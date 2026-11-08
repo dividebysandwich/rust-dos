@@ -794,6 +794,21 @@ pub fn set_mapper_flags(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     })
 }
 
+/// GetAspectRatioFilterEx(hdc, size): the aspect ratio of the fonts the
+/// font mapper takes while SetMapperFlags' ASPECT_FILTERING (bit 0) is
+/// on, the device's pixels an inch across and down; 0 by 0 while it is
+/// off.
+pub fn get_aspect_ratio_filter_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let Some(dc) = get(cpu, args[0]) else {
+        return Some(FALSE);
+    };
+    let size = if dc.attrs.mapper & 1 != 0 { DPI } else { 0 };
+    if args[1] != 0 {
+        write_words(cpu, args[1], &[size, size]);
+    }
+    Some(TRUE)
+}
+
 /// SetGraphicsMode(hdc, mode): Windows 95 has only GM_COMPATIBLE.
 pub fn set_graphics_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let mode = args[1];

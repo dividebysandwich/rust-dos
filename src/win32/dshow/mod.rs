@@ -128,6 +128,12 @@ pub const IID_IBASE_FILTER: Guid = quartz_iid(0x56A8_6895);
 pub const IID_IMEDIA_FILTER: Guid = quartz_iid(0x56A8_6899);
 pub const IID_IPERSIST: Guid = guid(0x0000_010C, 0, 0, [0xC0, 0, 0, 0, 0, 0, 0, 0x46]);
 pub const IID_IPIN: Guid = quartz_iid(0x56A8_6891);
+pub const IID_IENUM_MEDIA_TYPES: Guid = guid(
+    0x89C3_1040,
+    0x846B,
+    0x11CE,
+    [0x97, 0xD3, 0x00, 0xAA, 0x00, 0x55, 0x59, 0x5A],
+);
 pub const IID_IMEM_INPUT_PIN: Guid = quartz_iid(0x56A8_689D);
 pub const IID_IMEM_ALLOCATOR: Guid = quartz_iid(0x56A8_689C);
 pub const IID_IMEDIA_SAMPLE: Guid = quartz_iid(0x56A8_689A);
@@ -228,6 +234,7 @@ pub const VFW_E_WRONG_STATE: u32 = 0x8004_0227;
 pub const VFW_S_DUPLICATE_NAME: u32 = 0x0004_022D;
 pub const VFW_S_NO_STOP_TIME: u32 = 0x0004_0270;
 pub const VFW_E_NOT_CONNECTED: u32 = 0x8004_0209;
+pub const VFW_E_NO_ACCEPTABLE_TYPES: u32 = 0x8004_0207;
 pub const VFW_E_ALREADY_CONNECTED: u32 = 0x8004_0204;
 pub const VFW_E_BUFFER_NOTSET: u32 = 0x8004_020C;
 pub const VFW_E_BUFFER_OVERFLOW: u32 = 0x8004_020D;
@@ -294,7 +301,7 @@ static QUARTZ_APIS: &[Api] = &[
     method("Graph_EnumFilters", 2, e_notimpl),
     method("Graph_FindFilterByName", 3, filter::find_filter_by_name),
     method("Graph_ConnectDirect", 4, e_notimpl),
-    method("Graph_Reconnect", 2, e_notimpl),
+    method("Graph_Reconnect", 2, filter::reconnect),
     method("Graph_Disconnect", 2, e_notimpl),
     method("Graph_SetDefaultSyncSource", 1, s_ok),
     method("Graph_Connect", 3, e_notimpl),
@@ -526,7 +533,7 @@ static QUARTZ_APIS: &[Api] = &[
     method("Pin_QueryDirection", 2, filter::pin_query_direction),
     method("Pin_QueryId", 2, filter::pin_query_id),
     method("Pin_QueryAccept", 2, filter::pin_query_accept),
-    method("Pin_EnumMediaTypes", 2, e_notimpl),
+    method("Pin_EnumMediaTypes", 2, filter::pin_enum_media_types),
     method("Pin_QueryInternalConnections", 3, e_notimpl),
     method("Pin_EndOfStream", 1, e_unexpected),
     method("Pin_BeginFlush", 1, e_unexpected),
@@ -581,6 +588,11 @@ static QUARTZ_APIS: &[Api] = &[
         conv: Conv::Loop,
         handler: filter::stream_thread,
     },
+    // The decoder's output pin's IEnumMediaTypes.
+    method("TypeEnum_Next", 4, filter::type_enum_next),
+    method("TypeEnum_Skip", 2, filter::type_enum_skip),
+    method("TypeEnum_Reset", 1, filter::type_enum_reset),
+    method("TypeEnum_Clone", 2, filter::type_enum_clone),
 ];
 
 static QUARTZ_VTABLES: &[Vtable] = &[
@@ -848,6 +860,15 @@ static QUARTZ_VTABLES: &[Vtable] = &[
             "Clock_Unadvise",
         ],
     },
+    Vtable {
+        name: "IEnumMediaTypes",
+        methods: unknown![
+            "TypeEnum_Next",
+            "TypeEnum_Skip",
+            "TypeEnum_Reset",
+            "TypeEnum_Clone",
+        ],
+    },
 ];
 
 /// AMSTREAM.DLL's functions. Append only (see `stubs`).
@@ -1037,6 +1058,7 @@ pub const QUALITY: Iface = Iface(D_QUARTZ, 11);
 pub const ALLOCATOR: Iface = Iface(D_QUARTZ, 12);
 pub const MEDIA_SAMPLE: Iface = Iface(D_QUARTZ, 13);
 pub const CLOCK: Iface = Iface(D_QUARTZ, 14);
+pub const TYPE_ENUM: Iface = Iface(D_QUARTZ, 15);
 pub const MULTI_STREAM: Iface = Iface(D_AMSTREAM, 0);
 pub const DD_STREAM: Iface = Iface(D_AMSTREAM, 1);
 pub const AUDIO_STREAM: Iface = Iface(D_AMSTREAM, 2);
@@ -1110,6 +1132,7 @@ pub enum Kind {
     AudioData { d: stream::AudioData },
     Decoder { d: filter::Decoder },
     Pin { p: filter::Pin },
+    TypeEnum { e: filter::TypeEnum },
     Allocator { a: sample::Allocator },
     MediaSample { s: sample::MediaSample },
     Clock { c: sample::Clock },
@@ -1147,6 +1170,7 @@ impl Kind {
                 (IID_IPERSIST, DECODER),
             ],
             Kind::Pin { .. } => &[(IID_IPIN, PIN), (IID_IQUALITY_CONTROL, QUALITY)],
+            Kind::TypeEnum { .. } => &[(IID_IENUM_MEDIA_TYPES, TYPE_ENUM)],
             Kind::Allocator { .. } => &[(IID_IMEM_ALLOCATOR, ALLOCATOR)],
             Kind::MediaSample { .. } => &[
                 (IID_IMEDIA_SAMPLE, MEDIA_SAMPLE),
@@ -1589,5 +1613,6 @@ super::state_variants!(Kind {
     Allocator { a },
     MediaSample { s },
     Clock { c },
+    TypeEnum { e },
 });
 crate::state_fields!(State { objects, last_id });

@@ -69,6 +69,193 @@ pub fn needs_paint(w: &Window) -> bool {
     !w.update.is_empty() || w.paint & PAINT_INTERNAL != 0
 }
 
+/// The screen under a top-level window of a class with CS_SAVEBITS (a
+/// menu, a dialog), kept from when the window showed. When it hides, the
+/// screen gets these pixels back, and the windows under it paint only
+/// the part that is `stale`. The window moving drops them (`moved`).
+#[derive(Clone, Debug, Default)]
+pub struct SavedBits {
+    pub hwnd: u32,
+    pub rect: Rect,
+    /// The screen's mode they were taken in.
+    pub width: u32,
+    pub height: u32,
+    pub bpp: u32,
+    /// `screen::load_area`'s pixels of `rect`.
+    pub data: Vec<u8>,
+    /// The part of `rect` whose pixels aren't what is under the window,
+    /// on the screen: where a window above it covered it as it showed,
+    /// where a window under it had an update region then, and where a
+    /// window under it moved, showed, hid or was invalidated since
+    /// (`stale_bits_under`). Real Windows keeps the same region with a
+    /// window's saved bits, and invalidates it as the window hides.
+    pub stale: Region,
+    /// The visible top-level windows that were under it as it showed,
+    /// whose pixels the kept ones hold. One of them that goes above it
+    /// still changes what is under it.
+    pub under: Vec<u32>,
+}
+
+crate::state_fields!(SavedBits {
+    hwnd,
+    rect,
+    width,
+    height,
+    bpp,
+    data,
+    stale,
+    under
+});
+
+/// Whether the window's class has CS_SAVEBITS.
+fn saves_bits(state: &State, hwnd: u32) -> bool {
+    state.window(hwnd).is_some_and(|w| {
+        state
+            .classes
+            .get(w.class as usize)
+            .and_then(|c| c.as_ref())
+            .is_some_and(|c| c.style & super::class::CS_SAVEBITS != 0)
+    })
+}
+
+/// Keep the screen under the top-level window `hwnd` at `rect`, which
+/// shows now (`SavedBits`).
+fn save_bits(cpu: &mut Cpu, hwnd: u32, rect: Rect) {
+    user(cpu).saved_bits.retain(|s| s.hwnd != hwnd);
+    let Some(mode) = crate::win32::screen::gdi_mode(cpu) else {
+        return;
+    };
+    let rect = rect.intersect(&Rect::new(0, 0, mode.width as i32, mode.height as i32));
+    if rect.is_empty() {
+        return;
+    }
+    let data = crate::win32::screen::load_area(
+        cpu,
+        &mode,
+        rect.top as u32,
+        rect.height() as u32,
+        rect.left as u32,
+        rect.width() as u32,
+    );
+    let state = user(cpu);
+    let stale = covered_by_above(state, hwnd, rect).or(&updates_under(state, hwnd, rect));
+    let under = state
+        .top_levels()
+        .into_iter()
+        .skip_while(|&h| h != hwnd)
+        .skip(1)
+        .filter(|&h| state.window(h).is_some_and(|w| w.style & WS_VISIBLE != 0))
+        .collect();
+    state.saved_bits.push(SavedBits {
+        hwnd,
+        rect,
+        width: mode.width,
+        height: mode.height,
+        bpp: mode.bpp,
+        data,
+        stale,
+        under,
+    });
+}
+
+/// What of `rect` the windows under the top-level window `hwnd` have yet
+/// to paint: their update regions, on the screen. They paint it while
+/// `hwnd` covers it, so the screen there doesn't show what they drew.
+fn updates_under(state: &State, hwnd: u32, rect: Rect) -> Region {
+    let mut area = Region::new();
+    for top in state
+        .top_levels()
+        .into_iter()
+        .skip_while(|&h| h != hwnd)
+        .skip(1)
+    {
+        if !state.window(top).is_some_and(|w| w.style & WS_VISIBLE != 0) {
+            continue;
+        }
+        for h in super::window::pre_order(state, top) {
+            let Some(w) = state.window(h) else {
+                continue;
+            };
+            if !w.update.is_empty() {
+                let wr = state.screen_rect(h);
+                area = area.or(&w.update.offset_by(wr.left, wr.top));
+            }
+        }
+    }
+    area.and_rect(&rect)
+}
+
+/// Give the screen back what was under `hwnd`, which hid from `old`,
+/// where the windows above it don't cover it and it isn't stale, if it
+/// had it kept in the screen's mode for where it was. Then the stale
+/// part, which the windows under it still have to paint, is the result.
+fn restore_bits(cpu: &mut Cpu, hwnd: u32, old: Rect) -> Option<Region> {
+    let state = user(cpu);
+    let at = state.saved_bits.iter().position(|s| s.hwnd == hwnd)?;
+    let saved = state.saved_bits.remove(at);
+    let mode = crate::win32::screen::gdi_mode(cpu)?;
+    let same_mode = (mode.width, mode.height, mode.bpp) == (saved.width, saved.height, saved.bpp);
+    let screen = Rect::new(0, 0, mode.width as i32, mode.height as i32);
+    if !same_mode || saved.rect != old.intersect(&screen) {
+        return None;
+    }
+    let state = user(cpu);
+    let shown = Region::from_rect(saved.rect)
+        .diff(&covered_by_above(state, hwnd, saved.rect))
+        .diff(&saved.stale);
+    let bytes = if mode.bpp == 8 { 1 } else { 4 };
+    let row = saved.rect.width() as usize * bytes;
+    for r in &shown.rects {
+        let cols = r.width() as usize;
+        let skip = (r.left - saved.rect.left) as usize * bytes;
+        let mut part = Vec::with_capacity(cols * bytes * r.height() as usize);
+        for y in r.top..r.bottom {
+            let start = (y - saved.rect.top) as usize * row + skip;
+            part.extend_from_slice(&saved.data[start..start + cols * bytes]);
+        }
+        let (top, left) = (r.top as u32, r.left as u32);
+        crate::win32::screen::store_area(cpu, &mode, top, left, cols as u32, &part);
+    }
+    Some(saved.stale)
+}
+
+/// What of `rect` the visible top-level windows above `hwnd` cover.
+fn covered_by_above(state: &State, hwnd: u32, rect: Rect) -> Region {
+    let mut area = Region::new();
+    for h in state.top_levels().into_iter().take_while(|&h| h != hwnd) {
+        if state.window(h).is_some_and(|w| w.style & WS_VISIBLE != 0) {
+            area = area.or(&shape(state, h));
+        }
+    }
+    area.and_rect(&rect)
+}
+
+/// The window `hwnd` changed `area` of the screen: it moved, showed or
+/// hid there, or was invalidated there. The kept screens (`SavedBits`)
+/// of the windows it is under become stale there. Their own children
+/// change nothing under them, and neither does a window above them that
+/// wasn't under them as they showed (a submenu over its menu): its
+/// pixels are on the screen above theirs, never in them.
+fn stale_bits_under(state: &mut State, hwnd: u32, area: &Region) {
+    if state.saved_bits.is_empty() || area.is_empty() {
+        return;
+    }
+    let tops = state.top_levels();
+    let top = state.top_level(hwnd);
+    let place = |h: u32| tops.iter().position(|&t| t == h);
+    let changed = place(top);
+    for s in &mut state.saved_bits {
+        let above = matches!((changed, place(s.hwnd)), (Some(c), Some(p)) if c < p);
+        if s.hwnd == top || (above && !s.under.contains(&top)) {
+            continue;
+        }
+        let part = area.and_rect(&s.rect);
+        if !part.is_empty() {
+            s.stale = s.stale.or(&part);
+        }
+    }
+}
+
 /// The window tree changed: nothing is kept that depends on it, as
 /// visible regions are worked out when a DC draws, so this only wakes
 /// the threads, whose windows may need painting now.
@@ -449,6 +636,10 @@ fn redraw_in(
     // pending WM_NCPAINT stay.
     let validates = flags & (RDW_INVALIDATE | RDW_VALIDATE | RDW_FRAME) == RDW_VALIDATE;
     let kept = validates.then(|| validated_area(state, hwnd, flags));
+    // It paints that part again, under the windows above it too.
+    if flags & RDW_INVALIDATE != 0 {
+        stale_bits_under(state, hwnd, &part);
+    }
     if let Some(w) = state.window_mut(hwnd) {
         if flags & RDW_INVALIDATE != 0 {
             if !local.is_empty() {
@@ -578,6 +769,7 @@ pub fn expose(cpu: &mut Cpu, area: &Region) {
         return;
     }
     let state = user(cpu);
+    stale_bits_under(state, DESKTOP, area);
     for top in state.top_levels() {
         if state.window(top).is_some_and(|w| w.style & WS_VISIBLE != 0) {
             invalidate_screen(state, top, area);
@@ -590,12 +782,17 @@ pub fn expose(cpu: &mut Cpu, area: &Region) {
 /// What of the window `hwnd` the visible siblings above it cover, on the
 /// screen.
 pub fn covered(state: &State, hwnd: u32) -> Region {
+    covered_but(state, hwnd, 0)
+}
+
+/// `covered`, leaving the sibling `but` out.
+pub fn covered_but(state: &State, hwnd: u32, but: u32) -> Region {
     let siblings = state
         .window(state.parent(hwnd))
         .map_or(&[][..], |p| &p.children[..]);
     let mut area = Region::new();
     for &h in siblings.iter().take_while(|&&h| h != hwnd) {
-        if state.window(h).is_some_and(|w| w.style & WS_VISIBLE != 0) {
+        if h != but && state.window(h).is_some_and(|w| w.style & WS_VISIBLE != 0) {
             area = area.or(&shape(state, h));
         }
     }
@@ -605,8 +802,15 @@ pub fn covered(state: &State, hwnd: u32) -> Region {
 /// SetWindowPos brought `hwnd` above siblings that covered `before` of
 /// it: what they no longer cover needs painting.
 pub fn raised(cpu: &mut Cpu, hwnd: u32, before: &Region) {
+    raised_but(cpu, hwnd, before, 0);
+}
+
+/// `raised`, for `before` from `covered_but` with the sibling `but` left
+/// out: what `but` uncovers is left to its own move, which knows whether
+/// it gives back saved bits.
+pub fn raised_but(cpu: &mut Cpu, hwnd: u32, before: &Region, but: u32) {
     let state = user(cpu);
-    let shown = before.diff(&covered(state, hwnd));
+    let shown = before.diff(&covered_but(state, hwnd, but));
     if !shown.is_empty() {
         invalidate_screen(state, hwnd, &shown);
         thread::wake(cpu);
@@ -631,13 +835,43 @@ pub fn moved(
     if !now_visible {
         clear_updates(state, hwnd);
     }
+    // The kept screens of the windows above are stale where it was and
+    // where it is, if it moved, showed, hid or changed its place among
+    // the windows; its own go when it moves. Its children's moves change
+    // nothing under it.
+    if was_visible != now_visible || old != new || flags & SWP_NOZORDER == 0 {
+        let mut changed = Region::new();
+        if was_visible {
+            changed = changed.or(&Region::from_rect(old));
+        }
+        if now_visible {
+            changed = changed.or(&Region::from_rect(new));
+        }
+        stale_bits_under(state, hwnd, &changed);
+    }
+    if old != new {
+        state.saved_bits.retain(|s| s.hwnd != hwnd);
+    }
     if flags & SWP_NOREDRAW != 0 && flags & SWP_HIDEWINDOW == 0 {
         return;
     }
+    // A top-level window of a class with CS_SAVEBITS that hides gives the
+    // screen back what was under it: the windows there paint only what
+    // changed under it since it showed.
+    let top_level = matches!(state.parent(hwnd), DESKTOP | 0);
+    let stale = if top_level && was_visible && !now_visible {
+        restore_bits(cpu, hwnd, old)
+    } else {
+        None
+    };
+    let state = user(cpu);
     if was_visible && (!now_visible || old != new) {
         let mut gone = Region::from_rect(old);
         if now_visible {
             gone = gone.diff_rect(&new);
+        }
+        if let Some(stale) = &stale {
+            gone = gone.and(stale);
         }
         // What is under it: its parent, or the desktop and the windows
         // there.
@@ -658,6 +892,9 @@ pub fn moved(
             }
             paint_background(cpu, &background);
         }
+    }
+    if top_level && now_visible && !was_visible && saves_bits(user(cpu), hwnd) {
+        save_bits(cpu, hwnd, new);
     }
     let state = user(cpu);
     if now_visible && (!was_visible || old != new || flags & super::window::SWP_FRAMECHANGED != 0) {
@@ -991,6 +1228,7 @@ fn redraw(cpu: &mut Cpu, hwnd: u32, area: &Region, flags: u32) -> Option<u32> {
     if flags & (RDW_INVALIDATE | RDW_VALIDATE | RDW_INTERNALPAINT | RDW_NOINTERNALPAINT) != 0 {
         if hwnd == DESKTOP && flags & RDW_INVALIDATE != 0 {
             // The desktop paints itself at once.
+            stale_bits_under(state, DESKTOP, area);
             let mut background = area.clone();
             for top in state.top_levels() {
                 if state.window(top).is_some_and(|w| w.style & WS_VISIBLE != 0) {
@@ -1379,8 +1617,11 @@ fn scroll(cpu: &mut Cpu, args: &[u32], boolean: bool) -> Option<u32> {
         let (_, gone) = scroll_bits(cpu, hdc, dx, dy, Some(rc), Some(cliprc));
         release_dc(cpu, &[hwnd, hdc]);
         uncovered = gone;
-        // What was to paint moves with what it covers.
+        // What it scrolled under a window above it doesn't show there.
         let state = user(cpu);
+        let scrolled = cliprc.offset(client.left, client.top);
+        stale_bits_under(state, hwnd, &Region::from_rect(scrolled));
+        // What was to paint moves with what it covers.
         if let Some(w) = state.window(hwnd) {
             let wr = state.screen_rect(hwnd);
             let off = (client.left - wr.left, client.top - wr.top);

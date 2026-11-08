@@ -91,8 +91,7 @@ install and the registry keys they write are the same, apart from these:
 - Names on a drive that is a host folder are in capitals, as DOS made
   them: the Start menu's folder is `START MENU`.
 - Shortcuts are smaller: they have no relative path and no file times.
-  Their targets, working folders and icons are the same. A shortcut to
-  Notepad points to the CD's drive, as the setup finds no Notepad on C:.
+  Their targets, working folders and icons are the same.
 
 ### Disk space on a host folder
 
@@ -101,7 +100,7 @@ space is made up: between 1.75 and 3.75 GB through
 `GetDiskFreeSpaceExA`, and at most just under 2 GB through
 `GetDiskFreeSpaceA`, as Windows 95 and 98 give a real disk's space. It
 drops as files are written. A setup that checks for the space it needs
-finds enough. DOS's own answer for such a drive is 80 MB.
+finds enough. DOS's own answer for such a drive is 160 to 480 MB.
 
 ### The system folder
 
@@ -112,6 +111,19 @@ Windows has. `GLIDE2X.DLL` and `GLIDE3X.DLL` are among them only with a
 3dfx card (`voodoo=true`, or `machine=svga_voodoo3` or `svga_banshee`),
 so a game that checks for Glide by its file sees none without one. A DLL
 of the same name that a game copies to C: wins over the built-in one.
+
+### Notepad
+
+`C:\WINDOWS\NOTEPAD.EXE` is there, read-only, as on Windows 98, and the
+registry opens text files (`.txt`) with it. A setup that offers to show
+its readme when it ends starts it, by its name or by opening the file,
+and the readme opens in a window titled with its name
+(`readme.txt - Notepad`), which stays open after the setup ends. The
+DOS prompt comes back once it is closed too (Alt+F4 or its close
+button). The text, in the system's fixed font, scrolls and can be
+selected and copied. Notepad's menus aren't there, so nothing can be
+saved, and a file that isn't there opens an empty window instead of
+asking whether to make it.
 
 ### Text and dialogs
 
@@ -157,7 +169,14 @@ both the IPX and the TCP/IP connection
 DirectPlay's protocol here is rust-dos's own, so a game on a Windows 95
 or 98 image in another instance doesn't see these sessions. Lobby
 programs, such as the Zone's, aren't there, and WinSock (WS2_32 and
-WSOCK32) has no network yet.
+WSOCK32) has no network yet. TAPI32 is there as on a machine with no
+modem installed: lineInitialize fails with LINEERR_NODEVICE, so a game
+that imports it starts, and its modem play says no modem is there.
+IMM32 is there as Windows 95 and 98 have it outside their Chinese,
+Japanese and Korean editions, with no input methods: every function
+returns 0, but ImmGetCompositionString, which returns -1, and
+ImmGetVirtualKey, which returns VK_PROCESSKEY, so a game that turns the
+IME off for its window, such as Age of Empires, starts.
 
 ### Copy protection
 
@@ -178,6 +197,16 @@ fails it as on Windows 98. Dump the CD with its error-correction data
   composer need the composition engine, which isn't there: they load and
   play nothing.
 - **DirectInput's action maps** and device images (#378).
+- **GLU's quadrics, NURBS and tessellator.** GLU32.DLL scales images,
+  builds mipmaps, sets up matrices and gives its texts. gluSphere,
+  gluNurbsCurve, gluTessVertex and the other drawing functions do
+  nothing, and gluNewQuadric, gluNewNurbsRenderer and gluNewTess return
+  NULL (#741).
+- **OLE's dialogs, fonts and pictures.** OLEDLG.DLL and OLEPRO32.DLL
+  are there, so a program linked with MFC's OLE support starts, but of
+  their functions only OleTranslateColor, DllCanUnloadNow,
+  DllRegisterServer and DllUnregisterServer are written. Calling another
+  ends the program with a message naming it.
 - **Functions not written yet.** A program that calls one stops with a
   message naming it. Please
   [open an issue](https://github.com/dividebysandwich/rust-dos/issues)

@@ -139,9 +139,10 @@ opcode, `win32_version=98se` when a message names the version, more
   there only with a 3dfx card: `voodoo=true`, or
   `machine=svga_voodoo3` or `svga_banshee`
   ([the system folder](builtin-windows.md#the-system-folder)).
-* **SafeDisc 2 games**: use a CD image that keeps the error-correction
-  data (a BIN or CHD dumped Redump-style). An image whose unreadable
-  sectors read back as good fails the check, as on Windows 98
+* **SafeDisc 1 and 2 games**: use a CD image that keeps the
+  error-correction data (a BIN or CHD dumped Redump-style, or a CloneCD
+  image). An ISO, or another image whose unreadable sectors read back as
+  good, fails the check, as on Windows 98
   ([disk images](../CONFIGURATION.md#disk-images)).
 
 ### Installer archives

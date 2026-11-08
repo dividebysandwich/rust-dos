@@ -91,7 +91,7 @@ task.rs       USER32 and GDI32 functions that call into the program
 seh.rs        structured exceptions
 registry.rs   the registry
 boot.rs       the session's start: WININIT.INI and RunOnce
-dll_files.rs  the built-in DLLs as files in C:\WINDOWS\SYSTEM
+dll_files.rs  the built-in DLLs and NOTEPAD.EXE as files in C:\WINDOWS
 screen.rs     the display adapter as the built-in Windows drives it
 kernel32/ user32/ gdi32/ advapi32.rs ole32/ comctl32/ comdlg32/ shell32/
 ddraw/ dsound/ dinput/ dplayx/ dmusic/ glide/ d3d8/ opengl32/ winmm/ vfw/
@@ -259,8 +259,8 @@ top of that.
   `GetDiskFreeSpaceExA` (`kernel32/win98.rs`), and at most just under 2
   GB through `GetDiskFreeSpaceA` (`kernel32/disk.rs`), as Windows 95 and
   98 give a real disk's space. It drops as files are written. DOS's own
-  answer for such a drive is 80 MB, too little for a setup that checks
-  the space it needs.
+  answer for such a drive is 160 to 480 MB, too little for some setups
+  that check the space they need.
 - `GetVersion` and `GetVersionEx` say Windows 95 (4.0.950, platform 1),
   or with `win32_version=98` Windows 98 (4.10.1998) and with
   `win32_version=98se` Windows 98 SE (4.10.2222, " A "), as do the
@@ -284,8 +284,8 @@ top of that.
   for it. They are there while the built-in Windows is on, and follow
   the loader's rules: `GLIDE2X.DLL` and `GLIDE3X.DLL` with a 3dfx card
   alone (`voodoo=true`, or a Banshee or Voodoo3 as the display adapter),
-  `NTDLL.DLL` with `win32_dlls` alone, and a DLL that
-  `win32_dlls_replace` replaces with one of the folder's not at all.
+  `MSIMG32.DLL` from Windows 98 on, and a DLL that `win32_dlls_replace`
+  replaces with one of the folder's not at all.
 
   The files are read-only: they open for reading alone, show as
   read-only (FILE_ATTRIBUTE_READONLY and ARCHIVE), and opening one for
@@ -301,6 +301,15 @@ top of that.
   `WINDOWS\SYSTEM` folder, it and `WINDOWS` show as directories with
   just the DLLs in them, and are made on C: when a program makes a file
   or directory in them; neither can be removed while it holds them.
+
+  The Windows directory has `NOTEPAD.EXE` the same way, which setups run
+  to show a readme (`user32/notepad.rs`). It is a PE image the emulator
+  builds, a Windows program of its own whose code is a message loop:
+  NotepadMain and NotepadWndProc, functions of USER32 that USER32
+  doesn't export, read the file the command line names and make the
+  window, a multi-line edit control with the file's text. Started by
+  WinExec or CreateProcessA, it is a process of its own and stays open
+  after the program that started it ends, as on Windows 98.
 - The CD-ROM drive takes SCSI commands through WNASPI32.DLL, ASPI for
   Win32, as Windows 98 SE's does (`wnaspi32.rs`). Copy protections read
   their discs that way: SafeDisc 2 loads it to check the CD. On Windows
@@ -392,11 +401,19 @@ what its region cuts off. No probe has compared that crop with Windows.
 AVIFIL32.DLL reads AVI files, and MSVFW32.DLL's DrawDib functions
 decompress and draw their frames (`vfw/`). AVIStreamGetFrame decompresses
 a video stream's frames to a DIB of the program's choice, 24 bits a pixel
-by default, from the last key frame on. The codecs are Indeo Video 3 and
-5, which Windows 98 installs, decoded by the `oxideav-indeo` crate. Indeo
-5 key frames match FFmpeg's, but for frames that both decoders refuse as
-damaged, where the picture before stays. Indeo 5's frames that depend on
-earlier ones have not been compared with a reference.
+by default, from the last key frame on. The codecs are four of those
+Windows 98 installs: Indeo Video 3 and 5, decoded by the `oxideav-indeo`
+crate, Indeo Video Interactive 4, and Cinepak. Indeo 5 key frames match
+FFmpeg's, but for frames that both decoders refuse as damaged, where the
+picture before stays. Indeo 5's frames that depend on earlier ones have
+not been compared with a reference. Cinepak's pictures match FFmpeg's
+exactly, every tenth frame of Wages of War's two Cinepak movies.
+ICInfo lists the four as installed `vidc` codecs, under the drivers
+Windows 98 SE's SYSTEM.INI names, so a program that asks whether Indeo
+4 is there before it plays a movie, as Age of Empires does, finds it.
+ICOpen opens them to decompress, and ICClose closes the handle; a mode
+that compresses or draws finds no codec. Rent-A-Hero opens Indeo 5
+before it starts, to see that it is there.
 
 ## Sound and input
 
@@ -574,9 +591,10 @@ isn't on the search path, and reads it as if it were in
 `C:\WINDOWS\SYSTEM`; `win32_dlls_replace` lets the folder's DLL replace
 a built-in one of the same name. With the setting, `ucrtbase.dll` and
 `api-ms-win-crt-*.dll` are the built-in MSVCRT, `kernelbase.dll` is
-KERNEL32, and there is a built-in NTDLL.DLL at BFE40000h with
-`_vsnprintf`; without it there is no NTDLL, as programs looking for
-Windows NT expect.
+KERNEL32. The built-in NTDLL.DLL, at BFE40000h, is there with or
+without the setting, as Windows 95 and 98 both have one with
+`RtlUnwind` (Microsoft's D3DRM.DLL and DirectX 6.1a's ADVPACK.DLL
+import it); it has `_vsnprintf` for Wine's DLLs too.
 
 A DLL from the folder is guest code (the module flag `GUEST`). A
 function it imports that no built-in DLL has gets the stub that ends a

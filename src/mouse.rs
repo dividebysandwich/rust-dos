@@ -112,13 +112,13 @@ pub struct MouseState {
     /// Accumulated deltas in mickeys, read-and-clear via AH=0Bh.
     pub mickey_x: i16,
     pub mickey_y: i16,
-    /// Fractional-mickey accumulators. We emit mickeys at a non-integer
-    /// ratio to virtual-pixel delta (2/3 horizontal, 4/3 vertical) so
-    /// Carrier Command's internal cursor integrator moves 1:1 with the
-    /// host mouse. The remainder from each integer division is kept here
-    /// so small sub-pixel motions accumulate instead of being lost.
+    /// The parts of a mickey counted but not reported yet, in
+    /// `MICKEY_FRACTION`ths, so slow motions add up instead of being lost.
     pub mickey_accum_x: i32,
     pub mickey_accum_y: i32,
+    /// Mickeys for a virtual pixel of motion, across and down (see
+    /// `mickeys_per_unit`).
+    pub mickey_scale: (f64, f64),
 
     /// User-installed event callback (AH=0Ch). Invoked by the main loop
     /// when any event bit in `pending_callback_events` also appears in
@@ -185,6 +185,7 @@ impl MouseState {
             mickey_y: 0,
             mickey_accum_x: 0,
             mickey_accum_y: 0,
+            mickey_scale: TEXT_MICKEY_SCALE,
             callback_mask: 0,
             callback_cs: 0,
             callback_ip: 0,
@@ -308,14 +309,7 @@ impl MouseState {
     }
 
     /// Move the cursor, clamped to the clipping window, and accumulate
-    /// AH=0Bh mickey deltas. Empirical Carrier Command testing shows its
-    /// integrator applies a ~1.5× gain horizontally and ~0.75× vertically
-    /// to the mickey stream before advancing its cursor — a 2:1 vertical-
-    /// to-horizontal ratio consistent with the standard Microsoft mouse
-    /// sensitivity. To cancel that so the in-game cursor tracks the host
-    /// mouse 1:1, we emit mickeys at 2/3 the horizontal delta and 4/3
-    /// the vertical delta. Remainders accumulate in mickey_accum_* so
-    /// slow motions aren't lost to integer truncation.
+    /// AH=0Bh mickey deltas at `mickey_scale`.
     pub fn set_position(&mut self, x: i32, y: i32) {
         if let Some((last_x, last_y)) = self.ps2.last_position.replace((x, y)) {
             self.ps2.dx += x - last_x;
@@ -431,15 +425,16 @@ impl MouseState {
         self.y = (self.y + dy).clamp(self.min_y, self.max_y);
     }
 
-    /// Count the mickeys of a motion of (`dx`, `dy`) virtual pixels (see
-    /// `set_position`).
+    /// Count the mickeys of a motion of (`dx`, `dy`) virtual pixels at
+    /// `mickey_scale` (see `mickeys_per_unit`).
     fn add_mickeys(&mut self, dx: i32, dy: i32) {
-        self.mickey_accum_x += dx * 2;
-        self.mickey_accum_y += dy * 4;
-        let emit_x = self.mickey_accum_x / 3;
-        let emit_y = self.mickey_accum_y / 3;
-        self.mickey_accum_x -= emit_x * 3;
-        self.mickey_accum_y -= emit_y * 3;
+        let steps = |d: i32, scale: f64| (d as f64 * scale * MICKEY_FRACTION as f64).round() as i32;
+        self.mickey_accum_x = self.mickey_accum_x.saturating_add(steps(dx, self.mickey_scale.0));
+        self.mickey_accum_y = self.mickey_accum_y.saturating_add(steps(dy, self.mickey_scale.1));
+        let emit_x = self.mickey_accum_x / MICKEY_FRACTION;
+        let emit_y = self.mickey_accum_y / MICKEY_FRACTION;
+        self.mickey_accum_x -= emit_x * MICKEY_FRACTION;
+        self.mickey_accum_y -= emit_y * MICKEY_FRACTION;
 
         self.mickey_x = self.mickey_x.wrapping_add(
             emit_x.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
@@ -555,12 +550,21 @@ pub fn clear_callback_busy(bus: &mut crate::bus::Bus) {
 /// "driver" invokes on the events in its mask. Many Microsoft-mouse
 /// compatible games expect button presses to arrive this way rather than
 /// via polling AH=03 or AH=05. When an event in the mask is pending, a
-/// handler is installed and not still running, enter the ROM stub in real
-/// mode only: it saves the registers and CALL FARs the handler, which
-/// returns with RETF. The caller controls IF gating. Returns true when
-/// the handler was entered.
+/// handler is installed and not still running, enter the ROM stub: it
+/// saves the registers and CALL FARs the handler, which returns with
+/// RETF. The caller controls IF gating. Returns true when the handler was
+/// entered.
+///
+/// The handler is real-mode code. In real mode the stub runs on the
+/// program's stack, as an interrupt would. In protected mode it runs only
+/// for a client of the built-in DPMI host, which runs it in real mode as
+/// it runs the real-mode handler of a hardware interrupt, such as the IRQ
+/// a mouse driver's handler runs from, and the client goes on afterwards
+/// as it was. ShadowCaster's DOS/4GW code stays in protected mode and
+/// reads the mouse only through the handler it installs. Other
+/// protected-mode systems get no call.
 pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
-    if cpu.pe() {
+    if cpu.pe() && !crate::dpmi::can_reflect_interrupt(cpu) {
         return false;
     }
     let mouse = &cpu.bus.mouse;
@@ -568,6 +572,10 @@ pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
     if fire == 0 || (mouse.callback_cs == 0 && mouse.callback_ip == 0) || callback_busy(&cpu.bus) {
         return false;
     }
+    // The motion after this call counts for the picture shown now, which
+    // a program may have changed without telling the driver: a mode X
+    // set through the CRTC's ports, or a 3dfx card's picture turned on.
+    update_mickey_scale(&mut cpu.bus);
     let mouse = &mut cpu.bus.mouse;
     // Snapshot and consume the bits we're about to handle.
     mouse.pending_callback_events &= !fire;
@@ -589,6 +597,11 @@ pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
     data.push(1); // busy
     cpu.bus.write_rom(CALLBACK_DATA, &data);
 
+    if cpu.pe() {
+        let stub = (CALLBACK_STUB - 0xF0000) as u16;
+        crate::dpmi::call_device_code(cpu, 0xF000, stub);
+        return true;
+    }
     cpu.push(cpu.flags16());
     cpu.push(cpu.cs());
     cpu.push(cpu.ip());
@@ -820,7 +833,49 @@ crate::state_fields!(MouseState {
     mickey_x, mickey_y, mickey_accum_x, mickey_accum_y,
     callback_mask, callback_cs, callback_ip, pending_callback_events,
     unused, rest_x, rest_y, ps2, range_set,
-} skip { serial_dx, serial_dy, motion, last_call_ns, last_relative_ns });
+} skip { serial_dx, serial_dy, motion, last_call_ns, last_relative_ns, mickey_scale });
+
+/// The steps `mickey_accum_x` and `mickey_accum_y` count in: 1/1024 of a
+/// mickey.
+const MICKEY_FRACTION: i32 = 1024;
+
+/// Mickeys for a pixel of motion on the picture, the same on both axes,
+/// as a mouse counts the same for the same distance either way. The
+/// Microsoft driver turns them into its cursor's position at 8 mickeys
+/// for 8 pixels across and 16 for 8 down, a ratio made for 200-line
+/// screens, so a program that moves its own cursor by them (AX=000Bh)
+/// moves it as far down as across, in a 480-line mode too. 2/3 is what
+/// Carrier Command needs for its cursor, which moves 1.5 pixels a
+/// mickey, to follow the host's pointer in its 320x200 mode.
+const MICKEYS_PER_PICTURE_PIXEL: f64 = 2.0 / 3.0;
+
+/// `mickey_scale` on the 80x25 text screen: a virtual screen of 640x200
+/// on a picture of 640x400.
+const TEXT_MICKEY_SCALE: (f64, f64) = (MICKEYS_PER_PICTURE_PIXEL, MICKEYS_PER_PICTURE_PIXEL * 2.0);
+
+/// Mickeys for a virtual pixel of motion when a virtual screen of
+/// `virt` shows on a picture of `picture` pixels: the motion on the
+/// picture at `MICKEYS_PER_PICTURE_PIXEL`. A 200-line mode's virtual
+/// pixel is two lines of its 400-line picture, so it counts 4/3 of a
+/// mickey down and 2/3 across; in a 480-line mode it is one line, 2/3
+/// each way.
+pub fn mickeys_per_unit(virt: (i32, i32), picture: (u32, u32)) -> (f64, f64) {
+    let per = |picture: u32, virt: i32| {
+        MICKEYS_PER_PICTURE_PIXEL * picture.max(1) as f64 / virt.max(1) as f64
+    };
+    (per(picture.0, virt.0), per(picture.1, virt.1))
+}
+
+/// Count mickeys for the picture the machine shows now and the virtual
+/// screen the driver has (see `mickeys_per_unit`): after a mode set, when
+/// a program calls the driver, which may have set a range, before its
+/// event handler runs, and after a state is loaded, which doesn't hold
+/// the scale.
+pub fn update_mickey_scale(bus: &mut crate::bus::Bus) {
+    let virt = bus.mouse.virtual_screen(bus);
+    let picture = crate::video::frame_size(bus);
+    bus.mouse.mickey_scale = mickeys_per_unit(virt, picture);
+}
 
 /// Two i16 placeholders in a saved mouse: saved as zeros, read and
 /// dropped on load.

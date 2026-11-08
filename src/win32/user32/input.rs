@@ -1041,10 +1041,13 @@ const K_DEACTIVATE: u32 = 4;
 
 /// An activation's flags: it brings the queue to the foreground; the
 /// foreground came to the queue from another one, which WM_ACTIVATEAPP
-/// tells; a click activates (WA_CLICKACTIVE).
+/// tells; a click activates (WA_CLICKACTIVE); SetFocus activates the
+/// window of the one it gives the focus, so the activation gives the
+/// window none.
 const F_FOREGROUND: u32 = 1;
 const F_SWITCHED: u32 = 2;
 const F_CLICK: u32 = 4;
+const F_NOFOCUS: u32 = 8;
 
 const WA_CLICKACTIVE: u32 = 2;
 
@@ -1379,8 +1382,20 @@ fn focus_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 t.step = 10;
             }
             10 => {
-                if hwnd != 0 && top != active(cpu) {
-                    return Next::call(address_of("SetActiveWindow"), &[top], 1);
+                // The SetActiveWindow(top) that USER does here, but
+                // without the focus the activation would give `top`: a
+                // dialog would select the text of the control it gives it
+                // (Windows 98 doesn't, nor does Wine). SetActiveWindow
+                // leaves a child window, or one of another queue, as it
+                // is, and then the focus stays where it was (step 1).
+                let state = user(cpu);
+                let activatable = state.window(top).is_some_and(|w| {
+                    w.style & (WS_POPUP | WS_CHILD) != WS_CHILD
+                        && state.window_queue(top) == queue
+                });
+                if hwnd != 0 && top != active(cpu) && activatable {
+                    let args = [top, F_NOFOCUS, 0];
+                    return Next::call(address_of("ActivateInQueue"), &args, 1);
                 }
                 t.step = 1;
             }
@@ -1445,7 +1460,9 @@ pub fn set_active_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// ActivateInQueue(hwnd, flags, thread), an internal function: `hwnd`
 /// becomes the active window of the running thread's queue, which
 /// F_FOREGROUND in `flags` brings to the foreground; with F_SWITCHED
-/// the foreground came to the queue from `thread`'s.
+/// the foreground came to the queue from `thread`'s; with F_NOFOCUS
+/// the activation gives `hwnd` no focus. It doesn't check the window as
+/// SetActiveWindow does.
 pub fn activate_in_queue(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     start_activation(cpu, args[0], args[1], args[2])
 }
@@ -1473,11 +1490,26 @@ fn iconic(state: &State, hwnd: u32) -> u32 {
 }
 
 /// An activation message for `hwnd`: sent, or to another thread's window
-/// (a Win16 task's, in the queue the tasks share) queued without waiting
-/// for it, as that thread may be waiting for this one.
+/// queued without waiting for it, as that thread may be waiting for this
+/// one. Between two Win16 tasks, which share a queue, it is sent: Windows
+/// 3.1 sends a task's window its WM_NCACTIVATE, WM_ACTIVATE and
+/// WM_ACTIVATEAPP before the activation goes on, and a task that waits
+/// for a message or a reply takes a message sent to it meanwhile. Queued,
+/// the messages came after the activation and could be overtaken by the
+/// next: the Metal Marines CD's launcher handled the WM_ACTIVATE of its
+/// own activation after the Video for Windows setup's dialog had been
+/// activated, and the SetFocus to its child window that it answers with
+/// took the activation back from the dialog. A client task's window (one
+/// that 16-bit code a Win32 process called made, flat.rs) still gets them
+/// queued: between calls its thread waits in Win16Serve, which takes no
+/// message sent to it, and the activation would wait for ever.
 fn activate_send(cpu: &mut Cpu, hwnd: u32, msg: u32, wp: u32, lp: u32, step: u16) -> Next {
     let tid = user(cpu).window(hwnd).map_or(0, |w| w.tid);
-    if tid != current_tid(cpu) {
+    let me = current_tid(cpu);
+    let win32 = &cpu.bus.win32;
+    let waits = crate::win16::task::both_tasks(win32, me, tid)
+        && !crate::win16::flat::is_client(win32, tid);
+    if tid != me && !waits {
         let args = [hwnd, msg, wp, lp];
         return Next::call(address_of("SendNotifyMessageA"), &args, step);
     }
@@ -1642,6 +1674,7 @@ fn activate_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 let a = state.activation(queue);
                 let focus = a.focus;
                 if a.active == hwnd
+                    && t.var(A_FLAGS) & F_NOFOCUS == 0
                     && (focus == 0 || hwnd == 0 || state.top_level(focus) != hwnd)
                     && (hwnd != 0 || focus != 0)
                 {
@@ -2821,6 +2854,41 @@ crate::state_fields!(Clipboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The function an activation message for `hwnd` calls.
+    fn activation_call(cpu: &mut Cpu, hwnd: u32) -> u32 {
+        match activate_send(cpu, hwnd, WM_ACTIVATE, WA_INACTIVE, 0, 1) {
+            Next::Call { target, .. } => target,
+            _ => 0,
+        }
+    }
+
+    /// An activation message to a window of another Win16 task is sent,
+    /// and the task that activates waits for it, as Windows 3.1's
+    /// activation does; to a window of a thread that isn't a task, or of
+    /// a client task, which takes no sent message between its calls, it
+    /// is queued.
+    #[test]
+    fn activation_messages_between_tasks_are_sent() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        super::super::message::tests::win16_process(&mut cpu, &[1, 2, 4]);
+        cpu.bus.win32.win16.clients.push(crate::win16::flat::Client {
+            tid: 4,
+            ..Default::default()
+        });
+        let window = |tid| window::Window {
+            tid,
+            ..Default::default()
+        };
+        let task = user(&mut cpu).new_window(window(2)).expect("a window");
+        let other = user(&mut cpu).new_window(window(3)).expect("a window");
+        let client = user(&mut cpu).new_window(window(4)).expect("a window");
+        let send = address_of("SendMessageA");
+        assert_eq!(activation_call(&mut cpu, task), send);
+        let notify = address_of("SendNotifyMessageA");
+        assert_eq!(activation_call(&mut cpu, other), notify);
+        assert_eq!(activation_call(&mut cpu, client), notify);
+    }
 
     /// A program that hid the cursor and took the capture steers with
     /// the mouse: the host's mouse then counts as in use and moving by

@@ -286,9 +286,14 @@ impl Memory {
 
     /// The page table entry of `lin`, if its page table is there.
     pub fn entry(&self, bus: &Bus, lin: u32) -> Option<u32> {
+        self.entry_at(bus, lin).map(|at| bus.read_32(at))
+    }
+
+    /// The physical address of the page table entry of `lin`, if its page
+    /// table is there.
+    pub fn entry_at(&self, bus: &Bus, lin: u32) -> Option<usize> {
         let table = bus.read_32((self.cr3 + 4 * (lin >> 22)) as usize);
-        (table & PRESENT != 0)
-            .then(|| bus.read_32(((table & !0xFFF) + 4 * ((lin >> 12) & 0x3FF)) as usize))
+        (table & PRESENT != 0).then(|| ((table & !0xFFF) + 4 * ((lin >> 12) & 0x3FF)) as usize)
     }
 
     /// The reserved ranges, in order.

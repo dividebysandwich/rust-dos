@@ -1246,6 +1246,10 @@ fn the_mixer_page_switches_filters_and_effects() {
     ui.key(Down, &mut host);
     pick(&mut ui, &mut host, "off");
     assert_eq!(host.applied.last().unwrap().mixer.sb_filter, SbFilter::Off);
+    ui.key(Down, &mut host);
+    assert_eq!(ui.item(), Some(Item::SbCoupling));
+    pick(&mut ui, &mut host, "off");
+    assert!(!host.applied.last().unwrap().mixer.sb_coupling);
     // The effects' mixes show while they are on.
     assert!(!ui.items().contains(&Item::ReverbMix) && !ui.items().contains(&Item::ChorusMix));
     ui.key(Down, &mut host);

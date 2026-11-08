@@ -20,6 +20,7 @@ pub mod input;
 pub mod menu;
 pub mod message;
 pub mod monitor;
+pub mod notepad;
 pub mod paint;
 pub mod progman;
 pub mod rect;
@@ -147,6 +148,9 @@ pub struct State {
     /// the hooks' kind; and the number of the last hook set.
     pub in_hooks: Vec<(u32, i32)>,
     pub last_hook: u32,
+    /// The screens kept under the windows of classes with CS_SAVEBITS
+    /// that show (`paint::SavedBits`).
+    pub saved_bits: Vec<paint::SavedBits>,
     /// The help viewer (winhelp), which save states leave out.
     pub help: winhelp::Help,
 }
@@ -540,6 +544,7 @@ fn forget_windows(cpu: &mut Cpu, gone: impl Fn(&Window) -> bool, tids: &[u32]) {
             state.windows[i] = None;
         }
     }
+    state.saved_bits.retain(|s| !gone.contains(&s.hwnd));
     state.timers.retain(|t| !tids.contains(&t.tid));
     state.queues.retain(|q| !tids.contains(&q.tid));
     let windows = &state.windows;
@@ -1352,6 +1357,10 @@ static APIS: &[Api] = &[
     // Windows 98's does nothing: there is no debug USER32 to tell.
     stdcall("SetDebugErrorLevel", 522, 1, |_, _| Some(0)),
     stdcall("SetSystemCursor", 557, 2, resource::set_system_cursor),
+    // Notepad, C:\WINDOWS\NOTEPAD.EXE: its start and its window's
+    // procedure (notepad.rs).
+    stdcall("NotepadMain", 0, 0, notepad::main),
+    stdcall("NotepadWndProc", 0, 4, notepad::wnd_proc),
 ];
 
 crate::state_fields!(State {
@@ -1375,7 +1384,8 @@ crate::state_fields!(State {
     params,
     registered,
     in_hooks,
-    last_hook
+    last_hook,
+    saved_bits
 } skip {
     help
 });

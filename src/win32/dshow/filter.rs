@@ -9,14 +9,40 @@
 //!
 //! How it is done follows Wine's quartz and strmbase (filtergraph.c,
 //! strmbase's pin.c, quartz_transform.c), which follow Windows'. The
+//! filters are tried from the one added last, as Windows' graph keeps
+//! them (`newest`), and their pins in the order they give them. The
 //! decoder's output pin tries the input pin's own media types first,
 //! then its own, in the MPEG video decoder's order: YV12, YUY2, UYVY,
 //! RGB24, RGB32, RGB565 and RGB555. A type is tried with
-//! ReceiveConnection; the pin that takes it gives its IMemInputPin and
-//! its allocator (GetAllocator, or the graph's own memory allocator),
-//! whose buffers are sized for a picture with GetAllocatorRequirements,
-//! and NotifyAllocator ends it. The sound, if the file has any, plays
-//! through the graph's MPEGVideo device, opened without a window.
+//! ReceiveConnection, and the pin that takes it gives its IMemInputPin.
+//! The allocator is chosen as the base classes' DecideAllocator chooses
+//! it: the pin's requirements (GetAllocatorRequirements), then the pin's
+//! allocator (GetAllocator), sized for a picture with SetProperties and
+//! given back with NotifyAllocator. When the pin has none, or the
+//! allocator or the pin refuses, the decoder's own memory allocator is
+//! sized and given instead. The pin's allocator may be a memory
+//! allocator of the graph's, or one of the program's own, such as a
+//! renderer's that hands out DirectDraw surfaces. The sound, if the file
+//! has any, plays through the graph's MPEGVideo device, opened without
+//! a window.
+//!
+//! The graph then renders the output pins of the filter that took the
+//! pictures, as Windows' graph builder renders a filter's outputs after
+//! it connects the filter's input (Wine's `autoplug_through`): each one
+//! not yet connected is connected with its own IPin::Connect to a free
+//! input pin of another of the program's filters, which renders that
+//! filter's outputs in turn. A program's transform filter between the
+//! decoder and its renderer gets its renderer so. The graph keeps those
+//! connections (`Joint`) to undo them when a filter leaves it, and moves
+//! the filters through the states from the renderers up.
+//!
+//! The decoder's output pin enumerates its types (EnumMediaTypes), which
+//! a program's transform-in-place filter passes on as its own, and
+//! IFilterGraph::Reconnect connects the decoder to the program's pin
+//! again, as Wine's ReconnectEx does for a stopped graph: both ends
+//! disconnect and the connection is made as RenderFile makes it, the
+//! pin's own types first. The base classes' ReconnectPin calls it when
+//! an in-place filter's output takes another type than its input has.
 //!
 //! Every call into the program goes through a task (task.rs): the
 //! connection's steps (`connect_step`), lists of calls the graph's
@@ -25,7 +51,11 @@
 //! the pictures one after another while the graph is paused or runs.
 //! It waits for a free sample of the allocator, fills it with the next
 //! picture, timed from the segment's start, and hands it over; the
-//! renderer holds it until its time on the clock comes. After the last
+//! renderer holds it until its time on the clock comes. With the
+//! program's allocator each of those is a call into the program
+//! (`sample_step`): GetBuffer, the sample's methods, Receive and
+//! Release, and the decoder's output pin commits and decommits the
+//! allocator as the graph leaves Stopped and stops. After the last
 //! picture it calls EndOfStream, and the renderer then tells the graph
 //! EC_COMPLETE.
 //!
@@ -36,7 +66,8 @@ use super::graph::{graph, graph_of};
 use super::sample;
 use super::{
     E_FAIL, E_NOTIMPL, E_OUTOFMEMORY, E_POINTER, Kind, S_FALSE, S_OK, VFW_E_ALREADY_CONNECTED,
-    VFW_E_NOT_CONNECTED, VFW_E_NOT_FOUND, VFW_E_NOT_STOPPED, VFW_S_DUPLICATE_NAME, put32,
+    VFW_E_NO_ACCEPTABLE_TYPES, VFW_E_NOT_CONNECTED, VFW_E_NOT_FOUND, VFW_E_NOT_STOPPED,
+    VFW_S_DUPLICATE_NAME, put32,
 };
 use crate::cpu::Cpu;
 use crate::win32::com::Guid;
@@ -67,6 +98,7 @@ const FILTER_SET_SYNC_SOURCE: u32 = 8;
 const FILTER_ENUM_PINS: u32 = 10;
 const FILTER_JOIN_FILTER_GRAPH: u32 = 13;
 const ENUM_NEXT: u32 = 3;
+const PIN_CONNECT: u32 = 3;
 const PIN_RECEIVE_CONNECTION: u32 = 4;
 const PIN_DISCONNECT: u32 = 5;
 const PIN_CONNECTED_TO: u32 = 6;
@@ -78,6 +110,17 @@ const INPUT_GET_ALLOCATOR: u32 = 3;
 const INPUT_NOTIFY_ALLOCATOR: u32 = 4;
 const INPUT_GET_ALLOCATOR_REQUIREMENTS: u32 = 5;
 const INPUT_RECEIVE: u32 = 6;
+const ALLOCATOR_SET_PROPERTIES: u32 = 3;
+const ALLOCATOR_COMMIT: u32 = 5;
+const ALLOCATOR_DECOMMIT: u32 = 6;
+const ALLOCATOR_GET_BUFFER: u32 = 7;
+const SAMPLE_GET_POINTER: u32 = 3;
+const SAMPLE_GET_SIZE: u32 = 4;
+const SAMPLE_SET_TIME: u32 = 6;
+const SAMPLE_SET_SYNC_POINT: u32 = 8;
+const SAMPLE_SET_ACTUAL_DATA_LENGTH: u32 = 12;
+const SAMPLE_SET_DISCONTINUITY: u32 = 16;
+const SAMPLE_SET_MEDIA_TIME: u32 = 18;
 
 /// The decoder's name and its output pin's, as Windows' MPEG video
 /// decoder has them.
@@ -193,6 +236,19 @@ pub struct Filter {
     pub name: String,
 }
 
+/// A connection the graph made between two of the program's filters,
+/// from the output pin `out` of the filter `from` to the input pin
+/// `input` of the filter `to`. The graph holds a reference on each pin
+/// until it undoes the connection: a pin may be an object of its own,
+/// which its filter can let go of while the graph still names it.
+#[derive(Clone, Debug, Default)]
+pub struct Joint {
+    pub from: u32,
+    pub out: u32,
+    pub to: u32,
+    pub input: u32,
+}
+
 /// The decoder's connection to a program's input pin, and its stream.
 #[derive(Clone, Debug, Default)]
 pub struct Link {
@@ -205,6 +261,11 @@ pub struct Link {
     /// which the link holds references on.
     pub allocator: u32,
     pub decoder: u32,
+    /// The allocator the program's input pin gave (GetAllocator), an
+    /// IMemAllocator of the program's own the link holds a reference
+    /// on, which the samples come from instead of `allocator`: 0 when
+    /// the decoder uses its own.
+    pub given: u32,
     pub out_pin: u32,
     /// The connection's media type: AM_MEDIA_TYPE without its format
     /// block's pointer, and the block. Its place in `FORMATS`, and
@@ -255,6 +316,16 @@ pub struct Pin {
     pub graph: u32,
 }
 
+/// An enumerator of the decoder's output types (IEnumMediaTypes): its
+/// graph, its pin (by its object) and the place in `FORMATS` of the next
+/// type it gives.
+#[derive(Clone, Debug, Default)]
+pub struct TypeEnum {
+    pub graph: u32,
+    pub pin: u32,
+    pub next: u32,
+}
+
 /// The graph of the decoder or pin `this`.
 fn owner_of(cpu: &mut Cpu, this: u32) -> Result<u32, u32> {
     let id = super::object_of(cpu, this).ok_or(E_POINTER)?;
@@ -285,6 +356,7 @@ pub fn linked(cpu: &mut Cpu, id: u32) -> bool {
 const JOB_CONNECT: u32 = 1;
 const JOB_LIST: u32 = 2;
 const JOB_STREAM: u32 = 3;
+const JOB_SAMPLE: u32 = 4;
 
 /// The DSHOW task's steps (task.rs).
 pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
@@ -292,6 +364,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         JOB_CONNECT => connect_step(cpu, t, value),
         JOB_LIST => list_step(cpu, t, value),
         JOB_STREAM => stream_step(cpu, t, value),
+        JOB_SAMPLE => sample_step(cpu, t, value),
         _ => Next::Done(E_FAIL),
     }
 }
@@ -509,6 +582,7 @@ pub fn remove_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if linked {
         disconnect_calls(cpu, &mut list, id);
     }
+    unjoin_calls(cpu, &mut list, id, Some(filter));
     list.call(cpu, filter, FILTER_JOIN_FILTER_GRAPH, &[0, 0], 0);
     list.release(cpu, filter);
     list.start(cpu, 0)
@@ -539,17 +613,48 @@ pub fn find_filter_by_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// The calls that undo the graph `id`'s link: its stream stops, the
 /// program's pin disconnects, and the link lets go of its references on
-/// the pin. The link itself goes after the calls (`unlink`): the pin
-/// lets go of the decoder's pin as it disconnects.
+/// the pin and on the program's allocator, if it has one. The link
+/// itself goes after the calls (`unlink`): the pin lets go of the
+/// decoder's pin as it disconnects.
 fn disconnect_calls(cpu: &mut Cpu, list: &mut List, id: u32) {
     halt(cpu, id);
     let Some(l) = link(cpu, id) else {
         return;
     };
     let (pin, input) = (std::mem::take(&mut l.pin), std::mem::take(&mut l.input));
+    let given = std::mem::take(&mut l.given);
     list.call(cpu, pin, PIN_DISCONNECT, &[], 0);
+    let_go_of_given(cpu, list, given);
     list.release(cpu, input);
     list.release(cpu, pin);
+}
+
+/// The calls with which the decoder's output pin lets go of the
+/// program's allocator `given` as it disconnects: Decommit, then
+/// Release, as the base classes' CBaseOutputPin::Disconnect does.
+fn let_go_of_given(cpu: &mut Cpu, list: &mut List, given: u32) {
+    if given != 0 {
+        list.call(cpu, given, ALLOCATOR_DECOMMIT, &[], 0);
+        list.release(cpu, given);
+    }
+}
+
+/// The calls that undo the graph `id`'s joints with the filter `filter`,
+/// or all of them for None: each input pin disconnects, then its output
+/// pin (Wine's RemoveFilter), and the graph lets go of both.
+fn unjoin_calls(cpu: &mut Cpu, list: &mut List, id: u32, filter: Option<u32>) {
+    let Some(g) = graph(cpu, id) else {
+        return;
+    };
+    let touches = |j: &Joint| filter.is_none_or(|f| j.from == f || j.to == f);
+    let undone: Vec<Joint> = g.joints.iter().filter(|j| touches(j)).cloned().collect();
+    g.joints.retain(|j| !touches(j));
+    for j in undone {
+        list.call(cpu, j.input, PIN_DISCONNECT, &[], 0);
+        list.call(cpu, j.out, PIN_DISCONNECT, &[], 0);
+        list.release(cpu, j.input);
+        list.release(cpu, j.out);
+    }
 }
 
 /// The graph `id`'s stream stops: the decoder's output pin decommits
@@ -602,17 +707,20 @@ pub fn close(cpu: &mut Cpu, id: u32) -> Option<u32> {
     let Some(g) = graph(cpu, id) else {
         return Some(0);
     };
+    // They stop from the renderers up, as IMediaControl::Stop stops them.
+    let order = downstream_first(g);
     let filters = std::mem::take(&mut g.filters);
     let running = g.state != STATE_STOPPED;
     let mut list = List::new(0, THEN_CLOSED, id, 0, 0);
     if running {
-        for f in &filters {
-            list.call(cpu, f.iface, FILTER_STOP, &[], 0);
+        for &f in &order {
+            list.call(cpu, f, FILTER_STOP, &[], 0);
         }
     }
     if linked(cpu, id) {
         disconnect_calls(cpu, &mut list, id);
     }
+    unjoin_calls(cpu, &mut list, id, None);
     for f in &filters {
         list.call(cpu, f.iface, FILTER_JOIN_FILTER_GRAPH, &[0, 0], 0);
         list.release(cpu, f.iface);
@@ -647,7 +755,7 @@ pub fn change_state(cpu: &mut Cpu, id: u32, state: u32) -> Option<()> {
     }
     let g = graph(cpu, id)?;
     let from = g.state;
-    let filters: Vec<u32> = g.filters.iter().map(|f| f.iface).collect();
+    let filters = downstream_first(g);
     let mut list = List::new(S_OK, THEN_STATE, id, state, 0);
     if from == STATE_STOPPED && state != STATE_STOPPED {
         give_clock(cpu, id, &mut list, &filters);
@@ -658,12 +766,20 @@ pub fn change_state(cpu: &mut Cpu, id: u32, state: u32) -> Option<()> {
         g.completes = 0;
     }
     let now = sample::now(cpu);
+    // The decoder changes its state after the program's filters, its
+    // output pin committing the program's allocator as it leaves Stopped
+    // and decommitting it as it stops (the base classes' CBaseOutputPin
+    // Active and Inactive). Its own allocator commits in `moved`.
+    let given = link(cpu, id).map_or(0, |l| l.given);
     let g = graph(cpu, id)?;
     match state {
         STATE_RUNNING => {
             if from == STATE_STOPPED {
                 for &f in &filters {
                     list.call(cpu, f, FILTER_PAUSE, &[], 0);
+                }
+                if given != 0 {
+                    list.call(cpu, given, ALLOCATOR_COMMIT, &[], 0);
                 }
             }
             let g = graph(cpu, id)?;
@@ -680,11 +796,17 @@ pub fn change_state(cpu: &mut Cpu, id: u32, state: u32) -> Option<()> {
             for &f in &filters {
                 list.call(cpu, f, FILTER_PAUSE, &[], 0);
             }
+            if from == STATE_STOPPED && given != 0 {
+                list.call(cpu, given, ALLOCATOR_COMMIT, &[], 0);
+            }
         }
         _ => {
             g.elapsed = 0;
             for &f in &filters {
                 list.call(cpu, f, FILTER_STOP, &[], 0);
+            }
+            if given != 0 {
+                list.call(cpu, given, ALLOCATOR_DECOMMIT, &[], 0);
             }
         }
     }
@@ -697,6 +819,28 @@ pub fn change_state(cpu: &mut Cpu, id: u32, state: u32) -> Option<()> {
         cpu.set_eax(v);
     }
     None
+}
+
+/// The graph's filters in the order their states change: each after the
+/// filters its output pins connect to, so the renderers come first (Wine's
+/// `sort_filters`), and otherwise from the one added last.
+fn downstream_first(g: &super::graph::Graph) -> Vec<u32> {
+    let mut left: Vec<u32> = g.filters.iter().rev().map(|f| f.iface).collect();
+    let mut order = Vec::with_capacity(left.len());
+    while !left.is_empty() {
+        // One whose downstream filters are all placed; the first left when
+        // the joints make a loop.
+        let k = left
+            .iter()
+            .position(|&f| {
+                g.joints
+                    .iter()
+                    .all(|j| j.from != f || !left.contains(&j.to) || j.to == f)
+            })
+            .unwrap_or(0);
+        order.push(left.remove(k));
+    }
+    order
 }
 
 /// The graph's clock goes to its filters (SetSyncSource) the first time
@@ -748,8 +892,9 @@ fn moved(cpu: &mut Cpu, id: u32, state: u32) {
         halt(cpu, id);
         return;
     }
-    let a = link(cpu, id).map_or(0, |l| l.allocator);
-    if sample::commit_now(cpu, a) != S_OK {
+    let (a, given) = link(cpu, id).map_or((0, 0), |l| (l.allocator, l.given));
+    // The program's allocator was committed with the calls before.
+    if given == 0 && sample::commit_now(cpu, a) != S_OK {
         return;
     }
     let media = stream_media(cpu, id);
@@ -874,19 +1019,28 @@ fn read_media(cpu: &mut Cpu, path: &str) -> Option<Media> {
 /// or a wait until there is something.
 pub fn stream_thread(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let tid = crate::win32::user32::current_tid(cpu);
+    // Reconnect moves the link to `connecting` while it connects again,
+    // and the thread goes on with it after.
     let found = super::state(cpu)
         .objects
         .iter()
         .find_map(|o| match &o.kind {
-            Kind::Graph { g } => g.link.as_ref().filter(|l| l.tid == tid).map(|_| o.id),
+            Kind::Graph { g } => [g.link.as_ref(), g.connecting.as_ref()]
+                .into_iter()
+                .flatten()
+                .find(|l| l.tid == tid)
+                .map(|l| (o.id, l.wake)),
             _ => None,
         });
-    let Some(id) = found else {
+    let Some((id, wake)) = found else {
         // Its link is gone, or a program called the stub.
         thread::exit_current(cpu, 0);
         return None;
     };
-    let l = link(cpu, id)?.clone_shallow();
+    let Some(l) = link(cpu, id).map(|l| l.clone_shallow()) else {
+        // Reconnect is making the link again.
+        return wait(cpu, vec![wake]);
+    };
     if !l.active || l.ended || l.refused {
         return wait(cpu, vec![l.wake]);
     }
@@ -919,6 +1073,9 @@ pub fn stream_thread(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     };
     if l.next >= last {
         return end_stream(cpu, id, &l);
+    }
+    if l.given != 0 {
+        return given_sample(cpu, id, &l);
     }
     let s = match sample::take_buffer(cpu, l.allocator) {
         Ok(Some(s)) => s,
@@ -1010,6 +1167,15 @@ fn stream_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     // The sample comes back to the allocator when the pin has let go of
     // it too.
     super::drop_ref(cpu, s);
+    received(cpu, id, generation, value);
+    Next::Done(0)
+}
+
+/// The program's Receive returned `value` for the picture of the stream
+/// `generation`: the next picture goes after S_OK. S_FALSE or an error
+/// says the pin wants no more (strmbase's source pins stop their
+/// thread).
+fn received(cpu: &mut Cpu, id: u32, generation: u32, value: u32) {
     if let Some(l) = link(cpu, id)
         && l.generation == generation
     {
@@ -1017,17 +1183,21 @@ fn stream_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             l.next += 1;
             l.discontinuity = false;
         } else {
-            // S_FALSE or an error: the pin wants no more (strmbase's
-            // source pins stop their thread).
             l.refused = true;
         }
     }
-    Next::Done(0)
 }
 
-/// Fill the sample `s` with the link's next picture, timed from the
-/// segment's start.
-fn fill(cpu: &mut Cpu, id: u32, l: &Link, m: &Media, s: u32) {
+/// The link's next picture in the connection's format (None when it
+/// can't be decoded), its size, and its times from the segment's start.
+struct Picture {
+    data: Option<Vec<u8>>,
+    len: u32,
+    start: i64,
+    stop: i64,
+}
+
+fn picture(cpu: &mut Cpu, id: u32, l: &Link, m: &Media) -> Picture {
     let (w, h) = (m.width, m.height);
     let stride = dib_stride(w as i32, 24);
     let mut pictures =
@@ -1038,8 +1208,29 @@ fn fill(cpu: &mut Cpu, id: u32, l: &Link, m: &Media, s: u32) {
     }
     let data = rows.map(|rows| convert(l.kind as usize, &rows, w, h, stride, l.bottom_up));
     let from = l.from_ms as i64;
-    let start = (m.frame_ms(l.next) as i64 - from).max(0) * 10_000;
-    let stop = (m.frame_ms(l.next + 1) as i64 - from).max(0) * 10_000;
+    Picture {
+        data,
+        len: image_size(l.kind as usize, w, h),
+        start: (m.frame_ms(l.next) as i64 - from).max(0) * 10_000,
+        stop: (m.frame_ms(l.next + 1) as i64 - from).max(0) * 10_000,
+    }
+}
+
+/// Write the picture `p` at `buffer`, a buffer of `size` bytes: the
+/// number of bytes it takes there.
+fn put_picture(cpu: &mut Cpu, p: &Picture, buffer: u32, size: u32) -> u32 {
+    let len = p.len.min(size);
+    if let Some(data) = &p.data {
+        let n = data.len().min(len as usize);
+        cpu.bus.guest_write_bytes(buffer, &data[..n]);
+    }
+    len
+}
+
+/// Fill the sample `s` of the decoder's own allocator with the link's
+/// next picture, timed from the segment's start.
+fn fill(cpu: &mut Cpu, id: u32, l: &Link, m: &Media, s: u32) {
+    let p = picture(cpu, id, l, m);
     let Some(Kind::MediaSample { s: ms }) = super::kind(cpu, s) else {
         return;
     };
@@ -1049,15 +1240,180 @@ fn fill(cpu: &mut Cpu, id: u32, l: &Link, m: &Media, s: u32) {
         flags |= sample::AM_SAMPLE_DATADISCONTINUITY;
     }
     ms.flags = flags;
-    ms.start = start;
-    ms.stop = stop;
+    ms.start = p.start;
+    ms.stop = p.stop;
     ms.media_time = Some((l.next as i64, l.next as i64 + 1));
     let (buffer, size) = (ms.buffer, ms.size);
-    let len = image_size(l.kind as usize, w, h).min(size);
-    ms.actual = len;
-    if let Some(data) = data {
-        let n = data.len().min(len as usize);
-        cpu.bus.guest_write_bytes(buffer, &data[..n]);
+    let len = put_picture(cpu, &p, buffer, size);
+    if let Some(Kind::MediaSample { s: ms }) = super::kind(cpu, s) {
+        ms.actual = len;
+    }
+}
+
+// The streaming thread with the program's allocator.
+
+/// The scratch space of a sample's calls: the sample GetBuffer gives,
+/// its buffer, and its start, stop and media times.
+const P_SAMPLE: u32 = 0;
+const P_POINTER: u32 = 4;
+const P_START: u32 = 8;
+const P_STOP: u32 = 16;
+const P_MEDIA_START: u32 = 24;
+const P_MEDIA_STOP: u32 = 32;
+const P_SCRATCH: u32 = 40;
+
+/// A sample's variables: the graph, the stream's generation, the
+/// program's allocator, the sample, and the picture's size in it.
+const P_GRAPH: usize = 1;
+const P_GENERATION: usize = 2;
+const P_GIVEN: usize = 3;
+const P_THE_SAMPLE: usize = 4;
+const P_LEN: usize = 5;
+
+/// A sample's steps.
+const P_GOT: u16 = 1;
+const P_POINTED: u16 = 2;
+const P_SIZED: u16 = 3;
+const P_TIMED: u16 = 4;
+const P_MEDIA_TIMED: u16 = 5;
+const P_LENGTH: u16 = 6;
+const P_SYNC: u16 = 7;
+const P_DISCONTINUITY: u16 = 8;
+const P_RECEIVED: u16 = 9;
+const P_RELEASED: u16 = 10;
+
+/// The streaming thread hands the next picture over in a sample of the
+/// program's allocator, through the program's own methods, as the base
+/// classes' output pins and Wine's MPEG video decoder do: GetBuffer,
+/// which waits for a free sample, GetPointer and GetSize, the picture
+/// written, SetTime, SetMediaTime, SetActualDataLength, SetSyncPoint
+/// and SetDiscontinuity, then Receive and Release.
+fn given_sample(cpu: &mut Cpu, id: u32, l: &Link) -> Option<u32> {
+    let mut vars = vec![0u32; P_LEN + 1];
+    vars[0] = JOB_SAMPLE;
+    vars[P_GRAPH] = id;
+    vars[P_GENERATION] = l.generation;
+    vars[P_GIVEN] = l.given;
+    task::start(cpu, task::DSHOW, vars, P_SCRATCH)
+}
+
+/// The stream of the graph `id` sends no more until the graph starts it
+/// again, unless it went on already (`generation`).
+fn refuse(cpu: &mut Cpu, id: u32, generation: u32) {
+    if let Some(l) = link(cpu, id)
+        && l.generation == generation
+    {
+        l.refused = true;
+    }
+}
+
+fn sample_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
+    let (id, generation) = (t.var(P_GRAPH), t.var(P_GENERATION));
+    let s = t.scratch;
+    let the_sample = t.var(P_THE_SAMPLE);
+    // Whether the stream is still the one the sample is for: the graph
+    // may have stopped or seeked, or Reconnect made the link again, while
+    // the program ran. A sample for none goes back unsent.
+    let current = link(cpu, id).is_some_and(|l| l.generation == generation);
+    match t.step {
+        0 => {
+            let given = t.var(P_GIVEN);
+            call_method(
+                cpu,
+                given,
+                ALLOCATOR_GET_BUFFER,
+                &[s + P_SAMPLE, 0, 0, 0],
+                P_GOT,
+            )
+        }
+        P_GOT => {
+            let got = cpu.bus.guest_read_32(s + P_SAMPLE);
+            if failed(value) || got == 0 {
+                // Decommitted, or the allocator fails: the base classes'
+                // output pins stop streaming on GetBuffer's error.
+                refuse(cpu, id, generation);
+                return Next::Done(0);
+            }
+            t.set(P_THE_SAMPLE, got);
+            if !current {
+                return call_method(cpu, got, RELEASE, &[], P_RELEASED);
+            }
+            call_method(cpu, got, SAMPLE_GET_POINTER, &[s + P_POINTER], P_POINTED)
+        }
+        P_POINTED => {
+            if failed(value) || cpu.bus.guest_read_32(s + P_POINTER) == 0 {
+                refuse(cpu, id, generation);
+                return call_method(cpu, the_sample, RELEASE, &[], P_RELEASED);
+            }
+            call_method(cpu, the_sample, SAMPLE_GET_SIZE, &[], P_SIZED)
+        }
+        P_SIZED => {
+            let size = value;
+            let media = stream_media(cpu, id);
+            let l = link(cpu, id).map(|l| l.clone_shallow());
+            let (Some(m), Some(l), true) = (media, l, current) else {
+                return call_method(cpu, the_sample, RELEASE, &[], P_RELEASED);
+            };
+            let p = picture(cpu, id, &l, &m);
+            let buffer = cpu.bus.guest_read_32(s + P_POINTER);
+            let fits = cpu.bus.guest_probe(buffer, p.len.min(size) as usize, true);
+            let len = if fits {
+                put_picture(cpu, &p, buffer, size)
+            } else {
+                0
+            };
+            t.set(P_LEN, len);
+            let times = [
+                (P_START, p.start),
+                (P_STOP, p.stop),
+                (P_MEDIA_START, l.next as i64),
+                (P_MEDIA_STOP, l.next as i64 + 1),
+            ];
+            for (at, v) in times {
+                cpu.bus.guest_write_32(s + at, v as u32);
+                cpu.bus.guest_write_32(s + at + 4, (v >> 32) as u32);
+            }
+            let args = [s + P_START, s + P_STOP];
+            call_method(cpu, the_sample, SAMPLE_SET_TIME, &args, P_TIMED)
+        }
+        P_TIMED => {
+            let args = [s + P_MEDIA_START, s + P_MEDIA_STOP];
+            call_method(cpu, the_sample, SAMPLE_SET_MEDIA_TIME, &args, P_MEDIA_TIMED)
+        }
+        P_MEDIA_TIMED => {
+            let len = t.var(P_LEN);
+            call_method(
+                cpu,
+                the_sample,
+                SAMPLE_SET_ACTUAL_DATA_LENGTH,
+                &[len],
+                P_LENGTH,
+            )
+        }
+        P_LENGTH => call_method(cpu, the_sample, SAMPLE_SET_SYNC_POINT, &[1], P_SYNC),
+        P_SYNC => {
+            let discontinuity = link(cpu, id).is_some_and(|l| l.discontinuity);
+            call_method(
+                cpu,
+                the_sample,
+                SAMPLE_SET_DISCONTINUITY,
+                &[discontinuity as u32],
+                P_DISCONTINUITY,
+            )
+        }
+        P_DISCONTINUITY => {
+            let input = link(cpu, id).map_or(0, |l| l.input);
+            if !current || input == 0 || method(cpu, input, INPUT_RECEIVE).is_none() {
+                refuse(cpu, id, generation);
+                return call_method(cpu, the_sample, RELEASE, &[], P_RELEASED);
+            }
+            call_method(cpu, input, INPUT_RECEIVE, &[the_sample], P_RECEIVED)
+        }
+        P_RECEIVED => {
+            received(cpu, id, generation, value);
+            call_method(cpu, the_sample, RELEASE, &[], P_RELEASED)
+        }
+        _ => Next::Done(0),
     }
 }
 
@@ -1302,14 +1658,15 @@ fn accepts(m: &Media, mt: &MediaType) -> Option<(usize, bool)> {
 
 /// The scratch space of the connection's calls: the pointer a call
 /// gives back, a count, a pin's direction, IID_IMemInputPin, the
-/// allocator's properties, and the media type tried, with its format
-/// block.
+/// allocator's properties asked for and those it has, and the media
+/// type tried, with its format block.
 const C_OUT: u32 = 0;
 const C_FETCHED: u32 = 4;
 const C_DIR: u32 = 8;
 const C_IID: u32 = 12;
 const C_PROPS: u32 = 28;
-const C_TYPE: u32 = 44;
+const C_ACTUAL: u32 = 44;
+const C_TYPE: u32 = 60;
 const C_FORMAT: u32 = C_TYPE + MEDIA_TYPE as u32;
 const C_SCRATCH: u32 = C_FORMAT + MAX_FORMAT as u32;
 
@@ -1328,6 +1685,26 @@ const V_RELEASE: usize = 11;
 const V_FILE: usize = 12;
 const V_KIND: usize = 13;
 const V_BOTTOM_UP: usize = 14;
+/// Rendering a filter's outputs: the filter and its pins' enumerator,
+/// its output pin, the place in the graph's filters of the filter tried
+/// for it, that filter's enumerator and its input pin. The filters whose
+/// outputs are still to render follow, from `V_QUEUE`.
+const V_SOURCE: usize = 15;
+const V_SOURCE_ENUM: usize = 16;
+const V_OUT: usize = 17;
+const V_TARGET: usize = 18;
+const V_TARGET_ENUM: usize = 19;
+const V_IN: usize = 20;
+/// 1 when Reconnect makes the connection again (`reconnect`).
+const V_AGAIN: usize = 21;
+/// The filter tried for the output pin (`V_TARGET`), by its interface.
+const V_TARGET_FILTER: usize = 22;
+/// The allocator the input pin gave (GetAllocator), a memory allocator
+/// of the graph's or one of the program's own, while the connection
+/// tries it; for Reconnect, the program's allocator the link had, until
+/// it is let go of.
+const V_GIVEN: usize = 23;
+const V_QUEUE: usize = 24;
 
 /// The connection's steps.
 const S_START: u16 = 0;
@@ -1357,17 +1734,50 @@ const S_DISCONNECT: u16 = 23;
 const S_DONE: u16 = 24;
 const S_RELEASE: u16 = 25;
 const S_FINISH: u16 = 26;
+const S_DOWN: u16 = 27;
+const S_DOWN_PINS: u16 = 28;
+const S_DOWN_NEXT: u16 = 29;
+const S_DOWN_PIN: u16 = 30;
+const S_DOWN_DIRECTION: u16 = 31;
+const S_DOWN_CONNECTED: u16 = 32;
+const S_DOWN_SKIP: u16 = 33;
+const S_TARGET: u16 = 34;
+const S_TARGET_PINS: u16 = 35;
+const S_TARGET_NEXT: u16 = 36;
+const S_TARGET_PIN: u16 = 37;
+const S_TARGET_DIRECTION: u16 = 38;
+const S_TARGET_CONNECTED: u16 = 39;
+const S_TARGET_SKIP: u16 = 40;
+const S_JOINED: u16 = 41;
+const S_TARGET_DONE: u16 = 42;
+const S_DOWN_DONE: u16 = 43;
+const S_AGAIN_DISCONNECTED: u16 = 44;
+const S_AGAIN: u16 = 45;
+const S_GIVEN_SIZED: u16 = 46;
+const S_GIVEN_FAILED: u16 = 47;
+const S_AGAIN_UNGIVEN: u16 = 48;
+const S_AGAIN_DECOMMITTED: u16 = 49;
 
 /// Connect the decoder of the file named by the wide string at `file`
 /// to an input pin of the program's filters in the graph `id`, before
 /// RenderFile opens its device: None while the calls are made, after
 /// which RenderFile runs again with `connect_tried` set.
 pub fn connect(cpu: &mut Cpu, id: u32, file: u32) -> Option<u32> {
-    let mut vars = vec![0u32; V_BOTTOM_UP + 1];
+    let mut vars = vec![0u32; V_QUEUE];
     vars[0] = JOB_CONNECT;
     vars[V_GRAPH] = id;
     vars[V_FILE] = file;
     task::start(cpu, task::DSHOW, vars, C_SCRATCH)
+}
+
+/// The program's filter `k` of the graph `id`, counted from the one
+/// added last: the order Windows' graph keeps its filters in, which
+/// EnumFilters gives and Render tries them in (Wine's AddFilter puts a
+/// filter at the head of its list, and its tests, run on Windows, find
+/// a pin rendered to the filter added last).
+fn newest(cpu: &mut Cpu, id: u32, k: usize) -> Option<u32> {
+    let g = graph(cpu, id)?;
+    g.filters.iter().rev().nth(k).map(|f| f.iface)
 }
 
 /// Go on at `step` at once.
@@ -1415,6 +1825,14 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     // which reads as S_OK: the steps that check results treat a missing
     // method by what it leaves in the scratch space.
     match t.step {
+        S_START if t.var(V_AGAIN) != 0 => {
+            // Reconnect: the program's pin disconnects, the link's
+            // reference on its IMemInputPin goes, and the pin is tried
+            // again.
+            super::IID_IMEM_INPUT_PIN.write(cpu, s + C_IID);
+            let pin = t.var(V_PIN);
+            call_method(cpu, pin, PIN_DISCONNECT, &[], S_AGAIN_DISCONNECTED)
+        }
         S_START => {
             let path = crate::win32::dmusic::read_wide(cpu, t.var(V_FILE), 260);
             let Some(m) = read_media(cpu, &path).filter(|m| m.frames > 0) else {
@@ -1447,12 +1865,15 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         }
         S_FILTER => {
             let k = t.var(V_FILTER) as usize;
-            let Some(f) = graph(cpu, id)
-                .and_then(|g| g.filters.get(k))
-                .map(|f| f.iface)
-            else {
+            let Some(f) = newest(cpu, id, k) else {
                 return goto(S_FINISH);
             };
+            // The filter the link goes to if one of its pins takes the
+            // pictures, kept as it is chosen: the program's calls may add
+            // filters, which moves the places `newest` counts.
+            if let Some(l) = graph(cpu, id).and_then(|g| g.connecting.as_mut()) {
+                l.filter = f;
+            }
             clear_out(cpu, t);
             call_method(cpu, f, FILTER_ENUM_PINS, &[s + C_OUT], S_PINS)
         }
@@ -1506,7 +1927,13 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         S_SKIP_PIN => {
             let pin = t.var(V_PIN);
             t.set(V_PIN, 0);
-            release_then(t, pin, S_NEXT_PIN)
+            // Reconnect tries its pin alone.
+            let then = if t.var(V_AGAIN) != 0 {
+                S_FINISH
+            } else {
+                S_NEXT_PIN
+            };
+            release_then(t, pin, then)
         }
         S_TYPES => {
             let e = out(cpu, t);
@@ -1630,31 +2057,13 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         }
         S_ALLOCATOR => {
             let given = out(cpu, t);
-            let ours = if failed(value) || given == 0 {
-                None
-            } else {
-                sample::allocator_of(cpu, given)
-            };
-            match ours {
-                // The pin's allocator is the memory allocator the
-                // program made (CLSID_MemoryAllocator): the reference
-                // GetAllocator gave is the link's.
-                Some(a) => {
-                    t.set(V_ALLOC, a);
-                    goto(S_DECIDE)
-                }
-                None => {
-                    // None, or one of the program's own: the decoder's
-                    // own allocator, as the base classes' output pins
-                    // use when the input pin's isn't taken.
-                    let a = sample::new_allocator(cpu);
-                    t.set(V_ALLOC, a);
-                    if !failed(value) && given != 0 {
-                        return release_then(t, given, S_DECIDE);
-                    }
-                    goto(S_DECIDE)
-                }
+            if failed(value) || given == 0 {
+                return goto(S_GIVEN_FAILED);
             }
+            // The pin's allocator is tried first, and the reference
+            // GetAllocator gave is the connection's.
+            t.set(V_GIVEN, given);
+            goto(S_DECIDE)
         }
         S_DECIDE => {
             // The requirements, zero when the pin gave none (S_REQUIRED).
@@ -1664,19 +2073,48 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             // DecideBufferSize: a buffer at least, a picture's size at
             // least, an alignment of 1 at least (quartz_transform.c).
             let props = [req[0].max(1), req[1].max(size), req[2].max(1), req[3]];
-            let a = t.var(V_ALLOC);
+            let given = t.var(V_GIVEN);
+            // The memory allocator the pin gave, one the program made
+            // (CLSID_MemoryAllocator), or the decoder's own without one.
+            let ours = if given != 0 {
+                sample::allocator_of(cpu, given)
+            } else {
+                Some(t.var(V_ALLOC))
+            };
+            let Some(a) = ours else {
+                // One of the program's own, which the samples come from
+                // if it takes the properties and the pin takes it back.
+                for (j, v) in props.into_iter().enumerate() {
+                    cpu.bus.guest_write_32(s + C_PROPS + 4 * j as u32, v);
+                }
+                cpu.bus.guest_fill(s + C_ACTUAL, 16, 0);
+                if method(cpu, given, ALLOCATOR_SET_PROPERTIES).is_none() {
+                    return goto(S_GIVEN_FAILED);
+                }
+                let args = [s + C_PROPS, s + C_ACTUAL];
+                return call_method(cpu, given, ALLOCATOR_SET_PROPERTIES, &args, S_GIVEN_SIZED);
+            };
+            // The pin's allocator refused: the decoder's own is tried
+            // next (S_GIVEN_FAILED), as for one of the program's.
+            let refused = if given != 0 { S_GIVEN_FAILED } else { S_FAILED };
             if sample::set_props(cpu, a, props).is_err() {
-                return goto(S_FAILED);
+                return goto(refused);
             }
             let Some(at) = super::block(cpu, a, super::ALLOCATOR) else {
-                return goto(S_FAILED);
+                return goto(refused);
             };
             let input = t.var(V_INPUT);
             call_method(cpu, input, INPUT_NOTIFY_ALLOCATOR, &[at, 0], S_NOTIFIED)
         }
         S_NOTIFIED => {
             if failed(value) {
-                return goto(S_FAILED);
+                // The pin's allocator, refused: the decoder's own is
+                // tried next, as the base classes' DecideAllocator does.
+                return goto(if t.var(V_GIVEN) != 0 {
+                    S_GIVEN_FAILED
+                } else {
+                    S_FAILED
+                });
             }
             let mut head = vec![0u8; MEDIA_TYPE];
             cpu.bus.guest_read_bytes(s + C_TYPE, &mut head);
@@ -1684,22 +2122,35 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let mut format = vec![0u8; n];
             cpu.bus.guest_read_bytes(s + C_FORMAT, &mut format);
             head[68..72].fill(0);
-            let k = graph(cpu, id).and_then(|g| g.filters.get(t.var(V_FILTER) as usize).cloned());
+            // The link keeps the pin's allocator: by its object when it
+            // is a memory allocator of the graph's.
+            let given = t.var(V_GIVEN);
+            let (allocator, given) = match sample::allocator_of(cpu, given) {
+                Some(a) if given != 0 => (a, 0),
+                _ => (t.var(V_ALLOC), given),
+            };
             let Some(g) = graph(cpu, id) else {
                 return goto(S_FINISH);
             };
             let Some(mut l) = g.connecting.take() else {
                 return goto(S_FINISH);
             };
-            l.filter = k.map_or(0, |f| f.iface);
             l.pin = t.var(V_PIN);
             l.input = t.var(V_INPUT);
-            l.allocator = t.var(V_ALLOC);
+            l.allocator = allocator;
+            l.given = given;
+            t.set(V_GIVEN, 0);
             l.head = head;
             l.format = format;
             l.kind = t.var(V_KIND);
             l.bottom_up = t.var(V_BOTTOM_UP) != 0;
+            let filter = l.filter;
             g.link = Some(l);
+            // Its outputs are rendered next, but after Reconnect, whose
+            // filter's outputs are connected already.
+            if t.var(V_AGAIN) == 0 {
+                t.vars.push(filter);
+            }
             t.set(V_PIN, 0);
             let e = t.var(V_TYPES);
             t.set(V_TYPES, 0);
@@ -1722,25 +2173,247 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         S_DONE => {
             let e = t.var(V_ENUM);
             t.set(V_ENUM, 0);
-            release_then(t, e, S_FINISH)
+            release_then(t, e, S_DOWN)
         }
         S_RELEASE => {
             let this = t.var(V_RELEASE);
             let then = t.var(V_THEN) as u16;
             call_method(cpu, this, RELEASE, &[], then)
         }
+        S_GIVEN_SIZED => {
+            if failed(value) {
+                return goto(S_GIVEN_FAILED);
+            }
+            // DecideBufferSize passes on SetProperties' result, and the
+            // input pin takes the allocator back (NotifyAllocator).
+            let (given, input) = (t.var(V_GIVEN), t.var(V_INPUT));
+            call_method(cpu, input, INPUT_NOTIFY_ALLOCATOR, &[given, 0], S_NOTIFIED)
+        }
+        S_GIVEN_FAILED => {
+            // The base classes' CBaseOutputPin::DecideAllocator: without
+            // an allocator from the pin, or with one it can't use, the
+            // output pin makes its own (InitAllocator) and sizes it.
+            let a = sample::new_allocator(cpu);
+            t.set(V_ALLOC, a);
+            let given = t.var(V_GIVEN);
+            t.set(V_GIVEN, 0);
+            release_then(t, given, S_DECIDE)
+        }
+        S_AGAIN_UNGIVEN => {
+            // Reconnect: the output pin's Disconnect decommits the
+            // program's allocator, then lets go of the link's reference
+            // on it (`let_go_of_given`).
+            let given = t.var(V_GIVEN);
+            if given == 0 {
+                return goto(S_AGAIN);
+            }
+            call_method(cpu, given, ALLOCATOR_DECOMMIT, &[], S_AGAIN_DECOMMITTED)
+        }
+        S_AGAIN_DECOMMITTED => {
+            let given = t.var(V_GIVEN);
+            t.set(V_GIVEN, 0);
+            release_then(t, given, S_AGAIN)
+        }
+        S_DOWN.. => down_step(cpu, t, value),
         _ => {
             // S_FINISH: without a connection, the decoder and its pin go.
             if let Some(l) = graph(cpu, id).and_then(|g| g.connecting.take()) {
                 for o in [l.out_pin, l.decoder] {
                     super::drop_ref(cpu, o);
                 }
+                if l.wake != 0 {
+                    super::set_event(cpu, l.wake);
+                    crate::win32::object::objects(cpu).release(l.wake);
+                }
+            }
+            if t.var(V_AGAIN) != 0 {
+                let made = linked(cpu, id);
+                return Next::Done(if made { S_OK } else { VFW_E_NO_ACCEPTABLE_TYPES });
             }
             if let Some(g) = graph(cpu, id) {
                 g.connect_tried = true;
             }
             t.retry(cpu);
             Next::Stop
+        }
+    }
+}
+
+/// The steps that render the output pins of the filters in the queue
+/// (`V_QUEUE`): each output pin not yet connected tries the free input
+/// pins of the program's other filters, from the one added last,
+/// with its own IPin::Connect, and the filter of the one that takes it
+/// joins the queue. An output pin none takes stays free, as a partial
+/// render leaves it on Windows.
+fn down_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
+    let id = t.var(V_GRAPH);
+    let s = t.scratch;
+    match t.step {
+        S_AGAIN_DISCONNECTED => {
+            let input = t.var(V_INPUT);
+            t.set(V_INPUT, 0);
+            release_then(t, input, S_AGAIN_UNGIVEN)
+        }
+        S_AGAIN => {
+            // As if ConnectedTo found the pin free (S_CONNECTED).
+            clear_out(cpu, t);
+            t.step = S_CONNECTED;
+            connect_step(cpu, t, S_OK)
+        }
+        S_DOWN => {
+            if t.vars.len() <= V_QUEUE {
+                return goto(S_FINISH);
+            }
+            let f = t.vars.pop().unwrap_or(0);
+            t.set(V_SOURCE, f);
+            clear_out(cpu, t);
+            call_method(cpu, f, FILTER_ENUM_PINS, &[s + C_OUT], S_DOWN_PINS)
+        }
+        S_DOWN_PINS => {
+            let e = out(cpu, t);
+            if failed(value) || e == 0 {
+                return goto(S_DOWN);
+            }
+            t.set(V_SOURCE_ENUM, e);
+            goto(S_DOWN_NEXT)
+        }
+        S_DOWN_NEXT => {
+            clear_out(cpu, t);
+            let e = t.var(V_SOURCE_ENUM);
+            call_method(cpu, e, ENUM_NEXT, &[1, s + C_OUT, s + C_FETCHED], S_DOWN_PIN)
+        }
+        S_DOWN_PIN => {
+            let pin = out(cpu, t);
+            if value != S_OK || pin == 0 {
+                let e = t.var(V_SOURCE_ENUM);
+                t.set(V_SOURCE_ENUM, 0);
+                return release_then(t, e, S_DOWN);
+            }
+            t.set(V_OUT, pin);
+            cpu.bus.guest_write_32(s + C_DIR, 0xFFFF_FFFF);
+            call_method(cpu, pin, PIN_QUERY_DIRECTION, &[s + C_DIR], S_DOWN_DIRECTION)
+        }
+        S_DOWN_DIRECTION => {
+            let dir = cpu.bus.guest_read_32(s + C_DIR);
+            if failed(value) || dir != PINDIR_OUTPUT {
+                return goto(S_DOWN_SKIP);
+            }
+            clear_out(cpu, t);
+            let pin = t.var(V_OUT);
+            call_method(cpu, pin, PIN_CONNECTED_TO, &[s + C_OUT], S_DOWN_CONNECTED)
+        }
+        S_DOWN_CONNECTED => {
+            let other = out(cpu, t);
+            if other != 0 {
+                return release_then(t, other, S_DOWN_SKIP);
+            }
+            t.set(V_TARGET, 0);
+            goto(S_TARGET)
+        }
+        S_DOWN_SKIP => {
+            let pin = t.var(V_OUT);
+            t.set(V_OUT, 0);
+            release_then(t, pin, S_DOWN_NEXT)
+        }
+        S_TARGET => {
+            let k = t.var(V_TARGET) as usize;
+            let source = t.var(V_SOURCE);
+            let Some(f) = newest(cpu, id, k) else {
+                // No filter takes this output.
+                return goto(S_DOWN_SKIP);
+            };
+            if f == source {
+                t.set(V_TARGET, k as u32 + 1);
+                return goto(S_TARGET);
+            }
+            t.set(V_TARGET_FILTER, f);
+            clear_out(cpu, t);
+            call_method(cpu, f, FILTER_ENUM_PINS, &[s + C_OUT], S_TARGET_PINS)
+        }
+        S_TARGET_PINS => {
+            let e = out(cpu, t);
+            if failed(value) || e == 0 {
+                t.set(V_TARGET, t.var(V_TARGET) + 1);
+                return goto(S_TARGET);
+            }
+            t.set(V_TARGET_ENUM, e);
+            goto(S_TARGET_NEXT)
+        }
+        S_TARGET_NEXT => {
+            clear_out(cpu, t);
+            let e = t.var(V_TARGET_ENUM);
+            call_method(cpu, e, ENUM_NEXT, &[1, s + C_OUT, s + C_FETCHED], S_TARGET_PIN)
+        }
+        S_TARGET_PIN => {
+            let pin = out(cpu, t);
+            if value != S_OK || pin == 0 {
+                return goto(S_TARGET_DONE);
+            }
+            t.set(V_IN, pin);
+            cpu.bus.guest_write_32(s + C_DIR, 0xFFFF_FFFF);
+            call_method(cpu, pin, PIN_QUERY_DIRECTION, &[s + C_DIR], S_TARGET_DIRECTION)
+        }
+        S_TARGET_DIRECTION => {
+            let dir = cpu.bus.guest_read_32(s + C_DIR);
+            if failed(value) || dir != PINDIR_INPUT {
+                return goto(S_TARGET_SKIP);
+            }
+            clear_out(cpu, t);
+            let pin = t.var(V_IN);
+            call_method(cpu, pin, PIN_CONNECTED_TO, &[s + C_OUT], S_TARGET_CONNECTED)
+        }
+        S_TARGET_CONNECTED => {
+            let other = out(cpu, t);
+            if other != 0 {
+                return release_then(t, other, S_TARGET_SKIP);
+            }
+            let (pin, input) = (t.var(V_OUT), t.var(V_IN));
+            // A missing method fails the attempt.
+            if method(cpu, pin, PIN_CONNECT).is_none() {
+                return goto(S_TARGET_SKIP);
+            }
+            call_method(cpu, pin, PIN_CONNECT, &[input, 0], S_JOINED)
+        }
+        S_TARGET_SKIP => {
+            let pin = t.var(V_IN);
+            t.set(V_IN, 0);
+            release_then(t, pin, S_TARGET_NEXT)
+        }
+        S_JOINED => {
+            if failed(value) {
+                return goto(S_TARGET_SKIP);
+            }
+            // The filter chosen at S_TARGET: the program's Connect may
+            // have added filters, which moves the places `newest` counts.
+            let to = t.var(V_TARGET_FILTER);
+            let joint = Joint {
+                from: t.var(V_SOURCE),
+                out: t.var(V_OUT),
+                to,
+                input: t.var(V_IN),
+            };
+            if let Some(g) = graph(cpu, id) {
+                g.joints.push(joint);
+            }
+            t.vars.push(to);
+            // The references on both pins go to the joint. The target's
+            // enumerator goes (S_DOWN_DONE), and the next output pin is
+            // rendered.
+            t.set(V_IN, 0);
+            t.set(V_OUT, 0);
+            goto(S_DOWN_DONE)
+        }
+        S_TARGET_DONE => {
+            let e = t.var(V_TARGET_ENUM);
+            t.set(V_TARGET_ENUM, 0);
+            t.set(V_TARGET, t.var(V_TARGET) + 1);
+            release_then(t, e, S_TARGET)
+        }
+        _ => {
+            // S_DOWN_DONE.
+            let e = t.var(V_TARGET_ENUM);
+            t.set(V_TARGET_ENUM, 0);
+            release_then(t, e, S_DOWN_SKIP)
         }
     }
 }
@@ -1754,6 +2427,85 @@ fn put_type(cpu: &mut Cpu, s: u32, head: &[u8], format: &[u8]) {
     head[68..72].copy_from_slice(&(s + C_FORMAT).to_le_bytes());
     cpu.bus.guest_write_bytes(s + C_TYPE, &head);
     cpu.bus.guest_write_bytes(s + C_FORMAT, &format[..n]);
+}
+
+/// IFilterGraph::Reconnect(this, pin): the decoder's connection to the
+/// program's pin `pin`, or the one of the decoder's own pin, is made
+/// again, as Wine's ReconnectEx does it: both ends disconnect, and the
+/// decoder's output pin connects to the pin again as RenderFile does,
+/// the pin's own types first. The streaming thread, if there is one,
+/// goes on with the new connection. A pin of a connection the graph
+/// made between two of the program's filters (`Joint`) is connected
+/// again the same way, with the output pin's own IPin::Connect, so that
+/// a second transform-in-place filter's ReconnectPin works too.
+/// VFW_E_NOT_CONNECTED for a pin of neither, VFW_E_NOT_STOPPED while the
+/// graph plays.
+pub fn reconnect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let [this, pin] = args[..] else {
+        return Some(super::E_INVALIDARG);
+    };
+    let id = hr!(graph_of(cpu, this));
+    if pin == 0 {
+        return Some(E_POINTER);
+    }
+    let own = super::object_of(cpu, pin);
+    let Some(g) = graph(cpu, id) else {
+        return Some(E_POINTER);
+    };
+    if g.state != STATE_STOPPED {
+        return Some(VFW_E_NOT_STOPPED);
+    }
+    let joint = g
+        .joints
+        .iter()
+        .find(|j| j.out == pin || j.input == pin)
+        .cloned();
+    if let Some(j) = joint {
+        // The joint keeps its references on both pins, and stays when the
+        // connection isn't made again: undoing it then disconnects pins
+        // already free, which tells them nothing.
+        let mut list = List::new(S_OK, THEN_DONE, id, 0, 0);
+        list.call(cpu, j.input, PIN_DISCONNECT, &[], 0);
+        list.call(cpu, j.out, PIN_DISCONNECT, &[], 0);
+        list.call(cpu, j.out, PIN_CONNECT, &[j.input, 0], TAKE_RESULT);
+        return list.start(cpu, 0);
+    }
+    let found = g
+        .link
+        .as_ref()
+        .is_some_and(|l| l.pin == pin || Some(l.out_pin) == own);
+    if !found {
+        return Some(VFW_E_NOT_CONNECTED);
+    }
+    let Some(l) = g.link.take() else {
+        return Some(VFW_E_NOT_CONNECTED);
+    };
+    sample::decommit_now(cpu, l.allocator);
+    if l.allocator != 0 {
+        super::drop_ref(cpu, l.allocator);
+    }
+    let (program_pin, input, given) = (l.pin, l.input, l.given);
+    if let Some(g) = graph(cpu, id) {
+        g.connecting = Some(Link {
+            pin: 0,
+            input: 0,
+            allocator: 0,
+            given: 0,
+            head: Vec::new(),
+            format: Vec::new(),
+            ..l
+        });
+    }
+    let mut vars = vec![0u32; V_QUEUE];
+    vars[0] = JOB_CONNECT;
+    vars[V_GRAPH] = id;
+    // The link's references on the pin and its IMemInputPin go to the
+    // connection, which lets go of them as RenderFile's does.
+    vars[V_PIN] = program_pin;
+    vars[V_INPUT] = input;
+    vars[V_GIVEN] = given;
+    vars[V_AGAIN] = 1;
+    task::start(cpu, task::DSHOW, vars, C_SCRATCH)
 }
 
 // The decoder's IBaseFilter.
@@ -1862,12 +2614,14 @@ pub fn pin_disconnect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(VFW_E_NOT_STOPPED);
     }
     let mut list = List::new(S_OK, THEN_UNLINKED, id, 0, 0);
+    let_go_of_given(cpu, &mut list, l.given);
     list.release(cpu, l.input);
     list.release(cpu, l.pin);
     if let Some(l) = link(cpu, id) {
         // Its pin, which has let go of this one, isn't told again.
         l.pin = 0;
         l.input = 0;
+        l.given = 0;
     }
     list.start(cpu, 0)
 }
@@ -1954,6 +2708,116 @@ pub fn pin_query_id(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(put32(cpu, args[1], at).map_or_else(|e| e, |_| S_OK))
 }
 
+/// The file of the decoder whose output pin is the object `pin`, of the
+/// graph `id`: its link's, or the one RenderFile is connecting's.
+fn pin_media(cpu: &mut Cpu, id: u32, pin: u32) -> Option<Arc<Media>> {
+    let g = graph(cpu, id)?;
+    if g.link.as_ref().is_some_and(|l| l.out_pin == pin) {
+        stream_media(cpu, id)
+    } else if g.connecting.as_ref().is_some_and(|l| l.out_pin == pin) {
+        connecting_media(cpu, id)
+    } else {
+        None
+    }
+}
+
+/// IPin::EnumMediaTypes(this, out): an enumerator of the decoder's
+/// types, in the order it offers them (`FORMATS`).
+pub fn pin_enum_media_types(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let id = hr!(owner_of(cpu, args[0]));
+    let pin = hr!(super::object_of(cpu, args[0]).ok_or(E_POINTER));
+    hr!(put32(cpu, args[1], 0));
+    let e = super::add(
+        cpu,
+        Kind::TypeEnum {
+            e: TypeEnum {
+                graph: id,
+                pin,
+                next: 0,
+            },
+        },
+    );
+    Some(super::give_new(cpu, e, &super::IID_IENUM_MEDIA_TYPES, args[1]))
+}
+
+/// The enumerator `this`.
+fn type_enum(cpu: &mut Cpu, this: u32) -> Result<&mut TypeEnum, u32> {
+    let id = super::object_of(cpu, this).ok_or(E_POINTER)?;
+    match super::kind(cpu, id) {
+        Some(Kind::TypeEnum { e }) => Ok(e),
+        _ => Err(E_POINTER),
+    }
+}
+
+/// IEnumMediaTypes::Next(this, count, types, fetched): up to `count` of
+/// the decoder's types, each a new AM_MEDIA_TYPE of the task heap, which
+/// the caller frees; S_FALSE when fewer were left. E_POINTER for more
+/// than one without `fetched`, which COM's IEnum methods allow only for
+/// one, and E_OUTOFMEMORY when the heap has no room for the first.
+pub fn type_enum_next(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let [this, count, out, fetched] = args[..] else {
+        return Some(super::E_INVALIDARG);
+    };
+    let e = hr!(type_enum(cpu, this)).clone();
+    if out == 0 || (count > 1 && fetched == 0) {
+        return Some(E_POINTER);
+    }
+    let media = pin_media(cpu, e.graph, e.pin);
+    let mut given = 0;
+    let mut next = e.next;
+    while given < count && (next as usize) < FORMATS.len() {
+        let Some(m) = &media else {
+            break;
+        };
+        let (head, format) = own_type(m, next as usize);
+        let at = new_media_type(cpu, &MediaType { head, format });
+        if at == 0 {
+            if given == 0 {
+                return Some(E_OUTOFMEMORY);
+            }
+            break;
+        }
+        cpu.bus.guest_write_32(out + 4 * given, at);
+        given += 1;
+        next += 1;
+    }
+    if let Ok(e) = type_enum(cpu, this) {
+        e.next = next;
+    }
+    if fetched != 0 {
+        cpu.bus.guest_write_32(fetched, given);
+    }
+    Some(if given == count { S_OK } else { S_FALSE })
+}
+
+/// IEnumMediaTypes::Skip(this, count).
+pub fn type_enum_skip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let e = hr!(type_enum(cpu, args[0]));
+    let next = e.next.saturating_add(args[1]);
+    e.next = next.min(FORMATS.len() as u32);
+    Some(if next as usize <= FORMATS.len() {
+        S_OK
+    } else {
+        S_FALSE
+    })
+}
+
+/// IEnumMediaTypes::Reset(this).
+pub fn type_enum_reset(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    hr!(type_enum(cpu, args[0])).next = 0;
+    Some(S_OK)
+}
+
+/// IEnumMediaTypes::Clone(this, out): a new enumerator at the same place.
+pub fn type_enum_clone(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let e = hr!(type_enum(cpu, args[0])).clone();
+    if args[1] == 0 {
+        return Some(E_POINTER);
+    }
+    let copy = super::add(cpu, Kind::TypeEnum { e });
+    Some(super::give_new(cpu, copy, &super::IID_IENUM_MEDIA_TYPES, args[1]))
+}
+
 /// IPin::QueryAccept(this, type): whether the decoder can give it.
 pub fn pin_query_accept(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (id, _) = hr!(pin_link(cpu, args[0]));
@@ -1966,12 +2830,19 @@ pub fn pin_query_accept(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 crate::state_fields!(Filter { iface, name });
+crate::state_fields!(Joint {
+    from,
+    out,
+    to,
+    input
+});
 crate::state_fields!(Link {
     filter,
     pin,
     input,
     allocator,
     decoder,
+    given,
     out_pin,
     head,
     format,
@@ -1995,3 +2866,4 @@ crate::state_fields!(Link {
 });
 crate::state_fields!(Decoder { graph });
 crate::state_fields!(Pin { graph });
+crate::state_fields!(TypeEnum { graph, pin, next });

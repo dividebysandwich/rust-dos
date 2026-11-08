@@ -2,6 +2,7 @@
 //! the other parts in the modules below.
 
 pub(super) mod atom;
+pub(super) mod change;
 mod console;
 mod disk;
 mod env;
@@ -17,7 +18,8 @@ pub(crate) mod path;
 mod process;
 pub use process::ProgramInLine;
 mod profile;
-pub(in crate::win32) use profile::{profile_int, profile_value};
+pub(in crate::win32) use profile::profile_int;
+pub(crate) use profile::profile_value;
 mod sort;
 mod sync;
 mod text;
@@ -30,7 +32,7 @@ mod vxd;
 
 pub(super) use locale::enum_returned;
 pub(crate) use path::{change_directory, current_directory, find_entries, full_path, matches};
-pub(crate) use process::{spawn, startup_showing};
+pub(crate) use process::{spawn, startup_show, startup_showing};
 pub(super) use process::{STARTUPINFO_SIZE, win_exec_step};
 pub(super) use file::{
     CREATE_ALWAYS, CREATE_NEW, FILE_SHARE_READ, FILE_SHARE_WRITE, GENERIC_READ, GENERIC_WRITE,
@@ -681,6 +683,14 @@ static APIS: &[Api] = &[
     // with the process functions it uses and exits with -1 where
     // GetProcAddress finds it missing.
     stdcall("GetStartupInfoW", 442, 1, not_implemented),
+    // Another of Windows 98 SE's stubs: it fails with
+    // ERROR_CALL_NOT_IMPLEMENTED and returns FALSE, and the SYSTEMTIME
+    // it was to fill stays as it was. Myth II 1.8.3 imports it and
+    // calls it for the date of each saved game it lists.
+    stdcall("SystemTimeToTzSpecificLocalTime", 764, 3, not_implemented),
+    stdcall("FindFirstChangeNotificationA", 282, 3, change::find_first),
+    stdcall("FindNextChangeNotification", 288, 1, change::find_next),
+    stdcall("FindCloseChangeNotification", 281, 1, change::find_close),
 ];
 
 /// The places in `APIS` of the system's own stubs.
