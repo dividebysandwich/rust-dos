@@ -238,6 +238,7 @@ impl Voodoo {
             _ => Some(0),
         };
         let Some(dest) = dest else { return };
+        self.fastfills += 1;
         let st = self.raster_state(dest, 0);
         let (sx, ex, sy, ey) = st.clip();
         // color1 through the dither matrix, 4x4 pixels.

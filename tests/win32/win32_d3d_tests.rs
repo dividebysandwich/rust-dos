@@ -2299,6 +2299,51 @@ fn a_depth_fill_blt_resets_the_z_buffer_in_its_rectangle() {
     assert_rgb(&p, 48, 30, [0, 255, 0], 0);
 }
 
+/// The card's fastfills over `scene`, from the machine's start.
+fn fastfills(test: &str, scene: &Scene) -> u64 {
+    let (exe, data) = scene_program_with(scene, 16, &mut Vec::new());
+    let mut cpu = machine_with(test, scene.card, exe);
+    run_until_done(&mut cpu, data);
+    cpu.bus.voodoo.as_ref().unwrap().fastfills
+}
+
+#[test]
+fn a_depth_fill_blt_is_one_fastfill_of_the_card_for_each_rectangle() {
+    // The fill is the 3D engine's, as the HAL's Clear: with the CPU's
+    // writes instead, the OpenGL renderer reads the rows back and draws
+    // the triangles into them in software. The pixels are the same
+    // either way, so the card's count of fastfills tells them apart.
+    let draw = |z, color| Step::Draw(quad(0.0, 0.0, 64.0, 64.0, z, color));
+    let scene = |steps| Scene {
+        api: Api::D3D6,
+        card: None,
+        clear: 0,
+        zbuffer: Some(1.0),
+        texture: None,
+        texture_alpha: false,
+        steps,
+    };
+    let plain = scene(vec![
+        Step::State(RS_ZENABLE, 1),
+        draw(0.25, RED),
+        draw(0.75, GREEN),
+    ]);
+    let base = fastfills("depth_fill_count_plain", &plain);
+    let tests = [
+        ("depth_fill_count", Some([0, 0, 32, 64])),
+        ("depth_fill_count_all", None),
+    ];
+    for (test, rect) in tests {
+        let filled = scene(vec![
+            Step::State(RS_ZENABLE, 1),
+            draw(0.25, RED),
+            Step::DepthFill(0xFFFF, rect),
+            draw(0.75, GREEN),
+        ]);
+        assert_eq!(fastfills(test, &filled), base + 1, "{test}");
+    }
+}
+
 #[test]
 fn a_quad_nearer_than_the_cleared_depth_passes_the_depth_test() {
     // Cleared to 0.5 through the viewport, as Expendable does, then
