@@ -145,6 +145,14 @@ impl OutputCoupling {
         }
         (self.filters[0].process(l), self.filters[1].process(r))
     }
+
+    /// Whether a frame of `(l, r)` would give silence and leave the
+    /// capacitor as it is: it got that level last, and what it passed of
+    /// it has faded to exactly 0.
+    pub fn rests_on(&self, (l, r): (f32, f32)) -> bool {
+        let [left, right] = &self.filters;
+        self.settled && left.x1 == l && right.x1 == r && left.y1 == 0.0 && right.y1 == 0.0
+    }
 }
 
 /// The small speaker of a PC, as DOSBox Staging has it: a third-order

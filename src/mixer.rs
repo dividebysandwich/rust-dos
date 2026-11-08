@@ -475,6 +475,18 @@ impl Mixer {
         }
     }
 
+    /// Whether the Sound Blaster's frame `frame`, held, gives silence
+    /// through `sb_coupling` and changes nothing in it: the capacitor has
+    /// let all of the level through that it will, or there is none to let
+    /// through.
+    pub(crate) fn sb_coupling_rests_on(&self, frame: (f32, f32)) -> bool {
+        if self.settings.sb_coupling {
+            self.dsp.sb_coupling.rests_on(frame)
+        } else {
+            frame == (0.0, 0.0)
+        }
+    }
+
     /// The mix of a frame: the sources with the reverb and chorus of what
     /// they sent, as the mixes have them, at the master volume. Notes the mix's peak.
     #[inline]
