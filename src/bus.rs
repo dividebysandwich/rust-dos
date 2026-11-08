@@ -2826,6 +2826,8 @@ impl Bus {
                 self.vga.mark_dirty_full();
                 self.vga.flipped = true;
             }
+            // After the latch: the picture the display shows from now on.
+            self.activity.set_picture(crate::autospeed::picture(self));
             if self.vga.adapter.gate_array() {
                 self.compare_gate_array();
             }
