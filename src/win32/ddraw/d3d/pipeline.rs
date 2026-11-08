@@ -569,8 +569,22 @@ impl Processed {
         for i in 0..6 {
             p.planes[i] = l(self.planes[i], o.planes[i]);
         }
+        // Transformed vertices are cut on the screen, where the card
+        // iterates the texture coordinates divided by w, and rhw: the
+        // point on the edge gets the coordinates the card would have
+        // drawn there. The colors, z and rhw, which the card iterates as
+        // they are, come from the straight line. Cut straight, the
+        // coordinates of a floor whose near corners lie far past the
+        // guard band stretch across what is left of it (Omikron, #280).
+        let rhw = [self.rhw, o.rhw];
+        let perspective = self.tl && o.tl && rhw.iter().all(|w| w.is_finite() && *w > 0.0);
         for i in 0..8 {
-            p.tex[i] = l4(self.tex[i], o.tex[i]);
+            p.tex[i] = if perspective {
+                let (a, b) = (self.tex[i], o.tex[i]);
+                std::array::from_fn(|k| l(a[k] * rhw[0], b[k] * rhw[1]) / p.rhw)
+            } else {
+                l4(self.tex[i], o.tex[i])
+            };
         }
         p
     }
@@ -1837,5 +1851,64 @@ mod tests {
             }
         }
         assert!(cut > 1000, "{cut} cut");
+    }
+
+    #[test]
+    fn a_transformed_triangle_cut_at_the_guard_band_keeps_its_texture_in_perspective() {
+        // A floor's near corner far right of the guard band, as Omikron
+        // draws one when the camera is close: rhw 100 times the others'.
+        // Every corner of what is left has the coordinates the card would
+        // iterate there across the whole triangle: u*rhw and rhw are
+        // linear on the screen.
+        let corner = |x: f32, y: f32, rhw: f32, u: f32| {
+            let mut p = Processed {
+                clip: [x, y, 0.5, 1.0],
+                rhw,
+                tl: true,
+                diffuse: [1.0; 4],
+                ..Processed::default()
+            };
+            p.tex[0] = [u, 1.0 - u, 0.0, 0.0];
+            p
+        };
+        let tri = [
+            corner(0.0, 0.0, 0.01, 0.0),
+            corner(20000.0, 100.0, 1.0, 50.0),
+            corner(0.0, 200.0, 0.01, 1.0),
+        ];
+        let setup = Setup {
+            cull: CULL_NONE,
+            ..Setup::default()
+        };
+        let mut r = Recorder::default();
+        draw(
+            &setup,
+            &tri,
+            &assemble(TRIANGLELIST, &[0, 1, 2]).unwrap(),
+            &mut r,
+        );
+        assert!(!r.triangles.is_empty());
+        // Barycentric weights of a point in the uncut triangle.
+        let [a, b, c] = tri.map(|p| (p.clip[0], p.clip[1]));
+        let area = (b.0 - a.0) * (c.1 - a.1) - (c.0 - a.0) * (b.1 - a.1);
+        let weights = |x: f32, y: f32| {
+            let wb = ((x - a.0) * (c.1 - a.1) - (c.0 - a.0) * (y - a.1)) / area;
+            let wc = ((b.0 - a.0) * (y - a.1) - (x - a.0) * (b.1 - a.1)) / area;
+            [1.0 - wb - wc, wb, wc]
+        };
+        let mut cut = 0;
+        for v in r.triangles.iter().flatten() {
+            assert!(v.x <= super::super::hal::VERTEX_BAND[2] + 0.01, "{v:?}");
+            let w = weights(v.x, v.y);
+            let rhw: f32 = (0..3).map(|i| w[i] * tri[i].rhw).sum();
+            assert!((v.rhw - rhw).abs() <= 1e-4 * rhw.max(1.0), "{v:?}: rhw {rhw}");
+            for k in 0..2 {
+                let uw: f32 = (0..3).map(|i| w[i] * tri[i].tex[0][k] * tri[i].rhw).sum();
+                let want = uw / rhw;
+                assert!((v.tex[0][k] - want).abs() < 1e-3, "{v:?}: {k} {want}");
+            }
+            cut += (v.x > 1.0) as usize;
+        }
+        assert!(cut > 0);
     }
 }
