@@ -199,6 +199,17 @@ needs.
   Voodoo3 with the 1.07.00 driver it needs DirectX 7
   ([3dfx Voodoo3 and
   Banshee](../CONFIGURATION.md#3dfx-voodoo3-and-banshee)).
+* **Moto Racer** (GOG release, `game.EXE`): play it on [the built-in
+  Windows](#windows-games-on-the-built-in-windows), with
+  `machine=svga_voodoo3` and `win32_depth=16`; it draws the races
+  correctly there with either 3dfx renderer. On a Voodoo3 image, install
+  the driver from 3dfx's Voodoo3 driver CD 1.2 (`3dfx32v3.dll`
+  4.11.01.1151), copied over 1.07.00 as for Glover above. With 1.07.00
+  the bikes and riders are flat white and grey shapes without their
+  textures, while the track and the scenery have theirs; 86Box with a
+  Voodoo3 and the same driver draws them the same way. With
+  4.11.01.1151, and on a Voodoo2 with 3dfx's Voodoo2 driver, the bikes
+  have their colours.
 * **Oni**: on a Voodoo3, take away a MiniGL `opengl32.dll` from its
   folder. On a Voodoo2, copy `3DFXVGL.DLL` into its folder as
   `OPENGL32.DLL` ([OpenGL games under
