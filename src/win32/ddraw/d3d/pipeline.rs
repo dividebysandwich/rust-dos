@@ -576,6 +576,9 @@ impl Processed {
         // they are, come from the straight line. Cut straight, the
         // coordinates of a floor whose near corners lie far past the
         // guard band stretch across what is left of it (Omikron, #280).
+        // The HAL draws every texture in perspective, whatever
+        // D3DRENDERSTATE_TEXTUREPERSPECTIVE says; a cut has to follow it
+        // if it ever draws one without (#838).
         let rhw = [self.rhw, o.rhw];
         let perspective = self.tl && o.tl && rhw.iter().all(|w| w.is_finite() && *w > 0.0);
         for i in 0..8 {
@@ -1898,7 +1901,7 @@ mod tests {
         };
         let mut cut = 0;
         for v in r.triangles.iter().flatten() {
-            assert!(v.x <= super::super::hal::VERTEX_BAND[2] + 0.01, "{v:?}");
+            assert!(v.x <= setup.guard_band[2] + 0.01, "{v:?}");
             let w = weights(v.x, v.y);
             let rhw: f32 = (0..3).map(|i| w[i] * tri[i].rhw).sum();
             assert!((v.rhw - rhw).abs() <= 1e-4 * rhw.max(1.0), "{v:?}: rhw {rhw}");
