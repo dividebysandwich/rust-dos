@@ -16,12 +16,13 @@ that names the game, its settings and what happened. Make your own
 image, as the rest of this page describes, for the games the built-in
 Windows can't run yet.
 
-This is how to make a Windows 95 or 98 hard disk image that games can
-name as their operating system, and how to use it: as a desktop of its
-own, with games that run from a folder, and with games that have to be
-installed. The example throughout is a Voodoo3 machine, so that Glide,
-OpenGL and Direct3D games all work, but the steps are the same for any
-display adapter rust-dos has.
+This is how to make a Windows 95 or 98 hard disk image that games can name
+as their operating system, and how to use it: as a desktop of its own, with
+games that run from a folder, and with games that have to be installed. The
+example throughout is a Voodoo3 machine, so that Glide, OpenGL and Direct3D
+games all work, but the steps are the same for any display adapter rust-dos
+has. [3dfx.md](3dfx.md) says when a game needs a Voodoo Graphics or Voodoo2
+add-on card instead, and the driver each takes.
 
 The pieces are described in more detail in
 [CONFIGURATION.md](../CONFIGURATION.md) ("Booting a disk image",
@@ -131,10 +132,13 @@ made in another emulator usually needs two things:
 
 ### The Voodoo3 driver
 
-Windows 98 SE doesn't have a Voodoo3 driver. 3dfx's 1.07.00 is known to
-work: put its `driver9x` folder (the one with `Voodoo3.inf`) on the setup
-CD. At the first start with `machine=svga_voodoo3`, Windows finds a
-"Standard PCI Graphics Adapter (VGA)":
+Windows 98 SE doesn't have a Voodoo3 driver. 3dfx's 1.07.00 is known to work
+(the [reference driver
+1.07.00](https://archive.org/details/3dfx-voodoo-3-reference-driver-1.07.00)
+on the Internet Archive): put its `driver9x` folder (the one with
+`Voodoo3.inf`) on the setup CD. At the first start with
+`machine=svga_voodoo3`, Windows finds a "Standard PCI Graphics Adapter
+(VGA)":
 
 1. **Next**, then "Search for the best driver", **Next**.
 2. Untick "Microsoft Windows Update", tick "Specify a location" and type
