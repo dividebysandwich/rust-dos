@@ -16,11 +16,12 @@
 //!
 //! The graph's own filters aren't seen by the program. A program adds
 //! filters of its own with AddFilter, and RenderFile connects the
-//! movie's pictures to one of their input pins when one takes them
-//! (filter.rs): the device then opens without a window and plays the
-//! sound. The methods that connect or list filters themselves return
-//! E_NOTIMPL, and so do IDispatch's, but for GetTypeInfoCount, which
-//! counts no type information.
+//! movie's pictures to one of their input pins when one takes them, and
+//! that filter's output pins to the others' (filter.rs): the device then
+//! opens without a window and plays the sound. Reconnect connects the
+//! decoder to the program's pin again. The other methods that connect or
+//! list filters themselves return E_NOTIMPL, and so do IDispatch's, but
+//! for GetTypeInfoCount, which counts no type information.
 //! Positions are in milliseconds within, in 100-nanosecond units
 //! (TIME_FORMAT_MEDIA_TIME) through IMediaSeeking and in seconds
 //! through IMediaPosition. The play's rate is always 1.
@@ -119,6 +120,9 @@ pub struct Graph {
     /// connects; whether RenderFile tried to connect, so that it opens
     /// its device when it runs again.
     pub filters: Vec<filter::Filter>,
+    /// The connections it made between the program's filters as it
+    /// rendered the outputs of the one that took the pictures.
+    pub joints: Vec<filter::Joint>,
     pub link: Option<filter::Link>,
     pub connecting: Option<filter::Link>,
     pub connect_tried: bool,
@@ -1828,6 +1832,7 @@ crate::state_fields!(Graph {
     cursor_hidden,
     complete_taken,
     filters,
+    joints,
     link,
     connecting,
     connect_tried,

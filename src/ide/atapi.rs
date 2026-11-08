@@ -279,7 +279,12 @@ impl Atapi {
                 }
                 Loading::SpinningUp => {
                     self.loading = Loading::Readied;
-                    self.loading_at = Some(env.now + ticks(SPINDOWN));
+                    self.loading_at = Some(self.spindown_at(env));
+                }
+                // A disc that plays audio is spinning: the drive stops it
+                // `SPINDOWN` after the play ends.
+                Loading::Readied | Loading::Ready if env.player.is_busy(self.drive) => {
+                    self.loading_at = Some(self.spindown_at(env));
                 }
                 Loading::Readied | Loading::Ready => self.loading = Loading::Idle,
                 _ => {}
@@ -293,9 +298,12 @@ impl Atapi {
 
     /// The disc changed (`has_disc`: a new one went in; otherwise it was
     /// taken out): the drive reports it as a real one does, not present
-    /// while it goes in, then spinning up, then changed.
+    /// while it goes in, then spinning up, then changed. Its buffer held
+    /// the old disc's sectors: it starts empty, and the next read moves
+    /// the head.
     pub fn media_changed(&mut self, has_disc: bool, now: u64) {
         self.has_changed = true;
+        self.head = Head::default();
         if has_disc {
             self.loading = Loading::InsertCd;
             self.loading_at = Some(now + ticks(INSERTION));
@@ -303,6 +311,19 @@ impl Atapi {
             self.loading = Loading::NoDisc;
             self.loading_at = None;
         }
+    }
+
+    /// When the spinning disc stops if no command comes (PIT ticks):
+    /// `SPINDOWN` after now, or after the end of the audio the drive
+    /// plays, which keeps the disc turning until then.
+    fn spindown_at(&self, env: &Env) -> u64 {
+        let playing = if env.player.is_busy(self.drive) {
+            let (_, end) = env.player.range();
+            end.saturating_sub(env.player.position()) as f64 * 1000.0 / 75.0
+        } else {
+            0.0
+        };
+        env.now + ticks(playing + SPINDOWN)
     }
 
     fn schedule(&mut self, delayed: Delayed, ms: f64, now: u64) {
@@ -638,7 +659,7 @@ impl Atapi {
                 self.loading = Loading::SpinningUp;
                 self.loading_at = Some(env.now + ticks(SPINUP));
             }
-            Loading::Ready if trigger => self.loading_at = Some(env.now + ticks(SPINDOWN)),
+            Loading::Ready if trigger => self.loading_at = Some(self.spindown_at(env)),
             _ => {}
         }
         if env.cd(self.drive).is_none() {
@@ -757,6 +778,14 @@ impl Atapi {
         }
         let (lba, count) = (self.lba_next as i64, self.xfer);
         self.head_ms(env, |head, disc, at| head.read(disc, at, lba, count))
+    }
+
+    /// The head's work ended by `now` (PIT ticks) at the latest: for a host
+    /// that finishes a command in no emulated time, such as a WNASPI32
+    /// request without an event (#636), the drive reads on from where it
+    /// is then.
+    pub fn head_done_by(&mut self, now: u64) {
+        self.head.done_by(now as f64 / crate::timer::PIT_HZ as f64);
     }
 
     /// How long, in ms, SEEK takes to move the head to its sector.
@@ -914,6 +943,12 @@ impl Atapi {
             }
             0x4E => env.player.reset(),
             _ => {}
+        }
+        // A play that starts or resumes keeps the disc turning to its end.
+        if matches!(self.loading, Loading::Readied | Loading::Ready)
+            && env.player.is_busy(self.drive)
+        {
+            self.loading_at = Some(self.spindown_at(env));
         }
         self.count = 0x03;
         self.feature = 0;

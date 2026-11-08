@@ -472,6 +472,55 @@ fn exec_loads_a_program_for_a_debugger_and_ends_it_at_its_terminate_address() {
 }
 
 #[test]
+fn exec_points_int_22h_at_the_return_address_and_the_end_restores_the_vectors() {
+    // Bureau 13's SETUP, run through EXEC by B13.COM, reckons the memory
+    // the game has from the segment of the INT 22h vector. DOS sets it to
+    // the parent's return address and keeps INT 22h, 23h and 24h in the
+    // child's PSP (0Ah, 0Eh, 12h), and sets them from there when the child
+    // ends, so the child's Ctrl-Break handler goes with it.
+    #[rustfmt::skip]
+    let parent = [
+        0xB4, 0x4A,             // MOV AH,4Ah: shrink to 1000h paragraphs
+        0xBB, 0x00, 0x10,       // MOV BX,1000h
+        0xCD, 0x21,             // INT 21h
+        0xB8, 0x00, 0x4B,       // MOV AX,4B00h
+        0xBB, 0x00, 0x02,       // MOV BX,0200h
+        0xBA, 0x00, 0x03,       // MOV DX,0300h
+        0xCD, 0x21,             // INT 21h
+        0xF4,                   // 0112: HLT
+    ];
+    #[rustfmt::skip]
+    let child = [
+        0xF4,                                       // HLT
+        0x31, 0xC0,                                 // XOR AX,AX
+        0x8E, 0xC0,                                 // MOV ES,AX
+        0x26, 0xC7, 0x06, 0x8C, 0x00, 0x34, 0x12,   // MOV WORD ES:[008Ch],1234h
+        0xB8, 0x00, 0x4C,                           // MOV AX,4C00h
+        0xCD, 0x21,                                 // INT 21h
+    ];
+    let dir = scratch("exec_int22", &[("PARENT.COM", &parent), ("CHILD.COM", &child)]);
+    let mut cpu = Cpu::new(dir);
+    assert!(cpu.load_executable("PARENT.COM", None));
+    let psp = cpu.current_psp;
+    exec_child_com(&mut cpu, psp);
+    let vectors = |cpu: &Cpu| [0x22, 0x23, 0x24].map(|v| cpu.bus.read_32(v * 4));
+    let ctrl_break = vectors(&cpu)[1];
+
+    run_to_hlt_where(&mut cpu, |cpu| cpu.current_psp != psp);
+    let child_psp = cpu.current_psp;
+    let return_address = (psp as u32) << 16 | 0x0112;
+    assert_eq!(vectors(&cpu)[0], return_address, "INT 22h is the parent's return address");
+    let kept = [0x0A, 0x0E, 0x12].map(|off| cpu.bus.read_32(child_psp as usize * 16 + off));
+    assert_eq!(kept, vectors(&cpu), "the child's PSP keeps the three vectors");
+
+    cpu.set_ip(cpu.ip() + 1);
+    run_to_hlt_where(&mut cpu, |cpu| cpu.current_psp == psp);
+    assert_eq!((cpu.cs(), cpu.ip()), (psp, 0x0112));
+    assert_eq!(vectors(&cpu)[1], ctrl_break, "the child's INT 23h handler went with it");
+    assert_eq!(vectors(&cpu)[0], return_address);
+}
+
+#[test]
 fn int_20h_frees_the_memory_of_a_child_program() {
     #[rustfmt::skip]
     let parent = [

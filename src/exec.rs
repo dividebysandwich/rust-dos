@@ -8,7 +8,7 @@
 
 use iced_x86::{Decoder, DecoderOptions, Instruction};
 
-use crate::bus::GEN_SHIFT;
+use crate::bus::{Bus, GEN_SHIFT};
 use crate::command::{CommandDispatcher, split_command};
 use crate::cpu::{ATTR_DB, CR0_PG, Cpu, CpuFlags, CpuState, Fault, IntSource, SHELL_SEGMENT, Seg};
 use crate::dynrec::{DynState, Run};
@@ -609,6 +609,15 @@ pub fn run_command_line(cpu: &mut Cpu, cmd: &str) {
     if plain && crate::almanac::ask_first(cpu, &cmd, command) {
         return;
     }
+    // The output file is made before the program is looked for, as
+    // COMMAND.COM and DOSBox make it: for a program, for a batch file
+    // (whose output still goes to the screen) and for a command that isn't
+    // found, whose message stays on the screen. Wolf runs
+    // `POWER.EXE > C:POWERFL` through COMMAND.COM and opens the file
+    // whether POWER.EXE was there or not.
+    if let Some((path, append)) = &redirect.output {
+        create_output(&mut cpu.bus, path, *append);
+    }
     match start(cpu, command, args.trim(), false, false) {
         None => bad_command(cpu),
         Some(Started::Program) => redirect_program(cpu, &redirect),
@@ -784,22 +793,29 @@ fn write_redirected(cpu: &mut Cpu, redirect: &Redirections, captured: &[u8]) {
     }
 }
 
+/// The file a `>` redirection writes to, made empty, or a `>>` one's,
+/// made if it isn't there. A device (NUL, CON) is left alone.
+fn create_output(bus: &mut Bus, path: &str, append: bool) {
+    let is_device = crate::disk::char_device(path).is_some();
+    if !is_device && (!append || !bus.disk.exists(path)) {
+        let _ = bus.disk.write_whole_file(path, &[], None);
+    }
+}
+
 /// Give a program started from the shell the files its command line
-/// redirected: its handle 1 (standard output) and 0 (standard input).
+/// redirected: its handle 1 (standard output) and 0 (standard input). The
+/// shell made the output file before it looked for the program
+/// (`create_output`).
 fn redirect_program(cpu: &mut Cpu, redirect: &Redirections) {
     let psp = cpu.current_psp;
     let bus = &mut cpu.bus;
-    if let Some((path, append)) = &redirect.output {
-        let is_device = crate::disk::char_device(path).is_some();
-        if !is_device && (!append || !bus.disk.exists(path)) {
-            let _ = bus.disk.write_whole_file(path, &[], None);
+    if let Some((path, append)) = &redirect.output
+        && let Ok(sft) = bus.disk.open_file(path, 0x01, psp)
+    {
+        if *append {
+            let _ = bus.disk.seek_file(sft, 0, 2);
         }
-        if let Ok(sft) = bus.disk.open_file(path, 0x01, psp) {
-            if *append {
-                let _ = bus.disk.seek_file(sft, 0, 2);
-            }
-            crate::dos_files::replace(bus, psp, 1, sft);
-        }
+        crate::dos_files::replace(bus, psp, 1, sft);
     }
     if let Some(path) = &redirect.input
         && let Ok(sft) = bus.disk.open_file(path, 0x00, psp)
