@@ -1382,11 +1382,18 @@ fn focus_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 t.step = 10;
             }
             10 => {
-                if hwnd != 0 && top != active(cpu) {
-                    // The SetActiveWindow(top) that USER does here, but
-                    // without the focus the activation would give `top`:
-                    // a dialog would select the text of the control it
-                    // gives it (Windows 98 doesn't, nor does Wine).
+                // The SetActiveWindow(top) that USER does here, but
+                // without the focus the activation would give `top`: a
+                // dialog would select the text of the control it gives it
+                // (Windows 98 doesn't, nor does Wine). SetActiveWindow
+                // leaves a child window, or one of another queue, as it
+                // is, and then the focus stays where it was (step 1).
+                let state = user(cpu);
+                let activatable = state.window(top).is_some_and(|w| {
+                    w.style & (WS_POPUP | WS_CHILD) != WS_CHILD
+                        && state.window_queue(top) == queue
+                });
+                if hwnd != 0 && top != active(cpu) && activatable {
                     let args = [top, F_NOFOCUS, 0];
                     return Next::call(address_of("ActivateInQueue"), &args, 1);
                 }
@@ -1453,7 +1460,9 @@ pub fn set_active_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// ActivateInQueue(hwnd, flags, thread), an internal function: `hwnd`
 /// becomes the active window of the running thread's queue, which
 /// F_FOREGROUND in `flags` brings to the foreground; with F_SWITCHED
-/// the foreground came to the queue from `thread`'s.
+/// the foreground came to the queue from `thread`'s; with F_NOFOCUS
+/// the activation gives `hwnd` no focus. It doesn't check the window as
+/// SetActiveWindow does.
 pub fn activate_in_queue(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     start_activation(cpu, args[0], args[1], args[2])
 }

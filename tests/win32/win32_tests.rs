@@ -8355,7 +8355,7 @@ fn edit_dialog_template() -> Vec<u8> {
 
 #[test]
 fn a_dialog_selects_the_edit_text_it_gives_the_focus_as_windows_98_does() {
-    // Windows 98 SE (measured on a 86Box machine): when WM_INITDIALOG
+    // Windows 98 SE (measured on an 86Box machine): when WM_INITDIALOG
     // returns TRUE, the dialog manager sends EM_SETSEL(0, -2) to the edit
     // control it gives the focus, so text WM_INITDIALOG put there starts
     // selected; Rent-A-Hero's save dialog relies on it. A SetFocus of the
