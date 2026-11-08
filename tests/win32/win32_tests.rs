@@ -7898,6 +7898,103 @@ fn a_program_started_from_the_foreground_comes_to_it_and_stays() {
     assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
 }
 
+const SWP_HIDE_ONLY: i32 = 0x0097; // SWP_HIDEWINDOW | NOACTIVATE | NOZORDER | NOMOVE | NOSIZE
+const SW_HIDE: i32 = 0;
+
+#[test]
+fn a_hidden_window_stays_active_until_it_goes_and_end_dialog_activates_the_owner() {
+    // As Wine's test_SetActiveWindow and test_EndDialog check on
+    // Windows: a popup hidden by SetWindowPos(SWP_HIDEWINDOW) stays the
+    // active window, and its owner becomes active when it is destroyed.
+    // EndDialog enables the owner, even one the program disabled itself,
+    // and activates it; ShowWindow(SW_HIDE) of the last window leaves
+    // none active. (Discworld Noir's setup, whose MFC dialog loop
+    // disables the owner itself, had no active window after its Change
+    // CD dialog, dividebysandwich/rust-dos#714.)
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "CreateDialogIndirectParamA",
+        "SetWindowPos",
+        "DestroyWindow",
+        "EnableWindow",
+        "IsWindowEnabled",
+        "EndDialog",
+        "ShowWindow",
+        "GetActiveWindow",
+    ];
+    // The class at 0x10, and a DLGTEMPLATE at 0x100: a visible popup
+    // with a caption, no controls, no menu, class or title.
+    let mut data = child_data(&[(0x10, "Static")]);
+    data.resize(0x120, 0);
+    let style = WS_POPUP | WS_VISIBLE | 0x00C0_0000;
+    data[0x100..0x104].copy_from_slice(&style.to_le_bytes());
+    data[0x10E..0x110].copy_from_slice(&100u16.to_le_bytes());
+    data[0x110..0x112].copy_from_slice(&50u16.to_le_bytes());
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let class = l.at(0x10) as i32;
+        let style = WS_POPUP | WS_VISIBLE;
+        a.xor(ebx, ebx)?;
+        push_args(a, &[0, class, 0, style, 0, 0, 100, 100, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, eq, 0)?;
+        // A popup the first one owns, hidden and then destroyed.
+        push_args(a, &[0, class, 0, style, 10, 10, 50, 50, 0, 0, 0, 0])?;
+        a.mov(dword_ptr(esp + 32), esi)?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(edi, eax)?;
+        push_args(a, &[0, 0, 0, 0, 0, 0, SWP_HIDE_ONLY])?;
+        a.mov(dword_ptr(esp), edi)?;
+        a.call(f("SetWindowPos"))?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 1)?;
+        a.push(edi)?;
+        a.call(f("DestroyWindow"))?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, eq, 2)?;
+        // A dialog whose owner the program disabled, ended.
+        a.push(0)?;
+        a.push(esi)?;
+        a.call(f("EnableWindow"))?;
+        push_args(a, &[BASE as i32, l.at(0x100) as i32, 0, 0, 0])?;
+        a.mov(dword_ptr(esp + 8), esi)?;
+        a.call(f("CreateDialogIndirectParamA"))?;
+        a.mov(edi, eax)?;
+        a.test(edi, edi)?;
+        bit_if(a, ne, 3)?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 4)?;
+        a.push(0)?;
+        a.push(edi)?;
+        a.call(f("EndDialog"))?;
+        a.push(esi)?;
+        a.call(f("IsWindowEnabled"))?;
+        a.test(eax, eax)?;
+        bit_if(a, ne, 5)?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, eq, 6)?;
+        // The last visible window hidden by ShowWindow: none is active.
+        a.push(SW_HIDE)?;
+        a.push(esi)?;
+        a.call(f("ShowWindow"))?;
+        a.call(f("GetActiveWindow"))?;
+        a.test(eax, eax)?;
+        bit_if(a, eq, 7)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("hidden_stays_active", &[("T.EXE", program)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
 const WM_QUERYENDSESSION: i32 = 0x0011;
 const WM_ENDSESSION: i32 = 0x0016;
 const EWX_REBOOT: i32 = 2;

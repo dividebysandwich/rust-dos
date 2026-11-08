@@ -2010,11 +2010,15 @@ fn sub_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
 fn end_step(cpu: &mut Cpu, t: &mut Task) -> Next {
     let hwnd = t.var(V_HWND);
     match t.step {
+        // The owner (GWL_HWNDPARENT's window) is enabled, whoever
+        // disabled it: the owner of a modeless dialog too, and one the
+        // program disabled itself, as MFC's CDialog::DoModal does. It can
+        // then be activated once the dialog is hidden below. Wine's
+        // test_EndDialog and test_dialog_parent check this on Windows.
         400 => {
-            let (was_enabled, owner) = (t.var(2), t.var(3));
-            let root = root_of(user(cpu), owner);
-            if was_enabled != 0 && root != 0 {
-                return call_api("EnableWindow", &[root, TRUE], 401);
+            let owner = t.var(3);
+            if owner != 0 && owner != DESKTOP && user(cpu).is_window(owner) {
+                return call_api("EnableWindow", &[owner, TRUE], 401);
             }
             goto(401)
         }
@@ -2451,9 +2455,10 @@ pub fn end_dialog(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     i.result = result;
     i.flags |= DF_END;
     set_info(state, hwnd, &i);
-    let was_enabled = (i.flags & DF_OWNERENABLED != 0) as u32;
-    let owner = state.window(hwnd).map_or(0, |w| w.owner);
-    task::start(cpu, TASK_DIALOG, vec![K_END, hwnd, was_enabled, owner], 0)
+    // The variable after the dialog is unused. The owner keeps its
+    // place, so a state saved during an EndDialog goes on after a load.
+    let owner = state.window(hwnd).map_or(0, super::window::hwnd_parent_of);
+    task::start(cpu, TASK_DIALOG, vec![K_END, hwnd, 0, owner], 0)
 }
 
 /// DefDlgProcA(hwnd, msg, wParam, lParam).

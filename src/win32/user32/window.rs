@@ -1190,6 +1190,20 @@ pub fn destroy_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                         None => {}
                     }
                 }
+                // Still the active window, as SWP_HIDEWINDOW leaves it, or
+                // one hidden before: another is activated before
+                // WM_DESTROY, as Wine's WIN_SendDestroyMsg does (its
+                // WmDestroyOverlappedSeq). In Wine's test_SetActiveWindow
+                // the owner of a popup hidden so and destroyed is active.
+                t.step = 9;
+                if user(cpu).is_active(hwnd) {
+                    return Next::call(address_of("ActivateOtherWindow"), &[hwnd], 9);
+                }
+            }
+            9 => {
+                if !user(cpu).is_window(hwnd) {
+                    return Next::Done(TRUE);
+                }
                 // WM_DESTROY to the window, then to its children, each
                 // before its own children.
                 let list = pre_order(user(cpu), hwnd);
@@ -1470,6 +1484,15 @@ pub fn show_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 return Next::call(address_of("SetWindowPos"), &args, 2);
             }
             2 => {
+                // The active window hidden: another is activated, after
+                // WM_WINDOWPOSCHANGED, as in Wine's WmHideOverlappedSeq.
+                if cmd == SW_HIDE && user(cpu).is_active(hwnd) {
+                    t.step = 6;
+                    return Next::call(address_of("ActivateOtherWindow"), &[hwnd], 6);
+                }
+                t.step = 6;
+            }
+            6 => {
                 if cmd == SW_HIDE {
                     let focus = super::input::focus(cpu);
                     let state = user(cpu);
@@ -1626,8 +1649,10 @@ pub fn set_window_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // The active window of a queue in the background is: the activation
     // brings it to the foreground if SetForegroundWindow may, as when a
     // program's message box made active behind the foreground (its
-    // SetFocus came first) is then shown.
-    if child || state.foreground_window() == hwnd {
+    // SetFocus came first) is then shown. Hiding it adds nothing: Windows
+    // passes the flags as they were (WM_WINDOWPOSCHANGING of Wine's
+    // WmHideOverlappedSeq and WmSWP_HideOverlappedSeq).
+    if child || (state.foreground_window() == hwnd && flags & SWP_HIDEWINDOW == 0) {
         flags |= SWP_NOACTIVATE;
     }
     let mut after = after;
@@ -1818,14 +1843,13 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     || was_visible != now_visible;
                 super::input::window_moved(cpu, hwnd, under, changed);
                 cpu.bus.guest_write_32(winpos + 24, flags);
-                // Activate it.
+                // Activate it. A window hidden here stays active: Windows
+                // activates another in ShowWindow(SW_HIDE), EndDialog and
+                // DestroyWindow, not here (Wine's test_SetActiveWindow and
+                // msg.c's test_messages check it, on Windows 9x too).
                 let child = user(cpu)
                     .window(hwnd)
                     .is_some_and(|w| w.style & WS_CHILD != 0);
-                if flags & SWP_HIDEWINDOW != 0 && user(cpu).is_active(hwnd) {
-                    t.step = 4;
-                    return Next::call(address_of("ActivateOtherWindow"), &[hwnd], 4);
-                }
                 if flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW) == 0 && !child {
                     return Next::call(address_of("SetForegroundWindow"), &[hwnd], 4);
                 }
@@ -2121,7 +2145,7 @@ fn parent_of(state: &State, hwnd: u32) -> u32 {
 
 /// GWL_HWNDPARENT: a window's parent, or the owner of one whose parent
 /// is the desktop, whatever its style says.
-fn hwnd_parent_of(w: &Window) -> u32 {
+pub fn hwnd_parent_of(w: &Window) -> u32 {
     if w.parent == DESKTOP || w.parent == 0 {
         w.owner
     } else {
