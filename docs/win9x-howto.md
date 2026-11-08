@@ -151,9 +151,10 @@ on the Internet Archive): put its `driver9x` folder (the one with
    it from its own files. The desktop comes up at 1024x768.
 
 The driver brings Glide 2 and 3 (`glide2x.dll`, `glide3x.dll`), the
-OpenGL ICD (`3dfxOGL.dll`) and Direct3D. Glover draws wrongly with
-1.07.00 and needs an earlier driver; [compatibility.md](compatibility.md)
-names the games that need another driver.
+OpenGL ICD (`3dfxOGL.dll`) and Direct3D. Glover and Moto Racer draw
+wrongly with 1.07.00 and need an earlier driver;
+[compatibility.md](compatibility.md) names the games that need another
+driver.
 
 ### DirectX
 
