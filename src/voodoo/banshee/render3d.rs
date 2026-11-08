@@ -7,7 +7,8 @@
 //! the video processor's overlay, at once or at a vertical retrace,
 //! while the command FIFOs wait for it; swapPending counts the swaps the
 //! status register reports; texBaseAddr is a byte address; and the 3D
-//! linear frame buffer has rows of 2048 pixels.
+//! linear frame buffer has rows of 2048 pixels. The Voodoo2's command
+//! FIFO, video, init and 2D blitter registers aren't there (`absent`).
 //!
 //! From 86Box's vid_voodoo_reg.c, vid_voodoo_render.c, vid_voodoo_fb.c
 //! and vid_voodoo_banshee.c (Sarah Walker, GPLv2) and sections 5 and 8
@@ -43,6 +44,26 @@ const KEPT: [usize; 8] = [
     RIGHT_OVERLAY_BUF,
 ];
 
+/// Whether the card has no register at dword `regnum` of the 3D space
+/// where a Voodoo2 has one. At byte addresses 1E0h-1E8h the Voodoo2 has
+/// its command FIFO's base, bump and read pointer, and at 200h-254h its
+/// video and init registers; the card has none of those (its command
+/// FIFOs have registers outside the 3D space), and its own registers
+/// there are matched before this. fbiSwapHistory at 258h is the card's
+/// too. At 2A8h-2FCh the Voodoo2 has its 2D blitter's registers
+/// (bltSrcBaseAddr to bltData). The Banshee's and the Voodoo3's
+/// specifications list 2A8h-2FCh as one reserved row, with no bits,
+/// chip or access ("Banshee High Performance Graphics Engine" rev. 1.1,
+/// "3D Memory Mapped Register Set", page 84; "Avenger (a.k.a. Voodoo3)"
+/// rev. 1.0, section 8, page 86). 3dfx's Glide 3 for both cards
+/// (h3regs.h) has reserved words at 1E0h-1E8h (reservedB) and at
+/// 2A8h-2FCh. The card's 2D engine has a register space of its own
+/// (`blit2d`). Writes there are dropped and reads give 0, as in MAME's
+/// Banshee.
+const fn absent(regnum: usize) -> bool {
+    matches!(regnum, 0x78..=0x7A | 0x80..=0x95 | 0xAA..=0xBF)
+}
+
 /// A buffer's stride register: bytes a row when linear (bit 15 clear),
 /// tiles a row of tiles when tiled.
 fn stride(value: u32) -> Stride {
@@ -63,8 +84,7 @@ impl Voodoo {
             STATUS => self.banshee_status(now),
             INTR_CTRL => self.banshee.as_ref().map_or(0, |b| b.intr_ctrl),
             regnum if KEPT.contains(&regnum) => self.reg[regnum],
-            // The Voodoo2's video and init registers aren't there.
-            0x80..=0x96 => 0,
+            regnum if absent(regnum) => 0,
             regnum => self.register_read(regnum as u32, now),
         }
     }
@@ -123,8 +143,7 @@ impl Voodoo {
                     b.swap_count += 1;
                 }
             }
-            // The Voodoo2's video and init registers aren't there.
-            0x80..=0x96 => {}
+            regnum if absent(regnum) => {}
             _ => {
                 if self.chip.access[regnum] & WRITE != 0 {
                     self.register_to(regnum, chips, data, now, effect);
@@ -137,7 +156,6 @@ impl Voodoo {
     /// their strides: the colour buffer is the same whichever fbzMode
     /// and lfbMode pick.
     pub(crate) fn banshee_buffers(&mut self) {
-        self.blt_queue_stale();
         let col = self.reg[COL_BUFFER_ADDR] & 0xFF_FFF0;
         let aux = self.reg[AUX_BUFFER_ADDR] & 0xFF_FFF0;
         let (col_stride, aux_stride) = (
@@ -2251,6 +2269,56 @@ pub(crate) mod tests {
         // A download from 600000h lands from there on.
         v.write(0x60_0008, 0x1122_3344, 0xFFFF_FFFF, Now::default());
         assert_eq!(v.fbi.ram.get(0x50_0018 / 2), 0x3344);
+    }
+
+    #[test]
+    fn the_3d_space_has_no_voodoo2_blitter() {
+        // The Banshee's and Voodoo3's specifications list 2A8h-2FCh of
+        // the 3D space as reserved (`absent`). A CPU-to-screen copy that
+        // a Voodoo2 draws (as `blit`'s tests do) draws nothing here, from
+        // BAR0 or from a command FIFO, and the blitter's registers read 0.
+        for board in [Board::Banshee, Board::Voodoo3] {
+            let mut v = Voodoo::with_workers(board, 0);
+            let before = v.frame_buffer().to_bytes();
+            let copy = [
+                (BLT_ROP, 0xCCCC),
+                (BLT_DST_BASE_ADDR, 0),
+                (BLT_XY_STRIDES, 1280 << 16),
+                (BLT_DST_XY, 2 << 16 | 3),
+                (BLT_SIZE, 1 << 16 | 1),
+                (BLT_COMMAND, 1 << 31 | 2 << 3 | 1),
+                (BLT_DATA, 0x1234_5678),
+                (BLT_DATA, 0x9ABC_DEF0),
+            ];
+            for (regnum, data) in copy {
+                reg3d(&mut v, regnum, data);
+            }
+            for (regnum, data) in copy {
+                let mut effect = Effect::default();
+                v.banshee_3d_register(4 * regnum as u32, data, Now::default(), &mut effect);
+            }
+            assert!(v.frame_buffer().to_bytes() == before, "{board:?}");
+            assert!(!v.blt.active, "{board:?}");
+            for regnum in 0xAA..=0xBF {
+                let read = v.read(0x20_0000 + 4 * regnum, Now::default());
+                assert_eq!(read, 0, "{board:?} {:03X}h", 4 * regnum);
+            }
+        }
+    }
+
+    #[test]
+    fn the_3d_space_has_no_voodoo2_command_fifo_registers() {
+        // Glide 3's h3regs.h has reservedB at 1E0h-1E8h, where the
+        // Voodoo2 has cmdFifoBaseAddr, cmdFifoBump and cmdFifoRdPtr.
+        for board in [Board::Banshee, Board::Voodoo3] {
+            let mut v = Voodoo::with_workers(board, 0);
+            for regnum in [CMDFIFO_BASE_ADDR, CMDFIFO_BUMP, CMDFIFO_RD_PTR] {
+                reg3d(&mut v, regnum, 0x0012_3456);
+                let read = v.read(0x20_0000 + 4 * regnum as u32, Now::default());
+                assert_eq!(read, 0, "{board:?} {:03X}h", 4 * regnum);
+            }
+            assert_eq!((v.cmdfifo.base, v.cmdfifo.read), (0, 0), "{board:?}");
+        }
     }
 
     #[test]
