@@ -5,7 +5,11 @@ name: zizmor
 # something zizmor reads changes: workflows, dependabot.yml and composite
 # actions.
 on:
+  # Pushes to main and tags only: a branch with a pull request runs through
+  # `pull_request`.
   push:
+    branches: [main]
+    tags: ["*"]
     paths: &paths
       - ".github/**"
       - "**/action.yml"

@@ -103,10 +103,7 @@ impl DiskController {
                 Some(FileData::Memory(data)) => OpenData::Memory(data, Rc::new(Cell::new(0))),
                 Some(FileData::Image(image, extent)) => OpenData::Image(image, extent, Rc::new(Cell::new(0))),
                 _ if files.is_dir(&path) => return Err(0x05),
-                _ => {
-                    let parent = path.rsplit_once('\\').map_or("", |(p, _)| p);
-                    return Err(if files.is_dir(parent) { 0x02 } else { 0x03 });
-                }
+                _ => return Err(Self::memory_missing(files, &path)),
             };
             match mode & 0x03 {
                 0 | 2 => {}
@@ -201,7 +198,8 @@ impl DiskController {
             Ok(file) => {
                 let key = self.file_key(filename);
                 let written = (writable && mode & 0x03 != 0).then_some(path);
-                let file = self.opened(OpenData::Host(file, written), drive, owner, key, filename, mode);
+                let data = OpenData::Host(HostFile::new(file), written);
+                let file = self.opened(data, drive, owner, key, filename, mode);
                 self.insert(handle, file);
                 Ok(handle)
             }
@@ -260,12 +258,21 @@ impl DiskController {
         self.close_file(sft)
     }
 
+    /// Whether a use of the file `sft` would empty a file a create call
+    /// left for its first use (`settle`).
+    pub fn settles(&self, sft: u16) -> bool {
+        self.open_files.get(&sft).is_some_and(|open| {
+            self.open_files
+                .values()
+                .any(|f| f.empty_on_use && f.key == open.key)
+        })
+    }
+
     /// Empty the file `sft` names if a create call left that for its first
     /// use, through whichever handle: DOS emptied it for all of them.
     fn settle(&mut self, sft: u16) {
-        if self.open_files.values().any(|f| f.empty_on_use)
-            && let Some(key) = self.open_files.get(&sft).map(|f| f.key)
-        {
+        if self.settles(sft) {
+            let key = self.open_files[&sft].key;
             self.settle_where(|_, f| f.key == key);
         }
     }

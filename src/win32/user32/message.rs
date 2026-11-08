@@ -564,31 +564,39 @@ fn send_other(
             return Some(0);
         }
         _ => {
-            let state = user(cpu);
-            state.last_sent += 1;
-            let id = state.last_sent;
-            let deadline = timeout.map_or(0, |(ms, _)| now + ms as u64 * 1000);
-            state
-                .queue_mut(me)
-                .waiting
-                .push((id, deadline.max(1) * (timeout.is_some() as u64)));
-            state.queue_mut(tid).sent.push_back(Sent {
-                id,
+            let deadline = timeout.map(|(ms, _)| now + ms as u64 * 1000);
+            let sent = Sent {
                 from: me,
                 hwnd,
                 message: msg,
                 wparam: wp,
                 lparam: lp,
-                kind: 0,
-                callback: (0, 0),
-            });
-            state.queue_mut(tid).changed |= QS_SENDMESSAGE;
-            thread::wake(cpu);
-            id
+                ..Sent::default()
+            };
+            queue_send(cpu, tid, sent, deadline)
         }
     };
     let out = timeout.map_or(0, |(_, out)| out);
     task::start(cpu, TASK_SEND, vec![hwnd, msg, wp, lp, 0, 1, id, out], 0)
+}
+
+/// Queue `sent` for the thread `tid`, whose reply its sender waits for
+/// until `deadline` (in the clock's microseconds), if there is one: the
+/// message's id.
+fn queue_send(cpu: &mut Cpu, tid: u32, mut sent: Sent, deadline: Option<u64>) -> u32 {
+    let me = sent.from;
+    let state = user(cpu);
+    state.last_sent += 1;
+    let id = state.last_sent;
+    sent.id = id;
+    sent.kind = 0;
+    let deadline = deadline.map_or(0, |d| d.max(1));
+    state.queue_mut(me).waiting.push((id, deadline));
+    state.queue_mut(tid).sent.push_back(sent);
+    state.queue_mut(tid).changed |= QS_SENDMESSAGE;
+    crate::win16::task::hand_turn(&mut cpu.bus.win32, me, tid);
+    thread::wake(cpu);
+    id
 }
 
 /// Whether the current thread's function runs again after a send to
@@ -805,6 +813,7 @@ fn finish_sent(cpu: &mut Cpu, result: u32) {
     match sent.kind {
         0 => {
             state.queue_mut(sent.from).replies.push((sent.id, result));
+            crate::win16::task::hand_turn(&mut cpu.bus.win32, me, sent.from);
         }
         2 => {
             // As in Wine, the result comes to the sender as a sent
@@ -1570,6 +1579,7 @@ pub fn reply_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     sent.kind = 1;
     let (from, id) = (sent.from, sent.id);
     state.queue_mut(from).replies.push((id, args[0]));
+    crate::win16::task::hand_turn(&mut cpu.bus.win32, tid, from);
     thread::wake(cpu);
     Some(TRUE)
 }
@@ -1944,7 +1954,7 @@ crate::state_fields!(QueueWait {
 });
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::input;
     use super::*;
 
@@ -2037,6 +2047,93 @@ mod tests {
         assert!(q.sent.is_empty() && q.in_send.is_empty());
         let replies = &user(&mut cpu).queue_mut(7).replies;
         assert_eq!(replies, &vec![(3, 0), (1, 5)]);
+    }
+
+    /// A Win16 process whose tasks run the threads `tids`, the first of
+    /// which is the running one, for tests of how tasks take turns.
+    pub(in super::super) fn win16_process(cpu: &mut Cpu, tids: &[u32]) {
+        let win32 = &mut cpu.bus.win32;
+        let mut process = crate::win32::Process {
+            id: 0x50,
+            ..Default::default()
+        };
+        process.threads = tids
+            .iter()
+            .map(|&id| thread::Thread {
+                id,
+                ..Default::default()
+            })
+            .collect();
+        process.current = Some(0);
+        win32.processes = vec![process];
+        win32.running = 0;
+        win32.win16.pid = 0x50;
+        win32.win16.tasks = tids
+            .iter()
+            .map(|&tid| crate::win16::Task16 {
+                tid,
+                ..Default::default()
+            })
+            .collect();
+    }
+
+    /// Whether the task of thread `tid` may run, as the Win16 lock goes.
+    fn may_run(cpu: &Cpu, tid: u32) -> bool {
+        let win32 = &cpu.bus.win32;
+        let t = win32.processes[0].threads.iter().position(|h| h.id == tid);
+        crate::win16::task::may_run(win32, 0, t.expect("a thread"))
+    }
+
+    /// The thread `tid` waits (true) or is ready.
+    fn set_waiting(cpu: &mut Cpu, tid: u32, waiting: bool) {
+        let threads = &mut cpu.bus.win32.processes[0].threads;
+        let h = threads.iter_mut().find(|h| h.id == tid).expect("a thread");
+        h.wait = waiting.then(Wait::default);
+    }
+
+    /// A task that sends a message to another task's window hands it the
+    /// next turn, and the reply hands the turn back, as Windows 3.1's
+    /// SendMessage switches to the task it sends to and back: a third
+    /// task that is ready doesn't run in between. The Video for Windows
+    /// setup of the Metal Marines CD hid its window, which activated the
+    /// CD's launcher; the setup task's next program ran while the
+    /// launcher was to handle WM_WINDOWPOSCHANGING, activated its dialog,
+    /// and the rest of the launcher's activation then brought the
+    /// launcher back over the dialog.
+    #[test]
+    fn a_task_sending_to_another_task_hands_it_the_turn() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        // Task 1 (the setup) sends; task 2 (the launcher) handles the
+        // message; task 3 (the setup's new program) is ready too.
+        win16_process(&mut cpu, &[1, 2, 3]);
+        crate::win16::task::entered(&mut cpu.bus.win32, 1);
+        let sent = Sent {
+            from: 1,
+            hwnd: 0x404,
+            message: 0x46,
+            ..Sent::default()
+        };
+        let id = queue_send(&mut cpu, 2, sent, None);
+        // Task 1 waits for the reply: task 2 runs, task 3 doesn't.
+        set_waiting(&mut cpu, 1, true);
+        assert!(may_run(&cpu, 2));
+        assert!(!may_run(&cpu, 3));
+        // Task 2 runs, handles the message and replies.
+        crate::win16::task::entered(&mut cpu.bus.win32, 2);
+        cpu.bus.win32.processes[0].current = Some(1);
+        assert!(handle_sent(&mut cpu, 2).is_some());
+        finish_sent(&mut cpu, 0);
+        assert_eq!(user(&mut cpu).queue_mut(1).replies, vec![(id, 0)]);
+        set_waiting(&mut cpu, 1, false);
+        // Task 2 goes on until it waits; then task 1 goes on, not 3.
+        assert!(!may_run(&cpu, 1));
+        set_waiting(&mut cpu, 2, true);
+        assert!(may_run(&cpu, 1));
+        assert!(!may_run(&cpu, 3));
+        // Once task 1 had its turn and waits, the others take turns.
+        crate::win16::task::entered(&mut cpu.bus.win32, 1);
+        set_waiting(&mut cpu, 1, true);
+        assert!(may_run(&cpu, 3));
     }
 
     /// A message the thread took off its queue is still the one

@@ -179,3 +179,48 @@ impl Bus {
         self.sync_sb_irq();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::bus::Bus;
+    use crate::sb::SbConfig;
+
+    /// Render `ms` of sound in steps of 10 ms, as the window does, and
+    /// return the left samples.
+    fn render(bus: &mut Bus, ms: u64) -> Vec<i16> {
+        let mut left = Vec::new();
+        for _ in 0..ms / 10 {
+            bus.clock.icount += 10_000;
+            bus.audio_catch_up();
+            left.extend(bus.audio_out.drain(..).step_by(2));
+        }
+        left
+    }
+
+    /// A level the DAC holds, once the card's output coupling has taken
+    /// it out of the sound, lets the mixer skip its frames as silence, as
+    /// a card at the centre does. The next sample still comes through.
+    #[test]
+    fn a_held_level_faded_out_lets_the_mixer_rest() {
+        let mut bus = Bus::new(std::path::PathBuf::from("."));
+        bus.set_cycles_per_ms(1000);
+        bus.configure_sound(Some(SbConfig::default()), true);
+        bus.io_write(0x226, 1);
+        bus.io_write(0x226, 0);
+        let _ = bus.io_read(0x22A);
+        render(&mut bus, 10);
+        bus.io_write(0x22C, 0x10);
+        bus.io_write(0x22C, 0xC0);
+        let faded = render(&mut bus, 4000);
+        let peak = faded.iter().max().unwrap();
+        assert!(*peak > 10000, "{}", peak);
+        assert_eq!(faded[faded.len() - 1], 0);
+        assert!(bus.audio_settled && bus.audio_quiet(), "the mixer rests");
+        bus.io_write(0x22C, 0x10);
+        bus.io_write(0x22C, 0x40);
+        assert!(!bus.audio_quiet(), "a new level is heard");
+        let step = render(&mut bus, 10);
+        let low = step.iter().min().unwrap();
+        assert!(*low < -20000, "{}", low);
+    }
+}

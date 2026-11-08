@@ -276,6 +276,13 @@ pub fn set_cooperative_level(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             display::leave_exclusive(cpu, id, restore);
         }
     }
+    // Leaving exclusive mode, Windows 98 SE's SetCooperativeLevel takes
+    // the window the object had out of the topmost ones (SetWindowPos
+    // with HWND_NOTOPMOST, SWP_NOMOVE, SWP_NOSIZE and SWP_NOACTIVATE),
+    // unless the new level has DDSCL_NOWINDOWCHANGES. A card isn't the
+    // desktop's display, and DirectDraw never changes its window.
+    let left = !card && exclusive == id && flags & DDSCL_EXCLUSIVE == 0;
+    let old = ddraw(cpu, id).map_or(0, |d| d.hwnd);
     let exclusive = flags & DDSCL_EXCLUSIVE != 0;
     subclass(cpu, id, if exclusive { hwnd } else { 0 });
     if let Some(d) = ddraw(cpu, id) {
@@ -292,27 +299,63 @@ pub fn set_cooperative_level(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             return task::start(cpu, task::DD_ACTIVATE, vec![WINDOW_ACTIVATE, top], 0);
         }
     }
+    let user = &cpu.bus.win32.user;
+    if left && flags & DDSCL_NOWINDOWCHANGES == 0 && user.is_window(old) {
+        let top = user.top_level(old);
+        return task::start(cpu, task::DD_ACTIVATE, vec![WINDOW_NOTOPMOST, top], 0);
+    }
     Some(DD_OK)
 }
 
 /// What DirectDraw's window task does to the window of exclusive mode.
 const WINDOW_ACTIVATE: u32 = 0;
 const WINDOW_FULLSCREEN: u32 = 1;
+const WINDOW_NOTOPMOST: u32 = 2;
 
 /// DirectDraw's task on the window of exclusive mode, which returns
 /// DD_OK: SetCooperativeLevel makes it the active one
 /// (`WINDOW_ACTIVATE`, the window), SetDisplayMode makes it cover the
 /// screen (`WINDOW_FULLSCREEN`, the window, the screen's width and
-/// height), as DirectDraw's MakeFullscreen does on Windows 98 when the
-/// mode changes.
-pub fn activate_step(_: &mut Cpu, t: &mut Task, _: u32) -> Next {
+/// height, the focus window), as DirectDraw's MakeFullscreen does on
+/// Windows 98 when the mode changes, and leaving exclusive mode takes it
+/// out of the topmost windows (`WINDOW_NOTOPMOST`, the window).
+///
+/// After the resize, Windows 98 SE's MakeFullscreen goes on only if the
+/// focus window is the foreground one: it shows the window if it is
+/// hidden (ShowWindow with SW_SHOW), makes it topmost (SetWindowPos with
+/// HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE and SWP_NOACTIVATE), and restores
+/// it if it is maximized (SW_RESTORE). It asks for the foreground window
+/// once, before the three. WarGames never shows its window itself:
+/// hidden, the window isn't under the cursor, so the mouse's clicks went
+/// to the desktop and the game's menus didn't answer them.
+pub fn activate_step(cpu: &mut Cpu, t: &mut Task, _: u32) -> Next {
+    use user32::window::{
+        HWND_NOTOPMOST, HWND_TOPMOST, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_NOZORDER, WS_MAXIMIZE, WS_VISIBLE,
+    };
     let hwnd = t.var(1);
+    let style = cpu.bus.win32.user.window(hwnd).map_or(0, |w| w.style);
+    let z_order = |after: u32, next: u16| {
+        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        let args = [hwnd, after, 0, 0, 0, 0, flags];
+        Next::call(user32::address_of("SetWindowPos"), &args, next)
+    };
     match (t.step, t.var(0)) {
         (0, WINDOW_ACTIVATE) => Next::call(user32::address_of("SetActiveWindow"), &[hwnd], 1),
+        (0, WINDOW_NOTOPMOST) => z_order(HWND_NOTOPMOST, 1),
+        (_, WINDOW_ACTIVATE | WINDOW_NOTOPMOST) => Next::Done(DD_OK),
         (0, _) => {
-            let flags = user32::window::SWP_NOZORDER | user32::window::SWP_NOACTIVATE;
+            let flags = SWP_NOZORDER | SWP_NOACTIVATE;
             let args = [hwnd, 0, 0, 0, t.var(2), t.var(3), flags];
             Next::call(user32::address_of("SetWindowPos"), &args, 1)
+        }
+        (1, _) if cpu.bus.win32.user.foreground_window() != t.var(4) => Next::Done(DD_OK),
+        (1, _) if style & WS_VISIBLE == 0 => {
+            Next::call(user32::address_of("ShowWindow"), &[hwnd, SW_SHOW], 2)
+        }
+        (1 | 2, _) => z_order(HWND_TOPMOST, 3),
+        (3, _) if style & WS_MAXIMIZE != 0 => {
+            Next::call(user32::address_of("ShowWindow"), &[hwnd, SW_RESTORE], 9)
         }
         _ => Next::Done(DD_OK),
     }
@@ -449,22 +492,39 @@ pub fn set_display_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// The display's mode changed for the object `id`: its window of
-/// exclusive mode is made to cover the screen, unless it was set with
-/// DDSCL_NOWINDOWCHANGES. DD_OK.
+/// exclusive mode is made to cover the screen, and while the focus
+/// window is the foreground one shown, topmost and not maximized
+/// (`activate_step`), unless it was set with DDSCL_NOWINDOWCHANGES.
+/// DD_OK.
 fn cover_screen(cpu: &mut Cpu, id: u32) -> Option<u32> {
+    use user32::window::{WS_EX_TOPMOST, WS_MAXIMIZE, WS_VISIBLE};
     let Some(d) = ddraw(cpu, id) else {
         return Some(DD_OK);
     };
+    // MakeFullscreen asks whether the focus window is the foreground
+    // one. A level without a device window makes the window of exclusive
+    // mode the focus window as well.
+    let device_window = DDSCL_SETDEVICEWINDOW | DDSCL_CREATEDEVICEWINDOW;
+    let focus = if d.level & device_window != 0 { d.focus } else { d.hwnd };
     let (level, hwnd) = (d.level, d.hwnd);
     let (w, h) = user32::sysparams::screen_size(cpu);
     let user = &cpu.bus.win32.user;
-    let top = user.top_level(hwnd);
+    let (top, focus) = (user.top_level(hwnd), user.top_level(focus));
     let screen = crate::win32::gdi32::Rect::new(0, 0, w, h);
-    let fits = user.window(top).is_none_or(|win| win.rect == screen);
-    if level & DDSCL_EXCLUSIVE == 0 || level & DDSCL_NOWINDOWCHANGES != 0 || fits {
+    // The task would change nothing: the window covers the screen, and
+    // either the focus window isn't the foreground one, or the window is
+    // shown, not maximized, and topmost at the top of the z-order
+    // already.
+    let done = user.window(top).is_none_or(|win| {
+        let placed = win.style & (WS_VISIBLE | WS_MAXIMIZE) == WS_VISIBLE
+            && win.ex_style & WS_EX_TOPMOST != 0
+            && user.top_levels().first() == Some(&top);
+        win.rect == screen && (placed || user.foreground_window() != focus)
+    });
+    if level & DDSCL_EXCLUSIVE == 0 || level & DDSCL_NOWINDOWCHANGES != 0 || done {
         return Some(DD_OK);
     }
-    let vars = vec![WINDOW_FULLSCREEN, top, w as u32, h as u32];
+    let vars = vec![WINDOW_FULLSCREEN, top, w as u32, h as u32, focus];
     task::start(cpu, task::DD_ACTIVATE, vars, 0)
 }
 

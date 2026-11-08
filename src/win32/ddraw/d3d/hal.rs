@@ -35,7 +35,7 @@
 //! out.
 
 use super::super::surface::{self, DDPF_PALETTEINDEXED8, KEY_SRC_BLT, MEM_CARD, Surface};
-use super::super::{current_pid, display, state, voodoo};
+use super::super::{Format, current_pid, display, state, voodoo};
 use super::device::{
     Device, RS_FOGENABLE, RS_FOGTABLEMODE, RS_SPECULARENABLE, RS_TEXTUREFACTOR, RS_TEXTUREMAPBLEND,
     RS_ZENABLE, RS_ZFUNC, RS_ZWRITEENABLE, TA_TEXTURE, TA_TFACTOR, TOP_ADD, TOP_BLENDCURRENTALPHA,
@@ -186,14 +186,16 @@ const HEAP_MIN: u32 = 256 << 10;
 /// How a batch of primitives is drawn: for each of the card's texture
 /// units, the factors that turn a texture coordinate into Glide's (its
 /// texture's size in Glide's 256 units) and the stage whose coordinates
-/// it takes; whether Z or W carries the vertex fog; and how the
-/// specular color is added.
+/// it takes; whether Z or W carries the vertex fog; how the specular
+/// color is added; and how far the vertices move to put a pixel's centre
+/// where the card has it.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Card {
     tmus: [Option<(usize, [f32; 2])>; 2],
     fog_z: bool,
     fog_w: bool,
     specular: Specular,
+    centre: f32,
 }
 
 /// How the specular color is added (D3DRENDERSTATE_SPECULARENABLE).
@@ -426,9 +428,15 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     } else {
         None
     };
+    // The card, with the subpixel adjustment Glide turns on, evaluates a
+    // pixel at its integer coordinates plus half a pixel. OpenGL's
+    // window coordinates put the centre there too; Direct3D's put it on
+    // them, so its vertices move half a pixel right and down.
+    let centre = if d.gl_pixel_centres { 0.0 } else { 0.5 };
     let mut card = Card {
         fog_z,
         fog_w,
+        centre,
         ..Card::default()
     };
     let mut keyed = false;
@@ -982,15 +990,24 @@ fn in_place(cpu: &mut Cpu, id: u32, key: bool) -> Option<InPlace> {
         return None;
     }
     let (_, pitch) = surface::card_memory(cpu, id)?;
-    let s = state(cpu).surface(id)?.clone();
-    let (w, h) = (s.width, s.height);
+    // The fields it needs, without a copy of the surface's lists: this
+    // runs at every draw that samples a texture on these cards.
+    let (w, h, f, key_set, key_low) = {
+        let s = state(cpu).surface(id)?;
+        (
+            s.width,
+            s.height,
+            s.format,
+            s.key_set,
+            s.keys[KEY_SRC_BLT].0,
+        )
+    };
     if !w.is_power_of_two() || !h.is_power_of_two() || w.max(h) > 256 || w.max(h) < 2 {
         return None;
     }
     if w > 8 * h || h > 8 * w {
         return None;
     }
-    let f = &s.format;
     let paletted = f.flags & DDPF_PALETTEINDEXED8 != 0;
     let format = match (paletted, f.bits, f.r, f.a) {
         (true, 8, _, _) => api::TEXFMT_P_8,
@@ -1034,13 +1051,12 @@ fn in_place(cpu: &mut Cpu, id: u32, key: bool) -> Option<InPlace> {
             None => break,
         }
     }
-    let keyed = key && s.key_set & 1 << KEY_SRC_BLT != 0;
+    let keyed = key && key_set & 1 << KEY_SRC_BLT != 0;
     let key = keyed.then(|| {
-        let raw = s.keys[KEY_SRC_BLT].0;
         if paletted {
-            palette(cpu, id)[(raw & 0xFF) as usize]
+            palette(cpu, id)[(key_low & 0xFF) as usize]
         } else {
-            expanded(raw, &s)
+            expanded(key_low, &f)
         }
     });
     Some(InPlace {
@@ -1058,7 +1074,7 @@ fn in_place(cpu: &mut Cpu, id: u32, key: bool) -> Option<InPlace> {
 
 /// A 16-bit texel as the texture unit makes it 8 bits a channel: each
 /// channel's bits again below them. 0RGB.
-fn expanded(raw: u32, s: &Surface) -> u32 {
+fn expanded(raw: u32, f: &Format) -> u32 {
     let channel = |mask: u32| {
         // A mask past the texel's 16 bits is the program's mistake.
         let mask = mask & 0xFFFF;
@@ -1075,7 +1091,6 @@ fn expanded(raw: u32, s: &Surface) -> u32 {
         }
         out >> (have - 8)
     };
-    let f = &s.format;
     channel(f.r) << 16 | channel(f.g) << 8 | channel(f.b)
 }
 
@@ -1106,9 +1121,12 @@ fn palette(cpu: &mut Cpu, id: u32) -> [u32; 256] {
 /// The heap's copy of the surface `id`, made if it has none that is
 /// up to date.
 fn cached(cpu: &mut Cpu, id: u32, key: bool, tmu: u32) -> Option<Cached> {
-    let s = state(cpu).surface(id)?.clone();
-    let keyed = key && s.key_set & 1 << KEY_SRC_BLT != 0;
-    let paletted = s.format.flags & DDPF_PALETTEINDEXED8 != 0;
+    let (key_set, flags, uniqueness) = {
+        let s = state(cpu).surface(id)?;
+        (s.key_set, s.format.flags, s.uniqueness)
+    };
+    let keyed = key && key_set & 1 << KEY_SRC_BLT != 0;
+    let paletted = flags & DDPF_PALETTEINDEXED8 != 0;
     let variant = if paletted {
         hash_words(&palette(cpu, id)) ^ keyed as u32
     } else {
@@ -1125,7 +1143,7 @@ fn cached(cpu: &mut Cpu, id: u32, key: bool, tmu: u32) -> Option<Cached> {
     };
     let clock = hal(cpu).clock;
     if let Some(c) = hal(cpu).textures.iter_mut().find(|c| {
-        c.surface == id && c.tmu == unit && c.uniqueness == s.uniqueness && c.variant == variant
+        c.surface == id && c.tmu == unit && c.uniqueness == uniqueness && c.variant == variant
     }) {
         c.used = clock;
         return Some(c.clone());
@@ -1147,7 +1165,7 @@ fn cached(cpu: &mut Cpu, id: u32, key: bool, tmu: u32) -> Option<Cached> {
     let c = Cached {
         surface: id,
         tmu: unit,
-        uniqueness: s.uniqueness,
+        uniqueness,
         variant,
         start,
         size,
@@ -1167,19 +1185,24 @@ fn cached(cpu: &mut Cpu, id: u32, key: bool, tmu: u32) -> Option<Cached> {
 /// The heap there, taken from video memory if it isn't (or video
 /// memory was lost since).
 fn heap(cpu: &mut Cpu) -> bool {
-    let h = hal(cpu).clone();
+    // Only these: a copy of all of it would copy the texture list, at
+    // every draw that samples a texture from the heap.
+    let (at, heap_len, owner) = {
+        let h = hal(cpu);
+        (h.heap, h.heap_len, h.pid)
+    };
     let pid = current_pid(cpu);
-    if h.heap_len != 0 {
+    if heap_len != 0 {
         let there = state(cpu)
             .display
             .blocks
             .iter()
-            .any(|&(at, len)| at == h.heap && len >= h.heap_len);
-        if there && h.pid == pid {
+            .any(|&(block, len)| block == at && len >= heap_len);
+        if there && owner == pid {
             return true;
         }
         if there {
-            display::free(cpu, h.heap);
+            display::free(cpu, at);
         }
     }
     let (_, free) = display::video_memory(cpu);
@@ -1463,9 +1486,11 @@ fn encode(data: &mut Vec<u8>, format: u32, raw: u32, s: &Surface, pal: &[u32; 25
 /// left, top, right and bottom. The card's vertex registers hold 12.4
 /// fixed point, -2048 to 2047.9375, and a coordinate past either end
 /// wraps round to the other, so a triangle clipped at 2048 would have
-/// its vertices there drawn at -2048. A pixel in from those ends
-/// leaves room for the half pixel lines are drawn out by.
-pub const VERTEX_BAND: [f32; 4] = [-2047.0, -2047.0, 2047.0, 2047.0];
+/// its vertices there drawn at -2048. A pixel in from the low end
+/// leaves room for the half pixel lines are drawn out by, two from the
+/// high end for that and the half pixel Direct3D's vertices move by
+/// (`Card::centre`).
+pub const VERTEX_BAND: [f32; 4] = [-2047.0, -2047.0, 2046.0, 2046.0];
 
 /// The card as the pipeline's rasterizer.
 pub struct Raster<'a> {
@@ -1514,9 +1539,14 @@ impl Raster<'_> {
                 t.oow = rhw;
             }
         }
+        // Moved to where the card has a pixel's centre (`Card::centre`).
+        // Edges at whole pixels cover the same pixels either way. Left
+        // where Direct3D has them, the last column of a texture mapped a
+        // texel's centre to a pixel's (Drakan's menu sky, its tiles 256
+        // pixels wide) samples the texture's edge, and wraps to its first.
         Vertex {
-            x: v.x,
-            y: v.y,
+            x: v.x + self.card.centre,
+            y: v.y + self.card.centre,
             z: v.z,
             r,
             g,
@@ -1592,7 +1622,18 @@ impl Rasterizer for Raster<'_> {
     }
 
     fn point(&mut self, v: &ScreenVertex) {
-        let p = self.vertex(v);
+        let mut p = self.vertex(v);
+        // A point lights the pixel whose centre is nearest. Glide's point
+        // lights the pixel the vertex is in, which for a Direct3D vertex
+        // moved half a pixel is that pixel, except half way between two,
+        // where 3dfx's Direct3D driver lights the left or upper one: 10.5
+        // lights 10 and 10.6 lights 11 (on a Voodoo 3 with its driver
+        // 4.12.01.0666). OpenGL's window coordinates take the pixel the
+        // vertex is in.
+        if self.card.centre != 0.0 {
+            p.x = (p.x - 1.0).ceil();
+            p.y = (p.y - 1.0).ceil();
+        }
         api::draw_point(self.cpu, &p);
     }
 }

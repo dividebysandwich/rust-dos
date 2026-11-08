@@ -667,6 +667,28 @@ const R_VT_FILTER: u32 = 0x300;
 const R_VT_ENUM: u32 = 0x340;
 const R_VT_PIN: u32 = 0x360;
 const R_VT_INPUT: u32 = 0x3B0;
+// The program's own allocator and its one sample, in "Renderer with its
+// own allocator": the interfaces, how many references the program gave
+// on the allocator, the calls counted, the sample's actual length,
+// times, and the properties SetProperties set; the vtables, and the
+// sample's buffer.
+const A_ALLOC: u32 = 0x400;
+const A_SAMPLE: u32 = 0x404;
+const A_REFS: u32 = 0x408;
+const A_COMMITS: u32 = 0x40C;
+const A_DECOMMITS: u32 = 0x410;
+const A_GETS: u32 = 0x414;
+const A_RELEASES: u32 = 0x418;
+const A_ACTUAL: u32 = 0x41C;
+const A_START: u32 = 0x420;
+const A_STOP: u32 = 0x428;
+const A_SYNCS: u32 = 0x430;
+const A_DISCONTINUITIES: u32 = 0x434;
+const A_PROPS: u32 = 0x440;
+const A_VT_ALLOC: u32 = 0x460;
+const A_VT_SAMPLE: u32 = 0x490;
+const A_BUFFER: u32 = 0x800;
+const R_SIZE: usize = 0x1000;
 
 const E_NOTIMPL: u32 = 0x8000_4001;
 const VFW_E_NOT_CONNECTED: u32 = 0x8004_0209;
@@ -677,7 +699,7 @@ const GRAPH_ADD_FILTER: i32 = 12;
 const CONTROL_STOP: i32 = 36;
 
 fn renderer_data() -> Vec<u8> {
-    let mut d = vec![0u8; SIZE];
+    let mut d = vec![0u8; R_SIZE];
     let mut put = |at: u32, bytes: &[u8]| {
         d[at as usize..at as usize + bytes.len()].copy_from_slice(bytes);
     };
@@ -765,7 +787,43 @@ fn check(
 /// the filter out of it.
 #[test]
 fn a_programs_renderer_filter_gets_the_movies_pictures() {
-    let exe = program(IMPORTS, &renderer_data(), |a, l| {
+    let mut cpu = machine(
+        "renderer",
+        renderer_program(false),
+        &[("CLIP.MPG", super::win32_winmm_tests::clip())],
+    );
+    let code = run(&mut cpu);
+    assert_eq!(code, 0, "{}", printed(&cpu));
+}
+
+/// The renderer of `a_programs_renderer_filter_gets_the_movies_pictures`
+/// with an allocator of its own, as a renderer that draws with DirectDraw
+/// surfaces has (Submarine Titans' "DDX Video Renderer"): its input pin's
+/// GetAllocator gives it. The decoder takes it, as the base classes'
+/// DecideAllocator does: SetProperties sizes it for a picture and
+/// NotifyAllocator gives it back. The decoder commits it when the graph
+/// runs, and for each of the twelve pictures takes a sample with
+/// GetBuffer, writes the picture at GetPointer's buffer, sets the
+/// sample's times, length, sync point and discontinuity (the first
+/// alone), hands it over with Receive and releases it. The decoder
+/// decommits it when the graph stops, and again each time it
+/// disconnects (Reconnect, then the graph's last Release), each time
+/// letting go of the reference GetAllocator gave.
+#[test]
+fn a_renderer_with_its_own_allocator_gets_the_pictures_in_its_samples() {
+    let mut cpu = machine(
+        "renderer_allocator",
+        renderer_program(true),
+        &[("CLIP.MPG", super::win32_winmm_tests::clip())],
+    );
+    let code = run(&mut cpu);
+    assert_eq!(code, 0, "{}", printed(&cpu));
+}
+
+/// The program of the renderer tests: with its own allocator when
+/// `given` says so.
+fn renderer_program(given: bool) -> Vec<u8> {
+    program(IMPORTS, &renderer_data(), |a, l| {
         let mut fail = a.create_label();
         let mut start = a.create_label();
         a.jmp(start)?;
@@ -914,8 +972,14 @@ fn a_programs_renderer_filter_gets_the_movies_pictures() {
         let mut get_allocator = a.create_label();
         a.set_label(&mut get_allocator)?;
         a.mov(eax, dword_ptr(esp + 8))?;
-        a.mov(dword_ptr(eax), 0)?;
-        a.mov(eax, VFW_E_NO_ALLOCATOR)?;
+        if given {
+            a.mov(dword_ptr(eax), l.at(A_ALLOC) as u32)?;
+            a.inc(dword_ptr(l.at(A_REFS)))?;
+            a.xor(eax, eax)?;
+        } else {
+            a.mov(dword_ptr(eax), 0)?;
+            a.mov(eax, VFW_E_NO_ALLOCATOR)?;
+        }
         a.ret_1(8)?;
         let mut notify_allocator = a.create_label();
         a.set_label(&mut notify_allocator)?;
@@ -946,8 +1010,150 @@ fn a_programs_renderer_filter_gets_the_movies_pictures() {
         a.xor(eax, eax)?;
         a.ret_1(8)?;
 
+        // The program's allocator (IMemAllocator) and its sample
+        // (IMediaSample), which keeps its times and its length.
+        let mut alloc_add_ref = a.create_label();
+        a.set_label(&mut alloc_add_ref)?;
+        a.inc(dword_ptr(l.at(A_REFS)))?;
+        a.mov(eax, 1)?;
+        a.ret_1(4)?;
+        let mut alloc_release = a.create_label();
+        a.set_label(&mut alloc_release)?;
+        a.dec(dword_ptr(l.at(A_REFS)))?;
+        a.mov(eax, 1)?;
+        a.ret_1(4)?;
+        let mut set_properties = a.create_label();
+        a.set_label(&mut set_properties)?;
+        for k in 0..4 {
+            a.mov(eax, dword_ptr(esp + 8))?;
+            a.mov(ecx, dword_ptr(eax + 4 * k))?;
+            a.mov(dword_ptr(l.at(A_PROPS + 4 * k as u32)), ecx)?;
+            a.mov(edx, dword_ptr(esp + 12))?;
+            a.mov(dword_ptr(edx + 4 * k), ecx)?;
+        }
+        a.xor(eax, eax)?;
+        a.ret_1(12)?;
+        let mut counters = [A_COMMITS, A_DECOMMITS, A_RELEASES].map(|_| a.create_label());
+        for (label, at) in counters
+            .iter_mut()
+            .zip([A_COMMITS, A_DECOMMITS, A_RELEASES])
+        {
+            a.set_label(label)?;
+            a.inc(dword_ptr(l.at(at)))?;
+            a.xor(eax, eax)?;
+            a.ret_1(4)?;
+        }
+        let [commit, decommit, sample_release] = counters;
+        let mut get_buffer = a.create_label();
+        a.set_label(&mut get_buffer)?;
+        a.inc(dword_ptr(l.at(A_GETS)))?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(eax), l.at(A_SAMPLE) as u32)?;
+        a.xor(eax, eax)?;
+        a.ret_1(20)?;
+        let mut get_pointer = a.create_label();
+        a.set_label(&mut get_pointer)?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(eax), l.at(A_BUFFER) as u32)?;
+        a.xor(eax, eax)?;
+        a.ret_1(8)?;
+        let mut get_size = a.create_label();
+        a.set_label(&mut get_size)?;
+        a.mov(eax, dword_ptr(l.at(A_PROPS + 4)))?;
+        a.ret_1(4)?;
+        // GetTime and SetTime copy the times out of and into the sample.
+        let mut times = [(); 2].map(|_| a.create_label());
+        for (k, label) in times.iter_mut().enumerate() {
+            a.set_label(label)?;
+            for (arg, at) in [(8, A_START), (12, A_STOP)] {
+                a.mov(edx, dword_ptr(esp + arg))?;
+                for half in 0..2 {
+                    if k == 0 {
+                        a.mov(ecx, dword_ptr(l.at(at + 4 * half as u32)))?;
+                        a.mov(dword_ptr(edx + 4 * half), ecx)?;
+                    } else {
+                        a.mov(ecx, dword_ptr(edx + 4 * half))?;
+                        a.mov(dword_ptr(l.at(at + 4 * half as u32)), ecx)?;
+                    }
+                }
+            }
+            a.xor(eax, eax)?;
+            a.ret_1(12)?;
+        }
+        let [get_time, set_time] = times;
+        // SetSyncPoint and SetDiscontinuity count the TRUEs.
+        let mut flags = [(); 2].map(|_| a.create_label());
+        for (label, at) in flags.iter_mut().zip([A_SYNCS, A_DISCONTINUITIES]) {
+            a.set_label(label)?;
+            a.mov(eax, dword_ptr(esp + 8))?;
+            a.add(dword_ptr(l.at(at)), eax)?;
+            a.xor(eax, eax)?;
+            a.ret_1(8)?;
+        }
+        let [set_sync_point, set_discontinuity] = flags;
+        let mut get_actual = a.create_label();
+        a.set_label(&mut get_actual)?;
+        a.mov(eax, dword_ptr(l.at(A_ACTUAL)))?;
+        a.ret_1(4)?;
+        let mut set_actual = a.create_label();
+        a.set_label(&mut set_actual)?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(l.at(A_ACTUAL)), eax)?;
+        a.xor(eax, eax)?;
+        a.ret_1(8)?;
+        let mut ok1 = a.create_label();
+        returns(a, &mut ok1, S_OK, 1)?;
+        let mut ok2 = a.create_label();
+        returns(a, &mut ok2, S_OK, 2)?;
+
         a.set_label(&mut start)?;
-        let [_, n1, n2, n3] = not_impl;
+        let [n0, n1, n2, n3] = not_impl;
+        if given {
+            vtable(
+                a,
+                l,
+                A_VT_ALLOC,
+                &[
+                    no_interface,
+                    alloc_add_ref,
+                    alloc_release,
+                    set_properties,
+                    n2,
+                    commit,
+                    decommit,
+                    get_buffer,
+                    ok1,
+                ],
+            )?;
+            a.mov(dword_ptr(l.at(A_ALLOC)), eax)?;
+            vtable(
+                a,
+                l,
+                A_VT_SAMPLE,
+                &[
+                    no_interface,
+                    one,
+                    sample_release,
+                    get_pointer,
+                    get_size,
+                    get_time,
+                    set_time,
+                    n0,
+                    set_sync_point,
+                    n0,
+                    n1,
+                    get_actual,
+                    set_actual,
+                    n1,
+                    n1,
+                    n0,
+                    set_discontinuity,
+                    n2,
+                    ok2,
+                ],
+            )?;
+            a.mov(dword_ptr(l.at(A_SAMPLE)), eax)?;
+        }
         let [stop, pause, run_] = state;
         vtable(
             a,
@@ -1092,15 +1298,416 @@ fn a_programs_renderer_filter_gets_the_movies_pictures() {
             a.cmp(dword_ptr(l.at(at)), 0)?;
             a.je(fail)?;
         }
+        if given {
+            // NotifyAllocator got the program's allocator, sized for one
+            // RGB565 picture in one buffer, aligned on 1.
+            check(a, l, fail, 39, R_ALLOCATOR, l.at(A_ALLOC) as u32)?;
+            check(a, l, fail, 40, A_PROPS, 1)?;
+            check(a, l, fail, 41, A_PROPS + 4, 32 * 32 * 2)?;
+            check(a, l, fail, 42, A_PROPS + 8, 1)?;
+            check(a, l, fail, 43, A_COMMITS, 1)?;
+            check(a, l, fail, 44, A_GETS, 12)?;
+            check(a, l, fail, 45, A_RELEASES, 12)?;
+            check(a, l, fail, 46, A_SYNCS, 12)?;
+            check(a, l, fail, 47, A_DISCONTINUITIES, 1)?;
+            check(a, l, fail, 48, A_DECOMMITS, 1)?;
+            // Reconnect: the decoder's pin decommits the allocator and
+            // lets go of it as it disconnects, then takes it again from
+            // GetAllocator.
+            a.mov(dword_ptr(l.at(R_ALLOCATOR)), 0)?;
+            push(a, l, &[Ptr(R_PIN)])?;
+            a.mov(eax, dword_ptr(l.at(GRAPH)))?;
+            a.push(eax)?;
+            a.mov(eax, dword_ptr(eax))?;
+            a.call(dword_ptr(eax + GRAPH_RECONNECT))?;
+            expect(a, fail, 51, S_OK)?;
+            check(a, l, fail, 52, A_DECOMMITS, 2)?;
+            check(a, l, fail, 53, A_REFS, 1)?;
+            check(a, l, fail, 54, R_ALLOCATOR, l.at(A_ALLOC) as u32)?;
+        }
         method(a, l, fail, 35, (EVENT, RELEASE), &[], 2)?;
         method(a, l, fail, 36, (CONTROL, RELEASE), &[], 1)?;
         method(a, l, fail, 37, (GRAPH, RELEASE), &[], 0)?;
         // The filter left the graph.
         check(a, l, fail, 38, R_JOINED, 0)?;
+        if given {
+            // Decommitted again as the decoder's pin disconnected, and
+            // the reference GetAllocator gave let go of.
+            check(a, l, fail, 49, A_DECOMMITS, 3)?;
+            check(a, l, fail, 50, A_REFS, 0)?;
+        }
+        exit(a, l, &mut fail, Imm(0))
+    })
+}
+
+// "Transform and renderer": the places in its program's data. A filter
+// is its vtable, its pins' enumerator, the count Pause found, and the
+// graph it joined; an enumerator its vtable, how far it got and its pins,
+// ending with 0; a pin its vtable, its direction, its peer, how often
+// Connect and Disconnect were called, and its IMemInputPin (0 for none).
+const T_COUNTER: u32 = 0x110;
+const T_TYPES: u32 = 0x114;
+const T_TYPE: u32 = 0x118;
+const T_FETCHED: u32 = 0x11C;
+const T_TRANSFORM: u32 = 0x200;
+const T_RENDERER: u32 = 0x220;
+const T_TRANSFORM_ENUM: u32 = 0x240;
+const T_RENDERER_ENUM: u32 = 0x260;
+const T_IN: u32 = 0x280;
+const T_OUT: u32 = 0x2A0;
+const T_RENDERER_IN: u32 = 0x2C0;
+const T_INPUT: u32 = 0x2E0;
+const T_VT_FILTER: u32 = 0x400;
+const T_VT_ENUM: u32 = 0x440;
+const T_VT_PIN: u32 = 0x460;
+const T_VT_INPUT: u32 = 0x4B0;
+const T_SIZE: usize = 0x500;
+const FILTER_PAUSED: u32 = 8;
+const FILTER_JOINED: u32 = 16;
+const PIN_PEER: u32 = 8;
+const PIN_CONNECTS: u32 = 12;
+const PIN_DISCONNECTS: u32 = 16;
+const CONTROL_PAUSE: i32 = 32;
+const GRAPH_RECONNECT: i32 = 32;
+const PIN_ENUM_MEDIA_TYPES: i32 = 48;
+
+/// A program's renderer and transform filter, added in that order. Both
+/// input pins take the decoder's first type; the transform's output pin
+/// connects with its own IPin::Connect. RenderFile tries the filter
+/// added last first, as Windows' graph does: it connects the decoder to
+/// the transform, then the transform's output pin to the renderer's
+/// input pin, as the graph builder renders a filter's outputs after its
+/// input (Wine's test_graph_builder_render, run on Windows, finds both).
+/// The decoder's output pin enumerates its types, YV12 first, and
+/// Reconnect connects it to the transform again, as a transform-in-place
+/// filter's ReconnectPin asks, and the transform's output pin to the
+/// renderer again. The graph pauses the renderer before the transform,
+/// and as it goes it disconnects both ends of each connection and takes
+/// both filters out of it.
+#[test]
+fn a_programs_transform_filter_gets_its_renderer_connected() {
+    let mut data = vec![0u8; T_SIZE];
+    let mut put = |at: u32, bytes: &[u8]| {
+        data[at as usize..at as usize + bytes.len()].copy_from_slice(bytes);
+    };
+    put(G_CLSID_GRAPH, &CLSID_FILTER_GRAPH);
+    put(G_IID_GRAPH, &IID_IGRAPH_BUILDER);
+    put(G_IID_CONTROL, &IID_IMEDIA_CONTROL);
+    let file: Vec<u8> = "CLIP.MPG\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    put(R_FILE, &file);
+    // The output pin's direction.
+    put(T_OUT + 4, &1u32.to_le_bytes());
+    let exe = program(IMPORTS, &data, |a, l| {
+        let mut fail = a.create_label();
+        let mut start = a.create_label();
+        a.jmp(start)?;
+        let at = |o: u32| l.at(o) as u32;
+
+        let mut not_impl = [(); 3].map(|_| a.create_label());
+        for (k, label) in not_impl.iter_mut().enumerate() {
+            returns(a, label, E_NOTIMPL, k as u32)?;
+        }
+        let [_, n1, n2] = not_impl;
+        let mut ok = [(); 3].map(|_| a.create_label());
+        for (k, label) in ok.iter_mut().enumerate() {
+            returns(a, label, S_OK, k as u32)?;
+        }
+        let [ok0, ok1, ok2] = ok;
+        let mut ok_segment = a.create_label();
+        returns(a, &mut ok_segment, S_OK, 6)?;
+        let mut one = a.create_label();
+        returns(a, &mut one, 1, 0)?;
+        let mut no_interface = a.create_label();
+        a.set_label(&mut no_interface)?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(eax), 0)?;
+        a.mov(eax, E_NOINTERFACE)?;
+        a.ret_1(12)?;
+
+        // IBaseFilter.
+        let mut pause = a.create_label();
+        a.set_label(&mut pause)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.inc(dword_ptr(l.at(T_COUNTER)))?;
+        a.mov(ecx, dword_ptr(l.at(T_COUNTER)))?;
+        a.mov(dword_ptr(eax + FILTER_PAUSED as i32), ecx)?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        let mut enum_pins = a.create_label();
+        a.set_label(&mut enum_pins)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(ecx, dword_ptr(eax + 4))?;
+        a.mov(dword_ptr(ecx + 4), 0)?;
+        a.mov(edx, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(edx), ecx)?;
+        a.xor(eax, eax)?;
+        a.ret_1(8)?;
+        let mut join = a.create_label();
+        a.set_label(&mut join)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(ecx, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(eax + FILTER_JOINED as i32), ecx)?;
+        a.xor(eax, eax)?;
+        a.ret_1(12)?;
+
+        // IEnumPins::Next: the enumerator's pins, one at a time.
+        let mut next = a.create_label();
+        let mut none = a.create_label();
+        let mut counted = a.create_label();
+        a.set_label(&mut next)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(ecx, dword_ptr(eax + 4))?;
+        a.mov(edx, dword_ptr(eax + ecx * 4 + 8))?;
+        a.test(edx, edx)?;
+        a.jz(none)?;
+        a.inc(dword_ptr(eax + 4))?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(eax), edx)?;
+        a.mov(eax, dword_ptr(esp + 16))?;
+        a.test(eax, eax)?;
+        a.jz(counted)?;
+        a.mov(dword_ptr(eax), 1)?;
+        a.set_label(&mut counted)?;
+        a.xor(eax, eax)?;
+        a.ret_1(16)?;
+        a.set_label(&mut none)?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(eax), 0)?;
+        a.mov(eax, 1)?;
+        a.ret_1(16)?;
+
+        // IPin.
+        let mut pin_qi = a.create_label();
+        let mut pin_qi_none = a.create_label();
+        a.set_label(&mut pin_qi)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(ecx, dword_ptr(eax + 20))?;
+        a.mov(edx, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(edx), ecx)?;
+        a.test(ecx, ecx)?;
+        a.jz(pin_qi_none)?;
+        a.xor(eax, eax)?;
+        a.ret_1(12)?;
+        a.set_label(&mut pin_qi_none)?;
+        a.mov(eax, E_NOINTERFACE)?;
+        a.ret_1(12)?;
+        let mut connect = a.create_label();
+        a.set_label(&mut connect)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(ecx, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(eax + PIN_PEER as i32), ecx)?;
+        a.inc(dword_ptr(eax + PIN_CONNECTS as i32))?;
+        a.xor(eax, eax)?;
+        a.ret_1(12)?;
+        let mut receive_connection = a.create_label();
+        a.set_label(&mut receive_connection)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(ecx, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(eax + PIN_PEER as i32), ecx)?;
+        a.xor(eax, eax)?;
+        a.ret_1(12)?;
+        let mut disconnect = a.create_label();
+        a.set_label(&mut disconnect)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(dword_ptr(eax + PIN_PEER as i32), 0)?;
+        a.inc(dword_ptr(eax + PIN_DISCONNECTS as i32))?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        let mut connected_to = a.create_label();
+        let mut not_connected = a.create_label();
+        a.set_label(&mut connected_to)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(ecx, dword_ptr(eax + PIN_PEER as i32))?;
+        a.mov(edx, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(edx), ecx)?;
+        a.test(ecx, ecx)?;
+        a.jz(not_connected)?;
+        a.xor(eax, eax)?;
+        a.ret_1(8)?;
+        a.set_label(&mut not_connected)?;
+        a.mov(eax, VFW_E_NOT_CONNECTED)?;
+        a.ret_1(8)?;
+        let mut direction = a.create_label();
+        a.set_label(&mut direction)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(ecx, dword_ptr(eax + 4))?;
+        a.mov(edx, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(edx), ecx)?;
+        a.xor(eax, eax)?;
+        a.ret_1(8)?;
+
+        // IMemInputPin: the decoder's own allocator, and every sample
+        // taken.
+        let mut get_allocator = a.create_label();
+        a.set_label(&mut get_allocator)?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(eax), 0)?;
+        a.mov(eax, VFW_E_NO_ALLOCATOR)?;
+        a.ret_1(8)?;
+
+        a.set_label(&mut start)?;
+        vtable(
+            a,
+            l,
+            T_VT_FILTER,
+            &[
+                no_interface,
+                one,
+                one,
+                n1,
+                ok0,
+                pause,
+                ok2,
+                n2,
+                ok1,
+                n1,
+                enum_pins,
+                n2,
+                n1,
+                join,
+                n1,
+            ],
+        )?;
+        for (filter, e) in [(T_TRANSFORM, T_TRANSFORM_ENUM), (T_RENDERER, T_RENDERER_ENUM)] {
+            a.mov(dword_ptr(l.at(filter)), eax)?;
+            a.mov(dword_ptr(l.at(filter + 4)), at(e))?;
+        }
+        vtable(a, l, T_VT_ENUM, &[no_interface, one, one, next, n1, ok0, n1])?;
+        a.mov(dword_ptr(l.at(T_TRANSFORM_ENUM)), eax)?;
+        a.mov(dword_ptr(l.at(T_RENDERER_ENUM)), eax)?;
+        a.mov(dword_ptr(l.at(T_TRANSFORM_ENUM + 8)), at(T_IN))?;
+        a.mov(dword_ptr(l.at(T_TRANSFORM_ENUM + 12)), at(T_OUT))?;
+        a.mov(dword_ptr(l.at(T_RENDERER_ENUM + 8)), at(T_RENDERER_IN))?;
+        vtable(
+            a,
+            l,
+            T_VT_PIN,
+            &[
+                pin_qi,
+                one,
+                one,
+                connect,
+                receive_connection,
+                disconnect,
+                connected_to,
+                n1,
+                n1,
+                direction,
+                n1,
+                ok1,
+                n1,
+                n2,
+                ok0,
+                ok0,
+                ok0,
+                ok_segment,
+            ],
+        )?;
+        for pin in [T_IN, T_OUT, T_RENDERER_IN] {
+            a.mov(dword_ptr(l.at(pin)), eax)?;
+        }
+        a.mov(dword_ptr(l.at(T_IN + 20)), at(T_INPUT))?;
+        vtable(
+            a,
+            l,
+            T_VT_INPUT,
+            &[
+                no_interface,
+                one,
+                one,
+                get_allocator,
+                ok2,
+                n1,
+                ok1,
+                n2,
+                ok0,
+            ],
+        )?;
+        a.mov(dword_ptr(l.at(T_INPUT)), eax)?;
+
+        // The program.
+        call(a, l, fail, 1, CO_INITIALIZE, &[Imm(0)], S_OK)?;
+        let args = [
+            Ptr(G_CLSID_GRAPH),
+            Imm(0),
+            Imm(1),
+            Ptr(G_IID_GRAPH),
+            Ptr(GRAPH),
+        ];
+        call(a, l, fail, 2, CO_CREATE, &args, S_OK)?;
+        for (step, filter) in [(3, T_RENDERER), (4, T_TRANSFORM)] {
+            let args = [Ptr(filter), Imm(0)];
+            method(a, l, fail, step, (GRAPH, GRAPH_ADD_FILTER), &args, S_OK)?;
+        }
+        let args = [Ptr(G_IID_CONTROL), Ptr(CONTROL)];
+        method(a, l, fail, 5, (GRAPH, QUERY_INTERFACE), &args, S_OK)?;
+        let args = [Ptr(R_FILE), Imm(0)];
+        method(a, l, fail, 6, (GRAPH, GRAPH_RENDER_FILE), &args, S_OK)?;
+        // The decoder took the transform's input, whose output pin
+        // connected to the renderer's input pin once.
+        a.mov(ebx, 7)?;
+        a.cmp(dword_ptr(l.at(T_IN + PIN_PEER)), 0)?;
+        a.je(fail)?;
+        check(a, l, fail, 8, T_OUT + PIN_PEER, at(T_RENDERER_IN))?;
+        check(a, l, fail, 9, T_OUT + PIN_CONNECTS, 1)?;
+        check(a, l, fail, 10, T_RENDERER_IN + PIN_CONNECTS, 0)?;
+        // The decoder's types: YV12 first.
+        push(a, l, &[Ptr(T_TYPES)])?;
+        call_on(a, dword_ptr(l.at(T_IN + PIN_PEER)), PIN_ENUM_MEDIA_TYPES)?;
+        expect(a, fail, 22, S_OK)?;
+        push(a, l, &[Imm(1), Ptr(T_TYPE), Ptr(T_FETCHED)])?;
+        call_on(a, dword_ptr(l.at(T_TYPES)), 12)?;
+        expect(a, fail, 23, S_OK)?;
+        check(a, l, fail, 24, T_FETCHED, 1)?;
+        a.mov(eax, dword_ptr(l.at(T_TYPE)))?;
+        a.mov(eax, dword_ptr(eax + 16))?;
+        expect(a, fail, 25, 0x3231_5659)?;
+        call_on(a, dword_ptr(l.at(T_TYPES)), RELEASE)?;
+        // Reconnect: the transform's input disconnects and connects
+        // again.
+        push(a, l, &[Ptr(T_IN)])?;
+        a.mov(eax, dword_ptr(l.at(GRAPH)))?;
+        a.push(eax)?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.call(dword_ptr(eax + GRAPH_RECONNECT))?;
+        expect(a, fail, 26, S_OK)?;
+        check(a, l, fail, 27, T_IN + PIN_DISCONNECTS, 1)?;
+        a.mov(ebx, 28)?;
+        a.cmp(dword_ptr(l.at(T_IN + PIN_PEER)), 0)?;
+        a.je(fail)?;
+        // Reconnect of the renderer's input pin: both ends of the
+        // transform's connection to it disconnect, and the transform's
+        // output pin connects to it again.
+        push(a, l, &[Ptr(T_RENDERER_IN)])?;
+        a.mov(eax, dword_ptr(l.at(GRAPH)))?;
+        a.push(eax)?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.call(dword_ptr(eax + GRAPH_RECONNECT))?;
+        expect(a, fail, 29, S_OK)?;
+        check(a, l, fail, 30, T_OUT + PIN_CONNECTS, 2)?;
+        check(a, l, fail, 31, T_OUT + PIN_PEER, at(T_RENDERER_IN))?;
+        check(a, l, fail, 32, T_RENDERER_IN + PIN_DISCONNECTS, 1)?;
+        // The renderer pauses first.
+        method(a, l, fail, 11, (CONTROL, CONTROL_PAUSE), &[], S_OK)?;
+        check(a, l, fail, 12, T_RENDERER + FILTER_PAUSED, 1)?;
+        check(a, l, fail, 13, T_TRANSFORM + FILTER_PAUSED, 2)?;
+        method(a, l, fail, 14, (CONTROL, CONTROL_STOP), &[], S_OK)?;
+        method(a, l, fail, 15, (CONTROL, RELEASE), &[], 1)?;
+        method(a, l, fail, 16, (GRAPH, RELEASE), &[], 0)?;
+        // Both ends of each connection disconnected, and both filters
+        // left the graph.
+        check(a, l, fail, 17, T_IN + PIN_DISCONNECTS, 2)?;
+        check(a, l, fail, 18, T_OUT + PIN_DISCONNECTS, 2)?;
+        check(a, l, fail, 19, T_RENDERER_IN + PIN_DISCONNECTS, 2)?;
+        check(a, l, fail, 20, T_TRANSFORM + FILTER_JOINED, 0)?;
+        check(a, l, fail, 21, T_RENDERER + FILTER_JOINED, 0)?;
         exit(a, l, &mut fail, Imm(0))
     });
     let mut cpu = machine(
-        "renderer",
+        "transform",
         exe,
         &[("CLIP.MPG", super::win32_winmm_tests::clip())],
     );

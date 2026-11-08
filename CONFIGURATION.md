@@ -175,25 +175,26 @@ limit, so without a connection it goes on as it would with one:
   stops where the frame rate stops following (a game that caps its own
   frame rate) or reaches the display's refresh rate (frames nobody sees,
   and some games, such as Descent, play badly at such rates), and goes
-  down while the program waits for a key or calls DOS's idle interrupt.
-  It then tries lower speeds, down to where they cost more than 3% of
-  the frame rate. A speed the host falls behind at is left for a lower
-  one, and the limit that sets rises again while the host keeps up. A
-  real-mode program with no frames to go by (most games of the 1980s,
-  which update the screen piecemeal) runs at 3000, about a 286, as in
-  DOSBox's `cycles=auto`. A protected-mode one runs at max while it
-  reads and writes (loading, computing), and otherwise goes down to
-  20000, a 486's speed, or a quarter of a faster `cpu` model's clock
-  (50000 on a Pentium, 112500 on a Pentium II), no more than the host
-  has. `auto 10000` makes that real-mode speed, and the least `auto`
-  goes down to, 10000. `max` runs everything as fast as the host keeps
-  up with in real time. Use a number such as `3000` for a fixed speed.
-  `--cycles` overrides it. Loading a [save state](README.md#save-states)
-  keeps the speed the machine runs at (this setting, `--cycles`, or the
-  last one the window, the speed keys or `/api/speed` set): a fixed
-  speed and `max` go on at the rate they had, and `auto` starts its
-  search from the rate the state was saved at. Only `--deterministic`
-  runs at the state's speed.
+  down while the program waits for a key or calls DOS's idle interrupt. It
+  then tries lower speeds, down to where they cost more than 3% of the
+  frame rate. A speed the host falls behind at is left for a lower one,
+  and the limit that sets rises again while the host keeps up. A real-mode
+  program with no frames to go by (most games of the 1980s, which update
+  the screen piecemeal) runs at 3000, about a 286, as in DOSBox's
+  `cycles=auto`. A protected-mode one runs at max while it reads and
+  writes (loading, computing), and otherwise goes down to 20000, a 486's
+  speed, or a quarter of a faster `cpu` model's clock (50000 on a Pentium,
+  112500 on a Pentium II), no more than the host has. Resetting the Sound
+  Blaster, as a sound driver does before it times the card with delay
+  loops, ends the loading speed at once. `auto 10000` makes that real-mode
+  speed, and the least `auto` goes down to, 10000. `max` runs everything
+  as fast as the host keeps up with in real time. Use a number such as
+  `3000` for a fixed speed. `--cycles` overrides it. Loading a [save
+  state](README.md#save-states) keeps the speed the machine runs at (this
+  setting, `--cycles`, or the last one the window, the speed keys or
+  `/api/speed` set): a fixed speed and `max` go on at the rate they had,
+  and `auto` starts its search from the rate the state was saved at. Only
+  `--deterministic` runs at the state's speed.
 * `auto_fps` is the frame rate `cycles=auto` aims for: `auto`, the
   default, is the display's refresh rate (the 3dfx card's while it
   shows), and a number from 10 to 240 takes its place. A lower one, such
@@ -504,7 +505,9 @@ limit, so without a connection it goes on as it would with one:
   OpenGL driver (`3dfxVGL.dll`, which draws with `GLIDE3X.DLL`), gets
   GDI32's `ChoosePixelFormat`, `SetPixelFormat`, `GetPixelFormat`,
   `DescribePixelFormat` and `SwapBuffers`, as Windows' GDI32 calls the
-  loaded OpenGL32's.
+  loaded OpenGL32's. It takes the folder's `glu32.dll` with it, if
+  there is one, since the built-in GLU32.DLL draws only through the
+  built-in OpenGL32.
 * `win32_version` is the version of Windows the built-in Windows is:
   `95` (the default), `98` or `98se` (Windows 98 Second Edition). It is
   what GetVersion and GetVersionEx say (4.00.950, 4.10.1998 or 4.10.2222
@@ -797,6 +800,12 @@ programs set.
   filters as the model in `sbtype` does, at 4.8 kHz on an SB 2.0, 3.2 kHz
   on an SB Pro and half the sample rate on an SB16; `off` leaves the
   sound as the card makes it.
+* `sb_coupling` is the capacitor on the Sound Blaster's output, a
+  high-pass at 3 Hz: `on` (the default) or `off`. A card's DAC holds its
+  last sample until the next, and with the capacitor that level fades
+  out of the mix within a fraction of a second, as on the real card;
+  `off` mixes the DAC's level as it is, so a level a program leaves the
+  card at stays in the mix as a constant offset.
 * `reverb` adds a room to the music of the FM synthesizer, the Gravis
   Ultrasound and MIDI: `off` (the default), `tiny`, `small`, `medium`,
   `large` or `huge`. `chorus` thickens them: `off` (the default),
@@ -1892,59 +1901,68 @@ lists the options. Each drive keeps its own current directory, as in DOS.
 
 A CD image always makes a read-only CD-ROM drive, labelled with the disc's
 volume name unless `-label` says otherwise. It can be a CUE sheet (`.cue`,
-GOG's `.ins`, GOG's `.bdn` for BloodNet, or a file of any other name that is
-at most 64 KiB and reads as a sheet; with BINARY, MOTOROLA or WAVE files,
-any number of tracks and gaps), a CD image in MAME's compressed CHD format
-(`.chd`, as `chdman createcd` makes them; its data and audio tracks,
+GOG's `.ins`, GOG's `.bdn` for BloodNet, or a file of any other name that
+is at most 64 KiB and reads as a sheet; with BINARY, MOTOROLA or WAVE
+files, any number of tracks and gaps), a CD image in MAME's compressed CHD
+format (`.chd`, as `chdman createcd` makes them; its data and audio tracks,
 decompressed as they are read), a BlindWrite 5 or 6 image (the `.b5t` or
 `.b6t` descriptor, with its `.b5i` or `.b6i` data files and the `.b00`,
-`.b01`... BlindWrite split them into, beside it), or a bare image of a data
-track in 2048, 2336 or 2352-byte sectors (`.iso`, `.bin`, `.img`, GOG's
-`.gog`). The data track can be ISO 9660 or High Sierra, the format of discs
-mastered before ISO 9660. Audio tracks can be Ogg Vorbis, FLAC or MP3 files
-(FILE ... MP3, OGG or FLAC, or WAVE as many sheets call them), and WAVE
-files at other rates: they are decoded to CD audio as they play. Programs
-run from the image as from any other drive. DOS programs see the names of
-the disc's ISO 9660 tree, as MSCDEX shows them; Windows programs on the
-built-in Windows see its Joliet long names where the disc has them, as on
-Windows 95.
+`.b01`... BlindWrite split them into, beside it), a CloneCD image (the
+`.ccd` descriptor that CloneCD and DiscImageCreator write, with the `.img`
+of the same name beside it; discs of one session, data tracks stored
+unscrambled), an Alcohol 120% image (the `.mds` descriptor, version 1 as
+Alcohol 120% writes it, with its `.mdf` data file beside it; a CD's, of
+any number of sessions), or a bare image of a data track in 2048, 2336 or
+2352-byte sectors (`.iso`, `.bin`, `.img`, GOG's `.gog`). The data track
+can be ISO 9660 or High Sierra, the format of discs mastered before ISO
+9660. Audio tracks can be Ogg Vorbis, FLAC or MP3 files (FILE ... MP3, OGG
+or FLAC, or WAVE as many sheets call them), and WAVE files at other rates:
+they are decoded to CD audio as they play. Programs run from the image as
+from any other drive. DOS programs see the names of the disc's ISO 9660
+tree, as MSCDEX shows them; Windows programs on the built-in Windows see
+its Joliet long names where the disc has them, as on Windows 95.
 
-An image of whole 2352-byte sectors (a BIN, a CHD, or a BlindWrite image
-read in raw mode) keeps each data sector's EDC, and a sector whose EDC
-doesn't match its data reads as a drive reads it: as an error (MEDIUM
-ERROR, unrecovered read error, on the IDE drive; a CRC error through
-MSCDEX, and a data error when DOS reads a file over it). Some copy
-protections master such sectors on purpose and refuse to run when reading
-them succeeds, so an image as Redump makes it passes their check. Sectors
-with an EDC of 0, which tools that turn an ISO into a BIN leave, aren't
-checked.
+An image of whole 2352-byte sectors (a BIN, a CHD, a CloneCD image, or a
+BlindWrite or Alcohol 120% image read in raw mode) keeps each data
+sector's EDC, and a sector whose EDC doesn't match its data reads as a
+drive reads it: as an error (MEDIUM ERROR, unrecovered read error, on the
+IDE drive; a CRC error through MSCDEX, and a data error when DOS reads a
+file over it). Some copy protections, SafeDisc 1 among them, master such
+sectors on purpose and refuse to run when reading them succeeds, so an
+image as Redump or CloneCD makes it passes their check, and an ISO of the
+same disc fails it. Sectors with an EDC of 0, which tools that turn an ISO
+into a BIN leave, aren't checked.
 
 The IDE drive also reads each sector's subchannel: READ CD returns it after
 the sector (raw P-W, formatted Q, or R-W), and READ SUB-CHANNEL reports the
 Q at the head (where audio plays, or else the last sector read or sought)
-and the disc's catalog number. A BlindWrite image read with subchannel
-(2448-byte sectors) keeps what the disc had, deliberately bad Q included,
-and so does a subchannel file beside a CUE sheet or bare image: a file
-named as the sheet or one of its data files, with the extension `.sub`
-(CloneCD's and DiscImageCreator's, each channel's 12 bytes after the one
-before, from sector 0) or `.subcode` (redumper's, raw and interleaved, from
-the lead-in on), 96 bytes a sector. Which of the two layouts a file has,
-and where it starts, is found from the Q positions in it, whatever its
-extension; a file whose size isn't whole sectors, or whose Qs agree on
-neither layout, is left alone, and the next one named so is looked for.
-Redump's downloads leave the subchannel out, but their dump logs have it
-(`<name>.sub`): put it beside the CUE sheet under the sheet's name. For
-other images and sectors the drive makes P and Q from the disc's layout,
-with R-W empty. A Q whose CRC is bad reads back as it is through READ CD,
-and READ SUB-CHANNEL reports the layout's position in its place, as a drive
-keeps the last good one. MSCDEX's Q channel reports the same position. The
-catalog number and the tracks' copy and pre-emphasis flags come from a
-BlindWrite descriptor, or from a CUE sheet's CATALOG and FLAGS, and both
-the IDE drive and MSCDEX report them. BlindWrite's data position
-measurement (DPM, in the descriptor or a `.bwa` file) is read, but the
-drive doesn't time its reads by it yet
-([#591](https://github.com/dividebysandwich/rust-dos/issues/591)), so a
-protection that measures sector angles may not pass.
+and the disc's catalog number. A BlindWrite or Alcohol 120% image read with
+subchannel (2448-byte sectors) keeps what the disc had, deliberately bad Q
+included, and so does a subchannel file beside a CUE sheet, CloneCD
+descriptor or bare image: a file named as the sheet or one of its data
+files, with the extension `.sub` (CloneCD's and DiscImageCreator's, each
+channel's 12 bytes after the one before, from sector 0) or `.subcode`
+(redumper's, raw and interleaved, from the lead-in on), 96 bytes a sector.
+Which of the two layouts a file has, and where it starts, is found from the
+Q positions in it, whatever its extension; a file whose size isn't whole
+sectors, or whose Qs agree on neither layout, is left alone, and the next
+one named so is looked for. Redump's downloads leave the subchannel out, but
+their dump logs have it (`<name>.sub`): put it beside the CUE sheet under
+the sheet's name. For other images and sectors the drive makes P and Q from
+the disc's layout, with R-W empty. A Q whose CRC is bad reads back as it is
+through READ CD, and READ SUB-CHANNEL reports the layout's position in its
+place, as a drive keeps the last good one. MSCDEX's Q channel reports the
+same position. The catalog number and the tracks' copy and pre-emphasis
+flags come from a BlindWrite descriptor, a CloneCD descriptor's CATALOG and
+control bits, or from a CUE sheet's CATALOG and FLAGS, and both the IDE
+drive and MSCDEX report them; the flags also come from an Alcohol 120%
+descriptor. The data position measurement (DPM) that BlindWrite keeps in its
+descriptor or a `.bwa` file, and Alcohol 120% in its descriptor, says where
+the pressed disc had its sectors, and the drive takes the time to reach them
+there when it times a read
+([#591](https://github.com/dividebysandwich/rust-dos/issues/591)). Copy
+protections such as SecuROM 4.8 and StarForce time reads to check where
+sectors are.
 
 The type of a drive is the word after the path in `[drives]`, or `-t` at
 the prompt:

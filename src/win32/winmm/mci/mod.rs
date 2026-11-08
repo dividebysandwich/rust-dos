@@ -783,12 +783,15 @@ fn send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         MCI_SEEK | MCI_STEP => 8,
         _ => 4,
     };
-    if at == 0
-        && !matches!(
-            msg,
-            MCI_CLOSE | MCI_STOP | MCI_PAUSE | MCI_RESUME | MCI_BREAK
-        )
-    {
+    // A play or a seek whose flags name no field of its parameters, such
+    // as MCI_SEEK_TO_END, runs without them on Windows 98, which Drakan's
+    // CD check counts on.
+    let needs_no_parms = match msg {
+        MCI_CLOSE | MCI_STOP | MCI_PAUSE | MCI_RESUME | MCI_BREAK => true,
+        MCI_PLAY | MCI_SEEK => flags & (MCI_NOTIFY | MCI_FROM | MCI_TO) == 0,
+        _ => false,
+    };
+    if at == 0 && !needs_no_parms {
         return Some(MCIERR_NULL_PARAMETER_BLOCK);
     }
     if at != 0 && !cpu.bus.guest_probe(at, size as usize, true) {

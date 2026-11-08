@@ -510,6 +510,24 @@ impl SoundBlaster {
             && self.out.iter().all(|&f| f == (0, 0))
     }
 
+    /// Whether the DAC's output reaches the mix: the speaker switch (DSP
+    /// commands D1h and D3h) is on, or the card is an SB16, whose output
+    /// that switch doesn't cut.
+    pub fn output_on(&self) -> bool {
+        self.speaker_on || self.config.model.is_sb16()
+    }
+
+    /// The level the DAC holds while nothing else goes on: no transfer or
+    /// silence period runs, and the frames not yet taken carry that level
+    /// too. The card's output coupling takes such a level out of the
+    /// sound.
+    pub fn held_level(&self) -> Option<(i16, i16)> {
+        let held = self.transfer.is_none()
+            && self.silence.is_none()
+            && self.out.iter().all(|&f| f == self.dac);
+        held.then_some(self.dac)
+    }
+
     /// Run the DSP up to `now`: the DMA units due by then, and the IRQ of a
     /// block that ends.
     fn run_to(&mut self, now: u64, dma: &mut Dma, ram: &[u8]) {

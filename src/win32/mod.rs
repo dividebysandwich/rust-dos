@@ -30,6 +30,7 @@ mod dplayx;
 mod dshow;
 mod dsound;
 pub mod gdi32;
+mod glu32;
 mod glide;
 pub(crate) mod heap;
 mod imagehlp;
@@ -38,7 +39,7 @@ pub(crate) mod kernel32;
 mod launcher;
 pub(crate) mod loader;
 mod lz32;
-mod mapping;
+pub(crate) mod mapping;
 pub(crate) mod memory;
 mod mpr;
 mod msacm32;
@@ -50,6 +51,8 @@ pub(crate) mod object;
 mod ordinals;
 mod ole32;
 mod oleaut32;
+mod oledlg;
+mod olepro32;
 mod opengl32;
 mod advpack;
 pub(crate) mod realmode;
@@ -77,6 +80,20 @@ mod wsock32;
 
 pub use snapshot::snapshot;
 pub use stubs::function_name;
+
+/// Handlers for functions of the built-in DLL `$dll` that aren't written
+/// yet, each calling `not_written` with its name and the value it fails
+/// with from guest code: `handler: "Name" => failed`.
+macro_rules! not_written_handlers {
+    ($dll:expr; $($handler:ident: $name:literal => $failed:expr),* $(,)?) => {
+        $(
+            fn $handler(cpu: &mut crate::cpu::Cpu, _: &[u32]) -> Option<u32> {
+                crate::win32::not_written(cpu, $dll, $name, $failed)
+            }
+        )*
+    };
+}
+pub(crate) use not_written_handlers;
 
 /// `State` for an enum whose variants have named fields (or `{}`), as the
 /// variant's place in the list and then its fields.
@@ -1250,12 +1267,28 @@ fn guest_caller(cpu: &Cpu) -> Option<String> {
 /// guest code (`loader::GUEST`) calls it, the call fails: it returns 0
 /// with ERROR_CALL_NOT_IMPLEMENTED, and its stub pops the arguments.
 fn missing(cpu: &mut Cpu, index: u16) {
-    let caller = peek_32(cpu, cpu.esp()).unwrap_or(0);
     let (dll, function) = process(cpu)
         .missing
         .get(index as usize)
         .cloned()
         .unwrap_or_default();
+    if let Some(result) = not_written(cpu, &dll, &function, 0) {
+        cpu.set_eax(result);
+        cpu.set_eip(cpu.eip().wrapping_add(4));
+    }
+}
+
+/// A call of `function`, which the built-in DLL `dll` exports but has
+/// no code for yet: what a call of a missing function does (`missing`).
+/// From guest code the call fails with ERROR_CALL_NOT_IMPLEMENTED and
+/// the result is `Some(failed)`, the value the function fails with (0,
+/// or E_NOTIMPL for one returning an HRESULT, where 0 is S_OK);
+/// otherwise the program ends, saying what it needed, and the result is
+/// None. For the handler of such a function in a DLL's table, where it
+/// has to be for programs that import it by ordinal
+/// (`not_written_handlers`).
+fn not_written(cpu: &mut Cpu, dll: &str, function: &str, failed: u32) -> Option<u32> {
+    let caller = peek_32(cpu, cpu.esp()).unwrap_or(0);
     if let Some(module) = guest_caller(cpu) {
         let message = format!(
             "[W32] {} called {}'s function {} (from {:08X}), which the built-in \
@@ -1264,9 +1297,7 @@ fn missing(cpu: &mut Cpu, index: u16) {
         );
         cpu.bus.log_string(&message);
         process(cpu).last_error = ERROR_CALL_NOT_IMPLEMENTED;
-        cpu.set_eax(0);
-        cpu.set_eip(cpu.eip().wrapping_add(4));
-        return;
+        return Some(failed);
     }
     let message = format!(
         "{} needs {}'s function {} (called from {:08X}), which the built-in Windows doesn't have yet.",
@@ -1278,6 +1309,7 @@ fn missing(cpu: &mut Cpu, index: u16) {
     cpu.bus.log_string(&format!("[W32] {}", message));
     say(cpu, &message);
     exit(cpu, FAILED);
+    None
 }
 
 /// Say `message` on standard error (DOS's handle 2).

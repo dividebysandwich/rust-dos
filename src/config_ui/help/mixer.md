@@ -38,6 +38,13 @@ real PC. Leave it **on**, unless you like the raw square wave.
 model did, making old low-quality samples less hissy. **off** plays them
 unfiltered: crisper, but harsher.
 
+# Sound Blaster coupling {#sb-coupling}
+
+The capacitor on the real card's output. A program can leave the card's
+DAC at a level other than silence; with this **on**, that level fades
+out within a fraction of a second, as on the real card. **off** keeps it
+in the mix as a constant offset, heard as a thump when it changes.
+
 # Reverb {#reverb}
 
 Adds the echo of a room, from **tiny** to **huge**, to the music of the FM
