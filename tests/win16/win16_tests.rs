@@ -174,6 +174,25 @@ fn cli_and_sti_go_on_in_a_task() {
 }
 
 #[test]
+fn cli_at_offset_28h_goes_on_in_a_task() {
+    // The #GP of a task's CLI at offset 28h pushes an error code and an
+    // EIP of 28h, where a frame from level 0 has its CS, the system's
+    // level 0 code segment. It is still the task's fault, and CLI goes
+    // on. Exit code 7 if it did.
+    let mut code = Code::new();
+    code.emit(&[0x90; 0x28]);
+    assert_eq!(code.here(), 0x28);
+    code.emit(&[
+        0xFA, // cli
+        0xFB, // sti
+        0xB0, 0x07, // mov al,7
+    ])
+    .exit_al();
+    let (exit, log) = run("cli_at_28h", program(&code, CODE));
+    assert_eq!(exit, 7, "{log}");
+}
+
+#[test]
 fn a_real_mode_handler_a_task_set_runs_for_its_int() {
     // Windows 98 Setup's way of running code in real mode: the code goes
     // into a block of GlobalDOSAlloc, its address into the real-mode

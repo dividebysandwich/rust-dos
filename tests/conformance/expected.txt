@@ -265,7 +265,7 @@ kernel32/thread: skipped thread.c:763
 kernel32/thread: skipped thread.c:1020
 kernel32/thread: skipped thread.c:1248
 kernel32/time: time: 40 tests executed (0 marked as todo, 0 failures), 2 skipped.
-kernel32/time: skipped time.c:297
+kernel32/time: skipped time.c:308
 kernel32/time: skipped time.c:428
 kernel32/timer: timer: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
 kernel32/timer: skipped timer.c:42

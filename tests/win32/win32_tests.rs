@@ -1859,7 +1859,7 @@ fn a_program_runs_level_0_code_through_the_idt_as_on_windows_98() {
 
 /// SafeDisc 1's loader (Omikron's RUNTIME.EXE) goes on at level 0 with
 /// interrupts on: its divide error's handler returns to the program's code
-/// with CS 0008, leaving the user's EFLAGS (IF set), and that code divides
+/// with CS 0028, leaving the user's EFLAGS (IF set), and that code divides
 /// by zero again, through a handler that returns to level 3. A timer
 /// interrupt between the two comes from level 0, on the level 0 stack 8
 /// bytes below the top, so its frame lies where one from level 3 would.
@@ -1915,7 +1915,7 @@ fn a_timer_interrupt_in_level_0_code_returns_to_it() {
             a.div(ecx)?;
             // Level 0, interrupts on, ESP 8 bytes below the stack's top, or
             // 12 with a dword pushed: wait for an interrupt's frame (CS
-            // 0008) to appear below ESP.
+            // 0028) to appear below ESP.
             a.set_label(&mut level0)?;
             if pushed {
                 a.push(eax)?;
@@ -1923,7 +1923,7 @@ fn a_timer_interrupt_in_level_0_code_returns_to_it() {
             a.mov(dword_ptr(esp - 8), 0)?;
             a.mov(edx, 1_000_000)?;
             a.set_label(&mut spin)?;
-            a.cmp(dword_ptr(esp - 8), 8)?;
+            a.cmp(dword_ptr(esp - 8), 0x28)?;
             a.je(served)?;
             a.dec(edx)?;
             a.jnz(spin)?;
@@ -3409,23 +3409,27 @@ fn get_thread_context_of_a_new_thread_gives_its_starting_fpu() {
     assert_eq!(code, 7, "the checks that failed: {:03b} {text}", !code & 7);
 }
 
-/// GetStartupInfoW, which SafeDisc 1's loader looks up with
-/// GetProcAddress, is there as Windows 98 SE's stub: it takes its one
-/// argument, fails with ERROR_CALL_NOT_IMPLEMENTED and leaves the
-/// structure as it was.
-#[test]
-fn get_startup_info_w_is_a_stub_that_fails() {
+/// Check that KERNEL32's `name` is one of Windows 98 SE's stubs that
+/// fail: GetProcAddress finds it, and the call with `args` (pushed last
+/// first: `Some(offset)` the address of the data at `offset`, `None`
+/// NULL) returns 0 with the stack balanced, GetLastError gives
+/// ERROR_CALL_NOT_IMPLEMENTED (120), and the `len` bytes the call was to
+/// fill at offset `out` of the data, a multiple of 4, are as they were.
+fn check_failing_stub(test: &str, name: &str, args: &[Option<u32>], out: u32, len: u32) {
+    const NAME: u32 = 13;
+    assert!(NAME as usize + name.len() < 0x40 && out >= 0x40 && len.is_multiple_of(4));
     let names: &[&str] = &["GetModuleHandleA", "GetProcAddress", "GetLastError"];
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
-    let mut data = b"KERNEL32.DLL\0GetStartupInfoW\0".to_vec();
-    data.resize(0x40, 0);
-    data.resize(0x84, 0x5A);
+    let mut data = b"KERNEL32.DLL\0".to_vec();
+    data.extend_from_slice(name.as_bytes());
+    data.resize(out as usize, 0);
+    data.resize((out + len) as usize, 0x5A);
     let main = |a: &mut CodeAssembler, l: &Layout| {
         let mut end = a.create_label();
         a.xor(ebx, ebx)?;
         a.push(l.at(0) as i32)?;
         a.call(l.import(0))?;
-        a.push(l.at(13) as i32)?;
+        a.push(l.at(NAME) as i32)?;
         a.push(eax)?;
         a.call(l.import(1))?;
         a.mov(esi, eax)?;
@@ -3434,7 +3438,9 @@ fn get_startup_info_w_is_a_stub_that_fails() {
         a.test(esi, esi)?;
         a.je(end)?;
         a.mov(edi, esp)?;
-        a.push(l.at(0x40) as i32)?;
+        for arg in args.iter().rev() {
+            a.push(arg.map_or(0, |offset| l.at(offset) as i32))?;
+        }
         a.call(esi)?;
         a.test(eax, eax)?;
         check(a, false, 1)?;
@@ -3443,10 +3449,9 @@ fn get_startup_info_w_is_a_stub_that_fails() {
         a.call(l.import(2))?;
         a.cmp(eax, 120)?;
         check(a, false, 3)?;
-        // All 68 bytes of the structure are as they were.
         a.cld()?;
-        a.mov(edi, l.at(0x40) as u32)?;
-        a.mov(ecx, 17)?;
+        a.mov(edi, l.at(out) as u32)?;
+        a.mov(ecx, len / 4)?;
         a.mov(eax, 0x5A5A_5A5A)?;
         a.repe().scasd()?;
         check(a, false, 4)?;
@@ -3455,8 +3460,29 @@ fn get_startup_info_w_is_a_stub_that_fails() {
         a.ret()
     };
     let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
-    let (code, _) = run("startup_info_w", exe);
+    let (code, _) = run(test, exe);
     assert_eq!(code, 0x1F, "the checks that failed: {:05b}", !code & 0x1F);
+}
+
+/// GetStartupInfoW, which SafeDisc 1's loader looks up with
+/// GetProcAddress, is there as Windows 98 SE's stub: it takes its one
+/// argument, fails with ERROR_CALL_NOT_IMPLEMENTED and leaves the
+/// 68-byte structure as it was.
+#[test]
+fn get_startup_info_w_is_a_stub_that_fails() {
+    check_failing_stub("startup_info_w", "GetStartupInfoW", &[Some(0x40)], 0x40, 68);
+}
+
+/// SystemTimeToTzSpecificLocalTime, which Myth II 1.8.3 imports, is
+/// there as Windows 98 SE's stub: it takes its three arguments, fails
+/// with ERROR_CALL_NOT_IMPLEMENTED and leaves the SYSTEMTIME it was to
+/// fill as it was.
+#[test]
+fn system_time_to_tz_specific_local_time_is_a_stub_that_fails() {
+    let name = "SystemTimeToTzSpecificLocalTime";
+    // No time zone, the SYSTEMTIME given at 0x40, the one to fill at 0x50.
+    let args = &[None, Some(0x40), Some(0x50)];
+    check_failing_stub("tz_specific_local_time", name, args, 0x50, 16);
 }
 
 /// INT 68h, WDEB386's interface, as Windows 98 has it without the
@@ -3509,6 +3535,117 @@ fn hlt_raises_a_privileged_instruction_exception() {
         }),
     );
     assert_eq!(code, 1, "{}", text);
+}
+
+/// CLI and STI at level 3 go on with no exception, as Windows 98's VMM
+/// simulates them for the system VM. SafeDisc 2.30 brackets its writes
+/// to the IDT with them. A handler would end the program with 2.
+#[test]
+fn cli_and_sti_go_on_as_on_windows_98() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+    let (code, text) = run(
+        "cli_sti",
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            let mut setup = a.create_label();
+            a.call(setup)?;
+            a.push(2)?;
+            a.call(l.import(0))?;
+            a.int3()?;
+            a.set_label(&mut setup)?;
+            a.push(dword_ptr(0u64).fs())?;
+            a.mov(dword_ptr(0u64).fs(), esp)?;
+            a.cli()?;
+            a.sti()?;
+            a.cli()?;
+            a.sti()?;
+            a.push(1)?;
+            a.call(l.import(0))?;
+            a.int3()
+        }),
+    );
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// The GDT has Windows 98's level 0 flat code segment at 28h. SafeDisc
+/// 2.30 writes a gate of its own into the IDT with that selector and
+/// raises its vector from level 3 (INT 5, through a gate of level 3) to
+/// run its code at level 0. The code puts CR0 in EBX and returns, and
+/// the program ends with CR0's PE bit, 1.
+#[test]
+fn a_gate_to_selector_28h_runs_level_0_code() {
+    let (code, text) = run_through_gate_28h(
+        "gate_28h",
+        &[
+            0x0F, 0x20, 0xC3, // mov ebx, cr0
+            0xCF, // iretd
+        ],
+    );
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// A VxD service call at level 0, INT 20h and the service's dword, as
+/// SafeDisc 2.30's level 0 code makes one: the built-in Windows has no
+/// VxDs, so the program ends, naming the service and the INT's address.
+/// Bit 15 of the service's word marks a VxDJmp and isn't part of its
+/// number.
+#[test]
+fn a_vxd_call_at_level_0_names_the_service() {
+    let (code, text) = run_through_gate_28h(
+        "vxd_level0",
+        &[
+            0xCD, 0x20, // int 20h
+            0x3E, 0x81, 0x01, 0x00, // VMM's service 013Eh, as a VxDJmp
+        ],
+    );
+    assert_eq!(code, 0xFF, "{}", text);
+    assert!(text.contains("VxD 0001h's service 013Eh"), "{}", text);
+    // The INT, at 30h of the data section, which starts at a page.
+    let at = text
+        .split_once("doesn't have at 0028:")
+        .and_then(|(_, rest)| u32::from_str_radix(rest.get(..8)?, 16).ok());
+    assert_eq!(at.map(|at| at & 0xFFF), Some(0x30), "{}", text);
+}
+
+/// Run `level0` at level 0, as SafeDisc 2.30 does: at 30h of the data
+/// section, through a gate of level 3 for vector 5 with selector 28h. The
+/// program ends with EBX's bit 0 after it returns.
+fn run_through_gate_28h(name: &str, level0: &[u8]) -> (u8, String) {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+    let mut data = vec![0u8; 0x40];
+    data[0x30..0x30 + level0.len()].copy_from_slice(level0);
+    run(
+        name,
+        program(BASE, false, imports, &data, |a, l| {
+            // The IDT's base, from SIDT's 6 bytes at 0, and vector 5's
+            // gate, kept at 10h.
+            a.sidt(ptr(l.at(0)))?;
+            a.mov(esi, dword_ptr(l.at(2)))?;
+            a.add(esi, 5 * 8)?;
+            a.mov(eax, dword_ptr(esi))?;
+            a.mov(dword_ptr(l.at(0x10)), eax)?;
+            a.mov(eax, dword_ptr(esi + 4))?;
+            a.mov(dword_ptr(l.at(0x14)), eax)?;
+            // A 32-bit interrupt gate of level 3 to the code at 30h,
+            // selector 28h.
+            a.mov(eax, l.at(0x30) as u32)?;
+            a.mov(word_ptr(esi), ax)?;
+            a.mov(word_ptr(esi + 2), 0x28)?;
+            a.mov(word_ptr(esi + 4), 0xEE00)?;
+            a.shr(eax, 16)?;
+            a.mov(word_ptr(esi + 6), ax)?;
+            a.xor(ebx, ebx)?;
+            a.int(5)?;
+            // Put the gate back.
+            a.mov(eax, dword_ptr(l.at(0x10)))?;
+            a.mov(dword_ptr(esi), eax)?;
+            a.mov(eax, dword_ptr(l.at(0x14)))?;
+            a.mov(dword_ptr(esi + 4), eax)?;
+            a.and(ebx, 1)?;
+            a.push(ebx)?;
+            a.call(l.import(0))?;
+            a.int3()
+        }),
+    )
 }
 
 /// C.DLL, whose entry point returns FALSE, and exports F.
