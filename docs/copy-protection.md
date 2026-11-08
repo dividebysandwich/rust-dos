@@ -23,13 +23,17 @@ disc as it is.
 
 ## Which protections run
 
-| Protection | Built-in Windows | Booted Windows 95 or 98 image | The image it needs |
-|---|---|---|---|
-| SafeDisc 1 | The check passes (Discworld Noir) | Not tried | Whole 2352-byte sectors: BIN and CUE, CHD, CloneCD, or BlindWrite or Alcohol 120% in raw mode |
-| SafeDisc 2 | Passes (Oni) | Passes (Anachronox, SafeDisc 2.30) | The same as SafeDisc 1 |
-| SecuROM 4.8 | The check passes (Grom, SecuROM 4.84) | Not tried | BlindWrite or Alcohol 120% with the subchannel and DPM data |
-| Other SecuROM versions, StarForce, LaserLock, CD-Cops and the rest | Not tried | Not tried | |
-| Code wheels, manual lookups | Yes | Yes | The manual or wheel as a PDF or picture (see [Manuals and code wheels](#manuals-and-code-wheels)) |
+| Protection | The image it needs | Games that pass it |
+|---|---|---|
+| SafeDisc 1 | Whole 2352-byte sectors: BIN and CUE, CHD, CloneCD, or BlindWrite or Alcohol 120% in raw mode | Discworld Noir (built-in Windows) |
+| SafeDisc 2 | The same as SafeDisc 1 | Oni (built-in Windows), Anachronox (SafeDisc 2.30, booted Windows) |
+| SecuROM 4.8 | BlindWrite or Alcohol 120% with the subchannel and DPM data | Grom (SecuROM 4.84, built-in Windows) |
+| Code wheels, manual lookups | The manual or wheel as a PDF or picture (see [Manuals and code wheels](#manuals-and-code-wheels)) | Any |
+
+For a protection not in the table, use the most complete image
+(BlindWrite or Alcohol 120% with subchannel and DPM data), and if the
+check fails, report it as [When the check fails](#when-the-check-fails)
+says.
 
 "The check passes" means the game gets past its disc check and stops
 later for another reason, which has an issue of its own:
@@ -40,13 +44,6 @@ later for another reason, which has an issue of its own:
 - **Grom** then asks Direct3D for 32-bit textures, which a Voodoo3
   doesn't have, on a real one either: the game's minimum is a later card
   ([#645](https://github.com/dividebysandwich/rust-dos/issues/645)).
-
-Discworld Noir's and Grom's checks passed with images made locally to
-keep what each check reads
-([#711](https://github.com/dividebysandwich/rust-dos/issues/711),
-[#630](https://github.com/dividebysandwich/rust-dos/pull/630)). A dump
-of either disc made with the tools in [Dumping a disc](#dumping-a-disc)
-hasn't been tried yet.
 
 **Anachronox** checks disc 2, as its readme says: keep disc 2 in the
 drive while playing. With disc 1 SafeDisc says it can't find the CD, on
@@ -95,15 +92,18 @@ profile, and Ctrl+Shift+M shows it over the game:
 
 | Tool | What it makes | Good for |
 |---|---|---|
-| redumper or DiscImageCreator | CUE, BIN and a `.subcode` or `.sub` subchannel file | SafeDisc |
+| Tool | What it makes | Good for |
+|---|---|---|
+| [redumper](https://github.com/superg/redumper) or [DiscImageCreator](https://github.com/saramibreak/DiscImageCreator) | CUE, BIN and a `.subcode` or `.sub` subchannel file | SafeDisc |
 | CloneCD | `.ccd`, `.img` and `.sub` (discs of one session) | SafeDisc |
-| BlindWrite 5 or 6, with subchannel and DPM | `.b5t` or `.b6t`, its data files, and a `.bwa` file with the DPM data | Everything in the table |
-| Alcohol 120%, with subchannel and DPM | `.mds` and `.mdf` | Everything in the table |
-| chdman (`chdman createcd`) from a CUE and BIN dump | `.chd` | SafeDisc; rust-dos reads no subchannel from a CHD |
+| [BlindWrite](https://www.vso-software.fr/products/blindwrite/) 5 or 6, with subchannel and DPM | `.b5t` or `.b6t`, its data files, and a `.bwa` file with the DPM data | Everything in the table |
+| [Alcohol 120%](https://www.alcohol-soft.com/), with subchannel and DPM | `.mds` and `.mdf` | Everything in the table |
+| [chdman](https://docs.mamedev.org/tools/chdman.html), from a CUE and BIN dump | `.chd` | SafeDisc; rust-dos reads no subchannel from a CHD |
 
-Use the tool's settings for an exact copy of the disc: raw sectors of
-2352 bytes, the subchannel, and DPM where the tool has it. Keep every
-file the tool makes together, under the names it gave them.
+Each tool's own documentation says how to make an exact copy with it:
+raw sectors of 2352 bytes, the subchannel, and DPM where the tool has
+it. Keep every file the tool makes together, under the names it gave
+them.
 
 Rust-DOS reads Alcohol 120% descriptors of version 1, of CDs, with the
 tracks in one `.mdf` file
