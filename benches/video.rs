@@ -389,6 +389,7 @@ criterion_group!(
     planar_dos_rows,
     cga_composite,
     voodoo::pipelines,
+    voodoo::blt_words,
     voodoo::frames,
     voodoo_dispatch::lookup
 );

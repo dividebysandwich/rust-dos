@@ -286,3 +286,82 @@ pub fn frames(c: &mut Criterion) {
     }
     group.finish();
 }
+
+/// A Voodoo2 at 640x480, as `card` sets it up, for the 2D engine.
+fn voodoo2(mirror: bool) -> Voodoo {
+    let mut v = Voodoo::with_workers(Board::Voodoo2, 0);
+    v.config_write(0x40, 1);
+    write(&mut v, FBI_INIT1, 10 << 4);
+    write(&mut v, FBI_INIT2, 150 << 11);
+    v.config_write(0x40, 0);
+    v.set_mirror(mirror);
+    v.set_software_picture(false);
+    v
+}
+
+/// A Voodoo3 with a 640x480 desktop at 1 MB that the 3D engine draws
+/// into, as a game in a window has it.
+fn voodoo3(mirror: bool) -> Voodoo {
+    use rust_dos::voodoo::banshee::render3d::{COL_BUFFER_ADDR, COL_BUFFER_STRIDE};
+    use rust_dos::voodoo::banshee::{
+        LFB_MEMORY_CONFIG, VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT, VID_PROC_CFG, VIDPROC_ENABLE,
+    };
+    let mut v = Voodoo::with_workers(Board::Voodoo3, 0);
+    let now = Now::default();
+    v.write(VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT, u32::MAX, now);
+    v.write(VID_PROC_CFG, VIDPROC_ENABLE | 1 << 18, u32::MAX, now);
+    v.write(LFB_MEMORY_CONFIG, 0x1FFF, u32::MAX, now);
+    let crtc = &mut v.banshee.as_mut().expect("a Voodoo3").crtc;
+    // 80 characters by 480 lines.
+    (crtc[0x01], crtc[0x12], crtc[0x07]) = (79, 0xDF, 0x02);
+    for (reg, value) in [(COL_BUFFER_ADDR, 0x10_0000), (COL_BUFFER_STRIDE, 1280)] {
+        reg3d(&mut v, reg, value);
+    }
+    v.set_mirror(mirror);
+    v.set_software_picture(false);
+    v
+}
+
+/// A 3D register of a Voodoo3, in its 3D window.
+fn reg3d(v: &mut Voodoo, reg: usize, data: u32) {
+    v.write(0x20_0000 + 4 * reg as u32, data, u32::MAX, Now::default());
+}
+
+/// A CPU-to-screen copy of a whole 640x480 picture of 16-bit pixels,
+/// two a bltData word, as Moto Racer copies its sky each frame. Each word
+/// checks the recording's layout (`mirror_sync`) when the OpenGL renderer
+/// records; the software renderer's words skip it.
+pub fn blt_words(c: &mut Criterion) {
+    const WORDS: u32 = 640 * 480 / 2;
+    let mut group = c.benchmark_group("video/voodoo/blt_words");
+    group.throughput(Throughput::Elements(WORDS as u64));
+    for (card, reg) in [
+        ("voodoo2", write as fn(&mut Voodoo, usize, u32)),
+        ("voodoo3", reg3d),
+    ] {
+        for (name, mirror) in [("software", false), ("gl", true)] {
+            let mut v = if card == "voodoo2" { voodoo2(mirror) } else { voodoo3(mirror) };
+            let base = if card == "voodoo2" { 0 } else { 0x10_0000 };
+            let mut copy = |v: &mut Voodoo| {
+                reg(v, BLT_ROP, 0xCCCC);
+                reg(v, BLT_DST_BASE_ADDR, base);
+                reg(v, BLT_XY_STRIDES, 1280 << 16);
+                reg(v, BLT_DST_XY, 0);
+                reg(v, BLT_SIZE, 479 << 16 | 639);
+                // CPU to screen, 16-bit pixels.
+                reg(v, BLT_COMMAND, 1 << 31 | 2 << 3 | 1);
+                for i in 0..WORDS {
+                    reg(v, BLT_DATA, i.wrapping_mul(0x9E37_79B9));
+                }
+                if mirror {
+                    black_box(v.take_mirror().expect("recording"));
+                } else {
+                    v.flush();
+                }
+            };
+            copy(&mut v);
+            group.bench_function(BenchmarkId::new(card, name), |b| b.iter(|| copy(&mut v)));
+        }
+    }
+    group.finish();
+}
