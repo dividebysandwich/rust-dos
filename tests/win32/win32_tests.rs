@@ -2726,9 +2726,9 @@ fn a_mapping_of_a_file_larger_than_memory_reads_pages_as_they_are_touched() {
     assert_eq!(text, "read from the mapping\r\n");
 }
 
-/// A view of a read-write mapping of a file writes back the pages that
-/// were read and changed, and leaves the rest of the file as it was. A
-/// bit each in the exit code.
+/// A view of a read-write mapping of a file writes back the pages it
+/// read, here one that it changed, and leaves the rest of the file as it
+/// was. A bit each in the exit code.
 #[test]
 fn a_read_write_mapping_writes_back_only_the_pages_it_read() {
     const GENERIC_READ_WRITE: i32 = 0xC000_0000u32 as i32;

@@ -239,29 +239,22 @@ fn with_process_at<T>(
 /// (the first page's) written to `old`.
 fn protect(cpu: &mut Cpu, index: usize, at: u32, size: u32, protect: u32, old: u32) -> Option<u32> {
     let range = page_range(at, size.max(1));
-    // The pages of a view of a file are committed: those not read yet
-    // are read first, to take the protection.
-    if let Some((first, end)) = range
-        && index == cpu.bus.win32.running
-    {
-        for page in (first..end).step_by(PAGE as usize) {
-            mapping::fault_in(cpu, page);
-        }
-    }
     let found = with_process_at(cpu, index, |p, bus| {
         let (first, end) = range?;
         let region = p.memory.region(first)?;
         if end > region.end() {
             return None;
         }
-        let entries: Vec<u32> = (first..end)
+        // The pages of a view of a file not read yet are committed, with
+        // the view's protection.
+        let states: Option<Vec<u32>> = (first..end)
             .step_by(PAGE as usize)
-            .map(|page| p.memory.entry(bus, page).unwrap_or(0))
+            .map(|page| {
+                protection(p.memory.entry(bus, page).unwrap_or(0))
+                    .or_else(|| mapping::unread_protection(bus, p, page))
+            })
             .collect();
-        if entries.contains(&0) {
-            return None;
-        }
-        protection(entries[0])
+        states?.first().copied()
     });
     if !valid_protection(protect) || old == 0 {
         set_error(cpu, ERROR_INVALID_PARAMETER);
@@ -276,11 +269,16 @@ fn protect(cpu: &mut Cpu, index: usize, at: u32, size: u32, protect: u32, old: u
         return None;
     }
     let (first, end) = range.expect("checked");
-    with_process_at(cpu, index, |p, bus| {
-        for page in (first..end).step_by(PAGE as usize) {
-            p.memory.set_protection(bus, page, protect & 0xFF);
-        }
-    });
+    for page in (first..end).step_by(PAGE as usize) {
+        // A page of a view of a file not read yet is read first, to take
+        // the protection, one page at a time. Reading a later page may
+        // evict an earlier one only if it kept the view's protection,
+        // which it has again when it is read again (`mapping::evict`).
+        mapping::fault_in_process(cpu, index, page);
+        with_process_at(cpu, index, |p, bus| {
+            p.memory.set_protection(bus, page, protect & 0xFF)
+        });
+    }
     if index == cpu.bus.win32.running {
         flush(cpu, first, end);
     }
