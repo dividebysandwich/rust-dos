@@ -598,6 +598,44 @@ fn output_and_input_can_be_redirected() {
     assert!(screen.contains("shown"), "{}", screen);
 }
 
+#[test]
+fn a_command_that_is_not_found_still_makes_its_output_file() {
+    // DOSBox's shell, as COMMAND.COM, opens the file before it looks for
+    // the program: Wolf runs `POWER.EXE > C:POWERFL` through COMMAND.COM
+    // and opens the file whether POWER.EXE is there or not.
+    let dir = scratch("redirect_not_found", &[("KEPT.TXT", b"kept")]);
+    let mut cpu = machine(&dir);
+    cpu.queue_batch_lines([
+        "@NOSUCH > C:MADE.TXT",
+        "@NOSUCH >> KEPT.TXT",
+        "@NOSUCH >> ADDED.TXT",
+        "@NOSUCH > NUL",
+    ]);
+    run_batch_files(&mut cpu);
+    assert_eq!(fs::read(dir.join("MADE.TXT")).unwrap(), b"");
+    assert_eq!(fs::read(dir.join("KEPT.TXT")).unwrap(), b"kept");
+    assert_eq!(fs::read(dir.join("ADDED.TXT")).unwrap(), b"");
+    assert!(!dir.join("NUL").exists());
+    let screen = screen(&cpu);
+    assert_eq!(screen.matches("Bad command or file name.").count(), 4, "{}", screen);
+}
+
+#[test]
+fn a_batch_file_started_with_a_redirection_makes_its_output_file() {
+    // COMMAND.COM makes the file before it looks for the command, and a
+    // batch file's own output still goes to the screen.
+    let dir = scratch(
+        "redirect_batch",
+        &[("SUB.BAT", b"@echo from the batch\r\n")],
+    );
+    let mut cpu = machine(&dir);
+    cpu.queue_batch_lines(["@SUB > BATOUT.TXT"]);
+    run_batch_files(&mut cpu);
+    assert_eq!(fs::read(dir.join("BATOUT.TXT")).unwrap(), b"");
+    let screen = screen(&cpu);
+    assert!(screen.contains("from the batch"), "{}", screen);
+}
+
 /// A .COM program that copies up to 20 bytes of standard input to standard
 /// output.
 const ECHO_IN: [u8; 23] = [
