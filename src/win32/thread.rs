@@ -446,6 +446,7 @@ fn signaled(objects: &Objects, id: u32, tid: u32) -> bool {
             exit_code.is_some()
         }
         Some(Kind::Dos { .. } | Kind::File { .. }) => true,
+        Some(Kind::Change { signaled, .. }) => *signaled,
         Some(Kind::Mapping { .. } | Kind::Find { .. }) | None => false,
     }
 }
@@ -519,6 +520,7 @@ fn try_wait(objects: &mut Objects, tid: u32, wait: &Wait) -> Option<u32> {
 /// What a wait for `wait` returns at once, if the running thread doesn't
 /// have to wait.
 pub fn wait_now(cpu: &mut Cpu, wait: &Wait) -> Option<u32> {
+    super::kernel32::change::poll(cpu, &wait.objects);
     let tid = process(cpu).current_thread()?.id;
     try_wait(&mut cpu.bus.win32.objects, tid, wait)
 }
@@ -580,6 +582,9 @@ pub fn wake(cpu: &mut Cpu) -> Vec<At> {
     super::dsound::tick(cpu);
     super::wnaspi32::tick(cpu);
     super::dplayx::poll(cpu);
+    // The change notifications the waiting threads wait for look at
+    // their directories again.
+    super::kernel32::change::poll_blocked(cpu);
     let now = cpu.bus.clock.now_micros();
     let win32 = &mut cpu.bus.win32;
     let running = current(win32);

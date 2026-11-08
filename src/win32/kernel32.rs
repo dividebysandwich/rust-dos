@@ -2,6 +2,7 @@
 //! the other parts in the modules below.
 
 pub(super) mod atom;
+pub(super) mod change;
 mod console;
 mod disk;
 mod env;
@@ -687,6 +688,9 @@ static APIS: &[Api] = &[
     // it was to fill stays as it was. Myth II 1.8.3 imports it and
     // calls it for the date of each saved game it lists.
     stdcall("SystemTimeToTzSpecificLocalTime", 764, 3, not_implemented),
+    stdcall("FindFirstChangeNotificationA", 282, 3, change::find_first),
+    stdcall("FindNextChangeNotification", 288, 1, change::find_next),
+    stdcall("FindCloseChangeNotification", 281, 1, change::find_close),
 ];
 
 /// The places in `APIS` of the system's own stubs.
