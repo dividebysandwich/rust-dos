@@ -1324,8 +1324,9 @@ fn glu_builds_mipmaps_of_an_image_of_no_power_of_two_and_sets_up_2d() {
     assert_eq!(r(11), GLU_INVALID_ENUM, "a depth image");
     assert_eq!(peek_string(&cpu, r(12)), "invalid enumerant");
     assert_eq!(peek_string(&cpu, r(13)), "1.2.2.0 Microsoft Corporation");
-    // The built-in OpenGL has no GL_EXT_bgra.
-    assert_eq!(peek_string(&cpu, r(14)), "");
+    // The built-in OpenGL lists GL_EXT_bgra on a Voodoo3, as 3dfx's ICD
+    // does, so GLU does too.
+    assert_eq!(peek_string(&cpu, r(14)), "GL_EXT_bgra");
     assert_eq!(r(25), 0, "glGetError");
     // The red texture in the bottom left quarter, the clear color
     // elsewhere.
