@@ -69,6 +69,14 @@ const CDS: u16 = DPBS + LASTDRIVE as u16 * DPB_SIZE;
 const CDS_SIZE: u16 = 0x58;
 /// The one disk buffer, a 14h-byte header and a sector.
 const DISK_BUFFER: u16 = CDS + LASTDRIVE as u16 * CDS_SIZE;
+/// The lead byte table of double-byte character sets (INT 21h AX=6300h
+/// and AX=6507h): a length word and the ranges, start and end byte each,
+/// ending with a zero word. Code page 437 has none, so the length is 0
+/// and the list is only its end, as in MS-DOS. It takes room left after
+/// the disk buffer, so the packed layout (`HIGH`) and with it where
+/// programs load stay as they were.
+pub const DBCS_TABLE: u16 = DISK_BUFFER + 0x14 + 0x200;
+const DBCS_TABLE_SIZE: u16 = 4;
 /// The expanded memory manager's Global EMM Import record for Windows
 /// (`ems::ioctl_read`).
 pub const EMM_IMPORT: u16 = 0x1D00;
@@ -77,7 +85,7 @@ pub const EMM_IMPORT: u16 = 0x1D00;
 pub const XMS_ENTRY: u16 = EMM_IMPORT + 0x200;
 const END: u16 = XMS_ENTRY + 0x10;
 
-const _: () = assert!(DISK_BUFFER + 0x14 + 0x200 <= EMM_IMPORT);
+const _: () = assert!(DBCS_TABLE + DBCS_TABLE_SIZE <= EMM_IMPORT);
 
 const _: () = assert!(DEVICE_RETF < DOSMGR_PATCHES && DOSMGR_PATCHES + 0x0E <= DEVICE_HEADERS);
 const _: () = assert!(
@@ -209,6 +217,7 @@ pub fn write(bus: &mut Bus) {
     }
     bus.write_8(address(SDA_FORMAT), 0x01);
     bus.write_16(address(CRIT_PATCHES), 0);
+    bus.write_32(address(DBCS_TABLE), 0);
     write_dosmgr_patches(bus);
     // What the last DOS call wrote into the SDA may be gone (the shell
     // clears low memory before it starts a program): until the next call

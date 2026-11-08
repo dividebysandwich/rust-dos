@@ -190,6 +190,11 @@ fails it as on Windows 98. Dump the CD with its error-correction data
   gluNurbsCurve, gluTessVertex and the other drawing functions do
   nothing, and gluNewQuadric, gluNewNurbsRenderer and gluNewTess return
   NULL (#741).
+- **OLE's dialogs, fonts and pictures.** OLEDLG.DLL and OLEPRO32.DLL
+  are there, so a program linked with MFC's OLE support starts, but of
+  their functions only OleTranslateColor, DllCanUnloadNow,
+  DllRegisterServer and DllUnregisterServer are written. Calling another
+  ends the program with a message naming it.
 - **Functions not written yet.** A program that calls one stops with a
   message naming it. Please
   [open an issue](https://github.com/dividebysandwich/rust-dos/issues)

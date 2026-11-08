@@ -6,7 +6,11 @@ name: Conformance
 # OpenWatcom, so they run in jobs of their own: on changes to what they
 # test, every night, and by hand.
 on:
+  # Pushes to main and tags only: a branch with a pull request runs through
+  # `pull_request`, whose runs a newer push cancels.
   push:
+    branches: [main]
+    tags: ["*"]
     paths: &paths
       - "src/win32/**"
       - "crates/pe/**"

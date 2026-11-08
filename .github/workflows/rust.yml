@@ -1,7 +1,13 @@
 name: Rust
 
 on:
+  # Pushes to main and tags only. A branch with a pull request runs through
+  # `pull_request`, whose runs a newer push cancels and whose builds
+  # `scope` picks; a push run of the same commit would build every target
+  # and run to the end however many commits replace it.
   push:
+    branches: [main]
+    tags: ["*"]
   # ready_for_review too, as drafts skip the release builds (see `scope`).
   # A pull request that changes only the documentation outside `src`
   # doesn't run this workflow: nothing reads it but the packages, which
