@@ -766,11 +766,13 @@ fn reset_dsp_at(bus: &mut Bus, base: u16) {
 /// (time constant 137), `blocks` times, while the mixer renders every
 /// 1/60 s as the window does and at every DSP write. The card plays a
 /// block in 19.99 ms, so between blocks its DAC holds the last sample.
-/// Returns the left samples rendered, without the output filter.
+/// Returns the left samples rendered, without the output filter and the
+/// capacitor on the card's output, so the DAC's level shows as it is.
 fn play_blocks(data: &[u8], blocks: usize) -> Vec<i16> {
     let mut bus = sb16();
     let mut settings = MixerSettings::default();
     settings.sb_filter = SbFilter::Off;
+    settings.sb_coupling = false;
     bus.set_mixer(settings);
     reset_dsp(&mut bus);
     dsp_write(&mut bus, 0x40);
@@ -881,6 +883,7 @@ fn a_reset_between_renders_keeps_the_sound_played_before_it() {
     let mut bus = sb16();
     let mut settings = MixerSettings::default();
     settings.sb_filter = SbFilter::Off;
+    settings.sb_coupling = false;
     bus.set_mixer(settings);
     reset_dsp(&mut bus);
     // Direct DAC output: a level the card holds.

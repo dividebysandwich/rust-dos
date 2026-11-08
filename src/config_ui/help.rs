@@ -399,6 +399,7 @@ impl Item {
             Deadzone => "deadzone",
             SpeakerFilter => "speaker-filter",
             SbFilter => "sb-filter",
+            SbCoupling => "sb-coupling",
             Reverb => "reverb",
             Chorus => "chorus",
             ReverbMix | ChorusMix => "effect-mix",
