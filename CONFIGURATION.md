@@ -12,8 +12,8 @@ of their own. See the [README](README.md) for everything else.
 * [Settings window](#settings-window)
 * [Game profiles](#game-profiles), [game fixes](#game-fixes) and
   [RetroAchievements](#retroachievements)
-* [Mounting drives](#mounting-drives), [disk images](#disk-images) and
-  [disk speed and noises](#disk-speed-and-noises)
+* [Mounting drives](#mounting-drives), [CD images](#cd-images), [disk
+  images](#disk-images) and [disk speed and noises](#disk-speed-and-noises)
 * [Networking at a glance](#networking-at-a-glance): what the IPX driver,
   rooms, relays and the network card each do
 * [Playing over a LAN](#playing-over-a-lan), [serial and modem
@@ -339,48 +339,51 @@ limit, so without a connection it goes on as it would with one:
   games. Not there: the Tandy 1000 SL/TL's DAC and 640x200 in 16
   colours, and the PCjr's cartridges.
 * `voodoo=true` adds a 3dfx Voodoo Graphics card to any of the display
-  adapters, for games that draw with Glide (see
-  [3dfx Voodoo Graphics](#3dfx-voodoo-graphics)); `false` is the default.
-  `voodoo_model` is `voodoo1` (the Voodoo Graphics, the default) or
-  `voodoo2` (see [3dfx Voodoo2](#3dfx-voodoo2)). `voodoo_memory` is `12`
-  (the default: 4 MB of frame buffer and two texture units with 4 MB each,
-  as DOSBox-X's card has), `8` (a Voodoo2 board: 4 MB and two texture
-  units with 2 MB each; it picks `voodoo2` when `voodoo_model` is unset) or
-  `4` (a retail Voodoo Graphics: 2 MB and one texture unit with 2 MB; a
-  Voodoo2 takes it as `8`). All three take effect at the DOS prompt.
-  `voodoo_texture_sampling` is `default` (preserves the game's filtering) or `unfiltered` (nearest-neighbour sampling). With supported
-  OpenGL anisotropy enabled, `unfiltered` also blends between mip levels
-  and allows anisotropic filtering to reduce shimmer, which may soften
-  textures; magnification stays nearest-neighbour. With anisotropy off,
-  or with software rendering, sampling stays strictly nearest-neighbour.
-  It works with both renderers and changes immediately; mip levels,
-  wrapping and clamping still follow the game.
-  `voodoo_renderer` is what draws the card's picture in the
+  adapters, for games that draw with Glide (see [3dfx Voodoo
+  Graphics](#3dfx-voodoo-graphics)); `false` is the default. `voodoo_model`
+  is `voodoo1` (the Voodoo Graphics, the default) or `voodoo2` (see [3dfx
+  Voodoo2](#3dfx-voodoo2)). `voodoo_memory` is `12` (the default: 4 MB of
+  frame buffer and two texture units with 4 MB each, as DOSBox-X's card
+  has), `8` (a Voodoo2 board: 4 MB and two texture units with 2 MB each; it
+  picks `voodoo2` when `voodoo_model` is unset) or `4` (a retail Voodoo
+  Graphics: 2 MB and one texture unit with 2 MB; a Voodoo2 takes it as `8`).
+  All three take effect at the DOS prompt. `voodoo_texture_sampling` is
+  `default` (preserves the game's filtering) or `unfiltered`
+  (nearest-neighbour sampling). With supported OpenGL anisotropy enabled,
+  `unfiltered` also blends between mip levels and allows anisotropic
+  filtering to reduce shimmer, which may soften textures; magnification
+  stays nearest-neighbour. With anisotropy off, or with software rendering,
+  sampling stays strictly nearest-neighbour. It works with both renderers
+  and changes immediately; mip levels, wrapping and clamping still follow
+  the game. `voodoo_renderer` is what draws the card's picture in the
   window: `software` (the default, rust-dos's own rasterizer) or `opengl`,
   which draws it again at `voodoo_scale` (1 to 4, 2 by default) times the
-  card's resolution (see [3dfx Voodoo Graphics](#3dfx-voodoo-graphics)),
-  with `voodoo_scale_shader` (`true`, the default, or `false`) whether the
-  CRT looks keep one scanline per line of the card's resolution (`false`
-  gives a line per pixel of the bigger picture, finer lines; it matters
-  only above 1x and with a CRT look),
-  with `voodoo_dither` (`true`, the default, or `false`) whether it
-  dithers to 16 bits a pixel as the card does where the game dithers
-  (`false` gives a smoother picture; see
-  [3dfx Voodoo Graphics](#3dfx-voodoo-graphics)),
-  with `voodoo_readback` (`gpu`, the default, or `exact`) whether what a
-  game reads back from the card's memory is OpenGL's picture or the
-  card's own pixels, which the software rasterizer then draws as well
-  (see [3dfx Voodoo Graphics](#3dfx-voodoo-graphics)),
-  with `voodoo_msaa` (`off`, the default, `2`, `4` or `8`) samples a
-  pixel of multisampled antialiasing and `voodoo_anisotropy` (`off`, the
-  default, `2`, `4`, `8` or `16`) filters textures at oblique angles;
-  `voodoo_fps_cap` (`off`, the default, or 10 to 240) is the most frames a
-  second games may show on the card (see
-  [3dfx Voodoo Graphics](#3dfx-voodoo-graphics));
-  `voodoo_gamma` (`off`, the default, or 0.1 to 2) is the gamma Glide
-  gives the card's picture (see [3dfx gamma](#3dfx-gamma));
-  without OpenGL 3 (in the browser, or with SDL's dummy video driver) the
-  software rasterizer's picture shows. Both change at once.
+  card's resolution (see [the 3dfx OpenGL
+  renderer](#the-3dfx-opengl-renderer)), with `voodoo_scale_shader` (`true`,
+  the default, or `false`) whether the CRT looks keep one scanline per line
+  of the card's resolution (`false` gives a line per pixel of the bigger
+  picture, finer lines; it matters only above 1x and with a CRT look), with
+  `voodoo_dither` (`true`, the default, or `false`) whether it dithers to 16
+  bits a pixel as the card does where the game dithers (`false` gives a
+  smoother picture; see [the 3dfx OpenGL
+  renderer](#the-3dfx-opengl-renderer)), with `voodoo_readback` (`gpu`, the
+  default, or `exact`) whether what a game reads back from the card's memory
+  is OpenGL's picture or the card's own pixels, which the software
+  rasterizer then draws as well (see [the 3dfx OpenGL
+  renderer](#the-3dfx-opengl-renderer)), with `voodoo_msaa` (`off`, the
+  default, `2`, `4` or `8`) samples a pixel of multisampled antialiasing and
+  `voodoo_anisotropy` (`off`, the default, `2`, `4`, `8` or `16`) filters
+  textures at oblique angles; `voodoo_fps_cap` (`off`, the default, or 10 to
+  240) is the most frames a second games may show on the card (see [3dfx
+  frame rate cap](#3dfx-frame-rate-cap)); `voodoo_gamma` (`off`, the
+  default, or 0.1 to 2) is the gamma Glide gives the card's picture (see
+  [3dfx gamma](#3dfx-gamma)); without OpenGL 3 (in the browser, or with
+  SDL's dummy video driver) the software rasterizer's picture shows. The
+  settings from `voodoo_texture_sampling` on change at once, `voodoo_gamma`
+  at the DOS prompt. `voodoo_renderer` and the OpenGL settings with it also
+  draw a Voodoo3 or Banshee display adapter (`machine=svga_voodoo3` or
+  `svga_banshee`; see [3dfx Voodoo3](#3dfx-voodoo3-and-banshee)), whose card
+  and memory don't depend on `voodoo`, `voodoo_model` or `voodoo_memory`.
 * `powervr=pcx1` or `pcx2` adds a PowerVR 3D card beside the display
   adapter, for games with a PowerVR version: the PCX1 (VideoLogic
   Apocalypse 3D) or the PCX2 (Matrox m3D, VideoLogic Apocalypse 3Dx; see
@@ -1400,7 +1403,7 @@ Windows. `windows=` in the profile's `[game]` picks which:
 |---|---|---|
 | What runs the game | rust-dos's own Windows: the system DLLs are written into the emulator, and the game starts from the DOS prompt | A real Windows 95 or 98, installed on a disk image that the profile's `[autoexec]` boots |
 | What you need besides the game | Nothing | A Windows CD, and the time to install Windows and its drivers on an image ([docs/win9x-howto.md](docs/win9x-howto.md)) |
-| What it runs | Games that use what the built-in DLLs have: GDI, DirectDraw, DirectSound, DirectInput, DirectPlay and DirectMusic of DirectX 3 to 6, Direct3D 5, 6 and 8, OpenGL and Glide 2 | What ran on that Windows with its drivers |
+| What it runs | Games that use what the built-in DLLs have: GDI, DirectDraw, DirectSound, DirectInput, DirectPlay and DirectMusic of DirectX 3 to 6, Direct3D 5, 6 and 8, OpenGL and Glide 2 and 3 | What ran on that Windows with its drivers |
 | State | Experimental: not every game runs yet | Depends on how well the emulated display, sound and 3D cards run their Windows drivers |
 
 Start with `windows=builtin`. If the game doesn't run there, see
@@ -1452,7 +1455,7 @@ profile:
 
 | Setting | Set it to | Why |
 |---|---|---|
-| `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too, and with the Banshee it is the only card Direct3D 8 and OpenGL run on. `GLIDE2X.DLL` and `GLIDE3X.DLL` are there only with a 3dfx card. GDI and DirectDraw games run on it too |
+| `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too. With the Banshee it is the only card Direct3D 8 runs on, and the only one OpenGL draws on in a window: on a Voodoo2 add-on card OpenGL draws full screen, and a Voodoo Graphics has none. [docs/3dfx.md](docs/3dfx.md) has the other cards. `GLIDE2X.DLL` and `GLIDE3X.DLL` are there only with a 3dfx card. GDI and DirectDraw games run on it too |
 | `cpu` | `pentium_ii` | The default 486 has no time stamp counter (RDTSC) or MMX, which many games of the time use: such a game stops with an invalid opcode. The Pentium II has both |
 | `memsize` | `64`, or `128` for a 3D game from 1998 on | The default 16 MB is less than most Windows 98 games asked for. The game's heaps and its DirectDraw surfaces come out of it, and it is what the game is told the machine has |
 | `win32_version` | `98se` | The setups and games tested with the built-in Windows were tested under Windows 98 SE. Under the default, `95`, a program that imports a function Windows 98 added doesn't start, and its message names this setting |
@@ -1899,71 +1902,6 @@ letter (`MOUNT 2 hdd.img`) mounts an image for the BIOS alone, as in
 DOSBox (see [Booting a disk image](#booting-a-disk-image)). `MOUNT /?`
 lists the options. Each drive keeps its own current directory, as in DOS.
 
-A CD image always makes a read-only CD-ROM drive, labelled with the disc's
-volume name unless `-label` says otherwise. It can be a CUE sheet (`.cue`,
-GOG's `.ins`, GOG's `.bdn` for BloodNet, or a file of any other name that
-is at most 64 KiB and reads as a sheet; with BINARY, MOTOROLA or WAVE
-files, any number of tracks and gaps), a CD image in MAME's compressed CHD
-format (`.chd`, as `chdman createcd` makes them; its data and audio tracks,
-decompressed as they are read), a BlindWrite 5 or 6 image (the `.b5t` or
-`.b6t` descriptor, with its `.b5i` or `.b6i` data files and the `.b00`,
-`.b01`... BlindWrite split them into, beside it), a CloneCD image (the
-`.ccd` descriptor that CloneCD and DiscImageCreator write, with the `.img`
-of the same name beside it; discs of one session, data tracks stored
-unscrambled), an Alcohol 120% image (the `.mds` descriptor, version 1 as
-Alcohol 120% writes it, with its `.mdf` data file beside it; a CD's, of
-any number of sessions), or a bare image of a data track in 2048, 2336 or
-2352-byte sectors (`.iso`, `.bin`, `.img`, GOG's `.gog`). The data track
-can be ISO 9660 or High Sierra, the format of discs mastered before ISO
-9660. Audio tracks can be Ogg Vorbis, FLAC or MP3 files (FILE ... MP3, OGG
-or FLAC, or WAVE as many sheets call them), and WAVE files at other rates:
-they are decoded to CD audio as they play. Programs run from the image as
-from any other drive. DOS programs see the names of the disc's ISO 9660
-tree, as MSCDEX shows them; Windows programs on the built-in Windows see
-its Joliet long names where the disc has them, as on Windows 95.
-
-An image of whole 2352-byte sectors (a BIN, a CHD, a CloneCD image, or a
-BlindWrite or Alcohol 120% image read in raw mode) keeps each data
-sector's EDC, and a sector whose EDC doesn't match its data reads as a
-drive reads it: as an error (MEDIUM ERROR, unrecovered read error, on the
-IDE drive; a CRC error through MSCDEX, and a data error when DOS reads a
-file over it). Some copy protections, SafeDisc 1 among them, master such
-sectors on purpose and refuse to run when reading them succeeds, so an
-image as Redump or CloneCD makes it passes their check, and an ISO of the
-same disc fails it. Sectors with an EDC of 0, which tools that turn an ISO
-into a BIN leave, aren't checked.
-
-The IDE drive also reads each sector's subchannel: READ CD returns it after
-the sector (raw P-W, formatted Q, or R-W), and READ SUB-CHANNEL reports the
-Q at the head (where audio plays, or else the last sector read or sought)
-and the disc's catalog number. A BlindWrite or Alcohol 120% image read with
-subchannel (2448-byte sectors) keeps what the disc had, deliberately bad Q
-included, and so does a subchannel file beside a CUE sheet, CloneCD
-descriptor or bare image: a file named as the sheet or one of its data
-files, with the extension `.sub` (CloneCD's and DiscImageCreator's, each
-channel's 12 bytes after the one before, from sector 0) or `.subcode`
-(redumper's, raw and interleaved, from the lead-in on), 96 bytes a sector.
-Which of the two layouts a file has, and where it starts, is found from the
-Q positions in it, whatever its extension; a file whose size isn't whole
-sectors, or whose Qs agree on neither layout, is left alone, and the next
-one named so is looked for. Redump's downloads leave the subchannel out, but
-their dump logs have it (`<name>.sub`): put it beside the CUE sheet under
-the sheet's name. For other images and sectors the drive makes P and Q from
-the disc's layout, with R-W empty. A Q whose CRC is bad reads back as it is
-through READ CD, and READ SUB-CHANNEL reports the layout's position in its
-place, as a drive keeps the last good one. MSCDEX's Q channel reports the
-same position. The catalog number and the tracks' copy and pre-emphasis
-flags come from a BlindWrite descriptor, a CloneCD descriptor's CATALOG and
-control bits, or from a CUE sheet's CATALOG and FLAGS, and both the IDE
-drive and MSCDEX report them; the flags also come from an Alcohol 120%
-descriptor. The data position measurement (DPM) that BlindWrite keeps in its
-descriptor or a `.bwa` file, and Alcohol 120% in its descriptor, says where
-the pressed disc had its sectors, and the drive takes the time to reach them
-there when it times a read
-([#591](https://github.com/dividebysandwich/rust-dos/issues/591)). Copy
-protections such as SecuROM 4.8 and StarForce time reads to check where
-sectors are.
-
 The type of a drive is the word after the path in `[drives]`, or `-t` at
 the prompt:
 
@@ -2028,6 +1966,79 @@ names the way DOSBox and Windows make them: the start of the name and a
 number, counted in sorted order per directory. `Day Of The Tentacle.BIN`
 and `Day Of The Tentacle.cue` are `DAYOFT~1.BIN` and `DAYOFT~2.CUE`. Both the
 long and the short name open the file.
+
+### CD images
+
+A CD image always makes a read-only CD-ROM drive, labelled with the disc's
+volume name unless `-label` says otherwise. It can be a CUE sheet (`.cue`,
+GOG's `.ins`, GOG's `.bdn` for BloodNet, or a file of any other name that
+is at most 64 KiB and reads as a sheet; with BINARY, MOTOROLA or WAVE
+files, any number of tracks and gaps), a CD image in MAME's compressed CHD
+format (`.chd`, as `chdman createcd` makes them; its data and audio tracks,
+decompressed as they are read), a BlindWrite 5 or 6 image (the `.b5t` or
+`.b6t` descriptor, with its `.b5i` or `.b6i` data files and the `.b00`,
+`.b01`... BlindWrite split them into, beside it), a CloneCD image (the
+`.ccd` descriptor that CloneCD and DiscImageCreator write, with the `.img`
+of the same name beside it; discs of one session, data tracks stored
+unscrambled), an Alcohol 120% image (the `.mds` descriptor, version 1 as
+Alcohol 120% writes it, with its `.mdf` data file beside it; a CD's, of
+any number of sessions), or a bare image of a data track in 2048, 2336 or
+2352-byte sectors (`.iso`, `.bin`, `.img`, GOG's `.gog`). The data track
+can be ISO 9660 or High Sierra, the format of discs mastered before ISO
+9660. Audio tracks can be Ogg Vorbis, FLAC or MP3 files (FILE ... MP3, OGG
+or FLAC, or WAVE as many sheets call them), and WAVE files at other rates:
+they are decoded to CD audio as they play. Programs run from the image as
+from any other drive. DOS programs see the names of the disc's ISO 9660
+tree, as MSCDEX shows them; Windows programs on the built-in Windows see
+its Joliet long names where the disc has them, as on Windows 95.
+
+An image of whole 2352-byte sectors (a BIN, a CHD, a CloneCD image, or a
+BlindWrite or Alcohol 120% image read in raw mode) keeps each data
+sector's EDC, and a sector whose EDC doesn't match its data reads as a
+drive reads it: as an error (MEDIUM ERROR, unrecovered read error, on the
+IDE drive; a CRC error through MSCDEX, and a data error when DOS reads a
+file over it). Some copy protections, SafeDisc 1 among them, master such
+sectors on purpose and refuse to run when reading them succeeds, so an
+image as Redump or CloneCD makes it passes their check, and an ISO of the
+same disc fails it. Sectors with an EDC of 0, which tools that turn an ISO
+into a BIN leave, aren't checked.
+
+The IDE drive also reads each sector's subchannel: READ CD returns it after
+the sector (raw P-W, formatted Q, or R-W), and READ SUB-CHANNEL reports the
+Q at the head (where audio plays, or else the last sector read or sought)
+and the disc's catalog number. A BlindWrite or Alcohol 120% image read with
+subchannel (2448-byte sectors) keeps what the disc had, deliberately bad Q
+included, and so does a subchannel file beside a CUE sheet, CloneCD
+descriptor or bare image: a file named as the sheet or one of its data
+files, with the extension `.sub` (CloneCD's and DiscImageCreator's, each
+channel's 12 bytes after the one before, from sector 0) or `.subcode`
+(redumper's, raw and interleaved, from the lead-in on), 96 bytes a sector.
+Which of the two layouts a file has, and where it starts, is found from the
+Q positions in it, whatever its extension; a file whose size isn't whole
+sectors, or whose Qs agree on neither layout, is left alone, and the next
+one named so is looked for. A dump made with redumper or DiscImageCreator
+writes its subchannel to such a file: keep it beside the CUE sheet, under
+the sheet's name. A CUE sheet with only its BIN files has no subchannel of
+the disc's own. For other images and sectors the drive makes P and Q from
+the disc's layout, with R-W empty. A Q whose CRC is bad reads back as it is
+through READ CD, and READ SUB-CHANNEL reports the layout's position in its
+place, as a drive keeps the last good one. MSCDEX's Q channel reports the
+same position. The catalog number and the tracks' copy and pre-emphasis
+flags come from a BlindWrite descriptor, a CloneCD descriptor's CATALOG and
+control bits, or from a CUE sheet's CATALOG and FLAGS, and both the IDE
+drive and MSCDEX report them; the flags also come from an Alcohol 120%
+descriptor. The data position measurement (DPM) that BlindWrite keeps in its
+descriptor or a `.bwa` file, and Alcohol 120% in its descriptor, says where
+the pressed disc had its sectors, and the drive takes the time to reach them
+there when it times a read. Reads on the IDE drive, and ASPI requests with
+an event on the built-in Windows, take the time a 40x drive takes to move
+its head, wait for the sector to come round and read it
+([#630](https://github.com/dividebysandwich/rust-dos/pull/630)); without DPM
+data the sectors lie on a pressed disc's usual spiral. Copy protections such
+as SecuROM 4.8 time reads to check where sectors are.
+
+[docs/copy-protection.md](docs/copy-protection.md) says which image a
+protected disc needs, and which protections run.
 
 ### Disk images
 
@@ -2183,10 +2194,11 @@ By default disks are as fast as the host. As in DOSBox Staging,
 mid-1990s (`fast`, ~15 MB/s), the early 1990s (`medium`, ~2.5 MB/s) or the
 1980s (`slow`, ~600 kB/s), and `floppy_disk_speed` floppies to extra-high
 (`fast`, ~120 kB/s), high (`medium`, ~60 kB/s) or double density (`slow`,
-~30 kB/s). Reading, writing, opening and loading files and INT 13h and
-INT 25h/26h sector transfers take that long in emulated time; the machine
-runs on meanwhile, so music and animations don't stop. CD-ROMs are not
-slowed down.
+~30 kB/s). Reading, writing, opening and loading files and INT 13h and INT
+25h/26h sector transfers take that long in emulated time; the machine runs
+on meanwhile, so music and animations don't stop. These settings don't apply
+to CD-ROMs; the IDE CD-ROM drive takes a real drive's time of its own (see
+[CD images](#cd-images)).
 
 `hard_disk_noise` and `floppy_disk_noise` in `[sound]` add the drives'
 noises, with DOSBox Staging's recordings: `seek-only` plays the heads
@@ -2559,6 +2571,10 @@ place of 32 bits).
 
 ## 3dfx Voodoo Graphics
 
+[docs/3dfx.md](docs/3dfx.md) says which 3dfx card a game needs, and the
+settings and drivers for each. This section and the ones after it are the
+reference.
+
 `voodoo=true` in `[emulator]` puts a 3dfx Voodoo Graphics in the machine,
 the 3D card DOS and Windows 95 games of 1996-1998 draw with through Glide:
 
@@ -2637,18 +2653,21 @@ level, the wider video fields of its resolutions up to 1024x768, fog
 dithering and the clamping of iterated colours, depth and W (fbzColorPath
 bit 28). The board is SLI-less: one card, as Glide sees a single Voodoo2.
 
-**Windows 98 SE** needs 3dfx's Voodoo2 driver, which neither Windows 98
-nor rust-dos comes with: the Windows 98 CD has drivers for the Voodoo
-Graphics and the Banshee only. Unpack 3dfx's reference driver 3.03.00
-(`rkv2dx6.exe`, which the Internet Archive keeps) into a folder Windows
-can read, such as a [host folder](#host-folders-in-a-booted-system). At
-its next start Windows finds the new PCI device and opens the Add New
-Hardware wizard: choose to search for the best driver, tick
-"Specify a location", give the folder that holds `voodoo2.inf`, and
-restart Windows when it is done. Device Manager then lists a "Voodoo2 3D
-Accelerator", and DirectDraw and Direct3D offer the card as "3dfxV2
-(Voodoo2 DirectX 6 Driver)", which Direct3D games that let you choose the
-3D card draw on.
+DOS games that bring the Voodoo2's `GLIDE2X.OVL` or Glide 3 run as on the
+Voodoo Graphics.
+
+**Windows 98 SE** needs 3dfx's Voodoo2 driver, which neither Windows 98 nor
+rust-dos comes with: the Windows 98 CD has drivers for the Voodoo Graphics
+and the Banshee only. Unpack 3dfx's reference driver 3.03.00 (`rkv2dx6.exe`,
+which the [Internet Archive keeps](https://archive.org/details/rkv2dx6))
+into a folder Windows can read, such as a [host
+folder](#host-folders-in-a-booted-system). At its next start Windows finds
+the new PCI device and opens the Add New Hardware wizard: choose to search
+for the best driver, tick "Specify a location", give the folder that holds
+`voodoo2.inf`, and restart Windows when it is done. Device Manager then
+lists a "Voodoo2 3D Accelerator", and DirectDraw and Direct3D offer the card
+as "3dfxV2 (Voodoo2 DirectX 6 Driver)", which Direct3D games that let you
+choose the 3D card draw on.
 
 #### OpenGL games under Windows
 
@@ -2700,8 +2719,7 @@ folders under `Program Files`). The copy runs at every start and
 overwrites the one the last start made, so the setup needs nothing else,
 and the image under it can stay the base of other games' setups.
 
-DOS games that bring the Voodoo2's `GLIDE2X.OVL` or Glide 3 run as on the
-Voodoo Graphics.
+### 3dfx frame rate cap
 
 `voodoo_fps_cap` caps the frames a second games show on the card, for an
 even pace without lowering `cycles`: a swap waits for the first multiple
@@ -2714,6 +2732,8 @@ picture and the cap is below its 60 Hz, the window refreshes at the cap's
 frame times. It doesn't apply to VGA games, whose frames come at the
 display's retraces they wait for.
 
+### 3dfx gamma
+
 `voodoo_gamma` sets Glide's gamma through the environment variables
 `SST_RGAMMA`, `SST_GGAMMA` and `SST_BGAMMA`, all three to the value. They
 are put into the guest's environment while the card is on and the guest
@@ -2722,6 +2742,8 @@ guest's from then on, and only the variables rust-dos put in are taken out
 again when the setting goes off or changes. Changes take effect at the DOS
 prompt. A save state keeps which variables rust-dos put in, and loading one
 puts in the variables the settings want.
+
+### The 3dfx OpenGL renderer
 
 With `voodoo_renderer=opengl` the window shows the card's picture drawn
 again with OpenGL, at `voodoo_scale` times the card's resolution: the same
@@ -2887,17 +2909,19 @@ on linear or tiled surfaces. The video processor shows the desktop in 8,
 16, 24 or 32 bits through the colour lookup table, with the overlay and
 the hardware cursor.
 
-**Windows 98 SE** needs 3dfx's Voodoo3 driver (version 1.07.00 was
-tried), which the Windows 98 CD doesn't have. Unpack its `driver9x`
-folder where Windows can read it. At the next start Windows finds a
-"Standard PCI Graphics Adapter (VGA)": choose to search for the best
-driver, tick "Specify a location", give the folder that holds
-`Voodoo3.inf`, and restart Windows when it is done. Windows then finds a
-"Plug and Play Monitor": the card answers on its DDC lines with an EDID
-for a CRT that takes up to 1600x1200 (DxDiag calls it "rust-dos CRT"),
-and the VESA BIOS hands the same EDID to programs that ask through
-4F15h. The card's interrupt, the vertical retrace one, is IRQ 11. The
-desktop was tried at 640x480 and 1024x768 in High Color.
+**Windows 98 SE** needs 3dfx's Voodoo3 driver (version 1.07.00 was tried,
+the [reference driver
+1.07.00](https://archive.org/details/3dfx-voodoo-3-reference-driver-1.07.00)
+on the Internet Archive), which the Windows 98 CD doesn't have. Unpack its
+`driver9x` folder where Windows can read it. At the next start Windows finds
+a "Standard PCI Graphics Adapter (VGA)": choose to search for the best
+driver, tick "Specify a location", give the folder that holds `Voodoo3.inf`,
+and restart Windows when it is done. Windows then finds a "Plug and Play
+Monitor": the card answers on its DDC lines with an EDID for a CRT that
+takes up to 1600x1200 (DxDiag calls it "rust-dos CRT"), and the VESA BIOS
+hands the same EDID to programs that ask through 4F15h. The card's
+interrupt, the vertical retrace one, is IRQ 11. The desktop was tried at
+640x480 and 1024x768 in High Color.
 
 The 3D engine draws into the buffers the driver points it at, linear or
 tiled, and a swap shows the buffer through the video processor. These
@@ -2914,31 +2938,32 @@ were tried on Windows 98 SE with the 1.07.00 driver:
 * Direct3D: Incoming (the GOG release, run without GOG's wrapper DLLs),
   its menus and the first level of its arcade game.
 
-The 1.07.00 driver's Direct3D needs DirectX 7, as its readme says;
-Windows 98 SE comes with 6.1. With 6.1 the driver takes the structure
-DirectDraw gives it when a program starts Direct3D for the one DirectX 7
-has, and faults: the program's window stays white and the card draws
-nothing. Install DirectX 7.0 (`dx70eng.exe`) or later first. Glover
-draws wrongly with 1.07.00 and needs the earlier 4.11.01.1151, which
-runs on 6.1 too; [docs/compatibility.md](docs/compatibility.md) names
-the games that need another driver.
+The 1.07.00 driver's Direct3D needs DirectX 7, as its readme says; Windows
+98 SE comes with 6.1. With 6.1 the driver takes the structure DirectDraw
+gives it when a program starts Direct3D for the one DirectX 7 has, and
+faults: the program's window stays white and the card draws nothing. Install
+DirectX 7.0 (`dx70eng.exe`) or later first. Glover draws wrongly with
+1.07.00 and needs the earlier 4.11.01.1151, from 3dfx's [Voodoo3 driver CD
+1.2](https://archive.org/details/voodoo3v12), which runs on 6.1 too;
+[docs/compatibility.md](docs/compatibility.md) names the games that need
+another driver.
 
-With `voodoo_renderer=opengl` the window's OpenGL draws the card's 3D
-at `voodoo_scale` times its resolution, as for the Voodoo Graphics (see
-[3dfx Voodoo Graphics](#3dfx-voodoo-graphics)), and puts the picture
-together as the card's video processor does: the desktop, the overlay
-(the window or screen a game shows its 3D through, scaled and in YUV
-too) and the cursor. A desktop or overlay that is a 16-bit buffer the 3D
-draws into, laid out as the 3D draws it, comes from the bigger picture;
-anything else (the Windows desktop, 8, 24 and 32-bit modes, YUV video)
-comes from the card's memory at its own resolution, with the drawing
-still queued for it done first. With `voodoo_readback=gpu`, the default,
-OpenGL alone draws the 3D, and what reads the card's memory reads back
-OpenGL's picture, as on the Voodoo2; with `voodoo_readback=exact` the
-software rasterizer keeps the memory as well, so programs read back what
-they would on the card. Screenshots and recordings show the software
-picture, which reads everything back. The libretro core draws a Banshee
-or Voodoo3 in software whatever `voodoo_renderer` says.
+With `voodoo_renderer=opengl` the window's OpenGL draws the card's 3D at
+`voodoo_scale` times its resolution, as for the Voodoo Graphics (see [the
+3dfx OpenGL renderer](#the-3dfx-opengl-renderer)), and puts the picture
+together as the card's video processor does: the desktop, the overlay (the
+window or screen a game shows its 3D through, scaled and in YUV too) and the
+cursor. A desktop or overlay that is a 16-bit buffer the 3D draws into, laid
+out as the 3D draws it, comes from the bigger picture; anything else (the
+Windows desktop, 8, 24 and 32-bit modes, YUV video) comes from the card's
+memory at its own resolution, with the drawing still queued for it done
+first. With `voodoo_readback=gpu`, the default, OpenGL alone draws the 3D,
+and what reads the card's memory reads back OpenGL's picture, as on the
+Voodoo2; with `voodoo_readback=exact` the software rasterizer keeps the
+memory as well, so programs read back what they would on the card.
+Screenshots and recordings show the software picture, which reads everything
+back. The libretro core draws a Banshee or Voodoo3 in software whatever
+`voodoo_renderer` says.
 
 The card is a port of 86Box's Banshee and Voodoo3 emulation
 (`vid_voodoo_banshee.c` and its 2D engine, by Sarah Walker, GPLv2, and

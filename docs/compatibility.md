@@ -59,7 +59,7 @@ that names the game, its settings and what happened.
 * **Bao Xiao San Guo Zhi** (`SANGO.EXE`): `pit2_gate_at_start=true` in
   its profile; [`[sound]`](../CONFIGURATION.md#sound) says why.
 * **BloodNet** (GOG): GOG's `.bdn` file mounts as a CUE sheet
-  ([disk images](../CONFIGURATION.md#disk-images)).
+  ([CD images](../CONFIGURATION.md#cd-images)).
 * **Descent**: keep `cycles=auto`, the default. A high fixed `cycles`
   runs it faster than the display's refresh rate, and it plays badly
   there.
@@ -139,11 +139,11 @@ opcode, `win32_version=98se` when a message names the version, more
   there only with a 3dfx card: `voodoo=true`, or
   `machine=svga_voodoo3` or `svga_banshee`
   ([the system folder](builtin-windows.md#the-system-folder)).
-* **SafeDisc 1 and 2 games**: use a CD image that keeps the
-  error-correction data (a BIN or CHD dumped Redump-style, or a CloneCD
-  image). An ISO, or another image whose unreadable sectors read back as
-  good, fails the check, as on Windows 98
-  ([disk images](../CONFIGURATION.md#disk-images)).
+* **SafeDisc and SecuROM games**: use an image of the disc that keeps
+  what the protection checks. An ISO fails SafeDisc's check, and an
+  image without DPM data SecuROM 4.8's, as on Windows 98.
+  [copy-protection.md](copy-protection.md) has the protections that
+  pass, the image each needs and the tools that make it.
 
 ### Installer archives
 
@@ -167,7 +167,8 @@ with every file the same as Unshield's or idecomp's:
 ## Windows games on a Windows 95 or 98 image
 
 [docs/win9x-howto.md](win9x-howto.md) says how to make the image and
-which drivers to install.
+which drivers to install, and [3dfx.md](3dfx.md) which 3dfx card a game
+needs.
 
 * **Expendable**: Windows 98 SE on a Voodoo Graphics card,
   `voodoo=true`, `machine=svga_s3virge`, `cpu=pentium_ii`,
