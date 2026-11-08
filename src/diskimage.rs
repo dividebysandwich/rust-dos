@@ -157,8 +157,8 @@ fn kind_by_name(path: &Path, requested: DriveKind) -> Option<ImageKind> {
     // GOG's CD images are .gog (the sectors) and .ins (the CUE sheet);
     // Steam's releases of GOG's games name the CUE sheet .inst.
     // BloodNet from GOG names its sheet .bdn. BlindWrite's descriptors
-    // are .b5t and .b6t.
-    let cd = ["iso", "cue", "bin", "gog", "ins", "inst", "bdn", "chd", "b5t", "b6t"];
+    // are .b5t and .b6t, Alcohol 120%'s .mds.
+    let cd = ["iso", "cue", "bin", "gog", "ins", "inst", "bdn", "chd", "b5t", "b6t", "mds"];
     if requested == DriveKind::CdRom || cd.contains(&ext.as_str()) {
         return Some(ImageKind::Cd);
     }
