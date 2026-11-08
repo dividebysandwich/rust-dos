@@ -91,7 +91,7 @@ task.rs       USER32 and GDI32 functions that call into the program
 seh.rs        structured exceptions
 registry.rs   the registry
 boot.rs       the session's start: WININIT.INI and RunOnce
-dll_files.rs  the built-in DLLs as files in C:\WINDOWS\SYSTEM
+dll_files.rs  the built-in DLLs and NOTEPAD.EXE as files in C:\WINDOWS
 screen.rs     the display adapter as the built-in Windows drives it
 kernel32/ user32/ gdi32/ advapi32.rs ole32/ comctl32/ comdlg32/ shell32/
 ddraw/ dsound/ dinput/ dplayx/ dmusic/ glide/ d3d8/ opengl32/ winmm/ vfw/
@@ -301,6 +301,15 @@ top of that.
   `WINDOWS\SYSTEM` folder, it and `WINDOWS` show as directories with
   just the DLLs in them, and are made on C: when a program makes a file
   or directory in them; neither can be removed while it holds them.
+
+  The Windows directory has `NOTEPAD.EXE` the same way, which setups run
+  to show a readme (`user32/notepad.rs`). It is a PE image the emulator
+  builds, a Windows program of its own whose code is a message loop:
+  NotepadMain and NotepadWndProc, functions of USER32 that USER32
+  doesn't export, read the file the command line names and make the
+  window, a multi-line edit control with the file's text. Started by
+  WinExec or CreateProcessA, it is a process of its own and stays open
+  after the program that started it ends, as on Windows 98.
 - The CD-ROM drive takes SCSI commands through WNASPI32.DLL, ASPI for
   Win32, as Windows 98 SE's does (`wnaspi32.rs`). Copy protections read
   their discs that way: SafeDisc 2 loads it to check the CD. On Windows

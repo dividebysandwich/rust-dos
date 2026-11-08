@@ -32,7 +32,7 @@ mod vxd;
 
 pub(super) use locale::enum_returned;
 pub(crate) use path::{change_directory, current_directory, find_entries, full_path, matches};
-pub(crate) use process::{spawn, startup_showing};
+pub(crate) use process::{spawn, startup_show, startup_showing};
 pub(super) use process::{STARTUPINFO_SIZE, win_exec_step};
 pub(super) use file::{
     CREATE_ALWAYS, CREATE_NEW, FILE_SHARE_READ, FILE_SHARE_WRITE, GENERIC_READ, GENERIC_WRITE,

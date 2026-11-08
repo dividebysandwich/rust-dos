@@ -675,6 +675,146 @@ fn a_wait_on_the_clock_is_skipped_exactly() {
     }
 }
 
+/// Run `image` on a machine that skips passes (on the recompiler) and one
+/// that runs them all (on the interpreter), in lockstep: they must come
+/// out the same after every batch, and the program must end with 2Ah.
+/// What the skipping one skipped, which ran with paging on.
+fn idle_lockstep(test: &str, image: Vec<u8>) -> rust_dos::idle::IdleStats {
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu
+    };
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
+    let mut plain = start(&format!("{test}_plain"), CoreMode::Normal, false);
+    let mut skipping = start(&format!("{test}_skipping"), CoreMode::Dynamic, true);
+    let mut paged = false;
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 300, 10_000, |_, cpu| {
+        paged |= cpu.cr0 & rust_dos::cpu::CR0_PG != 0;
+    });
+    if let Err(e) = run {
+        panic!("{e}\n  {:?}", skipping.bus.observe.stats);
+    }
+    assert!(paged, "the program ran with paging on");
+    assert_eq!(plain.errorlevel, 0x2A, "the wait ended");
+    assert_eq!(
+        skipping.errorlevel, 0x2A,
+        "{:?}",
+        skipping.bus.observe.stats
+    );
+    skipping.bus.observe.stats
+}
+
+/// The number of proofs that failed for `why`.
+fn failed_by(stats: &rust_dos::idle::IdleStats, why: &str) -> u64 {
+    stats
+        .failed_by
+        .iter()
+        .find(|(w, _)| *w == why)
+        .map_or(0, |&(_, n)| n)
+}
+
+/// A wait on the clock that counts its passes in memory, as a frame
+/// limiter counts the passes it waited: with paging on, as the built-in
+/// Windows runs, the passes are skipped as long as the counts let them
+/// run the same, and the counts come out as the passes would leave them.
+#[test]
+fn a_wait_on_the_clock_that_counts_its_passes_is_skipped() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetTickCount"])];
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let mut wait = a.create_label();
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 20))?;
+        a.set_label(&mut wait)?;
+        a.call(l.import(0))?;
+        a.inc(dword_ptr(l.data))?;
+        a.add(dword_ptr(l.at(4)), 3)?;
+        a.cmp(eax, ebx)?;
+        a.jb(wait)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let stats = idle_lockstep("counting_clock_wait", image);
+    assert!(stats.proofs >= 10, "{stats:?}");
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// The program, waiting on the clock, asks where a file is and seeks to
+/// there with SetFilePointer, and asks for an accelerator table it doesn't
+/// have, as Railroad Tycoon II's main loop does, and with `count` counts
+/// its passes in memory.
+fn file_and_table_wait(table: bool, count: bool) -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.DLL",
+            &["GetTickCount", "CreateFileA", "SetFilePointer"],
+        ),
+        ("USER32.DLL", &["LoadAcceleratorsA"]),
+    ];
+    let mut data = vec![0; 0x20];
+    put(&mut data, 0x10, b"T.EXE\0");
+    put(&mut data, 0x18, b"Accel\0");
+    program(BASE, false, imports, &data, |a, l| {
+        use Arg::{Esi, I};
+        let mut wait = a.create_label();
+        let at = |offset: u32| I(l.at(offset) as u32);
+        let open = [at(0x10), I(0x8000_0000), I(1), I(0), I(3), I(0x80), I(0)];
+        call_with(a, l.import(1), &open)?;
+        a.mov(esi, eax)?;
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 20))?;
+        a.set_label(&mut wait)?;
+        a.call(l.import(0))?;
+        a.mov(edi, eax)?;
+        call_with(a, l.import(2), &[Esi, I(0), I(0), I(1)])?;
+        call_with(a, l.import(2), &[Esi, I(0), I(0), I(0)])?;
+        if table {
+            call_with(a, l.import(3), &[I(0), at(0x18)])?;
+        }
+        if count {
+            a.inc(dword_ptr(l.data))?;
+        }
+        a.cmp(edi, ebx)?;
+        a.jb(wait)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    })
+}
+
+/// Neither the query of a file's place, nor a seek to where it is, nor a
+/// look for an accelerator table that isn't there changes anything: a
+/// wait that calls them is skipped.
+#[test]
+fn a_wait_that_asks_where_a_file_is_and_for_a_missing_table_is_skipped() {
+    let stats = idle_lockstep("file_table_wait", file_and_table_wait(true, false));
+    assert!(stats.proofs >= 10, "{stats:?}");
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// SetFilePointer reads nothing but its arguments: a wait that calls it
+/// and counts its passes is skipped too.
+#[test]
+fn a_wait_that_asks_where_a_file_is_and_counts_its_passes_is_skipped() {
+    let stats = idle_lockstep("file_count_wait", file_and_table_wait(false, true));
+    assert!(stats.proofs >= 10, "{stats:?}");
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// LoadAcceleratorsA reads the table's name and the program's resources,
+/// which a count could be in: a wait that calls it and counts its passes
+/// isn't skipped.
+#[test]
+fn a_wait_that_counts_its_passes_and_reads_more_than_its_arguments_is_not_skipped() {
+    let stats = idle_lockstep("table_count_wait", file_and_table_wait(true, true));
+    assert_eq!(stats.proofs, 0, "{stats:?}");
+    assert!(failed_by(&stats, "count service") > 0, "{stats:?}");
+}
+
 /// KERNEL's LocalLock has the trap id KERNEL32's GetTickCount has, in the
 /// numbering of the 16-bit modules, and reads no clock: calls of it in a
 /// row don't arm their stub.
@@ -2582,6 +2722,209 @@ fn a_program_uses_heaps_global_memory_and_mappings() {
         !code & 0x3F,
         text
     );
+}
+
+/// Run T.EXE from a folder with `files` to its end, on a machine with
+/// `memory_mb` MB of RAM; its exit code and what it printed.
+fn run_files_in(test: &str, files: &[(&str, Vec<u8>)], memory_mb: usize) -> (u8, String) {
+    let mut cpu = Cpu::with_memory(scratch(test, files), memory_mb);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert!(!cpu.bus.win32.active());
+    (cpu.errorlevel, printed(&cpu))
+}
+
+/// A read-only mapping of a file larger than the machine's memory, as
+/// Windows 95 has it: making and viewing it takes no memory, a page is
+/// read from the file when it is touched, by the program or by a system
+/// call reading the view (WriteFile), and pages not used lately make
+/// room for others, read again when they are touched again. Submarine
+/// Titans maps several hundred MB of data files whole on a 128 MB
+/// machine. A bit each in the exit code.
+#[test]
+fn a_mapping_of_a_file_larger_than_memory_reads_pages_as_they_are_touched() {
+    const PAGES: u32 = 24 * 256;
+    const MARK: u32 = 0x1234_5678;
+    const TEXT_AT: u32 = 3000 * 0x1000 + 0x10;
+    const TEXT: &[u8] = b"read from the mapping\r\n";
+    const GENERIC_READ: i32 = 0x8000_0000u32 as i32;
+    const FILE_SHARE_READ: i32 = 1;
+    const OPEN_EXISTING: i32 = 3;
+    const PAGE_READONLY: i32 = 2;
+    const FILE_MAP_READ: i32 = 4;
+    const MEM_COMMIT: i32 = 0x1000;
+    // Each page starts with its number; the first has MARK after it.
+    let mut file = vec![0u8; (PAGES * 0x1000) as usize];
+    for page in 0..PAGES {
+        let at = (page * 0x1000) as usize;
+        file[at..at + 4].copy_from_slice(&page.to_le_bytes());
+    }
+    file[4..8].copy_from_slice(&MARK.to_le_bytes());
+    file[TEXT_AT as usize..TEXT_AT as usize + TEXT.len()].copy_from_slice(TEXT);
+    let names: &[&str] = &[
+        "CreateFileA",
+        "CreateFileMappingA",
+        "MapViewOfFile",
+        "IsBadReadPtr",
+        "VirtualQuery",
+        "GetStdHandle",
+        "WriteFile",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // Data: the file's name at 0, WriteFile's count at 10h, and a
+    // MEMORY_BASIC_INFORMATION at 20h.
+    let mut data = b"BIG.DAT\0".to_vec();
+    data.resize(0x40, 0);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let (written, info) = (l.at(0x10), l.at(0x20));
+        a.xor(ebx, ebx)?;
+        push_args(
+            a,
+            &[l.at(0) as i32, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0],
+        )?;
+        a.call(f("CreateFileA"))?;
+        push_args(a, &[PAGE_READONLY, 0, 0, 0])?;
+        a.push(0)?;
+        a.push(eax)?;
+        a.call(f("CreateFileMappingA"))?;
+        a.test(eax, eax)?;
+        a.setne(cl)?;
+        a.cmp(cl, 1)?;
+        bit_if_equal(a, 0)?;
+        push_args(a, &[FILE_MAP_READ, 0, 0, 0])?;
+        a.push(eax)?;
+        a.call(f("MapViewOfFile"))?;
+        a.mov(esi, eax)?;
+        // Pages not touched yet are there to IsBadReadPtr and committed
+        // to VirtualQuery.
+        a.push(0x1000)?;
+        a.lea(eax, dword_ptr(esi + 0x140_0000))?;
+        a.push(eax)?;
+        a.call(f("IsBadReadPtr"))?;
+        a.cmp(eax, 0)?;
+        bit_if_equal(a, 1)?;
+        a.push(28)?;
+        a.push(info as i32)?;
+        a.lea(eax, dword_ptr(esi + 0x100_0000))?;
+        a.push(eax)?;
+        a.call(f("VirtualQuery"))?;
+        a.cmp(dword_ptr(info + 16), MEM_COMMIT)?;
+        bit_if_equal(a, 2)?;
+        // WriteFile reads a page of the view the program never touched.
+        a.push(STD_OUTPUT_HANDLE)?;
+        a.call(f("GetStdHandle"))?;
+        a.push(0)?;
+        a.push(written as i32)?;
+        a.push(TEXT.len() as i32)?;
+        a.lea(ecx, dword_ptr(esi + TEXT_AT))?;
+        a.push(ecx)?;
+        a.push(eax)?;
+        a.call(f("WriteFile"))?;
+        a.cmp(dword_ptr(written), TEXT.len() as i32)?;
+        bit_if_equal(a, 3)?;
+        // Every page has its number, more of them than memory holds.
+        let mut next = a.create_label();
+        let mut wrong = a.create_label();
+        a.xor(edx, edx)?;
+        a.set_label(&mut next)?;
+        a.mov(eax, edx)?;
+        a.shl(eax, 12)?;
+        a.cmp(dword_ptr(esi + eax), edx)?;
+        a.jne(wrong)?;
+        a.inc(edx)?;
+        a.cmp(edx, PAGES as i32)?;
+        a.jne(next)?;
+        a.set_label(&mut wrong)?;
+        a.cmp(edx, PAGES as i32)?;
+        bit_if_equal(a, 4)?;
+        // The first page, given back for the later ones, is read again.
+        a.cmp(dword_ptr(esi + 4), MARK as i32)?;
+        bit_if_equal(a, 5)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run_files_in(
+        "mapping_larger_than_memory",
+        &[("T.EXE", exe), ("BIG.DAT", file)],
+        16,
+    );
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b} {}",
+        !code & 0x3F,
+        text
+    );
+    assert_eq!(text, "read from the mapping\r\n");
+}
+
+/// A view of a read-write mapping of a file writes back the pages it
+/// read, here one that it changed, and leaves the rest of the file as it
+/// was. A bit each in the exit code.
+#[test]
+fn a_read_write_mapping_writes_back_only_the_pages_it_read() {
+    const GENERIC_READ_WRITE: i32 = 0xC000_0000u32 as i32;
+    const OPEN_EXISTING: i32 = 3;
+    const PAGE_READWRITE: i32 = 4;
+    const FILE_MAP_WRITE: i32 = 2;
+    // Three pages of 1s, 2s and 3s.
+    let file: Vec<u8> = (1..=3u8).flat_map(|b| [b; 0x1000]).collect();
+    let names: &[&str] = &[
+        "CreateFileA",
+        "CreateFileMappingA",
+        "MapViewOfFile",
+        "UnmapViewOfFile",
+        "CloseHandle",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"RW.DAT\0".to_vec();
+    data.resize(0x10, 0);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        push_args(
+            a,
+            &[l.at(0) as i32, GENERIC_READ_WRITE, 0, 0, OPEN_EXISTING, 0, 0],
+        )?;
+        a.call(f("CreateFileA"))?;
+        a.mov(edi, eax)?;
+        push_args(a, &[0, PAGE_READWRITE, 0, 0, 0])?;
+        a.push(edi)?;
+        a.call(f("CreateFileMappingA"))?;
+        a.mov(ebp, eax)?;
+        push_args(a, &[FILE_MAP_WRITE, 0, 0, 0])?;
+        a.push(ebp)?;
+        a.call(f("MapViewOfFile"))?;
+        a.mov(esi, eax)?;
+        a.cmp(byte_ptr(esi + 0x1004), 2)?;
+        bit_if_equal(a, 0)?;
+        a.mov(byte_ptr(esi + 0x1005), 0x55)?;
+        a.push(esi)?;
+        a.call(f("UnmapViewOfFile"))?;
+        a.cmp(eax, 1)?;
+        bit_if_equal(a, 1)?;
+        a.push(ebp)?;
+        a.call(f("CloseHandle"))?;
+        a.push(edi)?;
+        a.call(f("CloseHandle"))?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let test = "mapping_writes_back";
+    let (code, text) = run_files_in(test, &[("T.EXE", exe), ("RW.DAT", file.clone())], 16);
+    assert_eq!(code, 3, "the checks that failed: {:02b} {}", !code & 3, text);
+    let mut expected = file;
+    expected[0x1005] = 0x55;
+    let written = fs::read(PathBuf::from("target/test_win32").join(test).join("RW.DAT")).unwrap();
+    assert!(written == expected, "the file isn't the one expected");
 }
 
 /// ReleaseStgMedium, as Windows' table of it has it: a global block no
@@ -7695,6 +8038,217 @@ fn a_program_started_from_the_foreground_comes_to_it_and_stays() {
     assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
 }
 
+/// SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOZORDER, SWP_NOMOVE, SWP_NOSIZE.
+const SWP_HIDE_ONLY: i32 = 0x0097;
+const SW_HIDE: i32 = 0;
+
+#[test]
+fn a_hidden_window_stays_active_until_it_goes_and_end_dialog_activates_the_owner() {
+    // As Wine's test_SetActiveWindow and test_EndDialog check on
+    // Windows: a popup hidden by SetWindowPos(SWP_HIDEWINDOW) stays the
+    // active window, and its owner becomes active when it is destroyed.
+    // EndDialog enables the owner, even one the program disabled itself,
+    // and activates it; ShowWindow(SW_HIDE) of the last window leaves
+    // none active. (Discworld Noir's setup, whose MFC dialog loop
+    // disables the owner itself, had no active window after its Change
+    // CD dialog, dividebysandwich/rust-dos#714.)
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "CreateDialogIndirectParamA",
+        "SetWindowPos",
+        "DestroyWindow",
+        "EnableWindow",
+        "IsWindowEnabled",
+        "EndDialog",
+        "ShowWindow",
+        "GetActiveWindow",
+    ];
+    // The class at 0x10, and a DLGTEMPLATE at 0x100: a visible popup
+    // with a caption, no controls, no menu, class or title.
+    let mut data = child_data(&[(0x10, "Static")]);
+    data.resize(0x120, 0);
+    let style = WS_POPUP | WS_VISIBLE | 0x00C0_0000;
+    data[0x100..0x104].copy_from_slice(&style.to_le_bytes());
+    data[0x10E..0x110].copy_from_slice(&100u16.to_le_bytes());
+    data[0x110..0x112].copy_from_slice(&50u16.to_le_bytes());
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let class = l.at(0x10) as i32;
+        let style = WS_POPUP | WS_VISIBLE;
+        a.xor(ebx, ebx)?;
+        push_args(a, &[0, class, 0, style, 0, 0, 100, 100, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, eq, 0)?;
+        // A popup the first one owns, hidden and then destroyed.
+        push_args(a, &[0, class, 0, style, 10, 10, 50, 50, 0, 0, 0, 0])?;
+        a.mov(dword_ptr(esp + 32), esi)?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(edi, eax)?;
+        push_args(a, &[0, 0, 0, 0, 0, 0, SWP_HIDE_ONLY])?;
+        a.mov(dword_ptr(esp), edi)?;
+        a.call(f("SetWindowPos"))?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 1)?;
+        a.push(edi)?;
+        a.call(f("DestroyWindow"))?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, eq, 2)?;
+        // A dialog whose owner the program disabled, ended.
+        a.push(0)?;
+        a.push(esi)?;
+        a.call(f("EnableWindow"))?;
+        push_args(a, &[BASE as i32, l.at(0x100) as i32, 0, 0, 0])?;
+        a.mov(dword_ptr(esp + 8), esi)?;
+        a.call(f("CreateDialogIndirectParamA"))?;
+        a.mov(edi, eax)?;
+        a.test(edi, edi)?;
+        bit_if(a, ne, 3)?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 4)?;
+        a.push(0)?;
+        a.push(edi)?;
+        a.call(f("EndDialog"))?;
+        a.push(esi)?;
+        a.call(f("IsWindowEnabled"))?;
+        a.test(eax, eax)?;
+        bit_if(a, ne, 5)?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, eq, 6)?;
+        // The last visible window hidden by ShowWindow: none is active.
+        a.push(SW_HIDE)?;
+        a.push(esi)?;
+        a.call(f("ShowWindow"))?;
+        a.call(f("GetActiveWindow"))?;
+        a.test(eax, eax)?;
+        bit_if(a, eq, 7)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("hidden_stays_active", &[("T.EXE", program)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+#[test]
+fn a_dialog_box_has_its_owner_enabled_by_end_dialog_only() {
+    // As Wine's test_dialog_parent checks on Windows: EndDialog enables
+    // the owner DialogBox disabled, and DialogBox doesn't enable it
+    // again as it returns, so an owner the dialog procedure disabled
+    // after EndDialog stays disabled. A WS_CHILD dialog whose owner is
+    // a child window is made the child of the first ancestor that isn't
+    // one, the window disabled and enabled.
+    const WS_CHILD: i32 = 0x4000_0000;
+    const WM_INITDIALOG: i32 = 0x0110;
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "DialogBoxIndirectParamA",
+        "EndDialog",
+        "EnableWindow",
+        "IsWindowEnabled",
+        "GetParent",
+    ];
+    // The class at 0x10; DLGTEMPLATEs at 0x100 (a popup) and 0x140 (a
+    // child), no controls, menu, class or title; at 0x180 the owner the
+    // procedure disables, at 0x184 whether it was enabled, at 0x188 the
+    // dialog's parent.
+    let mut data = child_data(&[(0x10, "Static")]);
+    data.resize(0x190, 0);
+    for (at, style) in [(0x100, WS_POPUP | 0x00C0_0000), (0x140, WS_CHILD)] {
+        data[at..at + 4].copy_from_slice(&style.to_le_bytes());
+        data[at + 0x0E..at + 0x10].copy_from_slice(&100u16.to_le_bytes());
+        data[at + 0x10..at + 0x12].copy_from_slice(&50u16.to_le_bytes());
+    }
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let (owner, was_enabled, parent) = (l.at(0x180), l.at(0x184), l.at(0x188));
+        let mut start = a.create_label();
+        let mut other = a.create_label();
+        let mut done = a.create_label();
+        a.call(start)?;
+        // The dialog procedure: in WM_INITDIALOG, EndDialog with the
+        // lParam as the result, then the owner's state, and the owner
+        // disabled again.
+        a.cmp(dword_ptr(esp + 8), WM_INITDIALOG)?;
+        a.jne(other)?;
+        a.push(dword_ptr(esp + 4))?;
+        a.call(f("GetParent"))?;
+        a.mov(dword_ptr(parent), eax)?;
+        a.push(dword_ptr(esp + 16))?;
+        a.push(dword_ptr(esp + 8))?;
+        a.call(f("EndDialog"))?;
+        a.mov(eax, dword_ptr(owner))?;
+        a.test(eax, eax)?;
+        a.jz(done)?;
+        a.push(eax)?;
+        a.call(f("IsWindowEnabled"))?;
+        a.mov(dword_ptr(was_enabled), eax)?;
+        a.push(0)?;
+        a.push(dword_ptr(owner))?;
+        a.call(f("EnableWindow"))?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(16)?;
+        a.set_label(&mut other)?;
+        a.xor(eax, eax)?;
+        a.ret_1(16)?;
+        a.set_label(&mut start)?;
+        a.pop(edi)?;
+        let class = l.at(0x10) as i32;
+        a.xor(ebx, ebx)?;
+        let popup = WS_POPUP | WS_VISIBLE;
+        push_args(a, &[0, class, 0, popup, 0, 0, 100, 100, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        a.mov(dword_ptr(owner), esi)?;
+        push_args(a, &[BASE as i32, l.at(0x100) as i32, 0, 0, 2])?;
+        a.mov(dword_ptr(esp + 8), esi)?;
+        a.mov(dword_ptr(esp + 12), edi)?;
+        a.call(f("DialogBoxIndirectParamA"))?;
+        a.cmp(eax, 2)?;
+        bit_if(a, eq, 0)?;
+        a.cmp(dword_ptr(was_enabled), 0)?;
+        bit_if(a, ne, 1)?;
+        a.push(esi)?;
+        a.call(f("IsWindowEnabled"))?;
+        a.test(eax, eax)?;
+        bit_if(a, eq, 2)?;
+        a.push(1)?;
+        a.push(esi)?;
+        a.call(f("EnableWindow"))?;
+        // A child dialog with a child window of the first as its owner.
+        a.mov(dword_ptr(owner), 0)?;
+        let child = WS_CHILD | WS_VISIBLE;
+        push_args(a, &[0, class, 0, child, 0, 0, 10, 10, 0, 0, 0, 0])?;
+        a.mov(dword_ptr(esp + 32), esi)?;
+        a.call(f("CreateWindowExA"))?;
+        push_args(a, &[BASE as i32, l.at(0x140) as i32, 0, 0, 3])?;
+        a.mov(dword_ptr(esp + 8), eax)?;
+        a.mov(dword_ptr(esp + 12), edi)?;
+        a.call(f("DialogBoxIndirectParamA"))?;
+        a.cmp(eax, 3)?;
+        bit_if(a, eq, 3)?;
+        a.cmp(dword_ptr(parent), esi)?;
+        bit_if(a, eq, 4)?;
+        a.push(esi)?;
+        a.call(f("IsWindowEnabled"))?;
+        a.test(eax, eax)?;
+        bit_if(a, ne, 5)?;
+        a.or(ebx, 0xC0)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("dialog_box_owner", &[("T.EXE", program)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
 const WM_QUERYENDSESSION: i32 = 0x0011;
 const WM_ENDSESSION: i32 = 0x0016;
 const EWX_REBOOT: i32 = 2;
@@ -9775,8 +10329,91 @@ fn wnaspi32_completes_event_requests_for_accepted_and_rejected_targets() {
     cpu.bus
         .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
         .unwrap();
+    // Two seconds: the drive spins up for one before its first read.
     assert!(
-        run_to_exit(&mut cpu, 200),
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
+#[test]
+fn wnaspi32_finishes_event_requests_in_the_order_they_came() {
+    // An event READ(10), which waits a second for the drive to spin up,
+    // then at once an event request to target 1, which has no device. One
+    // thread takes the requests in turn, so when the second one's event
+    // is set, the read before it is done.
+    let dir = cdimage::scratch("wnaspi32_order");
+    let image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    fs::write(dir.join("GAME.BIN"), cdimage::mode1_2352(&image)).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n";
+    fs::write(&cue, sheet).unwrap();
+
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "WNASPI32.DLL",
+            &["GetASPI32SupportInfo", "SendASPI32Command"],
+        ),
+        (
+            "KERNEL32.DLL",
+            &["ExitProcess", "CreateEventA", "WaitForSingleObject"],
+        ),
+    ];
+    let mut data = vec![0u8; 0xA00];
+    let mut read = read10_srb(16);
+    read[3] |= 0x40;
+    data[0x40..0x90].copy_from_slice(&read);
+    let mut rejected = read10_srb(16);
+    rejected[3] |= 0x40;
+    rejected[8] = 1;
+    data[0x100..0x150].copy_from_slice(&rejected);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        for (srb, keep) in [(0x40, 0x180), (0x100, 0x184)] {
+            a.push(0i32)?;
+            a.push(0i32)?;
+            a.push(1i32)?;
+            a.push(0i32)?;
+            a.call(l.import(3))?;
+            a.mov(dword_ptr(l.at(srb + 24)), eax)?;
+            a.mov(dword_ptr(l.at(keep)), eax)?;
+        }
+        a.mov(dword_ptr(l.at(0x50)), l.at(0x200) as i32)?;
+        a.mov(dword_ptr(l.at(0x110)), l.at(0x200) as i32)?;
+        for srb in [0x40, 0x100] {
+            a.push(l.at(srb) as i32)?;
+            a.call(l.import(1))?;
+            a.add(esp, 4)?;
+            a.mov(ebx, 1)?;
+            a.test(eax, eax)?;
+            a.jne(fail)?;
+        }
+        // The rejected request's event: by then the read is done.
+        a.mov(eax, dword_ptr(l.at(0x184)))?;
+        a.push(-1i32)?;
+        a.push(eax)?;
+        a.call(l.import(4))?;
+        a.mov(ebx, 2)?;
+        a.cmp(byte_ptr(l.at(0x101)), 0x82)?;
+        a.jne(fail)?;
+        a.mov(ebx, 3)?;
+        a.cmp(byte_ptr(l.at(0x41)), 1)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let mut cpu = machine("wnaspi32_order", exe);
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    // Two seconds: the drive spins up for one before its first read.
+    assert!(
+        run_to_exit(&mut cpu, 400),
         "the program didn't end: {:?}",
         printed(&cpu)
     );
@@ -9854,8 +10491,225 @@ fn wnaspi32_finishes_an_event_request_while_the_program_polls() {
     cpu.bus
         .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
         .unwrap();
+    // Two seconds: the drive spins up for one before its first read.
     assert!(
-        run_to_exit(&mut cpu, 200),
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
+#[test]
+fn wnaspi32_reads_take_the_time_the_drive_takes_to_reach_their_sectors() {
+    // Three event READ(10)s, each timed with QueryPerformanceCounter
+    // around SendASPI32Command and the wait on its event: sector 16, then
+    // 17, then 300. The drive has 17 in its buffer, read ahead as the disc
+    // turned on from 16, and sends it in under 2 ms. 300 is past what it
+    // reads ahead: it moves the head and waits for the sector to come
+    // round, which takes more than the millisecond the head takes to
+    // settle on its own.
+    let dir = cdimage::scratch("wnaspi32_timing");
+    let mut image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    image.resize(400 * 2048, 0);
+    fs::write(dir.join("GAME.BIN"), cdimage::mode1_2352(&image)).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n";
+    fs::write(&cue, sheet).unwrap();
+
+    let imports: &[(&str, &[&str])] = &[
+        ("WNASPI32.DLL", &["GetASPI32SupportInfo", "SendASPI32Command"]),
+        (
+            "KERNEL32.DLL",
+            &[
+                "ExitProcess",
+                "CreateEventA",
+                "WaitForSingleObject",
+                "QueryPerformanceCounter",
+            ],
+        ),
+    ];
+    let mut data = vec![0u8; 0x1000];
+    let srbs = [(0x40, 16), (0x100, 17), (0x1C0, 300)];
+    for (at, lba) in srbs {
+        let mut srb = read10_srb(lba);
+        srb[3] |= 0x40;
+        data[at..at + 0x50].copy_from_slice(&srb);
+    }
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        for (i, (at, _)) in srbs.into_iter().enumerate() {
+            let at = at as u32;
+            let times = 0x300 + i as u32 * 16;
+            // A manual-reset event, not signaled, in the PostProc field;
+            // the buffer.
+            a.push(0i32)?;
+            a.push(0i32)?;
+            a.push(1i32)?;
+            a.push(0i32)?;
+            a.call(l.import(3))?;
+            a.mov(dword_ptr(l.at(at + 24)), eax)?;
+            a.mov(dword_ptr(l.at(at + 16)), l.at(0x800) as i32)?;
+            a.push(l.at(times) as i32)?;
+            a.call(l.import(5))?;
+            a.push(l.at(at) as i32)?;
+            a.call(l.import(1))?;
+            a.add(esp, 4)?;
+            a.mov(eax, dword_ptr(l.at(at + 24)))?;
+            a.push(-1i32)?;
+            a.push(eax)?;
+            a.call(l.import(4))?;
+            a.push(l.at(times + 8) as i32)?;
+            a.call(l.import(5))?;
+            a.mov(ebx, 1 + i as i32)?;
+            a.cmp(byte_ptr(l.at(at + 1)), 1)?;
+            a.jne(fail)?;
+        }
+        // The counts each read took: 17's in ecx, 300's in edx.
+        a.mov(ecx, dword_ptr(l.at(0x318)))?;
+        a.sub(ecx, dword_ptr(l.at(0x310)))?;
+        a.mov(edx, dword_ptr(l.at(0x328)))?;
+        a.sub(edx, dword_ptr(l.at(0x320)))?;
+        // Sector 17 took time, but less than 2 ms (1193 counts of the
+        // 1.193182 MHz counter a millisecond).
+        a.mov(ebx, 4)?;
+        a.cmp(ecx, 0)?;
+        a.je(fail)?;
+        a.mov(ebx, 5)?;
+        a.cmp(ecx, 2 * 1193)?;
+        a.jae(fail)?;
+        // Sector 300 took more than a millisecond longer.
+        a.mov(ebx, 6)?;
+        a.sub(edx, ecx)?;
+        a.cmp(edx, 1193)?;
+        a.jbe(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let mut cpu = machine("wnaspi32_timing", exe);
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    // Two seconds: the drive spins up for one before its first read.
+    assert!(
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
+#[test]
+fn wnaspi32_plain_reads_leave_no_drive_time_for_the_event_read_after_them() {
+    // An event READ(10) of sector 16, which waits for the drive to spin
+    // up, then twenty plain ones of 17 to 36, finished inside
+    // SendASPI32Command in no emulated time, then an event read of 37,
+    // timed with QueryPerformanceCounter. The drive read 17 to 36 as it
+    // got each request: 37 is the next sector to come round, and the
+    // event read waits for it alone, not for the time of the twenty.
+    let dir = cdimage::scratch("wnaspi32_plain_reads");
+    let mut image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    image.resize(100 * 2048, 0);
+    fs::write(dir.join("GAME.BIN"), cdimage::mode1_2352(&image)).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n";
+    fs::write(&cue, sheet).unwrap();
+
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "WNASPI32.DLL",
+            &["GetASPI32SupportInfo", "SendASPI32Command"],
+        ),
+        (
+            "KERNEL32.DLL",
+            &[
+                "ExitProcess",
+                "CreateEventA",
+                "WaitForSingleObject",
+                "QueryPerformanceCounter",
+            ],
+        ),
+    ];
+    let (first, last, times, buffer) = (0x40u32, 0x780u32, 0x900u32, 0xA00u32);
+    let plain = |i: u32| 0x100 + i * 0x50;
+    let mut data = vec![0u8; 0x1400];
+    let mut put = |at: u32, srb: [u8; 0x50]| {
+        data[at as usize..at as usize + 0x50].copy_from_slice(&srb);
+    };
+    for (at, lba) in [(first, 16), (last, 37)] {
+        let mut srb = read10_srb(lba);
+        srb[3] |= 0x40;
+        put(at, srb);
+    }
+    for i in 0..20 {
+        put(plain(i), read10_srb(17 + i));
+    }
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        // Each event request: a manual-reset event, not signaled, in its
+        // PostProc field, sent, and waited for.
+        let event_read = |a: &mut CodeAssembler, at: u32, timed: bool| {
+            a.push(0i32)?;
+            a.push(0i32)?;
+            a.push(1i32)?;
+            a.push(0i32)?;
+            a.call(l.import(3))?;
+            a.mov(dword_ptr(l.at(at + 24)), eax)?;
+            a.mov(dword_ptr(l.at(at + 16)), l.at(buffer) as i32)?;
+            if timed {
+                a.push(l.at(times) as i32)?;
+                a.call(l.import(5))?;
+            }
+            a.push(l.at(at) as i32)?;
+            a.call(l.import(1))?;
+            a.add(esp, 4)?;
+            a.mov(eax, dword_ptr(l.at(at + 24)))?;
+            a.push(-1i32)?;
+            a.push(eax)?;
+            a.call(l.import(4))?;
+            if timed {
+                a.push(l.at(times + 8) as i32)?;
+                a.call(l.import(5))?;
+            }
+            a.mov(ebx, 1)?;
+            a.cmp(byte_ptr(l.at(at + 1)), 1)?;
+            a.jne(fail)
+        };
+        event_read(a, first, false)?;
+        for i in 0..20 {
+            a.mov(dword_ptr(l.at(plain(i) + 16)), l.at(buffer) as i32)?;
+            a.push(l.at(plain(i)) as i32)?;
+            a.call(l.import(1))?;
+            a.add(esp, 4)?;
+            a.mov(ebx, 2)?;
+            a.cmp(byte_ptr(l.at(plain(i) + 1)), 1)?;
+            a.jne(fail)?;
+        }
+        event_read(a, last, true)?;
+        // Sector 37 took less than 2 ms (1193 counts of the 1.193182 MHz
+        // counter a millisecond), where the twenty before it took about
+        // 15 ms of the drive's time.
+        a.mov(ecx, dword_ptr(l.at(times + 8)))?;
+        a.sub(ecx, dword_ptr(l.at(times)))?;
+        a.mov(ebx, 3)?;
+        a.cmp(ecx, 2 * 1193)?;
+        a.jae(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let mut cpu = machine("wnaspi32_plain_reads", exe);
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    // Two seconds: the drive spins up for one before its first read.
+    assert!(
+        run_to_exit(&mut cpu, 400),
         "the program didn't end: {:?}",
         printed(&cpu)
     );

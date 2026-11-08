@@ -182,6 +182,25 @@ pub fn playing(w: &Wave) -> bool {
     !w.sounds.is_empty() || w.outs.iter().any(|o| !o.paused && !o.segments.is_empty())
 }
 
+/// Whether a device of the process `pid` has a block queued with data in
+/// the `len` bytes at `lin`, which it reads as it plays, without a page
+/// fault: the pages stay there for it (`mapping::evict`).
+pub fn plays_from(bus: &crate::bus::Bus, pid: u32, lin: u32, len: u32) -> bool {
+    let (lin, end) = (lin as u64, lin as u64 + len as u64);
+    bus.win32
+        .winmm
+        .wave
+        .outs
+        .iter()
+        .filter(|o| o.pid == pid)
+        .any(|o| {
+            let block = o.format.block() as u64;
+            o.segments
+                .iter()
+                .any(|s| (s.data as u64) < end && lin < s.data as u64 + s.frames * block)
+        })
+}
+
 /// A process ended: its devices close and its sounds stop.
 pub fn process_ended(cpu: &mut Cpu, pid: u32) {
     let w = wave(cpu);
@@ -578,6 +597,12 @@ pub fn wave_out_write(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let data = cpu.bus.guest_read_32(header + HDR_DATA);
     let length = cpu.bus.guest_read_32(header + HDR_LENGTH);
     let loops = cpu.bus.guest_read_32(header + HDR_LOOPS);
+    // The device reads the block as it plays, without a page fault, as
+    // Windows locks a prepared block's pages: those of a view of a file
+    // not read yet are read now, before anything changes.
+    if !crate::win32::mapping::read_ahead(&mut cpu.bus, data, length) {
+        return None;
+    }
     cpu.bus
         .guest_write_32(header + HDR_FLAGS, flags & !WHDR_DONE | WHDR_INQUEUE);
     device::catch_up(cpu);

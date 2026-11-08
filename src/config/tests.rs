@@ -596,16 +596,16 @@ fn mixer_settings() {
     let mixer = Settings::from_config(&config).mixer;
     let levels = Channel::ALL.map(|channel| mixer.level(channel));
     assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100, 100, 100, 100, 100, 100, 100]);
-    assert!(mixer.speaker_filter);
+    assert!(mixer.speaker_filter && mixer.sb_coupling);
     assert_eq!((mixer.sb_filter, mixer.reverb, mixer.chorus), (SbFilter::Auto, ReverbPreset::Off, ChorusPreset::Off));
 
     assert_eq!((mixer.reverb_mix, mixer.chorus_mix), (50, 50));
 
-    let text = "[mixer]\nspeaker_filter=off\nsb_filter=OFF\nreverb=Large\nchorus=light\nreverb_mix=80%\nChorus_Mix=0\n";
+    let text = "[mixer]\nspeaker_filter=off\nsb_filter=OFF\nsb_coupling=off\nreverb=Large\nchorus=light\nreverb_mix=80%\nChorus_Mix=0\n";
     let config = parse(text, Path::new("/cfg"), None);
     assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     let mixer = config.mixer;
-    assert!(!mixer.speaker_filter);
+    assert!(!mixer.speaker_filter && !mixer.sb_coupling);
     assert_eq!((mixer.sb_filter, mixer.reverb, mixer.chorus), (SbFilter::Off, ReverbPreset::Large, ChorusPreset::Light));
     assert_eq!((mixer.reverb_mix, mixer.chorus_mix), (80, 0));
     let text = "[mixer]\nspeaker_filter=maybe\nsb_filter=sb1\nreverb=hall\nchorus=heavy\nreverb_mix=150\nchorus_mix=wet\n";

@@ -250,6 +250,7 @@ pub(super) enum Item {
     /// The mixer's filters and effects.
     SpeakerFilter,
     SbFilter,
+    SbCoupling,
     Reverb,
     Chorus,
     /// The dry/wet mixes of the reverb and the chorus, shown while they
@@ -446,6 +447,7 @@ impl Item {
             Deadzone => "  Deadzone",
             SpeakerFilter => "PC speaker filter",
             SbFilter => "Sound Blaster filter",
+            SbCoupling => "Sound Blaster coupling",
             Reverb => "Reverb (FM, GUS, MIDI)",
             Chorus => "Chorus (FM, GUS, MIDI)",
             ReverbMix | ChorusMix => "  Dry/wet mix",
@@ -661,7 +663,7 @@ impl Item {
             Post => Applies::NextStart,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
             | RecordShader => Applies::Now,
-            Joystick | Deadzone | MouseSensitivity | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
+            Joystick | Deadzone | MouseSensitivity | SpeakerFilter | SbFilter | SbCoupling | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
             AudioBlocksize | AudioPrebuffer => Applies::Now,
             Rooms | Phonebook => Applies::Now,
             AlmanacAuto | AlmanacFetch | AlmanacReport => Applies::Now,
@@ -969,6 +971,7 @@ impl Item {
                 crate::mixer::SbFilter::Off => "off",
             }
             .to_string(),
+            SbCoupling => on_off(s.mixer.sb_coupling),
             Reverb => s.mixer.reverb.name().to_string(),
             Chorus => s.mixer.chorus.name().to_string(),
             ReverbMix => percent_bar(s.mixer.reverb_mix, MAX_MIX),
