@@ -1504,22 +1504,22 @@ fn stall_period(cpu: &mut Cpu, ns: u64) {
 }
 
 /// Let the emulated time pass that a blit of `pixels` pixels to
-/// `surface` takes, `from` the target of its source if it has one. The
-/// built-in GDI's blits run outside the emulated CPU, so without this
-/// they take no time at all, and a loop that blits until a second has
-/// passed runs as many as the host can do. On the screen, a fill and a
-/// copy within it are the card's blitter's work, at hundreds of
-/// megabytes a second: they take the call's time only.
-pub fn take_blit_time(cpu: &mut Cpu, surface: &Surface, pixels: u64, from: Option<Target>) {
+/// `surface` takes. The built-in GDI's blits run outside the emulated
+/// CPU, so without this they take no time at all, and a loop that blits
+/// until a second has passed runs as many as the host can do. `by_card`
+/// is a blit on the screen that the card's blitter does, at hundreds of
+/// megabytes a second (a fill, or a copy within the screen): it takes
+/// the call's time only.
+pub fn take_blit_time(cpu: &mut Cpu, surface: &Surface, pixels: u64, by_card: bool) {
     let (call_ns, byte_ps, bpp) = match surface.target {
+        Target::Screen if by_card => (SCREEN_BLIT_NS, 0, 0),
         // The screen's surface is 32 bits a pixel whatever the mode's
         // depth is: the bytes moved are the mode's.
-        Target::Screen if from.is_some_and(|t| t != Target::Screen) => (
+        Target::Screen => (
             SCREEN_BLIT_NS,
             SCREEN_BYTE_PS,
             super::surface::screen_mode(cpu).bpp,
         ),
-        Target::Screen => (SCREEN_BLIT_NS, 0, 0),
         Target::Bitmap(_) | Target::Memory => (MEMORY_BLIT_NS, MEMORY_BYTE_PS, surface.bpp),
     };
     let bytes = (pixels * bpp as u64).div_ceil(8);
@@ -1615,7 +1615,7 @@ pub fn blit_from(
             if area.is_empty() {
                 continue;
             }
-            pixels += area.width() as u64 * area.height() as u64;
+            pixels += area.pixels();
             values.resize((area.right - area.left) as usize, 0);
             for y in area.top..area.bottom {
                 src.surface.get_row(area.left + dx, y + dy, &mut values);
@@ -1638,7 +1638,7 @@ pub fn blit_from(
             }
             continue;
         }
-        pixels += area.width().max(0) as u64 * area.height().max(0) as u64;
+        pixels += area.pixels();
         for y in area.top..area.bottom {
             let sy = source.as_ref().map_or(0, |(src, (_, sy0, _, sy1))| {
                 scale(y - oy, y0, y1, *sy0, *sy1) + src.origin.1
@@ -1667,8 +1667,12 @@ pub fn blit_from(
     if let Some(t) = xlat {
         t.keep(cpu);
     }
-    let from = source.as_ref().map(|(src, _)| src.surface.target);
-    take_blit_time(cpu, &c.surface, pixels, from);
+    // On the screen, a fill and a copy within it are the card's
+    // blitter's work.
+    let by_card = source
+        .as_ref()
+        .is_none_or(|(src, _)| src.surface.target == Target::Screen);
+    take_blit_time(cpu, &c.surface, pixels, by_card);
     c.drawn = dst_rect;
     c.close(cpu);
     true

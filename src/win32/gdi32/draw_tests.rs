@@ -445,25 +445,59 @@ fn blits_in_a_while_count_the_same_at_a_fixed_speed() {
     // 1.31 ms a blit at the period PC's speed, a quarter of it here.
     let period = 12_500 + 344 * 209 * 18;
     let want = 100_000_000 / (period / 4);
-    assert!(first.abs_diff(want) <= want / 100, "{first} blits, {want} wanted");
+    assert!(
+        first.abs_diff(want) <= want / 100,
+        "{first} blits, {want} wanted"
+    );
     let slow = count(draw::PERIOD_CYCLES as u32);
     let want = 100_000_000 / period;
     assert!(slow.abs_diff(want) <= 1, "{slow} blits, {want} wanted");
 }
 
 /// The time a blit takes is work the host does in its own code, which
-/// the host's speed counts as run (`Clock::offloaded`); a fill within
+/// the host's speed counts as run (`Clock::offloaded`); a copy within
 /// the screen and a blit that draws nothing too.
 #[test]
 fn a_blits_time_is_the_hosts_work() {
     let colors = game_colors();
     let (mut cpu, screen) = machine(DesktopDepth::Palette, &colors);
     let mem = dib_dc(&mut cpu, BITS, &colors, false, tile_pixel);
-    for rect in [(0, 0, 344, 209), (2000, 2000, 344, 209)] {
+    let blits = [
+        ((0, 0, 344, 209), mem),
+        ((0, 0, 344, 209), screen),
+        ((2000, 2000, 344, 209), mem),
+    ];
+    for (rect, src) in blits {
         let (stalled, offloaded) = (cpu.bus.clock.stalled, cpu.bus.clock.offloaded);
-        bit_blt(&mut cpu, screen, rect, mem, 0, 0);
+        bit_blt(&mut cpu, screen, rect, src, 0, 0);
         let stalled = cpu.bus.clock.stalled - stalled;
         assert!(stalled > 0);
         assert_eq!(cpu.bus.clock.offloaded - offloaded, stalled);
     }
+}
+
+/// Windows 98 SE's msimg32 does a TransparentBlt on DIBs in user mode,
+/// not on the card's blitter, so one within the screen takes a copy's
+/// time from memory. An AlphaBlend of a constant alpha of 0 draws
+/// nothing and takes the call's time.
+#[test]
+fn msimg32_blits_take_their_pixels_time_on_the_screen() {
+    use crate::win32::msimg32;
+    let colors = game_colors();
+    let (mut cpu, screen) = machine(DesktopDepth::Palette, &colors);
+    let within = emulated_ns(&mut cpu, |cpu| {
+        let args = [screen, 0, 0, 64, 64, screen, 100, 100, 64, 64, 0x0100_0000];
+        assert_eq!(msimg32::transparent_blt(cpu, &args), Some(TRUE));
+    });
+    let want = 12_500 + 64 * 64 * 18;
+    assert!(
+        within.abs_diff(want) < want / 100,
+        "{within} ns, {want} wanted"
+    );
+    let mem = dib_dc(&mut cpu, BITS, &colors, false, tile_pixel);
+    let nothing = emulated_ns(&mut cpu, |cpu| {
+        let args = [screen, 0, 0, 64, 64, mem, 0, 0, 64, 64, 0];
+        assert_eq!(msimg32::alpha_blend(cpu, &args), Some(TRUE));
+    });
+    assert!(nothing.abs_diff(12_500) < 200, "{nothing} ns");
 }

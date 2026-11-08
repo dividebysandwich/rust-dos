@@ -127,8 +127,9 @@ pub struct Clock {
     /// Of `stalled`, the counts charged for work the emulator does in its
     /// own code for the emulated machine (the built-in GDI's blits): the
     /// host spends its time on it, as on instructions, so the host's speed
-    /// counts them as run, in the share of the frame the processor didn't
-    /// halt (`Pacer::end_cpu_frame`).
+    /// counts them as run: all of them while the recent frames halted
+    /// none of their counts, fewer the more they halted, and none from
+    /// `BLITS_UNTIL_HALTED` of them (`Pacer::end_cpu_frame`).
     pub offloaded: u64,
     batch_end: u64,
     cycles_per_ms: u32,
