@@ -9,6 +9,7 @@ How fast the emulated processor runs, in instructions per millisecond.
   Games that don't draw full frames (mostly early games from the 1980s)
   run at 3000 cycles. Such games can be forced to a higher cycle value 
   by typing **auto 10000**.
+  While they load from their disks, they get all the speed there is.
   Games for DOS extenders (DOS/4GW) get all the speed there is. 
   Finding the speed takes a few seconds when a game starts.
 - **max**: as fast as your computer allows, for every game.
