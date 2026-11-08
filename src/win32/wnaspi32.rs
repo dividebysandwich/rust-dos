@@ -487,6 +487,13 @@ fn exec_scsi_cmd(cpu: &mut Cpu, srb: u32, flags: u8, cd: u8) -> Result<Finished,
     };
     let cd = state.drive.as_mut().expect("the drive was made");
     let outcome = cd.run_packet(&cdb[..cdb_len], &out, &mut env);
+    // The drive's time leaves out sending the data, which the emulated
+    // CPU's PIO transfer takes over the IDE port. Here nothing in the
+    // machine moves the data, so the request takes that time too, as the
+    // transfer by APIX's driver does on Windows.
+    let sent = outcome.data.len().min(len as usize);
+    let transfer_ms = crate::cdrom::timing::transfer_ms(sent);
+    env.now += (transfer_ms * crate::timer::PIT_HZ as f64 / 1000.0).round() as u64;
     // An event request keeps the drive busy until it is done, and the
     // requests after it queue behind it. Any other request is finished
     // before SendASPI32Command returns, in no emulated time, so it leaves
