@@ -2815,6 +2815,166 @@ fn a_program_makes_reads_finds_moves_and_deletes_files() {
     assert!(!dir.join("D").exists() && !dir.join("G.TXT").exists());
 }
 
+/// A change notification for C:\ with FILE_NOTIFY_CHANGE_FILE_NAME isn't
+/// signaled (bit 0) until a file is made there (1), stays signaled (2)
+/// until FindNextChangeNotification (3), and closes (4). One with
+/// FILE_NOTIFY_CHANGE_DIR_NAME isn't signaled by a file (5), and one with
+/// no change in its filter isn't made (6).
+#[test]
+fn a_change_notification_is_signaled_by_a_new_file() {
+    use Arg::{Esi, I};
+    const WAIT_TIMEOUT: i32 = 0x102;
+    let names: &[&str] = &[
+        "FindFirstChangeNotificationA",
+        "FindNextChangeNotification",
+        "FindCloseChangeNotification",
+        "WaitForSingleObject",
+        "CreateFileA",
+        "CloseHandle",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0; 0x100];
+    put(&mut data, 0, b"C:\\\0");
+    put(&mut data, 0x10, b"C:\\A.TXT\0");
+    put(&mut data, 0x20, b"C:\\B.TXT\0");
+    let (code, text) = run(
+        "change",
+        program(BASE, false, imports, &data, |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let at = |offset: u32| I(l.at(offset) as u32);
+            let make = |a: &mut CodeAssembler, name: Arg| -> Result<(), IcedError> {
+                let new = [name, I(0x4000_0000), I(0), I(0), I(2), I(0x80), I(0)];
+                call_with(a, f("CreateFileA"), &new)?;
+                a.push(eax)?;
+                a.call(f("CloseHandle"))
+            };
+            a.xor(ebx, ebx)?;
+            call_with(a, f("FindFirstChangeNotificationA"), &[at(0), I(0), I(1)])?;
+            a.mov(esi, eax)?;
+            call_with(a, f("WaitForSingleObject"), &[Esi, I(0)])?;
+            a.cmp(eax, WAIT_TIMEOUT)?;
+            check(a, false, 0)?;
+            make(a, at(0x10))?;
+            call_with(a, f("WaitForSingleObject"), &[Esi, I(0)])?;
+            a.test(eax, eax)?;
+            check(a, false, 1)?;
+            call_with(a, f("WaitForSingleObject"), &[Esi, I(0)])?;
+            a.test(eax, eax)?;
+            check(a, false, 2)?;
+            call_with(a, f("FindNextChangeNotification"), &[Esi])?;
+            call_with(a, f("WaitForSingleObject"), &[Esi, I(0)])?;
+            a.cmp(eax, WAIT_TIMEOUT)?;
+            check(a, false, 3)?;
+            call_with(a, f("FindCloseChangeNotification"), &[Esi])?;
+            a.test(eax, eax)?;
+            check(a, true, 4)?;
+            // Directory names only: a new file doesn't signal it.
+            call_with(a, f("FindFirstChangeNotificationA"), &[at(0), I(0), I(2)])?;
+            a.mov(esi, eax)?;
+            make(a, at(0x20))?;
+            call_with(a, f("WaitForSingleObject"), &[Esi, I(0)])?;
+            a.cmp(eax, WAIT_TIMEOUT)?;
+            check(a, false, 5)?;
+            call_with(a, f("FindCloseChangeNotification"), &[Esi])?;
+            call_with(a, f("FindFirstChangeNotificationA"), &[at(0), I(0), I(0)])?;
+            a.cmp(eax, -1)?;
+            check(a, false, 6)?;
+            a.mov(eax, ebx)?;
+            a.or(eax, 0x80)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b} {}", !code, text);
+}
+
+/// A change notification for C:\ and the directories below it with
+/// FILE_NOTIFY_CHANGE_FILE_NAME isn't signaled by an empty directory made
+/// below (bit 0), which is a directory's name, and is by a file made in it
+/// (1). One for a directory in a directory that isn't there isn't made
+/// (2), with ERROR_PATH_NOT_FOUND (3).
+#[test]
+fn a_subtree_change_notification_watches_the_files_below() {
+    use Arg::{Esi, I};
+    const WAIT_TIMEOUT: i32 = 0x102;
+    let names: &[&str] = &[
+        "FindFirstChangeNotificationA",
+        "FindCloseChangeNotification",
+        "WaitForSingleObject",
+        "CreateDirectoryA",
+        "CreateFileA",
+        "CloseHandle",
+        "GetLastError",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0; 0x100];
+    put(&mut data, 0, b"C:\\\0");
+    put(&mut data, 0x10, b"C:\\SUB\0");
+    put(&mut data, 0x20, b"C:\\SUB\\A.TXT\0");
+    put(&mut data, 0x40, b"C:\\NO\\WHERE\0");
+    let (code, text) = run(
+        "change_subtree",
+        program(BASE, false, imports, &data, |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let at = |offset: u32| I(l.at(offset) as u32);
+            a.xor(ebx, ebx)?;
+            call_with(a, f("FindFirstChangeNotificationA"), &[at(0), I(1), I(1)])?;
+            a.mov(esi, eax)?;
+            call_with(a, f("CreateDirectoryA"), &[at(0x10), I(0)])?;
+            call_with(a, f("WaitForSingleObject"), &[Esi, I(0)])?;
+            a.cmp(eax, WAIT_TIMEOUT)?;
+            check(a, false, 0)?;
+            let new = [at(0x20), I(0x4000_0000), I(0), I(0), I(2), I(0x80), I(0)];
+            call_with(a, f("CreateFileA"), &new)?;
+            a.push(eax)?;
+            a.call(f("CloseHandle"))?;
+            call_with(a, f("WaitForSingleObject"), &[Esi, I(0)])?;
+            a.test(eax, eax)?;
+            check(a, false, 1)?;
+            call_with(a, f("FindCloseChangeNotification"), &[Esi])?;
+            call_with(a, f("FindFirstChangeNotificationA"), &[at(0x40), I(0), I(1)])?;
+            a.cmp(eax, -1)?;
+            check(a, false, 2)?;
+            a.call(f("GetLastError"))?;
+            a.cmp(eax, 3)?;
+            check(a, false, 3)?;
+            a.mov(eax, ebx)?;
+            a.or(eax, 0xF0)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b} {}", !code, text);
+}
+
+/// A thread that waits for a change notification with no timeout goes on
+/// when the directory changes, here by a file another program (the host)
+/// puts there.
+#[test]
+fn a_wait_for_a_change_notification_ends_when_the_directory_changes() {
+    use Arg::{Esi, I};
+    let names: &[&str] = &["FindFirstChangeNotificationA", "WaitForSingleObject"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0; 0x10];
+    put(&mut data, 0, b"C:\\\0");
+    let mut cpu = machine(
+        "change_wait",
+        program(BASE, false, imports, &data, |a, l| {
+            call_with(a, l.import(0), &[I(l.at(0) as u32), I(0), I(1)])?;
+            a.mov(esi, eax)?;
+            call_with(a, l.import(1), &[Esi, I(0xFFFF_FFFF)])?;
+            a.add(eax, 0x40)?;
+            a.ret()
+        }),
+    );
+    assert!(!run_to_exit(&mut cpu, 20), "the wait ended with no change");
+    fs::write("target/test_win32/change_wait/HOST.TXT", b"host").unwrap();
+    assert!(
+        run_to_exit(&mut cpu, 200),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0x40, "WAIT_OBJECT_0");
+}
+
 /// `cycles=auto` gives a Win32 program that computes without drawing,
 /// reading or waiting (a game unpacking its level) all the host has: the
 /// built-in Windows halts the processor when no thread can run, so one
@@ -10514,14 +10674,30 @@ fn gdi32s_pixel_formats_go_to_a_guest_opengl32() {
 /// OPENGL32.DLL, which replaces the built-in one: its exit code and what
 /// it printed.
 fn run_with_guest_opengl32(name: &str, exe: Vec<u8>) -> (u8, String) {
+    run_with_guest_dll(name, exe, "OPENGL32.DLL", guest_opengl32(), true)
+}
+
+/// Run `exe` with `dll` as the `win32_dlls` folder's DLL `file`, which
+/// with `replace` replaces the built-in one of its name: its exit code
+/// and what it printed.
+fn run_with_guest_dll(
+    name: &str,
+    exe: Vec<u8>,
+    file: &str,
+    dll: Vec<u8>,
+    replace: bool,
+) -> (u8, String) {
     let dir = scratch(name, &[("T.EXE", exe)]);
     let dlls = dir.join("DLLS");
     fs::create_dir_all(&dlls).unwrap();
-    fs::write(dlls.join("OPENGL32.DLL"), guest_opengl32()).unwrap();
+    fs::write(dlls.join(file), dll).unwrap();
     let mut cpu = Cpu::new(dir);
     cpu.bus.win32.enabled = true;
     cpu.bus.win32.guest_dlls = Some(dlls);
-    cpu.bus.win32.guest_replace = vec!["opengl32".to_string()];
+    if replace {
+        let stem = file.trim_end_matches(".DLL").to_ascii_lowercase();
+        cpu.bus.win32.guest_replace = vec![stem];
+    }
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
     assert!(cpu.load_executable("T.EXE", None));
@@ -10726,4 +10902,139 @@ fn icopen_opens_installed_decompressors() {
     assert_eq!(ic_open("icopen_vids", b"vids", b"IV50", ICMODE_DECOMPRESS), 0xEE);
     assert_eq!(ic_open("icopen_compress", vidc, b"IV50", ICMODE_COMPRESS), 0xEE);
     assert_eq!(ic_open("icopen_draw", vidc, b"IV50", ICMODE_DRAW), 0xEE);
+}
+
+/// A program linked with MFC's OLE support imports OLEDLG.DLL's
+/// OleUIBusyA and OLEPRO32.DLL's OleCreateFontIndirect by ordinal (8 and
+/// 253), as Discworld Noir's setup does. It loads, and OleTranslateColor,
+/// OLEPRO32's and OLEAUT32's, translates: an RGB colour to itself, or to
+/// its PALETTERGB with a palette; a palette index to itself, if the
+/// palette has the entry; a PALETTERGB to itself; a system colour to
+/// GetSysColor's; and a system colour past the last or an unknown kind to
+/// E_INVALIDARG, writing nothing. It takes a NULL for the result's
+/// address. The program ends with the number of the first check that
+/// went wrong, or 0.
+#[test]
+fn mfc_ole_imports_load_and_ole_translate_color_translates() {
+    const OUT: u32 = 0;
+    const E_INVALIDARG: u32 = 0x8007_0057;
+    let imports: &[(&str, &[&str])] = &[
+        ("OLEDLG.DLL", &["#8"]),
+        ("OLEPRO32.DLL", &["#253", "OleTranslateColor"]),
+        ("OLEAUT32.DLL", &["OleTranslateColor"]),
+        ("GDI32.DLL", &["GetStockObject"]),
+    ];
+    // (colour, with DEFAULT_PALETTE, the result wanted, the colour
+    // written or None). DEFAULT_PALETTE has 20 entries.
+    let checks: [(u32, bool, u32, Option<u32>); 9] = [
+        (0x0012_3456, false, 0, Some(0x0012_3456)),
+        (0x0012_3456, true, 0, Some(0x0212_3456)),
+        (0x0100_0013, true, 0, Some(0x0100_0013)),
+        (0x0100_0014, true, E_INVALIDARG, None),
+        (0x0100_0014, false, 0, Some(0x0100_0014)),
+        (0x0212_3456, false, 0, Some(0x0212_3456)),
+        // COLOR_WINDOW, which is white.
+        (0x8000_0005, false, 0, Some(0x00FF_FFFF)),
+        (0x8000_0020, false, E_INVALIDARG, None),
+        (0x0300_0000, false, E_INVALIDARG, None),
+    ];
+    let exe = program(BASE, false, imports, &[0; 8], |a, l| {
+        let mut wrong = a.create_label();
+        // DEFAULT_PALETTE.
+        a.push(15)?;
+        a.call(l.import(4))?;
+        a.mov(esi, eax)?;
+        let mut number = 0;
+        for function in [2, 3] {
+            for (color, palette, result, written) in checks {
+                number += 1;
+                a.mov(ebx, number)?;
+                a.mov(dword_ptr(l.at(OUT)), 0xCCCC_CCCCu32 as i32)?;
+                a.push(l.at(OUT) as i32)?;
+                if palette {
+                    a.push(esi)?;
+                } else {
+                    a.push(0)?;
+                }
+                a.push(color as i32)?;
+                a.call(l.import(function))?;
+                a.cmp(eax, result as i32)?;
+                a.jne(wrong)?;
+                let written = written.unwrap_or(0xCCCC_CCCC);
+                a.cmp(dword_ptr(l.at(OUT)), written as i32)?;
+                a.jne(wrong)?;
+            }
+        }
+        // No address for the result.
+        a.mov(ebx, number + 1)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0x8000_0005u32 as i32)?;
+        a.call(l.import(2))?;
+        a.test(eax, eax)?;
+        a.jne(wrong)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut wrong)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, out) = run("ole_translate_color", exe);
+    assert_eq!(code, 0, "check {code} went wrong (OLEAUT32's from 10) {out}");
+}
+
+/// A function of OLEDLG.DLL that isn't written yet ends the program that
+/// calls it, saying which it was, as a missing function does.
+#[test]
+fn an_oledlg_function_not_written_ends_the_program_naming_it() {
+    let imports: &[(&str, &[&str])] = &[("OLEDLG.DLL", &["#8"])];
+    let exe = program(BASE, false, imports, &[0; 4], |a, l| {
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.xor(eax, eax)?;
+        a.ret()
+    });
+    let (code, out) = run("oledlg_not_written", exe);
+    assert_eq!(code, 0xFF, "{out}");
+    assert!(out.contains("OLEDLG.DLL's function OleUIBusyA"), "{out}");
+}
+
+/// A function of OLEPRO32.DLL that isn't written yet and returns an
+/// HRESULT fails with E_NOTIMPL when guest code (a DLL of the
+/// `win32_dlls` folder) calls it, popping its arguments: 0 would be
+/// S_OK, and the caller would use the font it didn't get.
+#[test]
+fn an_olepro32_function_not_written_fails_guest_code_with_e_notimpl() {
+    let call_font = |a: &mut CodeAssembler, l: &Layout| {
+        for _ in 0..3 {
+            a.push(0)?;
+        }
+        a.call(l.import(0))?;
+        a.ret()
+    };
+    let main = |a: &mut CodeAssembler, _: &Layout| {
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let dll = module_image(
+        DLL_BASE,
+        Some("OLEUSER.DLL"),
+        &[("OLEPRO32.DLL", &["#253"])],
+        &[0; 0x10],
+        &[("", &main), ("CallFont", &call_font)],
+        &[],
+    );
+    let imports: &[(&str, &[&str])] = &[("OLEUSER.DLL", &["CallFont"])];
+    let exe = program(BASE, false, imports, &[0; 4], |a, l| {
+        a.xor(ebx, ebx)?;
+        a.mov(esi, esp)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, 0x8000_4001u32 as i32)?;
+        check(a, false, 0)?;
+        a.cmp(esp, esi)?;
+        check(a, false, 1)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, out) = run_with_guest_dll("olepro32_guest", exe, "OLEUSER.DLL", dll, false);
+    assert_eq!(code, 3, "the checks that failed: {:02b} {out}", !code & 3);
 }

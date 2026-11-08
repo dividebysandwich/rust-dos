@@ -1,10 +1,11 @@
 //! OLEAUT32.DLL: the BSTR functions and VARIANTs' simplest ones, which
 //! setup programs and OLE32's PROPVARIANTs use; type libraries
 //! (typelib.rs), which controls register themselves with; error objects
-//! (errorinfo.rs); and changes of VARIANTs' types (variant.rs). A BSTR is
-//! a string of Unicode characters whose length in bytes is in the 4
-//! bytes before it, and a zero after it, in a block of the task
-//! allocator, as Windows has it.
+//! (errorinfo.rs); changes of VARIANTs' types (variant.rs); and
+//! OleTranslateColor, which OLEPRO32 has too (olepro32.rs). A BSTR is a
+//! string of Unicode characters whose length in bytes is in the 4 bytes
+//! before it, and a zero after it, in a block of the task allocator, as
+//! Windows has it.
 
 mod desc;
 mod errorinfo;
@@ -194,6 +195,7 @@ static APIS: &[Api] = &[
     stdcall("IErrorInfo_GetHelpFile", 0, 2, errorinfo::get_help_file),
     stdcall("IErrorInfo_GetHelpContext", 0, 2, errorinfo::get_help_context),
     stdcall("VarUI4FromStr", 277, 4, variant::var_ui4_from_str),
+    stdcall("OleTranslateColor", 421, 3, super::olepro32::translate_color),
 ];
 
 /// The vtables, by their places in this list. ITypeLib's and ITypeInfo's

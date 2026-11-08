@@ -21,9 +21,12 @@
 //! After a read the drive goes on reading the sectors that follow into
 //! its buffer as the disc turns, up to `READ_AHEAD` of them. A read of
 //! sectors the buffer holds, or will hold by then, waits only for those
-//! still to come and then sends them. Any other read moves the head to
-//! its first sector's radius (`seek_ms`), waits for the sector to come
-//! round, and reads its sectors as they pass.
+//! still to come. Any other read moves the head to its first sector's
+//! radius (`seek_ms`), waits for the sector to come round, and reads its
+//! sectors as they pass. Sending the data to the host comes on top: over
+//! the IDE port the emulated CPU's PIO transfer takes that time, and an
+//! ASPI request, which hands the data over without one, adds
+//! `transfer_ms`.
 //!
 //! Real drives don't take exactly the same time twice: the servo settles
 //! a little differently each time. Each read's time varies by up to
@@ -40,6 +43,13 @@
 
 use super::dpm::Dpm;
 
+/// How long, in ms, the drive takes to send `bytes` of data to the host
+/// when nothing in the emulated machine moves them: the PIO transfer the
+/// ATAPI driver would do on a real machine.
+pub fn transfer_ms(bytes: usize) -> f64 {
+    bytes as f64 / 2048.0 * SEND_MS
+}
+
 /// Linear velocity of the spiral, in m/s: the Red Book allows 1.2 to 1.4.
 const VELOCITY: f64 = 1.3;
 /// Track pitch, in m: the Red Book allows 1.5 to 1.7 um.
@@ -55,7 +65,10 @@ const SPEED: f64 = 40.0;
 /// Sectors the drive reads ahead into its buffer after a read: 128 KB.
 const READ_AHEAD: i64 = 64;
 /// Sending a sector from the buffer to the host, in ms: 2 KB at the
-/// 16.6 MB/s of ATA PIO mode 4.
+/// 16.6 MB/s of ATA PIO mode 4. The drive's own time doesn't include it:
+/// over the IDE port the emulated CPU moves the data itself and takes
+/// that time, so only a transfer that happens outside the CPU, such as
+/// an ASPI request's, adds it (`transfer_ms`).
 const SEND_MS: f64 = 0.125;
 /// A seek's time, in ms: settling on the track, and the move across the
 /// whole program area, which grows with the root of the distance. A seek
@@ -224,16 +237,15 @@ impl Head {
     pub fn read(&mut self, disc: &Geometry, now: f64, lba: i64, count: u32) -> f64 {
         let rps = turns_per_second();
         let end = lba + count as i64;
-        let send = count as f64 * SEND_MS / 1000.0;
         // The buffer holds the last READ_AHEAD sectors read: reading ahead
         // pushes the oldest out.
         let ahead = self.ahead(disc, now);
         let held = self.start.max(self.next + ahead - READ_AHEAD);
         let (ready, seconds) = if lba >= held && end <= self.next + READ_AHEAD {
             // The buffer has the sectors, or will have them as the disc
-            // turns on from `next`: wait for the last one, then send them.
+            // turns on from `next`: wait for the last one.
             let ready = self.since + (disc.turns(end) - disc.turns(self.next)).max(0.0) / rps;
-            (ready, (ready - now).max(0.0) + send)
+            (ready, (ready - now).max(0.0))
         } else {
             // Move the head from where reading ahead took it, wait for
             // the sector to come round, and read on.
@@ -245,7 +257,7 @@ impl Head {
             self.start = lba;
             self.next = lba;
             let ready = now + seek + wait + reading;
-            (ready, ready - now + send)
+            (ready, ready - now)
         };
         if end > self.next {
             self.next = end;
@@ -315,16 +327,12 @@ mod tests {
         let then = 0.5 + first / 1000.0;
         let next = exact(&mut head, &disc, then, 1001, 16);
         let turning = (disc.turns(1017) - disc.turns(1001)) / rps * 1000.0;
-        let send = 16.0 * SEND_MS;
         let early = (then - head_ready(first, 0.5)) * 1000.0;
-        assert!(
-            (next - (turning - early + send)).abs() < 1e-6,
-            "{next} {turning} {send}"
-        );
+        assert!((next - (turning - early)).abs() < 1e-6, "{next} {turning}");
         // A second later the drive has read them all ahead: 16 more are
-        // only sent.
+        // there at once.
         let later = exact(&mut head, &disc, then + 1.0, 1017, 16);
-        assert!((later - send).abs() < 1e-9, "{later}");
+        assert!(later.abs() < 1e-9, "{later}");
     }
 
     #[test]
@@ -335,11 +343,11 @@ mod tests {
         // A second later the drive has read 64 sectors on from 1016, which
         // is all the buffer holds: 1016 is still there, 1015 is gone.
         let kept = exact(&mut head, &disc, 1.5, 1016, 1);
-        assert!((kept - SEND_MS).abs() < 1e-9, "{kept}");
+        assert!(kept.abs() < 1e-9, "{kept}");
         let mut head = Head::default();
         exact(&mut head, &disc, 0.5, 1000, 16);
         let gone = exact(&mut head, &disc, 1.5, 1015, 1);
-        assert!(gone > SEEK_SETTLE_MS + SEND_MS, "{gone}");
+        assert!(gone > SEEK_SETTLE_MS, "{gone}");
     }
 
     #[test]
@@ -356,13 +364,12 @@ mod tests {
         let ms = exact(&mut head, &disc, now, 300_000, 1);
         let wait = wrap(disc.turns(300_000) - rps * now) / rps * 1000.0;
         let read = (disc.turns(300_001) - disc.turns(300_000)) / rps * 1000.0;
-        assert!((ms - (wait + read + SEND_MS)).abs() < 1e-6, "{ms} {wait}");
+        assert!((ms - (wait + read)).abs() < 1e-6, "{ms} {wait}");
     }
 
-    /// When the first read of a test had its sector: it ended at `ms` less
-    /// the time to send it.
+    /// When the first read of a test had its sector: when it ended.
     fn head_ready(ms: f64, now: f64) -> f64 {
-        now + (ms - SEND_MS) / 1000.0
+        now + ms / 1000.0
     }
 
     #[test]
@@ -379,8 +386,8 @@ mod tests {
         let seek = seek_ms(from, disc.radius(10_200));
         let wait = wrap(disc.turns(10_200) - rps * (now + seek / 1000.0)) / rps * 1000.0;
         let read = (disc.turns(10_201) - disc.turns(10_200)) / rps * 1000.0;
-        assert!((ms - (seek + wait + read + SEND_MS)).abs() < 1e-6, "{ms}");
-        assert!(ms > seek && ms < seek + 1000.0 / rps + read + SEND_MS);
+        assert!((ms - (seek + wait + read)).abs() < 1e-6, "{ms}");
+        assert!(ms > seek && ms < seek + 1000.0 / rps + read);
     }
 
     #[test]

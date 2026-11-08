@@ -816,7 +816,8 @@ mod tests {
         (39, 0xEC3D_4AFA_6107_B768), // the screens kept under CS_SAVEBITS windows
         (40, 0x7030_77A9_A34C_1A60), // the Win16 task a message handed the turn to
         (41, 0x6147_C450_7D40_D8CF), // the codecs a process opened with ICOpen
-        (44, 0x3252_A7F5_96FE_1CF9), // ASPI requests' due times, the drive's head
+        (42, 0x7540_74DC_C874_40DC), // change notification handles
+        (44, 0x0B7F_B292_0B00_1986), // ASPI requests' due times, the drive's head
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
