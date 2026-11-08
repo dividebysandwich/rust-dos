@@ -23,7 +23,7 @@ use super::call::{self, THREAD_ATTACHED};
 use super::memory::{GRANULARITY, Memory, PRIVATE, SHARED, USER, WRITABLE};
 use super::object::{Kind, Objects};
 use super::seh;
-use super::{Context, ESP, Win32, process};
+use super::{Context, EAX, EBX, ESP, Win32, process};
 use crate::bus::Bus;
 use crate::cpu::Cpu;
 use crate::instructions::fpu::control;
@@ -32,10 +32,6 @@ use crate::instructions::sse::float::MXCSR_DEFAULT;
 /// How long a thread runs before another that is ready gets its turn, in
 /// microseconds. The timer's interrupt, which switches, comes every 55 ms.
 const SLICE: u64 = 20_000;
-
-/// The index of EAX and EBX in `Context::gpr`.
-const EAX: usize = 0;
-const EBX: usize = 3;
 
 /// What wait functions return.
 pub const WAIT_OBJECT_0: u32 = 0;

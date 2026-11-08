@@ -171,7 +171,11 @@ const ID_START: u16 = 0xF300;
 /// The callbacks' traps, the slot in the low byte.
 const ID_CALLBACK: u16 = 0xF400;
 
-/// The index of ESP in `Context::gpr`.
+/// The indexes of the general registers in `Context::gpr`.
+const EAX: usize = 0;
+const ECX: usize = 1;
+const EDX: usize = 2;
+const EBX: usize = 3;
 const ESP: usize = 4;
 
 /// What a call of a function the built-in DLLs lack fails with.
