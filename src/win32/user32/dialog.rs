@@ -148,7 +148,8 @@ const I_MB_STYLE: usize = 28;
 
 /// EndDialog was called.
 const DF_END: u16 = 0x0001;
-/// A modal dialog disabled its owner, which it enables again.
+/// A modal dialog disabled its owner, which it enables again if the
+/// dialog can't be made. EndDialog enables the owner in any case.
 const DF_OWNERENABLED: u16 = 0x0002;
 /// A message box: DefDlgProcA is its dialog procedure too.
 const DF_MSGBOX: u16 = 0x0100;
@@ -326,14 +327,21 @@ fn parent_of(state: &State, hwnd: u32) -> u32 {
     }
 }
 
-/// GetAncestor(GA_ROOT), or 0 for what isn't a window.
-fn root_of(state: &State, hwnd: u32) -> u32 {
+/// The owner a modal dialog disables and is made with: the first of
+/// `hwnd` and its ancestors that isn't a child window (WS_CHILD without
+/// WS_POPUP), as Windows picks it (Wine's test_dialog_parent), or 0 for
+/// what isn't a window.
+fn modal_owner(state: &State, hwnd: u32) -> u32 {
     if hwnd == DESKTOP || !state.is_window(hwnd) {
         return 0;
     }
     let mut h = hwnd;
-    while state.parent(h) != DESKTOP && state.parent(h) != 0 {
-        h = state.parent(h);
+    while style(state, h) & (WS_POPUP | WS_CHILD) == WS_CHILD {
+        let parent = state.parent(h);
+        if parent == 0 || parent == DESKTOP {
+            break;
+        }
+        h = parent;
     }
     h
 }
@@ -1282,8 +1290,15 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 t.set(C_POS, CW_USEDEFAULT);
             }
             if modal {
-                let root = root_of(state, owner);
+                // The modal owner is the dialog's parent or owner too,
+                // whatever the template's style, so the window EndDialog
+                // enables (GWL_HWNDPARENT) is the one disabled here. The
+                // place above was worked out from the owner given.
+                let root = modal_owner(state, owner);
                 t.set(C_ROOT, root);
+                if root != 0 {
+                    t.set(C_OWNER, root);
+                }
                 if root != 0 && style_of_root_enabled(state, root) {
                     t.set(C_FLAGS, DF_OWNERENABLED as u32);
                     return call_api("EnableWindow", &[root, FALSE], 92);
@@ -1605,9 +1620,9 @@ fn modal_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         220 => {
             let i = info(user(cpu), hwnd).unwrap_or_default();
             t.set(C_RESULT, i.result);
-            if i.flags & DF_OWNERENABLED != 0 && t.var(C_ROOT) != 0 {
-                return call_api("EnableWindow", &[t.var(C_ROOT), TRUE], 221);
-            }
+            // The owner isn't enabled here: EndDialog did, and Windows
+            // leaves one the program disabled again, or one the loop
+            // left by WM_QUIT, disabled (Wine's test_dialog_parent).
             goto(221)
         }
         221 => call_api("DestroyWindow", &[hwnd], 222),

@@ -7898,7 +7898,8 @@ fn a_program_started_from_the_foreground_comes_to_it_and_stays() {
     assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
 }
 
-const SWP_HIDE_ONLY: i32 = 0x0097; // SWP_HIDEWINDOW | NOACTIVATE | NOZORDER | NOMOVE | NOSIZE
+/// SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOZORDER, SWP_NOMOVE, SWP_NOSIZE.
+const SWP_HIDE_ONLY: i32 = 0x0097;
 const SW_HIDE: i32 = 0;
 
 #[test]
@@ -7992,6 +7993,119 @@ fn a_hidden_window_stays_active_until_it_goes_and_end_dialog_activates_the_owner
         a.int3()
     });
     let code = run_family("hidden_stays_active", &[("T.EXE", program)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+#[test]
+fn a_dialog_box_has_its_owner_enabled_by_end_dialog_only() {
+    // As Wine's test_dialog_parent checks on Windows: EndDialog enables
+    // the owner DialogBox disabled, and DialogBox doesn't enable it
+    // again as it returns, so an owner the dialog procedure disabled
+    // after EndDialog stays disabled. A WS_CHILD dialog whose owner is
+    // a child window is made the child of the first ancestor that isn't
+    // one, the window disabled and enabled.
+    const WS_CHILD: i32 = 0x4000_0000;
+    const WM_INITDIALOG: i32 = 0x0110;
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "DialogBoxIndirectParamA",
+        "EndDialog",
+        "EnableWindow",
+        "IsWindowEnabled",
+        "GetParent",
+    ];
+    // The class at 0x10; DLGTEMPLATEs at 0x100 (a popup) and 0x140 (a
+    // child), no controls, menu, class or title; at 0x180 the owner the
+    // procedure disables, at 0x184 whether it was enabled, at 0x188 the
+    // dialog's parent.
+    let mut data = child_data(&[(0x10, "Static")]);
+    data.resize(0x190, 0);
+    for (at, style) in [(0x100, WS_POPUP | 0x00C0_0000), (0x140, WS_CHILD)] {
+        data[at..at + 4].copy_from_slice(&style.to_le_bytes());
+        data[at + 0x0E..at + 0x10].copy_from_slice(&100u16.to_le_bytes());
+        data[at + 0x10..at + 0x12].copy_from_slice(&50u16.to_le_bytes());
+    }
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let (owner, was_enabled, parent) = (l.at(0x180), l.at(0x184), l.at(0x188));
+        let mut start = a.create_label();
+        let mut other = a.create_label();
+        let mut done = a.create_label();
+        a.call(start)?;
+        // The dialog procedure: in WM_INITDIALOG, EndDialog with the
+        // lParam as the result, then the owner's state, and the owner
+        // disabled again.
+        a.cmp(dword_ptr(esp + 8), WM_INITDIALOG)?;
+        a.jne(other)?;
+        a.push(dword_ptr(esp + 4))?;
+        a.call(f("GetParent"))?;
+        a.mov(dword_ptr(parent), eax)?;
+        a.push(dword_ptr(esp + 16))?;
+        a.push(dword_ptr(esp + 8))?;
+        a.call(f("EndDialog"))?;
+        a.mov(eax, dword_ptr(owner))?;
+        a.test(eax, eax)?;
+        a.jz(done)?;
+        a.push(eax)?;
+        a.call(f("IsWindowEnabled"))?;
+        a.mov(dword_ptr(was_enabled), eax)?;
+        a.push(0)?;
+        a.push(dword_ptr(owner))?;
+        a.call(f("EnableWindow"))?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(16)?;
+        a.set_label(&mut other)?;
+        a.xor(eax, eax)?;
+        a.ret_1(16)?;
+        a.set_label(&mut start)?;
+        a.pop(edi)?;
+        let class = l.at(0x10) as i32;
+        a.xor(ebx, ebx)?;
+        let popup = WS_POPUP | WS_VISIBLE;
+        push_args(a, &[0, class, 0, popup, 0, 0, 100, 100, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        a.mov(dword_ptr(owner), esi)?;
+        push_args(a, &[BASE as i32, l.at(0x100) as i32, 0, 0, 2])?;
+        a.mov(dword_ptr(esp + 8), esi)?;
+        a.mov(dword_ptr(esp + 12), edi)?;
+        a.call(f("DialogBoxIndirectParamA"))?;
+        a.cmp(eax, 2)?;
+        bit_if(a, eq, 0)?;
+        a.cmp(dword_ptr(was_enabled), 0)?;
+        bit_if(a, ne, 1)?;
+        a.push(esi)?;
+        a.call(f("IsWindowEnabled"))?;
+        a.test(eax, eax)?;
+        bit_if(a, eq, 2)?;
+        a.push(1)?;
+        a.push(esi)?;
+        a.call(f("EnableWindow"))?;
+        // A child dialog with a child window of the first as its owner.
+        a.mov(dword_ptr(owner), 0)?;
+        let child = WS_CHILD | WS_VISIBLE;
+        push_args(a, &[0, class, 0, child, 0, 0, 10, 10, 0, 0, 0, 0])?;
+        a.mov(dword_ptr(esp + 32), esi)?;
+        a.call(f("CreateWindowExA"))?;
+        push_args(a, &[BASE as i32, l.at(0x140) as i32, 0, 0, 3])?;
+        a.mov(dword_ptr(esp + 8), eax)?;
+        a.mov(dword_ptr(esp + 12), edi)?;
+        a.call(f("DialogBoxIndirectParamA"))?;
+        a.cmp(eax, 3)?;
+        bit_if(a, eq, 3)?;
+        a.cmp(dword_ptr(parent), esi)?;
+        bit_if(a, eq, 4)?;
+        a.push(esi)?;
+        a.call(f("IsWindowEnabled"))?;
+        a.test(eax, eax)?;
+        bit_if(a, ne, 5)?;
+        a.or(ebx, 0xC0)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("dialog_box_owner", &[("T.EXE", program)]);
     assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
 }
 
