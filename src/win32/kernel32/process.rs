@@ -593,6 +593,9 @@ fn process_memory(cpu: &mut Cpu, args: &[u32], write: bool) -> Option<u32> {
     let mut done = 0;
     while done < size {
         let lin = address.wrapping_add(done);
+        // A page of a view of a file the other process hasn't read yet is
+        // read from the file, as its own touch would.
+        crate::win32::mapping::fault_in_process(cpu, p, lin);
         let Some(phys) = user_page(cpu, p, lin) else {
             break;
         };

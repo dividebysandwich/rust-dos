@@ -1710,8 +1710,7 @@ impl Bus {
             let (wl, wr) = self.win32.cd_gain();
             (cl * wl, cr * wr)
         };
-        let sb_on =
-            self.sb.as_ref().is_some_and(|sb| sb.speaker_on || sb.config.model.is_sb16());
+        let sb_on = self.sb.as_ref().is_some_and(|sb| sb.output_on());
         const SPEAKER: f32 = 3000.0;
         const GUS_GAIN: f32 = 1.0;
         // The Sound Blaster's output filter, as its model has it: its
@@ -1766,7 +1765,12 @@ impl Bus {
                     self.sb_frame = f;
                 }
                 if sb_on {
-                    let mut frame = (self.sb_frame.0 as f32 * vl, self.sb_frame.1 as f32 * vr);
+                    let held = (self.sb_frame.0 as f32 * vl, self.sb_frame.1 as f32 * vr);
+                    // The capacitor on the card's output takes the level
+                    // the DAC holds out. It goes first, before the
+                    // low-pass, so that when it starts settled (after a
+                    // state load) the low-pass gets silence, not a step.
+                    let mut frame = self.mixer.sb_coupling(held);
                     if let Some((cutoff, order)) = sb_filter {
                         frame = self.mixer.sb_filter(frame, cutoff, order);
                     }
@@ -1817,6 +1821,25 @@ impl Bus {
         self.trim_audio();
     }
 
+    /// Whether the Sound Blaster adds nothing to the mix and nothing it
+    /// holds would change: it is idle, or its DAC holds a level that the
+    /// capacitor on its output has already taken out of the sound (a
+    /// program left it off the centre, as ShadowCaster's driver does).
+    fn sb_quiet(&self) -> bool {
+        let Some(sb) = &self.sb else {
+            return true;
+        };
+        if sb.is_idle() {
+            return true;
+        }
+        if sb.held_level() != Some(self.sb_frame) {
+            return false;
+        }
+        let ((vl, vr), _) = sb.volumes();
+        let held = (self.sb_frame.0 as f32 * vl, self.sb_frame.1 as f32 * vr);
+        !sb.output_on() || self.mixer.sb_coupling_rests_on(held)
+    }
+
     /// Whether no source makes a sound, or would move on in a way the
     /// sound coming later depends on, as the frames to mix start (see
     /// `audio_settled`).
@@ -1828,7 +1851,7 @@ impl Bus {
         !speaker
             && self.beep_frames == 0
             && self.opl.is_idle()
-            && self.sb.as_ref().is_none_or(|sb| sb.is_idle())
+            && self.sb_quiet()
             && self.mpu.is_idle()
             && self.cdaudio.is_idle()
             && self.disknoise.is_silent()

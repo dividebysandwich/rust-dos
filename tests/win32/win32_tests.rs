@@ -2724,6 +2724,209 @@ fn a_program_uses_heaps_global_memory_and_mappings() {
     );
 }
 
+/// Run T.EXE from a folder with `files` to its end, on a machine with
+/// `memory_mb` MB of RAM; its exit code and what it printed.
+fn run_files_in(test: &str, files: &[(&str, Vec<u8>)], memory_mb: usize) -> (u8, String) {
+    let mut cpu = Cpu::with_memory(scratch(test, files), memory_mb);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert!(!cpu.bus.win32.active());
+    (cpu.errorlevel, printed(&cpu))
+}
+
+/// A read-only mapping of a file larger than the machine's memory, as
+/// Windows 95 has it: making and viewing it takes no memory, a page is
+/// read from the file when it is touched, by the program or by a system
+/// call reading the view (WriteFile), and pages not used lately make
+/// room for others, read again when they are touched again. Submarine
+/// Titans maps several hundred MB of data files whole on a 128 MB
+/// machine. A bit each in the exit code.
+#[test]
+fn a_mapping_of_a_file_larger_than_memory_reads_pages_as_they_are_touched() {
+    const PAGES: u32 = 24 * 256;
+    const MARK: u32 = 0x1234_5678;
+    const TEXT_AT: u32 = 3000 * 0x1000 + 0x10;
+    const TEXT: &[u8] = b"read from the mapping\r\n";
+    const GENERIC_READ: i32 = 0x8000_0000u32 as i32;
+    const FILE_SHARE_READ: i32 = 1;
+    const OPEN_EXISTING: i32 = 3;
+    const PAGE_READONLY: i32 = 2;
+    const FILE_MAP_READ: i32 = 4;
+    const MEM_COMMIT: i32 = 0x1000;
+    // Each page starts with its number; the first has MARK after it.
+    let mut file = vec![0u8; (PAGES * 0x1000) as usize];
+    for page in 0..PAGES {
+        let at = (page * 0x1000) as usize;
+        file[at..at + 4].copy_from_slice(&page.to_le_bytes());
+    }
+    file[4..8].copy_from_slice(&MARK.to_le_bytes());
+    file[TEXT_AT as usize..TEXT_AT as usize + TEXT.len()].copy_from_slice(TEXT);
+    let names: &[&str] = &[
+        "CreateFileA",
+        "CreateFileMappingA",
+        "MapViewOfFile",
+        "IsBadReadPtr",
+        "VirtualQuery",
+        "GetStdHandle",
+        "WriteFile",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // Data: the file's name at 0, WriteFile's count at 10h, and a
+    // MEMORY_BASIC_INFORMATION at 20h.
+    let mut data = b"BIG.DAT\0".to_vec();
+    data.resize(0x40, 0);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let (written, info) = (l.at(0x10), l.at(0x20));
+        a.xor(ebx, ebx)?;
+        push_args(
+            a,
+            &[l.at(0) as i32, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0],
+        )?;
+        a.call(f("CreateFileA"))?;
+        push_args(a, &[PAGE_READONLY, 0, 0, 0])?;
+        a.push(0)?;
+        a.push(eax)?;
+        a.call(f("CreateFileMappingA"))?;
+        a.test(eax, eax)?;
+        a.setne(cl)?;
+        a.cmp(cl, 1)?;
+        bit_if_equal(a, 0)?;
+        push_args(a, &[FILE_MAP_READ, 0, 0, 0])?;
+        a.push(eax)?;
+        a.call(f("MapViewOfFile"))?;
+        a.mov(esi, eax)?;
+        // Pages not touched yet are there to IsBadReadPtr and committed
+        // to VirtualQuery.
+        a.push(0x1000)?;
+        a.lea(eax, dword_ptr(esi + 0x140_0000))?;
+        a.push(eax)?;
+        a.call(f("IsBadReadPtr"))?;
+        a.cmp(eax, 0)?;
+        bit_if_equal(a, 1)?;
+        a.push(28)?;
+        a.push(info as i32)?;
+        a.lea(eax, dword_ptr(esi + 0x100_0000))?;
+        a.push(eax)?;
+        a.call(f("VirtualQuery"))?;
+        a.cmp(dword_ptr(info + 16), MEM_COMMIT)?;
+        bit_if_equal(a, 2)?;
+        // WriteFile reads a page of the view the program never touched.
+        a.push(STD_OUTPUT_HANDLE)?;
+        a.call(f("GetStdHandle"))?;
+        a.push(0)?;
+        a.push(written as i32)?;
+        a.push(TEXT.len() as i32)?;
+        a.lea(ecx, dword_ptr(esi + TEXT_AT))?;
+        a.push(ecx)?;
+        a.push(eax)?;
+        a.call(f("WriteFile"))?;
+        a.cmp(dword_ptr(written), TEXT.len() as i32)?;
+        bit_if_equal(a, 3)?;
+        // Every page has its number, more of them than memory holds.
+        let mut next = a.create_label();
+        let mut wrong = a.create_label();
+        a.xor(edx, edx)?;
+        a.set_label(&mut next)?;
+        a.mov(eax, edx)?;
+        a.shl(eax, 12)?;
+        a.cmp(dword_ptr(esi + eax), edx)?;
+        a.jne(wrong)?;
+        a.inc(edx)?;
+        a.cmp(edx, PAGES as i32)?;
+        a.jne(next)?;
+        a.set_label(&mut wrong)?;
+        a.cmp(edx, PAGES as i32)?;
+        bit_if_equal(a, 4)?;
+        // The first page, given back for the later ones, is read again.
+        a.cmp(dword_ptr(esi + 4), MARK as i32)?;
+        bit_if_equal(a, 5)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run_files_in(
+        "mapping_larger_than_memory",
+        &[("T.EXE", exe), ("BIG.DAT", file)],
+        16,
+    );
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b} {}",
+        !code & 0x3F,
+        text
+    );
+    assert_eq!(text, "read from the mapping\r\n");
+}
+
+/// A view of a read-write mapping of a file writes back the pages it
+/// read, here one that it changed, and leaves the rest of the file as it
+/// was. A bit each in the exit code.
+#[test]
+fn a_read_write_mapping_writes_back_only_the_pages_it_read() {
+    const GENERIC_READ_WRITE: i32 = 0xC000_0000u32 as i32;
+    const OPEN_EXISTING: i32 = 3;
+    const PAGE_READWRITE: i32 = 4;
+    const FILE_MAP_WRITE: i32 = 2;
+    // Three pages of 1s, 2s and 3s.
+    let file: Vec<u8> = (1..=3u8).flat_map(|b| [b; 0x1000]).collect();
+    let names: &[&str] = &[
+        "CreateFileA",
+        "CreateFileMappingA",
+        "MapViewOfFile",
+        "UnmapViewOfFile",
+        "CloseHandle",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"RW.DAT\0".to_vec();
+    data.resize(0x10, 0);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        push_args(
+            a,
+            &[l.at(0) as i32, GENERIC_READ_WRITE, 0, 0, OPEN_EXISTING, 0, 0],
+        )?;
+        a.call(f("CreateFileA"))?;
+        a.mov(edi, eax)?;
+        push_args(a, &[0, PAGE_READWRITE, 0, 0, 0])?;
+        a.push(edi)?;
+        a.call(f("CreateFileMappingA"))?;
+        a.mov(ebp, eax)?;
+        push_args(a, &[FILE_MAP_WRITE, 0, 0, 0])?;
+        a.push(ebp)?;
+        a.call(f("MapViewOfFile"))?;
+        a.mov(esi, eax)?;
+        a.cmp(byte_ptr(esi + 0x1004), 2)?;
+        bit_if_equal(a, 0)?;
+        a.mov(byte_ptr(esi + 0x1005), 0x55)?;
+        a.push(esi)?;
+        a.call(f("UnmapViewOfFile"))?;
+        a.cmp(eax, 1)?;
+        bit_if_equal(a, 1)?;
+        a.push(ebp)?;
+        a.call(f("CloseHandle"))?;
+        a.push(edi)?;
+        a.call(f("CloseHandle"))?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let test = "mapping_writes_back";
+    let (code, text) = run_files_in(test, &[("T.EXE", exe), ("RW.DAT", file.clone())], 16);
+    assert_eq!(code, 3, "the checks that failed: {:02b} {}", !code & 3, text);
+    let mut expected = file;
+    expected[0x1005] = 0x55;
+    let written = fs::read(PathBuf::from("target/test_win32").join(test).join("RW.DAT")).unwrap();
+    assert!(written == expected, "the file isn't the one expected");
+}
+
 /// ReleaseStgMedium, as Windows' table of it has it: a global block no
 /// object owns is freed, a stream and the object that owns a medium are
 /// released, a block an object owns is left alone, and the medium is
