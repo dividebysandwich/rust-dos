@@ -1257,7 +1257,11 @@ pub fn load_accelerators(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (at, size) = match kernel32::resource_data(cpu, args[0], RT_ACCELERATOR, args[1])? {
         Ok(found) => found,
         Err(_) => {
+            // No table: nothing changes but the last error, which an idle
+            // proof can follow (`idle::pure_call`). Railroad Tycoon II asks
+            // for one it doesn't have in every pass of its main loop.
             set_error(cpu, ERROR_RESOURCE_NAME_NOT_FOUND);
+            crate::idle::pure_call(cpu, None);
             return Some(0);
         }
     };

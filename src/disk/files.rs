@@ -258,6 +258,16 @@ impl DiskController {
         self.close_file(sft)
     }
 
+    /// Whether a use of the file `sft` would empty a file a create call
+    /// left for its first use (`settle`).
+    pub fn settles(&self, sft: u16) -> bool {
+        self.open_files.get(&sft).is_some_and(|open| {
+            self.open_files
+                .values()
+                .any(|f| f.empty_on_use && f.key == open.key)
+        })
+    }
+
     /// Empty the file `sft` names if a create call left that for its first
     /// use, through whichever handle: DOS emptied it for all of them.
     fn settle(&mut self, sft: u16) {

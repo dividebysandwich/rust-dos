@@ -86,6 +86,9 @@ const STATUS_POLLS: u32 = 64;
 const COUNTER_BYTES: usize = 16;
 /// Instructions of a pass `Phase::Count` records.
 const PASS_LIMIT: usize = 20_000;
+/// Bytes a REP string instruction with 32-bit addresses may reach in a
+/// pass `Phase::Count` records.
+const REP_SPAN: u64 = 1 << 20;
 /// Passes skipped at most over counters at once.
 const COUNTED_PASSES: u64 = 1 << 20;
 
@@ -345,6 +348,13 @@ pub struct Observe {
     /// The built-in Windows' service running said it changed nothing but
     /// RAM and registers (`pure_call`).
     pure: bool,
+    /// It said too that it read no RAM but its arguments on the stack
+    /// (`reads_arguments`), as a pass `Phase::Count` records needs.
+    arguments: bool,
+    /// The instruction running in a pass `Phase::Count` records reaches
+    /// more RAM than its operands (a service, an interrupt): the bytes it
+    /// writes are noted in the pass's writes as they are written.
+    noting: bool,
     /// Since the base: the first instruction count at which what the
     /// services read would read otherwise, and when the last service
     /// started the thread's turn over.
@@ -400,6 +410,8 @@ impl Default for Observe {
             latch_at: None,
             writes: Vec::new(),
             pure: false,
+            arguments: false,
+            noting: false,
             holds_until: None,
             turn_at: None,
             stats: IdleStats::default(),
@@ -460,6 +472,17 @@ impl Observe {
     pub fn wrote(&mut self, start: usize, end: usize) {
         if self.timing() {
             self.writes.push((start, end));
+        }
+        if self.noting
+            && let Phase::Count { pass, .. } = &mut self.phase
+        {
+            pass.writes.push(Access::Range {
+                start,
+                len: end - start,
+            });
+            if pass.writes.len() > 4 * PASS_LIMIT && self.failed.get().is_none() {
+                self.failed.set(Some("pass"));
+            }
         }
         for chunk in start >> GEN_SHIFT..=(end - 1) >> GEN_SHIFT {
             self.chunks.push(chunk as u32);
@@ -607,6 +630,7 @@ impl Observe {
         self.pit_read = false;
         self.clock_read = None;
         self.writes.clear();
+        self.noting = false;
     }
 
     fn forget_ports(&mut self) {
@@ -790,17 +814,23 @@ pub fn pure_service(kind: u8, vector: u8, ax: u16) -> bool {
 #[inline(always)]
 pub fn before_service(cpu: &mut Cpu) {
     cpu.bus.observe.pure = false;
+    cpu.bus.observe.arguments = false;
 }
 
 /// After it, during a proof: a service that said it changed nothing but
 /// RAM and registers is followed, but not in a time proof, which doesn't
 /// look at `holds_until`, nor one that found a page missing, which runs
-/// again after the system's handler. Any other ends the proof.
+/// again after the system's handler. Any other ends the proof. In a pass
+/// `Phase::Count` records it must also have read no RAM but its arguments
+/// (`reads_arguments`): what it read elsewhere may be a counter, and the
+/// passes after it may then not run the same.
 pub fn after_service(cpu: &mut Cpu) {
     let faulted = cpu.bus.guest_faulted();
     let o = &mut cpu.bus.observe;
     if !(o.pure && !faulted && !matches!(o.phase, Phase::Time(_))) {
         o.opaque();
+    } else if matches!(o.phase, Phase::Count { .. }) && !o.arguments {
+        o.opaque_because("count service");
     }
 }
 
@@ -812,8 +842,12 @@ pub fn after_service(cpu: &mut Cpu) {
 /// the thunks between them (Johnny Castaway's animation loop, #358).
 /// What they keep outside RAM is as it was after every pass, but for the
 /// count of calls and when the thread's turn started (`turn_started`),
-/// which a skip moves on as the passes would have. The call trace in the
-/// log counts only the calls that ran.
+/// which a skip moves on as the passes would have, and the thread's last
+/// error. A service may set that (a SetFilePointer that leaves the pointer
+/// where it was sets it to 0): only services the proof can't follow read
+/// it, and every pass sets it as the one before did, so the passes skipped
+/// leave it as the last pass run left it. The call trace in the log counts
+/// only the calls that ran.
 pub fn pure_call(cpu: &mut Cpu, until: Option<u64>) {
     if !cpu.bus.observe.on {
         return;
@@ -831,6 +865,15 @@ pub fn not_pure(cpu: &mut Cpu) {
     cpu.bus.observe.pure = false;
 }
 
+/// The service running read no RAM but its arguments on the stack, within
+/// the 64 bytes above the stack's top that a pass `Phase::Count` records
+/// takes a service to read (`record`). A counter elsewhere then can't
+/// change what it does, and a pass that counts may call it. What it wrote
+/// is noted as it writes it, wherever it is.
+pub fn reads_arguments(cpu: &mut Cpu) {
+    cpu.bus.observe.arguments = true;
+}
+
 /// Run `f`, a built-in function the service running calls from Rust (as
 /// a tree view calls GetTickCount). The service stays pure only if what
 /// it said before the call holds and `f` says it changed nothing but RAM
@@ -840,9 +883,12 @@ pub fn not_pure(cpu: &mut Cpu) {
 /// read still holds only as long as they say (`holds_until`).
 pub fn nested<T>(cpu: &mut Cpu, f: impl FnOnce(&mut Cpu) -> T) -> T {
     let claimed = cpu.bus.observe.pure;
+    let arguments = cpu.bus.observe.arguments;
     cpu.bus.observe.pure = false;
+    cpu.bus.observe.arguments = false;
     let value = f(cpu);
     cpu.bus.observe.pure &= claimed;
+    cpu.bus.observe.arguments &= arguments;
     value
 }
 
@@ -863,6 +909,7 @@ pub fn tick_count(cpu: &mut Cpu) -> u32 {
     if cpu.bus.observe.on {
         let next = cpu.bus.clock.icount_at_micros((micros / 1000 + 1) * 1000);
         pure_call(cpu, Some(next));
+        reads_arguments(cpu);
     }
     (micros / 1000) as u32
 }
@@ -1129,7 +1176,7 @@ fn compare(cpu: &mut Cpu, visit: Visit) {
             })
             .take(COUNTER_BYTES + 1)
             .collect();
-        if counters.len() <= COUNTER_BYTES && cpu.cr0 & crate::cpu::CR0_PG == 0 {
+        if counters.len() <= COUNTER_BYTES {
             let blocks: Vec<usize> = copies.iter().map(|(k, _)| *k).collect();
             let copies = copy_blocks(ram, blocks);
             let o = &mut cpu.bus.observe;
@@ -1227,19 +1274,32 @@ fn finish(
 /// During `Phase::Count`, the instruction about to run: what it does to
 /// the flags, and the RAM it reaches. Of the counters only INC, DEC, ADD,
 /// SUB and CMP with a constant may reach them (which `count` follows);
-/// anything else ends the proof.
+/// anything else ends the proof. With paging on, the RAM is found through
+/// the page tables (`physical`): the counters are physical addresses, as
+/// the blocks compared are.
 fn record(cpu: &mut Cpu) {
     use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpAccess, OpKind, Register};
     use crate::cpu::alu::ARITH;
-    if cpu.cr0 & crate::cpu::CR0_PG != 0 {
-        return cpu.bus.observe.fail("paging");
-    }
+    let paged = cpu.cr0 & crate::cpu::CR0_PG != 0;
     let cs = cpu.seg_cache(crate::cpu::Seg::CS);
     let bitness = if cs.attr & crate::cpu::ATTR_DB != 0 { 32 } else { 16 };
     let a20 = cpu.bus.a20_mask() as usize;
-    let lin = cs.base.wrapping_add(cpu.eip()) as usize & a20;
-    let bytes = code_at(cpu, lin);
+    let ip = cs.base.wrapping_add(cpu.eip());
+    let (bytes, mapped) = code_at(cpu, ip);
     let instr = Decoder::with_ip(bitness, &bytes, cpu.eip() as u64, DecoderOptions::NONE).decode();
+    // An instruction that runs into a page that isn't there faults, and
+    // the fault ends the proof: its bytes aren't known before.
+    if instr.len() > mapped || instr.is_invalid() && mapped < bytes.len() {
+        return cpu.bus.observe.fail("paging");
+    }
+    // The page table entries that find its bytes and the RAM it reaches.
+    let mut tables = entries(cpu, ip, instr.len() as u64);
+    // The BIOS's and DOS's services read memory of their own (the BIOS
+    // data area, DOS's data), which with paging on is where the page
+    // tables put it, not where the window below looks.
+    if paged && instr.is_invalid() && bytes[0] == 0xFE && bytes[1] != crate::win32::TRAP {
+        return cpu.bus.observe.fail("count service");
+    }
     let mnemonic = instr.mnemonic();
     // An emulator service trap (which decodes as nothing), and what pushes
     // the flags or goes through the interrupt table: all the flags may be
@@ -1283,25 +1343,98 @@ fn record(cpu: &mut Cpu) {
         };
         let size = m.memory_size().size().max(1);
         let operand = !repeated && instr.op_count() > 0 && instr.op0_kind() == OpKind::Memory && m.base() == instr.memory_base() && m.displacement() == instr.memory_displacement64();
-        let access = if repeated {
-            if m.address_size() != iced_x86::CodeSize::Code16 {
-                return cpu.bus.observe.fail("count");
-            }
+        let down = cpu.get_cpu_flag(crate::cpu::CpuFlags::DF);
+        let code16 = m.address_size() == iced_x86::CodeSize::Code16;
+        if repeated && code16 && !paged {
             let base = seg_base(m.segment()).unwrap_or(0) as usize;
             let off = addr.wrapping_sub(base as u64) as u32 & 0xFFFF;
-            let down = cpu.get_cpu_flag(crate::cpu::CpuFlags::DF);
-            Access::Rep { base, off, size: size as u32, count: rep_count(cpu), down }
+            let access = Access::Rep {
+                base,
+                off,
+                size: size as u32,
+                count: rep_count(cpu),
+                down,
+            };
+            accesses.push((access, write, operand));
+            continue;
+        }
+        // The linear bytes it reaches: for a REP, its elements from the
+        // one at `addr` on, up or down, with 32-bit addresses (16-bit ones,
+        // which wrap in their segment, aren't followed with paging on).
+        let (start, len) = if repeated {
+            if m.address_size() != iced_x86::CodeSize::Code32 {
+                return cpu.bus.observe.fail("count");
+            }
+            let count = rep_count(cpu) as u64;
+            let len = count * size as u64;
+            if len > REP_SPAN {
+                return cpu.bus.observe.fail("count");
+            }
+            let back = count.saturating_sub(1) * size as u64;
+            let start = if down {
+                (addr as u32).wrapping_sub(back as u32)
+            } else {
+                addr as u32
+            };
+            (start, len)
         } else {
-            Access::Range { start: addr as usize & a20, len: size }
+            (addr as u32, size as u64)
         };
-        accesses.push((access, write, operand));
+        let Some(pieces) = physical(cpu, start, len, write) else {
+            return cpu.bus.observe.fail("paging");
+        };
+        tables.extend(entries(cpu, start, len));
+        // An operand split between two pages isn't one a counting
+        // instruction is followed in.
+        let whole = pieces.len() == 1;
+        for access in pieces {
+            accesses.push((access, write, operand && whole));
+        }
     }
     if opaque {
-        let ss = cpu.seg_cache(crate::cpu::Seg::SS).base as usize;
-        let off = (cpu.sp() as u32).wrapping_sub(64) & 0xFFFF;
-        accesses.push((Access::Rep { base: ss, off, size: 1, count: 128, down: false }, true, false));
+        // The 64 bytes either side of the stack's top, the interrupt table
+        // and the BIOS's data area, and in protected mode the IDT.
+        let ss = cpu.seg_cache(crate::cpu::Seg::SS);
+        if paged || ss.attr & crate::cpu::ATTR_DB != 0 {
+            let big = ss.attr & crate::cpu::ATTR_DB != 0;
+            let from = if big { cpu.esp() } else { cpu.sp() as u32 }.wrapping_sub(64);
+            let linear = if big {
+                vec![(ss.base.wrapping_add(from), 128)]
+            } else {
+                // A 16-bit stack's offsets wrap at 64K.
+                let off = from & 0xFFFF;
+                let first = (0x1_0000 - off).min(128);
+                vec![(ss.base.wrapping_add(off), first), (ss.base, 128 - first)]
+            };
+            for (lin, len) in linear {
+                let pieces = present(cpu, lin, len as u64, true);
+                accesses.extend(pieces.into_iter().map(|access| (access, true, false)));
+                tables.extend(entries(cpu, lin, len as u64));
+            }
+        } else {
+            let base = ss.base as usize;
+            let off = (cpu.sp() as u32).wrapping_sub(64) & 0xFFFF;
+            accesses.push((
+                Access::Rep {
+                    base,
+                    off,
+                    size: 1,
+                    count: 128,
+                    down: false,
+                },
+                true,
+                false,
+            ));
+        }
         accesses.push((Access::Range { start: 0, len: 0x400 }, false, false));
+        if cpu.pe() {
+            let idt = cpu.idtr;
+            let pieces = present(cpu, idt.base, idt.limit as u64 + 1, false);
+            accesses.extend(pieces.into_iter().map(|access| (access, false, false)));
+            tables.extend(entries(cpu, idt.base, idt.limit as u64 + 1));
+        }
     }
+    accesses.extend(tables.into_iter().map(|access| (access, false, false)));
     let op = match (mnemonic, instr.op_count()) {
         (Mnemonic::Inc, 1) => Some(CountOp::Inc),
         (Mnemonic::Dec, 1) => Some(CountOp::Dec),
@@ -1327,6 +1460,7 @@ fn record(cpu: &mut Cpu) {
         })
         .collect();
     let o = &mut cpu.bus.observe;
+    o.noting = opaque;
     let Phase::Count { pass, .. } = &mut o.phase else { return };
     if pass.flags.len() >= PASS_LIMIT {
         return o.fail("pass");
@@ -1355,19 +1489,110 @@ thread_local! {
         std::cell::RefCell::new(iced_x86::InstructionInfoFactory::new());
 }
 
-/// The 15 bytes an instruction at linear address `lin` may have, with
-/// paging off.
-fn code_at(cpu: &Cpu, lin: usize) -> [u8; 15] {
+/// The 15 bytes an instruction at linear address `lin` may have, and how
+/// many of them are in pages that are there (all of them with paging
+/// off).
+fn code_at(cpu: &Cpu, lin: u32) -> ([u8; 15], usize) {
     let mut bytes = [0u8; 15];
+    if cpu.cr0 & crate::cpu::CR0_PG != 0 {
+        for (i, b) in bytes.iter_mut().enumerate() {
+            let Some(at) = physical_at(cpu, lin.wrapping_add(i as u32), false) else {
+                return (bytes, i);
+            };
+            *b = cpu.bus.peek_8(at as usize);
+        }
+        return (bytes, bytes.len());
+    }
+    let a20 = cpu.bus.a20_mask() as usize;
+    let lin = lin as usize & a20;
     if cpu.bus.is_plain_ram(lin, 15) {
         bytes.copy_from_slice(&cpu.bus.ram()[lin..lin + 15]);
     } else {
-        let a20 = cpu.bus.a20_mask() as usize;
         for (i, b) in bytes.iter_mut().enumerate() {
             *b = cpu.bus.peek_8((lin + i) & a20);
         }
     }
-    bytes
+    (bytes, bytes.len())
+}
+
+/// The physical address an access of the CPU at linear address `lin`
+/// goes to (a write's with `write`), found without changing anything:
+/// through the TLB where it has the page, as the access goes, else
+/// through the page tables, as the access would walk them.
+fn physical_at(cpu: &Cpu, lin: u32, write: bool) -> Option<u32> {
+    cpu.translated_for(lin, write, cpu.cpl == 3)
+        .or_else(|| cpu.peek_translate(lin))
+}
+
+/// The RAM the `len` bytes at linear address `lin` are in: one range with
+/// paging off, one for each page with it on (`physical_at`). None where a
+/// page isn't there, whose access faults.
+fn physical(cpu: &Cpu, lin: u32, len: u64, write: bool) -> Option<Vec<Access>> {
+    pages(cpu, lin, len, write).collect()
+}
+
+/// As `physical`, without the pages that aren't there: the RAM a service
+/// or an interrupt may reach near the stack's top or in the IDT, which it
+/// can't reach in a missing page without a fault.
+fn present(cpu: &Cpu, lin: u32, len: u64, write: bool) -> Vec<Access> {
+    pages(cpu, lin, len, write).flatten().collect()
+}
+
+/// The page directory and page table entries that find the pages of the
+/// `len` bytes at linear address `lin`, with paging on (none with it off).
+/// The CPU reads them for the passes after the one recorded too, where
+/// its TLB doesn't have the page: a counter in one would move the page.
+fn entries(cpu: &Cpu, lin: u32, len: u64) -> Vec<Access> {
+    let mut found = Vec::new();
+    if cpu.cr0 & crate::cpu::CR0_PG == 0 {
+        return found;
+    }
+    let mut done = 0;
+    while done < len {
+        let at = lin.wrapping_add(done as u32);
+        done += (0x1000 - (at & 0xFFF) as u64).min(len - done);
+        let (pde, _, pte) = cpu.page_walk(at);
+        found.push(Access::Range {
+            start: pde as usize,
+            len: 4,
+        });
+        if let Some((pte, _)) = pte {
+            found.push(Access::Range {
+                start: pte as usize,
+                len: 4,
+            });
+        }
+    }
+    found
+}
+
+/// The RAM of each page the `len` bytes at linear address `lin` are in
+/// (one range for all of them with paging off), or None for a page that
+/// isn't there.
+fn pages(cpu: &Cpu, lin: u32, len: u64, write: bool) -> impl Iterator<Item = Option<Access>> {
+    let paged = cpu.cr0 & crate::cpu::CR0_PG != 0;
+    let mut done = 0;
+    std::iter::from_fn(move || {
+        if done >= len {
+            return None;
+        }
+        let at = lin.wrapping_add(done as u32);
+        if !paged {
+            done = len;
+            let start = (at & cpu.bus.a20_mask()) as usize;
+            return Some(Some(Access::Range {
+                start,
+                len: len as usize,
+            }));
+        }
+        let run = (0x1000 - (at & 0xFFF) as u64).min(len - done);
+        done += run;
+        let start = physical_at(cpu, at, write);
+        Some(start.map(|start| Access::Range {
+            start: start as usize,
+            len: run as usize,
+        }))
+    })
 }
 
 /// The arithmetic flags of iced's `RflagsBits`.
@@ -1528,7 +1753,7 @@ fn inspect(cpu: &mut Cpu, now: u64) {
             return;
         }
     }
-    let bytes = code_at(cpu, lin as usize);
+    let (bytes, _) = code_at(cpu, lin);
     let instr = Decoder::with_ip(bitness, &bytes, cpu.eip() as u64, DecoderOptions::NONE).decode();
     let o = &mut cpu.bus.observe;
     if instr.mnemonic() == Mnemonic::In && instr.op0_register() == Register::AL {

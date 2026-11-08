@@ -675,6 +675,146 @@ fn a_wait_on_the_clock_is_skipped_exactly() {
     }
 }
 
+/// Run `image` on a machine that skips passes (on the recompiler) and one
+/// that runs them all (on the interpreter), in lockstep: they must come
+/// out the same after every batch, and the program must end with 2Ah.
+/// What the skipping one skipped, which ran with paging on.
+fn idle_lockstep(test: &str, image: Vec<u8>) -> rust_dos::idle::IdleStats {
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu
+    };
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
+    let mut plain = start(&format!("{test}_plain"), CoreMode::Normal, false);
+    let mut skipping = start(&format!("{test}_skipping"), CoreMode::Dynamic, true);
+    let mut paged = false;
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 300, 10_000, |_, cpu| {
+        paged |= cpu.cr0 & rust_dos::cpu::CR0_PG != 0;
+    });
+    if let Err(e) = run {
+        panic!("{e}\n  {:?}", skipping.bus.observe.stats);
+    }
+    assert!(paged, "the program ran with paging on");
+    assert_eq!(plain.errorlevel, 0x2A, "the wait ended");
+    assert_eq!(
+        skipping.errorlevel, 0x2A,
+        "{:?}",
+        skipping.bus.observe.stats
+    );
+    skipping.bus.observe.stats
+}
+
+/// The number of proofs that failed for `why`.
+fn failed_by(stats: &rust_dos::idle::IdleStats, why: &str) -> u64 {
+    stats
+        .failed_by
+        .iter()
+        .find(|(w, _)| *w == why)
+        .map_or(0, |&(_, n)| n)
+}
+
+/// A wait on the clock that counts its passes in memory, as a frame
+/// limiter counts the passes it waited: with paging on, as the built-in
+/// Windows runs, the passes are skipped as long as the counts let them
+/// run the same, and the counts come out as the passes would leave them.
+#[test]
+fn a_wait_on_the_clock_that_counts_its_passes_is_skipped() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetTickCount"])];
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let mut wait = a.create_label();
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 20))?;
+        a.set_label(&mut wait)?;
+        a.call(l.import(0))?;
+        a.inc(dword_ptr(l.data))?;
+        a.add(dword_ptr(l.at(4)), 3)?;
+        a.cmp(eax, ebx)?;
+        a.jb(wait)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let stats = idle_lockstep("counting_clock_wait", image);
+    assert!(stats.proofs >= 10, "{stats:?}");
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// The program, waiting on the clock, asks where a file is and seeks to
+/// there with SetFilePointer, and asks for an accelerator table it doesn't
+/// have, as Railroad Tycoon II's main loop does, and with `count` counts
+/// its passes in memory.
+fn file_and_table_wait(table: bool, count: bool) -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.DLL",
+            &["GetTickCount", "CreateFileA", "SetFilePointer"],
+        ),
+        ("USER32.DLL", &["LoadAcceleratorsA"]),
+    ];
+    let mut data = vec![0; 0x20];
+    put(&mut data, 0x10, b"T.EXE\0");
+    put(&mut data, 0x18, b"Accel\0");
+    program(BASE, false, imports, &data, |a, l| {
+        use Arg::{Esi, I};
+        let mut wait = a.create_label();
+        let at = |offset: u32| I(l.at(offset) as u32);
+        let open = [at(0x10), I(0x8000_0000), I(1), I(0), I(3), I(0x80), I(0)];
+        call_with(a, l.import(1), &open)?;
+        a.mov(esi, eax)?;
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 20))?;
+        a.set_label(&mut wait)?;
+        a.call(l.import(0))?;
+        a.mov(edi, eax)?;
+        call_with(a, l.import(2), &[Esi, I(0), I(0), I(1)])?;
+        call_with(a, l.import(2), &[Esi, I(0), I(0), I(0)])?;
+        if table {
+            call_with(a, l.import(3), &[I(0), at(0x18)])?;
+        }
+        if count {
+            a.inc(dword_ptr(l.data))?;
+        }
+        a.cmp(edi, ebx)?;
+        a.jb(wait)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    })
+}
+
+/// Neither the query of a file's place, nor a seek to where it is, nor a
+/// look for an accelerator table that isn't there changes anything: a
+/// wait that calls them is skipped.
+#[test]
+fn a_wait_that_asks_where_a_file_is_and_for_a_missing_table_is_skipped() {
+    let stats = idle_lockstep("file_table_wait", file_and_table_wait(true, false));
+    assert!(stats.proofs >= 10, "{stats:?}");
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// SetFilePointer reads nothing but its arguments: a wait that calls it
+/// and counts its passes is skipped too.
+#[test]
+fn a_wait_that_asks_where_a_file_is_and_counts_its_passes_is_skipped() {
+    let stats = idle_lockstep("file_count_wait", file_and_table_wait(false, true));
+    assert!(stats.proofs >= 10, "{stats:?}");
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// LoadAcceleratorsA reads the table's name and the program's resources,
+/// which a count could be in: a wait that calls it and counts its passes
+/// isn't skipped.
+#[test]
+fn a_wait_that_counts_its_passes_and_reads_more_than_its_arguments_is_not_skipped() {
+    let stats = idle_lockstep("table_count_wait", file_and_table_wait(true, true));
+    assert_eq!(stats.proofs, 0, "{stats:?}");
+    assert!(failed_by(&stats, "count service") > 0, "{stats:?}");
+}
+
 /// KERNEL's LocalLock has the trap id KERNEL32's GetTickCount has, in the
 /// numbering of the 16-bit modules, and reads no clock: calls of it in a
 /// row don't arm their stub.
