@@ -2815,6 +2815,166 @@ fn a_program_makes_reads_finds_moves_and_deletes_files() {
     assert!(!dir.join("D").exists() && !dir.join("G.TXT").exists());
 }
 
+/// A change notification for C:\ with FILE_NOTIFY_CHANGE_FILE_NAME isn't
+/// signaled (bit 0) until a file is made there (1), stays signaled (2)
+/// until FindNextChangeNotification (3), and closes (4). One with
+/// FILE_NOTIFY_CHANGE_DIR_NAME isn't signaled by a file (5), and one with
+/// no change in its filter isn't made (6).
+#[test]
+fn a_change_notification_is_signaled_by_a_new_file() {
+    use Arg::{Esi, I};
+    const WAIT_TIMEOUT: i32 = 0x102;
+    let names: &[&str] = &[
+        "FindFirstChangeNotificationA",
+        "FindNextChangeNotification",
+        "FindCloseChangeNotification",
+        "WaitForSingleObject",
+        "CreateFileA",
+        "CloseHandle",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0; 0x100];
+    put(&mut data, 0, b"C:\\\0");
+    put(&mut data, 0x10, b"C:\\A.TXT\0");
+    put(&mut data, 0x20, b"C:\\B.TXT\0");
+    let (code, text) = run(
+        "change",
+        program(BASE, false, imports, &data, |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let at = |offset: u32| I(l.at(offset) as u32);
+            let make = |a: &mut CodeAssembler, name: Arg| -> Result<(), IcedError> {
+                let new = [name, I(0x4000_0000), I(0), I(0), I(2), I(0x80), I(0)];
+                call_with(a, f("CreateFileA"), &new)?;
+                a.push(eax)?;
+                a.call(f("CloseHandle"))
+            };
+            a.xor(ebx, ebx)?;
+            call_with(a, f("FindFirstChangeNotificationA"), &[at(0), I(0), I(1)])?;
+            a.mov(esi, eax)?;
+            call_with(a, f("WaitForSingleObject"), &[Esi, I(0)])?;
+            a.cmp(eax, WAIT_TIMEOUT)?;
+            check(a, false, 0)?;
+            make(a, at(0x10))?;
+            call_with(a, f("WaitForSingleObject"), &[Esi, I(0)])?;
+            a.test(eax, eax)?;
+            check(a, false, 1)?;
+            call_with(a, f("WaitForSingleObject"), &[Esi, I(0)])?;
+            a.test(eax, eax)?;
+            check(a, false, 2)?;
+            call_with(a, f("FindNextChangeNotification"), &[Esi])?;
+            call_with(a, f("WaitForSingleObject"), &[Esi, I(0)])?;
+            a.cmp(eax, WAIT_TIMEOUT)?;
+            check(a, false, 3)?;
+            call_with(a, f("FindCloseChangeNotification"), &[Esi])?;
+            a.test(eax, eax)?;
+            check(a, true, 4)?;
+            // Directory names only: a new file doesn't signal it.
+            call_with(a, f("FindFirstChangeNotificationA"), &[at(0), I(0), I(2)])?;
+            a.mov(esi, eax)?;
+            make(a, at(0x20))?;
+            call_with(a, f("WaitForSingleObject"), &[Esi, I(0)])?;
+            a.cmp(eax, WAIT_TIMEOUT)?;
+            check(a, false, 5)?;
+            call_with(a, f("FindCloseChangeNotification"), &[Esi])?;
+            call_with(a, f("FindFirstChangeNotificationA"), &[at(0), I(0), I(0)])?;
+            a.cmp(eax, -1)?;
+            check(a, false, 6)?;
+            a.mov(eax, ebx)?;
+            a.or(eax, 0x80)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b} {}", !code, text);
+}
+
+/// A change notification for C:\ and the directories below it with
+/// FILE_NOTIFY_CHANGE_FILE_NAME isn't signaled by an empty directory made
+/// below (bit 0), which is a directory's name, and is by a file made in it
+/// (1). One for a directory in a directory that isn't there isn't made
+/// (2), with ERROR_PATH_NOT_FOUND (3).
+#[test]
+fn a_subtree_change_notification_watches_the_files_below() {
+    use Arg::{Esi, I};
+    const WAIT_TIMEOUT: i32 = 0x102;
+    let names: &[&str] = &[
+        "FindFirstChangeNotificationA",
+        "FindCloseChangeNotification",
+        "WaitForSingleObject",
+        "CreateDirectoryA",
+        "CreateFileA",
+        "CloseHandle",
+        "GetLastError",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0; 0x100];
+    put(&mut data, 0, b"C:\\\0");
+    put(&mut data, 0x10, b"C:\\SUB\0");
+    put(&mut data, 0x20, b"C:\\SUB\\A.TXT\0");
+    put(&mut data, 0x40, b"C:\\NO\\WHERE\0");
+    let (code, text) = run(
+        "change_subtree",
+        program(BASE, false, imports, &data, |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let at = |offset: u32| I(l.at(offset) as u32);
+            a.xor(ebx, ebx)?;
+            call_with(a, f("FindFirstChangeNotificationA"), &[at(0), I(1), I(1)])?;
+            a.mov(esi, eax)?;
+            call_with(a, f("CreateDirectoryA"), &[at(0x10), I(0)])?;
+            call_with(a, f("WaitForSingleObject"), &[Esi, I(0)])?;
+            a.cmp(eax, WAIT_TIMEOUT)?;
+            check(a, false, 0)?;
+            let new = [at(0x20), I(0x4000_0000), I(0), I(0), I(2), I(0x80), I(0)];
+            call_with(a, f("CreateFileA"), &new)?;
+            a.push(eax)?;
+            a.call(f("CloseHandle"))?;
+            call_with(a, f("WaitForSingleObject"), &[Esi, I(0)])?;
+            a.test(eax, eax)?;
+            check(a, false, 1)?;
+            call_with(a, f("FindCloseChangeNotification"), &[Esi])?;
+            call_with(a, f("FindFirstChangeNotificationA"), &[at(0x40), I(0), I(1)])?;
+            a.cmp(eax, -1)?;
+            check(a, false, 2)?;
+            a.call(f("GetLastError"))?;
+            a.cmp(eax, 3)?;
+            check(a, false, 3)?;
+            a.mov(eax, ebx)?;
+            a.or(eax, 0xF0)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b} {}", !code, text);
+}
+
+/// A thread that waits for a change notification with no timeout goes on
+/// when the directory changes, here by a file another program (the host)
+/// puts there.
+#[test]
+fn a_wait_for_a_change_notification_ends_when_the_directory_changes() {
+    use Arg::{Esi, I};
+    let names: &[&str] = &["FindFirstChangeNotificationA", "WaitForSingleObject"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0; 0x10];
+    put(&mut data, 0, b"C:\\\0");
+    let mut cpu = machine(
+        "change_wait",
+        program(BASE, false, imports, &data, |a, l| {
+            call_with(a, l.import(0), &[I(l.at(0) as u32), I(0), I(1)])?;
+            a.mov(esi, eax)?;
+            call_with(a, l.import(1), &[Esi, I(0xFFFF_FFFF)])?;
+            a.add(eax, 0x40)?;
+            a.ret()
+        }),
+    );
+    assert!(!run_to_exit(&mut cpu, 20), "the wait ended with no change");
+    fs::write("target/test_win32/change_wait/HOST.TXT", b"host").unwrap();
+    assert!(
+        run_to_exit(&mut cpu, 200),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0x40, "WAIT_OBJECT_0");
+}
+
 /// `cycles=auto` gives a Win32 program that computes without drawing,
 /// reading or waiting (a game unpacking its level) all the host has: the
 /// built-in Windows halts the processor when no thread can run, so one
