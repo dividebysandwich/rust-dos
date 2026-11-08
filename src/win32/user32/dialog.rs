@@ -1024,6 +1024,8 @@ const S_CODE: usize = 33;
 const S_I: usize = 34;
 const S_FOUND: usize = 35;
 const S_ID: usize = 36;
+/// Set when DEFDLG_RestoreFocus runs for WM_ACTIVATE.
+const S_ACTIVATE: usize = 39;
 
 /// The subroutines' return steps, and a list of windows.
 const SP: usize = 37;
@@ -1498,11 +1500,16 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             }
             if value != 0 && (style & DS_CONTROL == 0 || style & WS_VISIBLE != 0) {
                 // TRUE asks for the first control with WS_TABSTOP, which
-                // WM_INITDIALOG may have changed.
+                // WM_INITDIALOG may have changed. It gets the focus as
+                // DEFDLG_SetFocus gives it, so an edit control's text
+                // starts selected, as on Windows 98. A SetFocus of the
+                // dialog procedure's own, which returns FALSE, selects
+                // nothing.
                 let focus = next_tab(state, hwnd, 0, false);
                 update_info(state, hwnd, |i| i.focus = focus);
                 if focus != 0 {
-                    return call_api("SetFocus", &[focus], 114);
+                    t.set(S_CTRL, focus);
+                    return gosub(t, SUB_SET_FOCUS, 114);
                 }
             }
             goto(114)
@@ -1759,12 +1766,16 @@ fn def_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 }
                 WM_ACTIVATE => {
                     if wp != 0 {
+                        t.set(S_ACTIVATE, TRUE);
                         return gosub(t, SUB_RESTORE_FOCUS, 397);
                     }
                     save_focus(state, hwnd);
                     Next::Done(0)
                 }
-                WM_SETFOCUS => gosub(t, SUB_RESTORE_FOCUS, 397),
+                WM_SETFOCUS => {
+                    t.set(S_ACTIVATE, 0);
+                    gosub(t, SUB_RESTORE_FOCUS, 397)
+                }
                 DM_SETDEFID => {
                     if i.flags & DF_END == 0 {
                         t.set(S_ID, wp);
@@ -1876,17 +1887,24 @@ fn sub_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let hwnd = t.var(V_HWND);
     match t.step {
         // DEFDLG_SetFocus(S_CTRL): an edit control's text is selected.
+        // Windows 98 sends EM_SETSEL(0, -2), which a subclassed control
+        // sees.
         600 => send(t.var(S_CTRL), WM_GETDLGCODE, 0, 0, 601),
         601 => {
             if value & DLGC_HASSETSEL != 0 {
-                return send(t.var(S_CTRL), EM_SETSEL, 0, u32::MAX, 602);
+                return send(t.var(S_CTRL), EM_SETSEL, 0, -2i32 as u32, 602);
             }
             goto(602)
         }
         602 => call_api("SetFocus", &[t.var(S_CTRL)], 603),
         603 => ret(t),
         // DEFDLG_RestoreFocus: the saved control, or the first with
-        // WS_TABSTOP.
+        // WS_TABSTOP, through DEFDLG_SetFocus. For WM_ACTIVATE
+        // (S_ACTIVATE) Windows 98 gives a saved control the focus with
+        // its selection as it was, and does nothing without one: the
+        // activation then gives the dialog the focus, and its
+        // WM_SETFOCUS selects the first control's text. An activation
+        // that SetFocus of a control makes selects nothing.
         610 => {
             let state = user(cpu);
             if style(state, hwnd) & WS_MINIMIZE != 0 {
@@ -1899,7 +1917,14 @@ fn sub_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 return ret(t);
             }
             let mut focus = i.focus;
-            if !state.is_window(focus) || focus == hwnd {
+            let saved = state.is_window(focus) && focus != hwnd;
+            if t.var(S_ACTIVATE) != 0 {
+                if saved {
+                    return call_api("SetFocus", &[focus], 611);
+                }
+                return ret(t);
+            }
+            if !saved {
                 focus = next_tab(state, hwnd, 0, false);
                 update_info(state, hwnd, |i| i.focus = focus);
                 if !state.is_window(focus) {
