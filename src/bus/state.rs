@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 44;
+const WIN32_VERSION: u16 = 45;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -819,6 +819,7 @@ mod tests {
         (42, 0x7540_74DC_C874_40DC), // change notification handles
         (43, 0x1974_9F8E_624E_4E47), // DirectShow's joints and media type enumerators
         (44, 0xBE96_CD5A_0B06_51EC), // the program's allocator a DirectShow link uses
+        (45, 0xBE96_CD5A_0B06_51EC), // a file mapping's views keep their protection
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

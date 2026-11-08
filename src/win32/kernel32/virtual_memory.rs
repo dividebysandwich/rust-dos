@@ -16,10 +16,10 @@ use crate::bus::Bus;
 use crate::cpu::{Cpu, CpuModel};
 use crate::win32::memory::{
     GRANULARITY, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE, Memory, PAGE, PAGE_NOACCESS, PAGE_READWRITE,
-    PRESENT, PRIVATE, SHARED, SYSTEM, USER, WRITABLE, protection,
+    PRESENT, PRIVATE, SHARED, SYSTEM, USER, WRITABLE, protection, protection_bits,
 };
 use crate::win32::object::{self, Kind};
-use crate::win32::{Process, running};
+use crate::win32::{Process, mapping, running};
 
 /// VirtualAlloc's and VirtualFree's types.
 const MEM_COMMIT: u32 = 0x1000;
@@ -239,6 +239,15 @@ fn with_process_at<T>(
 /// (the first page's) written to `old`.
 fn protect(cpu: &mut Cpu, index: usize, at: u32, size: u32, protect: u32, old: u32) -> Option<u32> {
     let range = page_range(at, size.max(1));
+    // The pages of a view of a file are committed: those not read yet
+    // are read first, to take the protection.
+    if let Some((first, end)) = range
+        && index == cpu.bus.win32.running
+    {
+        for page in (first..end).step_by(PAGE as usize) {
+            mapping::fault_in(cpu, page);
+        }
+    }
     let found = with_process_at(cpu, index, |p, bus| {
         let (first, end) = range?;
         let region = p.memory.region(first)?;
@@ -299,9 +308,12 @@ pub(super) fn virtual_protect_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     protect(cpu, index, at, size, new, old)
 }
 
-/// What VirtualQuery says of `at` in `memory`: the MEMORY_BASIC_INFORMATION
-/// of the run of pages from its page with the same state and protection.
-fn query(memory: &Memory, bus: &Bus, at: u32) -> [u32; 7] {
+/// What VirtualQuery says of `at` in the memory of `process`: the
+/// MEMORY_BASIC_INFORMATION of the run of pages from its page with the same
+/// state and protection. A page of a view of a file is committed before
+/// it is read from the file.
+fn query(process: &Process, bus: &Bus, at: u32) -> [u32; 7] {
+    let memory = &process.memory;
     let page = at & !(PAGE - 1);
     let Some(region) = memory.region(page) else {
         // Free: up to the next region, or the end of the arena.
@@ -317,7 +329,10 @@ fn query(memory: &Memory, bus: &Bus, at: u32) -> [u32; 7] {
             .map_or(arena_end, |start| start.min(arena_end));
         return [page, 0, 0, end - page, MEM_FREE, PAGE_NOACCESS, 0];
     };
-    let state = |page: u32| protection(memory.entry(bus, page).unwrap_or(0));
+    let state = |page: u32| {
+        protection(memory.entry(bus, page).unwrap_or(0))
+            .or_else(|| mapping::unread_protection(bus, process, page))
+    };
     let first = state(page);
     let mut end = page + PAGE;
     while end < region.end() && state(end) == first {
@@ -356,7 +371,7 @@ fn query_into(cpu: &mut Cpu, index: usize, at: u32, buffer: u32, len: u32) -> Op
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(0);
     }
-    let info = with_process_at(cpu, index, |p, bus| query(&p.memory, bus, at));
+    let info = with_process_at(cpu, index, |p, bus| query(p, bus, at));
     for (i, value) in info.into_iter().enumerate() {
         cpu.bus
             .guest_write_32(buffer.wrapping_add(4 * i as u32), value);
@@ -396,12 +411,18 @@ pub(super) fn virtual_lock(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 /// Whether the program may read (or with `write` write) the page at
-/// `page`, by its page table entry: no page fault is recorded.
+/// `page`, by its page table entry: no page fault is recorded. A page of
+/// a view of a file not read yet is there to the program as the view
+/// allows, since touching it reads it.
 fn page_allows(cpu: &Cpu, page: u32, write: bool) -> bool {
     let Some(process) = running(cpu) else {
         return false;
     };
     let entry = process.memory.entry(&cpu.bus, page).unwrap_or(0);
+    let entry = match mapping::unread_protection(&cpu.bus, process, page) {
+        Some(protect) => protection_bits(protect),
+        None => entry,
+    };
     let needed = PRESENT | USER | if write { WRITABLE } else { 0 };
     entry & needed == needed
 }
@@ -438,9 +459,6 @@ pub(super) fn is_bad_code_ptr(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// Whether a string of `unit`-byte characters at `at`, up to its 0 or
 /// `max` characters, can't be read.
 fn bad_string(cpu: &mut Cpu, at: u32, max: u32, unit: u32) -> u32 {
-    let Some(process) = running(cpu) else {
-        return TRUE;
-    };
     for i in 0..max {
         let Some(char_at) = at.checked_add(i * unit) else {
             return TRUE;
@@ -453,8 +471,12 @@ fn bad_string(cpu: &mut Cpu, at: u32, max: u32, unit: u32) -> u32 {
             if !page_allows(cpu, lin & !(PAGE - 1), false) {
                 return TRUE;
             }
-            let phys = process.memory.translate(&cpu.bus, lin).expect("present");
-            value |= (cpu.bus.read_8(phys as usize) as u32) << (8 * byte);
+            // A page of a view of a file is read from it here, or the
+            // call runs again once a page fault has read it.
+            value |= (cpu.bus.guest_read_8(lin) as u32) << (8 * byte);
+            if cpu.bus.guest_faulted() {
+                return TRUE;
+            }
         }
         if value == 0 {
             break;
