@@ -205,11 +205,11 @@ needs.
   Windows](#windows-games-on-the-built-in-windows), which draws it
   correctly. On a Voodoo3 image, install the driver from 3dfx's Voodoo3
   driver CD 1.2 (`3dfx32v3.dll` 4.11.01.1151), copied over 1.07.00 as
-  for Glover above. With 1.07.00 the bikes and riders are flat white and grey shapes without
-  their textures, while the track and the scenery have theirs; 86Box
-  with a Voodoo3 and the same driver draws them the same way. With
-  4.11.01.1151, and on a Voodoo2 with 3dfx's Voodoo2 driver, the bikes
-  and riders are textured.
+  for Glover above. With 1.07.00 the bikes and riders are flat white
+  and grey shapes without their textures, while the track and the
+  scenery have theirs; 86Box with a Voodoo3 and the same driver draws
+  them the same way. With 4.11.01.1151, and on a Voodoo2 with 3dfx's
+  Voodoo2 driver, the bikes and riders are textured.
 * **Oni**: on a Voodoo3, take away a MiniGL `opengl32.dll` from its
   folder. On a Voodoo2, copy `3DFXVGL.DLL` into its folder as
   `OPENGL32.DLL` ([OpenGL games under
