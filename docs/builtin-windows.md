@@ -91,8 +91,7 @@ install and the registry keys they write are the same, apart from these:
 - Names on a drive that is a host folder are in capitals, as DOS made
   them: the Start menu's folder is `START MENU`.
 - Shortcuts are smaller: they have no relative path and no file times.
-  Their targets, working folders and icons are the same. A shortcut to
-  Notepad points to the CD's drive, as the setup finds no Notepad on C:.
+  Their targets, working folders and icons are the same.
 
 ### Disk space on a host folder
 
@@ -112,6 +111,16 @@ Windows has. `GLIDE2X.DLL` and `GLIDE3X.DLL` are among them only with a
 3dfx card (`voodoo=true`, or `machine=svga_voodoo3` or `svga_banshee`),
 so a game that checks for Glide by its file sees none without one. A DLL
 of the same name that a game copies to C: wins over the built-in one.
+
+### Notepad
+
+`C:\WINDOWS\NOTEPAD.EXE` is there, read-only, as on Windows 98. A setup
+that offers to show its readme when it ends starts it, and the readme
+opens in a window titled with its name (`readme.txt - Notepad`), which
+stays open after the setup ends. The text, in the system's fixed font,
+scrolls and can be selected and copied. Notepad's menus aren't there,
+so nothing can be saved, and a file that isn't there opens an empty
+window instead of asking whether to make it.
 
 ### Text and dialogs
 

@@ -1,11 +1,11 @@
 //! The built-in Windows' shell: special folders made on first use, a
 //! shell link saved through IShellLinkA and IPersistFile, a Program
 //! Manager group made through DDEML as InstallShield makes one and
-//! through raw DDE messages, a file copied by SHFileOperationA, and
-//! FindExecutableA following the registry's associations. Each runs on
-//! the interpreter and on the dynamic recompiler. The programs are PE
-//! files made with rust-dos-pe's builder, their code assembled with
-//! iced.
+//! through raw DDE messages, a file copied by SHFileOperationA,
+//! FindExecutableA following the registry's associations, and Notepad
+//! showing the file WinExec gives it. Each runs on the interpreter and
+//! on the dynamic recompiler. The programs are PE files made with
+//! rust-dos-pe's builder, their code assembled with iced.
 
 use iced_x86::code_asm::*;
 use rust_dos::cpu::{CoreMode, Cpu, HostConsole};
@@ -644,5 +644,89 @@ fn findexecutable_follows_the_registry_association() {
         run_to_exit(&mut cpu);
         assert_eq!(cpu.errorlevel, 1, "{core:?}: {}", printed(&cpu));
         assert_eq!(printed(&cpu), "C:\\T.EXE", "{core:?}");
+    }
+}
+
+#[test]
+fn notepad_shows_a_readme_that_winexec_opens() {
+    const WM_CLOSE: i32 = 0x10;
+    let mut data = vec![0u8; 0x400];
+    put(&mut data, 0x00, b"C:\\WINDOWS\\NOTEPAD.EXE\0");
+    put(&mut data, 0x20, b"notepad.exe\0");
+    // Found where SearchPathA looks, ".exe" added.
+    put(&mut data, 0x30, b"notepad C:\\README.TXT\0");
+    put(&mut data, 0x50, b"Notepad\0");
+    put(&mut data, 0x60, b"README.TXT - Notepad\0");
+    // 0x100: the path SearchPathA finds; 0x300: the edit control's
+    // text; 0x3F0: bytes written.
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.dll",
+            &[
+                "ExitProcess",
+                "GetFileAttributesA",
+                "SearchPathA",
+                "WinExec",
+                "GetStdHandle",
+                "WriteFile",
+            ],
+        ),
+        (
+            "USER32.dll",
+            &[
+                "FindWindowA",
+                "GetDlgItem",
+                "GetWindowTextA",
+                "PostMessageA",
+            ],
+        ),
+    ];
+    let code = program(imports, &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        // A read-only file in the Windows directory.
+        call(a, l.import(1), &[l.at(0)])?;
+        check_eax(a, 0x21, 0)?;
+        call(a, l.import(2), &[0, l.at(0x20), 0, 0x104, l.at(0x100), 0])?;
+        check_eax(a, 22, 1)?;
+        // WinExec returns once Notepad waits for input, its window made.
+        call(a, l.import(3), &[l.at(0x30), 1])?;
+        check_eax(a, 33, 2)?;
+        call(a, l.import(6), &[l.at(0x50), l.at(0x60)])?;
+        a.mov(esi, eax)?;
+        check_nonzero(a, 3)?;
+        // The edit control, Notepad's 15, has the file's text.
+        a.push(15)?;
+        a.push(esi)?;
+        a.call(l.import(7))?;
+        a.mov(edi, eax)?;
+        check_nonzero(a, 4)?;
+        a.push(0x100)?;
+        a.push(l.at(0x300))?;
+        a.push(edi)?;
+        a.call(l.import(8))?;
+        a.mov(ebp, eax)?;
+        call(a, l.import(4), &[-11])?;
+        a.push(0)?;
+        a.push(l.at(0x3F0))?;
+        a.push(ebp)?;
+        a.push(l.at(0x300))?;
+        a.push(eax)?;
+        a.call(l.import(5))?;
+        // Closed, Notepad ends: the machine goes back to DOS only then.
+        a.push(0)?;
+        a.push(0)?;
+        a.push(WM_CLOSE)?;
+        a.push(esi)?;
+        a.call(l.import(9))?;
+        check_nonzero(a, 5)?;
+        exit(a, l.import(0))
+    });
+    for core in CORES {
+        let readme = b"Hello\r\nthere".to_vec();
+        let files = [("T.EXE", code.clone()), ("README.TXT", readme)];
+        let mut cpu = machine("notepad", core, &files);
+        run_to_exit(&mut cpu);
+        assert_eq!(printed(&cpu), "Hello\r\nthere", "{core:?}");
+        assert_eq!(cpu.errorlevel, 0x3F, "{core:?}");
     }
 }
