@@ -1750,6 +1750,40 @@ mod tests {
     }
 
     #[test]
+    fn a_banshee_display_change_during_a_copy_reaches_the_recording() {
+        // A Banshee's 3D registers take bltData too. The recording's
+        // height is the desktop's, from the CRTC and vidProcCfg, which
+        // are written outside the 3D registers (the VGA ports, the
+        // extended registers). A change between two data words of one
+        // copy gets to the recording at the next word.
+        use crate::voodoo::banshee::render3d::tests::{mirrored, reg3d};
+        use crate::voodoo::banshee::render3d::{COL_BUFFER_ADDR, COL_BUFFER_STRIDE};
+        use crate::voodoo::banshee::{VID_PROC_CFG, VIDPROC_ENABLE, VIDPROC_HALF_MODE};
+
+        let mut v = mirrored();
+        reg3d(&mut v, COL_BUFFER_ADDR, 0x10_0000);
+        reg3d(&mut v, COL_BUFFER_STRIDE, 1280);
+        reg3d(&mut v, BLT_ROP, 0xCCCC);
+        reg3d(&mut v, BLT_DST_BASE_ADDR, 0x10_0000);
+        reg3d(&mut v, BLT_XY_STRIDES, 1280 << 16);
+        reg3d(&mut v, BLT_DST_XY, 2 << 16 | 12);
+        reg3d(&mut v, BLT_SIZE, 2 << 16 | 3);
+        reg3d(&mut v, BLT_COMMAND, 1 << 31 | 2 << 3 | CPU_TO_SCREEN);
+        let height = |v: &Voodoo| v.mirror_layout().map(|k| k.height);
+        reg3d(&mut v, BLT_DATA, 0x0101_0101);
+        assert_eq!(height(&v), Some(64));
+        // CR12, the display end: 128 rows.
+        v.banshee.as_mut().unwrap().crtc[0x12] = 127;
+        reg3d(&mut v, BLT_DATA, 0x0202_0202);
+        assert_eq!(height(&v), Some(128), "the CRTC's change");
+        // Half mode: every row shown twice, 64 rows in memory.
+        let cfg = VIDPROC_ENABLE | 1 << 18 | VIDPROC_HALF_MODE;
+        v.write(VID_PROC_CFG, cfg, u32::MAX, Now::default());
+        reg3d(&mut v, BLT_DATA, 0x0303_0303);
+        assert_eq!(height(&v), Some(64), "vidProcCfg's change");
+    }
+
+    #[test]
     fn copies_keep_their_place_among_the_jobs_held_back() {
         // Copies into the back buffer with fastfills between them that
         // cover part of their rows, and the last copy longer than a batch
