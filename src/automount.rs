@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 /// The folder's name.
 pub const FOLDER: &str = "automount";
 
-const CD_EXTENSIONS: [&str; 9] = ["cue", "iso", "bin", "ins", "inst", "bdn", "chd", "b5t", "b6t"];
+const CD_EXTENSIONS: [&str; 10] = [
+    "cue", "iso", "bin", "ins", "inst", "bdn", "chd", "b5t", "b6t", "ccd",
+];
 /// The CUE sheets' extensions, GOG's among them.
 const SHEET_EXTENSIONS: [&str; 4] = ["cue", "ins", "inst", "bdn"];
 /// The extensions of BlindWrite's descriptors, which name data files as
@@ -260,6 +262,11 @@ fn scan_entries(folder: &Path, entries: &[Entry]) -> Scan {
             // And DPM data beside it.
             let stem = entry.name.rsplit_once('.').map_or(entry.name.as_str(), |(stem, _)| stem);
             tracks.push(format!("{}.bwa", stem.to_ascii_lowercase()));
+        } else if named(&entry.name, &["ccd"]) {
+            // A CloneCD descriptor's image and subchannel are named as it.
+            let stem = entry.name.rsplit_once('.').map_or(entry.name.as_str(), |(stem, _)| stem);
+            let stem = stem.to_ascii_lowercase();
+            tracks.extend(["img", "sub"].map(|ext| format!("{}.{}", stem, ext)));
         }
     }
     let mut found: Vec<(u8, u32, Option<String>, Kind, &Entry)> = Vec::new();

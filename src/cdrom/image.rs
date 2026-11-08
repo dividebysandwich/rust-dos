@@ -205,10 +205,10 @@ fn check_readable(lba: u32, raw: &[u8; RAW_SECTOR]) -> io::Result<()> {
 }
 
 impl CdImage {
-    /// Open a CD image: a CUE sheet, a CHD file, a BlindWrite descriptor,
-    /// or a bare image of one data track (.iso, .bin, .img), whose sector
-    /// format is found from where the ISO 9660 or High Sierra volume
-    /// descriptor is.
+    /// Open a CD image: a CUE sheet, a CHD file, a BlindWrite or CloneCD
+    /// descriptor, or a bare image of one data track (.iso, .bin, .img),
+    /// whose sector format is found from where the ISO 9660 or High Sierra
+    /// volume descriptor is.
     pub fn open(path: &Path) -> Result<Self, String> {
         if is_b6t(path) {
             Self::open_b6t(path)
@@ -1124,22 +1124,36 @@ const MAX_SHEET: u64 = 64 * 1024;
 /// as one: a `.cue`, GOG's `.ins` (`.inst` in Steam's copies) or GOG's
 /// `.bdn` for BloodNet, with the error if it can't be read or parsed, or a
 /// small file of any other name that parses as a sheet with a track.
-/// None for any other file.
+/// A CloneCD descriptor (`.ccd`, or a small file that starts as one) is
+/// read as the sheet of its `.img` (`ccd::parse`). None for any other
+/// file.
 fn sheet(path: &Path) -> Option<Result<CueSheet, String>> {
-    let named =
-        path.extension().is_some_and(|e| ["cue", "ins", "inst", "bdn"].iter().any(|c| e.eq_ignore_ascii_case(c)));
-    if !named && !hostfs::metadata(path).is_ok_and(|m| !m.is_dir && m.len <= MAX_SHEET) {
+    let has = |exts: &[&str]| {
+        path.extension()
+            .is_some_and(|e| exts.iter().any(|c| e.eq_ignore_ascii_case(c)))
+    };
+    let (named, ccd) = (has(&["cue", "ins", "inst", "bdn"]), has(&["ccd"]));
+    if !named && !ccd && !hostfs::metadata(path).is_ok_and(|m| !m.is_dir && m.len <= MAX_SHEET) {
         return None;
     }
-    let sheet = hostfs::read(path)
-        .map_err(|e| format!("{}: {}", path.display(), e))
-        .and_then(|text| parse_cue(&String::from_utf8_lossy(&text)));
+    let text = match hostfs::read(path) {
+        Ok(data) => String::from_utf8_lossy(&data).into_owned(),
+        Err(e) => return (named || ccd).then(|| Err(format!("{}: {}", path.display(), e))),
+    };
+    if ccd || super::ccd::is_ccd(&text) {
+        // CloneCD and DiscImageCreator name the image as the descriptor.
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+        let sheet = super::ccd::parse(&text, &format!("{}.img", stem));
+        return Some(sheet.map_err(|e| format!("{}: {}", path.display(), e)));
+    }
+    let sheet = parse_cue(&text);
     (named || sheet.is_ok()).then_some(sheet)
 }
 
-/// The files a CUE sheet or BlindWrite descriptor at `path` keeps its
-/// tracks in, those that are there, with the subchannel or DPM file
-/// beside it; none if `path` isn't one that `CdImage::open` reads as one.
+/// The files a CUE sheet or a BlindWrite or CloneCD descriptor at `path`
+/// keeps its tracks in, those that are there, with the subchannel or DPM
+/// file beside it; none if `path` isn't one that `CdImage::open` reads as
+/// one.
 pub fn track_files(path: &Path) -> Vec<PathBuf> {
     if is_b6t(path) {
         return b6t_files(path).into_iter().filter_map(Result::ok).collect();
@@ -1156,8 +1170,8 @@ pub fn track_files(path: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Whether `path` is a CUE sheet or BlindWrite descriptor `CdImage::open`
-/// reads as one that names a track file that isn't there.
+/// Whether `path` is a CUE sheet or a BlindWrite or CloneCD descriptor
+/// `CdImage::open` reads as one that names a track file that isn't there.
 pub fn lacks_a_track_file(path: &Path) -> bool {
     if is_b6t(path) {
         return b6t_files(path).iter().any(Result::is_err);
@@ -1826,5 +1840,78 @@ mod tests {
         assert_eq!(sub, linear_sub(&track, 100, true));
         let files = track_files(&dir.join("game.cue"));
         assert!(files.iter().any(named), "{:?}", files);
+    }
+
+    #[test]
+    fn clonecd_images() {
+        let dir = scratch("clonecd");
+        // A data track of 200 sectors whose sector 50 a drive couldn't
+        // read (its EDC doesn't match its data), then an audio track of
+        // 100 with a pregap of 20 in the image, its copy flag set.
+        let mut img: Vec<u8> = (0..200)
+            .flat_map(|lba| crate::cdrom::mode1_sector(lba, lba as u8))
+            .collect();
+        img[50 * RAW_SECTOR + 16] ^= 0xFF;
+        img.extend(sectors(100, 7));
+        fs::write(dir.join("Game.IMG"), &img).unwrap();
+        let ccd = "[CloneCD]\r\nVersion=3\r\n[Disc]\r\nTocEntries=5\r\nSessions=1\r\n\
+            DataTracksScrambled=0\r\nCDTextLength=0\r\nCATALOG=0724384512345\r\n\
+            [Session 1]\r\nPreGapMode=1\r\nPreGapSubC=0\r\n\
+            [Entry 0]\r\nSession=1\r\nPoint=0xa2\r\nControl=0x04\r\nPLBA=300\r\n\
+            [Entry 1]\r\nSession=1\r\nPoint=0x01\r\nControl=0x04\r\nPLBA=0\r\n\
+            [Entry 2]\r\nSession=1\r\nPoint=0x02\r\nControl=0x02\r\nPLBA=220\r\n\
+            [TRACK 1]\r\nMODE=1\r\nINDEX 1=0\r\n\
+            [TRACK 2]\r\nMODE=0\r\nINDEX 0=200\r\nINDEX 1=220\r\n";
+        fs::write(dir.join("game.ccd"), ccd).unwrap();
+        let span = Span::new(0, 300, 0, 0, 2352);
+        let data = Track::stored(1, TrackMode::Mode1_2352, 0, 0, 300, span);
+        let sub: Vec<u8> = (0..300).flat_map(|lba| linear_sub(&data, lba, lba == 120)).collect();
+        fs::write(dir.join("game.sub"), &sub).unwrap();
+
+        let image = CdImage::open(&dir.join("game.ccd")).unwrap();
+        let tracks: Vec<_> = image
+            .tracks()
+            .iter()
+            .map(|t| (t.number, t.mode, t.pregap_start, t.start, t.end, t.control))
+            .collect();
+        assert_eq!(
+            tracks,
+            [
+                (1, TrackMode::Mode1_2352, 0, 0, 200, 4),
+                (2, TrackMode::Audio, 200, 220, 300, 2)
+            ]
+        );
+        assert_eq!(image.leadout(), 300);
+        assert_eq!(image.mcn(), Some("0724384512345"));
+        let mut buf = [0u8; DATA_SECTOR];
+        let mut raw = [0u8; RAW_SECTOR];
+        image.read_data(49, &mut buf).unwrap();
+        assert!(buf.iter().all(|&b| b == 49));
+        assert!(is_unreadable(&image.read_data(50, &mut buf).unwrap_err()));
+        assert!(is_unreadable(&image.read_raw(50, &mut raw).unwrap_err()));
+        image.read_raw(250, &mut raw).unwrap();
+        assert!(raw.iter().all(|&b| b == 7), "audio as the image has it");
+        // The subchannel file beside it, named as it: a bad Q as dumped.
+        let mut got = [0u8; 96];
+        image.read_subchannel(120, &mut got).unwrap();
+        assert_eq!(got, linear_sub(&data, 120, true));
+        let mut files: Vec<String> = track_files(&dir.join("game.ccd"))
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_ascii_lowercase())
+            .collect();
+        files.sort();
+        assert_eq!(files, ["game.img", "game.sub"]);
+        assert!(!lacks_a_track_file(&dir.join("game.ccd")));
+
+        // A descriptor of another name is read as one by how it starts,
+        // and looks for the image named as it.
+        fs::copy(dir.join("game.ccd"), dir.join("other.txt")).unwrap();
+        let error = CdImage::open(&dir.join("other.txt")).unwrap_err();
+        assert!(error.contains("other.img"), "{}", error);
+        fs::remove_file(dir.join("Game.IMG")).unwrap();
+        assert!(lacks_a_track_file(&dir.join("game.ccd")));
+        fs::write(dir.join("two.ccd"), ccd.replace("Sessions=1", "Sessions=2")).unwrap();
+        let error = CdImage::open(&dir.join("two.ccd")).unwrap_err();
+        assert!(error.contains("two.ccd") && error.contains("several sessions"), "{}", error);
     }
 }
