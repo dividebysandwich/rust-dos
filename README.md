@@ -48,23 +48,23 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   ([docs/builtin-windows.md](docs/builtin-windows.md))
 * **Graphics:** text, CGA with composite artifact colours, EGA, VGA with
   Mode X, VESA VBE 2.0 up to 1024x768, a Tseng ET4000 with HiColor, an S3
-  Trio64 with its 2D accelerator, an
-  [S3 ViRGE](CONFIGURATION.md#direct3d-on-an-s3-virge) whose 3D engine
-  draws Direct3D in Windows 95, Hercules, the Tandy 1000's and IBM PCjr's
-  16-colour modes, a
-  [3dfx Voodoo Graphics](CONFIGURATION.md#3dfx-voodoo-graphics) or
+  Trio64 with its 2D accelerator, an [S3
+  ViRGE](CONFIGURATION.md#direct3d-on-an-s3-virge) whose 3D engine draws
+  Direct3D in Windows 95, Hercules, the Tandy 1000's and IBM PCjr's
+  16-colour modes, a [3dfx Voodoo
+  Graphics](CONFIGURATION.md#3dfx-voodoo-graphics) or
   [Voodoo2](CONFIGURATION.md#3dfx-voodoo2) for Glide games in DOS and
-  Windows 95 and Direct3D and OpenGL games in Windows 98, drawn by
-  Rust-DOS or again by OpenGL at up to four times its resolution, a
-  [3dfx Voodoo3 or Banshee](CONFIGURATION.md#3dfx-voodoo3-and-banshee) as
-  the display adapter itself, which runs Windows' desktop, Direct3D and
-  OpenGL with 3dfx's driver, an
-  [ATI 3D RAGE or 3D RAGE II](CONFIGURATION.md#ati-3d-rage) whose 2D and
-  3D engines run ATI's Windows drivers, Direct3D and ATI3DCIF games, and a
-  [PowerVR PCX1 or PCX2](CONFIGURATION.md#powervr-pcx1-and-pcx2) and a
-  [Rendition Vérité](CONFIGURATION.md#rendition-vérité), its RISC
-  emulated, for DOS games' PowerVR and Vérité versions and the 3D Blaster
-  PCI's games
+  Windows 95 and Direct3D and OpenGL games in Windows 98, drawn by Rust-DOS
+  or again by OpenGL at up to four times its resolution, a [3dfx Voodoo3 or
+  Banshee](CONFIGURATION.md#3dfx-voodoo3-and-banshee) as the display adapter
+  itself, which runs Windows' desktop, Direct3D and OpenGL with 3dfx's
+  driver, an [ATI 3D RAGE or 3D RAGE II](CONFIGURATION.md#ati-3d-rage) whose
+  2D and 3D engines run ATI's Windows drivers, Direct3D and ATI3DCIF games,
+  and a [PowerVR PCX1 or PCX2](CONFIGURATION.md#powervr-pcx1-and-pcx2) and a
+  [Rendition Vérité](CONFIGURATION.md#rendition-vérité), its RISC emulated,
+  for DOS games' PowerVR and Vérité versions and the 3D Blaster PCI's games.
+  [docs/3dfx.md](docs/3dfx.md) says which 3dfx card a game needs and how to
+  set it up
 * **Sound:** Sound Blaster 16, Pro 2 and 2.0 with OPL3 FM music, Gravis
   Ultrasound with a built-in patch set, General MIDI through a SoundFont,
   the Ultrasound patches, a Roland MT-32 (via munt), a Roland Sound Canvas
@@ -73,8 +73,10 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
 * **Drives:** host directories as floppy, hard disk and CD-ROM drives, CD
   images (CUE with BIN, WAV, MP3, OGG or FLAC tracks, ISO, CHD, BlindWrite,
   CloneCD, Alcohol 120%) and FAT12, FAT16 and FAT32 disk images (raw, VHD,
-  and 86Box's 86F floppies), with DOSBox Staging's `MOUNT` (and
-  `IMGMOUNT`), and emulated disk speeds and noises
+  and 86Box's 86F floppies), with DOSBox Staging's `MOUNT` (and `IMGMOUNT`),
+  and emulated disk speeds and noises.
+  [docs/copy-protection.md](docs/copy-protection.md) says which image of a
+  copy-protected disc a game needs
 * **[Booting disk images](CONFIGURATION.md#booting-a-disk-image)**
   (`BOOT`): MS-DOS, [Windows 95](CONFIGURATION.md#windows-95) and other systems of their own, with a Plug
   and Play BIOS, APM, a PCI bus and IDE hard disks and CD-ROM drive (for
@@ -193,6 +195,7 @@ changes most settings without a restart, and F2 saves them to the file.
 * [game profiles](CONFIGURATION.md#game-profiles), and importing games set
   up for DOSBox or GOG
 * [mounting drives](CONFIGURATION.md#mounting-drives),
+  [CD images](CONFIGURATION.md#cd-images),
   [disk images](CONFIGURATION.md#disk-images) and
   [disk speed and noises](CONFIGURATION.md#disk-speed-and-noises)
 * [CRT shaders](CONFIGURATION.md#crt-shaders)
@@ -200,6 +203,10 @@ changes most settings without a restart, and F2 saves them to the file.
 
 **[docs/compatibility.md](docs/compatibility.md)** lists what particular
 games need: settings, drivers, setup steps and known limits.
+**[docs/3dfx.md](docs/3dfx.md)** says which 3dfx card a game needs and
+how to set it up, and
+**[docs/copy-protection.md](docs/copy-protection.md)** which copy
+protections run and which image of a protected disc they need.
 
 ## The DOS prompt
 

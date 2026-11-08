@@ -131,6 +131,11 @@ pub struct Clock {
     /// none of their counts, fewer the more they halted, and none from
     /// `BLITS_UNTIL_HALTED` of them (`Pacer::end_cpu_frame`).
     pub offloaded: u64,
+    /// Of `idle`, the counts skipped while a disk service waited out the
+    /// drive's time (`diskio::wait`): the program didn't ask for those.
+    /// Only differences between two points count, so a save state leaves
+    /// it out.
+    pub disk_wait: u64,
     batch_end: u64,
     cycles_per_ms: u32,
     base_icount: u64,
@@ -164,6 +169,7 @@ impl Clock {
             stalled: 0,
             idle: 0,
             offloaded: 0,
+            disk_wait: 0,
             batch_end: u64::MAX,
             cycles_per_ms: cycles_per_ms.clamp(MIN_CYCLES, MAX_CYCLES),
             base_icount: 0,
@@ -1271,7 +1277,7 @@ impl Pit2 {
 
 crate::state_fields!(Pit0 { mode, reload, pending_reload, counting, stopped, armed, period_start, next_tc });
 crate::state_fields!(Pit2 { mode, reload, pending, gate, start, from, held, access, latched } skip { count_due });
-crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns } skip { tsc, offloaded });
+crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns } skip { tsc, offloaded, disk_wait });
 crate::state_fields!(Tsc { base, icount, hz });
 
 #[cfg(test)]
