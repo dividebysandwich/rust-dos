@@ -8319,6 +8319,237 @@ fn all_equal(
     bit_if(a, eq, bit)
 }
 
+/// A dialog template: an edit control (id 100) and an OK button, in that
+/// order, both with WS_TABSTOP, in a visible popup dialog.
+fn edit_dialog_template() -> Vec<u8> {
+    const WS_CHILD: u32 = 0x4000_0000;
+    const WS_TABSTOP: u32 = 0x0001_0000;
+    const WS_BORDER: u32 = 0x0080_0000;
+    const WS_CAPTION: u32 = 0x00C0_0000;
+    const DS_MODALFRAME: u32 = 0x80;
+    const ES_AUTOHSCROLL: u32 = 0x80;
+    const BS_DEFPUSHBUTTON: u32 = 1;
+    let mut t = Vec::new();
+    let style = WS_POPUP as u32 | WS_VISIBLE as u32 | WS_CAPTION | DS_MODALFRAME;
+    t.extend(style.to_le_bytes());
+    t.extend(0u32.to_le_bytes());
+    // Two items at 20,20, 160 by 60; no menu, class or title.
+    for word in [2u16, 20, 20, 160, 60, 0, 0, 0] {
+        t.extend(word.to_le_bytes());
+    }
+    let items = [
+        (ES_AUTOHSCROLL | WS_BORDER, [10, 10, 140, 12], 100, 0x81),
+        (BS_DEFPUSHBUTTON, [50, 35, 50, 14], 1, 0x80),
+    ];
+    for (style, place, id, atom) in items {
+        t.resize(t.len().next_multiple_of(4), 0);
+        t.extend((style | WS_CHILD | WS_VISIBLE as u32 | WS_TABSTOP).to_le_bytes());
+        t.extend(0u32.to_le_bytes());
+        // Place, id, class atom, an empty title, no creation data.
+        for word in place.into_iter().chain([id, 0xFFFF, atom, 0, 0]) {
+            t.extend((word as u16).to_le_bytes());
+        }
+    }
+    t
+}
+
+#[test]
+fn a_dialog_selects_the_edit_text_it_gives_the_focus_as_windows_98_does() {
+    // Windows 98 SE (measured on a 86Box machine): when WM_INITDIALOG
+    // returns TRUE, the dialog manager sends EM_SETSEL(0, -2) to the edit
+    // control it gives the focus, so text WM_INITDIALOG put there starts
+    // selected; Rent-A-Hero's save dialog relies on it. A SetFocus of the
+    // dialog procedure's own, which returns FALSE, selects nothing.
+    // Activating the dialog again gives the saved control the focus with
+    // its selection as it was, while WM_SETFOCUS on the dialog selects
+    // the text again; activation with no control saved selects the first
+    // one's text too.
+    const WM_INITDIALOG: i32 = 0x0110;
+    const EM_GETSEL: i32 = 0x00B0;
+    const EM_SETSEL: i32 = 0x00B1;
+    const GWL_WNDPROC: i32 = -4;
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "CreateDialogIndirectParamA",
+        "CreateWindowExA",
+        "DestroyWindow",
+        "GetDlgItem",
+        "SetDlgItemTextA",
+        "SetFocus",
+        "GetFocus",
+        "SetActiveWindow",
+        "SendMessageA",
+        "SetWindowLongA",
+        "CallWindowProcA",
+    ];
+    // The text at 0, the class "Static" at 0x10; the dialog procedure's
+    // mode at 0x20 (0: TRUE, 1: SetFocus and FALSE, 2: FALSE), the edit
+    // control's procedure at 0x24, and the count of EM_SETSELs it got at
+    // 0x28 with the last one's wParam and lParam at 0x2C and 0x30. The
+    // results at 0x40 on, the template at 0x100.
+    let mut data = vec![0; 0x100];
+    data[..8].copy_from_slice(b"Empty...");
+    data[0x10..0x16].copy_from_slice(b"Static");
+    data.extend(edit_dialog_template());
+    // The results: selection and focus after each step.
+    const SEL: u32 = 0x40;
+    const FOCUS: u32 = 0x44;
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let mut dialog_proc = a.create_label();
+        let mut edit_proc = a.create_label();
+        let mut main = a.create_label();
+        a.jmp(main)?;
+
+        // The edit control's procedure: counts EM_SETSEL, then calls the
+        // control's own.
+        a.set_label(&mut edit_proc)?;
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), EM_SETSEL)?;
+        a.jne(other)?;
+        a.inc(dword_ptr(l.at(0x28)))?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(l.at(0x2C)), eax)?;
+        a.mov(eax, dword_ptr(esp + 16))?;
+        a.mov(dword_ptr(l.at(0x30)), eax)?;
+        a.set_label(&mut other)?;
+        a.pop(ecx)?;
+        a.push(dword_ptr(l.at(0x24)))?;
+        a.push(ecx)?;
+        a.jmp(f("CallWindowProcA"))?;
+
+        // The dialog procedure.
+        a.set_label(&mut dialog_proc)?;
+        let mut not_init = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_INITDIALOG)?;
+        a.jne(not_init)?;
+        a.push(esi)?;
+        a.mov(esi, dword_ptr(esp + 8))?;
+        a.push(100)?;
+        a.push(esi)?;
+        a.call(f("GetDlgItem"))?;
+        a.push(eax)?;
+        push_label(a, edit_proc)?;
+        a.push(GWL_WNDPROC)?;
+        a.push(eax)?;
+        a.call(f("SetWindowLongA"))?;
+        a.mov(dword_ptr(l.at(0x24)), eax)?;
+        a.push(l.at(0) as i32)?;
+        a.push(100)?;
+        a.push(esi)?;
+        a.call(f("SetDlgItemTextA"))?;
+        // The edit control, pushed above.
+        a.pop(eax)?;
+        let mut no_focus = a.create_label();
+        a.cmp(dword_ptr(l.at(0x20)), 1)?;
+        a.jne(no_focus)?;
+        a.push(eax)?;
+        a.call(f("SetFocus"))?;
+        a.set_label(&mut no_focus)?;
+        a.pop(esi)?;
+        a.xor(eax, eax)?;
+        a.cmp(dword_ptr(l.at(0x20)), 0)?;
+        a.sete(al)?;
+        a.ret_1(16)?;
+        a.set_label(&mut not_init)?;
+        a.xor(eax, eax)?;
+        a.ret_1(16)?;
+
+        a.set_label(&mut main)?;
+        a.xor(ebx, ebx)?;
+        // The other window, which takes the activation from the dialogs.
+        let class = l.at(0x10) as i32;
+        let style = WS_POPUP | WS_VISIBLE;
+        push_args(a, &[0, class, class, style, 300, 300, 50, 50, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(ebp, eax)?;
+        // A dialog in the mode at 0x20, in ESI, its edit control in EDI.
+        let dialog = |a: &mut CodeAssembler, mode: i32| -> Result<(), IcedError> {
+            a.mov(dword_ptr(l.at(0x20)), mode)?;
+            a.mov(dword_ptr(l.at(0x28)), 0)?;
+            a.mov(dword_ptr(l.at(0x30)), 0)?;
+            a.push(0)?;
+            push_label(a, dialog_proc)?;
+            a.push(0)?;
+            a.push(l.at(0x100) as i32)?;
+            a.push(BASE as i32)?;
+            a.call(f("CreateDialogIndirectParamA"))?;
+            a.mov(esi, eax)?;
+            a.push(100)?;
+            a.push(esi)?;
+            a.call(f("GetDlgItem"))?;
+            a.mov(edi, eax)
+        };
+        // The edit control's selection at SEL, as EM_GETSEL returns it,
+        // and whether it has the focus at FOCUS.
+        let check = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+            push_args(a, &[EM_GETSEL, 0, 0])?;
+            a.push(edi)?;
+            a.call(f("SendMessageA"))?;
+            a.mov(dword_ptr(l.at(SEL)), eax)?;
+            a.call(f("GetFocus"))?;
+            a.cmp(eax, edi)?;
+            a.sete(al)?;
+            a.movzx(eax, al)?;
+            a.mov(dword_ptr(l.at(FOCUS)), eax)
+        };
+        let set_sel = |a: &mut CodeAssembler, at: i32| -> Result<(), IcedError> {
+            push_args(a, &[EM_SETSEL, at, at])?;
+            a.push(edi)?;
+            a.call(f("SendMessageA"))
+        };
+        // Deactivated and activated again.
+        let reactivate = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+            a.push(ebp)?;
+            a.call(f("SetActiveWindow"))?;
+            a.push(esi)?;
+            a.call(f("SetActiveWindow"))
+        };
+        let all = 8 << 16;
+        let none = 0;
+
+        // TRUE: the text is selected, by one EM_SETSEL(0, -2).
+        dialog(a, 0)?;
+        check(a)?;
+        all_equal(a, l, &[(SEL, all), (FOCUS, 1)], 0)?;
+        all_equal(a, l, &[(0x28, 1), (0x2C, 0), (0x30, -2)], 1)?;
+        // Activated again: the caret stays where it was put.
+        set_sel(a, 2)?;
+        reactivate(a)?;
+        check(a)?;
+        all_equal(a, l, &[(SEL, 2 << 16 | 2), (FOCUS, 1), (0x28, 2)], 2)?;
+        // WM_SETFOCUS on the dialog selects the text again.
+        set_sel(a, 2)?;
+        a.push(esi)?;
+        a.call(f("SetFocus"))?;
+        check(a)?;
+        all_equal(a, l, &[(SEL, all), (FOCUS, 1), (0x28, 4)], 3)?;
+        a.push(esi)?;
+        a.call(f("DestroyWindow"))?;
+
+        // SetFocus in WM_INITDIALOG and FALSE: nothing is selected.
+        dialog(a, 1)?;
+        check(a)?;
+        all_equal(a, l, &[(SEL, none), (FOCUS, 1), (0x28, 0)], 4)?;
+        a.push(esi)?;
+        a.call(f("DestroyWindow"))?;
+
+        // FALSE alone: the activation gives the first control the focus,
+        // with its text selected.
+        dialog(a, 2)?;
+        reactivate(a)?;
+        check(a)?;
+        all_equal(a, l, &[(SEL, all), (FOCUS, 1)], 5)?;
+        a.push(esi)?;
+        a.call(f("DestroyWindow"))?;
+
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let (code, _) = run("dialog_edit_selection", program);
+    assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
+}
+
 #[test]
 fn a_state_saved_while_win_exec_waits_resumes_the_wait() {
     // C.EXE writes C0.DAT, works for 300 ms, writes C.DAT and only then

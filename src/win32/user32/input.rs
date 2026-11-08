@@ -1041,10 +1041,13 @@ const K_DEACTIVATE: u32 = 4;
 
 /// An activation's flags: it brings the queue to the foreground; the
 /// foreground came to the queue from another one, which WM_ACTIVATEAPP
-/// tells; a click activates (WA_CLICKACTIVE).
+/// tells; a click activates (WA_CLICKACTIVE); SetFocus activates the
+/// window of the one it gives the focus, so the activation gives the
+/// window none.
 const F_FOREGROUND: u32 = 1;
 const F_SWITCHED: u32 = 2;
 const F_CLICK: u32 = 4;
+const F_NOFOCUS: u32 = 8;
 
 const WA_CLICKACTIVE: u32 = 2;
 
@@ -1380,7 +1383,12 @@ fn focus_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             }
             10 => {
                 if hwnd != 0 && top != active(cpu) {
-                    return Next::call(address_of("SetActiveWindow"), &[top], 1);
+                    // The SetActiveWindow(top) that USER does here, but
+                    // without the focus the activation would give `top`:
+                    // a dialog would select the text of the control it
+                    // gives it (Windows 98 doesn't, nor does Wine).
+                    let args = [top, F_NOFOCUS, 0];
+                    return Next::call(address_of("ActivateInQueue"), &args, 1);
                 }
                 t.step = 1;
             }
@@ -1657,6 +1665,7 @@ fn activate_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 let a = state.activation(queue);
                 let focus = a.focus;
                 if a.active == hwnd
+                    && t.var(A_FLAGS) & F_NOFOCUS == 0
                     && (focus == 0 || hwnd == 0 || state.top_level(focus) != hwnd)
                     && (hwnd != 0 || focus != 0)
                 {
