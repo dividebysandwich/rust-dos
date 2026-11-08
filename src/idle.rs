@@ -212,30 +212,16 @@ impl CountOp {
     }
 }
 
-/// Bytes of RAM an instruction reached: `len` from `start`, or an element
-/// of `size` bytes at offset `off` from `base` and the `count - 1` after it
-/// (before it, `down`), as a REP string instruction reaches them, the
-/// offset wrapping at 64K.
+/// Bytes of RAM an instruction reached: `len` from `start`.
 #[derive(Clone, Copy)]
-enum Access {
-    Range { start: usize, len: usize },
-    Rep { base: usize, off: u32, size: u32, count: u32, down: bool },
+struct Access {
+    start: usize,
+    len: usize,
 }
 
 impl Access {
     fn covers(self, addr: usize) -> bool {
-        match self {
-            Access::Range { start, len } => addr.wrapping_sub(start) < len,
-            Access::Rep { base, off, size, count, down } => {
-                let at = addr.wrapping_sub(base);
-                if at >= 0x1_0000 {
-                    return false;
-                }
-                let span = count as u64 * size as u64;
-                let from = if down { (off + size - 1).wrapping_sub(at as u32) } else { (at as u32).wrapping_sub(off) } & 0xFFFF;
-                span >= 0x1_0000 || (from as u64) < span
-            }
-        }
+        addr.wrapping_sub(self.start) < self.len
     }
 }
 
@@ -476,12 +462,12 @@ impl Observe {
         if self.noting
             && let Phase::Count { pass, .. } = &mut self.phase
         {
-            pass.writes.push(Access::Range {
+            pass.writes.push(Access {
                 start,
                 len: end - start,
             });
-            if pass.writes.len() > 4 * PASS_LIMIT && self.failed.get().is_none() {
-                self.failed.set(Some("pass"));
+            if pass.writes.len() > 4 * PASS_LIMIT {
+                self.opaque_because("pass");
             }
         }
         for chunk in start >> GEN_SHIFT..=(end - 1) >> GEN_SHIFT {
@@ -1283,7 +1269,6 @@ fn record(cpu: &mut Cpu) {
     let paged = cpu.cr0 & crate::cpu::CR0_PG != 0;
     let cs = cpu.seg_cache(crate::cpu::Seg::CS);
     let bitness = if cs.attr & crate::cpu::ATTR_DB != 0 { 32 } else { 16 };
-    let a20 = cpu.bus.a20_mask() as usize;
     let ip = cs.base.wrapping_add(cpu.eip());
     let (bytes, mapped) = code_at(cpu, ip);
     let instr = Decoder::with_ip(bitness, &bytes, cpu.eip() as u64, DecoderOptions::NONE).decode();
@@ -1341,92 +1326,82 @@ fn record(cpu: &mut Cpu) {
         let Some(addr) = m.virtual_address(0, |r, _, _| seg_base(r).or(Some(cpu.reg(r) as u64))) else {
             return cpu.bus.observe.fail("count");
         };
-        let size = m.memory_size().size().max(1);
+        let size = m.memory_size().size().max(1) as u64;
         let operand = !repeated && instr.op_count() > 0 && instr.op0_kind() == OpKind::Memory && m.base() == instr.memory_base() && m.displacement() == instr.memory_displacement64();
-        let down = cpu.get_cpu_flag(crate::cpu::CpuFlags::DF);
-        let code16 = m.address_size() == iced_x86::CodeSize::Code16;
-        if repeated && code16 && !paged {
-            let base = seg_base(m.segment()).unwrap_or(0) as usize;
-            let off = addr.wrapping_sub(base as u64) as u32 & 0xFFFF;
-            let access = Access::Rep {
-                base,
-                off,
-                size: size as u32,
-                count: rep_count(cpu),
-                down,
-            };
-            accesses.push((access, write, operand));
-            continue;
-        }
         // The linear bytes it reaches: for a REP, its elements from the
-        // one at `addr` on, up or down, with 32-bit addresses (16-bit ones,
-        // which wrap in their segment, aren't followed with paging on).
-        let (start, len) = if repeated {
-            if m.address_size() != iced_x86::CodeSize::Code32 {
-                return cpu.bus.observe.fail("count");
+        // one at `addr` on, up or down. 16-bit offsets wrap in their
+        // segment, which may make them two runs.
+        let runs = if repeated {
+            let span = rep_count(cpu) as u64 * size;
+            let down = cpu.get_cpu_flag(crate::cpu::CpuFlags::DF);
+            match m.address_size() {
+                iced_x86::CodeSize::Code16 => {
+                    let base = seg_base(m.segment()).unwrap_or(0) as u32;
+                    let off = (addr as u32).wrapping_sub(base) & 0xFFFF;
+                    let span = span.min(0x1_0000) as u32;
+                    let first = if down {
+                        (off + size as u32).wrapping_sub(span) & 0xFFFF
+                    } else {
+                        off
+                    };
+                    segment_runs(base, first, span)
+                }
+                iced_x86::CodeSize::Code32 if span <= REP_SPAN => {
+                    let back = span.saturating_sub(size) as u32;
+                    let start = if down {
+                        (addr as u32).wrapping_sub(back)
+                    } else {
+                        addr as u32
+                    };
+                    [(start, span), (0, 0)]
+                }
+                _ => return cpu.bus.observe.fail("count"),
             }
-            let count = rep_count(cpu) as u64;
-            let len = count * size as u64;
-            if len > REP_SPAN {
-                return cpu.bus.observe.fail("count");
-            }
-            let back = count.saturating_sub(1) * size as u64;
-            let start = if down {
-                (addr as u32).wrapping_sub(back as u32)
-            } else {
-                addr as u32
-            };
-            (start, len)
         } else {
-            (addr as u32, size as u64)
+            [(addr as u32, size), (0, 0)]
         };
-        let Some(pieces) = physical(cpu, start, len, write) else {
-            return cpu.bus.observe.fail("paging");
-        };
-        tables.extend(entries(cpu, start, len));
-        // An operand split between two pages isn't one a counting
-        // instruction is followed in.
+        let mut pieces = Vec::with_capacity(1);
+        for (lin, len) in runs {
+            let Some(found) = physical(cpu, lin, len, write) else {
+                return cpu.bus.observe.fail("paging");
+            };
+            pieces.extend(found);
+            tables.extend(entries(cpu, lin, len));
+        }
+        // An operand split between two pages apart in RAM isn't one a
+        // counting instruction is followed in.
         let whole = pieces.len() == 1;
         for access in pieces {
             accesses.push((access, write, operand && whole));
         }
     }
     if opaque {
-        // The 64 bytes either side of the stack's top, the interrupt table
-        // and the BIOS's data area, and in protected mode the IDT.
+        // The 64 bytes either side of the stack's top (a 16-bit stack's
+        // offsets wrap at 64K), the interrupt table and the BIOS's data
+        // area, and in protected mode the IDT.
         let ss = cpu.seg_cache(crate::cpu::Seg::SS);
-        if paged || ss.attr & crate::cpu::ATTR_DB != 0 {
-            let big = ss.attr & crate::cpu::ATTR_DB != 0;
-            let from = if big { cpu.esp() } else { cpu.sp() as u32 }.wrapping_sub(64);
-            let linear = if big {
-                vec![(ss.base.wrapping_add(from), 128)]
-            } else {
-                // A 16-bit stack's offsets wrap at 64K.
-                let off = from & 0xFFFF;
-                let first = (0x1_0000 - off).min(128);
-                vec![(ss.base.wrapping_add(off), first), (ss.base, 128 - first)]
-            };
-            for (lin, len) in linear {
-                let pieces = present(cpu, lin, len as u64, true);
-                accesses.extend(pieces.into_iter().map(|access| (access, true, false)));
-                tables.extend(entries(cpu, lin, len as u64));
-            }
+        let runs = if ss.attr & crate::cpu::ATTR_DB != 0 {
+            [
+                (ss.base.wrapping_add(cpu.esp().wrapping_sub(64)), 128),
+                (0, 0),
+            ]
         } else {
-            let base = ss.base as usize;
             let off = (cpu.sp() as u32).wrapping_sub(64) & 0xFFFF;
-            accesses.push((
-                Access::Rep {
-                    base,
-                    off,
-                    size: 1,
-                    count: 128,
-                    down: false,
-                },
-                true,
-                false,
-            ));
+            segment_runs(ss.base, off, 128)
+        };
+        for (lin, len) in runs {
+            let pieces = present(cpu, lin, len, true);
+            accesses.extend(pieces.into_iter().map(|access| (access, true, false)));
+            tables.extend(entries(cpu, lin, len));
         }
-        accesses.push((Access::Range { start: 0, len: 0x400 }, false, false));
+        accesses.push((
+            Access {
+                start: 0,
+                len: 0x400,
+            },
+            false,
+            false,
+        ));
         if cpu.pe() {
             let idt = cpu.idtr;
             let pieces = present(cpu, idt.base, idt.limit as u64 + 1, false);
@@ -1452,11 +1427,13 @@ fn record(cpu: &mut Cpu) {
     // What each operand held before it ran.
     let befores: Vec<u32> = accesses
         .iter()
-        .map(|&(access, _, _)| match access {
-            Access::Range { start, len } if len <= 4 => {
-                (0..len).fold(0u32, |v, i| v | (cpu.bus.peek_8((start + i) & a20) as u32) << (8 * i))
+        .map(|&(Access { start, len }, _, _)| {
+            if len > 4 {
+                return 0;
             }
-            _ => 0,
+            (0..len).fold(0u32, |v, i| {
+                v | (cpu.bus.peek_8(start + i) as u32) << (8 * i)
+            })
         })
         .collect();
     let o = &mut cpu.bus.observe;
@@ -1471,7 +1448,7 @@ fn record(cpu: &mut Cpu) {
     for ((access, write, operand), before) in accesses.into_iter().zip(befores) {
         let reaches = pass.counters.iter().any(|&c| access.covers(c));
         match (op, access) {
-            (Some(op), Access::Range { start, len }) if operand && reaches && len <= 4 => {
+            (Some(op), Access { start, len }) if operand && reaches && len <= 4 => {
                 pass.ops.push(Counting { op, addr: start, size: len as u8, at, before });
             }
             _ if reaches => failed = true,
@@ -1494,48 +1471,71 @@ thread_local! {
 /// off).
 fn code_at(cpu: &Cpu, lin: u32) -> ([u8; 15], usize) {
     let mut bytes = [0u8; 15];
-    if cpu.cr0 & crate::cpu::CR0_PG != 0 {
-        for (i, b) in bytes.iter_mut().enumerate() {
-            let Some(at) = physical_at(cpu, lin.wrapping_add(i as u32), false) else {
-                return (bytes, i);
-            };
-            *b = cpu.bus.peek_8(at as usize);
+    let mut done = 0;
+    for page in pages(cpu, lin, 15, false) {
+        let Some(Access { start, len }) = page else {
+            break;
+        };
+        let to = &mut bytes[done..done + len];
+        if cpu.bus.is_plain_ram(start, len) {
+            to.copy_from_slice(&cpu.bus.ram()[start..start + len]);
+        } else {
+            for (i, b) in to.iter_mut().enumerate() {
+                *b = cpu.bus.peek_8(start + i);
+            }
         }
-        return (bytes, bytes.len());
+        done += len;
     }
-    let a20 = cpu.bus.a20_mask() as usize;
-    let lin = lin as usize & a20;
-    if cpu.bus.is_plain_ram(lin, 15) {
-        bytes.copy_from_slice(&cpu.bus.ram()[lin..lin + 15]);
-    } else {
-        for (i, b) in bytes.iter_mut().enumerate() {
-            *b = cpu.bus.peek_8((lin + i) & a20);
-        }
-    }
-    (bytes, bytes.len())
+    (bytes, done)
 }
 
 /// The physical address an access of the CPU at linear address `lin`
 /// goes to (a write's with `write`), found without changing anything:
 /// through the TLB where it has the page, as the access goes, else
-/// through the page tables, as the access would walk them.
+/// through the page tables, as the access would walk them. With paging
+/// off, `lin` through the A20 gate.
 fn physical_at(cpu: &Cpu, lin: u32, write: bool) -> Option<u32> {
     cpu.translated_for(lin, write, cpu.cpl == 3)
         .or_else(|| cpu.peek_translate(lin))
 }
 
-/// The RAM the `len` bytes at linear address `lin` are in: one range with
-/// paging off, one for each page with it on (`physical_at`). None where a
+/// The RAM the `len` bytes at linear address `lin` are in, a range for
+/// each run of them that follows on in RAM (`physical_at`). None where a
 /// page isn't there, whose access faults.
 fn physical(cpu: &Cpu, lin: u32, len: u64, write: bool) -> Option<Vec<Access>> {
-    pages(cpu, lin, len, write).collect()
+    let pieces: Option<Vec<Access>> = pages(cpu, lin, len, write).collect();
+    Some(merged(pieces?))
 }
 
 /// As `physical`, without the pages that aren't there: the RAM a service
 /// or an interrupt may reach near the stack's top or in the IDT, which it
 /// can't reach in a missing page without a fault.
 fn present(cpu: &Cpu, lin: u32, len: u64, write: bool) -> Vec<Access> {
-    pages(cpu, lin, len, write).flatten().collect()
+    merged(pages(cpu, lin, len, write).flatten())
+}
+
+/// `pieces`, with each that starts where the one before it ends made one
+/// with it.
+fn merged(pieces: impl IntoIterator<Item = Access>) -> Vec<Access> {
+    let mut out: Vec<Access> = Vec::new();
+    for piece in pieces {
+        match out.last_mut() {
+            Some(last) if last.start + last.len == piece.start => last.len += piece.len,
+            _ => out.push(piece),
+        }
+    }
+    out
+}
+
+/// The linear runs of the `len` bytes (64K at most) from offset `off` of
+/// the segment at `base`, whose 16-bit offsets wrap at 64K: the second is
+/// empty unless they wrap.
+fn segment_runs(base: u32, off: u32, len: u32) -> [(u32, u64); 2] {
+    let first = (0x1_0000 - off).min(len);
+    [
+        (base.wrapping_add(off), first as u64),
+        (base, (len - first) as u64),
+    ]
 }
 
 /// The page directory and page table entries that find the pages of the
@@ -1552,12 +1552,12 @@ fn entries(cpu: &Cpu, lin: u32, len: u64) -> Vec<Access> {
         let at = lin.wrapping_add(done as u32);
         done += (0x1000 - (at & 0xFFF) as u64).min(len - done);
         let (pde, _, pte) = cpu.page_walk(at);
-        found.push(Access::Range {
+        found.push(Access {
             start: pde as usize,
             len: 4,
         });
         if let Some((pte, _)) = pte {
-            found.push(Access::Range {
+            found.push(Access {
                 start: pte as usize,
                 len: 4,
             });
@@ -1566,29 +1566,20 @@ fn entries(cpu: &Cpu, lin: u32, len: u64) -> Vec<Access> {
     found
 }
 
-/// The RAM of each page the `len` bytes at linear address `lin` are in
-/// (one range for all of them with paging off), or None for a page that
-/// isn't there.
+/// The RAM of each page the `len` bytes at linear address `lin` are in,
+/// or None for a page that isn't there. With paging off the A20 gate
+/// decides, which may wrap them at 1 MB, a page's end.
 fn pages(cpu: &Cpu, lin: u32, len: u64, write: bool) -> impl Iterator<Item = Option<Access>> {
-    let paged = cpu.cr0 & crate::cpu::CR0_PG != 0;
     let mut done = 0;
     std::iter::from_fn(move || {
         if done >= len {
             return None;
         }
         let at = lin.wrapping_add(done as u32);
-        if !paged {
-            done = len;
-            let start = (at & cpu.bus.a20_mask()) as usize;
-            return Some(Some(Access::Range {
-                start,
-                len: len as usize,
-            }));
-        }
         let run = (0x1000 - (at & 0xFFF) as u64).min(len - done);
         done += run;
         let start = physical_at(cpu, at, write);
-        Some(start.map(|start| Access::Range {
+        Some(start.map(|start| Access {
             start: start as usize,
             len: run as usize,
         }))

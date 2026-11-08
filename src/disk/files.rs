@@ -271,9 +271,8 @@ impl DiskController {
     /// Empty the file `sft` names if a create call left that for its first
     /// use, through whichever handle: DOS emptied it for all of them.
     fn settle(&mut self, sft: u16) {
-        if self.open_files.values().any(|f| f.empty_on_use)
-            && let Some(key) = self.open_files.get(&sft).map(|f| f.key)
-        {
+        if self.settles(sft) {
+            let key = self.open_files[&sft].key;
             self.settle_where(|_, f| f.key == key);
         }
     }
