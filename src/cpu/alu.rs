@@ -56,6 +56,14 @@ fn szp(size: u8, result: u32) -> u32 {
     f
 }
 
+/// The arithmetic flags a logic instruction (AND, OR, XOR, TEST) of
+/// `size` bytes sets for `result`: SF, ZF and PF from it, CF, OF and AF
+/// clear.
+#[inline(always)]
+pub fn logic(size: u8, result: u32) -> u32 {
+    szp(size, result & size_mask(size))
+}
+
 /// Shift and rotate operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShiftOp {
@@ -130,7 +138,7 @@ impl Cpu {
     #[inline(always)]
     pub fn alu_logic(&mut self, size: u8, result: u32) -> u32 {
         let result = result & size_mask(size);
-        self.set_flag_bits(ARITH, szp(size, result));
+        self.set_flag_bits(ARITH, logic(size, result));
         result
     }
 

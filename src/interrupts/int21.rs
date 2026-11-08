@@ -102,6 +102,27 @@ pub(crate) fn read_open_file(cpu: &mut Cpu, sft: u16, count: usize) -> Result<Ve
     Ok(bytes)
 }
 
+/// Read up to `count` bytes of the open file `sft` from `offset`, charging
+/// the drive as `read_open_file` does, and leave the file's position where
+/// it was: a page of a file mapping, which Windows reads from the file
+/// when the page is first touched.
+pub(crate) fn read_file_at(
+    bus: &mut crate::bus::Bus,
+    sft: u16,
+    offset: u32,
+    count: usize,
+) -> Option<Vec<u8>> {
+    let position = bus.disk.seek_file(sft, 0, 1).ok()?;
+    let read = bus
+        .disk
+        .seek_file(sft, offset as i64, 0)
+        .and_then(|_| bus.disk.read_file(sft, count));
+    let _ = bus.disk.seek_file(sft, position as i64, 0);
+    let bytes = read.ok()?;
+    bus_file_io(bus, sft, bytes.len() as u32, Some(false));
+    Some(bytes)
+}
+
 /// Write `data` to the open file `sft`, handle `handle` of the running
 /// program (AH=40h with bytes to write). Kernel32's WriteFile writes so
 /// to the files it opened, which have no handle (0FFFFh).
@@ -282,16 +303,24 @@ fn generic_block_ioctl(cpu: &mut Cpu) {
 /// from a write), or a call that moves none. It takes the time the drive's
 /// speed says and makes its noise (see `diskio`); devices take none.
 fn file_io(cpu: &mut Cpu, handle: u16, bytes: u32, data: Option<bool>) {
-    let disk = &cpu.bus.disk;
-    let (Some(drive), None, Some(key)) = (disk.handle_drive(handle), disk.handle_device(handle), disk.handle_key(handle))
-    else {
+    bus_file_io(&mut cpu.bus, handle, bytes, data);
+}
+
+/// `file_io`, for work that has only the bus.
+fn bus_file_io(bus: &mut crate::bus::Bus, handle: u16, bytes: u32, data: Option<bool>) {
+    let disk = &bus.disk;
+    let (Some(drive), None, Some(key)) = (
+        disk.handle_drive(handle),
+        disk.handle_device(handle),
+        disk.handle_key(handle),
+    ) else {
         return;
     };
     let access = match data {
         Some(write) => Access::File { write, key },
         None => Access::Other,
     };
-    cpu.bus.drive_activity(drive, bytes, access);
+    bus.drive_activity(drive, bytes, access);
 }
 
 /// A character from the keyboard the way DOS's console driver reads it: an

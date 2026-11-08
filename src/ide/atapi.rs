@@ -6,16 +6,20 @@
 //! A port of the ATAPI half of DOSBox-X's ide.cpp: the task file and its
 //! status bits, the packet protocol with its data blocks and interrupts,
 //! the timing of commands (0.25 ms to take a packet, 1 ms for most
-//! commands, 3 ms a read), the disc's spin-up and a new disc's insertion,
-//! and the packet commands Windows 95 uses. Beyond DOSBox-X: the ATAPI
+//! commands), the disc's spin-up and a new disc's insertion, and the
+//! packet commands Windows 95 uses. Beyond DOSBox-X: the ATAPI
 //! signature after a soft reset, READ CAPACITY's last sector (not the
 //! lead-out), sense data for unknown commands, the relative address of
 //! READ SUB-CHANNEL, the subchannel of READ CD and READ SUB-CHANNEL from
-//! the image where it keeps it, and the sessions of READ TOC.
+//! the image where it keeps it, the sessions of READ TOC, and reads and
+//! seeks that take as long as the head and the disc take to reach and
+//! read their sectors (`cdrom::timing`), where DOSBox-X waits 3 ms for
+//! any read and 1 ms for a seek.
 
 use super::{BSY, DRDY, DRQ, DSC, ERR, Env, ticks};
 use crate::cdrom::audio::PlayState;
 use crate::cdrom::image::QPosition;
+use crate::cdrom::timing::{Geometry, Head};
 use crate::cdrom::{DATA_SECTOR, LBA_OFFSET, RAW_SECTOR, lba_to_msf};
 
 /// The largest data block, as DOSBox-X's buffer.
@@ -27,7 +31,6 @@ const SECTORS_PER_BLOCK: u32 = 16;
 const PACKET_DELAY: f64 = 0.25;
 const IDENTIFY_DELAY: f64 = 0.01;
 const COMMAND_DELAY: f64 = 1.0;
-const READ_DELAY: f64 = 3.0;
 const SPINUP_RETRY: f64 = 100.0;
 const INSERTION: f64 = 4000.0;
 const SPINUP: f64 = 1000.0;
@@ -138,6 +141,8 @@ pub struct Atapi {
     /// The disc's next change of state (insertion done, spun up, spun
     /// down).
     loading_at: Option<u64>,
+    /// Where the head is on the disc, for the time of the next read.
+    head: Head,
     /// Messages for the log.
     pub log: Vec<String>,
 }
@@ -147,7 +152,7 @@ crate::state_fields!(Atapi {
     feature, count, lba, drivehead, command, status, state, allow_writing, irq_signal,
     cdb, cdb_len, max_bytes, buf, buf_pos, buf_len,
     lba_next, remaining, xfer, sector_size, sense, loading, has_changed,
-    delayed, delayed_at, loading_at,
+    delayed, delayed_at, loading_at, head,
 } skip { log });
 
 impl Default for Atapi {
@@ -234,6 +239,7 @@ impl Atapi {
             delayed: Delayed::None,
             delayed_at: 0,
             loading_at: None,
+            head: Head::default(),
             log: Vec::new(),
         };
         ide.set_sense(0, 0, 0);
@@ -273,7 +279,12 @@ impl Atapi {
                 }
                 Loading::SpinningUp => {
                     self.loading = Loading::Readied;
-                    self.loading_at = Some(env.now + ticks(SPINDOWN));
+                    self.loading_at = Some(self.spindown_at(env));
+                }
+                // A disc that plays audio is spinning: the drive stops it
+                // `SPINDOWN` after the play ends.
+                Loading::Readied | Loading::Ready if env.player.is_busy(self.drive) => {
+                    self.loading_at = Some(self.spindown_at(env));
                 }
                 Loading::Readied | Loading::Ready => self.loading = Loading::Idle,
                 _ => {}
@@ -287,9 +298,12 @@ impl Atapi {
 
     /// The disc changed (`has_disc`: a new one went in; otherwise it was
     /// taken out): the drive reports it as a real one does, not present
-    /// while it goes in, then spinning up, then changed.
+    /// while it goes in, then spinning up, then changed. Its buffer held
+    /// the old disc's sectors: it starts empty, and the next read moves
+    /// the head.
     pub fn media_changed(&mut self, has_disc: bool, now: u64) {
         self.has_changed = true;
+        self.head = Head::default();
         if has_disc {
             self.loading = Loading::InsertCd;
             self.loading_at = Some(now + ticks(INSERTION));
@@ -297,6 +311,19 @@ impl Atapi {
             self.loading = Loading::NoDisc;
             self.loading_at = None;
         }
+    }
+
+    /// When the spinning disc stops if no command comes (PIT ticks):
+    /// `SPINDOWN` after now, or after the end of the audio the drive
+    /// plays, which keeps the disc turning until then.
+    fn spindown_at(&self, env: &Env) -> u64 {
+        let playing = if env.player.is_busy(self.drive) {
+            let (_, end) = env.player.range();
+            end.saturating_sub(env.player.position()) as f64 * 1000.0 / 75.0
+        } else {
+            0.0
+        };
+        env.now + ticks(playing + SPINDOWN)
     }
 
     fn schedule(&mut self, delayed: Delayed, ms: f64, now: u64) {
@@ -589,7 +616,8 @@ impl Atapi {
                 self.count = 0x02;
                 self.state = State::AtapiBusy;
                 self.status = BSY;
-                self.schedule(Delayed::Busy, READ_DELAY, env.now);
+                let ms = self.read_ms(env);
+                self.schedule(Delayed::Busy, ms, env.now);
                 return;
             }
         }
@@ -631,7 +659,7 @@ impl Atapi {
                 self.loading = Loading::SpinningUp;
                 self.loading_at = Some(env.now + ticks(SPINUP));
             }
-            Loading::Ready if trigger => self.loading_at = Some(env.now + ticks(SPINDOWN)),
+            Loading::Ready if trigger => self.loading_at = Some(self.spindown_at(env)),
             _ => {}
         }
         if env.cd(self.drive).is_none() {
@@ -682,8 +710,9 @@ impl Atapi {
                 let delay = match op {
                     0x28 | 0xA8 | 0xBE => {
                         self.start_read();
-                        READ_DELAY
+                        self.read_ms(env)
                     }
+                    0x2B => self.seek_ms(env),
                     _ => COMMAND_DELAY,
                 };
                 self.count = 0x02;
@@ -737,6 +766,49 @@ impl Atapi {
         self.remaining = if size == 0 { 0 } else { count };
         self.xfer = self.remaining.min(SECTORS_PER_BLOCK).min(BUFFER as u32 / size.max(1)).min(limit / size.max(1));
         self.remaining -= self.xfer;
+    }
+
+    /// How long, in ms, the block of a read the drive is to read next
+    /// (`xfer` sectors from `lba_next`) takes to reach and read, from now
+    /// (`cdrom::timing`). The head moves to the block's end. A read of no
+    /// sectors has none to reach and leaves the head where it is.
+    fn read_ms(&mut self, env: &Env) -> f64 {
+        if self.xfer == 0 {
+            return COMMAND_DELAY;
+        }
+        let (lba, count) = (self.lba_next as i64, self.xfer);
+        self.head_ms(env, |head, disc, at| head.read(disc, at, lba, count))
+    }
+
+    /// The head's work ended by `now` (PIT ticks) at the latest: for a host
+    /// that finishes a command in no emulated time, such as a WNASPI32
+    /// request without an event (#636), the drive reads on from where it
+    /// is then.
+    pub fn head_done_by(&mut self, now: u64) {
+        self.head.done_by(now as f64 / crate::timer::PIT_HZ as f64);
+    }
+
+    /// How long, in ms, SEEK takes to move the head to its sector.
+    fn seek_ms(&mut self, env: &Env) -> f64 {
+        let lba = be32(&self.cdb[2..6]) as i64;
+        self.head_ms(env, |head, disc, at| head.seek(disc, at, lba))
+    }
+
+    /// How long, in ms, the head's work `work` takes from now: it starts
+    /// once the disc is up to speed, at the end of a spin-up the command
+    /// came during.
+    fn head_ms(&mut self, env: &Env, work: impl FnOnce(&mut Head, &Geometry, f64) -> f64) -> f64 {
+        let Some(image) = env.cd(self.drive) else {
+            return COMMAND_DELAY;
+        };
+        let disc = Geometry::new(image.dpm());
+        let start = match (self.loading, self.loading_at) {
+            (Loading::SpinningUp, Some(at)) => at.max(env.now),
+            _ => env.now,
+        };
+        let seconds = |ticks: u64| ticks as f64 / crate::timer::PIT_HZ as f64;
+        let spin_up = (seconds(start) - seconds(env.now)) * 1000.0;
+        spin_up + work(&mut self.head, &disc, seconds(start))
     }
 
     /// A packet command's work, after its delay (`on_atapi_busy_time`).
@@ -824,8 +896,9 @@ impl Atapi {
                 }
             }
             // SEEK stops CD audio: Windows 95's CD Player stops playing
-            // with it. The head is then at the sector sought, which READ
-            // SUB-CHANNEL reports as it does the last sector read.
+            // with it. The head is then at the sector sought (moved there
+            // by `seek_ms` when the command came), which READ SUB-CHANNEL
+            // reports as it does the last sector read.
             0x2B => {
                 if env.player.state() == PlayState::Playing {
                     env.player.reset();
@@ -870,6 +943,12 @@ impl Atapi {
             }
             0x4E => env.player.reset(),
             _ => {}
+        }
+        // A play that starts or resumes keeps the disc turning to its end.
+        if matches!(self.loading, Loading::Readied | Loading::Ready)
+            && env.player.is_busy(self.drive)
+        {
+            self.loading_at = Some(self.spindown_at(env));
         }
         self.count = 0x03;
         self.feature = 0;

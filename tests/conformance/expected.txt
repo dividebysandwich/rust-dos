@@ -67,9 +67,10 @@ comctl32/toolbar: failed toolbar.c:1066 (x3)
 comctl32/tooltips: tooltips: 64 tests executed (0 marked as todo, 0 failures), 2 skipped.
 comctl32/tooltips: skipped tooltips.c:392
 comctl32/tooltips: skipped tooltips.c:549
-comctl32/trackbar: trackbar: 1511 tests executed (0 marked as todo, 2 failures), 0 skipped.
+comctl32/trackbar: trackbar: 1511 tests executed (0 marked as todo, 3 failures), 0 skipped.
 comctl32/trackbar: failed trackbar.c:1000
 comctl32/trackbar: failed trackbar.c:518
+comctl32/trackbar: failed trackbar.c:1029
 comctl32/treeview: treeview: 754 tests executed (0 marked as todo, 1 failure), 1 skipped.
 comctl32/treeview: failed treeview.c:527
 comctl32/treeview: skipped treeview.c:1104
@@ -199,7 +200,7 @@ kernel32/environ: skipped environ.c:387
 kernel32/environ: skipped environ.c:468
 kernel32/fiber: fiber: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
 kernel32/fiber: skipped fiber.c:190
-kernel32/file: file: 489791 tests executed (0 marked as todo, 1 failure), 16 skipped.
+kernel32/file: file: 489792 tests executed (0 marked as todo, 1 failure), 16 skipped.
 kernel32/file: failed file.c:350
 kernel32/file: skipped file.c:757
 kernel32/file: skipped file.c:924 (x2)
@@ -338,7 +339,7 @@ shell32/shelllink: skipped shelllink.c:854
 shell32/shellpath: shellpath: 116 tests executed (0 marked as todo, 0 failures), 1 skipped.
 shell32/shellpath: skipped shellpath.c:849
 shell32/shlexec: shlexec: 240 tests executed (0 marked as todo, 0 failures), 0 skipped.
-shell32/shlfileop: shlfileop: 540 tests executed (0 marked as todo, 1 failure), 5 skipped.
+shell32/shlfileop: shlfileop: 544 tests executed (0 marked as todo, 1 failure), 5 skipped.
 shell32/shlfileop: skipped shlfileop.c:220
 shell32/shlfileop: failed shlfileop.c:336
 shell32/shlfileop: skipped shlfileop.c:348
@@ -376,11 +377,11 @@ user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
-user32/msg: msg: 11075 tests executed (0 marked as todo, 586 failures), 6 skipped.
+user32/msg: msg: 11068 tests executed (0 marked as todo, 569 failures), 6 skipped.
 user32/msg: skipped msg.c:12537
 user32/msg: failed msg.c:8462
 user32/msg: skipped msg.c:12177
-user32/msg: failed msg.c:10734 (x67)
+user32/msg: failed msg.c:10734 (x57)
 user32/msg: failed msg.c:10731 (x3)
 user32/msg: failed msg.c:10729 (x2)
 user32/msg: failed msg.c:9529
@@ -396,8 +397,7 @@ user32/msg: failed msg.c:4507
 user32/msg: failed msg.c:4511 (x3)
 user32/msg: failed msg.c:4515
 user32/msg: failed msg.c:4528
-user32/msg: failed msg.c:4544 (x3)
-user32/msg: failed msg.c:4546
+user32/msg: failed msg.c:4544 (x2)
 user32/msg: failed msg.c:3969 (x12)
 user32/msg: failed msg.c:4011 (x12)
 user32/msg: failed msg.c:4558
@@ -415,7 +415,7 @@ user32/msg: failed msg.c:4690
 user32/msg: failed msg.c:4693 (x7)
 user32/msg: failed msg.c:4711
 user32/msg: failed msg.c:4718
-user32/msg: failed msg.c:4733 (x7)
+user32/msg: failed msg.c:4733 (x2)
 user32/msg: failed msg.c:4745
 user32/msg: failed msg.c:4750
 user32/msg: failed msg.c:4766 (x6)
@@ -631,7 +631,7 @@ user32/text: text: 197 tests executed (0 marked as todo, 0 failures), 2 skipped.
 user32/text: skipped text.c:119
 user32/text: skipped text.c:554
 user32/uitools: uitools: 6 tests executed (0 marked as todo, 0 failures), 0 skipped.
-user32/win: win: 10390 tests executed (0 marked as todo, 60 failures), 8 skipped.
+user32/win: win: 10436 tests executed (0 marked as todo, 45 failures), 8 skipped.
 user32/win: skipped win.c:5400
 user32/win: skipped win.c:2891
 user32/win: failed win.c:4616
@@ -658,9 +658,6 @@ user32/win: failed win.c:2366
 user32/win: failed win.c:2386
 user32/win: failed win.c:2397
 user32/win: failed win.c:2407
-user32/win: failed win.c:2455 (x2)
-user32/win: failed win.c:2458 (x2)
-user32/win: failed win.c:2480 (x3)
 user32/win: failed win.c:5261
 user32/win: failed win.c:3088
 user32/win: failed win.c:3094
@@ -677,10 +674,6 @@ user32/win: failed win.c:3429 (x2)
 user32/win: failed win.c:4252 (x4)
 user32/win: failed win.c:4264 (x4)
 user32/win: skipped win.c:5464
-user32/win: failed win.c:2555 (x2)
-user32/win: failed win.c:2558 (x2)
-user32/win: failed win.c:2561
-user32/win: failed win.c:2587 (x3)
 user32/win: skipped win.c:1057
 user32/win: skipped win.c:5990
 user32/wsprintf: wsprintf: 6 tests executed (0 marked as todo, 0 failures), 0 skipped.

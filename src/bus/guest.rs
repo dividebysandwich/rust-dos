@@ -20,7 +20,19 @@ impl Bus {
         if self.guest_fault.is_some() {
             return None;
         }
-        match walk_tables(self, paging, lin, write) {
+        let mut walk = walk_tables(self, paging, lin, write);
+        // A page of a view of a file the built-in Windows hasn't read yet
+        // is read now (error code bit 0 clear: no page there). One that
+        // needs a page the pool doesn't have faults, and the system's
+        // handler makes room.
+        if let Err(error) = walk
+            && error & 1 == 0
+            && crate::win32::mapping::page_in(self, paging.cr3, lin)
+                == crate::win32::mapping::PageIn::Done
+        {
+            walk = walk_tables(self, paging, lin, write);
+        }
+        match walk {
             Ok(walked) => Some(((walked.page | (lin & 0xFFF)) & self.a20_mask) as usize),
             Err(error) => {
                 self.guest_fault = Some((lin, error));

@@ -109,6 +109,13 @@ fn parse_msf(s: &str) -> Result<u32, String> {
     }
 }
 
+/// Whether `code` is a media catalog number as the drive and MSCDEX
+/// report it: 13 decimal digits. Any other is left out, as the readers of
+/// `CueSheet::catalog` copy its 13 digits as they are.
+pub fn is_catalog(code: &str) -> bool {
+    code.len() == 13 && code.bytes().all(|b| b.is_ascii_digit())
+}
+
 pub fn parse_cue(text: &str) -> Result<CueSheet, String> {
     let mut sheet = CueSheet::default();
     // Sheets saved by Notepad and some rippers start with a UTF-8 byte
@@ -191,7 +198,7 @@ pub fn parse_cue(text: &str) -> Result<CueSheet, String> {
             }
             "CATALOG" => {
                 let code = arg(1)?;
-                if code.len() == 13 && code.bytes().all(|b| b.is_ascii_digit()) {
+                if is_catalog(code) {
                     sheet.catalog = Some(code.to_string());
                 }
             }

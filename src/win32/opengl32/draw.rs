@@ -338,6 +338,7 @@ fn apply(cpu: &mut Cpu) -> Option<(usize, u32, bool)> {
     d.scissor = a.scissor;
     d.depth_bias = a.depth_bias;
     d.color_off = a.color_off;
+    d.gl_pixel_centres = true;
     let held: Vec<u32> = d.textures.iter().take(UNITS).copied().collect();
     for (stage, &iface) in a.textures.iter().enumerate() {
         if held[stage] != iface {

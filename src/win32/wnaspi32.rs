@@ -23,8 +23,11 @@
 //!   posting routine called before SendASPI32Command returns SS_PENDING,
 //!   as if APIX's thread had run the command at once. With an event, it
 //!   returns SS_PENDING with the block still empty, and the scheduler
-//!   finishes the block and sets the event afterwards (`tick`), as APIX
-//!   does from its own thread.
+//!   finishes the block and sets the event once the drive is done with
+//!   the command (`tick`), as APIX does from its own thread: a read
+//!   takes as long as the drive takes to reach and read its sectors
+//!   (`cdrom::timing`), and copy protections that time reads with
+//!   QueryPerformanceCounter, such as SecuROM 4.8's, see that time.
 //! - The functions are `cdecl`, as Windows 98's are.
 
 use super::call;
@@ -119,8 +122,9 @@ const TARGETS: u8 = 2;
 /// The most a command transfers, a data block of the drive's.
 const MAX_TRANSFER: u32 = 0x1_0000;
 
-/// The state: the drive the commands go to, and the time of the last
-/// command (PIT ticks), which its delays moved on from the machine's.
+/// The state: the drive the commands go to, and when the last event
+/// request is done with it (PIT ticks), which its delays moved on from
+/// the machine's.
 #[derive(Clone, Debug, Default)]
 pub struct State {
     drive: Option<Atapi>,
@@ -262,8 +266,14 @@ fn complete(cpu: &mut Cpu, srb: u32, flags: u8, ran: Result<Finished, u8>) -> Op
         });
         done.pid = pid;
         done.event = event_object(cpu, post);
+        // APIX's thread takes the requests in turn: one the drive doesn't
+        // run (a reset, a rejected target) still ends after those before
+        // it.
+        done.due = done.due.max(cpu.bus.win32.wnaspi32.clock);
         cpu.bus.guest_write_8(srb + 1, SS_PENDING);
         cpu.bus.win32.wnaspi32.finishing.push(done);
+        // A timer event for when the drive is done (`due`).
+        super::thread::schedule_waits(&mut cpu.bus);
         return Some(SS_PENDING as u32);
     }
     let mut done = match ran {
@@ -299,16 +309,20 @@ fn event_object(cpu: &mut Cpu, handle: u32) -> Option<u32> {
     Some(id)
 }
 
-/// Finish the event requests whose drive work is done: write each block
-/// (its data, residual count, target status and sense), then its status
-/// byte, then set its event. Called on every scheduler tick, which may
-/// come in another process or outside any call (an interrupt's), so the
-/// blocks are written through their own process's page tables.
+/// Finish the event requests whose drive work is done by now: write each
+/// block (its data, residual count, target status and sense), then its
+/// status byte, then set its event. Called on every scheduler tick, which
+/// may come in another process or outside any call (an interrupt's), so
+/// the blocks are written through their own process's page tables.
 pub(crate) fn tick(cpu: &mut Cpu) {
     if cpu.bus.win32.wnaspi32.finishing.is_empty() {
         return;
     }
-    let due = std::mem::take(&mut cpu.bus.win32.wnaspi32.finishing);
+    let now = cpu.bus.clock.now_ticks();
+    let (due, waiting) = std::mem::take(&mut cpu.bus.win32.wnaspi32.finishing)
+        .into_iter()
+        .partition(|done| done.due <= now);
+    cpu.bus.win32.wnaspi32.finishing = waiting;
     for done in due {
         finish(cpu, &done);
         if let Some(id) = done.event {
@@ -316,6 +330,14 @@ pub(crate) fn tick(cpu: &mut Cpu) {
             object::objects(cpu).release(id);
         }
     }
+}
+
+/// When the first event request still waiting for the drive is done, in
+/// the clock's microseconds: a time the scheduler wakes up at
+/// (`thread::wait_due`), so the request finishes when the drive does.
+pub(crate) fn due(state: &State) -> Option<u64> {
+    let ticks = state.finishing.iter().map(|done| done.due).min()?;
+    Some(crate::timer::mul_div_ceil(ticks, 1_000_000, crate::timer::PIT_HZ))
 }
 
 /// A finished SC_EXEC_SCSI_CMD or SC_RESET_DEV: what it writes into its
@@ -332,6 +354,8 @@ pub(crate) struct Finished {
     sense: Option<Vec<u8>>,
     pid: u32,
     event: Option<u32>,
+    /// When the drive is done with the command (PIT ticks).
+    due: u64,
 }
 
 crate::state_fields!(Finished {
@@ -343,7 +367,8 @@ crate::state_fields!(Finished {
     residual,
     sense,
     pid,
-    event
+    event,
+    due
 });
 
 /// Write a finished command's data, residual count, target status and
@@ -453,20 +478,40 @@ fn exec_scsi_cmd(cpu: &mut Cpu, srb: u32, flags: u8, cd: u8) -> Result<Finished,
 
     // Makes the drive if `cd_drive` shows another CD-ROM drive now.
     drive_state(cpu);
-    let now = cpu.bus.clock.now_ticks();
     let bus = &mut cpu.bus;
     let state = &mut bus.win32.wnaspi32;
+    let start = bus.clock.now_ticks().max(state.clock);
     let mut env = Env {
         disks: &bus.disk,
         player: &mut bus.cdaudio,
-        now: now.max(state.clock),
+        now: start,
         hard_disk_ns_per_sector: 0,
         faked: false,
         moved: 0,
     };
     let cd = state.drive.as_mut().expect("the drive was made");
     let outcome = cd.run_packet(&cdb[..cdb_len], &out, &mut env);
-    state.clock = env.now;
+    // The drive's time leaves out sending the data, which the emulated
+    // CPU's PIO transfer takes over the IDE port. Here nothing in the
+    // machine moves the data, so the request takes that time too, as the
+    // transfer by APIX's driver does on Windows.
+    let sent = outcome.data.len().min(len as usize);
+    env.now += crate::ide::ticks(crate::cdrom::timing::transfer_ms(sent));
+    // An event request keeps the drive busy until it is done, and the
+    // requests after it queue behind it. Any other request is finished
+    // before SendASPI32Command returns, in no emulated time, so it leaves
+    // the drive's clock where it was, and the drive reads on from where
+    // the request left the head as if it had got there at once: otherwise
+    // a run of such reads would put the drive further ahead of the
+    // machine with each, and an event request after them would wait for
+    // all of their time. On Windows they too end when the drive is done
+    // (#636).
+    if flags & SRB_EVENT_NOTIFY != 0 {
+        state.clock = env.now;
+    } else {
+        cd.head_done_by(start);
+    }
+    let due = env.now;
     let moved = env.moved;
     let log = std::mem::take(&mut cd.log);
     bus.activity.io_bytes += moved;
@@ -499,6 +544,7 @@ fn exec_scsi_cmd(cpu: &mut Cpu, srb: u32, flags: u8, cd: u8) -> Result<Finished,
         data,
         residual,
         sense,
+        due,
         ..Finished::default()
     })
 }

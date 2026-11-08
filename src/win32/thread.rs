@@ -23,7 +23,7 @@ use super::call::{self, THREAD_ATTACHED};
 use super::memory::{GRANULARITY, Memory, PRIVATE, SHARED, USER, WRITABLE};
 use super::object::{Kind, Objects};
 use super::seh;
-use super::{Context, ESP, Win32, process};
+use super::{Context, EAX, EBX, ESP, Win32, process};
 use crate::bus::Bus;
 use crate::cpu::Cpu;
 use crate::instructions::fpu::control;
@@ -32,10 +32,6 @@ use crate::instructions::sse::float::MXCSR_DEFAULT;
 /// How long a thread runs before another that is ready gets its turn, in
 /// microseconds. The timer's interrupt, which switches, comes every 55 ms.
 const SLICE: u64 = 20_000;
-
-/// The index of EAX and EBX in `Context::gpr`.
-const EAX: usize = 0;
-const EBX: usize = 3;
 
 /// What wait functions return.
 pub const WAIT_OBJECT_0: u32 = 0;
@@ -539,15 +535,18 @@ pub fn block(cpu: &mut Cpu, wait: Wait) {
 }
 
 /// When the first of the threads' timed waits that are still to come
-/// ends, by the clock's microseconds. A wait whose time has passed but
-/// that hasn't ended, while the system runs code of its own, ends at the
-/// next interrupt and gets no event of its own.
+/// ends, or an ASPI request the drive is still working on is done, by
+/// the clock's microseconds. A wait whose time has passed but that
+/// hasn't ended, while the system runs code of its own, ends at the next
+/// interrupt and gets no event of its own.
 pub(crate) fn wait_due(win32: &Win32, now: u64) -> Option<u64> {
     win32
         .processes
         .iter()
         .flat_map(|p| &p.threads)
         .filter_map(|t| t.wait.as_ref()?.deadline)
+        // An ASPI request ends a wait on its event when the drive is done.
+        .chain(super::wnaspi32::due(&win32.wnaspi32))
         .filter(|&d| d > now)
         .min()
 }
