@@ -119,10 +119,11 @@ registry opens text files (`.txt`) with it. A setup that offers to show
 its readme when it ends starts it, by its name or by opening the file,
 and the readme opens in a window titled with its name
 (`readme.txt - Notepad`), which stays open after the setup ends. The
-text, in the system's fixed font, scrolls and can be selected and
-copied. Notepad's menus aren't there, so nothing can be saved, and a
-file that isn't there opens an empty window instead of asking whether
-to make it.
+DOS prompt comes back once it is closed too (Alt+F4 or its close
+button). The text, in the system's fixed font, scrolls and can be
+selected and copied. Notepad's menus aren't there, so nothing can be
+saved, and a file that isn't there opens an empty window instead of
+asking whether to make it.
 
 ### Text and dialogs
 
