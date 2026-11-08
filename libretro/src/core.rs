@@ -630,7 +630,7 @@ impl Core {
     pub fn rebase(&mut self) {
         self.target_ticks = self.m.cpu.bus.clock.now_ticks();
         self.tick_rem = 0;
-        self.m.pacer.rebase(&self.m.cpu.bus.clock, Instant::now());
+        self.m.pacer.rebase(&mut self.m.cpu.bus, Instant::now());
         self.m.cpu.bus.vga.mark_dirty_full();
         self.memmap.forget();
         self.release_input();
