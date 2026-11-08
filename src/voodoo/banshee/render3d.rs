@@ -7,8 +7,8 @@
 //! the video processor's overlay, at once or at a vertical retrace,
 //! while the command FIFOs wait for it; swapPending counts the swaps the
 //! status register reports; texBaseAddr is a byte address; and the 3D
-//! linear frame buffer has rows of 2048 pixels. The Voodoo2's video and
-//! init registers and its 2D blitter's aren't there (`absent`).
+//! linear frame buffer has rows of 2048 pixels. The Voodoo2's command
+//! FIFO, video, init and 2D blitter registers aren't there (`absent`).
 //!
 //! From 86Box's vid_voodoo_reg.c, vid_voodoo_render.c, vid_voodoo_fb.c
 //! and vid_voodoo_banshee.c (Sarah Walker, GPLv2) and sections 5 and 8
