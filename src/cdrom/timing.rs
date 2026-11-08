@@ -243,8 +243,11 @@ impl Head {
         let held = self.start.max(self.next + ahead - READ_AHEAD);
         let (ready, seconds) = if lba >= held && end <= self.next + READ_AHEAD {
             // The buffer has the sectors, or will have them as the disc
-            // turns on from `next`: wait for the last one.
-            let ready = self.since + (disc.turns(end) - disc.turns(self.next)).max(0.0) / rps;
+            // turns on from `next`: wait for the last one. The sectors
+            // before `next` passed the head before `since`, so a read of
+            // ones the drive has just read ends when the last of them
+            // passed, not when `next - 1` did.
+            let ready = self.since + (disc.turns(end) - disc.turns(self.next)) / rps;
             (ready, (ready - now).max(0.0))
         } else {
             // Move the head from where reading ahead took it, wait for
@@ -265,6 +268,15 @@ impl Head {
         }
         self.start = self.start.max(self.next - READ_AHEAD);
         seconds * 1000.0 * (1.0 + JITTER * jitter(lba, now))
+    }
+
+    /// The drive's work ended by `now` (seconds of emulated time) at the
+    /// latest: a host that finished a command in no emulated time leaves
+    /// the drive reading on from where it is at `now`. Otherwise a run of
+    /// such reads would carry the time of each on to the next, and the
+    /// drive would fall further behind the machine with each.
+    pub fn done_by(&mut self, now: f64) {
+        self.since = self.since.min(now);
     }
 }
 
@@ -409,6 +421,33 @@ mod tests {
             .iter()
             .fold((f64::MAX, 0.0f64), |(lo, hi), &t| (lo.min(t), hi.max(t)));
         assert!(hi - lo > turn / 2.0 && hi - lo < turn, "{lo} {hi} {turn}");
+    }
+
+    #[test]
+    fn a_read_of_sectors_just_read_waits_for_none_after_them() {
+        // 16 sectors, then the first of them again a millisecond before
+        // the last has passed the head: the first passed long before.
+        let disc = Geometry::new(None);
+        let mut head = Head::default();
+        let first = exact(&mut head, &disc, 1.0, 1000, 16);
+        let now = 1.0 + first / 1000.0 - 0.001;
+        let again = exact(&mut head, &disc, now, 1000, 1);
+        assert!(again.abs() < 1e-9, "{again}");
+    }
+
+    #[test]
+    fn reads_done_by_a_time_leave_the_drive_reading_on_from_it() {
+        // Reads a host finished in no time, one after another at the same
+        // moment: each takes the time of its own sectors, not that of the
+        // ones before it as well.
+        let disc = Geometry::new(None);
+        let mut head = Head::default();
+        exact(&mut head, &disc, 1.0, 1000, 1);
+        head.done_by(1.0);
+        let one = exact(&mut head, &disc, 1.0, 1001, 16);
+        head.done_by(1.0);
+        let two = exact(&mut head, &disc, 1.0, 1017, 16);
+        assert!(two > one * 0.9 && two < one * 1.01, "{one} {two}");
     }
 
     #[test]

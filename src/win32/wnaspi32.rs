@@ -266,6 +266,10 @@ fn complete(cpu: &mut Cpu, srb: u32, flags: u8, ran: Result<Finished, u8>) -> Op
         });
         done.pid = pid;
         done.event = event_object(cpu, post);
+        // APIX's thread takes the requests in turn: one the drive doesn't
+        // run (a reset, a rejected target) still ends after those before
+        // it.
+        done.due = done.due.max(cpu.bus.win32.wnaspi32.clock);
         cpu.bus.guest_write_8(srb + 1, SS_PENDING);
         cpu.bus.win32.wnaspi32.finishing.push(done);
         // A timer event for when the drive is done (`due`).
@@ -474,13 +478,13 @@ fn exec_scsi_cmd(cpu: &mut Cpu, srb: u32, flags: u8, cd: u8) -> Result<Finished,
 
     // Makes the drive if `cd_drive` shows another CD-ROM drive now.
     drive_state(cpu);
-    let now = cpu.bus.clock.now_ticks();
     let bus = &mut cpu.bus;
     let state = &mut bus.win32.wnaspi32;
+    let start = bus.clock.now_ticks().max(state.clock);
     let mut env = Env {
         disks: &bus.disk,
         player: &mut bus.cdaudio,
-        now: now.max(state.clock),
+        now: start,
         hard_disk_ns_per_sector: 0,
         faked: false,
         moved: 0,
@@ -492,17 +496,20 @@ fn exec_scsi_cmd(cpu: &mut Cpu, srb: u32, flags: u8, cd: u8) -> Result<Finished,
     // machine moves the data, so the request takes that time too, as the
     // transfer by APIX's driver does on Windows.
     let sent = outcome.data.len().min(len as usize);
-    let transfer_ms = crate::cdrom::timing::transfer_ms(sent);
-    env.now += (transfer_ms * crate::timer::PIT_HZ as f64 / 1000.0).round() as u64;
+    env.now += crate::ide::ticks(crate::cdrom::timing::transfer_ms(sent));
     // An event request keeps the drive busy until it is done, and the
     // requests after it queue behind it. Any other request is finished
     // before SendASPI32Command returns, in no emulated time, so it leaves
-    // the drive's clock where it was: otherwise a run of such reads would
-    // put the drive further ahead of the machine with each, and an event
-    // request after them would wait for all of their time. On Windows
-    // they too end when the drive is done (#636).
+    // the drive's clock where it was, and the drive reads on from where
+    // the request left the head as if it had got there at once: otherwise
+    // a run of such reads would put the drive further ahead of the
+    // machine with each, and an event request after them would wait for
+    // all of their time. On Windows they too end when the drive is done
+    // (#636).
     if flags & SRB_EVENT_NOTIFY != 0 {
         state.clock = env.now;
+    } else {
+        cd.head_done_by(start);
     }
     let due = env.now;
     let moved = env.moved;

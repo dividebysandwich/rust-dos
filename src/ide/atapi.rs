@@ -293,9 +293,12 @@ impl Atapi {
 
     /// The disc changed (`has_disc`: a new one went in; otherwise it was
     /// taken out): the drive reports it as a real one does, not present
-    /// while it goes in, then spinning up, then changed.
+    /// while it goes in, then spinning up, then changed. Its buffer held
+    /// the old disc's sectors: it starts empty, and the next read moves
+    /// the head.
     pub fn media_changed(&mut self, has_disc: bool, now: u64) {
         self.has_changed = true;
+        self.head = Head::default();
         if has_disc {
             self.loading = Loading::InsertCd;
             self.loading_at = Some(now + ticks(INSERTION));
@@ -757,6 +760,14 @@ impl Atapi {
         }
         let (lba, count) = (self.lba_next as i64, self.xfer);
         self.head_ms(env, |head, disc, at| head.read(disc, at, lba, count))
+    }
+
+    /// The head's work ended by `now` (PIT ticks) at the latest: for a host
+    /// that finishes a command in no emulated time, such as a WNASPI32
+    /// request without an event (#636), the drive reads on from where it
+    /// is then.
+    pub fn head_done_by(&mut self, now: u64) {
+        self.head.done_by(now as f64 / crate::timer::PIT_HZ as f64);
     }
 
     /// How long, in ms, SEEK takes to move the head to its sector.
