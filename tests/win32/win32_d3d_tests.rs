@@ -1147,6 +1147,9 @@ const D3DERR_STENCILBUFFER_NOTPRESENT: u32 = 0x8876_0817;
 const TL_FVF: u32 = 0x1C4;
 
 const SURF_ADD_ATTACHED_SURFACE: u32 = 3;
+const SURF_BLT: u32 = 5;
+const DDBLT_WAIT: u32 = 0x100_0000;
+const DDBLT_DEPTHFILL: u32 = 0x200_0000;
 const SURF_GET_ATTACHED_SURFACE: u32 = 12;
 const SURF_FLIP: u32 = 11;
 const SURF_LOCK: u32 = 25;
@@ -1277,6 +1280,10 @@ enum Step {
     /// background material, black without one. Its result is the
     /// test's to check.
     ViewportClear(u32),
+    /// Blt with DDBLT_DEPTHFILL of the z-buffer to a value, in a
+    /// rectangle (left, top, right, bottom) or all of it, as Omikron
+    /// fills its z-buffer every frame.
+    DepthFill(u32, Option<[i32; 4]>),
 }
 
 /// Which Direct3D draws a scene.
@@ -1419,6 +1426,16 @@ fn scene_program_with(scene: &Scene, bpp: u32, checked: &mut Vec<u32>) -> (Vec<u
             assert!(scene.texture.is_some(), "a key without a texture");
             put32(&mut d, KEY, *key);
             put32(&mut d, KEY + 4, *key);
+        }
+        if let Step::DepthFill(value, rect) = step {
+            // The DDBLTFX, and after it the rectangle.
+            draws.push(at);
+            put32(&mut d, at, 100);
+            put32(&mut d, at + 0x50, *value);
+            for (i, v) in rect.unwrap_or_default().iter().enumerate() {
+                put32(&mut d, at + 100 + 4 * i as u32, *v as u32);
+            }
+            at += 116;
         }
         if let Step::Draw(verts) | Step::Prims(_, verts) = step {
             draws.push(at);
@@ -1627,6 +1644,17 @@ fn scene_program_with(scene: &Scene, bpp: u32, checked: &mut Vec<u32>) -> (Vec<u
                     a.call(dword_ptr(eax + 4 * DD_CREATE_SURFACE))?;
                     a.test(eax, eax)?;
                     a.jz(again)?;
+                }
+                Step::DepthFill(_, rect) => {
+                    let at = *draws.next().unwrap();
+                    let rect = if rect.is_some() {
+                        Arg::At(at + 100)
+                    } else {
+                        Arg::I(0)
+                    };
+                    let flags = DDBLT_DEPTHFILL | DDBLT_WAIT;
+                    let args = [rect, Arg::I(0), Arg::I(0), Arg::I(flags), Arg::At(at)];
+                    c.com(a, l, ZBUF, SURF_BLT, &args)?;
                 }
                 Step::Draw(verts) | Step::Prims(_, verts) => {
                     let at = *draws.next().unwrap();
@@ -2230,6 +2258,45 @@ fn the_z_buffer_keeps_the_nearer_of_two_quads() {
     let p = draw_scene("ztest", &scene);
     assert_rgb(&p, 10, 30, [0, 255, 0], 0);
     assert_rgb(&p, 50, 30, [255, 0, 0], 0);
+}
+
+#[test]
+fn a_depth_fill_blt_resets_the_z_buffer_in_its_rectangle() {
+    // A red quad near the eye, then a Blt that fills the left half of
+    // the z-buffer with its farthest depth, as Omikron fills its
+    // z-buffer each frame: a green quad behind the red one passes the
+    // depth test on the left only. The Voodoo3 fills it with its 3D
+    // engine's fastfill of the depth, as the HAL's Clear does.
+    let scene = Scene {
+        api: Api::D3D6,
+        card: None,
+        clear: 0,
+        zbuffer: Some(1.0),
+        texture: None,
+        texture_alpha: false,
+        steps: vec![
+            Step::State(RS_ZENABLE, 1),
+            Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.25, RED)),
+            Step::DepthFill(0xFFFF, Some([0, 0, 32, 64])),
+            Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.75, GREEN)),
+        ],
+    };
+    let p = draw_scene("depth_fill", &scene);
+    assert_rgb(&p, 16, 30, [0, 255, 0], 0);
+    assert_rgb(&p, 48, 30, [255, 0, 0], 0);
+    // All of it, with no rectangle.
+    let scene = Scene {
+        steps: vec![
+            Step::State(RS_ZENABLE, 1),
+            Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.25, RED)),
+            Step::DepthFill(0xFFFF, None),
+            Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.75, GREEN)),
+        ],
+        ..scene
+    };
+    let p = draw_scene("depth_fill_all", &scene);
+    assert_rgb(&p, 16, 30, [0, 255, 0], 0);
+    assert_rgb(&p, 48, 30, [0, 255, 0], 0);
 }
 
 #[test]

@@ -200,6 +200,32 @@ fn store(cpu: &mut Cpu, s: &Surface, r: &Rect, data: &[u8]) {
     surface::write_rows(cpu, s, offset(s, r.left, r.top), len, data);
 }
 
+/// A fill (DDBLT_DEPTHFILL) of a 16-bit depth buffer in a Banshee's or
+/// Voodoo3's memory, done as the 3D engine's fastfill of the depth, as
+/// the HAL's Clear does it (`hal::card_fill`): true if it was. The card
+/// fills the memory with its own engine, and so does the emulated one,
+/// in the order of the 3D drawing queued before it. Written by the CPU
+/// instead, the rows of a depth buffer the OpenGL renderer draws are
+/// read back from the GPU first, and stay hot: every triangle that tests
+/// depth there is then drawn in software until they cool, which a game
+/// that fills its depth buffer this way every frame (Omikron) never
+/// lets them do.
+fn depth_fill(cpu: &mut Cpu, id: u32, d: &Surface, rects: &[Rect], op: &Op) -> bool {
+    if d.memory != surface::MEM_VIDEO
+        || d.format.flags & surface::DDPF_ZBUFFER == 0
+        || d.bytes_per_pixel() != 2
+        || op.src.is_some()
+        || op.dst_key.is_some()
+    {
+        return false;
+    }
+    let rects: Vec<[i32; 4]> = rects
+        .iter()
+        .map(|r| [r.left, r.top, r.right, r.bottom])
+        .collect();
+    super::d3d::hal::card_fill(cpu, d, id, &rects, op.fill as u16)
+}
+
 /// Do the blit `op` on the surface `dst_id`.
 fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
     let Some(d) = state(cpu).surface(dst_id).cloned() else {
@@ -218,6 +244,10 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
     surface::shown(cpu, dst_id);
     if d.memory == surface::MEM_CARD && op.src.is_none() && op.dst_key.is_none() {
         super::voodoo::fill(cpu, &d, &rects, op.fill);
+        surface::changed(cpu, dst_id);
+        return Ok(());
+    }
+    if depth_fill(cpu, dst_id, &d, &rects, op) {
         surface::changed(cpu, dst_id);
         return Ok(());
     }
