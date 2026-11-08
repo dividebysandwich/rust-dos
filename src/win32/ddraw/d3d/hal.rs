@@ -1607,7 +1607,18 @@ impl Rasterizer for Raster<'_> {
     }
 
     fn point(&mut self, v: &ScreenVertex) {
-        let p = self.vertex(v);
+        let mut p = self.vertex(v);
+        // A point lights the pixel whose centre is nearest. Glide's point
+        // lights the pixel the vertex is in, which for a Direct3D vertex
+        // moved half a pixel is that pixel, except half way between two,
+        // where 3dfx's Direct3D driver lights the left or upper one: 10.5
+        // lights 10 and 10.6 lights 11 (on a Voodoo 3 with its driver
+        // 4.12.01.0666). OpenGL's window coordinates take the pixel the
+        // vertex is in.
+        if self.card.centre != 0.0 {
+            p.x = (p.x - 1.0).ceil();
+            p.y = (p.y - 1.0).ceil();
+        }
         api::draw_point(self.cpu, &p);
     }
 }

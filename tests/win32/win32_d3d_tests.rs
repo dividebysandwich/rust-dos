@@ -410,6 +410,8 @@ const D3DFVF_NORMAL: u32 = 0x10;
 const D3DFVF_DIFFUSE: u32 = 0x40;
 const D3DVOP_TRANSFORM: u32 = 0x1;
 const D3DVOP_LIGHT: u32 = 0x400;
+const D3DPT_POINTLIST: u32 = 1;
+const D3DPT_LINELIST: u32 = 2;
 const D3DPT_TRIANGLELIST: u32 = 4;
 const D3DVT_TLVERTEX: u32 = 3;
 
@@ -1179,6 +1181,8 @@ enum Step {
     State(u32, u32),
     /// DrawPrimitive of a triangle list.
     Draw(Vec<Tl>),
+    /// DrawPrimitive of another D3DPT_ type, such as a point or line list.
+    Prims(u32, Vec<Tl>),
     /// 256x256 textures made in video memory until there is no more
     /// room (Direct3D 7), as Unreal does.
     Fill,
@@ -1340,7 +1344,7 @@ fn scene_program_with(scene: &Scene, bpp: u32, checked: &mut Vec<u32>) -> (Vec<u
             put32(&mut d, KEY, *key);
             put32(&mut d, KEY + 4, *key);
         }
-        if let Step::Draw(verts) = step {
+        if let Step::Draw(verts) | Step::Prims(_, verts) = step {
             draws.push(at);
             for v in verts {
                 put_f32s(&mut d, at, &[v.x, v.y, v.z, v.rhw]);
@@ -1548,15 +1552,19 @@ fn scene_program_with(scene: &Scene, bpp: u32, checked: &mut Vec<u32>) -> (Vec<u
                     a.test(eax, eax)?;
                     a.jz(again)?;
                 }
-                Step::Draw(verts) => {
+                Step::Draw(verts) | Step::Prims(_, verts) => {
                     let at = *draws.next().unwrap();
+                    let kind = match step {
+                        Step::Prims(kind, _) => *kind,
+                        _ => D3DPT_TRIANGLELIST,
+                    };
                     c.com(
                         a,
                         l,
                         DEVICE,
                         draw,
                         &[
-                            Arg::I(D3DPT_TRIANGLELIST),
+                            Arg::I(kind),
                             Arg::I(TL_FVF),
                             Arg::At(at),
                             Arg::I(verts.len() as u32),
@@ -1911,6 +1919,47 @@ fn a_texel_centred_on_each_pixel_is_the_one_the_pixel_samples() {
     // Nothing past the quad.
     assert_rgb(&p, 8, 4, [0, 0, 0], 8);
     assert_rgb(&p, 4, 8, [0, 0, 0], 8);
+}
+
+#[test]
+fn points_and_lines_light_the_pixels_3dfxs_driver_lights() {
+    // What 3dfx's own Direct3D driver (4.12.01.0666, Voodoo 3, in 86Box)
+    // draws for these, read back pixel by pixel: a point lights the
+    // pixel whose centre is nearest, the left or upper one when it is
+    // half way between two (10.5 lights 10, 10.6 lights 11), and a line
+    // along a whole coordinate lights that row or column.
+    let point = |x: f32, y: f32| tl(x, y, 0.5, WHITE);
+    let scene = Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: 0,
+        zbuffer: None,
+        texture: None,
+        texture_alpha: false,
+        steps: vec![
+            Step::Prims(
+                D3DPT_POINTLIST,
+                vec![
+                    point(2.0, 2.0),
+                    point(6.4, 6.4),
+                    point(10.5, 10.5),
+                    point(14.6, 14.6),
+                ],
+            ),
+            Step::Prims(D3DPT_LINELIST, vec![point(20.0, 30.0), point(40.0, 30.0)]),
+            Step::Prims(D3DPT_LINELIST, vec![point(50.0, 20.0), point(50.0, 40.0)]),
+        ],
+    };
+    let p = draw_scene("points_and_lines", &scene);
+    let lit = |x: usize, y: usize| p[y * 64 + x] != 0;
+    for (x, y) in [(2, 2), (6, 6), (10, 10), (15, 15)] {
+        assert!(lit(x, y), "pixel ({x}, {y})");
+    }
+    for (x, y) in [(3, 3), (7, 7), (11, 11), (14, 14)] {
+        assert!(!lit(x, y), "pixel ({x}, {y}) lit");
+    }
+    assert!(lit(25, 30) && !lit(25, 29) && !lit(25, 31));
+    assert!(lit(50, 25) && !lit(49, 25) && !lit(51, 25));
 }
 
 #[test]
