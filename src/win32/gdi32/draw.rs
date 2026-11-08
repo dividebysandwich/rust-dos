@@ -1458,6 +1458,33 @@ const SCREEN_BYTE_PS: u64 = 18_000;
 const MEMORY_BLIT_NS: u64 = 10_700;
 const MEMORY_BYTE_PS: u64 = 2_200;
 
+/// The `cycles` (instructions a millisecond) at which the emulated CPU
+/// runs a game's code as fast as that Pentium II 350. A probe of a
+/// game-like inner loop (fixed-point vertices turned with a sine table,
+/// a perspective divide, a store, a float multiply every 8) ran 6770
+/// passes a second on the 86Box machine and 4784 in rust-dos at
+/// `cycles=100000`, 9565 at 200000 and 19128 at 400000: 141,500.
+/// Integer work alone gave 453,000, memory work 222,000 and FPU work
+/// 100,000.
+pub const PERIOD_CYCLES: u64 = 141_500;
+
+/// Let `ns` of a period PC's blit time pass. Above `PERIOD_CYCLES` the
+/// emulated CPU is faster than that PC, and its blits are as much
+/// faster, so a blit takes as many instructions' time as it did there:
+/// a game that draws a frame through GDI then spends the same share of
+/// its time on its blits as it did on that PC, instead of having a
+/// faster CPU wait as long as a slow one for them. At or below it the
+/// blit takes the period PC's time.
+fn stall_period(cpu: &mut Cpu, ns: u64) {
+    let cycles = cpu.bus.clock.cycles_per_ms() as u64;
+    let ns = if cycles > PERIOD_CYCLES {
+        ns * PERIOD_CYCLES / cycles
+    } else {
+        ns
+    };
+    cpu.bus.clock.stall(ns);
+}
+
 /// Let the emulated time pass that a blit of `pixels` pixels to
 /// `surface` takes, `from` the target of its source if it has one. The
 /// built-in GDI's blits run outside the emulated CPU, so without this
@@ -1478,7 +1505,7 @@ pub fn take_blit_time(cpu: &mut Cpu, surface: &Surface, pixels: u64, from: Optio
         Target::Bitmap(_) | Target::Memory => (MEMORY_BLIT_NS, MEMORY_BYTE_PS, surface.bpp),
     };
     let bytes = (pixels * bpp as u64).div_ceil(8);
-    cpu.bus.clock.stall(call_ns + bytes * byte_ps / 1000);
+    stall_period(cpu, call_ns + bytes * byte_ps / 1000);
 }
 
 /// Let the emulated time pass that a blit to `dc` takes when it draws
@@ -1493,7 +1520,7 @@ pub fn take_call_time(cpu: &mut Cpu, dc: &Dc) {
     } else {
         SCREEN_BLIT_NS
     };
-    cpu.bus.clock.stall(call_ns);
+    stall_period(cpu, call_ns);
 }
 
 /// A blit to the device rectangle from (`x0`, `y0`) to (`x1`, `y1`) of

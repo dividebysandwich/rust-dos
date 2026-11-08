@@ -333,3 +333,74 @@ fn a_band_of_scan_lines_takes_the_bands_time() {
     let want = 12_500 + 64 * 16 * 18;
     assert!(band.abs_diff(want) < want / 100, "{band} ns, {want} wanted");
 }
+
+/// A copy of 344x209 from memory to a 256-colour screen at `cycles`:
+/// the emulated time it takes.
+fn screen_blit_ns_at(cycles: u32) -> u64 {
+    let colors = game_colors();
+    let (mut cpu, screen) = machine(DesktopDepth::Palette, &colors);
+    cpu.bus.clock.set_cycles_per_ms(cycles);
+    let mem = dib_dc(&mut cpu, BITS, &colors, false, tile_pixel);
+    emulated_ns(&mut cpu, |cpu| {
+        bit_blt(cpu, screen, (0, 0, 344, 209), mem, 0, 0)
+    })
+}
+
+/// Up to the speed of the Pentium II 350 the rates were measured on, a
+/// blit takes that PC's time, whatever the speed.
+#[test]
+fn a_blit_takes_the_period_pcs_time_up_to_its_speed() {
+    let want = 12_500 + 344 * 209 * 18;
+    for cycles in [3_000, 50_000, draw::PERIOD_CYCLES as u32] {
+        let ns = screen_blit_ns_at(cycles);
+        assert!(
+            ns.abs_diff(want) < want / 100,
+            "{ns} ns at {cycles} cycles, {want} wanted"
+        );
+    }
+}
+
+/// On a CPU faster than that PC, a blit is as much faster: it takes as
+/// many instructions' time as it did there.
+#[test]
+fn a_blit_is_faster_on_a_faster_cpu() {
+    let period = 12_500 + 344 * 209 * 18;
+    for times in [2, 4] {
+        let cycles = draw::PERIOD_CYCLES as u32 * times;
+        let ns = screen_blit_ns_at(cycles);
+        let want = period / times as u64;
+        assert!(
+            ns.abs_diff(want) < want / 100,
+            "{ns} ns at {cycles} cycles, {want} wanted"
+        );
+    }
+}
+
+/// A program that blits until 100 ms have passed counts the same blits
+/// on every run at a fixed speed, as Chaos Overlords' start does.
+#[test]
+fn blits_in_a_while_count_the_same_at_a_fixed_speed() {
+    let count = |cycles: u32| {
+        let colors = game_colors();
+        let (mut cpu, screen) = machine(DesktopDepth::Palette, &colors);
+        cpu.bus.clock.set_cycles_per_ms(cycles);
+        let mem = dib_dc(&mut cpu, BITS, &colors, false, tile_pixel);
+        let end = cpu.bus.clock.now_ns() + 100_000_000;
+        let mut n: u64 = 0;
+        while cpu.bus.clock.now_ns() < end {
+            bit_blt(&mut cpu, screen, (0, 0, 344, 209), mem, 0, 0);
+            n += 1;
+        }
+        n
+    };
+    let cycles = 4 * draw::PERIOD_CYCLES as u32;
+    let first = count(cycles);
+    assert_eq!(count(cycles), first);
+    // 1.31 ms a blit at the period PC's speed, a quarter of it here.
+    let period = 12_500 + 344 * 209 * 18;
+    let want = 100_000_000 / (period / 4);
+    assert!(first.abs_diff(want) <= want / 100, "{first} blits, {want} wanted");
+    let slow = count(draw::PERIOD_CYCLES as u32);
+    let want = 100_000_000 / period;
+    assert!(slow.abs_diff(want) <= 1, "{slow} blits, {want} wanted");
+}
