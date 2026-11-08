@@ -101,7 +101,7 @@ space is made up: between 1.75 and 3.75 GB through
 `GetDiskFreeSpaceExA`, and at most just under 2 GB through
 `GetDiskFreeSpaceA`, as Windows 95 and 98 give a real disk's space. It
 drops as files are written. A setup that checks for the space it needs
-finds enough. DOS's own answer for such a drive is 80 MB.
+finds enough. DOS's own answer for such a drive is 160 to 480 MB.
 
 ### The system folder
 
@@ -157,7 +157,14 @@ both the IPX and the TCP/IP connection
 DirectPlay's protocol here is rust-dos's own, so a game on a Windows 95
 or 98 image in another instance doesn't see these sessions. Lobby
 programs, such as the Zone's, aren't there, and WinSock (WS2_32 and
-WSOCK32) has no network yet.
+WSOCK32) has no network yet. TAPI32 is there as on a machine with no
+modem installed: lineInitialize fails with LINEERR_NODEVICE, so a game
+that imports it starts, and its modem play says no modem is there.
+IMM32 is there as Windows 95 and 98 have it outside their Chinese,
+Japanese and Korean editions, with no input methods: every function
+returns 0, but ImmGetCompositionString, which returns -1, and
+ImmGetVirtualKey, which returns VK_PROCESSKEY, so a game that turns the
+IME off for its window, such as Age of Empires, starts.
 
 ### Copy protection
 
@@ -178,6 +185,11 @@ fails it as on Windows 98. Dump the CD with its error-correction data
   composer need the composition engine, which isn't there: they load and
   play nothing.
 - **DirectInput's action maps** and device images (#378).
+- **GLU's quadrics, NURBS and tessellator.** GLU32.DLL scales images,
+  builds mipmaps, sets up matrices and gives its texts. gluSphere,
+  gluNurbsCurve, gluTessVertex and the other drawing functions do
+  nothing, and gluNewQuadric, gluNewNurbsRenderer and gluNewTess return
+  NULL (#741).
 - **Functions not written yet.** A program that calls one stops with a
   message naming it. Please
   [open an issue](https://github.com/dividebysandwich/rust-dos/issues)

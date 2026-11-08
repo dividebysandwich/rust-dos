@@ -147,6 +147,9 @@ pub struct State {
     /// the hooks' kind; and the number of the last hook set.
     pub in_hooks: Vec<(u32, i32)>,
     pub last_hook: u32,
+    /// The screens kept under the windows of classes with CS_SAVEBITS
+    /// that show (`paint::SavedBits`).
+    pub saved_bits: Vec<paint::SavedBits>,
     /// The help viewer (winhelp), which save states leave out.
     pub help: winhelp::Help,
 }
@@ -540,6 +543,7 @@ fn forget_windows(cpu: &mut Cpu, gone: impl Fn(&Window) -> bool, tids: &[u32]) {
             state.windows[i] = None;
         }
     }
+    state.saved_bits.retain(|s| !gone.contains(&s.hwnd));
     state.timers.retain(|t| !tids.contains(&t.tid));
     state.queues.retain(|q| !tids.contains(&q.tid));
     let windows = &state.windows;
@@ -1375,7 +1379,8 @@ crate::state_fields!(State {
     params,
     registered,
     in_hooks,
-    last_hook
+    last_hook,
+    saved_bits
 } skip {
     help
 });

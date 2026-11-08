@@ -193,17 +193,20 @@ pub fn has_thick_frame(style: u32, _ex: u32) -> bool {
     style & WS_THICKFRAME != 0 && style & (WS_DLGFRAME | WS_BORDER) != WS_DLGFRAME
 }
 
+/// The thin frame is WS_BORDER's, which WS_CAPTION includes. A top-level
+/// window whose caption and frame were taken away with SetWindowLong has
+/// none, as on Windows 95 and later: its client area is the whole window,
+/// which full-screen games such as Railroad Tycoon II draw to. Only
+/// Windows 3.x gave every overlapped window a thin frame.
 pub fn has_thin_frame(style: u32) -> bool {
-    style & WS_BORDER != 0 || style & (WS_CHILD | WS_POPUP) == 0
+    style & WS_BORDER != 0
 }
 
-/// The window rectangle around the client rectangle `r` for the style,
-/// as AdjustWindowRectEx makes it.
-pub fn adjust(r: Rect, style: u32, ex: u32, menu: bool) -> Rect {
+/// The outer frame's width and height for the style, as
+/// AdjustWindowRectEx counts them: thick, dialog, thin or none.
+pub fn frame_size(style: u32, ex: u32) -> (i32, i32) {
     let m = super::sysparams::metric;
-    let mut r = r;
-    // The outer frame and caption.
-    let (dx, dy) = if has_thick_frame(style, ex) {
+    if has_thick_frame(style, ex) {
         (m(32), m(33))
     } else if has_dlg_frame(style, ex) {
         (m(7), m(8))
@@ -211,8 +214,16 @@ pub fn adjust(r: Rect, style: u32, ex: u32, menu: bool) -> Rect {
         (m(5), m(6))
     } else {
         (0, 0)
-    };
-    r = r.inflate(dx, dy);
+    }
+}
+
+/// The window rectangle around the client rectangle `r` for the style,
+/// as AdjustWindowRectEx makes it.
+pub fn adjust(r: Rect, style: u32, ex: u32, menu: bool) -> Rect {
+    let m = super::sysparams::metric;
+    // The outer frame and caption.
+    let (dx, dy) = frame_size(style, ex);
+    let mut r = r.inflate(dx, dy);
     if style & WS_CAPTION == WS_CAPTION {
         r.top -= if ex & WS_EX_TOOLWINDOW != 0 {
             m(51)
@@ -1022,6 +1033,7 @@ pub fn free_window(cpu: &mut Cpu, hwnd: u32) {
         c.windows = c.windows.saturating_sub(1);
     }
     state.forget_activation(|h| h == hwnd);
+    state.saved_bits.retain(|s| s.hwnd != hwnd);
     let input = &mut state.input;
     if input.capture == hwnd {
         input.capture = 0;
@@ -1891,7 +1903,22 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     | SWP_NOCLIENTMOVE;
                 let nothing =
                     SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOCLIENTSIZE | SWP_NOCLIENTMOVE;
-                if flags & AGG != nothing && flags & SWP_NOSENDCHANGING == 0 {
+                // SWP_NOSENDCHANGING leaves out WM_WINDOWPOSCHANGING
+                // only: WM_WINDOWPOSCHANGED still comes. Its WINDOWPOS
+                // holds the place and size this call gave the window,
+                // relative to its parent, whatever the flags kept from
+                // changing (Wine's win.c checks the place on Windows).
+                // That is the call's own rectangle, as in Wine's
+                // set_window_pos and ReactOS's co_WinPosSetWindowPos, so
+                // a SetWindowPos that the window's WM_ACTIVATE made on
+                // the way doesn't change what this message says. Myth
+                // II's window thread learns that its window is active
+                // only from this message, after its main thread resizes
+                // the window with that flag.
+                if flags & AGG != nothing {
+                    let r = rect_var(t, P_WAS_VISIBLE + 1);
+                    let place = [r.left, r.top, r.width(), r.height()];
+                    write_words(cpu, winpos + 8, &place.map(|v| v as u32));
                     return send(hwnd, WM_WINDOWPOSCHANGED, 0, winpos, 6);
                 }
                 return Next::Done(TRUE);
@@ -3248,6 +3275,33 @@ mod tests {
         );
         let c = client_for(user(&mut cpu), hwnd, Rect::new(-4, -4, 644, 484));
         assert_eq!((c.left, c.top, c.width(), c.height()), (0, 38, 640, 442));
+    }
+
+    /// A top-level window whose style SetWindowLong set to WS_VISIBLE |
+    /// WS_CLIPSIBLINGS, as Railroad Tycoon II's full-screen window, has
+    /// no frame: its client area is the whole window, and the screen's
+    /// corner is in it. Windows 11 gives a 640x480 client area and
+    /// HTCLIENT at (0, 0) for such a window, and AdjustWindowRectEx adds
+    /// nothing for style 0 and one pixel for WS_BORDER. The client area
+    /// the hit test sees is WM_NCCALCSIZE's, as SWP_FRAMECHANGED sets it.
+    #[test]
+    fn a_frameless_top_level_window_is_all_client_area() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let style = WS_VISIBLE | WS_CLIPSIBLINGS;
+        let r = Rect::new(0, 0, 640, 480);
+        assert_eq!(adjust(r, style, 0, false), r);
+        assert_eq!(adjust(r, WS_BORDER, 0, false), Rect::new(-1, -1, 641, 481));
+        let w = Window {
+            style,
+            rect: r,
+            ..Window::default()
+        };
+        let hwnd = user(&mut cpu).new_window(w).expect("a window");
+        let client = client_for(user(&mut cpu), hwnd, r);
+        assert_eq!(client, r);
+        user(&mut cpu).window_mut(hwnd).expect("the window").client = client;
+        let hit = super::super::input::hit_test(user(&mut cpu), hwnd, 0, 0);
+        assert_eq!(hit, super::super::input::HTCLIENT);
     }
 
     /// A caption without a thick frame keeps its 3-pixel dialog frame

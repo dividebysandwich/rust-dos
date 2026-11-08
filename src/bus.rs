@@ -2300,16 +2300,22 @@ impl Bus {
                 };
                 if complete {
                     // Programs that play sound through the timer rewrite the
-                    // count on every tick. Only log the first count after a
-                    // control word, which is how programs set a new rate.
+                    // count on every tick, so only the first count after a
+                    // control word is logged, which is how programs set a
+                    // new rate. Some send the control word and the same
+                    // count many times a second (Civilization's sound
+                    // drivers), so the count is logged only when it differs
+                    // from the rate in force, which a control word keeps.
                     let was_counting = self.pit0.is_counting();
+                    let previous = self.pit0.reload();
                     self.pit0
                         .write_count(self.pit0_divisor, self.clock.now_ticks());
                     self.clock.schedule(self.next_event());
-                    if !was_counting {
+                    let reload = self.pit0.reload();
+                    if !was_counting && reload != previous {
                         self.log_string(&format!(
                             "[PIT] Channel 0 Frequency set to {} Hz",
-                            1_193_182 / self.pit0.reload()
+                            1_193_182 / reload
                         ));
                     }
                 }

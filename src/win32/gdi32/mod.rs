@@ -460,6 +460,20 @@ pub fn add_stock(cpu: &mut Cpu, kind: Kind) -> u32 {
     gdi(cpu).add(object).unwrap_or(0)
 }
 
+/// Add `kind` as an object the system makes for its own drawing (an
+/// MCI device's palette): no process owns it, so it stays when the
+/// process that was running ends, until its maker deletes it.
+pub fn add_system(cpu: &mut Cpu, kind: Kind) -> u32 {
+    init(cpu);
+    let object = Object {
+        kind,
+        stock: false,
+        pid: 0,
+        deleted: false,
+    };
+    gdi(cpu).add(object).unwrap_or(0)
+}
+
 /// The colors of the stock brushes and the static colors of the system
 /// palette, as COLORREFs.
 const STATIC_COLORS: [u32; 20] = [
@@ -1626,6 +1640,7 @@ static APIS: &[Api] = &[
     stdcall("GetMetaFileBitsEx", 276, 3, metafile::get_meta_file_bits_ex),
     stdcall("DeleteMetaFile", 175, 1, metafile::delete_meta_file),
     stdcall("PlayMetaFile", 340, 2, metafile::play_meta_file),
+    stdcall("GetAspectRatioFilterEx", 222, 2, dc::get_aspect_ratio_filter_ex),
 ];
 
 crate::state_fields!(Pen {
