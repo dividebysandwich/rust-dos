@@ -209,8 +209,11 @@ fn dac_hold(model: SbModel, filter: SbFilter, coupling: bool, ms: u64) -> Vec<i1
     // In steps, as the window renders: the mixer starts afresh after a
     // gap of over half a second.
     let mut left = Vec::new();
-    for _ in 0..ms.div_ceil(10) {
-        wait_ms(&mut bus, 10.min(ms));
+    let mut waited = 0;
+    while waited < ms {
+        let step = 10.min(ms - waited);
+        wait_ms(&mut bus, step);
+        waited += step;
         left.extend(samples(&mut bus).chunks(2).map(|frame| frame[0]));
     }
     left
