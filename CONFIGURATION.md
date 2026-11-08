@@ -182,21 +182,22 @@ limit, so without a connection it goes on as it would with one:
   program with no frames to go by (most games of the 1980s, which update
   the screen piecemeal) runs at 3000, about a 286, as in DOSBox's
   `cycles=auto`, and at max while it reads or writes its drives
-  (loading). A protected-mode one runs at max while it reads and writes
-  (loading, computing), and otherwise goes down to 20000, a 486's speed,
-  or a quarter of a faster `cpu` model's clock (50000 on a Pentium,
-  112500 on a Pentium II), no more than the host has. Either goes back to
-  its speed 100 ms after the work stops. Resetting the Sound Blaster, as a
-  sound driver does before it times the card with delay loops, ends the
-  loading speed at once. `auto 10000` makes that real-mode speed, and the
-  least `auto` goes down to, 10000. `max` runs everything as fast as the
-  host keeps up with in real time. Use a number such as `3000` for a fixed
-  speed. `--cycles` overrides it. Loading a [save
-  state](README.md#save-states) keeps the speed the machine runs at (this
-  setting, `--cycles`, or the last one the window, the speed keys or
-  `/api/speed` set): a fixed speed and `max` go on at the rate they had,
-  and `auto` starts its search from the rate the state was saved at. Only
-  `--deterministic` runs at the state's speed.
+  (loading), unless it halts for 30% of the time or more, as a game
+  playing speech from its CD does. A protected-mode one runs at max while
+  it reads and writes (loading, computing), and otherwise goes down to
+  20000, a 486's speed, or a quarter of a faster `cpu` model's clock
+  (50000 on a Pentium, 112500 on a Pentium II), no more than the host
+  has. Either goes back to its speed 100 ms after the work stops.
+  Resetting the Sound Blaster, as a sound driver does before it times the
+  card with delay loops, ends the loading speed at once. `auto 10000`
+  makes that real-mode speed, and the least `auto` goes down to, 10000.
+  `max` runs everything as fast as the host keeps up with in real time. Use
+  a number such as `3000` for a fixed speed. `--cycles` overrides it.
+  Loading a [save state](README.md#save-states) keeps the speed the machine
+  runs at (this setting, `--cycles`, or the last one the window, the speed
+  keys or `/api/speed` set): a fixed speed and `max` go on at the rate they
+  had, and `auto` starts its search from the rate the state was saved at.
+  Only `--deterministic` runs at the state's speed.
 * `auto_fps` is the frame rate `cycles=auto` aims for: `auto`, the
   default, is the display's refresh rate (the 3dfx card's while it
   shows), and a number from 10 to 240 takes its place. A lower one, such

@@ -203,6 +203,16 @@ const BUSY: f64 = 0.05;
 /// a program without frames is at work; a real-mode program's on drives
 /// only. Wolf moves 52 KB a second while it loads.
 const WORKING: f64 = 32768.0;
+/// A real-mode program halted for this share of a measurement or more
+/// isn't loading, whatever its drives move: it waits for the timer with
+/// time to spare, as a game playing speech from its CD does, reading a
+/// block now and then. Wolf's loading screens halt for 0 to 5% of a
+/// measurement, and the scene loads of Day of the Tentacle and Fate of
+/// Atlantis for 0 to 23%. Their speech halts for 39 to 75% and moves 16 to
+/// 72 KB a second, past `WORKING` when two blocks fall in one measurement
+/// (Fate of Atlantis's office conversation: 37 and 72 KB at 46% and 39%).
+/// 30% leaves room on both sides.
+const LOADING_HALTED: f64 = 0.3;
 /// Emulated time without reads and writes (a real-mode program's, on its
 /// drives) after which a program that got all the host has for them goes
 /// back to the speed it had: less than the four timer ticks a delay loop's
@@ -1093,12 +1103,13 @@ impl AutoSpeed {
             // does neither spins in a loop, as a game's menu does. A
             // real-mode program loads while it moves data on its drives,
             // from the second measurement running that finds it doing so
-            // (`loading`); its writes to video memory are the 1980s games'
-            // piecemeal drawing, which keeps the real-mode speed.
+            // (`loading`) and doesn't sit halted for `LOADING_HALTED` of it;
+            // its writes to video memory are the 1980s games' piecemeal
+            // drawing, which keeps the real-mode speed.
             let works = if protected {
                 m.halted < IDLES && m.output >= WORKING
             } else {
-                self.loading = m.io >= WORKING;
+                self.loading = m.io >= WORKING && m.halted < LOADING_HALTED;
                 loading && self.loading
             };
             return if works {
@@ -2768,6 +2779,35 @@ mod tests {
         assert_eq!(auto.decide(3000, &doing(0.0), false, HOST), 3000);
         assert_eq!(auto.decide(3000, &doing(52_000.0), false, HOST), 3000);
         assert_eq!(auto.working, None);
+    }
+
+    #[test]
+    fn a_real_mode_program_halted_while_its_drives_move_plays_speech() {
+        let doing = |io, halted| Measurement {
+            io,
+            halted,
+            ..STILL
+        };
+        let pair = |a: Measurement, b: Measurement| {
+            let mut auto = AutoSpeed::new(3000, None);
+            let first = auto.decide(3000, &a, false, HOST);
+            (first, auto.decide(3000, &b, false, HOST), auto.working)
+        };
+        // Fate of Atlantis's office conversation, read from the CD as it
+        // plays: the processor waits for the timer between the blocks.
+        let speech = pair(doing(37_253.0, 0.46), doing(72_178.0, 0.39));
+        assert_eq!(speech, (3000, 3000, None));
+        // Wolf loading a level, and a scene load in Day of the Tentacle,
+        // which halts a little between its reads.
+        let wolf = pair(doing(363_698.0, 0.0), doing(77_304.0, 0.0));
+        assert_eq!(wolf, (3000, HOST, Some(3000)));
+        let scene = pair(doing(68_573.0, 0.2), doing(110_309.0, 0.22));
+        assert_eq!(scene, (3000, HOST, Some(3000)));
+        // A program that got all the host has goes back once it halts.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.decide(3000, &doing(363_698.0, 0.0), false, HOST);
+        auto.decide(3000, &doing(77_304.0, 0.0), false, HOST);
+        assert_eq!(auto.decide(HOST, &doing(72_178.0, 0.39), false, HOST), 3000);
     }
 
     #[test]
