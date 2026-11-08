@@ -221,6 +221,32 @@ fn psp_fields(bus: &mut Bus, psp: u16) {
     bus.guest_write_32(base + 0x38, 0xFFFF_FFFF);
     bus.guest_write_16(base + 0x40, u16::from_le_bytes([bus.dos_version.major, bus.dos_version.minor]));
     bus.guest_write_bytes(base + 0x50, &[0xCD, 0x21, 0xCB]);
+    save_vectors(bus, psp);
+}
+
+/// The vectors DOS keeps for each process: INT 22h (where it returns to
+/// when it ends), 23h (Ctrl-Break) and 24h (critical errors).
+const PROCESS_VECTORS: [u32; 3] = [0x22, 0x23, 0x24];
+
+/// Copy the INT 22h, 23h and 24h vectors as they are now into the PSP at
+/// `psp` (0Ah, 0Eh and 12h), as DOS does for every PSP it builds.
+pub fn save_vectors(bus: &mut Bus, psp: u16) {
+    let base = psp as u32 * 16;
+    for (i, vector) in PROCESS_VECTORS.into_iter().enumerate() {
+        let handler = bus.guest_read_32(vector * 4);
+        bus.guest_write_32(base + 0x0A + 4 * i as u32, handler);
+    }
+}
+
+/// Set the INT 22h, 23h and 24h vectors from the PSP at `psp`, as DOS
+/// does when the process ends: a handler the process installed goes, and
+/// INT 22h holds the address the process returned to.
+pub fn restore_vectors(bus: &mut Bus, psp: u16) {
+    let base = psp as u32 * 16;
+    for (i, vector) in PROCESS_VECTORS.into_iter().enumerate() {
+        let handler = bus.guest_read_32(base + 0x0A + 4 * i as u32);
+        bus.guest_write_32(vector * 4, handler);
+    }
 }
 
 /// INT 21h AH=26h (`inherit` false) and AH=55h (true): a PSP at `segment`
@@ -249,12 +275,6 @@ pub fn new_psp(bus: &mut Bus, segment: u16, parent: u16, top: u16, inherit: bool
     }
     bus.guest_write_bytes(to, &[0xCD, 0x20]);
     bus.guest_write_16(to + 0x02, top);
-    // Where it returns to, Ctrl-Break and critical errors go: the vectors
-    // as they are now.
-    for (i, vector) in [0x22u32, 0x23, 0x24].into_iter().enumerate() {
-        let handler = bus.guest_read_32(vector * 4);
-        bus.guest_write_32(to + 0x0A + 4 * i as u32, handler);
-    }
     bus.guest_write_16(to + 0x16, parent);
 }
 
