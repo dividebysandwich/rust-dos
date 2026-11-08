@@ -1303,7 +1303,7 @@ impl PageHost<'_> {
         }
         // The state's time stamp counter goes on at this machine's speed.
         self.cpu.set_tsc_speed(self.settings.cycles);
-        self.pacer.rebase(&self.cpu.bus.clock, Instant::now());
+        self.pacer.rebase(&mut self.cpu.bus, Instant::now());
         *self.slot = slot;
         Ok(format!("Loaded slot {}: {}", slot, describe_state(&header)))
     }

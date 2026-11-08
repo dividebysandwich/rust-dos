@@ -234,6 +234,14 @@ impl Vbe {
         Some(((first * scale) as u32, ((last + 1).min(mode.height as usize) * scale) as u32))
     }
 
+    /// The bytes of video memory the picture shown takes, from its first
+    /// to past its last: the mode's rows from the display start.
+    pub fn picture(&self) -> Option<(u64, u64)> {
+        let mode = self.mode?;
+        let start = self.latched_start as u64;
+        Some((start, start + self.pitch as u64 * mode.height as u64))
+    }
+
     /// Small modes are shown doubled.
     pub fn scale(&self) -> u32 {
         match self.mode {

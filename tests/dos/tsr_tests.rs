@@ -183,6 +183,27 @@ fn tsr_started_from_shell_stays_resident() {
 }
 
 #[test]
+fn tsr_started_from_shell_gives_up_its_ctrl_break_and_critical_error_handlers() {
+    // DOS sets INT 22h, 23h and 24h from the PSP for a process that stays
+    // resident too, so handlers it pointed into its own memory go: a TSR
+    // hooks them through its PSP (0Ah, 0Eh, 12h), not the vectors.
+    let base = scratch("resident_vectors", &[("TSR.COM", &[0xEB, 0xFE])]);
+    let mut cpu = Cpu::new(base);
+    cpu.load_shell();
+    assert!(cpu.load_executable("TSR.COM", None));
+    let tsr = cpu.current_psp;
+    let before = [ivt(&cpu, 0x23), ivt(&cpu, 0x24)];
+    set_ivt(&mut cpu, 0x23, tsr, 0x0180);
+    set_ivt(&mut cpu, 0x24, tsr, 0x0190);
+
+    cpu.set_dx(0x20);
+    cpu.set_reg8(Register::AL, 0);
+    int21(&mut cpu, 0x31);
+    cpu.load_shell();
+    assert_eq!([ivt(&cpu, 0x23), ivt(&cpu, 0x24)], before);
+}
+
+#[test]
 fn int_27h_keeps_dx_bytes_resident() {
     // MOV DX,0201h ; INT 27h ; MOV AH,4Ch ; INT 21h, as Microsoft's
     // MOUSE.COM 6.24 stays resident: the bytes up to DX, in paragraphs.

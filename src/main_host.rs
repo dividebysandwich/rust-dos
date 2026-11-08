@@ -424,7 +424,7 @@ impl MainHost<'_, '_> {
         }
         // The state's time stamp counter goes on at this machine's speed.
         self.cpu.set_tsc_speed(self.settings.cycles);
-        self.pacer.rebase(&self.cpu.bus.clock, std::time::Instant::now());
+        self.pacer.rebase(&mut self.cpu.bus, std::time::Instant::now());
         *self.state_loaded = true;
         self.cpu.bus.log_string(&format!("[STATE] Loaded {} (saved {})", path.display(), header.saved));
         Ok(header)
@@ -524,6 +524,8 @@ impl Host for MainHost<'_, '_> {
         if new.cycles != old.cycles {
             self.pacer.set_speed(new.cycles);
             self.cpu.set_tsc_speed(new.cycles);
+            // A speed `auto` found to go back to isn't the new setting's.
+            self.cpu.bus.activity.work_return = None;
             // At max, the pacer tunes the speed from the current one, and
             // at auto, it picks the speed at the end of the frame.
             if let CpuSpeed::Fixed(n) = new.cycles {
