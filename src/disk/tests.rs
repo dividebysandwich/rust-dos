@@ -1701,6 +1701,50 @@ fn system_files_show_in_a_directory_the_drive_lacks() {
 }
 
 #[test]
+fn system_files_show_in_two_directories() {
+    let base = scratch("system-files-two");
+    let mut disk = DiskController::new(base.clone());
+    let dll = vec![("DDRAW.DLL".to_string(), Bytes::from(&b"MZddraw"[..]))];
+    let exe = vec![("NOTEPAD.EXE".to_string(), Bytes::from(&b"MZnotepad"[..]))];
+    disk.set_system_files("C:\\WINDOWS\\SYSTEM", dll);
+    disk.set_system_files("C:\\WINDOWS", exe);
+    let names = |disk: &DiskController, spec: &str, attr: u16| -> Vec<String> {
+        disk.list_directory(spec, attr)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.filename)
+            .collect()
+    };
+    // The Windows directory has its file and the system directory.
+    assert_eq!(
+        names(&disk, "C:\\WINDOWS\\*.*", 0x10),
+        ["..", ".", "NOTEPAD.EXE", "SYSTEM"]
+    );
+    assert_eq!(names(&disk, "C:\\WINDOWS\\*.EXE", 0), ["NOTEPAD.EXE"]);
+    assert_eq!(names(&disk, "C:\\WINDOWS\\SYSTEM\\*.*", 0), ["DDRAW.DLL"]);
+    assert_eq!(
+        disk.get_file_attribute("C:\\WINDOWS\\NOTEPAD.EXE"),
+        Ok(0x21)
+    );
+    let h = disk.open_file("C:\\WINDOWS\\NOTEPAD.EXE", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 16).unwrap(), b"MZnotepad");
+    disk.close_file(h);
+    assert_eq!(disk.remove_directory("C:\\WINDOWS"), Err(0x05));
+    // Taking one directory's files away leaves the other's.
+    disk.set_system_files("C:\\WINDOWS\\SYSTEM", Vec::new());
+    assert!(!disk.is_file("C:\\WINDOWS\\SYSTEM\\DDRAW.DLL"));
+    assert!(!disk.is_directory("C:\\WINDOWS\\SYSTEM"));
+    assert!(disk.is_file("C:\\WINDOWS\\NOTEPAD.EXE"));
+    assert_eq!(
+        names(&disk, "C:\\WINDOWS\\*.*", 0x10),
+        ["..", ".", "NOTEPAD.EXE"]
+    );
+    disk.set_system_files("C:\\WINDOWS", Vec::new());
+    assert!(!disk.is_directory("C:\\WINDOWS"));
+    assert!(!base.join("WINDOWS").exists());
+}
+
+#[test]
 fn system_files_on_a_disk_image() {
     let base = scratch("system-files-fat");
     let mut disk = DiskController::new(base.clone());

@@ -810,8 +810,8 @@ pub struct DiskController {
     pub(crate) media: Cell<Option<crate::savestate::media::Kept>>,
     /// The entries of host folders as last read (`host_entries`).
     host_dirs: HostDirCache,
-    /// The files shown in a directory that the drive doesn't have: the
-    /// built-in Windows's DLLs (system_files.rs).
+    /// The files shown in directories that the drive doesn't have: the
+    /// built-in Windows's DLLs and its NOTEPAD.EXE (system_files.rs).
     system_files: system_files::SystemFiles,
 }
 
