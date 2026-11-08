@@ -53,7 +53,8 @@ fn key(key: (u32, u32), s: &Surface) -> Key {
     }
 }
 
-fn corners(r: &Rect) -> [i32; 4] {
+/// The rectangle `r` as (left, top, right, bottom).
+pub(super) fn corners(r: &Rect) -> [i32; 4] {
     [r.left, r.top, r.right, r.bottom]
 }
 

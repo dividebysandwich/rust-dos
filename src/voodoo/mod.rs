@@ -607,6 +607,10 @@ pub struct Voodoo {
     showing: bool,
     /// Buffer swaps since the bus last counted them as frames drawn.
     pub swapped: u64,
+    /// fastfillCMDs that filled something, from the card's creation.
+    /// Nothing in the emulator reads them; tests tell from them whether
+    /// a fill was the card's (`blt::depth_fill`).
+    pub fastfills: u64,
     /// The video timing the card's registers describe.
     timing: CrtTiming,
     /// RGB of each 5-6-5 pixel through the gamma table, rebuilt when it
@@ -749,6 +753,7 @@ impl Voodoo {
             display_dirty: true,
             showing: false,
             swapped: 0,
+            fastfills: 0,
             timing: CrtTiming::VESA_480,
             palette: vec![[0; 3]; 65536],
             palette_dirty: true,
