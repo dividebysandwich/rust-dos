@@ -527,24 +527,7 @@ impl<'a> Row<'a> {
             stats.afunc_fail += 1;
             return false;
         }
-        if bit(m.am, 0) {
-            let reference = (m.am >> 24) as i32;
-            let pass = match (m.am >> 1) & 7 {
-                0 => false,
-                1 => alpha < reference,
-                2 => alpha == reference,
-                3 => alpha <= reference,
-                4 => alpha > reference,
-                5 => alpha != reference,
-                6 => alpha >= reference,
-                _ => true,
-            };
-            if !pass {
-                stats.afunc_fail += 1;
-                return false;
-            }
-        }
-        true
+        self.alpha_test(alpha, stats)
     }
 
     /// Fog, alpha blending and the writes (`PIXEL_PIPELINE_MODIFY`,
