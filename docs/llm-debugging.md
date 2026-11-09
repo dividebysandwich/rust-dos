@@ -55,7 +55,11 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
   `RUST_DOS_GL_NO_BLIT=1` leaves out its program for 2D operations, as
   if it didn't compile: the card does them in software, the renderer
   still composes the picture, and stderr says
-  `2D operations stay on the CPU`.
+  `2D operations stay on the CPU`. With `voodoo_msaa`,
+  `RUST_DOS_GL_NO_PER_SAMPLE=1` leaves out the program that blends each
+  sample on its own, as on a driver without `GL_ARB_sample_shading`:
+  blended triangles blend with each pixel's samples averaged, and
+  stderr says `blending pixels, not samples`.
 - **C: drive:** `-d` sets it. `AUTOEXEC.BAT` in that directory runs at
   startup.
 - **`--no-config`:** without it, rust-dos reads `rust-dos.conf` from the
