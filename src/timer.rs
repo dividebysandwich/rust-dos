@@ -22,7 +22,7 @@ pub use rust_dos_audio_core::{PIT_HZ, mul_div, mul_div_ceil};
 const FRAME: Duration = Duration::from_micros(16_667);
 /// How far emulated time may fall behind the wall clock before the backlog
 /// is dropped rather than caught up.
-const MAX_LAG: Duration = Duration::from_millis(50);
+pub(crate) const MAX_LAG: Duration = Duration::from_millis(50);
 /// A backlog of this much is one gap: running frames, it is dropped at
 /// `MAX_LAG`. The frontend stopped (a page in the background, a window
 /// being dragged, the host asleep), which says nothing of whether the host
@@ -993,10 +993,20 @@ impl Pacer {
                 if self.fast_forward {
                     return None;
                 }
-                let next = self.auto.update(bus, protected, host_max, self.lost_ns);
                 if self.wall_paced {
-                    return next;
+                    // How far the emulated time is behind the wall clock
+                    // now: what the next batch runs to catch up, as
+                    // `batch_end` reckons it.
+                    let since = Instant::now().saturating_duration_since(self.anchor_wall);
+                    let wall = self.anchor_ticks + duration_to_ticks(since);
+                    let behind = ticks_to_duration(wall.saturating_sub(bus.clock.now_ticks()));
+                    let behind_ns = behind.as_nanos() as u64;
+                    if let Some(cut) = self.auto.falling_behind(bus, behind_ns, self.lost_ns) {
+                        return Some(cut);
+                    }
+                    return self.auto.update(bus, protected, host_max, self.lost_ns);
                 }
+                let next = self.auto.update(bus, protected, host_max, self.lost_ns);
                 // Nothing tells that the host fell behind, but for its
                 // estimate: a heavier scene than it keeps up with at this
                 // speed.

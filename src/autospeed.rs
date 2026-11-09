@@ -185,6 +185,36 @@ const HEAVIER: f64 = 2.0;
 const LAGGED_WINDOWS: u32 = HOLD_WINDOWS;
 /// Falling behind once at less than the host estimate over this is a stall.
 const STALLED: f64 = 2.0;
+/// A step up that the host doesn't keep up with shows it frame by frame,
+/// long before its measurement ends. Each frame runs the emulated time the
+/// one before it took on the wall clock, so a frame that takes longer than
+/// a frame leaves the next more to run, and where drawing the program's
+/// frames is most of the host's cost, a batch long enough to hold two of
+/// them takes it twice as long. In Omikron's software-rendered dialogue on
+/// a host that keeps up with 27,000, the frames at 29,000 run at 35 to 45
+/// ms, and every few seconds one takes 80 ms; the step to the host's
+/// estimate, 45,700, made twelve frames of 59 to 117 ms before its
+/// measurement ended, and more after it as the game caught up (#856). So
+/// until its first measurement is in, a step up is watched frame by frame:
+/// `TRY_BEHIND_FRAMES` in a row that leave the host `TRY_BEHIND_NS` behind
+/// (a frame and a half), or a backlog the pacer dropped, end it at once. A
+/// step of more than `FINE_STEP` goes on as one of `FINE_STEP` from where it
+/// came, with a step under the speed it fell behind at the most it may go
+/// to, and one of `FINE_STEP` goes back there, the most the speed may go to
+/// until the host has kept up for a while (`LAGGED_WINDOWS`). There, the
+/// dialogue's frames do that less than once in 45 seconds at 23,000, about
+/// once in three seconds at 26,000, and more than once a second at 29,000.
+/// A hold isn't watched this way: at a speed the host keeps up with, a run
+/// of long frames comes now and then, and its measurements say what they
+/// cost.
+const TRY_BEHIND_NS: u64 = 25_000_000;
+const TRY_BEHIND_FRAMES: u32 = 3;
+/// A measurement behind at a speed that another fell behind at, at that
+/// speed or less, within this many measurements before, is no stall: the
+/// host keeps up there only between heavier moments. Omikron's dialogue at
+/// 29,800 falls behind for one measurement in eight, each with a frame of
+/// 80 ms, while the smoothed pace stays above `KEPT_UP`.
+const AGAIN_WINDOWS: u32 = HOLD_WINDOWS;
 /// How many steps of `FINE_STEP` above the record's speed are tried for its
 /// frame rate (see `Record`).
 const CLIMBS: u32 = 2;
@@ -706,6 +736,24 @@ pub struct AutoSpeed {
     lagged: Option<(u32, u32)>,
     pace: f64,
     behind: bool,
+    /// A measurement fell behind at this speed without the smoothed pace
+    /// saying the host lagged, and the measurements left in which another
+    /// one behind there says it does (`AGAIN_WINDOWS`).
+    slipped: Option<(u32, u32)>,
+    /// While a step up waits for its first measurement, the speed it came
+    /// from, which the frames are watched for (`TRY_BEHIND_NS`): the frames
+    /// in a row behind by that much, and the emulated time dropped so far.
+    trying: Option<u32>,
+    try_behind: u32,
+    try_lost_ns: u64,
+    /// The least speed the host fell behind at, by a measurement or a step
+    /// up's frames, until it keeps up above it. A step up goes no further
+    /// than a step under it at once, and past it by `FINE_STEP`; a faster CPU
+    /// model's least speed no further than a step past it. The cap after a
+    /// fall (`lagged`) lapses once it reaches the host's estimate, and where
+    /// that reads far more than the host runs (Omikron's dialogue, see
+    /// `decide`), both went there at once: 45,700 where the host ran 27,000.
+    fell_at: Option<u32>,
     /// While a program gets all the host has for its reads and writes, the
     /// speed it had before.
     working: Option<u32>,
@@ -758,6 +806,11 @@ impl AutoSpeed {
             lagged: None,
             pace: 1.0,
             behind: false,
+            slipped: None,
+            trying: None,
+            try_behind: 0,
+            try_lost_ns: 0,
+            fell_at: None,
             working: None,
             work_cuts: 0,
             flat_out: false,
@@ -826,6 +879,8 @@ impl AutoSpeed {
         self.lagged = None;
         self.pace = 1.0;
         self.behind = false;
+        self.slipped = None;
+        self.fell_at = None;
     }
 
     /// While a program gets all the host has for its reads and writes, the
@@ -839,6 +894,7 @@ impl AutoSpeed {
     /// Measure afresh. How the host kept up stays: it says the same of
     /// what the same program does next.
     pub fn start_over(&mut self) {
+        self.trying = None;
         self.mark = None;
         self.settle_until = 0;
         self.unsettled = None;
@@ -987,6 +1043,8 @@ impl AutoSpeed {
             refresh,
             pace: paced as f64 / (paced + now.lost_ns.saturating_sub(mark.lost_ns)) as f64,
         };
+        // The step up's first measurement is in: the frames kept up with it.
+        self.trying = None;
         let working = self.working.take();
         let next = self.decide(current, &measured, protected, host_max);
         if self.working.is_some() {
@@ -1025,7 +1083,82 @@ impl AutoSpeed {
         let lowered = matches!(self.step, Step::Lowered { .. });
         self.settle_until = now.ns + if lowered { SETTLE_DOWN_NS } else { SETTLE_NS };
         self.unsettled = Some((f64::NAN, 0));
+        // A step up is watched until its first measurement is in, unless
+        // it gives the program all the host has, which it may fall behind
+        // with.
+        if next > current && !self.flat_out {
+            self.trying = Some(current);
+        }
         Some(next)
+    }
+
+    /// The host fell behind at `speed` (`fell_at`).
+    fn fell_behind_at(&mut self, speed: u32) {
+        self.fell_at = Some(self.fell_at.map_or(speed, |at| at.min(speed)));
+    }
+
+    /// After a frame, before `update`: `behind_ns` is the emulated time the
+    /// host is behind the wall clock now, and `lost_ns` what it dropped so
+    /// far (`Pacer::lost`). A step up that the frames show the host doesn't
+    /// keep up with (`TRY_BEHIND_NS`) ends: the speed it asks for instead.
+    pub fn falling_behind(&mut self, bus: &Bus, behind_ns: u64, lost_ns: u64) -> Option<u32> {
+        let dropped = lost_ns > self.try_lost_ns;
+        self.try_lost_ns = lost_ns;
+        self.try_behind = if behind_ns >= TRY_BEHIND_NS {
+            self.try_behind + 1
+        } else {
+            0
+        };
+        let from = self.trying?;
+        if self.working.is_some() {
+            self.trying = None;
+            return None;
+        }
+        let frames = std::mem::take(&mut self.try_behind);
+        if !dropped && frames < TRY_BEHIND_FRAMES {
+            self.try_behind = frames;
+            return None;
+        }
+        let current = bus.clock.cycles_per_ms();
+        self.fell_behind_at(current);
+        let fine = (from as f64 * FINE_STEP).round() as u32;
+        let next = if current as f64 > fine as f64 * 1.01 {
+            // Still a step up from `from`, as the search had it, watched
+            // the same way. The search may climb from there to a step under
+            // the speed that fell behind: one that jumped to the host's
+            // estimate from far below it (as one does after a load) would
+            // otherwise wait a step per `LAGGED_WINDOWS` to get back.
+            let most = (current as f64 / FINE_STEP).round() as u32;
+            self.lagged = Some((most.max(fine), LAGGED_WINDOWS));
+            fine
+        } else {
+            self.trying = None;
+            self.lagged = Some((from, LAGGED_WINDOWS));
+            self.step = Step::Hold {
+                fps: f64::NAN,
+                left: HOLD_WINDOWS,
+                more: false,
+                recent: f64::NAN,
+                seen: 0,
+                dipped: 0,
+            };
+            from
+        };
+        if trace() {
+            eprintln!(
+                "[auto] {} -> {}: a step up from {} behind {:.1}ms for {} frames, dropped {}",
+                current,
+                next,
+                from,
+                behind_ns as f64 / 1e6,
+                frames,
+                dropped
+            );
+        }
+        self.mark = None;
+        self.settle_until = bus.clock.now_ns() + SETTLE_NS;
+        self.unsettled = Some((f64::NAN, 0));
+        (next != current).then_some(next)
     }
 
     /// The work the program got all the host has for is done: back to
@@ -1072,7 +1205,18 @@ impl AutoSpeed {
         // many.
         let kept_up = self.pace >= KEPT_UP;
         self.pace = self.pace * 0.75 + m.pace * 0.25;
-        let lagged = m.pace < KEPT_UP && self.pace < KEPT_UP;
+        // Behind again where it was a while ago (`AGAIN_WINDOWS`).
+        let again_here = self.slipped.is_some_and(|(speed, _)| current >= speed);
+        let lagged = m.pace < KEPT_UP && (self.pace < KEPT_UP || again_here);
+        if m.pace >= KEPT_UP && self.fell_at.is_some_and(|at| c > at as f64 * 1.01) {
+            self.fell_at = None;
+        }
+        self.slipped = match self.slipped {
+            _ if lagged => None,
+            _ if m.pace < KEPT_UP => Some((current, AGAIN_WINDOWS)),
+            Some((speed, left)) if left > 1 => Some((speed, left - 1)),
+            _ => None,
+        };
         let again = std::mem::replace(&mut self.behind, lagged);
         // Behind once at well under what the host runs, after keeping up,
         // it stalled: that says nothing of its limit, and a cap from it
@@ -1114,6 +1258,7 @@ impl AutoSpeed {
             }
             // Not the CPU model's least speed: the cap keeps that under it.
             let least = self.least(protected, 0);
+            self.fell_behind_at(current);
             self.lagged = (most > least).then_some((most, LAGGED_WINDOWS));
         } else if let (false, Some((most, left))) = (lagged, self.lagged) {
             // The estimate dipping to the limit doesn't end it: only rising
@@ -1130,7 +1275,9 @@ impl AutoSpeed {
         // up would otherwise take the speed back past the cap at once.
         let host_top = top;
         let have = self.lagged.map_or(have, |(most, _)| most.min(have));
-        let base = self.least(protected, have);
+        // Nor past a step above where the host fell behind (`fell_at`).
+        let past_fall = self.fell_at.map(|at| (at as f64 * FINE_STEP) as u32);
+        let base = self.least(protected, past_fall.map_or(have, |most| most.min(have)));
         let top = have.max(base);
         let clamp = |speed: f64| (speed.round() as u32).clamp(base, top);
         if m.polling >= WAITING {
@@ -1220,6 +1367,12 @@ impl AutoSpeed {
                 return hold(this, c, HOLD_WINDOWS, false);
             }
             this.step = Step::Raised { from: current, fps, below };
+            // No further at once than a step under where the host fell
+            // behind, and past it a step at a time.
+            let most = match this.fell_at {
+                Some(at) => most.min(at as f64 / FINE_STEP / c).max(FINE_STEP),
+                None => most,
+            };
             clamp(c * (m.refresh / fps).clamp(FINE_STEP, most))
         };
         let down = |this: &mut Self, fps: f64| {
@@ -3297,6 +3450,132 @@ mod tests {
         let (shown, kept) = run_omikron(60_000.0, 1.0 / 30.0);
         assert!(shown >= 0.9, "{shown} of the frames, {kept} of real time");
         assert!(kept >= 0.98, "{shown} of the frames, {kept} of real time");
+    }
+
+    /// Omikron's dialogue frame by frame on the 7700X, as measured at fixed
+    /// speeds (#856): the host runs 60,000 of the program's own instructions
+    /// a ms, and the renderer's workers take 40 ms to draw each of its
+    /// frames, 0.9 a second for each 1000 instructions per ms. They draw one
+    /// while the emulator goes on, and the next frame waits for it: real
+    /// time ends at 27,800. Each host frame runs the emulated time the one
+    /// before it took, or a frame's if that was less, and the backlog past
+    /// 50 ms is dropped, as `Pacer::batch_end` does, so a batch that holds
+    /// two of the program's frames waits for a whole drawing. Returns each
+    /// host frame's time in ms and speed from the 30th second on, and the
+    /// share of real time kept there.
+    fn omikron_frames(seconds: f64) -> (Vec<f64>, Vec<u32>, f64) {
+        const FRAME: f64 = 1.0 / 60.0;
+        const MAX_LAG: f64 = 0.05;
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(PROTECTED_LEAST);
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_protected_least(crate::cpu::CpuModel::PentiumII.auto_least());
+        let (mut behind, mut lost, mut drawn, mut wall) = (0.0f64, 0.0, 0.0, 0.0);
+        let mut drawn_by = 0.0;
+        let (mut times, mut speeds, mut kept) = (Vec::new(), Vec::new(), (0.0, 0.0));
+        while wall < seconds {
+            let speed = bus.clock.cycles_per_ms() as f64;
+            let backlog = behind.max(FRAME);
+            let span = if backlog > MAX_LAG {
+                lost += backlog - FRAME;
+                FRAME
+            } else {
+                backlog
+            };
+            drawn += speed * 0.0009 * span;
+            let frames = drawn.floor();
+            drawn -= frames;
+            // The instructions' time, with the frames among them, each of
+            // which waits for the one before it to be drawn.
+            let part = span * speed / 60_000.0 / (frames + 1.0);
+            let mut at = wall;
+            for _ in 0..frames as u32 {
+                at = (at + part).max(drawn_by);
+                drawn_by = at + 0.040;
+            }
+            let cost = at + part - wall;
+            behind = cost;
+            wall += cost.max(FRAME);
+            if wall >= 30.0 {
+                times.push(cost.max(FRAME) * 1e3);
+                speeds.push(speed as u32);
+                kept = (kept.0 + span, kept.1 + cost.max(FRAME));
+            }
+            bus.clock.icount += (span * 1e3 * speed) as u64;
+            bus.activity.swapped(frames as u64);
+            // The estimate reads what the host runs of the program's own
+            // instructions, give or take, without the drawing.
+            let (behind_ns, lost_ns) = ((behind * 1e9) as u64, (lost * 1e9) as u64);
+            let next = auto
+                .falling_behind(bus, behind_ns, lost_ns)
+                .or_else(|| auto.update(bus, true, 45_000, lost_ns));
+            if let Some(next) = next {
+                bus.set_cycles_per_ms(next);
+            }
+        }
+        (times, speeds, kept.0 / kept.1)
+    }
+
+    /// The speeds in turn, and for how many frames.
+    fn in_turn(speeds: &[u32]) -> Vec<(u32, usize)> {
+        let mut turns: Vec<(u32, usize)> = Vec::new();
+        for &speed in speeds {
+            match turns.last_mut() {
+                Some((at, frames)) if *at == speed => *frames += 1,
+                _ => turns.push((speed, 1)),
+            }
+        }
+        turns
+    }
+
+    #[test]
+    fn a_speed_the_host_falls_behind_at_costs_no_long_frame() {
+        // Judged by measurements alone, a step past what the host keeps up
+        // with ran until the pacer dropped the backlog, more than once, and
+        // a speed it fell behind at for one measurement in eight stayed:
+        // frames of 60 ms and more, twice the others (#856).
+        let (times, speeds, kept) = omikron_frames(150.0);
+        let turns = in_turn(&speeds);
+        let longest = times.iter().copied().fold(0.0, f64::max);
+        assert!(longest < 50.0, "{longest} ms: {turns:?}");
+        // Still as fast as the host keeps up with, most of the time.
+        let mean = speeds.iter().map(|&s| s as f64).sum::<f64>() / speeds.len() as f64;
+        assert!(mean >= 23_000.0, "{mean}: {turns:?}");
+        assert!(kept >= 0.99, "{kept} of real time: {turns:?}");
+    }
+
+    #[test]
+    fn a_jump_cut_short_climbs_back_to_a_step_under_where_it_fell_behind() {
+        // Delta Force after a state loads (#856): the first measurement
+        // takes the speed from 278,000 to the host's estimate, 610,000, a
+        // little more than the host keeps up with. Cut back to a step above
+        // 278,000, the search goes on to a step under 610,000 with its next
+        // measurement, where the host keeps up, rather than a step per
+        // `LAGGED_WINDOWS` from there.
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_protected_least(crate::cpu::CpuModel::PentiumII.auto_least());
+        let frames = |speed: u32| Measurement {
+            fps: Some(speed as f64 * 0.00005),
+            refresh: 60.0,
+            pace: 1.0,
+            ..STILL
+        };
+        let up = auto.decide(278_229, &frames(278_229), true, 609_961);
+        assert_eq!(up, 609_961);
+        bus.set_cycles_per_ms(up);
+        auto.trying = Some(278_229);
+        let behind = TRY_BEHIND_NS + 3_000_000;
+        for _ in 1..TRY_BEHIND_FRAMES {
+            assert_eq!(auto.falling_behind(bus, behind, 0), None);
+        }
+        let cut = auto.falling_behind(bus, behind, 0).unwrap();
+        assert_eq!(cut, (278_229.0 * FINE_STEP).round() as u32);
+        let next = auto.decide(cut, &frames(cut), true, 609_961);
+        let under = (609_961.0 / FINE_STEP).round() as u32;
+        assert!((under - 1..=under).contains(&next), "{next}");
     }
 
     #[test]
