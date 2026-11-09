@@ -3190,7 +3190,11 @@ pub(crate) mod tests {
     /// RUST_DOS_VOODOO_SAMPLES sets the samples a pixel, and with
     /// RUST_DOS_VOODOO_BARRIER=1 blending as the card does reads the
     /// buffer behind a texture barrier where the driver has one, rather
-    /// than a copy.
+    /// than a copy. RUST_DOS_VOODOO_FRAMES sets the frames (60) and
+    /// RUST_DOS_VOODOO_FRAME_INSNS the instructions between two of them
+    /// (1,600,000). After each frame it prints a hash of every colour
+    /// buffer and how many pixels of the picture differ from the software
+    /// rasterizer's.
     #[test]
     #[ignore = "requires a saved Glide scene and a desktop OpenGL context"]
     fn replay_saved_glide_scene() {
@@ -3198,6 +3202,7 @@ pub(crate) mod tests {
         use crate::cpu::Cpu;
         use crate::exec::{NoHook, run_batch};
         use crate::savestate::{machine, slots};
+        use std::hash::{Hash, Hasher};
         use std::{fs, path::PathBuf};
 
         let path = std::env::var_os("RUST_DOS_VOODOO_STATE").expect("RUST_DOS_VOODOO_STATE");
@@ -3238,9 +3243,14 @@ pub(crate) mod tests {
             encoder.set_depth(png::BitDepth::Eight);
             encoder.write_header().unwrap().write_image_data(rgb).unwrap();
         };
-        for frame in 0..60 {
+        let number = |name: &str, default: u64| {
+            std::env::var(name).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+        };
+        let frames = number("RUST_DOS_VOODOO_FRAMES", 60);
+        let instructions = number("RUST_DOS_VOODOO_FRAME_INSNS", 1_600_000);
+        for frame in 0..frames {
             if frame != 0 {
-                cpu.bus.start_batch(cpu.bus.clock.icount + 1_600_000);
+                cpu.bus.start_batch(cpu.bus.clock.icount + instructions);
                 run_batch(&mut cpu, &mut NoHook, false);
             }
             let card = cpu.bus.voodoo.as_mut().unwrap();
@@ -3250,41 +3260,91 @@ pub(crate) mod tests {
             }).collect();
             println!("frame {frame}, front {:?}, commands {}, fills {:?}", recording.front, recording.commands.len(), fills);
             renderer.run(&gl, recording);
-            if frame % 10 == 0 || frame == 59 {
-                let (w, h) = (card.fbi.width, card.fbi.height);
-                card.frame_buffer();
-                card.prepare_display();
-                let mut rgba = vec![0; (w * h * 4) as usize];
-                card.render(&mut rgba, w as usize);
-                let reference: Vec<_> = rgba.as_chunks::<4>().0.iter()
-                    .flat_map(|&[r, g, b, _]| [r, g, b]).collect();
-                save(&format!("glide-{frame}-software"), &reference, w, h);
-                let target = &renderer.targets[&renderer.front.unwrap()];
-                target.resolve(&gl, (w as i32, h as i32));
-                let mut rendered = vec![0; reference.len()];
-                // GL's lower row is the card's top row (the shader's convention).
+
+            // A hash of each colour buffer, resolved, so that two builds can
+            // be compared byte for byte, buffers not shown included.
+            let (bw, bh) = renderer.scaled();
+            let mut offsets: Vec<u32> = renderer.targets.keys().copied().collect();
+            offsets.sort_unstable();
+            let mut hashes = String::new();
+            for offs in offsets {
+                let target = &renderer.targets[&offs];
+                target.resolve(&gl, (bw, bh));
+                let mut pixels = vec![0u8; (bw * bh * 4) as usize];
+                // SAFETY: the context and framebuffer belong to this thread.
                 unsafe {
                     gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.fbo));
                     gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
-                    gl.read_pixels(0, 0, w as i32, h as i32, glow::RGB, glow::UNSIGNED_BYTE,
-                        glow::PixelPackData::Slice(Some(&mut rendered)));
-                    assert_eq!(gl.get_error(), glow::NO_ERROR);
+                    let out = glow::PixelPackData::Slice(Some(&mut pixels));
+                    gl.read_pixels(0, 0, bw, bh, glow::RGBA, glow::UNSIGNED_BYTE, out);
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                 }
-                // The target holds the colours before the gamma table, which the
-                // presenting pass applies; the software picture has it applied.
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                pixels.hash(&mut hasher);
+                hashes += &format!(" {offs:x}={:016x}", hasher.finish());
+            }
+            println!("frame {frame} targets:{hashes}");
+
+            // The picture: a Voodoo3's or a Banshee's composed (as the window
+            // takes it, through `composite`), a Voodoo Graphics' or a
+            // Voodoo2's front buffer through the gamma table.
+            let banshee = renderer.scanout.is_some();
+            let (w, h) = if banshee { card.picture_size() } else { (card.fbi.width, card.fbi.height) };
+            card.frame_buffer();
+            card.prepare_display();
+            let mut rgba = vec![0; (w * h * 4) as usize];
+            card.render(&mut rgba, w as usize);
+            let reference: Vec<_> = rgba.as_chunks::<4>().0.iter()
+                .flat_map(|&[r, g, b, _]| [r, g, b]).collect();
+            let fbo = if banshee {
+                let base = Frame::new(w, h);
+                match renderer.composite(&gl, &base, &base) {
+                    Some((_, size)) => {
+                        assert_eq!(size, (w, h));
+                        renderer.composite.as_ref().map(|(c, _)| c.fbo)
+                    }
+                    None => None,
+                }
+            } else {
+                renderer.front.map(|front| {
+                    let target = &renderer.targets[&front];
+                    target.resolve(&gl, (w as i32, h as i32));
+                    target.fbo
+                })
+            };
+            let Some(fbo) = fbo else {
+                println!("frame {frame}: nothing shown");
+                continue;
+            };
+            let mut rendered = vec![0; reference.len()];
+            // GL's lower row is the card's top row (the shader's convention).
+            // SAFETY: the context and framebuffer belong to this thread.
+            unsafe {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+                gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+                gl.read_pixels(0, 0, w as i32, h as i32, glow::RGB, glow::UNSIGNED_BYTE,
+                    glow::PixelPackData::Slice(Some(&mut rendered)));
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                assert_eq!(gl.get_error(), glow::NO_ERROR);
+            }
+            if !banshee {
+                // The buffer holds the colours before the gamma table, which
+                // the presenting pass applies; the software picture has it
+                // applied. The composed picture has it too.
                 let table = super::super::gamma_table(&renderer.clut);
                 for rgb in rendered.as_chunks_mut::<3>().0 {
                     *rgb = [table[rgb[0] as usize][0], table[rgb[1] as usize][1], table[rgb[2] as usize][2]];
                 }
-                save(&format!("glide-{frame}-opengl"), &rendered, w, h);
-                let pairs = || reference.as_chunks::<3>().0.iter().zip(rendered.as_chunks::<3>().0);
-                let far = |(a, b): &(&[u8; 3], &[u8; 3])| {
-                    a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 32)
-                };
-                let bad = pairs().filter(far).count();
-                let differ = pairs().filter(|(a, b)| a != b).count();
-                println!("frame {frame}: {differ} pixels differ, {bad} by more than 32");
             }
+            save(&format!("glide-{frame}-software"), &reference, w, h);
+            save(&format!("glide-{frame}-opengl"), &rendered, w, h);
+            let pairs = || reference.as_chunks::<3>().0.iter().zip(rendered.as_chunks::<3>().0);
+            let far = |(a, b): &(&[u8; 3], &[u8; 3])| {
+                a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 32)
+            };
+            let bad = pairs().filter(far).count();
+            let differ = pairs().filter(|(a, b)| a != b).count();
+            println!("frame {frame}: {differ} pixels differ, {bad} by more than 32");
         }
         renderer.destroy(&gl);
     }
