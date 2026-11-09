@@ -16,7 +16,7 @@
 //! ones.
 
 use super::dc::{self, Dc, OPAQUE};
-use super::surface::Surface;
+use super::surface::{Surface, Target};
 use super::{
     BS_HATCHED, BS_NULL, BS_SOLID, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE,
     PS_ALTERNATE, PS_DASH, PS_DASHDOT, PS_DASHDOTDOT, PS_DOT, PS_INSIDEFRAME, PS_NULL,
@@ -1460,6 +1460,92 @@ impl Rop {
     }
 }
 
+/// How long a blit takes on a period PC: a Pentium II 350 with a
+/// Voodoo3 under Windows 95, in 86Box, at 640x480 and 16 bits a pixel.
+/// Blits of a memory DC to a window: 1x1 79720 a second, 64x64 5660,
+/// 344x209 339, 640x480 90; that is about 12.5 us a call and 18 ns a
+/// byte written, 55 MB a second over the bus. Blits of a memory DC to
+/// another: 1x1 93287 a second, 344x209 3065, 640x480 744; about
+/// 10.7 us a call and 2.2 ns a byte. Programs that count their blits
+/// for a while to size their work (Chaos Overlords' start) count about
+/// what that PC did.
+const SCREEN_BLIT_NS: u64 = 12_500;
+const SCREEN_BYTE_PS: u64 = 18_000;
+const MEMORY_BLIT_NS: u64 = 10_700;
+const MEMORY_BYTE_PS: u64 = 2_200;
+
+/// The `cycles` (instructions a millisecond) at which the emulated CPU
+/// runs a game's code as fast as that Pentium II 350. A probe of a
+/// game-like inner loop (fixed-point vertices turned with a sine table,
+/// a perspective divide, a store, a float multiply every 8) ran 6770
+/// passes a second on the 86Box machine and 4784 in rust-dos at
+/// `cycles=100000`, 9565 at 200000 and 19128 at 400000: 141,500.
+/// Integer work alone gave 453,000, memory work 222,000 and FPU work
+/// 100,000.
+pub const PERIOD_CYCLES: u64 = 141_500;
+
+/// Let `ns` of a period PC's blit time pass. Above `PERIOD_CYCLES` the
+/// emulated CPU is faster than that PC, and its blits are as much
+/// faster, so a blit takes as many instructions' time as it did there:
+/// a game that draws a frame through GDI then spends the same share of
+/// its time on its blits as it did on that PC, instead of having a
+/// faster CPU wait as long as a slow one for them. At or below it the
+/// blit takes the period PC's time.
+///
+/// The bytes of a copy to the screen went over the bus, whose speed
+/// rose with later PCs (AGP, write combining) but not in step with the
+/// CPU's. Scaling them with the CPU too is a simplification, kept until
+/// a faster period machine is measured (#832).
+fn stall_period(cpu: &mut Cpu, ns: u64) {
+    let cycles = cpu.bus.clock.cycles_per_ms() as u64;
+    let ns = if cycles > PERIOD_CYCLES {
+        ns * PERIOD_CYCLES / cycles
+    } else {
+        ns
+    };
+    // The host does the blit in its own code meanwhile: its time is the
+    // host's work, as an instruction's is.
+    cpu.bus.clock.stall_offloaded(ns);
+}
+
+/// Let the emulated time pass that a blit of `pixels` pixels to
+/// `surface` takes. The built-in GDI's blits run outside the emulated
+/// CPU, so without this they take no time at all, and a loop that blits
+/// until a second has passed runs as many as the host can do. `by_card`
+/// is a blit on the screen that the card's blitter does, at hundreds of
+/// megabytes a second (a fill, or a copy within the screen): it takes
+/// the call's time only.
+pub fn take_blit_time(cpu: &mut Cpu, surface: &Surface, pixels: u64, by_card: bool) {
+    let (call_ns, byte_ps, bpp) = match surface.target {
+        Target::Screen if by_card => (SCREEN_BLIT_NS, 0, 0),
+        // The screen's surface is 32 bits a pixel whatever the mode's
+        // depth is: the bytes moved are the mode's.
+        Target::Screen => (
+            SCREEN_BLIT_NS,
+            SCREEN_BYTE_PS,
+            super::surface::screen_mode(cpu).bpp,
+        ),
+        Target::Bitmap(_) | Target::Memory => (MEMORY_BLIT_NS, MEMORY_BYTE_PS, surface.bpp),
+    };
+    let bytes = (pixels * bpp as u64).div_ceil(8);
+    stall_period(cpu, call_ns + bytes * byte_ps / 1000);
+}
+
+/// Let the emulated time pass that a blit to `dc` takes when it draws
+/// nothing: its rectangle is empty, or the clip region hides all of it
+/// (a window not shown yet, or covered). The call's time is the 1x1
+/// blit's, which is almost all GDI's checks and thunks; Windows goes
+/// through those before it finds nothing to draw, so a loop of such
+/// blits doesn't run as many as the host can do either.
+pub fn take_call_time(cpu: &mut Cpu, dc: &Dc) {
+    let call_ns = if dc.kind == dc::MEMORY {
+        MEMORY_BLIT_NS
+    } else {
+        SCREEN_BLIT_NS
+    };
+    stall_period(cpu, call_ns);
+}
+
 /// A blit to the device rectangle from (`x0`, `y0`) to (`x1`, `y1`) of
 /// `hdst` (mirrored where they run backwards) from `source`, whose
 /// rectangle is in its device coordinates.
@@ -1477,9 +1563,11 @@ pub fn blit_from(
     let ((left, right), (top, bottom)) = (span(x0, x1), span(y0, y1));
     let r = Rect::new(left, top, right, bottom);
     if r.is_empty() {
+        take_call_time(cpu, &ddc);
         return true;
     }
     let Some(mut c) = Canvas::open_columns(cpu, hdst, r) else {
+        take_call_time(cpu, &ddc);
         return true;
     };
     let map = c
@@ -1513,6 +1601,9 @@ pub fn blit_from(
     let (ox, oy) = c.origin;
     let rects = std::mem::take(&mut c.rects);
     let dst_rect = r.offset(ox, oy);
+    // The pixels it draws, for the time it takes: those of a source's
+    // band (SetDIBitsToDevice's scan lines) only.
+    let mut pixels = 0;
     // A blit whose source and destination have the same size and run
     // the same way (one mirrored on both sides included) reads the
     // source pixel at the destination's place moved by this.
@@ -1529,6 +1620,7 @@ pub fn blit_from(
             if area.is_empty() {
                 continue;
             }
+            pixels += area.pixels();
             values.resize((area.right - area.left) as usize, 0);
             for y in area.top..area.bottom {
                 src.surface.get_row(area.left + dx, y + dy, &mut values);
@@ -1551,6 +1643,7 @@ pub fn blit_from(
             }
             continue;
         }
+        pixels += area.pixels();
         for y in area.top..area.bottom {
             let sy = source.as_ref().map_or(0, |(src, (_, sy0, _, sy1))| {
                 scale(y - oy, y0, y1, *sy0, *sy1) + src.origin.1
@@ -1579,6 +1672,12 @@ pub fn blit_from(
     if let Some(t) = xlat {
         t.keep(cpu);
     }
+    // On the screen, a fill and a copy within it are the card's
+    // blitter's work.
+    let by_card = source
+        .as_ref()
+        .is_none_or(|(src, _)| src.surface.target == Target::Screen);
+    take_blit_time(cpu, &c.surface, pixels, by_card);
     c.drawn = dst_rect;
     c.close(cpu);
     true

@@ -216,7 +216,7 @@ const AC_SRC_ALPHA: u32 = 1;
 /// without an error.
 /// Source and destination may be the same DC, and may overlap. A
 /// SourceConstantAlpha of 0 changes nothing.
-fn alpha_blend(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(crate) fn alpha_blend(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[hdst, x, y, w, h, hsrc, xs, ys, ws, hs, func] = args else {
         unreachable!()
     };
@@ -252,10 +252,13 @@ fn alpha_blend(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(FALSE);
     }
     if sca == 0 {
+        // Nothing to draw, but the call goes through GDI all the same.
+        draw::take_call_time(cpu, &ddc);
         return Some(TRUE);
     }
     let r = device_rect(&ddc, x, y, w, h);
     let Some(mut c) = Canvas::open(cpu, hdst, Rect::new(r.0, r.1, r.2, r.3)) else {
+        draw::take_call_time(cpu, &ddc);
         return Some(TRUE);
     };
     let (ox, oy) = c.origin;
@@ -263,8 +266,10 @@ fn alpha_blend(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let area = Rect::new(r.0, r.1, r.2, r.3).offset(ox, oy);
     // A palette's nearest colors, which are a search.
     let mut nearest = std::collections::HashMap::new();
+    let mut pixels = 0;
     for clip in c.rects.clone() {
         let a = clip.intersect(&area);
+        pixels += a.pixels();
         for py in a.top..a.bottom {
             let sy = stretch(py - oy, (r.1, r.3), (sy0, sy1));
             for px in a.left..a.right {
@@ -282,6 +287,11 @@ fn alpha_blend(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         c.drew(a);
     }
+    // A copy's time: AlphaBlend reads the destination as well, which
+    // takes longer, but there is no measurement of how much. Within the
+    // screen too: Windows 98 SE's msimg32.dll blends on DIBs in user
+    // mode, as for TransparentBlt below.
+    draw::take_blit_time(cpu, &c.surface, pixels, false);
     c.close(cpu);
     Some(TRUE)
 }
@@ -298,7 +308,7 @@ fn alpha_blend(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// the surface or ends below it, are ERROR_INVALID_PARAMETER. A width or
 /// height of 0 or less, and a source rectangle past the surface's right
 /// edge, fail without an error.
-fn transparent_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+pub(crate) fn transparent_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[hdst, x, y, w, h, hsrc, xs, ys, ws, hs, transparent] = args else {
         unreachable!()
     };
@@ -329,6 +339,7 @@ fn transparent_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let r = device_rect(&ddc, x, y, w, h);
     let Some(mut c) = Canvas::open(cpu, hdst, Rect::new(r.0, r.1, r.2, r.3)) else {
+        draw::take_call_time(cpu, &ddc);
         return Some(TRUE);
     };
     // The DC's palette map, built once, and the translation table kept
@@ -343,8 +354,10 @@ fn transparent_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (ox, oy) = c.origin;
     let (sx0, sy0, sx1, sy1) = src.rect;
     let area = Rect::new(r.0, r.1, r.2, r.3).offset(ox, oy);
+    let mut pixels = 0;
     for clip in c.rects.clone() {
         let a = clip.intersect(&area);
+        pixels += a.pixels();
         for py in a.top..a.bottom {
             let sy = stretch(py - oy, (r.1, r.3), (sy0, sy1));
             for px in a.left..a.right {
@@ -360,6 +373,13 @@ fn transparent_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         c.drew(a);
     }
     xlat.keep(cpu);
+    // A copy's time from memory, within the screen too. Windows 98 SE's
+    // msimg32.dll calls no driver entry for a transparent copy, only
+    // GDI's ordinary calls (CreateDIBSection, GetDIBits, BitBlt,
+    // SetDIBitsToDevice), so it does the work on DIBs in user mode and
+    // the card's blitter doesn't. Reading the screen back takes longer
+    // still: this is a lower bound.
+    draw::take_blit_time(cpu, &c.surface, pixels, false);
     c.close(cpu);
     Some(TRUE)
 }

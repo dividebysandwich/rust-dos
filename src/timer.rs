@@ -54,6 +54,13 @@ const HOST_SAMPLE: Duration = Duration::from_millis(10);
 /// Instructions a frame has to run for a measurement of the host's speed
 /// to take it: fewer, and the frame's time is mostly not theirs.
 const SAMPLE_INSTRUCTIONS: u64 = 10_000;
+/// How much a frame's counts weigh in the busy share of the recent frames
+/// (`Pacer::end_cpu_frame`) against the next frame's: about half a second
+/// of frames at 60 a second carries most of it.
+const BUSY_DECAY: f64 = 0.97;
+/// The share of the recent frames' counts the processor halted from which
+/// GDI's blits no longer count as the host's work (`Pacer::end_cpu_frame`).
+const BLITS_UNTIL_HALTED: f64 = 0.5;
 /// How many times `SAMPLE_INSTRUCTIONS` a frame at the least speed `Max`
 /// and `Auto` go down to has room for (`Pacer::least_timed`). A frame
 /// doesn't run all of it: the guest halts or waits on a device for part
@@ -117,6 +124,13 @@ pub struct Clock {
     pub stalled: u64,
     /// Instruction counts skipped while the CPU waited for an interrupt.
     pub idle: u64,
+    /// Of `stalled`, the counts charged for work the emulator does in its
+    /// own code for the emulated machine (the built-in GDI's blits): the
+    /// host spends its time on it, as on instructions, so the host's speed
+    /// counts them as run: all of them while the recent frames halted
+    /// none of their counts, fewer the more they halted, and none from
+    /// `BLITS_UNTIL_HALTED` of them (`Pacer::end_cpu_frame`).
+    pub offloaded: u64,
     /// Of `idle`, the counts skipped while a disk service waited out the
     /// drive's time (`diskio::wait`): the program didn't ask for those.
     /// Only differences between two points count, so a save state leaves
@@ -154,6 +168,7 @@ impl Clock {
             deadline: u64::MAX,
             stalled: 0,
             idle: 0,
+            offloaded: 0,
             disk_wait: 0,
             batch_end: u64::MAX,
             cycles_per_ms: cycles_per_ms.clamp(MIN_CYCLES, MAX_CYCLES),
@@ -313,6 +328,15 @@ impl Clock {
         let n = self.stall_count(ns) * times;
         self.icount += n;
         self.stalled += n;
+    }
+
+    /// `stall` for `ns` nanoseconds of work done in the emulator's own code
+    /// (`offloaded`).
+    pub fn stall_offloaded(&mut self, ns: u64) {
+        let n = self.stall_count(ns);
+        self.icount += n;
+        self.stalled += n;
+        self.offloaded += n;
     }
 
     /// The instruction count `stall` adds for `ns` nanoseconds.
@@ -591,6 +615,15 @@ pub struct Pacer {
     /// The frames measured for the host's speed so far: the instructions
     /// they ran, the time those took and the rest of their work.
     sample: HostSample,
+    /// `Clock::offloaded`, `Clock::idle` and `Clock::icount` as the last
+    /// frame left them.
+    offloaded: u64,
+    idle: u64,
+    icount: u64,
+    /// The counts of the recent frames and those of them the processor
+    /// halted, each frame's weighing `BUSY_DECAY` times the next one's.
+    recent_ran: f64,
+    recent_idle: f64,
     /// The emulated time dropped behind the wall clock so far
     /// (`MAX_LAG`): whether the host keeps up with the speed, for `Auto`.
     /// And the emulated time the last frame ended at, and whether it ran
@@ -627,6 +660,11 @@ impl Pacer {
             protected: false,
             host: HostEstimate::default(),
             sample: HostSample::default(),
+            offloaded: 0,
+            idle: 0,
+            icount: 0,
+            recent_ran: 0.0,
+            recent_idle: 0.0,
             lost_ns: 0,
             last_ns: 0,
             ran: false,
@@ -733,6 +771,42 @@ impl Pacer {
         let watched = watched.min(exec);
         let (executed, exec, overhead) =
             (executed.saturating_sub(run), exec - watched, overhead + watched);
+        // The emulated time the built-in GDI's blits took (`Clock::offloaded`)
+        // is work the host did in `exec`, in its own code: it runs as many
+        // of those counts in that time as of instructions. Left out, the
+        // host would look as much slower as the program blits, and a speed
+        // it has the time for would never be tried: a game that draws its
+        // frames through GDI would leave the host idle the blits' share of
+        // the time, at a speed whose blits take longer than the host's.
+        //
+        // That holds for a program that keeps the processor busy: at a
+        // higher speed it draws more frames, and blits in the same share
+        // of its work. One that waits between its frames (a movie at its
+        // own pace) blits as often at any speed and has time to spare at
+        // the speed it runs, so the estimate doesn't hold it back, and its
+        // blits say nothing of what a higher speed would bring, which is
+        // instructions. Counted in full, the blits of Chaos Overlords'
+        // movie, halted 90 % of the time, took the estimate to 2.5 times
+        // the speed the host runs the game's next work at, and `Auto` went
+        // there when that work began. The blits count in full while the
+        // recent frames (about half a second's, as a single frame's would
+        // give a movie's frame that decodes and blits) halted none of
+        // their counts, not at all once they halted `BLITS_UNTIL_HALTED`
+        // of them, and in proportion between.
+        let clock = &cpu.bus.clock;
+        let offloaded = clock.offloaded.saturating_sub(self.offloaded);
+        let ran = clock.icount.saturating_sub(self.icount);
+        let idle = clock.idle.saturating_sub(self.idle).min(ran);
+        (self.offloaded, self.idle, self.icount) = (clock.offloaded, clock.idle, clock.icount);
+        self.recent_ran = self.recent_ran * BUSY_DECAY + ran as f64;
+        self.recent_idle = self.recent_idle * BUSY_DECAY + idle as f64;
+        let halted = if self.recent_ran > 0.0 {
+            self.recent_idle / self.recent_ran
+        } else {
+            1.0
+        };
+        let share = (1.0 - halted / BLITS_UNTIL_HALTED).clamp(0.0, 1.0);
+        let executed = executed + (offloaded as f64 * share) as u64;
         let next = self.end_frame(&cpu.bus, cpu.pm_latched, executed, exec, overhead);
         cpu.os_idles = self.auto.idles();
         // What a device may go back to in the middle of the next frame
@@ -1266,12 +1340,98 @@ impl Pit2 {
 
 crate::state_fields!(Pit0 { mode, reload, pending_reload, counting, stopped, armed, period_start, next_tc });
 crate::state_fields!(Pit2 { mode, reload, pending, gate, start, from, held, access, latched } skip { count_due });
-crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns } skip { tsc, disk_wait });
+crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns } skip { tsc, offloaded, disk_wait });
 crate::state_fields!(Tsc { base, icount, hz });
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The host estimate `Auto` keeps to, after `frames` of `executed`
+    /// instructions, `offloaded` counts of GDI's blits and `halted` counts
+    /// the processor waited, each 8 ms of the host's time, run `times`.
+    fn estimate_of(frames: &[(u64, u64, u64)], times: usize) -> f64 {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let mut pacer = Pacer::new(CpuSpeed::Auto(3000), None, Instant::now());
+        for &(executed, offloaded, halted) in frames.iter().cycle().take(frames.len() * times) {
+            let cycles = cpu.bus.clock.cycles_per_ms() as u64;
+            cpu.bus
+                .clock
+                .stall_offloaded(offloaded * 1_000_000 / cycles);
+            cpu.bus.clock.icount += executed + halted;
+            cpu.bus.clock.idle += halted;
+            let ms = Duration::from_millis;
+            pacer.end_cpu_frame(&mut cpu, executed, ms(8), Duration::ZERO);
+        }
+        pacer.host.max.unwrap()
+    }
+
+    fn host_estimate(executed: u64, offloaded: u64, halted: u64) -> f64 {
+        estimate_of(&[(executed, offloaded, halted)], 4)
+    }
+
+    /// A blit's emulated time is work the host did, in its own code, in
+    /// the frame's time: a host that runs half the instructions and blits
+    /// the rest in the same time keeps up with the same speed, where
+    /// leaving the blits out would halve it.
+    #[test]
+    fn the_hosts_speed_counts_blits_as_work() {
+        let all = host_estimate(200_000, 0, 0);
+        let half = host_estimate(100_000, 0, 0);
+        let blitting = host_estimate(100_000, 100_000, 0);
+        assert!((half / all - 0.5).abs() < 0.01, "{half} against {all}");
+        assert!(
+            (blitting / all - 1.0).abs() < 0.01,
+            "{blitting} against {all}"
+        );
+    }
+
+    /// A program that waits between its frames blits as often at any
+    /// speed: its blits count less the more it halts, and not at all from
+    /// `BLITS_UNTIL_HALTED`, where it gets the estimate of its
+    /// instructions.
+    #[test]
+    fn a_waiting_programs_blits_count_as_its_busy_share() {
+        let all = host_estimate(200_000, 0, 0);
+        let half = host_estimate(100_000, 0, 0);
+        // A quarter of the counts halted: half the blits.
+        let quarter_halted = host_estimate(100_000, 100_000, 200_000 / 3);
+        let waiting = host_estimate(100_000, 100_000, 200_000);
+        let expected = (100_000.0 + 100_000.0 * 0.5) / 200_000.0;
+        assert!(
+            (quarter_halted / all - expected).abs() < 0.02,
+            "{quarter_halted} against {all}"
+        );
+        assert!(
+            (waiting / half - 1.0).abs() < 0.01,
+            "{waiting} against {half}"
+        );
+    }
+
+    /// A movie's frame that decodes and blits, among frames that wait for
+    /// the next: the share halted is the recent frames', so its blits
+    /// don't count.
+    #[test]
+    fn a_movies_blitting_frame_counts_in_the_movies_busy_share() {
+        let waiting = (20_000, 0, 1_000_000);
+        let frames = |blits| {
+            [
+                waiting,
+                waiting,
+                waiting,
+                waiting,
+                waiting,
+                (100_000, blits, 0),
+            ]
+        };
+        let plain = estimate_of(&frames(0), 10);
+        let movie = estimate_of(&frames(100_000), 10);
+        // Counted in full for its own frame, the blits would add half.
+        assert!(
+            (movie / plain - 1.0).abs() < 0.01,
+            "{movie} against {plain}"
+        );
+    }
 
     #[test]
     fn the_host_estimate_falls_fast_when_the_host_cannot_run_the_speed() {
