@@ -4215,9 +4215,10 @@ pub(crate) mod tests {
     /// triangles share blends with what that sample holds, as each pixel
     /// does on the card: the resolved picture is the software
     /// rasterizer's, where the edge's samples would otherwise blend with
-    /// the pixel's average, which holds the other triangle's blend (as
-    /// they do with RUST_DOS_GL_NO_PER_SAMPLE=1, or where the driver has
-    /// no GL_ARB_sample_shading).
+    /// the pixel's average, which holds the other triangle's blend. Where
+    /// the renderer can't blend samples on their own (a driver without
+    /// GL_ARB_sample_shading, or RUST_DOS_GL_NO_PER_SAMPLE=1), it says so
+    /// and skips the counts above 1, which it can't draw right.
     #[test]
     #[ignore = "requires a desktop OpenGL context"]
     fn blended_edges_with_samples_match_the_software_rasterizer() {
@@ -4226,11 +4227,15 @@ pub(crate) mod tests {
         let gl = &t.gl;
         // SAFETY: the context is current on this thread.
         let most = unsafe { gl.get_parameter_i32(glow::MAX_SAMPLES) } as u32;
-        let renderer = VoodooGl::new(gl, Glsl::Gl150, 1, 4, 1).unwrap();
-        let blends_samples = renderer.blends_samples();
-        renderer.destroy(gl);
         let (dither, subtract) = (1 << 8, 1 << 19);
         for samples in [1, 4, 8].into_iter().filter(|&n| n <= most) {
+            let renderer = VoodooGl::new(gl, Glsl::Gl150, 1, samples, 1).unwrap();
+            let blends_samples = renderer.blends_samples();
+            renderer.destroy(gl);
+            if samples > 1 && !blends_samples {
+                println!("{samples} samples skipped: this renderer blends pixels, not samples");
+                continue;
+            }
             for (fbz, alpha, scale) in [
                 (dither | subtract, 96, 1),
                 (dither, 200, 1),
@@ -4241,7 +4246,7 @@ pub(crate) mod tests {
                 assert_eq!(
                     differences(&software, &opengl, scale as usize),
                     (0, vec![]),
-                    "{samples} samples (per sample: {blends_samples}), \
+                    "{samples} samples, \
                      fbzMode {fbz:X}h, alpha {alpha}, {scale}x"
                 );
             }
