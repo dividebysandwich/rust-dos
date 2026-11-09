@@ -83,6 +83,7 @@ fn router(state: AppState) -> Router {
         .route("/api/status", get(status))
         .route("/api/stats", get(stats))
         .route("/api/underruns", get(underruns))
+        .route("/api/frames", get(frames))
         .route("/api/profile", get(profile_get).post(profile_post))
         .route("/api/screenshot", get(screenshot))
         .route("/api/screen/text", get(screen_text))
@@ -793,6 +794,18 @@ async fn stats(State(s): State<AppState>) -> ApiResult {
 
 async fn underruns(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::Underruns, DEFAULT_TIMEOUT).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FramesQuery {
+    /// The count an earlier answer reached: only the frames after it.
+    after: Option<u64>,
+}
+
+async fn frames(State(s): State<AppState>, Query(q): Query<FramesQuery>) -> ApiResult {
+    let after = q.after.unwrap_or(0);
+    s.call_json(Cmd::Frames { after }, DEFAULT_TIMEOUT).await
 }
 
 #[derive(Deserialize)]
@@ -2176,6 +2189,9 @@ STATUS / SCREEN
                                            checks), dry_checks, and the last 32 with the time since
                                            the last pump, the queue then, the speed, and that time
                                            by cpu, video, present, wait and other
+  GET  /api/frames                         ?after=N: the host's frames after the first N, of the last
+                                           1024: count (the next N), first, ms (each one's wall time)
+                                           and end_ms (the emulated time at its end)
   POST /api/profile                        {"enabled":true,"hz":2000,"timer":"sleep"|"spin","duration_ms":N}
                                            starts a profile (again, if one runs): a thread samples where
                                            the emulation thread's host time goes, by zone and guest

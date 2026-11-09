@@ -79,6 +79,7 @@ impl DebugHub {
             }
             Cmd::Stats => Reply::Json(self.stats_json(cpu)),
             Cmd::Underruns => Reply::Json(super::run::underruns_json(cpu)),
+            Cmd::Frames { after } => Reply::Json(super::run::frames_json(cpu, after)),
             Cmd::ProfileControl(c) => self.profile_control(cpu, c),
             Cmd::ProfileStatus => Reply::Json(self.profile_status(cpu)),
             Cmd::ProfileGet { query, format } => self.profile_report(cpu, &query, format),

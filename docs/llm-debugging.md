@@ -1452,6 +1452,13 @@ address mapped to when it was set.
   nearest-rank percentiles `p50_ms`, `p90_ms` and `p99_ms`. Use a release
   build and a CPU-bound scene, such as the Stunts intro, when comparing
   emulator changes.
+- **Every frame's time with `/api/frames`.** For the frames of a whole
+  run, such as how many took over 50 ms, ask `/api/frames?after=N` at
+  least once every 1024 frames, each time with the `count` the answer
+  before gave as `N`. It gives the frames after the first `N` of them,
+  `ms` the wall time of each and `end_ms` the emulated time at its end;
+  `first` is the number of the first one given, more than `N` if the
+  ring dropped frames before they were asked for.
 - **Coarse timestamps.** Trace times are sampled once per frame (about
   16 ms). Use `icount` for exact ordering.
 - **Ring buffer size.** The trace ring holds 1,000,000 instructions by

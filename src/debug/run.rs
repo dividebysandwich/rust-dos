@@ -71,6 +71,28 @@ pub(super) fn underruns_json(cpu: &Cpu) -> Value {
     })
 }
 
+/// `/api/frames`: the host's frames after the first `after`, from one start
+/// of the frame loop to the next, as far back as `FRAME_WINDOW` goes.
+/// `count` is the frames so far, the `after` that asks for the ones after
+/// these; `first` is the number of the first given, more than `after` where
+/// the ring dropped some. `ms` is each one's wall time and `end_ms` the
+/// emulated time at its end.
+pub(super) fn frames_json(cpu: &Cpu, after: u64) -> Value {
+    let host = &cpu.bus.host_frames;
+    let (first, frames) = host.since(after);
+    let ms: Vec<f64> = frames.iter().map(|&(wall, _)| millis(wall)).collect();
+    let end_ms: Vec<f64> = frames
+        .iter()
+        .map(|&(_, end)| (end as f64 / 1e4).round() / 100.0)
+        .collect();
+    json!({
+        "count": host.frame_count(),
+        "first": first,
+        "ms": ms,
+        "end_ms": end_ms,
+    })
+}
+
 impl DebugHub {
     // ----- per-frame hooks ------------------------------------------------
 

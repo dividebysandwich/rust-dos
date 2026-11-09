@@ -1166,6 +1166,12 @@ fn underruns_and_frame_times_are_told_in_ms() {
     assert_eq!(times["longest_ms"], 32.0);
     assert_eq!(times["p50_ms"], 16.0);
     assert_eq!(times["p99_ms"], 32.0);
+
+    let frames = reply(&mut cpu, &mut hub, Cmd::Frames { after: 1 }).unwrap();
+    assert_eq!(frames["count"], 2);
+    assert_eq!(frames["first"], 1);
+    assert_eq!(frames["ms"], serde_json::json!([32.0]));
+    assert_eq!(frames["end_ms"], serde_json::json!([0.0]));
 }
 
 // ----- the journal --------------------------------------------------------
