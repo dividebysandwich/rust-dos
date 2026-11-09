@@ -363,6 +363,24 @@ mod tests {
     }
 
     #[test]
+    fn a_write_of_the_desktop_start_is_a_flip() {
+        use crate::voodoo::banshee::{VGA_INIT0, VID_DESKTOP_START_ADDR, VID_PROC_CFG};
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.configure_voodoo(Some(Board::Voodoo3));
+        let bus = &mut cpu.bus;
+        bus.voodoo_write_32(VGA_INIT0, 0x0000_1140);
+        bus.voodoo_write_32(VID_PROC_CFG, 0x0904_0081);
+        assert!(bus.banshee().unwrap().extended());
+        // A guest driver's page flips: through BAR0, then the I/O BAR.
+        let flips = bus.activity.flips;
+        bus.clock.icount += 10_000;
+        bus.voodoo_write_32(VID_DESKTOP_START_ADDR, 0x10_0000);
+        bus.clock.icount += 10_000;
+        bus.banshee_port_write_wide(VID_DESKTOP_START_ADDR, 0, 4);
+        assert_eq!(bus.activity.flips, flips + 2);
+    }
+
+    #[test]
     fn a_service_for_a_dos_box_in_a_window_keeps_the_desktop() {
         use crate::video::echo::Display;
         use crate::voodoo::banshee::{VGA_INIT0, VID_PROC_CFG};

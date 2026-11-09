@@ -288,7 +288,16 @@ impl Bus {
         let now = self.voodoo_now();
         let Some(v) = &mut self.voodoo else { return };
         let effect = v.write(offset, value, mask, now);
+        let banshee = v.banshee.is_some();
         self.voodoo_effect(effect);
+        // A Banshee's desktop start, its init register in BAR0 (and in
+        // the I/O BAR, which comes here): a guest driver's page flip.
+        if banshee
+            && offset < 0x8_0000
+            && offset & 0xFC == crate::voodoo::banshee::VID_DESKTOP_START_ADDR
+        {
+            self.note_display_start();
+        }
     }
 
     /// Texture data put into a Banshee's or Voodoo3's memory from byte
