@@ -19,6 +19,15 @@
 // buffer being drawn into, behind a texture barrier, or where there is no
 // barrier or the buffer has samples, a copy VoodooGl makes before it draws.
 //
+// With PER_SAMPLE defined, u_dst is a copy of the buffer's samples, and a
+// draw that blends runs once for each sample, u_sample: the fragment
+// writes only that sample (gl_SampleMask, from GL_ARB_sample_shading) and
+// blends with that sample of the copy, so each sample blends with what it
+// holds, as each pixel does on the card. The shader still runs once a
+// pixel, with the inputs and the depth of the pixel's centre, as in the
+// draws that don't blend; reading gl_SampleID would run it at each
+// sample's place instead. A u_sample below 0 writes every sample.
+//
 // The texture units pick their levels of detail as the card does, in
 // perspective from each pixel's footprint (the triangle's gradients,
 // v_dx and v_dy, with S/W, T/W and W at the pixel), and without it the
@@ -95,7 +104,12 @@ uniform ivec3 u_tdetail1;
 // of 255, 2 with the alpha planes' alpha (fbzMode bit 18 and an
 // auxiliary buffer to hold them).
 uniform int u_card_blend;
+#ifdef PER_SAMPLE
+uniform sampler2DMS u_dst;
+uniform int u_sample;
+#else
 uniform sampler2D u_dst;
+#endif
 
 bool bit(int v, int n) {
     return ((v >> n) & 1) != 0;
@@ -553,7 +567,12 @@ ivec3 fog(ivec3 c, int itera, ivec2 pixel) {
 // u_dst: its 5-6-5 bits, less the dither with fbzMode bit 19, and its
 // alpha from the alpha planes or 255 (u_card_blend).
 ivec4 cardBlend(ivec4 c, ivec3 prefog, ivec2 pixel) {
-    ivec4 dst = ivec4(round(texelFetch(u_dst, ivec2(gl_FragCoord.xy), 0) * 255.0));
+#ifdef PER_SAMPLE
+    vec4 under = texelFetch(u_dst, ivec2(gl_FragCoord.xy), max(u_sample, 0));
+#else
+    vec4 under = texelFetch(u_dst, ivec2(gl_FragCoord.xy), 0);
+#endif
+    ivec4 dst = ivec4(round(under * 255.0));
     ivec3 d = dst.rgb & ivec3(0xF8, 0xFC, 0xF8);
     int da = u_card_blend == 2 ? dst.a : 0xFF;
     if (bit(u_fbz, 19) && dithers()) {
@@ -609,6 +628,9 @@ ivec4 cardBlend(ivec4 c, ivec3 prefog, ivec2 pixel) {
 }
 
 void main() {
+#ifdef PER_SAMPLE
+    gl_SampleMask[0] = u_sample < 0 ? -1 : 1 << u_sample;
+#endif
     ivec4 iter = ivec4(clampedColor(v_color.r), clampedColor(v_color.g), clampedColor(v_color.b), clampedColor(v_color.a));
 
     // The texture units, TMU 1 first, whose output TMU 0 combines with.

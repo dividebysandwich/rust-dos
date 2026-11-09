@@ -1925,7 +1925,7 @@ fn gpu_blits_leave_the_memory_as_software_does() {
 fn gpu_blits_in_small_textures_leave_the_memory_as_software_does() {
     gpu_blits_within(rust_dos::voodoo::gl::Limits {
         max_texture_size: Some(256),
-        no_blit: false,
+        ..Default::default()
     });
 }
 
@@ -1942,8 +1942,8 @@ fn without_the_blit_program_blits_stay_on_the_cpu() {
 
     let (_sdl, _window, _context, gl, glsl) = gl_context("no blit program");
     let limits = Limits {
-        max_texture_size: None,
         no_blit: true,
+        ..Default::default()
     };
     let renderer = VoodooGl::with_limits(&gl, glsl, 1, 1, 1, limits).unwrap();
     assert!(renderer.banshee_problem().is_none());
