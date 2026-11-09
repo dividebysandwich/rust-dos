@@ -690,8 +690,9 @@ pub struct VoodooGl {
     /// With samples, the triangle program that blends each sample with
     /// what that sample holds (`PER_SAMPLE` in gl/triangle.frag), for the
     /// draws that blend as the card does. None without samples, or where
-    /// the driver has no GL_ARB_sample_shading: those draws then blend
-    /// every sample of a pixel with the pixel's resolved colour.
+    /// the driver has no GL_ARB_sample_shading or no multisample texture
+    /// with the buffer's samples to copy them into: those draws then
+    /// blend every sample of a pixel with the pixel's resolved colour.
     per_sample: Option<Program<Triangle>>,
     pixels: Program<Quad>,
     depth_program: Program<Quad>,
@@ -789,37 +790,63 @@ impl VoodooGl {
         ];
         let triangle: Program<Triangle> =
             compile(gl, glsl, TRIANGLE_VERT, TRIANGLE_FRAG, &attributes)?;
-        // SAFETY: see `VoodooGl`.
-        let most = unsafe { gl.get_parameter_i32(glow::MAX_SAMPLES) };
-        let samples = samples.clamp(1, most.max(1) as u32);
-        let per_sample = if samples > 1 && !limits.no_per_sample {
-            let defines = "#extension GL_ARB_sample_shading : require\n#define PER_SAMPLE\n";
-            let fragment = format!("{defines}{TRIANGLE_FRAG}");
-            match compile::<Triangle>(gl, glsl, TRIANGLE_VERT, &fragment, &attributes) {
-                Ok(program) => Some(program),
-                Err(e) => {
-                    eprintln!("[VOODOO] blending pixels, not samples, with voodoo_msaa: {e}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
         let fill_program: Program<FillQuad> = compile(gl, glsl, QUAD_VERT, FILL_FRAG, &[])?;
         let pixels: Program<Quad> = compile(gl, glsl, QUAD_VERT, PIXELS_FRAG, &[])?;
         let depth_program: Program<Quad> = compile(gl, glsl, QUAD_VERT, DEPTH_FRAG, &[])?;
         let clut_program: Program<Quad> = compile(gl, glsl, QUAD_VERT, CLUT_FRAG, &[])?;
         let copy_program: Program<CopyQuad> = compile(gl, glsl, QUAD_VERT, COPY_FRAG, &[])?;
+        // SAFETY: see `VoodooGl`.
+        let most = unsafe { gl.get_parameter_i32(glow::MAX_SAMPLES) };
+        let samples = samples.clamp(1, most.max(1) as u32);
+        let per_sample = if samples > 1 && !limits.no_per_sample {
+            // The program reads the copy as a sampler2DMS (GLSL 1.50) and
+            // writes gl_SampleMask (GL_ARB_sample_shading). The copy is a
+            // multisample texture, which may allow fewer samples than a
+            // renderbuffer. Without one of them the draws blend with the
+            // pixels' resolved colours, as they do without the program.
+            // The limit is asked only of a context with GLSL 1.50 (OpenGL
+            // 3.2), as an older one has no such parameter and would queue
+            // an error.
+            let sample_shading = gl.supported_extensions().contains("GL_ARB_sample_shading");
+            let missing = if glsl != Glsl::Gl150 {
+                Some("needs GLSL 1.50".to_string())
+            } else if !sample_shading {
+                Some("no GL_ARB_sample_shading".to_string())
+            } else {
+                // SAFETY: see `VoodooGl`.
+                let most = unsafe { gl.get_parameter_i32(glow::MAX_COLOR_TEXTURE_SAMPLES) };
+                (most < samples as i32).then(|| format!("textures hold at most {most} samples"))
+            };
+            let program = match missing {
+                Some(reason) => Err(reason),
+                None => {
+                    let defines =
+                        "#extension GL_ARB_sample_shading : require\n#define PER_SAMPLE\n";
+                    let fragment = format!("{defines}{TRIANGLE_FRAG}");
+                    compile::<Triangle>(gl, glsl, TRIANGLE_VERT, &fragment, &attributes)
+                }
+            };
+            program
+                .inspect_err(|e| {
+                    eprintln!("[VOODOO] blending pixels, not samples, with voodoo_msaa: {e}")
+                })
+                .ok()
+        } else {
+            None
+        };
         let banshee = BansheeGl::new(gl, glsl, limits);
         // SAFETY: see `VoodooGl`.
         unsafe {
-            for (program, samplers) in [
-                (triangle.program, &[("u_tex0", 1), ("u_tex1", 2), ("u_dst", 3)][..]),
+            let triangle_samplers = &[("u_tex0", 1), ("u_tex1", 2), ("u_dst", 3)][..];
+            let programs = [
+                (triangle.program, triangle_samplers),
                 (pixels.program, &[("u_src", 0)][..]),
                 (depth_program.program, &[("u_src", 0)][..]),
                 (clut_program.program, &[("u_src", 0), ("u_lut", 1)][..]),
                 (copy_program.program, &[("u_src", 0)][..]),
-            ] {
+            ];
+            let per_sample_program = per_sample.as_ref().map(|p| (p.program, triangle_samplers));
+            for (program, samplers) in programs.into_iter().chain(per_sample_program) {
                 gl.use_program(Some(program));
                 for &(name, unit) in samplers {
                     gl.uniform_1_i32(gl.get_uniform_location(program, name).as_ref(), unit);
@@ -827,9 +854,6 @@ impl VoodooGl {
             }
             if let Some(p) = &per_sample {
                 gl.use_program(Some(p.program));
-                for (name, unit) in [("u_tex0", 1), ("u_tex1", 2), ("u_dst", 3)] {
-                    gl.uniform_1_i32(gl.get_uniform_location(p.program, name).as_ref(), unit);
-                }
                 // Every sample, until a draw picks one.
                 p.uniforms.u_sample.set(gl, -1);
             }
@@ -1695,7 +1719,7 @@ impl VoodooGl {
         // blends with its own value: a pixel on an edge has samples of the
         // triangles on both sides, and blending them all with the pixel's
         // average would blend a triangle's samples with the other's.
-        let card_blend = self.dither
+        let mut card_blend = self.dither
             && s.alpha_mode & (1 << 4) != 0
             && s.fbz_mode & (1 << 8) != 0
             && s.fbz_mode & (1 << 9) != 0;
@@ -1708,14 +1732,13 @@ impl VoodooGl {
         // A new copy has none of the buffer yet. Only a draw that reads
         // the copy makes one: one that doesn't, or one behind the barrier
         // (where there is no copy), leaves `unread` following.
-        let mut card_blend = card_blend;
         if card_blend && barrier.is_none() {
             let mut made = blend_copy_ready(&mut self.blend_copy, gl, size, copy_samples);
             if made.is_none() && copy_samples > 1 {
-                // OpenGL has no copy of the samples (its sample count
-                // isn't the buffer's): blend pixels, as without the
-                // program.
-                eprintln!("[VOODOO] no copy of {copy_samples} samples; blending pixels instead");
+                // OpenGL has no copy of the samples (`blend_copy_ready`
+                // said why): blend pixels, as without the program, from
+                // now on.
+                eprintln!("[VOODOO] blending pixels, not samples, with voodoo_msaa");
                 if let Some(p) = self.per_sample.take() {
                     // SAFETY: see `VoodooGl`.
                     unsafe { gl.delete_program(p.program) };
@@ -2458,6 +2481,19 @@ fn blend_copy_ready(
         } else {
             target(gl, size, 1, None)
         };
+        if let Err(e) = &new {
+            eprintln!("[VOODOO] no copy of the buffer to blend with: {e}");
+            // A failed allocation leaves its error queued, where the next
+            // check of the context's errors (xBRZ's allocation, for one)
+            // would take it for its own. A lost context may keep
+            // reporting, so the reads stop after a few.
+            // SAFETY: see `VoodooGl`.
+            for _ in 0..8 {
+                if unsafe { gl.get_error() } == glow::NO_ERROR {
+                    break;
+                }
+            }
+        }
         *copy = Some((new.ok(), key));
     }
     copy.as_ref().and_then(|(t, _)| t.as_ref()).map(|_| made)

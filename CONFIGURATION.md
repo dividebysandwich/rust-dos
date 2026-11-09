@@ -2850,16 +2850,24 @@ barrier (OpenGL 4.5, `GL_ARB_texture_barrier` or
 `GL_NV_texture_barrier`) the shader reads them from the buffer it draws
 into, behind a barrier. Otherwise, and with `voodoo_msaa`, they are
 copied out of the buffer before the triangle is drawn, and the shader
-reads them from the copy, which with `voodoo_msaa` holds each pixel's
-samples averaged. At `voodoo_scale=1` such a triangle comes out as the
-software rasterizer draws it too. Triangles of one draw that overlap go
-after a barrier or over a copy each, so each blends with what the one
-before drew. The texture units' dithered level of detail
-(textureMode bit 4) follows the setting as well. Frame buffer writes and
-the Voodoo2's blitter show what the card's memory holds, dithered or not,
-whatever the setting. The Voodoo2's and Voodoo3's video output filter,
-which partly smooths the pattern on the card's own output, isn't
-modelled: with the setting on, the pattern shows as the card writes it.
+reads them from the copy. With `voodoo_msaa` the copy keeps every
+sample, and the triangle is drawn once for each sample, which blends
+with what that sample holds, so two blended triangles that share an
+edge each blend with their own samples along it. That needs
+`GL_ARB_sample_shading` and multisample textures with as many samples
+as `voodoo_msaa`; without them each sample blends with its pixel's
+samples averaged, which leaves a dark line along such edges, and
+stderr says `blending pixels, not samples`. Drawing a blended triangle
+once a sample takes more of the GPU's time the more samples there are.
+At `voodoo_scale=1` such a triangle comes out as the software
+rasterizer draws it too. Triangles of one draw that overlap go after a
+barrier or over a copy each, so each blends with what the one before
+drew. The texture units' dithered level of detail (textureMode bit 4)
+follows the setting as well. Frame buffer writes and the Voodoo2's
+blitter show what the card's memory holds, dithered or not, whatever
+the setting. The Voodoo2's and Voodoo3's video output filter, which
+partly smooths the pattern on the card's own output, isn't modelled:
+with the setting on, the pattern shows as the card writes it.
 
 The dithering costs a few more instructions a pixel in the shader, and
 nothing on the host's CPU. On an Intel UHD Graphics 770 at the default
