@@ -304,7 +304,32 @@ pub fn ci_fmod(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     ci_binary(cpu, |x, y| x % y)
 }
 
-/// _ftol(): ST(0) popped, truncated to a 64-bit integer in EDX:EAX.
+/// _ftol(): ST(0) popped, truncated to a 64-bit integer in EDX:EAX, as
+/// Windows 98 SE's MSVCRT.DLL has it. FISTP stores the integer indefinite,
+/// 8000000000000000h, for a NaN, an infinity or a value out of range.
+/// Programs call it for every float they turn into an integer, so it is
+/// code the recompiler translates with theirs (`Conv::Code`).
+pub const FTOL: &[u8] = &[
+    0x55, //                   push ebp
+    0x8B, 0xEC, //             mov ebp, esp
+    0x83, 0xC4, 0xF4, //       add esp, -0Ch
+    0x9B, 0xD9, 0x7D, 0xFE, // fstcw [ebp-2]
+    0x9B, //                   wait
+    0x66, 0x8B, 0x45, 0xFE, // mov ax, [ebp-2]
+    0x80, 0xCC, 0x0C, //       or ah, 0Ch (round toward zero)
+    0x66, 0x89, 0x45, 0xFC, // mov [ebp-4], ax
+    0xD9, 0x6D, 0xFC, //       fldcw [ebp-4]
+    0xDF, 0x7D, 0xF4, //       fistp qword [ebp-0Ch]
+    0xD9, 0x6D, 0xFE, //       fldcw [ebp-2]
+    0x8B, 0x45, 0xF4, //       mov eax, [ebp-0Ch]
+    0x8B, 0x55, 0xF8, //       mov edx, [ebp-8]
+    0xC9, //                   leave
+    0xC3, //                   ret
+];
+
+/// _ftol for a state saved when it was a trap, whose memory still has
+/// that stub (`FTOL` is the function now): ST(0) popped, truncated to a
+/// 64-bit integer in EDX:EAX.
 pub fn ftol(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let x = cpu.fpu_get_f64(0);
     cpu.fpu_drop();

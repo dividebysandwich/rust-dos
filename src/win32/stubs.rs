@@ -13,6 +13,12 @@
 //! A function's id is its DLL's place in `DLLS` and its own in the DLL's
 //! table (`id`). Saved states keep the stubs in memory, so tables are only
 //! added to at their ends.
+//!
+//! A few functions are x86 code instead (`Conv::Code`), as Windows has
+//! them: the code goes after the stubs and vtables, the export points at
+//! it, and the function's stub jumps to it. Called many times a frame, a
+//! trap leaves translated code for the interpreter on every call, where
+//! code of the DLL's own is translated with the program's.
 
 use super::TRAP;
 use crate::cpu::Cpu;
@@ -27,6 +33,12 @@ pub enum Conv {
     /// No return: the stub jumps back to its trap, which runs again (the
     /// idle loop).
     Loop,
+    /// The function is this x86 code, which returns to its caller itself.
+    /// The DLL's code section has it after the stubs and vtables, its
+    /// export points at it, and its stub jumps to it. The `handler` runs
+    /// only in a state saved when the function was a trap, whose memory
+    /// still has that stub.
+    Code(&'static [u8]),
 }
 
 /// A function's Rust side: the arguments as the program passed them;
@@ -212,10 +224,37 @@ pub fn stub_address(dll: usize, api: usize) -> u32 {
 /// Variables start at multiples of this in the data section.
 const VAR_ALIGN: u32 = 8;
 
-/// Bytes the stubs of the DLL `dll` take, and the vtables after them.
-fn code_size(dll: &Dll) -> u32 {
+/// Bytes the stubs of the DLL `dll` take, and the vtables after them:
+/// where the functions given as code start in the code section.
+fn stubs_size(dll: &Dll) -> u32 {
     let methods: usize = dll.vtables.iter().map(|v| v.methods.len()).sum();
     dll.apis.len() as u32 * STUB + 4 * methods as u32
+}
+
+/// The code of each function of `dll` given as code (`Conv::Code`): its
+/// place in `apis`, its offset in the code section, and the code.
+fn functions_as_code(dll: &Dll) -> impl Iterator<Item = (usize, u32, &'static [u8])> + '_ {
+    let mut at = stubs_size(dll);
+    dll.apis
+        .iter()
+        .enumerate()
+        .filter_map(move |(i, api)| match api.conv {
+            Conv::Code(code) => {
+                let offset = at;
+                at += code.len() as u32;
+                Some((i, offset, code))
+            }
+            _ => None,
+        })
+}
+
+/// Bytes the code section of the DLL `dll` takes: the stubs, the vtables
+/// and the functions given as code.
+fn code_size(dll: &Dll) -> u32 {
+    let code: u32 = functions_as_code(dll)
+        .map(|(_, _, code)| code.len() as u32)
+        .sum();
+    stubs_size(dll) + code
 }
 
 /// Where the data section of the DLL `dll` starts: the page after its
@@ -278,7 +317,9 @@ pub fn init_process(bus: &mut crate::bus::Bus, process: &mut super::Process) -> 
 }
 
 /// The stub of the function with id `id`, which takes `args` arguments
-/// the way `conv` says.
+/// the way `conv` says. For a function given as code (`Conv::Code`) this
+/// is the trap and `RET` it had before, which `builder` doesn't write: its
+/// stub there is a jump to its code (`jump`).
 pub fn stub(id: u16, args: u8, conv: Conv) -> [u8; STUB as usize] {
     let [lo, hi] = id.to_le_bytes();
     let mut code = [0x90; STUB as usize];
@@ -292,6 +333,15 @@ pub fn stub(id: u16, args: u8, conv: Conv) -> [u8; STUB as usize] {
     } else {
         code[4] = 0xC3;
     }
+    code
+}
+
+/// The stub of a function given as code: a JMP from the stub at RVA
+/// `from` to its code at RVA `to`.
+fn jump(from: u32, to: u32) -> [u8; STUB as usize] {
+    let mut code = [0x90; STUB as usize];
+    code[0] = 0xE9;
+    code[1..5].copy_from_slice(&to.wrapping_sub(from + 5).to_le_bytes());
     code
 }
 
@@ -320,14 +370,28 @@ const LANG_ENGLISH_US: u16 = 0x0409;
 fn builder(index: usize, version: super::version::WindowsVersion) -> pe::Builder {
     let dll = DLLS[index];
     let mut b = pe::Builder::dll(dll.base, dll.name);
+    // Where each function's export points: its stub, or its code.
+    let mut entries: Vec<u32> = (0..dll.apis.len() as u32)
+        .map(|i| CODE_RVA + i * STUB)
+        .collect();
+    for (i, offset, _) in functions_as_code(dll) {
+        entries[i] = CODE_RVA + offset;
+    }
     let mut code: Vec<u8> = dll
         .apis
         .iter()
         .enumerate()
-        .flat_map(|(i, api)| stub(id(index, i), api.args, api.conv))
+        .flat_map(|(i, api)| match api.conv {
+            Conv::Code(_) => jump(CODE_RVA + i as u32 * STUB, entries[i]),
+            conv => stub(id(index, i), api.args, conv),
+        })
         .collect();
     for method in vtable_methods(dll) {
         code.extend_from_slice(&stub_address(index, method).to_le_bytes());
+    }
+    for (_, offset, function) in functions_as_code(dll) {
+        debug_assert_eq!(code.len() as u32, offset);
+        code.extend_from_slice(function);
     }
     let rva = b.section(
         ".text",
@@ -337,7 +401,7 @@ fn builder(index: usize, version: super::version::WindowsVersion) -> pe::Builder
     debug_assert_eq!(rva, CODE_RVA);
     for (i, api) in dll.apis.iter().enumerate() {
         if api.ordinal != 0 && super::version::exports(version, dll.name, api.name) {
-            b.export(Some(api.name), api.ordinal, rva + i as u32 * STUB);
+            b.export(Some(api.name), api.ordinal, entries[i]);
         }
     }
     if !dll.vars.is_empty() {
@@ -541,6 +605,34 @@ mod tests {
             let ((_, end, a), (start, _, b)) = (pair[0], pair[1]);
             assert!(end <= start, "{a} ends at {end:08X}, past {b}'s base {start:08X}");
         }
+    }
+
+    /// MSVCRT's _ftol is code of its own (`Conv::Code`): its export points
+    /// at the code, after the stubs, and its stub jumps there.
+    #[test]
+    fn a_function_given_as_code_is_exported_and_its_stub_jumps_to_it() {
+        let msvcrt = find_dll("MSVCRT.DLL").unwrap();
+        let dll = DLLS[msvcrt];
+        let index = dll.apis.iter().position(|a| a.name == "_ftol").unwrap();
+        let Conv::Code(code) = dll.apis[index].conv else {
+            panic!("_ftol is a trap");
+        };
+        let image = image(msvcrt, super::super::version::WindowsVersion::Win98Se);
+        let export = image.exports().unwrap().unwrap();
+        let pe::ExportTarget::Rva(rva) = export.by_name("_ftol").unwrap().target else {
+            panic!("_ftol is forwarded");
+        };
+        assert!(
+            rva >= CODE_RVA + stubs_size(dll),
+            "{rva:X} is among the stubs"
+        );
+        assert_eq!(&image.data[rva as usize..][..code.len()], code);
+        let stub = (stub_address(msvcrt, index) - dll.base) as usize;
+        assert_eq!(image.data[stub], 0xE9, "a JMP");
+        let rel = u32::from_le_bytes(image.data[stub + 1..stub + 5].try_into().unwrap());
+        assert_eq!(stub as u32 + 5 + rel, rva);
+        // The variables start after it.
+        assert!(data_rva(dll) >= rva + code.len() as u32);
     }
 
     #[test]

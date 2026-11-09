@@ -269,6 +269,215 @@ fn a_program_runs_on_the_dynamic_recompiler() {
     assert_eq!(cpu.errorlevel as usize, HELLO.len());
 }
 
+/// Doubles for `_ftol`: zeros, fractions of both signs, values past 32
+/// bits, the largest double under 2^63 and -2^63, then what is out of
+/// range, denormals, infinities and NaNs.
+const FTOL_DOUBLES: &[f64] = &[
+    0.0,
+    -0.0,
+    0.5,
+    -0.5,
+    0.999_999,
+    -0.999_999,
+    1.0,
+    -1.0,
+    1.5,
+    -1.5,
+    2.5,
+    -2.5,
+    2.999_999_9,
+    -2.999_999_9,
+    123_456_789.987,
+    -123_456_789.987,
+    2_147_483_647.75,
+    -2_147_483_648.5,
+    1_099_511_627_776.75,
+    -4_503_599_627_370_495.5,
+    9_223_372_036_854_774_784.0,
+    -9_223_372_036_854_775_808.0,
+    9_223_372_036_854_775_808.0,
+    -9_223_372_036_854_777_856.0,
+    1e300,
+    -1e300,
+    5e-324,
+    -5e-324,
+    f64::INFINITY,
+    f64::NEG_INFINITY,
+    f64::NAN,
+    -f64::NAN,
+];
+
+/// 80-bit values for `_ftol` (sign and exponent, mantissa) whose 80 bits
+/// hold more than a double, and what FISTP stores of them truncated:
+/// 3 - 2^-62 and its negative, which a double would round to 3, 2^63 - 1,
+/// which a double would round past the range, and -(2^63 + 1).
+const FTOL_EXTENDED: &[(u16, u64, i64)] = &[
+    (0x4000, 0xBFFF_FFFF_FFFF_FFFF, 2),
+    (0xC000, 0xBFFF_FFFF_FFFF_FFFF, -2),
+    (0x403D, 0xFFFF_FFFF_FFFF_FFFF, i64::MAX),
+    (0xC03E, 0x8000_0000_0000_0001, i64::MIN),
+];
+
+/// What `_ftol` gives for `x`: truncated toward zero, or the integer
+/// indefinite for a NaN, an infinity or a value out of range.
+fn ftol_of(x: f64) -> i64 {
+    if x.is_nan() || x.abs() >= 9_223_372_036_854_775_808.0 {
+        i64::MIN
+    } else {
+        x.trunc() as i64
+    }
+}
+
+/// A program that calls MSVCRT's `_ftol` on each of `FTOL_DOUBLES` and
+/// `FTOL_EXTENDED`, 200 times over, with the control word `control`, and
+/// ends with 0 if every call returned what `ftol_of` says in EDX:EAX, left
+/// the control word as it was and popped ST(0). Otherwise it ends with the
+/// case's number plus 1 for a wrong result, 101 for a changed control word
+/// and 201 for a register left on the stack.
+fn ftol_program(control: u16) -> Vec<u8> {
+    const DOUBLES: u32 = 0x000;
+    const EXPECTED: u32 = 0x100;
+    const EXTENDED: u32 = 0x200;
+    const EXTENDED_EXPECTED: u32 = 0x280;
+    const CONTROL: u32 = 0x300;
+    const STORED: u32 = 0x304;
+    let mut data = vec![0u8; 0x310];
+    let put = |data: &mut Vec<u8>, at: u32, bytes: &[u8]| {
+        data[at as usize..at as usize + bytes.len()].copy_from_slice(bytes);
+    };
+    for (i, &x) in FTOL_DOUBLES.iter().enumerate() {
+        put(&mut data, DOUBLES + 8 * i as u32, &x.to_le_bytes());
+        put(
+            &mut data,
+            EXPECTED + 8 * i as u32,
+            &ftol_of(x).to_le_bytes(),
+        );
+    }
+    for (i, &(exponent, mantissa, n)) in FTOL_EXTENDED.iter().enumerate() {
+        put(&mut data, EXTENDED + 16 * i as u32, &mantissa.to_le_bytes());
+        put(
+            &mut data,
+            EXTENDED + 16 * i as u32 + 8,
+            &exponent.to_le_bytes(),
+        );
+        put(
+            &mut data,
+            EXTENDED_EXPECTED + 8 * i as u32,
+            &n.to_le_bytes(),
+        );
+    }
+    put(&mut data, CONTROL, &control.to_le_bytes());
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["ExitProcess"]),
+        ("MSVCRT.DLL", &["_ftol"]),
+    ];
+    let doubles = FTOL_DOUBLES.len() as u32;
+    let extended = FTOL_EXTENDED.len() as u32;
+    program(BASE, false, imports, &data, |a, l| {
+        let mut again = a.create_label();
+        let mut double = a.create_label();
+        let mut wide = a.create_label();
+        let mut check = a.create_label();
+        let mut wrong = a.create_label();
+        let mut changed = a.create_label();
+        let mut left = a.create_label();
+        let mut exit = a.create_label();
+        a.fninit()?;
+        a.fldcw(word_ptr(l.at(CONTROL)))?;
+        a.mov(edi, 200u32)?;
+        a.set_label(&mut again)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut double)?;
+        a.fld(qword_ptr(ebx * 8 + l.at(DOUBLES) as i32))?;
+        a.call(l.import(1))?;
+        a.mov(ecx, ebx)?;
+        a.cmp(eax, dword_ptr(ebx * 8 + l.at(EXPECTED) as i32))?;
+        a.jne(wrong)?;
+        a.cmp(edx, dword_ptr(ebx * 8 + (l.at(EXPECTED) + 4) as i32))?;
+        a.jne(wrong)?;
+        a.call(check)?;
+        a.inc(ebx)?;
+        a.cmp(ebx, doubles)?;
+        a.jb(double)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut wide)?;
+        a.mov(esi, ebx)?;
+        a.shl(esi, 4)?;
+        a.fld(tword_ptr(esi + l.at(EXTENDED) as i32))?;
+        a.call(l.import(1))?;
+        a.lea(ecx, dword_ptr(ebx + doubles as i32))?;
+        a.cmp(eax, dword_ptr(ebx * 8 + l.at(EXTENDED_EXPECTED) as i32))?;
+        a.jne(wrong)?;
+        a.cmp(
+            edx,
+            dword_ptr(ebx * 8 + (l.at(EXTENDED_EXPECTED) + 4) as i32),
+        )?;
+        a.jne(wrong)?;
+        a.call(check)?;
+        a.inc(ebx)?;
+        a.cmp(ebx, extended)?;
+        a.jb(wide)?;
+        a.dec(edi)?;
+        a.jnz(again)?;
+        a.xor(eax, eax)?;
+        a.jmp(exit)?;
+        // The control word as the caller had it, and the stack empty.
+        a.set_label(&mut check)?;
+        a.fnstcw(word_ptr(l.at(STORED)))?;
+        a.mov(ax, word_ptr(l.at(STORED)))?;
+        a.cmp(ax, word_ptr(l.at(CONTROL)))?;
+        a.jne(changed)?;
+        a.fnstsw(ax)?;
+        a.test(ax, 0x3800)?;
+        a.jnz(left)?;
+        a.ret()?;
+        a.set_label(&mut wrong)?;
+        a.lea(eax, dword_ptr(ecx + 1))?;
+        a.jmp(exit)?;
+        a.set_label(&mut changed)?;
+        a.lea(eax, dword_ptr(ecx + 101))?;
+        a.jmp(exit)?;
+        a.set_label(&mut left)?;
+        a.lea(eax, dword_ptr(ecx + 201))?;
+        a.set_label(&mut exit)?;
+        a.push(eax)?;
+        a.call(l.import(0))?;
+        a.int3()
+    })
+}
+
+/// MSVCRT's `_ftol` is Windows 98 SE's code, which the recompiler
+/// translates with the program's: on both cores it truncates toward zero,
+/// gives 8000000000000000h for what has no 64-bit integer, truncates the
+/// 80 bits of a register that holds more than a double, and leaves the
+/// caller's control word as it was, whatever it rounds to.
+#[test]
+fn ftol_truncates_and_keeps_the_control_word_on_both_cores() {
+    let calls = 200 * (FTOL_DOUBLES.len() + FTOL_EXTENDED.len()) as u64;
+    for control in [0x027F, 0x037F, 0x0F7F, 0x077F, 0x0B7F, 0x007F] {
+        for core in [CoreMode::Normal, CoreMode::Dynamic] {
+            let mut cpu = machine(
+                &format!("ftol_{control:04x}_{core:?}"),
+                ftol_program(control),
+            );
+            cpu.core = core;
+            let what = format!("control word {control:04X}h, {core:?}");
+            assert!(run_to_exit(&mut cpu, 400), "{what}: {}", printed(&cpu));
+            assert_eq!(cpu.errorlevel, 0, "{what}: case {} failed", cpu.errorlevel);
+            if core == CoreMode::Dynamic && rust_dos::dynrec::AVAILABLE {
+                // Each call runs 19 to 21 instructions of the loop and the
+                // 16 of _ftol, which the import reaches without the stub.
+                // Over 30 translated a call means _ftol ran translated.
+                let translated = cpu.dynrec.counts().executed;
+                assert!(
+                    translated > calls * 30,
+                    "{what}: {translated} translated for {calls} calls"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn a_program_is_relocated_when_its_base_is_taken() {
     // 90000000h is in the shared arena, where no program goes.

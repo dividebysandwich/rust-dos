@@ -144,6 +144,16 @@ that know the trap kinds each know this one: `is_service_trap`,
 service checks, the profiler's `Win32` zone and the debugger's trap
 names.
 
+A trap leaves translated code for the interpreter on every call. A
+function that programs call many times a frame and that Windows has as
+a few instructions can instead be that x86 code (`Conv::Code`): it goes
+in the code section after the stubs and vtables, its export points at
+it, and its stub jumps to it, so the recompiler translates it with the
+program's code. MSVCRT's `_ftol` is Windows 98 SE's: it sets the
+control word to chop, stores the integer with `FISTP` and puts the
+control word back. Its Rust function stays for states saved when it was
+a trap, whose memory still has that stub.
+
 Because the DLLs are real images, `LoadLibrary`, `GetProcAddress`,
 `GetModuleHandle`, programs that walk export tables, data exports and
 the debugger all work on them like on any DLL. retrowin32, which solves
