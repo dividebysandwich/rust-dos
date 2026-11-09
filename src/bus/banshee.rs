@@ -376,7 +376,13 @@ mod tests {
         bus.clock.icount += 10_000;
         bus.voodoo_write_32(VID_DESKTOP_START_ADDR, 0x10_0000);
         bus.clock.icount += 10_000;
-        bus.banshee_port_write_wide(VID_DESKTOP_START_ADDR, 0, 4);
+        bus.banshee_port_write_wide(VID_DESKTOP_START_ADDR, 0x20_0000, 4);
+        assert_eq!(bus.activity.flips, flips + 2);
+        // With the video processor off, as a mode set has it, the start
+        // shows nothing: no flip.
+        bus.voodoo_write_32(VID_PROC_CFG, 0x0904_0080);
+        bus.clock.icount += 10_000;
+        bus.voodoo_write_32(VID_DESKTOP_START_ADDR, 0);
         assert_eq!(bus.activity.flips, flips + 2);
     }
 

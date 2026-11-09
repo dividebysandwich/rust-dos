@@ -327,9 +327,9 @@ pub fn drew_rects(cpu: &mut Cpu, at: u32, pitch: u32, bytes: u32, rects: &[Rect]
 /// frame: VBE's display start, or the card's vidDesktopStartAddr.
 pub fn show(cpu: &mut Cpu, offset: u32) {
     if is_card(cpu) {
+        // The write is a flip for `cycles=auto` (`Bus::voodoo_write`).
         cpu.bus
             .voodoo_write_32(card::VID_DESKTOP_START_ADDR, offset);
-        cpu.bus.note_display_start();
         return;
     }
     cpu.bus.vbe.start = offset;

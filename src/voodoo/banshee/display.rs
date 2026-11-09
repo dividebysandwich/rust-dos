@@ -30,16 +30,24 @@ struct Frame {
 }
 
 impl Frame {
-    /// The bytes of a surface as tall as the desktop with `stride`: its
-    /// stride times its rows, or its rows of tiles, each counted as the
-    /// surface itself is laid out.
-    fn span(&self, stride: u32, tiled: bool) -> u64 {
-        let rows = if tiled {
-            self.height.div_ceil(32)
+    /// The bytes of a surface of `rows` rows with `stride`: its stride
+    /// times its rows, or its rows of tiles, each counted as the surface
+    /// itself is laid out.
+    fn span(stride: u32, tiled: bool, rows: usize) -> u64 {
+        let rows = if tiled { rows.div_ceil(32) } else { rows };
+        stride.max(1) as u64 * rows.max(1) as u64
+    }
+
+    /// The memory the desktop is shown from: its first byte, and the
+    /// bytes of the rows `render_desktop` reads, half of the lines in
+    /// half mode, which shows each row twice.
+    fn desktop(&self) -> (u32, u64) {
+        let rows = if self.half {
+            self.height.div_ceil(2)
         } else {
             self.height
         };
-        stride.max(1) as u64 * rows.max(1) as u64
+        (self.start, Self::span(self.stride, self.tiled, rows))
     }
 }
 
@@ -125,20 +133,19 @@ impl Banshee {
     /// The memory the desktop is shown from: its first byte, and the
     /// bytes its rows (or rows of tiles) take from there.
     pub fn desktop_memory(&self) -> (u32, u64) {
-        let f = self.frame();
-        (f.start, f.span(f.stride, f.tiled))
+        self.frame().desktop()
     }
 
     /// Whether any of the `len` bytes from byte `addr` on (with None, a
     /// surface as big as the desktop) is in memory the picture shows.
     pub fn shows_bytes(&self, addr: u32, len: Option<u64>) -> bool {
         let f = self.frame();
-        let desktop = (f.start, f.span(f.stride, f.tiled));
+        let desktop = f.desktop();
         let overlay = (f.cfg & VIDPROC_OVERLAY_ENABLE != 0).then(|| {
             let tiled = f.cfg & VIDPROC_OVERLAY_TILED != 0;
             let stride = (self.reg(VID_DESKTOP_OVERLAY_STRIDE) >> 16) & 0x7FFF;
             let stride = if tiled { stride * TILE } else { stride };
-            (self.overlay_addr, f.span(stride, tiled))
+            (self.overlay_addr, Frame::span(stride, tiled, f.height))
         });
         // The surface drawn, as big as the bigger of the two.
         let drawn = len.unwrap_or_else(|| overlay.map_or(desktop.1, |o| o.1.max(desktop.1)));
@@ -600,6 +607,18 @@ mod tests {
             VIDPROC_ENABLE | 1 << 18 | VIDPROC_OVERLAY_ENABLE,
         );
         assert!(b.shows(0x40_0000));
+    }
+
+    #[test]
+    fn a_half_mode_desktop_is_half_its_lines() {
+        // 768 lines of 2048 bytes, each row shown twice: 384 rows, and the
+        // memory after them (a back buffer) isn't the desktop's.
+        let mut b = card_1024x768(1 << 18 | VIDPROC_HALF_MODE);
+        b.ext_write(VID_DESKTOP_START_ADDR, 0x10_0000);
+        b.ext_write(VID_DESKTOP_OVERLAY_STRIDE, 2048);
+        assert_eq!(b.desktop_memory(), (0x10_0000, 384 * 2048));
+        assert!(b.shows_bytes(0x10_0000 + 383 * 2048, Some(2048)));
+        assert!(!b.shows_bytes(0x10_0000 + 384 * 2048, Some(2048)));
     }
 
     #[test]
