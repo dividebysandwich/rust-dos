@@ -230,7 +230,9 @@ physical page (`Engine::pokes`). Once a byte has been counted twice
   loops, and Riverworld the factors of its transforms into IMULs), the
   instruction reads the immediate from RAM instead
   (`translate::live_immediate`, `Uop::LoadCode`), and never leaves the
-  block for it.
+  block for it. An MMX shift by a constant whose count is poked (Delta
+  Force's terrain loop) reads the count the same way and shifts by it as
+  by a register (`translate::live_shift`).
 - The block's own checks leave the watched bytes out, so it stays valid
   while only they change. That holds for its own stores too: a block that
   pokes the immediates of its later instructions just ahead of running

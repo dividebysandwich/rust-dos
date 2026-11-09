@@ -3050,6 +3050,84 @@ fn an_imul_factor_a_block_pokes_just_ahead_of_itself_is_read_where_it_is() {
 }
 
 #[test]
+fn mmx_shift_counts_poked_before_each_loop_are_read_where_they_are() {
+    // Delta Force's terrain loop: the counts of its PSLLDs poked before
+    // each run of it, here with a PSRAW too and counts past the lanes'
+    // width. The shifts read them where they are, without leaving the
+    // block at them.
+    let f = CODE + 0x1000;
+    let top = CODE + 0x40;
+    let (mut a, mut b) = twins(|rig| {
+        rig.cpu.model = rust_dos::cpu::CpuModel::PentiumII;
+        rig.load(f, &asm32(f, |a| {
+            let mut again = a.create_label();
+            a.mov(ecx, 8u32)?; // B9 imm32
+            a.set_label(&mut again)?;
+            a.movq(mm0, mm2)?; // 0F 6F C2, at + 5
+            a.pslld(mm0, 3)?; // 0F 72 F0 imm8, at + 8
+            a.movq(mm3, mm2)?; // 0F 6F DA, at + 12
+            a.psraw(mm3, 1)?; // 0F 71 E3 imm8, at + 15
+            a.paddd(mm1, mm0)?;
+            a.paddw(mm1, mm3)?;
+            a.dec(ecx)?;
+            a.jnz(again)?;
+            a.ret()
+        }));
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.pxor(mm1, mm1)?;
+            a.mov(ebx, 200u32)?;
+            a.jmp(top as u64)
+        }));
+        rig.load(top, &asm32(top, |a| {
+            a.imul_3(eax, ebx, 0x8765_4321u32 as i32)?;
+            a.movd(mm2, eax)?;
+            a.punpckldq(mm2, mm2)?;
+            a.mov(eax, ebx)?;
+            a.and(eax, 0x1F)?;
+            a.mov(byte_ptr(f + 11), al)?;
+            a.mov(eax, ebx)?;
+            a.and(eax, 0x13)?;
+            a.mov(byte_ptr(f + 18), al)?;
+            a.call(f as u64)?;
+            a.dec(ebx)?;
+            a.jnz(top as u64)?;
+            a.movd(eax, mm1)?;
+            a.psrlq(mm1, 32)?;
+            a.movd(edx, mm1)?;
+            a.emms()?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    // MM1's lanes as the program adds them up.
+    let (mut lo, mut hi) = (0u32, 0u32);
+    for n in (1..=200u32).rev() {
+        let v = n.wrapping_mul(0x8765_4321);
+        let d = v << (n & 0x1F);
+        let w = |x: u16| {
+            let sh = (n & 0x13).min(15);
+            ((x as i16) >> sh) as u16
+        };
+        let words = [w(v as u16), w((v >> 16) as u16)];
+        for _ in 0..8 {
+            let add = |acc: u32| {
+                let acc = acc.wrapping_add(d);
+                let l = (acc as u16).wrapping_add(words[0]);
+                let h = ((acc >> 16) as u16).wrapping_add(words[1]);
+                l as u32 | (h as u32) << 16
+            };
+            lo = add(lo);
+            hi = add(hi);
+        }
+    }
+    assert_eq!((b.cpu.eax(), b.cpu.edx()), (lo, hi));
+    if AVAILABLE {
+        assert!(stats.watched < 10, "left at the poked counts: {:?}", stats);
+        assert!(stats.blocks < 60, "translated again and again: {:?}", stats);
+    }
+}
+
+#[test]
 fn a_displacement_a_block_pokes_just_ahead_of_itself_is_run_as_it_is_now() {
     // The same with the address of an ADD's operand: the block leaves
     // before the ADD where its watched bytes changed, and the interpreter
