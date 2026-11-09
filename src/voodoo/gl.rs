@@ -1206,10 +1206,14 @@ impl VoodooGl {
         for command in commands {
             self.alpha.command(command);
             // Only triangles draw what `unread` can follow; textures
-            // aren't drawn into.
+            // aren't drawn into, and staged pixels are drawn by
+            // `flush_staging`, which forgets then.
             let drawn = matches!(
                 command,
-                Command::Draw(_) | Command::Texture(_) | Command::FreeTexture(_)
+                Command::Draw(_)
+                    | Command::Texture(_)
+                    | Command::FreeTexture(_)
+                    | Command::Pixels(_)
             );
             if !drawn {
                 self.unread.forget();
@@ -1522,7 +1526,10 @@ impl VoodooGl {
         let Some(staging) = self.staging.get_mut(&key) else { return };
         let Some([x0, x1, y0, y1]) = staging.dirty.take() else { return };
         let Some(fbo) = fbo else { return };
-        self.unread.forget();
+        // Depth writes leave the colours as they were.
+        if key.is_some() {
+            self.unread.forget();
+        }
         let program = if key.is_some() { &self.pixels } else { &self.depth_program };
         let (sw, sh) = ((self.width * scale) as i32, (self.height * scale) as i32);
         // SAFETY: see `VoodooGl`.
@@ -1643,8 +1650,11 @@ impl VoodooGl {
             && s.fbz_mode & (1 << 9) != 0;
         let single = target.samples.is_none();
         let barrier = self.texture_barrier.filter(|_| card_blend && single);
-        if barrier.is_none() && self.blend_copy.as_ref().is_none_or(|&(_, s)| s != size) {
-            // A new copy has none of the buffer yet.
+        // A new copy has none of the buffer yet. Only a draw that reads
+        // the copy makes one: one that doesn't, or one behind the barrier
+        // (where there is no copy), leaves `unread` following.
+        let new_copy = self.blend_copy.as_ref().is_none_or(|&(_, s)| s != size);
+        if card_blend && barrier.is_none() && new_copy {
             self.unread.forget();
         }
         let card_blend =
@@ -3501,7 +3511,8 @@ pub(crate) mod tests {
             [159.125, 220.25, 675.3125, 420.0625, 675.3125, 220.25],
             [671.4375, 418.5625, 600.0, 500.0, 700.0, 500.0],
         ];
-        assert_eq!(runs(&tip)[1].0, 3);
+        let first = Some(Catch::Bounds([159.125, 220.25, 675.3125, 420.0625]));
+        assert_eq!(runs(&tip), [(0, 3, None), (3, 3, first)]);
     }
 
     #[test]
@@ -3821,36 +3832,72 @@ pub(crate) mod tests {
     /// blend a rectangle of one colour with `alpha` (source alpha over its
     /// inverse) and fbzMode's `fbz` bits: two triangles of 128 by 32
     /// pixels at (96, 48), and two more over their right half, which blend
-    /// with them. With `split`, color0 (which they don't use) changes
-    /// between the two pairs, so each pair is a draw of its own.
-    fn draw_blended(bus: &mut crate::bus::Bus, fbz: u32, alpha: i32, ramp: bool, split: bool) {
+    /// with them. `between` says what goes between the two pairs.
+    fn draw_blended(
+        bus: &mut crate::bus::Bus,
+        fbz: u32,
+        alpha: i32,
+        ramp: bool,
+        between: Between,
+    ) {
         draw_scene(bus, 1 << 8, ramp);
         w(bus, 0x110, (1 << 9) | fbz);
-        w(bus, 0x10C, (1 << 4) | (1 << 8) | (5 << 12));
-        for (x0, x1) in [(96, 224), (160, 224)] {
-            if split {
-                w(bus, 0x144, x0 as u32);
+        let blend = (1 << 4) | (1 << 8) | (5 << 12);
+        w(bus, 0x10C, blend);
+        let colour = [201, 37, 90, alpha];
+        match between {
+            Between::Nothing => rectangle(bus, (96, 224), colour),
+            Between::Color0 => {
+                rectangle(bus, (96, 224), colour);
+                w(bus, 0x144, 160);
             }
-            let (y0, y1) = (48, 80);
-            for verts in [
-                [(x0, y0), (x1, y0), (x0, y1)],
-                [(x1, y0), (x1, y1), (x0, y1)],
-            ] {
-                let start = |v: i32| ((v << 12) | 0x800) as u32;
-                for (reg, v) in [(0x020, 201), (0x024, 37), (0x028, 90), (0x030, alpha)] {
-                    w(bus, reg, start(v));
-                }
-                for reg in [0x040, 0x044, 0x048, 0x050, 0x060, 0x064, 0x068, 0x070] {
-                    w(bus, reg, 0);
-                }
-                for (i, (x, y)) in verts.into_iter().enumerate() {
-                    w(bus, 0x008 + 8 * i as u32, (x * 16) as u32);
-                    w(bus, 0x00C + 8 * i as u32, (y * 16) as u32);
-                }
-                w(bus, 0x080, 0);
+            Between::Opaque => {
+                rectangle(bus, (96, 160), colour);
+                w(bus, 0x10C, 0);
+                rectangle(bus, (160, 224), [30, 180, 60, 255]);
+                w(bus, 0x10C, blend);
             }
         }
+        rectangle(bus, (160, 224), colour);
         w(bus, 0x10C, 0);
+    }
+
+    /// What `draw_blended` does between its two pairs of triangles.
+    #[derive(Clone, Copy, Debug)]
+    enum Between {
+        /// Nothing: the four triangles are one draw.
+        Nothing,
+        /// Change color0, which they don't use, so each pair is a draw
+        /// of its own.
+        Color0,
+        /// Draw the first pair over the left half only, then the second
+        /// pair's rectangle in another colour without blending: the
+        /// second pair goes over none of the first pair's pixels, only
+        /// over those of a draw that didn't read the buffer.
+        Opaque,
+    }
+
+    /// Two triangles from `x0` to `x1` and from row 48 to 80, of one
+    /// colour (red, green, blue and alpha).
+    fn rectangle(bus: &mut crate::bus::Bus, (x0, x1): (i32, i32), [r, g, b, a]: [i32; 4]) {
+        let (y0, y1) = (48, 80);
+        for verts in [
+            [(x0, y0), (x1, y0), (x0, y1)],
+            [(x1, y0), (x1, y1), (x0, y1)],
+        ] {
+            let start = |v: i32| ((v << 12) | 0x800) as u32;
+            for (reg, v) in [(0x020, r), (0x024, g), (0x028, b), (0x030, a)] {
+                w(bus, reg, start(v));
+            }
+            for reg in [0x040, 0x044, 0x048, 0x050, 0x060, 0x064, 0x068, 0x070] {
+                w(bus, reg, 0);
+            }
+            for (i, (x, y)) in verts.into_iter().enumerate() {
+                w(bus, 0x008 + 8 * i as u32, (x * 16) as u32);
+                w(bus, 0x00C + 8 * i as u32, (y * 16) as u32);
+            }
+            w(bus, 0x080, 0);
+        }
     }
 
     #[test]
@@ -3864,7 +3911,8 @@ pub(crate) mod tests {
         // each pixel is the software rasterizer's, over the ramp at 1x and
         // over one colour at 2x (where the ramp between the card's pixels
         // isn't the card's), through the texture barrier where the driver
-        // has one and through a copy.
+        // has one and through a copy. Blended draws after other draws
+        // into the buffer, blended or not, read what those drew.
         let barriers = [None].into_iter().chain(t.barrier.map(Some));
         for (barrier, (fbz, what)) in barriers.flat_map(|b| {
             [
@@ -3874,22 +3922,24 @@ pub(crate) mod tests {
             ]
             .map(|f| (b, f))
         }) {
-            for (alpha, scale, split) in [
-                (96, 1, false),
-                (200, 1, false),
-                (96, 2, false),
-                (200, 2, false),
-                (96, 1, true),
-                (200, 2, true),
+            for (alpha, scale, between) in [
+                (96, 1, Between::Nothing),
+                (200, 1, Between::Nothing),
+                (96, 2, Between::Nothing),
+                (200, 2, Between::Nothing),
+                (96, 1, Between::Color0),
+                (200, 2, Between::Color0),
+                (96, 1, Between::Opaque),
+                (200, 2, Between::Opaque),
             ] {
                 let draw = |bus: &mut crate::bus::Bus| {
-                    draw_blended(bus, fbz, alpha, scale == 1, split)
+                    draw_blended(bus, fbz, alpha, scale == 1, between)
                 };
                 let (software, opengl) = both_pictures_with(gl, draw, true, scale, barrier);
                 assert_eq!(
                     differences(&software, &opengl, scale as usize),
                     (0, vec![]),
-                    "{what}, alpha {alpha}, {scale}x, barrier {}, split {split}",
+                    "{what}, alpha {alpha}, {scale}x, barrier {}, {between:?}",
                     barrier.is_some()
                 );
             }
