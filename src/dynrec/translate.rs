@@ -1684,27 +1684,17 @@ fn live_shift(instr: &Instruction, phys: u32, watched: &[usize], u: &mut Vec<Uop
     if !u.iter().all(plain) {
         return false;
     }
-    let Some(site) = u.iter().position(shift_imm) else {
+    let Some((site, shift, a, b)) = u.iter().enumerate().find_map(|(k, uop)| match *uop {
+        Uop::VOp {
+            op: VOp::ShiftImm(shift, _),
+            a,
+            b,
+        } => Some((k, shift, a, b)),
+        _ => None,
+    }) else {
         return false;
     };
-    let Uop::VOp {
-        op: VOp::ShiftImm(shift, _),
-        a,
-        b,
-    } = u[site]
-    else {
-        unreachable!()
-    };
-    let op = match shift {
-        VShift::Psllw => VOp::Psllw,
-        VShift::Pslld => VOp::Pslld,
-        VShift::Psllq => VOp::Psllq,
-        VShift::Psrlw => VOp::Psrlw,
-        VShift::Psrld => VOp::Psrld,
-        VShift::Psrlq => VOp::Psrlq,
-        VShift::Psraw => VOp::Psraw,
-        VShift::Psrad => VOp::Psrad,
-    };
+    let op = shift.by_quadword();
     if u.iter()
         .any(|uop| matches!(*uop, Uop::VLoad { x, .. } | Uop::VSet { x, .. } if x == b))
     {
