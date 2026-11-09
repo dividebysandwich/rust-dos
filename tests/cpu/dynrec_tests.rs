@@ -3052,9 +3052,10 @@ fn an_imul_factor_a_block_pokes_just_ahead_of_itself_is_read_where_it_is() {
 #[test]
 fn mmx_shift_counts_poked_before_each_loop_are_read_where_they_are() {
     // Delta Force's terrain loop: the counts of its PSLLDs poked before
-    // each run of it, here with a PSRAW too and counts past the lanes'
-    // width. The shifts read them where they are, without leaving the
-    // block at them.
+    // each run of it, here with a PSRAW too and counts from 1 to 200
+    // (PSLLD) and 0 to 127 (PSRAW), most of them past the lanes' width
+    // and many past 63. The shifts read them where they are, without
+    // leaving the block at them.
     let f = CODE + 0x1000;
     let top = CODE + 0x40;
     let (mut a, mut b) = twins(|rig| {
@@ -3082,11 +3083,9 @@ fn mmx_shift_counts_poked_before_each_loop_are_read_where_they_are() {
             a.imul_3(eax, ebx, 0x8765_4321u32 as i32)?;
             a.movd(mm2, eax)?;
             a.punpckldq(mm2, mm2)?;
+            a.mov(byte_ptr(f + 11), bl)?;
             a.mov(eax, ebx)?;
-            a.and(eax, 0x1F)?;
-            a.mov(byte_ptr(f + 11), al)?;
-            a.mov(eax, ebx)?;
-            a.and(eax, 0x13)?;
+            a.xor(eax, 0x40)?;
             a.mov(byte_ptr(f + 18), al)?;
             a.call(f as u64)?;
             a.dec(ebx)?;
@@ -3103,9 +3102,9 @@ fn mmx_shift_counts_poked_before_each_loop_are_read_where_they_are() {
     let (mut lo, mut hi) = (0u32, 0u32);
     for n in (1..=200u32).rev() {
         let v = n.wrapping_mul(0x8765_4321);
-        let d = v << (n & 0x1F);
+        let d = if n < 32 { v << n } else { 0 };
         let w = |x: u16| {
-            let sh = (n & 0x13).min(15);
+            let sh = (n ^ 0x40).min(15);
             ((x as i16) >> sh) as u16
         };
         let words = [w(v as u16), w((v >> 16) as u16)];
