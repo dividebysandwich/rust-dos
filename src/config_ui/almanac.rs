@@ -265,13 +265,15 @@ impl ConfigUi {
             .program
             .as_ref()
             .map_or_else(Vec::new, |p| p.files.clone());
+        let platform = view.program.as_ref().and_then(|p| p.platform.clone());
         let rating = view.rating;
         view.note = Some((format!("Reporting to {}...", almanac::SITE), false));
         let (done, answer) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new()
             .name("almanac".to_string())
             .spawn(move || {
-                let result = almanac::report(&subject, &files, rating, &settings);
+                let result =
+                    almanac::report(&subject, &files, platform.as_deref(), rating, &settings);
                 let _ = done.send(Answer::Reported(result, name));
             });
         match spawned {

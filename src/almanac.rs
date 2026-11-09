@@ -27,7 +27,7 @@ pub const API_VARIABLE: &str = "RUST_DOS_ALMANAC_API";
 
 /// The settings the almanac knows, by section and key: those of the
 /// machine a game runs on.
-pub const KEYS: [(&str, &str); 37] = [
+pub const KEYS: [(&str, &str); 38] = [
     ("emulator", "machine"),
     ("emulator", "cpu"),
     ("emulator", "core"),
@@ -41,6 +41,7 @@ pub const KEYS: [(&str, &str); 37] = [
     ("emulator", "dos_version"),
     ("emulator", "win32"),
     ("emulator", "win32_version"),
+    ("emulator", "win32_depth"),
     ("emulator", "voodoo"),
     ("emulator", "voodoo_model"),
     ("emulator", "voodoo_memory"),
@@ -101,12 +102,28 @@ pub fn file_info(name: &str, bytes: &[u8]) -> FileInfo {
     }
 }
 
+/// What the program `bytes` are, as the almanac files a version under:
+/// `win32` for a Windows 95/98 program (PE), `win16` for a Windows 3.1
+/// one (NE, not OS/2's), `dos` for anything else. The Windows ones run on
+/// the built-in Windows (`win32`).
+pub fn platform_of(bytes: &[u8]) -> &'static str {
+    if rust_dos_pe::is_pe(bytes) {
+        "win32"
+    } else if crate::win32::is_win16(bytes) {
+        "win16"
+    } else {
+        "dos"
+    }
+}
+
 /// The program a game starts with, as the settings window asks about it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Program {
     /// Its file, a DOS path.
     pub path: String,
     pub files: Vec<FileInfo>,
+    /// [`platform_of`] its file, when there is one.
+    pub platform: Option<String>,
     /// The name to look the game up by: its profile's, or the program's.
     pub name: String,
 }
@@ -123,6 +140,7 @@ pub fn program(cpu: &mut Cpu, path: &str) -> Option<Program> {
     Some(Program {
         path: path.to_string(),
         files: vec![file],
+        platform: Some(platform_of(&bytes).to_string()),
         name,
     })
 }
@@ -470,14 +488,15 @@ pub fn candidates(
 pub fn report(
     subject: &Subject,
     files: &[FileInfo],
+    platform: Option<&str>,
     rating: Rating,
     settings: &BTreeMap<String, BTreeMap<String, String>>,
 ) -> Result<i64, String> {
     #[cfg(all(feature = "sdl", not(target_arch = "wasm32")))]
-    return client::report(subject, files, rating, settings);
+    return client::report(subject, files, platform, rating, settings);
     #[cfg(not(all(feature = "sdl", not(target_arch = "wasm32"))))]
     {
-        let _ = (subject, files, rating, settings);
+        let _ = (subject, files, platform, rating, settings);
         Err(format!("This Rust-DOS doesn't ask {}", SITE))
     }
 }
@@ -664,18 +683,24 @@ pub mod client {
     }
 
     /// Report that the game played `rating` with `settings`: to its
-    /// version of the program's `files`, which is added if the game
-    /// doesn't have it yet, and the game too if it is new. Returns the
-    /// report's number.
+    /// version of the program's `files`, which is added, with the
+    /// program's `platform`, if the game doesn't have it yet, and the
+    /// game too if it is new. Returns the report's number.
     pub fn report(
         subject: &Subject,
         files: &[FileInfo],
+        platform: Option<&str>,
         rating: Rating,
         settings: &BTreeMap<String, BTreeMap<String, String>>,
     ) -> Result<i64, String> {
         let new_version = || {
-            (!files.is_empty())
-                .then(|| serde_json::json!({ "label": version_label(files), "files": files }))
+            (!files.is_empty()).then(|| {
+                serde_json::json!({
+                    "label": version_label(files),
+                    "platform": platform,
+                    "files": files,
+                })
+            })
         };
         let (slug, version) = match subject {
             Subject::Game {
@@ -724,6 +749,21 @@ pub mod client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn programs_are_filed_by_platform() {
+        let mut pe = vec![0u8; 0x48];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3C] = 0x40;
+        pe[0x40..0x44].copy_from_slice(b"PE\0\0");
+        assert_eq!(platform_of(&pe), "win32");
+        // An NE header that doesn't parse runs as DOS, as its stub would.
+        let mut ne = pe.clone();
+        ne[0x40..0x44].copy_from_slice(b"NE\0\0");
+        assert_eq!(platform_of(&ne), "dos");
+        assert_eq!(platform_of(b"MZ\x90\0"), "dos");
+        assert_eq!(platform_of(&[0xB4, 0x4C, 0xCD, 0x21]), "dos");
+    }
 
     #[test]
     fn a_file_is_known_by_its_name_size_and_checksums() {

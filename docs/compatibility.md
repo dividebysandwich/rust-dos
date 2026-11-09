@@ -25,7 +25,15 @@ settings of a game only when the checksums match. That works for DOS
 games and for games on the built-in Windows, which start from the same
 prompt. The almanac carries the machine's settings only: the graphics
 card, processor, speed, memory, DPMI, the DOS and Windows versions, the
-3D cards, the sound cards, the joystick and the disks' speeds.
+Windows desktop's colour depth (`win32_depth`), the 3D cards, the sound
+cards, the joystick and the disks' speeds.
+
+A version a report adds is filed under its program's platform: DOS,
+Windows 3.1 (an NE file) or Windows 95/98 (a PE file). For a Windows
+version the almanac recommends `win32=true` even before anyone has
+reported on it, so with `almanac_auto` a Windows game started at the
+prompt runs on the built-in Windows rather than as its DOS stub, which
+only says it needs Windows. A report that sets `win32` itself wins.
 
 ## What this page adds
 
@@ -33,11 +41,14 @@ What the almanac can't carry:
 
 * files to copy or remove, drivers, command-line switches and install
   steps;
-* settings outside its list, such as `win32_depth`;
+* settings outside its list, such as `win32_dlls` and `win32_trace`;
 * limits that are known;
 * games on a Windows 95 or 98 disk image. There the game is started by
   the Windows inside the image, not at Rust-DOS's prompt, so Rust-DOS
-  never sees which program runs and can't look it up.
+  never sees which program runs and can't look it up;
+* the program a launcher on the built-in Windows starts. The almanac
+  knows a game by the program started at the prompt, so a game whose
+  launcher starts the real program is filed under the launcher.
 
 Where an entry also names settings the almanac takes, they can be
 fetched from it or reported to it like any other.

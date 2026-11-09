@@ -648,6 +648,12 @@ pub fn install_rom(bus: &mut crate::bus::Bus) {
 /// it is a PE file and the built-in Windows is on, make it start as a
 /// Win32 program, or the engine it unpacks if it is InstallShield's setup
 /// launcher (`launcher`). Returns whether it does.
+/// Whether `bytes` are a Windows 3.1 program the Win16 layer runs (an NE
+/// file not marked for OS/2).
+pub fn is_win16(bytes: &[u8]) -> bool {
+    launcher::is_win16(bytes)
+}
+
 pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
     if !cpu.bus.win32.enabled {
         return false;
