@@ -1458,7 +1458,8 @@ address mapped to when it was set.
   before gave as `N`. It gives the frames after the first `N` of them,
   `ms` the wall time of each and `end_ms` the emulated time at its end;
   `first` is the number of the first one given, more than `N` if the
-  ring dropped frames before they were asked for.
+  ring dropped frames before they were asked for. Frames while the
+  machine waits (paused, or in the settings window) aren't counted.
 - **Coarse timestamps.** Trace times are sampled once per frame (about
   16 ms). Use `icount` for exact ordering.
 - **Ring buffer size.** The trace ring holds 1,000,000 instructions by

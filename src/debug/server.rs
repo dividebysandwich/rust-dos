@@ -2191,7 +2191,8 @@ STATUS / SCREEN
                                            by cpu, video, present, wait and other
   GET  /api/frames                         ?after=N: the host's frames after the first N, of the last
                                            1024: count (the next N), first, ms (each one's wall time)
-                                           and end_ms (the emulated time at its end)
+                                           and end_ms (the emulated time at its end); frames while the
+                                           machine waits don't count
   POST /api/profile                        {"enabled":true,"hz":2000,"timer":"sleep"|"spin","duration_ms":N}
                                            starts a profile (again, if one runs): a thread samples where
                                            the emulation thread's host time goes, by zone and guest

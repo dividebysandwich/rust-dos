@@ -197,18 +197,23 @@ const STALLED: f64 = 2.0;
 /// measurement ended, and more after it as the game caught up (#856). So
 /// until its first measurement is in, a step up is watched frame by frame:
 /// `TRY_BEHIND_FRAMES` in a row that leave the host `TRY_BEHIND_NS` behind
-/// (a frame and a half), or a backlog the pacer dropped, end it at once. A
-/// step of more than `FINE_STEP` goes on as one of `FINE_STEP` from where it
-/// came, with a step under the speed it fell behind at the most it may go
-/// to, and one of `FINE_STEP` goes back there, the most the speed may go to
-/// until the host has kept up for a while (`LAGGED_WINDOWS`). There, the
-/// dialogue's frames do that less than once in 45 seconds at 23,000, about
-/// once in three seconds at 26,000, and more than once a second at 29,000.
-/// A hold isn't watched this way: at a speed the host keeps up with, a run
-/// of long frames comes now and then, and its measurements say what they
-/// cost.
+/// (a frame and a half), or `TRY_DROPS` backlogs the pacer dropped, end it
+/// at once. Frames that alternate long and short, as a batch with two of
+/// the program's frames and one with one do, drop a backlog every other
+/// frame without three in a row; one backlog dropped is also what a host
+/// that stopped once (a disk flush, another program) leaves, which says
+/// nothing of the speed. A step of more than `FINE_STEP` goes on as one of
+/// `FINE_STEP` from where it came, with a step under the speed it fell
+/// behind at the most it may go to, and one of `FINE_STEP` goes back there,
+/// the most the speed may go to until the host has kept up for a while
+/// (`LAGGED_WINDOWS`). There, the dialogue's frames fall behind less than
+/// once in 45 seconds at 23,000, about once in three seconds at 26,000, and
+/// more than once a second at 29,000. A hold isn't watched this way: at a
+/// speed the host keeps up with, a run of long frames comes now and then,
+/// and its measurements say what they cost.
 const TRY_BEHIND_NS: u64 = 25_000_000;
 const TRY_BEHIND_FRAMES: u32 = 3;
+const TRY_DROPS: u32 = 2;
 /// A measurement behind at a speed that another fell behind at, at that
 /// speed or less, within this many measurements before, is no stall: the
 /// host keeps up there only between heavier moments. Omikron's dialogue at
@@ -742,10 +747,15 @@ pub struct AutoSpeed {
     slipped: Option<(u32, u32)>,
     /// While a step up waits for its first measurement, the speed it came
     /// from, which the frames are watched for (`TRY_BEHIND_NS`): the frames
-    /// in a row behind by that much, and the emulated time dropped so far.
+    /// in a row behind by that much, the backlogs dropped since it began
+    /// (`TRY_DROPS`), and the emulated time dropped so far. `try_fresh`
+    /// until the first frame at the new speed is in: what the pacer dropped
+    /// at its start was the frame before's backlog, at the speed before.
     trying: Option<u32>,
     try_behind: u32,
+    try_drops: u32,
     try_lost_ns: u64,
+    try_fresh: bool,
     /// The least speed the host fell behind at, by a measurement or a step
     /// up's frames, until it keeps up above it. A step up goes no further
     /// than a step under it at once, and past it by `FINE_STEP`; a faster CPU
@@ -809,7 +819,9 @@ impl AutoSpeed {
             slipped: None,
             trying: None,
             try_behind: 0,
+            try_drops: 0,
             try_lost_ns: 0,
+            try_fresh: false,
             fell_at: None,
             working: None,
             work_cuts: 0,
@@ -1087,9 +1099,18 @@ impl AutoSpeed {
         // it gives the program all the host has, which it may fall behind
         // with.
         if next > current && !self.flat_out {
-            self.trying = Some(current);
+            self.watch(current);
         }
         Some(next)
+    }
+
+    /// Watch the frames of a step up from `from`, counting none of those
+    /// before it: they ran at the speed before.
+    fn watch(&mut self, from: u32) {
+        self.trying = Some(from);
+        self.try_behind = 0;
+        self.try_drops = 0;
+        self.try_fresh = true;
     }
 
     /// The host fell behind at `speed` (`fell_at`).
@@ -1102,7 +1123,8 @@ impl AutoSpeed {
     /// far (`Pacer::lost`). A step up that the frames show the host doesn't
     /// keep up with (`TRY_BEHIND_NS`) ends: the speed it asks for instead.
     pub fn falling_behind(&mut self, bus: &Bus, behind_ns: u64, lost_ns: u64) -> Option<u32> {
-        let dropped = lost_ns > self.try_lost_ns;
+        let fresh = std::mem::take(&mut self.try_fresh);
+        let dropped = lost_ns > self.try_lost_ns && !fresh;
         self.try_lost_ns = lost_ns;
         self.try_behind = if behind_ns >= TRY_BEHIND_NS {
             self.try_behind + 1
@@ -1114,8 +1136,10 @@ impl AutoSpeed {
             self.trying = None;
             return None;
         }
+        self.try_drops += u32::from(dropped);
+        let drops = self.try_drops;
         let frames = std::mem::take(&mut self.try_behind);
-        if !dropped && frames < TRY_BEHIND_FRAMES {
+        if drops < TRY_DROPS && frames < TRY_BEHIND_FRAMES {
             self.try_behind = frames;
             return None;
         }
@@ -1130,6 +1154,7 @@ impl AutoSpeed {
             // otherwise wait a step per `LAGGED_WINDOWS` to get back.
             let most = (current as f64 / FINE_STEP).round() as u32;
             self.lagged = Some((most.max(fine), LAGGED_WINDOWS));
+            self.watch(from);
             fine
         } else {
             self.trying = None;
@@ -1146,13 +1171,13 @@ impl AutoSpeed {
         };
         if trace() {
             eprintln!(
-                "[auto] {} -> {}: a step up from {} behind {:.1}ms for {} frames, dropped {}",
+                "[auto] {} -> {}: a step up from {} behind {:.1}ms for {} frames, {} dropped",
                 current,
                 next,
                 from,
                 behind_ns as f64 / 1e6,
                 frames,
-                dropped
+                drops
             );
         }
         self.mark = None;
@@ -3465,7 +3490,7 @@ mod tests {
     /// share of real time kept there.
     fn omikron_frames(seconds: f64) -> (Vec<f64>, Vec<u32>, f64) {
         const FRAME: f64 = 1.0 / 60.0;
-        const MAX_LAG: f64 = 0.05;
+        let max_lag = crate::timer::MAX_LAG.as_secs_f64();
         let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
         let bus = &mut cpu.bus;
         bus.set_cycles_per_ms(PROTECTED_LEAST);
@@ -3477,7 +3502,7 @@ mod tests {
         while wall < seconds {
             let speed = bus.clock.cycles_per_ms() as f64;
             let backlog = behind.max(FRAME);
-            let span = if backlog > MAX_LAG {
+            let span = if backlog > max_lag {
                 lost += backlog - FRAME;
                 FRAME
             } else {
@@ -3576,6 +3601,31 @@ mod tests {
         let next = auto.decide(cut, &frames(cut), true, 609_961);
         let under = (609_961.0 / FINE_STEP).round() as u32;
         assert!((under - 1..=under).contains(&next), "{next}");
+    }
+
+    #[test]
+    fn a_step_ups_watch_counts_only_its_own_frames() {
+        // Two long frames at 20,000, then a step up to 23,000: one frame
+        // behind at 23,000 isn't three in a row, and what the pacer drops
+        // at the start of its first frame is the backlog of the last frame
+        // at 20,000.
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        let mut auto = AutoSpeed::new(3000, None);
+        let behind = TRY_BEHIND_NS + 3_000_000;
+        assert_eq!(auto.falling_behind(bus, behind, 0), None);
+        assert_eq!(auto.falling_behind(bus, behind, 0), None);
+        bus.set_cycles_per_ms(23_000);
+        auto.watch(20_000);
+        assert_eq!(auto.falling_behind(bus, behind, 60_000_000), None);
+        assert_eq!(auto.trying, Some(20_000));
+        // One backlog of its own dropped is what a host that stopped once
+        // leaves: the try goes on. A second ends it.
+        assert_eq!(auto.falling_behind(bus, 0, 120_000_000), None);
+        assert_eq!(auto.falling_behind(bus, 0, 120_000_000), None);
+        assert_eq!(auto.trying, Some(20_000));
+        assert_eq!(auto.falling_behind(bus, 0, 180_000_000), Some(20_000));
+        assert_eq!(auto.trying, None);
     }
 
     #[test]

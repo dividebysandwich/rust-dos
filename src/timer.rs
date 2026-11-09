@@ -1001,7 +1001,13 @@ impl Pacer {
                     let wall = self.anchor_ticks + duration_to_ticks(since);
                     let behind = ticks_to_duration(wall.saturating_sub(bus.clock.now_ticks()));
                     let behind_ns = behind.as_nanos() as u64;
-                    if let Some(cut) = self.auto.falling_behind(bus, behind_ns, self.lost_ns) {
+                    // A frame of a paused machine (the debugger, the
+                    // settings window, a rewind) runs nothing and falls
+                    // behind the wall clock by the pause: no batch_end
+                    // moves the anchor until it resumes.
+                    if self.ran
+                        && let Some(cut) = self.auto.falling_behind(bus, behind_ns, self.lost_ns)
+                    {
                         return Some(cut);
                     }
                     return self.auto.update(bus, protected, host_max, self.lost_ns);
