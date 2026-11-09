@@ -162,7 +162,7 @@ jobs:
       # Saved only from main: every PR restores main's entries, while a
       # PR's own entries are visible to that PR alone and push main's out
       # of the 10 GB repository cache.
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3 # zizmor: ignore[cache-poisoning]
         with:
           key: test-${{ matrix.label }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -431,7 +431,7 @@ jobs:
         with:
           toolchain: nightly-2026-10-31
           components: rust-src
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3 # zizmor: ignore[cache-poisoning]
         with:
           key: ${{ matrix.label }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -609,7 +609,7 @@ jobs:
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3 # zizmor: ignore[cache-poisoning]
         with:
           key: web
           workspaces: web
@@ -776,7 +776,7 @@ jobs:
       # runs save. rust-cache names that one after its `key` and the job's
       # ID: this shared-key is the two together. Only pull requests run this
       # job, so it never saves, as the other jobs save only from main.
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3 # zizmor: ignore[cache-poisoning]
         with:
           shared-key: libretro-linux-x86_64-libretro
           workspaces: libretro
@@ -849,7 +849,7 @@ jobs:
         with:
           toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3 # zizmor: ignore[cache-poisoning]
         with:
           key: libretro-${{ matrix.label }}
           workspaces: libretro
@@ -928,7 +928,7 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3 # zizmor: ignore[cache-poisoning]
         with:
           key: libretro-android-${{ matrix.abi }}
           workspaces: libretro
