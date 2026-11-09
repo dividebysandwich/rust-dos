@@ -168,7 +168,11 @@ const TWO_STEPS: f64 = FINE_STEP * FINE_STEP;
 /// measurement whatever the speed, and taking a step and the cap for each
 /// of those would leave the speed at the floor. The speed then goes no
 /// higher than a step below it, or what the host ran if it falls behind
-/// again. That limit rises by `FINE_STEP` for each `LAGGED_WINDOWS`
+/// again, or if the estimate reads less than that: where much of the host's
+/// time goes to each frame rather than each instruction, the estimate reads
+/// low once the host falls behind and high while it keeps up (Omikron's
+/// software-rendered dialogue). A faster CPU model's least speed keeps under
+/// that limit too. It rises by `FINE_STEP` for each `LAGGED_WINDOWS`
 /// measurements the host keeps up, so a host that stalls now and then
 /// loses a step for a while and no more, and one that can't run a speed
 /// meets it again only that often. A scene that takes more work says
@@ -1054,8 +1058,7 @@ impl AutoSpeed {
     /// is at the speed the lower one would have grown to the higher frame
     /// rate at.
     pub fn decide(&mut self, current: u32, m: &Measurement, protected: bool, host_max: u32) -> u32 {
-        let base = self.least(protected, host_max);
-        let top = host_max.max(base);
+        let top = host_max.max(self.least(protected, host_max));
         let c = current as f64;
         self.flat_out = false;
         let loading = std::mem::take(&mut self.loading);
@@ -1078,6 +1081,15 @@ impl AutoSpeed {
         // low, and that is no stall. A cap at the least speed holds nothing
         // but such work back either.
         let stalled = kept_up && self.lagged.is_none() && c * STALLED < top as f64;
+        // What the host has: its estimate, but no less than what it ran in a
+        // measurement it fell behind in, and no more than the cap. The
+        // estimate takes all of the host's time for the instructions', and
+        // where much of it goes to each frame instead, it reads wrong both
+        // ways: the software Voodoo renderer draws Omikron's frames while
+        // the emulator waits for the wall clock, so at 20,000 the estimate
+        // reads 60,000, and once the emulator waits for the renderer, at
+        // 40,000, it reads 12,500 while the host ran 25,600 (#849).
+        let mut have = host_max;
         if lagged && !stalled {
             let cut = if again {
                 (m.pace * KEPT_UP).clamp(0.5, 1.0 / FINE_STEP)
@@ -1086,8 +1098,15 @@ impl AutoSpeed {
             };
             // Of the speed that fell behind: an estimate that dipped for the
             // frames it was measured on would hold the limit down after it.
-            let most = (c * cut).round() as u32;
-            self.lagged = (most > base).then_some((most, LAGGED_WINDOWS));
+            // Where it dipped below what the host ran, no higher than that:
+            // a cap above it would go back there when it next rises.
+            let mut most = (c * cut).round() as u32;
+            let ran = (c * m.pace * KEPT_UP).round() as u32;
+            if ran > have {
+                have = ran;
+                most = most.min(ran);
+            }
+            self.lagged = (most > self.least(protected, 0)).then_some((most, LAGGED_WINDOWS));
         } else if let (false, Some((most, left))) = (lagged, self.lagged) {
             // The estimate dipping to the limit doesn't end it: only rising
             // past what the host has does.
@@ -1098,11 +1117,13 @@ impl AutoSpeed {
                 (most < top).then_some((most, LAGGED_WINDOWS))
             };
         }
-        // The cap was clamped to the least speed of its own measurement; a
-        // host estimate that has risen since raises the least speed of a
-        // faster CPU model past it.
+        // A faster CPU model's least speed is only up to what the host has,
+        // the cap included: an estimate that reads high where the host keeps
+        // up would otherwise take the speed back past the cap at once.
         let host_top = top;
-        let top = self.lagged.map_or(top, |(most, _)| most.clamp(base, top));
+        let have = self.lagged.map_or(have, |(most, _)| most.min(have));
+        let base = self.least(protected, have);
+        let top = have.max(base);
         let clamp = |speed: f64| (speed.round() as u32).clamp(base, top);
         if m.polling >= WAITING {
             self.restart_search();
@@ -1827,19 +1848,34 @@ mod tests {
     #[test]
     fn a_host_estimate_rising_past_the_lagged_cap_raises_it() {
         // A Pentium II's least speed, 112500, is the host's estimate while
-        // that is less. Behind at 60000, the cap is that least speed; the
-        // estimate rises to 70000 and the least speed with it, above the
-        // cap.
+        // that is less, and no more than the cap. Behind at 60000, the cap
+        // is a step less, under the least speed the estimate gives.
         let mut auto = AutoSpeed::new(3000, None);
         auto.set_protected_least(112_500);
         let behind = Measurement {
             pace: 0.5,
             ..myth(60_000)
         };
-        assert_eq!(auto.decide(60_000, &behind, true, 60_000), 60_000);
-        // The hold goes on at 60000, then goes to the least speed.
-        let mut speed = 60_000;
-        for _ in 0..2 * HOLD_WINDOWS {
+        assert_eq!(auto.decide(60_000, &behind, true, 60_000), 52_174);
+        // The estimate rises to 70000 and holds the least speed there no
+        // more than the cap does: it goes up with the cap, a step for each
+        // `LAGGED_WINDOWS` the host keeps up, and to the estimate once the
+        // cap rises past it.
+        let mut speed = 52_174;
+        for _ in 0..HOLD_WINDOWS {
+            speed = auto.decide(speed, &myth(speed), true, 70_000);
+        }
+        assert_eq!(speed, 60_000);
+        for _ in 0..HOLD_WINDOWS {
+            speed = auto.decide(speed, &myth(speed), true, 70_000);
+        }
+        assert_eq!(speed, 69_000);
+        for _ in 0..HOLD_WINDOWS {
+            speed = auto.decide(speed, &myth(speed), true, 70_000);
+        }
+        assert_eq!(auto.lagged, None);
+        // The hold at 69000 goes on until it ends.
+        for _ in 0..HOLD_WINDOWS {
             speed = auto.decide(speed, &myth(speed), true, 70_000);
         }
         assert_eq!(speed, 70_000);
@@ -3047,14 +3083,22 @@ mod tests {
 
     #[test]
     fn a_limit_comes_from_the_speed_not_an_estimate_that_dipped() {
-        // Unreal's 60 frame a second scene takes the estimate down with it.
+        // Unreal's 60 frame a second scene takes the estimate down with it,
+        // under the 91,850 the host ran: the speed and the cap go to what it
+        // ran, with `KEPT_UP`'s margin.
         let mut auto = AutoSpeed::new(3000, None);
         auto.pace = 0.9;
         let behind = Measurement {
             pace: 0.8,
             ..game(0.0005, 60.0)(114_817)
         };
-        assert_eq!(auto.decide(114_817, &behind, true, 78_135), 78_135);
+        assert_eq!(auto.decide(114_817, &behind, true, 78_135), 87_261);
+        assert_eq!(auto.lagged, Some((87_261, LAGGED_WINDOWS)));
+        // An estimate above what it ran is the limit, and the cap a step
+        // less than the speed.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.pace = 0.9;
+        assert_eq!(auto.decide(114_817, &behind, true, 95_000), 95_000);
         assert_eq!(auto.lagged, Some((99_841, LAGGED_WINDOWS)));
     }
 
@@ -3170,6 +3214,79 @@ mod tests {
         // The 486 keeps the 486's.
         auto.set_protected_least(crate::cpu::CpuModel::I486.auto_least());
         assert_eq!(settle(&mut auto, true, HOST), PROTECTED_LEAST);
+    }
+
+    /// Omikron's first dialogue on the software Voodoo renderer (#849), on
+    /// a host that runs `per_instruction` instructions per ms of the
+    /// program's own, and whose render workers take `per_frame` seconds of
+    /// its time for each frame. The frame rate follows the speed, 0.9
+    /// frames a second for each 1000 instructions per ms. Returns the
+    /// measurement at `speed` and the host's estimate there: as the
+    /// emulator measures it, with the frames drawn while it waits for the
+    /// wall clock, the program's own speed (give or take a quarter) while
+    /// the host keeps up, and half of what it runs once it falls behind and
+    /// waits for the workers.
+    fn omikron(
+        speed: u32,
+        per_instruction: f64,
+        per_frame: f64,
+        seed: &mut u32,
+    ) -> (Measurement, u32) {
+        let fps = speed as f64 * 0.0009;
+        let host_time = speed as f64 / per_instruction + fps * per_frame;
+        let pace = (1.0 / host_time).min(1.0);
+        let estimate = if pace < 1.0 {
+            speed as f64 * pace * 0.5
+        } else {
+            per_instruction * noise(seed, 0.25)
+        };
+        let m = Measurement {
+            fps: Some(fps),
+            refresh: 60.0,
+            pace,
+            ..STILL
+        };
+        (m, estimate as u32)
+    }
+
+    /// The frames a second `auto` shows of Omikron's dialogue on average,
+    /// as a share of the most the host can show at real time, and the share
+    /// of real time the emulated time kept.
+    fn run_omikron(per_instruction: f64, per_frame: f64) -> (f64, f64) {
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_protected_least(crate::cpu::CpuModel::PentiumII.auto_least());
+        let (mut speed, mut seed) = (PROTECTED_LEAST, 0x2468_ace1);
+        let (mut shown, mut kept) = (0.0, 0.0);
+        let measured = 500;
+        for i in 0..100 + measured {
+            let (m, estimate) = omikron(speed, per_instruction, per_frame, &mut seed);
+            if i >= 100 {
+                shown += m.fps.unwrap() * m.pace;
+                kept += m.pace;
+            }
+            speed = auto.decide(speed, &m, true, estimate);
+        }
+        // Real time ends where the host's time for a second runs out.
+        let limit = 1.0 / (1.0 / per_instruction + 0.0009 * per_frame);
+        let best = limit * 0.0009;
+        (shown / measured as f64 / best, kept / measured as f64)
+    }
+
+    #[test]
+    fn a_program_whose_frames_cost_the_host_finds_the_speed_it_keeps_up_with() {
+        // The 7700X: 60,000 of the program's own, a 60th of a second for
+        // each frame, real time up to 31,600. On main, the estimate behind
+        // took the speed to 20,000 (18 frames a second, 0.65 of the most),
+        // and the one at 20,000 back to 60,000, half of real time, every 30
+        // measurements.
+        let (shown, kept) = run_omikron(60_000.0, 1.0 / 60.0);
+        assert!(shown >= 0.9, "{shown} of the frames, {kept} of real time");
+        assert!(kept >= 0.98, "{shown} of the frames, {kept} of real time");
+        // A host with half the workers (4 cores) draws a frame in a 30th:
+        // real time up to 21,400, near the least speed.
+        let (shown, kept) = run_omikron(60_000.0, 1.0 / 30.0);
+        assert!(shown >= 0.9, "{shown} of the frames, {kept} of real time");
+        assert!(kept >= 0.98, "{shown} of the frames, {kept} of real time");
     }
 
     /// Alien Legacy's frame copy where little changed: its REPE CMPSD loop
