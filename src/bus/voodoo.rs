@@ -261,7 +261,10 @@ impl Bus {
                 let dwords = data.as_chunks::<4>().0.iter();
                 v.lfb_write_run(index, dwords.map(|&d| u32::from_le_bytes(d)));
             }
-            MemoryRun::Linear(addr) => v.banshee_memory_write(addr, data),
+            MemoryRun::Linear(addr) => {
+                v.banshee_memory_write(addr, data);
+                self.note_banshee_memory_write(addr, len as u32);
+            }
             MemoryRun::Fifo => {}
         }
         true

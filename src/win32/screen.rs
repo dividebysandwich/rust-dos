@@ -732,4 +732,43 @@ mod tests {
             assert!(f.abs_diff(hz) * 200 < hz, "{hz}: {f}");
         }
     }
+
+    #[test]
+    fn frames_copied_into_the_desktop_count_for_cycles_auto() {
+        // Delta Force locks the primary surface on a Voodoo3 and copies
+        // each frame into it itself, with MMX stores (the recompiler's
+        // runs) or a dword at a time (the interpreter's writes).
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus
+            .configure_voodoo(Some(crate::voodoo::Board::Voodoo3));
+        card_set_mode(&mut cpu, 640, 480, 32).unwrap();
+        let bus = &mut cpu.bus;
+        let screen = crate::autospeed::screen_bytes(bus);
+        bus.activity
+            .set_screen(screen, crate::autospeed::linear_screen(bus));
+        let bar1 = card::INITIAL_BAR1 as usize;
+        let screen = screen as usize;
+        let gap = 100_000;
+        // A frame copied with MMX stores, one a dword at a time, and one
+        // into the memory after the desktop, out of sight.
+        for at in (0..screen).step_by(8) {
+            bus.clock.icount += 1;
+            assert!(bus.write_to_voodoo(bar1 + at, &[0x55; 8]));
+        }
+        bus.clock.icount += gap;
+        for at in (0..screen).step_by(4) {
+            bus.clock.icount += 1;
+            bus.write_32(bar1 + at, 0x00AA_AAAA);
+        }
+        bus.clock.icount += gap;
+        for at in (screen..2 * screen).step_by(8) {
+            bus.clock.icount += 1;
+            assert!(bus.write_to_voodoo(bar1 + at, &[0x55; 8]));
+        }
+        // A write after them ends the last burst.
+        bus.clock.icount += gap;
+        bus.write_32(bar1, 0);
+        assert_eq!(bus.activity.bursts, 2);
+        assert_eq!(bus.activity.copies, 0);
+    }
 }

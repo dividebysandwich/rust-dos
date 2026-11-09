@@ -69,6 +69,30 @@ impl Bus {
                 (mask >> 32) as u32,
             );
         }
+        if offset >= banshee::LINEAR
+            && let Some(b) = self.banshee()
+        {
+            let addr = b.linear_addr(offset - banshee::LINEAR);
+            self.note_banshee_memory_write(addr, len);
+        }
+    }
+
+    /// The CPU wrote `len` bytes into the card's memory from byte `addr`
+    /// on. What lands in the desktop shown counts for `cycles=auto` as a
+    /// write into a VESA frame buffer does: a game under Windows that
+    /// copies its frames into the primary surface itself draws them there.
+    #[inline]
+    pub(crate) fn note_banshee_memory_write(&mut self, addr: u32, len: u32) {
+        let Some(b) = self.banshee().filter(|b| b.extended()) else {
+            return;
+        };
+        let (start, span) = b.desktop_memory();
+        let start = start as u64;
+        let from = (addr as u64).max(start);
+        let to = (addr as u64 + len as u64).min(start + span);
+        if from < to {
+            self.note_video_write((from - start) as usize, to - from);
+        }
     }
 
     /// A byte of the VGA's ports in BAR0 as a read of the port gives it,
