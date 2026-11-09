@@ -1207,7 +1207,11 @@ impl VoodooGl {
             self.alpha.command(command);
             // Only triangles draw what `unread` can follow; textures
             // aren't drawn into.
-            if !matches!(command, Command::Draw(_) | Command::Texture(_) | Command::FreeTexture(_)) {
+            let drawn = matches!(
+                command,
+                Command::Draw(_) | Command::Texture(_) | Command::FreeTexture(_)
+            );
+            if !drawn {
                 self.unread.forget();
             }
             match command {
@@ -2454,7 +2458,9 @@ impl Unread {
         for (i, t) in bounded(vertices).enumerate() {
             let catch = if self.seen != Some(dest) || self.more {
                 Some(Catch::All)
-            } else if self.drawn.len() == RUN_TRIANGLES || self.drawn.iter().any(|d| overlap(d, &t)) {
+            } else if self.drawn.len() == RUN_TRIANGLES
+                || self.drawn.iter().any(|d| overlap(d, &t))
+            {
                 let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
                 for (_, d) in &self.drawn {
                     b = [b[0].min(d[0]), b[1].min(d[1]), b[2].max(d[2]), b[3].max(d[3])];
@@ -3122,7 +3128,10 @@ pub(crate) mod tests {
                 }
                 save(&format!("glide-{frame}-opengl"), &rendered, w, h);
                 let pairs = || reference.as_chunks::<3>().0.iter().zip(rendered.as_chunks::<3>().0);
-                let bad = pairs().filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 32)).count();
+                let far = |(a, b): &(&[u8; 3], &[u8; 3])| {
+                    a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 32)
+                };
+                let bad = pairs().filter(far).count();
                 let differ = pairs().filter(|(a, b)| a != b).count();
                 println!("frame {frame}: {differ} pixels differ, {bad} by more than 32");
             }
