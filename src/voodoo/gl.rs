@@ -676,6 +676,8 @@ pub struct VoodooGl {
     /// buffer it draws into, which `card_blend` then does instead of
     /// reading a copy.
     texture_barrier: Option<TextureBarrier>,
+    /// The pixels drawn since `card_blend`'s reads last saw the buffer.
+    unread: Unread,
     triangle: Program<Triangle>,
     pixels: Program<Quad>,
     depth_program: Program<Quad>,
@@ -855,6 +857,7 @@ impl VoodooGl {
                 composite: None,
                 blend_copy: None,
                 texture_barrier: None,
+                unread: Unread::default(),
                 triangle,
                 pixels,
                 depth_program,
@@ -897,6 +900,7 @@ impl VoodooGl {
     /// context's (`TextureBarrier::load`), or with None through a copy.
     pub fn set_texture_barrier(&mut self, barrier: Option<TextureBarrier>) {
         self.texture_barrier = barrier;
+        self.unread.forget();
     }
 
     /// Give everything back to OpenGL.
@@ -1198,8 +1202,14 @@ impl VoodooGl {
     }
 
     fn run_commands(&mut self, gl: &glow::Context, commands: &[Command]) {
+        self.unread.forget();
         for command in commands {
             self.alpha.command(command);
+            // Only triangles draw what `unread` can follow; textures
+            // aren't drawn into.
+            if !matches!(command, Command::Draw(_) | Command::Texture(_) | Command::FreeTexture(_)) {
+                self.unread.forget();
+            }
             match command {
                 Command::Resync(snapshot) => self.resync(gl, snapshot),
                 Command::Draw(draw) => {
@@ -1508,6 +1518,7 @@ impl VoodooGl {
         let Some(staging) = self.staging.get_mut(&key) else { return };
         let Some([x0, x1, y0, y1]) = staging.dirty.take() else { return };
         let Some(fbo) = fbo else { return };
+        self.unread.forget();
         let program = if key.is_some() { &self.pixels } else { &self.depth_program };
         let (sw, sh) = ((self.width * scale) as i32, (self.height * scale) as i32);
         // SAFETY: see `VoodooGl`.
@@ -1628,6 +1639,10 @@ impl VoodooGl {
             && s.fbz_mode & (1 << 9) != 0;
         let single = target.samples.is_none();
         let barrier = self.texture_barrier.filter(|_| card_blend && single);
+        if barrier.is_none() && self.blend_copy.as_ref().is_none_or(|&(_, s)| s != size) {
+            // A new copy has none of the buffer yet.
+            self.unread.forget();
+        }
         let card_blend =
             card_blend && (barrier.is_some() || blend_copy_ready(&mut self.blend_copy, gl, size));
         let fbz = s.fbz_mode;
@@ -1778,16 +1793,27 @@ impl VoodooGl {
                 gl.active_texture(glow::TEXTURE3);
                 gl.bind_texture(glow::TEXTURE_2D, Some(read));
             }
-            // Make the pixels triangles `first..first + count` (in vertices)
-            // go over readable for the shader to blend with: everything
-            // drawn before is seen past the barrier, or copied out.
-            let under = |first: usize, count: usize| {
+            // The runs of triangles to draw, and before each, what makes the
+            // pixels drawn since the last barrier or copy readable for the
+            // shader to blend with (`Unread`). A draw that doesn't read the
+            // buffer is one run, which `unread` notes.
+            let runs = if card_blend {
+                self.unread.blend(s.dest, &draw.vertices)
+            } else {
+                self.unread.draw(s.dest, &draw.vertices);
+                vec![(0, draw.vertices.len(), None)]
+            };
+            let under = |catch: Option<Catch>| {
+                let Some(catch) = catch else { return };
                 if let Some(barrier) = barrier {
                     barrier.apply();
                     return;
                 }
                 let Some(copy) = copy else { return };
-                let rect = buffer_rect(&draw.vertices[first..first + count], self.scale, (w, h));
+                let rect = match catch {
+                    Catch::All => [0, 0, w, h],
+                    Catch::Bounds(bounds) => buffer_rect(bounds, self.scale, (w, h)),
+                };
                 copy_rect(gl, target.draw_fbo(), copy.fbo, rect);
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.draw_fbo()));
                 self.clip(gl, s.clip);
@@ -1804,7 +1830,12 @@ impl VoodooGl {
                 // each gets its own reference, so the buffer is cleared only
                 // every 255 triangles.
                 gl.enable(glow::STENCIL_TEST);
-                for (n, first) in (0..draw.vertices.len() as i32).step_by(3).enumerate() {
+                let triangles = runs.iter().flat_map(|&(first, count, catch)| {
+                    (first..first + count)
+                        .step_by(3)
+                        .map(move |f| (f as i32, catch.filter(|_| f == first)))
+                });
+                for (n, (first, catch)) in triangles.enumerate() {
                     let reference = (n % 255) as i32 + 1;
                     gl.stencil_mask(0xFF);
                     if reference == 1 {
@@ -1817,7 +1848,7 @@ impl VoodooGl {
                     gl.depth_mask(false);
                     gl.color_mask(rgb, rgb, rgb, false);
                     p.uniforms.u_constant_depth.set(gl, 1);
-                    under(first as usize, 3);
+                    under(catch);
                     gl.draw_arrays(glow::TRIANGLES, first, 3);
 
                     gl.stencil_mask(0);
@@ -1831,16 +1862,13 @@ impl VoodooGl {
                 }
                 gl.disable(glow::STENCIL_TEST);
                 gl.stencil_mask(0xFF);
-            } else if card_blend {
+            } else {
                 // Triangles that overlap blend with each other's pixels, so
-                // each group of them that don't is drawn on its own, after a
-                // barrier or over a copy of its own.
-                for (first, count) in separate_triangles(&draw.vertices) {
-                    under(first, count);
+                // each run of them that don't is drawn on its own.
+                for (first, count, catch) in runs {
+                    under(catch);
                     gl.draw_arrays(glow::TRIANGLES, first as i32, count as i32);
                 }
-            } else {
-                gl.draw_arrays(glow::TRIANGLES, 0, draw.vertices.len() as i32);
             }
             if barrier.is_some() {
                 // The buffer is no texture of the next draws, which don't
@@ -2270,14 +2298,10 @@ fn source_factor(f: u32) -> u32 {
 }
 
 /// The rectangle of the buffer (`size` pixels at `scale` times the
-/// card's) that triangles of `vertices` cover: left, bottom, right and
-/// top rows in OpenGL's terms, the right and top ones outside.
-fn buffer_rect(vertices: &[Vertex], scale: u32, (w, h): (i32, i32)) -> [i32; 4] {
-    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-    for v in vertices {
-        (x0, x1) = (x0.min(v.pos[0]), x1.max(v.pos[0]));
-        (y0, y1) = (y0.min(v.pos[1]), y1.max(v.pos[1]));
-    }
+/// card's) that `bounds` (`Unread`'s, in the card's pixels) cover: left,
+/// bottom, right and top rows in OpenGL's terms, the right and top ones
+/// outside.
+fn buffer_rect([x0, y0, x1, y1]: [f32; 4], scale: u32, (w, h): (i32, i32)) -> [i32; 4] {
     let s = scale as f32;
     let at = |v: f32, max: i32| (v * s).clamp(0.0, max as f32) as i32;
     [
@@ -2320,23 +2344,37 @@ fn blend_copy_ready(
     copy.as_ref().is_some_and(|(t, _)| t.is_some())
 }
 
-/// The most triangles in one of `separate_triangles`' runs, which bounds
-/// the overlap tests a triangle takes to as many: a run of triangles that
-/// don't overlap is cut there, for one more barrier or copy.
+/// The most triangles `Unread` keeps, which bounds the overlap tests a
+/// triangle takes to as many: a blended triangle after that many takes
+/// one more barrier or copy, overlapping or not.
 const RUN_TRIANGLES: usize = 64;
 
-/// The triangles of `vertices` in runs of ones that don't overlap, as
-/// (first vertex, vertices): a run's pixels are each drawn once, so what
-/// the barrier or the copy before it makes readable is what each of them
-/// blends with. Triangles that only share an edge don't overlap, as the
-/// edge's pixels go to one of them. A run has `RUN_TRIANGLES` at most.
-fn separate_triangles(vertices: &[Vertex]) -> Vec<(usize, usize)> {
-    type Tri = [[f32; 2]; 3];
+/// A triangle's corners in the card's pixels.
+type Corners = [[f32; 2]; 3];
+
+/// A triangle and its bounds: left, top, right, bottom.
+type Bounded = (Corners, [f32; 4]);
+
+/// The triangles of `vertices`, each with its bounds.
+fn bounded(vertices: &[Vertex]) -> impl Iterator<Item = Bounded> + '_ {
+    vertices.as_chunks::<3>().0.iter().map(|t| {
+        let tri = [t[0].pos, t[1].pos, t[2].pos];
+        let xs = tri.map(|v| v[0]);
+        let ys = tri.map(|v| v[1]);
+        let min = |v: [f32; 3]| v[0].min(v[1]).min(v[2]);
+        let max = |v: [f32; 3]| v[0].max(v[1]).max(v[2]);
+        (tri, [min(xs), min(ys), max(xs), max(ys)])
+    })
+}
+
+/// Whether triangles `a` and `b` draw a pixel in common. Triangles that
+/// only share an edge don't, as the edge's pixels go to one of them.
+fn overlap((a, ab): &Bounded, (b, bb): &Bounded) -> bool {
     // Whether the edges of `a` keep `b` out: for one edge, the vertices of
     // `b` are on the far side of it from `a`'s third vertex, or on it. The
     // card's coordinates have 4 bits of fraction, so in f64 the products
     // are exact, where f32 can round a vertex just inside an edge onto it.
-    let apart = |a: &Tri, b: &Tri| {
+    let apart = |a: &Corners, b: &Corners| {
         (0..3).any(|i| {
             let (p, q, r) = (a[i], a[(i + 1) % 3], a[(i + 2) % 3]);
             let d = |a: f32, b: f32| f64::from(a) - f64::from(b);
@@ -2345,38 +2383,101 @@ fn separate_triangles(vertices: &[Vertex]) -> Vec<(usize, usize)> {
             inner == 0.0 || b.iter().all(|&v| side(v) * inner.signum() <= 0.0)
         })
     };
-    let bounds = |t: &Tri| {
-        let xs = t.map(|v| v[0]);
-        let ys = t.map(|v| v[1]);
-        let min = |v: [f32; 3]| v[0].min(v[1]).min(v[2]);
-        let max = |v: [f32; 3]| v[0].max(v[1]).max(v[2]);
-        [min(xs), min(ys), max(xs), max(ys)]
-    };
-    let mut runs = Vec::new();
-    let mut run: Vec<(Tri, [f32; 4])> = Vec::new();
-    let mut first = 0;
-    for (i, t) in vertices.as_chunks::<3>().0.iter().enumerate() {
-        let tri = [t[0].pos, t[1].pos, t[2].pos];
-        let b = bounds(&tri);
-        let overlaps = run.iter().any(|(o, ob)| {
-            b[0] < ob[2]
-                && ob[0] < b[2]
-                && b[1] < ob[3]
-                && ob[1] < b[3]
-                && !apart(o, &tri)
-                && !apart(&tri, o)
-        });
-        if overlaps || run.len() == RUN_TRIANGLES {
-            runs.push((first, i * 3 - first));
-            first = i * 3;
-            run.clear();
+    ab[0] < bb[2]
+        && bb[0] < ab[2]
+        && ab[1] < bb[3]
+        && bb[1] < ab[3]
+        && !apart(a, b)
+        && !apart(b, a)
+}
+
+/// What a blended draw that reads the buffer it draws into (`card_blend`)
+/// does before a run of its triangles: make the pixels drawn since the
+/// last barrier or copy readable to the shader.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Catch {
+    /// The whole buffer: a barrier, or a copy of all of it.
+    All,
+    /// A barrier, or a copy of these bounds (`buffer_rect`), which hold
+    /// every pixel drawn since the last copy.
+    Bounds([f32; 4]),
+}
+
+/// The pixels of a colour buffer drawn since the shader's reads of it
+/// last saw them, through a texture barrier or a copy (`card_blend`).
+/// A blended triangle may read any other pixel without a new barrier or
+/// copy: OpenGL leaves a read of a pixel drawn since the last barrier
+/// undefined, and the copy doesn't have those pixels. Draws of all kinds
+/// go between barriers that way, so a game that blends every triangle,
+/// as Test Drive 4 does, takes a barrier or a copy only where one goes
+/// over another, rather than one for each draw.
+#[derive(Default)]
+struct Unread {
+    /// The buffer the reads saw, None for none: at the start of each
+    /// recording, and after anything other than a triangle drew.
+    seen: Option<u32>,
+    /// The triangles drawn into it since, `RUN_TRIANGLES` at most.
+    drawn: Vec<Bounded>,
+    /// Whether more was drawn into it since than `drawn` holds.
+    more: bool,
+}
+
+impl Unread {
+    /// Forget what the reads saw, after pixels were drawn that `drawn`
+    /// can't follow (fills, frame buffer writes, copies), or the copy
+    /// changed: the next blended triangle catches up with all of it.
+    fn forget(&mut self) {
+        self.seen = None;
+    }
+
+    /// Triangles `vertices` drawn into buffer `dest` without reading it.
+    fn draw(&mut self, dest: u32, vertices: &[Vertex]) {
+        if self.seen != Some(dest) || self.more {
+            return;
         }
-        run.push((tri, b));
+        for t in bounded(vertices) {
+            if self.drawn.len() == RUN_TRIANGLES {
+                self.more = true;
+                return;
+            }
+            self.drawn.push(t);
+        }
     }
-    if !run.is_empty() {
-        runs.push((first, run.len() * 3));
+
+    /// Blended triangles `vertices` drawn into buffer `dest`, which read
+    /// it, in runs that read only pixels the reads saw, as (first vertex,
+    /// vertices, and what goes before it, if anything): a run starts
+    /// where a triangle goes over one drawn since the last barrier or
+    /// copy (by this draw or an earlier one), or where `drawn` is full.
+    fn blend(&mut self, dest: u32, vertices: &[Vertex]) -> Vec<(usize, usize, Option<Catch>)> {
+        let mut runs: Vec<(usize, usize, Option<Catch>)> = Vec::new();
+        for (i, t) in bounded(vertices).enumerate() {
+            let catch = if self.seen != Some(dest) || self.more {
+                Some(Catch::All)
+            } else if self.drawn.len() == RUN_TRIANGLES || self.drawn.iter().any(|d| overlap(d, &t)) {
+                let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+                for (_, d) in &self.drawn {
+                    b = [b[0].min(d[0]), b[1].min(d[1]), b[2].max(d[2]), b[3].max(d[3])];
+                }
+                Some(Catch::Bounds(b))
+            } else {
+                None
+            };
+            if catch.is_some() {
+                self.seen = Some(dest);
+                self.drawn.clear();
+                self.more = false;
+                runs.push((i * 3, 0, catch));
+            } else if runs.is_empty() {
+                runs.push((i * 3, 0, None));
+            }
+            if let Some(run) = runs.last_mut() {
+                run.1 += 3;
+            }
+            self.drawn.push(t);
+        }
+        runs
     }
-    runs
 }
 
 /// Blend factor `f` (`source_factor` if `source`, else `dest_factor`)
@@ -2638,7 +2739,7 @@ fn compile<U: Locations>(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{RUN_TRIANGLES, Vertex, buffer_rect, sampling_filters, separate_triangles};
+    use super::{Catch, RUN_TRIANGLES, Unread, Vertex, buffer_rect, sampling_filters};
 
     #[test]
     #[ignore = "requires a desktop OpenGL context"]
@@ -3336,6 +3437,13 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// `Unread::blend`'s runs of `corners` drawn into buffer 0 as the
+    /// first draw after a barrier or copy of all of it.
+    fn runs(corners: &[[f32; 6]]) -> Vec<(usize, usize, Option<Catch>)> {
+        let mut unread = Unread { seen: Some(0), ..Default::default() };
+        unread.blend(0, &triangles(corners))
+    }
+
     #[test]
     fn blended_triangles_run_until_one_overlaps() {
         // A quad's two halves share an edge, whose pixels go to one of
@@ -3355,23 +3463,25 @@ pub(crate) mod tests {
                 [0.0, 8.0, 8.0, 0.0, 8.0, 8.0],
             ],
         ] {
-            assert_eq!(separate_triangles(&triangles(&pair)), [(0, 6)], "{pair:?}");
+            assert_eq!(runs(&pair), [(0, 6, None)], "{pair:?}");
         }
-        // The second goes over the first, so it starts a run; the third
-        // goes over the first only, which is in the run before.
+        // The second goes over the first, so it starts a run after a
+        // catch-up with the first's pixels; the third goes over the first
+        // only, which the reads have seen since.
         let over = [
             [0.0, 0.0, 8.0, 0.0, 0.0, 8.0],
             [1.0, 1.0, 6.0, 1.0, 1.0, 6.0],
             [0.0, 0.0, 2.0, 0.0, 0.0, 2.0],
         ];
-        assert_eq!(separate_triangles(&triangles(&over)), [(0, 3), (3, 6)]);
+        let first = Some(Catch::Bounds([0.0, 0.0, 8.0, 8.0]));
+        assert_eq!(runs(&over), [(0, 3, None), (3, 6, first)]);
         // The second's first vertex is inside the first, by less than f32
         // tells from its edge: they overlap.
         let tip = [
             [159.125, 220.25, 675.3125, 420.0625, 675.3125, 220.25],
             [671.4375, 418.5625, 600.0, 500.0, 700.0, 500.0],
         ];
-        assert_eq!(separate_triangles(&triangles(&tip)), [(0, 3), (3, 3)]);
+        assert_eq!(runs(&tip)[1].0, 3);
     }
 
     #[test]
@@ -3384,16 +3494,50 @@ pub(crate) mod tests {
             })
             .collect();
         let (first, rest) = (3 * RUN_TRIANGLES, 3 * (100 - RUN_TRIANGLES));
-        assert_eq!(separate_triangles(&triangles(&row)), [(0, first), (first, rest)]);
+        let all = Catch::Bounds([0.0, 0.0, 2.0 * RUN_TRIANGLES as f32 - 1.0, 1.0]);
+        assert_eq!(runs(&row), [(0, first, None), (first, rest, Some(all))]);
+    }
+
+    #[test]
+    fn blended_draws_share_a_barrier_until_one_goes_over_another() {
+        let left = triangles(&[[0.0, 0.0, 8.0, 0.0, 0.0, 8.0]]);
+        let right = triangles(&[[20.0, 0.0, 28.0, 0.0, 20.0, 8.0]]);
+        let over_left = triangles(&[[1.0, 1.0, 6.0, 1.0, 1.0, 6.0]]);
+        let mut unread = Unread::default();
+        // The first draw of a recording catches up with the whole buffer;
+        // a later one that goes over none of the pixels drawn since
+        // doesn't, whether those were blended or not.
+        assert_eq!(unread.blend(0, &left), [(0, 3, Some(Catch::All))]);
+        unread.draw(0, &right);
+        let catch = Some(Catch::Bounds([0.0, 0.0, 28.0, 8.0]));
+        assert_eq!(unread.blend(0, &over_left), [(0, 3, catch)]);
+        // Another buffer's draws leave this one's reads as they are, but
+        // reads of another buffer catch up with all of it.
+        unread.draw(1, &over_left);
+        assert_eq!(unread.blend(0, &right), [(0, 3, None)]);
+        assert_eq!(unread.blend(1, &right), [(0, 3, Some(Catch::All))]);
+        // After pixels drawn otherwise (fills, frame buffer writes), the
+        // next blended draw catches up with all of the buffer.
+        unread.forget();
+        assert_eq!(unread.blend(1, &left), [(0, 3, Some(Catch::All))]);
+        // More unblended triangles than it follows: the same.
+        let many: Vec<[f32; 6]> = (0..=RUN_TRIANGLES)
+            .map(|i| {
+                let x = 100.0 + 2.0 * i as f32;
+                [x, 0.0, x + 1.0, 0.0, x, 1.0]
+            })
+            .collect();
+        unread.draw(1, &triangles(&many));
+        assert_eq!(unread.blend(1, &right), [(0, 3, Some(Catch::All))]);
     }
 
     #[test]
     fn blended_triangles_copy_the_pixels_they_cover() {
-        let tri = triangles(&[[1.5, 2.25, 10.2, 2.5, 4.0, 20.0]]);
-        assert_eq!(buffer_rect(&tri, 1, (30, 30)), [1, 2, 11, 20]);
-        assert_eq!(buffer_rect(&tri, 2, (30, 30)), [2, 4, 22, 30]);
-        let off = triangles(&[[-4.0, -2.0, -1.0, -2.0, -4.0, -1.0]]);
-        assert_eq!(buffer_rect(&off, 1, (30, 30)), [0, 0, 0, 0]);
+        let bounds = [1.5, 2.25, 10.2, 20.0];
+        assert_eq!(buffer_rect(bounds, 1, (30, 30)), [1, 2, 11, 20]);
+        assert_eq!(buffer_rect(bounds, 2, (30, 30)), [2, 4, 22, 30]);
+        let off = [-4.0, -2.0, -1.0, -1.0];
+        assert_eq!(buffer_rect(off, 1, (30, 30)), [0, 0, 0, 0]);
     }
 
     /// A hidden window's desktop OpenGL 3.3 context, current on this
@@ -3657,12 +3801,16 @@ pub(crate) mod tests {
     /// blend a rectangle of one colour with `alpha` (source alpha over its
     /// inverse) and fbzMode's `fbz` bits: two triangles of 128 by 32
     /// pixels at (96, 48), and two more over their right half, which blend
-    /// with them.
-    fn draw_blended(bus: &mut crate::bus::Bus, fbz: u32, alpha: i32, ramp: bool) {
+    /// with them. With `split`, color0 (which they don't use) changes
+    /// between the two pairs, so each pair is a draw of its own.
+    fn draw_blended(bus: &mut crate::bus::Bus, fbz: u32, alpha: i32, ramp: bool, split: bool) {
         draw_scene(bus, 1 << 8, ramp);
         w(bus, 0x110, (1 << 9) | fbz);
         w(bus, 0x10C, (1 << 4) | (1 << 8) | (5 << 12));
         for (x0, x1) in [(96, 224), (160, 224)] {
+            if split {
+                w(bus, 0x144, x0 as u32);
+            }
             let (y0, y1) = (48, 80);
             for verts in [
                 [(x0, y0), (x1, y0), (x0, y1)],
@@ -3706,13 +3854,22 @@ pub(crate) mod tests {
             ]
             .map(|f| (b, f))
         }) {
-            for (alpha, scale) in [(96, 1), (200, 1), (96, 2), (200, 2)] {
-                let draw = |bus: &mut crate::bus::Bus| draw_blended(bus, fbz, alpha, scale == 1);
+            for (alpha, scale, split) in [
+                (96, 1, false),
+                (200, 1, false),
+                (96, 2, false),
+                (200, 2, false),
+                (96, 1, true),
+                (200, 2, true),
+            ] {
+                let draw = |bus: &mut crate::bus::Bus| {
+                    draw_blended(bus, fbz, alpha, scale == 1, split)
+                };
                 let (software, opengl) = both_pictures_with(gl, draw, true, scale, barrier);
                 assert_eq!(
                     differences(&software, &opengl, scale as usize),
                     (0, vec![]),
-                    "{what}, alpha {alpha}, {scale}x, barrier {}",
+                    "{what}, alpha {alpha}, {scale}x, barrier {}, split {split}",
                     barrier.is_some()
                 );
             }
