@@ -465,8 +465,9 @@ fn ftol_truncates_and_keeps_the_control_word_on_both_cores() {
             assert!(run_to_exit(&mut cpu, 400), "{what}: {}", printed(&cpu));
             assert_eq!(cpu.errorlevel, 0, "{what}: case {} failed", cpu.errorlevel);
             if core == CoreMode::Dynamic && rust_dos::dynrec::AVAILABLE {
-                // The loop's 16 instructions and _ftol's 17, each call:
-                // _ftol ran as translated code.
+                // Each call runs 19 to 21 instructions of the loop and the
+                // 16 of _ftol, which the import reaches without the stub.
+                // Over 30 translated a call means _ftol ran translated.
                 let translated = cpu.dynrec.counts().executed;
                 assert!(
                     translated > calls * 30,

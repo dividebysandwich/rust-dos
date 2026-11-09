@@ -317,8 +317,9 @@ pub fn init_process(bus: &mut crate::bus::Bus, process: &mut super::Process) -> 
 }
 
 /// The stub of the function with id `id`, which takes `args` arguments
-/// the way `conv` says. A function given as code (`Conv::Code`) has a
-/// jump to its code as its stub instead (`jump`).
+/// the way `conv` says. For a function given as code (`Conv::Code`) this
+/// is the trap and `RET` it had before, which `builder` doesn't write: its
+/// stub there is a jump to its code (`jump`).
 pub fn stub(id: u16, args: u8, conv: Conv) -> [u8; STUB as usize] {
     let [lo, hi] = id.to_le_bytes();
     let mut code = [0x90; STUB as usize];
