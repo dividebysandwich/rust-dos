@@ -1284,12 +1284,14 @@ macro_rules! variants {
 // formats. C3 is Myth's Glide renderer on a Voodoo3: TMU 0's texel alone,
 // which it draws its terrain, units and lighting with, opaque or
 // blended, in its palettized, intensity and 16-bit formats. V16-V19 and
-// C4 are the built-in Windows' Direct3D HAL on a Banshee or Voodoo3
-// (`win32::ddraw::d3d::hal`), which gives the texture to TMU 0 and leaves
-// TMU 1's texel unused (TMU 0's combine sets zero_other). V16 and V17 are
-// its textured states with the most area in Omikron's first dialogue,
-// with two alpha blends, and V18 and V19 the same blends untextured; C4
-// covers its other blends, fog modes, filtering and texel formats.
+// C4 are the built-in Windows' Direct3D HAL (`win32::ddraw::d3d::hal`)
+// on a Voodoo3, which gives the texture to TMU 0 and leaves TMU 1's
+// texel unused (TMU 0's combine sets zero_other). V16 and V17 are its
+// textured states with the most area in Omikron's first dialogue, with
+// two alpha blends, and V18 and V19 the same blends untextured; C4
+// covers its other blends, fog modes, filtering and texel formats. A
+// Banshee has one unit, and of these only the untextured V18 and V19
+// take its triangles (#562).
 variants! {
     V0: 2, full[0x90110, 0x0D42_0009, 0x0004_0400, 0, 0x8C26_1A0F, 0x8422_1C0F];
     V1: 2, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_1C0F];
@@ -1715,6 +1717,26 @@ pub(crate) mod tests {
         );
         let differ = first_difference(&selected, &generic);
         assert_eq!(differ, None, "{regs:08X?} drawn with variant {index}");
+    }
+
+    /// `regs` with the bits of fbzMode a variant leaves to the triangle
+    /// replaced: the depth function (always, less, greater or equal, less
+    /// or equal), the colour and depth writes, clipping and the Y origin;
+    /// and with alphaMode's reference value set.
+    pub(crate) fn dynamic(regs: [u32; 6]) -> impl Iterator<Item = [u32; 6]> {
+        [
+            (7 << 5 | 3 << 9, 0),
+            (1 << 5 | 3 << 9, 64),
+            (6 << 5 | 1 << 9 | 1, 128),
+            (3 << 5 | 3 << 9 | 1 << 17, 255),
+        ]
+        .into_iter()
+        .map(move |(fbz, reference)| {
+            let mut r = regs;
+            r[0] = r[0] & !(7 << 5 | 3 << 9 | 1 | 1 << 17) | fbz;
+            r[2] = r[2] & AM_FIXED | reference << 24;
+            r
+        })
     }
 
     /// The level a pixel in perspective reads follows the texels it
