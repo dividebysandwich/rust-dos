@@ -17,7 +17,10 @@
 //! too small to be a frame that reaches across the screen is one too.
 //! Where the bus knows which video memory the display shows (in VESA
 //! modes), only writes there count: Gender Wars copies each frame a second
-//! time, to a copy of the screen out of sight.
+//! time, to a copy of the screen out of sight. In a Banshee's or Voodoo3's
+//! own modes, the writes counted are those into the desktop it shows: a
+//! Windows game that locks the primary surface (Delta Force) copies its
+//! frames there itself.
 //! Under the built-in Windows, a program's blits to the primary surface
 //! and GDI's drawing on the screen copy the picture in the emulator's own
 //! code (Magic & Mayhem blits each frame from system memory): the bursts

@@ -69,6 +69,30 @@ impl Bus {
                 (mask >> 32) as u32,
             );
         }
+        if offset >= banshee::LINEAR
+            && let Some(b) = self.banshee()
+        {
+            let addr = b.linear_addr(offset - banshee::LINEAR);
+            self.note_banshee_memory_write(addr, len);
+        }
+    }
+
+    /// The CPU wrote `len` bytes into the card's memory from byte `addr`
+    /// on. What lands in the desktop shown counts for `cycles=auto` as a
+    /// write into a VESA frame buffer does: a game under Windows that
+    /// copies its frames into the primary surface itself draws them there.
+    #[inline]
+    pub(crate) fn note_banshee_memory_write(&mut self, addr: u32, len: u32) {
+        let Some(b) = self.banshee().filter(|b| b.extended()) else {
+            return;
+        };
+        let (start, span) = b.desktop_memory();
+        let start = start as u64;
+        let from = (addr as u64).max(start);
+        let to = (addr as u64 + len as u64).min(start + span);
+        if from < to {
+            self.note_video_write((from - start) as usize, to - from);
+        }
     }
 
     /// A byte of the VGA's ports in BAR0 as a read of the port gives it,
@@ -336,6 +360,30 @@ mod tests {
         bus.voodoo_write_8(0x1_00D5, 0x04);
         assert_eq!(bus.banshee_crtc_read(0x1A), 0x04);
         assert_eq!(bus.voodoo_read_16(0xD4), 0x041A);
+    }
+
+    #[test]
+    fn a_write_of_the_desktop_start_is_a_flip() {
+        use crate::voodoo::banshee::{VGA_INIT0, VID_DESKTOP_START_ADDR, VID_PROC_CFG};
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.configure_voodoo(Some(Board::Voodoo3));
+        let bus = &mut cpu.bus;
+        bus.voodoo_write_32(VGA_INIT0, 0x0000_1140);
+        bus.voodoo_write_32(VID_PROC_CFG, 0x0904_0081);
+        assert!(bus.banshee().unwrap().extended());
+        // A guest driver's page flips: through BAR0, then the I/O BAR.
+        let flips = bus.activity.flips;
+        bus.clock.icount += 10_000;
+        bus.voodoo_write_32(VID_DESKTOP_START_ADDR, 0x10_0000);
+        bus.clock.icount += 10_000;
+        bus.banshee_port_write_wide(VID_DESKTOP_START_ADDR, 0x20_0000, 4);
+        assert_eq!(bus.activity.flips, flips + 2);
+        // With the video processor off, as a mode set has it, the start
+        // shows nothing: no flip.
+        bus.voodoo_write_32(VID_PROC_CFG, 0x0904_0080);
+        bus.clock.icount += 10_000;
+        bus.voodoo_write_32(VID_DESKTOP_START_ADDR, 0);
+        assert_eq!(bus.activity.flips, flips + 2);
     }
 
     #[test]

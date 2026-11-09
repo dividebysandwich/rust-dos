@@ -261,7 +261,10 @@ impl Bus {
                 let dwords = data.as_chunks::<4>().0.iter();
                 v.lfb_write_run(index, dwords.map(|&d| u32::from_le_bytes(d)));
             }
-            MemoryRun::Linear(addr) => v.banshee_memory_write(addr, data),
+            MemoryRun::Linear(addr) => {
+                v.banshee_memory_write(addr, data);
+                self.note_banshee_memory_write(addr, len as u32);
+            }
             MemoryRun::Fifo => {}
         }
         true
@@ -286,6 +289,16 @@ impl Bus {
         let Some(v) = &mut self.voodoo else { return };
         let effect = v.write(offset, value, mask, now);
         self.voodoo_effect(effect);
+        // A Banshee's desktop start, its init register in BAR0 (and in
+        // the I/O BAR, which comes here), while the video processor shows
+        // the desktop: a guest driver's page flip. A mode set writes it
+        // with the video processor off, which shows nothing new.
+        if offset < 0x8_0000
+            && offset & 0xFC == crate::voodoo::banshee::VID_DESKTOP_START_ADDR
+            && self.banshee().is_some_and(|b| b.extended())
+        {
+            self.note_display_start();
+        }
     }
 
     /// Texture data put into a Banshee's or Voodoo3's memory from byte
