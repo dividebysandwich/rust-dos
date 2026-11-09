@@ -3120,7 +3120,9 @@ fn mmx_shift_counts_poked_before_each_loop_are_read_where_they_are() {
         }
     }
     assert_eq!((b.cpu.eax(), b.cpu.edx()), (lo, hi));
-    if AVAILABLE {
+    // The ARM64 back end translates no MMX, and leaves at the shifts as
+    // at any SIMD instruction.
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
         assert!(stats.watched < 10, "left at the poked counts: {:?}", stats);
         assert!(stats.blocks < 60, "translated again and again: {:?}", stats);
     }
