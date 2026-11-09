@@ -394,6 +394,7 @@ struct Row<'a> {
 }
 
 impl<'a> Row<'a> {
+    #[inline(always)]
     fn new(st: &'a RasterState, m: Modes, y: i32, scry: i32) -> Self {
         let fbz = m.fbz;
         let (mut dither, mut dither4, mut dither_lookup) = (None, None, None);
@@ -420,10 +421,12 @@ impl<'a> Row<'a> {
         }
     }
 
+    #[inline(always)]
     fn get(&self, at: usize) -> u16 {
         if at < self.st.fb.len() { self.st.fb.get(at) } else { 0 }
     }
 
+    #[inline(always)]
     fn set(&self, at: usize, value: u16) {
         if at < self.st.fb.len() {
             self.st.fb.set(at, value);
@@ -436,6 +439,7 @@ impl<'a> Row<'a> {
         self.dest + self.st.stride.col(x as usize)
     }
 
+    #[inline(always)]
     fn depth_at(&self, x: i32) -> Option<i32> {
         self.depth.map(|d| self.get(d + self.st.aux_stride.col(x as usize)) as i32)
     }
@@ -512,6 +516,7 @@ impl<'a> Row<'a> {
     /// (`APPLY_CHROMAKEY`, `APPLY_ALPHAMASK`, `APPLY_ALPHATEST`); false to
     /// skip the pixel. The chroma test is on `color`, the others on its
     /// alpha.
+    #[inline(always)]
     fn tests(&self, color: u32, alpha: i32, stats: &mut Stats) -> bool {
         let (st, m) = (self.st, self.m);
         if bit(m.fbz, 1) && st.chroma_rejects(color) {
@@ -522,24 +527,7 @@ impl<'a> Row<'a> {
             stats.afunc_fail += 1;
             return false;
         }
-        if bit(m.am, 0) {
-            let reference = (m.am >> 24) as i32;
-            let pass = match (m.am >> 1) & 7 {
-                0 => false,
-                1 => alpha < reference,
-                2 => alpha == reference,
-                3 => alpha <= reference,
-                4 => alpha > reference,
-                5 => alpha != reference,
-                6 => alpha >= reference,
-                _ => true,
-            };
-            if !pass {
-                stats.afunc_fail += 1;
-                return false;
-            }
-        }
-        true
+        self.alpha_test(alpha, stats)
     }
 
     /// Fog, alpha blending and the writes (`PIXEL_PIPELINE_MODIFY`,
@@ -1109,6 +1097,7 @@ fn combine(cp: u32, c_other: u32, c_local: u32, texel: u32) -> (i32, i32, i32, i
 }
 
 impl Row<'_> {
+    #[inline(always)]
     fn alpha_test(&self, alpha: i32, stats: &mut Stats) -> bool {
         let am = self.m.am;
         if !bit(am, 0) {

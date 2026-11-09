@@ -78,12 +78,13 @@ fn two_unit_state(regs: [u32; 6]) -> RasterState {
     }
 }
 
-/// The same textured triangle through a matching variant and Generic.
+/// The same triangle through a matching variant and Generic.
 /// No register bit changes between the two measurements.
 pub fn pipelines(c: &mut Criterion) {
     pipeline(
         c,
         "video/voodoo/pipeline",
+        2,
         [
             0x0009_4771,
             0x0D42_2409,
@@ -102,6 +103,7 @@ pub fn pipelines(c: &mut Criterion) {
         pipeline(
             c,
             &format!("video/voodoo/{name}"),
+            2,
             [0x0008_43E1, cp, 0x0000_5110, 0xC0, 0x8000_0006, texture],
         );
     }
@@ -115,6 +117,7 @@ pub fn pipelines(c: &mut Criterion) {
         pipeline(
             c,
             &format!("video/voodoo/{name}"),
+            2,
             [0x0001_0F71, 0x0800_2401, alpha, fog, 0x0000_0507, 0x0824_1507],
         );
     }
@@ -128,12 +131,29 @@ pub fn pipelines(c: &mut Criterion) {
         pipeline(
             c,
             &format!("video/voodoo/{name}"),
+            2,
             [0x0008_4321, 0x0C00_0035, alpha, 0, texture, 0x0422_10C0],
         );
     }
+    // The built-in Windows' Direct3D HAL on a Voodoo3, additive with 4x4
+    // dither, as in Omikron's first dialogue: V16 with TMU 0's bilinear
+    // RGB565 texture and a depth test, and V19 untextured. The clip and
+    // RGB write bits are added, which the variants leave free.
+    pipeline(
+        c,
+        "video/voodoo/hal-add",
+        2,
+        [0x0009_0331, 0x0000_2401, 0x0004_4410, 0, 0x0C26_1A0F, 0x0422_10C0],
+    );
+    pipeline(
+        c,
+        "video/voodoo/hal-add-untextured",
+        0,
+        [0x0008_0301, 0, 0x0004_4410, 0, 0, 0],
+    );
 }
 
-fn pipeline(c: &mut Criterion, name: &str, regs: [u32; 6]) {
+fn pipeline(c: &mut Criterion, name: &str, texcount: usize, regs: [u32; 6]) {
     let st = two_unit_state(regs);
     let tp = TmuParams {
         starts: 10 << 32,
@@ -157,13 +177,13 @@ fn pipeline(c: &mut Criterion, name: &str, regs: [u32; 6]) {
         tmu: [tp, tp],
         ..Default::default()
     };
-    let variant = raster::variant(&st, 2).expect("the state has a variant");
+    let variant = raster::variant(&st, texcount).expect("the state has a variant");
     let draw = |variant, stats: &mut Stats| {
         let mut stipple = 0;
         for y in 0..240 {
             raster::scanline_as(
                 variant,
-                2,
+                texcount,
                 &st,
                 &p,
                 y,
