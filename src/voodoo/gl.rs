@@ -3031,6 +3031,10 @@ pub(crate) mod tests {
     /// Replay a saved Glide scene without changing the running game.
     /// RUST_DOS_VOODOO_STATE selects the state; images go under target/tmp.
     /// RUST_DOS_VOODOO_DRIVE_C redirects its C: image to a scratch disk.
+    /// RUST_DOS_VOODOO_SAMPLES sets the samples a pixel, and with
+    /// RUST_DOS_VOODOO_BARRIER=1 blending as the card does reads the
+    /// buffer behind a texture barrier where the driver has one, rather
+    /// than a copy.
     #[test]
     #[ignore = "requires a saved Glide scene and a desktop OpenGL context"]
     fn replay_saved_glide_scene() {
@@ -3065,6 +3069,12 @@ pub(crate) mod tests {
         let gl = unsafe { glow::Context::from_loader_function(|s| proc_address(&video, s)) };
         let samples = std::env::var("RUST_DOS_VOODOO_SAMPLES").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
         let mut renderer = VoodooGl::new(&gl, Glsl::Gl150, 1, samples, 1).unwrap();
+        if std::env::var("RUST_DOS_VOODOO_BARRIER").is_ok_and(|v| v == "1") {
+            // SAFETY: as above.
+            let barrier = unsafe { TextureBarrier::load(&gl, |s| proc_address(&video, s)) };
+            println!("texture barrier: {}", barrier.is_some());
+            renderer.set_texture_barrier(barrier);
+        }
         let save = |name: &str, rgb: &[u8], w, h| {
             let file = fs::File::create(format!("target/tmp/{name}.png")).unwrap();
             let mut encoder = png::Encoder::new(file, w, h);
@@ -3111,9 +3121,10 @@ pub(crate) mod tests {
                     *rgb = [table[rgb[0] as usize][0], table[rgb[1] as usize][1], table[rgb[2] as usize][2]];
                 }
                 save(&format!("glide-{frame}-opengl"), &rendered, w, h);
-                let bad = reference.as_chunks::<3>().0.iter().zip(rendered.as_chunks::<3>().0)
-                    .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 32)).count();
-                println!("frame {frame}: {bad} pixels differ by more than 32");
+                let pairs = || reference.as_chunks::<3>().0.iter().zip(rendered.as_chunks::<3>().0);
+                let bad = pairs().filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 32)).count();
+                let differ = pairs().filter(|(a, b)| a != b).count();
+                println!("frame {frame}: {differ} pixels differ, {bad} by more than 32");
             }
         }
         renderer.destroy(&gl);
