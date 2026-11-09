@@ -1560,8 +1560,12 @@ fn far_ret_pm(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
 /// translated. False, with nothing changed, for forms other than MOV, the
 /// ALU operations and the three-operand IMUL with an immediate (Riverworld
 /// pokes the factors of its transforms into those), and where the watched
-/// bytes take in more than the immediate.
+/// bytes take in more than the immediate. An MMX shift by a constant
+/// goes by the count it reads instead (`live_shift`).
 pub fn live_immediate(instr: &Instruction, phys: u32, watched: &[usize], u: &mut Vec<Uop>) -> bool {
+    if u.iter().any(shift_imm) {
+        return live_shift(instr, phys, watched, u);
+    }
     let last = match instr.op_count() {
         2 => 1,
         3 if instr.mnemonic() == Mnemonic::Imul => 2,
@@ -1648,4 +1652,75 @@ pub fn live_immediate(instr: &Instruction, phys: u32, watched: &[usize], u: &mut
     });
     u.splice(at, [load].into_iter().chain(cut));
     true
+}
+
+/// `live_immediate` for an MMX shift by a constant, whose count Delta
+/// Force pokes into the shifts of its terrain loop: the count byte is
+/// read into T0 and the shift goes by it as by a register, which shifts
+/// the same for any count from 0 to 255 (past the lane's width, to 0 or
+/// to the sign). The shift's operations use no temporary and leave its
+/// second host register unused (`simd::mmx_binary`).
+fn live_shift(instr: &Instruction, phys: u32, watched: &[usize], u: &mut Vec<Uop>) -> bool {
+    if instr.op_count() != 2 || instr.op_kind(1) != OpKind::Immediate8 {
+        return false;
+    }
+    let start = instr.len() - 1;
+    if watched.iter().any(|&w| w < start) {
+        return false;
+    }
+    let plain = |uop: &Uop| {
+        matches!(
+            uop,
+            Uop::SimdGuard { .. }
+                | Uop::VLoad {
+                    src: VSrc::R(_),
+                    ..
+                }
+                | Uop::VOp { .. }
+                | Uop::EnterMmx
+                | Uop::VSet { .. }
+        )
+    };
+    if !u.iter().all(plain) {
+        return false;
+    }
+    let Some((site, shift, a, b)) = u.iter().enumerate().find_map(|(k, uop)| match *uop {
+        Uop::VOp {
+            op: VOp::ShiftImm(shift, _),
+            a,
+            b,
+        } => Some((k, shift, a, b)),
+        _ => None,
+    }) else {
+        return false;
+    };
+    let op = shift.by_quadword();
+    if u.iter()
+        .any(|uop| matches!(*uop, Uop::VLoad { x, .. } | Uop::VSet { x, .. } if x == b))
+    {
+        return false;
+    }
+    let load = Uop::LoadCode {
+        t: T0,
+        phys: phys + start as u32,
+        size: 1,
+        signed: false,
+    };
+    let count = Uop::VLoad {
+        x: b,
+        src: VSrc::T(T0),
+    };
+    u.splice(site..site + 1, [load, count, Uop::VOp { op, a, b }]);
+    true
+}
+
+/// An MMX shift by a constant.
+fn shift_imm(uop: &Uop) -> bool {
+    matches!(
+        uop,
+        Uop::VOp {
+            op: VOp::ShiftImm(..),
+            ..
+        }
+    )
 }

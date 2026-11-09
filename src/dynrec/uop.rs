@@ -183,6 +183,22 @@ pub enum VShift {
     Psrad,
 }
 
+impl VShift {
+    /// The same shift by b's low quadword.
+    pub fn by_quadword(self) -> VOp {
+        match self {
+            VShift::Psllw => VOp::Psllw,
+            VShift::Pslld => VOp::Pslld,
+            VShift::Psllq => VOp::Psllq,
+            VShift::Psrlw => VOp::Psrlw,
+            VShift::Psrld => VOp::Psrld,
+            VShift::Psrlq => VOp::Psrlq,
+            VShift::Psraw => VOp::Psraw,
+            VShift::Psrad => VOp::Psrad,
+        }
+    }
+}
+
 /// Floating-point operations on two host registers (`Uop::VFloat`): a = a
 /// OP b, as the SSE instruction does it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
