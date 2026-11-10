@@ -683,6 +683,39 @@ fn a_string_move_into_the_frame_buffer_writes_what_its_dwords_write() {
 }
 
 #[test]
+fn a_services_copy_into_the_frame_buffer_goes_in_words_and_dwords() {
+    // GDI's rows on the DC of a surface on the card (issue 910) go
+    // through the services' copies, which the card has to take as a
+    // program's copy would: no bytes, which it ignores. Ten pixels from
+    // an odd one (a word, four dwords, a word), read back the same, then
+    // four of them filled from another odd one.
+    let mut bus = bus(Board::Standard);
+    init(&mut bus);
+    w(&mut bus, LFB_MODE, 0);
+    let row: Vec<u8> = (0..20u32).map(|i| (i * 37 + 5) as u8).collect();
+    let at = |x: usize| (BASE + 0x40_0000 + 3 * 2048 + 2 * x) as u32;
+    bus.guest_write_bytes(at(1), &row);
+    for x in 0..12 {
+        let want = match x {
+            1..=10 => u16::from_le_bytes([row[2 * x - 2], row[2 * x - 1]]),
+            _ => 0,
+        };
+        assert_eq!(pixel(&bus, 0, x, 3), want, "pixel {x}");
+    }
+    let mut back = vec![0; row.len()];
+    bus.guest_read_bytes(at(1), &mut back);
+    assert_eq!(back, row, "read back");
+    bus.guest_fill(at(3), 8, 0x5A);
+    for x in 2..8 {
+        let want = match x {
+            3..=6 => 0x5A5A,
+            _ => u16::from_le_bytes([row[2 * x - 2], row[2 * x - 1]]),
+        };
+        assert_eq!(pixel(&bus, 0, x, 3), want, "filled pixel {x}");
+    }
+}
+
+#[test]
 fn a_string_move_into_a_banshee_writes_what_its_dwords_write() {
     const BAR1: usize = 0xD200_0000;
     const D3: usize = BASE + 0x20_0000;

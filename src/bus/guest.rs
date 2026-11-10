@@ -98,12 +98,7 @@ impl Bus {
             let Some(addr) = self.guest_physical(lin.wrapping_add(offset as u32), false) else {
                 return;
             };
-            let to = &mut data[offset..offset + run];
-            if self.is_plain_ram(addr, run) {
-                to.copy_from_slice(&self.ram[addr..addr + run]);
-            } else {
-                self.read_mapped(addr, to);
-            }
+            self.read_into(addr, &mut data[offset..offset + run]);
         }
     }
 
@@ -129,7 +124,8 @@ impl Bus {
             if self.is_plain_ram(addr, run) {
                 self.fill_ram(addr..addr + run, value);
             } else {
-                self.write_mapped(addr, &vec![value; run]);
+                // A page's run is at most a page long.
+                self.write_run(addr, &[value; 0x1000][..run]);
             }
         }
     }
@@ -153,75 +149,7 @@ impl Bus {
             let Some(addr) = self.guest_physical(lin.wrapping_add(offset as u32), true) else {
                 return;
             };
-            if self.is_plain_ram(addr, run) {
-                self.load_bytes(addr, &data[offset..offset + run]);
-            } else {
-                self.write_mapped(addr, &data[offset..offset + run]);
-            }
-        }
-    }
-
-    /// The size of the access a 32-bit program makes at `addr` with
-    /// `left` bytes to go: a dword where it is aligned to one, a word
-    /// where it is aligned to that, a byte otherwise.
-    fn access_size(addr: usize, left: usize) -> usize {
-        if addr.is_multiple_of(4) && left >= 4 {
-            4
-        } else if addr.is_multiple_of(2) && left >= 2 {
-            2
-        } else {
-            1
-        }
-    }
-
-    /// Fill `data` from the device memory at physical `addr` (not plain
-    /// RAM) as a 32-bit program's copy reads it: aligned dwords and words,
-    /// bytes only where they can't be. A Voodoo Graphics' or Voodoo2's
-    /// linear frame buffer reads no bytes: GDI's DIB section on it (a
-    /// card surface's DC) reads pixels.
-    fn read_mapped(&mut self, addr: usize, data: &mut [u8]) {
-        let mut i = 0;
-        while i < data.len() {
-            let at = addr + i;
-            let size = Self::access_size(at, data.len() - i);
-            let value = match size {
-                4 => self.read_32(at),
-                2 => self.read_16(at) as u32,
-                _ => self.read_8(at) as u32,
-            };
-            data[i..i + size].copy_from_slice(&value.to_le_bytes()[..size]);
-            i += size;
-        }
-    }
-
-    /// Write `data` to the device memory at physical `addr` (not plain
-    /// RAM) as `read_mapped` reads it: a Voodoo Graphics or Voodoo2
-    /// ignores byte writes to its window, so GDI's drawing on a card
-    /// surface's DC goes in words and dwords. Its run of aligned dwords
-    /// into the card goes in one call.
-    fn write_mapped(&mut self, addr: usize, data: &[u8]) {
-        let mut i = 0;
-        let mut run_tried = false;
-        while i < data.len() {
-            let at = addr + i;
-            let size = Self::access_size(at, data.len() - i);
-            if size == 4 && !run_tried {
-                run_tried = true;
-                let dwords = (data.len() - i) & !3;
-                if self.write_to_voodoo(at, &data[i..i + dwords]) {
-                    i += dwords;
-                    continue;
-                }
-            }
-            let mut bytes = [0u8; 4];
-            bytes[..size].copy_from_slice(&data[i..i + size]);
-            let value = u32::from_le_bytes(bytes);
-            match size {
-                4 => self.write_32(at, value),
-                2 => _ = self.write_16(at, value as u16),
-                _ => _ = self.write_8(at, value as u8),
-            }
-            i += size;
+            self.write_run(addr, &data[offset..offset + run]);
         }
     }
 }
