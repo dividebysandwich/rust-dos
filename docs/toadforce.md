@@ -62,11 +62,14 @@ Five points define the design:
    it. This is the model the Voodoo3 emulation already uses, and it
    makes save states, `Lock` pointers and the software renderer work the
    same way as today.
-3. A software renderer defines what the card draws, in integer
-   arithmetic where the pixel pipeline allows it. The OpenGL renderer
-   draws the same commands with shaders generated from the pipeline
-   state, as wined3d, DXVK and xemu do, and is tested against the
-   software renderer within stated tolerances.
+3. Games are played on the host's GPU. The OpenGL renderer draws the
+   commands with shaders generated from the pipeline state, as wined3d,
+   DXVK and xemu do, and the card is shaped so that the GPU does the
+   transform, the lighting and the pixels with nothing read back in a
+   frame. A software renderer defines what the card draws, in integer
+   arithmetic where the pixel pipeline allows it, and the OpenGL
+   renderer is tested against it within stated tolerances. It also
+   draws where there is no GPU to use, slowly.
 4. The capabilities are a fixed table for each feature level. A level
    never changes once released. New features make a new level, which the
    guest's driver has to ask for.
@@ -320,6 +323,27 @@ state-level command set carries with far less guest code.
    cards of 2000 to 2002 reported, because games size their data from
    them. Where a game can't see the difference (operations accepted,
    internal precision), the card does the complete thing.
+7. **The host's GPU is the path games run on.** The card is designed
+   for the OpenGL renderer's speed first, and the software renderer
+   pays for it where the two pull apart. Three things follow:
+   - Whatever the card defines, an OpenGL 3.2 GPU can do in its own
+     pipeline. A definition that would make the renderer read a target
+     back during a frame, or do on the processor what a shader can do,
+     is changed until it doesn't (the dithering order of 16-bit targets
+     is the example).
+   - The work goes to the GPU whole: untransformed vertices, lights and
+     stage state, with buffers and textures uploaded once and found
+     again by their place in card memory.
+   - A command is complete for the guest when `RING_PUT` returns, and
+     the GPU need not have drawn it by then. The ownership tracking
+     makes up the difference, reading pixels back only when the guest
+     reads them.
+
+   The software renderer is the definition, the test reference and the
+   fallback. It is expected to be several times slower than a GPU, and
+   too slow for some target games at their usual resolutions. Speed
+   work on it comes after the OpenGL renderer's, and no feature of the
+   card is held back or bent to make it faster.
 
 ## The card
 
@@ -755,9 +779,18 @@ sets of primitives.
 A new module (`src/toadforce/raster/`), which draws into card memory
 with the span workers of the Voodoo renderer's kind: up to four threads
 on interleaved rows, so the picture doesn't depend on the thread count.
-It doesn't have to reach full speed at 1024x768. It is what
-`--deterministic`, the tests, the web build, and hosts without OpenGL
-3.2 use, and a 640x480 game should be playable on it.
+It is what `--deterministic`, the tests, the web build, and hosts
+without OpenGL 3.2 use.
+
+It is slow next to a GPU, and the design accepts that (rule 7). Each
+pixel runs up to eight stages and four texture samples on the
+processor, with transform and lighting for every vertex before it, on
+threads the emulated machine also needs. The aim is a 640x480 game with
+one or two textures playable on it. A game at 1024x768 with four
+textures, or one that leans on hardware T&L for its vertex counts,
+isn't expected to reach full speed, and a user with such a game needs a
+host with OpenGL 3.2. What its speed turns out to be is measured in
+phases 2 and 3 and written here.
 
 It doesn't break rule 2 of the built-in Windows, which keeps a second
 3D pipeline out of the Direct3D layer: this renderer is the card's, as
@@ -990,8 +1023,9 @@ Each phase is one or a few pull requests that leave main working.
    joins the proof once #889 lets it run on the built-in Windows, or
    with the Windows 98 driver of phase 6.
 4. **The OpenGL renderer.** Generated shaders, caches, GPU-owned
-   targets, the disk cache. Proof: renderer agreement tests, and frame
-   rates in the phase 2 and 3 games against the software renderer.
+   targets, the disk cache. Proof: renderer agreement tests, and the
+   phase 2 and 3 games at their full frame rate on it, measured against
+   the software renderer on a four-core host as well as a larger one.
 5. **Direct3D 8 and OpenGL 1.3 on the card**, with the OpenGL front end
    separated from WGL. Proof: Max Payne, MDK2, Oni.
 6. **The Windows 98 driver**: display minidriver, then the DirectDraw
@@ -999,9 +1033,12 @@ Each phase is one or a few pull requests that leave main working.
 7. **Level 2**, when a game that needs shaders is picked up.
 
 Phases 2 and 3 come before the OpenGL renderer so that the reference
-exists before the accelerator that is tested against it, and so that
+exists before the renderer that is tested against it, and so that
 Zanzarah and Grom, which need formats more than speed, are unblocked
-early.
+early. This is the order of building. The order of importance is rule
+7's: phases 2 and 3 write the lowering, the caches' keys and the
+command decoding for the OpenGL renderer to use, and the games of those
+phases may run below full speed until phase 4.
 
 ## Alternatives considered
 
