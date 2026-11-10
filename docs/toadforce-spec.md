@@ -56,7 +56,7 @@ One function with a type 00h header.
 |---|---|---|
 | 00h | vendor ID | 1234h |
 | 02h | device ID | 7F01h |
-| 04h | command | bit 0 I/O space, bit 1 memory space, both writable; 0 after reset |
+| 04h | command | bit 0 I/O space, bit 1 memory space, both writable; 0003h at power-on |
 | 06h | status | 0000h (no capability list) |
 | 08h | revision | 00h |
 | 09h | class | 03h, 00h, 00h: VGA-compatible display controller |
@@ -72,6 +72,11 @@ One function with a type 00h header.
 The three BARs decode while bit 1 of the command register is set. The
 legacy VGA ports (3B0h to 3DFh) decode while bit 0 is set, and the VGA
 memory at A0000h to BFFFFh while bit 1 is.
+
+The emulator's BIOS doesn't enumerate PCI, so the card starts as a PCI
+BIOS leaves the boot display adapter: I/O and memory decoding on, and
+each BAR at a base the emulator assigns, as the Banshee's are. A guest
+reads the BARs to find them and may move them.
 
 The vendor and device IDs aren't registered to this card. A driver that
 finds them reads `ID` and goes on only when it holds 44414F54h.
@@ -286,11 +291,13 @@ While the card's mode is shown:
 - The picture is the surface at `MODE_START`. A `P8` pixel shows the
   colour `PALETTE` has for it.
 - Writes to `MODE_WIDTH`, `MODE_HEIGHT`, `MODE_FORMAT`, `MODE_PITCH` and
-  `MODE_REFRESH` are kept and change nothing until the next write of 1
-  to `MODE_ENABLE`.
+  `MODE_REFRESH` are kept and read back, and change nothing until the
+  next write of 1 to `MODE_ENABLE`. "The mode shown" is the values those
+  registers had at that write, which the card keeps apart from them.
 - A write to `MODE_START` shows from the next frame, and cancels a
-  pending flip. A value whose surface reaches outside card memory is
-  rejected with `BAD_RANGE`.
+  pending flip. A value whose surface, with the height, pitch and
+  format of the mode shown, reaches outside card memory is rejected
+  with `BAD_RANGE`.
 - The VGA registers keep their contents and take writes, and none of it
   is shown.
 
@@ -299,7 +306,8 @@ Card memory is unchanged by either write.
 
 ### Timing
 
-With the card's mode shown, time is counted from the write that set it:
+With the card's mode shown, time is counted from the write that set it,
+and `MODE_HEIGHT` and `MODE_REFRESH` below are the mode shown's values:
 
 - a frame lasts 1 000 000 000 / `MODE_REFRESH` nanoseconds of the
   emulated clock, rounded down,
@@ -356,8 +364,8 @@ offset 0, since `RING_PUT` and `RING_GET` are 0.
 
 A saved state of the emulator holds everything this document describes.
 After a load, each register, card memory, the ring, the state commands
-set, a pending flip and the position in the frame are as they were at
-the save, and a guest can't tell that it happened.
+set, the mode shown, a pending flip and the position in the frame are
+as they were at the save, and a guest can't tell that it happened.
 
 ## 9. Commands
 
@@ -403,12 +411,12 @@ at level 0. Both rectangles lie inside their surfaces.
   `x` of `dw` and row `y` of `dh` takes the source pixel at column
   `((2x + 1) * sw) / (2 * dw)` and row `((2y + 1) * sh) / (2 * dh)`,
   divisions rounded down: the source pixel under the destination
-  pixel's centre. With overlapping memory the result of a stretch is
-  undefined within the destination rectangle, and nothing outside it is
-  written.
+  pixel's centre. Overlapping memory is read as for a copy: the whole
+  source rectangle before any pixel is written.
 - With bit 0 of the flags, a source pixel whose value equals the low
-  bits of the colour key, compared over the whole pixel, leaves its
-  destination pixel as it was.
+  bits of the colour key leaves its destination pixel as it was. The
+  comparison covers the bits the format defines: bits 24 to 31 of
+  `X8R8G8B8` take no part.
 
 **`FLIP`, 0003h.** Length 3.
 
@@ -417,10 +425,11 @@ at level 0. Both rectangles lie inside their surfaces.
 | 1 | offset of the surface to show |
 | 2 | flags: bit 0 wait for the vertical blank |
 
-See "Flips" in chapter 6. The surface has the current mode's size and
-pitch and lies inside card memory, or the command is rejected with
-`BAD_RANGE`. With `MODE_ENABLE` at 0 the flip is made at once whatever
-the flag says, checked against the `MODE` registers' values.
+See "Flips" in chapter 6. The surface has the height, pitch and format
+of the mode shown and lies inside card memory, or the command is
+rejected with `BAD_RANGE`. With `MODE_ENABLE` at 0 the flip is made at
+once whatever the flag says, checked against the `MODE` registers'
+values.
 
 ### Level 1
 

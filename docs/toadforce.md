@@ -112,7 +112,7 @@ What the runs reached:
 |---|---|---|
 | Giants | gameplay, mission 1 | |
 | No One Lives Forever | gameplay, started from `LITHTECH.EXE` | `NOLF.EXE` is SafeDisc 2 (#889) |
-| Max Payne | gameplay, the tutorial, traced with its own MSVCRT before #879 was fixed | |
+| Max Payne | gameplay, the tutorial, from the release's no-CD `MaxPayne.exe`, traced with its own MSVCRT before #879 was fixed | the original `MaxPayne.exe` is SafeDisc 2 (#889) |
 | Oni | gameplay, the training level | |
 | Zanzarah | the 3D title scene; gameplay in the Fairy Garden with the closed fixes of #593 and #613 applied locally | #583 |
 | Grom | initialisation | #645 |
@@ -299,8 +299,9 @@ state-level command set carries with far less guest code.
    configuration space, registers, card memory and the command ring.
    Rule 1 of the built-in Windows ("output goes through the emulated
    hardware") holds for it as for the Voodoo3.
-2. **Card memory and registers are the whole state.** A save state holds
-   them and nothing from the host's GPU.
+2. **The card's own state is the whole state**: card memory, the ring,
+   registers and the state commands set. A save state holds them and
+   nothing from the host's GPU.
 3. **The software renderer defines the pixels.** `--deterministic` runs
    it. The OpenGL renderer is an accelerator that has to agree with it
    within the tolerances this document states.
@@ -365,8 +366,8 @@ All are 32 bits, little-endian.
 | 014h | `IRQ_ENABLE` | R/W | same bits |
 | 018h | `RING_PUT` | R/W | byte offset after the last command written |
 | 01Ch | `RING_GET` | R | byte offset the card has consumed to |
-| 020h | `ERROR` | R/W1C | code of the first rejected command |
-| 024h | `ERROR_AT` | R | ring offset of that command |
+| 020h | `ERROR` | R/WC | code of the first rejection; any write clears it |
+| 024h | `ERROR_AT` | R | ring offset of that command, FFFFFFFFh for a register write |
 | 028h | `MEMORY` | R | size of card memory in bytes |
 | 02Ch | `RESET` | W | writing 1 resets registers and command state |
 | 040h | `MODE_ENABLE` | R/W | 1: scan out the mode below instead of the VGA's |
@@ -480,6 +481,10 @@ Drawing:
 | `DRAW_INDEXED` | the same with 16-bit indices inline |
 | `DRAW_BUFFER` | primitive type, vertex format, stride, vertex buffer offset, first, count |
 | `DRAW_BUFFER_INDEXED` | the same with an index buffer offset, or indices inline |
+
+A command's length is a 16-bit count of words, so an inline draw holds
+at most 65535 words with its header and arguments. The driver splits a
+larger one into several commands or draws it from a buffer.
 
 The vertex format is a Direct3D FVF code: position as XYZ, XYZRHW
 (already transformed, which bypasses transform and lighting) or XYZ with
@@ -661,9 +666,10 @@ sign and extra range only inside an operation:
   and clamp.
 - `ADDSIGNED` is `a + b - 128`; `ADDSMOOTH` is
   `a + b - round(a * b / 255)`.
-- `DOTPRODUCT3` is
-  `4 * ((a.r-128)*(b.r-128) + (a.g-128)*(b.g-128) + (a.b-128)*(b.b-128))`
-  scaled to 0 to 255 and replicated to all channels.
+- `DOTPRODUCT3`, with
+  `s = (a.r-128)*(b.r-128) + (a.g-128)*(b.g-128) + (a.b-128)*(b.b-128)`,
+  is 0 when `s` is 0 or less and `min(255, (4 * s + 127) / 255)`
+  otherwise, the division rounded down, replicated to all channels.
 - `BUMPENVMAP` reads signed (du, dv) from its texture, multiplies them
   by the stage's 2x2 matrix in floating point, adds the result to the
   next stage's texture coordinates, and passes `CURRENT` through.
@@ -822,10 +828,12 @@ small instruction set. It is left out until a measurement asks for it.
 `impl State` for the card reads back whatever is newer on the GPU and
 saves the registers, the state the commands set (a fixed-size block:
 render and stage states, matrices, lights, material, clip planes, the
-texture and palette tables) and card memory. Loading rebuilds the host
-caches from card memory, as the Voodoo's `Resync` does. The ring holds
-nothing between commands, since the card consumes it at each
-`RING_PUT`.
+texture and palette tables), the mode shown, a pending flip, the
+position in the frame, card memory and the ring. Loading rebuilds the
+host caches from card memory, as the Voodoo's `Resync` does. The ring
+holds no commands still to run, since the card consumes them at each
+`RING_PUT`, but the guest reads back what it wrote there, so its
+contents are saved with the rest.
 
 With `--deterministic` no GPU link is attached, as for the Voodoo, and
 the software renderer draws. A change to the OpenGL renderer can't be
@@ -915,13 +923,13 @@ Proposed keys, following the Voodoo's:
 
 | Key | Values | Default |
 |---|---|---|
-| `machine` | `toadforce` | |
+| `machine` | `svga_toadforce` | |
 | `toadforce_level` | `1` (later `2`): the highest level the card offers | newest |
 | `toadforce_memory` | `32`, `64`, `128` | `64` |
 | `toadforce_renderer` | `software`, `opengl` | `opengl` where a context exists |
 | `toadforce_scale` | `1` to `4` | `1` |
-| `toadforce_msaa` | `0`, `2`, `4`, `8` | `0` |
-| `toadforce_anisotropy` | `0` (the game's) to `16` | `0` |
+| `toadforce_msaa` | `off`, `2`, `4`, `8` | `off` |
+| `toadforce_anisotropy` | `off` (the game's), `2`, `4`, `8`, `16` | `off` |
 
 ## Testing
 
@@ -966,12 +974,16 @@ Each phase is one or a few pull requests that leave main working.
 2. **The software renderer and the Direct3D 7 HAL**, for transformed
    vertices first: the lowering, the stage cascade, all texture formats
    including DXT and bump formats, depth, stencil, blending, fog. The
-   HAL interface split in `ddraw/d3d`. Proof: Zanzarah's Fairy Garden
-   with DDS textures and no game fix (#583, #606), and Grom past
-   `screen.Init` (#645).
+   HAL interface split in `ddraw/d3d`, with rule 2 of
+   `builtin-windows-architecture.md` ("Direct3D runs on the emulated
+   3dfx card's HAL") reworded to the emulated card's HAL, whichever
+   card it is. Proof: Zanzarah's Fairy Garden with DDS textures and no
+   game fix (#583, #606), and Grom past `screen.Init` (#645).
 3. **Transform and lighting in the card.** Untransformed draws, lights,
    vertex blending, clip planes, texture coordinate generation, the T&L
-   HAL device. Proof: Giants' terrain with bump mapping, Black & White.
+   HAL device. Proof: Giants' terrain with bump mapping. Black & White
+   joins the proof once #889 lets it run on the built-in Windows, or
+   with the Windows 98 driver of phase 6.
 4. **The OpenGL renderer.** Generated shaders, caches, GPU-owned
    targets, the disk cache. Proof: renderer agreement tests, and frame
    rates in the phase 2 and 3 games against the software renderer.
