@@ -7,6 +7,7 @@ pub mod cga;
 pub mod composite;
 pub mod compose;
 pub mod crt;
+pub mod dxt;
 pub mod echo;
 pub mod et4000;
 pub mod hercules;

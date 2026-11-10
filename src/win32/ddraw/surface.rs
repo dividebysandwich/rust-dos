@@ -27,12 +27,13 @@ use super::{
     DDERR_INVALIDPARAMS, DDERR_INVALIDPIXELFORMAT, DDERR_INVALIDRECT, DDERR_MOREDATA,
     DDERR_NOCLIPPERATTACHED, DDERR_NOCOLORKEY, DDERR_NOCOOPERATIVELEVELSET, DDERR_NODC,
     DDERR_NOEXCLUSIVEMODE, DDERR_NOOVERLAYHW, DDERR_NOPALETTEATTACHED, DDERR_NOTAOVERLAYSURFACE,
-    DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_NOTLOCKED, DDERR_OUTOFVIDEOMEMORY,
+    DDERR_NOTEXTUREHW, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_NOTLOCKED, DDERR_OUTOFVIDEOMEMORY,
     DDERR_PRIMARYSURFACEALREADYEXISTS, DDERR_SURFACEALREADYATTACHED, DDERR_SURFACEBUSY,
     DDERR_SURFACELOST, DDERR_WRONGMODE, Format, Object, V_SURFACE1, V_SURFACE4, V_SURFACE7,
     display, palette, state, voodoo,
 };
 use crate::cpu::Cpu;
+use crate::video::dxt;
 use crate::win32::gdi32;
 use crate::win32::screen;
 
@@ -99,9 +100,6 @@ pub const MEM_SYSTEM: u32 = 1;
 pub const MEM_VIDEO: u32 = 2;
 /// A buffer of the 3dfx device's card (`voodoo.rs`): `bits` is which.
 pub const MEM_CARD: u32 = 3;
-
-/// The compressed formats, which only system memory has.
-const DXT: [&[u8; 4]; 5] = [b"DXT1", b"DXT2", b"DXT3", b"DXT4", b"DXT5"];
 
 /// A DDSURFACEDESC or DDSURFACEDESC2, as its fields are.
 #[derive(Clone, Debug, Default)]
@@ -753,11 +751,19 @@ fn pitch_of(width: u32, bits: u32) -> u32 {
     (width * bits).div_ceil(8).next_multiple_of(PITCH_ALIGN)
 }
 
+/// The DXT format of a compressed pixel format.
+pub fn dxt_format(f: &Format) -> Option<dxt::Format> {
+    if f.flags & DDPF_FOURCC == 0 {
+        return None;
+    }
+    dxt::Format::from_fourcc(f.fourcc)
+}
+
 /// Check a pixel format a program gave: the ones surfaces can have.
 fn check_format(f: &Format, caps: &[u32; 4]) -> Result<Format, u32> {
     if f.flags & DDPF_FOURCC != 0 {
-        let code = f.fourcc.to_le_bytes();
-        if !DXT.iter().any(|d| **d == code) {
+        // The compressed formats, which only system memory has.
+        if dxt::Format::from_fourcc(f.fourcc).is_none() {
             return Err(DDERR_INVALIDPIXELFORMAT);
         }
         return Ok(Format {
@@ -958,19 +964,31 @@ pub fn make(
             return Err(DDERR_INVALIDPIXELFORMAT);
         }
         if f.flags & DDPF_FOURCC != 0 {
-            // Compressed formats are in system memory, and managed.
-            if caps[0] & DDSCAPS_SYSTEMMEMORY == 0 && !managed {
+            // Compressed formats are in system memory, and managed. They
+            // are whole blocks of 4x4 pixels, as DirectX 7 on Windows 98
+            // SE makes them: a width or height that isn't a multiple of
+            // 4 fails. Mipmap levels below 4 pixels are made, of one
+            // block each. One asked for without a memory is put in system
+            // memory, as there; a texture asked for in video memory fails
+            // with DDERR_NOTEXTUREHW, as on a card without compressed
+            // textures there.
+            if caps[0] & DDSCAPS_VIDEOMEMORY != 0 {
+                return Err(if caps[0] & DDSCAPS_TEXTURE != 0 {
+                    DDERR_NOTEXTUREHW
+                } else {
+                    DDERR_INVALIDPARAMS
+                });
+            }
+            if !managed {
+                caps[0] |= DDSCAPS_SYSTEMMEMORY;
+            }
+            if !desc.width.is_multiple_of(4) || !desc.height.is_multiple_of(4) {
                 return Err(DDERR_INVALIDPARAMS);
             }
         }
         (width, height, format) = (desc.width, desc.height, f);
-        pitch = if f.flags & DDPF_FOURCC != 0 {
-            let block = if f.fourcc == u32::from_le_bytes(*b"DXT1") {
-                8
-            } else {
-                16
-            };
-            width.div_ceil(4).max(1) * height.div_ceil(4).max(1) * block
+        pitch = if let Some(dxt) = dxt_format(&f) {
+            dxt.size(width, height) as u32
         } else if card && voodoo::role(caps[0]).is_some() {
             // One of the card's buffers (a back buffer made on its own
             // and attached later, too): its rows are the linear frame
@@ -1035,7 +1053,10 @@ pub fn make(
         let mut sub = base.clone();
         sub.width = (width >> level).max(1);
         sub.height = (height >> level).max(1);
-        sub.pitch = pitch_of(sub.width, format.bits);
+        sub.pitch = match dxt_format(&format) {
+            Some(dxt) => dxt.size(sub.width, sub.height) as u32,
+            None => pitch_of(sub.width, format.bits),
+        };
         sub.mipmaps = levels - level;
         if version >= 7 {
             sub.caps[1] |= DDSCAPS2_MIPMAPSUBLEVEL;

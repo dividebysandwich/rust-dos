@@ -406,6 +406,34 @@ screen uncovers (`invalidate_screen` in `user32/paint.rs`) stays cropped
 to the window's shape, so a window gets no WM_PAINT or WM_NCPAINT for
 what its region cuts off. No probe has compared that crop with Windows.
 
+### DXT surfaces
+
+The card has no compressed textures, so DXT1 to DXT5 surfaces are in
+system memory, as DirectX 7 makes them on Windows 98 SE with a card
+without them. A program decodes them into a 16-bit texture with `Blt`
+or `BltFast`, as The Operative: No One Lives Forever does. A probe
+program run on Windows 98 SE with DirectX 7.0a, and on Windows 11, gave
+what `ddraw/dxt_blt.rs` and `video/dxt.rs` do:
+
+- A DXT surface's width and height are multiples of 4, or creating it
+  fails with DDERR_INVALIDPARAMS. Mipmap levels below 4 pixels are one
+  block each, and `Lock` gives the size of the level as its pitch.
+- The decoder follows S3TC, with DirectDraw's differences: DXT5's alpha
+  values between the two ends run from the second to the first, DXT2
+  to DXT5 have three colours and black when the first colour isn't
+  greater, as DXT1 does, and DXT2's and DXT4's colours are clamped to
+  their alpha.
+- A blit to a 16, 24 or 32-bit RGB surface keeps the top bits of each
+  channel, and a 32-bit destination gets the alpha in its top byte
+  even without alpha bits. A stretch takes the source pixel at the
+  middle of each destination pixel, in 16.16 fixed point.
+- A blit to an 8-bit palette surface succeeds and draws nothing, a fill
+  of a DXT surface fails with E_NOTIMPL, and so do a source colour key
+  and DXT2 or DXT4 to a format with alpha.
+- Windows compresses what is blitted to a DXT surface. Here only blocks
+  of the same format are copied, between rectangles on block
+  boundaries; other blits to a DXT surface fail with E_NOTIMPL.
+
 ## Movies
 
 AVIFIL32.DLL reads AVI files, and MSVFW32.DLL's DrawDib functions

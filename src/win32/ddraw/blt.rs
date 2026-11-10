@@ -6,10 +6,12 @@
 //! buffer. On a Banshee or Voodoo3, a fill of a 16-bit depth buffer is
 //! the 3D engine's fastfill, as the HAL's Clear. While the OpenGL
 //! renderer draws a Voodoo3, other blits within its memory are the
-//! renderer's (`gpu_blt`).
+//! renderer's (`gpu_blt`). Blits from and to DXT surfaces are
+//! `dxt_blt`'s.
 
 use std::borrow::Cow;
 
+use super::dxt_blt::{self, Plan};
 use super::surface::{self, KEY_DEST_BLT, KEY_SRC_BLT, Surface, surface_of};
 use super::{
     DD_OK, DDERR_BLTFASTCANTCLIP, DDERR_INVALIDOBJECT, DDERR_INVALIDPARAMS,
@@ -65,6 +67,8 @@ struct Op {
     mirror_y: bool,
     /// Where it may draw, in the destination's pixels.
     clip: Option<Region>,
+    /// What it does when the source or the destination is DXT.
+    dxt: Option<Plan>,
 }
 
 /// A color key, with the test of a pixel against it worked out once a
@@ -242,6 +246,27 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
     if rects.is_empty() {
         return Ok(());
     }
+    match op.dxt {
+        Some(Plan::Nothing) => return Ok(()),
+        Some(Plan::Copy) => {
+            let (src_id, sr) = op.src.ok_or(DDERR_INVALIDPARAMS)?;
+            let s = state(cpu).surface(src_id).cloned();
+            let s = s.ok_or(DDERR_INVALIDOBJECT)?;
+            // Blocks are copied whole: a clipper that cuts the rectangle
+            // would need them compressed again. The rectangles a clip
+            // leaves don't overlap and lie within the destination's, so
+            // they cover it when their areas add up to its area.
+            let size = |r: &Rect| r.width() as i64 * r.height() as i64;
+            let covered: i64 = rects.iter().map(size).sum();
+            if area != op.dst || covered != size(&op.dst) || op.mirror_x || op.mirror_y {
+                return Err(DDERR_UNSUPPORTED);
+            }
+            dxt_blt::copy(cpu, &s, &sr, &d, &op.dst)?;
+            surface::changed(cpu, dst_id);
+            return Ok(());
+        }
+        _ => {}
+    }
     surface::shown(cpu, dst_id);
     if d.memory == surface::MEM_CARD && op.src.is_none() && op.dst_key.is_none() {
         super::voodoo::fill(cpu, &d, &rects, op.fill);
@@ -263,7 +288,7 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
         dst_key: op.dst_key,
         mirror: [op.mirror_x, op.mirror_y],
     };
-    if super::gpu_blt::run(cpu, &gpu) {
+    if op.dxt.is_none() && super::gpu_blt::run(cpu, &gpu) {
         // The renderer copied the pixels in its own copy of the card's
         // memory, not through `screen::write`, which counts them.
         let bytes = d.bytes_per_pixel();
@@ -271,22 +296,37 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
         surface::changed(cpu, dst_id);
         return Ok(());
     }
-    // The source's pixels, its rectangle's only.
+    let (dw, dh) = (op.dst.width() as i64, op.dst.height() as i64);
+    let decode = op.dxt == Some(Plan::Decode);
+    // Where the source's pixels start, in the destination's.
+    let mut origin = (op.dst.left, op.dst.top);
+    // The source's pixels, its rectangle's only. A DXT source's are
+    // decoded already stretched and mirrored, in the destination's
+    // format, over the part of its rectangle on the surface: a rectangle
+    // a clipper cuts may reach far outside it.
     let source = match op.src {
         Some((src_id, r)) => {
             let Some(s) = state(cpu).surface(src_id).cloned() else {
                 return Err(DDERR_INVALIDOBJECT);
             };
-            Some((load(cpu, &s, &r), s, r))
+            if decode {
+                let mirror = [op.mirror_x, op.mirror_y];
+                let data = dxt_blt::decode(cpu, &s, &r, &op.dst, &area, mirror, &d);
+                origin = (area.left, area.top);
+                let size = Rect::new(0, 0, area.width(), area.height());
+                Some((data, d.clone(), size))
+            } else {
+                Some((load(cpu, &s, &r), s, r))
+            }
         }
         None => None,
     };
-    let (dw, dh) = (op.dst.width() as i64, op.dst.height() as i64);
     // A copy of the same size, not mirrored, takes the source's rows as
-    // they are.
-    let unscaled = source.as_ref().is_some_and(|(_, _, sr)| {
-        sr.width() as i64 == dw && sr.height() as i64 == dh && !op.mirror_x && !op.mirror_y
-    });
+    // they are, and so does a decoded DXT source.
+    let unscaled = decode
+        || source.as_ref().is_some_and(|(_, _, sr)| {
+            sr.width() as i64 == dw && sr.height() as i64 == dh && !op.mirror_x && !op.mirror_y
+        });
     let src_key = match (&source, op.src_key) {
         (Some((_, s, _)), Some(k)) => Some(Key::new(k, s)),
         _ => None,
@@ -295,9 +335,8 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
     // Where the pixel under the destination's (`x`, `y`) is in the
     // source's, of an unscaled copy.
     let src_width = source.as_ref().map_or(0, |(_, _, sr)| sr.width() as usize);
-    let src_at = |x: i32, y: i32| {
-        ((y - op.dst.top) as usize * src_width + (x - op.dst.left) as usize) * bytes
-    };
+    let src_at =
+        |x: i32, y: i32| ((y - origin.1) as usize * src_width + (x - origin.0) as usize) * bytes;
     // A blit through no key puts its pixels over all that was there: the
     // destination isn't read. A fill or an unscaled copy stores its rows
     // as they are.
@@ -382,9 +421,6 @@ fn ready(cpu: &mut Cpu, this: u32) -> Result<(u32, Surface), u32> {
     }
     if s.locked || s.dc != 0 {
         return Err(DDERR_SURFACEBUSY);
-    }
-    if s.compressed() {
-        return Err(DDERR_UNSUPPORTED);
     }
     Ok((id, s))
 }
@@ -471,6 +507,9 @@ pub fn blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
     };
     if let Some(value) = fill {
+        if d.compressed() {
+            return Some(DDERR_UNSUPPORTED);
+        }
         let bits = d.format.bits.min(32);
         op.fill = if bits >= 32 {
             value
@@ -488,7 +527,9 @@ pub fn blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             }
             Err(e) => return Some(e),
         };
-        if s.format.bits != d.format.bits {
+        if s.compressed() || d.compressed() {
+            op.dxt = Some(hr!(dxt_blt::plan(&s, &d)));
+        } else if s.format.bits != d.format.bits {
             return Some(DDERR_INVALIDPIXELFORMAT);
         }
         let r = hr!(surface::rect_in(cpu, &s, src_rect));
@@ -517,6 +558,15 @@ pub fn blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     if flags & DDBLT_KEYDESTOVERRIDE != 0 {
         op.dst_key = Some(read_key(cpu, fx + FX_DEST_KEY));
+    }
+    if op.dxt.is_some() {
+        // A source key Blt asks for without the source having one was
+        // DDERR_INVALIDPARAMS above.
+        hr!(dxt_blt::keys(
+            op.src_key.is_some(),
+            true,
+            op.dst_key.is_some()
+        ));
     }
     if flags & DDBLT_DDFX != 0 {
         let ddfx = cpu.bus.guest_read_32(fx + FX_DDFX);
@@ -548,9 +598,13 @@ pub fn blt_fast(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if d.clipper != 0 {
         return Some(DDERR_BLTFASTCANTCLIP);
     }
-    if s.format.bits != d.format.bits {
+    let dxt = if s.compressed() || d.compressed() {
+        Some(hr!(dxt_blt::plan(&s, &d)))
+    } else if s.format.bits != d.format.bits {
         return Some(DDERR_INVALIDPIXELFORMAT);
-    }
+    } else {
+        None
+    };
     let r = hr!(surface::rect_in(cpu, &s, src_rect));
     let (x, y) = (x as i32, y as i32);
     let (Some(right), Some(bottom)) = (x.checked_add(r.width()), y.checked_add(r.height())) else {
@@ -560,9 +614,17 @@ pub fn blt_fast(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if x < 0 || y < 0 || surface::bounds(&d).intersect(&dst) != dst {
         return Some(DDERR_INVALIDRECT);
     }
+    if dxt.is_some() {
+        hr!(dxt_blt::keys(
+            flags & DDBLTFAST_SRCCOLORKEY != 0,
+            s.key_set & 1 << KEY_SRC_BLT != 0,
+            flags & DDBLTFAST_DESTCOLORKEY != 0
+        ));
+    }
     let mut op = Op {
         dst,
         src: Some((src_id, r)),
+        dxt,
         ..Op::default()
     };
     if flags & DDBLTFAST_SRCCOLORKEY != 0 && s.key_set & 1 << KEY_SRC_BLT != 0 {
