@@ -625,7 +625,7 @@ pub struct Pacer {
     recent_ran: f64,
     recent_idle: f64,
     /// The emulated time dropped behind the wall clock so far
-    /// (`MAX_LAG`): whether the host keeps up with the speed, for `Auto`.
+    /// (`MAX_LAG`), stalls and lag alike (`backlog` sorts them for `Auto`).
     /// And the emulated time the last frame ended at, and whether it ran
     /// on from the one before: the backlog after frames of a paused
     /// machine, which the frontend goes on drawing, is the pause's.
@@ -894,8 +894,8 @@ impl Pacer {
         }
     }
 
-    /// The emulated time dropped behind the wall clock so far, for `Auto`
-    /// (`AutoSpeed::update`).
+    /// The emulated time dropped behind the wall clock so far, stalls and
+    /// lag alike: `Auto` goes by the lag only (`Backlog::frame`).
     pub fn lost(&self) -> Duration {
         Duration::from_nanos(self.lost_ns)
     }

@@ -241,14 +241,16 @@ const TRY_DROPS: u32 = 2;
 ///   count too, times the speed's change.
 ///
 /// So is a backlog of that size dropped after a run on time, the host
-/// stopping between frames. A late frame that drops nothing and starts no
-/// stall doesn't break a run: Magic & Mayhem has one of 30 ms before a
-/// load now and then. Loads come in clusters, a frame of 57 ms and one of
-/// 600 ms a second apart, so a stall needs only a run on time since the
-/// last. What a stall dropped counts for nothing, and a step up's watch
-/// doesn't count its frames as behind. All else the pacer drops is lag,
-/// which measurements (`KEPT_UP`) and a step up's frames (`TRY_DROPS`) go
-/// by. A speed past what the host keeps up with makes every frame late, or
+/// stopping between frames. A late frame after one on time that drops
+/// nothing (`MAX_LAG`) and starts no stall doesn't break a run: Magic &
+/// Mayhem has one of 30 ms before a load now and then. A second late frame
+/// in a row does, and so does a late one the pacer drops the backlog of,
+/// which is lag. Loads come in clusters, a frame of 57 ms and one of 600
+/// ms a second apart, so a stall needs only a run on time since the last.
+/// What a stall dropped counts for nothing, and a step up's watch doesn't
+/// count its frames as behind. All else the pacer drops is lag, which
+/// measurements (`KEPT_UP`) and a step up's frames (`TRY_DROPS`) go by. A
+/// speed past what the host keeps up with makes every frame late, or
 /// alternates late ones with ones that catch up (Omikron's dialogue at
 /// 29,000), and never runs `STALL_RUN` on time in between. A scene that
 /// gets heavier at a speed that ran on time makes its frames longer by a
@@ -259,7 +261,8 @@ const TRY_DROPS: u32 = 2;
 const STALL_RUN: u32 = 10;
 const STALL_FRAMES: u32 = 8;
 const STALL_COST: u64 = 6;
-const STALL_LEAST_NS: u64 = crate::timer::MAX_LAG.as_nanos() as u64 / STALL_COST;
+const STALL_LEAST_NS: u64 = MAX_LAG_NS.div_ceil(STALL_COST);
+const MAX_LAG_NS: u64 = crate::timer::MAX_LAG.as_nanos() as u64;
 /// A measurement behind at a speed that another fell behind at, at that
 /// speed or less, within this many measurements before, is no stall: the
 /// host keeps up there only between heavier moments. Omikron's dialogue at
@@ -772,6 +775,10 @@ pub struct Backlog {
     /// since the first of them: a stall if a frame on time ends them within
     /// `STALL_FRAMES`, lag otherwise.
     late: Option<(u32, u64)>,
+    /// Whether the last frame was late (`TRY_BEHIND_NS`): what the pacer
+    /// drops at the next is its backlog, not the host stopping between
+    /// frames on time.
+    last_late: bool,
 }
 
 /// What a frame showed of lag (`Backlog::frame`): how far the emulated
@@ -823,16 +830,22 @@ impl Backlog {
             }
             None if late && stalled(behind_ns) => self.late = Some((1, dropped)),
             // The host stopped between two frames on time.
-            None if !late && dropped > 0 && stalled(dropped) => self.stall(0, dropped),
+            None if !late && !self.last_late && dropped > 0 && stalled(dropped) => {
+                self.stall(0, dropped)
+            }
             None => {
                 self.lag_ns += dropped;
                 counted = u32::from(late);
             }
         }
-        // A late frame that dropped nothing and opened no stall neither
-        // ends a run on time nor counts in it: Magic & Mayhem's loads come
-        // after one of 30 ms now and then.
-        if self.late.is_some() || dropped > 0 {
+        // A late frame after one on time that drops nothing and opened no
+        // stall neither ends a run on time nor counts in it: Magic &
+        // Mayhem's loads come after one of 30 ms now and then. One whose
+        // backlog the pacer drops, or a second in a row, is the host
+        // behind, and ends it.
+        let lone = !self.last_late && behind_ns <= MAX_LAG_NS;
+        self.last_late = late;
+        if self.late.is_some() || dropped > 0 || (late && !lone) {
             self.on_time = 0;
         } else if !late {
             self.on_time += 1;
@@ -3676,7 +3689,6 @@ mod tests {
     /// share of real time kept there.
     fn omikron_frames(seconds: f64) -> (Vec<f64>, Vec<u32>, f64) {
         const FRAME: f64 = 1.0 / 60.0;
-        let max_lag = crate::timer::MAX_LAG.as_secs_f64();
         let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
         let bus = &mut cpu.bus;
         bus.set_cycles_per_ms(PROTECTED_LEAST);
@@ -3688,13 +3700,7 @@ mod tests {
         let (mut times, mut speeds, mut kept) = (Vec::new(), Vec::new(), (0.0, 0.0));
         while wall < seconds {
             let speed = bus.clock.cycles_per_ms() as f64;
-            let backlog = behind.max(FRAME);
-            let span = if backlog > max_lag {
-                lost += backlog - FRAME;
-                FRAME
-            } else {
-                backlog
-            };
+            let span = paced_span(behind, &mut lost);
             drawn += speed * 0.0009 * span;
             let frames = drawn.floor();
             drawn -= frames;
@@ -3727,6 +3733,21 @@ mod tests {
             }
         }
         (times, speeds, kept.0 / kept.1)
+    }
+
+    /// The emulated time a host frame runs, as `Pacer::batch_end` has it,
+    /// after one that left the host `behind` seconds behind: that, or a
+    /// frame's if it was less, and past `MAX_LAG` a frame's, with the rest
+    /// added to `lost`.
+    fn paced_span(behind: f64, lost: &mut f64) -> f64 {
+        const FRAME: f64 = 1.0 / 60.0;
+        let backlog = behind.max(FRAME);
+        if backlog > crate::timer::MAX_LAG.as_secs_f64() {
+            *lost += backlog - FRAME;
+            FRAME
+        } else {
+            backlog
+        }
     }
 
     /// A frame's lag as `Backlog::frame` gives it, with nothing taken for a
@@ -3910,6 +3931,37 @@ mod tests {
     }
 
     #[test]
+    fn a_late_frame_ends_a_run_when_its_backlog_drops_or_another_follows() {
+        const MS: u64 = 1_000_000;
+        let mut sorted = Backlog::default();
+        for _ in 0..STALL_RUN {
+            sorted.frame(17 * MS, 0, 100_000);
+        }
+        // A frame of 80 ms is under the bar of frames of 17 and is lag. The
+        // pacer drops its backlog at the next frame, which a step down to
+        // 60,000 makes on time: that is still its lag, not the host
+        // stopping between frames on time, though the bar fell with the
+        // speed.
+        assert_eq!(sorted.frame(80 * MS, 0, 100_000).late, 1);
+        let lag = sorted.frame(10 * MS, 63 * MS, 60_000);
+        assert_eq!(lag.lost_ns, 63 * MS);
+        assert_eq!(sorted.stalled_ns(), 0);
+        // Late frames that drop nothing, many in a row: the host only just
+        // keeps up, and the run on time before them says nothing of a long
+        // frame after them.
+        for _ in 0..STALL_RUN {
+            sorted.frame(10 * MS, 63 * MS, 60_000);
+        }
+        for _ in 0..5 {
+            assert_eq!(sorted.frame(40 * MS, 63 * MS, 60_000).late, 1);
+        }
+        assert_eq!(sorted.frame(80 * MS, 63 * MS, 60_000).late, 1);
+        let lag = sorted.frame(10 * MS, 126 * MS, 60_000);
+        assert_eq!(lag.lost_ns, 126 * MS);
+        assert_eq!(sorted.stalled_ns(), 0);
+    }
+
+    #[test]
     fn frames_on_time_at_the_speed_before_count_only_until_some_at_the_new_one_are_in() {
         const MS: u64 = 1_000_000;
         let on_time = 5 * MS;
@@ -3942,12 +3994,9 @@ mod tests {
         assert_eq!(sorted.stalled_ns(), 381 * MS);
     }
 
-    /// A pacer for the tests, frame by frame, for a program whose
-    /// instructions the host runs `host_rate` of a ms: each frame runs the
-    /// emulated time the one before took on the wall clock, or a frame's if
-    /// that was less, and the backlog past `MAX_LAG` is dropped, as
-    /// `Pacer::batch_end` does. The program draws 20 frames a second
-    /// whatever the speed.
+    /// A pacer for the tests, frame by frame (`paced_span`), for a program
+    /// whose instructions the host runs `host_rate` of a ms. The program
+    /// draws 20 frames a second whatever the speed.
     #[derive(Default)]
     struct Paced {
         behind: f64,
@@ -3968,15 +4017,8 @@ mod tests {
             stall: f64,
             host_max: u32,
         ) -> (Option<u32>, Option<u32>) {
-            const FRAME: f64 = 1.0 / 60.0;
             let speed = bus.clock.cycles_per_ms();
-            let backlog = self.behind.max(FRAME);
-            let span = if backlog > crate::timer::MAX_LAG.as_secs_f64() {
-                self.lost += backlog - FRAME;
-                FRAME
-            } else {
-                backlog
-            };
+            let span = paced_span(self.behind, &mut self.lost);
             self.drawn += 20.0 * span;
             let frames = self.drawn.floor();
             self.drawn -= frames;
