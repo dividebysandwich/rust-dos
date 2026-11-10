@@ -21,6 +21,7 @@ mod sound;
 mod powervr;
 mod verite;
 mod mach64;
+pub(crate) mod toadforce;
 mod banshee;
 mod voodoo;
 
@@ -284,6 +285,10 @@ pub struct Bus {
     /// The ATI mach64's registers and engines, on `Adapter::AtiRage` and
     /// `AtiRage2`.
     pub mach64: crate::mach64::Mach64,
+    /// The ToadForce card, on `Adapter::ToadForce` (`fit_toadforce`).
+    pub toadforce: Option<Box<crate::toadforce::ToadForce>>,
+    /// The bytes of card memory a ToadForce has (`toadforce_memory`).
+    pub toadforce_memory: u32,
     /// A memory-mapped read of Input Status 1 (a ViRGE's 83DAh) happened,
     /// whose reset of the attribute flip-flop is done at the next port
     /// access, as memory reads can't change the machine.
@@ -867,7 +872,7 @@ impl Bus {
     /// plainly.
     fn plain_vga_run(&self, dst: usize, len: usize) -> bool {
         (ADDR_VGA_GRAPHICS..=ADDR_VGA_GRAPHICS + SIZE_GRAPHICS - len).contains(&dst)
-            && self.video_mode != VideoMode::Vesa
+            && !self.vbe_window()
             && self.s3_mmio(dst).is_none()
             && self.mach64_mmio(dst).is_none()
             && self.vga.plain_writes()
@@ -1020,7 +1025,7 @@ impl Bus {
         }
         if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) {
             // VESA modes: the window onto the bank of video memory.
-            if self.video_mode == VideoMode::Vesa {
+            if self.vbe_window() {
                 return self.vbe.vram[self.vesa_window(addr - ADDR_VGA_GRAPHICS, false)];
             }
             // Route through VGA so chain-4, odd/even, and Read Map Select
@@ -1043,6 +1048,9 @@ impl Bus {
         }
         if let Some(at) = self.powervr_at(addr) {
             return self.powervr_read(at, 1) as u8;
+        }
+        if let Some(at) = self.toadforce_at(addr) {
+            return self.toadforce_read(at, 1) as u8;
         }
         if let Some(offset) = self.voodoo_at(addr) {
             return self.voodoo_read_8(offset);
@@ -1071,7 +1079,7 @@ impl Bus {
         if addr >= self.ram.len() {
             return self.mapped_8(addr);
         }
-        if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) && self.video_mode != VideoMode::Vesa {
+        if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) && !self.vbe_window() {
             let saved = self.vga.latches.get();
             let v = self.vga.read_graphics(self.vga_window(addr, false));
             self.vga.latches.set(saved);
@@ -1092,7 +1100,7 @@ impl Bus {
     /// the VGA's planes as `write_planes_plainly` has them.
     #[cfg_attr(not(dynrec), allow(dead_code))]
     pub(crate) fn plain_planes(&mut self) -> Option<(u8, *mut u8, usize)> {
-        if self.video_mode == VideoMode::Vesa || self.et4000() || (self.s3() && self.vga.s3.mmio()) {
+        if self.vbe_window() || self.et4000() || (self.s3() && self.vga.s3.mmio()) {
             return None;
         }
         self.vga.plain_planes()
@@ -1100,7 +1108,7 @@ impl Bus {
 
     pub(crate) fn write_planes_plainly(&mut self, addr: usize, value: u32, size: usize) -> bool {
         if !(ADDR_VGA_GRAPHICS..=ADDR_VGA_GRAPHICS + SIZE_GRAPHICS - size).contains(&addr)
-            || self.video_mode == VideoMode::Vesa
+            || self.vbe_window()
             || self.et4000()
             || (self.s3() && self.vga.s3.mmio())
             || !self.vga.write_planes_plainly(addr - ADDR_VGA_GRAPHICS, value, size)
@@ -1143,7 +1151,7 @@ impl Bus {
             return true;
         }
         if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) {
-            if self.video_mode == VideoMode::Vesa {
+            if self.vbe_window() {
                 let offset = self.vesa_window(addr - ADDR_VGA_GRAPHICS, true);
                 self.write_vram(offset, &[value]);
                 return true;
@@ -1219,6 +1227,10 @@ impl Bus {
         }
         if let Some(offset) = self.vbe.lfb_offset(addr, 1) {
             self.write_vram(offset, &[value]);
+            return true;
+        }
+        if let Some(at) = self.toadforce_at(addr) {
+            self.toadforce_write(at, value as u32, 1);
             return true;
         }
         if let Some(offset) = self.voodoo_at(addr) {
@@ -1340,6 +1352,10 @@ impl Bus {
             self.mach64_mmio_write(at, value as u32, 2);
             return true;
         }
+        if let Some(at) = self.toadforce_at(addr) {
+            self.toadforce_write(at, value as u32, 2);
+            return true;
+        }
         if let Some(offset) = self.voodoo_at(addr) {
             self.voodoo_write_16(offset, value);
             return true;
@@ -1382,6 +1398,9 @@ impl Bus {
         if let Some(at) = self.mach64_mmio(addr) {
             return self.mach64_mmio_read(at, 2) as u16;
         }
+        if let Some(at) = self.toadforce_at(addr) {
+            return self.toadforce_read(at, 2) as u16;
+        }
         if let Some(offset) = self.voodoo_at(addr) {
             return self.voodoo_read_16(offset);
         }
@@ -1422,6 +1441,9 @@ impl Bus {
         if let Some(at) = self.mach64_mmio(addr) {
             return self.mach64_mmio_read(at, 4);
         }
+        if let Some(at) = self.toadforce_at(addr) {
+            return self.toadforce_read(at, 4);
+        }
         if let Some(offset) = self.voodoo_at(addr) {
             return self.voodoo_read_32(offset);
         }
@@ -1461,6 +1483,10 @@ impl Bus {
         }
         if let Some(at) = self.mach64_mmio(addr) {
             self.mach64_mmio_write(at, value, 4);
+            return;
+        }
+        if let Some(at) = self.toadforce_at(addr) {
+            self.toadforce_write(at, value, 4);
             return;
         }
         if let Some(offset) = self.voodoo_at(addr) {
@@ -1568,6 +1594,7 @@ impl Bus {
             self.banshee_next_event(),
             self.powervr_next_event(),
             self.verite_next_event(),
+            self.toadforce_next_event(),
             self.ide_next_event(),
             self.fdc_next_event(),
             self.net_next_event(),
@@ -1611,6 +1638,9 @@ impl Bus {
         }
         if self.verite_next_event().is_some_and(|t| t <= now) {
             self.verite_service();
+        }
+        if self.toadforce_next_event().is_some_and(|t| t <= now) {
+            self.toadforce_service();
         }
         if self.ide_next_event().is_some_and(|t| t <= now) {
             self.ide_service();
@@ -2186,7 +2216,8 @@ impl Bus {
     /// line stays up while any of them holds it.
     fn pci_holds(&self, irq: u8) -> bool {
         let banshee = self.banshee().and_then(|b| b.irq_up);
-        [banshee, self.powervr_line, self.verite.line].contains(&Some(irq))
+        let toadforce = self.toadforce_irq_up();
+        [banshee, self.powervr_line, self.verite.line, toadforce].contains(&Some(irq))
     }
 
     /// A device's line `irq` dropped: withdraw its request, unless a PCI
@@ -3123,8 +3154,11 @@ impl Bus {
     /// In a VESA mode the Start Address registers and CRTC 69h give the
     /// display start in doublewords.
     fn update_vbe_start(&mut self) {
-        // A Vérité's own CRTC has its start in its own register.
-        if self.video_mode == VideoMode::Vesa && !self.verite.native && !self.mach64.native {
+        // A Vérité's own CRTC has its start in its own register, and a
+        // ToadForce's own mode in `MODE_START`: the VGA's registers take
+        // the write and show nothing of it.
+        let native = self.verite.native || self.mach64.native || self.toadforce_shows();
+        if self.video_mode == VideoMode::Vesa && !native {
             let crtc = &self.vga.crtc_regs;
             let dwords = (self.vbe.start_high as u32) << 16 | (crtc[0x0C] as u32) << 8 | crtc[0x0D] as u32;
             self.vbe.start = dwords * 4;
@@ -3193,6 +3227,7 @@ impl Bus {
                 | video::adapter::Adapter::Et4000
                 | video::adapter::Adapter::AtiRage
                 | video::adapter::Adapter::AtiRage2
+                | video::adapter::Adapter::ToadForce
         );
         if !(vga && matches!(port, 0x3DA | 0x3BA) && self.vga.decodes(port)) {
             return None;

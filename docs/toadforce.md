@@ -886,7 +886,13 @@ DLLs are the emulator's.
 
 - **Display.** GDI's desktop and DirectDraw's modes use the card's mode
   registers, at 8, 16 or 32 bits a pixel. DirectDraw surfaces in video
-  memory are in BAR 1.
+  memory are in BAR 1. A colour fill, and a copy of equal size between
+  two of them, is a `FILL` or `BLT` of the card's; a flip is its
+  `FLIP`. The driver builds the words a guest's driver would put in the
+  ring and hands them to the card without the ring
+  (`Bus::toadforce_submit`), so both run one decoder. Blits the card
+  doesn't do as DirectDraw's own code does (stretches, which sample
+  differently, mirrors, destination keys) stay with that code.
 - **Direct3D 7.** `ddraw/d3d/hal.rs` is written against the Voodoo. It
   becomes one implementation of a HAL interface (capabilities, texture
   formats, texture handles, state, draws), and ToadForce is the second.
@@ -957,7 +963,9 @@ set that the built-in Windows has already exercised in real games.
 
 ## Configuration
 
-Proposed keys, following the Voodoo's:
+The keys, following the Voodoo's. `machine` and `toadforce_memory`
+exist; `toadforce_level` comes with level 1, since a card with one
+level has none to choose, and the renderer's keys with the renderers.
 
 | Key | Values | Default |
 |---|---|---|
@@ -1008,7 +1016,11 @@ Each phase is one or a few pull requests that leave main working.
 1. **The card without 3D.** PCI function, registers, card memory, mode
    setting, the ring with `NOP`, `FILL`, `BLT` and `FLIP`, save states.
    The built-in Windows' GDI and DirectDraw run on it at 8, 16 and 32
-   bits. Proof: 2D DirectDraw games run as on the `Svga` adapter.
+   bits. Proof: 2D DirectDraw games run as on the `Svga` adapter. Done:
+   the card is `src/toadforce`, its place in the machine
+   `src/bus/toadforce.rs`, and the built-in Windows' driver the third
+   kind of adapter in `src/win32/screen.rs` with
+   `src/win32/ddraw/toadforce.rs`.
 2. **The software renderer and the Direct3D 7 HAL**, for transformed
    vertices first: the lowering, the stage cascade, all texture formats
    including DXT and bump formats, depth, stencil, blending, fog. The

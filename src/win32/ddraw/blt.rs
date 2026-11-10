@@ -277,6 +277,28 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
         surface::changed(cpu, dst_id);
         return Ok(());
     }
+    // A ToadForce fills and copies in its own memory. The other adapters
+    // don't come here, which would copy the source's description for
+    // nothing on every blit.
+    let plain = op.dxt.is_none() && op.dst_key.is_none() && !op.mirror_x && !op.mirror_y;
+    if plain && crate::win32::screen::is_toadforce(cpu) {
+        let blit = super::toadforce::Blit {
+            dst: &d,
+            rects: &rects,
+            area: op.dst,
+        };
+        let done = match op.src {
+            None => super::toadforce::fill(cpu, &blit, op.fill),
+            Some((src_id, from)) => state(cpu)
+                .surface(src_id)
+                .cloned()
+                .is_some_and(|s| super::toadforce::copy(cpu, &blit, &s, &from, op.src_key)),
+        };
+        if done {
+            surface::changed(cpu, dst_id);
+            return Ok(());
+        }
+    }
     let gpu = super::gpu_blt::Blit {
         dst_id,
         dst: &d,

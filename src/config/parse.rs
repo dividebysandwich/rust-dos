@@ -160,8 +160,8 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             None => warn(format!(
                                 "invalid machine '{}' (svga, svga_s3, svga_s3virge, \
                                  svga_s3virgevx, svga_verite, svga_voodoo3, svga_banshee, \
-                                 svga_ati_3drage, svga_ati_3drage2, svga_et4000, vga, ega, \
-                                 cga, tandy, pcjr or hercules)",
+                                 svga_ati_3drage, svga_ati_3drage2, svga_toadforce, svga_et4000, \
+                                 vga, ega, cga, tandy, pcjr or hercules)",
                                 value
                             )),
                         },
@@ -182,6 +182,21 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "verite_mhz" => match value.parse::<u32>() {
                             Ok(n) if (1..=1000).contains(&n) => config.verite_mhz = Some(n),
                             _ => warn(format!("invalid verite_mhz '{}' (1 to 1000)", value)),
+                        },
+                        "toadforce_memory" => match value.parse::<u32>() {
+                            // Megabytes are compared: a number shifted to
+                            // bytes would wrap round to a size.
+                            Ok(n)
+                                if crate::toadforce::regs::MEMORY_SIZES
+                                    .iter()
+                                    .any(|&bytes| bytes >> 20 == n) =>
+                            {
+                                config.toadforce_memory = Some(n)
+                            }
+                            _ => warn(format!(
+                                "invalid toadforce_memory '{}' (32, 64 or 128)",
+                                value
+                            )),
                         },
                         "verite_rom" => {
                             let value = value.trim_matches('"');

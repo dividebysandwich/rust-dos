@@ -124,6 +124,7 @@ impl DebugHub {
                 // An S3's extended CRTC registers (30h-6Fh, a row of 16
                 // each) and its hardware cursor.
                 "voodoo": cpu.bus.voodoo_status(),
+                "toadforce": cpu.bus.toadforce_status(),
                 "powervr": cpu.bus.powervr_status(),
                 "verite": cpu.bus.verite().then(|| cpu.bus.verite.describe()),
                 "mach64": cpu.bus.mach64().then(|| cpu.bus.mach64.describe()),

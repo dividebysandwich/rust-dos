@@ -845,6 +845,10 @@ pub fn get_device_identifier(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             };
             Some(device << 16 | 0x5333)
         }
+        _ if adapter.is_toadforce() => {
+            use crate::toadforce::pci::{DEVICE_ID, VENDOR_ID};
+            Some((DEVICE_ID as u32) << 16 | VENDOR_ID as u32)
+        }
         _ => None,
     };
     if let Some(ids) = ids {

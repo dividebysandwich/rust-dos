@@ -32,6 +32,26 @@ fn run_lock_is_off_on_or_a_directory() {
 }
 
 #[test]
+fn toadforce_memory_is_one_of_the_cards_sizes() {
+    let get = |value: &str| {
+        let text = format!("[emulator]\ntoadforce_memory={}\n", value);
+        parse(&text, Path::new("/cfg"), None)
+    };
+    for megabytes in [32, 64, 128] {
+        let config = get(&megabytes.to_string());
+        assert_eq!(config.toadforce_memory, Some(megabytes));
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    }
+    // 4128 MB is 32 MB more than 32 bits of bytes hold.
+    for value in ["0", "48", "256", "4128", "64MB"] {
+        let config = get(value);
+        assert_eq!(config.toadforce_memory, None, "{value}");
+        let warned = |w: &String| w.contains("invalid toadforce_memory");
+        assert!(config.warnings.iter().any(warned), "{value}");
+    }
+}
+
+#[test]
 fn xbrz_config_parses_and_invalid_shader_help_lists_it() {
     let config = parse("[emulator]\nshader=xbrz\n", Path::new("/cfg"), None);
     assert_eq!(config.shader, Some(crate::video::shader::Shader::Xbrz));
@@ -762,6 +782,7 @@ fn changed_settings() -> Settings {
             rom: Some(PathBuf::from("/home/u/roms/verite.rom")),
             irq: 5,
         },
+        toadforce_memory: 128,
         capture_dir: PathBuf::from("/home/u/dos captures"),
         record_ui: true,
         record_shader: true,

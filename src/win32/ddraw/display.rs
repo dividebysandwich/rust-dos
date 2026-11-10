@@ -158,7 +158,13 @@ pub fn modes(cpu: &Cpu) -> Vec<(u32, u32, u32)> {
         32
     };
     let mut list = Vec::new();
-    for (w, h) in screen::SIZES {
+    // A ToadForce has the larger sizes too, which fit its memory.
+    let more: &[(u32, u32)] = if screen::is_toadforce(cpu) {
+        &screen::TOADFORCE_SIZES
+    } else {
+        &[]
+    };
+    for &(w, h) in screen::SIZES.iter().chain(more) {
         for bpp in [8, 16, truecolor] {
             list.push((w, h, bpp));
         }

@@ -26,6 +26,7 @@ const VIRGE_VERSION: u16 = 1;
 const VERITE_VERSION: u16 = 3;
 const ET4000_VERSION: u16 = 1;
 const MACH64_VERSION: u16 = 1;
+const TOADFORCE_VERSION: u16 = 1;
 const SHARED_VERSION: u16 = 1;
 const SB_HIGH_SPEED_VERSION: u16 = 1;
 const ISAPNP_VERSION: u16 = 1;
@@ -108,6 +109,8 @@ impl Bus {
             virge,
             verite,
             mach64,
+            toadforce,
+            toadforce_memory,
             retraces,
             last_flip,
             gate_array_shadow,
@@ -245,6 +248,13 @@ impl Bus {
         // An ATI mach64's registers and engine, only on one, likewise.
         if vga.adapter.is_mach64() {
             w.section(b"MC64", MACH64_VERSION, |w| mach64.save(w));
+        }
+        // A ToadForce's registers and ring, only on one, likewise. Its
+        // memory is the Super VGA's, in the section above. How much it
+        // has is the machine's setting, which the card saved carries.
+        let _ = toadforce_memory;
+        if let Some(toadforce) = toadforce {
+            w.section(b"TOAD", TOADFORCE_VERSION, |w| toadforce.save(w));
         }
         // A booted system's disks made of shared host directories, before
         // the drives, which need them for their checkpoints; only with
@@ -415,6 +425,8 @@ impl Bus {
             virge,
             verite,
             mach64,
+            toadforce,
+            toadforce_memory,
             retraces,
             last_flip,
             gate_array_shadow,
@@ -565,6 +577,26 @@ impl Bus {
         mach64.rage2 = vga.adapter == crate::video::adapter::Adapter::AtiRage2;
         if r.next_is(b"MC64") {
             mach64.load(&mut r.section(b"MC64", MACH64_VERSION)?)?;
+        }
+        match (r.next_is(b"TOAD"), toadforce) {
+            (true, Some(toadforce)) => {
+                toadforce.load(&mut r.section(b"TOAD", TOADFORCE_VERSION)?)?;
+                // The card is the state's, with the memory it had there.
+                if toadforce.memory() as usize != vbe.vram.len() {
+                    let what = "a ToadForce whose memory isn't its size";
+                    return Err(StateError::Invalid(what.into()));
+                }
+                *toadforce_memory = toadforce.memory();
+            }
+            (false, None) => {}
+            (true, None) => {
+                let what = "it has a ToadForce and this machine hasn't";
+                return Err(StateError::Mismatch(what.into()));
+            }
+            (false, Some(_)) => {
+                let what = "this machine has a ToadForce and it hasn't";
+                return Err(StateError::Mismatch(what.into()));
+            }
         }
         disk.shared_from_state = None;
         if r.next_is(b"SHRD") {
@@ -755,6 +787,7 @@ impl Bus {
         if self.banshee().is_some() {
             self.banshee_settle();
         }
+        self.toadforce_after_load();
         if let Some(awe) = &mut self.awe {
             awe.after_load();
         }

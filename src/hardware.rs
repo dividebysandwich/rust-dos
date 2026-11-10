@@ -25,6 +25,8 @@ pub struct Hardware {
     pub powervr: Option<crate::powervr::Chip>,
     /// The Vérité's RISC.
     pub verite: crate::verite::VeriteSettings,
+    /// The megabytes of memory a ToadForce has.
+    pub toadforce_memory: u32,
     /// The IPX driver and the LAN.
     pub network: crate::net::NetSettings,
     /// The serial ports.
@@ -50,6 +52,7 @@ pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate
     cpu.bus.idle_hint = settings.idle_hint;
     cpu.bus.game_fixes = settings.game_fixes;
     cpu.bus.game_fixes_off = settings.game_fixes_off.clone();
+    cpu.bus.toadforce_memory = settings.toadforce_memory << 20;
     crate::video::bios::install(&mut cpu.bus, settings.video_setup());
     cpu.bus.configure_voodoo(settings.voodoo_board());
     cpu.bus.set_voodoo_texture_sampling(settings.voodoo.texture_sampling);
@@ -98,6 +101,7 @@ impl Hardware {
             env: settings.environment(),
             powervr: settings.powervr,
             verite: settings.verite.clone(),
+            toadforce_memory: settings.toadforce_memory,
             network: settings.network.clone(),
             serial: settings.serial.clone(),
             printer: (settings.printer.clone(), settings.capture_dir.clone()),
@@ -128,6 +132,7 @@ impl Hardware {
             },
             powervr: self.powervr,
             verite: self.verite.clone(),
+            toadforce_memory: self.toadforce_memory,
             network: self.network.clone(),
             serial: self.serial.clone(),
             printer: self.printer.0.clone(),
@@ -157,6 +162,14 @@ impl Hardware {
         // Another display adapter: its BIOS data, and the text mode it
         // starts in, keeping what the screen shows.
         let setup = settings.video_setup();
+        if settings.toadforce_memory != self.toadforce_memory {
+            let line = format!("[CONFIG] A ToadForce has {} MB", settings.toadforce_memory);
+            cpu.bus.log_string(&line);
+            cpu.bus.toadforce_memory = settings.toadforce_memory << 20;
+            // A card that is there now is replaced, in the mode the VGA
+            // had.
+            cpu.bus.fit_toadforce();
+        }
         if setup != self.video {
             let monitor = if setup.mono() { "monochrome" } else { "colour" };
             cpu.bus.log_string(&format!(

@@ -101,6 +101,8 @@ impl Bus {
             virge: Default::default(),
             verite: Default::default(),
             mach64: Default::default(),
+            toadforce: None,
+            toadforce_memory: crate::toadforce::regs::DEFAULT_MEMORY,
             attribute_reset: Default::default(),
             pci: crate::pci::Pci::default(),
             voodoo: None,
@@ -242,6 +244,7 @@ impl Bus {
         self.fill_ram(0..0x500, 0);
         self.pic = crate::pic::Pic::new();
         self.reset_voodoo();
+        self.reset_toadforce();
         self.reset_powervr();
         self.detach_ide();
         self.detach_fdc();

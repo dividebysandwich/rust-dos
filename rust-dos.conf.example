@@ -117,6 +117,9 @@
 #   svga_ati_3drage, svga_ati_3drage2  an ATI 3D RAGE or 3D RAGE II on
 #         the PCI bus, with its 2D and 3D engines, for ATI's drivers in a
 #         booted Windows (Direct3D and ATI3DCIF games)
+#   svga_toadforce  Rust-DOS's own card, with 64 MB for the Windows
+#         programs it runs without Windows: DirectDraw modes up to
+#         1600x1200. The svga adapter to DOS programs
 #   svga_et4000  a Tseng ET4000AX with 1 MB and a Sierra HiColor DAC:
 #         Tseng's modes, 32K and 64K colours, VBE 1.2 without a linear
 #         frame buffer
@@ -187,6 +190,9 @@
 #verite_mhz=25
 #verite_rom=
 #verite_irq=10
+# The megabytes of video memory machine=svga_toadforce's card has: 32, 64
+# or 128. A change takes effect at the DOS prompt.
+#toadforce_memory=64
 # Where screenshots (Ctrl+F5) and sound (Ctrl+F6), video (Ctrl+F7) and
 # animation (PrintScreen) recordings go: a folder, relative to the
 # directory rust-dos started in.

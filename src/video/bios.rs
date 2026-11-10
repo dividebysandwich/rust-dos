@@ -76,6 +76,10 @@ pub fn cursor_shape(adapter: Adapter, height: u16) -> u16 {
 /// set leaves, so a program that exited in another mode, with its own
 /// palette or rows, doesn't leave the prompt in it.
 pub fn reset_for_shell(bus: &mut Bus) {
+    // A ToadForce's own mode ends first, as before the BIOS's mode sets:
+    // a program that exited in it would leave the card showing a mode
+    // the screen no longer has.
+    bus.toadforce_mode_set();
     let adapter = bus.vga.adapter;
     let mono = bus.vga.setup().mono();
     let mode = if mono { VideoMode::Mono80x25 } else { VideoMode::Text80x25Color };
@@ -233,6 +237,9 @@ pub fn install(bus: &mut Bus, setup: VideoSetup) {
         bus.write_rom(((segment as usize) << 4) + offset as usize, &data);
     }
     bus.vbe.lfb_base = if s3 || setup.adapter.is_et4000() { None } else { Some(super::vbe::LFB_BASE as u32) };
+    // A ToadForce comes and goes with its adapter: its memory is the
+    // Super VGA's, and the frame buffer is where its BAR 1 is.
+    bus.fit_toadforce();
     crate::interrupts::vbe::install_mode_list(bus, setup.adapter);
     // A mach64's BIOS: its data in the ROM, the card as its POST leaves
     // it.
