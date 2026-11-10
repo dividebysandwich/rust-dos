@@ -6342,6 +6342,29 @@ fn eh_prolog_program() -> Vec<u8> {
     })
 }
 
+/// MSVCRT's `__setlc_active` and `__unguarded_readlc_active` are
+/// variables the program can write, as MSVCP60's locale code does: it
+/// counts itself in and out of the second with InterlockedIncrement and
+/// InterlockedDecrement (Max Payne). The first is 0 while no setlocale
+/// runs. The program ends with 1 for the count it wrote and read back.
+#[test]
+fn msvcrt_locale_guards_are_variables() {
+    let names: &[&str] = &["__setlc_active", "__unguarded_readlc_active", "exit"];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.dll", names)];
+    let exe = program(BASE, false, imports, &[], |a, l| {
+        a.mov(eax, l.import(1))?;
+        a.lock().inc(dword_ptr(eax))?;
+        a.mov(ecx, dword_ptr(eax))?;
+        a.mov(eax, l.import(0))?;
+        a.add(ecx, dword_ptr(eax))?;
+        a.push(ecx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let (code, _) = run("msvcrt_locale_guards", exe);
+    assert_eq!(code, 1);
+}
+
 /// MSVCRT's `_EH_prolog` makes the frame Visual C++ 6's code asks of it
 /// (Max Payne's DLLs call it), and __CxxFrameHandler and
 /// _CxxThrowException catch and unwind through such frames, on both

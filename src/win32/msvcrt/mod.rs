@@ -158,6 +158,12 @@ static VARS: &[Var] = &[
     var("streams", 0, MAX_STREAMS * 4),
     var("threads", 0, MAX_THREADS * 8),
     var("state", 0, 0x200),
+    // setlocale's guards: MSVCRT counts a thread in the first while it
+    // changes the locale, and MSVCP60's locale code counts itself in the
+    // second while it reads the locale without the lock. setlocale here
+    // changes it in one go, so the first stays 0.
+    var("__setlc_active", 131, 4),
+    var("__unguarded_readlc_active", 138, 4),
 ];
 
 /// The places in the `state` variable: the application type, the

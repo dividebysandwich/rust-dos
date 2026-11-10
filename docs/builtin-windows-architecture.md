@@ -152,7 +152,11 @@ it, and its stub jumps to it, so the recompiler translates it with the
 program's code. MSVCRT's `_ftol` is Windows 98 SE's: it sets the
 control word to chop, stores the integer with `FISTP` and puts the
 control word back. Its Rust function stays for states saved when it was
-a trap, whose memory still has that stub.
+a trap, whose memory still has that stub. `_EH_prolog`, which Visual
+C++ 6 code calls at the start of a function to make its C++ exception
+frame, is code as Wine and Windows have it: nine instructions that
+push the frame on the caller's stack and return with ESP and EBP
+moved.
 
 Because the DLLs are real images, `LoadLibrary`, `GetProcAddress`,
 `GetModuleHandle`, programs that walk export tables, data exports and
