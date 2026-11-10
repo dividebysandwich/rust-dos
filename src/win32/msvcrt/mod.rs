@@ -25,6 +25,7 @@ mod math;
 mod mbcs;
 mod startup;
 mod stdio;
+mod strftime;
 mod string;
 mod time;
 mod undname;
@@ -55,10 +56,12 @@ const IOB_ENTRIES: u32 = 20;
 const MAX_STREAMS: u32 = 512;
 /// A FILE's size, as `_iobuf` is laid out.
 const FILE_SIZE: u32 = 32;
-/// File descriptors there can be, and each one's entry: the handle and
-/// the flags (`io.rs`).
-const MAX_FDS: u32 = 256;
-const FD_SIZE: u32 = 8;
+/// File descriptors there can be (64 blocks for `__pioinfo`'s 64
+/// pointers), in blocks of `IOINFO_BLOCK`, and the size of each one's
+/// `ioinfo` (`io.rs`).
+const MAX_FDS: u32 = 2048;
+const IOINFO_BLOCK: u32 = 32;
+const IOINFO_SIZE: u32 = 36;
 /// Threads whose blocks are kept, as (thread id, block).
 const MAX_THREADS: u32 = 64;
 /// `_sys_errlist`'s messages.
@@ -99,7 +102,7 @@ const V_MBCASEMAP: usize = 34;
 const V_WCTYPE: usize = 35;
 const V_ERRTEXT: usize = 36;
 const V_TZTEXT: usize = 37;
-const V_FDS: usize = 38;
+const V_PIOINFO: usize = 38;
 const V_STREAMS: usize = 39;
 const V_THREADS: usize = 40;
 const V_STATE: usize = 41;
@@ -114,6 +117,8 @@ const V_BAD_TYPEID_COL: usize = 51;
 const V_BAD_TYPEID_VTABLE: usize = 52;
 const V_NON_RTTI_COL: usize = 53;
 const V_NON_RTTI_VTABLE: usize = 54;
+const V_BADIOINFO: usize = 55;
+const V_LC_TIME_C: usize = 56;
 
 const fn var(name: &'static str, ordinal: u16, size: u32) -> Var {
     Var {
@@ -161,13 +166,13 @@ static VARS: &[Var] = &[
     var("__lc_handle", 96, 24),
     var("_mbcasemap", 332, 256),
     // The DLL's own: the wide character classes `_pwctype` points at,
-    // the text `_sys_errlist` and `_tzname` point at, the file
-    // descriptors, the streams there are, the threads' blocks and the
-    // rest (`S_*`).
+    // the text `_sys_errlist` and `_tzname` point at; then the blocks of
+    // file descriptors, exported for MSVCIRT; then the DLL's own again:
+    // the streams there are, the threads' blocks and the rest (`S_*`).
     var("wctype", 0, 256 * 2),
     var("errtext", 0, 2048),
     var("tztext", 0, 64),
-    var("fds", 0, MAX_FDS * FD_SIZE),
+    var("__pioinfo", 128, MAX_FDS / IOINFO_BLOCK * 4),
     var("streams", 0, MAX_STREAMS * 4),
     var("threads", 0, MAX_THREADS * 8),
     var("state", 0, 0x200),
@@ -192,13 +197,20 @@ static VARS: &[Var] = &[
     var("??_7bad_typeid@@6B@", 25, 8),
     var("__non_rtti_object locator", 0, 8),
     var("??_7__non_rtti_object@@6B@", 23, 8),
+    // The descriptor -1's entry, which MSVCIRT reads for a stream with
+    // no descriptor.
+    var("__badioinfo", 82, IOINFO_SIZE),
+    // The "C" locale's names of days and months and its date and time
+    // formats, as strftime takes them (strftime.rs).
+    var("lc_time_c", 0, strftime::LC_TIME_C_SIZE),
 ];
 
 /// The places in the `state` variable: the application type, the
 /// `atexit` table (its address, count and room), `_set_new_mode`'s mode,
 /// the handler `__setusermatherr` set, `signal`'s handlers (one for each
 /// signal number below 32), `_set_error_mode`'s mode and `_onexit`'s
-/// `__dllonexit` lock.
+/// `__dllonexit` lock. They are all here, in the order of their places,
+/// so that a new one can't take a place another one has (#898).
 const S_APP_TYPE: u32 = 0x00;
 const S_ATEXIT: u32 = 0x04;
 const S_ATEXIT_COUNT: u32 = 0x08;
@@ -216,7 +228,19 @@ const S_START: u32 = 0x2C;
 const S_TMPNAM_COUNT: u32 = 0x30;
 /// The handle of the runtime's heap.
 const S_HEAP: u32 = 0x34;
+/// The locale (0 "C", 1 the system's), and how many `__finally` blocks
+/// an unwind is running (`startup.rs`).
+const S_LOCALE: u32 = 0x38;
+const S_ABNORMAL: u32 = 0x3C;
+/// The handler `_set_new_handler` set.
+const S_NEW_HANDLER: u32 = 0x40;
 const S_SIGNALS: u32 = 0x80;
+/// The locale's names and `lconv`, and the texts it points to
+/// (`startup.rs`).
+const S_LOCALE_C: u32 = 0x100;
+const S_LOCALE_NATIVE: u32 = 0x108;
+const S_LCONV: u32 = 0x130;
+const S_LCONV_TEXT: u32 = 0x160;
 
 /// A thread's block: its errno and _doserrno, rand's seed, strtok's
 /// place (_mbstok's too) and wcstok's, the translator _set_se_translator
@@ -580,6 +604,7 @@ static CONTS: &[call::Then] = &[
     startup::spawned,
     startup::cxx_returned,
     cxx::undname_allocated,
+    startup::longjmp_unwound,
 ];
 
 const C_INITTERM: u32 = 0;
@@ -594,6 +619,7 @@ const C_LFIND: u32 = 8;
 const C_SPAWNED: u32 = 9;
 const C_CXX: u32 = 10;
 const C_UNDNAME: u32 = 11;
+const C_LONGJMP: u32 = 12;
 
 /// Call the program's function at `target` with `args`; when it returns,
 /// `CONTS[cont]` runs with the call, whose data is `data` after the
@@ -748,10 +774,8 @@ fn init(bus: &mut Bus, process: &mut super::Process) -> Option<()> {
             w.u32(file + stdio::F_FILE, u32::MAX)?;
         }
     }
-    for fd in 0..MAX_FDS {
-        w.u32(var_at(V_FDS) + FD_SIZE * fd, u32::MAX)?;
-        w.u32(var_at(V_FDS) + FD_SIZE * fd + 4, 0)?;
-    }
+    w.bytes(var_at(V_BADIOINFO), &io::bad_ioinfo())?;
+    w.fd_entry(0)?;
     // The descriptors the parent's C runtime passed in lpReserved2: their
     // count, a byte of flags each, then a handle each. The standard ones
     // it didn't pass are the standard handles.
@@ -776,9 +800,9 @@ fn init(bus: &mut Bus, process: &mut super::Process) -> Option<()> {
         if io::is_device(w.bus, w.process, handle) {
             flags |= io::FDEV;
         }
-        let entry = var_at(V_FDS) + FD_SIZE * fd as u32;
+        let entry = w.fd_entry(fd as u32)?;
         w.u32(entry, handle)?;
-        w.u32(entry + 4, flags)?;
+        w.bytes(entry + 4, &[flags as u8])?;
         if let Some(p) = passed.get_mut(fd) {
             *p = true;
         }
@@ -795,9 +819,9 @@ fn init(bus: &mut Bus, process: &mut super::Process) -> Option<()> {
             } else {
                 0
             };
-        let entry = var_at(V_FDS) + FD_SIZE * fd as u32;
+        let entry = w.fd_entry(fd as u32)?;
         w.u32(entry, handle)?;
-        w.u32(entry + 4, flags)?;
+        w.bytes(entry + 4, &[flags as u8])?;
     }
 
     // The character classes, and the case map of the multibyte code page.
@@ -850,6 +874,7 @@ fn init(bus: &mut Bus, process: &mut super::Process) -> Option<()> {
     w.u32(var_at(V_TZNAME) + 4, var_at(V_TZTEXT) + 8)?;
     w.u32(state_at(S_START), (w.bus.clock.now_micros() / 1000) as u32)?;
     w.bytes(var_at(V_HUGE), &f64::INFINITY.to_le_bytes())?;
+    w.bytes(var_at(V_LC_TIME_C), &strftime::lc_time_c(var_at(V_LC_TIME_C)))?;
     w.u32(state_at(S_ATEXIT), 0)?;
     w.u32(state_at(S_MBCP), 1252)?;
     cxx::init(&mut w)?;
@@ -926,6 +951,23 @@ impl Writer<'_> {
         let p = &mut *self.process;
         let heap = p.heaps.iter_mut().find(|h| h.base == self.heap)?;
         heap.alloc(&mut p.memory, self.bus, size)
+    }
+
+    /// The address of descriptor `fd`'s `ioinfo`, with its block and
+    /// those before it made, as MSVCRT's startup makes them for the
+    /// descriptors it inherits.
+    fn fd_entry(&mut self, fd: u32) -> Option<u32> {
+        for i in 0..=fd / IOINFO_BLOCK {
+            let slot = var_at(V_PIOINFO) + 4 * i;
+            if self.process.memory.read_32(self.bus, slot)? == 0 {
+                let block = self.alloc(IOINFO_BLOCK * IOINFO_SIZE)?;
+                self.bytes(block, &io::fresh_block())?;
+                self.u32(slot, block)?;
+            }
+        }
+        let block = var_at(V_PIOINFO) + 4 * (fd / IOINFO_BLOCK);
+        let block = self.process.memory.read_32(self.bus, block)?;
+        Some(block + IOINFO_SIZE * (fd % IOINFO_BLOCK))
     }
 
     /// A copy of `text` and a 0 on the heap.

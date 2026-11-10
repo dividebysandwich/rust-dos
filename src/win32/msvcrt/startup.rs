@@ -10,17 +10,6 @@ use crate::win32::{object, seh};
 
 const EOF: u32 = u32::MAX;
 
-/// More places in the `state` variable (see `S_APP_TYPE`): the new
-/// handler, the locale (0 "C", 1 the system's), how many `__finally`
-/// blocks an unwind is running, and the locale's texts and `lconv`.
-const S_NEW_HANDLER: u32 = 0x34;
-const S_LOCALE: u32 = 0x38;
-const S_ABNORMAL: u32 = 0x3C;
-const S_LOCALE_C: u32 = 0x100;
-const S_LOCALE_NATIVE: u32 = 0x108;
-const S_LCONV: u32 = 0x130;
-const S_LCONV_TEXT: u32 = 0x160;
-
 const NATIVE_LOCALE: &[u8] = b"English_United States.1252";
 
 // Arguments and the environment.
@@ -686,6 +675,9 @@ const M_HANDLER: u32 = 1;
 const M_LONGJMP: u32 = 2;
 /// After RtlUnwind for _global_unwind2: return, with no local unwind.
 const M_GLOBAL: u32 = 3;
+/// After RtlUnwind for longjmp: the jump buffer's own unwind, then the
+/// jump (`unwind_setjmp_frame`).
+const M_LONGJMP_GLOBAL: u32 = 4;
 
 /// The registers a handler keeps for its caller.
 fn saved_registers(cpu: &Cpu) -> [u32; 4] {
@@ -813,12 +805,14 @@ fn global_unwind(cpu: &mut Cpu, frame: u32, resume: (u32, u32), d: &[u32]) -> bo
 
 pub fn rtl_unwound(cpu: &mut Cpu, _: u32, call: Call) {
     let d = call.data;
-    if d.first() == Some(&M_GLOBAL) {
-        restore_registers(cpu, &d[4..8]);
-        call::finish(cpu, call.resume, 0);
-        return;
+    match d.first() {
+        Some(&M_GLOBAL) => {
+            restore_registers(cpu, &d[4..8]);
+            call::finish(cpu, call.resume, 0);
+        }
+        Some(&M_LONGJMP_GLOBAL) => unwind_setjmp_frame(cpu, call.resume, d[3], d[4]),
+        _ => local_unwind(cpu, call.resume, d),
     }
-    local_unwind(cpu, call.resume, d);
 }
 
 /// Run the `__finally` blocks of the frame d[1] from its level down to
@@ -916,14 +910,25 @@ pub fn abnormal_termination(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some((state(cpu, S_ABNORMAL) != 0) as u32)
 }
 
-// setjmp and longjmp, on MSVC's _JUMP_BUFFER: EBP, EBX, EDI, ESI, ESP,
-// EIP, the exception frame, its level, a cookie, the C++ unwind function
-// and its data.
+// setjmp and longjmp, on the documented `_JUMP_BUFFER`: EBP, EBX, EDI,
+// ESI, ESP, EIP, the exception frame (Registration), its level
+// (TryLevel), a cookie, the unwind function and six words of data for
+// it. The design is Wine's (dlls/msvcrt/except_i386.c): _setjmp3 marks
+// the buffer with the cookie and keeps the unwind function the compiler
+// passes, and longjmp unwinds the frames above setjmp's with RtlUnwind,
+// then setjmp's own frame: through the buffer's unwind function where
+// it has the cookie, through its __finally blocks where it doesn't.
+// The fields and the order of the unwinding are those the probe saw
+// MSVCRT.DLL 6.00.8337 give.
 
 const JMP_REGISTRATION: u32 = 24;
 const JMP_TRYLEVEL: u32 = 28;
 const JMP_COOKIE: u32 = 32;
 const JMP_UNWIND: u32 = 36;
+const JMP_UNWIND_DATA: u32 = 40;
+/// The unwind data's words.
+const JMP_UNWIND_WORDS: u32 = 6;
+/// "VC20", the cookie of a buffer _setjmp3 filled.
 const JMP_MAGIC: u32 = 0x5643_3230;
 
 /// The running thread's first exception frame.
@@ -934,8 +939,14 @@ fn exception_list(cpu: &mut Cpu) -> u32 {
     cpu.bus.guest_read_32(tib)
 }
 
-/// Save the registers as they will be when the call returns.
-fn save_jump(cpu: &mut Cpu, buffer: u32) -> Option<()> {
+/// Whether `frame` is an exception frame, and not the end of the list.
+fn is_frame(frame: u32) -> bool {
+    frame != 0 && frame != u32::MAX
+}
+
+/// Save the registers as they will be when the call returns, and the
+/// thread's first exception frame. That frame's level, or -1 without one.
+fn save_jump(cpu: &mut Cpu, buffer: u32) -> Option<u32> {
     let esp = cpu.esp();
     let eip = read32(cpu, esp)?;
     let registration = exception_list(cpu);
@@ -949,67 +960,119 @@ fn save_jump(cpu: &mut Cpu, buffer: u32) -> Option<()> {
         registration,
     ];
     let raw: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-    put(cpu, buffer, &raw)
+    put(cpu, buffer, &raw)?;
+    if is_frame(registration) {
+        read32(cpu, registration + 12)
+    } else {
+        Some(TRYLEVEL_NONE)
+    }
 }
 
-/// _setjmp(buffer): 0.
+/// _setjmp(buffer): 0. The buffer gets the registers, the frame and its
+/// level, and nothing after them.
 pub fn setjmp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    save_jump(cpu, args[0])?;
-    let registration = read32(cpu, args[0] + JMP_REGISTRATION)?;
-    let level = if registration == u32::MAX || registration == 0 {
-        TRYLEVEL_NONE
-    } else {
-        read32(cpu, registration + 12)?
-    };
+    let level = save_jump(cpu, args[0])?;
     write32(cpu, args[0] + JMP_TRYLEVEL, level)?;
     Some(0)
 }
 
-/// _setjmp3(buffer, count, unwind function, level): 0.
+/// _setjmp3(buffer, count, unwind function, level, data...): 0. Of the
+/// `count` words after `count`, the first is the unwind function, the
+/// second the level, and up to six more the function's data; the fields
+/// they don't give keep what they had, but for the function, which is 0
+/// then, and the level, which is the frame's. With a count of 1 MSVCRT 6
+/// reads the level from 0Ch bytes into the unwind function; compilers
+/// pass no such count, and this takes the frame's level, as Wine does.
+/// Called outside every exception frame, it takes none of the words, as
+/// Wine does: no function, level -1 and the data as it was.
 pub fn setjmp3(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let buffer = args[0];
-    save_jump(cpu, buffer)?;
-    write32(cpu, buffer + JMP_COOKIE, JMP_MAGIC)?;
-    write32(cpu, buffer + JMP_UNWIND, 0)?;
-    let rest = varargs(cpu, 2);
-    if args[1] == 0 {
-        write32(cpu, buffer + JMP_TRYLEVEL, TRYLEVEL_NONE)?;
-        return Some(0);
-    }
-    let unwind = read32(cpu, rest)?;
-    write32(cpu, buffer + JMP_UNWIND, unwind)?;
-    let level = if args[1] > 1 {
-        read32(cpu, rest + 4)?
-    } else {
-        let registration = read32(cpu, buffer + JMP_REGISTRATION)?;
-        read32(cpu, registration + 12)?
+    let &[buffer, count] = args else {
+        unreachable!()
     };
+    let frame_level = save_jump(cpu, buffer)?;
+    let words = varargs(cpu, 2);
+    let given = if is_frame(exception_list(cpu)) {
+        count.min(2 + JMP_UNWIND_WORDS)
+    } else {
+        0
+    };
+    let mut extra = Vec::with_capacity(given as usize);
+    for i in 0..given {
+        extra.push(read32(cpu, words + 4 * i)?);
+    }
+    write32(cpu, buffer + JMP_COOKIE, JMP_MAGIC)?;
+    let unwind = extra.first().copied().unwrap_or(0);
+    let level = extra.get(1).copied().unwrap_or(frame_level);
+    write32(cpu, buffer + JMP_UNWIND, unwind)?;
     write32(cpu, buffer + JMP_TRYLEVEL, level)?;
+    for (i, &word) in extra.iter().skip(2).enumerate() {
+        write32(cpu, buffer + JMP_UNWIND_DATA + 4 * i as u32, word)?;
+    }
     Some(0)
 }
 
-/// longjmp(buffer, value): the frames since setjmp unwound, then back to
-/// setjmp's return, which returns `value` (1 for 0).
+/// longjmp(buffer, value): back to setjmp's return, which returns
+/// `value` (1 for 0), the frames since setjmp unwound first.
 pub fn longjmp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let buffer = args[0];
     let value = if args[1] == 0 { 1 } else { args[1] };
     let registration = read32(cpu, buffer + JMP_REGISTRATION)?;
-    let level = read32(cpu, buffer + JMP_TRYLEVEL)?;
-    read32(cpu, buffer + JMP_UNWIND)?;
     let resume = call::here(cpu);
-    if registration == 0 || registration == u32::MAX {
+    if registration == 0 {
         long_jump(cpu, buffer, value);
         return None;
     }
-    let d = vec![M_LONGJMP, registration, level, buffer, value, 0, 0, 0];
     if registration != exception_list(cpu) {
-        if !global_unwind(cpu, registration, resume, &d) {
-            long_jump(cpu, buffer, value);
+        // The frames above setjmp's go first, all of them where setjmp
+        // was called outside every frame (-1), as Wine and MSVCRT 6 do;
+        // `rtl_unwound` goes on with `unwind_setjmp_frame`.
+        let d = [M_LONGJMP_GLOBAL, registration, 0, buffer, value, 0, 0, 0];
+        if global_unwind(cpu, registration, resume, &d) {
+            return None;
         }
-        return None;
     }
-    local_unwind(cpu, resume, d);
+    unwind_setjmp_frame(cpu, resume, buffer, value);
     None
+}
+
+/// The frames above setjmp's are gone: unwind setjmp's own down to the
+/// level it was at, then jump.
+fn unwind_setjmp_frame(cpu: &mut Cpu, resume: (u32, u32), buffer: u32, value: u32) {
+    let registration = cpu.bus.guest_read_32(buffer + JMP_REGISTRATION);
+    let level = cpu.bus.guest_read_32(buffer + JMP_TRYLEVEL);
+    let marked = cpu.bus.guest_read_32(buffer + JMP_COOKIE) == JMP_MAGIC;
+    let unwind = cpu.bus.guest_read_32(buffer + JMP_UNWIND);
+    if cpu.bus.guest_faulted() || !is_frame(registration) {
+        long_jump(cpu, buffer, value);
+        return;
+    }
+    if !marked {
+        // A buffer of _setjmp's: the frame's __finally blocks, then the
+        // jump (`unwound`'s M_LONGJMP).
+        let d = vec![M_LONGJMP, registration, level, buffer, value, 0, 0, 0];
+        local_unwind(cpu, resume, d);
+    } else if unwind == 0
+        || !call_program(cpu, unwind, &[buffer], C_LONGJMP, resume, &[buffer, value])
+    {
+        long_jump(cpu, buffer, value);
+    }
+}
+
+/// The buffer's unwind function returned: the jump.
+pub fn longjmp_unwound(cpu: &mut Cpu, _: u32, call: Call) {
+    if let [buffer, value] = call.data[..] {
+        long_jump(cpu, buffer, value);
+    }
+}
+
+/// _seh_longjmp_unwind(buffer): the unwind function for a frame of
+/// _except_handler3's. It runs the frame's __finally blocks down to the
+/// buffer's level, as `_local_unwind2` does. It takes its argument off
+/// the stack.
+pub fn seh_longjmp_unwind(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let registration = read32(cpu, args[0] + JMP_REGISTRATION)?;
+    let level = read32(cpu, args[0] + JMP_TRYLEVEL)?;
+    local_unwind2(cpu, &[registration, level])
 }
 
 /// Back to setjmp's return with the registers it saved.
@@ -1762,6 +1825,28 @@ fn catch_object(
     Some(false)
 }
 
+/// __CxxLongjmpUnwind(buffer): the unwind function C++ code passes
+/// _setjmp3, with the function's FuncInfo as the first word of data. As
+/// in Wine, it destroys the objects of the frame setjmp was called in
+/// that were made after setjmp: those of the states from the frame's
+/// state now down to the buffer's level, by the frame's unwind map, as
+/// an exception's unwind destroys them. It takes its argument off the
+/// stack.
+pub fn cxx_longjmp_unwind(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let frame = read32(cpu, args[0] + JMP_REGISTRATION)?;
+    let state = read32(cpu, args[0] + JMP_TRYLEVEL)?;
+    let info = read32(cpu, args[0] + JMP_UNWIND_DATA)?;
+    let resume = call::here(cpu);
+    // A step of `cxx_returned` that returns when the objects are gone.
+    let mut d = vec![0; D_LEN];
+    d[0] = X_RETURN;
+    (d[D_FRAME], d[D_INFO], d[D_TARGET]) = (frame, info, state);
+    (d[D_RESUME], d[D_RESUME + 1]) = resume;
+    d[D_REGS..D_OUTER].copy_from_slice(&saved_registers(cpu));
+    cxx_unwind(cpu, resume, d);
+    None
+}
+
 /// RtlUnwind to the frame that catches or the guard the search started
 /// in, then the function's objects in the try.
 fn unwind_above(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>) {
@@ -2108,9 +2193,10 @@ fn string_list(cpu: &mut Cpu, mut at: u32) -> Option<Vec<String>> {
 /// goes in lpReserved2: their count, their flags, their handles. Those
 /// opened with O_NOINHERIT are left out.
 fn inherit_block(cpu: &mut Cpu) -> Vec<u8> {
-    let fds: Vec<(u8, u32)> = (0..MAX_FDS)
-        .map(|fd| match io::fd_info(cpu, fd) {
-            Some((handle, flags)) if flags & io::FNOINHERIT == 0 => (flags as u8, handle),
+    let fds: Vec<(u8, u32)> = io::descriptors(cpu)
+        .into_iter()
+        .map(|(handle, flags)| match flags {
+            f if f & io::FOPEN != 0 && f & io::FNOINHERIT == 0 => (flags as u8, handle),
             _ => (0, u32::MAX),
         })
         .collect();

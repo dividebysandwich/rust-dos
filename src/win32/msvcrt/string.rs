@@ -1894,3 +1894,41 @@ pub fn splitpath(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     Some(0)
 }
+
+// __crtCompareStringA and __crtLCMapStringA, which MSVCP60 calls for
+// collation and case mapping: CompareStringA and LCMapStringA of the
+// built-in KERNEL32, as in Wine's MSVCRT, with each positive count first
+// cut at the string's 0, as the probe saw MSVCRT 6 do. The code page
+// argument is the one the strings are in; KERNEL32 reads them in the
+// ANSI code page, which is the only one the built-in runtime has.
+
+/// `count` bytes of the string at `at`, or fewer where its 0 comes
+/// first; a count below 1 as it is.
+fn count_to_nul(cpu: &mut Cpu, at: u32, count: u32) -> Option<u32> {
+    if count as i32 <= 0 {
+        return Some(count);
+    }
+    Some(cstr_n(cpu, at, count as usize)?.len() as u32)
+}
+
+/// __crtCompareStringA(lcid, flags, a, a_count, b, b_count, code_page):
+/// CompareStringA's 1, 2 or 3 for less, equal or greater, 0 on failure.
+pub fn crt_compare_string_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[lcid, flags, a, a_count, b, b_count, _code_page] = args else {
+        unreachable!()
+    };
+    let a_count = count_to_nul(cpu, a, a_count)?;
+    let b_count = count_to_nul(cpu, b, b_count)?;
+    let args = [lcid, flags, a, a_count, b, b_count];
+    kernel32(cpu, "CompareStringA", &args)
+}
+
+/// __crtLCMapStringA(lcid, flags, from, count, to, size, code_page,
+/// xflag): LCMapStringA's bytes written or needed, 0 on failure.
+pub fn crt_lc_map_string_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[lcid, flags, from, count, to, size, _code_page, _xflag] = args else {
+        unreachable!()
+    };
+    let count = count_to_nul(cpu, from, count)?;
+    kernel32(cpu, "LCMapStringA", &[lcid, flags, from, count, to, size])
+}

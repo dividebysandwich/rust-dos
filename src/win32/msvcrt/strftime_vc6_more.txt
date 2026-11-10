@@ -1,0 +1,189 @@
+# More of what Visual C++ 6's MSVCRT.DLL (6.00.8337) wrote for
+# strftime and _Strftime, read by a second probe program: '#'
+# numbers in short buffers, numbers out of their ranges, formats
+# that end in '%', pictures under '#', and more AM/PM and quote
+# forms. Columns as in strftime_vc6.txt, but the time may also be
+# the nine fields of a struct tm.
+1	0	-	-	-	%#d	0	************
+1	1	-	-	-	%#d	0	\x00***********
+1	2	-	-	-	%#d	1	1\x00**********
+1	3	-	-	-	%#d	2	31\x00*********
+1	4	-	-	-	%#d	2	31\x00*********
+1	5	-	-	-	%#d	2	31\x00*********
+1	6	-	-	-	%#d	2	31\x00*********
+1	7	-	-	-	%#d	2	31\x00*********
+1	0	-	-	-	x%#d	0	************
+1	1	-	-	-	x%#d	0	x***********
+1	2	-	-	-	x%#d	1	*\x00**********
+1	3	-	-	-	x%#d	2	x1\x00*********
+1	4	-	-	-	x%#d	3	x31\x00********
+1	5	-	-	-	x%#d	3	x31\x00********
+1	6	-	-	-	x%#d	3	x31\x00********
+1	7	-	-	-	x%#d	3	x31\x00********
+1	0	-	-	-	%#j	0	************
+1	1	-	-	-	%#j	0	\x00***********
+1	2	-	-	-	%#j	1	5\x00**********
+1	3	-	-	-	%#j	2	65\x00*********
+1	4	-	-	-	%#j	3	365\x00********
+1	5	-	-	-	%#j	3	365\x00********
+1	6	-	-	-	%#j	3	365\x00********
+1	7	-	-	-	%#j	3	365\x00********
+1	0	-	-	-	%#jx	0	************
+1	1	-	-	-	%#jx	0	x***********
+1	2	-	-	-	%#jx	0	5x**********
+1	3	-	-	-	%#jx	0	65x*********
+1	4	-	-	-	%#jx	0	365x********
+1	5	-	-	-	%#jx	4	365x\x00*******
+1	6	-	-	-	%#jx	4	365x\x00*******
+1	7	-	-	-	%#jx	4	365x\x00*******
+1	0	-	-	-	%#d%#d%#d	0	************
+1	1	-	-	-	%#d%#d%#d	0	\x00***********
+1	2	-	-	-	%#d%#d%#d	1	1\x00**********
+1	3	-	-	-	%#d%#d%#d	2	31\x00*********
+1	4	-	-	-	%#d%#d%#d	3	31*\x00********
+1	5	-	-	-	%#d%#d%#d	4	313*\x00*******
+1	6	-	-	-	%#d%#d%#d	5	31311\x00******
+1	7	-	-	-	%#d%#d%#d	6	313131\x00*****
+1	0	-	-	-	%#y	0	************
+1	1	-	-	-	%#y	0	\x00***********
+1	2	-	-	-	%#y	1	9\x00**********
+1	3	-	-	-	%#y	2	99\x00*********
+1	4	-	-	-	%#y	2	99\x00*********
+1	5	-	-	-	%#y	2	99\x00*********
+1	6	-	-	-	%#y	2	99\x00*********
+1	7	-	-	-	%#y	2	99\x00*********
+1	0	-	-	-	%#H	0	************
+1	1	-	-	-	%#H	0	\x00***********
+1	2	-	-	-	%#H	1	3\x00**********
+1	3	-	-	-	%#H	2	23\x00*********
+1	4	-	-	-	%#H	2	23\x00*********
+1	5	-	-	-	%#H	2	23\x00*********
+1	6	-	-	-	%#H	2	23\x00*********
+1	7	-	-	-	%#H	2	23\x00*********
+1	0	-	-	-	ab%#j	0	************
+1	1	-	-	-	ab%#j	0	a***********
+1	2	-	-	-	ab%#j	0	ab**********
+1	3	-	-	-	ab%#j	2	a*\x00*********
+1	4	-	-	-	ab%#j	3	ab5\x00********
+1	5	-	-	-	ab%#j	4	ab65\x00*******
+1	6	-	-	-	ab%#j	5	ab365\x00******
+1	7	-	-	-	ab%#j	5	ab365\x00******
+1	0	-	-	-	%#d%#j	0	************
+1	1	-	-	-	%#d%#j	0	\x00***********
+1	2	-	-	-	%#d%#j	1	*\x00**********
+1	3	-	-	-	%#d%#j	2	3*\x00*********
+1	4	-	-	-	%#d%#j	3	315\x00********
+1	5	-	-	-	%#d%#j	4	3165\x00*******
+1	6	-	-	-	%#d%#j	5	31365\x00******
+1	7	-	-	-	%#d%#j	5	31365\x00******
+1	0	-	-	-	%#Y	0	************
+1	1	-	-	-	%#Y	0	\x00***********
+1	2	-	-	-	%#Y	1	9\x00**********
+1	3	-	-	-	%#Y	2	99\x00*********
+1	4	-	-	-	%#Y	3	999\x00********
+1	5	-	-	-	%#Y	4	1999\x00*******
+1	6	-	-	-	%#Y	4	1999\x00*******
+1	7	-	-	-	%#Y	4	1999\x00*******
+123,100,100,100,98,8200,3,1000,0	199	-	-	-	%d|%H|%I|%j|%m|%M|%S|%U|%w|%W|%y|%Y|%p	40	00|00|04|001|99|00|23|43|3|43|00|0100|PM\x00
+123,100,100,100,98,8200,3,1000,0	199	-	-	-	%#d|%#H|%#I|%#j|%#m|%#M|%#S|%#U|%#w|%#W|%#y|%#Y	43	100|100|4|1001|99|100|123|143|3|143|0|10100\x00
+123,100,100,100,98,8200,3,1000,0	199	-	-	-	%x|%X|%c	35	99/00/00|00:00:23|99/00/00 00:00:23\x00
+0,0,0,1,0,8100,0,0,0	199	-	-	-	%d|%H|%I|%j|%m|%M|%S|%U|%w|%W|%y|%Y|%p	40	01|00|12|001|01|00|00|01|0|00|00|0000|AM\x00
+0,0,0,1,0,8100,0,0,0	199	-	-	-	%#d|%#H|%#I|%#j|%#m|%#M|%#S|%#U|%#w|%#W|%#y|%#Y	28	1|0|12|1|1|0|0|1|0|0|0|10000\x00
+0,0,0,1,0,8100,0,0,0	199	-	-	-	%x|%X|%c	35	01/01/00|00:00:00|01/01/00 00:00:00\x00
+0,0,0,1,0,-1900,-1,0,0	199	-	-	-	%d|%H|%I|%j|%m|%M|%S|%U|%w|%W|%y|%Y|%p	40	01|00|12|001|01|00|00|01|/|01|00|0000|AM\x00
+0,0,0,1,0,-1900,-1,0,0	199	-	-	-	%#d|%#H|%#I|%#j|%#m|%#M|%#S|%#U|%#w|%#W|%#y|%#Y	24	1|0|12|1|1|0|0|1|/|1|0|0\x00
+0,0,0,1,0,-1900,-1,0,0	199	-	-	-	%x|%X|%c	35	01/01/00|00:00:00|01/01/00 00:00:00\x00
+0,0,0,1,0,-1905,9,0,0	199	-	-	-	%d|%H|%I|%j|%m|%M|%S|%U|%w|%W|%y|%Y|%p	40	01|00|12|001|01|00|00|00|9|00|0+|000+|AM\x00
+0,0,0,1,0,-1905,9,0,0	199	-	-	-	%#d|%#H|%#I|%#j|%#m|%#M|%#S|%#U|%#w|%#W|%#y|%#Y	24	1|0|12|1|1|0|0|0|9|0|+|+\x00
+0,0,0,1,0,-1905,9,0,0	199	-	-	-	%x|%X|%c	35	01/01/0+|00:00:00|01/01/0+ 00:00:00\x00
+0,0,0,1,0,-1901,7,0,0	199	-	-	-	%d|%H|%I|%j|%m|%M|%S|%U|%w|%W|%y|%Y|%p	40	01|00|12|001|01|00|00|00|7|00|0/|000/|AM\x00
+0,0,0,1,0,-1901,7,0,0	199	-	-	-	%#d|%#H|%#I|%#j|%#m|%#M|%#S|%#U|%#w|%#W|%#y|%#Y	24	1|0|12|1|1|0|0|0|7|0|/|/\x00
+0,0,0,1,0,-1901,7,0,0	199	-	-	-	%x|%X|%c	35	01/01/0/|00:00:00|01/01/0/ 00:00:00\x00
+0,0,-1,1,0,-3901,8,0,0	199	-	-	-	%d|%H|%I|%j|%m|%M|%S|%U|%w|%W|%y|%Y|%p	40	01|0/|0/|001|01|00|00|00|8|00|0/|.00/|AM\x00
+0,0,-1,1,0,-3901,8,0,0	199	-	-	-	%#d|%#H|%#I|%#j|%#m|%#M|%#S|%#U|%#w|%#W|%#y|%#Y	23	1|/|/|1|1|0|0|0|8|0|/|/\x00
+0,0,-1,1,0,-3901,8,0,0	199	-	-	-	%x|%X|%c	35	01/01/0/|0/:00:00|01/01/0/ 0/:00:00\x00
+0,0,12,1,0,98100,-8,3,0	199	-	-	-	%d|%H|%I|%j|%m|%M|%S|%U|%w|%W|%y|%Y|%p	40	01|12|12|004|01|00|00|01|(|01|00|0000|PM\x00
+0,0,12,1,0,98100,-8,3,0	199	-	-	-	%#d|%#H|%#I|%#j|%#m|%#M|%#S|%#U|%#w|%#W|%#y|%#Y	30	1|12|12|4|1|0|0|1|(|1|0|100000\x00
+0,0,12,1,0,98100,-8,3,0	199	-	-	-	%x|%X|%c	35	01/01/00|12:00:00|01/01/00 12:00:00\x00
+0,0,-13,1,0,-21,6,-9,0	199	-	-	-	%x|%X|%c	35	01/01/./|/-:00:00|01/01/./ /-:00:00\x00
+0	199	-	-	-	%	0	\x00
+0	199	-	-	-	%#	0	\x00
+0	199	-	-	-	ab%#	2	ab\x00
+0	199	-	-	-	%#%#	2	%#\x00
+0	199	-	-	-	%#q%q|	1	|\x00
+0	199	-	-	-	%E	0	\x00
+0	199	-	-	-	%#E	0	\x00
+0	199	-	-	-	%n%t	0	\x00
+0	199	-	-	-	%#n	0	\x00
+0	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%x	50	02|02|01|01|y|80|1980|12|12|00|00|03|03|05|05|a|am\x00
+0	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%#x	50	02|02|01|01|y|80|1980|12|12|00|00|03|03|05|05|a|am\x00
+0	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%X	50	02|02|01|01|y|80|1980|12|12|00|00|03|03|05|05|a|am\x00
+0	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%#X	50	02|02|01|01|y|80|1980|12|12|00|00|03|03|05|05|a|am\x00
+0	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%c	101	02|02|01|01|y|80|1980|12|12|00|00|03|03|05|05|a|am 02|02|01|01|y|80|1980|12|12|00|00|03|03|05|05|a|am\x00
+0	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%#c	101	02|02|01|01|y|80|1980|12|12|00|00|03|03|05|05|a|am 02|02|01|01|y|80|1980|12|12|00|00|03|03|05|05|a|am\x00
+4	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%x	50	0,|0,|07|07|y|0/|1899|01|01|25|25|75|75|0-|0-|p|pm\x00
+4	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%#x	50	0,|0,|07|07|y|0/|1899|01|01|25|25|75|75|0-|0-|p|pm\x00
+4	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%X	50	0,|0,|07|07|y|0/|1899|01|01|25|25|75|75|0-|0-|p|pm\x00
+4	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%#X	50	0,|0,|07|07|y|0/|1899|01|01|25|25|75|75|0-|0-|p|pm\x00
+4	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%c	101	0,|0,|07|07|y|0/|1899|01|01|25|25|75|75|0-|0-|p|pm 0,|0,|07|07|y|0/|1899|01|01|25|25|75|75|0-|0-|p|pm\x00
+4	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%#c	101	0,|0,|07|07|y|0/|1899|01|01|25|25|75|75|0-|0-|p|pm 0,|0,|07|07|y|0/|1899|01|01|25|25|75|75|0-|0-|p|pm\x00
+5	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%x	50	01|01|07|07|y|05|2105|01|01|01|01|01|01|01|01|a|am\x00
+5	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%#x	50	01|01|07|07|y|05|2105|01|01|01|01|01|01|01|01|a|am\x00
+5	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%X	50	01|01|07|07|y|05|2105|01|01|01|01|01|01|01|01|a|am\x00
+5	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%#X	50	01|01|07|07|y|05|2105|01|01|01|01|01|01|01|01|a|am\x00
+5	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%c	101	01|01|07|07|y|05|2105|01|01|01|01|01|01|01|01|a|am 01|01|07|07|y|05|2105|01|01|01|01|01|01|01|01|a|am\x00
+5	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%#c	101	01|01|07|07|y|05|2105|01|01|01|01|01|01|01|01|a|am 01|01|07|07|y|05|2105|01|01|01|01|01|01|01|01|a|am\x00
+3	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%x	50	29|29|02|02|y|04|2004|11|11|11|11|07|07|09|09|a|am\x00
+3	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%#x	50	29|29|02|02|y|04|2004|11|11|11|11|07|07|09|09|a|am\x00
+3	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%X	50	29|29|02|02|y|04|2004|11|11|11|11|07|07|09|09|a|am\x00
+3	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%#X	50	29|29|02|02|y|04|2004|11|11|11|11|07|07|09|09|a|am\x00
+3	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%c	101	29|29|02|02|y|04|2004|11|11|11|11|07|07|09|09|a|am 29|29|02|02|y|04|2004|11|11|11|11|07|07|09|09|a|am\x00
+3	199	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	d|dd|M|MM|y|yy|yyyy|h|hh|H|HH|m|mm|s|ss|t|tt	%#c	101	29|29|02|02|y|04|2004|11|11|11|11|07|07|09|09|a|am 29|29|02|02|y|04|2004|11|11|11|11|07|07|09|09|a|am\x00
+4	199	am/pm x	L	T	%x	11	pm!75/p75 x\x00
+0	199	am/pm x	L	T	%x	11	am!03/p03 x\x00
+4	199	a/px	L	T	%x	6	pm!/px\x00
+0	199	a/px	L	T	%x	6	am!/px\x00
+4	199	aM/Pm	L	T	%x	3	pm!\x00
+0	199	aM/Pm	L	T	%x	3	am!\x00
+4	199	a/P	L	T	%x	3	pm!\x00
+0	199	a/P	L	T	%x	3	am!\x00
+4	199	 am/pm	L	T	%x	4	 pm!\x00
+0	199	 am/pm	L	T	%x	4	 am!\x00
+4	199	am/p	L	T	%x	7	pm!75/p\x00
+0	199	am/p	L	T	%x	7	am!03/p\x00
+4	199	a/pm	L	T	%x	7	pm!/p75\x00
+0	199	a/pm	L	T	%x	7	am!/p03\x00
+4	199	AmPm	L	T	%x	8	pm!75P75\x00
+0	199	AmPm	L	T	%x	8	am!03P03\x00
+4	199	ap	L	T	%x	4	pm!p\x00
+0	199	ap	L	T	%x	4	am!p\x00
+4	199	A/PM	L	T	%x	7	pm!/P07\x00
+0	199	A/PM	L	T	%x	7	am!/P01\x00
+4	199	am/pmam/pm	L	T	%x	12	pm!75/p75pm!\x00
+0	199	am/pmam/pm	L	T	%x	12	am!03/p03am!\x00
+4	199	'am/pm'	L	T	%x	5	am/pm\x00
+0	199	'am/pm'	L	T	%x	5	am/pm\x00
+4	199	tttttt	L	T	%x	6	pm!\x00
+0	199	tttttt	L	T	%x	6	am!\x00
+4	199	x a/p	L	T	%x	5	x pm!\x00
+0	199	x a/p	L	T	%x	5	x am!\x00
+4	199	a//p	L	T	%x	6	pm!//p\x00
+0	199	a//p	L	T	%x	6	am!//p\x00
+4	199	a/p/	L	T	%x	6	pm!/p/\x00
+0	199	a/p/	L	T	%x	6	am!/p/\x00
+4	199	aam/pm	L	T	%x	9	pm!75/p75\x00
+0	199	aam/pm	L	T	%x	9	am!03/p03\x00
+4	199	am/pm 	L	T	%x	10	pm!75/p75 \x00
+0	199	am/pm 	L	T	%x	10	am!03/p03 \x00
+4	199	Am/pM	L	T	%x	3	pm!\x00
+0	199	Am/pM	L	T	%x	3	am!\x00
+4	199	dd'	L	T	%x	2	0,\x00
+0	199	dd'	L	T	%x	2	02\x00
+4	199	''''	L	T	%x	0	\x00
+0	199	''''	L	T	%x	0	\x00
+4	199	'a''b''c'	L	T	%x	3	abc\x00
+0	199	'a''b''c'	L	T	%x	3	abc\x00
+4	199	M'	L	T	%x	2	07\x00
+0	199	M'	L	T	%x	2	01\x00
+4	199	d'M'd	L	T	%x	5	0,M0,\x00
+0	199	d'M'd	L	T	%x	5	02M02\x00

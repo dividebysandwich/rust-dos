@@ -170,6 +170,62 @@ pub fn ismbclegal(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some((c < 0x10000 && is_lead(cpu, (c >> 8) as u8) && is_trail(cpu, c as u8)) as u32)
 }
 
+/// The locale of the double-byte code page `cp`, for KERNEL32's
+/// character types, or None for a single-byte one.
+fn mb_lcid(cp: u32) -> Option<u32> {
+    match cp {
+        932 => Some(0x411),
+        936 => Some(0x804),
+        949 => Some(0x412),
+        950 => Some(0x404),
+        _ => None,
+    }
+}
+
+/// The `_ctype` class bits `class` of the byte `c`, as `isdigit` and
+/// `isspace` give them in the "C" locale (4 for a digit, 8 for white
+/// space).
+fn byte_class(c: u8, class: u16) -> u32 {
+    (ctype_of(c) & class) as u32
+}
+
+/// The class test of `_ismbcdigit` and `_ismbcspace`: a byte's class
+/// bits; for a larger value in a double-byte code page, 1 when KERNEL32's
+/// GetStringTypeA takes its two bytes, high one first, for one character
+/// of the class; else 0. The built-in KERNEL32 has no character types for
+/// double-byte characters yet (#919), so this gives 0 for every one, as
+/// MSVCRT 6 run on it gave the probe; it follows KERNEL32 when it has
+/// them.
+fn ismbc_class(cpu: &mut Cpu, c: u32, class: u16) -> Option<u32> {
+    if let Ok(byte) = u8::try_from(c) {
+        return Some(byte_class(byte, class));
+    }
+    let Some(lcid) = mb_lcid(state(cpu, S_MBCP)) else {
+        return Some(0);
+    };
+    let at = thread_field(cpu, T_SCRATCH)? + 0x10;
+    put(cpu, at, &[(c >> 8) as u8, c as u8, 0, 0, 0, 0, 0, 0])?;
+    if kernel32(cpu, "GetStringTypeA", &[lcid, CT_CTYPE1, at, 2, at + 4])? == 0 {
+        return Some(0);
+    }
+    let first = cpu.bus.guest_read_16(at + 4);
+    let second = cpu.bus.guest_read_16(at + 6);
+    Some((second == 0 && first & class != 0) as u32)
+}
+
+/// GetStringTypeA's kind for the `_ctype` classes.
+const CT_CTYPE1: u32 = 1;
+
+/// _ismbcdigit(c): nonzero for a digit.
+pub fn ismbcdigit(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    ismbc_class(cpu, args[0], DIGIT)
+}
+
+/// _ismbcspace(c): nonzero for white space.
+pub fn ismbcspace(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    ismbc_class(cpu, args[0], SPACE)
+}
+
 /// Whether the byte at `at` leads a character, reading the string from
 /// `start`, where lead bytes may also be trail bytes.
 fn leads(cpu: &mut Cpu, start: u32, at: u32) -> Option<bool> {
@@ -527,4 +583,27 @@ pub fn mbbtombc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         0x20 => 0x8140,
         _ => c,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// _ismbcdigit and _ismbcspace give what MSVCRT 6 gave the probe for
+    /// a byte: its class bit, or 0. Larger values go to KERNEL32, and
+    /// `msvcrt_has_what_msvcp60_msvcirt_and_mfc42_import` in tests/win32
+    /// checks two of them.
+    #[test]
+    fn ismbc_bytes_as_visual_cpp_6() {
+        for c in 0..=0xFFu8 {
+            let digit = if c.is_ascii_digit() { 4 } else { 0 };
+            let space = if matches!(c, 0x09..=0x0D | 0x20) {
+                8
+            } else {
+                0
+            };
+            assert_eq!(byte_class(c, DIGIT), digit, "{c:#x}");
+            assert_eq!(byte_class(c, SPACE), space, "{c:#x}");
+        }
+    }
 }

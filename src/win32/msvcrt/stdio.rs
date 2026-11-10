@@ -82,8 +82,7 @@ pub fn iob(index: u32) -> u32 {
 /// Whether the descriptor `fd` is a device, which its stream doesn't
 /// buffer writes for.
 fn is_device(cpu: &mut Cpu, fd: u32) -> bool {
-    let entry = var_at(V_FDS) + FD_SIZE * fd;
-    fd < MAX_FDS && cpu.bus.guest_read_32(entry + 4) & io::FDEV != 0
+    io::fd_flags(cpu, fd) & io::FDEV != 0
 }
 
 /// Give the stream a buffer of its own, if it has none: one from the heap,
