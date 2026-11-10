@@ -3,15 +3,17 @@
 //! and the rest, which `draw.rs` puts on the inner device as it draws;
 //! glGetError, glGetString and glGet.
 
+use super::attrib::ATTRIB_DEPTH;
+use super::light::{self, LIGHTS};
 use super::wgl::{EXTENSIONS_AT, RENDERER_AT, VENDOR_AT, VERSION_AT};
 use super::{
     CAP_ALPHA_TEST, CAP_BLEND, CAP_CLIP_PLANES, CAP_COLOR_MATERIAL, CAP_CULL_FACE, CAP_DEPTH_TEST,
     CAP_DITHER, CAP_FOG, CAP_LIGHTING, CAP_LINE_SMOOTH, CAP_LINE_STIPPLE, CAP_LOGIC_OP,
     CAP_NORMALIZE, CAP_POINT_SMOOTH, CAP_POLYGON_OFFSET_FILL, CAP_POLYGON_OFFSET_LINE,
     CAP_POLYGON_OFFSET_POINT, CAP_POLYGON_SMOOTH, CAP_POLYGON_STIPPLE, CAP_SCISSOR_TEST,
-    CAP_STENCIL_TEST, CAP_TEXTURE_GEN, Context, GL_INVALID_ENUM, GL_INVALID_VALUE, GL_NO_ERROR,
-    MAX_TEXTURE_SIZE, MODELVIEW_DEPTH, PROJECTION_DEPTH, TEXTURE_DEPTH, ctx, d, error, f,
-    read_floats,
+    CAP_STENCIL_TEST, CAP_TEXTURE_GEN, Context, GL_INVALID_ENUM, GL_INVALID_OPERATION,
+    GL_INVALID_VALUE, GL_NO_ERROR, MAX_TEXTURE_SIZE, MODELVIEW_DEPTH, PROJECTION_DEPTH,
+    TEXTURE_DEPTH, ctx, d, error, f, read_floats,
 };
 use crate::cpu::Cpu;
 
@@ -110,8 +112,8 @@ fn cap_bit(cap: u32) -> Option<u32> {
         GL_LOGIC_OP | GL_COLOR_LOGIC_OP => CAP_LOGIC_OP,
         0x3000..=0x3005 => CAP_CLIP_PLANES,
         0x0C60..=0x0C63 => CAP_TEXTURE_GEN,
-        // Lights, evaluators' maps, GL_TEXTURE_1D: kept nowhere.
-        0x4000..=0x4007 | 0x0D90..=0x0DB8 | GL_AUTO_NORMAL | GL_TEXTURE_1D => 0,
+        // Evaluators' maps, GL_TEXTURE_1D: kept nowhere.
+        0x0D90..=0x0DB8 | GL_AUTO_NORMAL | GL_TEXTURE_1D => 0,
         _ => return None,
     })
 }
@@ -124,6 +126,20 @@ fn set_cap(cpu: &mut Cpu, cap: u32, on: bool) {
         let unit = c.active_unit as usize;
         c.texture_2d[unit] = on;
         return;
+    }
+    if let Some(i) = light::index(cap) {
+        let bit = 1u8 << i;
+        if on {
+            c.lighting.enabled |= bit;
+        } else {
+            c.lighting.enabled &= !bit;
+        }
+        return;
+    }
+    // The tracked material properties take the current color as soon as
+    // GL_COLOR_MATERIAL is on (section 2.13.3).
+    if cap == GL_COLOR_MATERIAL && on {
+        c.lighting.track(c.color);
     }
     match cap_bit(cap) {
         Some(bit) if on => c.caps |= bit,
@@ -146,6 +162,9 @@ pub fn disable(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// Whether `cap` is on: glIsEnabled's, and glGet's of a capability.
 fn enabled(c: &Context, cap: u32) -> Option<bool> {
+    if let Some(i) = light::index(cap) {
+        return Some(c.lighting.enabled & 1 << i != 0);
+    }
     let unit = c.client_unit as usize;
     Some(match cap {
         GL_TEXTURE_2D => c.texture_2d[c.active_unit as usize],
@@ -166,6 +185,10 @@ pub fn is_enabled(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(c) = ctx(cpu) else {
         return Some(0);
     };
+    if c.begin.is_some() {
+        error(cpu, GL_INVALID_OPERATION);
+        return Some(0);
+    }
     match enabled(c, args[0]) {
         Some(on) => Some(on as u32),
         None => {
@@ -616,6 +639,9 @@ fn values(cpu: &mut Cpu, p: u32) -> Option<(Vec<f64>, bool)> {
     if let Some(on) = enabled(c, p) {
         return one(on as u32 as f64);
     }
+    if let Some(v) = light::get(c, p) {
+        return Some(v);
+    }
     match p {
         // GL_CURRENT_COLOR, GL_CURRENT_TEXTURE_COORDS, GL_CURRENT_NORMAL.
         0x0B00 => Some((floats(&c.color), true)),
@@ -650,6 +676,8 @@ fn values(cpu: &mut Cpu, p: u32) -> Option<(Vec<f64>, bool)> {
         0x0BA6 => matrix(c.modelview.last()?),
         0x0BA7 => matrix(c.projection.last()?),
         0x0BA8 => matrix(c.texture_matrix[unit].last()?),
+        // GL_ATTRIB_STACK_DEPTH.
+        0x0BB0 => one(c.attribs.len() as f64),
         // GL_VIEWPORT, GL_SCISSOR_BOX.
         0x0BA2 => ints(&c.viewport),
         0x0C10 => ints(&c.scissor),
@@ -680,11 +708,11 @@ fn values(cpu: &mut Cpu, p: u32) -> Option<(Vec<f64>, bool)> {
         // GL_MAX_MODELVIEW_STACK_DEPTH, GL_MAX_NAME_STACK_DEPTH,
         // GL_MAX_PROJECTION_STACK_DEPTH, GL_MAX_TEXTURE_STACK_DEPTH,
         // GL_MAX_VIEWPORT_DIMS, GL_MAX_CLIENT_ATTRIB_STACK_DEPTH.
-        0x0D31 => one(8.0),
+        0x0D31 => one(LIGHTS as f64),
         0x0D32 => one(6.0),
         0x0D33 => one(MAX_TEXTURE_SIZE as f64),
         0x0D34 => one(256.0),
-        0x0D35 => one(16.0),
+        0x0D35 => one(ATTRIB_DEPTH as f64),
         0x0D36 => one(MODELVIEW_DEPTH as f64),
         0x0D37 => one(64.0),
         0x0D38 => one(PROJECTION_DEPTH as f64),
@@ -726,7 +754,10 @@ fn values(cpu: &mut Cpu, p: u32) -> Option<(Vec<f64>, bool)> {
 
 /// The values of `p` for glGet, or the error for one there isn't.
 fn get(cpu: &mut Cpu, p: u32) -> Option<(Vec<f64>, bool)> {
-    ctx(cpu)?;
+    if ctx(cpu)?.begin.is_some() {
+        error(cpu, GL_INVALID_OPERATION);
+        return None;
+    }
     let v = values(cpu, p);
     if v.is_none() {
         error(cpu, GL_INVALID_ENUM);

@@ -10,6 +10,12 @@
 //! OpenGL's primitives are assembled here (`primitives`), with the
 //! vertex flat shading takes the colors of where OpenGL has it, which
 //! is not where Direct3D has it.
+//!
+//! With GL_LIGHTING on, each vertex is lit here as it is given
+//! (`shade.rs`), and reaches the pipeline with its lit color and
+//! Direct3D's lighting off. With two-sided lighting a vertex has a
+//! front and a back color, and each polygon takes the ones of the side
+//! it shows (`back_faces`).
 
 use super::super::ddraw::d3d::device::{
     self as inner_device, RS_ALPHAFUNC, RS_CLIPPING, RS_CULLMODE, RS_DESTBLEND, RS_FILLMODE,
@@ -28,15 +34,18 @@ use super::super::ddraw::d3d::pipeline::{
     self, CULL_CCW, CULL_CW, FVF_DIFFUSE, FVF_XYZ, IDENTITY, Layout, Matrix, Prim, Vertex,
 };
 use super::super::ddraw::d3d::{draw as d3d_draw, hal, states};
+use super::light::Lighting;
 use super::matrix::{self, mul};
+use super::shade::{self, Input};
 use super::state::{
     GL_BACK, GL_CW, GL_EXP, GL_EXP2, GL_FLAT, GL_FRONT_AND_BACK, GL_LINE, GL_POINT,
 };
 use super::texture::{self, GL_ADD, GL_CLAMP, GL_DECAL, GL_LINEAR, GL_REPLACE};
 use super::{
-    Array, CAP_ALPHA_TEST, CAP_BLEND, CAP_CULL_FACE, CAP_DEPTH_TEST, CAP_DITHER, CAP_FOG,
-    CAP_POLYGON_OFFSET_FILL, CAP_SCISSOR_TEST, Context, GL_INVALID_ENUM, GL_INVALID_OPERATION,
-    GL_INVALID_VALUE, ImmVertex, UNITS, ctx, current, error, state,
+    Array, CAP_ALPHA_TEST, CAP_BLEND, CAP_COLOR_MATERIAL, CAP_CULL_FACE, CAP_DEPTH_TEST,
+    CAP_DITHER, CAP_FOG, CAP_LIGHTING, CAP_NORMALIZE, CAP_POLYGON_OFFSET_FILL, CAP_SCISSOR_TEST,
+    Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, ImmVertex, UNITS, ctx,
+    current, error, signed_unit, state,
 };
 use crate::cpu::Cpu;
 
@@ -116,6 +125,67 @@ fn blend_factor(f: u32) -> u32 {
 /// D3DCOLOR (ARGB) of red, green, blue and alpha from 0 to 1.
 fn argb(c: [f32; 4]) -> u32 {
     pipeline::color(c)
+}
+
+/// What lighting the vertices of one draw take from their context. The
+/// modelview matrix and the lights can't change between glBegin and
+/// glEnd. It borrows the lights and materials: glVertex makes one for
+/// each vertex.
+struct Lit<'a> {
+    lighting: &'a Lighting,
+    modelview: Matrix,
+    normals: Option<[f32; 9]>,
+    normalize: bool,
+    color_material: bool,
+}
+
+impl<'a> Lit<'a> {
+    /// The context's, None with GL_LIGHTING off.
+    fn of(c: &'a Context) -> Option<Lit<'a>> {
+        if c.caps & CAP_LIGHTING == 0 {
+            return None;
+        }
+        let modelview = c.modelview.last().copied().unwrap_or(IDENTITY);
+        Some(Lit {
+            lighting: &c.lighting,
+            modelview,
+            normals: shade::normal_matrix(&modelview),
+            normalize: c.caps & CAP_NORMALIZE != 0,
+            color_material: c.caps & CAP_COLOR_MATERIAL != 0,
+        })
+    }
+
+    /// The front and back colors (ARGB) of the vertex at `position` in
+    /// object coordinates, with the normal `normal` and the current
+    /// color `color`.
+    fn colors(&self, position: [f32; 4], normal: [f32; 3], color: [f32; 4]) -> [u32; 2] {
+        let input = Input {
+            position: matrix::apply(&self.modelview, position),
+            normal: shade::eye_normal(self.normals.as_ref(), normal, self.normalize),
+            color: self.color_material.then_some(color),
+        };
+        shade::shade(self.lighting, &input).map(argb)
+    }
+}
+
+/// Whether the context's vertices have back colors of their own, which
+/// they have with GL_LIGHTING on and two-sided lighting.
+fn two_sided(c: &Context) -> bool {
+    c.caps & CAP_LIGHTING != 0 && c.lighting.two_side
+}
+
+/// The front and back colors of a vertex: lit by `lit`, or the color
+/// `color` with lighting off.
+fn vertex_colors(
+    lit: Option<&Lit>,
+    position: [f32; 4],
+    normal: [f32; 3],
+    color: [f32; 4],
+) -> [u32; 2] {
+    match lit {
+        Some(l) => l.colors(position, normal, color),
+        None => [argb(color); 2],
+    }
 }
 
 /// The scissor box as the target's rectangle (left, top, right,
@@ -434,9 +504,100 @@ fn primitives(kind: u32, order: &[u32]) -> Vec<Prim> {
     out
 }
 
+/// How many of the triangles `primitives` makes of `kind` make one
+/// OpenGL polygon: two for a quad, all of them for a polygon.
+fn polygon_triangles(kind: u32) -> usize {
+    match kind {
+        GL_QUADS | GL_QUAD_STRIP => 2,
+        GL_POLYGON => usize::MAX,
+        _ => 1,
+    }
+}
+
+/// The determinant of a triangle's clip coordinates x, y and w: twice
+/// its area in normalized device coordinates times the three w.
+fn clip_det(a: [f64; 4], b: [f64; 4], d: [f64; 4]) -> f64 {
+    a[0] * (b[1] * d[3] - d[1] * b[3]) - b[0] * (a[1] * d[3] - d[1] * a[3])
+        + d[0] * (a[1] * b[3] - b[1] * a[3])
+}
+
+/// The vertices for the primitives `prims` of the context `c`, which
+/// come `per` triangles to a polygon, when the vertices have the back
+/// colors `backs`: `vertices` and then the same with the back colors,
+/// with each polygon whose back shows taking the second ones.
+///
+/// Section 2.13.1 chooses by the sign of the polygon's area in window
+/// coordinates. With all its corners in front of the eye (w > 0) that
+/// is the sum of its triangles' areas in normalized device coordinates.
+/// With one behind, each triangle takes the sign of the determinant of
+/// its corners' clip coordinates x, y and w, which is the side that
+/// shows of the part of it in front of the eye.
+fn back_faces(
+    c: &Context,
+    vertices: &[Vertex],
+    backs: &[u32],
+    prims: &mut [Prim],
+    per: usize,
+) -> Vec<Vertex> {
+    let modelview = c.modelview.last().copied().unwrap_or(IDENTITY);
+    let projection = c.projection.last().copied().unwrap_or(IDENTITY);
+    let m = mul(&projection, &modelview);
+    let clip: Vec<[f64; 4]> = vertices
+        .iter()
+        .map(|v| matrix::apply(&m, v.position).map(|x| x as f64))
+        .collect();
+    let ccw_front = c.front_face != GL_CW;
+    let n = vertices.len() as u32;
+    let mut out = vertices.to_vec();
+    out.extend(vertices.iter().zip(backs).map(|(v, &b)| Vertex {
+        diffuse: Some(b),
+        ..*v
+    }));
+    let shows_back = |area: f64| if ccw_front { area < 0.0 } else { area > 0.0 };
+    for polygon in prims.chunks_mut(per) {
+        let corners = |p: &Prim| match *p {
+            Prim::Triangle(t, ..) => Some(t.map(|i| clip[i as usize])),
+            _ => None,
+        };
+        let in_front = polygon
+            .iter()
+            .filter_map(corners)
+            .all(|t| t.iter().all(|v| v[3] > 0.0));
+        let area: f64 = polygon
+            .iter()
+            .filter_map(corners)
+            .map(|[a, b, d]| clip_det(a, b, d) / (a[3] * b[3] * d[3]))
+            .sum();
+        for p in polygon.iter_mut() {
+            let Some([a, b, d]) = corners(p) else {
+                continue;
+            };
+            let back = if in_front {
+                shows_back(area)
+            } else {
+                shows_back(clip_det(a, b, d))
+            };
+            if let Prim::Triangle(t, provoking, _) = p
+                && back
+            {
+                *t = t.map(|i| i + n);
+                *provoking += n;
+            }
+        }
+    }
+    out
+}
+
 /// Draw `kind` primitives (OpenGL's) of `vertices`, in the order
-/// `order` or as they are.
-fn draw(cpu: &mut Cpu, kind: u32, vertices: &[Vertex], order: Option<&[u32]>) {
+/// `order` or as they are. `backs` are the vertices' back colors when
+/// they have their own, with two-sided lighting.
+fn draw(
+    cpu: &mut Cpu,
+    kind: u32,
+    vertices: &[Vertex],
+    backs: Option<&[u32]>,
+    order: Option<&[u32]>,
+) {
     if vertices.is_empty() {
         return;
     }
@@ -458,10 +619,18 @@ fn draw(cpu: &mut Cpu, kind: u32, vertices: &[Vertex], order: Option<&[u32]>) {
     if triangles && !faces {
         return;
     }
-    let prims = primitives(kind, order);
+    let mut prims = primitives(kind, order);
     if prims.is_empty() {
         return;
     }
+    // Points and lines take the front colors.
+    let sided = match backs {
+        Some(backs) if triangles => state(cpu).contexts[index]
+            .as_ref()
+            .map(|c| back_faces(c, vertices, backs, &mut prims, polygon_triangles(kind))),
+        _ => None,
+    };
+    let vertices = sided.as_deref().unwrap_or(vertices);
     let _ = d3d_draw::draw_prims(cpu, inner, 8, &layout(), vertices, &prims, 0);
     if let Some(Some(c)) = state(cpu).contexts.get_mut(index) {
         c.drawn = true;
@@ -504,6 +673,7 @@ pub fn end(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     };
     let gathered = std::mem::take(&mut c.vertices);
     let matrices = texture_matrices(c);
+    let sided = two_sided(c);
     let vertices: Vec<Vertex> = gathered
         .iter()
         .map(|v| {
@@ -518,7 +688,8 @@ pub fn end(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
             out
         })
         .collect();
-    draw(cpu, kind, &vertices, None);
+    let backs: Option<Vec<u32>> = sided.then(|| gathered.iter().map(|v| v.back).collect());
+    draw(cpu, kind, &vertices, backs.as_deref(), None);
     Some(0)
 }
 
@@ -555,10 +726,11 @@ pub fn vertex(cpu: &mut Cpu, position: [f32; 4]) {
     if c.begin.is_none() {
         return;
     }
-    let position = homogeneous(position);
+    let [color, back] = vertex_colors(Lit::of(c).as_ref(), position, c.normal, c.color);
     let v = ImmVertex {
-        position,
-        color: argb(c.color),
+        position: homogeneous(position),
+        color,
+        back,
         tex: c.tex_coord,
     };
     c.vertices.push(v);
@@ -633,8 +805,12 @@ pub fn tex_coord_pointer(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-/// glNormalPointer(type, stride, pointer).
+/// glNormalPointer(type, stride, pointer): of signed types only.
 pub fn normal_pointer(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if ![GL_BYTE, GL_SHORT, GL_INT, GL_FLOAT, GL_DOUBLE].contains(&args[0]) {
+        error(cpu, GL_INVALID_ENUM);
+        return Some(0);
+    }
     let a = [3, args[0], args[1], args[2]];
     pointer(cpu, |c| &mut c.normal_array, a, &[3]);
     Some(0)
@@ -784,27 +960,49 @@ fn values(b: &[u8], kind: u32, size: u32, normalize: bool) -> [f32; 4] {
     out
 }
 
-/// The vertices `first` to `last` of the current context's arrays,
-/// with the current color and texture coordinates where an array is
-/// off. The texture coordinates go through the texture matrices when
-/// `transform` is set; glArrayElement's don't, as glEnd puts them
-/// through. None without a vertex array.
-fn gather(cpu: &mut Cpu, first: u32, last: u32, transform: bool) -> Option<Vec<Vertex>> {
-    let c = ctx(cpu)?;
-    let (va, ca, ta) = (c.vertex_array, c.color_array, c.tex_array);
-    let color = argb(c.color);
-    let tex = c.tex_coord;
-    let matrices = if transform {
-        texture_matrices(c)
-    } else {
-        [None; UNITS]
+/// A normal of an array as table 2.6 converts it: signed integers to
+/// (2c + 1) / (2^b - 1).
+fn normal_values(b: &[u8], kind: u32) -> [f32; 3] {
+    let v = values(b, kind, 3, false);
+    let bits = match kind {
+        GL_BYTE => 8,
+        GL_SHORT => 16,
+        GL_INT => 32,
+        _ => return [v[0], v[1], v[2]],
     };
+    [v[0], v[1], v[2]].map(|x| signed_unit(x as f64, bits))
+}
+
+/// The vertices `first` to `last` of the current context's arrays,
+/// with the current color, normal and texture coordinates where an
+/// array is off, lit with GL_LIGHTING on; and their back colors with
+/// two-sided lighting. The texture coordinates go through the texture
+/// matrices when `transform` is set; glArrayElement's don't, as glEnd
+/// puts them through. With `used`, only the vertices it marks (counted
+/// from `first`) are lit: the others are drawn by no primitive. None
+/// without a vertex array.
+fn gather(
+    cpu: &mut Cpu,
+    first: u32,
+    last: u32,
+    transform: bool,
+    used: Option<&[bool]>,
+) -> Option<(Vec<Vertex>, Option<Vec<u32>>)> {
+    let c = ctx(cpu)?;
+    let (va, ca, na, ta) = (c.vertex_array, c.color_array, c.normal_array, c.tex_array);
+    let lighting = c.caps & CAP_LIGHTING != 0;
     if !va.enabled || last < first {
         return None;
     }
     let (vb, vs) = array_bytes(cpu, &va, first, last)?;
     let colors = if ca.enabled {
         array_bytes(cpu, &ca, first, last)
+    } else {
+        None
+    };
+    // Normals matter only to lighting.
+    let normals = if na.enabled && lighting {
+        array_bytes(cpu, &na, first, last)
     } else {
         None
     };
@@ -815,8 +1013,17 @@ fn gather(cpu: &mut Cpu, first: u32, last: u32, transform: bool) -> Option<Vec<V
             None
         }
     });
+    let c = ctx(cpu)?;
+    let (color, normal, tex) = (c.color, c.normal, c.tex_coord);
+    let matrices = if transform {
+        texture_matrices(c)
+    } else {
+        [None; UNITS]
+    };
+    let lit = Lit::of(c);
     let n = (last - first + 1) as usize;
     let mut out = Vec::with_capacity(n);
+    let mut backs = two_sided(c).then(|| Vec::with_capacity(n));
     for i in 0..n {
         let mut p = values(&vb[i * vs..], va.kind, va.size, false);
         if va.size < 4 {
@@ -825,16 +1032,25 @@ fn gather(cpu: &mut Cpu, first: u32, last: u32, transform: bool) -> Option<Vec<V
         if va.size < 3 {
             p[2] = 0.0;
         }
-        let diffuse = match &colors {
+        let rgba = match &colors {
             Some((b, s)) => {
                 let mut v = values(&b[i * s..], ca.kind, ca.size, true);
                 if ca.size < 4 {
                     v[3] = 1.0;
                 }
-                argb(v)
+                v
             }
             None => color,
         };
+        let normal = match &normals {
+            Some((b, s)) => normal_values(&b[i * s..], na.kind),
+            None => normal,
+        };
+        let lit = lit.as_ref().filter(|_| used.is_none_or(|u| u[i]));
+        let [diffuse, back] = vertex_colors(lit, p, normal, rgba);
+        if let Some(backs) = &mut backs {
+            backs.push(back);
+        }
         let mut v = Vertex {
             position: homogeneous(p),
             diffuse: Some(diffuse),
@@ -853,23 +1069,29 @@ fn gather(cpu: &mut Cpu, first: u32, last: u32, transform: bool) -> Option<Vec<V
         }
         out.push(v);
     }
-    Some(out)
+    Some((out, backs))
 }
 
 /// glArrayElement(i): a vertex of the arrays, between glBegin and
 /// glEnd.
 pub fn array_element(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let i = args[0];
-    let Some(v) = gather(cpu, i, i, false).and_then(|v| v.into_iter().next()) else {
+    let Some((vertices, backs)) = gather(cpu, i, i, false, None) else {
         return Some(0);
     };
+    let Some(&v) = vertices.first() else {
+        return Some(0);
+    };
+    let color = v.diffuse.unwrap_or(0xFFFF_FFFF);
+    let back = backs.and_then(|b| b.first().copied()).unwrap_or(color);
     let Some(c) = ctx(cpu) else {
         return Some(0);
     };
     if c.begin.is_some() {
         c.vertices.push(ImmVertex {
             position: v.position,
-            color: v.diffuse.unwrap_or(0xFFFF_FFFF),
+            color,
+            back,
             tex: [v.tex[0], v.tex[1]],
         });
     }
@@ -894,8 +1116,8 @@ pub fn draw_arrays(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(last) = first.checked_add(count - 1) else {
         return Some(0);
     };
-    if let Some(v) = gather(cpu, first, last, true) {
-        draw(cpu, kind, &v, None);
+    if let Some((v, backs)) = gather(cpu, first, last, true, None) {
+        draw(cpu, kind, &v, backs.as_deref(), None);
     }
     Some(0)
 }
@@ -950,11 +1172,15 @@ pub fn draw_elements(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if last - first > 0x10_0000 {
         return Some(0);
     }
-    let Some(v) = gather(cpu, first, last, true) else {
+    let mut used = vec![false; (last - first + 1) as usize];
+    for &i in &indices {
+        used[(i - first) as usize] = true;
+    }
+    let Some((v, backs)) = gather(cpu, first, last, true, Some(&used)) else {
         return Some(0);
     };
     let order: Vec<u32> = indices.iter().map(|i| i - first).collect();
-    draw(cpu, kind, &v, Some(&order));
+    draw(cpu, kind, &v, backs.as_deref(), Some(&order));
     Some(0)
 }
 
@@ -973,26 +1199,33 @@ fn rect(cpu: &mut Cpu, r: [f32; 4]) {
         error(cpu, GL_INVALID_OPERATION);
         return;
     }
-    let color = argb(c.color);
     let matrices = texture_matrices(c);
     let tex: [[f32; 4]; UNITS] =
         std::array::from_fn(|u| texture_coords(&matrices[u], c.tex_coord[u]));
-    let corner = |x: f32, y: f32| {
+    // A rectangle is a polygon of four vertices, lit as glVertex's are.
+    let lit = Lit::of(c);
+    let corners = [[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]];
+    let mut backs = Vec::with_capacity(4);
+    let vertices = corners.map(|[x, y]| {
+        let position = [x, y, 0.0, 1.0];
+        let [color, back] = vertex_colors(lit.as_ref(), position, c.normal, c.color);
+        backs.push(back);
         let mut v = Vertex {
-            position: [x, y, 0.0, 1.0],
+            position,
             diffuse: Some(color),
             ..Vertex::default()
         };
         v.tex[..UNITS].copy_from_slice(&tex);
         v
-    };
-    let vertices = [
-        corner(r[0], r[1]),
-        corner(r[2], r[1]),
-        corner(r[2], r[3]),
-        corner(r[0], r[3]),
-    ];
-    draw(cpu, GL_POLYGON, &vertices, None);
+    });
+    let sided = two_sided(c);
+    draw(
+        cpu,
+        GL_POLYGON,
+        &vertices,
+        sided.then_some(&backs[..]),
+        None,
+    );
 }
 
 /// glRectf(x1, y1, x2, y2).
@@ -1279,6 +1512,39 @@ mod tests {
         // A strip's and a fan's triangles are each drawn whole.
         assert_eq!(edges(GL_TRIANGLE_STRIP, 4), [7, 7]);
         assert_eq!(edges(GL_TRIANGLE_FAN, 4), [7, 7]);
+    }
+
+    #[test]
+    fn a_polygon_shows_one_side_whatever_its_triangles_do() {
+        let c = super::super::new_context(0, 0, 1);
+        // A concave quad, counterclockwise as a whole, whose second
+        // triangle (0, 2, 3) is clockwise.
+        let corners = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.5, 0.4]];
+        let vertices: Vec<Vertex> = corners
+            .iter()
+            .map(|&[x, y]| Vertex {
+                position: [x, y, 0.0, 1.0],
+                ..Vertex::default()
+            })
+            .collect();
+        let backs = [0; 4];
+        let showing = |kind: u32| {
+            let mut prims = primitives(kind, &[0, 1, 2, 3]);
+            back_faces(&c, &vertices, &backs, &mut prims, polygon_triangles(kind));
+            prims
+                .iter()
+                .map(|p| match *p {
+                    Prim::Triangle(t, ..) => t[0] >= 4,
+                    _ => false,
+                })
+                .collect::<Vec<_>>()
+        };
+        // Section 2.13.1: the quad's area, positive, shows the front of
+        // both its triangles.
+        assert_eq!(showing(GL_QUADS), [false, false]);
+        assert_eq!(showing(GL_POLYGON), [false, false]);
+        // As separate triangles each shows its own side.
+        assert_eq!(showing(GL_TRIANGLE_FAN), [false, true]);
     }
 
     #[test]

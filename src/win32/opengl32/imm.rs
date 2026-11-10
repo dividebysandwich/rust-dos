@@ -4,7 +4,7 @@
 //! for its kind, size and type, and whether it takes an array.
 
 use super::texture::GL_TEXTURE0;
-use super::{GL_INVALID_ENUM, UNITS, ctx, error};
+use super::{CAP_COLOR_MATERIAL, GL_INVALID_ENUM, UNITS, ctx, error, signed_unit};
 use crate::cpu::Cpu;
 
 /// What a function sets.
@@ -43,8 +43,19 @@ impl Type {
     }
 
     /// A value from its bytes or its argument's words; a color's
-    /// integers go from 0 to 1 (or -1 to 1 signed).
-    fn value(self, lo: u32, hi: u32, color: bool) -> f32 {
+    /// integers go from 0 to 1 (or -1 to 1 signed), and a normal's from
+    /// -1 to 1 as table 2.6 converts signed integers, (2c + 1) / (2^b -
+    /// 1).
+    fn value(self, lo: u32, hi: u32, kind: Kind) -> f32 {
+        if kind == Kind::Normal {
+            return match self {
+                Type::B => signed_unit(lo as u8 as i8 as f64, 8),
+                Type::S => signed_unit(lo as u16 as i16 as f64, 16),
+                Type::I => signed_unit(lo as i32 as f64, 32),
+                _ => self.value(lo, hi, Kind::Vertex),
+            };
+        }
+        let color = kind == Kind::Color;
         let (v, most) = match self {
             Type::B => (lo as u8 as i8 as f32, 127.0),
             Type::UB => (lo as u8 as f32, 255.0),
@@ -68,7 +79,7 @@ fn values(
     n: usize,
     t: Type,
     array: bool,
-    color: bool,
+    kind: Kind,
 ) -> Option<[f32; 4]> {
     let mut out = [0.0; 4];
     if array {
@@ -88,7 +99,7 @@ fn values(
                 w[..have].copy_from_slice(&p[4 * k..4 * k + have]);
                 u32::from_le_bytes(w)
             };
-            *o = t.value(word(0), if t == Type::D { word(1) } else { 0 }, color);
+            *o = t.value(word(0), if t == Type::D { word(1) } else { 0 }, kind);
         }
     } else {
         let words = if t == Type::D { 2 } else { 1 };
@@ -96,7 +107,7 @@ fn values(
             let at = skip + i * words;
             let lo = *args.get(at)?;
             let hi = if t == Type::D { *args.get(at + 1)? } else { 0 };
-            *o = t.value(lo, hi, color);
+            *o = t.value(lo, hi, kind);
         }
     }
     Some(out)
@@ -105,7 +116,7 @@ fn values(
 /// Set an attribute, or make a vertex.
 fn set(cpu: &mut Cpu, kind: Kind, n: usize, t: Type, array: bool, args: &[u32]) {
     let skip = (kind == Kind::MultiTexCoord) as usize;
-    let Some(v) = values(cpu, args, skip, n, t, array, kind == Kind::Color) else {
+    let Some(v) = values(cpu, args, skip, n, t, array, kind) else {
         return;
     };
     match kind {
@@ -117,6 +128,11 @@ fn set(cpu: &mut Cpu, kind: Kind, n: usize, t: Type, array: bool, args: &[u32]) 
         Kind::Color => {
             if let Some(c) = ctx(cpu) {
                 c.color = [v[0], v[1], v[2], if n == 4 { v[3] } else { 1.0 }];
+                // The material properties glColorMaterial tracks follow
+                // the current color (section 2.13.3).
+                if c.caps & CAP_COLOR_MATERIAL != 0 {
+                    c.lighting.track(c.color);
+                }
             }
         }
         Kind::Normal => {
