@@ -410,11 +410,12 @@ pub fn fprem_internal(cpu: &mut Cpu, ieee: bool) {
     let st0 = st0_obj.get_f64();
     let st1 = st1_obj.get_f64();
     // Operands outside a double's range need the reduction on the 80
-    // bits (#913). A divisor below it (a denormal, or a normal number
-    // under 2^-1022) comes to 0 here, and is taken as one. A dividend
-    // above it comes to an infinity, and `%` below gives a NaN, with no
-    // IE and C2 clear, where the x87 reduces part of the way and sets C2.
-    if st1 == 0.0 {
+    // bits (#913). Until then they give the real indefinite with IE, so
+    // that the wrong result is at least flagged: a divisor below the
+    // range (a denormal, or a normal number under 2^-1022) comes to 0
+    // here, and a dividend above it to an infinity, where the x87 reduces
+    // by the one, and part of the way for the other (C2 set).
+    if st1 == 0.0 || st0.is_infinite() {
         fprem_unreduced(cpu, INDEFINITE, true);
         return;
     }
