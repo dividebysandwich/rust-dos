@@ -28,10 +28,12 @@
 //!
 //! Every OpenGL 1.1 function is exported, since programs ask for all of
 //! them with GetProcAddress (Quake III's QGL does). Those that aren't
-//! here, such as display lists, evaluators, selection, feedback,
-//! lighting and the accumulation buffer, do nothing and say so in the
-//! log. The extensions are GL_ARB_multitexture (on a Voodoo3, with its
-//! two texture units; a Banshee has one and not the extension),
+//! here, such as display lists, evaluators, selection, feedback and the
+//! accumulation buffer, do nothing and say so in the log. Lighting is
+//! computed on the processor, as 3dfx's ICD did (`light.rs`,
+//! `shade.rs`), and the vertices reach Direct3D's pipeline lit. The
+//! extensions are GL_ARB_multitexture (on a Voodoo3, with its two
+//! texture units; a Banshee has one and not the extension),
 //! GL_EXT_bgra, GL_EXT_compiled_vertex_array, GL_EXT_texture_env_add
 //! and WGL_EXT_swap_control.
 //!
@@ -58,10 +60,13 @@
 //! License 2.1 or later: Copyright (c) 1999 Lionel Ulmer, Copyright (c)
 //! 2005 Raphael Junqueira.
 
+mod attrib;
 mod draw;
 mod exports;
 mod imm;
+mod light;
 mod matrix;
+mod shade;
 mod state;
 mod texture;
 pub mod wgl;
@@ -129,11 +134,13 @@ pub struct Array {
 }
 
 /// A vertex as glBegin and glEnd gather it: the position, the color
-/// (ARGB), and each unit's texture coordinates.
+/// (ARGB) and the color a back face takes, which differs from it only
+/// with two-sided lighting, and each unit's texture coordinates.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ImmVertex {
     pub position: [f32; 4],
     pub color: u32,
+    pub back: u32,
     pub tex: [[f32; 4]; UNITS],
 }
 
@@ -237,6 +244,10 @@ pub struct Context {
     /// texture).
     pub bound: [u32; UNITS],
     pub textures: Vec<Texture>,
+    /// The lights, the materials and the lighting model.
+    pub lighting: light::Lighting,
+    /// glPushAttrib's stack.
+    pub attribs: Vec<attrib::Attrib>,
     /// The current color, texture coordinates and normal.
     pub color: [f32; 4],
     pub tex_coord: [[f32; 4]; UNITS],
@@ -472,6 +483,7 @@ crate::state_fields!(Array {
 crate::state_fields!(ImmVertex {
     position,
     color,
+    back,
     tex
 });
 crate::state_fields!(Texture {
@@ -543,6 +555,8 @@ crate::state_fields!(Context {
     env_color,
     bound,
     textures,
+    lighting,
+    attribs,
     color,
     tex_coord,
     normal,

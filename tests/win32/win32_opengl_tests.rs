@@ -71,6 +71,20 @@ const OPENGL32: &[&str] = &[
     "glFrustum",
     "glDepthRange",
     "glShadeModel",
+    "glLightfv",
+    "glLightf",
+    "glMaterialfv",
+    "glNormal3f",
+    "glLightModeli",
+    "glColorMaterial",
+    "glGetLightfv",
+    "glGetMaterialfv",
+    "glIsEnabled",
+    "glGetFloatv",
+    "glPushAttrib",
+    "glPopAttrib",
+    "glScalef",
+    "glNormalPointer",
 ];
 const GLU32: &[&str] = &[
     "gluBuild2DMipmaps",
@@ -116,6 +130,20 @@ const ORTHO: usize = GL + 28;
 const FRUSTUM: usize = GL + 29;
 const DEPTH_RANGE: usize = GL + 30;
 const SHADE_MODEL: usize = GL + 31;
+const LIGHTFV: usize = GL + 32;
+const LIGHTF: usize = GL + 33;
+const MATERIALFV: usize = GL + 34;
+const NORMAL3F: usize = GL + 35;
+const LIGHT_MODELI: usize = GL + 36;
+const COLOR_MATERIAL: usize = GL + 37;
+const GET_LIGHTFV: usize = GL + 38;
+const GET_MATERIALFV: usize = GL + 39;
+const IS_ENABLED: usize = GL + 40;
+const GET_FLOATV: usize = GL + 41;
+const PUSH_ATTRIB: usize = GL + 42;
+const POP_ATTRIB: usize = GL + 43;
+const SCALEF: usize = GL + 44;
+const NORMAL_POINTER: usize = GL + 45;
 const GLU: usize = GL + OPENGL32.len();
 const BUILD_2D_MIPMAPS: usize = GLU;
 const ORTHO_2D: usize = GLU + 1;
@@ -1362,4 +1390,246 @@ fn glu_builds_mipmaps_of_an_image_of_no_power_of_two_and_sets_up_2d() {
     assert_eq!(pixel(&cpu, data, 24, 24), [255, 0, 0]);
     assert_eq!(pixel(&cpu, data, 48, 48), [0, 0, 255]);
     assert_eq!(pixel(&cpu, data, 48, 8), [0, 0, 255]);
+}
+
+// Lighting (OpenGL 1.1, section 2.13).
+const GL_LIGHTING: u32 = 0x0B50;
+const GL_LIGHT0: u32 = 0x4000;
+const GL_DITHER: u32 = 0x0BD0;
+const GL_COLOR_MATERIAL: u32 = 0x0B57;
+const GL_DIFFUSE: u32 = 0x1201;
+const GL_POSITION: u32 = 0x1203;
+const GL_SPOT_DIRECTION: u32 = 0x1204;
+const GL_SPOT_CUTOFF: u32 = 0x1206;
+const GL_EMISSION: u32 = 0x1600;
+const GL_FRONT: u32 = 0x0404;
+const GL_BACK: u32 = 0x0405;
+const GL_LIGHT_MODEL_TWO_SIDE: u32 = 0x0B52;
+const GL_LIGHT_MODEL_AMBIENT: u32 = 0x0B53;
+const GL_LIGHTING_BIT: u32 = 0x40;
+const GL_SHORT: u32 = 0x1402;
+const GL_NORMAL_ARRAY: u32 = 0x8075;
+const GL_INVALID_VALUE: u32 = 0x0501;
+
+/// Where the lighting tests keep the vectors they pass, and where the
+/// queries write theirs.
+const VECTORS: u32 = 0x600;
+const OUT: u32 = 0x700;
+
+/// A color read back from the 5-6-5 color buffer is `want` (0 to 1)
+/// within its steps.
+fn near(got: [u8; 3], want: [f32; 3]) {
+    for k in 0..3 {
+        let w = want[k] * 255.0;
+        assert!(
+            (got[k] as f32 - w).abs() <= 9.0,
+            "{got:?} is not near {:?}",
+            want.map(|x| x * 255.0)
+        );
+    }
+}
+
+/// The 4 floats of the program's data at `offset`.
+fn floats(cpu: &Cpu, data: u32, offset: u32) -> [f32; 4] {
+    std::array::from_fn(|i| f32::from_bits(peek(cpu, data + offset + 4 * i as u32)))
+}
+
+#[test]
+fn lighting_colors_vertices_by_their_normals_from_calls_and_arrays() {
+    let mut d = data();
+    // Light 0's diffuse color.
+    put_f32s(&mut d, VECTORS, &[1.0, 0.5, 0.25, 1.0]);
+    // The top right triangle for the arrays, with shorts for normals
+    // straight along z: 32767 is (2 * 32767 + 1) / 65535 = 1.
+    put_f32s(
+        &mut d,
+        VERTICES,
+        &[1.0, -1.0, 0.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0],
+    );
+    for i in 0..3 {
+        put(&mut d, TEX_COORDS + 6 * i, &[0, 0, 0, 0, 0xFF, 0x7F]);
+    }
+    for (i, v) in [0u16, 1, 2].iter().enumerate() {
+        put(&mut d, INDICES + 2 * i as u32, &v.to_le_bytes());
+    }
+    let mut error_at = 0;
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        c.api(a, l, DISABLE, &[Arg::I(GL_DITHER)])?;
+        c.api(a, l, CLEAR, &[Arg::I(GL_COLOR_BUFFER_BIT)])?;
+        let diffuse = [Arg::I(GL_LIGHT0), Arg::I(GL_DIFFUSE), Arg::At(VECTORS)];
+        c.api(a, l, LIGHTFV, &diffuse)?;
+        c.api(a, l, ENABLE, &[Arg::I(GL_LIGHTING)])?;
+        c.api(a, l, ENABLE, &[Arg::I(GL_LIGHT0)])?;
+        // The bottom left triangle: its normal at 0.8 to the light, which
+        // is along z at infinity. The color doesn't count.
+        c.api(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+        c.api(a, l, COLOR3F, &[Arg::F(0.0), Arg::F(0.0), Arg::F(1.0)])?;
+        c.api(a, l, NORMAL3F, &[Arg::F(0.0), Arg::F(0.6), Arg::F(0.8)])?;
+        for [x, y] in BOTTOM_LEFT {
+            c.api(a, l, VERTEX2F, &[Arg::F(x), Arg::F(y)])?;
+        }
+        c.api(a, l, END, &[])?;
+        // The top right one from arrays, green taken for the ambient and
+        // diffuse material by GL_COLOR_MATERIAL.
+        c.api(a, l, COLOR3F, &[Arg::F(0.0), Arg::F(1.0), Arg::F(0.0)])?;
+        c.api(a, l, ENABLE, &[Arg::I(GL_COLOR_MATERIAL)])?;
+        c.api(a, l, ENABLE_CLIENT_STATE, &[Arg::I(GL_VERTEX_ARRAY)])?;
+        c.api(a, l, ENABLE_CLIENT_STATE, &[Arg::I(GL_NORMAL_ARRAY)])?;
+        let vertices = [Arg::I(3), Arg::I(GL_FLOAT), Arg::I(0), Arg::At(VERTICES)];
+        c.api(a, l, VERTEX_POINTER, &vertices)?;
+        let normals = [Arg::I(GL_SHORT), Arg::I(0), Arg::At(TEX_COORDS)];
+        c.api(a, l, NORMAL_POINTER, &normals)?;
+        let triangle = [
+            Arg::I(GL_TRIANGLES),
+            Arg::I(3),
+            Arg::I(GL_UNSIGNED_SHORT),
+            Arg::At(INDICES),
+        ];
+        c.api(a, l, DRAW_ELEMENTS, &triangle)?;
+        read_back(a, l, &mut c)?;
+        error_at = c.next - 1;
+        finish(a, l)
+    });
+    let mut cpu = machine("lighting", true, exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * error_at), 0, "glGetError");
+    // Equation 2.1: the scene's ambient 0.2 times the material's 0.2,
+    // and n.L 0.8 times the material's diffuse 0.8 times the light's.
+    let lit = [0.04 + 0.64, 0.04 + 0.64 * 0.5, 0.04 + 0.64 * 0.25];
+    near(pixel(&cpu, data, 4, 4), lit);
+    // Green for both: 0.2 of it from the scene's ambient, and the light's
+    // green, 0.5, at n.L 1.
+    near(pixel(&cpu, data, 60, 60), [0.0, 0.7, 0.0]);
+}
+
+/// A program that lights two triangles from behind them, a red front
+/// material and a green back one: the bottom left triangle wound
+/// counter-clockwise, so its front shows, and the top right one
+/// clockwise, so its back shows. With `two_side`, lighting is
+/// two-sided.
+fn two_sided(two_side: bool) -> (Cpu, u32) {
+    let mut d = data();
+    put_f32s(&mut d, VECTORS, &[0.0, 0.0, -1.0, 0.0]);
+    put_f32s(&mut d, VECTORS + 16, &[1.0, 0.0, 0.0, 1.0]);
+    put_f32s(&mut d, VECTORS + 32, &[0.0, 1.0, 0.0, 1.0]);
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        c.api(a, l, DISABLE, &[Arg::I(GL_DITHER)])?;
+        c.api(a, l, CLEAR, &[Arg::I(GL_COLOR_BUFFER_BIT)])?;
+        let position = [Arg::I(GL_LIGHT0), Arg::I(GL_POSITION), Arg::At(VECTORS)];
+        c.api(a, l, LIGHTFV, &position)?;
+        let front = [Arg::I(GL_FRONT), Arg::I(GL_DIFFUSE), Arg::At(VECTORS + 16)];
+        c.api(a, l, MATERIALFV, &front)?;
+        let back = [Arg::I(GL_BACK), Arg::I(GL_DIFFUSE), Arg::At(VECTORS + 32)];
+        c.api(a, l, MATERIALFV, &back)?;
+        let model = [Arg::I(GL_LIGHT_MODEL_TWO_SIDE), Arg::I(two_side as u32)];
+        c.api(a, l, LIGHT_MODELI, &model)?;
+        c.api(a, l, ENABLE, &[Arg::I(GL_LIGHTING)])?;
+        c.api(a, l, ENABLE, &[Arg::I(GL_LIGHT0)])?;
+        c.api(a, l, NORMAL3F, &[Arg::F(0.0), Arg::F(0.0), Arg::F(1.0)])?;
+        c.api(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+        for [x, y] in BOTTOM_LEFT {
+            c.api(a, l, VERTEX2F, &[Arg::F(x), Arg::F(y)])?;
+        }
+        for [x, y] in TOP_RIGHT.iter().rev() {
+            c.api(a, l, VERTEX2F, &[Arg::F(*x), Arg::F(*y)])?;
+        }
+        c.api(a, l, END, &[])?;
+        read_back(a, l, &mut c)?;
+        finish(a, l)
+    });
+    let mut cpu = machine(&format!("two_sided_{two_side}"), true, exe);
+    run_until_done(&mut cpu, data);
+    (cpu, data)
+}
+
+#[test]
+fn two_sided_lighting_lights_the_back_that_shows_with_the_back_material() {
+    let ambient = [0.04; 3];
+    // The front faces away from the light: the ambient term alone.
+    let (cpu, data) = two_sided(true);
+    near(pixel(&cpu, data, 4, 4), ambient);
+    // The back faces it, and is the back material's green.
+    near(pixel(&cpu, data, 60, 60), [0.04, 1.0, 0.04]);
+    // One-sided, the back shows the front's color, of the front
+    // material and the normal as given.
+    let (cpu, data) = two_sided(false);
+    near(pixel(&cpu, data, 4, 4), ambient);
+    near(pixel(&cpu, data, 60, 60), ambient);
+}
+
+#[test]
+fn lighting_queries_give_back_what_was_set() {
+    let mut d = data();
+    put_f32s(&mut d, VECTORS, &[1.0, 2.0, 3.0, 1.0]);
+    put_f32s(&mut d, VECTORS + 16, &[1.0, 0.0, 0.0, 0.0]);
+    let mut at = Vec::new();
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let light1 = GL_LIGHT0 + 1;
+        // The position and spot direction go through the modelview matrix
+        // as they are given, a scale by 2 along x.
+        c.api(a, l, SCALEF, &[Arg::F(2.0), Arg::F(1.0), Arg::F(1.0)])?;
+        let position = [Arg::I(light1), Arg::I(GL_POSITION), Arg::At(VECTORS)];
+        c.api(a, l, LIGHTFV, &position)?;
+        let spot = [
+            Arg::I(light1),
+            Arg::I(GL_SPOT_DIRECTION),
+            Arg::At(VECTORS + 16),
+        ];
+        c.api(a, l, LIGHTFV, &spot)?;
+        c.api(a, l, LOAD_IDENTITY, &[])?;
+        let get = |p, out| [Arg::I(light1), Arg::I(p), Arg::At(out)];
+        c.api(a, l, GET_LIGHTFV, &get(GL_POSITION, OUT))?;
+        c.api(a, l, GET_LIGHTFV, &get(GL_SPOT_DIRECTION, OUT + 16))?;
+        // A cutoff over 90 that isn't 180 is refused.
+        let cutoff = [Arg::I(light1), Arg::I(GL_SPOT_CUTOFF), Arg::F(100.0)];
+        c.api(a, l, LIGHTF, &cutoff)?;
+        at.push(c.next);
+        c.api(a, l, GET_ERROR, &[])?;
+        c.api(a, l, ENABLE, &[Arg::I(GL_LIGHT0 + 3)])?;
+        at.push(c.next);
+        c.api(a, l, IS_ENABLED, &[Arg::I(GL_LIGHT0 + 3)])?;
+        c.api(a, l, IS_ENABLED, &[Arg::I(GL_LIGHT0 + 2)])?;
+        // The front emission follows the current color.
+        c.api(a, l, ENABLE, &[Arg::I(GL_COLOR_MATERIAL)])?;
+        let track = [Arg::I(GL_FRONT), Arg::I(GL_EMISSION)];
+        c.api(a, l, COLOR_MATERIAL, &track)?;
+        c.api(a, l, COLOR3F, &[Arg::F(0.5), Arg::F(0.25), Arg::F(1.0)])?;
+        let emission = |face, out| [Arg::I(face), Arg::I(GL_EMISSION), Arg::At(out)];
+        c.api(a, l, GET_MATERIALFV, &emission(GL_FRONT, OUT + 32))?;
+        c.api(a, l, GET_MATERIALFV, &emission(GL_BACK, OUT + 48))?;
+        let ambient = [Arg::I(GL_LIGHT_MODEL_AMBIENT), Arg::At(OUT + 64)];
+        c.api(a, l, GET_FLOATV, &ambient)?;
+        // glPopAttrib puts back the lighting group.
+        c.api(a, l, ENABLE, &[Arg::I(GL_LIGHTING)])?;
+        c.api(a, l, PUSH_ATTRIB, &[Arg::I(GL_LIGHTING_BIT)])?;
+        c.api(a, l, DISABLE, &[Arg::I(GL_LIGHTING)])?;
+        let model = [Arg::I(GL_LIGHT_MODEL_TWO_SIDE), Arg::I(1)];
+        c.api(a, l, LIGHT_MODELI, &model)?;
+        c.api(a, l, POP_ATTRIB, &[])?;
+        at.push(c.next);
+        c.api(a, l, IS_ENABLED, &[Arg::I(GL_LIGHTING)])?;
+        let two_side = [Arg::I(GL_LIGHT_MODEL_TWO_SIDE), Arg::At(OUT + 80)];
+        c.api(a, l, GET_FLOATV, &two_side)?;
+        c.api(a, l, GET_ERROR, &[])?;
+        finish(a, l)
+    });
+    let mut cpu = machine("lighting_queries", true, exe);
+    run_until_done(&mut cpu, data);
+    let r = |i: u32| peek(&cpu, data + RESULTS + 4 * i);
+    assert_eq!(floats(&cpu, data, OUT), [2.0, 2.0, 3.0, 1.0]);
+    assert_eq!(floats(&cpu, data, OUT + 16)[..3], [2.0, 0.0, 0.0]);
+    assert_eq!(r(at[0]), GL_INVALID_VALUE, "a cutoff of 100");
+    assert_eq!([r(at[1]), r(at[1] + 1)], [1, 0], "lights 3 and 2 on");
+    assert_eq!(floats(&cpu, data, OUT + 32), [0.5, 0.25, 1.0, 1.0]);
+    assert_eq!(floats(&cpu, data, OUT + 48), [0.0, 0.0, 0.0, 1.0]);
+    assert_eq!(floats(&cpu, data, OUT + 64), [0.2, 0.2, 0.2, 1.0]);
+    assert_eq!(r(at[2]), 1, "lighting on again");
+    assert_eq!(floats(&cpu, data, OUT + 80)[0], 0.0, "one-sided again");
+    assert_eq!(r(at[2] + 2), 0, "glGetError");
 }
