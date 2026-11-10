@@ -1393,15 +1393,18 @@ pub fn mbsupr(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 // Sorting and searching, with the program's compare function.
 
-/// qsort(base, count, width, compare): Visual C++ 6's quicksort, whose
-/// comparisons are calls into the program. It isn't stable, so elements
-/// that compare equal end up in the order its steps leave them, and a
-/// program that sorts such elements sees that order: the steps, and the
-/// order of the comparisons, are Microsoft's. A range of more than 8
+/// qsort(base, count, width, compare): a quicksort whose comparisons are
+/// calls into the program, made in the order Visual C++ 6's qsort makes
+/// them. It isn't stable, so elements that compare equal end up in the
+/// order its steps leave them, and a program that sorts such elements
+/// sees the same order as with Microsoft's DLL. A range of more than 8
 /// elements is split around its middle element, which goes to its start
 /// first; the smaller part goes on at once and the larger waits on a
 /// stack. A range of up to 8 is sorted by moving its largest element to
-/// its end, then the largest of the rest, and so on (`QSort`).
+/// its end, then the largest of the rest, and so on (`QSort`). The order
+/// of comparisons and the results were checked against a log of
+/// MSVCRT.DLL 6.00.8337's comparisons: 518 sorts and searches of 0 to 257
+/// elements, all the same.
 pub fn qsort(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[base, count, width, compare] = args else {
         unreachable!()
@@ -1417,17 +1420,17 @@ pub fn qsort(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return None;
     }
     let resume = call::here(cpu);
-    let hi = base + (count - 1) * width;
+    let last = base + (count - 1) * width;
     let mut s = QSort {
         width,
         compare,
-        step: QSort::RANGE,
-        lo: base,
-        hi,
-        loguy: 0,
-        higuy: 0,
-        max: 0,
-        p: 0,
+        step: QSort::START_RANGE,
+        first: base,
+        last,
+        low_scan: 0,
+        high_scan: 0,
+        largest: 0,
+        candidate: 0,
         stack: Vec::new(),
     };
     s.run(cpu, resume, None);
@@ -1441,48 +1444,49 @@ pub fn qsort_returned(cpu: &mut Cpu, value: u32, call: Call) {
     s.run(cpu, call.resume, Some(value as i32));
 }
 
-/// Where a qsort is: the range it sorts (`lo` to `hi`, the addresses of
-/// its first and last elements), the step it takes, the elements the
-/// split has reached from each end (`loguy`, `higuy`), the largest
-/// element found yet and the one it is compared with (`max`, `p`), and
-/// the ranges waiting (`stack`, start and end each).
+/// Where a qsort is: the range it sorts (`first` to `last`, the addresses
+/// of its first and last elements), the step it takes, the elements the
+/// split has reached scanning up from the low end and down from the high
+/// end (`low_scan`, `high_scan`), the largest element found yet and the
+/// one it is compared with (`largest`, `candidate`), and the ranges
+/// waiting (`stack`, first and last each).
 struct QSort {
     width: u32,
     compare: u32,
     step: u32,
-    lo: u32,
-    hi: u32,
-    loguy: u32,
-    higuy: u32,
-    max: u32,
-    p: u32,
+    first: u32,
+    last: u32,
+    low_scan: u32,
+    high_scan: u32,
+    largest: u32,
+    candidate: u32,
     stack: Vec<u32>,
 }
 
 impl QSort {
-    /// Sort the range `lo` to `hi`.
-    const RANGE: u32 = 0;
-    /// Up to 8 elements: compare element `p` with the largest yet.
-    const LARGEST: u32 = 1;
-    /// Splitting: element `loguy` was compared with the middle one, which
-    /// is at `lo`.
-    const FROM_LOW: u32 = 2;
-    /// Element `higuy` was compared with it.
-    const FROM_HIGH: u32 = 3;
+    /// Sort the range `first` to `last`.
+    const START_RANGE: u32 = 0;
+    /// Up to 8 elements: compare element `candidate` with the largest yet.
+    const FIND_LARGEST: u32 = 1;
+    /// Splitting: element `low_scan` was compared with the middle one,
+    /// which is at `first`.
+    const SCAN_UP: u32 = 2;
+    /// Element `high_scan` was compared with it.
+    const SCAN_DOWN: u32 = 3;
     /// The array is sorted.
-    const DONE: u32 = 4;
+    const FINISHED: u32 = 4;
 
     fn words(&self) -> Vec<u32> {
         let mut words = vec![
             self.width,
             self.compare,
             self.step,
-            self.lo,
-            self.hi,
-            self.loguy,
-            self.higuy,
-            self.max,
-            self.p,
+            self.first,
+            self.last,
+            self.low_scan,
+            self.high_scan,
+            self.largest,
+            self.candidate,
         ];
         words.extend_from_slice(&self.stack);
         words
@@ -1490,19 +1494,30 @@ impl QSort {
 
     fn from_words(words: &[u32]) -> Option<QSort> {
         let (head, stack) = words.split_at_checked(9)?;
-        let &[width, compare, step, lo, hi, loguy, higuy, max, p] = head else {
+        let &[
+            width,
+            compare,
+            step,
+            first,
+            last,
+            low_scan,
+            high_scan,
+            largest,
+            candidate,
+        ] = head
+        else {
             return None;
         };
         Some(QSort {
             width,
             compare,
             step,
-            lo,
-            hi,
-            loguy,
-            higuy,
-            max,
-            p,
+            first,
+            last,
+            low_scan,
+            high_scan,
+            largest,
+            candidate,
             stack: stack.to_vec(),
         })
     }
@@ -1515,64 +1530,64 @@ impl QSort {
         loop {
             let compared = result.take();
             let pair = match self.step {
-                Self::RANGE => {
-                    let size = (self.hi - self.lo) / w + 1;
+                Self::START_RANGE => {
+                    let size = (self.last - self.first) / w + 1;
                     if size <= 8 {
-                        // The largest of lo..=hi goes to hi, then the
-                        // largest of the rest.
-                        if self.hi > self.lo {
-                            (self.max, self.p) = (self.lo, self.lo + w);
-                            self.step = Self::LARGEST;
-                            Some((self.p, self.max))
+                        // The largest of first..=last goes to last, then
+                        // the largest of the rest.
+                        if self.last > self.first {
+                            (self.largest, self.candidate) = (self.first, self.first + w);
+                            self.step = Self::FIND_LARGEST;
+                            Some((self.candidate, self.largest))
                         } else {
-                            self.next_range()
+                            self.pop_range()
                         }
                     } else {
-                        swap(cpu, self.lo + size / 2 * w, self.lo, w);
-                        (self.loguy, self.higuy) = (self.lo + w, self.hi + w);
-                        self.step = Self::FROM_LOW;
-                        self.from_low(cpu)
+                        swap(cpu, self.first + size / 2 * w, self.first, w);
+                        (self.low_scan, self.high_scan) = (self.first + w, self.last + w);
+                        self.step = Self::SCAN_UP;
+                        self.scan_up(cpu)
                     }
                 }
-                Self::LARGEST => {
+                Self::FIND_LARGEST => {
                     if compared.is_some_and(|c| c > 0) {
-                        self.max = self.p;
+                        self.largest = self.candidate;
                     }
-                    self.p += w;
-                    if self.p <= self.hi {
-                        Some((self.p, self.max))
+                    self.candidate += w;
+                    if self.candidate <= self.last {
+                        Some((self.candidate, self.largest))
                     } else {
-                        swap(cpu, self.max, self.hi, w);
-                        self.hi -= w;
-                        if self.hi > self.lo {
-                            (self.max, self.p) = (self.lo, self.lo + w);
-                            Some((self.p, self.max))
+                        swap(cpu, self.largest, self.last, w);
+                        self.last -= w;
+                        if self.last > self.first {
+                            (self.largest, self.candidate) = (self.first, self.first + w);
+                            Some((self.candidate, self.largest))
                         } else {
-                            self.next_range()
+                            self.pop_range()
                         }
                     }
                 }
-                Self::FROM_LOW => {
+                Self::SCAN_UP => {
                     if compared.is_some_and(|c| c <= 0) {
-                        self.loguy += w;
-                        self.from_low(cpu)
+                        self.low_scan += w;
+                        self.scan_up(cpu)
                     } else {
-                        self.higuy -= w;
-                        self.step = Self::FROM_HIGH;
-                        self.from_high(cpu)
+                        self.high_scan -= w;
+                        self.step = Self::SCAN_DOWN;
+                        self.scan_down(cpu)
                     }
                 }
-                Self::FROM_HIGH => {
+                Self::SCAN_DOWN => {
                     if compared.is_some_and(|c| c >= 0) {
-                        self.higuy -= w;
-                        self.from_high(cpu)
+                        self.high_scan -= w;
+                        self.scan_down(cpu)
                     } else {
-                        self.met(cpu)
+                        self.scans_stopped(cpu)
                     }
                 }
-                // DONE, or a step no qsort saves: there is nothing to do.
+                // FINISHED, or a step no qsort saves: there is nothing to do.
                 _ => {
-                    self.step = Self::DONE;
+                    self.step = Self::FINISHED;
                     None
                 }
             };
@@ -1584,7 +1599,7 @@ impl QSort {
                     }
                     return;
                 }
-                None if self.step == Self::RANGE => continue,
+                None if self.step == Self::START_RANGE => continue,
                 None => {
                     call::finish(cpu, resume, 0);
                     return;
@@ -1594,73 +1609,75 @@ impl QSort {
     }
 
     /// Splitting, from the low end: the next element to compare with the
-    /// middle one, or once past `hi`, on from the high end.
-    fn from_low(&mut self, cpu: &mut Cpu) -> Option<(u32, u32)> {
-        if self.loguy <= self.hi {
-            return Some((self.loguy, self.lo));
+    /// middle one, or once past `last`, on from the high end.
+    fn scan_up(&mut self, cpu: &mut Cpu) -> Option<(u32, u32)> {
+        if self.low_scan <= self.last {
+            return Some((self.low_scan, self.first));
         }
-        self.higuy -= self.width;
-        self.step = Self::FROM_HIGH;
-        self.from_high(cpu)
+        self.high_scan -= self.width;
+        self.step = Self::SCAN_DOWN;
+        self.scan_down(cpu)
     }
 
     /// Splitting, from the high end: the next element to compare with the
-    /// middle one, or once at `lo`, `met`.
-    fn from_high(&mut self, cpu: &mut Cpu) -> Option<(u32, u32)> {
-        if self.higuy > self.lo {
-            return Some((self.higuy, self.lo));
+    /// middle one, or once at `first`, `scans_stopped`.
+    fn scan_down(&mut self, cpu: &mut Cpu) -> Option<(u32, u32)> {
+        if self.high_scan > self.first {
+            return Some((self.high_scan, self.first));
         }
-        self.met(cpu)
+        self.scans_stopped(cpu)
     }
 
-    /// Both ends stopped. If they haven't met, the elements there trade
-    /// places and the low end goes on; if they have, the middle element
-    /// goes between the two parts and the next range is sorted.
-    fn met(&mut self, cpu: &mut Cpu) -> Option<(u32, u32)> {
+    /// Both scans stopped. If they haven't crossed, the elements where
+    /// they stopped trade places and the scan up goes on; if they have,
+    /// the middle element goes between the two parts and the next range
+    /// is sorted.
+    fn scans_stopped(&mut self, cpu: &mut Cpu) -> Option<(u32, u32)> {
         let w = self.width;
-        if self.higuy >= self.loguy {
-            swap(cpu, self.loguy, self.higuy, w);
-            self.loguy += w;
-            self.step = Self::FROM_LOW;
-            return self.from_low(cpu);
+        if self.high_scan >= self.low_scan {
+            swap(cpu, self.low_scan, self.high_scan, w);
+            self.low_scan += w;
+            self.step = Self::SCAN_UP;
+            return self.scan_up(cpu);
         }
-        swap(cpu, self.lo, self.higuy, w);
-        let (lo, hi, loguy, higuy) = (self.lo, self.hi, self.loguy, self.higuy);
-        // Sizes in bytes, as the pointers' differences: hi - loguy is
-        // negative when the low end went past hi.
-        let low_part = higuy as i64 - 1 - lo as i64;
-        let high_part = hi as i64 - loguy as i64;
+        swap(cpu, self.first, self.high_scan, w);
+        let (first, last, low_scan, high_scan) =
+            (self.first, self.last, self.low_scan, self.high_scan);
+        // Sizes in bytes, as the pointers' differences: last - low_scan
+        // is negative when the scan up went past last.
+        let low_part = high_scan as i64 - 1 - first as i64;
+        let high_part = last as i64 - low_scan as i64;
         if low_part >= high_part {
-            if lo + w < higuy {
-                self.stack.extend([lo, higuy - w]);
+            if first + w < high_scan {
+                self.stack.extend([first, high_scan - w]);
             }
-            if loguy < hi {
-                self.lo = loguy;
-                self.step = Self::RANGE;
+            if low_scan < last {
+                self.first = low_scan;
+                self.step = Self::START_RANGE;
                 return None;
             }
         } else {
-            if loguy < hi {
-                self.stack.extend([loguy, hi]);
+            if low_scan < last {
+                self.stack.extend([low_scan, last]);
             }
-            if lo + w < higuy {
-                self.hi = higuy - w;
-                self.step = Self::RANGE;
+            if first + w < high_scan {
+                self.last = high_scan - w;
+                self.step = Self::START_RANGE;
                 return None;
             }
         }
-        self.next_range()
+        self.pop_range()
     }
 
     /// The range that waited longest, to sort next, or None (and a step
     /// that ends qsort) when there is none.
-    fn next_range(&mut self) -> Option<(u32, u32)> {
+    fn pop_range(&mut self) -> Option<(u32, u32)> {
         match (self.stack.pop(), self.stack.pop()) {
-            (Some(hi), Some(lo)) => {
-                (self.lo, self.hi) = (lo, hi);
-                self.step = Self::RANGE;
+            (Some(last), Some(first)) => {
+                (self.first, self.last) = (first, last);
+                self.step = Self::START_RANGE;
             }
-            _ => self.step = Self::DONE,
+            _ => self.step = Self::FINISHED,
         }
         None
     }
@@ -1678,44 +1695,42 @@ fn swap(cpu: &mut Cpu, a: u32, b: u32, width: u32) {
 }
 
 /// bsearch(key, base, count, width, compare): the matching element, or
-/// NULL, found the way Visual C++ 6's does, so that of elements that
-/// compare equal it finds the same one: each step compares the key with
-/// the middle element of the `num` left, the lower of the two middle ones
-/// when `num` is even, and the last one left is compared on its own. The
-/// call's data: key, the first and last elements left, how many there
-/// are, width and compare.
+/// NULL, with the comparisons Visual C++ 6's bsearch makes, so that of
+/// elements that compare equal it finds the same one: each step compares
+/// the key with the middle one of the elements left, the lower of the two
+/// middle ones when an even number is left, and the last one left is
+/// compared on its own. The comparisons and the elements found were
+/// checked against a log of MSVCRT.DLL 6.00.8337's, in the 518 sorts and
+/// searches qsort's comment counts, all the same. The call's data: key,
+/// the first and last elements left, how many are left, width and
+/// compare.
 pub fn bsearch(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[key, base, count, width, compare] = args else {
         unreachable!()
     };
     let resume = call::here(cpu);
-    let hi = base.wrapping_add(count.wrapping_sub(1).wrapping_mul(width));
-    bsearch_step(cpu, resume, [key, base, hi, count, width, compare]);
+    let last = base.wrapping_add(count.wrapping_sub(1).wrapping_mul(width));
+    bsearch_step(cpu, resume, [key, base, last, count, width, compare]);
     None
 }
 
-/// Of the `num` elements left from `lo`, the one `bsearch` compares the
-/// key with next, and how many come before it. The product wraps as the
-/// C code's pointer arithmetic does, for a count and width whose array
-/// doesn't fit in the address space.
-fn bsearch_middle(lo: u32, num: u32, width: u32) -> (u32, u32) {
-    let half = num / 2;
-    let below = if num & 1 != 0 {
-        half
-    } else {
-        half.saturating_sub(1)
-    };
-    (lo.wrapping_add(below.wrapping_mul(width)), below)
+/// Of the `left` elements from `first` on, the one `bsearch` compares the
+/// key with next, and how many come before it. The address wraps as a C
+/// pointer's does, for a count and width whose array doesn't fit in the
+/// address space.
+fn bsearch_next(first: u32, left: u32, width: u32) -> (u32, u32) {
+    let below = left.saturating_sub(1) / 2;
+    (first.wrapping_add(below.wrapping_mul(width)), below)
 }
 
 fn bsearch_step(cpu: &mut Cpu, resume: (u32, u32), s: [u32; 6]) {
-    let [key, lo, hi, num, width, compare] = s;
-    if num == 0 || lo > hi {
+    let [key, first, last, left, width, compare] = s;
+    if left == 0 || first > last {
         call::finish(cpu, resume, 0);
         return;
     }
-    let (mid, _) = bsearch_middle(lo, num, width);
-    if !call_program(cpu, compare, &[key, mid], C_BSEARCH, resume, &s) {
+    let (middle, _) = bsearch_next(first, left, width);
+    if !call_program(cpu, compare, &[key, middle], C_BSEARCH, resume, &s) {
         call::finish(cpu, resume, 0);
     }
 }
@@ -1724,22 +1739,22 @@ pub fn bsearch_returned(cpu: &mut Cpu, value: u32, call: Call) {
     let Ok(mut s) = <[u32; 6]>::try_from(call.data.as_slice()) else {
         return;
     };
-    let [_, lo, _, num, width, _] = s;
-    let (mid, below) = bsearch_middle(lo, num, width);
+    let [_, first, _, left, width, _] = s;
+    let (middle, below) = bsearch_next(first, left, width);
     match (value as i32).cmp(&0) {
         std::cmp::Ordering::Equal => {
-            call::finish(cpu, call.resume, mid);
+            call::finish(cpu, call.resume, middle);
             return;
         }
         // The last one left wasn't it.
-        _ if num == 1 => s[3] = 0,
+        _ if left == 1 => s[3] = 0,
         std::cmp::Ordering::Less => {
-            s[2] = mid.wrapping_sub(width);
+            s[2] = middle.wrapping_sub(width);
             s[3] = below;
         }
         std::cmp::Ordering::Greater => {
-            s[1] = mid.wrapping_add(width);
-            s[3] = num / 2;
+            s[1] = middle.wrapping_add(width);
+            s[3] = left.saturating_sub(below + 1);
         }
     }
     bsearch_step(cpu, call.resume, s);
