@@ -11,12 +11,9 @@
 //! memory a byte at a time, so what a short buffer or a format that runs
 //! past a name's end gets is what it gets on Windows.
 //!
-//! What it does was read from the disassembly of MSVCRT.DLL 6.00.8337
-//! (strftime at 78013E48, `_Strftime` at 78013E63, the conversion of one
-//! format letter at 78013F64 and the helpers it calls, `_Gettnames` at
-//! 78013C0F, `wcsftime` at 780277DE) and checked against a probe run on
-//! that DLL: strftime_vc6.txt has what it gave for made-up formats and
-//! names.
+//! It does what MSVCRT.DLL 6.00.8337 does, checked against a probe run
+//! on that DLL: strftime_vc6.txt has what it gave for made-up formats
+//! and names.
 
 use super::time::{DAYS, LONG_DAYS, LONG_MONTHS, MONTHS, Tm, read_tm};
 use super::*;
@@ -192,7 +189,7 @@ impl Out {
         self.left = self.left.wrapping_sub(1);
     }
 
-    /// `text`, as much of it as there is room for (MSVCRT 6's 7801434F).
+    /// `text`, as much of it as there is room for.
     fn text(&mut self, m: &mut impl Guest, text: &[u8]) {
         for &byte in text {
             if self.left == 0 {
@@ -202,9 +199,9 @@ impl Out {
         }
     }
 
-    /// `num` in `digits` digits, or with `no_zeros` in as many as it takes
-    /// (MSVCRT 6's 78014376). Without room for the digits and a 0 after
-    /// them, nothing is written and there is no more room.
+    /// `num` in `digits` digits, or with `no_zeros` in as many as it
+    /// takes. Without room for the digits and a 0 after them, nothing is
+    /// written and there is no more room.
     fn number(&mut self, m: &mut impl Guest, num: i32, digits: u32, no_zeros: bool) {
         if no_zeros {
             return self.bare_number(m, num);
@@ -224,8 +221,7 @@ impl Out {
 
     /// The digits of `num`, last first while there is room for one and a
     /// 0, then turned around. With no room for even one, the turn swaps
-    /// the byte before with the one at the place, as MSVCRT 6's 780143E5
-    /// does.
+    /// the byte before with the one at the place, as MSVCRT 6 does.
     fn bare_number(&mut self, m: &mut impl Guest, num: i32) {
         let start = self.at;
         let mut n = num;
@@ -268,8 +264,8 @@ impl Expand {
         }
     }
 
-    /// The conversion `spec`, as MSVCRT 6's 78013F64 does it. Numbers have
-    /// no leading zeros with '#'.
+    /// The conversion `spec`, as MSVCRT 6 does it. Numbers have no
+    /// leading zeros with '#'.
     fn conversion(&mut self, m: &mut impl Guest, out: &mut Out, spec: u8) {
         let tm = self.tm;
         let (sec, min, hour, mday, mon, year, wday, yday, isdst) = (
@@ -345,8 +341,8 @@ impl Expand {
         }
     }
 
-    /// The date or time format of field `field` (MSVCRT 6's 7801442E), a
-    /// Windows picture. A run of a letter is a conversion: d and dd the
+    /// The date or time format of field `field`, a Windows picture. A
+    /// run of a letter is a conversion: d and dd the
     /// day, ddd and dddd its names; M and MM the month, MMM and MMMM its
     /// names; yy and yyyy the year; h, hh, H and HH the hour; m and mm the
     /// minutes; s and ss the seconds; as many bytes of AM or PM as there

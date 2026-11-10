@@ -1678,8 +1678,8 @@ fn bounded_len(cpu: &mut Cpu, at: u32, count: u32) -> Option<u32> {
 }
 
 /// __crtCompareStringA(lcid, flags, a, a_count, b, b_count, code_page):
-/// CompareStringA, with a count past a string's 0 made its length, as the
-/// disassembly of MSVCRT 6.00.8337 at 78015131 and the probe show.
+/// CompareStringA, with a count past a string's 0 made its length, as
+/// MSVCRT 6.00.8337 does (checked with a probe run on it).
 pub fn crt_compare_string_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[lcid, flags, a, mut a_count, b, mut b_count, _] = args else {
         unreachable!()
@@ -1696,8 +1696,8 @@ pub fn crt_compare_string_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// __crtLCMapStringA(lcid, flags, from, count, to, size, code_page,
 /// error): LCMapStringA, with a count past the string's 0 made its length,
-/// as MSVCRT 6.00.8337 does at 780042B8 and the probe shows. The last two
-/// matter only to the wide function.
+/// as MSVCRT 6.00.8337 does (checked with a probe run on it). The last
+/// two matter only to the wide function.
 pub fn crt_lc_map_string_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[lcid, flags, from, mut count, to, size, _, _] = args else {
         unreachable!()

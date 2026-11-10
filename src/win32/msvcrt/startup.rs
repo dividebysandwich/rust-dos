@@ -915,10 +915,8 @@ pub fn abnormal_termination(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 // up to six words of data for it. _setjmp3 marks the buffers it fills
 // with the cookie; longjmp calls the unwind function of such a buffer to
 // leave the frame setjmp was called in, and runs the __finally blocks of
-// a buffer without the cookie itself. This was read from the disassembly
-// of MSVCRT.DLL 6.00.8337 (_setjmp3 at 7801E7B0, longjmp at 7801E40E,
-// __CxxLongjmpUnwind at 7800AD16, _seh_longjmp_unwind at 7800EFC3) and
-// checked with a probe run on it.
+// a buffer without the cookie itself. This is what MSVCRT.DLL 6.00.8337
+// does, checked with a probe run on it.
 
 const JMP_REGISTRATION: u32 = 24;
 const JMP_TRYLEVEL: u32 = 28;
