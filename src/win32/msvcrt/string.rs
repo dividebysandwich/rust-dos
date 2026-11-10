@@ -1393,9 +1393,15 @@ pub fn mbsupr(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 // Sorting and searching, with the program's compare function.
 
-/// qsort(base, count, width, compare): a binary insertion sort, whose
-/// comparisons are calls into the program. The call's data: base, count,
-/// width, compare, the element being placed and the range it goes in.
+/// qsort(base, count, width, compare): Visual C++ 6's quicksort, whose
+/// comparisons are calls into the program. It isn't stable, so elements
+/// that compare equal end up in the order its steps leave them, and a
+/// program that sorts such elements sees that order: the steps, and the
+/// order of the comparisons, are Microsoft's. A range of more than 8
+/// elements is split around its middle element, which goes to its start
+/// first; the smaller part goes on at once and the larger waits on a
+/// stack. A range of up to 8 is sorted by moving its largest element to
+/// its end, then the largest of the rest, and so on (`QSort`).
 pub fn qsort(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[base, count, width, compare] = args else {
         unreachable!()
@@ -1403,85 +1409,304 @@ pub fn qsort(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if count < 2 || width == 0 {
         return Some(0);
     }
-    if !cpu.bus.guest_probe(base, (count * width) as usize, true) {
+    // An array past the end of the address space isn't there.
+    let size = count as u64 * width as u64;
+    if base as u64 + size >= 1 << 32 || !cpu.bus.guest_probe(base, size as usize, true) {
         return None;
     }
     let resume = call::here(cpu);
-    qsort_step(cpu, resume, [base, count, width, compare, 1, 0, 1]);
+    let hi = base + (count - 1) * width;
+    let mut s = QSort {
+        width,
+        compare,
+        step: QSort::RANGE,
+        lo: base,
+        hi,
+        loguy: 0,
+        higuy: 0,
+        max: 0,
+        p: 0,
+        stack: Vec::new(),
+    };
+    s.run(cpu, resume, None);
     None
 }
 
-/// Compare the element being placed with the middle of its range, or
-/// with the range empty, put it there and go on with the next.
-fn qsort_step(cpu: &mut Cpu, resume: (u32, u32), mut s: [u32; 7]) {
-    let [base, count, width, compare, _, _, _] = s;
-    loop {
-        let [.., i, lo, hi] = s;
-        if lo < hi {
-            let mid = (lo + hi) / 2;
-            let args = [base + i * width, base + mid * width];
-            if !call_program(cpu, compare, &args, C_QSORT, resume, &s) {
-                call::finish(cpu, resume, 0);
+pub fn qsort_returned(cpu: &mut Cpu, value: u32, call: Call) {
+    let Some(mut s) = QSort::from_words(&call.data) else {
+        return;
+    };
+    s.run(cpu, call.resume, Some(value as i32));
+}
+
+/// Where a qsort is: the range it sorts (`lo` to `hi`, the addresses of
+/// its first and last elements), the step it takes, the elements the
+/// split has reached from each end (`loguy`, `higuy`), the largest
+/// element found yet and the one it is compared with (`max`, `p`), and
+/// the ranges waiting (`stack`, start and end each).
+struct QSort {
+    width: u32,
+    compare: u32,
+    step: u32,
+    lo: u32,
+    hi: u32,
+    loguy: u32,
+    higuy: u32,
+    max: u32,
+    p: u32,
+    stack: Vec<u32>,
+}
+
+impl QSort {
+    /// Sort the range `lo` to `hi`.
+    const RANGE: u32 = 0;
+    /// Up to 8 elements: compare element `p` with the largest yet.
+    const LARGEST: u32 = 1;
+    /// Splitting: element `loguy` was compared with the middle one, which
+    /// is at `lo`.
+    const FROM_LOW: u32 = 2;
+    /// Element `higuy` was compared with it.
+    const FROM_HIGH: u32 = 3;
+    /// The array is sorted.
+    const DONE: u32 = 4;
+
+    fn words(&self) -> Vec<u32> {
+        let mut words = vec![
+            self.width,
+            self.compare,
+            self.step,
+            self.lo,
+            self.hi,
+            self.loguy,
+            self.higuy,
+            self.max,
+            self.p,
+        ];
+        words.extend_from_slice(&self.stack);
+        words
+    }
+
+    fn from_words(words: &[u32]) -> Option<QSort> {
+        let (head, stack) = words.split_at_checked(9)?;
+        let &[width, compare, step, lo, hi, loguy, higuy, max, p] = head else {
+            return None;
+        };
+        Some(QSort {
+            width,
+            compare,
+            step,
+            lo,
+            hi,
+            loguy,
+            higuy,
+            max,
+            p,
+            stack: stack.to_vec(),
+        })
+    }
+
+    /// Go on to the next comparison, with the result of the last one
+    /// (`result`), and call the program's compare function for it, or
+    /// return from qsort when the array is sorted.
+    fn run(&mut self, cpu: &mut Cpu, resume: (u32, u32), mut result: Option<i32>) {
+        let w = self.width;
+        loop {
+            let compared = result.take();
+            let pair = match self.step {
+                Self::RANGE => {
+                    let size = (self.hi - self.lo) / w + 1;
+                    if size <= 8 {
+                        // The largest of lo..=hi goes to hi, then the
+                        // largest of the rest.
+                        if self.hi > self.lo {
+                            (self.max, self.p) = (self.lo, self.lo + w);
+                            self.step = Self::LARGEST;
+                            Some((self.p, self.max))
+                        } else {
+                            self.next_range()
+                        }
+                    } else {
+                        swap(cpu, self.lo + size / 2 * w, self.lo, w);
+                        (self.loguy, self.higuy) = (self.lo + w, self.hi + w);
+                        self.step = Self::FROM_LOW;
+                        self.from_low(cpu)
+                    }
+                }
+                Self::LARGEST => {
+                    if compared.is_some_and(|c| c > 0) {
+                        self.max = self.p;
+                    }
+                    self.p += w;
+                    if self.p <= self.hi {
+                        Some((self.p, self.max))
+                    } else {
+                        swap(cpu, self.max, self.hi, w);
+                        self.hi -= w;
+                        if self.hi > self.lo {
+                            (self.max, self.p) = (self.lo, self.lo + w);
+                            Some((self.p, self.max))
+                        } else {
+                            self.next_range()
+                        }
+                    }
+                }
+                Self::FROM_LOW => {
+                    if compared.is_some_and(|c| c <= 0) {
+                        self.loguy += w;
+                        self.from_low(cpu)
+                    } else {
+                        self.higuy -= w;
+                        self.step = Self::FROM_HIGH;
+                        self.from_high(cpu)
+                    }
+                }
+                _ => {
+                    if compared.is_some_and(|c| c >= 0) {
+                        self.higuy -= w;
+                        self.from_high(cpu)
+                    } else {
+                        self.met(cpu)
+                    }
+                }
+            };
+            match pair {
+                Some((a, b)) => {
+                    let words = self.words();
+                    if !call_program(cpu, self.compare, &[a, b], C_QSORT, resume, &words) {
+                        call::finish(cpu, resume, 0);
+                    }
+                    return;
+                }
+                None if self.step == Self::RANGE => continue,
+                None => {
+                    call::finish(cpu, resume, 0);
+                    return;
+                }
             }
-            return;
         }
-        if lo < i {
-            let from = base + lo * width;
-            let len = (i - lo + 1) * width;
-            if let Some(mut data) = bytes(cpu, from, len) {
-                data.rotate_right(width as usize);
-                put(cpu, from, &data);
+    }
+
+    /// Splitting, from the low end: the next element to compare with the
+    /// middle one, or once past `hi`, on from the high end.
+    fn from_low(&mut self, cpu: &mut Cpu) -> Option<(u32, u32)> {
+        if self.loguy <= self.hi {
+            return Some((self.loguy, self.lo));
+        }
+        self.higuy -= self.width;
+        self.step = Self::FROM_HIGH;
+        self.from_high(cpu)
+    }
+
+    /// Splitting, from the high end: the next element to compare with the
+    /// middle one, or once at `lo`, `met`.
+    fn from_high(&mut self, cpu: &mut Cpu) -> Option<(u32, u32)> {
+        if self.higuy > self.lo {
+            return Some((self.higuy, self.lo));
+        }
+        self.met(cpu)
+    }
+
+    /// Both ends stopped. If they haven't met, the elements there trade
+    /// places and the low end goes on; if they have, the middle element
+    /// goes between the two parts and the next range is sorted.
+    fn met(&mut self, cpu: &mut Cpu) -> Option<(u32, u32)> {
+        let w = self.width;
+        if self.higuy >= self.loguy {
+            swap(cpu, self.loguy, self.higuy, w);
+            self.loguy += w;
+            self.step = Self::FROM_LOW;
+            return self.from_low(cpu);
+        }
+        swap(cpu, self.lo, self.higuy, w);
+        let (lo, hi, loguy, higuy) = (self.lo, self.hi, self.loguy, self.higuy);
+        // Sizes in bytes, as the pointers' differences: hi - loguy is
+        // negative when the low end went past hi.
+        let low_part = higuy as i64 - 1 - lo as i64;
+        let high_part = hi as i64 - loguy as i64;
+        if low_part >= high_part {
+            if lo + w < higuy {
+                self.stack.extend([lo, higuy - w]);
+            }
+            if loguy < hi {
+                self.lo = loguy;
+                self.step = Self::RANGE;
+                return None;
+            }
+        } else {
+            if loguy < hi {
+                self.stack.extend([loguy, hi]);
+            }
+            if lo + w < higuy {
+                self.hi = higuy - w;
+                self.step = Self::RANGE;
+                return None;
             }
         }
-        if i + 1 >= count {
-            call::finish(cpu, resume, 0);
-            return;
+        self.next_range()
+    }
+
+    /// The range that waited longest, to sort next, or None (and a step
+    /// that ends qsort) when there is none.
+    fn next_range(&mut self) -> Option<(u32, u32)> {
+        match (self.stack.pop(), self.stack.pop()) {
+            (Some(hi), Some(lo)) => {
+                (self.lo, self.hi) = (lo, hi);
+                self.step = Self::RANGE;
+            }
+            _ => self.step = Self::DONE,
         }
-        s[4] = i + 1;
-        s[5] = 0;
-        s[6] = i + 1;
+        None
     }
 }
 
-pub fn qsort_returned(cpu: &mut Cpu, value: u32, call: Call) {
-    let Ok(mut s) = <[u32; 7]>::try_from(call.data.as_slice()) else {
+/// Swap the `width` bytes at `a` with those at `b`.
+fn swap(cpu: &mut Cpu, a: u32, b: u32, width: u32) {
+    if a == b {
         return;
-    };
-    let mid = (s[5] + s[6]) / 2;
-    if (value as i32) < 0 {
-        s[6] = mid;
-    } else {
-        s[5] = mid + 1;
     }
-    qsort_step(cpu, call.resume, s);
+    if let (Some(x), Some(y)) = (bytes(cpu, a, width), bytes(cpu, b, width)) {
+        put(cpu, a, &y);
+        put(cpu, b, &x);
+    }
 }
 
 /// bsearch(key, base, count, width, compare): the matching element, or
-/// NULL. The call's data: key, base, the range, width and compare.
+/// NULL, found the way Visual C++ 6's does, so that of elements that
+/// compare equal it finds the same one: each step compares the key with
+/// the middle element of the `num` left, the lower of the two middle ones
+/// when `num` is even, and the last one left is compared on its own. The
+/// call's data: key, the first and last elements left, how many there
+/// are, width and compare.
 pub fn bsearch(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[key, base, count, width, compare] = args else {
         unreachable!()
     };
     let resume = call::here(cpu);
-    bsearch_step(cpu, resume, [key, base, 0, count, width, compare]);
+    let hi = base.wrapping_add(count.wrapping_sub(1).wrapping_mul(width));
+    bsearch_step(cpu, resume, [key, base, hi, count, width, compare]);
     None
 }
 
+/// The element `bsearch` compares the key with next, of the `num` from
+/// `lo`.
+fn bsearch_middle(lo: u32, num: u32, width: u32) -> u32 {
+    let half = num / 2;
+    let below = if num & 1 != 0 {
+        half
+    } else {
+        half.saturating_sub(1)
+    };
+    lo.wrapping_add(below * width)
+}
+
 fn bsearch_step(cpu: &mut Cpu, resume: (u32, u32), s: [u32; 6]) {
-    let [key, base, lo, hi, width, compare] = s;
-    if lo >= hi {
+    let [key, lo, hi, num, width, compare] = s;
+    if num == 0 || lo > hi {
         call::finish(cpu, resume, 0);
         return;
     }
-    let mid = lo + (hi - lo) / 2;
-    if !call_program(
-        cpu,
-        compare,
-        &[key, base + mid * width],
-        C_BSEARCH,
-        resume,
-        &s,
-    ) {
+    let mid = bsearch_middle(lo, num, width);
+    if !call_program(cpu, compare, &[key, mid], C_BSEARCH, resume, &s) {
         call::finish(cpu, resume, 0);
     }
 }
@@ -1490,14 +1715,24 @@ pub fn bsearch_returned(cpu: &mut Cpu, value: u32, call: Call) {
     let Ok(mut s) = <[u32; 6]>::try_from(call.data.as_slice()) else {
         return;
     };
-    let mid = s[2] + (s[3] - s[2]) / 2;
+    let [_, lo, _, num, width, _] = s;
+    let mid = bsearch_middle(lo, num, width);
+    let half = num / 2;
     match (value as i32).cmp(&0) {
         std::cmp::Ordering::Equal => {
-            call::finish(cpu, call.resume, s[1] + mid * s[4]);
+            call::finish(cpu, call.resume, mid);
             return;
         }
-        std::cmp::Ordering::Less => s[3] = mid,
-        std::cmp::Ordering::Greater => s[2] = mid + 1,
+        // The last one left wasn't it.
+        _ if half == 0 => s[3] = 0,
+        std::cmp::Ordering::Less => {
+            s[2] = mid.wrapping_sub(width);
+            s[3] = if num & 1 != 0 { half } else { half - 1 };
+        }
+        std::cmp::Ordering::Greater => {
+            s[1] = mid.wrapping_add(width);
+            s[3] = half;
+        }
     }
     bsearch_step(cpu, call.resume, s);
 }
