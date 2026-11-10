@@ -2774,3 +2774,298 @@ fn the_specular_color_adds_to_textured_and_untextured_triangles() {
         assert_rgb(&p, 48, 30, [0, 0, 0], 0);
     }
 }
+
+// Depth buffers on textures drawn into (issue 877). The expected values
+// are what DirectX 7 does on Windows 98 SE with 3dfx's Voodoo3 drivers
+// 4.11.01.1151 and 4.12.01.0666.
+
+const DDERR_CANNOTATTACHSURFACE: u32 = 0x8876_000A;
+const SURF_DELETE_ATTACHED_SURFACE: u32 = 8;
+const DEV7_SET_RENDER_TARGET: u32 = 8;
+const DEV7_GET_RENDER_STATE: u32 = 21;
+const D3DCMP_LESSEQUAL: u32 = 4;
+
+/// The DDSURFACEDESC2s of a 32x32 texture to draw into, of a 16x16
+/// depth buffer and of a 32x32 off-screen surface to draw into; their
+/// interfaces; a 32x32 viewport; ZENABLE as GetRenderState read it on
+/// the texture and on the off-screen surface; the draws' vertices; the
+/// texture's pixels.
+const RT_TEX_DESC: u32 = 0xA00;
+const RT_ZSMALL_DESC: u32 = 0xA80;
+const RT_OFF_DESC: u32 = 0xB00;
+const RT_TEX: u32 = 0xB80;
+const RT_ZSMALL: u32 = 0xB84;
+const RT_OFF: u32 = 0xB88;
+const RT_VIEW: u32 = 0xB90;
+const RT_ZENABLE_TEX: u32 = 0xBB0;
+const RT_ZENABLE_OFF: u32 = 0xBB4;
+const RT_VERTICES: u32 = 0xC00;
+const RT_PIXELS: u32 = 0x4000;
+
+/// Where `rt_z_program`'s calls are in its results.
+#[derive(Default)]
+struct RtZCalls {
+    /// AddAttachedSurface of the 64x64 and of the 16x16 depth buffer to
+    /// the 32x32 off-screen surface.
+    offscreen_larger: u32,
+    offscreen_smaller: u32,
+    /// AddAttachedSurface of the 16x16 depth buffer to the 32x32
+    /// texture, then of the 64x64 one while the 16x16 one is on it.
+    texture_smaller: u32,
+    texture_second: u32,
+    /// AddAttachedSurface of the 64x64 depth buffer to the 64x64
+    /// target, then to the texture: on both at once.
+    target_shared: u32,
+    texture_shared: u32,
+    /// The texture's Clear of its target and depth, and of its depth
+    /// alone; the off-screen surface's Clear of a depth it doesn't have.
+    texture_clear: u32,
+    texture_clear_z: u32,
+    offscreen_clear_z: u32,
+}
+
+/// Direct3D 7 on the Voodoo3's HAL: a 64x64 target with a 64x64 depth
+/// buffer, which a 32x32 texture to draw into shares. With ZENABLE on,
+/// the device switches to the texture, clears it red with depth 1 and
+/// draws a green quad at depth 0.5 over its right half, then clears the
+/// depth alone to 0 and draws one over the left half. Back on the
+/// 64x64 target, cleared blue with depth 1 before, it draws a green
+/// quad at depth 0.5 over all of it: where the texture's clear left
+/// depth 0, the target stays blue. Last it switches to a 32x32
+/// off-screen surface without a depth buffer.
+fn rt_z_program(calls: &mut RtZCalls) -> (Vec<u8>, u32) {
+    let mut d = data();
+    target_desc(&mut d, DESC, 124, 64, 64);
+    put32(&mut d, LOCK_DESC, 124);
+    put32(&mut d, TEX_LOCK_DESC, 124);
+    // The depth buffers: 64x64 and 16x16.
+    let flags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+    for (at, size) in [(Z_DESC, 64), (RT_ZSMALL_DESC, 16)] {
+        put32(&mut d, at, 124);
+        put32(&mut d, at + 0x04, flags);
+        put32(&mut d, at + 0x08, size);
+        put32(&mut d, at + 0x0C, size);
+        put32(&mut d, at + 0x48, 32);
+        put32(&mut d, at + 0x4C, DDPF_ZBUFFER);
+        put32(&mut d, at + 0x54, 16);
+        put32(&mut d, at + 0x5C, 0xFFFF);
+        put32(&mut d, at + 0x68, DDSCAPS_ZBUFFER | DDSCAPS_VIDEOMEMORY);
+    }
+    // The 32x32 texture to draw into, 5-6-5 as Zanzarah's.
+    put32(&mut d, RT_TEX_DESC, 124);
+    put32(&mut d, RT_TEX_DESC + 0x04, flags);
+    put32(&mut d, RT_TEX_DESC + 0x08, 32);
+    put32(&mut d, RT_TEX_DESC + 0x0C, 32);
+    put32(&mut d, RT_TEX_DESC + 0x48, 32);
+    put32(&mut d, RT_TEX_DESC + 0x4C, DDPF_RGB);
+    put32(&mut d, RT_TEX_DESC + 0x54, 16);
+    put32(&mut d, RT_TEX_DESC + 0x58, 0xF800);
+    put32(&mut d, RT_TEX_DESC + 0x5C, 0x07E0);
+    put32(&mut d, RT_TEX_DESC + 0x60, 0x001F);
+    let caps = DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY;
+    put32(&mut d, RT_TEX_DESC + 0x68, caps);
+    target_desc(&mut d, RT_OFF_DESC, 124, 32, 32);
+    // D3DVIEWPORT7s: 64x64 and 32x32, depths 0 to 1.
+    put32(&mut d, VIEW + 8, 64);
+    put32(&mut d, VIEW + 12, 64);
+    put_f32s(&mut d, VIEW + 16, &[0.0, 1.0]);
+    put32(&mut d, RT_VIEW + 8, 32);
+    put32(&mut d, RT_VIEW + 12, 32);
+    put_f32s(&mut d, RT_VIEW + 16, &[0.0, 1.0]);
+    // The quads: the texture's left and right halves, all of the target.
+    let quads = [
+        quad(0.0, 0.0, 16.0, 32.0, 0.5, GREEN),
+        quad(16.0, 0.0, 32.0, 32.0, 0.5, GREEN),
+        quad(0.0, 0.0, 64.0, 64.0, 0.5, GREEN),
+    ];
+    let mut at = RT_VERTICES;
+    let mut quad_at = Vec::new();
+    for q in &quads {
+        quad_at.push(at);
+        for v in q {
+            put_f32s(&mut d, at, &[v.x, v.y, v.z, v.rhw]);
+            put32(&mut d, at + 16, v.diffuse);
+            put32(&mut d, at + 20, v.specular);
+            put_f32s(&mut d, at + 24, &[v.u, v.v]);
+            at += 32;
+        }
+    }
+    assert!(at <= RESULTS, "too many vertices");
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, true, false)?;
+        c.com(a, l, DD, QUERY_INTERFACE, &[Arg::At(IID_D3D7), Arg::At(D3D)])?;
+        for (desc, out) in [
+            (DESC, TARGET),
+            (Z_DESC, ZBUF),
+            (RT_TEX_DESC, RT_TEX),
+            (RT_ZSMALL_DESC, RT_ZSMALL),
+            (RT_OFF_DESC, RT_OFF),
+        ] {
+            let args = [Arg::At(desc), Arg::At(out), Arg::I(0)];
+            c.com(a, l, DD, DD_CREATE_SURFACE, &args)?;
+        }
+        let attach = |a: &mut CodeAssembler, c: &mut Calls, to: u32, z: u32| {
+            c.com(a, l, to, SURF_ADD_ATTACHED_SURFACE, &[Arg::Val(z)])
+        };
+        calls.offscreen_larger = c.next;
+        attach(a, &mut c, RT_OFF, ZBUF)?;
+        calls.offscreen_smaller = c.next;
+        attach(a, &mut c, RT_OFF, RT_ZSMALL)?;
+        calls.texture_smaller = c.next;
+        attach(a, &mut c, RT_TEX, RT_ZSMALL)?;
+        calls.texture_second = c.next;
+        attach(a, &mut c, RT_TEX, ZBUF)?;
+        let args = [Arg::I(0), Arg::Val(RT_ZSMALL)];
+        c.com(a, l, RT_TEX, SURF_DELETE_ATTACHED_SURFACE, &args)?;
+        calls.target_shared = c.next;
+        attach(a, &mut c, TARGET, ZBUF)?;
+        calls.texture_shared = c.next;
+        attach(a, &mut c, RT_TEX, ZBUF)?;
+        let args = [Arg::At(IID_HAL), Arg::Val(TARGET), Arg::At(DEVICE)];
+        c.com(a, l, D3D, D3D7_CREATE_DEVICE, &args)?;
+        c.com(a, l, DEVICE, DEV7_SET_VIEWPORT, &[Arg::At(VIEW)])?;
+        let state = |a: &mut CodeAssembler, c: &mut Calls, s: u32, v: u32| {
+            c.com(a, l, DEVICE, DEV7_SET_RENDER_STATE, &[Arg::I(s), Arg::I(v)])
+        };
+        state(a, &mut c, RS_ZENABLE, 1)?;
+        state(a, &mut c, RS_ZFUNC, D3DCMP_LESSEQUAL)?;
+        let clear = |a: &mut CodeAssembler, c: &mut Calls, flags: u32, color: u32, z: f32| {
+            let args = [
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(flags),
+                Arg::I(color),
+                Arg::I(z.to_bits()),
+                Arg::I(0),
+            ];
+            c.com(a, l, DEVICE, DEV7_CLEAR, &args)
+        };
+        let draw = |a: &mut CodeAssembler, c: &mut Calls, at: u32| {
+            c.com(a, l, DEVICE, DEV7_BEGIN_SCENE, &[])?;
+            let args = [
+                Arg::I(D3DPT_TRIANGLELIST),
+                Arg::I(TL_FVF),
+                Arg::At(at),
+                Arg::I(6),
+                Arg::I(0),
+            ];
+            c.com(a, l, DEVICE, DEV7_DRAW_PRIMITIVE, &args)?;
+            c.com(a, l, DEVICE, DEV7_END_SCENE, &[])
+        };
+        let set_target = |a: &mut CodeAssembler, c: &mut Calls, target: u32| {
+            let args = [Arg::Val(target), Arg::I(0)];
+            c.com(a, l, DEVICE, DEV7_SET_RENDER_TARGET, &args)
+        };
+        let zenable = |a: &mut CodeAssembler, c: &mut Calls, out: u32| {
+            let args = [Arg::I(RS_ZENABLE), Arg::At(out)];
+            c.com(a, l, DEVICE, DEV7_GET_RENDER_STATE, &args)
+        };
+        clear(a, &mut c, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, BLUE, 1.0)?;
+        // The texture, sharing the depth buffer.
+        set_target(a, &mut c, RT_TEX)?;
+        c.com(a, l, DEVICE, DEV7_SET_VIEWPORT, &[Arg::At(RT_VIEW)])?;
+        zenable(a, &mut c, RT_ZENABLE_TEX)?;
+        calls.texture_clear = c.next;
+        clear(a, &mut c, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, RED, 1.0)?;
+        draw(a, &mut c, quad_at[1])?;
+        calls.texture_clear_z = c.next;
+        clear(a, &mut c, D3DCLEAR_ZBUFFER, 0, 0.0)?;
+        draw(a, &mut c, quad_at[0])?;
+        // Back to the target.
+        set_target(a, &mut c, TARGET)?;
+        c.com(a, l, DEVICE, DEV7_SET_VIEWPORT, &[Arg::At(VIEW)])?;
+        draw(a, &mut c, quad_at[2])?;
+        // The off-screen surface without a depth buffer.
+        set_target(a, &mut c, RT_OFF)?;
+        zenable(a, &mut c, RT_ZENABLE_OFF)?;
+        calls.offscreen_clear_z = c.next;
+        clear(a, &mut c, D3DCLEAR_ZBUFFER, 0, 1.0)?;
+        // The texture's pixels, then the target's.
+        let args = [
+            Arg::I(0),
+            Arg::At(TEX_LOCK_DESC),
+            Arg::I(DDLOCK_WAIT),
+            Arg::I(0),
+        ];
+        c.com(a, l, RT_TEX, SURF_LOCK, &args)?;
+        a.mov(esi, dword_ptr(l.at(TEX_LOCK_DESC + 0x24)))?;
+        a.mov(edi, l.at(RT_PIXELS) as u32)?;
+        a.mov(edx, 32)?;
+        a.cld()?;
+        let mut row = a.create_label();
+        a.set_label(&mut row)?;
+        a.mov(ecx, 16)?;
+        a.rep().movsd()?;
+        a.add(esi, dword_ptr(l.at(TEX_LOCK_DESC + 0x10)))?;
+        a.sub(esi, 64)?;
+        a.dec(edx)?;
+        a.jnz(row)?;
+        c.com(a, l, RT_TEX, SURF_UNLOCK, &[Arg::I(0)])?;
+        read_target(a, l, &mut c, 16)?;
+        finish(a, l)
+    })
+}
+
+/// `rt_z_program` run to its end: the machine, where its data is, its
+/// calls' results and where some of them are.
+fn run_rt_z(test: &str) -> (Cpu, u32, Vec<u32>, RtZCalls) {
+    let mut calls = RtZCalls::default();
+    let (exe, data) = rt_z_program(&mut calls);
+    let mut cpu = machine(test, exe);
+    run_until_done(&mut cpu, data);
+    let n = peek(&cpu, data + CALLS);
+    let r = results(&cpu, data, n);
+    (cpu, data, r, calls)
+}
+
+/// A texture in video memory takes a depth buffer of any size, smaller
+/// or larger than itself, and one also attached to another surface; an
+/// off-screen surface takes only one of its own size. A surface takes
+/// one depth buffer at a time.
+#[test]
+fn a_texture_takes_a_depth_buffer_of_any_size() {
+    let (_, _, r, calls) = run_rt_z("rtz_attach");
+    let at = |i: u32| r[i as usize];
+    assert_eq!(at(calls.offscreen_larger), DDERR_CANNOTATTACHSURFACE);
+    assert_eq!(at(calls.offscreen_smaller), DDERR_CANNOTATTACHSURFACE);
+    assert_eq!(at(calls.texture_smaller), 0);
+    assert_eq!(at(calls.texture_second), DDERR_CANNOTATTACHSURFACE);
+    assert_eq!(at(calls.target_shared), 0);
+    assert_eq!(at(calls.texture_shared), 0);
+}
+
+/// A texture sharing the target's larger depth buffer, as Zanzarah's
+/// share the screen's: its Clear of the depth succeeds and fills only
+/// the depth buffer's pixels under the texture, and its draws are depth
+/// tested. SetRenderTarget leaves ZENABLE on, on a surface without a
+/// depth buffer too, whose Clear of the depth fails.
+#[test]
+fn a_texture_draws_with_a_larger_shared_depth_buffer() {
+    let (cpu, data, r, calls) = run_rt_z("rtz_draw");
+    let refused = [
+        calls.offscreen_larger,
+        calls.offscreen_smaller,
+        calls.texture_second,
+        calls.offscreen_clear_z,
+    ];
+    for i in (1..r.len() as u32).filter(|i| !refused.contains(i)) {
+        assert_eq!(r[i as usize], 0, "call {i}: {r:X?}");
+    }
+    assert_eq!(r[calls.offscreen_clear_z as usize], D3DERR_ZBUFFER_NOTPRESENT);
+    assert_eq!(peek(&cpu, data + RT_ZENABLE_TEX), 1);
+    assert_eq!(peek(&cpu, data + RT_ZENABLE_OFF), 1);
+    let pixel = |base: u32, width: u32, x: u32, y: u32| {
+        let at = data + base + 2 * (width * y + x);
+        (peek(&cpu, at & !3) >> (8 * (at & 2))) as u16
+    };
+    // The texture: the left quad behind depth 0, the right one drawn.
+    assert_eq!(pixel(RT_PIXELS, 32, 4, 16), 0xF800);
+    assert_eq!(pixel(RT_PIXELS, 32, 28, 16), 0x07E0);
+    // The target: the quad behind the depth the texture's clear left in
+    // the top left 32x32, drawn elsewhere.
+    assert_eq!(pixel(PIXELS, 64, 4, 4), 0x001F);
+    assert_eq!(pixel(PIXELS, 64, 28, 28), 0x001F);
+    assert_eq!(pixel(PIXELS, 64, 40, 10), 0x07E0);
+    assert_eq!(pixel(PIXELS, 64, 10, 40), 0x07E0);
+}

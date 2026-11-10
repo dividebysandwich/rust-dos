@@ -972,7 +972,12 @@ pub fn get_current_viewport(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     ))
 }
 
-/// SetRenderTarget(this, surface, flags). The viewport stays as it is.
+/// SetRenderTarget(this, surface, flags). The viewport and the render
+/// states stay as they are: D3DRENDERSTATE_ZENABLE keeps its value on a
+/// target without a depth buffer, where the device draws without the
+/// depth test, and the test is back when the device returns to a
+/// target with one. DirectX 7 on Windows 98 SE with a Voodoo3 does
+/// this.
 pub fn set_render_target(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, target, _] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
@@ -986,16 +991,12 @@ pub fn set_render_target(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     hr!(check_target(cpu, sid));
     super::super::add_ref(cpu, target);
-    let z = z_buffer(cpu, sid).is_some();
     let Some(d) = get(cpu, id) else {
         return Some(DDERR_INVALIDOBJECT);
     };
     let old = d.target_iface;
     d.target = sid;
     d.target_iface = target;
-    if !z {
-        d.render[RS_ZENABLE as usize] = 0;
-    }
     super::super::release(cpu, old);
     Some(D3D_OK)
 }

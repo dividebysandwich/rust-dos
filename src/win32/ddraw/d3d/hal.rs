@@ -1733,7 +1733,11 @@ pub(in crate::win32::ddraw) fn card_fill(
 
 /// Fill rectangles (left, top, right, bottom) of the device `d`'s render
 /// target with `color` (ARGB) and of its depth buffer with `z`, as
-/// `target` and `depth` say, or the whole of them with no rectangles.
+/// `target` and `depth` say, or the whole target with no rectangles.
+/// The depth buffer is filled where it is under the target: a texture's
+/// depth buffer may be larger than the texture (see
+/// `surface::add_attached_surface`), and its pixels past the texture's
+/// stay as they are.
 pub fn clear(
     cpu: &mut Cpu,
     d: &Device,
@@ -1741,6 +1745,19 @@ pub fn clear(
     target: Option<u32>,
     depth: Option<f32>,
 ) {
+    let Some((width, height)) = state(cpu).surface(d.target).map(|s| (s.width, s.height)) else {
+        return;
+    };
+    let (width, height) = (width.min(0x7FFF) as i32, height.min(0x7FFF) as i32);
+    let rects: Vec<[i32; 4]> = if rects.is_empty() {
+        vec![[0, 0, width, height]]
+    } else {
+        rects
+            .iter()
+            .map(|r| [r[0], r[1], r[2].min(width), r[3].min(height)])
+            .collect()
+    };
+    let rects = &rects[..];
     let fill = |cpu: &mut Cpu, id: u32, value: u16| {
         let Some(s) = state(cpu).surface(id).cloned() else {
             return;
