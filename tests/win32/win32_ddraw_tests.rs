@@ -2310,3 +2310,608 @@ fn enum_surfaces_describes_a_surface_that_can_be_created() {
     let caps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
     assert_eq!(field(5) & caps, caps);
 }
+
+// Blits from DXT surfaces. The expected pixels are what DirectX 7's
+// DirectDraw wrote on Windows 98 SE for the same blocks and blits, read
+// back by a probe program run there.
+
+const S_BLT_FAST: u32 = 7;
+const DDBLT_DDFX: u32 = 0x800;
+const DDBLTFAST_SRCCOLORKEY: u32 = 0x1;
+const DDBLTFAST_DESTCOLORKEY: u32 = 0x2;
+const DDBLTFAST_WAIT: u32 = 0x10;
+const DDBLTFX_MIRRORLEFTRIGHT: u32 = 0x2;
+const DDPF_FOURCC: u32 = 0x4;
+const DDPF_ALPHAPIXELS: u32 = 0x1;
+const DDPF_RGB: u32 = 0x40;
+const DDERR_INVALIDPARAMS: u32 = 0x8007_0057;
+const E_NOTIMPL: u32 = 0x8000_4001;
+
+/// The probe's DXT1 to DXT5 blocks: a four-colour block (0xFFE0 and
+/// 0x0843) and a three-colour one (0x001F and 0xF800), codes 0 to 3 in
+/// each row; DXT2 and DXT3 alpha 0 to 15; DXT4 and DXT5 the eight
+/// values between 200 and 40, or the six between 40 and 200, codes 0 to
+/// 7 twice.
+fn probe_block(fourcc: &[u8; 4], i: usize) -> Vec<u8> {
+    let colour: [u8; 8] = if i.is_multiple_of(2) {
+        [0xE0, 0xFF, 0x43, 0x08, 0xE4, 0xE4, 0xE4, 0xE4]
+    } else {
+        [0x1F, 0x00, 0x00, 0xF8, 0xE4, 0xE4, 0xE4, 0xE4]
+    };
+    let codes = [0x88, 0xC6, 0xFA, 0x88, 0xC6, 0xFA];
+    let alpha: Vec<u8> = match fourcc {
+        b"DXT1" => vec![],
+        b"DXT2" | b"DXT3" => vec![0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE],
+        _ if i.is_multiple_of(2) => [&[200, 40][..], &codes].concat(),
+        _ => [&[40, 200][..], &codes].concat(),
+    };
+    [alpha, colour.to_vec()].concat()
+}
+
+/// The 8x8 surface of four blocks the probe made: the four-colour block
+/// top left and bottom right.
+fn probe_blocks(fourcc: &[u8; 4]) -> Vec<u8> {
+    [0, 1, 1, 0]
+        .iter()
+        .flat_map(|&i| probe_block(fourcc, i))
+        .collect()
+}
+
+/// A DDSURFACEDESC at `offset` for an 8x8 system memory texture of the
+/// DXT format `fourcc`.
+fn dxt_desc(data: &mut [u8], offset: u32, fourcc: &[u8; 4], w: u32, h: u32) {
+    let flags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+    desc(
+        data,
+        offset,
+        flags,
+        DDSCAPS_TEXTURE | DDSCAPS_SYSTEMMEMORY,
+        w,
+        h,
+        0,
+    );
+    put32(data, offset + 0x48, 32);
+    put32(data, offset + 0x4C, DDPF_FOURCC);
+    put(data, offset + 0x50, fourcc);
+}
+
+/// An RGB pixel format: bits, then the red, green, blue and alpha masks.
+type Rgb = (u32, u32, u32, u32, u32);
+
+/// A DDSURFACEDESC at `offset` for a system memory texture of `w` by
+/// `h` pixels of the format `f`.
+fn rgb_desc(data: &mut [u8], offset: u32, f: Rgb, w: u32, h: u32) {
+    let flags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+    desc(
+        data,
+        offset,
+        flags,
+        DDSCAPS_TEXTURE | DDSCAPS_SYSTEMMEMORY,
+        w,
+        h,
+        0,
+    );
+    let pf = offset + 0x48;
+    let alpha = if f.4 != 0 { DDPF_ALPHAPIXELS } else { 0 };
+    put32(data, pf, 32);
+    put32(data, pf + 4, DDPF_RGB | alpha);
+    put32(data, pf + 12, f.0);
+    put32(data, pf + 16, f.1);
+    put32(data, pf + 20, f.2);
+    put32(data, pf + 24, f.3);
+    put32(data, pf + 28, f.4);
+}
+
+const R5G6B5: Rgb = (16, 0xF800, 0x07E0, 0x001F, 0);
+const X1R5G5B5: Rgb = (16, 0x7C00, 0x03E0, 0x001F, 0);
+const A1R5G5B5: Rgb = (16, 0x7C00, 0x03E0, 0x001F, 0x8000);
+const A4R4G4B4: Rgb = (16, 0x0F00, 0x00F0, 0x000F, 0xF000);
+const R8G8B8: Rgb = (24, 0xFF_0000, 0xFF00, 0xFF, 0);
+const A8R8G8B8: Rgb = (32, 0xFF_0000, 0xFF00, 0xFF, 0xFF00_0000);
+const X8R8G8B8: Rgb = (32, 0xFF_0000, 0xFF00, 0xFF, 0);
+
+/// Where the DXT programs keep their blocks, more surface descriptions
+/// and rectangles.
+const BLOCKS: u32 = 0x900;
+const DESC3: u32 = 0x980;
+const DESC4: u32 = 0xA00;
+const RECTS: u32 = 0xA80;
+const DXT_DATA_SIZE: usize = 0xB00;
+
+/// Copy `n` dwords from the data at `from` to the surface the
+/// description at `desc` locked.
+fn copy_in(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    from: u32,
+    desc: u32,
+    n: u32,
+) -> Result<(), IcedError> {
+    a.mov(edi, dword_ptr(l.at(desc + 0x24)))?;
+    a.mov(esi, l.at(from) as u32)?;
+    a.mov(ecx, n)?;
+    a.cld()?;
+    a.rep().movsd()
+}
+
+/// A window, a DirectDraw object and the normal cooperative level, then
+/// the source of DESC at SOURCE, filled with BLOCKS, and the surfaces of
+/// the other descriptions given.
+fn dxt_start(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    c: &mut Calls,
+    block_bytes: u32,
+    others: &[(u32, u32)],
+) -> Result<(), IcedError> {
+    start(a, l, c, (0, 0, 64, 64))?;
+    let level = [Arg::Val(HWND), Arg::I(DDSCL_NORMAL)];
+    c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &level)?;
+    let args = [Arg::At(DESC), Arg::At(SOURCE), Arg::I(0)];
+    c.com(a, l, DD, DD_CREATE_SURFACE, &args)?;
+    for &(desc, out) in others {
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(desc), Arg::At(out), Arg::I(0)],
+        )?;
+    }
+    let lock = [Arg::I(0), Arg::At(DESC), Arg::I(1), Arg::I(0)];
+    c.com(a, l, SOURCE, S_LOCK, &lock)?;
+    copy_in(a, l, BLOCKS, DESC, block_bytes / 4)?;
+    c.com(a, l, SOURCE, S_UNLOCK, &[Arg::I(0)])
+}
+
+/// Lock and unlock the surface at `object` with the description at
+/// `desc`, which then says where its pixels are.
+fn find_pixels(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    c: &mut Calls,
+    object: u32,
+    desc: u32,
+) -> Result<(), IcedError> {
+    c.com(
+        a,
+        l,
+        object,
+        S_LOCK,
+        &[Arg::I(0), Arg::At(desc), Arg::I(1), Arg::I(0)],
+    )?;
+    c.com(a, l, object, S_UNLOCK, &[Arg::I(0)])
+}
+
+/// The pixels of `w` by `h` of `bytes` each of the surface a lock
+/// described at `desc`, row by row.
+fn locked_pixels(cpu: &Cpu, data: u32, desc: u32, (w, h): (u32, u32), bytes: u32) -> Vec<u32> {
+    let pitch = peek(cpu, data + desc + 0x10);
+    let bits = peek(cpu, data + desc + 0x24);
+    let mut out = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            let at = bits + y * pitch + x * bytes;
+            // A pixel's bytes, read a byte at a time: a dword read could
+            // run off the end of the surface's pages.
+            let value = (0..bytes).fold(0, |v, i| {
+                let b = peek(cpu, (at + i) & !3) >> (8 * ((at + i) & 3)) & 0xFF;
+                v | b << (8 * i)
+            });
+            out.push(value);
+        }
+    }
+    out
+}
+
+/// The probe's output: rows of hexadecimal pixels.
+fn probe_pixels(text: &str) -> Vec<u32> {
+    text.split_whitespace()
+        .map(|v| u32::from_str_radix(v, 16).unwrap())
+        .collect()
+}
+
+/// A program that BltFasts the probe's 8x8 surface of `fourcc` into an
+/// 8x8 surface of the format `f`.
+fn dxt_decode_program(fourcc: &[u8; 4], f: Rgb) -> (Vec<u8>, u32) {
+    let mut d = data();
+    d.resize(DXT_DATA_SIZE, 0);
+    dxt_desc(&mut d, DESC, fourcc, 8, 8);
+    rgb_desc(&mut d, LOCKED, f, 8, 8);
+    let blocks = probe_blocks(fourcc);
+    put(&mut d, BLOCKS, &blocks);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        dxt_start(a, l, &mut c, blocks.len() as u32, &[(LOCKED, OFFSCREEN)])?;
+        let args = [
+            Arg::I(0),
+            Arg::I(0),
+            Arg::Val(SOURCE),
+            Arg::I(0),
+            Arg::I(DDBLTFAST_WAIT),
+        ];
+        c.com(a, l, OFFSCREEN, S_BLT_FAST, &args)?;
+        find_pixels(a, l, &mut c, OFFSCREEN, LOCKED)?;
+        finish(a, l)
+    })
+}
+
+/// The pixels a BltFast of the probe's surface of `fourcc` into an 8x8
+/// surface of the format `f` leaves, and its result.
+fn dxt_decoded(test: &str, fourcc: &[u8; 4], f: Rgb) -> (u32, Vec<u32>) {
+    let (program, data) = dxt_decode_program(fourcc, f);
+    let mut cpu = machine(test, program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 10);
+    assert_eq!(r[1..7], [0; 6], "{r:X?}");
+    let pixels = locked_pixels(&cpu, data, LOCKED, (8, 8), f.0 / 8);
+    (r[7], pixels)
+}
+
+fn assert_decodes_as_windows(test: &str, fourcc: &[u8; 4], f: Rgb, windows: &str) {
+    let (hr, pixels) = dxt_decoded(test, fourcc, f);
+    assert_eq!(hr, 0);
+    let expected = probe_pixels(windows);
+    let hex = |p: &[u32]| p.iter().map(|v| format!("{v:X}")).collect::<Vec<_>>();
+    assert_eq!(hex(&pixels), hex(&expected));
+}
+
+#[test]
+fn bltfast_decodes_dxt1_into_a1r5g5b5_as_windows() {
+    let windows = "
+        ffe0 8423 d6a1 ad62 801f fc00 bc0f 0000
+        ffe0 8423 d6a1 ad62 801f fc00 bc0f 0000
+        ffe0 8423 d6a1 ad62 801f fc00 bc0f 0000
+        ffe0 8423 d6a1 ad62 801f fc00 bc0f 0000
+        801f fc00 bc0f 0000 ffe0 8423 d6a1 ad62
+        801f fc00 bc0f 0000 ffe0 8423 d6a1 ad62
+        801f fc00 bc0f 0000 ffe0 8423 d6a1 ad62
+        801f fc00 bc0f 0000 ffe0 8423 d6a1 ad62";
+    assert_decodes_as_windows("dxt1_a1r5g5b5", b"DXT1", A1R5G5B5, windows);
+}
+
+#[test]
+fn bltfast_decodes_dxt1_into_r8g8b8_as_windows() {
+    let windows = "
+        ffff00 080818 adad08 5a5a10 0000ff ff0000 7f007f 000000
+        ffff00 080818 adad08 5a5a10 0000ff ff0000 7f007f 000000
+        ffff00 080818 adad08 5a5a10 0000ff ff0000 7f007f 000000
+        ffff00 080818 adad08 5a5a10 0000ff ff0000 7f007f 000000
+        0000ff ff0000 7f007f 000000 ffff00 080818 adad08 5a5a10
+        0000ff ff0000 7f007f 000000 ffff00 080818 adad08 5a5a10
+        0000ff ff0000 7f007f 000000 ffff00 080818 adad08 5a5a10
+        0000ff ff0000 7f007f 000000 ffff00 080818 adad08 5a5a10";
+    assert_decodes_as_windows("dxt1_r8g8b8", b"DXT1", R8G8B8, windows);
+}
+
+/// DXT2's colours stay at most their alpha, which an X1R5G5B5 surface
+/// drops.
+#[test]
+fn bltfast_decodes_dxt2_into_x1r5g5b5_as_windows() {
+    let windows = "
+        0000 0422 1081 18c2 0000 0800 1004 0000
+        2100 0423 3181 2d62 0008 2800 300c 0000
+        4620 0423 56a1 2d62 0011 4c00 3c0f 0000
+        6720 0423 56a1 2d62 0019 6c00 3c0f 0000
+        0000 0800 1004 0000 0000 0422 1081 18c2
+        0008 2800 300c 0000 2100 0423 3181 2d62
+        0011 4c00 3c0f 0000 4620 0423 56a1 2d62
+        0019 6c00 3c0f 0000 6720 0423 56a1 2d62";
+    assert_decodes_as_windows("dxt2_x1r5g5b5", b"DXT2", X1R5G5B5, windows);
+}
+
+#[test]
+fn bltfast_decodes_dxt3_into_a4r4g4b4_as_windows() {
+    let windows = "
+        0ff0 1001 2aa0 3551 000f 1f00 2707 3000
+        4ff0 5001 6aa0 7551 400f 5f00 6707 7000
+        8ff0 9001 aaa0 b551 800f 9f00 a707 b000
+        cff0 d001 eaa0 f551 c00f df00 e707 f000
+        000f 1f00 2707 3000 0ff0 1001 2aa0 3551
+        400f 5f00 6707 7000 4ff0 5001 6aa0 7551
+        800f 9f00 a707 b000 8ff0 9001 aaa0 b551
+        c00f df00 e707 f000 cff0 d001 eaa0 f551";
+    assert_decodes_as_windows("dxt3_a4r4g4b4", b"DXT3", A4R4G4B4, windows);
+}
+
+/// An X8R8G8B8 surface gets the alpha in its top byte.
+#[test]
+fn bltfast_decodes_dxt4_into_x8r8g8b8_as_windows() {
+    let windows = "
+        c8c8c800 28080818 3f3f3f08 56565610 28000028 c8c80000 a87f007f 88000000
+        6d6d6d00 83080818 9a9a9a08 b15a5a10 68000068 48480000 00000000 ff000000
+        c8c8c800 28080818 3f3f3f08 56565610 28000028 c8c80000 a87f007f 88000000
+        6d6d6d00 83080818 9a9a9a08 b15a5a10 68000068 48480000 00000000 ff000000
+        28000028 c8c80000 a87f007f 88000000 c8c8c800 28080818 3f3f3f08 56565610
+        68000068 48480000 00000000 ff000000 6d6d6d00 83080818 9a9a9a08 b15a5a10
+        28000028 c8c80000 a87f007f 88000000 c8c8c800 28080818 3f3f3f08 56565610
+        68000068 48480000 00000000 ff000000 6d6d6d00 83080818 9a9a9a08 b15a5a10";
+    assert_decodes_as_windows("dxt4_x8r8g8b8", b"DXT4", X8R8G8B8, windows);
+}
+
+#[test]
+fn bltfast_decodes_dxt5_into_a8r8g8b8_as_windows() {
+    let windows = "
+        c8ffff00 28080818 3fadad08 565a5a10 280000ff c8ff0000 a87f007f 88000000
+        6dffff00 83080818 9aadad08 b15a5a10 680000ff 48ff0000 007f007f ff000000
+        c8ffff00 28080818 3fadad08 565a5a10 280000ff c8ff0000 a87f007f 88000000
+        6dffff00 83080818 9aadad08 b15a5a10 680000ff 48ff0000 007f007f ff000000
+        280000ff c8ff0000 a87f007f 88000000 c8ffff00 28080818 3fadad08 565a5a10
+        680000ff 48ff0000 007f007f ff000000 6dffff00 83080818 9aadad08 b15a5a10
+        280000ff c8ff0000 a87f007f 88000000 c8ffff00 28080818 3fadad08 565a5a10
+        680000ff 48ff0000 007f007f ff000000 6dffff00 83080818 9aadad08 b15a5a10";
+    assert_decodes_as_windows("dxt5_a8r8g8b8", b"DXT5", A8R8G8B8, windows);
+}
+
+/// What The Operative: No One Lives Forever does with its DXT textures.
+#[test]
+fn bltfast_decodes_dxt5_into_a1r5g5b5_as_windows() {
+    let windows = "
+        ffe0 0423 56a1 2d62 001f fc00 bc0f 8000
+        7fe0 8423 d6a1 ad62 001f 7c00 3c0f 8000
+        ffe0 0423 56a1 2d62 001f fc00 bc0f 8000
+        7fe0 8423 d6a1 ad62 001f 7c00 3c0f 8000
+        001f fc00 bc0f 8000 ffe0 0423 56a1 2d62
+        001f 7c00 3c0f 8000 7fe0 8423 d6a1 ad62
+        001f fc00 bc0f 8000 ffe0 0423 56a1 2d62
+        001f 7c00 3c0f 8000 7fe0 8423 d6a1 ad62";
+    assert_decodes_as_windows("dxt5_a1r5g5b5", b"DXT5", A1R5G5B5, windows);
+}
+
+/// DXT2's and DXT4's premultiplied colours don't go to a format with
+/// alpha.
+#[test]
+fn premultiplied_dxt_doesnt_go_to_a_format_with_alpha() {
+    for (test, fourcc) in [("dxt2_alpha", b"DXT2"), ("dxt4_alpha", b"DXT4")] {
+        let (hr, pixels) = dxt_decoded(test, fourcc, A8R8G8B8);
+        assert_eq!(hr, E_NOTIMPL);
+        assert!(pixels.iter().all(|&p| p == 0), "{pixels:X?}");
+    }
+}
+
+/// Four DXT1 blocks of 8x8 pixels: red, green, blue, and white and
+/// black and the two greys between in a pattern.
+const FOUR_BLOCKS: [u8; 32] = [
+    0x00, 0xF8, 0x1F, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    0xE0, 0x07, 0x1F, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    0x1F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    0xFF, 0xFF, 0x00, 0x00, 0x1B, 0x6C, 0xB1, 0xC6, //
+];
+
+/// FOUR_BLOCKS stretched, cut and mirrored into a 16x16 R5G6B5
+/// surface, copied block by block into another DXT1 surface, and the
+/// blits that fail.
+fn dxt_blits_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    d.resize(DXT_DATA_SIZE, 0);
+    dxt_desc(&mut d, DESC, b"DXT1", 8, 8);
+    rgb_desc(&mut d, LOCKED, R5G6B5, 16, 16);
+    dxt_desc(&mut d, DESC3, b"DXT1", 8, 8);
+    dxt_desc(&mut d, DESC4, b"DXT3", 8, 8);
+    put(&mut d, BLOCKS, &FOUR_BLOCKS);
+    let rects: [[i32; 4]; 6] = [
+        [0, 0, 4, 4],
+        [8, 0, 16, 8],
+        [2, 1, 7, 6],
+        [4, 0, 8, 4],
+        [2, 2, 6, 6],
+        [0, 0, 16, 16],
+    ];
+    for (i, r) in rects.iter().enumerate() {
+        for (j, v) in r.iter().enumerate() {
+            put32(&mut d, RECTS + 16 * i as u32 + 4 * j as u32, *v as u32);
+        }
+    }
+    put32(&mut d, FX, 100);
+    put32(&mut d, FX + 4, DDBLTFX_MIRRORLEFTRIGHT);
+    put32(&mut d, KEY, 0xFFE0);
+    put32(&mut d, KEY + 4, 0xFFE0);
+    let rect = |i: u32| Arg::At(RECTS + 16 * i);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        let others = [(LOCKED, OFFSCREEN), (DESC3, FRONT), (DESC4, BACK)];
+        dxt_start(a, l, &mut c, 32, &others)?;
+        let src = Arg::Val(SOURCE);
+        let wait = Arg::I(DDBLT_WAIT);
+        let fast = |x: u32, y: u32, r: Arg, flags: u32| {
+            [Arg::I(x), Arg::I(y), src, r, Arg::I(DDBLTFAST_WAIT | flags)]
+        };
+        // 9: shrunk to 4x4; 10: mirrored at (8, 0); 11: a rectangle
+        // within blocks to (0, 8).
+        c.com(
+            a,
+            l,
+            OFFSCREEN,
+            S_BLT,
+            &[rect(0), src, Arg::I(0), wait, Arg::I(0)],
+        )?;
+        let mirror = [
+            rect(1),
+            src,
+            Arg::I(0),
+            Arg::I(DDBLT_WAIT | DDBLT_DDFX),
+            Arg::At(FX),
+        ];
+        c.com(a, l, OFFSCREEN, S_BLT, &mirror)?;
+        c.com(a, l, OFFSCREEN, S_BLT_FAST, &fast(0, 8, rect(2), 0))?;
+        // 12: the second block to the third place of a DXT1 surface; 13:
+        // a rectangle within blocks; 14: into DXT3; 15: from R5G6B5.
+        c.com(a, l, FRONT, S_BLT_FAST, &fast(0, 4, rect(3), 0))?;
+        c.com(a, l, FRONT, S_BLT_FAST, &fast(0, 0, rect(4), 0))?;
+        c.com(a, l, BACK, S_BLT_FAST, &fast(0, 0, Arg::I(0), 0))?;
+        let rgb = [
+            Arg::I(0),
+            Arg::I(0),
+            Arg::Val(OFFSCREEN),
+            rect(0),
+            Arg::I(DDBLTFAST_WAIT),
+        ];
+        c.com(a, l, FRONT, S_BLT_FAST, &rgb)?;
+        // 16: a fill of a DXT surface.
+        let fill = [
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(DDBLT_COLORFILL | DDBLT_WAIT),
+            Arg::At(FX),
+        ];
+        c.com(a, l, FRONT, S_BLT, &fill)?;
+        // 17: a source key the source hasn't got; 18, 19, 20: one it
+        // has; 21: a destination key.
+        let all = rect(5);
+        c.com(
+            a,
+            l,
+            OFFSCREEN,
+            S_BLT_FAST,
+            &fast(0, 0, Arg::I(0), DDBLTFAST_SRCCOLORKEY),
+        )?;
+        c.com(
+            a,
+            l,
+            SOURCE,
+            S_SET_COLOR_KEY,
+            &[Arg::I(DDCKEY_SRCBLT), Arg::At(KEY)],
+        )?;
+        c.com(
+            a,
+            l,
+            OFFSCREEN,
+            S_BLT_FAST,
+            &fast(0, 0, Arg::I(0), DDBLTFAST_SRCCOLORKEY),
+        )?;
+        let keyed = [
+            all,
+            src,
+            Arg::I(0),
+            Arg::I(DDBLT_KEYSRC | DDBLT_WAIT),
+            Arg::I(0),
+        ];
+        c.com(a, l, OFFSCREEN, S_BLT, &keyed)?;
+        c.com(
+            a,
+            l,
+            OFFSCREEN,
+            S_BLT_FAST,
+            &fast(0, 0, Arg::I(0), DDBLTFAST_DESTCOLORKEY),
+        )?;
+        // 22 to 25.
+        find_pixels(a, l, &mut c, OFFSCREEN, LOCKED)?;
+        find_pixels(a, l, &mut c, FRONT, DESC3)?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn blits_from_dxt_stretch_cut_blocks_and_mirror_as_windows() {
+    let (program, data) = dxt_blits_program();
+    let mut cpu = machine("dxt_blits", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 26);
+    assert_eq!(r[1..13], [0; 12], "{r:X?}");
+    let pixels = locked_pixels(&cpu, data, LOCKED, (16, 16), 2);
+    let at = |x: usize, y: usize, w: usize, h: usize| -> Vec<u32> {
+        (y..y + h)
+            .flat_map(|y| pixels[y * 16 + x..][..w].to_vec())
+            .collect()
+    };
+    // Windows 98 SE's pixels: the shrink samples the odd pixels.
+    let shrunk = "
+        f800 f800 07e0 07e0
+        f800 f800 07e0 07e0
+        001f 001f 52aa 0000
+        001f 001f 0000 52aa";
+    assert_eq!(at(0, 0, 4, 4), probe_pixels(shrunk));
+    let mirrored = "
+        07e0 07e0 07e0 07e0 f800 f800 f800 f800
+        07e0 07e0 07e0 07e0 f800 f800 f800 f800
+        07e0 07e0 07e0 07e0 f800 f800 f800 f800
+        07e0 07e0 07e0 07e0 f800 f800 f800 f800
+        ffff 0000 ad55 52aa 001f 001f 001f 001f
+        0000 ad55 52aa ffff 001f 001f 001f 001f
+        ad55 52aa ffff 0000 001f 001f 001f 001f
+        52aa ffff 0000 ad55 001f 001f 001f 001f";
+    assert_eq!(at(8, 0, 8, 8), probe_pixels(mirrored));
+    let cut = "
+        f800 f800 07e0 07e0 07e0
+        f800 f800 07e0 07e0 07e0
+        f800 f800 07e0 07e0 07e0
+        001f 001f 52aa ad55 0000
+        001f 001f ffff 52aa ad55";
+    assert_eq!(at(0, 8, 5, 5), probe_pixels(cut));
+}
+
+#[test]
+fn a_dxt_surface_takes_whole_blocks_of_its_format_and_nothing_else() {
+    let (program, data) = dxt_blits_program();
+    let mut cpu = machine("dxt_to_dxt", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 26);
+    assert_eq!(r[12], 0, "{r:X?}");
+    // Windows compresses these; the built-in DirectDraw doesn't.
+    assert_eq!(r[13..16], [E_NOTIMPL; 3], "{r:X?}");
+    // A fill of a DXT surface fails on Windows too.
+    assert_eq!(r[16], E_NOTIMPL);
+    assert_eq!(r[22..26], [0; 4], "{r:X?}");
+    let blocks = locked_pixels(&cpu, data, DESC3, (8, 1), 4);
+    let green = [0x001F_07E0, 0];
+    assert_eq!(blocks[..4], [0; 4], "{blocks:X?}");
+    assert_eq!(blocks[4..6], green, "{blocks:X?}");
+    assert_eq!(blocks[6..], [0; 2], "{blocks:X?}");
+}
+
+#[test]
+fn colour_keys_on_a_blit_from_dxt_fail_as_on_windows() {
+    let (program, data) = dxt_blits_program();
+    let mut cpu = machine("dxt_keys", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 22);
+    assert_eq!(
+        r[17..22],
+        [
+            DDERR_INVALIDPARAMS,
+            0,
+            E_NOTIMPL,
+            E_NOTIMPL,
+            DDERR_INVALIDPARAMS
+        ],
+        "{r:X?}"
+    );
+}
+
+/// A 6x6 DXT1 texture, and an 8x8 one asked for without a memory,
+/// locked.
+fn dxt_create_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    d.resize(DXT_DATA_SIZE, 0);
+    dxt_desc(&mut d, DESC, b"DXT1", 6, 6);
+    dxt_desc(&mut d, DESC3, b"DXT1", 8, 8);
+    put32(&mut d, DESC3 + 0x68, DDSCAPS_TEXTURE);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        let level = [Arg::Val(HWND), Arg::I(DDSCL_NORMAL)];
+        c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &level)?;
+        for (desc, out) in [(DESC, SOURCE), (DESC3, FRONT)] {
+            let args = [Arg::At(desc), Arg::At(out), Arg::I(0)];
+            c.com(a, l, DD, DD_CREATE_SURFACE, &args)?;
+        }
+        find_pixels(a, l, &mut c, FRONT, DESC3)?;
+        finish(a, l)
+    })
+}
+
+/// DirectX 7 on Windows 98 SE makes DXT surfaces of whole blocks only,
+/// and puts one asked for without a memory in system memory, its pitch
+/// the size of its blocks.
+#[test]
+fn dxt_surfaces_are_whole_blocks_in_system_memory() {
+    let (program, data) = dxt_create_program();
+    let mut cpu = machine("dxt_create", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 7);
+    assert_eq!(r[3..7], [DDERR_INVALIDPARAMS, 0, 0, 0], "{r:X?}");
+    let caps = peek(&cpu, data + DESC3 + 0x68);
+    assert_eq!(caps & DDSCAPS_SYSTEMMEMORY, DDSCAPS_SYSTEMMEMORY);
+    assert_eq!(peek(&cpu, data + DESC3 + 0x10), 32);
+}

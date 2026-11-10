@@ -39,6 +39,7 @@ macro_rules! hr {
 }
 
 mod blt;
+mod dxt_blt;
 mod clipper;
 pub mod d3d;
 pub(super) mod directdraw;
