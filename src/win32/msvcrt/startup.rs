@@ -1061,11 +1061,12 @@ fn long_jump(cpu: &mut Cpu, buffer: u32, value: u32) {
 /// (-1), the handler and the previous fs:[0]; fs:[0] and ESP point at
 /// that frame, at EBP - 0Ch, and EAX holds the return address. The other
 /// registers keep their values. It returns with ESP and EBP changed, so
-/// it is x86 code (`Conv::Code`).
-/// The instructions are Wine's (dlls/msvcrt/except_i386.c, LGPL-2.1+,
-/// Copyright 2000 Jon Griffiths, 2002 Alexandre Julliard, 2005 Juan
-/// Lang). They leave the registers and the stack as Visual C++ 6's
-/// MSVCRT.DLL (6.00.8337) does.
+/// it is x86 code (`Conv::Code`). The instructions are Wine's
+/// (dlls/msvcrt/except_i386.c, LGPL-2.1+, Copyright 2000 Jon Griffiths,
+/// 2002 Alexandre Julliard, 2005 Juan Lang). Windows' MSVCRT.DLL (Windows
+/// 98 SE's 6.00.8397, Visual C++ 6's 6.00.8337) has ten, loading fs:[0]
+/// through EAX before it pushes it; both leave the same registers and
+/// stack.
 pub const EH_PROLOG: &[u8] = &[
     0x6A, 0xFF, //                               push -1 (the state)
     0x50, //                                     push eax (the handler)
@@ -1077,30 +1078,6 @@ pub const EH_PROLOG: &[u8] = &[
     0x50, //                                     push eax
     0xC3, //                                     ret
 ];
-
-/// _EH_prolog's Rust side, which runs only from a trap. `EH_PROLOG` has
-/// been the function since the DLL had it, so no saved state holds such
-/// a trap; this does the same for one. The `RET` after the trap returns
-/// to the address it leaves on top of the stack.
-pub fn eh_prolog(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    let slot = cpu.esp();
-    let (ebp, handler) = (cpu.ebp(), cpu.eax());
-    let back = read32(cpu, slot)?;
-    let tib = super::super::process(cpu)
-        .current_thread()
-        .map_or(0, |t| t.tib);
-    let frame = slot.wrapping_sub(12);
-    let next = read32(cpu, tib)?;
-    write32(cpu, slot, ebp)?;
-    write32(cpu, slot.wrapping_sub(4), u32::MAX)?;
-    write32(cpu, slot.wrapping_sub(8), handler)?;
-    write32(cpu, frame, next)?;
-    write32(cpu, frame.wrapping_sub(4), back)?;
-    write32(cpu, tib, frame)?;
-    cpu.set_ebp(slot);
-    cpu.set_esp(frame.wrapping_sub(4));
-    Some(back)
-}
 
 const CXX_EXCEPTION: u32 = 0xE06D_7363;
 const CXX_MAGIC: u32 = 0x1993_0520;

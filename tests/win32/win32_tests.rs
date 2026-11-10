@@ -6346,7 +6346,8 @@ fn eh_prolog_program() -> Vec<u8> {
 /// variables the program can write, as MSVCP60's locale code does: it
 /// counts itself in and out of the second with InterlockedIncrement and
 /// InterlockedDecrement (Max Payne). The first is 0 while no setlocale
-/// runs. The program ends with 1 for the count it wrote and read back.
+/// runs. The program ends with the count it wrote and read back in the
+/// low four bits and the first variable above them: 1.
 #[test]
 fn msvcrt_locale_guards_are_variables() {
     let names: &[&str] = &["__setlc_active", "__unguarded_readlc_active", "exit"];
@@ -6356,7 +6357,9 @@ fn msvcrt_locale_guards_are_variables() {
         a.lock().inc(dword_ptr(eax))?;
         a.mov(ecx, dword_ptr(eax))?;
         a.mov(eax, l.import(0))?;
-        a.add(ecx, dword_ptr(eax))?;
+        a.mov(edx, dword_ptr(eax))?;
+        a.shl(edx, 4)?;
+        a.add(ecx, edx)?;
         a.push(ecx)?;
         a.call(l.import(2))?;
         a.int3()

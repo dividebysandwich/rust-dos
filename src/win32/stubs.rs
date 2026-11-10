@@ -37,8 +37,18 @@ pub enum Conv {
     /// The DLL's code section has it after the stubs and vtables, its
     /// export points at it, and its stub jumps to it. The `handler` runs
     /// only in a state saved when the function was a trap, whose memory
-    /// still has that stub.
+    /// still has that stub. A function that has been code since it was
+    /// added has no such state, and its handler is `never_a_trap`.
     Code(&'static [u8]),
+}
+
+/// The handler of a function that has been x86 code (`Conv::Code`) since
+/// it was added: its stub has never been a trap, so this doesn't run
+/// unless the code section is overwritten with one. The program then ends
+/// as for a call of an unknown function.
+pub fn never_a_trap(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    super::fatal(cpu, "a trap of a function that is x86 code", None);
+    None
 }
 
 /// A function's Rust side: the arguments as the program passed them;
