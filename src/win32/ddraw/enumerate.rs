@@ -23,6 +23,9 @@ const DEVICES_EX: u32 = 1;
 const MODES: u32 = 2;
 const SURFACES: u32 = 3;
 const CREATABLE: u32 = 4;
+/// EnumAttachedSurfaces's: a list as SURFACES is, which the 3D trace
+/// names apart.
+const ATTACHED: u32 = 5;
 
 /// The task's variables: the kind, the callback, its context, the size
 /// of the descriptions it gets, where the list is at, and the items.
@@ -274,7 +277,7 @@ pub fn enum_attached_surfaces(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         108
     };
-    let mut vars = vec![SURFACES, callback, context, size, 0];
+    let mut vars = vec![ATTACHED, callback, context, size, 0];
     let attached = state(cpu)
         .surface(id)
         .map(|s| s.attached.clone())
@@ -302,6 +305,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             DEVICES => "DDRAW.DirectDrawEnumerateA",
             DEVICES_EX => "DDRAW.DirectDrawEnumerateExA",
             MODES => "DDRAW.EnumDisplayModes",
+            ATTACHED => "DDRAW.EnumAttachedSurfaces",
             _ => "DDRAW.EnumSurfaces",
         };
         trace3d::enumerated(cpu, list, scratch, step, value, &next, |cpu, args| {

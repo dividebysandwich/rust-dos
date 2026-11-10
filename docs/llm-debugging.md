@@ -1438,18 +1438,19 @@ The events:
   the arguments that say what was asked and the result: `OK`, an
   HRESULT, or `-` for a function that calls the program back before it
   returns. Render and texture stage states, their values, formats,
-  primitive types, vertex formats (`XYZ|NORMAL|TEX1`) and OpenGL's enums
-  have their names without the API's prefix. Other numbers are decimal,
-  or hexadecimal from 0x10000. CreateSurface has the description asked
-  for and the surface made; AddAttachedSurface, DeleteAttachedSurface,
+  primitive types, vertex formats (`XYZ|NORMAL|TEX1`, or `TLVERTEX` for
+  IDirect3DDevice2's vertex types) and OpenGL's enums have their names
+  without the API's prefix. Other numbers are decimal, or hexadecimal
+  from 0x10000. CreateSurface has the description asked for and the
+  surface made; AddAttachedSurface, DeleteAttachedSurface,
   SetRenderTarget and Clear name each surface involved by its size,
   format and caps, and blits by format and caps. Calls polled every
   frame (Lock, GetRenderState) have only their result.
 - What an enumeration offered the program's callback, and what the
   callback returned: `DDRAW.EnumZBufferFormats item Z16 -> OK`. `CANCEL`
   stopped the list there. These cover DirectDrawEnumerate,
-  EnumDisplayModes, EnumSurfaces, and Direct3D's EnumDevices,
-  EnumTextureFormats and EnumZBufferFormats.
+  EnumDisplayModes, EnumSurfaces, EnumAttachedSurfaces, and Direct3D's
+  EnumDevices, EnumTextureFormats and EnumZBufferFormats.
 - KERNEL32's LoadLibrary, GetModuleHandle and GetProcAddress of 3D DLLs
   and functions, with whether they were found; GDI32's pixel format
   calls with the PIXELFORMATDESCRIPTOR asked for.
@@ -1457,16 +1458,18 @@ The events:
 - `EXECUTE STATERENDER(...)`, `STATELIGHT` and `STATETRANSFORM`: the
   states an execute buffer set (Direct3D 3 to 5).
 - `draw` and `process`: the states a draw, or a ProcessVertices, used:
-  the device's version, the vertex format, `z=` (ZENABLE, ZWRITEENABLE,
-  ZFUNC), `alphatest=` (enable, function), `blend=` (enable, source,
-  destination, BLENDOP), `fog=` (enable, table mode, vertex mode, range
-  fog), `specular=`, `stencil=`, `lighting=` (LIGHTING and the number of
-  lights on), `vertexblend=` (VERTEXBLEND, INDEXEDVERTEXBLENDENABLE),
-  `clipplanes=`, `wrap0=`, `pointsprite=` and `zbias=`, then each
-  texture stage up to the first disabled one: whether it has a texture,
-  the color and alpha operations with their arguments, the texture
-  coordinate index and the transform flags. Each different set of states
-  is one line in `FILE`; its count is the number of draws that used it.
+  the device's version (`v8` for OpenGL too, whose draws go to the same
+  pipeline as Direct3D 8's), the vertex format, `z=` (ZENABLE,
+  ZWRITEENABLE, ZFUNC), `alphatest=` (enable, function), `blend=`
+  (enable, source, destination, BLENDOP), `fog=` (enable, table mode,
+  vertex mode, range fog), `specular=`, `stencil=`, `lighting=` (LIGHTING
+  and the number of lights on), `vertexblend=` (VERTEXBLEND,
+  INDEXEDVERTEXBLENDENABLE), `clipplanes=`, `wrap0=`, `pointsprite=` and
+  `zbias=`, then each texture stage up to the first disabled one:
+  whether it has a texture, the color and alpha operations with their
+  arguments, the texture coordinate index and the transform flags. Each
+  different set of states is one line in `FILE`; its count is the number
+  of draws that used it.
 
 The trace only reads the machine: a run with it reaches the same
 emulated state at the same emulated time as one without. It takes host

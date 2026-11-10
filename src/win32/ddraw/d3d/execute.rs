@@ -12,13 +12,13 @@ use super::super::{
 };
 use super::device::{self, HANDLE_MATRIX, HANDLE_TEXTURE, device_of, get};
 use super::draw::setup_in;
-use crate::win32::trace3d::Pass;
 use super::pipeline::{self, Layout, Prim, Processed};
 use super::{
     D3D_OK, D3DERR_EXECUTE_LOCKED, D3DERR_EXECUTE_NOT_LOCKED, D3dObject, probe, read_bytes,
     read_dwords, write_dwords,
 };
 use crate::cpu::Cpu;
+use crate::win32::trace3d::Pass;
 use crate::win32::{com, kernel32};
 
 /// An execute buffer.

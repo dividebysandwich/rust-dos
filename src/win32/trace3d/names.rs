@@ -328,7 +328,9 @@ pub fn stage_op(x: u32) -> Option<&'static str> {
 pub fn stage_arg(x: u32) -> String {
     let source = pick(
         x & 0xF,
-        &["DIFFUSE", "CURRENT", "TEXTURE", "TFACTOR", "SPECULAR", "TEMP"],
+        &[
+            "DIFFUSE", "CURRENT", "TEXTURE", "TFACTOR", "SPECULAR", "TEMP",
+        ],
     )
     .map_or_else(|| number(x & 0xF), str::to_string);
     let mut s = String::new();

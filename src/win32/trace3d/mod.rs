@@ -70,10 +70,13 @@ impl Trace3d {
     }
 
     fn record(&mut self, key: String) {
-        let count = self.counts.entry(key.clone()).or_insert(0);
-        *count += 1;
-        if *count == 1 {
+        // Most events have come before: the key is copied only for a new
+        // one, which `order` keeps too.
+        if let Some(count) = self.counts.get_mut(&key) {
+            *count += 1;
+        } else {
             let _ = writeln!(self.events, "{:6} {}", self.order.len(), key);
+            self.counts.insert(key.clone(), 1);
             self.order.push(key);
         }
         if self.written.elapsed() >= REWRITE {
@@ -203,12 +206,34 @@ fn guid(cpu: &Cpu, at: u32) -> String {
 /// The object of the COM interface `this` of the built-in `dll`, read
 /// as `com::interface_of` reads it, without its probe.
 fn object_of(cpu: &Cpu, dll: &str, this: u32) -> Option<u32> {
+    interface_of(cpu, dll, this).map(|(_, id)| id)
+}
+
+/// The same with the interface's vtable, as its place in the DLL's
+/// table (`com::interface_of`'s).
+fn interface_of(cpu: &Cpu, dll: &str, this: u32) -> Option<(usize, u32)> {
     let vtable = peek(cpu, this)?;
     let index = super::stubs::DLLS.iter().position(|d| d.name == dll)?;
-    (0..super::stubs::DLLS[index].vtables.len())
-        .any(|i| super::stubs::vtable_address(index, i) == vtable)
-        .then_some(())?;
-    peek(cpu, this.wrapping_add(4))
+    let table = (0..super::stubs::DLLS[index].vtables.len())
+        .find(|&i| super::stubs::vtable_address(index, i) == vtable)?;
+    Some((table, peek(cpu, this.wrapping_add(4))?))
+}
+
+/// The vertex type DrawPrimitive and DrawIndexedPrimitive of the
+/// Direct3D device `this` were given: IDirect3DDevice2's D3DVERTEXTYPE,
+/// or an FVF code from IDirect3DDevice3 on (`draw::vertex_format`).
+fn vertex_type(cpu: &Cpu, this: u32, vt: u32) -> String {
+    let version = interface_of(cpu, "DDRAW.DLL", this)
+        .map_or(7, |(vtable, _)| super::ddraw::d3d::device::version(vtable));
+    if version > 2 {
+        return names::fvf(vt);
+    }
+    match vt {
+        1 => "VERTEX".to_string(),
+        2 => "LVERTEX".to_string(),
+        3 => "TLVERTEX".to_string(),
+        _ => names::number(vt),
+    }
 }
 
 /// DirectDraw's surface `id`: its size, format and caps.
@@ -304,21 +329,23 @@ fn surface8_iface(cpu: &Cpu, this: u32) -> String {
 
 /// DDPIXELFORMAT at `at` as a name.
 fn pixel_format_at(cpu: &Cpu, at: u32) -> String {
-    let w: Vec<u32> = (0..8).map(|i| peek(cpu, at + 4 * i).unwrap_or(0)).collect();
+    let w: Vec<u32> = (0..8)
+        .map(|i| peek(cpu, at.wrapping_add(4 * i)).unwrap_or(0))
+        .collect();
     names::pixel_format(w[1], w[2], w[3], [w[4], w[5], w[6], w[7]])
 }
 
 /// DDSURFACEDESC or DDSURFACEDESC2 at `at`: the fields its flags say
 /// are there.
 fn surface_desc_at(cpu: &Cpu, at: u32) -> String {
-    let w = |o: u32| peek(cpu, at + o).unwrap_or(0);
+    let w = |o: u32| peek(cpu, at.wrapping_add(o)).unwrap_or(0);
     let flags = w(4);
     let mut s = Vec::new();
     if flags & 0x6 != 0 {
         s.push(format!("{}x{}", w(12), w(8)));
     }
     if flags & 0x1000 != 0 {
-        s.push(pixel_format_at(cpu, at + 72));
+        s.push(pixel_format_at(cpu, at.wrapping_add(72)));
     }
     if flags & 0x1 != 0 {
         let mut caps = names::ddscaps(w(104));
@@ -348,7 +375,7 @@ fn surface_desc_at(cpu: &Cpu, at: u32) -> String {
 /// D3DPRESENT_PARAMETERS at `at`.
 fn present_params(cpu: &Cpu, at: u32) -> String {
     let w: Vec<u32> = (0..13)
-        .map(|i| peek(cpu, at + 4 * i).unwrap_or(0))
+        .map(|i| peek(cpu, at.wrapping_add(4 * i)).unwrap_or(0))
         .collect();
     format!(
         "[{}x{} {} backbuffers={} ms={} swap={} windowed={} autodepth={} {} flags=0x{:X}]",
@@ -482,21 +509,25 @@ fn com_detail(
             let texture = match args[2] {
                 0 => "none".to_string(),
                 t => object_of(cpu, "DDRAW.DLL", t).map_or("?".to_string(), |id| {
-                    cpu.bus.win32.ddraw.surface(id).map_or("?".to_string(), |s| {
-                        names::pixel_format(
-                            s.format.flags,
-                            s.format.fourcc,
-                            s.format.bits,
-                            [s.format.r, s.format.g, s.format.b, s.format.a],
-                        )
-                    })
+                    cpu.bus
+                        .win32
+                        .ddraw
+                        .surface(id)
+                        .map_or("?".to_string(), |s| {
+                            names::pixel_format(
+                                s.format.flags,
+                                s.format.fourcc,
+                                s.format.bits,
+                                [s.format.r, s.format.g, s.format.b, s.format.a],
+                            )
+                        })
                 }),
             };
             format!("({},{}) = {}", args[1], texture, r)
         }
         "SetLight" => {
             let (index, at) = if name.starts_with("IDirect3DLight_") {
-                (None, args[1] + 4)
+                (None, args[1].wrapping_add(4))
             } else {
                 (Some(args[1]), args[2])
             };
@@ -522,7 +553,7 @@ fn com_detail(
             format!(
                 "({},{}) = {}",
                 names::primitive(args[1]),
-                names::fvf(args[2]),
+                vertex_type(cpu, args[0], args[2]),
                 r
             )
         }
@@ -548,7 +579,7 @@ fn com_detail(
             r
         ),
         "CreateVertexBuffer" => {
-            let w = |o: u32| peek(cpu, args[1] + o).unwrap_or(0);
+            let w = |o: u32| peek(cpu, args[1].wrapping_add(o)).unwrap_or(0);
             format!("(caps=0x{:X},{}) = {}", w(4), names::fvf(w(8)), r)
         }
         "CreateIndexBuffer" => format!(
@@ -598,7 +629,14 @@ fn com_detail(
             r
         ),
         "CreateDepthStencilSurface" => {
-            format!("({}x{},{},ms={}) = {}", args[1], args[2], fmt(3), args[4], r)
+            format!(
+                "({}x{},{},ms={}) = {}",
+                args[1],
+                args[2],
+                fmt(3),
+                args[4],
+                r
+            )
         }
         "CreateImageSurface" => format!("({}x{},{}) = {}", args[1], args[2], fmt(3), r),
         "CheckDeviceFormat" => format!(
@@ -665,7 +703,12 @@ fn com_detail(
                 Some(0) => peek(cpu, args[2]).map_or("?".to_string(), |s| surface_iface(cpu, s)),
                 _ => "nothing".to_string(),
             };
-            format!(" [{}] made [{}] = {}", surface_desc_at(cpu, args[1]), made, r)
+            format!(
+                " [{}] made [{}] = {}",
+                surface_desc_at(cpu, args[1]),
+                made,
+                r
+            )
         }
         "AddAttachedSurface" => format!(
             " [{}] gets [{}] = {}",
@@ -800,20 +843,35 @@ fn clear_detail(cpu: &Cpu, name: &str, d8: bool, args: &[u32], r: &str) -> Strin
 fn gl_args(name: &str) -> &'static [(usize, Gl)] {
     use Gl::*;
     match name {
-        "glEnable" | "glDisable" | "glIsEnabled" | "glEnableClientState"
-        | "glDisableClientState" | "glMatrixMode" | "glShadeModel" | "glCullFace"
-        | "glFrontFace" | "glDepthFunc" | "glGetIntegerv" | "glGetFloatv" | "glGetBooleanv"
-        | "glGetDoublev" | "glDrawBuffer" | "glReadBuffer" | "glActiveTextureARB"
-        | "glClientActiveTextureARB" | "glClipPlane" | "glBlendEquationEXT" => &[(0, Enum)],
+        "glEnable"
+        | "glDisable"
+        | "glIsEnabled"
+        | "glEnableClientState"
+        | "glDisableClientState"
+        | "glMatrixMode"
+        | "glShadeModel"
+        | "glCullFace"
+        | "glFrontFace"
+        | "glDepthFunc"
+        | "glGetIntegerv"
+        | "glGetFloatv"
+        | "glGetBooleanv"
+        | "glGetDoublev"
+        | "glDrawBuffer"
+        | "glReadBuffer"
+        | "glActiveTextureARB"
+        | "glClientActiveTextureARB"
+        | "glClipPlane"
+        | "glBlendEquationEXT"
+        | "glFogfv"
+        | "glLightModelfv" => &[(0, Enum)],
         "glBegin" | "glDrawArrays" => &[(0, Mode)],
         "glDrawElements" => &[(0, Mode), (2, Enum)],
         "glDepthMask" | "glLockArraysEXT" => &[(0, Int)],
         "glBlendFunc" => &[(0, Factor), (1, Factor)],
         "glHint" | "glPolygonMode" | "glColorMaterial" | "glFogi" | "glLightModeli"
-        | "glTexEnvfv" | "glTexEnviv" | "glTexGenfv" | "glTexParameterfv"
-        | "glTexParameteriv" | "glFogfv" | "glLightModelfv" | "glLightfv" | "glMaterialfv" => {
-            &[(0, Enum), (1, Enum)]
-        }
+        | "glTexEnvfv" | "glTexEnviv" | "glTexGenfv" | "glTexParameterfv" | "glTexParameteriv"
+        | "glLightfv" | "glMaterialfv" => &[(0, Enum), (1, Enum)],
         "glPixelStorei" => &[(0, Enum), (1, Int)],
         "glTexParameteri" | "glTexEnvi" | "glTexGeni" | "glStencilOp" => {
             &[(0, Enum), (1, Enum), (2, Enum)]
@@ -890,15 +948,21 @@ fn kernel_detail(cpu: &Cpu, name: &str, args: &[u32], result: Option<u32>) -> Op
         return None;
     }
     let s = peek_str(cpu, at)?;
-    let lower = s.to_ascii_lowercase();
     let wanted = if name == "GetProcAddress" {
-        ["gl", "wgl", "direct", "d3d"]
+        // Exports keep their case: glBegin and wglCreateContext are
+        // OpenGL's, GlobalAlloc and DirectSoundCreate aren't 3D.
+        ["gl", "wgl", "Direct3D", "DirectDraw", "D3D", "d3d"]
             .iter()
-            .any(|p| lower.starts_with(p))
+            .any(|p| s.starts_with(p))
     } else {
-        ["opengl", "d3d", "ddraw", "glide", "3dfx", "gl"]
-            .iter()
-            .any(|p| lower.contains(p))
+        // The file's name, without its folder: GLIDE2X.DLL and GLU32.DLL,
+        // not ENGLISH.DLL.
+        let lower = s.to_ascii_lowercase();
+        let file = lower.rsplit(['\\', '/']).next().unwrap_or(&lower);
+        file.starts_with("gl")
+            || ["opengl", "d3d", "ddraw", "3dfx"]
+                .iter()
+                .any(|p| file.contains(p))
     };
     wanted.then(|| format!("{}(\"{}\") found={}", name, s, result.unwrap_or(0) != 0))
 }
@@ -1062,6 +1126,12 @@ pub(crate) fn enumerated(
     let Some(t) = cpu.bus.win32.trace3d.as_deref_mut() else {
         return;
     };
+    // A list that ended without its callback returning (one that
+    // faulted, or a process that went) left its item; a task starting
+    // with the same scratch space has nothing to answer yet.
+    if step == 0 {
+        t.offered.remove(&scratch);
+    }
     if step != 0
         && let Some(item) = t.offered.remove(&scratch)
     {
@@ -1106,7 +1176,7 @@ pub(crate) fn pixel_format_item(cpu: &Cpu, args: &[u32]) -> String {
 /// description, HEL description, context), D3DDEVICEDESC's caps of the
 /// HAL.
 pub(crate) fn d3d_device_item(cpu: &Cpu, args: &[u32]) -> String {
-    let w = |o: u32| peek(cpu, args[3] + o).unwrap_or(0);
+    let w = |o: u32| peek(cpu, args[3].wrapping_add(o)).unwrap_or(0);
     format!(
         "{} \"{}\" devcaps=0x{:X} raster=0x{:X} texcaps=0x{:X} texblend=0x{:X} \
          depths=0x{:X} zdepths=0x{:X}",
@@ -1124,7 +1194,7 @@ pub(crate) fn d3d_device_item(cpu: &Cpu, args: &[u32]) -> String {
 /// IDirect3D7's EnumDevices: (description, name, D3DDEVICEDESC7,
 /// context).
 pub(crate) fn d3d_device7_item(cpu: &Cpu, args: &[u32]) -> String {
-    let w = |o: u32| peek(cpu, args[2] + o).unwrap_or(0);
+    let w = |o: u32| peek(cpu, args[2].wrapping_add(o)).unwrap_or(0);
     format!(
         "\"{}\" devcaps=0x{:X} raster=0x{:X} texcaps=0x{:X} texblend=0x{:X} \
          depths=0x{:X} zdepths=0x{:X}",
@@ -1136,4 +1206,36 @@ pub(crate) fn d3d_device7_item(cpu: &Cpu, args: &[u32]) -> String {
         w(116),
         w(120)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pointers_to_values_are_not_named_as_enums() {
+        assert!(matches!(gl_args("glFogfv"), [(0, Gl::Enum)]));
+        assert!(matches!(gl_args("glLightModelfv"), [(0, Gl::Enum)]));
+        assert!(matches!(
+            gl_args("glLightfv"),
+            [(0, Gl::Enum), (1, Gl::Enum)]
+        ));
+    }
+
+    #[test]
+    fn an_event_is_written_once_and_counted_each_time() {
+        let dir = std::env::temp_dir().join(format!("trace3d-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.trace");
+        let mut t = Trace3d::create(&path).unwrap();
+        for key in ["a", "b", "a", "a"] {
+            t.record(key.to_string());
+        }
+        drop(t);
+        let events = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(events, "     0 a\n     1 b\n");
+        let counts = std::fs::read_to_string(counts_path(&path)).unwrap();
+        assert_eq!(counts, "3\ta\n1\tb\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

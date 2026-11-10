@@ -3207,6 +3207,23 @@ fn the_3d_trace_names_the_states_and_the_surfaces_of_each_call() {
 }
 
 #[test]
+fn the_3d_trace_names_the_vertex_format_of_an_idirect3ddevice3_draw() {
+    // IDirect3DDevice3 shares IDirect3DDevice2's DrawPrimitive, whose
+    // vertex type is a D3DVERTEXTYPE there and an FVF code here.
+    let scene = Scene {
+        api: Api::D3D6,
+        steps: vec![Step::Draw(corners()), Step::Draw(corners())],
+        ..traced_scene()
+    };
+    let (exe, data) = scene_program(&scene);
+    let (_, path) = run_traced("trace3d_device3", exe, data, true);
+    let (events, counts) = read_trace(&path);
+    let draw =
+        "DDRAW.IDirect3DDevice2_DrawPrimitive(TRIANGLELIST,XYZRHW|DIFFUSE|SPECULAR|TEX1) = OK";
+    assert_eq!(event(&events, &counts, draw), (draw, 2));
+}
+
+#[test]
 fn the_3d_trace_changes_nothing_and_without_it_no_file_is_written() {
     let draw = |test: &str, trace: bool| {
         let (exe, data) = scene_program(&traced_scene());
