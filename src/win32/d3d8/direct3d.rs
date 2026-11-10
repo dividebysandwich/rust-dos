@@ -270,7 +270,7 @@ pub fn get_device_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     hr!(d3d_of(cpu, this));
     hr!(check_device(cpu, adapter, devtype));
-    Some(super::caps::write(cpu, at))
+    Some(super::caps::write(cpu, at, false))
 }
 
 /// GetAdapterMonitor(this, adapter).
