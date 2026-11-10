@@ -48,11 +48,8 @@ fn prim_caps() -> [u32; 13] {
     let misc = 0x2 | 0x10 | 0x20 | 0x40;
     // D3DPRASTERCAPS_: dither, z test, subpixel, vertex and table fog,
     // mipmap LOD bias, z bias, range fog, w buffer, w fog.
-    let mut raster =
+    let raster =
         0x1 | 0x10 | 0x20 | 0x80 | 0x100 | 0x2000 | 0x4000 | 0x1_0000 | 0x4_0000 | 0x10_0000;
-    if crate::win32::gfx_trace::hide_w_buffer() {
-        raster &= !0x4_0000;
-    }
     // D3DPCMPCAPS_: all eight.
     let cmp = 0xFF;
     // D3DPBLENDCAPS_: zero, one, the source's color and its inverse,

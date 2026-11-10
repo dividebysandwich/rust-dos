@@ -54,9 +54,6 @@ pub fn words(cpu: &Cpu, device: bool) -> [u32; 53] {
     // D3DPRASTERCAPS_: dither, z test, vertex and table fog, mipmap LOD
     // bias, z bias, range fog, w buffer, w fog.
     w[9] = 0x1 | 0x10 | 0x80 | 0x100 | 0x2000 | 0x4000 | 0x1_0000 | 0x4_0000 | 0x10_0000;
-    if crate::win32::gfx_trace::hide_w_buffer() {
-        w[9] &= !0x4_0000;
-    }
     // D3DPCMPCAPS_: all eight, for depth and alpha.
     w[10] = 0xFF;
     w[13] = 0xFF;

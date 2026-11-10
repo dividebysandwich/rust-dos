@@ -15,6 +15,7 @@ use super::surface::{self, Desc};
 use super::{DD_OK, DDERR_INVALIDPARAMS, DDERR_UNSUPPORTED, display, state, voodoo};
 use crate::cpu::Cpu;
 use crate::win32::task::{self, Next, Task};
+use crate::win32::trace3d;
 
 /// The kinds of lists (the task's variable 0).
 const DEVICES: u32 = 0;
@@ -289,11 +290,29 @@ pub fn enum_attached_surfaces(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// The task's step.
 pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
-    match t.var(KIND) {
+    let kind = t.var(KIND);
+    let (scratch, step) = (t.scratch, t.step);
+    let next = match kind {
         DEVICES | DEVICES_EX => devices(cpu, t, value),
         CREATABLE => creatable(cpu, t),
         _ => list(cpu, t, value),
+    };
+    if trace3d::on(cpu) {
+        let list = match kind {
+            DEVICES => "DDRAW.DirectDrawEnumerateA",
+            DEVICES_EX => "DDRAW.DirectDrawEnumerateExA",
+            MODES => "DDRAW.EnumDisplayModes",
+            _ => "DDRAW.EnumSurfaces",
+        };
+        trace3d::enumerated(cpu, list, scratch, step, value, &next, |cpu, args| {
+            match kind {
+                DEVICES | DEVICES_EX => trace3d::ddraw_device_item(cpu, args),
+                MODES => trace3d::surface_desc_item(cpu, args, 0),
+                _ => trace3d::surface_desc_item(cpu, args, 1),
+            }
+        });
     }
+    next
 }
 
 /// The devices to the callback: the display, whose GUID is NULL, then

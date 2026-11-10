@@ -12,6 +12,7 @@ use super::super::{
 };
 use super::device::{self, HANDLE_MATRIX, HANDLE_TEXTURE, device_of, get};
 use super::draw::setup_in;
+use crate::win32::trace3d::Pass;
 use super::pipeline::{self, Layout, Prim, Processed};
 use super::{
     D3D_OK, D3DERR_EXECUTE_LOCKED, D3DERR_EXECUTE_NOT_LOCKED, D3dObject, probe, read_bytes,
@@ -433,8 +434,8 @@ impl Run {
     }
 
     fn state(&mut self, cpu: &mut Cpu, op: u8, s: u32, v: u32) {
-        if crate::win32::gfx_trace::on() {
-            crate::win32::gfx_trace::record(format!("EXECUTE state op={} ({},{})", op, s, v));
+        if crate::win32::trace3d::on(cpu) {
+            crate::win32::trace3d::execute_state(cpu, op, s, v);
         }
         match op {
             D3DOP_STATETRANSFORM => {
@@ -490,7 +491,8 @@ impl Run {
             super::draw::D3DDP_DONOTLIGHT
         };
         let flags = lighting | self.flags;
-        let Some(mut setup) = setup_in(cpu, self.id, self.version, &layout, flags, self.viewport)
+        let (id, version, viewport) = (self.id, self.version, self.viewport);
+        let Some(mut setup) = setup_in(cpu, Pass::Process, id, version, &layout, flags, viewport)
         else {
             return;
         };
@@ -557,7 +559,7 @@ impl Run {
         // device's current states.
         let layout = Layout::of(pipeline::FVF_TLVERTEX).unwrap_or_default();
         let (id, version, flags, viewport) = (self.id, self.version, self.flags, self.viewport);
-        let Some(setup) = setup_in(cpu, id, version, &layout, flags, viewport) else {
+        let Some(setup) = setup_in(cpu, Pass::Draw, id, version, &layout, flags, viewport) else {
             return;
         };
         super::draw::draw_processed(cpu, self.id, &setup, &self.vertices, &prims);

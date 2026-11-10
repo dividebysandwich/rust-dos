@@ -24,6 +24,7 @@ use super::{
     D3DERR_NOTINBEGIN, D3DERR_VERTEXBUFFERLOCKED, probe, read_bytes, read_dwords,
 };
 use crate::cpu::Cpu;
+use crate::win32::trace3d::Pass;
 use std::sync::Arc;
 
 // DrawPrimitive's flags.
@@ -144,17 +145,26 @@ fn view_map(cpu: &mut Cpu, d: &Device, version: u32, viewport: u32) -> ViewMap {
     ViewMap::dx7(v.x, v.y, w, h, v.min_z, v.max_z)
 }
 
-/// The pipeline's setup for vertices of `layout` drawn by the device
-/// `id` through an interface of `version`, with DrawPrimitive's `flags`.
-pub fn setup(cpu: &mut Cpu, id: u32, version: u32, layout: &Layout, flags: u32) -> Option<Setup> {
+/// The pipeline's setup for vertices of `layout` drawn (or processed,
+/// as `pass` says) by the device `id` through an interface of `version`,
+/// with DrawPrimitive's `flags`.
+pub fn setup(
+    cpu: &mut Cpu,
+    pass: Pass,
+    id: u32,
+    version: u32,
+    layout: &Layout,
+    flags: u32,
+) -> Option<Setup> {
     let viewport = get(cpu, id)?.current.0;
-    setup_in(cpu, id, version, layout, flags, viewport)
+    setup_in(cpu, pass, id, version, layout, flags, viewport)
 }
 
 /// The same, with the viewport `viewport` for one of Direct3D 3 to 6
 /// (an execute buffer's).
 pub fn setup_in(
     cpu: &mut Cpu,
+    pass: Pass,
     id: u32,
     version: u32,
     layout: &Layout,
@@ -162,6 +172,14 @@ pub fn setup_in(
     viewport: u32,
 ) -> Option<Setup> {
     super::device::lend(cpu, id, |cpu, d| {
+        if crate::win32::trace3d::on(cpu) {
+            let textures: Vec<bool> = d.textures.iter().map(|&t| t != 0).collect();
+            let lights = d.lights.iter().filter(|l| l.enabled).count();
+            let (render, stages) = (&d.render, &d.stages);
+            crate::win32::trace3d::draw(
+                cpu, pass, version, layout.fvf, render, stages, &textures, lights,
+            );
+        }
         setup_of(cpu, d, version, layout, flags, viewport)
     })
 }
@@ -236,11 +254,6 @@ fn setup_of(
             range: s(48) != 0,
         });
     let tex = |stage: u32| (d.stage(stage, TSS_TEXCOORDINDEX) & 7) as usize;
-    if crate::win32::gfx_trace::on() {
-        let textures: Vec<bool> = d.textures.iter().map(|&t| t != 0).collect();
-        let lights = d.lights.iter().filter(|l| l.enabled).count();
-        crate::win32::gfx_trace::draw(version, layout.fvf, &d.render, &d.stages, &textures, lights);
-    }
     Setup {
         world: d.transforms[1],
         view: d.transforms[2],
@@ -383,7 +396,7 @@ fn draw_clipped(
     flags: u32,
     blend: Option<Blend>,
 ) -> Result<(), u32> {
-    let Some(mut setup) = setup(cpu, id, version, layout, flags) else {
+    let Some(mut setup) = setup(cpu, Pass::Draw, id, version, layout, flags) else {
         return Err(DDERR_INVALIDPARAMS);
     };
     setup.blend = blend;
@@ -927,7 +940,8 @@ pub fn device_setup(
 ) -> Result<(u32, Setup), u32> {
     let (vtable, id) = device_of(cpu, device_iface).map_err(|_| DDERR_INVALIDPARAMS)?;
     let flags = if lit { 0 } else { D3DDP_DONOTLIGHT };
-    let mut setup = setup(cpu, id, version(vtable), layout, flags).ok_or(DDERR_INVALIDPARAMS)?;
+    let mut setup = setup(cpu, Pass::Process, id, version(vtable), layout, flags)
+        .ok_or(DDERR_INVALIDPARAMS)?;
     if !lit {
         setup.lighting = None;
     }

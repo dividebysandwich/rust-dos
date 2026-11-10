@@ -15,8 +15,9 @@ use rust_dos::exec::{NoHook, run_batch};
 use rust_dos::video::adapter::{Adapter, VideoSetup};
 use rust_dos::voodoo::Board;
 use rust_dos_pe::{self as pe, Builder, Imp};
+use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const BASE: u32 = 0x40_0000;
 
@@ -3093,4 +3094,222 @@ fn a_texture_draws_with_a_larger_shared_depth_buffer() {
     assert_eq!(pixel(PIXELS, 64, 28, 28), 0x001F);
     assert_eq!(pixel(PIXELS, 64, 40, 10), 0x07E0);
     assert_eq!(pixel(PIXELS, 64, 10, 40), 0x07E0);
+}
+
+// The 3D trace (`--trace-3d`).
+
+/// The 3D trace at `path`: its events in order, without their numbers,
+/// and the count of each.
+pub(super) fn read_trace(path: &Path) -> (Vec<String>, HashMap<String, u64>) {
+    let text = fs::read_to_string(path).unwrap();
+    let events = text
+        .lines()
+        .map(|l| l.trim_start().split_once(' ').unwrap().1.to_string())
+        .collect();
+    let counts = fs::read_to_string(rust_dos::win32::trace3d::counts_path(path)).unwrap();
+    let counts = counts
+        .lines()
+        .map(|l| {
+            let (n, key) = l.split_once('\t').unwrap();
+            (key.to_string(), n.parse().unwrap())
+        })
+        .collect();
+    (events, counts)
+}
+
+/// The one event that starts with `start`, and its count.
+#[track_caller]
+pub(super) fn event<'a>(
+    events: &'a [String],
+    counts: &HashMap<String, u64>,
+    start: &str,
+) -> (&'a str, u64) {
+    let found: Vec<&String> = events.iter().filter(|e| e.starts_with(start)).collect();
+    assert_eq!(found.len(), 1, "{start:?} in {events:#?}");
+    (found[0], counts[found[0]])
+}
+
+/// The scene the trace tests draw: a z-buffer and a texture, the W
+/// buffer asked for, and two draws with the texture modulated.
+fn traced_scene() -> Scene {
+    Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: BLUE,
+        zbuffer: Some(1.0),
+        texture: Some([0xF800; 64]),
+        texture_alpha: false,
+        steps: vec![
+            Step::State(RS_ZENABLE, 2),
+            Step::Stage(TSS_COLOROP, TOP_MODULATE),
+            Step::Draw(corners()),
+            Step::Draw(corners()),
+        ],
+    }
+}
+
+/// `exe` run to its end in the folder of `test`, with the 3D trace into
+/// `t.trace` there when `trace`: the machine, and the trace's path.
+fn run_traced(test: &str, exe: Vec<u8>, data: u32, trace: bool) -> (Cpu, PathBuf) {
+    let mut cpu = machine(test, exe);
+    let path = PathBuf::from("target/test_win32_d3d")
+        .join(test)
+        .join("t.trace");
+    if trace {
+        rust_dos::win32::trace3d::start(&mut cpu, &path).unwrap();
+    }
+    run_until_done(&mut cpu, data);
+    rust_dos::win32::trace3d::flush(&mut cpu);
+    (cpu, path)
+}
+
+#[test]
+fn the_3d_trace_names_the_states_and_the_surfaces_of_each_call() {
+    let (exe, data) = scene_program(&traced_scene());
+    let (_, path) = run_traced("trace3d_scene", exe, data, true);
+    let (events, counts) = read_trace(&path);
+    let made = event(
+        &events,
+        &counts,
+        "DDRAW.IDirectDraw_CreateSurface [64x64 OFFSCREENPLAIN|3DDEVICE] made [64x64 R5G6B5 ",
+    );
+    assert!(made.0.ends_with("] = OK"), "{made:?}");
+    let attach = event(&events, &counts, "DDRAW.Surface_AddAttachedSurface [64x64 R5G6B5 ").0;
+    let z = " gets [64x64 Z16 VIDEOMEMORY|ZBUFFER|LOCALVIDMEM] = OK";
+    assert!(attach.ends_with(z), "{attach}");
+    let clear = event(&events, &counts, "DDRAW.IDirect3DDevice7_Clear(").0;
+    let start = "DDRAW.IDirect3DDevice7_Clear(rects=0,TARGET|ZBUFFER color=0xFF0000FF z=1.0 \
+                 stencil=0) target=[64x64 R5G6B5 ";
+    assert!(clear.starts_with(start), "{clear}");
+    let z = " depth=[64x64 Z16 VIDEOMEMORY|ZBUFFER|LOCALVIDMEM] = OK";
+    assert!(clear.ends_with(z), "{clear}");
+    let states = [
+        "DDRAW.IDirect3DDevice7_SetRenderState(ZENABLE,USEW) = OK",
+        "DDRAW.IDirect3DDevice7_SetTextureStageState(0,COLOROP,MODULATE) = OK",
+        "DDRAW.IDirect3DDevice7_SetTexture(0,R5G6B5) = OK",
+    ];
+    for s in states {
+        assert_eq!(event(&events, &counts, s), (s, 1));
+    }
+    let draw =
+        "DDRAW.IDirect3DDevice7_DrawPrimitive(TRIANGLELIST,XYZRHW|DIFFUSE|SPECULAR|TEX1) = OK";
+    assert_eq!(event(&events, &counts, draw), (draw, 2));
+    // The states the two draws used: once, counted twice.
+    let (draw, n) = event(&events, &counts, "draw v7 ");
+    assert_eq!(n, 2);
+    let start = "draw v7 fvf=XYZRHW|DIFFUSE|SPECULAR|TEX1 z=USEW,1,LESSEQUAL ";
+    assert!(draw.starts_with(start), "{draw}");
+    assert!(
+        draw.contains(" | s0 tex=1 c=MODULATE(TEXTURE,CURRENT) "),
+        "{draw}"
+    );
+    assert!(!events.iter().any(|e| e.starts_with("process ")));
+}
+
+#[test]
+fn the_3d_trace_changes_nothing_and_without_it_no_file_is_written() {
+    let draw = |test: &str, trace: bool| {
+        let (exe, data) = scene_program(&traced_scene());
+        let (cpu, path) = run_traced(test, exe, data, trace);
+        let n = peek(&cpu, data + CALLS);
+        let pixels: Vec<u32> = (0..32 * 64)
+            .map(|i| peek(&cpu, data + PIXELS + 4 * i))
+            .collect();
+        let mut files: Vec<String> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        files.sort();
+        (results(&cpu, data, n), pixels, files)
+    };
+    let (r_off, pixels_off, files_off) = draw("trace3d_off", false);
+    let (r_on, pixels_on, files_on) = draw("trace3d_on", true);
+    assert!(r_off[1..].iter().all(|&hr| hr == 0), "results: {r_off:X?}");
+    assert_eq!(r_on, r_off);
+    assert_eq!(pixels_on, pixels_off);
+    assert_eq!(files_off, ["T.EXE"]);
+    assert_eq!(files_on, ["T.EXE", "t.trace", "t.trace.counts"]);
+}
+
+#[test]
+fn the_3d_trace_tells_process_vertices_from_draws() {
+    let (exe, data) = process_program();
+    let (_, path) = run_traced("trace3d_process", exe, data, true);
+    let (events, counts) = read_trace(&path);
+    let (process, n) = event(&events, &counts, "process v7 ");
+    assert!(
+        process.starts_with("process v7 fvf=XYZ|NORMAL z="),
+        "{process}"
+    );
+    assert!(process.contains(" lighting=1/1 "), "{process}");
+    assert_eq!(n, 1);
+    let (draw, n) = event(&events, &counts, "draw v7 ");
+    assert!(draw.starts_with("draw v7 fvf=XYZRHW|DIFFUSE z="), "{draw}");
+    assert_eq!(n, 1);
+    let call = "DDRAW.IDirect3DVertexBuffer_ProcessVertices(op=0x401,flags=0x0) = OK";
+    assert_eq!(event(&events, &counts, call), (call, 1));
+}
+
+const D3D7_ENUM_ZBUFFER_FORMATS: u32 = 6;
+const DEV7_ENUM_TEXTURE_FORMATS: u32 = 4;
+/// Where the program keeps its two callbacks' addresses.
+const ENUM_OK: u32 = 0x2C;
+const ENUM_CANCEL: u32 = 0x30;
+
+#[test]
+fn the_3d_trace_has_what_an_enumeration_offered_and_what_the_callback_said() {
+    let mut d = data();
+    target_desc(&mut d, DESC, 124, 64, 64);
+    let (exe, data) = program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        // The callbacks (item, context): one goes on, the other stops.
+        // Each CALL over one pushes its address.
+        let mut after_ok = a.create_label();
+        a.call(after_ok)?;
+        a.mov(eax, 1)?;
+        a.ret_1(8)?;
+        a.set_label(&mut after_ok)?;
+        a.pop(dword_ptr(l.at(ENUM_OK)))?;
+        let mut after_cancel = a.create_label();
+        a.call(after_cancel)?;
+        a.xor(eax, eax)?;
+        a.ret_1(8)?;
+        a.set_label(&mut after_cancel)?;
+        a.pop(dword_ptr(l.at(ENUM_CANCEL)))?;
+        start(a, l, &mut c, true, false)?;
+        let args = [Arg::At(IID_D3D7), Arg::At(D3D)];
+        c.com(a, l, DD, QUERY_INTERFACE, &args)?;
+        let args = [Arg::At(IID_HAL), Arg::Val(ENUM_OK), Arg::I(0)];
+        c.com(a, l, D3D, D3D7_ENUM_ZBUFFER_FORMATS, &args)?;
+        let args = [Arg::At(DESC), Arg::At(TARGET), Arg::I(0)];
+        c.com(a, l, DD, DD_CREATE_SURFACE, &args)?;
+        let args = [Arg::At(IID_HAL), Arg::Val(TARGET), Arg::At(DEVICE)];
+        c.com(a, l, D3D, D3D7_CREATE_DEVICE, &args)?;
+        let args = [Arg::Val(ENUM_CANCEL), Arg::I(0)];
+        c.com(a, l, DEVICE, DEV7_ENUM_TEXTURE_FORMATS, &args)?;
+        finish(a, l)
+    });
+    let (cpu, path) = run_traced("trace3d_enum", exe, data, true);
+    let r = results(&cpu, data, 9);
+    assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+    let (events, counts) = read_trace(&path);
+    let z: Vec<&String> = events
+        .iter()
+        .filter(|e| e.starts_with("DDRAW.EnumZBufferFormats item "))
+        .collect();
+    assert!(!z.is_empty(), "{events:#?}");
+    assert!(z.iter().all(|e| e.ends_with(" -> OK")), "{z:#?}");
+    assert!(
+        z.iter()
+            .any(|e| e.as_str() == "DDRAW.EnumZBufferFormats item Z16 -> OK"),
+        "{z:#?}"
+    );
+    // The callback stopped the list at its first item.
+    let textures: Vec<&String> = events
+        .iter()
+        .filter(|e| e.starts_with("DDRAW.EnumTextureFormats item "))
+        .collect();
+    assert_eq!(textures.len(), 1, "{events:#?}");
+    assert!(textures[0].ends_with(" -> CANCEL"), "{textures:?}");
+    assert_eq!(counts[textures[0].as_str()], 1);
 }
