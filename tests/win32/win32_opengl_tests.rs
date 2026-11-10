@@ -1642,3 +1642,40 @@ fn lighting_queries_give_back_what_was_set() {
     assert_eq!(r(at[3]), GL_INVALID_OPERATION, "glGetLightfv in glBegin");
     assert_eq!(floats(&cpu, data, OUT + 96), [0.0; 4], "nothing written");
 }
+
+#[test]
+fn the_3d_trace_names_opengls_enums_and_counts_its_calls() {
+    let (exe, data) = program(&data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        c.api(a, l, GET_STRING, &[Arg::I(GL_VENDOR)])?;
+        c.api(a, l, ENABLE, &[Arg::I(GL_DEPTH_TEST)])?;
+        c.api(a, l, DEPTH_FUNC, &[Arg::I(GL_LESS)])?;
+        triangle(a, l, &mut c, [1.0, 0.0, 0.0], BOTTOM_LEFT)?;
+        triangle(a, l, &mut c, [0.0, 1.0, 0.0], TOP_RIGHT)?;
+        finish(a, l)
+    });
+    let mut cpu = machine("trace3d", true, exe);
+    let path = PathBuf::from("target/test_win32_opengl/trace3d/t.trace");
+    rust_dos::win32::trace3d::start(&mut cpu, &path).unwrap();
+    run_until_done(&mut cpu, data);
+    rust_dos::win32::trace3d::flush(&mut cpu);
+    let (events, counts) = super::win32_d3d_tests::read_trace(&path);
+    let event = |start: &str| super::win32_d3d_tests::event(&events, &counts, start);
+    let choose = event("GDI32.ChoosePixelFormat pfd[").0;
+    // PFD_DRAW_TO_WINDOW, PFD_SUPPORT_OPENGL and PFD_DOUBLEBUFFER.
+    let start = "GDI32.ChoosePixelFormat pfd[flags=0x25 ";
+    assert!(choose.starts_with(start), "{choose}");
+    assert!(choose.ends_with("] = 2"), "{choose}");
+    let calls = [
+        ("OPENGL32.glGetString(VENDOR) = \"3Dfx Interactive Inc.\"", 1),
+        ("OPENGL32.glEnable(DEPTH_TEST)", 1),
+        ("OPENGL32.glDepthFunc(LESS)", 1),
+        ("OPENGL32.glBegin(TRIANGLES)", 2),
+        ("OPENGL32.glVertex2f", 6),
+        ("OPENGL32.glEnd", 2),
+    ];
+    for (call, n) in calls {
+        assert_eq!(event(call), (call, n));
+    }
+}

@@ -4608,6 +4608,146 @@ fn a_program_loads_and_frees_msvcrt_without_importing_it() {
     );
 }
 
+/// MSVCRT's run-time type information and `exception`, as Visual C++ 6's
+/// MSVCRT.DLL has them (the values a probe read on it): type_info::name
+/// undecorates the type's name once and keeps it, __RTtypeid and
+/// __RTDynamicCast follow the object's complete object locator, the
+/// exception constructor keeps a copy of its message for what(), with
+/// the vtable the DLL exports, and __unDName undecorates a function, but
+/// returns 0 without an allocator, even with a buffer.
+#[test]
+fn msvcrt_has_rtti_and_the_exception_class() {
+    let crt: &[&str] = &[
+        "?name@type_info@@QBEPBDXZ",
+        "__RTtypeid",
+        "__RTDynamicCast",
+        "??0exception@@QAE@ABQBD@Z",
+        "?what@exception@@UBEPBDXZ",
+        "??_7exception@@6B@",
+        "__unDName",
+        "strcmp",
+        "malloc",
+        "free",
+    ];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.DLL", crt)];
+    let mut data = vec![0; 0x160];
+    put(&mut data, 0x00, b"?f@@YAXH@Z\0");
+    put(&mut data, 0x10, b"void __cdecl f(int)\0");
+    put(&mut data, 0x30, b"class T<int>\0");
+    put(&mut data, 0x40, b"hello\0");
+    // Type descriptors: no vtable, an empty cache, the decorated name.
+    put(&mut data, 0xA8, b".?AV?$T@H@@\0");
+    put(&mut data, 0xC0, b".?AVD@@\0");
+    put(&mut data, 0xD0, b".?AVB@@\0");
+    put(&mut data, 0xE0, b".?AVU@@\0");
+    // D derives from B: the base class descriptors of D and B (the type,
+    // the bases it contains, where it is (0, -1, 0), its attributes) at
+    // E8h and 100h, their array at 118h, the hierarchy at 120h, the
+    // locator at 130h, D's vtable at 148h after a pointer to the locator,
+    // and a D at 150h. The program fills in the pointers.
+    put(&mut data, 0xEC, &1u32.to_le_bytes());
+    put(&mut data, 0xF4, &u32::MAX.to_le_bytes());
+    put(&mut data, 0x10C, &u32::MAX.to_le_bytes());
+    put(&mut data, 0x128, &2u32.to_le_bytes());
+    const TD_T: u32 = 0xA0;
+    const TD_D: u32 = 0xB8;
+    const TD_B: u32 = 0xC8;
+    const TD_U: u32 = 0xD8;
+    const OBJECT: u32 = 0x150;
+    let pointers: &[(u32, u32)] = &[
+        (0xE8, TD_D),
+        (0x100, TD_B),
+        (0x118, 0xE8),
+        (0x11C, 0x100),
+        (0x12C, 0x118),
+        (0x13C, TD_D),
+        (0x140, 0x120),
+        (0x144, 0x130),
+        (OBJECT, 0x148),
+        (0x48, 0x40),
+    ];
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        use Arg::I;
+        let c = |name: &str| l.import(crt.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| I(l.at(offset) as u32);
+        for &(offset, to) in pointers {
+            a.mov(dword_ptr(l.at(offset)), l.at(to) as i32)?;
+        }
+        a.xor(ebx, ebx)?;
+        // The name, then the same pointer again.
+        a.mov(ecx, l.at(TD_T) as u32)?;
+        a.call(c("?name@type_info@@QBEPBDXZ"))?;
+        a.mov(esi, eax)?;
+        call_with(a, c("strcmp"), &[Arg::Esi, at(0x30)])?;
+        a.add(esp, 8)?;
+        a.test(eax, eax)?;
+        check(a, false, 0)?;
+        a.mov(ecx, l.at(TD_T) as u32)?;
+        a.call(c("?name@type_info@@QBEPBDXZ"))?;
+        a.cmp(eax, esi)?;
+        check(a, false, 1)?;
+        // typeid of the D, and casts of it from B to D and to U.
+        call_with(a, c("__RTtypeid"), &[at(OBJECT)])?;
+        a.add(esp, 4)?;
+        a.cmp(eax, l.at(TD_D) as u32)?;
+        check(a, false, 2)?;
+        let cast = |to: u32| [at(OBJECT), I(0), at(TD_B), at(to), I(0)];
+        call_with(a, c("__RTDynamicCast"), &cast(TD_D))?;
+        a.add(esp, 20)?;
+        a.cmp(eax, l.at(OBJECT) as u32)?;
+        check(a, false, 3)?;
+        call_with(a, c("__RTDynamicCast"), &cast(TD_U))?;
+        a.add(esp, 20)?;
+        a.test(eax, eax)?;
+        check(a, false, 4)?;
+        // exception("hello"): what() and the vtable.
+        a.mov(ecx, l.at(0x50) as u32)?;
+        call_with(a, c("??0exception@@QAE@ABQBD@Z"), &[at(0x48)])?;
+        a.mov(ecx, l.at(0x50) as u32)?;
+        a.call(c("?what@exception@@UBEPBDXZ"))?;
+        a.mov(esi, eax)?;
+        call_with(a, c("strcmp"), &[Arg::Esi, at(0x40)])?;
+        a.add(esp, 8)?;
+        a.test(eax, eax)?;
+        check(a, false, 5)?;
+        a.mov(eax, c("??_7exception@@6B@"))?;
+        a.cmp(eax, dword_ptr(l.at(0x50)))?;
+        check(a, false, 6)?;
+        // __unDName(buffer, name, 64, NULL, NULL, 0) is 0, then
+        // __unDName(buffer, name, 64, malloc, free, 0) the buffer.
+        call_with(
+            a,
+            c("__unDName"),
+            &[at(0x60), at(0x00), I(64), I(0), I(0), I(0)],
+        )?;
+        a.add(esp, 24)?;
+        a.mov(edi, eax)?;
+        a.push(0)?;
+        a.push(c("free"))?;
+        a.push(c("malloc"))?;
+        a.push(64)?;
+        a.push(l.at(0x00) as i32)?;
+        a.push(l.at(0x60) as i32)?;
+        a.call(c("__unDName"))?;
+        a.add(esp, 24)?;
+        call_with(a, c("strcmp"), &[at(0x60), at(0x10)])?;
+        a.add(esp, 8)?;
+        a.or(eax, edi)?;
+        check(a, false, 7)?;
+        a.mov(eax, ebx)?;
+        a.xor(eax, 0x55)?;
+        a.ret()
+    });
+    let (code, text) = run_files("msvcrt_rtti", &[("T.EXE", exe)]);
+    assert_eq!(
+        code ^ 0x55,
+        0xFF,
+        "the checks that failed: {:08b}, {}",
+        !(code ^ 0x55),
+        text
+    );
+}
+
 /// The last FreeLibrary of MSVCRT.DLL, as a probe measured it on Windows
 /// 98 SE. A stream left open isn't flushed and its file stays open, so
 /// its handle still works and a load of a file with no sharing fails.

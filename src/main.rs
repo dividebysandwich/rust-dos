@@ -264,6 +264,10 @@ fn main() -> Result<ExitCode, String> {
         .deterministic
         .then(|| rust_dos::deterministic::Deterministic::new(args.start_time.unwrap_or_else(rust_dos::deterministic::default_start)));
     let mut cpu = create_cpu(&args, &config, memory_mb)?;
+    if let Some(path) = &args.trace_3d {
+        rust_dos::win32::trace3d::start(&mut cpu, path)
+            .map_err(|e| format!("The 3D trace can't be written to {}: {}", path.display(), e))?;
+    }
     apply_keyboard_layout(&mut cpu, settings.keyboard_layout);
     for warning in rust_dos::hardware::configure(&mut cpu, &settings, sdl_keys::detect_layout()) {
         config_warning(&mut cpu, &warning);
@@ -2348,6 +2352,7 @@ fn shut_down(
 
     // The loops of a program still running get their summaries.
     rust_dos::win32::trace::flush(cpu);
+    rust_dos::win32::trace3d::flush(cpu);
     cpu.bus.flush_log();
 
     // The journal ends, and the debug server's clients get what they

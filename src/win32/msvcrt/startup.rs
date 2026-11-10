@@ -1079,8 +1079,8 @@ pub const EH_PROLOG: &[u8] = &[
     0xC3, //                                     ret
 ];
 
-const CXX_EXCEPTION: u32 = 0xE06D_7363;
-const CXX_MAGIC: u32 = 0x1993_0520;
+pub(super) const CXX_EXCEPTION: u32 = 0xE06D_7363;
+pub(super) const CXX_MAGIC: u32 = 0x1993_0520;
 /// FuncInfo's magic numbers: MSVC 6's and the two later ones, which add
 /// fields after those read here. MSVCRT.DLL of Windows 98 knows only the
 /// first and calls terminate() for the others.
@@ -2006,7 +2006,7 @@ pub fn cxx_throw_exception(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     seh::raise_from_call(cpu, 2, CXX_EXCEPTION, 1, &params)
 }
 
-/// Functions with nothing to do: type_info's destructor, _lock, _unlock.
+/// Functions with nothing to do: _lock, _unlock.
 pub fn nothing(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }

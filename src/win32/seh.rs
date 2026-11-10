@@ -897,13 +897,22 @@ pub fn raise_from_call(
     flags: u32,
     params: &[u32],
 ) -> Option<u32> {
+    let esp = cpu.esp().wrapping_add(4 + 4 * args);
+    raise_at(cpu, esp, code, flags, params)
+}
+
+/// Raise the exception from the function the running stub is of, at the
+/// caller's EIP after the call and the stack pointer `esp`: the caller's
+/// after the call, or one below the stub's return address, as a function
+/// it called would raise it. MSVCRT's C++ exceptions have their object
+/// there, which stays while the handlers run.
+pub fn raise_at(cpu: &mut Cpu, esp: u32, code: u32, flags: u32, params: &[u32]) -> Option<u32> {
     let mut ctx = Context::of(cpu);
-    let esp = cpu.esp();
-    ctx.eip = cpu.bus.guest_read_32(esp);
+    ctx.eip = cpu.bus.guest_read_32(cpu.esp());
     if cpu.bus.guest_faulted() {
         return None;
     }
-    ctx.gpr[ESP] = esp + 4 + 4 * args;
+    ctx.gpr[ESP] = esp;
     if let Some(thread) = process(cpu).current_thread_mut() {
         thread.fault.clear();
     }

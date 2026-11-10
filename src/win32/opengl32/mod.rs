@@ -450,6 +450,10 @@ fn missing(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let base = DLL.base + 0x1000;
     let stub = cpu.eip().wrapping_sub(4).wrapping_sub(base) / super::stubs::STUB;
     let id = stub as u16;
+    if super::trace3d::on(cpu) {
+        let name = exports::APIS.get(stub as usize).map_or("?", |a| a.name);
+        super::trace3d::gl_missing(cpu, name);
+    }
     if !state(cpu).logged.contains(&id) {
         state(cpu).logged.push(id);
         let name = exports::APIS.get(stub as usize).map_or("?", |a| a.name);

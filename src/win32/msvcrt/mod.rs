@@ -18,6 +18,7 @@
 //! `CONTS`, run when the program's function returns.
 
 mod apis;
+mod cxx;
 mod format;
 mod io;
 mod math;
@@ -26,6 +27,7 @@ mod startup;
 mod stdio;
 mod string;
 mod time;
+mod undname;
 
 pub(super) use stdio::vsnprintf;
 
@@ -101,6 +103,17 @@ const V_FDS: usize = 38;
 const V_STREAMS: usize = 39;
 const V_THREADS: usize = 40;
 const V_STATE: usize = 41;
+const V_RTTI: usize = 44;
+const V_TYPE_INFO_COL: usize = 45;
+const V_TYPE_INFO_VTABLE: usize = 46;
+const V_EXCEPTION_COL: usize = 47;
+const V_EXCEPTION_VTABLE: usize = 48;
+const V_BAD_CAST_COL: usize = 49;
+const V_BAD_CAST_VTABLE: usize = 50;
+const V_BAD_TYPEID_COL: usize = 51;
+const V_BAD_TYPEID_VTABLE: usize = 52;
+const V_NON_RTTI_COL: usize = 53;
+const V_NON_RTTI_VTABLE: usize = 54;
 
 const fn var(name: &'static str, ordinal: u16, size: u32) -> Var {
     Var {
@@ -164,6 +177,21 @@ static VARS: &[Var] = &[
     // changes it in one go, so the first stays 0.
     var("__setlc_active", 131, 4),
     var("__unguarded_readlc_active", 138, 4),
+    // The C++ classes' type descriptors, hierarchies and throw
+    // information (cxx.rs), then each class's vtable after a word that
+    // points to its complete object locator: type_info's, which isn't
+    // exported, and the exception classes'.
+    var("rtti", 0, cxx::RTTI_SIZE),
+    var("type_info locator", 0, 8),
+    var("type_info vtable", 0, 4),
+    var("exception locator", 0, 8),
+    var("??_7exception@@6B@", 26, 8),
+    var("bad_cast locator", 0, 8),
+    var("??_7bad_cast@@6B@", 24, 8),
+    var("bad_typeid locator", 0, 8),
+    var("??_7bad_typeid@@6B@", 25, 8),
+    var("__non_rtti_object locator", 0, 8),
+    var("??_7__non_rtti_object@@6B@", 23, 8),
 ];
 
 /// The places in the `state` variable: the application type, the
@@ -551,6 +579,7 @@ static CONTS: &[call::Then] = &[
     string::lfind_returned,
     startup::spawned,
     startup::cxx_returned,
+    cxx::undname_allocated,
 ];
 
 const C_INITTERM: u32 = 0;
@@ -564,6 +593,7 @@ const C_UNWOUND: u32 = 7;
 const C_LFIND: u32 = 8;
 const C_SPAWNED: u32 = 9;
 const C_CXX: u32 = 10;
+const C_UNDNAME: u32 = 11;
 
 /// Call the program's function at `target` with `args`; when it returns,
 /// `CONTS[cont]` runs with the call, whose data is `data` after the
@@ -822,6 +852,7 @@ fn init(bus: &mut Bus, process: &mut super::Process) -> Option<()> {
     w.bytes(var_at(V_HUGE), &f64::INFINITY.to_le_bytes())?;
     w.u32(state_at(S_ATEXIT), 0)?;
     w.u32(state_at(S_MBCP), 1252)?;
+    cxx::init(&mut w)?;
 
     // The command line, the program's path, the arguments and the
     // environment.

@@ -1399,6 +1399,84 @@ whichever process runs, and the read changes nothing in the machine. A
 surface on the 3dfx card has no picture here; `/api/screenshot` shows
 the card's.
 
+### What a program asks of DirectDraw, Direct3D and OpenGL
+
+`--trace-3d FILE` writes what Win32 programs ask of the built-in
+DirectDraw, Direct3D 3 to 8 and OpenGL: each event the first time it
+comes, numbered in order, to `FILE`, and every event with the number of
+times it came to `FILE.counts`. It answers which states, formats and
+calls a game uses, and what a change made a game do differently.
+
+```sh
+rust-dos --config giants.conf --trace-3d giants.trace
+```
+
+Lines from Giants: Citizen Kabuto's menu:
+
+```
+    38 DDRAW.EnumZBufferFormats item Z16 -> OK
+    39 DDRAW.EnumZBufferFormats item Z16 -> CANCEL
+    40 DDRAW.IDirectDraw_CreateSurface [800x600 Z16 VIDEOMEMORY|ZBUFFER] made [800x600 Z16 VIDEOMEMORY|ZBUFFER|LOCALVIDMEM] = OK
+    41 DDRAW.Surface_AddAttachedSurface [800x600 R5G6B5 BACKBUFFER|COMPLEX|FLIP|3DDEVICE|VIDEOMEMORY|LOCALVIDMEM] gets [800x600 Z16 VIDEOMEMORY|ZBUFFER|LOCALVIDMEM] = OK
+   109 DDRAW.IDirect3DDevice7_SetRenderState(ZENABLE,USEW) = OK
+   211 draw v7 fvf=XYZRHW|DIFFUSE|TEX1 z=USEW,0,LESSEQUAL alphatest=0,GREATER blend=1,SRCALPHA,INVSRCALPHA,0 fog=0,LINEAR,NONE,0 specular=0 stencil=0 lighting=0/2 vertexblend=DISABLE,0 clipplanes=0 wrap0=0 pointsprite=0 zbias=0 | s0 tex=1 c=MODULATE(TEXTURE,TFACTOR) a=MODULATE(TEXTURE,TFACTOR) tci=0 ttf=DISABLE
+```
+
+`FILE.counts` has a line for each event, its count and a tab before it,
+in the same order. It is written every two seconds of the host's time
+while events come, and when the emulator stops, so quit with `POST
+/api/control/quit` or the window rather than by killing the process.
+
+```
+147756	draw v7 fvf=XYZRHW|DIFFUSE|TEX1 z=USEW,0,LESSEQUAL ...
+139469	DDRAW.IDirect3DDevice7_SetRenderState(FOGTABLEMODE,LINEAR) = OK
+```
+
+The events:
+
+- A call of DDRAW, D3D8, OPENGL32 or GLU32, as `MODULE.Function`, with
+  the arguments that say what was asked and the result: `OK`, an
+  HRESULT, or `-` for a function that calls the program back before it
+  returns. Render and texture stage states, their values, formats,
+  primitive types, vertex formats (`XYZ|NORMAL|TEX1`, or `TLVERTEX` for
+  IDirect3DDevice2's vertex types) and OpenGL's enums have their names
+  without the API's prefix. Other numbers are decimal, or hexadecimal
+  from 0x10000. CreateSurface has the description asked for and the
+  surface made; AddAttachedSurface, DeleteAttachedSurface,
+  SetRenderTarget and Clear name each surface involved by its size,
+  format and caps, and blits by format and caps. Calls polled every
+  frame (Lock, GetRenderState) have only their result.
+- What an enumeration offered the program's callback, and what the
+  callback returned: `DDRAW.EnumZBufferFormats item Z16 -> OK`. `CANCEL`
+  stopped the list there. These cover DirectDrawEnumerate,
+  EnumDisplayModes, EnumSurfaces, EnumAttachedSurfaces, and Direct3D's
+  EnumDevices, EnumTextureFormats and EnumZBufferFormats.
+- KERNEL32's LoadLibrary, GetModuleHandle and GetProcAddress of 3D DLLs
+  and functions, with whether they were found; GDI32's pixel format
+  calls with the PIXELFORMATDESCRIPTOR asked for.
+- `OPENGL32 not implemented: NAME`, a function OPENGL32 doesn't have.
+- `EXECUTE STATERENDER(...)`, `STATELIGHT` and `STATETRANSFORM`: the
+  states an execute buffer set (Direct3D 3 to 5).
+- `draw` and `process`: the states a draw, or a ProcessVertices, used:
+  the device's version (`v8` for OpenGL too, whose draws go to the same
+  pipeline as Direct3D 8's), the vertex format, `z=` (ZENABLE,
+  ZWRITEENABLE, ZFUNC), `alphatest=` (enable, function), `blend=`
+  (enable, source, destination, BLENDOP), `fog=` (enable, table mode,
+  vertex mode, range fog), `specular=`, `stencil=`, `lighting=` (LIGHTING
+  and the number of lights on), `vertexblend=` (VERTEXBLEND,
+  INDEXEDVERTEXBLENDENABLE), `clipplanes=`, `wrap0=`, `pointsprite=` and
+  `zbias=`, then each texture stage up to the first disabled one:
+  whether it has a texture, the color and alpha operations with their
+  arguments, the texture coordinate index and the transform flags. Each
+  different set of states is one line in `FILE`; its count is the number
+  of draws that used it.
+
+The trace only reads the machine: a run with it reaches the same
+emulated state at the same emulated time as one without. It takes host
+time for every call, so leave it off for timing measurements. To see
+what changed between two builds, run both with the same deterministic
+script and compare their counts files.
+
 ## 5. Addresses
 
 Addresses are always hex, as in DEBUG.COM:

@@ -236,6 +236,21 @@ SetUnhandledExceptionFilter gets its say (`seh.rs`). MSVC's
 `_except_handler3` and C++ exceptions run as the program's own code on
 top of that.
 
+MSVCRT also has the C++ classes and run-time type information of Visual
+C++ 6's runtime (`msvcrt/cxx.rs`): `exception`, `bad_cast`,
+`bad_typeid` and `__non_rtti_object` with their exported vtables,
+`type_info`, and `__RTDynamicCast`, `__RTtypeid` and `__RTCastToVoid`,
+which walk the program's complete object locators and class
+hierarchies. The exceptions they throw are raised as
+`_CxxThrowException` raises them, with the object below the caller's
+return address, so the program's catch blocks take them. The type
+descriptors, hierarchies and throw information of the runtime's own
+classes are in the DLL's data section. `type_info::name` and
+`__unDName` undecorate names with a port of Wine's `undname.c` (LGPL
+2.1 or later), with the spacing and the names Microsoft's undecorator
+of Visual C++ 6 gives and gives up on (`msvcrt/undname.rs`, tested
+against that DLL's results in `undname_vc6.txt`).
+
 ## Files, registry and version
 
 - Paths go to `DiskController`'s drives, so a program sees the same C:

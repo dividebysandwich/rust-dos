@@ -120,6 +120,12 @@ pub(crate) struct Args {
     #[arg(long, value_name = "FILE")]
     pub(crate) profile: Option<std::path::PathBuf>,
 
+    /// Write what Windows programs ask of DirectDraw, Direct3D and OpenGL
+    /// to FILE, each call or state the first time it comes, and all of
+    /// them with their counts to FILE.counts (docs/llm-debugging.md)
+    #[arg(long, value_name = "FILE")]
+    pub(crate) trace_3d: Option<std::path::PathBuf>,
+
     /// Samples a second for --profile (10 to 20000)
     #[arg(long, value_name = "HZ", default_value_t = rust_dos::profile::session::DEFAULT_HZ,
           value_parser = clap::value_parser!(u32).range(rust_dos::profile::session::MIN_HZ as i64..=rust_dos::profile::session::MAX_HZ as i64))]
