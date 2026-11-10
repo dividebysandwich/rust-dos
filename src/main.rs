@@ -432,6 +432,17 @@ fn main() -> Result<ExitCode, String> {
             auto_capture.released();
         }};
     }
+    // Whether the program uses the mouse, so that a click captures it:
+    // the INT 33h driver, the PS/2 mouse as Windows has it, a serial
+    // mouse, or the built-in Windows' program steering with it.
+    macro_rules! uses_mouse {
+        () => {
+            cpu.bus.mouse.installed
+                || cpu.bus.mouse.ps2.enabled
+                || cpu.bus.serial.mouse_in_use()
+                || cpu.bus.mouse.moves_by_motion(cpu.bus.clock.now_ns())
+        };
+    }
     // Whether the program follows the mouse driver's cursor, which then
     // decides where the mouse leaves: not with the PS/2 or a serial mouse
     // read by the program itself.
@@ -1167,7 +1178,7 @@ fn main() -> Result<ExitCode, String> {
                     if clipboard.finish(&cpu.bus, display.to_frame(x, y)) {
                         osd.show("Ctrl+Shift+C copies the selected text");
                     } else if !ui.is_open() && !paused {
-                        if cpu.bus.mouse.installed || cpu.bus.mouse.ps2.enabled || cpu.bus.serial.mouse_in_use() {
+                        if uses_mouse!() {
                             capture_mouse!(true);
                             capture_message!(CAPTURED);
                         } else {
@@ -1229,7 +1240,7 @@ fn main() -> Result<ExitCode, String> {
                     // A program using the mouse (the INT 33h driver, or the
                     // BIOS's PS/2 mouse as Windows does) gets it captured by
                     // a click, which it doesn't see, as in DOSBox.
-                    if !mouse_captured && (cpu.bus.mouse.installed || cpu.bus.mouse.ps2.enabled || cpu.bus.serial.mouse_in_use()) {
+                    if !mouse_captured && uses_mouse!() {
                         capture_mouse!(true);
                         capturing_click = Some(mouse_btn);
                         capture_message!(CAPTURED);

@@ -422,16 +422,21 @@ pub fn seen(cpu: &mut Cpu) -> Option<Seen> {
 /// Whether the program steers with the mouse's motion: DirectInput has
 /// the mouse exclusively (`taken`), or it hid the cursor and has the
 /// capture, as games do that put the cursor back in the middle after
-/// each move (Unreal). The host's mouse then moves the emulated one by
-/// its motion (`MouseState::note_steering`); where the host's pointer is
-/// on the picture means nothing to such a program.
+/// each move (Unreal), or it hid the cursor and reads the mouse through
+/// DirectInput without taking it (Adrenix). The host's mouse then moves
+/// the emulated one by its motion (`MouseState::note_steering`); where
+/// the host's pointer is on the picture means nothing to such a program.
 fn steers_with_mouse(cpu: &mut Cpu, taken: bool) -> bool {
     if taken {
         return true;
     }
     let state = user(cpu);
     let input = &state.input;
-    input.cursor_count < 0 && input.capture != 0 && state.is_window(input.capture)
+    if input.cursor_count >= 0 {
+        return false;
+    }
+    input.capture != 0 && state.is_window(input.capture)
+        || crate::win32::dinput::mouse_acquired(cpu)
 }
 
 /// Read the keyboard: whether a key went down since the last read.
@@ -2910,6 +2915,27 @@ mod tests {
         user(&mut other).input.cursor_count = -1;
         poll(&mut other);
         assert!(!other.bus.mouse.in_use(now), "no capture");
+    }
+
+    /// A program that hides the cursor and reads the mouse through
+    /// DirectInput steers with it, whether it took the mouse or not
+    /// (Adrenix acquires it non-exclusively, issue 917); with the cursor
+    /// showing, a non-exclusive mouse doesn't steer.
+    #[test]
+    fn a_hidden_cursor_with_a_directinput_mouse_steers_with_the_mouse() {
+        use crate::win32::dinput::{self, DISCL_FOREGROUND, DISCL_NONEXCLUSIVE};
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let now = cpu.bus.clock.now_ns();
+        dinput::acquired_mouse(&mut cpu, DISCL_NONEXCLUSIVE | DISCL_FOREGROUND);
+        poll(&mut cpu);
+        assert!(!cpu.bus.mouse.in_use(now), "the cursor shows");
+        user(&mut cpu).input.cursor_count = -1;
+        poll(&mut cpu);
+        assert!(cpu.bus.mouse.in_use(now) && cpu.bus.mouse.moves_by_motion(now));
+        let mut other = Cpu::new(std::path::PathBuf::from("."));
+        user(&mut other).input.cursor_count = -1;
+        poll(&mut other);
+        assert!(!other.bus.mouse.in_use(now), "no DirectInput mouse");
     }
 
     /// A window shown under the cursor gets a WM_MOUSEMOVE where the

@@ -38,7 +38,7 @@ mod objects;
 mod poll;
 
 pub use enumerate::step;
-pub use poll::{key, mouse_taken, poll};
+pub use poll::{key, mouse_acquired, mouse_taken, poll};
 
 use super::com::{
     self, CLASS_E_NOAGGREGATION, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, Guid,
@@ -485,12 +485,16 @@ impl State {
     /// Whether a device has the mouse exclusively: USER32 then leaves it
     /// alone, and Windows hides the cursor.
     pub fn mouse_taken(&self) -> bool {
+        self.mouse_acquired(device::DISCL_EXCLUSIVE)
+    }
+
+    /// Whether a device has the mouse acquired with all of `coop`'s
+    /// cooperative level flags.
+    pub fn mouse_acquired(&self, coop: u32) -> bool {
         self.objects
             .iter()
             .filter_map(|o| o.as_ref()?.device.as_ref())
-            .any(|d| {
-                d.kind == objects::MOUSE && d.acquired && d.coop & device::DISCL_EXCLUSIVE != 0
-            })
+            .any(|d| d.kind == objects::MOUSE && d.acquired && d.coop & coop == coop)
     }
 
     /// The devices, with their ids.
@@ -505,6 +509,22 @@ impl State {
 fn state(cpu: &mut Cpu) -> &mut State {
     &mut cpu.bus.win32.dinput
 }
+
+/// A mouse device acquired at the cooperative level `coop`, for tests
+/// of what reads the devices.
+#[cfg(test)]
+pub fn acquired_mouse(cpu: &mut Cpu, coop: u32) {
+    let mut device = device::Device::new(0, objects::MOUSE, (0, 0));
+    device.coop = coop;
+    device.acquired = true;
+    state(cpu).add(Object {
+        device: Some(device),
+        ..Object::default()
+    });
+}
+
+#[cfg(test)]
+pub use device::{DISCL_FOREGROUND, DISCL_NONEXCLUSIVE};
 
 fn dll_index() -> usize {
     super::stubs::DLLS
