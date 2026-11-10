@@ -100,10 +100,11 @@ not merged). The Voodoo3 HAL reports a W buffer today, so each
 Direct3D game was run twice, with that capability shown and hidden.
 
 The traces found gaps in the built-in Windows that stopped or spoiled
-some of the games on any card. Five were fixed the same day, and the
+some of the games on any card. Six were fixed the same day, and the
 text below says where a result predates its fix: `ReBaseImage` (#869),
 `_EH_prolog` (#870), blits from DXT surfaces (#871), vertex blending in
-Direct3D 8 (#872) and a Z buffer on a texture target (#877).
+Direct3D 8 (#872), a Z buffer on a texture target (#877) and the C++
+run-time type information of MSVCRT (#879).
 
 What the runs reached:
 
@@ -111,7 +112,7 @@ What the runs reached:
 |---|---|---|
 | Giants | gameplay, mission 1 | |
 | No One Lives Forever | gameplay, started from `LITHTECH.EXE` | `NOLF.EXE` is SafeDisc 2 (#889) |
-| Max Payne | gameplay, the tutorial | needs its own MSVCRT (#879) |
+| Max Payne | gameplay, the tutorial, traced with its own MSVCRT before #879 was fixed | |
 | Oni | gameplay, the training level | |
 | Zanzarah | the 3D title scene; gameplay in the Fairy Garden with the closed fixes of #593 and #613 applied locally | #583 |
 | Grom | initialisation | #645 |
@@ -212,8 +213,8 @@ What that changes in the design:
   code of Windows 98's VMM that the built-in Windows doesn't have
   (#889). On a booted Windows 98 the same executable passes its disc
   check, so the game's needs wait for the Windows 98 driver of phase 6.
-- Still open and unrelated to the card: Max Payne on the built-in
-  MSVCRT (#879) and InstallShield 6 setups (#875).
+- Still open and unrelated to the card: InstallShield 6 setups (#875).
+  Max Payne runs on the built-in MSVCRT since #879.
 
 ## Precedents
 
