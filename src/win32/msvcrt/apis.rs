@@ -1,7 +1,7 @@
 //! MSVCRT's functions: all cdecl, ordinals from 1 in the order they
 //! were added. Append only (see `stubs`).
 
-use super::{io, math, mbcs, startup, stdio, string, time};
+use super::{cxx, io, math, mbcs, startup, stdio, string, time};
 use crate::win32::stubs::{self, Api, Conv, Handler};
 
 const fn cdecl(name: &'static str, ordinal: u16, args: u8, handler: Handler) -> Api {
@@ -10,6 +10,18 @@ const fn cdecl(name: &'static str, ordinal: u16, args: u8, handler: Handler) -> 
         ordinal,
         args,
         conv: Conv::Cdecl,
+        handler,
+    }
+}
+
+/// A member function: `this` in ECX, and its arguments, which it takes
+/// off the stack.
+const fn thiscall(name: &'static str, ordinal: u16, args: u8, handler: Handler) -> Api {
+    Api {
+        name,
+        ordinal,
+        args,
+        conv: Conv::Stdcall,
         handler,
     }
 }
@@ -77,7 +89,7 @@ pub static APIS: &[Api] = &[
     cdecl("raise", 678, 1, startup::raise),
     cdecl("__CxxFrameHandler", 74, 4, startup::cxx_frame_handler),
     cdecl("_CxxThrowException", 66, 2, startup::cxx_throw_exception),
-    cdecl("??1type_info@@UAE@XZ", 14, 0, startup::nothing),
+    cdecl("??1type_info@@UAE@XZ", 14, 0, cxx::type_info_destroy),
     cdecl("_lock", 318, 1, startup::nothing),
     cdecl("_unlock", 480, 1, startup::nothing),
     cdecl("_beginthread", 166, 3, startup::beginthread),
@@ -557,4 +569,102 @@ pub static APIS: &[Api] = &[
         conv: Conv::Code(startup::EH_PROLOG),
         handler: stubs::never_a_trap,
     },
+    // The C++ classes and run-time type information (cxx.rs).
+    thiscall("?name@type_info@@QBEPBDXZ", 41, 0, cxx::type_info_name),
+    thiscall(
+        "?raw_name@type_info@@QBEPBDXZ",
+        42,
+        0,
+        cxx::type_info_raw_name,
+    ),
+    thiscall("??8type_info@@QBEHABV0@@Z", 21, 1, cxx::type_info_eq),
+    thiscall("??9type_info@@QBEHABV0@@Z", 22, 1, cxx::type_info_ne),
+    thiscall(
+        "?before@type_info@@QBEHABV1@@Z",
+        40,
+        1,
+        cxx::type_info_before,
+    ),
+    thiscall("??_Gtype_info@@UAEPAXI@Z", 0, 1, cxx::type_info_delete),
+    thiscall("??0exception@@QAE@XZ", 9, 0, cxx::exception_new),
+    thiscall("??0exception@@QAE@ABQBD@Z", 7, 1, cxx::exception_with),
+    thiscall("??0exception@@QAE@ABV0@@Z", 8, 1, cxx::exception_copy),
+    thiscall("??1exception@@UAE@XZ", 13, 0, cxx::exception_destroy),
+    thiscall(
+        "??4exception@@QAEAAV0@ABV0@@Z",
+        20,
+        1,
+        cxx::exception_assign,
+    ),
+    thiscall(
+        "??_Eexception@@UAEPAXI@Z",
+        30,
+        1,
+        cxx::exception_vector_delete,
+    ),
+    thiscall("??_Gexception@@UAEPAXI@Z", 34, 1, cxx::exception_delete),
+    thiscall("?what@exception@@UBEPBDXZ", 48, 0, cxx::what),
+    thiscall("??0bad_cast@@QAE@ABQBD@Z", 3, 1, cxx::bad_cast_with),
+    thiscall("??0bad_cast@@QAE@ABV0@@Z", 4, 1, cxx::bad_cast_copy),
+    thiscall("??1bad_cast@@UAE@XZ", 11, 0, cxx::exception_destroy),
+    thiscall("??4bad_cast@@QAEAAV0@ABV0@@Z", 18, 1, cxx::exception_assign),
+    thiscall(
+        "??_Ebad_cast@@UAEPAXI@Z",
+        28,
+        1,
+        cxx::exception_vector_delete,
+    ),
+    thiscall("??_Gbad_cast@@UAEPAXI@Z", 32, 1, cxx::exception_delete),
+    thiscall("??0bad_typeid@@QAE@PBD@Z", 6, 1, cxx::bad_typeid_with),
+    thiscall("??0bad_typeid@@QAE@ABV0@@Z", 5, 1, cxx::bad_typeid_copy),
+    thiscall("??1bad_typeid@@UAE@XZ", 12, 0, cxx::exception_destroy),
+    thiscall(
+        "??4bad_typeid@@QAEAAV0@ABV0@@Z",
+        19,
+        1,
+        cxx::exception_assign,
+    ),
+    thiscall(
+        "??_Ebad_typeid@@UAEPAXI@Z",
+        29,
+        1,
+        cxx::exception_vector_delete,
+    ),
+    thiscall("??_Gbad_typeid@@UAEPAXI@Z", 33, 1, cxx::exception_delete),
+    thiscall("??0__non_rtti_object@@QAE@PBD@Z", 2, 1, cxx::non_rtti_with),
+    thiscall(
+        "??0__non_rtti_object@@QAE@ABV0@@Z",
+        1,
+        1,
+        cxx::non_rtti_copy,
+    ),
+    thiscall(
+        "??1__non_rtti_object@@UAE@XZ",
+        10,
+        0,
+        cxx::exception_destroy,
+    ),
+    thiscall(
+        "??4__non_rtti_object@@QAEAAV0@ABV0@@Z",
+        17,
+        1,
+        cxx::exception_assign,
+    ),
+    thiscall(
+        "??_E__non_rtti_object@@UAEPAXI@Z",
+        27,
+        1,
+        cxx::exception_vector_delete,
+    ),
+    thiscall(
+        "??_G__non_rtti_object@@UAEPAXI@Z",
+        31,
+        1,
+        cxx::exception_delete,
+    ),
+    cdecl("__RTDynamicCast", 77, 5, cxx::rt_dynamic_cast),
+    cdecl("__RTtypeid", 78, 1, cxx::rt_typeid),
+    cdecl("__RTCastToVoid", 76, 1, cxx::rt_cast_to_void),
+    cdecl("__unDName", 136, 6, cxx::undname),
+    cdecl("__unDNameEx", 137, 7, cxx::undname_ex),
 ];
