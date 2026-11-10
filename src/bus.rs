@@ -619,8 +619,12 @@ impl Bus {
     /// the VESA frame buffer, upper memory) reads the same bytes either
     /// way; a Voodoo Graphics' or Voodoo2's window reads no bytes, so
     /// GDI's DIB section on its linear frame buffer (a card surface's DC)
-    /// reads its pixels this way.
+    /// reads its pixels this way. A Banshee's or Voodoo3's memory through
+    /// BAR1 is read in one copy (`read_from_voodoo`).
     fn read_mapped(&self, addr: usize, data: &mut [u8]) {
+        if self.read_from_voodoo(addr, data) {
+            return;
+        }
         let mut i = 0;
         while i < data.len() {
             let at = addr.wrapping_add(i);
@@ -640,8 +644,13 @@ impl Bus {
     /// writes to its window, so GDI's drawing on a card surface's DC has
     /// to go in words and dwords. The aligned dwords between the head and
     /// the tail go into the 3dfx card in one call where they can
-    /// (`write_to_voodoo`).
+    /// (`write_to_voodoo`). A Banshee's or Voodoo3's memory through BAR1
+    /// takes all of it in one copy, head and tail too
+    /// (`bytes_to_voodoo`).
     fn write_mapped(&mut self, addr: usize, data: &[u8]) {
+        if self.bytes_to_voodoo(addr, data) {
+            return;
+        }
         let head = (addr.wrapping_neg() & 3).min(data.len());
         let body = (data.len() - head) & !3;
         self.write_accesses(addr, &data[..head]);
