@@ -474,6 +474,15 @@ pub(super) fn search(cpu: &mut Cpu, dirs: Option<&str>, name: &str) -> Option<St
         .find(|full| cpu.bus.disk.is_file(&dos_path(full)))
 }
 
+/// Add `extension` to the path `name` if its file name has none, as
+/// SearchPathA does.
+pub(super) fn add_extension(name: &mut String, extension: &str) {
+    let file = name.rsplit(['\\', '/']).next().unwrap_or("");
+    if !file.contains('.') {
+        name.push_str(extension);
+    }
+}
+
 /// SearchPathA(path, name, extension, size, buffer, filepart): the full
 /// path of the file `name`, with `extension` added if it has none, in
 /// the directories of `path`, or where `search_directories` says.
@@ -493,10 +502,7 @@ pub(super) fn search_path(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let mut name = string_at(cpu, name)?;
     if extension != 0 {
         let extension = string_at(cpu, extension)?;
-        let file = name.rsplit(['\\', '/']).next().unwrap_or("");
-        if !file.contains('.') {
-            name.push_str(&extension);
-        }
+        add_extension(&mut name, &extension);
     }
     match search(cpu, dirs.as_deref(), &name) {
         Some(full) => put_path(cpu, buffer, size, filepart, &full),

@@ -350,18 +350,22 @@ const NOT_AN_IMAGE: u32 = 0;
 /// What an image's place in the address space is rounded to.
 const ALLOCATION_GRANULARITY: u32 = 0x1_0000;
 
-/// Where ReBaseImage puts what it gives back.
-struct Outputs {
-    old_size: u32,
-    old_base: u32,
-    new_size: u32,
-    new_base: u32,
+/// What a ReBaseImage call asks for: whether to move the file or only
+/// work out where it goes, and which way; the time stamp; the base it
+/// goes to (or below); and where the old size, old base, new size and
+/// new base go.
+struct Request {
+    rebase: bool,
+    going_down: bool,
+    stamp: u32,
+    target: u32,
+    outputs: [u32; 4],
 }
 
 /// ReBaseImage(name, symbol path, rebase, system files too, going down,
 /// most size, old size, old base, new size, new base, time stamp): move
 /// the PE file `name` to a new image base, as Windows 98 SE's IMAGEHLP
-/// does: the program of `tests/win32/win32_imagehlp_tests.rs` gave the
+/// does: the programs of `tests/win32/win32_imagehlp_tests.rs` gave the
 /// results those tests expect on a booted Windows 98 SE, and left the
 /// same files. The file is found as MapAndLoad finds it, with
 /// SearchPathA's directories and ".EXE" added to a name without an
@@ -372,23 +376,27 @@ struct Outputs {
 /// it isn't 0, and the checksum CheckSumMappedFile gives. A file that is
 /// where it is to go stays as it is.
 ///
-/// What it gives back: the old size and base and the new size once the
-/// file is read as a PE image, and the new base once it is worked out:
-/// the image's new base when it goes down, and the address after it when
-/// it goes up, for the next image. Without `rebase` only the sizes and
-/// the old base are worked out, and the file is opened for reading
-/// alone. A file without base relocations can't be moved and fails with
-/// ERROR_INVALID_ADDRESS. Windows 98 SE moves a file whose header says
-/// IMAGE_FILE_SYSTEM even when `system files too` is FALSE, and one
-/// larger than `most size`; .DBG files on the symbol path aren't
-/// updated. The last error is 0 when it succeeds.
+/// `*new_base` is read first: a NULL `new_base` faults, and a base that
+/// isn't a multiple of 64 KB fails with ERROR_INVALID_ADDRESS. The old
+/// size and base and the new size are written once the file is read as
+/// a PE image, and the new base once it is worked out: the image's new
+/// base when it goes down, and the address after it when it goes up, for
+/// the next image. A NULL for one of those faults only when it is
+/// written. Without `rebase` only the sizes and the old base are worked
+/// out, and the file is opened for reading alone. A file without base
+/// relocations can't be moved and fails with ERROR_INVALID_ADDRESS.
+/// Windows 98 SE moves a file whose header says IMAGE_FILE_SYSTEM even
+/// when `system files too` is FALSE, and one larger than `most size`;
+/// .DBG files on the symbol path aren't updated. The last error is 0 when
+/// it succeeds.
 ///
 /// The built-in DLLs' files in the system directory are read-only, so
-/// moving one fails with ERROR_ACCESS_DENIED. MDK2 moves OPENGL32.DLL
-/// (to just below 64500000h) before it loads it: on Windows 98 that is
-/// the system's OPENGL32.DLL; here the built-in one, which isn't loaded
-/// from its file, can't be moved, and the game goes on, as it ignores
-/// the result.
+/// moving one fails with ERROR_ACCESS_DENIED, and a file a process has
+/// loaded can't be written, which fails with ERROR_SHARING_VIOLATION.
+/// MDK2 moves OPENGL32.DLL (to just below 64500000h) before it loads it:
+/// on Windows 98 that is the system's OPENGL32.DLL; here the built-in
+/// one, which isn't loaded from its file, can't be moved, and the game
+/// goes on, as it ignores the result.
 fn rebase_image(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[
         name,
@@ -406,112 +414,108 @@ fn rebase_image(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     else {
         unreachable!()
     };
-    for out in [old_size, old_base, new_size, new_base] {
-        if !cpu.bus.guest_probe(out, 4, true) {
-            return None;
-        }
+    if !cpu.bus.guest_probe(new_base, 4, false) {
+        return None;
     }
-    let mut name = if name == 0 {
+    let request = Request {
+        rebase: rebase != 0,
+        going_down: going_down != 0,
+        stamp,
+        target: cpu.bus.guest_read_32(new_base),
+        outputs: [old_size, old_base, new_size, new_base],
+    };
+    let name = if name == 0 {
         String::new()
     } else {
         super::user32::string_at(cpu, name)?
     };
-    let file = name.rsplit(['\\', '/']).next().unwrap_or("");
-    if !file.contains('.') {
-        name.push_str(".EXE");
-    }
-    let outputs = Outputs {
-        old_size,
-        old_base,
-        new_size,
-        new_base,
-    };
-    let done = match super::kernel32::search_file(cpu, &name) {
-        Some(full) => rebase_path(cpu, &full, rebase != 0, going_down != 0, stamp, &outputs),
-        None => Err(ERROR_FILE_NOT_FOUND),
+    let done = if !request.target.is_multiple_of(ALLOCATION_GRANULARITY) {
+        Err(ERROR_INVALID_ADDRESS)
+    } else {
+        match super::kernel32::search_file_with_extension(cpu, &name, ".EXE") {
+            Some(full) => rebase_path(cpu, &full, &request)?,
+            None => Err(ERROR_FILE_NOT_FOUND),
+        }
     };
     process(cpu).last_error = done.err().unwrap_or(0);
     Some(done.is_ok() as u32)
 }
 
-/// ReBaseImage on the file at the full path `full`.
-fn rebase_path(
-    cpu: &mut Cpu,
-    full: &str,
-    rebase: bool,
-    going_down: bool,
-    stamp: u32,
-    outputs: &Outputs,
-) -> Result<(), u32> {
-    use super::kernel32::{open_handle, read_file, seek_file, write_file};
-    let access = if rebase {
+/// ReBaseImage on the file at the full path `full`: done, or the error.
+/// None if writing what it gives back faults.
+fn rebase_path(cpu: &mut Cpu, full: &str, request: &Request) -> Option<Result<(), u32>> {
+    let access = if request.rebase {
         GENERIC_READ | GENERIC_WRITE
     } else {
         GENERIC_READ
     };
-    let handle = open_handle(cpu, full, access, FILE_SHARE_READ, OPEN_EXISTING)?;
-    let mut done = || -> Result<(), u32> {
-        let mut file = Vec::new();
-        loop {
-            let bytes = read_file(cpu, handle, 0x8000)?;
-            if bytes.is_empty() {
-                break;
-            }
-            file.extend(bytes);
-        }
-        let Some(moved) = moved_file(cpu, file, rebase, going_down, stamp, outputs)? else {
-            return Ok(());
+    let handle =
+        match super::kernel32::open_handle(cpu, full, access, FILE_SHARE_READ, OPEN_EXISTING) {
+            Ok(handle) => handle,
+            Err(error) => return Some(Err(error)),
         };
-        seek_file(cpu, handle, 0, 0)?;
-        for chunk in moved.chunks(0x8000) {
-            write_file(cpu, handle, chunk)?;
-        }
-        Ok(())
-    };
-    let done = done();
+    let done = rebase_open(cpu, handle, request);
     super::object::close(cpu, handle);
     done
 }
 
-/// The PE file `file` moved as ReBaseImage moves it, with what it gives
-/// back written to `outputs`; None if it stays as it is.
-fn moved_file(
-    cpu: &mut Cpu,
-    mut file: Vec<u8>,
-    rebase: bool,
-    going_down: bool,
-    stamp: u32,
-    outputs: &Outputs,
-) -> Result<Option<Vec<u8>>, u32> {
-    let headers = rust_dos_pe::Headers::parse(&file).map_err(|_| NOT_AN_IMAGE)?;
+/// ReBaseImage on the open file `handle`, as `rebase_path`.
+fn rebase_open(cpu: &mut Cpu, handle: u32, request: &Request) -> Option<Result<(), u32>> {
+    use super::kernel32::{read_file, seek_file, write_file};
+    let mut file = Vec::new();
+    loop {
+        match read_file(cpu, handle, 0x8000) {
+            Ok(bytes) if bytes.is_empty() => break,
+            Ok(bytes) => file.extend(bytes),
+            Err(error) => return Some(Err(error)),
+        }
+    }
+    let Ok(headers) = rust_dos_pe::Headers::parse(&file) else {
+        return Some(Err(NOT_AN_IMAGE));
+    };
+    let [old_size, old_base, new_size, new_base] = request.outputs;
     let size = headers
         .size_of_image
         .next_multiple_of(ALLOCATION_GRANULARITY);
-    cpu.bus
-        .guest_write_32(outputs.old_size, headers.size_of_image);
-    cpu.bus.guest_write_32(outputs.old_base, headers.image_base);
-    cpu.bus.guest_write_32(outputs.new_size, size);
-    if !rebase {
-        return Ok(None);
+    for (at, value) in [
+        (old_size, headers.size_of_image),
+        (old_base, headers.image_base),
+        (new_size, size),
+    ] {
+        if !cpu.bus.guest_probe(at, 4, true) {
+            return None;
+        }
+        cpu.bus.guest_write_32(at, value);
+    }
+    if !request.rebase {
+        return Some(Ok(()));
     }
     if !headers.relocatable() {
-        return Err(ERROR_INVALID_ADDRESS);
+        return Some(Err(ERROR_INVALID_ADDRESS));
     }
-    let target = cpu.bus.guest_read_32(outputs.new_base);
-    let (base, next) = if going_down {
-        let base = target.wrapping_sub(size);
+    let (base, next) = if request.going_down {
+        let base = request.target.wrapping_sub(size);
         (base, base)
     } else {
-        (target, target.wrapping_add(size))
+        (request.target, request.target.wrapping_add(size))
     };
-    cpu.bus.guest_write_32(outputs.new_base, next);
-    if base == headers.image_base {
-        return Ok(None);
+    if !cpu.bus.guest_probe(new_base, 4, true) {
+        return None;
     }
-    rust_dos_pe::rebase_file(&mut file, base).map_err(|_| ERROR_BAD_EXE_FORMAT)?;
-    if stamp != 0 {
-        rust_dos_pe::set_time_stamp(&mut file, stamp);
+    cpu.bus.guest_write_32(new_base, next);
+    if base == headers.image_base {
+        return Some(Ok(()));
+    }
+    if rust_dos_pe::rebase_file(&mut file, base).is_err() {
+        return Some(Err(ERROR_BAD_EXE_FORMAT));
+    }
+    if request.stamp != 0 {
+        rust_dos_pe::set_time_stamp(&mut file, request.stamp);
     }
     rust_dos_pe::set_checksum(&mut file);
-    Ok(Some(file))
+    let written = seek_file(cpu, handle, 0, 0).and_then(|_| {
+        file.chunks(0x8000)
+            .try_for_each(|chunk| write_file(cpu, handle, chunk).map(|_| ()))
+    });
+    Some(written)
 }

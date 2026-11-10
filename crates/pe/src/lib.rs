@@ -632,23 +632,13 @@ impl Image {
             return Ok(());
         }
         for Relocation { rva, kind } in self.relocations()? {
-            match kind {
-                REL_HIGHLOW => {
-                    let value = self.u32_at(rva)?;
-                    self.set_u32(rva, value.wrapping_add(delta))?;
-                }
-                REL_HIGH | REL_LOW => {
-                    let value = self.u16_at(rva)?;
-                    let add = if kind == REL_HIGH {
-                        (delta >> 16) as u16
-                    } else {
-                        delta as u16
-                    };
-                    let at = rva as usize;
-                    self.data[at..at + 2].copy_from_slice(&value.wrapping_add(add).to_le_bytes());
-                }
-                _ => return Err(Error::Unsupported(format!("base relocation type {}", kind))),
-            }
+            let width = relocation_width(kind)?;
+            let at = rva as usize;
+            let slot = self
+                .data
+                .get_mut(at..at + width as usize)
+                .ok_or(Error::Truncated("table"))?;
+            apply_relocation(slot, kind, delta);
         }
         self.headers.image_base = base;
         Ok(())
@@ -785,16 +775,50 @@ fn checksum_field(pe: usize) -> usize {
     pe + 4 + 20 + 64
 }
 
+/// How many bytes a base relocation of type `kind` changes: 4 for a
+/// whole address, 2 for its high or low half. Other types aren't ones
+/// 32-bit linkers write.
+fn relocation_width(kind: u8) -> Result<u32> {
+    match kind {
+        REL_HIGHLOW => Ok(4),
+        REL_HIGH | REL_LOW => Ok(2),
+        _ => Err(Error::Unsupported(format!("base relocation type {}", kind))),
+    }
+}
+
+/// Add the part of `delta` that a base relocation of type `kind` adds to
+/// `slot`, the `relocation_width(kind)` bytes it changes.
+fn apply_relocation(slot: &mut [u8], kind: u8, delta: u32) {
+    if kind == REL_HIGHLOW {
+        let value = u32::from_le_bytes(slot.try_into().unwrap()).wrapping_add(delta);
+        slot.copy_from_slice(&value.to_le_bytes());
+    } else {
+        let add = if kind == REL_HIGH {
+            (delta >> 16) as u16
+        } else {
+            delta as u16
+        };
+        let value = u16::from_le_bytes(slot.try_into().unwrap()).wrapping_add(add);
+        slot.copy_from_slice(&value.to_le_bytes());
+    }
+}
+
 /// Where the RVA `rva` and the `width` bytes from it are in the PE file
-/// whose headers are `headers`: in the headers, or in a section's raw
-/// data. None for bytes past a section's raw data (zeros the loader adds)
-/// or past the end of the file, which is `len` bytes long.
+/// whose headers are `headers`: in the headers, or in the raw data of the
+/// first section in the table whose raw data holds them, as IMAGEHLP's
+/// ImageRvaToSection finds it by SizeOfRawData. Raw data past a section's
+/// virtual size counts: the loader maps it too (see `Image::load`). None
+/// for bytes in no section's raw data (zeros the loader adds) or past the
+/// end of the file, which is `len` bytes long.
 fn file_offset(headers: &Headers, rva: u32, width: u32, len: usize) -> Option<usize> {
     let end = rva.checked_add(width)?;
     let at = if end <= headers.size_of_headers {
         rva
     } else {
-        let s = headers.section_at(rva)?;
+        let s = headers
+            .sections
+            .iter()
+            .find(|s| rva >= s.rva && rva - s.rva < s.raw_size)?;
         let offset = rva - s.rva;
         if s.raw_offset == 0 || offset + width > s.raw_size {
             return None;
@@ -816,28 +840,13 @@ pub fn rebase_file(file: &mut [u8], base: u32) -> Result<()> {
     let delta = base.wrapping_sub(headers.image_base);
     let mut fixups = Vec::new();
     for Relocation { rva, kind } in Image::load(file)?.relocations()? {
-        let width = match kind {
-            REL_HIGHLOW => 4,
-            REL_HIGH | REL_LOW => 2,
-            _ => return Err(Error::Unsupported(format!("base relocation type {}", kind))),
-        };
+        let width = relocation_width(kind)?;
         if let Some(at) = file_offset(&headers, rva, width, file.len()) {
-            fixups.push((at, kind));
+            fixups.push((at..at + width as usize, kind));
         }
     }
-    for (at, kind) in fixups {
-        if kind == REL_HIGHLOW {
-            let value = u32_at(file, at).unwrap().wrapping_add(delta);
-            file[at..at + 4].copy_from_slice(&value.to_le_bytes());
-        } else {
-            let add = if kind == REL_HIGH {
-                (delta >> 16) as u16
-            } else {
-                delta as u16
-            };
-            let value = u16_at(file, at).unwrap().wrapping_add(add);
-            file[at..at + 2].copy_from_slice(&value.to_le_bytes());
-        }
+    for (slot, kind) in fixups {
+        apply_relocation(&mut file[slot], kind, delta);
     }
     let pe = pe_offset(file).unwrap();
     file[pe + 4 + 20 + 28..][..4].copy_from_slice(&base.to_le_bytes());
@@ -846,19 +855,27 @@ pub fn rebase_file(file: &mut [u8], base: u32) -> Result<()> {
 
 /// The checksum of the PE file `file` that IMAGEHLP's CheckSumMappedFile
 /// gives and the optional header's CheckSum field holds: the 16-bit
-/// little-endian words of the file added up with their carries folded
-/// back in, the field itself taken as zero, and the file's length added
-/// to that.
+/// little-endian words of the whole file added up with their carries
+/// folded back in, then the two words of the CheckSum field taken off
+/// again, each with a borrow when it is larger than the sum, and the
+/// file's length added to that. Taking the field off afterwards gives 0
+/// where leaving it out of the sum would give FFFFh (the two are equal
+/// as one's complement sums), as CheckSumMappedFile does.
 pub fn checksum(file: &[u8]) -> u32 {
-    let field = pe_offset(file).map(checksum_field);
     let mut sum = 0u32;
-    for (i, pair) in file.chunks(2).enumerate() {
-        let at = 2 * i;
-        if field.is_some_and(|f| at == f || at == f + 2) {
-            continue;
-        }
+    for pair in file.chunks(2) {
         sum += u16::from_le_bytes([pair[0], pair.get(1).copied().unwrap_or(0)]) as u32;
         sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    let field = pe_offset(file)
+        .and_then(|pe| u32_at(file, checksum_field(pe)))
+        .unwrap_or(0);
+    for word in [field & 0xFFFF, field >> 16] {
+        sum = if sum >= word {
+            sum - word
+        } else {
+            (sum.wrapping_sub(word) & 0xFFFF) - 1
+        };
     }
     sum.wrapping_add(file.len() as u32)
 }

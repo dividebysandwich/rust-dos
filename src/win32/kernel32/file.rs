@@ -199,8 +199,13 @@ pub(crate) fn new_file(cpu: &mut Cpu, sft: u16, access: u32, share: u32) -> u32 
 
 /// Whether the file `name` is open with access or sharing that opening it
 /// with `access` and `share` conflicts with: each handle's access must be
-/// what the others share. Windows 95 takes no access as reading.
+/// what the others share. Windows 95 takes no access as reading. The file
+/// of a program or DLL a process has loaded can't be opened for writing
+/// (`loaded_module`).
 pub(super) fn sharing_violation(cpu: &Cpu, name: &str, access: u32, share: u32) -> bool {
+    if access & GENERIC_WRITE != 0 && loaded_module(cpu, name) {
+        return true;
+    }
     let reading = |access: u32| match access & (GENERIC_READ | GENERIC_WRITE) {
         0 => GENERIC_READ,
         access => access,
@@ -229,6 +234,24 @@ pub(super) fn sharing_violation(cpu: &Cpu, name: &str, access: u32, share: u32) 
             }
             _ => false,
         })
+}
+
+/// Whether the file `name` is that of a program or DLL a process has
+/// loaded from it. Windows 9x keeps those open while they are loaded, and
+/// opening one for writing fails with ERROR_SHARING_VIOLATION: Windows 98
+/// SE's IMAGEHLP can't rebase a DLL the program has loaded
+/// (`win32_imagehlp_tests.rs`). The built-in DLLs aren't loaded from
+/// their files.
+fn loaded_module(cpu: &Cpu, name: &str) -> bool {
+    let disk = &cpu.bus.disk;
+    let key = disk.file_key(name);
+    cpu.bus
+        .win32
+        .processes
+        .iter()
+        .flat_map(|p| &p.modules)
+        .filter(|m| m.flags & crate::win32::loader::BUILTIN == 0)
+        .any(|m| disk.file_key(&m.path) == key)
 }
 
 /// CreateFileA(name, access, share, security, disposition, flags,

@@ -7,7 +7,8 @@
 //! The same program and DLLs (`write_probe` writes them) were run from a
 //! DOS box of a booted Windows 98 SE, after `attrib +r K.DLL`: its
 //! IMAGEHLP gave the results the tests expect, and left the DLL files
-//! the same, byte for byte, as the built-in one does.
+//! the same, byte for byte, as the built-in one does. So did P1.EXE to
+//! P5.EXE, the programs of `more_calls`, each run on its own.
 
 use iced_x86::code_asm::*;
 use rust_dos::config::WindowsVersion;
@@ -31,7 +32,9 @@ const UNTOUCHED_ERROR: u32 = 0xDEAD;
 const UNTOUCHED: u32 = 0xCCCC_CCCC;
 
 /// One call of ReBaseImage(name, "", rebase, system, down, check, ...,
-/// &new_base, stamp).
+/// &new_base, stamp), after LoadLibraryA(name) when `load`, and with NULL
+/// for those of the four values it gives back whose bits `null_outputs`
+/// has (bit 0 the old size, to bit 3 the new base).
 #[derive(Clone, Copy)]
 struct Call {
     name: &'static str,
@@ -41,6 +44,8 @@ struct Call {
     check: u32,
     new_base: u32,
     stamp: u32,
+    load: bool,
+    null_outputs: u8,
 }
 
 /// What a call gave: its result, the last error, and the old size, old
@@ -81,6 +86,7 @@ fn program(calls: &[Call]) -> Vec<u8> {
         "CreateFileA",
         "WriteFile",
         "CloseHandle",
+        "LoadLibraryA",
     ];
     let mut b = Builder::exe(BASE);
     let k: Vec<Imp> = kernel32.iter().map(|n| Imp::Name(n)).collect();
@@ -110,6 +116,17 @@ fn program(calls: &[Call]) -> Vec<u8> {
                 a.mov(var(block + 4 * field), UNTOUCHED as i32)?;
             }
             a.mov(var(block + 20), call.new_base as i32)?;
+            if call.load {
+                a.push(at(NAMES + NAME_SIZE * i as u32) as i32)?;
+                a.call(import("LoadLibraryA"))?;
+            }
+            let output = |n: u32| {
+                if call.null_outputs >> n & 1 != 0 {
+                    0
+                } else {
+                    at(block + 8 + 4 * n)
+                }
+            };
             a.push(UNTOUCHED_ERROR as i32)?;
             a.call(import("SetLastError"))?;
             let args = [
@@ -119,10 +136,10 @@ fn program(calls: &[Call]) -> Vec<u8> {
                 call.system as u32,
                 call.down as u32,
                 call.check,
-                at(block + 8),
-                at(block + 12),
-                at(block + 16),
-                at(block + 20),
+                output(0),
+                output(1),
+                output(2),
+                output(3),
                 call.stamp,
             ];
             for &arg in args.iter().rev() {
@@ -274,6 +291,35 @@ fn run(
     files: &[(&str, Vec<u8>)],
     read_only: Option<&str>,
 ) -> (Vec<Outcome>, PathBuf) {
+    let (code, printed, drive) = run_program(test, calls, files, read_only);
+    assert!(printed.is_empty(), "{}", printed);
+    assert_eq!(code, 0);
+    let result = fs::read(drive.join("RESULT.BIN")).unwrap();
+    let word = |at: usize| u32::from_le_bytes(result[at..at + 4].try_into().unwrap());
+    let outcomes = (0..calls.len())
+        .map(|i| {
+            let at = RESULT_SIZE as usize * i;
+            Outcome {
+                result: word(at),
+                error: word(at + 4),
+                old_size: word(at + 8),
+                old_base: word(at + 12),
+                new_size: word(at + 16),
+                new_base: word(at + 20),
+            }
+        })
+        .collect();
+    (outcomes, drive)
+}
+
+/// `run`'s program, to its end: its exit code, what it printed (an
+/// exception's message), and C:'s folder.
+fn run_program(
+    test: &str,
+    calls: &[Call],
+    files: &[(&str, Vec<u8>)],
+    read_only: Option<&str>,
+) -> (u8, String, PathBuf) {
     let mut all = files.to_vec();
     all.push(("T.EXE", program(calls)));
     let drive = scratch(test, &all);
@@ -299,24 +345,8 @@ fn run(
     let console = cpu.host_console.as_ref().unwrap();
     let printed = [&console.stdout[..], &console.stderr[..]].concat();
     assert!(ended, "the program didn't end");
-    assert!(printed.is_empty(), "{}", String::from_utf8_lossy(&printed));
-    assert_eq!(cpu.errorlevel, 0);
-    let result = fs::read(drive.join("RESULT.BIN")).unwrap();
-    let word = |at: usize| u32::from_le_bytes(result[at..at + 4].try_into().unwrap());
-    let outcomes = (0..calls.len())
-        .map(|i| {
-            let at = RESULT_SIZE as usize * i;
-            Outcome {
-                result: word(at),
-                error: word(at + 4),
-                old_size: word(at + 8),
-                old_base: word(at + 12),
-                new_size: word(at + 16),
-                new_base: word(at + 20),
-            }
-        })
-        .collect();
-    (outcomes, drive)
+    let printed = String::from_utf8_lossy(&printed).into_owned();
+    (cpu.errorlevel, printed, drive)
 }
 
 /// The fields of a DLL file that ReBaseImage changes: the image base,
@@ -351,6 +381,8 @@ fn call(name: &'static str) -> Call {
         check: 0,
         new_base: 0x6450_0000,
         stamp: 1,
+        load: false,
+        null_outputs: 0,
     }
 }
 
@@ -464,6 +496,12 @@ fn write_probe() {
     }
     fs::write(dir.join("T.EXE"), program(&calls())).unwrap();
     fs::write(dir.join("O.EXE"), program(&[call("OPENGL32.DLL")])).unwrap();
+    for (name, bytes) in more_dlls() {
+        fs::write(dir.join(name), bytes).unwrap();
+    }
+    for (i, calls) in more_calls().iter().enumerate() {
+        fs::write(dir.join(format!("P{}.EXE", i + 1)), program(calls)).unwrap();
+    }
 }
 
 /// What Windows 98 SE's ReBaseImage gave for each of `calls()`.
@@ -507,6 +545,7 @@ fn windows_98_outcomes() -> Vec<Outcome> {
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_ACCESS_DENIED: u32 = 5;
+const ERROR_SHARING_VIOLATION: u32 = 32;
 const ERROR_INVALID_ADDRESS: u32 = 487;
 
 /// What a DLL file moved to `base` with the time stamp `stamp` holds, and
@@ -596,4 +635,114 @@ fn rebasing_the_built_in_opengl32_is_denied() {
             new_base: 0x6450_0000,
         }]
     );
+}
+
+/// The DLLs of `more_calls`: N.DLL, which the second program loads, and
+/// R.DLL, without relocations and a header that doesn't say they were
+/// stripped.
+fn more_dlls() -> Vec<(&'static str, Vec<u8>)> {
+    let mut r = dll("R.DLL", false, 0, 0, false);
+    let at = pe_offset(&r) + 4 + 18;
+    r[at] &= !(pe::FILE_RELOCS_STRIPPED as u8);
+    vec![("N.DLL", dll("N.DLL", true, 0, 0, false)), ("R.DLL", r)]
+}
+
+/// Five more programs, P1.EXE to P5.EXE, each run on its own as some of
+/// them end with a page fault.
+fn more_calls() -> Vec<Vec<Call>> {
+    vec![
+        // Without a new base, for a file that isn't there.
+        vec![Call {
+            null_outputs: 0b1111,
+            ..call("NOFILE.DLL")
+        }],
+        // A DLL the program has loaded; no relocations, not marked so.
+        vec![
+            Call {
+                load: true,
+                ..call("N.DLL")
+            },
+            call("R.DLL"),
+        ],
+        // A new base that isn't a multiple of 64 KB.
+        vec![Call {
+            new_base: 0x6450_1234,
+            ..call("N.DLL")
+        }],
+        // Without an old size, for a file that isn't there.
+        vec![Call {
+            null_outputs: 0b0001,
+            ..call("NOFILE.DLL")
+        }],
+        // Without the old size, old base and new size, for a DLL.
+        vec![Call {
+            null_outputs: 0b0111,
+            ..call("N.DLL")
+        }],
+    ]
+}
+
+/// A loaded DLL's file can't be written, so it can't be moved; a DLL
+/// without relocations fails as one marked so does; a new base that isn't
+/// a multiple of 64 KB fails before the file is looked at. As Windows 98
+/// SE gave them.
+#[test]
+fn rebase_image_fails_as_windows_98_se_does() {
+    let calls = more_calls();
+    let untouched = |error| Outcome {
+        result: 0,
+        error,
+        old_size: UNTOUCHED,
+        old_base: UNTOUCHED,
+        new_size: UNTOUCHED,
+        new_base: 0x6450_0000,
+    };
+    let (loaded, drive) = run("loaded", &calls[1], &more_dlls(), None);
+    assert_eq!(
+        loaded,
+        [
+            untouched(ERROR_SHARING_VIOLATION),
+            Outcome {
+                old_size: 0x2000,
+                old_base: DLL_BASE,
+                new_size: 0x1_0000,
+                ..untouched(ERROR_INVALID_ADDRESS)
+            }
+        ]
+    );
+    let (unaligned, drive_2) = run("unaligned", &calls[2], &more_dlls(), None);
+    assert_eq!(
+        unaligned,
+        [Outcome {
+            new_base: 0x6450_1234,
+            ..untouched(ERROR_INVALID_ADDRESS)
+        }]
+    );
+    for drive in [drive, drive_2] {
+        for (name, bytes) in more_dlls() {
+            assert!(fs::read(drive.join(name)).unwrap() == bytes, "{}", name);
+        }
+    }
+}
+
+/// The new base is read before the file is looked for, so a NULL for it
+/// faults in IMAGEHLP; the other three are written once the file is read,
+/// and a NULL for one of them faults only then. Windows 98 SE ends P1 and
+/// P5 with a page fault in IMAGEHLP.DLL, and P4 with ERROR_FILE_NOT_FOUND.
+#[test]
+fn null_outputs_fault_where_windows_98_se_faults() {
+    let calls = more_calls();
+    for (i, faults) in [(0, true), (3, false), (4, true)] {
+        let test = format!("null_{}", i + 1);
+        let (code, printed, drive) = run_program(&test, &calls[i], &more_dlls(), None);
+        if faults {
+            assert_eq!(code, 0xFF, "P{}", i + 1);
+            assert!(printed.contains("page fault"), "P{}: {}", i + 1, printed);
+        } else {
+            assert_eq!(code, 0, "P{}: {}", i + 1, printed);
+            let result = fs::read(drive.join("RESULT.BIN")).unwrap();
+            let word = |at: usize| u32::from_le_bytes(result[at..at + 4].try_into().unwrap());
+            assert_eq!([word(0), word(4)], [0, ERROR_FILE_NOT_FOUND]);
+        }
+    }
 }

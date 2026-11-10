@@ -808,6 +808,14 @@ pub fn search_file(cpu: &mut Cpu, name: &str) -> Option<String> {
     path::search(cpu, None, name)
 }
 
+/// `search_file` for `name` with `extension` added if its file name has
+/// none, as SearchPathA(NULL, name, extension, ...) looks for it.
+pub fn search_file_with_extension(cpu: &mut Cpu, name: &str, extension: &str) -> Option<String> {
+    let mut name = name.to_string();
+    path::add_extension(&mut name, extension);
+    path::search(cpu, None, &name)
+}
+
 /// The program the command line `line` names first, as CreateProcessA
 /// finds it with no application name (process.rs).
 pub fn program_in_line<'a>(cpu: &mut Cpu, line: &'a str) -> Option<ProgramInLine<'a>> {
