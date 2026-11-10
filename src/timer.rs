@@ -10,7 +10,7 @@
 //!
 //! Time is measured in PIT input clock ticks (1.193182 MHz).
 
-use crate::autospeed::AutoSpeed;
+use crate::autospeed::{AutoSpeed, Backlog};
 use crate::bus::Bus;
 use crate::video::crt::CrtTiming;
 use std::time::Duration;
@@ -22,7 +22,7 @@ pub use rust_dos_audio_core::{PIT_HZ, mul_div, mul_div_ceil};
 const FRAME: Duration = Duration::from_micros(16_667);
 /// How far emulated time may fall behind the wall clock before the backlog
 /// is dropped rather than caught up.
-const MAX_LAG: Duration = Duration::from_millis(50);
+pub(crate) const MAX_LAG: Duration = Duration::from_millis(50);
 /// A backlog of this much is one gap: running frames, it is dropped at
 /// `MAX_LAG`. The frontend stopped (a page in the background, a window
 /// being dragged, the host asleep), which says nothing of whether the host
@@ -625,13 +625,15 @@ pub struct Pacer {
     recent_ran: f64,
     recent_idle: f64,
     /// The emulated time dropped behind the wall clock so far
-    /// (`MAX_LAG`): whether the host keeps up with the speed, for `Auto`.
+    /// (`MAX_LAG`), stalls and lag alike (`backlog` sorts them for `Auto`).
     /// And the emulated time the last frame ended at, and whether it ran
     /// on from the one before: the backlog after frames of a paused
     /// machine, which the frontend goes on drawing, is the pause's.
     lost_ns: u64,
     last_ns: u64,
     ran: bool,
+    /// Of `lost_ns`, what was lag rather than a stall, which `Auto` goes by.
+    backlog: Backlog,
     /// Whether the frames run by the wall clock (`batch_end`). A frontend
     /// that runs them at its own pace (libretro) drops nothing, so that
     /// `lost_ns` says nothing and the host estimate is all there is.
@@ -668,6 +670,7 @@ impl Pacer {
             lost_ns: 0,
             last_ns: 0,
             ran: false,
+            backlog: Backlog::default(),
             wall_paced: false,
             anchor_wall: now,
             anchor_ticks: 0,
@@ -686,6 +689,7 @@ impl Pacer {
     pub fn set_fast_forward(&mut self, on: bool, clock: &Clock, now: Instant) {
         if self.fast_forward && !on {
             self.auto.start_over();
+            self.backlog.start_over();
             self.anchor_to(clock, now);
         }
         self.fast_forward = on;
@@ -698,6 +702,7 @@ impl Pacer {
     /// speed it had to go back to (`Bus::end_work_boost`).
     pub fn rebase(&mut self, bus: &mut Bus, now: Instant) {
         self.auto.reset();
+        self.backlog.start_over();
         bus.activity.work_return = None;
         self.anchor_to(&bus.clock, now);
     }
@@ -889,8 +894,8 @@ impl Pacer {
         }
     }
 
-    /// The emulated time dropped behind the wall clock so far, for `Auto`
-    /// (`AutoSpeed::update`).
+    /// The emulated time dropped behind the wall clock so far, stalls and
+    /// lag alike: `Auto` goes by the lag only (`Backlog::frame`).
     pub fn lost(&self) -> Duration {
         Duration::from_nanos(self.lost_ns)
     }
@@ -993,10 +998,30 @@ impl Pacer {
                 if self.fast_forward {
                     return None;
                 }
-                let next = self.auto.update(bus, protected, host_max, self.lost_ns);
                 if self.wall_paced {
-                    return next;
+                    // How far the emulated time is behind the wall clock
+                    // now: what the next batch runs to catch up, as
+                    // `batch_end` reckons it.
+                    let since = Instant::now().saturating_duration_since(self.anchor_wall);
+                    let wall = self.anchor_ticks + duration_to_ticks(since);
+                    let behind = ticks_to_duration(wall.saturating_sub(bus.clock.now_ticks()));
+                    let behind_ns = behind.as_nanos() as u64;
+                    // A frame of a paused machine (the debugger, the
+                    // settings window, a rewind) runs nothing and falls
+                    // behind the wall clock by the pause: no batch_end
+                    // moves the anchor until it resumes.
+                    if self.ran {
+                        let lag = self.backlog.frame(behind_ns, self.lost_ns, current);
+                        if let Some(cut) = self.auto.falling_behind(bus, lag) {
+                            return Some(cut);
+                        }
+                    }
+                    let lag_ns = self.backlog.lag_ns();
+                    return self.auto.update(bus, protected, host_max, lag_ns);
                 }
+                let next = self
+                    .auto
+                    .update(bus, protected, host_max, self.backlog.lag_ns());
                 // Nothing tells that the host fell behind, but for its
                 // estimate: a heavier scene than it keeps up with at this
                 // speed.

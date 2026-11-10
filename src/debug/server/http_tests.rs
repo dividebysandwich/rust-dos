@@ -1653,6 +1653,7 @@ fn if_state_seq_guards_every_request_the_emulator_carries_out() {
         ("GET", "/api/status".into(), None),
         ("GET", "/api/stats".into(), None),
         ("GET", "/api/underruns".into(), None),
+        ("GET", "/api/frames?after=0".into(), None),
         ("GET", "/api/screen/text".into(), None),
         ("GET", "/api/trace".into(), None),
         ("POST", "/api/trace".into(), Some(json!({"clear": true}))),

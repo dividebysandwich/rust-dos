@@ -301,6 +301,8 @@ pub enum Cmd {
     Status,
     Stats,
     Underruns,
+    /// The host's frames after the first `after` (`/api/frames`).
+    Frames { after: u64 },
     Screenshot { shader: bool },
     ScreenText,
     TraceQuery(TraceQuery),
