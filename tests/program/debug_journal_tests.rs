@@ -173,11 +173,23 @@ fn xbrz_window_screenshots_use_the_selected_shader() {
             .unwrap()
             .success()
     );
+    // `--sync` gives up after 15 s and still exits with 0, and xte types
+    // into whichever window has the focus. `-f` gives the window the X
+    // server reports, the one `--sync` compares.
+    let focused = Command::new("xdotool")
+        .args(["getwindowfocus", "-f"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&focused.stdout).trim(),
+        window,
+        "the shader test window takes the focus"
+    );
     assert!(
         Command::new("xte")
             .args(["keydown Control_L", "key F5", "keyup Control_L"])
             .status()
-            .unwrap()
+            .expect("xte (from xautomation) runs")
             .success()
     );
     let capture = loop {
