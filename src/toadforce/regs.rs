@@ -87,4 +87,7 @@ pub enum Error {
     BadPut = 6,
     /// `MODE_ENABLE` set with a mode the card doesn't take.
     BadMode = 7,
+    /// The command needs state that isn't set: a render target, a depth
+    /// buffer, a light (level 1).
+    BadState = 8,
 }

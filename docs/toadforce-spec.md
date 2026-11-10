@@ -18,7 +18,7 @@ there.
 |---|---|
 | 1 to 8 | frozen: implemented in `src/toadforce` and `src/bus/toadforce.rs` |
 | 9, level 0 | frozen, with them |
-| 9, level 1 | headings only, written with phases 2, 3 and 5 |
+| 9, level 1 | provisional: the state and surface commands are implemented in `src/toadforce/level1`; the draw commands come with the software renderer. A machine's card doesn't offer the level until it is frozen, after phase 5 |
 | 9, level 2 | not started |
 
 A frozen chapter changes only by adding what an earlier reader can't
@@ -138,9 +138,10 @@ of any value clears the register.
 
 `LEVEL`. A write of a value up to `LEVEL_MAX` selects that level: the
 commands the card accepts, the table `CAPS` shows, and every state a
-command of level 1 or above can set goes back to its default. A write of
-a larger value is ignored, so a driver reads `LEVEL` back. Display
-state (the `MODE` registers, `PALETTE`, a pending flip) is untouched.
+command of level 1 or above can set goes back to its default, a write
+of the level already in use included. A write of a larger value is
+ignored, so a driver reads `LEVEL` back. Display state (the `MODE`
+registers, `PALETTE`, a pending flip) is untouched.
 
 `STATUS`, `IRQ_STATUS`, `MODE_START`, `FRAME` and `SCANLINE` follow the
 emulated clock (chapter 6): a read gives their value at the moment of
@@ -167,7 +168,27 @@ entries. Entries past the count read as 0.
 | 4 | 50 | lowest `MODE_REFRESH` |
 | 5 | 200 | highest `MODE_REFRESH` |
 
-Level 0's count is 5.
+Level 0's count is 5. Level 1 has the same five and these:
+
+| Index | Level 1's value | Meaning |
+|---|---|---|
+| 6 | 2048 | largest width and height of a render target |
+| 7 | 0000001Ch | formats of a render target's colour surface |
+| 8 | 00380000h | formats of its depth buffer |
+| 9 | 0007FFFEh | formats of a texture |
+| 10 | 2048 | largest width and height of a texture |
+| 11 | 4 | stages that can have a texture in one draw |
+| 12 | 8 | blend stages |
+| 13 | 4095 | highest texture handle |
+| 14 | 8 | lights |
+| 15 | 6 | clip planes |
+| 16 | 4 | world matrices a vertex can be blended between |
+| 17 | 8 | texture coordinate sets of a vertex |
+| 18 | 8 | highest `MAXANISOTROPY` |
+| 19 | 64 | largest point size in pixels |
+| 20 | 07FDFFFEh | stage operations: bit n set for operation n |
+
+Level 1's count is 20.
 
 ## 4. Card memory (BAR 1)
 
@@ -216,7 +237,33 @@ ones that reaches outside card memory with `BAD_RANGE`.
 | 3 | `X8R8G8B8` | 4 bytes | red in bits 16 to 23, green 8 to 15, blue 0 to 7; bits 24 to 31 unused |
 | 4 | `A8R8G8B8` | 4 bytes | the same with alpha in bits 24 to 31 |
 
-Level 1 adds codes for its texture and depth formats.
+Level 1 adds these, for textures and depth buffers. `FILL` and `BLT`
+don't take them.
+
+| Code | Name | Pixel | Layout |
+|---|---|---|---|
+| 5 | `X1R5G5B5` | 2 bytes | red in bits 10 to 14, green 5 to 9, blue 0 to 4 |
+| 6 | `A1R5G5B5` | 2 bytes | the same with alpha in bit 15 |
+| 7 | `A4R4G4B4` | 2 bytes | alpha, red, green, blue in 4 bits each, from bit 12 down |
+| 8 | `A8` | 1 byte | alpha; the colour is white |
+| 9 | `L8` | 1 byte | luminance; the alpha is opaque |
+| 10 | `A8L8` | 2 bytes | luminance in bits 0 to 7, alpha 8 to 15 |
+| 11 | `DXT1` | 8 bytes a block | 4x4 texels: two `R5G6B5` colours and 2 bits a texel, with one bit of alpha |
+| 12 | `DXT2` | 16 bytes a block | 4 bits of alpha a texel, then a `DXT1` colour block; colours multiplied by alpha |
+| 13 | `DXT3` | 16 bytes a block | as `DXT2`, colours not multiplied |
+| 14 | `DXT4` | 16 bytes a block | two alphas and 3 bits a texel, then a `DXT1` colour block; colours multiplied by alpha |
+| 15 | `DXT5` | 16 bytes a block | as `DXT4`, colours not multiplied |
+| 16 | `V8U8` | 2 bytes | signed du in bits 0 to 7, dv 8 to 15 |
+| 17 | `L6V5U5` | 2 bytes | signed du in bits 0 to 4, dv 5 to 9, luminance 10 to 15 |
+| 18 | `X8L8V8U8` | 4 bytes | signed du in bits 0 to 7, dv 8 to 15, luminance 16 to 23 |
+| 19 | `D16` | 2 bytes | depth |
+| 20 | `D24X8` | 4 bytes | depth in bits 8 to 31 |
+| 21 | `D24S8` | 4 bytes | depth in bits 8 to 31, stencil 0 to 7 |
+
+An image in a block format is rows of blocks: a line of its memory is
+one row, of the width divided by 4 and rounded up blocks, and it has
+the height divided by 4 and rounded up of them. Its pitch is the bytes
+from one row of blocks to the next.
 
 ## 5. Command ring (BAR 2)
 
@@ -257,7 +304,8 @@ it draws nothing and sets no state, and the card goes on with the next
 command. A command is checked in that order, and within its arguments
 values before ranges, so one with several faults has the code of the
 first: `BAD_OPCODE`, then `BAD_LENGTH`, then `BAD_VALUE`, then
-`BAD_RANGE`.
+`BAD_RANGE`, and after those what depends on the card's state,
+`BAD_HANDLE` and `BAD_STATE`.
 
 A header whose length is 0, or reaches past the commands submitted or
 past the end of the ring, leaves no next command to find. The card
@@ -291,6 +339,7 @@ build of the emulator stops at.
 | 5 | `BAD_HANDLE` | a handle that isn't defined (level 1) |
 | 6 | `BAD_PUT` | a value `RING_PUT` doesn't take |
 | 7 | `BAD_MODE` | `MODE_ENABLE` set with a mode the card doesn't take |
+| 8 | `BAD_STATE` | the command needs state that isn't set: a render target, a depth buffer, a light (level 1) |
 
 A correct driver never causes a rejection. The registers exist so that a
 driver under development, and the emulator's log, can say what went
@@ -513,14 +562,357 @@ made at once whatever the flag says.
 
 ### Level 1
 
-Opcodes from 0010h. Written with the phases that implement them; the
-command list is in "Commands of level 1" of `docs/toadforce.md`.
+Opcodes 0010h to 00FFh. Level 1 has level 0's commands too. This
+section is provisional until the level is frozen: the draw commands
+(opcodes from 0030h) are written with the software renderer.
 
-- State: render states, stage states, transforms, viewport, scissor,
-  material, lights, clip planes, palettes.
-- Surfaces: render target, clear, textures.
-- Drawing: inline and from buffers, with and without indices.
-- The capability entries and format codes level 1 adds.
+A number in an argument is an IEEE single-precision value in its word.
+One that isn't finite is rejected with `BAD_VALUE`. A colour of four
+numbers is red, green, blue, alpha. A colour in one word has alpha in
+bits 24 to 31, red in 16 to 23, green in 8 to 15 and blue in 0 to 7.
+
+After a reset or a write to `LEVEL`: every render state and stage
+state has the reset value of its table below, every transform is the
+identity, the viewport and the scissor rectangle are zero and the
+scissor is off, the material is zero, no light is set or on, the clip
+planes are zero, there is no render target, and no texture is defined.
+
+**`SET_RENDER_STATE`, 0010h.** Length 3 or more, odd.
+
+| Word | Argument |
+|---|---|
+| 1, 2 | a render state's number and its value |
+| 3 on | more such pairs |
+
+Sets each state to its value, in order. A number the table doesn't
+have, or a value its state doesn't take, is rejected with `BAD_VALUE`,
+and none of the command's states is set.
+
+**`SET_STAGE_STATE`, 0011h.** Length 4 or more, even.
+
+| Word | Argument |
+|---|---|
+| 1 | stage, 0 to 7 |
+| 2, 3 | a stage state's number and its value |
+| 4 on | more such pairs |
+
+The same for one stage's states.
+
+**`SET_TRANSFORM`, 0012h.** Length 18.
+
+| Word | Argument |
+|---|---|
+| 1 | which: 0 to 3 world (1 to 3 for vertex blending), 4 view, 5 projection, 6 to 13 the texture coordinate sets 0 to 7 |
+| 2 to 17 | the matrix, row by row; a vector is a row and multiplies from the left, as in Direct3D |
+
+**`SET_VIEWPORT`, 0013h.** Length 7.
+
+| Word | Argument |
+|---|---|
+| 1, 2 | left and top, in pixels of the render target |
+| 3, 4 | width and height |
+| 5, 6 | the depths of the near and far planes |
+
+Left plus width and top plus height are at most `CAPS[6]`, and the
+depths are 0 to 1 with the near one not above the far one, or the
+command is rejected with `BAD_VALUE`. The viewport isn't checked
+against the render target, which may change after it: a draw reaches
+the pixels both have.
+
+**`SET_SCISSOR`, 0014h.** Length 6.
+
+| Word | Argument |
+|---|---|
+| 1 | 1 to limit draws to the rectangle, 0 not to |
+| 2 to 5 | left, top, width, height |
+
+**`SET_MATERIAL`, 0015h.** Length 18.
+
+| Word | Argument |
+|---|---|
+| 1 to 4 | diffuse colour |
+| 5 to 8 | ambient colour |
+| 9 to 12 | specular colour |
+| 13 to 16 | emissive colour |
+| 17 | specular power |
+
+**`SET_LIGHT`, 0016h.** Length 29.
+
+| Word | Argument |
+|---|---|
+| 1 | slot, 0 to 7 |
+| 2 | kind: 1 point, 2 spot, 3 directional |
+| 3 to 6 | diffuse colour |
+| 7 to 10 | specular colour |
+| 11 to 14 | ambient colour |
+| 15 to 17 | position, in world space |
+| 18 to 20 | direction, in world space |
+| 21 | range |
+| 22 | falloff |
+| 23 to 25 | attenuation: constant, linear, quadratic |
+| 26, 27 | theta and phi, the angles of a spot's inner and outer cones in radians |
+| 28 | spot model: 0 Direct3D's (two cones and the falloff between them), 1 OpenGL's (the cosine of the angle to the power of the falloff, nothing outside phi) |
+
+Setting a light doesn't turn it on.
+
+**`ENABLE_LIGHT`, 0017h.** Length 3.
+
+| Word | Argument |
+|---|---|
+| 1 | slot, 0 to 7 |
+| 2 | 1 on, 0 off |
+
+Turning on a slot no `SET_LIGHT` has set is rejected with `BAD_STATE`.
+
+**`SET_CLIP_PLANE`, 0018h.** Length 6.
+
+| Word | Argument |
+|---|---|
+| 1 | index, 0 to 5 |
+| 2 to 5 | the plane's four coefficients, in world space |
+
+The planes in use are those whose bits `CLIPPLANEENABLE` has.
+
+**`SET_RENDER_TARGET`, 0020h.** Length 9.
+
+| Word | Argument |
+|---|---|
+| 1 to 5 | the colour surface |
+| 6 | offset of the depth buffer |
+| 7 | its format, or FFFFFFFFh for none |
+| 8 | its pitch |
+
+What draws and `CLEAR` write to. The colour surface has a format of
+`CAPS[7]` and a width and height up to `CAPS[6]`. The depth buffer has
+a format of `CAPS[8]`, the colour surface's width and height, and a
+pitch of at least its width times its pixel size. Both lie inside card
+memory. A colour surface whose format word is FFFFFFFFh takes the
+render target away, and the other words are ignored.
+
+**`CLEAR`, 0021h.** Length 5 or more, in steps of 4.
+
+| Word | Argument |
+|---|---|
+| 1 | flags: bit 0 colour, bit 1 depth, bit 2 stencil |
+| 2 | colour |
+| 3 | depth, a number from 0 to 1 |
+| 4 | stencil value, 0 to 255 |
+| 5 on | rectangles: left, top, width, height of each |
+
+Writes each rectangle of the buffers the flags name, or the whole
+render target when there is no rectangle. Neither the viewport nor the
+scissor limits it.
+
+- The colour is reduced to the surface's format by taking each
+  channel's top bits. An `X8R8G8B8` surface gets 0 in bits 24 to 31.
+- The depth is stored as the nearest whole number to it times FFFFh
+  (`D16`) or FFFFFFh.
+- Depth and stencil of a `D24S8` buffer are written apart: a clear of
+  one leaves the other. A depth clear of `D24X8` writes 0 to bits 0 to
+  7.
+
+No flag, a flag this table doesn't define, a depth outside 0 to 1 or a
+stencil value above 255 is rejected with `BAD_VALUE`; a rectangle with
+no pixel or reaching outside the render target with `BAD_RANGE`; and no
+render target, a depth flag without a depth buffer, or a stencil flag
+without a `D24S8` buffer with `BAD_STATE`.
+
+**`DEFINE_TEXTURE`, 0022h.** Length 10 or more, even.
+
+| Word | Argument |
+|---|---|
+| 1 | handle, 1 to `CAPS[13]` |
+| 2 | format, one of `CAPS[9]` |
+| 3, 4 | width and height of level 0: powers of two up to `CAPS[10]` |
+| 5 | levels, 1 up to the count that ends at 1x1 |
+| 6 | flags: bit 0 a cube map |
+| 7 | offset of the palette, or FFFFFFFFh |
+| 8, 9 | offset and pitch of level 0's image |
+| 10 on | the same for each further image |
+
+Tells the card where a texture is. The card copies nothing: it reads
+the images from card memory when a draw samples them, so what the
+guest writes there afterwards shows in the next draw.
+
+- Each level has half the width and height of the one before, and at
+  least 1. Images follow level by level, and a cube map has six for
+  each level: the faces +x, -x, +y, -y, +z, -z. A cube map is square.
+- The command has exactly the images its levels and faces need.
+- A `P8` texture has a palette, and no other format does. The palette
+  is 256 words of card memory, each a colour in one word, alpha
+  included.
+- A handle already defined is defined anew, in the stages that have it
+  too.
+
+Values outside those above are rejected with `BAD_VALUE`, and an image
+or palette that reaches outside card memory with `BAD_RANGE`.
+
+**`FREE_TEXTURE`, 0023h.** Length 2.
+
+| Word | Argument |
+|---|---|
+| 1 | handle |
+
+The handle is defined no longer, and the stages that had it have no
+texture. A handle that isn't defined is rejected with `BAD_HANDLE`.
+
+**`SET_TEXTURE`, 0024h.** Length 3.
+
+| Word | Argument |
+|---|---|
+| 1 | stage, 0 to 7 |
+| 2 | handle, or 0 for no texture |
+
+A handle that isn't defined is rejected with `BAD_HANDLE`.
+
+#### Render states
+
+The numbers and values are Direct3D 8's `D3DRS` ones where Direct3D
+has the state. 256 to 258 are the card's own.
+
+| Number | Name | Values | Reset |
+|---|---|---|---|
+| 7 | `ZENABLE` | 0 or 1 | 0 |
+| 8 | `FILLMODE` | 1 to 3 | 3 |
+| 9 | `SHADEMODE` | 1 to 2 | 2 |
+| 14 | `ZWRITEENABLE` | 0 or 1 | 1 |
+| 15 | `ALPHATESTENABLE` | 0 or 1 | 0 |
+| 16 | `LASTPIXEL` | 0 or 1 | 1 |
+| 19 | `SRCBLEND` | 1 to 13, a blend factor | 2 |
+| 20 | `DESTBLEND` | 1 to 13, a blend factor | 1 |
+| 22 | `CULLMODE` | 1 to 3 | 3 |
+| 23 | `ZFUNC` | 1 to 8, a compare function | 4 |
+| 24 | `ALPHAREF` | 0 to 255 | 0 |
+| 25 | `ALPHAFUNC` | 1 to 8, a compare function | 8 |
+| 26 | `DITHERENABLE` | 0 or 1 | 0 |
+| 27 | `ALPHABLENDENABLE` | 0 or 1 | 0 |
+| 28 | `FOGENABLE` | 0 or 1 | 0 |
+| 29 | `SPECULARENABLE` | 0 or 1 | 0 |
+| 34 | `FOGCOLOR` | any | 0 |
+| 35 | `FOGTABLEMODE` | 0 to 3 | 0 |
+| 36 | `FOGSTART` | a number | 0.0 |
+| 37 | `FOGEND` | a number | 1.0 |
+| 38 | `FOGDENSITY` | a number | 1.0 |
+| 41 | `COLORKEYENABLE` | 0 or 1 | 0 |
+| 47 | `ZBIAS` | 0 to 16 | 0 |
+| 48 | `RANGEFOGENABLE` | 0 or 1 | 0 |
+| 52 | `STENCILENABLE` | 0 or 1 | 0 |
+| 53 | `STENCILFAIL` | 1 to 8, a stencil operation | 1 |
+| 54 | `STENCILZFAIL` | 1 to 8, a stencil operation | 1 |
+| 55 | `STENCILPASS` | 1 to 8, a stencil operation | 1 |
+| 56 | `STENCILFUNC` | 1 to 8, a compare function | 8 |
+| 57 | `STENCILREF` | 0 to 255 | 0 |
+| 58 | `STENCILMASK` | any | FFFFFFFFh |
+| 59 | `STENCILWRITEMASK` | any | FFFFFFFFh |
+| 60 | `TEXTUREFACTOR` | any | FFFFFFFFh |
+| 128 | `WRAP0` | bits of Fh | 0 |
+| 129 | `WRAP1` | bits of Fh | 0 |
+| 130 | `WRAP2` | bits of Fh | 0 |
+| 131 | `WRAP3` | bits of Fh | 0 |
+| 132 | `WRAP4` | bits of Fh | 0 |
+| 133 | `WRAP5` | bits of Fh | 0 |
+| 134 | `WRAP6` | bits of Fh | 0 |
+| 135 | `WRAP7` | bits of Fh | 0 |
+| 136 | `CLIPPING` | 0 or 1 | 1 |
+| 137 | `LIGHTING` | 0 or 1 | 1 |
+| 139 | `AMBIENT` | any | 0 |
+| 140 | `FOGVERTEXMODE` | 0 to 3 | 0 |
+| 141 | `COLORVERTEX` | 0 or 1 | 1 |
+| 142 | `LOCALVIEWER` | 0 or 1 | 1 |
+| 143 | `NORMALIZENORMALS` | 0 or 1 | 0 |
+| 145 | `DIFFUSEMATERIALSOURCE` | 0 to 2 | 1 |
+| 146 | `SPECULARMATERIALSOURCE` | 0 to 2 | 2 |
+| 147 | `AMBIENTMATERIALSOURCE` | 0 to 2 | 0 |
+| 148 | `EMISSIVEMATERIALSOURCE` | 0 to 2 | 0 |
+| 151 | `VERTEXBLEND` | 0 to 3 | 0 |
+| 152 | `CLIPPLANEENABLE` | bits of 3Fh | 0 |
+| 154 | `POINTSIZE` | a number | 1.0 |
+| 155 | `POINTSIZE_MIN` | a number | 1.0 |
+| 156 | `POINTSPRITEENABLE` | 0 or 1 | 0 |
+| 157 | `POINTSCALEENABLE` | 0 or 1 | 0 |
+| 158 | `POINTSCALE_A` | a number | 1.0 |
+| 159 | `POINTSCALE_B` | a number | 0.0 |
+| 160 | `POINTSCALE_C` | a number | 0.0 |
+| 166 | `POINTSIZE_MAX` | a number | 64.0 |
+| 168 | `COLORWRITEENABLE` | bits of Fh | 15 |
+| 171 | `BLENDOP` | 1 to 5 | 1 |
+| 256 | `PIXEL_CENTRE` | 0 or 1 | 0 |
+| 257 | `FLAT_VERTEX` | 0 or 1 | 0 |
+| 258 | `TWO_SIDED_LIGHTING` | 0 or 1 | 0 |
+
+- `ZENABLE` has no value for a W buffer.
+- `SHADEMODE` is 1 flat or 2 Gouraud.
+- `COLORKEYENABLE` (Direct3D 7's) leaves out the texels of a stage's
+  texture that equal its colour key.
+- `PIXEL_CENTRE`: 0 puts pixel centres at whole coordinates (Direct3D
+  7 and 8), 1 at half ones (OpenGL).
+- `FLAT_VERTEX`: the vertex that gives a flat-shaded primitive its
+  colour, 0 the first (Direct3D), 1 the last (OpenGL).
+- `TWO_SIDED_LIGHTING`: 1 lights the back of a triangle with its
+  normal turned round (OpenGL).
+
+#### Stage states
+
+Direct3D 8's `D3DTSS` numbers and values. 32 and 33 are the card's own.
+The reset values are stage 0's; in stages 1 to 7 `COLOROP` and
+`ALPHAOP` reset to 1 (disabled), and `TEXCOORDINDEX` to the stage's
+number.
+
+| Number | Name | Values | Reset |
+|---|---|---|---|
+| 1 | `COLOROP` | a stage operation | 4 |
+| 2 | `COLORARG1` | a stage argument | 2 |
+| 3 | `COLORARG2` | a stage argument | 1 |
+| 4 | `ALPHAOP` | a stage operation | 2 |
+| 5 | `ALPHAARG1` | a stage argument | 2 |
+| 6 | `ALPHAARG2` | a stage argument | 1 |
+| 7 | `BUMPENVMAT00` | a number | 0.0 |
+| 8 | `BUMPENVMAT01` | a number | 0.0 |
+| 9 | `BUMPENVMAT10` | a number | 0.0 |
+| 10 | `BUMPENVMAT11` | a number | 0.0 |
+| 11 | `TEXCOORDINDEX` | a set and a generation | 0 |
+| 13 | `ADDRESSU` | 1 to 4 | 1 |
+| 14 | `ADDRESSV` | 1 to 4 | 1 |
+| 15 | `BORDERCOLOR` | any | 0 |
+| 16 | `MAGFILTER` | 1 to 3 | 1 |
+| 17 | `MINFILTER` | 1 to 3 | 1 |
+| 18 | `MIPFILTER` | 0 to 2 | 0 |
+| 19 | `MIPMAPLODBIAS` | a number | 0.0 |
+| 20 | `MAXMIPLEVEL` | 0 to 11 | 0 |
+| 21 | `MAXANISOTROPY` | 1 to 8 | 1 |
+| 22 | `BUMPENVLSCALE` | a number | 0.0 |
+| 23 | `BUMPENVLOFFSET` | a number | 0.0 |
+| 24 | `TEXTURETRANSFORMFLAGS` | 0 to 4, with 256 | 0 |
+| 26 | `COLORARG0` | a stage argument | 1 |
+| 27 | `ALPHAARG0` | a stage argument | 1 |
+| 28 | `RESULTARG` | 1 or 5 | 1 |
+| 32 | `COLOR_SCALE` | 1, 2 or 4 | 1 |
+| 33 | `ALPHA_SCALE` | 1, 2 or 4 | 1 |
+
+- A stage operation is 1 to 26 but 17: `DISABLE`, `SELECTARG1`,
+  `SELECTARG2`, `MODULATE`, `MODULATE2X`, `MODULATE4X`, `ADD`,
+  `ADDSIGNED`, `ADDSIGNED2X`, `SUBTRACT`, `ADDSMOOTH`,
+  `BLENDDIFFUSEALPHA`, `BLENDTEXTUREALPHA`, `BLENDFACTORALPHA`,
+  `BLENDTEXTUREALPHAPM`, `BLENDCURRENTALPHA`, (17, `PREMODULATE`, which
+  the card lacks), `MODULATEALPHA_ADDCOLOR`, `MODULATECOLOR_ADDALPHA`,
+  `MODULATEINVALPHA_ADDCOLOR`, `MODULATEINVCOLOR_ADDALPHA`,
+  `BUMPENVMAP`, `BUMPENVMAPLUMINANCE`, `DOTPRODUCT3`, `MULTIPLYADD`,
+  `LERP`.
+- A stage argument has its source in bits 0 to 3 (0 `DIFFUSE`, 1
+  `CURRENT`, 2 `TEXTURE`, 3 `TFACTOR`, 4 `SPECULAR`, 5 `TEMP`), bit 4
+  to take its complement and bit 5 to replicate its alpha to the colour
+  channels. The two bits give OpenGL's four operands of
+  `ARB_texture_env_combine`.
+- `RESULTARG` is 1 (`CURRENT`) or 5 (`TEMP`).
+- `TEXCOORDINDEX` has the coordinate set, 0 to 7, in bits 0 to 15, and
+  in bits 16 to 31 what the coordinates are: 0 the vertex's set, 1 the
+  normal, 2 the position, 3 the reflection vector, all three in camera
+  space, and 4 a sphere map's.
+- `TEXTURETRANSFORMFLAGS` is the count of coordinates the stage's
+  texture transform gives, 0 for no transform, plus 256 to divide them
+  by the last.
+- `COLOR_SCALE` and `ALPHA_SCALE` multiply the stage's results by 1, 2
+  or 4 before they are clamped.
 
 ## Open points
 

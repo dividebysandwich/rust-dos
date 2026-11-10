@@ -497,6 +497,7 @@ fn the_status_counts_what_was_asked_of_the_card() {
         fill: 2,
         blt: 1,
         flip: 1,
+        level1: 0,
         rejected: 2,
     };
     assert_eq!(rig.card.counts(), counts);

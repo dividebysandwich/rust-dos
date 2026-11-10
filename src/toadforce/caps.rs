@@ -10,7 +10,11 @@
 pub const ENTRIES: usize = 191;
 
 /// The highest level this version of the card can have.
-pub const NEWEST_LEVEL: u32 = 0;
+pub const NEWEST_LEVEL: u32 = 1;
+/// The highest level that is released, and so frozen. The levels above
+/// it are being built: their tables and commands still change, and a
+/// machine's card doesn't offer them.
+pub const RELEASED_LEVEL: u32 = 0;
 
 /// Entry 1: the largest width and height of a surface in `FILL` and
 /// `BLT`, and of a mode.
@@ -32,10 +36,67 @@ const LEVEL_0: [u32; 5] = [
     REFRESH_MAX,
 ];
 
+/// Entry 6: the largest width and height of a render target.
+pub const TARGET_MAX: u32 = 2048;
+/// Entry 7: the formats a render target's colour surface takes.
+pub const TARGET_FORMATS: u32 = 0x1C;
+/// Entry 8: the formats its depth buffer takes.
+pub const DEPTH_FORMATS: u32 = 0x38_0000;
+/// Entry 9: the formats a texture takes.
+pub const TEXTURE_FORMATS: u32 = 0x7_FFFE;
+/// Entry 10: the largest width and height of a texture.
+pub const TEXTURE_MAX: u32 = 2048;
+/// Entry 11: the stages that can have a texture in one draw.
+pub const TEXTURES_AT_ONCE: u32 = 4;
+/// Entry 12: the blend stages.
+pub const STAGES: u32 = 8;
+/// Entry 13: the highest texture handle.
+pub const TEXTURE_HANDLES: u32 = 4095;
+/// Entry 14: the lights.
+pub const LIGHTS: u32 = 8;
+/// Entry 15: the clip planes.
+pub const CLIP_PLANES: u32 = 6;
+/// Entry 16: the world matrices a vertex can be blended between.
+pub const BLEND_MATRICES: u32 = 4;
+/// Entry 17: the texture coordinate sets of a vertex.
+pub const COORD_SETS: u32 = 8;
+/// Entry 18: the highest `MAXANISOTROPY`.
+pub const ANISOTROPY_MAX: u32 = 8;
+/// Entry 19: the largest point size, in pixels.
+pub const POINT_SIZE_MAX: u32 = 64;
+/// Entry 20: the stage operations, bit n for operation n: all from
+/// `DISABLE` (1) to `LERP` (26) but `PREMODULATE` (17).
+pub const STAGE_OPS: u32 = 0x07FD_FFFE;
+
+/// Level 1, fixed-function 3D: level 0's entries and entries 6 to 20.
+const LEVEL_1: [u32; 20] = [
+    SURFACE_MAX,
+    BLIT_FORMATS,
+    MODE_FORMATS,
+    REFRESH_MIN,
+    REFRESH_MAX,
+    TARGET_MAX,
+    TARGET_FORMATS,
+    DEPTH_FORMATS,
+    TEXTURE_FORMATS,
+    TEXTURE_MAX,
+    TEXTURES_AT_ONCE,
+    STAGES,
+    TEXTURE_HANDLES,
+    LIGHTS,
+    CLIP_PLANES,
+    BLEND_MATRICES,
+    COORD_SETS,
+    ANISOTROPY_MAX,
+    POINT_SIZE_MAX,
+    STAGE_OPS,
+];
+
 /// The entries of `level`'s table, from entry 1 on.
 fn table(level: u32) -> &'static [u32] {
     match level {
         0 => &LEVEL_0,
+        1 => &LEVEL_1,
         _ => &[],
     }
 }
@@ -60,7 +121,7 @@ mod tests {
 
     #[test]
     fn released_levels_keep_their_tables() {
-        assert_eq!(FROZEN.len(), NEWEST_LEVEL as usize + 1);
+        assert_eq!(FROZEN.len(), RELEASED_LEVEL as usize + 1);
         for (level, frozen) in FROZEN.iter().enumerate() {
             let level = level as u32;
             assert_eq!(read(level, 0), frozen.len() as u32, "level {level}");

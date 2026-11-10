@@ -185,13 +185,6 @@ impl Default for Display {
     }
 }
 
-crate::state_enum!(Format {
-    Format::P8,
-    Format::R5G6B5,
-    Format::X8R8G8B8,
-    Format::A8R8G8B8
-});
-
 impl Default for Shown {
     fn default() -> Self {
         Shown {
