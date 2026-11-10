@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 48;
+const WIN32_VERSION: u16 = 49;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -823,6 +823,7 @@ mod tests {
         (46, 0x5C6F_53A0_DDD4_1506), // ASPI requests' due times, the drive's head
         (47, 0x5C6F_53A0_DDD4_1506), // MSVCRT's variables a page further on
         (48, 0x39FB_7FAD_F632_9763), // OpenGL's lighting state and attribute stack
+        (49, 0x39FB_7FAD_F632_9763), // MSVCRT's descriptors in __pioinfo's blocks
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
