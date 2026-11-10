@@ -1,527 +1,686 @@
-//! strftime and the names it takes, as Visual C++ 6's MSVCRT.DLL has them:
-//! `strftime`, `_Strftime`, `wcsftime`, and `_Getdays`, `_Getmonths` and
-//! `_Gettnames`, which give MSVCP60 the locale's names.
+//! strftime and the time names behind it: `strftime`, `_Strftime`,
+//! `wcsftime`, and `_Getdays`, `_Getmonths` and `_Gettnames`, which give
+//! MSVCP60 the locale's names.
 //!
-//! A locale's names block is 43 pointers to strings: the days' short and
-//! long names, the months' short and long names, "AM" and "PM", then the
-//! short date, long date and time formats in Windows' pictures
-//! ("M/d/yy"). The "C" locale's is in the DLL's data section, its strings
-//! after it. `_Strftime` takes one of a program's own, as MSVCP60 passes
-//! them. strftime reads the names and writes its text in the program's
-//! memory a byte at a time, so what a short buffer or a format that runs
-//! past a name's end gets is what it gets on Windows.
+//! A locale's time names (`__lc_time_data`) are 43 pointers to strings:
+//! the seven short and seven long day names, the twelve short and twelve
+//! long month names, "AM" and "PM", then the short date, long date and
+//! time formats as Windows writes them ("M/d/yy"). The "C" locale's table
+//! is one of the DLL's variables, with its strings after it; `_Strftime`
+//! takes a program's own table, as MSVCP60 passes one.
 //!
-//! It does what MSVCRT.DLL 6.00.8337 does, checked against a probe run
-//! on that DLL: strftime_vc6.txt has what it gave for made-up formats
-//! and names.
+//! What a call writes, short buffers and odd formats and names included,
+//! is what MSVCRT.DLL 6.00.8337 writes, as observed by a probe program run
+//! on that DLL; strftime_vc6.txt and the tests below hold its answers.
 
 use super::time::{DAYS, LONG_DAYS, LONG_MONTHS, MONTHS, Tm, read_tm};
 use super::*;
 
 /// The memory strftime reads and writes: the program's, or a test's.
-pub(super) trait Guest {
+pub(super) trait Memory {
     /// The byte at `at`, None where there is no memory.
-    fn read8(&mut self, at: u32) -> Option<u8>;
-    fn write8(&mut self, at: u32, byte: u8);
+    fn load(&mut self, at: u32) -> Option<u8>;
+    fn store(&mut self, at: u32, byte: u8);
+
+    fn load32(&mut self, at: u32) -> Option<u32> {
+        let mut word = 0;
+        for i in 0..4 {
+            word |= (self.load(at.wrapping_add(i))? as u32) << (8 * i);
+        }
+        Some(word)
+    }
+
+    /// The bytes at `at` up to their 0, which isn't included.
+    fn load_str(&mut self, at: u32) -> Option<Vec<u8>> {
+        let mut text = Vec::new();
+        while let Some(byte) = self.load(at.wrapping_add(text.len() as u32)) {
+            if byte == 0 {
+                return Some(text);
+            }
+            text.push(byte);
+        }
+        None
+    }
 }
 
-impl Guest for Cpu {
-    fn read8(&mut self, at: u32) -> Option<u8> {
+impl Memory for Cpu {
+    fn load(&mut self, at: u32) -> Option<u8> {
         let byte = self.bus.guest_read_8(at);
         (!self.bus.guest_faulted()).then_some(byte)
     }
 
-    fn write8(&mut self, at: u32, byte: u8) {
+    fn store(&mut self, at: u32, byte: u8) {
         self.bus.guest_write_8(at, byte);
     }
 }
 
-/// The 32-bit word at `at`.
-fn word(m: &mut impl Guest, at: u32) -> Option<u32> {
-    let mut bytes = [0; 4];
-    for (i, byte) in bytes.iter_mut().enumerate() {
-        *byte = m.read8(at.wrapping_add(i as u32))?;
-    }
-    Some(u32::from_le_bytes(bytes))
-}
-
-/// The string at `at`, without its 0.
-fn string(m: &mut impl Guest, at: u32) -> Option<Vec<u8>> {
-    let mut text = Vec::new();
-    loop {
-        match m.read8(at.wrapping_add(text.len() as u32))? {
-            0 => return Some(text),
-            byte => text.push(byte),
-        }
-    }
-}
-
-/// The fields of a names block, by their place.
-const LC_WDAY_ABBR: u32 = 0;
-const LC_WDAY: u32 = 7;
-const LC_MONTH_ABBR: u32 = 14;
-const LC_MONTH: u32 = 26;
-const LC_AMPM: u32 = 38;
-const LC_SDATE: u32 = 40;
-const LC_LDATE: u32 = 41;
-const LC_TIME: u32 = 42;
-const LC_FIELDS: u32 = 43;
-/// The struct's size, and the room for the "C" locale's with its
-/// strings.
-const LC_TIME_SIZE: u32 = 4 * LC_FIELDS;
+/// The places of the names in a table, counted in pointers.
+const DAY_ABBR: u32 = 0;
+const DAY_FULL: u32 = 7;
+const MONTH_ABBR: u32 = 14;
+const MONTH_FULL: u32 = 26;
+const AM_PM: u32 = 38;
+const SHORT_DATE: u32 = 40;
+const LONG_DATE: u32 = 41;
+const TIME_FORMAT: u32 = 42;
+const NAME_COUNT: u32 = 43;
+/// The table's size, and the room the "C" locale's variable has for the
+/// table and its strings.
+const TABLE_SIZE: u32 = 4 * NAME_COUNT;
 pub const LC_TIME_C_SIZE: u32 = 0x200;
 
-/// The "C" locale's names and formats, in the order of the fields.
-fn c_locale_names() -> Vec<&'static str> {
-    let mut names = Vec::new();
-    names.extend(DAYS);
-    names.extend(LONG_DAYS);
-    names.extend(MONTHS);
-    names.extend(LONG_MONTHS);
-    names.extend(["AM", "PM", "M/d/yy", "dddd, MMMM dd, yyyy", "H:mm:ss"]);
-    names
+/// The "C" locale's names, in table order.
+fn c_names() -> impl Iterator<Item = &'static str> {
+    DAYS.into_iter()
+        .chain(LONG_DAYS)
+        .chain(MONTHS)
+        .chain(LONG_MONTHS)
+        .chain(["AM", "PM", "M/d/yy", "dddd, MMMM dd, yyyy", "H:mm:ss"])
 }
 
-/// The "C" locale's names block for the address `at`: the pointers,
-/// then the strings they point to.
+/// The "C" locale's table as it is at address `at`: the pointers, then
+/// the strings they point to.
 pub fn lc_time_c(at: u32) -> Vec<u8> {
-    let names = c_locale_names();
+    let mut table = Vec::new();
     let mut strings = Vec::new();
-    let mut data = Vec::new();
-    for name in names {
-        let pointer = at + LC_TIME_SIZE + strings.len() as u32;
-        data.extend(pointer.to_le_bytes());
-        strings.extend(name.as_bytes());
+    for name in c_names() {
+        table.extend((at + TABLE_SIZE + strings.len() as u32).to_le_bytes());
+        strings.extend_from_slice(name.as_bytes());
         strings.push(0);
     }
-    data.extend(strings);
-    data
+    table.extend(strings);
+    table
 }
 
-/// The names block a function was given, the "C" locale's for NULL.
-fn lc_time(lc: u32) -> u32 {
-    if lc == 0 { var_at(V_LC_TIME_C) } else { lc }
-}
-
-/// The string of field `field` of the names block at `lc`.
-fn lc_name(m: &mut impl Guest, lc: u32, field: u32) -> Option<Vec<u8>> {
-    let at = word(m, lc.wrapping_add(4 * field))?;
-    string(m, at)
-}
-
-/// The current locale's names of `count` days or months, from the fields
-/// `abbr` and `full` on: for each the short name and the long one, each
-/// after a colon, in a block from malloc. NULL when there is no memory
-/// for it.
-fn names_block(cpu: &mut Cpu, abbr: u32, full: u32, count: u32) -> Option<u32> {
-    let lc = lc_time(0);
-    let mut text = Vec::new();
-    for i in 0..count {
-        text.push(b':');
-        text.extend(lc_name(cpu, lc, abbr + i)?);
-        text.push(b':');
-        text.extend(lc_name(cpu, lc, full + i)?);
+/// The table a call uses: the one it was given, else the "C" locale's,
+/// which is the only one the built-in runtime has.
+fn table_or_current(table: u32) -> u32 {
+    match table {
+        0 => var_at(V_LC_TIME_C),
+        _ => table,
     }
+}
+
+/// The string of name `index` of the table at `table`.
+fn name(m: &mut impl Memory, table: u32, index: u32) -> Option<Vec<u8>> {
+    let at = m.load32(table.wrapping_add(4 * index))?;
+    m.load_str(at)
+}
+
+/// A copy of `text` and a 0 in a block from malloc, or NULL.
+fn malloc_text(cpu: &mut Cpu, text: &[u8]) -> Option<u32> {
     let Some(at) = heap_alloc(cpu, text.len() as u32 + 1) else {
         return Some(0);
     };
-    put_cstr(cpu, at, &text)?;
+    put_cstr(cpu, at, text)?;
     Some(at)
 }
 
-/// _Getdays(): ":Sun:Sunday:Mon:Monday:...:Sat:Saturday", malloc'ed.
+/// ":short:long" for each of the `count` names that start at `abbr` and
+/// at `full` in the current table, in one string.
+fn colon_list(m: &mut impl Memory, abbr: u32, full: u32, count: u32) -> Option<Vec<u8>> {
+    let table = table_or_current(0);
+    let mut text = Vec::new();
+    for i in 0..count {
+        for index in [abbr + i, full + i] {
+            text.push(b':');
+            text.extend(name(m, table, index)?);
+        }
+    }
+    Some(text)
+}
+
+/// _Getdays(): ":Sun:Sunday:Mon:Monday:...:Sat:Saturday", in a block
+/// from malloc.
 pub fn getdays(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    names_block(cpu, LC_WDAY_ABBR, LC_WDAY, 7)
+    let text = colon_list(cpu, DAY_ABBR, DAY_FULL, 7)?;
+    malloc_text(cpu, &text)
 }
 
-/// _Getmonths(): ":Jan:January:...:Dec:December", malloc'ed.
+/// _Getmonths(): ":Jan:January:...:Dec:December", in a block from malloc.
 pub fn getmonths(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    names_block(cpu, LC_MONTH_ABBR, LC_MONTH, 12)
+    let text = colon_list(cpu, MONTH_ABBR, MONTH_FULL, 12)?;
+    malloc_text(cpu, &text)
 }
 
-/// _Gettnames(): a copy of the current locale's names block in one
-/// block from malloc, its strings after it: each day's short and long
-/// name, then each month's, then the rest in the struct's order. NULL
-/// when there is no memory for it. MSVCRT 6 leaves out the time format:
-/// the block has room for it, and its pointer points there, but the
-/// string isn't copied, so it holds what the heap had there.
+/// _Gettnames(): a copy of the current table in one block from malloc,
+/// which the caller frees, or NULL.
 pub fn gettnames(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    let lc = lc_time(0);
-    let mut order = Vec::new();
-    for i in 0..7 {
-        order.extend([LC_WDAY_ABBR + i, LC_WDAY + i]);
-    }
-    for i in 0..12 {
-        order.extend([LC_MONTH_ABBR + i, LC_MONTH + i]);
-    }
-    order.extend(LC_AMPM..LC_FIELDS);
-    let mut strings = Vec::new();
-    for &field in &order {
-        strings.push((field, lc_name(cpu, lc, field)?));
-    }
-    let size = LC_TIME_SIZE + strings.iter().map(|(_, s)| s.len() as u32 + 1).sum::<u32>();
-    let Some(at) = heap_alloc(cpu, size) else {
+    let mut copy = table_copy(cpu, table_or_current(0))?;
+    let Some(at) = heap_alloc(cpu, copy.len() as u32) else {
         return Some(0);
     };
-    let mut next = at + LC_TIME_SIZE;
-    for (field, text) in strings {
-        write32(cpu, at + 4 * field, next)?;
-        if field != LC_TIME {
-            put_cstr(cpu, next, &text)?;
-        }
-        next += text.len() as u32 + 1;
+    for pointer in copy[..TABLE_SIZE as usize].as_chunks_mut::<4>().0 {
+        let offset = u32::from_le_bytes(*pointer);
+        *pointer = (at + offset).to_le_bytes();
     }
+    put(cpu, at, &copy)?;
     Some(at)
 }
 
-/// Where strftime writes: the next place in the buffer, and the room left
-/// there. Writes go straight to the program's memory, as MSVCRT's do, so
-/// what a short buffer gets is what it gets on Windows.
-struct Out {
-    at: u32,
+/// A copy of the table at `table` as _Gettnames lays it out, its
+/// pointers counted from the copy's start. The strings follow the
+/// pointers in the order the probe saw MSVCRT 6 put them: each day's
+/// short then long name, each month's, then "AM", "PM" and the three
+/// formats. MSVCRT 6 leaves the time format's string out, though its
+/// pointer points at room for it, so a program reads whatever the heap
+/// had there; this copy has it.
+fn table_copy(m: &mut impl Memory, table: u32) -> Option<Vec<u8>> {
+    let pairs =
+        |first: u32, second: u32, count: u32| (0..count).flat_map(move |i| [first + i, second + i]);
+    let order = pairs(DAY_ABBR, DAY_FULL, 7)
+        .chain(pairs(MONTH_ABBR, MONTH_FULL, 12))
+        .chain(AM_PM..NAME_COUNT);
+    let mut copy = vec![0u8; TABLE_SIZE as usize];
+    let mut strings = Vec::new();
+    for index in order {
+        let place = TABLE_SIZE + strings.len() as u32;
+        copy[4 * index as usize..][..4].copy_from_slice(&place.to_le_bytes());
+        strings.extend(name(m, table, index)?);
+        strings.push(0);
+    }
+    copy.extend(strings);
+    Some(copy)
+}
+
+/// The caller's buffer as strftime fills it. `left` counts the bytes it
+/// still has, the final 0's included. Text goes in while there is room.
+/// A number goes in whole or not at all, and only with a byte to spare;
+/// one that doesn't fit ends the output. Both match what the probe saw
+/// MSVCRT 6 write into short buffers.
+struct Output {
+    start: u32,
+    next: u32,
     left: u32,
 }
 
-impl Out {
-    fn put(&mut self, m: &mut impl Guest, byte: u8) {
-        m.write8(self.at, byte);
-        self.at = self.at.wrapping_add(1);
-        self.left = self.left.wrapping_sub(1);
+/// The character of a digit, which for a negative number's digits falls
+/// below '0', as MSVCRT 6 writes them.
+fn digit(value: i32) -> u8 {
+    (b'0' as i32 + value) as u8
+}
+
+impl Output {
+    fn new(buffer: u32, size: u32) -> Self {
+        Output {
+            start: buffer,
+            next: buffer,
+            left: size,
+        }
     }
 
-    /// `text`, as much of it as there is room for.
-    fn text(&mut self, m: &mut impl Guest, text: &[u8]) {
+    fn byte(&mut self, m: &mut impl Memory, byte: u8) {
+        if self.left > 0 {
+            m.store(self.next, byte);
+            self.next = self.next.wrapping_add(1);
+            self.left -= 1;
+        }
+    }
+
+    fn text(&mut self, m: &mut impl Memory, text: &[u8]) {
         for &byte in text {
-            if self.left == 0 {
-                break;
-            }
-            self.put(m, byte);
+            self.byte(m, byte);
         }
     }
 
-    /// `num` in `digits` digits, or with `no_zeros` in as many as it
-    /// takes. Without room for the digits and a 0 after them, nothing is
-    /// written and there is no more room.
-    fn number(&mut self, m: &mut impl Guest, num: i32, digits: u32, no_zeros: bool) {
-        if no_zeros {
-            return self.bare_number(m, num);
-        }
-        if digits >= self.left {
+    /// `value` in `width` digits, with zeros in front. Its last `width`
+    /// digits, where it has more.
+    fn padded(&mut self, m: &mut impl Memory, value: i32, width: u32) {
+        if width >= self.left {
             self.left = 0;
             return;
         }
-        let mut n = num;
-        for i in (0..digits).rev() {
-            m.write8(self.at.wrapping_add(i), (0x30 + n % 10) as u8);
-            n /= 10;
+        for place in (0..width).rev() {
+            let digit_value = (value / 10i32.pow(place)) % 10;
+            self.byte(m, digit(digit_value));
         }
-        self.at = self.at.wrapping_add(digits);
-        self.left -= digits;
     }
 
-    /// The digits of `num`, last first while there is room for one and a
-    /// 0, then turned around. With no room for even one, the turn swaps
-    /// the byte before with the one at the place, as MSVCRT 6 does.
-    fn bare_number(&mut self, m: &mut impl Guest, num: i32) {
-        let start = self.at;
-        let mut n = num;
-        while self.left > 1 {
-            self.put(m, (0x30 + n % 10) as u8);
-            n /= 10;
-            if n <= 0 {
-                break;
-            }
+    /// `value` without leading zeros, for the '#' flag; of a negative
+    /// value, only the last digit, as MSVCRT 6 writes it. Where its digits
+    /// don't all fit with a byte to spare, its last ones go in, as many as
+    /// do. Where only the byte for the final 0 is left, MSVCRT 6 swaps the
+    /// byte before the place with the one at it, which the probe saw in
+    /// short buffers ("x%#d" in two bytes gives "*", the 'x' moved to
+    /// where the 0 then goes). This does too, but only within the buffer,
+    /// where MSVCRT 6 also changes the byte before a buffer of one.
+    fn unpadded(&mut self, m: &mut impl Memory, value: i32) {
+        if self.left == 0 {
+            return;
         }
-        let (mut low, mut high) = (start, self.at.wrapping_sub(1));
+        let mut digits = Vec::new();
+        let mut rest = value;
         loop {
-            let a = m.read8(low).unwrap_or(0);
-            let b = m.read8(high).unwrap_or(0);
-            m.write8(high, a);
-            m.write8(low, b);
-            low = low.wrapping_add(1);
-            high = high.wrapping_sub(1);
-            if low >= high {
+            digits.push(digit(rest % 10));
+            rest /= 10;
+            if rest <= 0 {
                 break;
             }
         }
+        let room = self.left.saturating_sub(1) as usize;
+        if room == 0 {
+            if self.next != self.start {
+                let before = self.next.wrapping_sub(1);
+                if let (Some(a), Some(b)) = (m.load(before), m.load(self.next)) {
+                    m.store(before, b);
+                    m.store(self.next, a);
+                }
+            }
+            return;
+        }
+        digits.truncate(room);
+        for &byte in digits.iter().rev() {
+            self.byte(m, byte);
+        }
+    }
+
+    /// The final 0 and the length, or 0 when the text didn't fit.
+    fn finish(mut self, m: &mut impl Memory) -> u32 {
+        if self.left == 0 {
+            return 0;
+        }
+        let length = self.next.wrapping_sub(self.start);
+        self.byte(m, 0);
+        length
     }
 }
 
-/// The time strftime formats and the names it takes, with '#' given for
-/// the conversion running.
-struct Expand {
-    tm: Tm,
-    lc: u32,
-    alternate: bool,
+/// What a format is expanded with: the time, the names table, and the
+/// '#' flag of the conversion being expanded.
+struct Expansion<'a> {
+    tm: &'a Tm,
+    table: u32,
+    alt: bool,
 }
 
-impl Expand {
-    /// The string of field `field`, `index` places on.
-    fn name(&self, m: &mut impl Guest, out: &mut Out, field: u32, index: i32) {
-        let field = (field as i32).wrapping_add(index) as u32;
-        if let Some(text) = lc_name(m, self.lc, field) {
+impl Expansion<'_> {
+    fn second(&self) -> i32 {
+        self.tm[0]
+    }
+    fn minute(&self) -> i32 {
+        self.tm[1]
+    }
+    fn hour(&self) -> i32 {
+        self.tm[2]
+    }
+    fn mday(&self) -> i32 {
+        self.tm[3]
+    }
+    fn month(&self) -> i32 {
+        self.tm[4]
+    }
+    fn year(&self) -> i32 {
+        self.tm[5]
+    }
+    fn wday(&self) -> i32 {
+        self.tm[6]
+    }
+    fn yday(&self) -> i32 {
+        self.tm[7]
+    }
+
+    /// The hour on a 12-hour clock, 12 for 0.
+    fn hour12(&self) -> i32 {
+        match self.hour() % 12 {
+            0 => 12,
+            h => h,
+        }
+    }
+
+    /// The week of the year, the weeks starting on Sunday, or on Monday
+    /// with `monday`; the days before the first such day are in week 0.
+    /// For days of the week and of the year out of their ranges this
+    /// gives what the probe saw MSVCRT 6 give, apart from a negative day
+    /// of the year, where MSVCRT 6 gave 0 for the one the probe tried.
+    fn week(&self, monday: bool) -> i32 {
+        // The days the week had gone on for, by the start of the year's.
+        let into_week = match (monday, self.wday()) {
+            (false, wday) => wday,
+            (true, 0) => 6,
+            (true, wday) => wday - 1,
+        };
+        self.yday() / 7 + (self.yday() % 7 >= into_week) as i32
+    }
+
+    /// Name `base + index` of the table, the index taken within its
+    /// `count` names.
+    fn put_name(&self, m: &mut impl Memory, out: &mut Output, base: u32, index: i32, count: i32) {
+        let index = index.rem_euclid(count) as u32;
+        if let Some(text) = name(m, self.table, base + index) {
             out.text(m, &text);
         }
     }
 
-    /// The conversion `spec`, as MSVCRT 6 does it. Numbers have no
-    /// leading zeros with '#'.
-    fn conversion(&mut self, m: &mut impl Guest, out: &mut Out, spec: u8) {
-        let tm = self.tm;
-        let (sec, min, hour, mday, mon, year, wday, yday, isdst) = (
-            tm[0], tm[1], tm[2], tm[3], tm[4], tm[5], tm[6], tm[7], tm[8],
-        );
-        let bare = self.alternate;
+    fn put_am_pm(&self, m: &mut impl Memory, out: &mut Output) {
+        let index = (self.hour() >= 12) as i32;
+        self.put_name(m, out, AM_PM, index, 2);
+    }
+
+    /// A number: zero-padded to `width` digits, without the zeros under
+    /// '#'.
+    fn number(&self, m: &mut impl Memory, out: &mut Output, value: i32, width: u32) {
+        if self.alt {
+            out.unpadded(m, value);
+        } else {
+            out.padded(m, value, width);
+        }
+    }
+
+    /// The format at `format`, its conversions expanded.
+    fn format(&mut self, m: &mut impl Memory, out: &mut Output, format: &[u8]) {
+        let mut rest = format;
+        while let Some((&first, after)) = rest.split_first() {
+            rest = after;
+            if first != b'%' {
+                out.byte(m, first);
+                continue;
+            }
+            self.alt = rest.first() == Some(&b'#');
+            if self.alt {
+                rest = &rest[1..];
+            }
+            let Some((&spec, after)) = rest.split_first() else {
+                break;
+            };
+            rest = after;
+            self.conversion(m, out, spec);
+        }
+    }
+
+    fn conversion(&mut self, m: &mut impl Memory, out: &mut Output, spec: u8) {
         match spec {
-            b'a' => self.name(m, out, LC_WDAY_ABBR, wday),
-            b'A' => self.name(m, out, LC_WDAY, wday),
-            b'b' => self.name(m, out, LC_MONTH_ABBR, mon),
-            b'B' => self.name(m, out, LC_MONTH, mon),
+            b'a' => self.put_name(m, out, DAY_ABBR, self.wday(), 7),
+            b'A' => self.put_name(m, out, DAY_FULL, self.wday(), 7),
+            b'b' => self.put_name(m, out, MONTH_ABBR, self.month(), 12),
+            b'B' => self.put_name(m, out, MONTH_FULL, self.month(), 12),
             b'c' => {
-                let date = if self.alternate { LC_LDATE } else { LC_SDATE };
-                self.alternate = false;
-                self.picture(m, out, date);
-                if out.left == 0 {
-                    return;
-                }
-                out.put(m, b' ');
-                self.picture(m, out, LC_TIME);
+                self.picture(m, out, self.date_format());
+                out.byte(m, b' ');
+                self.picture(m, out, TIME_FORMAT);
             }
-            b'd' => out.number(m, mday, 2, bare),
-            b'H' => out.number(m, hour, 2, bare),
-            b'I' => {
-                let h = match hour % 12 {
-                    0 => 12,
-                    h => h,
-                };
-                out.number(m, h, 2, bare);
-            }
-            b'j' => out.number(m, yday.wrapping_add(1), 3, bare),
-            b'm' => out.number(m, mon.wrapping_add(1), 2, bare),
-            b'M' => out.number(m, min, 2, bare),
-            b'p' => self.name(m, out, LC_AMPM, (hour > 11) as i32),
-            b'S' => out.number(m, sec, 2, bare),
-            b'U' | b'W' => {
-                // The week of the year, the first starting on the first
-                // Sunday (U) or Monday (W).
-                let first = match (spec, wday) {
-                    (b'U', d) => d,
-                    (_, 0) => 6,
-                    (_, d) => d.wrapping_sub(1),
-                };
-                let week = if yday < first {
-                    0
-                } else {
-                    yday / 7 + (yday % 7 >= first) as i32
-                };
-                out.number(m, week, 2, bare);
-            }
-            b'w' => out.number(m, wday, 1, bare),
-            b'x' => {
-                let date = if self.alternate { LC_LDATE } else { LC_SDATE };
-                self.alternate = false;
-                self.picture(m, out, date);
-            }
-            b'X' => {
-                self.alternate = false;
-                self.picture(m, out, LC_TIME);
-            }
-            b'y' => out.number(m, year % 100, 2, bare),
-            b'Y' => {
-                let full = (year / 100).wrapping_add(19).wrapping_mul(100);
-                out.number(m, full.wrapping_add(year % 100), 4, bare);
-            }
-            b'z' | b'Z' => {
-                let name = word(m, var_at(V_TZNAME) + 4 * (isdst != 0) as u32)
-                    .and_then(|at| string(m, at));
-                out.text(m, &name.unwrap_or_default());
-            }
-            b'%' => out.put(m, b'%'),
+            b'd' => self.number(m, out, self.mday(), 2),
+            b'H' => self.number(m, out, self.hour(), 2),
+            b'I' => self.number(m, out, self.hour12(), 2),
+            b'j' => self.number(m, out, self.yday() + 1, 3),
+            b'm' => self.number(m, out, self.month() + 1, 2),
+            b'M' => self.number(m, out, self.minute(), 2),
+            b'p' => self.put_am_pm(m, out),
+            b'S' => self.number(m, out, self.second(), 2),
+            b'U' => self.number(m, out, self.week(false), 2),
+            b'w' => self.number(m, out, self.wday(), 1),
+            b'W' => self.number(m, out, self.week(true), 2),
+            b'x' => self.picture(m, out, self.date_format()),
+            b'X' => self.picture(m, out, TIME_FORMAT),
+            b'y' => self.number(m, out, self.year() % 100, 2),
+            b'Y' => self.number(m, out, self.year() + 1900, 4),
+            b'z' | b'Z' => self.time_zone(m, out),
+            b'%' => out.byte(m, b'%'),
             _ => {}
         }
     }
 
-    /// The date or time format of field `field`, a Windows picture. A run
-    /// of a letter is a conversion: d and dd the day, ddd and dddd its
-    /// names; M and MM the month, MMM and MMMM its names; yy and yyyy the
-    /// year; h, hh, H and HH the hour; m and mm the minutes; s and ss the
-    /// seconds; as many bytes of AM or PM as there are t's, past its end
-    /// too; and a or A AM or PM, "am/pm" and "a/p" at the end of the
-    /// picture with it. Quotes take what they enclose as it is; another run
-    /// is its first byte as it is, then the rest. Its numbers keep their
-    /// zeros: strftime gives no '#' here.
-    fn picture(&mut self, m: &mut impl Guest, out: &mut Out, field: u32) {
-        let Some(format) = lc_name(m, self.lc, field) else {
+    /// The long date format under '#', else the short one.
+    fn date_format(&self) -> u32 {
+        if self.alt { LONG_DATE } else { SHORT_DATE }
+    }
+
+    /// The name of the time zone, `_tzname`'s standard or daylight one.
+    fn time_zone(&self, m: &mut impl Memory, out: &mut Output) {
+        let which = (self.tm[8] > 0) as u32;
+        if let Some(at) = m.load32(var_at(V_TZNAME) + 4 * which)
+            && let Some(text) = m.load_str(at)
+        {
+            out.text(m, &text);
+        }
+    }
+
+    /// The table's format `index` in Windows' date and time pictures:
+    /// runs of d, M, y, h, H, m, s and t stand for the parts of the time,
+    /// 'a' or a closing "am/pm" or "a/p" for AM or PM, and text between
+    /// single quotes is written as it is. The rules, longer runs and
+    /// unknown letters included, are those the probe saw MSVCRT 6 follow.
+    fn picture(&self, m: &mut impl Memory, out: &mut Output, index: u32) {
+        let Some(at) = m.load32(self.table.wrapping_add(4 * index)) else {
             return;
         };
+        let Some(picture) = m.load_str(at) else {
+            return;
+        };
+        // The numbers of a picture keep their zeros under '#' too.
+        let plain = Expansion {
+            tm: self.tm,
+            table: self.table,
+            alt: false,
+        };
+        let mut quoted = false;
         let mut i = 0;
-        while i < format.len() && out.left != 0 {
-            let c = format[i];
-            let run = format[i..].iter().take_while(|&&b| b == c).count();
-            let next = i + run;
-            let spec = match (c, run) {
-                (b'd', 1 | 2) => Some(b'd'),
-                (b'd', 3) => Some(b'a'),
-                (b'd', 4) => Some(b'A'),
-                (b'M', 1 | 2) => Some(b'm'),
-                (b'M', 3) => Some(b'b'),
-                (b'M', 4) => Some(b'B'),
-                (b'y', 2) => Some(b'y'),
-                (b'y', 4) => Some(b'Y'),
-                (b'h', 1 | 2) => Some(b'I'),
-                (b'H', 1 | 2) => Some(b'H'),
-                (b'm', 1 | 2) => Some(b'M'),
-                (b's', 1 | 2) => Some(b'S'),
-                _ => None,
-            };
-            if let Some(spec) = spec {
-                self.conversion(m, out, spec);
-                i = next;
+        while i < picture.len() {
+            let c = picture[i];
+            if c == b'\'' {
+                quoted = !quoted;
+                i += 1;
                 continue;
             }
+            if quoted {
+                out.byte(m, c);
+                i += 1;
+                continue;
+            }
+            let run = picture[i..].iter().take_while(|&&b| b == c).count();
+            i += run;
             match c {
+                b'd' => plain.name_or_number(m, out, c, run, DAY_ABBR, DAY_FULL),
+                b'M' => plain.name_or_number(m, out, c, run, MONTH_ABBR, MONTH_FULL),
+                b'y' => {
+                    // "yy" and "yyyy"; the y's beyond the longest of them
+                    // that fits the run are written as they are.
+                    let width = if run >= 4 { 4 } else { 2 * (run / 2) };
+                    for _ in width..run {
+                        out.byte(m, b'y');
+                    }
+                    match width {
+                        4 => plain.number(m, out, self.year() + 1900, 4),
+                        2 => plain.number(m, out, self.year() % 100, 2),
+                        _ => {}
+                    }
+                }
+                b'h' | b'H' | b'm' | b's' => {
+                    for _ in 2..run {
+                        out.byte(m, c);
+                    }
+                    let value = match c {
+                        b'h' => self.hour12(),
+                        b'H' => self.hour(),
+                        b'm' => self.minute(),
+                        _ => self.second(),
+                    };
+                    plain.number(m, out, value, 2);
+                }
                 b't' => {
-                    let field = LC_AMPM + (self.tm[2] > 11) as u32;
-                    if let Some(at) = word(m, self.lc.wrapping_add(4 * field)) {
+                    // The first `run` bytes of the designator, whatever
+                    // its length.
+                    let index = AM_PM + (self.hour() >= 12) as u32;
+                    if let Some(at) = m.load32(self.table.wrapping_add(4 * index)) {
                         for k in 0..run as u32 {
-                            if out.left == 0 {
-                                break;
+                            match m.load(at.wrapping_add(k)) {
+                                Some(byte) => out.byte(m, byte),
+                                None => break,
                             }
-                            let byte = m.read8(at.wrapping_add(k)).unwrap_or(0);
-                            out.put(m, byte);
                         }
                     }
-                    i = next;
                 }
                 b'a' | b'A' => {
-                    let rest = &format[i..];
-                    i = if rest.eq_ignore_ascii_case(b"am/pm") {
-                        i + 5
-                    } else if rest.eq_ignore_ascii_case(b"a/p") {
-                        i + 3
-                    } else {
-                        next
-                    };
-                    self.conversion(m, out, b'p');
-                }
-                b'\'' if run % 2 == 0 => i = next,
-                b'\'' => {
-                    i = next;
-                    while i < format.len() && out.left != 0 {
-                        if format[i] == b'\'' {
-                            i += 1;
-                            break;
-                        }
-                        out.put(m, format[i]);
-                        i += 1;
+                    let tail = &picture[i - run..];
+                    let closing =
+                        tail.eq_ignore_ascii_case(b"am/pm") || tail.eq_ignore_ascii_case(b"a/p");
+                    self.put_am_pm(m, out);
+                    if closing {
+                        return;
                     }
                 }
                 _ => {
-                    out.put(m, c);
-                    i += 1;
+                    for _ in 0..run {
+                        out.byte(m, c);
+                    }
                 }
             }
         }
     }
+
+    /// A run of `run` d's or M's: one or two for the number in two digits,
+    /// three for the short name, four for the long one. Beyond four the
+    /// extra letters are written as they are, then the long name.
+    fn name_or_number(
+        &self,
+        m: &mut impl Memory,
+        out: &mut Output,
+        letter: u8,
+        run: usize,
+        abbr: u32,
+        full: u32,
+    ) {
+        let (value, index, count) = if letter == b'd' {
+            (self.mday(), self.wday(), 7)
+        } else {
+            (self.month() + 1, self.month(), 12)
+        };
+        for _ in 4..run {
+            out.byte(m, letter);
+        }
+        match run {
+            1 | 2 => self.number(m, out, value, 2),
+            3 => self.put_name(m, out, abbr, index, count),
+            _ => self.put_name(m, out, full, index, count),
+        }
+    }
 }
 
-/// strftime's work: the format `format` and the time `tm` with the names
-/// of the names block at `lc` (the "C" locale's for 0), into
-/// `size` bytes at `buffer`. The length written, and a 0 after it; or 0,
-/// with as much as there was room for and no 0, when it doesn't fit.
-fn format_time(m: &mut impl Guest, buffer: u32, size: u32, format: &[u8], tm: &Tm, lc: u32) -> u32 {
-    let mut out = Out {
-        at: buffer,
-        left: size,
+/// Expand `format` for `tm` with the names table at `table` (0 for the
+/// current one) into the `size` bytes at `buffer`: the length written,
+/// or 0 when the text and its 0 didn't fit.
+fn expand(m: &mut impl Memory, buffer: u32, size: u32, format: &[u8], tm: &Tm, table: u32) -> u32 {
+    let mut out = Output::new(buffer, size);
+    let mut expansion = Expansion {
+        tm,
+        table: table_or_current(table),
+        alt: false,
     };
-    let mut e = Expand {
-        tm: *tm,
-        lc: lc_time(lc),
-        alternate: false,
-    };
-    let mut i = 0;
-    while out.left > 0 && i < format.len() {
-        if format[i] != b'%' {
-            out.put(m, format[i]);
-            i += 1;
-            continue;
-        }
-        i += 1;
-        e.alternate = format.get(i) == Some(&b'#');
-        if e.alternate {
-            i += 1;
-        }
-        let spec = format.get(i).copied().unwrap_or(0);
-        e.conversion(m, &mut out, spec);
-        i += 1;
-    }
-    if out.left == 0 {
-        return 0;
-    }
-    m.write8(out.at, 0);
-    size - out.left
+    expansion.format(m, &mut out, format);
+    out.finish(m)
 }
 
-/// strftime(buffer, size, format, tm): `_Strftime` with the current
-/// locale's names.
+/// strftime(buffer, size, format, tm).
 pub fn strftime(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[buffer, size, format, at] = args else {
         unreachable!()
     };
-    big_strftime(cpu, &[buffer, size, format, at, 0])
+    let format = cstr(cpu, format)?;
+    let tm = read_tm(cpu, at)?;
+    Some(expand(cpu, buffer, size, &format, &tm, 0))
 }
 
-/// _Strftime(buffer, size, format, tm, names): strftime with the names of
-/// the names block `names`, the current locale's for NULL.
+/// _Strftime(buffer, size, format, tm, names): strftime with a names
+/// table of the caller's, or the current one for NULL.
 pub fn big_strftime(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[buffer, size, format, at, lc] = args else {
+    let &[buffer, size, format, at, table] = args else {
         unreachable!()
     };
     let format = cstr(cpu, format)?;
     let tm = read_tm(cpu, at)?;
-    let written = format_time(cpu, buffer, size, &format, &tm, lc);
-    if cpu.bus.guest_faulted() {
-        return None;
-    }
-    Some(written)
+    Some(expand(cpu, buffer, size, &format, &tm, table))
 }
 
-/// wcsftime(buffer, size, format, tm), with wide strings: the format made
-/// ANSI, formatted into a block of twice `size` bytes from the heap, and
-/// the text made wide by mbstowcs(buffer, text, size), as MSVCRT 6 does.
-/// So a text of `size` characters or more, up to twice that, gives its
-/// first `size` characters with no 0 after them, and `size`. 0 when the
-/// text doesn't fit the block, or malloc fails.
+/// errno for a character with no byte in the code page.
+const EILSEQ: u32 = 42;
+
+/// wcsftime(buffer, size, format, tm): strftime for wide strings, `size`
+/// counted in characters. As the probe saw MSVCRT 6 do it: the format is
+/// made ANSI, a character with no byte in the code page giving 0 and
+/// errno EILSEQ; the text is what strftime gives in twice `size` bytes,
+/// and 0 when that is 0, with the buffer untouched; of that text, the
+/// first `size` characters are made wide, with a 0 after them where
+/// there is room, and their count is returned. So a text of `size` to
+/// `2 * size - 1` characters is cut to `size` with no 0.
 pub fn wcsftime(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[buffer, size, format, at] = args else {
         unreachable!()
     };
-    let format: Vec<u8> = wstr(cpu, format)?
-        .into_iter()
-        .map(|c| narrow(c).unwrap_or(b'?'))
-        .collect();
+    let format = wstr(cpu, format)?;
     let tm = read_tm(cpu, at)?;
-    if size == 0 {
-        return Some(0);
-    }
-    let room = size.wrapping_mul(2);
-    let Some(scratch) = heap_alloc(cpu, room) else {
+    let Some(wide) = wide_text(cpu, size, &format, &tm) else {
+        set_errno(cpu, EILSEQ);
         return Some(0);
     };
-    let written = format_time(cpu, scratch, room, &format, &tm, 0);
-    let text = bytes(cpu, scratch, written);
-    heap_free(cpu, scratch);
-    if written == 0 {
-        return Some(0);
+    let count = wide
+        .iter()
+        .take_while(|&&c| c != 0)
+        .count()
+        .min(size as usize);
+    let raw: Vec<u8> = wide.iter().flat_map(|c| c.to_le_bytes()).collect();
+    put(cpu, buffer, &raw)?;
+    Some(count as u32)
+}
+
+/// What wcsftime writes for the wide `format` in a buffer of `size`
+/// characters: the text's characters up to its 0, and the 0 where there
+/// is room for it; nothing when strftime gives 0. None for a format with
+/// a character the code page has no byte for.
+fn wide_text(m: &mut impl Memory, size: u32, format: &[u16], tm: &Tm) -> Option<Vec<u16>> {
+    let format: Vec<u8> = format.iter().map(|&c| narrow(c)).collect::<Option<_>>()?;
+    let Some(text) = text_of(m, size.saturating_mul(2), &format, tm) else {
+        return Some(Vec::new());
+    };
+    let mut wide: Vec<u16> = text
+        .into_iter()
+        .take_while(|&b| b != 0)
+        .take(size as usize)
+        .map(widen)
+        .collect();
+    if wide.len() < size as usize {
+        wide.push(0);
     }
-    let text: Vec<u16> = text?.into_iter().take(size as usize).map(widen).collect();
-    if (text.len() as u32) < size {
-        put_wstr(cpu, buffer, &text)?;
-    } else {
-        let raw: Vec<u8> = text.iter().flat_map(|c| c.to_le_bytes()).collect();
-        put(cpu, buffer, &raw)?;
+    Some(wide)
+}
+
+/// Memory of the host's for strftime to write into, over the memory it
+/// reads the names from.
+struct Scratch<'a, M: Memory> {
+    names: &'a mut M,
+    base: u32,
+    bytes: Vec<u8>,
+}
+
+impl<M: Memory> Memory for Scratch<'_, M> {
+    fn load(&mut self, at: u32) -> Option<u8> {
+        match at.checked_sub(self.base) {
+            Some(i) if (i as usize) < self.bytes.len() => Some(self.bytes[i as usize]),
+            _ => self.names.load(at),
+        }
     }
-    Some(text.len() as u32)
+
+    fn store(&mut self, at: u32, byte: u8) {
+        if let Some(i) = at.checked_sub(self.base)
+            && let Some(slot) = self.bytes.get_mut(i as usize)
+        {
+            *slot = byte;
+        }
+    }
+}
+
+/// The text strftime gives for `format` in a buffer of `size` bytes, or
+/// None when it gives 0.
+fn text_of(m: &mut impl Memory, size: u32, format: &[u8], tm: &Tm) -> Option<Vec<u8>> {
+    // Addresses no names table or string of the program's is at.
+    const BASE: u32 = 0xFFFF_0000;
+    let size = size.min(0xFFFF);
+    let mut scratch = Scratch {
+        names: m,
+        base: BASE,
+        bytes: vec![0; size as usize],
+    };
+    let length = expand(&mut scratch, BASE, size, format, tm, 0);
+    scratch.bytes.truncate(length as usize);
+    (length != 0).then_some(scratch.bytes)
 }
 
 #[cfg(test)]
@@ -533,12 +692,12 @@ mod tests {
     #[derive(Default)]
     struct Bytes(HashMap<u32, u8>);
 
-    impl Guest for Bytes {
-        fn read8(&mut self, at: u32) -> Option<u8> {
+    impl Memory for Bytes {
+        fn load(&mut self, at: u32) -> Option<u8> {
             Some(self.0.get(&at).copied().unwrap_or(0))
         }
 
-        fn write8(&mut self, at: u32, byte: u8) {
+        fn store(&mut self, at: u32, byte: u8) {
             self.0.insert(at, byte);
         }
     }
@@ -546,8 +705,14 @@ mod tests {
     impl Bytes {
         fn put(&mut self, at: u32, data: &[u8]) {
             for (i, &byte) in data.iter().enumerate() {
-                self.write8(at + i as u32, byte);
+                self.store(at + i as u32, byte);
             }
+        }
+
+        fn get(&mut self, at: u32, len: usize) -> Vec<u8> {
+            (0..len as u32)
+                .map(|i| self.load(at + i).unwrap())
+                .collect()
         }
     }
 
@@ -562,7 +727,7 @@ mod tests {
         [1, 1, 1, 1, 6, 205, 1, 6, 0],
     ];
 
-    /// The fixture's escapes undone.
+    /// The fixtures' escapes undone: \xNN is the byte NN.
     fn unescape(text: &str) -> Vec<u8> {
         let bytes = text.as_bytes();
         let mut out = Vec::new();
@@ -579,9 +744,19 @@ mod tests {
         out
     }
 
-    /// A made-up locale's names, laid out as the probe laid them out:
-    /// the strings one after another, so that a format that reads past
-    /// one's end reads the next.
+    /// A memory with the "C" locale's table and empty time zone names, as
+    /// on the probe's machine.
+    fn memory() -> Bytes {
+        let mut m = Bytes::default();
+        let c = var_at(V_LC_TIME_C);
+        m.put(c, &lc_time_c(c));
+        m.put(var_at(V_TZNAME), &[0, 0x90, 0, 0, 0, 0x90, 0, 0]);
+        m
+    }
+
+    /// A made-up names table at `at`, as the probe made it: the strings
+    /// one after another, so a picture that reads past one's end reads
+    /// the next, then "TAIL". The table's address.
     fn made_up(m: &mut Bytes, at: u32, formats: [&[u8]; 3]) -> u32 {
         let table = at + 0x1000;
         let mut names: Vec<Vec<u8>> = Vec::new();
@@ -593,32 +768,36 @@ mod tests {
         names.extend(formats.iter().map(|f| f.to_vec()));
         names.push(b"TAIL".to_vec());
         let mut next = at;
-        for (i, name) in names.iter().enumerate() {
-            if i < LC_FIELDS as usize {
+        for (i, text) in names.iter().enumerate() {
+            if i < NAME_COUNT as usize {
                 m.put(table + 4 * i as u32, &next.to_le_bytes());
             }
-            m.put(next, name);
-            m.write8(next + name.len() as u32, 0);
-            next += name.len() as u32 + 1;
+            m.put(next, text);
+            m.store(next + text.len() as u32, 0);
+            next += text.len() as u32 + 1;
         }
         table
     }
 
-    /// strftime and _Strftime give what MSVCRT 6 gave the probe, byte for
-    /// byte, short buffers and the bytes around them included.
-    #[test]
-    fn as_visual_cpp_6() {
-        const BUFFER: u32 = 0x30000;
+    const BUFFER: u32 = 0x30000;
+
+    /// A fixture's time: an index into TIMES, or the nine fields.
+    fn time_of(column: &str) -> Tm {
+        if let Ok(index) = column.parse::<usize>() {
+            return TIMES[index];
+        }
+        let fields: Vec<i32> = column.split(',').map(|f| f.parse().unwrap()).collect();
+        fields.try_into().unwrap()
+    }
+
+    /// The failures of the strftime fixture `fixture` (see
+    /// strftime_vc6.txt), as lines.
+    fn check_fixture(fixture: &str) -> Vec<String> {
         let mut failed = Vec::new();
-        let fixture = include_str!("strftime_vc6.txt");
         for line in fixture.lines().filter(|l| !l.starts_with('#')) {
             let f: Vec<&str> = line.split('\t').collect();
-            let mut m = Bytes::default();
-            let c = var_at(V_LC_TIME_C);
-            m.put(c, &lc_time_c(c));
-            // The time zone's names are empty, as on the probe's machine.
-            m.put(var_at(V_TZNAME), &[0, 0x90, 0, 0, 0, 0x90, 0, 0]);
-            let lc = match f[2] {
+            let mut m = memory();
+            let table = match f[2] {
                 "-" => 0,
                 _ => made_up(
                     &mut m,
@@ -627,13 +806,11 @@ mod tests {
                 ),
             };
             m.put(BUFFER, &[b'*'; 200]);
-            let tm = &TIMES[f[0].parse::<usize>().unwrap()];
+            let tm = time_of(f[0]);
             let size = f[1].parse().unwrap();
-            let written = format_time(&mut m, BUFFER, size, &unescape(f[5]), tm, lc);
+            let written = expand(&mut m, BUFFER, size, &unescape(f[5]), &tm, table);
             let expected = unescape(f[7]);
-            let got: Vec<u8> = (0..expected.len() as u32)
-                .map(|i| m.read8(BUFFER + i).unwrap())
-                .collect();
+            let got = m.get(BUFFER, expected.len());
             if written != f[6].parse::<u32>().unwrap() || got != expected {
                 failed.push(format!(
                     "{line}: {written} {:?}",
@@ -641,10 +818,127 @@ mod tests {
                 ));
             }
         }
+        failed
+    }
+
+    /// strftime and _Strftime give what MSVCRT 6 gave the probe, byte for
+    /// byte, short buffers and the bytes after the text included.
+    #[test]
+    fn as_visual_cpp_6() {
+        let failed = check_fixture(include_str!("strftime_vc6.txt"));
         assert!(failed.is_empty(), "{}", failed.join("\n"));
     }
 
-    /// The "C" locale's names fit their variable.
+    /// The same for the second probe's cases: '#' numbers in short
+    /// buffers, numbers out of range, formats ending in '%', pictures
+    /// under '#', and more AM/PM and quote forms.
+    #[test]
+    fn as_visual_cpp_6_more() {
+        let failed = check_fixture(include_str!("strftime_vc6_more.txt"));
+        assert!(failed.is_empty(), "{}", failed.join("\n"));
+    }
+
+    /// Where the built-in runtime gives something else than MSVCRT 6 did
+    /// for the probe, by choice.
+    #[test]
+    fn own_choices() {
+        let mut m = memory();
+        // A '%' at the format's end ends it; MSVCRT 6 reads on past the
+        // format's 0.
+        m.put(BUFFER, &[b'*'; 8]);
+        assert_eq!(expand(&mut m, BUFFER, 8, b"%%%", &TIMES[0], 0), 1);
+        assert_eq!(m.get(BUFFER, 2), b"%\0");
+        // A negative day of the year: MSVCRT 6 gave week 0 for day -9 of
+        // a Saturday; this gives week -1 ("0/").
+        let tm = [0, 0, -13, 1, 0, -21, 6, -9, 0];
+        assert_eq!(expand(&mut m, BUFFER, 8, b"%U%W", &tm, 0), 4);
+        assert_eq!(m.get(BUFFER, 5), b"0/0/\0");
+        // "%#d" in one byte leaves the byte before the buffer alone,
+        // where MSVCRT 6 swaps it with the buffer's first.
+        m.put(BUFFER - 1, b"B*");
+        assert_eq!(expand(&mut m, BUFFER, 1, b"%#d", &TIMES[1], 0), 0);
+        assert_eq!(m.get(BUFFER - 1, 2), b"B\0");
+    }
+
+    /// The fixture's \uNNNN escapes undone.
+    fn unescape_wide(text: &str) -> Vec<u16> {
+        let mut out = Vec::new();
+        let mut rest = text;
+        while let Some(c) = rest.chars().next() {
+            if let Some(hex) = rest.strip_prefix(r"\u") {
+                out.push(u16::from_str_radix(&hex[..4], 16).unwrap());
+                rest = &hex[4..];
+            } else {
+                out.push(c as u16);
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+        out
+    }
+
+    /// wcsftime gives what MSVCRT 6 gave the probe: the value, errno
+    /// (EILSEQ or untouched) and the buffer.
+    #[test]
+    fn wcsftime_as_visual_cpp_6() {
+        let mut failed = Vec::new();
+        for line in include_str!("wcsftime_vc6.txt").lines() {
+            if line.starts_with('#') {
+                continue;
+            }
+            let f: Vec<&str> = line.split('\t').collect();
+            let size: u32 = f[1].parse().unwrap();
+            let mut buffer = vec![0x2A2A; 80];
+            let (value, errno) =
+                match wide_text(&mut memory(), size, &unescape_wide(f[0]), &TIMES[1]) {
+                    Some(wide) => {
+                        buffer[..wide.len()].copy_from_slice(&wide);
+                        (wide.iter().take_while(|&&c| c != 0).count() as u32, 0)
+                    }
+                    None => (0, EILSEQ),
+                };
+            let expected = unescape_wide(f[4]);
+            if value != f[2].parse::<u32>().unwrap()
+                || errno != f[3].parse::<u32>().unwrap()
+                || buffer[..expected.len()] != expected[..]
+            {
+                failed.push(format!("{line}: {value} {errno} {:?}", &buffer[..20]));
+            }
+        }
+        assert!(failed.is_empty(), "{}", failed.join("\n"));
+    }
+
+    /// _Getdays' text, and _Gettnames' copy: where each string is from
+    /// the copy's start and what it says, as the probe saw them, but for
+    /// the time format, which this copy has.
+    #[test]
+    fn names_as_visual_cpp_6() {
+        let mut m = memory();
+        let days = colon_list(&mut m, DAY_ABBR, DAY_FULL, 7).unwrap();
+        assert_eq!(
+            days,
+            b":Sun:Sunday:Mon:Monday:Tue:Tuesday:Wed:Wednesday:Thu:Thursday\
+              :Fri:Friday:Sat:Saturday"
+        );
+        let months = colon_list(&mut m, MONTH_ABBR, MONTH_FULL, 12).unwrap();
+        assert_eq!(months.len() + 1, 135);
+        let copy = table_copy(&mut m, var_at(V_LC_TIME_C)).unwrap();
+        let offsets = [
+            172, 183, 194, 206, 220, 233, 244, 176, 187, 198, 210, 224, 237, 248, 257, 269, 282,
+            292, 302, 310, 319, 328, 339, 353, 365, 378, 261, 273, 286, 296, 306, 314, 323, 332,
+            343, 357, 369, 382, 391, 394, 397, 404, 424,
+        ];
+        let names: Vec<&str> = c_names().collect();
+        for (index, &offset) in offsets.iter().enumerate() {
+            let pointer = u32::from_le_bytes(copy[4 * index..][..4].try_into().unwrap());
+            assert_eq!(pointer, offset, "name {index}");
+            let text = &copy[offset as usize..][..names[index].len() + 1];
+            assert_eq!(&text[..names[index].len()], names[index].as_bytes());
+            assert_eq!(text[names[index].len()], 0);
+        }
+        assert_eq!(copy.len(), 432);
+    }
+
+    /// The "C" locale's table fits its variable.
     #[test]
     fn c_locale_fits() {
         assert!(lc_time_c(0).len() as u32 <= LC_TIME_C_SIZE);
