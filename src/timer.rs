@@ -10,7 +10,7 @@
 //!
 //! Time is measured in PIT input clock ticks (1.193182 MHz).
 
-use crate::autospeed::AutoSpeed;
+use crate::autospeed::{AutoSpeed, Backlog};
 use crate::bus::Bus;
 use crate::video::crt::CrtTiming;
 use std::time::Duration;
@@ -632,6 +632,8 @@ pub struct Pacer {
     lost_ns: u64,
     last_ns: u64,
     ran: bool,
+    /// Of `lost_ns`, what was lag rather than a stall, which `Auto` goes by.
+    backlog: Backlog,
     /// Whether the frames run by the wall clock (`batch_end`). A frontend
     /// that runs them at its own pace (libretro) drops nothing, so that
     /// `lost_ns` says nothing and the host estimate is all there is.
@@ -668,6 +670,7 @@ impl Pacer {
             lost_ns: 0,
             last_ns: 0,
             ran: false,
+            backlog: Backlog::default(),
             wall_paced: false,
             anchor_wall: now,
             anchor_ticks: 0,
@@ -1005,14 +1008,18 @@ impl Pacer {
                     // settings window, a rewind) runs nothing and falls
                     // behind the wall clock by the pause: no batch_end
                     // moves the anchor until it resumes.
-                    if self.ran
-                        && let Some(cut) = self.auto.falling_behind(bus, behind_ns, self.lost_ns)
-                    {
-                        return Some(cut);
+                    if self.ran {
+                        let lag = self.backlog.frame(behind_ns, self.lost_ns, current);
+                        if let Some(cut) = self.auto.falling_behind(bus, lag) {
+                            return Some(cut);
+                        }
                     }
-                    return self.auto.update(bus, protected, host_max, self.lost_ns);
+                    let lag_ns = self.backlog.lag_ns();
+                    return self.auto.update(bus, protected, host_max, lag_ns);
                 }
-                let next = self.auto.update(bus, protected, host_max, self.lost_ns);
+                let next = self
+                    .auto
+                    .update(bus, protected, host_max, self.backlog.lag_ns());
                 // Nothing tells that the host fell behind, but for its
                 // estimate: a heavier scene than it keeps up with at this
                 // speed.
