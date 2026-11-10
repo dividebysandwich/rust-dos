@@ -486,7 +486,11 @@ pub fn big_strftime(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// wcsftime(buffer, size, format, tm), with wide strings: the format made
-/// ANSI, formatted on a block of the heap, the text made wide.
+/// ANSI, formatted into a block of twice `size` bytes from the heap, and
+/// the text made wide by mbstowcs(buffer, text, size), as MSVCRT 6 does.
+/// So a text of `size` characters or more, up to twice that, gives its
+/// first `size` characters with no 0 after them, and `size`. 0 when the
+/// text doesn't fit the block, or malloc fails.
 pub fn wcsftime(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[buffer, size, format, at] = args else {
         unreachable!()
@@ -499,15 +503,23 @@ pub fn wcsftime(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if size == 0 {
         return Some(0);
     }
-    let scratch = heap_alloc(cpu, size)?;
-    let written = format_time(cpu, scratch, size, &format, &tm, 0);
+    let room = size.wrapping_mul(2);
+    let Some(scratch) = heap_alloc(cpu, room) else {
+        return Some(0);
+    };
+    let written = format_time(cpu, scratch, room, &format, &tm, 0);
     let text = bytes(cpu, scratch, written);
     heap_free(cpu, scratch);
     if written == 0 {
         return Some(0);
     }
-    let text: Vec<u16> = text?.into_iter().map(widen).collect();
-    put_wstr(cpu, buffer, &text)?;
+    let text: Vec<u16> = text?.into_iter().take(size as usize).map(widen).collect();
+    if (text.len() as u32) < size {
+        put_wstr(cpu, buffer, &text)?;
+    } else {
+        let raw: Vec<u8> = text.iter().flat_map(|c| c.to_le_bytes()).collect();
+        put(cpu, buffer, &raw)?;
+    }
     Some(text.len() as u32)
 }
 

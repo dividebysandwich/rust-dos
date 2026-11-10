@@ -126,10 +126,11 @@ pub fn fd_flags(cpu: &mut Cpu, fd: u32) -> u32 {
 /// The handle and flags of the open descriptor `fd`; None, errno EBADF,
 /// if it isn't one.
 pub fn fd_info(cpu: &mut Cpu, fd: u32) -> Option<(u32, u32)> {
-    if fd_flags(cpu, fd) & FOPEN != 0
+    let flags = fd_flags(cpu, fd);
+    if flags & FOPEN != 0
         && let Some(handle) = entry(cpu, fd).and_then(|at| read32(cpu, at))
     {
-        return Some((handle, fd_flags(cpu, fd)));
+        return Some((handle, flags));
     }
     set_errno(cpu, EBADF);
     set_doserrno(cpu, 0);
@@ -156,7 +157,7 @@ fn set_flags(cpu: &mut Cpu, fd: u32, flags: u32) {
     }
 }
 
-/// Descriptor `fd`'s handle and flags.
+/// The handle and flags of the descriptor whose `ioinfo` is at `at`.
 fn set_fd(cpu: &mut Cpu, at: u32, handle: u32, flags: u32) {
     cpu.bus.guest_write_32(at, handle);
     cpu.bus.guest_write_8(at + 4, flags as u8);

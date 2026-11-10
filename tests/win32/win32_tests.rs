@@ -4915,6 +4915,72 @@ fn msvcrt_has_what_msvcp60_msvcirt_and_mfc42_import() {
     );
 }
 
+/// wcsftime as MSVCRT 6's: it formats into twice `size` bytes, then
+/// mbstowcs makes at most `size` wide characters of the text. "Wed 02"
+/// in 4 gives "Wed " with no 0 and 4; in 8 the text and its 0, and 6; in
+/// 3 nothing, as 6 bytes leave no room for the 0.
+#[test]
+fn msvcrt_wcsftime_takes_twice_its_size() {
+    let crt: &[&str] = &["wcsftime", "memcmp"];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.DLL", crt)];
+    fn wide(text: &str) -> Vec<u8> {
+        text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+    }
+    let mut data = vec![0; 0x100];
+    put(&mut data, 0x00, &wide("%a %d\0"));
+    // 2 Jan 1980, a Wednesday.
+    let tm: Vec<u8> = [5u32, 3, 0, 2, 0, 80, 3, 1, 0]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    put(&mut data, 0x20, &tm);
+    put(&mut data, 0x50, &wide("xxxxxxxxxxxxxxxx"));
+    put(&mut data, 0x70, &wide("xxxxxxxxxxxxxxxx"));
+    put(&mut data, 0x90, &wide("xxxxxxxxxxxxxxxx"));
+    put(&mut data, 0xB0, &wide("Wed x"));
+    put(&mut data, 0xC0, &wide("Wed 02\0"));
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        use Arg::I;
+        let c = |name: &str| l.import(crt.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| I(l.at(offset) as u32);
+        a.xor(ebx, ebx)?;
+        let cases: &[(u32, u32, u32, u32, u32)] = &[
+            // (buffer, size, result, expected text, its bytes)
+            (0x50, 4, 4, 0xB0, 10),
+            (0x70, 8, 6, 0xC0, 14),
+            (0x90, 3, 0, 0, 0),
+        ];
+        for (i, &(buffer, size, result, expected, len)) in cases.iter().enumerate() {
+            let bit = 2 * i as u32;
+            call_with(a, c("wcsftime"), &[at(buffer), I(size), at(0x00), at(0x20)])?;
+            a.add(esp, 16)?;
+            a.cmp(eax, result)?;
+            check(a, false, bit)?;
+            if len != 0 {
+                call_with(a, c("memcmp"), &[at(buffer), at(expected), I(len)])?;
+                a.add(esp, 12)?;
+                a.test(eax, eax)?;
+                check(a, false, bit + 1)?;
+            } else {
+                // Nothing written.
+                a.cmp(dword_ptr(l.at(buffer)), 0x0078_0078)?;
+                check(a, false, bit + 1)?;
+            }
+        }
+        a.mov(eax, ebx)?;
+        a.xor(eax, 0x55)?;
+        a.ret()
+    });
+    let (code, text) = run_files("msvcrt_wcsftime", &[("T.EXE", exe)]);
+    assert_eq!(
+        code ^ 0x55,
+        0x3F,
+        "the checks that failed: {:06b}, {}",
+        !(code ^ 0x55) & 0x3F,
+        text
+    );
+}
+
 /// The last FreeLibrary of MSVCRT.DLL, as a probe measured it on Windows
 /// 98 SE. A stream left open isn't flushed and its file stays open, so
 /// its handle still works and a load of a file with no sharing fails.

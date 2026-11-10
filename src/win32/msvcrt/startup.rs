@@ -10,17 +10,6 @@ use crate::win32::{object, seh};
 
 const EOF: u32 = u32::MAX;
 
-/// More places in the `state` variable (see `S_APP_TYPE`): the new
-/// handler, the locale (0 "C", 1 the system's), how many `__finally`
-/// blocks an unwind is running, and the locale's texts and `lconv`.
-const S_NEW_HANDLER: u32 = 0x40;
-const S_LOCALE: u32 = 0x38;
-const S_ABNORMAL: u32 = 0x3C;
-const S_LOCALE_C: u32 = 0x100;
-const S_LOCALE_NATIVE: u32 = 0x108;
-const S_LCONV: u32 = 0x130;
-const S_LCONV_TEXT: u32 = 0x160;
-
 const NATIVE_LOCALE: &[u8] = b"English_United States.1252";
 
 // Arguments and the environment.

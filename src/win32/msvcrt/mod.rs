@@ -208,7 +208,8 @@ static VARS: &[Var] = &[
 /// `atexit` table (its address, count and room), `_set_new_mode`'s mode,
 /// the handler `__setusermatherr` set, `signal`'s handlers (one for each
 /// signal number below 32), `_set_error_mode`'s mode and `_onexit`'s
-/// `__dllonexit` lock.
+/// `__dllonexit` lock. They are all here, in the order of their places,
+/// so that a new one can't take a place another one has (#898).
 const S_APP_TYPE: u32 = 0x00;
 const S_ATEXIT: u32 = 0x04;
 const S_ATEXIT_COUNT: u32 = 0x08;
@@ -226,10 +227,22 @@ const S_START: u32 = 0x2C;
 const S_TMPNAM_COUNT: u32 = 0x30;
 /// The handle of the runtime's heap.
 const S_HEAP: u32 = 0x34;
+/// The locale (0 "C", 1 the system's), and how many `__finally` blocks
+/// an unwind is running (`startup.rs`).
+const S_LOCALE: u32 = 0x38;
+const S_ABNORMAL: u32 = 0x3C;
+/// The handler `_set_new_handler` set.
+const S_NEW_HANDLER: u32 = 0x40;
 /// Whether __crtCompareStringA and __crtLCMapStringA have tried the wide
 /// functions (`string.rs`).
 const S_CRT_TRIED_WIDE: u32 = 0x44;
 const S_SIGNALS: u32 = 0x80;
+/// The locale's names and `lconv`, and the texts it points to
+/// (`startup.rs`).
+const S_LOCALE_C: u32 = 0x100;
+const S_LOCALE_NATIVE: u32 = 0x108;
+const S_LCONV: u32 = 0x130;
+const S_LCONV_TEXT: u32 = 0x160;
 
 /// A thread's block: its errno and _doserrno, rand's seed, strtok's
 /// place (_mbstok's too) and wcstok's, the translator _set_se_translator
