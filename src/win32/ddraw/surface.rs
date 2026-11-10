@@ -1508,7 +1508,19 @@ pub fn add_attached_surface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if a.version >= 7 && !z {
         return Some(DDERR_CANNOTATTACHSURFACE);
     }
-    if a.width != b.width || a.height != b.height {
+    // A depth buffer goes on a texture in video memory whatever the two
+    // sizes, and the device then draws into the texture with the depth
+    // buffer's pixels at the texture's: RenderWare games such as
+    // Zanzarah give their texture targets the screen's depth buffer,
+    // still attached to the back buffer. Other surfaces, a texture in
+    // system memory among them, take only one of their own size, and a
+    // surface takes one depth buffer. DirectX 7 on Windows 98 SE does
+    // this with 3dfx's Voodoo3 drivers 4.11.01.1151 and 4.12.01.0666.
+    let texture = a.caps[0] & (DDSCAPS_TEXTURE | DDSCAPS_SYSTEMMEMORY) == DDSCAPS_TEXTURE;
+    if (a.width != b.width || a.height != b.height) && !(z && texture) {
+        return Some(DDERR_CANNOTATTACHSURFACE);
+    }
+    if z && !attached_matching(cpu, id, &[DDSCAPS_ZBUFFER, 0, 0, 0]).is_empty() {
         return Some(DDERR_CANNOTATTACHSURFACE);
     }
     if a.caps[0] & DDSCAPS_ZBUFFER != 0 {
