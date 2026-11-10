@@ -1411,18 +1411,26 @@ calls a game uses, and what a change made a game do differently.
 rust-dos --config giants.conf --trace-3d giants.trace
 ```
 
+Lines from Giants: Citizen Kabuto's menu:
+
 ```
-    18 DDRAW.IDirectDraw_CreateSurface [640x480 Z16 ZBUFFER|VIDEOMEMORY] made [640x480 Z16 VIDEOMEMORY|ZBUFFER|LOCALVIDMEM] = OK
-    19 DDRAW.Surface_AddAttachedSurface [640x480 R5G6B5 BACKBUFFER|...] gets [640x480 Z16 VIDEOMEMORY|ZBUFFER|LOCALVIDMEM] = OK
-    25 DDRAW.EnumTextureFormats item A1R5G5B5 -> OK
-    40 DDRAW.IDirect3DDevice7_SetRenderState(ZENABLE,USEW) = OK
-    57 draw v7 fvf=XYZ|NORMAL|TEX1 z=USEW,1,LESSEQUAL alphatest=0,ALWAYS ... | s0 tex=1 c=MODULATE(TEXTURE,DIFFUSE) a=SELECTARG1(TEXTURE,DIFFUSE) tci=0 ttf=DISABLE
+    38 DDRAW.EnumZBufferFormats item Z16 -> OK
+    39 DDRAW.EnumZBufferFormats item Z16 -> CANCEL
+    40 DDRAW.IDirectDraw_CreateSurface [800x600 Z16 VIDEOMEMORY|ZBUFFER] made [800x600 Z16 VIDEOMEMORY|ZBUFFER|LOCALVIDMEM] = OK
+    41 DDRAW.Surface_AddAttachedSurface [800x600 R5G6B5 BACKBUFFER|COMPLEX|FLIP|3DDEVICE|VIDEOMEMORY|LOCALVIDMEM] gets [800x600 Z16 VIDEOMEMORY|ZBUFFER|LOCALVIDMEM] = OK
+   109 DDRAW.IDirect3DDevice7_SetRenderState(ZENABLE,USEW) = OK
+   211 draw v7 fvf=XYZRHW|DIFFUSE|TEX1 z=USEW,0,LESSEQUAL alphatest=0,GREATER blend=1,SRCALPHA,INVSRCALPHA,0 fog=0,LINEAR,NONE,0 specular=0 stencil=0 lighting=0/2 vertexblend=DISABLE,0 clipplanes=0 wrap0=0 pointsprite=0 zbias=0 | s0 tex=1 c=MODULATE(TEXTURE,TFACTOR) a=MODULATE(TEXTURE,TFACTOR) tci=0 ttf=DISABLE
 ```
 
 `FILE.counts` has a line for each event, its count and a tab before it,
 in the same order. It is written every two seconds of the host's time
 while events come, and when the emulator stops, so quit with `POST
 /api/control/quit` or the window rather than by killing the process.
+
+```
+147756	draw v7 fvf=XYZRHW|DIFFUSE|TEX1 z=USEW,0,LESSEQUAL ...
+139469	DDRAW.IDirect3DDevice7_SetRenderState(FOGTABLEMODE,LINEAR) = OK
+```
 
 The events:
 
