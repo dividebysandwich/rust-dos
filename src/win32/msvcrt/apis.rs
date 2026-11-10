@@ -550,4 +550,11 @@ pub static APIS: &[Api] = &[
         conv: Conv::Stdcall,
         handler: startup::cxx_unhandled_filter,
     },
+    Api {
+        name: "_EH_prolog",
+        ordinal: 67,
+        args: 0,
+        conv: Conv::Code(startup::EH_PROLOG),
+        handler: startup::eh_prolog,
+    },
 ];

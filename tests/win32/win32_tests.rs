@@ -6042,6 +6042,321 @@ fn a_program_catches_its_cxx_exceptions() {
     assert_eq!(code, 0);
 }
 
+/// A program whose functions make their frames with MSVCRT's
+/// `_EH_prolog`, as Visual C++ 6 builds them. It prints in hex the bits
+/// of what held:
+/// 1     EBX, ECX, EDX, ESI and EDI kept through the call
+/// 2     EAX the return address
+/// 4     EBP where the return address was, with the caller's EBP there
+///       and the function's return address above it
+/// 8     below EBP the state -1, the handler and the old fs:[0]
+/// 10h   fs:[0] and ESP the frame, at EBP - 0Ch
+/// 20h   the function's epilogue back in its caller with ESP, EBP and
+///       fs:[0] as before the call
+/// 40h   a char * thrown two frames up caught in the outer frame
+/// 80h   on after its try with the function's ESP
+/// 100h  the object of the inner frame destroyed once on the way
+/// 200h  the outer function back in its caller with ESP, EBP and fs:[0]
+///       as before the call
+fn eh_prolog_program() -> Vec<u8> {
+    let names: &[&str] = &[
+        "_EH_prolog",
+        "__CxxFrameHandler",
+        "_CxxThrowException",
+        "printf",
+        "exit",
+    ];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.dll", names)];
+    let mut d = Data::default();
+    let boom = d.text("boom");
+    let bits_format = d.text("%x\n");
+    let char_pointer = d.add(&[0; 8]);
+    d.text(".PAD");
+    let catchable = d.add(&[0; 28]);
+    let list = d.add(&[0; 8]);
+    let throw_info = d.add(&[0; 16]);
+    let thrown = d.add(&[0; 4]);
+    // The outer function: a try (state 0) with a catch (char *) into
+    // EBP - 14h. The inner one: an object (state 0) `destroy` destroys.
+    let outer = d.add(&[0; 28]);
+    let outer_unwind = d.add(&[0; 16]);
+    let outer_try = d.add(&[0; 20]);
+    let outer_handler = d.add(&[0; 16]);
+    let inner = d.add(&[0; 28]);
+    let inner_unwind = d.add(&[0; 8]);
+    let destroyed = d.add(&[0; 4]);
+    let bits = d.add(&[0; 4]);
+    let saved_fs = d.add(&[0; 4]);
+    let esp_before = d.add(&[0; 4]);
+    let outer_esp = d.add(&[0; 4]);
+    let data_len = d.0.len() as u32;
+    const CALLER_EBP: u32 = 0x1234_5678;
+    const KEPT: [(AsmRegister32, u32); 5] = [
+        (ebx, 0xB0B0_B0B0),
+        (ecx, 0xC0C0_C0C0),
+        (edx, 0xD0D0_D0D0),
+        (esi, 0x5151_5151),
+        (edi, 0xD1D1_D1D1),
+    ];
+    program(BASE, false, imports, &d.0, |a, l| {
+        let code = |a: &mut CodeAssembler, at: [u32; 7]| -> Result<[CodeLabel; 7], IcedError> {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let [
+                outer_thunk_at,
+                inner_thunk_at,
+                catch_at,
+                destroy_at,
+                after_at,
+                prolog_back,
+                main_back_at,
+            ] = at;
+            let mut outer_thunk = a.create_label();
+            let mut inner_thunk = a.create_label();
+            let mut outer_catch = a.create_label();
+            let mut destroy = a.create_label();
+            let mut after = a.create_label();
+            let mut after_prolog = a.create_label();
+            let mut main_back = a.create_label();
+            let mut probe = a.create_label();
+            let mut outer_function = a.create_label();
+            let mut inner_function = a.create_label();
+            let mut thrower = a.create_label();
+            let mut as_before = a.create_label();
+            let set = |a: &mut CodeAssembler, bit: u32| a.or(dword_ptr(l.at(bits)), bit as i32);
+            let put = |a: &mut CodeAssembler, offset: u32, value: u32| {
+                a.mov(dword_ptr(l.at(offset)), value as i32)
+            };
+            let data = |offset: u32| l.at(offset) as u32;
+            // The tables.
+            put(a, catchable, 1)?;
+            put(a, catchable + 4, data(char_pointer))?;
+            put(a, catchable + 12, u32::MAX)?;
+            put(a, catchable + 20, 4)?;
+            put(a, list, 1)?;
+            put(a, list + 4, data(catchable))?;
+            put(a, throw_info + 12, data(list))?;
+            put(a, outer, 0x1993_0520)?;
+            put(a, outer + 4, 2)?;
+            put(a, outer + 8, data(outer_unwind))?;
+            put(a, outer + 12, 1)?;
+            put(a, outer + 16, data(outer_try))?;
+            put(a, outer_unwind, u32::MAX)?;
+            put(a, outer_unwind + 8, u32::MAX)?;
+            put(a, outer_try + 8, 1)?;
+            put(a, outer_try + 12, 1)?;
+            put(a, outer_try + 16, data(outer_handler))?;
+            put(a, outer_handler + 4, data(char_pointer))?;
+            put(a, outer_handler + 8, -0x14i32 as u32)?;
+            put(a, outer_handler + 12, catch_at)?;
+            put(a, inner, 0x1993_0520)?;
+            put(a, inner + 4, 1)?;
+            put(a, inner + 8, data(inner_unwind))?;
+            put(a, inner_unwind, u32::MAX)?;
+            put(a, inner_unwind + 4, destroy_at)?;
+
+            // The caller: known registers, then the two functions.
+            a.mov(eax, dword_ptr(0u64).fs())?;
+            a.mov(dword_ptr(l.at(saved_fs)), eax)?;
+            a.mov(ebp, CALLER_EBP)?;
+            for (register, value) in KEPT {
+                a.mov(register, value)?;
+            }
+            a.mov(dword_ptr(l.at(esp_before)), esp)?;
+            a.call(probe)?;
+            a.set_label(&mut main_back)?;
+            a.call(as_before)?;
+            let mut skip = a.create_label();
+            a.jne(skip)?;
+            set(a, 0x20)?;
+            a.set_label(&mut skip)?;
+            a.call(outer_function)?;
+            a.call(as_before)?;
+            let mut skip = a.create_label();
+            a.jne(skip)?;
+            set(a, 0x200)?;
+            a.set_label(&mut skip)?;
+            a.push(dword_ptr(l.at(bits)))?;
+            a.push(l.at(bits_format) as i32)?;
+            a.call(f("printf"))?;
+            a.add(esp, 8)?;
+            a.push(0)?;
+            a.call(f("exit"))?;
+            a.int3()?;
+
+            // ZF set if ESP (less this call's return address), EBP and
+            // fs:[0] are as the caller had them before its first call.
+            a.set_label(&mut as_before)?;
+            a.lea(eax, dword_ptr(esp + 4))?;
+            a.cmp(eax, dword_ptr(l.at(esp_before)))?;
+            let mut done = a.create_label();
+            a.jne(done)?;
+            a.cmp(ebp, CALLER_EBP as i32)?;
+            a.jne(done)?;
+            a.mov(eax, dword_ptr(0u64).fs())?;
+            a.cmp(eax, dword_ptr(l.at(saved_fs)))?;
+            a.set_label(&mut done)?;
+            a.ret()?;
+
+            // A function that only makes its frame and takes it down.
+            a.set_label(&mut probe)?;
+            a.mov(eax, outer_thunk_at)?;
+            a.call(f("_EH_prolog"))?;
+            a.set_label(&mut after_prolog)?;
+            let mut skip = a.create_label();
+            for (register, value) in KEPT {
+                a.cmp(register, value as i32)?;
+                a.jne(skip)?;
+            }
+            set(a, 1)?;
+            a.set_label(&mut skip)?;
+            let mut skip = a.create_label();
+            a.cmp(eax, prolog_back as i32)?;
+            a.jne(skip)?;
+            set(a, 2)?;
+            a.set_label(&mut skip)?;
+            let mut skip = a.create_label();
+            a.mov(eax, dword_ptr(l.at(esp_before)))?;
+            a.sub(eax, 8)?;
+            a.cmp(ebp, eax)?;
+            a.jne(skip)?;
+            a.cmp(dword_ptr(ebp), CALLER_EBP as i32)?;
+            a.jne(skip)?;
+            a.cmp(dword_ptr(ebp + 4), main_back_at as i32)?;
+            a.jne(skip)?;
+            set(a, 4)?;
+            a.set_label(&mut skip)?;
+            let mut skip = a.create_label();
+            a.cmp(dword_ptr(ebp - 4), -1)?;
+            a.jne(skip)?;
+            a.cmp(dword_ptr(ebp - 8), outer_thunk_at as i32)?;
+            a.jne(skip)?;
+            a.mov(eax, dword_ptr(l.at(saved_fs)))?;
+            a.cmp(dword_ptr(ebp - 0x0C), eax)?;
+            a.jne(skip)?;
+            set(a, 8)?;
+            a.set_label(&mut skip)?;
+            let mut skip = a.create_label();
+            a.lea(eax, dword_ptr(ebp - 0x0C))?;
+            a.cmp(esp, eax)?;
+            a.jne(skip)?;
+            a.cmp(dword_ptr(0u64).fs(), eax)?;
+            a.jne(skip)?;
+            set(a, 0x10)?;
+            a.set_label(&mut skip)?;
+            a.mov(ecx, dword_ptr(ebp - 0x0C))?;
+            a.mov(dword_ptr(0u64).fs(), ecx)?;
+            a.mov(esp, ebp)?;
+            a.pop(ebp)?;
+            a.ret()?;
+
+            // try { inner(); } catch (char *p) { }
+            a.set_label(&mut outer_function)?;
+            a.mov(eax, outer_thunk_at)?;
+            a.call(f("_EH_prolog"))?;
+            a.sub(esp, 0x10)?;
+            a.mov(dword_ptr(ebp - 0x10), esp)?;
+            a.mov(dword_ptr(l.at(outer_esp)), esp)?;
+            a.mov(dword_ptr(ebp - 4), 0)?;
+            a.call(inner_function)?;
+            a.int3()?;
+
+            a.set_label(&mut outer_catch)?;
+            let mut skip = a.create_label();
+            a.cmp(dword_ptr(ebp - 0x14), data(boom) as i32)?;
+            a.jne(skip)?;
+            set(a, 0x40)?;
+            a.set_label(&mut skip)?;
+            a.mov(eax, after_at)?;
+            a.ret()?;
+
+            a.set_label(&mut after)?;
+            let mut skip = a.create_label();
+            a.cmp(esp, dword_ptr(l.at(outer_esp)))?;
+            a.jne(skip)?;
+            a.cmp(esp, dword_ptr(ebp - 0x10))?;
+            a.jne(skip)?;
+            set(a, 0x80)?;
+            a.set_label(&mut skip)?;
+            let mut skip = a.create_label();
+            a.cmp(dword_ptr(l.at(destroyed)), 1)?;
+            a.jne(skip)?;
+            set(a, 0x100)?;
+            a.set_label(&mut skip)?;
+            a.mov(ecx, dword_ptr(ebp - 0x0C))?;
+            a.mov(dword_ptr(0u64).fs(), ecx)?;
+            a.mov(esp, ebp)?;
+            a.pop(ebp)?;
+            a.ret()?;
+
+            // An object, then a call that throws.
+            a.set_label(&mut inner_function)?;
+            a.mov(eax, inner_thunk_at)?;
+            a.call(f("_EH_prolog"))?;
+            a.push(ecx)?;
+            a.mov(dword_ptr(ebp - 0x10), esp)?;
+            a.mov(dword_ptr(ebp - 4), 0)?;
+            a.call(thrower)?;
+            a.int3()?;
+
+            a.set_label(&mut destroy)?;
+            a.inc(dword_ptr(l.at(destroyed)))?;
+            a.ret()?;
+
+            // throw "boom";
+            a.set_label(&mut thrower)?;
+            put(a, thrown, data(boom))?;
+            a.push(data(throw_info) as i32)?;
+            a.push(data(thrown) as i32)?;
+            a.call(f("_CxxThrowException"))?;
+            a.int3()?;
+
+            a.set_label(&mut outer_thunk)?;
+            a.mov(eax, data(outer))?;
+            a.jmp(f("__CxxFrameHandler"))?;
+            a.set_label(&mut inner_thunk)?;
+            a.mov(eax, data(inner))?;
+            a.jmp(f("__CxxFrameHandler"))?;
+            Ok([
+                outer_thunk,
+                inner_thunk,
+                outer_catch,
+                destroy,
+                after,
+                after_prolog,
+                main_back,
+            ])
+        };
+        // The first pass's addresses take as many bytes as the real ones:
+        // CMP with a value below 80h has a shorter form.
+        let labels = code(a, [BASE; 7])?;
+        let ip = (l.data + data_len).next_multiple_of(0x1000) as u64;
+        let options = iced_x86::BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS;
+        let result = a.assemble_options(ip, options)?;
+        let mut at = [0; 7];
+        for (i, label) in labels.iter().enumerate() {
+            at[i] = result.label_ip(label)? as u32;
+        }
+        a.reset();
+        code(a, at)?;
+        Ok(())
+    })
+}
+
+/// MSVCRT's `_EH_prolog` makes the frame Visual C++ 6's code asks of it
+/// (Max Payne's DLLs call it), and __CxxFrameHandler and
+/// _CxxThrowException catch and unwind through such frames, on both
+/// cores.
+#[test]
+fn eh_prolog_frames_hold_cxx_exceptions_on_both_cores() {
+    for core in [CoreMode::Normal, CoreMode::Dynamic] {
+        let mut cpu = machine(&format!("eh_prolog_{core:?}"), eh_prolog_program());
+        cpu.core = core;
+        assert!(run_to_exit(&mut cpu, 200), "{core:?}: {}", printed(&cpu));
+        assert_eq!(printed(&cpu), "3ff\r\n", "{core:?}");
+        assert_eq!(cpu.errorlevel, 0, "{core:?}");
+    }
+}
+
 /// What a script for `update_script` does to the window, or checks.
 #[derive(Clone, Copy)]
 enum Upd {
