@@ -56,8 +56,9 @@ const IOB_ENTRIES: u32 = 20;
 const MAX_STREAMS: u32 = 512;
 /// A FILE's size, as `_iobuf` is laid out.
 const FILE_SIZE: u32 = 32;
-/// File descriptors there can be (`_NHANDLE_`), in blocks of
-/// `IOINFO_BLOCK`, and the size of each one's `ioinfo` (`io.rs`).
+/// File descriptors there can be (64 blocks for `__pioinfo`'s 64
+/// pointers), in blocks of `IOINFO_BLOCK`, and the size of each one's
+/// `ioinfo` (`io.rs`).
 const MAX_FDS: u32 = 2048;
 const IOINFO_BLOCK: u32 = 32;
 const IOINFO_SIZE: u32 = 36;

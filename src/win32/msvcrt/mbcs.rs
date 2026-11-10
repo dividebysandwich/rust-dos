@@ -171,7 +171,7 @@ pub fn ismbclegal(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// The locale `_setmbcp` gives a double-byte code page, or None for a
-/// single-byte one (`__mblcid`, `__ismbcodepage`).
+/// single-byte one.
 fn mb_lcid(cp: u32) -> Option<u32> {
     match cp {
         932 => Some(0x411),
@@ -185,7 +185,9 @@ fn mb_lcid(cp: u32) -> Option<u32> {
 /// The class test of `_ismbcdigit` and `_ismbcspace`: for a byte, its
 /// `_ctype` bit `class` as isdigit and isspace give it; for a double-byte
 /// character in a double-byte code page, 1 when GetStringTypeA takes its
-/// two bytes for one character of the class; otherwise 0.
+/// two bytes for one character of the class; otherwise 0. Read from the
+/// disassembly of MSVCRT.DLL 6.00.8337 at 7801C7D0 and 7801CBAA, and
+/// checked with a probe run on it.
 fn ismbc_class(cpu: &mut Cpu, c: u32, class: u16) -> Option<u32> {
     if c <= 0xFF {
         return Some((ctype_of(c as u8) & class) as u32);

@@ -2,16 +2,21 @@
 //! `strftime`, `_Strftime`, `wcsftime`, and `_Getdays`, `_Getmonths` and
 //! `_Gettnames`, which give MSVCP60 the locale's names.
 //!
-//! A locale's names are a `__lc_time_data`: 43 pointers to strings, the
-//! days' short and long names, the months' short and long names, "AM" and
-//! "PM", then the short date, long date and time formats in Windows'
-//! pictures ("M/d/yy"). The "C" locale's is in the DLL's data section,
-//! its strings after it. `_Strftime` takes one of a program's own, as
-//! MSVCP60 passes them. strftime reads the names and writes its text in
-//! the program's memory as MSVCRT does, a byte at a time, so what a short
-//! buffer or a format that runs past a name's end gets is what it gets
-//! on Windows; strftime_vc6.txt has what MSVCRT 6 gave for made-up
-//! formats and names.
+//! A locale's names block is 43 pointers to strings: the days' short and
+//! long names, the months' short and long names, "AM" and "PM", then the
+//! short date, long date and time formats in Windows' pictures
+//! ("M/d/yy"). The "C" locale's is in the DLL's data section, its strings
+//! after it. `_Strftime` takes one of a program's own, as MSVCP60 passes
+//! them. strftime reads the names and writes its text in the program's
+//! memory a byte at a time, so what a short buffer or a format that runs
+//! past a name's end gets is what it gets on Windows.
+//!
+//! What it does was read from the disassembly of MSVCRT.DLL 6.00.8337
+//! (strftime at 78013E48, `_Strftime` at 78013E63, the conversion of one
+//! format letter at 78013F64 and the helpers it calls, `_Gettnames` at
+//! 78013C0F, `wcsftime` at 780277DE) and checked against a probe run on
+//! that DLL: strftime_vc6.txt has what it gave for made-up formats and
+//! names.
 
 use super::time::{DAYS, LONG_DAYS, LONG_MONTHS, MONTHS, Tm, read_tm};
 use super::*;
@@ -54,7 +59,7 @@ fn string(m: &mut impl Guest, at: u32) -> Option<Vec<u8>> {
     }
 }
 
-/// `__lc_time_data`'s fields, by their place.
+/// The fields of a names block, by their place.
 const LC_WDAY_ABBR: u32 = 0;
 const LC_WDAY: u32 = 7;
 const LC_MONTH_ABBR: u32 = 14;
@@ -80,7 +85,7 @@ fn c_locale_names() -> Vec<&'static str> {
     names
 }
 
-/// The "C" locale's `__lc_time_data` for the address `at`: the pointers,
+/// The "C" locale's names block for the address `at`: the pointers,
 /// then the strings they point to.
 pub fn lc_time_c(at: u32) -> Vec<u8> {
     let names = c_locale_names();
@@ -96,12 +101,12 @@ pub fn lc_time_c(at: u32) -> Vec<u8> {
     data
 }
 
-/// The `__lc_time_data` a function was given, the "C" locale's for NULL.
+/// The names block a function was given, the "C" locale's for NULL.
 fn lc_time(lc: u32) -> u32 {
     if lc == 0 { var_at(V_LC_TIME_C) } else { lc }
 }
 
-/// The string of field `field` of the `__lc_time_data` at `lc`.
+/// The string of field `field` of the names block at `lc`.
 fn lc_name(m: &mut impl Guest, lc: u32, field: u32) -> Option<Vec<u8>> {
     let at = word(m, lc.wrapping_add(4 * field))?;
     string(m, at)
@@ -137,7 +142,7 @@ pub fn getmonths(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     names_block(cpu, LC_MONTH_ABBR, LC_MONTH, 12)
 }
 
-/// _Gettnames(): a copy of the current locale's `__lc_time_data` in one
+/// _Gettnames(): a copy of the current locale's names block in one
 /// block from malloc, its strings after it: each day's short and long
 /// name, then each month's, then the rest in the struct's order. NULL
 /// when there is no memory for it. MSVCRT 6 leaves out the time format:
@@ -187,7 +192,7 @@ impl Out {
         self.left = self.left.wrapping_sub(1);
     }
 
-    /// `_store_str`: `text`, as much of it as there is room for.
+    /// `text`, as much of it as there is room for (MSVCRT 6's 7801434F).
     fn text(&mut self, m: &mut impl Guest, text: &[u8]) {
         for &byte in text {
             if self.left == 0 {
@@ -197,9 +202,9 @@ impl Out {
         }
     }
 
-    /// `_store_num`: `num` in `digits` digits, or with `no_zeros` in as
-    /// many as it takes. Without room for the digits and a 0 after them,
-    /// nothing is written and there is no more room.
+    /// `num` in `digits` digits, or with `no_zeros` in as many as it takes
+    /// (MSVCRT 6's 78014376). Without room for the digits and a 0 after
+    /// them, nothing is written and there is no more room.
     fn number(&mut self, m: &mut impl Guest, num: i32, digits: u32, no_zeros: bool) {
         if no_zeros {
             return self.bare_number(m, num);
@@ -217,10 +222,10 @@ impl Out {
         self.left -= digits;
     }
 
-    /// `_store_number`: the digits of `num`, last first while there is
-    /// room for one and a 0, then turned around. With no room for even
-    /// one, the turn swaps the byte before with the one at the place, as
-    /// MSVCRT's does.
+    /// The digits of `num`, last first while there is room for one and a
+    /// 0, then turned around. With no room for even one, the turn swaps
+    /// the byte before with the one at the place, as MSVCRT 6's 780143E5
+    /// does.
     fn bare_number(&mut self, m: &mut impl Guest, num: i32) {
         let start = self.at;
         let mut n = num;
@@ -247,7 +252,7 @@ impl Out {
 }
 
 /// The time strftime formats and the names it takes, with '#' given for
-/// the conversion running (`__alternate_form`).
+/// the conversion running.
 struct Expand {
     tm: Tm,
     lc: u32,
@@ -263,8 +268,8 @@ impl Expand {
         }
     }
 
-    /// `_expandtime`: the conversion `spec`. Numbers have no leading zeros
-    /// with '#'.
+    /// The conversion `spec`, as MSVCRT 6's 78013F64 does it. Numbers have
+    /// no leading zeros with '#'.
     fn conversion(&mut self, m: &mut impl Guest, out: &mut Out, spec: u8) {
         let tm = self.tm;
         let (sec, min, hour, mday, mon, year, wday, yday, isdst) = (
@@ -340,7 +345,7 @@ impl Expand {
         }
     }
 
-    /// `_store_winword`: the date or time format of field `field`, a
+    /// The date or time format of field `field` (MSVCRT 6's 7801442E), a
     /// Windows picture. A run of a letter is a conversion: d and dd the
     /// day, ddd and dddd its names; M and MM the month, MMM and MMMM its
     /// names; yy and yyyy the year; h, hh, H and HH the hour; m and mm the
@@ -425,7 +430,7 @@ impl Expand {
 }
 
 /// strftime's work: the format `format` and the time `tm` with the names
-/// of the `__lc_time_data` at `lc` (the "C" locale's for 0), into
+/// of the names block at `lc` (the "C" locale's for 0), into
 /// `size` bytes at `buffer`. The length written, and a 0 after it; or 0,
 /// with as much as there was room for and no 0, when it doesn't fit.
 fn format_time(m: &mut impl Guest, buffer: u32, size: u32, format: &[u8], tm: &Tm, lc: u32) -> u32 {
@@ -471,7 +476,7 @@ pub fn strftime(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// _Strftime(buffer, size, format, tm, names): strftime with the names of
-/// the `__lc_time_data` `names`, the current locale's for NULL.
+/// the names block `names`, the current locale's for NULL.
 pub fn big_strftime(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[buffer, size, format, at, lc] = args else {
         unreachable!()

@@ -95,8 +95,9 @@ fn entry(cpu: &mut Cpu, fd: u32) -> Option<u32> {
 }
 
 /// The address of descriptor `fd`'s `ioinfo`, with the blocks up to its
-/// own made, as MSVCRT's `extend_ioinfo_arrays` makes them. None for a
-/// descriptor past `MAX_FDS`, or when there is no memory for a block.
+/// own made from the heap, as the probe saw MSVCRT 6 make a second block
+/// for descriptor 32. None for a descriptor past `MAX_FDS`, or when there
+/// is no memory for a block.
 fn entry_made(cpu: &mut Cpu, fd: u32) -> Option<u32> {
     if fd >= MAX_FDS {
         return None;
