@@ -4981,6 +4981,153 @@ fn msvcrt_wcsftime_takes_twice_its_size() {
     );
 }
 
+/// _setjmp3 and _setjmp fill the jump buffer as the probe saw Visual
+/// C++ 6's MSVCRT.DLL fill it, in an exception frame at level 1: the
+/// frame, a level, the cookie "VC20", the unwind function and up to six
+/// words of its data, from the words after the count (0: the frame's
+/// level and no function; 2: the given level and function; 3: one word
+/// of data; 9: six), the rest of the buffer left as it was. _setjmp
+/// writes the frame and its level, and nothing after them. A count of 1
+/// takes the frame's level, which MSVCRT 6 reads from 0Ch bytes into
+/// the unwind function instead; no compiler passes that count.
+#[test]
+fn msvcrt_setjmp3_fills_the_jump_buffer() {
+    let crt: &[&str] = &["_setjmp3", "_setjmp", "memcmp"];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.DLL", crt)];
+    const FRAME: u32 = 0x00;
+    const AA: u32 = 0xAAAA_AAAA;
+    const VC20: u32 = 0x5643_3230;
+    // (count, or None for _setjmp, then the words from Registration on:
+    // Registration, TryLevel, Cookie, UnwindFunc, UnwindData[6], and two
+    // words after the buffer.)
+    let cases: &[(Option<u32>, [u32; 11])] = &[
+        (Some(0), [1, VC20, 0, AA, AA, AA, AA, AA, AA, AA, AA]),
+        (Some(1), [1, VC20, 0x1111, AA, AA, AA, AA, AA, AA, AA, AA]),
+        (
+            Some(2),
+            [0x2222, VC20, 0x1111, AA, AA, AA, AA, AA, AA, AA, AA],
+        ),
+        (
+            Some(3),
+            [0x2222, VC20, 0x1111, 0x3333, AA, AA, AA, AA, AA, AA, AA],
+        ),
+        (
+            Some(9),
+            [
+                0x2222, VC20, 0x1111, 0x3333, 0x4444, 0x5555, 0x6666, 0x7777, 0x8888, AA, AA,
+            ],
+        ),
+        (None, [1, AA, AA, AA, AA, AA, AA, AA, AA, AA, AA]),
+    ];
+    let buffer = |i: usize| 0x40 + 0x50 * i as u32;
+    let expected = |i: usize| 0x300 + 0x30 * i as u32;
+    let mut data = vec![0; 0x420];
+    // The frame: the next one, its handler, its scope table, level 1.
+    put(&mut data, FRAME as usize + 12, &1u32.to_le_bytes());
+    for (i, (_, words)) in cases.iter().enumerate() {
+        put(&mut data, buffer(i) as usize, &[0xAA; 0x50]);
+        let image: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        put(&mut data, expected(i) as usize + 4, &image);
+    }
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        use Arg::I;
+        let c = |name: &str| l.import(crt.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| I(l.at(offset) as u32);
+        a.xor(ebx, ebx)?;
+        a.mov(eax, dword_ptr(0u64).fs())?;
+        a.mov(dword_ptr(l.at(FRAME)), eax)?;
+        a.mov(eax, l.at(FRAME) as u32)?;
+        a.mov(dword_ptr(0u64).fs(), eax)?;
+        for (i, &(count, _)) in cases.iter().enumerate() {
+            a.mov(dword_ptr(l.at(expected(i))), l.at(FRAME) as i32)?;
+            match count {
+                Some(count) => {
+                    let words = [0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666, 0x7777];
+                    let mut args = vec![at(buffer(i)), I(count)];
+                    args.extend(words.iter().chain(&[0x8888, 0x9999]).map(|&w| I(w)));
+                    call_with(a, c("_setjmp3"), &args)?;
+                    a.add(esp, 4 * args.len() as i32)?;
+                }
+                None => {
+                    call_with(a, c("_setjmp"), &[at(buffer(i))])?;
+                    a.add(esp, 4)?;
+                }
+            }
+            call_with(
+                a,
+                c("memcmp"),
+                &[at(buffer(i) + 24), at(expected(i)), I(48)],
+            )?;
+            a.add(esp, 12)?;
+            a.test(eax, eax)?;
+            check(a, false, i as u32)?;
+        }
+        a.mov(eax, dword_ptr(l.at(FRAME)))?;
+        a.mov(dword_ptr(0u64).fs(), eax)?;
+        a.mov(eax, ebx)?;
+        a.xor(eax, 0x55)?;
+        a.ret()
+    });
+    let (code, text) = run_files("msvcrt_setjmp3", &[("T.EXE", exe)]);
+    assert_eq!(
+        code ^ 0x55,
+        0x3F,
+        "the checks that failed: {:06b}, {}",
+        !(code ^ 0x55) & 0x3F,
+        text
+    );
+}
+
+/// longjmp unwinds the exception frames made after setjmp, as the probe
+/// saw Visual C++ 6's MSVCRT.DLL do, even where setjmp was called outside
+/// every frame of the program's: the __finally of a frame of
+/// _except_handler3's runs once, then setjmp returns the value.
+#[test]
+fn msvcrt_longjmp_runs_the_finally_blocks_above_setjmp() {
+    let crt: &[&str] = &["_setjmp3", "longjmp", "_except_handler3"];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.DLL", crt)];
+    const BUFFER: u32 = 0x00;
+    const SCOPE: u32 = 0x40;
+    const COUNTER: u32 = 0x50;
+    const FINALLY: u32 = 0x60;
+    let mut data = vec![0; 0x80];
+    // The scope table's one entry: no enclosing level, no filter (a
+    // __finally), and the block, which adds 1 to the counter.
+    put(&mut data, SCOPE as usize, &u32::MAX.to_le_bytes());
+    put(&mut data, FINALLY as usize, &[0xFF, 0x05, 0, 0, 0, 0, 0xC3]);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        use Arg::I;
+        let c = |name: &str| l.import(crt.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        a.mov(dword_ptr(l.at(SCOPE + 8)), l.at(FINALLY) as i32)?;
+        a.mov(dword_ptr(l.at(FINALLY + 2)), l.at(COUNTER) as i32)?;
+        let mut back = a.create_label();
+        call_with(a, c("_setjmp3"), &[I(l.at(BUFFER) as u32), I(0)])?;
+        a.add(esp, 8)?;
+        a.cmp(eax, 9)?;
+        a.je(back)?;
+        // A frame of _except_handler3's at EBP - 10h, in its __try.
+        a.push(ebp)?;
+        a.mov(ebp, esp)?;
+        a.push(0)?;
+        a.push(l.at(SCOPE) as i32)?;
+        a.push(c("_except_handler3"))?;
+        a.push(dword_ptr(0u64).fs())?;
+        a.mov(dword_ptr(0u64).fs(), esp)?;
+        a.sub(esp, 8)?;
+        call_with(a, c("longjmp"), &[I(l.at(BUFFER) as u32), I(9)])?;
+        a.int3()?;
+        a.set_label(&mut back)?;
+        a.cmp(dword_ptr(l.at(COUNTER)), 1)?;
+        check(a, false, 0)?;
+        a.mov(eax, ebx)?;
+        a.xor(eax, 0x55)?;
+        a.ret()
+    });
+    let (code, text) = run_files("msvcrt_longjmp_seh", &[("T.EXE", exe)]);
+    assert_eq!(code ^ 0x55, 1, "the __finally didn't run once: {}", text);
+}
+
 /// The last FreeLibrary of MSVCRT.DLL, as a probe measured it on Windows
 /// 98 SE. A stream left open isn't flushed and its file stays open, so
 /// its handle still works and a load of a file with no sharing fails.
