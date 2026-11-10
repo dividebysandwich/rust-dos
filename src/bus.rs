@@ -872,7 +872,7 @@ impl Bus {
     /// plainly.
     fn plain_vga_run(&self, dst: usize, len: usize) -> bool {
         (ADDR_VGA_GRAPHICS..=ADDR_VGA_GRAPHICS + SIZE_GRAPHICS - len).contains(&dst)
-            && self.video_mode != VideoMode::Vesa
+            && !self.vbe_window()
             && self.s3_mmio(dst).is_none()
             && self.mach64_mmio(dst).is_none()
             && self.vga.plain_writes()
@@ -1025,7 +1025,7 @@ impl Bus {
         }
         if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) {
             // VESA modes: the window onto the bank of video memory.
-            if self.video_mode == VideoMode::Vesa {
+            if self.vbe_window() {
                 return self.vbe.vram[self.vesa_window(addr - ADDR_VGA_GRAPHICS, false)];
             }
             // Route through VGA so chain-4, odd/even, and Read Map Select
@@ -1079,7 +1079,7 @@ impl Bus {
         if addr >= self.ram.len() {
             return self.mapped_8(addr);
         }
-        if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) && self.video_mode != VideoMode::Vesa {
+        if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) && !self.vbe_window() {
             let saved = self.vga.latches.get();
             let v = self.vga.read_graphics(self.vga_window(addr, false));
             self.vga.latches.set(saved);
@@ -1100,7 +1100,7 @@ impl Bus {
     /// the VGA's planes as `write_planes_plainly` has them.
     #[cfg_attr(not(dynrec), allow(dead_code))]
     pub(crate) fn plain_planes(&mut self) -> Option<(u8, *mut u8, usize)> {
-        if self.video_mode == VideoMode::Vesa || self.et4000() || (self.s3() && self.vga.s3.mmio()) {
+        if self.vbe_window() || self.et4000() || (self.s3() && self.vga.s3.mmio()) {
             return None;
         }
         self.vga.plain_planes()
@@ -1108,7 +1108,7 @@ impl Bus {
 
     pub(crate) fn write_planes_plainly(&mut self, addr: usize, value: u32, size: usize) -> bool {
         if !(ADDR_VGA_GRAPHICS..=ADDR_VGA_GRAPHICS + SIZE_GRAPHICS - size).contains(&addr)
-            || self.video_mode == VideoMode::Vesa
+            || self.vbe_window()
             || self.et4000()
             || (self.s3() && self.vga.s3.mmio())
             || !self.vga.write_planes_plainly(addr - ADDR_VGA_GRAPHICS, value, size)
@@ -1151,7 +1151,7 @@ impl Bus {
             return true;
         }
         if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) {
-            if self.video_mode == VideoMode::Vesa {
+            if self.vbe_window() {
                 let offset = self.vesa_window(addr - ADDR_VGA_GRAPHICS, true);
                 self.write_vram(offset, &[value]);
                 return true;

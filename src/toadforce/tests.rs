@@ -471,3 +471,42 @@ fn a_saved_card_loads_as_it_was() {
     assert_eq!(loaded.next_event(), rig.card.next_event());
     assert_eq!(loaded.pci.read(0x13), 0xC0);
 }
+
+#[test]
+fn the_status_counts_what_was_asked_of_the_card() {
+    let mut rig = Rig::new();
+    let s = surface(0);
+    let all = Rect {
+        left: 0,
+        top: 0,
+        width: s.width,
+        height: s.height,
+    };
+    let mut words = Vec::new();
+    encode::nop(&mut words, 1);
+    encode::fill(&mut words, &s, &all, 7);
+    encode::fill(&mut words, &s, &all, 8);
+    encode::blt(&mut words, &s, &all, &s, &all, None);
+    encode::flip(&mut words, 0, false);
+    words.push(0x0001_7777);
+    rig.run(&words);
+    // A register write the card rejects counts too.
+    rig.write(regs::RING_PUT, 2);
+    let counts = Counts {
+        nop: 1,
+        fill: 2,
+        blt: 1,
+        flip: 1,
+        rejected: 2,
+    };
+    assert_eq!(rig.card.counts(), counts);
+    assert_eq!(rig.card.drawn(), 3);
+    let status = rig.card.describe(rig.live());
+    assert_eq!(status["commands"]["fill"], 2);
+    assert_eq!(status["commands"]["rejected"], 2);
+    assert_eq!(status["error"], Error::BadOpcode as u32);
+    assert_eq!(status["mode"], serde_json::Value::Null);
+    assert_eq!(status["memory_mb"], 32);
+    // A look at the card changes nothing of it.
+    assert_eq!(rig.card.counts(), counts);
+}

@@ -52,6 +52,35 @@ impl Bus {
             .is_some_and(|c| c.display.shown().is_some())
     }
 
+    /// For the debugger's status: what the card shows and was asked.
+    pub fn toadforce_status(&self) -> Option<serde_json::Value> {
+        let card = self.toadforce.as_deref()?;
+        Some(card.describe(self.toadforce_live()))
+    }
+
+    /// What the VGA's side of the display was when the card's own mode
+    /// took the screen, and is again when it ends. None while the card
+    /// shows no mode.
+    pub(crate) fn toadforce_legacy(&self) -> Option<&Legacy> {
+        self.toadforce.as_deref()?.display.legacy.as_ref()
+    }
+
+    /// Whether A0000h is the window onto a bank of a VBE mode's frame
+    /// buffer. Otherwise it is the VGA's own memory, as its registers
+    /// map it.
+    ///
+    /// A card's own mode is shown through the scan-out of the VBE modes,
+    /// which makes `video_mode` `Vesa`. The window stays what the VGA's
+    /// side has it as: the card's mode changes nothing a guest sees of
+    /// the VGA (chapter 6 of `docs/toadforce-spec.md`).
+    #[inline]
+    pub(crate) fn vbe_window(&self) -> bool {
+        self.video_mode == VideoMode::Vesa
+            && self
+                .toadforce_legacy()
+                .is_none_or(|vga| vga.video_mode == VideoMode::Vesa)
+    }
+
     /// Have the card the display adapter calls for: a ToadForce with
     /// `toadforce_memory` bytes on `Adapter::ToadForce`, none on the
     /// others. A card already there with that memory stays as it is.

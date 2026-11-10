@@ -347,6 +347,13 @@ While the card's mode is shown:
 - A colour written to `PALETTE` shows from the next frame.
 - The VGA registers keep their contents and take writes, and none of it
   is shown.
+- The window at A0000h stays what the VGA's side has it as: the VGA's
+  own memory after a standard mode, and after a VBE mode the bank of
+  the BIOS's part of card memory that function 4F05h selects.
+- The video BIOS reports, in function 4F03h, the mode it set last,
+  which is the one that comes back. Its functions that lay out a VBE
+  mode's picture (4F06h, the line length, and 4F07h, the display start)
+  fail with AH = 02h, since the picture on the screen isn't the BIOS's.
 
 A write of 0 brings the VGA's picture back: what its registers
 describe, and the VBE mode that was set when the card's mode took the

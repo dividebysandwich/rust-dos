@@ -35,6 +35,7 @@ pub mod regs;
 
 use command::Command;
 pub use display::{Change, Live};
+use pci::Bar;
 use regs::Error;
 
 /// What an access changed outside the card, for the bus to carry out.
@@ -84,9 +85,20 @@ pub struct ToadForce {
     pub display: display::Display,
     /// The interrupt request the card has up, which the bus keeps.
     pub irq_up: Option<u8>,
-    /// The `FILL` and `BLT` commands carried out since the card was
-    /// made, for a look at what drives it. No part of the card's state.
-    drawn: u64,
+    /// The commands since the card was made, for a look at what drives
+    /// it. No part of the card's state.
+    counts: Counts,
+}
+
+/// How many commands the card carried out, by kind, and how many it
+/// rejected (register writes among those).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub nop: u64,
+    pub fill: u64,
+    pub blt: u64,
+    pub flip: u64,
+    pub rejected: u64,
 }
 
 // The ring first: rewind compares states block by block from a section's
@@ -105,7 +117,7 @@ crate::state_fields!(ToadForce {
     error_at,
     display,
     irq_up,
-} skip { drawn });
+} skip { counts });
 
 impl ToadForce {
     /// A card with `memory` bytes of card memory (one of
@@ -129,7 +141,7 @@ impl ToadForce {
             error_at: 0,
             display: display::Display::default(),
             irq_up: None,
-            drawn: 0,
+            counts: Counts::default(),
         }
     }
 
@@ -140,7 +152,51 @@ impl ToadForce {
 
     /// How many `FILL` and `BLT` commands the card carried out.
     pub fn drawn(&self) -> u64 {
-        self.drawn
+        self.counts.fill + self.counts.blt
+    }
+
+    /// The commands the card carried out and rejected.
+    pub fn counts(&self) -> Counts {
+        self.counts
+    }
+
+    /// For the debugger's status: what the card shows and what was asked
+    /// of it, at `live`. Reads change nothing.
+    pub fn describe(&self, live: Live) -> serde_json::Value {
+        let read = |offset| self.read(offset, live);
+        let counts = self.counts;
+        let bars = [Bar::Registers, Bar::Memory, Bar::Ring]
+            .map(|bar| self.pci.window(bar).map(|(base, _)| format!("{base:X}")));
+        serde_json::json!({
+            "memory_mb": self.memory >> 20,
+            "level": self.level,
+            "level_max": self.level_max,
+            "mode": self.display.shown().map(|shown| serde_json::json!({
+                "width": shown.width,
+                "height": shown.height,
+                "format": format!("{:?}", shown.format),
+                "pitch": shown.pitch,
+                "refresh": shown.refresh,
+                "start": format!("{:X}", self.display.start()),
+            })),
+            "frame": read(regs::FRAME),
+            "scanline": read(regs::SCANLINE),
+            "status": format!("{:X}", read(regs::STATUS)),
+            "irq_status": format!("{:X}", read(regs::IRQ_STATUS)),
+            "irq_enable": format!("{:X}", self.irq_enable),
+            "irq": self.irq_up,
+            "ring_put": format!("{:X}", self.ring_put),
+            "error": self.error,
+            "error_at": format!("{:X}", self.error_at),
+            "bars": bars,
+            "commands": {
+                "nop": counts.nop,
+                "fill": counts.fill,
+                "blt": counts.blt,
+                "flip": counts.flip,
+                "rejected": counts.rejected,
+            },
+        })
     }
 
     /// The highest feature level the card has.
@@ -265,6 +321,7 @@ impl ToadForce {
 
     /// Latch the first rejection since `ERROR` was last written.
     fn latch(&mut self, error: Error, at: u32) {
+        self.counts.rejected += 1;
         if self.error == 0 {
             self.error = error as u32;
             self.error_at = at;
@@ -334,10 +391,10 @@ impl ToadForce {
         fx: &mut Effects,
     ) -> Result<(), Error> {
         match command {
-            Command::Nop => {}
+            Command::Nop => self.counts.nop += 1,
             Command::Fill { dst, rect, value } => {
                 blit::fill(memory, &dst, &rect, value);
-                self.drawn += 1;
+                self.counts.fill += 1;
                 fx.drawn.push(dst.span(&rect));
             }
             Command::Blt {
@@ -348,7 +405,7 @@ impl ToadForce {
                 key,
             } => {
                 blit::blt(memory, &dst, &dst_rect, &src, &src_rect, key);
-                self.drawn += 1;
+                self.counts.blt += 1;
                 fx.drawn.push(dst.span(&dst_rect));
             }
             Command::Flip { offset, wait } => {
@@ -356,6 +413,7 @@ impl ToadForce {
                     self.irq_status |= regs::IRQ_FLIP;
                     fx.display = fx.display.max(Change::Picture);
                 }
+                self.counts.flip += 1;
             }
         }
         Ok(())

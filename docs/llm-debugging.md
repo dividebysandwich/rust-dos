@@ -1117,6 +1117,20 @@ the mount names the delta file. `-inplace` writes the image itself.
   4Ah READ ID, 0Fh SEEK, 08h SENSE INTERRUPT STATUS. The log's `[FDC]`
   lines name commands it doesn't know.
 
+### The ToadForce card
+
+With `machine=svga_toadforce`, `/api/status` → `video.toadforce` shows
+the card: `mode` (the mode of its own on the screen, with its `start` in
+card memory, or null while the VGA's picture shows), `frame` and
+`scanline`, `status`, `irq_status` and `irq_enable` as the registers
+read, `irq` (the request line it has up), `error` and `error_at` (the
+first rejection, chapter 5 of `toadforce-spec.md`), the three `bars`,
+and `commands`: how many `nop`, `fill`, `blt` and `flip` commands it
+carried out since power-on, from the ring and from the built-in
+Windows' driver alike, and how many commands and register writes it
+`rejected`. A game whose DirectDraw blits stay on the CPU has `fill`
+and `blt` at 0.
+
 ### 3dfx (Glide) games
 
 With `voodoo=true` (CONFIGURATION.md's "3dfx Voodoo Graphics"),

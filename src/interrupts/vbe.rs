@@ -184,9 +184,18 @@ pub fn handle(cpu: &mut Cpu) {
         0x01 => mode_info(cpu, cpu.cx(), es_di),
         0x02 => set_mode(cpu, cpu.bx()),
         0x03 => {
-            let mode = match (cpu.bus.video_mode, cpu.bus.vbe.mode) {
-                (VideoMode::Vesa, Some(mode)) => mode.number | if cpu.bus.vbe.lfb { 0x4000 } else { 0 },
-                _ => cpu.bus.guest_read_8(0x0449) as u16,
+            // Under a ToadForce's own mode, the mode the BIOS set last:
+            // the one that comes back when the card's mode ends.
+            let vbe = match cpu.bus.toadforce_legacy() {
+                Some(vga) => vga.vesa.map(|(number, ..)| (number, vga.lfb)),
+                None => (cpu.bus.video_mode == VideoMode::Vesa)
+                    .then_some(cpu.bus.vbe.mode)
+                    .flatten()
+                    .map(|mode| (mode.number, cpu.bus.vbe.lfb)),
+            };
+            let mode = match vbe {
+                Some((number, lfb)) => number | if lfb { 0x4000 } else { 0 },
+                None => cpu.bus.guest_read_8(0x0449) as u16,
             };
             cpu.set_bx(mode);
             SUCCESS
@@ -462,11 +471,23 @@ pub fn window_call(cpu: &mut Cpu) {
     cpu.set_ax(status);
 }
 
+/// The VBE mode on the screen, whose line length and display start
+/// functions 06h and 07h change. None in a standard mode, and under a
+/// ToadForce's own mode: the screen is the card's then, laid out by its
+/// `MODE` registers, and the BIOS has no picture to move until a mode
+/// set brings the VGA's back.
+fn vbe_mode_shown(cpu: &Cpu) -> Option<VbeMode> {
+    let bus = &cpu.bus;
+    bus.vbe
+        .mode
+        .filter(|_| bus.video_mode == VideoMode::Vesa && !bus.toadforce_shows())
+}
+
 /// Function 06h: set the scan line length in pixels (BL=0) or bytes
 /// (BL=2), get it (BL=1) or the maximum (BL=3). Returns the bytes per
 /// line in BX, pixels in CX and the scan lines that fit in DX.
 fn scan_line_length(cpu: &mut Cpu) -> u16 {
-    let Some(mode) = cpu.bus.vbe.mode.filter(|_| cpu.bus.video_mode == VideoMode::Vesa) else {
+    let Some(mode) = vbe_mode_shown(cpu) else {
         return INVALID_NOW;
     };
     let bytes_per_pixel = mode.bytes_per_pixel() as u32;
@@ -513,7 +534,7 @@ fn scan_line_length(cpu: &mut Cpu) -> u16 {
 /// (BL=0, or BL=80h at the next vertical retrace), or get it (BL=1).
 /// None while it waits for the retrace.
 fn display_start(cpu: &mut Cpu) -> Option<u16> {
-    let Some(mode) = cpu.bus.vbe.mode.filter(|_| cpu.bus.video_mode == VideoMode::Vesa) else {
+    let Some(mode) = vbe_mode_shown(cpu) else {
         return Some(INVALID_NOW);
     };
     let bytes_per_pixel = mode.bytes_per_pixel() as u32;

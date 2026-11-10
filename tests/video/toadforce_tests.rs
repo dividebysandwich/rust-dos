@@ -543,3 +543,44 @@ fn a_reset_of_the_machine_resets_the_card() {
     // Card memory keeps what it held.
     assert_eq!(cpu.bus.read_32(MEMORY + 100), 0x1234_5678);
 }
+
+#[test]
+fn the_vga_keeps_its_window_and_the_bios_its_mode_under_the_cards_mode() {
+    // Mode 13h under the card's mode: A0000h is still the VGA's memory,
+    // and no part of card memory.
+    let mut cpu = machine();
+    int10::set_mode(&mut cpu, 0x13);
+    cpu.bus.write_8(MEMORY, 0x11);
+    show(&mut cpu, 640, 480, Format::X8R8G8B8, 60);
+    cpu.bus.write_8(0xA0000, 0x5A);
+    cpu.bus.write_16(0xA0002, 0x1234);
+    assert_eq!(cpu.bus.read_8(0xA0000), 0x5A);
+    assert_eq!(cpu.bus.read_16(0xA0002), 0x1234);
+    assert_eq!(cpu.bus.read_32(MEMORY), 0x11);
+    // The BIOS reports the mode that comes back, and has no VBE picture
+    // to move.
+    assert_eq!(int10(&mut cpu, 0x4F03, 0, 0, 0), 0x004F);
+    assert_eq!(cpu.bx(), 0x13);
+    assert_eq!(int10(&mut cpu, 0x4F07, 0, 0, 16), 0x024F);
+    assert_eq!(int10(&mut cpu, 0x4F06, 1, 0, 0), 0x024F);
+    assert_eq!(reg(&cpu, regs::MODE_START), 0);
+    set_reg(&mut cpu, regs::MODE_ENABLE, 0);
+    assert_eq!(cpu.bus.video_mode, VideoMode::Graphics320x200);
+    assert_eq!(cpu.bus.read_8(0xA0000), 0x5A);
+    let index = pixel(&mut cpu, 0, 0);
+    cpu.bus.write_8(0xA0000, 0);
+    assert_ne!(pixel(&mut cpu, 0, 0), index);
+
+    // A banked VBE mode under the card's mode: A0000h is still the
+    // window onto the BIOS's part of card memory.
+    let mut cpu = machine();
+    assert_eq!(int10(&mut cpu, 0x4F02, 0x0101, 0, 0), 0x004F);
+    show(&mut cpu, 800, 600, Format::R5G6B5, 75);
+    cpu.bus.write_8(0xA0005, 9);
+    assert_eq!(cpu.bus.read_8(MEMORY + 5), 9);
+    assert_eq!(cpu.bus.read_8(0xA0005), 9);
+    assert_eq!(int10(&mut cpu, 0x4F03, 0, 0, 0), 0x004F);
+    assert_eq!(cpu.bx(), 0x0101);
+    assert_eq!(int10(&mut cpu, 0x4F07, 0, 0, 16), 0x024F);
+    assert_eq!(reg(&cpu, regs::MODE_START), 0);
+}
