@@ -345,26 +345,72 @@ pub fn fdivrp(cpu: &mut Cpu, instr: &Instruction) {
 
 // --- ADVANCED ARITHMETIC ---
 
+/// What FPREM and FPREM1 give for ST(0) and ST(1) when they don't divide
+/// one by the other, with the invalid exception masked: the result and
+/// whether the operation is invalid (IE). None for a finite dividend and
+/// a finite divisor other than 0, which they reduce.
+fn fprem_special(st0: F80, st1: F80) -> Option<(F80, bool)> {
+    let mut indefinite = F80::new();
+    indefinite.set_real_indefinite();
+    if st0.is_unsupported() || st1.is_unsupported() {
+        return Some((indefinite, true));
+    }
+    if let Some(nan) = st0.nan_result(st1) {
+        return Some(nan);
+    }
+    if st0.is_infinite() || st1.is_zero() {
+        return Some((indefinite, true));
+    }
+    None
+}
+
 pub fn fprem_internal(cpu: &mut Cpu, ieee: bool) {
+    // An operand the FPU doesn't reduce: an empty register (a stack
+    // underflow, SF), a NaN, an unsupported format, an infinite dividend
+    // or a divisor of 0. As a Ryzen's x87 does with IE masked, ST(0)
+    // becomes the result (the real indefinite but for a NaN operand, which
+    // goes through), C1 and C2 are cleared and C0 and C3 keep what they
+    // had. C2 clear says the reduction is complete, so a loop that repeats
+    // FPREM while C2 is set (as fmod's do) ends.
+    let special = if cpu.fpu_is_empty(0) || cpu.fpu_is_empty(1) {
+        cpu.set_fpu_flag(FpuFlags::SF, true);
+        let mut indefinite = F80::new();
+        indefinite.set_real_indefinite();
+        Some((indefinite, true))
+    } else {
+        fprem_special(cpu.fpu_get(0), cpu.fpu_get(1))
+    };
+    if let Some((result, invalid)) = special {
+        if invalid {
+            cpu.set_fpu_flag(FpuFlags::IE, true);
+        }
+        cpu.set_fpu_flag(FpuFlags::C1 | FpuFlags::C2, false);
+        cpu.fpu_set_valid(0, result);
+        return;
+    }
+
     let st0_obj = cpu.fpu_get(0);
     let st1_obj = cpu.fpu_get(1);
-
-    let st0 = st0_obj.get_f64();
-    let st1 = st1_obj.get_f64();
-
-    // A divisor of 0 or an infinite dividend: the real indefinite, with
-    // IE, and the condition codes all clear, as on a Pentium. C2 clear
-    // says the reduction is complete: Visual C++'s fmod repeats FPREM
-    // while C2 is set, so fmod(x, 0) ends.
-    if st1 == 0.0 || st0.is_infinite() {
-        cpu.set_fpu_flag(FpuFlags::IE, true);
+    // An infinite divisor: the dividend as it is, the quotient 0.
+    if st1_obj.is_infinite() {
         cpu.set_fpu_flag(
             FpuFlags::C0 | FpuFlags::C1 | FpuFlags::C2 | FpuFlags::C3,
             false,
         );
-        let mut nan = F80::new();
-        nan.set_real_indefinite();
-        cpu.fpu_set(0, nan);
+        return;
+    }
+
+    let st0 = st0_obj.get_f64();
+    let st1 = st1_obj.get_f64();
+    // A divisor below a double's range (a denormal, or a normal number
+    // under 2^-1022) comes to 0 here, and is taken as one; the reduction
+    // on the 80 bits it needs is #913.
+    if st1 == 0.0 {
+        let mut indefinite = F80::new();
+        indefinite.set_real_indefinite();
+        cpu.set_fpu_flag(FpuFlags::IE, true);
+        cpu.set_fpu_flag(FpuFlags::C1 | FpuFlags::C2, false);
+        cpu.fpu_set(0, indefinite);
         return;
     }
 

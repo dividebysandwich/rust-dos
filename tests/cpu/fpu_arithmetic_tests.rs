@@ -440,39 +440,151 @@ fn fprem_quotient_bits_are_the_magnitudes_and_fprem1_ties_to_even() {
     }
 }
 
-/// FPREM and FPREM1 with a divisor of 0 or an infinite dividend give the
-/// real indefinite with IE and clear C0 to C3, whatever they were before,
-/// as a Pentium II does: C2 set by FXAM before stays set otherwise, and a
-/// loop that repeats FPREM while C2 is set (fmod's) never ends.
+/// FPREM and FPREM1 on operands they don't reduce, and a few they do,
+/// with C0 to C3 all set or all clear before and IE masked: the status
+/// word and ST(0) after, as the host's x87 (a Ryzen 7 7700X) gave them
+/// for the same operands and stack. An invalid or NaN operand clears C1
+/// and C2 and keeps C0 and C3; C2 left set would make a loop that repeats
+/// FPREM while C2 is set (fmod's) run forever. `empty`: 1 ST(1) empty,
+/// 2 both, 3 ST(0) (FFREE'd).
 #[test]
-fn an_invalid_fprem_clears_the_condition_codes() {
-    let indefinite = 0xFFFF_C000_0000_0000_0000u128;
-    let cases = [
-        (5.0, 0.0),
-        (f64::INFINITY, 3.0),
-        (f64::NEG_INFINITY, 3.0),
-        (0.0, 0.0),
-        (f64::INFINITY, 0.0),
+fn fprem_on_operands_it_does_not_reduce_as_the_x87() {
+    const FPREM: [u8; 2] = [0xD9, 0xF8];
+    const FPREM1: [u8; 2] = [0xD9, 0xF5];
+    const ZERO: u128 = 0;
+    const FIVE: u128 = 0x4001_A000_0000_0000_0000;
+    const THREE: u128 = 0x4000_C000_0000_0000_0000;
+    const INF: u128 = 0x7FFF_8000_0000_0000_0000;
+    const NINF: u128 = 0xFFFF_8000_0000_0000_0000;
+    const QNAN: u128 = 0x7FFF_C000_0000_0000_0000;
+    const SNAN: u128 = 0x7FFF_A000_0000_0000_0000;
+    const UNNORMAL: u128 = 0x4001_4000_0000_0000_0000;
+    const PSEUDONAN: u128 = 0x7FFF_4000_0000_0000_0000;
+    const PSEUDOINF: u128 = 0x7FFF_0000_0000_0000_0000;
+    // (instruction, ST(0), ST(1), empty, C3-C0 before, status word after,
+    // ST(0) after)
+    let cases: [([u8; 2], u128, u128, u32, u16, u16, u128); 96] = [
+        (FPREM, FIVE, ZERO, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // 5/0
+        (FPREM, FIVE, ZERO, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // 5/0
+        (FPREM, INF, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // inf/3
+        (FPREM, INF, THREE, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // inf/3
+        (FPREM, NINF, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // -inf/3
+        (FPREM, NINF, THREE, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // -inf/3
+        (FPREM, ZERO, ZERO, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // 0/0
+        (FPREM, ZERO, ZERO, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // 0/0
+        (FPREM, INF, ZERO, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // inf/0
+        (FPREM, INF, ZERO, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // inf/0
+        (FPREM, INF, INF, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // inf/inf
+        (FPREM, INF, INF, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // inf/inf
+        (FPREM, QNAN, THREE, 0, 0x4700, 0x7100, 0x7fff_c000_0000_0000_0000), // qnan/3
+        (FPREM, QNAN, THREE, 0, 0x0000, 0x3000, 0x7fff_c000_0000_0000_0000), // qnan/3
+        (FPREM, FIVE, QNAN, 0, 0x4700, 0x7100, 0x7fff_c000_0000_0000_0000), // 5/qnan
+        (FPREM, FIVE, QNAN, 0, 0x0000, 0x3000, 0x7fff_c000_0000_0000_0000), // 5/qnan
+        (FPREM, SNAN, THREE, 0, 0x4700, 0x7101, 0x7fff_e000_0000_0000_0000), // snan/3
+        (FPREM, SNAN, THREE, 0, 0x0000, 0x3001, 0x7fff_e000_0000_0000_0000), // snan/3
+        (FPREM, FIVE, SNAN, 0, 0x4700, 0x7101, 0x7fff_e000_0000_0000_0000), // 5/snan
+        (FPREM, FIVE, SNAN, 0, 0x0000, 0x3001, 0x7fff_e000_0000_0000_0000), // 5/snan
+        (FPREM, QNAN, ZERO, 0, 0x4700, 0x7100, 0x7fff_c000_0000_0000_0000), // qnan/0
+        (FPREM, QNAN, ZERO, 0, 0x0000, 0x3000, 0x7fff_c000_0000_0000_0000), // qnan/0
+        (FPREM, INF, QNAN, 0, 0x4700, 0x7100, 0x7fff_c000_0000_0000_0000), // inf/qnan
+        (FPREM, INF, QNAN, 0, 0x0000, 0x3000, 0x7fff_c000_0000_0000_0000), // inf/qnan
+        (FPREM, UNNORMAL, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // unnormal/3
+        (FPREM, UNNORMAL, THREE, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // unnormal/3
+        (FPREM, FIVE, UNNORMAL, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // 5/unnormal
+        (FPREM, FIVE, UNNORMAL, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // 5/unnormal
+        (FPREM, PSEUDONAN, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // pseudonan/3
+        (FPREM, PSEUDONAN, THREE, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // pseudonan/3
+        (FPREM, PSEUDOINF, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // pseudoinf/3
+        (FPREM, PSEUDOINF, THREE, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // pseudoinf/3
+        (FPREM, FIVE, PSEUDOINF, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // 5/pseudoinf
+        (FPREM, FIVE, PSEUDOINF, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // 5/pseudoinf
+        (FPREM, FIVE, THREE, 1, 0x4700, 0x7941, 0xffff_c000_0000_0000_0000), // 5/empty
+        (FPREM, FIVE, THREE, 1, 0x0000, 0x3841, 0xffff_c000_0000_0000_0000), // 5/empty
+        (FPREM, FIVE, THREE, 2, 0x4700, 0x4141, 0xffff_c000_0000_0000_0000), // empty/empty
+        (FPREM, FIVE, THREE, 2, 0x0000, 0x0041, 0xffff_c000_0000_0000_0000), // empty/empty
+        (FPREM, FIVE, THREE, 3, 0x4700, 0x7141, 0xffff_c000_0000_0000_0000), // empty/3
+        (FPREM, FIVE, THREE, 3, 0x0000, 0x3041, 0xffff_c000_0000_0000_0000), // empty/3
+        (FPREM, FIVE, THREE, 0, 0x4700, 0x3200, 0x4000_8000_0000_0000_0000), // 5/3
+        (FPREM, FIVE, THREE, 0, 0x0000, 0x3200, 0x4000_8000_0000_0000_0000), // 5/3
+        (FPREM, FIVE, INF, 0, 0x4700, 0x3000, 0x4001_a000_0000_0000_0000), // 5/inf
+        (FPREM, FIVE, INF, 0, 0x0000, 0x3000, 0x4001_a000_0000_0000_0000), // 5/inf
+        (FPREM, ZERO, INF, 0, 0x4700, 0x3000, 0x0000_0000_0000_0000_0000), // 0/inf
+        (FPREM, ZERO, INF, 0, 0x0000, 0x3000, 0x0000_0000_0000_0000_0000), // 0/inf
+        (FPREM, ZERO, THREE, 0, 0x4700, 0x3000, 0x0000_0000_0000_0000_0000), // 0/3
+        (FPREM, ZERO, THREE, 0, 0x0000, 0x3000, 0x0000_0000_0000_0000_0000), // 0/3
+        (FPREM1, FIVE, ZERO, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // 5/0
+        (FPREM1, FIVE, ZERO, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // 5/0
+        (FPREM1, INF, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // inf/3
+        (FPREM1, INF, THREE, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // inf/3
+        (FPREM1, NINF, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // -inf/3
+        (FPREM1, NINF, THREE, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // -inf/3
+        (FPREM1, ZERO, ZERO, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // 0/0
+        (FPREM1, ZERO, ZERO, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // 0/0
+        (FPREM1, INF, ZERO, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // inf/0
+        (FPREM1, INF, ZERO, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // inf/0
+        (FPREM1, INF, INF, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // inf/inf
+        (FPREM1, INF, INF, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // inf/inf
+        (FPREM1, QNAN, THREE, 0, 0x4700, 0x7100, 0x7fff_c000_0000_0000_0000), // qnan/3
+        (FPREM1, QNAN, THREE, 0, 0x0000, 0x3000, 0x7fff_c000_0000_0000_0000), // qnan/3
+        (FPREM1, FIVE, QNAN, 0, 0x4700, 0x7100, 0x7fff_c000_0000_0000_0000), // 5/qnan
+        (FPREM1, FIVE, QNAN, 0, 0x0000, 0x3000, 0x7fff_c000_0000_0000_0000), // 5/qnan
+        (FPREM1, SNAN, THREE, 0, 0x4700, 0x7101, 0x7fff_e000_0000_0000_0000), // snan/3
+        (FPREM1, SNAN, THREE, 0, 0x0000, 0x3001, 0x7fff_e000_0000_0000_0000), // snan/3
+        (FPREM1, FIVE, SNAN, 0, 0x4700, 0x7101, 0x7fff_e000_0000_0000_0000), // 5/snan
+        (FPREM1, FIVE, SNAN, 0, 0x0000, 0x3001, 0x7fff_e000_0000_0000_0000), // 5/snan
+        (FPREM1, QNAN, ZERO, 0, 0x4700, 0x7100, 0x7fff_c000_0000_0000_0000), // qnan/0
+        (FPREM1, QNAN, ZERO, 0, 0x0000, 0x3000, 0x7fff_c000_0000_0000_0000), // qnan/0
+        (FPREM1, INF, QNAN, 0, 0x4700, 0x7100, 0x7fff_c000_0000_0000_0000), // inf/qnan
+        (FPREM1, INF, QNAN, 0, 0x0000, 0x3000, 0x7fff_c000_0000_0000_0000), // inf/qnan
+        (FPREM1, UNNORMAL, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // unnormal/3
+        (FPREM1, UNNORMAL, THREE, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // unnormal/3
+        (FPREM1, FIVE, UNNORMAL, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // 5/unnormal
+        (FPREM1, FIVE, UNNORMAL, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // 5/unnormal
+        (FPREM1, PSEUDONAN, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // pseudonan/3
+        (FPREM1, PSEUDONAN, THREE, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // pseudonan/3
+        (FPREM1, PSEUDOINF, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // pseudoinf/3
+        (FPREM1, PSEUDOINF, THREE, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // pseudoinf/3
+        (FPREM1, FIVE, PSEUDOINF, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // 5/pseudoinf
+        (FPREM1, FIVE, PSEUDOINF, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // 5/pseudoinf
+        (FPREM1, FIVE, THREE, 1, 0x4700, 0x7941, 0xffff_c000_0000_0000_0000), // 5/empty
+        (FPREM1, FIVE, THREE, 1, 0x0000, 0x3841, 0xffff_c000_0000_0000_0000), // 5/empty
+        (FPREM1, FIVE, THREE, 2, 0x4700, 0x4141, 0xffff_c000_0000_0000_0000), // empty/empty
+        (FPREM1, FIVE, THREE, 2, 0x0000, 0x0041, 0xffff_c000_0000_0000_0000), // empty/empty
+        (FPREM1, FIVE, THREE, 3, 0x4700, 0x7141, 0xffff_c000_0000_0000_0000), // empty/3
+        (FPREM1, FIVE, THREE, 3, 0x0000, 0x3041, 0xffff_c000_0000_0000_0000), // empty/3
+        (FPREM1, FIVE, THREE, 0, 0x4700, 0x7000, 0xbfff_8000_0000_0000_0000), // 5/3
+        (FPREM1, FIVE, THREE, 0, 0x0000, 0x7000, 0xbfff_8000_0000_0000_0000), // 5/3
+        (FPREM1, FIVE, INF, 0, 0x4700, 0x3000, 0x4001_a000_0000_0000_0000), // 5/inf
+        (FPREM1, FIVE, INF, 0, 0x0000, 0x3000, 0x4001_a000_0000_0000_0000), // 5/inf
+        (FPREM1, ZERO, INF, 0, 0x4700, 0x3000, 0x0000_0000_0000_0000_0000), // 0/inf
+        (FPREM1, ZERO, INF, 0, 0x0000, 0x3000, 0x0000_0000_0000_0000_0000), // 0/inf
+        (FPREM1, ZERO, THREE, 0, 0x4700, 0x3000, 0x0000_0000_0000_0000_0000), // 0/3
+        (FPREM1, ZERO, THREE, 0, 0x0000, 0x3000, 0x0000_0000_0000_0000_0000), // 0/3
     ];
-    for code in [[0xD9, 0xF8], [0xD9, 0xF5]] {
-        for (st0, st1) in cases {
-            let mut cpu = Cpu::new(std::path::PathBuf::from("."));
-            for v in [st1, st0] {
-                let mut f = F80::new();
-                f.set_f64(v);
-                cpu.fpu_push(f);
-            }
-            for flag in [FpuFlags::C0, FpuFlags::C1, FpuFlags::C2, FpuFlags::C3] {
-                cpu.set_fpu_flag(flag, true);
-            }
-            testrunners::run_fpu_code(&mut cpu, &code);
-            let what = format!("{st0} {code:02X?} {st1}");
-            assert_eq!(cpu.fpu_get(0).get(), indefinite, "{what}");
-            assert!(cpu.get_fpu_flag(FpuFlags::IE), "{what}: IE");
-            for flag in [FpuFlags::C0, FpuFlags::C1, FpuFlags::C2, FpuFlags::C3] {
-                assert!(!cpu.get_fpu_flag(flag), "{what}: {flag:?}");
-            }
+    let c = [FpuFlags::C0, FpuFlags::C1, FpuFlags::C2, FpuFlags::C3];
+    for (code, st0, st1, empty, before, sw, result) in cases {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let pushed: &[u128] = match empty {
+            1 => &[st0],
+            2 => &[],
+            _ => &[st1, st0],
+        };
+        for &v in pushed {
+            let mut f = F80::new();
+            f.set(v);
+            cpu.fpu_push(f);
         }
+        for flag in c {
+            cpu.set_fpu_flag(flag, before & flag.bits() != 0);
+        }
+        if empty == 3 {
+            testrunners::run_fpu_code(&mut cpu, &[0xDD, 0xC0]); // FFREE ST(0)
+        }
+        testrunners::run_fpu_code(&mut cpu, &code);
+        let what = format!("{code:02X?} {st0:020X} {st1:020X} empty {empty} before {before:04X}");
+        assert_eq!(cpu.fpu_status_word(), sw, "{what}: status word");
+        assert_eq!(cpu.fpu_get(0).get(), result, "{what}: ST(0)");
+        assert!(!cpu.fpu_is_empty(0), "{what}: ST(0) valid");
     }
 }
 
