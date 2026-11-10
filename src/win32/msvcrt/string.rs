@@ -1636,3 +1636,82 @@ pub fn splitpath(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     Some(0)
 }
+
+// The locale's comparisons and mappings as MSVCRT's own functions call
+// them: CompareStringA, LCMapStringA and GetStringTypeA with the code page
+// they take as well. MSVCRT tries each wide function once, and uses it
+// when it works; Windows 98's KERNEL32 has none of them, as this one, so
+// the ANSI ones do the work, and the first call leaves the wide one's
+// error.
+
+/// `S_CRT_TRIED_WIDE`'s bits: CompareStringW, LCMapStringW and
+/// GetStringTypeW tried. MSVCRT's startup has tried the last two when it
+/// set up its multibyte code page's tables, so a process starts with
+/// those (`STARTUP_TRIED`).
+const TRIED_COMPARE: u32 = 1;
+const TRIED_MAP: u32 = 2;
+const TRIED_TYPE: u32 = 4;
+pub const STARTUP_TRIED: u32 = TRIED_MAP | TRIED_TYPE;
+
+/// Call the wide KERNEL32 function `name` once per process, with an empty
+/// string as MSVCRT tries it.
+fn try_wide(cpu: &mut Cpu, bit: u32, name: &str) -> Option<()> {
+    let tried = state(cpu, S_CRT_TRIED_WIDE);
+    if tried & bit != 0 {
+        return Some(());
+    }
+    set_state(cpu, S_CRT_TRIED_WIDE, tried | bit);
+    let empty = thread_field(cpu, T_SCRATCH)?;
+    write32(cpu, empty, 0)?;
+    let args: &[u32] = match name {
+        "CompareStringW" => &[0, 0, empty, 1, empty, 1],
+        "LCMapStringW" => &[0, 0x100, empty, 1, 0, 0],
+        _ => &[1, empty, 1, empty + 2],
+    };
+    let _ = kernel32(cpu, name, args);
+    Some(())
+}
+
+/// The bytes of the string at `at` before its 0, but at most `count`
+/// (MSVCRT's strncnt).
+fn strncnt(cpu: &mut Cpu, at: u32, count: u32) -> Option<u32> {
+    Some(cstr_n(cpu, at, count as usize)?.len() as u32)
+}
+
+/// __crtCompareStringA(lcid, flags, a, a_count, b, b_count, code_page):
+/// CompareStringA, with a count past a string's 0 made its length.
+pub fn crt_compare_string_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[lcid, flags, a, mut a_count, b, mut b_count, _] = args else {
+        unreachable!()
+    };
+    try_wide(cpu, TRIED_COMPARE, "CompareStringW")?;
+    if a_count as i32 > 0 {
+        a_count = strncnt(cpu, a, a_count)?;
+    }
+    if b_count as i32 > 0 {
+        b_count = strncnt(cpu, b, b_count)?;
+    }
+    kernel32(cpu, "CompareStringA", &[lcid, flags, a, a_count, b, b_count])
+}
+
+/// __crtLCMapStringA(lcid, flags, from, count, to, size, code_page,
+/// error): LCMapStringA, with a count past the string's 0 made its length.
+/// The last two matter only to the wide function.
+pub fn crt_lc_map_string_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[lcid, flags, from, mut count, to, size, _, _] = args else {
+        unreachable!()
+    };
+    try_wide(cpu, TRIED_MAP, "LCMapStringW")?;
+    if count as i32 > 0 {
+        count = strncnt(cpu, from, count)?;
+    }
+    kernel32(cpu, "LCMapStringA", &[lcid, flags, from, count, to, size])
+}
+
+/// MSVCRT's __crtGetStringTypeA(CT_CTYPE1, ...) for the `len` bytes at
+/// `from` in the locale `lcid`: the types, into the words at `to`. False
+/// when KERNEL32 fails.
+pub fn crt_string_type(cpu: &mut Cpu, lcid: u32, from: u32, len: u32, to: u32) -> Option<bool> {
+    try_wide(cpu, TRIED_TYPE, "GetStringTypeW")?;
+    Some(kernel32(cpu, "GetStringTypeA", &[lcid, 1, from, len, to])? != 0)
+}

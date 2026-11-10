@@ -1,7 +1,7 @@
 //! Low-level I/O: the file descriptors (`_open`, `_read`, `_write`,
-//! `_lseek`), each a handle and flags in the DLL's `fds` table; files,
-//! directories and their names (`_stat`, `_findfirst`, `_mkdir`,
-//! `_getcwd`).
+//! `_lseek`), each a handle and flags in the blocks `__pioinfo` points
+//! to; files, directories and their names (`_stat`, `_findfirst`,
+//! `_mkdir`, `_getcwd`).
 //!
 //! The handles are KERNEL32's: its file objects, opened as CreateFileA
 //! opens them, or the standard handles, which are DOS's. They are read,
@@ -63,37 +63,115 @@ pub fn is_device(bus: &mut Bus, process: &super::super::Process, handle: u32) ->
     sft.is_some_and(|sft| bus.disk.handle_device(sft).is_some())
 }
 
-/// The address of descriptor `fd`'s entry: its handle, then its flags.
-fn entry(fd: u32) -> u32 {
-    var_at(V_FDS) + FD_SIZE * fd
+// The descriptors, as MSVCRT keeps them: `__pioinfo` points to up to 64
+// blocks of 32 `ioinfo`, each the descriptor's handle, its flags
+// (`osfile`), the byte a text-mode read looked ahead at (`pipech`, LF for
+// none), and a lock that is made when it is first taken. The blocks are on
+// the runtime's heap: the first is made with the process, the next ones
+// when a descriptor needs them. MSVCIRT reads a descriptor's flags there
+// itself, and its entry `__badioinfo` for descriptor -1.
+
+/// The bytes of a block of descriptors none of which is open.
+pub fn fresh_block() -> Vec<u8> {
+    let mut entry = [0u8; IOINFO_SIZE as usize];
+    entry[..4].copy_from_slice(&u32::MAX.to_le_bytes());
+    entry[5] = b'\n';
+    entry.repeat(IOINFO_BLOCK as usize)
+}
+
+/// `__badioinfo`'s bytes: those of a descriptor that isn't open.
+pub fn bad_ioinfo() -> Vec<u8> {
+    fresh_block()[..IOINFO_SIZE as usize].to_vec()
+}
+
+/// The address of descriptor `fd`'s `ioinfo`. None for a descriptor past
+/// the blocks made so far.
+fn entry(cpu: &mut Cpu, fd: u32) -> Option<u32> {
+    if fd >= MAX_FDS {
+        return None;
+    }
+    let block = read32(cpu, var_at(V_PIOINFO) + 4 * (fd / IOINFO_BLOCK))?;
+    (block != 0).then_some(block + IOINFO_SIZE * (fd % IOINFO_BLOCK))
+}
+
+/// The address of descriptor `fd`'s `ioinfo`, with the blocks up to its
+/// own made, as MSVCRT's `extend_ioinfo_arrays` makes them. None for a
+/// descriptor past `MAX_FDS`, or when there is no memory for a block.
+fn entry_made(cpu: &mut Cpu, fd: u32) -> Option<u32> {
+    if fd >= MAX_FDS {
+        return None;
+    }
+    for i in 0..=fd / IOINFO_BLOCK {
+        let slot = var_at(V_PIOINFO) + 4 * i;
+        if read32(cpu, slot)? == 0 {
+            let block = heap_alloc(cpu, IOINFO_BLOCK * IOINFO_SIZE)?;
+            put(cpu, block, &fresh_block())?;
+            write32(cpu, slot, block)?;
+        }
+    }
+    entry(cpu, fd)
+}
+
+/// The flags of descriptor `fd`, 0 for one that isn't open.
+pub fn fd_flags(cpu: &mut Cpu, fd: u32) -> u32 {
+    match entry(cpu, fd) {
+        Some(at) => {
+            let flags = cpu.bus.guest_read_8(at + 4) as u32;
+            if cpu.bus.guest_faulted() { 0 } else { flags }
+        }
+        None => 0,
+    }
 }
 
 /// The handle and flags of the open descriptor `fd`; None, errno EBADF,
 /// if it isn't one.
 pub fn fd_info(cpu: &mut Cpu, fd: u32) -> Option<(u32, u32)> {
-    if fd < MAX_FDS {
-        let handle = cpu.bus.guest_read_32(entry(fd));
-        let flags = cpu.bus.guest_read_32(entry(fd) + 4);
-        if flags & FOPEN != 0 && !cpu.bus.guest_faulted() {
-            return Some((handle, flags));
-        }
+    if fd_flags(cpu, fd) & FOPEN != 0
+        && let Some(handle) = entry(cpu, fd).and_then(|at| read32(cpu, at))
+    {
+        return Some((handle, fd_flags(cpu, fd)));
     }
     set_errno(cpu, EBADF);
     set_doserrno(cpu, 0);
     None
 }
 
-fn set_flags(cpu: &mut Cpu, fd: u32, flags: u32) {
-    cpu.bus.guest_write_32(entry(fd) + 4, flags);
+/// The handle and flags of each descriptor in the blocks made so far,
+/// open or not, as a child's C runtime inherits them.
+pub fn descriptors(cpu: &mut Cpu) -> Vec<(u32, u32)> {
+    let mut all = Vec::new();
+    for fd in 0..MAX_FDS {
+        let Some(at) = entry(cpu, fd) else {
+            break;
+        };
+        let handle = cpu.bus.guest_read_32(at);
+        all.push((handle, fd_flags(cpu, fd)));
+    }
+    all
 }
 
-/// A descriptor for `handle` with `flags`: the lowest free one at or
-/// above `from`. None, errno EMFILE, when there is none.
-fn new_fd(cpu: &mut Cpu, handle: u32, flags: u32, from: u32) -> Option<u32> {
-    for fd in from..MAX_FDS {
-        if cpu.bus.guest_read_32(entry(fd) + 4) & FOPEN == 0 {
-            cpu.bus.guest_write_32(entry(fd), handle);
-            cpu.bus.guest_write_32(entry(fd) + 4, flags | FOPEN);
+fn set_flags(cpu: &mut Cpu, fd: u32, flags: u32) {
+    if let Some(at) = entry(cpu, fd) {
+        cpu.bus.guest_write_8(at + 4, flags as u8);
+    }
+}
+
+/// Descriptor `fd`'s handle and flags.
+fn set_fd(cpu: &mut Cpu, at: u32, handle: u32, flags: u32) {
+    cpu.bus.guest_write_32(at, handle);
+    cpu.bus.guest_write_8(at + 4, flags as u8);
+}
+
+/// A descriptor for `handle` with `flags`: the lowest free one, in a new
+/// block when the ones there are are full. None, errno EMFILE, when there
+/// is none.
+fn new_fd(cpu: &mut Cpu, handle: u32, flags: u32) -> Option<u32> {
+    for fd in 0..MAX_FDS {
+        let Some(at) = entry_made(cpu, fd) else {
+            break;
+        };
+        if fd_flags(cpu, fd) & FOPEN == 0 {
+            set_fd(cpu, at, handle, flags | FOPEN);
             return Some(fd);
         }
     }
@@ -320,7 +398,7 @@ fn open_shared(cpu: &mut Cpu, name: &[u8], flags: u32, share: u32) -> Option<u32
         fd_flags |= FNOINHERIT;
     }
     let _ = flags & O_TEMPORARY;
-    match new_fd(cpu, handle, fd_flags, 0) {
+    match new_fd(cpu, handle, fd_flags) {
         Some(fd) => Some(fd),
         None => {
             dos_close(cpu, handle);
@@ -336,8 +414,9 @@ pub fn close(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 pub fn close_fd(cpu: &mut Cpu, fd: u32) -> Option<()> {
     let (handle, _) = fd_info(cpu, fd)?;
-    set_flags(cpu, fd, 0);
-    cpu.bus.guest_write_32(entry(fd), u32::MAX);
+    if let Some(at) = entry(cpu, fd) {
+        set_fd(cpu, at, u32::MAX, 0);
+    }
     if !dos_close(cpu, handle) {
         set_errno(cpu, EBADF);
         return None;
@@ -639,7 +718,7 @@ pub fn open_osfhandle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if sft_of(cpu, handle).is_some_and(|sft| cpu.bus.disk.handle_device(sft).is_some()) {
         fd_flags |= FDEV;
     }
-    Some(new_fd(cpu, handle, fd_flags, 0).unwrap_or(EOF))
+    Some(new_fd(cpu, handle, fd_flags).unwrap_or(EOF))
 }
 
 /// A second handle of the object `handle`, as DuplicateHandle makes.
@@ -658,7 +737,7 @@ pub fn dup(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_errno(cpu, EBADF);
         return Some(EOF);
     };
-    match new_fd(cpu, copy, flags & !FOPEN, 0) {
+    match new_fd(cpu, copy, flags & !FOPEN) {
         Some(fd) => Some(fd),
         None => {
             dos_close(cpu, copy);
@@ -678,6 +757,11 @@ pub fn dup2(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_errno(cpu, EBADF);
         return Some(EOF);
     }
+    // fd2's block, and those before it, are made first.
+    let Some(at) = entry_made(cpu, fd2) else {
+        set_errno(cpu, ENOMEM);
+        return Some(EOF);
+    };
     if fd == fd2 {
         return Some(0);
     }
@@ -685,11 +769,10 @@ pub fn dup2(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_errno(cpu, EBADF);
         return Some(EOF);
     };
-    if cpu.bus.guest_read_32(entry(fd2) + 4) & FOPEN != 0 {
+    if fd_flags(cpu, fd2) & FOPEN != 0 {
         let _ = close_fd(cpu, fd2);
     }
-    cpu.bus.guest_write_32(entry(fd2), copy);
-    cpu.bus.guest_write_32(entry(fd2) + 4, flags);
+    set_fd(cpu, at, copy, flags);
     Some(0)
 }
 

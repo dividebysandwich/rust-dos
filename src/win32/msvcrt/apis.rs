@@ -1,7 +1,7 @@
 //! MSVCRT's functions: all cdecl, ordinals from 1 in the order they
 //! were added. Append only (see `stubs`).
 
-use super::{cxx, io, math, mbcs, startup, stdio, string, time};
+use super::{cxx, io, math, mbcs, startup, stdio, strftime, string, time};
 use crate::win32::stubs::{self, Api, Conv, Handler};
 
 const fn cdecl(name: &'static str, ordinal: u16, args: u8, handler: Handler) -> Api {
@@ -10,6 +10,17 @@ const fn cdecl(name: &'static str, ordinal: u16, args: u8, handler: Handler) -> 
         ordinal,
         args,
         conv: Conv::Cdecl,
+        handler,
+    }
+}
+
+/// A function that takes its arguments off the stack.
+const fn stdcall(name: &'static str, ordinal: u16, args: u8, handler: Handler) -> Api {
+    Api {
+        name,
+        ordinal,
+        args,
+        conv: Conv::Stdcall,
         handler,
     }
 }
@@ -408,8 +419,8 @@ pub static APIS: &[Api] = &[
     cdecl("ctime", 583, 1, time::ctime),
     cdecl("_wasctime", 485, 1, time::wasctime),
     cdecl("_wctime", 501, 1, time::wctime),
-    cdecl("strftime", 702, 4, time::strftime),
-    cdecl("wcsftime", 742, 4, time::wcsftime),
+    cdecl("strftime", 702, 4, strftime::strftime),
+    cdecl("wcsftime", 742, 4, strftime::wcsftime),
     cdecl("_ftime", 241, 1, time::ftime),
     cdecl("_strdate", 447, 1, time::strdate),
     cdecl("_strtime", 459, 1, time::strtime),
@@ -667,4 +678,15 @@ pub static APIS: &[Api] = &[
     cdecl("__RTCastToVoid", 76, 1, cxx::rt_cast_to_void),
     cdecl("__unDName", 136, 6, cxx::undname),
     cdecl("__unDNameEx", 137, 7, cxx::undname_ex),
+    // What MSVCP60, MSVCIRT, MFC42 and the games' own DLLs import besides.
+    cdecl("_Getdays", 68, 0, strftime::getdays),
+    cdecl("_Getmonths", 69, 0, strftime::getmonths),
+    cdecl("_Gettnames", 70, 0, strftime::gettnames),
+    cdecl("_Strftime", 72, 5, strftime::big_strftime),
+    cdecl("__crtCompareStringA", 83, 7, string::crt_compare_string_a),
+    cdecl("__crtLCMapStringA", 85, 8, string::crt_lc_map_string_a),
+    cdecl("_ismbcdigit", 292, 1, mbcs::ismbcdigit),
+    cdecl("_ismbcspace", 303, 1, mbcs::ismbcspace),
+    stdcall("__CxxLongjmpUnwind", 75, 1, startup::cxx_longjmp_unwind),
+    stdcall("_seh_longjmp_unwind", 420, 1, startup::seh_longjmp_unwind),
 ];

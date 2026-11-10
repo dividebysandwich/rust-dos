@@ -170,6 +170,51 @@ pub fn ismbclegal(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some((c < 0x10000 && is_lead(cpu, (c >> 8) as u8) && is_trail(cpu, c as u8)) as u32)
 }
 
+/// The locale `_setmbcp` gives a double-byte code page, or None for a
+/// single-byte one (`__mblcid`, `__ismbcodepage`).
+fn mb_lcid(cp: u32) -> Option<u32> {
+    match cp {
+        932 => Some(0x411),
+        936 => Some(0x804),
+        949 => Some(0x412),
+        950 => Some(0x404),
+        _ => None,
+    }
+}
+
+/// The class test of `_ismbcdigit` and `_ismbcspace`: for a byte, its
+/// `_ctype` bit `class` as isdigit and isspace give it; for a double-byte
+/// character in a double-byte code page, 1 when GetStringTypeA takes its
+/// two bytes for one character of the class; otherwise 0.
+fn ismbc_class(cpu: &mut Cpu, c: u32, class: u16) -> Option<u32> {
+    if c <= 0xFF {
+        return Some((ctype_of(c as u8) & class) as u32);
+    }
+    let Some(lcid) = mb_lcid(state(cpu, S_MBCP)) else {
+        return Some(0);
+    };
+    let at = thread_field(cpu, T_SCRATCH)? + 0x10;
+    put(cpu, at, &[(c >> 8) as u8, c as u8, 0, 0, 0, 0, 0, 0])?;
+    if !string::crt_string_type(cpu, lcid, at, 2, at + 4)? {
+        return Some(0);
+    }
+    let first = cpu.bus.guest_read_16(at + 4);
+    let second = cpu.bus.guest_read_16(at + 6);
+    Some((second == 0 && first & class != 0) as u32)
+}
+
+/// _ismbcdigit(c): whether c is a digit (4 for a byte, 1 for a double-byte
+/// character).
+pub fn ismbcdigit(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    ismbc_class(cpu, args[0], DIGIT)
+}
+
+/// _ismbcspace(c): whether c is white space (8 for a byte, 1 for a
+/// double-byte character).
+pub fn ismbcspace(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    ismbc_class(cpu, args[0], SPACE)
+}
+
 /// Whether the byte at `at` leads a character, reading the string from
 /// `start`, where lead bytes may also be trail bytes.
 fn leads(cpu: &mut Cpu, start: u32, at: u32) -> Option<bool> {

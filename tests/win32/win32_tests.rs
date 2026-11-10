@@ -4748,6 +4748,173 @@ fn msvcrt_has_rtti_and_the_exception_class() {
     );
 }
 
+/// The MSVCRT functions Visual C++ 6's MSVCP60, MSVCIRT and MFC42 import,
+/// with the values a probe read on Visual C++ 6's MSVCRT.DLL: _Getdays'
+/// names, _Strftime with the "C" locale's long date (whose "dd" keeps its
+/// zero, '#' or not), __crtCompareStringA with a count past the string's
+/// end, _ismbcdigit and _ismbcspace of a byte (its class bit), the
+/// descriptors' table and its bad entry, a longjmp out of a C++ frame
+/// whose objects __CxxLongjmpUnwind destroys, and malloc after
+/// _set_new_handler.
+#[test]
+fn msvcrt_has_what_msvcp60_msvcirt_and_mfc42_import() {
+    let crt: &[&str] = &[
+        "_Getdays",
+        "_Strftime",
+        "__crtCompareStringA",
+        "_ismbcdigit",
+        "_ismbcspace",
+        "__pioinfo",
+        "__badioinfo",
+        "_get_osfhandle",
+        "_set_new_handler",
+        "malloc",
+        "strcmp",
+        "_setjmp3",
+        "longjmp",
+        "__CxxLongjmpUnwind",
+    ];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.DLL", crt)];
+    let mut data = vec![0; 0x1A0];
+    put(
+        &mut data,
+        0x00,
+        b":Sun:Sunday:Mon:Monday:Tue:Tuesday:Wed:Wednesday:Thu:Thursday:Fri:Friday:Sat:Saturday\0",
+    );
+    put(&mut data, 0x60, b"%#x\0");
+    put(&mut data, 0x68, b"Wednesday, January 02, 1980\0");
+    put(&mut data, 0x88, b"abc\0");
+    put(&mut data, 0x90, b"ABC\0");
+    // 2 Jan 1980, 00:03:05, a Wednesday.
+    let tm: Vec<u8> = [5u32, 3, 0, 2, 0, 80, 3, 1, 0]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    put(&mut data, 0xA0, &tm);
+    // A C++ function's frame at D0h in state 1, its FuncInfo at E0h with
+    // two states, and the unwind map at 100h: state 1 destroys with the
+    // code at 118h (adds 10h to the counter at C8h) and goes to state 0,
+    // which destroys with the code at 110h (adds 1) and goes to -1. The
+    // program fills in the addresses.
+    const COUNTER: u32 = 0xC8;
+    const FRAME: u32 = 0xD0;
+    const BUFFER: u32 = 0x120;
+    put(&mut data, 0xE0, &[0x20, 0x05, 0x93, 0x19, 2, 0, 0, 0]);
+    put(&mut data, 0x100, &u32::MAX.to_le_bytes());
+    put(&mut data, 0x110, &[0xFF, 0x05, 0, 0, 0, 0, 0xC3]);
+    put(&mut data, 0x118, &[0x83, 0x05, 0, 0, 0, 0, 0x10, 0xC3]);
+    let pointers: &[(u32, u32)] = &[
+        (0xE8, 0x100),
+        (0x104, 0x110),
+        (0x10C, 0x118),
+        (0x112, COUNTER),
+        (0x11A, COUNTER),
+    ];
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        use Arg::I;
+        let c = |name: &str| l.import(crt.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| I(l.at(offset) as u32);
+        for &(offset, to) in pointers {
+            a.mov(dword_ptr(l.at(offset)), l.at(to) as i32)?;
+        }
+        a.xor(ebx, ebx)?;
+        // _Getdays.
+        a.call(c("_Getdays"))?;
+        a.mov(esi, eax)?;
+        call_with(a, c("strcmp"), &[Arg::Esi, at(0x00)])?;
+        a.add(esp, 8)?;
+        a.test(eax, eax)?;
+        check(a, false, 0)?;
+        // _Strftime(buffer, 64, "%#x", tm, NULL): 27 and the long date.
+        call_with(
+            a,
+            c("_Strftime"),
+            &[at(0x160), I(64), at(0x60), at(0xA0), I(0)],
+        )?;
+        a.add(esp, 20)?;
+        a.mov(edi, eax)?;
+        call_with(a, c("strcmp"), &[at(0x160), at(0x68)])?;
+        a.add(esp, 8)?;
+        a.sub(edi, 27)?;
+        a.or(eax, edi)?;
+        check(a, false, 1)?;
+        // "abc" (a count of 9) and "ABC", case ignored: equal.
+        call_with(
+            a,
+            c("__crtCompareStringA"),
+            &[I(0x409), I(1), at(0x88), I(9), at(0x90), I(u32::MAX), I(0)],
+        )?;
+        a.add(esp, 28)?;
+        a.cmp(eax, 2)?;
+        check(a, false, 2)?;
+        // '7' is a digit (4), ' ' a space (8).
+        call_with(a, c("_ismbcdigit"), &[I(0x37)])?;
+        a.add(esp, 4)?;
+        a.mov(esi, eax)?;
+        call_with(a, c("_ismbcspace"), &[I(0x20)])?;
+        a.add(esp, 4)?;
+        a.add(eax, esi)?;
+        a.cmp(eax, 12)?;
+        check(a, false, 3)?;
+        // stdout's handle in the first block, as _get_osfhandle has it.
+        a.mov(eax, c("__pioinfo"))?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.mov(esi, dword_ptr(eax + 36))?;
+        call_with(a, c("_get_osfhandle"), &[I(1)])?;
+        a.add(esp, 4)?;
+        a.cmp(eax, esi)?;
+        check(a, false, 4)?;
+        // malloc works after _set_new_handler.
+        call_with(a, c("_set_new_handler"), &[I(0)])?;
+        a.add(esp, 4)?;
+        call_with(a, c("malloc"), &[I(16)])?;
+        a.add(esp, 4)?;
+        a.test(eax, eax)?;
+        check(a, true, 5)?;
+        // In the frame: _setjmp3(buffer, 3, __CxxLongjmpUnwind, -1,
+        // FuncInfo), then longjmp(buffer, 7), which destroys both objects.
+        let mut back = a.create_label();
+        a.mov(eax, dword_ptr(0u64).fs())?;
+        a.mov(dword_ptr(l.at(FRAME)), eax)?;
+        a.mov(dword_ptr(l.at(FRAME + 8)), 1)?;
+        a.mov(eax, l.at(FRAME) as u32)?;
+        a.mov(dword_ptr(0u64).fs(), eax)?;
+        a.push(l.at(0xE0) as i32)?;
+        a.push(-1)?;
+        a.push(c("__CxxLongjmpUnwind"))?;
+        a.push(3)?;
+        a.push(l.at(BUFFER) as i32)?;
+        a.call(c("_setjmp3"))?;
+        a.add(esp, 20)?;
+        a.cmp(eax, 7)?;
+        a.je(back)?;
+        call_with(a, c("longjmp"), &[at(BUFFER), I(7)])?;
+        a.int3()?;
+        a.set_label(&mut back)?;
+        a.mov(eax, dword_ptr(l.at(FRAME)))?;
+        a.mov(dword_ptr(0u64).fs(), eax)?;
+        a.cmp(dword_ptr(l.at(COUNTER)), 0x11)?;
+        check(a, false, 6)?;
+        // The frame left in state -1; the bad entry's handle is -1.
+        a.mov(eax, c("__badioinfo"))?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.and(eax, dword_ptr(l.at(FRAME + 8)))?;
+        a.cmp(eax, -1)?;
+        check(a, false, 7)?;
+        a.mov(eax, ebx)?;
+        a.xor(eax, 0x55)?;
+        a.ret()
+    });
+    let (code, text) = run_files("msvcrt_msvcp60", &[("T.EXE", exe)]);
+    assert_eq!(
+        code ^ 0x55,
+        0xFF,
+        "the checks that failed: {:08b}, {}",
+        !(code ^ 0x55),
+        text
+    );
+}
+
 /// The last FreeLibrary of MSVCRT.DLL, as a probe measured it on Windows
 /// 98 SE. A stream left open isn't flushed and its file stays open, so
 /// its handle still works and a load of a file with no sharing fails.
