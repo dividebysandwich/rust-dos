@@ -4613,7 +4613,8 @@ fn a_program_loads_and_frees_msvcrt_without_importing_it() {
 /// undecorates the type's name once and keeps it, __RTtypeid and
 /// __RTDynamicCast follow the object's complete object locator, the
 /// exception constructor keeps a copy of its message for what(), with
-/// the vtable the DLL exports, and __unDName undecorates a function.
+/// the vtable the DLL exports, and __unDName undecorates a function, but
+/// returns 0 without an allocator, even with a buffer.
 #[test]
 fn msvcrt_has_rtti_and_the_exception_class() {
     let crt: &[&str] = &[
@@ -4625,6 +4626,8 @@ fn msvcrt_has_rtti_and_the_exception_class() {
         "??_7exception@@6B@",
         "__unDName",
         "strcmp",
+        "malloc",
+        "free",
     ];
     let imports: &[(&str, &[&str])] = &[("MSVCRT.DLL", crt)];
     let mut data = vec![0; 0x160];
@@ -4710,16 +4713,26 @@ fn msvcrt_has_rtti_and_the_exception_class() {
         a.mov(eax, c("??_7exception@@6B@"))?;
         a.cmp(eax, dword_ptr(l.at(0x50)))?;
         check(a, false, 6)?;
-        // __unDName(buffer, name, 64, NULL, NULL, 0).
+        // __unDName(buffer, name, 64, NULL, NULL, 0) is 0, then
+        // __unDName(buffer, name, 64, malloc, free, 0) the buffer.
         call_with(
             a,
             c("__unDName"),
             &[at(0x60), at(0x00), I(64), I(0), I(0), I(0)],
         )?;
         a.add(esp, 24)?;
+        a.mov(edi, eax)?;
+        a.push(0)?;
+        a.push(c("free"))?;
+        a.push(c("malloc"))?;
+        a.push(64)?;
+        a.push(l.at(0x00) as i32)?;
+        a.push(l.at(0x60) as i32)?;
+        a.call(c("__unDName"))?;
+        a.add(esp, 24)?;
         call_with(a, c("strcmp"), &[at(0x60), at(0x10)])?;
         a.add(esp, 8)?;
-        a.test(eax, eax)?;
+        a.or(eax, edi)?;
         check(a, false, 7)?;
         a.mov(eax, ebx)?;
         a.xor(eax, 0x55)?;

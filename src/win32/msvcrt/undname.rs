@@ -130,10 +130,20 @@ fn when(cond: bool, s: &str) -> Option<&str> {
     cond.then_some(s)
 }
 
+/// How deep types and symbols may nest in one another. The parser
+/// recurses into each, and a name the program made up, `PAPAPA...H` for
+/// a pointer to a pointer and so on, would otherwise take the host's
+/// stack: 1,000 levels overflow a megabyte. Visual C++ 6's undecorator
+/// recurses on the program's own stack; no name a compiler makes nests
+/// anywhere near this deep, and one that does is given back as it is.
+const MAX_DEPTH: u32 = 64;
+
 struct Parser<'a> {
     flags: u32,
     text: &'a [u8],
     at: usize,
+    /// The types and nested symbols being read, one in another.
+    depth: u32,
     result: Option<String>,
     names: Strings,
     args: Strings,
@@ -188,6 +198,16 @@ impl<'a> Parser<'a> {
             _ => return None,
         };
         Some(text)
+    }
+
+    /// The number of an array's dimensions. A compiler writes a byte or
+    /// more for each, so a count past the bytes left isn't one it wrote,
+    /// and the name isn't read: Wine's would add "[]" for every dimension
+    /// it can't read, two billion of them for a count of 7FFFFFFFh.
+    fn dimensions(&mut self) -> Option<usize> {
+        let n = self.number()?;
+        let count = n.parse::<i32>().unwrap_or(0).max(0) as usize;
+        (count <= self.text.len().saturating_sub(self.at)).then_some(count)
     }
 
     /// A list of arguments, of a function (`z_term`, ended by Z) or a
@@ -402,10 +422,9 @@ impl<'a> Parser<'a> {
             // behind a pointer or a reference.
             if self.cur() == b'Y' && qualifier != b'?' {
                 self.at += 1;
-                let Some(n) = self.number() else {
+                let Some(count) = self.dimensions() else {
                     return false;
                 };
-                let count = n.parse::<i32>().unwrap_or(0).max(0);
                 let inner = match (&ct.left, &xdt2.left) {
                     (Some(left), None) => left.get(1..).unwrap_or("").to_string(),
                     (left, _) => left.clone().unwrap_or_default(),
@@ -556,6 +575,16 @@ impl<'a> Parser<'a> {
     /// is in, or a template's argument that is the address of a symbol.
     /// Its own arguments show, even in a type alone.
     fn nested_symbol(&mut self) -> Option<String> {
+        if self.depth >= MAX_DEPTH {
+            return None;
+        }
+        self.depth += 1;
+        let symbol = self.nested_symbol_here();
+        self.depth -= 1;
+        symbol
+    }
+
+    fn nested_symbol_here(&mut self) -> Option<String> {
         let stack = std::mem::take(&mut self.stack);
         let (start, num) = (self.names.start, self.names.num);
         let (flags, result) = (self.flags, self.result.take());
@@ -676,8 +705,19 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// A type; None if it isn't one.
+    /// A type; None if it isn't one, or if it is nested deeper than
+    /// `MAX_DEPTH`.
     fn datatype(&mut self, flags: u32) -> Option<DataType> {
+        if self.depth >= MAX_DEPTH {
+            return None;
+        }
+        self.depth += 1;
+        let ct = self.datatype_here(flags);
+        self.depth -= 1;
+        ct
+    }
+
+    fn datatype_here(&mut self, flags: u32) -> Option<DataType> {
         let mut ct = DataType::default();
         let dt = self.next();
         match dt {
@@ -838,8 +878,7 @@ impl<'a> Parser<'a> {
                         let mut array: Option<String> = None;
                         if self.cur() == b'Y' {
                             self.at += 1;
-                            let n = self.number()?;
-                            let count = n.parse::<i32>().unwrap_or(0).max(0);
+                            let count = self.dimensions()?;
                             for _ in 0..count {
                                 let n = self.number();
                                 array = Some(format!(
@@ -1368,6 +1407,7 @@ pub fn undecorate(mangled: &[u8], flags: u32) -> Option<String> {
         flags,
         text: mangled,
         at: 0,
+        depth: 0,
         result: None,
         names: Strings::default(),
         args: Strings::default(),
@@ -1421,6 +1461,56 @@ mod tests {
         }
         assert!(count > 300);
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A pointer to a pointer `n` times, and a template of a template `n`
+    /// times.
+    fn pointers(n: usize) -> Vec<u8> {
+        let mut name = b"PA".repeat(n);
+        name.push(b'H');
+        name
+    }
+
+    fn templates(n: usize) -> Vec<u8> {
+        let mut name = b"?AV".to_vec();
+        name.extend(b"?$A@V".repeat(n));
+        name.extend_from_slice(b"B@@");
+        name.extend(b"@@".repeat(n));
+        name
+    }
+
+    /// Names nested deeper than MAX_DEPTH are given back as they are, on
+    /// a stack of a megabyte, the size of the host's main thread on
+    /// Windows, which a thousand levels overflowed. Ones a compiler makes
+    /// still undecorate.
+    #[test]
+    fn deep_names_leave_the_stack_alone() {
+        let results = std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(|| {
+                [pointers(2000), templates(800), pointers(20), templates(20)]
+                    .map(|name| undecorate(&name, TYPE_NAME))
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(results[0], None);
+        assert_eq!(results[1], None);
+        assert!(
+            results[2]
+                .as_deref()
+                .is_some_and(|s| s.starts_with("int *"))
+        );
+        let template = format!("class {}B>{}", "A<class ".repeat(20), " >".repeat(19));
+        assert_eq!(results[3].as_deref(), Some(template.as_str()));
+    }
+
+    /// An array whose count of dimensions is past the name's end isn't
+    /// read, however large the count.
+    #[test]
+    fn a_dimension_count_past_the_end_is_no_array() {
+        assert_eq!(undecorate(b"PAYHPPPPPPP@H", TYPE_NAME), None);
+        assert_eq!(undecorate(b"$$BYHPPPPPPP@H", TYPE_NAME), None);
     }
 
     /// type_info::name's text: the type, with no spaces at its end, or

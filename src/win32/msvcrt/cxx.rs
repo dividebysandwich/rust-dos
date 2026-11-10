@@ -128,7 +128,6 @@ struct Rtti {
     /// The throw information of the classes the runtime throws (none for
     /// type_info and exception).
     throw: [u32; 5],
-    unknown: u32,
 }
 
 impl Rtti {
@@ -148,11 +147,13 @@ impl Rtti {
         }
     }
 
-    /// The layout at `base`: type descriptors, base class descriptors,
-    /// class hierarchies, complete object locators, catchable types,
-    /// their arrays and the throw information, as Visual C++ 6 makes
-    /// them. A pointer to member's displacements are (0, -1, 0): the
-    /// classes are bases at offset 0, none of them virtual.
+    /// The layout at `base`: the text what() gives for an exception with
+    /// no message first, so that it is at `base`, then type descriptors,
+    /// base class descriptors, class hierarchies, complete object
+    /// locators, catchable types, their arrays and the throw information,
+    /// as Visual C++ 6 makes them. A pointer to member's displacements
+    /// are (0, -1, 0): the classes are bases at offset 0, none of them
+    /// virtual.
     fn new(base: u32) -> Rtti {
         let mut r = Rtti {
             bytes: Vec::new(),
@@ -160,8 +161,8 @@ impl Rtti {
             td: [0; 5],
             col: [0; 5],
             throw: [0; 5],
-            unknown: 0,
         };
+        r.text(UNKNOWN);
         let type_info_vtable = var_at(CLASSES[TYPE_INFO].vtable_var);
         for (i, class) in CLASSES.iter().enumerate() {
             r.td[i] = r.at();
@@ -220,8 +221,6 @@ impl Rtti {
             r.word(0);
             r.word(array);
         }
-        r.unknown = r.at();
-        r.text(UNKNOWN);
         r
     }
 }
@@ -295,24 +294,47 @@ fn construct_with(cpu: &mut Cpu, class: usize, message: u32) -> Option<u32> {
     Some(this)
 }
 
-/// The copy constructors: a copy of the message if `other` owns its own,
-/// else the same pointer.
-fn construct_copy(cpu: &mut Cpu, class: usize, other: u32) -> Option<u32> {
-    let this = cpu.ecx();
-    let name = read32(cpu, other + O_NAME)?;
-    let do_free = read32(cpu, other + O_DO_FREE)?;
+/// What a copy of the exception `other` takes from it: its message
+/// pointer, whether it owns it, and the text when it does.
+struct Source {
+    name: u32,
+    do_free: u32,
+    text: Option<Vec<u8>>,
+}
+
+fn read_source(cpu: &mut Cpu, other: u32) -> Option<Source> {
+    let name = read32(cpu, other.wrapping_add(O_NAME))?;
+    let do_free = read32(cpu, other.wrapping_add(O_DO_FREE))?;
     let text = match (do_free, name) {
         (0, _) | (_, 0) => None,
         _ => Some(cstr(cpu, name)?),
     };
+    Some(Source {
+        name,
+        do_free,
+        text,
+    })
+}
+
+/// Make `this`, which `writable` passed, a copy of `source` of the class
+/// `class`: a copy of the message if the source owns its own, else the
+/// same pointer.
+fn copy_into(cpu: &mut Cpu, this: u32, class: usize, source: Source) -> Option<()> {
+    let name = match source.text {
+        Some(text) => new_text(cpu, &text),
+        None => source.name,
+    };
+    set_object(cpu, this, class, name, source.do_free)
+}
+
+/// The copy constructors.
+fn construct_copy(cpu: &mut Cpu, class: usize, other: u32) -> Option<u32> {
+    let this = cpu.ecx();
+    let source = read_source(cpu, other)?;
     if !writable(cpu, this) {
         return None;
     }
-    let name = match text {
-        Some(text) => new_text(cpu, &text),
-        None => name,
-    };
-    set_object(cpu, this, class, name, do_free)?;
+    copy_into(cpu, this, class, source)?;
     Some(this)
 }
 
@@ -365,8 +387,8 @@ pub fn non_rtti_copy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// `exception`'s vtable again, and the message freed if the object owns
 /// it.
 fn destroy(cpu: &mut Cpu, this: u32) -> Option<()> {
-    let name = read32(cpu, this + O_NAME)?;
-    let do_free = read32(cpu, this + O_DO_FREE)?;
+    let name = read32(cpu, this.wrapping_add(O_NAME))?;
+    let do_free = read32(cpu, this.wrapping_add(O_DO_FREE))?;
     write32(cpu, this, vtable(EXCEPTION))?;
     if do_free != 0 && name != 0 {
         heap_free(cpu, name);
@@ -383,15 +405,21 @@ pub fn exception_destroy(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 /// operator=(const exception &other) of the four classes: unless it is
 /// the object itself, `this` is destroyed and made a copy of `other`, as
-/// `exception`, whatever class it was.
+/// `exception`, whatever class it was. Everything is read and `this`
+/// probed before the destructor frees its message, so that a page fault,
+/// after which the call runs again, doesn't free it twice.
 pub fn exception_assign(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let this = cpu.ecx();
     let other = args[0];
-    if this != other {
-        read32(cpu, other + O_DO_FREE)?;
-        destroy(cpu, this)?;
-        construct_copy(cpu, EXCEPTION, other)?;
+    if this == other {
+        return Some(this);
     }
+    let source = read_source(cpu, other)?;
+    if !writable(cpu, this) {
+        return None;
+    }
+    destroy(cpu, this)?;
+    copy_into(cpu, this, EXCEPTION, source)?;
     Some(this)
 }
 
@@ -409,7 +437,9 @@ pub fn exception_delete(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// The vector deleting destructor (`??_E`), which the vtables point to:
 /// with bit 1 of `flags`, `this` is an array whose count is in the word
 /// before it, each element destroyed from the last, and the block from
-/// that word freed with bit 0. Else it is the scalar one.
+/// that word freed with bit 0. Else it is the scalar one. The whole
+/// array is probed first, so that a page fault, after which the call
+/// runs again, comes before any element's message is freed.
 pub fn exception_vector_delete(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let flags = args[0];
     if flags & 2 == 0 {
@@ -418,6 +448,10 @@ pub fn exception_vector_delete(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let this = cpu.ecx();
     let block = this.wrapping_sub(4);
     let count = read32(cpu, block)?;
+    let size = (count as u64 * OBJECT_SIZE as u64).min(u32::MAX as u64) as usize;
+    if !cpu.bus.guest_probe(this, size, true) {
+        return None;
+    }
     for i in (0..count).rev() {
         destroy(cpu, this.wrapping_add(i.wrapping_mul(OBJECT_SIZE)))?;
     }
@@ -430,8 +464,8 @@ pub fn exception_vector_delete(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// ?what@exception@@UBEPBDXZ: the message, or "Unknown exception".
 pub fn what(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let this = cpu.ecx();
-    match read32(cpu, this + O_NAME)? {
-        0 => Some(Rtti::new(var_at(super::V_RTTI)).unknown),
+    match read32(cpu, this.wrapping_add(O_NAME))? {
+        0 => Some(var_at(super::V_RTTI)),
         name => Some(name),
     }
 }
@@ -453,15 +487,17 @@ fn raw_name(cpu: &mut Cpu, at: u32) -> Option<Vec<u8>> {
 /// and kept in the type_info, on the runtime's heap.
 pub fn type_info_name(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let this = cpu.ecx();
-    let made = read32(cpu, this + TI_NAME)?;
+    let made = read32(cpu, this.wrapping_add(TI_NAME))?;
     if made != 0 {
         return Some(made);
     }
     let raw = raw_name(cpu, this)?;
     let name = super::undname::type_name(&raw);
-    cpu.bus.guest_probe(this + TI_NAME, 4, true).then_some(())?;
+    cpu.bus
+        .guest_probe(this.wrapping_add(TI_NAME), 4, true)
+        .then_some(())?;
     let at = new_text(cpu, &name);
-    write32(cpu, this + TI_NAME, at)?;
+    write32(cpu, this.wrapping_add(TI_NAME), at)?;
     Some(at)
 }
 
@@ -497,7 +533,7 @@ pub fn type_info_before(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// name `name()` made freed (the field keeps the pointer).
 pub fn type_info_destroy(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let this = cpu.ecx();
-    let made = read32(cpu, this + TI_NAME)?;
+    let made = read32(cpu, this.wrapping_add(TI_NAME))?;
     write32(cpu, this, vtable(TYPE_INFO))?;
     if made != 0 {
         heap_free(cpu, made);
@@ -650,7 +686,7 @@ impl Cast {
     fn single(&self, cpu: &mut Cpu, bases: &[u32]) -> Option<u32> {
         for &bcd in bases {
             if is_type(cpu, bcd, self.target)?
-                && peek(cpu, bcd + B_ATTRIBUTES)? & BCD_NOT_VISIBLE == 0
+                && peek(cpu, bcd.wrapping_add(B_ATTRIBUTES))? & BCD_NOT_VISIBLE == 0
             {
                 return Some(bcd);
             }
@@ -661,10 +697,10 @@ impl Cast {
     /// Whether the target `bcd`, the `i`th base, contains the source at
     /// its offset in the object.
     fn contains_source(&self, cpu: &mut Cpu, bases: &[u32], i: usize) -> Option<bool> {
-        let contained = peek(cpu, bases[i] + B_CONTAINED)? as usize;
+        let contained = peek(cpu, bases[i].wrapping_add(B_CONTAINED))? as usize;
         for &sub in bases.iter().skip(i + 1).take(contained) {
             if is_type(cpu, sub, self.src)?
-                && member_offset(cpu, self.complete, sub + B_WHERE)? == self.src_offset
+                && member_offset(cpu, self.complete, sub.wrapping_add(B_WHERE))? == self.src_offset
             {
                 return Some(true);
             }
@@ -677,7 +713,8 @@ impl Cast {
     fn cross(&self, cpu: &mut Cpu, bases: &[u32]) -> Option<u32> {
         for &bcd in bases {
             if is_type(cpu, bcd, self.target)?
-                && peek(cpu, bcd + B_ATTRIBUTES)? & (BCD_NOT_VISIBLE | BCD_AMBIGUOUS) == 0
+                && peek(cpu, bcd.wrapping_add(B_ATTRIBUTES))? & (BCD_NOT_VISIBLE | BCD_AMBIGUOUS)
+                    == 0
             {
                 return Some(bcd);
             }
@@ -699,21 +736,22 @@ impl Cast {
     /// Virtual inheritance: as multiple, but targets containing the
     /// source at different places in the object make the cast fail.
     fn virtual_(&self, cpu: &mut Cpu, bases: &[u32]) -> Option<u32> {
-        let mut found = 0;
+        let mut found = 0u32;
         for (i, &bcd) in bases.iter().enumerate() {
             if !is_type(cpu, bcd, self.target)? {
                 continue;
             }
-            let contained = peek(cpu, bcd + B_CONTAINED)? as usize;
+            let contained = peek(cpu, bcd.wrapping_add(B_CONTAINED))? as usize;
             for &sub in bases.iter().skip(i + 1).take(contained) {
                 if !is_type(cpu, sub, self.src)?
-                    || member_offset(cpu, self.complete, sub + B_WHERE)? != self.src_offset
+                    || member_offset(cpu, self.complete, sub.wrapping_add(B_WHERE))?
+                        != self.src_offset
                 {
                     continue;
                 }
                 if found != 0
-                    && member_offset(cpu, self.complete, bcd + B_WHERE)?
-                        != member_offset(cpu, self.complete, found + B_WHERE)?
+                    && member_offset(cpu, self.complete, bcd.wrapping_add(B_WHERE))?
+                        != member_offset(cpu, self.complete, found.wrapping_add(B_WHERE))?
                 {
                     return Some(0);
                 }
@@ -776,7 +814,11 @@ pub fn rt_dynamic_cast(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         Some(match bcd {
             0 if is_reference != 0 => Rt::Throw(BAD_CAST, BAD_DYNAMIC_CAST),
             0 => Rt::Value(0),
-            bcd => Rt::Value(complete.wrapping_add(member_offset(cpu, complete, bcd + B_WHERE)?)),
+            bcd => Rt::Value(complete.wrapping_add(member_offset(
+                cpu,
+                complete,
+                bcd.wrapping_add(B_WHERE),
+            )?)),
         })
     })();
     finish(cpu, result)
@@ -818,7 +860,9 @@ pub fn rt_cast_to_void(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// undecorated `mangled` (or the name itself, when it can't be
 /// undecorated) in `buffer`, cut to `size` bytes with its 0, or with no
 /// buffer in a block from the program's `alloc(length + 1)`. The result
-/// is the buffer, or 0.
+/// is the buffer, or 0. Visual C++ 6's returns 0 at once when `alloc` is
+/// NULL, buffer or not: its undecorator takes its own memory from
+/// `alloc` too.
 pub fn undname(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     undname_ex(
         cpu,
@@ -833,7 +877,7 @@ pub fn undname_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[buffer, mangled, size, alloc, _, _, flags] = args else {
         unreachable!()
     };
-    if mangled == 0 {
+    if alloc == 0 || mangled == 0 {
         return Some(0);
     }
     let name = cstr_n(cpu, mangled, 0x1000)?;
@@ -845,9 +889,6 @@ pub fn undname_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let len = text.len().min(size as usize - 1);
         put_cstr(cpu, buffer, &text[..len])?;
         return Some(buffer);
-    }
-    if alloc == 0 {
-        return Some(0);
     }
     // The text goes in the call's data, four bytes a word, after its
     // length.
