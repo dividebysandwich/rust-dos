@@ -779,5 +779,110 @@ enum Node {
     Leaf(u32),
 }
 
+/// Where the optional header's CheckSum field is, in a PE file whose PE
+/// signature is at `pe`.
+fn checksum_field(pe: usize) -> usize {
+    pe + 4 + 20 + 64
+}
+
+/// Where the RVA `rva` and the `width` bytes from it are in the PE file
+/// whose headers are `headers`: in the headers, or in a section's raw
+/// data. None for bytes past a section's raw data (zeros the loader adds)
+/// or past the end of the file, which is `len` bytes long.
+fn file_offset(headers: &Headers, rva: u32, width: u32, len: usize) -> Option<usize> {
+    let end = rva.checked_add(width)?;
+    let at = if end <= headers.size_of_headers {
+        rva
+    } else {
+        let s = headers.section_at(rva)?;
+        let offset = rva - s.rva;
+        if s.raw_offset == 0 || offset + width > s.raw_size {
+            return None;
+        }
+        s.raw_offset.checked_add(offset)?
+    };
+    (at as usize + width as usize <= len).then_some(at as usize)
+}
+
+/// Move the PE file `file` to the image base `base`, as IMAGEHLP's
+/// ReBaseImage changes a file on disk: add the distance to each address
+/// its base relocations name, found through the section table, and write
+/// the new image base into the optional header. Addresses in no section's
+/// raw data have no bytes in the file to change. A relocation of a type
+/// other than the three 32-bit linkers write leaves the file as it was,
+/// with the error.
+pub fn rebase_file(file: &mut [u8], base: u32) -> Result<()> {
+    let headers = Headers::parse(file)?;
+    let delta = base.wrapping_sub(headers.image_base);
+    let mut fixups = Vec::new();
+    for Relocation { rva, kind } in Image::load(file)?.relocations()? {
+        let width = match kind {
+            REL_HIGHLOW => 4,
+            REL_HIGH | REL_LOW => 2,
+            _ => return Err(Error::Unsupported(format!("base relocation type {}", kind))),
+        };
+        if let Some(at) = file_offset(&headers, rva, width, file.len()) {
+            fixups.push((at, kind));
+        }
+    }
+    for (at, kind) in fixups {
+        if kind == REL_HIGHLOW {
+            let value = u32_at(file, at).unwrap().wrapping_add(delta);
+            file[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        } else {
+            let add = if kind == REL_HIGH {
+                (delta >> 16) as u16
+            } else {
+                delta as u16
+            };
+            let value = u16_at(file, at).unwrap().wrapping_add(add);
+            file[at..at + 2].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    let pe = pe_offset(file).unwrap();
+    file[pe + 4 + 20 + 28..][..4].copy_from_slice(&base.to_le_bytes());
+    Ok(())
+}
+
+/// The checksum of the PE file `file` that IMAGEHLP's CheckSumMappedFile
+/// gives and the optional header's CheckSum field holds: the 16-bit
+/// little-endian words of the file added up with their carries folded
+/// back in, the field itself taken as zero, and the file's length added
+/// to that.
+pub fn checksum(file: &[u8]) -> u32 {
+    let field = pe_offset(file).map(checksum_field);
+    let mut sum = 0u32;
+    for (i, pair) in file.chunks(2).enumerate() {
+        let at = 2 * i;
+        if field.is_some_and(|f| at == f || at == f + 2) {
+            continue;
+        }
+        sum += u16::from_le_bytes([pair[0], pair.get(1).copied().unwrap_or(0)]) as u32;
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    sum.wrapping_add(file.len() as u32)
+}
+
+/// Write `checksum(file)` into the CheckSum field of the PE file `file`.
+/// A file that isn't one stays as it is.
+pub fn set_checksum(file: &mut [u8]) {
+    let sum = checksum(file);
+    if let Some(at) = pe_offset(file).map(checksum_field)
+        && let Some(field) = file.get_mut(at..at + 4)
+    {
+        field.copy_from_slice(&sum.to_le_bytes());
+    }
+}
+
+/// Write `stamp` into the file header's TimeDateStamp of the PE file
+/// `file`. A file that isn't one stays as it is.
+pub fn set_time_stamp(file: &mut [u8], stamp: u32) {
+    if let Some(pe) = pe_offset(file)
+        && let Some(field) = file.get_mut(pe + 8..pe + 12)
+    {
+        field.copy_from_slice(&stamp.to_le_bytes());
+    }
+}
+
 #[cfg(test)]
 mod tests;
