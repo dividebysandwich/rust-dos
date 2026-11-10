@@ -341,15 +341,15 @@ impl Expand {
         }
     }
 
-    /// The date or time format of field `field`, a Windows picture. A
-    /// run of a letter is a conversion: d and dd the
-    /// day, ddd and dddd its names; M and MM the month, MMM and MMMM its
-    /// names; yy and yyyy the year; h, hh, H and HH the hour; m and mm the
-    /// minutes; s and ss the seconds; as many bytes of AM or PM as there
-    /// are t's, past its end too; and a or A AM or PM, "am/pm" and "a/p"
-    /// at the end of the picture with it. Quotes take what they enclose
-    /// as it is; another run is its first byte as it is, then the rest.
-    /// Its numbers keep their zeros: strftime gives no '#' here.
+    /// The date or time format of field `field`, a Windows picture. A run
+    /// of a letter is a conversion: d and dd the day, ddd and dddd its
+    /// names; M and MM the month, MMM and MMMM its names; yy and yyyy the
+    /// year; h, hh, H and HH the hour; m and mm the minutes; s and ss the
+    /// seconds; as many bytes of AM or PM as there are t's, past its end
+    /// too; and a or A AM or PM, "am/pm" and "a/p" at the end of the
+    /// picture with it. Quotes take what they enclose as it is; another run
+    /// is its first byte as it is, then the rest. Its numbers keep their
+    /// zeros: strftime gives no '#' here.
     fn picture(&mut self, m: &mut impl Guest, out: &mut Out, field: u32) {
         let Some(format) = lc_name(m, self.lc, field) else {
             return;
