@@ -303,10 +303,11 @@ impl Bus {
         let Some(addr) = self.banshee_linear_at(src, data.len()) else {
             return false;
         };
+        // Counted as the dwords of a 32-bit program's copy.
         let _profile = self
             .profile
             .as_deref()
-            .map(|p| p.mem_run(src, false, data.len() as u64));
+            .map(|p| p.mem_run(src, false, data.len().div_ceil(4) as u64));
         if self.observe.on {
             self.observe.mapped(src, self.ram.len());
         }
@@ -327,7 +328,7 @@ impl Bus {
         let _profile = self
             .profile
             .as_deref()
-            .map(|p| p.mem_run(dst, true, data.len() as u64));
+            .map(|p| p.mem_run(dst, true, data.len().div_ceil(4) as u64));
         if self.observe.on {
             self.observe.mapped_write(dst, self.ram.len());
         }
