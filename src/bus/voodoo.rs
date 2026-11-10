@@ -270,6 +270,76 @@ impl Bus {
         true
     }
 
+    /// Where the `len` bytes of the bus from `addr` on are in a Banshee's
+    /// or Voodoo3's memory, all of them, through BAR1 below the tile base
+    /// and outside the command FIFOs' rings (`Voodoo::linear_run`): the
+    /// first byte's address in the card's memory. None where any of them
+    /// is somewhere else, such as a register or another card's window,
+    /// which reads and writes reach a byte at a time.
+    fn banshee_linear_at(&self, addr: usize, len: usize) -> Option<u32> {
+        let v = self.voodoo.as_ref().filter(|v| v.banshee.is_some())?;
+        let last = addr.checked_add(len.checked_sub(1)?)?;
+        let first = self.voodoo_at(addr)?;
+        // `read_8` and `write_8` give these their bytes before the card.
+        let other = |at: usize| {
+            self.vbe.lfb_offset(at, 1).is_some()
+                || self.s3_mmio(at).is_some()
+                || self.mach64_mmio(at).is_some()
+                || self.powervr_at(at).is_some()
+        };
+        if self.voodoo_at(last) != Some(first + (len - 1) as u32) || other(addr) || other(last) {
+            return None;
+        }
+        v.linear_run(first, len as u32)
+    }
+
+    /// Fill `data` from a Banshee's or Voodoo3's memory at `src` in one
+    /// copy, as reads of its bytes one at a time would, the drawing
+    /// queued before done first (`Voodoo::banshee_memory_read`): a
+    /// service reading a surface in the card's memory, such as GDI
+    /// loading the rows it blits onto. False, having read nothing, where
+    /// the bytes aren't all the card's memory (`banshee_linear_at`).
+    pub(crate) fn read_from_voodoo(&self, src: usize, data: &mut [u8]) -> bool {
+        let Some(addr) = self.banshee_linear_at(src, data.len()) else {
+            return false;
+        };
+        let _profile = self
+            .profile
+            .as_deref()
+            .map(|p| p.mem_run(src, false, data.len() as u64));
+        if self.observe.on {
+            self.observe.mapped(src, self.ram.len());
+        }
+        if let Some(v) = &self.voodoo {
+            v.banshee_memory_read(addr, data);
+        }
+        true
+    }
+
+    /// Write `data` into a Banshee's or Voodoo3's memory at `dst` in one
+    /// copy, as writes of its bytes one at a time would, `cycles=auto`
+    /// hearing of what lands in the desktop shown. False, having written
+    /// nothing, where `read_from_voodoo` is false for them.
+    pub(crate) fn bytes_to_voodoo(&mut self, dst: usize, data: &[u8]) -> bool {
+        let Some(addr) = self.banshee_linear_at(dst, data.len()) else {
+            return false;
+        };
+        let _profile = self
+            .profile
+            .as_deref()
+            .map(|p| p.mem_run(dst, true, data.len() as u64));
+        if self.observe.on {
+            self.observe.mapped_write(dst, self.ram.len());
+        }
+        let _zone = crate::profile::zone(crate::profile::Zone::Voodoo);
+        self.voodoo_swap_wait();
+        if let Some(v) = &mut self.voodoo {
+            v.banshee_memory_write(addr, data);
+        }
+        self.note_banshee_memory_write(addr, data.len() as u32);
+        true
+    }
+
     /// A write behind a swap the frame rate cap holds back (the rest of
     /// the code the program ran before it was held) waits for the swap.
     fn voodoo_swap_wait(&mut self) {

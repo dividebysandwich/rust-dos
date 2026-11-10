@@ -777,6 +777,58 @@ fn a_string_move_into_a_banshee_writes_what_its_dwords_write() {
 }
 
 #[test]
+fn a_services_bytes_reach_a_banshees_memory_as_byte_accesses_do() {
+    const BAR1: usize = 0xD200_0000;
+    let memory = BAR1 + 0x10_0000;
+    // An odd start and length, as a row of a 16-bit surface GDI blits
+    // onto from an odd column: 3 bytes into a dword, 37 bytes.
+    let at = memory + 3;
+    let bytes: Vec<u8> = (0..37u32).map(|i| (i * 53 + 7) as u8).collect();
+    let (mut one, mut each) = (bus(Board::Voodoo3), bus(Board::Voodoo3));
+    for bus in [&mut one, &mut each] {
+        bus.set_a20(true);
+        // lfbMemoryConfig: the tile base at the top, all of BAR1 linear.
+        bus.write_32(BASE + 0x0C, 0x1FFF);
+        for i in (0..64).step_by(4) {
+            bus.write_32(memory + i, 0x5A5A_5A5A);
+        }
+    }
+    let dwords = |bus: &Bus| -> Vec<u32> {
+        (0..64)
+            .step_by(4)
+            .map(|i| bus.read_32(memory + i))
+            .collect()
+    };
+    // A service's write in one copy, and the same bytes one at a time.
+    one.guest_write_bytes(at as u32, &bytes);
+    for (i, &b) in bytes.iter().enumerate() {
+        each.write_8(at + i, b);
+    }
+    assert_eq!(dwords(&one), dwords(&each));
+    assert_eq!(one.read_32(memory), 0x075A_5A5A, "before the first");
+    assert_eq!(one.read_8(at + 37), 0x5A, "after the last");
+    // Read back the same ways, with a byte on each side.
+    let mut read = vec![0; bytes.len() + 2];
+    one.guest_read_bytes(at as u32 - 1, &mut read);
+    let each_read: Vec<u8> = (0..read.len()).map(|i| each.read_8(at - 1 + i)).collect();
+    assert_eq!(read, each_read);
+    assert_eq!(read[1..=bytes.len()], bytes[..]);
+    // Above the tile base BAR1 is tiled: its bytes are where the card
+    // lays them out, for a service as for the CPU.
+    for bus in [&mut one, &mut each] {
+        bus.write_32(BASE + 0x0C, 0x100);
+    }
+    one.guest_write_bytes(at as u32, &bytes);
+    for (i, &b) in bytes.iter().enumerate() {
+        each.write_8(at + i, b);
+    }
+    let mut tiled = vec![0; bytes.len()];
+    one.guest_read_bytes(at as u32, &mut tiled);
+    assert_eq!(tiled, bytes);
+    assert_eq!(dwords(&one), dwords(&each));
+}
+
+#[test]
 fn frame_buffer_writes_and_reads() {
     let mut bus = bus(Board::Standard);
     init(&mut bus);
