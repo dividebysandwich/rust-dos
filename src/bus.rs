@@ -569,26 +569,104 @@ impl Bus {
         len <= self.ram.len() && self.is_plain_ram(addr, len)
     }
 
-    /// Append the `len` bytes at `addr` to `out` as programs read them:
-    /// plain RAM as one slice, anything else (video memory, the ROMs,
-    /// upper memory) through `read_8`.
+    /// Append the `len` bytes at `addr` to `out` as programs read them
+    /// (`read_into`).
     pub(crate) fn read_run(&self, addr: usize, len: usize, out: &mut Vec<u8>) {
-        if self.is_plain_run(addr, len) {
-            out.extend_from_slice(&self.ram[addr..addr + len]);
+        let start = out.len();
+        out.resize(start + len, 0);
+        self.read_into(addr, &mut out[start..]);
+    }
+
+    /// Fill `data` from `addr` as programs read it: plain RAM as one
+    /// slice, anything else (video memory, the ROMs, upper memory, a
+    /// card's window) as a 32-bit program's copy reads it
+    /// (`read_mapped`).
+    pub(crate) fn read_into(&self, addr: usize, data: &mut [u8]) {
+        if self.is_plain_run(addr, data.len()) {
+            data.copy_from_slice(&self.ram[addr..addr + data.len()]);
         } else {
-            out.extend((0..len).map(|i| self.read_8(addr.wrapping_add(i))));
+            self.read_mapped(addr, data);
         }
     }
 
-    /// Write `data` at `addr` as programs write it, as `read_run` reads
-    /// it: plain RAM with one copy, anything else through `write_8`.
+    /// Write `data` at `addr` as programs write it, as `read_into` reads
+    /// it: plain RAM with one copy, anything else as a 32-bit program's
+    /// copy writes it (`write_mapped`).
     pub(crate) fn write_run(&mut self, addr: usize, data: &[u8]) {
         if self.is_plain_run(addr, data.len()) {
             self.load_bytes(addr, data);
         } else {
-            for (i, &b) in data.iter().enumerate() {
-                self.write_8(addr.wrapping_add(i), b);
+            self.write_mapped(addr, data);
+        }
+    }
+
+    /// The size of the access a 32-bit program's copy makes at `addr`
+    /// with `left` bytes to go: a dword where it is aligned to one, a
+    /// word where it is aligned to that, a byte otherwise.
+    fn access_size(addr: usize, left: usize) -> usize {
+        if addr.is_multiple_of(4) && left >= 4 {
+            4
+        } else if addr.is_multiple_of(2) && left >= 2 {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// Fill `data` from the memory at `addr` that isn't plain RAM in
+    /// aligned dwords and words, bytes only where they can't be, as a
+    /// 32-bit program's copy reads it. Memory that takes bytes (the VGA,
+    /// the VESA frame buffer, upper memory) reads the same bytes either
+    /// way; a Voodoo Graphics' or Voodoo2's window reads no bytes, so
+    /// GDI's DIB section on its linear frame buffer (a card surface's DC)
+    /// reads its pixels this way.
+    fn read_mapped(&self, addr: usize, data: &mut [u8]) {
+        let mut i = 0;
+        while i < data.len() {
+            let at = addr.wrapping_add(i);
+            let size = Self::access_size(at, data.len() - i);
+            let value = match size {
+                4 => self.read_32(at),
+                2 => self.read_16(at) as u32,
+                _ => self.read_8(at) as u32,
+            };
+            data[i..i + size].copy_from_slice(&value.to_le_bytes()[..size]);
+            i += size;
+        }
+    }
+
+    /// Write `data` to the memory at `addr` that isn't plain RAM as
+    /// `read_mapped` reads it. A Voodoo Graphics or Voodoo2 ignores byte
+    /// writes to its window, so GDI's drawing on a card surface's DC has
+    /// to go in words and dwords. The aligned dwords between the head and
+    /// the tail go into the 3dfx card in one call where they can
+    /// (`write_to_voodoo`).
+    fn write_mapped(&mut self, addr: usize, data: &[u8]) {
+        let head = (addr.wrapping_neg() & 3).min(data.len());
+        let body = (data.len() - head) & !3;
+        self.write_accesses(addr, &data[..head]);
+        let mut done = head;
+        if body > 0 && self.write_to_voodoo(addr.wrapping_add(head), &data[head..head + body]) {
+            done += body;
+        }
+        self.write_accesses(addr.wrapping_add(done), &data[done..]);
+    }
+
+    /// `write_mapped` without the card's run: an access at a time.
+    fn write_accesses(&mut self, addr: usize, data: &[u8]) {
+        let mut i = 0;
+        while i < data.len() {
+            let at = addr.wrapping_add(i);
+            let size = Self::access_size(at, data.len() - i);
+            let mut bytes = [0u8; 4];
+            bytes[..size].copy_from_slice(&data[i..i + size]);
+            let value = u32::from_le_bytes(bytes);
+            match size {
+                4 => self.write_32(at, value),
+                2 => _ = self.write_16(at, value as u16),
+                _ => _ = self.write_8(at, value as u8),
             }
+            i += size;
         }
     }
 

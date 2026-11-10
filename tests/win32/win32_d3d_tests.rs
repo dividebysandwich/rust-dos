@@ -2751,6 +2751,78 @@ fn flip_status_on_a_voodoo2_follows_the_swap() {
     assert_eq!(peek(&cpu, data + POLLS), 16, "calls of GetFlipStatus");
 }
 
+const SURF_GET_DC: u32 = 17;
+const SURF_RELEASE_DC: u32 = 26;
+/// Where the GDI program keeps the primary surface's DC.
+const SURFACE_DC: u32 = 0x9B0;
+const BLACKNESS: u32 = 0x0000_0042;
+const DSTINVERT: u32 = 0x0055_0009;
+const GDI32: (&str, &[&str]) = ("GDI32.DLL", &["PatBlt"]);
+const PAT_BLT: usize = 3;
+
+#[test]
+fn gdi_draws_into_the_voodoo2s_primary_through_its_dc() {
+    // Adrenix's Direct3D build draws its video and menus with GDI into
+    // the DC of the primary surface on the card (issue 910): GDI reads
+    // and writes the card's frame buffer through the DIB section on its
+    // linear frame buffer, which takes words and dwords, not bytes. An
+    // 8x4 rectangle made black, then 3x2 pixels of it inverted to white
+    // from an odd column, which starts on a word and not a dword.
+    let mut d = data();
+    guid(
+        &mut d,
+        CARD_GUID,
+        0x472B_EA00,
+        0x40DF,
+        0x11D1,
+        [0xA9, 0xDF, 0x00, 0x60, 0x97, 0xC2, 0xED, 0xB2],
+    );
+    put32(&mut d, DESC, 124);
+    put32(&mut d, DESC + 0x04, DDSD_CAPS);
+    put32(&mut d, DESC + 0x68, DDSCAPS_PRIMARYSURFACE);
+    put32(&mut d, LOCK_DESC, 124);
+    let (exe, data) = program(&[USER32, DDRAW, GDI32], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, true, true)?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(TARGET), Arg::I(0)],
+        )?;
+        c.com(a, l, TARGET, SURF_GET_DC, &[Arg::At(SURFACE_DC)])?;
+        let dc = Arg::Val(SURFACE_DC);
+        let fill = [dc, Arg::I(0), Arg::I(0), Arg::I(8), Arg::I(4)];
+        c.api(a, l, PAT_BLT, &[&fill[..], &[Arg::I(BLACKNESS)]].concat())?;
+        let invert = [dc, Arg::I(3), Arg::I(1), Arg::I(3), Arg::I(2)];
+        c.api(a, l, PAT_BLT, &[&invert[..], &[Arg::I(DSTINVERT)]].concat())?;
+        c.com(a, l, TARGET, SURF_RELEASE_DC, &[dc])?;
+        read_target(a, l, &mut c, 16)?;
+        finish(a, l)
+    });
+    let mut cpu = machine_with("card_gdi_primary", Some(Board::Voodoo2), exe);
+    run_until_done(&mut cpu, data);
+    let n = peek(&cpu, data + CALLS);
+    // DirectDraw's calls succeed, and each PatBlt gives TRUE.
+    assert_eq!(
+        results(&cpu, data, n)[1..],
+        [0, 0, 0, 0, 0, 1, 1, 0, 0],
+        "results"
+    );
+    let pixel = |x: u32, y: u32| {
+        let at = data + PIXELS + 2 * (64 * y + x);
+        (peek(&cpu, at & !3) >> (8 * (at & 2))) as u16
+    };
+    for y in 0..4 {
+        for x in 0..8 {
+            let inverted = (3..6).contains(&x) && (1..3).contains(&y);
+            let want = if inverted { 0xFFFF } else { 0 };
+            assert_eq!(pixel(x, y), want, "pixel ({x}, {y})");
+        }
+    }
+}
+
 #[test]
 fn the_specular_color_adds_to_textured_and_untextured_triangles() {
     let gray = |textured: bool| Scene {

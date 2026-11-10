@@ -98,14 +98,7 @@ impl Bus {
             let Some(addr) = self.guest_physical(lin.wrapping_add(offset as u32), false) else {
                 return;
             };
-            let to = &mut data[offset..offset + run];
-            if self.is_plain_ram(addr, run) {
-                to.copy_from_slice(&self.ram[addr..addr + run]);
-            } else {
-                for (i, byte) in to.iter_mut().enumerate() {
-                    *byte = self.read_8(addr + i);
-                }
-            }
+            self.read_into(addr, &mut data[offset..offset + run]);
         }
     }
 
@@ -131,9 +124,8 @@ impl Bus {
             if self.is_plain_ram(addr, run) {
                 self.fill_ram(addr..addr + run, value);
             } else {
-                for i in 0..run {
-                    self.write_8(addr + i, value);
-                }
+                // A page's run is at most a page long.
+                self.write_run(addr, &[value; 0x1000][..run]);
             }
         }
     }
@@ -157,13 +149,7 @@ impl Bus {
             let Some(addr) = self.guest_physical(lin.wrapping_add(offset as u32), true) else {
                 return;
             };
-            if self.is_plain_ram(addr, run) {
-                self.load_bytes(addr, &data[offset..offset + run]);
-            } else {
-                for (i, &byte) in data[offset..offset + run].iter().enumerate() {
-                    self.write_8(addr + i, byte);
-                }
-            }
+            self.write_run(addr, &data[offset..offset + run]);
         }
     }
 }
