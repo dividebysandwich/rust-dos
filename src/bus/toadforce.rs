@@ -44,6 +44,14 @@ impl Bus {
         self.toadforce.is_some()
     }
 
+    /// Whether the card shows a mode of its own, which the Super VGA's
+    /// scan-out state then describes.
+    pub(crate) fn toadforce_shows(&self) -> bool {
+        self.toadforce
+            .as_deref()
+            .is_some_and(|c| c.display.shown().is_some())
+    }
+
     /// Have the card the display adapter calls for: a ToadForce with
     /// `toadforce_memory` bytes on `Adapter::ToadForce`, none on the
     /// others. A card already there with that memory stays as it is.
@@ -54,6 +62,10 @@ impl Bus {
             .is_toadforce()
             .then_some(self.toadforce_memory);
         if self.toadforce.as_ref().map(|c| c.memory()) == wanted {
+            // The card that stays keeps its configuration space, so the
+            // frame buffer is where its BAR 1 is and not where the
+            // adapter's BIOS data was just written to say.
+            self.toadforce_moved();
             return;
         }
         self.lower_toadforce_irq();
@@ -108,11 +120,16 @@ impl Bus {
             Window::Ring(offset) => card.ring_read(offset, len),
             Window::Registers(offset) => {
                 let live = self.toadforce_live();
+                // Each register the bytes are in is read once: a whole
+                // word is one register, and an unaligned read two.
+                let mut register = (offset & !3, card.read(offset & !3, live));
                 (0..len)
                     .map(|i| {
                         let at = offset + i;
-                        let word = card.read(at & !3, live);
-                        (word >> (8 * (at & 3)) & 0xFF) << (8 * i)
+                        if register.0 != at & !3 {
+                            register = (at & !3, card.read(at & !3, live));
+                        }
+                        (register.1 >> (8 * (at & 3)) & 0xFF) << (8 * i)
                     })
                     .sum()
             }
@@ -385,13 +402,20 @@ impl Bus {
         self.toadforce.as_deref().and_then(|c| c.irq_up)
     }
 
-    /// When the card next changes by itself, in PIT ticks, rounded up:
-    /// the vertical blank it raises an interrupt at or flips at.
+    /// When the card next changes by itself, in PIT ticks: the vertical
+    /// blank it raises an interrupt at or flips at.
     pub(crate) fn toadforce_next_event(&self) -> Option<u64> {
         let ns = self.toadforce.as_deref()?.next_event()?;
-        // A tick more than the time takes: the clock's ticks and its
-        // nanoseconds are each rounded from the instruction count.
-        Some((ns as u128 * crate::timer::PIT_HZ as u128).div_ceil(1_000_000_000) as u64 + 1)
+        // By way of the instruction the blank begins at. The clock's
+        // ticks and its nanoseconds are each rounded down from the
+        // instruction count at every change of speed, so they drift
+        // apart, and a blank's nanoseconds counted as ticks from the
+        // clock's zero would come later with every change. The tick
+        // after that instruction's: by then the blank has begun. The
+        // answer depends on the blank and the clock alone, not on when
+        // it is asked for, which the host's timing decides.
+        let at = self.clock.icount_at_ns(ns);
+        Some(self.clock.ticks_at(at) + 1)
     }
 
     /// Bring the card up to now, at the time `toadforce_next_event`

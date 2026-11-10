@@ -76,6 +76,10 @@ pub fn cursor_shape(adapter: Adapter, height: u16) -> u16 {
 /// set leaves, so a program that exited in another mode, with its own
 /// palette or rows, doesn't leave the prompt in it.
 pub fn reset_for_shell(bus: &mut Bus) {
+    // A ToadForce's own mode ends first, as before the BIOS's mode sets:
+    // a program that exited in it would leave the card showing a mode
+    // the screen no longer has.
+    bus.toadforce_mode_set();
     let adapter = bus.vga.adapter;
     let mono = bus.vga.setup().mono();
     let mode = if mono { VideoMode::Mono80x25 } else { VideoMode::Text80x25Color };

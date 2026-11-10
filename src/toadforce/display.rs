@@ -155,8 +155,8 @@ impl Beam {
 
 #[derive(Clone, Debug)]
 pub struct Display {
-    /// The `MODE` registers, but `MODE_START`.
-    enable: bool,
+    /// The `MODE` registers, but `MODE_START` and `MODE_ENABLE`, which
+    /// is 1 while `shown` holds a mode.
     width: u32,
     height: u32,
     format: u32,
@@ -172,7 +172,6 @@ pub struct Display {
 impl Default for Display {
     fn default() -> Self {
         Display {
-            enable: false,
             width: 0,
             height: 0,
             format: 0,
@@ -243,7 +242,6 @@ crate::state_fields!(Beam {
     synced_ns
 });
 crate::state_fields!(Display {
-    enable,
     width,
     height,
     format,
@@ -322,19 +320,26 @@ impl Display {
         status
     }
 
-    /// A display register as it reads at `live`.
+    /// A display register as it reads at `live`. Only the registers that
+    /// move with time bring the display's moving part up to it.
     pub fn read(&self, offset: u32, live: Live) -> u32 {
-        let (beam, _) = self.ahead(live);
         match offset {
-            regs::MODE_ENABLE => self.enable as u32,
+            regs::MODE_ENABLE => self.shown.is_some() as u32,
             regs::MODE_WIDTH => self.width,
             regs::MODE_HEIGHT => self.height,
             regs::MODE_FORMAT => self.format,
             regs::MODE_PITCH => self.pitch,
-            regs::MODE_START => beam.start,
+            regs::MODE_START => self.ahead(live).0.start,
             regs::MODE_REFRESH => self.refresh,
-            regs::FRAME => beam.frame,
-            regs::SCANLINE if counts(&beam.timing) => beam.timing.position(live.ns).0,
+            regs::FRAME => self.ahead(live).0.frame,
+            regs::SCANLINE => {
+                let timing = self.ahead(live).0.timing;
+                if counts(&timing) {
+                    timing.position(live.ns).0
+                } else {
+                    0
+                }
+            }
             regs::PALETTE..regs::PALETTE_END => {
                 self.palette[((offset - regs::PALETTE) / 4) as usize]
             }
@@ -374,14 +379,12 @@ impl Display {
         match offset {
             regs::MODE_ENABLE if value & 1 != 0 => {
                 self.shown = Some(self.mode(memory).ok_or(Error::BadMode)?);
-                self.enable = true;
                 self.beam.pending = None;
                 self.beam.timing = self.timing_at(live);
                 return Ok(Change::Mode);
             }
             regs::MODE_ENABLE => {
                 let was = self.shown.take().is_some();
-                self.enable = false;
                 self.beam.pending = None;
                 self.beam.timing = self.timing_at(live);
                 return Ok(if was { Change::Mode } else { Change::None });

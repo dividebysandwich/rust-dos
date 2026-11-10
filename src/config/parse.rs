@@ -184,7 +184,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             _ => warn(format!("invalid verite_mhz '{}' (1 to 1000)", value)),
                         },
                         "toadforce_memory" => match value.parse::<u32>() {
-                            Ok(n) if crate::toadforce::regs::MEMORY_SIZES.contains(&(n << 20)) => {
+                            // Megabytes are compared: a number shifted to
+                            // bytes would wrap round to a size.
+                            Ok(n)
+                                if crate::toadforce::regs::MEMORY_SIZES
+                                    .iter()
+                                    .any(|&bytes| bytes >> 20 == n) =>
+                            {
                                 config.toadforce_memory = Some(n)
                             }
                             _ => warn(format!(

@@ -308,7 +308,9 @@ programs and a Windows without a driver never leave it.
 
 A VBE mode has its frame buffer at offset 0 of card memory (chapter 4).
 The video BIOS writes 0 to `MODE_ENABLE` before every mode set, so a
-mode set through INT 10h always brings the VGA's picture back.
+mode set through INT 10h always brings the VGA's picture back. The
+built-in DOS writes it too when a program ends and the prompt's text
+mode takes the screen.
 
 Bit 0 of `STATUS`, `SCANLINE` and `FRAME` follow the VGA's timing: bit 0
 is set while port 3DAh reports vertical retrace, `SCANLINE` is the line

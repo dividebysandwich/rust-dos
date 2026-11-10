@@ -215,6 +215,13 @@ fn card_memory_is_at_bar_1_and_moves_with_it() {
     cpu.set_di(0);
     assert_eq!(int10(&mut cpu, 0x4F01, 0, 0x101, 0), 0x004F);
     assert_eq!(cpu.bus.read_32(0x30000 + 40), 0xC000_0000);
+    // The adapter's BIOS data written again, as when the built-in DOS
+    // starts again, leaves the card and its windows where they are.
+    let setup = cpu.bus.vga.setup();
+    bios::install(&mut cpu.bus, setup);
+    assert_eq!(cpu.bus.vbe.lfb_base, Some(0xC000_0000));
+    assert_eq!(cpu.bus.read_32(0xC000_0000 + far), 0xDEAD_BEEF);
+    assert_eq!(cpu.bus.read_8(MEMORY + 5_000_000), 0xFF);
     // With memory decoding off, none of the windows answers.
     set_config(&mut cpu, 0x04, 0x0001);
     assert_eq!(cpu.bus.read_32(0xC000_0000 + far), 0xFFFF_FFFF);
@@ -303,6 +310,17 @@ fn the_screen_shows_the_cards_mode_and_the_vga_comes_back() {
     // The display takes it at its next retrace.
     pass(&mut cpu, frame);
     assert_eq!(pixel(&mut cpu, 0, 0), (0xFF, 0xFF, 0xFF));
+    // The VGA's registers take writes and none of it shows: its Start
+    // Address, which moves a VESA mode's picture, leaves the card's.
+    for (index, value) in [(0x0C, 0x12), (0x0D, 0x34)] {
+        cpu.bus.io_write(0x3D4, index);
+        cpu.bus.io_write(0x3D5, value);
+    }
+    assert_eq!(cpu.bus.vga.crtc_regs[0x0C], 0x12);
+    assert_eq!(cpu.bus.vbe.start, 1 << 20);
+    pass(&mut cpu, frame);
+    assert_eq!(reg(&cpu, regs::MODE_START), 1 << 20);
+    assert_eq!(pixel(&mut cpu, 0, 0), (0xFF, 0xFF, 0xFF));
 
     // The BIOS's mode set ends the card's mode: the text is back.
     assert_eq!(int10(&mut cpu, 0x0083, 0, 0, 0) & 0xFF00, 0);
@@ -367,6 +385,18 @@ fn a_vesa_mode_comes_back_when_the_cards_mode_ends() {
     assert_eq!((mode.number, mode.bpp), (0x111, 16));
     assert_eq!(cpu.bus.read_8(MEMORY + start as usize), 0);
     assert_eq!(cpu.bus.read_8(MEMORY + (6 << 20)), 0x77);
+
+    // A program that ends in the card's mode leaves the prompt its text
+    // mode, and the card none: nothing of the VESA mode under it is
+    // left to come back.
+    show(&mut cpu, 1024, 768, Format::X8R8G8B8, 60);
+    bios::reset_for_shell(&mut cpu.bus);
+    assert_eq!(reg(&cpu, regs::MODE_ENABLE), 0);
+    assert_eq!(cpu.bus.video_mode, VideoMode::Text80x25Color);
+    assert!(cpu.bus.vbe.mode.is_none());
+    assert_eq!(cpu.bus.vga.timing().display, 400);
+    let card = cpu.bus.toadforce.as_ref().unwrap();
+    assert!(card.display.legacy.is_none());
 }
 
 #[test]

@@ -60,26 +60,33 @@ pub fn blt(
     };
     let same_size = (src_rect.width, src_rect.height) == (dst_rect.width, dst_rect.height);
     let key = key.map(|k| (k & src.format.defined_bits(), src.format.defined_bits()));
-    let mut row = vec![0u8; row_len];
+    let mut row = Vec::new();
     for y in 0..dst_rect.height {
         let sy = if same_size {
             y
         } else {
             centre(y, dst_rect.height, src_rect.height)
         };
+        let from = src_row(sy);
+        let at = dst.at(dst_rect.left, dst_rect.top + y);
+        if same_size && key.is_none() {
+            // A whole line, copied once. Without `copy` the rectangles
+            // share no byte of card memory, so a line read after another
+            // was written still holds the source's pixels.
+            match &copy {
+                Some(copy) => memory[at..at + row_len].copy_from_slice(&copy[from..from + row_len]),
+                None => memory.copy_within(from..from + row_len, at),
+            }
+            continue;
+        }
         // A line of the source, apart from card memory, so that the
         // destination can be written while it is read.
-        let from = src_row(sy);
-        row.copy_from_slice(match &copy {
+        row.clear();
+        row.extend_from_slice(match &copy {
             Some(copy) => &copy[from..from + row_len],
             None => &memory[from..from + row_len],
         });
-        let at = dst.at(dst_rect.left, dst_rect.top + y);
         let out = &mut memory[at..at + dst_rect.width as usize * bytes];
-        if same_size && key.is_none() {
-            out.copy_from_slice(&row);
-            continue;
-        }
         for (x, pixel) in out.chunks_exact_mut(bytes).enumerate() {
             let sx = if same_size {
                 x
