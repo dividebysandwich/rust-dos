@@ -869,6 +869,7 @@ pub const DDERR_NOEXCLUSIVEMODE: u32 = dderr(225);
 pub const DDERR_NOTFOUND: u32 = dderr(255);
 pub const DDERR_NOOVERLAYHW: u32 = dderr(260);
 pub const DDERR_NORASTEROPHW: u32 = dderr(280);
+pub const DDERR_NOTEXTUREHW: u32 = dderr(330);
 pub const DDERR_OUTOFVIDEOMEMORY: u32 = dderr(380);
 pub const DDERR_SURFACEALREADYATTACHED: u32 = dderr(410);
 pub const DDERR_SURFACEBUSY: u32 = dderr(430);

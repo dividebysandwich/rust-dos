@@ -2879,20 +2879,22 @@ fn colour_keys_on_a_blit_from_dxt_fail_as_on_windows() {
     );
 }
 
-/// A 6x6 DXT1 texture, and an 8x8 one asked for without a memory,
-/// locked.
+/// A 6x6 DXT1 texture, an 8x8 one asked for without a memory, locked,
+/// and one asked for in video memory.
 fn dxt_create_program() -> (Vec<u8>, u32) {
     let mut d = data();
     d.resize(DXT_DATA_SIZE, 0);
     dxt_desc(&mut d, DESC, b"DXT1", 6, 6);
     dxt_desc(&mut d, DESC3, b"DXT1", 8, 8);
     put32(&mut d, DESC3 + 0x68, DDSCAPS_TEXTURE);
+    dxt_desc(&mut d, DESC4, b"DXT1", 8, 8);
+    put32(&mut d, DESC4 + 0x68, DDSCAPS_TEXTURE | DDSCAPS_VIDEOMEMORY);
     program(&[USER32, DDRAW], &d, |a, l| {
         let mut c = Calls { next: 0 };
         start(a, l, &mut c, (0, 0, 64, 64))?;
         let level = [Arg::Val(HWND), Arg::I(DDSCL_NORMAL)];
         c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &level)?;
-        for (desc, out) in [(DESC, SOURCE), (DESC3, FRONT)] {
+        for (desc, out) in [(DESC, SOURCE), (DESC3, FRONT), (DESC4, BACK)] {
             let args = [Arg::At(desc), Arg::At(out), Arg::I(0)];
             c.com(a, l, DD, DD_CREATE_SURFACE, &args)?;
         }
@@ -2902,15 +2904,21 @@ fn dxt_create_program() -> (Vec<u8>, u32) {
 }
 
 /// DirectX 7 on Windows 98 SE makes DXT surfaces of whole blocks only,
-/// and puts one asked for without a memory in system memory, its pitch
-/// the size of its blocks.
+/// puts one asked for without a memory in system memory, its pitch the
+/// size of its blocks, and fails one in video memory on a card without
+/// compressed textures with DDERR_NOTEXTUREHW.
 #[test]
 fn dxt_surfaces_are_whole_blocks_in_system_memory() {
     let (program, data) = dxt_create_program();
     let mut cpu = machine("dxt_create", program);
     run_until_done(&mut cpu, data);
-    let r = results(&mut cpu, data, 7);
-    assert_eq!(r[3..7], [DDERR_INVALIDPARAMS, 0, 0, 0], "{r:X?}");
+    let r = results(&mut cpu, data, 8);
+    let no_texture_hw = 0x8876_014A;
+    assert_eq!(
+        r[3..8],
+        [DDERR_INVALIDPARAMS, 0, no_texture_hw, 0, 0],
+        "{r:X?}"
+    );
     let caps = peek(&cpu, data + DESC3 + 0x68);
     assert_eq!(caps & DDSCAPS_SYSTEMMEMORY, DDSCAPS_SYSTEMMEMORY);
     assert_eq!(peek(&cpu, data + DESC3 + 0x10), 32);

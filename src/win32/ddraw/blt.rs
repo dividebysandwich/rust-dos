@@ -293,20 +293,24 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
         return Ok(());
     }
     let (dw, dh) = (op.dst.width() as i64, op.dst.height() as i64);
-    let (mut mirror_x, mut mirror_y) = (op.mirror_x, op.mirror_y);
+    let decode = op.dxt == Some(Plan::Decode);
+    // Where the source's pixels start, in the destination's.
+    let mut origin = (op.dst.left, op.dst.top);
     // The source's pixels, its rectangle's only. A DXT source's are
-    // decoded already stretched and mirrored over the destination's
-    // rectangle, in its format.
+    // decoded already stretched and mirrored, in the destination's
+    // format, over the part of its rectangle on the surface: a rectangle
+    // a clipper cuts may reach far outside it.
     let source = match op.src {
         Some((src_id, r)) => {
             let Some(s) = state(cpu).surface(src_id).cloned() else {
                 return Err(DDERR_INVALIDOBJECT);
             };
-            if op.dxt == Some(Plan::Decode) {
-                let size = (dw as u32, dh as u32);
-                let data = dxt_blt::decode(cpu, &s, &r, size, [mirror_x, mirror_y], &d);
-                (mirror_x, mirror_y) = (false, false);
-                Some((data, d.clone(), Rect::new(0, 0, dw as i32, dh as i32)))
+            if decode {
+                let mirror = [op.mirror_x, op.mirror_y];
+                let data = dxt_blt::decode(cpu, &s, &r, &op.dst, &area, mirror, &d);
+                origin = (area.left, area.top);
+                let size = Rect::new(0, 0, area.width(), area.height());
+                Some((data, d.clone(), size))
             } else {
                 Some((load(cpu, &s, &r), s, r))
             }
@@ -314,10 +318,11 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
         None => None,
     };
     // A copy of the same size, not mirrored, takes the source's rows as
-    // they are.
-    let unscaled = source.as_ref().is_some_and(|(_, _, sr)| {
-        sr.width() as i64 == dw && sr.height() as i64 == dh && !mirror_x && !mirror_y
-    });
+    // they are, and so does a decoded DXT source.
+    let unscaled = decode
+        || source.as_ref().is_some_and(|(_, _, sr)| {
+            sr.width() as i64 == dw && sr.height() as i64 == dh && !op.mirror_x && !op.mirror_y
+        });
     let src_key = match (&source, op.src_key) {
         (Some((_, s, _)), Some(k)) => Some(Key::new(k, s)),
         _ => None,
@@ -326,9 +331,8 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
     // Where the pixel under the destination's (`x`, `y`) is in the
     // source's, of an unscaled copy.
     let src_width = source.as_ref().map_or(0, |(_, _, sr)| sr.width() as usize);
-    let src_at = |x: i32, y: i32| {
-        ((y - op.dst.top) as usize * src_width + (x - op.dst.left) as usize) * bytes
-    };
+    let src_at =
+        |x: i32, y: i32| ((y - origin.1) as usize * src_width + (x - origin.0) as usize) * bytes;
     // A blit through no key puts its pixels over all that was there: the
     // destination isn't read. A fill or an unscaled copy stores its rows
     // as they are.
@@ -374,10 +378,10 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
                         let (sw, sh) = (sr.width() as i64, sr.height() as i64);
                         let mut u = (x - op.dst.left) as i64;
                         let mut v = (y - op.dst.top) as i64;
-                        if mirror_x {
+                        if op.mirror_x {
                             u = dw - 1 - u;
                         }
-                        if mirror_y {
+                        if op.mirror_y {
                             v = dh - 1 - v;
                         }
                         let (sx, sy) = (u * sw / dw, v * sh / dh);

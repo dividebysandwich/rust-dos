@@ -27,7 +27,7 @@ use super::{
     DDERR_INVALIDPARAMS, DDERR_INVALIDPIXELFORMAT, DDERR_INVALIDRECT, DDERR_MOREDATA,
     DDERR_NOCLIPPERATTACHED, DDERR_NOCOLORKEY, DDERR_NOCOOPERATIVELEVELSET, DDERR_NODC,
     DDERR_NOEXCLUSIVEMODE, DDERR_NOOVERLAYHW, DDERR_NOPALETTEATTACHED, DDERR_NOTAOVERLAYSURFACE,
-    DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_NOTLOCKED, DDERR_OUTOFVIDEOMEMORY,
+    DDERR_NOTEXTUREHW, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_NOTLOCKED, DDERR_OUTOFVIDEOMEMORY,
     DDERR_PRIMARYSURFACEALREADYEXISTS, DDERR_SURFACEALREADYATTACHED, DDERR_SURFACEBUSY,
     DDERR_SURFACELOST, DDERR_WRONGMODE, Format, Object, V_SURFACE1, V_SURFACE4, V_SURFACE7,
     display, palette, state, voodoo,
@@ -969,9 +969,15 @@ pub fn make(
             // SE makes them: a width or height that isn't a multiple of
             // 4 fails. Mipmap levels below 4 pixels are made, of one
             // block each. One asked for without a memory is put in system
-            // memory, as there.
+            // memory, as there; a texture asked for in video memory fails
+            // with DDERR_NOTEXTUREHW, as on a card without compressed
+            // textures there.
             if caps[0] & DDSCAPS_VIDEOMEMORY != 0 {
-                return Err(DDERR_INVALIDPARAMS);
+                return Err(if caps[0] & DDSCAPS_TEXTURE != 0 {
+                    DDERR_NOTEXTUREHW
+                } else {
+                    DDERR_INVALIDPARAMS
+                });
             }
             if !managed {
                 caps[0] |= DDSCAPS_SYSTEMMEMORY;

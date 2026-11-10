@@ -82,23 +82,34 @@ pub(super) fn keys(src: bool, src_set: bool, dst: bool) -> Result<(), u32> {
     Ok(())
 }
 
-/// The source column (or row) of each of `dst` destination pixels
-/// stretched from `src`: the middle of each destination pixel, in 16.16
-/// fixed point with the step rounded down.
-fn samples(src: u32, dst: u32) -> Vec<u32> {
+/// The source column (or row) of the destination pixels `pixels` of
+/// `dst` stretched from `src`, mirrored if `mirror` says so: the middle
+/// of each destination pixel, in 16.16 fixed point with the step rounded
+/// down.
+fn samples(src: u32, dst: u32, pixels: std::ops::Range<u32>, mirror: bool) -> Vec<u32> {
     let step = ((src as u64) << 16) / dst as u64;
-    (0..dst as u64)
-        .map(|i| ((step / 2 + i * step) >> 16).min(src as u64 - 1) as u32)
+    pixels
+        .map(|i| {
+            let i = if mirror { dst - 1 - i } else { i } as u64;
+            ((step / 2 + i * step) >> 16).min(src as u64 - 1) as u32
+        })
         .collect()
 }
 
-/// The 8-bit value `v` in the channel `mask` of a pixel: its top bits.
+/// The 8-bit value `v` in the channel `mask` of a pixel: its top bits,
+/// or in a channel of more than 8 bits, its top 8.
 fn channel(v: u8, mask: u32) -> u32 {
     if mask == 0 {
         return 0;
     }
-    let bits = mask.count_ones().min(8);
-    ((v as u32) >> (8 - bits) << mask.trailing_zeros()) & mask
+    let bits = mask.count_ones();
+    let v = v as u32;
+    let top = if bits >= 8 {
+        v << (bits - 8)
+    } else {
+        v >> (8 - bits)
+    };
+    (top << mask.trailing_zeros()) & mask
 }
 
 /// A decoded pixel in the RGB format `f`.
@@ -117,13 +128,15 @@ fn to_pixel([r, g, b, a]: Rgba, f: &Format) -> u32 {
 }
 
 /// The pixels of the rectangle `r` of the DXT surface `s`, stretched to
-/// `dw` by `dh` and mirrored as `mirror` says, in the format of the
-/// destination `d`: `d`'s bytes a pixel each, row after row.
+/// the destination's rectangle `dst` and mirrored as `mirror` says, in
+/// the format of the destination `d`: `d`'s bytes a pixel each, row
+/// after row, of the part `area` of `dst` only.
 pub(super) fn decode(
     cpu: &mut Cpu,
     s: &Surface,
     r: &Rect,
-    (dw, dh): (u32, u32),
+    dst: &Rect,
+    area: &Rect,
     mirror: [bool; 2],
     d: &Surface,
 ) -> Vec<u8> {
@@ -146,16 +159,13 @@ pub(super) fn decode(
         [left, top_in, right, top_in + (bottom - top)],
     );
     let (sw, sh) = (right - left, bottom - top);
-    let mut xs = samples(sw, dw);
-    let mut ys = samples(sh, dh);
-    if mirror[0] {
-        xs.reverse();
-    }
-    if mirror[1] {
-        ys.reverse();
-    }
+    let (dw, dh) = (dst.width() as u32, dst.height() as u32);
+    let (x0, y0) = ((area.left - dst.left) as u32, (area.top - dst.top) as u32);
+    let (aw, ah) = (area.width() as u32, area.height() as u32);
+    let xs = samples(sw, dw, x0..x0 + aw, mirror[0]);
+    let ys = samples(sh, dh, y0..y0 + ah, mirror[1]);
     let bytes = d.bytes_per_pixel() as usize;
-    let mut out = Vec::with_capacity(dw as usize * dh as usize * bytes);
+    let mut out = Vec::with_capacity(aw as usize * ah as usize * bytes);
     for &y in &ys {
         let row = &pixels[(y * sw) as usize..][..sw as usize];
         for &x in &xs {
@@ -201,12 +211,17 @@ pub(super) fn copy(
         format.row_bytes(d.width) as u32,
     );
     let across = (sr.width() as u32).div_ceil(4) * bytes;
-    let mut row = vec![0u8; across as usize];
-    for i in 0..(sr.height() as u32).div_ceil(4) {
+    let rows = (sr.height() as u32).div_ceil(4);
+    // Every row is read before any is written: the source and the
+    // destination may be one surface, the rectangles overlapping.
+    let mut data = vec![0u8; (rows * across) as usize];
+    for (row, i) in data.chunks_mut(across as usize).zip(0u32..) {
         let from = (sr.top as u32 / 4 + i) * s_row + sr.left as u32 / 4 * bytes;
+        surface::read_bytes(cpu, s, from, row);
+    }
+    for (row, i) in data.chunks(across as usize).zip(0u32..) {
         let to = (dr.top as u32 / 4 + i) * d_row + dr.left as u32 / 4 * bytes;
-        surface::read_bytes(cpu, s, from, &mut row);
-        surface::write_bytes(cpu, d, to, &row);
+        surface::write_bytes(cpu, d, to, row);
     }
     Ok(())
 }
@@ -215,16 +230,36 @@ pub(super) fn copy(
 mod tests {
     use super::*;
 
+    /// All the samples of a stretch from `src` to `dst`.
+    fn all(src: u32, dst: u32) -> Vec<u32> {
+        samples(src, dst, 0..dst, false)
+    }
+
     /// The probe's stretches of 8 pixels on Windows 98 SE.
     #[test]
     fn a_stretch_samples_the_middle_of_each_pixel() {
-        assert_eq!(samples(8, 8), [0, 1, 2, 3, 4, 5, 6, 7]);
-        assert_eq!(samples(8, 4), [1, 3, 5, 7]);
-        assert_eq!(samples(8, 6)[3..], [4, 5, 7]);
-        assert_eq!(samples(8, 5)[3..], [5, 7]);
-        assert_eq!(samples(8, 3)[2], 6);
-        assert_eq!(samples(8, 12), [0, 0, 1, 2, 2, 3, 4, 4, 5, 6, 6, 7]);
-        assert_eq!(samples(8, 16)[..4], [0, 0, 1, 1]);
+        assert_eq!(all(8, 8), [0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(all(8, 4), [1, 3, 5, 7]);
+        assert_eq!(all(8, 6)[3..], [4, 5, 7]);
+        assert_eq!(all(8, 5)[3..], [5, 7]);
+        assert_eq!(all(8, 3)[2], 6);
+        assert_eq!(all(8, 12), [0, 0, 1, 2, 2, 3, 4, 4, 5, 6, 6, 7]);
+        assert_eq!(all(8, 16)[..4], [0, 0, 1, 1]);
+    }
+
+    /// The samples of part of a destination, as a clipper leaves it, are
+    /// those of the whole stretch there, mirrored too.
+    #[test]
+    fn part_of_a_stretch_samples_as_the_whole_does() {
+        let whole = all(8, 12);
+        assert_eq!(samples(8, 12, 3..9, false), whole[3..9]);
+        let mut mirrored = whole.clone();
+        mirrored.reverse();
+        assert_eq!(samples(8, 12, 0..12, true), mirrored);
+        assert_eq!(samples(8, 12, 3..9, true), mirrored[3..9]);
+        // A rectangle reaching far outside the surface.
+        let huge = samples(8, 0x4_0000, 0x2_0000..0x2_0002, false);
+        assert_eq!(huge, [4, 4]);
     }
 
     fn rgb(bits: u32, r: u32, g: u32, b: u32, a: u32) -> Format {
@@ -263,5 +298,15 @@ mod tests {
         let a1 = rgb(16, 0x7C00, 0x03E0, 0x001F, 0x8000);
         assert_eq!(to_pixel([0, 0, 0, 0x77], &a1), 0);
         assert_eq!(to_pixel([0, 0, 0, 0x88], &a1), 0x8000);
+    }
+
+    /// A channel of more than 8 bits gets the value in its top 8.
+    #[test]
+    fn a_wide_channel_gets_the_value_in_its_top_bits() {
+        let a2r10g10b10 = rgb(32, 0x3FF0_0000, 0x000F_FC00, 0x3FF, 0xC000_0000);
+        assert_eq!(
+            to_pixel([0xFF, 0x80, 0x01, 0xFF], &a2r10g10b10),
+            0xC000_0000 | 0x3FC << 20 | 0x200 << 10 | 0x004
+        );
     }
 }
