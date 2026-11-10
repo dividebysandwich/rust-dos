@@ -8,11 +8,12 @@
 //! device as they are. The texture stages' states are kept by Direct3D
 //! 8's numbers and go to the inner device with its filters' numbers:
 //! D3DTEXF_NONE, POINT and LINEAR as D3DTFP_NONE, POINT and LINEAR for
-//! the mipmap filter. The world matrices past the fourth have no effect:
-//! vertex blending is left out.
+//! the mipmap filter. The first four world matrices are the inner
+//! device's world matrices, and the others the device's own; geometry
+//! blending (`draw.rs`) takes them from both.
 
 use super::super::ddraw::d3d::device::{Change, Viewport7};
-use super::super::ddraw::d3d::pipeline::{IDENTITY, multiply};
+use super::super::ddraw::d3d::pipeline::{IDENTITY, Matrix, multiply};
 use super::super::ddraw::d3d::states as inner_states;
 use super::device::{
     self, Device, PS_CONSTANTS, STAGES, STREAMS, VS_CONSTANTS, get, inner, this_device,
@@ -349,6 +350,27 @@ fn transform_words(d: &Device, i: &super::super::ddraw::d3d::device::Device, t: 
         .iter()
         .find(|w| w.0 == t)
         .map_or(IDENTITY.map(f32::to_bits), |w| w.1)
+}
+
+/// The first `count` world matrices (D3DTS_WORLDMATRIX(0) and on) of
+/// the device `d`, whose inner device is `i`.
+pub fn world_matrices(
+    d: &Device,
+    i: &super::super::ddraw::d3d::device::Device,
+    count: usize,
+) -> Vec<Matrix> {
+    let mut out = vec![IDENTITY; count];
+    for (k, m) in out.iter_mut().enumerate().take(4) {
+        if let Some(at) = inner_transform(256 + k as u32) {
+            *m = i.transforms.get(at).copied().unwrap_or(IDENTITY);
+        }
+    }
+    for (t, m) in &d.worlds {
+        if let Some(slot) = t.checked_sub(256).and_then(|k| out.get_mut(k as usize)) {
+            *slot = m.map(f32::from_bits);
+        }
+    }
+    out
 }
 
 // The state a device starts with.
@@ -1027,7 +1049,7 @@ pub fn set_vertex_shader(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if super::shader::get_shader(&d, handle).is_none() {
             return Some(D3DERR_INVALIDCALL);
         }
-    } else if handle != 0 && super::super::ddraw::d3d::pipeline::Layout::of(handle).is_none() {
+    } else if handle != 0 && super::super::ddraw::d3d::pipeline::Layout::of_d3d8(handle).is_none() {
         return Some(D3DERR_INVALIDCALL);
     }
     set(cpu, id, change(VSHADER, 0, 0, vec![handle]));

@@ -16,7 +16,7 @@ use super::device::{
     RS_SPECULARMATERIALSOURCE, TSS_TEXCOORDINDEX, device_of, get, version,
 };
 use super::pipeline::{
-    self, Fog, Layout, Light, Lighting, Material, Prim, Processed, Setup, Vertex, ViewMap,
+    self, Blend, Fog, Layout, Light, Lighting, Material, Prim, Processed, Setup, Vertex, ViewMap,
 };
 use super::vertexbuffer::Clipped;
 use super::{
@@ -250,6 +250,7 @@ fn setup_of(
         fill: s(RS_FILLMODE),
         shade: s(RS_SHADEMODE),
         tex_index: [tex(0), tex(1)],
+        blend: None,
     }
 }
 
@@ -304,8 +305,27 @@ pub fn draw(
     order: Option<&[u32]>,
     flags: u32,
 ) -> Result<(), u32> {
+    draw_blended(cpu, id, version, layout, kind, vertices, order, flags, None)
+}
+
+/// Draw as `draw` does, the vertices blended as `blend` says (Direct3D
+/// 8's geometry blending).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_blended(
+    cpu: &mut Cpu,
+    id: u32,
+    version: u32,
+    layout: &Layout,
+    kind: u32,
+    vertices: &[Vertex],
+    order: Option<&[u32]>,
+    flags: u32,
+    blend: Option<Blend>,
+) -> Result<(), u32> {
     let prims = primitives(kind, order, vertices.len())?;
-    draw_prims(cpu, id, version, layout, vertices, &prims, flags)
+    draw_clipped(
+        cpu, id, version, layout, vertices, None, &prims, flags, blend,
+    )
 }
 
 /// The `kind` primitives of `count` vertices, in the order `order` or
@@ -336,7 +356,7 @@ pub fn draw_prims(
     prims: &[Prim],
     flags: u32,
 ) -> Result<(), u32> {
-    draw_clipped(cpu, id, version, layout, vertices, None, prims, flags)
+    draw_clipped(cpu, id, version, layout, vertices, None, prims, flags, None)
 }
 
 /// Draw the primitives `prims` of `vertices`, and with `clip` what
@@ -345,7 +365,7 @@ pub fn draw_prims(
 /// puts them where the buffer has it; after a change of viewport, or
 /// once the program wrote over it, it is drawn where the buffer says,
 /// as before, and a primitive that mixes the two is clipped as
-/// `pipeline::one_kind` says.
+/// `pipeline::one_kind` says. The vertices are blended as `blend` says.
 #[allow(clippy::too_many_arguments)]
 fn draw_clipped(
     cpu: &mut Cpu,
@@ -356,10 +376,12 @@ fn draw_clipped(
     clip: Option<&[Option<Clipped>]>,
     prims: &[Prim],
     flags: u32,
+    blend: Option<Blend>,
 ) -> Result<(), u32> {
-    let Some(setup) = setup(cpu, id, version, layout, flags) else {
+    let Some(mut setup) = setup(cpu, id, version, layout, flags) else {
         return Err(DDERR_INVALIDPARAMS);
     };
+    setup.blend = blend;
     let mut processed = pipeline::process(&setup, vertices, layout);
     if let Some(clip) = clip {
         for ((p, v), c) in processed.iter_mut().zip(vertices).zip(clip) {
@@ -633,7 +655,9 @@ fn draw_buffer(
     let prims = primitives(kind, order, b.vertices.len())?;
     let (layout, vertices) = (&b.layout, &b.vertices);
     let clip = b.clipped.get(b.start..b.start + vertices.len());
-    draw_clipped(cpu, id, version, layout, vertices, clip, &prims, flags)
+    draw_clipped(
+        cpu, id, version, layout, vertices, clip, &prims, flags, None,
+    )
 }
 
 /// DrawPrimitiveVB(this, type, buffer, start, count, flags).

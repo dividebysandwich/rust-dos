@@ -21,14 +21,14 @@ use std::path::PathBuf;
 const BASE: u32 = 0x40_0000;
 
 /// Where a test program's data and imports are, for its code.
-struct Layout {
+pub(super) struct Layout {
     data: u32,
     iat: Vec<u32>,
 }
 
 impl Layout {
     /// The address of byte `offset` of the data.
-    fn at(&self, offset: u32) -> u64 {
+    pub(super) fn at(&self, offset: u32) -> u64 {
         (self.data + offset) as u64
     }
 
@@ -40,7 +40,7 @@ impl Layout {
 
 /// A program importing `imports`, with `data` and the code `f` makes,
 /// and where its data is.
-fn program(
+pub(super) fn program(
     imports: &[(&str, &[&str])],
     data: &[u8],
     f: impl FnOnce(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
@@ -83,7 +83,7 @@ fn program(
 
 /// A machine with a Voodoo3 as its display adapter, the built-in
 /// Windows on and `program` loaded from the shell as T.EXE.
-fn machine(test: &str, program: Vec<u8>) -> Cpu {
+pub(super) fn machine(test: &str, program: Vec<u8>) -> Cpu {
     machine_with(test, None, program)
 }
 
@@ -118,7 +118,7 @@ fn printed(cpu: &Cpu) -> String {
 }
 
 /// The program's dword at `lin`, through its page tables.
-fn peek(cpu: &Cpu, lin: u32) -> u32 {
+pub(super) fn peek(cpu: &Cpu, lin: u32) -> u32 {
     let pde = cpu
         .bus
         .read_32((cpu.cr3 & !0xFFF) as usize + 4 * (lin >> 22) as usize);
@@ -131,13 +131,13 @@ fn peek(cpu: &Cpu, lin: u32) -> u32 {
         .read_32((pte & !0xFFF) as usize + (lin & 0xFFF) as usize)
 }
 
-fn peek_f32(cpu: &Cpu, lin: u32) -> f32 {
+pub(super) fn peek_f32(cpu: &Cpu, lin: u32) -> f32 {
     f32::from_bits(peek(cpu, lin))
 }
 
 /// Run the program until it says it is done (DONE in its data), with
 /// its results there.
-fn run_until_done(cpu: &mut Cpu, data: u32) {
+pub(super) fn run_until_done(cpu: &mut Cpu, data: u32) {
     for _ in 0..400 {
         cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
         run_batch(cpu, &mut NoHook, false);
@@ -169,8 +169,8 @@ const DEVICE1: u32 = 0x24;
 const BUFFER: u32 = 0x28;
 /// The HRESULTs of the calls, in order, and how many calls a scene
 /// made.
-const RESULTS: u32 = 0x1000;
-const DONE: u32 = 0xF0;
+pub(super) const RESULTS: u32 = 0x1000;
+pub(super) const DONE: u32 = 0xF0;
 const CALLS: u32 = 0xF4;
 const CLASS: u32 = 0x100;
 const IID_DD7: u32 = 0x110;
@@ -252,15 +252,15 @@ fn data() -> Vec<u8> {
     data
 }
 
-fn put(data: &mut [u8], offset: u32, bytes: &[u8]) {
+pub(super) fn put(data: &mut [u8], offset: u32, bytes: &[u8]) {
     data[offset as usize..offset as usize + bytes.len()].copy_from_slice(bytes);
 }
 
-fn put32(data: &mut [u8], offset: u32, value: u32) {
+pub(super) fn put32(data: &mut [u8], offset: u32, value: u32) {
     put(data, offset, &value.to_le_bytes());
 }
 
-fn put_f32s(data: &mut [u8], offset: u32, values: &[f32]) {
+pub(super) fn put_f32s(data: &mut [u8], offset: u32, values: &[f32]) {
     for (i, v) in values.iter().enumerate() {
         put32(data, offset + 4 * i as u32, v.to_bits());
     }
@@ -275,7 +275,7 @@ fn guid(data: &mut [u8], offset: u32, d1: u32, d2: u16, d3: u16, d4: [u8; 8]) {
 
 /// An argument a program passes.
 #[derive(Clone, Copy)]
-enum Arg {
+pub(super) enum Arg {
     /// A value.
     I(u32),
     /// The address of the data's byte at an offset.
@@ -296,8 +296,8 @@ fn push(a: &mut CodeAssembler, l: &Layout, args: &[Arg]) -> Result<(), IcedError
 }
 
 /// The program's call results, one after another in RESULTS.
-struct Calls {
-    next: u32,
+pub(super) struct Calls {
+    pub(super) next: u32,
 }
 
 impl Calls {
@@ -308,7 +308,7 @@ impl Calls {
     }
 
     /// Call the import `index` with `args`.
-    fn api(
+    pub(super) fn api(
         &mut self,
         a: &mut CodeAssembler,
         l: &Layout,
@@ -322,7 +322,7 @@ impl Calls {
 
     /// Call method `method` of the interface whose pointer is at data
     /// offset `object`, with `args` after `this`.
-    fn com(
+    pub(super) fn com(
         &mut self,
         a: &mut CodeAssembler,
         l: &Layout,
@@ -341,7 +341,13 @@ impl Calls {
 
 /// Copy `len` bytes of the data at `from` to where the pointer at data
 /// offset `to` points.
-fn copy(a: &mut CodeAssembler, l: &Layout, from: u32, to: u32, len: u32) -> Result<(), IcedError> {
+pub(super) fn copy(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    from: u32,
+    to: u32,
+    len: u32,
+) -> Result<(), IcedError> {
     a.mov(edi, dword_ptr(l.at(to)))?;
     a.mov(esi, l.at(from) as u32)?;
     a.mov(ecx, len)?;
@@ -351,7 +357,7 @@ fn copy(a: &mut CodeAssembler, l: &Layout, from: u32, to: u32, len: u32) -> Resu
 
 /// The end of a program: DONE set, and it spins, its memory there to
 /// look at.
-fn finish(a: &mut CodeAssembler, l: &Layout) -> Result<(), IcedError> {
+pub(super) fn finish(a: &mut CodeAssembler, l: &Layout) -> Result<(), IcedError> {
     a.mov(dword_ptr(l.at(DONE)), 1)?;
     let mut again = a.create_label();
     a.set_label(&mut again)?;
@@ -359,7 +365,7 @@ fn finish(a: &mut CodeAssembler, l: &Layout) -> Result<(), IcedError> {
 }
 
 /// The results of the first `n` calls, read from the program's data.
-fn results(cpu: &Cpu, data: u32, n: u32) -> Vec<u32> {
+pub(super) fn results(cpu: &Cpu, data: u32, n: u32) -> Vec<u32> {
     (0..n).map(|i| peek(cpu, data + RESULTS + 4 * i)).collect()
 }
 

@@ -121,6 +121,10 @@ pub const FVF_DIFFUSE: u32 = 0x040;
 pub const FVF_SPECULAR: u32 = 0x080;
 const FVF_RESERVED0: u32 = 0x001;
 const FVF_RESERVED2: u32 = 0xF000;
+/// Direct3D 8's D3DFVF_LASTBETA_UBYTE4: the last beta of an XYZBn
+/// position is the four bytes of the indices of the world matrices.
+/// Direct3D 8.1 has no D3DFVF_LASTBETA_D3DCOLOR; Direct3D 9 added it.
+pub const FVF_LASTBETA_UBYTE4: u32 = 0x1000;
 
 /// D3DVERTEX, D3DLVERTEX and D3DTLVERTEX, as FVF codes.
 pub const FVF_VERTEX: u32 = 0x112;
@@ -141,12 +145,29 @@ pub struct Layout {
     /// The texture coordinate sets: offset and number of floats of each.
     pub textures: usize,
     pub tex: [(u32, u32); 8],
+    /// The blending weights after x, y and z: how many floats.
+    pub weights: u32,
+    /// Where the indices of the world matrices are, as four bytes.
+    pub indices: Option<u32>,
 }
 
 impl Layout {
-    /// The layout of the FVF code `fvf`, if it is one.
+    /// The layout of the FVF code `fvf`, if it is one of Direct3D 7's
+    /// or before.
     pub fn of(fvf: u32) -> Option<Layout> {
-        if fvf & (FVF_RESERVED0 | FVF_RESERVED2) != 0 {
+        if fvf & FVF_RESERVED2 != 0 {
+            return None;
+        }
+        Layout::of_d3d8(fvf)
+    }
+
+    /// The layout of the FVF code `fvf`, if it is one of Direct3D 8's,
+    /// which may have D3DFVF_LASTBETA_UBYTE4. With it the last of the
+    /// XYZBn betas holds the matrix indices and the others are weights:
+    /// XYZB2 has one weight and the indices. Without betas the flag has
+    /// nothing to change, and is let be.
+    pub fn of_d3d8(fvf: u32) -> Option<Layout> {
+        if fvf & (FVF_RESERVED0 | (FVF_RESERVED2 & !FVF_LASTBETA_UBYTE4)) != 0 {
             return None;
         }
         let position = fvf & FVF_POSITION_MASK;
@@ -162,6 +183,14 @@ impl Layout {
             rhw,
             ..Layout::default()
         };
+        if !rhw {
+            let betas = (at - 12) / 4;
+            l.weights = betas;
+            if betas > 0 && fvf & FVF_LASTBETA_UBYTE4 != 0 {
+                l.weights = betas - 1;
+                l.indices = Some(at - 4);
+            }
+        }
         if fvf & FVF_NORMAL != 0 {
             l.normal = Some(at);
             at += 12;
@@ -217,6 +246,12 @@ impl Layout {
         if let Some(at) = self.normal {
             v.normal = [f(at), f(at + 4), f(at + 8)];
         }
+        for k in 0..self.weights.min(4) {
+            v.weights[k as usize] = f(12 + 4 * k);
+        }
+        if let Some(at) = self.indices {
+            v.indices = d(at).to_le_bytes();
+        }
         v.diffuse = self.diffuse.map(d);
         v.specular = self.specular.map(d);
         for i in 0..self.textures {
@@ -238,6 +273,14 @@ pub struct Vertex {
     pub diffuse: Option<u32>,
     pub specular: Option<u32>,
     pub tex: [[f32; 4]; 8],
+    /// The blending weights (the first four the vertex has, 0 for those
+    /// it hasn't) and the indices of the world matrices they weigh.
+    pub weights: [f32; 4],
+    pub indices: [u8; 4],
+    /// The second position and normal a declaration's vertex can have,
+    /// for tweening (D3DVSDE_POSITION2 and NORMAL2).
+    pub position2: Option<[f32; 3]>,
+    pub normal2: Option<[f32; 3]>,
 }
 
 /// A D3DCOLOR (ARGB) as red, green, blue and alpha from 0 to 1.
@@ -459,6 +502,31 @@ pub fn fog_factor(mode: u32, start: f32, end: f32, density: f32, depth: f32) -> 
     if f.is_nan() { 1.0 } else { f.clamp(0.0, 1.0) }
 }
 
+/// Geometry blending, Direct3D 8's D3DRS_VERTEXBLEND, which the
+/// runtime's software vertex processing does whatever the card can.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Blend {
+    /// Each vertex goes through the world matrices `matrices` in
+    /// proportion to its weights: `count` of them (0 to 3) from the
+    /// vertex, and one more that is 1 minus their sum. The position
+    /// that comes out is the sum of the vertex times each matrix times
+    /// its weight; the normal is that of the normal through each
+    /// matrix's inverse transpose (with the view's), as Wine's
+    /// `process_vertices_strided` has it. With `indexed` the vertex's
+    /// indices name the matrices among the 256 of `matrices`; without,
+    /// they are the first 4.
+    Weights {
+        count: usize,
+        indexed: bool,
+        matrices: Vec<Matrix>,
+    },
+    /// D3DVBF_TWEENING: the position and normal are those of the
+    /// vertex's first and second, the second's share the factor
+    /// (D3DRS_TWEENFACTOR): position = position1 * (1 - factor) +
+    /// position2 * factor, as DirectX documents it.
+    Tween(f32),
+}
+
 /// D3DCULL_ modes.
 #[cfg(test)]
 pub const CULL_NONE: u32 = 1;
@@ -497,6 +565,9 @@ pub struct Setup {
     pub shade: u32,
     /// The texture coordinates each of the card's two stages takes.
     pub tex_index: [usize; 2],
+    /// Geometry blending, if the vertices are blended: `world` is then
+    /// the first world matrix only for tweening.
+    pub blend: Option<Blend>,
 }
 
 impl Default for Setup {
@@ -515,6 +586,7 @@ impl Default for Setup {
             fill: 3,
             shade: 2,
             tex_index: [0, 1],
+            blend: None,
         }
     }
 }
@@ -679,27 +751,60 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
                 .collect()
         })
         .unwrap_or_default();
+    let mut blended = Blended::of(setup);
+    let tween = match setup.blend {
+        Some(Blend::Tween(f)) => Some(f),
+        _ => None,
+    };
+    let lit = setup.lighting.is_some();
     input
         .iter()
         .map(|v| {
+            let tweened;
+            let v = match tween {
+                Some(f) => {
+                    tweened = tween_vertex(v, f);
+                    &tweened
+                }
+                None => v,
+            };
             let p = [v.position[0], v.position[1], v.position[2], 1.0];
-            let clip = transform(p, &all);
+            // Where the vertex is in the world, its clip coordinates,
+            // where it is in camera space and its normal there.
+            let (world, clip, eye, n) = match blended.as_mut() {
+                Some(b) => {
+                    let (w, n) = b.place(v, lit);
+                    let e = transform(w, &setup.view);
+                    (w, transform(w, &b.view_projection), [e[0], e[1], e[2]], n)
+                }
+                None => {
+                    let n = if lit {
+                        times(v.normal, &normals)
+                    } else {
+                        [0.0; 3]
+                    };
+                    let w = if setup.planes.is_empty() {
+                        p
+                    } else {
+                        transform(p, &setup.world)
+                    };
+                    let eye = point([p[0], p[1], p[2]], &world_view);
+                    (w, transform(p, &all), eye, n)
+                }
+            };
             let mut out = Processed {
                 clip,
                 tex: v.tex,
                 ..Processed::default()
             };
-            if !setup.planes.is_empty() {
-                let w = transform(p, &setup.world);
-                for (i, plane) in setup.planes.iter().take(6).enumerate() {
-                    out.planes[i] =
-                        plane[0] * w[0] + plane[1] * w[1] + plane[2] * w[2] + plane[3] * w[3];
-                }
+            for (i, plane) in setup.planes.iter().take(6).enumerate() {
+                out.planes[i] = plane[0] * world[0]
+                    + plane[1] * world[1]
+                    + plane[2] * world[2]
+                    + plane[3] * world[3];
             }
-            let eye = point([p[0], p[1], p[2]], &world_view);
             match &setup.lighting {
                 Some(l) => {
-                    let n = times(v.normal, &normals);
                     let n = if l.normalize { normalize(n) } else { n };
                     let (d, s) = light_vertex(l, &lights, v, eye, n);
                     out.diffuse = d;
@@ -718,6 +823,98 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
             out
         })
         .collect()
+}
+
+/// The vertex `v` tweened by `factor`: its position, and its normal,
+/// moved that share of the way to its second ones. A vertex without a
+/// second one keeps its first.
+fn tween_vertex(v: &Vertex, factor: f32) -> Vertex {
+    let mix =
+        |a: [f32; 3], b: [f32; 3]| std::array::from_fn(|k| a[k] * (1.0 - factor) + b[k] * factor);
+    let mut out = *v;
+    if let Some(p2) = v.position2 {
+        let p = mix([v.position[0], v.position[1], v.position[2]], p2);
+        out.position = [p[0], p[1], p[2], v.position[3]];
+    }
+    if let Some(n2) = v.normal2 {
+        out.normal = mix(v.normal, n2);
+    }
+    out
+}
+
+/// What blending by weights needs while a draw's vertices go through
+/// it: the setup's matrices, and the normal matrices of those the
+/// vertices use, made when the first one does.
+struct Blended<'a> {
+    count: usize,
+    indexed: bool,
+    matrices: &'a [Matrix],
+    view: Matrix,
+    view_projection: Matrix,
+    normals: Vec<Option<[[f32; 3]; 3]>>,
+}
+
+impl<'a> Blended<'a> {
+    fn of(setup: &'a Setup) -> Option<Blended<'a>> {
+        let Some(Blend::Weights {
+            count,
+            indexed,
+            matrices,
+        }) = &setup.blend
+        else {
+            return None;
+        };
+        if matrices.is_empty() {
+            return None;
+        }
+        Some(Blended {
+            count: (*count).min(3),
+            indexed: *indexed,
+            matrices,
+            view: setup.view,
+            view_projection: multiply(&setup.view, &setup.projection),
+            normals: vec![None; matrices.len()],
+        })
+    }
+
+    /// The vertex `v` blended: where it is in the world, and with `lit`
+    /// its normal in camera space.
+    fn place(&mut self, v: &Vertex, lit: bool) -> ([f32; 4], [f32; 3]) {
+        let p = [v.position[0], v.position[1], v.position[2], 1.0];
+        let n = self.count;
+        let mut weights = [0.0f32; 4];
+        weights[..n].copy_from_slice(&v.weights[..n]);
+        weights[n] = v.weights[..n].iter().fold(1.0, |last, w| last - w);
+        let mut world = [0.0f32; 4];
+        let mut normal = [0.0f32; 3];
+        for (k, &weight) in weights.iter().enumerate().take(self.count + 1) {
+            // A matrix of no weight adds nothing.
+            if weight == 0.0 {
+                continue;
+            }
+            let m = if self.indexed {
+                v.indices[k] as usize
+            } else {
+                k
+            }
+            .min(self.matrices.len() - 1);
+            let t = transform(p, &self.matrices[m]);
+            for (w, t) in world.iter_mut().zip(t) {
+                *w += weight * t;
+            }
+            if lit {
+                let view = &self.view;
+                let matrix = &self.matrices[m];
+                let nm =
+                    self.normals[m].get_or_insert_with(|| normal_matrix(&multiply(matrix, view)));
+                let n = times(v.normal, nm);
+                for (a, n) in normal.iter_mut().zip(n) {
+                    *a += weight * n;
+                }
+            }
+        }
+        (world, normal)
+    }
 }
 
 /// The transformed vertex `p` at the clip coordinates `clip` it was
@@ -1913,5 +2110,162 @@ mod tests {
             cut += (v.x > 1.0) as usize;
         }
         assert!(cut > 0);
+    }
+
+    fn translation(x: f32, y: f32, z: f32) -> Matrix {
+        let mut m = IDENTITY;
+        m[12] = x;
+        m[13] = y;
+        m[14] = z;
+        m
+    }
+
+    fn blended(count: usize, indexed: bool, matrices: Vec<Matrix>) -> Setup {
+        Setup {
+            blend: Some(Blend::Weights {
+                count,
+                indexed,
+                matrices,
+            }),
+            ..Setup::default()
+        }
+    }
+
+    #[test]
+    fn xyzb_layouts_with_ubyte4_indices() {
+        // Max Payne's: XYZB2, LASTBETA_UBYTE4, NORMAL, TEX1.
+        let l = Layout::of_d3d8(0x1118).unwrap();
+        assert_eq!((l.weights, l.indices, l.normal), (1, Some(16), Some(20)));
+        assert_eq!((l.tex[0].0, l.size), (32, 40));
+        // XYZB1 with LASTBETA_UBYTE4: no weights, only the indices.
+        let l = Layout::of_d3d8(0x1116).unwrap();
+        assert_eq!(
+            (l.weights, l.indices, l.normal, l.size),
+            (0, Some(12), Some(16), 36)
+        );
+        // XYZB3 without: three weights.
+        let l = Layout::of_d3d8(0x00A).unwrap();
+        assert_eq!((l.weights, l.indices, l.size), (3, None, 24));
+        // Direct3D 7 has no LASTBETA_UBYTE4.
+        assert_eq!(Layout::of(0x1118), None);
+        assert_eq!(Layout::of_d3d8(0x2118), None);
+
+        let mut bytes = Vec::new();
+        for f in [1.0f32, 2.0, 3.0, 0.25] {
+            bytes.extend(f.to_le_bytes());
+        }
+        bytes.extend([7, 200, 0, 0]);
+        bytes.extend([0; 20]);
+        let v = Layout::of_d3d8(0x1118).unwrap().read(&bytes);
+        assert_eq!(v.position, [1.0, 2.0, 3.0, 1.0]);
+        assert_eq!((v.weights[0], v.indices), (0.25, [7, 200, 0, 0]));
+    }
+
+    #[test]
+    fn blending_weighs_the_world_matrices() {
+        // Matrix 0 moves x by 2 and matrix 1 by 4. With one weight of
+        // 0.25 the second gets 0.75: x = 0.25 * 2 + 0.75 * 4 = 3.5.
+        let setup = blended(
+            1,
+            false,
+            vec![translation(2.0, 0.0, 0.0), translation(4.0, 0.0, 0.0)],
+        );
+        let mut v = vertex(0.0, 1.0, 0.5);
+        v.weights[0] = 0.25;
+        let out = process(&setup, &[v], &Layout::of_d3d8(0x6).unwrap());
+        assert_eq!(out[0].clip, [3.5, 1.0, 0.5, 1.0]);
+        // Three weights of 0.25, 0.25 and 0.5 leave none for matrix 3.
+        let setup = blended(
+            3,
+            false,
+            (0..4).map(|k| translation(0.0, k as f32, 0.0)).collect(),
+        );
+        v.weights = [0.25, 0.25, 0.5, 9.0];
+        let out = process(&setup, &[v], &Layout::of_d3d8(0xC).unwrap());
+        // y = 1 + 0.25 * 0 + 0.25 * 1 + 0.5 * 2.
+        assert_eq!(out[0].clip[1], 2.25);
+    }
+
+    #[test]
+    fn indexed_blending_takes_the_matrices_the_indices_name() {
+        let mut matrices = vec![IDENTITY; 256];
+        matrices[7] = translation(0.0, 1.0, 0.0);
+        matrices[200] = translation(0.0, 3.0, 0.0);
+        // The first weight, 0.75, is matrix 200's (the lowest byte's
+        // index); the last, 0.25, matrix 7's: y = 0.75 * 3 + 0.25 * 1.
+        let setup = blended(1, true, matrices.clone());
+        let mut v = vertex(0.0, 0.0, 0.5);
+        v.weights[0] = 0.75;
+        v.indices = [200, 7, 0, 0];
+        let out = process(&setup, &[v], &Layout::of_d3d8(0x1008).unwrap());
+        assert_eq!(out[0].clip, [0.0, 2.5, 0.5, 1.0]);
+        // D3DVBF_0WEIGHTS: the one matrix the first index names.
+        let setup = blended(0, true, matrices);
+        v.indices = [7, 200, 0, 0];
+        let out = process(&setup, &[v], &Layout::of_d3d8(0x1006).unwrap());
+        assert_eq!(out[0].clip, [0.0, 1.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn blended_normals_go_through_each_matrix_and_light_the_vertex() {
+        // A light from +x. Matrix 0 turns x to y (90 degrees about z),
+        // matrix 1 is the identity: half of each makes the normal (1, 0,
+        // 0) into (0.5, 0.5, 0), which lights 0.5 of the diffuse color
+        // as it is and 0.707 of it normalized.
+        let light = Light {
+            kind: LIGHT_DIRECTIONAL,
+            diffuse: [1.0, 1.0, 1.0, 1.0],
+            direction: [-1.0, 0.0, 0.0],
+            ..Light::default()
+        };
+        let lighting = |normalize| Lighting {
+            lights: vec![light],
+            material: Material {
+                diffuse: [1.0, 1.0, 1.0, 1.0],
+                ..Material::default()
+            },
+            normalize,
+            ..Lighting::default()
+        };
+        let turn = [
+            0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let mut setup = blended(1, false, vec![turn, IDENTITY]);
+        let mut v = vertex(0.0, 0.0, 0.5);
+        v.normal = [1.0, 0.0, 0.0];
+        v.weights[0] = 0.5;
+        let layout = Layout::of_d3d8(0x6 | FVF_NORMAL).unwrap();
+        setup.lighting = Some(lighting(false));
+        let out = process(&setup, &[v], &layout);
+        assert!(near(out[0].diffuse[0], 0.5));
+        setup.lighting = Some(lighting(true));
+        let out = process(&setup, &[v], &layout);
+        assert!(near(out[0].diffuse[0], 0.5f32.sqrt()));
+
+        // A normal goes through the inverse transpose: x scaled by 2
+        // scales a normal's x by 0.5, which lights 0.5 of the color.
+        let mut stretch = IDENTITY;
+        stretch[0] = 2.0;
+        let mut setup = blended(1, false, vec![stretch, IDENTITY]);
+        setup.lighting = Some(lighting(false));
+        v.weights[0] = 1.0;
+        let out = process(&setup, &[v], &layout);
+        assert!(near(out[0].diffuse[0], 0.5));
+    }
+
+    #[test]
+    fn tweening_moves_the_factor_of_the_way_to_the_second_position() {
+        let setup = Setup {
+            blend: Some(Blend::Tween(0.25)),
+            ..Setup::default()
+        };
+        let mut v = vertex(0.0, 1.0, 0.5);
+        v.position2 = Some([2.0, 1.0, 0.5]);
+        let out = process(&setup, &[v], &Layout::default());
+        assert_eq!(out[0].clip, [0.5, 1.0, 0.5, 1.0]);
+        // A vertex without a second position stays where it is.
+        v.position2 = None;
+        let out = process(&setup, &[v], &Layout::default());
+        assert_eq!(out[0].clip, [0.0, 1.0, 0.5, 1.0]);
     }
 }

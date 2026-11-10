@@ -741,7 +741,7 @@ pub fn get_device_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(D3DERR_INVALIDCALL);
     };
     hr!(this_device(cpu, this));
-    Some(super::caps::write(cpu, at))
+    Some(super::caps::write(cpu, at, true))
 }
 
 /// Write D3DDISPLAYMODE at `at`: the display's mode now.

@@ -4,6 +4,14 @@
 //! of up to 8, one texture unit on a Banshee and two on a Voodoo3, no
 //! stencil, cube or volume textures, and vertex shaders 1.1 run on the
 //! processor, but no pixel shaders.
+//!
+//! A device's own caps (IDirect3DDevice8::GetDeviceCaps) add what its
+//! software vertex processing does that the card can't: geometry
+//! blending of 4 matrices, indexed among 256, and tweening. Windows
+//! reports a MaxVertexBlendMatrixIndex of 255 for a software device and
+//! MaxVertexBlendMatrices of 4 (Wine bug 39057, from runs of its tests
+//! on Windows). The adapter's caps (IDirect3D8::GetDeviceCaps) are the
+//! HAL's, and the Voodoo3 blends nothing.
 
 use super::{D3D_OK, D3DERR_INVALIDCALL};
 use crate::cpu::Cpu;
@@ -24,8 +32,8 @@ pub fn tmus(cpu: &Cpu) -> u32 {
     }
 }
 
-/// D3DCAPS8's words.
-pub fn words(cpu: &Cpu) -> [u32; 53] {
+/// D3DCAPS8's words: a device's with `device`, else the adapter's.
+pub fn words(cpu: &Cpu, device: bool) -> [u32; 53] {
     let tmus = tmus(cpu);
     let mut w = [0u32; 53];
     // D3DDEVTYPE_HAL, adapter 0.
@@ -86,6 +94,13 @@ pub fn words(cpu: &Cpu) -> [u32; 53] {
     w[39] = 0x1 | 0x2 | 0x8 | 0x10 | 0x20;
     w[40] = 8;
     w[41] = MAX_CLIP_PLANES;
+    if device {
+        // D3DVTXPCAPS_TWEENING; MaxVertexBlendMatrices and
+        // MaxVertexBlendMatrixIndex.
+        w[39] |= 0x40;
+        w[42] = 4;
+        w[43] = 255;
+    }
     w[44] = MAX_POINT_SIZE.to_bits();
     w[45] = 0xF_FFFF;
     w[46] = 0xFF_FFFF;
@@ -97,12 +112,13 @@ pub fn words(cpu: &Cpu) -> [u32; 53] {
     w
 }
 
-/// Write D3DCAPS8 at `at`.
-pub fn write(cpu: &mut Cpu, at: u32) -> u32 {
+/// Write D3DCAPS8 at `at`: a device's with `device`, else the
+/// adapter's.
+pub fn write(cpu: &mut Cpu, at: u32, device: bool) -> u32 {
     if at == 0 || !cpu.bus.guest_probe(at, SIZE, true) {
         return D3DERR_INVALIDCALL;
     }
-    let w = words(cpu);
+    let w = words(cpu, device);
     for (i, v) in w.iter().enumerate() {
         cpu.bus.guest_write_32(at + 4 * i as u32, *v);
     }

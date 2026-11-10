@@ -8,12 +8,13 @@
 //! Patches the card can't draw.
 
 use super::super::ddraw::d3d::draw as inner_draw;
-use super::super::ddraw::d3d::pipeline::{self, Layout, Processed, Vertex};
-use super::device::{Device, get, this_device};
+use super::super::ddraw::d3d::pipeline::{self, Blend, Layout, Processed, Vertex};
+use super::device::{Device, get, inner, this_device};
 use super::shader::{
-    self, Decl, REG_DIFFUSE, REG_NORMAL, REG_POSITION, REG_SPECULAR, REG_TEXCOORD0,
+    self, Decl, REG_BLENDINDICES, REG_BLENDWEIGHT, REG_DIFFUSE, REG_NORMAL, REG_NORMAL2,
+    REG_POSITION, REG_POSITION2, REG_SPECULAR, REG_TEXCOORD0, REGISTERS,
 };
-use super::states::index_size;
+use super::states::{index_size, world_matrices};
 use super::{D3D_OK, D3DERR_INVALIDCALL, state};
 use crate::cpu::Cpu;
 
@@ -90,7 +91,7 @@ fn shading(d: &Device) -> Option<Shading> {
         let decl = shader::parse_decl(&s.decl)?;
         return Some(Shading::Decl(decl, s.function.clone()));
     }
-    Some(Shading::Fixed(Layout::of(h)?))
+    Some(Shading::Fixed(Layout::of_d3d8(h)?))
 }
 
 /// The registers of `count` vertices from `first`, as a declaration
@@ -101,8 +102,8 @@ fn registers(
     sources: &[Option<Source>],
     first: u32,
     count: u32,
-) -> Option<Vec<[[f32; 4]; 16]>> {
-    let mut out = vec![[[0.0, 0.0, 0.0, 1.0]; 16]; count as usize];
+) -> Option<Vec<[[f32; 4]; REGISTERS]>> {
+    let mut out = vec![[[0.0, 0.0, 0.0, 1.0]; REGISTERS]; count as usize];
     let streams: Vec<u32> = {
         let mut s: Vec<u32> = decl.inputs.iter().map(|i| i.stream).collect();
         s.sort();
@@ -131,28 +132,45 @@ fn registers(
 
 /// A fixed-function declaration's registers as an FVF vertex, and the
 /// layout that has its parts.
-fn decl_vertices(decl: &Decl, regs: &[[[f32; 4]; 16]]) -> (Layout, Vec<Vertex>) {
-    let has = |r: u32| decl.inputs.iter().any(|i| i.reg == r);
+fn decl_vertices(decl: &Decl, regs: &[[[f32; 4]; REGISTERS]]) -> (Layout, Vec<Vertex>) {
+    let input = |r: u32| decl.inputs.iter().find(|i| i.reg == r);
+    let has = |r: u32| input(r).is_some();
     let layout = Layout {
         normal: has(REG_NORMAL).then_some(0),
         diffuse: has(REG_DIFFUSE).then_some(0),
         specular: has(REG_SPECULAR).then_some(0),
+        // As many weights as the register's type has values.
+        weights: input(REG_BLENDWEIGHT).map_or(0, |i| match i.kind {
+            0 => 1,
+            1 | 6 => 2,
+            2 => 3,
+            _ => 4,
+        }),
+        indices: has(REG_BLENDINDICES).then_some(0),
         ..Layout::default()
     };
+    let (position2, normal2) = (has(REG_POSITION2), has(REG_NORMAL2));
+    let xyz = |v: [f32; 4]| [v[0], v[1], v[2]];
     let vertices = regs
         .iter()
         .map(|r| {
             let p = r[REG_POSITION as usize];
-            let n = r[REG_NORMAL as usize];
+            // The indices as D3DVSDT_UBYTE4, which the documentation
+            // asks for, loads them: each byte's value.
+            let indices = r[REG_BLENDINDICES as usize].map(|x| x.clamp(0.0, 255.0) as u8);
             let mut v = Vertex {
                 position: [p[0], p[1], p[2], 1.0],
-                normal: [n[0], n[1], n[2]],
+                normal: xyz(r[REG_NORMAL as usize]),
                 diffuse: layout
                     .diffuse
                     .map(|_| pipeline::color(r[REG_DIFFUSE as usize])),
                 specular: layout
                     .specular
                     .map(|_| pipeline::color(r[REG_SPECULAR as usize])),
+                weights: r[REG_BLENDWEIGHT as usize],
+                indices,
+                position2: position2.then(|| xyz(r[REG_POSITION2 as usize])),
+                normal2: normal2.then(|| xyz(r[REG_NORMAL2 as usize])),
                 ..Vertex::default()
             };
             for t in 0..8 {
@@ -162,6 +180,49 @@ fn decl_vertices(decl: &Decl, regs: &[[[f32; 4]; 16]]) -> (Layout, Vec<Vertex>) 
         })
         .collect();
     (layout, vertices)
+}
+
+// Geometry blending's render states and their values.
+const RS_VERTEXBLEND: u32 = 151;
+const RS_INDEXEDVERTEXBLENDENABLE: u32 = 167;
+const RS_TWEENFACTOR: u32 = 170;
+const VBF_TWEENING: u32 = 255;
+const VBF_0WEIGHTS: u32 = 256;
+
+/// The world matrices indexed vertex blending chooses among: the 256 of
+/// software vertex processing, which every device here does.
+const INDEXED_MATRICES: usize = 256;
+
+/// How the device `id` (`d`) blends vertices of `layout`, if it does:
+/// as D3DRS_VERTEXBLEND says, which Direct3D 8's software vertex
+/// processing does on the processor whatever the card can do.
+///
+/// D3DVBF_1WEIGHTS to 3WEIGHTS take that many weights from the vertex,
+/// and 0WEIGHTS none, with one matrix more than weights. With
+/// D3DRS_INDEXEDVERTEXBLENDENABLE and indices in the vertex, the
+/// indices name the matrices; otherwise they are the world matrices 0
+/// to 3, which the documentation says indexing disabled amounts to. A
+/// vertex without weights is drawn by the world matrix alone when the
+/// state asks for some, as Wine's `process_vertices_strided` has it.
+fn blend(cpu: &mut Cpu, id: u32, d: &Device, layout: &Layout) -> Option<Blend> {
+    if layout.rhw {
+        return None;
+    }
+    let i = inner(cpu, id)?;
+    let mode = i.state(RS_VERTEXBLEND);
+    let count = match mode {
+        VBF_TWEENING => return Some(Blend::Tween(f32::from_bits(i.state(RS_TWEENFACTOR)))),
+        VBF_0WEIGHTS => 0,
+        1..=3 if layout.weights > 0 => mode as usize,
+        _ => return None,
+    };
+    let indexed = i.state(RS_INDEXEDVERTEXBLENDENABLE) != 0 && layout.indices.is_some();
+    let matrices = world_matrices(d, i, if indexed { INDEXED_MATRICES } else { 4 });
+    Some(Blend::Weights {
+        count,
+        indexed,
+        matrices,
+    })
 }
 
 /// The most vertices one draw takes.
@@ -202,7 +263,9 @@ fn draw_vertices(
             let vertices: Vec<Vertex> = (0..count)
                 .map(|k| layout.read(vertex_bytes(&bytes, src.stride, k, len)))
                 .collect();
-            let _ = inner_draw::draw(cpu, d.inner, 8, &layout, kind, &vertices, order, 0);
+            let b = blend(cpu, id, &d, &layout);
+            let _ =
+                inner_draw::draw_blended(cpu, d.inner, 8, &layout, kind, &vertices, order, 0, b);
         }
         Shading::Decl(decl, function) => {
             let Some(regs) = registers(cpu, &decl, sources, first, count) else {
@@ -210,7 +273,10 @@ fn draw_vertices(
             };
             if function.is_empty() {
                 let (layout, vertices) = decl_vertices(&decl, &regs);
-                let _ = inner_draw::draw(cpu, d.inner, 8, &layout, kind, &vertices, order, 0);
+                let b = blend(cpu, id, &d, &layout);
+                let _ = inner_draw::draw_blended(
+                    cpu, d.inner, 8, &layout, kind, &vertices, order, 0, b,
+                );
             } else {
                 run_function(cpu, &d, kind, &function, &regs, order);
             }
@@ -226,7 +292,7 @@ fn run_function(
     d: &Device,
     kind: u32,
     function: &[u32],
-    regs: &[[[f32; 4]; 16]],
+    regs: &[[[f32; 4]; REGISTERS]],
     order: Option<&[u32]>,
 ) {
     let layout = Layout::default();
@@ -421,7 +487,7 @@ pub fn process_vertices(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, start, dest_index, count, dest, flags] = args[..] else {
         return Some(D3DERR_INVALIDCALL);
     };
-    let (_, d) = hr!(this_device(cpu, this));
+    let (id, d) = hr!(this_device(cpu, this));
     let Some(Shading::Fixed(layout)) = shading(&d) else {
         return Some(D3DERR_INVALIDCALL);
     };
@@ -446,9 +512,10 @@ pub fn process_vertices(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let vertices: Vec<Vertex> = (0..count)
         .map(|k| layout.read(vertex_bytes(&bytes, src.stride, k, len)))
         .collect();
-    let Some(setup) = inner_draw::setup(cpu, d.inner, 8, &layout, 0) else {
+    let Some(mut setup) = inner_draw::setup(cpu, d.inner, 8, &layout, 0) else {
         return Some(D3DERR_INVALIDCALL);
     };
+    setup.blend = blend(cpu, id, &d, &layout);
     let processed = pipeline::process(&setup, &vertices, &layout);
     // D3DPV_DONOTCOPYDATA: only the position.
     let position_only = flags & 1 != 0;
