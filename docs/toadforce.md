@@ -317,6 +317,11 @@ state-level command set carries with far less guest code.
 
 ## The card
 
+`docs/toadforce-spec.md` defines what this chapter describes, as a
+guest sees it: field by field, with reset values, error codes and the
+arguments of each command. It is written a phase at a time, and it is
+the one to follow where the two differ.
+
 ### PCI identity and resources
 
 One PCI function, class 03h/00h (VGA-compatible display controller), in
@@ -363,6 +368,7 @@ All are 32 bits, little-endian.
 | 020h | `ERROR` | R/W1C | code of the first rejected command |
 | 024h | `ERROR_AT` | R | ring offset of that command |
 | 028h | `MEMORY` | R | size of card memory in bytes |
+| 02Ch | `RESET` | W | writing 1 resets registers and command state |
 | 040h | `MODE_ENABLE` | R/W | 1: scan out the mode below instead of the VGA's |
 | 044h | `MODE_WIDTH` | R/W | |
 | 048h | `MODE_HEIGHT` | R/W | |
@@ -373,6 +379,7 @@ All are 32 bits, little-endian.
 | 060h | `FRAME` | R | vertical blanks since reset |
 | 064h | `SCANLINE` | R | current scan line |
 | 100h- | `CAPS[n]` | R | capability table of `LEVEL` (see "Feature levels") |
+| 400h- | `PALETTE[n]` | R/W | the 256 colours of a P8 mode |
 
 `STATUS`, `FRAME` and `SCANLINE` follow the emulated clock, so they read
 the same in two deterministic runs. There is no busy bit: the card has
@@ -425,7 +432,8 @@ A command the card rejects (unknown opcode for the level, bad length, an
 offset outside card memory, an undefined handle or state value) draws
 nothing and changes no state. The first rejection since the last
 acknowledgement sets `ERROR` and `ERROR_AT`, and the card goes on with
-the next command.
+the next command. A length that leaves no next command to find (0, or
+past what was submitted) drops the rest of the submission.
 
 The emulator exposes the decoder to the built-in Windows as a function
 (`submit(&[u32])`) that takes the same words. The built-in Direct3D
@@ -461,7 +469,7 @@ Surfaces:
 | `FREE_TEXTURE` | handle |
 | `SET_TEXTURE` | stage, handle or none |
 | `FILL` | surface description, rectangle, value |
-| `BLT` | source and destination surface descriptions and rectangles, flags (source colour key, stretch) |
+| `BLT` | source and destination surface descriptions and rectangles, flags (source colour key); rectangles of different sizes stretch |
 | `FLIP` | offset of the new visible surface, wait for vertical blank or not |
 
 Drawing:
