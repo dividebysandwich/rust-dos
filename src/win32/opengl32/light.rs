@@ -11,14 +11,20 @@
 use super::state::{GL_BACK, GL_FRONT, GL_FRONT_AND_BACK};
 use super::{
     CAP_COLOR_MATERIAL, Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, ctx,
-    error, matrix,
+    error, matrix, signed_unit,
 };
 use crate::cpu::Cpu;
 
 /// How many lights there are (GL_MAX_LIGHTS).
 pub const LIGHTS: usize = 8;
 
-pub const GL_LIGHT0: u32 = 0x4000;
+const GL_LIGHT0: u32 = 0x4000;
+
+/// The light GL_LIGHTi `light` names, if it is one.
+pub fn index(light: u32) -> Option<usize> {
+    let i = light.wrapping_sub(GL_LIGHT0) as usize;
+    (i < LIGHTS).then_some(i)
+}
 
 // Light parameters.
 const GL_AMBIENT: u32 = 0x1200;
@@ -269,18 +275,16 @@ fn read(cpu: &mut Cpu, v: Values, p: u32, n: usize) -> Option<Vec<f32>> {
                 (0..n as u32)
                     .map(|i| {
                         let x = cpu.bus.guest_read_32(at + 4 * i) as i32;
-                        if color { int_color(x) } else { x as f32 }
+                        if color {
+                            signed_unit(x as f64, 32)
+                        } else {
+                            x as f32
+                        }
                     })
                     .collect(),
             )
         }
     }
-}
-
-/// An integer color component as table 2.6 has it: (2c + 1) / (2^32 -
-/// 1).
-fn int_color(x: i32) -> f32 {
-    ((2.0 * x as f64 + 1.0) / u32::MAX as f64) as f32
 }
 
 /// Where a call's values are.
@@ -313,8 +317,7 @@ fn light(cpu: &mut Cpu, light: u32, p: u32, v: Values) {
     if inside_begin(cpu) {
         return;
     }
-    let i = light.wrapping_sub(GL_LIGHT0) as usize;
-    let Some(n) = light_values(p).filter(|_| i < LIGHTS) else {
+    let (Some(i), Some(n)) = (index(light), light_values(p)) else {
         error(cpu, GL_INVALID_ENUM);
         return;
     };
@@ -574,11 +577,10 @@ fn write(cpu: &mut Cpu, at: u32, v: &[f32], ints: bool, color: bool) {
 /// glGetLightfv and glGetLightiv.
 fn get_light(cpu: &mut Cpu, args: &[u32], ints: bool) {
     let (light, p, at) = (args[0], args[1], args[2]);
-    let i = light.wrapping_sub(GL_LIGHT0) as usize;
     let Some(c) = ctx(cpu) else {
         return;
     };
-    let v = c.lighting.lights.get(i).and_then(|l| light_get(l, p));
+    let v = index(light).and_then(|i| light_get(&c.lighting.lights[i], p));
     match v {
         Some(v) => write(cpu, at, &v, ints, is_color(p)),
         None => error(cpu, GL_INVALID_ENUM),
@@ -697,9 +699,14 @@ mod tests {
 
     #[test]
     fn integer_colors_convert_as_signed_integers() {
-        assert_eq!(int_color(i32::MAX), 1.0);
-        assert_eq!(int_color(i32::MIN), -1.0);
-        assert!(int_color(0).abs() < 1e-9);
+        assert_eq!(signed_unit(i32::MAX as f64, 32), 1.0);
+        assert_eq!(signed_unit(i32::MIN as f64, 32), -1.0);
+        assert!(signed_unit(0.0, 32).abs() < 1e-9);
+        // A normal's bytes and shorts as glNormal3b and glNormal3s give
+        // them.
+        assert_eq!(signed_unit(127.0, 8), 1.0);
+        assert_eq!(signed_unit(-128.0, 8), -1.0);
+        assert_eq!(signed_unit(32767.0, 16), 1.0);
     }
 
     #[test]

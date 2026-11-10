@@ -342,6 +342,12 @@ pub fn d(args: &[u32], i: usize) -> f64 {
     f64::from_bits(hi << 32 | lo)
 }
 
+/// A signed integer `c` of `bits` bits as table 2.6 converts it to a
+/// float from -1 to 1: (2c + 1) / (2^bits - 1).
+pub fn signed_unit(c: f64, bits: u32) -> f32 {
+    ((2.0 * c + 1.0) / ((1u64 << bits) - 1) as f64) as f32
+}
+
 /// Read `n` floats at `at`.
 pub fn read_floats(cpu: &mut Cpu, at: u32, n: usize) -> Option<Vec<f32>> {
     if at == 0 || !cpu.bus.guest_probe(at, n * 4, false) {

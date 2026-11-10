@@ -4,7 +4,7 @@
 //! for its kind, size and type, and whether it takes an array.
 
 use super::texture::GL_TEXTURE0;
-use super::{CAP_COLOR_MATERIAL, GL_INVALID_ENUM, UNITS, ctx, error};
+use super::{CAP_COLOR_MATERIAL, GL_INVALID_ENUM, UNITS, ctx, error, signed_unit};
 use crate::cpu::Cpu;
 
 /// What a function sets.
@@ -48,13 +48,12 @@ impl Type {
     /// 1).
     fn value(self, lo: u32, hi: u32, kind: Kind) -> f32 {
         if kind == Kind::Normal {
-            let (v, steps) = match self {
-                Type::B => (lo as u8 as i8 as f64, 255.0),
-                Type::S => (lo as u16 as i16 as f64, 65535.0),
-                Type::I => (lo as i32 as f64, u32::MAX as f64),
-                _ => return self.value(lo, hi, Kind::Vertex),
+            return match self {
+                Type::B => signed_unit(lo as u8 as i8 as f64, 8),
+                Type::S => signed_unit(lo as u16 as i16 as f64, 16),
+                Type::I => signed_unit(lo as i32 as f64, 32),
+                _ => self.value(lo, hi, Kind::Vertex),
             };
-            return ((2.0 * v + 1.0) / steps) as f32;
         }
         let color = kind == Kind::Color;
         let (v, most) = match self {

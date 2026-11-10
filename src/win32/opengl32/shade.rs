@@ -104,12 +104,14 @@ fn side(l: &Lighting, m: &Material, v: [f32; 4], n: [f32; 3]) -> [f32; 4] {
             1.0
         };
         // Equation 2.5: a spot lights only inside its cone, more toward
-        // its middle as its exponent grows.
+        // its middle as its exponent grows. The cone is tested with the
+        // cosine before it is clamped: clamped, a vertex behind a spot of
+        // 90 degrees would pass, as cos(90) rounds below 0, and take
+        // 0^0 = 1 with an exponent of 0.
         let spot = if light.cutoff != 180.0 {
-            let pv = scale(vp, -1.0);
-            let cos = clamped(pv, unit(light.direction));
+            let cos = dot(scale(vp, -1.0), unit(light.direction));
             if cos >= light.cutoff.to_radians().cos() {
-                cos.powf(light.exponent)
+                cos.max(0.0).powf(light.exponent)
             } else {
                 0.0
             }
@@ -313,6 +315,25 @@ mod tests {
         assert!((at(1.0, 180.0, 64.0) - cos).abs() < 1e-5);
         // On the axis, the spot's factor is 1.
         assert!((at(0.0, 10.0, 128.0) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_spot_of_90_degrees_leaves_what_is_behind_it_dark() {
+        // A spot at the origin pointing down -z, of 90 degrees and
+        // exponent 0, and a vertex behind it at (0, 0, 1) whose normal
+        // faces the spot: outside the cone, so no light at all.
+        let mut l = diffuse_only();
+        l.materials[0].diffuse = [1.0; 4];
+        let s = &mut l.lights[0];
+        s.position = [0.0, 0.0, 0.0, 1.0];
+        s.direction = [0.0, 0.0, -1.0];
+        s.cutoff = 90.0;
+        s.exponent = 0.0;
+        let c = shade(&l, &input([0.0, 0.0, 1.0, 1.0], [0.0, 0.0, -1.0]))[0];
+        close(c, [0.0, 0.0, 0.0, 1.0]);
+        // In front of it, at (0, 0, -1), the vertex is lit.
+        let c = shade(&l, &input([0.0, 0.0, -1.0, 1.0], [0.0, 0.0, 1.0]))[0];
+        close(c, [1.0, 1.0, 1.0, 1.0]);
     }
 
     #[test]

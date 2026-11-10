@@ -4,7 +4,7 @@
 //! glGetError, glGetString and glGet.
 
 use super::attrib::ATTRIB_DEPTH;
-use super::light::{self, GL_LIGHT0, LIGHTS};
+use super::light::{self, LIGHTS};
 use super::wgl::{EXTENSIONS_AT, RENDERER_AT, VENDOR_AT, VERSION_AT};
 use super::{
     CAP_ALPHA_TEST, CAP_BLEND, CAP_CLIP_PLANES, CAP_COLOR_MATERIAL, CAP_CULL_FACE, CAP_DEPTH_TEST,
@@ -127,7 +127,7 @@ fn set_cap(cpu: &mut Cpu, cap: u32, on: bool) {
         c.texture_2d[unit] = on;
         return;
     }
-    if let Some(i) = light_index(cap) {
+    if let Some(i) = light::index(cap) {
         let bit = 1u8 << i;
         if on {
             c.lighting.enabled |= bit;
@@ -148,12 +148,6 @@ fn set_cap(cpu: &mut Cpu, cap: u32, on: bool) {
     }
 }
 
-/// The light GL_LIGHTi `cap` names, if it is one.
-fn light_index(cap: u32) -> Option<usize> {
-    let i = cap.wrapping_sub(GL_LIGHT0) as usize;
-    (i < LIGHTS).then_some(i)
-}
-
 /// glEnable(cap).
 pub fn enable(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     set_cap(cpu, args[0], true);
@@ -168,6 +162,9 @@ pub fn disable(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// Whether `cap` is on: glIsEnabled's, and glGet's of a capability.
 fn enabled(c: &Context, cap: u32) -> Option<bool> {
+    if let Some(i) = light::index(cap) {
+        return Some(c.lighting.enabled & 1 << i != 0);
+    }
     let unit = c.client_unit as usize;
     Some(match cap {
         GL_TEXTURE_2D => c.texture_2d[c.active_unit as usize],
@@ -176,7 +173,6 @@ fn enabled(c: &Context, cap: u32) -> Option<bool> {
         GL_NORMAL_ARRAY => c.normal_array.enabled,
         GL_TEXTURE_COORD_ARRAY => c.tex_array[unit].enabled,
         GL_INDEX_ARRAY | GL_EDGE_FLAG_ARRAY => false,
-        _ if light_index(cap).is_some() => c.lighting.enabled & 1 << light_index(cap)? != 0,
         _ => {
             let bit = cap_bit(cap)?;
             bit != 0 && c.caps & bit != 0

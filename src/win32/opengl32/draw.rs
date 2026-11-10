@@ -45,7 +45,7 @@ use super::{
     Array, CAP_ALPHA_TEST, CAP_BLEND, CAP_COLOR_MATERIAL, CAP_CULL_FACE, CAP_DEPTH_TEST,
     CAP_DITHER, CAP_FOG, CAP_LIGHTING, CAP_NORMALIZE, CAP_POLYGON_OFFSET_FILL, CAP_SCISSOR_TEST,
     Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, ImmVertex, UNITS, ctx,
-    current, error, state,
+    current, error, signed_unit, state,
 };
 use crate::cpu::Cpu;
 
@@ -129,34 +129,30 @@ fn argb(c: [f32; 4]) -> u32 {
 
 /// What lighting the vertices of one draw take from their context. The
 /// modelview matrix and the lights can't change between glBegin and
-/// glEnd.
-struct Lit {
-    lighting: Lighting,
+/// glEnd. It borrows the lights and materials: glVertex makes one for
+/// each vertex.
+struct Lit<'a> {
+    lighting: &'a Lighting,
     modelview: Matrix,
     normals: Option<[f32; 9]>,
     normalize: bool,
     color_material: bool,
 }
 
-impl Lit {
+impl<'a> Lit<'a> {
     /// The context's, None with GL_LIGHTING off.
-    fn of(c: &Context) -> Option<Lit> {
+    fn of(c: &'a Context) -> Option<Lit<'a>> {
         if c.caps & CAP_LIGHTING == 0 {
             return None;
         }
         let modelview = c.modelview.last().copied().unwrap_or(IDENTITY);
         Some(Lit {
-            lighting: c.lighting,
+            lighting: &c.lighting,
             modelview,
             normals: shade::normal_matrix(&modelview),
             normalize: c.caps & CAP_NORMALIZE != 0,
             color_material: c.caps & CAP_COLOR_MATERIAL != 0,
         })
-    }
-
-    /// Whether a vertex's back color can differ from its front color.
-    fn two_sided(&self) -> bool {
-        self.lighting.two_side
     }
 
     /// The front and back colors (ARGB) of the vertex at `position` in
@@ -168,8 +164,14 @@ impl Lit {
             normal: shade::eye_normal(self.normals.as_ref(), normal, self.normalize),
             color: self.color_material.then_some(color),
         };
-        shade::shade(&self.lighting, &input).map(argb)
+        shade::shade(self.lighting, &input).map(argb)
     }
+}
+
+/// Whether the context's vertices have back colors of their own, which
+/// they have with GL_LIGHTING on and two-sided lighting.
+fn two_sided(c: &Context) -> bool {
+    c.caps & CAP_LIGHTING != 0 && c.lighting.two_side
 }
 
 /// The front and back colors of a vertex: lit by `lit`, or the color
@@ -626,7 +628,7 @@ pub fn end(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     };
     let gathered = std::mem::take(&mut c.vertices);
     let matrices = texture_matrices(c);
-    let two_sided = Lit::of(c).is_some_and(|l| l.two_sided());
+    let sided = two_sided(c);
     let vertices: Vec<Vertex> = gathered
         .iter()
         .map(|v| {
@@ -641,7 +643,7 @@ pub fn end(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
             out
         })
         .collect();
-    let backs: Option<Vec<u32>> = two_sided.then(|| gathered.iter().map(|v| v.back).collect());
+    let backs: Option<Vec<u32>> = sided.then(|| gathered.iter().map(|v| v.back).collect());
     draw(cpu, kind, &vertices, backs.as_deref(), None);
     Some(0)
 }
@@ -917,13 +919,13 @@ fn values(b: &[u8], kind: u32, size: u32, normalize: bool) -> [f32; 4] {
 /// (2c + 1) / (2^b - 1).
 fn normal_values(b: &[u8], kind: u32) -> [f32; 3] {
     let v = values(b, kind, 3, false);
-    let steps = match kind {
-        GL_BYTE => 255.0,
-        GL_SHORT => 65535.0,
-        GL_INT => u32::MAX as f64,
+    let bits = match kind {
+        GL_BYTE => 8,
+        GL_SHORT => 16,
+        GL_INT => 32,
         _ => return [v[0], v[1], v[2]],
     };
-    [v[0], v[1], v[2]].map(|x| ((2.0 * x as f64 + 1.0) / steps) as f32)
+    [v[0], v[1], v[2]].map(|x| signed_unit(x as f64, bits))
 }
 
 /// The vertices `first` to `last` of the current context's arrays,
@@ -940,14 +942,7 @@ fn gather(
 ) -> Option<(Vec<Vertex>, Option<Vec<u32>>)> {
     let c = ctx(cpu)?;
     let (va, ca, na, ta) = (c.vertex_array, c.color_array, c.normal_array, c.tex_array);
-    let (color, normal) = (c.color, c.normal);
-    let lit = Lit::of(c);
-    let tex = c.tex_coord;
-    let matrices = if transform {
-        texture_matrices(c)
-    } else {
-        [None; UNITS]
-    };
+    let lighting = c.caps & CAP_LIGHTING != 0;
     if !va.enabled || last < first {
         return None;
     }
@@ -958,7 +953,7 @@ fn gather(
         None
     };
     // Normals matter only to lighting.
-    let normals = if na.enabled && lit.is_some() {
+    let normals = if na.enabled && lighting {
         array_bytes(cpu, &na, first, last)
     } else {
         None
@@ -970,12 +965,17 @@ fn gather(
             None
         }
     });
+    let c = ctx(cpu)?;
+    let (color, normal, tex) = (c.color, c.normal, c.tex_coord);
+    let matrices = if transform {
+        texture_matrices(c)
+    } else {
+        [None; UNITS]
+    };
+    let lit = Lit::of(c);
     let n = (last - first + 1) as usize;
     let mut out = Vec::with_capacity(n);
-    let mut backs = lit
-        .as_ref()
-        .is_some_and(Lit::two_sided)
-        .then(|| Vec::with_capacity(n));
+    let mut backs = two_sided(c).then(|| Vec::with_capacity(n));
     for i in 0..n {
         let mut p = values(&vb[i * vs..], va.kind, va.size, false);
         if va.size < 4 {
@@ -1165,12 +1165,12 @@ fn rect(cpu: &mut Cpu, r: [f32; 4]) {
         v.tex[..UNITS].copy_from_slice(&tex);
         v
     });
-    let two_sided = lit.is_some_and(|l| l.two_sided());
+    let sided = two_sided(c);
     draw(
         cpu,
         GL_POLYGON,
         &vertices,
-        two_sided.then_some(&backs[..]),
+        sided.then_some(&backs[..]),
         None,
     );
 }
