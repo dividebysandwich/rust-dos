@@ -352,8 +352,16 @@ pub fn fprem_internal(cpu: &mut Cpu, ieee: bool) {
     let st0 = st0_obj.get_f64();
     let st1 = st1_obj.get_f64();
 
+    // A divisor of 0 or an infinite dividend: the real indefinite, with
+    // IE, and the condition codes all clear, as on a Pentium. C2 clear
+    // says the reduction is complete: Visual C++'s fmod repeats FPREM
+    // while C2 is set, so fmod(x, 0) ends.
     if st1 == 0.0 || st0.is_infinite() {
         cpu.set_fpu_flag(FpuFlags::IE, true);
+        cpu.set_fpu_flag(
+            FpuFlags::C0 | FpuFlags::C1 | FpuFlags::C2 | FpuFlags::C3,
+            false,
+        );
         let mut nan = F80::new();
         nan.set_real_indefinite();
         cpu.fpu_set(0, nan);

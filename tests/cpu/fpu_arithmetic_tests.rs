@@ -440,6 +440,42 @@ fn fprem_quotient_bits_are_the_magnitudes_and_fprem1_ties_to_even() {
     }
 }
 
+/// FPREM and FPREM1 with a divisor of 0 or an infinite dividend give the
+/// real indefinite with IE and clear C0 to C3, whatever they were before,
+/// as a Pentium II does: C2 set by FXAM before stays set otherwise, and a
+/// loop that repeats FPREM while C2 is set (fmod's) never ends.
+#[test]
+fn an_invalid_fprem_clears_the_condition_codes() {
+    let indefinite = 0xFFFF_C000_0000_0000_0000u128;
+    let cases = [
+        (5.0, 0.0),
+        (f64::INFINITY, 3.0),
+        (f64::NEG_INFINITY, 3.0),
+        (0.0, 0.0),
+        (f64::INFINITY, 0.0),
+    ];
+    for code in [[0xD9, 0xF8], [0xD9, 0xF5]] {
+        for (st0, st1) in cases {
+            let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+            for v in [st1, st0] {
+                let mut f = F80::new();
+                f.set_f64(v);
+                cpu.fpu_push(f);
+            }
+            for flag in [FpuFlags::C0, FpuFlags::C1, FpuFlags::C2, FpuFlags::C3] {
+                cpu.set_fpu_flag(flag, true);
+            }
+            testrunners::run_fpu_code(&mut cpu, &code);
+            let what = format!("{st0} {code:02X?} {st1}");
+            assert_eq!(cpu.fpu_get(0).get(), indefinite, "{what}");
+            assert!(cpu.get_fpu_flag(FpuFlags::IE), "{what}: IE");
+            for flag in [FpuFlags::C0, FpuFlags::C1, FpuFlags::C2, FpuFlags::C3] {
+                assert!(!cpu.get_fpu_flag(flag), "{what}: {flag:?}");
+            }
+        }
+    }
+}
+
 #[test]
 fn fyl2x_of_zero_and_negative_values() {
     // (y, x, the result's 80 bits, ZE, IE)
