@@ -212,9 +212,10 @@ impl MouseState {
 
     /// A program steers with the mouse's motion at `now_ns` without
     /// asking the driver for it: the built-in Windows says so for a
-    /// program that hides the cursor and takes the mouse, which puts the
-    /// cursor back in the middle after each move (`in_use` and
-    /// `moves_by_motion` hold for a second after).
+    /// program that takes the mouse through DirectInput, or hides the
+    /// cursor and takes the capture or reads DirectInput's mouse
+    /// (`user32::input::steers_with_mouse`). `in_use` and
+    /// `moves_by_motion` hold for a second after.
     pub fn note_steering(&mut self, now_ns: u64) {
         self.last_relative_ns = Some(now_ns);
     }

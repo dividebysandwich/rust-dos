@@ -371,8 +371,9 @@ fn char_of(vk: usize, keys: &dyn Fn(usize) -> u8) -> Option<u8> {
 /// it next asks, not only after the next interrupt.
 pub fn poll(cpu: &mut Cpu) {
     let desktop = cpu.bus.win32.user.desktop;
-    let taken = crate::win32::dinput::mouse_taken(cpu);
-    if steers_with_mouse(cpu, taken) {
+    let acquired = crate::win32::dinput::mouse_acquired(cpu);
+    let taken = acquired == Some(true);
+    if steers_with_mouse(cpu, acquired) {
         let now = cpu.bus.clock.now_ns();
         cpu.bus.mouse.note_steering(now);
     }
@@ -390,9 +391,14 @@ pub fn poll(cpu: &mut Cpu) {
 
 /// What reading the devices (`poll`) may change, compared before and
 /// after a look at the queue that is to have changed nothing, as an idle
-/// proof's PeekMessage (message.rs). None when a key went down or the
-/// program steers with the mouse, which a read changes whatever comes of
-/// it.
+/// proof's PeekMessage (message.rs). None when a key went down, which a
+/// read takes from the keyboard whatever comes of it.
+///
+/// A program steering with the mouse doesn't count: the read notes it
+/// (`MouseState::note_steering`), but only for the host's capture of the
+/// mouse, which the program never sees, and the reads at every interrupt
+/// (`thread::wake`) note it again after the passes skipped, which end by
+/// the next timer event, long before the note's second runs out.
 #[derive(PartialEq)]
 pub struct Seen {
     cursor: (i32, i32),
@@ -404,8 +410,7 @@ pub struct Seen {
 }
 
 pub fn seen(cpu: &mut Cpu) -> Option<Seen> {
-    let taken = crate::win32::dinput::mouse_taken(cpu);
-    if cpu.bus.kbd.has_pressed() || steers_with_mouse(cpu, taken) {
+    if cpu.bus.kbd.has_pressed() {
         return None;
     }
     let input = &user(cpu).input;
@@ -420,18 +425,21 @@ pub fn seen(cpu: &mut Cpu) -> Option<Seen> {
 }
 
 /// Whether the program steers with the mouse's motion: DirectInput has
-/// the mouse exclusively (`taken`), or it hid the cursor and has the
-/// capture, as games do that put the cursor back in the middle after
-/// each move (Unreal). The host's mouse then moves the emulated one by
-/// its motion (`MouseState::note_steering`); where the host's pointer is
-/// on the picture means nothing to such a program.
-fn steers_with_mouse(cpu: &mut Cpu, taken: bool) -> bool {
-    if taken {
-        return true;
-    }
+/// the mouse exclusively (`acquired` is Some(true)), or it hid the cursor
+/// and has the capture, as games do that put the cursor back in the
+/// middle after each move (Unreal), or it hid the cursor and reads the
+/// mouse through DirectInput without taking it (Adrenix). The host's
+/// mouse then moves the emulated one by its motion
+/// (`MouseState::note_steering`); where the host's pointer is on the
+/// picture means nothing to such a program.
+fn steers_with_mouse(cpu: &mut Cpu, acquired: Option<bool>) -> bool {
     let state = user(cpu);
     let input = &state.input;
-    input.cursor_count < 0 && input.capture != 0 && state.is_window(input.capture)
+    match acquired {
+        Some(true) => true,
+        Some(false) => input.cursor_count < 0,
+        None => input.cursor_count < 0 && input.capture != 0 && state.is_window(input.capture),
+    }
 }
 
 /// Read the keyboard: whether a key went down since the last read.
@@ -2910,6 +2918,46 @@ mod tests {
         user(&mut other).input.cursor_count = -1;
         poll(&mut other);
         assert!(!other.bus.mouse.in_use(now), "no capture");
+    }
+
+    /// A program that hides the cursor and reads the mouse through
+    /// DirectInput steers with it, whether it took the mouse or not
+    /// (Adrenix acquires it non-exclusively, issue 917); with the cursor
+    /// showing, only a mouse taken exclusively steers.
+    #[test]
+    fn a_hidden_cursor_with_a_directinput_mouse_steers_with_the_mouse() {
+        use crate::win32::dinput;
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let now = cpu.bus.clock.now_ns();
+        dinput::acquired_mouse(&mut cpu, false);
+        poll(&mut cpu);
+        assert!(!cpu.bus.mouse.in_use(now), "the cursor shows");
+        user(&mut cpu).input.cursor_count = -1;
+        poll(&mut cpu);
+        assert!(cpu.bus.mouse.in_use(now) && cpu.bus.mouse.moves_by_motion(now));
+        let mut other = Cpu::new(std::path::PathBuf::from("."));
+        user(&mut other).input.cursor_count = -1;
+        poll(&mut other);
+        assert!(!other.bus.mouse.in_use(now), "no DirectInput mouse");
+        let mut taken = Cpu::new(std::path::PathBuf::from("."));
+        dinput::acquired_mouse(&mut taken, true);
+        poll(&mut taken);
+        assert!(taken.bus.mouse.moves_by_motion(now), "taken exclusively");
+    }
+
+    /// Reading the devices while a program steers with the mouse changes
+    /// nothing the program sees, so an idle proof's PeekMessage can still
+    /// find that it changed nothing.
+    #[test]
+    fn steering_leaves_what_a_read_sees_as_it_was() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        crate::win32::dinput::acquired_mouse(&mut cpu, false);
+        user(&mut cpu).input.cursor_count = -1;
+        poll(&mut cpu);
+        let before = seen(&mut cpu);
+        poll(&mut cpu);
+        assert!(cpu.bus.mouse.moves_by_motion(cpu.bus.clock.now_ns()));
+        assert!(before.is_some() && seen(&mut cpu) == before);
     }
 
     /// A window shown under the cursor gets a WM_MOUSEMOVE where the
