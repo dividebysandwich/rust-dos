@@ -689,6 +689,7 @@ impl Pacer {
     pub fn set_fast_forward(&mut self, on: bool, clock: &Clock, now: Instant) {
         if self.fast_forward && !on {
             self.auto.start_over();
+            self.backlog.start_over();
             self.anchor_to(clock, now);
         }
         self.fast_forward = on;
@@ -701,6 +702,7 @@ impl Pacer {
     /// speed it had to go back to (`Bus::end_work_boost`).
     pub fn rebase(&mut self, bus: &mut Bus, now: Instant) {
         self.auto.reset();
+        self.backlog.start_over();
         bus.activity.work_return = None;
         self.anchor_to(&bus.clock, now);
     }
