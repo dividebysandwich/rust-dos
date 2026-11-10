@@ -335,7 +335,9 @@ fn mode_info(cpu: &mut Cpu, number: u16, addr: usize) -> u16 {
     block[31..39].copy_from_slice(&color_masks(mode.bpp));
     // The S3's frame buffer is where its registers put it for the mode
     // (`s3_program_mode`).
-    block[40..44].copy_from_slice(&(LFB_BASE as u32).to_le_bytes());
+    // A ToadForce's is its BAR 1, wherever the system put that.
+    let moved = cpu.bus.vbe.lfb_base.filter(|_| cpu.bus.toadforce());
+    block[40..44].copy_from_slice(&moved.unwrap_or(LFB_BASE as u32).to_le_bytes());
     write_bytes(&mut cpu.bus, addr, &block);
     SUCCESS
 }
@@ -375,6 +377,8 @@ pub fn enter_mode(bus: &mut Bus, mode: &VbeMode, lfb: bool, keep: bool) {
         "[BIOS] Switch to VESA mode {:03X}h ({}x{}, {} bits per pixel)",
         mode.number, mode.width, mode.height, mode.bpp
     ));
+    // A ToadForce's own mode ends first.
+    bus.toadforce_mode_set();
     bus.vbe.set_mode(mode, lfb, keep);
     bus.video_mode = VideoMode::Vesa;
     // The VGA side runs as a 256-color mode, at the mode's own timing.

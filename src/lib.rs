@@ -123,6 +123,7 @@ pub mod stats;
 mod test_dir;
 pub mod time_commands;
 pub mod timer;
+pub mod toadforce;
 pub mod ultrasnd;
 pub mod unpack;
 pub mod verite;

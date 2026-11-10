@@ -233,6 +233,9 @@ pub fn install(bus: &mut Bus, setup: VideoSetup) {
         bus.write_rom(((segment as usize) << 4) + offset as usize, &data);
     }
     bus.vbe.lfb_base = if s3 || setup.adapter.is_et4000() { None } else { Some(super::vbe::LFB_BASE as u32) };
+    // A ToadForce comes and goes with its adapter: its memory is the
+    // Super VGA's, and the frame buffer is where its BAR 1 is.
+    bus.fit_toadforce();
     crate::interrupts::vbe::install_mode_list(bus, setup.adapter);
     // A mach64's BIOS: its data in the ROM, the card as its POST leaves
     // it.

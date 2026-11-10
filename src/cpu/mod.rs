@@ -1116,6 +1116,7 @@ impl Cpu {
         // A program closed in the middle may have left the Voodoo card
         // driving the monitor, or the PowerVR one rendering.
         self.bus.reset_voodoo();
+        self.bus.reset_toadforce();
         self.bus.reset_powervr();
         self.state = CpuState::RebootShell;
     }

@@ -300,8 +300,10 @@ limit, so without a connection it goes on as it would with one:
   RAGE](#ati-3d-rage)), `svga_voodoo3` and `svga_banshee` (a 3dfx Voodoo3
   3000 or Voodoo Banshee with 16 MB on the PCI bus, which 3dfx's Windows
   drivers use for the desktop, Direct3D and OpenGL; see [3dfx
-  Voodoo3](#3dfx-voodoo3-and-banshee)), `svga_et4000` (a Tseng Labs ET4000AX
-  with 1 MB and a Sierra HiColor DAC, see below), `vga` (an IBM VGA, without
+  Voodoo3](#3dfx-voodoo3-and-banshee)), `svga_toadforce` (Rust-DOS's own
+  card, for Windows programs run without Windows; see
+  [ToadForce](#toadforce)), `svga_et4000` (a Tseng Labs ET4000AX with 1 MB
+  and a Sierra HiColor DAC, see below), `vga` (an IBM VGA, without
   VESA modes), `ega` (an IBM EGA with an Enhanced Color Display: 16 of 64
   colours at 640x350, 60 Hz), `cga` (an IBM CGA: 4 colours at 320x200, 2 at
   640x200, 60 Hz), `tandy` (a Tandy 1000), `pcjr` (an IBM PCjr) or
@@ -3130,6 +3132,31 @@ a switch from the 3D RAGE, as it would after changing the card.
 
 `RUST_DOS_MACH64_TRACE=<dir>` writes every register access and BIOS
 call to `<dir>/trace.txt`.
+
+## ToadForce
+
+`machine=svga_toadforce` makes the display adapter a ToadForce, a card
+Rust-DOS defines itself: no such hardware existed. To DOS programs it is
+the `svga` adapter, with the same VESA modes. Windows programs that
+Rust-DOS runs without Windows get its 64 MB of video memory for the
+desktop and for DirectDraw's surfaces, and DirectDraw modes up to
+1600x1200 at 8, 16 and 32 bits a pixel; DirectDraw's colour fills and
+its copies between surfaces in video memory are the card's own
+commands. The card has no 3D yet, so Direct3D programs get the software
+devices, as on `svga`. No system booted from a disk image has a driver
+for it: a booted Windows uses it as a plain VGA.
+
+```ini
+[emulator]
+machine=svga_toadforce
+```
+
+| Setting | Values | What it does |
+|---|---|---|
+| `toadforce_memory` | 32, 64 (default), 128 | The megabytes of video memory the card has |
+
+A change takes effect at the DOS prompt. The card's registers and
+commands are specified in [docs/toadforce-spec.md](docs/toadforce-spec.md).
 
 ## PowerVR PCX1 and PCX2
 

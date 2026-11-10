@@ -158,6 +158,8 @@ pub(super) enum Item {
     /// The dump of a Vérité board's ROM the RISC sees.
     VeriteRom,
     VeriteIrq,
+    /// The megabytes of memory a ToadForce has.
+    ToadForceMemory,
     Memsize,
     /// Expanded memory and upper memory blocks.
     Ems,
@@ -388,6 +390,7 @@ impl Item {
             VeriteMhz => "  RISC speed",
             VeriteRom => "  Board ROM",
             VeriteIrq => "  Vérité IRQ",
+            ToadForceMemory => "  ToadForce memory",
             Ems => "Expanded memory (EMS)",
             Umb => "Upper memory (UMB)",
             DosHigh => "DOS high",
@@ -617,6 +620,7 @@ impl Item {
             Item::VoodooMemory | Item::VoodooRenderer | Item::VoodooTextureSampling | Item::VoodooFpsCap | Item::VoodooGamma => s.voodoo.enabled,
             Item::PowerVrFilter => s.powervr.is_some(),
             Item::VeriteRisc | Item::VeriteIrq => s.machine.is_verite(),
+            Item::ToadForceMemory => s.machine.is_toadforce(),
             Item::VeriteMhz | Item::VeriteRom => {
                 s.machine.is_verite() && s.verite.risc == crate::verite::Risc::Lle
             }
@@ -858,6 +862,7 @@ impl Item {
                 None => "Built-in loader".to_string(),
             },
             VeriteIrq => s.verite.irq.to_string(),
+            ToadForceMemory => format!("{} MB", s.toadforce_memory),
             PowerVrFilter => match s.powervr_filter {
                 crate::powervr::tsp::Filter::Auto => "As the game sets it",
                 crate::powervr::tsp::Filter::Point => "Point (blocky)",

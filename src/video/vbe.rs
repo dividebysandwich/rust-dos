@@ -11,7 +11,8 @@ use super::crt::CrtTiming;
 
 /// Physical address of the linear frame buffer.
 pub const LFB_BASE: usize = 0xE000_0000;
-/// Video memory: 4 MB.
+/// Video memory: 4 MB. A ToadForce has more (`Vbe::resize`), which its
+/// own modes and commands use; its VESA BIOS knows these first 4 MB.
 pub const VRAM_SIZE: usize = 4 << 20;
 /// Size and granularity of the window at A0000h.
 pub const WINDOW_SIZE: usize = 0x10000;
@@ -182,8 +183,16 @@ impl Vbe {
         self.latched_start = 0;
         self.start_high = 0;
         if !keep {
-            self.vram.fill(0);
+            self.vram[..VRAM_SIZE].fill(0);
         }
+    }
+
+    /// Give the card `bytes` of video memory, a power of two and
+    /// `VRAM_SIZE` at least: what is there stays, as far as it fits.
+    pub fn resize(&mut self, bytes: usize) {
+        debug_assert!(bytes.is_power_of_two() && bytes >= VRAM_SIZE);
+        self.vram.resize(bytes, 0);
+        self.vram.shrink_to_fit();
     }
 
     /// Back to the standard VGA modes.
@@ -203,7 +212,7 @@ impl Vbe {
     #[inline]
     pub fn lfb_offset(&self, addr: usize, len: usize) -> Option<usize> {
         let offset = addr.checked_sub(self.lfb_base? as usize)?;
-        if offset + len > VRAM_SIZE {
+        if offset + len > self.vram.len() {
             return None;
         }
         match self.host_xor {

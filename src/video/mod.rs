@@ -597,10 +597,14 @@ fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bu
     let Some(mode) = vbe.mode else {
         return;
     };
-    let colors: [(u8, u8, u8); 256] =
-        std::array::from_fn(|i| bus.vga.get_rgb(i as u8 & bus.vga.dac_mask));
+    // A ToadForce's own mode has the card's palette, the others the
+    // VGA's DAC.
+    let colors: [(u8, u8, u8); 256] = match bus.toadforce_palette() {
+        Some(palette) => palette.map(|c| ((c >> 16) as u8, (c >> 8) as u8, c as u8)),
+        None => std::array::from_fn(|i| bus.vga.get_rgb(i as u8 & bus.vga.dac_mask)),
+    };
     let vram = &vbe.vram;
-    let wrap = vbe::VRAM_SIZE - 1;
+    let wrap = vram.len() - 1;
     // A Vérité's pixels are in its RISC's byte order.
     let swizzle = vbe.scan_xor;
     let pixel = |off: usize| -> (u8, u8, u8) {

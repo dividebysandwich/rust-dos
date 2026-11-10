@@ -400,6 +400,7 @@ fn emulated_cursor(cpu: &mut Cpu, mut first: u8, mut last: u8) -> (u8, u8) {
 /// cursor's shape (0460h) and place (0450h).
 pub fn assume_machine_display(cpu: &mut Cpu) {
     let Some((mode, _)) = standard_mode(cpu.bus.guest_read_8(0x0449) & 0x7F) else { return };
+    cpu.bus.toadforce_mode_set();
     cpu.bus.vbe.reset();
     cpu.bus.video_mode = mode;
     cpu.bus.vga.set_video_mode(mode);
@@ -461,6 +462,9 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
         cpu.bus.log_string(&format!("[BIOS] Video mode {:02X} isn't on this adapter", mode));
         return;
     }
+    // A ToadForce's own mode ends first, which brings back the Super
+    // VGA's state as it was before it.
+    cpu.bus.toadforce_mode_set();
     cpu.bus.vbe.reset();
     let adapter = cpu.bus.vga.adapter;
     if adapter.is_s3() {

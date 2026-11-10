@@ -94,6 +94,7 @@ fn definitions() -> Vec<Definition> {
                 ("svga_banshee", "3dfx Voodoo Banshee (Direct3D and OpenGL in booted Windows)"),
                 ("svga_ati_3drage", "ATI 3D RAGE (Direct3D and ATI3DCIF in booted Windows)"),
                 ("svga_ati_3drage2", "ATI 3D RAGE II (Direct3D and ATI3DCIF in booted Windows)"),
+                ("svga_toadforce", "ToadForce (64 MB, for Windows programs run without Windows)"),
                 ("svga_et4000", "Tseng ET4000 (HiColor, VBE 1.2)"),
                 ("vga", "VGA"),
                 ("ega", "EGA"),

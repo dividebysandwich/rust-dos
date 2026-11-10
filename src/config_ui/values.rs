@@ -264,6 +264,10 @@ impl Item {
             }
             VeriteMhz => each(s, [25, 50, 100, 200], |s, mhz| s.verite.mhz = mhz),
             VeriteIrq => each(s, crate::verite::IRQS, |s, irq| s.verite.irq = irq),
+            ToadForceMemory => {
+                let sizes = crate::toadforce::regs::MEMORY_SIZES.map(|bytes| bytes >> 20);
+                each(s, sizes, |s, megabytes| s.toadforce_memory = megabytes)
+            }
             PowerVrFilter => {
                 use crate::powervr::tsp::Filter;
                 each(s, [Filter::Auto, Filter::Point, Filter::Bilinear], |s, filter| s.powervr_filter = filter)

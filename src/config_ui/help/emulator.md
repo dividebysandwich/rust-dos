@@ -286,6 +286,13 @@ Enter picks the file, Del goes back to the built-in loader.
 The interrupt line of the Vérité. **10** suits most games. Battle Race
 needs one below 8 (**5** or **7**).
 
+# ToadForce memory {#toadforce-memory}
+
+The video memory of the ToadForce, the card Rust-DOS defines for the
+Windows programs it runs without Windows. **64 MB** holds the screen and
+the surfaces of any game of the time. **128 MB** leaves more room at the
+largest modes; **32 MB** is what the cards of 1999 had.
+
 # Memory {#memsize}
 
 The PC's RAM. **16 MB** runs nearly every DOS game. Windows 95 and a few

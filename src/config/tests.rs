@@ -762,6 +762,7 @@ fn changed_settings() -> Settings {
             rom: Some(PathBuf::from("/home/u/roms/verite.rom")),
             irq: 5,
         },
+        toadforce_memory: 128,
         capture_dir: PathBuf::from("/home/u/dos captures"),
         record_ui: true,
         record_shader: true,

@@ -16,6 +16,7 @@
 use iced_x86::code_asm::*;
 use rust_dos::cpu::{Cpu, HostConsole};
 use rust_dos::exec::{NoHook, run_batch};
+use rust_dos::toadforce::{pci as toad_pci, regs as toad_regs};
 use rust_dos::video::adapter::{Adapter, VideoSetup};
 use rust_dos::video::{self, Frame, bios};
 use rust_dos::voodoo::Board;
@@ -4041,4 +4042,374 @@ fn the_desktop_starts_the_cursor_where_user_had_it() {
 fn under_directdraw_the_desktop_keeps_the_host_pointer() {
     let (_, after) = desktop_cursor_before_and_after("cursor-directdraw", true);
     assert_eq!(after, (50, 40));
+}
+
+// The ToadForce (`rust_dos::toadforce`): the screen in the card's own
+// modes, set through its registers, and DirectDraw's fills and copies
+// in its memory done by its commands.
+
+/// A ToadForce's register.
+fn toad(cpu: &Cpu, register: u32) -> u32 {
+    cpu.bus.toadforce_register(register)
+}
+
+/// The mode a ToadForce shows: whether it shows one, its width, height,
+/// format, bytes a row and refresh rate.
+fn toad_mode(cpu: &Cpu) -> (u32, u32, u32, u32, u32, u32) {
+    (
+        toad(cpu, toad_regs::MODE_ENABLE),
+        toad(cpu, toad_regs::MODE_WIDTH),
+        toad(cpu, toad_regs::MODE_HEIGHT),
+        toad(cpu, toad_regs::MODE_FORMAT),
+        toad(cpu, toad_regs::MODE_PITCH),
+        toad(cpu, toad_regs::MODE_REFRESH),
+    )
+}
+
+/// The word of video memory at byte `at`.
+fn vram_word(cpu: &Cpu, at: u32) -> u16 {
+    let v = &cpu.bus.vbe.vram[at as usize..];
+    u16::from_le_bytes([v[0], v[1]])
+}
+
+#[test]
+fn the_desktop_is_32_bits_in_a_toadforce_mode() {
+    let (program, data) = desktop_program();
+    let mut cpu = vesa_machine("desktop_toadforce", Adapter::ToadForce, program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 8);
+    assert_eq!(r[1], 0, "DirectDrawCreate");
+    assert_eq!(r[3], 32, "GetDeviceCaps(BITSPIXEL)");
+    assert_eq!(r[6], 0x0012_3456, "GetPixel");
+    assert_eq!(r[7], 0, "GetDisplayMode");
+    // The card's own mode, X8R8G8B8 at 60 Hz, from the start of its
+    // 64 MB.
+    assert_eq!(toad_mode(&cpu), (1, 640, 480, 3, 2560, 60));
+    assert_eq!(toad(&cpu, toad_regs::MODE_START), 0);
+    assert_eq!(toad(&cpu, toad_regs::MEMORY), 64 << 20);
+    assert_eq!(cpu.bus.vbe.vram.len(), 64 << 20);
+    assert_eq!(toad(&cpu, toad_regs::ERROR), 0);
+    let at = 200 * 2560 + 300 * 4;
+    assert_eq!(
+        cpu.bus.vbe.vram[at..at + 8],
+        [0, 0, 0xFF, 0, 0x12, 0x34, 0x56, 0]
+    );
+    assert_eq!(shown(&mut cpu, 300, 200), [0xFF, 0, 0]);
+    let mode = |o: u32| peek(&cpu, data + MODE + o);
+    assert_eq!((mode(0x0C), mode(0x08), mode(0x10)), (640, 480, 2560));
+    assert_eq!(mode(0x48 + 12), 32);
+}
+
+#[test]
+fn a_full_screen_mode_flips_in_a_toadforces_memory_and_the_desktop_comes_back() {
+    let (program, data) = fullscreen_program();
+    let mut cpu = vesa_machine("fullscreen_toadforce", Adapter::ToadForce, program);
+    run_until(&mut cpu, data, 1);
+    assert_eq!(toad_mode(&cpu), (1, 640, 480, 3, 2560, 60));
+    let before = cpu.bus.vbe.vram[..640 * 480 * 4].to_vec();
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 2);
+    assert_eq!(results(&cpu, data, 9)[1..], [0; 8]);
+    // R5G6B5, and the flip showed the back buffer, which was after the
+    // screen's 614400 bytes.
+    assert_eq!(toad_mode(&cpu), (1, 640, 480, 2, 1280, 60));
+    let start = toad(&cpu, toad_regs::MODE_START);
+    assert_eq!(start, 640 * 480 * 2);
+    assert_eq!(seen(&cpu, data, 1), 1280);
+    assert_eq!(vram_word(&cpu, start), 0xF800);
+    assert_eq!(vram_word(&cpu, start + 2), 0x07E0);
+    assert_eq!(vram_word(&cpu, start + 1280), 0x001F);
+    // The display takes the new start at its next retrace.
+    next_retrace(&mut cpu);
+    assert_eq!(shown(&mut cpu, 0, 0), [0xFF, 0, 0]);
+    assert_eq!(shown(&mut cpu, 1, 0), [0, 0xFF, 0]);
+    assert_eq!(shown(&mut cpu, 0, 1), [0, 0, 0xFF]);
+    // The pointer Lock gave is in the program's view of card memory,
+    // which is the card's BAR 1.
+    let pointer = seen(&cpu, data, 0);
+    let card = cpu.bus.toadforce.as_ref().unwrap();
+    let bar1 = card.pci.window(toad_pci::Bar::Memory).unwrap().0;
+    assert_eq!(physical(&cpu, pointer) as u32, bar1 + start);
+    assert_eq!(toad(&cpu, toad_regs::ERROR), 0);
+
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 3);
+    assert_eq!(results(&cpu, data, 11)[9..], [0; 2]);
+    // The desktop's mode again, from the start of memory, repainted,
+    // the window over all of it (as on the other adapters).
+    assert_eq!(toad_mode(&cpu), (1, 640, 480, 3, 2560, 60));
+    assert_eq!(toad(&cpu, toad_regs::MODE_START), 0);
+    let after = &cpu.bus.vbe.vram[..640 * 480 * 4];
+    let at = |x: usize, y: usize| (y * 640 + x) * 4;
+    assert!(after[..at(320, 0)] == before[..at(320, 0)], "its top");
+    assert_eq!(toad(&cpu, toad_regs::ERROR), 0);
+}
+
+/// Blits from system memory, which the card has no part in, come out as
+/// on the other adapters.
+#[test]
+fn keyed_blits_into_a_toadforces_memory_keep_what_the_keys_say() {
+    let (program, data) = keyed_blit_program(false);
+    let mut cpu = vesa_machine("keyed_blit_toadforce", Adapter::ToadForce, program);
+    keyed_blits_keep_what_the_keys_say(&mut cpu, data, 19);
+    assert_eq!(toad(&cpu, toad_regs::ERROR), 0);
+}
+
+// The data of the program that blits inside video memory.
+const VID_FX_FILL: u32 = 0xE00;
+const VID_FX_GREEN: u32 = 0xE70;
+const VID_FX_MAGENTA: u32 = 0xEE0;
+const VID_RECTS: u32 = 0xF50;
+const GREEN: u16 = 0x07E0;
+const DDBLTFAST_SRCCOLORKEY: u32 = 1;
+const DDBLTFAST_WAIT: u32 = 0x10;
+
+/// Full screen at 640x480x16 with a flip chain and a surface of 64x32
+/// in video memory (step 1). Then fills and copies between them, none
+/// stretched: the back buffer filled, the small surface magenta with a
+/// green box, copied to the back buffer whole, through its key twice,
+/// and a part of the back buffer copied over itself; then a flip
+/// (step 2).
+fn vidmem_blit_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    desc(
+        &mut d,
+        DESC,
+        DDSD_CAPS | DDSD_BACKBUFFERCOUNT,
+        DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX,
+        0,
+        0,
+        1,
+    );
+    put32(&mut d, CAPS, DDSCAPS_BACKBUFFER);
+    desc(
+        &mut d,
+        SYSDESC,
+        DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
+        DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY,
+        64,
+        32,
+        0,
+    );
+    for (fx, colour) in [
+        (VID_FX_FILL, FILL),
+        (VID_FX_GREEN, GREEN),
+        (VID_FX_MAGENTA, MAGENTA),
+    ] {
+        put32(&mut d, fx, 100);
+        put32(&mut d, fx + 0x50, colour as u32);
+    }
+    put32(&mut d, KEY, MAGENTA as u32);
+    put32(&mut d, KEY + 4, MAGENTA as u32);
+    let rects = [
+        [8, 8, 24, 16],        // the green box in the small surface
+        [400, 100, 464, 132],  // where Blt puts it through its key
+        [110, 60, 174, 92],    // the back buffer's copy over itself: to
+        [100, 50, 164, 82],    // and from
+    ];
+    for (i, r) in rects.iter().enumerate() {
+        for (j, v) in r.iter().enumerate() {
+            put32(&mut d, VID_RECTS + 16 * i as u32 + 4 * j as u32, *v);
+        }
+    }
+    program(&[USER32, GDI32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_DISPLAY_MODE,
+            &[Arg::I(640), Arg::I(480), Arg::I(16)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            S_GET_ATTACHED_SURFACE,
+            &[Arg::At(CAPS), Arg::At(BACK)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(SYSDESC), Arg::At(SYS), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            SYS,
+            S_SET_COLOR_KEY,
+            &[Arg::I(DDCKEY_SRCBLT), Arg::At(KEY)],
+        )?;
+        wait(a, l, 1)?;
+        let fill = |c: &mut Calls, a: &mut CodeAssembler, to: u32, rect: Arg, fx: u32| {
+            let flags = Arg::I(DDBLT_COLORFILL | DDBLT_WAIT);
+            c.com(
+                a,
+                l,
+                to,
+                S_BLT,
+                &[rect, Arg::I(0), Arg::I(0), flags, Arg::At(fx)],
+            )
+        };
+        fill(&mut c, a, BACK, Arg::I(0), VID_FX_FILL)?;
+        fill(&mut c, a, SYS, Arg::I(0), VID_FX_MAGENTA)?;
+        fill(&mut c, a, SYS, Arg::At(VID_RECTS), VID_FX_GREEN)?;
+        for (x, y, flags) in [(100, 50, 0), (300, 200, DDBLTFAST_SRCCOLORKEY)] {
+            c.com(
+                a,
+                l,
+                BACK,
+                S_BLT_FAST,
+                &[
+                    Arg::I(x),
+                    Arg::I(y),
+                    Arg::Val(SYS),
+                    Arg::I(0),
+                    Arg::I(flags | DDBLTFAST_WAIT),
+                ],
+            )?;
+        }
+        c.com(
+            a,
+            l,
+            BACK,
+            S_BLT,
+            &[
+                Arg::At(VID_RECTS + 16),
+                Arg::Val(SYS),
+                Arg::I(0),
+                Arg::I(DDBLT_KEYSRC | DDBLT_WAIT),
+                Arg::I(0),
+            ],
+        )?;
+        c.com(
+            a,
+            l,
+            BACK,
+            S_BLT,
+            &[
+                Arg::At(VID_RECTS + 32),
+                Arg::Val(BACK),
+                Arg::At(VID_RECTS + 48),
+                Arg::I(DDBLT_WAIT),
+                Arg::I(0),
+            ],
+        )?;
+        c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
+        finish(a, l, 2)
+    })
+}
+
+/// The program's picture on `adapter`: the bytes of the surface shown
+/// after its flip, and how many `FILL` and `BLT` commands a ToadForce
+/// carried out for its blits.
+fn vidmem_blits(test: &str, adapter: Adapter) -> (Vec<u8>, u64) {
+    let (program, data) = vidmem_blit_program();
+    let mut cpu = vesa_machine(test, adapter, program);
+    let drawn = |cpu: &Cpu| cpu.bus.toadforce.as_ref().map_or(0, |c| c.drawn());
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 8);
+    assert!(r[1..].iter().all(|&v| v == 0), "{r:X?}");
+    let before = drawn(&cpu);
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 2);
+    let r = results(&cpu, data, 16);
+    assert!(r[8..].iter().all(|&v| v == 0), "{r:X?}");
+    let start = cpu.bus.vbe.start as usize;
+    assert_eq!(start, 640 * 480 * 2, "the back buffer shows");
+    let picture = cpu.bus.vbe.vram[start..start + 640 * 480 * 2].to_vec();
+    if adapter == Adapter::ToadForce {
+        assert_eq!(toad(&cpu, toad_regs::ERROR), 0);
+        assert_eq!(toad(&cpu, toad_regs::MODE_START), start as u32);
+    }
+    (picture, drawn(&cpu) - before)
+}
+
+#[test]
+fn a_toadforce_fills_and_copies_in_its_memory_as_directdraw_does() {
+    let (picture, drawn) = vidmem_blits("vidmem_blit_toadforce", Adapter::ToadForce);
+    // Three fills and four copies, each one command of the card's.
+    assert_eq!(drawn, 7);
+    let pixel = |x: usize, y: usize| {
+        let at = (y * 640 + x) * 2;
+        u16::from_le_bytes([picture[at], picture[at + 1]])
+    };
+    assert_eq!(pixel(0, 0), FILL);
+    assert_eq!(pixel(639, 479), FILL);
+    // Copied whole at (100, 50), then (100, 50)-(164, 82) of that over
+    // itself 10 across and down.
+    assert_eq!(pixel(100, 50), MAGENTA);
+    assert_eq!(pixel(108, 58), GREEN);
+    assert_eq!(pixel(109, 59), GREEN);
+    assert_eq!(pixel(110, 60), MAGENTA);
+    assert_eq!(pixel(118, 68), GREEN);
+    assert_eq!(pixel(133, 75), GREEN);
+    assert_eq!(pixel(134, 76), MAGENTA);
+    assert_eq!(pixel(173, 91), MAGENTA);
+    assert_eq!(pixel(174, 92), FILL);
+    // Through the key, only the green box came.
+    for (x, y) in [(300, 200), (400, 100)] {
+        assert_eq!(pixel(x, y), FILL);
+        assert_eq!(pixel(x + 7, y + 8), FILL);
+        assert_eq!(pixel(x + 8, y + 8), GREEN);
+        assert_eq!(pixel(x + 23, y + 15), GREEN);
+        assert_eq!(pixel(x + 24, y + 15), FILL);
+        assert_eq!(pixel(x + 23, y + 16), FILL);
+    }
+    // The Super VGA, where DirectDraw's own code drew it all, has the
+    // same picture.
+    let (svga, none) = vidmem_blits("vidmem_blit_svga", Adapter::Svga);
+    assert_eq!(none, 0);
+    assert!(picture == svga, "the pictures differ");
+}
+
+/// Other modes on a ToadForce: 320x200 at 8 bits, its colours in the
+/// card's palette, then 800x600 at 32.
+#[test]
+fn eight_and_32_bit_modes_are_a_toadforces() {
+    let (program, data) = modes_program();
+    let mut cpu = vesa_machine("modes_toadforce", Adapter::ToadForce, program);
+    run_until(&mut cpu, data, 1);
+    assert_eq!(results(&cpu, data, 9)[1..], [0; 8]);
+    assert_eq!(toad_mode(&cpu), (1, 320, 200, 1, 320, 60));
+    assert_eq!(toad(&cpu, toad_regs::PALETTE + 4 * 7), 0x07_40F8);
+    assert_eq!(toad(&cpu, toad_regs::PALETTE + 4 * 200), 0xC8_4037);
+    // The display shows a mode this narrow with each pixel doubled.
+    assert_eq!(video::frame_size(&cpu.bus), (640, 400));
+    for (x, y) in [(10, 0), (11, 0), (10, 1), (11, 1)] {
+        assert_eq!(shown(&mut cpu, x, y), [7, 0x40, 0xF8], "({x}, {y})");
+    }
+    assert_eq!(shown(&mut cpu, 9, 0), [0, 0x40, 0xFF]);
+    assert_eq!(shown(&mut cpu, 12, 0), [0, 0x40, 0xFF]);
+    // The card's timing is the machine's: 200 lines and 13 of blank,
+    // 60 times a second.
+    let timing = cpu.bus.vga.timing();
+    assert_eq!((timing.display, timing.total), (200, 213));
+    assert!((timing.hz() - 60.0).abs() < 0.1, "{}", timing.hz());
+
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 2);
+    assert_eq!(results(&cpu, data, 10)[9], 0);
+    assert_eq!(toad_mode(&cpu), (1, 800, 600, 3, 3200, 60));
+    let timing = cpu.bus.vga.timing();
+    assert_eq!(timing.display, 600);
+    assert!((timing.hz() - 60.0).abs() < 0.1, "{}", timing.hz());
+    assert_eq!(toad(&cpu, toad_regs::ERROR), 0);
 }

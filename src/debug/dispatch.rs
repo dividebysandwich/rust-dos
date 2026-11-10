@@ -294,7 +294,8 @@ impl DebugHub {
                         (Some(_), _) => len,
                         // The linear frame buffer, up to its end.
                         (None, Some(p)) if cpu.bus.vbe.lfb_offset(p, 1).is_some() => {
-                            len.min(cpu.bus.vbe.lfb_base.unwrap_or(0) as usize + video::vbe::VRAM_SIZE - p)
+                            let vbe = &cpu.bus.vbe;
+                            len.min(vbe.lfb_base.unwrap_or(0) as usize + vbe.vram.len() - p)
                         }
                         // The 3dfx card's window, up to its end.
                         (None, Some(p)) if cpu.bus.voodoo_at(p).is_some() => {

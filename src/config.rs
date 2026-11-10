@@ -180,6 +180,8 @@ pub struct Config {
     pub verite_mhz: Option<u32>,
     pub verite_rom: Option<PathBuf>,
     pub verite_irq: Option<u8>,
+    /// The megabytes of memory a ToadForce has (`toadforce_memory`).
+    pub toadforce_memory: Option<u32>,
     /// Where screenshots and recordings go (`capture_dir`), and whether
     /// they show the settings window and the performance overlay
     /// (`record_ui`) and the CRT shader (`record_shader`).

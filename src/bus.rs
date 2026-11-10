@@ -21,6 +21,7 @@ mod sound;
 mod powervr;
 mod verite;
 mod mach64;
+pub(crate) mod toadforce;
 mod banshee;
 mod voodoo;
 
@@ -284,6 +285,10 @@ pub struct Bus {
     /// The ATI mach64's registers and engines, on `Adapter::AtiRage` and
     /// `AtiRage2`.
     pub mach64: crate::mach64::Mach64,
+    /// The ToadForce card, on `Adapter::ToadForce` (`fit_toadforce`).
+    pub toadforce: Option<Box<crate::toadforce::ToadForce>>,
+    /// The bytes of card memory a ToadForce has (`toadforce_memory`).
+    pub toadforce_memory: u32,
     /// A memory-mapped read of Input Status 1 (a ViRGE's 83DAh) happened,
     /// whose reset of the attribute flip-flop is done at the next port
     /// access, as memory reads can't change the machine.
@@ -1044,6 +1049,9 @@ impl Bus {
         if let Some(at) = self.powervr_at(addr) {
             return self.powervr_read(at, 1) as u8;
         }
+        if let Some(at) = self.toadforce_at(addr) {
+            return self.toadforce_read(at, 1) as u8;
+        }
         if let Some(offset) = self.voodoo_at(addr) {
             return self.voodoo_read_8(offset);
         }
@@ -1221,6 +1229,10 @@ impl Bus {
             self.write_vram(offset, &[value]);
             return true;
         }
+        if let Some(at) = self.toadforce_at(addr) {
+            self.toadforce_write(at, value as u32, 1);
+            return true;
+        }
         if let Some(offset) = self.voodoo_at(addr) {
             self.voodoo_write_8(offset, value);
             return true;
@@ -1340,6 +1352,10 @@ impl Bus {
             self.mach64_mmio_write(at, value as u32, 2);
             return true;
         }
+        if let Some(at) = self.toadforce_at(addr) {
+            self.toadforce_write(at, value as u32, 2);
+            return true;
+        }
         if let Some(offset) = self.voodoo_at(addr) {
             self.voodoo_write_16(offset, value);
             return true;
@@ -1382,6 +1398,9 @@ impl Bus {
         if let Some(at) = self.mach64_mmio(addr) {
             return self.mach64_mmio_read(at, 2) as u16;
         }
+        if let Some(at) = self.toadforce_at(addr) {
+            return self.toadforce_read(at, 2) as u16;
+        }
         if let Some(offset) = self.voodoo_at(addr) {
             return self.voodoo_read_16(offset);
         }
@@ -1422,6 +1441,9 @@ impl Bus {
         if let Some(at) = self.mach64_mmio(addr) {
             return self.mach64_mmio_read(at, 4);
         }
+        if let Some(at) = self.toadforce_at(addr) {
+            return self.toadforce_read(at, 4);
+        }
         if let Some(offset) = self.voodoo_at(addr) {
             return self.voodoo_read_32(offset);
         }
@@ -1461,6 +1483,10 @@ impl Bus {
         }
         if let Some(at) = self.mach64_mmio(addr) {
             self.mach64_mmio_write(at, value, 4);
+            return;
+        }
+        if let Some(at) = self.toadforce_at(addr) {
+            self.toadforce_write(at, value, 4);
             return;
         }
         if let Some(offset) = self.voodoo_at(addr) {
@@ -1568,6 +1594,7 @@ impl Bus {
             self.banshee_next_event(),
             self.powervr_next_event(),
             self.verite_next_event(),
+            self.toadforce_next_event(),
             self.ide_next_event(),
             self.fdc_next_event(),
             self.net_next_event(),
@@ -1611,6 +1638,9 @@ impl Bus {
         }
         if self.verite_next_event().is_some_and(|t| t <= now) {
             self.verite_service();
+        }
+        if self.toadforce_next_event().is_some_and(|t| t <= now) {
+            self.toadforce_service();
         }
         if self.ide_next_event().is_some_and(|t| t <= now) {
             self.ide_service();
@@ -2186,7 +2216,8 @@ impl Bus {
     /// line stays up while any of them holds it.
     fn pci_holds(&self, irq: u8) -> bool {
         let banshee = self.banshee().and_then(|b| b.irq_up);
-        [banshee, self.powervr_line, self.verite.line].contains(&Some(irq))
+        let toadforce = self.toadforce_irq_up();
+        [banshee, self.powervr_line, self.verite.line, toadforce].contains(&Some(irq))
     }
 
     /// A device's line `irq` dropped: withdraw its request, unless a PCI
@@ -3193,6 +3224,7 @@ impl Bus {
                 | video::adapter::Adapter::Et4000
                 | video::adapter::Adapter::AtiRage
                 | video::adapter::Adapter::AtiRage2
+                | video::adapter::Adapter::ToadForce
         );
         if !(vga && matches!(port, 0x3DA | 0x3BA) && self.vga.decodes(port)) {
             return None;
