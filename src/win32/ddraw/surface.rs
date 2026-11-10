@@ -2147,13 +2147,13 @@ pub fn get_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(DD_OK)
 }
 
-/// Let go of the surface `id`'s DC, if it has one.
-fn end_dc(cpu: &mut Cpu, id: u32) {
+/// Let go of the surface `id`'s DC, if it has one; false if it had none.
+fn end_dc(cpu: &mut Cpu, id: u32) -> bool {
     let Some(s) = state(cpu).surface(id).cloned() else {
-        return;
+        return false;
     };
     if s.dc == 0 {
-        return;
+        return false;
     }
     if s.dc_old != 0 {
         gdi32::dc::select_object(cpu, &[s.dc, s.dc_old]);
@@ -2168,19 +2168,21 @@ fn end_dc(cpu: &mut Cpu, id: u32) {
         s.dc_bitmap = 0;
         s.dc_old = 0;
     }
+    true
 }
 
 /// ReleaseDC(this, dc).
 pub fn release_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [this, dc] = args[..] else {
+    // Windows 98's DirectDraw releases the surface's DC whatever handle
+    // it is given: Adrenix passes the address of its HDC variable, and
+    // its cockpit surfaces would stay busy for good otherwise.
+    let [this, _dc] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (_, id) = hr!(surface_of(cpu, this));
-    let has = state(cpu).surface(id).map_or(0, |s| s.dc);
-    if has == 0 || has != dc {
+    if !end_dc(cpu, id) {
         return Some(DDERR_NODC);
     }
-    end_dc(cpu, id);
     shown(cpu, id);
     changed(cpu, id);
     Some(DD_OK)
