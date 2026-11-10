@@ -100,11 +100,12 @@ not merged). The Voodoo3 HAL reports a W buffer today, so each
 Direct3D game was run twice, with that capability shown and hidden.
 
 The traces found gaps in the built-in Windows that stopped or spoiled
-some of the games on any card. Six were fixed the same day, and the
+some of the games on any card. Seven were fixed the same day, and the
 text below says where a result predates its fix: `ReBaseImage` (#869),
 `_EH_prolog` (#870), blits from DXT surfaces (#871), vertex blending in
-Direct3D 8 (#872), a Z buffer on a texture target (#877) and the C++
-run-time type information of MSVCRT (#879).
+Direct3D 8 (#872), a Z buffer on a texture target (#877), the C++
+run-time type information of MSVCRT (#879) and OpenGL's lighting
+(#890).
 
 What the runs reached:
 
@@ -178,8 +179,9 @@ What they show:
   planes. With "Hardware T&L" ticked in its launcher it hands lighting
   to OpenGL: lights 0 to 7 with positions, diffuse colours and
   quadratic attenuation, a diffuse material, `glColorMaterial` on the
-  emission colour, and normals as shorts. The built-in OPENGL32 has no
-  lighting yet, so its characters then draw black (#890).
+  emission colour, and normals as shorts. The built-in OPENGL32 had no
+  lighting at the time, so its characters then drew black (#890,
+  fixed).
 
 What that changes in the design:
 
@@ -205,9 +207,12 @@ What that changes in the design:
   for attaching them is Windows' since #877.
 - MDK2's lighting is what the card's OpenGL states are for: its lights
   map to the eight light slots, and its emission colour taken from the
-  vertex colour to the material source states. The lighting itself is
-  missing from the built-in OPENGL32 on every card (#890); on this
-  card the front end passes the lights on instead of computing them.
+  vertex colour to the material source states. Since #890 the built-in
+  OPENGL32 computes OpenGL's lighting itself and hands the Voodoo's
+  Direct3D device lit vertices. It keeps the lighting state
+  (`opengl32/light.rs`) apart from the code that evaluates it
+  (`opengl32/shade.rs`), so on this card the front end sends that state
+  as commands and the card does the lighting.
 - Black & White can't be traced on the built-in Windows. Its SafeDisc
   2.10 loader, like No One Lives Forever's and Max Payne's, looks for
   code of Windows 98's VMM that the built-in Windows doesn't have
