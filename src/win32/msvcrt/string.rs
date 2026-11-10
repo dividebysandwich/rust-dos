@@ -1409,7 +1409,9 @@ pub fn qsort(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if count < 2 || width == 0 {
         return Some(0);
     }
-    // An array past the end of the address space isn't there.
+    // An array that reaches the end of the address space isn't taken:
+    // the split's high end starts one element past the last, which would
+    // wrap to 0 there.
     let size = count as u64 * width as u64;
     if base as u64 + size >= 1 << 32 || !cpu.bus.guest_probe(base, size as usize, true) {
         return None;
@@ -1560,13 +1562,18 @@ impl QSort {
                         self.from_high(cpu)
                     }
                 }
-                _ => {
+                Self::FROM_HIGH => {
                     if compared.is_some_and(|c| c >= 0) {
                         self.higuy -= w;
                         self.from_high(cpu)
                     } else {
                         self.met(cpu)
                     }
+                }
+                // DONE, or a step no qsort saves: there is nothing to do.
+                _ => {
+                    self.step = Self::DONE;
+                    None
                 }
             };
             match pair {
@@ -1687,16 +1694,18 @@ pub fn bsearch(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     None
 }
 
-/// The element `bsearch` compares the key with next, of the `num` from
-/// `lo`.
-fn bsearch_middle(lo: u32, num: u32, width: u32) -> u32 {
+/// Of the `num` elements left from `lo`, the one `bsearch` compares the
+/// key with next, and how many come before it. The product wraps as the
+/// C code's pointer arithmetic does, for a count and width whose array
+/// doesn't fit in the address space.
+fn bsearch_middle(lo: u32, num: u32, width: u32) -> (u32, u32) {
     let half = num / 2;
     let below = if num & 1 != 0 {
         half
     } else {
         half.saturating_sub(1)
     };
-    lo.wrapping_add(below * width)
+    (lo.wrapping_add(below.wrapping_mul(width)), below)
 }
 
 fn bsearch_step(cpu: &mut Cpu, resume: (u32, u32), s: [u32; 6]) {
@@ -1705,7 +1714,7 @@ fn bsearch_step(cpu: &mut Cpu, resume: (u32, u32), s: [u32; 6]) {
         call::finish(cpu, resume, 0);
         return;
     }
-    let mid = bsearch_middle(lo, num, width);
+    let (mid, _) = bsearch_middle(lo, num, width);
     if !call_program(cpu, compare, &[key, mid], C_BSEARCH, resume, &s) {
         call::finish(cpu, resume, 0);
     }
@@ -1716,22 +1725,21 @@ pub fn bsearch_returned(cpu: &mut Cpu, value: u32, call: Call) {
         return;
     };
     let [_, lo, _, num, width, _] = s;
-    let mid = bsearch_middle(lo, num, width);
-    let half = num / 2;
+    let (mid, below) = bsearch_middle(lo, num, width);
     match (value as i32).cmp(&0) {
         std::cmp::Ordering::Equal => {
             call::finish(cpu, call.resume, mid);
             return;
         }
         // The last one left wasn't it.
-        _ if half == 0 => s[3] = 0,
+        _ if num == 1 => s[3] = 0,
         std::cmp::Ordering::Less => {
             s[2] = mid.wrapping_sub(width);
-            s[3] = if num & 1 != 0 { half } else { half - 1 };
+            s[3] = below;
         }
         std::cmp::Ordering::Greater => {
             s[1] = mid.wrapping_add(width);
-            s[3] = half;
+            s[3] = num / 2;
         }
     }
     bsearch_step(cpu, call.resume, s);

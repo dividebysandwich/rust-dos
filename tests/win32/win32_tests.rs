@@ -5989,10 +5989,11 @@ fn a_program_uses_msvcrt_files_heap_and_callbacks() {
 
 /// qsort isn't stable, and bsearch finds one of the elements equal to the
 /// key: which order and which element a program gets depends on the
-/// steps each takes. Max Payne sorts and then looks up its archives'
-/// file names, and a different order gave its menu text other pixels.
-/// The orders here are what MSVCRT.DLL 6.00.8337 gives these elements,
-/// key and tag each, compared by key alone.
+/// steps each takes. Max Payne sorts its font's characters by width
+/// before it packs them into the font's texture, and another order of
+/// the characters of equal width gave its menu text other pixels. The
+/// orders here are what MSVCRT.DLL 6.00.8337 gives these elements, key
+/// and tag each, compared by key alone.
 #[test]
 fn msvcrt_qsort_and_bsearch_order_equal_elements_as_visual_cpp_6() {
     let names: &[&str] = &["qsort", "bsearch", "printf", "exit"];
