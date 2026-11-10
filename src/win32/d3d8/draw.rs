@@ -191,7 +191,24 @@ const VBF_0WEIGHTS: u32 = 256;
 
 /// The world matrices indexed vertex blending chooses among: the 256 of
 /// software vertex processing, which every device here does.
-const INDEXED_MATRICES: usize = 256;
+const INDEXED_MATRICES: u32 = 256;
+
+/// How many world matrices indexed blending of the device `d` needs: up
+/// to one past the last it has set, with the four the inner device
+/// keeps, and one identity more. An index past them names a matrix
+/// that is still the identity, so `Blend::Weights` takes it as the last
+/// of its matrices, and a draw doesn't copy all 256 when a program sets
+/// a few dozen.
+fn indexed_matrices(d: &Device) -> usize {
+    let last = d
+        .worlds
+        .iter()
+        .filter_map(|w| w.0.checked_sub(256))
+        .filter(|&k| k < INDEXED_MATRICES)
+        .max()
+        .map_or(3, |k| k.max(3));
+    last as usize + 2
+}
 
 /// How the device `id` (`d`) blends vertices of `layout`, if it does:
 /// as D3DRS_VERTEXBLEND says, which Direct3D 8's software vertex
@@ -217,7 +234,7 @@ fn blend(cpu: &mut Cpu, id: u32, d: &Device, layout: &Layout) -> Option<Blend> {
         _ => return None,
     };
     let indexed = i.state(RS_INDEXEDVERTEXBLENDENABLE) != 0 && layout.indices.is_some();
-    let matrices = world_matrices(d, i, if indexed { INDEXED_MATRICES } else { 4 });
+    let matrices = world_matrices(d, i, if indexed { indexed_matrices(d) } else { 4 });
     Some(Blend::Weights {
         count,
         indexed,

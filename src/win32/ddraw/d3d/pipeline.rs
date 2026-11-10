@@ -513,8 +513,9 @@ pub enum Blend {
     /// its weight; the normal is that of the normal through each
     /// matrix's inverse transpose (with the view's), as Wine's
     /// `process_vertices_strided` has it. With `indexed` the vertex's
-    /// indices name the matrices among the 256 of `matrices`; without,
-    /// they are the first 4.
+    /// indices name the matrices among `matrices`, and an index past
+    /// them names the last, which the caller makes the identity that
+    /// every matrix not set is; without, they are the first 4.
     Weights {
         count: usize,
         indexed: bool,
@@ -892,6 +893,7 @@ impl<'a> Blended<'a> {
             if weight == 0.0 {
                 continue;
             }
+            // An index past the matrices names the last (see `Blend`).
             let m = if self.indexed {
                 v.indices[k] as usize
             } else {

@@ -106,8 +106,8 @@ fn matrices() -> [(u32, [f32; 16]); 4] {
 /// identity for view and projection and a 64x64 viewport. Its two
 /// vertices of one weight and indices go through ProcessVertices with
 /// D3DVBF_1WEIGHTS indexed (into screen vertices 0 and 1) and not
-/// (2 and 3), and a vertex of indices only with D3DVBF_0WEIGHTS indexed
-/// (4).
+/// (2 and 3), and two vertices of indices only with D3DVBF_0WEIGHTS
+/// indexed (4 and 5).
 fn blend_program() -> (Vec<u8>, u32) {
     let mut d = vec![0u8; DATA_SIZE];
     d[CLASS as usize..CLASS as usize + 7].copy_from_slice(b"Static\0");
@@ -146,6 +146,7 @@ fn blend_program() -> (Vec<u8>, u32) {
     vertex(VERTICES, Some(0.25), [5, 9, 0, 0]);
     vertex(VERTICES + 32, Some(1.0), [9, 5, 0, 0]);
     vertex(VERTICES1, None, [5, 0, 0, 0]);
+    vertex(VERTICES1 + 28, None, [200, 0, 0, 0]);
     program(&[USER32, D3D8], &d, |a, l| {
         let mut c = Calls { next: 0 };
         c.api(
@@ -196,7 +197,7 @@ fn blend_program() -> (Vec<u8>, u32) {
         // The source buffers, and the screen vertices'.
         for (fvf, size, buffer, from) in [
             (FVF_ONE_WEIGHT, 64, SOURCE, VERTICES),
-            (FVF_INDICES_ONLY, 28, SOURCE1, VERTICES1),
+            (FVF_INDICES_ONLY, 56, SOURCE1, VERTICES1),
         ] {
             c.com(
                 a,
@@ -227,7 +228,7 @@ fn blend_program() -> (Vec<u8>, u32) {
             DEVICE,
             DEV_CREATE_VERTEX_BUFFER,
             &[
-                Arg::I(5 * 20),
+                Arg::I(6 * 20),
                 Arg::I(0),
                 Arg::I(FVF_SCREEN),
                 Arg::I(D3DPOOL_SYSTEMMEM),
@@ -287,7 +288,7 @@ fn blend_program() -> (Vec<u8>, u32) {
         source(a, &mut c, FVF_INDICES_ONLY, SOURCE1, 28)?;
         state(a, &mut c, D3DRS_VERTEXBLEND, D3DVBF_0WEIGHTS)?;
         state(a, &mut c, D3DRS_INDEXEDVERTEXBLENDENABLE, 1)?;
-        process(a, &mut c, 1, 4)?;
+        process(a, &mut c, 2, 4)?;
         c.com(
             a,
             l,
@@ -348,6 +349,8 @@ fn geometry_blending_weighs_the_world_matrices_the_indices_name() {
         // D3DVBF_0WEIGHTS: all matrix 5's, the first index: (0, 0.5),
         // the normal turned to (0, 1), away from the light.
         ([32.0, 16.0, 0.5, 1.0], 0xFF00_0000),
+        // Matrix 200, which the program never set: the identity.
+        ([32.0, 32.0, 0.5, 1.0], 0xFFFF_FFFF),
     ];
     for (i, (position, color)) in expected.iter().enumerate() {
         assert_eq!(vertex(i as u32), (*position, *color), "vertex {i}");
