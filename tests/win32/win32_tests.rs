@@ -4752,8 +4752,9 @@ fn msvcrt_has_rtti_and_the_exception_class() {
 /// with the values a probe read on Visual C++ 6's MSVCRT.DLL: _Getdays'
 /// names, _Strftime with the "C" locale's long date (whose "dd" keeps its
 /// zero, '#' or not), __crtCompareStringA with a count past the string's
-/// end, _ismbcdigit and _ismbcspace of a byte (its class bit), the
-/// descriptors' table and its bad entry, a longjmp out of a C++ frame
+/// end, _ismbcdigit and _ismbcspace of a byte (its class bit) and of
+/// code page 932's full-width digit and space (0, as the built-in
+/// KERNEL32 has no types for them, #919), the descriptors' table and its bad entry, a longjmp out of a C++ frame
 /// whose objects __CxxLongjmpUnwind destroys, and malloc after
 /// _set_new_handler.
 #[test]
@@ -4764,6 +4765,7 @@ fn msvcrt_has_what_msvcp60_msvcirt_and_mfc42_import() {
         "__crtCompareStringA",
         "_ismbcdigit",
         "_ismbcspace",
+        "_setmbcp",
         "__pioinfo",
         "__badioinfo",
         "_get_osfhandle",
@@ -4847,11 +4849,22 @@ fn msvcrt_has_what_msvcp60_msvcirt_and_mfc42_import() {
         a.add(esp, 28)?;
         a.cmp(eax, 2)?;
         check(a, false, 2)?;
-        // '7' is a digit (4), ' ' a space (8).
+        // '7' is a digit (4), ' ' a space (8). In code page 932 the
+        // full-width digit 0x824F and space 0x8140 give 0 (and
+        // _setmbcp 0).
         call_with(a, c("_ismbcdigit"), &[I(0x37)])?;
         a.add(esp, 4)?;
         a.mov(esi, eax)?;
         call_with(a, c("_ismbcspace"), &[I(0x20)])?;
+        a.add(esp, 4)?;
+        a.add(esi, eax)?;
+        call_with(a, c("_setmbcp"), &[I(932)])?;
+        a.add(esp, 4)?;
+        a.add(esi, eax)?;
+        call_with(a, c("_ismbcdigit"), &[I(0x824F)])?;
+        a.add(esp, 4)?;
+        a.add(esi, eax)?;
+        call_with(a, c("_ismbcspace"), &[I(0x8140)])?;
         a.add(esp, 4)?;
         a.add(eax, esi)?;
         a.cmp(eax, 12)?;

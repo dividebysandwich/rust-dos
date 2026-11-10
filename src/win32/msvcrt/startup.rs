@@ -983,13 +983,19 @@ pub fn setjmp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// then, and the level, which is the frame's. With a count of 1 MSVCRT 6
 /// reads the level from 0Ch bytes into the unwind function; compilers
 /// pass no such count, and this takes the frame's level, as Wine does.
+/// Called outside every exception frame, it takes none of the words, as
+/// MSVCRT 6 and Wine do: no function, level -1 and the data as it was.
 pub fn setjmp3(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[buffer, count] = args else {
         unreachable!()
     };
     let frame_level = save_jump(cpu, buffer)?;
     let words = varargs(cpu, 2);
-    let given = count.min(2 + JMP_UNWIND_WORDS);
+    let given = if is_frame(exception_list(cpu)) {
+        count.min(2 + JMP_UNWIND_WORDS)
+    } else {
+        0
+    };
     let mut extra = Vec::with_capacity(given as usize);
     for i in 0..given {
         extra.push(read32(cpu, words + 4 * i)?);
