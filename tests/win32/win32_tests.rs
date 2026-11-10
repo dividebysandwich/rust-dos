@@ -4754,9 +4754,9 @@ fn msvcrt_has_rtti_and_the_exception_class() {
 /// zero, '#' or not), __crtCompareStringA with a count past the string's
 /// end, _ismbcdigit and _ismbcspace of a byte (its class bit) and of
 /// code page 932's full-width digit and space (0, as the built-in
-/// KERNEL32 has no types for them, #919), the descriptors' table and its bad entry, a longjmp out of a C++ frame
-/// whose objects __CxxLongjmpUnwind destroys, and malloc after
-/// _set_new_handler.
+/// KERNEL32 has no types for them, #919), the descriptors' table and its
+/// bad entry, a longjmp out of a C++ frame whose objects
+/// __CxxLongjmpUnwind destroys, and malloc after _set_new_handler.
 #[test]
 fn msvcrt_has_what_msvcp60_msvcirt_and_mfc42_import() {
     let crt: &[&str] = &[

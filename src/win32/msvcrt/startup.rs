@@ -984,7 +984,7 @@ pub fn setjmp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// reads the level from 0Ch bytes into the unwind function; compilers
 /// pass no such count, and this takes the frame's level, as Wine does.
 /// Called outside every exception frame, it takes none of the words, as
-/// MSVCRT 6 and Wine do: no function, level -1 and the data as it was.
+/// Wine does: no function, level -1 and the data as it was.
 pub fn setjmp3(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[buffer, count] = args else {
         unreachable!()

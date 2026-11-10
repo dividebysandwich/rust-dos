@@ -350,20 +350,20 @@ impl Expansion<'_> {
         self.year().wrapping_add(1900)
     }
 
-    /// Name `base + index` of the table. As in MSVCRT 6 the index isn't
-    /// checked: a day of the week or a month out of its range takes the
-    /// pointer that many places on, a name of the next field ("Sunday"
-    /// for `%a` on day 7) or a word before or after the table.
-    fn put_name(&self, m: &mut impl Memory, out: &mut Output, base: u32, index: i32) {
-        let index = base.wrapping_add(index as u32);
-        if let Some(text) = name(m, self.table, index) {
+    /// Name `base + index` of the table, the index taken within its
+    /// `count` names. The C standard leaves a day of the week or a month
+    /// out of its range undefined; this picks a name of the field rather
+    /// than read a pointer from outside it.
+    fn put_name(&self, m: &mut impl Memory, out: &mut Output, base: u32, index: i32, count: i32) {
+        let index = index.rem_euclid(count) as u32;
+        if let Some(text) = name(m, self.table, base + index) {
             out.text(m, &text);
         }
     }
 
     fn put_am_pm(&self, m: &mut impl Memory, out: &mut Output) {
         let index = (self.hour() >= 12) as i32;
-        self.put_name(m, out, AM_PM, index);
+        self.put_name(m, out, AM_PM, index, 2);
     }
 
     /// A number: zero-padded to `width` digits, without the zeros under
@@ -399,10 +399,10 @@ impl Expansion<'_> {
 
     fn conversion(&mut self, m: &mut impl Memory, out: &mut Output, spec: u8) {
         match spec {
-            b'a' => self.put_name(m, out, DAY_ABBR, self.wday()),
-            b'A' => self.put_name(m, out, DAY_FULL, self.wday()),
-            b'b' => self.put_name(m, out, MONTH_ABBR, self.month()),
-            b'B' => self.put_name(m, out, MONTH_FULL, self.month()),
+            b'a' => self.put_name(m, out, DAY_ABBR, self.wday(), 7),
+            b'A' => self.put_name(m, out, DAY_FULL, self.wday(), 7),
+            b'b' => self.put_name(m, out, MONTH_ABBR, self.month(), 12),
+            b'B' => self.put_name(m, out, MONTH_FULL, self.month(), 12),
             b'c' => {
                 self.picture(m, out, self.date_format());
                 out.byte(m, b' ');
@@ -436,7 +436,7 @@ impl Expansion<'_> {
 
     /// The name of the time zone, `_tzname`'s standard or daylight one.
     /// Any nonzero `tm_isdst` takes the daylight one, -1 ("not known")
-    /// included, as in MSVCRT 6 and Wine.
+    /// included, as in Wine.
     fn time_zone(&self, m: &mut impl Memory, out: &mut Output) {
         let which = (self.tm[8] != 0) as u32;
         if let Some(at) = m.load32(var_at(V_TZNAME) + 4 * which)
@@ -551,18 +551,18 @@ impl Expansion<'_> {
         abbr: u32,
         full: u32,
     ) {
-        let (value, index) = if letter == b'd' {
-            (self.mday(), self.wday())
+        let (value, index, count) = if letter == b'd' {
+            (self.mday(), self.wday(), 7)
         } else {
-            (self.month().wrapping_add(1), self.month())
+            (self.month().wrapping_add(1), self.month(), 12)
         };
         for _ in 4..run {
             out.byte(m, letter);
         }
         match run {
             1 | 2 => self.number(m, out, value, 2),
-            3 => self.put_name(m, out, abbr, index),
-            _ => self.put_name(m, out, full, index),
+            3 => self.put_name(m, out, abbr, index, count),
+            _ => self.put_name(m, out, full, index, count),
         }
     }
 }
@@ -869,9 +869,10 @@ mod tests {
 
     /// Fields out of their ranges: a negative day of the year is in week
     /// 0, as MSVCRT 6 gave the probe for day -9 of a Saturday; a day of
-    /// the week or a month past its names takes the next field's, as
-    /// MSVCRT 6 checks no range; a negative `tm_isdst` takes the daylight
-    /// name; and numbers at the ends of `int` wrap instead of overflowing.
+    /// the week or a month past its names takes a name of its own field
+    /// (the probe tried none of these); a negative `tm_isdst` takes the
+    /// daylight name; and numbers at the ends of `int` wrap instead of
+    /// overflowing.
     #[test]
     fn fields_out_of_range() {
         let mut m = memory();
@@ -881,8 +882,11 @@ mod tests {
         assert_eq!(m.get(BUFFER, 5), b"0000\0");
         let tm = [0, 0, 0, 1, 12, 0, 7, 0, 0];
         m.put(BUFFER, &[b'*'; 16]);
-        assert_eq!(expand(&mut m, BUFFER, 16, b"%a %b", &tm, 0), 14);
-        assert_eq!(m.get(BUFFER, 15), b"Sunday January\0");
+        assert_eq!(expand(&mut m, BUFFER, 16, b"%a %b", &tm, 0), 7);
+        assert_eq!(m.get(BUFFER, 8), b"Sun Jan\0");
+        let tm = [0, 0, 0, 1, -1, 0, -1, 0, 0];
+        assert_eq!(expand(&mut m, BUFFER, 16, b"%a %b", &tm, 0), 7);
+        assert_eq!(m.get(BUFFER, 8), b"Sat Dec\0");
         let names = var_at(V_TZNAME);
         m.put(0x50000, b"STD\0DST\0");
         m.put(names, &[0x00, 0x00, 0x05, 0x00, 0x04, 0x00, 0x05, 0x00]);
