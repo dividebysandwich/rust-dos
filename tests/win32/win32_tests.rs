@@ -6380,6 +6380,114 @@ fn a_program_uses_msvcrt_files_heap_and_callbacks() {
     assert_eq!(code, 0);
 }
 
+/// qsort isn't stable, and bsearch finds one of the elements equal to the
+/// key: which order and which element a program gets depends on the
+/// steps each takes. Max Payne sorts its font's characters by width
+/// before it packs them into the font's texture, and another order of
+/// the characters of equal width gave its menu text other pixels. The
+/// orders here are what MSVCRT.DLL 6.00.8337 gives these elements, key
+/// and tag each, compared by key alone.
+#[test]
+fn msvcrt_qsort_and_bsearch_order_equal_elements_as_visual_cpp_6() {
+    let names: &[&str] = &["qsort", "bsearch", "printf", "exit"];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.dll", names)];
+    let keys = [0u32, 1, 2, 1, 2, 1, 0, 2, 1, 0, 0, 2, 1, 1, 2, 1, 0];
+    let mut d = Data::default();
+    let tag_format = d.text("%d ");
+    let none = d.text("- ");
+    let elements = d.add(
+        &keys
+            .iter()
+            .enumerate()
+            .flat_map(|(tag, key)| [key.to_le_bytes(), (tag as u32).to_le_bytes()])
+            .flatten()
+            .collect::<Vec<u8>>(),
+    );
+    let key = d.add(&[0; 4]);
+    let data_len = d.0.len() as u32;
+    let count = keys.len() as i32;
+    let exe = program(BASE, false, imports, &d.0, |a, l| {
+        // Assembled once to find where the compare function is.
+        let code = |a: &mut CodeAssembler, compare_at: u32| -> Result<CodeLabel, IcedError> {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let mut compare = a.create_label();
+            // (mov is the same length for every address, push isn't.)
+            a.mov(edi, compare_at)?;
+            a.push(edi)?;
+            a.push(8)?;
+            a.push(count)?;
+            a.push(l.at(elements) as i32)?;
+            a.call(f("qsort"))?;
+            a.add(esp, 16)?;
+            // The tags in their order.
+            a.xor(esi, esi)?;
+            let mut next = a.create_label();
+            a.set_label(&mut next)?;
+            a.push(dword_ptr(esi * 8 + l.at(elements + 4)))?;
+            a.push(l.at(tag_format) as i32)?;
+            a.call(f("printf"))?;
+            a.add(esp, 8)?;
+            a.inc(esi)?;
+            a.cmp(esi, count)?;
+            a.jb(next)?;
+            // The element bsearch finds for the keys 0 to 3.
+            a.xor(esi, esi)?;
+            let mut search = a.create_label();
+            a.set_label(&mut search)?;
+            a.mov(dword_ptr(l.at(key)), esi)?;
+            a.push(edi)?;
+            a.push(8)?;
+            a.push(count)?;
+            a.push(l.at(elements) as i32)?;
+            a.push(l.at(key) as i32)?;
+            a.call(f("bsearch"))?;
+            a.add(esp, 20)?;
+            let mut found = a.create_label();
+            let mut printed = a.create_label();
+            a.test(eax, eax)?;
+            a.jne(found)?;
+            a.push(l.at(none) as i32)?;
+            a.call(f("printf"))?;
+            a.add(esp, 4)?;
+            a.jmp(printed)?;
+            a.set_label(&mut found)?;
+            a.push(dword_ptr(eax + 4))?;
+            a.push(l.at(tag_format) as i32)?;
+            a.call(f("printf"))?;
+            a.add(esp, 8)?;
+            a.set_label(&mut printed)?;
+            a.inc(esi)?;
+            a.cmp(esi, 4)?;
+            a.jb(search)?;
+            a.push(0)?;
+            a.call(f("exit"))?;
+            a.int3()?;
+            // compare(a, b): the keys' order.
+            a.set_label(&mut compare)?;
+            a.mov(eax, dword_ptr(esp + 4))?;
+            a.mov(eax, dword_ptr(eax))?;
+            a.mov(ecx, dword_ptr(esp + 8))?;
+            a.sub(eax, dword_ptr(ecx))?;
+            a.ret()?;
+            Ok(compare)
+        };
+        let label = code(a, 0)?;
+        let ip = (l.data + data_len).next_multiple_of(0x1000) as u64;
+        let options = iced_x86::BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS;
+        let result = a.assemble_options(ip, options)?;
+        let compare_at = result.label_ip(&label)? as u32;
+        a.reset();
+        code(a, compare_at)?;
+        Ok(())
+    });
+    let (code, text) = run("msvcrt_sort", exe);
+    assert_eq!(
+        text, "9 16 6 10 0 5 3 1 8 13 12 15 11 14 4 2 7 10 8 11 - ",
+        "the order and the elements found"
+    );
+    assert_eq!(code, 0);
+}
+
 #[test]
 fn a_program_catches_its_cxx_exceptions() {
     let names: &[&str] = &["__CxxFrameHandler", "_CxxThrowException", "printf", "exit"];

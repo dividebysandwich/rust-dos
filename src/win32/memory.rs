@@ -484,9 +484,7 @@ pub fn write_process_bytes(bus: &mut Bus, pid: u32, lin: u32, data: &[u8]) {
         let at = lin.wrapping_add(done as u32);
         let run = ((PAGE - (at & (PAGE - 1))) as usize).min(data.len() - done);
         if let Some(phys) = bus.win32.processes[p].memory.translate(bus, at) {
-            for (i, &byte) in data[done..done + run].iter().enumerate() {
-                bus.write_8(phys as usize + i, byte);
-            }
+            bus.write_run(phys as usize, &data[done..done + run]);
         }
         done += run;
     }
