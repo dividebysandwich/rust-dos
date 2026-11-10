@@ -84,8 +84,8 @@ means seen in a run of the game (see "Phase 0 traces").
 |---|---|---|---|---|
 | Giants: Citizen Kabuto | 2000 | Direct3D 7 | Dot3 bump mapping and environment maps, which its options screen shows as unavailable on the Voodoo3; reviewers say it enables Dot3 only on a T&L device | traced (options), reviews (Dot3) |
 | The Operative: No One Lives Forever | 2000 | Direct3D 7 | DXT1, DXT3 and DXT5 textures | traced |
-| MDK2 | 2000 | OpenGL | T&L (a check box in its launcher, off by default); the renderer's needs unknown | traced (launcher), #869 |
-| Black & White | 2001 | Direct3D 7 | T&L, large textures | PCGamingWiki snippet; no trace, #873 |
+| MDK2 | 2000 | OpenGL | T&L (a check box in its launcher, off by default): with it on, OpenGL lighting with 8 lights and materials; 32-bit textures | traced |
+| Black & White | 2001 | Direct3D 7 | T&L, large textures | PCGamingWiki snippet; no trace, #889 |
 | Oni | 2001 | OpenGL | `ARB_multitexture`, `ARB_texture_compression`, `EXT_blend_color` (it looks all three up) | traced |
 | Max Payne | 2001 | Direct3D 8 | 32-bit textures and DXT1, DXT3, DXT5 (it asks for them and is refused); D24S8 | traced |
 | Zanzarah | 2002 | Direct3D 7 | DXTn in the texture format list; minimum GeForce or Voodoo 5500 | #583, #606 |
@@ -99,18 +99,24 @@ with a trace of what it asks of DirectDraw, Direct3D and OpenGL
 not merged). The Voodoo3 HAL reports a W buffer today, so each
 Direct3D game was run twice, with that capability shown and hidden.
 
+The traces found gaps in the built-in Windows that stopped or spoiled
+some of the games on any card. Five were fixed the same day, and the
+text below says where a result predates its fix: `ReBaseImage` (#869),
+`_EH_prolog` (#870), blits from DXT surfaces (#871), vertex blending in
+Direct3D 8 (#872) and a Z buffer on a texture target (#877).
+
 What the runs reached:
 
 | Game | Reached | Stopped by |
 |---|---|---|
 | Giants | gameplay, mission 1 | |
-| No One Lives Forever | gameplay, started from `LITHTECH.EXE` | `NOLF.EXE` faults (#874) |
-| Max Payne | gameplay, the tutorial | needs its own MSVCRT (#870) |
+| No One Lives Forever | gameplay, started from `LITHTECH.EXE` | `NOLF.EXE` is SafeDisc 2 (#889) |
+| Max Payne | gameplay, the tutorial | needs its own MSVCRT (#879) |
 | Oni | gameplay, the training level | |
 | Zanzarah | the 3D title scene; gameplay in the Fairy Garden with the closed fixes of #593 and #613 applied locally | #583 |
 | Grom | initialisation | #645 |
-| MDK2 | the launcher | `ReBaseImage` missing (#869) |
-| Black & White | nothing | SafeDisc 2.10 loader faults (#873) |
+| MDK2 | gameplay, the first level, once #869 was fixed | |
+| Black & White | nothing | SafeDisc 2 doesn't run on the built-in Windows (#889) |
 
 What they show:
 
@@ -140,25 +146,39 @@ What they show:
   most 256 texels. Max Payne first asks for A8R8G8B8, X8R8G8B8, DXT1,
   DXT3, DXT5 and the bump formats, and for D24S8, and is refused. No One
   Lives Forever keeps DXT surfaces in system memory and blits them into
-  16-bit textures, which the built-in DirectDraw can't do yet (#871).
-  Giants and Zanzarah render into 128 and 256 texel textures, and
-  both fail to clear depth there: Zanzarah's attachment of a Z buffer
-  to a texture target is refused (#877). Giants runs out of video
-  memory creating 256x256 textures.
+  16-bit textures, which the built-in DirectDraw couldn't do at the
+  time (#871, fixed). Giants and Zanzarah render into 64 to 256 texel
+  textures. Zanzarah's are its heroine's shadow, and it shares the back
+  buffer's Z buffer with them, which the built-in DirectDraw refused
+  (#877, fixed: Windows 98 lets a texture in video memory take a Z
+  buffer of any size). Giants draws into its targets without depth.
+  Giants runs out of video memory creating 256x256 textures.
 - **Lights and fog.** Giants uses up to 3 directional lights, Max Payne
   up to 7 point and spot lights at once. Max Payne and Zanzarah use
   linear vertex fog. No game set a user clip plane.
 - **Vertex blending.** Max Payne draws its characters with indexed
-  vertex blending (28 world matrices, indices as `UBYTE4`) and with
-  tweening, on a device it created with software vertex processing.
-  The built-in Direct3D 8 refuses those vertex formats today (#872).
+  vertex blending (28 world matrices, indices as `UBYTE4`, one weight)
+  on a device it created with software vertex processing. The built-in
+  Direct3D 8 refused those vertex formats at the time (#872, fixed).
+  It doesn't tween.
 - **OpenGL.** Oni looks up every OpenGL 1.1 function, the
   `ARB_multitexture` functions, `glBlendColor`, the seven
   `ARB_texture_compression` functions, `wglSwapIntervalEXT` and 3dfx's
   gamma functions. On the Voodoo3 it draws with one texture unit,
   16-bit texture formats and its own transform (`glBegin` with
-  four-component texture coordinates), and no OpenGL lights. MDK2's
-  launcher asks for a 16-bit pixel format with 16-bit depth.
+  four-component texture coordinates), and no OpenGL lights.
+- **MDK2** asks for a 16-bit pixel format with 16-bit depth and no
+  stencil, and looks up the OpenGL 1.1, WGL and GLU functions only. It
+  loads RGBA8 and RGB8 textures of up to 256 texels with full mip
+  chains, sets the texture environment to `MODULATE` only, and draws
+  everything in immediate mode (`glBegin` with strips, quads and
+  triangles), with alpha blending, an alpha test, culling and linear
+  fog. It uses no vertex arrays, texture coordinate generation or clip
+  planes. With "Hardware T&L" ticked in its launcher it hands lighting
+  to OpenGL: lights 0 to 7 with positions, diffuse colours and
+  quadratic attenuation, a diffuse material, `glColorMaterial` on the
+  emission colour, and normals as shorts. The built-in OPENGL32 has no
+  lighting yet, so its characters then draw black (#890).
 
 What that changes in the design:
 
@@ -171,17 +191,29 @@ What that changes in the design:
   shows.
 - Indexed vertex blending and tweening stay out of level 1. With the
   capabilities reporting no indexed blending in hardware, Direct3D 8
-  does both on the processor, as it did on the cards of 2001, so the
-  work is in the built-in Direct3D 8 (#872).
-- The built-in DirectDraw has to blit from DXT surfaces to RGB ones
-  (#871), on any card.
+  does both on the processor, as it did on the cards of 2001, and the
+  built-in Direct3D 8 now does (#872).
+- The DXT decoder the card needs exists since #871
+  (`src/video/dxt.rs`), with two sets of rules. The card decodes by
+  S3TC's, as the cards of the time did. DirectDraw's software blits
+  keep Windows 98's own, which differ (DXT5's interpolated alphas run
+  the other way, and three-colour blocks occur in DXT2 to DXT5 too).
 - A texture render target takes a depth buffer of its own on this
-  card: `SET_RENDER_TARGET` names any colour surface and any depth
-  surface in card memory. Whether the Voodoo3 should allow it too is
-  #877's question.
-- Four games need emulator fixes that have nothing to do with the card
-  before their traces can be completed: #869, #870, #873, #874, and the
-  InstallShield 6 setups of #875.
+  card, or shares a larger one: `SET_RENDER_TARGET` names any colour
+  surface and any depth surface in card memory, and DirectDraw's rule
+  for attaching them is Windows' since #877.
+- MDK2's lighting is what the card's OpenGL states are for: its lights
+  map to the eight light slots, and its emission colour taken from the
+  vertex colour to the material source states. The lighting itself is
+  missing from the built-in OPENGL32 on every card (#890); on this
+  card the front end passes the lights on instead of computing them.
+- Black & White can't be traced on the built-in Windows. Its SafeDisc
+  2.10 loader, like No One Lives Forever's and Max Payne's, looks for
+  code of Windows 98's VMM that the built-in Windows doesn't have
+  (#889). On a booted Windows 98 the same executable passes its disc
+  check, so the game's needs wait for the Windows 98 driver of phase 6.
+- Still open and unrelated to the card: Max Payne on the built-in
+  MSVCRT (#879) and InstallShield 6 setups (#875).
 
 ## Precedents
 
@@ -1005,8 +1037,8 @@ Still to check:
 
 - Whether Giants' terrain shows z-fighting on plain Z with 24-bit
   depth, in phase 3.
-- What Giants, MDK2 and Black & White ask of a T&L device, once the
-  card offers one and #869 and #873 are fixed.
+- What Giants asks of a T&L device, once the card offers one, and
+  what Black & White asks of any card, once it runs (#889).
 - What Zanzarah does with DDS textures, and what Grom asks for past
   its initialisation, once the card gets them past #583 and #645.
 
@@ -1022,9 +1054,9 @@ on or marks as recollection:
   NVIDIA listing `NV_texture_shader` for the GeForce3 family only.
 - Which Direct3D operations Giants uses for its bump mapping, beyond
   reviewers calling it Dot3 and tying it to T&L.
-- What MDK2's renderer needs from OpenGL (#869 stops it before), and
-  what Oni and Max Payne do once the compressed and 32-bit formats they
-  ask about are there.
+- What Oni and Max Payne do once the compressed and 32-bit formats
+  they ask about are there, and whether MDK2 asks for more than OpenGL
+  1.1 on a card that lists more.
 - How vertex buffers reach a Direct3D 7 T&L driver on Windows 9x
   (execute-buffer surfaces and their callbacks), and whether the DIB
   engine tells a minidriver when it touches the frame buffer. The card
