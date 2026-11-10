@@ -485,16 +485,19 @@ impl State {
     /// Whether a device has the mouse exclusively: USER32 then leaves it
     /// alone, and Windows hides the cursor.
     pub fn mouse_taken(&self) -> bool {
-        self.mouse_acquired(device::DISCL_EXCLUSIVE)
+        self.mouse_acquired() == Some(true)
     }
 
-    /// Whether a device has the mouse acquired with all of `coop`'s
-    /// cooperative level flags.
-    pub fn mouse_acquired(&self, coop: u32) -> bool {
+    /// Whether a device has the mouse acquired: Some(true) when one has
+    /// it exclusively, Some(false) when the devices that have it share
+    /// it, None when none has it.
+    pub fn mouse_acquired(&self) -> Option<bool> {
         self.objects
             .iter()
             .filter_map(|o| o.as_ref()?.device.as_ref())
-            .any(|d| d.kind == objects::MOUSE && d.acquired && d.coop & coop == coop)
+            .filter(|d| d.kind == objects::MOUSE && d.acquired)
+            .map(|d| d.coop & device::DISCL_EXCLUSIVE != 0)
+            .reduce(|a, b| a || b)
     }
 
     /// The devices, with their ids.
@@ -510,21 +513,23 @@ fn state(cpu: &mut Cpu) -> &mut State {
     &mut cpu.bus.win32.dinput
 }
 
-/// A mouse device acquired at the cooperative level `coop`, for tests
-/// of what reads the devices.
+/// A mouse device acquired in the foreground, exclusively or not, for
+/// tests of what reads the devices.
 #[cfg(test)]
-pub fn acquired_mouse(cpu: &mut Cpu, coop: u32) {
+pub fn acquired_mouse(cpu: &mut Cpu, exclusive: bool) {
     let mut device = device::Device::new(0, objects::MOUSE, (0, 0));
-    device.coop = coop;
+    device.coop = device::DISCL_FOREGROUND
+        | if exclusive {
+            device::DISCL_EXCLUSIVE
+        } else {
+            device::DISCL_NONEXCLUSIVE
+        };
     device.acquired = true;
     state(cpu).add(Object {
         device: Some(device),
         ..Object::default()
     });
 }
-
-#[cfg(test)]
-pub use device::{DISCL_FOREGROUND, DISCL_NONEXCLUSIVE};
 
 fn dll_index() -> usize {
     super::stubs::DLLS

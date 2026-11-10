@@ -1237,9 +1237,11 @@ fn main() -> Result<ExitCode, String> {
 
                 Event::MouseButtonDown { mouse_btn, x, y, .. } => {
                     clipboard.clear();
-                    // A program using the mouse (the INT 33h driver, or the
-                    // BIOS's PS/2 mouse as Windows does) gets it captured by
-                    // a click, which it doesn't see, as in DOSBox.
+                    // A program using the mouse (`uses_mouse!`: the INT 33h
+                    // driver, the BIOS's PS/2 mouse as Windows does, or the
+                    // built-in Windows' program steering with it) gets it
+                    // captured by a click, which it doesn't see, as in
+                    // DOSBox.
                     if !mouse_captured && uses_mouse!() {
                         capture_mouse!(true);
                         capturing_click = Some(mouse_btn);

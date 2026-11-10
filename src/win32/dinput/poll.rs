@@ -130,9 +130,10 @@ pub fn mouse_taken(cpu: &mut Cpu) -> bool {
     state(cpu).mouse_taken()
 }
 
-/// Whether a device has the mouse acquired, exclusively or not.
-pub fn mouse_acquired(cpu: &mut Cpu) -> bool {
-    state(cpu).mouse_acquired(0)
+/// Whether a device has the mouse acquired: Some(true) when one has it
+/// exclusively (`State::mouse_acquired`).
+pub fn mouse_acquired(cpu: &mut Cpu) -> Option<bool> {
+    state(cpu).mouse_acquired()
 }
 
 fn read_mouse(cpu: &mut Cpu) {
