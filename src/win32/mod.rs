@@ -30,6 +30,7 @@ mod dplayx;
 mod dshow;
 mod dsound;
 pub mod gdi32;
+pub(crate) mod gfx_trace;
 mod glu32;
 mod glide;
 pub(crate) mod heap;

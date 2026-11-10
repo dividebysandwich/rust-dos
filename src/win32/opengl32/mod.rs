@@ -432,6 +432,10 @@ fn missing(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let base = DLL.base + 0x1000;
     let stub = cpu.eip().wrapping_sub(4).wrapping_sub(base) / super::stubs::STUB;
     let id = stub as u16;
+    if super::gfx_trace::on() {
+        let name = exports::APIS.get(stub as usize).map_or("?", |a| a.name);
+        super::gfx_trace::record(format!("OPENGL32 not implemented: {}", name));
+    }
     if !state(cpu).logged.contains(&id) {
         state(cpu).logged.push(id);
         let name = exports::APIS.get(stub as usize).map_or("?", |a| a.name);

@@ -433,6 +433,9 @@ impl Run {
     }
 
     fn state(&mut self, cpu: &mut Cpu, op: u8, s: u32, v: u32) {
+        if crate::win32::gfx_trace::on() {
+            crate::win32::gfx_trace::record(format!("EXECUTE state op={} ({},{})", op, s, v));
+        }
         match op {
             D3DOP_STATETRANSFORM => {
                 let Some(d) = get(cpu, self.id) else {

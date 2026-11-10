@@ -236,6 +236,11 @@ fn setup_of(
             range: s(48) != 0,
         });
     let tex = |stage: u32| (d.stage(stage, TSS_TEXCOORDINDEX) & 7) as usize;
+    if crate::win32::gfx_trace::on() {
+        let textures: Vec<bool> = d.textures.iter().map(|&t| t != 0).collect();
+        let lights = d.lights.iter().filter(|l| l.enabled).count();
+        crate::win32::gfx_trace::draw(version, layout.fvf, &d.render, &d.stages, &textures, lights);
+    }
     Setup {
         world: d.transforms[1],
         view: d.transforms[2],

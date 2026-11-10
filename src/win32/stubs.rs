@@ -487,6 +487,9 @@ pub fn call(cpu: &mut Cpu, id: u16) {
         cpu.set_eax(value);
     }
     let module = &dll.name[..dll.name.len() - 4];
+    if super::gfx_trace::on() {
+        super::gfx_trace::call(cpu, module, api.name, args, result);
+    }
     let call = super::trace::Call {
         kind: super::trace::Kind::W32,
         caller,
