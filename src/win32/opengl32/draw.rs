@@ -504,15 +504,41 @@ fn primitives(kind: u32, order: &[u32]) -> Vec<Prim> {
     out
 }
 
-/// The vertices for the primitives `prims` of the context `c` when the
-/// vertices have the back colors `backs`: `vertices` and then the same
-/// with the back colors, with each polygon whose back shows taking the
-/// second ones. Section 2.13.1 chooses by the sign of the polygon's area
-/// in window coordinates. The determinant of its corners' clip
-/// coordinates x, y and w has that sign where all three are in front of
-/// the eye, and gives the side that shows of the part in front of it
-/// when the near plane cuts the polygon.
-fn back_faces(c: &Context, vertices: &[Vertex], backs: &[u32], prims: &mut [Prim]) -> Vec<Vertex> {
+/// How many of the triangles `primitives` makes of `kind` make one
+/// OpenGL polygon: two for a quad, all of them for a polygon.
+fn polygon_triangles(kind: u32) -> usize {
+    match kind {
+        GL_QUADS | GL_QUAD_STRIP => 2,
+        GL_POLYGON => usize::MAX,
+        _ => 1,
+    }
+}
+
+/// The determinant of a triangle's clip coordinates x, y and w: twice
+/// its area in normalized device coordinates times the three w.
+fn clip_det(a: [f64; 4], b: [f64; 4], d: [f64; 4]) -> f64 {
+    a[0] * (b[1] * d[3] - d[1] * b[3]) - b[0] * (a[1] * d[3] - d[1] * a[3])
+        + d[0] * (a[1] * b[3] - b[1] * a[3])
+}
+
+/// The vertices for the primitives `prims` of the context `c`, which
+/// come `per` triangles to a polygon, when the vertices have the back
+/// colors `backs`: `vertices` and then the same with the back colors,
+/// with each polygon whose back shows taking the second ones.
+///
+/// Section 2.13.1 chooses by the sign of the polygon's area in window
+/// coordinates. With all its corners in front of the eye (w > 0) that
+/// is the sum of its triangles' areas in normalized device coordinates.
+/// With one behind, each triangle takes the sign of the determinant of
+/// its corners' clip coordinates x, y and w, which is the side that
+/// shows of the part of it in front of the eye.
+fn back_faces(
+    c: &Context,
+    vertices: &[Vertex],
+    backs: &[u32],
+    prims: &mut [Prim],
+    per: usize,
+) -> Vec<Vertex> {
     let modelview = c.modelview.last().copied().unwrap_or(IDENTITY);
     let projection = c.projection.last().copied().unwrap_or(IDENTITY);
     let m = mul(&projection, &modelview);
@@ -527,17 +553,36 @@ fn back_faces(c: &Context, vertices: &[Vertex], backs: &[u32], prims: &mut [Prim
         diffuse: Some(b),
         ..*v
     }));
-    for p in prims {
-        let Prim::Triangle(t, provoking, _) = p else {
-            continue;
+    let shows_back = |area: f64| if ccw_front { area < 0.0 } else { area > 0.0 };
+    for polygon in prims.chunks_mut(per) {
+        let corners = |p: &Prim| match *p {
+            Prim::Triangle(t, ..) => Some(t.map(|i| clip[i as usize])),
+            _ => None,
         };
-        let [a, b, d] = t.map(|i| clip[i as usize]);
-        let det = a[0] * (b[1] * d[3] - d[1] * b[3]) - b[0] * (a[1] * d[3] - d[1] * a[3])
-            + d[0] * (a[1] * b[3] - b[1] * a[3]);
-        let back = if ccw_front { det < 0.0 } else { det > 0.0 };
-        if back {
-            *t = t.map(|i| i + n);
-            *provoking += n;
+        let in_front = polygon
+            .iter()
+            .filter_map(corners)
+            .all(|t| t.iter().all(|v| v[3] > 0.0));
+        let area: f64 = polygon
+            .iter()
+            .filter_map(corners)
+            .map(|[a, b, d]| clip_det(a, b, d) / (a[3] * b[3] * d[3]))
+            .sum();
+        for p in polygon.iter_mut() {
+            let Some([a, b, d]) = corners(p) else {
+                continue;
+            };
+            let back = if in_front {
+                shows_back(area)
+            } else {
+                shows_back(clip_det(a, b, d))
+            };
+            if let Prim::Triangle(t, provoking, _) = p
+                && back
+            {
+                *t = t.map(|i| i + n);
+                *provoking += n;
+            }
         }
     }
     out
@@ -582,7 +627,7 @@ fn draw(
     let sided = match backs {
         Some(backs) if triangles => state(cpu).contexts[index]
             .as_ref()
-            .map(|c| back_faces(c, vertices, backs, &mut prims)),
+            .map(|c| back_faces(c, vertices, backs, &mut prims, polygon_triangles(kind))),
         _ => None,
     };
     let vertices = sided.as_deref().unwrap_or(vertices);
@@ -933,12 +978,15 @@ fn normal_values(b: &[u8], kind: u32) -> [f32; 3] {
 /// array is off, lit with GL_LIGHTING on; and their back colors with
 /// two-sided lighting. The texture coordinates go through the texture
 /// matrices when `transform` is set; glArrayElement's don't, as glEnd
-/// puts them through. None without a vertex array.
+/// puts them through. With `used`, only the vertices it marks (counted
+/// from `first`) are lit: the others are drawn by no primitive. None
+/// without a vertex array.
 fn gather(
     cpu: &mut Cpu,
     first: u32,
     last: u32,
     transform: bool,
+    used: Option<&[bool]>,
 ) -> Option<(Vec<Vertex>, Option<Vec<u32>>)> {
     let c = ctx(cpu)?;
     let (va, ca, na, ta) = (c.vertex_array, c.color_array, c.normal_array, c.tex_array);
@@ -998,7 +1046,8 @@ fn gather(
             Some((b, s)) => normal_values(&b[i * s..], na.kind),
             None => normal,
         };
-        let [diffuse, back] = vertex_colors(lit.as_ref(), p, normal, rgba);
+        let lit = lit.as_ref().filter(|_| used.is_none_or(|u| u[i]));
+        let [diffuse, back] = vertex_colors(lit, p, normal, rgba);
         if let Some(backs) = &mut backs {
             backs.push(back);
         }
@@ -1027,7 +1076,7 @@ fn gather(
 /// glEnd.
 pub fn array_element(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let i = args[0];
-    let Some((vertices, backs)) = gather(cpu, i, i, false) else {
+    let Some((vertices, backs)) = gather(cpu, i, i, false, None) else {
         return Some(0);
     };
     let Some(&v) = vertices.first() else {
@@ -1067,7 +1116,7 @@ pub fn draw_arrays(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(last) = first.checked_add(count - 1) else {
         return Some(0);
     };
-    if let Some((v, backs)) = gather(cpu, first, last, true) {
+    if let Some((v, backs)) = gather(cpu, first, last, true, None) {
         draw(cpu, kind, &v, backs.as_deref(), None);
     }
     Some(0)
@@ -1123,7 +1172,11 @@ pub fn draw_elements(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if last - first > 0x10_0000 {
         return Some(0);
     }
-    let Some((v, backs)) = gather(cpu, first, last, true) else {
+    let mut used = vec![false; (last - first + 1) as usize];
+    for &i in &indices {
+        used[(i - first) as usize] = true;
+    }
+    let Some((v, backs)) = gather(cpu, first, last, true, Some(&used)) else {
         return Some(0);
     };
     let order: Vec<u32> = indices.iter().map(|i| i - first).collect();
@@ -1459,6 +1512,39 @@ mod tests {
         // A strip's and a fan's triangles are each drawn whole.
         assert_eq!(edges(GL_TRIANGLE_STRIP, 4), [7, 7]);
         assert_eq!(edges(GL_TRIANGLE_FAN, 4), [7, 7]);
+    }
+
+    #[test]
+    fn a_polygon_shows_one_side_whatever_its_triangles_do() {
+        let c = super::super::new_context(0, 0, 1);
+        // A concave quad, counterclockwise as a whole, whose second
+        // triangle (0, 2, 3) is clockwise.
+        let corners = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.5, 0.4]];
+        let vertices: Vec<Vertex> = corners
+            .iter()
+            .map(|&[x, y]| Vertex {
+                position: [x, y, 0.0, 1.0],
+                ..Vertex::default()
+            })
+            .collect();
+        let backs = [0; 4];
+        let showing = |kind: u32| {
+            let mut prims = primitives(kind, &[0, 1, 2, 3]);
+            back_faces(&c, &vertices, &backs, &mut prims, polygon_triangles(kind));
+            prims
+                .iter()
+                .map(|p| match *p {
+                    Prim::Triangle(t, ..) => t[0] >= 4,
+                    _ => false,
+                })
+                .collect::<Vec<_>>()
+        };
+        // Section 2.13.1: the quad's area, positive, shows the front of
+        // both its triangles.
+        assert_eq!(showing(GL_QUADS), [false, false]);
+        assert_eq!(showing(GL_POLYGON), [false, false]);
+        // As separate triangles each shows its own side.
+        assert_eq!(showing(GL_TRIANGLE_FAN), [false, true]);
     }
 
     #[test]

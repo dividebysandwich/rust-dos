@@ -30,12 +30,13 @@
 //! them with GetProcAddress (Quake III's QGL does). Those that aren't
 //! here, such as display lists, evaluators, selection, feedback and the
 //! accumulation buffer, do nothing and say so in the log. Lighting is
-//! computed on the processor, as 3dfx's ICD did (`light.rs`,
-//! `shade.rs`), and the vertices reach Direct3D's pipeline lit. The
-//! extensions are GL_ARB_multitexture (on a Voodoo3, with its two
-//! texture units; a Banshee has one and not the extension),
-//! GL_EXT_bgra, GL_EXT_compiled_vertex_array, GL_EXT_texture_env_add
-//! and WGL_EXT_swap_control.
+//! computed on the processor (`light.rs`, `shade.rs`), as a Voodoo3
+//! driver had to with no transform and lighting hardware on the card,
+//! and the vertices reach Direct3D's pipeline lit. The extensions are
+//! GL_ARB_multitexture (on a Voodoo3, with its two texture units; a
+//! Banshee has one and not the extension), GL_EXT_bgra,
+//! GL_EXT_compiled_vertex_array, GL_EXT_texture_env_add and
+//! WGL_EXT_swap_control.
 //!
 //! On a machine with a Voodoo2 beside the display adapter, the DLL is
 //! 3dfx's Voodoo2 OpenGL driver (3DFXVGL.DLL), which games of the time

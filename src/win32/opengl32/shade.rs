@@ -1,7 +1,8 @@
 //! OpenGL 1.1's lighting equation (section 2.13.1), evaluated on the
-//! processor as the Voodoo3's OpenGL driver did: a function of the
-//! lighting state (`light.rs`) and one vertex in eye coordinates, which
-//! gives the vertex's front color and its back color.
+//! processor, as the Voodoo3's OpenGL driver had to with no transform
+//! and lighting hardware on the card: a function of the lighting state
+//! (`light.rs`) and one vertex in eye coordinates, which gives the
+//! vertex's front color and its back color.
 //!
 //! Direct3D's lighting (`ddraw::d3d::pipeline`) isn't used for it: its
 //! spot light has an inner and an outer cone where OpenGL's has a cosine

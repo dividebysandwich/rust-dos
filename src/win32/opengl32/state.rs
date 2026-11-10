@@ -11,9 +11,9 @@ use super::{
     CAP_DITHER, CAP_FOG, CAP_LIGHTING, CAP_LINE_SMOOTH, CAP_LINE_STIPPLE, CAP_LOGIC_OP,
     CAP_NORMALIZE, CAP_POINT_SMOOTH, CAP_POLYGON_OFFSET_FILL, CAP_POLYGON_OFFSET_LINE,
     CAP_POLYGON_OFFSET_POINT, CAP_POLYGON_SMOOTH, CAP_POLYGON_STIPPLE, CAP_SCISSOR_TEST,
-    CAP_STENCIL_TEST, CAP_TEXTURE_GEN, Context, GL_INVALID_ENUM, GL_INVALID_VALUE, GL_NO_ERROR,
-    MAX_TEXTURE_SIZE, MODELVIEW_DEPTH, PROJECTION_DEPTH, TEXTURE_DEPTH, ctx, d, error, f,
-    read_floats,
+    CAP_STENCIL_TEST, CAP_TEXTURE_GEN, Context, GL_INVALID_ENUM, GL_INVALID_OPERATION,
+    GL_INVALID_VALUE, GL_NO_ERROR, MAX_TEXTURE_SIZE, MODELVIEW_DEPTH, PROJECTION_DEPTH,
+    TEXTURE_DEPTH, ctx, d, error, f, read_floats,
 };
 use crate::cpu::Cpu;
 
@@ -185,6 +185,10 @@ pub fn is_enabled(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(c) = ctx(cpu) else {
         return Some(0);
     };
+    if c.begin.is_some() {
+        error(cpu, GL_INVALID_OPERATION);
+        return Some(0);
+    }
     match enabled(c, args[0]) {
         Some(on) => Some(on as u32),
         None => {
@@ -750,7 +754,10 @@ fn values(cpu: &mut Cpu, p: u32) -> Option<(Vec<f64>, bool)> {
 
 /// The values of `p` for glGet, or the error for one there isn't.
 fn get(cpu: &mut Cpu, p: u32) -> Option<(Vec<f64>, bool)> {
-    ctx(cpu)?;
+    if ctx(cpu)?.begin.is_some() {
+        error(cpu, GL_INVALID_OPERATION);
+        return None;
+    }
     let v = values(cpu, p);
     if v.is_none() {
         error(cpu, GL_INVALID_ENUM);

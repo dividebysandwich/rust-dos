@@ -580,6 +580,9 @@ fn get_light(cpu: &mut Cpu, args: &[u32], ints: bool) {
     let Some(c) = ctx(cpu) else {
         return;
     };
+    if c.begin.is_some() {
+        return error(cpu, GL_INVALID_OPERATION);
+    }
     let v = index(light).and_then(|i| light_get(&c.lighting.lights[i], p));
     match v {
         Some(v) => write(cpu, at, &v, ints, is_color(p)),
@@ -606,6 +609,9 @@ fn get_material(cpu: &mut Cpu, args: &[u32], ints: bool) {
     let Some(c) = ctx(cpu) else {
         return;
     };
+    if c.begin.is_some() {
+        return error(cpu, GL_INVALID_OPERATION);
+    }
     let side = match face {
         GL_FRONT => Some(0),
         GL_BACK => Some(1),

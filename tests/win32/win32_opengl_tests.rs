@@ -1410,6 +1410,7 @@ const GL_LIGHTING_BIT: u32 = 0x40;
 const GL_SHORT: u32 = 0x1402;
 const GL_NORMAL_ARRAY: u32 = 0x8075;
 const GL_INVALID_VALUE: u32 = 0x0501;
+const GL_INVALID_OPERATION: u32 = 0x0502;
 
 /// Where the lighting tests keep the vectors they pass, and where the
 /// queries write theirs.
@@ -1617,6 +1618,12 @@ fn lighting_queries_give_back_what_was_set() {
         let two_side = [Arg::I(GL_LIGHT_MODEL_TWO_SIDE), Arg::At(OUT + 80)];
         c.api(a, l, GET_FLOATV, &two_side)?;
         c.api(a, l, GET_ERROR, &[])?;
+        // A query between glBegin and glEnd is refused.
+        c.api(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+        c.api(a, l, GET_LIGHTFV, &get(GL_POSITION, OUT + 96))?;
+        c.api(a, l, END, &[])?;
+        at.push(c.next);
+        c.api(a, l, GET_ERROR, &[])?;
         finish(a, l)
     });
     let mut cpu = machine("lighting_queries", true, exe);
@@ -1632,4 +1639,6 @@ fn lighting_queries_give_back_what_was_set() {
     assert_eq!(r(at[2]), 1, "lighting on again");
     assert_eq!(floats(&cpu, data, OUT + 80)[0], 0.0, "one-sided again");
     assert_eq!(r(at[2] + 2), 0, "glGetError");
+    assert_eq!(r(at[3]), GL_INVALID_OPERATION, "glGetLightfv in glBegin");
+    assert_eq!(floats(&cpu, data, OUT + 96), [0.0; 4], "nothing written");
 }
