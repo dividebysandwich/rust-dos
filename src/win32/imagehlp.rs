@@ -3,7 +3,8 @@
 //! a log (Grom and Zanzarah do). No module has debug symbols here, as
 //! on a machine without the game's .DBG or .PDB files: modules are
 //! found and described, symbols aren't, and a stack is walked by its
-//! frame pointers.
+//! frame pointers. ReBaseImage moves a DLL file on disk to a new image
+//! base, which MDK2 does to OPENGL32.DLL before it loads it.
 
 use super::kernel32::virtual_memory::allows;
 use super::process;
@@ -52,6 +53,7 @@ static APIS: &[Api] = &[
     stdcall("SymUnloadModule", 55, 2, true_),
     stdcall("UnDecorateSymbolName", 57, 4, undecorate_symbol_name),
     stdcall("ImageNtHeader", 17, 1, image_nt_header),
+    stdcall("ReBaseImage", 30, 11, rebase_image),
 ];
 
 const TRUE: u32 = 1;
@@ -332,4 +334,188 @@ fn stack_walk(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         cpu.bus.guest_write_32(frame + PARAMS + 4 * i, p);
     }
     Some(TRUE)
+}
+
+const GENERIC_READ: u32 = 0x8000_0000;
+const GENERIC_WRITE: u32 = 0x4000_0000;
+const FILE_SHARE_READ: u32 = 1;
+const OPEN_EXISTING: u32 = 3;
+
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_BAD_EXE_FORMAT: u32 = 193;
+/// The last error ReBaseImage of Windows 98 SE fails with on a file that
+/// isn't a PE image: none.
+const NOT_AN_IMAGE: u32 = 0;
+
+/// What an image's place in the address space is rounded to.
+const ALLOCATION_GRANULARITY: u32 = 0x1_0000;
+
+/// What a ReBaseImage call asks for: whether to move the file or only
+/// work out where it goes, and which way; the time stamp; the base it
+/// goes to (or below); and where the old size, old base, new size and
+/// new base go.
+struct Request {
+    rebase: bool,
+    going_down: bool,
+    stamp: u32,
+    target: u32,
+    outputs: [u32; 4],
+}
+
+/// ReBaseImage(name, symbol path, rebase, system files too, going down,
+/// most size, old size, old base, new size, new base, time stamp): move
+/// the PE file `name` to a new image base, as Windows 98 SE's IMAGEHLP
+/// does: the programs of `tests/win32/win32_imagehlp_tests.rs` gave the
+/// results those tests expect on a booted Windows 98 SE, and left the
+/// same files. The file is found as MapAndLoad finds it, with
+/// SearchPathA's directories and ".EXE" added to a name without an
+/// extension. Its size in the address space is SizeOfImage rounded up to
+/// 64 KB, and its new base the one `*new_base` has, or that size below it
+/// when it goes down. Moving it adds the distance to each address its
+/// base relocations name, writes the new image base, the time stamp if
+/// it isn't 0, and the checksum CheckSumMappedFile gives. A file that is
+/// where it is to go stays as it is.
+///
+/// `*new_base` is read first: a NULL `new_base` faults, and a base that
+/// isn't a multiple of 64 KB fails with ERROR_INVALID_ADDRESS. The old
+/// size and base and the new size are written once the file is read as
+/// a PE image, and the new base once it is worked out: the image's new
+/// base when it goes down, and the address after it when it goes up, for
+/// the next image. A NULL for one of those faults only when it is
+/// written. Without `rebase` only the sizes and the old base are worked
+/// out, and the file is opened for reading alone. A file without base
+/// relocations can't be moved and fails with ERROR_INVALID_ADDRESS.
+/// Windows 98 SE moves a file whose header says IMAGE_FILE_SYSTEM even
+/// when `system files too` is FALSE, and one larger than `most size`;
+/// .DBG files on the symbol path aren't updated. The last error is 0 when
+/// it succeeds.
+///
+/// The built-in DLLs' files in the system directory are read-only, so
+/// moving one fails with ERROR_ACCESS_DENIED, and a file a process has
+/// loaded can't be written, which fails with ERROR_SHARING_VIOLATION.
+/// MDK2 moves OPENGL32.DLL (to just below 64500000h) before it loads it:
+/// on Windows 98 that is the system's OPENGL32.DLL; here the built-in
+/// one, which isn't loaded from its file, can't be moved, and the game
+/// goes on, as it ignores the result.
+fn rebase_image(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[
+        name,
+        _,
+        rebase,
+        _,
+        going_down,
+        _,
+        old_size,
+        old_base,
+        new_size,
+        new_base,
+        stamp,
+    ] = args
+    else {
+        unreachable!()
+    };
+    if !cpu.bus.guest_probe(new_base, 4, false) {
+        return None;
+    }
+    let request = Request {
+        rebase: rebase != 0,
+        going_down: going_down != 0,
+        stamp,
+        target: cpu.bus.guest_read_32(new_base),
+        outputs: [old_size, old_base, new_size, new_base],
+    };
+    let name = if name == 0 {
+        String::new()
+    } else {
+        super::user32::string_at(cpu, name)?
+    };
+    let done = if !request.target.is_multiple_of(ALLOCATION_GRANULARITY) {
+        Err(ERROR_INVALID_ADDRESS)
+    } else {
+        match super::kernel32::search_file_with_extension(cpu, &name, ".EXE") {
+            Some(full) => rebase_path(cpu, &full, &request)?,
+            None => Err(ERROR_FILE_NOT_FOUND),
+        }
+    };
+    process(cpu).last_error = done.err().unwrap_or(0);
+    Some(done.is_ok() as u32)
+}
+
+/// ReBaseImage on the file at the full path `full`: done, or the error.
+/// None if writing what it gives back faults.
+fn rebase_path(cpu: &mut Cpu, full: &str, request: &Request) -> Option<Result<(), u32>> {
+    let access = if request.rebase {
+        GENERIC_READ | GENERIC_WRITE
+    } else {
+        GENERIC_READ
+    };
+    let handle =
+        match super::kernel32::open_handle(cpu, full, access, FILE_SHARE_READ, OPEN_EXISTING) {
+            Ok(handle) => handle,
+            Err(error) => return Some(Err(error)),
+        };
+    let done = rebase_open(cpu, handle, request);
+    super::object::close(cpu, handle);
+    done
+}
+
+/// ReBaseImage on the open file `handle`, as `rebase_path`.
+fn rebase_open(cpu: &mut Cpu, handle: u32, request: &Request) -> Option<Result<(), u32>> {
+    use super::kernel32::{read_file, seek_file, write_file};
+    let mut file = Vec::new();
+    loop {
+        match read_file(cpu, handle, 0x8000) {
+            Ok(bytes) if bytes.is_empty() => break,
+            Ok(bytes) => file.extend(bytes),
+            Err(error) => return Some(Err(error)),
+        }
+    }
+    let Ok(headers) = rust_dos_pe::Headers::parse(&file) else {
+        return Some(Err(NOT_AN_IMAGE));
+    };
+    let [old_size, old_base, new_size, new_base] = request.outputs;
+    let size = headers
+        .size_of_image
+        .next_multiple_of(ALLOCATION_GRANULARITY);
+    for (at, value) in [
+        (old_size, headers.size_of_image),
+        (old_base, headers.image_base),
+        (new_size, size),
+    ] {
+        if !cpu.bus.guest_probe(at, 4, true) {
+            return None;
+        }
+        cpu.bus.guest_write_32(at, value);
+    }
+    if !request.rebase {
+        return Some(Ok(()));
+    }
+    if !headers.relocatable() {
+        return Some(Err(ERROR_INVALID_ADDRESS));
+    }
+    let (base, next) = if request.going_down {
+        let base = request.target.wrapping_sub(size);
+        (base, base)
+    } else {
+        (request.target, request.target.wrapping_add(size))
+    };
+    if !cpu.bus.guest_probe(new_base, 4, true) {
+        return None;
+    }
+    cpu.bus.guest_write_32(new_base, next);
+    if base == headers.image_base {
+        return Some(Ok(()));
+    }
+    if rust_dos_pe::rebase_file(&mut file, base).is_err() {
+        return Some(Err(ERROR_BAD_EXE_FORMAT));
+    }
+    if request.stamp != 0 {
+        rust_dos_pe::set_time_stamp(&mut file, request.stamp);
+    }
+    rust_dos_pe::set_checksum(&mut file);
+    let written = seek_file(cpu, handle, 0, 0).and_then(|_| {
+        file.chunks(0x8000)
+            .try_for_each(|chunk| write_file(cpu, handle, chunk).map(|_| ()))
+    });
+    Some(written)
 }

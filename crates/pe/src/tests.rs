@@ -174,6 +174,108 @@ fn relocations_move_the_image() {
     assert_eq!(Headers::parse(&image.data).unwrap().image_base, 0x40_0000);
 }
 
+/// `file`, a built image, with its sections' data one after the other
+/// from 400h, 200h-aligned, so that their file offsets aren't their RVAs.
+fn packed(file: &[u8]) -> Vec<u8> {
+    let headers = Headers::parse(file).unwrap();
+    let table = 0x80 + 24 + 0xE0;
+    let mut out = file[..0x400].to_vec();
+    for (i, s) in headers.sections.iter().enumerate() {
+        let size = s.virtual_size.next_multiple_of(0x200);
+        let at = table + 40 * i;
+        out[at + 16..at + 20].copy_from_slice(&size.to_le_bytes());
+        let offset = out.len() as u32;
+        out[at + 20..at + 24].copy_from_slice(&offset.to_le_bytes());
+        out.extend_from_slice(&file[s.raw_offset as usize..][..size as usize]);
+    }
+    out
+}
+
+#[test]
+fn a_file_is_rebased_through_its_section_table() {
+    let mut b = Builder::dll(0x1000_0000, "R.DLL");
+    let data = b.next_rva();
+    let mut bytes = Vec::new();
+    for word in [0x1000_1000u32, 0x1000_2004, 0x1234_5678] {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    b.section(".data", &bytes, SCN_INITIALIZED_DATA | SCN_READ | SCN_WRITE);
+    b.reloc(data).reloc(data + 4);
+    let mut file = packed(&b.build());
+    let before = file.clone();
+    rebase_file(&mut file, 0x6440_0000).unwrap();
+    let headers = Headers::parse(&file).unwrap();
+    assert_eq!(headers.image_base, 0x6440_0000);
+    let at = headers.sections[0].raw_offset as usize;
+    assert_ne!(at as u32, data);
+    let word = |i: usize| u32_at(&file, at + 4 * i).unwrap();
+    assert_eq!(
+        [word(0), word(1), word(2)],
+        [0x6440_1000, 0x6440_2004, 0x1234_5678]
+    );
+    // Nothing else changed: the base, and the two addresses.
+    let changed = (0..file.len()).filter(|&i| file[i] != before[i]).count();
+    assert!(changed <= 3 * 4, "{} bytes changed", changed);
+    // Moving it back gives the file again.
+    rebase_file(&mut file, 0x1000_0000).unwrap();
+    assert_eq!(file, before);
+}
+
+#[test]
+fn rebasing_a_file_moves_raw_data_past_the_virtual_size() {
+    // A section 12 bytes long in memory has 200h in the file, which the
+    // loader maps: a relocation at 10h in it is applied on disk too, as
+    // Image::relocate applies it in memory.
+    let mut b = Builder::dll(0x1000_0000, "P.DLL");
+    let data = b.next_rva();
+    b.section(
+        ".data",
+        &[0; 12],
+        SCN_INITIALIZED_DATA | SCN_READ | SCN_WRITE,
+    );
+    b.reloc(data + 0x10);
+    let mut file = packed(&b.build());
+    let at = Headers::parse(&file).unwrap().sections[0].raw_offset as usize + 0x10;
+    file[at..at + 4].copy_from_slice(&0x1000_3000u32.to_le_bytes());
+    let mut image = Image::load(&file).unwrap();
+    image.relocate(0x6440_0000).unwrap();
+    assert_eq!(image.u32_at(data + 0x10).unwrap(), 0x6440_3000);
+    rebase_file(&mut file, 0x6440_0000).unwrap();
+    assert_eq!(u32_at(&file, at), Some(0x6440_3000));
+}
+
+#[test]
+fn the_checksum_takes_its_field_off_with_a_borrow() {
+    // A file whose words without the CheckSum field add up to FFFFh, and
+    // whose field is 1: CheckSumMappedFile's sum is 1 with the field,
+    // and 0 once its 1 is taken off, where leaving the field out of the
+    // sum would give FFFFh.
+    let mut file = Builder::dll(0x1000_0000, "S.DLL").build();
+    let field = 0x80 + 24 + 64;
+    file[field..field + 4].fill(0);
+    let spare = Headers::parse(&file).unwrap().size_of_headers as usize - 2;
+    assert_eq!(file[spare..spare + 2], [0, 0]);
+    let sum = checksum(&file) - file.len() as u32;
+    file[spare..spare + 2].copy_from_slice(&(0xFFFF - sum as u16).to_le_bytes());
+    assert_eq!(checksum(&file), 0xFFFF + file.len() as u32);
+    file[field] = 1;
+    assert_eq!(checksum(&file), file.len() as u32);
+}
+
+#[test]
+fn the_checksum_adds_words_with_carries_and_the_length() {
+    // 0001h + FFFFh carries into 1; then 0003h, the odd last byte; then
+    // the length, 5.
+    assert_eq!(checksum(&[0x01, 0x00, 0xFF, 0xFF, 0x03]), 9);
+    // A PE file's own CheckSum field doesn't count.
+    let mut file = Builder::dll(0x1000_0000, "C.DLL").build();
+    let sum = checksum(&file);
+    file[0x80 + 24 + 64] = 0x55;
+    assert_eq!(checksum(&file), sum);
+    set_checksum(&mut file);
+    assert_eq!(u32_at(&file, 0x80 + 24 + 64), Some(sum));
+}
+
 #[test]
 fn the_tls_directory_has_the_template_and_callbacks() {
     let mut b = Builder::exe(0x40_0000);
