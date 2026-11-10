@@ -838,6 +838,66 @@ fn flip_status_says_a_locked_chain_cant_flip() {
     assert_eq!(r[7..], [DDERR_SURFACEBUSY, 0, 0, 0]);
 }
 
+const S_GET_DC: u32 = 17;
+const S_RELEASE_DC: u32 = 26;
+const DDERR_NODC: u32 = 0x8876_024A;
+/// Where GetDC puts the surface's DC.
+const SURFACE_DC: u32 = 0x890;
+
+#[test]
+fn release_dc_lets_go_of_the_dc_whatever_handle_it_is_given() {
+    // Adrenix gives ReleaseDC the address of its HDC variable instead of
+    // the HDC (issue 916). Windows 98 releases the DC all the same, so
+    // the surface can be locked after; a second ReleaseDC has no DC to
+    // release.
+    let mut d = data();
+    desc(
+        &mut d,
+        DESC,
+        DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
+        DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY,
+        8,
+        8,
+        0,
+    );
+    put32(&mut d, LOCKED, 108);
+    let (program, data) = program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 320, 200))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_NORMAL)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(OFFSCREEN), Arg::I(0)],
+        )?;
+        c.com(a, l, OFFSCREEN, S_GET_DC, &[Arg::At(SURFACE_DC)])?;
+        c.com(a, l, OFFSCREEN, S_RELEASE_DC, &[Arg::At(SURFACE_DC)])?;
+        c.com(
+            a,
+            l,
+            OFFSCREEN,
+            S_LOCK,
+            &[Arg::I(0), Arg::At(LOCKED), Arg::I(1), Arg::I(0)],
+        )?;
+        c.com(a, l, OFFSCREEN, S_UNLOCK, &[Arg::I(0)])?;
+        c.com(a, l, OFFSCREEN, S_RELEASE_DC, &[Arg::At(SURFACE_DC)])?;
+        finish(a, l)
+    });
+    let mut cpu = machine("release_dc_any_handle", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 9);
+    assert_ne!(peek(&cpu, data + SURFACE_DC), 0, "GetDC gave no DC");
+    assert_eq!(r[1..], [0, 0, 0, 0, 0, 0, 0, DDERR_NODC]);
+}
+
 /// Full screen with a back buffer made on its own (DDSCAPS_BACKBUFFER
 /// with a size) and attached to a plain primary surface, as Glover makes
 /// its flip chain: a pixel written to the back buffer and a flip of the

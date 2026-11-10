@@ -2172,12 +2172,14 @@ fn end_dc(cpu: &mut Cpu, id: u32) {
 
 /// ReleaseDC(this, dc).
 pub fn release_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [this, dc] = args[..] else {
+    // Windows 98's DirectDraw releases the surface's DC whatever handle
+    // it is given: Adrenix passes the address of its HDC variable, and
+    // its cockpit surfaces would stay busy for good otherwise.
+    let [this, _dc] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (_, id) = hr!(surface_of(cpu, this));
-    let has = state(cpu).surface(id).map_or(0, |s| s.dc);
-    if has == 0 || has != dc {
+    if state(cpu).surface(id).is_none_or(|s| s.dc == 0) {
         return Some(DDERR_NODC);
     }
     end_dc(cpu, id);
