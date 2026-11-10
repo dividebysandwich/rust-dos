@@ -107,7 +107,7 @@ What the runs reached:
 | No One Lives Forever | gameplay, started from `LITHTECH.EXE` | `NOLF.EXE` faults (#874) |
 | Max Payne | gameplay, the tutorial | needs its own MSVCRT (#870) |
 | Oni | gameplay, the training level | |
-| Zanzarah | the 3D title scene | #583 |
+| Zanzarah | the 3D title scene; gameplay in the Fairy Garden with the closed fixes of #593 and #613 applied locally | #583 |
 | Grom | initialisation | #645 |
 | MDK2 | the launcher | `ReBaseImage` missing (#869) |
 | Black & White | nothing | SafeDisc 2.10 loader faults (#873) |
@@ -124,6 +124,12 @@ What they show:
   ways. No other game set `USEW`. Whether Giants' Z path shows
   z-fighting was not looked at; the run had 16-bit depth, and the card
   gives it 24.
+- **Zanzarah in gameplay** was traced on a local build with the two
+  closed game fixes, which put it on the path it takes when no DXTn
+  format is listed (BMP textures). What it does with DDS textures is
+  untraced. In the Fairy Garden it uses one stage, one directional
+  light, linear vertex fog, source colour keys, a depth bias, and
+  render targets in 128 and 256 texel textures, and never a W buffer.
 - **Stages.** Giants, Zanzarah and No One Lives Forever draw with stage
   0 alone. Max Payne uses two (a light map added to the diffuse colour,
   then the texture modulated). The operations seen are `SELECTARG1`,
@@ -135,8 +141,10 @@ What they show:
   DXT3, DXT5 and the bump formats, and for D24S8, and is refused. No One
   Lives Forever keeps DXT surfaces in system memory and blits them into
   16-bit textures, which the built-in DirectDraw can't do yet (#871).
-  Giants and Zanzarah render into 128 and 256 texel textures. Giants
-  runs out of video memory creating 256x256 textures.
+  Giants and Zanzarah render into 128 and 256 texel textures, and
+  both fail to clear depth there: Zanzarah's attachment of a Z buffer
+  to a texture target is refused (#877). Giants runs out of video
+  memory creating 256x256 textures.
 - **Lights and fog.** Giants uses up to 3 directional lights, Max Payne
   up to 7 point and spot lights at once. Max Payne and Zanzarah use
   linear vertex fog. No game set a user clip plane.
@@ -167,6 +175,10 @@ What that changes in the design:
   work is in the built-in Direct3D 8 (#872).
 - The built-in DirectDraw has to blit from DXT surfaces to RGB ones
   (#871), on any card.
+- A texture render target takes a depth buffer of its own on this
+  card: `SET_RENDER_TARGET` names any colour surface and any depth
+  surface in card memory. Whether the Voodoo3 should allow it too is
+  #877's question.
 - Four games need emulator fixes that have nothing to do with the card
   before their traces can be completed: #869, #870, #873, #874, and the
   InstallShield 6 setups of #875.
@@ -995,8 +1007,8 @@ Still to check:
   depth, in phase 3.
 - What Giants, MDK2 and Black & White ask of a T&L device, once the
   card offers one and #869 and #873 are fixed.
-- What Zanzarah and Grom ask for in gameplay, once the card gets them
-  past #583 and #645.
+- What Zanzarah does with DDS textures, and what Grom asks for past
+  its initialisation, once the card gets them past #583 and #645.
 
 Facts the research could not confirm, which the design avoids depending
 on or marks as recollection:
