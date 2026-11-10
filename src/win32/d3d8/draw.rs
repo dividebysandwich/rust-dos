@@ -17,6 +17,7 @@ use super::shader::{
 use super::states::{index_size, world_matrices};
 use super::{D3D_OK, D3DERR_INVALIDCALL, state};
 use crate::cpu::Cpu;
+use crate::win32::trace3d::Pass;
 
 /// The vertices `count` primitives of `kind` take.
 fn vertex_count(kind: u32, count: u32) -> Option<u32> {
@@ -313,7 +314,7 @@ fn run_function(
     order: Option<&[u32]>,
 ) {
     let layout = Layout::default();
-    let Some(setup) = inner_draw::setup(cpu, d.inner, 8, &layout, 0) else {
+    let Some(setup) = inner_draw::setup(cpu, Pass::Draw, d.inner, 8, &layout, 0) else {
         return;
     };
     let constants: Vec<[f32; 4]> = d.constants.iter().map(|c| c.map(f32::from_bits)).collect();
@@ -529,7 +530,7 @@ pub fn process_vertices(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let vertices: Vec<Vertex> = (0..count)
         .map(|k| layout.read(vertex_bytes(&bytes, src.stride, k, len)))
         .collect();
-    let Some(mut setup) = inner_draw::setup(cpu, d.inner, 8, &layout, 0) else {
+    let Some(mut setup) = inner_draw::setup(cpu, Pass::Process, d.inner, 8, &layout, 0) else {
         return Some(D3DERR_INVALIDCALL);
     };
     setup.blend = blend(cpu, id, &d, &layout);

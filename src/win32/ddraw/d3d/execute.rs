@@ -18,6 +18,7 @@ use super::{
     read_dwords, write_dwords,
 };
 use crate::cpu::Cpu;
+use crate::win32::trace3d::Pass;
 use crate::win32::{com, kernel32};
 
 /// An execute buffer.
@@ -433,6 +434,9 @@ impl Run {
     }
 
     fn state(&mut self, cpu: &mut Cpu, op: u8, s: u32, v: u32) {
+        if crate::win32::trace3d::on(cpu) {
+            crate::win32::trace3d::execute_state(cpu, op, s, v);
+        }
         match op {
             D3DOP_STATETRANSFORM => {
                 let Some(d) = get(cpu, self.id) else {
@@ -487,7 +491,8 @@ impl Run {
             super::draw::D3DDP_DONOTLIGHT
         };
         let flags = lighting | self.flags;
-        let Some(mut setup) = setup_in(cpu, self.id, self.version, &layout, flags, self.viewport)
+        let (id, version, viewport) = (self.id, self.version, self.viewport);
+        let Some(mut setup) = setup_in(cpu, Pass::Process, id, version, &layout, flags, viewport)
         else {
             return;
         };
@@ -554,7 +559,7 @@ impl Run {
         // device's current states.
         let layout = Layout::of(pipeline::FVF_TLVERTEX).unwrap_or_default();
         let (id, version, flags, viewport) = (self.id, self.version, self.flags, self.viewport);
-        let Some(setup) = setup_in(cpu, id, version, &layout, flags, viewport) else {
+        let Some(setup) = setup_in(cpu, Pass::Draw, id, version, &layout, flags, viewport) else {
             return;
         };
         super::draw::draw_processed(cpu, self.id, &setup, &self.vertices, &prims);

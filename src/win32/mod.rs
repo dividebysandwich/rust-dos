@@ -67,6 +67,7 @@ mod tapi32;
 mod task;
 pub(crate) mod thread;
 pub mod trace;
+pub mod trace3d;
 pub mod user32;
 pub mod version;
 mod verdll;
@@ -347,6 +348,8 @@ pub struct Win32 {
     /// The log's trace of the calls of the built-in functions (the
     /// `win32_trace` setting), which outlives the programs.
     pub(crate) trace: trace::Trace,
+    /// The 3D trace (`--trace-3d`), which outlives the programs too.
+    trace3d: Option<Box<trace3d::Trace3d>>,
     /// The program that starts at `START`: the one DOS loaded, or a
     /// RunOnce command's (`boot`).
     pending: Option<boot::Program>,
@@ -467,6 +470,7 @@ impl Win32 {
             depth: self.depth,
             dll_files: self.dll_files.take(),
             trace: trace::Trace::new(self.trace.level()),
+            trace3d: self.trace3d.take(),
             ..Win32::default()
         };
     }
@@ -1538,6 +1542,7 @@ crate::state_fields!(Win32 {
     depth,
     dll_files,
     trace,
+    trace3d,
     wait_due,
     system_clock,
 });

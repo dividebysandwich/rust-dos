@@ -13,6 +13,7 @@ use super::{D3D_OK, D3dObject, IID_HAL, caps, is_device_guid, probe};
 use crate::cpu::Cpu;
 use crate::win32::com::{self, CLASS_E_NOAGGREGATION, Guid};
 use crate::win32::task::{self, Next, Task};
+use crate::win32::trace3d;
 
 /// The DirectDraw object of the IDirect3D interface `this`: the
 /// interface's vtable and the object's id.
@@ -158,6 +159,28 @@ pub fn enum_z_buffer_formats(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// The task's step: the next item to the callback, until the list ends
 /// or the callback returns D3DENUMRET_CANCEL (0).
 pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
+    let kind = t.var(KIND);
+    let (scratch, step) = (t.scratch, t.step);
+    let next = items(cpu, t, value);
+    if trace3d::on(cpu) {
+        let list = match kind {
+            DEVICES | DEVICES7 => "DDRAW.EnumDevices",
+            Z_FORMATS => "DDRAW.EnumZBufferFormats",
+            _ => "DDRAW.EnumTextureFormats",
+        };
+        trace3d::enumerated(cpu, list, scratch, step, value, &next, |cpu, args| {
+            match kind {
+                DEVICES => trace3d::d3d_device_item(cpu, args),
+                DEVICES7 => trace3d::d3d_device7_item(cpu, args),
+                TEXTURES_DESC => trace3d::surface_desc_item(cpu, args, 0),
+                _ => trace3d::pixel_format_item(cpu, args),
+            }
+        });
+    }
+    next
+}
+
+fn items(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     if t.step == 1 && value == 0 {
         return Next::Done(D3D_OK);
     }
