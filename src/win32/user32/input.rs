@@ -391,9 +391,14 @@ pub fn poll(cpu: &mut Cpu) {
 
 /// What reading the devices (`poll`) may change, compared before and
 /// after a look at the queue that is to have changed nothing, as an idle
-/// proof's PeekMessage (message.rs). None when a key went down or the
-/// program steers with the mouse, which a read changes whatever comes of
-/// it.
+/// proof's PeekMessage (message.rs). None when a key went down, which a
+/// read takes from the keyboard whatever comes of it.
+///
+/// A program steering with the mouse doesn't count: the read notes it
+/// (`MouseState::note_steering`), but only for the host's capture of the
+/// mouse, which the program never sees, and the reads at every interrupt
+/// (`thread::wake`) note it again after the passes skipped, which end by
+/// the next timer event, long before the note's second runs out.
 #[derive(PartialEq)]
 pub struct Seen {
     cursor: (i32, i32),
@@ -405,8 +410,7 @@ pub struct Seen {
 }
 
 pub fn seen(cpu: &mut Cpu) -> Option<Seen> {
-    let acquired = crate::win32::dinput::mouse_acquired(cpu);
-    if cpu.bus.kbd.has_pressed() || steers_with_mouse(cpu, acquired) {
+    if cpu.bus.kbd.has_pressed() {
         return None;
     }
     let input = &user(cpu).input;
@@ -2939,6 +2943,21 @@ mod tests {
         dinput::acquired_mouse(&mut taken, true);
         poll(&mut taken);
         assert!(taken.bus.mouse.moves_by_motion(now), "taken exclusively");
+    }
+
+    /// Reading the devices while a program steers with the mouse changes
+    /// nothing the program sees, so an idle proof's PeekMessage can still
+    /// find that it changed nothing.
+    #[test]
+    fn steering_leaves_what_a_read_sees_as_it_was() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        crate::win32::dinput::acquired_mouse(&mut cpu, false);
+        user(&mut cpu).input.cursor_count = -1;
+        poll(&mut cpu);
+        let before = seen(&mut cpu);
+        poll(&mut cpu);
+        assert!(cpu.bus.mouse.moves_by_motion(cpu.bus.clock.now_ns()));
+        assert!(before.is_some() && seen(&mut cpu) == before);
     }
 
     /// A window shown under the cursor gets a WM_MOUSEMOVE where the
