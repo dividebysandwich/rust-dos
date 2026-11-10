@@ -2785,17 +2785,22 @@ const DEV7_SET_RENDER_TARGET: u32 = 8;
 const DEV7_GET_RENDER_STATE: u32 = 21;
 const D3DCMP_LESSEQUAL: u32 = 4;
 
+const DDSCAPS_SYSTEMMEMORY: u32 = 0x800;
+
 /// The DDSURFACEDESC2s of a 32x32 texture to draw into, of a 16x16
-/// depth buffer and of a 32x32 off-screen surface to draw into; their
-/// interfaces; a 32x32 viewport; ZENABLE as GetRenderState read it on
-/// the texture and on the off-screen surface; the draws' vertices; the
-/// texture's pixels.
+/// depth buffer, of a 32x32 off-screen surface to draw into and of a
+/// 32x32 texture in system memory (in TEX_DESC's place, which this
+/// program doesn't use otherwise); their interfaces; a 32x32 viewport;
+/// ZENABLE as GetRenderState read it on the texture and on the
+/// off-screen surface; the draws' vertices; the texture's pixels.
 const RT_TEX_DESC: u32 = 0xA00;
 const RT_ZSMALL_DESC: u32 = 0xA80;
 const RT_OFF_DESC: u32 = 0xB00;
+const RT_SYS_DESC: u32 = TEX_DESC;
 const RT_TEX: u32 = 0xB80;
 const RT_ZSMALL: u32 = 0xB84;
 const RT_OFF: u32 = 0xB88;
+const RT_SYS: u32 = 0xB8C;
 const RT_VIEW: u32 = 0xB90;
 const RT_ZENABLE_TEX: u32 = 0xBB0;
 const RT_ZENABLE_OFF: u32 = 0xBB4;
@@ -2809,6 +2814,9 @@ struct RtZCalls {
     /// the 32x32 off-screen surface.
     offscreen_larger: u32,
     offscreen_smaller: u32,
+    /// AddAttachedSurface of the 16x16 depth buffer to the 32x32
+    /// texture in system memory.
+    system_smaller: u32,
     /// AddAttachedSurface of the 16x16 depth buffer to the 32x32
     /// texture, then of the 64x64 one while the 16x16 one is on it.
     texture_smaller: u32,
@@ -2851,19 +2859,23 @@ fn rt_z_program(calls: &mut RtZCalls) -> (Vec<u8>, u32) {
         put32(&mut d, at + 0x5C, 0xFFFF);
         put32(&mut d, at + 0x68, DDSCAPS_ZBUFFER | DDSCAPS_VIDEOMEMORY);
     }
-    // The 32x32 texture to draw into, 5-6-5 as Zanzarah's.
-    put32(&mut d, RT_TEX_DESC, 124);
-    put32(&mut d, RT_TEX_DESC + 0x04, flags);
-    put32(&mut d, RT_TEX_DESC + 0x08, 32);
-    put32(&mut d, RT_TEX_DESC + 0x0C, 32);
-    put32(&mut d, RT_TEX_DESC + 0x48, 32);
-    put32(&mut d, RT_TEX_DESC + 0x4C, DDPF_RGB);
-    put32(&mut d, RT_TEX_DESC + 0x54, 16);
-    put32(&mut d, RT_TEX_DESC + 0x58, 0xF800);
-    put32(&mut d, RT_TEX_DESC + 0x5C, 0x07E0);
-    put32(&mut d, RT_TEX_DESC + 0x60, 0x001F);
-    let caps = DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY;
-    put32(&mut d, RT_TEX_DESC + 0x68, caps);
+    // The 32x32 texture to draw into, 5-6-5 as Zanzarah's, and one in
+    // system memory.
+    let video = DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY;
+    let system = DDSCAPS_TEXTURE | DDSCAPS_SYSTEMMEMORY;
+    for (at, caps) in [(RT_TEX_DESC, video), (RT_SYS_DESC, system)] {
+        put32(&mut d, at, 124);
+        put32(&mut d, at + 0x04, flags);
+        put32(&mut d, at + 0x08, 32);
+        put32(&mut d, at + 0x0C, 32);
+        put32(&mut d, at + 0x48, 32);
+        put32(&mut d, at + 0x4C, DDPF_RGB);
+        put32(&mut d, at + 0x54, 16);
+        put32(&mut d, at + 0x58, 0xF800);
+        put32(&mut d, at + 0x5C, 0x07E0);
+        put32(&mut d, at + 0x60, 0x001F);
+        put32(&mut d, at + 0x68, caps);
+    }
     target_desc(&mut d, RT_OFF_DESC, 124, 32, 32);
     // D3DVIEWPORT7s: 64x64 and 32x32, depths 0 to 1.
     put32(&mut d, VIEW + 8, 64);
@@ -2894,13 +2906,15 @@ fn rt_z_program(calls: &mut RtZCalls) -> (Vec<u8>, u32) {
     program(&[USER32, DDRAW], &d, |a, l| {
         let mut c = Calls { next: 0 };
         start(a, l, &mut c, true, false)?;
-        c.com(a, l, DD, QUERY_INTERFACE, &[Arg::At(IID_D3D7), Arg::At(D3D)])?;
+        let args = [Arg::At(IID_D3D7), Arg::At(D3D)];
+        c.com(a, l, DD, QUERY_INTERFACE, &args)?;
         for (desc, out) in [
             (DESC, TARGET),
             (Z_DESC, ZBUF),
             (RT_TEX_DESC, RT_TEX),
             (RT_ZSMALL_DESC, RT_ZSMALL),
             (RT_OFF_DESC, RT_OFF),
+            (RT_SYS_DESC, RT_SYS),
         ] {
             let args = [Arg::At(desc), Arg::At(out), Arg::I(0)];
             c.com(a, l, DD, DD_CREATE_SURFACE, &args)?;
@@ -2912,6 +2926,8 @@ fn rt_z_program(calls: &mut RtZCalls) -> (Vec<u8>, u32) {
         attach(a, &mut c, RT_OFF, ZBUF)?;
         calls.offscreen_smaller = c.next;
         attach(a, &mut c, RT_OFF, RT_ZSMALL)?;
+        calls.system_smaller = c.next;
+        attach(a, &mut c, RT_SYS, RT_ZSMALL)?;
         calls.texture_smaller = c.next;
         attach(a, &mut c, RT_TEX, RT_ZSMALL)?;
         calls.texture_second = c.next;
@@ -3021,14 +3037,15 @@ fn run_rt_z(test: &str) -> (Cpu, u32, Vec<u32>, RtZCalls) {
 
 /// A texture in video memory takes a depth buffer of any size, smaller
 /// or larger than itself, and one also attached to another surface; an
-/// off-screen surface takes only one of its own size. A surface takes
-/// one depth buffer at a time.
+/// off-screen surface or a texture in system memory takes only one of
+/// its own size. A surface takes one depth buffer at a time.
 #[test]
 fn a_texture_takes_a_depth_buffer_of_any_size() {
     let (_, _, r, calls) = run_rt_z("rtz_attach");
     let at = |i: u32| r[i as usize];
     assert_eq!(at(calls.offscreen_larger), DDERR_CANNOTATTACHSURFACE);
     assert_eq!(at(calls.offscreen_smaller), DDERR_CANNOTATTACHSURFACE);
+    assert_eq!(at(calls.system_smaller), DDERR_CANNOTATTACHSURFACE);
     assert_eq!(at(calls.texture_smaller), 0);
     assert_eq!(at(calls.texture_second), DDERR_CANNOTATTACHSURFACE);
     assert_eq!(at(calls.target_shared), 0);
@@ -3046,13 +3063,15 @@ fn a_texture_draws_with_a_larger_shared_depth_buffer() {
     let refused = [
         calls.offscreen_larger,
         calls.offscreen_smaller,
+        calls.system_smaller,
         calls.texture_second,
         calls.offscreen_clear_z,
     ];
     for i in (1..r.len() as u32).filter(|i| !refused.contains(i)) {
         assert_eq!(r[i as usize], 0, "call {i}: {r:X?}");
     }
-    assert_eq!(r[calls.offscreen_clear_z as usize], D3DERR_ZBUFFER_NOTPRESENT);
+    let clear_z = r[calls.offscreen_clear_z as usize];
+    assert_eq!(clear_z, D3DERR_ZBUFFER_NOTPRESENT);
     assert_eq!(peek(&cpu, data + RT_ZENABLE_TEX), 1);
     assert_eq!(peek(&cpu, data + RT_ZENABLE_OFF), 1);
     let pixel = |base: u32, width: u32, x: u32, y: u32| {

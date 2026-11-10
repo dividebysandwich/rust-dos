@@ -1745,17 +1745,27 @@ pub fn clear(
     target: Option<u32>,
     depth: Option<f32>,
 ) {
-    let Some((width, height)) = state(cpu).surface(d.target).map(|s| (s.width, s.height)) else {
-        return;
-    };
-    let (width, height) = (width.min(0x7FFF) as i32, height.min(0x7FFF) as i32);
-    let rects: Vec<[i32; 4]> = if rects.is_empty() {
-        vec![[0, 0, width, height]]
-    } else {
-        rects
-            .iter()
-            .map(|r| [r[0], r[1], r[2].min(width), r[3].min(height)])
-            .collect()
+    // With no target surface to keep to, the depth buffer is filled as
+    // the rectangles say, or all of it.
+    let size = state(cpu).surface(d.target).map(|s| (s.width, s.height));
+    let rects: Vec<[i32; 4]> = match size {
+        Some((width, height)) => {
+            let (width, height) = (width.min(0x7FFF) as i32, height.min(0x7FFF) as i32);
+            let whole = [[0, 0, width, height]];
+            let rects = if rects.is_empty() { &whole[..] } else { rects };
+            let list: Vec<_> = rects
+                .iter()
+                .map(|r| [r[0].max(0), r[1].max(0), r[2].min(width), r[3].min(height)])
+                .filter(|r| r[0] < r[2] && r[1] < r[3])
+                .collect();
+            // Rectangles all past the target clear nothing; an empty
+            // list would be the whole of each buffer below.
+            if list.is_empty() {
+                return;
+            }
+            list
+        }
+        None => rects.to_vec(),
     };
     let rects = &rects[..];
     let fill = |cpu: &mut Cpu, id: u32, value: u16| {
