@@ -234,9 +234,6 @@ const S_LOCALE: u32 = 0x38;
 const S_ABNORMAL: u32 = 0x3C;
 /// The handler `_set_new_handler` set.
 const S_NEW_HANDLER: u32 = 0x40;
-/// Whether __crtCompareStringA and __crtLCMapStringA have tried the wide
-/// functions (`string.rs`).
-const S_CRT_TRIED_WIDE: u32 = 0x44;
 const S_SIGNALS: u32 = 0x80;
 /// The locale's names and `lconv`, and the texts it points to
 /// (`startup.rs`).
@@ -880,7 +877,6 @@ fn init(bus: &mut Bus, process: &mut super::Process) -> Option<()> {
     w.bytes(var_at(V_LC_TIME_C), &strftime::lc_time_c(var_at(V_LC_TIME_C)))?;
     w.u32(state_at(S_ATEXIT), 0)?;
     w.u32(state_at(S_MBCP), 1252)?;
-    w.u32(state_at(S_CRT_TRIED_WIDE), string::STARTUP_TRIED)?;
     cxx::init(&mut w)?;
 
     // The command line, the program's path, the arguments and the

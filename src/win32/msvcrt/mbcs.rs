@@ -170,50 +170,28 @@ pub fn ismbclegal(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some((c < 0x10000 && is_lead(cpu, (c >> 8) as u8) && is_trail(cpu, c as u8)) as u32)
 }
 
-/// The locale `_setmbcp` gives a double-byte code page, or None for a
-/// single-byte one.
-fn mb_lcid(cp: u32) -> Option<u32> {
-    match cp {
-        932 => Some(0x411),
-        936 => Some(0x804),
-        949 => Some(0x412),
-        950 => Some(0x404),
-        _ => None,
+/// The `_ctype` class bits `class` of the character `c`, for
+/// `_ismbcdigit` and `_ismbcspace`: those of the "C" locale for a single
+/// byte, which `isdigit` and `isspace` give too (4 for a digit, 8 for
+/// white space), and 0 for a double-byte character. The built-in KERNEL32
+/// has no character types for double-byte characters, and MSVCRT 6 run
+/// on it gave 0 for every one the probe tried, the full-width digits and
+/// space of code page 932 among them (#919).
+fn ismbc_class(c: u32, class: u16) -> u32 {
+    match u8::try_from(c) {
+        Ok(byte) => (ctype_of(byte) & class) as u32,
+        Err(_) => 0,
     }
 }
 
-/// The class test of `_ismbcdigit` and `_ismbcspace`: for a byte, its
-/// `_ctype` bit `class` as isdigit and isspace give it; for a double-byte
-/// character in a double-byte code page, 1 when GetStringTypeA takes its
-/// two bytes for one character of the class; otherwise 0. This is what
-/// MSVCRT.DLL 6.00.8337 does, checked with a probe run on it.
-fn ismbc_class(cpu: &mut Cpu, c: u32, class: u16) -> Option<u32> {
-    if c <= 0xFF {
-        return Some((ctype_of(c as u8) & class) as u32);
-    }
-    let Some(lcid) = mb_lcid(state(cpu, S_MBCP)) else {
-        return Some(0);
-    };
-    let at = thread_field(cpu, T_SCRATCH)? + 0x10;
-    put(cpu, at, &[(c >> 8) as u8, c as u8, 0, 0, 0, 0, 0, 0])?;
-    if !string::crt_string_type(cpu, lcid, at, 2, at + 4)? {
-        return Some(0);
-    }
-    let first = cpu.bus.guest_read_16(at + 4);
-    let second = cpu.bus.guest_read_16(at + 6);
-    Some((second == 0 && first & class != 0) as u32)
+/// _ismbcdigit(c): nonzero for a digit.
+pub fn ismbcdigit(_: &mut Cpu, args: &[u32]) -> Option<u32> {
+    Some(ismbc_class(args[0], DIGIT))
 }
 
-/// _ismbcdigit(c): whether c is a digit (4 for a byte, 1 for a double-byte
-/// character).
-pub fn ismbcdigit(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    ismbc_class(cpu, args[0], DIGIT)
-}
-
-/// _ismbcspace(c): whether c is white space (8 for a byte, 1 for a
-/// double-byte character).
-pub fn ismbcspace(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    ismbc_class(cpu, args[0], SPACE)
+/// _ismbcspace(c): nonzero for white space.
+pub fn ismbcspace(_: &mut Cpu, args: &[u32]) -> Option<u32> {
+    Some(ismbc_class(args[0], SPACE))
 }
 
 /// Whether the byte at `at` leads a character, reading the string from
@@ -573,4 +551,45 @@ pub fn mbbtombc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         0x20 => 0x8140,
         _ => c,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// _ismbcdigit and _ismbcspace give what MSVCRT 6 gave the probe, in
+    /// each code page it tried: the class bit for the bytes that have it,
+    /// 0 for the other bytes and for every larger value.
+    #[test]
+    fn ismbc_classes_as_visual_cpp_6() {
+        for c in 0..=0xFFu32 {
+            let digit = if (0x30..=0x39).contains(&c) { 4 } else { 0 };
+            let space = if matches!(c, 0x09..=0x0D | 0x20) {
+                8
+            } else {
+                0
+            };
+            assert_eq!(ismbc_class(c, DIGIT), digit, "{c:#x}");
+            assert_eq!(ismbc_class(c, SPACE), space, "{c:#x}");
+        }
+        let more = [
+            0x100,
+            0x130,
+            0x8140,
+            0x824F,
+            0x8250,
+            0xA1A1,
+            0xA3B0,
+            0x3030,
+            0xFFFF,
+            0x10030,
+            0x10020,
+            0xFFFF_FFFF,
+            0x8000_0030,
+        ];
+        for c in more {
+            assert_eq!(ismbc_class(c, DIGIT), 0, "{c:#x}");
+            assert_eq!(ismbc_class(c, SPACE), 0, "{c:#x}");
+        }
+    }
 }
