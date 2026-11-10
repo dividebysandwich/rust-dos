@@ -2,7 +2,7 @@
 //! were added. Append only (see `stubs`).
 
 use super::{io, math, mbcs, startup, stdio, string, time};
-use crate::win32::stubs::{Api, Conv, Handler};
+use crate::win32::stubs::{self, Api, Conv, Handler};
 
 const fn cdecl(name: &'static str, ordinal: u16, args: u8, handler: Handler) -> Api {
     Api {
@@ -549,5 +549,12 @@ pub static APIS: &[Api] = &[
         args: 1,
         conv: Conv::Stdcall,
         handler: startup::cxx_unhandled_filter,
+    },
+    Api {
+        name: "_EH_prolog",
+        ordinal: 67,
+        args: 0,
+        conv: Conv::Code(startup::EH_PROLOG),
+        handler: stubs::never_a_trap,
     },
 ];
