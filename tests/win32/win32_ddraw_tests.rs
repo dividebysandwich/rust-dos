@@ -160,6 +160,8 @@ const POLLS: u32 = 0x880;
 const LAST: u32 = 0x884;
 const LINE: u32 = 0x888;
 const FIRST: u32 = 0x88C;
+/// Where GetDC puts the surface's DC.
+const SURFACE_DC: u32 = 0x890;
 const DATA_SIZE: usize = 0x900;
 
 /// The data the programs start with: the window class's name.
@@ -270,8 +272,10 @@ const S_BLT: u32 = 5;
 const S_FLIP: u32 = 11;
 const S_GET_ATTACHED_SURFACE: u32 = 12;
 const S_GET_CAPS: u32 = 14;
+const S_GET_DC: u32 = 17;
 const S_GET_FLIP_STATUS: u32 = 18;
 const S_LOCK: u32 = 25;
+const S_RELEASE_DC: u32 = 26;
 const S_SET_CLIPPER: u32 = 28;
 const S_SET_COLOR_KEY: u32 = 29;
 const S_SET_PALETTE: u32 = 31;
@@ -838,18 +842,14 @@ fn flip_status_says_a_locked_chain_cant_flip() {
     assert_eq!(r[7..], [DDERR_SURFACEBUSY, 0, 0, 0]);
 }
 
-const S_GET_DC: u32 = 17;
-const S_RELEASE_DC: u32 = 26;
 const DDERR_NODC: u32 = 0x8876_024A;
-/// Where GetDC puts the surface's DC.
-const SURFACE_DC: u32 = 0x890;
 
 #[test]
 fn release_dc_lets_go_of_the_dc_whatever_handle_it_is_given() {
     // Adrenix gives ReleaseDC the address of its HDC variable instead of
     // the HDC (issue 916). Windows 98 releases the DC all the same, so
     // the surface can be locked after; a second ReleaseDC has no DC to
-    // release.
+    // release. The usual call, with the HDC itself, releases it too.
     let mut d = data();
     desc(
         &mut d,
@@ -889,13 +889,24 @@ fn release_dc_lets_go_of_the_dc_whatever_handle_it_is_given() {
         )?;
         c.com(a, l, OFFSCREEN, S_UNLOCK, &[Arg::I(0)])?;
         c.com(a, l, OFFSCREEN, S_RELEASE_DC, &[Arg::At(SURFACE_DC)])?;
+        c.com(a, l, OFFSCREEN, S_GET_DC, &[Arg::At(SURFACE_DC)])?;
+        c.com(a, l, OFFSCREEN, S_RELEASE_DC, &[Arg::Val(SURFACE_DC)])?;
+        c.com(
+            a,
+            l,
+            OFFSCREEN,
+            S_LOCK,
+            &[Arg::I(0), Arg::At(LOCKED), Arg::I(1), Arg::I(0)],
+        )?;
+        c.com(a, l, OFFSCREEN, S_UNLOCK, &[Arg::I(0)])?;
         finish(a, l)
     });
     let mut cpu = machine("release_dc_any_handle", program);
     run_until_done(&mut cpu, data);
-    let r = results(&mut cpu, data, 9);
+    let r = results(&mut cpu, data, 13);
     assert_ne!(peek(&cpu, data + SURFACE_DC), 0, "GetDC gave no DC");
-    assert_eq!(r[1..], [0, 0, 0, 0, 0, 0, 0, DDERR_NODC]);
+    assert_eq!(r[1..8], [0; 7]);
+    assert_eq!(r[8..], [DDERR_NODC, 0, 0, 0, 0]);
 }
 
 /// Full screen with a back buffer made on its own (DDSCAPS_BACKBUFFER

@@ -2147,13 +2147,13 @@ pub fn get_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(DD_OK)
 }
 
-/// Let go of the surface `id`'s DC, if it has one.
-fn end_dc(cpu: &mut Cpu, id: u32) {
+/// Let go of the surface `id`'s DC, if it has one; false if it had none.
+fn end_dc(cpu: &mut Cpu, id: u32) -> bool {
     let Some(s) = state(cpu).surface(id).cloned() else {
-        return;
+        return false;
     };
     if s.dc == 0 {
-        return;
+        return false;
     }
     if s.dc_old != 0 {
         gdi32::dc::select_object(cpu, &[s.dc, s.dc_old]);
@@ -2168,6 +2168,7 @@ fn end_dc(cpu: &mut Cpu, id: u32) {
         s.dc_bitmap = 0;
         s.dc_old = 0;
     }
+    true
 }
 
 /// ReleaseDC(this, dc).
@@ -2179,10 +2180,9 @@ pub fn release_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (_, id) = hr!(surface_of(cpu, this));
-    if state(cpu).surface(id).is_none_or(|s| s.dc == 0) {
+    if !end_dc(cpu, id) {
         return Some(DDERR_NODC);
     }
-    end_dc(cpu, id);
     shown(cpu, id);
     changed(cpu, id);
     Some(DD_OK)
