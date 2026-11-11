@@ -785,4 +785,266 @@ mod tests {
         assert_eq!(cube_face(0.0, 0.0, 0.0), (0, 0.5, 0.5));
         assert_eq!(cube_face(f32::NAN, 0.0, 0.0), (0, 0.5, 0.5));
     }
+
+    /// The sampler as it was before it kept each level's place and read
+    /// plain pixels by format: everything from the texture by itself,
+    /// one texel and one channel at a time. `differs_in_nothing` holds
+    /// the sampler to it.
+    mod reference {
+        use super::*;
+
+        fn texel(mem: Mem, t: &Texture, level: u32, face: u32, x: u32, y: u32) -> Rgba {
+            let (offset, pitch) = t.image(level, face);
+            if let Some(size) = t.format.block_bytes() {
+                let at = offset as usize
+                    + (y / 4) as usize * pitch as usize
+                    + (x / 4) as usize * size as usize;
+                let i = (y % 4 * 4 + x % 4) as usize;
+                return if size == 8 {
+                    texel::block_texel(t.format, &mem.read::<8>(at), i)
+                } else {
+                    texel::block_texel(t.format, &mem.read::<16>(at), i)
+                };
+            }
+            let value = pixel(mem, t, level, face, x, y);
+            if t.format == Format::P8 {
+                return mem.read(t.palette.unwrap_or(0) as usize + value as usize * 4);
+            }
+            texel::decode(t.format, value)
+        }
+
+        fn pixel(mem: Mem, t: &Texture, level: u32, face: u32, x: u32, y: u32) -> u32 {
+            let (offset, pitch) = t.image(level, face);
+            let bytes = t.format.bytes();
+            mem.pixel(offset as usize + y as usize * pitch as usize + (x * bytes) as usize, bytes)
+        }
+
+        fn at(mem: Mem, tex: &Tex, level: u32, face: u32, x: i32, y: i32) -> Rgba {
+            let (w, h) = tex.texture.level_size(level);
+            match (
+                tex.address[0].texel(x, w as i32),
+                tex.address[1].texel(y, h as i32),
+            ) {
+                (Some(x), Some(y)) => texel(mem, &tex.texture, level, face, x as u32, y as u32),
+                _ => tex.border,
+            }
+        }
+
+        fn fixed(tex: &Tex, level: u32, u: f32, v: f32, shift: f64) -> (i64, i64) {
+            let (w, h) = tex.texture.level_size(level);
+            let limit = (1i64 << 31) as f64;
+            let to = |c: f32, size: u32| {
+                let at = (c as f64 * size as f64 * 256.0 - shift).floor();
+                if at.is_nan() {
+                    0
+                } else {
+                    at.clamp(-limit, limit) as i64
+                }
+            };
+            (to(u, w), to(v, h))
+        }
+
+        fn level(mem: Mem, tex: &Tex, level: u32, face: u32, u: f32, v: f32, f: Filter) -> Rgba {
+            let at = |x, y| at(mem, tex, level, face, x, y);
+            match f {
+                Filter::Point => {
+                    let (x, y) = fixed(tex, level, u, v, 0.0);
+                    at((x >> 8) as i32, (y >> 8) as i32)
+                }
+                Filter::Linear => {
+                    let (x, y) = fixed(tex, level, u, v, 128.0);
+                    let (fx, fy) = ((x & 255) as u32, (y & 255) as u32);
+                    let (x, y) = ((x >> 8) as i32, (y >> 8) as i32);
+                    let (x1, y1) = (x.wrapping_add(1), y.wrapping_add(1));
+                    let top = lerp(at(x, y), at(x1, y), fx);
+                    let bottom = lerp(at(x, y1), at(x1, y1), fx);
+                    lerp(top, bottom, fy)
+                }
+            }
+        }
+
+        pub fn sample(s: &Sampler, mem: Mem, face: u32, u: f32, v: f32, lod: f32) -> Rgba {
+            let l = s.levels(lod);
+            let near = level(mem, s.tex, l.level, face, u, v, l.filter);
+            if l.next == 0 {
+                return near;
+            }
+            let far = level(mem, s.tex, l.level + 1, face, u, v, l.filter);
+            lerp(near, far, l.next)
+        }
+
+        pub fn keyed(s: &Sampler, mem: Mem, face: u32, u: f32, v: f32, lod: f32) -> bool {
+            let Some(key) = s.tex.key else {
+                return false;
+            };
+            let t = &s.tex.texture;
+            let level = s.levels(lod).level;
+            let (x, y) = fixed(s.tex, level, u, v, 0.0);
+            let (w, h) = t.level_size(level);
+            match (
+                s.tex.address[0].texel((x >> 8) as i32, w as i32),
+                s.tex.address[1].texel((y >> 8) as i32, h as i32),
+            ) {
+                (Some(x), Some(y)) => {
+                    pixel(mem, t, level, face, x as u32, y as u32) & t.format.defined_bits() == key
+                }
+                _ => false,
+            }
+        }
+    }
+
+    /// A xorshift generator, so the test is the same on every run.
+    struct Random(u64);
+
+    impl Random {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+
+        fn pick<T: Copy>(&mut self, of: &[T]) -> T {
+            of[self.below(of.len() as u64) as usize]
+        }
+
+        /// A coordinate: one of the odd ones, a whole number of 1/256
+        /// of a texel of a level or the float either side of it, or
+        /// any.
+        fn coordinate(&mut self, size: u32) -> f32 {
+            let odd = [
+                f32::NAN,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                0.0,
+                -0.0,
+                1.0,
+                -1.0,
+                -2.0,
+                0.5,
+                1e10,
+                -1e10,
+                f32::MAX,
+                f32::MIN,
+                f32::MIN_POSITIVE,
+                -f32::MIN_POSITIVE,
+                // Just past what 2^31 / 256 texels of the largest
+                // size come to, and just short of it.
+                8388608.0 / 2048.0,
+                -8388608.0 / 2048.0,
+                8388607.9 / 2048.0,
+                -8388607.9 / 2048.0,
+            ];
+            match self.below(4) {
+                0 => self.pick(&odd),
+                1 | 2 => {
+                    let size = (size >> self.below(12)).max(1) as f32;
+                    let whole = (self.below(4096) as i64 - 2048) as f32 / (size * 256.0);
+                    match self.below(3) {
+                        0 => whole,
+                        1 => whole.next_down(),
+                        _ => whole.next_up(),
+                    }
+                }
+                _ => (self.next() as i64 as f64 / i64::MAX as f64 * 3.0) as f32,
+            }
+        }
+    }
+
+    #[test]
+    fn differs_in_nothing_from_reading_each_texel_by_itself() {
+        use Format::*;
+        let formats = [
+            P8, R5G6B5, X8R8G8B8, A8R8G8B8, X1R5G5B5, A1R5G5B5, A4R4G4B4, A8, L8, A8L8, DXT1,
+            DXT2, DXT3, DXT4, DXT5, V8U8, L6V5U5, X8L8V8U8,
+        ];
+        let addresses = [
+            Address::Wrap,
+            Address::Mirror,
+            Address::Clamp,
+            Address::Border,
+        ];
+        let filters = [Filter::Point, Filter::Linear];
+        let mut r = Random(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..3000 {
+            let format = r.pick(&formats);
+            let cube = r.below(4) == 0;
+            // Sides of 1 to 2048, some long and thin for more than 12
+            // levels' worth of a sampler's own list.
+            let width = 1u32 << r.below(12);
+            let height = if cube {
+                width
+            } else if width > 64 {
+                1 << r.below(2)
+            } else {
+                1 << r.below(7)
+            };
+            if cube && width > 64 {
+                continue;
+            }
+            let faces = if cube { 6 } else { 1 };
+            let levels = 1 + r.below((width.max(height).ilog2() + 1) as u64) as u32;
+            let mut images = Vec::new();
+            let mut end = r.below(64) as u32;
+            for i in 0..levels * faces {
+                let (w, h) = ((width >> (i / faces)).max(1), (height >> (i / faces)).max(1));
+                let pitch = format.line_bytes(w) as u32 + r.below(3) as u32 * 4;
+                images.push((end, pitch));
+                end += format.image_bytes(w, h, pitch) as u32 + r.below(16) as u32;
+            }
+            let palette = (format == P8).then(|| end + r.below(64) as u32);
+            end = palette.map_or(end, |at| at + 1024);
+            // Most of the time all of the texture is in the memory;
+            // else it stops somewhere in it, and the rest reads as 0.
+            let len = match r.below(4) {
+                0 => r.below(end as u64 + 1) as usize,
+                _ => end as usize,
+            };
+            let mut memory: Vec<u8> = (0..len).map(|_| r.next() as u8).collect();
+            let mem = Mem::new(&mut memory);
+            let mut tex = Tex::new(Texture {
+                format,
+                width,
+                height,
+                levels,
+                cube,
+                palette,
+                images,
+                ..Texture::default()
+            });
+            tex.address = [r.pick(&addresses), r.pick(&addresses)];
+            tex.border = (r.next() as u32).to_le_bytes();
+            tex.mag = r.pick(&filters);
+            tex.min = r.pick(&filters);
+            tex.mip = r.pick(&[Mip::None, Mip::Point, Mip::Linear]);
+            tex.lod_bias = r.pick(&[0.0, 0.5, -1.0]);
+            tex.first_level = r.below(levels as u64) as u32;
+            if format.block_bytes().is_none() {
+                tex.key = Some(r.next() as u32 & format.defined_bits() & r.pick(&[0, !0]));
+            }
+            let s = Sampler::new(mem, &tex);
+            for _ in 0..100 {
+                let face = r.below(faces as u64) as u32;
+                let (u, v) = (r.coordinate(width), r.coordinate(height));
+                let lod = match r.below(4) {
+                    0 => r.pick(&[f32::NAN, f32::NEG_INFINITY, f32::INFINITY, 0.0]),
+                    _ => (r.below(1600) as f32 - 200.0) / 100.0,
+                };
+                assert_eq!(
+                    s.sample(face, u, v, lod),
+                    reference::sample(&s, mem, face, u, v, lod),
+                    "{tex:?} face {face} at ({u}, {v}) lod {lod}"
+                );
+                assert_eq!(
+                    s.keyed(face, u, v, lod),
+                    reference::keyed(&s, mem, face, u, v, lod),
+                    "{tex:?} face {face} at ({u}, {v}) lod {lod}"
+                );
+            }
+        }
+    }
 }
