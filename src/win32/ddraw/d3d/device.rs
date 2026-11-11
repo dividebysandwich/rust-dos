@@ -11,9 +11,7 @@
 //! IDirect3DDevice, 2 and 3; one made through IDirect3D7 only
 //! IDirect3DDevice7.
 
-use super::super::surface::{
-    self, DDSCAPS_SYSTEMMEMORY, DDSCAPS_ZBUFFER, MEM_CARD, MEM_VIDEO,
-};
+use super::super::surface::{self, DDSCAPS_SYSTEMMEMORY, DDSCAPS_ZBUFFER, MEM_CARD, MEM_VIDEO};
 use super::super::{
     DDERR_ALREADYINITIALIZED, DDERR_INVALIDCAPS, DDERR_INVALIDOBJECT, DDERR_INVALIDPARAMS,
     DDERR_INVALIDPIXELFORMAT, V_D3D1, V_D3D2, V_D3D3, V_D3D7, V_DEVICE1, V_DEVICE2, V_DEVICE3,
@@ -999,9 +997,7 @@ pub fn set_render_target(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if state(cpu).surface(sid).is_none() {
         return Some(DDERR_INVALIDPARAMS);
     }
-    let kind = get(cpu, id)
-        .cloned()
-        .map_or(super::hal::Kind::Voodoo, |d| super::hal::kind_of(cpu, &d));
+    let kind = offer_of(cpu, id).kind;
     hr!(check_target(cpu, kind, sid));
     super::super::add_ref(cpu, target);
     let Some(d) = get(cpu, id) else {
@@ -1133,7 +1129,8 @@ pub fn preload(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// ValidateDevice(this, passes): one pass, if the stages in use are no
-/// more than the card's texture units.
+/// more than the blend stages the device reports, and only the first
+/// of them, one for each texture unit, take a texture.
 pub fn validate_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, passes] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
@@ -1145,10 +1142,22 @@ pub fn validate_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let used = (0..STAGES)
         .take_while(|&s| d.stage(s, TSS_COLOROP) != TOP_DISABLE)
         .count() as u32;
-    if used > d.tmus {
+    let kind = super::hal::kind_of(cpu, &d);
+    // A card with a stage for each texture unit says 0 stages.
+    let stages = match super::hal::description(kind).stages {
+        0 => d.tmus,
+        stages => stages,
+    };
+    let texture = |s: u32, op: u32, args: [u32; 2]| {
+        d.stage(s, op) != TOP_DISABLE && args.iter().any(|&a| d.stage(s, a) & 0xF == TA_TEXTURE)
+    };
+    let textured = |s: u32| {
+        texture(s, TSS_COLOROP, [TSS_COLORARG1, TSS_COLORARG2])
+            || texture(s, TSS_ALPHAOP, [TSS_ALPHAARG1, TSS_ALPHAARG2])
+    };
+    if used > stages || (d.tmus..used).any(textured) {
         return Some(D3DERR_TOOMANYOPERATIONS);
     }
-    let kind = super::hal::kind_of(cpu, &d);
     for s in 0..used {
         if !super::hal::can_do(kind, d.stage(s, TSS_COLOROP)) {
             return Some(super::D3DERR_UNSUPPORTEDCOLOROPERATION);

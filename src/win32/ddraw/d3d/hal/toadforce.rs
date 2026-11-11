@@ -35,8 +35,8 @@ use super::super::super::surface::{
 };
 use super::super::super::{Format as DdFormat, current_pid, display, state};
 use super::super::device::{
-    Device, RS_FOGENABLE, RS_FOGTABLEMODE, RS_TEXTUREMAPBLEND, TA_TEXTURE, TOP_DISABLE,
-    TOP_SELECTARG1, TSS_ALPHAARG1, TSS_ALPHAOP, TSS_COLOROP,
+    Device, RS_TEXTUREMAPBLEND, TA_TEXTURE, TOP_DISABLE, TOP_SELECTARG1, TSS_ALPHAARG1,
+    TSS_ALPHAOP, TSS_COLOROP,
 };
 use super::super::pipeline::{Rasterizer, ScreenVertex, Setup};
 use super::{Description, Fill};
@@ -352,12 +352,16 @@ fn z_formats() -> Vec<DdFormat> {
 /// What the device description says of the card.
 pub fn description() -> Description {
     Description {
-        // DDBD_16 and DDBD_32; depth buffers of 24 bits too, which is
-        // what the 32-bit ones hold.
+        // DDBD_16 and DDBD_32. Depth buffers aren't DDBD_24: a program
+        // that picks 24 from this makes a depth buffer of 3 bytes a
+        // pixel, which the card has no format for. Its 24 bits of depth
+        // are in a 32-bit buffer (`z_formats`).
         target_depths: 0x400 | 0x100,
-        z_depths: 0x400 | 0x200 | 0x100,
+        z_depths: 0x400 | 0x100,
         texture_max: caps::TEXTURE_MAX,
-        texture_aspect: 0,
+        // Any ratio a texture of the largest size can have, as the
+        // cards of the time with no limit reported it.
+        texture_aspect: caps::TEXTURE_MAX,
         // D3DPRASTERCAPS_: anisotropic filtering, table fog by w and by
         // z.
         raster: 0x2_0000 | 0x10_0000 | 0x20_0000,
@@ -645,13 +649,10 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     let target = target(cpu, d)?;
     let pid = current_pid(cpu);
     if hal(cpu).pid != pid {
-        // Another process's copies went with its video memory.
-        let h = hal(cpu);
-        h.textures.clear();
-        h.pid = pid;
-        if let Some(sent) = &mut h.sent {
-            sent.textures = Default::default();
-        }
+        // The copies are in the video memory of the process that drew
+        // last, which may still be running: their blocks go back.
+        forget(cpu, |_| true);
+        hal(cpu).pid = pid;
     }
     hal(cpu).clock = hal(cpu).clock.wrapping_add(1);
     let mut sent = sent(cpu);
@@ -698,12 +699,13 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         .take_while(|&s| d.stage(s, TSS_COLOROP) != TOP_DISABLE)
         .count() as u32;
     let mut first_alpha = None;
+    let key = d.state(super::RS_COLORKEYENABLE) != 0;
     for unit in 0..UNITS {
         let surface = (unit < stages)
             .then(|| texture_of(cpu, d, unit as usize))
             .flatten();
         let texture = surface.and_then(|id| {
-            let texture = texture(cpu, id);
+            let texture = texture(cpu, id, key);
             if texture.is_none() {
                 undrawn(cpu, Undrawn::Texture, id);
             }
@@ -750,12 +752,7 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         let Some(def) = states::render(id) else {
             continue;
         };
-        let mut want = render_value(d, def, setup, depth);
-        // Without table fog the pipeline has put the fog factor in the
-        // specular color's alpha, which is the card's vertex fog.
-        if id == states::RS_FOGTABLEMODE && d.state(RS_FOGENABLE) != 0 {
-            want = checked(def, d.state(RS_FOGTABLEMODE));
-        }
+        let want = render_value(d, def, setup, depth);
         if *have != want {
             pairs.push((id, want));
             *have = want;
@@ -828,24 +825,10 @@ fn chain(cpu: &mut Cpu, id: u32) -> Vec<u32> {
     levels
 }
 
-/// The bits of a pixel of `format` that mean something, for a color
-/// key.
-fn key_mask(format: Format) -> u32 {
-    match format {
-        Format::X8R8G8B8 => 0xFF_FFFF,
-        Format::X1R5G5B5 => 0x7FFF,
-        _ => match format.bytes() {
-            1 => 0xFF,
-            2 => 0xFFFF,
-            _ => 0xFFFF_FFFF,
-        },
-    }
-}
-
 /// The surface `id` as a texture of the card: where it is, or the
-/// HAL's copy of it.
-fn texture(cpu: &mut Cpu, id: u32) -> Option<Texture> {
-    in_place(cpu, id).or_else(|| cached(cpu, id))
+/// HAL's copy of it. `key`: D3DRENDERSTATE_COLORKEYENABLE is on.
+fn texture(cpu: &mut Cpu, id: u32, key: bool) -> Option<Texture> {
+    in_place(cpu, id).or_else(|| cached(cpu, id, key))
 }
 
 /// The surface `id` as a texture where it is: in card memory, in a
@@ -881,7 +864,7 @@ fn in_place(cpu: &mut Cpu, id: u32) -> Option<Texture> {
         palette: None,
         key: key
             .filter(|_| block.is_none())
-            .map(|key| key & key_mask(format)),
+            .map(|key| key & format.defined_bits()),
         images,
     };
     takes(cpu, |w| encode::define_texture(w, 1, &texture)).then_some(texture)
@@ -896,20 +879,21 @@ fn hash_words(words: &[u32]) -> u32 {
 }
 
 /// The HAL's copy of the surface `id`, made if it has none that is up
-/// to date.
-fn cached(cpu: &mut Cpu, id: u32) -> Option<Texture> {
+/// to date. `key`: the copy leaves out the texels of the surface's
+/// color key, for D3DRENDERSTATE_COLORKEYENABLE.
+fn cached(cpu: &mut Cpu, id: u32, key: bool) -> Option<Texture> {
     let (uniqueness, paletted, key) = {
         let s = state(cpu).surface(id)?;
         let paletted =
             s.format.flags & DDPF_PALETTEINDEXED8 != 0 && s.format.flags & DDPF_FOURCC == 0;
-        let key = match s.key_set & 1 << KEY_SRC_BLT != 0 {
+        let key = match key && s.key_set & 1 << KEY_SRC_BLT != 0 {
             true => [1, s.keys[KEY_SRC_BLT].0, s.keys[KEY_SRC_BLT].1],
             false => [0; 3],
         };
         (s.uniqueness, paletted, key)
     };
     // What a copy has besides the surface's pixels: a palettized
-    // texture's has the palette's colors, and every copy the color key.
+    // texture's has the palette's colors, and a keyed copy the color key.
     let mut variant = key.to_vec();
     if paletted {
         variant.extend(super::voodoo::palette(cpu, id));
@@ -925,7 +909,7 @@ fn cached(cpu: &mut Cpu, id: u32) -> Option<Texture> {
         return Some(c.texture.clone());
     }
     forget(cpu, |c| c.surface == id);
-    let image = image(cpu, id)?;
+    let image = image(cpu, id, key[0] != 0)?;
     let start = room(cpu, image.data.len() as u32)?;
     screen::write(cpu, start, &image.data);
     let mut texture = image.texture;
@@ -959,13 +943,21 @@ fn forget(cpu: &mut Cpu, gone: impl Fn(&Cached) -> bool) {
 }
 
 /// A block of `len` bytes of video memory for a copy, the least
-/// recently used copies going until there is one.
+/// recently used copies going until there is one. A copy this bind
+/// took for another stage stays: its block is where the card samples
+/// that stage's texture.
 fn room(cpu: &mut Cpu, len: u32) -> Option<u32> {
+    let clock = hal(cpu).clock;
     loop {
         if let Ok(at) = display::alloc(cpu, len.max(4)) {
             return Some(at);
         }
-        let oldest = hal(cpu).textures.iter().map(|c| c.used).min()?;
+        let textures = &hal(cpu).textures;
+        let oldest = textures
+            .iter()
+            .map(|c| c.used)
+            .filter(|&u| u != clock)
+            .min()?;
         forget(cpu, |c| c.used == oldest);
     }
 }
@@ -979,10 +971,10 @@ struct Image {
 
 /// The surface `id` and its mipmap levels as a copy for the card: its
 /// own bytes when the card takes its format and size, and 8-8-8-8 at
-/// the next power of two otherwise.
-fn image(cpu: &mut Cpu, id: u32) -> Option<Image> {
+/// the next power of two otherwise. `keyed`: the copy has the surface's
+/// color key.
+fn image(cpu: &mut Cpu, id: u32, keyed: bool) -> Option<Image> {
     let s = state(cpu).surface(id)?.clone();
-    let keyed = s.key_set & 1 << KEY_SRC_BLT != 0;
     let pow2 = s.width.is_power_of_two() && s.height.is_power_of_two();
     let fits = s.width.max(s.height) <= caps::TEXTURE_MAX;
     let mut data = Vec::new();
@@ -1005,7 +997,7 @@ fn image(cpu: &mut Cpu, id: u32) -> Option<Image> {
             }
         }
         let key = (keyed && format.block_bytes().is_none())
-            .then(|| s.keys[KEY_SRC_BLT].0 & key_mask(format));
+            .then(|| s.keys[KEY_SRC_BLT].0 & format.defined_bits());
         return Some(Image {
             texture: Texture {
                 format,
@@ -1024,8 +1016,8 @@ fn image(cpu: &mut Cpu, id: u32) -> Option<Image> {
         return None;
     }
     // Converted: the nearest texel of the surface for each of the
-    // copy's. The texels of the color key are 0, which no other texel
-    // of the copy is.
+    // copy's. In a keyed copy the texels of the color key are 0, which
+    // no other texel of the copy is.
     let size = |n: u32| {
         n.clamp(1, caps::TEXTURE_MAX)
             .next_power_of_two()
@@ -1089,9 +1081,9 @@ pub fn release(cpu: &mut Cpu, gone: u32) {
     if devices.iter().any(|&id| id != gone) || !there(cpu) {
         return;
     }
-    if hal(cpu).pid == current_pid(cpu) {
-        forget(cpu, |_| true);
-    }
+    // A process that ended or lost its video memory has no copies left,
+    // so the blocks given back are the copies' still.
+    forget(cpu, |_| true);
     let known = hal(cpu).sent.is_some();
     *hal(cpu) = Hal::default();
     if known {
@@ -1100,16 +1092,20 @@ pub fn release(cpu: &mut Cpu, gone: u32) {
     }
 }
 
-/// A process ended: its copies are gone with its video memory.
+/// A process ended: the blocks of its copies go back to video memory,
+/// which gives back only its surfaces' itself.
 pub fn process_ended(cpu: &mut Cpu, pid: u32) {
-    let h = hal(cpu);
-    if h.pid == pid {
-        h.textures.clear();
-        h.pid = 0;
-        if let Some(sent) = &mut h.sent {
-            sent.textures = Default::default();
-        }
+    if hal(cpu).pid == pid {
+        forget(cpu, |_| true);
+        hal(cpu).pid = 0;
     }
+}
+
+/// Video memory was lost: the copies' blocks went with it, and may be
+/// other surfaces' now, so the copies are dropped without giving them
+/// back. The textures are copied again when they are next drawn with.
+pub fn video_memory_lost(cpu: &mut Cpu) {
+    hal(cpu).textures.clear();
 }
 
 // Drawing.

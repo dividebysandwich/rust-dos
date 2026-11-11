@@ -33,8 +33,9 @@ pub fn tmus(cpu: &Cpu) -> u32 {
 }
 
 /// D3DCAPS8's words: a device's with `device`, else the adapter's.
-/// They describe a Voodoo's HAL on every card: Direct3D 8 draws through
-/// the HAL of whichever card there is, with what a Voodoo's does.
+/// They describe a Voodoo's HAL: Direct3D 8 has its HAL device on a
+/// Banshee or Voodoo3 only (`device::create`), until phase 5 of
+/// `docs/toadforce.md` puts it on a ToadForce.
 pub fn words(cpu: &Cpu, device: bool) -> [u32; 53] {
     use crate::win32::ddraw::d3d::hal;
     let tmus = tmus(cpu);

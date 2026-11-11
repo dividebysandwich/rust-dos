@@ -101,7 +101,7 @@ pub struct Description {
     pub target_depths: u32,
     pub z_depths: u32,
     /// The largest width and height of a texture, and the largest ratio
-    /// of the two (0 for any).
+    /// of the two.
     pub texture_max: u32,
     pub texture_aspect: u32,
     /// D3DPRASTERCAPS_, D3DPTEXTURECAPS_, D3DPTFILTERCAPS_ and
@@ -267,9 +267,15 @@ pub fn release(cpu: &mut Cpu, gone: u32) {
     toadforce::release(cpu, gone);
 }
 
-/// A process ended: what the HALs kept for it is gone with its video
-/// memory.
+/// A process ended: the HALs give back the video memory they kept for
+/// it.
 pub fn process_ended(cpu: &mut Cpu, pid: u32) {
     voodoo::process_ended(cpu, pid);
     toadforce::process_ended(cpu, pid);
+}
+
+/// Video memory was lost (a mode was set): the blocks the HALs took
+/// from it are gone, and other surfaces may have them now.
+pub fn video_memory_lost(cpu: &mut Cpu) {
+    toadforce::video_memory_lost(cpu);
 }

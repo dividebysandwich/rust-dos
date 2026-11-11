@@ -652,7 +652,8 @@ fn free_memory(cpu: &mut Cpu, id: u32) {
 }
 
 /// The mode changed or went: video memory is the new mode's, and the
-/// surfaces that had pixels there are lost.
+/// surfaces that had pixels there are lost, as are the blocks Direct3D's
+/// HAL took for its copies of textures.
 pub fn video_memory_lost(cpu: &mut Cpu) {
     for id in state(cpu).ids(|o| o.surface.as_ref().is_some_and(|s| s.memory == MEM_VIDEO)) {
         if let Some(s) = surface(cpu, id) {
@@ -661,6 +662,7 @@ pub fn video_memory_lost(cpu: &mut Cpu) {
             s.lost = true;
         }
     }
+    super::d3d::hal::video_memory_lost(cpu);
 }
 
 /// The DirectDraw object of the surface `id` went: it has no pixels.

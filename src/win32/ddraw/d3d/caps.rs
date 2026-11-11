@@ -273,4 +273,27 @@ mod tests {
         assert_eq!(ops, 0x9A4F);
         assert_eq!(ops & !VOODOO3_DRIVER, 0);
     }
+
+    /// A program that makes its depth buffer with a depth the ToadForce
+    /// reports, by DDSD_ZBUFFERBITDEPTH, gets one the card draws with:
+    /// 24 isn't among them, as a 24-bit buffer has no card format.
+    #[test]
+    fn every_depth_buffer_depth_a_toadforce_reports_is_one_its_hal_takes() {
+        use super::super::super::Format;
+        use super::super::super::surface::DDPF_ZBUFFER;
+        let d = hal::description(hal::Kind::ToadForce);
+        // DDBD_16, DDBD_24 and DDBD_32.
+        for (bit, bits) in [(0x400, 16), (0x200, 24), (0x100, 32)] {
+            let format = Format {
+                flags: DDPF_ZBUFFER,
+                bits,
+                ..Format::default()
+            };
+            let takes = hal::toadforce::takes_depth(&format, true);
+            assert_eq!(d.z_depths & bit != 0, takes, "{bits} bits");
+        }
+        for f in &d.z_formats {
+            assert!(hal::toadforce::takes_depth(f, true), "{f:?}");
+        }
+    }
 }
