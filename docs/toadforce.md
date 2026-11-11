@@ -1092,13 +1092,20 @@ Each phase is one or a few pull requests that leave main working.
    the software renderer on a four-core host as well as a larger one.
 5. **Direct3D 8 and OpenGL 1.3 on the card**, with the OpenGL front end
    separated from WGL. Proof: Max Payne, MDK2, Oni.
-6. **The Windows 98 driver**: display minidriver, then the DirectDraw
-   and Direct3D HAL. OpenGL there is decided and done after those.
-   Deferred (2026-11-12): the card serves the built-in Windows only
-   for now. Black & White, which this phase was to unblock, then
-   waits for #889 alone.
-7. **Level 2**, when a game that needs shaders is picked up. None of
-   the eight games of phase 0 does.
+6. **Performance.** Optimisation passes over the working
+   implementation of phases 1 to 5. The target: every game of the
+   primary list (the eight of phase 0) holds a stable 30 frames a
+   second, with some to spare, measured on a four-core host as well
+   as a larger one.
+
+Postponed, with no place in the order (decided 2026-11-12):
+
+- **Level 2**, until work starts on a game that needs shaders. None
+  of the eight games of phase 0 does.
+- **The Windows 98 driver** (display minidriver, then the DirectDraw
+  and Direct3D HAL, then OpenGL): the card serves the built-in
+  Windows only for now. Black & White, which the driver was to
+  unblock, then waits for #889 alone.
 
 Phases 2 and 3 come before the OpenGL renderer so that the reference
 exists before the renderer that is tested against it, and so that
