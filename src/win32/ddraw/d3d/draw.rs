@@ -341,10 +341,62 @@ pub fn draw_blended(
     flags: u32,
     blend: Option<Blend>,
 ) -> Result<(), u32> {
+    check_kind(kind)?;
+    if blend.is_none()
+        && !layout.rhw
+        && draw_on_card(cpu, id, version, layout, kind, vertices, order, flags)
+    {
+        return Ok(());
+    }
     let prims = primitives(kind, order, vertices.len())?;
     draw_clipped(
         cpu, id, version, layout, vertices, None, &prims, flags, blend,
     )
+}
+
+/// Draw on a card that transforms and lights vertices itself, which
+/// gets them as the program gave them. False when the device's card
+/// doesn't, or can't for this draw (`hal::draw_geometry`).
+#[allow(clippy::too_many_arguments)]
+fn draw_on_card(
+    cpu: &mut Cpu,
+    id: u32,
+    version: u32,
+    layout: &Layout,
+    kind: u32,
+    vertices: &[Vertex],
+    order: Option<&[u32]>,
+    flags: u32,
+) -> bool {
+    let Some(setup) = setup(cpu, Pass::Draw, id, version, layout, flags) else {
+        return false;
+    };
+    let drawn = super::device::lend(cpu, id, |cpu, d| {
+        // A program that asks for the clip status or the extents gets
+        // them from the pipeline's vertices.
+        d.clip_status[0] & 3 == 0
+            && super::hal::draw_geometry(cpu, d, &setup, layout, vertices, kind, order)
+    });
+    if drawn != Some(true) {
+        return false;
+    }
+    let n = order.map_or(vertices.len(), |o| o.len()) as u32;
+    let Some(d) = get(cpu, id) else {
+        return true;
+    };
+    let (stat, primitives) = match kind {
+        pipeline::POINTLIST => (2, n),
+        pipeline::LINELIST => (1, n / 2),
+        pipeline::LINESTRIP => (1, n.saturating_sub(1)),
+        pipeline::TRIANGLELIST => (0, n / 3),
+        _ => (0, n.saturating_sub(2)),
+    };
+    d.stats[stat] = d.stats[stat].wrapping_add(primitives);
+    d.stats[4] = d.stats[4].wrapping_add(vertices.len() as u32);
+    // The target's pixels changed, for a texture made of it.
+    let target = d.target;
+    super::super::surface::changed(cpu, target);
+    true
 }
 
 /// The `kind` primitives of `count` vertices, in the order `order` or

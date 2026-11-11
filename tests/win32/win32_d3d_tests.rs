@@ -1289,6 +1289,14 @@ enum Step {
     Draw(Vec<Tl>),
     /// DrawPrimitive of another D3DPT_ type, such as a point or line list.
     Prims(u32, Vec<Tl>),
+    /// A method of the device (Direct3D 7) with numbers for arguments
+    /// and, after them, a pointer to words if there are any:
+    /// SetTransform, SetLight, SetMaterial, LightEnable.
+    Call(u32, Vec<u32>, Vec<u32>),
+    /// DrawPrimitive of a triangle list of vertices that aren't
+    /// transformed, laid out as the FVF: the words of all of them, and
+    /// how many they are.
+    World(u32, Vec<u32>, u32),
     /// 256x256 textures made in video memory until there is no more
     /// room (Direct3D 7), as Unreal does.
     Fill,
@@ -1467,6 +1475,13 @@ fn scene_program_with(scene: &Scene, bpp: u32, checked: &mut Vec<u32>) -> (Vec<u
                 put32(&mut d, at + 100 + 4 * i as u32, *v as u32);
             }
             at += 116;
+        }
+        if let Step::Call(_, _, words) | Step::World(_, words, _) = step {
+            draws.push(at);
+            for word in words {
+                put32(&mut d, at, *word);
+                at += 4;
+            }
         }
         if let Step::Draw(verts) | Step::Prims(_, verts) = step {
             draws.push(at);
@@ -1687,6 +1702,25 @@ fn scene_program_with(scene: &Scene, bpp: u32, checked: &mut Vec<u32>) -> (Vec<u
                     let args = [rect, Arg::I(0), Arg::I(0), Arg::I(flags), Arg::At(at)];
                     c.com(a, l, ZBUF, SURF_BLT, &args)?;
                 }
+                Step::Call(method, numbers, words) => {
+                    let at = *draws.next().unwrap();
+                    let mut args: Vec<Arg> = numbers.iter().map(|n| Arg::I(*n)).collect();
+                    if !words.is_empty() {
+                        args.push(Arg::At(at));
+                    }
+                    c.com(a, l, DEVICE, *method, &args)?;
+                }
+                Step::World(fvf, _, count) => {
+                    let at = *draws.next().unwrap();
+                    let args = [
+                        Arg::I(D3DPT_TRIANGLELIST),
+                        Arg::I(*fvf),
+                        Arg::At(at),
+                        Arg::I(*count),
+                        Arg::I(0),
+                    ];
+                    c.com(a, l, DEVICE, draw, &args)?;
+                }
                 Step::Draw(verts) | Step::Prims(_, verts) => {
                     let at = *draws.next().unwrap();
                     let kind = match step {
@@ -1797,8 +1831,15 @@ fn drew_on_the_card(cpu: &Cpu, scene: &Scene) {
     let draws = scene
         .steps
         .iter()
-        .filter(|step| matches!(step, Step::Draw(_) | Step::Prims(..)))
+        .filter(|step| matches!(step, Step::Draw(_) | Step::Prims(..) | Step::World(..)))
         .count() as u64;
+    let transformed = scene
+        .steps
+        .iter()
+        .filter(|step| matches!(step, Step::World(..)))
+        .count() as u64;
+    // The card transforms the vertices that aren't transformed.
+    assert_eq!(counts.transformed, transformed, "{counts:?}");
     assert!(counts.draws >= draws, "{counts:?}");
     assert!(draws == 0 || counts.primitives > 0, "{counts:?}");
 }
@@ -3670,6 +3711,136 @@ fn a_toadforce_draws_into_a_32_bit_target_with_a_24_bit_depth_buffer() {
     let p = draw_scene32_toadforce("toadforce_32", &scene);
     assert_eq!(p[30 * 64 + 10], 0x12_3456);
     assert_eq!(p[30 * 64 + 50], 0xAB_CDEF);
+}
+
+// Vertices the card transforms and lights itself.
+
+const RS_CULLMODE: u32 = 22;
+const RS_LIGHTING: u32 = 137;
+const TS_WORLD: u32 = 1;
+const TS_VIEW: u32 = 2;
+
+fn bits(numbers: &[f32]) -> Vec<u32> {
+    numbers.iter().map(|n| n.to_bits()).collect()
+}
+
+/// A triangle of positions and, if given, one normal or one color
+/// for all three, as the words of its vertices.
+fn world_triangle(p: [[f32; 3]; 3], normal: Option<[f32; 3]>, color: Option<u32>) -> Vec<u32> {
+    let mut words = Vec::new();
+    for position in p {
+        words.extend(bits(&position));
+        words.extend(normal.iter().flat_map(|n| bits(n)));
+        words.extend(color);
+    }
+    words
+}
+
+/// A D3DLIGHT7 that is white: its type, position, direction and the
+/// angles of a spot light's cones.
+fn light7(kind: u32, position: [f32; 3], direction: [f32; 3], cones: [f32; 2]) -> Vec<u32> {
+    let mut words = vec![kind];
+    words.extend(bits(&[1.0; 4]));
+    words.extend(bits(&[0.0; 8]));
+    words.extend(bits(&position));
+    words.extend(bits(&direction));
+    // Its range and falloff, and no attenuation.
+    words.extend(bits(&[10.0, 1.0, 1.0, 0.0, 0.0]));
+    words.extend(bits(&cones));
+    words
+}
+
+/// SetMaterial of a D3DMATERIAL7 with the diffuse color `diffuse`, and
+/// light 0 as `light`, switched on.
+fn lit_by(light: Vec<u32>, diffuse: [f32; 3]) -> Vec<Step> {
+    let mut material = bits(&[diffuse[0], diffuse[1], diffuse[2], 1.0]);
+    material.extend(bits(&[0.0; 13]));
+    vec![
+        Step::State(RS_CULLMODE, 1),
+        Step::Call(DEV7_SET_MATERIAL, vec![], material),
+        Step::Call(DEV7_SET_LIGHT, vec![0], light),
+        Step::Call(DEV7_LIGHT_ENABLE, vec![0, 1], vec![]),
+    ]
+}
+
+#[test]
+fn a_toadforce_transforms_vertices_by_the_devices_matrices() {
+    // The top left quarter's upper triangle, which the world matrix
+    // moves into the top right quarter.
+    let triangle = [[-1.0, 1.0, 0.5], [0.0, 1.0, 0.5], [-1.0, 0.0, 0.5]];
+    let mut world = [0.0f32; 16];
+    (world[0], world[5], world[10], world[15], world[12]) = (1.0, 1.0, 1.0, 1.0, 1.0);
+    let scene = toadforce_scene(vec![
+        Step::State(RS_LIGHTING, 0),
+        Step::State(RS_CULLMODE, 1),
+        Step::Call(DEV7_SET_TRANSFORM, vec![TS_WORLD], bits(&world)),
+        Step::World(
+            D3DFVF_XYZ | D3DFVF_DIFFUSE,
+            world_triangle(triangle, None, Some(0xFF12_3456)),
+            3,
+        ),
+    ]);
+    let p = draw_scene32_toadforce("toadforce_world", &scene);
+    assert_eq!(p[5 * 64 + 40], 0x12_3456);
+    assert_eq!(p[5 * 64 + 34], 0x12_3456);
+    assert_eq!(p[5 * 64 + 20], 0);
+    assert_eq!(p[30 * 64 + 40], 0);
+    // What is off the target's right edge is cut.
+    assert_eq!(p[6 * 64 + 63], 0);
+    assert_eq!(p[64 + 61], 0x12_3456);
+}
+
+#[test]
+fn a_toadforce_lights_vertices_with_the_devices_lights_and_material() {
+    // A light along z, on a surface that faces it and on one tilted
+    // so that the cosine is 0.8.
+    let facing = [[-1.0, 1.0, 0.5], [0.0, 1.0, 0.5], [-1.0, 0.0, 0.5]];
+    let tilted = [[0.0, 1.0, 0.5], [1.0, 1.0, 0.5], [0.0, 0.0, 0.5]];
+    let fvf = D3DFVF_XYZ | D3DFVF_NORMAL;
+    let mut steps = lit_by(light7(3, [0.0; 3], [0.0, 0.0, 1.0], [0.0; 2]), [1.0, 0.5, 0.25]);
+    steps.push(Step::World(
+        fvf,
+        world_triangle(facing, Some([0.0, 0.0, -1.0]), None),
+        3,
+    ));
+    steps.push(Step::World(
+        fvf,
+        world_triangle(tilted, Some([0.0, 0.6, -0.8]), None),
+        3,
+    ));
+    let p = draw_scene32_toadforce("toadforce_lit", &toadforce_scene(steps));
+    assert_eq!(p[5 * 64 + 5], 0xFF_8040);
+    assert_eq!(p[5 * 64 + 40], 0xCC_6633);
+    assert_eq!(p[40 * 64 + 40], 0);
+}
+
+/// A spot light behind a camera that looks the other way round, at a
+/// small triangle in the middle of its cone.
+fn spot_scene(card: bool) -> Scene {
+    let mut view = [0.0f32; 16];
+    (view[0], view[5], view[10], view[15]) = (-1.0, 1.0, -1.0, 1.0);
+    let triangle = [[-0.1, 0.1, -0.5], [0.1, 0.1, -0.5], [-0.1, -0.1, -0.5]];
+    let spot = light7(2, [0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [1.0, 2.0]);
+    let mut steps = lit_by(spot, [1.0; 3]);
+    steps.push(Step::Call(DEV7_SET_TRANSFORM, vec![TS_VIEW], bits(&view)));
+    steps.push(Step::World(
+        D3DFVF_XYZ | D3DFVF_NORMAL,
+        world_triangle(triangle, Some([0.0, 0.0, 1.0]), None),
+        3,
+    ));
+    let scene = toadforce_scene(steps);
+    if card { scene } else { Scene { api: Api::D3D7, ..scene } }
+}
+
+#[test]
+fn a_spot_light_points_where_the_view_matrix_turns_it() {
+    // The card's transform and lighting.
+    let p = draw_scene32_toadforce("toadforce_spot", &spot_scene(true));
+    let lit = p[30 * 64 + 33];
+    assert!(lit & 0xFF >= 0xF8 && lit >> 16 >= 0xF8, "{lit:X}");
+    // The pipeline's, for a Voodoo3.
+    let p = draw_scene("voodoo3_spot", &spot_scene(false));
+    assert_rgb(&p, 33, 30, [255, 255, 255], 12);
 }
 
 #[test]

@@ -22,7 +22,7 @@ pub mod voodoo;
 
 use super::super::Format;
 use super::device::Device;
-use super::pipeline::{Rasterizer, ScreenVertex, Setup};
+use super::pipeline::{Layout, Rasterizer, ScreenVertex, Setup, Vertex};
 use crate::cpu::Cpu;
 
 pub(in crate::win32::ddraw) use voodoo::card_fill;
@@ -182,6 +182,26 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     match kind_of(cpu, d) {
         Kind::Voodoo => voodoo::bind(cpu, d, setup).map(Card::Voodoo),
         Kind::ToadForce => toadforce::bind(cpu, d, setup).map(Card::ToadForce),
+    }
+}
+
+/// Draw `kind` primitives of `vertices`, which aren't in screen space,
+/// in the order `order` or as they are, on a card that transforms and
+/// lights vertices itself. False when the card of `d` doesn't, or
+/// can't for this draw: the pipeline then does, and hands the card
+/// screen vertices.
+pub fn draw_geometry(
+    cpu: &mut Cpu,
+    d: &Device,
+    setup: &Setup,
+    layout: &Layout,
+    vertices: &[Vertex],
+    kind: u32,
+    order: Option<&[u32]>,
+) -> bool {
+    match kind_of(cpu, d) {
+        Kind::Voodoo => false,
+        Kind::ToadForce => toadforce::draw_geometry(cpu, d, setup, layout, vertices, kind, order),
     }
 }
 

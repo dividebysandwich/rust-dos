@@ -11,12 +11,23 @@
 //! Nothing here decides how a state draws: that is the card's
 //! (`docs/toadforce-spec.md`).
 //!
-//! The pipeline has transformed, lit, clipped and culled the vertices
-//! by then, so the card gets screen vertices with the two sets of
-//! texture coordinates the pipeline works out, one for each of the
-//! first two stages. `Raster` collects them into `DRAW` commands and
-//! hands the card all of a batch's at once, which the card draws on its
-//! threads.
+//! A draw of vertices that aren't in screen space goes to the card as
+//! the program gave it (`draw_geometry`): the card has the device's
+//! matrices, lights, material and clip planes, and transforms, lights,
+//! clips and culls the vertices itself. The device's map from clip
+//! space to the screen, which may be Direct3D 5's viewport with its
+//! own scale, is folded into the projection matrix the card gets, so
+//! the card's viewport is only the rectangle it draws into.
+//!
+//! The pipeline keeps the draws the card can't do as it would
+//! (`can_transform`): blended and tweened vertices, clip status and
+//! extents the program reads back, a depth range outside 0 to 1, and
+//! screen vertices, which need no transform. For those the pipeline
+//! has transformed, lit, clipped and culled the vertices, so the card
+//! gets screen vertices with the two sets of texture coordinates the
+//! pipeline works out, one for each of the first two stages. `Raster`
+//! collects them into `DRAW` commands and hands the card all of a
+//! batch's at once, which the card draws on its threads.
 //!
 //! A texture surface in video memory whose format and size the card
 //! takes is sampled where it is: `DEFINE_TEXTURE` names the surface's
@@ -38,19 +49,24 @@ use super::super::device::{
     Device, RS_TEXTUREMAPBLEND, TA_TEXTURE, TOP_DISABLE, TOP_SELECTARG1, TSS_ALPHAARG1,
     TSS_ALPHAOP, TSS_COLOROP,
 };
-use super::super::pipeline::{Rasterizer, ScreenVertex, Setup};
+use super::super::pipeline::{
+    self, LIGHT_GLSPOT, Layout, Matrix, Rasterizer, SHADE_FLAT, ScreenVertex, Setup, Vertex,
+};
 use super::{Description, Fill};
 use crate::cpu::Cpu;
 use crate::toadforce::format::{Format, Rect, Surface as CardSurface};
 use crate::toadforce::level1::states::{self, Def};
-use crate::toadforce::level1::{self, Depth, Target, Texture, Viewport, encode};
+use crate::toadforce::level1::{
+    self, CLIP_PLANES, Depth, LIGHTS, Light, Material, TRANSFORMS, Target, Texture, Viewport,
+    encode,
+};
 use crate::toadforce::{caps, regs};
 use crate::win32::screen;
 
 /// The textures a draw has at once: the sets of texture coordinates
 /// the pipeline gives a screen vertex. The card takes more
-/// (`caps::TEXTURES_AT_ONCE`), which the device gets once the card
-/// transforms the vertices itself.
+/// (`caps::TEXTURES_AT_ONCE`), which the device gets when every draw
+/// that uses them is one the card transforms itself (#948).
 pub const UNITS: u32 = 2;
 
 /// The band the pipeline clips what the card draws to. The card takes
@@ -131,6 +147,19 @@ pub struct Sent {
     /// unit's stage has it.
     textures: [Option<Texture>; UNITS as usize],
     bound: [bool; UNITS as usize],
+    geometry: Geometry,
+}
+
+/// What the HAL gives the card for the vertices the card transforms
+/// and lights.
+#[derive(Clone, Debug, PartialEq)]
+struct Geometry {
+    transforms: [Matrix; TRANSFORMS],
+    material: Material,
+    lights: [Light; LIGHTS],
+    /// Bit n: light n is on.
+    on: u32,
+    planes: [[f32; 4]; CLIP_PLANES],
 }
 
 impl Sent {
@@ -152,13 +181,38 @@ impl Sent {
             viewport: Viewport::default(),
             textures: Default::default(),
             bound: [false; UNITS as usize],
+            geometry: Geometry {
+                transforms: [pipeline::IDENTITY; TRANSFORMS],
+                material: Material::default(),
+                lights: [Light::default(); LIGHTS],
+                on: 0,
+                planes: [[0.0; 4]; CLIP_PLANES],
+            },
         }
     }
 }
 
-/// The render states the HAL sets. The rest are the card's transform
-/// and lighting, which the pipeline does before the card.
-const RENDER: [u32; 39] = [
+/// The render states of the card's transform and lighting, which a
+/// draw of screen vertices leaves at their reset values.
+const GEOMETRY: [u32; 13] = [
+    states::RS_RANGEFOGENABLE,
+    states::RS_CLIPPING,
+    states::RS_LIGHTING,
+    states::RS_AMBIENT,
+    states::RS_FOGVERTEXMODE,
+    states::RS_COLORVERTEX,
+    states::RS_LOCALVIEWER,
+    states::RS_NORMALIZENORMALS,
+    states::RS_DIFFUSEMATERIALSOURCE,
+    states::RS_SPECULARMATERIALSOURCE,
+    states::RS_AMBIENTMATERIALSOURCE,
+    states::RS_EMISSIVEMATERIALSOURCE,
+    states::RS_CLIPPLANEENABLE,
+];
+
+/// The render states the HAL sets: the rasteriser's, and `GEOMETRY`.
+/// The others stay at their reset values.
+const RENDER: [u32; 52] = [
     states::RS_ZENABLE,
     states::RS_FILLMODE,
     states::RS_SHADEMODE,
@@ -198,6 +252,19 @@ const RENDER: [u32; 39] = [
     states::RS_BLENDOP,
     states::RS_PIXEL_CENTRE,
     states::RS_FOG_BY_W,
+    states::RS_RANGEFOGENABLE,
+    states::RS_CLIPPING,
+    states::RS_LIGHTING,
+    states::RS_AMBIENT,
+    states::RS_FOGVERTEXMODE,
+    states::RS_COLORVERTEX,
+    states::RS_LOCALVIEWER,
+    states::RS_NORMALIZENORMALS,
+    states::RS_DIFFUSEMATERIALSOURCE,
+    states::RS_SPECULARMATERIALSOURCE,
+    states::RS_AMBIENTMATERIALSOURCE,
+    states::RS_EMISSIVEMATERIALSOURCE,
+    states::RS_CLIPPLANEENABLE,
 ];
 
 /// Why the card leaves a draw, or a part of it, undone.
@@ -560,10 +627,33 @@ fn checked(def: &Def, value: u32) -> u32 {
     }
 }
 
-/// The value of the render state `def` for the device `d`.
-fn render_value(d: &Device, def: &Def, setup: &Setup, depth: Option<Format>) -> u32 {
+/// The value of the render state `def` for the device `d`. With
+/// `lit` the card transforms and lights the draw's vertices;
+/// without, they are the pipeline's screen vertices.
+fn render_value(d: &Device, def: &Def, setup: &Setup, depth: Option<Format>, lit: bool) -> u32 {
     use states::*;
+    if !lit && GEOMETRY.contains(&def.id) {
+        return def.reset;
+    }
+    let lighting = setup.lighting.as_ref();
+    let source = |which: usize| lighting.map_or(0, |l| l.sources[which]);
     let value = match def.id {
+        RS_CULLMODE if lit => setup.cull,
+        RS_FILLMODE if lit => setup.fill,
+        RS_SHADEMODE if lit => 2 - (setup.shade == SHADE_FLAT) as u32,
+        RS_CLIPPING => setup.clip as u32,
+        RS_LIGHTING => lighting.is_some() as u32,
+        RS_AMBIENT => lighting.map_or(0, |l| pipeline::color(l.ambient)),
+        RS_COLORVERTEX => lighting.is_some_and(|l| l.color_vertex) as u32,
+        RS_LOCALVIEWER => lighting.is_some_and(|l| l.local_viewer) as u32,
+        RS_NORMALIZENORMALS => lighting.is_some_and(|l| l.normalize) as u32,
+        RS_DIFFUSEMATERIALSOURCE => source(0),
+        RS_SPECULARMATERIALSOURCE => source(1),
+        RS_AMBIENTMATERIALSOURCE => source(2),
+        RS_EMISSIVEMATERIALSOURCE => source(3),
+        RS_FOGVERTEXMODE => setup.fog.map_or(0, |f| f.mode),
+        RS_RANGEFOGENABLE => setup.fog.is_some_and(|f| f.range) as u32,
+        RS_CLIPPLANEENABLE => (1 << setup.planes.len().min(CLIP_PLANES)) - 1,
         // The pipeline culls, makes the lines and points of the other
         // fill modes, and gives a flat primitive's vertices one color.
         RS_CULLMODE => 1,
@@ -598,13 +688,16 @@ fn render_value(d: &Device, def: &Def, setup: &Setup, depth: Option<Format>) -> 
 }
 
 /// The value of stage `stage`'s state `def` for the device `d`.
-/// `diffuse_alpha` gives stage 0's alpha the diffuse one (see `bind`).
-fn stage_value(d: &Device, at: u32, def: &Def, diffuse_alpha: bool) -> u32 {
+/// `diffuse_alpha` gives stage 0's alpha the diffuse one (see `bind`),
+/// and `lit` is `render_value`'s.
+fn stage_value(d: &Device, at: u32, def: &Def, diffuse_alpha: bool, lit: bool) -> u32 {
     use states::*;
     let value = d.stage(at, def.id);
     let value = match def.id {
-        // The pipeline gives each of the first stages its coordinates,
-        // generated and transformed already.
+        // The card makes the coordinates of a vertex it transforms as
+        // the device's states say.
+        TSS_TEXCOORDINDEX | TSS_TEXTURETRANSFORMFLAGS if lit => value,
+        // The pipeline gives each of the first stages its coordinates.
         TSS_TEXCOORDINDEX => at.min(UNITS - 1),
         TSS_TEXTURETRANSFORMFLAGS => 0,
         TSS_ALPHAARG1 if at == 0 && diffuse_alpha => ARG_DIFFUSE,
@@ -651,8 +744,15 @@ pub struct Card {
 }
 
 /// Whether the device `d` can be drawn by the card now. The card's
-/// state is then the device's.
+/// state is then the device's, for screen vertices.
 pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
+    bind_as(cpu, d, setup, false)
+}
+
+/// `bind`, with `lit` for vertices the card transforms and lights:
+/// the card then has the device's matrices, lights, material and clip
+/// planes too, which `can_transform` found it to take.
+fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> {
     let target = target(cpu, d)?;
     let pid = current_pid(cpu);
     if hal(cpu).pid != pid {
@@ -688,7 +788,7 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         None => [left, top, right, bottom],
     };
     let (left, top) = (left.min(width), top.min(height));
-    let viewport = Viewport {
+    let mut viewport = Viewport {
         x: left,
         y: top,
         width: right.saturating_sub(left),
@@ -696,9 +796,80 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         min_z: 0.0,
         max_z: 1.0,
     };
+    let lit = lit && viewport.width != 0 && viewport.height != 0;
+    if lit {
+        // The card's viewport is the rectangle it draws into, which
+        // the scissor box may have cut down, and the depths are the
+        // device's.
+        (viewport.min_z, viewport.max_z) = (m.oz, m.oz + m.sz);
+    }
     if sent.viewport != viewport {
         encode::viewport(&mut words, &viewport);
         sent.viewport = viewport;
+    }
+    if lit {
+        // The card puts clip x and y of -1 to 1 on its viewport. The
+        // device's map from clip space to the screen comes first, as
+        // a last step of the projection that undoes the card's.
+        let (w, h) = (viewport.width as f32, viewport.height as f32);
+        let mut fold = pipeline::IDENTITY;
+        fold[0] = 2.0 * m.sx / w;
+        fold[5] = 2.0 * m.sy / h;
+        fold[12] = 2.0 * (m.ox - left as f32) / w - 1.0;
+        fold[13] = 2.0 * (top as f32 - m.oy) / h + 1.0;
+        let projection = pipeline::multiply(&setup.projection, &fold);
+        let g = &mut sent.geometry;
+        let mut transforms = vec![
+            (level1::TRANSFORM_WORLD, setup.world),
+            (level1::TRANSFORM_VIEW, setup.view),
+            (level1::TRANSFORM_PROJECTION, projection),
+        ];
+        for stage in 0..caps::STAGES {
+            if d.stage(stage, states::TSS_TEXTURETRANSFORMFLAGS) & 0xFF != 0 {
+                let matrix = d.transforms[TS_TEXTURE0 + stage as usize];
+                transforms.push((level1::TRANSFORM_TEXTURE + stage, matrix));
+            }
+        }
+        for (which, matrix) in transforms {
+            if g.transforms[which as usize] != matrix {
+                encode::transform(&mut words, which, &matrix);
+                g.transforms[which as usize] = matrix;
+            }
+        }
+        if let Some(l) = &setup.lighting {
+            let m = &l.material;
+            let material = Material {
+                diffuse: m.diffuse,
+                ambient: m.ambient,
+                specular: m.specular,
+                emissive: m.emissive,
+                power: m.power,
+            };
+            if g.material != material {
+                encode::material(&mut words, &material);
+                g.material = material;
+            }
+            for (slot, light) in l.lights.iter().enumerate() {
+                let light = card_light(light);
+                if g.lights[slot] != light {
+                    encode::light(&mut words, slot as u32, &light);
+                    g.lights[slot] = light;
+                }
+            }
+            let on = (1u32 << l.lights.len()) - 1;
+            for slot in 0..LIGHTS as u32 {
+                if (g.on ^ on) >> slot & 1 != 0 {
+                    encode::enable_light(&mut words, slot, on >> slot & 1 != 0);
+                }
+            }
+            g.on = on;
+        }
+        for (i, plane) in setup.planes.iter().take(CLIP_PLANES).enumerate() {
+            if g.planes[i] != *plane {
+                encode::clip_plane(&mut words, i as u32, plane);
+                g.planes[i] = *plane;
+            }
+        }
     }
 
     // The textures of the stages in use.
@@ -759,7 +930,7 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         let Some(def) = states::render(id) else {
             continue;
         };
-        let want = render_value(d, def, setup, depth);
+        let want = render_value(d, def, setup, depth, lit);
         if *have != want {
             pairs.push((id, want));
             *have = want;
@@ -773,7 +944,7 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         pairs.clear();
         let have = &mut sent.stages[stage as usize * per_stage..][..per_stage];
         for (have, def) in have.iter_mut().zip(states::STAGE) {
-            let want = stage_value(d, stage, def, diffuse_alpha);
+            let want = stage_value(d, stage, def, diffuse_alpha, lit);
             if *have != want {
                 pairs.push((def.id, want));
                 *have = want;
@@ -1192,17 +1363,257 @@ impl Raster<'_> {
             return;
         }
         submit(self.cpu, &self.words);
-        // The card wrote its memory itself, past `screen::write`.
-        let [left, top, right, bottom] = self.card.clip;
-        let (at, pitch, bytes) = self.card.target;
-        let rect = crate::win32::gdi32::Rect {
-            left: left as i32,
-            top: top as i32,
-            right: right as i32,
-            bottom: bottom as i32,
-        };
-        screen::drew_rects(self.cpu, at, pitch, bytes, &[rect]);
+        drew(self.cpu, &self.card);
     }
+}
+
+/// The card drew into the rectangle of `card`, in its memory itself,
+/// past `screen::write`.
+fn drew(cpu: &mut Cpu, card: &Card) {
+    let [left, top, right, bottom] = card.clip;
+    let (at, pitch, bytes) = card.target;
+    let rect = crate::win32::gdi32::Rect {
+        left: left as i32,
+        top: top as i32,
+        right: right as i32,
+        bottom: bottom as i32,
+    };
+    screen::drew_rects(cpu, at, pitch, bytes, &[rect]);
+}
+
+// Vertices the card transforms and lights.
+
+/// D3DTRANSFORMSTATE_TEXTURE0, the first of the device's texture
+/// matrices.
+const TS_TEXTURE0: usize = 16;
+
+/// The words of a command at most, with room to spare under the
+/// 65535 its length field holds.
+const COMMAND_WORDS: usize = 60000;
+
+/// A light of the device as the card has one.
+fn card_light(l: &pipeline::Light) -> Light {
+    Light {
+        // Direct3D 5's second spot light is a spot light.
+        kind: if l.kind == LIGHT_GLSPOT {
+            level1::LIGHT_SPOT
+        } else {
+            l.kind
+        },
+        diffuse: l.diffuse,
+        specular: l.specular,
+        ambient: l.ambient,
+        position: l.position,
+        direction: l.direction,
+        // A range of 0 is no limit.
+        range: if l.range > 0.0 { l.range } else { f32::MAX },
+        falloff: l.falloff,
+        attenuation: l.attenuation,
+        theta: l.theta,
+        phi: l.phi,
+        spot_model: 0,
+    }
+}
+
+/// Whether the card can transform and light a draw with `setup` as
+/// the pipeline would: its state then holds everything the pipeline
+/// goes by, in values the card's commands take.
+fn can_transform(d: &Device, setup: &Setup) -> bool {
+    let finite = |numbers: &[f32]| numbers.iter().all(|n| n.is_finite());
+    let m = &setup.view_map;
+    // The card cuts at z of 0 to w, and its depths are 0 to 1.
+    let depths = m.bounds[4] == 0.0
+        && m.bounds[5] == 1.0
+        && (0.0..=1.0).contains(&m.oz)
+        && (0.0..=1.0).contains(&(m.oz + m.sz))
+        && m.sz >= 0.0;
+    let matrices = [setup.world, setup.view, setup.projection]
+        .iter()
+        .chain(&d.transforms[TS_TEXTURE0..])
+        .all(|matrix| finite(matrix));
+    let lighting = setup.lighting.as_ref().is_none_or(|l| {
+        let m = &l.material;
+        l.lights.len() <= LIGHTS
+            && finite(&[m.diffuse, m.ambient, m.specular, m.emissive].concat())
+            && m.power.is_finite()
+            && l.lights.iter().all(|light| {
+                let l = card_light(light);
+                (level1::LIGHT_POINT..=level1::LIGHT_DIRECTIONAL).contains(&l.kind)
+                    && finite(&[l.diffuse, l.specular, l.ambient].concat())
+                    && finite(&[l.position, l.direction, l.attenuation].concat())
+                    && finite(&[l.range, l.falloff, l.theta, l.phi])
+            })
+    });
+    // The states the card gets as the device has them.
+    let stages = (0..caps::STAGES).all(|stage| {
+        [states::TSS_TEXCOORDINDEX, states::TSS_TEXTURETRANSFORMFLAGS]
+            .iter()
+            .all(|&id| {
+                let def = states::STAGE.iter().find(|def| def.id == id);
+                def.is_some_and(|def| def.kind.takes(d.stage(stage, id)))
+            })
+    });
+    let modes = (1..=3).contains(&setup.cull)
+        && (1..=3).contains(&setup.fill)
+        && setup.fog.is_none_or(|f| f.mode <= 3)
+        && setup
+            .lighting
+            .as_ref()
+            .is_none_or(|l| l.sources.iter().all(|&source| source <= 2));
+    setup.blend.is_none()
+        && stages
+        && modes
+        && depths
+        && finite(&[m.ox, m.oy, m.sx, m.sy])
+        && matrices
+        && lighting
+        && setup.planes.iter().all(|plane| finite(plane))
+}
+
+/// The card's layout for vertices of `layout`, and the words of one.
+fn card_layout(layout: &Layout) -> (u32, usize) {
+    let mut fvf = 0x002;
+    let mut words = 3;
+    for (present, bit, size) in [
+        (layout.normal.is_some(), 0x010, 3),
+        (layout.diffuse.is_some(), 0x040, 1),
+        (layout.specular.is_some(), 0x080, 1),
+    ] {
+        if present {
+            fvf |= bit;
+            words += size;
+        }
+    }
+    fvf |= (layout.textures as u32) << 8;
+    for (set, &(_, numbers)) in layout.tex.iter().enumerate().take(layout.textures) {
+        // Two numbers are size 0, three 1, four 2 and one 3.
+        fvf |= [3, 0, 1, 2][numbers.clamp(1, 4) as usize - 1] << (16 + 2 * set);
+        words += numbers.clamp(1, 4) as usize;
+    }
+    (fvf, words)
+}
+
+/// The words of the vertex `v` in the card's layout for `layout`.
+fn card_vertex(words: &mut Vec<u32>, layout: &Layout, v: &Vertex) {
+    words.extend(v.position[..3].iter().map(|n| n.to_bits()));
+    if layout.normal.is_some() {
+        words.extend(v.normal.iter().map(|n| n.to_bits()));
+    }
+    if layout.diffuse.is_some() {
+        words.push(v.diffuse.unwrap_or(0xFFFF_FFFF));
+    }
+    if layout.specular.is_some() {
+        words.push(v.specular.unwrap_or(0xFF00_0000));
+    }
+    for (set, &(_, numbers)) in layout.tex.iter().enumerate().take(layout.textures) {
+        let numbers = numbers.clamp(1, 4) as usize;
+        words.extend(v.tex[set][..numbers].iter().map(|n| n.to_bits()));
+    }
+}
+
+/// The vertices of each primitive of a draw of `kind` over `n`
+/// vertices, as a list: every point by itself, every line's two and
+/// every triangle's three, the one that gives a flat triangle its
+/// colour first. With them the list's kind and the vertices of one.
+fn as_list(kind: u32, n: usize) -> (u32, usize, Vec<usize>) {
+    let mut list = Vec::new();
+    match kind {
+        1 => list.extend(0..n),
+        2 => list.extend(0..n - n % 2),
+        3 => (1..n).for_each(|i| list.extend([i - 1, i])),
+        4 => list.extend(0..n - n % 3),
+        // Every other triangle of a strip is wound the other way.
+        5 => (2..n).for_each(|i| match i % 2 {
+            0 => list.extend([i - 2, i - 1, i]),
+            _ => list.extend([i - 2, i, i - 1]),
+        }),
+        _ => (2..n).for_each(|i| list.extend([i - 1, i, 0])),
+    }
+    match kind {
+        1 => (1, 1, list),
+        2 | 3 => (2, 2, list),
+        _ => (4, 3, list),
+    }
+}
+
+/// Draw `kind` primitives of `vertices`, which aren't in screen space,
+/// in the order `order` or as they are: the card transforms and lights
+/// them. False when the card can't draw the device, or can't as the
+/// pipeline would: the pipeline then does.
+pub fn draw_geometry(
+    cpu: &mut Cpu,
+    d: &Device,
+    setup: &Setup,
+    layout: &Layout,
+    vertices: &[Vertex],
+    kind: u32,
+    order: Option<&[u32]>,
+) -> bool {
+    let count = vertices.len();
+    if !can_transform(d, setup) || order.is_some_and(|o| o.iter().any(|&i| i as usize >= count)) {
+        return false;
+    }
+    let Some(card) = bind_as(cpu, d, setup, true) else {
+        return false;
+    };
+    if card.clip[0] == card.clip[2] || card.clip[1] == card.clip[3] {
+        return true;
+    }
+    let (fvf, size) = card_layout(layout);
+    let indices = order.map_or(0, |o| o.len());
+    let mut words = Vec::new();
+    if count <= 0x1_0000 && 5 + count * size + indices.div_ceil(2) <= COMMAND_WORDS {
+        // The draw as it is, in one command.
+        let mut all = Vec::with_capacity(count * size);
+        for v in vertices {
+            card_vertex(&mut all, layout, v);
+        }
+        match order {
+            Some(order) => {
+                let order: Vec<u16> = order.iter().map(|&i| i as u16).collect();
+                encode::draw_indexed(&mut words, kind, fvf, count as u32, &all, &order);
+            }
+            None => encode::draw(&mut words, kind, fvf, count as u32, &all),
+        }
+    } else {
+        // A list of its primitives, in commands of as many as fit,
+        // each with the vertices its primitives name.
+        let (kind, each, list) = as_list(kind, order.map_or(count, |o| o.len()));
+        let place = |i: usize| order.map_or(i, |o| o[i] as usize);
+        let mut all = Vec::new();
+        let mut indexed: Vec<u16> = Vec::new();
+        let mut places = std::collections::HashMap::new();
+        let flush = |words: &mut Vec<u32>, all: &mut Vec<u32>, indexed: &mut Vec<u16>| {
+            if !indexed.is_empty() {
+                let count = (all.len() / size) as u32;
+                encode::draw_indexed(words, kind, fvf, count, all, indexed);
+            }
+            all.clear();
+            indexed.clear();
+        };
+        for primitive in list.chunks_exact(each) {
+            let room = 5 + all.len() + each * size + (indexed.len() + each).div_ceil(2);
+            if room > COMMAND_WORDS {
+                flush(&mut words, &mut all, &mut indexed);
+                places.clear();
+            }
+            for &i in primitive {
+                let at = place(i);
+                let next = places.len() as u16;
+                let index = *places.entry(at).or_insert_with(|| {
+                    card_vertex(&mut all, layout, &vertices[at]);
+                    next
+                });
+                indexed.push(index);
+            }
+        }
+        flush(&mut words, &mut all, &mut indexed);
+    }
+    if !words.is_empty() {
+        submit(cpu, &words);
+        drew(cpu, &card);
+    }
+    true
 }
 
 impl Rasterizer for Raster<'_> {
