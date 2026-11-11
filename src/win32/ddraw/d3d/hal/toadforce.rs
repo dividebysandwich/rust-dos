@@ -101,9 +101,6 @@ fn projected(d: &Device, stage: u32) -> bool {
     stage < UNITS
         && d.stage(stage, states::TSS_TEXTURETRANSFORMFLAGS) & pipeline::TTFF_PROJECTED != 0
 }
-/// The most vertices one `DRAW` holds, a command being 65535 words at
-/// the most: a multiple of two and of three.
-const DRAW_VERTICES: usize = 6000;
 
 const DDPF_ALPHA: u32 = 0x2;
 const DDPF_STENCILBUFFER: u32 = 0x4000;
@@ -1366,7 +1363,10 @@ impl Raster<'_> {
     /// being filled is of another or full.
     fn add(&mut self, primitive: u32, vertices: &[ScreenVertex]) {
         let (fvf, vertex_words) = self.card.layout();
-        let full = self.words.len() - self.header >= 4 + DRAW_VERTICES * vertex_words;
+        // A command holds what fits its length field, whatever the size
+        // of a vertex: a point, a line or a triangle is never split.
+        let full =
+            self.words.len() - self.header + vertices.len() * vertex_words > COMMAND_WORDS;
         if self.primitive != primitive || full {
             self.close();
             self.primitive = primitive;
