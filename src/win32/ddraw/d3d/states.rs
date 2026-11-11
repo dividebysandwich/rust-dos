@@ -63,15 +63,10 @@ fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
     match c.kind {
         CHANGE_RENDER => render(cpu, id, c.a, value),
         CHANGE_STAGE => {
-            // D3DTSS_ADDRESS is both directions at once.
-            let both = [TSS_ADDRESS, TSS_ADDRESSU, TSS_ADDRESSV];
-            let states = if c.b == TSS_ADDRESS { &both[..] } else { &[c.b][..] };
-            if let Some(d) = get(cpu, id) {
-                for &t in states {
-                    if let Some(s) = d.stages.get_mut((c.a * 32 + t) as usize) {
-                        *s = value;
-                    }
-                }
+            if let Some(d) = get(cpu, id)
+                && let Some(s) = d.stages.get_mut((c.a * 32 + c.b) as usize)
+            {
+                *s = value;
             }
         }
         CHANGE_TRANSFORM => {
@@ -221,11 +216,7 @@ fn render(cpu: &mut Cpu, id: u32, s: u32, value: u32) {
         *r = value;
     }
     let stage0: Vec<(u32, u32)> = match s {
-        RS_TEXTUREADDRESS => vec![
-            (TSS_ADDRESS, value),
-            (TSS_ADDRESSU, value),
-            (TSS_ADDRESSV, value),
-        ],
+        RS_TEXTUREADDRESS => ADDRESS_STATES.map(|t| (t, value)).to_vec(),
         RS_TEXTUREADDRESSU => vec![(TSS_ADDRESSU, value)],
         RS_TEXTUREADDRESSV => vec![(TSS_ADDRESSV, value)],
         // BORDERCOLOR, MIPMAPLODBIAS and ANISOTROPY.
@@ -693,8 +684,27 @@ pub fn set_texture_stage_state(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if stage >= STAGES || !(1..=TSS_LAST).contains(&t) {
         return Some(DDERR_INVALIDPARAMS);
     }
-    set(cpu, id, change(CHANGE_STAGE, stage, t, vec![value]));
+    set_stage(cpu, id, stage, t, value);
     Some(D3D_OK)
+}
+
+/// D3DTSS_ADDRESS and the states it sets: ADDRESSU and ADDRESSV, the
+/// directions the samplers read.
+const ADDRESS_STATES: [u32; 3] = [TSS_ADDRESS, TSS_ADDRESSU, TSS_ADDRESSV];
+
+/// Set the state `t` of a stage, and for D3DTSS_ADDRESS both directions
+/// with it. Each is a change of its own, made or recorded, so a state
+/// block that has D3DTSS_ADDRESS captures and restores ADDRESSU and
+/// ADDRESSV as the device has them, which the program may since have
+/// set apart.
+fn set_stage(cpu: &mut Cpu, id: u32, stage: u32, t: u32, value: u32) {
+    let states = match t {
+        TSS_ADDRESS => &ADDRESS_STATES[..],
+        _ => std::slice::from_ref(&t),
+    };
+    for &s in states {
+        set(cpu, id, change(CHANGE_STAGE, stage, s, vec![value]));
+    }
 }
 
 // State blocks.
@@ -876,4 +886,62 @@ pub fn create_state_block(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let h = new_block(d, list);
     cpu.bus.guest_write_32(out, h);
     Some(D3D_OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::win32::ddraw::{Object, add_object};
+
+    const WRAP: u32 = 1;
+    const MIRROR: u32 = 2;
+    const CLAMP: u32 = 3;
+    const BORDER: u32 = 4;
+
+    /// A Direct3D 7 device: its id.
+    fn device(cpu: &mut Cpu) -> u32 {
+        let d3d = super::super::D3dObject {
+            device: Some(Device::new(7, 0, 0, 0, 2)),
+            ..Default::default()
+        };
+        add_object(
+            cpu,
+            Object {
+                d3d: Some(d3d),
+                ..Default::default()
+            },
+        )
+    }
+
+    fn address(cpu: &mut Cpu, id: u32) -> (u32, u32) {
+        let d = get(cpu, id).unwrap();
+        (d.stage(1, TSS_ADDRESSU), d.stage(1, TSS_ADDRESSV))
+    }
+
+    #[test]
+    fn a_block_with_the_address_state_keeps_each_direction() {
+        // A block recorded with D3DTSS_ADDRESS sets both directions, and
+        // when it captures the device's state it takes ADDRESSU and
+        // ADDRESSV as they are, though the program set them apart.
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let id = device(&mut cpu);
+        get(&mut cpu, id).unwrap().recording = Some(Vec::new());
+        set_stage(&mut cpu, id, 1, TSS_ADDRESS, CLAMP);
+        let block = get(&mut cpu, id).unwrap().recording.take().unwrap();
+        assert_eq!(address(&mut cpu, id), (WRAP, WRAP));
+        for c in &block {
+            apply(&mut cpu, id, c);
+        }
+        assert_eq!(address(&mut cpu, id), (CLAMP, CLAMP));
+
+        set_stage(&mut cpu, id, 1, TSS_ADDRESSU, MIRROR);
+        set_stage(&mut cpu, id, 1, TSS_ADDRESSV, BORDER);
+        let d = get(&mut cpu, id).unwrap();
+        let captured: Vec<Change> = block.iter().map(|c| current(d, c)).collect();
+        set_stage(&mut cpu, id, 1, TSS_ADDRESS, WRAP);
+        for c in &captured {
+            apply(&mut cpu, id, c);
+        }
+        assert_eq!(address(&mut cpu, id), (MIRROR, BORDER));
+    }
 }
