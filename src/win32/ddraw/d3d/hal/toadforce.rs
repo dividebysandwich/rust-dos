@@ -575,8 +575,10 @@ fn render_value(d: &Device, def: &Def, setup: &Setup, depth: Option<Format>) -> 
         RS_ALPHAREF | RS_STENCILREF => d.state(def.id) & 0xFF,
         // OpenGL's depth bias is in steps of a 16-bit depth buffer.
         RS_ZBIAS => (d.state(def.id) as i64 + d.depth_bias as i64).clamp(0, 16) as u32,
-        // Direct3D 7 has neither state.
-        RS_COLORWRITEENABLE if d.color_off => 0,
+        // Direct3D 7 has neither state. A device of version 8 has both:
+        // Direct3D 8 sets them, and OpenGL puts its color mask, a
+        // channel at a time, and the blend operation it always has
+        // there before each draw.
         RS_COLORWRITEENABLE if d.version == 8 => d.state(def.id) & 0xF,
         RS_COLORWRITEENABLE => 0xF,
         RS_BLENDOP if d.version != 8 => 1,

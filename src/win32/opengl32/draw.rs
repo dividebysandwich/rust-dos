@@ -18,13 +18,13 @@
 //! it shows (`back_faces`).
 
 use super::super::ddraw::d3d::device::{
-    self as inner_device, RS_ALPHAFUNC, RS_CLIPPING, RS_CULLMODE, RS_DESTBLEND, RS_FILLMODE,
-    RS_FOGDENSITY, RS_FOGENABLE, RS_FOGEND, RS_FOGSTART, RS_FOGTABLEMODE, RS_FOGVERTEXMODE,
-    RS_LIGHTING, RS_SHADEMODE, RS_SPECULARENABLE, RS_SRCBLEND, RS_ZENABLE, RS_ZFUNC,
-    RS_ZWRITEENABLE, TA_CURRENT, TA_DIFFUSE, TA_TEXTURE, TOP_ADD, TOP_BLENDTEXTUREALPHA,
-    TOP_DISABLE, TOP_MODULATE, TOP_SELECTARG1, TOP_SELECTARG2, TSS_ADDRESSU, TSS_ADDRESSV,
-    TSS_ALPHAARG1, TSS_ALPHAARG2, TSS_ALPHAOP, TSS_COLORARG1, TSS_COLORARG2, TSS_COLOROP,
-    TSS_MAGFILTER, TSS_MINFILTER, TSS_MIPFILTER, TSS_TEXCOORDINDEX,
+    self as inner_device, RS_ALPHAFUNC, RS_BLENDOP, RS_CLIPPING, RS_COLORWRITEENABLE, RS_CULLMODE,
+    RS_DESTBLEND, RS_FILLMODE, RS_FOGDENSITY, RS_FOGENABLE, RS_FOGEND, RS_FOGSTART,
+    RS_FOGTABLEMODE, RS_FOGVERTEXMODE, RS_LIGHTING, RS_SHADEMODE, RS_SPECULARENABLE, RS_SRCBLEND,
+    RS_ZENABLE, RS_ZFUNC, RS_ZWRITEENABLE, TA_CURRENT, TA_DIFFUSE, TA_TEXTURE, TOP_ADD,
+    TOP_BLENDTEXTUREALPHA, TOP_DISABLE, TOP_MODULATE, TOP_SELECTARG1, TOP_SELECTARG2, TSS_ADDRESSU,
+    TSS_ADDRESSV, TSS_ALPHAARG1, TSS_ALPHAARG2, TSS_ALPHAOP, TSS_COLORARG1, TSS_COLORARG2,
+    TSS_COLOROP, TSS_MAGFILTER, TSS_MINFILTER, TSS_MIPFILTER, TSS_TEXCOORDINDEX,
 };
 use super::super::ddraw::d3d::hal::{
     RS_ALPHABLENDENABLE, RS_ALPHAREF, RS_ALPHATESTENABLE, RS_COLORKEYENABLE, RS_DITHERENABLE,
@@ -120,6 +120,14 @@ fn blend_factor(f: u32) -> u32 {
         0x0308 => 11,
         _ => 2,
     }
+}
+
+/// Direct3D 8's D3DCOLORWRITEENABLE bits of glColorMask's red, green,
+/// blue and alpha.
+fn color_write(mask: [bool; 4]) -> u32 {
+    mask.iter()
+        .enumerate()
+        .fold(0, |bits, (i, &on)| bits | (on as u32) << i)
 }
 
 /// D3DCOLOR (ARGB) of red, green, blue and alpha from 0 to 1.
@@ -322,6 +330,12 @@ fn applied(c: &Context) -> Option<Applied> {
         (RS_SHADEMODE, if c.shade_model == GL_FLAT { 1 } else { 2 }),
         (RS_LIGHTING, 0),
         (RS_CLIPPING, 1),
+        // A card that writes some channels of a color and not others
+        // takes the color mask from here (`color_off` below is the
+        // mask of one that writes all of them or none).
+        (RS_COLORWRITEENABLE, color_write(c.color_mask)),
+        // D3DBLENDOP_ADD: OpenGL 1.1 has no other.
+        (RS_BLENDOP, 1),
     ];
 
     // The units that texture: the first ones, each with a texture that

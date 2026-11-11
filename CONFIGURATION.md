@@ -3170,10 +3170,11 @@ modes, with textures up to 2048 pixels a side in 16- and 32-bit,
 compressed (DXT1 to DXT5) and bump-map formats, and a 24-bit depth
 buffer with stencil. Games that need those, which a Voodoo3 lacks, run
 on this card ([docs/compatibility.md](docs/compatibility.md) names
-them). The card draws 3D on the processor for now. It has no Glide, and
-Direct3D 8 and OpenGL programs need a 3dfx card. No system booted from
-a disk image has a driver for it: a booted Windows uses it as a plain
-VGA.
+them). OpenGL 1.1 draws on it too, in a window or full screen, with
+16-bit color and depth as on a Voodoo3. The card draws 3D on the
+processor for now. It has no Glide, and Direct3D 8 programs need a 3dfx
+card. No system booted from a disk image has a driver for it: a booted
+Windows uses it as a plain VGA.
 
 ```ini
 [emulator]

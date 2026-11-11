@@ -911,13 +911,14 @@ DLLs are the emulator's.
 - **Direct3D 8** (`d3d8/`) sits on the Direct3D 7 device today and
   keeps doing so, with `D3DCAPS8` filled from the level's table and
   hardware vertex processing offered for fixed-function draws.
-- **OpenGL** (`opengl32/`) is 1.1 on the Direct3D 7 device today. It
-  grows to 1.3 with the level's extensions, sending the card states
-  OpenGL needs that Direct3D has no state for. Its OpenGL front end
-  (contexts, state, immediate mode, arrays, display lists, pixel
-  transfer) is kept apart from its WGL and Win32 parts and takes its
-  calls through one interface, so that a booted Windows can later feed
-  the same code (see below).
+- **OpenGL** (`opengl32/`) is 1.1 on the Direct3D 7 device, and so draws
+  on this card through the Direct3D HAL, with the pixel formats and
+  extensions it has on a Voodoo3 (Oni plays on it). It grows to 1.3 with
+  the level's extensions, sending the card states OpenGL needs that
+  Direct3D has no state for. Its OpenGL front end (contexts, state,
+  immediate mode, arrays, display lists, pixel transfer) is kept apart
+  from its WGL and Win32 parts and takes its calls through one interface,
+  so that a booted Windows can later feed the same code (see below).
 - **Glide** isn't offered on this card. A game that wants Glide is
   configured with a Voodoo.
 
