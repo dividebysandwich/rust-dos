@@ -351,6 +351,13 @@ fn flag(value: u32) -> Result<bool, Error> {
     }
 }
 
+/// Whether a rectangle's left, top, width and height keep it within the
+/// largest render target, as a viewport's and a scissor's must.
+fn in_target_max(rect: &[u32]) -> bool {
+    let side = |from: u32, size: u32| from as u64 + size as u64 <= caps::TARGET_MAX as u64;
+    side(rect[0], rect[2]) && side(rect[1], rect[3])
+}
+
 /// A texture's handle: 1 to `caps::TEXTURE_HANDLES`.
 fn handle(value: u32) -> Result<u32, Error> {
     (1..=caps::TEXTURE_HANDLES)
@@ -394,9 +401,8 @@ pub fn decode(opcode: u16, words: &[u32], memory: u32) -> Result<Command<'_>, Er
                 unreachable!()
             };
             let [min_z, max_z] = floats(&words[5..])?;
-            let side = |from: u32, size: u32| from as u64 + size as u64 <= caps::TARGET_MAX as u64;
             let depths = 0.0 <= min_z && min_z <= max_z && max_z <= 1.0;
-            if !side(x, width) || !side(y, height) || !depths {
+            if !in_target_max(&words[1..5]) || !depths {
                 return Err(Error::BadValue);
             }
             Command::Viewport(Viewport {
@@ -408,10 +414,16 @@ pub fn decode(opcode: u16, words: &[u32], memory: u32) -> Result<Command<'_>, Er
                 max_z,
             })
         }
-        SET_SCISSOR => Command::Scissor {
-            enable: flag(words[1])?,
-            rect: [words[2], words[3], words[4], words[5]],
-        },
+        SET_SCISSOR => {
+            let enable = flag(words[1])?;
+            if !in_target_max(&words[2..6]) {
+                return Err(Error::BadValue);
+            }
+            Command::Scissor {
+                enable,
+                rect: [words[2], words[3], words[4], words[5]],
+            }
+        }
         SET_MATERIAL => {
             let v: [f32; 17] = floats(&words[1..])?;
             let four = |at: usize| [v[at], v[at + 1], v[at + 2], v[at + 3]];
@@ -500,12 +512,22 @@ pub fn decode(opcode: u16, words: &[u32], memory: u32) -> Result<Command<'_>, Er
             if flags == 0 || flags & !all != 0 || !(0.0..=1.0).contains(&z) || stencil > 0xFF {
                 return Err(Error::BadValue);
             }
+            // A rectangle with no pixel is a bad range on any target.
+            let rects = &words[5..];
+            if rects
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|r| r[2] == 0 || r[3] == 0)
+            {
+                return Err(Error::BadRange);
+            }
             Command::Clear {
                 flags,
                 colour: words[2],
                 z,
                 stencil,
-                rects: &words[5..],
+                rects,
             }
         }
         DEFINE_TEXTURE => {
@@ -767,14 +789,10 @@ impl Level1 {
         memory: &mut [u8],
         drawn: &mut Vec<(u32, u32)>,
     ) -> Result<(), Error> {
+        // Without a target there is nothing to check the rectangles
+        // against. With one, ranges come before the state, as chapter 5
+        // orders them.
         let target = self.target.ok_or(Error::BadState)?;
-        let depth = target.depth_surface();
-        let has_stencil = depth.is_some_and(|d| d.format == Format::D24S8);
-        // A buffer the target lacks can't be cleared.
-        if flags & CLEAR_DEPTH != 0 && depth.is_none() || flags & CLEAR_STENCIL != 0 && !has_stencil
-        {
-            return Err(Error::BadState);
-        }
         let whole = [0, 0, target.colour.width, target.colour.height];
         let rects = if rects.is_empty() { &whole } else { rects };
         let rects: Vec<Rect> = rects
@@ -785,6 +803,13 @@ impl Level1 {
             .collect();
         if !rects.iter().all(|rect| target.colour.holds(rect)) {
             return Err(Error::BadRange);
+        }
+        let depth = target.depth_surface();
+        let has_stencil = depth.is_some_and(|d| d.format == Format::D24S8);
+        // A buffer the target lacks can't be cleared.
+        if flags & CLEAR_DEPTH != 0 && depth.is_none() || flags & CLEAR_STENCIL != 0 && !has_stencil
+        {
+            return Err(Error::BadState);
         }
         for rect in &rects {
             if flags & CLEAR_COLOUR != 0 {
@@ -800,12 +825,12 @@ impl Level1 {
             if mask == depth.format.defined_bits() || mask == 0xFFFF_FFFF {
                 super::blit::fill(memory, &depth, rect, value);
             } else {
+                let len = rect.width as usize * 4;
                 for y in rect.top..rect.top + rect.height {
-                    for x in rect.left..rect.left + rect.width {
-                        let at = depth.at(x, y);
-                        let old = u32::from_le_bytes(memory[at..at + 4].try_into().unwrap());
-                        let new = old & !mask | value & mask;
-                        memory[at..at + 4].copy_from_slice(&new.to_le_bytes());
+                    let at = depth.at(rect.left, y);
+                    for pixel in memory[at..at + len].as_chunks_mut::<4>().0 {
+                        let old = u32::from_le_bytes(*pixel);
+                        *pixel = (old & !mask | value & mask).to_le_bytes();
                     }
                 }
             }

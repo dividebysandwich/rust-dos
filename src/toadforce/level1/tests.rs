@@ -274,7 +274,33 @@ fn transforms_lights_and_planes_are_kept_as_sent() {
         ..viewport
     };
     assert_eq!(run(&mut rig, &|w| encode::viewport(w, &wide)), BAD_VALUE);
+    let inverted = Viewport {
+        min_z: 0.75,
+        max_z: 0.25,
+        ..viewport
+    };
+    assert_eq!(
+        run(&mut rig, &|w| encode::viewport(w, &inverted)),
+        BAD_VALUE
+    );
     assert_eq!(rig.card.level1.viewport, viewport);
+    // A scissor rectangle is held to the largest target, as a viewport.
+    for (enable, rect) in [
+        (2, [0, 0, 1, 1]),
+        (1, [2000, 0, 100, 1]),
+        (1, [0, u32::MAX, 0, 2]),
+    ] {
+        let words = [
+            header(SET_SCISSOR, 6),
+            enable,
+            rect[0],
+            rect[1],
+            rect[2],
+            rect[3],
+        ];
+        assert_eq!(rig.run(&words), BAD_VALUE, "{enable} {rect:?}");
+    }
+    assert_eq!(rig.card.level1.scissor, [1, 2, 3, 4]);
 }
 
 #[test]
@@ -323,6 +349,9 @@ fn clear_writes_each_buffer_its_flag_names() {
     let out = Rect { left: 61, ..rect };
     let outside = words(|w| encode::clear(w, CLEAR_COLOUR, 0, 0.0, 0, &[rect, out]));
     assert_eq!(rig.run(&outside), BAD_RANGE);
+    let empty = Rect { width: 0, ..rect };
+    let none = words(|w| encode::clear(w, CLEAR_COLOUR, 0, 0.0, 0, &[empty]));
+    assert_eq!(rig.run(&none), BAD_RANGE);
     for (flags, z, stencil) in [(0, 0.0, 0), (8, 0.0, 0), (all, 1.25, 0), (all, 0.0, 256)] {
         let bad = words(|w| encode::clear(w, flags, 0, z, stencil, &[]));
         assert_eq!(rig.run(&bad), BAD_VALUE, "{flags} {z} {stencil}");
@@ -336,9 +365,23 @@ fn clear_writes_each_buffer_its_flag_names() {
     let colour_only = words(|w| encode::clear(w, CLEAR_COLOUR, 0x1234_5678, 0.0, 0, &[]));
     assert_eq!(rig.run(&colour_only), 0);
     assert_eq!(rig.word(t16.colour.offset), 0x0034_5678);
+    // A depth clear of D24X8 writes 0 below the depth, and it has no
+    // stencil either.
+    let t24 = target(Format::R5G6B5, Some(Format::D24X8));
+    let d24 = t24.depth_surface().unwrap();
+    rig.memory[d24.at(2, 1)..d24.at(6, 1)].fill(0xA5);
+    rig.run(&words(|w| encode::render_target(w, Some(&t24))));
+    assert_eq!(rig.run(&deep), 0);
+    assert_eq!(rig.word(d24.at(2, 1) as u32), 0xFF_FFFF << 8);
+    assert_eq!(rig.word(d24.at(5, 2) as u32), 0xFF_FFFF << 8);
+    assert_eq!(rig.run(&stencil), BAD_STATE);
     let bare = target(Format::A8R8G8B8, None);
     rig.run(&words(|w| encode::render_target(w, Some(&bare))));
     assert_eq!(rig.run(&deep), BAD_STATE);
+    // Ranges come before the state: a rectangle outside the target is
+    // a bad range even when the target has no depth buffer to clear.
+    let deep_out = words(|w| encode::clear(w, CLEAR_DEPTH, 0, 1.0, 0, &[out]));
+    assert_eq!(rig.run(&deep_out), BAD_RANGE);
     assert_eq!(rig.run(&colour_only), 0);
     assert_eq!(rig.word(bare.colour.offset), 0x1234_5678);
     rig.run(&words(|w| encode::render_target(w, None)));
@@ -443,6 +486,9 @@ fn a_texture_the_card_cant_take_is_rejected() {
     let mut short = good.clone();
     short.levels = 2;
     assert_eq!(define(&mut rig, &short), BAD_VALUE);
+    let mut levelless = texture(Format::A8R8G8B8, 1);
+    levelless.levels = 0;
+    assert_eq!(define(&mut rig, &levelless), BAD_VALUE);
     let unpaletted = Texture {
         palette: None,
         ..texture(Format::P8, 1)

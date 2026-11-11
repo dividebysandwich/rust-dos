@@ -7,6 +7,8 @@
 //! (render) and 32 (stage) up are the card's own, for what OpenGL has
 //! and Direct3D lacks.
 
+use crate::toadforce::caps;
+
 /// What values a state takes. A write of another value is rejected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -98,7 +100,7 @@ pub const ARG_ALPHA_REPLICATE: u32 = 0x20;
 const ARG_FLAGS: u32 = ARG_COMPLEMENT | ARG_ALPHA_REPLICATE;
 
 /// The texture coordinate sets a vertex can have.
-pub const COORD_SETS: u32 = 8;
+pub const COORD_SETS: u32 = caps::COORD_SETS;
 /// The last way of generating coordinates (bits 16 to 31 of
 /// `TEXCOORDINDEX`): 0 the vertex's own, 1 the normal, 2 the position
 /// and 3 the reflection vector in camera space, 4 a sphere map.
@@ -312,7 +314,7 @@ pub const TSS_ALPHA_SCALE: u32 = 33;
 /// The stage states' numbers are below this.
 pub const STAGE_STATES: usize = 34;
 /// The blend stages.
-pub const STAGES: usize = 8;
+pub const STAGES: usize = caps::STAGES as usize;
 
 /// The stage states of level 1, with stage 0's values after a reset.
 /// `stage_reset` has the other stages'.
@@ -411,13 +413,7 @@ mod tests {
             let from = spec.find(heading).unwrap();
             let table = &spec[from..];
             let table = &table[table.find("|---").unwrap()..];
-            let end = table
-                .find(
-                    "
-
-",
-                )
-                .unwrap();
+            let end = table.find("\n\n").unwrap();
             table[..end].lines().count() - 1
         };
         assert_eq!(rows("#### Render states"), RENDER.len());

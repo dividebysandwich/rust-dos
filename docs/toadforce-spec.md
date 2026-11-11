@@ -567,9 +567,11 @@ section is provisional until the level is frozen: the draw commands
 (opcodes from 0030h) are written with the software renderer.
 
 A number in an argument is an IEEE single-precision value in its word.
-One that isn't finite is rejected with `BAD_VALUE`. A colour of four
-numbers is red, green, blue, alpha. A colour in one word has alpha in
-bits 24 to 31, red in 16 to 23, green in 8 to 15 and blue in 0 to 7.
+One that isn't finite is rejected with `BAD_VALUE`, and so is any
+argument outside the values its table gives: a slot, a kind or a flag
+word with a bit the table doesn't define. A colour of four numbers is
+red, green, blue, alpha. A colour in one word has alpha in bits 24 to
+31, red in 16 to 23, green in 8 to 15 and blue in 0 to 7.
 
 After a reset or a write to `LEVEL`: every render state and stage
 state has the reset value of its table below, every transform is the
@@ -625,6 +627,10 @@ the pixels both have.
 |---|---|
 | 1 | 1 to limit draws to the rectangle, 0 not to |
 | 2 to 5 | left, top, width, height |
+
+Left plus width and top plus height are at most `CAPS[6]`, or the
+command is rejected with `BAD_VALUE`. As with the viewport, the
+rectangle isn't checked against the render target.
 
 **`SET_MATERIAL`, 0015h.** Length 18.
 
@@ -715,7 +721,9 @@ No flag, a flag this table doesn't define, a depth outside 0 to 1 or a
 stencil value above 255 is rejected with `BAD_VALUE`; a rectangle with
 no pixel or reaching outside the render target with `BAD_RANGE`; and no
 render target, a depth flag without a depth buffer, or a stencil flag
-without a `D24S8` buffer with `BAD_STATE`.
+without a `D24S8` buffer with `BAD_STATE`. With no render target there
+is nothing to check a rectangle against, so only one with no pixel is
+rejected before that `BAD_STATE`.
 
 **`DEFINE_TEXTURE`, 0022h.** Length 10 or more, even.
 
@@ -738,6 +746,8 @@ guest writes there afterwards shows in the next draw.
   least 1. Images follow level by level, and a cube map has six for
   each level: the faces +x, -x, +y, -y, +z, -z. A cube map is square.
 - The command has exactly the images its levels and faces need.
+- An image's pitch is at least one line of it: its width times its
+  pixel size, or in a block format its row of blocks.
 - A `P8` texture has a palette, and no other format does. The palette
   is 256 words of card memory, each a colour in one word, alpha
   included.
@@ -751,7 +761,7 @@ or palette that reaches outside card memory with `BAD_RANGE`.
 
 | Word | Argument |
 |---|---|
-| 1 | handle |
+| 1 | handle, 1 to `CAPS[13]` |
 
 The handle is defined no longer, and the stages that had it have no
 texture. A handle that isn't defined is rejected with `BAD_HANDLE`.
@@ -761,7 +771,7 @@ texture. A handle that isn't defined is rejected with `BAD_HANDLE`.
 | Word | Argument |
 |---|---|
 | 1 | stage, 0 to 7 |
-| 2 | handle, or 0 for no texture |
+| 2 | handle, 1 to `CAPS[13]`, or 0 for no texture |
 
 A handle that isn't defined is rejected with `BAD_HANDLE`.
 

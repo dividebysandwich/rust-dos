@@ -4,6 +4,7 @@
 
 use super::caps;
 use super::regs::Error;
+use crate::savestate::{self, Reader, State, StateError, Writer};
 
 /// A pixel format, by its code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,8 +58,7 @@ pub enum Format {
     D24S8 = 21,
 }
 
-/// Every format, in the order a saved state numbers them: new ones go
-/// at the end.
+/// Every format, by code.
 pub const FORMATS: [Format; 21] = [
     Format::P8,
     Format::R5G6B5,
@@ -83,30 +83,21 @@ pub const FORMATS: [Format; 21] = [
     Format::D24S8,
 ];
 
-// By position in this list, which is `FORMATS`' order.
-crate::state_enum!(Format {
-    Format::P8,
-    Format::R5G6B5,
-    Format::X8R8G8B8,
-    Format::A8R8G8B8,
-    Format::X1R5G5B5,
-    Format::A1R5G5B5,
-    Format::A4R4G4B4,
-    Format::A8,
-    Format::L8,
-    Format::A8L8,
-    Format::DXT1,
-    Format::DXT2,
-    Format::DXT3,
-    Format::DXT4,
-    Format::DXT5,
-    Format::V8U8,
-    Format::L6V5U5,
-    Format::X8L8V8U8,
-    Format::D16,
-    Format::D24X8,
-    Format::D24S8,
-});
+/// A saved state holds a format by its code, so a format added to
+/// `FORMATS` is saved without a second list to keep in step.
+impl State for Format {
+    fn save(&self, w: &mut Writer) {
+        (self.code() as u8).save(w);
+    }
+
+    fn load(&mut self, r: &mut Reader) -> savestate::Result<()> {
+        let mut code = 0u8;
+        code.load(r)?;
+        *self = Format::from_code(code as u32)
+            .ok_or_else(|| StateError::Invalid(format!("a pixel format of code {code}")))?;
+        Ok(())
+    }
+}
 
 impl Format {
     /// The format code `code` names, if it names one.
