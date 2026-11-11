@@ -3,6 +3,7 @@
 
 use super::mem::Mem;
 use super::texel::{self, Rgba};
+use crate::toadforce::caps;
 use crate::toadforce::format::Format;
 use crate::toadforce::level1::Texture;
 
@@ -155,9 +156,7 @@ mod wide_of {
     /// `alpha` for `A8R8G8B8`; without it the texel is opaque.
     #[inline(always)]
     pub fn r8g8b8(v: u32, alpha: bool) -> u64 {
-        let v = if alpha { v } else { v | 0xFF00_0000 } as u64;
-        let v = (v | v << 16) & 0x0000_FFFF_0000_FFFF;
-        (v | v << 8) & 0x00FF_00FF_00FF_00FF
+        super::wide(if alpha { v } else { v | 0xFF00_0000 }.to_le_bytes())
     }
 }
 
@@ -174,7 +173,6 @@ fn lerp_wide(a: u64, b: u64, f: u32) -> u64 {
     let f = f as u64;
     ((a * (256 - f) + b * f + 0x0080_0080_0080_0080) >> 8) & 0x00FF_00FF_00FF_00FF
 }
-
 
 /// The levels a sample reads: the level, the filter in it, and how much
 /// of the next level is blended in, of 256.
@@ -206,7 +204,7 @@ struct Image {
 }
 
 /// The most levels a texture of the largest size has.
-const LEVELS: usize = 12;
+const LEVELS: usize = caps::TEXTURE_MAX.ilog2() as usize + 1;
 
 /// A `Tex` in card memory.
 #[derive(Clone, Copy)]
@@ -253,10 +251,12 @@ impl<'a> Sampler<'a> {
         }
     }
 
-    /// The image of `face` of `level`.
+    /// The image of `face` of `level`. `images` holds zeroes past the
+    /// texture's levels, so a level it doesn't have goes to
+    /// `Texture::image`, which panics.
     #[inline]
     fn image(&self, level: u32, face: u32) -> Image {
-        if face == 0 && (level as usize) < LEVELS {
+        if face == 0 && level < self.tex.texture.levels && (level as usize) < LEVELS {
             self.images[level as usize]
         } else {
             Self::image_of(&self.tex.texture, level, face)
@@ -276,10 +276,9 @@ impl<'a> Sampler<'a> {
     fn texel(&self, image: &Image, x: u32, y: u32) -> Rgba {
         match self.texels {
             Texels::Plain => texel::decode(self.tex.texture.format, self.value(image, x, y)),
-            Texels::Palette(palette) => {
-                self.mem
-                    .read(palette + self.value(image, x, y) as usize * 4)
-            }
+            Texels::Palette(palette) => self
+                .mem
+                .read(palette + self.value(image, x, y) as usize * 4),
             Texels::Blocks(size) => {
                 let at = image.offset
                     + (y / 4) as usize * image.pitch
@@ -327,17 +326,26 @@ impl<'a> Sampler<'a> {
         (to(u, image.width), to(v, image.height))
     }
 
+    /// The column and row of the texel of `image` nearest (`u`, `v`),
+    /// each None for the border.
+    #[inline]
+    fn nearest(&self, image: &Image, u: f32, v: f32) -> (Option<i32>, Option<i32>) {
+        let (x, y) = Self::fixed(image, u, v, 0.0);
+        let [across, down] = self.tex.address;
+        (
+            across.texel((x >> 8) as i32, image.width),
+            down.texel((y >> 8) as i32, image.height),
+        )
+    }
+
     /// One level at (`u`, `v`), in texture coordinates where 0 to 1 is
     /// the texture, through `filter`.
     #[inline]
     fn level(&self, level: u32, face: u32, u: f32, v: f32, filter: Filter) -> Rgba {
         let image = self.image(level, face);
-        let [across, down] = self.tex.address;
         match filter {
             Filter::Point => {
-                let (x, y) = Self::fixed(&image, u, v, 0.0);
-                let x = across.texel((x >> 8) as i32, image.width);
-                let y = down.texel((y >> 8) as i32, image.height);
+                let (x, y) = self.nearest(&image, u, v);
                 if self.texels == Texels::Plain
                     && let (Some(x), Some(y)) = (x, y)
                 {
@@ -350,6 +358,7 @@ impl<'a> Sampler<'a> {
                 let (x, y) = Self::fixed(&image, u, v, 128.0);
                 let (fx, fy) = ((x & 255) as u32, (y & 255) as u32);
                 let (x, y) = ((x >> 8) as i32, (y >> 8) as i32);
+                let [across, down] = self.tex.address;
                 let (x0, x1) = (
                     across.texel(x, image.width),
                     across.texel(x.wrapping_add(1), image.width),
@@ -476,15 +485,11 @@ impl<'a> Sampler<'a> {
         let Some(key) = self.tex.key else {
             return false;
         };
-        let t = &self.tex.texture;
         let image = self.image(self.levels(lod).level, face);
-        let (x, y) = Self::fixed(&image, u, v, 0.0);
-        match (
-            self.tex.address[0].texel((x >> 8) as i32, image.width),
-            self.tex.address[1].texel((y >> 8) as i32, image.height),
-        ) {
+        match self.nearest(&image, u, v) {
             (Some(x), Some(y)) => {
-                self.value(&image, x as u32, y as u32) & t.format.defined_bits() == key
+                let defined = self.tex.texture.format.defined_bits();
+                self.value(&image, x as u32, y as u32) & defined == key
             }
             _ => false,
         }
@@ -584,6 +589,51 @@ mod tests {
                 for &b in &values {
                     let (x, y) = ([a, b, 255 - a, 0], [b, a, 255, 255 - b]);
                     assert_eq!(narrow(lerp_wide(wide(x), wide(y), f)), lerp(x, y, f));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_sample_of_plain_pixels_is_what_its_texels_give_one_by_one() {
+        use Format::*;
+        let formats = [
+            L8, A8L8, R5G6B5, A4R4G4B4, A1R5G5B5, X1R5G5B5, A8R8G8B8, X8R8G8B8, X8L8V8U8,
+        ];
+        for format in formats {
+            let n = format.bytes() as usize;
+            // A 4x4 texture whose last pixel is past the memory's end,
+            // so a sample with it reads its pixels one at a time.
+            let mut memory: Vec<u8> = (0..15 * n).map(|i| (i * 89 + 7) as u8).collect();
+            let mut tex = Tex::new(Texture {
+                format,
+                width: 4,
+                height: 4,
+                levels: 1,
+                images: vec![(0, 4 * n as u32)],
+                ..Texture::default()
+            });
+            let mem = Mem::new(&mut memory);
+            for filter in [Filter::Point, Filter::Linear] {
+                tex.mag = filter;
+                let s = Sampler::new(mem, &tex);
+                let texel = |x: i64, y: i64| s.fetch(0, 0, (x & 3) as u32, (y & 3) as u32);
+                for (u, v) in [(0.1, 0.2), (0.5, 0.5), (0.9, 0.95), (-0.3, 1.7)] {
+                    let shift = if filter == Filter::Linear { 128.0 } else { 0.0 };
+                    let to = |c: f32| (c as f64 * 1024.0 - shift).floor() as i64;
+                    let (x, y) = (to(u), to(v));
+                    let (fx, fy) = ((x & 255) as u32, (y & 255) as u32);
+                    let (x, y) = (x >> 8, y >> 8);
+                    let want = match filter {
+                        Filter::Point => texel(x, y),
+                        Filter::Linear => lerp(
+                            lerp(texel(x, y), texel(x + 1, y), fx),
+                            lerp(texel(x, y + 1), texel(x + 1, y + 1), fx),
+                            fy,
+                        ),
+                    };
+                    let got = s.sample(0, u, v, f32::NEG_INFINITY);
+                    assert_eq!(got, want, "{format:?} {filter:?} ({u}, {v})");
                 }
             }
         }
