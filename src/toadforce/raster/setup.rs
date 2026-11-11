@@ -143,6 +143,25 @@ fn planes<const V: usize>(
 }
 
 impl Prim {
+    /// The positions of the triangle of `v` in 1/256 of a pixel and
+    /// twice its area, positive when it is clockwise on the screen.
+    /// None for a triangle with a position that is no number, with no
+    /// area, or that `cull` (`CULLMODE`) culls.
+    pub fn facing(v: [&ScreenVertex; 3], cull: u32) -> Option<([(i64, i64); 3], i64)> {
+        let mut p = [(0i64, 0i64); 3];
+        for (p, v) in p.iter_mut().zip(v) {
+            *p = (snap(v.x)?, snap(v.y)?);
+        }
+        let area = (p[1].0 - p[0].0) * (p[2].1 - p[0].1) - (p[1].1 - p[0].1) * (p[2].0 - p[0].0);
+        // With y down, a positive area is a clockwise triangle.
+        let culled = match cull {
+            2 => area > 0,
+            3 => area < 0,
+            _ => false,
+        };
+        (area != 0 && !culled).then_some((p, area))
+    }
+
     /// The triangle of `v`, drawn as `shape` says inside `clip`, with
     /// the coordinate sets `sets` in its slots. `provoking` gives a
     /// flat-shaded triangle its colours. None for a triangle with no
@@ -155,20 +174,7 @@ impl Prim {
         clip: [i32; 4],
         sets: &[u8],
     ) -> Option<Self> {
-        let mut p = [(0i64, 0i64); 3];
-        for (p, v) in p.iter_mut().zip(v) {
-            *p = (snap(v.x)?, snap(v.y)?);
-        }
-        let area = (p[1].0 - p[0].0) * (p[2].1 - p[0].1) - (p[1].1 - p[0].1) * (p[2].0 - p[0].0);
-        // With y down, a positive area is a clockwise triangle.
-        let culled = match shape.cull {
-            2 => area > 0,
-            3 => area < 0,
-            _ => false,
-        };
-        if area == 0 || culled {
-            return None;
-        }
+        let (p, area) = Self::facing(v, shape.cull)?;
         // The edges go clockwise.
         let order = if area > 0 { [0, 1, 2] } else { [0, 2, 1] };
         let edges = [0, 1, 2].map(|i| {
@@ -303,42 +309,24 @@ impl Prim {
                 num.div_euclid(den)
             }
         };
-        let mut spans: Vec<(i32, i32)> = Vec::new();
-        let mut top = i32::MAX;
-        let mut put = |x: i32, y: i32| {
-            if top == i32::MAX {
-                top = y;
-            }
-            // Rows come in order, up or down.
-            if y < top {
-                let more = (top - y) as usize;
-                spans.splice(0..0, std::iter::repeat_n((0, 0), more));
-                top = y;
-            }
-            let row = (y - top) as usize;
-            if row >= spans.len() {
-                spans.resize(row + 1, (0, 0));
-            }
-            let span = &mut spans[row];
+        let pixels: Vec<(i32, i32)> = (first..=last)
+            .filter_map(|m| {
+                let n = other(m);
+                let inside = (n_clip.0 as i64..n_clip.1 as i64).contains(&n);
+                let (m, n) = (m as i32, n as i32);
+                inside.then_some(if across { (m, n) } else { (n, m) })
+            })
+            .collect();
+        let top = pixels.iter().map(|p| p.1).min()?;
+        let bottom = pixels.iter().map(|p| p.1).max()? + 1;
+        let mut spans = vec![(0, 0); (bottom - top) as usize];
+        for (x, y) in pixels {
+            let span = &mut spans[(y - top) as usize];
             *span = if span.0 == span.1 {
                 (x, x + 1)
             } else {
                 (span.0.min(x), span.1.max(x + 1))
             };
-        };
-        for m in first..=last {
-            let n = other(m);
-            if n < n_clip.0 as i64 || n >= n_clip.1 as i64 {
-                continue;
-            }
-            if across {
-                put(m as i32, n as i32);
-            } else {
-                put(n as i32, m as i32);
-            }
-        }
-        if spans.is_empty() {
-            return None;
         }
         // Values change along the line and not across it.
         let pos = p.map(|p| (p.0 as f64 / 256.0, p.1 as f64 / 256.0));

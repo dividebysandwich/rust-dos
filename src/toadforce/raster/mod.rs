@@ -74,7 +74,8 @@ const SMALL: i64 = 512;
 pub struct Renderer {
     /// Made at the first batch that is worth it.
     pool: Option<Pool>,
-    /// The threads beside the caller's, where a test fixes them.
+    /// The threads beside the caller's: fixed by a test, or the host's
+    /// count, looked up at the first batch.
     workers: Option<usize>,
     runs: Vec<Run>,
     prims: Vec<Prim>,
@@ -120,6 +121,37 @@ impl Renderer {
         draw: &Draw,
         memory: &mut [u8],
     ) -> Result<Option<Drawn>, Error> {
+        // Vertices and indices in card memory are read now, so what the
+        // queue writes there is drawn first.
+        let buffers = [
+            match draw.vertices {
+                Vertices::Buffer {
+                    offset,
+                    stride,
+                    count,
+                } if count > 0 => {
+                    let last = (count as u64 - 1) * stride as u64;
+                    let end = offset as u64 + last + 4 * draw.fvf.words as u64;
+                    Some((offset as u64, end))
+                }
+                _ => None,
+            },
+            match draw.indices {
+                Indices::Buffer { offset, count } => {
+                    Some((offset as u64, offset as u64 + 2 * count as u64))
+                }
+                _ => None,
+            },
+        ];
+        if let Some(target) = &self.target
+            && buffers
+                .iter()
+                .flatten()
+                .any(|&r| pipeline::writes(target, r))
+        {
+            self.flush(memory);
+        }
+
         // The order of the vertices, each one of the draw's.
         let count = draw.vertex_count();
         self.order.clear();
@@ -221,10 +253,10 @@ impl Renderer {
             } else {
                 t[ends.0]
             };
-            let Some(prim) = Prim::triangle(t, provoking, shape, clip, sets) else {
-                return;
-            };
+            // Points and lines go by the triangle's winding only: their
+            // pixels needn't be in the rows the triangle's are.
             match shape.fill {
+                1 | 2 if Prim::facing(t, shape.cull).is_none() => {}
                 1 => t.into_iter().for_each(|a| point(prims, a)),
                 2 => {
                     for i in 0..3 {
@@ -232,7 +264,7 @@ impl Renderer {
                         prims.extend(Prim::line(a, b, provoking, shape, clip, sets));
                     }
                 }
-                _ => prims.push(prim),
+                _ => prims.extend(Prim::triangle(t, provoking, shape, clip, sets)),
             }
         };
         match primitive {
@@ -279,7 +311,7 @@ impl Renderer {
         };
         let rows: i64 = prims.iter().map(|p| (p.rows.1 - p.rows.0) as i64).sum();
         let serial = runs.iter().any(|run| run.state.serial);
-        let workers = self.workers.unwrap_or_else(Pool::default_workers);
+        let workers = *self.workers.get_or_insert_with(Pool::default_workers);
         if serial || rows < SMALL || workers == 0 {
             work(0, 1);
         } else {

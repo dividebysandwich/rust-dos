@@ -897,7 +897,10 @@ impl Level1 {
         memory: &mut [u8],
         drawn: &mut Vec<(u32, u32)>,
     ) -> Result<(), Error> {
-        self.lowered.forget();
+        // `CLEAR` leaves the state as it is, and a frame starts with one.
+        if command.sets_state() {
+            self.lowered.forget();
+        }
         match command {
             // The card hands a draw to its renderer.
             Command::Draw(_) => {}

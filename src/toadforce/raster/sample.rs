@@ -151,12 +151,12 @@ impl<'a> Sampler<'a> {
             let at = offset as usize
                 + (y / 4) as usize * pitch as usize
                 + (x / 4) as usize * size as usize;
-            let block = if size == 8 {
-                texel::block(t.format, &self.mem.read::<8>(at))
+            let i = (y % 4 * 4 + x % 4) as usize;
+            return if size == 8 {
+                texel::block_texel(t.format, &self.mem.read::<8>(at), i)
             } else {
-                texel::block(t.format, &self.mem.read::<16>(at))
+                texel::block_texel(t.format, &self.mem.read::<16>(at), i)
             };
-            return block[(y % 4 * 4 + x % 4) as usize];
         }
         let value = self.pixel(level, face, x, y);
         if t.format == Format::P8 {
@@ -239,13 +239,15 @@ impl<'a> Sampler<'a> {
                 next: 0,
             };
         }
-        let span = (last - first) as f32;
+        // `MAXMIPLEVEL` limits the level the pixel's size picks, as in
+        // Direct3D: it doesn't move it. The level of detail is measured
+        // in texels of level 0.
         let (level, next) = match tex.mip {
             Mip::None => (first, 0),
-            Mip::Point => (first + (lod + 0.5).min(span) as u32, 0),
+            Mip::Point => (((lod + 0.5) as u32).clamp(first, last), 0),
             Mip::Linear => {
-                let lod = lod.min(span);
-                let level = first + lod as u32;
+                let lod = lod.clamp(first as f32, last as f32);
+                let level = lod as u32;
                 let next = (lod.fract() * 256.0) as u32;
                 (level, if level == last { 0 } else { next })
             }
@@ -419,13 +421,19 @@ mod tests {
         assert_eq!(at(&tex, 2.0), 0xFF00_00FF);
         assert_eq!(at(&tex, 4.0), 0xFFFF_FFFF);
         assert_eq!(at(&tex, 400.0), 0xFFFF_FFFF);
-        // A bias of one level, and the chain cut at level 1.
+        // A bias of one level, and the chain cut at level 1: the levels
+        // the pixel's size picks below 1 are 1, the others stay.
         tex.lod_bias = 1.0;
         assert_eq!(at(&tex, 1.0), 0xFF00_00FF);
         tex.lod_bias = 0.0;
         tex.first_level = 1;
         assert_eq!(at(&tex, 0.5), 0xFF00_00FF);
-        assert_eq!(at(&tex, 2.0), 0xFFFF_FFFF);
+        assert_eq!(at(&tex, 1.4), 0xFF00_00FF);
+        assert_eq!(at(&tex, 2.0), 0xFF00_00FF);
+        assert_eq!(at(&tex, 4.0), 0xFFFF_FFFF);
+        tex.mip = Mip::Linear;
+        assert_eq!(at(&tex, 1.4), 0xFF00_00FF);
+        tex.mip = Mip::Point;
         // Between two levels, their blend.
         tex.first_level = 0;
         tex.mip = Mip::Linear;

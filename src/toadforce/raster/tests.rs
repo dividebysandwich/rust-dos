@@ -492,6 +492,30 @@ fn points_and_lines_cover_their_pixels() {
     assert_eq!(rig.draw(4, &corner(0.0, 0.0, 4.0, 0.0, white)), 0);
     assert_eq!(rig.drawn(0).len(), 12);
     assert_eq!(rig.px(1, 1), 0);
+
+    // The points of a triangle above the target reach into its first
+    // row: only the triangle's winding decides whether they are drawn.
+    rig.clear(CLEAR_COLOUR, 0, 0.0, 0);
+    rig.states(&[(RS_FILLMODE, 1), (RS_POINTSIZE, 4.0f32.to_bits())]);
+    assert_eq!(rig.draw(4, &corner(4.0, -3.0, 2.0, 0.0, white)), 0);
+    assert_eq!(rig.drawn(0), [(2, 0), (3, 0), (4, 0), (5, 0)]);
+}
+
+#[test]
+fn a_buffer_a_draw_paints_over_is_read_after_it() {
+    let mut rig = Rig::new(Format::X8R8G8B8, None);
+    // A white triangle's vertices in row 40 of the target, which the
+    // first draw of the run paints over with positions of no area.
+    let at = COLOUR as usize + 40 * (SIZE * 4) as usize;
+    for (i, word) in corner(0.0, 0.0, 8.0, 0.0, 0xFFFF_FFFF).iter().enumerate() {
+        rig.memory[at + 4 * i..][..4].copy_from_slice(&word.to_le_bytes());
+    }
+    let error = rig.run(|w| {
+        encode::draw(w, 5, TL, 4, &square(64.0, 0xFF12_3456));
+        encode::draw_buffer(w, 4, TL, 32, at as u32, 3);
+    });
+    assert_eq!(error, 0);
+    assert_eq!(rig.px(1, 1), 0x12_3456);
 }
 
 #[test]

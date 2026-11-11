@@ -3,10 +3,11 @@
 //!
 //! A texel is four channels of 8 bits. Formats with fewer bits are
 //! widened by repeating their top bits, and DXT blocks are decoded by
-//! the fixed integer formulas here, which the OpenGL renderer uses too:
-//! it uploads what this module decodes.
+//! the fixed integer formulas of `video::dxt` (its S3TC rules), which
+//! the OpenGL renderer uses too: it uploads what this module decodes.
 
 use crate::toadforce::format::Format;
+use crate::video::dxt;
 
 /// A colour of 8 bits a channel, as its word's bytes: blue, green, red,
 /// alpha. A texel of a bump format has du where red is, dv where green
@@ -100,79 +101,27 @@ pub fn decode(format: Format, v: u32) -> Rgba {
     }
 }
 
-/// The four colours of a DXT colour block. With `punch` (DXT1 only), a
-/// block whose first colour isn't above its second has three colours
-/// and a transparent one.
-fn block_colours(c0: u32, c1: u32, punch: bool) -> [Rgba; 4] {
-    let (a, b) = (rgb565(c0), rgb565(c1));
-    let mix = |f: &dyn Fn(u32, u32) -> u32| -> Rgba {
-        [
-            f(a[0] as u32, b[0] as u32) as u8,
-            f(a[1] as u32, b[1] as u32) as u8,
-            f(a[2] as u32, b[2] as u32) as u8,
-            255,
-        ]
+/// Texel `i` (0 to 15, a row of four after another) of a block of
+/// `format`, from the block's 8 or 16 bytes, by the S3TC rules of
+/// `video::dxt`. A format that isn't a block format has no colour.
+#[inline]
+pub fn block_texel(format: Format, bytes: &[u8], i: usize) -> Rgba {
+    let format = match format {
+        Format::DXT1 => dxt::Format::Dxt1,
+        Format::DXT2 => dxt::Format::Dxt2,
+        Format::DXT3 => dxt::Format::Dxt3,
+        Format::DXT4 => dxt::Format::Dxt4,
+        Format::DXT5 => dxt::Format::Dxt5,
+        _ => return [0, 0, 0, 255],
     };
-    if c0 > c1 || !punch {
-        [
-            a,
-            b,
-            mix(&|a, b| (2 * a + b + 1) / 3),
-            mix(&|a, b| (a + 2 * b + 1) / 3),
-        ]
-    } else {
-        [a, b, mix(&|a, b| (a + b) / 2), [0, 0, 0, 0]]
-    }
-}
-
-/// The eight alphas of a DXT4 or DXT5 alpha block.
-fn block_alphas(a0: u32, a1: u32) -> [u8; 8] {
-    let mut out = [a0 as u8, a1 as u8, 0, 0, 0, 0, 0, 255];
-    if a0 > a1 {
-        for i in 1..7 {
-            out[i as usize + 1] = (((7 - i) * a0 + i * a1 + 3) / 7) as u8;
-        }
-    } else {
-        for i in 1..5 {
-            out[i as usize + 1] = (((5 - i) * a0 + i * a1 + 2) / 5) as u8;
-        }
-    }
-    out
+    let [r, g, b, a] = dxt::decode_texel(format, dxt::Rules::S3tc, bytes, i);
+    [b, g, r, a]
 }
 
 /// The 16 texels of a block of `format`, a row of four after another,
 /// from the block's 8 or 16 bytes.
 pub fn block(format: Format, bytes: &[u8]) -> [Rgba; 16] {
-    let colour = if format == Format::DXT1 {
-        bytes
-    } else {
-        &bytes[8..]
-    };
-    let c0 = u16::from_le_bytes([colour[0], colour[1]]) as u32;
-    let c1 = u16::from_le_bytes([colour[2], colour[3]]) as u32;
-    let colours = block_colours(c0, c1, format == Format::DXT1);
-    let picks = u32::from_le_bytes([colour[4], colour[5], colour[6], colour[7]]);
-    let mut out = [[0; 4]; 16];
-    for (i, texel) in out.iter_mut().enumerate() {
-        *texel = colours[(picks >> (2 * i) & 3) as usize];
-    }
-    match format {
-        Format::DXT2 | Format::DXT3 => {
-            let alphas = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-            for (i, texel) in out.iter_mut().enumerate() {
-                texel[A] = widen((alphas >> (4 * i) & 0xF) as u32, 4);
-            }
-        }
-        Format::DXT4 | Format::DXT5 => {
-            let alphas = block_alphas(bytes[0] as u32, bytes[1] as u32);
-            let picks = u64::from_le_bytes(bytes[..8].try_into().unwrap()) >> 16;
-            for (i, texel) in out.iter_mut().enumerate() {
-                texel[A] = alphas[(picks >> (3 * i) & 7) as usize];
-            }
-        }
-        _ => {}
-    }
-    out
+    std::array::from_fn(|i| block_texel(format, bytes, i))
 }
 
 #[cfg(test)]

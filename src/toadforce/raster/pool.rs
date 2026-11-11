@@ -51,8 +51,8 @@ pub struct Pool {
 }
 
 impl Pool {
-    /// A pool of `workers` threads beside the caller's. The browser has
-    /// none.
+    /// A pool of `workers` threads beside the caller's, or as many as
+    /// the host could start. The browser has none.
     pub fn new(workers: usize) -> Self {
         let shared = Arc::new(Shared::default());
         #[cfg(target_arch = "wasm32")]
@@ -61,15 +61,18 @@ impl Pool {
             0
         };
         #[cfg(not(target_arch = "wasm32"))]
-        let threads = (0..workers)
-            .map(|k| {
+        let threads: Vec<_> = (0..workers)
+            .map_while(|k| {
                 let shared = shared.clone();
+                // A host out of threads draws with the ones it gave.
                 std::thread::Builder::new()
                     .name(format!("toadforce-{k}"))
                     .spawn(move || worker(&shared, k + 1))
-                    .expect("a renderer thread")
+                    .ok()
             })
             .collect();
+        #[cfg(not(target_arch = "wasm32"))]
+        let workers = threads.len();
         Pool {
             shared,
             #[cfg(not(target_arch = "wasm32"))]

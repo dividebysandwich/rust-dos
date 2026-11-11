@@ -118,6 +118,19 @@ fn palette(block: &[u8], format: Format, rules: Rules) -> [Rgba; 4] {
 
 /// The 16 alpha values of a DXT4 or DXT5 alpha block, in pixel order.
 fn interpolated_alpha(block: &[u8], rules: Rules) -> [u8; 16] {
+    let values = alpha_values(block, rules);
+    std::array::from_fn(|i| values[alpha_code(block, i)] as u8)
+}
+
+/// The 3-bit code of pixel `i` of a DXT4 or DXT5 alpha block.
+fn alpha_code(block: &[u8], i: usize) -> usize {
+    let mut bits = [0u8; 8];
+    bits[..6].copy_from_slice(&block[2..8]);
+    (u64::from_le_bytes(bits) >> (3 * i) & 7) as usize
+}
+
+/// The eight alpha values the codes of a DXT4 or DXT5 alpha block pick.
+fn alpha_values(block: &[u8], rules: Rules) -> [u32; 8] {
     let (a0, a1) = (block[0] as u32, block[1] as u32);
     // The values between run from the first to the second, or under
     // DirectDraw's rules from the second to the first; each is rounded
@@ -137,10 +150,7 @@ fn interpolated_alpha(block: &[u8], rules: Rules) -> [u8; 16] {
             values[i as usize + 1] = between(5, i);
         }
     }
-    let mut bits = [0u8; 8];
-    bits[..6].copy_from_slice(&block[2..8]);
-    let bits = u64::from_le_bytes(bits);
-    std::array::from_fn(|i| values[(bits >> (3 * i) & 7) as usize] as u8)
+    values
 }
 
 /// The 16 alpha values of a DXT2 or DXT3 alpha block: 4 bits each, the
@@ -171,6 +181,30 @@ pub fn decode_block(format: Format, rules: Rules, block: &[u8]) -> [Rgba; 16] {
         }
         p
     })
+}
+
+/// Pixel `i` (0 to 15, row by row) of a block, as `decode_block` has
+/// it, without decoding the other 15: for a sampler that reads one
+/// texel at a time.
+pub fn decode_texel(format: Format, rules: Rules, block: &[u8], i: usize) -> Rgba {
+    let colour = match format {
+        Format::Dxt1 => &block[..8],
+        _ => &block[8..16],
+    };
+    let codes = u32::from_le_bytes([colour[4], colour[5], colour[6], colour[7]]);
+    let mut p = palette(colour, format, rules)[(codes >> (2 * i) & 3) as usize];
+    let alpha = match format {
+        Format::Dxt1 => return p,
+        Format::Dxt2 | Format::Dxt3 => (block[i / 2] >> (4 * (i % 2)) & 0xF) * 17,
+        Format::Dxt4 | Format::Dxt5 => alpha_values(block, rules)[alpha_code(block, i)] as u8,
+    };
+    p[3] = alpha;
+    if format.premultiplied() && rules == Rules::DirectDraw {
+        for c in &mut p[..3] {
+            *c = (*c).min(alpha);
+        }
+    }
+    p
 }
 
 /// The pixels of the rectangle (`left`, `top`) to (`right`, `bottom`)
@@ -415,5 +449,32 @@ mod tests {
             Some(Format::Dxt4)
         );
         assert_eq!(Format::from_fourcc(u32::from_le_bytes(*b"UYVY")), None);
+    }
+
+    #[test]
+    fn one_pixel_decodes_as_in_its_block() {
+        // Blocks of bytes that vary, among them both colour orders and
+        // both alpha orders.
+        let mut seed = 0x1234_5678u32;
+        for _ in 0..200 {
+            let block: [u8; 16] = std::array::from_fn(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 24) as u8
+            });
+            for format in [
+                Format::Dxt1,
+                Format::Dxt2,
+                Format::Dxt3,
+                Format::Dxt4,
+                Format::Dxt5,
+            ] {
+                for rules in [Rules::S3tc, Rules::DirectDraw] {
+                    let whole = decode_block(format, rules, &block);
+                    for (i, pixel) in whole.iter().enumerate() {
+                        assert_eq!(decode_texel(format, rules, &block, i), *pixel);
+                    }
+                }
+            }
+        }
     }
 }

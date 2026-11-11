@@ -922,9 +922,9 @@ is limited to 0 to 1. A colour channel is rounded to the nearest of
 1. The depth and stencil tests, when no later step can drop the
    fragment; otherwise they come after step 5, so a dropped fragment
    leaves the depth and stencil as they were.
-2. The stages, from 0 up to the first whose `COLOROP` is 1. A stage
-   whose operation reads a texture it hasn't got passes the fragment
-   on unchanged.
+2. The stages, from 0 up to the first whose `COLOROP` is 1. A colour
+   or alpha operation that reads a texture the stage hasn't got leaves
+   the fragment's colour or alpha as it was.
 3. With `SPECULARENABLE`, the specular colour is added to the red,
    green and blue.
 4. With `FOGENABLE`, the red, green and blue are mixed with
@@ -976,21 +976,24 @@ nearest filter takes the texel a coordinate falls in. The linear
 filter mixes the four texels around it by the distances to their
 centres in 1/256 of a texel. The level of detail is half the base-2
 logarithm of the larger of two numbers: the squared length, in
-texels, of the step the coordinates take for one pixel to the right,
-and for one pixel down. `MIPMAPLODBIAS` is added. At or below 0 the
-`MAGFILTER` applies to level 0; above, the `MINFILTER`, on the level
-nearest to it with `MIPFILTER` 1, on the two around it mixed with 2,
-and on level 0 with 0. With an anisotropic filter and `MAXANISOTROPY`
-a, the level follows the smaller of the two numbers, though not below
-the larger over a squared.
+texels of level 0, of the step the coordinates take for one pixel to
+the right, and for one pixel down. `MIPMAPLODBIAS` is added. At or
+below 0 the `MAGFILTER` applies to the level `MAXMIPLEVEL` names;
+above, the `MINFILTER`, on the level nearest to the level of detail
+with `MIPFILTER` 1, on the two around it mixed with 2, and on the
+level `MAXMIPLEVEL` names with 0. With `MIPFILTER` 1 or 2 the level
+of detail is limited to `MAXMIPLEVEL` and the last level first. With
+an anisotropic filter and `MAXANISOTROPY` a, the level follows the
+smaller of the two numbers, though not below the larger over a
+squared.
 
 **Order between draws.** A pixel sees the primitives in the order
 their commands came, and within a command in the order of its
 vertices. A draw that samples a texture whose memory overlaps its
 render target's, or whose colour and depth buffers overlap, reads
 what the primitives before it wrote. Within one primitive it reads
-what the primitive wrote to the rows above the pixel and to the pixels
-left of it in its row.
+what the primitive wrote to the rows above the pixel; what it reads
+of the pixel's own row is not defined.
 
 #### Render states
 

@@ -390,6 +390,16 @@ fn overlap(a: (u64, u64), b: (u64, u64)) -> bool {
     a.0 < b.1 && b.0 < a.1
 }
 
+/// Whether the range `r` of card memory shares a byte with what a draw
+/// into `target` writes: its colour buffer or its depth buffer.
+pub fn writes(target: &Target, r: (u64, u64)) -> bool {
+    let colour = (target.colour.offset as u64, target.colour.end());
+    overlap(r, colour)
+        || target
+            .depth_surface()
+            .is_some_and(|d| overlap(r, (d.offset as u64, d.end())))
+}
+
 /// Lower the state `l`. `BadState` when it has no render target, or
 /// samples more textures than the card has at once.
 pub fn lower(l: &Level1) -> Result<DrawState, Error> {
@@ -594,11 +604,17 @@ pub fn lower(l: &Level1) -> Result<DrawState, Error> {
         bump: [[0.0; 6]; STAGES],
     };
     for (stage, bump) in values.bump.iter_mut().enumerate() {
-        for (i, id) in [7, 8, 9, 10, TSS_BUMPENVLSCALE, TSS_BUMPENVLOFFSET]
-            .into_iter()
-            .enumerate()
-        {
-            bump[i] = f32::from_bits(l.stage(stage, id));
+        let m = TSS_BUMPENVMAT00;
+        let ids = [
+            m,
+            m + 1,
+            m + 2,
+            m + 3,
+            TSS_BUMPENVLSCALE,
+            TSS_BUMPENVLOFFSET,
+        ];
+        for (value, id) in bump.iter_mut().zip(ids) {
+            *value = f32::from_bits(l.stage(stage, id));
         }
     }
 
@@ -620,8 +636,9 @@ pub fn lower(l: &Level1) -> Result<DrawState, Error> {
 
     // What the draw writes against what it reads.
     let colour = (target.colour.offset as u64, target.colour.end());
-    let depth_range = target.depth_surface().map(|d| (d.offset as u64, d.end()));
-    let mut serial = depth_range.is_some_and(|d| overlap(colour, d));
+    let mut serial = target
+        .depth_surface()
+        .is_some_and(|d| overlap(colour, (d.offset as u64, d.end())));
     for t in texs.iter().flatten() {
         let t = &t.texture;
         let mut reads = Vec::new();
@@ -638,9 +655,7 @@ pub fn lower(l: &Level1) -> Result<DrawState, Error> {
                 ));
             }
         }
-        serial |= reads
-            .iter()
-            .any(|&r| overlap(r, colour) || depth_range.is_some_and(|d| overlap(r, d)));
+        serial |= reads.iter().any(|&r| writes(&target, r));
     }
 
     let size = |id: u32| l.state_f(id).clamp(0.0, caps::POINT_SIZE_MAX as f32);
