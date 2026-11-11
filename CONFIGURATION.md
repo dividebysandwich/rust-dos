@@ -1392,10 +1392,12 @@ the notes (one line, how it plays and what it needs) showing with the
 report. **Ins** asks for them, and the report dialog keeps what you type
 there in the profile of the game playing. `uuid` is the profile's own,
 which new and imported profiles get and an older one gets with its
-first report: a report sent with it replaces the one sent with it
-before instead of adding another. Keep it to yourself, as anyone with it
-can replace your report; a package's own `uuid` is never copied into the
-profiles made from it, each of which gets its own.
+first report: a report sent with it replaces the one sent with it on
+the same game before, instead of adding another, and a profile that runs
+several games (a Windows 98 image, say) keeps a report on each. Keep it
+to yourself, as anyone with it can replace your reports; a package's own
+`uuid` is never copied into the profiles made from it, each of which
+gets its own.
 
 ```ini
 [game]

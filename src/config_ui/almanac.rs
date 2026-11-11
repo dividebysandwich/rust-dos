@@ -6,9 +6,9 @@
 //! place; reporting, Enter tells the almanac how the game played with the
 //! settings as they are, to the game picked or to a new one by the name
 //! typed. A game takes any number of reports; one from a game profile
-//! replaces the one the profile sent before (its `uuid=`). Reporting, the
-//! game's year, publisher and the player's notes go too, from the profile
-//! of the game playing, and are kept in it.
+//! replaces the one the profile sent on that game before (its `uuid=`).
+//! Reporting, the game's year, publisher and the player's notes go too,
+//! from the profile of the game playing, and are kept in it.
 
 use super::dialog::TextField;
 use super::draw::{self, Grid};
@@ -642,11 +642,12 @@ fn about(view: &AlmanacView, line: &Line) -> String {
             };
             let keeps = match view.program.as_ref().and_then(|p| p.about.as_ref()) {
                 Some(about) if about.key.is_some() => {
-                    "Its profile keeps it, and a report from it replaces the one it sent before."
+                    "Its profile keeps it, and a report from it replaces the one it sent on \
+                     that game before."
                 }
                 Some(_) => {
                     "Its profile keeps it, and gets a UUID: a report from it replaces the one \
-                     it sent before."
+                     it sent on that game before."
                 }
                 None => "No game profile plays: it goes with this report only.",
             };

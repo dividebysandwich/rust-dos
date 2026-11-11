@@ -141,7 +141,7 @@ pub struct About {
     pub publisher: Option<String>,
     pub notes: Option<String>,
     /// The profile's UUID, the report's key: a report sent with it
-    /// replaces the one sent with it before.
+    /// replaces the one sent with it on the same game before.
     pub key: Option<String>,
 }
 
@@ -737,7 +737,7 @@ pub mod client {
     /// profile says of it (`about`): to its version of the program's
     /// `files`, which is added, with the program's `platform`, if the game
     /// doesn't have it yet, and the game too if it is new. The almanac
-    /// replaces the report sent with `about`'s key before.
+    /// replaces the report sent with `about`'s key on the game before.
     pub fn report(
         subject: &Subject,
         files: &[FileInfo],

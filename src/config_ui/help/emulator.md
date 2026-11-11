@@ -564,5 +564,5 @@ almanac doesn't know of the game, and the notes show with your report.
 While a game launched from its profile plays, the year, publisher and
 notes come from the profile and are kept in it, and the profile's UUID
 goes with the report: reporting the game again replaces your report
-instead of adding another, so it can follow your settings as they
-change. Without a profile, each report is a new one.
+on it instead of adding another, so it can follow your settings as
+they change. Without a profile, each report is a new one.
