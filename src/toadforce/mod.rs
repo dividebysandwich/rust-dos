@@ -255,7 +255,8 @@ impl ToadForce {
 
     /// When the card next changes by itself, in nanoseconds of the
     /// emulated clock: the vertical blank that raises an interrupt or
-    /// makes a waiting flip. `service` then brings the card there.
+    /// makes a waiting flip, which `service` then brings the card to, or
+    /// the queue's deadline (`queue_due`), when its owner runs it.
     pub fn next_event(&self) -> Option<u64> {
         let blank_irq =
             self.irq_enable & regs::IRQ_VBLANK != 0 && self.irq_status & regs::IRQ_VBLANK == 0;

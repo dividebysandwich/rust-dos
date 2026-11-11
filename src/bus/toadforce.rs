@@ -471,7 +471,8 @@ impl Bus {
     }
 
     /// When the card next changes by itself, in PIT ticks: the vertical
-    /// blank it raises an interrupt at or flips at.
+    /// blank it raises an interrupt at or flips at, or the moment the
+    /// queue of `toadforce_submit` is due to run.
     pub(crate) fn toadforce_next_event(&self) -> Option<u64> {
         let ns = self.toadforce.as_deref()?.next_event()?;
         // By way of the instruction the blank begins at. The clock's

@@ -904,14 +904,16 @@ DLLs are the emulator's.
   renderer's threads at once. The queue runs before anything can tell
   it was there: before a write to the card's registers or ring, before
   the program or the emulator writes card memory, before the emulator
-  reads it (`win32::screen`), with a flip, and before a call that lets
-  the program read it or shows a window (`screen::api_settles`: all of
-  DirectDraw but the Direct3D device's methods, GDI, USER, Direct3D 8,
-  WGL and OpenGL's pixel transfers). It also runs when it is full, and
-  5 ms of emulated time after its first command, so a program that
-  reads video memory it kept a pointer to sees the picture a frame's
-  fraction late at worst, as it would beside a real card that draws
-  behind the driver's back. The queue is part of the card's saved
+  reads it (`win32::screen`), with a flip or a mode set, and before a
+  call that lets the program read it or shows a window
+  (`screen::api_settles`: all of DirectDraw and Direct3D 8 but the
+  Direct3D devices' methods and those of what they draw from, with a
+  scene's end and Direct3D 8's present among those that settle; GDI;
+  USER; WGL; and OpenGL's pixel transfers). It also runs when it is
+  full, and 5 ms of emulated time after its first command, so a
+  program that reads video memory it kept a pointer to sees the picture
+  a frame's fraction late at worst, as it would beside a real card that
+  draws behind the driver's back. The queue is part of the card's saved
   state. A guest's driver, with its ring, isn't queued.
 - **Direct3D 7.** `ddraw/d3d/hal` is the HAL interface (capabilities,
   formats, state, draws, clears), with the Voodoo's implementation

@@ -277,6 +277,9 @@ fn toadforce_set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32) -> Optio
     let mut words = Vec::new();
     encode::fill(&mut words, &surface, &whole, 0);
     bus.toadforce_submit(&words);
+    // The mode is shown from the next frame: black, and not what card
+    // memory held before.
+    settle(cpu);
     Some(())
 }
 
@@ -356,20 +359,25 @@ pub fn settle(cpu: &mut Cpu) {
 /// video memory, or is where a program expects the drawing done.
 /// `stubs::call` settles before those.
 ///
-/// A program reads video memory through DirectDraw (a locked surface,
-/// which stays readable after the call), so every call of DirectDraw's
-/// settles but the Direct3D device's, which fill the queue. GDI and
-/// USER show windows and what is in them, and Direct3D 8 and OpenGL's
-/// WGL present. Everything else leaves a ToadForce's queue to grow:
-/// the Direct3D device's and OpenGL's drawing and state calls, and the
-/// rest of Windows, which a program calls between its draws.
+/// A program reads video memory through DirectDraw and Direct3D 8 (a
+/// locked surface, which stays readable after the call), so every call
+/// of theirs settles but those of the Direct3D devices and of what they
+/// draw from, which fill the queue, and a scene's end and Direct3D 8's
+/// present. GDI and USER show windows and what is in them, and OpenGL's
+/// WGL presents. Everything else leaves a ToadForce's queue to grow:
+/// the devices' and OpenGL's drawing and state calls, and the rest of
+/// Windows, which a program calls between its draws. A device's call
+/// that reads video memory itself reads it through `read`, which
+/// settles.
 pub fn api_settles(dll: &str, name: &str) -> bool {
+    // A scene's end and a present are where a program has the card
+    // catch up.
+    let frame_end = name.ends_with("_EndScene") || name.ends_with("_Present");
     match dll {
-        "GDI32.DLL" | "USER32.DLL" | "D3D8.DLL" => true,
+        "GDI32.DLL" | "USER32.DLL" => true,
         "DDRAW.DLL" => {
             // The Direct3D device and what it draws from, which hold no
-            // video memory but through the HAL. A scene's end is where
-            // Direct3D has the card catch up.
+            // video memory but through the HAL.
             const DRAWING: [&str; 6] = [
                 "IDirect3DDevice",
                 "IDirect3DVertexBuffer",
@@ -378,12 +386,18 @@ pub fn api_settles(dll: &str, name: &str) -> bool {
                 "IDirect3DLight",
                 "IDirect3DExecuteBuffer",
             ];
-            !DRAWING.iter().any(|prefix| name.starts_with(prefix)) || name.ends_with("_EndScene")
+            !DRAWING.iter().any(|prefix| name.starts_with(prefix)) || frame_end
+        }
+        "D3D8.DLL" => {
+            // The device, and the vertex and index buffers, whose memory
+            // is the process's.
+            const DRAWING: [&str; 4] = ["Device8_", "Buffer8_", "VertexBuffer8_", "IndexBuffer8_"];
+            !DRAWING.iter().any(|prefix| name.starts_with(prefix)) || frame_end
         }
         "OPENGL32.DLL" => {
             // The pixel transfers to and from the frame buffer, and the
             // two calls that ask for the drawing to be done.
-            const READING: [&str; 10] = [
+            const SETTLING: [&str; 11] = [
                 "glReadPixels",
                 "glCopyPixels",
                 "glDrawPixels",
@@ -394,8 +408,9 @@ pub fn api_settles(dll: &str, name: &str) -> bool {
                 "glCopyTexSubImage1D",
                 "glCopyTexSubImage2D",
                 "glFinish",
+                "glFlush",
             ];
-            !name.starts_with("gl") || READING.contains(&name) || name == "glFlush"
+            !name.starts_with("gl") || SETTLING.contains(&name)
         }
         _ => false,
     }
@@ -608,14 +623,7 @@ pub fn load_rows(cpu: &mut Cpu, mode: &Mode, top: u32, rows: u32) -> Vec<u8> {
 
 /// The pixels `left..left + cols` of the rows `top..top + rows` of the
 /// picture in `mode`, as `load_rows` gives them: `cols` pixels a row.
-pub fn load_area(
-    cpu: &mut Cpu,
-    mode: &Mode,
-    top: u32,
-    rows: u32,
-    left: u32,
-    cols: u32,
-) -> Vec<u8> {
+pub fn load_area(cpu: &mut Cpu, mode: &Mode, top: u32, rows: u32, left: u32, cols: u32) -> Vec<u8> {
     let bytes = mode.bpp / 8;
     let mut raw = vec![0u8; (cols * bytes) as usize];
     let mut out = Vec::with_capacity(cols as usize * 4 * rows as usize);
@@ -920,6 +928,8 @@ mod tests {
         let big = set_mode(&mut cpu, 1600, 1200, 32).unwrap();
         assert_eq!((big.width, big.height, big.bpp, big.pitch), (1600, 1200, 32, 6400));
         assert_eq!(mode(&cpu), Some(big));
+        // The mode is black at once: its fill doesn't wait in the queue.
+        assert!(!cpu.bus.toadforce_queued());
         // What the card has no mode for leaves the one it shows, and
         // latches no error: the driver asks for nothing it can't have.
         for (w, h, bpp) in [(4097, 16, 8), (640, 480, 24), (640, 480, 15), (16, 0, 8)] {
@@ -937,6 +947,41 @@ mod tests {
         crate::interrupts::int10::set_mode(&mut cpu, 3);
         assert_eq!(mode(&cpu), None);
         assert_eq!(cpu.bus.toadforce_register(regs::MODE_ENABLE), 0);
+    }
+
+    #[test]
+    fn the_direct3d_devices_draws_queue_and_what_reads_video_memory_settles() {
+        // The names are the DLLs' own, so a renamed method can't drop
+        // out of the lists unseen.
+        let listed = |dll: &str, name: &str| {
+            let d = crate::win32::stubs::DLLS
+                .iter()
+                .find(|d| d.name == dll)
+                .unwrap();
+            assert!(d.apis.iter().any(|a| a.name == name), "{dll} {name}");
+            api_settles(dll, name)
+        };
+        for (dll, name, settles) in [
+            ("DDRAW.DLL", "IDirect3DDevice7_DrawPrimitive", false),
+            ("DDRAW.DLL", "IDirect3DDevice7_EndScene", true),
+            ("DDRAW.DLL", "Surface_Lock", true),
+            ("D3D8.DLL", "Device8_DrawPrimitive", false),
+            ("D3D8.DLL", "Device8_SetRenderState", false),
+            ("D3D8.DLL", "Buffer8_Lock", false),
+            ("D3D8.DLL", "Device8_EndScene", true),
+            ("D3D8.DLL", "Device8_Present", true),
+            ("D3D8.DLL", "SwapChain8_Present", true),
+            ("D3D8.DLL", "Surface8_LockRect", true),
+            ("D3D8.DLL", "Texture8_LockRect", true),
+            ("OPENGL32.DLL", "glVertex3f", false),
+            ("OPENGL32.DLL", "glReadPixels", true),
+            ("OPENGL32.DLL", "glFlush", true),
+            ("OPENGL32.DLL", "wglSwapBuffers", true),
+            ("GDI32.DLL", "SwapBuffers", true),
+            ("KERNEL32.DLL", "GetTickCount", false),
+        ] {
+            assert_eq!(listed(dll, name), settles, "{dll} {name}");
+        }
     }
 
     #[test]

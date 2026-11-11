@@ -981,8 +981,8 @@ struct Image {
 /// the next power of two otherwise. `keyed`: the copy has the surface's
 /// color key.
 fn image(cpu: &mut Cpu, id: u32, keyed: bool) -> Option<Image> {
-    // The surface may be one the queued draws draw on.
-    screen::settle(cpu);
+    // A surface in video memory, which the queued draws may draw on, is
+    // read through `screen::read`, which has them drawn first.
     let s = state(cpu).surface(id)?.clone();
     let pow2 = s.width.is_power_of_two() && s.height.is_power_of_two();
     let fits = s.width.max(s.height) <= caps::TEXTURE_MAX;
