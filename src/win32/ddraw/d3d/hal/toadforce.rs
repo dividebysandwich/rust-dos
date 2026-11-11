@@ -87,6 +87,12 @@ pub const TNL_LIGHTS: u32 = caps::LIGHTS;
 /// specular colour, and two sets of two texture coordinates.
 const FVF: u32 = 0x004 | 0x040 | 0x080 | 0x200;
 const VERTEX_WORDS: usize = 10;
+/// The layout where a stage's coordinates are projected: both sets
+/// have four, the last what the card divides the others by.
+const FVF_PROJECTED: u32 = FVF | 2 << 16 | 2 << 18;
+const VERTEX_WORDS_PROJECTED: usize = 14;
+/// D3DTTFF_PROJECTED.
+const PROJECTED: u32 = 0x100;
 /// The most vertices one `DRAW` holds, a command being 65535 words at
 /// the most: a multiple of two and of three.
 const DRAW_VERTICES: usize = 6000;
@@ -698,8 +704,11 @@ fn stage_value(d: &Device, at: u32, def: &Def, diffuse_alpha: bool, lit: bool) -
         // The card makes the coordinates of a vertex it transforms as
         // the device's states say.
         TSS_TEXCOORDINDEX | TSS_TEXTURETRANSFORMFLAGS if lit => value,
-        // The pipeline gives each of the first stages its coordinates.
+        // The pipeline gives each of the first stages its coordinates,
+        // generated and through the texture matrix, and with them what
+        // a projected stage divides them by, as the fourth.
         TSS_TEXCOORDINDEX => at.min(UNITS - 1),
+        TSS_TEXTURETRANSFORMFLAGS if at < UNITS && value & PROJECTED != 0 => PROJECTED | 4,
         TSS_TEXTURETRANSFORMFLAGS => 0,
         TSS_ALPHAARG1 if at == 0 && diffuse_alpha => ARG_DIFFUSE,
         // The device has Direct3D 7's filter values: the two cubic
@@ -742,6 +751,19 @@ pub struct Card {
     target: (u32, u32, u32),
     /// The rectangle drawn into: left, top, right, bottom.
     clip: [u32; 4],
+    /// Whether a stage's coordinates are projected, and the vertices
+    /// carry what they are divided by (`FVF_PROJECTED`).
+    projected: bool,
+}
+
+impl Card {
+    /// The layout of the screen vertices of a draw, and its words.
+    fn layout(&self) -> (u32, usize) {
+        match self.projected {
+            true => (FVF_PROJECTED, VERTEX_WORDS_PROJECTED),
+            false => (FVF, VERTEX_WORDS),
+        }
+    }
 }
 
 /// Whether the device `d` can be drawn by the card now. The card's
@@ -962,6 +984,10 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
             target.colour.format.bytes(),
         ),
         clip: [left, top, right.max(left), bottom.max(top)],
+        projected: !lit
+            && (0..UNITS).any(|stage| {
+                d.stage(stage, states::TSS_TEXTURETRANSFORMFLAGS) & PROJECTED != 0
+            }),
     })
 }
 
@@ -1323,7 +1349,7 @@ impl Raster<'_> {
             return;
         }
         let len = self.words.len() - self.header;
-        let count = (len - 4) / VERTEX_WORDS;
+        let count = (len - 4) / self.card.layout().1;
         self.words[self.header] = crate::toadforce::command::header(level1::DRAW, len);
         self.words[self.header + 3] = count as u32;
         self.primitive = 0;
@@ -1332,13 +1358,15 @@ impl Raster<'_> {
     /// Add `vertices` to a command of `primitive`, a new one if the one
     /// being filled is of another or full.
     fn add(&mut self, primitive: u32, vertices: &[ScreenVertex]) {
-        let full = self.words.len() - self.header >= 4 + DRAW_VERTICES * VERTEX_WORDS;
+        let (fvf, vertex_words) = self.card.layout();
+        let full = self.words.len() - self.header >= 4 + DRAW_VERTICES * vertex_words;
         if self.primitive != primitive || full {
             self.close();
             self.primitive = primitive;
             self.header = self.words.len();
-            self.words.extend([0, primitive, FVF, 0]);
+            self.words.extend([0, primitive, fvf, 0]);
         }
+        let numbers = if self.card.projected { 4 } else { 2 };
         for v in vertices {
             self.words.extend([
                 v.x.to_bits(),
@@ -1347,11 +1375,10 @@ impl Raster<'_> {
                 v.rhw.to_bits(),
                 v.diffuse,
                 v.specular,
-                v.tex[0][0].to_bits(),
-                v.tex[0][1].to_bits(),
-                v.tex[1][0].to_bits(),
-                v.tex[1][1].to_bits(),
             ]);
+            for set in &v.tex {
+                self.words.extend(set[..numbers].iter().map(|n| n.to_bits()));
+            }
         }
     }
 

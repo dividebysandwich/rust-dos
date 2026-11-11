@@ -13,7 +13,8 @@ use super::device::{
     RS_COLORVERTEX, RS_CULLMODE, RS_DIFFUSEMATERIALSOURCE, RS_EMISSIVEMATERIALSOURCE, RS_FILLMODE,
     RS_FOGDENSITY, RS_FOGENABLE, RS_FOGEND, RS_FOGSTART, RS_FOGTABLEMODE, RS_FOGVERTEXMODE,
     RS_LIGHTING, RS_LOCALVIEWER, RS_NORMALIZENORMALS, RS_SHADEMODE, RS_SPECULARENABLE,
-    RS_SPECULARMATERIALSOURCE, TSS_TEXCOORDINDEX, device_of, get, version,
+    RS_SPECULARMATERIALSOURCE, TSS_TEXCOORDINDEX, TSS_TEXTURETRANSFORMFLAGS, device_of, get,
+    version,
 };
 use super::pipeline::{
     self, Blend, Fog, Layout, Light, Lighting, Material, Prim, Processed, Setup, Vertex, ViewMap,
@@ -254,7 +255,6 @@ fn setup_of(
             density: d.state_f(RS_FOGDENSITY),
             range: s(48) != 0,
         });
-    let tex = |stage: u32| (d.stage(stage, TSS_TEXCOORDINDEX) & 7) as usize;
     Setup {
         world: d.transforms[1],
         view: d.transforms[2],
@@ -268,7 +268,15 @@ fn setup_of(
         cull: s(RS_CULLMODE),
         fill: s(RS_FILLMODE),
         shade: s(RS_SHADEMODE),
-        tex_index: [tex(0), tex(1)],
+        coords: std::array::from_fn(|stage| {
+            let stage = stage as u32;
+            pipeline::Coord::of(
+                d.stage(stage, TSS_TEXCOORDINDEX),
+                d.stage(stage, TSS_TEXTURETRANSFORMFLAGS),
+                &d.transforms[16 + stage as usize],
+            )
+        }),
+        normalize: s(RS_NORMALIZENORMALS) != 0,
         blend: None,
     }
 }
@@ -1019,5 +1027,5 @@ pub fn device_setup(
     if !lit {
         setup.lighting = None;
     }
-    Ok((id, setup))
+    Ok((id, setup.for_sets()))
 }

@@ -564,8 +564,14 @@ pub struct Setup {
     pub cull: u32,
     pub fill: u32,
     pub shade: u32,
-    /// The texture coordinates each of the card's two stages takes.
-    pub tex_index: [usize; 2],
+    /// What each of a processed vertex's eight slots of texture
+    /// coordinates holds. For a draw, slot n is stage n's coordinates
+    /// (`Coord::of`); for ProcessVertices, set n of the vertices it
+    /// writes (`Setup::for_sets`).
+    pub coords: [Coord; 8],
+    /// D3DRENDERSTATE_NORMALIZENORMALS, for the normals that texture
+    /// coordinates are made from.
+    pub normalize: bool,
     /// Geometry blending, if the vertices are blended: `world` is then
     /// the first world matrix only for tweening.
     pub blend: Option<Blend>,
@@ -586,9 +592,161 @@ impl Default for Setup {
             cull: CULL_CCW,
             fill: 3,
             shade: 2,
-            tex_index: [0, 1],
+            coords: std::array::from_fn(Coord::set),
+            normalize: false,
             blend: None,
         }
+    }
+}
+
+/// Where the texture coordinates in a slot of a processed vertex come
+/// from: a stage's D3DTSS_TEXCOORDINDEX and
+/// D3DTSS_TEXTURETRANSFORMFLAGS, and its texture matrix.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Coord {
+    /// The vertex's coordinate set.
+    pub set: usize,
+    /// D3DTSS_TCI_, the index's upper half: 0 for the set, or the
+    /// camera-space normal (1), position (2) or reflection vector (3),
+    /// or Direct3D 8's sphere map (4), which Direct3D makes the
+    /// coordinates from. A transformed vertex has none of them, and
+    /// keeps its set.
+    pub generate: u32,
+    /// The texture matrix the coordinates go through, and how many
+    /// come out (D3DTTFF_COUNT1 to 4). Not for a transformed vertex.
+    pub matrix: Option<(Matrix, usize)>,
+    /// D3DTTFF_PROJECTED: the coordinate the others are divided by at
+    /// each pixel, which is the last one counted, or the fourth with
+    /// no count.
+    pub projected: Option<usize>,
+}
+
+impl Coord {
+    /// The vertex's set `set` as it is.
+    pub fn set(set: usize) -> Coord {
+        Coord {
+            set,
+            generate: 0,
+            matrix: None,
+            projected: None,
+        }
+    }
+
+    /// From a stage's TEXCOORDINDEX `index`, its TEXTURETRANSFORMFLAGS
+    /// `flags` and its texture matrix.
+    pub fn of(index: u32, flags: u32, matrix: &Matrix) -> Coord {
+        let count = (flags & 0xFF).min(4) as usize;
+        Coord {
+            set: (index & 7) as usize,
+            generate: index >> 16,
+            matrix: (count > 0).then_some((*matrix, count)),
+            projected: (flags & 0x100 != 0).then_some(match count {
+                0 => 3,
+                count => count - 1,
+            }),
+        }
+    }
+
+    /// Whether the slot is more than a set of the vertex.
+    fn made(&self) -> bool {
+        self.generate != 0 || self.matrix.is_some()
+    }
+
+    /// The coordinates of the slot for the vertex `v` at `eye` in
+    /// camera space with the normal `normal` there, as the ToadForce
+    /// makes them (`toadforce::raster::geometry`): the set or what is
+    /// generated, with a 1 after its last number, through the matrix.
+    /// Of what comes out the first `count` stay.
+    fn make(&self, layout: &Layout, v: &Vertex, eye: [f32; 3], normal: [f32; 3]) -> [f32; 4] {
+        let (mut c, numbers) = match self.generate {
+            0 => {
+                let numbers = match self.set < layout.textures {
+                    true => layout.tex[self.set].1.clamp(1, 4) as usize,
+                    false => 0,
+                };
+                let mut c = [0.0; 4];
+                c[..numbers].copy_from_slice(&v.tex[self.set & 7][..numbers]);
+                (c, numbers)
+            }
+            1 => ([normal[0], normal[1], normal[2], 0.0], 3),
+            2 => ([eye[0], eye[1], eye[2], 0.0], 3),
+            generate => {
+                // The eye's line of sight to the vertex, thrown back by
+                // the surface.
+                let sight = normalize(eye);
+                let twice = 2.0 * dot(normal, sight);
+                let r: [f32; 3] = std::array::from_fn(|i| sight[i] - twice * normal[i]);
+                if generate == 3 {
+                    ([r[0], r[1], r[2], 0.0], 3)
+                } else {
+                    let z = 1.0 - r[2];
+                    let m = 2.0 * (r[0] * r[0] + r[1] * r[1] + z * z).sqrt();
+                    ([r[0] / m + 0.5, r[1] / m + 0.5, 0.0, 0.0], 2)
+                }
+            }
+        };
+        match &self.matrix {
+            Some((matrix, count)) => {
+                if numbers < 4 {
+                    c[numbers] = 1.0;
+                }
+                let c = transform(c, matrix);
+                std::array::from_fn(|i| match i {
+                    i if i < *count => c[i],
+                    3 => 1.0,
+                    _ => 0.0,
+                })
+            }
+            None => {
+                if numbers < 4 {
+                    c[3] = 1.0;
+                }
+                c
+            }
+        }
+    }
+
+    /// A transformed vertex's coordinates for the slot: its set, with
+    /// 1 for a fourth number it doesn't have.
+    fn keep(&self, layout: &Layout, v: &Vertex) -> [f32; 4] {
+        Coord::set(self.set).make(layout, v, [0.0; 3], [0.0; 3])
+    }
+
+    /// The coordinates `c` of the slot as a card takes a stage's: the
+    /// two (or, for a cube, three) it samples at, and in the fourth
+    /// what it divides them by at each pixel, 1 unless the stage is
+    /// projected.
+    fn sampled(&self, c: [f32; 4]) -> [f32; 4] {
+        match self.projected {
+            None => [c[0], c[1], c[2], 1.0],
+            Some(by) => std::array::from_fn(|i| match i {
+                3 => c[by],
+                i if i < by => c[i],
+                _ => 0.0,
+            }),
+        }
+    }
+}
+
+impl Setup {
+    /// The setup for ProcessVertices, whose vertices keep their sets:
+    /// slot n is set n. A stage that generates its coordinates or has
+    /// a texture matrix puts them in the set its index names, where a
+    /// draw of the vertices it wrote, which are transformed, finds
+    /// them. The first such stage has a set.
+    pub fn for_sets(mut self) -> Setup {
+        let stages = self.coords;
+        self.coords = std::array::from_fn(Coord::set);
+        for stage in stages.iter().filter(|c| c.made()) {
+            let slot = &mut self.coords[stage.set & 7];
+            if !slot.made() {
+                *slot = Coord {
+                    projected: None,
+                    ..*stage
+                };
+            }
+        }
+        self
     }
 }
 
@@ -606,6 +764,7 @@ pub struct Processed {
     pub diffuse: [f32; 4],
     /// The specular color, its alpha the fog factor.
     pub specular: [f32; 4],
+    /// The texture coordinates of each slot (`Setup::coords`).
     pub tex: [[f32; 4]; 8],
     /// The planes it is outside of (D3DCLIP_).
     pub code: u32,
@@ -668,7 +827,9 @@ impl Processed {
 
 /// A vertex on the screen, as the card's triangle setup takes it: x, y,
 /// z (0 to 1), rhw, the colors (the specular's alpha the fog factor),
-/// and the coordinates of the textures of the card's two stages.
+/// and the coordinates of the textures of the card's two stages, each
+/// with the number it is divided by at each pixel in the fourth place
+/// (1 unless the stage's coordinates are projected).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ScreenVertex {
     pub x: f32,
@@ -677,7 +838,7 @@ pub struct ScreenVertex {
     pub rhw: f32,
     pub diffuse: u32,
     pub specular: u32,
-    pub tex: [[f32; 2]; 2],
+    pub tex: [[f32; 4]; 2],
 }
 
 /// What draws the primitives that come out of the pipeline: the card.
@@ -724,7 +885,7 @@ struct EyeLight {
 /// Run `input`, of `layout`, through transform, lighting and fog.
 pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processed> {
     if layout.rhw {
-        return input.iter().map(|v| transformed(v, layout)).collect();
+        return input.iter().map(|v| transformed(setup, v, layout)).collect();
     }
     let world_view = multiply(&setup.world, &setup.view);
     let all = multiply(&world_view, &setup.projection);
@@ -761,6 +922,10 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
         _ => None,
     };
     let lit = setup.lighting.is_some();
+    // The slots that are no more than a set are copied, and the normal
+    // is worked out for lighting and for the coordinates made from it.
+    let made = setup.coords.iter().any(Coord::made);
+    let normal = lit || setup.coords.iter().any(|c| matches!(c.generate, 1 | 3 | 4));
     input
         .iter()
         .map(|v| {
@@ -777,12 +942,12 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
             // where it is in camera space and its normal there.
             let (world, clip, eye, n) = match blended.as_mut() {
                 Some(b) => {
-                    let (w, n) = b.place(v, lit);
+                    let (w, n) = b.place(v, normal);
                     let e = transform(w, &setup.view);
                     (w, transform(w, &b.view_projection), [e[0], e[1], e[2]], n)
                 }
                 None => {
-                    let n = if lit {
+                    let n = if normal {
                         times(v.normal, &normals)
                     } else {
                         [0.0; 3]
@@ -798,9 +963,18 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
             };
             let mut out = Processed {
                 clip,
-                tex: v.tex,
                 ..Processed::default()
             };
+            if made {
+                let n = if setup.normalize { normalize(n) } else { n };
+                for (slot, c) in out.tex.iter_mut().zip(&setup.coords) {
+                    *slot = c.make(layout, v, eye, n);
+                }
+            } else {
+                for (slot, c) in out.tex.iter_mut().zip(&setup.coords) {
+                    *slot = c.keep(layout, v);
+                }
+            }
             for (i, plane) in setup.planes.iter().take(6).enumerate() {
                 out.planes[i] = plane[0] * world[0]
                     + plane[1] * world[1]
@@ -944,15 +1118,16 @@ pub fn at_clip_coordinates(
     out
 }
 
-/// A transformed vertex, as it is.
-fn transformed(v: &Vertex, _layout: &Layout) -> Processed {
+/// A transformed vertex, as it is, with its sets in the slots that
+/// take them.
+fn transformed(setup: &Setup, v: &Vertex, layout: &Layout) -> Processed {
     Processed {
         clip: [v.position[0], v.position[1], v.position[2], 1.0],
         rhw: v.position[3],
         tl: true,
         diffuse: rgba(v.diffuse.unwrap_or(0xFFFF_FFFF)),
         specular: rgba(v.specular.unwrap_or(0xFF00_0000)),
-        tex: v.tex,
+        tex: std::array::from_fn(|slot| setup.coords[slot].keep(layout, v)),
         ..Processed::default()
     }
 }
@@ -1367,10 +1542,7 @@ fn screen(setup: &Setup, p: &Processed) -> ScreenVertex {
     } else {
         setup.view_map.screen(p.clip)
     };
-    let tex = |stage: usize| {
-        let t = p.tex[setup.tex_index[stage] & 7];
-        [t[0], t[1]]
-    };
+    let tex = |stage: usize| setup.coords[stage].sampled(p.tex[stage]);
     ScreenVertex {
         x,
         y,

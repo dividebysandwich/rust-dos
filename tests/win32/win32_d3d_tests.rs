@@ -3855,6 +3855,85 @@ fn a_spot_light_points_where_the_view_matrix_turns_it() {
     assert_rgb(&p, 33, 30, [255, 255, 255], 12);
 }
 
+/// A quad over the whole target, of positions alone, with a texture of
+/// red, green, blue and white quarters on stage 0, whose coordinates
+/// are the camera-space position through `matrix` with the
+/// D3DTSS_TEXTURETRANSFORMFLAGS `flags`.
+fn generated_scene(matrix: [f32; 16], flags: u32) -> Scene {
+    let texels = std::array::from_fn(|i| match (i % 8 >= 4, i / 8 >= 4) {
+        (false, false) => 0xF800,
+        (true, false) => 0x07E0,
+        (false, true) => 0x001F,
+        (true, true) => 0xFFFF,
+    });
+    let quad = [
+        [-1.0, 1.0, 0.5],
+        [1.0, 1.0, 0.5],
+        [-1.0, -1.0, 0.5],
+        [1.0, 1.0, 0.5],
+        [1.0, -1.0, 0.5],
+        [-1.0, -1.0, 0.5],
+    ];
+    let scene = toadforce_scene(vec![
+        Step::State(RS_LIGHTING, 0),
+        Step::State(RS_CULLMODE, 1),
+        // D3DTSS_TEXCOORDINDEX: D3DTSS_TCI_CAMERASPACEPOSITION.
+        Step::Stage(11, 0x2_0000),
+        Step::Stage(24, flags),
+        Step::Call(DEV7_SET_TRANSFORM, vec![16], bits(&matrix)),
+        Step::World(D3DFVF_XYZ, quad.iter().flat_map(|p| bits(p)).collect(), 6),
+    ]);
+    Scene {
+        texture: Some(texels),
+        ..scene
+    }
+}
+
+/// The quarters of `generated_scene`'s texture, each where the matrix
+/// puts it.
+fn assert_quarters(p: &[u16]) {
+    assert_rgb(p, 16, 16, [255, 0, 0], 8);
+    assert_rgb(p, 48, 16, [0, 255, 0], 8);
+    assert_rgb(p, 16, 48, [0, 0, 255], 8);
+    assert_rgb(p, 48, 48, [255, 255, 255], 8);
+}
+
+#[test]
+fn texture_coordinates_made_from_the_position_go_through_the_texture_matrix() {
+    // u is x / 2 + 0.5 and v is 0.5 - y / 2: the texture over the
+    // target once. D3DTTFF_COUNT2.
+    let mut matrix = [0.0f32; 16];
+    (matrix[0], matrix[12], matrix[5], matrix[13]) = (0.5, 0.5, -0.5, 0.5);
+    let scene = generated_scene(matrix, 2);
+    // The pipeline's, for a Voodoo3, and the card's.
+    assert_quarters(&draw_scene("voodoo3_generated", &scene));
+    assert_quarters(&draw_scene_toadforce("toadforce_generated", &scene));
+}
+
+#[test]
+fn projected_texture_coordinates_are_divided_by_the_last_one() {
+    // Twice the coordinates, and 2 as the third: D3DTTFF_COUNT3 and
+    // D3DTTFF_PROJECTED divide the first two by it.
+    let mut matrix = [0.0f32; 16];
+    (matrix[0], matrix[12], matrix[5], matrix[13]) = (1.0, 1.0, -1.0, 1.0);
+    matrix[14] = 2.0;
+    let scene = generated_scene(matrix, 3 | 0x100);
+    assert_quarters(&draw_scene("voodoo3_projected", &scene));
+    assert_quarters(&draw_scene_toadforce("toadforce_projected", &scene));
+    // Transformed vertices keep their set, and with no count the
+    // fourth coordinate divides it, which is 1 for a set of two. The
+    // ToadForce takes such vertices with four coordinates a set.
+    let scene = Scene {
+        steps: vec![
+            Step::Stage(24, 0x100),
+            Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE)),
+        ],
+        ..scene
+    };
+    assert_quarters(&draw_scene("voodoo3_projected_tl", &scene));
+    assert_quarters(&draw_scene_toadforce("toadforce_projected_tl", &scene));
+}
+
 #[test]
 fn the_t_and_l_hal_device_draws_as_the_hal_device_does() {
     let scene = |api| {
