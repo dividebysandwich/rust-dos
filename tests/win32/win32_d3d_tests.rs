@@ -112,6 +112,26 @@ fn machine_with(test: &str, card: Option<Board>, program: Vec<u8>) -> Cpu {
     cpu
 }
 
+/// A machine with a ToadForce as its display adapter, the built-in
+/// Windows on and `program` loaded from the shell as T.EXE.
+fn machine_toadforce(test: &str, program: Vec<u8>) -> Cpu {
+    let base = PathBuf::from("target/test_win32_d3d").join(test);
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    fs::write(base.join("T.EXE"), program).unwrap();
+    let mut cpu = Cpu::new(base);
+    let setup = VideoSetup {
+        adapter: Adapter::ToadForce,
+        mono_monitor: false,
+    };
+    rust_dos::video::bios::install(&mut cpu.bus, setup);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    cpu
+}
+
 /// What the program printed.
 fn printed(cpu: &Cpu) -> String {
     let console = cpu.host_console.as_ref().unwrap();
@@ -1317,6 +1337,8 @@ struct Scene {
     texture: Option<[u16; 64]>,
     /// The texture is 4444, with alpha, in place of 565.
     texture_alpha: bool,
+    /// The texture is in system memory, where no card reads it.
+    texture_system: bool,
     steps: Vec<Step>,
 }
 
@@ -1407,7 +1429,9 @@ fn scene_program_with(scene: &Scene, bpp: u32, checked: &mut Vec<u32>) -> (Vec<u
         put32(&mut d, TEX_DESC + 0x5C, 0x07E0);
         put32(&mut d, TEX_DESC + 0x60, 0x001F);
     }
-    put32(&mut d, TEX_DESC + 0x68, DDSCAPS_TEXTURE);
+    // DDSCAPS_SYSTEMMEMORY.
+    let system = if scene.texture_system { 0x800 } else { 0 };
+    put32(&mut d, TEX_DESC + 0x68, DDSCAPS_TEXTURE | system);
     let tex_desc = d[TEX_DESC as usize..TEX_DESC as usize + 124].to_vec();
     put(&mut d, FILL_DESC, &tex_desc);
     put32(&mut d, FILL_DESC + 0x08, 256);
@@ -1740,10 +1764,57 @@ fn draw_scene(test: &str, scene: &Scene) -> Vec<u16> {
 /// The results of `scene`'s Clear and ViewportClear steps, and the
 /// render target's pixels after it, once every other call succeeded.
 fn clear_scene(test: &str, scene: &Scene) -> (Vec<u32>, Vec<u16>) {
+    clear_scene_on(test, scene, false)
+}
+
+/// The same scene drawn by a ToadForce's HAL.
+fn draw_scene_toadforce(test: &str, scene: &Scene) -> Vec<u16> {
+    let (r, pixels) = clear_scene_on(test, scene, true);
+    assert!(r.iter().all(|&hr| hr == 0), "Clear results: {r:X?}");
+    pixels
+}
+
+/// The render target's pixels after `scene` on a ToadForce in a 32-bit
+/// mode, X8R8G8B8.
+fn draw_scene32_toadforce(test: &str, scene: &Scene) -> Vec<u32> {
+    let (exe, data) = scene_program_in(scene, 32);
+    let mut cpu = machine_toadforce(test, exe);
+    run_until_done(&mut cpu, data);
+    let n = peek(&cpu, data + CALLS);
+    let r = results(&cpu, data, n);
+    assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+    drew_on_the_card(&cpu, scene);
+    (0..64 * 64)
+        .map(|i| peek(&cpu, data + PIXELS + 4 * i) & 0xFF_FFFF)
+        .collect()
+}
+
+/// The card drew the scene's primitives, and took every command of the
+/// HAL's.
+fn drew_on_the_card(cpu: &Cpu, scene: &Scene) {
+    let counts = cpu.bus.toadforce.as_ref().unwrap().counts();
+    assert_eq!(counts.rejected, 0);
+    let draws = scene
+        .steps
+        .iter()
+        .filter(|step| matches!(step, Step::Draw(_) | Step::Prims(..)))
+        .count() as u64;
+    assert!(counts.draws >= draws, "{counts:?}");
+    assert!(draws == 0 || counts.primitives > 0, "{counts:?}");
+}
+
+fn clear_scene_on(test: &str, scene: &Scene, toadforce: bool) -> (Vec<u32>, Vec<u16>) {
     let mut checked = Vec::new();
     let (exe, data) = scene_program_with(scene, 16, &mut checked);
-    let mut cpu = machine_with(test, scene.card, exe);
+    let mut cpu = if toadforce {
+        machine_toadforce(test, exe)
+    } else {
+        machine_with(test, scene.card, exe)
+    };
     run_until_done(&mut cpu, data);
+    if toadforce {
+        drew_on_the_card(&cpu, scene);
+    }
     let n = peek(&cpu, data + CALLS);
     let r = results(&cpu, data, n);
     let mut others = (1..n).filter(|i| !checked.contains(i));
@@ -1818,6 +1889,7 @@ fn a_flat_shaded_triangle_has_its_first_vertex_color() {
         zbuffer: None,
         texture: None,
         texture_alpha: false,
+        texture_system: false,
         steps: vec![Step::State(RS_SHADEMODE, 1), Step::Draw(corners())],
     };
     let p = draw_scene("flat", &scene);
@@ -1839,6 +1911,7 @@ fn clear_test_scene(api: Api, zbuffer: bool, steps: Vec<Step>) -> Scene {
         zbuffer: zbuffer.then_some(1.0),
         texture: None,
         texture_alpha: false,
+        texture_system: false,
         steps,
     }
 }
@@ -1911,6 +1984,7 @@ fn direct3d_on_a_voodoo3_leaves_glides_gamma_table_linear() {
         zbuffer: None,
         texture: None,
         texture_alpha: false,
+        texture_system: false,
         steps: vec![Step::Draw(corners())],
     };
     let (exe, data) = scene_program(&scene);
@@ -1937,6 +2011,7 @@ fn a_gouraud_shaded_triangle_blends_its_corners() {
         zbuffer: None,
         texture: None,
         texture_alpha: false,
+        texture_system: false,
         steps: vec![Step::Draw(corners())],
     };
     let p = draw_scene("gouraud", &scene);
@@ -1957,6 +2032,7 @@ fn direct3d_6_clears_through_its_viewport_and_draws() {
         zbuffer: None,
         texture: None,
         texture_alpha: false,
+        texture_system: false,
         steps: vec![Step::Draw(corners())],
     };
     let p = draw_scene("d3d6", &scene);
@@ -1981,6 +2057,7 @@ fn a_textured_quad_shows_its_texels() {
         zbuffer: None,
         texture: Some(texels),
         texture_alpha: false,
+        texture_system: false,
         steps: vec![Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE))],
     };
     let p = draw_scene("textured", &scene);
@@ -2019,6 +2096,7 @@ fn a_texel_centred_on_each_pixel_is_the_one_the_pixel_samples() {
         zbuffer: None,
         texture: Some(texels),
         texture_alpha: false,
+        texture_system: false,
         steps: vec![Step::Draw(vec![a, b, c, b, d, c])],
     };
     let p = draw_scene("texel_centres", &scene);
@@ -2047,6 +2125,7 @@ fn points_and_lines_light_the_pixels_3dfxs_driver_lights() {
         zbuffer: None,
         texture: None,
         texture_alpha: false,
+        texture_system: false,
         steps: vec![
             Step::Prims(
                 D3DPT_POINTLIST,
@@ -2088,6 +2167,7 @@ fn blending_by_the_current_alpha_on_stage_0_blends_by_the_diffuse_alpha() {
             zbuffer: None,
             texture: Some(texels),
             texture_alpha: false,
+            texture_system: false,
             steps: vec![
                 Step::Stage(TSS_COLOROP, op),
                 Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, 0x40FF_0000)),
@@ -2159,6 +2239,7 @@ fn blending_by_the_diffuse_alpha_ignores_the_texture_factor_of_the_alpha() {
             zbuffer: None,
             texture: Some([0x8FFF; 64]),
             texture_alpha: true,
+            texture_system: false,
             steps,
         };
         let p = draw_scene(&format!("blend_diffuse_alpha_tfactor_color{i}"), &scene);
@@ -2191,6 +2272,7 @@ fn blending_by_the_diffuse_alpha_keeps_the_alpha_of_the_texture_factor() {
             zbuffer: None,
             texture: Some([0x8FFF; 64]),
             texture_alpha: true,
+            texture_system: false,
             steps,
         };
         let p = draw_scene(&format!("blend_diffuse_alpha_tfactor{i}"), &scene);
@@ -2219,6 +2301,7 @@ fn blending_by_the_diffuse_alpha_keeps_the_alpha_test_on_the_texture() {
         zbuffer: None,
         texture: Some(texels),
         texture_alpha: true,
+        texture_system: false,
         steps,
     };
     let p = draw_scene("blend_diffuse_alpha_tfactor_test", &scene);
@@ -2238,6 +2321,7 @@ fn a_texture_draws_after_its_program_fills_video_memory() {
         zbuffer: None,
         texture: Some([0xF800; 64]),
         texture_alpha: false,
+        texture_system: false,
         steps: vec![
             Step::Fill,
             Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE)),
@@ -2256,6 +2340,7 @@ fn the_z_buffer_keeps_the_nearer_of_two_quads() {
         zbuffer: Some(1.0),
         texture: None,
         texture_alpha: false,
+        texture_system: false,
         steps: vec![
             Step::State(RS_ZENABLE, 1),
             Step::Draw(quad(0.0, 0.0, 32.0, 64.0, 0.25, GREEN)),
@@ -2281,6 +2366,7 @@ fn a_depth_fill_blt_resets_the_z_buffer_in_its_rectangle() {
         zbuffer: Some(1.0),
         texture: None,
         texture_alpha: false,
+        texture_system: false,
         steps: vec![
             Step::State(RS_ZENABLE, 1),
             Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.25, RED)),
@@ -2328,6 +2414,7 @@ fn a_depth_fill_blt_is_one_fastfill_of_the_card_for_each_rectangle() {
         zbuffer: Some(1.0),
         texture: None,
         texture_alpha: false,
+        texture_system: false,
         steps,
     };
     let plain = scene(vec![
@@ -2370,6 +2457,7 @@ fn a_quad_nearer_than_the_cleared_depth_passes_the_depth_test() {
             zbuffer: Some(0.5),
             texture: None,
             texture_alpha: false,
+            texture_system: false,
             steps: vec![
                 Step::State(RS_ZENABLE, 1),
                 Step::State(RS_ZFUNC, 4),
@@ -2398,6 +2486,7 @@ fn a_32_bit_target_keeps_its_clear_color_exactly_and_widens_drawn_pixels() {
             zbuffer: Some(0.5),
             texture: None,
             texture_alpha: false,
+            texture_system: false,
             steps: vec![
                 Step::State(RS_ZENABLE, 1),
                 Step::State(RS_ZFUNC, 4),
@@ -2432,6 +2521,7 @@ fn the_voodoo3_draws_into_a_back_buffer_at_the_start_of_its_memory() {
         zbuffer: None,
         texture: None,
         texture_alpha: false,
+        texture_system: false,
         steps: vec![
             Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, GREEN)),
             Step::Flip,
@@ -2452,6 +2542,7 @@ fn alpha_blending_mixes_with_the_target() {
         zbuffer: None,
         texture: None,
         texture_alpha: false,
+        texture_system: false,
         steps: vec![
             Step::State(RS_ALPHABLENDENABLE, 1),
             Step::State(RS_SRCBLEND, 5),
@@ -2484,6 +2575,7 @@ fn vertex_fog_and_table_fog_mix_in_the_fog_color() {
         zbuffer: None,
         texture: None,
         texture_alpha: false,
+        texture_system: false,
         steps: vec![
             Step::State(RS_FOGENABLE, 1),
             Step::State(RS_FOGCOLOR, 0x00_FF00),
@@ -2518,6 +2610,7 @@ fn flat_shading_keeps_each_vertex_fog() {
         zbuffer: None,
         texture: None,
         texture_alpha: false,
+        texture_system: false,
         steps: vec![
             Step::State(RS_SHADEMODE, 1),
             Step::State(RS_FOGENABLE, 1),
@@ -2545,6 +2638,7 @@ fn card_scene(test: &str, board: Board) {
         zbuffer: Some(1.0),
         texture: Some(texels),
         texture_alpha: false,
+        texture_system: false,
         steps: vec![
             Step::State(RS_ZENABLE, 1),
             Step::Draw(quad(0.0, 0.0, 32.0, 32.0, 0.25, GREEN)),
@@ -2592,6 +2686,7 @@ fn keyed_texels_stay_out_whatever_the_alpha_on_a_voodoo2() {
             zbuffer: None,
             texture: Some(texels),
             texture_alpha: false,
+            texture_system: false,
             steps: all,
         };
         let p = draw_scene(&format!("card_v2_keyed{i}"), &scene);
@@ -2637,6 +2732,7 @@ fn keyed_texels_blend_with_the_stages_alpha_on_a_voodoo2() {
             zbuffer: None,
             texture: Some(texels),
             texture_alpha: false,
+            texture_system: false,
             steps: all,
         };
         let p = draw_scene(&format!("card_v2_keyed_blend{i}"), &scene);
@@ -2832,6 +2928,7 @@ fn the_specular_color_adds_to_textured_and_untextured_triangles() {
         zbuffer: Some(1.0),
         texture: textured.then_some([0xFFFF; 64]),
         texture_alpha: false,
+        texture_system: false,
         steps: vec![
             Step::State(RS_ZENABLE, 1),
             Step::State(RS_SPECULARENABLE, 1),
@@ -3211,6 +3308,7 @@ fn traced_scene() -> Scene {
         zbuffer: Some(1.0),
         texture: Some([0xF800; 64]),
         texture_alpha: false,
+        texture_system: false,
         steps: vec![
             Step::State(RS_ZENABLE, 2),
             Step::Stage(TSS_COLOROP, TOP_MODULATE),
@@ -3401,4 +3499,205 @@ fn the_3d_trace_has_what_an_enumeration_offered_and_what_the_callback_said() {
     assert_eq!(textures.len(), 1, "{events:#?}");
     assert!(textures[0].ends_with(" -> CANCEL"), "{textures:?}");
     assert_eq!(counts[textures[0].as_str()], 1);
+}
+
+// The same scenes on a ToadForce, whose HAL sends them to the card as
+// level 1 commands. The card's pixels are defined
+// (`docs/toadforce-spec.md`), so these are exact.
+
+fn toadforce_scene(steps: Vec<Step>) -> Scene {
+    Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: 0,
+        zbuffer: None,
+        texture: None,
+        texture_alpha: false,
+        texture_system: false,
+        steps,
+    }
+}
+
+#[test]
+fn a_toadforce_draws_a_gouraud_shaded_triangle() {
+    let scene = toadforce_scene(vec![Step::Draw(corners())]);
+    let p = draw_scene_toadforce("toadforce_gouraud", &scene);
+    assert_rgb(&p, 5, 5, [255, 0, 0], 16);
+    assert_rgb(&p, 57, 5, [0, 255, 0], 24);
+    assert_rgb(&p, 5, 57, [0, 0, 255], 24);
+    assert_rgb(&p, 22, 22, [85, 85, 85], 24);
+    assert_rgb(&p, 60, 60, [0, 0, 0], 0);
+}
+
+#[test]
+fn a_toadforce_samples_a_texture_where_it_is() {
+    // Red, green, blue and white quarters.
+    let texels = std::array::from_fn(|i| match (i % 8 >= 4, i / 8 >= 4) {
+        (false, false) => 0xF800,
+        (true, false) => 0x07E0,
+        (false, true) => 0x001F,
+        (true, true) => 0xFFFF,
+    });
+    let scene = Scene {
+        texture: Some(texels),
+        ..toadforce_scene(vec![Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE))])
+    };
+    let p = draw_scene_toadforce("toadforce_textured", &scene);
+    assert_rgb(&p, 16, 16, [255, 0, 0], 0);
+    assert_rgb(&p, 48, 16, [0, 255, 0], 0);
+    assert_rgb(&p, 16, 48, [0, 0, 255], 0);
+    assert_rgb(&p, 48, 48, [255, 255, 255], 0);
+    assert_rgb(&p, 63, 0, [0, 255, 0], 0);
+    assert_rgb(&p, 63, 63, [255, 255, 255], 0);
+
+    // With its color key on, the keyed texels are left out.
+    let scene = Scene {
+        clear: BLUE,
+        texture: Some(texels),
+        ..toadforce_scene(vec![
+            Step::Key(0x07E0),
+            Step::State(RS_COLORKEYENABLE, 1),
+            Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE)),
+        ])
+    };
+    let p = draw_scene_toadforce("toadforce_keyed", &scene);
+    assert_rgb(&p, 16, 16, [255, 0, 0], 0);
+    assert_rgb(&p, 48, 16, [0, 0, 255], 0);
+    assert_rgb(&p, 48, 48, [255, 255, 255], 0);
+}
+
+#[test]
+fn a_toadforce_tests_depth_blends_and_fogs() {
+    let scene = Scene {
+        zbuffer: Some(1.0),
+        ..toadforce_scene(vec![
+            Step::State(RS_ZENABLE, 1),
+            Step::Draw(quad(0.0, 0.0, 32.0, 64.0, 0.25, GREEN)),
+            Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.75, RED)),
+        ])
+    };
+    let p = draw_scene_toadforce("toadforce_ztest", &scene);
+    assert_rgb(&p, 10, 30, [0, 255, 0], 0);
+    assert_rgb(&p, 50, 30, [255, 0, 0], 0);
+
+    let scene = Scene {
+        clear: BLUE,
+        ..toadforce_scene(vec![
+            Step::State(RS_ALPHABLENDENABLE, 1),
+            Step::State(RS_SRCBLEND, 5),
+            Step::State(RS_DESTBLEND, 6),
+            Step::Draw(quad(0.0, 0.0, 32.0, 64.0, 0.5, 0x80FF_0000)),
+        ])
+    };
+    let p = draw_scene_toadforce("toadforce_blend", &scene);
+    assert_rgb(&p, 16, 30, [128, 0, 127], 12);
+    assert_rgb(&p, 48, 30, [0, 0, 255], 0);
+
+    let fogged = |alpha: u32, x0: f32, x1: f32| {
+        quad(x0, 0.0, x1, 32.0, 0.5, WHITE)
+            .into_iter()
+            .map(|v| with_fog(v, alpha))
+            .collect()
+    };
+    // Table fog, linear from 0 to 1: half at depth 0.5. The projection
+    // matrix is the identity, with which Direct3D's table fog goes by
+    // depth, whatever the vertices' w (a Voodoo has fog by w only).
+    let table = quad(0.0, 32.0, 64.0, 64.0, 0.5, WHITE)
+        .into_iter()
+        .map(|v| Tl { rhw: 0.5, ..v })
+        .collect();
+    let scene = toadforce_scene(vec![
+        Step::State(RS_FOGENABLE, 1),
+        Step::State(RS_FOGCOLOR, 0x00_FF00),
+        Step::Draw(fogged(0, 0.0, 32.0)),
+        Step::Draw(fogged(0xFF, 32.0, 64.0)),
+        Step::State(RS_FOGTABLEMODE, 3),
+        Step::State(RS_FOGSTART, 0f32.to_bits()),
+        Step::State(RS_FOGEND, 1f32.to_bits()),
+        Step::Draw(table),
+    ]);
+    let p = draw_scene_toadforce("toadforce_fog", &scene);
+    assert_rgb(&p, 16, 16, [0, 255, 0], 0);
+    assert_rgb(&p, 48, 16, [255, 255, 255], 0);
+    assert_rgb(&p, 32, 48, [128, 255, 128], 12);
+}
+
+#[test]
+fn a_toadforce_draws_direct3d_6_flat_shading_points_and_lines() {
+    let scene = Scene {
+        api: Api::D3D6,
+        clear: 0xFF00_0080,
+        ..toadforce_scene(vec![Step::Draw(corners())])
+    };
+    let p = draw_scene_toadforce("toadforce_d3d6", &scene);
+    assert_rgb(&p, 5, 5, [255, 0, 0], 16);
+    assert_rgb(&p, 22, 22, [85, 85, 85], 24);
+    assert_rgb(&p, 60, 60, [0, 0, 0x84], 4);
+
+    let scene = toadforce_scene(vec![
+        Step::State(RS_SHADEMODE, 1),
+        Step::Draw(corners()),
+    ]);
+    let p = draw_scene_toadforce("toadforce_flat", &scene);
+    assert_rgb(&p, 22, 22, [255, 0, 0], 0);
+    assert_rgb(&p, 50, 8, [255, 0, 0], 0);
+
+    let scene = toadforce_scene(vec![
+        Step::Prims(D3DPT_POINTLIST, vec![tl(10.0, 10.0, 0.5, WHITE)]),
+        Step::Prims(
+            D3DPT_LINELIST,
+            vec![tl(20.0, 20.0, 0.5, RED), tl(30.0, 20.0, 0.5, RED)],
+        ),
+    ]);
+    let p = draw_scene_toadforce("toadforce_points", &scene);
+    assert_rgb(&p, 10, 10, [255, 255, 255], 0);
+    assert_rgb(&p, 11, 10, [0, 0, 0], 0);
+    assert_rgb(&p, 20, 20, [255, 0, 0], 0);
+    assert_rgb(&p, 29, 20, [255, 0, 0], 0);
+    assert_rgb(&p, 25, 21, [0, 0, 0], 0);
+}
+
+#[test]
+fn a_toadforce_draws_into_a_32_bit_target_with_a_24_bit_depth_buffer() {
+    let scene = Scene {
+        zbuffer: Some(1.0),
+        ..toadforce_scene(vec![
+            Step::State(RS_ZENABLE, 1),
+            Step::Draw(quad(0.0, 0.0, 32.0, 64.0, 0.25, 0xFF12_3456)),
+            Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.75, 0xFFAB_CDEF)),
+        ])
+    };
+    let p = draw_scene32_toadforce("toadforce_32", &scene);
+    assert_eq!(p[30 * 64 + 10], 0x12_3456);
+    assert_eq!(p[30 * 64 + 50], 0xAB_CDEF);
+}
+
+#[test]
+fn a_toadforce_draws_with_a_copy_of_a_texture_in_system_memory() {
+    let texels = std::array::from_fn(|i| match (i % 8 >= 4, i / 8 >= 4) {
+        (false, false) => 0xF800,
+        (true, false) => 0x07E0,
+        (false, true) => 0x001F,
+        (true, true) => 0xFFFF,
+    });
+    let scene = Scene {
+        clear: BLUE,
+        texture: Some(texels),
+        texture_system: true,
+        ..toadforce_scene(vec![
+            Step::Draw(quad(0.0, 0.0, 64.0, 32.0, 0.5, WHITE)),
+            // The key changes the copy the next draw is made with.
+            Step::Key(0x07E0),
+            Step::State(RS_COLORKEYENABLE, 1),
+            Step::Draw(quad(0.0, 32.0, 64.0, 64.0, 0.5, WHITE)),
+        ])
+    };
+    let p = draw_scene_toadforce("toadforce_copied", &scene);
+    assert_rgb(&p, 16, 8, [255, 0, 0], 0);
+    assert_rgb(&p, 48, 8, [0, 255, 0], 0);
+    assert_rgb(&p, 16, 24, [0, 0, 255], 0);
+    assert_rgb(&p, 48, 24, [255, 255, 255], 0);
+    assert_rgb(&p, 16, 40, [255, 0, 0], 0);
+    assert_rgb(&p, 48, 40, [0, 0, 255], 0);
+    assert_rgb(&p, 48, 56, [255, 255, 255], 0);
 }

@@ -33,7 +33,10 @@ pub fn tmus(cpu: &Cpu) -> u32 {
 }
 
 /// D3DCAPS8's words: a device's with `device`, else the adapter's.
+/// They describe a Voodoo's HAL on every card: Direct3D 8 draws through
+/// the HAL of whichever card there is, with what a Voodoo's does.
 pub fn words(cpu: &Cpu, device: bool) -> [u32; 53] {
+    use crate::win32::ddraw::d3d::hal;
     let tmus = tmus(cpu);
     let mut w = [0u32; 53];
     // D3DDEVTYPE_HAL, adapter 0.
@@ -79,14 +82,15 @@ pub fn words(cpu: &Cpu, device: bool) -> [u32; 53] {
     w[27] = 1;
     w[28] = 65536.0f32.to_bits();
     // The guard band, as Direct3D 7's HAL has it.
-    for (i, g) in crate::win32::ddraw::d3d::caps::GUARD_BAND.iter().enumerate() {
+    let voodoo = hal::description(hal::Kind::Voodoo);
+    for (i, g) in voodoo.guard_band.iter().enumerate() {
         w[29 + i] = g.to_bits();
     }
     // Eight sets of texture coordinates.
     w[35] = 8;
     // D3DTEXOPCAPS_: the operations the HAL draws, which ValidateDevice
     // accepts (hal::can_do).
-    w[36] = crate::win32::ddraw::d3d::hal::OP_CAPS;
+    w[36] = voodoo.ops;
     w[37] = tmus;
     w[38] = tmus;
     // D3DVTXPCAPS_: texture generation, material sources, directional

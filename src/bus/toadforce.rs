@@ -105,7 +105,7 @@ impl Bus {
             card.reset(live, &mut fx);
             self.toadforce_settle();
         }
-        self.toadforce = wanted.map(|memory| Box::new(ToadForce::new(memory, caps::RELEASED_LEVEL)));
+        self.toadforce = wanted.map(|memory| Box::new(ToadForce::new(memory, caps::OFFERED_LEVEL)));
         self.vbe
             .resize(wanted.map_or(vbe::VRAM_SIZE, |memory| memory as usize));
         if self.toadforce() {

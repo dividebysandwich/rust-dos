@@ -689,7 +689,7 @@ pub fn create(
         d.inner = inner_id;
         d.inner_iface = inner_iface;
     }
-    hal::created(cpu);
+    hal::created(cpu, dd);
     use_chain(cpu, id, chain, p.clone());
     super::states::defaults(cpu, id);
     write_params(cpu, params_at, &p);
@@ -1262,9 +1262,12 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         rects.push(view);
     }
-    let target = (flags & CLEAR_TARGET != 0).then_some(color);
-    let depth = (flags & CLEAR_ZBUFFER != 0).then(|| f32::from_bits(z).clamp(0.0, 1.0));
-    hal::clear(cpu, &dev, &rects, target, depth);
+    let fill = hal::Fill {
+        target: (flags & CLEAR_TARGET != 0).then_some(color),
+        depth: (flags & CLEAR_ZBUFFER != 0).then(|| f32::from_bits(z).clamp(0.0, 1.0)),
+        stencil: None,
+    };
+    hal::clear(cpu, &dev, &rects, fill);
     Some(D3D_OK)
 }
 
@@ -1278,7 +1281,9 @@ pub fn validate_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if out == 0 || !cpu.bus.guest_probe(out, 4, true) {
         return Some(D3DERR_INVALIDCALL);
     }
-    let tmus = super::super::ddraw::d3d::hal(cpu, d.dd).unwrap_or(1) as usize;
+    let offer = hal::card(cpu, d.dd);
+    let tmus = offer.map_or(1, |offer| offer.units) as usize;
+    let kind = offer.map_or(hal::Kind::Voodoo, |offer| offer.kind);
     let stage = |s: usize, t: usize| d.stages[s * 32 + t];
     let mut used = 0;
     for s in 0..STAGES {
@@ -1286,10 +1291,10 @@ pub fn validate_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if op == 1 {
             break;
         }
-        if !hal::can_do(op) {
+        if !hal::can_do(kind, op) {
             return Some(D3DERR_UNSUPPORTEDCOLOROPERATION);
         }
-        if aop != 1 && !hal::can_do(aop) {
+        if aop != 1 && !hal::can_do(kind, aop) {
             return Some(D3DERR_UNSUPPORTEDALPHAOPERATION);
         }
         used += 1;

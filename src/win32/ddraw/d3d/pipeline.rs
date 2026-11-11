@@ -558,7 +558,7 @@ pub struct Setup {
     /// can't take coordinates.
     pub clip: bool,
     /// The band primitives are always clipped to: left, top, right,
-    /// bottom. The card's is `hal::VERTEX_BAND`, a pixel or two inside
+    /// bottom. The card's is `hal::vertex_band`, at or a little inside
     /// the guard band the device reports.
     pub guard_band: [f32; 4],
     pub cull: u32,
@@ -582,7 +582,7 @@ impl Default for Setup {
             lighting: None,
             fog: None,
             clip: true,
-            guard_band: super::hal::VERTEX_BAND,
+            guard_band: super::hal::voodoo::VERTEX_BAND,
             cull: CULL_CCW,
             fill: 3,
             shade: 2,

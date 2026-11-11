@@ -1,10 +1,11 @@
 # ToadForce: a synthetic 3D card for games of 2000 to 2002
 
-Status: proposal. Nothing here is implemented. The document covers the
-research, the card's definition, how the emulator would draw it, what
-the guest software needs, and the order of the work. Facts taken from
-other projects have their source in "References"; what could not be
-confirmed is listed under "Unverified facts".
+Status: being built. "Phases" says what is done; the card as built is
+specified in `toadforce-spec.md`. The document covers the research, the
+card's definition, how the emulator draws it, what the guest software
+needs, and the order of the work. Facts taken from other projects have
+their source in "References"; what could not be confirmed is listed
+under "Unverified facts".
 
 ## The problem
 
@@ -897,13 +898,16 @@ DLLs are the emulator's.
   (`Bus::toadforce_submit`), so both run one decoder. Blits the card
   doesn't do as DirectDraw's own code does (stretches, which sample
   differently, mirrors, destination keys) stay with that code.
-- **Direct3D 7.** `ddraw/d3d/hal.rs` is written against the Voodoo. It
-  becomes one implementation of a HAL interface (capabilities, texture
-  formats, texture handles, state, draws), and ToadForce is the second.
-  The ToadForce HAL lists the level's formats, offers the HAL and T&L
-  HAL devices, and turns state and draws into card commands. The 16-bit
-  shadows of 32-bit targets (`d3d/shadow.rs`) and the copies of
-  textures the Voodoo can't sample in place aren't used on it.
+- **Direct3D 7.** `ddraw/d3d/hal` is the HAL interface (capabilities,
+  formats, state, draws, clears), with the Voodoo's implementation
+  (`hal/voodoo.rs`) and the ToadForce's (`hal/toadforce.rs`) behind it.
+  The ToadForce HAL lists the level's formats and turns state and draws
+  into card commands; it offers the T&L HAL device with phase 3. The
+  16-bit shadows of 32-bit targets (`d3d/shadow.rs`) aren't used on it.
+  A texture surface in video memory in one of the card's formats is
+  sampled where it is. The HAL copies into card memory only what the
+  card can't read there: textures in system memory, palettized ones,
+  and sizes that are no power of two.
 - **Direct3D 8** (`d3d8/`) sits on the Direct3D 7 device today and
   keeps doing so, with `D3DCAPS8` filled from the level's table and
   hardware vertex processing offered for fixed-function draws.
@@ -1032,11 +1036,11 @@ Each phase is one or a few pull requests that leave main working.
    `builtin-windows-architecture.md` ("Direct3D runs on the emulated
    3dfx card's HAL") reworded to the emulated card's HAL, whichever
    card it is. Proof: Zanzarah's Fairy Garden with DDS textures and no
-   game fix (#583, #606), and Grom past `screen.Init` (#645). In
-   progress: the state, surface and draw commands are in
-   `src/toadforce/level1` and the renderer in `src/toadforce/raster`,
-   tested through the card's commands. The HAL is still to come, and
-   until it is there machines offer level 0 only.
+   game fix (#583, #606), and Grom past `screen.Init` (#645). Done:
+   the state, surface and draw commands are in `src/toadforce/level1`,
+   the renderer in `src/toadforce/raster`, and the HAL in
+   `src/win32/ddraw/d3d/hal/toadforce.rs`. Machines offer level 1,
+   which stays provisional until it is frozen.
 3. **Transform and lighting in the card.** Untransformed draws, lights,
    vertex blending, clip planes, texture coordinate generation, the T&L
    HAL device. Proof: Giants' terrain with bump mapping. Black & White

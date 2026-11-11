@@ -429,9 +429,12 @@ fn clear_with(
     if count != 0 && list.is_empty() {
         return Some(D3D_OK);
     }
-    let target = (flags & super::device::CLEAR_TARGET != 0).then_some(color);
-    let depth = (flags & super::device::CLEAR_ZBUFFER != 0).then_some(z);
-    super::hal::clear(cpu, &d, &list, target, depth);
+    let fill = super::hal::Fill {
+        target: (flags & super::device::CLEAR_TARGET != 0).then_some(color),
+        depth: (flags & super::device::CLEAR_ZBUFFER != 0).then_some(z),
+        stencil: None,
+    };
+    super::hal::clear(cpu, &d, &list, fill);
     Some(D3D_OK)
 }
 

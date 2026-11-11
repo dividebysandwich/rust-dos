@@ -9,6 +9,7 @@ use super::super::{
     V_D3D2, V_D3D3, V_D3D7, V_DEVICE1, V_DEVICE2, V_DEVICE3, V_DEVICE7, V_LIGHT, V_MATERIAL1,
     V_MATERIAL2, V_MATERIAL3, V_VB1, V_VB7, V_VIEWPORT1, V_VIEWPORT2, V_VIEWPORT3, state,
 };
+use super::hal::{self, Offer};
 use super::{D3D_OK, D3dObject, IID_HAL, caps, is_device_guid, probe};
 use crate::cpu::Cpu;
 use crate::win32::com::{self, CLASS_E_NOAGGREGATION, Guid};
@@ -63,6 +64,8 @@ const CONTEXT: usize = 2;
 const NEXT: usize = 3;
 const PARAM: usize = 4;
 const TMUS: usize = 5;
+/// The card whose HAL is enumerated (`hal::Kind::code`).
+const CARD: usize = 6;
 
 /// The scratch space: the GUID, the strings, and the two descriptions.
 const SCRATCH: u32 = 640;
@@ -77,17 +80,21 @@ fn start(
     callback: u32,
     context: u32,
     param: u32,
-    tmus: u32,
+    offer: Offer,
 ) -> Option<u32> {
     if !callable(cpu, callback) {
         return Some(DDERR_INVALIDPARAMS);
     }
-    task::start(
-        cpu,
-        task::D3D_ENUM,
-        vec![kind, callback, context, 0, param, tmus],
-        SCRATCH,
-    )
+    let vars = vec![
+        kind,
+        callback,
+        context,
+        0,
+        param,
+        offer.units,
+        offer.kind.code(),
+    ];
+    task::start(cpu, task::D3D_ENUM, vars, SCRATCH)
 }
 
 /// EnumDevices(this, callback, context) of IDirect3D to 3: the HAL, if
@@ -102,14 +109,14 @@ pub fn enum_devices(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         2 => caps::DESC_V2,
         _ => caps::DESC_V3,
     };
-    let Some(tmus) = super::hal(cpu, dd) else {
+    let Some(offer) = super::hal::card(cpu, dd) else {
         return Some(if callable(cpu, callback) {
             D3D_OK
         } else {
             DDERR_INVALIDPARAMS
         });
     };
-    start(cpu, DEVICES, callback, context, size, tmus)
+    start(cpu, DEVICES, callback, context, size, offer)
 }
 
 /// EnumDevices(this, callback, context) of IDirect3D7.
@@ -118,14 +125,14 @@ pub fn enum_devices7(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (_, dd) = hr!(d3d_of(cpu, this));
-    let Some(tmus) = super::hal(cpu, dd) else {
+    let Some(offer) = super::hal::card(cpu, dd) else {
         return Some(if callable(cpu, callback) {
             D3D_OK
         } else {
             DDERR_INVALIDPARAMS
         });
     };
-    start(cpu, DEVICES7, callback, context, 0, tmus)
+    start(cpu, DEVICES7, callback, context, 0, offer)
 }
 
 /// EnumTextureFormats(this, callback, context) of a device: the texture
@@ -135,10 +142,11 @@ pub fn enum_texture_formats(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, callback, context] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (vtable, _) = hr!(super::device::device_of(cpu, this));
+    let (vtable, id) = hr!(super::device::device_of(cpu, this));
     let version = super::device::version(vtable);
     let kind = if version < 3 { TEXTURES_DESC } else { TEXTURES };
-    start(cpu, kind, callback, context, 0, 0)
+    let offer = super::device::offer_of(cpu, id);
+    start(cpu, kind, callback, context, 0, offer)
 }
 
 /// EnumZBufferFormats(this, device, callback, context).
@@ -150,10 +158,10 @@ pub fn enum_z_buffer_formats(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(guid) = Guid::read(cpu, device) else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    if guid != IID_HAL || super::hal(cpu, dd).is_none() {
+    let Some(offer) = super::hal::card(cpu, dd).filter(|_| guid == IID_HAL) else {
         return Some(DDERR_INVALIDPARAMS);
-    }
-    start(cpu, Z_FORMATS, callback, context, 0, 0)
+    };
+    start(cpu, Z_FORMATS, callback, context, 0, offer)
 }
 
 /// The task's step: the next item to the callback, until the list ends
@@ -195,15 +203,18 @@ fn items(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             }
             cpu.bus.guest_write_bytes(s + STRINGS, caps::DESCRIPTION);
             cpu.bus.guest_write_bytes(s + NAME, caps::NAME);
-            let tmus = t.var(TMUS);
+            let offer = Offer {
+                kind: hal::Kind::from_code(t.var(CARD)),
+                units: t.var(TMUS),
+            };
             if t.var(KIND) == DEVICES7 {
-                caps::write_desc7(cpu, s + HAL_DESC, tmus);
+                caps::write_desc7(cpu, s + HAL_DESC, offer);
                 return Next::call(callback, &[s + STRINGS, s + NAME, s + HAL_DESC, context], 1);
             }
             IID_HAL.write(cpu, s);
             let size = t.var(PARAM);
-            caps::write_desc(cpu, s + HAL_DESC, size, true, tmus);
-            caps::write_desc(cpu, s + HEL_DESC, size, false, tmus);
+            caps::write_desc(cpu, s + HAL_DESC, size, Some(offer));
+            caps::write_desc(cpu, s + HEL_DESC, size, None);
             let args = [
                 s,
                 s + STRINGS,
@@ -215,10 +226,11 @@ fn items(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             Next::call(callback, &args, 1)
         }
         kind => {
+            let description = hal::description(hal::Kind::from_code(t.var(CARD)));
             let list = if kind == Z_FORMATS {
-                caps::z_formats()
+                description.z_formats
             } else {
-                caps::texture_formats()
+                description.textures
             };
             let Some(f) = list.get(next) else {
                 return Next::Done(D3D_OK);
@@ -342,7 +354,7 @@ pub fn find_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     }
     let flags = cpu.bus.guest_read_32(search + 4);
-    let Some(tmus) = super::hal(cpu, dd) else {
+    let Some(offer) = super::hal::card(cpu, dd) else {
         return Some(DDERR_NOTFOUND);
     };
     if flags & D3DFDS_GUID != 0 && Guid::read(cpu, search + 16) != Some(IID_HAL) {
@@ -352,8 +364,8 @@ pub fn find_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_NOTFOUND);
     }
     IID_HAL.write(cpu, result + 4);
-    caps::write_desc(cpu, result + 20, desc, true, tmus);
-    caps::write_desc(cpu, result + 20 + desc, desc, false, tmus);
+    caps::write_desc(cpu, result + 20, desc, Some(offer));
+    caps::write_desc(cpu, result + 20 + desc, desc, None);
     Some(D3D_OK)
 }
 
