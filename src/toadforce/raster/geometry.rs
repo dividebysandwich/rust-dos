@@ -38,7 +38,9 @@ pub const PLANE_BOTTOM: usize = 6;
 pub const PLANE_USER: usize = 7;
 
 /// The planes that are cut at whatever `CLIPPING` says, since what is
-/// past them has no place on the screen.
+/// past them has no place on the screen. A card with transform and
+/// lighting cuts there whether the program asked for clipping or
+/// promised there is nothing to cut.
 const ALWAYS: u16 = 1 << PLANE_W | 1 << PLANE_NEAR | 0xF << PLANE_LEFT;
 
 /// The smallest w a vertex on the screen has.
@@ -196,7 +198,8 @@ impl Fog {
             2 => math::exp_neg((self.density * d) * (self.density * d)),
             _ => (self.end - d) / (self.end - self.start),
         };
-        // No number, as with a start equal to the end, is no fog.
+        // No number, as at the end of a fog that starts where it
+        // ends, is no fog.
         if f.is_nan() { 1.0 } else { f.clamp(0.0, 1.0) }
     }
 }
@@ -242,12 +245,11 @@ pub struct Setup {
     user: Vec<(usize, [f32; 4])>,
     /// The band's edges as shares of w: left, right, bottom, top.
     band: [f32; 4],
-    /// The planes vertices are told apart by.
+    /// The planes vertices are told apart by and primitives cut at.
     planes: u16,
-    /// Whether primitives are cut at the planes, or left out when they
-    /// cross one of `ALWAYS`.
-    pub clipping: bool,
-    /// Screen x = `x[0]` + clip x / w * `x[1]`, and so y and z.
+    /// Screen x = `x[0]` + (clip x / w + 1) * `x[1]`, screen y =
+    /// `y[0]` + (1 - clip y / w) * `y[1]` and depth = `z[0]` + clip z /
+    /// w * `z[1]`, as the specification has them.
     x: [f32; 2],
     y: [f32; 2],
     z: [f32; 2],
@@ -340,9 +342,8 @@ impl Setup {
                 1.0 - (-BAND - vy) / half_h,
             ],
             planes,
-            clipping,
-            x: [vx + half_w, half_w],
-            y: [vy + half_h, -half_h],
+            x: [vx, half_w],
+            y: [vy, half_h],
             z: [v.min_z, v.max_z - v.min_z],
         }
     }
@@ -519,13 +520,14 @@ impl Setup {
     /// Where `v` is on the screen, with its values as the rasteriser
     /// takes them: the coordinates of slot `n` as its set `n`.
     pub fn project(&self, v: &Vertex) -> ScreenVertex {
-        let rhw = 1.0 / v.clip[3];
+        let [x, y, z, w] = v.clip;
+        let rhw = 1.0 / w;
         let mut tex = ScreenVertex::default().tex;
         tex[..SLOTS].copy_from_slice(&v.tex);
         ScreenVertex {
-            x: self.x[0] + v.clip[0] * rhw * self.x[1],
-            y: self.y[0] + v.clip[1] * rhw * self.y[1],
-            z: self.z[0] + v.clip[2] * rhw * self.z[1],
+            x: self.x[0] + (x / w + 1.0) * self.x[1],
+            y: self.y[0] + (1.0 - y / w) * self.y[1],
+            z: self.z[0] + z / w * self.z[1],
             // A vertex that isn't on the screen is asked for its
             // colours only.
             rhw: if rhw > 0.0 && rhw.is_finite() {

@@ -152,6 +152,24 @@ fn a_vertex_goes_through_world_view_and_projection_to_the_viewport() {
 }
 
 #[test]
+fn an_indexed_draw_transforms_the_vertices_its_indices_name() {
+    // Vertex 0 is never named, and the two triangles share an edge.
+    let mut rig = Rig::unlit();
+    let p = [
+        [f32::NAN, f32::NAN, f32::NAN],
+        [-1.0, 1.0, 0.5],
+        [1.0, 1.0, 0.5],
+        [-1.0, -1.0, 0.5],
+        [1.0, -1.0, 0.5],
+    ];
+    let vertices = words(&p.concat());
+    let index = [1, 2, 3, 3, 2, 4];
+    let error = rig.run(|w| encode::draw_indexed(w, 4, XYZ, 5, &vertices, &index));
+    assert_eq!(error, 0);
+    assert_eq!(rig.drawn(0).len(), (SIZE * SIZE) as usize);
+}
+
+#[test]
 fn depth_runs_from_the_viewports_near_to_its_far() {
     let mut rig = Rig::new(Format::X8R8G8B8, Some(Format::D16));
     rig.states(&[(RS_LIGHTING, 0), (RS_ZENABLE, 1), (RS_ZFUNC, 8)]);
@@ -182,12 +200,13 @@ fn a_triangle_is_cut_at_the_near_plane_the_band_and_the_clip_planes() {
         .filter(|&(_, y)| y < 16)
         .collect();
     assert_eq!(rig.drawn(0), upper);
-    // With clipping off, what crosses the near plane isn't drawn, and
-    // what is past the far plane is.
+    // With clipping off the near plane still cuts, as a card with
+    // transform and lighting does, and what is past the far plane is
+    // drawn.
     rig.clear(1, 0, 1.0, 0);
     rig.states(&[(RS_CLIPPING, 0)]);
     rig.white(dipping);
-    assert_eq!(rig.drawn(0), []);
+    assert_eq!(rig.drawn(0), upper);
     rig.white([[-1.0, 1.0, 2.0], [0.0, 1.0, 2.0], [-1.0, 0.0, 2.0]]);
     assert_eq!(rig.drawn(0).len(), 528);
     rig.clear(1, 0, 1.0, 0);

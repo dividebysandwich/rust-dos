@@ -898,13 +898,13 @@ depths:
 **Clipping.** A primitive is cut where it crosses one of these, and
 what is outside isn't drawn: w below 1/65536; z below 0; x or y on the
 screen further than 16384 pixels from the render target's top left.
-With `CLIPPING` 1 also z above w, and each clip plane whose bit
-`CLIPPLANEENABLE` has: a plane (a, b, c, d) keeps the points whose
-world-space position (x, y, z, w) has a * x + b * y + c * z + d * w of
-0 or more. With `CLIPPING` 0 a primitive that crosses one of the
-first three isn't drawn at all. Where an edge crosses, every value of
-the vertex is taken from the straight line between its ends in clip
-space. A point is dropped whole by its position. What is cut from a
+These three are cut at with `CLIPPING` 0 as well. With `CLIPPING` 1
+also z above w, and each clip plane whose bit `CLIPPLANEENABLE` has: a
+plane (a, b, c, d) keeps the points whose world-space position (x, y,
+z, w) has a * x + b * y + c * z + d * w of 0 or more. Where an edge
+crosses, every value of the vertex is taken from the straight line
+between its ends in clip space. A point is dropped whole by its
+position. What is cut from a
 triangle is a convex polygon: filled, it covers the pixels the
 triangle did inside the planes; with `FILLMODE` 2 its outline is
 drawn, the cut edges included, and with 1 its corners.

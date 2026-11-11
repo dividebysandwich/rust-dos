@@ -90,6 +90,9 @@ pub struct Renderer {
     /// Kept from draw to draw for their room.
     vertices: Vec<ScreenVertex>,
     lit: Vec<geometry::Vertex>,
+    /// For each vertex of a draw the card transforms, its place in
+    /// `lit`, or `u32::MAX` while no index has named it.
+    places: Vec<u32>,
     order: Vec<u32>,
 }
 
@@ -126,29 +129,31 @@ fn pieces(primitive: u32, n: usize, mut f: impl FnMut(Piece)) {
 
 /// Queue the convex polygon of `corners`: a triangle, or what the
 /// planes left of one. `provoking` gives it its colours where it is
-/// flat-shaded.
-fn polygon(
+/// flat-shaded. The corners are taken by reference or by value, so a
+/// triangle of a draw's own vertices isn't copied.
+fn polygon<V: std::borrow::Borrow<ScreenVertex>>(
     prims: &mut Vec<Prim>,
-    corners: &[ScreenVertex],
+    corners: &[V],
     provoking: &ScreenVertex,
     state: &DrawState,
     sets: &[u8],
 ) {
     let (shape, clip) = (&state.shape, state.clip);
     let n = corners.len();
-    let fan = |i: usize| [&corners[0], &corners[i], &corners[i + 1]];
+    let at = |i: usize| corners[i].borrow();
+    let fan = |i: usize| [at(0), at(i), at(i + 1)];
     match shape.fill {
         // Points and lines go by the winding only: their pixels
         // needn't be in the rows the triangle's are.
         1 | 2 if !(1..n - 1).any(|i| Prim::facing(fan(i), shape.cull).is_some()) => {}
         1 => {
-            for a in corners {
-                prims.extend(Prim::point(a, shape, clip, sets).into_iter().flatten());
+            for i in 0..n {
+                prims.extend(Prim::point(at(i), shape, clip, sets).into_iter().flatten());
             }
         }
         2 => {
             for i in 0..n {
-                let (a, b) = (&corners[i], &corners[(i + 1) % n]);
+                let (a, b) = (at(i), at((i + 1) % n));
                 prims.extend(Prim::line(a, b, provoking, shape, clip, sets));
             }
         }
@@ -254,26 +259,35 @@ impl Renderer {
         // and the others through transform and lighting first.
         let geometry =
             (!draw.fvf.transformed).then(|| geometry::Setup::new(l, &state.coords, &draw.fvf));
+        // Word `i` of vertex `n`.
+        let word = |n: usize, i: usize| match draw.vertices {
+            Vertices::Inline(words) => words[n * draw.fvf.words + i],
+            Vertices::Buffer { offset, stride, .. } => {
+                let at = offset as usize + n * stride as usize + 4 * i;
+                u32::from_le_bytes(memory[at..at + 4].try_into().unwrap())
+            }
+        };
         self.vertices.clear();
         self.lit.clear();
-        let (vertices, lit) = (&mut self.vertices, &mut self.lit);
-        let mut vertex = |word: &dyn Fn(usize) -> u32| match &geometry {
-            Some(setup) => lit.push(setup.vertex(word)),
-            None => vertices.push(ScreenVertex::read(&draw.fvf, word)),
-        };
-        match draw.vertices {
-            Vertices::Inline(words) => {
-                for v in words.chunks_exact(draw.fvf.words) {
-                    vertex(&|i| v[i]);
-                }
-            }
-            Vertices::Buffer { offset, stride, .. } => {
-                for n in 0..count {
-                    let at = offset as usize + n * stride as usize;
-                    vertex(&|i| {
-                        let at = at + 4 * i;
-                        u32::from_le_bytes(memory[at..at + 4].try_into().unwrap())
-                    });
+        match &geometry {
+            None => self.vertices.extend(
+                (0..count).map(|n| ScreenVertex::read(&draw.fvf, |i| word(n, i))),
+            ),
+            // Only the vertices the indices name go through transform
+            // and lighting, each once, however many the draw has: an
+            // indexed draw often names a few of a large buffer. The
+            // order then counts in `lit`.
+            Some(setup) => {
+                self.places.clear();
+                self.places.resize(count, u32::MAX);
+                for i in self.order.iter_mut() {
+                    let place = &mut self.places[*i as usize];
+                    if *place == u32::MAX {
+                        *place = self.lit.len() as u32;
+                        let n = *i as usize;
+                        self.lit.push(setup.vertex(|w| word(n, w)));
+                    }
+                    *i = *place;
                 }
             }
         }
@@ -334,7 +348,7 @@ impl Renderer {
             }
             Piece::Triangle(t, ends) => {
                 let provoking = v(t[if shape.flat_last { ends.1 } else { ends.0 }]);
-                polygon(prims, &t.map(|i| *v(i)), provoking, state, sets);
+                polygon(prims, &t.map(v), provoking, state, sets);
             }
         });
     }
@@ -351,9 +365,7 @@ impl Renderer {
         let slots: [u8; pipeline::SLOTS] = std::array::from_fn(|i| i as u8);
         let sets = &slots[..state.coords.len()];
         let v = |i: usize| &lit[order[i] as usize];
-        // What crosses a plane is cut there, or left out when the
-        // state says nothing does.
-        let crosses = |out: u16| out != 0 && !setup.clipping;
+        // What crosses a plane in force is cut there.
         pieces(primitive, order.len(), |piece| match piece {
             Piece::Point(a) => {
                 if v(a).out == 0 {
@@ -364,7 +376,7 @@ impl Renderer {
             Piece::Line(a, b) => {
                 let (a, b) = (v(a), v(b));
                 let out = a.out | b.out;
-                if a.out & b.out != 0 || crosses(out) {
+                if a.out & b.out != 0 {
                     return;
                 }
                 let provoking = setup.project(if shape.flat_last { b } else { a });
@@ -376,7 +388,7 @@ impl Renderer {
             Piece::Triangle(t, ends) => {
                 let t = t.map(v);
                 let out = t[0].out | t[1].out | t[2].out;
-                if t[0].out & t[1].out & t[2].out != 0 || crosses(out) {
+                if t[0].out & t[1].out & t[2].out != 0 {
                     return;
                 }
                 // The side that shows gives the colours.
@@ -384,6 +396,13 @@ impl Renderer {
                 let side = |v: &geometry::Vertex| if back { v.turned() } else { *v };
                 let provoking =
                     setup.project(&side(t[if shape.flat_last { ends.1 } else { ends.0 }]));
+                // Most triangles cross no plane, and go to the screen
+                // without the room a cut one needs.
+                if out == 0 {
+                    let corners = t.map(|v| setup.project(&side(v)));
+                    polygon(prims, &corners, &provoking, state, sets);
+                    return;
+                }
                 let mut cut = clip::Polygon::triangle(t.map(side));
                 cut.cut(out);
                 let mut corners = [ScreenVertex::default(); clip::CORNERS];
