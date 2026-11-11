@@ -21,8 +21,10 @@
 //!
 //! The card also makes each stage's texture coordinates as the
 //! stage's `TEXCOORDINDEX` and `TEXTURETRANSFORMFLAGS` say, generated
-//! and through the texture matrix, which the pipeline doesn't do
-//! (#950).
+//! and through the texture matrix. For the draws it keeps, the
+//! pipeline makes them the same way (`pipeline::Coord`) and the screen
+//! vertices carry each stage's own, with what a projected stage
+//! divides them by.
 //!
 //! The pipeline keeps the draws the card can't take (`can_transform`):
 //! blended and tweened vertices, clip status and extents the program
@@ -70,10 +72,10 @@ use crate::toadforce::level1::{
 use crate::toadforce::{caps, regs};
 use crate::win32::screen;
 
-/// The textures a draw has at once: the sets of texture coordinates
-/// the pipeline gives a screen vertex. The card takes more
-/// (`caps::TEXTURES_AT_ONCE`), which the device gets when every draw
-/// that uses them is one the card transforms itself (#948).
+/// The textures a draw has at once: the stages whose texture
+/// coordinates the pipeline gives a screen vertex. The card takes more
+/// (`caps::TEXTURES_AT_ONCE`), which the device gets when a screen
+/// vertex carries as many (#948).
 pub const UNITS: u32 = 2;
 
 /// The band the pipeline clips what the card draws to. The card takes

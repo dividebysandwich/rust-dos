@@ -1867,6 +1867,95 @@ mod tests {
         }
     }
 
+    /// A matrix that is 0 but for `set`: each a place and its number.
+    fn sparse(set: &[(usize, f32)]) -> Matrix {
+        let mut m = [0.0; 16];
+        for &(at, n) in set {
+            m[at] = n;
+        }
+        m
+    }
+
+    #[test]
+    fn a_slot_takes_a_set_or_what_is_made_from_the_vertex() {
+        // XYZ, a normal and one set of two coordinates.
+        let layout = Layout::of(0x002 | 0x010 | 0x100).unwrap();
+        let mut v = vertex(1.0, 2.0, 4.0);
+        v.normal = [0.0, 0.0, -1.0];
+        v.tex[0] = [0.25, 0.75, 0.0, 0.0];
+        // The view moves the vertex 1 along x. The texture matrix
+        // doubles what goes in and adds its fourth number, which is the
+        // 1 after a position's three: a set of two has its 1 in the
+        // third place, where this matrix adds nothing.
+        let double = sparse(&[(0, 2.0), (5, 2.0), (10, 2.0), (12, 1.0), (13, 1.0), (14, 1.0)]);
+        let setup = Setup {
+            view: sparse(&[(0, 1.0), (5, 1.0), (10, 1.0), (15, 1.0), (12, 1.0)]),
+            coords: [
+                Coord::of(0, 0, &double),
+                Coord::of(0, 2, &double),
+                // The camera-space position, and the normal.
+                Coord::of(0x2_0000, 3, &double),
+                Coord::of(0x1_0000, 0, &double),
+                // A set the vertex doesn't have.
+                Coord::of(1, 0, &double),
+                Coord::set(5),
+                Coord::set(6),
+                Coord::set(7),
+            ],
+            ..Setup::default()
+        };
+        let p = process(&setup, &[v], &layout)[0];
+        assert_eq!(p.tex[0], [0.25, 0.75, 0.0, 1.0]);
+        assert_eq!(p.tex[1], [0.5, 1.5, 0.0, 1.0]);
+        assert_eq!(p.tex[2], [5.0, 5.0, 9.0, 1.0]);
+        assert_eq!(p.tex[3], [0.0, 0.0, -1.0, 1.0]);
+        assert_eq!(p.tex[4], [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn a_projected_stage_gives_the_card_its_divisor_last() {
+        let m = Setup::default().world;
+        // D3DTTFF_COUNT3 | PROJECTED divides by the third, and
+        // PROJECTED alone by the fourth.
+        assert_eq!(
+            Coord::of(0, 3 | 0x100, &m).sampled([2.0, 4.0, 8.0, 1.0]),
+            [2.0, 4.0, 0.0, 8.0]
+        );
+        assert_eq!(
+            Coord::of(0, 0x100, &m).sampled([2.0, 4.0, 8.0, 16.0]),
+            [2.0, 4.0, 8.0, 16.0]
+        );
+        assert_eq!(
+            Coord::of(0, 3, &m).sampled([2.0, 4.0, 8.0, 16.0]),
+            [2.0, 4.0, 8.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn process_vertices_puts_made_coordinates_in_the_set_the_stage_names() {
+        let m = Setup::default().world;
+        let mut stages: [Coord; 8] = std::array::from_fn(Coord::set);
+        // Stage 0 takes set 1 as it is, stage 1 makes set 1 from the
+        // position, and stage 2 would make it from the normal.
+        stages[0] = Coord::of(1, 0, &m);
+        stages[1] = Coord::of(1 | 0x2_0000, 2 | 0x100, &m);
+        stages[2] = Coord::of(1 | 0x1_0000, 0, &m);
+        let setup = Setup {
+            coords: stages,
+            ..Setup::default()
+        }
+        .for_sets();
+        assert_eq!(setup.coords[0], Coord::set(0));
+        assert_eq!(
+            setup.coords[1],
+            Coord {
+                projected: None,
+                ..stages[1]
+            }
+        );
+        assert_eq!(setup.coords[2], Coord::set(2));
+    }
+
     fn near(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-4
     }
