@@ -3165,9 +3165,15 @@ Rust-DOS runs without Windows get its 64 MB of video memory for the
 desktop and for DirectDraw's surfaces, and DirectDraw modes up to
 1600x1200 at 8, 16 and 32 bits a pixel; DirectDraw's colour fills and
 its copies between surfaces in video memory are the card's own
-commands. The card has no 3D yet, so Direct3D programs get the software
-devices, as on `svga`. No system booted from a disk image has a driver
-for it: a booted Windows uses it as a plain VGA.
+commands. Direct3D up to version 7 draws on it, in 16- and 32-bit
+modes, with textures up to 2048 pixels a side in 16- and 32-bit,
+compressed (DXT1 to DXT5) and bump-map formats, and a 24-bit depth
+buffer with stencil. Games that need those, which a Voodoo3 lacks, run
+on this card ([docs/compatibility.md](docs/compatibility.md) names
+them). The card draws 3D on the processor for now. It has no Glide, and
+Direct3D 8 and OpenGL programs need a 3dfx card. No system booted from
+a disk image has a driver for it: a booted Windows uses it as a plain
+VGA.
 
 ```ini
 [emulator]

@@ -132,9 +132,15 @@ opcode, `win32_version=98se` when a message names the version, more
   installs it with its InstallShield 5 setup and runs it. For a CD
   copied to a folder, give the drive the label `EI` ([the CD's drive
   letter and label](../CONFIGURATION.md#the-cds-drive-letter-and-label)).
-* **Grom**: its Wise setup runs (tested with the minimum installation).
-  It is on two CDs; list both images on the drive line and press Ctrl+F4
-  when the setup asks for the second ([running the
+* **Grom**: `win32=true` and `machine=svga_toadforce`
+  ([ToadForce](../CONFIGURATION.md#toadforce)). It stops at start with
+  an assertion (`screen.Init`) when Direct3D lists no 32-bit texture
+  format. A Voodoo3 (`svga_voodoo3`) lists none, as the real card
+  didn't, so Grom doesn't run on it. On the ToadForce, at 800x600 in
+  16 bits, it reaches its main menu and the tutorial level. Its Wise
+  setup runs (tested with the minimum installation). It is on two CDs;
+  list both images on the drive line and press Ctrl+F4 when the setup
+  asks for the second ([running the
   setup](../CONFIGURATION.md#running-the-setup-on-first-start)).
 * **Iron Helix**: `win32_depth=8` (256 colours).
 * **Moto Racer**: `win32_depth=16`; it checks the desktop's depth before
@@ -150,6 +156,14 @@ opcode, `win32_version=98se` when a message names the version, more
   there only with a 3dfx card: `voodoo=true`, or
   `machine=svga_voodoo3` or `svga_banshee`
   ([the system folder](builtin-windows.md#the-system-folder)).
+* **Zanzarah: The Hidden Portal**: `win32=true` and
+  `machine=svga_toadforce` ([ToadForce](../CONFIGURATION.md#toadforce)).
+  It reads its DDS textures only when Direct3D lists a compressed (DXT)
+  texture format. Without one it reads BMP files, and its BMP reader
+  crashes when a level loads. A Voodoo3 (`svga_voodoo3`) lists no DXT
+  format, as the real card didn't, so Zanzarah doesn't run on it. On
+  the ToadForce, at 640x480 in 16 bits, it loads a save and plays in
+  the Fairy Garden.
 * **SafeDisc and SecuROM games**: use an image of the disc that keeps
   what the protection checks. An ISO fails SafeDisc's check, and an
   image without DPM data SecuROM 4.8's, as on Windows 98.

@@ -1069,11 +1069,11 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// (IDirect3DViewport3) of `flags` on the device `d` that asks for a
 /// buffer its target doesn't have. D3DCLEAR_ZBUFFER or D3DCLEAR_STENCIL
 /// without a depth buffer attached fails with D3DERR_ZBUFFER_NOTPRESENT,
-/// D3DCLEAR_STENCIL with one fails with D3DERR_STENCILBUFFER_NOTPRESENT,
-/// as none of the depth buffers here has stencil bits. The call then
-/// clears nothing, the target included. DirectX 7 does this on Windows
-/// 95 with a Voodoo3, with the HAL and the RGB device alike, and so does
-/// Windows 11.
+/// D3DCLEAR_STENCIL with one fails with D3DERR_STENCILBUFFER_NOTPRESENT
+/// unless it has stencil bits and the card's HAL draws stencil (a
+/// ToadForce's; a Voodoo's has none). The call then clears nothing, the
+/// target included. DirectX 7 does this on Windows 95 with a Voodoo3,
+/// with the HAL and the RGB device alike, and so does Windows 11.
 pub fn missing_buffer(cpu: &mut Cpu, d: &Device, flags: u32) -> Option<u32> {
     if flags & (CLEAR_ZBUFFER | CLEAR_STENCIL) == 0 {
         return None;
@@ -1082,9 +1082,11 @@ pub fn missing_buffer(cpu: &mut Cpu, d: &Device, flags: u32) -> Option<u32> {
         return Some(D3DERR_ZBUFFER_NOTPRESENT);
     };
     // DDPF_STENCILBUFFER: the depth buffer has stencil bits.
-    let stencil = state(cpu)
-        .surface(z)
-        .is_some_and(|z| z.format.flags & 0x4000 != 0);
+    let drawn = super::hal::description(super::hal::kind_of(cpu, d)).stencil != 0;
+    let stencil = drawn
+        && state(cpu)
+            .surface(z)
+            .is_some_and(|z| z.format.flags & 0x4000 != 0);
     (flags & CLEAR_STENCIL != 0 && !stencil).then_some(D3DERR_STENCILBUFFER_NOTPRESENT)
 }
 
