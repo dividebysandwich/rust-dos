@@ -87,6 +87,9 @@ pub struct ToadForce {
     pub display: display::Display,
     /// The state the commands of level 1 set.
     pub level1: level1::Level1,
+    /// What draws level 1's primitives. It holds nothing between two
+    /// runs of commands, and no part of the card's state.
+    raster: raster::Renderer,
     /// The interrupt request the card has up, which the bus keeps.
     pub irq_up: Option<u8>,
     /// The commands since the card was made, for a look at what drives
@@ -104,6 +107,10 @@ pub struct Counts {
     pub flip: u64,
     /// The commands level 1 adds.
     pub level1: u64,
+    /// The draw commands among them, and the triangles, lines and
+    /// points they drew.
+    pub draws: u64,
+    pub primitives: u64,
     pub rejected: u64,
 }
 
@@ -124,7 +131,7 @@ crate::state_fields!(ToadForce {
     display,
     irq_up,
     level1,
-} skip { counts });
+} skip { counts, raster });
 
 impl ToadForce {
     /// A card with `memory` bytes of card memory (one of
@@ -148,6 +155,7 @@ impl ToadForce {
             error_at: 0,
             display: display::Display::default(),
             level1: level1::Level1::default(),
+            raster: raster::Renderer::default(),
             irq_up: None,
             counts: Counts::default(),
         }
@@ -203,6 +211,8 @@ impl ToadForce {
                 "blt": counts.blt,
                 "flip": counts.flip,
                 "level1": counts.level1,
+                "draws": counts.draws,
+                "primitives": counts.primitives,
                 "rejected": counts.rejected,
             },
         })
@@ -380,6 +390,19 @@ impl ToadForce {
     /// header's length left no next command to find, which drops the
     /// rest of what was submitted.
     fn run(&mut self, words: &[u32], origin: Origin, memory: &mut [u8], fx: &mut Effects) -> bool {
+        let whole = self.run_each(words, origin, memory, fx);
+        // The draws of a run are drawn by its end.
+        self.raster.flush(memory);
+        whole
+    }
+
+    fn run_each(
+        &mut self,
+        words: &[u32],
+        origin: Origin,
+        memory: &mut [u8],
+        fx: &mut Effects,
+    ) -> bool {
         debug_assert_eq!(memory.len(), self.memory as usize);
         let mut at = 0;
         while at < words.len() {
@@ -398,6 +421,13 @@ impl ToadForce {
         true
     }
 
+    /// Draw with `workers` threads beside the emulator's, whatever the
+    /// host has.
+    #[cfg(test)]
+    pub(crate) fn fix_workers(&mut self, workers: usize) {
+        self.raster = raster::Renderer::with_workers(workers);
+    }
+
     /// Carry out a decoded command.
     fn execute(
         &mut self,
@@ -405,6 +435,15 @@ impl ToadForce {
         memory: &mut [u8],
         fx: &mut Effects,
     ) -> Result<(), Error> {
+        // What the queued draws were to draw is there before anything
+        // else reads or writes the memory.
+        if !matches!(
+            command,
+            Command::Nop | Command::Level1(level1::Command::Draw(_))
+        ) && !matches!(command, Command::Level1(c) if c.sets_state())
+        {
+            self.raster.flush(memory);
+        }
         match command {
             Command::Nop => self.counts.nop += 1,
             Command::Fill { dst, rect, value } => {
@@ -429,6 +468,15 @@ impl ToadForce {
                     fx.display = fx.display.max(Change::Picture);
                 }
                 self.counts.flip += 1;
+            }
+            Command::Level1(level1::Command::Draw(draw)) => {
+                let drawn = self.raster.draw(&mut self.level1, &draw, memory)?;
+                self.counts.level1 += 1;
+                self.counts.draws += 1;
+                if let Some(drawn) = drawn {
+                    self.counts.primitives += drawn.primitives;
+                    fx.drawn.push(drawn.span);
+                }
             }
             Command::Level1(command) => {
                 self.level1.apply(command, memory, &mut fx.drawn)?;

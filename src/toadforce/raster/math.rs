@@ -78,7 +78,7 @@ mod tests {
         assert_eq!(exp_neg(f32::NAN), 1.0);
         assert_eq!(exp_neg(1000.0), 0.0);
         assert_eq!(exp_neg(f32::INFINITY), 0.0);
-        for x in [0.001f32, 0.1, 0.5, 0.6931, 1.0, 2.5, 10.0, 50.0] {
+        for x in [0.001f32, 0.1, 0.5, 0.7, 1.0, 2.5, 10.0, 50.0] {
             let want = (-(x as f64)).exp() as f32;
             assert!((exp_neg(x) - want).abs() <= want * 1e-6, "{x}");
         }

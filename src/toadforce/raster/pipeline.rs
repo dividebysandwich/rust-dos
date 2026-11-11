@@ -221,6 +221,60 @@ pub struct DrawState {
     pub serial: bool,
 }
 
+/// A state's `DrawState`, kept beside the state while it is the
+/// state's. It is no part of the state: two states are equal with or
+/// without it, a copy starts without, and a saved state has none.
+#[derive(Default)]
+pub struct Lowered(Option<std::sync::Arc<DrawState>>);
+
+impl Lowered {
+    /// The state changed.
+    pub fn forget(&mut self) {
+        self.0 = None;
+    }
+
+    /// The lowered form of `l`, which holds this.
+    pub fn of(l: &mut Level1) -> Result<std::sync::Arc<DrawState>, Error> {
+        if let Some(state) = &l.lowered.0 {
+            return Ok(state.clone());
+        }
+        let state = std::sync::Arc::new(lower(l)?);
+        l.lowered.0 = Some(state.clone());
+        Ok(state)
+    }
+}
+
+impl Clone for Lowered {
+    fn clone(&self) -> Self {
+        Lowered(None)
+    }
+}
+
+impl PartialEq for Lowered {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for Lowered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "Lowered(kept)"
+        } else {
+            "Lowered(none)"
+        })
+    }
+}
+
+impl crate::savestate::State for Lowered {
+    fn save(&self, _: &mut crate::savestate::Writer) {}
+
+    fn load(&mut self, _: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        self.forget();
+        Ok(())
+    }
+}
+
 /// The stage's sampling states around `texture`.
 fn tex(l: &Level1, stage: usize) -> Option<Tex> {
     let texture = l.texture(stage)?.clone();

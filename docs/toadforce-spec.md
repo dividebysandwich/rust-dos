@@ -563,8 +563,9 @@ made at once whatever the flag says.
 ### Level 1
 
 Opcodes 0010h to 00FFh. Level 1 has level 0's commands too. This
-section is provisional until the level is frozen: the draw commands
-(opcodes from 0030h) are written with the software renderer.
+section is provisional until the level is frozen, which waits for the
+card's transform and lighting and for the Direct3D driver that proves
+the commands against games.
 
 A number in an argument is an IEEE single-precision value in its word.
 One that isn't finite is rejected with `BAD_VALUE`, and so is any
@@ -778,6 +779,218 @@ texture. A handle that isn't defined is rejected with `BAD_HANDLE`.
 | 2 | handle, 1 to `CAPS[13]`, or 0 for no texture |
 
 A handle that isn't defined is rejected with `BAD_HANDLE`.
+
+**`DRAW`, 0030h.** Length 4 or more.
+
+| Word | Argument |
+|---|---|
+| 1 | primitive: 1 points, 2 lines, 3 a line strip, 4 triangles, 5 a triangle strip, 6 a triangle fan |
+| 2 | vertex layout |
+| 3 | vertex count, 0 to 65536 |
+| 4 on | the vertices, one after the other |
+
+Draws the primitives its vertices make, with the state as it is when
+the command runs. "Drawing" below says what a draw does; the rules
+here are for all four draw commands.
+
+- The vertex layout is a Direct3D flexible vertex format code, and
+  says which fields a vertex has and in which order: the position,
+  the point size, the diffuse colour, the specular colour, and up to
+  eight sets of one to four texture coordinates. A vertex is as many
+  words as its fields take. A code that names no layout, or one with a
+  reserved bit set, is rejected with `BAD_VALUE`.
+- Level 1's draws take vertices in screen space only (the layout's
+  position is x, y, z and 1 / w). Layouts with a position for the
+  card to transform are rejected with `BAD_VALUE` until the card's
+  transform and lighting is specified.
+- The command has exactly the words its count and layout need, or it
+  is rejected with `BAD_LENGTH`. The values that set the length are
+  checked before it.
+- Vertices left over after the last whole primitive draw nothing: a
+  third vertex of a list of lines, one or two after the last triangle.
+- The state is checked last. With no render target, or with stages
+  that sample more than `CAPS[11]` textures or use more than `CAPS[11]`
+  sets of coordinates, the draw is rejected with `BAD_STATE`.
+
+**`DRAW_INDEXED`, 0031h.** Length 5 or more.
+
+| Word | Argument |
+|---|---|
+| 1 | primitive |
+| 2 | vertex layout |
+| 3 | vertex count, 0 to 65536 |
+| 4 | index count, 0 to 196605 |
+| 5 on | the vertices, then the indices |
+
+The indices give the order the primitives take the vertices in. Each
+is 16 bits, two to a word, the first of the two in bits 0 to 15; with
+an odd count the last word's upper half is ignored. An index that
+isn't below the vertex count is rejected with `BAD_RANGE`, before the
+state is checked.
+
+**`DRAW_BUFFER`, 0032h.** Length 6.
+
+| Word | Argument |
+|---|---|
+| 1 | primitive |
+| 2 | vertex layout |
+| 3 | stride: the bytes from one vertex to the next, from the layout's size to 1024 |
+| 4 | offset of the first vertex in card memory |
+| 5 | vertex count, 0 to 65536 |
+
+The vertices are read from card memory when the command runs. A
+stride outside its range is rejected with `BAD_VALUE`, and vertices
+that reach outside card memory with `BAD_RANGE`. The offset need not
+be a multiple of four.
+
+**`DRAW_BUFFER_INDEXED`, 0033h.** Length 8 or more.
+
+| Word | Argument |
+|---|---|
+| 1 | primitive |
+| 2 | vertex layout |
+| 3 | stride |
+| 4 | offset of the first vertex in card memory |
+| 5 | vertex count, 0 to 65536 |
+| 6 | offset of the indices in card memory, or FFFFFFFFh |
+| 7 | index count, 0 to 196605 |
+| 8 on | the indices, when word 6 is FFFFFFFFh |
+
+`DRAW_BUFFER` with indices as `DRAW_INDEXED` has them, in the command
+or in card memory, where each is two bytes. With an offset the command
+is 8 words long, and indices that reach outside card memory are
+rejected with `BAD_RANGE`.
+
+#### Drawing
+
+This section defines the pixels a draw writes. Every renderer of the
+card gives these pixels; the software renderer gives them bit for bit
+on every host.
+
+**Vertices.** A field the layout lacks has its default: the diffuse
+colour is white with alpha 255, the specular colour is 0, texture
+coordinates are 0. A 1 / w that is 0, negative or no finite number
+counts as 1. Positions are in pixels from the render target's top
+left. With `PIXEL_CENTRE` 0 the centre of the top left pixel is at
+(0, 0), and with 1 at (0.5, 0.5). A position is limited to 32768
+pixels either side of 0 and rounded to 1/256 of a pixel. A primitive
+with a position that is no finite number is not drawn.
+
+**Primitives.** A strip's triangle i (from 0) has the vertices i,
+i + 1, i + 2, and every odd one has the first two the other way round,
+so all wind alike. A fan's triangle i has the vertices i + 1, i + 2
+and 0. With `SHADEMODE` flat a primitive has one vertex's colours all
+over, the first of its vertices in the draw's order (for a fan's
+triangle i that is vertex i + 1), or the last with `FLAT_VERTEX` 1.
+
+**Triangles.** A triangle with no area is not drawn, and neither is
+one `CULLMODE` culls: clockwise on the screen with 2,
+counterclockwise with 3. A triangle covers the pixels whose centres
+are inside it. A centre on an edge is covered when the edge is the
+triangle's top (horizontal, with the triangle below it) or on its
+left, so two triangles that share an edge cover each of its pixels
+once. With `FILLMODE` 2 a triangle that isn't culled is drawn as the
+three lines of its edges, and with 1 as its three vertices' points.
+
+**Lines.** A line has one pixel in each column it crosses when it is
+longer along x, and one in each row otherwise: the pixel whose centre
+is nearest to the line there, and of two equally near the lower or
+the right one. The columns (or rows) are those whose centres lie
+between the two ends, the first end's included. The last end's pixel
+is drawn with `LASTPIXEL` 1 and left out with 0.
+
+**Points.** A point is a square around its position with sides of the
+vertex's point size, or `POINTSIZE` where the layout has none,
+limited to `POINTSIZE_MIN` and `POINTSIZE_MAX`. It covers pixels as
+two triangles would. With `POINTSPRITEENABLE` every coordinate set
+goes from (0, 0) at the square's top left to (1, 1) at its bottom
+right.
+
+**Clipping.** Pixels outside the viewport's rectangle or the render
+target are not drawn, nor those outside the scissor rectangle when
+`SCISSORENABLE` is 1.
+
+**Values at a pixel.** Colours, texture coordinates and fog are
+interpolated to the pixel's centre with perspective: each value times
+1 / w, and 1 / w itself, change linearly over the screen, and the
+value is their quotient. Depth changes linearly over the screen and
+is limited to 0 to 1. A colour channel is rounded to the nearest of
+0 to 255.
+
+**The order of a fragment's steps.**
+
+1. The depth and stencil tests, when no later step can drop the
+   fragment; otherwise they come after step 5, so a dropped fragment
+   leaves the depth and stencil as they were.
+2. The stages, from 0 up to the first whose `COLOROP` is 1. A stage
+   whose operation reads a texture it hasn't got passes the fragment
+   on unchanged.
+3. With `SPECULARENABLE`, the specular colour is added to the red,
+   green and blue.
+4. With `FOGENABLE`, the red, green and blue are mixed with
+   `FOGCOLOR` by the fog factor f, 0 to 255: (c * f + fog * (255 - f)
+   + 127) / 255. With `FOGTABLEMODE` 0 the factor is the specular
+   colour's alpha. Otherwise it comes from the fragment's depth d, or
+   its w with `FOG_BY_W` 1: (end - d) / (end - start) for mode 3,
+   e^(-density * d) for 1, e^(-(density * d)^2) for 2.
+5. The colour key and the alpha test. With `COLORKEYENABLE`, a
+   fragment is dropped when a texture with a colour key has the key
+   at the texel nearest to the fragment's coordinates. With
+   `ALPHATESTENABLE`, it is dropped unless its alpha against
+   `ALPHAREF` passes `ALPHAFUNC`.
+6. With `DITHERENABLE` and an `R5G6B5` render target, the dither. The
+   matrix below gives d for the pixel, by x and y modulo 4. Red and
+   blue become (c + d / 2) / 8 and green (c + d / 4) / 4, each
+   division rounded down and the result limited to the channel's
+   bits; step 8 writes those.
+
+   | y \ x | 0 | 1 | 2 | 3 |
+   |---|---|---|---|---|
+   | 0 | 0 | 8 | 2 | 10 |
+   | 1 | 12 | 4 | 14 | 6 |
+   | 2 | 3 | 11 | 1 | 9 |
+   | 3 | 15 | 7 | 13 | 5 |
+7. With `ALPHABLENDENABLE`, the blend with the pixel there.
+8. The write of the channels `COLORWRITEENABLE` names. A channel
+   goes to a 16-bit target rounded to the nearest value the target
+   holds: (c * 31 + 127) / 255 for five bits, (c * 63 + 127) / 255
+   for six. An `X8R8G8B8` target's top byte is written 0.
+
+**Depth and stencil.** Depth is kept as 16 bits in a `D16` buffer and
+24 bits in the others, where it is in bits 8 to 31 of a pixel and the
+stencil value in bits 0 to 7. A fragment's depth is z times the
+largest value, rounded to nearest, less `ZBIAS`, and not below 0. The
+depth test compares it with the pixel's by `ZFUNC` and passes always
+with `ZENABLE` 0 or no depth buffer. The stencil test, with
+`STENCILENABLE` and a `D24S8` buffer, compares `STENCILREF` with the
+pixel's stencil value by `STENCILFUNC`, both under `STENCILMASK`. The
+stencil value then changes by `STENCILFAIL` when the stencil test
+fails, `STENCILZFAIL` when it passes and the depth test fails, and
+`STENCILPASS` when both pass, in the bits `STENCILWRITEMASK` names. A
+fragment that passes both is drawn, and writes its depth with
+`ZWRITEENABLE`.
+
+**Textures.** A coordinate of 0 is a texture's left or top edge and 1
+its right or bottom edge, so a texel's centre is half a texel in. The
+nearest filter takes the texel a coordinate falls in. The linear
+filter mixes the four texels around it by the distances to their
+centres in 1/256 of a texel. The level of detail is half the base-2
+logarithm of the larger of two numbers: the squared length, in
+texels, of the step the coordinates take for one pixel to the right,
+and for one pixel down. `MIPMAPLODBIAS` is added. At or below 0 the
+`MAGFILTER` applies to level 0; above, the `MINFILTER`, on the level
+nearest to it with `MIPFILTER` 1, on the two around it mixed with 2,
+and on level 0 with 0. With an anisotropic filter and `MAXANISOTROPY`
+a, the level follows the smaller of the two numbers, though not below
+the larger over a squared.
+
+**Order between draws.** A pixel sees the primitives in the order
+their commands came, and within a command in the order of its
+vertices. A draw that samples a texture whose memory overlaps its
+render target's, or whose colour and depth buffers overlap, reads
+what the primitives before it wrote. Within one primitive it reads
+what the primitive wrote to the rows above the pixel and to the pixels
+left of it in its row.
 
 #### Render states
 

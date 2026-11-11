@@ -1033,12 +1033,10 @@ Each phase is one or a few pull requests that leave main working.
    3dfx card's HAL") reworded to the emulated card's HAL, whichever
    card it is. Proof: Zanzarah's Fairy Garden with DDS textures and no
    game fix (#583, #606), and Grom past `screen.Init` (#645). In
-   progress: the state and surface commands are in
-   `src/toadforce/level1`, and the renderer's parts that draw nothing
-   by themselves in `src/toadforce/raster` (the lowering, texels and
-   sampling, the stage arithmetic, triangle set-up, the threads). The
-   draw commands, the code that runs the steps over a row, lines and
-   points, and the HAL are still to come.
+   progress: the state, surface and draw commands are in
+   `src/toadforce/level1` and the renderer in `src/toadforce/raster`,
+   tested through the card's commands. The HAL is still to come, and
+   until it is there machines offer level 0 only.
 3. **Transform and lighting in the card.** Untransformed draws, lights,
    vertex blending, clip planes, texture coordinate generation, the T&L
    HAL device. Proof: Giants' terrain with bump mapping. Black & White

@@ -583,6 +583,10 @@ fn the_decoder_knows_every_command_the_level_lists() {
         (DEFINE_TEXTURE, 11),
         (FREE_TEXTURE, 2),
         (SET_TEXTURE, 3),
+        (DRAW, 4),
+        (DRAW_INDEXED, 5),
+        (DRAW_BUFFER, 6),
+        (DRAW_BUFFER_INDEXED, 8),
     ];
     for opcode in 0x0010..0x0100u16 {
         let least = listed.iter().find(|l| l.0 == opcode).map(|l| l.1);
