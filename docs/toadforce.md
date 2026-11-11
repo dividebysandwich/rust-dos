@@ -922,9 +922,12 @@ DLLs are the emulator's.
   into card commands. A draw of vertices that aren't in screen space
   goes to the card with the device's matrices, lights and material, and
   the card transforms and lights it; the pipeline keeps blended
-  vertices and the draws whose clip status a program reads back. The
-  HAL offers the T&L HAL device with phase 3. The 16-bit shadows of
-  32-bit targets (`d3d/shadow.rs`) aren't used on it.
+  vertices and the draws whose clip status a program reads back.
+  Direct3D 7 lists the T&L HAL device beside the HAL one on the card,
+  and a program draws on either the same way: Giants picks the T&L HAL
+  and hands the card untransformed vertices, where on the HAL device
+  it has `ProcessVertices` transform them. The 16-bit shadows of 32-bit
+  targets (`d3d/shadow.rs`) aren't used on the card.
   A texture surface in video memory in one of the card's formats is
   sampled where it is. The HAL copies into card memory only what the
   card can't read there: textures in system memory, palettized ones,
