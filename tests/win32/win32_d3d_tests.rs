@@ -3857,21 +3857,27 @@ fn a_spot_light_points_where_the_view_matrix_turns_it() {
 
 #[test]
 fn the_t_and_l_hal_device_draws_as_the_hal_device_does() {
-    let facing = [[-1.0, 1.0, 0.5], [0.0, 1.0, 0.5], [-1.0, 0.0, 0.5]];
-    let mut steps = lit_by(light7(3, [0.0; 3], [0.0, 0.0, 1.0], [0.0; 2]), [1.0, 0.5, 0.25]);
-    steps.push(Step::World(
-        D3DFVF_XYZ | D3DFVF_NORMAL,
-        world_triangle(facing, Some([0.0, 0.0, -1.0]), None),
-        3,
-    ));
-    steps.push(Step::Draw(quad(32.0, 32.0, 64.0, 64.0, 0.5, 0xFF12_3456)));
-    let scene = Scene {
-        api: Api::D3D7Tnl,
-        ..toadforce_scene(steps)
+    let scene = |api| {
+        let facing = [[-1.0, 1.0, 0.5], [0.0, 1.0, 0.5], [-1.0, 0.0, 0.5]];
+        let light = light7(3, [0.0; 3], [0.0, 0.0, 1.0], [0.0; 2]);
+        let mut steps = lit_by(light, [1.0, 0.5, 0.25]);
+        steps.push(Step::World(
+            D3DFVF_XYZ | D3DFVF_NORMAL,
+            world_triangle(facing, Some([0.0, 0.0, -1.0]), None),
+            3,
+        ));
+        steps.push(Step::Draw(quad(32.0, 32.0, 64.0, 64.0, 0.5, 0xFF12_3456)));
+        Scene {
+            api,
+            ..toadforce_scene(steps)
+        }
     };
-    let p = draw_scene32_toadforce("toadforce_tnl_device", &scene);
+    let p = draw_scene32_toadforce("toadforce_tnl_device", &scene(Api::D3D7Tnl));
     assert_eq!(p[5 * 64 + 5], 0xFF_8040);
     assert_eq!(p[40 * 64 + 40], 0x12_3456);
+    // Every pixel is the HAL device's.
+    let hal = draw_scene32_toadforce("toadforce_hal_device", &scene(Api::D3D7));
+    assert!(p == hal, "the T&L HAL device's picture differs from the HAL's");
 }
 
 const D3D7_ENUM_DEVICES: u32 = 3;

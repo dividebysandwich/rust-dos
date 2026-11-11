@@ -154,22 +154,25 @@ pub fn enum_z_buffer_formats(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, device, callback, context] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (_, dd) = hr!(d3d_of(cpu, this));
+    let (vtable, dd) = hr!(d3d_of(cpu, this));
     let Some(guid) = Guid::read(cpu, device) else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let Some(offer) = super::hal::card(cpu, dd).filter(|offer| has_device(offer.kind, &guid))
+    let version = d3d_version(vtable);
+    let Some(offer) =
+        super::hal::card(cpu, dd).filter(|offer| has_device(offer.kind, &guid, version))
     else {
         return Some(DDERR_INVALIDPARAMS);
     };
     start(cpu, Z_FORMATS, callback, context, 0, offer)
 }
 
-/// Whether a card of `kind` has the Direct3D 7 device `guid`: the HAL
-/// device, and the T&L HAL device on a card that transforms and
-/// lights.
-fn has_device(kind: hal::Kind, guid: &Guid) -> bool {
-    *guid == IID_HAL || (*guid == IID_TNLHAL && hal::transforms(kind))
+/// Whether IDirect3D of `version` on a card of `kind` has the device
+/// `guid`: the HAL device, and from Direct3D 7 on the T&L HAL device
+/// on a card that transforms and lights. Direct3D 3 doesn't list that
+/// device, and neither makes one nor gives its depth formats.
+fn has_device(kind: hal::Kind, guid: &Guid, version: u32) -> bool {
+    *guid == IID_HAL || (*guid == IID_TNLHAL && version >= 7 && hal::transforms(kind))
 }
 
 /// The task's step: the next item to the callback, until the list ends
@@ -386,8 +389,9 @@ pub fn find_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// CreateDevice(this, guid, surface, out[, outer]) of IDirect3D2, 3 and
-/// 7. A device GUID that isn't the HAL's, or the HAL's with no card to
-/// draw with, makes it fail as a device that can't be made.
+/// 7. A device GUID the card has no device for (`has_device`), or the
+/// HAL's with no card to draw with, makes it fail as a device that
+/// can't be made.
 pub fn create_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (this, guid, target, out) = (args[0], args[1], args[2], args[3]);
     let (vtable, dd) = hr!(d3d_of(cpu, this));
@@ -404,14 +408,12 @@ pub fn create_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if !is_device_guid(&guid) {
         return Some(DDERR_INVALIDPARAMS);
     }
-    // The T&L HAL device is Direct3D 7's, on a card that transforms
-    // and lights.
-    let tnl = guid == IID_TNLHAL
-        && version == 7
-        && super::hal::card(cpu, dd).is_some_and(|offer| hal::transforms(offer.kind));
-    if guid != IID_HAL && !tnl {
+    if guid != IID_HAL
+        && !super::hal::card(cpu, dd).is_some_and(|o| has_device(o.kind, &guid, version))
+    {
         return Some(com::E_OUTOFMEMORY);
     }
+    let tnl = guid == IID_TNLHAL;
     let v = match version {
         2 => V_DEVICE2,
         3 => V_DEVICE3,

@@ -28,9 +28,6 @@ pub const TNL_NAME: &[u8] = b"Direct3D T&L HAL\0";
 /// D3DDEVCAPS_HWTRANSFORMANDLIGHT.
 const DEVCAPS_TNL: u32 = 0x1_0000;
 
-/// The lights a T&L HAL device has on at once: the card's.
-const TNL_LIGHTS: u32 = crate::toadforce::level1::LIGHTS as u32;
-
 // D3DDEVICEDESC's flags.
 const D3DDD_COLORMODEL: u32 = 0x1;
 const D3DDD_DEVCAPS: u32 = 0x2;
@@ -202,8 +199,10 @@ pub fn write_desc7(cpu: &mut Cpu, at: u32, offer: Offer, tnl: bool) {
     words[0xB0 / 4] = offer.units;
     words[0xB4 / 4] = d.ops;
     words[0xB8 / 4] = stages(&d, offer);
-    // The lights on at once: any number where the processor lights.
-    words[0xBC / 4] = if tnl { TNL_LIGHTS } else { 0xFFFF_FFFF };
+    // The lights on at once: the card's where it lights, any number
+    // where the processor does.
+    let lights = hal::tnl_lights(offer.kind).filter(|_| tnl);
+    words[0xBC / 4] = lights.unwrap_or(0xFFFF_FFFF);
     write_dwords(cpu, at, &words);
     write_f32(cpu, at + 0xC0, 65536.0);
     let guid = if tnl { IID_TNLHAL } else { IID_HAL };

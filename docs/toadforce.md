@@ -618,10 +618,13 @@ Reasons for the values a game can see:
   on.
 
 The Direct3D devices offered on this card are the HAL and the T&L HAL.
-A game that picks the plain HAL gets transform and lighting on the
-processor, by the code that does it for the Voodoo3 today
-(`src/win32/ddraw/d3d/pipeline.rs`), and the card draws XYZRHW
-vertices, as Direct3D 7 worked on a GeForce.
+The T&L HAL's description has `D3DDEVCAPS_HWTRANSFORMANDLIGHT` and the
+card's 8 lights, and the two draw the same way. On a GeForce, Direct3D 7
+transformed and lit the plain HAL device's vertices on the processor and
+the card drew XYZRHW vertices. Here the card transforms and lights the
+untransformed vertices of either device, and the pipeline
+(`src/win32/ddraw/d3d/pipeline.rs`) those of the draws the card can't,
+with the same picture.
 
 OpenGL on level 1 is version 1.3 with these extensions, each of which
 NVIDIA's table lists for both the GeForce 256/2 and the GeForce3
@@ -927,11 +930,11 @@ DLLs are the emulator's.
   and a program draws on either the same way: Giants picks the T&L HAL
   and hands the card untransformed vertices, where on the HAL device
   it has `ProcessVertices` transform them. The 16-bit shadows of 32-bit
-  targets (`d3d/shadow.rs`) aren't used on the card.
-  A texture surface in video memory in one of the card's formats is
-  sampled where it is. The HAL copies into card memory only what the
-  card can't read there: textures in system memory, palettized ones,
-  and sizes that are no power of two.
+  targets (`d3d/shadow.rs`) aren't used on the card. A texture surface
+  in video memory in one of the card's formats is sampled where it is.
+  The HAL copies into card memory only what the card can't read there:
+  textures in system memory, palettized ones, and sizes that are no
+  power of two.
 - **Direct3D 8** (`d3d8/`) sits on the Direct3D 7 device today and
   keeps doing so, with `D3DCAPS8` filled from the level's table and
   hardware vertex processing offered for fixed-function draws.

@@ -80,6 +80,9 @@ pub const UNITS: u32 = 2;
 /// positions to 32768 pixels either side of 0.
 pub const VERTEX_BAND: [f32; 4] = [-16384.0, -16384.0, 16384.0, 16384.0];
 
+/// The lights the card transforms and lights vertices with at once.
+pub const TNL_LIGHTS: u32 = caps::LIGHTS;
+
 /// The vertex layout of a `DRAW`: position with 1 / w, diffuse and
 /// specular colour, and two sets of two texture coordinates.
 const FVF: u32 = 0x004 | 0x040 | 0x080 | 0x200;
