@@ -43,6 +43,19 @@ impl<'a> Mem<'a> {
         }
     }
 
+    /// The `N` bytes at each of `at`, or None when any of them aren't
+    /// all in the memory: one check for the lot.
+    #[inline]
+    pub fn read_all<const N: usize, const K: usize>(&self, at: [usize; K]) -> Option<[[u8; N]; K]> {
+        let last = at.into_iter().max()?;
+        if last.checked_add(N)? > self.len {
+            return None;
+        }
+        // Each is at most `last`, which is in range, and u8 has no
+        // alignment.
+        Some(at.map(|at| unsafe { self.ptr.add(at).cast::<[u8; N]>().read() }))
+    }
+
     /// Put `bytes` at `at`. Nothing is written when they don't all fit.
     #[inline]
     pub fn write<const N: usize>(&self, at: usize, bytes: [u8; N]) {
@@ -102,6 +115,9 @@ mod tests {
         assert_eq!(mem.u32(3), 0);
         assert_eq!(mem.u8(6), 0);
         assert_eq!(mem.u32(usize::MAX - 1), 0);
+        assert_eq!(mem.read_all::<2, 2>([0, 4]), Some([[1, 2], [5, 6]]));
+        assert_eq!(mem.read_all::<2, 2>([0, 5]), None);
+        assert_eq!(mem.read_all::<2, 2>([usize::MAX, 0]), None);
         mem.set_pixel(4, 4, 0xFFFF_FFFF);
         mem.write(usize::MAX, [9u8; 2]);
         mem.set_pixel(2, 2, 0xAABB);

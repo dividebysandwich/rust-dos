@@ -62,7 +62,7 @@ fn rgb565(v: u32) -> Rgba {
 
 /// The texel a pixel `v` of `format` is. `format` isn't a block format
 /// or `P8`, whose texels come from `block` and the palette.
-#[inline]
+#[inline(always)]
 pub fn decode(format: Format, v: u32) -> Rgba {
     use Format::*;
     match format {
