@@ -12,7 +12,7 @@
 use super::Bus;
 use crate::toadforce::display::{Legacy, Shown};
 use crate::toadforce::pci::Bar;
-use crate::toadforce::{Change, Effects, Live, ToadForce, caps, regs};
+use crate::toadforce::{Change, Effects, Live, ToadForce, caps, command, regs};
 use crate::video::VideoMode;
 use crate::video::vbe::{self, VbeMode};
 
@@ -233,7 +233,13 @@ impl Bus {
             return;
         };
         let waiting = card.queued();
-        if card.queue(words, live) {
+        if !command::framed(words) {
+            // A header's length that leads nowhere drops what follows
+            // it. Run by themselves, these words lose only their own
+            // rest, and not what is queued after them.
+            self.toadforce_flush();
+            self.toadforce_run(Some(words));
+        } else if card.queue(words, live) {
             self.toadforce_flush();
         } else if !waiting {
             // The timer wakes the card for the queue's deadline.
@@ -252,17 +258,21 @@ impl Bus {
     #[inline]
     pub fn toadforce_flush(&mut self) {
         if self.toadforce_queued() {
-            self.toadforce_run_queue();
+            self.toadforce_run(None);
         }
     }
 
-    fn toadforce_run_queue(&mut self) {
+    /// Have the card run `words`, or its queue.
+    fn toadforce_run(&mut self, words: Option<&[u32]>) {
         let live = self.toadforce_live();
         let Some(card) = &mut self.toadforce else {
             return;
         };
         let clean = card.read(regs::ERROR, live) == 0;
-        let fx = card.run_queue(&mut self.vbe.vram, live);
+        let fx = match words {
+            Some(words) => card.submit(words, &mut self.vbe.vram, live),
+            None => card.run_queue(&mut self.vbe.vram, live),
+        };
         let error = card.read(regs::ERROR, live);
         if clean && error != 0 {
             self.log_string(&format!(

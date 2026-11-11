@@ -37,6 +37,19 @@ pub fn length(header: u32) -> usize {
     (header >> 16) as usize
 }
 
+/// Whether `words` are whole commands, one after the other: each
+/// header's length leads to the next header, and the last to the end.
+pub fn framed(words: &[u32]) -> bool {
+    let mut at = 0;
+    while at < words.len() {
+        match length(words[at]) {
+            0 => return false,
+            len => at += len,
+        }
+    }
+    at == words.len()
+}
+
 /// The lengths an opcode's commands can have.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Length {
@@ -245,6 +258,18 @@ mod tests {
         (0x0002, Length::Exactly(21)),
         (0x0003, Length::Exactly(3)),
     ]];
+
+    #[test]
+    fn framed_words_are_whole_commands() {
+        let (nop, flip) = (header(NOP, 1), header(FLIP, 3));
+        assert!(framed(&[]));
+        assert!(framed(&[nop, flip, 0, 0, nop]));
+        // A length of 0 leads nowhere, and one past the end has no
+        // command behind it.
+        assert!(!framed(&[nop, header(NOP, 0)]));
+        assert!(!framed(&[flip, 0]));
+        assert!(!framed(&[nop, flip, 0, 0, header(FILL, 11)]));
+    }
 
     #[test]
     fn released_levels_keep_their_commands() {
