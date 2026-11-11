@@ -6,6 +6,9 @@
 //!
 //! - `vertex`: the vertex layout a draw names, and a vertex in screen
 //!   space.
+//! - `geometry`, `light` and `clip`: a vertex the card transforms,
+//!   from its program's space to the screen, with its colours and its
+//!   texture coordinates, and the primitives cut at the planes.
 //! - `pipeline`: the lowering of the card's state to the steps a
 //!   fragment goes through, with the numbers and textures of the draw
 //!   beside them.
@@ -17,8 +20,8 @@
 //! - `combine`: the arithmetic of the stages, the tests and the blend.
 //! - `mem` and `pool`: card memory as several threads use it, and the
 //!   threads.
-//! - `math`: the logarithm and exponential the above need, the same on
-//!   every host.
+//! - `math`: the logarithm, exponential, power and cosine the above
+//!   need, the same on every host.
 //!
 //! `Renderer` here ties them together. The draws of one run of
 //! commands are queued and drawn together: every thread takes the
@@ -29,7 +32,10 @@
 //! memory and at the end of the run, so nothing is queued when the
 //! guest runs, a state is saved, or the screen is shown.
 
+pub mod clip;
 pub mod combine;
+pub mod geometry;
+pub mod light;
 pub mod math;
 pub mod mem;
 pub mod pipeline;
@@ -83,7 +89,75 @@ pub struct Renderer {
     target: Option<Target>,
     /// Kept from draw to draw for their room.
     vertices: Vec<ScreenVertex>,
+    lit: Vec<geometry::Vertex>,
     order: Vec<u32>,
+}
+
+/// One primitive of a draw, by its vertices' places in the draw's
+/// order.
+enum Piece {
+    Point(usize),
+    Line(usize, usize),
+    /// The triangle's vertices, and which of the three are its first
+    /// and last in the draw's order, which a strip and a fan turn
+    /// round.
+    Triangle([usize; 3], (usize, usize)),
+}
+
+/// The primitives `n` vertices make of the kind `primitive`.
+fn pieces(primitive: u32, n: usize, mut f: impl FnMut(Piece)) {
+    match primitive {
+        1 => (0..n).for_each(|i| f(Piece::Point(i))),
+        2 => (0..n / 2).for_each(|i| f(Piece::Line(2 * i, 2 * i + 1))),
+        3 => (1..n).for_each(|i| f(Piece::Line(i - 1, i))),
+        4 => (0..n / 3).for_each(|i| f(Piece::Triangle([3 * i, 3 * i + 1, 3 * i + 2], (0, 2)))),
+        5 => (2..n).for_each(|i| {
+            // Every other triangle of a strip has its first two
+            // vertices the other way round, to wind as the rest.
+            if i % 2 == 0 {
+                f(Piece::Triangle([i - 2, i - 1, i], (0, 2)));
+            } else {
+                f(Piece::Triangle([i - 1, i - 2, i], (1, 2)));
+            }
+        }),
+        _ => (2..n).for_each(|i| f(Piece::Triangle([i - 1, i, 0], (0, 1)))),
+    }
+}
+
+/// Queue the convex polygon of `corners`: a triangle, or what the
+/// planes left of one. `provoking` gives it its colours where it is
+/// flat-shaded.
+fn polygon(
+    prims: &mut Vec<Prim>,
+    corners: &[ScreenVertex],
+    provoking: &ScreenVertex,
+    state: &DrawState,
+    sets: &[u8],
+) {
+    let (shape, clip) = (&state.shape, state.clip);
+    let n = corners.len();
+    let fan = |i: usize| [&corners[0], &corners[i], &corners[i + 1]];
+    match shape.fill {
+        // Points and lines go by the winding only: their pixels
+        // needn't be in the rows the triangle's are.
+        1 | 2 if !(1..n - 1).any(|i| Prim::facing(fan(i), shape.cull).is_some()) => {}
+        1 => {
+            for a in corners {
+                prims.extend(Prim::point(a, shape, clip, sets).into_iter().flatten());
+            }
+        }
+        2 => {
+            for i in 0..n {
+                let (a, b) = (&corners[i], &corners[(i + 1) % n]);
+                prims.extend(Prim::line(a, b, provoking, shape, clip, sets));
+            }
+        }
+        _ => {
+            for i in 1..n - 1 {
+                prims.extend(Prim::triangle(fan(i), provoking, shape, clip, sets));
+            }
+        }
+    }
 }
 
 // A copy of a card draws as the card does, and has nothing queued.
@@ -176,21 +250,31 @@ impl Renderer {
         }
         let state = Lowered::of(l)?;
 
+        // A vertex in screen space goes to the rasteriser as it is,
+        // and the others through transform and lighting first.
+        let geometry =
+            (!draw.fvf.transformed).then(|| geometry::Setup::new(l, &state.coords, &draw.fvf));
         self.vertices.clear();
+        self.lit.clear();
+        let (vertices, lit) = (&mut self.vertices, &mut self.lit);
+        let mut vertex = |word: &dyn Fn(usize) -> u32| match &geometry {
+            Some(setup) => lit.push(setup.vertex(word)),
+            None => vertices.push(ScreenVertex::read(&draw.fvf, word)),
+        };
         match draw.vertices {
-            Vertices::Inline(words) => self.vertices.extend(
-                words
-                    .chunks_exact(draw.fvf.words)
-                    .map(|v| ScreenVertex::read(&draw.fvf, |i| v[i])),
-            ),
+            Vertices::Inline(words) => {
+                for v in words.chunks_exact(draw.fvf.words) {
+                    vertex(&|i| v[i]);
+                }
+            }
             Vertices::Buffer { offset, stride, .. } => {
-                self.vertices.extend((0..count).map(|n| {
+                for n in 0..count {
                     let at = offset as usize + n * stride as usize;
-                    ScreenVertex::read(&draw.fvf, |i| {
+                    vertex(&|i| {
                         let at = at + 4 * i;
                         u32::from_le_bytes(memory[at..at + 4].try_into().unwrap())
-                    })
-                }));
+                    });
+                }
             }
         }
 
@@ -201,7 +285,10 @@ impl Renderer {
         }
         self.target = Some(state.target);
         let first = self.prims.len();
-        self.assemble(draw.primitive, &state);
+        match &geometry {
+            Some(setup) => self.assemble_lit(draw.primitive, &state, setup),
+            None => self.assemble(draw.primitive, &state),
+        }
         let primitives = (self.prims.len() - first) as u64;
         if primitives == 0 {
             return Ok(None);
@@ -237,54 +324,79 @@ impl Renderer {
         } = self;
         let (shape, clip, sets) = (&state.shape, state.clip, &state.sets[..]);
         let v = |i: usize| &vertices[order[i] as usize];
-        let n = order.len();
-        let point = |prims: &mut Vec<Prim>, a: &ScreenVertex| {
-            prims.extend(Prim::point(a, shape, clip, sets).into_iter().flatten());
-        };
-        let line = |prims: &mut Vec<Prim>, a: &ScreenVertex, b: &ScreenVertex| {
-            let provoking = if shape.flat_last { b } else { a };
-            prims.extend(Prim::line(a, b, provoking, shape, clip, sets));
-        };
-        // `ends` are the triangle's first and last vertex in the draw's
-        // order, which a strip and a fan turn round.
-        let triangle = |prims: &mut Vec<Prim>, t: [&ScreenVertex; 3], ends: (usize, usize)| {
-            let provoking = if shape.flat_last {
-                t[ends.1]
-            } else {
-                t[ends.0]
-            };
-            // Points and lines go by the triangle's winding only: their
-            // pixels needn't be in the rows the triangle's are.
-            match shape.fill {
-                1 | 2 if Prim::facing(t, shape.cull).is_none() => {}
-                1 => t.into_iter().for_each(|a| point(prims, a)),
-                2 => {
-                    for i in 0..3 {
-                        let (a, b) = (t[i], t[(i + 1) % 3]);
-                        prims.extend(Prim::line(a, b, provoking, shape, clip, sets));
-                    }
-                }
-                _ => prims.extend(Prim::triangle(t, provoking, shape, clip, sets)),
+        pieces(primitive, order.len(), |piece| match piece {
+            Piece::Point(a) => {
+                prims.extend(Prim::point(v(a), shape, clip, sets).into_iter().flatten());
             }
-        };
-        match primitive {
-            1 => (0..n).for_each(|i| point(prims, v(i))),
-            2 => (0..n / 2).for_each(|i| line(prims, v(2 * i), v(2 * i + 1))),
-            3 => (1..n).for_each(|i| line(prims, v(i - 1), v(i))),
-            4 => (0..n / 3).for_each(|i| {
-                triangle(prims, [v(3 * i), v(3 * i + 1), v(3 * i + 2)], (0, 2));
-            }),
-            5 => (2..n).for_each(|i| {
-                // Every other triangle of a strip has its first two
-                // vertices the other way round, to wind as the rest.
-                if i % 2 == 0 {
-                    triangle(prims, [v(i - 2), v(i - 1), v(i)], (0, 2));
-                } else {
-                    triangle(prims, [v(i - 1), v(i - 2), v(i)], (1, 2));
+            Piece::Line(a, b) => {
+                let provoking = if shape.flat_last { v(b) } else { v(a) };
+                prims.extend(Prim::line(v(a), v(b), provoking, shape, clip, sets));
+            }
+            Piece::Triangle(t, ends) => {
+                let provoking = v(t[if shape.flat_last { ends.1 } else { ends.0 }]);
+                polygon(prims, &t.map(|i| *v(i)), provoking, state, sets);
+            }
+        });
+    }
+
+    /// The primitives of the vertices in `self.order`, which went
+    /// through `setup`: cut at its planes, put on the screen and
+    /// queued.
+    fn assemble_lit(&mut self, primitive: u32, state: &DrawState, setup: &geometry::Setup) {
+        let Renderer {
+            lit, order, prims, ..
+        } = self;
+        let (shape, clip) = (&state.shape, state.clip);
+        // A slot's coordinates are worked out for the slot.
+        let slots: [u8; pipeline::SLOTS] = std::array::from_fn(|i| i as u8);
+        let sets = &slots[..state.coords.len()];
+        let v = |i: usize| &lit[order[i] as usize];
+        // What crosses a plane is cut there, or left out when the
+        // state says nothing does.
+        let crosses = |out: u16| out != 0 && !setup.clipping;
+        pieces(primitive, order.len(), |piece| match piece {
+            Piece::Point(a) => {
+                if v(a).out == 0 {
+                    let a = setup.project(v(a));
+                    prims.extend(Prim::point(&a, shape, clip, sets).into_iter().flatten());
                 }
-            }),
-            _ => (2..n).for_each(|i| triangle(prims, [v(i - 1), v(i), v(0)], (0, 1))),
-        }
+            }
+            Piece::Line(a, b) => {
+                let (a, b) = (v(a), v(b));
+                let out = a.out | b.out;
+                if a.out & b.out != 0 || crosses(out) {
+                    return;
+                }
+                let provoking = setup.project(if shape.flat_last { b } else { a });
+                if let Some((a, b)) = clip::line(*a, *b, out) {
+                    let (a, b) = (setup.project(&a), setup.project(&b));
+                    prims.extend(Prim::line(&a, &b, &provoking, shape, clip, sets));
+                }
+            }
+            Piece::Triangle(t, ends) => {
+                let t = t.map(v);
+                let out = t[0].out | t[1].out | t[2].out;
+                if t[0].out & t[1].out & t[2].out != 0 || crosses(out) {
+                    return;
+                }
+                // The side that shows gives the colours.
+                let back = setup.back(t);
+                let side = |v: &geometry::Vertex| if back { v.turned() } else { *v };
+                let provoking =
+                    setup.project(&side(t[if shape.flat_last { ends.1 } else { ends.0 }]));
+                let mut cut = clip::Polygon::triangle(t.map(side));
+                cut.cut(out);
+                let mut corners = [ScreenVertex::default(); clip::CORNERS];
+                let n = cut.corners().len();
+                if n < 3 {
+                    return;
+                }
+                for (corner, v) in corners.iter_mut().zip(cut.corners()) {
+                    *corner = setup.project(v);
+                }
+                polygon(prims, &corners[..n], &provoking, state, sets);
+            }
+        });
     }
 
     /// Draw what is queued.

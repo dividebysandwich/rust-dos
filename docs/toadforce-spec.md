@@ -18,7 +18,7 @@ there.
 |---|---|
 | 1 to 8 | frozen: implemented in `src/toadforce` and `src/bus/toadforce.rs` |
 | 9, level 0 | frozen, with them |
-| 9, level 1 | provisional: the state, surface and draw commands for transformed vertices are implemented in `src/toadforce/level1` and drawn by `src/toadforce/raster`. A machine's card offers the level for the emulator's own drivers; it is frozen after phase 5, and may change until then |
+| 9, level 1 | provisional: the state, surface and draw commands are implemented in `src/toadforce/level1` and drawn by `src/toadforce/raster`, with the card's transform and lighting. A machine's card offers the level for the emulator's own drivers; it is frozen after phase 5, and may change until then |
 | 9, level 2 | not started |
 
 A frozen chapter changes only by adding what an earlier reader can't
@@ -802,10 +802,12 @@ here are for all four draw commands.
   eight sets of one to four texture coordinates. A vertex is as many
   words as its fields take. A code that names no layout, or one with a
   reserved bit set, is rejected with `BAD_VALUE`.
-- Level 1's draws take vertices in screen space only (the layout's
-  position is x, y, z and 1 / w). Layouts with a position for the
-  card to transform are rejected with `BAD_VALUE` until the card's
-  transform and lighting is specified.
+- A layout whose position is x, y, z and 1 / w has vertices in
+  screen space, which "Drawing" takes as they are. The other
+  positions (x, y, z, and x, y, z with one to three weights) and a
+  normal are for the card to transform and light, as "Transform and
+  lighting" says. A layout with a position in screen space and a
+  normal is rejected with `BAD_VALUE`.
 - The command has exactly the words its count and layout need, or it
   is rejected with `BAD_LENGTH`. The values that set the length are
   checked before it.
@@ -863,6 +865,119 @@ be a multiple of four.
 or in card memory, where each is two bytes. With an offset the command
 is 8 words long, and indices that reach outside card memory are
 rejected with `BAD_RANGE`.
+
+#### Transform and lighting
+
+This section defines what the card makes of a vertex whose layout
+has no 1 / w: a vertex in screen space, with its colours and texture
+coordinates, which "Drawing" then draws. A vector is a row, and a
+matrix of `SET_TRANSFORM` is 16 numbers, row by row: a vector times a
+matrix is the vector's numbers times the matrix's columns. A position
+has a fourth number of 1.
+
+**Spaces.** The position times the world matrix is in world space,
+that times the view matrix in camera space, and that times the
+projection matrix in clip space, as x, y, z and w. With `VERTEXBLEND`
+n above 0 and a layout with weights, the first n weights of the
+vertex (or all it has, if fewer) and what they leave of 1 weigh the
+position through world matrices 0 to n, one each, and the normal
+likewise. A normal goes to camera space by the inverse of the world
+matrix times the view matrix, transposed, without the row and column
+of the translation. `NORMALIZENORMALS` 1 brings it to a length of 1
+there; a normal of length 0 stays. A layout without a normal has one
+of 0.
+
+**The screen.** With the viewport's left, top, width, height and
+depths:
+
+- x on the screen = left + (x / w + 1) * width / 2
+- y on the screen = top + (1 - y / w) * height / 2
+- depth = near + z / w * (far - near)
+- 1 / w is the vertex's.
+
+**Clipping.** A primitive is cut where it crosses one of these, and
+what is outside isn't drawn: w below 1/65536; z below 0; x or y on the
+screen further than 16384 pixels from the render target's top left.
+With `CLIPPING` 1 also z above w, and each clip plane whose bit
+`CLIPPLANEENABLE` has: a plane (a, b, c, d) keeps the points whose
+world-space position (x, y, z, w) has a * x + b * y + c * z + d * w of
+0 or more. With `CLIPPING` 0 a primitive that crosses one of the
+first three isn't drawn at all. Where an edge crosses, every value of
+the vertex is taken from the straight line between its ends in clip
+space. A point is dropped whole by its position. What is cut from a
+triangle is a convex polygon: filled, it covers the pixels the
+triangle did inside the planes; with `FILLMODE` 2 its outline is
+drawn, the cut edges included, and with 1 its corners.
+
+**Lighting.** With `LIGHTING` 0 the diffuse colour is the vertex's,
+or white, and the specular colour the vertex's, or black with alpha
+255. With 1 they are worked out in camera space, each channel of 0 to
+1:
+
+- diffuse = emissive + ambient * (`AMBIENT` + the sum of each
+  light's ambient colour * f) + diffuse * the sum of each light's
+  diffuse colour * (N . L) * f, with the alpha of the surface's
+  diffuse colour
+- specular = specular * the sum of each light's specular colour *
+  (N . H)^power * f, with `SPECULARENABLE`, and alpha 255
+
+Emissive, ambient, diffuse and specular are the material's colours,
+or with `COLORVERTEX` 1 the vertex's diffuse (1) or specular (2)
+colour where the state `EMISSIVEMATERIALSOURCE`,
+`AMBIENTMATERIALSOURCE`, `DIFFUSEMATERIALSOURCE` or
+`SPECULARMATERIALSOURCE` names one the layout has. The sums are over
+the lights that are on. N is the normal. L points from the vertex to
+the light, with a length of 1: for a directional light the opposite
+of its direction, taken to camera space by the view matrix. H is L
+plus the direction to the eye, brought to a length of 1; the
+direction to the eye is from the vertex to the origin with
+`LOCALVIEWER` 1 and (0, 0, -1) with 0. A light adds diffuse and
+specular light only where N . L is above 0, and specular light only
+where N . H is too. A power of 0 or below counts as 0.
+
+A point or spot light's f is 1 / (a0 + a1 * d + a2 * d * d), with d
+the distance from the vertex to the light's position (taken to camera
+space by the view matrix) and a0 to a2 its attenuation; a sum that
+isn't above 0 gives 1. Further than its range the light adds nothing.
+A directional light's f is 1. A spot light's f is multiplied by its
+cone: with rho the cosine of the angle between its direction and the
+line from it to the vertex, 0 where rho is at most cos(phi / 2);
+otherwise with spot model 0, 1 where rho is above cos(theta / 2) and
+((rho - cos(phi / 2)) / (cos(theta / 2) - cos(phi / 2)))^falloff
+between; with spot model 1, rho^falloff.
+
+With `TWO_SIDED_LIGHTING` 1 or 2 a triangle that shows its back has
+the colours the vertices get with their normals turned round. The
+back shows where the triangle is counterclockwise on the screen with
+1, and clockwise with 2. Lines and points have the front's colours.
+
+Each channel is then limited to 0 to 1 and becomes c * 255 rounded to
+the nearest whole number.
+
+**Fog.** With `FOGENABLE` 1, `FOGTABLEMODE` 0 and `FOGVERTEXMODE` not
+0, the specular colour's alpha becomes the fog factor of the vertex's
+distance d: (end - d) / (end - start) for mode 3, e^(-density * d)
+for 1, e^(-(density * d)^2) for 2, limited to 0 to 1. d is the size
+of the camera-space z, or with `RANGEFOGENABLE` 1 the distance from
+the origin there.
+
+**Texture coordinates.** The upper half of a stage's `TEXCOORDINDEX`
+says what its coordinates are: 0 the vertex's set, 1 the normal in
+camera space, 2 the position there, 3 the reflection R = I - 2 * (N .
+I) * N of I, the position brought to a length of 1, and 4 a sphere
+map's: (R.x / m + 1/2, R.y / m + 1/2) with m = 2 * the length of
+(R.x, R.y, 1 - R.z). With a count in `TEXTURETRANSFORMFLAGS` above 0
+they are multiplied by the stage's texture matrix, after a 1 is put
+behind the last of them when they are fewer than four, and the first
+count numbers of the result are the stage's coordinates. Without, the
+coordinates are passed on. A coordinate the stage hasn't got is 0, or
+1 for the fourth.
+
+**Point sizes.** A vertex's size is the layout's, or `POINTSIZE`.
+With `POINTSCALEENABLE` 1 it is multiplied by the viewport's height
+times the square root of 1 / (A + B * d + C * d * d), with d the
+vertex's distance from the origin of camera space and A to C the
+states `POINTSCALE_A` to `_C`; a sum that isn't above 0 leaves it.
 
 #### Drawing
 
@@ -1071,7 +1186,7 @@ has the state. 256 to 258 are the card's own.
 | 171 | `BLENDOP` | 1 to 5 | 1 |
 | 256 | `PIXEL_CENTRE` | 0 or 1 | 0 |
 | 257 | `FLAT_VERTEX` | 0 or 1 | 0 |
-| 258 | `TWO_SIDED_LIGHTING` | 0 or 1 | 0 |
+| 258 | `TWO_SIDED_LIGHTING` | 0 to 2 | 0 |
 | 259 | `FOG_BY_W` | 0 or 1 | 0 |
 
 - `ZENABLE` has no value for a W buffer.
@@ -1084,8 +1199,9 @@ has the state. 256 to 258 are the card's own.
   7 and 8), 1 at half ones (OpenGL).
 - `FLAT_VERTEX`: the vertex that gives a flat-shaded primitive its
   colour, 0 the first (Direct3D), 1 the last (OpenGL).
-- `TWO_SIDED_LIGHTING`: 1 lights the back of a triangle with its
-  normal turned round (OpenGL).
+- `TWO_SIDED_LIGHTING`: 1 or 2 lights the back of a triangle with
+  its normal turned round (OpenGL). The back is the counterclockwise
+  side with 1 and the clockwise side with 2.
 - `FOG_BY_W`: the distance table fog goes by, 0 a fragment's depth
   and 1 its w.
 
@@ -1167,6 +1283,15 @@ number.
   DirectDraw HAL has to match, and whether level 1 gives `BLT` a flag
   for the other, is settled with a comparison against DirectDraw on a
   real Windows 98.
+- **One material.** OpenGL has a material for each side of a
+  triangle, and the card has one, which lights the back too. A second
+  material would be a flag word in `SET_MATERIAL`, added with the game
+  that shows the difference.
+- **Fog without a fog mode.** With `FOGENABLE` and neither a table
+  nor a vertex mode, the fog factor is the specular colour's alpha,
+  which a lit vertex has at 255. Whether Direct3D passes a lit
+  vertex's own specular alpha on there isn't checked against a real
+  Windows.
 - **Gamma.** The card has no gamma ramp, so DirectDraw's gamma control
   does nothing on it. A ramp would be a table of registers beside
   `PALETTE`, added with the level whose games ask for it.

@@ -281,7 +281,12 @@ pub const RENDER: &[Def] = &[
     def(RS_BLENDOP, "BLENDOP", Kind::Range(1, 5), 1),
     def(RS_PIXEL_CENTRE, "PIXEL_CENTRE", Kind::Bool, 0),
     def(RS_FLAT_VERTEX, "FLAT_VERTEX", Kind::Bool, 0),
-    def(RS_TWO_SIDED_LIGHTING, "TWO_SIDED_LIGHTING", Kind::Bool, 0),
+    def(
+        RS_TWO_SIDED_LIGHTING,
+        "TWO_SIDED_LIGHTING",
+        Kind::Range(0, 2),
+        0,
+    ),
     def(RS_FOG_BY_W, "FOG_BY_W", Kind::Bool, 0),
 ];
 

@@ -9,6 +9,8 @@ use crate::toadforce::regs;
 use crate::toadforce::{Live, ToadForce};
 use crate::video::crt::CrtTiming;
 
+mod tnl;
+
 const MEMORY: u32 = 32 << 20;
 const COLOUR: u32 = 0x10_0000;
 const DEPTH: u32 = 0x20_0000;
@@ -574,14 +576,14 @@ fn a_draw_the_card_cant_take_is_rejected_whole() {
     let run = |rig: &mut Rig, words: Vec<u32>| rig.run(|w| w.extend(words));
     assert_eq!(run(&mut rig, with(0, TL, 3)), BAD_VALUE);
     assert_eq!(run(&mut rig, with(7, TL, 3)), BAD_VALUE);
-    // A layout that isn't one, and one the card doesn't transform yet.
+    // A layout that isn't one.
     assert_eq!(run(&mut rig, with(4, 0x1C1, 3)), BAD_VALUE);
-    assert_eq!(run(&mut rig, with(4, 0x142, 3)), BAD_VALUE);
     assert_eq!(run(&mut rig, with(4, TL, 0x1_0001)), BAD_VALUE);
     // The count and the layout say how long the command is.
     assert_eq!(run(&mut rig, with(4, TL, 2)), BAD_LENGTH);
     assert_eq!(run(&mut rig, with(4, TL, 4)), BAD_LENGTH);
     assert_eq!(run(&mut rig, with(4, 0x044, 3)), BAD_LENGTH);
+    assert_eq!(run(&mut rig, with(4, 0x142, 3)), BAD_LENGTH);
     // Buffers inside card memory, strides that hold a vertex.
     let buffer = |stride: u32, offset: u32, count: u32| {
         let mut words = Vec::new();
