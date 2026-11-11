@@ -111,6 +111,71 @@ fn lerp(a: Rgba, b: Rgba, f: u32) -> Rgba {
     [mix(0), mix(1), mix(2), mix(3)]
 }
 
+/// A texel's four channels in the four 16-bit fields of a word, for
+/// `lerp_wide`.
+#[inline(always)]
+fn wide(c: Rgba) -> u64 {
+    let v = u32::from_le_bytes(c) as u64;
+    let v = (v | v << 16) & 0x0000_FFFF_0000_FFFF;
+    (v | v << 8) & 0x00FF_00FF_00FF_00FF
+}
+
+/// `wide` of what `texel::decode` makes of a pixel, for the formats
+/// most textures have, without the bytes in between: field by field,
+/// with the top bits repeated as `texel::widen` does.
+mod wide_of {
+    #[inline(always)]
+    fn fields(b: u64, g: u64, r: u64, a: u64) -> u64 {
+        b | g << 16 | r << 32 | a << 48
+    }
+
+    #[inline(always)]
+    pub fn r5g6b5(v: u32) -> u64 {
+        let v = v as u64;
+        let (b, g, r) = (v & 0x1F, v >> 5 & 0x3F, v >> 11 & 0x1F);
+        fields(b << 3 | b >> 2, g << 2 | g >> 4, r << 3 | r >> 2, 255)
+    }
+
+    /// `alpha` for `A1R5G5B5`; without it the texel is opaque.
+    #[inline(always)]
+    pub fn r5g5b5(v: u32, alpha: bool) -> u64 {
+        let v = v as u64;
+        let (b, g, r) = (v & 0x1F, v >> 5 & 0x1F, v >> 10 & 0x1F);
+        let a = if !alpha || v & 0x8000 != 0 { 255 } else { 0 };
+        fields(b << 3 | b >> 2, g << 3 | g >> 2, r << 3 | r >> 2, a)
+    }
+
+    #[inline(always)]
+    pub fn a4r4g4b4(v: u32) -> u64 {
+        let v = v as u64;
+        // A field of 4 bits twice over is 17 times it.
+        fields(v & 0xF, v >> 4 & 0xF, v >> 8 & 0xF, v >> 12 & 0xF) * 17
+    }
+
+    /// `alpha` for `A8R8G8B8`; without it the texel is opaque.
+    #[inline(always)]
+    pub fn r8g8b8(v: u32, alpha: bool) -> u64 {
+        let v = if alpha { v } else { v | 0xFF00_0000 } as u64;
+        let v = (v | v << 16) & 0x0000_FFFF_0000_FFFF;
+        (v | v << 8) & 0x00FF_00FF_00FF_00FF
+    }
+}
+
+#[inline(always)]
+fn narrow(v: u64) -> Rgba {
+    let v = (v | v >> 8) & 0x0000_FFFF_0000_FFFF;
+    ((v | v >> 16) as u32).to_le_bytes()
+}
+
+/// `lerp` of all four channels at once. A channel's sum is at most
+/// 255 * 256 + 128, so no field carries into the next.
+#[inline(always)]
+fn lerp_wide(a: u64, b: u64, f: u32) -> u64 {
+    let f = f as u64;
+    ((a * (256 - f) + b * f + 0x0080_0080_0080_0080) >> 8) & 0x00FF_00FF_00FF_00FF
+}
+
+
 /// The levels a sample reads: the level, the filter in it, and how much
 /// of the next level is blended in, of 256.
 struct Levels {
@@ -119,107 +184,242 @@ struct Levels {
     next: u32,
 }
 
+/// How a texture's pixels become texels: what the format says, found
+/// out once for a sampler.
+#[derive(Clone, Copy, PartialEq)]
+enum Texels {
+    /// Pixels of a format `texel::decode` reads.
+    Plain,
+    /// Indices into the palette at this offset.
+    Palette(usize),
+    /// Blocks of four by four, of this many bytes.
+    Blocks(u32),
+}
+
+/// Where one image of a texture is and how large.
+#[derive(Clone, Copy, Default)]
+struct Image {
+    offset: usize,
+    pitch: usize,
+    width: i32,
+    height: i32,
+}
+
+/// The most levels a texture of the largest size has.
+const LEVELS: usize = 12;
+
 /// A `Tex` in card memory.
 #[derive(Clone, Copy)]
 pub struct Sampler<'a> {
     mem: Mem<'a>,
     pub tex: &'a Tex,
+    texels: Texels,
+    /// The bytes of a pixel.
+    bytes: u32,
+    /// The levels of face 0, which is the whole texture unless it is a
+    /// cube map.
+    images: [Image; LEVELS],
 }
 
 impl<'a> Sampler<'a> {
     pub fn new(mem: Mem<'a>, tex: &'a Tex) -> Self {
-        Sampler { mem, tex }
+        let t = &tex.texture;
+        let texels = match t.format.block_bytes() {
+            Some(size) => Texels::Blocks(size),
+            None if t.format == Format::P8 => Texels::Palette(t.palette.unwrap_or(0) as usize),
+            None => Texels::Plain,
+        };
+        let mut images = [Image::default(); LEVELS];
+        for (level, image) in images.iter_mut().enumerate().take(t.levels as usize) {
+            *image = Self::image_of(t, level as u32, 0);
+        }
+        Sampler {
+            mem,
+            tex,
+            texels,
+            bytes: t.format.bytes(),
+            images,
+        }
     }
 
-    /// The pixel value at (`x`, `y`) of `face` of `level`, both inside
-    /// it. The format isn't a block format.
-    #[inline]
-    fn pixel(&self, level: u32, face: u32, x: u32, y: u32) -> u32 {
-        let t = &self.tex.texture;
+    fn image_of(t: &Texture, level: u32, face: u32) -> Image {
         let (offset, pitch) = t.image(level, face);
-        let bytes = t.format.bytes();
-        let at = offset as usize + y as usize * pitch as usize + (x * bytes) as usize;
-        self.mem.pixel(at, bytes)
+        let (width, height) = t.level_size(level);
+        Image {
+            offset: offset as usize,
+            pitch: pitch as usize,
+            width: width as i32,
+            height: height as i32,
+        }
+    }
+
+    /// The image of `face` of `level`.
+    #[inline]
+    fn image(&self, level: u32, face: u32) -> Image {
+        if face == 0 && (level as usize) < LEVELS {
+            self.images[level as usize]
+        } else {
+            Self::image_of(&self.tex.texture, level, face)
+        }
+    }
+
+    /// The pixel value at (`x`, `y`) of `image`, both inside it. The
+    /// format isn't a block format.
+    #[inline]
+    fn value(&self, image: &Image, x: u32, y: u32) -> u32 {
+        let at = image.offset + y as usize * image.pitch + (x * self.bytes) as usize;
+        self.mem.pixel(at, self.bytes)
+    }
+
+    /// The texel at (`x`, `y`) of `image`, both inside it.
+    #[inline]
+    fn texel(&self, image: &Image, x: u32, y: u32) -> Rgba {
+        match self.texels {
+            Texels::Plain => texel::decode(self.tex.texture.format, self.value(image, x, y)),
+            Texels::Palette(palette) => {
+                self.mem
+                    .read(palette + self.value(image, x, y) as usize * 4)
+            }
+            Texels::Blocks(size) => {
+                let at = image.offset
+                    + (y / 4) as usize * image.pitch
+                    + (x / 4) as usize * size as usize;
+                let i = (y % 4 * 4 + x % 4) as usize;
+                let format = self.tex.texture.format;
+                if size == 8 {
+                    texel::block_texel(format, &self.mem.read::<8>(at), i)
+                } else {
+                    texel::block_texel(format, &self.mem.read::<16>(at), i)
+                }
+            }
+        }
     }
 
     /// The texel at (`x`, `y`) of `face` of `level`, both inside it.
     #[inline]
     pub fn fetch(&self, level: u32, face: u32, x: u32, y: u32) -> Rgba {
-        let t = &self.tex.texture;
-        if let Some(size) = t.format.block_bytes() {
-            let (offset, pitch) = t.image(level, face);
-            let at = offset as usize
-                + (y / 4) as usize * pitch as usize
-                + (x / 4) as usize * size as usize;
-            let i = (y % 4 * 4 + x % 4) as usize;
-            return if size == 8 {
-                texel::block_texel(t.format, &self.mem.read::<8>(at), i)
-            } else {
-                texel::block_texel(t.format, &self.mem.read::<16>(at), i)
-            };
-        }
-        let value = self.pixel(level, face, x, y);
-        if t.format == Format::P8 {
-            let palette = t.palette.unwrap_or(0) as usize;
-            return self.mem.read(palette + value as usize * 4);
-        }
-        texel::decode(t.format, value)
+        self.texel(&self.image(level, face), x, y)
     }
 
-    /// The texel of `level` at texel coordinates (`x`, `y`) that may be
-    /// outside it.
+    /// The texel of `image` in column `x` and row `y`, each None for
+    /// the border.
     #[inline]
-    fn at(&self, level: u32, face: u32, x: i32, y: i32) -> Rgba {
-        let (w, h) = self.tex.texture.level_size(level);
-        match (
-            self.tex.address[0].texel(x, w as i32),
-            self.tex.address[1].texel(y, h as i32),
-        ) {
-            (Some(x), Some(y)) => self.fetch(level, face, x as u32, y as u32),
+    fn at(&self, image: &Image, x: Option<i32>, y: Option<i32>) -> Rgba {
+        match (x, y) {
+            (Some(x), Some(y)) => self.texel(image, x as u32, y as u32),
             _ => self.tex.border,
         }
     }
 
-    /// (`u`, `v`) in 1/256 of a texel of `level`, `shift` of them to
+    /// (`u`, `v`) in 1/256 of a texel of `image`, `shift` of them to
     /// the left and up.
     #[inline]
-    fn fixed(&self, level: u32, u: f32, v: f32, shift: f64) -> (i64, i64) {
-        let (w, h) = self.tex.texture.level_size(level);
-        let limit = (1i64 << 31) as f64;
-        let to = |c: f32, size: u32| {
-            let at = (c as f64 * size as f64 * 256.0 - shift).floor();
-            // A coordinate that is none is texel 0.
-            if at.is_nan() {
-                0
-            } else {
-                at.clamp(-limit, limit) as i64
-            }
+    fn fixed(image: &Image, u: f32, v: f32, shift: f64) -> (i64, i64) {
+        const LIMIT: f64 = (1i64 << 31) as f64;
+        let to = |c: f32, size: i32| {
+            let at = (c as f64 * size as f64 * 256.0 - shift).clamp(-LIMIT, LIMIT);
+            // Rounded down: the cast rounds toward 0, which is one too
+            // high below 0 unless the number is whole. A coordinate
+            // that is none casts to 0, texel 0.
+            let whole = at as i64;
+            whole - (whole as f64 > at) as i64
         };
-        (to(u, w), to(v, h))
+        (to(u, image.width), to(v, image.height))
     }
 
     /// One level at (`u`, `v`), in texture coordinates where 0 to 1 is
     /// the texture, through `filter`.
+    #[inline]
     fn level(&self, level: u32, face: u32, u: f32, v: f32, filter: Filter) -> Rgba {
+        let image = self.image(level, face);
+        let [across, down] = self.tex.address;
         match filter {
             Filter::Point => {
-                let (x, y) = self.fixed(level, u, v, 0.0);
-                self.at(level, face, (x >> 8) as i32, (y >> 8) as i32)
+                let (x, y) = Self::fixed(&image, u, v, 0.0);
+                let x = across.texel((x >> 8) as i32, image.width);
+                let y = down.texel((y >> 8) as i32, image.height);
+                if self.texels == Texels::Plain
+                    && let (Some(x), Some(y)) = (x, y)
+                {
+                    return narrow(self.plain(&image, [(x, y)])[0]);
+                }
+                self.at(&image, x, y)
             }
             Filter::Linear => {
                 // A texel's centre is half a texel inside it.
-                let (x, y) = self.fixed(level, u, v, 128.0);
+                let (x, y) = Self::fixed(&image, u, v, 128.0);
                 let (fx, fy) = ((x & 255) as u32, (y & 255) as u32);
                 let (x, y) = ((x >> 8) as i32, (y >> 8) as i32);
-                let (x1, y1) = (x.wrapping_add(1), y.wrapping_add(1));
-                let top = lerp(self.at(level, face, x, y), self.at(level, face, x1, y), fx);
-                let bottom = lerp(
-                    self.at(level, face, x, y1),
-                    self.at(level, face, x1, y1),
-                    fx,
+                let (x0, x1) = (
+                    across.texel(x, image.width),
+                    across.texel(x.wrapping_add(1), image.width),
                 );
+                let (y0, y1) = (
+                    down.texel(y, image.height),
+                    down.texel(y.wrapping_add(1), image.height),
+                );
+                if self.texels == Texels::Plain
+                    && let (Some(x0), Some(x1), Some(y0), Some(y1)) = (x0, x1, y0, y1)
+                {
+                    let t = self.plain(&image, [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]);
+                    return narrow(lerp_wide(
+                        lerp_wide(t[0], t[1], fx),
+                        lerp_wide(t[2], t[3], fx),
+                        fy,
+                    ));
+                }
+                let top = lerp(self.at(&image, x0, y0), self.at(&image, x1, y0), fx);
+                let bottom = lerp(self.at(&image, x0, y1), self.at(&image, x1, y1), fx);
                 lerp(top, bottom, fy)
             }
+        }
+    }
+
+    /// The texels of `image` at `places` (column, row), all inside it,
+    /// as `wide` has them. The texture's pixels are `Texels::Plain`.
+    ///
+    /// What a sample of most textures comes to. The format is looked
+    /// at once for the lot, and each format's arm has its own copy of
+    /// the reads and the decoding, with the pixel's size known.
+    #[inline]
+    fn plain<const K: usize>(&self, image: &Image, places: [(i32, i32); K]) -> [u64; K] {
+        use Format::*;
+        match self.tex.texture.format {
+            R5G6B5 => self.pixels::<2, K>(image, places, wide_of::r5g6b5),
+            A4R4G4B4 => self.pixels::<2, K>(image, places, wide_of::a4r4g4b4),
+            A1R5G5B5 => self.pixels::<2, K>(image, places, |v| wide_of::r5g5b5(v, true)),
+            X1R5G5B5 => self.pixels::<2, K>(image, places, |v| wide_of::r5g5b5(v, false)),
+            A8R8G8B8 => self.pixels::<4, K>(image, places, |v| wide_of::r8g8b8(v, true)),
+            X8R8G8B8 => self.pixels::<4, K>(image, places, |v| wide_of::r8g8b8(v, false)),
+            format => {
+                let decode = |v| wide(texel::decode(format, v));
+                match self.bytes {
+                    1 => self.pixels::<1, K>(image, places, decode),
+                    2 => self.pixels::<2, K>(image, places, decode),
+                    _ => self.pixels::<4, K>(image, places, decode),
+                }
+            }
+        }
+    }
+
+    /// `plain` for pixels of `N` bytes, each made a texel by `decode`.
+    #[inline(always)]
+    fn pixels<const N: usize, const K: usize>(
+        &self,
+        image: &Image,
+        places: [(i32, i32); K],
+        decode: impl Fn(u32) -> u64,
+    ) -> [u64; K] {
+        let at = places.map(|(x, y)| image.offset + y as usize * image.pitch + x as usize * N);
+        let value = |bytes: [u8; N]| {
+            let mut word = [0; 4];
+            word[..N].copy_from_slice(&bytes);
+            u32::from_le_bytes(word)
+        };
+        match self.mem.read_all::<N, K>(at) {
+            Some(pixels) => pixels.map(|bytes| decode(value(bytes))),
+            // Pixels outside the memory read as 0, each by itself.
+            None => at.map(|at| decode(value(self.mem.read(at)))),
         }
     }
 
@@ -277,15 +477,14 @@ impl<'a> Sampler<'a> {
             return false;
         };
         let t = &self.tex.texture;
-        let level = self.levels(lod).level;
-        let (x, y) = self.fixed(level, u, v, 0.0);
-        let (w, h) = t.level_size(level);
+        let image = self.image(self.levels(lod).level, face);
+        let (x, y) = Self::fixed(&image, u, v, 0.0);
         match (
-            self.tex.address[0].texel((x >> 8) as i32, w as i32),
-            self.tex.address[1].texel((y >> 8) as i32, h as i32),
+            self.tex.address[0].texel((x >> 8) as i32, image.width),
+            self.tex.address[1].texel((y >> 8) as i32, image.height),
         ) {
             (Some(x), Some(y)) => {
-                self.pixel(level, face, x as u32, y as u32) & t.format.defined_bits() == key
+                self.value(&image, x as u32, y as u32) & t.format.defined_bits() == key
             }
             _ => false,
         }
@@ -354,6 +553,40 @@ mod tests {
     /// A sample with the texture magnified.
     fn near(s: &Sampler, u: f32, v: f32) -> u32 {
         to_word(s.sample(0, u, v, f32::NEG_INFINITY))
+    }
+
+    #[test]
+    fn the_wide_decoders_give_what_decode_gives() {
+        let same = |format: Format, v: u32, got: u64| {
+            assert_eq!(got, wide(texel::decode(format, v)), "{format:?} {v:#x}");
+        };
+        for v in 0..=0xFFFF {
+            same(Format::R5G6B5, v, wide_of::r5g6b5(v));
+            same(Format::A4R4G4B4, v, wide_of::a4r4g4b4(v));
+            same(Format::A1R5G5B5, v, wide_of::r5g5b5(v, true));
+            same(Format::X1R5G5B5, v, wide_of::r5g5b5(v, false));
+        }
+        for i in 0..=0xFFFFu32 {
+            // Every value of each byte, in different company.
+            let v = i.wrapping_mul(0x9E37_79B9) ^ i << 16;
+            same(Format::A8R8G8B8, v, wide_of::r8g8b8(v, true));
+            same(Format::X8R8G8B8, v, wide_of::r8g8b8(v, false));
+        }
+    }
+
+    #[test]
+    fn a_linear_sample_blends_as_its_channels_do_one_by_one() {
+        // The four channels in one word against `lerp`, for every
+        // weight and the channel values at and around the ends.
+        let values = [0u8, 1, 2, 127, 128, 129, 254, 255];
+        for f in 0..256 {
+            for &a in &values {
+                for &b in &values {
+                    let (x, y) = ([a, b, 255 - a, 0], [b, a, 255, 255 - b]);
+                    assert_eq!(narrow(lerp_wide(wide(x), wide(y), f)), lerp(x, y, f));
+                }
+            }
+        }
     }
 
     #[test]
