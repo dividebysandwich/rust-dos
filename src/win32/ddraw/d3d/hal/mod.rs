@@ -88,6 +88,15 @@ pub fn card(cpu: &mut Cpu, dd: u32) -> Option<Offer> {
     })
 }
 
+/// Whether a card of `kind` transforms and lights vertices itself, and
+/// so has Direct3D 7's T&L HAL device beside the HAL one.
+pub fn transforms(kind: Kind) -> bool {
+    match kind {
+        Kind::Voodoo => false,
+        Kind::ToadForce => true,
+    }
+}
+
 /// The card that draws for the device `d`.
 pub fn kind_of(cpu: &mut Cpu, d: &Device) -> Kind {
     card(cpu, d.ddraw).map_or(Kind::Voodoo, |offer| offer.kind)
