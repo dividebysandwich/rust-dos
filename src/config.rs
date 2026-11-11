@@ -300,6 +300,17 @@ pub struct Config {
     pub autoexec: Vec<String>,
     /// A game profile's name (`[game]`, see games.rs).
     pub game_name: Option<String>,
+    /// The year a game profile's game came out (`[game]`'s `year`), told
+    /// to the almanac with its reports.
+    pub game_year: Option<i32>,
+    /// Who published it (`[game]`'s `publisher`), for the almanac too.
+    pub game_publisher: Option<String>,
+    /// The player's notes on how it plays (`[game]`'s `notes`), sent
+    /// with the almanac reports.
+    pub game_notes: Option<String>,
+    /// The profile's own UUID (`[game]`'s `uuid`): the almanac replaces
+    /// the report sent with it before rather than adding one.
+    pub game_uuid: Option<String>,
     /// The version of the game RetroAchievements knows (`[game]`'s
     /// `achievements`): its hash, or its zip or DOSZ archive.
     pub game_achievements: Option<String>,

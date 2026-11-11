@@ -1385,6 +1385,27 @@ game plays, F2 saves the settings window's changes to its profile.
 `--game NAME` launches a game at startup, by its file name (`keen4`) or
 its name, and so does `?game=NAME` in the browser.
 
+`year`, `publisher` and `notes` in `[game]` describe the game for
+[almanac.rust-dos.com](#emulator): its reports carry them, the year
+and publisher filling in what the almanac doesn't know of the game, and
+the notes (one line, how it plays and what it needs) showing with the
+report. **Ins** asks for them, and the report dialog keeps what you type
+there in the profile of the game playing. `uuid` is the profile's own,
+which new and imported profiles get and an older one gets with its
+first report: a report sent with it replaces the one sent with it
+before instead of adding another. Keep it to yourself, as anyone with it
+can replace your report; a package's own `uuid` is never copied into the
+profiles made from it, each of which gets its own.
+
+```ini
+[game]
+name=Commander Keen 4
+year=1991
+publisher=Apogee
+notes=Smooth at cycles=10000; the Sound Blaster needs EMS off
+uuid=0f8fad5b-d9cb-469f-a165-70867728950e
+```
+
 A profile with `overlay=true` in `[game]` keeps the game's files as they
 were installed. New and imported profiles, and those of archives, have it. What the game
 writes on its own drives (the host directories and disk images in its

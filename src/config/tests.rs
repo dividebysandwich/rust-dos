@@ -425,8 +425,19 @@ fn a_game_section_names_the_profile() {
     let config = parse("[game]\nname = Commander Keen 4\n[autoexec]\nKEEN4E\n", Path::new("/cfg"), None);
     assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     assert_eq!(config.game_name.as_deref(), Some("Commander Keen 4"));
-    let config = parse("[game]\nname=\nyear=1991\n", Path::new("/cfg"), None);
+    let config = parse("[game]\nname=\ngenre=platform\n", Path::new("/cfg"), None);
     assert_eq!((config.game_name, config.warnings.len()), (None, 2));
+    // What the almanac is told of the game.
+    let text = "[game]\nyear=1991\npublisher=Apogee\nnotes=Fine\nuuid=0F8FAD5B-D9CB-469F-A165-70867728950E\n";
+    let config = parse(text, Path::new("/cfg"), None);
+    assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    assert_eq!(config.game_year, Some(1991));
+    assert_eq!(config.game_publisher.as_deref(), Some("Apogee"));
+    assert_eq!(config.game_notes.as_deref(), Some("Fine"));
+    assert_eq!(
+        config.game_uuid.as_deref(),
+        Some("0f8fad5b-d9cb-469f-a165-70867728950e")
+    );
     let config = parse("[game]\noverlay=true\nmanual=a.pdf\nmanual=b.png|Map\n", Path::new("/cfg"), None);
     assert!(config.game_overlay && config.warnings.is_empty());
     assert_eq!(config.game_manuals, ["a.pdf", "b.png|Map"]);

@@ -26,6 +26,13 @@
 //! RetroAchievements: the hash of its archive, or the archive (a zip or a
 //! .dosz, relative to the games folder).
 //!
+//! `[game]`'s `year=`, `publisher=` and `notes=` describe the game for
+//! the almanac (almanac.rs), whose reports carry them. `uuid=`, which
+//! every new profile gets, is the profile's own: the almanac replaces the
+//! report sent with it before instead of adding another, so a game's
+//! report can be sent again as its settings change. A package's profile
+//! gets one of its own, never the package's.
+//!
 //! `[game]`'s `overlay=true`, which new profiles have, leaves the game's
 //! own drives (its `[drives]`' host directories and disk images) as they
 //! are: what the game changes on them goes to `saves/<id>/<drive letter>`
@@ -50,12 +57,86 @@ pub struct GameEntry {
 }
 
 /// A game to make a profile of (the settings window's dialog): its name,
-/// the DOS directory it is in and the command that starts it.
+/// the DOS directory it is in and the command that starts it, and what
+/// the almanac is told of it: its year, publisher and the player's notes,
+/// each empty if not given.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NewGame {
     pub name: String,
     pub directory: String,
     pub command: String,
+    pub year: String,
+    pub publisher: String,
+    pub notes: String,
+}
+
+/// Whether `text` is a UUID as `[game]`'s `uuid` has it: 32 hex digits in
+/// groups of 8, 4, 4, 4 and 12, with dashes between.
+pub fn valid_uuid(text: &str) -> bool {
+    let groups: Vec<&str> = text.split('-').collect();
+    groups.len() == 5
+        && groups
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(g, len)| g.len() == len && g.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// A new random (version 4) UUID, or None where there are no random
+/// numbers to be had (the browser, which doesn't report to the almanac).
+pub fn new_uuid() -> Option<String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut b = [0u8; 16];
+        getrandom::fill(&mut b).ok()?;
+        b[6] = (b[6] & 0x0F) | 0x40;
+        b[8] = (b[8] & 0x3F) | 0x80;
+        let hex: String = b.iter().map(|x| format!("{:02x}", x)).collect();
+        Some(format!(
+            "{}-{}-{}-{}-{}",
+            &hex[..8],
+            &hex[8..12],
+            &hex[12..16],
+            &hex[16..20],
+            &hex[20..]
+        ))
+    }
+    #[cfg(target_arch = "wasm32")]
+    None
+}
+
+/// The profile `text` with a `uuid=` of its own in `[game]`, if it has
+/// none yet: a new one (`new_uuid`).
+pub fn with_uuid(text: &str) -> String {
+    if config::parse(text, Path::new("/"), None)
+        .game_uuid
+        .is_some()
+    {
+        return text.to_string();
+    }
+    match new_uuid() {
+        Some(uuid) => set_game_key(text, "uuid", &uuid, false),
+        None => text.to_string(),
+    }
+}
+
+/// The `[game]` lines of what the almanac is told of a game: `year=`,
+/// `publisher=` and `notes=`, those given.
+fn about_lines(year: &str, publisher: &str, notes: &str) -> Result<String, String> {
+    let mut text = String::new();
+    let year = year.trim();
+    if !year.is_empty() {
+        match year.parse::<i32>() {
+            Ok(y) if (1970..=2100).contains(&y) => text.push_str(&format!("year={}\n", y)),
+            _ => return Err(format!("The year '{}' isn't a year such as 1993", year)),
+        }
+    }
+    for (key, value) in [("publisher", publisher), ("notes", notes)] {
+        let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !value.is_empty() {
+            text.push_str(&format!("{}={}\n", key, value));
+        }
+    }
+    Ok(text)
 }
 
 /// A profile's name and command, from its text.
@@ -131,7 +212,12 @@ pub fn profile_text(
     if new.command.trim().is_empty() {
         return Err("The game needs a command that starts it".to_string());
     }
-    let mut text = format!("[game]\nname={}\noverlay=true\n", new.name.trim());
+    let mut text = format!("[game]\nname={}\n", new.name.trim());
+    text.push_str(&about_lines(&new.year, &new.publisher, &new.notes)?);
+    text.push_str("overlay=true\n");
+    if let Some(uuid) = new_uuid() {
+        text.push_str(&format!("uuid={}\n", uuid));
+    }
     let settings = config::update_text("", base, current, drives, home);
     if !settings.is_empty() {
         text.push('\n');
@@ -335,6 +421,31 @@ pub fn add_manual(text: &str, value: &str) -> String {
     set_game_key(text, "manual", value, true)
 }
 
+/// The profile `text` with `key=value` in its `[game]` section in place
+/// of one there was, or with no `key` there if `value` is None or empty.
+pub fn set_game_value(text: &str, key: &str, value: Option<&str>) -> String {
+    if let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) {
+        return set_game_key(text, key, value, false);
+    }
+    let mut in_game = false;
+    let mut out = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_game = trimmed.eq_ignore_ascii_case("[game]");
+        } else if in_game
+            && trimmed
+                .split_once('=')
+                .is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case(key))
+        {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 /// The profile `text` with `key=value` in its `[game]` section: in place
 /// of one there was, or (`add`) after the others.
 fn set_game_key(text: &str, key: &str, value: &str, add: bool) -> String {
@@ -485,7 +596,7 @@ pub fn import(dir: &Path, source: &Path, home: Option<&Path>) -> Result<(String,
     let id = slug(&imported.name, &taken);
     let path = dir.join(format!("{}.conf", id));
     hostfs::create_dir_all(dir)
-        .and_then(|()| hostfs::write(&path, imported.profile_text(home)))
+        .and_then(|()| hostfs::write(&path, with_uuid(&imported.profile_text(home))))
         .map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
     Ok((id, imported.name, imported.warnings))
 }
@@ -643,10 +754,44 @@ pub fn add_package_in(dir: &Path, package: &Path, os: Option<&str>) -> Result<(S
         Some((entry, text)) if config::parse(text, dir, None).game_source.as_deref() == Some(source.as_str()) => {
             return Ok((entry.id.clone(), entry.name.clone(), Vec::new()));
         }
-        Some((entry, _)) => Some(entry.id.clone()),
+        Some((entry, text)) => Some((entry.id.clone(), config::parse(text, dir, None))),
         None => None,
     };
-    let (text, name, warnings) = package_profile(&package, &source, None, os)?;
+    let (mut text, name, warnings) = package_profile(&package, &source, None, os)?;
+    // Made again, it is the same profile to the almanac, and keeps what
+    // the player said of the game where the package says nothing.
+    if let Some((_, before)) = &remade {
+        let now = config::parse(&text, dir, None);
+        let year = before
+            .game_year
+            .filter(|_| now.game_year.is_none())
+            .map(|y| y.to_string());
+        let kept = [
+            ("year", year),
+            (
+                "publisher",
+                before
+                    .game_publisher
+                    .clone()
+                    .filter(|_| now.game_publisher.is_none()),
+            ),
+            (
+                "notes",
+                before
+                    .game_notes
+                    .clone()
+                    .filter(|_| now.game_notes.is_none()),
+            ),
+            ("uuid", before.game_uuid.clone()),
+        ];
+        for (key, value) in kept {
+            if let Some(value) = value {
+                text = set_game_key(&text, key, &value, false);
+            }
+        }
+    }
+    let text = with_uuid(&text);
+    let remade = remade.map(|(id, _)| id);
     // Its profile made before, or neither a profile nor a folder there
     // already.
     let id = remade.unwrap_or_else(|| {
@@ -751,6 +896,13 @@ fn package_profile(package: &Path, source: &str, variant: Option<&str>, os: Opti
         warnings.extend(setup.warnings);
     }
     let mut text = format!("[game]\nname={}\nsource={}\n", name, source);
+    // What the package says of the game, for the almanac; never its uuid,
+    // which each profile has of its own.
+    for key in ["year", "publisher", "notes"] {
+        if let Some(value) = game_value(&own, key).filter(|v| !v.is_empty()) {
+            text.push_str(&format!("{}={}\n", key, value));
+        }
+    }
     text.push_str(&format!("overlay={}\n", game_value(&own, "overlay").unwrap_or_else(|| "true".to_string())));
     // RetroAchievements knows the game by its archive's hash.
     match game_value(&own, "achievements") {
@@ -1032,7 +1184,20 @@ mod tests {
     use std::path::PathBuf;
 
     fn keen() -> NewGame {
-        NewGame { name: "Commander Keen 4".into(), directory: "C:\\KEEN4".into(), command: "KEEN4E".into() }
+        NewGame {
+            name: "Commander Keen 4".into(),
+            directory: "C:\\KEEN4".into(),
+            command: "KEEN4E".into(),
+            ..NewGame::default()
+        }
+    }
+
+    /// `text` without its `uuid=` line, which is new each time.
+    fn without_uuid(text: &str) -> String {
+        text.lines()
+            .filter(|l| !l.starts_with("uuid="))
+            .map(|l| format!("{}\n", l))
+            .collect()
     }
 
     #[test]
@@ -1040,7 +1205,10 @@ mod tests {
         let base = Settings::default();
         let current = Settings { cycles: CpuSpeed::Fixed(10000), ems: false, ..Settings::default() };
         let text = profile_text(&keen(), &base, &current, &[], None).unwrap();
-        assert_eq!(text, "[game]\nname=Commander Keen 4\noverlay=true\n\n[emulator]\ncycles=10000\nems=false\n\n[autoexec]\nC:\nCD \\KEEN4\nKEEN4E\n");
+        assert_eq!(
+            without_uuid(&text),
+            "[game]\nname=Commander Keen 4\noverlay=true\n\n[emulator]\ncycles=10000\nems=false\n\n[autoexec]\nC:\nCD \\KEEN4\nKEEN4E\n"
+        );
         let config = config::parse(&text, Path::new("/"), None);
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!(entry("keen4", &text), GameEntry { id: "keen4".into(), name: "Commander Keen 4".into(), command: "KEEN4E".into() });
@@ -1048,9 +1216,59 @@ mod tests {
         // In the root of D:, the same settings.
         let root = NewGame { directory: "d:\\".into(), ..keen() };
         let text = profile_text(&root, &base, &base, &[], None).unwrap();
-        assert_eq!(text, "[game]\nname=Commander Keen 4\noverlay=true\n\n[autoexec]\nD:\nKEEN4E\n");
+        assert_eq!(
+            without_uuid(&text),
+            "[game]\nname=Commander Keen 4\noverlay=true\n\n[autoexec]\nD:\nKEEN4E\n"
+        );
         assert!(profile_text(&NewGame { name: " ".into(), ..keen() }, &base, &base, &[], None).is_err());
         assert!(profile_text(&NewGame { command: "".into(), ..keen() }, &base, &base, &[], None).is_err());
+    }
+
+    #[test]
+    fn a_profile_tells_the_almanac_of_its_game_and_has_a_uuid_of_its_own() {
+        let base = Settings::default();
+        let new = NewGame {
+            year: " 1991 ".into(),
+            publisher: "Apogee".into(),
+            notes: "Needs  EMS".into(),
+            ..keen()
+        };
+        let text = profile_text(&new, &base, &base, &[], None).unwrap();
+        let config = config::parse(&text, Path::new("/"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(config.game_year, Some(1991));
+        assert_eq!(config.game_publisher.as_deref(), Some("Apogee"));
+        assert_eq!(config.game_notes.as_deref(), Some("Needs EMS"));
+        let uuid = config.game_uuid.expect("a new profile has a uuid");
+        assert!(valid_uuid(&uuid) && uuid.as_bytes()[14] == b'4', "{}", uuid);
+        let other = profile_text(&keen(), &base, &base, &[], None).unwrap();
+        assert_ne!(
+            config::parse(&other, Path::new("/"), None)
+                .game_uuid
+                .as_deref(),
+            Some(uuid.as_str())
+        );
+        let bad = NewGame {
+            year: "nineties".into(),
+            ..keen()
+        };
+        assert!(profile_text(&bad, &base, &base, &[], None).is_err());
+
+        // A profile without one gets one; one with one keeps it.
+        let old = "[game]\nname=Keen\noverlay=true\n\n[autoexec]\nKEEN4E\n";
+        let given = with_uuid(old);
+        let uuid = config::parse(&given, Path::new("/"), None)
+            .game_uuid
+            .unwrap();
+        assert!(
+            given.starts_with("[game]\nname=Keen\noverlay=true\nuuid="),
+            "{}",
+            given
+        );
+        assert_eq!(with_uuid(&given), given);
+        assert!(valid_uuid(&uuid));
+        let warned = config::parse("[game]\nuuid=nope\nyear=93\n", Path::new("/"), None);
+        assert_eq!(warned.warnings.len(), 2, "{:?}", warned.warnings);
     }
 
     #[test]
@@ -1380,6 +1598,46 @@ mod tests {
         assert_eq!((prepared.overlay, prepared.autoexec.clone()), (false, vec!["C:".to_string(), "KEEN4E.EXE".to_string()]));
         let titles: Vec<String> = manuals(&games, &id, &text, None).into_iter().map(|m| m.title).collect();
         assert_eq!(titles, ["Hint Book"]);
+    }
+
+    #[test]
+    fn a_package_s_profile_has_its_year_and_a_uuid_of_its_own_which_stays() {
+        let dir = std::path::PathBuf::from("target/test_games_package_uuid");
+        let _ = std::fs::remove_dir_all(&dir);
+        let folder = dir.join("Jazz");
+        std::fs::create_dir_all(&folder).unwrap();
+        let shared = "0f8fad5b-d9cb-469f-a165-70867728950e";
+        let conf = format!(
+            "[game]\nname=Jazz\nyear=1994\npublisher=Epic\nuuid={}\n",
+            shared
+        );
+        std::fs::write(folder.join("rust-dos.conf"), &conf).unwrap();
+        std::fs::write(folder.join("JAZZ.EXE"), b"MZ").unwrap();
+        let games = dir.join("games");
+        let (id, _, _) = add_package(&games, &folder).unwrap();
+        let path = games.join(format!("{}.conf", id));
+        let first = config::parse(&std::fs::read_to_string(&path).unwrap(), &games, None);
+        assert_eq!(
+            (first.game_year, first.game_publisher.as_deref()),
+            (Some(1994), Some("Epic"))
+        );
+        let uuid = first.game_uuid.clone().unwrap();
+        assert_ne!(uuid, shared, "every player's profile reports on its own");
+
+        // The player adds notes; the package changes, and its profile is
+        // made again: the same uuid, and the notes stay.
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, set_game_key(&text, "notes", "Use the GUS", false)).unwrap();
+        std::fs::write(
+            folder.join("rust-dos.conf"),
+            format!("{}\n[emulator]\ncycles=9000\n", conf),
+        )
+        .unwrap();
+        assert_eq!(add_package(&games, &folder).unwrap().0, id);
+        let again = config::parse(&std::fs::read_to_string(&path).unwrap(), &games, None);
+        assert_eq!(again.game_uuid, Some(uuid));
+        assert_eq!(again.game_notes.as_deref(), Some("Use the GUS"));
+        assert_eq!(again.game_year, Some(1994));
     }
 
     #[test]

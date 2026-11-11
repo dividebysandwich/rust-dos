@@ -1764,15 +1764,30 @@ fn the_games_page_launches_makes_and_deletes_games() {
     ui.text("Commander Keen", &mut host);
     keys(&mut ui, &mut host, &[Tab, End, Backspace, Backspace, Backspace, Backspace, Backspace]);
     ui.text("KEEN", &mut host);
-    keys(&mut ui, &mut host, &[Tab, Tab, Enter]);
+    // The year, publisher and notes for the almanac.
+    keys(&mut ui, &mut host, &[Tab, Tab]);
+    ui.text("1991", &mut host);
+    keys(&mut ui, &mut host, &[Tab]);
+    ui.text("Apogee", &mut host);
+    keys(&mut ui, &mut host, &[Tab]);
+    ui.text("Needs EMS", &mut host);
+    keys(&mut ui, &mut host, &[Tab, Enter]);
     assert!(status(&ui).1, "{:?}", status(&ui));
     assert!(ui.game_dialog.is_some());
     ui.draw(&mut Frame::new(640, 400));
-    keys(&mut ui, &mut host, &[BackTab]);
+    keys(&mut ui, &mut host, &[BackTab, BackTab, BackTab, BackTab]);
     ui.text("KEEN4E", &mut host);
     keys(&mut ui, &mut host, &[Enter]);
     assert!(ui.game_dialog.is_none(), "{:?}", status(&ui));
-    assert_eq!(host.created[0], NewGame { name: "Commander Keen".into(), directory: "C:\\KEEN".into(), command: "KEEN4E".into() });
+    let created = NewGame {
+        name: "Commander Keen".into(),
+        directory: "C:\\KEEN".into(),
+        command: "KEEN4E".into(),
+        year: "1991".into(),
+        publisher: "Apogee".into(),
+        notes: "Needs EMS".into(),
+    };
+    assert_eq!(host.created[0], created);
     assert_eq!(ui.games[ui.row].id, "commander-keen");
 
     // Del asks first; Esc keeps it, Enter deletes it.

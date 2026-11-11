@@ -14,18 +14,34 @@ pub enum GameField {
     Name,
     Directory,
     Command,
+    Year,
+    Publisher,
+    Notes,
     Create,
     Cancel,
 }
 
-const FIELDS: [GameField; 5] = [GameField::Name, GameField::Directory, GameField::Command, GameField::Create, GameField::Cancel];
+const FIELDS: [GameField; 8] = [
+    GameField::Name,
+    GameField::Directory,
+    GameField::Command,
+    GameField::Year,
+    GameField::Publisher,
+    GameField::Notes,
+    GameField::Create,
+    GameField::Cancel,
+];
 
 /// Making a profile of the current settings: the game's name, its
-/// directory and its command.
+/// directory and its command, and for the almanac its year, publisher
+/// and the player's notes.
 pub struct GameDialog {
     pub name: TextField,
     pub directory: TextField,
     pub command: TextField,
+    pub year: TextField,
+    pub publisher: TextField,
+    pub notes: TextField,
     pub focus: GameField,
 }
 
@@ -35,6 +51,9 @@ impl GameDialog {
             name: TextField::default(),
             directory: TextField::new(directory),
             command: TextField::default(),
+            year: TextField::default(),
+            publisher: TextField::default(),
+            notes: TextField::default(),
             focus: GameField::Name,
         }
     }
@@ -44,6 +63,9 @@ impl GameDialog {
             GameField::Name => Some(&mut self.name),
             GameField::Directory => Some(&mut self.directory),
             GameField::Command => Some(&mut self.command),
+            GameField::Year => Some(&mut self.year),
+            GameField::Publisher => Some(&mut self.publisher),
+            GameField::Notes => Some(&mut self.notes),
             _ => None,
         }
     }
@@ -54,7 +76,14 @@ impl GameDialog {
     }
 
     pub fn game(&self) -> NewGame {
-        NewGame { name: self.name.text(), directory: self.directory.text(), command: self.command.text() }
+        NewGame {
+            name: self.name.text(),
+            directory: self.directory.text(),
+            command: self.command.text(),
+            year: self.year.text(),
+            publisher: self.publisher.text(),
+            notes: self.notes.text(),
+        }
     }
 }
 
@@ -218,6 +247,24 @@ impl ConfigUi {
             (GameField::Name, "Name", &dialog.name, "Commander Keen 4"),
             (GameField::Directory, "Directory", &dialog.directory, "C:\\KEEN4"),
             (GameField::Command, "Command", &dialog.command, "KEEN4E"),
+            (
+                GameField::Year,
+                "Year",
+                &dialog.year,
+                "1991 (for the almanac)",
+            ),
+            (
+                GameField::Publisher,
+                "Publisher",
+                &dialog.publisher,
+                "Apogee",
+            ),
+            (
+                GameField::Notes,
+                "Notes",
+                &dialog.notes,
+                "How it plays, what it needs",
+            ),
         ];
         for (i, (field, label, text, example)) in rows.into_iter().enumerate() {
             let row = top + 2 + i;
@@ -237,7 +284,7 @@ impl ConfigUi {
             }
             hits.push(Hit { row, col: value_col, width, target: Target::GameField(field) });
         }
-        let row = top + 6;
+        let row = top + 9;
         if row < content.end {
             let mut col = value_col;
             for (field, text) in [(GameField::Create, "[ Create ]"), (GameField::Cancel, "[ Cancel ]")] {
@@ -250,9 +297,15 @@ impl ConfigUi {
                 col += text.len() + 2;
             }
         }
-        if top + 8 < content.end {
-            g.text_to(4, top + 8, "It keeps the settings that differ from the configuration file's,", draw::DIM, cols - 2);
-            g.text_to(4, top + 9, "and the drives mounted since. While the game plays, F2 saves to it.", draw::DIM, cols - 2);
+        let notes = [
+            "It keeps the settings that differ from the configuration file's,",
+            "and the drives mounted since. While the game plays, F2 saves to it.",
+            "Year, publisher and notes go with its reports to the almanac.",
+        ];
+        for (i, line) in notes.into_iter().enumerate() {
+            if top + 11 + i < content.end {
+                g.text_to(4, top + 11 + i, line, draw::DIM, cols - 2);
+            }
         }
         self.hits.extend(hits);
     }

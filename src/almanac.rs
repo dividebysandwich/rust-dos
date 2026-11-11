@@ -10,7 +10,10 @@
 //! puts the user's settings back once it has ended.
 //!
 //! Only the settings of the emulated machine go back and forth (`KEYS`):
-//! never drives, commands or paths.
+//! never drives, commands or paths. With them goes what the game's
+//! profile says of the game (`About`): its year, publisher and the
+//! player's notes, and its UUID, with which the almanac replaces the
+//! report the profile sent before instead of adding another.
 
 use crate::config::{self, Settings};
 use crate::cpu::Cpu;
@@ -126,6 +129,57 @@ pub struct Program {
     pub platform: Option<String>,
     /// The name to look the game up by: its profile's, or the program's.
     pub name: String,
+    /// What the profile of the game playing says of it, if one plays.
+    pub about: Option<About>,
+}
+
+/// What a game profile tells the almanac of its game (`[game]`'s `year`,
+/// `publisher`, `notes` and `uuid`, games.rs).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct About {
+    pub year: Option<i32>,
+    pub publisher: Option<String>,
+    pub notes: Option<String>,
+    /// The profile's UUID, the report's key: a report sent with it
+    /// replaces the one sent with it before.
+    pub key: Option<String>,
+}
+
+impl About {
+    /// What the profile `text` says.
+    pub fn of_profile(text: &str) -> About {
+        let config = config::parse(text, Path::new("/"), None);
+        About {
+            year: config.game_year,
+            publisher: config.game_publisher,
+            notes: config.game_notes,
+            key: config.game_uuid,
+        }
+    }
+
+    /// The profile `text` saying `self`'s year, publisher and notes (the
+    /// ones that are None taken out), and with a UUID of its own.
+    pub fn into_profile(&self, text: &str) -> String {
+        let year = self.year.map(|y| y.to_string());
+        let mut text = text.to_string();
+        for (key, value) in [
+            ("year", year.as_deref()),
+            ("publisher", self.publisher.as_deref()),
+            ("notes", self.notes.as_deref()),
+        ] {
+            text = crate::games::set_game_value(&text, key, value);
+        }
+        crate::games::with_uuid(&text)
+    }
+}
+
+/// A report the almanac took: its number, and whether it replaced the one
+/// the profile sent before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub struct Reported {
+    pub id: i64,
+    #[serde(default)]
+    pub replaced: bool,
 }
 
 /// The program at the DOS path `path`, read from the machine's drives.
@@ -142,6 +196,7 @@ pub fn program(cpu: &mut Cpu, path: &str) -> Option<Program> {
         files: vec![file],
         platform: Some(platform_of(&bytes).to_string()),
         name,
+        about: None,
     })
 }
 
@@ -491,12 +546,13 @@ pub fn report(
     platform: Option<&str>,
     rating: Rating,
     settings: &BTreeMap<String, BTreeMap<String, String>>,
-) -> Result<i64, String> {
+    about: &About,
+) -> Result<Reported, String> {
     #[cfg(all(feature = "sdl", not(target_arch = "wasm32")))]
-    return client::report(subject, files, platform, rating, settings);
+    return client::report(subject, files, platform, rating, settings, about);
     #[cfg(not(all(feature = "sdl", not(target_arch = "wasm32"))))]
     {
-        let _ = (subject, files, platform, rating, settings);
+        let _ = (subject, files, platform, rating, settings, about);
         Err(format!("This Rust-DOS doesn't ask {}", SITE))
     }
 }
@@ -665,11 +721,6 @@ pub mod client {
         versions: Vec<Version>,
     }
 
-    #[derive(Deserialize)]
-    struct Report {
-        id: i64,
-    }
-
     /// The label of the version a report adds for the program's file.
     fn version_label(files: &[FileInfo]) -> String {
         match files.first() {
@@ -682,17 +733,19 @@ pub mod client {
         }
     }
 
-    /// Report that the game played `rating` with `settings`: to its
-    /// version of the program's `files`, which is added, with the
-    /// program's `platform`, if the game doesn't have it yet, and the
-    /// game too if it is new. Returns the report's number.
+    /// Report that the game played `rating` with `settings`, and what its
+    /// profile says of it (`about`): to its version of the program's
+    /// `files`, which is added, with the program's `platform`, if the game
+    /// doesn't have it yet, and the game too if it is new. The almanac
+    /// replaces the report sent with `about`'s key before.
     pub fn report(
         subject: &Subject,
         files: &[FileInfo],
         platform: Option<&str>,
         rating: Rating,
         settings: &BTreeMap<String, BTreeMap<String, String>>,
-    ) -> Result<i64, String> {
+        about: &About,
+    ) -> Result<Reported, String> {
         let new_version = || {
             (!files.is_empty()).then(|| {
                 serde_json::json!({
@@ -729,7 +782,13 @@ pub mod client {
                 (game.slug, version)
             }
             Subject::New(name) => {
-                let body = serde_json::json!({ "name": name.trim(), "version": new_version() });
+                let body = serde_json::json!({
+                    "name": name.trim(),
+                    "year": about.year,
+                    "publisher": about.publisher,
+                    "key": about.key,
+                    "version": new_version(),
+                });
                 let game: Game = post("/games", &body)?;
                 let version = game.versions.first().map(|v| v.id);
                 (game.slug, version)
@@ -741,8 +800,12 @@ pub mod client {
             "rating": rating,
             "settings": settings,
             "rust_dos_version": env!("CARGO_PKG_VERSION"),
+            "notes": about.notes,
+            "key": about.key,
+            "year": about.year,
+            "publisher": about.publisher,
         });
-        post::<Report>("/reports", &body).map(|r| r.id)
+        post("/reports", &body)
     }
 }
 

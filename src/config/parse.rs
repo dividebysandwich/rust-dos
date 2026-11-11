@@ -542,6 +542,24 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                     match key.to_ascii_lowercase().as_str() {
                         "name" if !value.is_empty() => config.game_name = Some(value.to_string()),
                         "name" => warn("the game's name is empty".to_string()),
+                        "year" if value.is_empty() => {}
+                        "year" => match value.parse::<i32>() {
+                            Ok(year) if (1970..=2100).contains(&year) => {
+                                config.game_year = Some(year)
+                            }
+                            _ => warn(format!("invalid year '{}' (such as 1993)", value)),
+                        },
+                        "publisher" if !value.is_empty() => {
+                            config.game_publisher = Some(value.to_string())
+                        }
+                        "publisher" => {}
+                        "notes" if !value.is_empty() => config.game_notes = Some(value.to_string()),
+                        "notes" => {}
+                        "uuid" if crate::games::valid_uuid(value) => {
+                            config.game_uuid = Some(value.to_ascii_lowercase())
+                        }
+                        "uuid" if value.is_empty() => {}
+                        "uuid" => warn(format!("invalid uuid '{}'", value)),
                         "achievements" if !value.is_empty() => config.game_achievements = Some(value.to_string()),
                         "achievements" => {}
                         "manual" if !value.is_empty() => config.game_manuals.push(value.to_string()),

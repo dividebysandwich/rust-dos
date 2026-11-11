@@ -864,8 +864,26 @@ impl Host for MainHost<'_, '_> {
         };
         if let Some(game) = self.game.as_ref() {
             program.name = game.name.clone();
+            let profile = self.game_profile(&game.id).ok();
+            program.about = profile.map(|(text, _)| rust_dos::almanac::About::of_profile(&text));
         }
         Some(program)
+    }
+
+    fn almanac_save_about(
+        &mut self,
+        about: &rust_dos::almanac::About,
+    ) -> Result<Option<rust_dos::almanac::About>, String> {
+        let Some(game) = self.game.as_ref() else {
+            return Ok(None);
+        };
+        let (text, dir) = self.game_profile(&game.id)?;
+        let new = about.into_profile(&text);
+        if new != text {
+            let path = dir.join(format!("{}.conf", game.id));
+            std::fs::write(&path, &new).map_err(|e| format!("{}: {}", path.display(), e))?;
+        }
+        Ok(Some(rust_dos::almanac::About::of_profile(&new)))
     }
 
     fn identify_game(&mut self, archive: &std::path::Path) -> Result<String, String> {
