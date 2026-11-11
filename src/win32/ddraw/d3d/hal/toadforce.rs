@@ -609,13 +609,18 @@ fn stage_value(d: &Device, at: u32, def: &Def, diffuse_alpha: bool) -> u32 {
         // The device has Direct3D 7's filter values: the two cubic
         // magnification filters are the linear one here, and the
         // anisotropic one is the card's third. Direct3D 8's are the
-        // card's already.
+        // card's already, but for its two cubic filters (4 and 5),
+        // which are the linear one here too.
         TSS_MAGFILTER if d.version != 8 => match value {
             0 | 1 => 1,
             5 => 3,
             _ => 2,
         },
+        TSS_MAGFILTER | TSS_MINFILTER if value > 3 => 2,
         TSS_MAGFILTER | TSS_MINFILTER => value.clamp(1, 3),
+        // The device keeps Direct3D 7's mipmap filters, from 1
+        // (D3DTFP_NONE), on every version: Direct3D 8's states add 1
+        // to theirs (`d3d8::states::inner_stage`).
         TSS_MIPFILTER => value.clamp(1, 3) - 1,
         TSS_MAXANISOTROPY => value.clamp(1, caps::ANISOTROPY_MAX),
         TSS_COLOR_SCALE | TSS_ALPHA_SCALE => 1,
