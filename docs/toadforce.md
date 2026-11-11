@@ -1078,6 +1078,14 @@ Each phase is one or a few pull requests that leave main working.
    `raster/geometry.rs` (transform, texture coordinates, fog),
    `raster/light.rs` and `raster/clip.rs`, as "Transform and lighting"
    in the specification's chapter 9 defines.
+   Done but for two parts: Direct3D 7's untransformed draws go to the
+   card, the T&L HAL device is listed, the pipeline makes texture
+   coordinates as the card does for the draws it keeps, and the HAL
+   has the card's four textures. Giants makes the T&L HAL device and
+   turns object and landscape bump mapping on. Its environment mapping
+   waits for cube maps in DirectDraw (#958), and blended vertices
+   reach the card with Direct3D 8 in phase 5 or a Direct3D 7 game that
+   sets the state (#959).
 4. **The OpenGL renderer.** Generated shaders, caches, GPU-owned
    targets, the disk cache. Proof: renderer agreement tests, and the
    phase 2 and 3 games at their full frame rate on it, measured against
@@ -1156,10 +1164,10 @@ Still to check:
 
 - Whether Giants' terrain shows z-fighting on plain Z with 24-bit
   depth, in phase 3.
-- What Giants' options screen offers on the T&L HAL device, which it
-  makes when the card lists one (bump and environment mapping were
-  unavailable on the HAL device), and what Black & White asks of any
-  card, once it runs (#889).
+- What Giants asks of the card for its environment mapping, which
+  its options list as unavailable on the T&L HAL device while object
+  and landscape bump mapping are on: cube maps (#958), and perhaps
+  more. And what Black & White asks of any card, once it runs (#889).
 - What Zanzarah does with DDS textures, and what Grom asks for past
   its initialisation, once the card gets them past #583 and #645.
 
