@@ -1156,8 +1156,10 @@ Still to check:
 
 - Whether Giants' terrain shows z-fighting on plain Z with 24-bit
   depth, in phase 3.
-- What Giants asks of a T&L device, once the card offers one, and
-  what Black & White asks of any card, once it runs (#889).
+- What Giants' options screen offers on the T&L HAL device, which it
+  makes when the card lists one (bump and environment mapping were
+  unavailable on the HAL device), and what Black & White asks of any
+  card, once it runs (#889).
 - What Zanzarah does with DDS textures, and what Grom asks for past
   its initialisation, once the card gets them past #583 and #645.
 
