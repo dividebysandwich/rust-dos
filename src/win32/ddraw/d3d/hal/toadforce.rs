@@ -1542,6 +1542,17 @@ fn as_list(kind: u32, n: usize) -> (u32, usize, Vec<usize>) {
     }
 }
 
+/// Whether the environment asks for every draw to be transformed and
+/// lit by the pipeline (`RUST_DOS_TOADFORCE_TNL=pipeline`): the way to
+/// tell what the card's transform and lighting changes in a scene, by
+/// drawing it both ways.
+fn pipeline_transforms() -> bool {
+    static PIPELINE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PIPELINE.get_or_init(|| {
+        std::env::var("RUST_DOS_TOADFORCE_TNL").is_ok_and(|v| v.eq_ignore_ascii_case("pipeline"))
+    })
+}
+
 /// The draw commands for `kind` primitives of `vertices` in the order
 /// `order`, whose places are all among them, or as they are: one
 /// command where it has at most `limit` words, and otherwise lists of
@@ -1649,7 +1660,10 @@ pub fn draw_geometry(
     order: Option<&[u32]>,
 ) -> bool {
     let count = vertices.len();
-    if !can_transform(d, setup) || order.is_some_and(|o| o.iter().any(|&i| i as usize >= count)) {
+    if pipeline_transforms()
+        || !can_transform(d, setup)
+        || order.is_some_and(|o| o.iter().any(|&i| i as usize >= count))
+    {
         return false;
     }
     let Some(card) = bind_as(cpu, d, setup, true) else {
