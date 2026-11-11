@@ -5,13 +5,16 @@
 //! recommends. Fetching, Enter puts the settings of the game picked in
 //! place; reporting, Enter tells the almanac how the game played with the
 //! settings as they are, to the game picked or to a new one by the name
-//! typed. A game takes any number of reports.
+//! typed. A game takes any number of reports; one from a game profile
+//! replaces the one the profile sent on that game before (its `uuid=`).
+//! Reporting, the game's year, publisher and the player's notes go too,
+//! from the profile of the game playing, and are kept in it.
 
 use super::dialog::TextField;
 use super::draw::{self, Grid};
 use super::rooms::wrap;
 use super::{ConfigUi, Hit, Host, Target, UiKey, fit};
-use crate::almanac::{self, Candidate, Program, Rating, Subject};
+use crate::almanac::{self, About, Candidate, Program, Rating, Reported, Subject};
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 /// Whether this rust-dos asks the almanac.
@@ -20,8 +23,29 @@ pub(super) const ASKS: bool = cfg!(all(feature = "sdl", not(target_arch = "wasm3
 /// What a question to the almanac answered.
 enum Answer {
     Candidates(Result<Vec<Candidate>, String>),
-    /// A report sent: its number, and the game's name.
-    Reported(Result<i64, String>, String),
+    /// A report sent: what the almanac made of it, the game's name, and
+    /// why the game's profile couldn't keep what the report said of it.
+    Reported(Result<Reported, String>, String, Option<String>),
+}
+
+/// What the report says of the game, besides its settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AboutField {
+    Year,
+    Publisher,
+    Notes,
+}
+
+impl AboutField {
+    const ALL: [AboutField; 3] = [AboutField::Year, AboutField::Publisher, AboutField::Notes];
+
+    fn label(self) -> &'static str {
+        match self {
+            AboutField::Year => "Year",
+            AboutField::Publisher => "Publisher",
+            AboutField::Notes => "Notes",
+        }
+    }
 }
 
 /// A line of the list.
@@ -29,6 +53,7 @@ enum Answer {
 pub(super) enum Line {
     Search,
     Rating,
+    About(AboutField),
     Heading(&'static str),
     Game(usize),
     /// Reporting: a new game, by the name typed.
@@ -40,7 +65,7 @@ impl Line {
     fn selectable(&self) -> bool {
         matches!(
             self,
-            Line::Search | Line::Rating | Line::Game(_) | Line::NewGame
+            Line::Search | Line::Rating | Line::About(_) | Line::Game(_) | Line::NewGame
         )
     }
 }
@@ -52,6 +77,9 @@ pub struct AlmanacView {
     program: Option<Program>,
     search: TextField,
     rating: Rating,
+    year: TextField,
+    publisher: TextField,
+    notes: TextField,
     candidates: Vec<Candidate>,
     asking: Option<Receiver<Answer>>,
     /// What the last question or report came to, and whether it failed.
@@ -67,11 +95,19 @@ impl ConfigUi {
         self.status = None;
         let program = host.almanac_program();
         let name = program.as_ref().map_or(String::new(), |p| p.name.clone());
+        let about = program
+            .as_ref()
+            .and_then(|p| p.about.clone())
+            .unwrap_or_default();
+        let year = about.year.map_or(String::new(), |y| y.to_string());
         let mut view = AlmanacView {
             report,
             program,
             search: TextField::new(&name),
             rating: Rating::Green,
+            year: TextField::new(&year),
+            publisher: TextField::new(about.publisher.as_deref().unwrap_or("")),
+            notes: TextField::new(about.notes.as_deref().unwrap_or("")),
             candidates: Vec::new(),
             asking: None,
             note: None,
@@ -86,6 +122,7 @@ impl ConfigUi {
         let mut lines = vec![Line::Search];
         if view.report {
             lines.push(Line::Rating);
+            lines.extend(AboutField::ALL.map(Line::About));
         }
         if view.asking.is_some() && view.candidates.is_empty() {
             lines.push(Line::Note(format!("Asking {}...", almanac::SITE)));
@@ -138,13 +175,23 @@ impl ConfigUi {
                 view.scroll = 0;
             }
             Answer::Candidates(Err(e)) => view.note = Some((e, true)),
-            Answer::Reported(Ok(id), name) => {
-                view.note = Some((
-                    format!("Thank you! Report #{} on {} is in the almanac", id, name),
-                    false,
-                ));
+            Answer::Reported(result, name, unkept) => {
+                let (text, failed) = match result {
+                    Ok(Reported { id, replaced: true }) => (
+                        format!("Thank you! Your report #{} on {} is updated", id, name),
+                        false,
+                    ),
+                    Ok(Reported { id, .. }) => (
+                        format!("Thank you! Report #{} on {} is in the almanac", id, name),
+                        false,
+                    ),
+                    Err(e) => (e, true),
+                };
+                view.note = Some(match unkept {
+                    Some(why) => (format!("{}. {}", text, why), true),
+                    None => (text, failed),
+                });
             }
-            Answer::Reported(Err(e), _) => view.note = Some((e, true)),
         }
     }
 
@@ -155,8 +202,22 @@ impl ConfigUi {
         let lines = Self::almanac_lines(view);
         let selected = view.selected.min(lines.len() - 1);
         let line = lines[selected].clone();
-        // Typing goes to the name, wherever the cursor is.
-        if line == Line::Search || matches!(key, UiKey::Char(_)) {
+        let field_edits = matches!(
+            key,
+            UiKey::Char(_)
+                | UiKey::Backspace
+                | UiKey::Delete
+                | UiKey::Left
+                | UiKey::Right
+                | UiKey::Home
+                | UiKey::End
+        );
+        if let Line::About(field) = line {
+            if field_edits && view.about_field(field).key(key) {
+                return;
+            }
+        } else if line == Line::Search || matches!(key, UiKey::Char(_)) {
+            // Typing goes to the name, wherever else the cursor is.
             let edits = matches!(
                 key,
                 UiKey::Char(_) | UiKey::Backspace | UiKey::Delete | UiKey::Left | UiKey::Right
@@ -204,6 +265,11 @@ impl ConfigUi {
                 view.rating =
                     Rating::ALL[(at + step).rem_euclid(Rating::ALL.len() as isize) as usize];
             }
+            UiKey::Enter if matches!(line, Line::About(_)) => {
+                if let Some(next) = (selected + 1..lines.len()).find(|&i| lines[i].selectable()) {
+                    view.selected = next;
+                }
+            }
             UiKey::Enter if view.asking.is_some() => {}
             UiKey::Enter => match line {
                 Line::Search => ask(view),
@@ -211,7 +277,7 @@ impl ConfigUi {
                     let c = &view.candidates[i];
                     let subject = almanac_subject(c);
                     let name = c.name.clone();
-                    self.send_report(subject, name);
+                    self.send_report(subject, name, host);
                 }
                 Line::Game(i) => {
                     let c = view.candidates[i].clone();
@@ -219,7 +285,7 @@ impl ConfigUi {
                 }
                 Line::NewGame => {
                     let name = view.search.text().trim().to_string();
-                    self.send_report(Subject::New(name.clone()), name);
+                    self.send_report(Subject::New(name.clone()), name, host);
                 }
                 _ => {}
             },
@@ -254,13 +320,40 @@ impl ConfigUi {
         }
     }
 
-    /// Reporting: the settings as they are, the rating picked, the
-    /// program's file, to `subject`, on a thread of its own.
-    fn send_report(&mut self, subject: Subject, name: String) {
+    /// Reporting: the settings as they are, the rating picked, what the
+    /// report says of the game (kept in its profile, which gets a UUID if
+    /// it has none), the program's file, to `subject`, on a thread of its
+    /// own.
+    fn send_report(&mut self, subject: Subject, name: String, host: &mut dyn Host) {
         let settings = almanac::report_settings(&self.settings, self.home.as_deref());
         let Some(view) = &mut self.almanac else {
             return;
         };
+        let about = match view.about() {
+            Ok(about) => about,
+            Err(e) => {
+                view.note = Some((e, true));
+                return;
+            }
+        };
+        // The report doesn't wait on the profile: one that can't be
+        // written (a read-only games folder, say) lets it go all the same,
+        // with the key the profile had, and the note says why it didn't
+        // keep what the report says.
+        let (about, unkept) = match host.almanac_save_about(&about) {
+            Ok(Some(saved)) => (saved, None),
+            Ok(None) => (about, None),
+            Err(e) => {
+                let why = format!(
+                    "The game's profile can't keep the year, publisher and notes: {}",
+                    e
+                );
+                (about, Some(why))
+            }
+        };
+        if let Some(program) = &mut view.program {
+            program.about = Some(about.clone());
+        }
         let files = view
             .program
             .as_ref()
@@ -272,9 +365,15 @@ impl ConfigUi {
         let spawned = std::thread::Builder::new()
             .name("almanac".to_string())
             .spawn(move || {
-                let result =
-                    almanac::report(&subject, &files, platform.as_deref(), rating, &settings);
-                let _ = done.send(Answer::Reported(result, name));
+                let result = almanac::report(
+                    &subject,
+                    &files,
+                    platform.as_deref(),
+                    rating,
+                    &settings,
+                    &about,
+                );
+                let _ = done.send(Answer::Reported(result, name, unkept));
             });
         match spawned {
             Ok(_) => view.asking = Some(answer),
@@ -304,6 +403,7 @@ impl ConfigUi {
         let mut hints = match lines.get(view.selected) {
             Some(Line::Search) => vec![("Enter", "Search", UiKey::Enter)],
             Some(Line::Rating) => vec![("\u{2190}\u{2192}", "Change", UiKey::Right)],
+            Some(Line::About(_)) => vec![("Enter", "Next", UiKey::Enter)],
             Some(Line::Game(_)) if view.report => vec![("Enter", "Report", UiKey::Enter)],
             Some(Line::Game(_)) => vec![("Enter", "Apply", UiKey::Enter)],
             Some(Line::NewGame) => vec![("Enter", "Report", UiKey::Enter)],
@@ -385,6 +485,21 @@ impl ConfigUi {
                         cols - 2,
                     );
                 }
+                Line::About(field) => {
+                    g.text(2, row, field.label(), bright(draw::TEXT));
+                    let width = (cols - 3).saturating_sub(value_col);
+                    g.background(value_col, row, width, draw::FIELD);
+                    let text = match field {
+                        AboutField::Year => &view.year,
+                        AboutField::Publisher => &view.publisher,
+                        AboutField::Notes => &view.notes,
+                    };
+                    let (shown, cursor) = text.view(width);
+                    g.text_to(value_col, row, &shown, draw::BRIGHT, value_col + width);
+                    if selected {
+                        g.background(value_col + cursor, row, 1, draw::SELECT);
+                    }
+                }
                 Line::Heading(title) => {
                     g.text_to(2, row, title, draw::NOTE, cols - 2);
                 }
@@ -431,6 +546,33 @@ impl ConfigUi {
         let (scroll, total) = (view.scroll, lines.len());
         self.hits.extend(hits);
         self.draw_scrollbar(g, rows, scroll, total);
+    }
+}
+
+impl AlmanacView {
+    fn about_field(&mut self, field: AboutField) -> &mut TextField {
+        match field {
+            AboutField::Year => &mut self.year,
+            AboutField::Publisher => &mut self.publisher,
+            AboutField::Notes => &mut self.notes,
+        }
+    }
+
+    /// What the report says of the game: the fields', and the profile's
+    /// key. An error if the year isn't one.
+    pub(super) fn about(&self) -> Result<About, String> {
+        let year = crate::games::parse_year(&self.year.text())?;
+        let key = self
+            .program
+            .as_ref()
+            .and_then(|p| p.about.as_ref())
+            .and_then(|a| a.key.clone());
+        Ok(About {
+            year,
+            publisher: crate::games::one_line(&self.publisher.text()),
+            notes: crate::games::one_line(&self.notes.text()),
+            key,
+        })
     }
 }
 
@@ -488,6 +630,29 @@ fn about(view: &AlmanacView, line: &Line) -> String {
             None => "No program has run yet: type the game's name and press Enter.".to_string(),
         },
         Line::Rating => "How the game plays with the settings as they are now.".to_string(),
+        Line::About(field) => {
+            let what = match field {
+                AboutField::Year => {
+                    "The year the game came out, which the almanac takes if it hasn't one."
+                }
+                AboutField::Publisher => {
+                    "Who published it, which the almanac takes if it hasn't one."
+                }
+                AboutField::Notes => "How it plays, what it needs: shown with your report.",
+            };
+            let keeps = match view.program.as_ref().and_then(|p| p.about.as_ref()) {
+                Some(about) if about.key.is_some() => {
+                    "Its profile keeps it, and a report from it replaces the one it sent on \
+                     that game before."
+                }
+                Some(_) => {
+                    "Its profile keeps it, and gets a UUID: a report from it replaces the one \
+                     it sent on that game before."
+                }
+                None => "No game profile plays: it goes with this report only.",
+            };
+            format!("{} {}", what, keeps)
+        }
         Line::Game(i) => {
             let c = &view.candidates[*i];
             let found = match (&c.version, c.hash_match) {

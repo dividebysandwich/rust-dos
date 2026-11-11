@@ -115,6 +115,9 @@ mounted:
 - **Name**: what the Games page lists it as.
 - **Directory**: the DOS folder the game is in, such as `C:\KEEN4`.
 - **Command**: the program that starts it, such as `KEEN4E`.
+- **Year**, **Publisher**, **Notes**: what the almanac is told of the
+  game when you report it, each left empty if you like. The notes say
+  how it plays and what it needs, and show with your report.
 
 # Import a game {#import}
 

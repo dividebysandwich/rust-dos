@@ -561,8 +561,15 @@ moderator blessed, or else the ones most reports chose. **F2** saves
 them, into the game's profile while one plays.
 
 *Report settings to Almanac* sends the settings as they are now, with
-how the game played: pick the rating with the arrow keys, then press
-**Enter** on the game. A game the almanac doesn't have yet is added by
-the name typed. The program's name and checksums go with the report, so
-others with the same version find it. Report as often as you like, with
-other settings or after a new version of Rust-DOS.
+how the game played: pick the rating with the arrow keys, fill in the
+game's year, publisher and your notes if you like, then press **Enter**
+on the game. A game the almanac doesn't have yet is added by the name
+typed. The program's name and checksums go with the report, so others
+with the same version find it. The year and publisher fill in what the
+almanac doesn't know of the game, and the notes show with your report.
+
+While a game launched from its profile plays, the year, publisher and
+notes come from the profile and are kept in it, and the profile's UUID
+goes with the report: reporting the game again replaces your report
+on it instead of adding another, so it can follow your settings as
+they change. Without a profile, each report is a new one.
