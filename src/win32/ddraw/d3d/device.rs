@@ -137,7 +137,9 @@ pub struct Device {
     /// What OpenGL (`win32::opengl32`) draws with that Direct3D 7
     /// hasn't: the scissor box (left, top, right, bottom on the
     /// target), the depth bias in steps of the 16-bit depth buffer, and
-    /// whether the color buffer is left as it is (glColorMask).
+    /// whether the color buffer is left as it is (glColorMask), for a
+    /// card that writes all of a color or none of it. A card that masks
+    /// each channel takes OpenGL's mask from RS_COLORWRITEENABLE.
     pub scissor: Option<[u32; 4]>,
     pub depth_bias: i16,
     pub color_off: bool,
@@ -287,6 +289,9 @@ pub const RS_SPECULARMATERIALSOURCE: u32 = 146;
 pub const RS_AMBIENTMATERIALSOURCE: u32 = 147;
 pub const RS_EMISSIVEMATERIALSOURCE: u32 = 148;
 pub const RS_CLIPPLANEENABLE: u32 = 152;
+// Direct3D 8's, which a device of version 8 has.
+pub const RS_COLORWRITEENABLE: u32 = 168;
+pub const RS_BLENDOP: u32 = 171;
 pub const RENDER_STATES: usize = 256;
 
 // Texture stage states.
@@ -379,6 +384,12 @@ impl Device {
         // it (D3DRENDERSTATE_COLORKEYENABLE).
         if version == 1 {
             d.render[41] = 1;
+        }
+        // Direct3D 8's states a device of version 8 starts with: every
+        // channel written, and D3DBLENDOP_ADD.
+        if version == 8 {
+            d.render[RS_COLORWRITEENABLE as usize] = 0xF;
+            d.render[RS_BLENDOP as usize] = 1;
         }
         // D3DCOLOR_RGB.
         d.light_states[3] = 2;

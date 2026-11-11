@@ -1,11 +1,13 @@
 //! OPENGL32.DLL: OpenGL 1.1, as Windows 98 had it with 3dfx's OpenGL
 //! ICD for the Banshee and Voodoo3 installed: the WGL functions that
-//! make contexts and swap buffers, and OpenGL drawn by the card.
+//! make contexts and swap buffers, and OpenGL drawn by the card. A
+//! ToadForce has the same ICD, with its own vendor and renderer names.
 //!
 //! It is a layer over DirectDraw's Direct3D, as D3D8.DLL is. Each
 //! context has a DirectDraw object of its own and a Direct3D device of
 //! version 8 in DirectDraw's table, which draws with the HAL on the card
-//! (`ddraw::d3d::hal`, itself on Glide's layer, `glide::api`). Its color
+//! (`ddraw::d3d::hal`: on a 3dfx card through Glide's layer,
+//! `glide::api`, and on a ToadForce with its own commands). Its color
 //! buffer is a 16-bit render target and its depth buffer a 16-bit Z
 //! buffer, both in video memory and the size of the window's client
 //! area; SwapBuffers copies the color buffer into the client area where
@@ -19,12 +21,14 @@
 //! states and texture stages, the matrices its transforms, the viewport
 //! and depth range its viewport. What Direct3D 7 has no state for, the
 //! scissor box, polygon offset and the color mask, the inner device has
-//! as fields of its own that the HAL puts on the card. Textures are
-//! DirectDraw texture surfaces (`texture.rs`), 5-6-5 or 4-4-4-4 as
-//! 3dfx's ICD kept them, with the mipmap levels the program gives;
-//! vertices from glBegin and glEnd and from vertex arrays go through
-//! Direct3D's pipeline on the processor (`ddraw::d3d::pipeline`), with
-//! OpenGL's clip space z of -w to w taken to Direct3D's 0 to w.
+//! as fields of its own that the HAL puts on the card; the color mask
+//! is also Direct3D 8's write mask, for a card that writes some
+//! channels of a color and not others. Textures are DirectDraw texture
+//! surfaces (`texture.rs`), 5-6-5 or 4-4-4-4 as 3dfx's ICD kept them,
+//! with the mipmap levels the program gives; vertices from glBegin and
+//! glEnd and from vertex arrays go through Direct3D's pipeline on the
+//! processor (`ddraw::d3d::pipeline`), with OpenGL's clip space z of -w
+//! to w taken to Direct3D's 0 to w.
 //!
 //! Every OpenGL 1.1 function is exported, since programs ask for all of
 //! them with GetProcAddress (Quake III's QGL does). Those that aren't
@@ -38,18 +42,22 @@
 //! GL_EXT_compiled_vertex_array, GL_EXT_texture_env_add and
 //! WGL_EXT_swap_control.
 //!
-//! On a machine with a Voodoo2 beside the display adapter, the DLL is
-//! 3dfx's Voodoo2 OpenGL driver (3DFXVGL.DLL), which games of the time
-//! loaded themselves or had in their own folder as OPENGL32.DLL: a
-//! context's DirectDraw object is the card's, full screen, and its
-//! color and depth buffers are the card's back (or front) buffer and
-//! auxiliary buffer, the screen's top left the window's client area
-//! (`wgl.rs`). SwapBuffers swaps the card's buffers.
+//! On a machine with a Voodoo2 beside a display adapter that has no
+//! ICD of its own (one that is neither a Banshee, a Voodoo3 nor a
+//! ToadForce), the DLL is 3dfx's Voodoo2 OpenGL driver (3DFXVGL.DLL),
+//! which games of the time loaded themselves or had in their own folder
+//! as OPENGL32.DLL: a context's DirectDraw object is the card's, full
+//! screen, and its color and depth buffers are the card's back (or
+//! front) buffer and auxiliary buffer, the screen's top left the
+//! window's client area (`wgl.rs`). SwapBuffers swaps the card's
+//! buffers. Beside one of those display adapters, OpenGL draws on the
+//! display adapter, as Windows' OPENGL32.DLL used the ICD of the
+//! display's driver.
 //!
-//! On a machine with neither card there is no ICD: the DLL loads, but
-//! there are no pixel formats and wglCreateContext fails, as on a
-//! machine with Windows' own OPENGL32.DLL and a card without an OpenGL
-//! driver of its own.
+//! On a machine with none of these cards there is no ICD: the DLL
+//! loads, but there are no pixel formats and wglCreateContext fails, as
+//! on a machine with Windows' own OPENGL32.DLL and a card without an
+//! OpenGL driver of its own.
 //!
 //! The pixel formats and wglChoosePixelFormat follow Mesa 6.2's 3dfx
 //! driver (src/mesa/drivers/glide/fxwgl.c), which is under the MIT

@@ -575,14 +575,13 @@ fn render_value(d: &Device, def: &Def, setup: &Setup, depth: Option<Format>) -> 
         RS_ALPHAREF | RS_STENCILREF => d.state(def.id) & 0xFF,
         // OpenGL's depth bias is in steps of a 16-bit depth buffer.
         RS_ZBIAS => (d.state(def.id) as i64 + d.depth_bias as i64).clamp(0, 16) as u32,
-        // The device writes all of a color or none of it (`color_off`,
-        // which OpenGL's color mask sets). Its render states have no
-        // write mask: Direct3D 7 has no such state, and what draws
-        // through a device of version 8 (OpenGL, Direct3D 8) doesn't
-        // set that one in it. The same goes for the blend operation.
-        RS_COLORWRITEENABLE if d.color_off => 0,
+        // Direct3D 7 has neither state. A device of version 8 has both:
+        // Direct3D 8 sets them, and OpenGL puts its color mask, a
+        // channel at a time, and the blend operation it always has
+        // there before each draw.
+        RS_COLORWRITEENABLE if d.version == 8 => d.state(def.id) & 0xF,
         RS_COLORWRITEENABLE => 0xF,
-        RS_BLENDOP => 1,
+        RS_BLENDOP if d.version != 8 => 1,
         RS_PIXEL_CENTRE => d.gl_pixel_centres as u32,
         // Table fog goes by w when the projection gives a w that is
         // the distance from the eye, as Direct3D decides it.

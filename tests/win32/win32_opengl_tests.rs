@@ -1,15 +1,15 @@
 //! The built-in Windows' OpenGL (OPENGL32.DLL): Win32 programs that set
-//! a pixel format on a window's DC, make a context on the Voodoo3, draw
-//! with glBegin and glEnd and with vertex arrays (shaded, textured,
-//! depth tested), read the pixels back with glReadPixels and swap the
-//! buffers with GDI's SwapBuffers; one that draws full screen on a
-//! Voodoo2 beside the VGA; and one on a machine without a 3dfx card,
-//! which loads the DLL but has no pixel format; and GLU32.DLL's
-//! mipmaps, matrices and texts on top of it. The programs are PE
-//! files made with rust-dos-pe's builder, their code assembled with
-//! iced, as in win32_d3d_tests.rs. Each leaves its results in its data
-//! and spins, and the test looks at them while the program is still
-//! there.
+//! a pixel format on a window's DC, make a context on the Voodoo3 (and
+//! some of them on a ToadForce), draw with glBegin and glEnd and with
+//! vertex arrays (shaded, textured, depth tested), read the pixels back
+//! with glReadPixels and swap the buffers with GDI's SwapBuffers; one
+//! that draws full screen on a Voodoo2 beside the VGA; and one on a
+//! machine without a 3dfx card, which loads the DLL but has no pixel
+//! format; and GLU32.DLL's mipmaps, matrices and texts on top of it.
+//! The programs are PE files made with rust-dos-pe's builder, their
+//! code assembled with iced, as in win32_d3d_tests.rs. Each leaves its
+//! results in its data and spins, and the test looks at them while the
+//! program is still there.
 
 use iced_x86::code_asm::*;
 use rust_dos::cpu::{Cpu, HostConsole};
@@ -85,6 +85,7 @@ const OPENGL32: &[&str] = &[
     "glPopAttrib",
     "glScalef",
     "glNormalPointer",
+    "glColorMask",
 ];
 const GLU32: &[&str] = &[
     "gluBuild2DMipmaps",
@@ -144,6 +145,7 @@ const PUSH_ATTRIB: usize = GL + 42;
 const POP_ATTRIB: usize = GL + 43;
 const SCALEF: usize = GL + 44;
 const NORMAL_POINTER: usize = GL + 45;
+const COLOR_MASK: usize = GL + 46;
 const GLU: usize = GL + OPENGL32.len();
 const BUILD_2D_MIPMAPS: usize = GLU;
 const ORTHO_2D: usize = GLU + 1;
@@ -203,20 +205,28 @@ fn machine(test: &str, voodoo3: bool, program: Vec<u8>) -> Cpu {
 /// shell as T.EXE, and the 3dfx card `card`: a Voodoo3 is the display
 /// adapter, a Voodoo2 a card beside the VGA.
 fn machine_with(test: &str, card: Option<Board>, program: Vec<u8>) -> Cpu {
+    let adapter = (card == Some(Board::Voodoo3)).then_some(Adapter::Voodoo3);
+    boot(test, adapter, card, program)
+}
+
+/// A machine with the built-in Windows on, `program` loaded from the
+/// shell as T.EXE, `adapter` as its display adapter (the VGA when
+/// None), and the 3dfx card `voodoo`.
+fn boot(test: &str, adapter: Option<Adapter>, voodoo: Option<Board>, program: Vec<u8>) -> Cpu {
     let base = PathBuf::from("target/test_win32_opengl").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
     fs::write(base.join("T.EXE"), program).unwrap();
     let mut cpu = Cpu::new(base);
-    if card == Some(Board::Voodoo3) {
+    if let Some(adapter) = adapter {
         let setup = VideoSetup {
-            adapter: Adapter::Voodoo3,
+            adapter,
             mono_monitor: false,
         };
         rust_dos::video::bios::install(&mut cpu.bus, setup);
     }
-    if card.is_some() {
-        cpu.bus.configure_voodoo(card);
+    if voodoo.is_some() {
+        cpu.bus.configure_voodoo(voodoo);
     }
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
@@ -235,33 +245,26 @@ enum Draws {
 /// A machine with the built-in Windows on, `program` loaded from the
 /// shell as T.EXE, and `card` as its display adapter.
 fn machine_on(test: &str, card: Draws, program: Vec<u8>) -> Cpu {
-    if card == Draws::Voodoo3 {
-        return machine(test, true, program);
+    match card {
+        Draws::Voodoo3 => machine(test, true, program),
+        Draws::ToadForce => boot(
+            &format!("{test}_toadforce"),
+            Some(Adapter::ToadForce),
+            None,
+            program,
+        ),
     }
-    let base = PathBuf::from("target/test_win32_opengl").join(format!("{test}_toadforce"));
-    let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).unwrap();
-    fs::write(base.join("T.EXE"), program).unwrap();
-    let mut cpu = Cpu::new(base);
-    let setup = VideoSetup {
-        adapter: Adapter::ToadForce,
-        mono_monitor: false,
-    };
-    rust_dos::video::bios::install(&mut cpu.bus, setup);
-    cpu.bus.win32.enabled = true;
-    cpu.host_console = Some(HostConsole::default());
-    cpu.load_shell();
-    assert!(cpu.load_executable("T.EXE", None));
-    cpu
 }
 
-/// The ToadForce took every command its drivers gave it.
-fn card_rejected_nothing(cpu: &Cpu) {
-    if let Some(card) = cpu.bus.toadforce.as_ref() {
-        let counts = card.counts();
-        assert_eq!(counts.rejected, 0);
-        assert!(counts.primitives > 0, "{counts:?}");
+/// On a ToadForce, the card drew and took every command its drivers
+/// gave it.
+fn card_drew(cpu: &Cpu, card: Draws) {
+    if card != Draws::ToadForce {
+        return;
     }
+    let counts = cpu.bus.toadforce.as_ref().expect("a ToadForce").counts();
+    assert_eq!(counts.rejected, 0, "{counts:?}");
+    assert!(counts.primitives > 0, "{counts:?}");
 }
 
 /// What the program printed.
@@ -567,7 +570,7 @@ fn shaded_triangle(card: Draws) {
         assert_eq!(peek_string(&cpu, r[6]), "Rust-DOS");
         assert_eq!(peek_string(&cpu, r[7]), "ToadForce/64 MB");
     }
-    card_rejected_nothing(&cpu);
+    card_drew(&cpu, card);
     let extensions = peek_string(&cpu, r[8]);
     assert!(extensions.contains("GL_ARB_multitexture"));
     // As 3dfx's Voodoo3 ICD has it; Myth II 1.8.3 needs it of OpenGL 1.1.
@@ -577,6 +580,36 @@ fn shaded_triangle(card: Draws) {
     assert_eq!(r[19], 1, "SwapBuffers");
     assert_eq!(r[20], 0, "glGetError");
     assert_eq!(pixel(&cpu, data, 4, 4), [255, 0, 0]);
+    assert_eq!(pixel(&cpu, data, 60, 60), [0, 0, 255]);
+}
+
+#[test]
+fn the_color_mask_on_a_toadforce_writes_the_channels_it_lets_through() {
+    let (exe, data) = program(&data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let blue = [Arg::F(0.0), Arg::F(0.0), Arg::F(1.0), Arg::F(1.0)];
+        c.api(a, l, CLEAR_COLOR, &blue)?;
+        c.api(a, l, CLEAR, &[Arg::I(GL_COLOR_BUFFER_BIT)])?;
+        // White with only red let through over the bottom left half,
+        // then green with nothing let through over the top right half.
+        let red_only = [Arg::I(1), Arg::I(0), Arg::I(0), Arg::I(1)];
+        c.api(a, l, COLOR_MASK, &red_only)?;
+        triangle(a, l, &mut c, [1.0, 1.0, 1.0], BOTTOM_LEFT)?;
+        c.api(a, l, COLOR_MASK, &[Arg::I(0); 4])?;
+        triangle(a, l, &mut c, [0.0, 1.0, 0.0], TOP_RIGHT)?;
+        read_back(a, l, &mut c)?;
+        finish(a, l)
+    });
+    let mut cpu = machine_on("color_mask", Draws::ToadForce, exe);
+    run_until_done(&mut cpu, data);
+    card_drew(&cpu, Draws::ToadForce);
+    // Six results of `start`, two of the clear, a mask and a
+    // triangle's six twice, glReadPixels and SwapBuffers.
+    let error = peek(&cpu, data + RESULTS + 4 * (6 + 2 + 2 * 7 + 2));
+    assert_eq!(error, 0, "glGetError");
+    // Red written over the blue, which stays.
+    assert_eq!(pixel(&cpu, data, 4, 4), [255, 0, 255]);
     assert_eq!(pixel(&cpu, data, 60, 60), [0, 0, 255]);
 }
 
@@ -1028,7 +1061,7 @@ fn textured_depth_tested_quad(card: Draws) {
     });
     let mut cpu = machine_on("arrays", card, exe);
     run_until_done(&mut cpu, data);
-    card_rejected_nothing(&cpu);
+    card_drew(&cpu, card);
     let error = peek(&cpu, data + RESULTS + 4 * 30);
     assert_eq!(error, 0, "glGetError");
     // Green in the top right quarter, over the red; red below it in
@@ -1225,7 +1258,7 @@ fn lightmapped_wall(card: Draws) {
     });
     let mut cpu = machine_on("multitexture", card, exe);
     run_until_done(&mut cpu, data);
-    card_rejected_nothing(&cpu);
+    card_drew(&cpu, card);
     let error = peek(&cpu, data + RESULTS + 4 * 25);
     assert_eq!(error, 0, "glGetError");
     // Green by the lightmap's half.
