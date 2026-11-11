@@ -919,8 +919,12 @@ DLLs are the emulator's.
   formats, state, draws, clears), with the Voodoo's implementation
   (`hal/voodoo.rs`) and the ToadForce's (`hal/toadforce.rs`) behind it.
   The ToadForce HAL lists the level's formats and turns state and draws
-  into card commands; it offers the T&L HAL device with phase 3. The
-  16-bit shadows of 32-bit targets (`d3d/shadow.rs`) aren't used on it.
+  into card commands. A draw of vertices that aren't in screen space
+  goes to the card with the device's matrices, lights and material, and
+  the card transforms and lights it; the pipeline keeps blended
+  vertices and the draws whose clip status a program reads back. The
+  HAL offers the T&L HAL device with phase 3. The 16-bit shadows of
+  32-bit targets (`d3d/shadow.rs`) aren't used on it.
   A texture surface in video memory in one of the card's formats is
   sampled where it is. The HAL copies into card memory only what the
   card can't read there: textures in system memory, palettized ones,

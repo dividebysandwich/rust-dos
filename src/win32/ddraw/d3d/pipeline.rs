@@ -717,6 +717,8 @@ struct EyeLight {
     position: [f32; 3],
     /// For a directional or parallel point light: toward the light.
     toward: [f32; 3],
+    /// The way a spot light points.
+    axis: [f32; 3],
 }
 
 /// Run `input`, of `layout`, through transform, lighting and fog.
@@ -747,6 +749,7 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
                         light: *light,
                         position,
                         toward,
+                        axis: normalize(vector(light.direction, &setup.view)),
                     }
                 })
                 .collect()
@@ -1036,13 +1039,15 @@ fn light_vertex(
             }
         };
         let spot = if matches!(light.kind, LIGHT_SPOT | LIGHT_GLSPOT) {
-            let axis = normalize(vector(light.direction, &IDENTITY));
-            let rho = -dot(dir, axis);
+            let rho = -dot(dir, e.axis);
             let (inner, outer) = ((light.theta / 2.0).cos(), (light.phi / 2.0).cos());
-            if rho > inner {
-                1.0
-            } else if rho <= outer {
+            // Outside the outer cone first, as the card has it: a
+            // light whose inner cone is the wider one, which Direct3D
+            // doesn't define, then lights the same on both.
+            if rho <= outer {
                 0.0
+            } else if rho > inner {
+                1.0
             } else if inner > outer {
                 let f = (rho - outer) / (inner - outer);
                 if light.falloff == 1.0 {

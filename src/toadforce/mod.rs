@@ -125,6 +125,8 @@ pub struct Counts {
     /// points they drew.
     pub draws: u64,
     pub primitives: u64,
+    /// The draws whose vertices the card transformed and lit.
+    pub transformed: u64,
     pub rejected: u64,
 }
 
@@ -231,6 +233,7 @@ impl ToadForce {
                 "level1": counts.level1,
                 "draws": counts.draws,
                 "primitives": counts.primitives,
+                "transformed": counts.transformed,
                 "rejected": counts.rejected,
             },
         })
@@ -537,6 +540,7 @@ impl ToadForce {
                 let drawn = self.raster.draw(&mut self.level1, &draw, memory)?;
                 self.counts.level1 += 1;
                 self.counts.draws += 1;
+                self.counts.transformed += !draw.fvf.transformed as u64;
                 if let Some(drawn) = drawn {
                     self.counts.primitives += drawn.primitives;
                     fx.drawn.push(drawn.span);
