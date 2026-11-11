@@ -75,6 +75,8 @@ struct FakeHost {
     boot_view: Option<BootView>,
     synced: Vec<u8>,
     reinserted: Vec<u8>,
+    /// The program the almanac is asked about.
+    almanac: Option<crate::almanac::Program>,
 }
 
 impl FakeHost {
@@ -117,6 +119,7 @@ impl FakeHost {
             boot_view: None,
             synced: vec![],
             reinserted: vec![],
+            almanac: None,
         }
     }
 }
@@ -224,6 +227,10 @@ impl Host for FakeHost {
         self.variants.push((id.to_string(), variant.map(str::to_string), tool));
         self.running = true;
         Ok(format!("Starting {}", id))
+    }
+
+    fn almanac_program(&mut self) -> Option<crate::almanac::Program> {
+        self.almanac.clone()
     }
 
     fn create_game(&mut self, game: &NewGame, _settings: &Settings) -> Result<String, String> {
@@ -2770,4 +2777,51 @@ fn crowded_pages_still_show_esc() {
         assert!(keys.contains(&UiKey::Esc), "{:?}: {:?}", page, keys);
         assert!(keys.contains(&UiKey::Tab), "{:?}: {:?}", page, keys);
     }
+}
+
+#[test]
+fn the_almanac_report_says_what_the_profile_says_of_the_game() {
+    use crate::almanac::{About, Program};
+    use UiKey::*;
+    let key = "0f8fad5b-d9cb-469f-a165-70867728950e".to_string();
+    let mut host = FakeHost::new();
+    // No name, so that no search goes out.
+    host.almanac = Some(Program {
+        about: Some(About {
+            year: Some(1991),
+            publisher: Some("Apogee".into()),
+            notes: None,
+            key: Some(key.clone()),
+        }),
+        ..Program::default()
+    });
+    let mut ui = opened(&host);
+    ui.open_almanac(true, &mut host);
+    // Search, Rating, then Year, Publisher and Notes: typing goes to the
+    // field the cursor is on, not to the name.
+    keys(&mut ui, &mut host, &[Down, Down, Down, Down]);
+    ui.text("Needs  EMS ", &mut host);
+    keys(&mut ui, &mut host, &[Up, Up, End, Backspace]);
+    ui.text("2", &mut host);
+    let about = ui.almanac.as_ref().unwrap().about();
+    let expected = About {
+        year: Some(1992),
+        publisher: Some("Apogee".into()),
+        notes: Some("Needs EMS".into()),
+        key: Some(key),
+    };
+    assert_eq!(about, Ok(expected));
+    // Enter goes on to the next field.
+    keys(&mut ui, &mut host, &[Enter]);
+    ui.text(" Software", &mut host);
+    let about = ui.almanac.as_ref().unwrap().about().unwrap();
+    assert_eq!(about.publisher.as_deref(), Some("Apogee Software"));
+    // A year that isn't one is refused.
+    keys(
+        &mut ui,
+        &mut host,
+        &[Up, End, Backspace, Backspace, Backspace, Backspace],
+    );
+    ui.text("93", &mut host);
+    assert!(ui.almanac.as_ref().unwrap().about().is_err());
 }

@@ -814,6 +814,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_profile_keeps_what_the_report_says_of_its_game() {
+        let old = "[game]\nname=Keen\nnotes=Old notes\noverlay=true\n\n[autoexec]\nKEEN4E\n";
+        let about = About {
+            year: Some(1991),
+            publisher: Some("Apogee".into()),
+            notes: None,
+            key: None,
+        };
+        let text = about.into_profile(old);
+        let kept = About::of_profile(&text);
+        assert_eq!(
+            (kept.year, kept.publisher.as_deref()),
+            (Some(1991), Some("Apogee"))
+        );
+        // Notes taken out of the report are taken out of the profile.
+        assert_eq!(kept.notes, None);
+        assert!(!text.contains("notes="), "{}", text);
+        // It gets a UUID, which stays as it is the next time.
+        let key = kept.key.clone().expect("the profile gets a UUID");
+        assert!(crate::games::valid_uuid(&key));
+        let again = About {
+            notes: Some("Needs EMS".into()),
+            ..kept
+        }
+        .into_profile(&text);
+        assert_eq!(About::of_profile(&again).key, Some(key));
+        assert_eq!(About::of_profile(&again).notes.as_deref(), Some("Needs EMS"));
+        assert!(again.ends_with("\n[autoexec]\nKEEN4E\n"), "{}", again);
+    }
+
+    #[test]
     fn programs_are_filed_by_platform() {
         let mut pe = vec![0u8; 0x48];
         pe[..2].copy_from_slice(b"MZ");

@@ -23,8 +23,9 @@ pub(super) const ASKS: bool = cfg!(all(feature = "sdl", not(target_arch = "wasm3
 /// What a question to the almanac answered.
 enum Answer {
     Candidates(Result<Vec<Candidate>, String>),
-    /// A report sent: what the almanac made of it, and the game's name.
-    Reported(Result<Reported, String>, String),
+    /// A report sent: what the almanac made of it, the game's name, and
+    /// why the game's profile couldn't keep what the report said of it.
+    Reported(Result<Reported, String>, String, Option<String>),
 }
 
 /// What the report says of the game, besides its settings.
@@ -174,19 +175,23 @@ impl ConfigUi {
                 view.scroll = 0;
             }
             Answer::Candidates(Err(e)) => view.note = Some((e, true)),
-            Answer::Reported(Ok(Reported { id, replaced: true }), name) => {
-                view.note = Some((
-                    format!("Thank you! Your report #{} on {} is updated", id, name),
-                    false,
-                ));
+            Answer::Reported(result, name, unkept) => {
+                let (text, failed) = match result {
+                    Ok(Reported { id, replaced: true }) => (
+                        format!("Thank you! Your report #{} on {} is updated", id, name),
+                        false,
+                    ),
+                    Ok(Reported { id, .. }) => (
+                        format!("Thank you! Report #{} on {} is in the almanac", id, name),
+                        false,
+                    ),
+                    Err(e) => (e, true),
+                };
+                view.note = Some(match unkept {
+                    Some(why) => (format!("{}. {}", text, why), true),
+                    None => (text, failed),
+                });
             }
-            Answer::Reported(Ok(Reported { id, .. }), name) => {
-                view.note = Some((
-                    format!("Thank you! Report #{} on {} is in the almanac", id, name),
-                    false,
-                ));
-            }
-            Answer::Reported(Err(e), _) => view.note = Some((e, true)),
         }
     }
 
@@ -331,12 +336,19 @@ impl ConfigUi {
                 return;
             }
         };
-        let about = match host.almanac_save_about(&about) {
-            Ok(Some(saved)) => saved,
-            Ok(None) => about,
+        // The report doesn't wait on the profile: one that can't be
+        // written (a read-only games folder, say) lets it go all the same,
+        // with the key the profile had, and the note says why it didn't
+        // keep what the report says.
+        let (about, unkept) = match host.almanac_save_about(&about) {
+            Ok(Some(saved)) => (saved, None),
+            Ok(None) => (about, None),
             Err(e) => {
-                view.note = Some((format!("The game's profile can't keep it: {}", e), true));
-                return;
+                let why = format!(
+                    "The game's profile can't keep the year, publisher and notes: {}",
+                    e
+                );
+                (about, Some(why))
             }
         };
         if let Some(program) = &mut view.program {
@@ -361,7 +373,7 @@ impl ConfigUi {
                     &settings,
                     &about,
                 );
-                let _ = done.send(Answer::Reported(result, name));
+                let _ = done.send(Answer::Reported(result, name, unkept));
             });
         match spawned {
             Ok(_) => view.asking = Some(answer),
@@ -548,22 +560,8 @@ impl AlmanacView {
 
     /// What the report says of the game: the fields', and the profile's
     /// key. An error if the year isn't one.
-    fn about(&self) -> Result<About, String> {
-        let text = |field: &TextField| {
-            let t = field
-                .text()
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            (!t.is_empty()).then_some(t)
-        };
-        let year = match text(&self.year) {
-            Some(y) => match y.parse::<i32>() {
-                Ok(y) if (1970..=2100).contains(&y) => Some(y),
-                _ => return Err(format!("The year '{}' isn't a year such as 1993", y)),
-            },
-            None => None,
-        };
+    pub(super) fn about(&self) -> Result<About, String> {
+        let year = crate::games::parse_year(&self.year.text())?;
         let key = self
             .program
             .as_ref()
@@ -571,8 +569,8 @@ impl AlmanacView {
             .and_then(|a| a.key.clone());
         Ok(About {
             year,
-            publisher: text(&self.publisher),
-            notes: text(&self.notes),
+            publisher: crate::games::one_line(&self.publisher.text()),
+            notes: crate::games::one_line(&self.notes.text()),
             key,
         })
     }
@@ -647,7 +645,8 @@ fn about(view: &AlmanacView, line: &Line) -> String {
                     "Its profile keeps it, and a report from it replaces the one it sent before."
                 }
                 Some(_) => {
-                    "Its profile keeps it, and gets a UUID: a report from it replaces the one it sent before."
+                    "Its profile keeps it, and gets a UUID: a report from it replaces the one \
+                     it sent before."
                 }
                 None => "No game profile plays: it goes with this report only.",
             };

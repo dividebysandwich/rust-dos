@@ -543,11 +543,9 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "name" if !value.is_empty() => config.game_name = Some(value.to_string()),
                         "name" => warn("the game's name is empty".to_string()),
                         "year" if value.is_empty() => {}
-                        "year" => match value.parse::<i32>() {
-                            Ok(year) if (1970..=2100).contains(&year) => {
-                                config.game_year = Some(year)
-                            }
-                            _ => warn(format!("invalid year '{}' (such as 1993)", value)),
+                        "year" => match crate::games::parse_year(value) {
+                            Ok(year) => config.game_year = year,
+                            Err(_) => warn(format!("invalid year '{}' (such as 1993)", value)),
                         },
                         "publisher" if !value.is_empty() => {
                             config.game_publisher = Some(value.to_string())

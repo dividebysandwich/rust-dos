@@ -107,10 +107,7 @@ pub fn new_uuid() -> Option<String> {
 /// The profile `text` with a `uuid=` of its own in `[game]`, if it has
 /// none yet: a new one (`new_uuid`).
 pub fn with_uuid(text: &str) -> String {
-    if config::parse(text, Path::new("/"), None)
-        .game_uuid
-        .is_some()
-    {
+    if game_value(text, "uuid").is_some_and(|v| valid_uuid(&v)) {
         return text.to_string();
     }
     match new_uuid() {
@@ -119,20 +116,36 @@ pub fn with_uuid(text: &str) -> String {
     }
 }
 
+/// `[game]`'s `year` as typed: None if nothing is, an error if it isn't a
+/// year from 1970 to 2100. The profile, the new game dialog and the
+/// almanac's report dialog all take it so.
+pub fn parse_year(text: &str) -> Result<Option<i32>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    match text.parse::<i32>() {
+        Ok(year) if (1970..=2100).contains(&year) => Ok(Some(year)),
+        _ => Err(format!("The year '{}' isn't a year such as 1993", text)),
+    }
+}
+
+/// `text` as `[game]`'s `publisher` and `notes` keep it: on one line, each
+/// run of white space a single space, or None if it is empty.
+pub fn one_line(text: &str) -> Option<String> {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!line.is_empty()).then_some(line)
+}
+
 /// The `[game]` lines of what the almanac is told of a game: `year=`,
 /// `publisher=` and `notes=`, those given.
 fn about_lines(year: &str, publisher: &str, notes: &str) -> Result<String, String> {
     let mut text = String::new();
-    let year = year.trim();
-    if !year.is_empty() {
-        match year.parse::<i32>() {
-            Ok(y) if (1970..=2100).contains(&y) => text.push_str(&format!("year={}\n", y)),
-            _ => return Err(format!("The year '{}' isn't a year such as 1993", year)),
-        }
+    if let Some(year) = parse_year(year)? {
+        text.push_str(&format!("year={}\n", year));
     }
     for (key, value) in [("publisher", publisher), ("notes", notes)] {
-        let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
-        if !value.is_empty() {
+        if let Some(value) = one_line(value) {
             text.push_str(&format!("{}={}\n", key, value));
         }
     }
