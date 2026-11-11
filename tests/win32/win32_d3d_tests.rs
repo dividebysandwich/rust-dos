@@ -1150,6 +1150,16 @@ const FRONT: u32 = 0x994;
 const KEY: u32 = 0x998;
 const SCENE: u32 = 0xA00;
 
+/// A `Step::Cube`'s data: where the six DDSCAPS2, the faces' texels and
+/// a face's interface are after its DDSURFACEDESC2, and its bytes.
+const CUBE_CAPS: u32 = 124;
+const CUBE_TEXELS: u32 = CUBE_CAPS + 6 * 16;
+const CUBE_FACE: u32 = CUBE_TEXELS + 6 * 32;
+const CUBE_BYTES: u32 = CUBE_FACE + 4;
+const DDSCAPS2_CUBEMAP: u32 = 0x200;
+const DDSCAPS2_CUBEMAP_POSITIVEX: u32 = 0x400;
+const DDSCAPS2_CUBEMAP_ALLFACES: u32 = 0xFC00;
+
 const DDSD_PIXELFORMAT: u32 = 0x1000;
 const DDSCAPS_TEXTURE: u32 = 0x1000;
 const DDSCAPS_ZBUFFER: u32 = 0x2_0000;
@@ -1306,6 +1316,9 @@ enum Step {
     Stage(u32, u32),
     /// SetTexture of the scene's texture on a stage (Direct3D 7).
     Texture(u32),
+    /// A cube map of 4x4 565 faces, each of one colour (+x, -x, +y, -y,
+    /// +z, -z), made and put on stage 0 (Direct3D 7).
+    Cube([u16; 6]),
     /// SetColorKey of the texture: its source blit key (Direct3D 7).
     /// A scene has one key: every Key step sets the last one's.
     Key(u32),
@@ -1490,6 +1503,27 @@ fn scene_program_with(scene: &Scene, bpp: u32, checked: &mut Vec<u32>) -> (Vec<u
             }
             at += 116;
         }
+        if let Step::Cube(faces) = step {
+            // The cube map's DDSURFACEDESC2, the DDSCAPS2 that finds
+            // each face, each face's texels, and a face's interface.
+            draws.push(at);
+            let desc = d[TEX_DESC as usize..TEX_DESC as usize + 124].to_vec();
+            put(&mut d, at, &desc);
+            put32(&mut d, at + 0x08, 4);
+            put32(&mut d, at + 0x0C, 4);
+            put32(&mut d, at + 0x68, DDSCAPS_TEXTURE | DDSCAPS_COMPLEX);
+            put32(&mut d, at + 0x6C, DDSCAPS2_CUBEMAP | DDSCAPS2_CUBEMAP_ALLFACES);
+            for (face, colour) in faces.iter().enumerate() {
+                let face = face as u32;
+                let bit = DDSCAPS2_CUBEMAP_POSITIVEX << face;
+                put32(&mut d, at + CUBE_CAPS + 16 * face + 4, DDSCAPS2_CUBEMAP | bit);
+                for texel in 0..16 {
+                    let to = at + CUBE_TEXELS + 32 * face + 2 * texel;
+                    put(&mut d, to, &colour.to_le_bytes());
+                }
+            }
+            at += CUBE_BYTES;
+        }
         if let Step::Call(_, _, words) | Step::World(_, words, _) = step {
             draws.push(at);
             for word in words {
@@ -1666,6 +1700,33 @@ fn scene_program_with(scene: &Scene, bpp: u32, checked: &mut Vec<u32>) -> (Vec<u
                 }
                 Step::Texture(stage) => {
                     let args = [Arg::I(*stage), Arg::Val(TEXTURE)];
+                    c.com(a, l, DEVICE, DEV7_SET_TEXTURE, &args)?;
+                }
+                Step::Cube(_) => {
+                    let at = *draws.next().unwrap();
+                    let face_at = at + CUBE_FACE;
+                    let args = [Arg::At(at), Arg::At(TEXTURE), Arg::I(0)];
+                    c.com(a, l, DD, DD_CREATE_SURFACE, &args)?;
+                    for face in 0..6 {
+                        // The root is the first face, and has the others.
+                        let object = if face == 0 {
+                            TEXTURE
+                        } else {
+                            let args = [Arg::At(at + CUBE_CAPS + 16 * face), Arg::At(face_at)];
+                            c.com(a, l, TEXTURE, SURF_GET_ATTACHED_SURFACE, &args)?;
+                            face_at
+                        };
+                        let args = [
+                            Arg::I(0),
+                            Arg::At(TEX_LOCK_DESC),
+                            Arg::I(DDLOCK_WAIT),
+                            Arg::I(0),
+                        ];
+                        c.com(a, l, object, SURF_LOCK, &args)?;
+                        copy(a, l, at + CUBE_TEXELS + 32 * face, TEX_LOCK_DESC + 0x24, 32)?;
+                        c.com(a, l, object, SURF_UNLOCK, &[Arg::I(0)])?;
+                    }
+                    let args = [Arg::I(0), Arg::Val(TEXTURE)];
                     c.com(a, l, DEVICE, DEV7_SET_TEXTURE, &args)?;
                 }
                 Step::Key(_) => {
@@ -4055,6 +4116,71 @@ fn a_toadforce_draws_with_four_textures_each_at_its_own_coordinates() {
         assert_rgb(&shot, 16, 16, [255, 0, 0], 8);
         // Past the quad.
         assert_rgb(&shot, 48, 16, [0, 0, 0], 0);
+    }
+}
+
+/// A quad over the target's top left quarter with a cube map of six
+/// colours, sampled in the direction `direction` at every vertex: of
+/// transformed vertices, or of positions the device's identity matrices
+/// leave where they are.
+fn cube_scene(transformed: bool, direction: [f32; 3]) -> Scene {
+    let corners: [[f32; 2]; 6] = [
+        [0.0, 0.0],
+        [1.0, 0.0],
+        [0.0, 1.0],
+        [1.0, 0.0],
+        [1.0, 1.0],
+        [0.0, 1.0],
+    ];
+    let mut words = Vec::new();
+    for [x, y] in corners {
+        match transformed {
+            true => words.extend(bits(&[x * 32.0, y * 32.0, 0.5, 1.0])),
+            false => words.extend(bits(&[x - 1.0, 1.0 - y, 0.5])),
+        }
+        words.extend(bits(&direction));
+    }
+    let position = if transformed { D3DFVF_XYZRHW } else { D3DFVF_XYZ };
+    toadforce_scene(vec![
+        Step::State(RS_LIGHTING, 0),
+        Step::State(RS_CULLMODE, 1),
+        Step::Cube(CUBE_COLOURS.map(|(colour, _)| colour)),
+        Step::Stage(TSS_COLOROP, TOP_SELECTARG1),
+        // D3DFVF_TEX1 with D3DFVF_TEXCOORDSIZE3(0).
+        Step::World(position | 0x100 | 1 << 16, words, 6),
+    ])
+}
+
+/// The faces' colours as 565 texels and as the pixels they draw: red,
+/// green, blue, yellow, cyan and magenta for +x, -x, +y, -y, +z, -z.
+const CUBE_COLOURS: [(u16, [u32; 3]); 6] = [
+    (0xF800, [255, 0, 0]),
+    (0x07E0, [0, 255, 0]),
+    (0x001F, [0, 0, 255]),
+    (0xFFE0, [255, 255, 0]),
+    (0x07FF, [0, 255, 255]),
+    (0xF81F, [255, 0, 255]),
+];
+
+#[test]
+fn a_toadforce_samples_a_cube_map_in_the_direction_of_its_coordinates() {
+    let directions = [
+        [1.0, 0.2, -0.3],
+        [-1.0, 0.2, 0.3],
+        [0.2, 1.0, 0.3],
+        [-0.2, -1.0, 0.3],
+        [0.2, -0.3, 1.0],
+        [0.2, 0.3, -1.0],
+    ];
+    for transformed in [true, false] {
+        // The pipeline's screen vertices, and the card's transform.
+        for (direction, (_, rgb)) in directions.into_iter().zip(CUBE_COLOURS) {
+            let scene = cube_scene(transformed, direction);
+            let p = draw_scene_toadforce("toadforce_cube", &scene);
+            assert_rgb(&p, 16, 16, rgb, 8);
+            // Past the quad.
+            assert_rgb(&p, 48, 16, [0, 0, 0], 0);
+        }
     }
 }
 
