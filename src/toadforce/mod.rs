@@ -32,6 +32,7 @@ pub mod display;
 pub mod format;
 pub mod level1;
 pub mod pci;
+pub mod raster;
 pub mod regs;
 
 use command::Command;

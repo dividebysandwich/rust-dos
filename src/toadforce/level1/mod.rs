@@ -47,6 +47,8 @@ pub const CLEAR_DEPTH: u32 = 1 << 1;
 pub const CLEAR_STENCIL: u32 = 1 << 2;
 /// `DEFINE_TEXTURE`'s flags: bit 0, a cube map of six faces.
 pub const TEXTURE_CUBE: u32 = 1 << 0;
+/// `DEFINE_TEXTURE`'s flags: bit 1, the texture has a colour key.
+pub const TEXTURE_KEYED: u32 = 1 << 1;
 /// `DEFINE_TEXTURE`'s palette argument and `SET_RENDER_TARGET`'s depth
 /// format when there is none.
 pub const NONE: u32 = 0xFFFF_FFFF;
@@ -194,6 +196,9 @@ pub struct Texture {
     pub cube: bool,
     /// The offset of the 256 words of a `P8` texture's palette.
     pub palette: Option<u32>,
+    /// The pixel value that is left out of a draw with
+    /// `COLORKEYENABLE` on.
+    pub key: Option<u32>,
     /// The offset and pitch of each image: level 0 first, and for a
     /// cube map the six faces of a level together.
     pub images: Vec<(u32, u32)>,
@@ -208,6 +213,7 @@ impl Default for Texture {
             levels: 0,
             cube: false,
             palette: None,
+            key: None,
             images: Vec::new(),
         }
     }
@@ -220,6 +226,7 @@ crate::state_fields!(Texture {
     levels,
     cube,
     palette,
+    key,
     images,
 });
 
@@ -290,6 +297,7 @@ pub enum Command<'a> {
         levels: u32,
         cube: bool,
         palette: Option<u32>,
+        key: Option<u32>,
         /// The offset and pitch of each image.
         images: &'a [u32],
     },
@@ -318,7 +326,7 @@ pub fn lengths(opcode: u16) -> Option<(usize, usize)> {
         SET_CLIP_PLANE => (6, 0),
         SET_RENDER_TARGET => (9, 0),
         CLEAR => (5, 4),
-        DEFINE_TEXTURE => (10, 2),
+        DEFINE_TEXTURE => (11, 2),
         FREE_TEXTURE => (2, 0),
         SET_TEXTURE => (3, 0),
         _ => return None,
@@ -537,12 +545,19 @@ pub fn decode(opcode: u16, words: &[u32], memory: u32) -> Result<Command<'_>, Er
                 .ok_or(Error::BadValue)?;
             let (width, height, levels, flags) = (words[3], words[4], words[5], words[6]);
             let side = |n: u32| n.is_power_of_two() && n <= caps::TEXTURE_MAX;
-            if !side(width) || !side(height) || flags & !TEXTURE_CUBE != 0 {
+            if !side(width) || !side(height) || flags & !(TEXTURE_CUBE | TEXTURE_KEYED) != 0 {
                 return Err(Error::BadValue);
             }
             let cube = flags & TEXTURE_CUBE != 0;
+            // A key is a pixel value, which a block has none of.
+            let key = match flags & TEXTURE_KEYED != 0 {
+                true if format.block_bytes().is_some() => return Err(Error::BadValue),
+                true if words[8] & !format.defined_bits() != 0 => return Err(Error::BadValue),
+                true => Some(words[8]),
+                false => None,
+            };
             let most = width.max(height).ilog2() + 1;
-            let images = &words[8..];
+            let images = &words[9..];
             let faces = if cube { 6 } else { 1 };
             if !(1..=most).contains(&levels)
                 || images.len() as u32 != 2 * levels * faces
@@ -581,6 +596,7 @@ pub fn decode(opcode: u16, words: &[u32], memory: u32) -> Result<Command<'_>, Er
                 levels,
                 cube,
                 palette,
+                key,
                 images,
             }
         }
@@ -739,6 +755,7 @@ impl Level1 {
                 levels,
                 cube,
                 palette,
+                key,
                 images,
             } => {
                 let texture = Texture {
@@ -748,6 +765,7 @@ impl Level1 {
                     levels,
                     cube,
                     palette,
+                    key,
                     images: images
                         .as_chunks::<2>()
                         .0
@@ -964,10 +982,11 @@ pub mod encode {
     }
 
     pub fn define_texture(out: &mut Vec<u32>, handle: u32, t: &Texture) {
-        out.push(header(DEFINE_TEXTURE, 8 + 2 * t.images.len()));
-        let flags = if t.cube { TEXTURE_CUBE } else { 0 };
-        out.extend([handle, t.format.code(), t.width, t.height, t.levels, flags]);
-        out.push(t.palette.unwrap_or(NONE));
+        out.push(header(DEFINE_TEXTURE, 9 + 2 * t.images.len()));
+        let cube = if t.cube { TEXTURE_CUBE } else { 0 };
+        let keyed = if t.key.is_some() { TEXTURE_KEYED } else { 0 };
+        out.extend([handle, t.format.code(), t.width, t.height, t.levels]);
+        out.extend([cube | keyed, t.palette.unwrap_or(NONE), t.key.unwrap_or(0)]);
         out.extend(t.images.iter().flat_map(|&(offset, pitch)| [offset, pitch]));
     }
 

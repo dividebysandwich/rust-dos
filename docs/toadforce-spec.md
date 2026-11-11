@@ -725,7 +725,7 @@ without a `D24S8` buffer with `BAD_STATE`. With no render target there
 is nothing to check a rectangle against, so only one with no pixel is
 rejected before that `BAD_STATE`.
 
-**`DEFINE_TEXTURE`, 0022h.** Length 10 or more, even.
+**`DEFINE_TEXTURE`, 0022h.** Length 11 or more, odd.
 
 | Word | Argument |
 |---|---|
@@ -733,10 +733,11 @@ rejected before that `BAD_STATE`.
 | 2 | format, one of `CAPS[9]` |
 | 3, 4 | width and height of level 0: powers of two up to `CAPS[10]` |
 | 5 | levels, 1 up to the count that ends at 1x1 |
-| 6 | flags: bit 0 a cube map |
+| 6 | flags: bit 0 a cube map, bit 1 the texture has a colour key |
 | 7 | offset of the palette, or FFFFFFFFh |
-| 8, 9 | offset and pitch of level 0's image |
-| 10 on | the same for each further image |
+| 8 | colour key |
+| 9, 10 | offset and pitch of level 0's image |
+| 11 on | the same for each further image |
 
 Tells the card where a texture is. The card copies nothing: it reads
 the images from card memory when a draw samples them, so what the
@@ -751,6 +752,9 @@ guest writes there afterwards shows in the next draw.
 - A `P8` texture has a palette, and no other format does. The palette
   is 256 words of card memory, each a colour in one word, alpha
   included.
+- The colour key is a pixel value of the texture's format, with no
+  bit set that the format doesn't define. Without flag bit 1 the word
+  is ignored. A texture in a block format has no colour key.
 - A handle already defined is defined anew, in the stages that have it
   too.
 
@@ -849,17 +853,22 @@ has the state. 256 to 258 are the card's own.
 | 256 | `PIXEL_CENTRE` | 0 or 1 | 0 |
 | 257 | `FLAT_VERTEX` | 0 or 1 | 0 |
 | 258 | `TWO_SIDED_LIGHTING` | 0 or 1 | 0 |
+| 259 | `FOG_BY_W` | 0 or 1 | 0 |
 
 - `ZENABLE` has no value for a W buffer.
 - `SHADEMODE` is 1 flat or 2 Gouraud.
-- `COLORKEYENABLE` (Direct3D 7's) leaves out the texels of a stage's
-  texture that equal its colour key.
+- `COLORKEYENABLE` (Direct3D 7's) drops a fragment where the texel
+  nearest its coordinate in a stage's texture, in the level the sample
+  reads first, has the texture's colour key. The texels around it are
+  filtered with their own colours, the key's included.
 - `PIXEL_CENTRE`: 0 puts pixel centres at whole coordinates (Direct3D
   7 and 8), 1 at half ones (OpenGL).
 - `FLAT_VERTEX`: the vertex that gives a flat-shaded primitive its
   colour, 0 the first (Direct3D), 1 the last (OpenGL).
 - `TWO_SIDED_LIGHTING`: 1 lights the back of a triangle with its
   normal turned round (OpenGL).
+- `FOG_BY_W`: the distance table fog goes by, 0 a fragment's depth
+  and 1 its w.
 
 #### Stage states
 
