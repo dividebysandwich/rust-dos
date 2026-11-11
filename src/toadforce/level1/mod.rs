@@ -10,6 +10,8 @@ pub mod states;
 
 use super::caps;
 use super::format::{Format, Rect, SURFACE_WORDS, Surface};
+use super::raster::pipeline::Lowered;
+use super::raster::vertex::Fvf;
 use super::regs::Error;
 use states::{RENDER_STATES, STAGE_STATES, STAGES};
 use std::collections::BTreeMap;
@@ -28,6 +30,17 @@ pub const CLEAR: u16 = 0x0021;
 pub const DEFINE_TEXTURE: u16 = 0x0022;
 pub const FREE_TEXTURE: u16 = 0x0023;
 pub const SET_TEXTURE: u16 = 0x0024;
+pub const DRAW: u16 = 0x0030;
+pub const DRAW_INDEXED: u16 = 0x0031;
+pub const DRAW_BUFFER: u16 = 0x0032;
+pub const DRAW_BUFFER_INDEXED: u16 = 0x0033;
+
+/// The most vertices a draw has: what a 16-bit index reaches.
+pub const DRAW_VERTICES: u32 = 0x1_0000;
+/// The most indices a draw has: three for each of 65535 triangles.
+pub const DRAW_INDICES: u32 = 3 * 0xFFFF;
+/// The longest step from a vertex to the next in a buffer, in bytes.
+pub const DRAW_STRIDE: u32 = 1024;
 
 /// The transforms `SET_TRANSFORM` names: four world matrices (the
 /// second to fourth for vertex blending), the view, the projection, and
@@ -47,6 +60,8 @@ pub const CLEAR_DEPTH: u32 = 1 << 1;
 pub const CLEAR_STENCIL: u32 = 1 << 2;
 /// `DEFINE_TEXTURE`'s flags: bit 0, a cube map of six faces.
 pub const TEXTURE_CUBE: u32 = 1 << 0;
+/// `DEFINE_TEXTURE`'s flags: bit 1, the texture has a colour key.
+pub const TEXTURE_KEYED: u32 = 1 << 1;
 /// `DEFINE_TEXTURE`'s palette argument and `SET_RENDER_TARGET`'s depth
 /// format when there is none.
 pub const NONE: u32 = 0xFFFF_FFFF;
@@ -194,6 +209,9 @@ pub struct Texture {
     pub cube: bool,
     /// The offset of the 256 words of a `P8` texture's palette.
     pub palette: Option<u32>,
+    /// The pixel value that is left out of a draw with
+    /// `COLORKEYENABLE` on.
+    pub key: Option<u32>,
     /// The offset and pitch of each image: level 0 first, and for a
     /// cube map the six faces of a level together.
     pub images: Vec<(u32, u32)>,
@@ -208,6 +226,7 @@ impl Default for Texture {
             levels: 0,
             cube: false,
             palette: None,
+            key: None,
             images: Vec::new(),
         }
     }
@@ -220,6 +239,7 @@ crate::state_fields!(Texture {
     levels,
     cube,
     palette,
+    key,
     images,
 });
 
@@ -290,6 +310,7 @@ pub enum Command<'a> {
         levels: u32,
         cube: bool,
         palette: Option<u32>,
+        key: Option<u32>,
         /// The offset and pitch of each image.
         images: &'a [u32],
     },
@@ -299,6 +320,62 @@ pub enum Command<'a> {
         /// 0 for none.
         handle: u32,
     },
+    Draw(Draw<'a>),
+}
+
+impl Command<'_> {
+    /// Whether the command only sets state, and neither reads nor
+    /// writes card memory.
+    pub fn sets_state(&self) -> bool {
+        !matches!(self, Command::Clear { .. } | Command::Draw(_))
+    }
+}
+
+/// Where a draw's vertices are.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Vertices<'a> {
+    /// In the command, one after the other.
+    Inline(&'a [u32]),
+    /// `count` of them in card memory from `offset`, `stride` bytes
+    /// from one to the next.
+    Buffer {
+        offset: u32,
+        stride: u32,
+        count: u32,
+    },
+}
+
+/// The order a draw takes its vertices in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Indices<'a> {
+    /// As they are.
+    None,
+    /// `count` 16-bit indices in the command, two to a word, the first
+    /// in the low half.
+    Inline { words: &'a [u32], count: u32 },
+    /// `count` 16-bit indices in card memory from `offset`.
+    Buffer { offset: u32, count: u32 },
+}
+
+/// A draw command.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Draw<'a> {
+    /// 1 points, 2 lines, 3 a line strip, 4 triangles, 5 a triangle
+    /// strip, 6 a triangle fan.
+    pub primitive: u32,
+    pub fvf: Fvf,
+    pub vertices: Vertices<'a>,
+    pub indices: Indices<'a>,
+}
+
+impl Draw<'_> {
+    /// The vertices the draw has.
+    pub fn vertex_count(&self) -> usize {
+        match self.vertices {
+            Vertices::Inline(words) => words.len() / self.fvf.words,
+            Vertices::Buffer { count, .. } => count as usize,
+        }
+    }
 }
 
 /// The lengths `opcode`'s commands can have, if level 1 adds the
@@ -318,9 +395,13 @@ pub fn lengths(opcode: u16) -> Option<(usize, usize)> {
         SET_CLIP_PLANE => (6, 0),
         SET_RENDER_TARGET => (9, 0),
         CLEAR => (5, 4),
-        DEFINE_TEXTURE => (10, 2),
+        DEFINE_TEXTURE => (11, 2),
         FREE_TEXTURE => (2, 0),
         SET_TEXTURE => (3, 0),
+        DRAW => (4, 1),
+        DRAW_INDEXED => (5, 1),
+        DRAW_BUFFER => (6, 0),
+        DRAW_BUFFER_INDEXED => (8, 1),
         _ => return None,
     })
 }
@@ -537,12 +618,19 @@ pub fn decode(opcode: u16, words: &[u32], memory: u32) -> Result<Command<'_>, Er
                 .ok_or(Error::BadValue)?;
             let (width, height, levels, flags) = (words[3], words[4], words[5], words[6]);
             let side = |n: u32| n.is_power_of_two() && n <= caps::TEXTURE_MAX;
-            if !side(width) || !side(height) || flags & !TEXTURE_CUBE != 0 {
+            if !side(width) || !side(height) || flags & !(TEXTURE_CUBE | TEXTURE_KEYED) != 0 {
                 return Err(Error::BadValue);
             }
             let cube = flags & TEXTURE_CUBE != 0;
+            // A key is a pixel value, which a block has none of.
+            let key = match flags & TEXTURE_KEYED != 0 {
+                true if format.block_bytes().is_some() => return Err(Error::BadValue),
+                true if words[8] & !format.defined_bits() != 0 => return Err(Error::BadValue),
+                true => Some(words[8]),
+                false => None,
+            };
             let most = width.max(height).ilog2() + 1;
-            let images = &words[8..];
+            let images = &words[9..];
             let faces = if cube { 6 } else { 1 };
             if !(1..=most).contains(&levels)
                 || images.len() as u32 != 2 * levels * faces
@@ -581,6 +669,7 @@ pub fn decode(opcode: u16, words: &[u32], memory: u32) -> Result<Command<'_>, Er
                 levels,
                 cube,
                 palette,
+                key,
                 images,
             }
         }
@@ -592,7 +681,114 @@ pub fn decode(opcode: u16, words: &[u32], memory: u32) -> Result<Command<'_>, Er
                 value => handle(value)?,
             },
         },
+        DRAW | DRAW_INDEXED | DRAW_BUFFER | DRAW_BUFFER_INDEXED => {
+            Command::Draw(draw(opcode, words, memory)?)
+        }
         _ => unreachable!("an opcode with lengths has a decoder"),
+    })
+}
+
+/// Decode one of the four draw commands. The layout and the counts say
+/// how long the command is, so they are checked before its length.
+fn draw(opcode: u16, words: &[u32], memory: u32) -> Result<Draw<'_>, Error> {
+    let primitive = words[1];
+    // Until the card transforms vertices itself, a draw's are in
+    // screen space.
+    let fvf = Fvf::parse(words[2])
+        .filter(|fvf| fvf.transformed)
+        .ok_or(Error::BadValue)?;
+    if !(1..=6).contains(&primitive) {
+        return Err(Error::BadValue);
+    }
+    let at_most = |value: u32, most: u32| {
+        if value <= most {
+            Ok(value)
+        } else {
+            Err(Error::BadValue)
+        }
+    };
+    let stride = |value: u32| {
+        if (fvf.words as u32 * 4..=DRAW_STRIDE).contains(&value) {
+            Ok(value)
+        } else {
+            Err(Error::BadValue)
+        }
+    };
+    // Vertices in a buffer: the last one ends inside card memory.
+    let buffer = |offset: u32, stride: u32, count: u32| {
+        let end = match count {
+            0 => offset as u64,
+            n => offset as u64 + (n as u64 - 1) * stride as u64 + fvf.words as u64 * 4,
+        };
+        if end > memory as u64 {
+            return Err(Error::BadRange);
+        }
+        Ok(Vertices::Buffer {
+            offset,
+            stride,
+            count,
+        })
+    };
+    let (vertices, indices) = match opcode {
+        DRAW => {
+            let count = at_most(words[3], DRAW_VERTICES)? as usize;
+            let body = &words[4..];
+            if body.len() != count * fvf.words {
+                return Err(Error::BadLength);
+            }
+            (Vertices::Inline(body), Indices::None)
+        }
+        DRAW_INDEXED => {
+            let vertex_words = at_most(words[3], DRAW_VERTICES)? as usize * fvf.words;
+            let count = at_most(words[4], DRAW_INDICES)?;
+            let body = &words[5..];
+            if body.len() != vertex_words + count.div_ceil(2) as usize {
+                return Err(Error::BadLength);
+            }
+            let (vertices, indices) = body.split_at(vertex_words);
+            (
+                Vertices::Inline(vertices),
+                Indices::Inline {
+                    words: indices,
+                    count,
+                },
+            )
+        }
+        DRAW_BUFFER => {
+            let stride = stride(words[3])?;
+            let count = at_most(words[5], DRAW_VERTICES)?;
+            (buffer(words[4], stride, count)?, Indices::None)
+        }
+        _ => {
+            let stride = stride(words[3])?;
+            let vertex_count = at_most(words[5], DRAW_VERTICES)?;
+            let count = at_most(words[7], DRAW_INDICES)?;
+            let body = &words[8..];
+            let indices = if words[6] == NONE {
+                if body.len() != count.div_ceil(2) as usize {
+                    return Err(Error::BadLength);
+                }
+                Indices::Inline { words: body, count }
+            } else {
+                if !body.is_empty() {
+                    return Err(Error::BadLength);
+                }
+                if words[6] as u64 + 2 * count as u64 > memory as u64 {
+                    return Err(Error::BadRange);
+                }
+                Indices::Buffer {
+                    offset: words[6],
+                    count,
+                }
+            };
+            (buffer(words[4], stride, vertex_count)?, indices)
+        }
+    };
+    Ok(Draw {
+        primitive,
+        fvf,
+        vertices,
+        indices,
     })
 }
 
@@ -616,6 +812,9 @@ pub struct Level1 {
     pub target: Option<Target>,
     /// The textures defined, by handle.
     pub textures: BTreeMap<u32, Texture>,
+    /// The state as the renderer draws with it, kept from one draw to
+    /// the next while no command changes the state.
+    pub lowered: Lowered,
     /// The handle of each stage's texture, 0 for none.
     pub bound: [u32; STAGES],
 }
@@ -634,6 +833,7 @@ crate::state_fields!(Level1 {
     target,
     textures,
     bound,
+    lowered,
 });
 
 impl Default for Level1 {
@@ -663,6 +863,7 @@ impl Default for Level1 {
             target: None,
             textures: BTreeMap::new(),
             bound: [0; STAGES],
+            lowered: Lowered::default(),
         }
     }
 }
@@ -696,7 +897,13 @@ impl Level1 {
         memory: &mut [u8],
         drawn: &mut Vec<(u32, u32)>,
     ) -> Result<(), Error> {
+        // `CLEAR` leaves the state as it is, and a frame starts with one.
+        if command.sets_state() {
+            self.lowered.forget();
+        }
         match command {
+            // The card hands a draw to its renderer.
+            Command::Draw(_) => {}
             Command::RenderState(pairs) => {
                 for pair in pairs.as_chunks::<2>().0 {
                     self.render[pair[0] as usize] = pair[1];
@@ -739,6 +946,7 @@ impl Level1 {
                 levels,
                 cube,
                 palette,
+                key,
                 images,
             } => {
                 let texture = Texture {
@@ -748,6 +956,7 @@ impl Level1 {
                     levels,
                     cube,
                     palette,
+                    key,
                     images: images
                         .as_chunks::<2>()
                         .0
@@ -964,15 +1173,87 @@ pub mod encode {
     }
 
     pub fn define_texture(out: &mut Vec<u32>, handle: u32, t: &Texture) {
-        out.push(header(DEFINE_TEXTURE, 8 + 2 * t.images.len()));
-        let flags = if t.cube { TEXTURE_CUBE } else { 0 };
-        out.extend([handle, t.format.code(), t.width, t.height, t.levels, flags]);
-        out.push(t.palette.unwrap_or(NONE));
+        out.push(header(DEFINE_TEXTURE, 9 + 2 * t.images.len()));
+        let cube = if t.cube { TEXTURE_CUBE } else { 0 };
+        let keyed = if t.key.is_some() { TEXTURE_KEYED } else { 0 };
+        out.extend([handle, t.format.code(), t.width, t.height, t.levels]);
+        out.extend([cube | keyed, t.palette.unwrap_or(NONE), t.key.unwrap_or(0)]);
         out.extend(t.images.iter().flat_map(|&(offset, pitch)| [offset, pitch]));
     }
 
     pub fn free_texture(out: &mut Vec<u32>, handle: u32) {
         out.extend([header(FREE_TEXTURE, 2), handle]);
+    }
+
+    /// `DRAW` of the vertices in `vertices`, laid out as `fvf`.
+    pub fn draw(out: &mut Vec<u32>, primitive: u32, fvf: u32, count: u32, vertices: &[u32]) {
+        out.extend([header(DRAW, 4 + vertices.len()), primitive, fvf, count]);
+        out.extend(vertices);
+    }
+
+    /// 16-bit indices, two to a word.
+    fn indices(out: &mut Vec<u32>, indices: &[u16]) {
+        out.extend(
+            indices
+                .chunks(2)
+                .map(|pair| pair[0] as u32 | (pair.get(1).copied().unwrap_or(0) as u32) << 16),
+        );
+    }
+
+    pub fn draw_indexed(
+        out: &mut Vec<u32>,
+        primitive: u32,
+        fvf: u32,
+        count: u32,
+        vertices: &[u32],
+        index: &[u16],
+    ) {
+        let len = 5 + vertices.len() + index.len().div_ceil(2);
+        out.extend([header(DRAW_INDEXED, len), primitive, fvf, count]);
+        out.push(index.len() as u32);
+        out.extend(vertices);
+        indices(out, index);
+    }
+
+    pub fn draw_buffer(
+        out: &mut Vec<u32>,
+        primitive: u32,
+        fvf: u32,
+        stride: u32,
+        offset: u32,
+        count: u32,
+    ) {
+        out.extend([
+            header(DRAW_BUFFER, 6),
+            primitive,
+            fvf,
+            stride,
+            offset,
+            count,
+        ]);
+    }
+
+    /// `DRAW_BUFFER_INDEXED` with its indices in card memory at
+    /// `Ok(offset)`, `count` of them, or in the command.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_buffer_indexed(
+        out: &mut Vec<u32>,
+        primitive: u32,
+        fvf: u32,
+        stride: u32,
+        offset: u32,
+        vertices: u32,
+        index: Result<(u32, u32), &[u16]>,
+    ) {
+        let inline = index.err().unwrap_or(&[]);
+        let len = 8 + inline.len().div_ceil(2);
+        out.extend([header(DRAW_BUFFER_INDEXED, len), primitive, fvf, stride]);
+        out.extend([offset, vertices]);
+        match index {
+            Ok((at, count)) => out.extend([at, count]),
+            Err(inline) => out.extend([NONE, inline.len() as u32]),
+        }
+        indices(out, inline);
     }
 
     pub fn set_texture(out: &mut Vec<u32>, stage: u32, handle: u32) {

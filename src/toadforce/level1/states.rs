@@ -186,9 +186,12 @@ pub const RS_FLAT_VERTEX: u32 = 257;
 /// The card's own: light the back of a triangle with its normal turned
 /// round (OpenGL's two-sided lighting).
 pub const RS_TWO_SIDED_LIGHTING: u32 = 258;
+/// The card's own: table fog goes by a fragment's w, 1, or by its
+/// depth, 0.
+pub const RS_FOG_BY_W: u32 = 259;
 
 /// The render states' numbers are below this.
-pub const RENDER_STATES: usize = 259;
+pub const RENDER_STATES: usize = 260;
 
 /// The render states of level 1.
 pub const RENDER: &[Def] = &[
@@ -279,6 +282,7 @@ pub const RENDER: &[Def] = &[
     def(RS_PIXEL_CENTRE, "PIXEL_CENTRE", Kind::Bool, 0),
     def(RS_FLAT_VERTEX, "FLAT_VERTEX", Kind::Bool, 0),
     def(RS_TWO_SIDED_LIGHTING, "TWO_SIDED_LIGHTING", Kind::Bool, 0),
+    def(RS_FOG_BY_W, "FOG_BY_W", Kind::Bool, 0),
 ];
 
 // Stage states.

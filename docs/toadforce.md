@@ -494,7 +494,7 @@ Surfaces:
 |---|---|
 | `SET_RENDER_TARGET` | colour offset, format, width, height, pitch; depth offset, format, pitch |
 | `CLEAR` | flags (colour, depth, stencil), colour, z, stencil, rectangles |
-| `DEFINE_TEXTURE` | handle, format, width, height, levels, flags (cube), palette offset, offset and pitch of each level and face |
+| `DEFINE_TEXTURE` | handle, format, width, height, levels, flags (cube, colour key), palette offset, colour key, offset and pitch of each level and face |
 | `FREE_TEXTURE` | handle |
 | `SET_TEXTURE` | stage, handle or none |
 | `FILL` | surface description, rectangle, value |
@@ -1032,7 +1032,11 @@ Each phase is one or a few pull requests that leave main working.
    `builtin-windows-architecture.md` ("Direct3D runs on the emulated
    3dfx card's HAL") reworded to the emulated card's HAL, whichever
    card it is. Proof: Zanzarah's Fairy Garden with DDS textures and no
-   game fix (#583, #606), and Grom past `screen.Init` (#645).
+   game fix (#583, #606), and Grom past `screen.Init` (#645). In
+   progress: the state, surface and draw commands are in
+   `src/toadforce/level1` and the renderer in `src/toadforce/raster`,
+   tested through the card's commands. The HAL is still to come, and
+   until it is there machines offer level 0 only.
 3. **Transform and lighting in the card.** Untransformed draws, lights,
    vertex blending, clip planes, texture coordinate generation, the T&L
    HAL device. Proof: Giants' terrain with bump mapping. Black & White

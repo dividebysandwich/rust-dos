@@ -105,6 +105,7 @@ fn texture(format: Format, levels: u32) -> Texture {
         levels,
         cube: false,
         palette: (format == Format::P8).then_some(0x30_0000),
+        key: None,
         images,
     }
 }
@@ -417,6 +418,10 @@ fn a_render_target_is_checked_before_it_is_taken() {
     assert_eq!(rig.card.level1.target, Some(good));
 }
 
+fn free_now(rig: &mut Rig, handle: u32) -> u32 {
+    rig.run(&words(|w| encode::free_texture(w, handle)))
+}
+
 #[test]
 fn textures_are_defined_bound_and_freed_by_handle() {
     let mut rig = Rig::new();
@@ -427,6 +432,13 @@ fn textures_are_defined_bound_and_freed_by_handle() {
     };
     assert_eq!(define(&mut rig, 1, &mips), 0);
     assert_eq!(define(&mut rig, 4095, &paletted), 0);
+    let keyed = Texture {
+        key: Some(0xF81F),
+        ..texture(Format::R5G6B5, 2)
+    };
+    assert_eq!(define(&mut rig, 7, &keyed), 0);
+    assert_eq!(rig.card.level1.textures[&7], keyed);
+    assert_eq!(free_now(&mut rig, 7), 0);
     assert_eq!(rig.card.level1.textures[&1], mips);
     assert_eq!(mips.level_size(6), (1, 1));
     // A row of 16 blocks, then 8 rows of them.
@@ -498,6 +510,16 @@ fn a_texture_the_card_cant_take_is_rejected() {
         rig.run(&words(|w| encode::define_texture(w, 0, &good))),
         BAD_VALUE
     );
+    // A colour key is a pixel value of the format, and blocks have
+    // none.
+    let wide_key = change(&|t| {
+        t.format = Format::R5G6B5;
+        t.key = Some(0x1_0000);
+    });
+    assert_eq!(define(&mut rig, &wide_key), BAD_VALUE);
+    let mut blocks = texture(Format::DXT3, 1);
+    blocks.key = Some(0);
+    assert_eq!(define(&mut rig, &blocks), BAD_VALUE);
     // Images and a palette past card memory.
     let past = change(&|t| t.images[2].0 = MEMORY - 16 * 4 * 8 + 4);
     assert_eq!(define(&mut rig, &past), BAD_RANGE);
@@ -558,9 +580,13 @@ fn the_decoder_knows_every_command_the_level_lists() {
         (SET_CLIP_PLANE, 6),
         (SET_RENDER_TARGET, 9),
         (CLEAR, 5),
-        (DEFINE_TEXTURE, 10),
+        (DEFINE_TEXTURE, 11),
         (FREE_TEXTURE, 2),
         (SET_TEXTURE, 3),
+        (DRAW, 4),
+        (DRAW_INDEXED, 5),
+        (DRAW_BUFFER, 6),
+        (DRAW_BUFFER_INDEXED, 8),
     ];
     for opcode in 0x0010..0x0100u16 {
         let least = listed.iter().find(|l| l.0 == opcode).map(|l| l.1);
