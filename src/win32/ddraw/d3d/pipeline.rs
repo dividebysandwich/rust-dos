@@ -460,7 +460,6 @@ pub struct Lighting {
     pub ambient: [f32; 4],
     pub specular: bool,
     pub local_viewer: bool,
-    pub normalize: bool,
     /// Whether the vertex's colors stand for the material's, and which
     /// for each of diffuse, specular, ambient and emissive (`MCS_`).
     pub color_vertex: bool,
@@ -569,8 +568,8 @@ pub struct Setup {
     /// (`Coord::of`); for ProcessVertices, set n of the vertices it
     /// writes (`Setup::for_sets`).
     pub coords: [Coord; 8],
-    /// D3DRENDERSTATE_NORMALIZENORMALS, for the normals that texture
-    /// coordinates are made from.
+    /// D3DRENDERSTATE_NORMALIZENORMALS, for the normals that light
+    /// vertices and that texture coordinates are made from.
     pub normalize: bool,
     /// Geometry blending, if the vertices are blended: `world` is then
     /// the first world matrix only for tweening.
@@ -598,6 +597,9 @@ impl Default for Setup {
         }
     }
 }
+
+/// D3DTTFF_PROJECTED in D3DTSS_TEXTURETRANSFORMFLAGS.
+pub const TTFF_PROJECTED: u32 = 0x100;
 
 /// Where the texture coordinates in a slot of a processed vertex come
 /// from: a stage's D3DTSS_TEXCOORDINDEX and
@@ -640,7 +642,7 @@ impl Coord {
             set: (index & 7) as usize,
             generate: index >> 16,
             matrix: (count > 0).then_some((*matrix, count)),
-            projected: (flags & 0x100 != 0).then_some(match count {
+            projected: (flags & TTFF_PROJECTED != 0).then_some(match count {
                 0 => 3,
                 count => count - 1,
             }),
@@ -654,56 +656,17 @@ impl Coord {
 
     /// The coordinates of the slot for the vertex `v` at `eye` in
     /// camera space with the normal `normal` there, as the ToadForce
-    /// makes them (`toadforce::raster::geometry`): the set or what is
-    /// generated, with a 1 after its last number, through the matrix.
-    /// Of what comes out the first `count` stay.
+    /// makes them (`toadforce::raster::geometry::coordinates`): the set
+    /// or what is generated, with a 1 after its last number, through
+    /// the matrix. Of what comes out the first `count` stay.
     fn make(&self, layout: &Layout, v: &Vertex, eye: [f32; 3], normal: [f32; 3]) -> [f32; 4] {
-        let (mut c, numbers) = match self.generate {
-            0 => {
-                let numbers = match self.set < layout.textures {
-                    true => layout.tex[self.set].1.clamp(1, 4) as usize,
-                    false => 0,
-                };
-                let mut c = [0.0; 4];
-                c[..numbers].copy_from_slice(&v.tex[self.set & 7][..numbers]);
-                (c, numbers)
-            }
-            1 => ([normal[0], normal[1], normal[2], 0.0], 3),
-            2 => ([eye[0], eye[1], eye[2], 0.0], 3),
-            generate => {
-                // The eye's line of sight to the vertex, thrown back by
-                // the surface.
-                let sight = normalize(eye);
-                let twice = 2.0 * dot(normal, sight);
-                let r: [f32; 3] = std::array::from_fn(|i| sight[i] - twice * normal[i]);
-                if generate == 3 {
-                    ([r[0], r[1], r[2], 0.0], 3)
-                } else {
-                    let z = 1.0 - r[2];
-                    let m = 2.0 * (r[0] * r[0] + r[1] * r[1] + z * z).sqrt();
-                    ([r[0] / m + 0.5, r[1] / m + 0.5, 0.0, 0.0], 2)
-                }
-            }
+        let numbers = match self.set < layout.textures {
+            true => layout.tex[self.set].1.clamp(1, 4) as usize,
+            false => 0,
         };
-        match &self.matrix {
-            Some((matrix, count)) => {
-                if numbers < 4 {
-                    c[numbers] = 1.0;
-                }
-                let c = transform(c, matrix);
-                std::array::from_fn(|i| match i {
-                    i if i < *count => c[i],
-                    3 => 1.0,
-                    _ => 0.0,
-                })
-            }
-            None => {
-                if numbers < 4 {
-                    c[3] = 1.0;
-                }
-                c
-            }
-        }
+        let matrix = self.matrix.as_ref().map(|(m, count)| (m, *count));
+        let set = (v.tex[self.set & 7], numbers);
+        crate::toadforce::raster::geometry::coordinates(self.generate, set, eye, normal, matrix)
     }
 
     /// A transformed vertex's coordinates for the slot: its set, with
@@ -885,7 +848,10 @@ struct EyeLight {
 /// Run `input`, of `layout`, through transform, lighting and fog.
 pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processed> {
     if layout.rhw {
-        return input.iter().map(|v| transformed(setup, v, layout)).collect();
+        return input
+            .iter()
+            .map(|v| transformed(setup, v, layout))
+            .collect();
     }
     let world_view = multiply(&setup.world, &setup.view);
     let all = multiply(&world_view, &setup.projection);
@@ -921,10 +887,9 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
         Some(Blend::Tween(f)) => Some(f),
         _ => None,
     };
+    // The normal is worked out for lighting and for the coordinates
+    // made from it.
     let lit = setup.lighting.is_some();
-    // The slots that are no more than a set are copied, and the normal
-    // is worked out for lighting and for the coordinates made from it.
-    let made = setup.coords.iter().any(Coord::made);
     let normal = lit || setup.coords.iter().any(|c| matches!(c.generate, 1 | 3 | 4));
     input
         .iter()
@@ -961,20 +926,12 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
                     (w, transform(p, &all), eye, n)
                 }
             };
+            let n = if setup.normalize { normalize(n) } else { n };
             let mut out = Processed {
                 clip,
+                tex: std::array::from_fn(|slot| setup.coords[slot].make(layout, v, eye, n)),
                 ..Processed::default()
             };
-            if made {
-                let n = if setup.normalize { normalize(n) } else { n };
-                for (slot, c) in out.tex.iter_mut().zip(&setup.coords) {
-                    *slot = c.make(layout, v, eye, n);
-                }
-            } else {
-                for (slot, c) in out.tex.iter_mut().zip(&setup.coords) {
-                    *slot = c.keep(layout, v);
-                }
-            }
             for (i, plane) in setup.planes.iter().take(6).enumerate() {
                 out.planes[i] = plane[0] * world[0]
                     + plane[1] * world[1]
@@ -983,7 +940,6 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
             }
             match &setup.lighting {
                 Some(l) => {
-                    let n = if l.normalize { normalize(n) } else { n };
                     let (d, s) = light_vertex(l, &lights, v, eye, n);
                     out.diffuse = d;
                     out.specular = s;
@@ -1887,7 +1843,14 @@ mod tests {
         // doubles what goes in and adds its fourth number, which is the
         // 1 after a position's three: a set of two has its 1 in the
         // third place, where this matrix adds nothing.
-        let double = sparse(&[(0, 2.0), (5, 2.0), (10, 2.0), (12, 1.0), (13, 1.0), (14, 1.0)]);
+        let double = sparse(&[
+            (0, 2.0),
+            (5, 2.0),
+            (10, 2.0),
+            (12, 1.0),
+            (13, 1.0),
+            (14, 1.0),
+        ]);
         let setup = Setup {
             view: sparse(&[(0, 1.0), (5, 1.0), (10, 1.0), (15, 1.0), (12, 1.0)]),
             coords: [
@@ -2486,13 +2449,12 @@ mod tests {
             direction: [-1.0, 0.0, 0.0],
             ..Light::default()
         };
-        let lighting = |normalize| Lighting {
+        let lighting = Lighting {
             lights: vec![light],
             material: Material {
                 diffuse: [1.0, 1.0, 1.0, 1.0],
                 ..Material::default()
             },
-            normalize,
             ..Lighting::default()
         };
         let turn = [
@@ -2503,10 +2465,10 @@ mod tests {
         v.normal = [1.0, 0.0, 0.0];
         v.weights[0] = 0.5;
         let layout = Layout::of_d3d8(0x6 | FVF_NORMAL).unwrap();
-        setup.lighting = Some(lighting(false));
+        setup.lighting = Some(lighting.clone());
         let out = process(&setup, &[v], &layout);
         assert!(near(out[0].diffuse[0], 0.5));
-        setup.lighting = Some(lighting(true));
+        setup.normalize = true;
         let out = process(&setup, &[v], &layout);
         assert!(near(out[0].diffuse[0], 0.5f32.sqrt()));
 
@@ -2515,7 +2477,7 @@ mod tests {
         let mut stretch = IDENTITY;
         stretch[0] = 2.0;
         let mut setup = blended(1, false, vec![stretch, IDENTITY]);
-        setup.lighting = Some(lighting(false));
+        setup.lighting = Some(lighting);
         v.weights[0] = 1.0;
         let out = process(&setup, &[v], &layout);
         assert!(near(out[0].diffuse[0], 0.5));

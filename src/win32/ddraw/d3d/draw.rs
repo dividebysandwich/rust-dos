@@ -232,7 +232,6 @@ fn setup_of(
             ambient: [a[0], a[1], a[2], 0.0],
             specular: s(RS_SPECULARENABLE) != 0,
             local_viewer: s(RS_LOCALVIEWER) != 0,
-            normalize: s(RS_NORMALIZENORMALS) != 0,
             color_vertex: s(RS_COLORVERTEX) != 0,
             sources: [
                 s(RS_DIFFUSEMATERIALSOURCE),

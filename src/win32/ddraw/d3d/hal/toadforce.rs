@@ -93,8 +93,14 @@ const VERTEX_WORDS: usize = 10;
 /// have four, the last what the card divides the others by.
 const FVF_PROJECTED: u32 = FVF | 2 << 16 | 2 << 18;
 const VERTEX_WORDS_PROJECTED: usize = 14;
-/// D3DTTFF_PROJECTED.
-const PROJECTED: u32 = 0x100;
+
+/// Whether the device `d`'s stage `stage` is one of the first, whose
+/// coordinates the pipeline gives a screen vertex, and they are
+/// projected.
+fn projected(d: &Device, stage: u32) -> bool {
+    stage < UNITS
+        && d.stage(stage, states::TSS_TEXTURETRANSFORMFLAGS) & pipeline::TTFF_PROJECTED != 0
+}
 /// The most vertices one `DRAW` holds, a command being 65535 words at
 /// the most: a multiple of two and of three.
 const DRAW_VERTICES: usize = 6000;
@@ -655,7 +661,9 @@ fn render_value(d: &Device, def: &Def, setup: &Setup, depth: Option<Format>, lit
         RS_AMBIENT => lighting.map_or(0, |l| pipeline::color(l.ambient)),
         RS_COLORVERTEX => lighting.is_some_and(|l| l.color_vertex) as u32,
         RS_LOCALVIEWER => lighting.is_some_and(|l| l.local_viewer) as u32,
-        RS_NORMALIZENORMALS => lighting.is_some_and(|l| l.normalize) as u32,
+        // For the normals that light vertices and that texture
+        // coordinates are made from, with lighting or without.
+        RS_NORMALIZENORMALS => setup.normalize as u32,
         RS_DIFFUSEMATERIALSOURCE => source(0),
         RS_SPECULARMATERIALSOURCE => source(1),
         RS_AMBIENTMATERIALSOURCE => source(2),
@@ -710,7 +718,7 @@ fn stage_value(d: &Device, at: u32, def: &Def, diffuse_alpha: bool, lit: bool) -
         // generated and through the texture matrix, and with them what
         // a projected stage divides them by, as the fourth.
         TSS_TEXCOORDINDEX => at.min(UNITS - 1),
-        TSS_TEXTURETRANSFORMFLAGS if at < UNITS && value & PROJECTED != 0 => PROJECTED | 4,
+        TSS_TEXTURETRANSFORMFLAGS if projected(d, at) => TRANSFORM_PROJECTED | 4,
         TSS_TEXTURETRANSFORMFLAGS => 0,
         TSS_ALPHAARG1 if at == 0 && diffuse_alpha => ARG_DIFFUSE,
         // The device has Direct3D 7's filter values: the two cubic
@@ -986,10 +994,7 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
             target.colour.format.bytes(),
         ),
         clip: [left, top, right.max(left), bottom.max(top)],
-        projected: !lit
-            && (0..UNITS).any(|stage| {
-                d.stage(stage, states::TSS_TEXTURETRANSFORMFLAGS) & PROJECTED != 0
-            }),
+        projected: !lit && (0..UNITS).any(|stage| projected(d, stage)),
     })
 }
 
@@ -1379,7 +1384,8 @@ impl Raster<'_> {
                 v.specular,
             ]);
             for set in &v.tex {
-                self.words.extend(set[..numbers].iter().map(|n| n.to_bits()));
+                self.words
+                    .extend(set[..numbers].iter().map(|n| n.to_bits()));
             }
         }
     }

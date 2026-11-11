@@ -329,7 +329,8 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     // The texture units' W apart from the card's when that is the fog,
     // and when a stage's coordinates are projected: its unit's W is
     // then what they are divided by, times the card's.
-    let projected = (0..2).any(|stage| d.stage(stage, TSS_TEXTURETRANSFORMFLAGS) & 0x100 != 0);
+    let projected = (0..2)
+        .any(|stage| d.stage(stage, TSS_TEXTURETRANSFORMFLAGS) & pipeline::TTFF_PROJECTED != 0);
     let hint = if fog_w || projected {
         api::STWHINT_W_DIFF_TMU0 | api::STWHINT_W_DIFF_TMU1
     } else {
