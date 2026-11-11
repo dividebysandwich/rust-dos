@@ -19,15 +19,22 @@
 //! own scale, is folded into the projection matrix the card gets, so
 //! the card's viewport is only the rectangle it draws into.
 //!
-//! The pipeline keeps the draws the card can't do as it would
-//! (`can_transform`): blended and tweened vertices, clip status and
-//! extents the program reads back, a depth range outside 0 to 1, and
-//! screen vertices, which need no transform. For those the pipeline
-//! has transformed, lit, clipped and culled the vertices, so the card
-//! gets screen vertices with the two sets of texture coordinates the
-//! pipeline works out, one for each of the first two stages. `Raster`
-//! collects them into `DRAW` commands and hands the card all of a
-//! batch's at once, which the card draws on its threads.
+//! The card also makes each stage's texture coordinates as the
+//! stage's `TEXCOORDINDEX` and `TEXTURETRANSFORMFLAGS` say, generated
+//! and through the texture matrix, which the pipeline doesn't do
+//! (#950).
+//!
+//! The pipeline keeps the draws the card can't take (`can_transform`):
+//! blended and tweened vertices, clip status and extents the program
+//! reads back, a depth range outside 0 to 1, lights and values the
+//! card's commands lack, and screen vertices, which need no transform.
+//! Execute buffers and ProcessVertices are the pipeline's too. For
+//! those the pipeline has transformed, lit, clipped and culled the
+//! vertices, so the card gets screen vertices with the two sets of
+//! texture coordinates the pipeline works out, one for each of the
+//! first two stages. `Raster` collects them into `DRAW` commands and
+//! hands the card all of a batch's at once, which the card draws on
+//! its threads.
 //!
 //! A texture surface in video memory whose format and size the card
 //! takes is sampled where it is: `DEFINE_TEXTURE` names the surface's
@@ -1535,6 +1542,99 @@ fn as_list(kind: u32, n: usize) -> (u32, usize, Vec<usize>) {
     }
 }
 
+/// The draw commands for `kind` primitives of `vertices` in the order
+/// `order`, whose places are all among them, or as they are: one
+/// command where it has at most `limit` words, and otherwise lists of
+/// the draw's primitives in commands of at most that.
+fn geometry_words(
+    layout: &Layout,
+    vertices: &[Vertex],
+    kind: u32,
+    order: Option<&[u32]>,
+    limit: usize,
+) -> Vec<u32> {
+    let count = vertices.len();
+    let (fvf, size) = card_layout(layout);
+    let mut words = Vec::new();
+    let mut all = Vec::new();
+    // The draw in one command, where it fits: all the vertices of a
+    // draw without indices, and of an indexed one those the indices
+    // name, each once, since a program often draws a few triangles
+    // of a large buffer.
+    let whole = match order {
+        None => {
+            let fits = count <= 0x1_0000 && 5 + count * size <= limit;
+            if fits {
+                for v in vertices {
+                    card_vertex(&mut all, layout, v);
+                }
+                encode::draw(&mut words, kind, fvf, count as u32, &all);
+            }
+            fits
+        }
+        Some(order) => {
+            let mut places = vec![u32::MAX; count];
+            let mut named = 0u32;
+            let mut indexed = Vec::with_capacity(order.len());
+            for &i in order {
+                let place = &mut places[i as usize];
+                if *place == u32::MAX {
+                    *place = named;
+                    named += 1;
+                    // Past what one command holds, the rest isn't
+                    // needed.
+                    if named as usize * size <= limit {
+                        card_vertex(&mut all, layout, &vertices[i as usize]);
+                    }
+                }
+                indexed.push(*place as u16);
+            }
+            let fits = named <= 0x1_0000 && 5 + all.len() + indexed.len().div_ceil(2)
+                <= limit
+                && all.len() == named as usize * size;
+            if fits {
+                encode::draw_indexed(&mut words, kind, fvf, named, &all, &indexed);
+            }
+            fits
+        }
+    };
+    if !whole {
+        // A list of its primitives, in commands of as many as fit,
+        // each with the vertices its primitives name.
+        let (kind, each, list) = as_list(kind, order.map_or(count, |o| o.len()));
+        let place = |i: usize| order.map_or(i, |o| o[i] as usize);
+        all.clear();
+        let mut indexed: Vec<u16> = Vec::new();
+        let mut places = std::collections::HashMap::new();
+        let flush = |words: &mut Vec<u32>, all: &mut Vec<u32>, indexed: &mut Vec<u16>| {
+            if !indexed.is_empty() {
+                let count = (all.len() / size) as u32;
+                encode::draw_indexed(words, kind, fvf, count, all, indexed);
+            }
+            all.clear();
+            indexed.clear();
+        };
+        for primitive in list.chunks_exact(each) {
+            let room = 5 + all.len() + each * size + (indexed.len() + each).div_ceil(2);
+            if room > limit {
+                flush(&mut words, &mut all, &mut indexed);
+                places.clear();
+            }
+            for &i in primitive {
+                let at = place(i);
+                let next = places.len() as u16;
+                let index = *places.entry(at).or_insert_with(|| {
+                    card_vertex(&mut all, layout, &vertices[at]);
+                    next
+                });
+                indexed.push(index);
+            }
+        }
+        flush(&mut words, &mut all, &mut indexed);
+    }
+    words
+}
+
 /// Draw `kind` primitives of `vertices`, which aren't in screen space,
 /// in the order `order` or as they are: the card transforms and lights
 /// them. False when the card can't draw the device, or can't as the
@@ -1558,56 +1658,7 @@ pub fn draw_geometry(
     if card.clip[0] == card.clip[2] || card.clip[1] == card.clip[3] {
         return true;
     }
-    let (fvf, size) = card_layout(layout);
-    let indices = order.map_or(0, |o| o.len());
-    let mut words = Vec::new();
-    if count <= 0x1_0000 && 5 + count * size + indices.div_ceil(2) <= COMMAND_WORDS {
-        // The draw as it is, in one command.
-        let mut all = Vec::with_capacity(count * size);
-        for v in vertices {
-            card_vertex(&mut all, layout, v);
-        }
-        match order {
-            Some(order) => {
-                let order: Vec<u16> = order.iter().map(|&i| i as u16).collect();
-                encode::draw_indexed(&mut words, kind, fvf, count as u32, &all, &order);
-            }
-            None => encode::draw(&mut words, kind, fvf, count as u32, &all),
-        }
-    } else {
-        // A list of its primitives, in commands of as many as fit,
-        // each with the vertices its primitives name.
-        let (kind, each, list) = as_list(kind, order.map_or(count, |o| o.len()));
-        let place = |i: usize| order.map_or(i, |o| o[i] as usize);
-        let mut all = Vec::new();
-        let mut indexed: Vec<u16> = Vec::new();
-        let mut places = std::collections::HashMap::new();
-        let flush = |words: &mut Vec<u32>, all: &mut Vec<u32>, indexed: &mut Vec<u16>| {
-            if !indexed.is_empty() {
-                let count = (all.len() / size) as u32;
-                encode::draw_indexed(words, kind, fvf, count, all, indexed);
-            }
-            all.clear();
-            indexed.clear();
-        };
-        for primitive in list.chunks_exact(each) {
-            let room = 5 + all.len() + each * size + (indexed.len() + each).div_ceil(2);
-            if room > COMMAND_WORDS {
-                flush(&mut words, &mut all, &mut indexed);
-                places.clear();
-            }
-            for &i in primitive {
-                let at = place(i);
-                let next = places.len() as u16;
-                let index = *places.entry(at).or_insert_with(|| {
-                    card_vertex(&mut all, layout, &vertices[at]);
-                    next
-                });
-                indexed.push(index);
-            }
-        }
-        flush(&mut words, &mut all, &mut indexed);
-    }
+    let words = geometry_words(layout, vertices, kind, order, COMMAND_WORDS);
     if !words.is_empty() {
         submit(cpu, &words);
         drew(cpu, &card);
@@ -1714,5 +1765,110 @@ pub fn clear(cpu: &mut Cpu, d: &Device, rects: &[[i32; 4]], fill: Fill) {
         && let Some(z) = super::super::device::depth_buffer(cpu, d)
     {
         surface::changed(cpu, z);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::toadforce::command;
+    use crate::toadforce::level1::{Command, Indices, Vertices};
+
+    /// The triangles the commands in `words` draw, each as its
+    /// vertices' x coordinates, which number the vertices here.
+    fn triangles(words: &[u32]) -> Vec<[u32; 3]> {
+        let mut found = Vec::new();
+        let mut at = 0;
+        while at < words.len() {
+            let len = command::length(words[at]);
+            let Ok(command::Command::Level1(Command::Draw(draw))) =
+                command::decode(&words[at..at + len], 1, 1 << 24)
+            else {
+                panic!("not a draw at word {at}");
+            };
+            at += len;
+            let Vertices::Inline(vertices) = draw.vertices else {
+                panic!("vertices in a buffer");
+            };
+            let x = |i: usize| f32::from_bits(vertices[i * draw.fvf.words]) as u32;
+            let order: Vec<usize> = match draw.indices {
+                Indices::None => (0..draw.vertex_count()).collect(),
+                Indices::Inline { words, count } => (0..count as usize)
+                    .map(|i| (words[i / 2] >> (16 * (i % 2)) & 0xFFFF) as usize)
+                    .collect(),
+                Indices::Buffer { .. } => panic!("indices in a buffer"),
+            };
+            // As the card takes a list, a strip and a fan
+            // (`raster::pieces`), turned so that the vertex a flat
+            // triangle gets its colour from is first.
+            let n = order.len();
+            let of = |t: [usize; 3]| t.map(|i| x(order[i]));
+            match draw.primitive {
+                4 => found.extend((0..n / 3).map(|i| of([3 * i, 3 * i + 1, 3 * i + 2]))),
+                5 => found.extend((2..n).map(|i| match i % 2 {
+                    0 => of([i - 2, i - 1, i]),
+                    _ => of([i - 2, i, i - 1]),
+                })),
+                6 => found.extend((2..n).map(|i| of([i - 1, i, 0]))),
+                kind => panic!("primitive {kind}"),
+            }
+        }
+        found
+    }
+
+    fn numbered(n: usize) -> Vec<Vertex> {
+        (0..n)
+            .map(|i| Vertex {
+                position: [i as f32, 0.0, 0.0, 1.0],
+                ..Vertex::default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_draw_too_large_for_one_command_goes_as_lists_of_the_same_triangles() {
+        let layout = Layout::of(0x002).unwrap();
+        let vertices = numbered(40);
+        let order: Vec<u32> = (0..60).map(|i| (i * 7 % 40) as u32).collect();
+        for kind in [
+            pipeline::TRIANGLELIST,
+            pipeline::TRIANGLESTRIP,
+            pipeline::TRIANGLEFAN,
+        ] {
+            for order in [None, Some(&order[..])] {
+                let whole = geometry_words(&layout, &vertices, kind, order, COMMAND_WORDS);
+                assert_eq!(command::length(whole[0]), whole.len(), "one command");
+                // A command of 30 words holds few triangles.
+                let split = geometry_words(&layout, &vertices, kind, order, 30);
+                assert!(command::framed(&split));
+                let mut at = 0;
+                let mut commands = 0;
+                while at < split.len() {
+                    assert!(command::length(split[at]) <= 30);
+                    at += command::length(split[at]);
+                    commands += 1;
+                }
+                assert!(commands > 3, "{commands} commands");
+                assert_eq!(triangles(&split), triangles(&whole), "kind {kind}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_indexed_draw_sends_the_vertices_its_indices_name() {
+        let layout = Layout::of(0x002).unwrap();
+        let vertices = numbered(1000);
+        let order = [998, 3, 500, 3, 500, 999];
+        let words = geometry_words(
+            &layout,
+            &vertices,
+            pipeline::TRIANGLELIST,
+            Some(&order),
+            COMMAND_WORDS,
+        );
+        // The header, the kind, the layout and the two counts, four
+        // vertices of three words and six indices in three.
+        assert_eq!(words.len(), 5 + 4 * 3 + 3);
+        assert_eq!(triangles(&words), [[998, 3, 500], [3, 500, 999]]);
     }
 }
