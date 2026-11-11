@@ -51,7 +51,12 @@ fn a_game_runs_its_commands_and_ends_at_the_prompt() {
     // The profile made in the settings window, with a slower CPU.
     let base = Settings::default();
     let current = Settings { cycles: CpuSpeed::Fixed(3000), ..base.clone() };
-    let new = NewGame { name: "The Game".into(), directory: "C:\\".into(), command: "GAME".into() };
+    let new = NewGame {
+        name: "The Game".into(),
+        directory: "C:\\".into(),
+        command: "GAME".into(),
+        ..NewGame::default()
+    };
     let text = games::profile_text(&new, &base, &current, &[], None).unwrap();
 
     let prepared = games::prepare("the-game", &base, &text, Path::new("/"), None).unwrap();
