@@ -7,7 +7,7 @@
 //! clipping).
 
 use super::hal::{self, Description, Offer};
-use super::{IID_HAL, write_dwords, write_f32};
+use super::{IID_HAL, IID_TNLHAL, write_dwords, write_f32};
 use crate::cpu::Cpu;
 
 /// The sizes of D3DDEVICEDESC: Direct3D 3's, 5's and 6's.
@@ -18,6 +18,15 @@ pub const DESC7: u32 = 236;
 
 pub const DESCRIPTION: &[u8] = b"Microsoft Direct3D Hardware acceleration through Direct3D HAL\0";
 pub const NAME: &[u8] = b"Direct3D HAL\0";
+
+/// The same of the T&L HAL device, which a card that transforms and
+/// lights vertices has too (Direct3D 7).
+pub const TNL_DESCRIPTION: &[u8] =
+    b"Microsoft Direct3D Hardware Transform and Lighting acceleration capable device\0";
+pub const TNL_NAME: &[u8] = b"Direct3D T&L HAL\0";
+
+/// D3DDEVCAPS_HWTRANSFORMANDLIGHT.
+const DEVCAPS_TNL: u32 = 0x1_0000;
 
 // D3DDEVICEDESC's flags.
 const D3DDD_COLORMODEL: u32 = 0x1;
@@ -163,11 +172,13 @@ pub fn write_desc(cpu: &mut Cpu, at: u32, size: u32, offer: Option<Offer>) {
 }
 
 /// Write D3DDEVICEDESC7 at `at` (the caller has probed it), as
-/// `offer`'s card has it.
-pub fn write_desc7(cpu: &mut Cpu, at: u32, offer: Offer) {
+/// `offer`'s card has it: its HAL device's, or with `tnl` its T&L
+/// HAL device's, which says the card transforms and lights and how
+/// many lights it has on at once.
+pub fn write_desc7(cpu: &mut Cpu, at: u32, offer: Offer, tnl: bool) {
     let d = hal::description(offer.kind);
     let mut words = vec![0u32; DESC7 as usize / 4];
-    words[0] = DEVCAPS;
+    words[0] = DEVCAPS | if tnl { DEVCAPS_TNL } else { 0 };
     for base in [1, 0x3C / 4] {
         words[base] = 56;
         words[base + 1..base + 14].copy_from_slice(&prim_caps(&d));
@@ -188,10 +199,14 @@ pub fn write_desc7(cpu: &mut Cpu, at: u32, offer: Offer) {
     words[0xB0 / 4] = offer.units;
     words[0xB4 / 4] = d.ops;
     words[0xB8 / 4] = stages(&d, offer);
-    words[0xBC / 4] = 0xFFFF_FFFF;
+    // The lights on at once: the card's where it lights, any number
+    // where the processor does.
+    let lights = hal::tnl_lights(offer.kind).filter(|_| tnl);
+    words[0xBC / 4] = lights.unwrap_or(0xFFFF_FFFF);
     write_dwords(cpu, at, &words);
     write_f32(cpu, at + 0xC0, 65536.0);
-    IID_HAL.write(cpu, at + 0xC4);
+    let guid = if tnl { IID_TNLHAL } else { IID_HAL };
+    guid.write(cpu, at + 0xC4);
     // Six clip planes of the user's, no vertex blending; the vertex
     // processing caps: texture generation, material sources, vertex
     // fog, directional and positional lights and the local viewer.
@@ -229,7 +244,7 @@ mod tests {
         cpu.bus.configure_voodoo(Some(Board::Voodoo3));
         assert!(crate::win32::glide::hw::banshee(&cpu));
 
-        write_desc7(&mut cpu, AT, voodoo3());
+        write_desc7(&mut cpu, AT, voodoo3(), false);
         assert_eq!(read(&mut cpu, 0x74), DDBD_16, "render target depths");
         assert_eq!(read(&mut cpu, 0x78), DDBD_16, "depth buffer depths");
 

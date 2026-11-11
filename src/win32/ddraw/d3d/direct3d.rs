@@ -10,7 +10,7 @@ use super::super::{
     V_MATERIAL2, V_MATERIAL3, V_VB1, V_VB7, V_VIEWPORT1, V_VIEWPORT2, V_VIEWPORT3, state,
 };
 use super::hal::{self, Offer};
-use super::{D3D_OK, D3dObject, IID_HAL, caps, is_device_guid, probe};
+use super::{D3D_OK, D3dObject, IID_HAL, IID_TNLHAL, caps, is_device_guid, probe};
 use crate::cpu::Cpu;
 use crate::win32::com::{self, CLASS_E_NOAGGREGATION, Guid};
 use crate::win32::task::{self, Next, Task};
@@ -154,14 +154,25 @@ pub fn enum_z_buffer_formats(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, device, callback, context] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (_, dd) = hr!(d3d_of(cpu, this));
+    let (vtable, dd) = hr!(d3d_of(cpu, this));
     let Some(guid) = Guid::read(cpu, device) else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let Some(offer) = super::hal::card(cpu, dd).filter(|_| guid == IID_HAL) else {
+    let version = d3d_version(vtable);
+    let Some(offer) =
+        super::hal::card(cpu, dd).filter(|offer| has_device(offer.kind, &guid, version))
+    else {
         return Some(DDERR_INVALIDPARAMS);
     };
     start(cpu, Z_FORMATS, callback, context, 0, offer)
+}
+
+/// Whether IDirect3D of `version` on a card of `kind` has the device
+/// `guid`: the HAL device, and from Direct3D 7 on the T&L HAL device
+/// on a card that transforms and lights. Direct3D 3 doesn't list that
+/// device, and neither makes one nor gives its depth formats.
+fn has_device(kind: hal::Kind, guid: &Guid, version: u32) -> bool {
+    *guid == IID_HAL || (*guid == IID_TNLHAL && version >= 7 && hal::transforms(kind))
 }
 
 /// The task's step: the next item to the callback, until the list ends
@@ -198,17 +209,25 @@ fn items(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let (callback, context) = (t.var(CALLBACK), t.var(CONTEXT));
     match t.var(KIND) {
         DEVICES | DEVICES7 => {
-            if next > 0 {
-                return Next::Done(D3D_OK);
-            }
-            cpu.bus.guest_write_bytes(s + STRINGS, caps::DESCRIPTION);
-            cpu.bus.guest_write_bytes(s + NAME, caps::NAME);
             let offer = Offer {
                 kind: hal::Kind::from_code(t.var(CARD)),
                 units: t.var(TMUS),
             };
+            // Direct3D 7 lists the T&L HAL device after the HAL one,
+            // on a card that has it.
+            let tnl = next == 1 && t.var(KIND) == DEVICES7 && hal::transforms(offer.kind);
+            if next > 0 && !tnl {
+                return Next::Done(D3D_OK);
+            }
+            let (description, name) = if tnl {
+                (caps::TNL_DESCRIPTION, caps::TNL_NAME)
+            } else {
+                (caps::DESCRIPTION, caps::NAME)
+            };
+            cpu.bus.guest_write_bytes(s + STRINGS, description);
+            cpu.bus.guest_write_bytes(s + NAME, name);
             if t.var(KIND) == DEVICES7 {
-                caps::write_desc7(cpu, s + HAL_DESC, offer);
+                caps::write_desc7(cpu, s + HAL_DESC, offer, tnl);
                 return Next::call(callback, &[s + STRINGS, s + NAME, s + HAL_DESC, context], 1);
             }
             IID_HAL.write(cpu, s);
@@ -370,8 +389,9 @@ pub fn find_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// CreateDevice(this, guid, surface, out[, outer]) of IDirect3D2, 3 and
-/// 7. A device GUID that isn't the HAL's, or the HAL's with no card to
-/// draw with, makes it fail as a device that can't be made.
+/// 7. A device GUID the card has no device for (`has_device`), or the
+/// HAL's with no card to draw with, makes it fail as a device that
+/// can't be made.
 pub fn create_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (this, guid, target, out) = (args[0], args[1], args[2], args[3]);
     let (vtable, dd) = hr!(d3d_of(cpu, this));
@@ -388,15 +408,18 @@ pub fn create_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if !is_device_guid(&guid) {
         return Some(DDERR_INVALIDPARAMS);
     }
-    if guid != IID_HAL {
+    if guid != IID_HAL
+        && !super::hal::card(cpu, dd).is_some_and(|o| has_device(o.kind, &guid, version))
+    {
         return Some(com::E_OUTOFMEMORY);
     }
+    let tnl = guid == IID_TNLHAL;
     let v = match version {
         2 => V_DEVICE2,
         3 => V_DEVICE3,
         _ => V_DEVICE7,
     };
-    Some(super::device::create(cpu, version, dd, target, v, out))
+    Some(super::device::create(cpu, version, dd, target, v, out, tnl))
 }
 
 /// A surface asked for a device by its GUID (QueryInterface): Direct3D
@@ -408,7 +431,7 @@ pub fn surface_device(cpu: &mut Cpu, id: u32, vtable: usize, iid: &Guid, out: u3
     }
     let dd = state(cpu).object(id).map_or(0, |o| o.owner);
     let target = super::super::iface(cpu, id, vtable);
-    super::device::create(cpu, 1, dd, target, V_DEVICE1, out)
+    super::device::create(cpu, 1, dd, target, V_DEVICE1, out, false)
 }
 
 /// CreateVertexBuffer(this, desc, out, flags[, outer]) of IDirect3D3 and

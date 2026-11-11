@@ -93,6 +93,9 @@ pub struct Device {
     pub version: u32,
     /// The DirectDraw object it is of.
     pub ddraw: u32,
+    /// It was made as the T&L HAL device (Direct3D 7), which its
+    /// description says.
+    pub tnl: bool,
     /// The render target, and the interface of it the device holds.
     pub target: u32,
     pub target_iface: u32,
@@ -207,7 +210,8 @@ crate::state_fields!(Device {
     recording,
     scissor,
     depth_bias,
-    color_off
+    color_off,
+    tnl
 } skip {
     gl_pixel_centres
 });
@@ -549,6 +553,7 @@ pub fn create(
     target_iface: u32,
     vtable: usize,
     out: u32,
+    tnl: bool,
 ) -> u32 {
     let Some((_, target)) = super::super::this(cpu, target_iface) else {
         return DDERR_INVALIDPARAMS;
@@ -561,6 +566,7 @@ pub fn create(
         return e;
     }
     let mut device = Device::new(version, dd, target, target_iface, tmus);
+    device.tnl = tnl;
     let (w, h, z) = {
         let z = z_buffer(cpu, target).is_some();
         let s = state(cpu).surface(target);
@@ -667,7 +673,8 @@ pub fn get_caps7(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     }
     let offer = offer_of(cpu, id);
-    caps::write_desc7(cpu, desc, offer);
+    let tnl = get(cpu, id).is_some_and(|d| d.tnl);
+    caps::write_desc7(cpu, desc, offer, tnl);
     Some(D3D_OK)
 }
 

@@ -88,6 +88,22 @@ pub fn card(cpu: &mut Cpu, dd: u32) -> Option<Offer> {
     })
 }
 
+/// The lights a card of `kind` has on at once where it transforms and
+/// lights vertices itself, which a card that does has Direct3D 7's T&L
+/// HAL device for, beside the HAL one. None on a card that doesn't.
+pub fn tnl_lights(kind: Kind) -> Option<u32> {
+    match kind {
+        Kind::Voodoo => None,
+        Kind::ToadForce => Some(toadforce::TNL_LIGHTS),
+    }
+}
+
+/// Whether a card of `kind` transforms and lights vertices itself, and
+/// so has Direct3D 7's T&L HAL device.
+pub fn transforms(kind: Kind) -> bool {
+    tnl_lights(kind).is_some()
+}
+
 /// The card that draws for the device `d`.
 pub fn kind_of(cpu: &mut Cpu, d: &Device) -> Kind {
     card(cpu, d.ddraw).map_or(Kind::Voodoo, |offer| offer.kind)

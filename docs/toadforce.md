@@ -618,10 +618,13 @@ Reasons for the values a game can see:
   on.
 
 The Direct3D devices offered on this card are the HAL and the T&L HAL.
-A game that picks the plain HAL gets transform and lighting on the
-processor, by the code that does it for the Voodoo3 today
-(`src/win32/ddraw/d3d/pipeline.rs`), and the card draws XYZRHW
-vertices, as Direct3D 7 worked on a GeForce.
+The T&L HAL's description has `D3DDEVCAPS_HWTRANSFORMANDLIGHT` and the
+card's 8 lights, and the two draw the same way. On a GeForce, Direct3D 7
+transformed and lit the plain HAL device's vertices on the processor and
+the card drew XYZRHW vertices. Here the card transforms and lights the
+untransformed vertices of either device, and the pipeline
+(`src/win32/ddraw/d3d/pipeline.rs`) those of the draws the card can't,
+with the same picture.
 
 OpenGL on level 1 is version 1.3 with these extensions, each of which
 NVIDIA's table lists for both the GeForce 256/2 and the GeForce3
@@ -922,13 +925,16 @@ DLLs are the emulator's.
   into card commands. A draw of vertices that aren't in screen space
   goes to the card with the device's matrices, lights and material, and
   the card transforms and lights it; the pipeline keeps blended
-  vertices and the draws whose clip status a program reads back. The
-  HAL offers the T&L HAL device with phase 3. The 16-bit shadows of
-  32-bit targets (`d3d/shadow.rs`) aren't used on it.
-  A texture surface in video memory in one of the card's formats is
-  sampled where it is. The HAL copies into card memory only what the
-  card can't read there: textures in system memory, palettized ones,
-  and sizes that are no power of two.
+  vertices and the draws whose clip status a program reads back.
+  Direct3D 7 lists the T&L HAL device beside the HAL one on the card,
+  and a program draws on either the same way: Giants picks the T&L HAL
+  and hands the card untransformed vertices, where on the HAL device
+  it has `ProcessVertices` transform them. The 16-bit shadows of 32-bit
+  targets (`d3d/shadow.rs`) aren't used on the card. A texture surface
+  in video memory in one of the card's formats is sampled where it is.
+  The HAL copies into card memory only what the card can't read there:
+  textures in system memory, palettized ones, and sizes that are no
+  power of two.
 - **Direct3D 8** (`d3d8/`) sits on the Direct3D 7 device today and
   keeps doing so, with `D3DCAPS8` filled from the level's table and
   hardware vertex processing offered for fixed-function draws.
@@ -1150,8 +1156,10 @@ Still to check:
 
 - Whether Giants' terrain shows z-fighting on plain Z with 24-bit
   depth, in phase 3.
-- What Giants asks of a T&L device, once the card offers one, and
-  what Black & White asks of any card, once it runs (#889).
+- What Giants' options screen offers on the T&L HAL device, which it
+  makes when the card lists one (bump and environment mapping were
+  unavailable on the HAL device), and what Black & White asks of any
+  card, once it runs (#889).
 - What Zanzarah does with DDS textures, and what Grom asks for past
   its initialisation, once the card gets them past #583 and #645.
 

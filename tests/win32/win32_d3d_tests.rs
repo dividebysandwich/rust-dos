@@ -1328,6 +1328,9 @@ enum Api {
     D3D6,
     /// Direct3D 7: IDirect3DDevice7.
     D3D7,
+    /// Direct3D 7 on the T&L HAL device, which a card that transforms
+    /// and lights has.
+    D3D7Tnl,
 }
 
 struct Scene {
@@ -1350,6 +1353,12 @@ struct Scene {
     steps: Vec<Step>,
 }
 
+/// IID_IDirect3DTnLHalDevice at `offset`.
+fn tnl_guid(data: &mut [u8], offset: u32) {
+    let d4 = [0xA4, 0x07, 0x00, 0xA0, 0xC9, 0x06, 0x29, 0xA8];
+    guid(data, offset, 0xF504_9E78, 0x4861, 0x11D2, d4);
+}
+
 /// A program drawing `scene`, which ends with the target locked.
 fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
     scene_program_in(scene, 16)
@@ -1365,7 +1374,10 @@ fn scene_program_in(scene: &Scene, bpp: u32) -> (Vec<u8>, u32) {
 /// scene's Clear and ViewportClear steps are.
 fn scene_program_with(scene: &Scene, bpp: u32, checked: &mut Vec<u32>) -> (Vec<u8>, u32) {
     let mut d = data();
-    let size = if scene.api == Api::D3D7 { 124 } else { 108 };
+    if scene.api == Api::D3D7Tnl {
+        tnl_guid(&mut d, IID_HAL);
+    }
+    let size = if scene.api != Api::D3D6 { 124 } else { 108 };
     let (zw, zh) = if let Some(board) = scene.card {
         let d1 = if board == Board::Voodoo2 {
             (0x472B_EA00, 0x40DF, 0x11D1)
@@ -1392,7 +1404,7 @@ fn scene_program_with(scene: &Scene, bpp: u32, checked: &mut Vec<u32>) -> (Vec<u
     put32(&mut d, LOCK_DESC, size);
     put32(&mut d, TEX_LOCK_DESC, 124);
     // D3DVIEWPORT7: all of the surface, depths 0 to 1; or D3DVIEWPORT2.
-    if scene.api == Api::D3D7 {
+    if scene.api != Api::D3D6 {
         put32(&mut d, VIEW + 8, 64);
         put32(&mut d, VIEW + 12, 64);
         put_f32s(&mut d, VIEW + 16, &[0.0, 1.0]);
@@ -1456,7 +1468,7 @@ fn scene_program_with(scene: &Scene, bpp: u32, checked: &mut Vec<u32>) -> (Vec<u
     let mut at = SCENE;
     for step in &scene.steps {
         if matches!(step, Step::Stage(..) | Step::Key(_)) {
-            assert!(scene.api == Api::D3D7, "a Direct3D 7 step");
+            assert!(scene.api != Api::D3D6, "a Direct3D 7 step");
         }
         if matches!(step, Step::ViewportClear(_)) {
             assert!(scene.api == Api::D3D6, "a Direct3D 6 step");
@@ -1495,7 +1507,7 @@ fn scene_program_with(scene: &Scene, bpp: u32, checked: &mut Vec<u32>) -> (Vec<u
         }
     }
     assert!(at <= RESULTS, "too many vertices");
-    let ex = scene.api == Api::D3D7;
+    let ex = scene.api != Api::D3D6;
     program(&[USER32, DDRAW], &d, |a, l| {
         let mut c = Calls { next: 0 };
         let add_on = scene.card.is_some_and(|b| b != Board::Voodoo3);
@@ -3841,6 +3853,123 @@ fn a_spot_light_points_where_the_view_matrix_turns_it() {
     // The pipeline's, for a Voodoo3.
     let p = draw_scene("voodoo3_spot", &spot_scene(false));
     assert_rgb(&p, 33, 30, [255, 255, 255], 12);
+}
+
+#[test]
+fn the_t_and_l_hal_device_draws_as_the_hal_device_does() {
+    let scene = |api| {
+        let facing = [[-1.0, 1.0, 0.5], [0.0, 1.0, 0.5], [-1.0, 0.0, 0.5]];
+        let light = light7(3, [0.0; 3], [0.0, 0.0, 1.0], [0.0; 2]);
+        let mut steps = lit_by(light, [1.0, 0.5, 0.25]);
+        steps.push(Step::World(
+            D3DFVF_XYZ | D3DFVF_NORMAL,
+            world_triangle(facing, Some([0.0, 0.0, -1.0]), None),
+            3,
+        ));
+        steps.push(Step::Draw(quad(32.0, 32.0, 64.0, 64.0, 0.5, 0xFF12_3456)));
+        Scene {
+            api,
+            ..toadforce_scene(steps)
+        }
+    };
+    let p = draw_scene32_toadforce("toadforce_tnl_device", &scene(Api::D3D7Tnl));
+    assert_eq!(p[5 * 64 + 5], 0xFF_8040);
+    assert_eq!(p[40 * 64 + 40], 0x12_3456);
+    // Every pixel is the HAL device's.
+    let hal = draw_scene32_toadforce("toadforce_hal_device", &scene(Api::D3D7));
+    assert!(p == hal, "the T&L HAL device's picture differs from the HAL's");
+}
+
+const D3D7_ENUM_DEVICES: u32 = 3;
+const DEV7_GET_CAPS: u32 = 3;
+/// Where the device's description is read to.
+const CAPS7: u32 = 0x600;
+
+/// A program that lists Direct3D 7's devices, makes the T&L HAL
+/// device and reads its description: its results, with the machine
+/// and the lines of the 3D trace.
+fn tnl_device_program(test: &str, toadforce: bool) -> (Cpu, u32, Vec<String>) {
+    let mut d = data();
+    target_desc(&mut d, DESC, 124, 64, 64);
+    tnl_guid(&mut d, IID_HAL);
+    let (exe, data) = program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        // The callback (description, name, device description,
+        // context), which goes on.
+        let mut after = a.create_label();
+        a.call(after)?;
+        a.mov(eax, 1)?;
+        a.ret_1(16)?;
+        a.set_label(&mut after)?;
+        a.pop(dword_ptr(l.at(ENUM_OK)))?;
+        start(a, l, &mut c, true, false)?;
+        let args = [Arg::At(IID_D3D7), Arg::At(D3D)];
+        c.com(a, l, DD, QUERY_INTERFACE, &args)?;
+        let args = [Arg::Val(ENUM_OK), Arg::I(0)];
+        c.com(a, l, D3D, D3D7_ENUM_DEVICES, &args)?;
+        let args = [Arg::At(DESC), Arg::At(TARGET), Arg::I(0)];
+        c.com(a, l, DD, DD_CREATE_SURFACE, &args)?;
+        let args = [Arg::At(IID_HAL), Arg::Val(TARGET), Arg::At(DEVICE)];
+        c.com(a, l, D3D, D3D7_CREATE_DEVICE, &args)?;
+        // The calls as far as CreateDevice. Without a device there
+        // is nothing to ask.
+        a.mov(dword_ptr(l.at(CALLS)), c.next)?;
+        let mut done = a.create_label();
+        a.test(eax, eax)?;
+        a.jnz(done)?;
+        c.com(a, l, DEVICE, DEV7_GET_CAPS, &[Arg::At(CAPS7)])?;
+        a.set_label(&mut done)?;
+        finish(a, l)
+    });
+    let mut cpu = if toadforce {
+        machine_toadforce(test, exe)
+    } else {
+        machine(test, exe)
+    };
+    let path = PathBuf::from("target/test_win32_d3d")
+        .join(test)
+        .join("t.trace");
+    rust_dos::win32::trace3d::start(&mut cpu, &path).unwrap();
+    run_until_done(&mut cpu, data);
+    rust_dos::win32::trace3d::flush(&mut cpu);
+    let (events, _) = read_trace(&path);
+    let devices = events
+        .into_iter()
+        .filter(|e| e.starts_with("DDRAW.EnumDevices item "))
+        .collect();
+    (cpu, data, devices)
+}
+
+#[test]
+fn a_toadforce_has_direct3d_7s_t_and_l_hal_device_beside_the_hal_one() {
+    const TNL: u32 = 0x1_0000;
+    let (cpu, data, devices) = tnl_device_program("tnl_device_toadforce", true);
+    // The HAL device, then the T&L HAL device, which alone says the
+    // card transforms and lights.
+    assert_eq!(devices.len(), 2, "{devices:#?}");
+    assert!(devices[0].contains("\"Direct3D HAL\""), "{devices:#?}");
+    assert!(devices[1].contains("\"Direct3D T&L HAL\""), "{devices:#?}");
+    let devcaps = |line: &str| {
+        let at = line.find("devcaps=0x").unwrap() + 10;
+        let hex: String = line[at..].chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+        u32::from_str_radix(&hex, 16).unwrap()
+    };
+    assert_eq!(devcaps(&devices[0]) & TNL, 0);
+    assert_eq!(devcaps(&devices[1]) & TNL, TNL);
+    let r = results(&cpu, data, peek(&cpu, data + CALLS) + 1);
+    assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+    // The device made says what it is: the capability, eight lights
+    // on at once and its GUID.
+    assert_eq!(peek(&cpu, data + CAPS7) & TNL, TNL);
+    assert_eq!(peek(&cpu, data + CAPS7 + 0xBC), 8);
+    assert_eq!(peek(&cpu, data + CAPS7 + 0xC4), 0xF504_9E78);
+
+    // A Voodoo3 has the HAL device alone, and makes no other.
+    let (cpu, data, devices) = tnl_device_program("tnl_device_voodoo3", false);
+    assert_eq!(devices.len(), 1, "{devices:#?}");
+    assert_eq!(devcaps(&devices[0]) & TNL, 0);
+    let r = results(&cpu, data, peek(&cpu, data + CALLS));
+    assert_eq!(r.last(), Some(&0x8007_000E), "results: {r:X?}");
 }
 
 #[test]
