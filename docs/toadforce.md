@@ -1063,7 +1063,11 @@ Each phase is one or a few pull requests that leave main working.
    vertex blending, clip planes, texture coordinate generation, the T&L
    HAL device. Proof: Giants' terrain with bump mapping. Black & White
    joins the proof once #889 lets it run on the built-in Windows, or
-   with the Windows 98 driver of phase 6.
+   with the Windows 98 driver of phase 6. In the card: a draw of
+   vertices that aren't in screen space goes through
+   `raster/geometry.rs` (transform, texture coordinates, fog),
+   `raster/light.rs` and `raster/clip.rs`, as "Transform and lighting"
+   in the specification's chapter 9 defines.
 4. **The OpenGL renderer.** Generated shaders, caches, GPU-owned
    targets, the disk cache. Proof: renderer agreement tests, and the
    phase 2 and 3 games at their full frame rate on it, measured against

@@ -692,11 +692,7 @@ pub fn decode(opcode: u16, words: &[u32], memory: u32) -> Result<Command<'_>, Er
 /// how long the command is, so they are checked before its length.
 fn draw(opcode: u16, words: &[u32], memory: u32) -> Result<Draw<'_>, Error> {
     let primitive = words[1];
-    // Until the card transforms vertices itself, a draw's are in
-    // screen space.
-    let fvf = Fvf::parse(words[2])
-        .filter(|fvf| fvf.transformed)
-        .ok_or(Error::BadValue)?;
+    let fvf = Fvf::parse(words[2]).ok_or(Error::BadValue)?;
     if !(1..=6).contains(&primitive) {
         return Err(Error::BadValue);
     }

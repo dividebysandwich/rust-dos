@@ -196,6 +196,22 @@ pub struct Shape {
     pub point_sprite: bool,
 }
 
+/// What a slot's coordinates are: where they come from, and the
+/// texture matrix they go through. Two stages with the same share a
+/// slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Coord {
+    /// The vertex's coordinate set.
+    pub set: u8,
+    /// `TEXCOORDINDEX`'s upper half: 0 for the set, or what the card
+    /// makes the coordinates from.
+    pub generate: u8,
+    /// How many coordinates the texture matrix gives, 0 for none.
+    pub count: u8,
+    /// The stage whose texture matrix it is, 0 without one.
+    pub stage: u8,
+}
+
 /// The largest number of coordinate sets a draw interpolates: one for
 /// each texture it samples.
 pub const SLOTS: usize = caps::TEXTURES_AT_ONCE as usize;
@@ -211,8 +227,12 @@ pub struct DrawState {
     pub clip: [i32; 4],
     /// Each stage's texture, where a step samples it.
     pub tex: [Option<Tex>; STAGES],
-    /// The coordinate set of each slot in use.
+    /// The coordinate set of each slot in use, which is all a vertex
+    /// in screen space gives a slot.
     pub sets: Vec<u8>,
+    /// What each slot's coordinates are for a vertex the card
+    /// transforms.
+    pub coords: Vec<Coord>,
     pub shape: Shape,
     /// Whether `Specular` is read.
     pub specular: bool,
@@ -406,7 +426,7 @@ pub fn lower(l: &Level1) -> Result<DrawState, Error> {
     let target = l.target.ok_or(Error::BadState)?;
     let mut steps = Vec::new();
     let mut texs: [Option<Tex>; STAGES] = Default::default();
-    let mut sets: Vec<u8> = Vec::new();
+    let mut coords: Vec<Coord> = Vec::new();
     let mut keyed_any = false;
     let mut bumped: Option<bool> = None;
     let mut stage_steps = Vec::new();
@@ -421,15 +441,22 @@ pub fn lower(l: &Level1) -> Result<DrawState, Error> {
         let texture = tex(l, stage);
         let mut sample = |steps: &mut Vec<Step>, bumped: Option<bool>| -> Result<(), Error> {
             let t = texture.clone().ok_or(Error::BadState)?;
-            let set = (l.stage(stage, TSS_TEXCOORDINDEX) & 0xFFFF) as u8;
-            let slot = match sets.iter().position(|&s| s == set) {
+            let index = l.stage(stage, TSS_TEXCOORDINDEX);
+            let flags = l.stage(stage, TSS_TEXTURETRANSFORMFLAGS);
+            let count = (flags & 0xFF) as u8;
+            let coord = Coord {
+                set: (index & 0xFFFF) as u8,
+                generate: (index >> 16) as u8,
+                count,
+                stage: if count > 0 { stage as u8 } else { 0 },
+            };
+            let slot = match coords.iter().position(|&c| c == coord) {
                 Some(slot) => slot,
                 None => {
-                    sets.push(set);
-                    sets.len() - 1
+                    coords.push(coord);
+                    coords.len() - 1
                 }
             };
-            let flags = l.stage(stage, TSS_TEXTURETRANSFORMFLAGS);
             let keyed = t.key.is_some();
             keyed_any |= keyed;
             steps.push(Step::Sample {
@@ -504,7 +531,7 @@ pub fn lower(l: &Level1) -> Result<DrawState, Error> {
             }
         }
     }
-    if sets.len() > SLOTS || texs.iter().flatten().count() > SLOTS {
+    if coords.len() > SLOTS || texs.iter().flatten().count() > SLOTS {
         return Err(Error::BadState);
     }
 
@@ -561,7 +588,7 @@ pub fn lower(l: &Level1) -> Result<DrawState, Error> {
         }
     } else {
         texs = Default::default();
-        sets.clear();
+        coords.clear();
     }
     if kills {
         steps.extend(depth);
@@ -665,7 +692,8 @@ pub fn lower(l: &Level1) -> Result<DrawState, Error> {
         target,
         clip,
         tex: texs,
-        sets,
+        sets: coords.iter().map(|c| c.set).collect(),
+        coords,
         shape: Shape {
             half_centre: on(RS_PIXEL_CENTRE),
             cull: l.state(RS_CULLMODE),

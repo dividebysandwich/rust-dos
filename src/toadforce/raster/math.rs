@@ -53,9 +53,73 @@ pub fn exp_neg(x: f32) -> f32 {
     (sum * scale) as f32
 }
 
+/// `x` to the power `y`, for `x` of 0 to 1 and `y` of 0 and above: what
+/// a specular highlight and a spot light's falloff raise a cosine to.
+/// 1 for a `y` of 0 or below, whatever `x` is; otherwise 0 for an `x`
+/// of 0 or below or none, and 1 for one of 1 and above.
+pub fn pow_unit(x: f32, y: f32) -> f32 {
+    if y.is_nan() || y <= 0.0 {
+        return 1.0;
+    }
+    if x.is_nan() || x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    exp_neg(-log2(x) * std::f32::consts::LN_2 * y)
+}
+
+/// The cosine of a finite `x`, in radians; 1 for one that is none.
+pub fn cos(x: f32) -> f32 {
+    if !x.is_finite() {
+        return 1.0;
+    }
+    let turn = 2.0 * std::f64::consts::PI;
+    let x = (x as f64).abs();
+    // Within half a turn of 0, where the series to its 14th term is
+    // exact to more than a float holds.
+    let r = x - (x / turn).floor() * turn;
+    let r = if r > std::f64::consts::PI { r - turn } else { r };
+    let r2 = r * r;
+    let mut term = 1.0;
+    let mut sum = 1.0;
+    for n in 1..=14 {
+        term *= -r2 / ((2 * n - 1) * (2 * n)) as f64;
+        sum += term;
+    }
+    sum as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pow_unit_follows_the_power() {
+        assert_eq!(pow_unit(0.5, 0.0), 1.0);
+        assert_eq!(pow_unit(0.0, 0.0), 1.0);
+        assert_eq!(pow_unit(0.0, 3.0), 0.0);
+        assert_eq!(pow_unit(-1.0, 3.0), 0.0);
+        assert_eq!(pow_unit(1.0, 40.0), 1.0);
+        assert_eq!(pow_unit(f32::NAN, 2.0), 0.0);
+        for x in [0.001f32, 0.2, 0.5, 0.9, 0.999] {
+            for y in [0.5f32, 1.0, 2.0, 8.0, 50.0, 128.0] {
+                let want = x.powf(y);
+                assert!((pow_unit(x, y) - want).abs() <= want * 1e-3 + 1e-30, "{x} {y}");
+            }
+        }
+    }
+
+    #[test]
+    fn cos_follows_the_cosine() {
+        assert_eq!(cos(0.0), 1.0);
+        assert_eq!(cos(f32::INFINITY), 1.0);
+        for i in -200..200 {
+            let x = i as f32 * 0.173;
+            assert!((cos(x) - x.cos()).abs() < 2e-6, "{x}");
+        }
+    }
 
     #[test]
     fn log2_is_exact_at_powers_of_two_and_close_between() {
