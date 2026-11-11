@@ -947,6 +947,15 @@ otherwise with spot model 0, 1 where rho is above cos(theta / 2) and
 ((rho - cos(phi / 2)) / (cos(theta / 2) - cos(phi / 2)))^falloff
 between; with spot model 1, rho^falloff.
 
+`SET_LIGHT` takes any finite numbers, and these formulas say what
+each lights. Every vertex is further than a range below 0, so such a
+light adds nothing. With theta above phi the cone is 1 wherever rho
+is above cos(phi / 2). The cosines are those of the angles as they
+are, however large. A direction of length 0 stays 0, where the others
+are brought to a length of 1: a directional light with one adds its
+ambient colour only, and a spot with one has a rho of 0. A light
+whose f isn't a number above 0, or is infinite, adds nothing.
+
 With `TWO_SIDED_LIGHTING` 1 or 2 a triangle that shows its back has
 the colours the vertices get with their normals turned round. The
 back shows where the triangle is counterclockwise on the screen with

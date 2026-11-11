@@ -384,6 +384,70 @@ fn a_point_light_reaches_as_far_as_its_range_and_fades_with_distance() {
 }
 
 #[test]
+fn a_lights_numbers_outside_their_usual_ranges_light_as_the_formulas_say() {
+    let mut rig = Rig::new(Format::X8R8G8B8, None);
+    rig.material(&matte([1.0; 4]));
+    let lamp = Light {
+        kind: LIGHT_POINT,
+        diffuse: [1.0; 4],
+        position: [0.0, 0.0, -1.5],
+        range: 10.0,
+        attenuation: [1.0, 0.0, 0.0],
+        ..Light::default()
+    };
+    // The small triangle around the middle the light falls all but
+    // straight on, lit by `light`.
+    let mut small = |light: Light| {
+        rig.clear(1, 0, 1.0, 0);
+        rig.light(0, &light);
+        let p = [[-0.1f32, 0.1, 0.5], [0.1, 0.1, 0.5], [-0.1, -0.1, 0.5]];
+        let vertices: Vec<f32> = p
+            .iter()
+            .flat_map(|p| [p[0], p[1], p[2], 0.0, 0.0, -1.0])
+            .collect();
+        rig.triangles(XYZ | NORMAL, &words(&vertices));
+        rig.px(30, 30)
+    };
+    assert_eq!(small(lamp), 0x00FE_FEFE);
+    // Every vertex is further than a range below 0.
+    let range = -1.0;
+    assert_eq!(small(Light { range, ..lamp }), 0);
+    // An attenuation that isn't above 0 leaves the light as it is.
+    for attenuation in [[0.0; 3], [-1.0, 0.0, 0.0], [1.0, -1.0, 0.0]] {
+        let light = Light {
+            attenuation,
+            ..lamp
+        };
+        assert_eq!(small(light), 0x00FE_FEFE, "{attenuation:?}");
+    }
+    // An inner cone wider than the outer one: all of the outer is lit.
+    let spot = Light {
+        kind: LIGHT_SPOT,
+        direction: [0.0, 0.0, 1.0],
+        theta: 2.0,
+        phi: 1.0,
+        falloff: 1.0,
+        ..lamp
+    };
+    assert_eq!(small(spot), 0x00FE_FEFE);
+    // A direction of no length gives a rho of 0: the spot's cone
+    // holds nothing, unless it is wider than half a turn (0.435 of
+    // the way from the outer cone to the inner one here), and a
+    // directional light comes from nowhere.
+    let direction = [0.0; 3];
+    assert_eq!(small(Light { direction, ..spot }), 0);
+    let phi = 4.0;
+    let wide = Light {
+        direction,
+        phi,
+        ..spot
+    };
+    assert_eq!(small(wide), 0x006F_6F6F);
+    let kind = LIGHT_DIRECTIONAL;
+    assert_eq!(small(Light { kind, ..wide }), 0);
+}
+
+#[test]
 fn a_highlight_is_added_where_the_light_is_thrown_back_at_the_eye() {
     let mut rig = Rig::new(Format::X8R8G8B8, None);
     rig.states(&[(RS_SPECULARENABLE, 1), (RS_LOCALVIEWER, 0)]);
