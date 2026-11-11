@@ -898,6 +898,21 @@ DLLs are the emulator's.
   (`Bus::toadforce_submit`), so both run one decoder. Blits the card
   doesn't do as DirectDraw's own code does (stretches, which sample
   differently, mirrors, destination keys) stay with that code.
+- **The queue.** The words handed over that way wait in a queue and
+  run together, in their order. A game's draws are small, and one by
+  itself is a few rows on one thread; a queue of them goes to the
+  renderer's threads at once. The queue runs before anything can tell
+  it was there: before a write to the card's registers or ring, before
+  the program or the emulator writes card memory, before the emulator
+  reads it (`win32::screen`), with a flip, and before a call that lets
+  the program read it or shows a window (`screen::api_settles`: all of
+  DirectDraw but the Direct3D device's methods, GDI, USER, Direct3D 8,
+  WGL and OpenGL's pixel transfers). It also runs when it is full, and
+  5 ms of emulated time after its first command, so a program that
+  reads video memory it kept a pointer to sees the picture a frame's
+  fraction late at worst, as it would beside a real card that draws
+  behind the driver's back. The queue is part of the card's saved
+  state. A guest's driver, with its ring, isn't queued.
 - **Direct3D 7.** `ddraw/d3d/hal` is the HAL interface (capabilities,
   formats, state, draws, clears), with the Voodoo's implementation
   (`hal/voodoo.rs`) and the ToadForce's (`hal/toadforce.rs`) behind it.

@@ -318,7 +318,14 @@ fn vbe_mode(cpu: &Cpu, w: u32, h: u32, bpp: u32) -> Option<VbeMode> {
 
 /// Read video memory from byte `offset` into `data`; what is past its end
 /// reads as 0.
-pub fn read(cpu: &Cpu, offset: u32, data: &mut [u8]) {
+pub fn read(cpu: &mut Cpu, offset: u32, data: &mut [u8]) {
+    settle(cpu);
+    peek(cpu, offset, data);
+}
+
+/// `read` of video memory as it is, without what a ToadForce still has
+/// queued to draw: for a debugger's look, which changes nothing.
+pub fn peek(cpu: &Cpu, offset: u32, data: &mut [u8]) {
     let size = memory_size(cpu) as usize;
     let start = (offset as usize).min(size);
     let end = (start + data.len()).min(size);
@@ -333,6 +340,67 @@ pub fn read(cpu: &Cpu, offset: u32, data: &mut [u8]) {
     }
 }
 
+/// Have the display adapter finish what its driver gave it to draw: a
+/// ToadForce runs the commands the built-in drivers queued
+/// (`Bus::toadforce_submit`). `read` and `write` do it, and so do the
+/// program's own writes to video memory (in the bus). What is left is
+/// the program reading video memory by itself, which `api_settles`
+/// sees to.
+#[inline]
+pub fn settle(cpu: &mut Cpu) {
+    cpu.bus.toadforce_flush();
+}
+
+/// Whether a call of the function `name` of the DLL `dll` (its file
+/// name) is preceded by `settle`: whether it lets the program read
+/// video memory, or is where a program expects the drawing done.
+/// `stubs::call` settles before those.
+///
+/// A program reads video memory through DirectDraw (a locked surface,
+/// which stays readable after the call), so every call of DirectDraw's
+/// settles but the Direct3D device's, which fill the queue. GDI and
+/// USER show windows and what is in them, and Direct3D 8 and OpenGL's
+/// WGL present. Everything else leaves a ToadForce's queue to grow:
+/// the Direct3D device's and OpenGL's drawing and state calls, and the
+/// rest of Windows, which a program calls between its draws.
+pub fn api_settles(dll: &str, name: &str) -> bool {
+    match dll {
+        "GDI32.DLL" | "USER32.DLL" | "D3D8.DLL" => true,
+        "DDRAW.DLL" => {
+            // The Direct3D device and what it draws from, which hold no
+            // video memory but through the HAL. A scene's end is where
+            // Direct3D has the card catch up.
+            const DRAWING: [&str; 6] = [
+                "IDirect3DDevice",
+                "IDirect3DVertexBuffer",
+                "IDirect3DViewport",
+                "IDirect3DMaterial",
+                "IDirect3DLight",
+                "IDirect3DExecuteBuffer",
+            ];
+            !DRAWING.iter().any(|prefix| name.starts_with(prefix)) || name.ends_with("_EndScene")
+        }
+        "OPENGL32.DLL" => {
+            // The pixel transfers to and from the frame buffer, and the
+            // two calls that ask for the drawing to be done.
+            const READING: [&str; 10] = [
+                "glReadPixels",
+                "glCopyPixels",
+                "glDrawPixels",
+                "glBitmap",
+                "glAccum",
+                "glCopyTexImage1D",
+                "glCopyTexImage2D",
+                "glCopyTexSubImage1D",
+                "glCopyTexSubImage2D",
+                "glFinish",
+            ];
+            !name.starts_with("gl") || READING.contains(&name) || name == "glFlush"
+        }
+        _ => false,
+    }
+}
+
 /// Write `data` into video memory at byte `offset`: what is past its end
 /// goes nowhere. The picture shows it.
 pub fn write(cpu: &mut Cpu, offset: u32, data: &[u8]) {
@@ -343,6 +411,7 @@ pub fn write(cpu: &mut Cpu, offset: u32, data: &[u8]) {
         return;
     }
     let data = &data[..end - start];
+    settle(cpu);
     drew(cpu, start as u32, end as u32, data.len() as u64);
     if let Some(v) = &mut cpu.bus.voodoo
         && v.banshee().is_some()
@@ -413,6 +482,8 @@ pub fn show(cpu: &mut Cpu, offset: u32) {
         let mut words = Vec::new();
         encode::flip(&mut words, offset, false);
         cpu.bus.toadforce_submit(&words);
+        // The frame is done: the card draws it and shows it now.
+        settle(cpu);
         return;
     }
     if is_card(cpu) {
@@ -523,20 +594,28 @@ pub fn gdi_mode(cpu: &Cpu) -> Option<Mode> {
 }
 
 /// The desktop's rows `top..top + rows`, as `load_rows` gives them.
-pub fn load_desktop(cpu: &Cpu, top: u32, rows: u32) -> Vec<u8> {
-    load_rows(cpu, &desktop(cpu), top, rows)
+pub fn load_desktop(cpu: &mut Cpu, top: u32, rows: u32) -> Vec<u8> {
+    let desktop = desktop(cpu);
+    load_rows(cpu, &desktop, top, rows)
 }
 
 /// The rows `top..top + rows` of the picture in `mode` at the start of
 /// video memory, as 32-bit pixels (0x00RRGGBB), `width * 4` bytes a
 /// row, or at 8 bits a pixel as they are, `width` bytes a row.
-pub fn load_rows(cpu: &Cpu, mode: &Mode, top: u32, rows: u32) -> Vec<u8> {
+pub fn load_rows(cpu: &mut Cpu, mode: &Mode, top: u32, rows: u32) -> Vec<u8> {
     load_area(cpu, mode, top, rows, 0, mode.width)
 }
 
 /// The pixels `left..left + cols` of the rows `top..top + rows` of the
 /// picture in `mode`, as `load_rows` gives them: `cols` pixels a row.
-pub fn load_area(cpu: &Cpu, mode: &Mode, top: u32, rows: u32, left: u32, cols: u32) -> Vec<u8> {
+pub fn load_area(
+    cpu: &mut Cpu,
+    mode: &Mode,
+    top: u32,
+    rows: u32,
+    left: u32,
+    cols: u32,
+) -> Vec<u8> {
     let bytes = mode.bpp / 8;
     let mut raw = vec![0u8; (cols * bytes) as usize];
     let mut out = Vec::with_capacity(cols as usize * 4 * rows as usize);

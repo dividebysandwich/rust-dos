@@ -97,6 +97,7 @@ impl Bus {
             self.toadforce_moved();
             return;
         }
+        self.toadforce_flush();
         self.lower_toadforce_irq();
         let live = self.toadforce_live();
         if let Some(card) = &mut self.toadforce {
@@ -168,6 +169,7 @@ impl Bus {
     /// `len` bytes (1, 2 or 4) of `value` written at `at`. A register
     /// takes whole, aligned words: other writes to one are ignored.
     pub(crate) fn toadforce_write(&mut self, at: Window, value: u32, len: u32) {
+        self.toadforce_flush();
         match at {
             Window::Ring(offset) => {
                 if let Some(card) = &mut self.toadforce {
@@ -184,6 +186,7 @@ impl Bus {
     /// A word written to the register at `offset` of BAR 0: a guest's,
     /// through the window, or one of the emulator's own drivers'.
     pub fn toadforce_register_write(&mut self, offset: u32, value: u32) {
+        self.toadforce_flush();
         let live = self.toadforce_live();
         let Some(card) = &mut self.toadforce else {
             return;
@@ -215,15 +218,51 @@ impl Bus {
 
     /// Hand the card the commands in `words`, as the emulator's own
     /// drivers (the built-in Windows') do in place of writing them into
-    /// the ring: the card runs the same words the same way. A command it
-    /// rejects is a bug in the driver, which a debug build stops at.
+    /// the ring: the card runs the same words the same way, in the
+    /// order they were handed over.
+    ///
+    /// They are queued, and run together at the next `toadforce_flush`:
+    /// before anything reaches the card's registers or ring, before the
+    /// program or the emulator writes card memory, when the queue is
+    /// full, and `QUEUE_NS` of emulated time after the first of them at
+    /// the latest. A driver flushes before it reads card memory or lets
+    /// its program read it (`win32::screen`).
     pub fn toadforce_submit(&mut self, words: &[u32]) {
         let live = self.toadforce_live();
         let Some(card) = &mut self.toadforce else {
             return;
         };
+        let waiting = card.queued();
+        if card.queue(words, live) {
+            self.toadforce_flush();
+        } else if !waiting {
+            // The timer wakes the card for the queue's deadline.
+            self.clock.schedule(self.next_event());
+        }
+    }
+
+    /// Whether commands of `toadforce_submit` wait to be run.
+    #[inline]
+    pub fn toadforce_queued(&self) -> bool {
+        self.toadforce.as_deref().is_some_and(|c| c.queued())
+    }
+
+    /// Run the commands `toadforce_submit` queued. A command the card
+    /// rejects is a bug in the driver, which a debug build stops at.
+    #[inline]
+    pub fn toadforce_flush(&mut self) {
+        if self.toadforce_queued() {
+            self.toadforce_run_queue();
+        }
+    }
+
+    fn toadforce_run_queue(&mut self) {
+        let live = self.toadforce_live();
+        let Some(card) = &mut self.toadforce else {
+            return;
+        };
         let clean = card.read(regs::ERROR, live) == 0;
-        let fx = card.submit(words, &mut self.vbe.vram, live);
+        let fx = card.run_queue(&mut self.vbe.vram, live);
         let error = card.read(regs::ERROR, live);
         if clean && error != 0 {
             self.log_string(&format!(
@@ -451,6 +490,9 @@ impl Bus {
     /// gave.
     pub(crate) fn toadforce_service(&mut self) {
         let live = self.toadforce_live();
+        if self.toadforce.as_deref().is_some_and(|c| c.queue_due(live)) {
+            self.toadforce_flush();
+        }
         if let Some(card) = &mut self.toadforce {
             let fx = card.service(live);
             self.toadforce_effects(fx);

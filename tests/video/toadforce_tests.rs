@@ -584,3 +584,87 @@ fn the_vga_keeps_its_window_and_the_bios_its_mode_under_the_cards_mode() {
     assert_eq!(int10(&mut cpu, 0x4F07, 0, 0, 16), 0x024F);
     assert_eq!(reg(&cpu, regs::MODE_START), 0);
 }
+
+#[test]
+fn a_built_in_drivers_commands_wait_and_run_in_their_order() {
+    let mut cpu = machine();
+    let surface = Surface {
+        offset: 8 << 20,
+        pitch: 256,
+        width: 64,
+        height: 32,
+        format: Format::X8R8G8B8,
+    };
+    let at = MEMORY + (8 << 20);
+    let fill = |cpu: &mut Cpu, left: u32, colour: u32| {
+        let rect = Rect {
+            left,
+            top: 0,
+            width: 8,
+            height: 32,
+        };
+        let mut words = Vec::new();
+        encode::fill(&mut words, &surface, &rect, colour);
+        cpu.bus.toadforce_submit(&words);
+    };
+    // Queued, the fill has drawn nothing yet.
+    fill(&mut cpu, 0, 0x0011_1111);
+    assert!(cpu.bus.toadforce_queued());
+    assert_eq!(cpu.bus.vbe.vram[8 << 20..][..4], [0; 4]);
+    // A write to card memory comes after it: the fill is under it.
+    cpu.bus.write_32(at + 4, 0x00AB_CDEF);
+    assert!(!cpu.bus.toadforce_queued());
+    assert_eq!(cpu.bus.read_32(at), 0x0011_1111);
+    assert_eq!(cpu.bus.read_32(at + 4), 0x00AB_CDEF);
+    // So does a write to a register, and a command in the ring.
+    fill(&mut cpu, 8, 0x0022_2222);
+    set_reg(&mut cpu, regs::ERROR, 0);
+    assert_eq!(cpu.bus.read_32(at + 4 * 8), 0x0022_2222);
+    fill(&mut cpu, 16, 0x0033_3333);
+    let mut words = Vec::new();
+    let rect = Rect {
+        left: 16,
+        top: 0,
+        width: 4,
+        height: 32,
+    };
+    encode::fill(&mut words, &surface, &rect, 0x0044_4444);
+    run(&mut cpu, &words);
+    assert_eq!(cpu.bus.read_32(at + 4 * 16), 0x0044_4444);
+    assert_eq!(cpu.bus.read_32(at + 4 * 20), 0x0033_3333);
+    // Left alone, the queue runs when its first command has waited
+    // `QUEUE_NS`, counted from that command and not from the last.
+    fill(&mut cpu, 24, 0x0055_5555);
+    pass(&mut cpu, rust_dos::toadforce::QUEUE_NS / 2);
+    fill(&mut cpu, 32, 0x0066_6666);
+    assert_eq!(cpu.bus.vbe.vram[(8 << 20) + 4 * 24..][..4], [0; 4]);
+    pass(&mut cpu, rust_dos::toadforce::QUEUE_NS / 2 + 1_000_000);
+    assert!(!cpu.bus.toadforce_queued());
+    assert_eq!(cpu.bus.read_32(at + 4 * 24), 0x0055_5555);
+    assert_eq!(cpu.bus.read_32(at + 4 * 32), 0x0066_6666);
+    // A full queue runs by itself.
+    let mut fills = 0;
+    loop {
+        fill(&mut cpu, 40, 0x0077_7777);
+        fills += 1;
+        if !cpu.bus.toadforce_queued() {
+            break;
+        }
+        assert!(fills < 100_000);
+    }
+    assert!(fills > 1000);
+    assert_eq!(reg(&cpu, regs::ERROR), 0);
+    // A state saved with commands queued goes on as the machine does.
+    fill(&mut cpu, 48, 0x0088_8888);
+    let state = rust_dos::savestate::machine::save(&cpu);
+    let mut loaded = machine();
+    rust_dos::savestate::machine::load(&mut loaded, &state).unwrap();
+    for cpu in [&mut cpu, &mut loaded] {
+        assert!(cpu.bus.toadforce_queued());
+        cpu.bus.toadforce_flush();
+        assert_eq!(cpu.bus.read_32(at + 4 * 48), 0x0088_8888);
+    }
+    assert!(
+        rust_dos::savestate::machine::save(&cpu) == rust_dos::savestate::machine::save(&loaded)
+    );
+}
