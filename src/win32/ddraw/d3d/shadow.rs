@@ -451,7 +451,7 @@ mod tests {
         load(&mut cpu, &s, A);
         assert_eq!(reads(&log), [format!("read Some({}) 0..64", A / 2)]);
         let mut shadow = [0xFFu8; 2];
-        screen::read(&cpu, A + 63 * 1280 + 2 * 639, &mut shadow);
+        screen::read(&mut cpu, A + 63 * 1280 + 2 * 639, &mut shadow);
         assert_eq!(shadow, [0, 0], "the surface's pixels, narrowed");
     }
 }

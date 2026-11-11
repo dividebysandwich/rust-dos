@@ -779,6 +779,7 @@ impl Bus {
             return false;
         };
         let _profile = self.profile.as_deref().map(|p| p.mem_run(dst, true, (len / size) as u64));
+        self.toadforce_flush();
         self.vbe.vram[offset..offset + len].copy_from_slice(&self.ram[src..src + len]);
         self.lfb_written(dst, offset, len);
         true
@@ -797,6 +798,7 @@ impl Bus {
             .profile
             .as_deref()
             .map(|p| p.mem_run(dst, true, (len / 4) as u64));
+        self.toadforce_flush();
         self.vbe.vram[offset..offset + len].copy_from_slice(bytes);
         self.lfb_written(dst, offset, len);
         true
@@ -811,6 +813,7 @@ impl Bus {
             return false;
         };
         let _profile = self.profile.as_deref().map(|p| p.mem_run(dst, true, count as u64));
+        self.toadforce_flush();
         fill_pattern(&mut self.vbe.vram[offset..offset + len], size, value);
         self.lfb_written(dst, offset, len);
         true
@@ -1300,6 +1303,8 @@ impl Bus {
     /// in for repainting.
     #[inline]
     fn write_vram(&mut self, offset: usize, bytes: &[u8]) {
+        // What a ToadForce's driver queued to draw there comes first.
+        self.toadforce_flush();
         self.vbe.vram[offset..offset + bytes.len()].copy_from_slice(bytes);
         self.vram_written(offset, bytes.len());
     }

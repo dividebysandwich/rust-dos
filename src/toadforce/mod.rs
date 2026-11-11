@@ -92,10 +92,24 @@ pub struct ToadForce {
     raster: raster::Renderer,
     /// The interrupt request the card has up, which the bus keeps.
     pub irq_up: Option<u8>,
+    /// Commands the emulator's own drivers handed over that haven't run
+    /// yet (`queue`), in their order.
+    queue: Vec<u32>,
+    /// When the oldest of them was queued, in nanoseconds of the
+    /// emulated clock.
+    queue_since: u64,
     /// The commands since the card was made, for a look at what drives
     /// it. No part of the card's state.
     counts: Counts,
 }
+
+/// How long a queued command waits at most, in nanoseconds of the
+/// emulated clock: well under a frame, so that a picture drawn straight
+/// into what the display shows is there by the next one.
+pub const QUEUE_NS: u64 = 5_000_000;
+
+/// The words the queue holds at most.
+pub const QUEUE_WORDS: usize = 1 << 18;
 
 /// How many commands the card carried out, by kind, and how many it
 /// rejected (register writes among those).
@@ -131,6 +145,8 @@ crate::state_fields!(ToadForce {
     display,
     irq_up,
     level1,
+    queue,
+    queue_since,
 } skip { counts, raster });
 
 impl ToadForce {
@@ -157,6 +173,8 @@ impl ToadForce {
             level1: level1::Level1::default(),
             raster: raster::Renderer::default(),
             irq_up: None,
+            queue: Vec::new(),
+            queue_since: 0,
             counts: Counts::default(),
         }
     }
@@ -237,13 +255,59 @@ impl ToadForce {
 
     /// When the card next changes by itself, in nanoseconds of the
     /// emulated clock: the vertical blank that raises an interrupt or
-    /// makes a waiting flip. `service` then brings the card there.
+    /// makes a waiting flip, which `service` then brings the card to, or
+    /// the queue's deadline (`queue_due`), when its owner runs it.
     pub fn next_event(&self) -> Option<u64> {
         let blank_irq =
             self.irq_enable & regs::IRQ_VBLANK != 0 && self.irq_status & regs::IRQ_VBLANK == 0;
-        (blank_irq || self.display.flip_pending())
+        let blank = (blank_irq || self.display.flip_pending())
             .then(|| self.display.next_blank())
-            .flatten()
+            .flatten();
+        let queue = self.queued().then_some(self.queue_since + QUEUE_NS);
+        match (blank, queue) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// Queue the commands in `words` behind those queued before: they
+    /// run, in order, with `run_queue`. True when the queue then holds
+    /// as much as it may, or has held its oldest command as long as it
+    /// may, and is to be run now.
+    ///
+    /// The emulator's own drivers hand their commands over this way. A
+    /// draw by itself is a few rows on one thread; the draws of a batch
+    /// go to the renderer's threads together. Nothing but the queue's
+    /// owner sees the difference as long as the queue is run before
+    /// anything else reads or writes card memory or the registers,
+    /// which is the owner's to see to (`Bus::toadforce_flush`).
+    pub fn queue(&mut self, words: &[u32], live: Live) -> bool {
+        if self.queue.is_empty() {
+            self.queue_since = live.ns;
+        }
+        self.queue.extend_from_slice(words);
+        self.queue.len() >= QUEUE_WORDS || self.queue_due(live)
+    }
+
+    /// Whether commands are queued.
+    #[inline]
+    pub fn queued(&self) -> bool {
+        !self.queue.is_empty()
+    }
+
+    /// Whether the oldest queued command has waited as long as it may.
+    pub fn queue_due(&self, live: Live) -> bool {
+        self.queued() && live.ns >= self.queue_since + QUEUE_NS
+    }
+
+    /// Run the queued commands, as `submit` runs them.
+    pub fn run_queue(&mut self, memory: &mut [u8], live: Live) -> Effects {
+        let mut words = std::mem::take(&mut self.queue);
+        let fx = self.submit(&words, memory, live);
+        // The buffer is kept for the next batch.
+        words.clear();
+        self.queue = words;
+        fx
     }
 
     /// Bring the card up to `live`: the vertical blanks that began, and

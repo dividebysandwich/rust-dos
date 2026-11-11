@@ -236,6 +236,9 @@ fn run(cpu: &mut Cpu, mut task: Task, resume: (u32, u32), mut value: u32) -> Opt
 
 /// A call a task made returned `value`: it goes on.
 pub fn returned(cpu: &mut Cpu, value: u32, call: Call) {
+    // The task is some function's work going on, which may read video
+    // memory (`screen::api_settles` looks at calls, not at these).
+    super::screen::settle(cpu);
     let task = Task::decode(&call.data, call.resume);
     if let Some(v) = run(cpu, task, call.resume, value) {
         call::finish(cpu, call.resume, v);

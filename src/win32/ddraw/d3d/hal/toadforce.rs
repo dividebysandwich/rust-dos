@@ -981,6 +981,8 @@ struct Image {
 /// the next power of two otherwise. `keyed`: the copy has the surface's
 /// color key.
 fn image(cpu: &mut Cpu, id: u32, keyed: bool) -> Option<Image> {
+    // A surface in video memory, which the queued draws may draw on, is
+    // read through `screen::read`, which has them drawn first.
     let s = state(cpu).surface(id)?.clone();
     let pow2 = s.width.is_power_of_two() && s.height.is_power_of_two();
     let fits = s.width.max(s.height) <= caps::TEXTURE_MAX;
@@ -1102,6 +1104,8 @@ pub fn release(cpu: &mut Cpu, gone: u32) {
 /// A process ended: the blocks of its copies go back to video memory,
 /// which gives back only its surfaces' itself.
 pub fn process_ended(cpu: &mut Cpu, pid: u32) {
+    // What it had queued is drawn: the pictures it leaves are whole.
+    screen::settle(cpu);
     if hal(cpu).pid == pid {
         forget(cpu, |_| true);
         hal(cpu).pid = 0;
@@ -1112,6 +1116,8 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32) {
 /// other surfaces' now, so the copies are dropped without giving them
 /// back. The textures are copied again when they are next drawn with.
 pub fn video_memory_lost(cpu: &mut Cpu) {
+    // The queued draws are for the surfaces that were there.
+    screen::settle(cpu);
     hal(cpu).textures.clear();
 }
 

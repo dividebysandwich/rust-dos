@@ -214,6 +214,26 @@ pub fn reads_clock(id: u16) -> bool {
     .contains(&Some(id))
 }
 
+/// Whether the function of the id `id` is one of
+/// `screen::api_settles`: a bit for every id, worked out once.
+fn settles(id: u16) -> bool {
+    static BITS: std::sync::OnceLock<Vec<u64>> = std::sync::OnceLock::new();
+    let bits = BITS.get_or_init(|| {
+        let mut bits = vec![0u64; DLLS.len() << 4];
+        for (d, dll) in DLLS.iter().enumerate() {
+            for (a, api) in dll.apis.iter().enumerate() {
+                if super::screen::api_settles(dll.name, api.name) {
+                    let id = self::id(d, a) as usize;
+                    bits[id >> 6] |= 1 << (id & 63);
+                }
+            }
+        }
+        bits
+    });
+    bits.get(id as usize >> 6)
+        .is_some_and(|word| word >> (id & 63) & 1 != 0)
+}
+
 /// The DLL and function of the id `id`.
 pub fn api(id: u16) -> Option<(&'static Dll, &'static Api)> {
     let dll = DLLS.get((id >> 10) as usize)?;
@@ -473,6 +493,11 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     let traced = super::trace::on(cpu);
     let caller = traced.then(|| super::peek_32(cpu, esp));
     let caller = caller.flatten().unwrap_or(0);
+    // What a ToadForce's driver queued is drawn before a function that
+    // may read video memory or let the program read it.
+    if cpu.bus.toadforce_queued() && settles(id) {
+        super::screen::settle(cpu);
+    }
     let result = (api.handler)(cpu, args);
     // File mappings no handle or view holds go, then the files whose
     // last handle the function closed close in DOS.
