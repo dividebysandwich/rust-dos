@@ -670,9 +670,17 @@ pub fn get_texture_stage_state(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if stage >= STAGES || !(1..=TSS_LAST).contains(&t) || !probe(cpu, out, 4, true) {
         return Some(DDERR_INVALIDPARAMS);
     }
-    let value = get(cpu, id).map_or(0, |d| d.stage(stage, t));
+    let value = get(cpu, id).map_or(0, |d| stage_state(d, stage, t));
     cpu.bus.guest_write_32(out, value);
     Some(D3D_OK)
+}
+
+/// The state `t` of a stage as GetTextureStageState gives it.
+/// D3DTSS_ADDRESS reads back as ADDRESSU, as Wine's ddraw has it, so it
+/// follows ADDRESSU set on its own.
+fn stage_state(d: &Device, stage: u32, t: u32) -> u32 {
+    let t = if t == TSS_ADDRESS { TSS_ADDRESSU } else { t };
+    d.stage(stage, t)
 }
 
 /// SetTextureStageState(this, stage, type, value).
@@ -943,5 +951,18 @@ mod tests {
             apply(&mut cpu, id, c);
         }
         assert_eq!(address(&mut cpu, id), (MIRROR, BORDER));
+    }
+
+    #[test]
+    fn the_address_state_reads_back_as_addressu() {
+        // GetTextureStageState(D3DTSS_ADDRESS) gives ADDRESSU, also after
+        // ADDRESSU is set on its own.
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let id = device(&mut cpu);
+        let read = |cpu: &mut Cpu| stage_state(get(cpu, id).unwrap(), 1, TSS_ADDRESS);
+        set_stage(&mut cpu, id, 1, TSS_ADDRESS, CLAMP);
+        assert_eq!(read(&mut cpu), CLAMP);
+        set_stage(&mut cpu, id, 1, TSS_ADDRESSU, MIRROR);
+        assert_eq!(read(&mut cpu), MIRROR);
     }
 }
