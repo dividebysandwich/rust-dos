@@ -660,19 +660,33 @@ impl Coord {
     /// or what is generated, with a 1 after its last number, through
     /// the matrix. Of what comes out the first `count` stay.
     fn make(&self, layout: &Layout, v: &Vertex, eye: [f32; 3], normal: [f32; 3]) -> [f32; 4] {
-        let numbers = match self.set < layout.textures {
-            true => layout.tex[self.set].1.clamp(1, 4) as usize,
-            false => 0,
-        };
+        // A slot that is no more than a set, as nearly every one of
+        // every draw is, is a copy.
+        if !self.made() {
+            return self.keep(layout, v);
+        }
         let matrix = self.matrix.as_ref().map(|(m, count)| (m, *count));
-        let set = (v.tex[self.set & 7], numbers);
+        let set = (v.tex[self.set & 7], self.numbers(layout));
         crate::toadforce::raster::geometry::coordinates(self.generate, set, eye, normal, matrix)
     }
 
-    /// A transformed vertex's coordinates for the slot: its set, with
-    /// 1 for a fourth number it doesn't have.
+    /// How many numbers the slot's set has in a vertex of `layout`: 0
+    /// for a set the vertex doesn't have.
+    fn numbers(&self, layout: &Layout) -> usize {
+        match self.set < layout.textures {
+            true => layout.tex[self.set].1.clamp(1, 4) as usize,
+            false => 0,
+        }
+    }
+
+    /// The vertex's set for the slot, as a transformed vertex keeps it
+    /// and as `coordinates` gives a set with no matrix: its numbers,
+    /// 0 for those it doesn't have, and 1 for a fourth it doesn't have.
     fn keep(&self, layout: &Layout, v: &Vertex) -> [f32; 4] {
-        Coord::set(self.set).make(layout, v, [0.0; 3], [0.0; 3])
+        let numbers = self.numbers(layout);
+        let mut c = [0.0, 0.0, 0.0, 1.0];
+        c[..numbers].copy_from_slice(&v.tex[self.set & 7][..numbers]);
+        c
     }
 
     /// The coordinates `c` of the slot as a card takes a stage's: the
