@@ -500,6 +500,7 @@ fn the_status_counts_what_was_asked_of_the_card() {
         level1: 0,
         draws: 0,
         primitives: 0,
+        transformed: 0,
         rejected: 2,
     };
     assert_eq!(rig.card.counts(), counts);
