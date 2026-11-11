@@ -246,6 +246,31 @@ fn a_triangle_is_cut_at_the_near_plane_the_band_and_the_clip_planes() {
 }
 
 #[test]
+fn a_cut_triangles_outline_is_of_its_own_edges_and_corners() {
+    // The triangle the near plane cuts at row 16: its corners on the
+    // screen are (0, 0), (32, 0) and, behind the plane, (0, 32).
+    let dipping = [[-1.0, 1.0, 1.0], [0.0, 1.0, 1.0], [-1.0, 0.0, -1.0]];
+    let mut rig = Rig::unlit();
+    rig.states(&[(RS_FILLMODE, 2), (RS_CULLMODE, 1)]);
+    rig.white(dipping);
+    let lines = rig.drawn(0);
+    // The top edge and what is left of the other two are drawn, and
+    // nothing along the plane or past it.
+    assert!(lines.contains(&(16, 0)), "{lines:?}");
+    assert!(lines.contains(&(0, 8)), "{lines:?}");
+    assert!(lines.contains(&(24, 8)), "{lines:?}");
+    assert!(lines.iter().all(|&(_, y)| y <= 16), "{lines:?}");
+    for x in 2..14 {
+        assert!(!lines.contains(&(x, 15)) && !lines.contains(&(x, 16)));
+    }
+    // As points, the two corners in front of the plane.
+    rig.clear(1, 0, 1.0, 0);
+    rig.states(&[(RS_FILLMODE, 1)]);
+    rig.white(dipping);
+    assert_eq!(rig.drawn(0), [(0, 0), (32, 0)]);
+}
+
+#[test]
 fn lines_and_points_are_cut_too() {
     let mut rig = Rig::unlit();
     // A line from the middle of the top row to far outside on the

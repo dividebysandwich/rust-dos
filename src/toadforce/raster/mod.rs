@@ -130,10 +130,15 @@ fn pieces(primitive: u32, n: usize, mut f: impl FnMut(Piece)) {
 /// Queue the convex polygon of `corners`: a triangle, or what the
 /// planes left of one. `provoking` gives it its colours where it is
 /// flat-shaded. The corners are taken by reference or by value, so a
-/// triangle of a draw's own vertices isn't copied.
+/// triangle of a draw's own vertices isn't copied. `outline` has a
+/// bit for each corner that is the triangle's own and one for each
+/// edge, from a corner to the next, that is on one of the triangle's:
+/// those are the points and the lines of a triangle that isn't filled
+/// (`clip::Polygon::outline`).
 fn polygon<V: std::borrow::Borrow<ScreenVertex>>(
     prims: &mut Vec<Prim>,
     corners: &[V],
+    outline: (u32, u32),
     provoking: &ScreenVertex,
     state: &DrawState,
     sets: &[u8],
@@ -147,12 +152,12 @@ fn polygon<V: std::borrow::Borrow<ScreenVertex>>(
         // needn't be in the rows the triangle's are.
         1 | 2 if !(1..n - 1).any(|i| Prim::facing(fan(i), shape.cull).is_some()) => {}
         1 => {
-            for i in 0..n {
+            for i in (0..n).filter(|i| outline.0 >> i & 1 != 0) {
                 prims.extend(Prim::point(at(i), shape, clip, sets).into_iter().flatten());
             }
         }
         2 => {
-            for i in 0..n {
+            for i in (0..n).filter(|i| outline.1 >> i & 1 != 0) {
                 let (a, b) = (at(i), at((i + 1) % n));
                 prims.extend(Prim::line(a, b, provoking, shape, clip, sets));
             }
@@ -348,7 +353,7 @@ impl Renderer {
             }
             Piece::Triangle(t, ends) => {
                 let provoking = v(t[if shape.flat_last { ends.1 } else { ends.0 }]);
-                polygon(prims, &t.map(v), provoking, state, sets);
+                polygon(prims, &t.map(v), (7, 7), provoking, state, sets);
             }
         });
     }
@@ -400,7 +405,7 @@ impl Renderer {
                 // without the room a cut one needs.
                 if out == 0 {
                     let corners = t.map(|v| setup.project(&side(v)));
-                    polygon(prims, &corners, &provoking, state, sets);
+                    polygon(prims, &corners, (7, 7), &provoking, state, sets);
                     return;
                 }
                 let mut cut = clip::Polygon::triangle(t.map(side));
@@ -413,7 +418,7 @@ impl Renderer {
                 for (corner, v) in corners.iter_mut().zip(cut.corners()) {
                     *corner = setup.project(v);
                 }
-                polygon(prims, &corners[..n], &provoking, state, sets);
+                polygon(prims, &corners[..n], cut.outline(), &provoking, state, sets);
             }
         });
     }

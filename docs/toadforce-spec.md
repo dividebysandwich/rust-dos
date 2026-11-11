@@ -904,10 +904,11 @@ plane (a, b, c, d) keeps the points whose world-space position (x, y,
 z, w) has a * x + b * y + c * z + d * w of 0 or more. Where an edge
 crosses, every value of the vertex is taken from the straight line
 between its ends in clip space. A point is dropped whole by its
-position. What is cut from a
-triangle is a convex polygon: filled, it covers the pixels the
-triangle did inside the planes; with `FILLMODE` 2 its outline is
-drawn, the cut edges included, and with 1 its corners.
+position. What is cut from a triangle is a convex polygon: filled, it
+covers the pixels the triangle did inside the planes. With `FILLMODE`
+2 the parts of the triangle's own edges that are inside are drawn, and
+no line along a plane; with 1 the triangle's own corners that are
+inside.
 
 **Lighting.** With `LIGHTING` 0 the diffuse colour is the vertex's,
 or white, and the specular colour the vertex's, or black with alpha
