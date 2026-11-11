@@ -342,40 +342,40 @@ pub fn draw_blended(
     blend: Option<Blend>,
 ) -> Result<(), u32> {
     check_kind(kind)?;
-    if blend.is_none()
+    // One setup for the card and the pipeline both: making it records
+    // the draw in a 3D trace.
+    let Some(mut setup) = setup(cpu, Pass::Draw, id, version, layout, flags) else {
+        return Err(DDERR_INVALIDPARAMS);
+    };
+    setup.blend = blend;
+    if setup.blend.is_none()
         && !layout.rhw
-        && draw_on_card(cpu, id, version, layout, kind, vertices, order, flags)
+        && draw_on_card(cpu, id, &setup, layout, kind, vertices, order)
     {
         return Ok(());
     }
     let prims = primitives(kind, order, vertices.len())?;
-    draw_clipped(
-        cpu, id, version, layout, vertices, None, &prims, flags, blend,
-    )
+    draw_set_up(cpu, id, &setup, layout, vertices, None, &prims, flags);
+    Ok(())
 }
 
 /// Draw on a card that transforms and lights vertices itself, which
 /// gets them as the program gave them. False when the device's card
 /// doesn't, or can't for this draw (`hal::draw_geometry`).
-#[allow(clippy::too_many_arguments)]
 fn draw_on_card(
     cpu: &mut Cpu,
     id: u32,
-    version: u32,
+    setup: &Setup,
     layout: &Layout,
     kind: u32,
     vertices: &[Vertex],
     order: Option<&[u32]>,
-    flags: u32,
 ) -> bool {
-    let Some(setup) = setup(cpu, Pass::Draw, id, version, layout, flags) else {
-        return false;
-    };
     let drawn = super::device::lend(cpu, id, |cpu, d| {
         // A program that asks for the clip status or the extents gets
         // them from the pipeline's vertices.
         d.clip_status[0] & 3 == 0
-            && super::hal::draw_geometry(cpu, d, &setup, layout, vertices, kind, order)
+            && super::hal::draw_geometry(cpu, d, setup, layout, vertices, kind, order)
     });
     if drawn != Some(true) {
         return false;
@@ -453,17 +453,33 @@ fn draw_clipped(
         return Err(DDERR_INVALIDPARAMS);
     };
     setup.blend = blend;
-    let mut processed = pipeline::process(&setup, vertices, layout);
+    draw_set_up(cpu, id, &setup, layout, vertices, clip, prims, flags);
+    Ok(())
+}
+
+/// `draw_clipped` with the pipeline's setup made already.
+#[allow(clippy::too_many_arguments)]
+fn draw_set_up(
+    cpu: &mut Cpu,
+    id: u32,
+    setup: &Setup,
+    layout: &Layout,
+    vertices: &[Vertex],
+    clip: Option<&[Option<Clipped>]>,
+    prims: &[Prim],
+    flags: u32,
+) {
+    let mut processed = pipeline::process(setup, vertices, layout);
     if let Some(clip) = clip {
         for ((p, v), c) in processed.iter_mut().zip(vertices).zip(clip) {
             if let Some(c) = c
                 && setup.view_map.screen(c.clip).map(f32::to_bits) == v.position.map(f32::to_bits)
             {
-                *p = pipeline::at_clip_coordinates(&setup, p, c.clip, c.planes);
+                *p = pipeline::at_clip_coordinates(setup, p, c.clip, c.planes);
             }
         }
     }
-    let drawn = rasterize(cpu, id, &setup, &processed, prims);
+    let drawn = rasterize(cpu, id, setup, &processed, prims);
     if clip.is_some() {
         // ProcessVertices put their clip codes in the clip status
         // already. Drawn, they are screen vertices, which add none:
@@ -473,8 +489,7 @@ fn draw_clipped(
             p.code = 0;
         }
     }
-    account(cpu, id, &setup, &processed, drawn, flags);
-    Ok(())
+    account(cpu, id, setup, &processed, drawn, flags);
 }
 
 /// Draw `prims` of `verts` on the card, if the device can draw there,
@@ -723,8 +738,14 @@ fn draw_buffer(
     order: Option<&[u32]>,
     flags: u32,
 ) -> Result<(), u32> {
-    let prims = primitives(kind, order, b.vertices.len())?;
     let (layout, vertices) = (&b.layout, &b.vertices);
+    // ProcessVertices keeps clip coordinates only in a buffer of
+    // transformed vertices: a buffer of others draws as any draw of
+    // them does, on a card that transforms them if the device has one.
+    if !layout.rhw {
+        return draw(cpu, id, version, layout, kind, vertices, order, flags);
+    }
+    let prims = primitives(kind, order, vertices.len())?;
     let clip = b.clipped.get(b.start..b.start + vertices.len());
     draw_clipped(
         cpu, id, version, layout, vertices, clip, &prims, flags, None,

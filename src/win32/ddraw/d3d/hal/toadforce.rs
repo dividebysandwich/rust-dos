@@ -136,7 +136,7 @@ crate::state_fields!(Hal {
 /// The state the HAL gives the card.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sent {
-    /// The render states of `RENDER`, in its order.
+    /// The render states of `render_states`, in its order.
     render: Vec<u32>,
     /// The stage states of `states::STAGE`, in its order, a stage after
     /// another.
@@ -166,9 +166,8 @@ impl Sent {
     /// The card after a write to `LEVEL`.
     fn reset() -> Sent {
         Sent {
-            render: RENDER
-                .iter()
-                .map(|&id| states::render(id).map_or(0, |def| def.reset))
+            render: render_states()
+                .map(|id| states::render(id).map_or(0, |def| def.reset))
                 .collect(),
             stages: (0..states::STAGES)
                 .flat_map(|stage| {
@@ -212,7 +211,12 @@ const GEOMETRY: [u32; 13] = [
 
 /// The render states the HAL sets: the rasteriser's, and `GEOMETRY`.
 /// The others stay at their reset values.
-const RENDER: [u32; 52] = [
+fn render_states() -> impl Iterator<Item = u32> {
+    RASTER.into_iter().chain(GEOMETRY)
+}
+
+/// The rasteriser's render states the HAL sets.
+const RASTER: [u32; 39] = [
     states::RS_ZENABLE,
     states::RS_FILLMODE,
     states::RS_SHADEMODE,
@@ -252,19 +256,6 @@ const RENDER: [u32; 52] = [
     states::RS_BLENDOP,
     states::RS_PIXEL_CENTRE,
     states::RS_FOG_BY_W,
-    states::RS_RANGEFOGENABLE,
-    states::RS_CLIPPING,
-    states::RS_LIGHTING,
-    states::RS_AMBIENT,
-    states::RS_FOGVERTEXMODE,
-    states::RS_COLORVERTEX,
-    states::RS_LOCALVIEWER,
-    states::RS_NORMALIZENORMALS,
-    states::RS_DIFFUSEMATERIALSOURCE,
-    states::RS_SPECULARMATERIALSOURCE,
-    states::RS_AMBIENTMATERIALSOURCE,
-    states::RS_EMISSIVEMATERIALSOURCE,
-    states::RS_CLIPPLANEENABLE,
 ];
 
 /// Why the card leaves a draw, or a part of it, undone.
@@ -824,11 +815,9 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
             (level1::TRANSFORM_VIEW, setup.view),
             (level1::TRANSFORM_PROJECTION, projection),
         ];
-        for stage in 0..caps::STAGES {
-            if d.stage(stage, states::TSS_TEXTURETRANSFORMFLAGS) & 0xFF != 0 {
-                let matrix = d.transforms[TS_TEXTURE0 + stage as usize];
-                transforms.push((level1::TRANSFORM_TEXTURE + stage, matrix));
-            }
+        for stage in matrix_stages(d) {
+            let matrix = d.transforms[TS_TEXTURE0 + stage as usize];
+            transforms.push((level1::TRANSFORM_TEXTURE + stage, matrix));
         }
         for (which, matrix) in transforms {
             if g.transforms[which as usize] != matrix {
@@ -926,7 +915,7 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
     // The states that differ from the card's.
     let depth = target.depth.map(|depth| depth.format);
     let mut pairs = Vec::new();
-    for (have, &id) in sent.render.iter_mut().zip(&RENDER) {
+    for (have, id) in sent.render.iter_mut().zip(render_states()) {
         let Some(def) = states::render(id) else {
             continue;
         };
@@ -1391,6 +1380,13 @@ const TS_TEXTURE0: usize = 16;
 /// 65535 its length field holds.
 const COMMAND_WORDS: usize = 60000;
 
+/// The stages whose texture coordinates go through their stage's
+/// texture matrix.
+fn matrix_stages(d: &Device) -> impl Iterator<Item = u32> + '_ {
+    (0..caps::STAGES)
+        .filter(|&stage| d.stage(stage, states::TSS_TEXTURETRANSFORMFLAGS) & 0xFF != 0)
+}
+
 /// A light of the device as the card has one.
 fn card_light(l: &pipeline::Light) -> Light {
     Light {
@@ -1427,9 +1423,11 @@ fn can_transform(d: &Device, setup: &Setup) -> bool {
         && (0.0..=1.0).contains(&m.oz)
         && (0.0..=1.0).contains(&(m.oz + m.sz))
         && m.sz >= 0.0;
+    // A texture matrix no stage uses doesn't go to the card.
+    let textures = matrix_stages(d).map(|stage| &d.transforms[TS_TEXTURE0 + stage as usize]);
     let matrices = [setup.world, setup.view, setup.projection]
         .iter()
-        .chain(&d.transforms[TS_TEXTURE0..])
+        .chain(textures)
         .all(|matrix| finite(matrix));
     let lighting = setup.lighting.as_ref().is_none_or(|l| {
         let m = &l.material;
@@ -1516,23 +1514,24 @@ fn card_vertex(words: &mut Vec<u32>, layout: &Layout, v: &Vertex) {
 /// every triangle's three, the one that gives a flat triangle its
 /// colour first. With them the list's kind and the vertices of one.
 fn as_list(kind: u32, n: usize) -> (u32, usize, Vec<usize>) {
+    use pipeline::{LINELIST, LINESTRIP, POINTLIST, TRIANGLELIST, TRIANGLESTRIP};
     let mut list = Vec::new();
     match kind {
-        1 => list.extend(0..n),
-        2 => list.extend(0..n - n % 2),
-        3 => (1..n).for_each(|i| list.extend([i - 1, i])),
-        4 => list.extend(0..n - n % 3),
+        POINTLIST => list.extend(0..n),
+        LINELIST => list.extend(0..n - n % 2),
+        LINESTRIP => (1..n).for_each(|i| list.extend([i - 1, i])),
+        TRIANGLELIST => list.extend(0..n - n % 3),
         // Every other triangle of a strip is wound the other way.
-        5 => (2..n).for_each(|i| match i % 2 {
+        TRIANGLESTRIP => (2..n).for_each(|i| match i % 2 {
             0 => list.extend([i - 2, i - 1, i]),
             _ => list.extend([i - 2, i, i - 1]),
         }),
         _ => (2..n).for_each(|i| list.extend([i - 1, i, 0])),
     }
     match kind {
-        1 => (1, 1, list),
-        2 | 3 => (2, 2, list),
-        _ => (4, 3, list),
+        POINTLIST => (POINTLIST, 1, list),
+        LINELIST | LINESTRIP => (LINELIST, 2, list),
+        _ => (TRIANGLELIST, 3, list),
     }
 }
 
