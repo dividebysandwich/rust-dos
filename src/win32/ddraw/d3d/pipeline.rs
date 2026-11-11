@@ -460,7 +460,6 @@ pub struct Lighting {
     pub ambient: [f32; 4],
     pub specular: bool,
     pub local_viewer: bool,
-    pub normalize: bool,
     /// Whether the vertex's colors stand for the material's, and which
     /// for each of diffuse, specular, ambient and emissive (`MCS_`).
     pub color_vertex: bool,
@@ -564,8 +563,14 @@ pub struct Setup {
     pub cull: u32,
     pub fill: u32,
     pub shade: u32,
-    /// The texture coordinates each of the card's two stages takes.
-    pub tex_index: [usize; 2],
+    /// What each of a processed vertex's eight slots of texture
+    /// coordinates holds. For a draw, slot n is stage n's coordinates
+    /// (`Coord::of`); for ProcessVertices, set n of the vertices it
+    /// writes (`Setup::for_sets`).
+    pub coords: [Coord; 8],
+    /// D3DRENDERSTATE_NORMALIZENORMALS, for the normals that light
+    /// vertices and that texture coordinates are made from.
+    pub normalize: bool,
     /// Geometry blending, if the vertices are blended: `world` is then
     /// the first world matrix only for tweening.
     pub blend: Option<Blend>,
@@ -586,9 +591,139 @@ impl Default for Setup {
             cull: CULL_CCW,
             fill: 3,
             shade: 2,
-            tex_index: [0, 1],
+            coords: std::array::from_fn(Coord::set),
+            normalize: false,
             blend: None,
         }
+    }
+}
+
+/// D3DTTFF_PROJECTED in D3DTSS_TEXTURETRANSFORMFLAGS.
+pub const TTFF_PROJECTED: u32 = 0x100;
+
+/// Where the texture coordinates in a slot of a processed vertex come
+/// from: a stage's D3DTSS_TEXCOORDINDEX and
+/// D3DTSS_TEXTURETRANSFORMFLAGS, and its texture matrix.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Coord {
+    /// The vertex's coordinate set.
+    pub set: usize,
+    /// D3DTSS_TCI_, the index's upper half: 0 for the set, or the
+    /// camera-space normal (1), position (2) or reflection vector (3),
+    /// or Direct3D 8's sphere map (4), which Direct3D makes the
+    /// coordinates from. A transformed vertex has none of them, and
+    /// keeps its set.
+    pub generate: u32,
+    /// The texture matrix the coordinates go through, and how many
+    /// come out (D3DTTFF_COUNT1 to 4). Not for a transformed vertex.
+    pub matrix: Option<(Matrix, usize)>,
+    /// D3DTTFF_PROJECTED: the coordinate the others are divided by at
+    /// each pixel, which is the last one counted, or the fourth with
+    /// no count.
+    pub projected: Option<usize>,
+}
+
+impl Coord {
+    /// The vertex's set `set` as it is.
+    pub fn set(set: usize) -> Coord {
+        Coord {
+            set,
+            generate: 0,
+            matrix: None,
+            projected: None,
+        }
+    }
+
+    /// From a stage's TEXCOORDINDEX `index`, its TEXTURETRANSFORMFLAGS
+    /// `flags` and its texture matrix.
+    pub fn of(index: u32, flags: u32, matrix: &Matrix) -> Coord {
+        let count = (flags & 0xFF).min(4) as usize;
+        Coord {
+            set: (index & 7) as usize,
+            generate: index >> 16,
+            matrix: (count > 0).then_some((*matrix, count)),
+            projected: (flags & TTFF_PROJECTED != 0).then_some(match count {
+                0 => 3,
+                count => count - 1,
+            }),
+        }
+    }
+
+    /// Whether the slot is more than a set of the vertex.
+    fn made(&self) -> bool {
+        self.generate != 0 || self.matrix.is_some()
+    }
+
+    /// The coordinates of the slot for the vertex `v` at `eye` in
+    /// camera space with the normal `normal` there, as the ToadForce
+    /// makes them (`toadforce::raster::geometry::coordinates`): the set
+    /// or what is generated, with a 1 after its last number, through
+    /// the matrix. Of what comes out the first `count` stay.
+    fn make(&self, layout: &Layout, v: &Vertex, eye: [f32; 3], normal: [f32; 3]) -> [f32; 4] {
+        // A slot that is no more than a set, as nearly every one of
+        // every draw is, is a copy.
+        if !self.made() {
+            return self.keep(layout, v);
+        }
+        let matrix = self.matrix.as_ref().map(|(m, count)| (m, *count));
+        let set = (v.tex[self.set & 7], self.numbers(layout));
+        crate::toadforce::raster::geometry::coordinates(self.generate, set, eye, normal, matrix)
+    }
+
+    /// How many numbers the slot's set has in a vertex of `layout`: 0
+    /// for a set the vertex doesn't have.
+    fn numbers(&self, layout: &Layout) -> usize {
+        match self.set < layout.textures {
+            true => layout.tex[self.set].1.clamp(1, 4) as usize,
+            false => 0,
+        }
+    }
+
+    /// The vertex's set for the slot, as a transformed vertex keeps it
+    /// and as `coordinates` gives a set with no matrix: its numbers,
+    /// 0 for those it doesn't have, and 1 for a fourth it doesn't have.
+    fn keep(&self, layout: &Layout, v: &Vertex) -> [f32; 4] {
+        let numbers = self.numbers(layout);
+        let mut c = [0.0, 0.0, 0.0, 1.0];
+        c[..numbers].copy_from_slice(&v.tex[self.set & 7][..numbers]);
+        c
+    }
+
+    /// The coordinates `c` of the slot as a card takes a stage's: the
+    /// two (or, for a cube, three) it samples at, and in the fourth
+    /// what it divides them by at each pixel, 1 unless the stage is
+    /// projected.
+    fn sampled(&self, c: [f32; 4]) -> [f32; 4] {
+        match self.projected {
+            None => [c[0], c[1], c[2], 1.0],
+            Some(by) => std::array::from_fn(|i| match i {
+                3 => c[by],
+                i if i < by => c[i],
+                _ => 0.0,
+            }),
+        }
+    }
+}
+
+impl Setup {
+    /// The setup for ProcessVertices, whose vertices keep their sets:
+    /// slot n is set n. A stage that generates its coordinates or has
+    /// a texture matrix puts them in the set its index names, where a
+    /// draw of the vertices it wrote, which are transformed, finds
+    /// them. The first such stage has a set.
+    pub fn for_sets(mut self) -> Setup {
+        let stages = self.coords;
+        self.coords = std::array::from_fn(Coord::set);
+        for stage in stages.iter().filter(|c| c.made()) {
+            let slot = &mut self.coords[stage.set & 7];
+            if !slot.made() {
+                *slot = Coord {
+                    projected: None,
+                    ..*stage
+                };
+            }
+        }
+        self
     }
 }
 
@@ -606,6 +741,7 @@ pub struct Processed {
     pub diffuse: [f32; 4],
     /// The specular color, its alpha the fog factor.
     pub specular: [f32; 4],
+    /// The texture coordinates of each slot (`Setup::coords`).
     pub tex: [[f32; 4]; 8],
     /// The planes it is outside of (D3DCLIP_).
     pub code: u32,
@@ -668,7 +804,9 @@ impl Processed {
 
 /// A vertex on the screen, as the card's triangle setup takes it: x, y,
 /// z (0 to 1), rhw, the colors (the specular's alpha the fog factor),
-/// and the coordinates of the textures of the card's two stages.
+/// and the coordinates of the textures of the card's two stages, each
+/// with the number it is divided by at each pixel in the fourth place
+/// (1 unless the stage's coordinates are projected).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ScreenVertex {
     pub x: f32,
@@ -677,7 +815,7 @@ pub struct ScreenVertex {
     pub rhw: f32,
     pub diffuse: u32,
     pub specular: u32,
-    pub tex: [[f32; 2]; 2],
+    pub tex: [[f32; 4]; 2],
 }
 
 /// What draws the primitives that come out of the pipeline: the card.
@@ -724,7 +862,10 @@ struct EyeLight {
 /// Run `input`, of `layout`, through transform, lighting and fog.
 pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processed> {
     if layout.rhw {
-        return input.iter().map(|v| transformed(v, layout)).collect();
+        return input
+            .iter()
+            .map(|v| transformed(setup, v, layout))
+            .collect();
     }
     let world_view = multiply(&setup.world, &setup.view);
     let all = multiply(&world_view, &setup.projection);
@@ -760,7 +901,10 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
         Some(Blend::Tween(f)) => Some(f),
         _ => None,
     };
+    // The normal is worked out for lighting and for the coordinates
+    // made from it.
     let lit = setup.lighting.is_some();
+    let normal = lit || setup.coords.iter().any(|c| matches!(c.generate, 1 | 3 | 4));
     input
         .iter()
         .map(|v| {
@@ -777,12 +921,12 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
             // where it is in camera space and its normal there.
             let (world, clip, eye, n) = match blended.as_mut() {
                 Some(b) => {
-                    let (w, n) = b.place(v, lit);
+                    let (w, n) = b.place(v, normal);
                     let e = transform(w, &setup.view);
                     (w, transform(w, &b.view_projection), [e[0], e[1], e[2]], n)
                 }
                 None => {
-                    let n = if lit {
+                    let n = if normal {
                         times(v.normal, &normals)
                     } else {
                         [0.0; 3]
@@ -796,9 +940,10 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
                     (w, transform(p, &all), eye, n)
                 }
             };
+            let n = if setup.normalize { normalize(n) } else { n };
             let mut out = Processed {
                 clip,
-                tex: v.tex,
+                tex: std::array::from_fn(|slot| setup.coords[slot].make(layout, v, eye, n)),
                 ..Processed::default()
             };
             for (i, plane) in setup.planes.iter().take(6).enumerate() {
@@ -809,7 +954,6 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
             }
             match &setup.lighting {
                 Some(l) => {
-                    let n = if l.normalize { normalize(n) } else { n };
                     let (d, s) = light_vertex(l, &lights, v, eye, n);
                     out.diffuse = d;
                     out.specular = s;
@@ -944,15 +1088,16 @@ pub fn at_clip_coordinates(
     out
 }
 
-/// A transformed vertex, as it is.
-fn transformed(v: &Vertex, _layout: &Layout) -> Processed {
+/// A transformed vertex, as it is, with its sets in the slots that
+/// take them.
+fn transformed(setup: &Setup, v: &Vertex, layout: &Layout) -> Processed {
     Processed {
         clip: [v.position[0], v.position[1], v.position[2], 1.0],
         rhw: v.position[3],
         tl: true,
         diffuse: rgba(v.diffuse.unwrap_or(0xFFFF_FFFF)),
         specular: rgba(v.specular.unwrap_or(0xFF00_0000)),
-        tex: v.tex,
+        tex: std::array::from_fn(|slot| setup.coords[slot].keep(layout, v)),
         ..Processed::default()
     }
 }
@@ -1367,10 +1512,7 @@ fn screen(setup: &Setup, p: &Processed) -> ScreenVertex {
     } else {
         setup.view_map.screen(p.clip)
     };
-    let tex = |stage: usize| {
-        let t = p.tex[setup.tex_index[stage] & 7];
-        [t[0], t[1]]
-    };
+    let tex = |stage: usize| setup.coords[stage].sampled(p.tex[stage]);
     ScreenVertex {
         x,
         y,
@@ -1693,6 +1835,102 @@ mod tests {
             position: [x, y, z, 1.0],
             ..Vertex::default()
         }
+    }
+
+    /// A matrix that is 0 but for `set`: each a place and its number.
+    fn sparse(set: &[(usize, f32)]) -> Matrix {
+        let mut m = [0.0; 16];
+        for &(at, n) in set {
+            m[at] = n;
+        }
+        m
+    }
+
+    #[test]
+    fn a_slot_takes_a_set_or_what_is_made_from_the_vertex() {
+        // XYZ, a normal and one set of two coordinates.
+        let layout = Layout::of(0x002 | 0x010 | 0x100).unwrap();
+        let mut v = vertex(1.0, 2.0, 4.0);
+        v.normal = [0.0, 0.0, -1.0];
+        v.tex[0] = [0.25, 0.75, 0.0, 0.0];
+        // The view moves the vertex 1 along x. The texture matrix
+        // doubles what goes in and adds its fourth number, which is the
+        // 1 after a position's three: a set of two has its 1 in the
+        // third place, where this matrix adds nothing.
+        let double = sparse(&[
+            (0, 2.0),
+            (5, 2.0),
+            (10, 2.0),
+            (12, 1.0),
+            (13, 1.0),
+            (14, 1.0),
+        ]);
+        let setup = Setup {
+            view: sparse(&[(0, 1.0), (5, 1.0), (10, 1.0), (15, 1.0), (12, 1.0)]),
+            coords: [
+                Coord::of(0, 0, &double),
+                Coord::of(0, 2, &double),
+                // The camera-space position, and the normal.
+                Coord::of(0x2_0000, 3, &double),
+                Coord::of(0x1_0000, 0, &double),
+                // A set the vertex doesn't have.
+                Coord::of(1, 0, &double),
+                Coord::set(5),
+                Coord::set(6),
+                Coord::set(7),
+            ],
+            ..Setup::default()
+        };
+        let p = process(&setup, &[v], &layout)[0];
+        assert_eq!(p.tex[0], [0.25, 0.75, 0.0, 1.0]);
+        assert_eq!(p.tex[1], [0.5, 1.5, 0.0, 1.0]);
+        assert_eq!(p.tex[2], [5.0, 5.0, 9.0, 1.0]);
+        assert_eq!(p.tex[3], [0.0, 0.0, -1.0, 1.0]);
+        assert_eq!(p.tex[4], [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn a_projected_stage_gives_the_card_its_divisor_last() {
+        let m = Setup::default().world;
+        // D3DTTFF_COUNT3 | PROJECTED divides by the third, and
+        // PROJECTED alone by the fourth.
+        assert_eq!(
+            Coord::of(0, 3 | 0x100, &m).sampled([2.0, 4.0, 8.0, 1.0]),
+            [2.0, 4.0, 0.0, 8.0]
+        );
+        assert_eq!(
+            Coord::of(0, 0x100, &m).sampled([2.0, 4.0, 8.0, 16.0]),
+            [2.0, 4.0, 8.0, 16.0]
+        );
+        assert_eq!(
+            Coord::of(0, 3, &m).sampled([2.0, 4.0, 8.0, 16.0]),
+            [2.0, 4.0, 8.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn process_vertices_puts_made_coordinates_in_the_set_the_stage_names() {
+        let m = Setup::default().world;
+        let mut stages: [Coord; 8] = std::array::from_fn(Coord::set);
+        // Stage 0 takes set 1 as it is, stage 1 makes set 1 from the
+        // position, and stage 2 would make it from the normal.
+        stages[0] = Coord::of(1, 0, &m);
+        stages[1] = Coord::of(1 | 0x2_0000, 2 | 0x100, &m);
+        stages[2] = Coord::of(1 | 0x1_0000, 0, &m);
+        let setup = Setup {
+            coords: stages,
+            ..Setup::default()
+        }
+        .for_sets();
+        assert_eq!(setup.coords[0], Coord::set(0));
+        assert_eq!(
+            setup.coords[1],
+            Coord {
+                projected: None,
+                ..stages[1]
+            }
+        );
+        assert_eq!(setup.coords[2], Coord::set(2));
     }
 
     fn near(a: f32, b: f32) -> bool {
@@ -2225,13 +2463,12 @@ mod tests {
             direction: [-1.0, 0.0, 0.0],
             ..Light::default()
         };
-        let lighting = |normalize| Lighting {
+        let lighting = Lighting {
             lights: vec![light],
             material: Material {
                 diffuse: [1.0, 1.0, 1.0, 1.0],
                 ..Material::default()
             },
-            normalize,
             ..Lighting::default()
         };
         let turn = [
@@ -2242,10 +2479,10 @@ mod tests {
         v.normal = [1.0, 0.0, 0.0];
         v.weights[0] = 0.5;
         let layout = Layout::of_d3d8(0x6 | FVF_NORMAL).unwrap();
-        setup.lighting = Some(lighting(false));
+        setup.lighting = Some(lighting.clone());
         let out = process(&setup, &[v], &layout);
         assert!(near(out[0].diffuse[0], 0.5));
-        setup.lighting = Some(lighting(true));
+        setup.normalize = true;
         let out = process(&setup, &[v], &layout);
         assert!(near(out[0].diffuse[0], 0.5f32.sqrt()));
 
@@ -2254,7 +2491,7 @@ mod tests {
         let mut stretch = IDENTITY;
         stretch[0] = 2.0;
         let mut setup = blended(1, false, vec![stretch, IDENTITY]);
-        setup.lighting = Some(lighting(false));
+        setup.lighting = Some(lighting);
         v.weights[0] = 1.0;
         let out = process(&setup, &[v], &layout);
         assert!(near(out[0].diffuse[0], 0.5));

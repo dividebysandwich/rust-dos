@@ -21,8 +21,10 @@
 //!
 //! The card also makes each stage's texture coordinates as the
 //! stage's `TEXCOORDINDEX` and `TEXTURETRANSFORMFLAGS` say, generated
-//! and through the texture matrix, which the pipeline doesn't do
-//! (#950).
+//! and through the texture matrix. For the draws it keeps, the
+//! pipeline makes them the same way (`pipeline::Coord`) and the screen
+//! vertices carry each stage's own, with what a projected stage
+//! divides them by.
 //!
 //! The pipeline keeps the draws the card can't take (`can_transform`):
 //! blended and tweened vertices, clip status and extents the program
@@ -70,10 +72,10 @@ use crate::toadforce::level1::{
 use crate::toadforce::{caps, regs};
 use crate::win32::screen;
 
-/// The textures a draw has at once: the sets of texture coordinates
-/// the pipeline gives a screen vertex. The card takes more
-/// (`caps::TEXTURES_AT_ONCE`), which the device gets when every draw
-/// that uses them is one the card transforms itself (#948).
+/// The textures a draw has at once: the stages whose texture
+/// coordinates the pipeline gives a screen vertex. The card takes more
+/// (`caps::TEXTURES_AT_ONCE`), which the device gets when a screen
+/// vertex carries as many (#948).
 pub const UNITS: u32 = 2;
 
 /// The band the pipeline clips what the card draws to. The card takes
@@ -87,9 +89,18 @@ pub const TNL_LIGHTS: u32 = caps::LIGHTS;
 /// specular colour, and two sets of two texture coordinates.
 const FVF: u32 = 0x004 | 0x040 | 0x080 | 0x200;
 const VERTEX_WORDS: usize = 10;
-/// The most vertices one `DRAW` holds, a command being 65535 words at
-/// the most: a multiple of two and of three.
-const DRAW_VERTICES: usize = 6000;
+/// The layout where a stage's coordinates are projected: both sets
+/// have four, the last what the card divides the others by.
+const FVF_PROJECTED: u32 = FVF | 2 << 16 | 2 << 18;
+const VERTEX_WORDS_PROJECTED: usize = 14;
+
+/// Whether the device `d`'s stage `stage` is one of the first, whose
+/// coordinates the pipeline gives a screen vertex, and they are
+/// projected.
+fn projected(d: &Device, stage: u32) -> bool {
+    stage < UNITS
+        && d.stage(stage, states::TSS_TEXTURETRANSFORMFLAGS) & pipeline::TTFF_PROJECTED != 0
+}
 
 const DDPF_ALPHA: u32 = 0x2;
 const DDPF_STENCILBUFFER: u32 = 0x4000;
@@ -647,7 +658,9 @@ fn render_value(d: &Device, def: &Def, setup: &Setup, depth: Option<Format>, lit
         RS_AMBIENT => lighting.map_or(0, |l| pipeline::color(l.ambient)),
         RS_COLORVERTEX => lighting.is_some_and(|l| l.color_vertex) as u32,
         RS_LOCALVIEWER => lighting.is_some_and(|l| l.local_viewer) as u32,
-        RS_NORMALIZENORMALS => lighting.is_some_and(|l| l.normalize) as u32,
+        // For the normals that light vertices and that texture
+        // coordinates are made from, with lighting or without.
+        RS_NORMALIZENORMALS => setup.normalize as u32,
         RS_DIFFUSEMATERIALSOURCE => source(0),
         RS_SPECULARMATERIALSOURCE => source(1),
         RS_AMBIENTMATERIALSOURCE => source(2),
@@ -698,8 +711,11 @@ fn stage_value(d: &Device, at: u32, def: &Def, diffuse_alpha: bool, lit: bool) -
         // The card makes the coordinates of a vertex it transforms as
         // the device's states say.
         TSS_TEXCOORDINDEX | TSS_TEXTURETRANSFORMFLAGS if lit => value,
-        // The pipeline gives each of the first stages its coordinates.
+        // The pipeline gives each of the first stages its coordinates,
+        // generated and through the texture matrix, and with them what
+        // a projected stage divides them by, as the fourth.
         TSS_TEXCOORDINDEX => at.min(UNITS - 1),
+        TSS_TEXTURETRANSFORMFLAGS if projected(d, at) => TRANSFORM_PROJECTED | 4,
         TSS_TEXTURETRANSFORMFLAGS => 0,
         TSS_ALPHAARG1 if at == 0 && diffuse_alpha => ARG_DIFFUSE,
         // The device has Direct3D 7's filter values: the two cubic
@@ -742,6 +758,19 @@ pub struct Card {
     target: (u32, u32, u32),
     /// The rectangle drawn into: left, top, right, bottom.
     clip: [u32; 4],
+    /// Whether a stage's coordinates are projected, and the vertices
+    /// carry what they are divided by (`FVF_PROJECTED`).
+    projected: bool,
+}
+
+impl Card {
+    /// The layout of the screen vertices of a draw, and its words.
+    fn layout(&self) -> (u32, usize) {
+        match self.projected {
+            true => (FVF_PROJECTED, VERTEX_WORDS_PROJECTED),
+            false => (FVF, VERTEX_WORDS),
+        }
+    }
 }
 
 /// Whether the device `d` can be drawn by the card now. The card's
@@ -962,6 +991,7 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
             target.colour.format.bytes(),
         ),
         clip: [left, top, right.max(left), bottom.max(top)],
+        projected: !lit && (0..UNITS).any(|stage| projected(d, stage)),
     })
 }
 
@@ -1323,7 +1353,7 @@ impl Raster<'_> {
             return;
         }
         let len = self.words.len() - self.header;
-        let count = (len - 4) / VERTEX_WORDS;
+        let count = (len - 4) / self.card.layout().1;
         self.words[self.header] = crate::toadforce::command::header(level1::DRAW, len);
         self.words[self.header + 3] = count as u32;
         self.primitive = 0;
@@ -1332,13 +1362,18 @@ impl Raster<'_> {
     /// Add `vertices` to a command of `primitive`, a new one if the one
     /// being filled is of another or full.
     fn add(&mut self, primitive: u32, vertices: &[ScreenVertex]) {
-        let full = self.words.len() - self.header >= 4 + DRAW_VERTICES * VERTEX_WORDS;
+        let (fvf, vertex_words) = self.card.layout();
+        // A command holds what fits its length field, whatever the size
+        // of a vertex: a point, a line or a triangle is never split.
+        let full =
+            self.words.len() - self.header + vertices.len() * vertex_words > COMMAND_WORDS;
         if self.primitive != primitive || full {
             self.close();
             self.primitive = primitive;
             self.header = self.words.len();
-            self.words.extend([0, primitive, FVF, 0]);
+            self.words.extend([0, primitive, fvf, 0]);
         }
+        let numbers = if self.card.projected { 4 } else { 2 };
         for v in vertices {
             self.words.extend([
                 v.x.to_bits(),
@@ -1347,11 +1382,11 @@ impl Raster<'_> {
                 v.rhw.to_bits(),
                 v.diffuse,
                 v.specular,
-                v.tex[0][0].to_bits(),
-                v.tex[0][1].to_bits(),
-                v.tex[1][0].to_bits(),
-                v.tex[1][1].to_bits(),
             ]);
+            for set in &v.tex {
+                self.words
+                    .extend(set[..numbers].iter().map(|n| n.to_bits()));
+            }
         }
     }
 

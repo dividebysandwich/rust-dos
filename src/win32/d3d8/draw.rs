@@ -136,20 +136,33 @@ fn registers(
 fn decl_vertices(decl: &Decl, regs: &[[[f32; 4]; REGISTERS]]) -> (Layout, Vec<Vertex>) {
     let input = |r: u32| decl.inputs.iter().find(|i| i.reg == r);
     let has = |r: u32| input(r).is_some();
-    let layout = Layout {
+    // How many values a register of the type `kind` loads.
+    let values = |kind: u32| match kind {
+        0 => 1,
+        1 | 6 => 2,
+        2 => 3,
+        _ => 4,
+    };
+    let mut layout = Layout {
         normal: has(REG_NORMAL).then_some(0),
         diffuse: has(REG_DIFFUSE).then_some(0),
         specular: has(REG_SPECULAR).then_some(0),
-        // As many weights as the register's type has values.
-        weights: input(REG_BLENDWEIGHT).map_or(0, |i| match i.kind {
-            0 => 1,
-            1 | 6 => 2,
-            2 => 3,
-            _ => 4,
-        }),
+        weights: input(REG_BLENDWEIGHT).map_or(0, |i| values(i.kind)),
         indices: has(REG_BLENDINDICES).then_some(0),
         ..Layout::default()
     };
+    // The texture coordinate sets up to the last the declaration loads,
+    // each with the values of its register's type: a texture matrix puts
+    // its 1 after the last of them. A set it doesn't load has the
+    // register's four, 0, 0, 0 and 1.
+    layout.textures = (0..8)
+        .rev()
+        .find(|&t| has(REG_TEXCOORD0 + t))
+        .map_or(0, |t| t as usize + 1);
+    for t in 0..layout.textures {
+        let numbers = input(REG_TEXCOORD0 + t as u32).map_or(4, |i| values(i.kind));
+        layout.tex[t] = (0, numbers);
+    }
     let (position2, normal2) = (has(REG_POSITION2), has(REG_NORMAL2));
     let xyz = |v: [f32; 4]| [v[0], v[1], v[2]];
     let vertices = regs
@@ -530,7 +543,10 @@ pub fn process_vertices(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let vertices: Vec<Vertex> = (0..count)
         .map(|k| layout.read(vertex_bytes(&bytes, src.stride, k, len)))
         .collect();
-    let Some(mut setup) = inner_draw::setup(cpu, Pass::Process, d.inner, 8, &layout, 0) else {
+    // The vertices written keep their sets, as Direct3D 7's do.
+    let Some(mut setup) = inner_draw::setup(cpu, Pass::Process, d.inner, 8, &layout, 0)
+        .map(pipeline::Setup::for_sets)
+    else {
         return Some(D3DERR_INVALIDCALL);
     };
     setup.blend = blend(cpu, id, &d, &layout);
@@ -578,4 +594,43 @@ pub fn draw_patch(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 pub fn delete_patch(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     hr!(this_device(cpu, args[0]));
     Some(D3DERR_INVALIDCALL)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shader::Input;
+    use super::*;
+
+    #[test]
+    fn a_declarations_texture_coordinates_reach_the_pipeline() {
+        // A position, and the second set of two coordinates
+        // (D3DVSDT_FLOAT2).
+        let decl = Decl {
+            inputs: vec![
+                Input {
+                    kind: 2,
+                    reg: REG_POSITION,
+                    ..Input::default()
+                },
+                Input {
+                    offset: 12,
+                    kind: 1,
+                    reg: REG_TEXCOORD0 + 1,
+                    ..Input::default()
+                },
+            ],
+            ..Decl::default()
+        };
+        let mut regs = [[0.0, 0.0, 0.0, 1.0]; REGISTERS];
+        regs[REG_TEXCOORD0 as usize + 1] = [0.25, 0.75, 0.0, 1.0];
+        let (layout, vertices) = decl_vertices(&decl, &[regs]);
+        assert_eq!(layout.textures, 2);
+        assert_eq!(layout.tex[1].1, 2);
+        let setup = pipeline::Setup::default();
+        let p = pipeline::process(&setup, &vertices, &layout);
+        assert_eq!(p[0].tex[1], [0.25, 0.75, 0.0, 1.0]);
+        // The first set, which the declaration doesn't load, is the
+        // register's.
+        assert_eq!(p[0].tex[0], [0.0, 0.0, 0.0, 1.0]);
+    }
 }

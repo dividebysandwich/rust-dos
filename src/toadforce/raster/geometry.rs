@@ -204,6 +204,68 @@ impl Fog {
     }
 }
 
+/// The texture coordinates a slot makes: the first `numbers` of `set`
+/// when `generate` (D3DTSS_TCI_, the index's upper half) is 0, or the
+/// camera-space normal (1), position (2), reflection vector (3) or
+/// sphere map (4) of the vertex at `eye` in camera space with the
+/// normal `normal` there. With a texture `matrix` and its count, a 1
+/// goes after the last number, the matrix follows, and of what comes
+/// out the counted numbers stay; a fourth number not counted, or not
+/// there without a matrix, is 1. The Direct3D pipeline makes its
+/// coordinates with this too (`win32::ddraw::d3d::pipeline::Coord`).
+pub fn coordinates(
+    generate: u32,
+    (set, numbers): ([f32; 4], usize),
+    eye: [f32; 3],
+    normal: [f32; 3],
+    matrix: Option<(&Matrix, usize)>,
+) -> [f32; 4] {
+    let (from, numbers): ([f32; 4], usize) = match generate {
+        0 => {
+            let mut c = [0.0; 4];
+            c[..numbers.min(4)].copy_from_slice(&set[..numbers.min(4)]);
+            (c, numbers.min(4))
+        }
+        1 => ([normal[0], normal[1], normal[2], 0.0], 3),
+        2 => ([eye[0], eye[1], eye[2], 0.0], 3),
+        generate => {
+            // The eye's line of sight to the vertex, thrown back by the
+            // surface.
+            let sight = normalize(eye);
+            let twice = 2.0 * dot(normal, sight);
+            let r: [f32; 3] = std::array::from_fn(|i| sight[i] - twice * normal[i]);
+            if generate == 3 {
+                ([r[0], r[1], r[2], 0.0], 3)
+            } else {
+                let z = 1.0 - r[2];
+                let m = 2.0 * (r[0] * r[0] + r[1] * r[1] + z * z).sqrt();
+                ([r[0] / m + 0.5, r[1] / m + 0.5, 0.0, 0.0], 2)
+            }
+        }
+    };
+    let mut c = from;
+    match matrix {
+        Some((matrix, count)) => {
+            // The number after a set's last is 1.
+            if numbers < 4 {
+                c[numbers] = 1.0;
+            }
+            let c = transform(c, matrix);
+            std::array::from_fn(|i| match i {
+                i if i < count => c[i],
+                3 => 1.0,
+                _ => 0.0,
+            })
+        }
+        None => {
+            if numbers < 4 {
+                c[3] = 1.0;
+            }
+            c
+        }
+    }
+}
+
 /// Where a slot's coordinates come from, and the matrix they go
 /// through.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -433,54 +495,21 @@ impl Setup {
         }
 
         for (slot, out) in self.slots.iter().zip(&mut v.tex) {
-            let (from, numbers): ([f32; 4], usize) = match slot.generate {
-                0 => {
-                    let (at, numbers) = slot.set;
-                    let mut c = [0.0; 4];
-                    for (i, c) in c.iter_mut().enumerate().take(numbers as usize) {
-                        *c = number(at as usize + i);
-                    }
-                    (c, numbers as usize)
+            let (at, numbers) = slot.set;
+            let mut set = [0.0; 4];
+            if slot.generate == 0 {
+                for (i, c) in set.iter_mut().enumerate().take(numbers as usize) {
+                    *c = number(at as usize + i);
                 }
-                1 => ([normal[0], normal[1], normal[2], 0.0], 3),
-                2 => ([eye[0], eye[1], eye[2], 0.0], 3),
-                generate => {
-                    // The eye's line of sight to the vertex, thrown
-                    // back by the surface.
-                    let sight = normalize(eye);
-                    let twice = 2.0 * dot(normal, sight);
-                    let r: [f32; 3] = std::array::from_fn(|i| sight[i] - twice * normal[i]);
-                    if generate == 3 {
-                        ([r[0], r[1], r[2], 0.0], 3)
-                    } else {
-                        let z = 1.0 - r[2];
-                        let m = 2.0 * (r[0] * r[0] + r[1] * r[1] + z * z).sqrt();
-                        ([r[0] / m + 0.5, r[1] / m + 0.5, 0.0, 0.0], 2)
-                    }
-                }
-            };
-            *out = match &slot.matrix {
-                Some((matrix, count)) => {
-                    // The number after a set's last is 1.
-                    let mut c = from;
-                    if numbers < 4 {
-                        c[numbers] = 1.0;
-                    }
-                    let c = transform(c, matrix);
-                    std::array::from_fn(|i| match i {
-                        i if i < *count as usize => c[i],
-                        3 => 1.0,
-                        _ => 0.0,
-                    })
-                }
-                None => {
-                    let mut c = from;
-                    if numbers < 4 {
-                        c[3] = 1.0;
-                    }
-                    c
-                }
-            };
+            }
+            let matrix = slot.matrix.as_ref().map(|(m, count)| (m, *count as usize));
+            *out = coordinates(
+                slot.generate as u32,
+                (set, numbers as usize),
+                eye,
+                normal,
+                matrix,
+            );
         }
 
         if let Some(size) = self.point_size {

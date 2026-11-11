@@ -315,7 +315,9 @@ pub const TSS_MINFILTER: u32 = 17;
 pub const TSS_MIPFILTER: u32 = 18;
 pub const TSS_MIPMAPLODBIAS: u32 = 19;
 pub const TSS_MAXANISOTROPY: u32 = 21;
-pub const TSS_LAST: u32 = 24;
+/// D3DTSS_TEXTURETRANSFORMFLAGS, the last of Direct3D 7's.
+pub const TSS_TEXTURETRANSFORMFLAGS: u32 = 24;
+pub const TSS_LAST: u32 = TSS_TEXTURETRANSFORMFLAGS;
 pub const STAGES: u32 = 8;
 
 pub const TOP_DISABLE: u32 = 1;

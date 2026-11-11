@@ -42,7 +42,7 @@ use super::super::device::{
     TOP_BLENDDIFFUSEALPHA, TOP_BLENDTEXTUREALPHA, TOP_DISABLE, TOP_MODULATE, TOP_SELECTARG1,
     TOP_SELECTARG2, TOP_SUBTRACT, TSS_ADDRESSU, TSS_ADDRESSV, TSS_ALPHAARG1, TSS_ALPHAARG2,
     TSS_ALPHAOP, TSS_COLORARG1, TSS_COLORARG2, TSS_COLOROP, TSS_MAGFILTER, TSS_MINFILTER,
-    TSS_MIPFILTER,
+    TSS_MIPFILTER, TSS_TEXTURETRANSFORMFLAGS,
 };
 use super::super::pipeline::{self, Rasterizer, ScreenVertex, Setup};
 use super::super::shadow::Unplaced;
@@ -326,8 +326,12 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         api::fog_mode(cpu, api::FOG_DISABLE);
     }
     api::fog_color_value(cpu, d.state(RS_FOGCOLOR) & 0xFF_FFFF);
-    // The texture units' W apart from the card's when that is the fog.
-    let hint = if fog_w {
+    // The texture units' W apart from the card's when that is the fog,
+    // and when a stage's coordinates are projected: its unit's W is
+    // then what they are divided by, times the card's.
+    let projected = (0..2)
+        .any(|stage| d.stage(stage, TSS_TEXTURETRANSFORMFLAGS) & pipeline::TTFF_PROJECTED != 0);
+    let hint = if fog_w || projected {
         api::STWHINT_W_DIFF_TMU0 | api::STWHINT_W_DIFF_TMU1
     } else {
         0
@@ -1607,11 +1611,13 @@ impl Raster<'_> {
         let mut tmu = [TmuVertex::default(); 2];
         for (t, slot) in tmu.iter_mut().zip(self.card.tmus) {
             if let Some((stage, [sw, sh])) = slot {
-                let [u, vv] = v.tex[stage];
+                // What the stage's coordinates are divided by goes
+                // into the unit's own 1/w.
+                let [u, vv, _, q] = v.tex[stage];
                 *t = TmuVertex {
                     sow: u * sw * rhw,
                     tow: vv * sh * rhw,
-                    oow: rhw,
+                    oow: q * rhw,
                 };
             } else {
                 t.oow = rhw;
