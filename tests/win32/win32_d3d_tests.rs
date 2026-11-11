@@ -4051,9 +4051,10 @@ fn a_toadforce_draws_with_four_textures_each_at_its_own_coordinates() {
         };
         assert_rgb(&draw(blue), 16, 16, [0, 0, 255], 8);
         assert_rgb(&draw(green), 16, 16, [0, 255, 0], 8);
+        let shot = draw(red);
+        assert_rgb(&shot, 16, 16, [255, 0, 0], 8);
         // Past the quad.
-        assert_rgb(&draw(red), 48, 16, [0, 0, 0], 0);
-        assert_rgb(&draw(red), 16, 16, [255, 0, 0], 8);
+        assert_rgb(&shot, 48, 16, [0, 0, 0], 0);
     }
 }
 
