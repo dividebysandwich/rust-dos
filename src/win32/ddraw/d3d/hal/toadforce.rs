@@ -32,11 +32,11 @@
 //! card's commands lack, and screen vertices, which need no transform.
 //! Execute buffers and ProcessVertices are the pipeline's too. For
 //! those the pipeline has transformed, lit, clipped and culled the
-//! vertices, so the card gets screen vertices with the two sets of
-//! texture coordinates the pipeline works out, one for each of the
-//! first two stages. `Raster` collects them into `DRAW` commands and
-//! hands the card all of a batch's at once, which the card draws on
-//! its threads.
+//! vertices, so the card gets screen vertices with the sets of texture
+//! coordinates the pipeline works out, one for each stage in use of
+//! the card's four textures (`Card::layout`). `Raster` collects them
+//! into `DRAW` commands and hands the card all of a batch's at once,
+//! which the card draws on its threads.
 //!
 //! A texture surface in video memory whose format and size the card
 //! takes is sampled where it is: `DEFINE_TEXTURE` names the surface's
@@ -72,11 +72,11 @@ use crate::toadforce::level1::{
 use crate::toadforce::{caps, regs};
 use crate::win32::screen;
 
-/// The textures a draw has at once: the stages whose texture
-/// coordinates the pipeline gives a screen vertex. The card takes more
-/// (`caps::TEXTURES_AT_ONCE`), which the device gets when a screen
-/// vertex carries as many (#948).
-pub const UNITS: u32 = 2;
+/// The textures a draw has at once: the card's four
+/// (`caps::TEXTURES_AT_ONCE`), which are the stages whose texture
+/// coordinates the pipeline gives a screen vertex.
+pub const UNITS: u32 = caps::TEXTURES_AT_ONCE;
+const _: () = assert!(UNITS as usize == pipeline::SCREEN_STAGES);
 
 /// The band the pipeline clips what the card draws to. The card takes
 /// positions to 32768 pixels either side of 0.
@@ -85,14 +85,10 @@ pub const VERTEX_BAND: [f32; 4] = [-16384.0, -16384.0, 16384.0, 16384.0];
 /// The lights the card transforms and lights vertices with at once.
 pub const TNL_LIGHTS: u32 = caps::LIGHTS;
 
-/// The vertex layout of a `DRAW`: position with 1 / w, diffuse and
-/// specular colour, and two sets of two texture coordinates.
-const FVF: u32 = 0x004 | 0x040 | 0x080 | 0x200;
-const VERTEX_WORDS: usize = 10;
-/// The layout where a stage's coordinates are projected: both sets
-/// have four, the last what the card divides the others by.
-const FVF_PROJECTED: u32 = FVF | 2 << 16 | 2 << 18;
-const VERTEX_WORDS_PROJECTED: usize = 14;
+/// The vertex layout of a `DRAW` without texture coordinates:
+/// position with 1 / w, diffuse and specular colour.
+const FVF: u32 = 0x004 | 0x040 | 0x080;
+const VERTEX_WORDS: usize = 6;
 
 /// Whether the device `d`'s stage `stage` is one of the first, whose
 /// coordinates the pipeline gives a screen vertex, and they are
@@ -761,18 +757,31 @@ pub struct Card {
     target: (u32, u32, u32),
     /// The rectangle drawn into: left, top, right, bottom.
     clip: [u32; 4],
-    /// Whether a stage's coordinates are projected, and the vertices
-    /// carry what they are divided by (`FVF_PROJECTED`).
+    /// The stages in use, of the first `UNITS`: a screen vertex has a
+    /// set of texture coordinates for each.
+    sets: usize,
+    /// Whether a stage's coordinates are projected: the sets then have
+    /// four numbers, the last what the card divides the others by.
     projected: bool,
 }
 
 impl Card {
-    /// The layout of the screen vertices of a draw, and its words.
+    /// The numbers of each set of a screen vertex.
+    fn numbers(&self) -> usize {
+        if self.projected { 4 } else { 2 }
+    }
+
+    /// The layout of the screen vertices of a draw, and its words: a
+    /// set of two numbers, or of four, for each stage in use.
     fn layout(&self) -> (u32, usize) {
-        match self.projected {
-            true => (FVF_PROJECTED, VERTEX_WORDS_PROJECTED),
-            false => (FVF, VERTEX_WORDS),
+        let mut fvf = FVF | (self.sets as u32) << 8;
+        if self.projected {
+            // Four numbers are size 2.
+            for set in 0..self.sets {
+                fvf |= 2 << (16 + 2 * set);
+            }
         }
+        (fvf, VERTEX_WORDS + self.sets * self.numbers())
     }
 }
 
@@ -994,6 +1003,7 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
             target.colour.format.bytes(),
         ),
         clip: [left, top, right.max(left), bottom.max(top)],
+        sets: stages.min(UNITS) as usize,
         projected: !lit && (0..UNITS).any(|stage| projected(d, stage)),
     })
 }
@@ -1373,7 +1383,7 @@ impl Raster<'_> {
             self.header = self.words.len();
             self.words.extend([0, primitive, fvf, 0]);
         }
-        let numbers = if self.card.projected { 4 } else { 2 };
+        let (sets, numbers) = (self.card.sets, self.card.numbers());
         for v in vertices {
             self.words.extend([
                 v.x.to_bits(),
@@ -1383,7 +1393,7 @@ impl Raster<'_> {
                 v.diffuse,
                 v.specular,
             ]);
-            for set in &v.tex {
+            for set in &v.tex[..sets] {
                 self.words
                     .extend(set[..numbers].iter().map(|n| n.to_bits()));
             }

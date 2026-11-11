@@ -804,9 +804,9 @@ impl Processed {
 
 /// A vertex on the screen, as the card's triangle setup takes it: x, y,
 /// z (0 to 1), rhw, the colors (the specular's alpha the fog factor),
-/// and the coordinates of the textures of the card's two stages, each
-/// with the number it is divided by at each pixel in the fourth place
-/// (1 unless the stage's coordinates are projected).
+/// and the coordinates of the textures of the first `SCREEN_STAGES`
+/// stages, each with the number it is divided by at each pixel in the
+/// fourth place (1 unless the stage's coordinates are projected).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ScreenVertex {
     pub x: f32,
@@ -815,8 +815,13 @@ pub struct ScreenVertex {
     pub rhw: f32,
     pub diffuse: u32,
     pub specular: u32,
-    pub tex: [[f32; 4]; 2],
+    pub tex: [[f32; 4]; SCREEN_STAGES],
 }
+
+/// The stages whose texture coordinates a screen vertex carries: the
+/// most textures a card draws with at once, the ToadForce's four. A
+/// Voodoo takes those of its two units.
+pub const SCREEN_STAGES: usize = 4;
 
 /// What draws the primitives that come out of the pipeline: the card.
 /// Coordinates are inside the guard band, not the viewport: the
@@ -1512,7 +1517,6 @@ fn screen(setup: &Setup, p: &Processed) -> ScreenVertex {
     } else {
         setup.view_map.screen(p.clip)
     };
-    let tex = |stage: usize| setup.coords[stage].sampled(p.tex[stage]);
     ScreenVertex {
         x,
         y,
@@ -1520,7 +1524,7 @@ fn screen(setup: &Setup, p: &Processed) -> ScreenVertex {
         rhw,
         diffuse: color(p.diffuse),
         specular: color(p.specular),
-        tex: [tex(0), tex(1)],
+        tex: std::array::from_fn(|stage| setup.coords[stage].sampled(p.tex[stage])),
     }
 }
 
