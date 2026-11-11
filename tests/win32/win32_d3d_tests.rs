@@ -2071,6 +2071,50 @@ fn a_textured_quad_shows_its_texels() {
 }
 
 #[test]
+fn the_address_state_of_a_stage_sets_both_directions() {
+    // D3DTSS_ADDRESS (12) is ADDRESSU and ADDRESSV at once. Giants sets
+    // D3DTADDRESS_CLAMP with it for the tiles of its title picture. The
+    // texture's first column and row are red and the rest is green, and
+    // the quad's coordinates run from 1 to 2: wrapped, they repeat the
+    // texture and its red edges, and clamped they stay on its last
+    // texel.
+    let texels = std::array::from_fn(|i| match (i % 8, i / 8) {
+        (0, _) | (_, 0) => 0xF800,
+        _ => 0x07E0,
+    });
+    let at = |x: f32, y: f32| Tl {
+        u: 1.0 + x / 64.0,
+        v: 1.0 + y / 64.0,
+        ..tl(x, y, 0.5, WHITE)
+    };
+    let (a, b) = (at(0.0, 0.0), at(64.0, 0.0));
+    let (c, d) = (at(0.0, 64.0), at(64.0, 64.0));
+    let draw = |address: Option<u32>| {
+        let mut steps: Vec<Step> = address.map(|a| Step::Stage(12, a)).into_iter().collect();
+        steps.push(Step::Draw(vec![a, b, c, b, d, c]));
+        let scene = Scene {
+            api: Api::D3D7,
+            card: None,
+            clear: 0,
+            zbuffer: None,
+            texture: Some(texels),
+            texture_alpha: false,
+            texture_system: false,
+            steps,
+        };
+        draw_scene("stage_address", &scene)
+    };
+    let wrapped = draw(None);
+    assert_rgb(&wrapped, 2, 32, [255, 0, 0], 8);
+    assert_rgb(&wrapped, 32, 2, [255, 0, 0], 8);
+    assert_rgb(&wrapped, 32, 32, [0, 255, 0], 8);
+    let clamped = draw(Some(3));
+    for (x, y) in [(2, 32), (32, 2), (32, 32)] {
+        assert_rgb(&clamped, x, y, [0, 255, 0], 8);
+    }
+}
+
+#[test]
 fn a_texel_centred_on_each_pixel_is_the_one_the_pixel_samples() {
     // Direct3D puts a pixel's centre on its integer coordinates. The 8x8
     // texture over 8x8 pixels, u and v from 0.5/8 to 8.5/8, puts each

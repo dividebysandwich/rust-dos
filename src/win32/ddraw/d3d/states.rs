@@ -63,10 +63,15 @@ fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
     match c.kind {
         CHANGE_RENDER => render(cpu, id, c.a, value),
         CHANGE_STAGE => {
-            if let Some(d) = get(cpu, id)
-                && let Some(s) = d.stages.get_mut((c.a * 32 + c.b) as usize)
-            {
-                *s = value;
+            // D3DTSS_ADDRESS is both directions at once.
+            let both = [TSS_ADDRESS, TSS_ADDRESSU, TSS_ADDRESSV];
+            let states = if c.b == TSS_ADDRESS { &both[..] } else { &[c.b][..] };
+            if let Some(d) = get(cpu, id) {
+                for &t in states {
+                    if let Some(s) = d.stages.get_mut((c.a * 32 + t) as usize) {
+                        *s = value;
+                    }
+                }
             }
         }
         CHANGE_TRANSFORM => {
