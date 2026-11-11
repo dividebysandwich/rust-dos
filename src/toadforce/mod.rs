@@ -30,6 +30,7 @@ pub mod caps;
 pub mod command;
 pub mod display;
 pub mod format;
+pub mod level1;
 pub mod pci;
 pub mod regs;
 
@@ -83,6 +84,8 @@ pub struct ToadForce {
     error: u32,
     error_at: u32,
     pub display: display::Display,
+    /// The state the commands of level 1 set.
+    pub level1: level1::Level1,
     /// The interrupt request the card has up, which the bus keeps.
     pub irq_up: Option<u8>,
     /// The commands since the card was made, for a look at what drives
@@ -98,6 +101,8 @@ pub struct Counts {
     pub fill: u64,
     pub blt: u64,
     pub flip: u64,
+    /// The commands level 1 adds.
+    pub level1: u64,
     pub rejected: u64,
 }
 
@@ -117,6 +122,7 @@ crate::state_fields!(ToadForce {
     error_at,
     display,
     irq_up,
+    level1,
 } skip { counts });
 
 impl ToadForce {
@@ -140,6 +146,7 @@ impl ToadForce {
             error: 0,
             error_at: 0,
             display: display::Display::default(),
+            level1: level1::Level1::default(),
             irq_up: None,
             counts: Counts::default(),
         }
@@ -194,6 +201,7 @@ impl ToadForce {
                 "fill": counts.fill,
                 "blt": counts.blt,
                 "flip": counts.flip,
+                "level1": counts.level1,
                 "rejected": counts.rejected,
             },
         })
@@ -284,7 +292,12 @@ impl ToadForce {
         match offset {
             // A level the card doesn't have is ignored: a driver reads
             // the register back.
-            regs::LEVEL if value <= self.level_max => self.level = value,
+            // A write of the level in use counts too: a driver that
+            // takes the card over starts from the defaults.
+            regs::LEVEL if value <= self.level_max => {
+                self.level = value;
+                self.level1 = level1::Level1::default();
+            }
             regs::IRQ_STATUS => self.irq_status &= !value,
             regs::IRQ_ENABLE => self.irq_enable = value & regs::IRQ_ALL,
             regs::RING_PUT => self.put(value, memory, &mut fx),
@@ -309,6 +322,7 @@ impl ToadForce {
     /// contents and PCI configuration space keep what they hold.
     pub fn reset(&mut self, live: Live, fx: &mut Effects) {
         self.level = 0;
+        self.level1 = level1::Level1::default();
         self.irq_status = 0;
         self.irq_enable = 0;
         self.ring_put = 0;
@@ -414,6 +428,10 @@ impl ToadForce {
                     fx.display = fx.display.max(Change::Picture);
                 }
                 self.counts.flip += 1;
+            }
+            Command::Level1(command) => {
+                self.level1.apply(command, memory, &mut fx.drawn)?;
+                self.counts.level1 += 1;
             }
         }
         Ok(())

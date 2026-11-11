@@ -4,6 +4,7 @@
 
 use super::caps;
 use super::regs::Error;
+use crate::savestate::{self, Reader, State, StateError, Writer};
 
 /// A pixel format, by its code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,18 +18,91 @@ pub enum Format {
     X8R8G8B8 = 3,
     /// The same with alpha in bits 24 to 31.
     A8R8G8B8 = 4,
+    // Level 1's, for textures and depth buffers.
+    /// Red in bits 10 to 14, green in 5 to 9, blue in 0 to 4.
+    X1R5G5B5 = 5,
+    /// The same with alpha in bit 15.
+    A1R5G5B5 = 6,
+    /// Alpha, red, green and blue in four bits each, from bit 12 down.
+    A4R4G4B4 = 7,
+    /// Alpha alone; the colour is white.
+    A8 = 8,
+    /// Luminance alone; the alpha is opaque.
+    L8 = 9,
+    /// Luminance in bits 0 to 7, alpha in 8 to 15.
+    A8L8 = 10,
+    /// Blocks of 4x4 texels in 8 bytes: two colours and 2 bits a texel,
+    /// with one bit of alpha.
+    DXT1 = 11,
+    /// Blocks in 16 bytes: 4 bits of alpha a texel, then a `DXT1` colour
+    /// block. The colours are multiplied by the alpha.
+    DXT2 = 12,
+    /// As `DXT2`, with colours that aren't.
+    DXT3 = 13,
+    /// Blocks in 16 bytes: two alphas and 3 bits a texel, then a `DXT1`
+    /// colour block. The colours are multiplied by the alpha.
+    DXT4 = 14,
+    /// As `DXT4`, with colours that aren't.
+    DXT5 = 15,
+    /// Signed du in bits 0 to 7, dv in 8 to 15.
+    V8U8 = 16,
+    /// Signed du in bits 0 to 4, dv in 5 to 9, luminance in 10 to 15.
+    L6V5U5 = 17,
+    /// Signed du in bits 0 to 7, dv in 8 to 15, luminance in 16 to 23.
+    X8L8V8U8 = 18,
+    /// Depth in 16 bits.
+    D16 = 19,
+    /// Depth in bits 8 to 31.
+    D24X8 = 20,
+    /// Depth in bits 8 to 31, stencil in 0 to 7.
+    D24S8 = 21,
+}
+
+/// Every format, by code.
+pub const FORMATS: [Format; 21] = [
+    Format::P8,
+    Format::R5G6B5,
+    Format::X8R8G8B8,
+    Format::A8R8G8B8,
+    Format::X1R5G5B5,
+    Format::A1R5G5B5,
+    Format::A4R4G4B4,
+    Format::A8,
+    Format::L8,
+    Format::A8L8,
+    Format::DXT1,
+    Format::DXT2,
+    Format::DXT3,
+    Format::DXT4,
+    Format::DXT5,
+    Format::V8U8,
+    Format::L6V5U5,
+    Format::X8L8V8U8,
+    Format::D16,
+    Format::D24X8,
+    Format::D24S8,
+];
+
+/// A saved state holds a format by its code, so a format added to
+/// `FORMATS` is saved without a second list to keep in step.
+impl State for Format {
+    fn save(&self, w: &mut Writer) {
+        (self.code() as u8).save(w);
+    }
+
+    fn load(&mut self, r: &mut Reader) -> savestate::Result<()> {
+        let mut code = 0u8;
+        code.load(r)?;
+        *self = Format::from_code(code as u32)
+            .ok_or_else(|| StateError::Invalid(format!("a pixel format of code {code}")))?;
+        Ok(())
+    }
 }
 
 impl Format {
     /// The format code `code` names, if it names one.
     pub fn from_code(code: u32) -> Option<Self> {
-        Some(match code {
-            1 => Format::P8,
-            2 => Format::R5G6B5,
-            3 => Format::X8R8G8B8,
-            4 => Format::A8R8G8B8,
-            _ => return None,
-        })
+        FORMATS.into_iter().find(|format| format.code() == code)
     }
 
     pub fn code(self) -> u32 {
@@ -41,23 +115,75 @@ impl Format {
         mask >> self.code() & 1 != 0
     }
 
-    /// The bytes of a pixel.
+    /// The bytes of a pixel. A block format has no pixel of its own in
+    /// memory and gives 0: see `block_bytes`.
     pub fn bytes(self) -> u32 {
+        use Format::*;
         match self {
-            Format::P8 => 1,
-            Format::R5G6B5 => 2,
-            Format::X8R8G8B8 | Format::A8R8G8B8 => 4,
+            P8 | A8 | L8 => 1,
+            R5G6B5 | X1R5G5B5 | A1R5G5B5 | A4R4G4B4 | A8L8 | V8U8 | L6V5U5 | D16 => 2,
+            X8R8G8B8 | A8R8G8B8 | X8L8V8U8 | D24X8 | D24S8 => 4,
+            DXT1 | DXT2 | DXT3 | DXT4 | DXT5 => 0,
+        }
+    }
+
+    /// The bytes of a block of 4x4 texels, in a format stored as blocks.
+    pub fn block_bytes(self) -> Option<u32> {
+        match self {
+            Format::DXT1 => Some(8),
+            Format::DXT2 | Format::DXT3 | Format::DXT4 | Format::DXT5 => Some(16),
+            _ => None,
+        }
+    }
+
+    /// The bytes one line of an image `width` texels wide takes at
+    /// least: its pixels, or its row of blocks.
+    pub fn line_bytes(self, width: u32) -> u64 {
+        match self.block_bytes() {
+            Some(block) => width.div_ceil(4) as u64 * block as u64,
+            None => width as u64 * self.bytes() as u64,
+        }
+    }
+
+    /// The lines of memory an image `height` texels high has: its lines
+    /// of pixels, or its rows of blocks.
+    pub fn lines(self, height: u32) -> u32 {
+        match self.block_bytes() {
+            Some(_) => height.div_ceil(4),
+            None => height,
+        }
+    }
+
+    /// The bytes from the first of an image to after its last, with
+    /// `pitch` bytes from one line of memory to the next.
+    pub fn image_bytes(self, width: u32, height: u32, pitch: u32) -> u64 {
+        (self.lines(height) as u64 - 1) * pitch as u64 + self.line_bytes(width)
+    }
+
+    /// A colour of 8 bits a channel (alpha in bits 24 to 31, red in 16
+    /// to 23, green in 8 to 15, blue in 0 to 7) as a pixel of a render
+    /// target's format: each channel's top bits.
+    pub fn pack(self, argb: u32) -> u32 {
+        let (r, g, b) = (argb >> 16 & 0xFF, argb >> 8 & 0xFF, argb & 0xFF);
+        match self {
+            Format::R5G6B5 => (r >> 3) << 11 | (g >> 2) << 5 | b >> 3,
+            Format::X8R8G8B8 => argb & 0x00FF_FFFF,
+            _ => argb,
         }
     }
 
     /// The bits of a pixel the format defines, which a colour key
     /// compares.
     pub fn defined_bits(self) -> u32 {
+        use Format::*;
         match self {
-            Format::P8 => 0xFF,
-            Format::R5G6B5 => 0xFFFF,
-            Format::X8R8G8B8 => 0x00FF_FFFF,
-            Format::A8R8G8B8 => 0xFFFF_FFFF,
+            P8 | A8 | L8 => 0xFF,
+            X1R5G5B5 => 0x7FFF,
+            R5G6B5 | A1R5G5B5 | A4R4G4B4 | A8L8 | V8U8 | L6V5U5 | D16 => 0xFFFF,
+            X8R8G8B8 | X8L8V8U8 => 0x00FF_FFFF,
+            D24X8 => 0xFFFF_FF00,
+            A8R8G8B8 | D24S8 => 0xFFFF_FFFF,
+            DXT1 | DXT2 | DXT3 | DXT4 | DXT5 => 0,
         }
     }
 }
@@ -94,6 +220,26 @@ pub struct Surface {
     pub height: u32,
     pub format: Format,
 }
+
+impl Default for Surface {
+    fn default() -> Self {
+        Surface {
+            offset: 0,
+            pitch: 0,
+            width: 0,
+            height: 0,
+            format: Format::P8,
+        }
+    }
+}
+
+crate::state_fields!(Surface {
+    offset,
+    pitch,
+    width,
+    height,
+    format,
+});
 
 /// The words of a surface's description in a command.
 pub const SURFACE_WORDS: usize = 5;

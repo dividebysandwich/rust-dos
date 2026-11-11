@@ -487,7 +487,6 @@ State:
 | `SET_LIGHT` | slot 0 to 7, type, colours, position, direction, range, attenuation, cone, spot model |
 | `ENABLE_LIGHT` | slot, on or off |
 | `SET_CLIP_PLANE` | index 0 to 5, 4 floats |
-| `SET_PALETTE` | palette handle, first entry, entries |
 
 Surfaces:
 
@@ -495,7 +494,7 @@ Surfaces:
 |---|---|
 | `SET_RENDER_TARGET` | colour offset, format, width, height, pitch; depth offset, format, pitch |
 | `CLEAR` | flags (colour, depth, stencil), colour, z, stencil, rectangles |
-| `DEFINE_TEXTURE` | handle, format, width, height, levels, flags (cube), pitch, palette handle, offset of each level and face |
+| `DEFINE_TEXTURE` | handle, format, width, height, levels, flags (cube), palette offset, offset and pitch of each level and face |
 | `FREE_TEXTURE` | handle |
 | `SET_TEXTURE` | stage, handle or none |
 | `FILL` | surface description, rectangle, value |
@@ -510,6 +509,11 @@ Drawing:
 | `DRAW_INDEXED` | the same with 16-bit indices inline |
 | `DRAW_BUFFER` | primitive type, vertex format, stride, vertex buffer offset, first, count |
 | `DRAW_BUFFER_INDEXED` | the same with an index buffer offset, or indices inline |
+
+A palette is 256 words of card memory, which a `P8` texture names by
+their offset. It needs no command and no handle: the guest writes it as
+it writes texels, and the card reads it when a draw samples the
+texture.
 
 A command's length is a 16-bit count of words, so an inline draw holds
 at most 65535 words with its header and arguments. The driver splits a

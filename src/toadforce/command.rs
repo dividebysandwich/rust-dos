@@ -12,6 +12,7 @@
 
 use super::caps;
 use super::format::{Rect, SURFACE_WORDS, Surface};
+use super::level1;
 use super::regs::Error;
 
 pub const NOP: u16 = 0x0000;
@@ -41,6 +42,9 @@ pub fn length(header: u32) -> usize {
 pub enum Length {
     Exactly(usize),
     AtLeast(usize),
+    /// The first, and after it any whole number of the second: the
+    /// fixed arguments and a list of items.
+    List(usize, usize),
 }
 
 impl Length {
@@ -48,6 +52,7 @@ impl Length {
         match self {
             Length::Exactly(n) => words == n,
             Length::AtLeast(n) => words >= n,
+            Length::List(least, item) => words >= least && (words - least).is_multiple_of(item),
         }
     }
 }
@@ -56,19 +61,23 @@ impl Length {
 /// the command. The levels' command lists are frozen with their
 /// capability tables (`caps`), and the tests below hold a copy.
 pub fn lengths(level: u32, opcode: u16) -> Option<Length> {
-    let _ = level;
     Some(match opcode {
         NOP => Length::AtLeast(1),
         FILL => Length::Exactly(11),
         BLT => Length::Exactly(21),
         FLIP => Length::Exactly(3),
+        _ if level >= 1 => match level1::lengths(opcode)? {
+            (least, 0) => Length::Exactly(least),
+            (least, item) => Length::List(least, item),
+        },
         _ => return None,
     })
 }
 
-/// A command, decoded.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Command {
+/// A command, decoded. One of level 1 borrows its lists from the words
+/// it was decoded from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Command<'a> {
     Nop,
     /// Write `value` to each pixel of `rect` of `dst`.
     Fill {
@@ -92,11 +101,12 @@ pub enum Command {
         offset: u32,
         wait: bool,
     },
+    Level1(level1::Command<'a>),
 }
 
 /// The command `words` hold, header first, at `level` on a card with
 /// `memory` bytes. `words` is as long as the header says.
-pub fn decode(words: &[u32], level: u32, memory: u32) -> Result<Command, Error> {
+pub fn decode(words: &[u32], level: u32, memory: u32) -> Result<Command<'_>, Error> {
     let opcode = words[0] as u16;
     let lengths = lengths(level, opcode).ok_or(Error::BadOpcode)?;
     if !lengths.allows(words.len()) {
@@ -149,7 +159,7 @@ pub fn decode(words: &[u32], level: u32, memory: u32) -> Result<Command, Error> 
                 wait: flags & FLIP_WAIT != 0,
             }
         }
-        _ => unreachable!("an opcode with lengths has a decoder"),
+        _ => Command::Level1(level1::decode(opcode, words, memory)?),
     })
 }
 
@@ -238,7 +248,7 @@ mod tests {
 
     #[test]
     fn released_levels_keep_their_commands() {
-        assert_eq!(FROZEN.len(), caps::NEWEST_LEVEL as usize + 1);
+        assert_eq!(FROZEN.len(), caps::RELEASED_LEVEL as usize + 1);
         for (level, frozen) in FROZEN.iter().enumerate() {
             for opcode in 0..=u16::MAX {
                 let expected = frozen.iter().find(|c| c.0 == opcode).map(|c| c.1);
