@@ -225,6 +225,45 @@ fn machine_with(test: &str, card: Option<Board>, program: Vec<u8>) -> Cpu {
     cpu
 }
 
+/// The display adapter that draws a test's scene.
+#[derive(Clone, Copy, PartialEq)]
+enum Draws {
+    Voodoo3,
+    ToadForce,
+}
+
+/// A machine with the built-in Windows on, `program` loaded from the
+/// shell as T.EXE, and `card` as its display adapter.
+fn machine_on(test: &str, card: Draws, program: Vec<u8>) -> Cpu {
+    if card == Draws::Voodoo3 {
+        return machine(test, true, program);
+    }
+    let base = PathBuf::from("target/test_win32_opengl").join(format!("{test}_toadforce"));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    fs::write(base.join("T.EXE"), program).unwrap();
+    let mut cpu = Cpu::new(base);
+    let setup = VideoSetup {
+        adapter: Adapter::ToadForce,
+        mono_monitor: false,
+    };
+    rust_dos::video::bios::install(&mut cpu.bus, setup);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    cpu
+}
+
+/// The ToadForce took every command its drivers gave it.
+fn card_rejected_nothing(cpu: &Cpu) {
+    if let Some(card) = cpu.bus.toadforce.as_ref() {
+        let counts = card.counts();
+        assert_eq!(counts.rejected, 0);
+        assert!(counts.primitives > 0, "{counts:?}");
+    }
+}
+
 /// What the program printed.
 fn printed(cpu: &Cpu) -> String {
     let console = cpu.host_console.as_ref().unwrap();
@@ -474,6 +513,15 @@ fn pixel(cpu: &Cpu, data: u32, x: u32, y: u32) -> [u8; 3] {
 
 #[test]
 fn a_context_draws_a_shaded_triangle_and_reads_it_back() {
+    shaded_triangle(Draws::Voodoo3);
+}
+
+#[test]
+fn a_context_on_a_toadforce_draws_a_shaded_triangle_and_reads_it_back() {
+    shaded_triangle(Draws::ToadForce);
+}
+
+fn shaded_triangle(card: Draws) {
     let (exe, data) = program(&data(), |a, l| {
         let mut c = Calls { next: 0 };
         start(a, l, &mut c)?;
@@ -499,7 +547,7 @@ fn a_context_draws_a_shaded_triangle_and_reads_it_back() {
         read_back(a, l, &mut c)?;
         finish(a, l)
     });
-    let mut cpu = machine("triangle", true, exe);
+    let mut cpu = machine_on("triangle", card, exe);
     run_until_done(&mut cpu, data);
     let r: Vec<u32> = (0..21)
         .map(|i| peek(&cpu, data + RESULTS + 4 * i))
@@ -512,8 +560,14 @@ fn a_context_draws_a_shaded_triangle_and_reads_it_back() {
     assert_eq!(r[3], 1, "SetPixelFormat");
     assert_ne!(r[4], 0, "wglCreateContext");
     assert_eq!(r[5], 1, "wglMakeCurrent");
-    assert_eq!(peek_string(&cpu, r[6]), "3Dfx Interactive Inc.");
-    assert!(peek_string(&cpu, r[7]).starts_with("3Dfx/Voodoo3"));
+    if card == Draws::Voodoo3 {
+        assert_eq!(peek_string(&cpu, r[6]), "3Dfx Interactive Inc.");
+        assert!(peek_string(&cpu, r[7]).starts_with("3Dfx/Voodoo3"));
+    } else {
+        assert_eq!(peek_string(&cpu, r[6]), "Rust-DOS");
+        assert_eq!(peek_string(&cpu, r[7]), "ToadForce/64 MB");
+    }
+    card_rejected_nothing(&cpu);
     let extensions = peek_string(&cpu, r[8]);
     assert!(extensions.contains("GL_ARB_multitexture"));
     // As 3dfx's Voodoo3 ICD has it; Myth II 1.8.3 needs it of OpenGL 1.1.
@@ -850,6 +904,15 @@ fn a_triangle_reaching_far_off_the_window_is_drawn_where_it_covers_it() {
 
 #[test]
 fn vertex_arrays_draw_a_textured_depth_tested_quad() {
+    textured_depth_tested_quad(Draws::Voodoo3);
+}
+
+#[test]
+fn vertex_arrays_on_a_toadforce_draw_a_textured_depth_tested_quad() {
+    textured_depth_tested_quad(Draws::ToadForce);
+}
+
+fn textured_depth_tested_quad(card: Draws) {
     let mut d = data();
     // A 2x2 green texture, RGBA (rows of RGB would be padded to 4
     // bytes by the unpack alignment).
@@ -963,8 +1026,9 @@ fn vertex_arrays_draw_a_textured_depth_tested_quad() {
         read_back(a, l, &mut c)?;
         finish(a, l)
     });
-    let mut cpu = machine("arrays", true, exe);
+    let mut cpu = machine_on("arrays", card, exe);
     run_until_done(&mut cpu, data);
+    card_rejected_nothing(&cpu);
     let error = peek(&cpu, data + RESULTS + 4 * 30);
     assert_eq!(error, 0, "glGetError");
     // Green in the top right quarter, over the red; red below it in
@@ -1078,6 +1142,15 @@ fn texture_2x2(
 
 #[test]
 fn two_texture_units_modulate_a_lightmap_as_quake_iii_draws_walls() {
+    lightmapped_wall(Draws::Voodoo3);
+}
+
+#[test]
+fn two_texture_units_on_a_toadforce_modulate_a_lightmap() {
+    lightmapped_wall(Draws::ToadForce);
+}
+
+fn lightmapped_wall(card: Draws) {
     const LIGHTMAP: u32 = TEXTURE + 4;
     const LIGHT_TEXELS: u32 = TEXELS + 0x40;
     const ACTIVE: u32 = 0x20;
@@ -1150,8 +1223,9 @@ fn two_texture_units_modulate_a_lightmap_as_quake_iii_draws_walls() {
         read_back(a, l, &mut c)?;
         finish(a, l)
     });
-    let mut cpu = machine("multitexture", true, exe);
+    let mut cpu = machine_on("multitexture", card, exe);
     run_until_done(&mut cpu, data);
+    card_rejected_nothing(&cpu);
     let error = peek(&cpu, data + RESULTS + 4 * 25);
     assert_eq!(error, 0, "glGetError");
     // Green by the lightmap's half.

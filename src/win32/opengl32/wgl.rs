@@ -84,18 +84,19 @@ const VOODOO2_FORMATS: [u32; 2] = [
 pub enum Icd {
     /// None: no pixel formats.
     None,
-    /// 3dfx's for the Banshee and Voodoo3, the display adapter: a
-    /// context draws in a window.
+    /// The display adapter's: 3dfx's for the Banshee and Voodoo3, or
+    /// the ToadForce's. A context draws in a window.
     Windowed,
     /// 3dfx's for the Voodoo2, an add-on card: a context draws full
     /// screen on the card.
     FullScreen,
 }
 
-/// The ICD the machine has: the Banshee's or Voodoo3's when it is the
-/// display adapter, the Voodoo2's when the machine has one.
+/// The ICD the machine has: the display adapter's when that is a
+/// Banshee, a Voodoo3 or a ToadForce with Direct3D's HAL, the
+/// Voodoo2's when the machine has one.
 pub fn icd(cpu: &Cpu) -> Icd {
-    if cpu.bus.vga.adapter.voodoo_board().is_some() {
+    if cpu.bus.vga.adapter.voodoo_board().is_some() || hal::toadforce::there(cpu) {
         Icd::Windowed
     } else if super::super::glide::hw::board(cpu).is_some_and(|b| b.card == Card::Voodoo2) {
         Icd::FullScreen
@@ -322,8 +323,21 @@ fn icd_extensions(tmus: u32) -> &'static str {
 
 /// Write the strings into a new page of the process: its address.
 fn write_strings(cpu: &mut Cpu) -> Option<u32> {
+    if hal::toadforce::there(cpu) {
+        // The card's own names. The version and the extensions are
+        // what the driver does on the Direct3D device today.
+        let memory = cpu.bus.toadforce.as_ref().map_or(0, |card| card.memory());
+        let renderer = format!("ToadForce/{} MB", memory >> 20);
+        let strings = [
+            (VENDOR_AT, "Rust-DOS"),
+            (RENDERER_AT, renderer.as_str()),
+            (VERSION_AT, "1.1.0"),
+            (EXTENSIONS_AT, EXTENSIONS),
+            (WGL_EXTENSIONS_AT, WGL_EXTENSIONS),
+        ];
+        return place_strings(cpu, &strings);
+    }
     let board = super::super::glide::hw::board(cpu)?;
-    let at = super::super::kernel32::alloc_pages(cpu, 0x1000)?;
     let (renderer, version, extensions) = if board.card == Card::Voodoo2 {
         // As 3DFXVGL.DLL gives them, which a program loads itself or
         // finds as the OPENGL32.DLL of its own folder ("stand-alone").
@@ -357,7 +371,13 @@ fn write_strings(cpu: &mut Cpu) -> Option<u32> {
         (EXTENSIONS_AT, extensions),
         (WGL_EXTENSIONS_AT, WGL_EXTENSIONS),
     ];
-    for (offset, s) in strings {
+    place_strings(cpu, &strings)
+}
+
+/// The strings in a new page of the process, each at its offset.
+fn place_strings(cpu: &mut Cpu, strings: &[(u32, &str)]) -> Option<u32> {
+    let at = super::super::kernel32::alloc_pages(cpu, 0x1000)?;
+    for &(offset, s) in strings {
         let mut bytes = s.as_bytes().to_vec();
         bytes.push(0);
         cpu.bus.guest_write_bytes(at + offset, &bytes);

@@ -423,7 +423,8 @@ All output goes through the emulated video hardware (`screen.rs`):
   textures up to 2048 pixels a side, compressed and bump formats.
   `hal/mod.rs` is the interface both are behind. D3D8.DLL (`d3d8/`) is
   DirectX 8.1's Direct3D on a Banshee or Voodoo3, and OPENGL32.DLL
-  (`opengl32/`) is OpenGL 1.1 there and on a Voodoo2 in full screen.
+  (`opengl32/`) is OpenGL 1.1 there, on a ToadForce, and on a Voodoo2
+  in full screen.
 
 Painting follows Windows 98 SE's messages, compared by probes there.
 The differences that remain are listed in
