@@ -406,19 +406,23 @@ All output goes through the emulated video hardware (`screen.rs`):
   in the program's own layout, in arrays, strips and fans and in clip
   coordinates, log2 texture sizes, and `grGet` and `grQueryResolutions`
   in place of `grSstQueryHardware`.
-- **Direct3D** (IDirect3D to IDirect3D7, `ddraw/d3d/`) has one device,
-  the card's HAL, as 3dfx's Direct3D driver was: on a Banshee or Voodoo3
-  as the display adapter, so DirectDraw, GDI and Direct3D share one
-  frame buffer and Direct3D in a window works, and on a Voodoo Graphics
-  or Voodoo2 add-on card in full screen. Transform, lighting, clipping
-  and fog are done on the processor (`pipeline.rs`), as Windows'
-  Direct3D did them for the card, and the HAL draws the screen vertices
-  through the Glide layer's triangle setup (`hal.rs`). There is no
-  software rasterizer: it would be a second 3D pipeline to keep correct,
-  and the Voodoo emulation already replays its triangles in OpenGL. The
-  card's limits (16-bit colour and depth, 256x256 textures) are the ones
-  games of the time were written for. D3D8.DLL (`d3d8/`) is DirectX
-  8.1's Direct3D on a Banshee or Voodoo3, and OPENGL32.DLL
+- **Direct3D** (IDirect3D to IDirect3D7, `ddraw/d3d/`) has one device, the
+  card's HAL, as 3dfx's Direct3D driver was: on a Banshee or Voodoo3 as the
+  display adapter, so DirectDraw, GDI and Direct3D share one frame buffer
+  and Direct3D in a window works, and on a Voodoo Graphics or Voodoo2 add-on
+  card in full screen. Transform, lighting, clipping and fog are done on the
+  processor (`pipeline.rs`), as Windows' Direct3D did them for the card, and
+  the HAL draws the screen vertices through the Glide layer's triangle setup
+  (`hal/voodoo.rs`). Direct3D has no rasterizer of its own: it would be a
+  second 3D pipeline to keep correct, and the Voodoo emulation already
+  replays its triangles in OpenGL. The card's limits (16-bit colour and
+  depth, 256x256 textures) are the ones games of the time were written for.
+  On a ToadForce (`docs/toadforce.md`) as the display adapter the same
+  device draws through that card's HAL (`hal/toadforce.rs`), which sends the
+  card its level 1 commands: 32-bit targets, 24-bit depth with stencil,
+  textures up to 2048 pixels a side, compressed and bump formats.
+  `hal/mod.rs` is the interface both are behind. D3D8.DLL (`d3d8/`) is
+  DirectX 8.1's Direct3D on a Banshee or Voodoo3, and OPENGL32.DLL
   (`opengl32/`) is OpenGL 1.1 there and on a Voodoo2 in full screen.
 
 Painting follows Windows 98 SE's messages, compared by probes there.
@@ -807,8 +811,8 @@ rust-dos is GPL-2.0-or-later.
 1. **Output goes through the emulated hardware.** No DLL draws or plays
    on the host directly, so frontends, save states and recording need
    nothing of their own for Windows programs.
-2. **Direct3D runs on the emulated 3dfx card's HAL** (see "Video"),
-   without a software rasterizer.
+2. **Direct3D runs on the emulated card's HAL**, whichever card it is
+   (see "Video"), without a rasterizer of its own.
 3. **No Rust frame lives across a call into the program** (see "Calling
    the program from Rust"), so a save state is possible at any
    instruction.

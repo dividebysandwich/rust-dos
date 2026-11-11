@@ -376,32 +376,27 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// buffer the target doesn't have fails, and clears nothing, as
 /// IDirect3DDevice7's Clear does (`device::missing_buffer`).
 pub fn clear2(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [this, count, rects, flags, color, z, _] = args[..] else {
+    let [this, count, rects, flags, color, z, stencil] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    clear_with(
-        cpu,
-        this,
-        count,
-        rects,
-        flags,
-        Some(color),
-        f32::from_bits(z),
-    )
+    let given = Some((color, stencil));
+    clear_with(cpu, this, count, rects, flags, given, f32::from_bits(z))
 }
 
 /// Clear the rectangles of the viewport's device's render target
-/// (D3DCLEAR_TARGET) with `color`, or the background material's
-/// diffuse color, and of its depth buffer (D3DCLEAR_ZBUFFER) with `z`.
-/// A `color` is Clear2's, which fails on a buffer the target doesn't
-/// have; Clear skips the missing depth buffer.
+/// (D3DCLEAR_TARGET) with a color, the given one or the background
+/// material's diffuse color, of its depth buffer (D3DCLEAR_ZBUFFER)
+/// with `z`, and of its stencil buffer (D3DCLEAR_STENCIL) with the
+/// given value. `given` is Clear2's color and stencil value; Clear2
+/// fails on a buffer the target doesn't have, and Clear skips the
+/// missing depth buffer.
 fn clear_with(
     cpu: &mut Cpu,
     this: u32,
     count: u32,
     rects: u32,
     flags: u32,
-    color: Option<u32>,
+    given: Option<(u32, u32)>,
     z: f32,
 ) -> Option<u32> {
     let id = hr!(viewport_of(cpu, this));
@@ -414,12 +409,13 @@ fn clear_with(
     let Some(d) = super::device::get(cpu, v.device).cloned() else {
         return Some(D3D_OK);
     };
-    if color.is_some()
+    if given.is_some()
         && let Some(hr) = super::device::missing_buffer(cpu, &d, flags)
     {
         return Some(hr);
     }
-    let color = color.unwrap_or_else(|| {
+    let stencil = given.map(|(_, stencil)| stencil);
+    let color = given.map(|(color, _)| color).unwrap_or_else(|| {
         super::material::of_handle(cpu, &d, v.background)
             .map_or(0, |m| super::pipeline::color(m.diffuse))
     });
@@ -429,9 +425,12 @@ fn clear_with(
     if count != 0 && list.is_empty() {
         return Some(D3D_OK);
     }
-    let target = (flags & super::device::CLEAR_TARGET != 0).then_some(color);
-    let depth = (flags & super::device::CLEAR_ZBUFFER != 0).then_some(z);
-    super::hal::clear(cpu, &d, &list, target, depth);
+    let fill = super::hal::Fill {
+        target: (flags & super::device::CLEAR_TARGET != 0).then_some(color),
+        depth: (flags & super::device::CLEAR_ZBUFFER != 0).then_some(z),
+        stencil: stencil.filter(|_| flags & super::device::CLEAR_STENCIL != 0),
+    };
+    super::hal::clear(cpu, &d, &list, fill);
     Some(D3D_OK)
 }
 

@@ -1290,7 +1290,12 @@ fn clear_in(cpu: &mut Cpu, index: usize, color: bool, depth: bool, whole: bool) 
     let Some(d) = inner_device::get(cpu, inner).cloned() else {
         return;
     };
-    hal::clear(cpu, &d, &rects, fill_color, fill_depth);
+    let fill = hal::Fill {
+        target: fill_color,
+        depth: fill_depth,
+        stencil: None,
+    };
+    hal::clear(cpu, &d, &rects, fill);
 }
 
 /// Clear the whole of the context at `index`'s buffers, as new ones

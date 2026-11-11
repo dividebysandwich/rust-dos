@@ -11,9 +11,7 @@
 //! IDirect3DDevice, 2 and 3; one made through IDirect3D7 only
 //! IDirect3DDevice7.
 
-use super::super::surface::{
-    self, DDPF_RGB, DDSCAPS_SYSTEMMEMORY, DDSCAPS_ZBUFFER, MEM_CARD, MEM_VIDEO,
-};
+use super::super::surface::{self, DDSCAPS_SYSTEMMEMORY, DDSCAPS_ZBUFFER, MEM_CARD, MEM_VIDEO};
 use super::super::{
     DDERR_ALREADYINITIALIZED, DDERR_INVALIDCAPS, DDERR_INVALIDOBJECT, DDERR_INVALIDPARAMS,
     DDERR_INVALIDPIXELFORMAT, V_D3D1, V_D3D2, V_D3D3, V_D3D7, V_DEVICE1, V_DEVICE2, V_DEVICE3,
@@ -476,7 +474,7 @@ impl Device {
 /// if it has one, is 16-bit. A Banshee or Voodoo3 also draws into 24-
 /// and 32-bit targets with 24- or 32-bit depth buffers, through 16-bit
 /// shadows of them (`shadow.rs`).
-pub fn check_target(cpu: &mut Cpu, id: u32) -> Result<(), u32> {
+pub fn check_target(cpu: &mut Cpu, kind: super::hal::Kind, id: u32) -> Result<(), u32> {
     let s = state(cpu).surface(id).cloned().ok_or(DDERR_INVALIDPARAMS)?;
     if s.caps[0] & surface::DDSCAPS_3DDEVICE == 0 {
         return Err(DDERR_INVALIDCAPS);
@@ -485,20 +483,29 @@ pub fn check_target(cpu: &mut Cpu, id: u32) -> Result<(), u32> {
     if !video || s.caps[0] & DDSCAPS_SYSTEMMEMORY != 0 {
         return Err(D3DERR_SURFACENOTINVIDMEM);
     }
-    let f = s.format;
-    let wide = s.memory == MEM_VIDEO && crate::win32::glide::hw::banshee(cpu);
-    let rgb565 = f.bits == 16 && (f.r, f.g, f.b) == (0xF800, 0x07E0, 0x001F);
-    let rgb = matches!(f.bits, 24 | 32) && wide;
-    if f.flags & DDPF_RGB == 0 || !(rgb565 || rgb) {
+    // The card's HAL says which formats it draws into.
+    let in_video = s.memory == MEM_VIDEO;
+    if !super::hal::takes_target(cpu, kind, &s.format, in_video) {
         return Err(DDERR_INVALIDPIXELFORMAT);
     }
     if let Some(z) = z_buffer(cpu, id) {
-        let bits = state(cpu).surface(z).map_or(0, |z| z.format.bits);
-        if bits != 16 && !(matches!(bits, 24 | 32) && wide) {
+        let Some(z) = state(cpu).surface(z).cloned() else {
+            return Err(DDERR_INVALIDPIXELFORMAT);
+        };
+        if !super::hal::takes_depth(cpu, kind, &z.format, in_video && z.memory == MEM_VIDEO) {
             return Err(DDERR_INVALIDPIXELFORMAT);
         }
     }
     Ok(())
+}
+
+/// What the HAL of the device `id`'s card offers.
+pub fn offer_of(cpu: &mut Cpu, id: u32) -> super::hal::Offer {
+    let (dd, units) = get(cpu, id).map_or((0, 1), |d| (d.ddraw, d.tmus));
+    super::hal::card(cpu, dd).unwrap_or(super::hal::Offer {
+        kind: super::hal::Kind::Voodoo,
+        units,
+    })
 }
 
 /// The depth buffer attached to the surface `id`.
@@ -535,10 +542,11 @@ pub fn create(
     let Some((_, target)) = super::super::this(cpu, target_iface) else {
         return DDERR_INVALIDPARAMS;
     };
-    let Some(tmus) = super::hal(cpu, dd) else {
+    let Some(offer) = super::hal::card(cpu, dd) else {
         return com::E_OUTOFMEMORY;
     };
-    if let Err(e) = check_target(cpu, target) {
+    let tmus = offer.units;
+    if let Err(e) = check_target(cpu, offer.kind, target) {
         return e;
     }
     let mut device = Device::new(version, dd, target, target_iface, tmus);
@@ -563,7 +571,7 @@ pub fn create(
     match super::add(cpu, dd, object, vtable, out) {
         Ok(_) => {
             super::super::add_ref(cpu, target_iface);
-            super::hal::created(cpu);
+            super::hal::created(cpu, dd);
             D3D_OK
         }
         Err(e) => e,
@@ -619,7 +627,7 @@ pub fn get_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (_, id) = hr!(device_of(cpu, this));
-    let tmus = get(cpu, id).map_or(1, |d| d.tmus);
+    let offer = offer_of(cpu, id);
     let mut sizes = [0; 2];
     for (i, at) in [hal, hel].into_iter().enumerate() {
         if !probe(cpu, at, 4, true) {
@@ -633,8 +641,8 @@ pub fn get_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         sizes[i] = size;
     }
-    caps::write_desc(cpu, hal, sizes[0], true, tmus);
-    caps::write_desc(cpu, hel, sizes[1], false, tmus);
+    caps::write_desc(cpu, hal, sizes[0], Some(offer));
+    caps::write_desc(cpu, hel, sizes[1], None);
     Some(D3D_OK)
 }
 
@@ -647,8 +655,8 @@ pub fn get_caps7(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if !probe(cpu, desc, caps::DESC7, true) {
         return Some(DDERR_INVALIDPARAMS);
     }
-    let tmus = get(cpu, id).map_or(1, |d| d.tmus);
-    caps::write_desc7(cpu, desc, tmus);
+    let offer = offer_of(cpu, id);
+    caps::write_desc7(cpu, desc, offer);
     Some(D3D_OK)
 }
 
@@ -989,7 +997,8 @@ pub fn set_render_target(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if state(cpu).surface(sid).is_none() {
         return Some(DDERR_INVALIDPARAMS);
     }
-    hr!(check_target(cpu, sid));
+    let kind = offer_of(cpu, id).kind;
+    hr!(check_target(cpu, kind, sid));
     super::super::add_ref(cpu, target);
     let Some(d) = get(cpu, id) else {
         return Some(DDERR_INVALIDOBJECT);
@@ -1029,7 +1038,7 @@ pub const CLEAR_STENCIL: u32 = 4;
 /// buffer the target doesn't have fails as `missing_buffer` says, and
 /// clears nothing.
 pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [this, count, rects, flags, color, z, _] = args[..] else {
+    let [this, count, rects, flags, color, z, stencil] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (_, id) = hr!(device_of(cpu, this));
@@ -1047,9 +1056,12 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if count != 0 && list.is_empty() {
         return Some(D3D_OK);
     }
-    let target = (flags & CLEAR_TARGET != 0).then_some(color);
-    let depth = (flags & CLEAR_ZBUFFER != 0).then_some(f32::from_bits(z));
-    super::hal::clear(cpu, &d, &list, target, depth);
+    let fill = super::hal::Fill {
+        target: (flags & CLEAR_TARGET != 0).then_some(color),
+        depth: (flags & CLEAR_ZBUFFER != 0).then_some(f32::from_bits(z)),
+        stencil: (flags & CLEAR_STENCIL != 0).then_some(stencil),
+    };
+    super::hal::clear(cpu, &d, &list, fill);
     Some(D3D_OK)
 }
 
@@ -1057,19 +1069,25 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// (IDirect3DViewport3) of `flags` on the device `d` that asks for a
 /// buffer its target doesn't have. D3DCLEAR_ZBUFFER or D3DCLEAR_STENCIL
 /// without a depth buffer attached fails with D3DERR_ZBUFFER_NOTPRESENT,
-/// D3DCLEAR_STENCIL with one fails with D3DERR_STENCILBUFFER_NOTPRESENT,
-/// as none of the depth buffers here has stencil bits. The call then
-/// clears nothing, the target included. DirectX 7 does this on Windows
-/// 95 with a Voodoo3, with the HAL and the RGB device alike, and so does
-/// Windows 11.
+/// D3DCLEAR_STENCIL with one fails with D3DERR_STENCILBUFFER_NOTPRESENT
+/// unless it has stencil bits and the card's HAL draws stencil (a
+/// ToadForce's; a Voodoo's has none). The call then clears nothing, the
+/// target included. DirectX 7 does this on Windows 95 with a Voodoo3,
+/// with the HAL and the RGB device alike, and so does Windows 11.
 pub fn missing_buffer(cpu: &mut Cpu, d: &Device, flags: u32) -> Option<u32> {
     if flags & (CLEAR_ZBUFFER | CLEAR_STENCIL) == 0 {
         return None;
     }
-    if depth_buffer(cpu, d).is_none() {
+    let Some(z) = depth_buffer(cpu, d) else {
         return Some(D3DERR_ZBUFFER_NOTPRESENT);
-    }
-    (flags & CLEAR_STENCIL != 0).then_some(D3DERR_STENCILBUFFER_NOTPRESENT)
+    };
+    // DDPF_STENCILBUFFER: the depth buffer has stencil bits.
+    let drawn = super::hal::description(super::hal::kind_of(cpu, d)).stencil != 0;
+    let stencil = drawn
+        && state(cpu)
+            .surface(z)
+            .is_some_and(|z| z.format.flags & 0x4000 != 0);
+    (flags & CLEAR_STENCIL != 0 && !stencil).then_some(D3DERR_STENCILBUFFER_NOTPRESENT)
 }
 
 /// Clear keeps to the viewport (x, y, width, height): the rectangles
@@ -1113,7 +1131,8 @@ pub fn preload(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// ValidateDevice(this, passes): one pass, if the stages in use are no
-/// more than the card's texture units.
+/// more than the blend stages the device reports, and only the first
+/// of them, one for each texture unit, take a texture.
 pub fn validate_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, passes] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
@@ -1125,15 +1144,28 @@ pub fn validate_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let used = (0..STAGES)
         .take_while(|&s| d.stage(s, TSS_COLOROP) != TOP_DISABLE)
         .count() as u32;
-    if used > d.tmus {
+    let kind = super::hal::kind_of(cpu, &d);
+    // A card with a stage for each texture unit says 0 stages.
+    let stages = match super::hal::description(kind).stages {
+        0 => d.tmus,
+        stages => stages,
+    };
+    let texture = |s: u32, op: u32, args: [u32; 2]| {
+        d.stage(s, op) != TOP_DISABLE && args.iter().any(|&a| d.stage(s, a) & 0xF == TA_TEXTURE)
+    };
+    let textured = |s: u32| {
+        texture(s, TSS_COLOROP, [TSS_COLORARG1, TSS_COLORARG2])
+            || texture(s, TSS_ALPHAOP, [TSS_ALPHAARG1, TSS_ALPHAARG2])
+    };
+    if used > stages || (d.tmus..used).any(textured) {
         return Some(D3DERR_TOOMANYOPERATIONS);
     }
     for s in 0..used {
-        if !super::hal::can_do(d.stage(s, TSS_COLOROP)) {
+        if !super::hal::can_do(kind, d.stage(s, TSS_COLOROP)) {
             return Some(super::D3DERR_UNSUPPORTEDCOLOROPERATION);
         }
         let alpha = d.stage(s, TSS_ALPHAOP);
-        if alpha != TOP_DISABLE && !super::hal::can_do(alpha) {
+        if alpha != TOP_DISABLE && !super::hal::can_do(kind, alpha) {
             return Some(super::D3DERR_UNSUPPORTEDALPHAOPERATION);
         }
     }

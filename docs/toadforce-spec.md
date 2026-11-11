@@ -18,7 +18,7 @@ there.
 |---|---|
 | 1 to 8 | frozen: implemented in `src/toadforce` and `src/bus/toadforce.rs` |
 | 9, level 0 | frozen, with them |
-| 9, level 1 | provisional: the state and surface commands are implemented in `src/toadforce/level1`; the draw commands come with the software renderer. A machine's card doesn't offer the level until it is frozen, after phase 5 |
+| 9, level 1 | provisional: the state, surface and draw commands for transformed vertices are implemented in `src/toadforce/level1` and drawn by `src/toadforce/raster`. A machine's card offers the level for the emulator's own drivers; it is frozen after phase 5, and may change until then |
 | 9, level 2 | not started |
 
 A frozen chapter changes only by adding what an earlier reader can't
@@ -564,8 +564,11 @@ made at once whatever the flag says.
 
 Opcodes 0010h to 00FFh. Level 1 has level 0's commands too. This
 section is provisional until the level is frozen, which waits for the
-card's transform and lighting and for the Direct3D driver that proves
-the commands against games.
+card's transform and lighting and for the games the Direct3D driver
+proves the commands against. `LEVEL_MAX` reports the level before
+then, for the drivers that are part of the emulator and change with
+it. A driver in a guest that uses a provisional level may find it
+changed by a later version of the emulator.
 
 A number in an argument is an IEEE single-precision value in its word.
 One that isn't finite is rejected with `BAD_VALUE`, and so is any

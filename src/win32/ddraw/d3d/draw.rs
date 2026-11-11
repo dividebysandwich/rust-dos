@@ -4,7 +4,7 @@
 //! the pipeline (`pipeline.rs`), and counts what was drawn in the
 //! device's statistics and clip status.
 //!
-//! The rasterizer is the card's (`hal.rs`). Without a card to draw on,
+//! The rasterizer is the card's (`hal`). Without a card to draw on,
 //! what comes out of the pipeline is only counted (`pipeline::Counter`).
 
 use super::super::DDERR_INVALIDPARAMS;
@@ -194,6 +194,7 @@ fn setup_of(
     viewport: u32,
 ) -> Setup {
     let view_map = view_map(cpu, d, version, viewport);
+    let guard_band = super::hal::vertex_band(super::hal::kind_of(cpu, d));
     let s = |r: u32| d.state(r);
     let mut planes = Vec::new();
     if version >= 7 {
@@ -263,7 +264,7 @@ fn setup_of(
         lighting,
         fog,
         clip: s(RS_CLIPPING) != 0 && flags & D3DDP_DONOTCLIP == 0,
-        guard_band: super::hal::VERTEX_BAND,
+        guard_band,
         cull: s(RS_CULLMODE),
         fill: s(RS_FILLMODE),
         shade: s(RS_SHADEMODE),

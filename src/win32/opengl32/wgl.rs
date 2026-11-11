@@ -660,7 +660,7 @@ pub fn create_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     );
     let inner_iface = ddraw::iface(cpu, inner_id, V_DEVICE7);
     ddraw::add_ref(cpu, inner_iface);
-    hal::created(cpu);
+    hal::created(cpu, dd);
 
     let pid = super::super::user32::current_pid(cpu);
     let mut c = new_context(pid, hwnd, format);

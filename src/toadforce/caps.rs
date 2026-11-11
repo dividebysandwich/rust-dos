@@ -12,9 +12,13 @@ pub const ENTRIES: usize = 191;
 /// The highest level this version of the card can have.
 pub const NEWEST_LEVEL: u32 = 1;
 /// The highest level that is released, and so frozen. The levels above
-/// it are being built: their tables and commands still change, and a
-/// machine's card doesn't offer them.
+/// it are being built: their tables and commands still change.
 pub const RELEASED_LEVEL: u32 = 0;
+/// The highest level a machine's card offers. A level offered before
+/// it is released is for the emulator's own drivers, which change with
+/// it: a guest's driver that uses one has no promise that a later
+/// version of the emulator draws the same.
+pub const OFFERED_LEVEL: u32 = 1;
 
 /// Entry 1: the largest width and height of a surface in `FILL` and
 /// `BLT`, and of a mode.

@@ -616,18 +616,10 @@ pub fn of(cpu: &mut Cpu, this: u32) -> Option<(usize, u32)> {
     Some((vtable, id))
 }
 
-/// The number of texture units of the card the DirectDraw object `dd`
-/// draws on, if Direct3D has a HAL there: the display adapter's when it
-/// is a Banshee (1) or a Voodoo3 (2), or the add-on card's for the 3dfx
-/// device's DirectDraw object (a Voodoo Graphics or Voodoo2's).
+/// The number of textures the card the DirectDraw object `dd` draws on
+/// has at once, if Direct3D has a HAL there (`hal::card`).
 pub fn hal(cpu: &mut Cpu, dd: u32) -> Option<u32> {
-    if super::voodoo::is_card_object(cpu, dd) {
-        return crate::win32::glide::hw::board(cpu).map(|b| b.tmus);
-    }
-    match cpu.bus.vga.adapter.voodoo_board()? {
-        crate::voodoo::Board::Banshee => Some(1),
-        _ => Some(2),
-    }
+    hal::card(cpu, dd).map(|offer| offer.units)
 }
 
 /// Whether a DirectDraw object was made by DirectDrawCreateEx: its
