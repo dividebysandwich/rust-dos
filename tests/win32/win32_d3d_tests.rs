@@ -3999,7 +3999,14 @@ fn four_texture_scene(transformed: bool, sets: [[f32; 2]; 4]) -> Scene {
         (false, true) => 0x001F,
         (true, true) => 0xFFFF,
     });
-    let corners: [[f32; 2]; 6] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    let corners: [[f32; 2]; 6] = [
+        [0.0, 0.0],
+        [1.0, 0.0],
+        [0.0, 1.0],
+        [1.0, 0.0],
+        [1.0, 1.0],
+        [0.0, 1.0],
+    ];
     let mut words = Vec::new();
     for [x, y] in corners {
         match transformed {
