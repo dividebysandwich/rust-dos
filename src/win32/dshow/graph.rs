@@ -352,6 +352,8 @@ fn render(cpu: &mut Cpu, this: u32, file: u32) -> Result<u32, u32> {
     if let Some(g) = graph(cpu, id) {
         g.file = path;
         g.complete_taken = false;
+        // The new renderer's window starts outside full-screen mode.
+        g.full_screen = None;
     }
     Ok(S_OK)
 }
@@ -1448,7 +1450,11 @@ fn full_screen(cpu: &mut Cpu, id: u32) -> Option<FullScreen> {
 /// The window's visibility stays as it is, so a window still hidden
 /// shows when the graph runs, as AutoShow shows it. It isn't activated:
 /// the program's window keeps the keyboard, which the renderer's window
-/// would pass on to the message drain.
+/// would pass on to the message drain. SetParent activates a top-level
+/// window it moves, so the window leaves its owner while it is still a
+/// child, as Wine's order of calls has it, and comes back to it once it
+/// is a child again. A window without an owner keeps its parent, the
+/// desktop.
 pub fn put_full_screen_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (this, on) = (args[0], args[1] != OAFALSE);
     with_calls(cpu, |cpu| {
@@ -1478,9 +1484,11 @@ pub fn put_full_screen_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 }
             }
             let (w, h) = user32::sysparams::screen_size(cpu);
+            if style & WS_CHILD != 0 {
+                call(cpu, "SetParent", &[own, 0], &[])?;
+            }
             let style = WS_POPUP | shown;
             call(cpu, "SetWindowLongA", &[own, GWL_STYLE, style], &[])?;
-            call(cpu, "SetParent", &[own, 0], &[])?;
             let args = [own, HWND_TOP, 0, 0, w as u32, h as u32, SWP_NOACTIVATE];
             call(cpu, "SetWindowPos", &args, &[])?;
             mci::device(cpu, i).video.dest = None;
@@ -1493,7 +1501,9 @@ pub fn put_full_screen_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             };
             let style = (s.style & !WS_VISIBLE) | shown;
             call(cpu, "SetWindowLongA", &[own, GWL_STYLE, style], &[])?;
-            call(cpu, "SetParent", &[own, s.owner], &[])?;
+            if s.owner != 0 {
+                call(cpu, "SetParent", &[own, s.owner], &[])?;
+            }
             let [x, y, w, h] = s.rect.map(|v| v as u32);
             let flags = SWP_NOZORDER | SWP_NOACTIVATE;
             call(cpu, "SetWindowPos", &[own, 0, x, y, w, h, flags], &[])?;

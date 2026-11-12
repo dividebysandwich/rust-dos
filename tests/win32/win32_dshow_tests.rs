@@ -1714,16 +1714,21 @@ fn a_programs_transform_filter_gets_its_renderer_connected() {
     let code = run(&mut cpu);
     assert_eq!(code, 0, "{}", printed(&cpu));
 }
+
 const WINDOW_IMPORTS: &[(&str, &[&str])] = &[
     (
         "KERNEL32.dll",
         &["ExitProcess", "WaitForSingleObject", "Sleep"],
     ),
     ("OLE32.dll", &["CoInitialize", "CoCreateInstance"]),
-    ("USER32.dll", &["GetSystemMetrics", "CreateWindowExA"]),
+    (
+        "USER32.dll",
+        &["GetSystemMetrics", "CreateWindowExA", "GetActiveWindow"],
+    ),
 ];
 const GET_SYSTEM_METRICS: usize = 5;
 const CREATE_WINDOW: usize = 6;
+const GET_ACTIVE_WINDOW: usize = 7;
 
 const IID_IVIDEO_WINDOW: [u8; 16] = quartz(0x56A8_68B4);
 const G_IID_VIDEO_WINDOW: u32 = 0x80;
@@ -1745,6 +1750,21 @@ const OATRUE: u32 = 0xFFFF_FFFF;
 const S_FALSE: u32 = 1;
 const WS_CHILD: u32 = 0x4000_0000;
 const WS_POPUP: u32 = 0x8000_0000;
+const WS_VISIBLE: u32 = 0x1000_0000;
+
+/// End with exit code `step` unless the active window is the one at
+/// OWNER.
+fn expect_owner_active(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    fail: CodeLabel,
+    step: u32,
+) -> Result<(), IcedError> {
+    a.call(l.import(GET_ACTIVE_WINDOW))?;
+    a.mov(ebx, step)?;
+    a.cmp(eax, dword_ptr(l.at(OWNER)))?;
+    a.jne(fail)
+}
 
 /// End with exit code `step` unless the four numbers at RECT are `want`;
 /// None stands for the screen's width or height, at SCREEN.
@@ -1804,7 +1824,7 @@ fn full_screen_mode_covers_the_screen_and_gives_the_window_back() {
             Imm(0),
             Ptr(CLASS),
             Imm(0),
-            Imm(WS_POPUP),
+            Imm(WS_POPUP | WS_VISIBLE),
             Imm(0),
             Imm(0),
             Imm(320),
@@ -1817,6 +1837,7 @@ fn full_screen_mode_covers_the_screen_and_gives_the_window_back() {
         push(a, l, &args)?;
         a.call(l.import(CREATE_WINDOW))?;
         a.mov(dword_ptr(l.at(OWNER)), eax)?;
+        expect_owner_active(a, l, fail, 31)?;
         let vw = |offset| (VIDEO_WINDOW, offset);
         let value = [Ptr(VALUE)];
         let (get_mode, put_mode) = (
@@ -1853,6 +1874,7 @@ fn full_screen_mode_covers_the_screen_and_gives_the_window_back() {
         a.mov(eax, dword_ptr(l.at(VALUE)))?;
         a.and(eax, (WS_CHILD | WS_POPUP) as i32)?;
         expect(a, fail, 19, WS_POPUP)?;
+        expect_owner_active(a, l, fail, 32)?;
 
         // Off: back in its owner, where it was.
         method(a, l, fail, 20, put_mode, &[Imm(0)], S_OK)?;
@@ -1871,9 +1893,47 @@ fn full_screen_mode_covers_the_screen_and_gives_the_window_back() {
         a.mov(eax, dword_ptr(l.at(VALUE)))?;
         a.and(eax, (WS_CHILD | WS_POPUP) as i32)?;
         expect(a, fail, 28, WS_CHILD)?;
+        expect_owner_active(a, l, fail, 33)?;
         exit(a, l, &mut fail, Imm(0))
     });
     let mut cpu = machine("full-screen", exe, &[("CLIP.AVI", clip())]);
+    let code = run(&mut cpu);
+    assert_eq!(code, 0, "{}", printed(&cpu));
+}
+
+/// A file rendered again gets a new renderer, whose window starts
+/// outside full-screen mode: get_FullScreenMode says so, and turning the
+/// mode on works on the new window.
+#[test]
+fn a_file_rendered_again_starts_outside_full_screen_mode() {
+    let mut d = data();
+    d[G_IID_VIDEO_WINDOW as usize..][..16].copy_from_slice(&IID_IVIDEO_WINDOW);
+    let exe = program(WINDOW_IMPORTS, &d, |a, l| {
+        let mut fail = a.create_label();
+        call(a, l, fail, 1, CO_INITIALIZE, &[Imm(0)], S_OK)?;
+        let args = [
+            Ptr(G_CLSID_GRAPH),
+            Imm(0),
+            Imm(1),
+            Ptr(G_IID_GRAPH),
+            Ptr(GRAPH),
+        ];
+        call(a, l, fail, 2, CO_CREATE, &args, S_OK)?;
+        let render = [Ptr(FILE), Imm(0)];
+        method(a, l, fail, 3, (GRAPH, GRAPH_RENDER_FILE), &render, S_OK)?;
+        let args = [Ptr(G_IID_VIDEO_WINDOW), Ptr(VIDEO_WINDOW)];
+        method(a, l, fail, 4, (GRAPH, QUERY_INTERFACE), &args, S_OK)?;
+        let get_mode = (VIDEO_WINDOW, WINDOW_GET_FULL_SCREEN_MODE);
+        let put_mode = (VIDEO_WINDOW, WINDOW_PUT_FULL_SCREEN_MODE);
+        method(a, l, fail, 5, put_mode, &[Imm(OATRUE)], S_OK)?;
+        method(a, l, fail, 6, (GRAPH, GRAPH_RENDER_FILE), &render, S_OK)?;
+        method(a, l, fail, 7, get_mode, &[Ptr(VALUE)], S_OK)?;
+        a.mov(eax, dword_ptr(l.at(VALUE)))?;
+        expect(a, fail, 8, 0)?;
+        method(a, l, fail, 9, put_mode, &[Imm(OATRUE)], S_OK)?;
+        exit(a, l, &mut fail, Imm(0))
+    });
+    let mut cpu = machine("full-screen-again", exe, &[("CLIP.AVI", clip())]);
     let code = run(&mut cpu);
     assert_eq!(code, 0, "{}", printed(&cpu));
 }
