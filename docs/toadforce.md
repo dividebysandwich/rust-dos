@@ -855,6 +855,54 @@ them. The renderer sits behind the same kind of interface as
 `voodoo::gpu::GpuLink`, so another back end can be added behind it
 later.
 
+### Between the card and the host renderer
+
+The card and the display run on one thread, as the Voodoo's renderers
+do, so the card calls the host renderer directly. `toadforce::gpu` has
+the interface (`Host`), which the display attaches to the card when it
+has an OpenGL 3.2 context and the run isn't deterministic.
+
+- **What the host gets.** The card's renderer queues the primitives of
+  a run of commands as it does for the software renderer, and hands
+  the host the queue at the points where the software renderer would
+  draw it: each entry is the lowered state (`DrawState`) and its
+  triangles as screen vertices, after the card's transform, lighting
+  and clipping. The vertex work moves to the GPU later, if a
+  measurement asks for it.
+- **A draw the host doesn't take.** The host is asked for each state
+  (`Host::takes`). A draw it declines (a state it has no shader for
+  yet, lines and points until it draws them as the card does) is
+  drawn by the software renderer: the target is read back first, and
+  is uploaded again before the host's next draw into it. The host
+  renderer can so be built up state by state, and a rare state stays
+  right at the cost of speed.
+- **Who has the newer pixels.** A surface the host drew into is ahead
+  on the host, and card memory is stale there. Before anything reads
+  or writes that memory on the processor the card reads the surface
+  back (`ToadForce::settle` with the range): the program's reads and
+  writes of the frame buffer (in the bus), the drivers' (`win32::
+  screen`), the card's own `FILL`, `BLT` and `CLEAR` while they run on
+  the processor, a texture or a vertex buffer that overlaps it, the
+  picture the screen shows, and a saved state. Running the queued
+  commands and reading back are separate: the queue is run at every
+  such point as before, and a surface is read back only when its own
+  bytes are asked for.
+- **What the processor wrote.** The card counts the writes to each
+  page of its memory (`Pages`): the program's, the drivers' and its
+  own. The host's copies, of textures and of surfaces it drew into,
+  are valid while the counters of their pages are what they were, and
+  are made again from card memory when they aren't.
+- **The picture shown** is read back once a host frame at first, and
+  comes from the host's texture once that is built (see "The visible
+  surface" above).
+
+It is built in these steps, each a pull request: the interface with
+the tracking and a host that draws in software, to test the protocol
+(4a); the OpenGL host with its targets, textures, generated shaders
+and the agreement tests (4b); the display's side, the configuration
+and the status (4c); the picture from the host's texture, `CLEAR`,
+`FILL` and `BLT` on the host, and the host options (4d).
+
 ### Shader cache
 
 Programs are cached by key in memory. Compiled program binaries are
