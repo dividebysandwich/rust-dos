@@ -1541,6 +1541,10 @@ What is left of phase 5, with a guess of its size:
 - **`SwapBuffers` without the read-back** (medium): one read of the
   target a frame in MDK2 and Oni. A `BLT` or `FLIP` of the context's
   back buffer on the card. Oni's `glReadPixels` belongs here too.
+- **Keyed copies the host leaves to the processor** (small, #981): a
+  keyed copy with more than 4096 runs, or one whose source is ahead
+  on the host, is copied by the processor after a read-back. A draw
+  that discards the key would take both.
 
 The second step of phase 5 added:
 
@@ -1565,12 +1569,15 @@ The second step of phase 5 added:
 No One Lives Forever needed the last two. Its menus drew a
 full-screen `Blt` from a system-memory surface each frame and keyed
 blits for the cursor and the marks, and each made the host read the
-target back: 7398 read-backs through the menus and the first
-cutscene, 11 with these. It now plays its first mission. It takes the
-plain HAL device and transforms by itself: about 1600 `DrawPrimitive`
-fans of screen vertices a frame, which the host folds into about 5
-batches. The emulated processor never halts there, so its frame rate
-is the game's own work on the processor.
+target back: 9324 read-backs from the menus through the first
+cutscene into the first mission, 3 with these (one each for the
+driver, a lock and a shown frame). It now plays its first mission. It
+takes the plain HAL device and transforms by itself: about 1900
+`DrawPrimitive` fans of screen vertices a frame, which the host
+draws in batches of equal state. The emulated processor never halts
+there, so its frame rate is the game's own work on the processor.
+Zanzarah's driver read-backs on its route to 160 s went from 1208 to
+none, with the same pictures.
 
 ### What the phase 5 traces showed
 
