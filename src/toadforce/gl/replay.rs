@@ -20,6 +20,11 @@
 //! filter off.
 //! `TOADFORCE_REPLAY_OVER` is the difference above which a pixel is
 //! counted, in place of `OVER`.
+//! `TOADFORCE_REPLAY_PIXEL` names pixels, as `X,Y` joined by `;`, to
+//! follow through the whole recording on the software side: every
+//! draw that changes one is printed with the pixel before and after it
+//! and the draw's steps, which tells how many layers a pixel is made
+//! of and what each one adds.
 
 use super::tests::Bench;
 use crate::savestate::{Reader, State};
@@ -41,6 +46,20 @@ const OVER: u32 = 17;
 fn over() -> u32 {
     let set = std::env::var("TOADFORCE_REPLAY_OVER").ok();
     set.and_then(|v| v.parse().ok()).unwrap_or(OVER)
+}
+
+/// The pixels `TOADFORCE_REPLAY_PIXEL` names.
+fn traced() -> Vec<(u32, u32)> {
+    let Ok(list) = std::env::var("TOADFORCE_REPLAY_PIXEL") else {
+        return Vec::new();
+    };
+    let pixels = list.split(';').filter(|item| !item.is_empty());
+    pixels
+        .map(|item| {
+            let (x, y) = item.split_once(',').expect("X,Y");
+            (x.parse().expect("an x"), y.parse().expect("a y"))
+        })
+        .collect()
 }
 
 /// The commands that set the states `TOADFORCE_REPLAY_SET` names.
@@ -253,6 +272,8 @@ pub fn replay(bench: &Bench, rec: &Recording) {
     let mut hosted = Side::new(rec);
     hosted.card.set_host(Some(bench.host()), &mut hosted.memory);
     let mut targets: Vec<Surface> = Vec::new();
+    let traced = traced();
+    let mut draw_at = 0u64;
     for event in &rec.events {
         match event {
             Event::Patch(at, bytes) => {
@@ -270,17 +291,38 @@ pub fn replay(bench: &Bench, rec: &Recording) {
                         command::decode(one, level, size),
                         Ok(Command::Level1(level1::Command::Draw(_)))
                     );
+                    let mut followed = None;
                     if draws {
                         software.submit(&set);
                         hosted.submit(&set);
-                        if let Ok(st) = pipeline::lower(&software.card.level1)
-                            && !targets.contains(&st.target.colour)
-                        {
-                            targets.push(st.target.colour);
+                        if let Ok(st) = pipeline::lower(&software.card.level1) {
+                            if !targets.contains(&st.target.colour) {
+                                targets.push(st.target.colour);
+                            }
+                            let s = st.target.colour;
+                            let inside = traced.iter().filter(|p| p.0 < s.width && p.1 < s.height);
+                            let was: Vec<_> = inside
+                                .map(|&(x, y)| (x, y, software.pixel(&s, x, y)))
+                                .collect();
+                            followed = Some((st, was));
                         }
+                        draw_at += 1;
                     }
                     software.submit(one);
                     hosted.submit(one);
+                    if let Some((st, was)) = followed {
+                        let s = st.target.colour;
+                        for (x, y, was) in was {
+                            let now = software.pixel(&s, x, y);
+                            if now != was {
+                                println!(
+                                    "pixel ({x}, {y}) of {:?} at {:#x}, draw {draw_at}: {was:?} \
+                                     to {now:?}\n  steps {:?}",
+                                    s.format, s.offset, st.steps
+                                );
+                            }
+                        }
+                    }
                     at += len;
                 }
             }
