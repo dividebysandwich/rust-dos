@@ -532,7 +532,9 @@ fn glide2x_dll_is_there_with_a_3dfx_card_alone() {
 }
 
 /// Loads `path`, a DLL that isn't there, and checks that the load fails
-/// with ERROR_DLL_NOT_FOUND, as Windows 95 and 98 fail it.
+/// with ERROR_DLL_NOT_FOUND. Wine's tests record that code for Windows 9x
+/// when a DLL named without a path is missing; a full path to a missing
+/// file is taken to fail the same way.
 fn loads_a_missing_file(path: &str) -> Vec<u8> {
     let mut data = vec![0; 0x100];
     put(&mut data, 0, path.as_bytes());
