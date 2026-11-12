@@ -142,13 +142,16 @@ pub struct Hal {
     pub sent: Option<Sent>,
     /// The `Undrawn` reasons logged so far, one bit each.
     pub logged: u32,
+    /// The textures in place the card was last found to take
+    /// (`in_place`), newest last: most draws bind one of them again.
+    pub taken: Vec<Texture>,
 }
 
 crate::state_fields!(Hal {
     pid,
     textures,
     clock
-} skip { sent, logged });
+} skip { sent, logged, taken });
 
 /// The state the HAL gives the card.
 #[derive(Clone, Debug, PartialEq)]
@@ -1138,8 +1141,24 @@ fn in_place(cpu: &mut Cpu, id: u32) -> Option<Texture> {
             .map(|key| key & format.defined_bits()),
         images,
     };
-    takes(cpu, |w| encode::define_texture(w, 1, &texture)).then_some(texture)
+    // The card's check of the command is of the description alone,
+    // so one that passed passes again.
+    if hal(cpu).taken.contains(&texture) {
+        return Some(texture);
+    }
+    if !takes(cpu, |w| encode::define_texture(w, 1, &texture)) {
+        return None;
+    }
+    let taken = &mut hal(cpu).taken;
+    if taken.len() >= TAKEN {
+        taken.remove(0);
+    }
+    taken.push(texture.clone());
+    Some(texture)
 }
+
+/// The descriptions `Hal::taken` keeps.
+const TAKEN: usize = 64;
 
 fn hash_words(words: &[u32]) -> u32 {
     let mut h = 0x811C_9DC5u32;
