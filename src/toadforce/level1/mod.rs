@@ -933,7 +933,19 @@ impl Level1 {
                 z,
                 stencil,
                 rects,
-            } => self.clear(flags, colour, z, stencil, rects, memory, drawn)?,
+            } => {
+                let (rects, buffers) = self.clear(flags, colour, z, stencil, rects)?;
+                for (surface, value, mask) in buffers {
+                    let clear = crate::toadforce::gpu::Clear {
+                        surface,
+                        rects: &rects,
+                        value,
+                        mask,
+                    };
+                    clear.write(memory);
+                    drawn.extend(rects.iter().map(|rect| surface.span(rect)));
+                }
+            }
             Command::DefineTexture {
                 handle,
                 format,
@@ -980,20 +992,19 @@ impl Level1 {
         Ok(())
     }
 
-    /// `CLEAR`: write the colour, the depth and the stencil value to
-    /// the rectangles of the render target, each to the buffer its flag
-    /// names.
-    #[allow(clippy::too_many_arguments)]
-    fn clear(
+    /// What a `CLEAR` writes: the rectangles of the render target, and
+    /// for each buffer a flag names (the colour buffer, the depth
+    /// buffer) the pixel value and the bits of a pixel it replaces
+    /// (`gpu::Clear`).
+    #[allow(clippy::type_complexity)]
+    pub fn clear(
         &self,
         flags: u32,
         colour: u32,
         z: f32,
         stencil: u32,
         rects: &[u32],
-        memory: &mut [u8],
-        drawn: &mut Vec<(u32, u32)>,
-    ) -> Result<(), Error> {
+    ) -> Result<(Vec<Rect>, Vec<(Surface, u32, u32)>), Error> {
         // Without a target there is nothing to check the rectangles
         // against. With one, ranges come before the state, as chapter 5
         // orders them.
@@ -1016,32 +1027,17 @@ impl Level1 {
         {
             return Err(Error::BadState);
         }
-        for rect in &rects {
-            if flags & CLEAR_COLOUR != 0 {
-                let value = target.colour.format.pack(colour);
-                super::blit::fill(memory, &target.colour, rect, value);
-                drawn.push(target.colour.span(rect));
-            }
-            let Some(depth) = depth.filter(|_| flags & (CLEAR_DEPTH | CLEAR_STENCIL) != 0) else {
-                continue;
-            };
+        let mut buffers = Vec::new();
+        if flags & CLEAR_COLOUR != 0 {
+            let format = target.colour.format;
+            buffers.push((target.colour, format.pack(colour), 0xFFFF_FFFF));
+        }
+        if let Some(depth) = depth.filter(|_| flags & (CLEAR_DEPTH | CLEAR_STENCIL) != 0) {
             // The bits of a depth pixel each flag writes.
             let (value, mask) = depth_bits(depth.format, flags, z, stencil);
-            if mask == depth.format.defined_bits() || mask == 0xFFFF_FFFF {
-                super::blit::fill(memory, &depth, rect, value);
-            } else {
-                let len = rect.width as usize * 4;
-                for y in rect.top..rect.top + rect.height {
-                    let at = depth.at(rect.left, y);
-                    for pixel in memory[at..at + len].as_chunks_mut::<4>().0 {
-                        let old = u32::from_le_bytes(*pixel);
-                        *pixel = (old & !mask | value & mask).to_le_bytes();
-                    }
-                }
-            }
-            drawn.push(depth.span(rect));
+            buffers.push((depth, value, mask));
         }
-        Ok(())
+        Ok((rects, buffers))
     }
 }
 

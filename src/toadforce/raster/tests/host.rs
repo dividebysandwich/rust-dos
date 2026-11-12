@@ -32,6 +32,8 @@ struct Log {
     triangles: u32,
     read_backs: u32,
     forgets: u32,
+    /// Buffers a `CLEAR` wrote in the host's copy.
+    clears: u32,
 }
 
 /// Picks the states a host refuses.
@@ -58,6 +60,11 @@ struct TestHost {
     /// The states the host refuses.
     declines: Declines,
     log: Rc<RefCell<Log>>,
+}
+
+/// Whether two ranges of card memory share a byte.
+fn shares(a: (u32, u32), b: (u32, u32)) -> bool {
+    a.0 < b.1 && b.0 < a.1
 }
 
 /// The bytes of each row of `s` in card memory.
@@ -176,6 +183,35 @@ impl Host for TestHost {
             let copy = self.copies.iter_mut().find(|c| c.surface == *surface);
             copy.unwrap().pixels = pixels(surface, &scratch);
         }
+    }
+
+    fn clear(&mut self, clear: &gpu::Clear, _: &[u8], pages: &Pages) -> bool {
+        let surface = clear.surface;
+        let range = gpu::range(&surface);
+        // Only a copy that is what card memory holds, or newer.
+        let Some(at) = self.copies.iter().position(|c| c.surface == surface) else {
+            return false;
+        };
+        if pages.changed(range, &mut self.copies[at].stamp) {
+            return false;
+        }
+        self.copies
+            .retain(|c| c.surface == surface || !shares(gpu::range(&c.surface), range));
+        self.textures.retain(|t| !shares(t.range, range));
+        let copy = self.copies.iter_mut().find(|c| c.surface == surface);
+        // The copy's rows have nothing between them.
+        let rows = Surface {
+            offset: 0,
+            pitch: surface.width * surface.format.bytes(),
+            ..surface
+        };
+        gpu::Clear {
+            surface: rows,
+            ..*clear
+        }
+        .write(&mut copy.unwrap().pixels);
+        self.log.borrow_mut().clears += 1;
+        true
     }
 
     fn read_back(&mut self, surface: &Surface, memory: &mut [u8]) -> bool {
@@ -787,4 +823,32 @@ fn a_card_without_a_host_counts_nothing_and_is_never_ahead() {
     assert_eq!(status["renderer"], "software");
     assert_eq!(status["host"]["read_backs"], 0);
     assert_eq!(status["host"]["declined_draws"], 0);
+}
+
+/// A frame after a frame, and a clear of a corner.
+fn two_frames(rig: &mut Rig) {
+    triangles(rig);
+    rig.clear(CLEAR_COLOUR | CLEAR_DEPTH, 0xFF40_1010, 0.8, 0);
+    assert_eq!(rig.draw(4, &corner(4.0, 4.0, 30.0, 0.6, 0xFF00_00FF)), 0);
+    let corner = [rect(56, 0, 8, 8)];
+    let error = rig.run(|w| encode::clear(w, CLEAR_COLOUR, 0x33_3333, 0.0, 0, &corner));
+    assert_eq!(error, 0);
+}
+
+#[test]
+fn a_clear_runs_on_the_host_where_the_host_has_the_buffer() {
+    let (mut rig, log) = same(takes_all, two_frames);
+    // The first clear found no copy and ran on the processor. The
+    // second frame's cleared both of the host's buffers and the corner
+    // one of them, with nothing read back or copied in between.
+    assert_eq!(log.borrow().clears, 3);
+    assert_eq!((log.borrow().uploads, log.borrow().read_backs), (2, 2));
+    // After a write of the processor the host's copy is stale, and
+    // the clear is the processor's.
+    let at = rig.colour().at(0, 0);
+    poke(&mut rig, at, &[1, 2, 3, 4]);
+    rig.clear(CLEAR_COLOUR, 0xFF00_0000, 0.0, 0);
+    assert_eq!(log.borrow().clears, 3);
+    assert!(!rig.card.ahead());
+    assert_eq!(rig.px(0, 0), 0);
 }

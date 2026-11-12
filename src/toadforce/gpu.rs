@@ -29,11 +29,17 @@
 //!   holds, and isn't counted, and neither are the host's own draws:
 //!   a host that draws into a target drops its other copies that share
 //!   a byte with it (`Host::draw`).
+//! - **`CLEAR`.** The card offers the host each buffer a `CLEAR` writes
+//!   (`Host::clear`). A host whose copy of the buffer is what card
+//!   memory holds, or newer, writes the copy, and the buffer is ahead
+//!   there. Otherwise the processor writes card memory, so a target
+//!   only the software renderer draws into never goes through the
+//!   host.
 //!
 //! With no host attached none of this does anything: the pages aren't
 //! counted and nothing is ever ahead.
 
-use super::format::Surface;
+use super::format::{Rect, Surface};
 use super::level1::Target;
 use super::raster::pipeline::DrawState;
 use super::raster::vertex::ScreenVertex;
@@ -68,6 +74,45 @@ pub struct Batch<'a> {
     pub vertices: &'a [ScreenVertex],
 }
 
+/// What a `CLEAR` writes to one buffer of the render target.
+#[derive(Clone, Copy)]
+pub struct Clear<'a> {
+    /// The colour buffer or the depth buffer.
+    pub surface: Surface,
+    pub rects: &'a [Rect],
+    /// The pixel value, and the bits of a pixel it replaces: all of
+    /// them, or the depth or the stencil alone of a `D24S8` pixel.
+    pub value: u32,
+    pub mask: u32,
+}
+
+impl Clear<'_> {
+    /// Whether every bit of a pixel is replaced.
+    pub fn whole(&self) -> bool {
+        self.mask == self.surface.format.defined_bits() || self.mask == 0xFFFF_FFFF
+    }
+
+    /// Write it to `memory`, where the surface is.
+    pub fn write(&self, memory: &mut [u8]) {
+        let s = &self.surface;
+        for rect in self.rects {
+            if self.whole() {
+                super::blit::fill(memory, s, rect, self.value);
+                continue;
+            }
+            // A part of a pixel's bits is of a 32-bit depth format.
+            let len = rect.width as usize * 4;
+            for y in rect.top..rect.top + rect.height {
+                let at = s.at(rect.left, y);
+                for pixel in memory[at..at + len].as_chunks_mut::<4>().0 {
+                    let old = u32::from_le_bytes(*pixel);
+                    *pixel = (old & !self.mask | self.value & self.mask).to_le_bytes();
+                }
+            }
+        }
+    }
+}
+
 /// A renderer on the host that draws the card's triangles.
 pub trait Host {
     /// What the debugger's status calls it.
@@ -89,6 +134,15 @@ pub trait Host {
     /// another size or format. The card reads the target back before
     /// anything uses those bytes again, and the host copies them anew.
     fn draw(&mut self, batch: &Batch, memory: &[u8], pages: &Pages);
+
+    /// Write `clear` to the host's copy of its surface, when the host
+    /// has one that is what card memory holds (by `pages`) or newer:
+    /// the surface is then ahead on the host, and the host drops its
+    /// other copies that share a byte with it, as for a draw. False
+    /// when the host has no such copy or can't write those bits
+    /// exactly; nothing is changed, and the processor writes card
+    /// memory.
+    fn clear(&mut self, clear: &Clear, memory: &[u8], pages: &Pages) -> bool;
 
     /// Write the pixels of `surface`, a colour or a depth buffer the
     /// host drew into, to card memory. False when the host has no such
@@ -329,6 +383,37 @@ impl Gpu {
                 self.ahead.push(surface);
             }
         }
+    }
+
+    /// Have the host write `clear` to its copy of the surface, which
+    /// is then ahead on it. False when the host leaves it to the
+    /// processor. Other surfaces that are ahead and share bytes with
+    /// this one are read back first.
+    pub fn clear(&mut self, clear: &Clear, memory: &mut [u8]) -> bool {
+        if !self.attached() {
+            return false;
+        }
+        let bytes = range(&clear.surface);
+        let other: Vec<(u32, u32)> = self
+            .ahead
+            .iter()
+            .filter(|s| **s != clear.surface)
+            .map(range)
+            .filter(|&r| overlap(r, bytes))
+            .collect();
+        for r in other {
+            self.settle(memory, Some(r));
+        }
+        let Some(host) = self.host.get_mut() else {
+            return false;
+        };
+        if !host.clear(clear, memory, &self.pages) {
+            return false;
+        }
+        if !self.ahead.contains(&clear.surface) {
+            self.ahead.push(clear.surface);
+        }
+        true
     }
 
     /// The program read `len` bytes at `offset` by itself, which the
