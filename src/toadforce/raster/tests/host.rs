@@ -739,11 +739,13 @@ fn a_saved_state_has_what_the_host_drew_and_a_loaded_one_starts_from_memory() {
     assert!(rig.memory == software.memory);
 
     // The state loaded, with a host attached that still has the
-    // pixels of after the save: it drops them.
+    // pixels of after the save: it drops them. (It dropped what it had
+    // once before, when it was attached.)
+    let forgets = log.borrow().forgets;
     rig.card.load(&mut Reader::new(&w.buf)).unwrap();
     rig.memory = saved.clone();
     rig.card.forget();
-    assert_eq!(log.borrow().forgets, 1);
+    assert_eq!(log.borrow().forgets, forgets + 1);
     assert!(!rig.card.ahead());
     let uploads = log.borrow().uploads;
     after_the_load(&mut rig);

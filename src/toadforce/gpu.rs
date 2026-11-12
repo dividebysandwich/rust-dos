@@ -152,6 +152,12 @@ pub trait Host {
     /// Drop every copy: card memory is all there is, as after a saved
     /// state was loaded.
     fn forget(&mut self);
+
+    /// Counts of its own work for the debugger's status, if it keeps
+    /// any.
+    fn status(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
 }
 
 /// The writes the processor made to each page of card memory, while a
@@ -232,6 +238,48 @@ fn overlap(a: (u32, u32), b: (u32, u32)) -> bool {
     a.0 < b.1 && b.0 < a.1
 }
 
+/// What a surface was read back for, for the status: each read-back
+/// stalls the host's GPU, and which kind a game has many of says what
+/// to move to the host next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cause {
+    /// The program's own read or write of the frame buffer, and
+    /// whatever names nothing else.
+    Program,
+    /// A driver gave the program the surface's address (`Lock`,
+    /// `GetDC`).
+    Lock,
+    /// A driver read or wrote the bytes itself (GDI, a DirectDraw blit
+    /// on the processor).
+    Driver,
+    /// The screen shows the surface.
+    Show,
+    /// `FILL` or `BLT` on the processor reads or writes it.
+    Blit,
+    /// `CLEAR` writes bytes it shares: on the processor, which the
+    /// host declined, or on the host into another surface.
+    Clear,
+    /// A draw of the host's samples it, or draws into bytes it shares.
+    Sampled,
+    /// A draw the host declined draws into it or samples it.
+    Declined,
+    /// A draw's vertices or indices are in it.
+    Buffers,
+    /// A guest driver's write of `RING_PUT`, after which card memory
+    /// holds everything.
+    Ring,
+    /// The renderer changed, or a recording (`capture`) takes card
+    /// memory before and after a run.
+    Other,
+}
+
+impl Cause {
+    const NAMES: [&str; 11] = [
+        "program", "lock", "driver", "show", "blit", "clear", "sampled", "declined", "buffers",
+        "ring", "other",
+    ];
+}
+
 /// The card's side of a host renderer: the host, the pages, and the
 /// surfaces that are ahead on the host.
 #[derive(Default)]
@@ -246,6 +294,8 @@ pub struct Gpu {
     /// the software renderer with a host attached.
     pub read_backs: u64,
     pub declined: u64,
+    /// The read-backs by what asked for them (`Cause`).
+    by_cause: [u64; Cause::NAMES.len()],
     /// The program's reads of bytes that were ahead on the host, which
     /// got what card memory had (`Gpu::stale_read`).
     stale_reads: Cell<u64>,
@@ -267,9 +317,14 @@ impl std::fmt::Debug for Gpu {
 
 impl Gpu {
     /// Attach `host`, or with None go back to the software renderer.
-    /// The caller has settled everything first.
-    pub fn set_host(&mut self, host: Option<Box<dyn Host>>, memory: u32) {
+    /// The caller has settled everything first. The host drops the
+    /// copies it has: they were stamped by other pages, maybe another
+    /// card's, and card memory now has every pixel.
+    pub fn set_host(&mut self, mut host: Option<Box<dyn Host>>, memory: u32) {
         debug_assert!(self.ahead.is_empty());
+        if let Some(host) = &mut host {
+            host.forget();
+        }
         self.pages = match host {
             Some(_) => Pages::new(memory),
             None => Pages::default(),
@@ -290,6 +345,15 @@ impl Gpu {
         }
     }
 
+    /// The host's own counts for the status: null without a host, or
+    /// with one that keeps none.
+    pub fn status(&self) -> serde_json::Value {
+        match &*self.host.borrow() {
+            Some(host) => host.status(),
+            None => serde_json::Value::Null,
+        }
+    }
+
     /// Whether the host has pixels card memory hasn't.
     #[inline]
     pub fn ahead(&self) -> bool {
@@ -306,20 +370,30 @@ impl Gpu {
     }
 
     /// Read back the surfaces that are ahead on the host and share a
-    /// byte with `range` (all of them for None).
+    /// byte with `range` (all of them for None), counted for `why`.
     #[inline]
-    pub fn settle(&mut self, memory: &mut [u8], range: Option<(u32, u32)>) {
+    pub fn settle(&mut self, memory: &mut [u8], range: Option<(u32, u32)>, why: Cause) {
         if !self.ahead.is_empty() {
-            self.read_back(memory, range);
+            self.read_back(memory, range, why);
         }
     }
 
+    /// The read-backs by cause, for the status.
+    pub fn causes(&self) -> serde_json::Value {
+        let counts = Cause::NAMES.iter().zip(self.by_cause);
+        counts
+            .map(|(name, count)| (name.to_string(), serde_json::json!(count)))
+            .collect::<serde_json::Map<_, _>>()
+            .into()
+    }
+
     #[cold]
-    fn read_back(&mut self, memory: &mut [u8], range: Option<(u32, u32)>) {
+    fn read_back(&mut self, memory: &mut [u8], range: Option<(u32, u32)>, why: Cause) {
         let Gpu {
             host,
             ahead,
             read_backs,
+            by_cause,
             ..
         } = self;
         let Some(host) = host.get_mut() else {
@@ -332,6 +406,7 @@ impl Gpu {
             }
             host.read_back(surface, memory);
             *read_backs += 1;
+            by_cause[why as usize] += 1;
             false
         });
     }
@@ -372,7 +447,7 @@ impl Gpu {
             })
             .collect();
         for r in other {
-            self.settle(memory, Some(r));
+            self.settle(memory, Some(r), Cause::Sampled);
         }
         let Some(host) = self.host.get_mut() else {
             return;
@@ -402,7 +477,7 @@ impl Gpu {
             .filter(|&r| overlap(r, bytes))
             .collect();
         for r in other {
-            self.settle(memory, Some(r));
+            self.settle(memory, Some(r), Cause::Clear);
         }
         let Some(host) = self.host.get_mut() else {
             return false;

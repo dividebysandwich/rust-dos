@@ -182,6 +182,8 @@ pub struct Config {
     pub verite_irq: Option<u8>,
     /// The megabytes of memory a ToadForce has (`toadforce_memory`).
     pub toadforce_memory: Option<u32>,
+    /// What draws a ToadForce's triangles (`toadforce_renderer`).
+    pub toadforce_renderer: Option<crate::toadforce::Renderer>,
     /// Where screenshots and recordings go (`capture_dir`), and whether
     /// they show the settings window and the performance overlay
     /// (`record_ui`) and the CRT shader (`record_shader`).

@@ -27,6 +27,7 @@
 
 pub mod blit;
 pub mod caps;
+pub mod capture;
 pub mod command;
 pub mod display;
 pub mod format;
@@ -42,6 +43,41 @@ use command::Command;
 pub use display::{Change, Live};
 use pci::Bar;
 use regs::Error;
+
+/// What draws the card's triangles (`toadforce_renderer`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Renderer {
+    /// The host's OpenGL where the window has it, and the card's own
+    /// rasteriser elsewhere.
+    #[default]
+    Auto,
+    /// The host's OpenGL; where there is none, the log says so and the
+    /// card's own rasteriser draws.
+    OpenGl,
+    /// The card's own rasteriser, on the processor.
+    Software,
+}
+
+impl Renderer {
+    pub const ALL: [Renderer; 3] = [Renderer::Auto, Renderer::OpenGl, Renderer::Software];
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Renderer::Auto),
+            "opengl" => Some(Renderer::OpenGl),
+            "software" => Some(Renderer::Software),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Renderer::Auto => "auto",
+            Renderer::OpenGl => "opengl",
+            Renderer::Software => "software",
+        }
+    }
+}
 
 /// What an access changed outside the card, for the bus to carry out.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -108,7 +144,15 @@ pub struct ToadForce {
     /// The commands since the card was made, for a look at what drives
     /// it. No part of the card's state.
     counts: Counts,
+    /// The recording of what the card is given to draw, while one is
+    /// made (`capture`). No part of the card's state.
+    capture: capture::Slot,
 }
+
+/// The version of the card's saved state, which a saved state's `TOAD`
+/// section and a recording (`capture`) carry. A change to what
+/// `state_fields!` below saves takes a new one.
+pub const STATE_VERSION: u16 = 3;
 
 /// How long a queued command waits at most, in nanoseconds of the
 /// emulated clock: well under a frame, so that a picture drawn straight
@@ -156,7 +200,7 @@ crate::state_fields!(ToadForce {
     level1,
     queue,
     queue_since,
-} skip { counts, raster, gpu });
+} skip { counts, raster, gpu, capture });
 
 impl ToadForce {
     /// A card with `memory` bytes of card memory (one of
@@ -186,7 +230,26 @@ impl ToadForce {
             queue: Vec::new(),
             queue_since: 0,
             counts: Counts::default(),
+            capture: capture::Slot::default(),
         }
+    }
+
+    /// Record what the card is given to draw from its next run of
+    /// commands on, until `flips` page flips or with 0 until
+    /// `record_end`, into the new file `path` (`capture`).
+    pub fn record(&mut self, path: &std::path::Path, flips: u32) -> std::io::Result<()> {
+        self.capture.0 = Some(Box::new(capture::Recorder::new(path, flips)?));
+        Ok(())
+    }
+
+    /// End the recording, if one is being made.
+    pub fn record_end(&mut self) {
+        self.capture.0 = None;
+    }
+
+    /// Whether a recording is being made.
+    pub fn recording(&self) -> bool {
+        self.capture.0.is_some()
     }
 
     /// The bytes of card memory.
@@ -208,7 +271,7 @@ impl ToadForce {
     /// None the software renderer all of them again. What the host
     /// before it drew is read back into `memory`, card memory, first.
     pub fn set_host(&mut self, host: Option<Box<dyn gpu::Host>>, memory: &mut [u8]) {
-        self.gpu.settle(memory, None);
+        self.gpu.settle(memory, None, gpu::Cause::Other);
         self.gpu.set_host(host, self.memory);
     }
 
@@ -225,7 +288,13 @@ impl ToadForce {
     /// them.
     #[inline]
     pub fn settle(&mut self, memory: &mut [u8], range: Option<(u32, u32)>) {
-        self.gpu.settle(memory, range);
+        self.settle_for(memory, range, gpu::Cause::Program);
+    }
+
+    /// `settle`, with what the bytes are wanted for, for the status's
+    /// counts.
+    pub fn settle_for(&mut self, memory: &mut [u8], range: Option<(u32, u32)>, why: gpu::Cause) {
+        self.gpu.settle(memory, range, why);
     }
 
     /// The processor wrote `len` bytes of card memory at `offset`: the
@@ -243,9 +312,11 @@ impl ToadForce {
     }
 
     /// Card memory was replaced, by a loaded state: the host renderer
-    /// drops what it has.
+    /// drops what it has. A recording ends, as the state the card
+    /// jumped to isn't in it and a replay would go on from the old one.
     pub fn forget(&mut self) {
         self.gpu.forget();
+        self.record_end();
     }
 
     /// The program read `len` bytes of card memory at `offset` by
@@ -253,6 +324,11 @@ impl ToadForce {
     /// newer pixels there (see `gpu::Gpu::stale_read`).
     pub fn stale_read(&self, offset: u32, len: u32) {
         self.gpu.stale_read(offset, len);
+    }
+
+    /// Whether a host renderer is attached (`set_host`).
+    pub fn hosted(&self) -> bool {
+        self.gpu.attached()
     }
 
     /// For the debugger's status: what the card shows and what was asked
@@ -296,10 +372,13 @@ impl ToadForce {
                 "rejected": counts.rejected,
             },
             "renderer": self.gpu.name(),
+            "recording": self.recording(),
             "host": {
                 "read_backs": self.gpu.read_backs,
+                "read_backs_for": self.gpu.causes(),
                 "declined_draws": self.gpu.declined,
                 "stale_reads": self.gpu.stale_reads(),
+                "counts": self.gpu.status(),
             },
         })
     }
@@ -450,7 +529,7 @@ impl ToadForce {
                 // a read there can't read back (`Bus::read_8`). What
                 // its commands drew is in card memory when the write
                 // returns, as the specification has it.
-                self.gpu.settle(memory, None);
+                self.gpu.settle(memory, None, gpu::Cause::Ring);
             }
             regs::ERROR => {
                 self.error = 0;
@@ -530,9 +609,33 @@ impl ToadForce {
     /// header's length left no next command to find, which drops the
     /// rest of what was submitted.
     fn run(&mut self, words: &[u32], origin: Origin, memory: &mut [u8], fx: &mut Effects) -> bool {
+        let recorder = self.capture.0.take();
+        let flips = self.counts.flip;
+        let recorder = recorder.and_then(|mut recorder| {
+            // The recording has card memory with everything drawn.
+            self.gpu.settle(memory, None, gpu::Cause::Other);
+            let mut state = crate::savestate::Writer::new();
+            crate::savestate::State::save(self, &mut state);
+            match recorder.before(&state.buf, memory, words) {
+                Ok(()) => Some(recorder),
+                Err(e) => {
+                    eprintln!("[TOADFORCE] the recording ends: {e}");
+                    None
+                }
+            }
+        });
         let whole = self.run_each(words, origin, memory, fx);
         // The draws of a run are drawn by its end.
         self.raster.flush(memory, &mut self.gpu);
+        if let Some(mut recorder) = recorder {
+            self.gpu.settle(memory, None, gpu::Cause::Other);
+            let flips = (self.counts.flip - flips) as u32;
+            match recorder.after(memory, flips) {
+                Ok(false) => self.capture.0 = Some(recorder),
+                Ok(true) => {}
+                Err(e) => eprintln!("[TOADFORCE] the recording ends: {e}"),
+            }
+        }
         whole
     }
 
@@ -591,7 +694,7 @@ impl ToadForce {
             Command::Nop => self.counts.nop += 1,
             Command::Fill { dst, rect, value } => {
                 let span = dst.span(&rect);
-                self.gpu.settle(memory, Some(span));
+                self.gpu.settle(memory, Some(span), gpu::Cause::Blit);
                 blit::fill(memory, &dst, &rect, value);
                 self.gpu.pages.wrote(span.0, span.1 - span.0);
                 self.counts.fill += 1;
@@ -605,8 +708,9 @@ impl ToadForce {
                 key,
             } => {
                 let span = dst.span(&dst_rect);
-                self.gpu.settle(memory, Some(src.span(&src_rect)));
-                self.gpu.settle(memory, Some(span));
+                let read = src.span(&src_rect);
+                self.gpu.settle(memory, Some(read), gpu::Cause::Blit);
+                self.gpu.settle(memory, Some(span), gpu::Cause::Blit);
                 blit::blt(memory, &dst, &dst_rect, &src, &src_rect, key);
                 self.gpu.pages.wrote(span.0, span.1 - span.0);
                 self.counts.blt += 1;
@@ -653,7 +757,8 @@ impl ToadForce {
                     };
                     let spans = rects.iter().map(|rect| surface.span(rect));
                     if !self.gpu.clear(&clear, memory) {
-                        self.gpu.settle(memory, Some(gpu::range(&surface)));
+                        let bytes = gpu::range(&surface);
+                        self.gpu.settle(memory, Some(bytes), gpu::Cause::Clear);
                         clear.write(memory);
                         for (first, end) in spans.clone() {
                             self.gpu.pages.wrote(first, end - first);

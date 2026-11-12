@@ -268,6 +268,9 @@ impl Item {
                 let sizes = crate::toadforce::regs::MEMORY_SIZES.map(|bytes| bytes >> 20);
                 each(s, sizes, |s, megabytes| s.toadforce_memory = megabytes)
             }
+            ToadForceRenderer => each(s, crate::toadforce::Renderer::ALL, |s, renderer| {
+                s.toadforce_renderer = renderer
+            }),
             PowerVrFilter => {
                 use crate::powervr::tsp::Filter;
                 each(s, [Filter::Auto, Filter::Point, Filter::Bilinear], |s, filter| s.powervr_filter = filter)

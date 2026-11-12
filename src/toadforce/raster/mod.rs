@@ -300,7 +300,8 @@ impl Renderer {
         // And what the host drew there is read back.
         if gpu.ahead() {
             for (first, end) in buffers.into_iter().flatten() {
-                gpu.settle(memory, Some((first as u32, end.min(u32::MAX as u64) as u32)));
+                let range = (first as u32, end.min(u32::MAX as u64) as u32);
+                gpu.settle(memory, Some(range), gpu::Cause::Buffers);
             }
         }
 
@@ -388,14 +389,14 @@ impl Renderer {
             // left, and samples those it drew.
             if gpu.ahead() {
                 let colour = state.target.colour;
-                gpu.settle(memory, Some(gpu::range(&colour)));
+                gpu.settle(memory, Some(gpu::range(&colour)), gpu::Cause::Declined);
                 if let Some(depth) = state.target.depth_surface() {
-                    gpu.settle(memory, Some(gpu::range(&depth)));
+                    gpu.settle(memory, Some(gpu::range(&depth)), gpu::Cause::Declined);
                 }
                 let mut reads = Vec::new();
                 pipeline::reads(&state, &mut reads);
                 for read in reads {
-                    gpu.settle(memory, Some(read));
+                    gpu.settle(memory, Some(read), gpu::Cause::Declined);
                 }
             }
         }

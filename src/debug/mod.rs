@@ -377,6 +377,10 @@ pub enum Cmd {
     Win32Trace(rust_dos::config::Win32Trace),
     /// DirectDraw's display mode and surfaces.
     Win32Ddraw,
+    /// Have the ToadForce record what it is given to draw into the new
+    /// file `path`, until `flips` page flips or with 0 until told to
+    /// end; with no `path`, end the recording.
+    ToadForceCapture { path: Option<String>, flips: u32 },
     /// A DirectDraw surface's pixels; `keyed` makes those its source blit
     /// key matches transparent.
     Win32Surface { id: u32, keyed: bool },

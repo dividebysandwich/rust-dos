@@ -873,3 +873,133 @@ fn xbrz_incremental_regions_match_full_kernels_after_deferred_updates() {
         }
     }
 }
+
+/// A ToadForce in a machine draws through the window's host renderer,
+/// by the calls `Display::run_toadforce` makes: the pixels are on the
+/// GPU until card memory is asked for, the window's own drawing is as
+/// it was afterwards, and a card that outlives the window draws in
+/// software.
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn a_toadforce_draws_through_the_windows_host_renderer() {
+    use rust_dos::cpu::Cpu;
+    use rust_dos::toadforce::format::{Format, Surface};
+    use rust_dos::toadforce::level1::states::{
+        ARG_DIFFUSE, OP_SELECT_ARG1, RS_CULLMODE, TSS_ALPHAARG1, TSS_ALPHAOP, TSS_COLORARG1,
+        TSS_COLOROP,
+    };
+    use rust_dos::toadforce::level1::{Target, Viewport, encode};
+    use rust_dos::toadforce::regs;
+    use rust_dos::video::adapter::{Adapter, VideoSetup};
+
+    let sdl = sdl3::init().unwrap();
+    let video = sdl.video().unwrap();
+    let mut screen = GlScreen::open(&video, "ToadForce host", (8, 8), true)
+        .unwrap_or_else(|e| panic!("{}", e.reason));
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    let setup = VideoSetup {
+        adapter: Adapter::ToadForce,
+        ..Default::default()
+    };
+    rust_dos::video::bios::install(&mut cpu.bus, setup);
+    cpu.bus.toadforce_register_write(regs::LEVEL, 1);
+
+    assert!(!screen.toadforce_linked());
+    let link = screen.toadforce_link().expect("a host renderer");
+    cpu.bus.toadforce_set_host(Some(link));
+    assert!(cpu.bus.toadforce_hosted() && screen.toadforce_linked());
+    let renderer = |cpu: &Cpu| cpu.bus.toadforce_status().unwrap()["renderer"].clone();
+    assert_eq!(renderer(&cpu), "OpenGL");
+    let made = cpu.bus.toadforce_status().unwrap();
+
+    let colour = Surface {
+        offset: 8 << 20,
+        pitch: 16 * 4,
+        width: 16,
+        height: 16,
+        format: Format::X8R8G8B8,
+    };
+    let target = Target {
+        colour,
+        depth: None,
+    };
+    let viewport = Viewport {
+        x: 0,
+        y: 0,
+        width: 16,
+        height: 16,
+        min_z: 0.0,
+        max_z: 1.0,
+    };
+    // Two triangles over the target, of transformed vertices with a
+    // diffuse colour (D3DFVF_XYZRHW | D3DFVF_DIFFUSE).
+    let square = |cpu: &mut Cpu, diffuse: u32| {
+        let corners = [(0.0, 0.0), (16.0, 0.0), (0.0, 16.0)];
+        let other = [(16.0, 0.0), (16.0, 16.0), (0.0, 16.0)];
+        let mut vertices = Vec::new();
+        for (x, y) in corners.into_iter().chain(other) {
+            vertices.extend([x, y, 0.5f32, 1.0].map(f32::to_bits));
+            vertices.push(diffuse);
+        }
+        let mut words = Vec::new();
+        encode::draw(&mut words, 4, 0x004 | 0x040, 6, &vertices);
+        cpu.bus.toadforce_submit(&words);
+        cpu.bus.toadforce_flush();
+    };
+    let mut words = Vec::new();
+    encode::render_target(&mut words, Some(&target));
+    encode::viewport(&mut words, &viewport);
+    encode::render_state(&mut words, &[(RS_CULLMODE, 1)]);
+    // The diffuse colour alone: no texture is set.
+    let diffuse = [
+        (TSS_COLOROP, OP_SELECT_ARG1),
+        (TSS_COLORARG1, ARG_DIFFUSE),
+        (TSS_ALPHAOP, OP_SELECT_ARG1),
+        (TSS_ALPHAARG1, ARG_DIFFUSE),
+    ];
+    encode::stage_state(&mut words, 0, &diffuse);
+    cpu.bus.toadforce_submit(&words);
+    let pixel = |cpu: &Cpu| {
+        let at = (8 << 20) + 8 * 64 + 8 * 4;
+        u32::from_le_bytes(cpu.bus.vbe.vram[at..at + 4].try_into().unwrap()) & 0xFF_FFFF
+    };
+
+    square(&mut cpu, 0xFFFF_0000);
+    assert_eq!(cpu.bus.toadforce_status().unwrap()["error"], 0);
+    // The GPU has the square, and card memory gets it when asked.
+    assert!(cpu.bus.toadforce_ahead());
+    assert_eq!(pixel(&cpu), 0);
+    cpu.bus.toadforce_touch(8 << 20, 16 * 64);
+    assert!(!cpu.bus.toadforce_ahead());
+    assert_eq!(pixel(&cpu), 0xFF_0000);
+    let status = cpu.bus.toadforce_status().unwrap();
+    assert_eq!(status["host"]["read_backs"], 1, "{}", status["host"]);
+    // One batch more than the renderer's test of the host's formats
+    // drew when it was made.
+    let batches = |status: &serde_json::Value| status["host"]["counts"]["batches"].as_u64();
+    assert_eq!(batches(&status), batches(&made).map(|n| n + 1));
+
+    // The window draws its own picture as before.
+    let frame = Frame::from_rgb(5, 4, (0..60).collect());
+    screen
+        .present(&frame, None, 0..4, (5, 4), None, Monochrome::Off)
+        .unwrap();
+    assert_eq!(texture(&screen), frame.rgba);
+    // SAFETY: the test's context is current.
+    unsafe { assert_eq!(screen.gl.get_error(), glow::NO_ERROR) };
+
+    // Another machine's card gets the same renderer, without the
+    // first card's surfaces.
+    let link = screen.toadforce_link().expect("a host renderer");
+    cpu.bus.toadforce_set_host(Some(link));
+    square(&mut cpu, 0xFF00_FF00);
+    assert_eq!(pixel(&cpu), 0xFF_0000);
+
+    // The window ends with the square still on the GPU: that picture
+    // is lost, and the card draws in software from then on.
+    drop(screen);
+    square(&mut cpu, 0xFF00_00FF);
+    assert_eq!(pixel(&cpu), 0x00_00FF);
+    cpu.bus.toadforce_set_host(None);
+    assert_eq!(renderer(&cpu), "software");
+}

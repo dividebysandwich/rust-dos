@@ -347,6 +347,7 @@ impl Item {
             VeriteRom => "verite-rom",
             VeriteIrq => "verite-irq",
             ToadForceMemory => "toadforce-memory",
+            ToadForceRenderer => "toadforce-renderer",
             Memsize => "memsize",
             Ems => "ems",
             Umb => "umb",

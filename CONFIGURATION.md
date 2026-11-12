@@ -3171,10 +3171,11 @@ compressed (DXT1 to DXT5) and bump-map formats, and a 24-bit depth
 buffer with stencil. Games that need those, which a Voodoo3 lacks, run
 on this card ([docs/compatibility.md](docs/compatibility.md) names
 them). OpenGL 1.1 draws on it too, in a window or full screen, with
-16-bit color and depth as on a Voodoo3. The card draws 3D on the
-processor for now. It has no Glide, and Direct3D 8 programs need a 3dfx
-card. No system booted from a disk image has a driver for it: a booted
-Windows uses it as a plain VGA.
+16-bit color and depth as on a Voodoo3. Your graphics card draws its
+3D through OpenGL where the window has OpenGL 3.2, and the processor
+draws it elsewhere. It has no Glide, and Direct3D 8 programs need a
+3dfx card. No system booted from a disk image has a driver for it: a
+booted Windows uses it as a plain VGA.
 
 ```ini
 [emulator]
@@ -3184,9 +3185,22 @@ machine=svga_toadforce
 | Setting | Values | What it does |
 |---|---|---|
 | `toadforce_memory` | 32, 64 (default), 128 | The megabytes of video memory the card has |
+| `toadforce_renderer` | `auto` (default), `opengl`, `software` | What draws the card's 3D: your graphics card through OpenGL, or Rust-DOS on the processor |
 
-A change takes effect at the DOS prompt. The card's registers and
-commands are specified in [docs/toadforce-spec.md](docs/toadforce-spec.md).
+A change of `toadforce_memory` takes effect at the DOS prompt, and one
+of `toadforce_renderer` at once. The card's registers and commands are
+specified in [docs/toadforce-spec.md](docs/toadforce-spec.md).
+
+With `auto` and `opengl`, OpenGL draws the triangles and the card's
+memory gets the pixels when the program or the screen reads them. The
+pictures are those of `software` to within a step or two of a color
+channel where textures are filtered or a 16-bit screen is blended.
+`software` draws every pixel on the processor, the same on every
+computer: use it when a picture looks wrong with OpenGL, and report
+the game. The two differ only where OpenGL isn't there: `auto` then
+draws on the processor without a word, and `opengl` says so in the
+log first. A run with `--deterministic` draws on the processor whatever
+the setting.
 
 ## PowerVR PCX1 and PCX2
 

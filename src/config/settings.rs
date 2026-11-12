@@ -44,6 +44,8 @@ pub struct Settings {
     pub verite: crate::verite::VeriteSettings,
     /// The megabytes of memory a ToadForce has.
     pub toadforce_memory: u32,
+    /// What draws a ToadForce's triangles.
+    pub toadforce_renderer: crate::toadforce::Renderer,
     /// Where screenshots and recordings go; relative to the working
     /// directory.
     pub capture_dir: PathBuf,
@@ -176,6 +178,7 @@ impl Default for Settings {
             powervr_filter: Default::default(),
             verite: Default::default(),
             toadforce_memory: crate::toadforce::regs::DEFAULT_MEMORY >> 20,
+            toadforce_renderer: Default::default(),
             capture_dir: PathBuf::from("capture"),
             record_ui: false,
             record_shader: false,
@@ -324,6 +327,9 @@ impl Settings {
                 irq: config.verite_irq.unwrap_or(default.verite.irq),
             },
             toadforce_memory: config.toadforce_memory.unwrap_or(default.toadforce_memory),
+            toadforce_renderer: config
+                .toadforce_renderer
+                .unwrap_or(default.toadforce_renderer),
             capture_dir: config.capture_dir.clone().unwrap_or(default.capture_dir),
             record_ui: config.record_ui.unwrap_or(default.record_ui),
             record_shader: config.record_shader.unwrap_or(default.record_shader),
@@ -436,6 +442,11 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "verite_rom", settings.verite.rom.as_deref().map(|p| contract_home(p, home))),
         (Emulator, "verite_irq", Some(settings.verite.irq.to_string())),
         (Emulator, "toadforce_memory", Some(settings.toadforce_memory.to_string())),
+        (
+            Emulator,
+            "toadforce_renderer",
+            Some(settings.toadforce_renderer.name().to_string()),
+        ),
         (Emulator, "capture_dir", Some(contract_home(&settings.capture_dir, home))),
         (Emulator, "record_ui", yes_no(settings.record_ui)),
         (Emulator, "record_shader", yes_no(settings.record_shader)),

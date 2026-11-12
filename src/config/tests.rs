@@ -32,6 +32,30 @@ fn run_lock_is_off_on_or_a_directory() {
 }
 
 #[test]
+fn toadforce_renderer_is_auto_opengl_or_software() {
+    use crate::toadforce::Renderer;
+    let get = |value: &str| {
+        let text = format!("[emulator]\ntoadforce_renderer={}\n", value);
+        parse(&text, Path::new("/cfg"), None)
+    };
+    for renderer in Renderer::ALL {
+        let config = get(renderer.name());
+        assert_eq!(config.toadforce_renderer, Some(renderer));
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    }
+    assert_eq!(get(" OpenGL ").toadforce_renderer, Some(Renderer::OpenGl));
+    for value in ["", "gl", "on", "vulkan"] {
+        let config = get(value);
+        assert_eq!(config.toadforce_renderer, None, "{value}");
+        let warned = |w: &String| w.contains("invalid toadforce_renderer");
+        assert!(config.warnings.iter().any(warned), "{value}");
+    }
+    // Without the setting the card draws with OpenGL where it can.
+    let settings = Settings::from_config(&parse("", Path::new("/cfg"), None));
+    assert_eq!(settings.toadforce_renderer, Renderer::Auto);
+}
+
+#[test]
 fn toadforce_memory_is_one_of_the_cards_sizes() {
     let get = |value: &str| {
         let text = format!("[emulator]\ntoadforce_memory={}\n", value);
@@ -794,6 +818,7 @@ fn changed_settings() -> Settings {
             irq: 5,
         },
         toadforce_memory: 128,
+        toadforce_renderer: crate::toadforce::Renderer::Software,
         capture_dir: PathBuf::from("/home/u/dos captures"),
         record_ui: true,
         record_shader: true,

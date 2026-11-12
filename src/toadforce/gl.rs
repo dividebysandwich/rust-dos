@@ -33,6 +33,8 @@ mod shader;
 mod texture;
 
 #[cfg(test)]
+mod replay;
+#[cfg(test)]
 mod tests;
 
 use super::format::{Format, Surface};
@@ -120,6 +122,15 @@ impl Sampling {
     }
 }
 
+/// What a host texture's parameters were last set for.
+#[derive(Clone, Copy, PartialEq)]
+enum Set {
+    /// The shader reads its texels one by one (`shader::SAMPLING`).
+    Fetched,
+    /// The host's own filter samples it, with a stage's states.
+    Native(Sampling),
+}
+
 /// A texture as the host has it, kept by the texture's description.
 struct Texels {
     gl: glow::Texture,
@@ -128,8 +139,8 @@ struct Texels {
     key: Option<glow::Texture>,
     /// The bytes of card memory it was read from, and their stamps.
     ranges: Vec<((u32, u32), Stamp)>,
-    sampling: Option<Sampling>,
-    key_sampling: Option<Sampling>,
+    sampling: Option<Set>,
+    key_sampling: Option<Set>,
     /// The batch that last sampled it.
     used: u64,
 }
@@ -273,11 +284,16 @@ pub struct ToadForceGl {
     textures: HashMap<Texture, Texels>,
     /// The programs by `shader::key` of the steps they draw, made when
     /// `takes` first sees the steps (`compiled`).
-    programs: RefCell<HashMap<Vec<Step>, Program<Uniforms>>>,
+    programs: RefCell<HashMap<shader::Key, Program<Uniforms>>>,
     /// The keys whose program the host didn't compile.
-    failed: RefCell<HashSet<Vec<Step>>>,
+    failed: RefCell<HashSet<shader::Key>>,
     /// Counted up with every batch.
     batch: u64,
+    /// For the status: the runs drawn, and the surfaces and textures
+    /// copied from card memory.
+    runs: u64,
+    uploads: u64,
+    decodes: u64,
     /// The host has no framebuffer the card's surfaces fit: nothing is
     /// taken.
     broken: bool,
@@ -341,6 +357,9 @@ impl ToadForceGl {
                 programs: RefCell::default(),
                 failed: RefCell::default(),
                 batch: 0,
+                runs: 0,
+                uploads: 0,
+                decodes: 0,
                 broken: false,
             }
         };
@@ -696,6 +715,7 @@ impl ToadForceGl {
                     self.copies.len() - 1
                 }
             };
+            self.uploads += 1;
             let mut pixels = rows(surface, memory);
             if wide {
                 pixels = pixels
@@ -757,7 +777,7 @@ impl ToadForceGl {
     /// # Safety
     ///
     /// The context is current.
-    unsafe fn compiled(&self, key: &[Step]) -> bool {
+    unsafe fn compiled(&self, key: &shader::Key) -> bool {
         if self.programs.borrow().contains_key(key) {
             return true;
         }
@@ -777,13 +797,13 @@ impl ToadForceGl {
         unsafe { self.gl.use_program(None) };
         match made {
             Ok(program) => {
-                self.programs.borrow_mut().insert(key.to_vec(), program);
+                self.programs.borrow_mut().insert(key.clone(), program);
                 true
             }
             Err(e) => {
                 let e = e.replacen("a 3dfx shader", "a ToadForce shader", 1);
                 eprintln!("[TOADFORCE] {e}: the software renderer draws this state");
-                self.failed.borrow_mut().insert(key.to_vec());
+                self.failed.borrow_mut().insert(key.clone());
                 false
             }
         }
@@ -835,6 +855,7 @@ impl ToadForceGl {
                 self.textures.insert(texture.clone(), texels);
             }
         }
+        self.decodes += 1;
         let t = self
             .textures
             .get_mut(texture)
@@ -879,13 +900,14 @@ impl ToadForceGl {
         }
     }
 
-    /// Put the host's texture of `tex` (`texels`) on `stage`'s units,
-    /// with the stage's sampling states.
+    /// Put the host's texture of `tex` (`texels`) on `stage`'s units:
+    /// for the shader to read texel by texel, or with `native` for the
+    /// host's own filter, with the stage's sampling states.
     ///
     /// # Safety
     ///
     /// The context is current.
-    unsafe fn bind(&mut self, stage: usize, tex: &Tex) {
+    unsafe fn bind(&mut self, stage: usize, tex: &Tex, native: bool) {
         let gl = &*self.gl;
         let anisotropy = self.anisotropy;
         let Some(t) = self.textures.get_mut(&tex.texture) else {
@@ -896,7 +918,45 @@ impl ToadForceGl {
         } else {
             glow::TEXTURE_2D
         };
-        let now = Sampling::of(tex);
+        if !native {
+            // Every level as it is: the shader names the level and the
+            // texel of each read. A mipmapped filter, though `texelFetch`
+            // filters nothing, so that no driver takes the texture for
+            // its base level alone, where a fetch of another level is
+            // undefined.
+            let min = match tex.texture.levels {
+                1 => glow::NEAREST,
+                _ => glow::NEAREST_MIPMAP_NEAREST,
+            };
+            let fetched = |texture: glow::Texture, set: &mut Option<Set>| {
+                // SAFETY: the caller's.
+                unsafe {
+                    gl.bind_texture(kind, Some(texture));
+                    if *set != Some(Set::Fetched) {
+                        gl.tex_parameter_i32(kind, glow::TEXTURE_MIN_FILTER, min as i32);
+                        gl.tex_parameter_i32(kind, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+                        gl.tex_parameter_i32(kind, glow::TEXTURE_BASE_LEVEL, 0);
+                        gl.tex_parameter_f32(kind, glow::TEXTURE_MIN_LOD, -1000.0);
+                        gl.tex_parameter_f32(kind, glow::TEXTURE_LOD_BIAS, 0.0);
+                        if anisotropy > 0.0 {
+                            gl.tex_parameter_f32(kind, TEXTURE_MAX_ANISOTROPY, 1.0);
+                        }
+                        *set = Some(Set::Fetched);
+                    }
+                }
+            };
+            // SAFETY: the caller's.
+            unsafe {
+                gl.active_texture(glow::TEXTURE0 + shader::unit(stage));
+                fetched(t.gl, &mut t.sampling);
+                if let Some(key) = t.key.filter(|_| tex.key.is_some()) {
+                    gl.active_texture(glow::TEXTURE0 + shader::key_unit(stage));
+                    fetched(key, &mut t.key_sampling);
+                }
+            }
+            return;
+        }
+        let now = Set::Native(Sampling::of(tex));
         let mipped = tex.mip != Mip::None && tex.texture.levels > 1;
         let wrap = |address: Address| match address {
             Address::Wrap => glow::REPEAT,
@@ -1101,6 +1161,39 @@ impl ToadForceGl {
             if u.fog.is_some() {
                 gl.uniform_3_f32(u.fog.as_ref(), v.fog_start, v.fog_end, v.fog_density);
             }
+            for (stage, tex) in state.tex.iter().enumerate() {
+                let [ts, tm, ta, tl, tb] = &u.sampling[stage];
+                let (Some(tex), true) = (tex, ts.is_some()) else {
+                    continue;
+                };
+                let t = &tex.texture;
+                gl.uniform_4_i32(
+                    ts.as_ref(),
+                    t.width as i32,
+                    t.height as i32,
+                    tex.first_level.min(i32::MAX as u32) as i32,
+                    t.levels as i32 - 1,
+                );
+                let linear = |filter: Filter| (filter == Filter::Linear) as i32;
+                let mip = match tex.mip {
+                    Mip::None => 0,
+                    Mip::Point => 1,
+                    Mip::Linear => 2,
+                };
+                let needs = tex.needs_lod() as i32;
+                gl.uniform_4_i32(tm.as_ref(), linear(tex.mag), linear(tex.min), mip, needs);
+                let mode = |address: Address| match address {
+                    Address::Wrap => 0,
+                    Address::Mirror => 1,
+                    Address::Clamp => 2,
+                    Address::Border => 3,
+                };
+                gl.uniform_2_i32(ta.as_ref(), mode(tex.address[0]), mode(tex.address[1]));
+                let aniso = (tex.anisotropy * tex.anisotropy) as f32;
+                gl.uniform_2_f32(tl.as_ref(), tex.lod_bias, aniso);
+                let [r, g, b, a] = rgba(tex.border);
+                gl.uniform_4_i32(tb.as_ref(), r, g, b, a);
+            }
             for (stage, m) in v.bump.iter().enumerate() {
                 if u.bump[stage].is_some() {
                     gl.uniform_4_f32(u.bump[stage].as_ref(), m[0], m[1], m[2], m[3]);
@@ -1166,6 +1259,8 @@ impl Host for ToadForceGl {
                     let Some(tex) = &state.tex[stage as usize] else {
                         return false;
                     };
+                    let anisotropic = self.anisotropy > 0.0;
+                    let native = shader::native(tex, anisotropic);
                     // The bump offsets move a cube map's coordinates on
                     // the face they picked, which the host's cube
                     // sampler has no way to say.
@@ -1178,6 +1273,21 @@ impl Host for ToadForceGl {
                     // the host doesn't make.
                     if keyed && !texture::has_key(tex.texture.format) {
                         return false;
+                    }
+                    // A texture whose texels the shader reads on one
+                    // stage and the host's filter samples on another
+                    // has one set of the host's parameters for both.
+                    let mixed = state.tex.iter().flatten().any(|other| {
+                        other.texture == tex.texture && shader::native(other, anisotropic) != native
+                    });
+                    if mixed {
+                        return false;
+                    }
+                    // What follows is where the host's own filter goes
+                    // another way than the card; the shader's reads of
+                    // the texels (`shader::SAMPLING`) go the card's.
+                    if !native {
+                        continue;
                     }
                     // With `MAXMIPLEVEL` the software renderer still
                     // magnifies by the pixel's size in texels of level
@@ -1224,11 +1334,26 @@ impl Host for ToadForceGl {
             }
         }
         // SAFETY: the context is current (see the module comment).
-        unsafe { self.compiled(&shader::key(&state.steps)) }
+        unsafe { self.compiled(&shader::key(state, self.anisotropy > 0.0)) }
+    }
+
+    fn status(&self) -> serde_json::Value {
+        serde_json::json!({
+            "batches": self.batch,
+            "runs": self.runs,
+            "surface_uploads": self.uploads,
+            "texture_uploads": self.decodes,
+            "programs": self.programs.borrow().len(),
+            "failed_programs": self.failed.borrow().len(),
+            "surfaces": self.copies.len(),
+            "textures": self.textures.len(),
+            "packed_565": self.packed,
+        })
     }
 
     fn draw(&mut self, batch: &Batch, memory: &[u8], pages: &Pages) {
         self.batch += 1;
+        self.runs += batch.runs.len() as u64;
         let colour = batch.target.colour;
         let depth = batch.target.depth_surface();
         let surfaces: Vec<Surface> = std::iter::once(colour).chain(depth).collect();
@@ -1263,14 +1388,14 @@ impl Host for ToadForceGl {
                 if count == 0 || !self.fixed(state) {
                     continue;
                 }
+                // `takes` compiled it.
+                let key = shader::key(state, self.anisotropy > 0.0);
                 for (stage, tex) in state.tex.iter().enumerate() {
                     if let Some(tex) = tex {
                         self.texels(&tex.texture, memory, pages);
-                        self.bind(stage, tex);
+                        self.bind(stage, tex, key.native(stage));
                     }
                 }
-                // `takes` compiled it.
-                let key = shader::key(&state.steps);
                 if !self.compiled(&key) {
                     continue;
                 }
