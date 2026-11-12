@@ -29,3 +29,7 @@ web-time = "1"
 [profile.release]
 lto = true
 codegen-units = 1
+
+# The patched oxideav-indeo the emulator builds with (../Cargo.toml).
+[patch.crates-io]
+oxideav-indeo = { path = "../vendor/oxideav-indeo" }
