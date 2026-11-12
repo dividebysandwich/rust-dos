@@ -30,6 +30,8 @@ pub mod caps;
 pub mod command;
 pub mod display;
 pub mod format;
+#[cfg(feature = "voodoo-gl")]
+pub mod gl;
 pub mod gpu;
 pub mod level1;
 pub mod pci;

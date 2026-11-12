@@ -38,7 +38,8 @@ const BLIT_FRAG: &str = include_str!("gl/blit.frag");
 const COPY_FRAG: &str = include_str!("gl/copy.frag");
 
 mod uniforms;
-use uniforms::{Banshee, Blit2d, CopyQuad, FillQuad, Locations, Quad, Triangle};
+pub(crate) use uniforms::Locations;
+use uniforms::{Banshee, Blit2d, CopyQuad, FillQuad, Quad, Triangle};
 
 /// Bytes a row of the textures of the card's memory (`CardMemory`) at
 /// most: a page (`tracker::PAGE`).
@@ -77,9 +78,9 @@ const TEXTURE_MAX_ANISOTROPY: u32 = 0x84FE;
 const MAX_TEXTURE_MAX_ANISOTROPY: u32 = 0x84FF;
 
 /// A linked program and its uniforms.
-struct Program<U> {
-    program: glow::Program,
-    uniforms: U,
+pub(crate) struct Program<U> {
+    pub(crate) program: glow::Program,
+    pub(crate) uniforms: U,
 }
 
 /// glTextureBarrier, which glow doesn't offer: what draws wrote before it,
@@ -2883,8 +2884,9 @@ fn target(gl: &glow::Context, (w, h): (i32, i32), samples: u32, depth: Option<De
 }
 
 /// Compile and link a program with its attributes at their locations, and
-/// find its uniforms.
-fn compile<U: Locations>(
+/// find its uniforms. The ToadForce's renderer makes its programs with it
+/// too (`toadforce::gl`).
+pub(crate) fn compile<U: Locations>(
     gl: &glow::Context,
     glsl: Glsl,
     vertex: &str,
