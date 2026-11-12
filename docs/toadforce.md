@@ -1078,15 +1078,37 @@ Each phase is one or a few pull requests that leave main working.
    `raster/geometry.rs` (transform, texture coordinates, fog),
    `raster/light.rs` and `raster/clip.rs`, as "Transform and lighting"
    in the specification's chapter 9 defines.
+   Done but for two parts: Direct3D 7's untransformed draws go to the
+   card, the T&L HAL device is listed, the pipeline makes texture
+   coordinates as the card does for the draws it keeps, and the HAL
+   has the card's four textures. DirectDraw makes cube maps on the
+   card, which Direct3D 7 samples and draws into. Giants makes the
+   T&L HAL device and turns on object and landscape bump mapping and
+   environment mapping, for which it draws the sky and the sea into
+   the six faces of a 256-texel cube map; nothing at the first
+   mission's start samples it yet. Blended vertices reach the
+   card with Direct3D 8 in phase 5 or a Direct3D 7 game that sets the
+   state (#959).
 4. **The OpenGL renderer.** Generated shaders, caches, GPU-owned
    targets, the disk cache. Proof: renderer agreement tests, and the
    phase 2 and 3 games at their full frame rate on it, measured against
    the software renderer on a four-core host as well as a larger one.
 5. **Direct3D 8 and OpenGL 1.3 on the card**, with the OpenGL front end
    separated from WGL. Proof: Max Payne, MDK2, Oni.
-6. **The Windows 98 driver**: display minidriver, then the DirectDraw
-   and Direct3D HAL. OpenGL there is decided and done after those.
-7. **Level 2**, when a game that needs shaders is picked up.
+6. **Performance.** Optimisation passes over the working
+   implementation of phases 1 to 5. The target: every game of the
+   primary list (the eight of phase 0) holds a stable 30 frames a
+   second, with some to spare, measured on a four-core host as well
+   as a larger one.
+
+Postponed, with no place in the order (decided 2026-11-12):
+
+- **Level 2**, until work starts on a game that needs shaders. None
+  of the eight games of phase 0 does.
+- **The Windows 98 driver** (display minidriver, then the DirectDraw
+  and Direct3D HAL, then OpenGL): the card serves the built-in
+  Windows only for now. Black & White, which the driver was to
+  unblock, then waits for #889 alone.
 
 Phases 2 and 3 come before the OpenGL renderer so that the reference
 exists before the renderer that is tested against it, and so that
@@ -1156,10 +1178,7 @@ Still to check:
 
 - Whether Giants' terrain shows z-fighting on plain Z with 24-bit
   depth, in phase 3.
-- What Giants' options screen offers on the T&L HAL device, which it
-  makes when the card lists one (bump and environment mapping were
-  unavailable on the HAL device), and what Black & White asks of any
-  card, once it runs (#889).
+- What Black & White asks of any card, once it runs (#889).
 - What Zanzarah does with DDS textures, and what Grom asks for past
   its initialisation, once the card gets them past #583 and #645.
 

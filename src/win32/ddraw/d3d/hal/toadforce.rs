@@ -440,7 +440,7 @@ pub fn description() -> Description {
         // D3DPRASTERCAPS_: anisotropic filtering, table fog by w and by
         // z.
         raster: 0x2_0000 | 0x10_0000 | 0x20_0000,
-        texture: 0,
+        texture: super::TEXTURECAPS_CUBEMAP,
         // D3DPTFILTERCAPS_: anisotropic minification and magnification,
         // and a linear filter between mipmap levels.
         filter: 0x400 | 0x400_0000 | 0x2_0000,
@@ -761,23 +761,29 @@ pub struct Card {
     /// then have four numbers, the last what the card divides the
     /// others by.
     projected: bool,
+    /// Whether one of those stages' textures is a cube map: the sets
+    /// then have the three numbers of the direction it is sampled in.
+    cube: bool,
 }
 
 impl Card {
     /// The numbers of each set of a screen vertex.
     fn numbers(&self) -> usize {
-        if self.projected { 4 } else { 2 }
+        match (self.projected, self.cube) {
+            (true, _) => 4,
+            (false, true) => 3,
+            (false, false) => 2,
+        }
     }
 
     /// The layout of the screen vertices of a draw, and its words: a
-    /// set of two numbers, or of four, for each stage in use.
+    /// set of two, three or four numbers for each stage in use.
     fn layout(&self) -> (u32, usize) {
+        // D3DFVF_TEXCOORDSIZE: two numbers are 0, three 1 and four 2.
+        let size = self.numbers() as u32 - 2;
         let mut fvf = FVF | (self.sets as u32) << 8;
-        if self.projected {
-            // Four numbers are size 2.
-            for set in 0..self.sets {
-                fvf |= 2 << (16 + 2 * set);
-            }
+        for set in 0..self.sets {
+            fvf |= size << (16 + 2 * set);
         }
         (fvf, VERTEX_WORDS + self.sets * self.numbers())
     }
@@ -918,6 +924,7 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
     // The stages up to the last with a texture: only a stage with one
     // samples, so the screen vertices carry no sets past it.
     let mut sets = 0;
+    let mut cube = false;
     let key = d.state(super::RS_COLORKEYENABLE) != 0;
     for unit in 0..UNITS {
         let surface = (unit < stages)
@@ -939,6 +946,7 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
         match texture {
             Some(texture) => {
                 sets = i + 1;
+                cube |= texture.cube;
                 if sent.textures[i].as_ref() != Some(&texture) {
                     encode::define_texture(&mut words, handle, &texture);
                     // A handle defined anew stays in its stage.
@@ -1007,6 +1015,7 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
         clip: [left, top, right.max(left), bottom.max(top)],
         sets,
         projected: !lit && (0..sets as u32).any(|stage| projected(d, stage)),
+        cube,
     })
 }
 
@@ -1053,36 +1062,76 @@ fn texture(cpu: &mut Cpu, id: u32, key: bool) -> Option<Texture> {
     in_place(cpu, id).or_else(|| cached(cpu, id, key))
 }
 
+/// The faces of the texture `id`: itself, or the six of a cube map,
+/// +x first. None for a cube map made without one of them, which the
+/// card has no texture for.
+fn faces(cpu: &mut Cpu, id: u32) -> Option<Vec<u32>> {
+    let cube = state(cpu).surface(id)?.caps[1] & surface::DDSCAPS2_CUBEMAP != 0;
+    match cube {
+        true => (0..6)
+            .map(|face| super::super::texture::cube_face(cpu, id, face))
+            .collect(),
+        false => Some(vec![id]),
+    }
+}
+
+/// The surfaces of the texture `id`'s images in the card's order:
+/// level by level, and within a level a cube map's six faces. The
+/// levels are those every face has.
+fn images_of(cpu: &mut Cpu, id: u32) -> Option<Vec<Vec<u32>>> {
+    let chains: Vec<Vec<u32>> = faces(cpu, id)?
+        .into_iter()
+        .map(|face| chain(cpu, face))
+        .collect();
+    let levels = chains.iter().map(Vec::len).min()?;
+    Some(
+        (0..levels)
+            .map(|level| chains.iter().map(|chain| chain[level]).collect())
+            .collect(),
+    )
+}
+
 /// The surface `id` as a texture where it is: in card memory, in a
 /// format the card samples, a power of two each way, with the levels
-/// that are there the same way.
+/// that are there the same way. A cube map's level is there when all
+/// six of its faces are.
 fn in_place(cpu: &mut Cpu, id: u32) -> Option<Texture> {
-    let (offset, pitch) = in_card(cpu, id)?;
-    let (width, height, f, key) = {
+    in_card(cpu, id)?;
+    let (width, height, f, key, cube) = {
         let s = state(cpu).surface(id)?;
         let key = (s.key_set & 1 << KEY_SRC_BLT != 0).then_some(s.keys[KEY_SRC_BLT].0);
-        (s.width, s.height, s.format, key)
+        let cube = s.caps[1] & surface::DDSCAPS2_CUBEMAP != 0;
+        (s.width, s.height, s.format, key, cube)
     };
     let format = texture_format(&f)?;
     let block = format.block_bytes();
-    // A block format's surface has its size where the pitch is.
-    let pitch_of = |pitch: u32, width: u32| match block {
-        Some(_) => format.line_bytes(width) as u32,
-        None => pitch,
-    };
-    let mut images = vec![(offset, pitch_of(pitch, width))];
-    for (n, level) in chain(cpu, id).into_iter().enumerate().skip(1) {
-        let Some((offset, pitch)) = in_card(cpu, level) else {
+    let mut images = Vec::new();
+    let mut levels = 0;
+    for (n, level) in images_of(cpu, id)?.into_iter().enumerate() {
+        let places: Option<Vec<(u32, u32)>> = level.iter().map(|&s| in_card(cpu, s)).collect();
+        let Some(places) = places else {
             break;
         };
-        images.push((offset, pitch_of(pitch, (width >> n).max(1))));
+        for (offset, pitch) in places {
+            // A block format's surface has its size where the pitch
+            // is.
+            let pitch = match block {
+                Some(_) => format.line_bytes((width >> n).max(1)) as u32,
+                None => pitch,
+            };
+            images.push((offset, pitch));
+        }
+        levels += 1;
+    }
+    if levels == 0 {
+        return None;
     }
     let texture = Texture {
         format,
         width,
         height,
-        levels: images.len() as u32,
-        cube: false,
+        levels,
+        cube,
         palette: None,
         key: key
             .filter(|_| block.is_none())
@@ -1105,14 +1154,15 @@ fn hash_words(words: &[u32]) -> u32 {
 /// color key, for D3DRENDERSTATE_COLORKEYENABLE.
 fn cached(cpu: &mut Cpu, id: u32, key: bool) -> Option<Texture> {
     let (uniqueness, paletted, key) = {
-        let s = state(cpu).surface(id)?;
+        let st = &*state(cpu);
+        let s = st.surface(id)?;
         let paletted =
             s.format.flags & DDPF_PALETTEINDEXED8 != 0 && s.format.flags & DDPF_FOURCC == 0;
         let key = match key && s.key_set & 1 << KEY_SRC_BLT != 0 {
             true => [1, s.keys[KEY_SRC_BLT].0, s.keys[KEY_SRC_BLT].1],
             false => [0; 3],
         };
-        (s.uniqueness, paletted, key)
+        (stamp(st, s), paletted, key)
     };
     // What a copy has besides the surface's pixels: a palettized
     // texture's has the palette's colors, and a keyed copy the color key.
@@ -1151,6 +1201,19 @@ fn cached(cpu: &mut Cpu, id: u32, key: bool) -> Option<Texture> {
         texture: texture.clone(),
     });
     Some(texture)
+}
+
+/// What changes when the pixels of the texture `s` do, in any of the
+/// levels and faces made with it: a copy is of all of them.
+fn stamp(st: &super::super::super::State, s: &surface::Surface) -> u32 {
+    if s.children.is_empty() {
+        return s.uniqueness;
+    }
+    let subs = s.children.iter().filter_map(|&id| st.surface(id));
+    let all: Vec<u32> = std::iter::once(s.uniqueness)
+        .chain(subs.map(|sub| sub.uniqueness))
+        .collect();
+    hash_words(&all)
 }
 
 /// Drop the copies `gone` picks, and give their blocks back.
@@ -1201,23 +1264,29 @@ fn image(cpu: &mut Cpu, id: u32, keyed: bool) -> Option<Image> {
     let s = state(cpu).surface(id)?.clone();
     let pow2 = s.width.is_power_of_two() && s.height.is_power_of_two();
     let fits = s.width.max(s.height) <= caps::TEXTURE_MAX;
+    let cube = s.caps[1] & surface::DDSCAPS2_CUBEMAP != 0;
+    // The levels, each the surface of the level, or of the level of
+    // each face of a cube map.
+    let mut levels = images_of(cpu, id)?;
     let mut data = Vec::new();
     if let Some(format) = texture_format(&s.format).filter(|_| pow2 && fits) {
         // The surface's bytes, each level's rows without padding.
         let mut images = Vec::new();
-        for (n, level) in chain(cpu, id).into_iter().enumerate() {
-            let l = state(cpu).surface(level)?.clone();
-            let (w, h) = ((s.width >> n).max(1), (s.height >> n).max(1));
-            let line = format.line_bytes(w) as u32;
-            let lines = format.lines(h);
-            // A block format's surface is its blocks, one after
-            // another.
-            let step = if l.compressed() { line } else { l.pitch };
-            images.push((data.len() as u32, line));
-            let mut row = vec![0u8; line as usize];
-            for y in 0..lines {
-                surface::read_bytes(cpu, &l, y * step, &mut row);
-                data.extend_from_slice(&row);
+        for (n, level) in levels.iter().enumerate() {
+            for &face in level {
+                let l = state(cpu).surface(face)?.clone();
+                let (w, h) = ((s.width >> n).max(1), (s.height >> n).max(1));
+                let line = format.line_bytes(w) as u32;
+                let lines = format.lines(h);
+                // A block format's surface is its blocks, one after
+                // another.
+                let step = if l.compressed() { line } else { l.pitch };
+                images.push((data.len() as u32, line));
+                let mut row = vec![0u8; line as usize];
+                for y in 0..lines {
+                    surface::read_bytes(cpu, &l, y * step, &mut row);
+                    data.extend_from_slice(&row);
+                }
             }
         }
         let key = (keyed && format.block_bytes().is_none())
@@ -1227,8 +1296,8 @@ fn image(cpu: &mut Cpu, id: u32, keyed: bool) -> Option<Image> {
                 format,
                 width: s.width,
                 height: s.height,
-                levels: images.len() as u32,
-                cube: false,
+                levels: levels.len() as u32,
+                cube,
                 palette: None,
                 key,
                 images,
@@ -1248,30 +1317,31 @@ fn image(cpu: &mut Cpu, id: u32, keyed: bool) -> Option<Image> {
             .min(caps::TEXTURE_MAX)
     };
     let (w, h) = (size(s.width), size(s.height));
-    let levels = if pow2 && fits {
-        chain(cpu, id)
-    } else {
-        vec![id]
-    };
+    if !(pow2 && fits) {
+        // The top level alone: the levels below it halve another size.
+        levels.truncate(1);
+    }
     let pal = super::voodoo::palette(cpu, id);
     let mut images = Vec::new();
-    for (n, level) in levels.into_iter().enumerate() {
-        let l = state(cpu).surface(level)?.clone();
-        let (lw, lh) = ((w >> n).max(1), (h >> n).max(1));
-        let src = super::voodoo::level_texels(cpu, &l);
-        images.push((data.len() as u32, lw * 4));
-        for y in 0..lh {
-            for x in 0..lw {
-                let sx = (x * l.width / lw).min(l.width.saturating_sub(1));
-                let sy = (y * l.height / lh).min(l.height.saturating_sub(1));
-                let raw = src.get((sy * l.width + sx) as usize).copied().unwrap_or(0);
-                let (low, high) = l.keys[KEY_SRC_BLT];
-                let texel = if keyed && (low..=high.max(low)).contains(&raw) {
-                    0
-                } else {
-                    super::voodoo::argb(raw, &l, &pal).max(1)
-                };
-                data.extend_from_slice(&texel.to_le_bytes());
+    for (n, level) in levels.iter().enumerate() {
+        for &face in level {
+            let l = state(cpu).surface(face)?.clone();
+            let (lw, lh) = ((w >> n).max(1), (h >> n).max(1));
+            let src = super::voodoo::level_texels(cpu, &l);
+            images.push((data.len() as u32, lw * 4));
+            for y in 0..lh {
+                for x in 0..lw {
+                    let sx = (x * l.width / lw).min(l.width.saturating_sub(1));
+                    let sy = (y * l.height / lh).min(l.height.saturating_sub(1));
+                    let raw = src.get((sy * l.width + sx) as usize).copied().unwrap_or(0);
+                    let (low, high) = l.keys[KEY_SRC_BLT];
+                    let texel = if keyed && (low..=high.max(low)).contains(&raw) {
+                        0
+                    } else {
+                        super::voodoo::argb(raw, &l, &pal).max(1)
+                    };
+                    data.extend_from_slice(&texel.to_le_bytes());
+                }
             }
         }
     }
@@ -1280,8 +1350,8 @@ fn image(cpu: &mut Cpu, id: u32, keyed: bool) -> Option<Image> {
             format: Format::A8R8G8B8,
             width: w,
             height: h,
-            levels: images.len() as u32,
-            cube: false,
+            levels: levels.len() as u32,
+            cube,
             palette: None,
             key: keyed.then_some(0),
             images,

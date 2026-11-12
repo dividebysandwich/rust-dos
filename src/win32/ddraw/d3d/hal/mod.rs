@@ -109,6 +109,15 @@ pub fn kind_of(cpu: &mut Cpu, d: &Device) -> Kind {
     card(cpu, d.ddraw).map_or(Kind::Voodoo, |offer| offer.kind)
 }
 
+/// D3DPTEXTURECAPS_CUBEMAP.
+pub const TEXTURECAPS_CUBEMAP: u32 = 0x800;
+
+/// Whether the card the DirectDraw object `dd` draws on samples cube
+/// maps: DirectDraw makes them where it does.
+pub fn cube_maps(cpu: &mut Cpu, dd: u32) -> bool {
+    card(cpu, dd).is_some_and(|offer| description(offer.kind).texture & TEXTURECAPS_CUBEMAP != 0)
+}
+
 /// What a card's device description says that differs from card to
 /// card (`caps.rs` writes the descriptions).
 #[derive(Clone, Debug, PartialEq)]

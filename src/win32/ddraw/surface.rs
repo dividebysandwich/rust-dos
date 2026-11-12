@@ -69,7 +69,11 @@ pub const DDSCAPS_ZBUFFER: u32 = 0x2_0000;
 pub const DDSCAPS_MIPMAP: u32 = 0x40_0000;
 pub const DDSCAPS_LOCALVIDMEM: u32 = 0x1000_0000;
 const DDSCAPS2_TEXTUREMANAGE: u32 = 0x10;
-const DDSCAPS2_CUBEMAP: u32 = 0x200;
+pub const DDSCAPS2_CUBEMAP: u32 = 0x200;
+/// DDSCAPS2_CUBEMAP_POSITIVEX to NEGATIVEZ: the six faces, a bit each
+/// from POSITIVEX (0x400) up, in the order +x, -x, +y, -y, +z, -z.
+pub const DDSCAPS2_CUBEMAP_ALLFACES: u32 = 0xFC00;
+pub const DDSCAPS2_CUBEMAP_POSITIVEX: u32 = 0x400;
 pub const DDSCAPS2_MIPMAPSUBLEVEL: u32 = 0x1_0000;
 const DDSCAPS2_D3DTEXTUREMANAGE: u32 = 0x2_0000;
 const DDSCAPS2_VOLUME: u32 = 0x20_0000;
@@ -581,7 +585,11 @@ fn level_bytes(s: &Surface) -> u32 {
 /// round the chain, levels too, and each needs a block it can free
 /// wherever its pixels end up.
 fn shares_block(s: &Surface) -> bool {
-    s.caps[0] & (DDSCAPS_MIPMAP | DDSCAPS_FLIP) == DDSCAPS_MIPMAP && !s.compressed()
+    // A cube map's surfaces each have their own block: a block is one
+    // chain of levels, and a cube map has a chain for each face.
+    s.caps[0] & (DDSCAPS_MIPMAP | DDSCAPS_FLIP) == DDSCAPS_MIPMAP
+        && s.caps[1] & DDSCAPS2_CUBEMAP == 0
+        && !s.compressed()
 }
 
 /// The bytes the surface takes in video memory: a texture's top level
@@ -883,9 +891,34 @@ pub fn make(
     if caps[0] & DDSCAPS_BACKBUFFER != 0
         && (version >= 7 || caps[0] & (DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP) != 0)
         || caps[0] & front_back == front_back
-        || caps[1] & (DDSCAPS2_CUBEMAP | DDSCAPS2_VOLUME) != 0
+        || caps[1] & DDSCAPS2_VOLUME != 0
         || caps[0] & DDSCAPS_FRONTBUFFER != 0 && version >= 7
     {
+        return Err(DDERR_INVALIDCAPS);
+    }
+    // A cube map is a complex texture of IDirectDraw7, on a card that
+    // samples cube maps. Its faces are the ones the caps name, at least
+    // one; face bits without DDSCAPS2_CUBEMAP name nothing.
+    let cube = caps[1] & DDSCAPS2_CUBEMAP != 0;
+    if cube {
+        let complex_texture = DDSCAPS_COMPLEX | DDSCAPS_TEXTURE;
+        let other = DDSCAPS_PRIMARYSURFACE | DDSCAPS_ZBUFFER;
+        if caps[0] & DDSCAPS_FLIP != 0 {
+            // A cube map that flips, as Wine's ddraw_surface_create
+            // turns it down.
+            return Err(DDERR_INVALIDPARAMS);
+        }
+        if version < 7
+            || caps[0] & complex_texture != complex_texture
+            || caps[0] & other != 0
+            || !super::d3d::hal::cube_maps(cpu, dd)
+        {
+            return Err(DDERR_INVALIDCAPS);
+        }
+        if caps[1] & DDSCAPS2_CUBEMAP_ALLFACES == 0 {
+            return Err(DDERR_INVALIDPARAMS);
+        }
+    } else if caps[1] & DDSCAPS2_CUBEMAP_ALLFACES != 0 {
         return Err(DDERR_INVALIDCAPS);
     }
     if caps[0] & DDSCAPS_OVERLAY != 0 {
@@ -1003,6 +1036,11 @@ pub fn make(
             caps[0] |= DDSCAPS_SYSTEMMEMORY;
         }
     }
+    if cube && width != height {
+        // A cube map's faces are square, as Direct3D 7 has them and as
+        // the card samples them.
+        return Err(DDERR_INVALIDPARAMS);
+    }
     // The mipmap levels.
     let mipmap = caps[0] & DDSCAPS_MIPMAP != 0;
     let levels = if mipmap && caps[0] & DDSCAPS_COMPLEX != 0 {
@@ -1051,8 +1089,8 @@ pub fn make(
             list.push(back);
         }
     }
-    for level in 1..levels {
-        let mut sub = base.clone();
+    let sublevel = |top: &Surface, level: u32| {
+        let mut sub = top.clone();
         sub.width = (width >> level).max(1);
         sub.height = (height >> level).max(1);
         sub.pitch = match dxt_format(&format) {
@@ -1063,7 +1101,42 @@ pub fn make(
         if version >= 7 {
             sub.caps[1] |= DDSCAPS2_MIPMAPSUBLEVEL;
         }
-        list.push(sub);
+        sub
+    };
+    // What is attached to what, by place in the list, in the order
+    // GetAttachedSurface and EnumAttachedSurfaces find them.
+    let mut links = Vec::new();
+    if cube {
+        // The faces asked for, each with its own levels. The root is the
+        // first of them, and has the others attached, the last first as
+        // Wine's does, and then its own next level.
+        let faces: Vec<u32> = (0..6)
+            .map(|face| DDSCAPS2_CUBEMAP_POSITIVEX << face)
+            .filter(|bit| caps[1] & bit != 0)
+            .collect();
+        list.clear();
+        let mut tops = Vec::new();
+        let mut chains = Vec::new();
+        for bit in faces {
+            let mut top = base.clone();
+            top.caps[1] = top.caps[1] & !DDSCAPS2_CUBEMAP_ALLFACES | bit;
+            tops.push(list.len());
+            for level in 0..levels {
+                if level > 0 {
+                    chains.push((list.len() - 1, list.len()));
+                    list.push(sublevel(&top, level));
+                } else {
+                    list.push(top.clone());
+                }
+            }
+        }
+        links.extend(tops[1..].iter().rev().map(|&top| (0, top)));
+        links.extend(chains);
+    } else {
+        for level in 1..levels {
+            list.push(sublevel(&base, level));
+        }
+        links.extend((1..list.len()).map(|i| (i - 1, i)));
     }
     let pid = super::current_pid(cpu);
     let mut ids = Vec::new();
@@ -1086,14 +1159,12 @@ pub fn make(
         if let Some(o) = state(cpu).object_mut(id) {
             o.creator = creator;
         }
-        let next = ids.get(i + 1).copied();
         if let Some(s) = surface(cpu, id) {
             if i > 0 {
                 s.root = root;
             }
-            if let Some(next) = next {
-                s.attached.push((next, 0));
-            }
+            let attached = links.iter().filter(|link| link.0 == i);
+            s.attached.extend(attached.map(|link| (ids[link.1], 0)));
         }
     }
     if let Some(s) = surface(cpu, root) {
@@ -1123,16 +1194,30 @@ pub fn make(
             }
         }
     }
-    for (i, &id) in ids.iter().enumerate() {
+    let mut i = 0;
+    while let Some(&id) = ids.get(i) {
         let mut result = allocate(cpu, id);
         if result == Err(DDERR_OUTOFVIDEOMEMORY) && !wants_video && !primary {
             // The surfaces after it go with it: a mipmap whose block
             // doesn't fit keeps its levels with its top level, though
-            // the smaller ones would fit on their own.
-            for &id in &ids[i..] {
+            // the smaller ones would fit on their own. A cube map's
+            // surfaces each have a block, and all of them go, those
+            // before it too: a cube map is in one memory.
+            let from = if cube { 0 } else { i };
+            for &id in &ids[from..i] {
+                free_memory(cpu, id);
+                if let Some(s) = surface(cpu, id) {
+                    s.caps[0] &= !(DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM);
+                }
+            }
+            for &id in &ids[from..] {
                 if let Some(s) = surface(cpu, id) {
                     s.caps[0] |= DDSCAPS_SYSTEMMEMORY;
                 }
+            }
+            if from < i {
+                i = from;
+                continue;
             }
             result = allocate(cpu, id);
         }
@@ -1154,6 +1239,7 @@ pub fn make(
             }
         }
         changed(cpu, id);
+        i += 1;
     }
     Ok(ids)
 }
