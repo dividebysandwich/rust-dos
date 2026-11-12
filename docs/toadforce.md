@@ -744,10 +744,12 @@ smoke and particles.
 |---|---|
 | Vertex arithmetic in a vertex shader (operation order, fused multiply-add) | positions within 1/256 pixel, so a pixel on a triangle's edge may fall on the other side |
 | Interpolation of colours and coordinates | 1 in 255 on a stage input |
-| Bilinear weights | 1 in 255 on a sample |
+| Bilinear weights | 1 in 255 on a sample of a smooth texture; 2 where neighbouring texels differ by most of a channel's range, and 3 on a cube map. The host rounds a weight to its 8 bits where the card cuts it off, and works out a cube map's face coordinates in its own arithmetic |
+| Bump offsets from a linearly filtered bump texture | as the weights, except between texels whose offsets differ in sign: both renderers blend the signed bytes as unsigned ones, so there a weight that is one off can turn 127 into -128 |
 | Mip level selection, anisotropic filtering | the host GPU's; compared by eye and by a mean error over the frame |
+| Depth | 1 step of a 16-bit buffer, 4 steps of a 24-bit one: the host interpolates depth in single precision and rounds it by itself. A depth half-way between two steps goes either way |
 | Blending done by the host GPU | 1 in 255 on a channel; one step of the target's on a 16-bit target |
-| 16-bit targets on a host with no renderable 565 format | blended layers keep 8 bits until they are read back; several steps of the target's |
+| 16-bit targets on a host with no renderable 565 format, or one that doesn't round a blend to the nearest value | blended layers keep 8 bits until they are read back; several steps of the target's |
 
 Tests compare the two renderers on fixed scenes with these bounds (see
 "Testing"). Under `--deterministic` the software renderer draws and none
@@ -829,15 +831,22 @@ pixels.
 - **16-bit targets** are host framebuffers in the 565 format
   (`GL_RGB565`, renderable since OpenGL 4.1 and with
   `ARB_ES2_compatibility`), so the host's blend result is rounded to
-  the target's bits as the card defines. The shader does the dithering.
+  the target's bits as the card defines. The shader does the dithering,
+  and rounds a colour that is written without a blend to the target's
+  bits itself, so such a colour doesn't hang on the host's rounding.
   The format's presence doesn't prove it works: OpenGL 4.1 left it out
-  of its required formats (4.2 added it), and ANGLE replaces it with an
+  of its required formats (4.2 added it), ANGLE replaces it with an
   8-bit format on Macs with AMD GPUs, whose drivers get packed formats
-  wrong. So the renderer tests it once at start: it draws a blend with
-  a known result into a 565 target, reads it back, and compares with
-  the card's rounding. A host that fails, or has no such format, uses
-  an 8-bit target and reduces the colours when they are read back, with
-  the wider bound in the table above.
+  wrong, and a GeForce RTX 4080 cuts a blend's result off where the
+  card rounds it. So the renderer tests it once at start: it fills a
+  565 target and reads it back, writes colours each side of where the
+  bits round, and draws blends whose results are clear of the middle
+  between two values, and compares what it reads back with the card's
+  rounding. A host that fails, or has no such format, uses an 8-bit
+  target and reduces the colours when they are read back, with the
+  wider bound in the table above. Such a target holds a colour written
+  without a blend as the card's bits widened, so only blended layers
+  are wider than the card's.
 - **The visible surface** is shown from its host texture without
   passing through card memory, which is what #334 asks for on the
   Voodoo.
@@ -847,6 +856,64 @@ pixels.
   resolution scale, multisampling, and forced anisotropy, like
   `voodoo_scale` and `voodoo_msaa`. A read-back from a scaled target is
   filtered down to the target's own size.
+
+Step 4b builds the renderer behind `gpu::Host` (`src/toadforce/gl.rs`),
+on desktop OpenGL 3.2. Nothing attaches it yet: that is step 4c. It
+draws the screen vertices the card hands it, so the vertex work stays
+on the processor, and it has:
+
+- the targets, with their depth and stencil buffers, filled from card
+  memory and read back in the card's formats. Row 0 of a surface is
+  row 0 of its host texture, which makes the host's window coordinates
+  the card's and its fill rule the card's top-left rule;
+- the textures of every format, decoded by the software renderer's
+  decoders, with palettes, mip levels, cube maps, the address modes,
+  the filters, the level-of-detail bias, `MAXMIPLEVEL`, and anisotropy
+  where the host has it. A texture with a colour key has a second host
+  texture that marks the keyed texels, which the shader looks up at the
+  nearest texel;
+- a fragment shader printed from the draw's steps, with every stage
+  operation, the bump offsets and luminance, projected and cube
+  coordinates, the specular add, the three fog modes by depth and by
+  w, the alpha test and the dither, kept in memory by the steps;
+- the depth and stencil tests, the blend, the write masks and the clip
+  rectangle as the host's fixed state. The depth bias is taken from the
+  depth in the vertex shader, since the unit of the host's polygon
+  offset isn't a step of a 16-bit buffer on every host;
+- `CLEAR` on a buffer the host has (`Host::clear`). A depth that is
+  neither the nearest nor the farthest is written as pixels, since the
+  host's clear converts only those two for certain; with the stencil
+  kept, such a clear is left to the processor.
+
+It declines these states, which the software renderer draws:
+
+- bump offsets on a cube map: they move the coordinates on the face the
+  direction picked, and the host's cube sampler takes a direction;
+- a colour key on a texture of a block format, whose pixels have no
+  value to compare;
+- `MAXMIPLEVEL` above 0 with different filters for magnifying and
+  minifying: the card changes filter by the pixel's size in texels of
+  level 0, the host by the level it is limited to;
+- `SRCALPHASAT` as the destination's blend factor, which OpenGL takes
+  from 3.3 on.
+
+The agreement tests (`toadforce::gl::tests`, which need a desktop OpenGL
+context) draw 299 scenes in software and through the host and compare
+card memory. On a GeForce RTX 4080: untextured triangles, every stage
+operation at each result scale, four stages with four textures, the
+alpha test, fog, the specular add, the stencil operations, the write
+masks and every blend on a 32-bit target are the same byte for byte.
+So is the nearest texel of every format, address mode and cube face.
+The linear filter is within 1 on a smooth texture, 2 on one whose
+texels differ by all of the range and 3 on such a cube map. Depth is
+within 1 step of 16 bits and 4 of 24. That host's 565 format fails the
+test at start, so its 16-bit targets were compared in 8 bits a channel
+alone, and were within one step of the target's with up to five blended
+layers.
+
+Not built yet: the vertex work on the GPU, the picture from the host's
+texture, `BLT` and `FILL` on the host, the host options, and the
+program binaries on disk (see "Shader cache").
 
 OpenGL through `glow` is kept, instead of adding wgpu or Vulkan, because
 the window, the Voodoo renderer and the libretro core's frontends all
@@ -890,12 +957,13 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   or writes that memory on the processor the card reads the surface
   back (`ToadForce::settle` with the range): the program's writes of
   the frame buffer (in the bus), the drivers' reads and writes
-  (`win32::screen`), the card's own `FILL`, `BLT` and `CLEAR` while
-  they run on the processor, a texture or a vertex buffer that
-  overlaps it, and the picture the screen shows
-  (`Bus::sync_display`). Running the queued commands and reading back
-  are separate: the queue is run at every such point as before, and a
-  surface is read back only when its own bytes are asked for.
+  (`win32::screen`), the card's own `FILL` and `BLT` while they run
+  on the processor, a `CLEAR` of a buffer the host has no current
+  copy of, a texture or a vertex buffer that overlaps it, and the
+  picture the screen shows (`Bus::sync_display`). Running the queued
+  commands and reading back are separate: the queue is run at every
+  such point as before, and a surface is read back only when its own
+  bytes are asked for.
 - **The program's own reads.** A read of the frame buffer has the bus
   shared (`Bus::read_8`), and can't read anything back. The bytes are
   there before the program gets to them instead. The built-in drivers
@@ -932,17 +1000,22 @@ has an OpenGL 3.2 context and the run isn't deterministic.
 It is built in these steps, each a pull request: the interface with
 the tracking and a host that draws in software, to test the protocol
 (4a); the OpenGL host with its targets, textures, generated shaders
-and the agreement tests (4b); the display's side, the configuration
-and the status (4c); the picture from the host's texture, `CLEAR`,
-`FILL` and `BLT` on the host, and the host options (4d).
+and the agreement tests, and `CLEAR` on the host (4b); the display's
+side, the configuration and the status (4c); the picture from the
+host's texture, `FILL` and `BLT` on the host, and the host options
+(4d).
 
 ### Shader cache
 
-Programs are cached by key in memory. Compiled program binaries are
+Programs are cached by key in memory: the draw's steps without what is
+the host's fixed state, so two draws that differ in the depth test, the
+blend or the masks share a program. Compiled program binaries are to be
 stored on disk by a hash of the generated source (`glGetProgramBinary`,
 core since OpenGL 4.1, with a fallback to compiling on hosts without
 it), so a game's second run compiles nothing. A game of this period sets
-tens to a few hundred distinct state combinations.
+tens to a few hundred distinct state combinations. The store on disk
+isn't built yet: it waits for a game on the host renderer to show what
+the first run's compiles cost.
 
 If a first run still shows pauses in games, the answer is a general
 shader that reads the lowered operation list from uniforms and draws

@@ -254,8 +254,8 @@ ivec4 mul(ivec4 a, ivec4 b) {
                 let _ = match luminance {
                     true => writeln!(
                         body,
-                        "        lum = clamp(float(tex.b) / 255.0 * u_lum{stage}.x + u_lum{stage}.y, \
-                         0.0, 1.0);"
+                        "        lum = float(tex.b) / 255.0 * u_lum{stage}.x + u_lum{stage}.y;
+        lum = clamp(lum, 0.0, 1.0);"
                     ),
                     false => writeln!(body, "        lum = 1.0;"),
                 };
