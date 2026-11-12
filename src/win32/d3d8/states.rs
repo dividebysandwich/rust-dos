@@ -19,7 +19,10 @@ use super::device::{
     self, Device, PS_CONSTANTS, STAGES, STREAMS, VS_CONSTANTS, get, inner, this_device,
 };
 use super::resource::{FMT_INDEX16, FMT_INDEX32};
-use super::{D3D_OK, D3DERR_INVALIDCALL, V_INDEXBUFFER8, V_TEXTURE8, V_VERTEXBUFFER8, of, state};
+use super::{
+    D3D_OK, D3DERR_INVALIDCALL, V_CUBETEXTURE8, V_INDEXBUFFER8, V_TEXTURE8, V_VERTEXBUFFER8, of,
+    state,
+};
 use crate::cpu::Cpu;
 
 // What a change is.
@@ -238,7 +241,7 @@ fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
 
 /// Set the texture of a stage: the texture `tex` of Direct3D 8's, or 0.
 fn set_texture_now(cpu: &mut Cpu, id: u32, stage: u32, tex: u32) {
-    if !is_kind(cpu, tex, V_TEXTURE8) {
+    if !is_kind(cpu, tex, V_TEXTURE8) && !is_kind(cpu, tex, V_CUBETEXTURE8) {
         return;
     }
     let Some(d) = get(cpu, id) else {
@@ -594,7 +597,7 @@ pub fn set_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let t = if tex != 0 {
         match of(cpu, tex) {
-            Some((V_TEXTURE8, t)) => t,
+            Some((V_TEXTURE8 | V_CUBETEXTURE8, t)) => t,
             _ => return Some(D3DERR_INVALIDCALL),
         }
     } else {

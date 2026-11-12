@@ -1972,7 +1972,7 @@ fn drew_on_the_card(cpu: &Cpu, scene: &Scene) {
     let transformed = scene
         .steps
         .iter()
-        .filter(|step| matches!(step, Step::World(fvf, ..) if fvf & D3DFVF_XYZRHW == 0))
+        .filter(|step| matches!(step, Step::World(fvf, ..) if fvf & 0xE != D3DFVF_XYZRHW))
         .count() as u64;
     // The card transforms the vertices that aren't transformed.
     assert_eq!(counts.transformed, transformed, "{counts:?}");
@@ -4444,6 +4444,9 @@ fn a_toadforce_has_direct3d_7s_t_and_l_hal_device_beside_the_hal_one() {
     assert_eq!(peek(&cpu, data + CAPS7) & TNL, TNL);
     assert_eq!(peek(&cpu, data + CAPS7 + 0xBC), 8);
     assert_eq!(peek(&cpu, data + CAPS7 + 0xC4), 0xF504_9E78);
+    // wMaxUserClipPlanes and, above it, wMaxVertexBlendMatrices: the
+    // four world matrices the card blends a vertex between.
+    assert_eq!(peek(&cpu, data + CAPS7 + 0xD4), 6 | 4 << 16);
 
     // A Voodoo3 has the HAL device alone, and makes no other.
     let (cpu, data, devices) = tnl_device_program("tnl_device_voodoo3", false);
@@ -4481,4 +4484,108 @@ fn a_toadforce_draws_with_a_copy_of_a_texture_in_system_memory() {
     assert_rgb(&p, 16, 40, [255, 0, 0], 0);
     assert_rgb(&p, 48, 40, [0, 0, 255], 0);
     assert_rgb(&p, 48, 56, [255, 255, 255], 0);
+}
+
+// Vertices blended between world matrices (D3DRENDERSTATE_VERTEXBLEND),
+// by the card on a ToadForce and by the pipeline on a Voodoo3.
+
+const RS_VERTEXBLEND: u32 = 151;
+const TS_WORLD1: u32 = 4;
+const TS_WORLD2: u32 = 5;
+const D3DFVF_XYZB1: u32 = 0x006;
+const D3DFVF_XYZB2: u32 = 0x008;
+
+/// The identity moved by `t`.
+fn moved(t: [f32; 3]) -> Vec<u32> {
+    let mut m = [0.0f32; 16];
+    (m[0], m[5], m[10], m[15]) = (1.0, 1.0, 1.0, 1.0);
+    m[12..15].copy_from_slice(&t);
+    bits(&m)
+}
+
+/// The top left quarter's upper triangle, each vertex with two weights
+/// of 0.25 and a colour, blended with D3DVBLEND_2WEIGHTS between the
+/// world matrix, WORLD1, which moves a quarter's width to the right,
+/// and WORLD2, which moves a quarter's height down. The half the
+/// weights leave is WORLD2's: 8 pixels right and 16 down.
+fn weighted_scene() -> Scene {
+    let mut words = Vec::new();
+    for position in [[-1.0, 1.0, 0.5], [0.0, 1.0, 0.5], [-1.0, 0.0, 0.5]] {
+        words.extend(bits(&position));
+        words.extend(bits(&[0.25, 0.25]));
+        words.push(0xFF12_3456);
+    }
+    toadforce_scene(vec![
+        Step::State(RS_LIGHTING, 0),
+        Step::State(RS_CULLMODE, 1),
+        Step::Call(DEV7_SET_TRANSFORM, vec![TS_WORLD1], moved([1.0, 0.0, 0.0])),
+        Step::Call(DEV7_SET_TRANSFORM, vec![TS_WORLD2], moved([0.0, -1.0, 0.0])),
+        Step::State(RS_VERTEXBLEND, 2),
+        Step::World(D3DFVF_XYZB2 | D3DFVF_DIFFUSE, words, 3),
+    ])
+}
+
+/// The same triangle with a normal along x and one weight of 0.5,
+/// blended with D3DVBLEND_1WEIGHT between the world matrix and WORLD1,
+/// which turns x into y. A white light shines toward -x on a white
+/// material: the blended normal is half along x and half along y, and
+/// the triangle is lit by half. Its corners come to (0, 32), (16, 16)
+/// and (16, 48).
+fn weighted_lit_scene() -> Scene {
+    let mut words = Vec::new();
+    for position in [[-1.0, 1.0, 0.5], [0.0, 1.0, 0.5], [-1.0, 0.0, 0.5]] {
+        words.extend(bits(&position));
+        words.extend(bits(&[0.5]));
+        words.extend(bits(&[1.0, 0.0, 0.0]));
+    }
+    let mut turn = [0.0f32; 16];
+    (turn[1], turn[4], turn[10], turn[15]) = (1.0, -1.0, 1.0, 1.0);
+    let mut steps = lit_by(light7(3, [0.0; 3], [-1.0, 0.0, 0.0], [0.0; 2]), [1.0; 3]);
+    steps.extend([
+        Step::Call(DEV7_SET_TRANSFORM, vec![TS_WORLD1], bits(&turn)),
+        Step::State(RS_VERTEXBLEND, 1),
+        Step::World(D3DFVF_XYZB1 | D3DFVF_NORMAL, words, 3),
+    ]);
+    toadforce_scene(steps)
+}
+
+#[test]
+fn a_toadforce_blends_vertices_between_the_world_matrices() {
+    // The card's blending: `draw_scene32_toadforce` checks that the
+    // card transformed the draw.
+    let p = draw_scene32_toadforce("toadforce_weights", &weighted_scene());
+    assert_eq!(p[20 * 64 + 12], 0x12_3456);
+    assert_eq!(p[20 * 64 + 30], 0x12_3456);
+    assert_eq!(p[40 * 64 + 12], 0x12_3456);
+    // Where the triangle is without the weights, and past its edges.
+    assert_eq!(p[5 * 64 + 5], 0);
+    assert_eq!(p[20 * 64 + 5], 0);
+    assert_eq!(p[40 * 64 + 30], 0);
+    // The pipeline's, for a Voodoo3: the same triangle.
+    let p = draw_scene("voodoo3_weights", &weighted_scene());
+    for (x, y) in [(12, 20), (30, 20), (12, 40)] {
+        assert_rgb(&p, x, y, [0x12, 0x34, 0x56], 8);
+    }
+    for (x, y) in [(5, 5), (5, 20), (30, 40)] {
+        assert_rgb(&p, x, y, [0, 0, 0], 0);
+    }
+}
+
+#[test]
+fn a_toadforce_blends_the_normals_of_blended_vertices() {
+    let p = draw_scene32_toadforce("toadforce_weights_lit", &weighted_lit_scene());
+    for at in [32 * 64 + 10, 24 * 64 + 12, 40 * 64 + 13] {
+        let lit = p[at];
+        let channels = [lit >> 16, lit >> 8 & 0xFF, lit & 0xFF];
+        assert!(channels.iter().all(|c| (0x7E..=0x81).contains(c)), "{lit:X}");
+    }
+    assert_eq!(p[5 * 64 + 5], 0);
+    assert_eq!(p[32 * 64 + 20], 0);
+    // The pipeline's, for a Voodoo3.
+    let p = draw_scene("voodoo3_weights_lit", &weighted_lit_scene());
+    for (x, y) in [(10, 32), (12, 24), (13, 40)] {
+        assert_rgb(&p, x, y, [128, 128, 128], 8);
+    }
+    assert_rgb(&p, 5, 5, [0, 0, 0], 0);
+    assert_rgb(&p, 20, 32, [0, 0, 0], 0);
 }

@@ -196,9 +196,11 @@ pub fn check_device_type(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 // D3DRESOURCETYPE.
 const RTYPE_SURFACE: u32 = 1;
 const RTYPE_TEXTURE: u32 = 3;
+const RTYPE_CUBETEXTURE: u32 = 5;
 
 /// CheckDeviceFormat(this, adapter, type, adapter format, usage,
-/// resource type, format).
+/// resource type, format). A cube texture has the formats a texture
+/// has, on a card that samples cube textures.
 pub fn check_device_format(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, adapter, devtype, display, usage, rtype, format] = args[..] else {
         return Some(D3DERR_INVALIDCALL);
@@ -208,7 +210,8 @@ pub fn check_device_format(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if display_bits(display).is_none() {
         return Some(D3DERR_NOTAVAILABLE);
     }
-    let surface_or_texture = matches!(rtype, RTYPE_SURFACE | RTYPE_TEXTURE);
+    let cube = rtype == RTYPE_CUBETEXTURE && resource::card_cube(cpu);
+    let surface_or_texture = matches!(rtype, RTYPE_SURFACE | RTYPE_TEXTURE) || cube;
     let ok = if usage & USAGE_DEPTHSTENCIL != 0 {
         rtype == RTYPE_SURFACE && resource::card_depth(cpu, format)
     } else if usage & USAGE_RENDERTARGET != 0 {
@@ -218,6 +221,7 @@ pub fn check_device_format(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let surface = texture || matches!(format, FMT_X8R8G8B8 | FMT_A8R8G8B8);
         match rtype {
             RTYPE_TEXTURE => texture,
+            RTYPE_CUBETEXTURE => texture && cube,
             RTYPE_SURFACE => surface,
             _ => false,
         }

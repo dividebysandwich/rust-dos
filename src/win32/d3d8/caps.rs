@@ -98,12 +98,23 @@ pub fn words(cpu: &Cpu, whose: Whose) -> [u32; 53] {
     // D3DPSHADECAPS_: Gouraud color, specular, alpha blending, fog.
     w[14] = 0x8 | 0x200 | 0x4000 | 0x8_0000;
     // D3DPTEXTURECAPS_: perspective, powers of 2, alpha, alpha in
-    // palettes, mipmaps. Cube textures aren't made here yet, whatever
-    // the card samples.
-    w[15] = 0x1 | 0x2 | 0x4 | 0x80 | 0x4000 | card.texture & !hal::TEXTURECAPS_CUBEMAP;
+    // palettes, mipmaps, and what the card adds. A card with cube
+    // textures has them with mipmaps (MIPCUBEMAP, 0x1_0000) and with
+    // edges that are powers of 2 (CUBEMAP_POW2, 0x2_0000), which is
+    // what CreateCubeTexture makes.
+    w[15] = 0x1 | 0x2 | 0x4 | 0x80 | 0x4000 | card.texture;
+    if card.texture & hal::TEXTURECAPS_CUBEMAP != 0 {
+        w[15] |= 0x1_0000 | 0x2_0000;
+    }
     // D3DPTFILTERCAPS_: point and linear minification, mipmap and
     // magnification filters.
     w[16] = 0x100 | 0x200 | 0x1_0000 | 0x2_0000 | 0x100_0000 | 0x200_0000 | card.filter;
+    // CubeTextureFilterCaps: a card filters a cube texture's faces as
+    // it does a texture, and a caps of 0 would tell a program that it
+    // can't filter them at all.
+    if card.texture & hal::TEXTURECAPS_CUBEMAP != 0 {
+        w[17] = w[16];
+    }
     // D3DPTADDRESSCAPS_: wrap, mirror, clamp, independent u and v.
     w[19] = 0x1 | 0x2 | 0x4 | 0x10 | card.address;
     // D3DLINECAPS_: texture, z test, blending, alpha test, fog.

@@ -4153,6 +4153,13 @@ fn keyed_blits_into_a_toadforces_memory_keep_what_the_keys_say() {
     let mut cpu = vesa_machine("keyed_blit_toadforce", Adapter::ToadForce, program);
     keyed_blits_keep_what_the_keys_say(&mut cpu, data, 19);
     assert_eq!(toad(&cpu, toad_regs::ERROR), 0);
+    // The card copied the three blits of the source's own size from the
+    // surface in system memory, out of a block of its memory the
+    // driver wrote them to: through the key, as it is, and the middle
+    // columns through the key. The stretched ones and the one through
+    // a destination key are the processor's.
+    let card = cpu.bus.toadforce.as_ref().unwrap();
+    assert_eq!(card.counts().blt, 3);
 }
 
 // The data of the program that blits inside video memory.

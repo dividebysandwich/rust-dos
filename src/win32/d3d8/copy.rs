@@ -219,24 +219,27 @@ pub fn update_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if st.pool != resource::POOL_SYSTEMMEM || dt.pool != resource::POOL_DEFAULT {
         return Some(D3DERR_INVALIDCALL);
     }
-    if st.format != dt.format || st.levels.len() < dt.levels.len() {
+    if st.format != dt.format || st.cube != dt.cube || st.level_count() < dt.level_count() {
         return Some(D3DERR_INVALIDCALL);
     }
     let size = |cpu: &mut Cpu, id: u32| dd(cpu, id).map(|(_, s)| (s.width, s.height));
+    // Each face of a cube texture into the same face.
     let mut pairs = Vec::new();
-    for &level in &dt.levels {
-        let want = size(cpu, level);
-        let mut found = None;
-        for &from in &st.levels {
-            if size(cpu, from) == want {
-                found = Some(from);
-                break;
+    for (to_face, from_face) in dt.faces().zip(st.faces()) {
+        for &level in to_face {
+            let want = size(cpu, level);
+            let mut found = None;
+            for &from in from_face {
+                if size(cpu, from) == want {
+                    found = Some(from);
+                    break;
+                }
             }
+            let Some(from) = found else {
+                return Some(D3DERR_INVALIDCALL);
+            };
+            pairs.push((from, level));
         }
-        let Some(from) = found else {
-            return Some(D3DERR_INVALIDCALL);
-        };
-        pairs.push((from, level));
     }
     for (from, to) in pairs {
         let (a, b) = (dd_surface_of(cpu, from), dd_surface_of(cpu, to));

@@ -1540,16 +1540,69 @@ What is left of phase 5, with a guess of its size:
   first item of phase 6 for Oni too.
 - **`SwapBuffers` without the read-back** (medium): one read of the
   target a frame in MDK2 and Oni. A `BLT` or `FLIP` of the context's
-  back buffer on the card.
-- **Cube textures in Direct3D 8** (small): `CreateCubeTexture` over
-  DirectDraw's cube maps, which phase 3 made. No game here asks.
-- **Blended vertices on the card from Direct3D 8** (medium, #959):
-  a device with hardware processing reports the card's four matrices
-  without indices, and a draw with `D3DRS_VERTEXBLEND` set still goes
-  through the processor. Max Payne never reached it.
-- **No One Lives Forever's reads of the target** (medium): which
-  DirectDraw call asks after each draw, and whether the host can
-  serve it without a read-back.
+  back buffer on the card. Oni's `glReadPixels` belongs here too.
+- **Keyed copies the host leaves to the processor** (small, #981): a
+  keyed copy with more than 4096 runs, or one whose source is ahead
+  on the host, is copied by the processor after a read-back. A draw
+  that discards the key would take both.
+
+The second step of phase 5 added:
+
+- **Cube textures in Direct3D 8**: `CreateCubeTexture` and
+  `IDirect3DCubeTexture8` over DirectDraw's cube maps, with
+  `CheckDeviceFormat` answering for cube textures and the caps bits
+  set on a card that samples them.
+- **Blended vertices on the card** (#959): a draw from Direct3D 7 or
+  8 that blends by weights without indices goes to the card, which
+  weighs the position and the normal through its world matrices.
+  Direct3D 7 gained `D3DRENDERSTATE_VERTEXBLEND`, which it lacked on
+  every card. Indexed blending and tweening stay on the processor:
+  the card has neither.
+- **Copies from system memory**: the driver writes the source
+  rectangle into card memory and the card copies it with `BLT`, so
+  the host needn't read the target back for the processor to copy
+  into it.
+- **Keyed copies on the host**: the host reads the source from card
+  memory and writes the runs of pixels the key lets through, up to
+  4096 runs a copy. A copy with more goes back to the card.
+
+No One Lives Forever needed the last two. Its menus drew a
+full-screen `Blt` from a system-memory surface each frame and keyed
+blits for the cursor and the marks, and each made the host read the
+target back: 9324 read-backs from the menus through the first
+cutscene into the first mission, 3 with these (one each for the
+driver, a lock and a shown frame). It now plays its first mission. It
+takes the plain HAL device and transforms by itself: about 1900
+`DrawPrimitive` fans of screen vertices a frame, which the host
+draws in batches of equal state. The emulated processor never halts
+there, so its frame rate is the game's own work on the processor.
+Zanzarah's driver read-backs on its route to 160 s went from 1208 to
+none, with the same pictures.
+
+### What the phase 5 traces showed
+
+Traces of the HAL's commands in each game, taken to find what the
+card lacks:
+
+- **Giants** makes the T&L HAL device at 800x600 in X8R8G8B8 with a
+  32-bit z-buffer with stencil. It uses `DOTPRODUCT3`, `MODULATE4X`
+  and `ADDSMOOTH`, texture coordinates from the camera-space position
+  and from the reflection vector, three directional lights, and
+  render targets of 256 texels and cube maps.
+- **Zanzarah** makes the T&L HAL device and copies about 34 keyed
+  rectangles a frame from system memory to the back buffer, the case
+  the copies above cover.
+- **Grom** runs to 300 s without input with every draw transformed
+  by the card. Its trace hasn't been read.
+- **Max Payne** blends no vertex in the tutorial, lights with up to
+  6 point and spot lights, and uses two stages.
+- **MDK2** uses lights 0 to 5 and `glNormal3sv`, in immediate mode
+  only.
+- **Oni** calls `glReadPixels` 3501 times in a run where the driver
+  read the target 2957 times, so not all of those reads come from
+  `SwapBuffers`. Which do is open.
+
+None of them needs level 2.
 
 ### Frame rates against the target
 
