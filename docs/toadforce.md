@@ -1085,7 +1085,8 @@ Each phase is one or a few pull requests that leave main working.
    card, which Direct3D 7 samples and draws into. Giants makes the
    T&L HAL device and turns on object and landscape bump mapping and
    environment mapping, for which it draws the sky and the sea into
-   the six faces of a 256-texel cube map. Blended vertices reach the
+   the six faces of a 256-texel cube map; nothing at the first
+   mission's start samples it yet. Blended vertices reach the
    card with Direct3D 8 in phase 5 or a Direct3D 7 game that sets the
    state (#959).
 4. **The OpenGL renderer.** Generated shaders, caches, GPU-owned
