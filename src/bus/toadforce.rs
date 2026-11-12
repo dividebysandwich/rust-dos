@@ -262,6 +262,82 @@ impl Bus {
         }
     }
 
+    /// Whether the card's host renderer has pixels card memory hasn't
+    /// (`toadforce::gpu`). False on a card that draws in software.
+    #[inline]
+    pub fn toadforce_ahead(&self) -> bool {
+        self.toadforce.as_deref().is_some_and(|c| c.ahead())
+    }
+
+    /// Before the processor reads or writes `len` bytes of card memory
+    /// at `offset`: the queued commands run, and what the host
+    /// renderer drew into surfaces with those bytes is read back.
+    #[inline]
+    pub fn toadforce_touch(&mut self, offset: usize, len: usize) {
+        self.toadforce_flush();
+        if self.toadforce_ahead() {
+            let end = (offset + len).min(u32::MAX as usize);
+            self.toadforce_read_back(Some((offset as u32, end as u32)));
+        }
+    }
+
+    /// Read back what the host renderer drew into the surfaces that
+    /// share a byte with `range` of card memory (all for None).
+    #[cold]
+    pub fn toadforce_read_back(&mut self, range: Option<(u32, u32)>) {
+        if let Some(card) = &mut self.toadforce {
+            card.settle(&mut self.vbe.vram, range);
+        }
+    }
+
+    /// The processor wrote `len` bytes of card memory at `offset`: the
+    /// host renderer's copies of them are stale.
+    #[inline]
+    pub fn toadforce_wrote(&mut self, offset: usize, len: usize) {
+        if let Some(card) = &mut self.toadforce {
+            card.wrote(offset as u32, len as u32);
+        }
+    }
+
+    /// The program reads `len` bytes of card memory at `offset` through
+    /// the bus. A read has the bus shared and can't read anything
+    /// back, so the bytes are in card memory before the program gets
+    /// to them: a guest driver's commands are read back when its write
+    /// of `RING_PUT` returns, and the built-in drivers read a surface
+    /// back before they give the program its address (`win32::screen::
+    /// expose`). A read of bytes that are ahead all the same is a
+    /// driver's bug, which the card counts for its status.
+    #[inline]
+    pub(crate) fn toadforce_reads(&self, offset: usize, len: usize) {
+        if self.toadforce_ahead() {
+            self.toadforce_stale_read(offset, len);
+        }
+    }
+
+    #[cold]
+    fn toadforce_stale_read(&self, offset: usize, len: usize) {
+        if let Some(card) = &self.toadforce {
+            card.stale_read(offset as u32, len as u32);
+        }
+    }
+
+    /// The screen is about to be drawn from card memory: what the host
+    /// renderer drew into the surface shown is read back.
+    pub(crate) fn toadforce_show(&mut self) {
+        if !self.toadforce_ahead() {
+            return;
+        }
+        let Some(card) = &mut self.toadforce else {
+            return;
+        };
+        let Some(shown) = card.display.shown() else {
+            return;
+        };
+        let start = card.display.start();
+        let end = start.saturating_add(shown.pitch.saturating_mul(shown.height));
+        card.settle(&mut self.vbe.vram, Some((start, end)));
+    }
+
     /// Have the card run `words`, or its queue.
     fn toadforce_run(&mut self, words: Option<&[u32]>) {
         let live = self.toadforce_live();
@@ -403,6 +479,10 @@ impl Bus {
     /// Super VGA's description of, is described again.
     pub(crate) fn toadforce_after_load(&mut self) {
         self.toadforce_moved();
+        // Card memory is the state's: a host renderer starts from it.
+        if let Some(card) = &mut self.toadforce {
+            card.forget();
+        }
         let shown = self
             .toadforce
             .as_deref()

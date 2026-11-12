@@ -272,11 +272,16 @@ impl Vbe {
     }
 }
 
-/// The mode is saved by its number, and found again among the modes.
-impl crate::savestate::State for Vbe {
-    fn save(&self, w: &mut crate::savestate::Writer) {
+impl Vbe {
+    /// `save` with `memory` for the video memory: what a display
+    /// adapter that draws on the host has read back into a copy.
+    // A vector is what the state's writer takes.
+    #[allow(clippy::ptr_arg)]
+    pub fn save_with(&self, memory: &Vec<u8>, w: &mut crate::savestate::Writer) {
+        use crate::savestate::State;
+        debug_assert_eq!(memory.len(), self.vram.len());
         let Vbe {
-            vram,
+            vram: _,
             mode,
             lfb_base,
             lfb,
@@ -288,12 +293,19 @@ impl crate::savestate::State for Vbe {
             host_xor: _,
             scan_xor: _,
         } = self;
-        vram.save(w);
+        memory.save(w);
         mode.map_or(0, |m| m.number).save(w);
         mode.map_or((0, 0, 0), |m| (m.width, m.height, m.bpp)).save(w);
         lfb_base.save(w);
         crate::savestate::State::save(&(*lfb, *bank, *pitch), w);
         crate::savestate::State::save(&(*start, *latched_start, *start_high), w);
+    }
+}
+
+/// The mode is saved by its number, and found again among the modes.
+impl crate::savestate::State for Vbe {
+    fn save(&self, w: &mut crate::savestate::Writer) {
+        self.save_with(&self.vram, w);
     }
     fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
         let Vbe {
