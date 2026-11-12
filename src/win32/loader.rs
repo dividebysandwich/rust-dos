@@ -652,13 +652,37 @@ pub(super) fn load_module(
 ) -> Result<u32, LoadError> {
     let file = module_file_name(name);
     let datafile = flags & LOAD_LIBRARY_AS_DATAFILE != 0;
+
+    // A path names that file alone. One into the system directory can
+    // name a built-in DLL, and one into the Windows directory a file
+    // that Windows keeps there (TWAIN_32.DLL). A path anywhere else
+    // names a file of the program's own, which no built-in DLL stands
+    // in for: programs try optional DLLs this way, as LithTech games do
+    // with a language DLL (CRESL.DLL) in the TEMP directory, and when
+    // the file isn't there Windows fails the load just the same.
+    let has_path = name.contains(['\\', '/', ':']);
+    let qualified = if has_path {
+        l.bus.disk.qualify_path(name.trim_end_matches(' '))
+    } else {
+        None
+    };
+    let directory = qualified.as_deref().map(directory_of);
+    let in_directory = |dir: &str| {
+        directory
+            .as_deref()
+            .is_some_and(|d| d.eq_ignore_ascii_case(dir))
+    };
+    let in_system = in_directory(SYSTEM_DIR);
+    let own_file = has_path && !in_system && !in_directory(WINDOWS_DIR);
     let not_found = || LoadError {
         code: if datafile {
             ERROR_FILE_NOT_FOUND
         } else {
             ERROR_DLL_NOT_FOUND
         },
-        message: if super::glide::is_glide(&file) {
+        message: if own_file {
+            format!("{} needs {}, and there is no such file.", importer, name)
+        } else if super::glide::is_glide(&file) {
             format!(
                 "{} needs {}, which the built-in Windows has with a 3dfx card \
                  alone (the voodoo setting).",
@@ -681,15 +705,8 @@ pub(super) fn load_module(
     }
 
     // A built-in DLL, by its name alone or in the system directory.
-    let has_path = name.contains(['\\', '/', ':']);
-    let in_system = || {
-        l.bus
-            .disk
-            .qualify_path(name.trim_end_matches(' '))
-            .is_some_and(|p| directory_of(&p).eq_ignore_ascii_case(SYSTEM_DIR))
-    };
     if let Some(index) = builtin_for(l.bus, &file)
-        && (!has_path || in_system())
+        && (!has_path || in_system)
     {
         return load_builtin(l, index).ok_or_else(|| out_of_memory(importer));
     }
@@ -697,11 +714,6 @@ pub(super) fn load_module(
     // One loaded already, known by its file name as on Windows 95. A
     // path elsewhere doesn't name a built-in DLL, and one to map as data
     // names that file only.
-    let qualified = if has_path {
-        l.bus.disk.qualify_path(name.trim_end_matches(' '))
-    } else {
-        None
-    };
     let loaded = l.process.modules.iter_mut().find(|m| {
         let same_file = qualified
             .as_deref()
@@ -727,7 +739,7 @@ pub(super) fn load_module(
             let bytes = read_file(l.bus, &path).ok_or_else(not_found)?;
             (path, bytes, false)
         }
-        None if !has_path || in_system() => {
+        None if !has_path || in_system => {
             let host = guest_file(l.bus, &file).ok_or_else(not_found)?;
             let bytes = std::fs::read(&host).map_err(|_| not_found())?;
             l.bus.log_string(&format!(
@@ -738,17 +750,7 @@ pub(super) fn load_module(
             ));
             (join(SYSTEM_DIR, &file), bytes.into(), true)
         }
-        // A path outside the system directory names a file of the
-        // program's own, which no built-in DLL stands in for, and the file
-        // isn't there. Programs try optional DLLs this way, as LithTech
-        // games do with a language DLL (CRESL.DLL) in the TEMP directory,
-        // and Windows fails the load just the same.
-        None => {
-            return Err(LoadError {
-                message: format!("{} needs {}, and there is no such file.", importer, name),
-                ..not_found()
-            });
-        }
+        None => return Err(not_found()),
     };
     let mut image = pe::Image::load(&bytes).map_err(|e| LoadError {
         code: bad_image_error(&bytes),

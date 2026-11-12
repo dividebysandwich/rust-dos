@@ -531,34 +531,55 @@ fn glide2x_dll_is_there_with_a_3dfx_card_alone() {
     assert_eq!(run("no-glide", None, &[], finds_glide()), 0);
 }
 
-/// Loads C:\WINDOWS\TEMP\CRESL.DLL, which isn't there, as No One Lives
-/// Forever loads the language DLL it looks for in its rez files and
-/// doesn't find.
-fn loads_a_missing_file() -> Vec<u8> {
+/// Loads `path`, a DLL that isn't there, and checks that the load fails
+/// with ERROR_DLL_NOT_FOUND, as Windows 95 and 98 fail it.
+fn loads_a_missing_file(path: &str) -> Vec<u8> {
     let mut data = vec![0; 0x100];
-    put(&mut data, 0, b"C:\\WINDOWS\\TEMP\\CRESL.DLL\0");
+    put(&mut data, 0, path.as_bytes());
     program(&[("KERNEL32.DLL", KERNEL32)], &data, |a, l| {
         a.xor(ebx, ebx)?;
         call(a, l.import("LoadLibraryA"), &[l.at(0)])?;
-        // Windows 95 and 98 fail it with ERROR_DLL_NOT_FOUND.
         failed_with(a, l, 0, ERROR_DLL_NOT_FOUND, 0)?;
         a.mov(eax, ebx)?;
         a.ret()
     })
 }
 
-/// A DLL a program loads by a path outside the system directory is a file
-/// of its own: when it isn't there, the load fails, and the log says the
-/// file is missing, since there is nothing the built-in Windows lacks.
+/// The line the emulator logs for the failed load of `path`, by the test
+/// `test`.
+fn missing_file_line(test: &str, path: &str) -> String {
+    let (exit, log) = run_logged(test, None, &[], loads_a_missing_file(path));
+    assert_eq!(exit, 1, "{}", path);
+    let failed = format!("LoadLibrary({}) failed", path);
+    log.into_iter()
+        .find(|l| l.contains(&failed))
+        .expect("the failed load's line")
+}
+
+/// A DLL a program loads by a path outside the Windows and system
+/// directories is a file of its own: when it isn't there, the load fails,
+/// and the log says the file is missing, since there is nothing the
+/// built-in Windows lacks. No One Lives Forever loads the language DLL
+/// it looks for in its rez files and doesn't find this way.
 #[test]
 fn a_missing_dll_file_is_logged_as_missing() {
-    let (exit, log) = run_logged("missing", None, &[], loads_a_missing_file());
-    assert_eq!(exit, 1);
-    let line = log
-        .iter()
-        .find(|l| l.contains(r"LoadLibrary(C:\WINDOWS\TEMP\CRESL.DLL) failed"))
-        .expect("the failed load's line");
+    let line = missing_file_line("missing", r"C:\WINDOWS\TEMP\CRESL.DLL");
     assert!(line.ends_with("and there is no such file."), "{}", line);
+}
+
+/// A missing DLL by a path into the system or the Windows directory may
+/// be one that Windows has there, so the log says the built-in Windows
+/// lacks it.
+#[test]
+fn a_missing_windows_dll_is_logged_as_lacking() {
+    for (test, path) in [
+        ("missing-system", r"C:\WINDOWS\SYSTEM\NOSUCH.DLL"),
+        ("missing-windows", r"C:\WINDOWS\TWAIN_32.DLL"),
+    ] {
+        let line = missing_file_line(test, path);
+        let lacking = "which the built-in Windows doesn't have yet.";
+        assert!(line.ends_with(lacking), "{}", line);
+    }
 }
 
 /// Tries to write, make, delete, rename, copy over and change the
