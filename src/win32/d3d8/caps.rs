@@ -38,26 +38,7 @@ const SIZE: usize = 53 * 4;
 /// machine with another adapter (a Voodoo Graphics or Voodoo2 add-on
 /// card has no Direct3D 8 driver).
 pub fn card(cpu: &Cpu) -> Option<hal::Kind> {
-    if hal::toadforce::there(cpu) {
-        Some(hal::Kind::ToadForce)
-    } else {
-        cpu.bus
-            .vga
-            .adapter
-            .voodoo_board()
-            .map(|_| hal::Kind::Voodoo)
-    }
-}
-
-/// The texture units of the card that is the display adapter.
-pub fn tmus(cpu: &Cpu) -> u32 {
-    if hal::toadforce::there(cpu) {
-        return hal::toadforce::UNITS;
-    }
-    match cpu.bus.vga.adapter.voodoo_board() {
-        Some(crate::voodoo::Board::Banshee) => 1,
-        _ => 2,
-    }
+    hal::adapter(cpu).map(|offer| offer.kind)
 }
 
 /// Whose caps `words` gives: the adapter's, or those of a device made
@@ -68,20 +49,25 @@ pub enum Whose {
     Device { behavior: u32 },
 }
 
-/// D3DCREATE_HARDWARE_VERTEXPROCESSING: the card alone transforms and
-/// lights, and nothing runs vertex shaders.
-pub const CREATE_HARDWARE_VERTEXPROCESSING: u32 = 0x40;
-
 /// D3DCAPS8's words, the adapter's or a device's.
 pub fn words(cpu: &Cpu, whose: Whose) -> [u32; 53] {
-    let tmus = tmus(cpu);
-    let kind = card(cpu).unwrap_or_default();
+    // `check_device` and `device::create` let only a machine with a card
+    // here ask.
+    let offer = hal::adapter(cpu).unwrap_or(hal::Offer {
+        kind: hal::Kind::Voodoo,
+        units: 2,
+    });
+    let (kind, tmus) = (offer.kind, offer.units);
     let card = hal::description(kind);
     // The vertex processing Direct3D does on the processor is a
-    // device's unless the card alone does its.
+    // device's unless the card alone does its: hardware vertex
+    // processing, where the card transforms and nothing runs vertex
+    // shaders.
     let software = match whose {
         Whose::Adapter => false,
-        Whose::Device { behavior } => behavior & CREATE_HARDWARE_VERTEXPROCESSING == 0,
+        Whose::Device { behavior } => {
+            behavior & super::device::CREATE_HARDWARE_VERTEXPROCESSING == 0
+        }
     };
     let mut w = [0u32; 53];
     // D3DDEVTYPE_HAL, adapter 0.
@@ -147,10 +133,10 @@ pub fn words(cpu: &Cpu, whose: Whose) -> [u32; 53] {
     w[41] = MAX_CLIP_PLANES;
     if hal::transforms(kind) {
         // D3DDEVCAPS_HWTRANSFORMANDLIGHT. D3DPMISCCAPS_: the color
-        // write mask, the blend operations and D3DTA_TEMP, which the
-        // card's HAL draws.
+        // write mask (0x80), D3DTA_TEMP (TSSARGTEMP, 0x400) and the
+        // blend operations (0x800), which the card's HAL draws.
         w[7] |= 0x1_0000;
-        w[8] |= 0x80 | 0x800 | 0x4000;
+        w[8] |= 0x80 | 0x400 | 0x800;
         // The matrices the card blends a vertex between, which it
         // doesn't pick by index.
         w[42] = crate::toadforce::caps::BLEND_MATRICES;

@@ -5,7 +5,8 @@
 //! A surface is a DirectDraw surface of its device's DirectDraw object:
 //! a render target and a depth buffer in video memory, an image surface
 //! in system memory. A texture is a DirectDraw texture with its mipmap
-//! levels, in video memory for D3DPOOL_DEFAULT, managed for
+//! levels, in video memory for D3DPOOL_DEFAULT (a compressed one in
+//! system memory, where DirectDraw makes them), managed for
 //! D3DPOOL_MANAGED (in system memory, which the HAL copies to the card),
 //! and in system memory for the other pools; each level is a surface of
 //! Direct3D 8's whose count is the texture's. A Voodoo's HAL draws
@@ -14,7 +15,9 @@
 //! 32-bit formats work too though CheckDeviceFormat leaves them out, as
 //! the Voodoo3's driver did. A ToadForce has the formats its HAL lists
 //! (`card_texture`): the 32-bit ones, the compressed ones, alpha and
-//! luminance, and the bump formats. Cube and volume textures fail.
+//! luminance, and the bump formats. A texture of a format other than
+//! RGB is made only on a card that samples it (`makes_texture`). Cube
+//! and volume textures fail.
 //!
 //! Vertex and index buffers are blocks of the process's memory.
 
@@ -293,12 +296,17 @@ pub fn card_depth(cpu: &Cpu, format: u32) -> bool {
     }
 }
 
-/// The bytes of a block of 4 by 4 pixels of a compressed format.
-fn block_bytes(format: u32) -> Option<u32> {
-    match format {
-        FMT_DXT1 => Some(8),
-        FMT_DXT2 | FMT_DXT3 | FMT_DXT4 | FMT_DXT5 => Some(16),
-        _ => None,
+/// Whether CreateTexture makes a texture of `format` on the display
+/// adapter's card. The RGB formats are made on every card, which the
+/// HAL converts where the card doesn't sample them, as the Voodoo3's
+/// driver made the 32-bit ones. The others (compressed, luminance,
+/// alpha and bump) are only the card's that samples them: elsewhere
+/// CreateTexture fails as CheckDeviceFormat does.
+fn makes_texture(cpu: &Cpu, format: u32) -> bool {
+    match dd_format(format) {
+        Some(f) if f.flags & DDPF_RGB != 0 => true,
+        Some(_) => card_texture(cpu, format),
+        None => false,
     }
 }
 
@@ -351,6 +359,10 @@ pub fn make_dd(
         desc.format = dd_format(format).ok_or(D3DERR_INVALIDCALL)?;
     }
     let memory = match pool {
+        // DirectDraw makes compressed surfaces in system memory only,
+        // and the HAL copies one to the card as it does a managed
+        // texture: a texture of D3DPOOL_DEFAULT is there too.
+        POOL_DEFAULT if desc.format.flags & DDPF_FOURCC != 0 => 0,
         POOL_DEFAULT => DDSCAPS_VIDEOMEMORY,
         POOL_MANAGED => 0,
         _ => DDSCAPS_SYSTEMMEMORY,
@@ -534,7 +546,7 @@ pub fn create_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if w == 0 || h == 0 || w > 4096 || h > 4096 || pool > POOL_SCRATCH {
         return Some(D3DERR_INVALIDCALL);
     }
-    if dd_format(format).is_none() || is_depth(format) {
+    if is_depth(format) || !makes_texture(cpu, format) {
         return Some(D3DERR_INVALIDCALL);
     }
     if usage & USAGE_RENDERTARGET != 0 && pool != POOL_DEFAULT {
@@ -1055,9 +1067,9 @@ fn lock_surface(cpu: &mut Cpu, id: u32, at: u32, rect: u32) -> u32 {
     };
     // A compressed surface is its blocks, row after row of them: the
     // pitch is a row's bytes, and a rectangle starts at a block.
-    let (pitch, bits) = match block_bytes(s.format) {
-        Some(block) => {
-            let pitch = dd.width.div_ceil(4).max(1) * block;
+    let (pitch, bits) = match dd_surface::dxt_format(&dd.format) {
+        Some(f) => {
+            let (pitch, block) = (f.row_bytes(dd.width) as u32, f.block_bytes() as u32);
             (pitch, base + y / 4 * pitch + x / 4 * block)
         }
         None => (dd.pitch, base + y * dd.pitch + x * dd.bytes_per_pixel()),

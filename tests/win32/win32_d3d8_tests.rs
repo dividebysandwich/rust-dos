@@ -393,7 +393,10 @@ const D3DFMT_DXT1: u32 = u32::from_le_bytes(*b"DXT1");
 const D3DUSAGE_DEPTHSTENCIL: u32 = 2;
 const D3DRTYPE_SURFACE: u32 = 1;
 const D3DRTYPE_TEXTURE: u32 = 3;
+const D3DPOOL_DEFAULT: u32 = 0;
 const D3DPOOL_MANAGED: u32 = 1;
+const D3DFMT_L8: u32 = 50;
+const D3DFMT_V8U8: u32 = 60;
 const D3DPRESENTFLAG_LOCKABLE_BACKBUFFER: u32 = 1;
 const D3DPT_TRIANGLELIST: u32 = 4;
 /// XYZRHW with one set of texture coordinates.
@@ -418,8 +421,9 @@ const READ: [(u32, u32); 4] = [(16, 16), (40, 16), (16, 48), (60, 60)];
 /// and a D24S8 depth buffer. It clears colour, depth and stencil, and
 /// draws a quad of 48 by 32 pixels with an 8x8 DXT1 texture of one
 /// green, which writes 1 to the stencil. A red quad of 32 by 64 pixels
-/// then draws where the stencil is 1. The pixels of `READ` go to the
-/// data.
+/// then draws where the stencil is 1. Before the draws it also makes an
+/// L8 and a V8U8 texture and a DXT1 one in D3DPOOL_DEFAULT. The pixels
+/// of `READ` go to the data.
 fn toadforce_program() -> (Vec<u8>, u32) {
     let mut d = vec![0u8; DATA_SIZE];
     d[CLASS as usize..CLASS as usize + 7].copy_from_slice(b"Static\0");
@@ -545,6 +549,24 @@ fn toadforce_program() -> (Vec<u8>, u32) {
         c.com(a, l, TEXTURE, TEX_LOCK_RECT, &lock)?;
         copy(a, l, BLOCKS, TEX_LOCKED + 4, 32)?;
         c.com(a, l, TEXTURE, TEX_UNLOCK_RECT, &[Arg::I(0)])?;
+        // Textures of other formats the card samples: luminance, bump,
+        // and a compressed one in D3DPOOL_DEFAULT.
+        for (format, pool, out) in [
+            (D3DFMT_L8, D3DPOOL_MANAGED, SOURCE),
+            (D3DFMT_V8U8, D3DPOOL_MANAGED, SOURCE1),
+            (D3DFMT_DXT1, D3DPOOL_DEFAULT, DEST),
+        ] {
+            let args = [
+                Arg::I(8),
+                Arg::I(8),
+                Arg::I(1),
+                Arg::I(0),
+                Arg::I(format),
+                Arg::I(pool),
+                Arg::At(out),
+            ];
+            c.com(a, l, DEVICE, DEV_CREATE_TEXTURE, &args)?;
+        }
         let state = |a: &mut CodeAssembler, c: &mut Calls, s: u32, v: u32| {
             c.com(a, l, DEVICE, DEV_SET_RENDER_STATE, &[Arg::I(s), Arg::I(v)])
         };
@@ -616,6 +638,9 @@ fn a_toadforce_has_a_device_with_a_stencil_and_compressed_textures() {
     assert_eq!((caps(CAPS, 22), caps(CAPS, 23)), (2048, 2048));
     assert_eq!(caps(CAPS, 34), 0xFF);
     assert_eq!((caps(CAPS, 37), caps(CAPS, 38)), (8, 4));
+    // D3DPMISCCAPS_: the color write mask, D3DTA_TEMP and the blend
+    // operations.
+    assert_eq!(caps(CAPS, 8) & 0xC80, 0xC80);
     // The card blends between four matrices and picks none by index.
     // Vertex shaders run on the processor, which a device with
     // hardware vertex processing alone doesn't have.

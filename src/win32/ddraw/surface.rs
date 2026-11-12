@@ -821,6 +821,24 @@ fn check_format(f: &Format, caps: &[u32; 4]) -> Result<Format, u32> {
     })
 }
 
+/// A texture's pixel format of a kind `check_format` doesn't know
+/// (luminance, alpha only, or bump), where the card the DirectDraw
+/// object `dd` draws on samples it: its HAL lists it among the texture
+/// formats (EnumTextureFormats, CheckDeviceFormat). None for every
+/// other format and surface.
+fn card_texture_format(cpu: &mut Cpu, dd: u32, f: &Format, caps: &[u32; 4]) -> Option<Format> {
+    let known = DDPF_RGB | DDPF_PALETTEINDEXED8 | DDPF_ALPHAPIXELS | DDPF_FOURCC | DDPF_ZBUFFER;
+    if caps[0] & DDSCAPS_TEXTURE == 0 || f.flags & !known == 0 {
+        return None;
+    }
+    let f = Format { fourcc: 0, ..*f };
+    let offer = super::d3d::hal::card(cpu, dd)?;
+    super::d3d::hal::description(offer.kind)
+        .textures
+        .contains(&f)
+        .then_some(f)
+}
+
 /// A depth buffer's format with stencil bits, as EnumZBufferFormats
 /// gives it: the stencil's depth where a color format's red mask is,
 /// the depth mask where green is and the stencil mask where blue is.
@@ -1019,7 +1037,10 @@ pub fn make(
             return Err(DDERR_INVALIDPARAMS);
         }
         let f = if desc.flags & DDSD_PIXELFORMAT != 0 {
-            check_format(&desc.format, &caps)?
+            match card_texture_format(cpu, dd, &desc.format, &caps) {
+                Some(f) => f,
+                None => check_format(&desc.format, &caps)?,
+            }
         } else if caps[0] & DDSCAPS_ZBUFFER != 0 {
             if desc.flags & DDSD_ZBUFFERBITDEPTH == 0 || ![16, 24, 32].contains(&desc.mipmaps) {
                 return Err(DDERR_INVALIDPIXELFORMAT);

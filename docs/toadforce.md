@@ -1496,17 +1496,17 @@ rejected no command.
 What the games asked of the card, where it differs from the Voodoo3's
 traces of phase 0:
 
-- **Max Payne** lists the adapter and offers "D3D Software T&L" and
-  "D3D Hardware T&L". The second makes
-  a device with `D3DCREATE_MIXED_VERTEXPROCESSING`. It checks
-  A8R8G8B8, V8U8, L6V5U5 and DXT1, 3 and 5 as textures and D24S8 and
-  D24X8 as depth formats, takes D24S8, and clears colour, depth and
-  stencil in one `Clear`. Formats it checks and the card has none of:
-  R8G8B8, Q8W8V8U8, W11V11U10 and D32. With software vertex processing
-  it draws its characters with the blended vertex formats 0x1118 and
-  0x1116, which the layer blends on the processor as on the Voodoo3
-  (3% of the draws). With mixed processing it set neither in the
-  tutorial, and the card transformed every draw.
+- **Max Payne** lists the adapter and offers "D3D Software T&L" and "D3D
+  Hardware T&L". The second makes a device with
+  `D3DCREATE_MIXED_VERTEXPROCESSING`. It checks A8R8G8B8, V8U8, L6V5U5
+  and DXT1, 3 and 5 as textures and D24S8 and D24X8 as depth formats,
+  takes D24S8, and clears colour, depth and stencil in one `Clear`.
+  Formats it checks and the card has none of: R8G8B8, Q8W8V8U8,
+  W11V11U10 and D32. With software vertex processing it draws its
+  characters with the blended vertex formats 0x1118 and 0x1116, which
+  the layer blends on the processor as on the Voodoo3 (3% of the draws).
+  With mixed processing it set neither in the tutorial, and the card
+  transformed every draw.
 - **No One Lives Forever** takes the 32-bit z-buffer format with 8
   bits of stencil from `EnumZBufferFormats` and clears depth and
   stencil together each frame. DirectDraw dropped the stencil bits

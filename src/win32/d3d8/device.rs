@@ -53,7 +53,7 @@ const PRESENT_INTERVAL_IMMEDIATE: u32 = 0x8000_0000;
 
 // D3DCREATE_ flags.
 const CREATE_SOFTWARE_VERTEXPROCESSING: u32 = 0x20;
-const CREATE_HARDWARE_VERTEXPROCESSING: u32 = 0x40;
+pub const CREATE_HARDWARE_VERTEXPROCESSING: u32 = 0x40;
 const CREATE_MIXED_VERTEXPROCESSING: u32 = 0x80;
 
 /// D3DDEVTYPE_HAL.
@@ -1282,7 +1282,10 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// ValidateDevice(this, passes): whether the card draws with the
-/// texture stages as they are, in one pass.
+/// texture stages as they are, in one pass: no more stages than the
+/// caps' MaxTextureBlendStages, and a texture only in the first
+/// MaxSimultaneousTextures of them, as Direct3D 7's ValidateDevice
+/// has it.
 pub fn validate_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, out] = args[..] else {
         return Some(D3DERR_INVALIDCALL);
@@ -1294,7 +1297,18 @@ pub fn validate_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let offer = hal::card(cpu, d.dd);
     let tmus = offer.map_or(1, |offer| offer.units) as usize;
     let kind = offer.map_or(hal::Kind::Voodoo, |offer| offer.kind);
+    // A card with a stage for each texture unit says 0 stages.
+    let stages = match hal::description(kind).stages {
+        0 => tmus,
+        stages => stages as usize,
+    };
     let stage = |s: usize, t: usize| d.stages[s * 32 + t];
+    // D3DTA_TEXTURE in one of the arguments of the stage's colour
+    // (COLORARG1, 2 and 0) or alpha (ALPHAARG1, 2 and 0) operation.
+    let texture = |s: usize, op: usize, args: [usize; 3]| {
+        stage(s, op) != 1 && args.iter().any(|&a| stage(s, a) & 0xF == 2)
+    };
+    let textured = |s: usize| texture(s, 1, [2, 3, 26]) || texture(s, 4, [5, 6, 27]);
     let mut used = 0;
     for s in 0..STAGES {
         let (op, aop) = (stage(s, 1), stage(s, 4));
@@ -1309,7 +1323,7 @@ pub fn validate_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         used += 1;
     }
-    if used > tmus {
+    if used > stages || (tmus..used).any(textured) {
         return Some(D3DERR_TOOMANYOPERATIONS);
     }
     cpu.bus.guest_write_32(out, 1);

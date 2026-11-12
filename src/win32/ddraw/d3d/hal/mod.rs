@@ -72,6 +72,13 @@ pub fn card(cpu: &mut Cpu, dd: u32) -> Option<Offer> {
             units: b.tmus,
         });
     }
+    adapter(cpu)
+}
+
+/// The HAL of the display adapter, if Direct3D has one there: a
+/// Banshee, a Voodoo3 or a ToadForce with level 1. Direct3D 8 has its
+/// device here only.
+pub fn adapter(cpu: &Cpu) -> Option<Offer> {
     if toadforce::there(cpu) {
         return Some(Offer {
             kind: Kind::ToadForce,
