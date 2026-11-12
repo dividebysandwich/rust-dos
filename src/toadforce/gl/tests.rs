@@ -1899,3 +1899,61 @@ fn replay_a_capture() {
     }
     super::replay::replay(&bench, &rec);
 }
+
+/// A target drawn into with an alpha of its own, then sampled through
+/// a texture of 8 bits of alpha over its bytes and blended by that
+/// alpha: what the host fills the texture with from its copy must be
+/// what a read-back and a decode of the bytes give, alpha too. The
+/// clear before the draw has every channel masked off for draws, which
+/// a `CLEAR` doesn't heed.
+fn alpha_of_a_sampled_target(rig: &mut Rig) {
+    let surface = rig.surface(SECOND);
+    let target = Target {
+        colour: surface,
+        depth: None,
+    };
+    rig.run(|w| encode::render_target(w, Some(&target)));
+    rig.states(&[(RS_COLORWRITEENABLE, 0)]);
+    rig.clear(CLEAR_COLOUR, 0x8020_4060, 1.0, 0, &[]);
+    rig.states(&[(RS_COLORWRITEENABLE, 0xF)]);
+    rig.draw(&quad(4.0, 4.0, 40.0, 0x40C0_8040, 1.0));
+    let texture = Texture {
+        format: Format::A8R8G8B8,
+        width: SIZE,
+        height: SIZE,
+        levels: 1,
+        images: vec![(surface.offset, surface.pitch)],
+        ..Texture::default()
+    };
+    let screen = rig.target(COLOUR);
+    rig.run(|w| encode::render_target(w, Some(&screen)));
+    rig.clear(CLEAR_COLOUR, 0xFF10_1010, 1.0, 0, &[]);
+    rig.texture(0, 1, &texture);
+    filter(rig, 0, 1, 1, 0);
+    rig.states(&[
+        (RS_ALPHABLENDENABLE, 1),
+        (RS_SRCBLEND, 5),
+        (RS_DESTBLEND, 6),
+    ]);
+    rig.draw(&quad(0.0, 0.0, 64.0, WHITE, 1.0));
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn a_target_sampled_with_the_alpha_of_its_bytes_agrees() {
+    bench!(bench, "toadforce alpha of a sampled target");
+    for format in [Format::X8R8G8B8, Format::A8R8G8B8] {
+        let name = format!("alpha of a sampled target {format:?}");
+        let declined = bench.compare(&name, format, None, CLOSE, alpha_of_a_sampled_target);
+        assert_eq!(declined, 0, "{name}");
+        // The texture came from the host's copy, with nothing read
+        // back.
+        let mut hosted = Rig::new(format, None);
+        hosted.card.set_host(Some(bench.host()), &mut hosted.memory);
+        alpha_of_a_sampled_target(&mut hosted);
+        let status = hosted.card.describe(Rig::live());
+        assert_eq!(status["host"]["read_backs"], 0, "{name}: {status}");
+        let converts = status["host"]["counts"]["texture_converts"].as_u64();
+        assert!(converts >= Some(1), "{name}: {status}");
+    }
+}

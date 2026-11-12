@@ -186,9 +186,10 @@ pub trait Host {
     fn clear(&mut self, clear: &Clear, memory: &[u8], pages: &Pages) -> Option<Surface>;
 
     /// `FILL`: write the low bytes of `value` to each pixel of `rect`
-    /// of `dst`, when the host's copy of `dst` is ahead. The surface of
-    /// that copy, which is ahead after it. None when the host leaves
-    /// the fill to the processor, with nothing changed.
+    /// of `dst`, when the host's copy of `dst` is ahead and is of a
+    /// colour buffer. The surface of that copy, which is ahead after
+    /// it. None when the host leaves the fill to the processor, with
+    /// nothing changed.
     fn fill(
         &mut self,
         dst: &Surface,
@@ -202,8 +203,11 @@ pub trait Host {
     /// the host's copy of either is ahead. The surface of the host's
     /// copy of `dst`, which is ahead after it. None when the host
     /// leaves the copy to the processor, with nothing changed: for a
-    /// stretch, a colour key, formats it keeps no copies of, and a
-    /// copy onto its own source.
+    /// stretch, a colour key, a format the host draws into no target
+    /// of, pixels of two sizes, and a source the host has ahead that
+    /// shares a byte with `dst` without being a view of it or it of
+    /// the source (`related`), or that is such a view, with the two
+    /// rectangles sharing a pixel.
     #[allow(clippy::too_many_arguments)]
     fn blt(
         &mut self,

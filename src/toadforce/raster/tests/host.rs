@@ -354,7 +354,7 @@ impl Host for TestHost {
             .copies
             .iter_mut()
             .find(|c| gpu::within(dst, &c.surface))
-            .filter(|c| c.ahead)?;
+            .filter(|c| c.ahead && !depth(c.surface.format))?;
         let surface = copy.surface;
         blit::fill(&mut copy.pixels, &packed(&surface), rect, value);
         self.drop_textures(&[surface]);
@@ -373,12 +373,30 @@ impl Host for TestHost {
         pages: &Pages,
     ) -> Option<Surface> {
         let size = (src_rect.width, src_rect.height);
-        if key.is_some() || size != (dst_rect.width, dst_rect.height) {
+        if key.is_some()
+            || size != (dst_rect.width, dst_rect.height)
+            || !colour(dst.format)
+            || !colour(src.format)
+            || dst.format.bytes() != src.format.bytes()
+        {
             return None;
         }
         let find = |s: &Surface| self.copies.iter().find(|c| gpu::within(s, &c.surface));
         let from = find(src).filter(|c| c.ahead);
         if from.is_none() && !find(dst).is_some_and(|c| c.ahead) {
+            return None;
+        }
+        // What `ToadForceGl::blt` leaves to the processor, though the
+        // copies here could do it: a source the host has over other
+        // bytes of the destination's, and one over the destination's
+        // own pixels.
+        let related = gpu::related(src, dst);
+        let shared = !related && shares(gpu::range(src), gpu::range(dst));
+        let apart = src_rect.left + size.0 <= dst_rect.left
+            || dst_rect.left + size.0 <= src_rect.left
+            || src_rect.top + size.1 <= dst_rect.top
+            || dst_rect.top + size.1 <= src_rect.top;
+        if from.is_some() && (shared || related && !apart) {
             return None;
         }
         // The source's rows: the copy's, or card memory's.
@@ -448,6 +466,18 @@ impl Host for TestHost {
         self.copies.clear();
         self.textures.clear();
     }
+}
+
+/// Whether `format` is a depth buffer's, which `FILL` leaves to the
+/// processor.
+fn depth(format: Format) -> bool {
+    format.in_mask(crate::toadforce::caps::DEPTH_FORMATS)
+}
+
+/// Whether `format` is one a host draws into, the only ones `BLT`
+/// takes.
+fn colour(format: Format) -> bool {
+    matches!(format, Format::R5G6B5 | Format::X8R8G8B8 | Format::A8R8G8B8)
 }
 
 fn takes_all(_: &DrawState) -> bool {
@@ -1367,4 +1397,193 @@ fn the_screen_shows_a_surface_from_the_hosts_copy_while_it_is_current() {
     assert!(!rig.card.host_presents());
     assert_eq!(rig.draw(4, &corner(0.0, 0.0, 30.0, 0.0, 0xFF11_2233)), 0);
     assert!(rig.card.host_shows(&colour));
+}
+
+/// Make `colour` the render target, with no depth buffer.
+fn aim_at(rig: &mut Rig, colour: Surface) {
+    let target = Target {
+        colour,
+        depth: None,
+    };
+    aim(rig, &target);
+}
+
+/// Make `colour` the render target, with no depth buffer and no
+/// texture, and draw a corner of `diffuse` into it.
+fn draw_into(rig: &mut Rig, colour: Surface, diffuse: u32) {
+    aim_at(rig, colour);
+    assert_eq!(rig.run(|w| encode::set_texture(w, 0, 0)), 0);
+    rig.stage(0, &[(TSS_COLORARG1, ARG_DIFFUSE)]);
+    assert_eq!(rig.draw(4, &corner(1.0, 2.0, 40.0, 0.0, diffuse)), 0);
+}
+
+/// Draw the texture `render_to_texture` defined into a square of the
+/// screen's target at (`x`, `y`).
+fn sample_into_screen(rig: &mut Rig, x: f32, y: f32) {
+    let screen = target(rig);
+    aim(rig, &screen);
+    assert_eq!(rig.run(|w| encode::set_texture(w, 0, 1)), 0);
+    rig.stage(0, &[(TSS_COLORARG1, ARG_TEXTURE)]);
+    assert_eq!(rig.draw(5, &quad(x, y, 16.0)), 0);
+}
+
+/// A write of the processor into a surface the host has ahead, before
+/// each of the paths that keep it on the host: a sample of it as a
+/// texture, a `BLT` from it and into it, a `CLEAR` of a part of it
+/// and of all of it. Each sees the write.
+fn writes_into_a_surface_ahead(rig: &mut Rig) {
+    render_to_texture(rig);
+    let s = texture_surface();
+    let screen = rig.colour();
+    let poke_at = |rig: &mut Rig, x: u32, y: u32| {
+        poke(rig, s.at(x, y), &[0x11, 0x22, 0x33, 0x44]);
+        // The host's copy is stale: the screen isn't shown from it.
+        assert!(!rig.card.host_shows(&s));
+    };
+    draw_into(rig, s, 0xFF20_4060);
+    poke_at(rig, 3, 3);
+    sample_into_screen(rig, 0.0, 0.0);
+
+    draw_into(rig, s, 0xFF60_4020);
+    poke_at(rig, 5, 5);
+    let blt = |rig: &mut Rig, dst: &Surface, to: Rect, src: &Surface, from: Rect| {
+        let error = rig.run(|w| command::encode::blt(w, dst, &to, src, &from, None));
+        assert_eq!(error, 0);
+    };
+    blt(rig, &screen, rect(20, 0, 16, 16), &s, rect(0, 0, 16, 16));
+
+    draw_into(rig, s, 0xFF40_6020);
+    poke_at(rig, 6, 6);
+    blt(rig, &s, rect(0, 0, 8, 8), &screen, rect(40, 40, 8, 8));
+    sample_into_screen(rig, 40.0, 0.0);
+
+    draw_into(rig, s, 0xFF20_6040);
+    poke_at(rig, 7, 7);
+    aim_at(rig, s);
+    let part = [rect(0, 0, 4, 4)];
+    let error = rig.run(|w| encode::clear(w, CLEAR_COLOUR, 0xFF0A_0B0C, 0.0, 0, &part));
+    assert_eq!(error, 0);
+    sample_into_screen(rig, 0.0, 20.0);
+
+    draw_into(rig, s, 0xFF40_2060);
+    poke_at(rig, 9, 9);
+    aim_at(rig, s);
+    rig.clear(CLEAR_COLOUR, 0xFF0D_0E0F, 0.0, 0);
+    sample_into_screen(rig, 20.0, 20.0);
+}
+
+#[test]
+fn a_write_into_a_surface_that_is_ahead_is_seen_by_every_host_path() {
+    let (mut rig, log) = hosted(takes_all);
+    writes_into_a_surface_ahead(&mut rig);
+    // The clear of all of the surface was the host's, and the copy it
+    // wrote is shown.
+    assert!(rig.card.host_shows(&texture_surface()));
+    assert!(log.borrow().blits >= 1);
+    let (rig, _) = same(takes_all, writes_into_a_surface_ahead);
+    // The squares sampled after the write of a part, and after the
+    // clear of all of it.
+    assert_eq!(rig.px(0, 20), 0x0A_0B0C);
+    assert_eq!(rig.px(24, 24), 0x0D_0E0F);
+}
+
+/// A clear of all of a target the host has no copy of, which starts
+/// and ends inside pages it shares with other bytes, then a write of
+/// the processor to one of those bytes, and a clear of the target with
+/// a rectangle that isn't all of it.
+fn clears_of_a_target_without_a_copy(rig: &mut Rig) {
+    let colour = unaligned();
+    draw_into(rig, colour, 0xFF20_2020);
+    rig.card.settle(&mut rig.memory, None);
+    // The copy is stale after this, and the clear needs none of it.
+    poke(rig, colour.at(1, 1), &[9, 9, 9, 9]);
+    rig.clear(CLEAR_COLOUR, 0xFF30_4050, 0.0, 0);
+    // Beside it, in its first and last pages: no read-back, and the
+    // read-back of the surface later leaves the bytes as they are.
+    poke(rig, colour.offset as usize - 4, &[1, 2, 3, 4]);
+    poke(rig, gpu::range(&colour).1 as usize, &[5, 6, 7, 8]);
+    // A clear of a part of a surface the host has no copy of is the
+    // processor's.
+    let other = Surface {
+        offset: BUFFER,
+        ..small_surface()
+    };
+    aim_at(rig, other);
+    let part = [rect(0, 0, 8, 8)];
+    let error = rig.run(|w| encode::clear(w, CLEAR_COLOUR, 0xFF00_7700, 0.0, 0, &part));
+    assert_eq!(error, 0);
+}
+
+#[test]
+fn a_whole_clear_without_a_copy_leaves_the_bytes_beside_the_surface() {
+    let (mut rig, log) = hosted(takes_all);
+    clears_of_a_target_without_a_copy(&mut rig);
+    // The whole clear was the host's, with nothing copied first; the
+    // clear of a part of a surface it has no copy of wasn't.
+    assert_eq!(log.borrow().clears, 1);
+    assert_eq!(log.borrow().uploads, 1);
+    assert!(rig.card.ahead());
+    let (rig, _) = same(takes_all, clears_of_a_target_without_a_copy);
+    let colour = unaligned();
+    assert_eq!(rig.memory[colour.offset as usize - 4..][..4], [1, 2, 3, 4]);
+    let after = gpu::range(&colour).1 as usize;
+    assert_eq!(rig.memory[after..][..4], [5, 6, 7, 8]);
+    assert_eq!(rig.word(colour.at(1, 1), 4), 0x30_4050);
+}
+
+/// The colour buffer's copy stale and the depth buffer's ahead, a
+/// clear of the depth alone, and the reverse.
+fn one_buffer_stale(rig: &mut Rig) {
+    rig.clear(CLEAR_COLOUR | CLEAR_DEPTH, 0xFF20_2020, 1.0, 0);
+    rig.states(&[(RS_ZENABLE, 1)]);
+    assert_eq!(rig.draw(4, &corner(2.0, 2.0, 40.0, 0.5, 0xFFFF_0000)), 0);
+    rig.card.settle(&mut rig.memory, None);
+    let at = rig.colour().at(30, 30);
+    poke(rig, at, &[1, 2, 3, 4]);
+    let part = [rect(0, 0, 32, 32)];
+    let error = rig.run(|w| encode::clear(w, CLEAR_DEPTH, 0, 0.25, 0, &part));
+    assert_eq!(error, 0);
+    assert_eq!(rig.draw(4, &corner(20.0, 20.0, 40.0, 0.4, 0xFF00_FF00)), 0);
+    rig.card.settle(&mut rig.memory, None);
+    poke(rig, DEPTH as usize + 2, &[0, 0]);
+    let error = rig.run(|w| encode::clear(w, CLEAR_COLOUR, 0xFF00_0080, 0.0, 0, &part));
+    assert_eq!(error, 0);
+    assert_eq!(rig.draw(4, &corner(4.0, 4.0, 40.0, 0.3, 0xFF00_00FF)), 0);
+}
+
+#[test]
+fn a_clear_of_one_buffer_takes_the_others_stale_copy_from_card_memory() {
+    same(takes_all, one_buffer_stale);
+}
+
+/// Two targets of other pitches and formats over the bytes of one the
+/// host has ahead, each drawn into and seen through the other.
+fn other_views_of_the_same_bytes(rig: &mut Rig) {
+    let whole = texture_surface();
+    let narrow = Surface {
+        pitch: whole.pitch / 2,
+        width: SIZE / 2,
+        ..whole
+    };
+    let packed = Surface {
+        format: Format::R5G6B5,
+        ..whole
+    };
+    draw_into(rig, whole, 0xFF40_8020);
+    draw_into(rig, narrow, 0xFF20_4080);
+    draw_into(rig, whole, 0xFF80_2040);
+    draw_into(rig, packed, 0xFF10_2030);
+    sample_into_screen(rig, 0.0, 0.0);
+    draw_into(rig, whole, 0xFF30_2010);
+}
+
+#[test]
+fn surfaces_of_other_pitches_and_formats_over_one_copy_agree() {
+    // `render_to_texture` defines the texture `sample_into_screen`
+    // draws.
+    fn scene(rig: &mut Rig) {
+        render_to_texture(rig);
+        other_views_of_the_same_bytes(rig);
+    }
+    same(takes_all, scene);
 }
