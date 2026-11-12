@@ -109,6 +109,12 @@ pub fn words(cpu: &Cpu, whose: Whose) -> [u32; 53] {
     // D3DPTFILTERCAPS_: point and linear minification, mipmap and
     // magnification filters.
     w[16] = 0x100 | 0x200 | 0x1_0000 | 0x2_0000 | 0x100_0000 | 0x200_0000 | card.filter;
+    // CubeTextureFilterCaps: a card filters a cube texture's faces as
+    // it does a texture, and a caps of 0 would tell a program that it
+    // can't filter them at all.
+    if card.texture & hal::TEXTURECAPS_CUBEMAP != 0 {
+        w[17] = w[16];
+    }
     // D3DPTADDRESSCAPS_: wrap, mirror, clamp, independent u and v.
     w[19] = 0x1 | 0x2 | 0x4 | 0x10 | card.address;
     // D3DLINECAPS_: texture, z test, blending, alpha test, fog.

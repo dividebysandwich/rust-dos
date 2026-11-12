@@ -2229,35 +2229,23 @@ impl Host for ToadForceGl {
                     let (_, format, kind) = self.formats(surface.format);
                     let gl = &*self.gl;
                     gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                    let (x, y) = (place.0 as i32, place.1 as i32);
-                    let (w, h) = (size.0 as i32, size.1 as i32);
-                    match &runs {
-                        None => {
-                            let data = glow::PixelUnpackData::Slice(Some(&pixels));
-                            gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, x, y, w, h, format, kind, data);
-                        }
-                        Some(runs) => {
-                            // The bytes of a pixel as the texture takes it.
-                            let bytes = pixels.len() / (size.0 * size.1).max(1) as usize;
-                            for &(left, top, len) in runs {
-                                let at = (top * size.0 + left) as usize * bytes;
-                                let run = &pixels[at..at + len as usize * bytes];
-                                let data = glow::PixelUnpackData::Slice(Some(run));
-                                let (x, y) = (x + left as i32, y + top as i32);
-                                let len = len as i32;
-                                gl.tex_sub_image_2d(
-                                    glow::TEXTURE_2D,
-                                    0,
-                                    x,
-                                    y,
-                                    len,
-                                    1,
-                                    format,
-                                    kind,
-                                    data,
-                                );
-                            }
-                        }
+                    // The whole rectangle, or each run of pixels the key
+                    // lets through: its left, top, width and height in
+                    // the rectangle, and its rows, which follow each
+                    // other in `pixels`.
+                    let parts: Vec<(u32, u32, u32, u32)> = match &runs {
+                        None => vec![(0, 0, size.0, size.1)],
+                        Some(runs) => runs.iter().map(|&(l, t, len)| (l, t, len, 1)).collect(),
+                    };
+                    // The bytes of a pixel as the texture takes it.
+                    let bytes = pixels.len() / (size.0 * size.1).max(1) as usize;
+                    for (left, top, w, h) in parts {
+                        let at = (top * size.0 + left) as usize * bytes;
+                        let part = &pixels[at..at + (w * h) as usize * bytes];
+                        let data = glow::PixelUnpackData::Slice(Some(part));
+                        let (x, y) = ((place.0 + left) as i32, (place.1 + top) as i32);
+                        let (w, h) = (w as i32, h as i32);
+                        gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, x, y, w, h, format, kind, data);
                     }
                 }
             }

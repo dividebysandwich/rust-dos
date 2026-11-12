@@ -27,8 +27,8 @@ use super::super::ddraw::surface::{
     self as dd_surface, DDPF_ALPHAPIXELS, DDPF_FOURCC, DDPF_RGB, DDPF_ZBUFFER, DDSCAPS_3DDEVICE,
     DDSCAPS_COMPLEX, DDSCAPS_FLIP, DDSCAPS_MIPMAP, DDSCAPS_OFFSCREENPLAIN, DDSCAPS_PRIMARYSURFACE,
     DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_VIDEOMEMORY, DDSCAPS_ZBUFFER, DDSCAPS2_CUBEMAP,
-    DDSCAPS2_CUBEMAP_ALLFACES, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_HEIGHT, DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH,
-    Desc,
+    DDSCAPS2_CUBEMAP_ALLFACES, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_HEIGHT, DDSD_MIPMAPCOUNT,
+    DDSD_PIXELFORMAT, DDSD_WIDTH, Desc,
 };
 use super::super::ddraw::{self, Format, V_SURFACE7};
 use super::{
@@ -595,13 +595,7 @@ pub fn create_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if !com::write_out(cpu, out, 0) {
         return Some(D3DERR_INVALIDCALL);
     }
-    if w == 0 || h == 0 || w > 4096 || h > 4096 || pool > POOL_SCRATCH {
-        return Some(D3DERR_INVALIDCALL);
-    }
-    if is_depth(format) || !makes_texture(cpu, format) || !whole_blocks(format, w, h) {
-        return Some(D3DERR_INVALIDCALL);
-    }
-    if usage & USAGE_RENDERTARGET != 0 && pool != POOL_DEFAULT {
+    if w == 0 || h == 0 || w > 4096 || h > 4096 {
         return Some(D3DERR_INVALIDCALL);
     }
     let role = Role::Texture(level_count(w, h, levels));
@@ -614,6 +608,7 @@ pub fn create_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// A texture of `role` (a texture's or a cube texture's) for the device
 /// `device`, with the DirectDraw surfaces it is and a surface of
 /// Direct3D 8's for each: its id, with a reference for the program.
+/// The pool, the format and the usage are checked here, for both kinds.
 fn make_texture(
     cpu: &mut Cpu,
     device: u32,
@@ -628,6 +623,15 @@ fn make_texture(
         Role::Texture(levels) => (false, levels),
         _ => return Err(D3DERR_INVALIDCALL),
     };
+    let (w, h) = size;
+    if pool > POOL_SCRATCH
+        || is_depth(format)
+        || !makes_texture(cpu, format)
+        || !whole_blocks(format, w, h)
+        || (usage & USAGE_RENDERTARGET != 0 && pool != POOL_DEFAULT)
+    {
+        return Err(D3DERR_INVALIDCALL);
+    }
     let (ids, root) = make_dd(cpu, device, role, size, format, pool)?;
     if usage & USAGE_RENDERTARGET != 0 {
         // A texture the device can draw into.
@@ -713,13 +717,7 @@ pub fn create_cube_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if !com::write_out(cpu, out, 0) {
         return Some(D3DERR_INVALIDCALL);
     }
-    if !card_cube(cpu) || !edge.is_power_of_two() || edge > 4096 || pool > POOL_SCRATCH {
-        return Some(D3DERR_INVALIDCALL);
-    }
-    if is_depth(format) || !makes_texture(cpu, format) || !whole_blocks(format, edge, edge) {
-        return Some(D3DERR_INVALIDCALL);
-    }
-    if usage & USAGE_RENDERTARGET != 0 && pool != POOL_DEFAULT {
+    if !card_cube(cpu) || !edge.is_power_of_two() || edge > 4096 {
         return Some(D3DERR_INVALIDCALL);
     }
     let role = Role::Cube(level_count(edge, edge, levels));

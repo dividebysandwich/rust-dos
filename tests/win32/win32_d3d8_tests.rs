@@ -831,7 +831,14 @@ fn cube_program() -> (Vec<u8>, u32) {
     let mut d = vec![0u8; DATA_SIZE];
     toadforce_present(&mut d);
     let mut quad = |at: u32, x0: f32, direction: [f32; 3]| {
-        let corners = [[0.0, 0.0], [32.0, 0.0], [0.0, 32.0], [32.0, 0.0], [32.0, 32.0], [0.0, 32.0]];
+        let corners = [
+            [0.0, 0.0],
+            [32.0, 0.0],
+            [0.0, 32.0],
+            [32.0, 0.0],
+            [32.0, 32.0],
+            [0.0, 32.0],
+        ];
         for (i, [x, y]) in corners.into_iter().enumerate() {
             let [u, v, w] = direction;
             put_f32s(&mut d, at + 28 * i as u32, &[x0 + x, y, 0.5, 1.0, u, v, w]);
@@ -957,6 +964,11 @@ fn a_toadforce_makes_cube_textures_in_direct3d_8() {
     assert_eq!(peek(&cpu, data + ODD_TEXTURE), 0);
     // D3DPTEXTURECAPS_CUBEMAP, MIPCUBEMAP and CUBEMAP_POW2.
     assert_eq!(peek(&cpu, data + DEVICE_CAPS + 4 * 15) & 0x3_0800, 0x3_0800);
+    // CubeTextureFilterCaps are the TextureFilterCaps: the card filters
+    // a cube texture's faces as it does a texture.
+    let filters = peek(&cpu, data + DEVICE_CAPS + 4 * 16);
+    assert_ne!(filters, 0);
+    assert_eq!(peek(&cpu, data + DEVICE_CAPS + 4 * 17), filters);
     // A face is 4 pixels of 4 bytes wide.
     assert_eq!(peek(&cpu, data + TEX_LOCKED), 16);
     let pixel = |i: u32| peek(&cpu, data + PIXELS + 4 * i);
