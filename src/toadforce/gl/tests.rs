@@ -283,6 +283,10 @@ struct Bound {
     outliers: u32,
     /// The largest difference of a depth, in the buffer's steps.
     depth: u32,
+    /// The largest mean over the colour buffers of each pixel's largest
+    /// difference of a channel, for what the host draws in its own way
+    /// (anisotropic filtering), where a pixel says little.
+    mean: Option<f64>,
 }
 
 /// One in 255 of a channel, or one step of a 16-bit target, and
@@ -291,6 +295,7 @@ const CLOSE: Bound = Bound {
     channel: 1,
     outliers: 0,
     depth: 1,
+    mean: None,
 };
 
 /// What a scene is drawn on.
@@ -344,7 +349,7 @@ impl Bench {
             .unwrap();
 
         // The colour buffers, channel by channel.
-        let (mut differing, mut largest, mut outliers) = (0, 0, 0);
+        let (mut differing, mut largest, mut outliers, mut sum) = (0, 0, 0, 0u64);
         let mut first = None;
         for offset in [COLOUR, SECOND] {
             let surface = software.surface(offset);
@@ -371,6 +376,7 @@ impl Bench {
                         .max()
                         .unwrap();
                     differing += 1;
+                    sum += worst as u64;
                     largest = largest.max(worst);
                     if worst > bound.channel {
                         outliers += 1;
@@ -405,17 +411,21 @@ impl Bench {
                 stencil_differing += (sa != sb) as u32;
             }
         }
+        let mean = sum as f64 / (2 * SIZE * SIZE) as f64;
         println!(
             "{name} ({format:?}{}): {differing} pixels differ, largest {largest}, \
-             {outliers} over {}; depth {depth_differing} differ, largest {depth_largest}; \
-             stencil {stencil_differing} differ; {declined} declined",
+             mean {mean:.3}, {outliers} over {}; depth {depth_differing} differ, \
+             largest {depth_largest}; stencil {stencil_differing} differ; {declined} declined",
             if self.wide.get() { ", 8-bit" } else { "" },
             bound.channel,
         );
         if let Some((x, y, a, b)) = first {
             println!("  first over the bound at ({x}, {y}): software {a:08X}, host {b:08X}");
         }
-        assert!(outliers <= bound.outliers, "{name}: colour");
+        match bound.mean {
+            Some(most) => assert!(mean <= most, "{name}: colour"),
+            None => assert!(outliers <= bound.outliers, "{name}: colour"),
+        }
         assert!(depth_largest <= bound.depth, "{name}: depth");
         assert_eq!(stencil_differing, 0, "{name}: stencil");
         declined
@@ -804,7 +814,6 @@ fn address_modes_and_mip_levels_agree() {
         (2, 2, 2),
         (2, 1, 0),
         (1, 2, 0),
-        (2, 1, 1),
     ] {
         for (bias, first) in [(0.0f32, 0), (1.0, 0), (-1.0, 0), (0.0, 2)] {
             if first > 0 && mag != min {
@@ -1278,5 +1287,173 @@ fn the_host_and_the_processor_take_turns() {
         };
         let declined = bench.compare("turns", format, Some(Format::D16), CLOSE, scene);
         assert_eq!(declined, 1);
+    }
+}
+
+/// A texture of 32 with all its levels on stage 0: one smooth picture,
+/// each level of it half the size of the one before.
+fn mipped(rig: &mut Rig) {
+    let levels = |level: u32, _: u32, x: u32, y: u32| ramp(32)(0, 0, x << level, y << level);
+    let t = rig.texels(TEXTURE, Format::A8R8G8B8, 32, 6, false, levels);
+    rig.texture(0, 1, &t);
+}
+
+/// Squares where a pixel covers 1, 2 and 4 texels of a texture of 32,
+/// and 1.28, a level of detail between 0 and 0.5: four draws.
+fn sizes(rig: &mut Rig) {
+    rig.clear(CLEAR_COLOUR, 0xFF10_1010, 1.0, 0, &[]);
+    rig.draw(&quad(0.0, 0.0, 32.0, WHITE, 1.0));
+    rig.draw(&quad(34.0, 0.0, 16.0, WHITE, 1.0));
+    rig.draw(&quad(34.0, 18.0, 8.0, WHITE, 1.0));
+    rig.draw(&quad(0.0, 34.0, 25.0, WHITE, 1.0));
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn the_states_the_host_declines_are_drawn_in_software() {
+    bench!(bench, "toadforce declines");
+    let declines = |name: &str, draws: u64, scene: &dyn Fn(&mut Rig)| {
+        let declined = bench.compare(name, Format::A8R8G8B8, None, CLOSE, scene);
+        assert_eq!(declined, draws, "{name}");
+    };
+    // Bump offsets on a cube map.
+    declines("bump on a cube map", 1, &|rig| {
+        let bumps = rig.texels(TEXTURE, Format::V8U8, 8, 1, false, pattern);
+        let cube = rig.texels(TEXTURE + 0x1000, Format::R5G6B5, 8, 1, true, pattern);
+        rig.texture(0, 1, &bumps);
+        rig.texture(1, 2, &cube);
+        let matrix = [0.04f32, -0.02, 0.03, 0.05];
+        let mut states = vec![(TSS_COLOROP, 22)];
+        for (i, m) in matrix.iter().enumerate() {
+            states.push((TSS_BUMPENVMAT00 + i as u32, m.to_bits()));
+        }
+        rig.stage(0, &states);
+        rig.draw(&cube_quad(1));
+    });
+    // `SRCALPHASAT` for the destination.
+    declines("SRCALPHASAT for the destination", 1, &|rig| {
+        rig.clear(CLEAR_COLOUR, 0x6020_4060, 1.0, 0, &[]);
+        rig.states(&[
+            (RS_ALPHABLENDENABLE, 1),
+            (RS_SRCBLEND, 5),
+            (RS_DESTBLEND, 11),
+        ]);
+        rig.draw(&quad(6.0, 6.0, 50.0, 0x80C0_4020, 1.0));
+    });
+    // A linear magnification filter with a nearest minification filter
+    // and mip levels, where OpenGL magnifies further than the card.
+    for mip in [1, 2] {
+        declines(&format!("mag 2 min 1 mip {mip}"), 4, &|rig| {
+            mipped(rig);
+            filter(rig, 0, 2, 1, mip);
+            sizes(rig);
+        });
+    }
+    // A colour key on a texture blended between levels.
+    declines("colour key between levels", 4, &|rig| {
+        // Every other texel of each level has the key's value.
+        let keyed = |level: u32, face: u32, x: u32, y: u32| {
+            if (x + y + level).is_multiple_of(2) {
+                0xF81F
+            } else {
+                pattern(level, face, x, y) & 0xF7DF
+            }
+        };
+        let mut t = rig.texels(TEXTURE, Format::R5G6B5, 32, 6, false, keyed);
+        t.key = Some(0xF81F);
+        rig.texture(0, 1, &t);
+        filter(rig, 0, 1, 1, 2);
+        rig.states(&[(RS_COLORKEYENABLE, 1)]);
+        sizes(rig);
+    });
+    // One texture on two stages with different addressing, and with
+    // the same (which the host draws).
+    for (clamp, draws) in [(3, 1), (1, 0)] {
+        declines(
+            &format!("one texture twice, address {clamp}"),
+            draws,
+            &|rig| {
+                let t = rig.texels(TEXTURE, Format::A8R8G8B8, 8, 1, false, pattern);
+                rig.texture(0, 1, &t);
+                rig.texture(1, 2, &t);
+                rig.stage(
+                    1,
+                    &[
+                        (TSS_COLOROP, OP_MODULATE),
+                        (TSS_COLORARG2, ARG_CURRENT),
+                        (TSS_ADDRESSU, clamp),
+                    ],
+                );
+                rig.draw(&quad(4.0, 4.0, 48.0, WHITE, 2.5));
+            },
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn anisotropy_and_a_linearly_filtered_bump_texture_agree() {
+    bench!(bench, "toadforce anisotropy");
+    // A square that goes into the distance, with each filter and as
+    // much anisotropy as the card takes. The host's GPU filters
+    // anisotropically in its own way; the software renderer picks the
+    // level by the smaller side. Compared by the mean difference, which
+    // was 1.1 to 1.5 on a GeForce RTX 4080: a level off over much of
+    // the square would be several times that.
+    for anisotropy in [1, 4, 8] {
+        let name = format!("anisotropy {anisotropy}");
+        let bound = Bound {
+            channel: 255,
+            mean: Some(2.0),
+            ..CLOSE
+        };
+        let scene = |rig: &mut Rig| {
+            mipped(rig);
+            filter(rig, 0, 2, 3, 2);
+            // Mirrored, so the picture has no edge where it repeats.
+            rig.stage(
+                0,
+                &[
+                    (TSS_MAXANISOTROPY, anisotropy),
+                    (TSS_ADDRESSU, 2),
+                    (TSS_ADDRESSV, 2),
+                ],
+            );
+            rig.clear(CLEAR_COLOUR, 0xFF10_1010, 1.0, 0, &[]);
+            let mut q = quad(2.0, 2.0, 60.0, WHITE, 6.0);
+            for v in &mut q {
+                if v.t[1] == 0.0 {
+                    v.rhw = 0.125;
+                }
+            }
+            rig.draw(&q);
+        };
+        let declined = bench.compare(&name, Format::A8R8G8B8, None, bound, scene);
+        assert_eq!(declined, 0, "{name}");
+    }
+    // Offsets from a bump texture filtered between texels, all of one
+    // sign, so the blend of the signed bytes as unsigned ones is the
+    // blend of the offsets.
+    let smooth_offsets = |_: u32, _: u32, x: u32, y: u32| (x * 6) | (y * 6) << 8 | 0xFF << 16;
+    for format in [Format::V8U8, Format::X8L8V8U8] {
+        let name = format!("linear bump {format:?}");
+        bench.sampled(&name, 2, false, |rig| {
+            let bumps = rig.texels(TEXTURE, format, 8, 1, false, smooth_offsets);
+            let smooth = rig.texels(TEXTURE + 0x1000, Format::A8R8G8B8, 16, 1, false, ramp(16));
+            rig.texture(0, 1, &bumps);
+            rig.texture(1, 2, &smooth);
+            filter(rig, 0, 2, 2, 0);
+            filter(rig, 1, 2, 2, 0);
+            let matrix = [0.4f32, -0.2, 0.3, 0.5];
+            let mut states = vec![(TSS_COLOROP, 23)];
+            for (i, m) in matrix.iter().enumerate() {
+                states.push((TSS_BUMPENVMAT00 + i as u32, m.to_bits()));
+            }
+            states.push((TSS_BUMPENVLSCALE, 0.75f32.to_bits()));
+            states.push((TSS_BUMPENVLOFFSET, 0.125f32.to_bits()));
+            rig.stage(0, &states);
+            rig.stage(1, &[(TSS_ADDRESSU, 3), (TSS_ADDRESSV, 3)]);
+            rig.draw(&quad(4.0, 4.0, 48.0, WHITE, 1.0));
+        });
     }
 }

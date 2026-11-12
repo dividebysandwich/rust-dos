@@ -884,7 +884,10 @@ fn xbrz_incremental_regions_match_full_kernels_after_deferred_updates() {
 fn a_toadforce_draws_through_the_windows_host_renderer() {
     use rust_dos::cpu::Cpu;
     use rust_dos::toadforce::format::{Format, Surface};
-    use rust_dos::toadforce::level1::states::RS_CULLMODE;
+    use rust_dos::toadforce::level1::states::{
+        ARG_DIFFUSE, OP_SELECT_ARG1, RS_CULLMODE, TSS_ALPHAARG1, TSS_ALPHAOP, TSS_COLORARG1,
+        TSS_COLOROP,
+    };
     use rust_dos::toadforce::level1::{Target, Viewport, encode};
     use rust_dos::toadforce::regs;
     use rust_dos::video::adapter::{Adapter, VideoSetup};
@@ -907,6 +910,7 @@ fn a_toadforce_draws_through_the_windows_host_renderer() {
     assert!(cpu.bus.toadforce_hosted() && screen.toadforce_linked());
     let renderer = |cpu: &Cpu| cpu.bus.toadforce_status().unwrap()["renderer"].clone();
     assert_eq!(renderer(&cpu), "OpenGL");
+    let made = cpu.bus.toadforce_status().unwrap();
 
     let colour = Surface {
         offset: 8 << 20,
@@ -946,6 +950,14 @@ fn a_toadforce_draws_through_the_windows_host_renderer() {
     encode::render_target(&mut words, Some(&target));
     encode::viewport(&mut words, &viewport);
     encode::render_state(&mut words, &[(RS_CULLMODE, 1)]);
+    // The diffuse colour alone: no texture is set.
+    let diffuse = [
+        (TSS_COLOROP, OP_SELECT_ARG1),
+        (TSS_COLORARG1, ARG_DIFFUSE),
+        (TSS_ALPHAOP, OP_SELECT_ARG1),
+        (TSS_ALPHAARG1, ARG_DIFFUSE),
+    ];
+    encode::stage_state(&mut words, 0, &diffuse);
     cpu.bus.toadforce_submit(&words);
     let pixel = |cpu: &Cpu| {
         let at = (8 << 20) + 8 * 64 + 8 * 4;
@@ -962,7 +974,10 @@ fn a_toadforce_draws_through_the_windows_host_renderer() {
     assert_eq!(pixel(&cpu), 0xFF_0000);
     let status = cpu.bus.toadforce_status().unwrap();
     assert_eq!(status["host"]["read_backs"], 1, "{}", status["host"]);
-    assert_eq!(status["host"]["counts"]["runs"], 1);
+    // One batch more than the renderer's test of the host's formats
+    // drew when it was made.
+    let batches = |status: &serde_json::Value| status["host"]["counts"]["batches"].as_u64();
+    assert_eq!(batches(&status), batches(&made).map(|n| n + 1));
 
     // The window draws its own picture as before.
     let frame = Frame::from_rgb(5, 4, (0..60).collect());

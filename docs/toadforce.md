@@ -889,27 +889,43 @@ It declines these states, which the software renderer draws:
 
 - bump offsets on a cube map: they move the coordinates on the face the
   direction picked, and the host's cube sampler takes a direction;
-- a colour key on a texture of a block format, whose pixels have no
-  value to compare;
 - `MAXMIPLEVEL` above 0 with different filters for magnifying and
   minifying: the card changes filter by the pixel's size in texels of
   level 0, the host by the level it is limited to;
+- a linear filter for magnifying with the nearest texel for minifying,
+  with mip levels: OpenGL magnifies up to a level of detail of 0.5
+  there, and the card only up to 0;
+- a colour key on a texture blended between mip levels: the card
+  compares the texel of the lower level, and the host's lookup of the
+  nearest level takes the closer one;
+- one texture on two stages with different sampling states, which are
+  states of the host's texture, so one stage's would change the
+  other's;
 - `SRCALPHASAT` as the destination's blend factor, which OpenGL takes
   from 3.3 on.
 
+A colour key on a texture of a block format is no state to decline:
+`DEFINE_TEXTURE` refuses it. A state whose program the host doesn't
+compile is declined from its first draw on, since the program is
+compiled when the host is asked whether it takes the state.
+
 The agreement tests (`toadforce::gl::tests`, which need a desktop OpenGL
-context) draw 299 scenes in software and through the host and compare
+context) draw 308 scenes in software and through the host and compare
 card memory. On a GeForce RTX 4080: untextured triangles, every stage
 operation at each result scale, four stages with four textures, the
 alpha test, fog, the specular add, the stencil operations, the write
-masks and every blend on a 32-bit target are the same byte for byte.
-So is the nearest texel of every format, address mode and cube face.
-The linear filter is within 1 on a smooth texture, 2 on one whose
-texels differ by all of the range and 3 on such a cube map. Depth is
-within 1 step of 16 bits and 4 of 24. That host's 565 format fails the
-test at start, so its 16-bit targets were compared in 8 bits a channel
-alone, and were within one step of the target's with up to five blended
-layers.
+masks and the blend factors and operations on a 32-bit target are the
+same byte for byte. So is the nearest texel of every format, address
+mode and cube face. The linear filter is within 1 on a smooth texture,
+2 on one whose texels differ by all of the range and 3 on such a cube
+map, and offsets from a linearly filtered bump texture are within 1.
+Anisotropic filtering differs from the software renderer's by a mean
+of 1.5 over a square going into the distance. Depth is within 1 step
+of 16 bits and 4 of 24. That host's 565 format fails the test at
+start, so its 16-bit targets were compared in 8 bits a channel alone,
+and were within one step of the target's with up to five blended
+layers. A scene for each declined state checks that the software
+renderer draws it.
 
 Not built yet: the vertex work on the GPU, the picture from the host's
 texture, `BLT` and `FILL` on the host, the host options, and the

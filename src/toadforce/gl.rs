@@ -47,6 +47,7 @@ use crate::video::shader::Glsl;
 use crate::voodoo::gl::{Program, compile};
 use glow::HasContext;
 use shader::Uniforms;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -119,9 +120,8 @@ impl Sampling {
     }
 }
 
-/// A texture as the host has it.
+/// A texture as the host has it, kept by the texture's description.
 struct Texels {
-    texture: Texture,
     gl: glow::Texture,
     /// The texture that marks the texels with the colour key's value,
     /// for a texture with a key.
@@ -270,11 +270,12 @@ pub struct ToadForceGl {
     array: glow::VertexArray,
     buffer: glow::Buffer,
     copies: Vec<Copy>,
-    textures: Vec<Texels>,
-    /// The programs by `shader::key` of the steps they draw.
-    programs: HashMap<Vec<Step>, Program<Uniforms>>,
+    textures: HashMap<Texture, Texels>,
+    /// The programs by `shader::key` of the steps they draw, made when
+    /// `takes` first sees the steps (`compiled`).
+    programs: RefCell<HashMap<Vec<Step>, Program<Uniforms>>>,
     /// The keys whose program the host didn't compile.
-    failed: HashSet<Vec<Step>>,
+    failed: RefCell<HashSet<Vec<Step>>>,
     /// Counted up with every batch.
     batch: u64,
     /// For the status: the runs drawn, and the surfaces and textures
@@ -341,9 +342,9 @@ impl ToadForceGl {
                 array,
                 buffer,
                 copies: Vec::new(),
-                textures: Vec::new(),
-                programs: HashMap::new(),
-                failed: HashSet::new(),
+                textures: HashMap::new(),
+                programs: RefCell::default(),
+                failed: RefCell::default(),
                 batch: 0,
                 runs: 0,
                 uploads: 0,
@@ -639,7 +640,7 @@ impl ToadForceGl {
             }
             keep
         });
-        self.textures.retain(|t| {
+        self.textures.retain(|_, t| {
             let keep = !t.ranges.iter().any(|&(r, _)| shares(r));
             if !keep {
                 // SAFETY: the textures are this context's.
@@ -757,64 +758,68 @@ impl ToadForceGl {
         !self.broken
     }
 
-    /// The program of `steps`, compiled if it is new. None for one
-    /// the host doesn't compile, which `takes` declines from then on.
+    /// Whether the host has the program of `key` (`shader::key`),
+    /// compiled now if it is new. `takes` asks first, so a state whose
+    /// program doesn't compile goes to the software renderer from its
+    /// first draw on, and no draw the host took is left undrawn.
     ///
     /// # Safety
     ///
     /// The context is current.
-    unsafe fn program(&mut self, steps: &[Step]) -> Option<&Program<Uniforms>> {
-        let key = shader::key(steps);
-        if self.failed.contains(&key) {
-            return None;
+    unsafe fn compiled(&self, key: &[Step]) -> bool {
+        if self.programs.borrow().contains_key(key) {
+            return true;
         }
-        if !self.programs.contains_key(&key) {
-            let fragment = shader::fragment(&key);
-            let made = compile::<Uniforms>(
-                &self.gl,
-                self.glsl,
-                shader::VERTEX,
-                &fragment,
-                &shader::ATTRIBUTES,
-            );
-            match made {
-                Ok(program) => {
-                    self.programs.insert(key.clone(), program);
-                }
-                Err(e) => {
-                    let e = e.replacen("a 3dfx shader", "a ToadForce shader", 1);
-                    eprintln!("[TOADFORCE] {e}: the software renderer draws this state");
-                    self.failed.insert(key);
-                    return None;
-                }
+        if self.failed.borrow().contains(key) {
+            return false;
+        }
+        let fragment = shader::fragment(key);
+        let made = compile::<Uniforms>(
+            &self.gl,
+            self.glsl,
+            shader::VERTEX,
+            &fragment,
+            &shader::ATTRIBUTES,
+        );
+        // `compile` leaves the program in use.
+        // SAFETY: the caller's.
+        unsafe { self.gl.use_program(None) };
+        match made {
+            Ok(program) => {
+                self.programs.borrow_mut().insert(key.to_vec(), program);
+                true
+            }
+            Err(e) => {
+                let e = e.replacen("a 3dfx shader", "a ToadForce shader", 1);
+                eprintln!("[TOADFORCE] {e}: the software renderer draws this state");
+                self.failed.borrow_mut().insert(key.to_vec());
+                false
             }
         }
-        self.programs.get(&key)
     }
 
-    /// The host's texture of `texture`, decoded from `memory` if the
-    /// host has none or a stale one: its place in `textures`.
+    /// Make sure the host has `texture`, decoded from `memory` if the
+    /// host has none or a stale one.
     ///
     /// # Safety
     ///
     /// The context is current, in the state `enter` leaves.
-    unsafe fn texels(&mut self, texture: &Texture, memory: &[u8], pages: &Pages) -> usize {
+    unsafe fn texels(&mut self, texture: &Texture, memory: &[u8], pages: &Pages) {
         let gl = &*self.gl;
+        let batch = self.batch;
         // A unit no stage samples, for the textures filled here.
         // SAFETY: the caller's.
         unsafe { gl.active_texture(glow::TEXTURE0 + SCRATCH_UNIT) };
-        let at = match self.textures.iter().position(|t| t.texture == *texture) {
-            Some(at) => {
-                let t = &mut self.textures[at];
-                t.used = self.batch;
+        match self.textures.get_mut(texture) {
+            Some(t) => {
+                t.used = batch;
                 let mut stale = false;
                 for (range, stamp) in &mut t.ranges {
                     stale |= pages.changed(*range, stamp);
                 }
                 if !stale {
-                    return at;
+                    return;
                 }
-                at
             }
             None => {
                 let mut ranges = Vec::new();
@@ -828,20 +833,22 @@ impl ToadForceGl {
                     let make = || gl.create_texture().expect("an OpenGL texture");
                     (make(), keyed.then(make))
                 };
-                self.textures.push(Texels {
-                    texture: texture.clone(),
+                let texels = Texels {
                     gl: gl_texture,
                     key,
                     ranges,
                     sampling: None,
                     key_sampling: None,
-                    used: self.batch,
-                });
-                self.textures.len() - 1
+                    used: batch,
+                };
+                self.textures.insert(texture.clone(), texels);
             }
-        };
+        }
         self.decodes += 1;
-        let t = &mut self.textures[at];
+        let t = self
+            .textures
+            .get_mut(texture)
+            .expect("the texture was just kept");
         let kind = if texture.cube {
             glow::TEXTURE_CUBE_MAP
         } else {
@@ -880,19 +887,20 @@ impl ToadForceGl {
         for (range, stamp) in &mut t.ranges {
             *stamp = pages.stamp(*range);
         }
-        at
     }
 
-    /// Put the texture at `at` of `textures` on `stage`'s units, with
-    /// the stage's sampling states.
+    /// Put the host's texture of `tex` (`texels`) on `stage`'s units,
+    /// with the stage's sampling states.
     ///
     /// # Safety
     ///
     /// The context is current.
-    unsafe fn bind(&mut self, at: usize, stage: usize, tex: &Tex) {
+    unsafe fn bind(&mut self, stage: usize, tex: &Tex) {
         let gl = &*self.gl;
         let anisotropy = self.anisotropy;
-        let t = &mut self.textures[at];
+        let Some(t) = self.textures.get_mut(&tex.texture) else {
+            return;
+        };
         let kind = if tex.texture.cube {
             glow::TEXTURE_CUBE_MAP
         } else {
@@ -1127,7 +1135,7 @@ impl ToadForceGl {
             return;
         }
         let (gl, batch) = (&*self.gl, self.batch);
-        self.textures.retain(|t| {
+        self.textures.retain(|_, t| {
             let keep = t.used + BATCHES >= batch;
             if !keep {
                 // SAFETY: the textures are this context's.
@@ -1175,7 +1183,9 @@ impl Host for ToadForceGl {
                         return false;
                     }
                     // A block format's pixels have no value to compare
-                    // with the key.
+                    // with the key. `DEFINE_TEXTURE` refuses such a
+                    // texture; this keeps the shader from a key texture
+                    // the host doesn't make.
                     if keyed && !texture::has_key(tex.texture.format) {
                         return false;
                     }
@@ -1187,6 +1197,33 @@ impl Host for ToadForceGl {
                     if first > 0 && tex.mag != tex.min {
                         return false;
                     }
+                    let mipped = tex.mip != Mip::None && tex.texture.levels > 1;
+                    // OpenGL magnifies up to a level of detail of 0.5
+                    // where the magnification filter is linear and the
+                    // minification filter takes a level's nearest texel
+                    // ("c" in its rules for magnification); the card
+                    // minifies from 0 on.
+                    if mipped && tex.mag == Filter::Linear && tex.min == Filter::Point {
+                        return false;
+                    }
+                    // The key is looked up in the level a sample reads
+                    // first, the lower of the two it blends
+                    // (`Sampler::keyed`); the host's lookup of the
+                    // nearest level takes the closer one.
+                    if keyed && mipped && tex.mip == Mip::Linear {
+                        return false;
+                    }
+                    // A stage's sampling states are set on the host's
+                    // texture, which another stage sampling the same
+                    // texture with other states would change for both.
+                    let now = Sampling::of(tex);
+                    let shared =
+                        state.tex.iter().flatten().any(|other| {
+                            other.texture == tex.texture && Sampling::of(other) != now
+                        });
+                    if shared {
+                        return false;
+                    }
                 }
                 // `SRCALPHASAT` for the destination is OpenGL 3.3's.
                 Step::Write {
@@ -1196,7 +1233,8 @@ impl Host for ToadForceGl {
                 _ => {}
             }
         }
-        self.failed.is_empty() || !self.failed.contains(&shader::key(&state.steps))
+        // SAFETY: the context is current (see the module comment).
+        unsafe { self.compiled(&shader::key(&state.steps)) }
     }
 
     fn status(&self) -> serde_json::Value {
@@ -1205,8 +1243,8 @@ impl Host for ToadForceGl {
             "runs": self.runs,
             "surface_uploads": self.uploads,
             "texture_uploads": self.decodes,
-            "programs": self.programs.len(),
-            "failed_programs": self.failed.len(),
+            "programs": self.programs.borrow().len(),
+            "failed_programs": self.failed.borrow().len(),
             "surfaces": self.copies.len(),
             "textures": self.textures.len(),
             "packed_565": self.packed,
@@ -1252,13 +1290,17 @@ impl Host for ToadForceGl {
                 }
                 for (stage, tex) in state.tex.iter().enumerate() {
                     if let Some(tex) = tex {
-                        let at = self.texels(&tex.texture, memory, pages);
-                        self.bind(at, stage, tex);
+                        self.texels(&tex.texture, memory, pages);
+                        self.bind(stage, tex);
                     }
                 }
-                let Some(program) = self.program(&state.steps) else {
+                // `takes` compiled it.
+                let key = shader::key(&state.steps);
+                if !self.compiled(&key) {
                     continue;
-                };
+                }
+                let programs = self.programs.borrow();
+                let program = &programs[&key];
                 gl.use_program(Some(program.program));
                 // A write without a blend into a 5-6-5 target.
                 let plain = state
@@ -1457,7 +1499,7 @@ impl Host for ToadForceGl {
             for copy in self.copies.drain(..) {
                 gl.delete_texture(copy.texture);
             }
-            for t in self.textures.drain(..) {
+            for (_, t) in self.textures.drain() {
                 gl.delete_texture(t.gl);
                 if let Some(key) = t.key {
                     gl.delete_texture(key);
@@ -1474,7 +1516,7 @@ impl Drop for ToadForceGl {
         // SAFETY: the context is current (see the module comment), and
         // the objects are this host's.
         unsafe {
-            for (_, program) in self.programs.drain() {
+            for (_, program) in self.programs.get_mut().drain() {
                 gl.delete_program(program.program);
             }
             gl.delete_framebuffer(self.target);

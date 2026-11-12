@@ -7,7 +7,7 @@ use super::regs::Error;
 use crate::savestate::{self, Reader, State, StateError, Writer};
 
 /// A pixel format, by its code.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum Format {
     /// An index into a palette.
