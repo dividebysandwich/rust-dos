@@ -649,7 +649,7 @@ card took.
 
 ### Level 2: Direct3D 8.1 shaders (outline)
 
-Not designed in detail here, and not needed by the eight target games.
+Not designed in detail here, and not needed by the nine target games.
 It would add vertex shaders 1.1 and pixel shaders 1.1 to 1.4 as Direct3D
 bytecode (`DEFINE_SHADER`, `SET_SHADER`, `SET_SHADER_CONSTANTS`), vertex
 streams with declarations, 32-bit indices, volume textures, and indexed
@@ -1476,7 +1476,7 @@ Each phase is one or a few pull requests that leave main working.
 Postponed, with no place in the order (decided 2026-11-12):
 
 - **Level 2**, until work starts on a game that needs shaders. None
-  of the eight games of phase 0 does.
+  of the nine games of the primary list does.
 - **The Windows 98 driver** (display minidriver, then the DirectDraw
   and Direct3D HAL, then OpenGL): the card serves the built-in
   Windows only for now. Black & White, which the driver was to
