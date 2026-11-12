@@ -1376,13 +1376,20 @@ fn avivideo_realizes_the_movies_palette_on_a_256_colour_desktop() {
 /// foreground one, which takes them back, so the system palette's entry
 /// 10 is the movie's first color. MCI_DGV_REALIZE_BKGD realizes it in
 /// the background, where no entry is free, and the entry keeps the
-/// program's color. The program then ends without MCI_CLOSE, and its
-/// device closes after its GDI objects went.
+/// program's color. A full-screen play (MCI_PLAY with
+/// MCI_MCIAVI_PLAY_FULLSCREEN, waited for) takes them back as the normal
+/// MCI_REALIZE does: it has the screen to itself, though the window it
+/// covers the screen with isn't the foreground window. The program then
+/// ends without MCI_CLOSE, and its device closes after its GDI objects
+/// went.
 #[test]
 fn avivideo_realize_takes_the_foreground_or_the_background() {
     const WS_POPUP_VISIBLE: i32 = 0x9000_0000_u32 as i32;
     const MCI_OPEN: i32 = 0x803;
+    const MCI_PLAY: i32 = 0x806;
     const MCI_REALIZE: i32 = 0x840;
+    const MCI_WAIT: i32 = 0x2;
+    const MCI_MCIAVI_PLAY_FULLSCREEN: i32 = 0x0200_0000;
     const OPEN_FLAGS: i32 = 0x0200 | 0x1_0000 | 0x2_0000;
     const GENERIC_PARMS: u32 = 0xC0;
     const ENTRY: u32 = 0xD0;
@@ -1421,11 +1428,14 @@ fn avivideo_realize_takes_the_foreground_or_the_background() {
             ],
         ),
     ];
+    let movie = 200 | 100 << 8 | 50 << 16;
+    let full_screen = MCI_MCIAVI_PLAY_FULLSCREEN | MCI_WAIT;
     let cases = [
-        ("realize_normal", 0x1_0000, 200 | 100 << 8 | 50 << 16),
-        ("realize_background", 0x2_0000, 0x0201),
+        ("realize_normal", MCI_REALIZE, 0x1_0000, movie),
+        ("realize_background", MCI_REALIZE, 0x2_0000, 0x0201),
+        ("full_screen_play", MCI_PLAY, full_screen, movie),
     ];
-    for (test, flags, entry) in cases {
+    for (test, msg, flags, entry) in cases {
         let exe = program(imports, &data, |a, l| {
             a.xor(ebx, ebx)?;
             a.mov(dword_ptr(l.at(OPEN_PARMS + 12)), l.at(CLIP_NAME) as i32)?;
@@ -1460,7 +1470,7 @@ fn avivideo_realize_takes_the_foreground_or_the_background() {
             check_eax(a, 0, 0)?;
             a.push(l.at(GENERIC_PARMS) as i32)?;
             a.push(flags)?;
-            a.push(MCI_REALIZE)?;
+            a.push(msg)?;
             a.push(dword_ptr(l.at(OPEN_PARMS + 4)))?;
             a.call(l.import(1))?;
             check_eax(a, 0, 1)?;
@@ -1500,30 +1510,31 @@ fn full_screen_program(name: &str) -> Vec<u8> {
     const MCI_MCIAVI_PLAY_FULLSCREEN: i32 = 0x0200_0000;
     // The variables: half the screen's width and height, the program's
     // window, the device's id and window, the window that covers the
-    // screen, a MSG, MCI_STATUS_PARMS, MCI_PLAY_PARMS (from 0), the
-    // answer of a command string, and the open command.
+    // screen, MCI_STATUS_PARMS, MCI_PLAY_PARMS (from 0), the answer of a
+    // command string, and the open command.
     const CX: u32 = 0x00;
     const CY: u32 = 0x04;
     const POPUP: u32 = 0x08;
     const ID: u32 = 0x0C;
     const CHILD: u32 = 0x10;
     const COVER: u32 = 0x14;
-    const MSG: u32 = 0x20;
     const STATUS_PARMS: u32 = 0x40;
     const PLAY_PARMS: u32 = 0x60;
     const ANSWER: u32 = 0x80;
     const OPEN: u32 = 0xC0;
     let mut data = vec![0u8; 0x140];
-    put(&mut data, STATUS_PARMS as usize + 8, &0x4001u32.to_le_bytes());
+    put(
+        &mut data,
+        STATUS_PARMS as usize + 8,
+        &0x4001u32.to_le_bytes(),
+    );
     let mut text = |s: &str| {
         let at = data.len() as u32;
         data.extend_from_slice(s.as_bytes());
         data.push(0);
         at
     };
-    let open = text(&format!(
-        "open C:\\{name} alias mov style child parent %d"
-    ));
+    let open = text(&format!("open C:\\{name} alias mov style child parent %d"));
     let static_class = text("Static");
     let alias = text("mov");
     let commands = [
@@ -1554,8 +1565,6 @@ fn full_screen_program(name: &str) -> Vec<u8> {
                 "wsprintfA",
                 "WindowFromPoint",
                 "IsWindow",
-                "PeekMessageA",
-                "DispatchMessageA",
             ],
         ),
         ("GDI32.dll", &["GetPixel"]),
@@ -1563,7 +1572,7 @@ fn full_screen_program(name: &str) -> Vec<u8> {
     let (sleep, exit) = (0, 1);
     let (send_string, send_command, device_id) = (2, 3, 4);
     let (create, get_dc, metrics, wsprintf) = (5, 6, 7, 8);
-    let (from_point, is_window, peek, dispatch, get_pixel) = (9, 10, 11, 12, 13);
+    let (from_point, is_window, get_pixel) = (9, 10, 11);
     program(imports, &data, |a, l| {
         // Exit with `code` unless EAX is `value`.
         let check = |a: &mut CodeAssembler, value: i32, code: i32| {
@@ -1619,20 +1628,8 @@ fn full_screen_program(name: &str) -> Vec<u8> {
             call(a, l.import(from_point), &[2, 2])?;
             a.mov(dword_ptr(l.at(COVER)), eax)
         };
-        // The messages the thread has are dispatched.
-        let pump = |a: &mut CodeAssembler| {
-            let mut again = a.create_label();
-            let mut done = a.create_label();
-            a.set_label(&mut again)?;
-            call(a, l.import(peek), &[l.at(MSG) as i32, 0, 0, 0, 1])?;
-            a.test(eax, eax)?;
-            a.jz(done)?;
-            call(a, l.import(dispatch), &[l.at(MSG) as i32])?;
-            a.jmp(again)?;
-            a.set_label(&mut done)?;
-            a.nop()
-        };
-        // Exit with `code` unless COVER is a window no more.
+        // Exit with `code` unless COVER is a window no more: it goes
+        // with the play, though the program takes no messages.
         let gone = |a: &mut CodeAssembler, code: i32| {
             a.push(dword_ptr(l.at(COVER)))?;
             a.call(l.import(is_window))?;
@@ -1706,7 +1703,6 @@ fn full_screen_program(name: &str) -> Vec<u8> {
         // A stop gives the screen back.
         send(a, 2)?;
         check(a, 0, 10)?;
-        pump(a)?;
         gone(a, 11)?;
         // "fullscreen by 2": the picture twice that size; the screen
         // comes back when the play ends.
@@ -1717,7 +1713,6 @@ fn full_screen_program(name: &str) -> Vec<u8> {
         red(a, 13)?;
         corner(a)?;
         call(a, l.import(sleep), &[600])?;
-        pump(a)?;
         gone(a, 14)?;
         // Not both.
         send(a, 4)?;
@@ -1747,7 +1742,6 @@ fn full_screen_program(name: &str) -> Vec<u8> {
         a.set_label(&mut covered)?;
         send(a, 6)?;
         check(a, 0, 20)?;
-        pump(a)?;
         gone(a, 21)?;
         // waveaudio's play has no "window".
         send(a, 7)?;

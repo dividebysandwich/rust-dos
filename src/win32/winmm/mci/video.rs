@@ -763,8 +763,15 @@ fn full_screen(cpu: &mut Cpu, i: usize) -> Option<u32> {
     Some(cover)
 }
 
-/// A full-screen play stopped: the window that covered the screen goes,
-/// and the screen shows the windows under it again.
+/// A full-screen play stopped: the window that covered the screen goes
+/// at once, and the windows under it are painted again.
+///
+/// It goes without messages (`free_window`), as the end of a play is
+/// found on the multimedia thread. MCIAVI's own thread puts its
+/// full-screen window away, so the program's message loop takes no part
+/// in it, and a WM_CLOSE posted to the window would wait for a thread
+/// that may never take it: one that only takes its own window's
+/// messages (PeekMessageA with a window), or has no message loop.
 fn leave_full_screen(cpu: &mut Cpu, i: usize) {
     let cover = std::mem::take(&mut video(cpu, i).cover);
     if cover == 0 {
@@ -774,7 +781,7 @@ fn leave_full_screen(cpu: &mut Cpu, i: usize) {
     // screen: the next draw gives it the one the play got to.
     video(cpu, i).drawn = None;
     if user32::user(cpu).is_window(cover) {
-        user32::message::post_message(cpu, &[cover, WM_CLOSE, 0, 0]);
+        window::free_window(cpu, cover);
     }
 }
 
@@ -1216,6 +1223,15 @@ fn select_movie_palette(cpu: &mut Cpu, i: usize, m: &Media, hdc: u32) -> Option<
     }
     let background = video(cpu, i).background as u32;
     let old = palette::select_palette(cpu, &[hdc, hpal, background]).filter(|&o| o != 0)?;
+    // A full-screen play has the screen to itself, as in MCIAVI's display
+    // mode of its own: its palette is the foreground one, though the
+    // window that covers the screen is never the foreground window.
+    let cover = video(cpu, i).cover;
+    let gdi = crate::win32::gdi32::gdi(cpu);
+    if cover != 0 && gdi.dc(hdc).is_some_and(|d| d.hwnd == cover) && gdi.primary_palette != hpal {
+        gdi.primary_palette = hpal;
+        palette::unrealize(cpu, hpal);
+    }
     palette::realize_posted(cpu, hdc);
     Some(old)
 }
