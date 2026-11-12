@@ -368,6 +368,11 @@ const TEX_LOCKED: u32 = 0x28;
 const BACK_LOCKED: u32 = 0x30;
 /// The pixels the program reads from the back buffer.
 const PIXELS: u32 = 0x40;
+/// The D3DLOCKED_RECT of the locks of a rectangle, the texture that
+/// isn't whole blocks, and a rectangle that isn't on blocks.
+const RECT_LOCKED: u32 = 0x50;
+const ODD_TEXTURE: u32 = 0x58;
+const UNALIGNED: u32 = 0x60;
 /// The texture's blocks and the two quads' vertices.
 const BLOCKS: u32 = 0x800;
 const QUAD: u32 = 0x840;
@@ -396,6 +401,7 @@ const D3DRTYPE_TEXTURE: u32 = 3;
 const D3DPOOL_DEFAULT: u32 = 0;
 const D3DPOOL_MANAGED: u32 = 1;
 const D3DFMT_L8: u32 = 50;
+const D3DERR_INVALIDCALL: u32 = 0x8876_086C;
 const D3DFMT_V8U8: u32 = 60;
 const D3DPRESENTFLAG_LOCKABLE_BACKBUFFER: u32 = 1;
 const D3DPT_TRIANGLELIST: u32 = 4;
@@ -451,6 +457,10 @@ fn toadforce_program() -> (Vec<u8>, u32) {
     };
     quad(QUAD, 48.0, 32.0);
     quad(QUAD1, 32.0, 64.0);
+    // From the middle of the first block of the second row of blocks.
+    for (i, v) in [2, 4, 4, 8].into_iter().enumerate() {
+        put32(&mut d, UNALIGNED + 4 * i as u32, v);
+    }
     program(&[USER32, D3D8], &d, |a, l| {
         let mut c = Calls { next: 0 };
         c.api(
@@ -613,6 +623,23 @@ fn toadforce_program() -> (Vec<u8>, u32) {
             a.movzx(eax, word_ptr(eax + 2 * x))?;
             a.mov(dword_ptr(l.at(PIXELS + 4 * i as u32)), eax)?;
         }
+        // The refusals of compressed textures: one of 6 by 6 pixels,
+        // which isn't whole blocks, and a rectangle that starts inside a
+        // block, in D3DPOOL_DEFAULT. The managed texture locks it.
+        let odd = [
+            Arg::I(6),
+            Arg::I(6),
+            Arg::I(1),
+            Arg::I(0),
+            Arg::I(D3DFMT_DXT1),
+            Arg::I(D3DPOOL_MANAGED),
+            Arg::At(ODD_TEXTURE),
+        ];
+        c.com(a, l, DEVICE, DEV_CREATE_TEXTURE, &odd)?;
+        let lock = [Arg::I(0), Arg::At(RECT_LOCKED), Arg::At(UNALIGNED), Arg::I(0)];
+        c.com(a, l, DEST, TEX_LOCK_RECT, &lock)?;
+        c.com(a, l, TEXTURE, TEX_LOCK_RECT, &lock)?;
+        c.com(a, l, TEXTURE, TEX_UNLOCK_RECT, &[Arg::I(0)])?;
         a.mov(dword_ptr(l.at(RESULTS + 4 * CALLS)), c.next as i32)?;
         finish(a, l)
     })
@@ -628,8 +655,19 @@ fn a_toadforce_has_a_device_with_a_stencil_and_compressed_textures() {
     let r = results(&cpu, data, calls);
     // Every call after CreateWindowExA and Direct3DCreate8 succeeds:
     // the format checks, CreateDevice with hardware vertex processing,
-    // the Clear of the stencil and the texture among them.
-    assert!(r[2..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+    // the Clear of the stencil and the texture among them. Then the
+    // texture of 6 by 6 and the lock of the rectangle off the blocks in
+    // D3DPOOL_DEFAULT fail, and the managed texture's lock and unlock
+    // of it succeed.
+    let (draws, refusals) = r.split_at(r.len() - 4);
+    assert!(draws[2..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+    assert_eq!(refusals, [D3DERR_INVALIDCALL, D3DERR_INVALIDCALL, 0, 0]);
+    assert_eq!(peek(&cpu, data + ODD_TEXTURE), 0);
+    // That lock gives the block the rectangle starts in: the first of
+    // the second row, 16 bytes on.
+    let base = peek(&cpu, data + TEX_LOCKED + 4);
+    assert_eq!(peek(&cpu, data + RECT_LOCKED), 16);
+    assert_eq!(peek(&cpu, data + RECT_LOCKED + 4), base + 16);
 
     let caps = |at: u32, word: u32| peek(&cpu, data + at + 4 * word);
     // D3DDEVCAPS_HWTRANSFORMANDLIGHT, textures up to 2048, the eight

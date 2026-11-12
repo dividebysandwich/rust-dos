@@ -296,6 +296,15 @@ pub fn card_depth(cpu: &Cpu, format: u32) -> bool {
     }
 }
 
+/// Whether a surface or texture of `format`, `w` by `h` pixels, is
+/// whole blocks of 4 by 4 where the format is compressed. Direct3D 8
+/// makes a compressed one only so (Wine's d3d8 test_surface_blocks);
+/// its smaller mipmap levels may be less than a block.
+fn whole_blocks(format: u32, w: u32, h: u32) -> bool {
+    let compressed = dd_format(format).is_some_and(|f| dd_surface::dxt_format(&f).is_some());
+    !compressed || (w.is_multiple_of(4) && h.is_multiple_of(4))
+}
+
 /// Whether CreateTexture makes a texture of `format` on the display
 /// adapter's card. The RGB formats are made on every card, which the
 /// HAL converts where the card doesn't sample them, as the Voodoo3's
@@ -546,7 +555,7 @@ pub fn create_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if w == 0 || h == 0 || w > 4096 || h > 4096 || pool > POOL_SCRATCH {
         return Some(D3DERR_INVALIDCALL);
     }
-    if is_depth(format) || !makes_texture(cpu, format) {
+    if is_depth(format) || !makes_texture(cpu, format) || !whole_blocks(format, w, h) {
         return Some(D3DERR_INVALIDCALL);
     }
     if usage & USAGE_RENDERTARGET != 0 && pool != POOL_DEFAULT {
@@ -725,6 +734,9 @@ fn create_surface(
         Err(e) => return e,
     };
     if !com::write_out(cpu, out, 0) || w == 0 || h == 0 || w > 4096 || h > 4096 {
+        return D3DERR_INVALIDCALL;
+    }
+    if !whole_blocks(format, w, h) {
         return D3DERR_INVALIDCALL;
     }
     let (ids, root) = match make_dd(cpu, device, role, (w, h), format, pool) {
@@ -1056,6 +1068,17 @@ fn lock_surface(cpu: &mut Cpu, id: u32, at: u32, rect: u32) -> u32 {
             std::array::from_fn(|i| cpu.bus.guest_read_32(rect + 4 * i as u32) as i32);
         let (w, h) = (dd.width as i32, dd.height as i32);
         if r[0] < 0 || r[1] < 0 || r[0] >= r[2] || r[1] >= r[3] || r[2] > w || r[3] > h {
+            return D3DERR_INVALIDCALL;
+        }
+        // A compressed surface of D3DPOOL_DEFAULT locks whole blocks
+        // only: a rectangle starts on a block and ends on one or at the
+        // edge. In the other pools Direct3D 8 takes any rectangle and
+        // gives the block it starts in (Wine's d3d8 test_surface_blocks).
+        let ends = |end: i32, edge: i32| end % 4 == 0 || end == edge;
+        if s.pool == POOL_DEFAULT
+            && dd_surface::dxt_format(&dd.format).is_some()
+            && (r[0] % 4 != 0 || r[1] % 4 != 0 || !ends(r[2], w) || !ends(r[3], h))
+        {
             return D3DERR_INVALIDCALL;
         }
         (x, y) = (r[0] as u32, r[1] as u32);
