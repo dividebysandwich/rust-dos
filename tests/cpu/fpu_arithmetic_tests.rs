@@ -728,3 +728,47 @@ fn fscale_of_zeros_infinities_and_results_past_the_range() {
         assert_eq!(r, (result, flags), "{value:020X} * 2^{power:020X}");
     }
 }
+
+#[test]
+fn fscale_truncates_all_64_bits_and_flags_denormals_and_empty_registers() {
+    let bits = |v: f64| {
+        let mut f = F80::new();
+        f.set_f64(v);
+        f.get()
+    };
+    // FSCALE (D9 FD) of ST(0) by ST(1) as the control word `control`
+    // says: the result's bits, and DE, IE, SF, OE and C1.
+    let scale = |stack: &[u128], control: u16| {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.fpu_control = control;
+        for &v in stack {
+            let mut f = F80::new();
+            f.set(v);
+            cpu.fpu_push(f);
+        }
+        testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xFD]);
+        let flags = [FpuFlags::DE, FpuFlags::IE, FpuFlags::SF, FpuFlags::OE, FpuFlags::C1];
+        (cpu.fpu_get(0).get(), flags.map(|f| cpu.get_fpu_flag(f)))
+    };
+    let nearest = 0x037F;
+    let none = [false; 5];
+    // 4 - 2^-62 truncates to 3; as a double it would round to 4 first.
+    let below_four = 0x4000_FFFF_FFFF_FFFF_FFFFu128;
+    assert_eq!(scale(&[below_four, bits(1.0)], nearest), (bits(8.0), none));
+    // A power of 0 or -0 isn't a denormal operand.
+    assert_eq!(scale(&[bits(0.0), bits(1.5)], nearest), (bits(1.5), none));
+    assert_eq!(scale(&[bits(-0.0), bits(1.5)], nearest), (bits(1.5), none));
+    // A denormal power is 0, with DE.
+    let de = [true, false, false, false, false];
+    assert_eq!(scale(&[1, bits(1.5)], nearest), (bits(1.5), de));
+    // DE also where the result is a zero's or an infinity's.
+    assert_eq!(scale(&[1, bits(0.0)], nearest), (bits(0.0), de));
+    assert_eq!(scale(&[bits(f64::INFINITY), 1], nearest), (bits(f64::INFINITY), de));
+    // Overflow rounded toward 0: the largest finite number, C1 clear.
+    let overflow = scale(&[bits(20000.0), bits(1.0)], nearest | 0x0C00);
+    assert_eq!(overflow, (0x7FFE_FFFF_FFFF_FFFF_FFFF, [false, false, false, true, false]));
+    // An empty ST(1): a stack underflow, the real indefinite in ST(0).
+    let indefinite = 0xFFFF_C000_0000_0000_0000u128;
+    let underflow = [false, true, true, false, false];
+    assert_eq!(scale(&[bits(1.0)], nearest), (indefinite, underflow));
+}

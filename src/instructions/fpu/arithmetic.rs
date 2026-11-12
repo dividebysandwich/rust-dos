@@ -349,15 +349,24 @@ pub fn fdivrp(cpu: &mut Cpu, instr: &Instruction) {
 /// operation.
 const INDEFINITE: F80 = F80 { st: REAL_INDEFINITE };
 
+/// What an operation on two registers gives when either is a NaN or a
+/// format the FPU doesn't take, with the invalid exception masked: the
+/// result and whether the operation is invalid (IE). An unsupported
+/// operand gives the real indefinite, a NaN goes through as `nan_result`
+/// says. None when both are numbers.
+fn unsupported_or_nan(a: F80, b: F80) -> Option<(F80, bool)> {
+    if a.is_unsupported() || b.is_unsupported() {
+        return Some((INDEFINITE, true));
+    }
+    a.nan_result(b)
+}
+
 /// What FPREM and FPREM1 give for ST(0) and ST(1) when they don't divide
 /// one by the other, with the invalid exception masked: the result and
 /// whether the operation is invalid (IE). None for a finite dividend and
 /// a finite divisor other than 0, which they reduce.
 fn fprem_special(st0: F80, st1: F80) -> Option<(F80, bool)> {
-    if st0.is_unsupported() || st1.is_unsupported() {
-        return Some((INDEFINITE, true));
-    }
-    if let Some(nan) = st0.nan_result(st1) {
+    if let Some(nan) = unsupported_or_nan(st0, st1) {
         return Some(nan);
     }
     if st0.is_infinite() || st1.is_zero() {
@@ -535,21 +544,16 @@ pub fn fchs(cpu: &mut Cpu) {
     cpu.set_fpu_flag(FpuFlags::C1, false);
 }
 
-/// What FSCALE gives for ST(0) and ST(1) when it doesn't scale a finite
-/// number other than 0 by a finite power, with the invalid exception
-/// masked: the result and whether the operation is invalid (IE), as the
-/// table of FSCALE's results in Intel's manual has them. A zero or an
-/// infinity stays as it is, but for 0 * 2^+infinity and infinity *
-/// 2^-infinity, which are invalid; a finite number scaled by an infinite
-/// power becomes the infinity or the zero of its sign. None for a finite
-/// number other than 0 and a finite power, which `fscale` scales.
+/// What FSCALE gives for ST(0) and ST(1), both numbers, when it doesn't
+/// scale a finite number other than 0 by a finite power, with the invalid
+/// exception masked: the result and whether the operation is invalid
+/// (IE), as the table of FSCALE's results in Intel's manual has them. A
+/// zero or an infinity stays as it is, but for 0 * 2^+infinity and
+/// infinity * 2^-infinity, which are invalid; a finite number scaled by
+/// an infinite power becomes the infinity or the zero of its sign. None
+/// for a finite number other than 0 and a finite power, which `fscale`
+/// scales.
 fn fscale_special(st0: F80, st1: F80) -> Option<(F80, bool)> {
-    if st0.is_unsupported() || st1.is_unsupported() {
-        return Some((INDEFINITE, true));
-    }
-    if let Some(nan) = st0.nan_result(st1) {
-        return Some(nan);
-    }
     let up = !st1.get_sign();
     if st0.is_zero() || st0.is_infinite() {
         // A zero scaled up, or an infinity scaled down, without end.
@@ -574,22 +578,41 @@ fn fscale_special(st0: F80, st1: F80) -> Option<(F80, bool)> {
 /// number a denormal or a zero, rounded as the control word's RC says
 /// (UE when that loses bits), as on the FPU with those exceptions masked.
 pub fn fscale(cpu: &mut Cpu) {
-    let (st0, st1) = (cpu.fpu_get(0), cpu.fpu_get(1));
-    // C1 says whether the result was rounded up.
+    // C1 says whether the result was rounded up (0 on a stack underflow).
     cpu.set_fpu_flag(FpuFlags::C1, false);
-    if let Some((result, invalid)) = fscale_special(st0, st1) {
+    // An empty register: a stack underflow (SF), invalid, and ST(0)
+    // becomes the real indefinite.
+    if cpu.fpu_is_empty(0) || cpu.fpu_is_empty(1) {
+        cpu.set_fpu_flag(FpuFlags::SF | FpuFlags::IE, true);
+        cpu.fpu_set_valid(0, INDEFINITE);
+        return;
+    }
+    let (st0, st1) = (cpu.fpu_get(0), cpu.fpu_get(1));
+    let nan = unsupported_or_nan(st0, st1);
+    // Between numbers, a denormal or pseudo-denormal operand (DE), whatever
+    // the other one is, as SoftFloat's and Bochs's FSCALE have it. A zero
+    // has exponent 0 too but isn't one.
+    let denormal = |x: F80| x.is_denormal() && !x.is_zero();
+    if nan.is_none() && (denormal(st0) || denormal(st1)) {
+        cpu.set_fpu_flag(FpuFlags::DE, true);
+    }
+    if let Some((result, invalid)) = nan.or_else(|| fscale_special(st0, st1)) {
         if invalid {
             cpu.set_fpu_flag(FpuFlags::IE, true);
         }
         cpu.fpu_set(0, result);
         return;
     }
-    if st0.is_denormal() || st1.is_denormal() {
-        cpu.set_fpu_flag(FpuFlags::DE, true);
-    }
-    // A power past the 80 bits' range in either direction gives the same
-    // result as one just past it.
-    let power = st1.get_f64().trunc().clamp(-70000.0, 70000.0) as i32;
+    // ST(1) truncated toward 0 from all 64 bits of its significand: as a
+    // double, 4 - 2^-62 would round to 4 first. `round_int` gives nothing
+    // for a denormal or a zero (a power of 0) or from 2^63 up. A power
+    // past the 80 bits' range either way gives what one just past it does.
+    let power = match st1.round_int(3) {
+        Some(n) => n.clamp(-70000, 70000) as i32,
+        None if st1.is_denormal() => 0,
+        None if st1.get_sign() => -70000,
+        None => 70000,
+    };
     let negative = st0.get_sign();
     let mantissa = st0.get_mantissa();
     // A denormal's significand as a normal one's, with its exponent below
