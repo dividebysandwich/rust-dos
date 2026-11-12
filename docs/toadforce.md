@@ -1110,6 +1110,25 @@ Postponed, with no place in the order (decided 2026-11-12):
   Windows only for now. Black & White, which the driver was to
   unblock, then waits for #889 alone.
 
+### Frame rates against the target
+
+Measured in real time with `cycles=max`, alone on the machine (a
+Ryzen-class desktop), sound on a muted device. Each is one run of 20
+seconds, so a rough figure.
+
+| Game and scene | ToadForce, software | Voodoo3, software | Voodoo3, OpenGL |
+|---|---|---|---|
+| Giants, first mission, 800x600 (2026-11-12, after phase 3) | 14 | 21 | 17 |
+| Oni, training room, 640x480 (2026-11-11, with #944) | 15 | 23 | 29 |
+
+Giants stays under 30 on every card, the Voodoo3 drawn by the host's
+GPU included, with the emulated machine at full speed and the
+emulator's thread 84% to 98% busy. What limits it is the work on that
+thread: the game's own code and the Direct3D layer's. A faster
+renderer alone doesn't bring it to the target, so phase 6 starts with
+a profile of that thread. Oni gains from the renderer: the Voodoo3 is
+at 29 with OpenGL and at 23 without.
+
 Phases 2 and 3 come before the OpenGL renderer so that the reference
 exists before the renderer that is tested against it, and so that
 Zanzarah and Grom, which need formats more than speed, are unblocked
