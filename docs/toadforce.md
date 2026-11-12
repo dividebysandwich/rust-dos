@@ -1112,9 +1112,9 @@ Postponed, with no place in the order (decided 2026-11-12):
 
 ### Frame rates against the target
 
-Measured in real time with `cycles=max`, alone on the machine (a
-Ryzen-class desktop), sound on a muted device. Each is one run of 20
-seconds, so a rough figure.
+Measured in real time with `cycles=max`, alone on the development
+machine, sound on a muted device. Each is one run of 20 seconds, so a
+rough figure.
 
 | Game and scene | ToadForce, software | Voodoo3, software | Voodoo3, OpenGL |
 |---|---|---|---|
