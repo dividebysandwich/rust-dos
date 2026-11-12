@@ -80,7 +80,7 @@ Five points define the design:
 
 ## Target games
 
-These eight decide what level 1 contains. The table says what each is
+The first eight decide what level 1 contains. The table says what each is
 expected to need beyond a Voodoo3, and where that comes from. "Traced"
 means seen in a run of the game (see "Phase 0 traces").
 
@@ -94,6 +94,12 @@ means seen in a run of the game (see "Phase 0 traces").
 | Max Payne | 2001 | Direct3D 8 | 32-bit textures and DXT1, DXT3, DXT5 (it asks for them and is refused); D24S8 | traced |
 | Zanzarah | 2002 | Direct3D 7 | DXTn in the texture format list; minimum GeForce or Voodoo 5500 | #583, #606 |
 | Grom: Terror in Tibet | 2002 | Direct3D | A8R8G8B8 textures; minimum a 32 MB card | #645 |
+| Nocturne | 1999 | Direct3D 6 interfaces, from its DirectX 7 renderer | `DDCAPS_3D` in the driver's caps (#982); A8R8G8B8 textures and a 32-bit target with a Z32 z-buffer, which it picks where a card offers them | traced (see "Nocturne on the card") |
+
+Nocturne joined the list on 2026-11-12, after level 1 was fixed. It
+needs nothing of the card that the eight didn't, and is on the list
+for its frame rate and for what it asks of the built-in Windows (see
+"Nocturne on the card").
 
 ## Phase 0 traces
 
@@ -643,7 +649,7 @@ card took.
 
 ### Level 2: Direct3D 8.1 shaders (outline)
 
-Not designed in detail here, and not needed by the eight target games.
+Not designed in detail here, and not needed by the nine target games.
 It would add vertex shaders 1.1 and pixel shaders 1.1 to 1.4 as Direct3D
 bytecode (`DEFINE_SHADER`, `SET_SHADER`, `SET_SHADER_CONSTANTS`), vertex
 streams with declarations, 32-bit indices, volume textures, and indexed
@@ -1512,14 +1518,14 @@ Each phase is one or a few pull requests that leave main working.
    front end's vertices transformed and lit by the card.
 6. **Performance.** Optimisation passes over the working
    implementation of phases 1 to 5. The target: every game of the
-   primary list (the eight of phase 0) holds a stable 30 frames a
-   second, with some to spare, measured on a four-core host as well
-   as a larger one.
+   primary list (the eight of phase 0 and Nocturne) holds a stable 30
+   frames a second, with some to spare, measured on a four-core host
+   as well as a larger one.
 
 Postponed, with no place in the order (decided 2026-11-12):
 
 - **Level 2**, until work starts on a game that needs shaders. None
-  of the eight games of phase 0 does.
+  of the nine games of the primary list does.
 - **The Windows 98 driver** (display minidriver, then the DirectDraw
   and Direct3D HAL, then OpenGL): the card serves the built-in
   Windows only for now. Black & White, which the driver was to
@@ -1657,6 +1663,43 @@ card lacks:
 
 None of them needs level 2.
 
+### Nocturne on the card (2026-11-12)
+
+Nocturne (Terminal Reality, 1999) runs from its two discs: its own
+installer under the built-in Windows, then `NOCTURNE.EXE` with disc 1
+in the drive. On `svga_toadforce` it reaches play in the first room of
+Volume 1 with both of the card's renderers.
+
+- **Finding the card.** The game ships a renderer DLL for each API
+  (`TRID3D` for DirectX 5, `TRIDX6`, `TRIDX7`, `TRI3DFX` for Glide)
+  and starts on its software renderer; Options > Graphic options turns
+  3D hardware on. Each DLL lists a DirectDraw device only when
+  `DDCAPS_3D` is set in the driver's caps, which a ToadForce's lacked
+  (#982, fixed with this entry). With it the screen offers DirectX 5, 6
+  and 7 on "ToadForce", and no Glide. DirectX 7 is the one to use. On a
+  Voodoo3 the game's card table picks Glide and 16 bits instead.
+- **What it asks.** The DirectX 7 renderer makes `IDirect3D3`'s HAL
+  device on a 640x480 X8R8G8B8 flipping chain with a Z32 z-buffer (the
+  card lists Z16, Z32S8 and Z32), and A8R8G8B8 textures of 64 to 256
+  texels with mip levels, loaded by `Blt` from system memory. It
+  transforms and lights by itself: every draw is
+  `DrawIndexedPrimitive` of `XYZRHW | DIFFUSE | SPECULAR | TEX1`
+  triangle lists, about 44 a frame with 1400 triangles, one stage of
+  `MODULATE`, linear filters with a linear mip filter, vertex fog in
+  the specular colour's alpha, and for the lit effects `SRCALPHA` and
+  `ONE` blending with an alpha test.
+- **On the host.** No draw is declined and the card rejects no
+  command. Two things a frame make the OpenGL renderer read back
+  (#983): the game locks the whole back buffer, twice, and copies a
+  z-buffer it keeps into the device's with `Blt`.
+- **Frame rate, rough** (the card's flips over 10 seconds, with other
+  work on the machine): about 20 a second with OpenGL and 25 in
+  software in that room, and about 18 on a Voodoo3 through Glide. The
+  read-backs of #983 are what puts OpenGL behind software here.
+- **Outside the card.** The opening movie doesn't play and the game
+  waits on a black screen until Escape (#980): MCI's `play` lacks the
+  `window` and `fullscreen` flags of a video device.
+
 ### Frame rates against the target
 
 Measured in real time with `cycles=max`, alone on the development
@@ -1671,6 +1714,7 @@ rough figure.
 | Oni, the same (2026-11-12, step 4c) | 15 | 20 | | |
 | Giants, the same (2026-11-12, step 4d, 4c measured again beside it: 23) | | 28 | | |
 | Oni, the same (2026-11-12, step 4d, 4c beside it: 18) | | 19.5 | | |
+| Nocturne, first room of Volume 1, 640x480, 32 bits | not measured | not measured | | |
 
 With OpenGL at step 4c the emulator's thread is 86% busy in Giants
 and 82% in Oni, as it was in software: it still transforms and clips
