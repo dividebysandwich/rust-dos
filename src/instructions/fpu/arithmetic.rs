@@ -349,15 +349,24 @@ pub fn fdivrp(cpu: &mut Cpu, instr: &Instruction) {
 /// operation.
 const INDEFINITE: F80 = F80 { st: REAL_INDEFINITE };
 
+/// What an operation on two registers gives when either is a NaN or a
+/// format the FPU doesn't take, with the invalid exception masked: the
+/// result and whether the operation is invalid (IE). An unsupported
+/// operand gives the real indefinite, a NaN goes through as `nan_result`
+/// says. None when both are numbers.
+fn unsupported_or_nan(a: F80, b: F80) -> Option<(F80, bool)> {
+    if a.is_unsupported() || b.is_unsupported() {
+        return Some((INDEFINITE, true));
+    }
+    a.nan_result(b)
+}
+
 /// What FPREM and FPREM1 give for ST(0) and ST(1) when they don't divide
 /// one by the other, with the invalid exception masked: the result and
 /// whether the operation is invalid (IE). None for a finite dividend and
 /// a finite divisor other than 0, which they reduce.
 fn fprem_special(st0: F80, st1: F80) -> Option<(F80, bool)> {
-    if st0.is_unsupported() || st1.is_unsupported() {
-        return Some((INDEFINITE, true));
-    }
-    if let Some(nan) = st0.nan_result(st1) {
+    if let Some(nan) = unsupported_or_nan(st0, st1) {
         return Some(nan);
     }
     if st0.is_infinite() || st1.is_zero() {
@@ -535,22 +544,125 @@ pub fn fchs(cpu: &mut Cpu) {
     cpu.set_fpu_flag(FpuFlags::C1, false);
 }
 
-// FSCALE: Scale by 2^trunc(ST(1))
-// ST(0) = ST(0) * 2^(trunc(ST(1)))
+/// What FSCALE gives for ST(0) and ST(1), both numbers, when it doesn't
+/// scale a finite number other than 0 by a finite power, with the invalid
+/// exception masked: the result and whether the operation is invalid
+/// (IE), as the table of FSCALE's results in Intel's manual has them. A
+/// zero or an infinity stays as it is, but for 0 * 2^+infinity and
+/// infinity * 2^-infinity, which are invalid; a finite number scaled by
+/// an infinite power becomes the infinity or the zero of its sign. None
+/// for a finite number other than 0 and a finite power, which `fscale`
+/// scales.
+fn fscale_special(st0: F80, st1: F80) -> Option<(F80, bool)> {
+    let up = !st1.get_sign();
+    if st0.is_zero() || st0.is_infinite() {
+        // A zero scaled up, or an infinity scaled down, without end.
+        let invalid = st1.is_infinite() && st0.is_zero() == up;
+        return Some(if invalid { (INDEFINITE, true) } else { (st0, false) });
+    }
+    if st1.is_infinite() {
+        let mut out = F80::new();
+        if up {
+            out.set_exponent(0x7FFF);
+            out.set_mantissa(1 << 63);
+        }
+        out.set_sign(st0.get_sign());
+        return Some((out, false));
+    }
+    None
+}
+
+/// FSCALE: ST(0) = ST(0) * 2^trunc(ST(1)). The exponent changes and the
+/// 64 bits of the significand stay, over the 80 bits' whole range: a
+/// result past it is an overflow (OE), and one below the smallest normal
+/// number a denormal or a zero, rounded as the control word's RC says
+/// (UE when that loses bits), as on the FPU with those exceptions masked.
 pub fn fscale(cpu: &mut Cpu) {
-    let mut st0 = cpu.fpu_get(0);
-    let st1 = cpu.fpu_get(1).get_f64().trunc();
-    // A normal number whose result is one: only the exponent changes, as
-    // on the FPU, with all 64 bits and the 80 bits' range.
-    let exp = st0.get_exponent() as f64;
-    if st0.is_normal() && st0.get_integer_bit() != 0 && (1.0..=32766.0).contains(&(exp + st1)) {
-        st0.set_exponent((exp + st1) as u16);
-        cpu.fpu_set(0, st0);
+    // C1 says whether the result was rounded up (0 on a stack underflow).
+    cpu.set_fpu_flag(FpuFlags::C1, false);
+    // An empty register: a stack underflow (SF), invalid, and ST(0)
+    // becomes the real indefinite.
+    if cpu.fpu_is_empty(0) || cpu.fpu_is_empty(1) {
+        cpu.set_fpu_flag(FpuFlags::SF | FpuFlags::IE, true);
+        cpu.fpu_set_valid(0, INDEFINITE);
         return;
     }
-    let res = st0.get_f64() * 2.0_f64.powf(st1);
-    st0.set_f64(res);
-    cpu.fpu_set(0, st0);
+    let (st0, st1) = (cpu.fpu_get(0), cpu.fpu_get(1));
+    let nan = unsupported_or_nan(st0, st1);
+    // Between numbers, a denormal or pseudo-denormal operand (DE), whatever
+    // the other one is, as SoftFloat's and Bochs's FSCALE have it. A zero
+    // has exponent 0 too but isn't one.
+    let denormal = |x: F80| x.is_denormal() && !x.is_zero();
+    if nan.is_none() && (denormal(st0) || denormal(st1)) {
+        cpu.set_fpu_flag(FpuFlags::DE, true);
+    }
+    if let Some((result, invalid)) = nan.or_else(|| fscale_special(st0, st1)) {
+        if invalid {
+            cpu.set_fpu_flag(FpuFlags::IE, true);
+        }
+        cpu.fpu_set(0, result);
+        return;
+    }
+    // ST(1) truncated toward 0 from all 64 bits of its significand: as a
+    // double, 4 - 2^-62 would round to 4 first. `round_int` gives nothing
+    // for a denormal or a zero (a power of 0) or from 2^63 up. A power
+    // past the 80 bits' range either way gives what one just past it does.
+    let power = match st1.round_int(3) {
+        Some(n) => n.clamp(-70000, 70000) as i32,
+        None if st1.is_denormal() => 0,
+        None if st1.get_sign() => -70000,
+        None => 70000,
+    };
+    let negative = st0.get_sign();
+    let mantissa = st0.get_mantissa();
+    // A denormal's significand as a normal one's, with its exponent below
+    // the smallest normal one's.
+    let shift = mantissa.leading_zeros();
+    let exp = st0.get_exponent().max(1) as i32 - shift as i32 + power;
+    let mantissa = mantissa << shift;
+    let rc = (cpu.fpu_control >> 10) & 0x03;
+    // Whether a result rounded as RC says goes away from zero.
+    let away = |half: bool, odd: bool, rest: bool| match rc {
+        0 => half && (rest || odd),
+        1 => negative && (half || rest),
+        2 => !negative && (half || rest),
+        _ => false,
+    };
+    let mut out = F80::new();
+    out.set_sign(negative);
+    if exp >= 0x7FFF {
+        // Overflow: the infinity, or the largest number toward zero.
+        cpu.set_fpu_flag(FpuFlags::OE | FpuFlags::PE, true);
+        let infinite = away(true, true, true);
+        out.set_exponent(if infinite { 0x7FFF } else { 0x7FFE });
+        out.set_mantissa(if infinite { 1 << 63 } else { u64::MAX });
+        cpu.set_fpu_flag(FpuFlags::C1, infinite);
+    } else if exp >= 1 {
+        out.set_exponent(exp as u16);
+        out.set_mantissa(mantissa);
+    } else {
+        // Below the normal numbers: a denormal, with the bits shifted out
+        // rounded.
+        let drop = (1 - exp) as u32;
+        let (kept, half, rest) = if drop > 64 {
+            (0, false, true)
+        } else {
+            let wide = (mantissa as u128) << 64 >> drop;
+            let below = wide as u64;
+            ((wide >> 64) as u64, below >> 63 == 1, below << 1 != 0)
+        };
+        let inexact = half || rest;
+        let up = away(half, kept & 1 == 1, rest);
+        let kept = if up { kept + 1 } else { kept };
+        if inexact {
+            cpu.set_fpu_flag(FpuFlags::UE | FpuFlags::PE, true);
+        }
+        cpu.set_fpu_flag(FpuFlags::C1, up);
+        // Rounding up to 1 << 63 makes the smallest normal number.
+        out.set_exponent((kept >> 63) as u16);
+        out.set_mantissa(kept);
+    }
+    cpu.fpu_set(0, out);
 }
 
 // FSQRT: Square Root
