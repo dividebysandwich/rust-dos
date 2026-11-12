@@ -322,12 +322,14 @@ fn vbe_mode(cpu: &Cpu, w: u32, h: u32, bpp: u32) -> Option<VbeMode> {
 /// Read video memory from byte `offset` into `data`; what is past its end
 /// reads as 0.
 pub fn read(cpu: &mut Cpu, offset: u32, data: &mut [u8]) {
-    settle(cpu);
+    expose(cpu, offset, data.len() as u32);
     peek(cpu, offset, data);
 }
 
 /// `read` of video memory as it is, without what a ToadForce still has
-/// queued to draw: for a debugger's look, which changes nothing.
+/// queued to draw or its host renderer has drawn and not read back:
+/// for a debugger's look, which changes nothing, and so can't have
+/// the card bring its memory up to date.
 pub fn peek(cpu: &Cpu, offset: u32, data: &mut [u8]) {
     let size = memory_size(cpu) as usize;
     let start = (offset as usize).min(size);
@@ -352,6 +354,17 @@ pub fn peek(cpu: &Cpu, offset: u32, data: &mut [u8]) {
 #[inline]
 pub fn settle(cpu: &mut Cpu) {
     cpu.bus.toadforce_flush();
+}
+
+/// `settle`, and have the `len` bytes of video memory at `offset` hold
+/// what was drawn there: a ToadForce reads back the surfaces with
+/// those bytes that its host renderer drew into. `read` and `write` do
+/// it for their bytes, and whatever gives the program the address of a
+/// surface in video memory does it for the surface, since the program's
+/// reads through the bus can't.
+#[inline]
+pub fn expose(cpu: &mut Cpu, offset: u32, len: u32) {
+    cpu.bus.toadforce_touch(offset as usize, len as usize);
 }
 
 /// Whether a call of the function `name` of the DLL `dll` (its file
@@ -426,7 +439,8 @@ pub fn write(cpu: &mut Cpu, offset: u32, data: &[u8]) {
         return;
     }
     let data = &data[..end - start];
-    settle(cpu);
+    expose(cpu, start as u32, (end - start) as u32);
+    cpu.bus.toadforce_wrote(start, end - start);
     drew(cpu, start as u32, end as u32, data.len() as u64);
     if let Some(v) = &mut cpu.bus.voodoo
         && v.banshee().is_some()

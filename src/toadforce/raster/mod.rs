@@ -31,6 +31,12 @@
 //! The card empties the queue before any other command touches the
 //! memory and at the end of the run, so nothing is queued when the
 //! guest runs, a state is saved, or the screen is shown.
+//!
+//! With a host renderer attached (`super::gpu`), the filled triangles
+//! of a state the host takes are queued for it as screen vertices, and
+//! the rest is queued as before. The queue holds one kind at a time:
+//! a draw of the other kind empties it first, so the host's draws and
+//! the software's reach a target in the card's order.
 
 pub mod clip;
 pub mod combine;
@@ -47,6 +53,7 @@ pub mod texel;
 pub mod vertex;
 
 use super::format::Rect;
+use super::gpu::{self, Gpu};
 use super::level1::{Draw, Indices, Level1, Target, Vertices};
 use super::regs::Error;
 use mem::Mem;
@@ -94,6 +101,29 @@ pub struct Renderer {
     /// `lit`, or `u32::MAX` while no index has named it.
     places: Vec<u32>,
     order: Vec<u32>,
+    /// The triangles queued for the host renderer. While there are
+    /// any, `runs` is empty.
+    host_runs: Vec<gpu::Run>,
+    host_vertices: Vec<ScreenVertex>,
+}
+
+/// Where a draw's primitives are queued.
+enum Queue<'a> {
+    Software(&'a mut Vec<Prim>),
+    /// For the host, which gets filled triangles only: the triangles'
+    /// vertices, as `gpu::Run::vertices` has them.
+    Host(&'a mut Vec<ScreenVertex>),
+}
+
+impl Queue<'_> {
+    /// The software renderer's queue. A draw with a point or a line
+    /// in it never goes to the host.
+    fn prims(&mut self) -> &mut Vec<Prim> {
+        match self {
+            Queue::Software(prims) => prims,
+            Queue::Host(_) => unreachable!("the host draws triangles only"),
+        }
+    }
 }
 
 /// One primitive of a draw, by its vertices' places in the draw's
@@ -136,7 +166,7 @@ fn pieces(primitive: u32, n: usize, mut f: impl FnMut(Piece)) {
 /// those are the points and the lines of a triangle that isn't filled
 /// (`clip::Polygon::outline`).
 fn polygon<V: std::borrow::Borrow<ScreenVertex>>(
-    prims: &mut Vec<Prim>,
+    queue: &mut Queue,
     corners: &[V],
     outline: (u32, u32),
     provoking: &ScreenVertex,
@@ -147,6 +177,29 @@ fn polygon<V: std::borrow::Borrow<ScreenVertex>>(
     let n = corners.len();
     let at = |i: usize| corners[i].borrow();
     let fan = |i: usize| [at(0), at(i), at(i + 1)];
+    let prims = match queue {
+        Queue::Software(prims) => prims,
+        Queue::Host(vertices) => {
+            // The triangles the card doesn't cull, with each slot's
+            // coordinates where the host looks for them.
+            let slotted = |v: &ScreenVertex| {
+                let mut out = *v;
+                for (slot, &set) in sets.iter().enumerate() {
+                    out.tex[slot] = v.tex[set as usize];
+                }
+                out
+            };
+            for i in 1..n - 1 {
+                if Prim::facing(fan(i), shape.cull).is_some() {
+                    vertices.extend(fan(i).map(slotted));
+                    if shape.flat {
+                        vertices.push(slotted(provoking));
+                    }
+                }
+            }
+            return;
+        }
+    };
     match shape.fill {
         // Points and lines go by the winding only: their pixels
         // needn't be in the rows the triangle's are.
@@ -196,14 +249,23 @@ impl Renderer {
         }
     }
 
-    /// Queue the primitives of `draw`, with the state `l`. Gives how
-    /// many there are and the bytes of card memory they may write, or
-    /// None when there are none.
+    /// Draw with `workers` threads beside the caller's from now on.
+    #[cfg(test)]
+    pub(crate) fn fix_workers(&mut self, workers: usize) {
+        self.workers = Some(workers);
+        self.pool = None;
+    }
+
+    /// Queue the primitives of `draw`, with the state `l`: for the
+    /// host of `gpu` where it draws them, and for the software
+    /// renderer otherwise. Gives how many there are and the bytes of
+    /// card memory they may write, or None when there are none.
     pub fn draw(
         &mut self,
         l: &mut Level1,
         draw: &Draw,
         memory: &mut [u8],
+        gpu: &mut Gpu,
     ) -> Result<Option<Drawn>, Error> {
         // Vertices and indices in card memory are read now, so what the
         // queue writes there is drawn first.
@@ -233,7 +295,13 @@ impl Renderer {
                 .flatten()
                 .any(|&r| pipeline::writes(target, r))
         {
-            self.flush(memory);
+            self.flush(memory, gpu);
+        }
+        // And what the host drew there is read back.
+        if gpu.ahead() {
+            for (first, end) in buffers.into_iter().flatten() {
+                gpu.settle(memory, Some((first as u32, end.min(u32::MAX as u64) as u32)));
+            }
         }
 
         // The order of the vertices, each one of the draw's.
@@ -297,29 +365,74 @@ impl Renderer {
             }
         }
 
-        // What is queued is for one target, and a draw that reads what
-        // it writes is alone in the queue.
-        if self.target != Some(state.target) || state.serial {
-            self.flush(memory);
+        // The host draws filled triangles of the states it takes. A
+        // draw that reads what it writes stays with the software
+        // renderer, which draws it pixel by pixel in order.
+        let hosted = gpu.attached()
+            && draw.primitive >= 4
+            && !matches!(state.shape.fill, 1 | 2)
+            && !state.serial
+            && gpu.takes(&state);
+        // What is queued is for one target and one renderer, and a
+        // draw that reads what it writes is alone in the queue.
+        let other = match hosted {
+            true => !self.runs.is_empty(),
+            false => !self.host_runs.is_empty(),
+        };
+        if self.target != Some(state.target) || state.serial || other {
+            self.flush(memory, gpu);
+        }
+        if gpu.attached() && !hosted {
+            gpu.declined += 1;
+            // The software renderer draws over the pixels the host
+            // left, and samples those it drew.
+            if gpu.ahead() {
+                let colour = state.target.colour;
+                gpu.settle(memory, Some(gpu::range(&colour)));
+                if let Some(depth) = state.target.depth_surface() {
+                    gpu.settle(memory, Some(gpu::range(&depth)));
+                }
+                let mut reads = Vec::new();
+                pipeline::reads(&state, &mut reads);
+                for read in reads {
+                    gpu.settle(memory, Some(read));
+                }
+            }
         }
         self.target = Some(state.target);
-        let first = self.prims.len();
+        let first = match hosted {
+            true => self.host_vertices.len(),
+            false => self.prims.len(),
+        };
         match &geometry {
-            Some(setup) => self.assemble_lit(draw.primitive, &state, setup),
-            None => self.assemble(draw.primitive, &state),
+            Some(setup) => self.assemble_lit(draw.primitive, &state, setup, hosted),
+            None => self.assemble(draw.primitive, &state, hosted),
+        }
+        let colour = state.target.colour;
+        if hosted {
+            let vertices = first..self.host_vertices.len();
+            let run = gpu::Run { state, vertices };
+            let primitives = (run.vertices.len() / run.stride()) as u64;
+            if primitives == 0 {
+                return Ok(None);
+            }
+            self.host_runs.push(run);
+            return Ok(Some(Drawn {
+                primitives,
+                span: gpu::range(&colour),
+            }));
         }
         let primitives = (self.prims.len() - first) as u64;
         if primitives == 0 {
             return Ok(None);
         }
-        let colour = state.target.colour;
         let serial = state.serial;
         self.runs.push(Run {
             state,
             prims: first..self.prims.len(),
         });
         if serial {
-            self.flush(memory);
+            self.flush(memory, gpu);
         }
         let whole = Rect {
             left: 0,
@@ -333,38 +446,60 @@ impl Renderer {
         }))
     }
 
-    /// The primitives of the vertices in `self.order`, queued.
-    fn assemble(&mut self, primitive: u32, state: &DrawState) {
+    /// The primitives of the vertices in `self.order`, queued: for
+    /// the host if `hosted`.
+    fn assemble(&mut self, primitive: u32, state: &DrawState, hosted: bool) {
         let Renderer {
             vertices,
             order,
             prims,
+            host_vertices,
             ..
         } = self;
+        let mut queue = match hosted {
+            true => Queue::Host(host_vertices),
+            false => Queue::Software(prims),
+        };
         let (shape, clip, sets) = (&state.shape, state.clip, &state.sets[..]);
         let v = |i: usize| &vertices[order[i] as usize];
         pieces(primitive, order.len(), |piece| match piece {
             Piece::Point(a) => {
-                prims.extend(Prim::point(v(a), shape, clip, sets).into_iter().flatten());
+                let point = Prim::point(v(a), shape, clip, sets);
+                queue.prims().extend(point.into_iter().flatten());
             }
             Piece::Line(a, b) => {
                 let provoking = if shape.flat_last { v(b) } else { v(a) };
-                prims.extend(Prim::line(v(a), v(b), provoking, shape, clip, sets));
+                let line = Prim::line(v(a), v(b), provoking, shape, clip, sets);
+                queue.prims().extend(line);
             }
             Piece::Triangle(t, ends) => {
                 let provoking = v(t[if shape.flat_last { ends.1 } else { ends.0 }]);
-                polygon(prims, &t.map(v), (7, 7), provoking, state, sets);
+                polygon(&mut queue, &t.map(v), (7, 7), provoking, state, sets);
             }
         });
     }
 
     /// The primitives of the vertices in `self.order`, which went
     /// through `setup`: cut at its planes, put on the screen and
-    /// queued.
-    fn assemble_lit(&mut self, primitive: u32, state: &DrawState, setup: &geometry::Setup) {
+    /// queued, for the host if `hosted`.
+    fn assemble_lit(
+        &mut self,
+        primitive: u32,
+        state: &DrawState,
+        setup: &geometry::Setup,
+        hosted: bool,
+    ) {
         let Renderer {
-            lit, order, prims, ..
+            lit,
+            order,
+            prims,
+            host_vertices,
+            ..
         } = self;
+        let mut queue = match hosted {
+            true => Queue::Host(host_vertices),
+            false => Queue::Software(prims),
+        };
         let (shape, clip) = (&state.shape, state.clip);
         // A slot's coordinates are worked out for the slot.
         let slots: [u8; pipeline::SLOTS] = std::array::from_fn(|i| i as u8);
@@ -375,7 +510,8 @@ impl Renderer {
             Piece::Point(a) => {
                 if v(a).out == 0 {
                     let a = setup.project(v(a));
-                    prims.extend(Prim::point(&a, shape, clip, sets).into_iter().flatten());
+                    let point = Prim::point(&a, shape, clip, sets);
+                    queue.prims().extend(point.into_iter().flatten());
                 }
             }
             Piece::Line(a, b) => {
@@ -387,7 +523,8 @@ impl Renderer {
                 let provoking = setup.project(if shape.flat_last { b } else { a });
                 if let Some((a, b)) = clip::line(*a, *b, out) {
                     let (a, b) = (setup.project(&a), setup.project(&b));
-                    prims.extend(Prim::line(&a, &b, &provoking, shape, clip, sets));
+                    let line = Prim::line(&a, &b, &provoking, shape, clip, sets);
+                    queue.prims().extend(line);
                 }
             }
             Piece::Triangle(t, ends) => {
@@ -405,7 +542,7 @@ impl Renderer {
                 // without the room a cut one needs.
                 if out == 0 {
                     let corners = t.map(|v| setup.project(&side(v)));
-                    polygon(prims, &corners, (7, 7), &provoking, state, sets);
+                    polygon(&mut queue, &corners, (7, 7), &provoking, state, sets);
                     return;
                 }
                 let mut cut = clip::Polygon::triangle(t.map(side));
@@ -418,14 +555,34 @@ impl Renderer {
                 for (corner, v) in corners.iter_mut().zip(cut.corners()) {
                     *corner = setup.project(v);
                 }
-                polygon(prims, &corners[..n], cut.outline(), &provoking, state, sets);
+                polygon(&mut queue, &corners[..n], cut.outline(), &provoking, state, sets);
             }
         });
     }
 
-    /// Draw what is queued.
-    pub fn flush(&mut self, memory: &mut [u8]) {
+    /// Draw what is queued, or have the host of `gpu` draw it.
+    pub fn flush(&mut self, memory: &mut [u8], gpu: &mut Gpu) {
+        if !self.host_runs.is_empty() {
+            // The textures the host is about to copy from card memory.
+            let mut reads = Vec::new();
+            if gpu.ahead() {
+                for run in &self.host_runs {
+                    pipeline::reads(&run.state, &mut reads);
+                }
+            }
+            let batch = gpu::Batch {
+                target: self.target.expect("what is queued has a target"),
+                runs: &self.host_runs,
+                vertices: &self.host_vertices,
+            };
+            gpu.draw(&batch, &reads, memory);
+            self.host_runs.clear();
+            self.host_vertices.clear();
+            self.target = None;
+            return;
+        }
         if self.runs.is_empty() {
+            self.target = None;
             return;
         }
         let (runs, prims) = (&self.runs, &self.prims);
@@ -457,7 +614,15 @@ impl Renderer {
         }
         self.runs.clear();
         self.prims.clear();
-        self.target = None;
+        // The host's copies of what was drawn into are stale.
+        if let Some(target) = self.target.take() {
+            let (first, end) = gpu::range(&target.colour);
+            gpu.pages.wrote(first, end - first);
+            if let Some(depth) = target.depth_surface() {
+                let (first, end) = gpu::range(&depth);
+                gpu.pages.wrote(first, end - first);
+            }
+        }
     }
 }
 

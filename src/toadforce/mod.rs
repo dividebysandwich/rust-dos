@@ -30,6 +30,7 @@ pub mod caps;
 pub mod command;
 pub mod display;
 pub mod format;
+pub mod gpu;
 pub mod level1;
 pub mod pci;
 pub mod raster;
@@ -90,6 +91,10 @@ pub struct ToadForce {
     /// What draws level 1's primitives. It holds nothing between two
     /// runs of commands, and no part of the card's state.
     raster: raster::Renderer,
+    /// The host renderer, if one is attached, and what it has that
+    /// card memory hasn't. No part of the card's state: a saved state
+    /// has card memory with all of it read back.
+    gpu: gpu::Gpu,
     /// The interrupt request the card has up, which the bus keeps.
     pub irq_up: Option<u8>,
     /// Commands the emulator's own drivers handed over that haven't run
@@ -149,7 +154,7 @@ crate::state_fields!(ToadForce {
     level1,
     queue,
     queue_since,
-} skip { counts, raster });
+} skip { counts, raster, gpu });
 
 impl ToadForce {
     /// A card with `memory` bytes of card memory (one of
@@ -174,6 +179,7 @@ impl ToadForce {
             display: display::Display::default(),
             level1: level1::Level1::default(),
             raster: raster::Renderer::default(),
+            gpu: gpu::Gpu::default(),
             irq_up: None,
             queue: Vec::new(),
             queue_since: 0,
@@ -194,6 +200,57 @@ impl ToadForce {
     /// The commands the card carried out and rejected.
     pub fn counts(&self) -> Counts {
         self.counts
+    }
+
+    /// Have `host` draw the triangles it takes from now on, or with
+    /// None the software renderer all of them again. What the host
+    /// before it drew is read back into `memory`, card memory, first.
+    pub fn set_host(&mut self, host: Option<Box<dyn gpu::Host>>, memory: &mut [u8]) {
+        self.gpu.settle(memory, None);
+        self.gpu.set_host(host, self.memory);
+    }
+
+    /// Whether the host renderer has pixels card memory hasn't, which
+    /// `settle` reads back. False without a host.
+    #[inline]
+    pub fn ahead(&self) -> bool {
+        self.gpu.ahead()
+    }
+
+    /// Before the processor reads or writes the bytes `range` of
+    /// `memory`, card memory (all of it for None): read back the
+    /// surfaces the host renderer drew into that share a byte with
+    /// them.
+    #[inline]
+    pub fn settle(&mut self, memory: &mut [u8], range: Option<(u32, u32)>) {
+        self.gpu.settle(memory, range);
+    }
+
+    /// The processor wrote `len` bytes of card memory at `offset`: the
+    /// host renderer's copies of them are stale.
+    #[inline]
+    pub fn wrote(&mut self, offset: u32, len: u32) {
+        self.gpu.pages.wrote(offset, len);
+    }
+
+    /// `memory`, card memory, with what the host renderer drew read
+    /// back into a copy, when there is any: what a saved state keeps.
+    /// The card and its memory stay as they are.
+    pub fn settled(&self, memory: &[u8]) -> Option<Vec<u8>> {
+        self.gpu.settled(memory)
+    }
+
+    /// Card memory was replaced, by a loaded state: the host renderer
+    /// drops what it has.
+    pub fn forget(&mut self) {
+        self.gpu.forget();
+    }
+
+    /// The program read `len` bytes of card memory at `offset` by
+    /// itself, where `ahead`: counted for the status if the host has
+    /// newer pixels there (see `gpu::Gpu::stale_read`).
+    pub fn stale_read(&self, offset: u32, len: u32) {
+        self.gpu.stale_read(offset, len);
     }
 
     /// For the debugger's status: what the card shows and what was asked
@@ -235,6 +292,12 @@ impl ToadForce {
                 "primitives": counts.primitives,
                 "transformed": counts.transformed,
                 "rejected": counts.rejected,
+            },
+            "renderer": self.gpu.name(),
+            "host": {
+                "read_backs": self.gpu.read_backs,
+                "declined_draws": self.gpu.declined,
+                "stale_reads": self.gpu.stale_reads(),
             },
         })
     }
@@ -378,7 +441,15 @@ impl ToadForce {
             }
             regs::IRQ_STATUS => self.irq_status &= !value,
             regs::IRQ_ENABLE => self.irq_enable = value & regs::IRQ_ALL,
-            regs::RING_PUT => self.put(value, memory, &mut fx),
+            regs::RING_PUT => {
+                self.put(value, memory, &mut fx);
+                // A guest's own driver reads and writes card memory
+                // through the bus with nothing that says so first, and
+                // a read there can't read back (`Bus::read_8`). What
+                // its commands drew is in card memory when the write
+                // returns, as the specification has it.
+                self.gpu.settle(memory, None);
+            }
             regs::ERROR => {
                 self.error = 0;
                 self.error_at = 0;
@@ -459,7 +530,7 @@ impl ToadForce {
     fn run(&mut self, words: &[u32], origin: Origin, memory: &mut [u8], fx: &mut Effects) -> bool {
         let whole = self.run_each(words, origin, memory, fx);
         // The draws of a run are drawn by its end.
-        self.raster.flush(memory);
+        self.raster.flush(memory, &mut self.gpu);
         whole
     }
 
@@ -492,7 +563,7 @@ impl ToadForce {
     /// host has.
     #[cfg(test)]
     pub(crate) fn fix_workers(&mut self, workers: usize) {
-        self.raster = raster::Renderer::with_workers(workers);
+        self.raster.fix_workers(workers);
     }
 
     /// Carry out a decoded command.
@@ -509,14 +580,20 @@ impl ToadForce {
             Command::Nop | Command::Level1(level1::Command::Draw(_))
         ) && !matches!(command, Command::Level1(c) if c.sets_state())
         {
-            self.raster.flush(memory);
+            self.raster.flush(memory, &mut self.gpu);
         }
+        // The commands below that run on the processor read back what
+        // the host renderer drew where they read or write, and count
+        // what they wrote (`gpu`).
         match command {
             Command::Nop => self.counts.nop += 1,
             Command::Fill { dst, rect, value } => {
+                let span = dst.span(&rect);
+                self.gpu.settle(memory, Some(span));
                 blit::fill(memory, &dst, &rect, value);
+                self.gpu.pages.wrote(span.0, span.1 - span.0);
                 self.counts.fill += 1;
-                fx.drawn.push(dst.span(&rect));
+                fx.drawn.push(span);
             }
             Command::Blt {
                 dst,
@@ -525,9 +602,13 @@ impl ToadForce {
                 src_rect,
                 key,
             } => {
+                let span = dst.span(&dst_rect);
+                self.gpu.settle(memory, Some(src.span(&src_rect)));
+                self.gpu.settle(memory, Some(span));
                 blit::blt(memory, &dst, &dst_rect, &src, &src_rect, key);
+                self.gpu.pages.wrote(span.0, span.1 - span.0);
                 self.counts.blt += 1;
-                fx.drawn.push(dst.span(&dst_rect));
+                fx.drawn.push(span);
             }
             Command::Flip { offset, wait } => {
                 if self.display.flip(offset, wait, self.memory)? {
@@ -537,7 +618,9 @@ impl ToadForce {
                 self.counts.flip += 1;
             }
             Command::Level1(level1::Command::Draw(draw)) => {
-                let drawn = self.raster.draw(&mut self.level1, &draw, memory)?;
+                let drawn = self
+                    .raster
+                    .draw(&mut self.level1, &draw, memory, &mut self.gpu)?;
                 self.counts.level1 += 1;
                 self.counts.draws += 1;
                 self.counts.transformed += !draw.fvf.transformed as u64;
@@ -547,7 +630,23 @@ impl ToadForce {
                 }
             }
             Command::Level1(command) => {
+                // `CLEAR` is the one of these that touches card memory:
+                // it writes the target, and reads the depth buffer
+                // where it writes a part of its bits.
+                if self.gpu.ahead()
+                    && matches!(command, level1::Command::Clear { .. })
+                    && let Some(target) = self.level1.target
+                {
+                    self.gpu.settle(memory, Some(gpu::range(&target.colour)));
+                    if let Some(depth) = target.depth_surface() {
+                        self.gpu.settle(memory, Some(gpu::range(&depth)));
+                    }
+                }
+                let before = fx.drawn.len();
                 self.level1.apply(command, memory, &mut fx.drawn)?;
+                for &(first, end) in &fx.drawn[before..] {
+                    self.gpu.pages.wrote(first, end - first);
+                }
                 self.counts.level1 += 1;
             }
         }

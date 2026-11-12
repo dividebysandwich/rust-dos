@@ -9,6 +9,7 @@ use crate::toadforce::regs;
 use crate::toadforce::{Live, ToadForce};
 use crate::video::crt::CrtTiming;
 
+mod host;
 mod tnl;
 
 const MEMORY: u32 = 32 << 20;

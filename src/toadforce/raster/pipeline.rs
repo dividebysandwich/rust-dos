@@ -15,7 +15,7 @@ use super::texel::{self, Rgba};
 use crate::toadforce::caps;
 use crate::toadforce::format::Format;
 use crate::toadforce::level1::states::*;
-use crate::toadforce::level1::{Level1, Target};
+use crate::toadforce::level1::{Level1, Target, Texture};
 use crate::toadforce::regs::Error;
 
 /// Where a step reads or writes a colour.
@@ -420,6 +420,33 @@ pub fn writes(target: &Target, r: (u64, u64)) -> bool {
             .is_some_and(|d| overlap(r, (d.offset as u64, d.end())))
 }
 
+/// The bytes of card memory a draw that samples `t` reads: its
+/// palette and its images.
+fn texture_reads(t: &Texture, mut f: impl FnMut((u64, u64))) {
+    if let Some(palette) = t.palette {
+        f((palette as u64, palette as u64 + 1024));
+    }
+    for level in 0..t.levels {
+        let (w, h) = t.level_size(level);
+        for face in 0..t.faces() {
+            let (offset, pitch) = t.image(level, face);
+            f((
+                offset as u64,
+                offset as u64 + t.format.image_bytes(w, h, pitch),
+            ));
+        }
+    }
+}
+
+/// The bytes of card memory a draw with `state` reads besides its
+/// target, added to `reads`: its textures.
+pub fn reads(state: &DrawState, reads: &mut Vec<(u32, u32)>) {
+    let clamp = |at: u64| at.min(u32::MAX as u64) as u32;
+    for t in state.tex.iter().flatten() {
+        texture_reads(&t.texture, |r| reads.push((clamp(r.0), clamp(r.1))));
+    }
+}
+
 /// Lower the state `l`. `BadState` when it has no render target, or
 /// samples more textures than the card has at once.
 pub fn lower(l: &Level1) -> Result<DrawState, Error> {
@@ -667,22 +694,7 @@ pub fn lower(l: &Level1) -> Result<DrawState, Error> {
         .depth_surface()
         .is_some_and(|d| overlap(colour, (d.offset as u64, d.end())));
     for t in texs.iter().flatten() {
-        let t = &t.texture;
-        let mut reads = Vec::new();
-        if let Some(palette) = t.palette {
-            reads.push((palette as u64, palette as u64 + 1024));
-        }
-        for level in 0..t.levels {
-            let (w, h) = t.level_size(level);
-            for face in 0..t.faces() {
-                let (offset, pitch) = t.image(level, face);
-                reads.push((
-                    offset as u64,
-                    offset as u64 + t.format.image_bytes(w, h, pitch),
-                ));
-            }
-        }
-        serial |= reads.iter().any(|&r| writes(&target, r));
+        texture_reads(&t.texture, |r| serial |= writes(&target, r));
     }
 
     let size = |id: u32| l.state_f(id).clamp(0.0, caps::POINT_SIZE_MAX as f32);

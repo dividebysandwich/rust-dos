@@ -230,7 +230,15 @@ impl Bus {
         // own so states saved before it load.
         w.section(b"KEYQ", KEY_QUEUE_VERSION, |w| kbd.save_queue(w));
         w.section(b"VIDE", VIDEO_VERSION, |w| {
-            save_all!(w; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
+            save_all!(w; video_mode, vga);
+            // A ToadForce's memory is saved with what its host renderer
+            // drew read back, into a copy: saving changes nothing.
+            w.label("vbe");
+            match toadforce.as_deref().and_then(|card| card.settled(&vbe.vram)) {
+                Some(memory) => vbe.save_with(&memory, w),
+                None => State::save(vbe, w),
+            }
+            save_all!(w; s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         });
         // An S3 ViRGE's engines, only on one, so other states load as they
         // did.

@@ -855,6 +855,87 @@ them. The renderer sits behind the same kind of interface as
 `voodoo::gpu::GpuLink`, so another back end can be added behind it
 later.
 
+### Between the card and the host renderer
+
+The card and the display run on one thread, as the Voodoo's renderers
+do, so the card calls the host renderer directly. `toadforce::gpu` has
+the interface (`Host`), which the display attaches to the card when it
+has an OpenGL 3.2 context and the run isn't deterministic.
+
+- **What the host gets.** The card's renderer queues the primitives of
+  a run of commands as it does for the software renderer, and hands
+  the host the queue (`Batch`) at the points where the software
+  renderer would draw it: each entry is the lowered state
+  (`DrawState`) and its triangles as screen vertices, after the
+  card's transform, lighting, clipping and culling. A triangle the
+  card culls, or one with no area, never reaches the host, so the
+  host has no winding to agree on. The clip rectangle stays in the
+  state for the host to cut the pixels by. The coordinates of texture
+  slot `n` are in set `n` of every vertex, whichever set of the
+  program's vertex they came from, and a flat-shaded triangle has a
+  fourth vertex, the one that gives it its colours. The vertex work
+  moves to the GPU later, if a measurement asks for it.
+- **A draw the host doesn't take.** The host is asked for each state
+  (`Host::takes`). A draw it declines (a state it has no shader for
+  yet) is drawn by the software renderer, and so are lines, points,
+  triangles drawn as outlines or corners, and a draw that samples the
+  surface it writes: the target and the textures are read back first,
+  and the target is uploaded again before the host's next draw into
+  it. The host renderer can so be built up state by state, and a rare
+  state stays right at the cost of speed. The queue holds draws of
+  one renderer at a time, and a draw of the other empties it first,
+  which keeps the card's order on a target.
+- **Who has the newer pixels.** A surface the host drew into is ahead
+  on the host, and card memory is stale there. Before anything reads
+  or writes that memory on the processor the card reads the surface
+  back (`ToadForce::settle` with the range): the program's writes of
+  the frame buffer (in the bus), the drivers' reads and writes
+  (`win32::screen`), the card's own `FILL`, `BLT` and `CLEAR` while
+  they run on the processor, a texture or a vertex buffer that
+  overlaps it, and the picture the screen shows
+  (`Bus::sync_display`). Running the queued commands and reading back
+  are separate: the queue is run at every such point as before, and a
+  surface is read back only when its own bytes are asked for.
+- **The program's own reads.** A read of the frame buffer has the bus
+  shared (`Bus::read_8`), and can't read anything back. The bytes are
+  there before the program gets to them instead. The built-in drivers
+  read a surface back when they give the program its address, at a
+  lock (`win32::screen::expose`). A guest's own driver has no such
+  call, so the card reads everything back when a write of `RING_PUT`
+  returns, as the specification promises: such a driver gets the
+  host's speed only once the card shows the picture from the host's
+  texture and the driver's reads are known some other way. A read of
+  bytes that are ahead all the same is a driver that handed out an
+  address without `expose`; the card counts those for its status
+  (`stale_reads`).
+- **A saved state** is written from a shared card too. It keeps card
+  memory with every surface read back into a copy
+  (`ToadForce::settled`), and the card and the host stay as they are.
+  After a load the host drops its copies (`Host::forget`). A
+  debugger's look at card memory (`win32::screen::peek`) reads it as
+  it is.
+- **What the processor wrote.** The card counts the writes to each
+  page of its memory (`Pages`), 4 KiB each: the program's, the
+  drivers' and its own. The host keeps a stamp of the pages a copy
+  was made from, of a texture or of a surface it drew into, and makes
+  the copy again from card memory when a page of it was written
+  since. A read-back writes card memory what the host's copy holds
+  and isn't counted, and neither are the host's draws, so a host that
+  draws into a target drops its other copies of the target's bytes:
+  the same surface kept as a texture, or another surface over the
+  same memory, such as a depth buffer of another size. Without a host
+  nothing is counted.
+- **The picture shown** is read back once a host frame at first, and
+  comes from the host's texture once that is built (see "The visible
+  surface" above).
+
+It is built in these steps, each a pull request: the interface with
+the tracking and a host that draws in software, to test the protocol
+(4a); the OpenGL host with its targets, textures, generated shaders
+and the agreement tests (4b); the display's side, the configuration
+and the status (4c); the picture from the host's texture, `CLEAR`,
+`FILL` and `BLT` on the host, and the host options (4d).
+
 ### Shader cache
 
 Programs are cached by key in memory. Compiled program binaries are
@@ -871,12 +952,13 @@ small instruction set. It is left out until a measurement asks for it.
 
 ### Save states and determinism
 
-`impl State` for the card reads back whatever is newer on the GPU and
-saves the registers, the state the commands set (a fixed-size block:
-render and stage states, matrices, lights, material, clip planes, the
-texture and palette tables), the mode shown, a pending flip, the
-position in the frame, card memory and the ring. Loading rebuilds the
-host caches from card memory, as the Voodoo's `Resync` does. The ring
+A saved state has whatever is newer on the GPU read back into its copy
+of card memory ("Between the card and the host renderer"), and `impl
+State` for the card saves the registers, the state the commands set (a
+fixed-size block: render and stage states, matrices, lights, material,
+clip planes, the texture and palette tables), the mode shown, a
+pending flip, the position in the frame and the ring. Loading rebuilds
+the host caches from card memory, as the Voodoo's `Resync` does. The ring
 holds no commands still to run, since the card consumes them at each
 `RING_PUT`, but the guest reads back what it wrote there, so its
 contents are saved with the rest.
@@ -1109,6 +1191,25 @@ Postponed, with no place in the order (decided 2026-11-12):
   and Direct3D HAL, then OpenGL): the card serves the built-in
   Windows only for now. Black & White, which the driver was to
   unblock, then waits for #889 alone.
+
+### Frame rates against the target
+
+Measured in real time with `cycles=max`, alone on the development
+machine, sound on a muted device. Each is one run of 20 seconds, so a
+rough figure.
+
+| Game and scene | ToadForce, software | Voodoo3, software | Voodoo3, OpenGL |
+|---|---|---|---|
+| Giants, first mission, 800x600 (2026-11-12, after phase 3) | 14 | 21 | 17 |
+| Oni, training room, 640x480 (2026-11-11, with #944) | 15 | 23 | 29 |
+
+Giants stays under 30 on every card, the Voodoo3 drawn by the host's
+GPU included, with the emulated machine at full speed and the
+emulator's thread 84% to 98% busy. What limits it is the work on that
+thread: the game's own code and the Direct3D layer's. A faster
+renderer alone doesn't bring it to the target, so phase 6 starts with
+a profile of that thread. Oni gains from the renderer: the Voodoo3 is
+at 29 with OpenGL and at 23 without.
 
 Phases 2 and 3 come before the OpenGL renderer so that the reference
 exists before the renderer that is tested against it, and so that
