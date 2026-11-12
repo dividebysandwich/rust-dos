@@ -46,15 +46,31 @@ const RING0_STACK_TOP: u32 = RING0_STACK + 2 * PAGE;
 const HANDLERS: u32 = RING0_STACK_TOP;
 const HANDLER_SIZE: u32 = 32;
 /// VMM's data for the services a program's level 0 code may call through
-/// INT 20h (`vxd_service`): VMM's DDB and the list of where the VxDs are
-/// in memory, which VMM_GetVxDLocationList returns.
+/// INT 20h (`vxd_service`): VMM's DDB, the list of where the VxDs are in
+/// memory, which VMM_GetVxDLocationList returns, and the VxDs loaded
+/// since the start (`DYNAMIC_VXDS`), which VXDLDR_GetDeviceList returns.
 const VMM_DATA: u32 = HANDLERS + 256 * HANDLER_SIZE;
 const VMM_DDB: u32 = VMM_DATA;
 const DDB_SIZE: u32 = 0x50;
 const VXD_LOCATIONS: u32 = VMM_DDB + DDB_SIZE;
 /// The VxD location list's length: VMM's record with one object.
 const VXD_LOCATIONS_LEN: u32 = 5 + 9;
-pub const SYSTEM_BLOCK_PAGES: u32 = (VXD_LOCATIONS + VXD_LOCATIONS_LEN).div_ceil(PAGE);
+/// The dynamically loaded VxDs, `VXD_SIZE` bytes each, in load order:
+/// the VxD's locked code object (`VXD_OBJECT_SIZE` bytes: its control
+/// procedure and its DDB), then VXDLDR's DeviceInfo with its ObjectInfo
+/// array and the module's name.
+const VXDS: u32 = (VXD_LOCATIONS + VXD_LOCATIONS_LEN).next_multiple_of(16);
+const VXD_CONTROL: u32 = 0x00;
+const VXD_DDB: u32 = 0x10;
+const VXD_OBJECT_SIZE: u32 = VXD_DDB + DDB_SIZE;
+const VXD_INFO: u32 = VXD_OBJECT_SIZE;
+/// The DeviceInfo's parts, from its start. Windows 98 SE's VXDLDR puts
+/// the ObjectInfo array 30h bytes after the DeviceInfo, as here, for
+/// most of its VxDs.
+const INFO_OBJECTS: u32 = 0x30;
+const INFO_NAME: u32 = 0x40;
+const VXD_SIZE: u32 = VXD_INFO + INFO_NAME + 0x10;
+pub const SYSTEM_BLOCK_PAGES: u32 = (VXDS + VXD_SIZE * DYNAMIC_VXDS.len() as u32).div_ceil(PAGE);
 
 /// The GDT's selectors: the TSS, the LDT, and level 0 code and data
 /// covering everything at 28h and 30h, where Windows 98's VMM has its
@@ -161,9 +177,149 @@ pub fn build_tables(cpu: &mut Cpu, memory: &mut Memory, phys: u32, tib: u32) -> 
     Some(())
 }
 
-/// VMM's DDB and the VxD location list, in the system block at `phys`.
+/// A VxD's DDB (VMM.INC's VxD_Desc_Block), as offsets from its start.
+const DDB_NEXT: u32 = 0x00;
+const DDB_SDK_VERSION: u32 = 0x04;
+const DDB_DEVICE_ID: u32 = 0x06;
+const DDB_VERSION: u32 = 0x08;
+const DDB_FLAGS: u32 = 0x0A;
+const DDB_NAME: u32 = 0x0C;
+const DDB_INIT_ORDER: u32 = 0x14;
+const DDB_CONTROL_PROC: u32 = 0x18;
+const DDB_PREV: u32 = 0x3C;
+const DDB_SIZE_FIELD: u32 = 0x40;
+const DDB_RESERVED: u32 = 0x44;
+
+/// A VxD that Windows 98 SE's VXDLDR loads after the start and that the
+/// built-in Windows stands for, with the fields its DDB and DeviceInfo
+/// have there.
+struct DynamicVxd {
+    /// The DDB's name, padded with spaces.
+    name: &'static [u8; 8],
+    /// The module's name in the DeviceInfo.
+    module: &'static str,
+    id: u16,
+    /// The DDK version the VxD was built for.
+    sdk: u16,
+    version: (u8, u8),
+    init_order: u32,
+}
+
+/// The dynamically loaded VxDs of the parts of a Windows 98 machine that
+/// the built-in Windows provides, in the order Windows 98 SE loads them:
+/// the configuration manager's enumerators of the BIOS's devices, ISA
+/// Plug and Play and the PCI bus; then IOS's drivers for the disks and
+/// the CD-ROM drive, which the built-in Windows serves through its
+/// files, INT 13h and ASPI (APIX, the ATAPI layer under ASPI, CDFS and
+/// the CD-ROM's type and volume drivers, the disks' type driver,
+/// voltrack, and ESDI_506, the IDE controller's port driver). Each has
+/// the DDB fields Windows 98 SE's has. VxDs of hardware a machine may
+/// lack (sound cards, displays, floppy drives) and NTKERN's WDM drivers,
+/// which the built-in Windows has no counterpart of, aren't listed.
+const DYNAMIC_VXDS: [DynamicVxd; 10] = [
+    DynamicVxd {
+        name: b"BIOS    ",
+        module: "BIOS",
+        id: 0x003D,
+        sdk: 0x040A,
+        version: (4, 10),
+        init_order: 0x1680_0001,
+    },
+    DynamicVxd {
+        name: b"ISAPNP  ",
+        module: "ISAPNP",
+        id: 0x003C,
+        sdk: 0x040A,
+        version: (4, 10),
+        init_order: 0x1680_0000,
+    },
+    DynamicVxd {
+        name: b"PCI     ",
+        module: "PCI",
+        id: 0x0043,
+        sdk: 0x040A,
+        version: (4, 10),
+        init_order: 0x1680_0000,
+    },
+    DynamicVxd {
+        name: b"APIX    ",
+        module: "APIX",
+        id: 0x0022,
+        sdk: 0x0400,
+        version: (3, 10),
+        init_order: UNDEFINED_INIT_ORDER,
+    },
+    DynamicVxd {
+        name: b"CDFS    ",
+        module: "CDFS",
+        id: 0,
+        sdk: 0x040A,
+        version: (3, 0),
+        init_order: 0xA001_0100,
+    },
+    DynamicVxd {
+        name: b"CDTSD   ",
+        module: "CDTSD",
+        id: 0,
+        sdk: 0x0400,
+        version: (3, 10),
+        init_order: UNDEFINED_INIT_ORDER,
+    },
+    DynamicVxd {
+        name: b"CDVSD   ",
+        module: "CDVSD",
+        id: 0,
+        sdk: 0x040A,
+        version: (3, 10),
+        init_order: UNDEFINED_INIT_ORDER,
+    },
+    DynamicVxd {
+        name: b"DiskTSD ",
+        module: "DiskTSD",
+        id: 0,
+        sdk: 0x040A,
+        version: (3, 10),
+        init_order: UNDEFINED_INIT_ORDER,
+    },
+    DynamicVxd {
+        name: b"voltrack",
+        module: "voltrack",
+        id: 0x0090,
+        sdk: 0x0400,
+        version: (3, 10),
+        init_order: UNDEFINED_INIT_ORDER,
+    },
+    DynamicVxd {
+        name: b"ESDI_506",
+        module: "ESDI_506",
+        id: 0x008D,
+        sdk: 0x0400,
+        version: (3, 10),
+        init_order: UNDEFINED_INIT_ORDER,
+    },
+];
+
+/// The init order of a VxD that has no place of its own among the
+/// others: it comes after them.
+const UNDEFINED_INIT_ORDER: u32 = 0x8000_0000;
+/// The flags of a dynamically loaded VxD's DDB on Windows 98 SE, once it
+/// has started: bit 15, which VXDLDR sets on the VxDs it loads, and bits
+/// 1 and 2.
+const DYNAMIC_DDB_FLAGS: u16 = 0x8006;
+/// The signature of a DeviceInfo, "XVLD" read as a dword.
+const DEVICE_INFO_SIGNATURE: u32 = 0x444C_5658;
+
+/// The DDB's three reserved dwords, which VMM.INC's
+/// Declare_Virtual_Device fills with the signatures 'Rsv1' to 'Rsv3',
+/// as MASM stores a dword of four characters: the first character in
+/// the high byte, so that memory reads "1vsR" and so on, as on Windows
+/// 98 SE.
+const DDB_RESERVED_BYTES: &[u8; 12] = b"1vsR2vsR3vsR";
+
+/// VMM's DDB, the VxD location list and the dynamically loaded VxDs, in
+/// the system block at `phys`.
 ///
-/// The DDB has the fields of Windows 98 SE's VMM that say what it is:
+/// VMM's DDB has the fields of Windows 98 SE's VMM that say what it is:
 /// the name, the id 0001h, version 4.10 for both the DDK and VMM, its
 /// size and the three reserved signatures. It has no procedures and no
 /// service table: the built-in Windows runs VMM's services itself.
@@ -172,9 +328,16 @@ pub fn build_tables(cpu: &mut Cpu, memory: &mut Memory, phys: u32, tib: u32) -> 
 /// address, a byte with the number of objects, and for each object its
 /// address, its size and a byte with its type (01h locked code, 03h
 /// pageable code, 04h pageable data and so on, VXDLDR's object types).
-/// Windows 98 SE lists some 50 VxDs there, VMM first. The built-in
-/// Windows has VMM alone, whose locked code is this block: the IDT's
-/// gates lead to its handlers, as Windows 98's lead into VMM's objects.
+/// Windows 98 SE lists some 50 VxDs there, VMM first: those loaded at
+/// the start, before VXDLDR's. The built-in Windows has VMM alone, whose
+/// locked code is this block up to the dynamically loaded VxDs: the
+/// IDT's gates lead to its handlers, as Windows 98's lead into VMM's
+/// objects.
+///
+/// The VxDs loaded since the start are `write_dynamic_vxds`'s, each with
+/// an object of its own after VMM's, as no two VxDs' objects overlap on
+/// Windows 98. VMM's DDB heads the list of all DDBs (VMM_GetDDBList),
+/// theirs included.
 fn write_vmm_data(cpu: &mut Cpu, phys: u32) {
     let ddb = (phys + VMM_DDB) as usize;
     cpu.bus.write_16(ddb + 0x04, 0x040A);
@@ -183,15 +346,110 @@ fn write_vmm_data(cpu: &mut Cpu, phys: u32) {
     cpu.bus.write_8(ddb + 0x09, 10);
     cpu.bus.load_bytes(ddb + 0x0C, b"VMM     ");
     cpu.bus.write_32(ddb + 0x40, DDB_SIZE);
-    cpu.bus.load_bytes(ddb + 0x44, b"Rsv1Rsv2Rsv3");
+    cpu.bus.load_bytes(ddb + 0x44, DDB_RESERVED_BYTES);
+    write_dynamic_vxds(cpu, phys);
     let mut list = Vec::with_capacity(VXD_LOCATIONS_LEN as usize);
     list.extend_from_slice(&(SYSTEM + VMM_DDB).to_le_bytes());
     list.push(1);
     list.extend_from_slice(&SYSTEM.to_le_bytes());
-    list.extend_from_slice(&(SYSTEM_BLOCK_PAGES * PAGE).to_le_bytes());
+    list.extend_from_slice(&VXDS.to_le_bytes());
     list.push(OBJECT_LOCKED_CODE);
     debug_assert_eq!(list.len(), VXD_LOCATIONS_LEN as usize);
     cpu.bus.load_bytes((phys + VXD_LOCATIONS) as usize, &list);
+}
+
+/// The address of the `index`th of `DYNAMIC_VXDS` in the system arena.
+fn vxd_at(index: usize) -> u32 {
+    SYSTEM + VXDS + VXD_SIZE * index as u32
+}
+
+/// The DeviceInfo list's head: the VxD loaded last comes first.
+fn device_list_head() -> u32 {
+    vxd_at(DYNAMIC_VXDS.len() - 1) + VXD_INFO
+}
+
+/// The dynamically loaded VxDs (`DYNAMIC_VXDS`), in the system block at
+/// `phys`, and the DDB list that starts at VMM's DDB.
+///
+/// Each VxD has one object, of locked code: a control procedure that
+/// answers every system control message with success (carry clear), as
+/// a VxD does for the messages it doesn't handle, and the DDB, which
+/// points at it. The built-in Windows does the VxD's work itself and
+/// sends it no messages, but the DDB has a working procedure as every
+/// VxD's does.
+///
+/// VXDLDR describes each VxD it loads with a DeviceInfo (VXDLDR.H, and
+/// Geoff Chappell's notes on VXDLDR), packed: the next DeviceInfo (+00h,
+/// the one of the VxD loaded before), the load count (+04h, a byte), the
+/// DDB (+05h), the device id (+09h, a word), the module's name (+0Bh),
+/// the signature "XVLD" (+0Fh), the number of objects (+13h), the
+/// ObjectInfo array (+17h) and the V86 and protected mode API entry
+/// points (+1Bh, +1Fh), 0 for these VxDs. An ObjectInfo is four dwords:
+/// the object's address, its size, its type and 0, the object being of
+/// this load.
+///
+/// On Windows 98 SE the DDBs of the VxDs VXDLDR loads are in VMM's DDB
+/// list too, each put in by its init order after those of the same or a
+/// lower one, and each DDB's DDB_Prev points at the one before it, VMM's
+/// at the last.
+fn write_dynamic_vxds(cpu: &mut Cpu, phys: u32) {
+    let bus = &mut cpu.bus;
+    let ddb_of = |index: usize| vxd_at(index) + VXD_DDB;
+    for (index, vxd) in DYNAMIC_VXDS.iter().enumerate() {
+        let at = vxd_at(index);
+        let base = (phys + (at - SYSTEM)) as usize;
+        // clc ; ret
+        bus.load_bytes(base + VXD_CONTROL as usize, &[0xF8, 0xC3]);
+        let ddb = base + VXD_DDB as usize;
+        bus.write_16(ddb + DDB_SDK_VERSION as usize, vxd.sdk);
+        bus.write_16(ddb + DDB_DEVICE_ID as usize, vxd.id);
+        bus.write_8(ddb + DDB_VERSION as usize, vxd.version.0);
+        bus.write_8(ddb + DDB_VERSION as usize + 1, vxd.version.1);
+        bus.write_16(ddb + DDB_FLAGS as usize, DYNAMIC_DDB_FLAGS);
+        bus.load_bytes(ddb + DDB_NAME as usize, vxd.name);
+        bus.write_32(ddb + DDB_INIT_ORDER as usize, vxd.init_order);
+        bus.write_32(ddb + DDB_CONTROL_PROC as usize, at + VXD_CONTROL);
+        bus.write_32(ddb + DDB_SIZE_FIELD as usize, DDB_SIZE);
+        bus.load_bytes(ddb + DDB_RESERVED as usize, DDB_RESERVED_BYTES);
+
+        let info = base + VXD_INFO as usize;
+        let info_at = at + VXD_INFO;
+        let next = match index {
+            0 => 0,
+            _ => vxd_at(index - 1) + VXD_INFO,
+        };
+        bus.write_32(info, next);
+        bus.write_8(info + 0x04, 1);
+        bus.write_32(info + 0x05, ddb_of(index));
+        bus.write_16(info + 0x09, vxd.id);
+        bus.write_32(info + 0x0B, info_at + INFO_NAME);
+        bus.write_32(info + 0x0F, DEVICE_INFO_SIGNATURE);
+        bus.write_32(info + 0x13, 1);
+        bus.write_32(info + 0x17, info_at + INFO_OBJECTS);
+        let object = info + INFO_OBJECTS as usize;
+        bus.write_32(object, at);
+        bus.write_32(object + 4, VXD_OBJECT_SIZE);
+        bus.write_32(object + 8, OBJECT_LOCKED_CODE as u32);
+        let mut name = vxd.module.as_bytes().to_vec();
+        name.push(0);
+        bus.load_bytes(info + INFO_NAME as usize, &name);
+    }
+    // The DDB list: VMM's, then the others by init order, those of the
+    // same order in load order.
+    let mut order: Vec<usize> = (0..DYNAMIC_VXDS.len()).collect();
+    order.sort_by_key(|&index| DYNAMIC_VXDS[index].init_order);
+    let mut chain = vec![SYSTEM + VMM_DDB];
+    chain.extend(order.iter().map(|&index| ddb_of(index)));
+    let phys_of = |ddb: u32| (phys + (ddb - SYSTEM)) as usize;
+    for (k, &ddb) in chain.iter().enumerate() {
+        let next = chain.get(k + 1).copied().unwrap_or(0);
+        let prev = match k {
+            0 => chain[chain.len() - 1],
+            _ => chain[k - 1],
+        };
+        bus.write_32(phys_of(ddb) + DDB_NEXT as usize, next);
+        bus.write_32(phys_of(ddb) + DDB_PREV as usize, prev);
+    }
 }
 
 /// VXDLDR's object type of locked code (LCODE).
@@ -200,7 +458,16 @@ const OBJECT_LOCKED_CODE: u8 = 0x01;
 /// The VxD services that a program's level 0 code calls through INT 20h,
 /// the VxD's id in the high word and the service in the low one.
 const VMM_GET_VXD_LOCATION_LIST: u32 = 0x0001_013E;
+const VMM_GET_DDB_LIST: u32 = 0x0001_013F;
+const GET_DDB: u32 = 0x0001_0146;
 const VXDLDR_GET_DEVICE_LIST: u32 = 0x0027_0005;
+
+/// The index of EDI in `Context::gpr`.
+const EDI: usize = 7;
+
+/// The most DDBs Get_DDB looks at, so that a list a program has made
+/// circular can't keep it going.
+const DDB_LIST_LIMIT: usize = 1024;
 
 /// Run the VxD service `service` for a program's level 0 code, in its
 /// context `ctx`, if the built-in Windows has it. SafeDisc 2.30
@@ -212,17 +479,28 @@ const VXDLDR_GET_DEVICE_LIST: u32 = 0x0027_0005;
 /// other registers. Windows 98 SE's VMM keeps the three from its start
 /// and loads them, and its flags are those of a test of EAX.
 ///
+/// VMM_GetDDBList returns in EAX the first DDB of the list of all VxDs,
+/// VMM's, which the others follow through DDB_Next.
+///
+/// Get_DDB finds a VxD's DDB in that list: by its id in EAX, or with EAX
+/// 0 (Undefined_Device_ID) by the 8 bytes of its name at EDI. It returns
+/// the DDB in ECX, or 0 if there is none, and leaves the other registers
+/// as they were. As Windows 98 SE's, it returns with CF clear when it
+/// finds the DDB and set when it doesn't, and the other arithmetic flags
+/// as its search leaves them: all clear for a DDB found by id, ZF and PF
+/// set for one found by name, and SF set when there is none.
+///
 /// VXDLDR_GetDeviceList returns in EAX the first of the DeviceInfo
 /// blocks of the VxDs loaded since the start (dynamically loaded), each
 /// linked to the next, and changes nothing else, flags included: Windows
 /// 98 SE's VXDLDR loads the head of the list. The built-in Windows has
-/// loaded none, so the list is empty and EAX 0.
+/// those of `DYNAMIC_VXDS`.
 ///
 /// Windows 98's VMM also rewrites the INT 20h and its dword into a call
 /// through the VxD's service table, so that the next call goes there
 /// directly. The built-in Windows has no service tables and leaves the
 /// code as it is: each call comes back here.
-fn vxd_service(service: u32, ctx: &mut Context) -> bool {
+fn vxd_service(cpu: &mut Cpu, service: u32, ctx: &mut Context) -> bool {
     match service {
         VMM_GET_VXD_LOCATION_LIST => {
             let list = SYSTEM + VXD_LOCATIONS;
@@ -234,12 +512,53 @@ fn vxd_service(service: u32, ctx: &mut Context) -> bool {
             ctx.eflags = (ctx.eflags & !alu::ARITH) | alu::logic(4, list);
             true
         }
+        VMM_GET_DDB_LIST => {
+            ctx.gpr[EAX] = SYSTEM + VMM_DDB;
+            true
+        }
+        GET_DDB => {
+            let by_name = ctx.gpr[EAX] == 0;
+            let ddb = find_ddb(cpu, ctx.gpr[EAX], ctx.gpr[EDI]);
+            ctx.gpr[ECX] = ddb;
+            let flags = match (ddb, by_name) {
+                (0, _) => alu::CF | alu::SF,
+                (_, true) => alu::ZF | alu::PF,
+                (_, false) => 0,
+            };
+            ctx.eflags = (ctx.eflags & !alu::ARITH) | flags;
+            true
+        }
         VXDLDR_GET_DEVICE_LIST => {
-            ctx.gpr[EAX] = 0;
+            ctx.gpr[EAX] = device_list_head();
             true
         }
         _ => false,
     }
+}
+
+/// The DDB with the id `id` in VMM's DDB list, or with `id` 0 the one
+/// whose name is the 8 bytes at `name`; 0 if there is none. The list is
+/// read from memory, as a program may have changed it.
+fn find_ddb(cpu: &mut Cpu, id: u32, name: u32) -> u32 {
+    let wanted: Vec<u8> = match id {
+        0 => (0..8).map(|i| cpu.bus.guest_read_8(name + i)).collect(),
+        _ => Vec::new(),
+    };
+    let mut ddb = SYSTEM + VMM_DDB;
+    for _ in 0..DDB_LIST_LIMIT {
+        if ddb == 0 {
+            break;
+        }
+        let found = match id {
+            0 => (0..8).all(|i| cpu.bus.guest_read_8(ddb + DDB_NAME + i) == wanted[i as usize]),
+            _ => cpu.bus.guest_read_16(ddb + DDB_DEVICE_ID) as u32 == id,
+        };
+        if found {
+            return ddb;
+        }
+        ddb = cpu.bus.guest_read_32(ddb + DDB_NEXT);
+    }
+    0
 }
 
 /// Let level 3 use INT n for the vectors from 10h on, in the IDT of the
@@ -531,7 +850,7 @@ pub fn idt(cpu: &mut Cpu, vector: u8) {
         // bytes before the dword.
         Some(Entry::System(mut ctx)) if vector == 0x20 => {
             let service = cpu.bus.guest_read_32(ctx.eip);
-            if vxd_service(service & !0x8000, &mut ctx) {
+            if vxd_service(cpu, service & !0x8000, &mut ctx) {
                 if service & 0x8000 != 0 {
                     // VxDJmp: the service returns to the caller's caller,
                     // through the address at the top of the stack.
