@@ -1,6 +1,7 @@
 //! D3D8.DLL: Direct3D 8, as DirectX 8.1 had it on Windows 98 with a 3dfx
-//! Banshee or Voodoo3: IDirect3D8 and the device, swap chains, surfaces,
-//! textures and vertex and index buffers it makes.
+//! Banshee or Voodoo3, and on a ToadForce: IDirect3D8 and the device,
+//! swap chains, surfaces, textures and vertex and index buffers it
+//! makes.
 //!
 //! It is a layer over DirectDraw's Direct3D (`ddraw::d3d`). Each device
 //! has a DirectDraw object of its own and a Direct3D device of version 8
@@ -19,13 +20,15 @@
 //! device is drawing with; they go with the device (or when the device
 //! lets go of them). A texture's levels count on their texture.
 //!
-//! The only device type is the HAL, with software vertex processing:
-//! transform, lighting and vertex shaders (vs.1.0 and 1.1, `shader.rs`)
-//! run on the processor. There are no pixel shaders, cube or volume
-//! textures, or reference rasterizer. On a machine whose display adapter
-//! isn't a Banshee or Voodoo3 (one with a Voodoo Graphics or Voodoo2
-//! add-on card) there is no device: CreateDevice fails with
-//! D3DERR_NOTAVAILABLE.
+//! The only device type is the HAL. On a Voodoo it has software vertex
+//! processing: transform, lighting and vertex shaders (vs.1.0 and 1.1,
+//! `shader.rs`) run on the processor. A ToadForce transforms and lights
+//! itself, and its device takes hardware and mixed vertex processing
+//! too; shaders and indexed vertex blending stay on the processor
+//! (`caps.rs`). There are no pixel shaders, cube or volume textures, or
+//! reference rasterizer. On a machine whose display adapter is none of
+//! the three (one with a Voodoo Graphics or Voodoo2 add-on card) there
+//! is no device: CreateDevice fails with D3DERR_NOTAVAILABLE.
 //!
 //! Parts of this follow Wine 1.2.3's d3d8 (device.c, directx.c,
 //! vertexdeclaration.c and others), which is under the GNU Lesser General

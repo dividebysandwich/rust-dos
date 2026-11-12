@@ -1454,7 +1454,13 @@ Each phase is one or a few pull requests that leave main working.
    phase 2 and 3 games at their full frame rate on it, measured against
    the software renderer on a four-core host as well as a larger one.
 5. **Direct3D 8 and OpenGL 1.3 on the card**, with the OpenGL front end
-   separated from WGL. Proof: Max Payne, MDK2, Oni.
+   separated from WGL. Proof: Max Payne, MDK2, Oni. Started: Direct3D 8
+   makes its device on the card, with hardware or mixed vertex
+   processing, the HAL's texture formats and a D24S8 depth buffer, and
+   a DirectDraw z-buffer keeps its stencil bits. The four games draw
+   their first levels on the card (see "Phase 5 on the card"). Left:
+   OpenGL 1.3's extensions, cube textures in Direct3D 8, and the OpenGL
+   front end's vertices transformed and lit by the card.
 6. **Performance.** Optimisation passes over the working
    implementation of phases 1 to 5. The target: every game of the
    primary list (the eight of phase 0) holds a stable 30 frames a
@@ -1469,6 +1475,81 @@ Postponed, with no place in the order (decided 2026-11-12):
   and Direct3D HAL, then OpenGL): the card serves the built-in
   Windows only for now. Black & White, which the driver was to
   unblock, then waits for #889 alone.
+
+### Phase 5 on the card (2026-11-12)
+
+The four games of phase 5 on `svga_toadforce`, on the built-in
+Windows, each from its launcher to its first level. "Before" is the
+branch of phase 4. The frame rates are rough: other emulators ran
+beside each run.
+
+| Game | Before | Now, with the OpenGL renderer |
+|---|---|---|
+| Max Payne (Direct3D 8) | No adapter: `GetDeviceCaps` fails with `D3DERR_NOTAVAILABLE` | The tutorial level with "D3D Hardware T&L": every draw transformed by the card, no read-back, about 30 frames a second |
+| No One Lives Forever (Direct3D 7) | Menus without their backgrounds and text, the first cutscene a blue band | The menus and the first mission's cutscenes; no frame rate taken |
+| MDK2 (OpenGL) | The first level (run with the launcher's T&L box clear) | The same, with the box clear and ticked; about 28 frames a second ticked |
+| Oni (OpenGL) | The training room | The same |
+
+No draw was declined by the host renderer in any of them, and the card
+rejected no command.
+
+What the games asked of the card, where it differs from the Voodoo3's
+traces of phase 0:
+
+- **Max Payne** lists the adapter and offers "D3D Software T&L" and
+  "D3D Hardware T&L". The second makes
+  a device with `D3DCREATE_MIXED_VERTEXPROCESSING`. It checks
+  A8R8G8B8, V8U8, L6V5U5 and DXT1, 3 and 5 as textures and D24S8 and
+  D24X8 as depth formats, takes D24S8, and clears colour, depth and
+  stencil in one `Clear`. Formats it checks and the card has none of:
+  R8G8B8, Q8W8V8U8, W11V11U10 and D32. With software vertex processing
+  it draws its characters with the blended vertex formats 0x1118 and
+  0x1116, which the layer blends on the processor as on the Voodoo3
+  (3% of the draws). With mixed processing it set neither in the
+  tutorial, and the card transformed every draw.
+- **No One Lives Forever** takes the 32-bit z-buffer format with 8
+  bits of stencil from `EnumZBufferFormats` and clears depth and
+  stencil together each frame. DirectDraw dropped the stencil bits
+  of the format, so every such `Clear` failed and cleared nothing.
+  The `BltFast` of compressed surfaces that failed on the Voodoo3
+  doesn't come up: the textures are in the card's own formats. The
+  driver reads the target 1.7 times a frame in the menus and 0.4
+  times over the whole run.
+- **MDK2** with the T&L box ticked lights through OpenGL
+  (`glLightfv`, `glMaterialfv`, `glColorMaterial` with `GL_EMISSION`,
+  `glNormal3sv`). The front end lights and transforms on the
+  processor, so the card sees screen vertices: 160 draws a frame of
+  3.5 primitives each. Its attract-mode demo shows the gauges alone
+  with the box ticked, on the Voodoo3 as well; not looked into.
+- **Oni** is as in phase 4.
+
+What is left of phase 5, with a guess of its size:
+
+- **OpenGL 1.3 on the card** (large). The front end reports 1.1 with
+  the Voodoo3 ICD's four extensions. The card has what 1.3 adds
+  (compressed and cube textures, the combine, add and dot3
+  environments, the border colour, four units), and none of the four
+  games asks for it. To write: the entry points and the lowering of
+  each, and the version and extension strings by card.
+- **The OpenGL front end's vertices on the card** (large, and what
+  the separation from WGL is for). The front end runs Direct3D's
+  pipeline on the processor for every `glEnd`, and puts its whole
+  state on a Direct3D device before each. With the matrices, lights
+  and materials sent as level 1 state, the card transforms and lights
+  as it does for Direct3D, and equal state is sent once. This is the
+  first item of phase 6 for Oni too.
+- **`SwapBuffers` without the read-back** (medium): one read of the
+  target a frame in MDK2 and Oni. A `BLT` or `FLIP` of the context's
+  back buffer on the card.
+- **Cube textures in Direct3D 8** (small): `CreateCubeTexture` over
+  DirectDraw's cube maps, which phase 3 made. No game here asks.
+- **Blended vertices on the card from Direct3D 8** (medium, #959):
+  a device with hardware processing reports the card's four matrices
+  without indices, and a draw with `D3DRS_VERTEXBLEND` set still goes
+  through the processor. Max Payne never reached it.
+- **No One Lives Forever's reads of the target** (medium): which
+  DirectDraw call asks after each draw, and whether the host can
+  serve it without a read-back.
 
 ### Frame rates against the target
 
