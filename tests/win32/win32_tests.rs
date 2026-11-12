@@ -6,6 +6,7 @@
 use iced_x86::code_asm::*;
 use rust_dos::cpu::{CoreMode, Cpu, HostConsole};
 use rust_dos::exec::{NoHook, StopReason, run_batch};
+use rust_dos::voodoo::Board;
 use rust_dos_pe::{self as pe, Builder, Imp};
 use std::fs;
 use std::path::PathBuf;
@@ -4374,69 +4375,236 @@ fn a_vxd_service_at_level_0_keeps_interrupts_off() {
 }
 
 /// VXDLDR_GetDeviceList from level 0 through VxDJmp, which returns to the
-/// caller's caller: the built-in Windows has loaded no VxDs since its
-/// start, so the list is empty and EAX 0, and the code goes on after the
-/// CALL that led to the VxDJmp. The service leaves the flags as they
-/// were: CF, set before the CALL, is still set.
+/// caller's caller, after the CALL that led to the VxDJmp. As on Windows
+/// 98 SE, the list has the VxDs loaded since the start, the IDE port
+/// driver ESDI_506 first, the one loaded last. Each DeviceInfo has the
+/// signature "XVLD" at 0Fh, its DDB at 05h is the one Get_DDB finds by
+/// the DDB's name and lies in the VxD's locked code object, which the
+/// ObjectInfo array at 17h describes, and the module's name at 0Bh is
+/// ESDI_506's for the first. The service leaves the flags as they were:
+/// CF, set before the CALL, is still set. The machine has no PCI bus, so
+/// PCI's VxD isn't loaded: the list has 9 VxDs, and Get_DDB doesn't find
+/// PCI's id.
 #[test]
-fn vxdldr_get_device_list_is_empty() {
-    let (code, text) = run_through_gate_28h(
-        "vxdldr_device_list",
-        &[
-            0xB8, 0xFF, 0xFF, 0xFF, 0xFF, // mov eax, -1
-            0xF9, // stc
-            0xE8, 0x0B, 0x00, 0x00, 0x00, // call jump
-            0x0F, 0x92, 0xC1, // setc cl
-            0x85, 0xC0, // test eax, eax
-            0x0F, 0x94, 0xC3, // sete bl
-            0x20, 0xCB, // and bl, cl
-            0xCF, // iretd
-            0xCD, 0x20, 0x05, 0x80, 0x27, 0x00, // jump: VxDJmp GetDeviceList
-        ],
-    );
+fn vxdldr_get_device_list_lists_the_vxds_loaded_since_the_start() {
+    let program = gate_28h_program(&device_list_level0(9, false));
+    let (code, text) = run("vxdldr_device_list", program);
     assert_eq!(code, 1, "{}", text);
 }
 
-/// Run `level0` at level 0, as SafeDisc 2.30 does: at 30h of the data
-/// section, through a gate of level 3 for vector 5 with selector 28h. The
-/// program ends with EBX's bit 0 after it returns.
+/// The VxDs loaded since the start on a machine with a PCI bus (a
+/// Voodoo2 on it): PCI's VxD too, 10 in all, and Get_DDB finds its id.
+#[test]
+fn vxdldr_get_device_list_has_pci_on_a_machine_with_a_pci_bus() {
+    let program = gate_28h_program(&device_list_level0(10, true));
+    let mut cpu = Cpu::new(scratch("vxdldr_device_list_pci", &[("T.EXE", program)]));
+    cpu.bus.configure_voodoo(Some(Board::Voodoo2));
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 1, "{}", printed(&cpu));
+}
+
+/// Level 0 code that walks VXDLDR's device list as
+/// `vxdldr_get_device_list_lists_the_vxds_loaded_since_the_start` says,
+/// and sets EBX to 1 when it has `vxds` VxDs and Get_DDB finds PCI's id
+/// (0043h) if `pci`, and doesn't if not.
+fn device_list_level0(vxds: u32, pci: bool) -> Vec<u8> {
+    level0_code(|a| {
+        let mut jump = a.create_label();
+        let mut walk = a.create_label();
+        let mut end = a.create_label();
+        let mut fail = a.create_label();
+        a.push(ebp)?;
+        a.push(esi)?;
+        a.push(edi)?;
+        a.xor(ebp, ebp)?;
+        a.mov(eax, 0xFFFF_FFFFu32)?;
+        a.stc()?;
+        a.call(jump)?;
+        a.jnc(fail)?;
+        a.mov(esi, eax)?;
+        // The first module's name.
+        a.mov(edx, dword_ptr(esi + 0x0B))?;
+        a.cmp(dword_ptr(edx), 0x4944_5345)?; // "ESDI"
+        a.jne(fail)?;
+        a.set_label(&mut walk)?;
+        a.test(esi, esi)?;
+        a.jz(end)?;
+        a.cmp(dword_ptr(esi + 0x0F), 0x444C_5658)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 0x13), 1)?;
+        a.jne(fail)?;
+        // Get_DDB by the DDB's name finds the DDB.
+        a.mov(edx, dword_ptr(esi + 5))?;
+        a.lea(edi, dword_ptr(edx + 0x0C))?;
+        a.xor(eax, eax)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_0146])?;
+        a.cmp(ecx, edx)?;
+        a.jne(fail)?;
+        // The DDB is in the locked code object.
+        a.mov(edi, dword_ptr(esi + 0x17))?;
+        a.cmp(dword_ptr(edi + 8), 1)?;
+        a.jne(fail)?;
+        a.mov(eax, dword_ptr(edi))?;
+        a.cmp(edx, eax)?;
+        a.jb(fail)?;
+        a.add(eax, dword_ptr(edi + 4))?;
+        a.cmp(edx, eax)?;
+        a.jae(fail)?;
+        a.inc(ebp)?;
+        a.mov(esi, dword_ptr(esi))?;
+        a.jmp(walk)?;
+        a.set_label(&mut end)?;
+        a.cmp(ebp, vxds)?;
+        a.jne(fail)?;
+        // Get_DDB of PCI's id.
+        a.mov(eax, 0x43)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_0146])?;
+        a.test(ecx, ecx)?;
+        if pci {
+            a.jz(fail)?;
+        } else {
+            a.jnz(fail)?;
+        }
+        a.mov(ebx, 1)?;
+        a.set_label(&mut fail)?;
+        a.pop(edi)?;
+        a.pop(esi)?;
+        a.pop(ebp)?;
+        a.iretd()?;
+        // VxDJmp VXDLDR_GetDeviceList
+        a.set_label(&mut jump)?;
+        a.int(0x20)?;
+        a.dd(&[0x0027_8005])
+    })
+}
+
+/// VMM_GetDDBList returns VMM's DDB, the first of the list of all VxDs,
+/// and Get_DDB finds VxDs in that list as Windows 98 SE's does: by id in
+/// EAX (BIOS's, 003Dh) with ECX the DDB and the arithmetic flags clear,
+/// and with an id no VxD has with ECX 0 and CF set. The DDB found by id
+/// is in the list, after VMM's, and EAX, EDX and EDI stay as they were.
+/// VMM's DDB has its reserved signatures as MASM stores 'Rsv1' ("1vsR"
+/// in memory), and its DDB_Prev is the list's last DDB. The code sets EBX
+/// to 1 when all of that holds.
+#[test]
+fn get_ddb_finds_vxds_in_the_ddb_list() {
+    let level0 = level0_code(|a| {
+        let mut walk = a.create_label();
+        let mut found = a.create_label();
+        let mut fail = a.create_label();
+        a.push(esi)?;
+        a.push(edi)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_013F])?; // VMM_GetDDBList
+        a.mov(esi, eax)?;
+        a.cmp(dword_ptr(esi + 0x0C), 0x204D_4D56)?; // "VMM "
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 0x44), 0x5273_7631)?; // "1vsR"
+        a.jne(fail)?;
+        // VMM's DDB_Prev is the last DDB, with no DDB_Next.
+        a.mov(edx, dword_ptr(esi + 0x3C))?;
+        a.cmp(edx, esi)?;
+        a.je(fail)?;
+        a.cmp(dword_ptr(edx), 0)?;
+        a.jne(fail)?;
+        a.mov(eax, 0x3D)?;
+        a.mov(edx, 0x5A5A_5A5A)?;
+        a.mov(edi, 0x1111_1111)?;
+        a.stc()?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_0146])?; // Get_DDB
+        a.pushfd()?;
+        a.pop(ebx)?;
+        a.test(ebx, 0x8D5)?; // the arithmetic flags
+        a.mov(ebx, 0)?;
+        a.jnz(fail)?;
+        a.cmp(eax, 0x3D)?;
+        a.jne(fail)?;
+        a.cmp(edx, 0x5A5A_5A5A)?;
+        a.jne(fail)?;
+        a.cmp(edi, 0x1111_1111)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(ecx + 0x0C), 0x534F_4942)?; // "BIOS"
+        a.jne(fail)?;
+        a.set_label(&mut walk)?;
+        a.mov(esi, dword_ptr(esi))?;
+        a.test(esi, esi)?;
+        a.jz(fail)?;
+        a.cmp(esi, ecx)?;
+        a.je(found)?;
+        a.jmp(walk)?;
+        a.set_label(&mut found)?;
+        a.mov(eax, 0x1234)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_0146])?; // Get_DDB of no VxD
+        a.jnc(fail)?;
+        a.test(ecx, ecx)?;
+        a.jnz(fail)?;
+        a.mov(ebx, 1)?;
+        a.set_label(&mut fail)?;
+        a.pop(edi)?;
+        a.pop(esi)?;
+        a.iretd()
+    });
+    let (code, text) = run_through_gate_28h("get_ddb", &level0);
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// Level 0 code assembled by `f`, which may jump only within itself.
+fn level0_code(f: impl FnOnce(&mut CodeAssembler) -> Result<(), IcedError>) -> Vec<u8> {
+    let mut a = CodeAssembler::new(32).unwrap();
+    f(&mut a).unwrap();
+    a.assemble(0).unwrap()
+}
+
+/// Run `level0` at level 0 (`gate_28h_program`).
 fn run_through_gate_28h(name: &str, level0: &[u8]) -> (u8, String) {
+    run(name, gate_28h_program(level0))
+}
+
+/// A program that runs `level0` at level 0, as SafeDisc 2.30 does: at 30h
+/// of the data section, through a gate of level 3 for vector 5 with
+/// selector 28h. The program ends with EBX's bit 0 after it returns.
+fn gate_28h_program(level0: &[u8]) -> Vec<u8> {
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
     let mut data = vec![0u8; 0x30 + level0.len().max(0x10)];
     data[0x30..0x30 + level0.len()].copy_from_slice(level0);
-    run(
-        name,
-        program(BASE, false, imports, &data, |a, l| {
-            // The IDT's base, from SIDT's 6 bytes at 0, and vector 5's
-            // gate, kept at 10h.
-            a.sidt(ptr(l.at(0)))?;
-            a.mov(esi, dword_ptr(l.at(2)))?;
-            a.add(esi, 5 * 8)?;
-            a.mov(eax, dword_ptr(esi))?;
-            a.mov(dword_ptr(l.at(0x10)), eax)?;
-            a.mov(eax, dword_ptr(esi + 4))?;
-            a.mov(dword_ptr(l.at(0x14)), eax)?;
-            // A 32-bit interrupt gate of level 3 to the code at 30h,
-            // selector 28h.
-            a.mov(eax, l.at(0x30) as u32)?;
-            a.mov(word_ptr(esi), ax)?;
-            a.mov(word_ptr(esi + 2), 0x28)?;
-            a.mov(word_ptr(esi + 4), 0xEE00)?;
-            a.shr(eax, 16)?;
-            a.mov(word_ptr(esi + 6), ax)?;
-            a.xor(ebx, ebx)?;
-            a.int(5)?;
-            // Put the gate back.
-            a.mov(eax, dword_ptr(l.at(0x10)))?;
-            a.mov(dword_ptr(esi), eax)?;
-            a.mov(eax, dword_ptr(l.at(0x14)))?;
-            a.mov(dword_ptr(esi + 4), eax)?;
-            a.and(ebx, 1)?;
-            a.push(ebx)?;
-            a.call(l.import(0))?;
-            a.int3()
-        }),
-    )
+    program(BASE, false, imports, &data, |a, l| {
+        // The IDT's base, from SIDT's 6 bytes at 0, and vector 5's
+        // gate, kept at 10h.
+        a.sidt(ptr(l.at(0)))?;
+        a.mov(esi, dword_ptr(l.at(2)))?;
+        a.add(esi, 5 * 8)?;
+        a.mov(eax, dword_ptr(esi))?;
+        a.mov(dword_ptr(l.at(0x10)), eax)?;
+        a.mov(eax, dword_ptr(esi + 4))?;
+        a.mov(dword_ptr(l.at(0x14)), eax)?;
+        // A 32-bit interrupt gate of level 3 to the code at 30h,
+        // selector 28h.
+        a.mov(eax, l.at(0x30) as u32)?;
+        a.mov(word_ptr(esi), ax)?;
+        a.mov(word_ptr(esi + 2), 0x28)?;
+        a.mov(word_ptr(esi + 4), 0xEE00)?;
+        a.shr(eax, 16)?;
+        a.mov(word_ptr(esi + 6), ax)?;
+        a.xor(ebx, ebx)?;
+        a.int(5)?;
+        // Put the gate back.
+        a.mov(eax, dword_ptr(l.at(0x10)))?;
+        a.mov(dword_ptr(esi), eax)?;
+        a.mov(eax, dword_ptr(l.at(0x14)))?;
+        a.mov(dword_ptr(esi + 4), eax)?;
+        a.and(ebx, 1)?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    })
 }
 
 /// C.DLL, whose entry point returns FALSE, and exports F.
