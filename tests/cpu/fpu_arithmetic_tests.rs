@@ -678,3 +678,97 @@ fn fscale_fxtract_fchs_and_trigonometry_edges() {
     assert_eq!(cpu.fpu_get(0).get(), 0xFFFF_C000_0000_0000_0000);
     assert!(cpu.get_fpu_flag(FpuFlags::IE));
 }
+
+#[test]
+fn fscale_of_zeros_infinities_and_results_past_the_range() {
+    let bits = |v: f64| {
+        let mut f = F80::new();
+        f.set_f64(v);
+        f.get()
+    };
+    // FSCALE (D9 FD) of ST(0) by ST(1): the result's bits and the
+    // exceptions it raises (IE, OE, UE).
+    let scale = |value: u128, power: u128| {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        for v in [power, value] {
+            let mut f = F80::new();
+            f.set(v);
+            cpu.fpu_push(f);
+        }
+        testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xFD]);
+        let flags = [FpuFlags::IE, FpuFlags::OE, FpuFlags::UE].map(|f| cpu.get_fpu_flag(f));
+        (cpu.fpu_get(0).get(), flags)
+    };
+    let indefinite = 0xFFFF_C000_0000_0000_0000u128;
+    let none = [false; 3];
+    let cases = [
+        // A zero stays a zero, however far it is scaled: MSVC's pow
+        // scales an underflowed 0 by 2^1536 to tell how far it fell.
+        (bits(0.0), bits(1536.0), bits(0.0), none),
+        (bits(-0.0), bits(1e6), bits(-0.0), none),
+        (bits(0.0), bits(f64::NEG_INFINITY), bits(0.0), none),
+        (bits(0.0), bits(f64::INFINITY), indefinite, [true, false, false]),
+        // An infinity stays one, but scaled down without end.
+        (bits(f64::INFINITY), bits(-5.0), bits(f64::INFINITY), none),
+        (bits(f64::INFINITY), bits(f64::NEG_INFINITY), indefinite, [true, false, false]),
+        // A finite number by an infinite power.
+        (bits(-3.0), bits(f64::NEG_INFINITY), bits(-0.0), none),
+        (bits(3.0), bits(f64::INFINITY), bits(f64::INFINITY), none),
+        // Past the 80 bits' range: an infinity, and a zero.
+        (bits(1.0), bits(20000.0), bits(f64::INFINITY), [false, true, false]),
+        (bits(0.75), bits(-17175.0), bits(0.0), [false, false, true]),
+        // Below the normal numbers, a denormal that keeps its bits.
+        (bits(1.0), bits(-16400.0), 1 << 45, none),
+        // The smallest denormal, rounded to nearest from three quarters
+        // of it.
+        (bits(1.5), bits(-16446.0), 1, [false, false, true]),
+    ];
+    for (value, power, result, flags) in cases {
+        let r = scale(value, power);
+        assert_eq!(r, (result, flags), "{value:020X} * 2^{power:020X}");
+    }
+}
+
+#[test]
+fn fscale_truncates_all_64_bits_and_flags_denormals_and_empty_registers() {
+    let bits = |v: f64| {
+        let mut f = F80::new();
+        f.set_f64(v);
+        f.get()
+    };
+    // FSCALE (D9 FD) of ST(0) by ST(1) as the control word `control`
+    // says: the result's bits, and DE, IE, SF, OE and C1.
+    let scale = |stack: &[u128], control: u16| {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.fpu_control = control;
+        for &v in stack {
+            let mut f = F80::new();
+            f.set(v);
+            cpu.fpu_push(f);
+        }
+        testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xFD]);
+        let flags = [FpuFlags::DE, FpuFlags::IE, FpuFlags::SF, FpuFlags::OE, FpuFlags::C1];
+        (cpu.fpu_get(0).get(), flags.map(|f| cpu.get_fpu_flag(f)))
+    };
+    let nearest = 0x037F;
+    let none = [false; 5];
+    // 4 - 2^-62 truncates to 3; as a double it would round to 4 first.
+    let below_four = 0x4000_FFFF_FFFF_FFFF_FFFFu128;
+    assert_eq!(scale(&[below_four, bits(1.0)], nearest), (bits(8.0), none));
+    // A power of 0 or -0 isn't a denormal operand.
+    assert_eq!(scale(&[bits(0.0), bits(1.5)], nearest), (bits(1.5), none));
+    assert_eq!(scale(&[bits(-0.0), bits(1.5)], nearest), (bits(1.5), none));
+    // A denormal power is 0, with DE.
+    let de = [true, false, false, false, false];
+    assert_eq!(scale(&[1, bits(1.5)], nearest), (bits(1.5), de));
+    // DE also where the result is a zero's or an infinity's.
+    assert_eq!(scale(&[1, bits(0.0)], nearest), (bits(0.0), de));
+    assert_eq!(scale(&[bits(f64::INFINITY), 1], nearest), (bits(f64::INFINITY), de));
+    // Overflow rounded toward 0: the largest finite number, C1 clear.
+    let overflow = scale(&[bits(20000.0), bits(1.0)], nearest | 0x0C00);
+    assert_eq!(overflow, (0x7FFE_FFFF_FFFF_FFFF_FFFF, [false, false, false, true, false]));
+    // An empty ST(1): a stack underflow, the real indefinite in ST(0).
+    let indefinite = 0xFFFF_C000_0000_0000_0000u128;
+    let underflow = [false, true, true, false, false];
+    assert_eq!(scale(&[bits(1.0)], nearest), (indefinite, underflow));
+}

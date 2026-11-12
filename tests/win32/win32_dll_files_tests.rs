@@ -10,8 +10,10 @@ use rust_dos::cpu::{Cpu, HostConsole};
 use rust_dos::exec::{NoHook, StopReason, run_batch};
 use rust_dos::voodoo::Board;
 use rust_dos_pe::{self as pe, Builder, Imp};
+use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 const BASE: u32 = 0x40_0000;
 
@@ -24,6 +26,7 @@ const OPEN_EXISTING: u32 = 3;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 const OF_EXIST: u32 = 0x4000;
 const ERROR_ACCESS_DENIED: u32 = 5;
+const ERROR_DLL_NOT_FOUND: u32 = 1157;
 
 /// Where a test program's data and imports are, for its code.
 struct Layout {
@@ -107,9 +110,24 @@ fn scratch(name: &str, files: &[(&str, &[u8])]) -> PathBuf {
 /// programs print nothing: an exception, which ends a program with exit
 /// code FFh, prints a message.
 fn run(test: &str, board: Option<Board>, files: &[(&str, &[u8])], program: Vec<u8>) -> u8 {
+    run_logged(test, board, files, program).0
+}
+
+/// `run`, and the lines the emulator logged meanwhile.
+fn run_logged(
+    test: &str,
+    board: Option<Board>,
+    files: &[(&str, &[u8])],
+    program: Vec<u8>,
+) -> (u8, Vec<String>) {
     let mut all = files.to_vec();
     all.push(("T.EXE", &program));
     let mut cpu = Cpu::new(scratch(test, &all));
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let lines = log.clone();
+    cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+        lines.borrow_mut().push(line.to_string())
+    }));
     cpu.bus.win32.enabled = true;
     cpu.bus.configure_voodoo(board);
     cpu.host_console = Some(HostConsole::default());
@@ -121,7 +139,8 @@ fn run(test: &str, board: Option<Board>, files: &[(&str, &[u8])], program: Vec<u
             let console = cpu.host_console.as_ref().unwrap();
             let printed = [&console.stdout[..], &console.stderr[..]].concat();
             assert!(printed.is_empty(), "{}", String::from_utf8_lossy(&printed));
-            return cpu.errorlevel;
+            let lines = log.borrow().clone();
+            return (cpu.errorlevel, lines);
         }
     }
     let console = cpu.host_console.as_ref().unwrap();
@@ -510,6 +529,59 @@ fn glide2x_dll_is_there_with_a_3dfx_card_alone() {
         7
     );
     assert_eq!(run("no-glide", None, &[], finds_glide()), 0);
+}
+
+/// Loads `path`, a DLL that isn't there, and checks that the load fails
+/// with ERROR_DLL_NOT_FOUND. Wine's tests record that code for Windows 9x
+/// when a DLL named without a path is missing; a full path to a missing
+/// file is taken to fail the same way.
+fn loads_a_missing_file(path: &str) -> Vec<u8> {
+    let mut data = vec![0; 0x100];
+    put(&mut data, 0, path.as_bytes());
+    program(&[("KERNEL32.DLL", KERNEL32)], &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        call(a, l.import("LoadLibraryA"), &[l.at(0)])?;
+        failed_with(a, l, 0, ERROR_DLL_NOT_FOUND, 0)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    })
+}
+
+/// The line the emulator logs for the failed load of `path`, by the test
+/// `test`.
+fn missing_file_line(test: &str, path: &str) -> String {
+    let (exit, log) = run_logged(test, None, &[], loads_a_missing_file(path));
+    assert_eq!(exit, 1, "{}", path);
+    let failed = format!("LoadLibrary({}) failed", path);
+    log.into_iter()
+        .find(|l| l.contains(&failed))
+        .expect("the failed load's line")
+}
+
+/// A DLL a program loads by a path outside the Windows and system
+/// directories is a file of its own: when it isn't there, the load fails,
+/// and the log says the file is missing, since there is nothing the
+/// built-in Windows lacks. No One Lives Forever loads the language DLL
+/// it looks for in its rez files and doesn't find this way.
+#[test]
+fn a_missing_dll_file_is_logged_as_missing() {
+    let line = missing_file_line("missing", r"C:\WINDOWS\TEMP\CRESL.DLL");
+    assert!(line.ends_with("and there is no such file."), "{}", line);
+}
+
+/// A missing DLL by a path into the system or the Windows directory may
+/// be one that Windows has there, so the log says the built-in Windows
+/// lacks it.
+#[test]
+fn a_missing_windows_dll_is_logged_as_lacking() {
+    for (test, path) in [
+        ("missing-system", r"C:\WINDOWS\SYSTEM\NOSUCH.DLL"),
+        ("missing-windows", r"C:\WINDOWS\TWAIN_32.DLL"),
+    ] {
+        let line = missing_file_line(test, path);
+        let lacking = "which the built-in Windows doesn't have yet.";
+        assert!(line.ends_with(lacking), "{}", line);
+    }
 }
 
 /// Tries to write, make, delete, rename, copy over and change the

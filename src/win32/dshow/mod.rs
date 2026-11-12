@@ -434,7 +434,7 @@ static QUARTZ_APIS: &[Api] = &[
         3,
         graph::get_ideal_image_size,
     ),
-    method("Window_GetRestorePosition", 5, graph::get_window_position),
+    method("Window_GetRestorePosition", 5, graph::get_restore_position),
     method("Window_HideCursor", 2, graph::hide_cursor),
     method("Window_IsCursorHidden", 2, graph::is_cursor_hidden),
     // IBasicVideo.
