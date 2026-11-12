@@ -99,6 +99,11 @@ fn quad(x: f32, y: f32, size: f32, diffuse: u32, repeat: f32) -> Vec<V> {
     ]
 }
 
+/// The time of every access of the tests.
+pub(super) fn live() -> Live {
+    Rig::live()
+}
+
 /// A card with a 64x64 render target and a viewport of all of it.
 struct Rig {
     card: ToadForce,
@@ -299,7 +304,7 @@ const CLOSE: Bound = Bound {
 };
 
 /// What a scene is drawn on.
-struct Bench {
+pub(super) struct Bench {
     gl: Rc<glow::Context>,
     /// Keep 5-6-5 targets in 8 bits a channel.
     wide: std::cell::Cell<bool>,
@@ -319,7 +324,7 @@ macro_rules! bench {
 }
 
 impl Bench {
-    fn host(&self) -> Box<ToadForceGl> {
+    pub(super) fn host(&self) -> Box<ToadForceGl> {
         let mut host = ToadForceGl::new(Rc::clone(&self.gl), Glsl::Gl150).unwrap();
         if self.wide.get() {
             host.keep_wide();
@@ -1456,4 +1461,22 @@ fn anisotropy_and_a_linearly_filtered_bump_texture_agree() {
             rig.draw(&quad(4.0, 4.0, 48.0, WHITE, 1.0));
         });
     }
+}
+
+/// Play the recording the environment's `TOADFORCE_CAPTURE` names
+/// (`toadforce::capture`) through both renderers, and print the draws
+/// they draw differently (`replay`). It passes: it is a tool for
+/// finding out why a program's pictures differ.
+#[test]
+#[ignore = "requires a desktop OpenGL context and a recording"]
+fn replay_a_capture() {
+    let Ok(path) = std::env::var("TOADFORCE_CAPTURE") else {
+        return;
+    };
+    let rec = crate::toadforce::capture::Recording::read(std::path::Path::new(&path)).unwrap();
+    bench!(bench, "replay");
+    if std::env::var("TOADFORCE_CAPTURE_WIDE").is_ok() {
+        bench.wide.set(true);
+    }
+    super::replay::replay(&bench, &rec);
 }

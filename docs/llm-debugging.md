@@ -1162,6 +1162,46 @@ as long as it doesn't act on the pixels it reads, and the frames
 differ only where the renderers do. Check `renderer` before trusting
 identical pictures.
 
+To find the draws a difference between the renderers comes from,
+record what the card is given and draw the recording through both:
+
+```
+POST /api/toadforce/capture {"path": "D:/work/frame.tfcap", "flips": 2}
+POST /api/toadforce/capture {"path": "D:/work/frame.tfcap", "flips": 0}
+POST /api/toadforce/capture {}
+```
+
+The first records from the card's next run of commands until it has
+flipped twice (`flips` is 1 when left out). With `flips` 0 it records
+until a request without a `path` ends it, for a program that never
+flips (an OpenGL game, whose front end copies its frames). Send it
+while paused at the frame's emulated time. The file has the card's
+state, card memory, each run's commands and the bytes the program
+wrote between them (`src/toadforce/capture.rs`). The reply is 404
+without a ToadForce and 400 when the file can't be made.
+
+The ignored test `replay_a_capture` draws a recording, on a machine
+with a desktop OpenGL context:
+
+```
+TOADFORCE_CAPTURE=D:/work/frame.tfcap cargo test --release --lib \
+  toadforce::gl::tests::replay_a_capture -- --ignored --nocapture
+```
+
+It prints, for each target, how many pixels differ by 0, 1, 2, 3 to
+8, 9 to 32 and more with each renderer drawing the whole recording.
+Then it draws draw by draw, the host starting each draw from the
+software renderer's pixels, and lists the states by how many pixels
+differ by more than 17 after their draws: drawn by the software
+renderer alone, by the host alone or by both, with the state's steps
+and textures and its worst draw's vertices. `TOADFORCE_REPLAY_OVER=N`
+counts the pixels over N instead. `TOADFORCE_REPLAY_SET=rs27=0,ts21=1`
+sets render states (`rs`) and stage states (`ts`, on every stage) by
+number on both sides before each draw, here the blend off and the
+anisotropy 1: what stops differing hangs on that state.
+`TOADFORCE_CAPTURE_WIDE=1` keeps the host's 16-bit targets in 8 bits
+a channel, as a host whose 5-6-5 format fails the test does.
+
 ### 3dfx (Glide) games
 
 With `voodoo=true` (CONFIGURATION.md's "3dfx Voodoo Graphics"),

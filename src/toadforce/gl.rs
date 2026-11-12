@@ -33,6 +33,8 @@ mod shader;
 mod texture;
 
 #[cfg(test)]
+mod replay;
+#[cfg(test)]
 mod tests;
 
 use super::format::{Format, Surface};
