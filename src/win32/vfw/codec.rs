@@ -420,7 +420,8 @@ mod tests {
 
     impl Bits {
         fn put(&mut self, value: u32, n: u32) {
-            self.0.extend((0..n).map(|i| (value >> i) as u8 & 1));
+            self.0
+                .extend((0..n).map(|i| value.checked_shr(i).unwrap_or(0) as u8 & 1));
         }
         fn code(&mut self, code: &str) {
             self.0.extend(code.bytes().map(|c| c - b'0'));
@@ -479,7 +480,9 @@ mod tests {
             b.code("00000100");
             b.align();
         }
-        b.put(0x01, 8 * 4);
+        for _ in 0..4 {
+            b.put(0x01, 8);
+        }
         b.0.chunks(8)
             .map(|c| c.iter().rev().fold(0, |byte, &bit| byte << 1 | bit))
             .collect()
@@ -503,7 +506,11 @@ mod tests {
         for y in 0..288 {
             for x in 0..352 {
                 let v = [4, -5, 2, 1].get(y).copied().unwrap_or(0);
-                let h = if x < 15 { 4 } else if x == 15 { 2 } else { 0 };
+                let h = match x {
+                    0..15 => 4,
+                    15 => 2,
+                    _ => 0,
+                };
                 let luma = 128 + ((16 * 5 + v * h * 15) >> 6);
                 let at = (287 - y) * stride + 3 * x;
                 assert_eq!(dib[at..at + 3], bgr(luma as u8, 128, 128), "({x}, {y})");
