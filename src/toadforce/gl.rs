@@ -916,7 +916,18 @@ impl ToadForceGl {
             let [sx, sy, dx, dy] = [src.0, src.1, dst.0, dst.1].map(|v| v as i32);
             let (w, h) = (size.0 as i32, size.1 as i32);
             let (to_x, to_y) = (dx + w, dy + h);
-            gl.blit_framebuffer(sx, sy, sx + w, sy + h, dx, dy, to_x, to_y, bits, glow::NEAREST);
+            gl.blit_framebuffer(
+                sx,
+                sy,
+                sx + w,
+                sy + h,
+                dx,
+                dy,
+                to_x,
+                to_y,
+                bits,
+                glow::NEAREST,
+            );
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
     }
@@ -944,7 +955,8 @@ impl ToadForceGl {
             .position(|c| gpu::within(surface, &c.surface));
         if let Some(at) = found {
             let copy = &mut self.copies[at];
-            let whole = (copy.surface.width, copy.surface.height) == (surface.width, surface.height);
+            let whole =
+                (copy.surface.width, copy.surface.height) == (surface.width, surface.height);
             let stale = !copy.ahead
                 && !(fresh && whole)
                 && pages.changed(gpu::range(&copy.surface), &mut copy.stamp);
@@ -996,7 +1008,13 @@ impl ToadForceGl {
             unsafe {
                 if view.ahead && !fresh {
                     let size = (view.surface.width, view.surface.height);
-                    self.blit(surface.format, (view.texture, texture), (0, 0), (0, 0), size);
+                    self.blit(
+                        surface.format,
+                        (view.texture, texture),
+                        (0, 0),
+                        (0, 0),
+                        size,
+                    );
                     self.change(at);
                 }
                 self.gl.delete_texture(view.texture);
@@ -1834,7 +1852,7 @@ impl Host for ToadForceGl {
         })
     }
 
-    fn draw(&mut self, batch: &Batch, memory: &[u8], pages: &Pages) {
+    fn draw(&mut self, batch: &Batch, memory: &[u8], pages: &Pages) -> Vec<Surface> {
         self.batch += 1;
         self.runs += batch.runs.len() as u64;
         let colour = batch.target.colour;
@@ -1869,7 +1887,7 @@ impl Host for ToadForceGl {
             }
             if !self.attach(target, depth) {
                 self.leave();
-                return;
+                return drawn;
             }
             let gl = Rc::clone(&self.gl);
             gl.viewport(0, 0, colour.width as i32, colour.height as i32);
@@ -1915,13 +1933,14 @@ impl Host for ToadForceGl {
             }
             self.prune();
             self.leave();
+            drawn
         }
     }
 
-    fn clear(&mut self, clear: &Clear, memory: &[u8], pages: &Pages) -> bool {
+    fn clear(&mut self, clear: &Clear, memory: &[u8], pages: &Pages) -> Option<Surface> {
         let surface = clear.surface;
         if self.broken {
-            return false;
+            return None;
         }
         // A copy that is what card memory holds, or newer. A clear of
         // every bit of every pixel of the copy needs neither.
@@ -1938,7 +1957,7 @@ impl Host for ToadForceGl {
         };
         let fresh = whole && clear.whole() && clear.rects.contains(&all_of(&surface));
         if !current && !fresh {
-            return false;
+            return None;
         }
         let depth_format = surface.format.in_mask(super::caps::DEPTH_FORMATS);
         let d16 = surface.format == Format::D16;
@@ -1954,7 +1973,7 @@ impl Host for ToadForceGl {
         let writes_stencil = depth_format && !d16 && clear.mask & 0xFF != 0;
         let exact = !writes_depth || depth == 0 || depth == most;
         if depth_format && !exact && !clear.whole() {
-            return false;
+            return None;
         }
         let colour = self.colour(surface.format);
         let (_, format, kind) = self.formats(surface.format);
@@ -1982,7 +2001,7 @@ impl Host for ToadForceGl {
                     gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, x, y, w, h, format, kind, data);
                 }
                 self.leave();
-                return true;
+                return Some(written);
             }
             let bits = if depth_format {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.depth_only));
@@ -2022,7 +2041,7 @@ impl Host for ToadForceGl {
             } else {
                 if !self.attach(texture, None) {
                     self.leave();
-                    return false;
+                    return None;
                 }
                 // The pixel value's fields, each of its own range.
                 let v = clear.value;
@@ -2052,8 +2071,8 @@ impl Host for ToadForceGl {
                 gl.clear(bits);
             }
             self.leave();
+            Some(written)
         }
-        true
     }
 
     fn fill(
@@ -2070,14 +2089,13 @@ impl Host for ToadForceGl {
         }
         // The copy's pixels are kept by its own format, and every bit
         // of a pixel is written.
-        let surface = copy.surface;
         let clear = Clear {
-            surface,
+            surface: copy.surface,
             rects: std::slice::from_ref(rect),
             value,
             mask: 0xFFFF_FFFF,
         };
-        self.clear(&clear, memory, pages).then_some(surface)
+        self.clear(&clear, memory, pages)
     }
 
     fn blt(
@@ -2090,12 +2108,8 @@ impl Host for ToadForceGl {
         memory: &[u8],
         pages: &Pages,
     ) -> Option<Surface> {
-        let colour = |format: Format| {
-            matches!(
-                format,
-                Format::R5G6B5 | Format::X8R8G8B8 | Format::A8R8G8B8
-            )
-        };
+        let colour =
+            |format: Format| matches!(format, Format::R5G6B5 | Format::X8R8G8B8 | Format::A8R8G8B8);
         let size = (src_rect.width, src_rect.height);
         if self.broken
             || key.is_some()
@@ -2114,13 +2128,22 @@ impl Host for ToadForceGl {
         if from.is_none() && !to.is_some_and(|c| c.ahead) {
             return None;
         }
-        // The host's copy between two framebuffers has no result where
-        // the rectangles share pixels of one texture.
+        // A source over other bytes of the destination's, which the
+        // host drops below as it writes the destination.
+        let shared = !gpu::related(src, dst) && overlap(gpu::range(src), gpu::range(dst));
+        if from.is_some() && shared {
+            return None;
+        }
+        // Views of one another are one texture once the destination
+        // has its copy (`copy`), and the host's copy between two
+        // framebuffers has no result where the rectangles share pixels
+        // of one texture.
+        let one = gpu::related(src, dst) || (from.is_some() && from == to.map(|c| c.texture));
         let apart = src_rect.left + size.0 <= dst_rect.left
             || dst_rect.left + size.0 <= src_rect.left
             || src_rect.top + size.1 <= dst_rect.top
             || dst_rect.top + size.1 <= src_rect.top;
-        if from.is_some() && from == to.map(|c| c.texture) && !apart {
+        if from.is_some() && one && !apart {
             return None;
         }
         let fresh = *dst_rect == all_of(dst);
@@ -2136,6 +2159,12 @@ impl Host for ToadForceGl {
                 surface, texture, ..
             } = self.copies[at];
             self.drop_textures(&[surface]);
+            // The source's copy now: a copy of a view of the destination
+            // gave way to the destination's, with its pixels.
+            let from = from.and_then(|_| {
+                let copy = self.copies.iter().find(|c| gpu::within(src, &c.surface));
+                copy.map(|c| c.texture)
+            });
             let place = (dst_rect.left, dst_rect.top);
             match from {
                 Some(from) => {

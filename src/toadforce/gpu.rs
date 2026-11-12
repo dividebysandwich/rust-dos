@@ -168,22 +168,28 @@ pub trait Host {
     /// texture there that isn't the target exactly. The card reads the
     /// target back before anything uses those bytes again, and the
     /// host copies them anew.
-    fn draw(&mut self, batch: &Batch, memory: &[u8], pages: &Pages);
+    ///
+    /// Gives the surfaces of the copies drawn into, which are ahead
+    /// after it: the target's, or larger ones they are views of. The
+    /// card reads back all of such a copy, not the part a batch drew.
+    fn draw(&mut self, batch: &Batch, memory: &[u8], pages: &Pages) -> Vec<Surface>;
 
     /// Write `clear` to the host's copy of its surface: the surface is
     /// then ahead on the host, and the host drops its other copies
     /// that share a byte with it, as for a draw. The host takes a
     /// `CLEAR` when its copy is ahead or is what card memory holds (by
     /// `pages`), and one of every bit of every pixel of the copy
-    /// whatever the copy holds, or with no copy yet. False otherwise,
-    /// or when the host can't write those bits exactly; nothing is
+    /// whatever the copy holds, or with no copy yet. The surface of
+    /// the copy written, which is ahead after it. None otherwise, or
+    /// when the host can't write those bits exactly; nothing is
     /// changed, and the processor writes card memory.
-    fn clear(&mut self, clear: &Clear, memory: &[u8], pages: &Pages) -> bool;
+    fn clear(&mut self, clear: &Clear, memory: &[u8], pages: &Pages) -> Option<Surface>;
 
     /// `FILL`: write the low bytes of `value` to each pixel of `rect`
-    /// of `dst`, when the host's copy of `dst` is ahead. The surface of
-    /// that copy, which is ahead after it. None when the host leaves
-    /// the fill to the processor, with nothing changed.
+    /// of `dst`, when the host's copy of `dst` is ahead and is of a
+    /// colour buffer. The surface of that copy, which is ahead after
+    /// it. None when the host leaves the fill to the processor, with
+    /// nothing changed.
     fn fill(
         &mut self,
         dst: &Surface,
@@ -197,8 +203,11 @@ pub trait Host {
     /// the host's copy of either is ahead. The surface of the host's
     /// copy of `dst`, which is ahead after it. None when the host
     /// leaves the copy to the processor, with nothing changed: for a
-    /// stretch, a colour key, formats it keeps no copies of, and a
-    /// copy onto its own source.
+    /// stretch, a colour key, a format the host draws into no target
+    /// of, pixels of two sizes, and a source the host has ahead that
+    /// shares a byte with `dst` without being a view of it or it of
+    /// the source (`related`), or that is such a view, with the two
+    /// rectangles sharing a pixel.
     #[allow(clippy::too_many_arguments)]
     fn blt(
         &mut self,
@@ -628,8 +637,9 @@ impl Gpu {
             return;
         };
         let _profile = crate::profile::zone(crate::profile::Zone::ToadForceHost);
-        host.draw(batch, memory, &self.pages);
-        for surface in std::iter::once(colour).chain(depth) {
+        // The host's copies, which may be of surfaces the target's are
+        // views of: what is ahead is all of such a copy.
+        for surface in host.draw(batch, memory, &self.pages) {
             self.mark(surface);
         }
     }
@@ -647,11 +657,13 @@ impl Gpu {
             return false;
         };
         let _profile = crate::profile::zone(crate::profile::Zone::ToadForceHost);
-        if !host.clear(clear, memory, &self.pages) {
-            return false;
+        match host.clear(clear, memory, &self.pages) {
+            Some(written) => {
+                self.mark(written);
+                true
+            }
+            None => false,
         }
-        self.mark(clear.surface);
-        true
     }
 
     /// Whether the host shows `surface`, the picture on the screen,

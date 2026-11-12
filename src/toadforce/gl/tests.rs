@@ -1528,7 +1528,10 @@ fn on_the_host(rig: &mut Rig) {
     }
     // The level drawn into, alone and under the first level.
     rig.texture(0, 1, &mipped);
-    rig.stage(0, &[(TSS_ADDRESSU, 1), (TSS_ADDRESSV, 1), (TSS_MAXMIPLEVEL, 1)]);
+    rig.stage(
+        0,
+        &[(TSS_ADDRESSU, 1), (TSS_ADDRESSV, 1), (TSS_MAXMIPLEVEL, 1)],
+    );
     rig.draw(&quad(44.0, 2.0, 16.0, WHITE, 1.0));
     rig.stage(0, &[(TSS_MAXMIPLEVEL, 0)]);
     filter(rig, 0, 1, 1, 1);
@@ -1544,20 +1547,51 @@ fn on_the_host(rig: &mut Rig) {
         use crate::toadforce::command::encode::{blt, fill};
         fill(w, &colour, &rect(4, 30, 20, 6), 0x1234_5678);
         blt(w, &second, &all, &colour, &all, None);
-        blt(w, &colour, &rect(40, 26, 12, 12), &colour, &rect(0, 0, 12, 12), None);
-        blt(w, &colour, &rect(26, 30, 8, 8), &face, &rect(2, 4, 8, 8), None);
-        blt(w, &second, &rect(8, 8, 16, 16), &face, &rect(0, 0, 16, 16), None);
+        blt(
+            w,
+            &colour,
+            &rect(40, 26, 12, 12),
+            &colour,
+            &rect(0, 0, 12, 12),
+            None,
+        );
+        blt(
+            w,
+            &colour,
+            &rect(26, 30, 8, 8),
+            &face,
+            &rect(2, 4, 8, 8),
+            None,
+        );
+        blt(
+            w,
+            &second,
+            &rect(8, 8, 16, 16),
+            &face,
+            &rect(0, 0, 16, 16),
+            None,
+        );
     });
     // A draw into the surface copied to, and a part of it copied back.
     let other = rig.target(SECOND);
     rig.run(|w| encode::render_target(w, Some(&other)));
     rig.run(|w| encode::set_texture(w, 0, 0));
-    rig.stage(0, &[(TSS_COLORARG1, ARG_DIFFUSE), (TSS_ALPHAARG1, ARG_DIFFUSE)]);
+    rig.stage(
+        0,
+        &[(TSS_COLORARG1, ARG_DIFFUSE), (TSS_ALPHAARG1, ARG_DIFFUSE)],
+    );
     rig.draw(&quad(30.0, 4.0, 20.0, 0xFFA0_50F0, 1.0));
     rig.run(|w| encode::render_target(w, Some(&screen)));
     rig.run(|w| {
         use crate::toadforce::command::encode::blt;
-        blt(w, &colour, &rect(52, 52, 10, 10), &second, &rect(28, 2, 10, 10), None);
+        blt(
+            w,
+            &colour,
+            &rect(52, 52, 10, 10),
+            &second,
+            &rect(28, 2, 10, 10),
+            None,
+        );
     });
 }
 
@@ -1586,9 +1620,62 @@ fn surfaces_stay_on_the_host_through_a_frame() {
             assert_eq!(status["host"]["read_backs"], 0, "{name}: {status}");
             let host = &status["host"]["counts"];
             assert_eq!(&host["surface_uploads"], before, "{name}: {status}");
-            assert!(host["texture_converts"].as_u64() >= Some(7), "{name}: {status}");
+            assert!(
+                host["texture_converts"].as_u64() >= Some(7),
+                "{name}: {status}"
+            );
         }
     }
+}
+
+/// A target the host drew into, copied from into the larger surface it
+/// is the top half of, which the host has no copy of yet: the host's
+/// copy of the target gives way to one of the larger surface, which
+/// the copy then reads from.
+fn into_the_whole(rig: &mut Rig) {
+    let whole = rig.surface(SECOND);
+    let top = Surface {
+        height: SIZE / 2,
+        ..whole
+    };
+    let target = Target {
+        colour: top,
+        depth: None,
+    };
+    rig.run(|w| encode::render_target(w, Some(&target)));
+    rig.clear(CLEAR_COLOUR, 0xFF20_4060, 1.0, 0, &[]);
+    rig.draw(&quad(4.0, 2.0, 20.0, 0xFFC0_4020, 1.0));
+    rig.run(|w| {
+        use crate::toadforce::command::encode::blt;
+        blt(
+            w,
+            &whole,
+            &rect(8, 40, 24, 16),
+            &top,
+            &rect(2, 0, 24, 16),
+            None,
+        );
+    });
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn a_copy_into_the_surface_a_target_is_part_of_agrees() {
+    bench!(bench, "toadforce copy into the whole");
+    let declined = bench.compare(
+        "into the whole",
+        Format::A8R8G8B8,
+        None,
+        CLOSE,
+        into_the_whole,
+    );
+    assert_eq!(declined, 0);
+    // The copy read from a texture the host has: one deleted with the
+    // copy of the target would be an error, whatever pixels a driver
+    // still finds in it.
+    // SAFETY: the bench's context is current.
+    let error = unsafe { bench.gl.get_error() };
+    assert_eq!(error, glow::NO_ERROR);
 }
 
 /// A texture of 32 with all its levels on stage 0: one smooth picture,
@@ -1811,4 +1898,62 @@ fn replay_a_capture() {
         bench.wide.set(true);
     }
     super::replay::replay(&bench, &rec);
+}
+
+/// A target drawn into with an alpha of its own, then sampled through
+/// a texture of 8 bits of alpha over its bytes and blended by that
+/// alpha: what the host fills the texture with from its copy must be
+/// what a read-back and a decode of the bytes give, alpha too. The
+/// clear before the draw has every channel masked off for draws, which
+/// a `CLEAR` doesn't heed.
+fn alpha_of_a_sampled_target(rig: &mut Rig) {
+    let surface = rig.surface(SECOND);
+    let target = Target {
+        colour: surface,
+        depth: None,
+    };
+    rig.run(|w| encode::render_target(w, Some(&target)));
+    rig.states(&[(RS_COLORWRITEENABLE, 0)]);
+    rig.clear(CLEAR_COLOUR, 0x8020_4060, 1.0, 0, &[]);
+    rig.states(&[(RS_COLORWRITEENABLE, 0xF)]);
+    rig.draw(&quad(4.0, 4.0, 40.0, 0x40C0_8040, 1.0));
+    let texture = Texture {
+        format: Format::A8R8G8B8,
+        width: SIZE,
+        height: SIZE,
+        levels: 1,
+        images: vec![(surface.offset, surface.pitch)],
+        ..Texture::default()
+    };
+    let screen = rig.target(COLOUR);
+    rig.run(|w| encode::render_target(w, Some(&screen)));
+    rig.clear(CLEAR_COLOUR, 0xFF10_1010, 1.0, 0, &[]);
+    rig.texture(0, 1, &texture);
+    filter(rig, 0, 1, 1, 0);
+    rig.states(&[
+        (RS_ALPHABLENDENABLE, 1),
+        (RS_SRCBLEND, 5),
+        (RS_DESTBLEND, 6),
+    ]);
+    rig.draw(&quad(0.0, 0.0, 64.0, WHITE, 1.0));
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn a_target_sampled_with_the_alpha_of_its_bytes_agrees() {
+    bench!(bench, "toadforce alpha of a sampled target");
+    for format in [Format::X8R8G8B8, Format::A8R8G8B8] {
+        let name = format!("alpha of a sampled target {format:?}");
+        let declined = bench.compare(&name, format, None, CLOSE, alpha_of_a_sampled_target);
+        assert_eq!(declined, 0, "{name}");
+        // The texture came from the host's copy, with nothing read
+        // back.
+        let mut hosted = Rig::new(format, None);
+        hosted.card.set_host(Some(bench.host()), &mut hosted.memory);
+        alpha_of_a_sampled_target(&mut hosted);
+        let status = hosted.card.describe(Rig::live());
+        assert_eq!(status["host"]["read_backs"], 0, "{name}: {status}");
+        let converts = status["host"]["counts"]["texture_converts"].as_u64();
+        assert!(converts >= Some(1), "{name}: {status}");
+    }
 }

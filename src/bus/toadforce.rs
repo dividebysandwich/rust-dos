@@ -354,7 +354,11 @@ impl Bus {
     pub(crate) fn toadforce_show(&mut self) {
         // The window is drawn from the host's copy this frame
         // (`toadforce_host_picture`).
-        if self.toadforce.as_deref_mut().is_some_and(|c| c.host_presents()) {
+        if self
+            .toadforce
+            .as_deref_mut()
+            .is_some_and(|c| c.host_presents())
+        {
             return;
         }
         if !self.toadforce_ahead() || self.video_mode != VideoMode::Vesa {

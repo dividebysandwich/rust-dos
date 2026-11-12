@@ -1143,7 +1143,11 @@ fn a_toadforce_surface_is_shown_from_the_hosts_copy() {
         cpu.bus.toadforce_touch(8 << 20, 16 * colour.pitch as usize);
         assert!(!cpu.bus.toadforce_ahead());
         let first = cpu.bus.vbe.vram[8 << 20..][..2].to_vec();
-        let green = if format == Format::R5G6B5 { [0xE0, 0x07] } else { [0, 255] };
+        let green = if format == Format::R5G6B5 {
+            [0xE0, 0x07]
+        } else {
+            [0, 255]
+        };
         assert_eq!(first, green, "{format:?}");
         // The copy is what card memory holds now, and still shown.
         assert!(card(&mut cpu).host_shows(&colour), "{format:?}");

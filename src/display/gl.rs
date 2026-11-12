@@ -155,16 +155,16 @@ impl Host for HostLink {
         self.0.borrow().as_ref().is_some_and(|h| h.takes(state))
     }
 
-    fn draw(&mut self, batch: &gpu::Batch, memory: &[u8], pages: &gpu::Pages) {
-        if let Some(host) = &mut *self.0.borrow_mut() {
-            host.draw(batch, memory, pages);
+    fn draw(&mut self, batch: &gpu::Batch, memory: &[u8], pages: &gpu::Pages) -> Vec<Surface> {
+        match &mut *self.0.borrow_mut() {
+            Some(host) => host.draw(batch, memory, pages),
+            None => Vec::new(),
         }
     }
 
-    fn clear(&mut self, clear: &gpu::Clear, memory: &[u8], pages: &gpu::Pages) -> bool {
+    fn clear(&mut self, clear: &gpu::Clear, memory: &[u8], pages: &gpu::Pages) -> Option<Surface> {
         let mut host = self.0.borrow_mut();
-        host.as_mut()
-            .is_some_and(|h| h.clear(clear, memory, pages))
+        host.as_mut()?.clear(clear, memory, pages)
     }
 
     fn fill(
