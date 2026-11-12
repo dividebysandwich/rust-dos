@@ -7,7 +7,11 @@
 //! level by level of their mipmaps, and between cube maps face by
 //! face. IDirect3DDevice7's Load is ported from Wine's device.c.
 
-use super::super::surface::{self, DDSCAPS_MIPMAP, KEY_SRC_BLT};
+use super::super::surface::{
+    self, DDSCAPS_MIPMAP, DDSCAPS2_CUBEMAP as CUBEMAP,
+    DDSCAPS2_CUBEMAP_ALLFACES as CUBEMAP_ALLFACES, DDSCAPS2_CUBEMAP_POSITIVEX as CUBEMAP_POSITIVEX,
+    DDSCAPS2_MIPMAPSUBLEVEL as MIPMAPSUBLEVEL, KEY_SRC_BLT,
+};
 use super::super::{
     DDERR_ALREADYINITIALIZED, DDERR_INVALIDOBJECT, DDERR_INVALIDPARAMS, DDERR_NOPALETTEATTACHED,
     state,
@@ -15,13 +19,6 @@ use super::super::{
 use super::device::{self, HANDLE_TEXTURE};
 use super::{D3D_OK, D3DERR_TEXTURE_LOAD_FAILED, probe, read_dwords};
 use crate::cpu::Cpu;
-
-/// DDSCAPS2_MIPMAPSUBLEVEL and DDSCAPS2_CUBEMAP.
-const MIPMAPSUBLEVEL: u32 = 0x1_0000;
-const CUBEMAP: u32 = 0x200;
-use super::super::surface::{
-    DDSCAPS2_CUBEMAP_ALLFACES as CUBEMAP_ALLFACES, DDSCAPS2_CUBEMAP_POSITIVEX as CUBEMAP_POSITIVEX,
-};
 
 /// The surface of the texture interface `this`.
 fn texture_of(cpu: &mut Cpu, this: u32) -> Result<u32, u32> {
@@ -318,18 +315,25 @@ pub fn load7(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     }
     if s.caps[1] & CUBEMAP != 0 {
-        // The faces `flags` names (DDSCAPS2_CUBEMAP_ bits) that both
-        // have: all of them are checked before any is copied.
+        // Every face of `src` has to be one of `dest`'s, with levels
+        // `dest`'s are some of, whatever `flags` names: native fails
+        // otherwise, as Wine's Load has it. All of them are checked
+        // before any is copied, and then the faces `flags` names
+        // (DDSCAPS2_CUBEMAP_ bits) are.
         let mut pairs = Vec::new();
-        for face in (0..6).filter(|face| flags & CUBEMAP_POSITIVEX << face != 0) {
-            let (Some(df), Some(sf)) = (cube_face(cpu, dest, face), cube_face(cpu, src, face))
-            else {
+        for face in 0..6 {
+            let Some(sf) = cube_face(cpu, src, face) else {
                 continue;
+            };
+            let Some(df) = cube_face(cpu, dest, face) else {
+                return Some(DDERR_INVALIDPARAMS);
             };
             if !is_mip_level_subset(cpu, df, sf) {
                 return Some(DDERR_INVALIDPARAMS);
             }
-            pairs.push((df, sf));
+            if flags & CUBEMAP_POSITIVEX << face != 0 {
+                pairs.push((df, sf));
+            }
         }
         for (df, sf) in pairs {
             copy_mipmap_chain(cpu, df, sf, point, rect);

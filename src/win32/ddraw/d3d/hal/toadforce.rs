@@ -1093,76 +1093,49 @@ fn images_of(cpu: &mut Cpu, id: u32) -> Option<Vec<Vec<u32>>> {
 
 /// The surface `id` as a texture where it is: in card memory, in a
 /// format the card samples, a power of two each way, with the levels
-/// that are there the same way.
+/// that are there the same way. A cube map's level is there when all
+/// six of its faces are.
 fn in_place(cpu: &mut Cpu, id: u32) -> Option<Texture> {
-    let (offset, pitch) = in_card(cpu, id)?;
-    if state(cpu).surface(id)?.caps[1] & surface::DDSCAPS2_CUBEMAP != 0 {
-        return cube_in_place(cpu, id);
-    }
-    let (width, height, f, key) = {
+    in_card(cpu, id)?;
+    let (width, height, f, key, cube) = {
         let s = state(cpu).surface(id)?;
         let key = (s.key_set & 1 << KEY_SRC_BLT != 0).then_some(s.keys[KEY_SRC_BLT].0);
-        (s.width, s.height, s.format, key)
+        let cube = s.caps[1] & surface::DDSCAPS2_CUBEMAP != 0;
+        (s.width, s.height, s.format, key, cube)
     };
     let format = texture_format(&f)?;
     let block = format.block_bytes();
-    // A block format's surface has its size where the pitch is.
-    let pitch_of = |pitch: u32, width: u32| match block {
-        Some(_) => format.line_bytes(width) as u32,
-        None => pitch,
-    };
-    let mut images = vec![(offset, pitch_of(pitch, width))];
-    for (n, level) in chain(cpu, id).into_iter().enumerate().skip(1) {
-        let Some((offset, pitch)) = in_card(cpu, level) else {
+    let mut images = Vec::new();
+    let mut levels = 0;
+    for (n, level) in images_of(cpu, id)?.into_iter().enumerate() {
+        let places: Option<Vec<(u32, u32)>> = level.iter().map(|&s| in_card(cpu, s)).collect();
+        let Some(places) = places else {
             break;
         };
-        images.push((offset, pitch_of(pitch, (width >> n).max(1))));
+        for (offset, pitch) in places {
+            // A block format's surface has its size where the pitch
+            // is.
+            let pitch = match block {
+                Some(_) => format.line_bytes((width >> n).max(1)) as u32,
+                None => pitch,
+            };
+            images.push((offset, pitch));
+        }
+        levels += 1;
+    }
+    if levels == 0 {
+        return None;
     }
     let texture = Texture {
         format,
         width,
         height,
-        levels: images.len() as u32,
-        cube: false,
+        levels,
+        cube,
         palette: None,
         key: key
             .filter(|_| block.is_none())
             .map(|key| key & format.defined_bits()),
-        images,
-    };
-    takes(cpu, |w| encode::define_texture(w, 1, &texture)).then_some(texture)
-}
-
-/// The cube map `id` as a texture where it is: every face of every
-/// level in card memory.
-fn cube_in_place(cpu: &mut Cpu, id: u32) -> Option<Texture> {
-    let (width, height, f) = {
-        let s = state(cpu).surface(id)?;
-        (s.width, s.height, s.format)
-    };
-    let format = texture_format(&f)?;
-    let levels = images_of(cpu, id)?;
-    let mut images = Vec::new();
-    for (n, level) in levels.iter().enumerate() {
-        for &face in level {
-            let (offset, pitch) = in_card(cpu, face)?;
-            images.push((
-                offset,
-                match format.block_bytes() {
-                    Some(_) => format.line_bytes((width >> n).max(1)) as u32,
-                    None => pitch,
-                },
-            ));
-        }
-    }
-    let texture = Texture {
-        format,
-        width,
-        height,
-        levels: levels.len() as u32,
-        cube: true,
-        palette: None,
-        key: None,
         images,
     };
     takes(cpu, |w| encode::define_texture(w, 1, &texture)).then_some(texture)

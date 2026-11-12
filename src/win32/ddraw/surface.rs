@@ -902,7 +902,12 @@ pub fn make(
     let cube = caps[1] & DDSCAPS2_CUBEMAP != 0;
     if cube {
         let complex_texture = DDSCAPS_COMPLEX | DDSCAPS_TEXTURE;
-        let other = DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_ZBUFFER;
+        let other = DDSCAPS_PRIMARYSURFACE | DDSCAPS_ZBUFFER;
+        if caps[0] & DDSCAPS_FLIP != 0 {
+            // A cube map that flips, as Wine's ddraw_surface_create
+            // turns it down.
+            return Err(DDERR_INVALIDPARAMS);
+        }
         if version < 7
             || caps[0] & complex_texture != complex_texture
             || caps[0] & other != 0
@@ -1030,6 +1035,11 @@ pub fn make(
         if managed {
             caps[0] |= DDSCAPS_SYSTEMMEMORY;
         }
+    }
+    if cube && width != height {
+        // A cube map's faces are square, as Direct3D 7 has them and as
+        // the card samples them.
+        return Err(DDERR_INVALIDPARAMS);
     }
     // The mipmap levels.
     let mipmap = caps[0] & DDSCAPS_MIPMAP != 0;
@@ -1184,16 +1194,30 @@ pub fn make(
             }
         }
     }
-    for (i, &id) in ids.iter().enumerate() {
+    let mut i = 0;
+    while let Some(&id) = ids.get(i) {
         let mut result = allocate(cpu, id);
         if result == Err(DDERR_OUTOFVIDEOMEMORY) && !wants_video && !primary {
             // The surfaces after it go with it: a mipmap whose block
             // doesn't fit keeps its levels with its top level, though
-            // the smaller ones would fit on their own.
-            for &id in &ids[i..] {
+            // the smaller ones would fit on their own. A cube map's
+            // surfaces each have a block, and all of them go, those
+            // before it too: a cube map is in one memory.
+            let from = if cube { 0 } else { i };
+            for &id in &ids[from..i] {
+                free_memory(cpu, id);
+                if let Some(s) = surface(cpu, id) {
+                    s.caps[0] &= !(DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM);
+                }
+            }
+            for &id in &ids[from..] {
                 if let Some(s) = surface(cpu, id) {
                     s.caps[0] |= DDSCAPS_SYSTEMMEMORY;
                 }
+            }
+            if from < i {
+                i = from;
+                continue;
             }
             result = allocate(cpu, id);
         }
@@ -1215,6 +1239,7 @@ pub fn make(
             }
         }
         changed(cpu, id);
+        i += 1;
     }
     Ok(ids)
 }
