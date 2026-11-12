@@ -696,9 +696,11 @@ fn write_caps(cpu: &mut Cpu, at: u32, hal: bool, card: bool) -> Result<(), u32> 
         surface_caps &= !surface::DDSCAPS_PALETTE;
         palette_caps = 0;
     }
-    // Direct3D's HAL draws on the add-on card and on a Banshee or
-    // Voodoo3 display.
-    if hal && (card || crate::win32::screen::is_card(cpu)) {
+    // Direct3D's HAL draws on the add-on card and on a display with one:
+    // a Banshee, a Voodoo3 or a ToadForce. A driver with a Direct3D HAL
+    // sets DDCAPS_3D, and a program that looks for 3D hardware by that
+    // bit (Nocturne's renderers do) finds none without it.
+    if hal && (card || super::d3d::hal::adapter(cpu).is_some()) {
         caps |= DDCAPS_3D | DDCAPS_ZBLTS;
         surface_caps |= DDSCAPS_3DDEVICE | surface::DDSCAPS_ZBUFFER;
     }

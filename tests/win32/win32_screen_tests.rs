@@ -2845,6 +2845,33 @@ fn the_voodoo3_display_has_3d_and_takes_guid_null() {
     );
 }
 
+/// A ToadForce's driver has a Direct3D HAL, so its caps say 3D, a 3D
+/// device and a z-buffer. Nocturne's renderers look for 3D hardware by
+/// DDCAPS_3D alone and say there is none without it.
+#[test]
+fn a_toadforce_display_has_3d_in_its_caps() {
+    const DD_GET_CAPS: u32 = 11;
+    let mut d = data();
+    put32(&mut d, CAPS, 380);
+    let (program, data) = program(&[DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(a, l, 0, &[Arg::At(DESC), Arg::At(DD), Arg::I(0)])?;
+        c.com(a, l, DD, DD_GET_CAPS, &[Arg::At(CAPS), Arg::I(0)])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = vesa_machine("toadforce_caps", Adapter::ToadForce, program);
+    run_until(&mut cpu, data, 1);
+    assert_eq!(results(&cpu, data, 2), [0, 0]);
+    let caps = peek(&cpu, data + CAPS + 4);
+    assert_eq!(caps & 1, 1, "DDCAPS_3D: {caps:X}");
+    let surface_caps = peek(&cpu, data + CAPS + 0x84);
+    let zbuffer = 0x2_0000;
+    assert_eq!(
+        surface_caps & (DDSCAPS_3DDEVICE | zbuffer),
+        DDSCAPS_3DDEVICE | zbuffer
+    );
+}
+
 // IDirectDraw4: its ID, and the DirectDraw object's memory and
 // identity.
 
