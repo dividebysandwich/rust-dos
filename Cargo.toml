@@ -63,6 +63,7 @@ icon = ["assets/rust-dos.png", "packaging/linux/rust-dos.png"]
 # tests the crates too.
 [workspace]
 members = ["crates/*"]
+exclude = ["vendor/oxideav-indeo"]
 default-members = ["."]
 
 [workspace.package]
@@ -90,8 +91,8 @@ rust-dos-ne = { path = "crates/ne" }
 rust-dos-installshield = { path = "crates/installshield" }
 # Indeo Video 3 and 5, the codecs of Video for Windows files (MSVFW32's
 # DrawDib and AVIFIL32's AVIStreamGetFrame). Pinned: its API changes
-# between 0.0.x versions.
-oxideav-indeo = "=0.0.2"
+# between 0.0.x versions. Patched below.
+oxideav-indeo = "=0.0.4"
 # MPEG-1 video and its Layer II audio, which MCI's MPEGVideo device
 # plays, and the framework's packet and frame types the audio decoder
 # takes. Pinned as oxideav-indeo is.
@@ -340,3 +341,11 @@ path = "tests/program/main.rs"
 [profile.test]
 opt-level = 1
 debug = "line-tables-only"
+
+# oxideav-indeo 0.0.4 with a fix of its Indeo 5 decoder for intra frames
+# whose luma plane is split into four wavelet bands (Nocturne's opening
+# movie, issue 985), until a release has it: vendor/oxideav-indeo is the
+# crate's src/ at v0.0.4 with that patch, and its manifest without the
+# benches. Drop it and this section when the crate releases the fix.
+[patch.crates-io]
+oxideav-indeo = { path = "vendor/oxideav-indeo" }

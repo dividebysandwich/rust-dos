@@ -413,6 +413,104 @@ mod tests {
         assert_eq!(codec.picture(8, 8).unwrap(), picture);
     }
 
+    /// Bits for an Indeo 5 frame, put in from the lowest bit up, as the
+    /// codec reads them; a VLC codeword goes in from its first bit.
+    #[derive(Default)]
+    struct Bits(Vec<u8>);
+
+    impl Bits {
+        fn put(&mut self, value: u32, n: u32) {
+            self.0.extend((0..n).map(|i| (value >> i) as u8 & 1));
+        }
+        fn code(&mut self, code: &str) {
+            self.0.extend(code.bytes().map(|c| c - b'0'));
+        }
+        fn align(&mut self) {
+            while !self.0.len().is_multiple_of(8) {
+                self.0.push(0);
+            }
+        }
+    }
+
+    /// An Indeo 5 key frame of 352 by 288 whose luma plane is split into
+    /// four wavelet bands. Band 0 (low-low, 2D Slant) codes a DC of +1
+    /// in its first block, at quantizer 20 and a qdelta of +2 in its
+    /// first macroblock; band 1 (row Slant, its qdelta inherited from
+    /// band 0's macroblock) codes +1 at the top left of its first block.
+    /// Everything else is empty.
+    fn indeo5_four_band_frame() -> Vec<u8> {
+        let mut b = Bits::default();
+        // Picture start, key frame 0; GOP: one luma decomposition
+        // level, one chroma band, CIF, five bands of 16 by 16
+        // macroblocks of 8 by 8 blocks; frame flag bit 3 (a qdelta in
+        // every macroblock of band 0).
+        b.put(0x1f, 5);
+        b.put(0, 11);
+        b.put(0, 8);
+        b.put(1, 3);
+        b.put(5, 4);
+        b.put(0, 30 + 23);
+        b.align();
+        b.put(0x08, 8);
+        b.put(0, 3);
+        b.align();
+        for (flags, own_qdelta) in [(0x04, true), (0x0C, false)] {
+            b.put(flags, 8);
+            b.put(0, 1);
+            b.put(20, 5);
+            b.align();
+            b.put(0, 2);
+            b.align();
+            for mb in 0..11 * 9 {
+                if own_qdelta {
+                    // Coded, with the qdelta's codeword: +2, or 0.
+                    b.put(0, 1);
+                    b.put(u32::from(mb == 0), 4);
+                    b.code(if mb == 0 { "100010" } else { "0" });
+                } else if mb == 0 {
+                    b.put(0, 1);
+                    b.put(1, 4);
+                } else {
+                    b.put(1, 1);
+                }
+            }
+            b.align();
+            // The block's coefficients: (run 0, +1), end of block.
+            b.code("00000100");
+            b.align();
+        }
+        b.put(0x01, 8 * 4);
+        b.0.chunks(8)
+            .map(|c| c.iter().rev().fold(0, |byte, &bit| byte << 1 | bit))
+            .collect()
+    }
+
+    #[test]
+    fn indeo5_recomposes_a_luma_plane_of_four_bands() {
+        let mut codec = Codec::new(IV50);
+        codec.decode(&indeo5_four_band_frame()).unwrap();
+        let dib = codec.picture(352, 288).unwrap();
+        // Band 0 quantizes with its second 2D set, at a step of 7 for
+        // quantizer 22: the DC is 9, its block 5 everywhere, and the
+        // chain of DCs carries it to every block. Band 1 quantizes with
+        // the row Slant's set at the same quantizer, a step of 21: 30,
+        // and its block's top row 15, with no chain. The recomposition
+        // takes 16 times band 0, and band 1 through its vertical
+        // high-pass taps (4, -5, 2, 1 down output rows 0 to 3) times its
+        // horizontal low-pass ones (4 across columns 0 to 14, 2 at 15),
+        // over 64.
+        let stride = dib_stride(352, 24);
+        for y in 0..288 {
+            for x in 0..352 {
+                let v = [4, -5, 2, 1].get(y).copied().unwrap_or(0);
+                let h = if x < 15 { 4 } else if x == 15 { 2 } else { 0 };
+                let luma = 128 + ((16 * 5 + v * h * 15) >> 6);
+                let at = (287 - y) * stride + 3 * x;
+                assert_eq!(dib[at..at + 3], bgr(luma as u8, 128, 128), "({x}, {y})");
+            }
+        }
+    }
+
     #[test]
     fn codecs_go_by_fourcc_in_either_case() {
         let iv50 = u32::from_le_bytes(*b"iv50");

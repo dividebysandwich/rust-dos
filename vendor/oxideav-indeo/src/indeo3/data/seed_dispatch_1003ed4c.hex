@@ -1,0 +1,26 @@
+# Indeo 3 static codebook seed-dispatch table.
+# Verbatim copy of docs/video/indeo/indeo3/tables/region_1003ed4c.hex
+# (extracted from .data + 0x1003ed4c, 258 bytes = 129 byte-pairs).
+# Walked by the spec/04 5.1 codec-init routine at IR32_32.DLL!0x10006262
+# to seed the cell-state dispatch tables. Genuinely static on disk per
+# tables/region_1003ed4c.meta + spec/04 audit-confirmation (audit/00 3.1).
+# Lines beginning with '#' are comments; the remainder is whitespace-
+# separated lower-hex bytes in VMA order. SHA-256 of source DLL:
+# 98975f98b7b51d87971facea4458f008ecd566a160f1059290b783e457f8ef18.
+19 80 19 81 18 83 18 85 17 87 17 89 17 8b 16 8d
+16 8f 16 91 15 93 15 95 14 97 14 99 14 9b 13 9d
+13 9f 12 a1 12 a3 12 a5 11 a7 11 a9 10 ab 10 ad
+10 af 0f b1 0f b3 0e b5 0e b7 0e b9 0d bb 0d bd
+0d bf 0c c1 0c c3 0b c6 0b c8 0b ca 0a cc 0a ce
+09 d0 09 d2 09 d4 08 d6 08 d8 07 da 07 dc 07 de
+06 e0 06 e2 05 e4 05 e6 05 e8 04 ea 04 ec 04 ee
+03 f0 03 f2 02 f4 02 f6 02 f8 01 fa 01 fc 00 fe
+00 00 00 02 ff 04 ff 06 fe 08 fe 0a fe 0c fd 0e
+fd 10 fc 12 fc 14 fc 16 fb 18 fb 1a fb 1c fa 1e
+fa 20 f9 22 f9 24 f9 26 f8 28 f8 2a f7 2c f7 2e
+f7 30 f6 32 f6 34 f5 36 f5 38 f5 3a f4 3d f4 3f
+f3 41 f3 43 f3 45 f2 47 f2 49 f2 4b f1 4d f1 4f
+f0 51 f0 53 f0 55 ef 57 ef 59 ee 5b ee 5d ee 5f
+ed 61 ed 63 ec 65 ec 67 ec 69 eb 6b eb 6d ea 6f
+ea 71 ea 73 e9 75 e9 77 e9 79 e8 7b e8 7d e7 7f
+9a 34
