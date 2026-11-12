@@ -90,7 +90,10 @@ pub fn quant_matrix(group: usize, class: usize, quant: usize) -> [u8; 64] {
 /// band `n` quantises with group `n + 1` (group 1 is the low-low
 /// band's 2D set, group 2 the next band's, which the row Slant
 /// transforms, group 3 the column-Slant band's and group 4 the flat
-/// set of the band without a transform).
+/// set of the band without a transform). The bands of a second
+/// decomposition level (4 to 6) have no group of their own and take
+/// group 4; FFmpeg's decoder refuses such planes, and no stream is
+/// known to have them.
 pub fn quant_group(blk_size: u32, band_idx: usize, plane_bands: usize) -> usize {
     if blk_size == 4 {
         GROUP_4X4

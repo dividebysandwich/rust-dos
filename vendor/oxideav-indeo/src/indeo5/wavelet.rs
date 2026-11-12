@@ -310,4 +310,20 @@ mod tests {
         assert_eq!(plane, direct);
         assert_eq!((plane.width, plane.height), (4, 4));
     }
+
+    #[test]
+    fn recompose_plane_two_levels_doubles_twice() {
+        // Each level takes its low-low band at 4 times the scale of its
+        // output, so an innermost flat band of 16·v comes out as a flat
+        // plane of v, 4 times its size on each axis.
+        let ll = flat(2, 2, 32);
+        let level = |n: usize| LevelBands {
+            hl: flat(n, n, 0),
+            lh: flat(n, n, 0),
+            hh: flat(n, n, 0),
+        };
+        let plane = recompose_plane(&ll, &[level(2), level(4)]);
+        assert_eq!((plane.width, plane.height), (8, 8));
+        assert!(plane.data.iter().all(|&v| v == 2), "{:?}", plane.data);
+    }
 }

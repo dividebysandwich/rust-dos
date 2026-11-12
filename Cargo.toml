@@ -345,7 +345,9 @@ debug = "line-tables-only"
 # oxideav-indeo 0.0.4 with a fix of its Indeo 5 decoder for intra frames
 # whose luma plane is split into four wavelet bands (Nocturne's opening
 # movie, issue 985), until a release has it: vendor/oxideav-indeo is the
-# crate's src/ at v0.0.4 with that patch, and its manifest without the
-# benches. Drop it and this section when the crate releases the fix.
+# crate's src/ and license at v0.0.4 with that patch, and its manifest
+# without the benches, the dev-dependencies and the fields only
+# publishing reads (readme, homepage, keywords, categories, exclude).
+# Drop it and this section when the crate releases the fix.
 [patch.crates-io]
 oxideav-indeo = { path = "vendor/oxideav-indeo" }

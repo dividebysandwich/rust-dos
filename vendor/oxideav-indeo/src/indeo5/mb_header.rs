@@ -14,11 +14,16 @@
 //! | Field         | Width  | Condition                                |
 //! | ------------- | ------ | ---------------------------------------- |
 //! | `mb_coded`    | 1 bit  | always (`0` = coded, `1` = **skipped**)  |
+//! | `mb_qdelta`   | VLC    | skipped AND `qdelta_always`              |
 //! | `cbp`         | 4 bits | coded AND `blocks_per_mb == 4`           |
 //! | `block_coded` | 1 bit  | coded AND `blocks_per_mb == 1`           |
-//! | `mb_qdelta`   | VLC    | `qdelta_present` AND coded               |
+//! | `mb_qdelta`   | VLC    | coded AND `Explicit` AND (a coded block  |
+//! |               |        | OR `qdelta_always`)                      |
 //! | `mv_x_delta`  | VLC    | inter tile AND coded                     |
 //! | `mv_y_delta`  | VLC    | inter tile AND coded                     |
+//!
+//! `qdelta_always` ([`MbContext::qdelta_always`]) holds for the first
+//! luma band of a frame whose flags set bit 3.
 //!
 //! The qdelta / MV VLCs decode through the **MB-Huffman** codebook
 //! (the frame-level `mb_huff_desc` selection — the Indeo 4 wiki
@@ -90,9 +95,9 @@ pub enum QdeltaMode {
     /// `[band+0x2c] == 1 && [band+0x30] == 0` — an explicit per-MB
     /// qdelta VLC is read.
     Explicit,
-    /// `[band+0x30] == 1` — the per-MB qdelta is inherited from the
-    /// parent band's per-MB-qdelta map (no bits read here; the
-    /// inheritance-source walk is the `spec/03 §4.2`-deferred path).
+    /// `[band+0x30] == 1` — no bits read here: the MB takes the qdelta
+    /// of the MB at the same index in the same tile of the first luma
+    /// band (`decode::walk_tile_intra`).
     Inherit,
 }
 
@@ -165,10 +170,11 @@ pub struct MbContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MbHeader {
     /// `true` when the 1-bit `mb_coded` flag was `1` — the MB is
-    /// skipped and no further bits were consumed (`spec/03 §4.1`).
+    /// skipped and carries no further field but a qdelta under
+    /// [`MbContext::qdelta_always`] (`spec/03 §4.1`).
     pub skipped: bool,
-    /// The decoded signed per-MB quantiser delta (`Explicit` mode
-    /// only).
+    /// The decoded signed per-MB quantiser delta, when the MB codes
+    /// one (module docs).
     pub qdelta: Option<i8>,
     /// The decoded signed MV delta pair `(mv_x_delta, mv_y_delta)`
     /// (explicit-MV inter tiles only).
