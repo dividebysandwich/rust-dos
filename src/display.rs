@@ -22,6 +22,7 @@ use crate::video::{self, Frame};
 use gl::{GlScreen, NoGl};
 use rust_dos::bus::Bus;
 use rust_dos::config_ui::Layer;
+use rust_dos::toadforce::Renderer as Renderer3d;
 use rust_dos::voodoo::{Renderer, VoodooSettings};
 use sdl3::VideoSubsystem;
 use sdl3::pixels::PixelFormat;
@@ -100,6 +101,8 @@ pub struct Display<'a> {
     /// OpenGL drew, which the texture of `shown` isn't.
     voodoo_said: bool,
     voodoo_shown: bool,
+    /// Whether the log said why OpenGL doesn't draw the ToadForce.
+    toadforce_said: bool,
     /// The layer over the picture last shown (a manual's page), by its
     /// generation.
     layer_shown: Option<u64>,
@@ -223,6 +226,7 @@ impl<'a> Display<'a> {
             redraw: true,
             voodoo_said: false,
             voodoo_shown: false,
+            toadforce_said: false,
             layer_shown: None,
             refresh_hz: None,
             #[cfg(feature = "vr")]
@@ -437,6 +441,50 @@ impl<'a> Display<'a> {
             bus.log_string(&format!("[3DFX] voodoo_renderer=opengl: {}; the software renderer draws", problem));
         }
         false
+    }
+
+    /// Have the window's OpenGL draw a ToadForce's triangles
+    /// (`toadforce::gl`), with `toadforce_renderer` `auto` or `opengl`,
+    /// or the card's own rasteriser with `software`. A deterministic
+    /// run draws in software whatever the setting, as the GPU's pixels
+    /// depend on the host's GPU. Called every frame: a new machine's
+    /// card gets the renderer, and a changed setting takes effect.
+    pub fn run_toadforce(&mut self, bus: &mut Bus, renderer: Renderer3d, deterministic: bool) {
+        if !bus.toadforce() {
+            return;
+        }
+        let want = renderer != Renderer3d::Software && !deterministic;
+        let problem = match &mut self.out {
+            Output::Gl(gl) if want => {
+                // The card has no renderer yet, or the link of a
+                // window that is gone.
+                if bus.toadforce_hosted() && gl.toadforce_linked() {
+                    return;
+                }
+                match gl.toadforce_link() {
+                    Ok(link) => {
+                        bus.toadforce_set_host(Some(link));
+                        bus.log_string("[TOADFORCE] OpenGL draws the card's triangles");
+                        return;
+                    }
+                    Err(e) => Some(e),
+                }
+            }
+            Output::Sdl { .. } if want => Some("there is no OpenGL 3 here".to_string()),
+            _ => None,
+        };
+        if bus.toadforce_hosted() {
+            bus.toadforce_set_host(None);
+            self.redraw = true;
+        }
+        // `auto` settles for the software renderer without a word.
+        if let Some(problem) = problem.filter(|_| renderer == Renderer3d::OpenGl)
+            && !std::mem::replace(&mut self.toadforce_said, true)
+        {
+            bus.log_string(&format!(
+                "[TOADFORCE] toadforce_renderer=opengl: {problem}; the software renderer draws"
+            ));
+        }
     }
 
     /// Show `frame`, which must be as big as the last `set_frame_size`,

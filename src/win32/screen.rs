@@ -39,6 +39,7 @@ use crate::cpu::Cpu;
 use crate::video::crt::CrtTiming;
 use crate::toadforce::command::encode;
 use crate::toadforce::format::{Format, Rect as CardRect, Surface};
+use crate::toadforce::gpu::Cause;
 use crate::toadforce::{caps, regs};
 use crate::video::vbe::{self, LFB_BASE, VbeMode};
 use crate::voodoo::banshee as card;
@@ -322,7 +323,8 @@ fn vbe_mode(cpu: &Cpu, w: u32, h: u32, bpp: u32) -> Option<VbeMode> {
 /// Read video memory from byte `offset` into `data`; what is past its end
 /// reads as 0.
 pub fn read(cpu: &mut Cpu, offset: u32, data: &mut [u8]) {
-    expose(cpu, offset, data.len() as u32);
+    cpu.bus
+        .toadforce_touch_for(offset as usize, data.len(), Cause::Driver);
     peek(cpu, offset, data);
 }
 
@@ -364,7 +366,8 @@ pub fn settle(cpu: &mut Cpu) {
 /// reads through the bus can't.
 #[inline]
 pub fn expose(cpu: &mut Cpu, offset: u32, len: u32) {
-    cpu.bus.toadforce_touch(offset as usize, len as usize);
+    cpu.bus
+        .toadforce_touch_for(offset as usize, len as usize, Cause::Lock);
 }
 
 /// Whether a call of the function `name` of the DLL `dll` (its file
@@ -439,7 +442,8 @@ pub fn write(cpu: &mut Cpu, offset: u32, data: &[u8]) {
         return;
     }
     let data = &data[..end - start];
-    expose(cpu, start as u32, (end - start) as u32);
+    cpu.bus
+        .toadforce_touch_for(start, end - start, Cause::Driver);
     cpu.bus.toadforce_wrote(start, end - start);
     drew(cpu, start as u32, end as u32, data.len() as u64);
     if let Some(v) = &mut cpu.bus.voodoo

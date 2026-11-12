@@ -11,6 +11,7 @@
 
 use super::Bus;
 use crate::toadforce::display::{Legacy, Shown};
+use crate::toadforce::gpu::Cause;
 use crate::toadforce::pci::Bar;
 use crate::toadforce::{Change, Effects, Live, ToadForce, caps, command, regs};
 use crate::video::VideoMode;
@@ -262,6 +263,23 @@ impl Bus {
         }
     }
 
+    /// Whether a host renderer draws the card's triangles
+    /// (`toadforce_set_host`).
+    pub fn toadforce_hosted(&self) -> bool {
+        self.toadforce.as_deref().is_some_and(|c| c.hosted())
+    }
+
+    /// Have `host` draw the triangles it takes from now on, or with
+    /// None the card's own rasteriser all of them. The queued commands
+    /// run first, and what the host before it drew is read back, so
+    /// card memory holds every pixel when the renderer changes.
+    pub fn toadforce_set_host(&mut self, host: Option<Box<dyn crate::toadforce::gpu::Host>>) {
+        self.toadforce_flush();
+        if let Some(card) = &mut self.toadforce {
+            card.set_host(host, &mut self.vbe.vram);
+        }
+    }
+
     /// Whether the card's host renderer has pixels card memory hasn't
     /// (`toadforce::gpu`). False on a card that draws in software.
     #[inline]
@@ -274,19 +292,26 @@ impl Bus {
     /// renderer drew into surfaces with those bytes is read back.
     #[inline]
     pub fn toadforce_touch(&mut self, offset: usize, len: usize) {
+        self.toadforce_touch_for(offset, len, Cause::Program);
+    }
+
+    /// `toadforce_touch`, with what the bytes are wanted for, for the
+    /// status's counts of read-backs.
+    #[inline]
+    pub fn toadforce_touch_for(&mut self, offset: usize, len: usize, why: Cause) {
         self.toadforce_flush();
         if self.toadforce_ahead() {
             let end = (offset + len).min(u32::MAX as usize);
-            self.toadforce_read_back(Some((offset as u32, end as u32)));
+            self.toadforce_read_back(Some((offset as u32, end as u32)), why);
         }
     }
 
     /// Read back what the host renderer drew into the surfaces that
     /// share a byte with `range` of card memory (all for None).
     #[cold]
-    pub fn toadforce_read_back(&mut self, range: Option<(u32, u32)>) {
+    pub fn toadforce_read_back(&mut self, range: Option<(u32, u32)>, why: Cause) {
         if let Some(card) = &mut self.toadforce {
-            card.settle(&mut self.vbe.vram, range);
+            card.settle_for(&mut self.vbe.vram, range, why);
         }
     }
 
@@ -334,7 +359,7 @@ impl Bus {
             return;
         };
         let clamp = |at: u64| at.min(u32::MAX as u64) as u32;
-        self.toadforce_read_back(Some((clamp(start), clamp(end))));
+        self.toadforce_read_back(Some((clamp(start), clamp(end))), Cause::Show);
     }
 
     /// Have the card run `words`, or its queue.

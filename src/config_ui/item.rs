@@ -160,6 +160,8 @@ pub(super) enum Item {
     VeriteIrq,
     /// The megabytes of memory a ToadForce has.
     ToadForceMemory,
+    /// What draws a ToadForce's triangles.
+    ToadForceRenderer,
     Memsize,
     /// Expanded memory and upper memory blocks.
     Ems,
@@ -391,6 +393,7 @@ impl Item {
             VeriteRom => "  Board ROM",
             VeriteIrq => "  Vérité IRQ",
             ToadForceMemory => "  ToadForce memory",
+            ToadForceRenderer => "  ToadForce drawn by",
             Ems => "Expanded memory (EMS)",
             Umb => "Upper memory (UMB)",
             DosHigh => "DOS high",
@@ -543,6 +546,7 @@ impl Item {
             Item::Core => crate::dynrec::AVAILABLE,
             // The browser draws with the emulator's own rasterizer only.
             Item::VoodooRenderer
+            | Item::ToadForceRenderer
             | Item::VoodooScale
             | Item::VoodooScaleShader
             | Item::VoodooMsaa
@@ -620,7 +624,7 @@ impl Item {
             Item::VoodooMemory | Item::VoodooRenderer | Item::VoodooTextureSampling | Item::VoodooFpsCap | Item::VoodooGamma => s.voodoo.enabled,
             Item::PowerVrFilter => s.powervr.is_some(),
             Item::VeriteRisc | Item::VeriteIrq => s.machine.is_verite(),
-            Item::ToadForceMemory => s.machine.is_toadforce(),
+            Item::ToadForceMemory | Item::ToadForceRenderer => s.machine.is_toadforce(),
             Item::VeriteMhz | Item::VeriteRom => {
                 s.machine.is_verite() && s.verite.risc == crate::verite::Risc::Lle
             }
@@ -661,6 +665,7 @@ impl Item {
                 Applies::Now
             }
             Cycles | AutoFps | AutoBusyOs | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | PauseInSettings | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
+            | ToadForceRenderer
             | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooDither | VoodooTextureSampling | VoodooAnisotropy | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             MonitorEffects => Applies::Now,
@@ -863,6 +868,11 @@ impl Item {
             },
             VeriteIrq => s.verite.irq.to_string(),
             ToadForceMemory => format!("{} MB", s.toadforce_memory),
+            ToadForceRenderer => match s.toadforce_renderer {
+                crate::toadforce::Renderer::Auto => "Automatic".to_string(),
+                crate::toadforce::Renderer::OpenGl => "OpenGL".to_string(),
+                crate::toadforce::Renderer::Software => "Rust-DOS".to_string(),
+            },
             PowerVrFilter => match s.powervr_filter {
                 crate::powervr::tsp::Filter::Auto => "As the game sets it",
                 crate::powervr::tsp::Filter::Point => "Point (blocky)",

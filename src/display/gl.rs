@@ -5,6 +5,8 @@
 mod present_tests;
 mod xbrz;
 
+use rust_dos::toadforce::gl::ToadForceGl;
+use rust_dos::toadforce::gpu::{self, Host};
 use rust_dos::voodoo::gl::{SharedGl, TextureBarrier, VoodooGl};
 use rust_dos::voodoo::gpu::GpuLink;
 use std::cell::RefCell;
@@ -57,6 +59,11 @@ pub struct GlScreen {
     // The 3dfx card shares the functions and its renderer (`voodoo_link`)
     // until this ends, which ends the renderer.
     gl: Rc<glow::Context>,
+    /// The ToadForce's host renderer, made the first time a card asks
+    /// for one (`toadforce_link`), and why there is none if it can't
+    /// be made. Before the context, which it needs to end.
+    toadforce: HostCell,
+    toadforce_failed: Option<String>,
     _context: GLContext,
     window: Window,
     glsl: Glsl,
@@ -116,6 +123,70 @@ pub struct GlScreen {
     /// The look drawn without the tube's curve: the scene's screen has
     /// its own shape.
     flat: bool,
+}
+
+/// The ToadForce's host renderer on the window's context. The window
+/// has it, and a card a link to it (`HostLink`): the renderer ends with
+/// the window, while the context is still there, whatever a card that
+/// lives longer still holds.
+#[derive(Default)]
+struct HostCell(Rc<RefCell<Option<ToadForceGl>>>);
+
+impl Drop for HostCell {
+    fn drop(&mut self) {
+        // The renderer's own `Drop` deletes what it made.
+        self.0.borrow_mut().take();
+    }
+}
+
+/// A card's link to the window's host renderer. Once the window is
+/// gone it takes nothing, so the card draws in software, and has
+/// nothing to read back: what the renderer had ahead of card memory
+/// went with the window.
+struct HostLink(Rc<RefCell<Option<ToadForceGl>>>);
+
+impl Host for HostLink {
+    fn name(&self) -> &str {
+        "OpenGL"
+    }
+
+    fn takes(&self, state: &rust_dos::toadforce::raster::pipeline::DrawState) -> bool {
+        self.0.borrow().as_ref().is_some_and(|h| h.takes(state))
+    }
+
+    fn draw(&mut self, batch: &gpu::Batch, memory: &[u8], pages: &gpu::Pages) {
+        if let Some(host) = &mut *self.0.borrow_mut() {
+            host.draw(batch, memory, pages);
+        }
+    }
+
+    fn clear(&mut self, clear: &gpu::Clear, memory: &[u8], pages: &gpu::Pages) -> bool {
+        let mut host = self.0.borrow_mut();
+        host.as_mut()
+            .is_some_and(|h| h.clear(clear, memory, pages))
+    }
+
+    fn read_back(
+        &mut self,
+        surface: &rust_dos::toadforce::format::Surface,
+        memory: &mut [u8],
+    ) -> bool {
+        let mut host = self.0.borrow_mut();
+        host.as_mut().is_some_and(|h| h.read_back(surface, memory))
+    }
+
+    fn forget(&mut self) {
+        if let Some(host) = &mut *self.0.borrow_mut() {
+            host.forget();
+        }
+    }
+
+    fn status(&self) -> serde_json::Value {
+        match &*self.0.borrow() {
+            Some(host) => host.status(),
+            None => serde_json::Value::Null,
+        }
+    }
 }
 
 /// The scene goes first: the headset's thread draws with a context of the
@@ -258,6 +329,8 @@ impl GlScreen {
             scale_lines: true,
             filter: Filter::Nearest,
             renderer,
+            toadforce: HostCell::default(),
+            toadforce_failed: None,
             voodoo: Rc::new(RefCell::new(None)),
             voodoo_failed: (glsl == Glsl::Es300).then(|| "OpenGL ES can't draw it".to_string()),
             texture_barrier,
@@ -591,6 +664,33 @@ impl GlScreen {
             }
         }
         scale
+    }
+
+    /// Whether a card has a link to this window's host renderer.
+    pub fn toadforce_linked(&self) -> bool {
+        Rc::strong_count(&self.toadforce.0) > 1
+    }
+
+    /// A link to this window's host renderer for a ToadForce
+    /// (`Bus::toadforce_set_host`), which starts without copies of
+    /// anything: the card that gets it has every pixel in its memory.
+    /// The error says why OpenGL can't draw the card here.
+    pub fn toadforce_link(&mut self) -> Result<Box<dyn Host>, String> {
+        if let Some(problem) = &self.toadforce_failed {
+            return Err(problem.clone());
+        }
+        let mut host = self.toadforce.0.borrow_mut();
+        match &mut *host {
+            Some(host) => host.forget(),
+            None => match ToadForceGl::new(self.gl.clone(), self.glsl) {
+                Ok(made) => *host = Some(made),
+                Err(e) => {
+                    self.toadforce_failed = Some(e.clone());
+                    return Err(e);
+                }
+            },
+        }
+        Ok(Box::new(HostLink(self.toadforce.0.clone())))
     }
 
     /// Whether the 3dfx card can be drawn with OpenGL here, or why not.

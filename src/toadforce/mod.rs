@@ -43,6 +43,41 @@ pub use display::{Change, Live};
 use pci::Bar;
 use regs::Error;
 
+/// What draws the card's triangles (`toadforce_renderer`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Renderer {
+    /// The host's OpenGL where the window has it, and the card's own
+    /// rasteriser elsewhere.
+    #[default]
+    Auto,
+    /// The host's OpenGL; where there is none, the log says so and the
+    /// card's own rasteriser draws.
+    OpenGl,
+    /// The card's own rasteriser, on the processor.
+    Software,
+}
+
+impl Renderer {
+    pub const ALL: [Renderer; 3] = [Renderer::Auto, Renderer::OpenGl, Renderer::Software];
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Renderer::Auto),
+            "opengl" => Some(Renderer::OpenGl),
+            "software" => Some(Renderer::Software),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Renderer::Auto => "auto",
+            Renderer::OpenGl => "opengl",
+            Renderer::Software => "software",
+        }
+    }
+}
+
 /// What an access changed outside the card, for the bus to carry out.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Effects {
@@ -208,6 +243,7 @@ impl ToadForce {
     /// None the software renderer all of them again. What the host
     /// before it drew is read back into `memory`, card memory, first.
     pub fn set_host(&mut self, host: Option<Box<dyn gpu::Host>>, memory: &mut [u8]) {
+        self.gpu.why = gpu::Cause::Other;
         self.gpu.settle(memory, None);
         self.gpu.set_host(host, self.memory);
     }
@@ -225,6 +261,13 @@ impl ToadForce {
     /// them.
     #[inline]
     pub fn settle(&mut self, memory: &mut [u8], range: Option<(u32, u32)>) {
+        self.settle_for(memory, range, gpu::Cause::Program);
+    }
+
+    /// `settle`, with what the bytes are wanted for, for the status's
+    /// counts.
+    pub fn settle_for(&mut self, memory: &mut [u8], range: Option<(u32, u32)>, why: gpu::Cause) {
+        self.gpu.why = why;
         self.gpu.settle(memory, range);
     }
 
@@ -257,6 +300,11 @@ impl ToadForce {
 
     /// For the debugger's status: what the card shows and what was asked
     /// of it, at `live`. Reads change nothing.
+    /// Whether a host renderer is attached (`set_host`).
+    pub fn hosted(&self) -> bool {
+        self.gpu.attached()
+    }
+
     pub fn describe(&self, live: Live) -> serde_json::Value {
         let read = |offset| self.read(offset, live);
         let counts = self.counts;
@@ -298,8 +346,10 @@ impl ToadForce {
             "renderer": self.gpu.name(),
             "host": {
                 "read_backs": self.gpu.read_backs,
+                "read_backs_for": self.gpu.causes(),
                 "declined_draws": self.gpu.declined,
                 "stale_reads": self.gpu.stale_reads(),
+                "counts": self.gpu.status(),
             },
         })
     }
@@ -450,6 +500,7 @@ impl ToadForce {
                 // a read there can't read back (`Bus::read_8`). What
                 // its commands drew is in card memory when the write
                 // returns, as the specification has it.
+                self.gpu.why = gpu::Cause::Ring;
                 self.gpu.settle(memory, None);
             }
             regs::ERROR => {
@@ -591,6 +642,7 @@ impl ToadForce {
             Command::Nop => self.counts.nop += 1,
             Command::Fill { dst, rect, value } => {
                 let span = dst.span(&rect);
+                self.gpu.why = gpu::Cause::Blit;
                 self.gpu.settle(memory, Some(span));
                 blit::fill(memory, &dst, &rect, value);
                 self.gpu.pages.wrote(span.0, span.1 - span.0);
@@ -605,7 +657,9 @@ impl ToadForce {
                 key,
             } => {
                 let span = dst.span(&dst_rect);
+                self.gpu.why = gpu::Cause::Blit;
                 self.gpu.settle(memory, Some(src.span(&src_rect)));
+                self.gpu.why = gpu::Cause::Blit;
                 self.gpu.settle(memory, Some(span));
                 blit::blt(memory, &dst, &dst_rect, &src, &src_rect, key);
                 self.gpu.pages.wrote(span.0, span.1 - span.0);
@@ -653,6 +707,7 @@ impl ToadForce {
                     };
                     let spans = rects.iter().map(|rect| surface.span(rect));
                     if !self.gpu.clear(&clear, memory) {
+                        self.gpu.why = gpu::Cause::Clear;
                         self.gpu.settle(memory, Some(gpu::range(&surface)));
                         clear.write(memory);
                         for (first, end) in spans.clone() {

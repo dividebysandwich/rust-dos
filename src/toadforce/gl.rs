@@ -277,6 +277,11 @@ pub struct ToadForceGl {
     failed: HashSet<Vec<Step>>,
     /// Counted up with every batch.
     batch: u64,
+    /// For the status: the runs drawn, and the surfaces and textures
+    /// copied from card memory.
+    runs: u64,
+    uploads: u64,
+    decodes: u64,
     /// The host has no framebuffer the card's surfaces fit: nothing is
     /// taken.
     broken: bool,
@@ -340,6 +345,9 @@ impl ToadForceGl {
                 programs: HashMap::new(),
                 failed: HashSet::new(),
                 batch: 0,
+                runs: 0,
+                uploads: 0,
+                decodes: 0,
                 broken: false,
             }
         };
@@ -695,6 +703,7 @@ impl ToadForceGl {
                     self.copies.len() - 1
                 }
             };
+            self.uploads += 1;
             let mut pixels = rows(surface, memory);
             if wide {
                 pixels = pixels
@@ -831,6 +840,7 @@ impl ToadForceGl {
                 self.textures.len() - 1
             }
         };
+        self.decodes += 1;
         let t = &mut self.textures[at];
         let kind = if texture.cube {
             glow::TEXTURE_CUBE_MAP
@@ -1189,8 +1199,23 @@ impl Host for ToadForceGl {
         self.failed.is_empty() || !self.failed.contains(&shader::key(&state.steps))
     }
 
+    fn status(&self) -> serde_json::Value {
+        serde_json::json!({
+            "batches": self.batch,
+            "runs": self.runs,
+            "surface_uploads": self.uploads,
+            "texture_uploads": self.decodes,
+            "programs": self.programs.len(),
+            "failed_programs": self.failed.len(),
+            "surfaces": self.copies.len(),
+            "textures": self.textures.len(),
+            "packed_565": self.packed,
+        })
+    }
+
     fn draw(&mut self, batch: &Batch, memory: &[u8], pages: &Pages) {
         self.batch += 1;
+        self.runs += batch.runs.len() as u64;
         let colour = batch.target.colour;
         let depth = batch.target.depth_surface();
         let surfaces: Vec<Surface> = std::iter::once(colour).chain(depth).collect();

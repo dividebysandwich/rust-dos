@@ -198,6 +198,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                                 value
                             )),
                         },
+                        "toadforce_renderer" => match crate::toadforce::Renderer::parse(value) {
+                            Some(renderer) => config.toadforce_renderer = Some(renderer),
+                            None => warn(format!(
+                                "invalid toadforce_renderer '{}' (auto, opengl or software)",
+                                value
+                            )),
+                        },
                         "verite_rom" => {
                             let value = value.trim_matches('"');
                             let path = match (value.strip_prefix("~/"), home) {

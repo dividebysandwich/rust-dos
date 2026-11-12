@@ -1991,6 +1991,14 @@ fn main() -> Result<ExitCode, String> {
         } else {
             Zone::FrameCompose
         });
+        // A deterministic run draws a ToadForce in software, so that its
+        // pictures don't depend on the host's GPU. The variable keeps
+        // OpenGL drawing in one, for comparing the two renderers' frames
+        // at equal emulated times ("The ToadForce card" in
+        // `docs/llm-debugging.md`).
+        let toadforce_software =
+            det.is_some() && std::env::var_os("RUST_DOS_TOADFORCE_GL_DETERMINISTIC").is_none();
+        display.run_toadforce(&mut cpu.bus, settings.toadforce_renderer, toadforce_software);
         cpu.bus.sync_display();
         let voodoo_gl = display.run_voodoo(&mut cpu.bus, &settings.voodoo, det.is_none());
         if !voodoo_gl

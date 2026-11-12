@@ -293,6 +293,15 @@ Windows programs it runs without Windows. **64 MB** holds the screen and
 the surfaces of any game of the time. **128 MB** leaves more room at the
 largest modes; **32 MB** is what the cards of 1999 had.
 
+# ToadForce drawn by {#toadforce-renderer}
+
+What draws the ToadForce's 3D:
+
+- **Automatic**: your graphics card, through OpenGL, where the window
+  has it, and Rust-DOS itself elsewhere.
+- **OpenGL**: your graphics card. Faster in most games.
+- **Rust-DOS**: the processor, with the card's exact pixels.
+
 # Memory {#memsize}
 
 The PC's RAM. **16 MB** runs nearly every DOS game. Windows 95 and a few

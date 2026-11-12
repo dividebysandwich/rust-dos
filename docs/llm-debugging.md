@@ -1131,6 +1131,37 @@ from the built-in Windows' driver alike, and how many commands and
 register writes it `rejected`. A game whose DirectDraw blits stay on
 the CPU has `fill` and `blt` at 0.
 
+`renderer` is what draws the card's triangles: `software`, or `OpenGL`
+with `toadforce_renderer` `auto` or `opengl` in a window that has
+OpenGL 3.2 (`--hidden` has it, `SDL_VIDEO_DRIVER=dummy` hasn't). `host`
+counts what the OpenGL renderer costs and misses:
+
+- `read_backs`: surfaces copied from the GPU to card memory because
+  the program, a driver, the screen or a command on the processor
+  needed their bytes. Each stalls the GPU, so a game with several a
+  frame is one to look at (which call asks is in the plan,
+  `docs/toadforce.md`).
+- `declined_draws`: draws the software renderer drew because OpenGL
+  doesn't draw their state as the card does. Each reads its target
+  back first.
+- `stale_reads`: reads by the program of bytes the GPU had newer
+  pixels for. It should stay 0: anything else is a surface a driver
+  gave the program the address of without reading it back.
+- `counts`: the renderer's own, null with `software`: `batches` and
+  `runs` (draw calls), `surface_uploads` and `texture_uploads` from
+  card memory, the shader `programs` compiled and `failed_programs`,
+  the `surfaces` and `textures` it holds, and `packed_565` (whether
+  16-bit targets are the GPU's 5-6-5 format).
+
+A run with `--deterministic` draws the card in software, so that its
+pictures are the same on every host. To compare the two renderers at
+equal emulated times, start the OpenGL run with the environment
+variable `RUST_DOS_TOADFORCE_GL_DETERMINISTIC=1` as well: OpenGL then
+draws in the deterministic run too. The program runs the same in both
+as long as it doesn't act on the pixels it reads, and the frames
+differ only where the renderers do. Check `renderer` before trusting
+identical pictures.
+
 ### 3dfx (Glide) games
 
 With `voodoo=true` (CONFIGURATION.md's "3dfx Voodoo Graphics"),

@@ -152,6 +152,12 @@ pub trait Host {
     /// Drop every copy: card memory is all there is, as after a saved
     /// state was loaded.
     fn forget(&mut self);
+
+    /// Counts of its own work for the debugger's status, if it keeps
+    /// any.
+    fn status(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
 }
 
 /// The writes the processor made to each page of card memory, while a
@@ -232,6 +238,47 @@ fn overlap(a: (u32, u32), b: (u32, u32)) -> bool {
     a.0 < b.1 && b.0 < a.1
 }
 
+/// What a surface was read back for, for the status: each read-back
+/// stalls the host's GPU, and which kind a game has many of says what
+/// to move to the host next.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Cause {
+    /// The program's own write to the frame buffer, and whatever
+    /// names nothing else.
+    #[default]
+    Program,
+    /// A driver gave the program the surface's address (`Lock`,
+    /// `GetDC`).
+    Lock,
+    /// A driver read or wrote the bytes itself (GDI, a DirectDraw blit
+    /// on the processor).
+    Driver,
+    /// The screen shows the surface.
+    Show,
+    /// `FILL` or `BLT` on the processor reads or writes it.
+    Blit,
+    /// `CLEAR` on the processor, which the host declined.
+    Clear,
+    /// A draw of the host's samples it, or draws into bytes it shares.
+    Sampled,
+    /// A draw the host declined draws into it or samples it.
+    Declined,
+    /// A draw's vertices or indices are in it.
+    Buffers,
+    /// A guest driver's write of `RING_PUT`, after which card memory
+    /// holds everything.
+    Ring,
+    /// The renderer changed, or a state was saved.
+    Other,
+}
+
+impl Cause {
+    const NAMES: [&str; 11] = [
+        "program", "lock", "driver", "show", "blit", "clear", "sampled", "declined", "buffers",
+        "ring", "other",
+    ];
+}
+
 /// The card's side of a host renderer: the host, the pages, and the
 /// surfaces that are ahead on the host.
 #[derive(Default)]
@@ -246,6 +293,10 @@ pub struct Gpu {
     /// the software renderer with a host attached.
     pub read_backs: u64,
     pub declined: u64,
+    /// What the next `settle` reads back for, which a caller sets just
+    /// before it, and the read-backs by cause.
+    pub why: Cause,
+    by_cause: [u64; Cause::NAMES.len()],
     /// The program's reads of bytes that were ahead on the host, which
     /// got what card memory had (`Gpu::stale_read`).
     stale_reads: Cell<u64>,
@@ -290,6 +341,15 @@ impl Gpu {
         }
     }
 
+    /// The host's own counts for the status: null without a host, or
+    /// with one that keeps none.
+    pub fn status(&self) -> serde_json::Value {
+        match &*self.host.borrow() {
+            Some(host) => host.status(),
+            None => serde_json::Value::Null,
+        }
+    }
+
     /// Whether the host has pixels card memory hasn't.
     #[inline]
     pub fn ahead(&self) -> bool {
@@ -312,6 +372,16 @@ impl Gpu {
         if !self.ahead.is_empty() {
             self.read_back(memory, range);
         }
+        self.why = Cause::Program;
+    }
+
+    /// The read-backs by cause, for the status.
+    pub fn causes(&self) -> serde_json::Value {
+        let counts = Cause::NAMES.iter().zip(self.by_cause);
+        counts
+            .map(|(name, count)| (name.to_string(), serde_json::json!(count)))
+            .collect::<serde_json::Map<_, _>>()
+            .into()
     }
 
     #[cold]
@@ -320,6 +390,8 @@ impl Gpu {
             host,
             ahead,
             read_backs,
+            why,
+            by_cause,
             ..
         } = self;
         let Some(host) = host.get_mut() else {
@@ -332,6 +404,7 @@ impl Gpu {
             }
             host.read_back(surface, memory);
             *read_backs += 1;
+            by_cause[*why as usize] += 1;
             false
         });
     }
@@ -372,6 +445,7 @@ impl Gpu {
             })
             .collect();
         for r in other {
+            self.why = Cause::Sampled;
             self.settle(memory, Some(r));
         }
         let Some(host) = self.host.get_mut() else {
@@ -402,6 +476,7 @@ impl Gpu {
             .filter(|&r| overlap(r, bytes))
             .collect();
         for r in other {
+            self.why = Cause::Clear;
             self.settle(memory, Some(r));
         }
         let Some(host) = self.host.get_mut() else {
