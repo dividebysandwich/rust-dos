@@ -49,7 +49,7 @@ mod gamma;
 mod gpu_blt;
 pub(super) mod inspect;
 mod palette;
-mod toadforce;
+pub mod toadforce;
 pub mod picture;
 pub(super) mod surface;
 pub mod voodoo;

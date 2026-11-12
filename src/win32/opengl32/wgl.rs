@@ -65,7 +65,8 @@ const PFD_SIZE: u32 = 40;
 
 /// The ICD's pixel formats, from 1: their flags. Both are 5-6-5 with a
 /// 16-bit depth buffer, as Mesa's fxwgl.c has the first two of its
-/// table for cards before the Voodoo4.
+/// table for cards before the Voodoo4. A ToadForce's are of the
+/// desktop's colours (`color_bits`).
 const FORMATS: [u32; 2] = [
     PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL,
     PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER | PFD_SWAP_COPY,
@@ -141,6 +142,17 @@ fn format_of(cpu: &mut Cpu, hwnd: u32) -> u32 {
         .map_or(0, |f| f.1)
 }
 
+/// The bits of a pixel of a window's color buffer: 16, 5-6-5, or on a
+/// ToadForce with a 32-bit desktop 32, 8 bits a channel. A window's
+/// buffers are of the desktop's format on a real driver, whose
+/// SwapBuffers copies the back buffer to the screen as it is; the card
+/// then copies it with one `BLT` (`d3d8::copy::present_window`). The
+/// 3dfx cards draw 16 bits only.
+pub fn color_bits(cpu: &mut Cpu) -> u32 {
+    let wide = crate::win32::screen::is_toadforce(cpu) && ddraw::display::current(cpu).2 == 32;
+    if wide { 32 } else { 16 }
+}
+
 /// Write the descriptor of the pixel format `format` (from 1) at `at`.
 fn write_descriptor(cpu: &mut Cpu, at: u32, format: u32) {
     let flags = formats(cpu)[format as usize - 1];
@@ -153,6 +165,11 @@ fn write_descriptor(cpu: &mut Cpu, at: u32, format: u32) {
     b[8] = 0;
     b[9] = 16;
     b[10..18].copy_from_slice(&[5, 11, 6, 5, 5, 0, 0, 0]);
+    if color_bits(cpu) == 32 {
+        // 24 bits of color: red 8 at 16, green 8 at 8, blue 8 at 0.
+        b[9] = 24;
+        b[10..18].copy_from_slice(&[8, 16, 8, 8, 8, 0, 0, 0]);
+    }
     // No accumulation buffer, depth 16, no stencil or aux buffers, the
     // main plane. The Voodoo2's ICD has a 64-bit accumulation buffer,
     // 16 bits each, and an 8-bit stencil buffer.
@@ -385,16 +402,26 @@ fn place_strings(cpu: &mut Cpu, strings: &[(u32, &str)]) -> Option<u32> {
     Some(at)
 }
 
-/// A surface of the DirectDraw object `dd` in video memory, 16 bits:
-/// the render target or the depth buffer. Its id and the interface of
-/// it that is held.
+/// A surface of the DirectDraw object `dd` in video memory: the render
+/// target, of `color_bits`, or the depth buffer, 16 bits. Its id and
+/// the interface of it that is held.
 fn make_buffer(cpu: &mut Cpu, dd: u32, size: (u32, u32), depth: bool) -> Option<(u32, u32)> {
     let level = directdraw::ddraw(cpu, dd).map_or(0, |d| d.level);
+    let wide = color_bits(cpu) == 32;
     let format = if depth {
         Format {
             flags: DDPF_ZBUFFER,
             bits: 16,
             g: 0xFFFF,
+            ..Format::default()
+        }
+    } else if wide {
+        Format {
+            flags: DDPF_RGB,
+            bits: 32,
+            r: 0xFF_0000,
+            g: 0xFF00,
+            b: 0xFF,
             ..Format::default()
         }
     } else {

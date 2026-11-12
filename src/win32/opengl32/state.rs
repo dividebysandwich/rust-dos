@@ -630,6 +630,11 @@ fn values(cpu: &mut Cpu, p: u32) -> Option<(Vec<f64>, bool)> {
         let dd = ctx(cpu)?.dd;
         super::super::ddraw::d3d::hal(cpu, dd).unwrap_or(1)
     };
+    let wide = {
+        let target = ctx(cpu)?.target;
+        let surface = super::super::ddraw::state(cpu).surface(target);
+        surface.is_some_and(|s| s.format.bits == 32)
+    };
     let c = ctx(cpu)?;
     let unit = c.active_unit as usize;
     let one = |v: f64| Some((vec![v], false));
@@ -719,9 +724,11 @@ fn values(cpu: &mut Cpu, p: u32) -> Option<(Vec<f64>, bool)> {
         0x0D39 => one(TEXTURE_DEPTH as f64),
         0x0D3A => ints(&[MAX_VIEWPORT, MAX_VIEWPORT]),
         0x0D3B => one(16.0),
-        // GL_SUBPIXEL_BITS, and the bits of the buffers: 5-6-5 color,
-        // 16 of depth, no alpha, stencil or accumulation.
+        // GL_SUBPIXEL_BITS, and the bits of the buffers: 5-6-5 color
+        // or 8 bits a channel (`wgl::color_bits`), 16 of depth, no
+        // alpha, stencil or accumulation.
         0x0D50 => one(4.0),
+        0x0D52..=0x0D54 if wide => one(8.0),
         0x0D52 | 0x0D54 => one(5.0),
         0x0D53 => one(6.0),
         0x0D55 | 0x0D57..=0x0D5B => one(0.0),

@@ -581,6 +581,24 @@ fn shaded_triangle(card: Draws) {
     assert_eq!(r[20], 0, "glGetError");
     assert_eq!(pixel(&cpu, data, 4, 4), [255, 0, 0]);
     assert_eq!(pixel(&cpu, data, 60, 60), [0, 0, 255]);
+    if card == Draws::ToadForce {
+        // The window's buffers are of the desktop's format, 8 bits a
+        // channel, so SwapBuffers is a copy of the card's (`BLT`) and
+        // the processor reads nothing of the back buffer. The screen
+        // has the triangle's red and the clear's blue, half of the
+        // window's 64x64 pixels each.
+        cpu.bus.toadforce_flush();
+        let counts = cpu.bus.toadforce.as_ref().unwrap().counts();
+        assert!(counts.blt >= 1, "{counts:?}");
+        let screen = &cpu.bus.vbe.vram[..640 * 480 * 4];
+        let count = |colour: u32| {
+            let pixels = screen.as_chunks::<4>().0.iter();
+            let same = |p: &&[u8; 4]| u32::from_le_bytes([p[0], p[1], p[2], 0]) == colour;
+            pixels.filter(same).count()
+        };
+        assert!((1900..2200).contains(&count(0xFF_0000)), "red");
+        assert!((1900..2200).contains(&count(0xFF)), "blue");
+    }
 }
 
 #[test]
