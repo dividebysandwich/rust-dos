@@ -277,8 +277,31 @@ fn setup_of(
         }),
         normalize: s(RS_NORMALIZENORMALS) != 0,
         screen_stages: (d.tmus as usize).min(pipeline::SCREEN_STAGES),
-        blend: None,
+        blend: vertex_blend(d, version, layout),
     }
+}
+
+/// D3DRENDERSTATE_VERTEXBLEND.
+const RS_VERTEXBLEND: u32 = 151;
+
+/// How Direct3D 7 blends vertices of `layout`, if the device `d` does:
+/// D3DRENDERSTATE_VERTEXBLEND of D3DVBLEND_1WEIGHT to 3WEIGHTS (1 to 3)
+/// weighs a vertex of D3DFVF_XYZB1 to XYZB5 through the world matrices
+/// D3DTRANSFORMSTATE_WORLD and WORLD1 to WORLD3, one more than the
+/// weights the state counts. Direct3D 8 says how its device blends
+/// after the setup is made (`draw_blended`).
+fn vertex_blend(d: &Device, version: u32, layout: &Layout) -> Option<Blend> {
+    let count = d.state(RS_VERTEXBLEND);
+    if version != 7 || layout.rhw || layout.weights == 0 || !(1..=3).contains(&count) {
+        return None;
+    }
+    // D3DTRANSFORMSTATE_WORLD is 1, and WORLD1 to WORLD3 are 4 to 6.
+    let matrices = [1, 4, 5, 6].map(|t| d.transforms[t]).to_vec();
+    Some(Blend::Weights {
+        count: count as usize,
+        indexed: false,
+        matrices,
+    })
 }
 
 /// Count what was drawn, and the vertices' clip codes and extents, in
@@ -355,11 +378,12 @@ pub fn draw_blended(
     let Some(mut setup) = setup(cpu, Pass::Draw, id, version, layout, flags) else {
         return Err(DDERR_INVALIDPARAMS);
     };
-    setup.blend = blend;
-    if setup.blend.is_none()
-        && !layout.rhw
-        && draw_on_card(cpu, id, &setup, layout, kind, vertices, order)
-    {
+    if blend.is_some() {
+        setup.blend = blend;
+    }
+    // A card that transforms blends between its world matrices too,
+    // and leaves the pipeline the blending it doesn't have.
+    if !layout.rhw && draw_on_card(cpu, id, &setup, layout, kind, vertices, order) {
         return Ok(());
     }
     let prims = primitives(kind, order, vertices.len())?;
@@ -464,7 +488,9 @@ fn draw_clipped(
     let Some(mut setup) = made else {
         return Err(DDERR_INVALIDPARAMS);
     };
-    setup.blend = blend;
+    if blend.is_some() {
+        setup.blend = blend;
+    }
     draw_set_up(cpu, id, &setup, layout, vertices, clip, prims, flags);
     Ok(())
 }

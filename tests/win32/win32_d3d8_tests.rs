@@ -712,8 +712,14 @@ const CUBE_LOCK_RECT: u32 = 16;
 const CUBE_UNLOCK_RECT: u32 = 17;
 const D3DRTYPE_CUBETEXTURE: u32 = 5;
 const D3DERR_NOTAVAILABLE: u32 = 0x8876_086A;
+const D3DRS_CULLMODE: u32 = 22;
+const D3DRS_LIGHTING: u32 = 137;
 /// XYZRHW with one set of three texture coordinates.
 const FVF_CUBE: u32 = 0x1_0104;
+/// XYZB1 with a diffuse colour: one weight. With LASTBETA_UBYTE4 the
+/// one beta is the matrix indices.
+const FVF_WEIGHT: u32 = 0x046;
+const FVF_INDICES: u32 = 0x1046;
 
 /// The D3DPRESENT_PARAMETERS of the ToadForce programs: 640x480 R5G6B5
 /// in full screen, one back buffer that can be locked, and a depth
@@ -959,4 +965,87 @@ fn a_toadforce_makes_cube_textures_in_direct3d_8() {
     let counts = cpu.bus.toadforce.as_ref().expect("a ToadForce").counts();
     assert_eq!(counts.rejected, 0);
     assert_eq!(counts.draws, 2);
+}
+
+/// The pixels the blending program reads: in the triangle the weights
+/// moved, where it would be without them, and in the triangle the
+/// indices moved.
+const BLEND_READ: [(u32, u32); 3] = [(300, 20), (100, 20), (400, 260)];
+
+/// The program: the world matrix 1 moves by the width of the top left
+/// quarter. A red triangle in that quarter, each vertex with a weight
+/// of 0.25 for matrix 0, is drawn with D3DVBF_1WEIGHTS: three quarters
+/// of the way. A green one in the bottom left quarter, each vertex
+/// with the index 1, is drawn with D3DVBF_0WEIGHTS and indexed
+/// blending: all the way.
+fn card_blend_program() -> (Vec<u8>, u32) {
+    let mut d = vec![0u8; DATA_SIZE];
+    toadforce_present(&mut d);
+    put_f32s(&mut d, MATRICES, &moving([0.0; 3]));
+    put_f32s(&mut d, MATRICES + 64, &moving([1.0, 0.0, 0.0]));
+    let mut triangle = |at: u32, top: f32, beta: u32, colour: u32| {
+        for (i, [x, y]) in [[-1.0, top], [0.0, top], [-1.0, top - 1.0]].into_iter().enumerate() {
+            let at = at + 20 * i as u32;
+            put_f32s(&mut d, at, &[x, y, 0.5]);
+            put32(&mut d, at + 12, beta);
+            put32(&mut d, at + 16, colour);
+        }
+    };
+    triangle(VERTICES, 1.0, 0.25f32.to_bits(), 0xFFFF_0000);
+    triangle(VERTICES1, 0.0, 1, 0xFF00_FF00);
+    program(&[USER32, D3D8], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        toadforce_device(a, l, &mut c)?;
+        let state = |a: &mut CodeAssembler, c: &mut Calls, s: u32, v: u32| {
+            c.com(a, l, DEVICE, DEV_SET_RENDER_STATE, &[Arg::I(s), Arg::I(v)])
+        };
+        let draw = |a: &mut CodeAssembler, c: &mut Calls, vertices: u32| {
+            let args = [
+                Arg::I(D3DPT_TRIANGLELIST),
+                Arg::I(1),
+                Arg::At(vertices),
+                Arg::I(20),
+            ];
+            c.com(a, l, DEVICE, DEV_DRAW_PRIMITIVE_UP, &args)
+        };
+        for k in 0..2 {
+            let args = [Arg::I(D3DTS_WORLD + k), Arg::At(MATRICES + 64 * k)];
+            c.com(a, l, DEVICE, DEV_SET_TRANSFORM, &args)?;
+        }
+        state(a, &mut c, D3DRS_LIGHTING, 0)?;
+        state(a, &mut c, D3DRS_CULLMODE, 1)?;
+        c.com(a, l, DEVICE, DEV_BEGIN_SCENE, &[])?;
+        c.com(a, l, DEVICE, DEV_SET_VERTEX_SHADER, &[Arg::I(FVF_WEIGHT)])?;
+        state(a, &mut c, D3DRS_VERTEXBLEND, D3DVBF_1WEIGHTS)?;
+        draw(a, &mut c, VERTICES)?;
+        c.com(a, l, DEVICE, DEV_SET_VERTEX_SHADER, &[Arg::I(FVF_INDICES)])?;
+        state(a, &mut c, D3DRS_VERTEXBLEND, D3DVBF_0WEIGHTS)?;
+        state(a, &mut c, D3DRS_INDEXEDVERTEXBLENDENABLE, 1)?;
+        draw(a, &mut c, VERTICES1)?;
+        c.com(a, l, DEVICE, DEV_END_SCENE, &[])?;
+        toadforce_pixels(a, l, &mut c, &BLEND_READ)?;
+        a.mov(dword_ptr(l.at(RESULTS + 4 * CALLS)), c.next as i32)?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn a_toadforce_blends_vertices_by_their_weights_and_the_pipeline_by_their_indices() {
+    let (exe, data) = card_blend_program();
+    let mut cpu = machine_toadforce("d3d8_toadforce_blend", exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + DONE), 1);
+    let calls = peek(&cpu, data + RESULTS + 4 * CALLS);
+    let r = results(&cpu, data, calls);
+    assert!(r[2..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+    let pixel = |i: u32| peek(&cpu, data + PIXELS + 4 * i);
+    // Red 240 pixels to the right of where the vertices are, the blue
+    // of the Clear where they are, and green 320 pixels to the right.
+    assert_eq!([pixel(0), pixel(1), pixel(2)], [0xF800, 0x0010, 0x07E0]);
+    // The card transformed the draw blended by weights. The one whose
+    // matrices the indices name came from the pipeline, as screen
+    // vertices.
+    let counts = cpu.bus.toadforce.as_ref().expect("a ToadForce").counts();
+    assert_eq!(counts.rejected, 0);
+    assert_eq!((counts.draws, counts.transformed), (2, 1), "{counts:?}");
 }
