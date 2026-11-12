@@ -1150,9 +1150,12 @@ counts what the OpenGL renderer costs and misses:
 - `declined_draws`: draws the software renderer drew because OpenGL
   doesn't draw their state as the card does. Each reads its target
   back first.
-- `stale_reads`: reads by the program of bytes the GPU had newer
-  pixels for. It should stay 0: anything else is a surface a driver
-  gave the program the address of without reading it back.
+- `writes`: the times pixels the processor wrote into a surface the
+  GPU had newer pixels of went to the GPU's copy as rectangles, with
+  nothing read back. A surface written in parts of pixels or in too
+  many rectangles is read back instead, and counts under `program`.
+  `lock` counts the times the program read such a surface and the
+  card fetched its pixels from the GPU to answer.
 - `counts`: the renderer's own, null with `software`: `batches` and
   `runs` (draw calls), `surface_uploads` and `texture_uploads` from
   card memory, `texture_converts` (images of textures filled from a
