@@ -198,7 +198,7 @@ impl Target {
 }
 
 /// A texture: where its images are in card memory.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Texture {
     pub format: Format,
     /// The size of level 0. Each level after it has half the width and
