@@ -885,21 +885,17 @@ impl Level1 {
         self.textures.get(&self.bound[stage])
     }
 
-    /// Carry out `command` in `memory`, card memory. The spans of card
-    /// memory it wrote go to `drawn`.
-    pub fn apply(
-        &mut self,
-        command: Command,
-        memory: &mut [u8],
-        drawn: &mut Vec<(u32, u32)>,
-    ) -> Result<(), Error> {
+    /// Carry out `command` on the state. The two commands that write
+    /// card memory are the card's: it hands a draw to its renderer, and
+    /// writes a `CLEAR` where `Level1::clear` says, on the host or the
+    /// processor (`ToadForce::execute`).
+    pub fn apply(&mut self, command: Command) -> Result<(), Error> {
         // `CLEAR` leaves the state as it is, and a frame starts with one.
         if command.sets_state() {
             self.lowered.forget();
         }
         match command {
-            // The card hands a draw to its renderer.
-            Command::Draw(_) => {}
+            Command::Draw(_) | Command::Clear { .. } => {}
             Command::RenderState(pairs) => {
                 for pair in pairs.as_chunks::<2>().0 {
                     self.render[pair[0] as usize] = pair[1];
@@ -927,25 +923,6 @@ impl Level1 {
             }
             Command::ClipPlane { index, plane } => self.clip_planes[index] = plane,
             Command::RenderTarget(target) => self.target = target,
-            Command::Clear {
-                flags,
-                colour,
-                z,
-                stencil,
-                rects,
-            } => {
-                let (rects, buffers) = self.clear(flags, colour, z, stencil, rects)?;
-                for (surface, value, mask) in buffers {
-                    let clear = crate::toadforce::gpu::Clear {
-                        surface,
-                        rects: &rects,
-                        value,
-                        mask,
-                    };
-                    clear.write(memory);
-                    drawn.extend(rects.iter().map(|rect| surface.span(rect)));
-                }
-            }
             Command::DefineTexture {
                 handle,
                 format,

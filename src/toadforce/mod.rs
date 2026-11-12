@@ -664,7 +664,7 @@ impl ToadForce {
                 self.counts.level1 += 1;
             }
             Command::Level1(command) => {
-                self.level1.apply(command, memory, &mut fx.drawn)?;
+                self.level1.apply(command)?;
                 self.counts.level1 += 1;
             }
         }
