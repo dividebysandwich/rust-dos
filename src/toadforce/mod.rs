@@ -694,9 +694,12 @@ impl ToadForce {
             Command::Nop => self.counts.nop += 1,
             Command::Fill { dst, rect, value } => {
                 let span = dst.span(&rect);
-                self.gpu.settle(memory, Some(span), gpu::Cause::Blit);
-                blit::fill(memory, &dst, &rect, value);
-                self.gpu.pages.wrote(span.0, span.1 - span.0);
+                // The host's, where it has the destination ahead.
+                if !self.gpu.fill(&dst, &rect, value, memory) {
+                    self.gpu.settle(memory, Some(span), gpu::Cause::Blit);
+                    blit::fill(memory, &dst, &rect, value);
+                    self.gpu.pages.wrote(span.0, span.1 - span.0);
+                }
                 self.counts.fill += 1;
                 fx.drawn.push(span);
             }
@@ -709,10 +712,16 @@ impl ToadForce {
             } => {
                 let span = dst.span(&dst_rect);
                 let read = src.span(&src_rect);
-                self.gpu.settle(memory, Some(read), gpu::Cause::Blit);
-                self.gpu.settle(memory, Some(span), gpu::Cause::Blit);
-                blit::blt(memory, &dst, &dst_rect, &src, &src_rect, key);
-                self.gpu.pages.wrote(span.0, span.1 - span.0);
+                // The host's, where it has either surface ahead.
+                let hosted = self
+                    .gpu
+                    .blt(&dst, &dst_rect, &src, &src_rect, key, memory);
+                if !hosted {
+                    self.gpu.settle(memory, Some(read), gpu::Cause::Blit);
+                    self.gpu.settle(memory, Some(span), gpu::Cause::Blit);
+                    blit::blt(memory, &dst, &dst_rect, &src, &src_rect, key);
+                    self.gpu.pages.wrote(span.0, span.1 - span.0);
+                }
                 self.counts.blt += 1;
                 fx.drawn.push(span);
             }

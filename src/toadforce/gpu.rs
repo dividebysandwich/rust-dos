@@ -28,19 +28,37 @@
 //!   Reading a surface back writes card memory what the host's copy
 //!   holds, and isn't counted, and neither are the host's own draws:
 //!   a host that draws into a target drops its other copies that share
-//!   a byte with it (`Host::draw`).
+//!   a byte with it (`Host::draw`). A copy that is ahead is never made
+//!   again from card memory, whatever its stamp says: a write to a
+//!   neighbour in one of its pages changes the stamp and none of its
+//!   pixels.
+//! - **Views.** A surface with the offset, the pitch and the format of
+//!   another and no more of its width and height is the top left part
+//!   of it (`within`), as the depth buffer of a small render target is
+//!   of the one the screen's target has. The host keeps one copy for
+//!   them, of the largest it was given, and the card keeps that one in
+//!   its list of what is ahead.
 //! - **`CLEAR`.** The card offers the host each buffer a `CLEAR` writes
 //!   (`Host::clear`). A host whose copy of the buffer is what card
 //!   memory holds, or newer, writes the copy, and the buffer is ahead
-//!   there. Otherwise the processor writes card memory, so a target
-//!   only the software renderer draws into never goes through the
-//!   host.
+//!   there. So does a host for a `CLEAR` of every pixel of the buffer,
+//!   which needs nothing of what card memory holds. Otherwise the
+//!   processor writes card memory.
+//! - **`FILL` and `BLT`.** The card offers the host those that write a
+//!   surface, or copy from one, that is ahead (`Host::fill`,
+//!   `Host::blt`), and the destination is ahead after it. The others
+//!   are the processor's.
+//! - **A texture that is a surface.** A draw may sample a texture one
+//!   of whose images is a surface that is ahead (`image_of`): a render
+//!   target sampled, or the face of a cube map drawn into. The card
+//!   leaves the surface ahead, and the host fills the image from its
+//!   copy.
 //!
 //! With no host attached none of this does anything: the pages aren't
 //! counted and nothing is ever ahead.
 
-use super::format::{Rect, Surface};
-use super::level1::Target;
+use super::format::{Format, Rect, Surface};
+use super::level1::{Target, Texture};
 use super::raster::pipeline::DrawState;
 use super::raster::vertex::ScreenVertex;
 use std::cell::{Cell, RefCell};
@@ -124,30 +142,77 @@ pub trait Host {
 
     /// Draw `batch`. `memory` is card memory, for the textures and for
     /// a target the host has no copy of or a stale one, by `pages`.
-    /// The card has read back whatever of it was ahead on the host and
-    /// isn't the batch's own target.
+    /// The card has read back whatever of it was ahead on the host,
+    /// apart from the batch's own target, the surfaces the target's
+    /// are views of or that are views of them (`within`), and the
+    /// surfaces that are images of the batch's textures (`image_of`).
+    ///
+    /// The host's copy of a target's surface is the one of the largest
+    /// surface it was given there: a copy of a smaller one is made
+    /// larger, with its pixels kept if it was ahead. A copy that is
+    /// ahead is drawn into as it is, and one that isn't is made again
+    /// from `memory` when its stamp is stale. An image of a texture
+    /// that is a surface ahead on the host is filled from the host's
+    /// copy, with what a read-back and a decode of card memory would
+    /// give.
     ///
     /// The host's draws aren't counted in `pages`, and neither is a
     /// read-back. So the host drops every copy it has of other bytes
     /// that share one with the target's colour or depth buffer: a
-    /// texture drawn into, or a surface over the same memory with
-    /// another size or format. The card reads the target back before
-    /// anything uses those bytes again, and the host copies them anew.
+    /// surface over the same memory with another size or format, or a
+    /// texture there that isn't the target exactly. The card reads the
+    /// target back before anything uses those bytes again, and the
+    /// host copies them anew.
     fn draw(&mut self, batch: &Batch, memory: &[u8], pages: &Pages);
 
-    /// Write `clear` to the host's copy of its surface, when the host
-    /// has one that is what card memory holds (by `pages`) or newer:
-    /// the surface is then ahead on the host, and the host drops its
-    /// other copies that share a byte with it, as for a draw. False
-    /// when the host has no such copy or can't write those bits
-    /// exactly; nothing is changed, and the processor writes card
-    /// memory.
+    /// Write `clear` to the host's copy of its surface: the surface is
+    /// then ahead on the host, and the host drops its other copies
+    /// that share a byte with it, as for a draw. The host takes a
+    /// `CLEAR` when its copy is ahead or is what card memory holds (by
+    /// `pages`), and one of every bit of every pixel of the copy
+    /// whatever the copy holds, or with no copy yet. False otherwise,
+    /// or when the host can't write those bits exactly; nothing is
+    /// changed, and the processor writes card memory.
     fn clear(&mut self, clear: &Clear, memory: &[u8], pages: &Pages) -> bool;
 
+    /// `FILL`: write the low bytes of `value` to each pixel of `rect`
+    /// of `dst`, when the host's copy of `dst` is ahead. The surface of
+    /// that copy, which is ahead after it. None when the host leaves
+    /// the fill to the processor, with nothing changed.
+    fn fill(
+        &mut self,
+        dst: &Surface,
+        rect: &Rect,
+        value: u32,
+        memory: &[u8],
+        pages: &Pages,
+    ) -> Option<Surface>;
+
+    /// `BLT`: copy `src_rect` of `src` to `dst_rect` of `dst`, when
+    /// the host's copy of either is ahead. The surface of the host's
+    /// copy of `dst`, which is ahead after it. None when the host
+    /// leaves the copy to the processor, with nothing changed: for a
+    /// stretch, a colour key, formats it keeps no copies of, and a
+    /// copy onto its own source.
+    #[allow(clippy::too_many_arguments)]
+    fn blt(
+        &mut self,
+        dst: &Surface,
+        dst_rect: &Rect,
+        src: &Surface,
+        src_rect: &Rect,
+        key: Option<u32>,
+        memory: &[u8],
+        pages: &Pages,
+    ) -> Option<Surface>;
+
     /// Write the pixels of `surface`, a colour or a depth buffer the
-    /// host drew into, to card memory. False when the host has no such
-    /// surface, and `memory` is as it was.
-    fn read_back(&mut self, surface: &Surface, memory: &mut [u8]) -> bool;
+    /// host drew into, to `memory`. False when the host has no such
+    /// surface, and `memory` is as it was. With `pages`, `memory` is
+    /// card memory, which then holds what the copy does: the copy is
+    /// no longer ahead. Without, it is a copy of card memory for a
+    /// saved state, and the host's copy stays ahead.
+    fn read_back(&mut self, surface: &Surface, memory: &mut [u8], pages: Option<&Pages>) -> bool;
 
     /// Drop every copy: card memory is all there is, as after a saved
     /// state was loaded.
@@ -236,6 +301,58 @@ pub fn range(surface: &Surface) -> (u32, u32) {
 
 fn overlap(a: (u32, u32), b: (u32, u32)) -> bool {
     a.0 < b.1 && b.0 < a.1
+}
+
+/// A format as its pixels are kept: `X8R8G8B8` and `A8R8G8B8` name the
+/// same four bytes, and a host keeps all four for either.
+fn kept(format: Format) -> Format {
+    match format {
+        Format::X8R8G8B8 => Format::A8R8G8B8,
+        format => format,
+    }
+}
+
+/// Whether `view` is the top left part of `whole`, or all of it: they
+/// start at one byte with one pitch, their pixels are kept the same
+/// way, and `view` is no wider and no higher.
+pub fn within(view: &Surface, whole: &Surface) -> bool {
+    view.offset == whole.offset
+        && view.pitch == whole.pitch
+        && kept(view.format) == kept(whole.format)
+        && view.width <= whole.width
+        && view.height <= whole.height
+}
+
+/// Whether one of the two is a view of the other.
+pub fn related(a: &Surface, b: &Surface) -> bool {
+    within(a, b) || within(b, a)
+}
+
+/// The level and the face of `texture` that `surface` is, when it is
+/// one exactly: the image starts where the surface does, with its
+/// pitch and size, in a format a host has colour buffers of, and the
+/// texture has no colour key, whose test is of card memory's bits.
+pub fn image_of(texture: &Texture, surface: &Surface) -> Option<(u32, u32)> {
+    let colour = matches!(
+        texture.format,
+        Format::R5G6B5 | Format::X8R8G8B8 | Format::A8R8G8B8
+    );
+    if !colour || texture.key.is_some() || kept(texture.format) != kept(surface.format) {
+        return None;
+    }
+    (0..texture.levels)
+        .filter(|&level| texture.level_size(level) == (surface.width, surface.height))
+        .flat_map(|level| (0..texture.faces()).map(move |face| (level, face)))
+        .find(|&(level, face)| texture.image(level, face) == (surface.offset, surface.pitch))
+}
+
+/// Whether `texture` has a byte of `bytes`.
+fn samples(texture: &Texture, bytes: (u32, u32)) -> bool {
+    let mut shares = false;
+    super::raster::pipeline::texture_reads(texture, |r| {
+        shares |= r.0 < bytes.1 as u64 && (bytes.0 as u64) < r.1;
+    });
+    shares
 }
 
 /// What a surface was read back for, for the status: each read-back
@@ -395,6 +512,7 @@ impl Gpu {
             ahead,
             read_backs,
             by_cause,
+            pages,
             ..
         } = self;
         let Some(host) = host.get_mut() else {
@@ -405,7 +523,7 @@ impl Gpu {
             if range.is_some_and(|r| !overlap(r, self::range(surface))) {
                 return true;
             }
-            host.read_back(surface, memory);
+            host.read_back(surface, memory, Some(pages));
             *read_backs += 1;
             by_cause[why as usize] += 1;
             false
@@ -421,31 +539,70 @@ impl Gpu {
         let mut copy = memory.to_vec();
         if let Some(host) = self.host.borrow_mut().as_mut() {
             for surface in &self.ahead {
-                host.read_back(surface, &mut copy);
+                host.read_back(surface, &mut copy, None);
             }
         }
         Some(copy)
     }
 
+    /// `surface` is ahead on the host, which has one copy for it and
+    /// its views: the list keeps the largest.
+    fn mark(&mut self, surface: Surface) {
+        if self.ahead.iter().any(|s| within(&surface, s)) {
+            return;
+        }
+        self.ahead.retain(|s| !within(s, &surface));
+        self.ahead.push(surface);
+    }
+
+    /// Read back, for `why`, the surfaces that are ahead and share a
+    /// byte with `surface` without being it, a view of it or what it
+    /// is a view of.
+    fn settle_others(&mut self, surface: &Surface, memory: &mut [u8], why: Cause) {
+        let bytes = range(surface);
+        let other: Vec<(u32, u32)> = self
+            .ahead
+            .iter()
+            .filter(|s| !related(s, surface))
+            .map(range)
+            .filter(|&r| overlap(r, bytes))
+            .collect();
+        for r in other {
+            self.settle(memory, Some(r), why);
+        }
+    }
+
     /// Have the host draw `batch`, whose target is then ahead on it.
     /// Surfaces that are ahead and share bytes with the target's
-    /// without being them are read back first, and so are those the
-    /// bytes `reads` lie in: the host makes its copies from card
-    /// memory.
+    /// without being them or views of them are read back first, and so
+    /// are those the bytes `reads` lie in: the host makes its copies
+    /// from card memory. One that is exactly an image of each texture
+    /// that samples its bytes stays ahead, and the host fills the
+    /// image from its copy.
     pub fn draw(&mut self, batch: &Batch, reads: &[(u32, u32)], memory: &mut [u8]) {
         let colour = batch.target.colour;
         let depth = batch.target.depth_surface();
-        let own = |s: &Surface| *s == colour || Some(*s) == depth;
+        let own = |s: &Surface| related(s, &colour) || depth.is_some_and(|d| related(s, &d));
+        let drawn = |r: (u32, u32)| {
+            overlap(r, range(&colour)) || depth.is_some_and(|d| overlap(r, range(&d)))
+        };
+        let textures = || {
+            let runs = batch.runs.iter();
+            runs.flat_map(|run| run.state.tex.iter().flatten().map(|tex| &tex.texture))
+        };
         let other: Vec<(u32, u32)> = self
             .ahead
             .iter()
             .filter(|s| !own(s))
-            .map(range)
-            .filter(|&r| {
-                overlap(r, range(&colour))
-                    || depth.is_some_and(|d| overlap(r, range(&d)))
-                    || reads.iter().any(|&read| overlap(r, read))
+            .filter(|s| {
+                let r = range(s);
+                if drawn(r) {
+                    return true;
+                }
+                reads.iter().any(|&read| overlap(r, read))
+                    && textures().any(|t| samples(t, r) && image_of(t, s).is_none())
             })
+            .map(range)
             .collect();
         for r in other {
             self.settle(memory, Some(r), Cause::Sampled);
@@ -456,9 +613,7 @@ impl Gpu {
         let _profile = crate::profile::zone(crate::profile::Zone::ToadForceHost);
         host.draw(batch, memory, &self.pages);
         for surface in std::iter::once(colour).chain(depth) {
-            if !self.ahead.contains(&surface) {
-                self.ahead.push(surface);
-            }
+            self.mark(surface);
         }
     }
 
@@ -470,27 +625,71 @@ impl Gpu {
         if !self.attached() {
             return false;
         }
-        let bytes = range(&clear.surface);
-        let other: Vec<(u32, u32)> = self
-            .ahead
-            .iter()
-            .filter(|s| **s != clear.surface)
-            .map(range)
-            .filter(|&r| overlap(r, bytes))
-            .collect();
-        for r in other {
-            self.settle(memory, Some(r), Cause::Clear);
-        }
+        self.settle_others(&clear.surface, memory, Cause::Clear);
         let Some(host) = self.host.get_mut() else {
             return false;
         };
+        let _profile = crate::profile::zone(crate::profile::Zone::ToadForceHost);
         if !host.clear(clear, memory, &self.pages) {
             return false;
         }
-        if !self.ahead.contains(&clear.surface) {
-            self.ahead.push(clear.surface);
-        }
+        self.mark(clear.surface);
         true
+    }
+
+    /// Whether a surface that is ahead has the pixels of `surface`.
+    fn has_ahead(&self, surface: &Surface) -> bool {
+        self.ahead.iter().any(|s| related(s, surface))
+    }
+
+    /// Have the host do a `FILL`, when the destination is ahead on it
+    /// and stays so. False when the processor is to write card memory.
+    pub fn fill(&mut self, dst: &Surface, rect: &Rect, value: u32, memory: &mut [u8]) -> bool {
+        if !self.has_ahead(dst) {
+            return false;
+        }
+        self.settle_others(dst, memory, Cause::Blit);
+        let Some(host) = self.host.get_mut() else {
+            return false;
+        };
+        let _profile = crate::profile::zone(crate::profile::Zone::ToadForceHost);
+        match host.fill(dst, rect, value, memory, &self.pages) {
+            Some(now) => {
+                self.mark(now);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Have the host do a `BLT`, when the source or the destination is
+    /// ahead on it: the destination then is. False when the processor
+    /// is to copy in card memory.
+    pub fn blt(
+        &mut self,
+        dst: &Surface,
+        dst_rect: &Rect,
+        src: &Surface,
+        src_rect: &Rect,
+        key: Option<u32>,
+        memory: &mut [u8],
+    ) -> bool {
+        if !self.has_ahead(dst) && !self.has_ahead(src) {
+            return false;
+        }
+        self.settle_others(dst, memory, Cause::Blit);
+        self.settle_others(src, memory, Cause::Blit);
+        let Some(host) = self.host.get_mut() else {
+            return false;
+        };
+        let _profile = crate::profile::zone(crate::profile::Zone::ToadForceHost);
+        match host.blt(dst, dst_rect, src, src_rect, key, memory, &self.pages) {
+            Some(now) => {
+                self.mark(now);
+                true
+            }
+            None => false,
+        }
     }
 
     /// The program read `len` bytes at `offset` by itself, which the

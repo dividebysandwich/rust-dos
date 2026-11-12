@@ -5,6 +5,7 @@
 mod present_tests;
 mod xbrz;
 
+use rust_dos::toadforce::format::{Rect, Surface};
 use rust_dos::toadforce::gl::ToadForceGl;
 use rust_dos::toadforce::gpu::{self, Host};
 use rust_dos::voodoo::gl::{SharedGl, TextureBarrier, VoodooGl};
@@ -166,13 +167,42 @@ impl Host for HostLink {
             .is_some_and(|h| h.clear(clear, memory, pages))
     }
 
+    fn fill(
+        &mut self,
+        dst: &Surface,
+        rect: &Rect,
+        value: u32,
+        memory: &[u8],
+        pages: &gpu::Pages,
+    ) -> Option<Surface> {
+        let mut host = self.0.borrow_mut();
+        host.as_mut()?.fill(dst, rect, value, memory, pages)
+    }
+
+    fn blt(
+        &mut self,
+        dst: &Surface,
+        dst_rect: &Rect,
+        src: &Surface,
+        src_rect: &Rect,
+        key: Option<u32>,
+        memory: &[u8],
+        pages: &gpu::Pages,
+    ) -> Option<Surface> {
+        let mut host = self.0.borrow_mut();
+        host.as_mut()?
+            .blt(dst, dst_rect, src, src_rect, key, memory, pages)
+    }
+
     fn read_back(
         &mut self,
-        surface: &rust_dos::toadforce::format::Surface,
+        surface: &Surface,
         memory: &mut [u8],
+        pages: Option<&gpu::Pages>,
     ) -> bool {
         let mut host = self.0.borrow_mut();
-        host.as_mut().is_some_and(|h| h.read_back(surface, memory))
+        host.as_mut()
+            .is_some_and(|h| h.read_back(surface, memory, pages))
     }
 
     fn forget(&mut self) {
