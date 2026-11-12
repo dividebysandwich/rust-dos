@@ -369,7 +369,7 @@ fn check_params(cpu: &mut Cpu, p: &mut [u32], window: u32) -> Result<(), u32> {
             return Err(D3DERR_INVALIDCALL);
         }
     }
-    if p[PP_AUTODEPTH] != 0 && !super::direct3d::depth_format(p[PP_DEPTHFORMAT]) {
+    if p[PP_AUTODEPTH] != 0 && !resource::card_depth(cpu, p[PP_DEPTHFORMAT]) {
         return Err(D3DERR_INVALIDCALL);
     }
     Ok(())
@@ -612,13 +612,16 @@ pub fn create(
         DEVTYPE_REF => return D3DERR_NOTAVAILABLE,
         _ => return D3DERR_INVALIDCALL,
     }
-    // The card has no transform and lighting of its own.
-    if vp != CREATE_SOFTWARE_VERTEXPROCESSING {
-        return D3DERR_INVALIDCALL;
-    }
     // A Voodoo Graphics or Voodoo2 add-on card has no Direct3D 8 driver.
-    if cpu.bus.vga.adapter.voodoo_board().is_none() {
+    let Some(kind) = super::caps::card(cpu) else {
         return D3DERR_NOTAVAILABLE;
+    };
+    // Hardware and mixed vertex processing are of a card that
+    // transforms and lights. The draws are the same with each: the
+    // HAL hands the card the vertices it can transform as the pipeline
+    // would, and the pipeline does the others (`hal::draw_geometry`).
+    if vp != CREATE_SOFTWARE_VERTEXPROCESSING && !hal::transforms(kind) {
+        return D3DERR_INVALIDCALL;
     }
     let window = if p[PP_WINDOW] != 0 {
         p[PP_WINDOW]
@@ -740,8 +743,11 @@ pub fn get_device_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, at] = args[..] else {
         return Some(D3DERR_INVALIDCALL);
     };
-    hr!(this_device(cpu, this));
-    Some(super::caps::write(cpu, at, true))
+    let (_, d) = hr!(this_device(cpu, this));
+    let whose = super::caps::Whose::Device {
+        behavior: d.behavior,
+    };
+    Some(super::caps::write(cpu, at, whose))
 }
 
 /// Write D3DDISPLAYMODE at `at`: the display's mode now.
@@ -1213,7 +1219,7 @@ const CLEAR_STENCIL: u32 = 4;
 /// Clear(this, count, rects, flags, color, z, stencil): the rectangles
 /// (D3DRECTs), or all of the viewport.
 pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [this, count, rects_at, flags, color, z, _] = args[..] else {
+    let [this, count, rects_at, flags, color, z, stencil] = args[..] else {
         return Some(D3DERR_INVALIDCALL);
     };
     let (id, d) = hr!(this_device(cpu, this));
@@ -1223,8 +1229,12 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if flags & (CLEAR_ZBUFFER | CLEAR_STENCIL) != 0 && d.depth == 0 {
         return Some(D3DERR_INVALIDCALL);
     }
-    // The depth buffers have no stencil.
-    if flags & CLEAR_STENCIL != 0 {
+    // A stencil is cleared where the depth buffer has one.
+    let has_stencil = state(cpu)
+        .object(d.depth)
+        .and_then(|o| o.surface.as_ref())
+        .is_some_and(|s| s.format == resource::FMT_D24S8);
+    if flags & CLEAR_STENCIL != 0 && !has_stencil {
         return Some(D3DERR_INVALIDCALL);
     }
     let Some(dev) = inner(cpu, id).cloned() else {
@@ -1265,7 +1275,7 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let fill = hal::Fill {
         target: (flags & CLEAR_TARGET != 0).then_some(color),
         depth: (flags & CLEAR_ZBUFFER != 0).then(|| f32::from_bits(z).clamp(0.0, 1.0)),
-        stencil: None,
+        stencil: (flags & CLEAR_STENCIL != 0).then_some(stencil),
     };
     hal::clear(cpu, &dev, &rects, fill);
     Some(D3D_OK)

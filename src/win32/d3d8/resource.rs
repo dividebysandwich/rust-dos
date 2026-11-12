@@ -8,16 +8,18 @@
 //! levels, in video memory for D3DPOOL_DEFAULT, managed for
 //! D3DPOOL_MANAGED (in system memory, which the HAL copies to the card),
 //! and in system memory for the other pools; each level is a surface of
-//! Direct3D 8's whose count is the texture's. The HAL draws from 565,
-//! 1555 and 4444 textures where they are and copies the others,
-//! converted, to its heap on the card, so textures of the 32-bit formats
-//! work too though CheckDeviceFormat leaves them out, as the Voodoo3's
-//! driver did. Cube and volume textures fail, as the card has none.
+//! Direct3D 8's whose count is the texture's. A Voodoo's HAL draws
+//! from 565, 1555 and 4444 textures where they are and copies the
+//! others, converted, to its heap on the card, so textures of the
+//! 32-bit formats work too though CheckDeviceFormat leaves them out, as
+//! the Voodoo3's driver did. A ToadForce has the formats its HAL lists
+//! (`card_texture`): the 32-bit ones, the compressed ones, alpha and
+//! luminance, and the bump formats. Cube and volume textures fail.
 //!
 //! Vertex and index buffers are blocks of the process's memory.
 
 use super::super::ddraw::surface::{
-    self as dd_surface, DDPF_ALPHAPIXELS, DDPF_RGB, DDPF_ZBUFFER, DDSCAPS_3DDEVICE,
+    self as dd_surface, DDPF_ALPHAPIXELS, DDPF_FOURCC, DDPF_RGB, DDPF_ZBUFFER, DDSCAPS_3DDEVICE,
     DDSCAPS_COMPLEX, DDSCAPS_FLIP, DDSCAPS_MIPMAP, DDSCAPS_OFFSCREENPLAIN, DDSCAPS_PRIMARYSURFACE,
     DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_VIDEOMEMORY, DDSCAPS_ZBUFFER,
     DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_HEIGHT, DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH,
@@ -31,6 +33,13 @@ use super::{
 use crate::cpu::Cpu;
 use crate::win32::com::{self, Guid};
 
+// DDPF_ bits of the formats a ToadForce adds.
+const DDPF_ALPHA: u32 = 0x2;
+const DDPF_STENCILBUFFER: u32 = 0x4000;
+const DDPF_LUMINANCE: u32 = 0x2_0000;
+const DDPF_BUMPLUMINANCE: u32 = 0x4_0000;
+const DDPF_BUMPDUDV: u32 = 0x8_0000;
+
 // D3DFORMATs.
 pub const FMT_UNKNOWN: u32 = 0;
 pub const FMT_R8G8B8: u32 = 20;
@@ -40,7 +49,19 @@ pub const FMT_R5G6B5: u32 = 23;
 pub const FMT_X1R5G5B5: u32 = 24;
 pub const FMT_A1R5G5B5: u32 = 25;
 pub const FMT_A4R4G4B4: u32 = 26;
+pub const FMT_A8: u32 = 28;
 pub const FMT_X4R4G4B4: u32 = 30;
+pub const FMT_L8: u32 = 50;
+pub const FMT_A8L8: u32 = 51;
+pub const FMT_V8U8: u32 = 60;
+pub const FMT_L6V5U5: u32 = 61;
+pub const FMT_X8L8V8U8: u32 = 62;
+pub const FMT_DXT1: u32 = u32::from_le_bytes(*b"DXT1");
+pub const FMT_DXT2: u32 = u32::from_le_bytes(*b"DXT2");
+pub const FMT_DXT3: u32 = u32::from_le_bytes(*b"DXT3");
+pub const FMT_DXT4: u32 = u32::from_le_bytes(*b"DXT4");
+pub const FMT_DXT5: u32 = u32::from_le_bytes(*b"DXT5");
+pub const FMT_D24S8: u32 = 75;
 pub const FMT_D16_LOCKABLE: u32 = 70;
 pub const FMT_D24X8: u32 = 77;
 pub const FMT_D16: u32 = 80;
@@ -176,6 +197,15 @@ pub fn dd_format(format: u32) -> Option<Format> {
         b,
         a,
     };
+    let other = |flags: u32, bits: u32, r: u32, g: u32, b: u32, a: u32| Format {
+        flags,
+        fourcc: 0,
+        bits,
+        r,
+        g,
+        b,
+        a,
+    };
     Some(match format {
         FMT_R5G6B5 => rgb(16, 0xF800, 0x07E0, 0x001F, 0),
         FMT_X1R5G5B5 => rgb(16, 0x7C00, 0x03E0, 0x001F, 0),
@@ -197,8 +227,79 @@ pub fn dd_format(format: u32) -> Option<Format> {
             g: 0xFF_FFFF,
             ..Format::default()
         },
+        // The stencil's bits, the depth's mask and the stencil's.
+        FMT_D24S8 => Format {
+            flags: DDPF_ZBUFFER | DDPF_STENCILBUFFER,
+            bits: 32,
+            r: 8,
+            g: 0xFFFF_FF00,
+            b: 0xFF,
+            ..Format::default()
+        },
+        FMT_A8 => other(DDPF_ALPHA, 8, 0, 0, 0, 0xFF),
+        FMT_L8 => other(DDPF_LUMINANCE, 8, 0xFF, 0, 0, 0),
+        FMT_A8L8 => other(DDPF_LUMINANCE | DDPF_ALPHAPIXELS, 16, 0xFF, 0, 0, 0xFF00),
+        // The bump formats: du, dv and luminance where red, green and
+        // blue are.
+        FMT_V8U8 => other(DDPF_BUMPDUDV, 16, 0xFF, 0xFF00, 0, 0),
+        FMT_L6V5U5 => other(
+            DDPF_BUMPDUDV | DDPF_BUMPLUMINANCE,
+            16,
+            0x1F,
+            0x3E0,
+            0xFC00,
+            0,
+        ),
+        FMT_X8L8V8U8 => other(
+            DDPF_BUMPDUDV | DDPF_BUMPLUMINANCE,
+            32,
+            0xFF,
+            0xFF00,
+            0xFF_0000,
+            0,
+        ),
+        FMT_DXT1 | FMT_DXT2 | FMT_DXT3 | FMT_DXT4 | FMT_DXT5 => Format {
+            flags: DDPF_FOURCC,
+            fourcc: format,
+            ..Format::default()
+        },
         _ => return None,
     })
+}
+
+/// Whether the display adapter's card samples textures of `format`:
+/// the formats a Voodoo3's driver listed, or the ones a ToadForce's HAL
+/// has.
+pub fn card_texture(cpu: &Cpu, format: u32) -> bool {
+    use super::super::ddraw::d3d::hal;
+    match super::caps::card(cpu) {
+        Some(hal::Kind::ToadForce) => dd_format(format)
+            .is_some_and(|f| hal::description(hal::Kind::ToadForce).textures.contains(&f)),
+        _ => matches!(
+            format,
+            FMT_R5G6B5 | FMT_X1R5G5B5 | FMT_A1R5G5B5 | FMT_A4R4G4B4 | FMT_X4R4G4B4
+        ),
+    }
+}
+
+/// Whether the display adapter's card has depth buffers of `format`: a
+/// ToadForce has one with a stencil too.
+pub fn card_depth(cpu: &Cpu, format: u32) -> bool {
+    use super::super::ddraw::d3d::hal;
+    match format {
+        FMT_D16 | FMT_D16_LOCKABLE | FMT_D24X8 => true,
+        FMT_D24S8 => super::caps::card(cpu) == Some(hal::Kind::ToadForce),
+        _ => false,
+    }
+}
+
+/// The bytes of a block of 4 by 4 pixels of a compressed format.
+fn block_bytes(format: u32) -> Option<u32> {
+    match format {
+        FMT_DXT1 => Some(8),
+        FMT_DXT2 | FMT_DXT3 | FMT_DXT4 | FMT_DXT5 => Some(16),
+        _ => None,
+    }
 }
 
 /// The D3DFORMAT of a display depth.
@@ -658,12 +759,12 @@ pub fn create_render_target(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// CreateDepthStencilSurface(this, width, height, format, multisample,
-/// out): of the formats `direct3d::depth_format` has.
+/// out): of the formats the card has (`card_depth`).
 pub fn create_depth_stencil(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, w, h, format, ms, out] = args[..] else {
         return Some(D3DERR_INVALIDCALL);
     };
-    if !super::direct3d::depth_format(format) || ms > 1 {
+    if !card_depth(cpu, format) || ms > 1 {
         com::write_out(cpu, out, 0);
         return Some(D3DERR_INVALIDCALL);
     }
@@ -952,8 +1053,16 @@ fn lock_surface(cpu: &mut Cpu, id: u32, at: u32, rect: u32) -> u32 {
     let Some(base) = dd_surface::address(cpu, &dd) else {
         return D3DERR_INVALIDCALL;
     };
-    let bits = base + y * dd.pitch + x * dd.bytes_per_pixel();
-    cpu.bus.guest_write_32(at, dd.pitch);
+    // A compressed surface is its blocks, row after row of them: the
+    // pitch is a row's bytes, and a rectangle starts at a block.
+    let (pitch, bits) = match block_bytes(s.format) {
+        Some(block) => {
+            let pitch = dd.width.div_ceil(4).max(1) * block;
+            (pitch, base + y / 4 * pitch + x / 4 * block)
+        }
+        None => (dd.pitch, base + y * dd.pitch + x * dd.bytes_per_pixel()),
+    };
+    cpu.bus.guest_write_32(at, pitch);
     cpu.bus.guest_write_32(at + 4, bits);
     if let Some(s) = object(cpu, id).and_then(|o| o.surface.as_mut()) {
         s.locked = true;
