@@ -322,20 +322,19 @@ impl Bus {
     }
 
     /// The screen is about to be drawn from card memory: what the host
-    /// renderer drew into the surface shown is read back.
+    /// renderer drew into the bytes of the picture is read back. Those
+    /// are the Super VGA's, from the start latched at the last retrace
+    /// (`video::render_vbe`), which is the card's own mode while it
+    /// shows one and a mode the video BIOS set otherwise.
     pub(crate) fn toadforce_show(&mut self) {
-        if !self.toadforce_ahead() {
+        if !self.toadforce_ahead() || self.video_mode != VideoMode::Vesa {
             return;
         }
-        let Some(card) = &mut self.toadforce else {
+        let Some((start, end)) = self.vbe.picture() else {
             return;
         };
-        let Some(shown) = card.display.shown() else {
-            return;
-        };
-        let start = card.display.start();
-        let end = start.saturating_add(shown.pitch.saturating_mul(shown.height));
-        card.settle(&mut self.vbe.vram, Some((start, end)));
+        let clamp = |at: u64| at.min(u32::MAX as u64) as u32;
+        self.toadforce_read_back(Some((clamp(start), clamp(end))));
     }
 
     /// Have the card run `words`, or its queue.

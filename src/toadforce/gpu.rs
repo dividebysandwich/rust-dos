@@ -26,7 +26,9 @@
 //!   page of card memory. A host keeps a `Stamp` of the bytes a copy
 //!   was made from and makes the copy again when the stamp is stale.
 //!   Reading a surface back writes card memory what the host's copy
-//!   holds, and isn't counted.
+//!   holds, and isn't counted, and neither are the host's own draws:
+//!   a host that draws into a target drops its other copies that share
+//!   a byte with it (`Host::draw`).
 //!
 //! With no host attached none of this does anything: the pages aren't
 //! counted and nothing is ever ahead.
@@ -79,6 +81,13 @@ pub trait Host {
     /// a target the host has no copy of or a stale one, by `pages`.
     /// The card has read back whatever of it was ahead on the host and
     /// isn't the batch's own target.
+    ///
+    /// The host's draws aren't counted in `pages`, and neither is a
+    /// read-back. So the host drops every copy it has of other bytes
+    /// that share one with the target's colour or depth buffer: a
+    /// texture drawn into, or a surface over the same memory with
+    /// another size or format. The card reads the target back before
+    /// anything uses those bytes again, and the host copies them anew.
     fn draw(&mut self, batch: &Batch, memory: &[u8], pages: &Pages);
 
     /// Write the pixels of `surface`, a colour or a depth buffer the

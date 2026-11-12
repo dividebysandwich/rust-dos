@@ -920,9 +920,11 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   was made from, of a texture or of a surface it drew into, and makes
   the copy again from card memory when a page of it was written
   since. A read-back writes card memory what the host's copy holds
-  and isn't counted, so a host that keeps a surface both as a target
-  and as a texture drops the texture when it draws into the target.
-  Without a host nothing is counted.
+  and isn't counted, and neither are the host's draws, so a host that
+  draws into a target drops its other copies of the target's bytes:
+  the same surface kept as a texture, or another surface over the
+  same memory, such as a depth buffer of another size. Without a host
+  nothing is counted.
 - **The picture shown** is read back once a host frame at first, and
   comes from the host's texture once that is built (see "The visible
   surface" above).

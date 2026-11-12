@@ -3,10 +3,13 @@
 //! software renderer draws.
 //!
 //! The host here keeps a copy of each surface it draws into, as an
-//! OpenGL one keeps a texture, and draws into the copy with the
+//! OpenGL one keeps a framebuffer, and draws into the copy with the
 //! software renderer's own spans. Card memory gets the copy only when
 //! the card asks for it, so a read-back the card leaves out shows as
-//! a difference.
+//! a difference. It keeps the bytes of each texture it samples too,
+//! as an OpenGL one keeps a texture, and copies them again only when
+//! their stamp is stale: a write the card leaves out of `Pages` shows
+//! as a difference as well.
 
 use super::*;
 use crate::toadforce::command;
@@ -21,8 +24,10 @@ use std::rc::Rc;
 /// What the host was asked for.
 #[derive(Default)]
 struct Log {
-    /// Copies made from card memory.
+    /// Copies of targets made from card memory.
     uploads: u32,
+    /// Copies of textures made from card memory.
+    texture_uploads: u32,
     batches: u32,
     triangles: u32,
     read_backs: u32,
@@ -40,8 +45,16 @@ struct Copy {
     pixels: Vec<u8>,
 }
 
+/// The bytes of card memory a texture sampled, as the host has them.
+struct Texels {
+    range: (u32, u32),
+    stamp: Stamp,
+    bytes: Vec<u8>,
+}
+
 struct TestHost {
     copies: Vec<Copy>,
+    textures: Vec<Texels>,
     /// The states the host refuses.
     declines: Declines,
     log: Rc<RefCell<Log>>,
@@ -85,9 +98,41 @@ impl Host for TestHost {
         let surfaces: Vec<Surface> = std::iter::once(batch.target.colour)
             .chain(batch.target.depth_surface())
             .collect();
-        // Card memory with the host's copies of the target over it is
-        // what the spans draw into.
+        // Neither these draws nor a read-back of them is counted: the
+        // copies of other bytes of the target's are dropped
+        // (`Host::draw`).
+        let ranges: Vec<(u32, u32)> = surfaces.iter().map(gpu::range).collect();
+        let shares = |r: (u32, u32)| ranges.iter().any(|t| t.0 < r.1 && r.0 < t.1);
+        self.copies
+            .retain(|c| surfaces.contains(&c.surface) || !shares(gpu::range(&c.surface)));
+        self.textures.retain(|t| !shares(t.range));
+        // Card memory with the host's copies of the textures and of the
+        // target over it is what the spans draw into.
         let mut scratch = memory.to_vec();
+        let mut reads = Vec::new();
+        for run in batch.runs {
+            pipeline::reads(&run.state, &mut reads);
+        }
+        for range in reads {
+            let end = (range.1 as usize).min(memory.len());
+            let bytes = range.0 as usize..end.max(range.0 as usize);
+            let found = self.textures.iter().position(|t| t.range == range);
+            let at = found.unwrap_or_else(|| {
+                self.textures.push(Texels {
+                    range,
+                    stamp: Stamp::default(),
+                    bytes: Vec::new(),
+                });
+                self.textures.len() - 1
+            });
+            let texels = &mut self.textures[at];
+            if found.is_none() || pages.changed(range, &mut texels.stamp) {
+                texels.bytes = memory[bytes.clone()].to_vec();
+                texels.stamp = pages.stamp(range);
+                log.texture_uploads += 1;
+            }
+            scratch[bytes].copy_from_slice(&texels.bytes);
+        }
         for surface in &surfaces {
             let range = gpu::range(surface);
             let found = self.copies.iter().position(|c| c.surface == *surface);
@@ -147,6 +192,7 @@ impl Host for TestHost {
     fn forget(&mut self) {
         self.log.borrow_mut().forgets += 1;
         self.copies.clear();
+        self.textures.clear();
     }
 }
 
@@ -168,6 +214,7 @@ fn hosted(declines: Declines) -> (Rig, Rc<RefCell<Log>>) {
     let log = Rc::new(RefCell::new(Log::default()));
     let host = TestHost {
         copies: Vec::new(),
+        textures: Vec::new(),
         declines,
         log: log.clone(),
     };
@@ -184,6 +231,11 @@ fn same(declines: Declines, scene: fn(&mut Rig)) -> (Rig, Rc<RefCell<Log>>) {
     scene(&mut software);
     let (mut rig, log) = hosted(declines);
     scene(&mut rig);
+    // What the host has and card memory hasn't is what the read-back
+    // brings.
+    if rig.card.ahead() {
+        assert!(rig.memory != software.memory);
+    }
     rig.card.settle(&mut rig.memory, None);
     assert!(!rig.card.ahead());
     assert!(rig.memory == software.memory);
@@ -428,6 +480,191 @@ fn a_surface_the_host_drew_into_is_sampled_as_a_texture() {
         state.tex[0].is_some()
     }
     same(declines_textured, render_to_texture);
+}
+
+/// The square from (`x`, `y`) with sides of `size`, as a strip of four
+/// vertices, with the texture once over it.
+fn quad(x: f32, y: f32, size: f32) -> Vec<u32> {
+    let white = 0xFFFF_FFFF;
+    [
+        vertex(x, y, white, 0.0, 0.0),
+        vertex(x + size, y, white, 1.0, 0.0),
+        vertex(x, y + size, white, 0.0, 1.0),
+        vertex(x + size, y + size, white, 1.0, 1.0),
+    ]
+    .concat()
+}
+
+/// Make `target` the render target, with a viewport of all of it.
+fn aim(rig: &mut Rig, target: &Target) {
+    let viewport = Viewport {
+        x: 0,
+        y: 0,
+        width: target.colour.width,
+        height: target.colour.height,
+        min_z: 0.0,
+        max_z: 1.0,
+    };
+    let error = rig.run(|w| {
+        encode::render_target(w, Some(target));
+        encode::viewport(w, &viewport);
+    });
+    assert_eq!(error, 0);
+}
+
+/// Sample the texture at `TEXTURE` after each way card memory changes
+/// under it, each time into a square of its own: the processor's
+/// write, `FILL`, `BLT`, `CLEAR`, the software renderer's draw and two
+/// of the host's.
+fn texture_writes(rig: &mut Rig) {
+    let surface = texture_surface();
+    let texels: Vec<u8> = (0..SIZE * SIZE)
+        .flat_map(|i| (0xFF00_0000 | i.wrapping_mul(0x0001_0307)).to_le_bytes())
+        .collect();
+    poke(rig, TEXTURE as usize, &texels);
+    let texture = Texture {
+        format: FORMAT,
+        width: SIZE,
+        height: SIZE,
+        levels: 1,
+        images: vec![(surface.offset, surface.pitch)],
+        ..Texture::default()
+    };
+    let error = rig.run(|w| {
+        encode::define_texture(w, 1, &texture);
+        encode::set_texture(w, 0, 1);
+    });
+    assert_eq!(error, 0);
+    let sampled = [(TSS_COLOROP, OP_SELECT_ARG1), (TSS_COLORARG1, ARG_TEXTURE)];
+    let plain = [(TSS_COLOROP, OP_SELECT_ARG1), (TSS_COLORARG1, ARG_DIFFUSE)];
+    rig.stage(0, &sampled);
+    rig.clear(CLEAR_COLOUR | CLEAR_DEPTH, 0xFF00_0000, 1.0, 0);
+    assert_eq!(rig.draw(5, &quad(0.0, 0.0, 16.0)), 0);
+
+    let main = target(rig);
+    let error = rig.run(|w| {
+        command::encode::fill(w, &surface, &rect(0, 0, 32, 32), 0x00FF_00FF);
+        encode::draw(w, 5, TL, 4, &quad(16.0, 0.0, 16.0));
+        // From the target, which the host has drawn into.
+        command::encode::blt(
+            w,
+            &surface,
+            &rect(32, 32, 32, 32),
+            &main.colour,
+            &rect(0, 0, 32, 32),
+            None,
+        );
+        encode::draw(w, 5, TL, 4, &quad(32.0, 0.0, 16.0));
+    });
+    assert_eq!(error, 0);
+    poke(rig, surface.at(0, 40), &[0x80; 256]);
+    assert_eq!(rig.draw(5, &quad(48.0, 0.0, 16.0)), 0);
+
+    let into = Target {
+        colour: surface,
+        depth: None,
+    };
+    aim(rig, &into);
+    let error = rig.run(|w| {
+        encode::clear(w, CLEAR_COLOUR, 0x40_4040, 0.0, 0, &[rect(0, 48, 64, 16)]);
+    });
+    assert_eq!(error, 0);
+    aim(rig, &main);
+    assert_eq!(rig.draw(5, &quad(0.0, 16.0, 16.0)), 0);
+
+    // Into the texture with nothing bound: lines, which the software
+    // renderer draws, and then two triangles of the host's.
+    let line = [
+        vertex(0.0, 8.5, 0xFFFF_FFFF, 0.0, 0.0),
+        vertex(64.0, 12.5, 0xFFFF_FFFF, 0.0, 0.0),
+    ]
+    .concat();
+    let draws: [(u32, Vec<u32>); 3] = [
+        (2, line),
+        (4, corner(0.0, 0.0, 40.0, 0.0, 0xFF20_E0A0)),
+        (4, corner(20.0, 20.0, 40.0, 0.0, 0xFF80_2040)),
+    ];
+    for (i, (primitive, vertices)) in draws.iter().enumerate() {
+        rig.stage(0, &plain);
+        assert_eq!(rig.run(|w| encode::set_texture(w, 0, 0)), 0);
+        aim(rig, &into);
+        assert_eq!(rig.draw(*primitive, vertices), 0);
+        aim(rig, &main);
+        assert_eq!(rig.run(|w| encode::set_texture(w, 0, 1)), 0);
+        rig.stage(0, &sampled);
+        let x = 16.0 * (i + 1) as f32;
+        assert_eq!(rig.draw(5, &quad(x, 16.0, 16.0)), 0);
+    }
+}
+
+#[test]
+fn a_texture_the_host_keeps_is_copied_again_after_each_write() {
+    let (rig, log) = same(takes_all, texture_writes);
+    // A copy at first, and one after each of the seven writes.
+    assert_eq!(log.borrow().texture_uploads, 8);
+    // The lines.
+    let host = rig.card.describe(Rig::live());
+    assert_eq!(host["host"]["declined_draws"], 1);
+}
+
+/// Draw into two surfaces over the same bytes by turns, and into two
+/// targets whose depth buffers are the same memory at two sizes.
+fn overlapping_targets(rig: &mut Rig) {
+    let main = target(rig);
+    let whole = texture_surface();
+    let part = Surface {
+        offset: whole.at(16, 16) as u32,
+        width: 32,
+        height: 32,
+        ..whole
+    };
+    let on = |colour: Surface| Target {
+        colour,
+        depth: None,
+    };
+    aim(rig, &on(whole));
+    rig.clear(CLEAR_COLOUR, 0xFF10_1010, 0.0, 0);
+    let draws = [
+        (whole, corner(0.0, 0.0, 48.0, 0.0, 0xFFFF_0000)),
+        (part, corner(8.0, 8.0, 40.0, 0.0, 0xFF00_FF00)),
+        (whole, corner(30.0, 30.0, 30.0, 0.0, 0xFF00_00FF)),
+        (part, corner(0.0, 0.0, 20.0, 0.0, 0xFFFF_FF00)),
+    ];
+    for (surface, vertices) in &draws {
+        aim(rig, &on(*surface));
+        assert_eq!(rig.draw(4, vertices), 0);
+    }
+
+    // A 32x32 target with the top left of the main target's depth
+    // buffer for its own.
+    let small = Target {
+        colour: Surface {
+            offset: BUFFER,
+            pitch: 32 * FORMAT.bytes(),
+            width: 32,
+            height: 32,
+            format: FORMAT,
+        },
+        depth: main.depth,
+    };
+    aim(rig, &main);
+    rig.clear(CLEAR_COLOUR | CLEAR_DEPTH, 0xFF20_2020, 1.0, 0);
+    rig.states(&[(RS_ZENABLE, 1)]);
+    assert_eq!(rig.draw(4, &corner(0.0, 0.0, 40.0, 0.5, 0xFFFF_0000)), 0);
+    aim(rig, &small);
+    rig.clear(CLEAR_COLOUR, 0xFF00_0000, 0.0, 0);
+    assert_eq!(rig.draw(4, &corner(4.0, 4.0, 24.0, 0.2, 0xFF00_FF00)), 0);
+    aim(rig, &main);
+    assert_eq!(rig.draw(4, &corner(0.0, 0.0, 60.0, 0.3, 0xFF00_00FF)), 0);
+}
+
+#[test]
+fn surfaces_over_the_same_bytes_take_each_others_pixels() {
+    let (rig, _) = same(takes_all, overlapping_targets);
+    // The small target's depth kept the last triangle out of its
+    // corner, and the main target's kept it out of the red one's.
+    assert_eq!(rig.px(6, 6), 0xFF_0000);
+    assert_eq!(rig.px(45, 10), 0x00_00FF);
 }
 
 /// The first half of a scene, and the half after a state was saved.

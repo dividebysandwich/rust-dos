@@ -388,7 +388,16 @@ pub fn enter_mode(bus: &mut Bus, mode: &VbeMode, lfb: bool, keep: bool) {
     ));
     // A ToadForce's own mode ends first.
     bus.toadforce_mode_set();
+    // The clear writes card memory: what a ToadForce's host renderer
+    // drew there is read back first, so that it doesn't come back over
+    // the black, and its copies of those bytes are stale after it.
+    if !keep {
+        bus.toadforce_touch(0, VRAM_SIZE);
+    }
     bus.vbe.set_mode(mode, lfb, keep);
+    if !keep {
+        bus.toadforce_wrote(0, VRAM_SIZE);
+    }
     bus.video_mode = VideoMode::Vesa;
     // The VGA side runs as a 256-color mode, at the mode's own timing.
     bus.vga.set_video_mode(VideoMode::Vesa);

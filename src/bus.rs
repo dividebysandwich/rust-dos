@@ -2979,9 +2979,6 @@ impl Bus {
     /// start of a vertical retrace since it was last latched, as the CRTC
     /// does at every retrace.
     pub fn sync_display(&mut self) {
-        // The screen is drawn from card memory next: what a ToadForce's
-        // host renderer drew of the picture is read back into it.
-        self.toadforce_show();
         // The 3dfx card's picture changed, or it took or gave back the
         // monitor: draw the screen anew.
         if let Some(v) = &mut self.voodoo
@@ -3020,6 +3017,10 @@ impl Bus {
             }
             self.count_frame();
         }
+        // The screen is drawn from card memory next, from the start
+        // latched above: what a ToadForce's host renderer drew of the
+        // picture is read back into it.
+        self.toadforce_show();
     }
 
     /// After a switch between text and graphics made through the attribute
