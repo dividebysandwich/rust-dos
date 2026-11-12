@@ -412,12 +412,19 @@ impl Renderer {
         let colour = state.target.colour;
         if hosted {
             let vertices = first..self.host_vertices.len();
-            let run = gpu::Run { state, vertices };
-            let primitives = (run.vertices.len() / run.stride()) as u64;
+            let stride = if state.shape.flat { 4 } else { 3 };
+            let primitives = (vertices.len() / stride) as u64;
             if primitives == 0 {
                 return Ok(None);
             }
-            self.host_runs.push(run);
+            // A draw with the state of the one before it is one run
+            // with it: the host sets its state up once for both.
+            match self.host_runs.last_mut() {
+                Some(last) if Arc::ptr_eq(&last.state, &state) || *last.state == *state => {
+                    last.vertices.end = vertices.end;
+                }
+                _ => self.host_runs.push(gpu::Run { state, vertices }),
+            }
             return Ok(Some(Drawn {
                 primitives,
                 span: gpu::range(&colour),

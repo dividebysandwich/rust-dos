@@ -171,6 +171,12 @@ zones! {
     VoodooWait = "voodoo.wait",
     VoodooReadBack = "voodoo.readback",
     PowerVr = "powervr",
+    // The ToadForce: its commands (transform, lighting, clipping and
+    // the software renderer's queue), what it hands the host renderer,
+    // and the surfaces it reads back from it.
+    ToadForce = "toadforce",
+    ToadForceHost = "toadforce.host",
+    ToadForceReadBack = "toadforce.readback",
     // The emulator's BIOS, DOS and other services.
     HleInt08 = "hle.int08",
     HleInt09 = "hle.int09",
@@ -188,6 +194,15 @@ zones! {
     HleFar = "hle.far",
     Dpmi = "hle.dpmi",
     Win32 = "hle.win32",
+    // The built-in Direct3D's work on a draw: the pipeline's setup,
+    // its vertices (transform and lighting), the card's state
+    // (`hal::bind`), and the primitives handed to the card. And the
+    // built-in OpenGL's own, before it hands a draw to Direct3D.
+    D3dSetup = "hle.d3d.setup",
+    D3dVertices = "hle.d3d.vertices",
+    D3dBind = "hle.d3d.bind",
+    D3dDraw = "hle.d3d.draw",
+    OpenGl = "hle.opengl",
     // Port accesses, by the device that has the port.
     IoVga = "io.vga",
     IoPic = "io.pic",

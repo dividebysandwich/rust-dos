@@ -381,6 +381,7 @@ impl Bus {
 
     /// Have the card run `words`, or its queue.
     fn toadforce_run(&mut self, words: Option<&[u32]>) {
+        let _profile = crate::profile::zone(crate::profile::Zone::ToadForce);
         let live = self.toadforce_live();
         let Some(card) = &mut self.toadforce else {
             return;

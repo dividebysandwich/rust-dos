@@ -389,6 +389,7 @@ impl Gpu {
 
     #[cold]
     fn read_back(&mut self, memory: &mut [u8], range: Option<(u32, u32)>, why: Cause) {
+        let _profile = crate::profile::zone(crate::profile::Zone::ToadForceReadBack);
         let Gpu {
             host,
             ahead,
@@ -452,6 +453,7 @@ impl Gpu {
         let Some(host) = self.host.get_mut() else {
             return;
         };
+        let _profile = crate::profile::zone(crate::profile::Zone::ToadForceHost);
         host.draw(batch, memory, &self.pages);
         for surface in std::iter::once(colour).chain(depth) {
             if !self.ahead.contains(&surface) {
