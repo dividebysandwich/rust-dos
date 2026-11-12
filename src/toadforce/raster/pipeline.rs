@@ -422,7 +422,7 @@ pub fn writes(target: &Target, r: (u64, u64)) -> bool {
 
 /// The bytes of card memory a draw that samples `t` reads: its
 /// palette and its images.
-fn texture_reads(t: &Texture, mut f: impl FnMut((u64, u64))) {
+pub fn texture_reads(t: &Texture, mut f: impl FnMut((u64, u64))) {
     if let Some(palette) = t.palette {
         f((palette as u64, palette as u64 + 1024));
     }

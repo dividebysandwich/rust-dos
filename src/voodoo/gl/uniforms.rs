@@ -5,7 +5,7 @@
 use glow::HasContext;
 use std::cell::Cell;
 
-pub(super) trait Locations {
+pub(crate) trait Locations {
     fn resolve(gl: &glow::Context, program: glow::Program) -> Self;
 }
 

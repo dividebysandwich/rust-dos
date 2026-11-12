@@ -30,6 +30,8 @@ pub mod caps;
 pub mod command;
 pub mod display;
 pub mod format;
+#[cfg(feature = "voodoo-gl")]
+pub mod gl;
 pub mod gpu;
 pub mod level1;
 pub mod pci;
@@ -629,24 +631,40 @@ impl ToadForce {
                     fx.drawn.push(drawn.span);
                 }
             }
-            Command::Level1(command) => {
-                // `CLEAR` is the one of these that touches card memory:
-                // it writes the target, and reads the depth buffer
-                // where it writes a part of its bits.
-                if self.gpu.ahead()
-                    && matches!(command, level1::Command::Clear { .. })
-                    && let Some(target) = self.level1.target
-                {
-                    self.gpu.settle(memory, Some(gpu::range(&target.colour)));
-                    if let Some(depth) = target.depth_surface() {
-                        self.gpu.settle(memory, Some(gpu::range(&depth)));
+            Command::Level1(level1::Command::Clear {
+                flags,
+                colour,
+                z,
+                stencil,
+                rects,
+            }) => {
+                // `CLEAR` is the one command of level 1 that touches
+                // card memory. A buffer the host has a copy of is
+                // cleared there. The others are written here, after
+                // what the host drew in them is read back: the depth
+                // buffer is read where a part of its bits is written.
+                let (rects, buffers) = self.level1.clear(flags, colour, z, stencil, rects)?;
+                for (surface, value, mask) in buffers {
+                    let clear = gpu::Clear {
+                        surface,
+                        rects: &rects,
+                        value,
+                        mask,
+                    };
+                    let spans = rects.iter().map(|rect| surface.span(rect));
+                    if !self.gpu.clear(&clear, memory) {
+                        self.gpu.settle(memory, Some(gpu::range(&surface)));
+                        clear.write(memory);
+                        for (first, end) in spans.clone() {
+                            self.gpu.pages.wrote(first, end - first);
+                        }
                     }
+                    fx.drawn.extend(spans);
                 }
-                let before = fx.drawn.len();
-                self.level1.apply(command, memory, &mut fx.drawn)?;
-                for &(first, end) in &fx.drawn[before..] {
-                    self.gpu.pages.wrote(first, end - first);
-                }
+                self.counts.level1 += 1;
+            }
+            Command::Level1(command) => {
+                self.level1.apply(command)?;
                 self.counts.level1 += 1;
             }
         }

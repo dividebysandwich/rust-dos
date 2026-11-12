@@ -198,7 +198,7 @@ impl Target {
 }
 
 /// A texture: where its images are in card memory.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Texture {
     pub format: Format,
     /// The size of level 0. Each level after it has half the width and
@@ -885,21 +885,17 @@ impl Level1 {
         self.textures.get(&self.bound[stage])
     }
 
-    /// Carry out `command` in `memory`, card memory. The spans of card
-    /// memory it wrote go to `drawn`.
-    pub fn apply(
-        &mut self,
-        command: Command,
-        memory: &mut [u8],
-        drawn: &mut Vec<(u32, u32)>,
-    ) -> Result<(), Error> {
+    /// Carry out `command` on the state. The two commands that write
+    /// card memory are the card's: it hands a draw to its renderer, and
+    /// writes a `CLEAR` where `Level1::clear` says, on the host or the
+    /// processor (`ToadForce::execute`).
+    pub fn apply(&mut self, command: Command) -> Result<(), Error> {
         // `CLEAR` leaves the state as it is, and a frame starts with one.
         if command.sets_state() {
             self.lowered.forget();
         }
         match command {
-            // The card hands a draw to its renderer.
-            Command::Draw(_) => {}
+            Command::Draw(_) | Command::Clear { .. } => {}
             Command::RenderState(pairs) => {
                 for pair in pairs.as_chunks::<2>().0 {
                     self.render[pair[0] as usize] = pair[1];
@@ -927,13 +923,6 @@ impl Level1 {
             }
             Command::ClipPlane { index, plane } => self.clip_planes[index] = plane,
             Command::RenderTarget(target) => self.target = target,
-            Command::Clear {
-                flags,
-                colour,
-                z,
-                stencil,
-                rects,
-            } => self.clear(flags, colour, z, stencil, rects, memory, drawn)?,
             Command::DefineTexture {
                 handle,
                 format,
@@ -980,20 +969,19 @@ impl Level1 {
         Ok(())
     }
 
-    /// `CLEAR`: write the colour, the depth and the stencil value to
-    /// the rectangles of the render target, each to the buffer its flag
-    /// names.
-    #[allow(clippy::too_many_arguments)]
-    fn clear(
+    /// What a `CLEAR` writes: the rectangles of the render target, and
+    /// for each buffer a flag names (the colour buffer, the depth
+    /// buffer) the pixel value and the bits of a pixel it replaces
+    /// (`gpu::Clear`).
+    #[allow(clippy::type_complexity)]
+    pub fn clear(
         &self,
         flags: u32,
         colour: u32,
         z: f32,
         stencil: u32,
         rects: &[u32],
-        memory: &mut [u8],
-        drawn: &mut Vec<(u32, u32)>,
-    ) -> Result<(), Error> {
+    ) -> Result<(Vec<Rect>, Vec<(Surface, u32, u32)>), Error> {
         // Without a target there is nothing to check the rectangles
         // against. With one, ranges come before the state, as chapter 5
         // orders them.
@@ -1016,32 +1004,17 @@ impl Level1 {
         {
             return Err(Error::BadState);
         }
-        for rect in &rects {
-            if flags & CLEAR_COLOUR != 0 {
-                let value = target.colour.format.pack(colour);
-                super::blit::fill(memory, &target.colour, rect, value);
-                drawn.push(target.colour.span(rect));
-            }
-            let Some(depth) = depth.filter(|_| flags & (CLEAR_DEPTH | CLEAR_STENCIL) != 0) else {
-                continue;
-            };
+        let mut buffers = Vec::new();
+        if flags & CLEAR_COLOUR != 0 {
+            let format = target.colour.format;
+            buffers.push((target.colour, format.pack(colour), 0xFFFF_FFFF));
+        }
+        if let Some(depth) = depth.filter(|_| flags & (CLEAR_DEPTH | CLEAR_STENCIL) != 0) {
             // The bits of a depth pixel each flag writes.
             let (value, mask) = depth_bits(depth.format, flags, z, stencil);
-            if mask == depth.format.defined_bits() || mask == 0xFFFF_FFFF {
-                super::blit::fill(memory, &depth, rect, value);
-            } else {
-                let len = rect.width as usize * 4;
-                for y in rect.top..rect.top + rect.height {
-                    let at = depth.at(rect.left, y);
-                    for pixel in memory[at..at + len].as_chunks_mut::<4>().0 {
-                        let old = u32::from_le_bytes(*pixel);
-                        *pixel = (old & !mask | value & mask).to_le_bytes();
-                    }
-                }
-            }
-            drawn.push(depth.span(rect));
+            buffers.push((depth, value, mask));
         }
-        Ok(())
+        Ok((rects, buffers))
     }
 }
 
