@@ -22,7 +22,8 @@
 //! there: the timer's (vector 8) is a few after the exceptions'.
 
 use super::memory::{Memory, PAGE, SYSTEM, USER, WRITABLE};
-use super::{Context, EAX, ECX, EDX, ESP, ID_IDT, IDT_TRAPS, ROM_BASE, realmode};
+use super::{Context, EAX, ECX, EDI, EDX, ESP, ID_IDT, IDT_TRAPS, ROM_BASE, realmode};
+use crate::bus::Bus;
 use crate::cpu::{CR0_PE, CR0_PG, CR4_OSFXSR, Cpu, CpuFlags, DescTable, Seg, SegCache, alu};
 use crate::dpmi::descriptor;
 
@@ -55,11 +56,17 @@ const DDB_SIZE: u32 = 0x50;
 const VXD_LOCATIONS: u32 = VMM_DDB + DDB_SIZE;
 /// The VxD location list's length: VMM's record with one object.
 const VXD_LOCATIONS_LEN: u32 = 5 + 9;
+/// VXDLDR's variable with the head of its list of DeviceInfo blocks,
+/// which VXDLDR_GetDeviceList returns: 0 while it has loaded none. The
+/// service reads it here, so the process of a state saved before the
+/// built-in Windows had these VxDs, whose block has 0 here, keeps the
+/// empty list it had.
+const DEVICE_LIST: u32 = (VXD_LOCATIONS + VXD_LOCATIONS_LEN).next_multiple_of(4);
 /// The dynamically loaded VxDs, `VXD_SIZE` bytes each, in load order:
 /// the VxD's locked code object (`VXD_OBJECT_SIZE` bytes: its control
 /// procedure and its DDB), then VXDLDR's DeviceInfo with its ObjectInfo
 /// array and the module's name.
-const VXDS: u32 = (VXD_LOCATIONS + VXD_LOCATIONS_LEN).next_multiple_of(16);
+const VXDS: u32 = (DEVICE_LIST + 4).next_multiple_of(16);
 const VXD_CONTROL: u32 = 0x00;
 const VXD_DDB: u32 = 0x10;
 const VXD_OBJECT_SIZE: u32 = VXD_DDB + DDB_SIZE;
@@ -196,22 +203,32 @@ const DDB_RESERVED: u32 = 0x44;
 struct DynamicVxd {
     /// The DDB's name, padded with spaces.
     name: &'static [u8; 8],
-    /// The module's name in the DeviceInfo.
+    /// The module's name in the DeviceInfo, shorter than 16 bytes.
     module: &'static str,
     id: u16,
     /// The DDK version the VxD was built for.
     sdk: u16,
     version: (u8, u8),
     init_order: u32,
+    /// Whether the machine has what the VxD serves, so that Windows 98
+    /// loads it.
+    present: fn(&Bus) -> bool,
+}
+
+/// `DynamicVxd::present` of a VxD that every machine has a use for.
+fn always(_: &Bus) -> bool {
+    true
 }
 
 /// The dynamically loaded VxDs of the parts of a Windows 98 machine that
 /// the built-in Windows provides, in the order Windows 98 SE loads them:
 /// the configuration manager's enumerators of the BIOS's devices, ISA
-/// Plug and Play and the PCI bus; then IOS's drivers for the disks and
-/// the CD-ROM drive, which the built-in Windows serves through its
-/// files, INT 13h and ASPI (APIX, the ATAPI layer under ASPI, CDFS and
-/// the CD-ROM's type and volume drivers, the disks' type driver,
+/// Plug and Play and, on a machine with one, the PCI bus (a machine with
+/// no S3, 3dfx or other PCI card has none, its PnP BIOS lists none, and
+/// Windows 98 doesn't load PCI's VxD there); then IOS's drivers for the
+/// disks and the CD-ROM drive, which the built-in Windows serves through
+/// its files, INT 13h and ASPI (APIX, the ATAPI layer under ASPI, CDFS
+/// and the CD-ROM's type and volume drivers, the disks' type driver,
 /// voltrack, and ESDI_506, the IDE controller's port driver). Each has
 /// the DDB fields Windows 98 SE's has. VxDs of hardware a machine may
 /// lack (sound cards, displays, floppy drives) and NTKERN's WDM drivers,
@@ -224,6 +241,7 @@ const DYNAMIC_VXDS: [DynamicVxd; 10] = [
         sdk: 0x040A,
         version: (4, 10),
         init_order: 0x1680_0001,
+        present: always,
     },
     DynamicVxd {
         name: b"ISAPNP  ",
@@ -232,6 +250,7 @@ const DYNAMIC_VXDS: [DynamicVxd; 10] = [
         sdk: 0x040A,
         version: (4, 10),
         init_order: 0x1680_0000,
+        present: always,
     },
     DynamicVxd {
         name: b"PCI     ",
@@ -240,6 +259,7 @@ const DYNAMIC_VXDS: [DynamicVxd; 10] = [
         sdk: 0x040A,
         version: (4, 10),
         init_order: 0x1680_0000,
+        present: Bus::pci_present,
     },
     DynamicVxd {
         name: b"APIX    ",
@@ -248,6 +268,7 @@ const DYNAMIC_VXDS: [DynamicVxd; 10] = [
         sdk: 0x0400,
         version: (3, 10),
         init_order: UNDEFINED_INIT_ORDER,
+        present: always,
     },
     DynamicVxd {
         name: b"CDFS    ",
@@ -256,6 +277,7 @@ const DYNAMIC_VXDS: [DynamicVxd; 10] = [
         sdk: 0x040A,
         version: (3, 0),
         init_order: 0xA001_0100,
+        present: always,
     },
     DynamicVxd {
         name: b"CDTSD   ",
@@ -264,6 +286,7 @@ const DYNAMIC_VXDS: [DynamicVxd; 10] = [
         sdk: 0x0400,
         version: (3, 10),
         init_order: UNDEFINED_INIT_ORDER,
+        present: always,
     },
     DynamicVxd {
         name: b"CDVSD   ",
@@ -272,6 +295,7 @@ const DYNAMIC_VXDS: [DynamicVxd; 10] = [
         sdk: 0x040A,
         version: (3, 10),
         init_order: UNDEFINED_INIT_ORDER,
+        present: always,
     },
     DynamicVxd {
         name: b"DiskTSD ",
@@ -280,6 +304,7 @@ const DYNAMIC_VXDS: [DynamicVxd; 10] = [
         sdk: 0x040A,
         version: (3, 10),
         init_order: UNDEFINED_INIT_ORDER,
+        present: always,
     },
     DynamicVxd {
         name: b"voltrack",
@@ -288,6 +313,7 @@ const DYNAMIC_VXDS: [DynamicVxd; 10] = [
         sdk: 0x0400,
         version: (3, 10),
         init_order: UNDEFINED_INIT_ORDER,
+        present: always,
     },
     DynamicVxd {
         name: b"ESDI_506",
@@ -296,6 +322,7 @@ const DYNAMIC_VXDS: [DynamicVxd; 10] = [
         sdk: 0x0400,
         version: (3, 10),
         init_order: UNDEFINED_INIT_ORDER,
+        present: always,
     },
 ];
 
@@ -340,13 +367,7 @@ const DDB_RESERVED_BYTES: &[u8; 12] = b"1vsR2vsR3vsR";
 /// theirs included.
 fn write_vmm_data(cpu: &mut Cpu, phys: u32) {
     let ddb = (phys + VMM_DDB) as usize;
-    cpu.bus.write_16(ddb + 0x04, 0x040A);
-    cpu.bus.write_16(ddb + 0x06, 0x0001);
-    cpu.bus.write_8(ddb + 0x08, 4);
-    cpu.bus.write_8(ddb + 0x09, 10);
-    cpu.bus.load_bytes(ddb + 0x0C, b"VMM     ");
-    cpu.bus.write_32(ddb + 0x40, DDB_SIZE);
-    cpu.bus.load_bytes(ddb + 0x44, DDB_RESERVED_BYTES);
+    write_ddb(&mut cpu.bus, ddb, b"VMM     ", 0x0001, 0x040A, (4, 10));
     write_dynamic_vxds(cpu, phys);
     let mut list = Vec::with_capacity(VXD_LOCATIONS_LEN as usize);
     list.extend_from_slice(&(SYSTEM + VMM_DDB).to_le_bytes());
@@ -358,18 +379,28 @@ fn write_vmm_data(cpu: &mut Cpu, phys: u32) {
     cpu.bus.load_bytes((phys + VXD_LOCATIONS) as usize, &list);
 }
 
+/// The fields of the DDB at `ddb` (physical) that say what the VxD is:
+/// its name, id, DDK and VxD versions, the DDB's size and the reserved
+/// signatures.
+fn write_ddb(bus: &mut Bus, ddb: usize, name: &[u8; 8], id: u16, sdk: u16, version: (u8, u8)) {
+    bus.write_16(ddb + DDB_SDK_VERSION as usize, sdk);
+    bus.write_16(ddb + DDB_DEVICE_ID as usize, id);
+    bus.write_8(ddb + DDB_VERSION as usize, version.0);
+    bus.write_8(ddb + DDB_VERSION as usize + 1, version.1);
+    bus.load_bytes(ddb + DDB_NAME as usize, name);
+    bus.write_32(ddb + DDB_SIZE_FIELD as usize, DDB_SIZE);
+    bus.load_bytes(ddb + DDB_RESERVED as usize, DDB_RESERVED_BYTES);
+}
+
 /// The address of the `index`th of `DYNAMIC_VXDS` in the system arena.
 fn vxd_at(index: usize) -> u32 {
     SYSTEM + VXDS + VXD_SIZE * index as u32
 }
 
-/// The DeviceInfo list's head: the VxD loaded last comes first.
-fn device_list_head() -> u32 {
-    vxd_at(DYNAMIC_VXDS.len() - 1) + VXD_INFO
-}
-
-/// The dynamically loaded VxDs (`DYNAMIC_VXDS`), in the system block at
-/// `phys`, and the DDB list that starts at VMM's DDB.
+/// The dynamically loaded VxDs (`DYNAMIC_VXDS`) the machine has, in the
+/// system block at `phys`, VXDLDR's list of them, and the DDB list that
+/// starts at VMM's DDB. A VxD the machine has no use for keeps its place
+/// in the block, empty and in neither list.
 ///
 /// Each VxD has one object, of locked code: a control procedure that
 /// answers every system control message with success (carry clear), as
@@ -395,30 +426,27 @@ fn device_list_head() -> u32 {
 fn write_dynamic_vxds(cpu: &mut Cpu, phys: u32) {
     let bus = &mut cpu.bus;
     let ddb_of = |index: usize| vxd_at(index) + VXD_DDB;
-    for (index, vxd) in DYNAMIC_VXDS.iter().enumerate() {
+    let loaded: Vec<usize> = (0..DYNAMIC_VXDS.len())
+        .filter(|&index| (DYNAMIC_VXDS[index].present)(bus))
+        .collect();
+    // Each DeviceInfo links to the one of the VxD loaded before.
+    let mut previous = 0;
+    for &index in &loaded {
+        let vxd = &DYNAMIC_VXDS[index];
+        debug_assert!(vxd.module.len() < 0x10);
         let at = vxd_at(index);
         let base = (phys + (at - SYSTEM)) as usize;
         // clc ; ret
         bus.load_bytes(base + VXD_CONTROL as usize, &[0xF8, 0xC3]);
         let ddb = base + VXD_DDB as usize;
-        bus.write_16(ddb + DDB_SDK_VERSION as usize, vxd.sdk);
-        bus.write_16(ddb + DDB_DEVICE_ID as usize, vxd.id);
-        bus.write_8(ddb + DDB_VERSION as usize, vxd.version.0);
-        bus.write_8(ddb + DDB_VERSION as usize + 1, vxd.version.1);
+        write_ddb(bus, ddb, vxd.name, vxd.id, vxd.sdk, vxd.version);
         bus.write_16(ddb + DDB_FLAGS as usize, DYNAMIC_DDB_FLAGS);
-        bus.load_bytes(ddb + DDB_NAME as usize, vxd.name);
         bus.write_32(ddb + DDB_INIT_ORDER as usize, vxd.init_order);
         bus.write_32(ddb + DDB_CONTROL_PROC as usize, at + VXD_CONTROL);
-        bus.write_32(ddb + DDB_SIZE_FIELD as usize, DDB_SIZE);
-        bus.load_bytes(ddb + DDB_RESERVED as usize, DDB_RESERVED_BYTES);
 
         let info = base + VXD_INFO as usize;
         let info_at = at + VXD_INFO;
-        let next = match index {
-            0 => 0,
-            _ => vxd_at(index - 1) + VXD_INFO,
-        };
-        bus.write_32(info, next);
+        bus.write_32(info, previous);
         bus.write_8(info + 0x04, 1);
         bus.write_32(info + 0x05, ddb_of(index));
         bus.write_16(info + 0x09, vxd.id);
@@ -433,10 +461,13 @@ fn write_dynamic_vxds(cpu: &mut Cpu, phys: u32) {
         let mut name = vxd.module.as_bytes().to_vec();
         name.push(0);
         bus.load_bytes(info + INFO_NAME as usize, &name);
+        previous = info_at;
     }
+    // The VxD loaded last heads VXDLDR's list.
+    bus.write_32((phys + DEVICE_LIST) as usize, previous);
     // The DDB list: VMM's, then the others by init order, those of the
     // same order in load order.
-    let mut order: Vec<usize> = (0..DYNAMIC_VXDS.len()).collect();
+    let mut order = loaded;
     order.sort_by_key(|&index| DYNAMIC_VXDS[index].init_order);
     let mut chain = vec![SYSTEM + VMM_DDB];
     chain.extend(order.iter().map(|&index| ddb_of(index)));
@@ -461,9 +492,6 @@ const VMM_GET_VXD_LOCATION_LIST: u32 = 0x0001_013E;
 const VMM_GET_DDB_LIST: u32 = 0x0001_013F;
 const GET_DDB: u32 = 0x0001_0146;
 const VXDLDR_GET_DEVICE_LIST: u32 = 0x0027_0005;
-
-/// The index of EDI in `Context::gpr`.
-const EDI: usize = 7;
 
 /// The most DDBs Get_DDB looks at, so that a list a program has made
 /// circular can't keep it going.
@@ -493,8 +521,9 @@ const DDB_LIST_LIMIT: usize = 1024;
 /// VXDLDR_GetDeviceList returns in EAX the first of the DeviceInfo
 /// blocks of the VxDs loaded since the start (dynamically loaded), each
 /// linked to the next, and changes nothing else, flags included: Windows
-/// 98 SE's VXDLDR loads the head of the list. The built-in Windows has
-/// those of `DYNAMIC_VXDS`.
+/// 98 SE's VXDLDR loads the head of the list, as this does from
+/// `DEVICE_LIST`. The built-in Windows has those of `DYNAMIC_VXDS` that
+/// the machine has.
 ///
 /// Windows 98's VMM also rewrites the INT 20h and its dword into a call
 /// through the VxD's service table, so that the next call goes there
@@ -529,7 +558,7 @@ fn vxd_service(cpu: &mut Cpu, service: u32, ctx: &mut Context) -> bool {
             true
         }
         VXDLDR_GET_DEVICE_LIST => {
-            ctx.gpr[EAX] = device_list_head();
+            ctx.gpr[EAX] = cpu.bus.guest_read_32(SYSTEM + DEVICE_LIST);
             true
         }
         _ => false,
@@ -540,9 +569,15 @@ fn vxd_service(cpu: &mut Cpu, service: u32, ctx: &mut Context) -> bool {
 /// whose name is the 8 bytes at `name`; 0 if there is none. The list is
 /// read from memory, as a program may have changed it.
 fn find_ddb(cpu: &mut Cpu, id: u32, name: u32) -> u32 {
-    let wanted: Vec<u8> = match id {
-        0 => (0..8).map(|i| cpu.bus.guest_read_8(name + i)).collect(),
-        _ => Vec::new(),
+    let read_name = |cpu: &mut Cpu, at: u32| {
+        let mut bytes = [0; 8];
+        cpu.bus.guest_read_bytes(at, &mut bytes);
+        bytes
+    };
+    // EDI is read only for a search by name: by id it may be anything.
+    let wanted = match id {
+        0 => read_name(cpu, name),
+        _ => [0; 8],
     };
     let mut ddb = SYSTEM + VMM_DDB;
     for _ in 0..DDB_LIST_LIMIT {
@@ -550,7 +585,7 @@ fn find_ddb(cpu: &mut Cpu, id: u32, name: u32) -> u32 {
             break;
         }
         let found = match id {
-            0 => (0..8).all(|i| cpu.bus.guest_read_8(ddb + DDB_NAME + i) == wanted[i as usize]),
+            0 => read_name(cpu, ddb + DDB_NAME) == wanted,
             _ => cpu.bus.guest_read_16(ddb + DDB_DEVICE_ID) as u32 == id,
         };
         if found {

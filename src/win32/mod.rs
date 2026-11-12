@@ -178,6 +178,7 @@ const ECX: usize = 1;
 const EDX: usize = 2;
 const EBX: usize = 3;
 const ESP: usize = 4;
+const EDI: usize = 7;
 
 /// What a call of a function the built-in DLLs lack fails with.
 const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
