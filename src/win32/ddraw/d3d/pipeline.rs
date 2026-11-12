@@ -571,6 +571,10 @@ pub struct Setup {
     /// D3DRENDERSTATE_NORMALIZENORMALS, for the normals that light
     /// vertices and that texture coordinates are made from.
     pub normalize: bool,
+    /// The stages whose coordinates a screen vertex gets: the card's
+    /// textures at once, `SCREEN_STAGES` at most. The others' are left
+    /// out, so a card with two pays for two.
+    pub screen_stages: usize,
     /// Geometry blending, if the vertices are blended: `world` is then
     /// the first world matrix only for tweening.
     pub blend: Option<Blend>,
@@ -593,6 +597,7 @@ impl Default for Setup {
             shade: 2,
             coords: std::array::from_fn(Coord::set),
             normalize: false,
+            screen_stages: SCREEN_STAGES,
             blend: None,
         }
     }
@@ -1524,7 +1529,10 @@ fn screen(setup: &Setup, p: &Processed) -> ScreenVertex {
         rhw,
         diffuse: color(p.diffuse),
         specular: color(p.specular),
-        tex: std::array::from_fn(|stage| setup.coords[stage].sampled(p.tex[stage])),
+        tex: std::array::from_fn(|stage| match stage < setup.screen_stages {
+            true => setup.coords[stage].sampled(p.tex[stage]),
+            false => [0.0, 0.0, 0.0, 1.0],
+        }),
     }
 }
 
