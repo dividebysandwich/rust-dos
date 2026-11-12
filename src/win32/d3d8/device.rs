@@ -53,7 +53,7 @@ const PRESENT_INTERVAL_IMMEDIATE: u32 = 0x8000_0000;
 
 // D3DCREATE_ flags.
 const CREATE_SOFTWARE_VERTEXPROCESSING: u32 = 0x20;
-const CREATE_HARDWARE_VERTEXPROCESSING: u32 = 0x40;
+pub const CREATE_HARDWARE_VERTEXPROCESSING: u32 = 0x40;
 const CREATE_MIXED_VERTEXPROCESSING: u32 = 0x80;
 
 /// D3DDEVTYPE_HAL.
@@ -369,7 +369,7 @@ fn check_params(cpu: &mut Cpu, p: &mut [u32], window: u32) -> Result<(), u32> {
             return Err(D3DERR_INVALIDCALL);
         }
     }
-    if p[PP_AUTODEPTH] != 0 && !super::direct3d::depth_format(p[PP_DEPTHFORMAT]) {
+    if p[PP_AUTODEPTH] != 0 && !resource::card_depth(cpu, p[PP_DEPTHFORMAT]) {
         return Err(D3DERR_INVALIDCALL);
     }
     Ok(())
@@ -612,13 +612,16 @@ pub fn create(
         DEVTYPE_REF => return D3DERR_NOTAVAILABLE,
         _ => return D3DERR_INVALIDCALL,
     }
-    // The card has no transform and lighting of its own.
-    if vp != CREATE_SOFTWARE_VERTEXPROCESSING {
-        return D3DERR_INVALIDCALL;
-    }
     // A Voodoo Graphics or Voodoo2 add-on card has no Direct3D 8 driver.
-    if cpu.bus.vga.adapter.voodoo_board().is_none() {
+    let Some(kind) = super::caps::card(cpu) else {
         return D3DERR_NOTAVAILABLE;
+    };
+    // Hardware and mixed vertex processing are of a card that
+    // transforms and lights. The draws are the same with each: the
+    // HAL hands the card the vertices it can transform as the pipeline
+    // would, and the pipeline does the others (`hal::draw_geometry`).
+    if vp != CREATE_SOFTWARE_VERTEXPROCESSING && !hal::transforms(kind) {
+        return D3DERR_INVALIDCALL;
     }
     let window = if p[PP_WINDOW] != 0 {
         p[PP_WINDOW]
@@ -740,8 +743,11 @@ pub fn get_device_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, at] = args[..] else {
         return Some(D3DERR_INVALIDCALL);
     };
-    hr!(this_device(cpu, this));
-    Some(super::caps::write(cpu, at, true))
+    let (_, d) = hr!(this_device(cpu, this));
+    let whose = super::caps::Whose::Device {
+        behavior: d.behavior,
+    };
+    Some(super::caps::write(cpu, at, whose))
 }
 
 /// Write D3DDISPLAYMODE at `at`: the display's mode now.
@@ -1213,7 +1219,7 @@ const CLEAR_STENCIL: u32 = 4;
 /// Clear(this, count, rects, flags, color, z, stencil): the rectangles
 /// (D3DRECTs), or all of the viewport.
 pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [this, count, rects_at, flags, color, z, _] = args[..] else {
+    let [this, count, rects_at, flags, color, z, stencil] = args[..] else {
         return Some(D3DERR_INVALIDCALL);
     };
     let (id, d) = hr!(this_device(cpu, this));
@@ -1223,8 +1229,12 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if flags & (CLEAR_ZBUFFER | CLEAR_STENCIL) != 0 && d.depth == 0 {
         return Some(D3DERR_INVALIDCALL);
     }
-    // The depth buffers have no stencil.
-    if flags & CLEAR_STENCIL != 0 {
+    // A stencil is cleared where the depth buffer has one.
+    let has_stencil = state(cpu)
+        .object(d.depth)
+        .and_then(|o| o.surface.as_ref())
+        .is_some_and(|s| s.format == resource::FMT_D24S8);
+    if flags & CLEAR_STENCIL != 0 && !has_stencil {
         return Some(D3DERR_INVALIDCALL);
     }
     let Some(dev) = inner(cpu, id).cloned() else {
@@ -1265,14 +1275,17 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let fill = hal::Fill {
         target: (flags & CLEAR_TARGET != 0).then_some(color),
         depth: (flags & CLEAR_ZBUFFER != 0).then(|| f32::from_bits(z).clamp(0.0, 1.0)),
-        stencil: None,
+        stencil: (flags & CLEAR_STENCIL != 0).then_some(stencil),
     };
     hal::clear(cpu, &dev, &rects, fill);
     Some(D3D_OK)
 }
 
 /// ValidateDevice(this, passes): whether the card draws with the
-/// texture stages as they are, in one pass.
+/// texture stages as they are, in one pass: no more stages than the
+/// caps' MaxTextureBlendStages, and a texture only in the first
+/// MaxSimultaneousTextures of them, as Direct3D 7's ValidateDevice
+/// has it.
 pub fn validate_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, out] = args[..] else {
         return Some(D3DERR_INVALIDCALL);
@@ -1284,7 +1297,18 @@ pub fn validate_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let offer = hal::card(cpu, d.dd);
     let tmus = offer.map_or(1, |offer| offer.units) as usize;
     let kind = offer.map_or(hal::Kind::Voodoo, |offer| offer.kind);
+    // A card with a stage for each texture unit says 0 stages.
+    let stages = match hal::description(kind).stages {
+        0 => tmus,
+        stages => stages as usize,
+    };
     let stage = |s: usize, t: usize| d.stages[s * 32 + t];
+    // D3DTA_TEXTURE in one of the arguments of the stage's colour
+    // (COLORARG1, 2 and 0) or alpha (ALPHAARG1, 2 and 0) operation.
+    let texture = |s: usize, op: usize, args: [usize; 3]| {
+        stage(s, op) != 1 && args.iter().any(|&a| stage(s, a) & 0xF == 2)
+    };
+    let textured = |s: usize| texture(s, 1, [2, 3, 26]) || texture(s, 4, [5, 6, 27]);
     let mut used = 0;
     for s in 0..STAGES {
         let (op, aop) = (stage(s, 1), stage(s, 4));
@@ -1299,7 +1323,7 @@ pub fn validate_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         used += 1;
     }
-    if used > tmus {
+    if used > stages || (tmus..used).any(textured) {
         return Some(D3DERR_TOOMANYOPERATIONS);
     }
     cpu.bus.guest_write_32(out, 1);

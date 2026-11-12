@@ -4,10 +4,13 @@
 //! draws its characters: XYZB FVFs with D3DFVF_LASTBETA_UBYTE4, the
 //! world matrices weighed by the vertex's weights, indexed or not. The
 //! programs are made as in win32_d3d_tests.rs, whose helpers they use.
+//! On a ToadForce a program makes a device with hardware vertex
+//! processing and a depth buffer with a stencil, and draws with a
+//! compressed texture and the stencil test.
 
 use super::win32_d3d_tests::{
-    Arg, Calls, DONE, RESULTS, copy, finish, machine, peek, peek_f32, program, put_f32s, put32,
-    results, run_until_done,
+    Arg, Calls, DONE, RESULTS, copy, finish, machine, machine_toadforce, peek, peek_f32, program,
+    put_f32s, put32, results, run_until_done,
 };
 use iced_x86::code_asm::*;
 
@@ -355,4 +358,346 @@ fn geometry_blending_weighs_the_world_matrices_the_indices_name() {
     for (i, (position, color)) in expected.iter().enumerate() {
         assert_eq!(vertex(i as u32), (*position, *color), "vertex {i}");
     }
+}
+
+// The ToadForce program's data, beside what the blend program has.
+const TEXTURE: u32 = 0x1C;
+const BACK: u32 = 0x20;
+/// D3DLOCKED_RECTs: the texture's and the back buffer's.
+const TEX_LOCKED: u32 = 0x28;
+const BACK_LOCKED: u32 = 0x30;
+/// The pixels the program reads from the back buffer.
+const PIXELS: u32 = 0x40;
+/// The D3DLOCKED_RECT of the locks of a rectangle, the texture that
+/// isn't whole blocks, and a rectangle that isn't on blocks.
+const RECT_LOCKED: u32 = 0x50;
+const ODD_TEXTURE: u32 = 0x58;
+const UNALIGNED: u32 = 0x60;
+/// The texture's blocks and the two quads' vertices.
+const BLOCKS: u32 = 0x800;
+const QUAD: u32 = 0x840;
+const QUAD1: u32 = 0x900;
+
+const D3D8_CHECK_DEVICE_FORMAT: u32 = 10;
+const DEV_GET_BACK_BUFFER: u32 = 16;
+const DEV_CREATE_TEXTURE: u32 = 20;
+const DEV_BEGIN_SCENE: u32 = 34;
+const DEV_END_SCENE: u32 = 35;
+const DEV_CLEAR: u32 = 36;
+const DEV_SET_TEXTURE: u32 = 61;
+const DEV_SET_TEXTURE_STAGE_STATE: u32 = 63;
+const DEV_DRAW_PRIMITIVE_UP: u32 = 72;
+const TEX_LOCK_RECT: u32 = 16;
+const TEX_UNLOCK_RECT: u32 = 17;
+const SURF_LOCK_RECT: u32 = 9;
+
+const D3DCREATE_HARDWARE_VERTEXPROCESSING: u32 = 0x40;
+const D3DFMT_A8R8G8B8: u32 = 21;
+const D3DFMT_D24S8: u32 = 75;
+const D3DFMT_DXT1: u32 = u32::from_le_bytes(*b"DXT1");
+const D3DUSAGE_DEPTHSTENCIL: u32 = 2;
+const D3DRTYPE_SURFACE: u32 = 1;
+const D3DRTYPE_TEXTURE: u32 = 3;
+const D3DPOOL_DEFAULT: u32 = 0;
+const D3DPOOL_MANAGED: u32 = 1;
+const D3DFMT_L8: u32 = 50;
+const D3DERR_INVALIDCALL: u32 = 0x8876_086C;
+const D3DFMT_V8U8: u32 = 60;
+const D3DPRESENTFLAG_LOCKABLE_BACKBUFFER: u32 = 1;
+const D3DPT_TRIANGLELIST: u32 = 4;
+/// XYZRHW with one set of texture coordinates.
+const FVF_TEXTURED: u32 = 0x104;
+const D3DRS_STENCILENABLE: u32 = 52;
+const D3DRS_STENCILPASS: u32 = 55;
+const D3DRS_STENCILFUNC: u32 = 56;
+const D3DRS_STENCILREF: u32 = 57;
+const D3DRS_TEXTUREFACTOR: u32 = 60;
+const D3DTSS_COLOROP: u32 = 1;
+const D3DTSS_COLORARG1: u32 = 2;
+const D3DTOP_SELECTARG1: u32 = 2;
+const D3DTA_TFACTOR: u32 = 3;
+const D3DSTENCILOP_REPLACE: u32 = 3;
+const D3DCMP_EQUAL: u32 = 3;
+const D3DCMP_ALWAYS: u32 = 8;
+
+/// The pixels the program reads: x and y in the back buffer.
+const READ: [(u32, u32); 4] = [(16, 16), (40, 16), (16, 48), (60, 60)];
+
+/// The program: a full-screen device with hardware vertex processing
+/// and a D24S8 depth buffer. It clears colour, depth and stencil, and
+/// draws a quad of 48 by 32 pixels with an 8x8 DXT1 texture of one
+/// green, which writes 1 to the stencil. A red quad of 32 by 64 pixels
+/// then draws where the stencil is 1. Before the draws it also makes an
+/// L8 and a V8U8 texture and a DXT1 one in D3DPOOL_DEFAULT. The pixels
+/// of `READ` go to the data.
+fn toadforce_program() -> (Vec<u8>, u32) {
+    let mut d = vec![0u8; DATA_SIZE];
+    d[CLASS as usize..CLASS as usize + 7].copy_from_slice(b"Static\0");
+    // D3DPRESENT_PARAMETERS: 640x480 R5G6B5 in full screen, one back
+    // buffer that can be locked, and a depth buffer with a stencil.
+    for (i, v) in [640, 480, D3DFMT_R5G6B5, 1, 0, D3DSWAPEFFECT_DISCARD]
+        .iter()
+        .enumerate()
+    {
+        put32(&mut d, PRESENT + 4 * i as u32, *v);
+    }
+    put32(&mut d, PRESENT + 32, 1);
+    put32(&mut d, PRESENT + 36, D3DFMT_D24S8);
+    put32(&mut d, PRESENT + 40, D3DPRESENTFLAG_LOCKABLE_BACKBUFFER);
+    // Four blocks whose two colours are green, every pixel the first.
+    for block in 0..4 {
+        put32(&mut d, BLOCKS + 8 * block, 0x07E0_07E0);
+    }
+    // A quad from the top left corner: two triangles, clockwise.
+    let mut quad = |at: u32, w: f32, h: f32| {
+        let corners = [[0.0, 0.0], [w, 0.0], [0.0, h], [w, 0.0], [w, h], [0.0, h]];
+        for (i, [x, y]) in corners.into_iter().enumerate() {
+            put_f32s(&mut d, at + 24 * i as u32, &[x, y, 0.5, 1.0, x / w, y / h]);
+        }
+    };
+    quad(QUAD, 48.0, 32.0);
+    quad(QUAD1, 32.0, 64.0);
+    // From the middle of the first block of the second row of blocks.
+    for (i, v) in [2, 4, 4, 8].into_iter().enumerate() {
+        put32(&mut d, UNALIGNED + 4 * i as u32, v);
+    }
+    program(&[USER32, D3D8], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(640),
+                Arg::I(480),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(0x40_0000),
+                Arg::I(0),
+            ],
+        )?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        a.mov(dword_ptr(l.at(PRESENT + 24)), eax)?;
+        c.api(a, l, DIRECT3D_CREATE8, &[Arg::I(D3D_SDK_VERSION)])?;
+        a.mov(dword_ptr(l.at(D3D)), eax)?;
+        c.com(
+            a,
+            l,
+            D3D,
+            D3D8_GET_DEVICE_CAPS,
+            &[Arg::I(0), Arg::I(D3DDEVTYPE_HAL), Arg::At(CAPS)],
+        )?;
+        // The formats a Voodoo3 has none of: a compressed and a 32-bit
+        // texture, and a depth buffer with a stencil.
+        for (usage, kind, format) in [
+            (0, D3DRTYPE_TEXTURE, D3DFMT_DXT1),
+            (0, D3DRTYPE_TEXTURE, D3DFMT_A8R8G8B8),
+            (D3DUSAGE_DEPTHSTENCIL, D3DRTYPE_SURFACE, D3DFMT_D24S8),
+        ] {
+            c.com(
+                a,
+                l,
+                D3D,
+                D3D8_CHECK_DEVICE_FORMAT,
+                &[
+                    Arg::I(0),
+                    Arg::I(D3DDEVTYPE_HAL),
+                    Arg::I(D3DFMT_R5G6B5),
+                    Arg::I(usage),
+                    Arg::I(kind),
+                    Arg::I(format),
+                ],
+            )?;
+        }
+        c.com(
+            a,
+            l,
+            D3D,
+            D3D8_CREATE_DEVICE,
+            &[
+                Arg::I(0),
+                Arg::I(D3DDEVTYPE_HAL),
+                Arg::Val(HWND),
+                Arg::I(D3DCREATE_HARDWARE_VERTEXPROCESSING),
+                Arg::At(PRESENT),
+                Arg::At(DEVICE),
+            ],
+        )?;
+        c.com(a, l, DEVICE, DEV_GET_DEVICE_CAPS, &[Arg::At(DEVICE_CAPS)])?;
+        // Blue, the farthest depth, and a stencil of 0.
+        let clear = [
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(7),
+            Arg::I(0xFF00_0080),
+            Arg::I(1.0f32.to_bits()),
+            Arg::I(0),
+        ];
+        c.com(a, l, DEVICE, DEV_CLEAR, &clear)?;
+        c.com(
+            a,
+            l,
+            DEVICE,
+            DEV_CREATE_TEXTURE,
+            &[
+                Arg::I(8),
+                Arg::I(8),
+                Arg::I(1),
+                Arg::I(0),
+                Arg::I(D3DFMT_DXT1),
+                Arg::I(D3DPOOL_MANAGED),
+                Arg::At(TEXTURE),
+            ],
+        )?;
+        let lock = [Arg::I(0), Arg::At(TEX_LOCKED), Arg::I(0), Arg::I(0)];
+        c.com(a, l, TEXTURE, TEX_LOCK_RECT, &lock)?;
+        copy(a, l, BLOCKS, TEX_LOCKED + 4, 32)?;
+        c.com(a, l, TEXTURE, TEX_UNLOCK_RECT, &[Arg::I(0)])?;
+        // Textures of other formats the card samples: luminance, bump,
+        // and a compressed one in D3DPOOL_DEFAULT.
+        for (format, pool, out) in [
+            (D3DFMT_L8, D3DPOOL_MANAGED, SOURCE),
+            (D3DFMT_V8U8, D3DPOOL_MANAGED, SOURCE1),
+            (D3DFMT_DXT1, D3DPOOL_DEFAULT, DEST),
+        ] {
+            let args = [
+                Arg::I(8),
+                Arg::I(8),
+                Arg::I(1),
+                Arg::I(0),
+                Arg::I(format),
+                Arg::I(pool),
+                Arg::At(out),
+            ];
+            c.com(a, l, DEVICE, DEV_CREATE_TEXTURE, &args)?;
+        }
+        let state = |a: &mut CodeAssembler, c: &mut Calls, s: u32, v: u32| {
+            c.com(a, l, DEVICE, DEV_SET_RENDER_STATE, &[Arg::I(s), Arg::I(v)])
+        };
+        let stage = |a: &mut CodeAssembler, c: &mut Calls, s: u32, v: u32| {
+            let args = [Arg::I(0), Arg::I(s), Arg::I(v)];
+            c.com(a, l, DEVICE, DEV_SET_TEXTURE_STAGE_STATE, &args)
+        };
+        let draw = |a: &mut CodeAssembler, c: &mut Calls, quad: u32| {
+            let args = [
+                Arg::I(D3DPT_TRIANGLELIST),
+                Arg::I(2),
+                Arg::At(quad),
+                Arg::I(24),
+            ];
+            c.com(a, l, DEVICE, DEV_DRAW_PRIMITIVE_UP, &args)
+        };
+        c.com(a, l, DEVICE, DEV_SET_VERTEX_SHADER, &[Arg::I(FVF_TEXTURED)])?;
+        c.com(a, l, DEVICE, DEV_BEGIN_SCENE, &[])?;
+        // The textured quad, which marks the stencil.
+        let texture = [Arg::I(0), Arg::Val(TEXTURE)];
+        c.com(a, l, DEVICE, DEV_SET_TEXTURE, &texture)?;
+        state(a, &mut c, D3DRS_STENCILENABLE, 1)?;
+        state(a, &mut c, D3DRS_STENCILFUNC, D3DCMP_ALWAYS)?;
+        state(a, &mut c, D3DRS_STENCILREF, 1)?;
+        state(a, &mut c, D3DRS_STENCILPASS, D3DSTENCILOP_REPLACE)?;
+        draw(a, &mut c, QUAD)?;
+        // The red one, where the stencil is marked.
+        c.com(a, l, DEVICE, DEV_SET_TEXTURE, &[Arg::I(0), Arg::I(0)])?;
+        state(a, &mut c, D3DRS_TEXTUREFACTOR, 0xFFFF_0000)?;
+        stage(a, &mut c, D3DTSS_COLOROP, D3DTOP_SELECTARG1)?;
+        stage(a, &mut c, D3DTSS_COLORARG1, D3DTA_TFACTOR)?;
+        state(a, &mut c, D3DRS_STENCILFUNC, D3DCMP_EQUAL)?;
+        state(a, &mut c, D3DRS_STENCILPASS, 1)?;
+        draw(a, &mut c, QUAD1)?;
+        c.com(a, l, DEVICE, DEV_END_SCENE, &[])?;
+        let back = [Arg::I(0), Arg::I(0), Arg::At(BACK)];
+        c.com(a, l, DEVICE, DEV_GET_BACK_BUFFER, &back)?;
+        let lock = [Arg::At(BACK_LOCKED), Arg::I(0), Arg::I(0)];
+        c.com(a, l, BACK, SURF_LOCK_RECT, &lock)?;
+        for (i, (x, y)) in READ.into_iter().enumerate() {
+            a.mov(eax, dword_ptr(l.at(BACK_LOCKED)))?;
+            a.imul_3(eax, eax, y as i32)?;
+            a.add(eax, dword_ptr(l.at(BACK_LOCKED + 4)))?;
+            a.movzx(eax, word_ptr(eax + 2 * x))?;
+            a.mov(dword_ptr(l.at(PIXELS + 4 * i as u32)), eax)?;
+        }
+        // The refusals of compressed textures: one of 6 by 6 pixels,
+        // which isn't whole blocks, and a rectangle that starts inside a
+        // block, in D3DPOOL_DEFAULT. The managed texture locks it.
+        let odd = [
+            Arg::I(6),
+            Arg::I(6),
+            Arg::I(1),
+            Arg::I(0),
+            Arg::I(D3DFMT_DXT1),
+            Arg::I(D3DPOOL_MANAGED),
+            Arg::At(ODD_TEXTURE),
+        ];
+        c.com(a, l, DEVICE, DEV_CREATE_TEXTURE, &odd)?;
+        let lock = [Arg::I(0), Arg::At(RECT_LOCKED), Arg::At(UNALIGNED), Arg::I(0)];
+        c.com(a, l, DEST, TEX_LOCK_RECT, &lock)?;
+        c.com(a, l, TEXTURE, TEX_LOCK_RECT, &lock)?;
+        c.com(a, l, TEXTURE, TEX_UNLOCK_RECT, &[Arg::I(0)])?;
+        a.mov(dword_ptr(l.at(RESULTS + 4 * CALLS)), c.next as i32)?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn a_toadforce_has_a_device_with_a_stencil_and_compressed_textures() {
+    let (exe, data) = toadforce_program();
+    let mut cpu = machine_toadforce("d3d8_toadforce", exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + DONE), 1);
+    let calls = peek(&cpu, data + RESULTS + 4 * CALLS);
+    let r = results(&cpu, data, calls);
+    // Every call after CreateWindowExA and Direct3DCreate8 succeeds:
+    // the format checks, CreateDevice with hardware vertex processing,
+    // the Clear of the stencil and the texture among them. Then the
+    // texture of 6 by 6 and the lock of the rectangle off the blocks in
+    // D3DPOOL_DEFAULT fail, and the managed texture's lock and unlock
+    // of it succeed.
+    let (draws, refusals) = r.split_at(r.len() - 4);
+    assert!(draws[2..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+    assert_eq!(refusals, [D3DERR_INVALIDCALL, D3DERR_INVALIDCALL, 0, 0]);
+    assert_eq!(peek(&cpu, data + ODD_TEXTURE), 0);
+    // That lock gives the block the rectangle starts in: the first of
+    // the second row, 16 bytes on.
+    let base = peek(&cpu, data + TEX_LOCKED + 4);
+    assert_eq!(peek(&cpu, data + RECT_LOCKED), 16);
+    assert_eq!(peek(&cpu, data + RECT_LOCKED + 4), base + 16);
+
+    let caps = |at: u32, word: u32| peek(&cpu, data + at + 4 * word);
+    // D3DDEVCAPS_HWTRANSFORMANDLIGHT, textures up to 2048, the eight
+    // stencil operations, eight stages with four textures at once.
+    assert_eq!(caps(CAPS, 7) & 0x1_0000, 0x1_0000);
+    assert_eq!((caps(CAPS, 22), caps(CAPS, 23)), (2048, 2048));
+    assert_eq!(caps(CAPS, 34), 0xFF);
+    assert_eq!((caps(CAPS, 37), caps(CAPS, 38)), (8, 4));
+    // D3DPMISCCAPS_: the color write mask, D3DTA_TEMP and the blend
+    // operations.
+    assert_eq!(caps(CAPS, 8) & 0xC80, 0xC80);
+    // The card blends between four matrices and picks none by index.
+    // Vertex shaders run on the processor, which a device with
+    // hardware vertex processing alone doesn't have.
+    for at in [CAPS, DEVICE_CAPS] {
+        assert_eq!((caps(at, 42), caps(at, 43)), (4, 0));
+        assert_eq!(caps(at, 49), 0);
+    }
+
+    // A row of the 8x8 DXT1 texture is two blocks.
+    assert_eq!(peek(&cpu, data + TEX_LOCKED), 16);
+    let pixel = |i: u32| peek(&cpu, data + PIXELS + 4 * i);
+    // Red where both quads are, green where the textured one alone
+    // is, and the blue of the Clear where the stencil kept the red one
+    // out and where nothing drew.
+    assert_eq!(
+        [pixel(0), pixel(1), pixel(2), pixel(3)],
+        [0xF800, 0x07E0, 0x0010, 0x0010]
+    );
+    let counts = cpu.bus.toadforce.as_ref().expect("a ToadForce").counts();
+    assert_eq!(counts.rejected, 0);
+    assert_eq!(counts.draws, 2);
 }

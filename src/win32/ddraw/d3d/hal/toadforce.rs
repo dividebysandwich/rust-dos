@@ -480,14 +480,18 @@ fn target_format(f: &DdFormat) -> Option<Format> {
 /// card's whatever masks the program gave it: programs make them with
 /// depth in the low 24 bits, in the high 24 and in all 32, and the card
 /// keeps its depth in the high 24 for each. Only a program that locks
-/// its depth buffer could tell.
+/// its depth buffer could tell. A stencil is 8 bits beside 24 of depth:
+/// the card has no 16-bit depth buffer with one (D15S1) and no other
+/// width of it (D24X4S4), whose stencil a Clear and the stencil test
+/// would otherwise take as there.
 fn depth_format(f: &DdFormat) -> Option<Format> {
     if f.flags & DDPF_ZBUFFER == 0 {
         return None;
     }
+    let stencil = f.flags & DDPF_STENCILBUFFER != 0;
     match f.bits {
-        16 => Some(Format::D16),
-        32 if f.flags & DDPF_STENCILBUFFER != 0 => Some(Format::D24S8),
+        16 if !stencil => Some(Format::D16),
+        32 if stencil => (f.r == 8).then_some(Format::D24S8),
         32 => Some(Format::D24X8),
         _ => None,
     }

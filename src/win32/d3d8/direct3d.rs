@@ -2,16 +2,16 @@
 //! adapter, its modes and formats and the HAL device's caps, and makes
 //! devices. There is one adapter, and its only device type is the HAL.
 //!
-//! Render targets and back buffers are 565, X8R8G8B8 or A8R8G8B8 (the
-//! 32-bit ones drawn through 16-bit shadows), textures 565, 1555, 4444
-//! and X1R5G5B5 as the card samples them, and depth buffers D16, D16
-//! lockable or D24X8 (through a 16-bit shadow). The display modes are
-//! the adapter's of 16 and 32 bits a pixel.
+//! Render targets and back buffers are 565, X8R8G8B8 or A8R8G8B8 (on a
+//! Voodoo the 32-bit ones are drawn through 16-bit shadows), textures
+//! the formats the card samples (`resource::card_texture`), and depth
+//! buffers D16, D16 lockable or D24X8 (on a Voodoo through a 16-bit
+//! shadow), and D24S8 on a ToadForce. The display modes are the
+//! adapter's of 16 and 32 bits a pixel.
 
 use super::device::{self, DEVTYPE_HAL, DEVTYPE_REF};
 use super::resource::{
-    self, FMT_A1R5G5B5, FMT_A4R4G4B4, FMT_A8R8G8B8, FMT_D16, FMT_D16_LOCKABLE, FMT_D24X8,
-    FMT_R5G6B5, FMT_X1R5G5B5, FMT_X4R4G4B4, FMT_X8R8G8B8, USAGE_DEPTHSTENCIL, USAGE_RENDERTARGET,
+    self, FMT_A8R8G8B8, FMT_R5G6B5, FMT_X8R8G8B8, USAGE_DEPTHSTENCIL, USAGE_RENDERTARGET,
 };
 use super::{D3D_OK, D3DERR_INVALIDCALL, D3DERR_NOTAVAILABLE, Object, V_DIRECT3D8, add, of};
 use crate::cpu::Cpu;
@@ -157,7 +157,7 @@ fn check_device(cpu: &mut Cpu, adapter: u32, devtype: u32) -> Result<(), u32> {
         return Err(D3DERR_INVALIDCALL);
     }
     match devtype {
-        DEVTYPE_HAL if cpu.bus.vga.adapter.voodoo_board().is_some() => Ok(()),
+        DEVTYPE_HAL if super::caps::card(cpu).is_some() => Ok(()),
         DEVTYPE_HAL | DEVTYPE_REF => Err(D3DERR_NOTAVAILABLE),
         _ => Err(D3DERR_INVALIDCALL),
     }
@@ -197,11 +197,6 @@ pub fn check_device_type(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 const RTYPE_SURFACE: u32 = 1;
 const RTYPE_TEXTURE: u32 = 3;
 
-/// Whether `format` is a depth buffer's the device has.
-pub fn depth_format(format: u32) -> bool {
-    matches!(format, FMT_D16 | FMT_D16_LOCKABLE | FMT_D24X8)
-}
-
 /// CheckDeviceFormat(this, adapter, type, adapter format, usage,
 /// resource type, format).
 pub fn check_device_format(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -215,14 +210,11 @@ pub fn check_device_format(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let surface_or_texture = matches!(rtype, RTYPE_SURFACE | RTYPE_TEXTURE);
     let ok = if usage & USAGE_DEPTHSTENCIL != 0 {
-        rtype == RTYPE_SURFACE && depth_format(format)
+        rtype == RTYPE_SURFACE && resource::card_depth(cpu, format)
     } else if usage & USAGE_RENDERTARGET != 0 {
         surface_or_texture && resource::target_format(format)
     } else {
-        let texture = matches!(
-            format,
-            FMT_R5G6B5 | FMT_X1R5G5B5 | FMT_A1R5G5B5 | FMT_A4R4G4B4 | FMT_X4R4G4B4
-        );
+        let texture = resource::card_texture(cpu, format);
         let surface = texture || matches!(format, FMT_X8R8G8B8 | FMT_A8R8G8B8);
         match rtype {
             RTYPE_TEXTURE => texture,
@@ -256,11 +248,13 @@ pub fn check_depth_stencil_match(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     hr!(d3d_of(cpu, this));
     hr!(check_device(cpu, adapter, devtype));
-    Some(if resource::target_format(target) && depth_format(depth) {
-        D3D_OK
-    } else {
-        D3DERR_NOTAVAILABLE
-    })
+    Some(
+        if resource::target_format(target) && resource::card_depth(cpu, depth) {
+            D3D_OK
+        } else {
+            D3DERR_NOTAVAILABLE
+        },
+    )
 }
 
 /// GetDeviceCaps(this, adapter, type, caps).
@@ -270,7 +264,7 @@ pub fn get_device_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     hr!(d3d_of(cpu, this));
     hr!(check_device(cpu, adapter, devtype));
-    Some(super::caps::write(cpu, at, false))
+    Some(super::caps::write(cpu, at, super::caps::Whose::Adapter))
 }
 
 /// GetAdapterMonitor(this, adapter).

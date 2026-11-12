@@ -114,7 +114,7 @@ fn machine_with(test: &str, card: Option<Board>, program: Vec<u8>) -> Cpu {
 
 /// A machine with a ToadForce as its display adapter, the built-in
 /// Windows on and `program` loaded from the shell as T.EXE.
-fn machine_toadforce(test: &str, program: Vec<u8>) -> Cpu {
+pub(super) fn machine_toadforce(test: &str, program: Vec<u8>) -> Cpu {
     let base = PathBuf::from("target/test_win32_d3d").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -1188,6 +1188,7 @@ const DDSD_BACKBUFFERCOUNT: u32 = 0x20;
 const DDPF_ALPHAPIXELS: u32 = 0x1;
 const DDPF_RGB: u32 = 0x40;
 const DDPF_ZBUFFER: u32 = 0x400;
+const DDPF_STENCILBUFFER: u32 = 0x4000;
 const DDLOCK_WAIT: u32 = 1;
 const DDFLIP_WAIT: u32 = 1;
 const DDFLIP_NOVSYNC: u32 = 8;
@@ -1399,12 +1400,19 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
 /// The same in a mode of `bpp` bits a pixel (16 or 32), whose z-buffer
 /// has as many bits (24 of them depth at 32).
 fn scene_program_in(scene: &Scene, bpp: u32) -> (Vec<u8>, u32) {
-    scene_program_with(scene, bpp, &mut Vec::new())
+    scene_program_with(scene, bpp, false, &mut Vec::new())
 }
 
 /// The same, noting in `checked` where in the results the calls of the
-/// scene's Clear and ViewportClear steps are.
-fn scene_program_with(scene: &Scene, bpp: u32, checked: &mut Vec<u32>) -> (Vec<u8>, u32) {
+/// scene's Clear and ViewportClear steps are. With `stencil` the
+/// z-buffer of a 32-bit mode has 8 bits of stencil under its 24 of
+/// depth, the format a ToadForce's EnumZBufferFormats gives.
+fn scene_program_with(
+    scene: &Scene,
+    bpp: u32,
+    stencil: bool,
+    checked: &mut Vec<u32>,
+) -> (Vec<u8>, u32) {
     let mut d = data();
     if scene.api == Api::D3D7Tnl {
         tnl_guid(&mut d, IID_HAL);
@@ -1462,6 +1470,12 @@ fn scene_program_with(scene: &Scene, bpp: u32, checked: &mut Vec<u32>) -> (Vec<u
         Z_DESC + 0x5C,
         if bpp == 32 { 0xFF_FFFF } else { 0xFFFF },
     );
+    if stencil {
+        put32(&mut d, Z_DESC + 0x4C, DDPF_ZBUFFER | DDPF_STENCILBUFFER);
+        put32(&mut d, Z_DESC + 0x58, 8);
+        put32(&mut d, Z_DESC + 0x5C, 0xFFFF_FF00);
+        put32(&mut d, Z_DESC + 0x60, 0xFF);
+    }
     put32(&mut d, Z_DESC + 0x68, DDSCAPS_ZBUFFER | DDSCAPS_VIDEOMEMORY);
     put32(&mut d, TEX_DESC, 124);
     put32(&mut d, TEX_DESC + 0x04, flags);
@@ -1968,7 +1982,7 @@ fn drew_on_the_card(cpu: &Cpu, scene: &Scene) {
 
 fn clear_scene_on(test: &str, scene: &Scene, toadforce: bool) -> (Vec<u32>, Vec<u16>) {
     let mut checked = Vec::new();
-    let (exe, data) = scene_program_with(scene, 16, &mut checked);
+    let (exe, data) = scene_program_with(scene, 16, false, &mut checked);
     let mut cpu = if toadforce {
         machine_toadforce(test, exe)
     } else {
@@ -2120,6 +2134,42 @@ fn a_clear_of_a_missing_stencil_fails_and_clears_nothing() {
         assert_eq!(r, [0], "{test}");
         assert_rgb(&p, 0, 0, [0xFF, 0, 0], 4);
     }
+}
+
+/// A ToadForce draws stencil, and its EnumZBufferFormats gives a
+/// 32-bit format with 8 bits of it. A z-buffer of that format keeps its
+/// stencil bits: Clear with D3DCLEAR_STENCIL succeeds and clears all
+/// three, as No One Lives Forever clears each frame, and the stencil
+/// test then reads the value the Clear wrote.
+#[test]
+fn a_toadforce_clears_and_tests_the_stencil_of_a_z_buffer_with_one() {
+    const RS_STENCILENABLE: u32 = 52;
+    const RS_STENCILFUNC: u32 = 56;
+    const RS_STENCILREF: u32 = 57;
+    const D3DCMP_EQUAL: u32 = 3;
+    let steps = vec![
+        Step::Clear(D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, BLUE),
+        Step::State(RS_STENCILENABLE, 1),
+        Step::State(RS_STENCILFUNC, D3DCMP_EQUAL),
+        // The Clear wrote 0: a quad that wants 1 draws nothing.
+        Step::State(RS_STENCILREF, 1),
+        Step::Draw(quad(0.0, 0.0, 32.0, 64.0, 0.5, RED)),
+        Step::State(RS_STENCILREF, 0),
+        Step::Draw(quad(32.0, 0.0, 64.0, 64.0, 0.5, GREEN)),
+    ];
+    let scene = clear_test_scene(Api::D3D7, true, steps);
+    let mut checked = Vec::new();
+    let (exe, data) = scene_program_with(&scene, 32, true, &mut checked);
+    let mut cpu = machine_toadforce("stencil_clear", exe);
+    run_until_done(&mut cpu, data);
+    let n = peek(&cpu, data + CALLS);
+    let r = results(&cpu, data, n);
+    assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+    assert_eq!(checked.len(), 1);
+    drew_on_the_card(&cpu, &scene);
+    let pixel = |x: u32, y: u32| peek(&cpu, data + PIXELS + 4 * (64 * y + x)) & 0xFF_FFFF;
+    assert_eq!(pixel(16, 32), 0x0000FF);
+    assert_eq!(pixel(48, 32), 0x00FF00);
 }
 
 /// The viewport's older Clear, unlike Clear2, clears the target of one
@@ -2601,7 +2651,7 @@ fn a_depth_fill_blt_resets_the_z_buffer_in_its_rectangle() {
 
 /// The card's fastfills over `scene`, from the machine's start.
 fn fastfills(test: &str, scene: &Scene) -> u64 {
-    let (exe, data) = scene_program_with(scene, 16, &mut Vec::new());
+    let (exe, data) = scene_program_with(scene, 16, false, &mut Vec::new());
     let mut cpu = machine_with(test, scene.card, exe);
     run_until_done(&mut cpu, data);
     cpu.bus.voodoo.as_ref().unwrap().fastfills

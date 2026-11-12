@@ -82,16 +82,40 @@ fn changed(cpu: &mut Cpu, id: u32) {
     }
 }
 
-/// Copy the rectangle `r` of `src` to (`x`, `y`) of `dst`, byte for
-/// byte.
+/// How the pixels of `s` lie in its memory, in units of a pixel or, in
+/// a compressed format, of a block of 4 by 4 pixels: a unit's side in
+/// pixels, its bytes, and the bytes of a row of units.
+fn units(s: &DdSurface) -> (u32, u32, u32) {
+    match dd_surface::dxt_format(&s.format) {
+        Some(f) => (4, f.block_bytes() as u32, f.row_bytes(s.width) as u32),
+        None => (1, s.bytes_per_pixel(), s.pitch),
+    }
+}
+
+/// Whether the rectangle `r` of `s` and the point (`x`, `y`) start on
+/// a unit (`units`), and `r` ends on one or at the surface's edge.
+fn on_units(s: &DdSurface, r: &Rect, x: i32, y: i32) -> bool {
+    let side = units(s).0 as i32;
+    let ends = |end: i32, edge: u32| end % side == 0 || end as u32 == edge;
+    [r.left, r.top, x, y].iter().all(|v| v % side == 0)
+        && ends(r.right, s.width)
+        && ends(r.bottom, s.height)
+}
+
+/// Copy the rectangle `r` of `src` to (`x`, `y`) of `dst`, of one
+/// format, byte for byte: whole blocks of a compressed format.
 fn copy_rect(cpu: &mut Cpu, src: &DdSurface, dst: &DdSurface, r: &Rect, x: u32, y: u32) {
-    let bpp = src.bytes_per_pixel();
-    let w = (r.right - r.left) as u32;
-    let mut row = vec![0; (w * bpp) as usize];
-    for k in 0..(r.bottom - r.top) as u32 {
-        let from = (r.top as u32 + k) * src.pitch + r.left as u32 * bpp;
+    let (side, unit, src_pitch) = units(src);
+    let dst_pitch = units(dst).2;
+    let (left, top) = (r.left as u32 / side, r.top as u32 / side);
+    let w = (r.right as u32).div_ceil(side) - left;
+    let h = (r.bottom as u32).div_ceil(side) - top;
+    let (x, y) = (x / side, y / side);
+    let mut row = vec![0; (w * unit) as usize];
+    for k in 0..h {
+        let from = (top + k) * src_pitch + left * unit;
         dd_surface::read_bytes(cpu, src, from, &mut row);
-        let to = (y + k) * dst.pitch + x * bpp;
+        let to = (y + k) * dst_pitch + x * unit;
         dd_surface::write_bytes(cpu, dst, to, &row);
     }
 }
@@ -103,7 +127,8 @@ pub fn copy_all(cpu: &mut Cpu, src: u32, dst: u32) {
     let (Some(s), Some(d)) = (s, d) else {
         return;
     };
-    if (s.width, s.height, s.format.bits) != (d.width, d.height, d.format.bits) {
+    let layout = |s: &DdSurface| (s.width, s.height, s.format.bits, s.format.fourcc);
+    if layout(&s) != layout(&d) {
         return;
     }
     let r = Rect::new(0, 0, s.width as i32, s.height as i32);
@@ -170,7 +195,8 @@ pub fn copy_rects(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             && *y >= 0
             && *x as i64 + r.right as i64 - r.left as i64 <= d.width as i64
             && *y as i64 + r.bottom as i64 - r.top as i64 <= d.height as i64;
-        if !inside || !fits {
+        // A compressed format's rectangles are of whole blocks.
+        if !inside || !fits || !on_units(&s, r, *x, *y) {
             return Some(D3DERR_INVALIDCALL);
         }
     }

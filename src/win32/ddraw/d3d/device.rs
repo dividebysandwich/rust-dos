@@ -1106,7 +1106,7 @@ pub fn missing_buffer(cpu: &mut Cpu, d: &Device, flags: u32) -> Option<u32> {
     let stencil = drawn
         && state(cpu)
             .surface(z)
-            .is_some_and(|z| z.format.flags & 0x4000 != 0);
+            .is_some_and(|z| z.format.flags & surface::DDPF_STENCILBUFFER != 0);
     (flags & CLEAR_STENCIL != 0 && !stencil).then_some(D3DERR_STENCILBUFFER_NOTPRESENT)
 }
 
