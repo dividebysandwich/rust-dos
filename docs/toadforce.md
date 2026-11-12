@@ -986,13 +986,14 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   or writes that memory on the processor the card reads the surface
   back (`ToadForce::settle` with the range): the program's writes of
   the frame buffer (in the bus), the drivers' reads and writes
-  (`win32::screen`), the card's own `FILL` and `BLT` while they run
-  on the processor, a `CLEAR` of a buffer the host has no current
-  copy of, a texture or a vertex buffer that overlaps it, and the
-  picture the screen shows (`Bus::sync_display`). Running the queued
-  commands and reading back are separate: the queue is run at every
-  such point as before, and a surface is read back only when its own
-  bytes are asked for.
+  (`win32::screen`), the card's own `FILL` and `BLT` where they run
+  on the processor, a `CLEAR` of part of a buffer the host has no
+  current copy of, a texture or a vertex buffer that overlaps it
+  and isn't an image of it, and the picture the screen shows when
+  the window can't show the host's copy (`Bus::sync_display`).
+  Running the queued commands and reading back are separate: the
+  queue is run at every such point as before, and a surface is read
+  back only when its own bytes are asked for.
 - **The program's own reads.** A read of the frame buffer has the bus
   shared (`Bus::read_8`), and can't read anything back. The bytes are
   there before the program gets to them instead. The built-in drivers
@@ -1022,9 +1023,22 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   the same surface kept as a texture, or another surface over the
   same memory, such as a depth buffer of another size. Without a host
   nothing is counted.
-- **The picture shown** is read back once a host frame at first, and
-  comes from the host's texture once that is built (see "The visible
-  surface" above).
+- **What stays on the host.** A `CLEAR` of a whole surface makes the
+  host's copy the newer one whatever card memory holds, so a stale
+  or missing copy costs nothing. A texture whose image is a surface
+  the host has ahead (a level of a texture, a face of a cube map, in
+  `R5G6B5`, `X8R8G8B8` or `A8R8G8B8` without a colour key:
+  `gpu::image_of`) is filled from that copy by a shader, which
+  reduces a 16-bit surface kept in 8 bits a channel as a read-back
+  would. `FILL`, and `BLT` between surfaces of one colour format
+  with no stretch and no key, run on the host when a surface of
+  theirs is ahead (`Host::fill`, `Host::blt`). A surface inside a
+  larger copy of the same bytes (one depth buffer under targets of
+  several sizes) uses that copy. Everything else is read back as
+  before: a keyed texture, a texture that overlaps a surface
+  without being an image of it, a stretch.
+- **The picture shown** comes from the host's copy (`Host::shows`,
+  see "The window's side").
 
 ### The window's side
 
@@ -1057,10 +1071,25 @@ Voodoo3 never meet. A Voodoo Graphics or Voodoo2 board beside a
 ToadForce is possible in the configuration; each renderer then
 draws between the other's calls, from the reset state.
 
-The picture still comes from card memory: the surface on the screen
-is read back once a frame (`Bus::toadforce_show`) and goes to the
-window as any Super VGA picture does. Step 4d shows the host's texture
-instead.
+The window shows the host's copy of the surface on the screen
+(`Display::show_toadforce`, `ToadForceGl::composite`) while the copy
+has every pixel of it: it is ahead, or what card memory holds. The
+window's cursors and messages go over it, and nothing is read back.
+The picture comes from card memory, read back once a frame
+(`Bus::toadforce_show`), in every other case:
+
+- something wants the frame in memory: a screenshot, a recording, the
+  debugger's picture, the settings window or an overlay, a phosphor
+  monitor, a deterministic run;
+- the processor wrote the surface since the host had it, as GDI and
+  DirectDraw's blits on the processor do, until the host draws into
+  it again;
+- a mode with a palette, or one shown doubled.
+
+The surface shown is the one the card shows as of the commands it has
+run, with the queued ones left queued. The one latched at the last
+retrace would be wrong here: a program that flipped is already
+drawing its next frame into it.
 
 `/api/status` has the renderer's name and what it costs under
 `video.toadforce` (`docs/llm-debugging.md`): the read-backs by what
@@ -1129,7 +1158,21 @@ Read-backs for each frame the game shows, and what asks for them:
 | Zanzarah | 2.7 | `CLEAR` (1.4), a sampled target (0.5), the DirectDraw driver's own reads and writes (0.3), the screen (0.4) |
 | Oni | 1 | the OpenGL front end's `SwapBuffers`, which copies the back buffer to the screen on the processor |
 
-What they say to do next, in the order of what they cost:
+Step 4d did the first four of the list below, and `BLT` on the host.
+Read-backs for each frame the game shows after it, in a window that
+nothing reads the picture from:
+
+| Game | Read-backs a frame | What asks |
+|---|---|---|
+| Giants | 0 | |
+| Zanzarah | 0.4 | the DirectDraw driver's reads and writes of a surface the card drew into |
+| Oni | 1 | `SwapBuffers`, as before |
+
+Oni's `SwapBuffers` copies a 16-bit back buffer to a 32-bit desktop,
+and `BLT` converts no formats, so the copy stays on the processor
+(see "Frame rates against the target" for what is left).
+
+What the first runs said to do, in the order of what they cost:
 
 - **A target that is sampled.** The host reads the target back and
   decodes it again as a texture. A texture whose one level is a
@@ -1155,8 +1198,8 @@ the tracking and a host that draws in software, to test the protocol
 (4a); the OpenGL host with its targets, textures, generated shaders
 and the agreement tests, and `CLEAR` on the host (4b); the display's
 side, the configuration and the status (4c); the picture from the
-host's texture, `FILL` and `BLT` on the host, and the host options
-(4d).
+host's texture, and clears, copies and render to texture kept on the
+host (4d). The host options (a scale, multisampling) come after.
 
 ### Shader cache
 
@@ -1439,13 +1482,53 @@ rough figure.
 | Oni, training room, 640x480 (2026-11-11, with #944) | 15 | | 23 | 29 |
 | Giants, the same (2026-11-12, step 4c) | 15 | 25 | | |
 | Oni, the same (2026-11-12, step 4c) | 15 | 20 | | |
+| Giants, the same (2026-11-12, step 4d, 4c measured again beside it: 23) | | 28 | | |
+| Oni, the same (2026-11-12, step 4d, 4c beside it: 18) | | 19.5 | | |
 
-With OpenGL the emulator's thread is 86% busy in Giants and 82% in
-Oni, as it was in software: it still transforms and clips every
-vertex, hands the host a draw call for each of the game's (Oni's are
-a few triangles each, 1.65 million of them to the training room),
-and waits for the GPU at each read-back listed under "What the first
-games showed".
+With OpenGL at step 4c the emulator's thread is 86% busy in Giants
+and 82% in Oni, as it was in software: it still transforms and clips
+every vertex, hands the host a draw call for each of the game's
+(Oni's are a few triangles each, 1.65 million of them to the training
+room), and waits for the GPU at each read-back listed under "What the
+first games showed".
+
+Step 4d took Giants' five read-backs a frame away, which were 18% of
+the thread's busy time. Where the thread's busy time goes after it
+(`/api/profile`, zones in `docs/profiling.md`):
+
+| Zone | Giants | Oni |
+|---|---|---|
+| `cpu.jit`, the game's code | 33% | 29% |
+| `hle.win32`, the built-in Windows outside the zones below | 27% | 23% |
+| `toadforce`, the card: decoding, transform, lighting, clipping | 20% | 4% |
+| `toadforce.host`, the OpenGL renderer's calls | 10% | 3% |
+| `toadforce.readback` | 0% | 5% |
+| `hle.d3d.bind`, the card's state brought up to the device's | 1% | 16% |
+| `hle.d3d.draw` and `hle.opengl` | 1% | 8% |
+
+What is left for phase 6, largest first, with what each is worth:
+
+- **Oni: the Direct3D layer's work for each `glEnd`** (`hle.d3d.bind`,
+  `hle.d3d.draw`, `hle.opengl`: 24% of the busy time, for 97 draws a
+  frame of a few triangles each). The OpenGL front end sets its
+  whole state on its Direct3D device before every draw, and the HAL
+  compares all of it again. Draws with equal state gathered in the
+  front end into one draw would take most of it.
+- **Giants: transform and lighting on the processor** (`toadforce`,
+  20%). Moving the vertex work to the GPU, which the interface
+  between the card and the host was kept open for.
+- **`hle.win32` outside Direct3D** (23% to 27%): not looked into yet.
+  A profile by API call comes first.
+- **The host's own calls** (`toadforce.host`, 3% to 10%): state and
+  uniforms are set for every run, 290 a frame in Giants. Skipping
+  what didn't change is worth a part of the 10%.
+- **Oni's `SwapBuffers`** (5%): a back buffer in the desktop's format
+  when the desktop has 32 bits, as a real driver gives a windowed
+  context, with `BLT` to the window. It changes Oni's pictures, as
+  the target then isn't dithered.
+- **Zanzarah's driver reads** (0.4 read-backs a frame): which
+  DirectDraw calls ask, and whether a `BLT` with a colour key on
+  the host covers them.
 
 Giants stays under 30 on every card, the Voodoo3 drawn by the host's
 GPU included, with the emulated machine at full speed and the
