@@ -725,9 +725,7 @@ impl ToadForce {
                 let span = dst.span(&dst_rect);
                 let read = src.span(&src_rect);
                 // The host's, where it has either surface ahead.
-                let hosted = self
-                    .gpu
-                    .blt(&dst, &dst_rect, &src, &src_rect, key, memory);
+                let hosted = self.gpu.blt(&dst, &dst_rect, &src, &src_rect, key, memory);
                 if !hosted {
                     self.gpu.settle(memory, Some(read), gpu::Cause::Blit);
                     self.gpu.settle(memory, Some(span), gpu::Cause::Blit);

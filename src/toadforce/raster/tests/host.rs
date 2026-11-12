@@ -203,7 +203,7 @@ impl Host for TestHost {
         !(self.declines)(state)
     }
 
-    fn draw(&mut self, batch: &Batch, memory: &[u8], pages: &Pages) {
+    fn draw(&mut self, batch: &Batch, memory: &[u8], pages: &Pages) -> Vec<Surface> {
         self.log.borrow_mut().batches += 1;
         let surfaces: Vec<Surface> = std::iter::once(batch.target.colour)
             .chain(batch.target.depth_surface())
@@ -293,9 +293,10 @@ impl Host for TestHost {
             copy.pixels = pixels(&copy.surface, &scratch);
             copy.ahead = true;
         }
+        drawn
     }
 
-    fn clear(&mut self, clear: &gpu::Clear, memory: &[u8], pages: &Pages) -> bool {
+    fn clear(&mut self, clear: &gpu::Clear, memory: &[u8], pages: &Pages) -> Option<Surface> {
         let surface = clear.surface;
         // A copy that is what card memory holds, or newer, or a clear
         // of every bit of every pixel of the copy.
@@ -318,7 +319,7 @@ impl Host for TestHost {
         };
         let fresh = whole && clear.whole() && clear.rects.contains(&all);
         if !current && !fresh {
-            return false;
+            return None;
         }
         self.drop_copies(&[surface]);
         let at = self.copy(&surface, memory, pages, fresh);
@@ -338,7 +339,7 @@ impl Host for TestHost {
         .write(&mut copy.pixels);
         copy.ahead = true;
         self.log.borrow_mut().clears += 1;
-        true
+        Some(written)
     }
 
     fn fill(
@@ -1182,6 +1183,38 @@ fn a_copy_of_a_view_grows_with_its_pixels() {
     assert_eq!(log.borrow().read_backs, 3);
 }
 
+/// The small target draws into the host's copy of the whole depth
+/// buffer while card memory has all of it, the processor writes a
+/// part of the buffer the small target doesn't reach, and the screen's
+/// target draws over that part.
+fn depth_view_then_a_write(rig: &mut Rig) {
+    shared_depth(rig);
+    rig.card.settle(&mut rig.memory, None);
+    let big = target(rig);
+    let small = Target {
+        colour: small_surface(),
+        depth: big.depth,
+    };
+    assert_eq!(rig.run(|w| encode::render_target(w, Some(&small))), 0);
+    assert_eq!(rig.draw(4, &corner(0.0, 0.0, 20.0, 0.25, 0xFF00_FF00)), 0);
+    rig.card.settle(&mut rig.memory, None);
+    // The nearest depth in the bottom rows.
+    let rows = (DEPTH + (SIZE - 4) * SIZE * 2) as usize;
+    poke(rig, rows, &[0; (SIZE * 2 * 4) as usize]);
+    assert_eq!(rig.run(|w| encode::render_target(w, Some(&big))), 0);
+    let size = 2.0 * SIZE as f32;
+    assert_eq!(rig.draw(4, &corner(0.0, 0.0, size, 0.5, 0xFF00_00FF)), 0);
+}
+
+#[test]
+fn a_draw_into_a_view_leaves_the_whole_copy_to_be_read_back() {
+    // The host's copy is of the whole depth buffer, so the card reads
+    // all of it back: a copy left ahead after a read-back of the view
+    // would never take the processor's write.
+    let (rig, _) = same(takes_all, depth_view_then_a_write);
+    assert_eq!(rig.depth(0, SIZE - 1), 0);
+}
+
 /// Draw into a surface, sample it, draw into it again and sample it
 /// again, with the host's copy of it read back in between by a write
 /// of the processor elsewhere in it.
@@ -1237,14 +1270,49 @@ fn blits(rig: &mut Rig) {
     let error = rig.run(|w| {
         // Into the target, and from it into a surface in card memory.
         command::encode::fill(w, &colour, &rect(4, 30, 20, 10), 0x1234_5678);
-        command::encode::blt(w, &surface, &rect(0, 0, 32, 32), &colour, &rect(0, 0, 32, 32), None);
+        command::encode::blt(
+            w,
+            &surface,
+            &rect(0, 0, 32, 32),
+            &colour,
+            &rect(0, 0, 32, 32),
+            None,
+        );
         // Within the target, apart and over itself.
-        command::encode::blt(w, &colour, &rect(40, 40, 16, 16), &colour, &rect(0, 0, 16, 16), None);
-        command::encode::blt(w, &colour, &rect(4, 4, 16, 16), &colour, &rect(0, 0, 16, 16), None);
+        command::encode::blt(
+            w,
+            &colour,
+            &rect(40, 40, 16, 16),
+            &colour,
+            &rect(0, 0, 16, 16),
+            None,
+        );
+        command::encode::blt(
+            w,
+            &colour,
+            &rect(4, 4, 16, 16),
+            &colour,
+            &rect(0, 0, 16, 16),
+            None,
+        );
         // What the processor does: a key, and a stretch.
         let key = Some(0x20_2020);
-        command::encode::blt(w, &colour, &rect(0, 48, 8, 8), &colour, &rect(0, 0, 8, 8), key);
-        command::encode::blt(w, &colour, &rect(48, 0, 16, 16), &colour, &rect(0, 0, 8, 8), None);
+        command::encode::blt(
+            w,
+            &colour,
+            &rect(0, 48, 8, 8),
+            &colour,
+            &rect(0, 0, 8, 8),
+            key,
+        );
+        command::encode::blt(
+            w,
+            &colour,
+            &rect(48, 0, 16, 16),
+            &colour,
+            &rect(0, 0, 8, 8),
+            None,
+        );
     });
     assert_eq!(error, 0);
     // Draw into the surface copied to, and copy all of it back.
@@ -1252,7 +1320,10 @@ fn blits(rig: &mut Rig) {
     assert_eq!(rig.draw(4, &corner(0.0, 0.0, 20.0, 0.0, 0xFF00_FF00)), 0);
     assert_eq!(rig.run(|w| encode::render_target(w, Some(&screen))), 0);
     let all = rect(0, 0, SIZE, SIZE);
-    assert_eq!(rig.run(|w| command::encode::blt(w, &colour, &all, &surface, &all, None)), 0);
+    assert_eq!(
+        rig.run(|w| command::encode::blt(w, &colour, &all, &surface, &all, None)),
+        0
+    );
 }
 
 #[test]
