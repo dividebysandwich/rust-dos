@@ -308,6 +308,9 @@ pub(super) struct Bench {
     gl: Rc<glow::Context>,
     /// Keep 5-6-5 targets in 8 bits a channel.
     wide: std::cell::Cell<bool>,
+    /// Make hosts as on a GPU without anisotropic filtering, so the
+    /// shader samples an anisotropic texture (`shader::native`).
+    flat: std::cell::Cell<bool>,
 }
 
 /// A bench on a new context. The window that keeps the context stays
@@ -319,6 +322,7 @@ macro_rules! bench {
         let $bench = Bench {
             gl: Rc::new(context.gl),
             wide: std::cell::Cell::new(false),
+            flat: std::cell::Cell::new(false),
         };
     };
 }
@@ -328,6 +332,9 @@ impl Bench {
         let mut host = ToadForceGl::new(Rc::clone(&self.gl), Glsl::Gl150).unwrap();
         if self.wide.get() {
             host.keep_wide();
+        }
+        if self.flat.get() {
+            host.anisotropy = 0.0;
         }
         Box::new(host)
     }
@@ -928,6 +935,48 @@ fn the_shader_samples_as_the_card_does() {
             let declined = bench.compare(&name, Format::A8R8G8B8, None, CLOSE, scene);
             assert_eq!(declined, 0, "{name}");
         }
+    }
+    // A texture of 32 by 4 with all six levels, so the last four are a
+    // texel high and the last a texel wide too, wrapped going into the
+    // distance: each level's own size, and a level of 1 texel.
+    for mip in [1, 2] {
+        let name = format!("32 by 4 into the distance, mip {mip}");
+        let scene = |rig: &mut Rig| {
+            let mut images = Vec::new();
+            let mut at = TEXTURE;
+            for level in 0..6 {
+                let (w, h) = ((32u32 >> level).max(1), (4u32 >> level).max(1));
+                images.push((at, w * 4));
+                for y in 0..h {
+                    for x in 0..w {
+                        let texel = levels(level, 0, x, y);
+                        let to = (at + (y * w + x) * 4) as usize;
+                        rig.memory[to..to + 4].copy_from_slice(&texel.to_le_bytes());
+                    }
+                }
+                at += w * h * 4;
+            }
+            let t = Texture {
+                format: Format::A8R8G8B8,
+                width: 32,
+                height: 4,
+                levels: 6,
+                images,
+                ..Texture::default()
+            };
+            rig.texture(0, 1, &t);
+            filter(rig, 0, 2, 2, mip);
+            rig.clear(CLEAR_COLOUR, 0xFF10_1010, 1.0, 0, &[]);
+            let mut q = quad(2.0, 2.0, 60.0, WHITE, 6.0);
+            for v in &mut q {
+                if v.t[1] == 0.0 {
+                    v.rhw = 0.125;
+                }
+            }
+            rig.draw(&q);
+        };
+        let declined = bench.compare(&name, Format::A8R8G8B8, None, CLOSE, scene);
+        assert_eq!(declined, 0, "{name}");
     }
     // A filtered texture into a dithered 5-6-5 target, where a sample
     // one of 255 off is a step of the target at the pixels whose
@@ -1532,7 +1581,40 @@ fn anisotropy_and_a_linearly_filtered_bump_texture_agree() {
         };
         let declined = bench.compare(&name, Format::A8R8G8B8, None, bound, scene);
         assert_eq!(declined, 0, "{name}");
+        // A GPU without the filter: the shader takes the card's level
+        // by the smaller side, as on any other square going into the
+        // distance.
+        bench.flat.set(true);
+        let flat = format!("{name} without the host's filter");
+        let declined = bench.compare(&flat, Format::A8R8G8B8, None, CLOSE, scene);
+        assert_eq!(declined, 0, "{flat}");
+        bench.flat.set(false);
     }
+    // One texture on two stages, anisotropic on one: where the host
+    // has the filter, its own filter samples one stage and the shader
+    // reads the other, through one set of the host texture's
+    // parameters, so the draw is the software renderer's. Without the
+    // filter the shader reads both.
+    let twice = |rig: &mut Rig| {
+        let t = rig.texels(TEXTURE, Format::A8R8G8B8, 32, 6, false, ramp(32));
+        rig.texture(0, 1, &t);
+        rig.texture(1, 1, &t);
+        filter(rig, 0, 2, 3, 2);
+        filter(rig, 1, 2, 2, 2);
+        rig.stage(0, &[(TSS_MAXANISOTROPY, 8)]);
+        rig.stage(1, &[(TSS_COLOROP, OP_MODULATE), (TSS_COLORARG2, ARG_CURRENT)]);
+        rig.clear(CLEAR_COLOUR, 0xFF10_1010, 1.0, 0, &[]);
+        rig.draw(&quad(4.0, 4.0, 48.0, WHITE, 2.0));
+    };
+    let anisotropic = bench.host().anisotropy > 0.0;
+    let name = "one texture twice, anisotropic once";
+    let declined = bench.compare(name, Format::A8R8G8B8, None, CLOSE, twice);
+    assert_eq!(declined, anisotropic as u64, "{name}");
+    bench.flat.set(true);
+    let name = "one texture twice, without the host's filter";
+    let declined = bench.compare(name, Format::A8R8G8B8, None, CLOSE, twice);
+    assert_eq!(declined, 0, "{name}");
+    bench.flat.set(false);
     // Offsets from a bump texture filtered between texels, all of one
     // sign, so the blend of the signed bytes as unsigned ones is the
     // blend of the offsets.

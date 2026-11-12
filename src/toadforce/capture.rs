@@ -11,19 +11,23 @@
 //! `gl::tests::replay_a_capture` plays one through the software
 //! renderer and the OpenGL host draw by draw.
 //!
-//! The file: `TFCAP1\0\0`, the size of card memory, the size of the
-//! card's saved state, the state, the memory, and then records until
-//! the file's end. A record is a word that says what it is and one that
+//! The file: `TFCAP2\0\0`, the version of the card's saved state
+//! (`STATE_VERSION`), the size of card memory, the size of the card's
+//! saved state, the state, the memory, and then records until the
+//! file's end. A record is a word that says what it is and one that
 //! says how much: 1 and a count of words, a run's commands; 2 and a
 //! count of bytes after the word of their offset, a write to card
 //! memory. The file is whole after each run, so a recording that
-//! wasn't ended is one up to its last run.
+//! wasn't ended is one up to its last run. A build whose card saves
+//! its state another way doesn't read the recording, as it doesn't
+//! read a saved state of it.
 
+use super::STATE_VERSION;
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Write};
 use std::path::Path;
 
-const MAGIC: &[u8; 8] = b"TFCAP1\0\0";
+const MAGIC: &[u8; 8] = b"TFCAP2\0\0";
 const RUN: u32 = 1;
 const PATCH: u32 = 2;
 
@@ -83,6 +87,7 @@ impl Recorder {
         let f = &mut self.file;
         if self.after.is_empty() {
             f.write_all(MAGIC)?;
+            f.write_all(&(STATE_VERSION as u32).to_le_bytes())?;
             f.write_all(&(memory.len() as u32).to_le_bytes())?;
             f.write_all(&(state.len() as u32).to_le_bytes())?;
             f.write_all(state)?;
@@ -170,6 +175,13 @@ impl Recording {
         if take(8) != Some(&MAGIC[..]) {
             return Err(bad());
         }
+        let version = word(take(4)).ok_or_else(bad)?;
+        if version != STATE_VERSION as u32 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("a recording of the card's state version {version}, not {STATE_VERSION}"),
+            ));
+        }
         let memory = word(take(4)).ok_or_else(bad)? as usize;
         let state = word(take(4)).ok_or_else(bad)? as usize;
         let state = take(state).ok_or_else(bad)?.to_vec();
@@ -227,6 +239,11 @@ mod tests {
         drop(r);
 
         let back = Recording::read(&path).unwrap();
+        // A recording of a card that saved its state another way.
+        let mut other = std::fs::read(&path).unwrap();
+        other[8..12].copy_from_slice(&(STATE_VERSION as u32 + 1).to_le_bytes());
+        std::fs::write(&path, &other).unwrap();
+        assert!(Recording::read(&path).is_err());
         std::fs::remove_file(&path).unwrap();
         assert_eq!(back.state, b"state");
         assert_eq!(back.memory, vec![0u8; 4096]);
