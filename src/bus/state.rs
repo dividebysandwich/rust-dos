@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 53;
+const WIN32_VERSION: u16 = 54;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -869,6 +869,7 @@ mod tests {
         (51, 0x85E6_4D93_8609_5176), // the ToadForce HAL's copies of textures
         (52, 0xB8ED_A219_CC6C_C4BC), // a device made as the T&L HAL device
         (53, 0x59CC_53A1_8176_269C), // a filter graph's full-screen mode
+        (54, 0xE2EC_3CE3_7008_C735), // a video device's full-screen play
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
