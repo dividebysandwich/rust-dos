@@ -203,8 +203,10 @@ pub trait Host {
     /// the host's copy of either is ahead. The surface of the host's
     /// copy of `dst`, which is ahead after it. None when the host
     /// leaves the copy to the processor, with nothing changed: for a
-    /// stretch, a colour key, a format the host draws into no target
-    /// of, pixels of two sizes, and a source the host has ahead that
+    /// stretch, a format the host draws into no target of, pixels of
+    /// two sizes, a colour key with a source the host has ahead or
+    /// with more runs of pixels to copy than it writes one by one
+    /// (`KEYED_RUNS`), and a source the host has ahead that
     /// shares a byte with `dst` without being a view of it or it of
     /// the source (`related`), or that is such a view, with the two
     /// rectangles sharing a pixel.

@@ -1572,6 +1572,26 @@ fn on_the_host(rig: &mut Rig) {
             None,
         );
     });
+    // From card memory through a colour key, which is one of the
+    // source's pixels: the screen keeps its own there. The source is
+    // the level of the mipped texture that nothing drew into.
+    let face = image(&mipped, 0, 0);
+    let bytes = face.format.bytes() as usize;
+    let mut key = [0u8; 4];
+    let at = face.at(3, 5);
+    key[..bytes].copy_from_slice(&rig.memory[at..at + bytes]);
+    let key = u32::from_le_bytes(key);
+    rig.run(|w| {
+        use crate::toadforce::command::encode::blt;
+        blt(
+            w,
+            &colour,
+            &rect(2, 40, 12, 12),
+            &face,
+            &rect(0, 0, 12, 12),
+            Some(key),
+        );
+    });
     // A draw into the surface copied to, and a part of it copied back.
     let other = rig.target(SECOND);
     rig.run(|w| encode::render_target(w, Some(&other)));

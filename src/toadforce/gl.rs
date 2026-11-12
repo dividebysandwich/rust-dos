@@ -255,6 +255,48 @@ fn rect_rows(s: &Surface, rect: &Rect, memory: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The most runs of pixels a `BLT` through a colour key writes into
+/// the host's copy of its destination, each with a call of its own. A
+/// cursor or a line of text has a few hundred. A picture with more is
+/// the processor's, which reads the destination back once.
+const KEYED_RUNS: usize = 4096;
+
+/// The pixels of `rect` of `s` that a copy through `key` writes, as
+/// runs along a row: where each begins in the rectangle, and its
+/// pixels. A pixel that equals the key in the bits its format defines
+/// is in none (`blit::blt`). None for more than `KEYED_RUNS` of them.
+fn keyed_runs(s: &Surface, rect: &Rect, key: u32, memory: &[u8]) -> Option<Vec<(u32, u32, u32)>> {
+    let bytes = s.format.bytes() as usize;
+    let bits = s.format.defined_bits();
+    let key = key & bits;
+    let mut runs = Vec::new();
+    for y in 0..rect.height {
+        let at = s.at(rect.left, rect.top + y);
+        let row = &memory[at..at + rect.width as usize * bytes];
+        let mut start = None;
+        for (x, pixel) in row.chunks_exact(bytes).enumerate() {
+            let mut value = [0u8; 4];
+            value[..bytes].copy_from_slice(pixel);
+            let kept = u32::from_le_bytes(value) & bits != key;
+            match (kept, start) {
+                (true, None) => start = Some(x as u32),
+                (false, Some(from)) => {
+                    runs.push((from, y, x as u32 - from));
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(from) = start {
+            runs.push((from, y, rect.width - from));
+        }
+        if runs.len() > KEYED_RUNS {
+            return None;
+        }
+    }
+    Some(runs)
+}
+
 /// The whole of `s`.
 fn all_of(s: &Surface) -> Rect {
     Rect {
@@ -2112,7 +2154,6 @@ impl Host for ToadForceGl {
             |format: Format| matches!(format, Format::R5G6B5 | Format::X8R8G8B8 | Format::A8R8G8B8);
         let size = (src_rect.width, src_rect.height);
         if self.broken
-            || key.is_some()
             || size != (dst_rect.width, dst_rect.height)
             || !colour(dst.format)
             || !colour(src.format)
@@ -2128,6 +2169,14 @@ impl Host for ToadForceGl {
         if from.is_none() && !to.is_some_and(|c| c.ahead) {
             return None;
         }
+        // Through a colour key the host writes the runs of pixels the
+        // key lets through, from card memory, which has to hold the
+        // source: the key's test is of card memory's bits.
+        let runs = match key {
+            Some(_) if from.is_some() => return None,
+            Some(key) => Some(keyed_runs(src, src_rect, key, memory)?),
+            None => None,
+        };
         // A source over other bytes of the destination's, which the
         // host drops below as it writes the destination.
         let shared = !gpu::related(src, dst) && overlap(gpu::range(src), gpu::range(dst));
@@ -2146,7 +2195,7 @@ impl Host for ToadForceGl {
         if from.is_some() && one && !apart {
             return None;
         }
-        let fresh = *dst_rect == all_of(dst);
+        let fresh = runs.is_none() && *dst_rect == all_of(dst);
         self.blits += 1;
         // SAFETY: the context is current (see the module comment), and
         // every object used is this host's.
@@ -2180,10 +2229,36 @@ impl Host for ToadForceGl {
                     let (_, format, kind) = self.formats(surface.format);
                     let gl = &*self.gl;
                     gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                    let data = glow::PixelUnpackData::Slice(Some(&pixels));
                     let (x, y) = (place.0 as i32, place.1 as i32);
                     let (w, h) = (size.0 as i32, size.1 as i32);
-                    gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, x, y, w, h, format, kind, data);
+                    match &runs {
+                        None => {
+                            let data = glow::PixelUnpackData::Slice(Some(&pixels));
+                            gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, x, y, w, h, format, kind, data);
+                        }
+                        Some(runs) => {
+                            // The bytes of a pixel as the texture takes it.
+                            let bytes = pixels.len() / (size.0 * size.1).max(1) as usize;
+                            for &(left, top, len) in runs {
+                                let at = (top * size.0 + left) as usize * bytes;
+                                let run = &pixels[at..at + len as usize * bytes];
+                                let data = glow::PixelUnpackData::Slice(Some(run));
+                                let (x, y) = (x + left as i32, y + top as i32);
+                                let len = len as i32;
+                                gl.tex_sub_image_2d(
+                                    glow::TEXTURE_2D,
+                                    0,
+                                    x,
+                                    y,
+                                    len,
+                                    1,
+                                    format,
+                                    kind,
+                                    data,
+                                );
+                            }
+                        }
+                    }
                 }
             }
             self.leave();
