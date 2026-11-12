@@ -241,11 +241,10 @@ fn overlap(a: (u32, u32), b: (u32, u32)) -> bool {
 /// What a surface was read back for, for the status: each read-back
 /// stalls the host's GPU, and which kind a game has many of says what
 /// to move to the host next.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cause {
-    /// The program's own write to the frame buffer, and whatever
-    /// names nothing else.
-    #[default]
+    /// The program's own read or write of the frame buffer, and
+    /// whatever names nothing else.
     Program,
     /// A driver gave the program the surface's address (`Lock`,
     /// `GetDC`).
@@ -257,7 +256,8 @@ pub enum Cause {
     Show,
     /// `FILL` or `BLT` on the processor reads or writes it.
     Blit,
-    /// `CLEAR` on the processor, which the host declined.
+    /// `CLEAR` writes bytes it shares: on the processor, which the
+    /// host declined, or on the host into another surface.
     Clear,
     /// A draw of the host's samples it, or draws into bytes it shares.
     Sampled,
@@ -268,7 +268,8 @@ pub enum Cause {
     /// A guest driver's write of `RING_PUT`, after which card memory
     /// holds everything.
     Ring,
-    /// The renderer changed, or a state was saved.
+    /// The renderer changed, or a recording (`capture`) takes card
+    /// memory before and after a run.
     Other,
 }
 
@@ -293,9 +294,7 @@ pub struct Gpu {
     /// the software renderer with a host attached.
     pub read_backs: u64,
     pub declined: u64,
-    /// What the next `settle` reads back for, which a caller sets just
-    /// before it, and the read-backs by cause.
-    pub why: Cause,
+    /// The read-backs by what asked for them (`Cause`).
     by_cause: [u64; Cause::NAMES.len()],
     /// The program's reads of bytes that were ahead on the host, which
     /// got what card memory had (`Gpu::stale_read`).
@@ -318,9 +317,14 @@ impl std::fmt::Debug for Gpu {
 
 impl Gpu {
     /// Attach `host`, or with None go back to the software renderer.
-    /// The caller has settled everything first.
-    pub fn set_host(&mut self, host: Option<Box<dyn Host>>, memory: u32) {
+    /// The caller has settled everything first. The host drops the
+    /// copies it has: they were stamped by other pages, maybe another
+    /// card's, and card memory now has every pixel.
+    pub fn set_host(&mut self, mut host: Option<Box<dyn Host>>, memory: u32) {
         debug_assert!(self.ahead.is_empty());
+        if let Some(host) = &mut host {
+            host.forget();
+        }
         self.pages = match host {
             Some(_) => Pages::new(memory),
             None => Pages::default(),
@@ -366,13 +370,12 @@ impl Gpu {
     }
 
     /// Read back the surfaces that are ahead on the host and share a
-    /// byte with `range` (all of them for None).
+    /// byte with `range` (all of them for None), counted for `why`.
     #[inline]
-    pub fn settle(&mut self, memory: &mut [u8], range: Option<(u32, u32)>) {
+    pub fn settle(&mut self, memory: &mut [u8], range: Option<(u32, u32)>, why: Cause) {
         if !self.ahead.is_empty() {
-            self.read_back(memory, range);
+            self.read_back(memory, range, why);
         }
-        self.why = Cause::Program;
     }
 
     /// The read-backs by cause, for the status.
@@ -385,12 +388,11 @@ impl Gpu {
     }
 
     #[cold]
-    fn read_back(&mut self, memory: &mut [u8], range: Option<(u32, u32)>) {
+    fn read_back(&mut self, memory: &mut [u8], range: Option<(u32, u32)>, why: Cause) {
         let Gpu {
             host,
             ahead,
             read_backs,
-            why,
             by_cause,
             ..
         } = self;
@@ -404,7 +406,7 @@ impl Gpu {
             }
             host.read_back(surface, memory);
             *read_backs += 1;
-            by_cause[*why as usize] += 1;
+            by_cause[why as usize] += 1;
             false
         });
     }
@@ -445,8 +447,7 @@ impl Gpu {
             })
             .collect();
         for r in other {
-            self.why = Cause::Sampled;
-            self.settle(memory, Some(r));
+            self.settle(memory, Some(r), Cause::Sampled);
         }
         let Some(host) = self.host.get_mut() else {
             return;
@@ -476,8 +477,7 @@ impl Gpu {
             .filter(|&r| overlap(r, bytes))
             .collect();
         for r in other {
-            self.why = Cause::Clear;
-            self.settle(memory, Some(r));
+            self.settle(memory, Some(r), Cause::Clear);
         }
         let Some(host) = self.host.get_mut() else {
             return false;

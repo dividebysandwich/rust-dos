@@ -1178,7 +1178,9 @@ flips (an OpenGL game, whose front end copies its frames). Send it
 while paused at the frame's emulated time. The file has the card's
 state, card memory, each run's commands and the bytes the program
 wrote between them (`src/toadforce/capture.rs`). The reply is 404
-without a ToadForce and 400 when the file can't be made.
+without a ToadForce and 400 when the file can't be made. `recording`
+in the card's status is true until the recording is complete. A
+loaded state, or a write to the file that fails, ends it early.
 
 The ignored test `replay_a_capture` draws a recording, on a machine
 with a desktop OpenGL context:

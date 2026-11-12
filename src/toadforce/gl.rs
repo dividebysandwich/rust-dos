@@ -920,13 +920,20 @@ impl ToadForceGl {
         };
         if !native {
             // Every level as it is: the shader names the level and the
-            // texel of each read.
+            // texel of each read. A mipmapped filter, though `texelFetch`
+            // filters nothing, so that no driver takes the texture for
+            // its base level alone, where a fetch of another level is
+            // undefined.
+            let min = match tex.texture.levels {
+                1 => glow::NEAREST,
+                _ => glow::NEAREST_MIPMAP_NEAREST,
+            };
             let fetched = |texture: glow::Texture, set: &mut Option<Set>| {
                 // SAFETY: the caller's.
                 unsafe {
                     gl.bind_texture(kind, Some(texture));
                     if *set != Some(Set::Fetched) {
-                        gl.tex_parameter_i32(kind, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+                        gl.tex_parameter_i32(kind, glow::TEXTURE_MIN_FILTER, min as i32);
                         gl.tex_parameter_i32(kind, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
                         gl.tex_parameter_i32(kind, glow::TEXTURE_BASE_LEVEL, 0);
                         gl.tex_parameter_f32(kind, glow::TEXTURE_MIN_LOD, -1000.0);
@@ -1271,8 +1278,7 @@ impl Host for ToadForceGl {
                     // stage and the host's filter samples on another
                     // has one set of the host's parameters for both.
                     let mixed = state.tex.iter().flatten().any(|other| {
-                        other.texture == tex.texture
-                            && shader::native(other, anisotropic) != native
+                        other.texture == tex.texture && shader::native(other, anisotropic) != native
                     });
                     if mixed {
                         return false;

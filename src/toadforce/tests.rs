@@ -274,6 +274,24 @@ fn a_rejected_command_is_skipped_and_the_first_error_stays() {
     assert_eq!(pixel(&rig.memory, &s, 0, 0), 0);
 }
 
+/// A recording goes on over runs that don't flip, shows in the status
+/// while it is made, and ends at a loaded state, whose card and memory
+/// it has no record of.
+#[test]
+fn a_recording_ends_when_a_state_is_loaded() {
+    let path = std::env::temp_dir().join(format!("tfcap-load-{}.bin", std::process::id()));
+    let mut rig = Rig::new();
+    rig.card.record(&path, 1).unwrap();
+    let mut words = Vec::new();
+    encode::fill(&mut words, &surface(0x4000), &WHOLE, 0x55);
+    let live = rig.live();
+    rig.card.submit(&words, &mut rig.memory, live);
+    assert_eq!(rig.card.describe(live)["recording"], true);
+    rig.card.forget();
+    assert!(!rig.card.recording());
+    std::fs::remove_file(&path).unwrap();
+}
+
 #[test]
 fn submitted_words_run_as_the_rings_do() {
     let s = surface(0x4000);

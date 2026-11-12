@@ -672,25 +672,20 @@ impl GlScreen {
     }
 
     /// A link to this window's host renderer for a ToadForce
-    /// (`Bus::toadforce_set_host`), which starts without copies of
-    /// anything: the card that gets it has every pixel in its memory.
-    /// The error says why OpenGL can't draw the card here.
-    pub fn toadforce_link(&mut self) -> Result<Box<dyn Host>, String> {
-        if let Some(problem) = &self.toadforce_failed {
-            return Err(problem.clone());
+    /// (`Bus::toadforce_set_host`, which has the renderer drop the
+    /// copies it has once the card's pixels are in card memory). The
+    /// error says why OpenGL can't draw the card here.
+    pub fn toadforce_link(&mut self) -> Result<Box<dyn Host>, &str> {
+        if self.toadforce_failed.is_none() && self.toadforce.0.borrow().is_none() {
+            match ToadForceGl::new(self.gl.clone(), self.glsl) {
+                Ok(made) => *self.toadforce.0.borrow_mut() = Some(made),
+                Err(e) => self.toadforce_failed = Some(e),
+            }
         }
-        let mut host = self.toadforce.0.borrow_mut();
-        match &mut *host {
-            Some(host) => host.forget(),
-            None => match ToadForceGl::new(self.gl.clone(), self.glsl) {
-                Ok(made) => *host = Some(made),
-                Err(e) => {
-                    self.toadforce_failed = Some(e.clone());
-                    return Err(e);
-                }
-            },
+        match &self.toadforce_failed {
+            Some(problem) => Err(problem),
+            None => Ok(Box::new(HostLink(self.toadforce.0.clone()))),
         }
-        Ok(Box::new(HostLink(self.toadforce.0.clone())))
     }
 
     /// Whether the 3dfx card can be drawn with OpenGL here, or why not.

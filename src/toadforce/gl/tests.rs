@@ -899,9 +899,8 @@ fn the_shader_samples_as_the_card_does() {
     // changes from pixel to pixel, with each way of taking the levels
     // and a bias. The texture is smooth in a level and another colour
     // in the next, so a level off shows and a weight off doesn't.
-    let levels = |level: u32, _: u32, x: u32, y: u32| {
-        ramp(32)(level, 0, x, y) ^ 0x40 << (8 * (level % 3))
-    };
+    let levels =
+        |level: u32, _: u32, x: u32, y: u32| ramp(32)(level, 0, x, y) ^ 0x40 << (8 * (level % 3));
     for (mag, min, mip) in [(2, 2, 2), (2, 2, 1), (1, 1, 1), (2, 1, 2), (1, 2, 1)] {
         for bias in [0.0f32, 0.4] {
             let name = format!("into the distance, filter {mag} {min} {mip} bias {bias}");

@@ -266,8 +266,7 @@ impl ToadForce {
     /// None the software renderer all of them again. What the host
     /// before it drew is read back into `memory`, card memory, first.
     pub fn set_host(&mut self, host: Option<Box<dyn gpu::Host>>, memory: &mut [u8]) {
-        self.gpu.why = gpu::Cause::Other;
-        self.gpu.settle(memory, None);
+        self.gpu.settle(memory, None, gpu::Cause::Other);
         self.gpu.set_host(host, self.memory);
     }
 
@@ -290,8 +289,7 @@ impl ToadForce {
     /// `settle`, with what the bytes are wanted for, for the status's
     /// counts.
     pub fn settle_for(&mut self, memory: &mut [u8], range: Option<(u32, u32)>, why: gpu::Cause) {
-        self.gpu.why = why;
-        self.gpu.settle(memory, range);
+        self.gpu.settle(memory, range, why);
     }
 
     /// The processor wrote `len` bytes of card memory at `offset`: the
@@ -309,9 +307,11 @@ impl ToadForce {
     }
 
     /// Card memory was replaced, by a loaded state: the host renderer
-    /// drops what it has.
+    /// drops what it has. A recording ends, as the state the card
+    /// jumped to isn't in it and a replay would go on from the old one.
     pub fn forget(&mut self) {
         self.gpu.forget();
+        self.record_end();
     }
 
     /// The program read `len` bytes of card memory at `offset` by
@@ -321,13 +321,13 @@ impl ToadForce {
         self.gpu.stale_read(offset, len);
     }
 
-    /// For the debugger's status: what the card shows and what was asked
-    /// of it, at `live`. Reads change nothing.
     /// Whether a host renderer is attached (`set_host`).
     pub fn hosted(&self) -> bool {
         self.gpu.attached()
     }
 
+    /// For the debugger's status: what the card shows and what was asked
+    /// of it, at `live`. Reads change nothing.
     pub fn describe(&self, live: Live) -> serde_json::Value {
         let read = |offset| self.read(offset, live);
         let counts = self.counts;
@@ -367,6 +367,7 @@ impl ToadForce {
                 "rejected": counts.rejected,
             },
             "renderer": self.gpu.name(),
+            "recording": self.recording(),
             "host": {
                 "read_backs": self.gpu.read_backs,
                 "read_backs_for": self.gpu.causes(),
@@ -523,8 +524,7 @@ impl ToadForce {
                 // a read there can't read back (`Bus::read_8`). What
                 // its commands drew is in card memory when the write
                 // returns, as the specification has it.
-                self.gpu.why = gpu::Cause::Ring;
-                self.gpu.settle(memory, None);
+                self.gpu.settle(memory, None, gpu::Cause::Ring);
             }
             regs::ERROR => {
                 self.error = 0;
@@ -608,20 +608,27 @@ impl ToadForce {
         let flips = self.counts.flip;
         let recorder = recorder.and_then(|mut recorder| {
             // The recording has card memory with everything drawn.
-            self.gpu.settle(memory, None);
+            self.gpu.settle(memory, None, gpu::Cause::Other);
             let mut state = crate::savestate::Writer::new();
             crate::savestate::State::save(self, &mut state);
-            let done = recorder.before(&state.buf, memory, words);
-            done.is_ok().then_some(recorder)
+            match recorder.before(&state.buf, memory, words) {
+                Ok(()) => Some(recorder),
+                Err(e) => {
+                    eprintln!("[TOADFORCE] the recording ends: {e}");
+                    None
+                }
+            }
         });
         let whole = self.run_each(words, origin, memory, fx);
         // The draws of a run are drawn by its end.
         self.raster.flush(memory, &mut self.gpu);
         if let Some(mut recorder) = recorder {
-            self.gpu.settle(memory, None);
+            self.gpu.settle(memory, None, gpu::Cause::Other);
             let flips = (self.counts.flip - flips) as u32;
-            if let Ok(false) = recorder.after(memory, flips) {
-                self.capture.0 = Some(recorder);
+            match recorder.after(memory, flips) {
+                Ok(false) => self.capture.0 = Some(recorder),
+                Ok(true) => {}
+                Err(e) => eprintln!("[TOADFORCE] the recording ends: {e}"),
             }
         }
         whole
@@ -682,8 +689,7 @@ impl ToadForce {
             Command::Nop => self.counts.nop += 1,
             Command::Fill { dst, rect, value } => {
                 let span = dst.span(&rect);
-                self.gpu.why = gpu::Cause::Blit;
-                self.gpu.settle(memory, Some(span));
+                self.gpu.settle(memory, Some(span), gpu::Cause::Blit);
                 blit::fill(memory, &dst, &rect, value);
                 self.gpu.pages.wrote(span.0, span.1 - span.0);
                 self.counts.fill += 1;
@@ -697,10 +703,9 @@ impl ToadForce {
                 key,
             } => {
                 let span = dst.span(&dst_rect);
-                self.gpu.why = gpu::Cause::Blit;
-                self.gpu.settle(memory, Some(src.span(&src_rect)));
-                self.gpu.why = gpu::Cause::Blit;
-                self.gpu.settle(memory, Some(span));
+                let read = src.span(&src_rect);
+                self.gpu.settle(memory, Some(read), gpu::Cause::Blit);
+                self.gpu.settle(memory, Some(span), gpu::Cause::Blit);
                 blit::blt(memory, &dst, &dst_rect, &src, &src_rect, key);
                 self.gpu.pages.wrote(span.0, span.1 - span.0);
                 self.counts.blt += 1;
@@ -747,8 +752,8 @@ impl ToadForce {
                     };
                     let spans = rects.iter().map(|rect| surface.span(rect));
                     if !self.gpu.clear(&clear, memory) {
-                        self.gpu.why = gpu::Cause::Clear;
-                        self.gpu.settle(memory, Some(gpu::range(&surface)));
+                        let bytes = gpu::range(&surface);
+                        self.gpu.settle(memory, Some(bytes), gpu::Cause::Clear);
                         clear.write(memory);
                         for (first, end) in spans.clone() {
                             self.gpu.pages.wrote(first, end - first);

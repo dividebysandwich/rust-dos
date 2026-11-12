@@ -563,6 +563,11 @@ fn main() -> Result<ExitCode, String> {
     let mut seen_power = (cpu.bus.power_ons, cpu.bus.vga.resyncs);
     cpu.bus.monitor_noise.enabled = settings.monitor_effects.sound();
     power_on(&mut power, &mut cpu.bus, settings.monitor_effects);
+    // Whether OpenGL draws a ToadForce in a deterministic run too, for
+    // comparing the two renderers' frames at equal emulated times ("The
+    // ToadForce card" in `docs/llm-debugging.md`).
+    let toadforce_gl_deterministic =
+        std::env::var_os("RUST_DOS_TOADFORCE_GL_DETERMINISTIC").is_some();
 
     // Main Loop
     'running: loop {
@@ -1992,12 +1997,8 @@ fn main() -> Result<ExitCode, String> {
             Zone::FrameCompose
         });
         // A deterministic run draws a ToadForce in software, so that its
-        // pictures don't depend on the host's GPU. The variable keeps
-        // OpenGL drawing in one, for comparing the two renderers' frames
-        // at equal emulated times ("The ToadForce card" in
-        // `docs/llm-debugging.md`).
-        let toadforce_software =
-            det.is_some() && std::env::var_os("RUST_DOS_TOADFORCE_GL_DETERMINISTIC").is_none();
+        // pictures don't depend on the host's GPU.
+        let toadforce_software = det.is_some() && !toadforce_gl_deterministic;
         display.run_toadforce(&mut cpu.bus, settings.toadforce_renderer, toadforce_software);
         cpu.bus.sync_display();
         let voodoo_gl = display.run_voodoo(&mut cpu.bus, &settings.voodoo, det.is_none());

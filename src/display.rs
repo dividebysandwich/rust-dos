@@ -470,7 +470,7 @@ impl<'a> Display<'a> {
                     Err(e) => Some(e),
                 }
             }
-            Output::Sdl { .. } if want => Some("there is no OpenGL 3 here".to_string()),
+            Output::Sdl { .. } if want => Some("there is no OpenGL 3 here"),
             _ => None,
         };
         if bus.toadforce_hosted() {
