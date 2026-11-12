@@ -198,7 +198,9 @@ fn choose(cpu: &mut Cpu, at: u32) -> u32 {
     }
     let flags = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
     let (kind, color, alpha) = (b[8], b[9], b[16]);
-    // 24 and 32 bits are taken as the 16 the card has.
+    // 24 and 32 bits are taken as 16: whichever of the three is asked
+    // for, the formats have the window's colour bits, 16 or on a
+    // ToadForce the desktop's 24 (`color_bits`).
     let color = if color == 24 || color == 32 {
         16
     } else {

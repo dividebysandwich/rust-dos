@@ -239,7 +239,14 @@ pub fn present(cpu: &mut Cpu, back: &Surface, from: &Rect, to: &Rect, rects: &[R
         if s.left < 0 || s.top < 0 || !source.holds(&card_rect(&s)) || !shown.holds(&card_rect(r)) {
             return false;
         }
-        encode::blt(&mut commands, &shown, &card_rect(r), &source, &card_rect(&s), None);
+        encode::blt(
+            &mut commands,
+            &shown,
+            &card_rect(r),
+            &source,
+            &card_rect(&s),
+            None,
+        );
     }
     cpu.bus.toadforce_submit(&commands);
     true

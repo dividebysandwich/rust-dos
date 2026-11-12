@@ -233,6 +233,15 @@ fn overlap(a: (u32, u32), b: (u32, u32)) -> bool {
     a.0 < b.1 && b.0 < a.1
 }
 
+/// The copy of the bytes `s` names, whatever format either names them
+/// with (`gpu::alias`). Memory a program gave back and took again for
+/// another kind of surface can have two, one colour and one depth: the
+/// one that is ahead then, as it has the newer pixels, else the first.
+fn alias_of<'a>(copies: &'a [Copy], s: &Surface) -> Option<&'a Copy> {
+    let mut of = copies.iter().filter(|c| gpu::alias(s, &c.surface));
+    of.clone().find(|c| c.ahead).or_else(|| of.next())
+}
+
 /// `pixels`, the rows of `s` with nothing between them, put where `s`
 /// is in `memory`.
 fn put_rows(s: &Surface, pixels: &[u8], memory: &mut [u8]) {
@@ -2164,7 +2173,7 @@ impl Host for ToadForceGl {
         // The copies of the bytes the two name, whatever format the
         // command names them with: a `BLT` copies bits, and a copy's
         // format says what the bits are.
-        let alias = |s: &Surface| self.copies.iter().find(|c| gpu::alias(s, &c.surface));
+        let alias = |s: &Surface| alias_of(&self.copies, s);
         // The source on the host, when it is newer there than in card
         // memory. One that isn't is copied from card memory.
         let ahead = alias(src).filter(|c| c.ahead);
@@ -2178,10 +2187,7 @@ impl Host for ToadForceGl {
         let kept = |c: &Copy| c.surface.format;
         let format = to.map(kept).or(ahead.map(kept)).unwrap_or(dst.format);
         let depth = format.in_mask(super::caps::DEPTH_FORMATS);
-        let colour = matches!(
-            format,
-            Format::R5G6B5 | Format::X8R8G8B8 | Format::A8R8G8B8
-        );
+        let colour = matches!(format, Format::R5G6B5 | Format::X8R8G8B8 | Format::A8R8G8B8);
         let kind = |f: Format| self.formats(f).0;
         if !(colour || depth) || ahead.is_some_and(|c| kind(kept(c)) != kind(format)) {
             return None;
@@ -2233,19 +2239,19 @@ impl Host for ToadForceGl {
             // A depth buffer in card memory gets a copy of its own,
             // filled now if card memory changed since the last: a game
             // that keeps a scene's depth to put back every frame has
-            // it copied on the GPU from then on.
-            if depth && from.is_none() && !one {
-                self.copy(src, memory, pages, false);
-            }
-            // The source's copy now: a copy of a view of the destination
-            // gave way to the destination's, with its pixels.
-            let from = (from.is_some() || depth)
-                .then(|| self.copies.iter().find(|c| gpu::alias(src, &c.surface)))
-                .flatten()
-                .map(|c| c.texture);
-            let (surface, texture) = match self.copies.iter().find(|c| c.texture == texture) {
-                Some(c) => (c.surface, c.texture),
-                None => (surface, texture),
+            // it copied on the GPU from then on. That copy is the
+            // source, whatever other copy the bytes have. Otherwise the
+            // source's copy is looked up now: a copy of a view of the
+            // destination gave way to the destination's, with its
+            // pixels. The destination's copy stays as it was: the
+            // source's isn't a view of it.
+            let from = if depth && from.is_none() && !one {
+                let at = self.copy(src, memory, pages, false);
+                Some(self.copies[at].texture)
+            } else if from.is_some() || depth {
+                alias_of(&self.copies, src).map(|c| c.texture)
+            } else {
+                None
             };
             let place = (dst_rect.left, dst_rect.top);
             match from {

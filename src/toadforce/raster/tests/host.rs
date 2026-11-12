@@ -803,6 +803,33 @@ fn the_program_reads_a_surface_that_is_ahead_from_the_hosts_pixels() {
 }
 
 #[test]
+fn the_bytes_between_the_rows_of_a_surface_ahead_are_read_from_card_memory() {
+    let (mut rig, log) = hosted(takes_all);
+    // A surface half as wide as its pitch: the right half of each row
+    // but the last is no pixel of it, and holds what card memory has.
+    let whole = texture_surface();
+    let half = Surface {
+        width: SIZE / 2,
+        ..whole
+    };
+    let between = whole.at(SIZE / 2 + 3, 5);
+    poke(&mut rig, between, &[9, 8, 7, 6]);
+    draw_into(&mut rig, half, 0xFF20_4060);
+    assert!(rig.card.ahead());
+    assert_eq!(peek(&rig, between), 0x0607_0809);
+    // A pixel of it is the host's, fetched once, as a read-back brings
+    // it, which leaves the bytes between the rows as they were.
+    let at = half.at(3, 5);
+    let pixel = peek(&rig, at);
+    assert_ne!(pixel, 0);
+    assert_eq!(peek(&rig, between), 0x0607_0809);
+    assert_eq!(log.borrow().read_backs, 1);
+    rig.card.settle(&mut rig.memory, None);
+    assert_eq!(rig.memory[at..at + 4], pixel.to_le_bytes());
+    assert_eq!(rig.memory[between..between + 4], [9, 8, 7, 6]);
+}
+
+#[test]
 fn a_surface_written_in_parts_of_pixels_is_read_back_around_them() {
     let (mut rig, log) = hosted(takes_all);
     triangles(&mut rig);
@@ -849,7 +876,8 @@ fn depth_put_back(rig: &mut Rig) {
     rig.states(&[(RS_ZENABLE, 1)]);
     assert_eq!(rig.draw(4, &corner(2.0, 2.0, 40.0, 0.5, 0xFFFF_0000)), 0);
     let all = rect(0, 0, depth.width, depth.height);
-    let error = rig.run(|w| command::encode::blt(w, &named(&depth), &all, &named(&kept), &all, None));
+    let error =
+        rig.run(|w| command::encode::blt(w, &named(&depth), &all, &named(&kept), &all, None));
     assert_eq!(error, 0);
     assert_eq!(rig.draw(4, &corner(0.0, 0.0, 128.0, 0.5, 0xFF00_FF00)), 0);
 }

@@ -358,15 +358,14 @@ pub fn settle(cpu: &mut Cpu) {
     cpu.bus.toadforce_flush();
 }
 
-/// `settle`, before the program is given the address of the `len`
-/// bytes of video memory at `offset` (a locked surface, a DC's
-/// pixels). Nothing is read back from a ToadForce's host renderer: the
-/// card answers the program's reads of pixels the host has from the
-/// host's, and notes what the program writes (`toadforce::gpu`). So a
-/// program that locks a surface to write all of it costs no read-back.
+/// `settle`, before the program is given the address of a surface in
+/// video memory (a locked surface, a DC's pixels). Nothing is read back
+/// from a ToadForce's host renderer: the card answers the program's
+/// reads of pixels the host has from the host's, and notes what the
+/// program writes (`toadforce::gpu`). So a program that locks a surface
+/// to write all of it costs no read-back.
 #[inline]
-pub fn expose(cpu: &mut Cpu, offset: u32, len: u32) {
-    let _ = (offset, len);
+pub fn expose(cpu: &mut Cpu) {
     settle(cpu);
 }
 

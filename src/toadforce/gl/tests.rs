@@ -1516,7 +1516,10 @@ fn what_the_program_writes_into_a_target_goes_to_the_hosts_copy() {
             written_between_draws(&mut hosted);
             let status = hosted.card.describe(Rig::live());
             assert_eq!(status["host"]["read_backs"], 0, "{name}: {status}");
-            assert!(status["host"]["writes"].as_u64() >= Some(2), "{name}: {status}");
+            assert!(
+                status["host"]["writes"].as_u64() >= Some(2),
+                "{name}: {status}"
+            );
             // A read of the program's is answered from the host's
             // pixels, fetched once, and is what a read-back brings.
             let surface = hosted.surface(COLOUR);
@@ -1563,7 +1566,11 @@ fn depth_put_back(rig: &mut Rig, frames: u32) {
     for y in 0..SIZE {
         let row: Vec<u8> = (0..SIZE)
             .flat_map(|x| {
-                let z: u32 = if (x / 8 + y / 8) % 2 == 0 { 0x2000 } else { 0xE000 };
+                let z: u32 = if (x / 8 + y / 8) % 2 == 0 {
+                    0x2000
+                } else {
+                    0xE000
+                };
                 let z = if depth.bytes() == 2 { z } else { z << 16 };
                 z.to_le_bytes()[..depth.bytes() as usize].to_vec()
             })
@@ -1603,7 +1610,9 @@ fn a_depth_buffer_copied_from_another_stays_on_the_host() {
             depth_put_back(&mut hosted, frames);
             let status = hosted.card.describe(Rig::live());
             assert_eq!(status["host"]["read_backs"], 0, "{name}: {status}");
-            status["host"]["counts"]["surface_uploads"].as_u64().unwrap()
+            status["host"]["counts"]["surface_uploads"]
+                .as_u64()
+                .unwrap()
         };
         assert_eq!(counts(3), counts(1), "{name}");
     }

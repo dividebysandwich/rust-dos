@@ -581,9 +581,10 @@ impl Written {
             // one higher.
             let above = &rects[open..start];
             let same = above.len() == rects.len() - start
-                && above.iter().zip(&rects[start..]).all(|(a, b)| {
-                    (a.left, a.width) == (b.left, b.width) && a.top + a.height == y
-                });
+                && above
+                    .iter()
+                    .zip(&rects[start..])
+                    .all(|(a, b)| (a.left, a.width) == (b.left, b.width) && a.top + a.height == y);
             if same && start > open {
                 rects.truncate(start);
                 rects[open..].iter_mut().for_each(|r| r.height += 1);
@@ -794,6 +795,9 @@ impl Gpu {
         if let Some(host) = self.host.borrow_mut().as_mut() {
             for a in &self.ahead {
                 host.read_back(&a.surface, &mut copy, None);
+                if !a.written.any {
+                    continue;
+                }
                 let start = a.surface.offset;
                 a.written.runs(0, range(&a.surface).1 - start, |from, to| {
                     let run = (start + from) as usize..(start + to) as usize;
@@ -848,7 +852,17 @@ impl Gpu {
             .iter()
             .find(|a| overlap((offset, end), range(&a.surface)))?;
         let bytes = range(&a.surface);
-        let hosts = |at: u32| at >= bytes.0 && at < bytes.1 && !a.written.has(at - bytes.0);
+        // The bytes between a row's last pixel and the next row's first
+        // are no pixel's: the host has none of them, and a read-back
+        // leaves them as card memory has them.
+        let s = &a.surface;
+        let (pitch, row) = (s.pitch.max(1), s.width * s.format.bytes());
+        let hosts = |at: u32| {
+            at >= bytes.0
+                && at < bytes.1
+                && (at - bytes.0) % pitch < row
+                && !a.written.has(at - bytes.0)
+        };
         if !(offset..end).any(&hosts) {
             return None;
         }
@@ -859,7 +873,10 @@ impl Gpu {
                 fetched.bytes = vec![0; memory.len()];
             }
             let mut host = self.host.borrow_mut();
-            if !host.as_mut()?.read_back(&a.surface, &mut fetched.bytes, None) {
+            if !host
+                .as_mut()?
+                .read_back(&a.surface, &mut fetched.bytes, None)
+            {
                 return None;
             }
             fetched.of.push(a.surface);
@@ -900,6 +917,12 @@ impl Gpu {
             }
             let _profile = crate::profile::zone(crate::profile::Zone::ToadForceHost);
             let rects = a.written.rects(&a.surface);
+            // Bytes between rows alone are no pixel's: the host's copy
+            // has nothing of them to change.
+            if rects.as_ref().is_some_and(Vec::is_empty) {
+                a.written.clear();
+                continue;
+            }
             let wrote = match (rects, host.get_mut().as_mut()) {
                 (Some(rects), Some(host)) => host.write(&a.surface, &rects, memory),
                 _ => false,
