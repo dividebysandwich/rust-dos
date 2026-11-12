@@ -94,7 +94,7 @@ means seen in a run of the game (see "Phase 0 traces").
 | Max Payne | 2001 | Direct3D 8 | 32-bit textures and DXT1, DXT3, DXT5 (it asks for them and is refused); D24S8 | traced |
 | Zanzarah | 2002 | Direct3D 7 | DXTn in the texture format list; minimum GeForce or Voodoo 5500 | #583, #606 |
 | Grom: Terror in Tibet | 2002 | Direct3D | A8R8G8B8 textures; minimum a 32 MB card | #645 |
-| Nocturne | 1999 | Direct3D 6 interfaces, from its DirectX 7 renderer | `DDCAPS_3D` in the driver's caps (#982); A8R8G8B8 textures and a 32-bit target with a Z32 z-buffer, which it picks where a card offers them | traced |
+| Nocturne | 1999 | Direct3D 6 interfaces, from its DirectX 7 renderer | `DDCAPS_3D` in the driver's caps (#982); A8R8G8B8 textures and a 32-bit target with a Z32 z-buffer, which it picks where a card offers them | traced (see "Nocturne on the card") |
 
 Nocturne joined the list on 2026-11-12, after level 1 was fixed. It
 needs nothing of the card that the eight didn't, and is on the list

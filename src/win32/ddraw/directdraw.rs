@@ -642,12 +642,21 @@ const CAPS_DX6: u32 = 380;
 
 const DDCAPS_3D: u32 = 0x1;
 const DDCAPS_ZBLTS: u32 = 0x8_0000;
+const DDCAPS_BLTDEPTHFILL: u32 = 0x1000_0000;
 const DDSCAPS_3DDEVICE: u32 = 0x2000;
 
 /// Write a DDCAPS at `at`, of the size its dwSize says: the hardware's
 /// (`hal`) or the emulation's, of the display or of the 3dfx device's
-/// card (`card`), which has no palettes or GDI, but 3D and Z buffers.
-fn write_caps(cpu: &mut Cpu, at: u32, hal: bool, card: bool) -> Result<(), u32> {
+/// card (`card`), which has no palettes or GDI. `d3d` is the card
+/// Direct3D's HAL draws with on the object, if it has one there: the
+/// hardware's caps then say 3D, textures and Z buffers.
+fn write_caps(
+    cpu: &mut Cpu,
+    at: u32,
+    hal: bool,
+    card: bool,
+    d3d: Option<super::d3d::hal::Kind>,
+) -> Result<(), u32> {
     if !cpu.bus.guest_probe(at, 4, false) {
         return Err(DDERR_INVALIDPARAMS);
     }
@@ -696,13 +705,19 @@ fn write_caps(cpu: &mut Cpu, at: u32, hal: bool, card: bool) -> Result<(), u32> 
         surface_caps &= !surface::DDSCAPS_PALETTE;
         palette_caps = 0;
     }
-    // Direct3D's HAL draws on the add-on card and on a display with one:
-    // a Banshee, a Voodoo3 or a ToadForce. A driver with a Direct3D HAL
-    // sets DDCAPS_3D, and a program that looks for 3D hardware by that
-    // bit (Nocturne's renderers do) finds none without it.
-    if hal && (card || super::d3d::hal::adapter(cpu).is_some()) {
-        caps |= DDCAPS_3D | DDCAPS_ZBLTS;
-        surface_caps |= DDSCAPS_3DDEVICE | surface::DDSCAPS_ZBUFFER;
+    // A driver with a Direct3D HAL sets DDCAPS_3D, and a program that
+    // looks for 3D hardware by that bit (Nocturne's renderers do) finds
+    // none without it. Its surface caps have textures with mipmaps, 3D
+    // devices and Z buffers, and dwZBufferBitDepths the depths of the Z
+    // buffers it makes, as its device description gives them.
+    let mut z_depths = 0;
+    if hal && let Some(kind) = d3d {
+        caps |= DDCAPS_3D | DDCAPS_ZBLTS | DDCAPS_BLTDEPTHFILL;
+        surface_caps |= DDSCAPS_3DDEVICE
+            | surface::DDSCAPS_ZBUFFER
+            | surface::DDSCAPS_TEXTURE
+            | surface::DDSCAPS_MIPMAP;
+        z_depths = super::d3d::hal::description(kind).z_depths;
     }
     let w = |cpu: &mut Cpu, offset: u32, value: u32| cpu.bus.guest_write_32(at + offset, value);
     w(cpu, 0x04, caps);
@@ -710,6 +725,7 @@ fn write_caps(cpu: &mut Cpu, at: u32, hal: bool, card: bool) -> Result<(), u32> 
     w(cpu, 0x0C, ckey);
     w(cpu, 0x10, DDFXCAPS);
     w(cpu, 0x18, palette_caps);
+    w(cpu, 0x38, z_depths);
     w(cpu, 0x3C, total);
     w(cpu, 0x40, free);
     w(cpu, 0x60, 4);
@@ -748,11 +764,13 @@ pub fn get_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     }
     let card = is_card(cpu, id);
+    // The card EnumDevices lists Direct3D's HAL device for.
+    let d3d = super::d3d::hal::card(cpu, id).map(|offer| offer.kind);
     if hal != 0 {
-        hr!(write_caps(cpu, hal, true, card));
+        hr!(write_caps(cpu, hal, true, card, d3d));
     }
     if hel != 0 {
-        hr!(write_caps(cpu, hel, false, card));
+        hr!(write_caps(cpu, hel, false, card, d3d));
     }
     Some(DD_OK)
 }
