@@ -743,11 +743,13 @@ smoke and particles.
 | Source | Bound |
 |---|---|
 | Vertex arithmetic in a vertex shader (operation order, fused multiply-add) | positions within 1/256 pixel, so a pixel on a triangle's edge may fall on the other side |
-| Interpolation of colours and coordinates | 1 in 255 on a stage input |
-| Bilinear weights | 1 in 255 on a sample of a smooth texture; 2 where neighbouring texels differ by most of a channel's range, and 3 on a cube map. The host rounds a weight to its 8 bits where the card cuts it off, and works out a cube map's face coordinates in its own arithmetic |
+| Interpolation of colours and coordinates | 1 in 255 on a stage input. An operation that multiplies its result passes the step on multiplied: 8 after `DOTPRODUCT3` and `MODULATE2X` (Giants' ground, measured) |
+| A sample of a 2D texture | 1 in 255, and 2 with a projected texture. The shader takes the card's steps in the card's whole numbers (`shader::SAMPLING`): the level of detail, the levels and the filter, the coordinates in 1/256 of a texel, the weights of 8 bits. What is left is a coordinate or a level of detail that the host's interpolation puts on the other side of one of those steps: a weight one of 256 off, or the next level where the level of detail is within 1/4096 of the change. Coordinates the card has exactly (a texel to a pixel from whole coordinates) give the same texels |
+| A sample of a cube map | 1 in 255 on a smooth texture, 3 where neighbouring texels differ by most of a channel's range. The host's own filter samples it: it rounds a weight to its 8 bits where the card cuts it off, works out the face's coordinates in its own arithmetic, and picks the mip level |
 | Bump offsets from a linearly filtered bump texture | as the weights, except between texels whose offsets differ in sign: both renderers blend the signed bytes as unsigned ones, so there a weight that is one off can turn 127 into -128 |
-| Mip level selection, anisotropic filtering | the host GPU's; compared by eye and by a mean error over the frame |
-| Depth | 1 step of a 16-bit buffer, 4 steps of a 24-bit one: the host interpolates depth in single precision and rounds it by itself. A depth half-way between two steps goes either way |
+| Anisotropic filtering, where the host has it | the host GPU's, which reads more texels than the card's stand-in (trilinear at the level of the shorter side); compared by eye and by a mean error. Measured: a mean of 1.5 and at most 29 on the test's square going into the distance; in Giants 12% of the frame's pixels, 0.2% of the frame by more than 8 (the ground's normal map through `DOTPRODUCT3`) |
+| The alpha test and the colour key after a filtered sample | a pixel whose alpha is within the sample's bound of the reference is drawn by one renderer and not by the other. Measured: 0 to 6 pixels a frame of Zanzarah's leaves |
+| Depth | 1 step of a 16-bit buffer, 4 steps of a 24-bit one: the host interpolates depth in single precision and rounds it by itself. A depth half-way between two steps goes either way, and so does a test between two surfaces closer than the bound: Giants' marks on the ground, 2 steps of 24 bits in front of it, differ by more than 8 on 0.06% of the frame's pixels, where one renderer alone drew the mark |
 | Blending done by the host GPU | 1 in 255 on a channel; one step of the target's on a 16-bit target |
 | 16-bit targets on a host with no renderable 565 format, or one that doesn't round a blend to the nearest value | blended layers keep 8 bits until they are read back; several steps of the target's |
 
@@ -868,11 +870,17 @@ on the processor, and it has:
   row 0 of its host texture, which makes the host's window coordinates
   the card's and its fill rule the card's top-left rule;
 - the textures of every format, decoded by the software renderer's
-  decoders, with palettes, mip levels, cube maps, the address modes,
-  the filters, the level-of-detail bias, `MAXMIPLEVEL`, and anisotropy
-  where the host has it. A texture with a colour key has a second host
-  texture that marks the keyed texels, which the shader looks up at the
-  nearest texel;
+  decoders, with palettes, mip levels and cube maps. A texture with a
+  colour key has a second host texture that marks the keyed texels;
+- the card's sampling of a 2D texture, in the fragment shader
+  (`shader::SAMPLING`): the level of detail from how the coordinates
+  change over a pixel, the levels and the filter by `Sampler::levels`,
+  the level-of-detail bias and `MAXMIPLEVEL`, the coordinates in 1/256
+  of a texel, the address modes and the border colour, and the four
+  texels of a level blended by weights of 8 bits, each read with
+  `texelFetch`. The colour key is looked up in the level the sample
+  reads first. The host's own filter samples a cube map, and a texture
+  with anisotropy where the host has that filter;
 - a fragment shader printed from the draw's steps, with every stage
   operation, the bump offsets and luminance, projected and cube
   coordinates, the specular add, the three fog modes by depth and by
@@ -890,18 +898,18 @@ It declines these states, which the software renderer draws:
 
 - bump offsets on a cube map: they move the coordinates on the face the
   direction picked, and the host's cube sampler takes a direction;
-- `MAXMIPLEVEL` above 0 with different filters for magnifying and
-  minifying: the card changes filter by the pixel's size in texels of
-  level 0, the host by the level it is limited to;
-- a linear filter for magnifying with the nearest texel for minifying,
-  with mip levels: OpenGL magnifies up to a level of detail of 0.5
-  there, and the card only up to 0;
-- a colour key on a texture blended between mip levels: the card
-  compares the texel of the lower level, and the host's lookup of the
-  nearest level takes the closer one;
-- one texture on two stages with different sampling states, which are
-  states of the host's texture, so one stage's would change the
-  other's;
+- with the host's own filter (an anisotropic sample), what that filter
+  does another way than the card: `MAXMIPLEVEL` above 0 with different
+  filters for magnifying and minifying (the card changes filter by the
+  pixel's size in texels of level 0, the host by the level it is
+  limited to); a linear filter for magnifying with the nearest texel
+  for minifying, with mip levels (OpenGL magnifies up to a level of
+  detail of 0.5 there, and the card only up to 0); a colour key on a
+  texture blended between mip levels (the card compares the texel of
+  the lower level, the host's lookup the closer one); one texture on
+  two stages with different sampling states, or sampled by the host's
+  filter on one and read by the shader on the other, since the states
+  are the host texture's. The shader's own sampling draws all four;
 - `SRCALPHASAT` as the destination's blend factor, which OpenGL takes
   from 3.3 on.
 
@@ -911,17 +919,21 @@ compile is declined from its first draw on, since the program is
 compiled when the host is asked whether it takes the state.
 
 The agreement tests (`toadforce::gl::tests`, which need a desktop OpenGL
-context) draw 308 scenes in software and through the host and compare
+context) draw 332 scenes in software and through the host and compare
 card memory. On a GeForce RTX 4080: untextured triangles, every stage
 operation at each result scale, four stages with four textures, the
 alpha test, fog, the specular add, the stencil operations, the write
 masks and the blend factors and operations on a 32-bit target are the
 same byte for byte. So is the nearest texel of every format, address
-mode and cube face. The linear filter is within 1 on a smooth texture,
-2 on one whose texels differ by all of the range and 3 on such a cube
-map, and offsets from a linearly filtered bump texture are within 1.
-Anisotropic filtering differs from the software renderer's by a mean
-of 1.5 over a square going into the distance. Depth is within 1 step
+mode and cube face, the linear filter on a 2D texture of every format
+and address mode, every way of taking the mip levels on squares of 1,
+2, 4 and 8 texels to a pixel, a texture drawn a texel to a pixel from
+whole coordinates, and a filtered texture into a dithered 5-6-5
+target. A square going into the distance is within 1 with each mip
+filter, a projected texture within 2, a cube map with the linear
+filter within 3, and offsets from a linearly filtered bump texture
+within 1. Anisotropic filtering differs from the software renderer's
+by a mean of 1.5 over that square. Depth is within 1 step
 of 16 bits and 4 of 24. That host's 565 format fails the test at
 start, so its 16-bit targets were compared in 8 bits a channel alone,
 and were within one step of the target's with up to five blended
@@ -1067,17 +1079,47 @@ draw was declined and no read was stale in any of them.
 
 | Game and scene | Pixels that differ | By more than 8 in 255 | Mean difference |
 |---|---|---|---|
-| Giants, first mission, 800x600, 32 bits | 27% (24% by 1 or 2) | 0.3% | 0.46 |
-| Zanzarah, Fairy Garden, 640x480, 16 bits | 10% to 15% (most by one step of the screen's) | 1.5% to 2.4% | 0.65 to 0.99 |
-| Oni, training room, 640x480, 16 bits | 6% (5% by one step) | 0.7% to 0.8% | 0.37 to 0.40 |
+| Giants, first mission, 800x600, 32 bits | 16% (13% by 1 or 2) | 0.28% | 0.35 |
+| Zanzarah, Fairy Garden, 640x480, 16 bits | 0.6% to 1.1% (by one step of the screen's, but for 0 to 6 pixels a frame) | 0.09% to 0.17% | 0.04 to 0.07 |
+| Oni, training room, 640x480, 16 bits | 1.0% to 1.4% (by one step, but for 4 to 22 pixels a frame) | 0.25% to 0.35% | 0.08 to 0.11 |
 
-The pictures are right by eye in all three. The differences of 1 and
-2 are the filtered textures' weights; a step of a 16-bit screen is a
-value near a rounding boundary that the weights put on the other
-side. The larger ones are on the edges of alpha-tested leaves and
-fences, where a filtered alpha one off the reference turns a pixel on
-or off, on distant ground, where the host picks the mip level, and on
-triangle edges. Menus and loading screens are identical.
+A step of red or blue on a 16-bit screen is 8 or 9 in 255, so the
+third column of the two 16-bit games counts single steps. The
+pictures are right by eye in all three, and menus and loading screens
+are identical.
+
+Each difference was traced to its draws by recording a frame of each
+game and drawing it through both renderers (`replay_a_capture`, see
+"Testing"), with a state turned off on both sides to see what hangs
+on it:
+
+- **Giants.** The ground's normal map and its colour texture have an
+  anisotropy of 8, which the host's GPU filters in its own way. With
+  the anisotropy set to 1 on both sides 3.9% of the frame's pixels
+  differ, 2.3% by more than 1 and 0.06% by more than 8. Nine in ten of
+  those over 1 are the ground again: its diffuse colour, one of 255
+  off, goes through `DOTPRODUCT3` and `MODULATE2X` and comes out up to
+  8 off. Nearly all of the rest, and those over 8, are marks drawn on
+  the ground with a depth bias of 2 steps of 24 bits, less than the
+  depth bound: a mark's pixel is drawn by one renderer and not by the
+  other.
+- **Zanzarah.** With the blend turned off on both sides 0.05% to 0.1%
+  of the pixels differ. The rest is the host's blend into a 16-bit
+  target that it keeps in 8 bits a channel. The few pixels further
+  off, by up to 198, belong to alpha-tested leaves.
+- **Oni.** 97% of the pixels that differ by a step or more after their
+  draw are drawn by three blended states, into a 16-bit target as in
+  Zanzarah.
+
+With the host's own filter on 2D textures in place of the shader's
+sampling, the same frames differ on 27% of the pixels in Giants, 10%
+to 15% in Zanzarah (1.5% to 2.4% by more than 8, up to 239) and 6% in
+Oni (0.7% to 0.8% by more than 8): the host picks the mip level and
+rounds the weights by itself, and each sample one of 255 off tips a
+pixel of a dithered 16-bit target to the next step. The shader's
+sampling costs these games no frames on that host: Giants draws 25.8
+frames a second with it and 25.6 with the host's filter, Oni 20.6 and
+20.0.
 
 Read-backs for each frame the game shows, and what asks for them:
 
@@ -1119,14 +1161,15 @@ host's texture, `FILL` and `BLT` on the host, and the host options
 ### Shader cache
 
 Programs are cached by key in memory: the draw's steps without what is
-the host's fixed state, so two draws that differ in the depth test, the
-blend or the masks share a program. Compiled program binaries are to be
-stored on disk by a hash of the generated source (`glGetProgramBinary`,
-core since OpenGL 4.1, with a fallback to compiling on hosts without
-it), so a game's second run compiles nothing. A game of this period sets
-tens to a few hundred distinct state combinations. The store on disk
-isn't built yet: it waits for a game on the host renderer to show what
-the first run's compiles cost.
+the host's fixed state, and which stages the host's own filter
+samples, so two draws that differ in the depth test, the blend, the
+masks or a texture's sampling states share a program. Compiled program
+binaries are to be stored on disk by a hash of the generated source
+(`glGetProgramBinary`, core since OpenGL 4.1, with a fallback to
+compiling on hosts without it), so a game's second run compiles
+nothing. A game of this period sets tens to a few hundred distinct
+state combinations. The store on disk isn't built yet: it waits for a
+game on the host renderer to show what the first run's compiles cost.
 
 If a first run still shows pauses in games, the answer is a general
 shader that reads the lowered operation list from uniforms and draws
@@ -1295,6 +1338,14 @@ level has none to choose, and the renderer's keys with the renderers.
   renderer may differ". Whether CI has an OpenGL context for this (Mesa's
   llvmpipe on the Linux job) has to be checked; without one these run
   locally.
+- **A game's draws through both renderers.** `POST
+  /api/toadforce/capture` records what the card is given
+  (`toadforce::capture`), and the ignored test `replay_a_capture`
+  draws the recording in software and through the host
+  (`toadforce::gl::replay`): the differences of each target, and draw
+  by draw, with the host given the software's pixels before each
+  draw, which states the pixels that differ belong to
+  (`docs/llm-debugging.md`).
 - **Ring against `submit`.** One command stream through both, equal
   memory and state after.
 - **Frozen levels.** A golden copy of each level's capability table and

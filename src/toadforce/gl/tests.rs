@@ -450,9 +450,12 @@ impl Bench {
     }
 
     /// The bound of a sample of `pattern`, whose neighbours differ by
-    /// up to all of a channel's range: with the linear filter (2) the
-    /// host rounds each weight where the card cuts it off, and a cube
-    /// map's face coordinates are worked out in the host's arithmetic.
+    /// up to all of a channel's range. A cube map is the host's filter
+    /// to sample: with the linear filter (2) it rounds each weight
+    /// where the card cuts it off, and it works the face's coordinates
+    /// out in its own arithmetic. The shader samples the others with
+    /// the card's weights, which are one of 256 apart where a
+    /// coordinate comes out a little to the other side of a step.
     fn sampled(&self, name: &str, filter: u32, cube: bool, scene: impl Fn(&mut Rig)) {
         let channel = match (filter, cube) {
             (2, true) => 3,
@@ -821,9 +824,6 @@ fn address_modes_and_mip_levels_agree() {
         (1, 2, 0),
     ] {
         for (bias, first) in [(0.0f32, 0), (1.0, 0), (-1.0, 0), (0.0, 2)] {
-            if first > 0 && mag != min {
-                continue;
-            }
             let scene = |rig: &mut Rig| {
                 let t = rig.texels(TEXTURE, Format::A8R8G8B8, 32, 6, false, levels);
                 rig.texture(0, 1, &t);
@@ -845,21 +845,116 @@ fn address_modes_and_mip_levels_agree() {
             );
         }
     }
-    // What the host declines: `MAXMIPLEVEL` with two filters.
-    let declined = bench.compare(
-        "mip first level, two filters",
-        Format::A8R8G8B8,
-        None,
-        CLOSE,
-        |rig| {
+    // `MAXMIPLEVEL` with two filters, and a linear magnification with
+    // the nearest texel of a smaller level: the host's own filter
+    // changes over elsewhere than the card, and the shader's reads
+    // don't.
+    for (mag, min, mip) in [(2, 1, 1), (2, 1, 2), (1, 2, 1)] {
+        bench.close(&format!("mip {mag} {min} {mip} first 1"), |rig| {
             let t = rig.texels(TEXTURE, Format::A8R8G8B8, 32, 6, false, levels);
             rig.texture(0, 1, &t);
-            filter(rig, 0, 2, 1, 1);
+            filter(rig, 0, mag, min, mip);
             rig.stage(0, &[(TSS_MAXMIPLEVEL, 1)]);
             squares(rig);
-        },
-    );
-    assert_eq!(declined, 4);
+        });
+    }
+}
+
+/// A square with its corners on whole coordinates.
+fn whole_quad(x: f32, y: f32, size: f32, repeat: f32) -> Vec<V> {
+    quad(x - 0.25, y - 0.25, size, WHITE, repeat)
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn the_shader_samples_as_the_card_does() {
+    bench!(bench, "toadforce shader sampling");
+    let exact = Bound {
+        channel: 0,
+        ..CLOSE
+    };
+    // A texture drawn a texel to a pixel, and two pixels to a texel,
+    // from whole coordinates, as a program draws its pictures: every
+    // pixel is on the edge of two texels, and the nearest texel is the
+    // card's or its neighbour (`tf_fixed`).
+    for (mag, min) in [(1, 1), (2, 2), (2, 1), (1, 2)] {
+        for address in [1, 3] {
+            let name = format!("a texel to a pixel, filter {mag} {min} address {address}");
+            let scene = |rig: &mut Rig| {
+                let t = rig.texels(TEXTURE, Format::A8R8G8B8, 32, 1, false, pattern);
+                rig.texture(0, 1, &t);
+                filter(rig, 0, mag, min, 0);
+                rig.stage(0, &[(TSS_ADDRESSU, address), (TSS_ADDRESSV, address)]);
+                rig.clear(CLEAR_COLOUR, 0xFF10_1010, 1.0, 0, &[]);
+                rig.draw(&whole_quad(0.0, 0.0, 32.0, 1.0));
+                rig.draw(&whole_quad(32.0, 0.0, 32.0, 0.5));
+                rig.draw(&whole_quad(0.0, 32.0, 16.0, 1.0));
+                rig.draw(&whole_quad(16.0, 32.0, 48.0, 3.0));
+            };
+            let declined = bench.compare(&name, Format::A8R8G8B8, None, exact, scene);
+            assert_eq!(declined, 0, "{name}");
+        }
+    }
+    // A square that goes into the distance, where the level of detail
+    // changes from pixel to pixel, with each way of taking the levels
+    // and a bias. The texture is smooth in a level and another colour
+    // in the next, so a level off shows and a weight off doesn't.
+    let levels = |level: u32, _: u32, x: u32, y: u32| {
+        ramp(32)(level, 0, x, y) ^ 0x40 << (8 * (level % 3))
+    };
+    for (mag, min, mip) in [(2, 2, 2), (2, 2, 1), (1, 1, 1), (2, 1, 2), (1, 2, 1)] {
+        for bias in [0.0f32, 0.4] {
+            let name = format!("into the distance, filter {mag} {min} {mip} bias {bias}");
+            let scene = |rig: &mut Rig| {
+                let t = rig.texels(TEXTURE, Format::A8R8G8B8, 32, 6, false, levels);
+                rig.texture(0, 1, &t);
+                filter(rig, 0, mag, min, mip);
+                rig.stage(
+                    0,
+                    &[
+                        (TSS_MIPMAPLODBIAS, bias.to_bits()),
+                        (TSS_ADDRESSU, 2),
+                        (TSS_ADDRESSV, 2),
+                    ],
+                );
+                rig.clear(CLEAR_COLOUR, 0xFF10_1010, 1.0, 0, &[]);
+                let mut q = quad(2.0, 2.0, 60.0, WHITE, 6.0);
+                for v in &mut q {
+                    if v.t[1] == 0.0 {
+                        v.rhw = 0.125;
+                    }
+                }
+                rig.draw(&q);
+            };
+            let declined = bench.compare(&name, Format::A8R8G8B8, None, CLOSE, scene);
+            assert_eq!(declined, 0, "{name}");
+        }
+    }
+    // A filtered texture into a dithered 5-6-5 target, where a sample
+    // one of 255 off is a step of the target at the pixels whose
+    // dither it tips over.
+    for wide in [false, true] {
+        if !wide && !bench.host().packed() {
+            continue;
+        }
+        bench.wide.set(wide);
+        for dither in [0, 1] {
+            let name = format!("565 filtered, dither {dither}");
+            let scene = |rig: &mut Rig| {
+                let t = rig.texels(TEXTURE, Format::A8R8G8B8, 32, 6, false, ramp(32));
+                rig.texture(0, 1, &t);
+                filter(rig, 0, 2, 2, 2);
+                rig.states(&[(RS_DITHERENABLE, dither)]);
+                rig.clear(CLEAR_COLOUR, 0xFF10_1010, 1.0, 0, &[]);
+                rig.draw(&whole_quad(0.0, 0.0, 48.0, 1.0));
+                rig.draw(&whole_quad(48.0, 0.0, 16.0, 1.0));
+                rig.draw(&whole_quad(0.0, 48.0, 64.0, 2.0));
+            };
+            let declined = bench.compare(&name, Format::R5G6B5, None, exact, scene);
+            assert_eq!(declined, 0, "{name}");
+        }
+    }
+    bench.wide.set(false);
 }
 
 /// The corners of a square whose coordinates are directions on the
@@ -1345,17 +1440,20 @@ fn the_states_the_host_declines_are_drawn_in_software() {
         ]);
         rig.draw(&quad(6.0, 6.0, 50.0, 0x80C0_4020, 1.0));
     });
-    // A linear magnification filter with a nearest minification filter
-    // and mip levels, where OpenGL magnifies further than the card.
+    // What the host's own filter does another way than the card, and
+    // the shader's reads of the texels don't: a linear magnification
+    // filter with a nearest minification filter and mip levels, where
+    // OpenGL magnifies further than the card.
     for mip in [1, 2] {
-        declines(&format!("mag 2 min 1 mip {mip}"), 4, &|rig| {
+        declines(&format!("mag 2 min 1 mip {mip}"), 0, &|rig| {
             mipped(rig);
             filter(rig, 0, 2, 1, mip);
             sizes(rig);
         });
     }
-    // A colour key on a texture blended between levels.
-    declines("colour key between levels", 4, &|rig| {
+    // A colour key on a texture blended between levels, looked up in
+    // the lower of the two.
+    declines("colour key between levels", 0, &|rig| {
         // Every other texel of each level has the key's value.
         let keyed = |level: u32, face: u32, x: u32, y: u32| {
             if (x + y + level).is_multiple_of(2) {
@@ -1371,9 +1469,9 @@ fn the_states_the_host_declines_are_drawn_in_software() {
         rig.states(&[(RS_COLORKEYENABLE, 1)]);
         sizes(rig);
     });
-    // One texture on two stages with different addressing, and with
-    // the same (which the host draws).
-    for (clamp, draws) in [(3, 1), (1, 0)] {
+    // One texture on two stages, with different addressing and with
+    // the same: a stage's states are the shader's numbers.
+    for (clamp, draws) in [(3, 0), (1, 0)] {
         declines(
             &format!("one texture twice, address {clamp}"),
             draws,
