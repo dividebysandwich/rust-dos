@@ -738,7 +738,17 @@ pub(super) fn load_module(
             ));
             (join(SYSTEM_DIR, &file), bytes.into(), true)
         }
-        None => return Err(not_found()),
+        // A path outside the system directory names a file of the
+        // program's own, which no built-in DLL stands in for, and the file
+        // isn't there. Programs try optional DLLs this way, as LithTech
+        // games do with a language DLL (CRESL.DLL) in the TEMP directory,
+        // and Windows fails the load just the same.
+        None => {
+            return Err(LoadError {
+                message: format!("{} needs {}, and there is no such file.", importer, name),
+                ..not_found()
+            });
+        }
     };
     let mut image = pe::Image::load(&bytes).map_err(|e| LoadError {
         code: bad_image_error(&bytes),
