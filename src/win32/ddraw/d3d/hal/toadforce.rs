@@ -32,11 +32,11 @@
 //! card's commands lack, and screen vertices, which need no transform.
 //! Execute buffers and ProcessVertices are the pipeline's too. For
 //! those the pipeline has transformed, lit, clipped and culled the
-//! vertices, so the card gets screen vertices with the two sets of
-//! texture coordinates the pipeline works out, one for each of the
-//! first two stages. `Raster` collects them into `DRAW` commands and
-//! hands the card all of a batch's at once, which the card draws on
-//! its threads.
+//! vertices, so the card gets screen vertices with the sets of texture
+//! coordinates the pipeline works out, one for each of the card's four
+//! stages up to the last with a texture (`Card::layout`). `Raster`
+//! collects them into `DRAW` commands and hands the card all of a
+//! batch's at once, which the card draws on its threads.
 //!
 //! A texture surface in video memory whose format and size the card
 //! takes is sampled where it is: `DEFINE_TEXTURE` names the surface's
@@ -72,11 +72,11 @@ use crate::toadforce::level1::{
 use crate::toadforce::{caps, regs};
 use crate::win32::screen;
 
-/// The textures a draw has at once: the stages whose texture
-/// coordinates the pipeline gives a screen vertex. The card takes more
-/// (`caps::TEXTURES_AT_ONCE`), which the device gets when a screen
-/// vertex carries as many (#948).
-pub const UNITS: u32 = 2;
+/// The textures a draw has at once: the card's four
+/// (`caps::TEXTURES_AT_ONCE`), which are the stages whose texture
+/// coordinates the pipeline gives a screen vertex.
+pub const UNITS: u32 = caps::TEXTURES_AT_ONCE;
+const _: () = assert!(UNITS as usize == pipeline::SCREEN_STAGES);
 
 /// The band the pipeline clips what the card draws to. The card takes
 /// positions to 32768 pixels either side of 0.
@@ -85,14 +85,10 @@ pub const VERTEX_BAND: [f32; 4] = [-16384.0, -16384.0, 16384.0, 16384.0];
 /// The lights the card transforms and lights vertices with at once.
 pub const TNL_LIGHTS: u32 = caps::LIGHTS;
 
-/// The vertex layout of a `DRAW`: position with 1 / w, diffuse and
-/// specular colour, and two sets of two texture coordinates.
-const FVF: u32 = 0x004 | 0x040 | 0x080 | 0x200;
-const VERTEX_WORDS: usize = 10;
-/// The layout where a stage's coordinates are projected: both sets
-/// have four, the last what the card divides the others by.
-const FVF_PROJECTED: u32 = FVF | 2 << 16 | 2 << 18;
-const VERTEX_WORDS_PROJECTED: usize = 14;
+/// The vertex layout of a `DRAW` without texture coordinates:
+/// position with 1 / w, diffuse and specular colour.
+const FVF: u32 = 0x004 | 0x040 | 0x080;
+const VERTEX_WORDS: usize = 6;
 
 /// Whether the device `d`'s stage `stage` is one of the first, whose
 /// coordinates the pipeline gives a screen vertex, and they are
@@ -758,18 +754,32 @@ pub struct Card {
     target: (u32, u32, u32),
     /// The rectangle drawn into: left, top, right, bottom.
     clip: [u32; 4],
-    /// Whether a stage's coordinates are projected, and the vertices
-    /// carry what they are divided by (`FVF_PROJECTED`).
+    /// The stages up to the last one with a texture: a screen vertex has
+    /// a set of texture coordinates for each.
+    sets: usize,
+    /// Whether one of those stages' coordinates are projected: the sets
+    /// then have four numbers, the last what the card divides the
+    /// others by.
     projected: bool,
 }
 
 impl Card {
-    /// The layout of the screen vertices of a draw, and its words.
+    /// The numbers of each set of a screen vertex.
+    fn numbers(&self) -> usize {
+        if self.projected { 4 } else { 2 }
+    }
+
+    /// The layout of the screen vertices of a draw, and its words: a
+    /// set of two numbers, or of four, for each stage in use.
     fn layout(&self) -> (u32, usize) {
-        match self.projected {
-            true => (FVF_PROJECTED, VERTEX_WORDS_PROJECTED),
-            false => (FVF, VERTEX_WORDS),
+        let mut fvf = FVF | (self.sets as u32) << 8;
+        if self.projected {
+            // Four numbers are size 2.
+            for set in 0..self.sets {
+                fvf |= 2 << (16 + 2 * set);
+            }
         }
+        (fvf, VERTEX_WORDS + self.sets * self.numbers())
     }
 }
 
@@ -905,6 +915,9 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
         .take_while(|&s| d.stage(s, TSS_COLOROP) != TOP_DISABLE)
         .count() as u32;
     let mut first_alpha = None;
+    // The stages up to the last with a texture: only a stage with one
+    // samples, so the screen vertices carry no sets past it.
+    let mut sets = 0;
     let key = d.state(super::RS_COLORKEYENABLE) != 0;
     for unit in 0..UNITS {
         let surface = (unit < stages)
@@ -925,6 +938,7 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
         let (i, handle) = (unit as usize, unit + 1);
         match texture {
             Some(texture) => {
+                sets = i + 1;
                 if sent.textures[i].as_ref() != Some(&texture) {
                     encode::define_texture(&mut words, handle, &texture);
                     // A handle defined anew stays in its stage.
@@ -991,7 +1005,8 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
             target.colour.format.bytes(),
         ),
         clip: [left, top, right.max(left), bottom.max(top)],
-        projected: !lit && (0..UNITS).any(|stage| projected(d, stage)),
+        sets,
+        projected: !lit && (0..sets as u32).any(|stage| projected(d, stage)),
     })
 }
 
@@ -1328,6 +1343,10 @@ pub fn video_memory_lost(cpu: &mut Cpu) {
 pub struct Raster<'a> {
     pub cpu: &'a mut Cpu,
     card: Card,
+    /// The card's layout of the batch's vertices, and the words of one
+    /// (`Card::layout`).
+    fvf: u32,
+    vertex_words: usize,
     /// The commands so far.
     words: Vec<u32>,
     /// The primitive of the command being filled (0 for none), and
@@ -1338,9 +1357,12 @@ pub struct Raster<'a> {
 
 impl Raster<'_> {
     pub fn new(cpu: &mut Cpu, card: Card) -> Raster<'_> {
+        let (fvf, vertex_words) = card.layout();
         Raster {
             cpu,
             card,
+            fvf,
+            vertex_words,
             words: Vec::new(),
             primitive: 0,
             header: 0,
@@ -1353,27 +1375,26 @@ impl Raster<'_> {
             return;
         }
         let len = self.words.len() - self.header;
-        let count = (len - 4) / self.card.layout().1;
+        let count = (len - 4) / self.vertex_words;
         self.words[self.header] = crate::toadforce::command::header(level1::DRAW, len);
         self.words[self.header + 3] = count as u32;
         self.primitive = 0;
     }
 
     /// Add `vertices` to a command of `primitive`, a new one if the one
-    /// being filled is of another or full.
+    /// being filled is of another or has no room for them. A command
+    /// stays within `COMMAND_WORDS`, whatever the words of a vertex: up
+    /// to 22 with four sets of four numbers.
     fn add(&mut self, primitive: u32, vertices: &[ScreenVertex]) {
-        let (fvf, vertex_words) = self.card.layout();
-        // A command holds what fits its length field, whatever the size
-        // of a vertex: a point, a line or a triangle is never split.
-        let full =
-            self.words.len() - self.header + vertices.len() * vertex_words > COMMAND_WORDS;
+        let adding = vertices.len() * self.vertex_words;
+        let full = self.words.len() - self.header + adding > COMMAND_WORDS;
         if self.primitive != primitive || full {
             self.close();
             self.primitive = primitive;
             self.header = self.words.len();
-            self.words.extend([0, primitive, fvf, 0]);
+            self.words.extend([0, primitive, self.fvf, 0]);
         }
-        let numbers = if self.card.projected { 4 } else { 2 };
+        let (sets, numbers) = (self.card.sets, self.card.numbers());
         for v in vertices {
             self.words.extend([
                 v.x.to_bits(),
@@ -1383,7 +1404,7 @@ impl Raster<'_> {
                 v.diffuse,
                 v.specular,
             ]);
-            for set in &v.tex {
+            for set in &v.tex[..sets] {
                 self.words
                     .extend(set[..numbers].iter().map(|n| n.to_bits()));
             }
@@ -1922,5 +1943,75 @@ mod tests {
         // vertices of three words and six indices in three.
         assert_eq!(words.len(), 5 + 4 * 3 + 3);
         assert_eq!(triangles(&words), [[998, 3, 500], [3, 500, 999]]);
+    }
+
+    /// The `DRAW` commands a batch of `n` triangles of screen vertices
+    /// numbered by x becomes, drawn with `card`.
+    fn screen_draws(card: Card, n: usize) -> Vec<u32> {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let mut raster = Raster::new(&mut cpu, card);
+        for t in 0..n {
+            let v = |i: usize| ScreenVertex {
+                x: (3 * t + i) as f32,
+                tex: std::array::from_fn(|set| [set as f32, 1.0, 2.0, 3.0]),
+                ..ScreenVertex::default()
+            };
+            raster.triangle(&[v(0), v(1), v(2)]);
+        }
+        raster.close();
+        std::mem::take(&mut raster.words)
+    }
+
+    #[test]
+    fn screen_vertices_carry_a_set_of_two_or_four_numbers_for_each_stage() {
+        for sets in 0..=UNITS as usize {
+            for projected in [false, true] {
+                let card = Card {
+                    sets,
+                    projected,
+                    ..Card::default()
+                };
+                let words = screen_draws(card, 1);
+                let Ok(command::Command::Level1(Command::Draw(draw))) =
+                    command::decode(&words, 1, 1 << 24)
+                else {
+                    panic!("{sets} sets, projected {projected}: not a draw the card takes");
+                };
+                let numbers = if projected { 4 } else { 2 };
+                assert_eq!(draw.fvf.words, 6 + sets * numbers);
+                assert_eq!(draw.fvf.words, card.layout().1);
+                for set in 0..sets {
+                    let (at, n) = draw.fvf.sets[set];
+                    assert_eq!((at as usize, n as usize), (6 + set * numbers, numbers));
+                }
+                assert_eq!(draw.fvf.sets[sets], (0, 0));
+            }
+        }
+    }
+
+    #[test]
+    fn a_large_batch_goes_in_commands_the_length_field_holds() {
+        // Four sets of four numbers: 22 words a vertex, so 9000
+        // vertices are three times what a command holds.
+        let card = Card {
+            sets: UNITS as usize,
+            projected: true,
+            ..Card::default()
+        };
+        let words = screen_draws(card, 3000);
+        assert!(command::framed(&words));
+        let mut at = 0;
+        let mut commands = 0;
+        while at < words.len() {
+            let len = command::length(words[at]);
+            assert!(len <= COMMAND_WORDS, "{len} words");
+            at += len;
+            commands += 1;
+        }
+        assert!(commands >= 4, "{commands} commands");
+        let want: Vec<[u32; 3]> = (0..3000)
+            .map(|t| [3 * t, 3 * t + 1, 3 * t + 2].map(|i| i as u32))
+            .collect();
+        assert_eq!(triangles(&words), want);
     }
 }

@@ -276,6 +276,7 @@ fn setup_of(
             )
         }),
         normalize: s(RS_NORMALIZENORMALS) != 0,
+        screen_stages: (d.tmus as usize).min(pipeline::SCREEN_STAGES),
         blend: None,
     }
 }

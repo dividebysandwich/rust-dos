@@ -1304,6 +1304,8 @@ enum Step {
     Flip,
     /// SetTextureStageState of stage 0 (Direct3D 7).
     Stage(u32, u32),
+    /// SetTexture of the scene's texture on a stage (Direct3D 7).
+    Texture(u32),
     /// SetColorKey of the texture: its source blit key (Direct3D 7).
     /// A scene has one key: every Key step sets the last one's.
     Key(u32),
@@ -1662,6 +1664,10 @@ fn scene_program_with(scene: &Scene, bpp: u32, checked: &mut Vec<u32>) -> (Vec<u
                     let args = [Arg::I(0), Arg::I(*s), Arg::I(*v)];
                     c.com(a, l, DEVICE, DEV7_SET_TEXTURE_STAGE_STATE, &args)?;
                 }
+                Step::Texture(stage) => {
+                    let args = [Arg::I(*stage), Arg::Val(TEXTURE)];
+                    c.com(a, l, DEVICE, DEV7_SET_TEXTURE, &args)?;
+                }
                 Step::Key(_) => {
                     let args = [Arg::I(DDCKEY_SRCBLT), Arg::At(KEY)];
                     c.com(a, l, TEXTURE, SURF_SET_COLOR_KEY, &args)?;
@@ -1848,7 +1854,7 @@ fn drew_on_the_card(cpu: &Cpu, scene: &Scene) {
     let transformed = scene
         .steps
         .iter()
-        .filter(|step| matches!(step, Step::World(..)))
+        .filter(|step| matches!(step, Step::World(fvf, ..) if fvf & D3DFVF_XYZRHW == 0))
         .count() as u64;
     // The card transforms the vertices that aren't transformed.
     assert_eq!(counts.transformed, transformed, "{counts:?}");
@@ -4022,6 +4028,78 @@ fn normals_coordinates_are_made_from_are_normalized_without_lighting() {
     };
     assert_quarters(&draw_scene("voodoo3_normalized", &scene));
     assert_quarters(&draw_scene_toadforce("toadforce_normalized", &scene));
+}
+
+/// The texture of red, green, blue and white quarters on four stages,
+/// each with its own set of coordinates: the first three add up the
+/// quarters their sets name, and the fourth multiplies by its own.
+/// `sets` are the four sets' coordinates, the same at every vertex of
+/// a quad over the target's top left quarter, of transformed vertices
+/// or of positions the device's identity matrices leave where they are.
+fn four_texture_scene(transformed: bool, sets: [[f32; 2]; 4]) -> Scene {
+    let texels = std::array::from_fn(|i| match (i % 8 >= 4, i / 8 >= 4) {
+        (false, false) => 0xF800,
+        (true, false) => 0x07E0,
+        (false, true) => 0x001F,
+        (true, true) => 0xFFFF,
+    });
+    let corners: [[f32; 2]; 6] = [
+        [0.0, 0.0],
+        [1.0, 0.0],
+        [0.0, 1.0],
+        [1.0, 0.0],
+        [1.0, 1.0],
+        [0.0, 1.0],
+    ];
+    let mut words = Vec::new();
+    for [x, y] in corners {
+        match transformed {
+            true => words.extend(bits(&[x * 32.0, y * 32.0, 0.5, 1.0])),
+            false => words.extend(bits(&[x - 1.0, 1.0 - y, 0.5])),
+        }
+        words.extend(sets.iter().flat_map(|set| bits(set)));
+    }
+    let position = if transformed { D3DFVF_XYZRHW } else { D3DFVF_XYZ };
+    let stage = |stage: u32, state: u32, value: u32| {
+        Step::Call(DEV7_SET_TEXTURE_STAGE_STATE, vec![stage, state, value], vec![])
+    };
+    let scene = toadforce_scene(vec![
+        Step::State(RS_LIGHTING, 0),
+        Step::State(RS_CULLMODE, 1),
+        Step::Texture(1),
+        Step::Texture(2),
+        Step::Texture(3),
+        stage(0, TSS_COLOROP, TOP_SELECTARG1),
+        stage(1, TSS_COLOROP, TOP_ADD),
+        stage(2, TSS_COLOROP, TOP_ADD),
+        stage(3, TSS_COLOROP, TOP_MODULATE),
+        // D3DFVF_TEX4.
+        Step::World(position | 0x400, words, 6),
+    ]);
+    Scene {
+        texture: Some(texels),
+        ..scene
+    }
+}
+
+#[test]
+fn a_toadforce_draws_with_four_textures_each_at_its_own_coordinates() {
+    // The quarters' centres: red, green and blue add up to white, and
+    // the fourth stage leaves what its own quarter has of it.
+    let (red, green, blue) = ([0.25, 0.25], [0.75, 0.25], [0.25, 0.75]);
+    for transformed in [true, false] {
+        // The pipeline's screen vertices, and the card's transform.
+        let draw = |fourth: [f32; 2]| {
+            let scene = four_texture_scene(transformed, [red, green, blue, fourth]);
+            draw_scene_toadforce("toadforce_four", &scene)
+        };
+        assert_rgb(&draw(blue), 16, 16, [0, 0, 255], 8);
+        assert_rgb(&draw(green), 16, 16, [0, 255, 0], 8);
+        let shot = draw(red);
+        assert_rgb(&shot, 16, 16, [255, 0, 0], 8);
+        // Past the quad.
+        assert_rgb(&shot, 48, 16, [0, 0, 0], 0);
+    }
 }
 
 #[test]
