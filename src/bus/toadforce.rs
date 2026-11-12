@@ -287,9 +287,10 @@ impl Bus {
         self.toadforce.as_deref().is_some_and(|c| c.ahead())
     }
 
-    /// Before the processor reads or writes `len` bytes of card memory
-    /// at `offset`: the queued commands run, and what the host
-    /// renderer drew into surfaces with those bytes is read back.
+    /// Before the emulator itself reads `len` bytes of card memory at
+    /// `offset`, or writes them where it needs the others around them:
+    /// the queued commands run, and what the host renderer drew into
+    /// surfaces with those bytes is read back.
     #[inline]
     pub fn toadforce_touch(&mut self, offset: usize, len: usize) {
         self.toadforce_touch_for(offset, len, Cause::Program);
@@ -324,26 +325,42 @@ impl Bus {
         }
     }
 
-    /// The program reads `len` bytes of card memory at `offset` through
-    /// the bus. A read has the bus shared and can't read anything
-    /// back, so the bytes are in card memory before the program gets
-    /// to them: a guest driver's commands are read back when its write
-    /// of `RING_PUT` returns, and the built-in drivers read a surface
-    /// back before they give the program its address (`win32::screen::
-    /// expose`). A read of bytes that are ahead all the same is a
-    /// driver's bug, which the card counts for its status.
+    /// Before the processor writes `len` bytes of card memory at
+    /// `offset`: the queued commands run, and where the host renderer
+    /// has newer pixels of a surface with those bytes, the card notes
+    /// that card memory has these from now on. Nothing is read back:
+    /// what was written goes to the host's copy before the host next
+    /// uses it (`toadforce::gpu`).
     #[inline]
-    pub(crate) fn toadforce_reads(&self, offset: usize, len: usize) {
-        if self.toadforce_ahead() {
-            self.toadforce_stale_read(offset, len);
+    pub fn toadforce_writing(&mut self, offset: usize, len: usize) {
+        self.toadforce_flush();
+        if self.toadforce_ahead()
+            && let Some(card) = &mut self.toadforce
+        {
+            card.writing(offset as u32, len as u32);
         }
     }
 
-    #[cold]
-    fn toadforce_stale_read(&self, offset: usize, len: usize) {
-        if let Some(card) = &self.toadforce {
-            card.stale_read(offset as u32, len as u32);
+    /// The program reads `len` bytes of card memory at `offset` through
+    /// the bus, up to 4: their value where the host renderer has newer
+    /// pixels than card memory, and None where card memory has them. A
+    /// read has the bus shared and can't read a surface back into card
+    /// memory, so the card answers from the host's pixels, which it
+    /// fetches once for as long as the host's copy stays as it is. A
+    /// guest driver's commands are read back when its write of
+    /// `RING_PUT` returns, so its program never gets here.
+    #[inline]
+    pub(crate) fn toadforce_reads(&self, offset: usize, len: usize) -> Option<u32> {
+        if self.toadforce_ahead() {
+            return self.toadforce_read_ahead(offset, len);
         }
+        None
+    }
+
+    #[cold]
+    fn toadforce_read_ahead(&self, offset: usize, len: usize) -> Option<u32> {
+        let card = self.toadforce.as_deref()?;
+        card.read_ahead(offset as u32, len as u32, &self.vbe.vram)
     }
 
     /// The screen is about to be drawn from card memory: what the host
@@ -405,7 +422,8 @@ impl Bus {
             format,
         };
         let card = self.toadforce.as_deref_mut()?;
-        card.host_shows(&surface).then_some(surface)
+        card.host_shows(&surface, &mut self.vbe.vram)
+            .then_some(surface)
     }
 
     /// Have the card record what it is given to draw (`ToadForce::

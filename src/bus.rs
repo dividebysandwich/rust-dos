@@ -779,7 +779,7 @@ impl Bus {
             return false;
         };
         let _profile = self.profile.as_deref().map(|p| p.mem_run(dst, true, (len / size) as u64));
-        self.toadforce_touch(offset, len);
+        self.toadforce_writing(offset, len);
         self.vbe.vram[offset..offset + len].copy_from_slice(&self.ram[src..src + len]);
         self.lfb_written(dst, offset, len);
         true
@@ -798,7 +798,7 @@ impl Bus {
             .profile
             .as_deref()
             .map(|p| p.mem_run(dst, true, (len / 4) as u64));
-        self.toadforce_touch(offset, len);
+        self.toadforce_writing(offset, len);
         self.vbe.vram[offset..offset + len].copy_from_slice(bytes);
         self.lfb_written(dst, offset, len);
         true
@@ -813,7 +813,7 @@ impl Bus {
             return false;
         };
         let _profile = self.profile.as_deref().map(|p| p.mem_run(dst, true, count as u64));
-        self.toadforce_touch(offset, len);
+        self.toadforce_writing(offset, len);
         fill_pattern(&mut self.vbe.vram[offset..offset + len], size, value);
         self.lfb_written(dst, offset, len);
         true
@@ -1030,7 +1030,9 @@ impl Bus {
             // VESA modes: the window onto the bank of video memory.
             if self.vbe_window() {
                 let offset = self.vesa_window(addr - ADDR_VGA_GRAPHICS, false);
-                self.toadforce_reads(offset, 1);
+                if let Some(value) = self.toadforce_reads(offset, 1) {
+                    return value as u8;
+                }
                 return self.vbe.vram[offset];
             }
             // Route through VGA so chain-4, odd/even, and Read Map Select
@@ -1049,7 +1051,9 @@ impl Bus {
             return self.ram[addr];
         }
         if let Some(offset) = self.vbe.lfb_offset(addr, 1) {
-            self.toadforce_reads(offset, 1);
+            if let Some(value) = self.toadforce_reads(offset, 1) {
+                return value as u8;
+            }
             return self.vbe.vram[offset];
         }
         if let Some(at) = self.powervr_at(addr) {
@@ -1306,9 +1310,10 @@ impl Bus {
     /// in for repainting.
     #[inline]
     fn write_vram(&mut self, offset: usize, bytes: &[u8]) {
-        // What a ToadForce's driver queued to draw there comes first,
-        // and what its host renderer drew there.
-        self.toadforce_touch(offset, bytes.len());
+        // What a ToadForce's driver queued to draw there comes first.
+        // Where its host renderer has newer pixels, the card notes
+        // these bytes as card memory's.
+        self.toadforce_writing(offset, bytes.len());
         self.vbe.vram[offset..offset + bytes.len()].copy_from_slice(bytes);
         self.vram_written(offset, bytes.len());
     }
@@ -1400,7 +1405,9 @@ impl Bus {
             self.observe.mapped(addr, self.ram.len());
         }
         if let Some(offset) = self.vbe.lfb_offset(addr, 2) {
-            self.toadforce_reads(offset, 2);
+            if let Some(value) = self.toadforce_reads(offset, 2) {
+                return value as u16;
+            }
             return u16::from_le_bytes([self.vbe.vram[offset], self.vbe.vram[offset + 1]]);
         }
         if let Some(port) = self.s3_mmio(addr) {
@@ -1443,7 +1450,9 @@ impl Bus {
             self.observe.mapped(addr, self.ram.len());
         }
         if let Some(offset) = self.vbe.lfb_offset(addr, 4) {
-            self.toadforce_reads(offset, 4);
+            if let Some(value) = self.toadforce_reads(offset, 4) {
+                return value;
+            }
             let v = &self.vbe.vram[offset..offset + 4];
             return u32::from_le_bytes([v[0], v[1], v[2], v[3]]);
         }

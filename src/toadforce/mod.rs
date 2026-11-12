@@ -319,17 +319,24 @@ impl ToadForce {
         self.record_end();
     }
 
-    /// The program read `len` bytes of card memory at `offset` by
-    /// itself, where `ahead`: counted for the status if the host has
-    /// newer pixels there (see `gpu::Gpu::stale_read`).
-    pub fn stale_read(&self, offset: u32, len: u32) {
-        self.gpu.stale_read(offset, len);
+    /// The processor is about to write `len` bytes of `memory`, card
+    /// memory, at `offset`, where `ahead`: the card notes them, and
+    /// nothing is read back (`gpu::Gpu::writing`).
+    pub fn writing(&mut self, offset: u32, len: u32) {
+        self.gpu.writing(offset, len);
+    }
+
+    /// The program reads `len` bytes of `memory`, card memory, at
+    /// `offset` by itself, where `ahead`: their value if the host has
+    /// newer pixels there (`gpu::Gpu::read`).
+    pub fn read_ahead(&self, offset: u32, len: u32, memory: &[u8]) -> Option<u32> {
+        self.gpu.read(offset, len, memory)
     }
 
     /// Whether the host renderer shows `surface`, the picture on the
     /// screen, from its own copy this frame (`Gpu::shows`).
-    pub fn host_shows(&mut self, surface: &format::Surface) -> bool {
-        self.gpu.shows(surface)
+    pub fn host_shows(&mut self, surface: &format::Surface, memory: &mut [u8]) -> bool {
+        self.gpu.shows(surface, memory)
     }
 
     /// Whether the host shows this frame's picture: asked once, by the
@@ -386,10 +393,10 @@ impl ToadForce {
             "renderer": self.gpu.name(),
             "recording": self.recording(),
             "host": {
-                "read_backs": self.gpu.read_backs,
+                "read_backs": self.gpu.read_backs(),
                 "read_backs_for": self.gpu.causes(),
                 "declined_draws": self.gpu.declined,
-                "stale_reads": self.gpu.stale_reads(),
+                "writes": self.gpu.writes(),
                 "counts": self.gpu.status(),
             },
         })

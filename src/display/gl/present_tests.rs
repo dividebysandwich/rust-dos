@@ -1045,8 +1045,13 @@ fn a_toadforce_surface_is_shown_from_the_hosts_copy() {
         fn card(cpu: &mut Cpu) -> &mut rust_dos::toadforce::ToadForce {
             cpu.bus.toadforce.as_mut().expect("a ToadForce")
         }
+        fn shows(cpu: &mut Cpu, surface: &Surface) -> bool {
+            let bus = &mut cpu.bus;
+            let card = bus.toadforce.as_mut().expect("a ToadForce");
+            card.host_shows(surface, &mut bus.vbe.vram)
+        }
         // Nothing is drawn yet: the picture is card memory's.
-        assert!(!card(&mut cpu).host_shows(&colour), "{format:?}");
+        assert!(!shows(&mut cpu, &colour), "{format:?}");
         assert!(!card(&mut cpu).host_presents(), "{format:?}");
 
         let target = Target {
@@ -1093,7 +1098,7 @@ fn a_toadforce_surface_is_shown_from_the_hosts_copy() {
 
         // The host has the surface, and the frame's read-back is left
         // out once.
-        assert!(card(&mut cpu).host_shows(&colour), "{format:?}");
+        assert!(shows(&mut cpu, &colour), "{format:?}");
         assert!(card(&mut cpu).host_presents(), "{format:?}");
         assert!(!card(&mut cpu).host_presents(), "{format:?}");
 
@@ -1150,7 +1155,7 @@ fn a_toadforce_surface_is_shown_from_the_hosts_copy() {
         };
         assert_eq!(first, green, "{format:?}");
         // The copy is what card memory holds now, and still shown.
-        assert!(card(&mut cpu).host_shows(&colour), "{format:?}");
+        assert!(shows(&mut cpu, &colour), "{format:?}");
         cpu.bus.toadforce_set_host(None);
     }
 }

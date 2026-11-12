@@ -194,6 +194,12 @@ impl Host for HostLink {
             .blt(dst, dst_rect, src, src_rect, key, memory, pages)
     }
 
+    fn write(&mut self, surface: &Surface, rects: &[Rect], memory: &[u8]) -> bool {
+        let mut host = self.0.borrow_mut();
+        host.as_mut()
+            .is_some_and(|h| h.write(surface, rects, memory))
+    }
+
     fn read_back(
         &mut self,
         surface: &Surface,

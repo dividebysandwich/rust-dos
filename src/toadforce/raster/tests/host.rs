@@ -39,6 +39,8 @@ struct Log {
     /// `FILL`s and `BLT`s done in the host's copies.
     fills: u32,
     blits: u32,
+    /// The times the processor's pixels were put in a copy (`write`).
+    writes: u32,
     /// Images of textures taken from the host's copy of the surface
     /// they are.
     images_from_copies: u32,
@@ -375,17 +377,26 @@ impl Host for TestHost {
         let size = (src_rect.width, src_rect.height);
         if key.is_some()
             || size != (dst_rect.width, dst_rect.height)
-            || !colour(dst.format)
-            || !colour(src.format)
             || dst.format.bytes() != src.format.bytes()
         {
             return None;
         }
-        let find = |s: &Surface| self.copies.iter().find(|c| gpu::within(s, &c.surface));
+        // The copies of the bytes the two name, under whatever format:
+        // the copies' formats say what the bits are.
+        let find = |s: &Surface| self.copies.iter().find(|c| gpu::alias(s, &c.surface));
         let from = find(src).filter(|c| c.ahead);
-        if from.is_none() && !find(dst).is_some_and(|c| c.ahead) {
+        let to = find(dst);
+        if from.is_none() && !to.is_some_and(|c| c.ahead) {
             return None;
         }
+        let kept = |c: &Copy| c.surface.format;
+        let format = to.map(kept).or(from.map(kept)).unwrap_or(dst.format);
+        let kind = |f: Format| (depth(f), f.bytes());
+        if !(colour(format) || depth(format)) || from.is_some_and(|c| kind(kept(c)) != kind(format))
+        {
+            return None;
+        }
+        let (dst, src) = (&Surface { format, ..*dst }, &Surface { format, ..*src });
         // What `ToadForceGl::blt` leaves to the processor, though the
         // copies here could do it: a source the host has over other
         // bytes of the destination's, and one over the destination's
@@ -429,6 +440,32 @@ impl Host for TestHost {
         copy.ahead = true;
         self.log.borrow_mut().blits += 1;
         Some(surface)
+    }
+
+    fn write(&mut self, surface: &Surface, rects: &[Rect], memory: &[u8]) -> bool {
+        let copy = self
+            .copies
+            .iter_mut()
+            .find(|c| c.ahead && gpu::within(surface, &c.surface));
+        let Some(copy) = copy else {
+            return false;
+        };
+        let whole = copy.surface;
+        // The rectangles from card memory, behind the copy's rows in
+        // one buffer.
+        let offset = copy.pixels.len();
+        let mut both = copy.pixels.clone();
+        both.extend_from_slice(memory);
+        let from = Surface {
+            offset: whole.offset + offset as u32,
+            ..whole
+        };
+        for rect in rects {
+            blit::blt(&mut both, &packed(&whole), rect, &from, rect, None);
+        }
+        copy.pixels = both[..offset].to_vec();
+        self.log.borrow_mut().writes += 1;
+        true
     }
 
     fn read_back(&mut self, surface: &Surface, memory: &mut [u8], pages: Option<&Pages>) -> bool {
@@ -527,13 +564,26 @@ fn same(declines: Declines, scene: fn(&mut Rig)) -> (Rig, Rc<RefCell<Log>>) {
 }
 
 /// The processor writes `bytes` to card memory at `at`, as the bus
-/// does it: what the host drew there is read back first, and the
-/// write is counted.
+/// does it: the card notes them where the host has newer pixels, and
+/// the write is counted.
 fn poke(rig: &mut Rig, at: usize, bytes: &[u8]) {
     let (first, len) = (at as u32, bytes.len() as u32);
-    rig.card.settle(&mut rig.memory, Some((first, first + len)));
+    if rig.card.ahead() {
+        rig.card.writing(first, len);
+    }
     rig.memory[at..at + bytes.len()].copy_from_slice(bytes);
     rig.card.wrote(first, len);
+}
+
+/// The program reads the pixel at `at` of card memory, as the bus does
+/// it: from the host where it has a newer one.
+fn peek(rig: &Rig, at: usize) -> u32 {
+    let memory = &rig.memory;
+    let ahead = rig.card.ahead();
+    let hosts = ahead.then(|| rig.card.read_ahead(at as u32, 4, memory));
+    hosts.flatten().unwrap_or_else(|| {
+        u32::from_le_bytes([memory[at], memory[at + 1], memory[at + 2], memory[at + 3]])
+    })
 }
 
 fn rect(left: u32, top: u32, width: u32, height: u32) -> Rect {
@@ -671,17 +721,16 @@ fn the_hosts_draws_and_the_processors_keep_the_cards_order() {
         let host = rig.card.describe(Rig::live());
         assert_eq!(host["renderer"], "test");
         assert_eq!(host["host"]["declined_draws"], declined);
-        assert_eq!(host["host"]["stale_reads"], 0);
         let log = log.borrow();
         assert_eq!(host["host"]["read_backs"], log.read_backs);
-        // Every write of the processor into the target made the host
-        // copy it again.
-        assert!(log.uploads > 2 && log.read_backs > 2);
+        // What the processor wrote into the target went to the host's
+        // copy of it.
+        assert!(log.uploads >= 2 && log.writes >= 1);
     }
 }
 
 #[test]
-fn a_write_of_the_processor_makes_the_host_copy_the_target_again() {
+fn a_write_of_the_processor_into_a_target_goes_to_the_hosts_copy() {
     let (mut rig, log) = hosted(takes_all);
     let part = [rect(0, 0, 32, 32)];
     let error = rig.run(|w| encode::clear(w, CLEAR_COLOUR, 0xFF20_2020, 0.0, 0, &part));
@@ -696,17 +745,125 @@ fn a_write_of_the_processor_makes_the_host_copy_the_target_again() {
     poke(&mut rig, BUFFER as usize, &[1; 64]);
     assert_eq!(rig.draw(4, &corner(40.0, 0.0, 8.0, 0.0, 0xFFFF_0000)), 0);
     assert_eq!((log.borrow().uploads, log.borrow().read_backs), (2, 0));
-    // One into the colour buffer reads it back, and the next draw
-    // copies it again, the colour buffer alone.
+    // One into the colour buffer reads nothing back: the card notes
+    // the pixel, and the next draw has the host write it into its
+    // copy, which is copied from card memory no more.
     let at = rig.colour().at(1, 40);
     poke(&mut rig, at, &[0x55; 4]);
-    assert_eq!(log.borrow().read_backs, 1);
-    assert_eq!(rig.px(1, 1), 0xFF_0000);
+    assert_eq!((log.borrow().read_backs, log.borrow().writes), (0, 0));
     assert_eq!(rig.draw(4, &corner(0.0, 20.0, 8.0, 0.0, 0xFF00_FF00)), 0);
-    assert_eq!(log.borrow().uploads, 3);
+    assert_eq!((log.borrow().uploads, log.borrow().writes), (2, 1));
+    assert_eq!(log.borrow().read_backs, 0);
     rig.card.settle(&mut rig.memory, None);
     assert_eq!(rig.px(1, 40), 0x5555_5555);
+    assert_eq!(rig.px(1, 1), 0xFF_0000);
     assert_eq!(rig.px(1, 21), 0x00_FF00);
+}
+
+#[test]
+fn the_program_reads_a_surface_that_is_ahead_from_the_hosts_pixels() {
+    let (mut rig, log) = hosted(takes_all);
+    triangles(&mut rig);
+    let colour = rig.colour();
+    assert!(rig.card.ahead());
+    // Card memory has nothing of the picture, and a read through the
+    // bus gets the host's pixel: the surface is fetched once for any
+    // number of reads.
+    assert_eq!(rig.px(4, 34), 0);
+    assert_eq!(peek(&rig, colour.at(4, 34)) & 0xFF_FFFF, 0xFF_0000);
+    assert_eq!(peek(&rig, colour.at(60, 2)) & 0xFF_FFFF, 0x20_2020);
+    assert_eq!(log.borrow().read_backs, 1);
+    assert!(rig.card.ahead());
+    // A pixel the program wrote is card memory's, and one beside it
+    // the host's still. A read across the two has each byte from its
+    // own.
+    poke(&mut rig, colour.at(4, 34), &[1, 2, 3, 4]);
+    assert_eq!(peek(&rig, colour.at(4, 34)), 0x0403_0201);
+    assert_eq!(peek(&rig, colour.at(5, 34)) & 0xFF_FFFF, 0xFF_0000);
+    assert_eq!(peek(&rig, colour.at(4, 34) + 2), 0x0000_0403);
+    assert_eq!(log.borrow().read_backs, 1);
+    // Bytes outside every surface that is ahead are card memory's.
+    assert_eq!(rig.card.read_ahead(BUFFER, 4, &rig.memory), None);
+    // The status counts the fetch as a read-back for the lock.
+    let host = rig.card.describe(Rig::live());
+    assert_eq!(host["host"]["read_backs"], 1);
+    assert_eq!(host["host"]["read_backs_for"]["lock"], 1);
+    // The host draws again: its pixels are fetched anew, with the
+    // program's pixel in them.
+    assert_eq!(rig.draw(4, &corner(40.0, 40.0, 8.0, 0.0, 0xFF00_00FF)), 0);
+    assert_eq!(log.borrow().writes, 1);
+    assert_eq!(peek(&rig, colour.at(41, 41)) & 0xFF_FFFF, 0x00_00FF);
+    assert_eq!(peek(&rig, colour.at(4, 34)), 0x0403_0201);
+    assert_eq!(log.borrow().read_backs, 2);
+    // A saved state has the host's pixels.
+    let saved = rig.card.settled(&rig.memory).expect("a surface ahead");
+    let at = colour.at(41, 41);
+    assert_eq!(saved[at..at + 3], [0xFF, 0, 0]);
+    assert_eq!(saved[colour.at(4, 34)..][..4], [1, 2, 3, 4]);
+}
+
+#[test]
+fn a_surface_written_in_parts_of_pixels_is_read_back_around_them() {
+    let (mut rig, log) = hosted(takes_all);
+    triangles(&mut rig);
+    let colour = rig.colour();
+    // Two bytes of a pixel: the host takes whole pixels, so the next
+    // draw has the surface read back, with the two bytes kept, and
+    // copied again.
+    let at = colour.at(4, 34);
+    poke(&mut rig, at + 1, &[0xAB, 0xCD]);
+    let uploads = log.borrow().uploads;
+    assert_eq!(rig.draw(4, &corner(40.0, 40.0, 8.0, 0.0, 0xFF00_00FF)), 0);
+    assert_eq!((log.borrow().writes, log.borrow().read_backs), (0, 1));
+    assert_eq!(log.borrow().uploads, uploads + 1);
+    let host = rig.card.describe(Rig::live());
+    assert_eq!(host["host"]["read_backs_for"]["program"], 1);
+    rig.card.settle(&mut rig.memory, None);
+    assert_eq!(rig.memory[at..at + 3], [0, 0xAB, 0xCD]);
+    assert_eq!(rig.px(41, 41), 0x00_00FF);
+    assert_eq!(rig.px(5, 34), 0xFF_0000);
+}
+
+/// A scene's depth kept in a second depth buffer the processor wrote,
+/// and put back with a `BLT` that names both as colour, as DirectDraw
+/// blits between two z-buffers: the triangle drawn after it is cut by
+/// the depth that was put back.
+fn depth_put_back(rig: &mut Rig) {
+    let depth = target(rig).depth_surface().expect("a depth buffer");
+    let named = |s: &Surface| Surface {
+        format: Format::R5G6B5,
+        ..*s
+    };
+    let kept = Surface {
+        offset: BUFFER,
+        ..depth
+    };
+    // The kept depth: near on the left half, far on the right.
+    for y in 0..kept.height {
+        for x in 0..kept.width {
+            let z: u16 = if x < kept.width / 2 { 0x0010 } else { 0xFFFF };
+            poke(rig, kept.at(x, y), &z.to_le_bytes());
+        }
+    }
+    rig.clear(CLEAR_COLOUR | CLEAR_DEPTH, 0xFF20_2020, 1.0, 0);
+    rig.states(&[(RS_ZENABLE, 1)]);
+    assert_eq!(rig.draw(4, &corner(2.0, 2.0, 40.0, 0.5, 0xFFFF_0000)), 0);
+    let all = rect(0, 0, depth.width, depth.height);
+    let error = rig.run(|w| command::encode::blt(w, &named(&depth), &all, &named(&kept), &all, None));
+    assert_eq!(error, 0);
+    assert_eq!(rig.draw(4, &corner(0.0, 0.0, 128.0, 0.5, 0xFF00_FF00)), 0);
+}
+
+#[test]
+fn a_blt_between_depth_buffers_named_as_colour_copies_the_hosts_depth() {
+    let (mut rig, log) = hosted(takes_all);
+    depth_put_back(&mut rig);
+    // The host copied the depth: nothing was read back for it.
+    assert_eq!((log.borrow().blits, log.borrow().read_backs), (1, 0));
+    let (rig, _) = same(takes_all, depth_put_back);
+    // The triangle shows where the kept depth is far.
+    assert_eq!(rig.px(50, 50), 0x00_FF00);
+    assert_ne!(rig.px(10, 50), 0x00_FF00);
 }
 
 /// A surface the card draws into and then samples.
@@ -1371,13 +1528,13 @@ fn the_screen_shows_a_surface_from_the_hosts_copy_while_it_is_current() {
     let (mut rig, log) = hosted(takes_all);
     let colour = rig.colour();
     // The host has no copy of a surface nothing was drawn into.
-    assert!(!rig.card.host_shows(&colour));
+    assert!(!rig.card.host_shows(&colour, &mut rig.memory));
     assert!(!rig.card.host_presents());
 
     triangles(&mut rig);
     // The copy is ahead: the screen shows it, and the frame's read-back
     // of the picture is left out, once for each time it is asked.
-    assert!(rig.card.host_shows(&colour));
+    assert!(rig.card.host_shows(&colour, &mut rig.memory));
     assert!(rig.card.host_presents());
     assert!(!rig.card.host_presents());
     assert!(rig.card.ahead());
@@ -1388,15 +1545,15 @@ fn the_screen_shows_a_surface_from_the_hosts_copy_while_it_is_current() {
     let (first, end) = gpu::range(&colour);
     rig.card.settle(&mut rig.memory, Some((first, end)));
     assert_eq!(log.borrow().read_backs, 1);
-    assert!(rig.card.host_shows(&colour));
+    assert!(rig.card.host_shows(&colour, &mut rig.memory));
 
     // The processor draws into it, as GDI does: card memory is the
     // picture until the host has the surface again.
     poke(&mut rig, first as usize, &[1, 2, 3, 4]);
-    assert!(!rig.card.host_shows(&colour));
+    assert!(!rig.card.host_shows(&colour, &mut rig.memory));
     assert!(!rig.card.host_presents());
     assert_eq!(rig.draw(4, &corner(0.0, 0.0, 30.0, 0.0, 0xFF11_2233)), 0);
-    assert!(rig.card.host_shows(&colour));
+    assert!(rig.card.host_shows(&colour, &mut rig.memory));
 }
 
 /// Make `colour` the render target, with no depth buffer.
@@ -1437,8 +1594,6 @@ fn writes_into_a_surface_ahead(rig: &mut Rig) {
     let screen = rig.colour();
     let poke_at = |rig: &mut Rig, x: u32, y: u32| {
         poke(rig, s.at(x, y), &[0x11, 0x22, 0x33, 0x44]);
-        // The host's copy is stale: the screen isn't shown from it.
-        assert!(!rig.card.host_shows(&s));
     };
     draw_into(rig, s, 0xFF20_4060);
     poke_at(rig, 3, 3);
@@ -1478,7 +1633,7 @@ fn a_write_into_a_surface_that_is_ahead_is_seen_by_every_host_path() {
     writes_into_a_surface_ahead(&mut rig);
     // The clear of all of the surface was the host's, and the copy it
     // wrote is shown.
-    assert!(rig.card.host_shows(&texture_surface()));
+    assert!(rig.card.host_shows(&texture_surface(), &mut rig.memory));
     assert!(log.borrow().blits >= 1);
     let (rig, _) = same(takes_all, writes_into_a_surface_ahead);
     // The squares sampled after the write of a part, and after the
