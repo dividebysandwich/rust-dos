@@ -858,7 +858,8 @@ pixels.
   filtered down to the target's own size.
 
 Step 4b builds the renderer behind `gpu::Host` (`src/toadforce/gl.rs`),
-on desktop OpenGL 3.2. Nothing attaches it yet: that is step 4c. It
+on desktop OpenGL 3.2, and step 4c attaches it to the card of a
+running machine (see "The window's side" below). It
 draws the screen vertices the card hands it, so the vertex work stays
 on the processor, and it has:
 
@@ -1012,6 +1013,100 @@ has an OpenGL 3.2 context and the run isn't deterministic.
 - **The picture shown** is read back once a host frame at first, and
   comes from the host's texture once that is built (see "The visible
   surface" above).
+
+### The window's side
+
+The window's OpenGL screen (`display::gl::GlScreen`) owns the one
+`ToadForceGl` of its context, made the first time a card needs it. A
+card gets a link to it (`HostLink`, a `gpu::Host` that passes every
+call on), through `Bus::toadforce_set_host`, which runs the queued
+commands and reads everything back before the renderer changes.
+`Display::run_toadforce` does this once a frame from the main loop:
+
+- A machine with a ToadForce and no link gets one when
+  `toadforce_renderer` is `auto` or `opengl`, the window has desktop
+  OpenGL 3.2 and the run isn't deterministic. A new machine's card
+  gets the same renderer, which first drops every copy it has.
+- With `software`, in a deterministic run, or in a window drawn by
+  SDL's renderer, a card that has a link loses it, and its memory
+  holds every pixel from then on. `opengl` says once in the log why
+  OpenGL doesn't draw; `auto` says nothing.
+- The renderer ends with the window, before the context does. A card
+  that lives longer keeps a link that takes no draw, so it draws in
+  software. The emulator's own order ends the machine first.
+- A loaded state keeps the link, and the renderer drops its copies
+  (`Bus::toadforce_after_load`).
+
+The renderer shares the context with the window's own drawing and
+leaves OpenGL's reset state after every call (`ToadForceGl::leave`),
+as the 3dfx renderer does, so neither has to know of the other. A
+machine has one display adapter, so a ToadForce and a Banshee or
+Voodoo3 never meet. A Voodoo Graphics or Voodoo2 board beside a
+ToadForce is possible in the configuration; each renderer then
+draws between the other's calls, from the reset state.
+
+The picture still comes from card memory: the surface on the screen
+is read back once a frame (`Bus::toadforce_show`) and goes to the
+window as any Super VGA picture does. Step 4d shows the host's texture
+instead.
+
+`/api/status` has the renderer's name and what it costs under
+`video.toadforce` (`docs/llm-debugging.md`): the read-backs by what
+asked for them, the declined draws, and the renderer's own counts.
+`RUST_DOS_TOADFORCE_GL_DETERMINISTIC=1` keeps OpenGL drawing in a
+deterministic run, for comparing the two renderers' frames at equal
+emulated times. It is a tool for that comparison only: the frames of
+such a run depend on the host's GPU.
+
+### What the first games showed (2026-11-12)
+
+Deterministic runs of one build with each renderer, frames compared
+at equal emulated times. The host is an RTX 4080, which fails the
+5-6-5 test, so 16-bit targets are drawn with 8 bits a channel. No
+draw was declined and no read was stale in any of them.
+
+| Game and scene | Pixels that differ | By more than 8 in 255 | Mean difference |
+|---|---|---|---|
+| Giants, first mission, 800x600, 32 bits | 27% (24% by 1 or 2) | 0.3% | 0.46 |
+| Zanzarah, Fairy Garden, 640x480, 16 bits | 10% to 15% (most by one step of the screen's) | 1.5% to 2.4% | 0.65 to 0.99 |
+| Oni, training room, 640x480, 16 bits | 6% (5% by one step) | 0.7% to 0.8% | 0.37 to 0.40 |
+
+The pictures are right by eye in all three. The differences of 1 and
+2 are the filtered textures' weights; a step of a 16-bit screen is a
+value near a rounding boundary that the weights put on the other
+side. The larger ones are on the edges of alpha-tested leaves and
+fences, where a filtered alpha one off the reference turns a pixel on
+or off, on distant ground, where the host picks the mip level, and on
+triangle edges. Menus and loading screens are identical.
+
+Read-backs for each frame the game shows, and what asks for them:
+
+| Game | Read-backs a frame | What asks |
+|---|---|---|
+| Giants | 5 | the screen (1); a target a later draw samples (3: the sea's and the sky's 256x256 and 64x64 targets); `CLEAR` of a 64x64 target the host declined (1) |
+| Zanzarah | 2.7 | `CLEAR` (1.4), a sampled target (0.5), the DirectDraw driver's own reads and writes (0.3), the screen (0.4) |
+| Oni | 1 | the OpenGL front end's `SwapBuffers`, which copies the back buffer to the screen on the processor |
+
+What they say to do next, in the order of what they cost:
+
+- **A target that is sampled.** The host reads the target back and
+  decodes it again as a texture. A texture whose one level is a
+  surface the host has, in a format it samples as it is, can be the
+  host's copy itself.
+- **`CLEAR` declined over a shared page.** `Pages` counts by 4 KiB
+  page, and Giants' 64x64 targets lie 16 KiB apart off the page
+  boundaries, so a processor write to one makes its neighbours'
+  copies stale, the host declines their `CLEAR`, and the processor's
+  `CLEAR` writes again. A `CLEAR` of a whole surface with every bit
+  needs no current copy. Stamps by byte range would end the false
+  sharing for draws too.
+- **One depth buffer under targets of several sizes.** Giants draws
+  its small targets with the screen's depth buffer, which the host
+  holds as surfaces of different sizes over the same bytes, so each
+  change of target drops and reads back the other.
+- **The screen.** Step 4d's present from the host's texture.
+- **`SwapBuffers` and the drivers' blits.** `BLT` on the host, and
+  the OpenGL front end showing its back buffer with it.
 
 It is built in these steps, each a pull request: the interface with
 the tracking and a host that draws in software, to test the protocol
@@ -1287,10 +1382,19 @@ Measured in real time with `cycles=max`, alone on the development
 machine, sound on a muted device. Each is one run of 20 seconds, so a
 rough figure.
 
-| Game and scene | ToadForce, software | Voodoo3, software | Voodoo3, OpenGL |
-|---|---|---|---|
-| Giants, first mission, 800x600 (2026-11-12, after phase 3) | 14 | 21 | 17 |
-| Oni, training room, 640x480 (2026-11-11, with #944) | 15 | 23 | 29 |
+| Game and scene | ToadForce, software | ToadForce, OpenGL | Voodoo3, software | Voodoo3, OpenGL |
+|---|---|---|---|---|
+| Giants, first mission, 800x600 (2026-11-12, after phase 3) | 14 | | 21 | 17 |
+| Oni, training room, 640x480 (2026-11-11, with #944) | 15 | | 23 | 29 |
+| Giants, the same (2026-11-12, step 4c) | 15 | 25 | | |
+| Oni, the same (2026-11-12, step 4c) | 15 | 20 | | |
+
+With OpenGL the emulator's thread is 86% busy in Giants and 82% in
+Oni, as it was in software: it still transforms and clips every
+vertex, hands the host a draw call for each of the game's (Oni's are
+a few triangles each, 1.65 million of them to the training room),
+and waits for the GPU at each read-back listed under "What the first
+games showed".
 
 Giants stays under 30 on every card, the Voodoo3 drawn by the host's
 GPU included, with the emulated machine at full speed and the
