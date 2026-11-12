@@ -4,6 +4,15 @@
 //! words a guest's driver would put in the command ring and hands them
 //! to the card (`Bus::toadforce_submit`).
 //!
+//! A copy from a surface in system memory to one in card memory is the
+//! card's too. The driver writes the source's rectangle into a block of
+//! card memory it takes for the copy, and the card copies from there.
+//! Written by the processor, the destination's rows would have to be
+//! in card memory first: a destination the host renderer draws is read
+//! back from the GPU for every such blit, which a program that puts
+//! its interface on the back buffer this way does every frame (No One
+//! Lives Forever's menus).
+//!
 //! Only blits the card does exactly as DirectDraw's own code does them
 //! come here, so a picture doesn't depend on which of the two drew it.
 //! A stretch isn't one: the card takes the source pixel under each
@@ -12,6 +21,7 @@
 //! of colours aren't the card's at all.
 
 use super::blt::Key;
+use super::display;
 use super::surface::{self, Surface};
 use crate::cpu::Cpu;
 use crate::toadforce::caps;
@@ -119,14 +129,33 @@ pub(super) fn copy(
     let Some(format) = format else {
         return false;
     };
-    let (Some(dst), Some(source)) = (
-        card_surface(cpu, blit.dst, format),
-        card_surface(cpu, src, format),
-    ) else {
+    let Some(dst) = card_surface(cpu, blit.dst, format) else {
         return false;
+    };
+    // A source in system memory is copied from a block of card memory
+    // that holds its rectangle, whose top left is then the block's.
+    let staged = src.memory == surface::MEM_SYSTEM;
+    let inside = from.left >= 0
+        && from.top >= 0
+        && from.right as i64 <= src.width as i64
+        && from.bottom as i64 <= src.height as i64;
+    let (source, origin) = if staged {
+        if !inside || src.lost || src.compressed() {
+            return false;
+        }
+        let Some(source) = stage(cpu, src, from, format) else {
+            return false;
+        };
+        (source, (from.left, from.top))
+    } else {
+        let Some(source) = card_surface(cpu, src, format) else {
+            return false;
+        };
+        (source, (0, 0))
     };
     // Each rectangle's part of the source, which has to be in it.
     let (dx, dy) = (from.left - blit.area.left, from.top - blit.area.top);
+    let (dx, dy) = (dx - origin.0, dy - origin.1);
     let pairs: Vec<(format::Rect, format::Rect)> = blit
         .rects
         .iter()
@@ -138,6 +167,12 @@ pub(super) fn copy(
         .map(|(d, s)| (d, card_rect(&s)))
         .filter(|(_, s)| source.holds(s))
         .collect();
+    // The block goes back whatever comes of the blit. The card runs
+    // the commands queued below before anything else writes its
+    // memory (`Bus::toadforce_submit`), the next blit's block too.
+    if staged {
+        display::free(cpu, source.offset);
+    }
     if pairs.len() != blit.rects.len() {
         return false;
     }
@@ -160,6 +195,32 @@ pub(super) fn copy(
     }
     submit(cpu, blit, &words);
     true
+}
+
+/// The rectangle `from` of the surface `src`, which is in system
+/// memory, written to a block of card memory taken for it: the block
+/// as a surface of `format`, its rows one after another. None when
+/// card memory has no room, and the processor then copies. The caller
+/// gives the block back (`display::free`) once the copy is queued.
+fn stage(cpu: &mut Cpu, src: &Surface, from: &Rect, format: Format) -> Option<format::Surface> {
+    let bytes = src.bytes_per_pixel();
+    let (width, height) = (from.width() as u32, from.height() as u32);
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let pitch = width * bytes;
+    let start = display::alloc(cpu, pitch * height).ok()?;
+    let words = [start, pitch, width, height, format.code()];
+    let Ok(staged) = format::Surface::parse(&words, caps::BLIT_FORMATS, screen::memory_size(cpu))
+    else {
+        display::free(cpu, start);
+        return None;
+    };
+    let mut data = vec![0u8; (pitch * height) as usize];
+    let at = from.top as u32 * src.pitch + from.left as u32 * bytes;
+    surface::read_rows(cpu, src, at, pitch as usize, &mut data);
+    screen::write(cpu, start, &data);
+    Some(staged)
 }
 
 /// Hand the card the commands, and count what they drew of the picture
