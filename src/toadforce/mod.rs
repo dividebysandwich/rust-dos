@@ -27,6 +27,7 @@
 
 pub mod blit;
 pub mod caps;
+pub mod capture;
 pub mod command;
 pub mod display;
 pub mod format;
@@ -143,6 +144,9 @@ pub struct ToadForce {
     /// The commands since the card was made, for a look at what drives
     /// it. No part of the card's state.
     counts: Counts,
+    /// The recording of what the card is given to draw, while one is
+    /// made (`capture`). No part of the card's state.
+    capture: capture::Slot,
 }
 
 /// How long a queued command waits at most, in nanoseconds of the
@@ -191,7 +195,7 @@ crate::state_fields!(ToadForce {
     level1,
     queue,
     queue_since,
-} skip { counts, raster, gpu });
+} skip { counts, raster, gpu, capture });
 
 impl ToadForce {
     /// A card with `memory` bytes of card memory (one of
@@ -221,7 +225,26 @@ impl ToadForce {
             queue: Vec::new(),
             queue_since: 0,
             counts: Counts::default(),
+            capture: capture::Slot::default(),
         }
+    }
+
+    /// Record what the card is given to draw from its next run of
+    /// commands on, until `flips` page flips or with 0 until
+    /// `record_end`, into the new file `path` (`capture`).
+    pub fn record(&mut self, path: &std::path::Path, flips: u32) -> std::io::Result<()> {
+        self.capture.0 = Some(Box::new(capture::Recorder::new(path, flips)?));
+        Ok(())
+    }
+
+    /// End the recording, if one is being made.
+    pub fn record_end(&mut self) {
+        self.capture.0 = None;
+    }
+
+    /// Whether a recording is being made.
+    pub fn recording(&self) -> bool {
+        self.capture.0.is_some()
     }
 
     /// The bytes of card memory.
@@ -581,9 +604,26 @@ impl ToadForce {
     /// header's length left no next command to find, which drops the
     /// rest of what was submitted.
     fn run(&mut self, words: &[u32], origin: Origin, memory: &mut [u8], fx: &mut Effects) -> bool {
+        let recorder = self.capture.0.take();
+        let flips = self.counts.flip;
+        let recorder = recorder.and_then(|mut recorder| {
+            // The recording has card memory with everything drawn.
+            self.gpu.settle(memory, None);
+            let mut state = crate::savestate::Writer::new();
+            crate::savestate::State::save(self, &mut state);
+            let done = recorder.before(&state.buf, memory, words);
+            done.is_ok().then_some(recorder)
+        });
         let whole = self.run_each(words, origin, memory, fx);
         // The draws of a run are drawn by its end.
         self.raster.flush(memory, &mut self.gpu);
+        if let Some(mut recorder) = recorder {
+            self.gpu.settle(memory, None);
+            let flips = (self.counts.flip - flips) as u32;
+            if let Ok(false) = recorder.after(memory, flips) {
+                self.capture.0 = Some(recorder);
+            }
+        }
         whole
     }
 

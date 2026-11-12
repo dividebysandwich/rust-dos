@@ -362,6 +362,23 @@ impl Bus {
         self.toadforce_read_back(Some((clamp(start), clamp(end))), Cause::Show);
     }
 
+    /// Have the card record what it is given to draw (`ToadForce::
+    /// record`), or with no `path` end its recording. False without a
+    /// card or when the file can't be made.
+    pub fn toadforce_record(&mut self, path: Option<&std::path::Path>, flips: u32) -> bool {
+        self.toadforce_flush();
+        let Some(card) = self.toadforce.as_deref_mut() else {
+            return false;
+        };
+        match path {
+            Some(path) => card.record(path, flips).is_ok(),
+            None => {
+                card.record_end();
+                true
+            }
+        }
+    }
+
     /// Have the card run `words`, or its queue.
     fn toadforce_run(&mut self, words: Option<&[u32]>) {
         let live = self.toadforce_live();

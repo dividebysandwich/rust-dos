@@ -123,6 +123,7 @@ fn router(state: AppState) -> Router {
         .route("/api/exceptions", get(exceptions))
         .route("/api/win32", get(win32).post(win32_post))
         .route("/api/win32/ddraw", get(win32_ddraw))
+        .route("/api/toadforce/capture", post(toadforce_capture))
         .route("/api/win32/ddraw/surface/{id}", get(win32_surface))
         .route("/ws/trace", get(ws_trace))
         .route("/ws/events", get(ws_events))
@@ -1734,6 +1735,25 @@ async fn win32_post(State(s): State<AppState>, body: Bytes) -> ApiResult {
         return Err(bad(format!("trace '{}' is not all, collapsed or off", b.trace)));
     };
     s.call_json(Cmd::Win32Trace(level), DEFAULT_TIMEOUT).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToadForceCaptureBody {
+    /// The file to make. Left out, the recording being made ends.
+    path: Option<String>,
+    /// The page flips to record, 1 when left out, 0 to record until a
+    /// request without a path.
+    flips: Option<u32>,
+}
+
+async fn toadforce_capture(State(s): State<AppState>, body: Bytes) -> ApiResult {
+    let b: ToadForceCaptureBody = from_value(parse_body(&body)?)?;
+    let cmd = Cmd::ToadForceCapture {
+        path: b.path,
+        flips: b.flips.unwrap_or(1),
+    };
+    s.call_json(cmd, DEFAULT_TIMEOUT).await
 }
 
 async fn win32_ddraw(State(s): State<AppState>) -> ApiResult {

@@ -543,6 +543,17 @@ impl DebugHub {
                 Reply::Json(super::win32::win32_json(cpu))
             }
             Cmd::Win32Ddraw => Reply::Json(super::win32::ddraw_json(cpu)),
+            Cmd::ToadForceCapture { path, flips } => {
+                let file = path.as_deref().map(std::path::Path::new);
+                if !cpu.bus.toadforce() {
+                    Reply::Error(404, "the machine has no ToadForce".into())
+                } else if cpu.bus.toadforce_record(file, flips) {
+                    Reply::Json(serde_json::json!({ "path": path, "flips": flips }))
+                } else {
+                    let path = path.unwrap_or_default();
+                    Reply::Error(400, format!("the file '{path}' can't be made"))
+                }
+            }
             Cmd::Win32Surface { id, keyed } => match rust_dos::win32::snapshot::surface_image(cpu, id, keyed) {
                 Ok((width, height, rgba)) => Reply::Frame(video::Frame::from_rgba(width, height, rgba)),
                 Err(e) => Reply::Error(404, format!("surface {}: {}", id, e)),
