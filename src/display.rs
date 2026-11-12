@@ -101,6 +101,9 @@ pub struct Display<'a> {
     /// OpenGL drew, which the texture of `shown` isn't.
     voodoo_said: bool,
     voodoo_shown: bool,
+    /// The ToadForce's picture the host renderer shows from its own
+    /// copy at the next `present` (`show_toadforce`).
+    toadforce_picture: Option<rust_dos::toadforce::format::Surface>,
     /// Whether the log said why OpenGL doesn't draw the ToadForce.
     toadforce_said: bool,
     /// The layer over the picture last shown (a manual's page), by its
@@ -226,6 +229,7 @@ impl<'a> Display<'a> {
             redraw: true,
             voodoo_said: false,
             voodoo_shown: false,
+            toadforce_picture: None,
             toadforce_said: false,
             layer_shown: None,
             refresh_hz: None,
@@ -487,6 +491,26 @@ impl<'a> Display<'a> {
         }
     }
 
+    /// Whether OpenGL shows a ToadForce's picture this frame from the
+    /// host renderer's own copy of the surface on the screen, which is
+    /// then not read back into card memory: `present`'s `voodoo` is
+    /// the machine's picture without what is drawn over it, as for the
+    /// 3dfx card's. Without `wanted`, and where the renderer hasn't
+    /// the surface, the picture comes from card memory as ever. Called
+    /// every frame, before the machine's picture is drawn.
+    pub fn show_toadforce(&mut self, bus: &mut Bus, wanted: bool) -> bool {
+        self.toadforce_picture = None;
+        let linked = matches!(&self.out, Output::Gl(gl) if gl.toadforce_linked());
+        if !wanted || !linked || !bus.toadforce() {
+            return false;
+        }
+        self.toadforce_picture = bus.toadforce_host_picture();
+        // The frame `present` gets doesn't change with the card's
+        // picture.
+        self.redraw |= self.toadforce_picture.is_some();
+        self.toadforce_picture.is_some()
+    }
+
     /// Show `frame`, which must be as big as the last `set_frame_size`,
     /// if it differs from the one shown or the window needs drawing. The
     /// display keeps the changed rows to compare the next picture with.
@@ -550,8 +574,11 @@ impl<'a> Display<'a> {
                     changed: rows,
                     candidates: Some(candidates),
                 };
-                self.voodoo_shown =
-                    voodoo.is_some_and(|base| gl.present_voodoo(frame, base, display));
+                let toadforce = self.toadforce_picture.take();
+                self.voodoo_shown = voodoo.is_some_and(|base| match toadforce {
+                    Some(surface) => gl.present_toadforce(&surface, frame, base, display),
+                    None => gl.present_voodoo(frame, base, display),
+                });
                 if !self.voodoo_shown
                     && let Err(error) =
                         gl.present(frame, base, rows, display, layer, self.monochrome)

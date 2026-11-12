@@ -615,6 +615,7 @@ fn draw(
     if vertices.is_empty() {
         return;
     }
+    let profile = crate::profile::zone(crate::profile::Zone::OpenGl);
     let Some((index, inner, faces)) = apply(cpu) else {
         return;
     };
@@ -645,6 +646,7 @@ fn draw(
         _ => None,
     };
     let vertices = sided.as_deref().unwrap_or(vertices);
+    drop(profile);
     let _ = d3d_draw::draw_prims(cpu, inner, 8, &layout(), vertices, &prims, 0);
     if let Some(Some(c)) = state(cpu).contexts.get_mut(index) {
         c.drawn = true;

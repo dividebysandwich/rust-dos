@@ -417,7 +417,14 @@ impl Renderer {
             if primitives == 0 {
                 return Ok(None);
             }
-            self.host_runs.push(run);
+            // A draw with the state of the one before it is one run
+            // with it: the host sets its state up once for both.
+            match self.host_runs.last_mut() {
+                Some(last) if Arc::ptr_eq(&last.state, &run.state) || *last.state == *run.state => {
+                    last.vertices.end = run.vertices.end;
+                }
+                _ => self.host_runs.push(run),
+            }
             return Ok(Some(Drawn {
                 primitives,
                 span: gpu::range(&colour),

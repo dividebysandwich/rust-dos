@@ -457,7 +457,11 @@ fn draw_clipped(
     flags: u32,
     blend: Option<Blend>,
 ) -> Result<(), u32> {
-    let Some(mut setup) = setup(cpu, Pass::Draw, id, version, layout, flags) else {
+    let made = {
+        let _profile = crate::profile::zone(crate::profile::Zone::D3dSetup);
+        setup(cpu, Pass::Draw, id, version, layout, flags)
+    };
+    let Some(mut setup) = made else {
         return Err(DDERR_INVALIDPARAMS);
     };
     setup.blend = blend;
@@ -477,7 +481,10 @@ fn draw_set_up(
     prims: &[Prim],
     flags: u32,
 ) {
-    let mut processed = pipeline::process(setup, vertices, layout);
+    let mut processed = {
+        let _profile = crate::profile::zone(crate::profile::Zone::D3dVertices);
+        pipeline::process(setup, vertices, layout)
+    };
     if let Some(clip) = clip {
         for ((p, v), c) in processed.iter_mut().zip(vertices).zip(clip) {
             if let Some(c) = c
@@ -509,7 +516,11 @@ fn rasterize(
     verts: &[Processed],
     prims: &[Prim],
 ) -> pipeline::Drawn {
-    let card = super::device::lend(cpu, id, |cpu, d| super::hal::bind(cpu, d, setup)).flatten();
+    let card = {
+        let _profile = crate::profile::zone(crate::profile::Zone::D3dBind);
+        super::device::lend(cpu, id, |cpu, d| super::hal::bind(cpu, d, setup)).flatten()
+    };
+    let _profile = crate::profile::zone(crate::profile::Zone::D3dDraw);
     match card {
         Some(card) => {
             let mut raster = super::hal::Raster::new(cpu, card);

@@ -7,13 +7,22 @@
 //!   `Colour`), and the host's 16-bit depth or 24-bit depth with
 //!   stencil for the depth formats. A texture is filled from card
 //!   memory when the card's pages say its copy is stale, and read back
-//!   into the card's own bytes. Row 0 of the surface is row 0 of the
+//!   into the card's own bytes. One that is ahead of card memory is
+//!   never filled from it. Row 0 of the surface is row 0 of the
 //!   texture, so the host's window coordinates are the card's and
-//!   nothing is turned over.
+//!   nothing is turned over. A surface that is the top left part of
+//!   another (`gpu::within`) has no texture of its own: the two are
+//!   one texture, of the larger.
 //! - **Textures** are decoded by the software renderer's decoders
 //!   (`texture.rs`) and kept as 8 bits a channel, by the texture's
 //!   description and the stamps of the memory it was read from. The
-//!   host's sampler does the addressing and the filtering.
+//!   host's sampler does the addressing and the filtering. An image
+//!   that is a surface the host has a copy of ahead of card memory
+//!   (`gpu::image_of`) is filled from the copy by a draw (`CONVERT`),
+//!   which gives what the decoder gives for the bytes a read-back
+//!   would write.
+//! - **`CLEAR`, `FILL` and `BLT`** into a copy are the host's clear
+//!   and its copy between framebuffers.
 //! - **Programs.** The fragment shader is printed from the draw's
 //!   steps (`shader.rs`), and kept by them. The depth and stencil
 //!   tests, the blend, the write masks and the clip rectangle are the
@@ -37,7 +46,7 @@ mod replay;
 #[cfg(test)]
 mod tests;
 
-use super::format::{Format, Surface};
+use super::format::{Format, Rect, Surface};
 use super::gpu::{self, Batch, Clear, Host, Pages, Stamp};
 use super::level1::Texture;
 use super::raster::pipeline::{self, Blend, DrawState, Shape, Step, Values};
@@ -45,8 +54,9 @@ use super::raster::sample::{Address, Filter, Mip, Tex};
 use super::raster::span;
 use super::raster::texel::{self, Rgba};
 use super::raster::vertex::ScreenVertex;
+use crate::video::Frame;
 use crate::video::shader::Glsl;
-use crate::voodoo::gl::{Program, compile};
+use crate::voodoo::gl::{Locations, Program, compile};
 use glow::HasContext;
 use shader::Uniforms;
 use std::cell::RefCell;
@@ -92,6 +102,14 @@ struct Copy {
     /// What the pages held when the texture was last what card memory
     /// has.
     stamp: Stamp,
+    /// The texture has pixels card memory hasn't: a draw, a clear or a
+    /// copy went into it since it was last filled or read back. The
+    /// stamp says nothing then.
+    ahead: bool,
+    /// A number no other state of any copy has (`ToadForceGl::change`),
+    /// new with each change of the pixels: what a texture filled from
+    /// the copy keeps of it.
+    version: u64,
 }
 
 /// The sampling states of a stage, as last set on a host texture.
@@ -139,6 +157,12 @@ struct Texels {
     key: Option<glow::Texture>,
     /// The bytes of card memory it was read from, and their stamps.
     ranges: Vec<((u32, u32), Stamp)>,
+    /// For each image, level by level and face by face: the version
+    /// of the host's copy of the surface the image is, when the host
+    /// had one as the image was last filled.
+    sources: Vec<Option<u64>>,
+    /// `ToadForceGl::changes` when `sources` was last compared.
+    seen: u64,
     sampling: Option<Set>,
     key_sampling: Option<Set>,
     /// The batch that last sampled it.
@@ -209,24 +233,89 @@ fn overlap(a: (u32, u32), b: (u32, u32)) -> bool {
     a.0 < b.1 && b.0 < a.1
 }
 
-/// The pixels of `s` in `memory`, a row after another with nothing
-/// between them.
-fn rows(s: &Surface, memory: &[u8]) -> Vec<u8> {
-    let len = (s.width * s.format.bytes()) as usize;
-    let mut out = Vec::with_capacity(len * s.height as usize);
-    for y in 0..s.height {
-        let at = s.at(0, y);
-        out.extend_from_slice(&memory[at..at + len]);
-    }
-    out
-}
-
-/// `pixels`, as `rows` gives them, put where `s` is in `memory`.
+/// `pixels`, the rows of `s` with nothing between them, put where `s`
+/// is in `memory`.
 fn put_rows(s: &Surface, pixels: &[u8], memory: &mut [u8]) {
     let len = (s.width * s.format.bytes()) as usize;
     for (y, row) in pixels.chunks_exact(len).enumerate() {
         let at = s.at(0, y as u32);
         memory[at..at + len].copy_from_slice(row);
+    }
+}
+
+/// The pixels of `rect` of `s` in `memory`, a row after another with
+/// nothing between them.
+fn rect_rows(s: &Surface, rect: &Rect, memory: &[u8]) -> Vec<u8> {
+    let len = (rect.width * s.format.bytes()) as usize;
+    let mut out = Vec::with_capacity(len * rect.height as usize);
+    for y in rect.top..rect.top + rect.height {
+        let at = s.at(rect.left, y);
+        out.extend_from_slice(&memory[at..at + len]);
+    }
+    out
+}
+
+/// The whole of `s`.
+fn all_of(s: &Surface) -> Rect {
+    Rect {
+        left: 0,
+        top: 0,
+        width: s.width,
+        height: s.height,
+    }
+}
+
+/// Fills a texture's image from the host's copy of the surface it is:
+/// one triangle over the image, each pixel the copy's. `u_mode` is the
+/// texture's format and how the copy is kept: 0 for `A8R8G8B8`, 1 for
+/// `X8R8G8B8`, whose alpha is 1 (`texel::decode`), and for `R5G6B5` 2
+/// from a copy of 8 bits a channel, rounded to the format's bits as a
+/// read-back rounds it (`span::pack`), or 3 from a 5-6-5 copy. The
+/// bits are widened as `texel::widen` widens them.
+const CONVERT_VERTEX: &str = "
+void main() {
+    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+";
+const CONVERT: &str = "
+uniform sampler2D u_source;
+uniform int u_mode;
+out vec4 o_color;
+void main() {
+    vec4 c = texelFetch(u_source, ivec2(gl_FragCoord.xy), 0);
+    if (u_mode == 1) {
+        c.a = 1.0;
+    }
+    if (u_mode >= 2) {
+        ivec3 v = ivec3(c.rgb * vec3(31.0, 63.0, 31.0) + 0.5);
+        if (u_mode == 2) {
+            v = (ivec3(c.rgb * 255.0 + 0.5) * ivec3(31, 63, 31) + 127) / 255;
+        }
+        v = ivec3((v.r << 3) | (v.r >> 2), (v.g << 2) | (v.g >> 4), (v.b << 3) | (v.b >> 2));
+        c = vec4(vec3(v) / 255.0, 1.0);
+    }
+    o_color = c;
+}
+";
+
+/// Where `CONVERT`'s uniforms are.
+struct Convert {
+    mode: Option<glow::UniformLocation>,
+}
+
+impl Locations for Convert {
+    fn resolve(gl: &glow::Context, program: glow::Program) -> Self {
+        // SAFETY: the program was linked on this context, which is
+        // current.
+        unsafe {
+            gl.use_program(Some(program));
+            let source = gl.get_uniform_location(program, "u_source");
+            gl.uniform_1_i32(source.as_ref(), SCRATCH_UNIT as i32);
+            Convert {
+                mode: gl.get_uniform_location(program, "u_mode"),
+            }
+        }
     }
 }
 
@@ -278,9 +367,23 @@ pub struct ToadForceGl {
     /// read from, which has no colour.
     target: glow::Framebuffer,
     depth_only: glow::Framebuffer,
+    /// The framebuffers a copy between two textures reads from: one
+    /// for colour, and one without colour for depth.
+    from_colour: glow::Framebuffer,
+    from_depth: glow::Framebuffer,
     array: glow::VertexArray,
     buffer: glow::Buffer,
+    /// A vertex array without attributes, for `CONVERT`.
+    plain: glow::VertexArray,
+    /// The picture the window shows (`composite`): its framebuffer,
+    /// its texture and its size, and the texture of what is drawn over
+    /// it.
+    picture: Option<(glow::Framebuffer, glow::Texture, glow::Texture, (u32, u32))>,
+    convert: Program<Convert>,
     copies: Vec<Copy>,
+    /// Counted up with every change of a copy's pixels: the version of
+    /// the copy changed last.
+    changes: u64,
     textures: HashMap<Texture, Texels>,
     /// The programs by `shader::key` of the steps they draw, made when
     /// `takes` first sees the steps (`compiled`).
@@ -294,6 +397,13 @@ pub struct ToadForceGl {
     runs: u64,
     uploads: u64,
     decodes: u64,
+    /// The images of textures filled from a copy, and the clears,
+    /// fills and copies done in the copies.
+    converts: u64,
+    clears: u64,
+    blits: u64,
+    /// The frames the window showed from a copy (`composite`).
+    presents: u64,
     /// The host has no framebuffer the card's surfaces fit: nothing is
     /// taken.
     broken: bool,
@@ -321,10 +431,17 @@ impl ToadForceGl {
                 || extensions.contains("GL_ARB_ES2_compatibility");
             let target = gl.create_framebuffer()?;
             let depth_only = gl.create_framebuffer()?;
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(depth_only));
-            gl.draw_buffer(glow::NONE);
-            gl.read_buffer(glow::NONE);
+            let from_colour = gl.create_framebuffer()?;
+            let from_depth = gl.create_framebuffer()?;
+            for colourless in [depth_only, from_depth] {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(colourless));
+                gl.draw_buffer(glow::NONE);
+                gl.read_buffer(glow::NONE);
+            }
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            let plain = gl.create_vertex_array()?;
+            let convert = compile::<Convert>(&gl, glsl, CONVERT_VERTEX, CONVERT, &[])?;
+            gl.use_program(None);
             let array = gl.create_vertex_array()?;
             let buffer = gl.create_buffer()?;
             gl.bind_vertex_array(Some(array));
@@ -350,9 +467,15 @@ impl ToadForceGl {
                 anisotropy,
                 target,
                 depth_only,
+                from_colour,
+                from_depth,
                 array,
                 buffer,
+                plain,
+                picture: None,
+                convert,
                 copies: Vec::new(),
+                changes: 0,
                 textures: HashMap::new(),
                 programs: RefCell::default(),
                 failed: RefCell::default(),
@@ -360,6 +483,10 @@ impl ToadForceGl {
                 runs: 0,
                 uploads: 0,
                 decodes: 0,
+                converts: 0,
+                clears: 0,
+                blits: 0,
+                presents: 0,
                 broken: false,
             }
         };
@@ -490,7 +617,7 @@ impl ToadForceGl {
                     vertices: &vertices,
                 };
                 self.draw(&batch, &memory, &pages);
-                if self.broken || !self.read_back(&colour, &mut memory) {
+                if self.broken || !self.read_back(&colour, &mut memory, None) {
                     return Some("it is no render target");
                 }
                 for (i, &old) in ramp.iter().enumerate() {
@@ -541,7 +668,7 @@ impl ToadForceGl {
         };
         self.draw(&batch, &memory, &pages);
         let mut back = vec![0u8; memory.len()];
-        let same = self.read_back(&colour, &mut back) && back == memory;
+        let same = self.read_back(&colour, &mut back, None) && back == memory;
         (!same).then_some("a target doesn't read back as it was filled")
     }
 
@@ -632,27 +759,45 @@ impl ToadForceGl {
         }
     }
 
-    /// Drop the copies of other surfaces, and the textures, that share
-    /// a byte with `surfaces`: what the host draws there isn't counted
-    /// in the card's pages (`Host::draw`).
+    /// Drop the copies of other surfaces that share a byte with
+    /// `surfaces`: what the host draws there isn't counted in the
+    /// card's pages (`Host::draw`). A copy of a view of one of them, or
+    /// of what one is a view of, stays: it is their copy.
     ///
     /// # Safety
     ///
     /// The context is current.
-    unsafe fn drop_shared(&mut self, surfaces: &[Surface]) {
+    unsafe fn drop_copies(&mut self, surfaces: &[Surface]) {
         let gl = &*self.gl;
         let ranges: Vec<(u32, u32)> = surfaces.iter().map(gpu::range).collect();
         let shares = |r: (u32, u32)| ranges.iter().any(|&t| overlap(t, r));
         self.copies.retain(|c| {
-            let keep = surfaces.contains(&c.surface) || !shares(gpu::range(&c.surface));
+            let own = surfaces.iter().any(|s| gpu::related(s, &c.surface));
+            let keep = own || !shares(gpu::range(&c.surface));
             if !keep {
                 // SAFETY: the texture is this context's.
                 unsafe { gl.delete_texture(c.texture) };
             }
             keep
         });
-        self.textures.retain(|_, t| {
-            let keep = !t.ranges.iter().any(|&(r, _)| shares(r));
+    }
+
+    /// Drop the textures that share a byte with `surfaces`, copies the
+    /// host just wrote. One with an image that is the surface exactly
+    /// stays: it is filled from the copy when it is next sampled
+    /// (`texels`).
+    ///
+    /// # Safety
+    ///
+    /// The context is current.
+    unsafe fn drop_textures(&mut self, surfaces: &[Surface]) {
+        let gl = &*self.gl;
+        self.textures.retain(|texture, t| {
+            let keep = surfaces.iter().all(|s| {
+                let bytes = gpu::range(s);
+                !t.ranges.iter().any(|&(r, _)| overlap(r, bytes))
+                    || gpu::image_of(texture, s).is_some()
+            });
             if !keep {
                 // SAFETY: the textures are this context's.
                 unsafe {
@@ -666,70 +811,216 @@ impl ToadForceGl {
         });
     }
 
-    /// The host's texture of `surface`, filled from `memory` if the
-    /// host has none or a stale one.
+    /// The host's copy `at` has new pixels, which card memory hasn't.
+    fn change(&mut self, at: usize) {
+        self.changes += 1;
+        let copy = &mut self.copies[at];
+        copy.ahead = true;
+        copy.version = self.changes;
+    }
+
+    /// The pixels of `rect` of `surface` in `memory`, as the host's
+    /// texture of the surface takes them.
+    fn texture_rows(&self, surface: &Surface, rect: &Rect, memory: &[u8]) -> Vec<u8> {
+        let pixels = rect_rows(surface, rect, memory);
+        if self.colour(surface.format) != Colour::Wide
+            || surface.format.in_mask(super::caps::DEPTH_FORMATS)
+        {
+            return pixels;
+        }
+        pixels
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|p| texel::decode(Format::R5G6B5, u16::from_le_bytes(*p) as u32))
+            .collect()
+    }
+
+    /// Fill the copy `at` from `memory`, which it then holds.
     ///
     /// # Safety
     ///
     /// The context is current, in the state `enter` leaves.
-    unsafe fn copy(&mut self, surface: &Surface, memory: &[u8], pages: &Pages) -> glow::Texture {
-        let range = gpu::range(surface);
-        let (internal, format, kind) = self.formats(surface.format);
-        let wide = self.colour(surface.format) == Colour::Wide;
-        let gl = &*self.gl;
+    unsafe fn upload(&mut self, at: usize, memory: &[u8], pages: &Pages) {
+        let surface = self.copies[at].surface;
+        let (_, format, kind) = self.formats(surface.format);
+        let pixels = self.texture_rows(&surface, &all_of(&surface), memory);
         let (w, h) = (surface.width as i32, surface.height as i32);
+        let gl = &*self.gl;
         // SAFETY: the caller's.
         unsafe {
-            let at = match self.copies.iter().position(|c| c.surface == *surface) {
-                Some(at) => {
-                    if !pages.changed(range, &mut self.copies[at].stamp) {
-                        return self.copies[at].texture;
-                    }
-                    gl.bind_texture(glow::TEXTURE_2D, Some(self.copies[at].texture));
-                    at
-                }
-                None => {
-                    let texture = gl.create_texture().expect("an OpenGL texture");
-                    gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                    let none = glow::PixelUnpackData::Slice(None);
-                    gl.tex_image_2d(
-                        glow::TEXTURE_2D,
-                        0,
-                        internal as i32,
-                        w,
-                        h,
-                        0,
-                        format,
-                        kind,
-                        none,
-                    );
-                    for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
-                        gl.tex_parameter_i32(glow::TEXTURE_2D, filter, glow::NEAREST as i32);
-                    }
-                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL, 0);
-                    self.copies.push(Copy {
-                        surface: *surface,
-                        texture,
-                        stamp: Stamp::default(),
-                    });
-                    self.copies.len() - 1
-                }
-            };
-            self.uploads += 1;
-            let mut pixels = rows(surface, memory);
-            if wide {
-                pixels = pixels
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .flat_map(|p| texel::decode(Format::R5G6B5, u16::from_le_bytes(*p) as u32))
-                    .collect();
-            }
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.copies[at].texture));
             let data = glow::PixelUnpackData::Slice(Some(&pixels));
             gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, w, h, format, kind, data);
-            self.copies[at].stamp = pages.stamp(range);
-            self.copies[at].texture
         }
+        self.uploads += 1;
+        self.changes += 1;
+        let copy = &mut self.copies[at];
+        copy.stamp = pages.stamp(gpu::range(&surface));
+        copy.ahead = false;
+        copy.version = self.changes;
+    }
+
+    /// Copy a rectangle of `size` between two of the host's textures
+    /// of `format`, from `src` of one to `dst` of the other. Where
+    /// they are one texture the rectangles share no pixel.
+    ///
+    /// # Safety
+    ///
+    /// The context is current.
+    unsafe fn blit(
+        &self,
+        format: Format,
+        textures: (glow::Texture, glow::Texture),
+        src: (u32, u32),
+        dst: (u32, u32),
+        size: (u32, u32),
+    ) {
+        let gl = &*self.gl;
+        let (from, to) = textures;
+        let depth = format.in_mask(super::caps::DEPTH_FORMATS);
+        let (read, draw) = match depth {
+            true => (self.from_depth, self.depth_only),
+            false => (self.from_colour, self.target),
+        };
+        let (point, bits) = match format {
+            Format::D16 => (glow::DEPTH_ATTACHMENT, glow::DEPTH_BUFFER_BIT),
+            _ if depth => (
+                glow::DEPTH_STENCIL_ATTACHMENT,
+                glow::DEPTH_BUFFER_BIT | glow::STENCIL_BUFFER_BIT,
+            ),
+            _ => (glow::COLOR_ATTACHMENT0, glow::COLOR_BUFFER_BIT),
+        };
+        // SAFETY: the caller's.
+        unsafe {
+            for (binding, buffer, texture) in [
+                (glow::READ_FRAMEBUFFER, read, from),
+                (glow::DRAW_FRAMEBUFFER, draw, to),
+            ] {
+                gl.bind_framebuffer(binding, Some(buffer));
+                for other in [
+                    glow::COLOR_ATTACHMENT0,
+                    glow::DEPTH_ATTACHMENT,
+                    glow::DEPTH_STENCIL_ATTACHMENT,
+                ] {
+                    if other != point {
+                        gl.framebuffer_texture_2d(binding, other, glow::TEXTURE_2D, None, 0);
+                    }
+                }
+                gl.framebuffer_texture_2d(binding, point, glow::TEXTURE_2D, Some(texture), 0);
+            }
+            gl.disable(glow::SCISSOR_TEST);
+            gl.color_mask(true, true, true, true);
+            gl.depth_mask(true);
+            gl.stencil_mask(0xFF);
+            let [sx, sy, dx, dy] = [src.0, src.1, dst.0, dst.1].map(|v| v as i32);
+            let (w, h) = (size.0 as i32, size.1 as i32);
+            let (to_x, to_y) = (dx + w, dy + h);
+            gl.blit_framebuffer(
+                sx,
+                sy,
+                sx + w,
+                sy + h,
+                dx,
+                dy,
+                to_x,
+                to_y,
+                bits,
+                glow::NEAREST,
+            );
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
+    }
+
+    /// The host's copy of `surface`: where it is in `copies`. It is the
+    /// copy of the largest surface `surface` is a view of, made larger
+    /// if the host's is of a view of `surface`. One that isn't ahead is
+    /// filled from `memory` if the host has none or a stale one. With
+    /// `fresh` the caller writes every pixel of `surface` next, and a
+    /// copy of just that size isn't filled.
+    ///
+    /// # Safety
+    ///
+    /// The context is current, in the state `enter` leaves.
+    unsafe fn copy(
+        &mut self,
+        surface: &Surface,
+        memory: &[u8],
+        pages: &Pages,
+        fresh: bool,
+    ) -> usize {
+        let found = self
+            .copies
+            .iter()
+            .position(|c| gpu::within(surface, &c.surface));
+        if let Some(at) = found {
+            let copy = &mut self.copies[at];
+            let whole =
+                (copy.surface.width, copy.surface.height) == (surface.width, surface.height);
+            let stale = !copy.ahead
+                && !(fresh && whole)
+                && pages.changed(gpu::range(&copy.surface), &mut copy.stamp);
+            if stale {
+                // SAFETY: the caller's.
+                unsafe { self.upload(at, memory, pages) };
+            }
+            return at;
+        }
+        let (internal, format, kind) = self.formats(surface.format);
+        let (w, h) = (surface.width as i32, surface.height as i32);
+        // SAFETY: the caller's.
+        let texture = unsafe {
+            let gl = &*self.gl;
+            let texture = gl.create_texture().expect("an OpenGL texture");
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            let none = glow::PixelUnpackData::Slice(None);
+            let internal = internal as i32;
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, internal, w, h, 0, format, kind, none);
+            for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+                gl.tex_parameter_i32(glow::TEXTURE_2D, filter, glow::NEAREST as i32);
+            }
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL, 0);
+            texture
+        };
+        self.changes += 1;
+        self.copies.push(Copy {
+            surface: *surface,
+            texture,
+            stamp: Stamp::default(),
+            ahead: false,
+            version: self.changes,
+        });
+        let mut at = self.copies.len() - 1;
+        if !fresh {
+            // SAFETY: the caller's.
+            unsafe { self.upload(at, memory, pages) };
+        }
+        // The copy of a view of it, whose pixels are newer than card
+        // memory's where it is ahead.
+        let old = self
+            .copies
+            .iter()
+            .position(|c| c.texture != texture && gpu::within(&c.surface, surface));
+        if let Some(old) = old {
+            let view = self.copies.remove(old);
+            at -= 1;
+            // SAFETY: the caller's.
+            unsafe {
+                if view.ahead && !fresh {
+                    let size = (view.surface.width, view.surface.height);
+                    self.blit(
+                        surface.format,
+                        (view.texture, texture),
+                        (0, 0),
+                        (0, 0),
+                        size,
+                    );
+                    self.change(at);
+                }
+                self.gl.delete_texture(view.texture);
+            }
+        }
+        at
     }
 
     /// Make `colour` and `depth` what the draws go to. False where the
@@ -809,30 +1100,35 @@ impl ToadForceGl {
         }
     }
 
-    /// Make sure the host has `texture`, decoded from `memory` if the
-    /// host has none or a stale one.
+    /// Make sure the host has `texture` as it is now: decoded from
+    /// `memory` if the host has none or a stale one, with each image
+    /// that is a surface the host has ahead filled from that copy.
+    /// Changes the framebuffer and the fixed state.
     ///
     /// # Safety
     ///
     /// The context is current, in the state `enter` leaves.
     unsafe fn texels(&mut self, texture: &Texture, memory: &[u8], pages: &Pages) {
-        let gl = &*self.gl;
         let batch = self.batch;
-        // A unit no stage samples, for the textures filled here.
-        // SAFETY: the caller's.
-        unsafe { gl.active_texture(glow::TEXTURE0 + SCRATCH_UNIT) };
+        let changes = self.changes;
+        let images = (texture.levels * texture.faces()) as usize;
+        // Every image, or the ones whose surface changed on the host.
+        let mut all = false;
         match self.textures.get_mut(texture) {
             Some(t) => {
-                t.used = batch;
-                let mut stale = false;
-                for (range, stamp) in &mut t.ranges {
-                    stale |= pages.changed(*range, stamp);
+                if t.used == batch {
+                    return;
                 }
-                if !stale {
+                t.used = batch;
+                for (range, stamp) in &mut t.ranges {
+                    all |= pages.changed(*range, stamp);
+                }
+                if !all && t.seen == changes {
                     return;
                 }
             }
             None => {
+                all = true;
                 let mut ranges = Vec::new();
                 let clamp = |at: u64| at.min(u32::MAX as u64) as u32;
                 pipeline::texture_reads(texture, |r| {
@@ -841,6 +1137,7 @@ impl ToadForceGl {
                 let keyed = texture.key.is_some() && texture::has_key(texture.format);
                 // SAFETY: the caller's.
                 let (gl_texture, key) = unsafe {
+                    let gl = &*self.gl;
                     let make = || gl.create_texture().expect("an OpenGL texture");
                     (make(), keyed.then(make))
                 };
@@ -848,6 +1145,8 @@ impl ToadForceGl {
                     gl: gl_texture,
                     key,
                     ranges,
+                    sources: vec![None; images],
+                    seen: 0,
                     sampling: None,
                     key_sampling: None,
                     used: batch,
@@ -855,7 +1154,18 @@ impl ToadForceGl {
                 self.textures.insert(texture.clone(), texels);
             }
         }
-        self.decodes += 1;
+        // The host's copies of the surfaces the images are: the copy's
+        // version, its texture where it is ahead, and how it is kept.
+        let mut copies = vec![None; images];
+        for copy in &self.copies {
+            if let Some((level, face)) = gpu::image_of(texture, &copy.surface) {
+                let ahead = copy.ahead.then_some(copy.texture);
+                let kept = self.colour(copy.surface.format);
+                copies[(level * texture.faces() + face) as usize] =
+                    Some((copy.version, ahead, kept));
+            }
+        }
+        let gl = &*self.gl;
         let t = self
             .textures
             .get_mut(texture)
@@ -865,23 +1175,46 @@ impl ToadForceGl {
         } else {
             glow::TEXTURE_2D
         };
+        let face_of = |face: u32| match texture.cube {
+            true => glow::TEXTURE_CUBE_MAP_POSITIVE_X + face,
+            false => glow::TEXTURE_2D,
+        };
+        let mut decoded = false;
+        let mut converts = Vec::new();
         // SAFETY: the caller's.
         unsafe {
+            // A unit no stage samples, for the textures filled here.
+            gl.active_texture(glow::TEXTURE0 + SCRATCH_UNIT);
             let last = texture.levels as i32 - 1;
             for level in 0..texture.levels {
                 for face in 0..texture.faces() {
-                    let image = texture::decode(texture, level, face, memory);
-                    let (w, h) = (image.width as i32, image.height as i32);
-                    let to = if texture.cube {
-                        glow::TEXTURE_CUBE_MAP_POSITIVE_X + face
-                    } else {
-                        glow::TEXTURE_2D
-                    };
-                    let level = level as i32;
-                    gl.bind_texture(kind, Some(t.gl));
-                    let data = glow::PixelUnpackData::Slice(Some(&image.texels));
+                    let image = (level * texture.faces() + face) as usize;
+                    let version = copies[image].map(|(version, _, _)| version);
+                    if !all && version == t.sources[image] {
+                        continue;
+                    }
+                    t.sources[image] = version;
+                    let (w, h) = texture.level_size(level);
+                    let (w, h) = (w as i32, h as i32);
+                    let (to, level) = (face_of(face), level as i32);
                     let (format, bytes) = (glow::BGRA, glow::UNSIGNED_BYTE);
-                    gl.tex_image_2d(to, level, glow::RGBA8 as i32, w, h, 0, format, bytes, data);
+                    let rgba = glow::RGBA8 as i32;
+                    gl.bind_texture(kind, Some(t.gl));
+                    if let Some((_, Some(copy), kept)) = copies[image] {
+                        // The copy's pixels, by a draw once every image
+                        // is there.
+                        if all {
+                            let none = glow::PixelUnpackData::Slice(None);
+                            gl.tex_image_2d(to, level, rgba, w, h, 0, format, bytes, none);
+                        }
+                        converts.push((to, level, (w, h), copy, kept));
+                        continue;
+                    }
+                    decoded = true;
+                    let image = texture::decode(texture, level as u32, face, memory);
+                    let (w, h) = (image.width as i32, image.height as i32);
+                    let data = glow::PixelUnpackData::Slice(Some(&image.texels));
+                    gl.tex_image_2d(to, level, rgba, w, h, 0, format, bytes, data);
                     if let (Some(key), Some(keyed)) = (t.key, &image.keyed) {
                         gl.bind_texture(kind, Some(key));
                         let data = glow::PixelUnpackData::Slice(Some(keyed));
@@ -890,13 +1223,56 @@ impl ToadForceGl {
                     }
                 }
             }
-            for texture in std::iter::once(t.gl).chain(t.key) {
-                gl.bind_texture(kind, Some(texture));
-                gl.tex_parameter_i32(kind, glow::TEXTURE_MAX_LEVEL, last);
+            if all {
+                for texture in std::iter::once(t.gl).chain(t.key) {
+                    gl.bind_texture(kind, Some(texture));
+                    gl.tex_parameter_i32(kind, glow::TEXTURE_MAX_LEVEL, last);
+                }
+            }
+            if !converts.is_empty() {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.target));
+                for point in [glow::DEPTH_STENCIL_ATTACHMENT, glow::DEPTH_ATTACHMENT] {
+                    gl.framebuffer_texture_2d(glow::FRAMEBUFFER, point, glow::TEXTURE_2D, None, 0);
+                }
+                for state in [
+                    glow::SCISSOR_TEST,
+                    glow::DEPTH_TEST,
+                    glow::STENCIL_TEST,
+                    glow::BLEND,
+                ] {
+                    gl.disable(state);
+                }
+                gl.color_mask(true, true, true, true);
+                gl.use_program(Some(self.convert.program));
+                gl.bind_vertex_array(Some(self.plain));
+            }
+            for &(to, level, (w, h), copy, kept) in &converts {
+                let colour = glow::COLOR_ATTACHMENT0;
+                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, colour, to, Some(t.gl), level);
+                gl.viewport(0, 0, w, h);
+                let mode = match (texture.format, kept) {
+                    (Format::R5G6B5, Colour::Packed) => 3,
+                    (Format::R5G6B5, _) => 2,
+                    (Format::X8R8G8B8, _) => 1,
+                    _ => 0,
+                };
+                gl.uniform_1_i32(self.convert.uniforms.mode.as_ref(), mode);
+                gl.bind_texture(glow::TEXTURE_2D, Some(copy));
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            }
+            if !converts.is_empty() {
+                // The image is no attachment once it is sampled.
+                let colour = glow::COLOR_ATTACHMENT0;
+                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, colour, glow::TEXTURE_2D, None, 0);
             }
         }
-        for (range, stamp) in &mut t.ranges {
-            *stamp = pages.stamp(*range);
+        t.seen = changes;
+        self.decodes += decoded as u64;
+        self.converts += converts.len() as u64;
+        if all {
+            for (range, stamp) in &mut t.ranges {
+                *stamp = pages.stamp(*range);
+            }
         }
     }
 
@@ -1025,6 +1401,127 @@ impl ToadForceGl {
                     t.key_sampling = Some(now);
                 }
             }
+        }
+    }
+
+    /// The picture of `surface`, which the screen shows, from the
+    /// host's copy of it, with `screen`'s pixels over it where they
+    /// differ from `base` (a cursor, messages): a texture of 8 bits a
+    /// channel with the picture's first row first, and its size. None
+    /// without a copy of the surface.
+    pub fn composite(
+        &mut self,
+        surface: &Surface,
+        screen: &Frame,
+        base: &Frame,
+    ) -> Option<(glow::Texture, (u32, u32))> {
+        let copy = self
+            .copies
+            .iter()
+            .find(|c| gpu::within(surface, &c.surface))?;
+        let source = copy.texture;
+        let mode = match (surface.format, self.colour(copy.surface.format)) {
+            (Format::R5G6B5, Colour::Packed) => 3,
+            (Format::R5G6B5, _) => 2,
+            _ => 1,
+        };
+        let size = (surface.width, surface.height);
+        let (w, h) = (size.0 as i32, size.1 as i32);
+        // The rows where something is drawn over the machine's picture,
+        // and their pixels: opaque where the two differ.
+        let fits = |frame: &Frame| (frame.width, frame.height) == size;
+        let row = size.0 as usize * 4;
+        let mut over = None;
+        if fits(screen) && fits(base) && screen.rgba != base.rgba {
+            let differs = |y: &usize| {
+                let at = y * row..(y + 1) * row;
+                screen.rgba[at.clone()] != base.rgba[at]
+            };
+            let rows = 0..size.1 as usize;
+            let first = rows.clone().find(differs).unwrap_or(0);
+            let last = rows.rev().find(differs).unwrap_or(0);
+            let bytes = first * row..(last + 1) * row;
+            let mut pixels = screen.rgba[bytes.clone()].to_vec();
+            let pairs = pixels.as_chunks_mut::<4>().0.iter_mut();
+            for (pixel, under) in pairs.zip(base.rgba[bytes].as_chunks::<4>().0) {
+                pixel[3] = if *pixel == *under { 0 } else { 255 };
+            }
+            over = Some((first as i32, (last + 1 - first) as i32, pixels));
+        }
+        self.presents += 1;
+        let gl = Rc::clone(&self.gl);
+        // SAFETY: the context is current (see the module comment), and
+        // every object used is this host's.
+        unsafe {
+            self.enter();
+            if self.picture.is_none_or(|(.., s)| s != size) {
+                if let Some((buffer, picture, staging, _)) = self.picture.take() {
+                    gl.delete_framebuffer(buffer);
+                    gl.delete_texture(picture);
+                    gl.delete_texture(staging);
+                }
+                let buffer = gl.create_framebuffer().ok()?;
+                let make = || {
+                    let texture = gl.create_texture().expect("an OpenGL texture");
+                    gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                    let none = glow::PixelUnpackData::Slice(None);
+                    let (format, kind) = (glow::RGBA, glow::UNSIGNED_BYTE);
+                    let rgba = glow::RGBA8 as i32;
+                    gl.tex_image_2d(glow::TEXTURE_2D, 0, rgba, w, h, 0, format, kind, none);
+                    for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+                        gl.tex_parameter_i32(glow::TEXTURE_2D, filter, glow::NEAREST as i32);
+                    }
+                    for wrap in [glow::TEXTURE_WRAP_S, glow::TEXTURE_WRAP_T] {
+                        gl.tex_parameter_i32(glow::TEXTURE_2D, wrap, glow::CLAMP_TO_EDGE as i32);
+                    }
+                    texture
+                };
+                let (picture, staging) = (make(), make());
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(buffer));
+                gl.framebuffer_texture_2d(
+                    glow::FRAMEBUFFER,
+                    glow::COLOR_ATTACHMENT0,
+                    glow::TEXTURE_2D,
+                    Some(picture),
+                    0,
+                );
+                self.picture = Some((buffer, picture, staging, size));
+            }
+            let (buffer, picture, staging, _) = self.picture?;
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(buffer));
+            gl.viewport(0, 0, w, h);
+            for state in [
+                glow::SCISSOR_TEST,
+                glow::DEPTH_TEST,
+                glow::STENCIL_TEST,
+                glow::BLEND,
+            ] {
+                gl.disable(state);
+            }
+            gl.color_mask(true, true, true, true);
+            gl.use_program(Some(self.convert.program));
+            gl.bind_vertex_array(Some(self.plain));
+            gl.uniform_1_i32(self.convert.uniforms.mode.as_ref(), mode);
+            gl.bind_texture(glow::TEXTURE_2D, Some(source));
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            if let Some((first, rows, pixels)) = over {
+                gl.bind_texture(glow::TEXTURE_2D, Some(staging));
+                let data = glow::PixelUnpackData::Slice(Some(&pixels));
+                let (format, kind) = (glow::RGBA, glow::UNSIGNED_BYTE);
+                gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, first, w, rows, format, kind, data);
+                // Over the picture where they are opaque, and the
+                // picture stays opaque.
+                gl.enable(glow::SCISSOR_TEST);
+                gl.scissor(0, first, w, rows);
+                gl.enable(glow::BLEND);
+                gl.blend_equation(glow::FUNC_ADD);
+                let (src, dst) = (glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                gl.blend_func_separate(src, dst, glow::ZERO, glow::ONE);
+                gl.uniform_1_i32(self.convert.uniforms.mode.as_ref(), 0);
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            }
+            self.leave();
+            Some((picture, size))
         }
     }
 
@@ -1347,11 +1844,15 @@ impl Host for ToadForceGl {
             "failed_programs": self.failed.borrow().len(),
             "surfaces": self.copies.len(),
             "textures": self.textures.len(),
+            "texture_converts": self.converts,
+            "clears": self.clears,
+            "blits": self.blits,
+            "presents": self.presents,
             "packed_565": self.packed,
         })
     }
 
-    fn draw(&mut self, batch: &Batch, memory: &[u8], pages: &Pages) {
+    fn draw(&mut self, batch: &Batch, memory: &[u8], pages: &Pages) -> Vec<Surface> {
         self.batch += 1;
         self.runs += batch.runs.len() as u64;
         let colour = batch.target.colour;
@@ -1361,12 +1862,32 @@ impl Host for ToadForceGl {
         // every object used is this host's.
         unsafe {
             self.enter();
-            self.drop_shared(&surfaces);
-            let target = self.copy(&colour, memory, pages);
-            let depth = depth.map(|d| (self.copy(&d, memory, pages), d.format));
+            self.drop_copies(&surfaces);
+            let target = self.copy(&colour, memory, pages, false);
+            let target = self.copies[target].texture;
+            let depth = depth.map(|d| {
+                let at = self.copy(&d, memory, pages, false);
+                (self.copies[at].texture, d.format)
+            });
+            // The copies drawn into, which may be of larger surfaces.
+            let mut drawn = Vec::with_capacity(2);
+            for at in 0..self.copies.len() {
+                let texture = self.copies[at].texture;
+                if texture == target || depth.is_some_and(|(depth, _)| depth == texture) {
+                    self.change(at);
+                    drawn.push(self.copies[at].surface);
+                }
+            }
+            self.drop_textures(&drawn);
+            // The textures first: one filled from a copy is drawn.
+            for run in batch.runs {
+                for tex in run.state.tex.iter().flatten() {
+                    self.texels(&tex.texture, memory, pages);
+                }
+            }
             if !self.attach(target, depth) {
                 self.leave();
-                return;
+                return drawn;
             }
             let gl = Rc::clone(&self.gl);
             gl.viewport(0, 0, colour.width as i32, colour.height as i32);
@@ -1392,7 +1913,6 @@ impl Host for ToadForceGl {
                 let key = shader::key(state, self.anisotropy > 0.0);
                 for (stage, tex) in state.tex.iter().enumerate() {
                     if let Some(tex) = tex {
-                        self.texels(&tex.texture, memory, pages);
                         self.bind(stage, tex, key.native(stage));
                     }
                 }
@@ -1413,18 +1933,31 @@ impl Host for ToadForceGl {
             }
             self.prune();
             self.leave();
+            drawn
         }
     }
 
-    fn clear(&mut self, clear: &Clear, _: &[u8], pages: &Pages) -> bool {
+    fn clear(&mut self, clear: &Clear, memory: &[u8], pages: &Pages) -> Option<Surface> {
         let surface = clear.surface;
-        let range = gpu::range(&surface);
-        // Only a copy that is what card memory holds, or newer.
-        let Some(at) = self.copies.iter().position(|c| c.surface == surface) else {
-            return false;
+        if self.broken {
+            return None;
+        }
+        // A copy that is what card memory holds, or newer. A clear of
+        // every bit of every pixel of the copy needs neither.
+        let found = self
+            .copies
+            .iter_mut()
+            .find(|c| gpu::within(&surface, &c.surface));
+        let (whole, current) = match found {
+            Some(c) => (
+                (c.surface.width, c.surface.height) == (surface.width, surface.height),
+                c.ahead || !pages.changed(gpu::range(&c.surface), &mut c.stamp),
+            ),
+            None => (true, false),
         };
-        if self.broken || pages.changed(range, &mut self.copies[at].stamp) {
-            return false;
+        let fresh = whole && clear.whole() && clear.rects.contains(&all_of(&surface));
+        if !current && !fresh {
+            return None;
         }
         let depth_format = surface.format.in_mask(super::caps::DEPTH_FORMATS);
         let d16 = surface.format == Format::D16;
@@ -1440,16 +1973,21 @@ impl Host for ToadForceGl {
         let writes_stencil = depth_format && !d16 && clear.mask & 0xFF != 0;
         let exact = !writes_depth || depth == 0 || depth == most;
         if depth_format && !exact && !clear.whole() {
-            return false;
+            return None;
         }
-        let texture = self.copies[at].texture;
         let colour = self.colour(surface.format);
         let (_, format, kind) = self.formats(surface.format);
+        self.clears += 1;
         // SAFETY: the context is current (see the module comment), and
         // every object used is this host's.
         unsafe {
             self.enter();
-            self.drop_shared(&[surface]);
+            self.drop_copies(&[surface]);
+            let at = self.copy(&surface, memory, pages, fresh);
+            self.change(at);
+            let texture = self.copies[at].texture;
+            let written = self.copies[at].surface;
+            self.drop_textures(&[written]);
             let gl = Rc::clone(&self.gl);
             if depth_format && !exact {
                 // Every bit of the pixels, as the pixels themselves.
@@ -1463,7 +2001,7 @@ impl Host for ToadForceGl {
                     gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, x, y, w, h, format, kind, data);
                 }
                 self.leave();
-                return true;
+                return Some(written);
             }
             let bits = if depth_format {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.depth_only));
@@ -1503,7 +2041,7 @@ impl Host for ToadForceGl {
             } else {
                 if !self.attach(texture, None) {
                     self.leave();
-                    return false;
+                    return None;
                 }
                 // The pixel value's fields, each of its own range.
                 let v = clear.value;
@@ -1533,14 +2071,152 @@ impl Host for ToadForceGl {
                 gl.clear(bits);
             }
             self.leave();
+            Some(written)
         }
-        true
     }
 
-    fn read_back(&mut self, surface: &Surface, memory: &mut [u8]) -> bool {
-        let Some(copy) = self.copies.iter().find(|c| c.surface == *surface) else {
+    fn fill(
+        &mut self,
+        dst: &Surface,
+        rect: &Rect,
+        value: u32,
+        memory: &[u8],
+        pages: &Pages,
+    ) -> Option<Surface> {
+        let copy = self.copies.iter().find(|c| gpu::within(dst, &c.surface))?;
+        if !copy.ahead || copy.surface.format.in_mask(super::caps::DEPTH_FORMATS) {
+            return None;
+        }
+        // The copy's pixels are kept by its own format, and every bit
+        // of a pixel is written.
+        let clear = Clear {
+            surface: copy.surface,
+            rects: std::slice::from_ref(rect),
+            value,
+            mask: 0xFFFF_FFFF,
+        };
+        self.clear(&clear, memory, pages)
+    }
+
+    fn blt(
+        &mut self,
+        dst: &Surface,
+        dst_rect: &Rect,
+        src: &Surface,
+        src_rect: &Rect,
+        key: Option<u32>,
+        memory: &[u8],
+        pages: &Pages,
+    ) -> Option<Surface> {
+        let colour =
+            |format: Format| matches!(format, Format::R5G6B5 | Format::X8R8G8B8 | Format::A8R8G8B8);
+        let size = (src_rect.width, src_rect.height);
+        if self.broken
+            || key.is_some()
+            || size != (dst_rect.width, dst_rect.height)
+            || !colour(dst.format)
+            || !colour(src.format)
+            || dst.format.bytes() != src.format.bytes()
+        {
+            return None;
+        }
+        let find = |s: &Surface| self.copies.iter().find(|c| gpu::within(s, &c.surface));
+        // The source on the host, when it is newer there than in card
+        // memory. One that isn't is copied from card memory.
+        let from = find(src).filter(|c| c.ahead).map(|c| c.texture);
+        let to = find(dst);
+        if from.is_none() && !to.is_some_and(|c| c.ahead) {
+            return None;
+        }
+        // A source over other bytes of the destination's, which the
+        // host drops below as it writes the destination.
+        let shared = !gpu::related(src, dst) && overlap(gpu::range(src), gpu::range(dst));
+        if from.is_some() && shared {
+            return None;
+        }
+        // Views of one another are one texture once the destination
+        // has its copy (`copy`), and the host's copy between two
+        // framebuffers has no result where the rectangles share pixels
+        // of one texture.
+        let one = gpu::related(src, dst) || (from.is_some() && from == to.map(|c| c.texture));
+        let apart = src_rect.left + size.0 <= dst_rect.left
+            || dst_rect.left + size.0 <= src_rect.left
+            || src_rect.top + size.1 <= dst_rect.top
+            || dst_rect.top + size.1 <= src_rect.top;
+        if from.is_some() && one && !apart {
+            return None;
+        }
+        let fresh = *dst_rect == all_of(dst);
+        self.blits += 1;
+        // SAFETY: the context is current (see the module comment), and
+        // every object used is this host's.
+        unsafe {
+            self.enter();
+            self.drop_copies(&[*dst]);
+            let at = self.copy(dst, memory, pages, fresh);
+            self.change(at);
+            let Copy {
+                surface, texture, ..
+            } = self.copies[at];
+            self.drop_textures(&[surface]);
+            // The source's copy now: a copy of a view of the destination
+            // gave way to the destination's, with its pixels.
+            let from = from.and_then(|_| {
+                let copy = self.copies.iter().find(|c| gpu::within(src, &c.surface));
+                copy.map(|c| c.texture)
+            });
+            let place = (dst_rect.left, dst_rect.top);
+            match from {
+                Some(from) => {
+                    let source = (src_rect.left, src_rect.top);
+                    self.blit(surface.format, (from, texture), source, place, size);
+                }
+                None => {
+                    let named = Surface {
+                        format: surface.format,
+                        ..*src
+                    };
+                    let pixels = self.texture_rows(&named, src_rect, memory);
+                    let (_, format, kind) = self.formats(surface.format);
+                    let gl = &*self.gl;
+                    gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                    let data = glow::PixelUnpackData::Slice(Some(&pixels));
+                    let (x, y) = (place.0 as i32, place.1 as i32);
+                    let (w, h) = (size.0 as i32, size.1 as i32);
+                    gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, x, y, w, h, format, kind, data);
+                }
+            }
+            self.leave();
+            Some(surface)
+        }
+    }
+
+    fn shows(&mut self, surface: &Surface, pages: &Pages) -> bool {
+        let found = self
+            .copies
+            .iter_mut()
+            .find(|c| gpu::within(surface, &c.surface));
+        let colour = !surface.format.in_mask(super::caps::DEPTH_FORMATS);
+        found.is_some_and(|c| {
+            colour && (c.ahead || !pages.changed(gpu::range(&c.surface), &mut c.stamp))
+        })
+    }
+
+    fn read_back(&mut self, surface: &Surface, memory: &mut [u8], pages: Option<&Pages>) -> bool {
+        let found = self
+            .copies
+            .iter_mut()
+            .find(|c| gpu::within(surface, &c.surface));
+        let Some(copy) = found else {
             return false;
         };
+        if let Some(pages) = pages
+            && (copy.surface.width, copy.surface.height) == (surface.width, surface.height)
+        {
+            // Card memory has every pixel of the copy from now on.
+            copy.ahead = false;
+            copy.stamp = pages.stamp(gpu::range(&copy.surface));
+        }
         let texture = copy.texture;
         let (_, format, kind) = self.formats(surface.format);
         let depth_format = surface.format.in_mask(super::caps::DEPTH_FORMATS);
@@ -1596,6 +2272,11 @@ impl Host for ToadForceGl {
         // SAFETY: the context is current (see the module comment), and
         // the textures are this host's.
         unsafe {
+            if let Some((buffer, picture, staging, _)) = self.picture.take() {
+                gl.delete_framebuffer(buffer);
+                gl.delete_texture(picture);
+                gl.delete_texture(staging);
+            }
             for copy in self.copies.drain(..) {
                 gl.delete_texture(copy.texture);
             }
@@ -1619,8 +2300,16 @@ impl Drop for ToadForceGl {
             for (_, program) in self.programs.get_mut().drain() {
                 gl.delete_program(program.program);
             }
-            gl.delete_framebuffer(self.target);
-            gl.delete_framebuffer(self.depth_only);
+            gl.delete_program(self.convert.program);
+            for buffer in [
+                self.target,
+                self.depth_only,
+                self.from_colour,
+                self.from_depth,
+            ] {
+                gl.delete_framebuffer(buffer);
+            }
+            gl.delete_vertex_array(self.plain);
             gl.delete_vertex_array(self.array);
             gl.delete_buffer(self.buffer);
         }

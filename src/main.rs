@@ -322,6 +322,10 @@ fn main() -> Result<ExitCode, String> {
     let mut last_screen_key = None;
     // Whether the OpenGL renderer drew the 3dfx card's picture last frame.
     let mut voodoo_gl_shown = false;
+    // Whether `cached_frame` is filled with one colour, under a
+    // ToadForce's picture that the window shows from the OpenGL
+    // renderer's copy.
+    let mut toadforce_blank = false;
     // The cached render with the cursors on top, as the screen shows it.
     let mut screen = cached_frame.clone();
     let mut composition = video::compose::Composition::default();
@@ -2000,6 +2004,20 @@ fn main() -> Result<ExitCode, String> {
         // pictures don't depend on the host's GPU.
         let toadforce_software = det.is_some() && !toadforce_gl_deterministic;
         display.run_toadforce(&mut cpu.bus, settings.toadforce_renderer, toadforce_software);
+        // A ToadForce's picture from the OpenGL renderer's own copy of
+        // the surface shown, with nothing read back, unless something
+        // looks at the frame in memory: screenshots, recordings,
+        // overlays that mix with it, the debugger and a deterministic
+        // run.
+        let toadforce_memory = screenshot
+            || recorder.is_active()
+            || video_recording.is_some()
+            || ui.is_open()
+            || ui.overlay_shown()
+            || dbg.wants_frame()
+            || det.is_some()
+            || settings.monochrome.phosphor().is_some();
+        let toadforce_gl = display.show_toadforce(&mut cpu.bus, !toadforce_memory);
         cpu.bus.sync_display();
         let voodoo_gl = display.run_voodoo(&mut cpu.bus, &settings.voodoo, det.is_none());
         if !voodoo_gl
@@ -2011,14 +2029,35 @@ fn main() -> Result<ExitCode, String> {
         }
         voodoo_gl_shown = voodoo_gl;
         let (width, height) = video::frame_size(&cpu.bus);
-        if cached_frame.resize(width, height) {
+        let resized = cached_frame.resize(width, height);
+        if resized {
             cpu.bus.vga.mark_dirty_full();
             display.set_frame_size(width, height)?;
         }
         profile::set_host(Zone::VgaRender);
         let render_start = std::time::Instant::now();
+        // The first frame drawn from card memory again draws all of it.
+        if !toadforce_gl && std::mem::take(&mut toadforce_blank) {
+            cpu.bus.vga.mark_dirty_full();
+        }
         let rendered = cpu.bus.vga.dirty;
-        let changed = if cpu.bus.vga.dirty {
+        let changed = if toadforce_gl {
+            // Card memory isn't drawn, and what a ToadForce drew stays
+            // marked for the frame that is. The machine's picture is
+            // one colour meanwhile, filled once, so that the cursors
+            // and messages composed over it are all that differs from
+            // it: those are what the window draws over the renderer's
+            // picture. No cursor has the colour, so its black pixels
+            // differ too.
+            if resized || !std::mem::replace(&mut toadforce_blank, true) {
+                for pixel in cached_frame.rgba.as_chunks_mut::<4>().0 {
+                    *pixel = [1, 2, 3, 0];
+                }
+                0..cached_frame.height as usize
+            } else {
+                0..0
+            }
+        } else if cpu.bus.vga.dirty {
             let rows = video::render_screen_rows(&mut cached_frame, &cpu.bus);
             cpu.bus.vga.clear_dirty();
             rows
@@ -2060,6 +2099,7 @@ fn main() -> Result<ExitCode, String> {
             && power_look.is_none()
             && last_screen_key == Some(screen_key)
             && !voodoo_gl
+            && !toadforce_gl
             && !ui.is_open()
             && !ui.overlay_shown()
             && !ui.sound_viz_shown()
@@ -2258,7 +2298,7 @@ fn main() -> Result<ExitCode, String> {
         } else {
             display.present_rows(
                 &screen,
-                voodoo_gl.then_some(&cached_frame),
+                (voodoo_gl || toadforce_gl).then_some(&cached_frame),
                 ui.layer(),
                 composed_rows,
                 (settings.shader == video::shader::Shader::Xbrz).then_some(&cached_frame),

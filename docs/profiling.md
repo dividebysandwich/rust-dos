@@ -132,7 +132,8 @@ The JSON's sections:
 | `timers`, `irq`, `shell`, `idle` | Timer events, delivering hardware interrupts, the built-in shell, `idle.proof` (proving a loop only waits) |
 | `mem` | `mem.video`, `mem.upper`, `mem.device` |
 | `sb`, `gus`, `voodoo`, `powervr` | `sb.dma` (the Sound Blaster's DMA), `gus.advance` (the Ultrasound), `voodoo` and `voodoo.frame` (the 3dfx card's work on the emulation thread, and its frame), `voodoo.wait` (waiting for the worker threads to draw what was queued, as something reads the card's memory), `voodoo.readback` (reading the 3D buffers or the 2D engine's pages back from the OpenGL renderer, waiting for the GPU), `powervr` |
-| `hle` | `hle.int08` ... `hle.int67`, `hle.other`, `hle.inline`, `hle.far`, `hle.dpmi` |
+| `toadforce` | `toadforce` (the ToadForce's commands on the emulation thread: decoding, transform, lighting and clipping, and the software renderer), `toadforce.host` (the OpenGL renderer's draws, clears and copies, as far as the driver takes them without waiting), `toadforce.readback` (a surface copied from the GPU to card memory, waiting for the GPU) |
+| `hle` | `hle.int08` ... `hle.int67`, `hle.other`, `hle.inline`, `hle.far`, `hle.dpmi`, `hle.win32` (the built-in Windows), and inside it for a Direct3D draw `hle.d3d.setup` (the device's state gathered), `hle.d3d.vertices` (vertices the layer transforms itself), `hle.d3d.bind` (the card's state brought up to the device's), `hle.d3d.draw` (the vertices handed to the card) and `hle.opengl` (the OpenGL front end's state put on its Direct3D device before a draw) |
 | `io` | One zone per device: `io.vga`, `io.pic`, `io.pit`, `io.sb`, `io.opl`, `io.ide`, `io.s3`, ... and `io.unhandled` |
 
 A zone inside another counts only its own time: a port write from

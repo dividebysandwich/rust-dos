@@ -5,6 +5,7 @@
 mod present_tests;
 mod xbrz;
 
+use rust_dos::toadforce::format::{Rect, Surface};
 use rust_dos::toadforce::gl::ToadForceGl;
 use rust_dos::toadforce::gpu::{self, Host};
 use rust_dos::voodoo::gl::{SharedGl, TextureBarrier, VoodooGl};
@@ -154,25 +155,59 @@ impl Host for HostLink {
         self.0.borrow().as_ref().is_some_and(|h| h.takes(state))
     }
 
-    fn draw(&mut self, batch: &gpu::Batch, memory: &[u8], pages: &gpu::Pages) {
-        if let Some(host) = &mut *self.0.borrow_mut() {
-            host.draw(batch, memory, pages);
+    fn draw(&mut self, batch: &gpu::Batch, memory: &[u8], pages: &gpu::Pages) -> Vec<Surface> {
+        match &mut *self.0.borrow_mut() {
+            Some(host) => host.draw(batch, memory, pages),
+            None => Vec::new(),
         }
     }
 
-    fn clear(&mut self, clear: &gpu::Clear, memory: &[u8], pages: &gpu::Pages) -> bool {
+    fn clear(&mut self, clear: &gpu::Clear, memory: &[u8], pages: &gpu::Pages) -> Option<Surface> {
         let mut host = self.0.borrow_mut();
-        host.as_mut()
-            .is_some_and(|h| h.clear(clear, memory, pages))
+        host.as_mut()?.clear(clear, memory, pages)
+    }
+
+    fn fill(
+        &mut self,
+        dst: &Surface,
+        rect: &Rect,
+        value: u32,
+        memory: &[u8],
+        pages: &gpu::Pages,
+    ) -> Option<Surface> {
+        let mut host = self.0.borrow_mut();
+        host.as_mut()?.fill(dst, rect, value, memory, pages)
+    }
+
+    fn blt(
+        &mut self,
+        dst: &Surface,
+        dst_rect: &Rect,
+        src: &Surface,
+        src_rect: &Rect,
+        key: Option<u32>,
+        memory: &[u8],
+        pages: &gpu::Pages,
+    ) -> Option<Surface> {
+        let mut host = self.0.borrow_mut();
+        host.as_mut()?
+            .blt(dst, dst_rect, src, src_rect, key, memory, pages)
     }
 
     fn read_back(
         &mut self,
-        surface: &rust_dos::toadforce::format::Surface,
+        surface: &Surface,
         memory: &mut [u8],
+        pages: Option<&gpu::Pages>,
     ) -> bool {
         let mut host = self.0.borrow_mut();
-        host.as_mut().is_some_and(|h| h.read_back(surface, memory))
+        host.as_mut()
+            .is_some_and(|h| h.read_back(surface, memory, pages))
+    }
+
+    fn shows(&mut self, surface: &Surface, pages: &gpu::Pages) -> bool {
+        let mut host = self.0.borrow_mut();
+        host.as_mut().is_some_and(|h| h.shows(surface, pages))
     }
 
     fn forget(&mut self) {
@@ -800,6 +835,37 @@ impl GlScreen {
             }
         }
         self.draw(texture, size, display, None, line);
+        true
+    }
+
+    /// Show the ToadForce's picture `surface` from the host renderer's
+    /// copy of it (`ToadForceGl::composite`), with what `screen` has
+    /// over `base` on it, letterboxed at `display` proportions. False
+    /// if the renderer has none to show.
+    pub fn present_toadforce(
+        &mut self,
+        surface: &Surface,
+        screen: &Frame,
+        base: &Frame,
+        display: (u32, u32),
+    ) -> bool {
+        let composed = match &mut *self.toadforce.0.borrow_mut() {
+            Some(host) => host.composite(surface, screen, base),
+            None => None,
+        };
+        let Some((texture, size)) = composed else {
+            return false;
+        };
+        self.xbrz_frame.invalidate();
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.set_filter();
+            if shader::needs_mipmaps(self.active) {
+                self.gl.generate_mipmap(glow::TEXTURE_2D);
+            }
+        }
+        self.draw(texture, size, display, None, 1.0);
         true
     }
 

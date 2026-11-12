@@ -363,9 +363,20 @@ pub const STAGE: &[Def] = &[
     def(TSS_ALPHA_SCALE, "ALPHA_SCALE", Kind::Scale, 1),
 ];
 
-/// The render state `id`, if level 1 has it.
+/// The render state `id`, if level 1 has it. By a table of the
+/// numbers, made once: a driver asks for every state it sets before
+/// each draw.
 pub fn render(id: u32) -> Option<&'static Def> {
-    RENDER.iter().find(|def| def.id == id)
+    static BY_ID: std::sync::OnceLock<[Option<&'static Def>; RENDER_STATES]> =
+        std::sync::OnceLock::new();
+    let table = BY_ID.get_or_init(|| {
+        let mut table = [None; RENDER_STATES];
+        for def in RENDER {
+            table[def.id as usize] = Some(def);
+        }
+        table
+    });
+    *table.get(id as usize)?
 }
 
 /// The stage state `id`, if level 1 has it.
