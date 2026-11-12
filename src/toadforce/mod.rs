@@ -326,6 +326,18 @@ impl ToadForce {
         self.gpu.stale_read(offset, len);
     }
 
+    /// Whether the host renderer shows `surface`, the picture on the
+    /// screen, from its own copy this frame (`Gpu::shows`).
+    pub fn host_shows(&mut self, surface: &format::Surface) -> bool {
+        self.gpu.shows(surface)
+    }
+
+    /// Whether the host shows this frame's picture: asked once, by the
+    /// read-back of the picture, which it replaces.
+    pub fn host_presents(&mut self) -> bool {
+        self.gpu.take_presents()
+    }
+
     /// Whether a host renderer is attached (`set_host`).
     pub fn hosted(&self) -> bool {
         self.gpu.attached()

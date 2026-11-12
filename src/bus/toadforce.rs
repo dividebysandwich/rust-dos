@@ -352,6 +352,11 @@ impl Bus {
     /// (`video::render_vbe`), which is the card's own mode while it
     /// shows one and a mode the video BIOS set otherwise.
     pub(crate) fn toadforce_show(&mut self) {
+        // The window is drawn from the host's copy this frame
+        // (`toadforce_host_picture`).
+        if self.toadforce.as_deref_mut().is_some_and(|c| c.host_presents()) {
+            return;
+        }
         if !self.toadforce_ahead() || self.video_mode != VideoMode::Vesa {
             return;
         }
@@ -360,6 +365,43 @@ impl Bus {
         };
         let clamp = |at: u64| at.min(u32::MAX as u64) as u32;
         self.toadforce_read_back(Some((clamp(start), clamp(end))), Cause::Show);
+    }
+
+    /// The picture on the screen as a surface of the card, when the
+    /// host renderer has every pixel of it and can show it from its
+    /// own copy: a direct colour mode shown at its own size. The next
+    /// `toadforce_show` then reads nothing back, and the caller draws
+    /// the window from the host's copy instead of from card memory.
+    ///
+    /// The surface is the one the card shows as of the commands it has
+    /// run (`vbe.start`), and the queued ones stay queued. A program
+    /// that flipped draws its next frame into the surface the screen
+    /// had until then, which is still the one latched until the next
+    /// retrace: running the queue here and showing the latched surface
+    /// would show that frame half drawn.
+    pub fn toadforce_host_picture(&mut self) -> Option<crate::toadforce::format::Surface> {
+        use crate::toadforce::format::{Format, Surface};
+        if self.video_mode != VideoMode::Vesa || !self.toadforce_hosted() {
+            return None;
+        }
+        let mode = self.vbe.mode?;
+        if self.vbe.scale() != 1 {
+            return None;
+        }
+        let format = match mode.bpp {
+            16 => Format::R5G6B5,
+            32 => Format::X8R8G8B8,
+            _ => return None,
+        };
+        let surface = Surface {
+            offset: self.vbe.start,
+            pitch: self.vbe.pitch,
+            width: mode.width as u32,
+            height: mode.height as u32,
+            format,
+        };
+        let card = self.toadforce.as_deref_mut()?;
+        card.host_shows(&surface).then_some(surface)
     }
 
     /// Have the card record what it is given to draw (`ToadForce::

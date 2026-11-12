@@ -205,6 +205,11 @@ impl Host for HostLink {
             .is_some_and(|h| h.read_back(surface, memory, pages))
     }
 
+    fn shows(&mut self, surface: &Surface, pages: &gpu::Pages) -> bool {
+        let mut host = self.0.borrow_mut();
+        host.as_mut().is_some_and(|h| h.shows(surface, pages))
+    }
+
     fn forget(&mut self) {
         if let Some(host) = &mut *self.0.borrow_mut() {
             host.forget();
@@ -830,6 +835,37 @@ impl GlScreen {
             }
         }
         self.draw(texture, size, display, None, line);
+        true
+    }
+
+    /// Show the ToadForce's picture `surface` from the host renderer's
+    /// copy of it (`ToadForceGl::composite`), with what `screen` has
+    /// over `base` on it, letterboxed at `display` proportions. False
+    /// if the renderer has none to show.
+    pub fn present_toadforce(
+        &mut self,
+        surface: &Surface,
+        screen: &Frame,
+        base: &Frame,
+        display: (u32, u32),
+    ) -> bool {
+        let composed = match &mut *self.toadforce.0.borrow_mut() {
+            Some(host) => host.composite(surface, screen, base),
+            None => None,
+        };
+        let Some((texture, size)) = composed else {
+            return false;
+        };
+        self.xbrz_frame.invalidate();
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.set_filter();
+            if shader::needs_mipmaps(self.active) {
+                self.gl.generate_mipmap(glow::TEXTURE_2D);
+            }
+        }
+        self.draw(texture, size, display, None, 1.0);
         true
     }
 

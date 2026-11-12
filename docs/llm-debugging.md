@@ -1139,8 +1139,14 @@ counts what the OpenGL renderer costs and misses:
 - `read_backs`: surfaces copied from the GPU to card memory because
   the program, a driver, the screen or a command on the processor
   needed their bytes. Each stalls the GPU, so a game with several a
-  frame is one to look at (which call asks is in the plan,
-  `docs/toadforce.md`).
+  frame is one to look at. `read_backs_for` has them by what asked:
+  `program`, `lock`, `driver`, `show`, `blit`, `clear`, `sampled`,
+  `declined`, `buffers`, `ring` and `other` ("Between the card and
+  the host renderer" in `docs/toadforce.md`). A game in a window
+  nobody looks into has none: the window is drawn from the GPU's
+  surface. A screenshot, a recording, the debugger's picture and an
+  open settings window each read the picture back, so `show` counts
+  the frames one of them wanted.
 - `declined_draws`: draws the software renderer drew because OpenGL
   doesn't draw their state as the card does. Each reads its target
   back first.
@@ -1149,9 +1155,12 @@ counts what the OpenGL renderer costs and misses:
   gave the program the address of without reading it back.
 - `counts`: the renderer's own, null with `software`: `batches` and
   `runs` (draw calls), `surface_uploads` and `texture_uploads` from
-  card memory, the shader `programs` compiled and `failed_programs`,
-  the `surfaces` and `textures` it holds, and `packed_565` (whether
-  16-bit targets are the GPU's 5-6-5 format).
+  card memory, `texture_converts` (images of textures filled from a
+  surface the GPU has, with nothing read back), `clears` and `blits`
+  done on the GPU, `presents` (frames the window showed from the
+  GPU's surface), the shader `programs` compiled and
+  `failed_programs`, the `surfaces` and `textures` it holds, and
+  `packed_565` (whether 16-bit targets are the GPU's 5-6-5 format).
 
 A run with `--deterministic` draws the card in software, so that its
 pictures are the same on every host. To compare the two renderers at

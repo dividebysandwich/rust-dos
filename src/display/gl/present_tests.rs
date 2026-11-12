@@ -1003,3 +1003,150 @@ fn a_toadforce_draws_through_the_windows_host_renderer() {
     cpu.bus.toadforce_set_host(None);
     assert_eq!(renderer(&cpu), "software");
 }
+
+/// The window's picture of a ToadForce surface comes from the host
+/// renderer's copy: the top row first, 16-bit pixels as card memory
+/// would have them, the window's own drawing over it, and nothing read
+/// back.
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn a_toadforce_surface_is_shown_from_the_hosts_copy() {
+    use rust_dos::cpu::Cpu;
+    use rust_dos::toadforce::format::{Format, Surface};
+    use rust_dos::toadforce::level1::states::{
+        ARG_DIFFUSE, OP_SELECT_ARG1, RS_CULLMODE, TSS_ALPHAARG1, TSS_ALPHAOP, TSS_COLORARG1,
+        TSS_COLOROP,
+    };
+    use rust_dos::toadforce::level1::{Target, Viewport, encode};
+    use rust_dos::toadforce::regs;
+    use rust_dos::video::adapter::{Adapter, VideoSetup};
+
+    let sdl = sdl3::init().unwrap();
+    let video = sdl.video().unwrap();
+    let mut screen = GlScreen::open(&video, "ToadForce picture", (8, 8), true)
+        .unwrap_or_else(|e| panic!("{}", e.reason));
+    for format in [Format::X8R8G8B8, Format::R5G6B5] {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let setup = VideoSetup {
+            adapter: Adapter::ToadForce,
+            ..Default::default()
+        };
+        rust_dos::video::bios::install(&mut cpu.bus, setup);
+        cpu.bus.toadforce_register_write(regs::LEVEL, 1);
+        let link = screen.toadforce_link().expect("a host renderer");
+        cpu.bus.toadforce_set_host(Some(link));
+        let colour = Surface {
+            offset: 8 << 20,
+            pitch: 16 * format.bytes(),
+            width: 16,
+            height: 16,
+            format,
+        };
+        fn card(cpu: &mut Cpu) -> &mut rust_dos::toadforce::ToadForce {
+            cpu.bus.toadforce.as_mut().expect("a ToadForce")
+        }
+        // Nothing is drawn yet: the picture is card memory's.
+        assert!(!card(&mut cpu).host_shows(&colour), "{format:?}");
+        assert!(!card(&mut cpu).host_presents(), "{format:?}");
+
+        let target = Target {
+            colour,
+            depth: None,
+        };
+        let viewport = Viewport {
+            x: 0,
+            y: 0,
+            width: 16,
+            height: 16,
+            min_z: 0.0,
+            max_z: 1.0,
+        };
+        let diffuse = [
+            (TSS_COLOROP, OP_SELECT_ARG1),
+            (TSS_COLORARG1, ARG_DIFFUSE),
+            (TSS_ALPHAOP, OP_SELECT_ARG1),
+            (TSS_ALPHAARG1, ARG_DIFFUSE),
+        ];
+        let mut words = Vec::new();
+        encode::render_target(&mut words, Some(&target));
+        encode::viewport(&mut words, &viewport);
+        encode::render_state(&mut words, &[(RS_CULLMODE, 1)]);
+        encode::stage_state(&mut words, 0, &diffuse);
+        // Rows 0 to `bottom` of the target in one colour.
+        let mut rows = |bottom: f32, diffuse: u32| {
+            let corners = [(0.0, 0.0), (16.0, 0.0), (0.0, bottom)];
+            let other = [(16.0, 0.0), (16.0, bottom), (0.0, bottom)];
+            let mut vertices = Vec::new();
+            for (x, y) in corners.into_iter().chain(other) {
+                vertices.extend([x, y, 0.5f32, 1.0].map(f32::to_bits));
+                vertices.push(diffuse);
+            }
+            encode::draw(&mut words, 4, 0x004 | 0x040, 6, &vertices);
+        };
+        // Red, with green on the top four rows.
+        rows(16.0, 0xFFFF_0000);
+        rows(4.0, 0xFF00_FF00);
+        cpu.bus.toadforce_submit(&words);
+        cpu.bus.toadforce_flush();
+        assert_eq!(cpu.bus.toadforce_status().unwrap()["error"], 0);
+        assert!(cpu.bus.toadforce_ahead());
+
+        // The host has the surface, and the frame's read-back is left
+        // out once.
+        assert!(card(&mut cpu).host_shows(&colour), "{format:?}");
+        assert!(card(&mut cpu).host_presents(), "{format:?}");
+        assert!(!card(&mut cpu).host_presents(), "{format:?}");
+
+        // The window drew a white pixel at (3, 9) over the machine's
+        // picture, which it has as black: card memory's stale bytes.
+        let base = Frame::from_rgb(16, 16, vec![0; 16 * 16 * 3]);
+        let mut over = base.clone();
+        let at = (9 * 16 + 3) * 4;
+        over.rgba[at..at + 3].fill(255);
+        let composed = screen
+            .toadforce
+            .0
+            .borrow_mut()
+            .as_mut()
+            .expect("the host renderer")
+            .composite(&colour, &over, &base);
+        let (texture, size) = composed.expect("a picture");
+        assert_eq!(size, (16, 16));
+        let mut pixels = vec![0; 16 * 16 * 4];
+        // SAFETY: the test owns the current context and the texture.
+        unsafe {
+            screen.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            screen.gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+            screen.gl.get_tex_image(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut pixels)),
+            );
+            assert_eq!(screen.gl.get_error(), glow::NO_ERROR);
+        }
+        let pixel = |x: usize, y: usize| {
+            let at = (y * 16 + x) * 4;
+            [pixels[at], pixels[at + 1], pixels[at + 2]]
+        };
+        assert_eq!(pixel(8, 1), [0, 255, 0], "{format:?}");
+        assert_eq!(pixel(8, 12), [255, 0, 0], "{format:?}");
+        assert_eq!(pixel(3, 9), [255, 255, 255], "{format:?}");
+        assert_eq!(pixel(4, 9), [255, 0, 0], "{format:?}");
+
+        // Nothing came back to card memory, which a screenshot still
+        // gets when it asks.
+        let status = cpu.bus.toadforce_status().unwrap();
+        assert_eq!(status["host"]["read_backs"], 0, "{}", status["host"]);
+        assert!(cpu.bus.toadforce_ahead());
+        cpu.bus.toadforce_touch(8 << 20, 16 * colour.pitch as usize);
+        assert!(!cpu.bus.toadforce_ahead());
+        let first = cpu.bus.vbe.vram[8 << 20..][..2].to_vec();
+        let green = if format == Format::R5G6B5 { [0xE0, 0x07] } else { [0, 255] };
+        assert_eq!(first, green, "{format:?}");
+        // The copy is what card memory holds now, and still shown.
+        assert!(card(&mut cpu).host_shows(&colour), "{format:?}");
+        cpu.bus.toadforce_set_host(None);
+    }
+}

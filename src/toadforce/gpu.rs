@@ -48,6 +48,11 @@
 //!   surface, or copy from one, that is ahead (`Host::fill`,
 //!   `Host::blt`), and the destination is ahead after it. The others
 //!   are the processor's.
+//! - **The picture on the screen.** The screen asks whether the host
+//!   has the surface shown (`Gpu::shows`), and draws the window from
+//!   the host's copy when it has. The surface stays ahead. A frame
+//!   somebody needs in card memory (a screenshot, a recording, the
+//!   debugger, a deterministic run) is read back as before.
 //! - **A texture that is a surface.** A draw may sample a texture one
 //!   of whose images is a surface that is ahead (`image_of`): a render
 //!   target sampled, or the face of a cube map drawn into. The card
@@ -213,6 +218,15 @@ pub trait Host {
     /// no longer ahead. Without, it is a copy of card memory for a
     /// saved state, and the host's copy stays ahead.
     fn read_back(&mut self, surface: &Surface, memory: &mut [u8], pages: Option<&Pages>) -> bool;
+
+    /// Whether the host's copy has every pixel of `surface` as it is
+    /// now: it is ahead, or what card memory holds (by `pages`). The
+    /// screen then shows the surface from the copy, with nothing read
+    /// back. A host that can't show its copies has none.
+    fn shows(&mut self, surface: &Surface, pages: &Pages) -> bool {
+        let _ = (surface, pages);
+        false
+    }
 
     /// Drop every copy: card memory is all there is, as after a saved
     /// state was loaded.
@@ -407,6 +421,9 @@ pub struct Gpu {
     pub pages: Pages,
     /// The surfaces whose pixels the host has and card memory hasn't.
     ahead: Vec<Surface>,
+    /// The screen shows the picture from the host's copy this frame
+    /// (`shows`): the next `shown` reads nothing back.
+    presents: bool,
     /// How many surfaces were read back, and how many draws went to
     /// the software renderer with a host attached.
     pub read_backs: u64,
@@ -635,6 +652,24 @@ impl Gpu {
         }
         self.mark(clear.surface);
         true
+    }
+
+    /// Whether the host shows `surface`, the picture on the screen,
+    /// from its own copy (`Host::shows`). The frame's read-back of the
+    /// picture (`take_presents`) is then left out.
+    pub fn shows(&mut self, surface: &Surface) -> bool {
+        let shows = match self.host.get_mut() {
+            Some(host) => host.shows(surface, &self.pages),
+            None => false,
+        };
+        self.presents = shows;
+        shows
+    }
+
+    /// Whether the host shows this frame's picture, asked once a frame:
+    /// false again until the next `shows`.
+    pub fn take_presents(&mut self) -> bool {
+        std::mem::take(&mut self.presents)
     }
 
     /// Whether a surface that is ahead has the pixels of `surface`.

@@ -434,6 +434,14 @@ impl Host for TestHost {
         }
     }
 
+    fn shows(&mut self, surface: &Surface, pages: &Pages) -> bool {
+        let found = self
+            .copies
+            .iter_mut()
+            .find(|c| gpu::within(surface, &c.surface));
+        found.is_some_and(|c| c.ahead || !pages.changed(gpu::range(&c.surface), &mut c.stamp))
+    }
+
     fn forget(&mut self) {
         self.log.borrow_mut().forgets += 1;
         self.copies.clear();
@@ -1255,4 +1263,37 @@ fn fills_and_copies_run_on_the_host_where_a_surface_is_ahead() {
     assert!(log.borrow().blits >= 3);
     let (rig, _) = same(takes_all, blits);
     assert_eq!(rig.px(5, 31), 0x1234_5678);
+}
+
+#[test]
+fn the_screen_shows_a_surface_from_the_hosts_copy_while_it_is_current() {
+    let (mut rig, log) = hosted(takes_all);
+    let colour = rig.colour();
+    // The host has no copy of a surface nothing was drawn into.
+    assert!(!rig.card.host_shows(&colour));
+    assert!(!rig.card.host_presents());
+
+    triangles(&mut rig);
+    // The copy is ahead: the screen shows it, and the frame's read-back
+    // of the picture is left out, once for each time it is asked.
+    assert!(rig.card.host_shows(&colour));
+    assert!(rig.card.host_presents());
+    assert!(!rig.card.host_presents());
+    assert!(rig.card.ahead());
+    assert_eq!(log.borrow().read_backs, 0);
+
+    // A screenshot reads the picture back: the copy is what card memory
+    // holds, and still shown.
+    let (first, end) = gpu::range(&colour);
+    rig.card.settle(&mut rig.memory, Some((first, end)));
+    assert_eq!(log.borrow().read_backs, 1);
+    assert!(rig.card.host_shows(&colour));
+
+    // The processor draws into it, as GDI does: card memory is the
+    // picture until the host has the surface again.
+    poke(&mut rig, first as usize, &[1, 2, 3, 4]);
+    assert!(!rig.card.host_shows(&colour));
+    assert!(!rig.card.host_presents());
+    assert_eq!(rig.draw(4, &corner(0.0, 0.0, 30.0, 0.0, 0xFF11_2233)), 0);
+    assert!(rig.card.host_shows(&colour));
 }

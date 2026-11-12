@@ -119,6 +119,16 @@ impl GlScreen {
         match *self {}
     }
 
+    pub fn present_toadforce(
+        &mut self,
+        _surface: &rust_dos::toadforce::format::Surface,
+        _screen: &Frame,
+        _base: &Frame,
+        _display: (u32, u32),
+    ) -> bool {
+        match *self {}
+    }
+
     pub fn capture_size(&self, _display: (u32, u32)) -> Option<(u32, u32)> {
         match *self {}
     }
