@@ -116,7 +116,9 @@ pub(super) fn copy_file_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-pub(super) fn dos_date_time_to_file_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+/// DosDateTimeToFileTime, and OLE32's CoDosDateTimeToFileTime, which
+/// converts the same way.
+pub(crate) fn dos_date_time_to_file_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(ticks) = convert::dos_to_ticks(args[0] as u16, args[1] as u16) else {
         return Some(FALSE);
     };
@@ -124,7 +126,10 @@ pub(super) fn dos_date_time_to_file_time(cpu: &mut Cpu, args: &[u32]) -> Option<
     Some(TRUE)
 }
 
-pub(super) fn file_time_to_dos_date_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+/// FileTimeToDosDateTime, and OLE32's CoFileTimeToDosDateTime, which
+/// converts the same way: no time zone, and FALSE for a time before 1980
+/// or after 2107.
+pub(crate) fn file_time_to_dos_date_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let ticks = read_file_time(cpu, args[0])?;
     let Some((date, time)) = convert::ticks_to_dos(ticks) else {
         return Some(FALSE);

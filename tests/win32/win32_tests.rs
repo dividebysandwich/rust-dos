@@ -3224,6 +3224,67 @@ fn release_stg_medium_frees_what_the_medium_holds() {
     );
 }
 
+/// OLE32's CoFileTimeToDosDateTime and CoDosDateTimeToFileTime convert as
+/// KERNEL32's FileTimeToDosDateTime and DosDateTimeToFileTime do, with no
+/// time zone: 2001-03-15 12:34:56 is the DOS date 2A6Fh and time 645Ch
+/// both ways, and a time before 1980 has no DOS date. A bit each in the
+/// exit code.
+#[test]
+fn ole32_converts_between_file_times_and_dos_times() {
+    const FILE_TIME: u64 = 0x01C0_AD4C_574A_9800;
+    const BEFORE_1980: u64 = 0x01A8_E79F_E0A4_5300;
+    let imports: &[(&str, &[&str])] = &[(
+        "OLE32.DLL",
+        &["CoFileTimeToDosDateTime", "CoDosDateTimeToFileTime"],
+    )];
+    // Data: FILE_TIME at 0, BEFORE_1980 at 8, the DOS date at 10h and
+    // time at 12h, the FILETIME made back at 18h.
+    let mut data = vec![0u8; 0x20];
+    data[..8].copy_from_slice(&FILE_TIME.to_le_bytes());
+    data[8..16].copy_from_slice(&BEFORE_1980.to_le_bytes());
+    let (code, text) = run(
+        "ole32_dos_date_time",
+        program(BASE, false, imports, &data, |a, l| {
+            a.xor(ebx, ebx)?;
+            let to_dos = |a: &mut CodeAssembler, from: u32| {
+                a.push(l.at(0x12) as i32)?;
+                a.push(l.at(0x10) as i32)?;
+                a.push(l.at(from) as i32)?;
+                a.call(l.import(0))
+            };
+            to_dos(a, 0)?;
+            a.cmp(eax, 1)?;
+            bit_if_equal(a, 0)?;
+            a.cmp(word_ptr(l.at(0x10)), 0x2A6F)?;
+            bit_if_equal(a, 1)?;
+            a.cmp(word_ptr(l.at(0x12)), 0x645C)?;
+            bit_if_equal(a, 2)?;
+            a.push(l.at(0x18) as i32)?;
+            a.push(0x645C)?;
+            a.push(0x2A6F)?;
+            a.call(l.import(1))?;
+            a.cmp(eax, 1)?;
+            bit_if_equal(a, 3)?;
+            a.cmp(dword_ptr(l.at(0x18)), FILE_TIME as u32 as i32)?;
+            bit_if_equal(a, 4)?;
+            a.cmp(dword_ptr(l.at(0x1C)), (FILE_TIME >> 32) as i32)?;
+            bit_if_equal(a, 5)?;
+            to_dos(a, 8)?;
+            a.test(eax, eax)?;
+            bit_if_equal(a, 6)?;
+            a.mov(eax, ebx)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(
+        code,
+        0x7F,
+        "the checks that failed: {:07b} {}",
+        !code & 0x7F,
+        text
+    );
+}
+
 /// HeapAlloc with HEAP_GENERATE_EXCEPTIONS raises STATUS_NO_MEMORY when
 /// the heap is full; with no handler the program ends saying so.
 #[test]
