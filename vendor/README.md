@@ -50,12 +50,14 @@ tracks:
 3. In the same file, delete `exclude = ["vendor/oxideav-indeo"]` under
    `[workspace]`.
 4. `git rm -r vendor`
-5. Update the lock files:
+5. Update the lock files. `cargo update -p oxideav-indeo` can't, as the
+   lock names a folder that is gone; these change the crate's entry
+   alone:
 
    ```
-   cargo update -p oxideav-indeo
-   cargo update --manifest-path libretro/Cargo.toml -p oxideav-indeo
-   cargo update --manifest-path web/Cargo.toml -p oxideav-indeo
+   cargo update --workspace
+   cargo update --workspace --manifest-path libretro/Cargo.toml
+   cargo update --workspace --manifest-path web/Cargo.toml
    ```
 
 6. Run `cargo test --lib vfw::` and the command of step 1 again, which
