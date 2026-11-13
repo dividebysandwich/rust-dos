@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 56;
+const WIN32_VERSION: u16 = 57;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -872,6 +872,7 @@ mod tests {
         (54, 0xB1D0_B934_F547_E963), // Direct3D 8's cube textures
         (55, 0x33AE_9F33_F125_1478), // a video device's full-screen play
         (56, 0x0BF5_7A03_9493_E7DE), // TrackMouseEvent's request, one for the desktop
+        (57, 0x16FF_5336_3E4E_28D8), // the system locale
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

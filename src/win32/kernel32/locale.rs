@@ -1,21 +1,17 @@
-//! The locale: English (United States), the only one a US Windows 95
-//! has the data of here. Its information (GetLocaleInfo), the formats of
-//! dates, times, numbers and money made with it, and the enumerations of
-//! locales and formats, which call the program back.
+//! The locales: those of the built-in Windows (`nls::LOCALES`), all of
+//! them installed as on a Windows 98 with multilanguage support, and the
+//! system locale (`win32_locale`) the defaults stand for. Their
+//! information (GetLocaleInfo), the formats of dates, times, numbers and
+//! money made with it, and the enumerations of locales and formats, which
+//! call the program back. The A functions give text in the locale's ANSI
+//! code page, or with LOCALE_USE_CP_ACP the system's.
 
 use super::text::{ERROR_INVALID_FLAGS, put_units, read_string};
 use super::{ERROR_INVALID_PARAMETER, FALSE, TRUE, set_error};
 use crate::cpu::Cpu;
 use crate::win32::call::{self, Call};
 use crate::win32::convert::{self, SystemTime};
-
-/// The locale, its language and their defaults' names.
-const LCID_EN_US: u32 = 0x0409;
-const LOCALE_SYSTEM_DEFAULT: u32 = 0x0800;
-const LOCALE_USER_DEFAULT: u32 = 0x0400;
-const LOCALE_NEUTRAL: u32 = 0;
-const SUBLANG_NEUTRAL: u32 = 0;
-const SUBLANG_DEFAULT: u32 = 1;
+use crate::win32::nls::{self, CodePage, Locale};
 
 /// GetLocaleInfo's flags, in the LCTYPE's top bits.
 const LOCALE_NOUSEROVERRIDE: u32 = 0x8000_0000;
@@ -36,110 +32,99 @@ const LOCALE_SMONTHNAME1: u32 = 0x38;
 const LOCALE_SABBREVMONTHNAME1: u32 = 0x44;
 const LOCALE_STIMEFORMAT: u32 = 0x1003;
 
-const DAYS: [&str; 7] = [
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-    "Sunday",
-];
-const MONTHS: [&str; 12] = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-];
-
-/// The locale's information of the kind `lctype`, as Windows 95 has it
-/// for English (United States).
-fn info(lctype: u32) -> Option<String> {
+/// The information of the kind `lctype` of the locale `l`, as Windows 98
+/// has it.
+fn info(l: &Locale, lctype: u32) -> Option<String> {
+    let i = l.info;
+    let flag = |yes: bool| if yes { "1" } else { "0" };
     let text = match lctype {
-        0x01 | 0x09 => "0409",
-        0x02 => "English (United States)",
-        0x03 => "ENU",
-        0x04 | 0x1001 => "English",
-        0x05 | 0x0A => "1",
-        0x06 | 0x08 | 0x1002 => "United States",
-        0x07 => "USA",
-        0x0B => "437",
-        0x0C => ",",
-        0x0D => "1",
-        0x0E | 0x16 => ".",
-        0x0F | 0x17 => ",",
-        0x10 | 0x18 => "3;0",
+        0x01 | 0x09 => return Some(format!("{:04X}", l.lang_id())),
+        0x02 if l.lcid == 0x0409 => "English (United States)",
+        0x02 | 0x1001 => i.language,
+        0x03 => i.abbrev_language,
+        0x04 => i.native_language,
+        0x05 | 0x0A => return Some(l.country.to_string()),
+        0x06 | 0x1002 => i.country,
+        0x07 => i.abbrev_country,
+        0x08 => i.native_country,
+        0x0B => return Some(l.oem.to_string()),
+        0x0C => i.list,
+        0x0D => i.measure,
+        0x0E => i.decimal,
+        0x0F => i.thousand,
+        0x10 | 0x18 => i.grouping,
         0x11 | 0x19 | 0x1A => "2",
         0x12 => "1",
         0x13 => "0123456789",
-        0x14 => "$",
-        0x15 => "USD",
-        0x1B | 0x1C => "0",
-        0x1D => "/",
-        0x1E => ":",
-        LOCALE_SSHORTDATE => "M/d/yy",
-        LOCALE_SLONGDATE => "dddd, MMMM dd, yyyy",
-        0x21..=0x27 => "0",
-        LOCALE_S1159 => "AM",
-        LOCALE_S2359 => "PM",
-        0x2A..=0x30 => DAYS[(lctype - LOCALE_SDAYNAME1) as usize],
-        0x31..=0x37 => &DAYS[(lctype - LOCALE_SABBREVDAYNAME1) as usize][..3],
-        0x38..=0x43 => MONTHS[(lctype - LOCALE_SMONTHNAME1) as usize],
-        0x44..=0x4F => &MONTHS[(lctype - LOCALE_SABBREVMONTHNAME1) as usize][..3],
+        0x14 => i.currency,
+        0x15 => i.intl_symbol,
+        0x16 => i.money_decimal,
+        0x17 => i.money_thousand,
+        0x1B => i.currency_order,
+        0x1C => i.negative_currency,
+        0x1D => i.date_separator,
+        0x1E => i.time_separator,
+        LOCALE_SSHORTDATE => i.short_date,
+        LOCALE_SLONGDATE => i.long_date,
+        LOCALE_IDATE | LOCALE_ILDATE => i.date_order,
+        0x23 => i.hours24,
+        // ICENTURY, ITLZERO, IDAYLZERO and IMONLZERO: what the short date
+        // and the time formats have.
+        0x24 => flag(i.short_date.contains("yyyy")),
+        0x25 => flag(i.time_format.starts_with("hh") || i.time_format.starts_with("HH")),
+        0x26 => flag(i.short_date.contains("dd")),
+        0x27 => flag(i.short_date.contains("MM")),
+        LOCALE_S1159 => i.am,
+        LOCALE_S2359 => i.pm,
+        0x2A..=0x30 => i.days[(lctype - LOCALE_SDAYNAME1) as usize],
+        0x31..=0x37 => i.abbrev_days[(lctype - LOCALE_SABBREVDAYNAME1) as usize],
+        0x38..=0x43 => i.months[(lctype - LOCALE_SMONTHNAME1) as usize],
+        0x44..=0x4F => i.abbrev_months[(lctype - LOCALE_SABBREVMONTHNAME1) as usize],
         0x50 => "",
         0x51 => "-",
         0x52 => "3",
         0x53 | 0x55 | 0x57 => "0",
         0x54 | 0x56 => "1",
-        0x59 => "en",
-        0x5A => "US",
-        LOCALE_STIMEFORMAT => "h:mm:ss tt",
-        0x1004 => "1252",
+        0x59 => i.iso_language,
+        0x5A => i.iso_country,
+        LOCALE_STIMEFORMAT => i.time_format,
+        0x1004 => return Some(l.ansi.to_string()),
         0x1005 => "0",
         0x1009 => "1",
         0x100B => "0",
-        0x100C => "6",
+        0x100C => i.first_day,
         0x100D => "0",
         0x100E | 0x100F => "",
-        0x1010 => "1",
-        0x1011 => "10000",
+        0x1010 => i.negative_number,
+        0x1011 => return Some(l.mac.to_string()),
         _ => return None,
     };
     Some(text.to_string())
 }
 
-/// The locale `lcid` stands for: the user's or the system's default for
-/// those, SUBLANG_DEFAULT for a language's neutral sublanguage, as
-/// ConvertDefaultLocale says.
-fn convert_default(lcid: u32) -> u32 {
-    match lcid {
-        LOCALE_SYSTEM_DEFAULT | LOCALE_USER_DEFAULT | LOCALE_NEUTRAL => LCID_EN_US,
-        _ if lcid >> 10 & 0x3F == SUBLANG_NEUTRAL => lcid & !0xFC00 | SUBLANG_DEFAULT << 10,
-        _ => lcid,
-    }
-}
-
-/// Whether the locale `lcid` names is the one there is.
-fn known(lcid: u32) -> bool {
-    convert_default(lcid) == LCID_EN_US
-}
-
-/// Check the locale of a function: false, with the error set, if it is
-/// another.
-fn check_locale(cpu: &mut Cpu, lcid: u32) -> bool {
-    let ok = known(lcid);
-    if !ok {
+/// The locale a function's `lcid` names, or None, with the error set, for
+/// one there isn't.
+fn check_locale(cpu: &mut Cpu, lcid: u32) -> Option<&'static Locale> {
+    let l = nls::locale_of(cpu, lcid);
+    if l.is_none() {
         set_error(cpu, ERROR_INVALID_PARAMETER);
     }
-    ok
+    l
+}
+
+/// The code page an A function of the locale `l` writes its text in: the
+/// locale's, or the system's with LOCALE_USE_CP_ACP.
+fn page_of(cpu: &Cpu, l: &Locale, flags: u32) -> CodePage {
+    if flags & LOCALE_USE_CP_ACP != 0 {
+        nls::ansi(cpu)
+    } else {
+        l.ansi()
+    }
+}
+
+/// `text` in the code page `page`.
+fn encode(page: CodePage, text: &str) -> Vec<u8> {
+    page.encode(&text.encode_utf16().collect::<Vec<_>>())
 }
 
 /// Write the ANSI `text` and its zero to the buffer at `to` of `size`
@@ -175,14 +160,15 @@ pub(super) fn get_locale_info_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_FLAGS);
         return Some(0);
     }
-    if !check_locale(cpu, lcid) {
+    let Some(l) = check_locale(cpu, lcid) else {
         return Some(0);
-    }
-    let Some(text) = info(lctype & !(LOCALE_NOUSEROVERRIDE | LOCALE_USE_CP_ACP)) else {
+    };
+    let Some(text) = info(l, lctype & !(LOCALE_NOUSEROVERRIDE | LOCALE_USE_CP_ACP)) else {
         set_error(cpu, ERROR_INVALID_FLAGS);
         return Some(0);
     };
-    put_text(cpu, to, size, text.as_bytes())
+    let text = encode(page_of(cpu, l, lctype), &text);
+    put_text(cpu, to, size, &text)
 }
 
 /// SetLocaleInfoA: Windows takes changes of the user's formats here; this
@@ -192,7 +178,7 @@ pub(super) fn set_locale_info_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[lcid, lctype, data] = args else {
         unreachable!()
     };
-    if data == 0 || !known(lcid) {
+    if data == 0 || nls::locale_of(cpu, lcid).is_none() {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
     }
@@ -207,29 +193,31 @@ pub(super) fn set_locale_info_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-/// GetUserDefaultLCID, GetSystemDefaultLCID and GetThreadLocale.
-pub(super) fn get_default_lcid(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(LCID_EN_US)
+/// GetUserDefaultLCID, GetSystemDefaultLCID and GetThreadLocale: the
+/// system locale, which is the user's too.
+pub(super) fn get_default_lcid(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(nls::current(cpu).lcid)
 }
 
 /// GetUserDefaultLangID and GetSystemDefaultLangID.
-pub(super) fn get_default_lang_id(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(LCID_EN_US & 0xFFFF)
+pub(super) fn get_default_lang_id(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(nls::current(cpu).lang_id())
 }
 
-/// SetThreadLocale: only to the locale there is.
+/// SetThreadLocale: TRUE for a locale there is. The thread goes on in the
+/// system locale, which GetThreadLocale gives.
 pub(super) fn set_thread_locale(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    Some(check_locale(cpu, args[0]) as u32)
+    Some(check_locale(cpu, args[0]).is_some() as u32)
 }
 
-/// IsValidLocale: the locale there is, installed and supported.
+/// IsValidLocale: the locales there are, all installed and supported.
 pub(super) fn is_valid_locale(_: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[lcid, flags] = args else { unreachable!() };
-    Some((flags <= 2 && lcid == LCID_EN_US) as u32)
+    Some((flags <= 2 && nls::by_lcid(lcid).is_some()) as u32)
 }
 
-pub(super) fn convert_default_locale(_: &mut Cpu, args: &[u32]) -> Option<u32> {
-    Some(convert_default(args[0]))
+pub(super) fn convert_default_locale(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    Some(nls::convert_default(cpu, args[0]))
 }
 
 /// What the enumerations below list.
@@ -238,35 +226,50 @@ const SHORT_DATES: u32 = 1;
 const LONG_DATES: u32 = 2;
 const TIMES: u32 = 3;
 
-/// The strings the enumeration `kind` gives, in order: the locale's
-/// default first.
-fn enumerated(kind: u32) -> &'static [&'static str] {
+/// The strings the enumeration `kind` of the locale `lcid` gives, in
+/// order: the locale's default first. The US locale has the formats
+/// Windows 95 lists for it, the others their own.
+fn enumerated(kind: u32, lcid: u32) -> Vec<String> {
+    let l = nls::by_lcid(lcid).unwrap_or(&nls::LOCALES[0]);
+    let us = |formats: &[&str]| formats.iter().map(|f| f.to_string()).collect();
     match kind {
-        LOCALES => &["00000409"],
-        SHORT_DATES => &[
+        LOCALES => nls::LOCALES
+            .iter()
+            .map(|l| format!("{:08X}", l.lcid))
+            .collect(),
+        _ if l.lcid != 0x0409 => vec![
+            match kind {
+                SHORT_DATES => l.info.short_date,
+                LONG_DATES => l.info.long_date,
+                _ => l.info.time_format,
+            }
+            .to_string(),
+        ],
+        SHORT_DATES => us(&[
             "M/d/yy",
             "M/d/yyyy",
             "MM/dd/yy",
             "MM/dd/yyyy",
             "yy/MM/dd",
             "dd-MMM-yy",
-        ],
-        LONG_DATES => &[
+        ]),
+        LONG_DATES => us(&[
             "dddd, MMMM dd, yyyy",
             "MMMM dd, yyyy",
             "dddd, dd MMMM, yyyy",
             "dd MMMM, yyyy",
-        ],
-        _ => &["h:mm:ss tt", "hh:mm:ss tt", "H:mm:ss", "HH:mm:ss"],
+        ]),
+        _ => us(&["h:mm:ss tt", "hh:mm:ss tt", "H:mm:ss", "HH:mm:ss"]),
     }
 }
 
-/// Call the enumeration's callback `data[0]` with its `data[2]`th string,
-/// which goes on the stack below the stub's: false if the stack isn't
-/// there.
+/// Call the enumeration's callback `data[0]` with its `data[2]`th string
+/// of the locale `data[3]`, in the locale's code page, which goes on the
+/// stack below the stub's: false if the stack isn't there.
 fn call_with_string(cpu: &mut Cpu, resume: (u32, u32), data: Vec<u32>) -> bool {
-    let text = enumerated(data[1])[data[2] as usize];
-    let mut bytes = text.as_bytes().to_vec();
+    let text = &enumerated(data[1], data[3])[data[2] as usize];
+    let page = nls::by_lcid(data[3]).map_or(CodePage::WESTERN, |l| l.ansi());
+    let mut bytes = encode(page, text);
     bytes.push(0);
     let at = resume
         .1
@@ -280,11 +283,12 @@ fn call_with_string(cpu: &mut Cpu, resume: (u32, u32), data: Vec<u32>) -> bool {
     call::call(cpu, data[0], &[at], call::ENUM_STRINGS, resume, data)
 }
 
-/// Start the enumeration `kind` with the callback `callback`: no value
-/// now (None) while the callback runs, the result when it has run.
-fn enumerate(cpu: &mut Cpu, callback: u32, kind: u32) -> Option<u32> {
+/// Start the enumeration `kind` of the locale `lcid` with the callback
+/// `callback`: no value now (None) while the callback runs, the result
+/// when it has run.
+fn enumerate(cpu: &mut Cpu, callback: u32, kind: u32, lcid: u32) -> Option<u32> {
     let resume = call::here(cpu);
-    if !call_with_string(cpu, resume, vec![callback, kind, 0]) {
+    if !call_with_string(cpu, resume, vec![callback, kind, 0, lcid]) {
         return Some(FALSE);
     }
     None
@@ -295,19 +299,19 @@ fn enumerate(cpu: &mut Cpu, callback: u32, kind: u32) -> Option<u32> {
 pub(in crate::win32) fn enum_returned(cpu: &mut Cpu, value: u32, call: Call) {
     let mut data = call.data;
     data[2] += 1;
-    let more = value != 0 && (data[2] as usize) < enumerated(data[1]).len();
+    let more = value != 0 && (data[2] as usize) < enumerated(data[1], data[3]).len();
     if !more || !call_with_string(cpu, call.resume, data) {
         call::finish(cpu, call.resume, TRUE);
     }
 }
 
-/// EnumSystemLocalesA: the locale there is, "00000409".
+/// EnumSystemLocalesA: the locales there are, "00000409" first.
 pub(super) fn enum_system_locales_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if args[0] == 0 {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
     }
-    enumerate(cpu, args[0], LOCALES)
+    enumerate(cpu, args[0], LOCALES, 0x0409)
 }
 
 const DATE_SHORTDATE: u32 = 0x1;
@@ -322,10 +326,11 @@ pub(super) fn enum_date_formats_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[callback, lcid, flags] = args else {
         unreachable!()
     };
-    if callback == 0 || !check_locale(cpu, lcid) {
+    let l = if callback == 0 { None } else { check_locale(cpu, lcid) };
+    let Some(l) = l else {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
-    }
+    };
     let kind = match flags & !LOCALE_USE_CP_ACP {
         0 | DATE_SHORTDATE => SHORT_DATES,
         DATE_LONGDATE => LONG_DATES,
@@ -334,22 +339,23 @@ pub(super) fn enum_date_formats_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             return Some(FALSE);
         }
     };
-    enumerate(cpu, callback, kind)
+    enumerate(cpu, callback, kind, l.lcid)
 }
 
 pub(super) fn enum_time_formats_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[callback, lcid, flags] = args else {
         unreachable!()
     };
-    if callback == 0 || !check_locale(cpu, lcid) {
+    let l = if callback == 0 { None } else { check_locale(cpu, lcid) };
+    let Some(l) = l else {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
-    }
+    };
     if flags & !LOCALE_USE_CP_ACP != 0 {
         set_error(cpu, ERROR_INVALID_FLAGS);
         return Some(FALSE);
     }
-    enumerate(cpu, callback, TIMES)
+    enumerate(cpu, callback, TIMES, l.lcid)
 }
 
 const TIME_NOMINUTESORSECONDS: u32 = 0x1;
@@ -358,16 +364,27 @@ const TIME_NOTIMEMARKER: u32 = 0x4;
 const TIME_FORCE24HOURFORMAT: u32 = 0x8;
 
 /// `value` with at least `digits` digits.
-fn number(value: u32, digits: usize) -> Vec<u8> {
-    format!("{:0digits$}", value).into_bytes()
+fn number(value: u32, digits: usize) -> Vec<u16> {
+    wide(&format!("{:0digits$}", value))
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().collect()
 }
 
 /// A date or a time (`date`) in the picture `format`, as GetDateFormat
 /// and GetTimeFormat make it. Text in quotes is copied; with the
 /// TIME_NO... flags a left-out part takes the text before it with it, up
 /// to the part before, and the text after it up to the next part, but
-/// for spaces.
-fn format_date_time(format: &[u8], st: &SystemTime, flags: u32, date: bool) -> Vec<u8> {
+/// for spaces. The names are the locale `l`'s.
+fn format_date_time(
+    l: &Locale,
+    format: &[u16],
+    st: &SystemTime,
+    flags: u32,
+    date: bool,
+) -> Vec<u16> {
+    let names = l.info;
     let &[year, month, weekday, day, hour, minute, second, _] = st;
     let mut out = Vec::new();
     let mut last = 0;
@@ -375,12 +392,12 @@ fn format_date_time(format: &[u8], st: &SystemTime, flags: u32, date: bool) -> V
     let mut i = 0;
     while i < format.len() {
         let c = format[i];
-        if c == b'\'' {
+        if c == QUOTE {
             i += 1;
             while i < format.len() {
-                if format[i] == b'\'' {
+                if format[i] == QUOTE {
                     i += 1;
-                    if format.get(i) != Some(&b'\'') {
+                    if format.get(i) != Some(&QUOTE) {
                         break;
                     }
                 }
@@ -392,8 +409,8 @@ fn format_date_time(format: &[u8], st: &SystemTime, flags: u32, date: bool) -> V
             continue;
         }
         let pictures: &[u8] = if date { b"dMyg" } else { b"hHmst" };
-        if !pictures.contains(&c) {
-            if !skipping || c == b' ' {
+        if c >= 0x80 || !pictures.contains(&(c as u8)) {
+            if !skipping || c == b' ' as u16 {
                 out.push(c);
             }
             i += 1;
@@ -406,17 +423,19 @@ fn format_date_time(format: &[u8], st: &SystemTime, flags: u32, date: bool) -> V
         }
         skipping = false;
         let hour12 = if hour == 0 { 12 } else { (hour - 1) % 12 + 1 };
-        let marker = if hour < 12 { "AM" } else { "PM" };
-        let text = match c {
-            b'd' if count >= 4 => DAYS[(weekday as usize + 6) % 7].as_bytes().to_vec(),
-            b'd' if count == 3 => DAYS[(weekday as usize + 6) % 7].as_bytes()[..3].to_vec(),
+        let marker = wide(if hour < 12 { names.am } else { names.pm });
+        let day_index = (weekday as usize + 6) % 7;
+        let month_index = month as usize - 1;
+        let text = match c as u8 {
+            b'd' if count >= 4 => wide(names.days[day_index]),
+            b'd' if count == 3 => wide(names.abbrev_days[day_index]),
             b'd' => number(day as u32, count),
-            b'M' if count >= 4 => MONTHS[month as usize - 1].as_bytes().to_vec(),
-            b'M' if count == 3 => MONTHS[month as usize - 1].as_bytes()[..3].to_vec(),
+            b'M' if count >= 4 => wide(names.months[month_index]),
+            b'M' if count == 3 => wide(names.abbrev_months[month_index]),
             b'M' => number(month as u32, count),
             b'y' if count >= 4 => number(year as u32, 4),
             b'y' => number(year as u32 % 100, count.min(2)),
-            b'g' if count == 2 => b"AD".to_vec(),
+            b'g' if count == 2 => wide("AD"),
             b'g' => Vec::new(),
             b'h' if flags & TIME_FORCE24HOURFORMAT == 0 => number(hour12 as u32, count.min(2)),
             b'h' | b'H' => number(hour as u32, count.min(2)),
@@ -425,8 +444,8 @@ fn format_date_time(format: &[u8], st: &SystemTime, flags: u32, date: bool) -> V
                 number(second as u32, count.min(2))
             }
             b't' if flags & TIME_NOTIMEMARKER == 0 => match count {
-                1 => marker.as_bytes()[..1].to_vec(),
-                _ => marker.as_bytes().to_vec(),
+                1 => marker.into_iter().take(1).collect(),
+                _ => marker,
             },
             _ => {
                 out.truncate(last);
@@ -440,6 +459,8 @@ fn format_date_time(format: &[u8], st: &SystemTime, flags: u32, date: bool) -> V
     out
 }
 
+const QUOTE: u16 = b'\'' as u16;
+
 /// The SYSTEMTIME at `at`, or the system's time for NULL. Reading it
 /// doesn't make GetDateFormat or GetTimeFormat a service an idle proof
 /// can follow: they may set the last error after it (`idle::nested`).
@@ -452,11 +473,12 @@ fn read_time(cpu: &mut Cpu, at: u32) -> Option<SystemTime> {
     (!cpu.bus.guest_faulted()).then_some(st)
 }
 
-/// The picture `at` points to, or None for NULL.
-fn read_format(cpu: &mut Cpu, at: u32) -> Option<Option<Vec<u8>>> {
+/// The picture `at` points to in the code page `page`, as Unicode, or
+/// None for NULL.
+fn read_format(cpu: &mut Cpu, at: u32, page: CodePage) -> Option<Option<Vec<u16>>> {
     match at {
         0 => Some(None),
-        _ => Some(Some(read_string(cpu, at)?)),
+        _ => Some(Some(page.decode(&read_string(cpu, at)?))),
     }
 }
 
@@ -467,9 +489,12 @@ pub(super) fn get_date_format_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[lcid, flags, time, format, to, size] = args else {
         unreachable!()
     };
-    if bad_buffer(cpu, to, size) || !check_locale(cpu, lcid) {
+    if bad_buffer(cpu, to, size) {
         return Some(0);
     }
+    let Some(l) = check_locale(cpu, lcid) else {
+        return Some(0);
+    };
     let picture_flags =
         DATE_USE_ALT_CALENDAR | DATE_LTRREADING | DATE_RTLREADING | LOCALE_USE_CP_ACP;
     let allowed = match format {
@@ -484,8 +509,9 @@ pub(super) fn get_date_format_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_FLAGS);
         return Some(0);
     }
+    let page = page_of(cpu, l, flags);
     let st = read_time(cpu, time)?;
-    let format = read_format(cpu, format)?;
+    let format = read_format(cpu, format, page)?;
     let date = [st[0], st[1], 0, st[3], 0, 0, 0, 0];
     let Some(st) = (st[1] <= 12 && st[3] <= 31)
         .then(|| convert::system_time_to_ticks(&date))
@@ -500,10 +526,10 @@ pub(super) fn get_date_format_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             0 => LOCALE_SSHORTDATE,
             _ => LOCALE_SLONGDATE,
         };
-        info(kind).unwrap_or_default().into_bytes()
+        wide(&info(l, kind).unwrap_or_default())
     });
-    let text = format_date_time(&format, &st, flags, true);
-    put_text(cpu, to, size, &text)
+    let text = format_date_time(l, &format, &st, flags, true);
+    put_text(cpu, to, size, &page.encode(&text))
 }
 
 /// GetTimeFormatA: the time `args[2]` (NULL for now) in the picture
@@ -513,9 +539,12 @@ pub(super) fn get_time_format_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[lcid, flags, time, format, to, size] = args else {
         unreachable!()
     };
-    if bad_buffer(cpu, to, size) || !check_locale(cpu, lcid) {
+    if bad_buffer(cpu, to, size) {
         return Some(0);
     }
+    let Some(l) = check_locale(cpu, lcid) else {
+        return Some(0);
+    };
     let mut allowed = TIME_NOMINUTESORSECONDS
         | TIME_NOSECONDS
         | TIME_NOTIMEMARKER
@@ -528,16 +557,16 @@ pub(super) fn get_time_format_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_FLAGS);
         return Some(0);
     }
+    let page = page_of(cpu, l, flags);
     let st = read_time(cpu, time)?;
-    let format = read_format(cpu, format)?;
+    let format = read_format(cpu, format, page)?;
     if st[4] > 23 || st[5] > 59 || st[6] > 59 {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(0);
     }
-    let format =
-        format.unwrap_or_else(|| info(LOCALE_STIMEFORMAT).unwrap_or_default().into_bytes());
-    let text = format_date_time(&format, &st, flags, false);
-    put_text(cpu, to, size, &text)
+    let format = format.unwrap_or_else(|| wide(l.info.time_format));
+    let text = format_date_time(l, &format, &st, flags, false);
+    put_text(cpu, to, size, &page.encode(&text))
 }
 
 /// How a number is written: NUMBERFMT, and CURRENCYFMT's part of it.
@@ -634,15 +663,32 @@ fn grouping(value: u32) -> Vec<usize> {
     }
 }
 
-/// The locale's format of numbers, or of money (`money`).
-fn locale_number_format(money: bool) -> NumberFormat {
+/// A locale's grouping as group sizes: "3;0" is groups of 3, the last
+/// size repeating before a 0.
+fn grouping_of(text: &str) -> Vec<usize> {
+    let mut sizes: Vec<usize> = text.split(';').filter_map(|s| s.parse().ok()).collect();
+    if sizes.last() == Some(&0) {
+        sizes.pop();
+    }
+    sizes
+}
+
+/// The locale `l`'s format of numbers, or of money (`money`), its
+/// separators in the code page `page`.
+fn locale_number_format(l: &Locale, page: CodePage, money: bool) -> NumberFormat {
+    let i = l.info;
+    let (decimal, thousand, negative) = if money {
+        (i.money_decimal, i.money_thousand, i.negative_currency)
+    } else {
+        (i.decimal, i.thousand, i.negative_number)
+    };
     NumberFormat {
         digits: 2,
         leading_zero: true,
-        grouping: grouping(3),
-        decimal: b".".to_vec(),
-        thousand: b",".to_vec(),
-        negative_order: if money { 0 } else { 1 },
+        grouping: grouping_of(i.grouping),
+        decimal: encode(page, decimal),
+        thousand: encode(page, thousand),
+        negative_order: negative.parse().unwrap_or(0),
     }
 }
 
@@ -695,16 +741,24 @@ fn number_arguments(
     let &[lcid, flags, value, format, to, size] = args else {
         unreachable!()
     };
-    if value == 0 || bad_buffer(cpu, to, size) || !check_locale(cpu, lcid) {
+    let l = if value == 0 || bad_buffer(cpu, to, size) {
+        None
+    } else {
+        check_locale(cpu, lcid)
+    };
+    let Some(l) = l else {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(Err(()));
-    }
+    };
     let (format, positive, symbol) = if format == 0 {
         if flags & !(LOCALE_NOUSEROVERRIDE | LOCALE_USE_CP_ACP) != 0 {
             set_error(cpu, ERROR_INVALID_FLAGS);
             return Some(Err(()));
         }
-        (locale_number_format(money), 0, b"$".to_vec())
+        let page = page_of(cpu, l, flags);
+        let positive = l.info.currency_order.parse().unwrap_or(0);
+        let symbol = encode(page, l.info.currency);
+        (locale_number_format(l, page, money), positive, symbol)
     } else {
         if flags != 0 {
             set_error(cpu, ERROR_INVALID_FLAGS);

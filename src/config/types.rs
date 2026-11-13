@@ -201,6 +201,64 @@ impl DesktopDepth {
     }
 }
 
+/// The system locale of the built-in Windows (`win32_locale`): the
+/// localized Windows 98 it is, which sets its ANSI and OEM code pages,
+/// its locale's information and formats, and its fonts' character set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Win32Locale {
+    /// English (United States): code pages 1252 and 437.
+    #[default]
+    EnUs,
+    /// Russian: 1251 and 866.
+    RuRu,
+    /// Polish, Czech and Hungarian (Central European): 1250 and 852.
+    PlPl,
+    CsCz,
+    HuHu,
+    /// Greek: 1253 and 737.
+    ElGr,
+    /// Turkish: 1254 and 857.
+    TrTr,
+    /// Lithuanian (Baltic): 1257 and 775.
+    LtLt,
+}
+
+impl Win32Locale {
+    pub const ALL: [Win32Locale; 8] = [
+        Self::EnUs,
+        Self::RuRu,
+        Self::PlPl,
+        Self::CsCz,
+        Self::HuHu,
+        Self::ElGr,
+        Self::TrTr,
+        Self::LtLt,
+    ];
+
+    /// A locale name such as "ru-RU", in any case, with a hyphen or an
+    /// underscore.
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim().replace('_', "-");
+        Self::ALL
+            .into_iter()
+            .find(|l| l.name().eq_ignore_ascii_case(&s))
+    }
+
+    /// "en-US", "ru-RU", ...
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::EnUs => "en-US",
+            Self::RuRu => "ru-RU",
+            Self::PlPl => "pl-PL",
+            Self::CsCz => "cs-CZ",
+            Self::HuHu => "hu-HU",
+            Self::ElGr => "el-GR",
+            Self::TrTr => "tr-TR",
+            Self::LtLt => "lt-LT",
+        }
+    }
+}
+
 /// Which calls of the built-in Windows' functions the log gets a line
 /// for (`win32_trace`): every call; the first few of each call site's
 /// calls a second and a count of the rest (src/win32/trace.rs); or none.

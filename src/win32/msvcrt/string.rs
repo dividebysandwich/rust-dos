@@ -1316,6 +1316,7 @@ pub fn mblen(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// mbtowc(to, s, count).
 pub fn mbtowc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let cv = conv(cpu);
     if args[1] == 0 {
         return Some(0);
     }
@@ -1323,7 +1324,7 @@ pub fn mbtowc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(EOF);
     }
     let b = cstr_n(cpu, args[1], 1)?;
-    let c = b.first().map_or(0, |&b| widen(b));
+    let c = b.first().map_or(0, |&b| cv.widen(b));
     if args[0] != 0 {
         put(cpu, args[0], &c.to_le_bytes())?;
     }
@@ -1332,10 +1333,11 @@ pub fn mbtowc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// wctomb(to, c).
 pub fn wctomb(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let cv = conv(cpu);
     if args[0] == 0 {
         return Some(0);
     }
-    match narrow(args[1] as u16) {
+    match cv.narrow(args[1] as u16) {
         Some(b) => {
             put(cpu, args[0], &[b])?;
             Some(1)
@@ -1349,8 +1351,9 @@ pub fn wctomb(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// mbstowcs(to, from, count): the characters, without the 0.
 pub fn mbstowcs(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let cv = conv(cpu);
     let s = cstr(cpu, args[1])?;
-    let w: Vec<u16> = s.iter().map(|&b| widen(b)).collect();
+    let w: Vec<u16> = s.iter().map(|&b| cv.widen(b)).collect();
     if args[0] == 0 {
         return Some(w.len() as u32);
     }
@@ -1366,10 +1369,11 @@ pub fn mbstowcs(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// wcstombs(to, from, count): the bytes, without the 0; -1 if one
 /// character has none.
 pub fn wcstombs(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let cv = conv(cpu);
     let w = wstr(cpu, args[1])?;
     let mut s = Vec::with_capacity(w.len());
     for &c in &w {
-        match narrow(c) {
+        match cv.narrow(c) {
             Some(b) => s.push(b),
             None => return Some(EOF),
         }

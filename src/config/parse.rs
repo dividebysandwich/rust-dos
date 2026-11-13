@@ -3,7 +3,7 @@
 use super::types::parse_bool;
 use super::{
     AspectRatio, Config, DesktopDepth, DosVersion, Filter, RunLockSetting, Section, Settings,
-    Win32Trace, WindowsVersion, parse_mouse_sensitivity,
+    Win32Locale, Win32Trace, WindowsVersion, parse_mouse_sensitivity,
 };
 use crate::cpu::{CoreMode, CpuModel};
 use crate::disk::DRIVE_Z;
@@ -352,6 +352,14 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "win32_version" => match WindowsVersion::parse(value) {
                             Some(version) => config.win32_version = Some(version),
                             None => warn(format!("invalid win32_version '{}' (95, 98 or 98se)", value)),
+                        },
+                        "win32_locale" => match Win32Locale::parse(value) {
+                            Some(locale) => config.win32_locale = Some(locale),
+                            None => warn(format!(
+                                "invalid win32_locale '{}' (one of {})",
+                                value,
+                                Win32Locale::ALL.map(Win32Locale::name).join(", ")
+                            )),
                         },
                         "win32_depth" => match DesktopDepth::parse(value) {
                             Some(depth) => config.win32_depth = Some(depth),

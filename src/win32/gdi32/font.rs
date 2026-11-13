@@ -1,9 +1,23 @@
 //! Fonts and text. GDI here has raster fonts only, all drawn from the
 //! glyphs of the VGA's ROM fonts (8x8, 8x14, 8x16), scaled to the size a
 //! font asks for. A font of variable pitch has each glyph as wide as its
-//! lit columns and a column between glyphs. The glyphs are code page 437's,
-//! so ANSI text is drawn with the glyph of the same character, or of its
-//! letter without the accent, or a question mark.
+//! lit columns and a column between glyphs. The ROM's glyphs are code
+//! page 437's; the characters of the other code pages the built-in
+//! Windows has (Central European, Cyrillic, Greek, Turkish, Baltic) are
+//! drawn with glyphs of FreeDOS's CPIDOS fonts in the same three sizes
+//! (`CPIDOS_glyphs.bin`, from tools/gen_cpi_glyphs.py). A character none
+//! of them has is drawn as a look-alike, its letter without the accent, or
+//! a question mark.
+//!
+//! A font's bytes are those of its character set's code page. Each face
+//! has the character sets Windows 98 has it in: the raster faces the
+//! system locale's (Terminal its OEM one), and Arial, Times New Roman and
+//! Courier New those of WGL4, as the TrueType fonts of Windows 98 with
+//! multilanguage support have them. Choosing a font weighs the character
+//! set over the face, as Windows does: DEFAULT_CHARSET is the system
+//! locale's, and a face without the character set asked for gives way to
+//! one with it. The W functions draw Unicode text in the selected font's
+//! code page.
 //!
 //! System and MS Sans Serif, the faces dialogs and window frames use, move
 //! on as far as Windows 98's own raster fonts do instead: each character
@@ -24,13 +38,20 @@ use super::{
     gdi, init, set_error,
 };
 use crate::cpu::Cpu;
-use crate::win32::convert::{CodePage, decompose};
+use crate::win32::convert::decompose;
+use crate::win32::nls::{self, CodePage};
 use crate::win32::task::{Next, Task};
 use crate::win32::user32::{read_words, write_words};
 
 static GLYPHS_8: &[u8] = include_bytes!("../../video/assets/IBM_VGA_8x8.bin");
 static GLYPHS_14: &[u8] = include_bytes!("../../video/assets/IBM_EGA_8x14.bin");
 static GLYPHS_16: &[u8] = include_bytes!("../../video/assets/IBM_VGA_8x16.bin");
+
+/// The glyphs of the characters code page 437 has none of, from CPIDOS:
+/// each the character (16 bits) and its 8x8, 8x14 and 8x16 glyphs, sorted
+/// by character.
+static CPIDOS_GLYPHS: &[u8] = include_bytes!("../../video/assets/CPIDOS_glyphs.bin");
+const CPIDOS_ENTRY: usize = 2 + 8 + 14 + 16;
 
 /// Glyphs of ANSI characters that code page 437 has none of, drawn 8x16
 /// in the VGA font's style, after its 256: the copyright and registered
@@ -50,10 +71,7 @@ const EXTRA_GLYPHS: &[(u16, [u8; 16])] = &[
     ),
 ];
 
-pub const ANSI_CHARSET: u8 = 0;
-pub const DEFAULT_CHARSET: u8 = 1;
-pub const SYMBOL_CHARSET: u8 = 2;
-pub const OEM_CHARSET: u8 = 255;
+pub use crate::win32::nls::{ANSI_CHARSET, DEFAULT_CHARSET, OEM_CHARSET, SYMBOL_CHARSET};
 
 const FIXED_PITCH: u8 = 1;
 const VARIABLE_PITCH: u8 = 2;
@@ -73,84 +91,153 @@ const ETO_CLIPPED: u32 = 4;
 
 const RASTER_FONTTYPE: u32 = 1;
 
-/// A face GDI has: its name, pitch and family, character set, the cell
+/// The character sets a face has.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sets {
+    /// The system locale's: the raster fonts of a localized Windows 98.
+    System,
+    /// The OEM one, its code page the system locale's OEM code page.
+    Oem,
+    /// Those of WGL4 (Western, Central European, Cyrillic, Greek,
+    /// Turkish and Baltic), as Windows 98's TrueType fonts have them.
+    Wgl4,
+}
+
+const WGL4: [u8; 6] = [
+    ANSI_CHARSET,
+    nls::EASTEUROPE_CHARSET,
+    nls::RUSSIAN_CHARSET,
+    nls::GREEK_CHARSET,
+    nls::TURKISH_CHARSET,
+    nls::BALTIC_CHARSET,
+];
+
+/// A face GDI has: its name, pitch and family, character sets, the cell
 /// height it has when no height is asked for, and its weight.
 struct Face {
     name: &'static str,
     pitch_family: u8,
-    charset: u8,
+    charset: Sets,
     cell: i32,
     weight: i32,
+}
+
+/// What a font of the system locale is made of: the character set of
+/// its raster fonts and DEFAULT_CHARSET, and its OEM code page.
+#[derive(Clone, Copy)]
+struct System {
+    charset: u8,
+    oem: CodePage,
+}
+
+impl System {
+    /// The US Windows'.
+    #[cfg(test)]
+    const WESTERN: System = System {
+        charset: ANSI_CHARSET,
+        oem: CodePage::US_OEM,
+    };
+
+    fn of(cpu: &Cpu) -> System {
+        let l = nls::current(cpu);
+        System {
+            charset: l.charset,
+            oem: l.oem(),
+        }
+    }
+
+    /// The character sets of the face `fi`, its own first.
+    fn sets(&self, fi: usize) -> Vec<u8> {
+        match FACES[fi].charset {
+            Sets::System => vec![self.charset],
+            Sets::Oem => vec![OEM_CHARSET],
+            Sets::Wgl4 => {
+                let mut v = vec![self.charset];
+                v.extend(WGL4.iter().filter(|&&c| c != self.charset));
+                v
+            }
+        }
+    }
+
+    /// The code page of the character set `charset`'s bytes.
+    fn code_page(&self, charset: u8) -> CodePage {
+        if charset == OEM_CHARSET {
+            return self.oem;
+        }
+        nls::charset(charset)
+            .and_then(|c| CodePage::by_number(c.code_page))
+            .unwrap_or(CodePage::WESTERN)
+    }
 }
 
 const FACES: &[Face] = &[
     Face {
         name: "System",
         pitch_family: FF_SWISS | VARIABLE_PITCH,
-        charset: ANSI_CHARSET,
+        charset: Sets::System,
         cell: 16,
         weight: 700,
     },
     Face {
         name: "Fixedsys",
         pitch_family: FF_MODERN | FIXED_PITCH,
-        charset: ANSI_CHARSET,
+        charset: Sets::System,
         cell: 15,
         weight: 400,
     },
     Face {
         name: "Terminal",
         pitch_family: FF_MODERN | FIXED_PITCH,
-        charset: OEM_CHARSET,
+        charset: Sets::Oem,
         cell: 12,
         weight: 400,
     },
     Face {
         name: "MS Sans Serif",
         pitch_family: FF_SWISS | VARIABLE_PITCH,
-        charset: ANSI_CHARSET,
+        charset: Sets::System,
         cell: 13,
         weight: 400,
     },
     Face {
         name: "MS Serif",
         pitch_family: FF_ROMAN | VARIABLE_PITCH,
-        charset: ANSI_CHARSET,
+        charset: Sets::System,
         cell: 13,
         weight: 400,
     },
     Face {
         name: "Courier",
         pitch_family: FF_MODERN | FIXED_PITCH,
-        charset: ANSI_CHARSET,
+        charset: Sets::System,
         cell: 13,
         weight: 400,
     },
     Face {
         name: "Small Fonts",
         pitch_family: FF_SWISS | VARIABLE_PITCH,
-        charset: ANSI_CHARSET,
+        charset: Sets::System,
         cell: 11,
         weight: 400,
     },
     Face {
         name: "Arial",
         pitch_family: FF_SWISS | VARIABLE_PITCH,
-        charset: ANSI_CHARSET,
+        charset: Sets::Wgl4,
         cell: 16,
         weight: 400,
     },
     Face {
         name: "Times New Roman",
         pitch_family: FF_ROMAN | VARIABLE_PITCH,
-        charset: ANSI_CHARSET,
+        charset: Sets::Wgl4,
         cell: 16,
         weight: 400,
     },
     Face {
         name: "Courier New",
         pitch_family: FF_MODERN | FIXED_PITCH,
-        charset: ANSI_CHARSET,
+        charset: Sets::Wgl4,
         cell: 16,
         weight: 400,
     },
@@ -390,11 +477,53 @@ fn raster_of(fi: usize, device_height: i32) -> Option<(usize, i32)> {
     Some((i, scale.clamp(1, 128 / RASTERS[i].height)))
 }
 
-/// How far the byte `b` moves on in the raster size `r` drawn `x_scale`
-/// times wider.
-fn raster_width(r: &Raster, b: u8, x_scale: i32) -> i32 {
-    let c = if b < 0x20 { r.default } else { b };
-    r.widths[(c - 0x20) as usize] as i32 * x_scale
+/// How far the byte `b` of the code page `page` moves on in the raster
+/// size `r` drawn `x_scale` times wider. The widths are those of code
+/// page 1252's characters; a character it lacks takes the width of the
+/// ASCII character it is drawn like, or else one of ASCII's letters of
+/// as many lit columns (`derived_width`).
+fn raster_width(r: &Raster, page: CodePage, b: u8, x_scale: i32) -> i32 {
+    let w = |byte: u8| r.widths[(byte - 0x20) as usize] as i32 * x_scale;
+    if b < 0x20 {
+        return w(r.default);
+    }
+    let c = page.char(b);
+    match CodePage::WESTERN.byte(c) {
+        Some(western) if western >= 0x20 => w(western),
+        _ => derived_width(r, c) * x_scale,
+    }
+}
+
+/// The width in the raster size `r` of a character code page 1252 lacks:
+/// that of the ASCII character whose glyph it is drawn with, or whose
+/// 8x16 glyph is the same (Cyrillic and Greek letters that look like Latin
+/// ones), or else the most common width of the ASCII letters with as many
+/// lit columns, or the size's average.
+fn derived_width(r: &Raster, c: u16) -> i32 {
+    let ascii = |b: u8| r.widths[(b - 0x20) as usize] as i32;
+    let src = source(c);
+    if let Src::Rom(g) = src
+        && (0x21..0x7F).contains(&g)
+    {
+        return ascii(g);
+    }
+    let rows = glyph_bytes(src, 16);
+    let letters = (b'A'..=b'Z').chain(b'a'..=b'z');
+    if let Some(same) = letters.clone().find(|&l| glyph_bytes(Src::Rom(l), 16) == rows) {
+        return ascii(same);
+    }
+    let lit = |rows: &[u8]| rows.iter().fold(0u8, |a, &r| a | r).count_ones();
+    let n = lit(&rows);
+    let mut counts = [0u32; 64];
+    for l in letters {
+        if lit(&glyph_bytes(Src::Rom(l), 16)) == n {
+            counts[ascii(l) as usize] += 1;
+        }
+    }
+    match (0..64).max_by_key(|&w| (counts[w], std::cmp::Reverse(w))) {
+        Some(w) if counts[w] > 0 => w as i32,
+        _ => r.average,
+    }
 }
 
 /// A LOGFONTA, 60 bytes.
@@ -450,14 +579,37 @@ impl Log {
     }
 }
 
-/// The face a logical font gets.
-fn choose_face(log: &Log) -> usize {
-    if let Some(i) = FACES
-        .iter()
-        .position(|f| f.name.eq_ignore_ascii_case(&log.face))
-    {
-        return i;
+/// The names Windows 98 with multilanguage support substitutes for a
+/// face of one character set (the FontSubstitutes of its registry):
+/// "Arial Cyr" is Arial in Cyrillic.
+const SUBSTITUTES: &[(&str, u8)] = &[
+    (" CE", nls::EASTEUROPE_CHARSET),
+    (" Cyr", nls::RUSSIAN_CHARSET),
+    (" Greek", nls::GREEK_CHARSET),
+    (" Tur", nls::TURKISH_CHARSET),
+    (" Baltic", nls::BALTIC_CHARSET),
+];
+
+/// The face named `name`, and the character set its name says if it is
+/// a substitute's.
+fn face_named(name: &str) -> Option<(usize, Option<u8>)> {
+    let find = |n: &str| FACES.iter().position(|f| f.name.eq_ignore_ascii_case(n));
+    if let Some(i) = find(name) {
+        return Some((i, None));
     }
+    SUBSTITUTES.iter().find_map(|&(suffix, charset)| {
+        let cut = name.len().checked_sub(suffix.len())?;
+        let (base, end) = name.split_at_checked(cut)?;
+        if !end.eq_ignore_ascii_case(suffix) {
+            return None;
+        }
+        Some((find(base)?, Some(charset)))
+    })
+}
+
+/// The face a logical font of no face GDI has gets, by its pitch and
+/// family.
+fn face_by_family(log: &Log) -> usize {
     if log.charset == OEM_CHARSET {
         return TERMINAL_FACE;
     }
@@ -473,9 +625,49 @@ fn choose_face(log: &Log) -> usize {
     SANS_FACE
 }
 
+/// The face and character set a logical font gets. The character set
+/// weighs most, as in Windows' font mapper: the face asked for when it
+/// has the character set, else one that has it, of the face's family and
+/// pitch where there is one. DEFAULT_CHARSET is the system locale's, and
+/// a character set no face has (SYMBOL_CHARSET, the East Asian ones)
+/// leaves the face as asked for in a character set it has.
+fn choose(log: &Log, sys: &System) -> (usize, u8) {
+    let named = face_named(&log.face);
+    let asked = named.and_then(|(_, c)| c).unwrap_or(log.charset);
+    let face = named.map_or_else(|| face_by_family(log), |(i, _)| i);
+    let has = |fi: usize, c: u8| sys.sets(fi).contains(&c);
+    let want = if asked == DEFAULT_CHARSET {
+        sys.charset
+    } else {
+        asked
+    };
+    if has(face, want) {
+        return (face, want);
+    }
+    let candidates: Vec<usize> = (0..FACES.len()).filter(|&i| has(i, want)).collect();
+    if asked == DEFAULT_CHARSET || candidates.is_empty() {
+        return (face, sys.sets(face)[0]);
+    }
+    let pf = FACES[face].pitch_family;
+    let pick = candidates
+        .iter()
+        .copied()
+        .find(|&i| FACES[i].pitch_family == pf)
+        .or_else(|| {
+            candidates
+                .iter()
+                .copied()
+                .find(|&i| FACES[i].pitch_family & 3 == pf & 3)
+        })
+        .unwrap_or(candidates[0]);
+    (pick, want)
+}
+
 /// What a font's glyphs are made from and their size.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Key {
+    /// The code page of the font's bytes.
+    page: u16,
     base: u8,
     cell: i32,
     glyph_width: i32,
@@ -493,33 +685,145 @@ struct Glyph {
     offset: i32,
 }
 
+/// A font's glyphs, one for each byte of its code page.
 struct Glyphs {
     glyphs: Vec<Glyph>,
-    /// The glyphs are the font's ANSI characters', not code page 437's.
-    ansi: bool,
 }
 
 thread_local! {
     static CACHE: RefCell<HashMap<Key, Rc<Glyphs>>> = RefCell::new(HashMap::new());
 }
 
-/// The rows of the ROM glyph `g`, scaled to the key's cell height and
-/// `gw` columns.
-fn rom_rows(key: &Key, g: usize, gw: i32) -> Vec<u64> {
-    let (data, base_h) = match key.base {
-        8 => (GLYPHS_8, 8),
-        14 => (GLYPHS_14, 14),
-        _ => (GLYPHS_16, 16),
+/// Where a character's glyph comes from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Src {
+    /// The ROM font's glyph of this code page 437 byte.
+    Rom(u8),
+    /// The glyph of `EXTRA_GLYPHS` at this index.
+    Extra(usize),
+    /// The CPIDOS glyph at this index.
+    Cpidos(usize),
+}
+
+/// The glyph of the character `c`: the ROM font's, one of
+/// `EXTRA_GLYPHS`, CPIDOS's, or else that of a character it looks like
+/// or of its letter without the accent, or a question mark.
+fn source(c: u16) -> Src {
+    if (0x20..0x7F).contains(&c) {
+        return Src::Rom(c as u8);
+    }
+    // Code page 437's glyphs below 20h are the control characters', but
+    // the paragraph and section signs (14h and 15h) are ANSI's too.
+    if let Some(g) = CodePage::US_OEM.byte(c)
+        && (g >= 0x20 || c >= 0xA0)
+    {
+        return Src::Rom(g);
+    }
+    if let Some(i) = EXTRA_GLYPHS.iter().position(|&(e, _)| e == c) {
+        return Src::Extra(i);
+    }
+    if let Some(i) = cpidos_index(c) {
+        return Src::Cpidos(i);
+    }
+    let like = match c {
+        0xA0 => return Src::Rom(0xFF),
+        0x2022 => return Src::Rom(0x07),
+        0x2018 | 0x2019 | 0xB4 => '\'' as u16,
+        0x201C | 0x201D | 0x201E | 0xA8 => '"' as u16,
+        0x201A => ',' as u16,
+        0x2013 | 0x2014 | 0xAD | 0xAF => '-' as u16,
+        0x2026 | 0xB7 => '.' as u16,
+        0x2039 => '<' as u16,
+        0x203A => '>' as u16,
+        0x2020 | 0x2021 => '+' as u16,
+        0x2030 => '%' as u16,
+        0x2122 => 'T' as u16,
+        0x02C6 => '^' as u16,
+        0x02DC => '~' as u16,
+        0xD7 => 'x' as u16,
+        0x0152 => 'O' as u16,
+        0x0153 => 'o' as u16,
+        // Ukrainian ghe with upturn: the plain ghe.
+        0x0490 => 0x0413,
+        0x0491 => 0x0433,
+        _ => match decompose(c) {
+            Some((base, _)) => base,
+            None => return Src::Rom(b'?'),
+        },
     };
+    match source(like) {
+        Src::Rom(0x3F) if like != '?' as u16 => Src::Rom(b'?'),
+        s => s,
+    }
+}
+
+/// The index of the character `c`'s CPIDOS glyph, if it has one.
+fn cpidos_index(c: u16) -> Option<usize> {
+    let count = CPIDOS_GLYPHS.len() / CPIDOS_ENTRY;
+    let at = |i: usize| {
+        let e = &CPIDOS_GLYPHS[i * CPIDOS_ENTRY..];
+        u16::from_le_bytes([e[0], e[1]])
+    };
+    let (mut lo, mut hi) = (0, count);
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        match at(mid).cmp(&c) {
+            std::cmp::Ordering::Less => lo = mid + 1,
+            std::cmp::Ordering::Greater => hi = mid,
+            std::cmp::Ordering::Equal => return Some(mid),
+        }
+    }
+    None
+}
+
+/// The rows of the glyph `src` in the size `base` (8, 14 or 16 rows),
+/// each a byte with the leftmost pixel in bit 7. `EXTRA_GLYPHS` have 16
+/// rows only, which a smaller size samples.
+fn glyph_bytes(src: Src, base: u8) -> Vec<u8> {
+    let h = base as usize;
+    match src {
+        Src::Rom(g) => {
+            let data = match base {
+                8 => GLYPHS_8,
+                14 => GLYPHS_14,
+                _ => GLYPHS_16,
+            };
+            data[g as usize * h..g as usize * h + h].to_vec()
+        }
+        Src::Extra(e) => (0..h).map(|y| EXTRA_GLYPHS[e].1[y * 16 / h]).collect(),
+        Src::Cpidos(i) => {
+            let at = i * CPIDOS_ENTRY
+                + match base {
+                    8 => 2,
+                    14 => 10,
+                    _ => 24,
+                };
+            CPIDOS_GLYPHS[at..at + h].to_vec()
+        }
+    }
+}
+
+/// The glyph of the byte `b` of the code page `page`. A DOS code page's
+/// bytes below 80h are the ROM's glyphs, control characters' included.
+fn byte_source(page: CodePage, b: u8) -> Src {
+    if page.is_oem() && b < 0x80 || (0x20..0x7F).contains(&b) {
+        return Src::Rom(b);
+    }
+    if b < 0x20 {
+        return Src::Rom(b'?');
+    }
+    source(page.char(b))
+}
+
+/// The rows of the glyph `src`, scaled to the key's cell height and `gw`
+/// columns.
+fn rom_rows(key: &Key, src: Src, gw: i32) -> Vec<u64> {
+    let base_h = key.base as usize;
+    let data = glyph_bytes(src, key.base);
     let mut rows = Vec::with_capacity(key.cell as usize);
     for ty in 0..key.cell {
-        let byte = match g.checked_sub(256) {
-            Some(e) => EXTRA_GLYPHS[e].1[ty as usize * 16 / key.cell as usize],
-            None => {
-                let sy = (ty as usize * base_h) / key.cell as usize;
-                data.get(g * base_h + sy).copied().unwrap_or(0)
-            }
-        };
+        let sy = (ty as usize * base_h) / key.cell as usize;
+        let byte = data[sy];
         let mut bits = 0u64;
         for tx in 0..gw {
             let sx = (tx * 8) / gw;
@@ -539,10 +843,11 @@ fn rom_rows(key: &Key, g: usize, gw: i32) -> Vec<u64> {
 fn raster_glyphs(key: Key, r: &Raster) -> Glyphs {
     let native_bold = FACES[r.face].weight >= 600;
     let made_bold = key.bold && !native_bold;
+    let page = CodePage::by_number(key.page as u32).unwrap_or(CodePage::WESTERN);
     let glyphs = (0..256usize)
         .map(|b| {
-            let w = raster_width(r, b as u8, key.glyph_width);
-            let mut rows = rom_rows(&key, ansi_glyph(b as u8) as usize, 8);
+            let w = raster_width(r, page, b as u8, key.glyph_width);
+            let mut rows = rom_rows(&key, byte_source(page, b as u8), 8);
             let all = rows.iter().fold(0u64, |a, &r| a | r);
             if all != 0 {
                 let left = all.trailing_zeros() as i32;
@@ -573,17 +878,18 @@ fn raster_glyphs(key: Key, r: &Raster) -> Glyphs {
             }
         })
         .collect();
-    Glyphs { glyphs, ansi: true }
+    Glyphs { glyphs }
 }
 
 fn make_glyphs(key: Key) -> Glyphs {
     if let Some(i) = key.raster {
         return raster_glyphs(key, &RASTERS[i]);
     }
+    let page = CodePage::by_number(key.page as u32).unwrap_or(CodePage::WESTERN);
     let gw = key.glyph_width.clamp(1, 60);
-    let mut glyphs = Vec::with_capacity(256 + EXTRA_GLYPHS.len());
-    for g in 0..256 + EXTRA_GLYPHS.len() {
-        let mut rows = rom_rows(&key, g, gw);
+    let mut glyphs = Vec::with_capacity(256);
+    for b in 0..=255 {
+        let mut rows = rom_rows(&key, byte_source(page, b), gw);
         if key.bold {
             for bits in &mut rows {
                 *bits |= *bits << 1;
@@ -607,10 +913,7 @@ fn make_glyphs(key: Key) -> Glyphs {
             offset,
         });
     }
-    Glyphs {
-        glyphs,
-        ansi: false,
-    }
+    Glyphs { glyphs }
 }
 
 fn glyphs_of(key: Key) -> Rc<Glyphs> {
@@ -636,6 +939,10 @@ pub struct Realized {
     pub strike: bool,
     pub charset: u8,
     pub pitch_family: u8,
+    /// The code page of the font's bytes, its character set's.
+    pub page: CodePage,
+    /// The face's character sets as a FONTSIGNATURE's code page bits.
+    csb: u32,
     average: i32,
     glyphs: Rc<Glyphs>,
 }
@@ -647,12 +954,7 @@ impl Realized {
 
     /// The glyph of the byte `b` of the font's character set.
     fn glyph(&self, b: u8) -> &Glyph {
-        let g = if self.oem() || self.glyphs.ansi {
-            b as u16
-        } else {
-            ansi_glyph(b)
-        };
-        &self.glyphs.glyphs[g as usize]
+        &self.glyphs.glyphs[b as usize]
     }
 
     /// How far the byte `b` moves on, in device units.
@@ -669,42 +971,12 @@ impl Realized {
     }
 }
 
-/// The glyph that shows the ANSI byte `b`: code page 437's, or one of
-/// `EXTRA_GLYPHS` after them.
-fn ansi_glyph(b: u8) -> u16 {
-    if (0x20..0x7F).contains(&b) {
-        return b as u16;
-    }
-    let c = CodePage::Ansi.char(b);
-    // Code page 437's glyphs below 20h are the control characters', but
-    // the paragraph and section signs (14h and 15h) are ANSI's too.
-    if let Some(g) = CodePage::Oem.byte(c)
-        && (g >= 0x20 || c >= 0xA0)
-    {
-        return g as u16;
-    }
-    if let Some(i) = EXTRA_GLYPHS.iter().position(|&(e, _)| e == c) {
-        return 256 + i as u16;
-    }
-    let g = match c {
-        0xA0 => 0xFF,
-        0x2018 | 0x2019 | 0xB4 => b'\'',
-        0x201C | 0x201D | 0xA8 => b'"',
-        0x2013 | 0x2014 | 0xAD | 0xAF => b'-',
-        0x2022 => 0x07,
-        0xD7 => b'x',
-        _ => match decompose(c) {
-            Some((base, _)) if base < 0x80 => base as u8,
-            _ => b'?',
-        },
-    };
-    g as u16
-}
-
-/// Realize the logical font `log` for heights in device units.
-fn realize(log: &Log, device_height: i32, device_width: i32) -> Realized {
-    let fi = choose_face(log);
+/// Realize the logical font `log` for heights in device units, under the
+/// system locale `sys`.
+fn realize(log: &Log, sys: &System, device_height: i32, device_width: i32) -> Realized {
+    let (fi, charset) = choose(log, sys);
     let face = &FACES[fi];
+    let page = sys.code_page(charset);
     let (cell, internal) = match device_height {
         0 => (face.cell, (face.cell + 3) / 6),
         h if h < 0 => {
@@ -753,6 +1025,7 @@ fn realize(log: &Log, device_height: i32, device_width: i32) -> Realized {
     };
     let fixed = face.pitch_family & 3 == FIXED_PITCH;
     let key = Key {
+        page: page.number() as u16,
         base,
         cell,
         // For the raster faces, how many times wider they are drawn.
@@ -784,8 +1057,14 @@ fn realize(log: &Log, device_height: i32, device_width: i32) -> Realized {
         italic: log.italic,
         underline: log.underline,
         strike: log.strike,
-        charset: face.charset,
+        charset,
         pitch_family: face.pitch_family,
+        page,
+        csb: sys
+            .sets(fi)
+            .iter()
+            .filter_map(|&c| nls::charset(c))
+            .fold(0, |a, c| a | c.csb),
         average,
         glyphs,
     }
@@ -804,7 +1083,7 @@ pub fn realized_of(cpu: &mut Cpu, dc: &Dc) -> Realized {
         (y1 - y0).abs() * log.height.signum()
     };
     let width = dc.width_to_device(log.width.abs());
-    realize(&log, height, width)
+    realize(&log, &System::of(cpu), height, width)
 }
 
 /// The font of the DC `hdc`, or None with the error set.
@@ -917,8 +1196,10 @@ fn text_metric(dc: &Dc, f: &Realized) -> Vec<u8> {
     b
 }
 
-/// The text of a W function as ANSI.
-fn ansi_of_wide(cpu: &mut Cpu, at: u32, count: u32) -> Option<Vec<u8>> {
+/// The Unicode text of a W function in the code page of the font of the
+/// DC `hdc` (the system's ANSI code page for a DC there isn't), '?' for a
+/// character it lacks, as Windows draws it with a raster font.
+fn ansi_of_wide(cpu: &mut Cpu, hdc: u32, at: u32, count: u32) -> Option<Vec<u8>> {
     if !cpu.bus.guest_probe(at, 2 * count as usize, false) {
         return None;
     }
@@ -927,14 +1208,15 @@ fn ansi_of_wide(cpu: &mut Cpu, at: u32, count: u32) -> Option<Vec<u8>> {
     if cpu.bus.guest_faulted() {
         return None;
     }
-    Some(
-        raw.chunks(2)
-            .map(|c| {
-                let w = u16::from_le_bytes([c[0], c[1]]);
-                CodePage::Ansi.byte(w).unwrap_or(b'?')
-            })
-            .collect(),
-    )
+    let units: Vec<u16> = raw
+        .chunks(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let page = match gdi(cpu).dc(hdc).cloned() {
+        Some(dc) => realized_of(cpu, &dc).page,
+        None => nls::ansi(cpu),
+    };
+    Some(page.encode(&units))
 }
 
 fn bytes_of(cpu: &mut Cpu, at: u32, count: u32) -> Option<Vec<u8>> {
@@ -1029,7 +1311,7 @@ pub fn get_text_extent_point32_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
     }
-    let text = ansi_of_wide(cpu, args[1], args[2])?;
+    let text = ansi_of_wide(cpu, args[0], args[1], args[2])?;
     let Some(size) = text_extent(cpu, args[0], &text) else {
         return Some(FALSE);
     };
@@ -1221,7 +1503,7 @@ pub fn text_out(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// TextOutW(hdc, x, y, text, count).
 pub fn text_out_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let text = ansi_of_wide(cpu, args[3], args[4])?;
+    let text = ansi_of_wide(cpu, args[0], args[3], args[4])?;
     let pos = (args[1] as i32, args[2] as i32);
     Some(draw_text(cpu, args[0], pos, 0, None, &text, None) as u32)
 }
@@ -1257,7 +1539,7 @@ pub fn ext_text_out_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let text = if args[5] == 0 {
         Vec::new()
     } else {
-        ansi_of_wide(cpu, args[5], args[6])?
+        ansi_of_wide(cpu, args[0], args[5], args[6])?
     };
     ext_text_out_of(cpu, args, text)
 }
@@ -1278,7 +1560,7 @@ pub fn get_char_width(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             let b = if c < 0x100 {
                 c as u8
             } else {
-                CodePage::Ansi.byte(c as u16).unwrap_or(b'?')
+                f.page.byte(c as u16).unwrap_or(b'?')
             };
             to_logical_width(&dc, f.advance(b)) as u32
         })
@@ -1326,52 +1608,45 @@ pub fn get_text_charset(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// GetTextCharsetInfo(hdc, signature, flags).
 pub fn get_text_charset_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let charset = match font_of(cpu, args[0]) {
-        Some((_, f)) => f.charset,
+    let (charset, csb) = match font_of(cpu, args[0]) {
+        Some((_, f)) => (f.charset, f.csb),
         None => return Some(DEFAULT_CHARSET as u32),
     };
     if args[1] != 0 {
-        let csb = CHARSETS.iter().find(|c| c.0 == charset).map_or(0, |c| c.2);
         write_words(cpu, args[1], &[0, 0, 0, 0, csb, 0]);
     }
     Some(charset as u32)
 }
 
-/// The character sets: theirs, their code page and their bit of a
-/// FONTSIGNATURE's code pages.
-const CHARSETS: &[(u8, u32, u32)] = &[
-    (0, 1252, 0x1),
-    (238, 1250, 0x2),
-    (204, 1251, 0x4),
-    (161, 1253, 0x8),
-    (162, 1254, 0x10),
-    (177, 1255, 0x20),
-    (178, 1256, 0x40),
-    (186, 1257, 0x80),
-    (222, 874, 0x1_0000),
-    (128, 932, 0x2_0000),
-    (134, 936, 0x4_0000),
-    (129, 949, 0x8_0000),
-    (136, 950, 0x10_0000),
-    (2, 42, 0x8000_0000),
-];
+const TCI_SRCCHARSET: u32 = 1;
+const TCI_SRCCODEPAGE: u32 = 2;
+const TCI_SRCFONTSIG: u32 = 3;
+const TCI_SRCLOCALE: u32 = 0x1000;
 
-/// TranslateCharsetInfo(source, info, flags).
+/// TranslateCharsetInfo(source, info, flags): the character set of a
+/// character set's number, a code page, the lowest code page bit of a
+/// FONTSIGNATURE's, or (TCI_SRCLOCALE) the locale id `source`.
 pub fn translate_charset_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (src, out, flags) = (args[0], args[1], args[2]);
     let found = match flags {
-        1 => CHARSETS.iter().find(|c| c.0 as u32 == src),
-        2 => CHARSETS.iter().find(|c| c.1 == src),
-        3 => {
+        TCI_SRCCHARSET => nls::CHARSETS.iter().find(|c| c.charset as u32 == src),
+        TCI_SRCCODEPAGE => nls::CHARSETS.iter().find(|c| c.code_page == src),
+        TCI_SRCFONTSIG => {
             let bits = cpu.bus.guest_read_32(src);
-            CHARSETS.iter().find(|c| bits & c.2 != 0)
+            nls::CHARSETS.iter().find(|c| bits & c.csb != 0)
         }
+        TCI_SRCLOCALE => nls::by_lcid(nls::convert_default(cpu, src & 0xFFFF))
+            .and_then(|l| nls::charset(l.charset)),
         _ => None,
     };
-    let Some(&(charset, cp, bit)) = found else {
+    let Some(c) = found else {
         return Some(FALSE);
     };
-    write_words(cpu, out, &[charset as u32, cp, 0, 0, 0, 0, bit, 0]);
+    write_words(
+        cpu,
+        out,
+        &[c.charset as u32, c.code_page, 0, 0, 0, 0, c.csb, 0],
+    );
     Some(TRUE)
 }
 
@@ -1488,6 +1763,11 @@ fn faces_named(family: Option<&str>) -> Vec<usize> {
         .collect()
 }
 
+/// An enumeration's item: the face `fi` in the character set `charset`.
+fn enum_item(fi: usize, charset: u8) -> u32 {
+    fi as u32 | (charset as u32) << 8
+}
+
 /// EnumFontFamiliesA(hdc, family, proc, param), and EnumFontsA.
 pub fn enum_font_families(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if gdi(cpu).dc(args[0]).is_none() {
@@ -1499,9 +1779,12 @@ pub fn enum_font_families(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         crate::win32::user32::string_at(cpu, args[1])
     };
+    // Each face once, in its first character set: the system's where it
+    // has it.
+    let sys = System::of(cpu);
     let items = faces_named(family.as_deref())
         .into_iter()
-        .map(|i| i as u32 | (FACES[i].charset as u32) << 8)
+        .map(|i| enum_item(i, sys.sets(i)[0]))
         .collect();
     start_enum(cpu, items, args[2], args[3])
 }
@@ -1520,10 +1803,13 @@ pub fn enum_font_families_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let log = Log::of(&b);
     let family = (!log.face.is_empty()).then_some(log.face.as_str());
+    // A face in each of its character sets, or in the one asked for.
+    let sys = System::of(cpu);
     let items = faces_named(family)
         .into_iter()
-        .filter(|&i| log.charset == DEFAULT_CHARSET || FACES[i].charset == log.charset)
-        .map(|i| i as u32 | (FACES[i].charset as u32) << 8)
+        .flat_map(|i| sys.sets(i).into_iter().map(move |c| (i, c)))
+        .filter(|&(_, c)| log.charset == DEFAULT_CHARSET || c == log.charset)
+        .map(|(i, c)| enum_item(i, c))
         .collect();
     start_enum(cpu, items, args[2], args[3])
 }
@@ -1548,7 +1834,7 @@ pub fn enum_callback(cpu: &mut Cpu, t: &mut Task, at: usize) -> Next {
     log_bytes[24] = 1; // OUT_STRING_PRECIS
     log_bytes[25] = 2; // CLIP_STROKE_PRECIS
     log_bytes[26] = 2; // PROOF_QUALITY
-    let f = realize(&Log::of(&log_bytes), face.cell, 0);
+    let f = realize(&Log::of(&log_bytes), &System::of(cpu), face.cell, 0);
     log_bytes[4..8].copy_from_slice(&f.average_width().to_le_bytes());
     let mut elf = log_bytes;
     let mut full = face.name.as_bytes().to_vec();
@@ -1561,10 +1847,10 @@ pub fn enum_callback(cpu: &mut Cpu, t: &mut Task, at: usize) -> Next {
     };
     style.resize(32, 0);
     elf.extend_from_slice(&style);
-    let mut script = if charset == OEM_CHARSET {
-        b"OEM/DOS".to_vec()
-    } else {
-        b"Western".to_vec()
+    let mut script = match nls::charset(charset) {
+        _ if charset == OEM_CHARSET => b"OEM/DOS".to_vec(),
+        Some(c) => c.script.as_bytes().to_vec(),
+        None => b"Western".to_vec(),
     };
     script.resize(32, 0);
     elf.extend_from_slice(&script);
@@ -1584,6 +1870,9 @@ pub fn enum_callback(cpu: &mut Cpu, t: &mut Task, at: usize) -> Next {
     ] {
         ntm.extend_from_slice(&v.to_le_bytes());
     }
+    // The FONTSIGNATURE: no Unicode ranges, the face's code pages.
+    ntm.resize(72 + 16, 0);
+    ntm.extend_from_slice(&f.csb.to_le_bytes());
     ntm.resize(96, 0);
     let s = t.scratch;
     cpu.bus.guest_write_bytes(s, &elf);
@@ -1599,16 +1888,98 @@ pub fn enum_callback(cpu: &mut Cpu, t: &mut Task, at: usize) -> Next {
 mod tests {
     use super::*;
 
+    fn realize(log: &Log, h: i32, w: i32) -> Realized {
+        super::realize(log, &System::WESTERN, h, w)
+    }
+
+    const RUSSIAN: System = System {
+        charset: nls::RUSSIAN_CHARSET,
+        oem: CodePage::US_OEM,
+    };
+
     #[test]
     fn ansi_text_gets_code_page_437_glyphs() {
-        assert_eq!(ansi_glyph(b'A'), b'A' as u16);
+        let w = CodePage::WESTERN;
+        assert_eq!(byte_source(w, b'A'), Src::Rom(b'A'));
         // e acute is 82h in code page 437.
-        assert_eq!(ansi_glyph(0xE9), 0x82);
-        // A tilde has no glyph of its own: the plain letter.
-        assert_eq!(ansi_glyph(0xC3), b'A' as u16);
+        assert_eq!(byte_source(w, 0xE9), Src::Rom(0x82));
         // The section sign is 15h; the copyright sign isn't in 437.
-        assert_eq!(ansi_glyph(0xA7), 0x15);
-        assert_eq!(ansi_glyph(0xA9), 256);
+        assert_eq!(byte_source(w, 0xA7), Src::Rom(0x15));
+        assert_eq!(byte_source(w, 0xA9), Src::Extra(0));
+        // A tilde is CPIDOS's, the trade mark sign a T.
+        assert!(matches!(byte_source(w, 0xC3), Src::Cpidos(_)));
+        assert_eq!(byte_source(w, 0x99), Src::Rom(b'T'));
+    }
+
+    #[test]
+    fn cyrillic_text_gets_cyrillic_glyphs() {
+        let page = CodePage::by_number(1251).unwrap();
+        // Cyrillic capital de (C4h) and small ya (FFh) have glyphs of
+        // their own, different from any of code page 437's.
+        for b in [0xC4, 0xFF] {
+            let Src::Cpidos(i) = byte_source(page, b) else {
+                panic!("{b:02X} has no CPIDOS glyph");
+            };
+            let rows = glyph_bytes(Src::Cpidos(i), 16);
+            assert!((0..=255).all(|g| glyph_bytes(Src::Rom(g), 16) != rows));
+        }
+        // Ghe with upturn, which CPIDOS lacks, is drawn as ghe.
+        assert_eq!(byte_source(page, 0xA5), byte_source(page, 0xC3));
+    }
+
+    #[test]
+    fn every_code_page_character_has_a_glyph() {
+        for &n in &[1250, 1251, 1252, 1253, 1254, 1257, 737, 775, 852, 855, 866, 869] {
+            let page = CodePage::by_number(n).unwrap();
+            for b in 0xA0..=0xFF {
+                // Bytes the code page leaves undefined have no glyph.
+                let c = page.char(b);
+                if c == b as u16 && c < 0xA0 || (0xE000..0xF900).contains(&c) {
+                    continue;
+                }
+                assert_ne!(byte_source(page, b), Src::Rom(b'?'), "{n} {b:02X}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_character_set_weighs_more_than_the_face() {
+        let log = |face: &str, charset: u8| {
+            let mut b = logfont(0, 0, 0, charset, 0, face);
+            b[23] = charset;
+            Log::of(&b)
+        };
+        let face = |(fi, _): (usize, u8)| FACES[fi].name;
+        // MS Sans Serif is the system's character set only.
+        let ms = log("MS Sans Serif", DEFAULT_CHARSET);
+        assert_eq!(choose(&ms, &RUSSIAN), (SANS_FACE, nls::RUSSIAN_CHARSET));
+        assert_eq!(choose(&ms, &System::WESTERN), (SANS_FACE, ANSI_CHARSET));
+        // Cyrillic asked for on a US system: Arial has it.
+        let cyr = log("MS Sans Serif", nls::RUSSIAN_CHARSET);
+        assert_eq!(face(choose(&cyr, &System::WESTERN)), "Arial");
+        let courier = log("Courier", nls::RUSSIAN_CHARSET);
+        assert_eq!(face(choose(&courier, &System::WESTERN)), "Courier New");
+        // The substitutes' names.
+        let arial_cyr = log("Arial Cyr", ANSI_CHARSET);
+        assert_eq!(
+            choose(&arial_cyr, &System::WESTERN),
+            (7, nls::RUSSIAN_CHARSET)
+        );
+        // A character set no face has leaves the face.
+        let symbol = log("MS Sans Serif", SYMBOL_CHARSET);
+        assert_eq!(choose(&symbol, &System::WESTERN), (SANS_FACE, ANSI_CHARSET));
+    }
+
+    #[test]
+    fn raster_widths_of_cyrillic_follow_latin_look_alikes() {
+        let page = CodePage::by_number(1251).unwrap();
+        let r = &RASTERS[0];
+        // Cyrillic capital a (C0h) is drawn like A.
+        let a = raster_width(r, CodePage::WESTERN, b'A', 1);
+        assert_eq!(raster_width(r, page, 0xC0, 1), a);
+        for b in 0xC0..=0xFF {
+            assert!((3..=16).contains(&raster_width(r, page, b, 1)), "{b:02X}");
+        }
     }
 
     #[test]

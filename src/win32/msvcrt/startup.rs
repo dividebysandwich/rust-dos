@@ -10,7 +10,20 @@ use crate::win32::{object, seh};
 
 const EOF: u32 = u32::MAX;
 
-const NATIVE_LOCALE: &[u8] = b"English_United States.1252";
+/// The system locale's name as `setlocale` gives it,
+/// "English_United States.1252", and the names that pick it: the
+/// language and the country, the language, and the code page.
+fn native_locale(cpu: &Cpu) -> (Vec<u8>, [Vec<u8>; 3]) {
+    let l = crate::win32::nls::current(cpu);
+    let both = format!("{}_{}", l.info.language, l.info.country);
+    let page = format!(".{}", l.ansi);
+    let names = [
+        both.clone().into_bytes(),
+        l.info.language.as_bytes().to_vec(),
+        page.clone().into_bytes(),
+    ];
+    (format!("{both}{page}").into_bytes(), names)
+}
 
 // Arguments and the environment.
 
@@ -177,8 +190,11 @@ fn make_wide(cpu: &mut Cpu) -> Option<()> {
     if read32(cpu, var_at(V_WARGV))? != 0 {
         return Some(());
     }
+    // The system's code page, as GetCommandLineW and
+    // GetEnvironmentStringsW have the text.
+    let acp = crate::win32::nls::ansi(cpu);
     let wide_copy = |cpu: &mut Cpu, s: &[u8]| -> Option<u32> {
-        let w: Vec<u16> = s.iter().map(|&b| widen(b)).collect();
+        let w = acp.decode(s);
         let at = heap_alloc(cpu, 2 * w.len() as u32 + 2)?;
         put_wstr(cpu, at, &w)?;
         Some(at)
@@ -2442,15 +2458,14 @@ pub fn setlocale(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if args[0] > 5 {
         return Some(0);
     }
+    let (native_name, names) = native_locale(cpu);
     put_cstr(cpu, state_at(S_LOCALE_C), b"C")?;
-    put_cstr(cpu, state_at(S_LOCALE_NATIVE), NATIVE_LOCALE)?;
+    put_cstr(cpu, state_at(S_LOCALE_NATIVE), &native_name)?;
     if args[1] != 0 {
         let name = cstr(cpu, args[1])?;
         let native = name.is_empty()
-            || name.eq_ignore_ascii_case(NATIVE_LOCALE)
-            || name.eq_ignore_ascii_case(b"English_United States")
-            || name.eq_ignore_ascii_case(b"English")
-            || name.eq_ignore_ascii_case(b".1252");
+            || name.eq_ignore_ascii_case(&native_name)
+            || names.iter().any(|n| name.eq_ignore_ascii_case(n));
         if native {
             set_state(cpu, S_LOCALE, 1);
         } else if name == b"C" {
@@ -2458,6 +2473,12 @@ pub fn setlocale(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         } else {
             return Some(0);
         }
+        // __lc_codepage: the locale's code page, 0 for "C".
+        let page = match state(cpu, S_LOCALE) {
+            0 => 0,
+            _ => crate::win32::nls::ansi(cpu).number(),
+        };
+        write32(cpu, var_at(V_LC_CODEPAGE), page)?;
     }
     Some(if state(cpu, S_LOCALE) == 0 {
         state_at(S_LOCALE_C)

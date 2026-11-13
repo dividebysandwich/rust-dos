@@ -663,7 +663,7 @@ pub fn command_line_to_argv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             return Some(0);
         };
         let bytes = crate::dosstr::to_bytes(&path);
-        vec![crate::win32::kernel32::ansi_to_wide(&bytes)]
+        vec![crate::win32::kernel32::ansi_to_wide(cpu, &bytes)]
     } else {
         split_command_line(&units)
     };
