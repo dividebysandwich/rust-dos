@@ -1979,17 +1979,25 @@ and its frame rate: the bind was no cost there, and its `hle.win32`
 is the count of its state calls, pass 4's.
 
 MDK2's draws join five to one, and none of the 57 left keeps a bind:
-each differs from the one before it. The passes don't help it: its
-takes after are 2.3 to 3.8 frames a second below those before, and
-the two ranges don't overlap (in an earlier session they did: 48.7
-and 49.7 before, 47.6 and 48.9 after). Why it is lower isn't known.
-The thread does less for the draws, `hle.d3d.bind` and `hle.d3d.draw`
-going from 11% to 3% and the calls themselves (`hle.win32` with its
-`.args` and `.after`, and `hle.opengl.call`) from 46% to 41%, and it
-is 87% busy at 81% of full speed, so the processor's time isn't what
-holds the game back. The call made most is `SleepEx`, 270 thousand
-times a second, each a reschedule (issue 1007), and what the game's
-threads do with the time between them is what to look at first.
+each differs from the one before it. The passes don't help it, and
+at `cycles=max` its takes after are 2 to 4 frames a second below
+those before. The game is at its own limit of 58 frames an emulated
+second on both builds, so its rate on the wall clock is 58 times the
+emulated speed, and what differs is the emulated time dropped: 11%
+to 16% before, 17% to 20% after. At a fixed speed the builds are
+equal: 43.4 and 44.1 frames a second before and 44.9 and 43.9 after
+at 70000 cycles, where nothing is dropped, and 43.0 and 43.7 before
+and 42.8 and 43.9 after at 90000, where both drop 23% with the
+thread a third idle. The time goes while the game waits in a loop of
+`SleepEx(0)`, which `cycles=max` can't pace, since it takes the
+host's time to follow the instructions run: 3900 to 4200 calls a
+frame before, 5100 to 6300 after. Each pass that takes host work out
+of a frame lowers the rate a little (51.2 and 50.1 before either,
+49.7 and 48.1 with the kept bind, 47.3 and 47.7 with the joined
+draws too), and at the title menu, with 392 primitives a frame,
+`cycles=max` settles at 15 to 18 thousand cycles a millisecond and 40
+frames a second with the thread half idle, on both builds. Where the
+dropped time goes is issue 1007's to find.
 
 The pictures are the same: deterministic runs on the software
 renderer at 100000 cycles, the same inputs at the same emulated
