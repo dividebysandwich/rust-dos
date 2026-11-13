@@ -44,7 +44,8 @@ use super::texture::{self, GL_ADD, GL_CLAMP, GL_DECAL, GL_LINEAR, GL_REPLACE};
 use super::{
     Array, CAP_ALPHA_TEST, CAP_BLEND, CAP_COLOR_MATERIAL, CAP_CULL_FACE, CAP_DEPTH_TEST,
     CAP_DITHER, CAP_FOG, CAP_LIGHTING, CAP_NORMALIZE, CAP_POLYGON_OFFSET_FILL, CAP_SCISSOR_TEST,
-    Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, ImmVertex, UNITS, ctx,
+    Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, ImmVertex, Settings, UNITS,
+    ctx,
     current, error, signed_unit, state,
 };
 use crate::cpu::Cpu;
@@ -198,7 +199,7 @@ fn vertex_colors(
 
 /// The scissor box as the target's rectangle (left, top, right,
 /// bottom).
-fn scissor_rect(c: &Context) -> [u32; 4] {
+fn scissor_rect(c: &Settings) -> [u32; 4] {
     let [x, y, w, h] = c.scissor;
     let height = c.height as i32;
     let left = x.clamp(0, c.width as i32);
@@ -262,8 +263,12 @@ fn stage_states(mode: u32, t: &super::Texture) -> Vec<(u32, u32)> {
     ]
 }
 
-/// What `apply` puts on the device.
-struct Applied {
+/// A context's state as its Direct3D device's: what `put` puts on the
+/// device before a draw. Made from what the context's draws are made
+/// with and nothing else, so it holds while that has its stamp
+/// (`applied_of`).
+#[derive(Clone, Debug, Default)]
+pub struct Applied {
     inner: u32,
     render: Vec<(u32, u32)>,
     stages: Vec<(u32, u32, u32)>,
@@ -276,9 +281,53 @@ struct Applied {
     color_off: bool,
 }
 
-/// The device's state for drawing what the context `c` draws: None
+crate::state_fields!(Applied {
+    inner,
+    render,
+    stages,
+    textures,
+    world,
+    projection,
+    viewport,
+    scissor,
+    depth_bias,
+    color_off
+});
+
+impl Applied {
+    /// Whether a draw with `other` is drawn as one with this: the same
+    /// to the last bit.
+    fn same(&self, other: &Applied) -> bool {
+        let bits = |m: &Matrix| m.map(f32::to_bits);
+        self.inner == other.inner
+            && self.render == other.render
+            && self.stages == other.stages
+            && self.textures == other.textures
+            && bits(&self.world) == bits(&other.world)
+            && bits(&self.projection) == bits(&other.projection)
+            && same_viewport(&self.viewport, &other.viewport)
+            && self.scissor == other.scissor
+            && self.depth_bias == other.depth_bias
+            && self.color_off == other.color_off
+    }
+}
+
+/// The device's state for the draws of the context `c` as it is now,
+/// None when its viewport is off its buffers and nothing is drawn. It
+/// is made once for each stamp of the context: a draw that follows
+/// another with nothing set between them finds it made.
+fn applied_of(c: &mut Context) -> Option<&Applied> {
+    let stamp = c.stamp();
+    if c.applied.as_ref().is_none_or(|(made, _)| *made != stamp) {
+        let made = applied(c);
+        c.applied = Some((stamp, made));
+    }
+    c.applied.as_ref()?.1.as_ref()
+}
+
+/// The device's state for drawing what a context draws with `c`: None
 /// when its viewport is off its buffers, and nothing is drawn.
-fn applied(c: &Context) -> Option<Applied> {
+fn applied(c: &Settings) -> Option<Applied> {
     let (viewport, fit) = super::wgl::inner_viewport(c)?;
     let on = |cap: u32| c.caps & cap != 0;
     let depth = on(CAP_DEPTH_TEST);
@@ -397,27 +446,20 @@ fn applied(c: &Context) -> Option<Applied> {
     })
 }
 
-/// Put the current context's state on its device: its index, the
-/// device's id, and whether faces are drawn at all (not with both
-/// culled).
-fn apply(cpu: &mut Cpu) -> Option<(usize, u32, bool)> {
-    let (index, _) = current(cpu)?;
-    let c = state(cpu).contexts[index].as_ref()?;
-    if c.target == 0 {
-        return None;
-    }
-    let faces = !(c.caps & CAP_CULL_FACE != 0 && c.cull_face == GL_FRONT_AND_BACK);
-    let a = applied(c)?;
-    let d = inner_device::get(cpu, a.inner)?;
+/// Put the state `a` on its device. False if the device is gone.
+fn put(cpu: &mut Cpu, a: &Applied) -> bool {
+    let Some(d) = inner_device::get(cpu, a.inner) else {
+        return false;
+    };
     // Most draws follow one with the same state. Only what differs is
     // written: a write gives the device a new stamp, and the HAL then
     // binds the card's state anew (`inner_device::Device`).
-    for (s, v) in a.render {
+    for &(s, v) in &a.render {
         if d.render[s as usize] != v {
             d.render[s as usize] = v;
         }
     }
-    for (stage, s, v) in a.stages {
+    for &(stage, s, v) in &a.stages {
         let at = (stage * 32 + s) as usize;
         if d.stages[at] != v {
             d.stages[at] = v;
@@ -449,7 +491,7 @@ fn apply(cpu: &mut Cpu) -> Option<(usize, u32, bool)> {
             states::set_stage_texture(cpu, a.inner, stage as u32, iface);
         }
     }
-    Some((index, a.inner, faces))
+    true
 }
 
 /// Whether two viewports are the same to the last bit.
@@ -628,9 +670,167 @@ fn back_faces(
     out
 }
 
+/// Draws that wait to go to Direct3D as one: the primitives of
+/// glBegin and glEnd pairs and array draws that follow each other
+/// with the same state.
+///
+/// A program that draws a triangle or a quad at a time (Oni: 2700
+/// glEnd a frame for 3450 triangles) would otherwise pay Direct3D's
+/// work for a draw each time: the pipeline's setup, the card's state,
+/// a command. The primitives and their order are those the program
+/// gave, so the picture is the one it would be drawn one by one.
+///
+/// They hold everything they are drawn with by value: the device's
+/// state (`Applied`), and vertices that the texture matrices and the
+/// lights were applied to as they were given. So the program may set
+/// states after them and they are still drawn as they were. What they
+/// hold by name is the textures and the buffers, and what they change
+/// is the buffers: `flush_waiting` draws them before any function
+/// runs that isn't known to leave those alone (`keeps_waiting`).
+#[derive(Clone, Debug, Default)]
+pub struct Waiting {
+    /// The context that draws them, and its stamp when the last of
+    /// them was added: a draw of the context with that stamp has their
+    /// state.
+    context: u32,
+    stamp: u64,
+    applied: Applied,
+    vertices: Vec<Vertex>,
+    prims: Vec<Prim>,
+}
+
+/// The vertices that wait at most: a draw that would take them past
+/// this goes after a flush.
+const WAITING_VERTICES: usize = 8192;
+
+// A saved state has the vertices as OpenGL's are (position, color and
+// a set of coordinates for each unit) and each primitive as six words.
+// The stamp isn't saved: a loaded context has another.
+impl crate::savestate::State for Waiting {
+    fn save(&self, w: &mut crate::savestate::Writer) {
+        self.context.save(w);
+        self.applied.save(w);
+        let vertices: Vec<ImmVertex> = self
+            .vertices
+            .iter()
+            .map(|v| ImmVertex {
+                position: v.position,
+                color: v.diffuse.unwrap_or(0),
+                back: 0,
+                tex: std::array::from_fn(|u| v.tex[u]),
+            })
+            .collect();
+        vertices.save(w);
+        let prims: Vec<[u32; 6]> = self
+            .prims
+            .iter()
+            .map(|p| match *p {
+                Prim::Point(a) => [0, a, 0, 0, 0, 0],
+                Prim::Line(a, b, flat) => [1, a, b, 0, flat, 0],
+                Prim::Triangle([a, b, c], flat, edges) => [2, a, b, c, flat, edges as u32],
+            })
+            .collect();
+        prims.save(w);
+    }
+
+    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        self.context.load(r)?;
+        self.applied.load(r)?;
+        let mut vertices: Vec<ImmVertex> = Vec::new();
+        vertices.load(r)?;
+        self.vertices = vertices.iter().map(waiting_vertex).collect();
+        let mut prims: Vec<[u32; 6]> = Vec::new();
+        prims.load(r)?;
+        self.prims = prims
+            .iter()
+            .map(|&[kind, a, b, c, flat, edges]| match kind {
+                0 => Prim::Point(a),
+                1 => Prim::Line(a, b, flat),
+                _ => Prim::Triangle([a, b, c], flat, edges as u8),
+            })
+            .collect();
+        self.stamp = 0;
+        Ok(())
+    }
+}
+
+/// Draws that wait, of every kind of primitive, and whether two are
+/// the same but for the stamp: for the test of their saved state.
+#[cfg(test)]
+pub fn waiting_for_tests() -> Waiting {
+    let vertex = |x: f32| {
+        let mut v = Vertex {
+            position: [x, 2.0, 3.0, 1.0],
+            diffuse: Some(0x8040_2010),
+            ..Vertex::default()
+        };
+        v.tex[1] = [0.25, 0.5, 0.0, 1.0];
+        v
+    };
+    Waiting {
+        context: 0,
+        stamp: 77,
+        applied: Applied {
+            inner: 5,
+            render: vec![(7, 1)],
+            stages: vec![(0, 1, 4)],
+            textures: std::array::from_fn(|u| u as u32 + 9),
+            world: std::array::from_fn(|i| i as f32),
+            projection: IDENTITY,
+            scissor: Some([1, 2, 3, 4]),
+            depth_bias: -3,
+            color_off: true,
+            ..Applied::default()
+        },
+        vertices: (0..4).map(|i| vertex(i as f32)).collect(),
+        prims: vec![
+            Prim::Point(3),
+            Prim::Line(0, 1, 1),
+            Prim::Triangle([0, 1, 2], 2, 5),
+        ],
+    }
+}
+
+#[cfg(test)]
+pub fn same_waiting(a: &Waiting, b: &Waiting) -> bool {
+    a.context == b.context
+        && a.applied.same(&b.applied)
+        && a.vertices == b.vertices
+        && a.prims == b.prims
+}
+
+/// A saved waiting vertex as the pipeline takes it.
+fn waiting_vertex(v: &ImmVertex) -> Vertex {
+    let mut out = Vertex {
+        position: v.position,
+        diffuse: Some(v.color),
+        ..Vertex::default()
+    };
+    out.tex[..UNITS].copy_from_slice(&v.tex);
+    out
+}
+
+/// Draw what waits (`Waiting`), if anything does.
+pub fn flush_waiting(cpu: &mut Cpu) {
+    let Some(w) = state(cpu).waiting.take() else {
+        return;
+    };
+    let put = {
+        let _profile = crate::profile::zone(crate::profile::Zone::OpenGlApply);
+        put(cpu, &w.applied)
+    };
+    if put {
+        let inner = w.applied.inner;
+        let _ = d3d_draw::draw_prims(cpu, inner, 8, &layout(), &w.vertices, &w.prims, 0);
+    }
+}
+
 /// Draw `kind` primitives (OpenGL's) of `vertices`, in the order
 /// `order` or as they are. `backs` are the vertices' back colors when
 /// they have their own, with two-sided lighting.
+///
+/// They join the draws that wait if those have the context's state,
+/// and wait themselves otherwise, after those are drawn.
 fn draw(
     cpu: &mut Cpu,
     kind: u32,
@@ -641,14 +841,18 @@ fn draw(
     if vertices.is_empty() {
         return;
     }
-    let profile = crate::profile::zone(crate::profile::Zone::OpenGl);
-    let applied = {
-        let _profile = crate::profile::zone(crate::profile::Zone::OpenGlApply);
-        apply(cpu)
-    };
-    let Some((index, inner, faces)) = applied else {
+    let _profile = crate::profile::zone(crate::profile::Zone::OpenGl);
+    let Some((index, _)) = current(cpu) else {
         return;
     };
+    let st = state(cpu);
+    let Some(Some(c)) = st.contexts.get_mut(index) else {
+        return;
+    };
+    if c.target == 0 {
+        return;
+    }
+    let faces = !(c.caps & CAP_CULL_FACE != 0 && c.cull_face == GL_FRONT_AND_BACK);
     let all: Vec<u32>;
     let order = match order {
         Some(o) => o,
@@ -670,17 +874,50 @@ fn draw(
     }
     // Points and lines take the front colors.
     let sided = match backs {
-        Some(backs) if triangles => state(cpu).contexts[index]
-            .as_ref()
-            .map(|c| back_faces(c, vertices, backs, &mut prims, polygon_triangles(kind))),
+        Some(backs) if triangles => Some(back_faces(
+            c,
+            vertices,
+            backs,
+            &mut prims,
+            polygon_triangles(kind),
+        )),
         _ => None,
     };
     let vertices = sided.as_deref().unwrap_or(vertices);
-    drop(profile);
-    let _ = d3d_draw::draw_prims(cpu, inner, 8, &layout(), vertices, &prims, 0);
-    if let Some(Some(c)) = state(cpu).contexts.get_mut(index) {
+    let stamp = c.stamp();
+    // The draws that wait take this one if they are the context's and
+    // have its state: its stamp, or the state made anew and equal.
+    if let Some(w) = &mut st.waiting
+        && w.context == index as u32
+        && w.vertices.len() + vertices.len() <= WAITING_VERTICES
+        && (w.stamp == stamp || applied_of(c).is_some_and(|a| a.same(&w.applied)))
+    {
+        let first = w.vertices.len() as u32;
+        w.stamp = stamp;
+        w.vertices.extend_from_slice(vertices);
+        w.prims.extend(prims.iter().map(|p| match *p {
+            Prim::Point(a) => Prim::Point(a + first),
+            Prim::Line(a, b, flat) => Prim::Line(a + first, b + first, flat + first),
+            Prim::Triangle(t, flat, edges) => {
+                Prim::Triangle(t.map(|i| i + first), flat + first, edges)
+            }
+        }));
         c.drawn = true;
+        return;
     }
+    let Some(applied) = applied_of(c).cloned() else {
+        return;
+    };
+    c.drawn = true;
+    let waiting = Waiting {
+        context: index as u32,
+        stamp,
+        applied,
+        vertices: vertices.to_vec(),
+        prims,
+    };
+    flush_waiting(cpu);
+    state(cpu).waiting = Some(waiting);
 }
 
 /// Whether a primitive is one there is.
