@@ -211,6 +211,9 @@ pub static ONLY_98: &[(&str, &[&str])] = &[
             "GetLongPathNameA",
         ],
     ),
+    // COMCTL32 4.71, which came with Internet Explorer 4 and Windows 98;
+    // the built-in one says it is 4.70 (DllGetVersion), Windows 95's.
+    ("COMCTL32.DLL", &["_TrackMouseEvent"]),
 ];
 
 /// Whether the DLL `dll` exports `function` under `version`.

@@ -251,6 +251,13 @@ static APIS: &[Api] = &[
     stdcall("TooltipsSubclassProc", 0, 4, tooltips::subclass_proc),
     stdcall("PropSheetDlgProc", 0, 4, propsheet::dlg_proc),
     stdcall("ListViewEditProc", 0, 4, listview::edit_proc),
+    // USER32's TrackMouseEvent, which Windows 98's COMCTL32 calls.
+    stdcall(
+        "_TrackMouseEvent",
+        90,
+        1,
+        user32::track::track_mouse_event,
+    ),
 ];
 
 /// COMCTL32's place in `stubs::DLLS`.

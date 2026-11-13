@@ -381,6 +381,12 @@ pub fn wait_ready(win32: &crate::win32::Win32, tid: u32, wait: &QueueWait, now: 
     {
         return true;
     }
+    // The hover time is over: the thread posts its hover message as it
+    // looks for messages (track.rs).
+    if mask & QS_POSTMESSAGE != 0 && super::track::hover_due(state, tid).is_some_and(|d| d <= now)
+    {
+        return true;
+    }
     if mask & QS_INPUT != 0
         && q.input
             .iter()
@@ -420,13 +426,15 @@ fn timer_wanted(state: &super::State, t: &Timer, f: &Filter) -> bool {
         && (f.hwnd == 0 || t.hwnd == f.hwnd || state.is_descendant(f.hwnd, t.hwnd))
 }
 
-/// When the next timer of `tid` is due, if it has one.
+/// When the next timer of `tid` is due, or its hover time is over
+/// (track.rs), if it has either.
 fn next_timer(state: &super::State, tid: u32) -> Option<u64> {
     state
         .timers
         .iter()
         .filter(|t| t.tid == tid)
         .map(|t| t.due)
+        .chain(super::track::hover_due(state, tid))
         .min()
 }
 
@@ -1086,18 +1094,21 @@ pub fn peek_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         0,
     );
     // Found nothing and changed nothing: an idle proof goes through it,
-    // up to when the thread's next timer is due.
+    // up to when the thread's next timer or its hover time is due.
     if let Some(before) = before
         && result == Some(FALSE)
         && quiet(cpu).is_some_and(|after| after == before)
     {
         let tid = current_tid(cpu);
         let now = cpu.bus.clock.now_micros();
-        let due = user(cpu)
+        let state = user(cpu);
+        let due = state
             .timers
             .iter()
-            .filter(|t| t.tid == tid && t.due > now)
+            .filter(|t| t.tid == tid)
             .map(|t| t.due)
+            .chain(super::track::hover_due(state, tid))
+            .filter(|&due| due > now)
             .min();
         let until = due.map(|due| cpu.bus.clock.icount_at_micros(due));
         crate::idle::pure_call(cpu, until);
@@ -1185,6 +1196,7 @@ fn take_message(cpu: &mut Cpu, tid: u32, f: Filter, remove: bool) -> Option<Msg>
     // replaces the one SetCursorPos queued, which the program's next
     // SetCursorPos would otherwise undo before any poll saw it.
     super::input::poll(cpu);
+    super::track::hover_tick(cpu, tid);
     let now = cpu.bus.clock.now_micros();
     let pid = super::current_pid(cpu);
     let state = user(cpu);
