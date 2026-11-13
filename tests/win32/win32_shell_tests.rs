@@ -685,6 +685,42 @@ fn a_text_file_opens_in_notepad() {
     }
 }
 
+/// With no taskbar, SHAppBarMessage answers 0: no bar hides at any edge
+/// of the screen (ABM_GETAUTOHIDEBAR, as Myth II asks at its start), the
+/// taskbar has no place (ABM_GETTASKBARPOS) and a window can't register
+/// as a bar (ABM_NEW). SHELL32 on a Windows 95 without Explorer's
+/// taskbar answers the same.
+#[test]
+fn no_application_bar_without_a_taskbar() {
+    const ABM_NEW: i32 = 0;
+    const ABM_GETTASKBARPOS: i32 = 5;
+    const ABM_GETAUTOHIDEBAR: i32 = 7;
+    // An APPBARDATA: cbSize 36, then the window, message, edge, rectangle
+    // and lParam.
+    let mut data = vec![0u8; 0x40];
+    put(&mut data, 0x00, &36u32.to_le_bytes());
+    let imports: &[(&str, &[&str])] =
+        &[("KERNEL32.dll", &["ExitProcess"]), ("SHELL32.dll", &["SHAppBarMessage"])];
+    let code = program(imports, &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        for edge in 0..4 {
+            a.mov(dword_ptr(l.at(0x0C) as u64), edge)?;
+            call(a, l.import(1), &[ABM_GETAUTOHIDEBAR, l.at(0)])?;
+            check_eax(a, 0, edge as u32)?;
+        }
+        call(a, l.import(1), &[ABM_GETTASKBARPOS, l.at(0)])?;
+        check_eax(a, 0, 4)?;
+        call(a, l.import(1), &[ABM_NEW, l.at(0)])?;
+        check_eax(a, 0, 5)?;
+        exit(a, l.import(0))
+    });
+    for core in CORES {
+        let mut cpu = machine("appbar", core, &[("T.EXE", code.clone())]);
+        run_to_exit(&mut cpu);
+        assert_eq!(cpu.errorlevel, 0x3F, "{core:?}");
+    }
+}
+
 #[test]
 fn notepad_shows_a_readme_that_winexec_opens() {
     const WM_CLOSE: i32 = 0x10;

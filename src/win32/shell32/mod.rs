@@ -164,6 +164,7 @@ static APIS: &[Api] = &[
     stdcall("SHGetNewLinkInfo", 286, 5, info::sh_get_new_link_info),
     stdcall("BrowseDialogProc", 0, 4, browse::dialog_proc),
     stdcall("CommandLineToArgvW", 125, 2, exec::command_line_to_argv),
+    stdcall("SHAppBarMessage", 264, 2, sh_app_bar_message),
 ];
 
 /// The vtables, by their places in this list (link.rs's constants).
@@ -287,6 +288,17 @@ fn null(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 fn nothing(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(0)
+}
+
+/// SHAppBarMessage(message, data): SHELL32 passes the message to the
+/// taskbar's window, and answers 0 to every message when there is none,
+/// as on a Windows 95 whose shell isn't Explorer. There is no taskbar
+/// here, so no window is an application bar (ABM_NEW fails), none hides
+/// at an edge of the screen (ABM_GETAUTOHIDEBAR, which Myth II asks for
+/// each edge before it takes the screen) and the taskbar has no place
+/// or state.
+fn sh_app_bar_message(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }
 
