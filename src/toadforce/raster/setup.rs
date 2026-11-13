@@ -39,6 +39,13 @@ impl Plane {
     }
 }
 
+/// A colour's four channels from their planes over w.
+#[inline]
+pub fn colour(planes: &[Plane; 4], fx: f32, fy: f32, w: f32) -> Rgba {
+    // A number that is none casts to 0.
+    planes.map(|p| (p.eval(fx, fy) * w + 0.5).clamp(0.0, 255.0) as u8)
+}
+
 /// An edge from `a` to the next vertex, in 1/256 of a pixel. A point
 /// is on the inner side where `dx * (y - ay) - dy * (x - ax)` is at
 /// least `bias`.
@@ -367,6 +374,15 @@ impl Prim {
         clip: [i32; 4],
         sets: &[u8],
     ) -> [Option<Self>; 2] {
+        let t = Self::point_triangles(v, shape);
+        // A point has no back.
+        let shape = Shape { cull: 1, ..*shape };
+        t.map(|t| Prim::triangle([&t[0], &t[1], &t[2]], v, &shape, clip, sets))
+    }
+
+    /// The corners of the two triangles of the point at `v`
+    /// (`Prim::point`), which are drawn whichever way they face.
+    pub fn point_triangles(v: &ScreenVertex, shape: &Shape) -> [[ScreenVertex; 3]; 2] {
         let size = v
             .psize
             .unwrap_or(shape.point_size)
@@ -388,12 +404,95 @@ impl Prim {
             corner(false, true),
             corner(true, true),
         ];
-        // A point has no back.
-        let shape = Shape { cull: 1, ..*shape };
-        [
-            Prim::triangle([&c[0], &c[1], &c[2]], v, &shape, clip, sets),
-            Prim::triangle([&c[1], &c[3], &c[2]], v, &shape, clip, sets),
-        ]
+        [[c[0], c[1], c[2]], [c[1], c[3], c[2]]]
+    }
+
+    /// A line's pixels as squares for a renderer that fills triangles
+    /// (`gpu::Host`): each is the four corners of a run of the line's
+    /// pixels in one row (top left, top right, bottom left, bottom
+    /// right), and covers those pixels' centres and no other's.
+    /// `tex[n]` of a corner is slot `n`'s coordinates.
+    ///
+    /// The corners' depth, 1 / w and coordinates are the line's planes
+    /// at the corners, so what a renderer interpolates from them with
+    /// perspective is the planes at each pixel's centre, and their
+    /// change from a pixel to the next is the planes' too. The colours
+    /// are the pixel's own, rounded as `span.rs` rounds them: a line
+    /// whose colours change has a square for each pixel. A pixel whose
+    /// corners the planes give no positive 1 / w has its centre's
+    /// values at every corner.
+    pub fn squares(&self, shape: &Shape, mut out: impl FnMut(&[ScreenVertex; 4])) {
+        let Cover::Rows(spans) = &self.cover else {
+            return;
+        };
+        // A pixel's left and top side from its number.
+        let side = if shape.half_centre { 0.0 } else { -0.5 };
+        let at = |fx: f32, fy: f32, q: f32, colours: (Rgba, Rgba)| {
+            let mut v = ScreenVertex {
+                z: self.z.eval(fx, fy),
+                rhw: q,
+                diffuse: colours.0,
+                specular: colours.1,
+                ..ScreenVertex::default()
+            };
+            for (to, planes) in v.tex.iter_mut().zip(&self.tex) {
+                *to = planes.map(|p| p.eval(fx, fy) / q);
+            }
+            v
+        };
+        // The square of the pixels `x` of row `y`, unless it is of
+        // several and the planes aren't sound at its corners.
+        let mut square = |x: (i32, i32), y: i32, colours: (Rgba, Rgba)| {
+            let (fx, fy) = (x.0 as f32 - self.ox, y as f32 - self.oy);
+            let wide = (x.1 - x.0) as f32;
+            // The corners, from the first pixel's centre.
+            let offsets = [
+                (-0.5, -0.5),
+                (wide - 0.5, -0.5),
+                (-0.5, 0.5),
+                (wide - 0.5, 0.5),
+            ];
+            let q = offsets.map(|(dx, dy)| self.q.eval(fx + dx, fy + dy));
+            let sound = q.iter().all(|q| q.is_finite() && *q > 0.0);
+            if !sound && wide > 1.0 {
+                return false;
+            }
+            let centre = self.q.eval(fx, fy);
+            let mut corners = [ScreenVertex::default(); 4];
+            for (i, (dx, dy)) in offsets.into_iter().enumerate() {
+                corners[i] = match sound {
+                    true => at(fx + dx, fy + dy, q[i], colours),
+                    false => at(fx, fy, centre, colours),
+                };
+                corners[i].x = x.0 as f32 + side + dx + 0.5;
+                corners[i].y = y as f32 + side + dy + 0.5;
+            }
+            out(&corners);
+            true
+        };
+        for (row, &(first, end)) in spans.iter().enumerate() {
+            let y = self.rows.0 + row as i32;
+            // One square for the row where the colours are the same
+            // all along the line.
+            if let Some(flat) = self.flat
+                && square((first, end), y, flat)
+            {
+                continue;
+            }
+            for x in first..end {
+                // The pixel's place as `span.rs` works it out.
+                let fx = first as f32 - self.ox + (x - first) as f32;
+                let fy = y as f32 - self.oy;
+                let w = 1.0 / self.q.eval(fx, fy);
+                let colours = self.flat.unwrap_or_else(|| {
+                    (
+                        colour(&self.diffuse, fx, fy, w),
+                        colour(&self.specular, fx, fy, w),
+                    )
+                });
+                square((x, x + 1), y, colours);
+            }
+        }
     }
 
     /// The pixels of row `y` the primitive covers: the first, and the

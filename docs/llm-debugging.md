@@ -1151,9 +1151,8 @@ counts what the OpenGL renderer costs and misses:
   doesn't draw their state as the card does. Each reads its target
   back first. `declined_for` has them by reason, every reason listed
   with its count (`Decline` in `src/toadforce/gpu.rs`):
-  - the rasteriser's: `points and lines`, `fill mode` (triangles
-    drawn as points or edges) and `serial state` (a draw that reads
-    what it writes);
+  - the rasteriser's: `serial state` (a draw that reads what it
+    writes);
   - `no host`: draws after the window and its renderer are gone;
   - the OpenGL renderer's (`declines` in `src/toadforce/gl.rs`):
     `host broken` (no framebuffer the card's surfaces fit),
@@ -1221,8 +1220,11 @@ Then it draws draw by draw, the host starting each draw from the
 software renderer's pixels, and lists the states by how many pixels
 differ by more than 17 after their draws: drawn by the software
 renderer alone, by the host alone or by both, with the state's steps
-and textures and its worst draw's vertices. `TOADFORCE_REPLAY_OVER=N`
-counts the pixels over N instead. `TOADFORCE_REPLAY_SET=rs27=0,ts21=1`
+and textures and its worst draw's vertices. Each draw of points or
+lines, or of triangles as their corners or edges, gets a line of its
+own with the pixels it changed and the rectangle they are in, which
+tells what on the screen the program draws that way.
+`TOADFORCE_REPLAY_OVER=N` counts the pixels over N instead. `TOADFORCE_REPLAY_SET=rs27=0,ts21=1`
 sets render states (`rs`) and stage states (`ts`, on every stage) by
 number on both sides before each draw, here the blend off and the
 anisotropy 1: what stops differing hangs on that state.

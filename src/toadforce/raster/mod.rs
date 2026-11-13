@@ -32,9 +32,11 @@
 //! memory and at the end of the run, so nothing is queued when the
 //! guest runs, a state is saved, or the screen is shown.
 //!
-//! With a host renderer attached (`super::gpu`), the filled triangles
-//! of a state the host takes are queued for it as screen vertices, and
-//! the rest is queued as before. The queue holds one kind at a time:
+//! With a host renderer attached (`super::gpu`), the primitives of a
+//! state the host takes are queued for it as the screen vertices of
+//! triangles, a point as its two and a line as the squares of its
+//! pixels, and the rest is queued as before. The queue holds one kind
+//! at a time:
 //! a draw of the other kind empties it first, so the host's draws and
 //! the software's reach a target in the card's order.
 
@@ -105,23 +107,102 @@ pub struct Renderer {
     /// any, `runs` is empty.
     host_runs: Vec<gpu::Run>,
     host_vertices: Vec<ScreenVertex>,
+    /// The primitives queued for the host so far, counted as the
+    /// software renderer's are: a triangle and a line one, a point
+    /// its two triangles.
+    host_count: u64,
 }
 
 /// Where a draw's primitives are queued.
 enum Queue<'a> {
     Software(&'a mut Vec<Prim>),
-    /// For the host, which gets filled triangles only: the triangles'
-    /// vertices, as `gpu::Run::vertices` has them.
-    Host(&'a mut Vec<ScreenVertex>),
+    /// For the host, which fills triangles and nothing else: the
+    /// triangles' vertices, as `gpu::Run::vertices` has them, and the
+    /// count of the primitives they came from. A point goes there as
+    /// its two triangles and a line as the squares of its pixels
+    /// (`Prim::squares`), so the host covers the pixels the card's
+    /// rules give, and its own rules for lines and points are never
+    /// asked.
+    Host(&'a mut Vec<ScreenVertex>, &'a mut u64),
+}
+
+/// A vertex with each slot's coordinates where the host looks for
+/// them.
+fn slotted(v: &ScreenVertex, sets: &[u8]) -> ScreenVertex {
+    let mut out = *v;
+    for (slot, &set) in sets.iter().enumerate() {
+        out.tex[slot] = v.tex[set as usize];
+    }
+    out
+}
+
+/// A clockwise triangle of a point or of a line's square, turned
+/// round where the state culls clockwise triangles: no triangle the
+/// host gets is one the state's `CULLMODE` culls, so a host that
+/// applies it again draws them all.
+fn kept(t: [ScreenVertex; 3], shape: &pipeline::Shape) -> [ScreenVertex; 3] {
+    match shape.cull {
+        2 => [t[0], t[2], t[1]],
+        _ => t,
+    }
 }
 
 impl Queue<'_> {
-    /// The software renderer's queue. A draw with a point or a line
-    /// in it never goes to the host.
-    fn prims(&mut self) -> &mut Vec<Prim> {
+    /// Queue the point at `v`.
+    fn point(&mut self, v: &ScreenVertex, state: &DrawState, sets: &[u8]) {
+        let shape = &state.shape;
         match self {
-            Queue::Software(prims) => prims,
-            Queue::Host(_) => unreachable!("the host draws triangles only"),
+            Queue::Software(prims) => {
+                prims.extend(
+                    Prim::point(v, shape, state.clip, sets)
+                        .into_iter()
+                        .flatten(),
+                );
+            }
+            Queue::Host(vertices, count) => {
+                for t in Prim::point_triangles(v, shape) {
+                    // One with no area has no pixels.
+                    if Prim::facing([&t[0], &t[1], &t[2]], 1).is_none() {
+                        continue;
+                    }
+                    let t = kept(t, shape);
+                    vertices.extend(t.iter().map(|c| slotted(c, sets)));
+                    if shape.flat {
+                        vertices.push(slotted(v, sets));
+                    }
+                    **count += 1;
+                }
+            }
+        }
+    }
+
+    /// Queue the line from `a` to `b`.
+    fn line(
+        &mut self,
+        a: &ScreenVertex,
+        b: &ScreenVertex,
+        provoking: &ScreenVertex,
+        state: &DrawState,
+        sets: &[u8],
+    ) {
+        let shape = &state.shape;
+        let Some(line) = Prim::line(a, b, provoking, shape, state.clip, sets) else {
+            return;
+        };
+        match self {
+            Queue::Software(prims) => prims.push(line),
+            Queue::Host(vertices, count) => {
+                line.squares(shape, |c| {
+                    for t in [[0, 1, 2], [1, 3, 2]] {
+                        vertices.extend(kept(t.map(|i| c[i]), shape));
+                        // The corners have the pixels' colours.
+                        if shape.flat {
+                            vertices.push(c[0]);
+                        }
+                    }
+                });
+                **count += 1;
+            }
         }
     }
 }
@@ -177,49 +258,39 @@ fn polygon<V: std::borrow::Borrow<ScreenVertex>>(
     let n = corners.len();
     let at = |i: usize| corners[i].borrow();
     let fan = |i: usize| [at(0), at(i), at(i + 1)];
-    let prims = match queue {
-        Queue::Software(prims) => prims,
-        Queue::Host(vertices) => {
-            // The triangles the card doesn't cull, with each slot's
-            // coordinates where the host looks for them.
-            let slotted = |v: &ScreenVertex| {
-                let mut out = *v;
-                for (slot, &set) in sets.iter().enumerate() {
-                    out.tex[slot] = v.tex[set as usize];
-                }
-                out
-            };
-            for i in 1..n - 1 {
-                if Prim::facing(fan(i), shape.cull).is_some() {
-                    vertices.extend(fan(i).map(slotted));
-                    if shape.flat {
-                        vertices.push(slotted(provoking));
-                    }
-                }
-            }
-            return;
-        }
-    };
     match shape.fill {
         // Points and lines go by the winding only: their pixels
         // needn't be in the rows the triangle's are.
         1 | 2 if !(1..n - 1).any(|i| Prim::facing(fan(i), shape.cull).is_some()) => {}
         1 => {
             for i in (0..n).filter(|i| outline.0 >> i & 1 != 0) {
-                prims.extend(Prim::point(at(i), shape, clip, sets).into_iter().flatten());
+                queue.point(at(i), state, sets);
             }
         }
         2 => {
             for i in (0..n).filter(|i| outline.1 >> i & 1 != 0) {
-                let (a, b) = (at(i), at((i + 1) % n));
-                prims.extend(Prim::line(a, b, provoking, shape, clip, sets));
+                queue.line(at(i), at((i + 1) % n), provoking, state, sets);
             }
         }
-        _ => {
-            for i in 1..n - 1 {
-                prims.extend(Prim::triangle(fan(i), provoking, shape, clip, sets));
+        _ => match queue {
+            Queue::Software(prims) => {
+                for i in 1..n - 1 {
+                    prims.extend(Prim::triangle(fan(i), provoking, shape, clip, sets));
+                }
             }
-        }
+            // The triangles the card doesn't cull.
+            Queue::Host(vertices, count) => {
+                for i in 1..n - 1 {
+                    if Prim::facing(fan(i), shape.cull).is_some() {
+                        vertices.extend(fan(i).map(|v| slotted(v, sets)));
+                        if shape.flat {
+                            vertices.push(slotted(provoking, sets));
+                        }
+                        **count += 1;
+                    }
+                }
+            }
+        },
     }
 }
 
@@ -366,17 +437,13 @@ impl Renderer {
             }
         }
 
-        // The host draws filled triangles of the states it takes. A
+        // The host draws the primitives of the states it takes. A
         // draw that reads what it writes stays with the software
         // renderer, which draws it pixel by pixel in order. `declined`
         // is why a host doesn't draw it, and None with no host.
         let attached = gpu.attached();
         let declined = if !attached {
             None
-        } else if draw.primitive < 4 {
-            Some(Decline::PointsAndLines)
-        } else if matches!(state.shape.fill, 1 | 2) {
-            Some(Decline::FillMode)
         } else if state.serial {
             Some(Decline::Serial)
         } else {
@@ -414,6 +481,7 @@ impl Renderer {
             true => self.host_vertices.len(),
             false => self.prims.len(),
         };
+        let counted = self.host_count;
         match &geometry {
             Some(setup) => self.assemble_lit(draw.primitive, &state, setup, hosted),
             None => self.assemble(draw.primitive, &state, hosted),
@@ -422,10 +490,10 @@ impl Renderer {
         if hosted {
             let vertices = first..self.host_vertices.len();
             let run = gpu::Run { state, vertices };
-            let primitives = (run.vertices.len() / run.stride()) as u64;
-            if primitives == 0 {
+            if run.vertices.is_empty() {
                 return Ok(None);
             }
+            let primitives = self.host_count - counted;
             // A draw with the state of the one before it is one run
             // with it: the host sets its state up once for both.
             match self.host_runs.last_mut() {
@@ -471,23 +539,20 @@ impl Renderer {
             order,
             prims,
             host_vertices,
+            host_count,
             ..
         } = self;
         let mut queue = match hosted {
-            true => Queue::Host(host_vertices),
+            true => Queue::Host(host_vertices, host_count),
             false => Queue::Software(prims),
         };
-        let (shape, clip, sets) = (&state.shape, state.clip, &state.sets[..]);
+        let (shape, sets) = (&state.shape, &state.sets[..]);
         let v = |i: usize| &vertices[order[i] as usize];
         pieces(primitive, order.len(), |piece| match piece {
-            Piece::Point(a) => {
-                let point = Prim::point(v(a), shape, clip, sets);
-                queue.prims().extend(point.into_iter().flatten());
-            }
+            Piece::Point(a) => queue.point(v(a), state, sets),
             Piece::Line(a, b) => {
                 let provoking = if shape.flat_last { v(b) } else { v(a) };
-                let line = Prim::line(v(a), v(b), provoking, shape, clip, sets);
-                queue.prims().extend(line);
+                queue.line(v(a), v(b), provoking, state, sets);
             }
             Piece::Triangle(t, ends) => {
                 let provoking = v(t[if shape.flat_last { ends.1 } else { ends.0 }]);
@@ -511,13 +576,14 @@ impl Renderer {
             order,
             prims,
             host_vertices,
+            host_count,
             ..
         } = self;
         let mut queue = match hosted {
-            true => Queue::Host(host_vertices),
+            true => Queue::Host(host_vertices, host_count),
             false => Queue::Software(prims),
         };
-        let (shape, clip) = (&state.shape, state.clip);
+        let shape = &state.shape;
         // A slot's coordinates are worked out for the slot.
         let slots: [u8; pipeline::SLOTS] = std::array::from_fn(|i| i as u8);
         let sets = &slots[..state.coords.len()];
@@ -526,9 +592,7 @@ impl Renderer {
         pieces(primitive, order.len(), |piece| match piece {
             Piece::Point(a) => {
                 if v(a).out == 0 {
-                    let a = setup.project(v(a));
-                    let point = Prim::point(&a, shape, clip, sets);
-                    queue.prims().extend(point.into_iter().flatten());
+                    queue.point(&setup.project(v(a)), state, sets);
                 }
             }
             Piece::Line(a, b) => {
@@ -540,8 +604,7 @@ impl Renderer {
                 let provoking = setup.project(if shape.flat_last { b } else { a });
                 if let Some((a, b)) = clip::line(*a, *b, out) {
                     let (a, b) = (setup.project(&a), setup.project(&b));
-                    let line = Prim::line(&a, &b, &provoking, shape, clip, sets);
-                    queue.prims().extend(line);
+                    queue.line(&a, &b, &provoking, state, sets);
                 }
             }
             Piece::Triangle(t, ends) => {

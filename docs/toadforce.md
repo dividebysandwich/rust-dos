@@ -757,6 +757,7 @@ smoke and particles.
 | The alpha test and the colour key after a filtered sample | a pixel whose alpha is within the sample's bound of the reference is drawn by one renderer and not by the other. Measured: 0 to 6 pixels a frame of Zanzarah's leaves |
 | Depth | 1 step of a 16-bit buffer, 4 steps of a 24-bit one: the host interpolates depth in single precision and rounds it by itself. A depth half-way between two steps goes either way, and so does a test between two surfaces closer than the bound: Giants' marks on the ground, 2 steps of 24 bits in front of it, differ by more than 8 on 0.06% of the frame's pixels, where one renderer alone drew the mark |
 | Blending done by the host GPU | 1 in 255 on a channel; one step of the target's on a 16-bit target |
+| Lines and points | the same pixels, with the same colours where no texture is sampled: the card works out both. Depth and samples are within the bounds above. A pixel of a line within half a pixel of where the line's 1 / w falls to 0 gets its own values at every corner of its square, so a mip filter picks level 0 for it |
 | 16-bit targets on a host with no renderable 565 format, or one that doesn't round a blend to the nearest value | blended layers keep 8 bits until they are read back; several steps of the target's |
 
 Tests compare the two renderers on fixed scenes with these bounds (see
@@ -898,7 +899,24 @@ on the processor, and it has:
 - `CLEAR` on a buffer the host has (`Host::clear`). A depth that is
   neither the nearest nor the farthest is written as pixels, since the
   host's clear converts only those two for certain; with the stencil
-  kept, such a clear is left to the processor.
+  kept, such a clear is left to the processor;
+- points, lines, and triangles drawn as their corners or their edges
+  (`FILLMODE`), as triangles the card builds. OpenGL leaves it to the
+  GPU which pixels a `GL_LINES` line or a `GL_POINTS` point has, so
+  the host draws neither. The card works out a line's pixels by the
+  rule of "Rasterising" (`Prim::line`) and hands the host a square
+  for each run of them in a row, from pixel edge to pixel edge
+  (`Prim::squares`). A triangle covers the pixel centres inside it,
+  and a centre on the diagonal the square's two triangles share goes
+  to one of them by the top-left rule, so the squares cover the
+  line's pixels and no other on any host. The corners carry the
+  line's depth, 1 / w and coordinates there, and what the host
+  interpolates to a pixel's centre is the line's value at it, with
+  the coordinates' change from pixel to pixel for the level of
+  detail. The colours are worked out by the card for each pixel, with
+  its rounding: a line whose colours change has a square a pixel. A
+  point is the two triangles of its square, with the limits of its
+  size applied by the card.
 
 It declines these states, which the software renderer draws:
 
@@ -971,22 +989,24 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   (`DrawState`) and its triangles as screen vertices, after the
   card's transform, lighting, clipping and culling. A triangle the
   card culls, or one with no area, never reaches the host, so the
-  host has no winding to agree on. The clip rectangle stays in the
-  state for the host to cut the pixels by. The coordinates of texture
-  slot `n` are in set `n` of every vertex, whichever set of the
-  program's vertex they came from, and a flat-shaded triangle has a
-  fourth vertex, the one that gives it its colours. The vertex work
-  moves to the GPU later, if a measurement asks for it.
+  host has no winding to agree on. A point comes as the two
+  triangles of its square and a line as a square for each run of its
+  pixels in a row, so the host needs no rule of its own for either.
+  The clip rectangle stays in the state for the host to cut the
+  pixels by. The coordinates of texture slot `n` are in set `n` of
+  every vertex, whichever set of the program's vertex they came from,
+  and a flat-shaded triangle has a fourth vertex, the one that gives
+  it its colours. The vertex work moves to the GPU later, if a
+  measurement asks for it.
 - **A draw the host doesn't take.** The host is asked for each state
   (`Host::declines`). A draw it declines (a state it has no shader for
-  yet) is drawn by the software renderer, and so are lines, points,
-  triangles drawn as outlines or corners, and a draw that samples the
-  surface it writes: the target and the textures are read back first,
-  and the target is uploaded again before the host's next draw into
-  it. The host renderer can so be built up state by state, and a rare
-  state stays right at the cost of speed. The queue holds draws of
-  one renderer at a time, and a draw of the other empties it first,
-  which keeps the card's order on a target.
+  yet) is drawn by the software renderer, and so is a draw that
+  samples the surface it writes: the target and the textures are read
+  back first, and the target is uploaded again before the host's next
+  draw into it. The host renderer can so be built up state by state,
+  and a rare state stays right at the cost of speed. The queue holds
+  draws of one renderer at a time, and a draw of the other empties it
+  first, which keeps the card's order on a target.
 - **Who has the newer pixels.** A surface the host drew into is ahead
   on the host, and card memory is stale there. Before the emulator's
   own code reads that memory on the processor the card reads the

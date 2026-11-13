@@ -13,6 +13,11 @@
 //! triangle's edge, the depth test, the alpha test, a colour key), the
 //! last of the colour.
 //!
+//! Each draw of points or lines, and of triangles drawn as their
+//! corners or edges, is printed with the pixels the software side
+//! changed and the rectangle they are in, which tells what on the
+//! screen the program draws that way.
+//!
 //! `TOADFORCE_REPLAY_SET` changes states on both sides before every
 //! draw, to see which state a difference hangs on: a list such as
 //! `rs26=0,ts18=0` of render states (`rs`) and of stage states of
@@ -413,6 +418,10 @@ pub fn replay(bench: &Bench, rec: &Recording) {
             let group = groups.entry(key.clone()).or_default();
             group.draws += 1;
             let mut over = 0;
+            // What the software side changed: how many pixels, and the
+            // rectangle they are in.
+            let thin = draw.primitive < 4 || st.shape.fill != 3;
+            let (mut changed, mut bounds) = (0u32, [u32::MAX, u32::MAX, 0, 0]);
             // The pixel that differs most: how far, where, and the
             // software's, the host's and the earlier colour.
             type Most = (u32, u32, u32, [u8; 4], [u8; 4], [u8; 4]);
@@ -423,6 +432,15 @@ pub fn replay(bench: &Bench, rec: &Recording) {
                     let was = pixel_before(x, y);
                     if pa == was && pb == was {
                         continue;
+                    }
+                    if pa != was {
+                        changed += 1;
+                        bounds = [
+                            bounds[0].min(x),
+                            bounds[1].min(y),
+                            bounds[2].max(x),
+                            bounds[3].max(y),
+                        ];
                     }
                     let d = apart(pa, pb);
                     let slot = &mut map[(y * colour.width + x) as usize];
@@ -444,6 +462,15 @@ pub fn replay(bench: &Bench, rec: &Recording) {
                         sample = Some((d, x, y, pa, pb, was));
                     }
                 }
+            }
+            if thin {
+                println!(
+                    "points or lines: draw {draws}, primitive {} fill {} of {} vertices, \
+                     {changed} pixels changed in {bounds:?}, {over} over; {key}",
+                    draw.primitive,
+                    st.shape.fill,
+                    draw.vertex_count(),
+                );
             }
             if let Some((_, x, y, pa, pb, was)) = sample
                 && group.worst.as_ref().is_none_or(|w| over > w.over)
