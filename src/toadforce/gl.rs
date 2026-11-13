@@ -233,6 +233,15 @@ fn overlap(a: (u32, u32), b: (u32, u32)) -> bool {
     a.0 < b.1 && b.0 < a.1
 }
 
+/// The copy of the bytes `s` names, whatever format either names them
+/// with (`gpu::alias`). Memory a program gave back and took again for
+/// another kind of surface can have two, one colour and one depth: the
+/// one that is ahead then, as it has the newer pixels, else the first.
+fn alias_of<'a>(copies: &'a [Copy], s: &Surface) -> Option<&'a Copy> {
+    let mut of = copies.iter().filter(|c| gpu::alias(s, &c.surface));
+    of.clone().find(|c| c.ahead).or_else(|| of.next())
+}
+
 /// `pixels`, the rows of `s` with nothing between them, put where `s`
 /// is in `memory`.
 fn put_rows(s: &Surface, pixels: &[u8], memory: &mut [u8]) {
@@ -444,6 +453,8 @@ pub struct ToadForceGl {
     converts: u64,
     clears: u64,
     blits: u64,
+    /// The times `write` put the processor's pixels into a copy.
+    writes: u64,
     /// The frames the window showed from a copy (`composite`).
     presents: u64,
     /// The host has no framebuffer the card's surfaces fit: nothing is
@@ -528,6 +539,7 @@ impl ToadForceGl {
                 converts: 0,
                 clears: 0,
                 blits: 0,
+                writes: 0,
                 presents: 0,
                 broken: false,
             }
@@ -1889,6 +1901,7 @@ impl Host for ToadForceGl {
             "texture_converts": self.converts,
             "clears": self.clears,
             "blits": self.blits,
+            "writes": self.writes,
             "presents": self.presents,
             "packed_565": self.packed,
         })
@@ -2150,37 +2163,52 @@ impl Host for ToadForceGl {
         memory: &[u8],
         pages: &Pages,
     ) -> Option<Surface> {
-        let colour =
-            |format: Format| matches!(format, Format::R5G6B5 | Format::X8R8G8B8 | Format::A8R8G8B8);
         let size = (src_rect.width, src_rect.height);
         if self.broken
             || size != (dst_rect.width, dst_rect.height)
-            || !colour(dst.format)
-            || !colour(src.format)
             || dst.format.bytes() != src.format.bytes()
         {
             return None;
         }
-        let find = |s: &Surface| self.copies.iter().find(|c| gpu::within(s, &c.surface));
+        // The copies of the bytes the two name, whatever format the
+        // command names them with: a `BLT` copies bits, and a copy's
+        // format says what the bits are.
+        let alias = |s: &Surface| alias_of(&self.copies, s);
         // The source on the host, when it is newer there than in card
         // memory. One that isn't is copied from card memory.
-        let from = find(src).filter(|c| c.ahead).map(|c| c.texture);
-        let to = find(dst);
-        if from.is_none() && !to.is_some_and(|c| c.ahead) {
+        let ahead = alias(src).filter(|c| c.ahead);
+        let to = alias(dst);
+        if ahead.is_none() && !to.is_some_and(|c| c.ahead) {
             return None;
         }
+        // The two as the host keeps them: the bits go between textures
+        // of one kind, and to a destination with no copy as the
+        // source's kind.
+        let kept = |c: &Copy| c.surface.format;
+        let format = to.map(kept).or(ahead.map(kept)).unwrap_or(dst.format);
+        let depth = format.in_mask(super::caps::DEPTH_FORMATS);
+        let colour = matches!(format, Format::R5G6B5 | Format::X8R8G8B8 | Format::A8R8G8B8);
+        let kind = |f: Format| self.formats(f).0;
+        if !(colour || depth) || ahead.is_some_and(|c| kind(kept(c)) != kind(format)) {
+            return None;
+        }
+        let from = ahead.map(|c| c.texture);
+        let (dst, src) = (&Surface { format, ..*dst }, &Surface { format, ..*src });
         // Through a colour key the host writes the runs of pixels the
         // key lets through, from card memory, which has to hold the
         // source: the key's test is of card memory's bits.
         let runs = match key {
-            Some(_) if from.is_some() => return None,
+            Some(_) if from.is_some() || depth => return None,
             Some(key) => Some(keyed_runs(src, src_rect, key, memory)?),
             None => None,
         };
         // A source over other bytes of the destination's, which the
-        // host drops below as it writes the destination.
+        // host drops below as it writes the destination. A depth
+        // buffer in card memory is copied from a copy the host makes
+        // of it, so it counts as one the host has.
         let shared = !gpu::related(src, dst) && overlap(gpu::range(src), gpu::range(dst));
-        if from.is_some() && shared {
+        let hosted = from.is_some() || depth;
+        if hosted && shared {
             return None;
         }
         // Views of one another are one texture once the destination
@@ -2192,7 +2220,7 @@ impl Host for ToadForceGl {
             || dst_rect.left + size.0 <= src_rect.left
             || src_rect.top + size.1 <= dst_rect.top
             || dst_rect.top + size.1 <= src_rect.top;
-        if from.is_some() && one && !apart {
+        if hosted && one && !apart {
             return None;
         }
         let fresh = runs.is_none() && *dst_rect == all_of(dst);
@@ -2208,12 +2236,23 @@ impl Host for ToadForceGl {
                 surface, texture, ..
             } = self.copies[at];
             self.drop_textures(&[surface]);
-            // The source's copy now: a copy of a view of the destination
-            // gave way to the destination's, with its pixels.
-            let from = from.and_then(|_| {
-                let copy = self.copies.iter().find(|c| gpu::within(src, &c.surface));
-                copy.map(|c| c.texture)
-            });
+            // A depth buffer in card memory gets a copy of its own,
+            // filled now if card memory changed since the last: a game
+            // that keeps a scene's depth to put back every frame has
+            // it copied on the GPU from then on. That copy is the
+            // source, whatever other copy the bytes have. Otherwise the
+            // source's copy is looked up now: a copy of a view of the
+            // destination gave way to the destination's, with its
+            // pixels. The destination's copy stays as it was: the
+            // source's isn't a view of it.
+            let from = if depth && from.is_none() && !one {
+                let at = self.copy(src, memory, pages, false);
+                Some(self.copies[at].texture)
+            } else if from.is_some() || depth {
+                alias_of(&self.copies, src).map(|c| c.texture)
+            } else {
+                None
+            };
             let place = (dst_rect.left, dst_rect.top);
             match from {
                 Some(from) => {
@@ -2252,6 +2291,41 @@ impl Host for ToadForceGl {
             self.leave();
             Some(surface)
         }
+    }
+
+    fn write(&mut self, surface: &Surface, rects: &[Rect], memory: &[u8]) -> bool {
+        let found = self
+            .copies
+            .iter()
+            .position(|c| c.ahead && gpu::within(surface, &c.surface));
+        let Some(at) = found.filter(|_| !self.broken) else {
+            return false;
+        };
+        let Copy {
+            surface, texture, ..
+        } = self.copies[at];
+        let (_, format, kind) = self.formats(surface.format);
+        self.writes += 1;
+        // SAFETY: the context is current (see the module comment), and
+        // the texture is this host's.
+        unsafe {
+            self.enter();
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            for rect in rects {
+                let pixels = self.texture_rows(&surface, rect, memory);
+                let data = glow::PixelUnpackData::Slice(Some(&pixels));
+                let (x, y) = (rect.left as i32, rect.top as i32);
+                let (w, h) = (rect.width as i32, rect.height as i32);
+                let gl = &*self.gl;
+                gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, x, y, w, h, format, kind, data);
+            }
+            self.leave();
+        }
+        // The textures made from these bytes are stale by the card's
+        // pages, which counted the processor's writes. One that is the
+        // surface is filled from the copy again.
+        self.change(at);
+        true
     }
 
     fn shows(&mut self, surface: &Surface, pages: &Pages) -> bool {

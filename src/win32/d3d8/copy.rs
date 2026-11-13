@@ -346,9 +346,12 @@ pub fn present_window(cpu: &mut Cpu, back: u32, src: Option<Rect>, dst: Option<R
     if rects.is_empty() {
         return;
     }
-    if present_on_gpu(cpu, back, &src, &dst, &rects, pitch, bytes) {
-        // The renderer drew the desktop in its own copy of the card's
-        // memory, not through `screen::write`, which counts it.
+    if present_on_gpu(cpu, back, &src, &dst, &rects, pitch, bytes)
+        || ddraw::toadforce::present(cpu, &s, &src, &dst, &rects)
+    {
+        // The renderer, or the ToadForce, drew the desktop in the
+        // card's memory itself, not through `screen::write`, which
+        // counts it.
         screen::drew_rects(cpu, 0, pitch, bytes, &rects);
         return;
     }

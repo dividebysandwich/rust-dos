@@ -444,7 +444,7 @@ pub fn address(cpu: &mut Cpu, s: &Surface) -> Option<u32> {
         MEM_SYSTEM => Some(s.bits),
         MEM_VIDEO => {
             // The program reads the pixels by itself from here on.
-            screen::expose(cpu, s.bits, s.pitch.saturating_mul(s.height));
+            screen::expose(cpu);
             Some(display::view(cpu)? + s.bits)
         }
         _ => None,

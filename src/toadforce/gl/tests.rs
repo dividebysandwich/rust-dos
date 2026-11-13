@@ -1439,12 +1439,183 @@ fn the_host_and_the_processor_take_turns() {
 }
 
 /// The processor writes `bytes` to card memory at `at`, as the bus
-/// does it.
+/// does it: the card notes them where the host has newer pixels.
 fn poke(rig: &mut Rig, at: u32, bytes: &[u8]) {
     let len = bytes.len() as u32;
-    rig.card.settle(&mut rig.memory, Some((at, at + len)));
+    if rig.card.ahead() {
+        rig.card.writing(at, len);
+    }
     rig.memory[at as usize..][..bytes.len()].copy_from_slice(bytes);
     rig.card.wrote(at, len);
+}
+
+/// A program that locks its back buffer and writes into it between
+/// the host's draws, and never reads it: a block of pixels, a row, and
+/// single pixels over what the host drew, then depths in a block of
+/// the depth buffer, and draws over and beside both.
+fn written_between_draws(rig: &mut Rig) {
+    let surface = rig.surface(COLOUR);
+    let bytes = rig.format.bytes();
+    let pixel = |x: u32, y: u32| {
+        let p = match bytes {
+            2 => (x << 11 | y << 5 | (x ^ y) & 31) & 0xFFFF,
+            _ => 0xFF00_0000 | x << 18 | y << 10 | ((x * y) & 0xFF),
+        };
+        p.to_le_bytes()
+    };
+    let put = |rig: &mut Rig, x: u32, y: u32, width: u32| {
+        let row: Vec<u8> = (x..x + width)
+            .flat_map(|x| pixel(x, y)[..bytes as usize].to_vec())
+            .collect();
+        poke(rig, surface.at(x, y) as u32, &row);
+    };
+    rig.clear(CLEAR_COLOUR | CLEAR_DEPTH, 0xFF20_2020, 1.0, 0, &[]);
+    rig.states(&[(RS_ZENABLE, 1)]);
+    rig.draw(&quad_z(2.0, 2.0, 40.0, 0xFFFF_0000, 0.625));
+    for y in 8..24 {
+        put(rig, 30, y, 20);
+    }
+    put(rig, 0, 60, SIZE);
+    for i in 0..6 {
+        put(rig, 3 + 9 * i, 50 + i, 1);
+    }
+    rig.draw(&quad_z(36.0, 12.0, 20.0, 0xFF00_FF00, 0.5));
+    // Depths the host tests the next quad against: near in a block's
+    // left half, far in its right.
+    for y in 30..46 {
+        let row: Vec<u8> = (0..24u16)
+            .flat_map(|x| if x < 12 { 0x1000u16 } else { 0xF000 }.to_le_bytes())
+            .collect();
+        poke(rig, DEPTH + (y * SIZE + 4) * 2, &row);
+    }
+    rig.draw(&quad_z(0.0, 28.0, 32.0, 0xFF40_80FF, 0.5));
+    for y in 40..44 {
+        put(rig, 20, y, 30);
+    }
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn what_the_program_writes_into_a_target_goes_to_the_hosts_copy() {
+    bench!(bench, "toadforce written");
+    for format in [Format::A8R8G8B8, Format::X8R8G8B8, Format::R5G6B5] {
+        for wide in [false, true] {
+            if format == Format::R5G6B5 && !wide && !bench.host().packed() {
+                println!("the host's 5-6-5 format doesn't pass: only 8 bits a channel compared");
+                continue;
+            }
+            bench.wide.set(wide);
+            let name = format!("written {format:?} wide {wide}");
+            let scene = written_between_draws;
+            let declined = bench.compare(&name, format, Some(Format::D16), CLOSE, scene);
+            assert_eq!(declined, 0, "{name}");
+            // Nothing came back to card memory on the way, and what
+            // the program wrote is what it reads.
+            let mut hosted = Rig::new(format, Some(Format::D16));
+            hosted.card.set_host(Some(bench.host()), &mut hosted.memory);
+            written_between_draws(&mut hosted);
+            let status = hosted.card.describe(Rig::live());
+            assert_eq!(status["host"]["read_backs"], 0, "{name}: {status}");
+            assert!(
+                status["host"]["writes"].as_u64() >= Some(2),
+                "{name}: {status}"
+            );
+            // A read of the program's is answered from the host's
+            // pixels, fetched once, and is what a read-back brings.
+            let surface = hosted.surface(COLOUR);
+            let places = [(4, 4), (40, 14), (10, 60), (25, 41), (50, 30)];
+            let read = |rig: &Rig, x, y| {
+                let at = surface.at(x, y);
+                let ahead = rig.card.read_ahead(at as u32, format.bytes(), &rig.memory);
+                ahead.unwrap_or_else(|| {
+                    let mut word = [0; 4];
+                    let bytes = format.bytes() as usize;
+                    word[..bytes].copy_from_slice(&rig.memory[at..at + bytes]);
+                    u32::from_le_bytes(word)
+                })
+            };
+            let before = places.map(|(x, y)| read(&hosted, x, y));
+            let status = hosted.card.describe(Rig::live());
+            assert_eq!(status["host"]["read_backs_for"]["lock"], 1, "{name}");
+            hosted.card.settle(&mut hosted.memory, None);
+            let after = places.map(|(x, y)| read(&hosted, x, y));
+            assert_eq!(before, after, "{name}");
+        }
+    }
+}
+
+/// A scene over a picture drawn beforehand, as a game with fixed
+/// backgrounds draws each frame: the picture's depths, which the
+/// processor wrote into a second depth buffer once, are copied into
+/// the target's depth buffer with a `BLT` that names both as a colour
+/// format of their size, and the scene is drawn against them.
+fn depth_put_back(rig: &mut Rig, frames: u32) {
+    let depth = rig.depth.unwrap();
+    let named = match depth.bytes() {
+        2 => Format::R5G6B5,
+        _ => Format::X8R8G8B8,
+    };
+    let buffer = |offset| Surface {
+        offset,
+        pitch: SIZE * depth.bytes(),
+        width: SIZE,
+        height: SIZE,
+        format: named,
+    };
+    let (target, kept) = (buffer(DEPTH), buffer(SECOND));
+    for y in 0..SIZE {
+        let row: Vec<u8> = (0..SIZE)
+            .flat_map(|x| {
+                let z: u32 = if (x / 8 + y / 8) % 2 == 0 {
+                    0x2000
+                } else {
+                    0xE000
+                };
+                let z = if depth.bytes() == 2 { z } else { z << 16 };
+                z.to_le_bytes()[..depth.bytes() as usize].to_vec()
+            })
+            .collect();
+        poke(rig, kept.at(0, y) as u32, &row);
+    }
+    rig.states(&[(RS_ZENABLE, 1)]);
+    let all = rect(0, 0, SIZE, SIZE);
+    for frame in 0..frames {
+        rig.clear(CLEAR_COLOUR | CLEAR_DEPTH, 0xFF20_2020, 1.0, 0, &[]);
+        rig.draw(&quad_z(2.0, 2.0, 20.0, 0xFFFF_0000, 0.25));
+        rig.run(|w| crate::toadforce::command::encode::blt(w, &target, &all, &kept, &all, None));
+        let x = 4.0 + 6.0 * frame as f32;
+        rig.draw(&quad_z(x, 8.0, 44.0, 0xFF00_FF00, 0.5));
+        // A part of the kept depths alone, over what the quad left.
+        let part = rect(40, 40, 16, 16);
+        rig.run(|w| crate::toadforce::command::encode::blt(w, &target, &part, &kept, &part, None));
+        rig.draw(&quad_z(36.0, 36.0, 24.0, 0xFF40_80FF, 0.75));
+    }
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn a_depth_buffer_copied_from_another_stays_on_the_host() {
+    bench!(bench, "toadforce depth copy");
+    let depths = [Format::D16, Format::D24S8, Format::D24X8];
+    for depth in depths {
+        let name = format!("depth copy {depth:?}");
+        let scene = |rig: &mut Rig| depth_put_back(rig, 3);
+        let declined = bench.compare(&name, Format::X8R8G8B8, Some(depth), CLOSE, scene);
+        assert_eq!(declined, 0, "{name}");
+        // The kept depths are copied to the host once for the three
+        // frames, and nothing is read back.
+        let counts = |frames| {
+            let mut hosted = Rig::new(Format::X8R8G8B8, Some(depth));
+            hosted.card.set_host(Some(bench.host()), &mut hosted.memory);
+            depth_put_back(&mut hosted, frames);
+            let status = hosted.card.describe(Rig::live());
+            assert_eq!(status["host"]["read_backs"], 0, "{name}: {status}");
+            status["host"]["counts"]["surface_uploads"]
+                .as_u64()
+                .unwrap()
+        };
+        assert_eq!(counts(3), counts(1), "{name}");
+    }
 }
 
 fn rect(left: u32, top: u32, width: u32, height: u32) -> Rect {

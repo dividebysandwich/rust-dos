@@ -1150,9 +1150,12 @@ counts what the OpenGL renderer costs and misses:
 - `declined_draws`: draws the software renderer drew because OpenGL
   doesn't draw their state as the card does. Each reads its target
   back first.
-- `stale_reads`: reads by the program of bytes the GPU had newer
-  pixels for. It should stay 0: anything else is a surface a driver
-  gave the program the address of without reading it back.
+- `writes`: the times pixels the processor wrote into a surface the
+  GPU had newer pixels of went to the GPU's copy as rectangles, with
+  nothing read back. A surface written in parts of pixels or in too
+  many rectangles is read back instead, and counts under `program`.
+  `lock` counts the times the program read such a surface and the
+  card fetched its pixels from the GPU to answer.
 - `counts`: the renderer's own, null with `software`: `batches` and
   `runs` (draw calls), `surface_uploads` and `texture_uploads` from
   card memory, `texture_converts` (images of textures filled from a
@@ -1212,6 +1215,10 @@ number on both sides before each draw, here the blend off and the
 anisotropy 1: what stops differing hangs on that state.
 `TOADFORCE_CAPTURE_WIDE=1` keeps the host's 16-bit targets in 8 bits
 a channel, as a host whose 5-6-5 format fails the test does.
+`TOADFORCE_REPLAY_PIXEL='350,25;100,300'` follows those pixels through
+the whole recording on the software side: each draw that changes one
+is printed with the pixel before and after it and the draw's steps,
+which gives the layers a pixel is made of and what each adds.
 
 ### 3dfx (Glide) games
 

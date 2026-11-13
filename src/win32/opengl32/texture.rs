@@ -690,6 +690,8 @@ pub fn read_frame(cpu: &mut Cpu, x: i32, y: i32, w: u32, h: u32) -> Option<Vec<[
     let s = ddraw::state(cpu).surface(target)?.clone();
     let mut out = Vec::with_capacity(w as usize * h as usize);
     let mut row = vec![0u8; s.pitch as usize];
+    // 5-6-5, or X8R8G8B8 (`wgl::color_bits`).
+    let bytes = s.bytes_per_pixel() as usize;
     for r in 0..i64::from(h) {
         let sy = i64::from(height) - 1 - (i64::from(y) + r);
         if sy < 0 || sy >= i64::from(s.height) {
@@ -703,8 +705,11 @@ pub fn read_frame(cpu: &mut Cpu, x: i32, y: i32, w: u32, h: u32) -> Option<Vec<[
                 out.push([0, 0, 0, 255]);
                 continue;
             }
-            let p = u16::from_le_bytes([row[sx as usize * 2], row[sx as usize * 2 + 1]]);
-            out.push(rgb565(p));
+            let at = sx as usize * bytes;
+            out.push(match bytes {
+                4 => [row[at + 2], row[at + 1], row[at], 255],
+                _ => rgb565(u16::from_le_bytes([row[at], row[at + 1]])),
+            });
         }
     }
     Some(out)

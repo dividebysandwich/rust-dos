@@ -988,32 +988,47 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   one renderer at a time, and a draw of the other empties it first,
   which keeps the card's order on a target.
 - **Who has the newer pixels.** A surface the host drew into is ahead
-  on the host, and card memory is stale there. Before anything reads
-  or writes that memory on the processor the card reads the surface
-  back (`ToadForce::settle` with the range): the program's writes of
-  the frame buffer (in the bus), the drivers' reads and writes
-  (`win32::screen`), the card's own `FILL` and `BLT` where they run
-  on the processor, a `CLEAR` of part of a buffer the host has no
-  current copy of, a texture or a vertex buffer that overlaps it
-  and isn't an image of it, and the picture the screen shows when
-  the window can't show the host's copy (`Bus::sync_display`).
-  Running the queued commands and reading back are separate: the
-  queue is run at every such point as before, and a surface is read
-  back only when its own bytes are asked for.
-- **The program's own reads.** A read of the frame buffer has the bus
-  shared (`Bus::read_8`), and can't read anything back. The bytes are
-  there before the program gets to them instead. The built-in drivers
-  read a surface back when they give the program its address, at a
-  lock (`win32::screen::expose`). A guest's own driver has no such
-  call, so the card reads everything back when a write of `RING_PUT`
+  on the host, and card memory is stale there. Before the emulator's
+  own code reads that memory on the processor the card reads the
+  surface back (`ToadForce::settle` with the range): the drivers'
+  reads (`win32::screen::read`), the card's own `FILL` and `BLT`
+  where they run on the processor, a `CLEAR` of part of a buffer the
+  host has no current copy of, a texture or a vertex buffer that
+  overlaps it and isn't an image of it, and the picture the screen
+  shows when the window can't show the host's copy
+  (`Bus::sync_display`). Running the queued commands and reading back
+  are separate: the queue is run at every such point as before, and a
+  surface is read back only when its own bytes are asked for.
+- **What the program and the drivers write.** A write into a surface
+  that is ahead reads nothing back. The card notes each byte written
+  (`Gpu::writing`, a bit for each byte of the surface), and card
+  memory has those bytes from then on while the host has the others.
+  Before the host next uses its copies (a draw, `CLEAR`, `FILL`,
+  `BLT`, the picture shown) the pixels written go into the host's
+  copy as rectangles of whole pixels (`Host::write`), rows with equal
+  runs joined into one. A game that locks its back buffer every frame
+  to write a picture into it, as Nocturne does with its backgrounds,
+  so costs one copy of that picture to the GPU. A surface written in
+  parts of pixels, or in more than 1024 rectangles, is read back
+  around what was written and copied to the host again.
+- **What the program reads.** Handing out a surface's address, at a
+  lock, reads nothing back either (`win32::screen::expose` only runs
+  the queue). A read of the frame buffer has the bus shared
+  (`Bus::read_8`), so it can't change card memory: where the host has
+  newer pixels the bus answers from them (`Gpu::read`). The card
+  fetches the surface's pixels from the host once, into a buffer of
+  its own beside card memory, and answers every read from it until
+  the host's copy changes; bytes the processor wrote since come from
+  card memory. The status counts each fetch as a read-back for
+  `lock`. A program that only writes what it locked never pays for
+  one. A guest's own driver hands out no addresses the card knows
+  of, so the card reads everything back when a write of `RING_PUT`
   returns, as the specification promises: such a driver gets the
   host's speed only once the card shows the picture from the host's
-  texture and the driver's reads are known some other way. A read of
-  bytes that are ahead all the same is a driver that handed out an
-  address without `expose`; the card counts those for its status
-  (`stale_reads`).
+  texture and the driver's reads are known some other way.
 - **A saved state** is written from a shared card too. It keeps card
-  memory with every surface read back into a copy
+  memory with every surface read back into a copy, and what the
+  processor wrote of those surfaces over it
   (`ToadForce::settled`), and the card and the host stay as they are.
   After a load the host drops its copies (`Host::forget`). A
   debugger's look at card memory (`win32::screen::peek`) reads it as
@@ -1036,13 +1051,31 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   `R5G6B5`, `X8R8G8B8` or `A8R8G8B8` without a colour key:
   `gpu::image_of`) is filled from that copy by a shader, which
   reduces a 16-bit surface kept in 8 bits a channel as a read-back
-  would. `FILL`, and `BLT` between surfaces of one colour format
-  with no stretch and no key, run on the host when a surface of
-  theirs is ahead (`Host::fill`, `Host::blt`). A surface inside a
-  larger copy of the same bytes (one depth buffer under targets of
-  several sizes) uses that copy. Everything else is read back as
-  before: a keyed texture, a texture that overlaps a surface
-  without being an image of it, a stretch.
+  would. `FILL`, and `BLT` with no stretch and no key, run on the
+  host when a surface of theirs is ahead (`Host::fill`,
+  `Host::blt`). `BLT` copies bits, and the formats it names only say
+  how large a pixel is, so the host looks its copies up by the bytes
+  the command names (`gpu::alias`) and copies what they hold: colour
+  to colour, or depth to depth of one layout. DirectDraw's `Blt`
+  between two z-buffers names both as a colour format of their size
+  and is such a copy. A depth source card memory holds gets a host
+  copy of its own, made again only after a write to its pages, so a
+  game that puts a kept scene's depths back every frame (Nocturne,
+  behind its drawn backgrounds) has them copied on the GPU. A
+  surface inside a larger copy of the same bytes (one depth buffer
+  under targets of several sizes) uses that copy. Everything else is
+  read back as before: a keyed texture, a texture that overlaps a
+  surface without being an image of it, a stretch, a copy between
+  colour and depth.
+- **A window's back buffer.** The OpenGL front end's and Direct3D 8's
+  windowed presents copy the back buffer to the screen with `BLT`
+  when it has the screen's format and isn't stretched
+  (`ddraw::toadforce::present`), so the host copies its own pixels.
+  The front end makes its colour buffer in the desktop's format for
+  that: X8R8G8B8 on a 32-bit desktop, 5-6-5 on a 16-bit one, as a
+  real driver's windowed pixel formats are of the desktop's depth.
+  Other presents (a stretch, a 256-colour desktop) read the back
+  buffer and write the screen on the processor.
 - **The picture shown** comes from the host's copy (`Host::shows`,
   see "The window's side").
 
@@ -1087,9 +1120,11 @@ The picture comes from card memory, read back once a frame
 - something wants the frame in memory: a screenshot, a recording, the
   debugger's picture, the settings window or an overlay, a phosphor
   monitor, a deterministic run;
-- the processor wrote the surface since the host had it, as GDI and
-  DirectDraw's blits on the processor do, until the host draws into
-  it again;
+- the processor wrote the surface while the host's copy wasn't
+  ahead, as GDI and DirectDraw's blits on the processor do on a
+  desktop the host never drew, until the host draws into it again
+  (what is written into a surface that is ahead goes to the host's
+  copy first);
 - a mode with a palette, or one shown doubled.
 
 The surface shown is the one the card shows as of the commands it has
@@ -1174,9 +1209,23 @@ nothing reads the picture from:
 | Zanzarah | 0.4 | the DirectDraw driver's reads and writes of a surface the card drew into |
 | Oni | 1 | `SwapBuffers`, as before |
 
-Oni's `SwapBuffers` copies a 16-bit back buffer to a 32-bit desktop,
-and `BLT` converts no formats, so the copy stays on the processor
-(see "Frame rates against the target" for what is left).
+Oni's `SwapBuffers` copied a 16-bit back buffer to a 32-bit desktop
+then, and `BLT` converts no formats, so the copy stayed on the
+processor. With the front end's colour buffer in the desktop's format
+("A window's back buffer" above) it is a `BLT` on the host: on Oni's
+route to 145 s, 3048 read-backs for the driver before and none after,
+with 3050 copies on the host.
+
+Nocturne's DirectX 7 renderer draws its rooms over pictures made
+beforehand (#983). Each frame it locks the whole back buffer twice and
+writes the room's picture into it (1.2 MB in one lock, a few thousand
+pixels in the other) without reading a byte, and copies the picture's
+depths, which it keeps in a second z-buffer, into the device's with
+`Blt`. Each was a read-back a frame. Both stay on the host now ("What
+the program and the drivers write" and the depth copies above): on the
+route into the first room of Volume 1, 304 frames at 100000 cycles,
+the read-backs went from 630 to 79, of which 62 are the menus', which
+read the buffer they lock. In play 16 are left in 226 frames.
 
 What the first runs said to do, in the order of what they cost:
 
@@ -1544,9 +1593,10 @@ What is left of phase 5, with a guess of its size:
   and materials sent as level 1 state, the card transforms and lights
   as it does for Direct3D, and equal state is sent once. This is the
   first item of phase 6 for Oni too.
-- **`SwapBuffers` without the read-back** (medium): one read of the
-  target a frame in MDK2 and Oni. A `BLT` or `FLIP` of the context's
-  back buffer on the card. Oni's `glReadPixels` belongs here too.
+- **`SwapBuffers` without the read-back**: done, as a `BLT` of a
+  back buffer in the desktop's format ("A window's back buffer"
+  under "Between the card and the host renderer"). Oni's
+  `glReadPixels` reads no colour: see below.
 - **Keyed copies the host leaves to the processor** (small, #981): a
   keyed copy with more than 4096 runs, or one whose source is ahead
   on the host, is copied by the processor after a read-back. A draw
@@ -1605,8 +1655,11 @@ card lacks:
 - **MDK2** uses lights 0 to 5 and `glNormal3sv`, in immediate mode
   only.
 - **Oni** calls `glReadPixels` 3501 times in a run where the driver
-  read the target 2957 times, so not all of those reads come from
-  `SwapBuffers`. Which do is open.
+  read the target 2957 times. Every one of those calls asks for the
+  depth of a single pixel (`GL_DEPTH_COMPONENT`, `GL_FLOAT`, 1 by 1),
+  which the front end doesn't read and leaves the program's variable
+  as it was, so none of them reads the target back: the driver's
+  reads were all `SwapBuffers`.
 
 None of them needs level 2.
 
@@ -1700,10 +1753,10 @@ What is left for phase 6, largest first, with what each is worth:
 - **The host's own calls** (`toadforce.host`, 3% to 10%): state and
   uniforms are set for every run, 290 a frame in Giants. Skipping
   what didn't change is worth a part of the 10%.
-- **Oni's `SwapBuffers`** (5%): a back buffer in the desktop's format
-  when the desktop has 32 bits, as a real driver gives a windowed
-  context, with `BLT` to the window. It changes Oni's pictures, as
-  the target then isn't dithered.
+- **Oni's `SwapBuffers`** (5%): done. The back buffer is in the
+  desktop's format when the desktop has 32 bits, as a real driver
+  gives a windowed context, with `BLT` to the window. Oni's pictures
+  changed with it, as the target isn't dithered to 16 bits any more.
 - **Zanzarah's driver reads** (0.4 read-backs a frame): which
   DirectDraw calls ask, and whether a `BLT` with a colour key on
   the host covers them.

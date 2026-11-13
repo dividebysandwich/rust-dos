@@ -20,8 +20,23 @@
 //!   card's order with the host's.
 //! - **Who has the newer pixels.** A surface the host drew into is
 //!   ahead on the host (`Gpu::ahead`), and card memory is stale there
-//!   until `Gpu::settle` reads it back. Whatever reads or writes card
-//!   memory on the processor settles the bytes it touches first.
+//!   until `Gpu::settle` reads it back. The card's own work on the
+//!   processor (a draw the host declined, a `BLT` it left) settles the
+//!   bytes it touches first.
+//! - **What the program does with a surface that is ahead.** Nothing
+//!   is read back for a program that is given a surface's address, or
+//!   for a driver that writes one. The card notes each byte the
+//!   processor writes there (`Gpu::writing`): card memory has those,
+//!   and the host the rest. Before the host next uses the surface, the
+//!   written pixels go to its copy (`Host::write`), as rectangles of
+//!   whole pixels. A surface written in parts of pixels, or in more
+//!   rectangles than the host takes, is read back around what was
+//!   written instead. A read by the program of bytes the host has
+//!   (`Gpu::read`) is answered from the host's pixels, fetched once
+//!   for as long as the host's copy stays as it is. So a program that
+//!   locks its back buffer and writes all of it, as one with drawn
+//!   backgrounds does every frame, costs one upload, and one that only
+//!   reads costs the read-back a lock used to.
 //! - **What the processor wrote.** `Pages` counts the writes to each
 //!   page of card memory. A host keeps a `Stamp` of the bytes a copy
 //!   was made from and makes the copy again when the stamp is stale.
@@ -47,7 +62,10 @@
 //! - **`FILL` and `BLT`.** The card offers the host those that write a
 //!   surface, or copy from one, that is ahead (`Host::fill`,
 //!   `Host::blt`), and the destination is ahead after it. The others
-//!   are the processor's.
+//!   are the processor's. `BLT` copies bits, whatever format its
+//!   surfaces are named with: one over the bytes of a depth buffer the
+//!   host has (`alias`), as a DirectDraw blit between two z-buffers
+//!   is, copies the host's depth.
 //! - **The picture on the screen.** The screen asks whether the host
 //!   has the surface shown (`Gpu::shows`), and draws the window from
 //!   the host's copy when it has. The surface stays ahead. A frame
@@ -200,11 +218,18 @@ pub trait Host {
     ) -> Option<Surface>;
 
     /// `BLT`: copy `src_rect` of `src` to `dst_rect` of `dst`, when
-    /// the host's copy of either is ahead. The surface of the host's
-    /// copy of `dst`, which is ahead after it. None when the host
-    /// leaves the copy to the processor, with nothing changed: for a
-    /// stretch, a format the host draws into no target of, pixels of
-    /// two sizes, a colour key with a source the host has ahead or
+    /// the host's copy of either is ahead. The command copies bits,
+    /// and the formats it names say only how many a pixel has: the
+    /// copies are the ones of the bytes the two name (`alias`), and
+    /// their formats say what the bits are, so a copy between two
+    /// depth buffers named as colour is one of the host's depths. A
+    /// depth source card memory holds gets a copy of its own. The
+    /// surface of the host's copy of `dst`, which is ahead after it.
+    /// None when the host leaves the copy to the processor, with
+    /// nothing changed: for a stretch, a format the host draws into no
+    /// target of, pixels of two sizes, copies of two kinds (colour
+    /// and depth, or depths of two layouts), a colour key on depths,
+    /// a colour key with a source the host has ahead or
     /// with more runs of pixels to copy than it writes one by one
     /// (`KEYED_RUNS`), and a source the host has ahead that
     /// shares a byte with `dst` without being a view of it or it of
@@ -221,6 +246,13 @@ pub trait Host {
         memory: &[u8],
         pages: &Pages,
     ) -> Option<Surface>;
+
+    /// Copy `rects` of `surface` from `memory`, card memory, to the
+    /// host's copy of it, which is ahead and stays so: the processor
+    /// wrote those pixels, and the copy has the others. False when the
+    /// host has no such copy or can't write it, with nothing changed:
+    /// the card then reads the surface back around what was written.
+    fn write(&mut self, surface: &Surface, rects: &[Rect], memory: &[u8]) -> bool;
 
     /// Write the pixels of `surface`, a colour or a depth buffer the
     /// host drew into, to `memory`. False when the host has no such
@@ -348,9 +380,26 @@ pub fn within(view: &Surface, whole: &Surface) -> bool {
         && view.height <= whole.height
 }
 
+/// Whether one of the two is the other's bytes (`alias`).
+fn same_bytes(a: &Surface, b: &Surface) -> bool {
+    alias(a, b) || alias(b, a)
+}
+
 /// Whether one of the two is a view of the other.
 pub fn related(a: &Surface, b: &Surface) -> bool {
     within(a, b) || within(b, a)
+}
+
+/// Whether `named` is the bytes of the top left part of `whole`, or of
+/// all of it, whatever format either names them with: `within`, for
+/// pixels of one size. A `BLT` copies bits, so one that names a depth
+/// buffer's bytes as colour copies depth.
+pub fn alias(named: &Surface, whole: &Surface) -> bool {
+    named.offset == whole.offset
+        && named.pitch == whole.pitch
+        && named.format.bytes() == whole.format.bytes()
+        && named.width <= whole.width
+        && named.height <= whole.height
 }
 
 /// The level and the face of `texture` that `surface` is, when it is
@@ -385,11 +434,11 @@ fn samples(texture: &Texture, bytes: (u32, u32)) -> bool {
 /// to move to the host next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cause {
-    /// The program's own read or write of the frame buffer, and
-    /// whatever names nothing else.
+    /// What the program wrote of a surface the host couldn't take
+    /// (`Host::write`), and whatever names nothing else.
     Program,
-    /// A driver gave the program the surface's address (`Lock`,
-    /// `GetDC`).
+    /// The program read a surface it has the address of (`Lock`,
+    /// `GetDC`): the host's pixels were fetched for it (`Gpu::read`).
     Lock,
     /// A driver read or wrote the bytes itself (GDI, a DirectDraw blit
     /// on the processor).
@@ -422,28 +471,177 @@ impl Cause {
     ];
 }
 
+/// The most rectangles of written pixels the card hands a host for one
+/// surface (`Host::write`). A surface written in more is read back
+/// around them.
+const WRITTEN_RECTS: usize = 1024;
+
+/// The bytes of a surface the processor wrote while the surface was
+/// ahead on the host: a bit for each byte, from the surface's first.
+#[derive(Default)]
+struct Written {
+    /// Empty until the first write.
+    bits: Vec<u64>,
+    any: bool,
+}
+
+impl Written {
+    /// The bytes `from` to before `to` of the surface, of `len` bytes,
+    /// were written.
+    fn note(&mut self, from: u32, to: u32, len: u32) {
+        let (from, to) = (from as usize, to.min(len) as usize);
+        if from >= to {
+            return;
+        }
+        if self.bits.is_empty() {
+            self.bits = vec![0; len.div_ceil(64) as usize];
+        }
+        self.any = true;
+        let (first, last) = (from / 64, (to - 1) / 64);
+        let low = !0u64 << (from % 64);
+        let high = !0u64 >> (63 - (to - 1) % 64);
+        if first == last {
+            self.bits[first] |= low & high;
+            return;
+        }
+        self.bits[first] |= low;
+        self.bits[first + 1..last].fill(!0);
+        self.bits[last] |= high;
+    }
+
+    #[inline]
+    fn has(&self, byte: u32) -> bool {
+        let word = self.bits.get(byte as usize / 64);
+        word.is_some_and(|w| w >> (byte % 64) & 1 != 0)
+    }
+
+    fn clear(&mut self) {
+        self.bits.fill(0);
+        self.any = false;
+    }
+
+    /// The runs of written bytes from `from` to before `to`, first to
+    /// after last, in order.
+    fn runs(&self, from: u32, to: u32, mut each: impl FnMut(u32, u32)) {
+        let mut at = from;
+        while at < to {
+            let word = self.bits.get(at as usize / 64).copied().unwrap_or(0) >> (at % 64);
+            let left = 64 - at % 64;
+            if word == 0 {
+                at += left;
+                continue;
+            }
+            let start = at + word.trailing_zeros();
+            if start >= to {
+                break;
+            }
+            // The run goes on while the words are all ones.
+            let mut end = start;
+            loop {
+                let word = self.bits.get(end as usize / 64).copied().unwrap_or(0) >> (end % 64);
+                let ones = (!word).trailing_zeros().min(64 - end % 64);
+                end += ones;
+                if ones == 0 || !end.is_multiple_of(64) || end >= to {
+                    break;
+                }
+            }
+            let end = end.min(to);
+            each(start, end);
+            at = end;
+        }
+    }
+
+    /// The written pixels of `surface` as rectangles, the runs of a row
+    /// that the rows below repeat joined. None when a pixel was written
+    /// in part, or there are more than `WRITTEN_RECTS`.
+    fn rects(&self, surface: &Surface) -> Option<Vec<Rect>> {
+        let bytes = surface.format.bytes();
+        let row_len = surface.width * bytes;
+        let mut rects: Vec<Rect> = Vec::new();
+        // The rectangles the row above ended with: where in `rects`.
+        let mut open = 0;
+        let mut whole = true;
+        for y in 0..surface.height {
+            let row = y * surface.pitch;
+            let start = rects.len();
+            self.runs(row, row + row_len, |from, to| {
+                let (from, to) = (from - row, to - row);
+                whole &= from % bytes == 0 && to % bytes == 0;
+                rects.push(Rect {
+                    left: from / bytes,
+                    top: y,
+                    width: (to - from) / bytes,
+                    height: 1,
+                });
+            });
+            if !whole || rects.len() > 2 * WRITTEN_RECTS {
+                return None;
+            }
+            // A row with the runs of the one above makes its rectangles
+            // one higher.
+            let above = &rects[open..start];
+            let same = above.len() == rects.len() - start
+                && above
+                    .iter()
+                    .zip(&rects[start..])
+                    .all(|(a, b)| (a.left, a.width) == (b.left, b.width) && a.top + a.height == y);
+            if same && start > open {
+                rects.truncate(start);
+                rects[open..].iter_mut().for_each(|r| r.height += 1);
+            } else {
+                open = start;
+            }
+        }
+        (rects.len() <= WRITTEN_RECTS).then_some(rects)
+    }
+}
+
+/// A surface that is ahead on the host.
+struct Ahead {
+    surface: Surface,
+    /// What the processor wrote of it since: card memory has those
+    /// bytes, and the host the others.
+    written: Written,
+}
+
+/// The host's pixels of surfaces that are ahead, fetched for the
+/// program's reads of them (`Gpu::read`).
+#[derive(Default)]
+struct Fetched {
+    /// As large as card memory once used: each surface's pixels are
+    /// where card memory has the surface.
+    bytes: Vec<u8>,
+    /// The surfaces whose pixels are there, as the host has them now.
+    of: Vec<Surface>,
+}
+
 /// The card's side of a host renderer: the host, the pages, and the
 /// surfaces that are ahead on the host.
 #[derive(Default)]
 pub struct Gpu {
     /// Behind a cell, for a saved state, which reads the surfaces back
-    /// into a copy of card memory without changing the card.
+    /// into a copy of card memory without changing the card, and for
+    /// the program's reads, which have the bus shared.
     host: RefCell<Option<Box<dyn Host>>>,
     pub pages: Pages,
     /// The surfaces whose pixels the host has and card memory hasn't.
-    ahead: Vec<Surface>,
+    ahead: Vec<Ahead>,
+    fetched: RefCell<Fetched>,
     /// The screen shows the picture from the host's copy this frame
     /// (`shows`): the next `shown` reads nothing back.
     presents: bool,
     /// How many surfaces were read back, and how many draws went to
     /// the software renderer with a host attached.
-    pub read_backs: u64,
+    read_backs: u64,
     pub declined: u64,
     /// The read-backs by what asked for them (`Cause`).
     by_cause: [u64; Cause::NAMES.len()],
-    /// The program's reads of bytes that were ahead on the host, which
-    /// got what card memory had (`Gpu::stale_read`).
-    stale_reads: Cell<u64>,
+    /// The surfaces fetched for the program's reads (`read`), which
+    /// are read-backs for `Cause::Lock`.
+    fetches: Cell<u64>,
+    /// The times written pixels went to the host's copy (`Host::
+    /// write`).
+    writes: u64,
 }
 
 // A copy of a card has no host: it draws in software, from what card
@@ -474,6 +672,7 @@ impl Gpu {
             Some(_) => Pages::new(memory),
             None => Pages::default(),
         };
+        *self.fetched.get_mut() = Fetched::default();
         *self.host.get_mut() = host;
     }
 
@@ -505,8 +704,15 @@ impl Gpu {
         !self.ahead.is_empty()
     }
 
-    pub fn stale_reads(&self) -> u64 {
-        self.stale_reads.get()
+    /// How many surfaces were read back.
+    pub fn read_backs(&self) -> u64 {
+        self.read_backs + self.fetches.get()
+    }
+
+    /// How many times written pixels went to the host's copy of a
+    /// surface.
+    pub fn writes(&self) -> u64 {
+        self.writes
     }
 
     /// Whether the host draws triangles with `state`.
@@ -525,7 +731,9 @@ impl Gpu {
 
     /// The read-backs by cause, for the status.
     pub fn causes(&self) -> serde_json::Value {
-        let counts = Cause::NAMES.iter().zip(self.by_cause);
+        let mut by_cause = self.by_cause;
+        by_cause[Cause::Lock as usize] += self.fetches.get();
+        let counts = Cause::NAMES.iter().zip(by_cause);
         counts
             .map(|(name, count)| (name.to_string(), serde_json::json!(count)))
             .collect::<serde_json::Map<_, _>>()
@@ -541,17 +749,36 @@ impl Gpu {
             read_backs,
             by_cause,
             pages,
+            fetched,
             ..
         } = self;
+        fetched.get_mut().of.clear();
         let Some(host) = host.get_mut() else {
             ahead.clear();
             return;
         };
-        ahead.retain(|surface| {
-            if range.is_some_and(|r| !overlap(r, self::range(surface))) {
+        ahead.retain(|a| {
+            let bytes = self::range(&a.surface);
+            if range.is_some_and(|r| !overlap(r, bytes)) {
                 return true;
             }
-            host.read_back(surface, memory, Some(pages));
+            // What the processor wrote of it stays: the host's pixels
+            // go around it.
+            let mut kept: Vec<(u32, Vec<u8>)> = Vec::new();
+            if a.written.any {
+                a.written.runs(0, bytes.1 - bytes.0, |from, to| {
+                    let (from, to) = ((bytes.0 + from) as usize, (bytes.0 + to) as usize);
+                    kept.push((from as u32, memory[from..to].to_vec()));
+                });
+            }
+            host.read_back(&a.surface, memory, Some(pages));
+            for (at, run) in &kept {
+                memory[*at as usize..*at as usize + run.len()].copy_from_slice(run);
+            }
+            if !kept.is_empty() {
+                // The host's copy isn't what card memory holds.
+                pages.wrote(bytes.0, bytes.1 - bytes.0);
+            }
             *read_backs += 1;
             by_cause[why as usize] += 1;
             false
@@ -566,33 +793,164 @@ impl Gpu {
         }
         let mut copy = memory.to_vec();
         if let Some(host) = self.host.borrow_mut().as_mut() {
-            for surface in &self.ahead {
-                host.read_back(surface, &mut copy, None);
+            for a in &self.ahead {
+                host.read_back(&a.surface, &mut copy, None);
+                if !a.written.any {
+                    continue;
+                }
+                let start = a.surface.offset;
+                a.written.runs(0, range(&a.surface).1 - start, |from, to| {
+                    let run = (start + from) as usize..(start + to) as usize;
+                    copy[run.clone()].copy_from_slice(&memory[run]);
+                });
             }
         }
         Some(copy)
     }
 
     /// `surface` is ahead on the host, which has one copy for it and
-    /// its views: the list keeps the largest.
+    /// its views: the list keeps the largest. Nothing of them is
+    /// written: `push` came first.
     fn mark(&mut self, surface: Surface) {
-        if self.ahead.iter().any(|s| within(&surface, s)) {
+        if self.ahead.iter().any(|a| within(&surface, &a.surface)) {
             return;
         }
-        self.ahead.retain(|s| !within(s, &surface));
-        self.ahead.push(surface);
+        self.ahead.retain(|a| !within(&a.surface, &surface));
+        self.ahead.push(Ahead {
+            surface,
+            written: Written::default(),
+        });
+    }
+
+    /// The processor is about to write `len` bytes at `offset`: where a
+    /// surface that is ahead has them, card memory has those bytes of
+    /// it from now on.
+    #[cold]
+    pub fn writing(&mut self, offset: u32, len: u32) {
+        let end = offset.saturating_add(len);
+        for a in &mut self.ahead {
+            let bytes = range(&a.surface);
+            if overlap((offset, end), bytes) {
+                let (from, to) = (offset.max(bytes.0), end.min(bytes.1));
+                a.written
+                    .note(from - bytes.0, to - bytes.0, bytes.1 - bytes.0);
+            }
+        }
+    }
+
+    /// The program reads `len` bytes at `offset` by itself, up to 4:
+    /// their value where a surface that is ahead has one of them, the
+    /// host's pixels for what the processor didn't write since. None
+    /// where card memory has them all. The host's pixels of the
+    /// surface are fetched once, and again after the host changed its
+    /// copy.
+    #[cold]
+    pub fn read(&self, offset: u32, len: u32, memory: &[u8]) -> Option<u32> {
+        let end = offset.saturating_add(len);
+        let a = self
+            .ahead
+            .iter()
+            .find(|a| overlap((offset, end), range(&a.surface)))?;
+        let bytes = range(&a.surface);
+        // The bytes between a row's last pixel and the next row's first
+        // are no pixel's: the host has none of them, and a read-back
+        // leaves them as card memory has them.
+        let s = &a.surface;
+        let (pitch, row) = (s.pitch.max(1), s.width * s.format.bytes());
+        let hosts = |at: u32| {
+            at >= bytes.0
+                && at < bytes.1
+                && (at - bytes.0) % pitch < row
+                && !a.written.has(at - bytes.0)
+        };
+        if !(offset..end).any(&hosts) {
+            return None;
+        }
+        let mut fetched = self.fetched.borrow_mut();
+        if !fetched.of.contains(&a.surface) {
+            let _profile = crate::profile::zone(crate::profile::Zone::ToadForceReadBack);
+            if fetched.bytes.len() != memory.len() {
+                fetched.bytes = vec![0; memory.len()];
+            }
+            let mut host = self.host.borrow_mut();
+            if !host
+                .as_mut()?
+                .read_back(&a.surface, &mut fetched.bytes, None)
+            {
+                return None;
+            }
+            fetched.of.push(a.surface);
+            self.fetches.set(self.fetches.get() + 1);
+        }
+        let mut value = [0u8; 4];
+        for (i, at) in (offset..end).enumerate().take(4) {
+            let from = if hosts(at) { &fetched.bytes } else { memory };
+            value[i] = from.get(at as usize).copied().unwrap_or(0);
+        }
+        Some(u32::from_le_bytes(value))
+    }
+
+    /// Before the host uses its copies: what the processor wrote of
+    /// the surfaces that are ahead goes to them (`Host::write`). One
+    /// the host doesn't write is read back around what was written.
+    #[inline]
+    fn push(&mut self, memory: &mut [u8]) {
+        if self.ahead.iter().any(|a| a.written.any) {
+            self.push_written(memory);
+        }
+    }
+
+    #[cold]
+    fn push_written(&mut self, memory: &mut [u8]) {
+        let Gpu {
+            host,
+            ahead,
+            fetched,
+            writes,
+            ..
+        } = self;
+        fetched.get_mut().of.clear();
+        let mut left = Vec::new();
+        for a in ahead {
+            if !a.written.any {
+                continue;
+            }
+            let _profile = crate::profile::zone(crate::profile::Zone::ToadForceHost);
+            let rects = a.written.rects(&a.surface);
+            // Bytes between rows alone are no pixel's: the host's copy
+            // has nothing of them to change.
+            if rects.as_ref().is_some_and(Vec::is_empty) {
+                a.written.clear();
+                continue;
+            }
+            let wrote = match (rects, host.get_mut().as_mut()) {
+                (Some(rects), Some(host)) => host.write(&a.surface, &rects, memory),
+                _ => false,
+            };
+            if wrote {
+                a.written.clear();
+                *writes += 1;
+            } else {
+                left.push(range(&a.surface));
+            }
+        }
+        for bytes in left {
+            self.settle(memory, Some(bytes), Cause::Program);
+        }
     }
 
     /// Read back, for `why`, the surfaces that are ahead and share a
     /// byte with `surface` without being it, a view of it or what it
-    /// is a view of.
-    fn settle_others(&mut self, surface: &Surface, memory: &mut [u8], why: Cause) {
+    /// is a view of: with `bits`, without being its bytes under
+    /// another format's name either (`alias`).
+    fn settle_others(&mut self, surface: &Surface, bits: bool, memory: &mut [u8], why: Cause) {
         let bytes = range(surface);
+        let own = |s: &Surface| related(s, surface) || bits && same_bytes(s, surface);
         let other: Vec<(u32, u32)> = self
             .ahead
             .iter()
-            .filter(|s| !related(s, surface))
-            .map(range)
+            .filter(|a| !own(&a.surface))
+            .map(|a| range(&a.surface))
             .filter(|&r| overlap(r, bytes))
             .collect();
         for r in other {
@@ -608,6 +966,8 @@ impl Gpu {
     /// that samples its bytes stays ahead, and the host fills the
     /// image from its copy.
     pub fn draw(&mut self, batch: &Batch, reads: &[(u32, u32)], memory: &mut [u8]) {
+        self.push(memory);
+        self.fetched.get_mut().of.clear();
         let colour = batch.target.colour;
         let depth = batch.target.depth_surface();
         let own = |s: &Surface| related(s, &colour) || depth.is_some_and(|d| related(s, &d));
@@ -621,6 +981,7 @@ impl Gpu {
         let other: Vec<(u32, u32)> = self
             .ahead
             .iter()
+            .map(|a| &a.surface)
             .filter(|s| !own(s))
             .filter(|s| {
                 let r = range(s);
@@ -654,7 +1015,9 @@ impl Gpu {
         if !self.attached() {
             return false;
         }
-        self.settle_others(&clear.surface, memory, Cause::Clear);
+        self.push(memory);
+        self.fetched.get_mut().of.clear();
+        self.settle_others(&clear.surface, false, memory, Cause::Clear);
         let Some(host) = self.host.get_mut() else {
             return false;
         };
@@ -671,7 +1034,8 @@ impl Gpu {
     /// Whether the host shows `surface`, the picture on the screen,
     /// from its own copy (`Host::shows`). The frame's read-back of the
     /// picture (`take_presents`) is then left out.
-    pub fn shows(&mut self, surface: &Surface) -> bool {
+    pub fn shows(&mut self, surface: &Surface, memory: &mut [u8]) -> bool {
+        self.push(memory);
         let shows = match self.host.get_mut() {
             Some(host) => host.shows(surface, &self.pages),
             None => false,
@@ -686,18 +1050,23 @@ impl Gpu {
         std::mem::take(&mut self.presents)
     }
 
-    /// Whether a surface that is ahead has the pixels of `surface`.
-    fn has_ahead(&self, surface: &Surface) -> bool {
-        self.ahead.iter().any(|s| related(s, surface))
+    /// Whether a surface that is ahead has the pixels of `surface`:
+    /// with `bits`, its bytes under any format's name of that pixel
+    /// size.
+    fn has_ahead(&self, surface: &Surface, bits: bool) -> bool {
+        let mut ahead = self.ahead.iter().map(|a| &a.surface);
+        ahead.any(|s| related(s, surface) || bits && same_bytes(s, surface))
     }
 
     /// Have the host do a `FILL`, when the destination is ahead on it
     /// and stays so. False when the processor is to write card memory.
     pub fn fill(&mut self, dst: &Surface, rect: &Rect, value: u32, memory: &mut [u8]) -> bool {
-        if !self.has_ahead(dst) {
+        if !self.has_ahead(dst, false) {
             return false;
         }
-        self.settle_others(dst, memory, Cause::Blit);
+        self.push(memory);
+        self.fetched.get_mut().of.clear();
+        self.settle_others(dst, false, memory, Cause::Blit);
         let Some(host) = self.host.get_mut() else {
             return false;
         };
@@ -712,8 +1081,8 @@ impl Gpu {
     }
 
     /// Have the host do a `BLT`, when the source or the destination is
-    /// ahead on it: the destination then is. False when the processor
-    /// is to copy in card memory.
+    /// ahead on it, under whatever format's name: the destination then
+    /// is. False when the processor is to copy in card memory.
     pub fn blt(
         &mut self,
         dst: &Surface,
@@ -723,11 +1092,13 @@ impl Gpu {
         key: Option<u32>,
         memory: &mut [u8],
     ) -> bool {
-        if !self.has_ahead(dst) && !self.has_ahead(src) {
+        if !self.has_ahead(dst, true) && !self.has_ahead(src, true) {
             return false;
         }
-        self.settle_others(dst, memory, Cause::Blit);
-        self.settle_others(src, memory, Cause::Blit);
+        self.push(memory);
+        self.fetched.get_mut().of.clear();
+        self.settle_others(dst, true, memory, Cause::Blit);
+        self.settle_others(src, true, memory, Cause::Blit);
         let Some(host) = self.host.get_mut() else {
             return false;
         };
@@ -741,20 +1112,10 @@ impl Gpu {
         }
     }
 
-    /// The program read `len` bytes at `offset` by itself, which the
-    /// card can't answer with a read-back: count it if those bytes are
-    /// ahead on the host.
-    #[cold]
-    pub fn stale_read(&self, offset: u32, len: u32) {
-        let read = (offset, offset.saturating_add(len));
-        if self.ahead.iter().any(|s| overlap(read, range(s))) {
-            self.stale_reads.set(self.stale_reads.get() + 1);
-        }
-    }
-
     /// Card memory is all there is: a saved state was loaded.
     pub fn forget(&mut self) {
         self.ahead.clear();
+        self.fetched.get_mut().of.clear();
         if let Some(host) = self.host.get_mut() {
             host.forget();
         }

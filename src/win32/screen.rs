@@ -358,16 +358,15 @@ pub fn settle(cpu: &mut Cpu) {
     cpu.bus.toadforce_flush();
 }
 
-/// `settle`, and have the `len` bytes of video memory at `offset` hold
-/// what was drawn there: a ToadForce reads back the surfaces with
-/// those bytes that its host renderer drew into. `read` and `write` do
-/// it for their bytes, and whatever gives the program the address of a
-/// surface in video memory does it for the surface, since the program's
-/// reads through the bus can't.
+/// `settle`, before the program is given the address of a surface in
+/// video memory (a locked surface, a DC's pixels). Nothing is read back
+/// from a ToadForce's host renderer: the card answers the program's
+/// reads of pixels the host has from the host's, and notes what the
+/// program writes (`toadforce::gpu`). So a program that locks a surface
+/// to write all of it costs no read-back.
 #[inline]
-pub fn expose(cpu: &mut Cpu, offset: u32, len: u32) {
-    cpu.bus
-        .toadforce_touch_for(offset as usize, len as usize, Cause::Lock);
+pub fn expose(cpu: &mut Cpu) {
+    settle(cpu);
 }
 
 /// Whether a call of the function `name` of the DLL `dll` (its file
@@ -442,8 +441,9 @@ pub fn write(cpu: &mut Cpu, offset: u32, data: &[u8]) {
         return;
     }
     let data = &data[..end - start];
-    cpu.bus
-        .toadforce_touch_for(start, end - start, Cause::Driver);
+    // Every byte of the range is written, so a ToadForce reads nothing
+    // back for it.
+    cpu.bus.toadforce_writing(start, end - start);
     cpu.bus.toadforce_wrote(start, end - start);
     drew(cpu, start as u32, end as u32, data.len() as u64);
     if let Some(v) = &mut cpu.bus.voodoo

@@ -197,6 +197,61 @@ pub(super) fn copy(
     true
 }
 
+/// A window's back buffer `back` put on the screen: its rectangle
+/// `from` copied to the rectangle `to` of the picture shown, where
+/// `rects` of the screen are. True if the card did, which it does for
+/// a back buffer of the screen's format, copied without a stretch: a
+/// host renderer then copies its own pixels, and nothing of the back
+/// buffer is read back for the processor to copy.
+pub fn present(cpu: &mut Cpu, back: &Surface, from: &Rect, to: &Rect, rects: &[Rect]) -> bool {
+    if !screen::is_toadforce(cpu) {
+        return false;
+    }
+    let (width, height, bpp, pitch) = display::current(cpu);
+    let masks = match bpp {
+        16 => (0xF800, 0x07E0, 0x001F),
+        32 => (0xFF_0000, 0xFF00, 0xFF),
+        _ => return false,
+    };
+    let f = &back.format;
+    if (f.bits, f.r, f.g, f.b) != (bpp, masks.0, masks.1, masks.2)
+        || from.width() != to.width()
+        || from.height() != to.height()
+    {
+        return false;
+    }
+    let Some(format) = card_format(bpp / 8, false) else {
+        return false;
+    };
+    let Some(source) = card_surface(cpu, back, format) else {
+        return false;
+    };
+    // The picture shown starts card memory.
+    let words = [0, pitch, width, height, format.code()];
+    let Ok(shown) = format::Surface::parse(&words, caps::BLIT_FORMATS, screen::memory_size(cpu))
+    else {
+        return false;
+    };
+    let (dx, dy) = (from.left - to.left, from.top - to.top);
+    let mut commands = Vec::new();
+    for r in rects {
+        let s = Rect::new(r.left + dx, r.top + dy, r.right + dx, r.bottom + dy);
+        if s.left < 0 || s.top < 0 || !source.holds(&card_rect(&s)) || !shown.holds(&card_rect(r)) {
+            return false;
+        }
+        encode::blt(
+            &mut commands,
+            &shown,
+            &card_rect(r),
+            &source,
+            &card_rect(&s),
+            None,
+        );
+    }
+    cpu.bus.toadforce_submit(&commands);
+    true
+}
+
 /// The rectangle `from` of the surface `src`, which is in system
 /// memory, written to a block of card memory taken for it: the block
 /// as a surface of `format`, its rows one after another. None when
