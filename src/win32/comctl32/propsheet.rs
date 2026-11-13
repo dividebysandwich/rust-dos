@@ -35,8 +35,8 @@ use super::misc::{heap_alloc, heap_free, process_heap};
 use super::script::{self, Arg, Ctx, Op, Script};
 use super::{PROPSHEET, kernel32, state, tab};
 use crate::cpu::Cpu;
-use crate::win32::nls;
 use crate::win32::gdi32::Rect;
+use crate::win32::nls;
 use crate::win32::user32::message::{
     WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_GETDLGCODE, WM_INITDIALOG, WM_KEYDOWN, WM_NOTIFY,
 };

@@ -2452,6 +2452,10 @@ pub fn callnewh(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 // The locale: "C", or the system's by name, whose tables are the same.
 
+/// setlocale's categories: all of them, and the characters'.
+const LC_ALL: u32 = 0;
+const LC_CTYPE: u32 = 2;
+
 /// setlocale(category, name): the locale's name, or NULL for one there
 /// isn't.
 pub fn setlocale(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -2466,19 +2470,26 @@ pub fn setlocale(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let native = name.is_empty()
             || name.eq_ignore_ascii_case(&native_name)
             || names.iter().any(|n| name.eq_ignore_ascii_case(n));
-        if native {
-            set_state(cpu, S_LOCALE, 1);
+        let locale = if native {
+            1
         } else if name == b"C" {
-            set_state(cpu, S_LOCALE, 0);
+            0
         } else {
             return Some(0);
-        }
-        // __lc_codepage: the locale's code page, 0 for "C".
-        let page = match state(cpu, S_LOCALE) {
-            0 => 0,
-            _ => crate::win32::nls::ansi(cpu).number(),
         };
-        write32(cpu, var_at(V_LC_CODEPAGE), page)?;
+        set_state(cpu, S_LOCALE, locale);
+        // LC_ALL and LC_CTYPE set the characters' conversions and
+        // __lc_codepage, the locale's code page (0 for "C"); the other
+        // categories leave them, as after the common setlocale(LC_ALL, "")
+        // and setlocale(LC_NUMERIC, "C").
+        if args[0] == LC_ALL || args[0] == LC_CTYPE {
+            set_state(cpu, S_CTYPE, locale);
+            let page = match locale {
+                0 => 0,
+                _ => crate::win32::nls::ansi(cpu).number(),
+            };
+            write32(cpu, var_at(V_LC_CODEPAGE), page)?;
+        }
     }
     Some(if state(cpu, S_LOCALE) == 0 {
         state_at(S_LOCALE_C)

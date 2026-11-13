@@ -43,10 +43,10 @@ use super::{
     write_words,
 };
 use crate::cpu::Cpu;
-use crate::win32::nls;
 use crate::win32::gdi32::dc::{DCX_USESTYLE, DCX_WINDOW, TRANSPARENT};
 use crate::win32::gdi32::{self, Rect, Region, font};
 use crate::win32::kernel32;
+use crate::win32::nls;
 use crate::win32::task::{self, Next, Task};
 
 /// Menu flags (MF_) and the item types (MFT_) and states (MFS_) they

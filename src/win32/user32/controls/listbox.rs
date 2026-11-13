@@ -335,17 +335,17 @@ impl ListBox {
         index
     }
 
-    /// LB_FINDSTRING's and LB_FINDSTRINGEXACT's search of a list with
-    /// strings, or of one without by its data, from after `start`. None
-    /// for a sorted list without strings and `exact`, which asks the
-    /// owner.
     /// The code page of the list's strings: its locale's, which is the
-    /// system's unless LB_SETLOCALE set another.
+    /// system's unless LB_SETLOCALE set another of the locales there are.
     fn code_page(&self) -> crate::win32::nls::CodePage {
         crate::win32::nls::by_lcid(self.locale)
             .map_or(crate::win32::nls::CodePage::WESTERN, |l| l.ansi())
     }
 
+    /// LB_FINDSTRING's and LB_FINDSTRINGEXACT's search of a list with
+    /// strings, or of one without by its data, from after `start`. None
+    /// for a sorted list without strings and `exact`, which asks the
+    /// owner.
     fn find_string(&self, start: i32, s: &[u8], data: u32, exact: bool) -> Option<i32> {
         let n = self.count();
         let start = if start >= n { -1 } else { start };
@@ -1669,6 +1669,9 @@ pub fn listbox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         // Listing a directory isn't done.
         LB_DIR => LB_ERR,
         LB_GETLOCALE => c.l.locale as i32,
+        // A locale that isn't installed is refused, as IsValidLocale
+        // refuses it, and the list keeps its own.
+        LB_SETLOCALE if crate::win32::nls::by_lcid(wp).is_none() => LB_ERR,
         LB_SETLOCALE => std::mem::replace(&mut c.l.locale, wp) as i32,
         LB_INITSTORAGE => LB_OKAY,
         LB_SETCOUNT => c.set_count(wp as i32),

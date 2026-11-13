@@ -159,6 +159,17 @@ impl System {
         }
     }
 
+    /// Whether the face `fi` has the character set `charset`: `sets`
+    /// without making the list, for the font mapper, which asks it of
+    /// every face each time a font is realized.
+    fn has(&self, fi: usize, charset: u8) -> bool {
+        match FACES[fi].charset {
+            Sets::System => charset == self.charset,
+            Sets::Oem => charset == OEM_CHARSET,
+            Sets::Wgl4 => charset == self.charset || WGL4.contains(&charset),
+        }
+    }
+
     /// The code page of the character set `charset`'s bytes.
     fn code_page(&self, charset: u8) -> CodePage {
         if charset == OEM_CHARSET {
@@ -635,7 +646,7 @@ fn choose(log: &Log, sys: &System) -> (usize, u8) {
     let named = face_named(&log.face);
     let asked = named.and_then(|(_, c)| c).unwrap_or(log.charset);
     let face = named.map_or_else(|| face_by_family(log), |(i, _)| i);
-    let has = |fi: usize, c: u8| sys.sets(fi).contains(&c);
+    let has = |fi: usize, c: u8| sys.has(fi, c);
     let want = if asked == DEFAULT_CHARSET {
         sys.charset
     } else {
@@ -751,29 +762,16 @@ fn source(c: u16) -> Src {
             None => return Src::Rom(b'?'),
         },
     };
-    match source(like) {
-        Src::Rom(0x3F) if like != '?' as u16 => Src::Rom(b'?'),
-        s => s,
-    }
+    source(like)
 }
 
 /// The index of the character `c`'s CPIDOS glyph, if it has one.
 fn cpidos_index(c: u16) -> Option<usize> {
-    let count = CPIDOS_GLYPHS.len() / CPIDOS_ENTRY;
-    let at = |i: usize| {
-        let e = &CPIDOS_GLYPHS[i * CPIDOS_ENTRY..];
-        u16::from_le_bytes([e[0], e[1]])
-    };
-    let (mut lo, mut hi) = (0, count);
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        match at(mid).cmp(&c) {
-            std::cmp::Ordering::Less => lo = mid + 1,
-            std::cmp::Ordering::Greater => hi = mid,
-            std::cmp::Ordering::Equal => return Some(mid),
-        }
-    }
-    None
+    CPIDOS_GLYPHS
+        .as_chunks::<CPIDOS_ENTRY>()
+        .0
+        .binary_search_by_key(&c, |e| u16::from_le_bytes([e[0], e[1]]))
+        .ok()
 }
 
 /// The rows of the glyph `src` in the size `base` (8, 14 or 16 rows),
@@ -1544,9 +1542,20 @@ pub fn ext_text_out_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     ext_text_out_of(cpu, args, text)
 }
 
-/// GetCharWidthA(hdc, first, last, widths), and the 32 and W forms: a W
-/// function's characters are Unicode's.
+/// GetCharWidthA(hdc, first, last, widths) and GetCharWidth32A: the
+/// widths of the font's bytes.
 pub fn get_char_width(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    char_widths(cpu, args, false)
+}
+
+/// GetCharWidthW and GetCharWidth32W: each character the width of its
+/// byte in the font's code page, '?' for one it lacks, as TextOutW draws
+/// it.
+pub fn get_char_width_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    char_widths(cpu, args, true)
+}
+
+fn char_widths(cpu: &mut Cpu, args: &[u32], wide: bool) -> Option<u32> {
     let (first, last) = (args[1], args[2]);
     if last < first || last - first > 0x1_0000 {
         set_error(cpu, ERROR_INVALID_PARAMETER);
@@ -1557,7 +1566,9 @@ pub fn get_char_width(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let widths: Vec<u32> = (first..=last)
         .map(|c| {
-            let b = if c < 0x100 {
+            // A W function's characters are Unicode's: U+00E0 is byte
+            // E0h in code page 1252 and '?' in 1251, as TextOutW draws it.
+            let b = if c < 0x100 && !wide {
                 c as u8
             } else {
                 f.page.byte(c as u16).unwrap_or(b'?')

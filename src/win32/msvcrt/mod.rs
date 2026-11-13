@@ -234,6 +234,9 @@ const S_LOCALE: u32 = 0x38;
 const S_ABNORMAL: u32 = 0x3C;
 /// The handler `_set_new_handler` set.
 const S_NEW_HANDLER: u32 = 0x40;
+/// LC_CTYPE's locale (0 "C", 1 the system's), which the multibyte and
+/// wide characters convert by, whatever the other categories are.
+const S_CTYPE: u32 = 0x44;
 const S_SIGNALS: u32 = 0x80;
 /// The locale's names and `lconv`, and the texts it points to
 /// (`startup.rs`).
@@ -453,9 +456,10 @@ fn varargs(cpu: &Cpu, fixed: u32) -> u32 {
 
 /// How the multibyte and wide characters of the locale the program set
 /// (`setlocale`) convert, as `mbtowc` and `wctomb` do: by the system's
-/// ANSI code page once `setlocale` picked the system's locale. The "C"
-/// locale has no code page: its bytes are the first 256 characters, and
-/// a character above them has no byte (#909).
+/// ANSI code page once `setlocale` picked the system's locale for
+/// LC_CTYPE (LC_ALL or LC_CTYPE itself). The "C" locale has no code page:
+/// its bytes are the first 256 characters, and a character above them
+/// has no byte (#909).
 #[derive(Clone, Copy)]
 struct Conv(Option<super::nls::CodePage>);
 
@@ -475,9 +479,9 @@ impl Conv {
     }
 }
 
-/// The conversions of the locale the program set.
+/// The conversions of the LC_CTYPE locale the program set.
 fn conv(cpu: &mut Cpu) -> Conv {
-    Conv((state(cpu, S_LOCALE) != 0).then(|| super::nls::ansi(cpu)))
+    Conv((state(cpu, S_CTYPE) != 0).then(|| super::nls::ansi(cpu)))
 }
 
 /// The running thread's id.

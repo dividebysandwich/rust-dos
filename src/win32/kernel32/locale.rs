@@ -264,11 +264,11 @@ fn enumerated(kind: u32, lcid: u32) -> Vec<String> {
 }
 
 /// Call the enumeration's callback `data[0]` with its `data[2]`th string
-/// of the locale `data[3]`, in the locale's code page, which goes on the
+/// of the locale `data[3]`, in the code page `data[4]`, which goes on the
 /// stack below the stub's: false if the stack isn't there.
 fn call_with_string(cpu: &mut Cpu, resume: (u32, u32), data: Vec<u32>) -> bool {
     let text = &enumerated(data[1], data[3])[data[2] as usize];
-    let page = nls::by_lcid(data[3]).map_or(CodePage::WESTERN, |l| l.ansi());
+    let page = CodePage::by_number(data[4]).unwrap_or(CodePage::WESTERN);
     let mut bytes = encode(page, text);
     bytes.push(0);
     let at = resume
@@ -283,12 +283,13 @@ fn call_with_string(cpu: &mut Cpu, resume: (u32, u32), data: Vec<u32>) -> bool {
     call::call(cpu, data[0], &[at], call::ENUM_STRINGS, resume, data)
 }
 
-/// Start the enumeration `kind` of the locale `lcid` with the callback
-/// `callback`: no value now (None) while the callback runs, the result
-/// when it has run.
-fn enumerate(cpu: &mut Cpu, callback: u32, kind: u32, lcid: u32) -> Option<u32> {
+/// Start the enumeration `kind` of the locale `l` with the callback
+/// `callback`, its strings in the code page `page`: no value now (None)
+/// while the callback runs, the result when it has run.
+fn enumerate(cpu: &mut Cpu, callback: u32, kind: u32, l: &Locale, page: CodePage) -> Option<u32> {
     let resume = call::here(cpu);
-    if !call_with_string(cpu, resume, vec![callback, kind, 0, lcid]) {
+    let data = vec![callback, kind, 0, l.lcid, page.number()];
+    if !call_with_string(cpu, resume, data) {
         return Some(FALSE);
     }
     None
@@ -311,7 +312,8 @@ pub(super) fn enum_system_locales_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> 
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
     }
-    enumerate(cpu, args[0], LOCALES, 0x0409)
+    let us = &nls::LOCALES[0];
+    enumerate(cpu, args[0], LOCALES, us, us.ansi())
 }
 
 const DATE_SHORTDATE: u32 = 0x1;
@@ -339,7 +341,8 @@ pub(super) fn enum_date_formats_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             return Some(FALSE);
         }
     };
-    enumerate(cpu, callback, kind, l.lcid)
+    let page = page_of(cpu, l, flags);
+    enumerate(cpu, callback, kind, l, page)
 }
 
 pub(super) fn enum_time_formats_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -355,7 +358,8 @@ pub(super) fn enum_time_formats_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_FLAGS);
         return Some(FALSE);
     }
-    enumerate(cpu, callback, TIMES, l.lcid)
+    let page = page_of(cpu, l, flags);
+    enumerate(cpu, callback, TIMES, l, page)
 }
 
 const TIME_NOMINUTESORSECONDS: u32 = 0x1;

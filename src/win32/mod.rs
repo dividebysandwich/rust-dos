@@ -45,6 +45,7 @@ mod mpr;
 mod msacm32;
 mod msimg32;
 mod msvcrt;
+pub mod nls;
 mod ntdll;
 pub(crate) mod object;
 #[cfg(test)]
@@ -69,7 +70,6 @@ pub(crate) mod thread;
 pub mod trace;
 pub mod trace3d;
 pub mod user32;
-pub mod nls;
 pub mod version;
 mod verdll;
 mod vmm;

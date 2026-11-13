@@ -3,9 +3,8 @@
 
 use super::{FALSE, TRUE, bytes_at, read_words, user, write_words};
 use crate::cpu::Cpu;
-use crate::win32::convert::decompose;
-use crate::win32::nls::{self, CodePage};
 use crate::win32::gdi32::{self, Rect, font};
+use crate::win32::nls::{self, CodePage};
 use crate::win32::task::{self, Next, Task};
 
 pub const DT_CENTER: u32 = 0x0001;
@@ -1132,18 +1131,6 @@ pub fn is_char_lower_w(_cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     test_w(args, char::is_lowercase)
 }
 
-/// The byte of `c` in `to`, or the nearest it has: the letter without
-/// its accent, or a question mark.
-fn best_fit(c: u16, to: CodePage) -> u8 {
-    if let Some(b) = to.byte(c) {
-        return b;
-    }
-    match decompose(c) {
-        Some((base, _)) => to.byte(base).unwrap_or(b'?'),
-        None => b'?',
-    }
-}
-
 fn convert(cpu: &mut Cpu, src: u32, dst: u32, len: Option<u32>, to_oem: bool) -> Option<u32> {
     if src == 0 || dst == 0 {
         return Some(FALSE);
@@ -1171,7 +1158,9 @@ fn convert(cpu: &mut Cpu, src: u32, dst: u32, len: Option<u32>, to_oem: bool) ->
             if b < 0x80 {
                 b
             } else {
-                best_fit(from.char(b), to)
+                // The nearest character `to` has: the letter without its
+                // accent, or a question mark.
+                to.best_fit(from.char(b)).unwrap_or(b'?')
             }
         })
         .collect();

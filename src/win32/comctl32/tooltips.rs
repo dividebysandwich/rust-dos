@@ -24,8 +24,8 @@ use super::gfx;
 use super::script::{self, Arg, Ctx, Op, Script};
 use super::{TOOLTIPS, invalidate, state};
 use crate::cpu::Cpu;
-use crate::win32::nls;
 use crate::win32::gdi32::Rect;
+use crate::win32::nls;
 use crate::win32::user32::message::{
     WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_GETFONT, WM_GETTEXT, WM_GETTEXTLENGTH, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY,

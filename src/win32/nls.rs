@@ -492,7 +492,10 @@ mod tests {
         let text: Vec<u16> = "Привет".encode_utf16().collect();
         assert_eq!(ansi.encode(&text), [0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2]);
         assert_eq!(oem.encode(&text), [0x8F, 0xE0, 0xA8, 0xA2, 0xA5, 0xE2]);
-        assert_eq!(ansi.decode(&[0xA8, 0xB8]), "Ёё".encode_utf16().collect::<Vec<_>>());
+        assert_eq!(
+            ansi.decode(&[0xA8, 0xB8]),
+            "Ёё".encode_utf16().collect::<Vec<_>>()
+        );
     }
 
     #[test]

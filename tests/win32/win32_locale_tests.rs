@@ -47,6 +47,8 @@ const IMPORTS: &[(&str, &[&str])] = &[
             "TextOutW",
             "GetTextCharset",
             "CreateFontA",
+            "GetCharWidth32A",
+            "GetCharWidth32W",
         ],
     ),
 ];
@@ -345,4 +347,29 @@ fn a_russian_windows_draws_cyrillic_from_ansi_and_unicode() {
     let (us, charset) = draw_de("us_text", Win32Locale::EnUs);
     assert_eq!(charset, 0);
     assert_ne!(glyph(&us, 0), from_ansi);
+}
+
+#[test]
+fn a_russian_windows_measures_unicode_in_its_code_page() {
+    use Arg::*;
+    const WIDTHS: u32 = 0x700;
+    let width = |i: u32| At(WIDTHS + 4 * i);
+    // і (Ukrainian i) is B3h in code page 1251, and ³ (U+00B3) isn't
+    // there at all.
+    let calls = vec![
+        call("CreateCompatibleDC", &[I(0)]),
+        call("GetCharWidth32A", &[Res(0), I(0xB3), I(0xB3), width(0)]),
+        call("GetCharWidth32W", &[Res(0), I(0x456), I(0x456), width(1)]),
+        call("GetCharWidth32W", &[Res(0), I(0xB3), I(0xB3), width(2)]),
+        call("GetCharWidth32A", &[Res(0), I(0x3F), I(0x3F), width(3)]),
+    ];
+    let data = vec![0u8; DATA_SIZE];
+    let (cpu, at) = run("russian_widths", Win32Locale::RuRu, &data, &calls);
+    assert_eq!(results(&cpu, at, calls.len())[1..], [1, 1, 1, 1]);
+    let w: Vec<u32> = (0..4).map(|i| peek(&cpu, at + WIDTHS + 4 * i)).collect();
+    // і's byte and і itself are as wide, and ³ is the '?' it is drawn
+    // as, not the byte B3h.
+    assert_ne!(w[0], w[3], "і and '?' are as wide: the test can't tell");
+    assert_eq!(w[1], w[0]);
+    assert_eq!(w[2], w[3]);
 }

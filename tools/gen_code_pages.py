@@ -46,8 +46,9 @@ def main(folder, path):
     out.write("//! and MAPPINGS/VENDORS/MICSFT/PC); don't edit it by hand. A byte\n")
     out.write("//! a file leaves undefined stands for the character of its number,\n")
     out.write("//! or U+F700 plus it where another byte has that character.\n")
-    out.write("\n")
     for cp in ANSI + OEM:
+        # A blank line before each table, none after the last.
+        out.write("\n")
         table = read(os.path.join(folder, f"CP{cp}.TXT"))
         for b in range(0x80):
             assert table.get(b, b) == b, (cp, b)
@@ -61,7 +62,7 @@ def main(folder, path):
         for i in range(0, 128, 8):
             row = ", ".join(f"0x{c:04X}" for c in high[i : i + 8])
             out.write(f"    {row},\n")
-        out.write("];\n\n")
+        out.write("];\n")
 
 
 if __name__ == "__main__":

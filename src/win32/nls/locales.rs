@@ -271,7 +271,13 @@ pub const CS_CZ: Info = Info {
     pm: "odp.",
     first_day: "0",
     days: [
-        "pondělí", "úterý", "středa", "čtvrtek", "pátek", "sobota", "neděle",
+        "pondělí",
+        "úterý",
+        "středa",
+        "čtvrtek",
+        "pátek",
+        "sobota",
+        "neděle",
     ],
     abbrev_days: ["po", "út", "st", "čt", "pá", "so", "ne"],
     months: [
@@ -349,8 +355,8 @@ pub const HU_HU: Info = Info {
         "december",
     ],
     abbrev_months: [
-        "jan.", "febr.", "márc.", "ápr.", "máj.", "jún.", "júl.", "aug.", "szept.", "okt.",
-        "nov.", "dec.",
+        "jan.", "febr.", "márc.", "ápr.", "máj.", "jún.", "júl.", "aug.", "szept.", "okt.", "nov.",
+        "dec.",
     ],
 };
 
@@ -456,8 +462,8 @@ pub const TR_TR: Info = Info {
     ],
     abbrev_days: ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"],
     months: [
-        "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül",
-        "Ekim", "Kasım", "Aralık",
+        "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim",
+        "Kasım", "Aralık",
     ],
     abbrev_months: [
         "Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara",

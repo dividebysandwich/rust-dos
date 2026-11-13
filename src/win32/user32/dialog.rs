@@ -35,9 +35,9 @@ use super::{
     current_tid, make_long, read_words, set_error, user, write_words,
 };
 use crate::cpu::Cpu;
-use crate::win32::nls::{self, CodePage};
 use crate::win32::gdi32::{self, Font, Kind, Rect};
 use crate::win32::kernel32;
+use crate::win32::nls::{self, CodePage};
 use crate::win32::task::{self, Next, Task};
 
 /// The dialog task's place in `task::TASKS`.
