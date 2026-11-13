@@ -871,7 +871,7 @@ mod tests {
         (53, 0x59CC_53A1_8176_269C), // a filter graph's full-screen mode
         (54, 0xB1D0_B934_F547_E963), // Direct3D 8's cube textures
         (55, 0x33AE_9F33_F125_1478), // a video device's full-screen play
-        (56, 0x2DFB_07BF_941B_EF7B), // TrackMouseEvent's requests, one a thread
+        (56, 0x18F9_9526_84A6_5654), // TrackMouseEvent's request, one for the desktop
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

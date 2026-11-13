@@ -382,8 +382,12 @@ pub fn wait_ready(win32: &crate::win32::Win32, tid: u32, wait: &QueueWait, now: 
         return true;
     }
     // The hover time is over: the thread posts its hover message as it
-    // looks for messages (track.rs).
-    if mask & QS_POSTMESSAGE != 0 && super::track::hover_due(state, tid).is_some_and(|d| d <= now)
+    // looks for messages (track.rs). Windows runs the hover on a system
+    // timer of the window (ReactOS's ID_EVENT_SYSTIMER_MOUSEHOVER), which
+    // wakes a wait for QS_TIMER, and the message it posts one for
+    // QS_POSTMESSAGE.
+    if mask & (QS_TIMER | QS_POSTMESSAGE) != 0
+        && super::track::hover_due(state, tid).is_some_and(|d| d <= now)
     {
         return true;
     }
@@ -945,7 +949,7 @@ pub fn post(cpu: &mut Cpu, tid: u32, msg: Msg) {
 }
 
 /// The time and cursor position a message posted now has.
-fn stamp(cpu: &Cpu, mut msg: Msg) -> Msg {
+pub(super) fn stamp(cpu: &Cpu, mut msg: Msg) -> Msg {
     msg.time = now_ms(cpu);
     let (x, y) = cpu.bus.win32.user.input.cursor;
     msg.x = x;

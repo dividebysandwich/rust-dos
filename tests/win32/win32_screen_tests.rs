@@ -3949,7 +3949,13 @@ const USER32_TRACK: (&str, &[&str]) = (
 );
 const KERNEL32_TRACK: (&str, &[&str]) = (
     "KERNEL32.DLL",
-    &["GetTickCount", "Sleep", "LoadLibraryA", "GetProcAddress"],
+    &[
+        "GetTickCount",
+        "Sleep",
+        "LoadLibraryA",
+        "GetProcAddress",
+        "GetLastError",
+    ],
 );
 const TRACK_SET_CURSOR_POS: usize = 1;
 const TRACK_MOUSE_EVENT: usize = 2;
@@ -3960,6 +3966,7 @@ const TRACK_GET_TICK_COUNT: usize = 6;
 const TRACK_SLEEP: usize = 7;
 const TRACK_LOAD_LIBRARY: usize = 8;
 const TRACK_GET_PROC_ADDRESS: usize = 9;
+const TRACK_GET_LAST_ERROR: usize = 10;
 /// The TRACKMOUSEEVENT of the requests, the one of TME_QUERY, the MSG
 /// GetMessageA fills, what SystemParametersInfoA writes, and names.
 const TME: u32 = 0xE00;
@@ -4000,7 +4007,19 @@ fn track_data(flags: u32, hover: u32) -> Vec<u8> {
 /// TrackMouseEvent with TME, for the window CreateWindowExA made, with
 /// `flags`.
 fn request(c: &mut Calls, a: &mut CodeAssembler, l: &Layout, flags: u32) -> Result<(), IcedError> {
-    a.mov(eax, dword_ptr(l.at(RESULTS)))?;
+    request_for(c, a, l, 0, flags)
+}
+
+/// TrackMouseEvent with TME, for the window in the result `slot`, with
+/// `flags`.
+fn request_for(
+    c: &mut Calls,
+    a: &mut CodeAssembler,
+    l: &Layout,
+    slot: u32,
+    flags: u32,
+) -> Result<(), IcedError> {
+    a.mov(eax, dword_ptr(l.at(RESULTS + 4 * slot)))?;
     a.mov(dword_ptr(l.at(TME + 8)), eax)?;
     a.mov(dword_ptr(l.at(TME + 4)), flags)?;
     c.api(a, l, TRACK_MOUSE_EVENT, &[Arg::At(TME)])
@@ -4008,12 +4027,7 @@ fn request(c: &mut Calls, a: &mut CodeAssembler, l: &Layout, flags: u32) -> Resu
 
 /// TrackMouseEvent with TME_QUERY; the flags, window and hover time it
 /// gives go to SEEN's slots from `slot` on.
-fn query(
-    c: &mut Calls,
-    a: &mut CodeAssembler,
-    l: &Layout,
-    slot: u32,
-) -> Result<(), IcedError> {
+fn query(c: &mut Calls, a: &mut CodeAssembler, l: &Layout, slot: u32) -> Result<(), IcedError> {
     a.mov(dword_ptr(l.at(TME_QUERIED + 4)), TME_QUERY)?;
     c.api(a, l, TRACK_MOUSE_EVENT, &[Arg::At(TME_QUERIED)])?;
     for i in 0..3 {
@@ -4023,19 +4037,40 @@ fn query(
 }
 
 /// GetMessageA for `message` alone: the thread waits for it.
-fn wait_for(c: &mut Calls, a: &mut CodeAssembler, l: &Layout, message: u32) -> Result<(), IcedError> {
+fn wait_for(
+    c: &mut Calls,
+    a: &mut CodeAssembler,
+    l: &Layout,
+    message: u32,
+) -> Result<(), IcedError> {
     let m = Arg::I(message);
-    c.api(a, l, TRACK_GET_MESSAGE, &[Arg::At(TRACK_MSG), Arg::I(0), m, m])
+    c.api(
+        a,
+        l,
+        TRACK_GET_MESSAGE,
+        &[Arg::At(TRACK_MSG), Arg::I(0), m, m],
+    )
 }
 
 /// PeekMessageA for `message` alone, taking it.
-fn peek_for(c: &mut Calls, a: &mut CodeAssembler, l: &Layout, message: u32) -> Result<(), IcedError> {
+fn peek_for(
+    c: &mut Calls,
+    a: &mut CodeAssembler,
+    l: &Layout,
+    message: u32,
+) -> Result<(), IcedError> {
     let m = Arg::I(message);
     let args = [Arg::At(TRACK_MSG), Arg::I(0), m, m, Arg::I(PM_REMOVE)];
     c.api(a, l, TRACK_PEEK_MESSAGE, &args)
 }
 
-fn cursor_to(c: &mut Calls, a: &mut CodeAssembler, l: &Layout, x: u32, y: u32) -> Result<(), IcedError> {
+fn cursor_to(
+    c: &mut Calls,
+    a: &mut CodeAssembler,
+    l: &Layout,
+    x: u32,
+    y: u32,
+) -> Result<(), IcedError> {
     c.api(a, l, TRACK_SET_CURSOR_POS, &[Arg::I(x), Arg::I(y)])
 }
 
@@ -4085,12 +4120,29 @@ fn track_mouse_event_posts_hover_and_leave() {
     assert_ne!(hwnd, 0, "CreateWindowExA");
     assert_eq!(r[3], 1, "TrackMouseEvent");
     assert_eq!(r[4], 1, "TME_QUERY");
-    assert_eq!(s[0..3], [TME_HOVER | TME_LEAVE, hwnd, 400], "what is tracked");
+    assert_eq!(
+        s[0..3],
+        [TME_HOVER | TME_LEAVE, hwnd, 400],
+        "what is tracked"
+    );
     assert_eq!(r[5], 1, "WM_MOUSEHOVER");
     assert_eq!(s[3], 0, "no keys or buttons down");
-    assert_eq!(s[4], 20 << 16 | 20, "where the cursor is in the client area");
-    assert!(s[5].wrapping_sub(r[2]) >= 400, "after the hover time: {s:?} {r:?}");
-    assert_eq!(s[6..8], [TME_LEAVE, hwnd], "the leave tracked after the hover");
+    assert_eq!(
+        s[4],
+        20 << 16 | 20,
+        "where the cursor is in the client area"
+    );
+    assert!(
+        s[5].wrapping_sub(r[2]) >= 400,
+        "after the hover time: {s:?} {r:?}"
+    );
+    // The hover time only with TME_HOVER, as ReactOS's
+    // IntQueryTrackMouseEvent fills it.
+    assert_eq!(
+        s[6..9],
+        [TME_LEAVE, hwnd, 0],
+        "the leave tracked after the hover"
+    );
     assert_eq!(r[7], 1, "SetCursorPos");
     assert_eq!(r[8], 1, "WM_MOUSELEAVE");
     assert_eq!(s[9], hwnd, "for the window");
@@ -4112,7 +4164,12 @@ fn the_hover_time_starts_again_when_the_cursor_leaves_its_rectangle() {
     let (program, data) = program(&[USER32_TRACK, KERNEL32_TRACK], &d, |a, l| {
         let mut c = Calls { next: 0 };
         popup_window(&mut c, a, l)?;
-        let set = [Arg::I(SPI_SETMOUSEHOVERTIME), Arg::I(100), Arg::I(0), Arg::I(0)];
+        let set = [
+            Arg::I(SPI_SETMOUSEHOVERTIME),
+            Arg::I(100),
+            Arg::I(0),
+            Arg::I(0),
+        ];
         c.api(a, l, TRACK_SPI, &set)?;
         let get = |action| [Arg::I(action), Arg::I(0), Arg::At(SPI_VALUE), Arg::I(0)];
         c.api(a, l, TRACK_SPI, &get(SPI_GETMOUSEHOVERTIME))?;
@@ -4143,7 +4200,10 @@ fn the_hover_time_starts_again_when_the_cursor_leaves_its_rectangle() {
     assert_eq!(r[1..4], [1, 1, 1], "SystemParametersInfoA");
     assert_eq!(s[0..2], [100, 4], "the hover time and width");
     let first = s[2].wrapping_sub(r[5]);
-    assert!((100..160).contains(&first), "a pixel's move keeps the time: {first}");
+    assert!(
+        (100..160).contains(&first),
+        "a pixel's move keeps the time: {first}"
+    );
     assert_eq!(s[3], 21 << 16 | 21);
     let second = s[4].wrapping_sub(r[10]);
     assert!(second >= 160, "a move out starts it again: {second}");
@@ -4202,6 +4262,99 @@ fn track_mouse_event_tracks_the_non_client_area() {
     assert_eq!(s[1], 10 << 16 | 100, "where the cursor is on the screen");
     assert_eq!(r[7], 1, "WM_NCMOUSELEAVE");
     assert_eq!(s[2], r[0], "for the window");
+}
+
+/// The desktop has one request, for the window under the cursor, as
+/// ReactOS's IntTrackMouseEvent keeps it with the desktop's spwndTrack: a
+/// request for the parent of the child the cursor is on gets the
+/// parent's WM_MOUSELEAVE at once and leaves the child's request as it
+/// was, and the child gets its WM_MOUSELEAVE when the cursor leaves it.
+#[test]
+fn a_request_for_a_window_under_another_leaves_the_request_alone() {
+    const WS_CHILD: u32 = 0x4000_0000;
+    // An edit control for the child: a static one is HTTRANSPARENT, and
+    // the cursor would be on the parent.
+    const EDIT: u32 = 0xEC0;
+    let mut d = track_data(0, 0);
+    put(&mut d, EDIT, b"Edit\0");
+    let (program, data) = program(&[USER32_TRACK, KERNEL32_TRACK], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        popup_window(&mut c, a, l)?;
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(EDIT),
+                Arg::At(EDIT),
+                Arg::I(WS_CHILD | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(32),
+                Arg::I(32),
+                Arg::Val(RESULTS),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        cursor_to(&mut c, a, l, 10, 10)?;
+        request_for(&mut c, a, l, 1, TME_LEAVE)?;
+        request_for(&mut c, a, l, 0, TME_LEAVE)?;
+        peek_for(&mut c, a, l, WM_MOUSELEAVE)?;
+        see(a, l, TRACK_MSG, 0)?;
+        query(&mut c, a, l, 1)?;
+        cursor_to(&mut c, a, l, 300, 300)?;
+        wait_for(&mut c, a, l, WM_MOUSELEAVE)?;
+        see(a, l, TRACK_MSG, 4)?;
+        peek_for(&mut c, a, l, WM_MOUSELEAVE)?;
+        finish(a, l, 1)
+    });
+    let mut cpu = machine_98("track_parent_child", program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 10);
+    let s: Vec<u32> = (0..5).map(|i| seen(&cpu, data, i)).collect();
+    let (parent, child) = (r[0], r[1]);
+    assert_ne!(parent, 0, "the parent");
+    assert_ne!(child, 0, "the child");
+    assert_eq!(r[3..6], [1, 1, 1], "the requests and the parent's leave");
+    assert_eq!(s[0], parent, "the parent's leave at once");
+    assert_eq!(
+        s[1..4],
+        [TME_LEAVE, child, 0],
+        "the child's request goes on"
+    );
+    assert_eq!(r[8], 1, "the child's leave");
+    assert_eq!(s[4], child, "for the child");
+    assert_eq!(r[9], 0, "one leave each");
+}
+
+/// TrackMouseEvent fails for a size other than TRACKMOUSEEVENT's with
+/// ERROR_INVALID_PARAMETER, and for a flag it doesn't know with
+/// ERROR_INVALID_FLAGS, as NT's NtUserTrackMouseEvent does (ReactOS's
+/// has the same checks).
+#[test]
+fn track_mouse_event_checks_its_size_and_flags() {
+    const ERROR_INVALID_FLAGS: u32 = 1004;
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    let d = track_data(0, 0);
+    let (program, data) = program(&[USER32_TRACK, KERNEL32_TRACK], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        popup_window(&mut c, a, l)?;
+        cursor_to(&mut c, a, l, 10, 10)?;
+        request(&mut c, a, l, TME_LEAVE | 0x100)?;
+        c.api(a, l, TRACK_GET_LAST_ERROR, &[])?;
+        a.mov(dword_ptr(l.at(TME)), 12)?;
+        request(&mut c, a, l, TME_LEAVE)?;
+        c.api(a, l, TRACK_GET_LAST_ERROR, &[])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = machine_98("track_checks", program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 6);
+    assert_eq!(r[2..4], [0, ERROR_INVALID_FLAGS], "an unknown flag");
+    assert_eq!(r[4..6], [0, ERROR_INVALID_PARAMETER], "a wrong size");
 }
 
 /// COMCTL32's _TrackMouseEvent, which a program finds with

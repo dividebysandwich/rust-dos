@@ -131,8 +131,8 @@ pub struct Input {
     /// The key that last went down with Alt held, VK_MENU for Alt itself:
     /// Alt's release is WM_SYSKEYUP only after Alt alone.
     pub sys_key: usize,
-    /// TrackMouseEvent's requests, one a thread (track.rs).
-    pub tracking: Vec<super::track::Tracking>,
+    /// TrackMouseEvent's request, one for the desktop (track.rs).
+    pub tracking: Option<super::track::Tracking>,
     /// The screen saver (saver.rs): whether it is on and its timeout in
     /// seconds, from WIN.INI or SystemParametersInfo; and in microseconds
     /// of the emulated clock, when the last key or mouse input came and
