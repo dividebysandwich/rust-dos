@@ -3003,6 +3003,7 @@ const FRAMES: u32 = 0x8A0;
 const WORKER: u32 = 0x8A4;
 const DDFLIP_WAIT: u32 = 0x1;
 const DDFLIP_NOVSYNC: u32 = 0x8;
+const DDFLIP_DONOTWAIT: u32 = 0x20;
 
 /// How a capped program presents its frames.
 #[derive(Clone, Copy)]
@@ -3111,10 +3112,18 @@ fn capped_rate(test: &str, present: Present, fps: Option<u32>) -> (f64, u32) {
 
 #[test]
 fn flips_without_the_retrace_come_at_the_caps_rate() {
+    for fps in [60, 45] {
+        let (rate, _) = capped_rate("cap_flip_novsync", Present::Flip(DDFLIP_WAIT | DDFLIP_NOVSYNC), Some(fps));
+        assert!((rate - fps as f64).abs() < 1.5, "{} flips a second under a cap of {}", rate, fps);
+    }
     let (rate, worker) = capped_rate("cap_flip_novsync", Present::Flip(DDFLIP_WAIT | DDFLIP_NOVSYNC), Some(30));
     assert!((rate - 30.0).abs() < 1.5, "{} flips a second", rate);
     // The flipping thread waits for its turns, and the other one runs.
     assert!(worker > 100_000, "the other thread ran {} passes", worker);
+    // A flip that mustn't wait still waits for its turn: the program sees
+    // only that Flip took longer.
+    let (rate, _) = capped_rate("cap_flip_donotwait", Present::Flip(DDFLIP_NOVSYNC | DDFLIP_DONOTWAIT), Some(30));
+    assert!((rate - 30.0).abs() < 1.5, "{} flips a second with DDFLIP_DONOTWAIT", rate);
     let (uncapped, _) = capped_rate("cap_flip_off", Present::Flip(DDFLIP_WAIT | DDFLIP_NOVSYNC), None);
     assert!(uncapped > 200.0, "{} flips a second without the cap", uncapped);
 }
@@ -3124,8 +3133,9 @@ fn flips_at_the_retrace_under_a_lower_cap_come_at_the_caps_rate() {
     let flip = Present::Flip(DDFLIP_WAIT);
     let (display, _) = capped_rate("cap_flip_vsync_off", flip, None);
     assert!(display > 55.0 && display < 75.0, "{} flips a second at the retrace", display);
-    // A cap at the display's rate, or above it, holds none of them back.
-    for fps in [display.ceil() as u32, 240] {
+    // A cap at the display's rate, or above it, holds none of them back,
+    // nor one a hair below it (60 on a display of 60.00006 Hz).
+    for fps in [display.floor() as u32, display.ceil() as u32, 240] {
         let (rate, _) = capped_rate("cap_flip_vsync_at", flip, Some(fps));
         assert!((rate - display).abs() < 1.5, "{} flips a second under a cap of {}", rate, fps);
     }
