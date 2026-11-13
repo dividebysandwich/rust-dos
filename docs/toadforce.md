@@ -757,7 +757,7 @@ smoke and particles.
 | The alpha test and the colour key after a filtered sample | a pixel whose alpha is within the sample's bound of the reference is drawn by one renderer and not by the other. Measured: 0 to 6 pixels a frame of Zanzarah's leaves |
 | Depth | 1 step of a 16-bit buffer, 4 steps of a 24-bit one: the host interpolates depth in single precision and rounds it by itself. A depth half-way between two steps goes either way, and so does a test between two surfaces closer than the bound: Giants' marks on the ground, 2 steps of 24 bits in front of it, differ by more than 8 on 0.06% of the frame's pixels, where one renderer alone drew the mark |
 | Blending done by the host GPU | 1 in 255 on a channel; one step of the target's on a 16-bit target |
-| Lines and points | the same pixels, with the same colours where no texture is sampled: the card works out both. Depth and samples are within the bounds above. A pixel of a line within half a pixel of where the line's 1 / w falls to 0 gets its own values at every corner of its square, so a mip filter picks level 0 for it |
+| Lines and points | the same pixels, with the same colours where no texture is sampled: the card works out both. Depth and samples are within the bounds above (measured on lines: samples 1 in 255, depth 1 step of 16 bits and 2 of 24). `ZBIAS` moves a line's depth as a triangle's on both. A pixel of a line within half a pixel of where the line's 1 / w falls to 0, or past it, gets its own values at every corner of its square, so a mip filter picks level 0 for it and fog by w takes w as 1 where the centre has no positive 1 / w (#1003) |
 | 16-bit targets on a host with no renderable 565 format, or one that doesn't round a blend to the nearest value | blended layers keep 8 bits until they are read back; several steps of the target's |
 
 Tests compare the two renderers on fixed scenes with these bounds (see
@@ -943,7 +943,7 @@ compile is declined from its first draw on, since the program is
 compiled when the host is asked whether it takes the state.
 
 The agreement tests (`toadforce::gl::tests`, which need a desktop OpenGL
-context) draw 415 scenes in software and through the host and compare
+context) draw 422 scenes in software and through the host and compare
 card memory. On a GeForce RTX 4080: untextured triangles, every stage
 operation at each result scale, four stages with four textures, the
 alpha test, fog, the specular add, the stencil operations, the write
@@ -966,10 +966,13 @@ length, with either place of the pixel centres, with and without the
 last pixel, shaded and flat, cut by a viewport and by the scissor
 rectangle, blended, alpha-tested and fogged have the same pixels
 with the same colours, and so do points of every size at and between
-the pixel centres, and triangles drawn as their corners. Textured
-lines and triangles drawn as their edges are within 1, and a line's
-depth within 1 step of 16 bits and 2 of 24. A scene for each
-declined state checks that the software renderer draws it.
+the pixel centres, and triangles drawn as their corners. So do
+lines in the plane of a surface with a `ZBIAS` of 0, 1 and 16.
+Textured lines, lines whose w grows 16 times along them with each
+mip filter, and triangles drawn as their edges are within 1, and a
+line's depth within 1 step of 16 bits and 2 of 24. The tests assert
+these figures and no looser ones. A scene for each declined state
+checks that the software renderer draws it.
 
 Not built yet: the vertex work on the GPU, the picture from the host's
 texture, `BLT` and `FILL` on the host, the host options, and the
@@ -1745,7 +1748,7 @@ session. The table gives both.
 |---|---|---|---|---|---|---|
 | Oni, training room, 640x480 | 25.8, 26.2 | 14.6, 15.1 * | 1.00 | 81%, 86% | 2724 | 0 |
 | Grom, the tutorial's first screen, 800x600 | 27.6, 28.8 (28.7, 29.7 *) | 41.7, 40.7 * | 1.00 | 75%, 84% | 294 | 165, 173 |
-| Grom, the same, with lines on the host renderer † | 98.9, 103.4 | | 1.00 | 84%, 85% | 294 | 0 |
+| Grom, the same, with lines on the host renderer † | 103.6, 103.8 | | 1.00 | 83%, 84% | 294 | 0 |
 | Nocturne, first room of Volume 1, 640x480 | 35.6, 35.1 | | 1.00 | 84%, 84% | 45 | 0 |
 | Giants, first mission, on the beach, 800x600 | 37.2, 36.7 * | 12.5, 12.7 * | 1.00 | 83%, 84% | 546, 522 | 0 |
 | No One Lives Forever, first mission, 640x480 | 40.3, 40.4 | | 1.00 | 81%, 83% | 1902 | 0 |
@@ -1758,8 +1761,9 @@ The emulated processor halts in Zanzarah alone, for 6.5% of the time:
 the game is at its cap of 60. Black & White doesn't start: its
 SafeDisc check fails (#889). The software column has the games below
 30 and Giants. The row marked † is of the build that draws points and
-lines on the host renderer (`5531e89c`, pass 1 below), measured the
-same way on the same day.
+lines on the host renderer (`4c492b99`, pass 1 below), measured the
+same way in one session with main's build of that day (`b5ee6fc5`),
+which ran at 30.0 and 29.8 with 180 read-backs a second.
 
 What the table doesn't show:
 
@@ -1858,7 +1862,7 @@ comes last whatever its share.
    thread's busy time is read-backs for the draws the host declines.
    Done: the host takes them as triangles the card builds, which
    cover the pixels of the rules of "Rasterising" on any GPU ("The
-   OpenGL renderer"), and Grom runs at 99 and 103.
+   OpenGL renderer"), and Grom runs at 104.
 2. **`hal::bind` for a draw whose state didn't change.** Oni, 26, and
    No One Lives Forever and MDK2: 18%, 14% and 7%. The device keeps
    what it sent to the card and compares all of it again for each
