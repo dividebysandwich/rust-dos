@@ -189,8 +189,9 @@ launcher and readable menus.
 
 Which games need it:
 
-* **Russian** and the other languages written in Cyrillic (Ukrainian,
-  Belarusian, Bulgarian, Serbian in Cyrillic): `ru-RU`.
+* **Languages written in Cyrillic** (Belarusian, Bulgarian, Russian,
+  Serbian in Cyrillic, Ukrainian): `ru-RU`, the one locale with the
+  Cyrillic code page.
 * **Central European languages** with letters outside Western Europe's
   (Polish, Czech, Slovak, Hungarian, Slovenian, Croatian, Romanian):
   `pl-PL`, `cs-CZ` or `hu-HU`. All three read text in the same code
