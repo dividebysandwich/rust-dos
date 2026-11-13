@@ -101,12 +101,25 @@ const PLAY: &[Keyword] = &[
     (&["to"], MCI_TO, Arg::Int(Field::To)),
 ];
 
-/// MCI_PLAY's, which digitalvideo has more of.
+/// MCI_PLAY's, which digitalvideo has more of: MCIAVI's "window",
+/// "fullscreen" and "fullscreen by 2" too, which MCIQTZ takes as well.
+/// The other devices take only `PLAY`'s.
 const PLAY_VIDEO: &[Keyword] = &[
     (&["from"], MCI_FROM, Arg::Int(Field::From)),
     (&["to"], MCI_TO, Arg::Int(Field::To)),
     (&["repeat"], 0x0001_0000, Arg::None),
     (&["reverse"], 0x0002_0000, Arg::None),
+    (&["window"], video::MCI_MCIAVI_PLAY_WINDOW, Arg::None),
+    (
+        &["fullscreen", "by", "2"],
+        video::MCI_MCIAVI_PLAY_FULLBY2,
+        Arg::None,
+    ),
+    (
+        &["fullscreen"],
+        video::MCI_MCIAVI_PLAY_FULLSCREEN,
+        Arg::None,
+    ),
 ];
 
 /// digitalvideo's MCI_WINDOW: the window, how it shows, its caption.
@@ -224,6 +237,21 @@ const STATUS: &[Keyword] = &[
         &["window", "handle"],
         MCI_STATUS_ITEM,
         Arg::Item(video::MCI_DGV_STATUS_HWND),
+    ),
+    (
+        &["window", "visible"],
+        MCI_STATUS_ITEM,
+        Arg::Item(video::MCI_DGV_STATUS_WINDOW_VISIBLE),
+    ),
+    (
+        &["window", "minimized"],
+        MCI_STATUS_ITEM,
+        Arg::Item(video::MCI_DGV_STATUS_WINDOW_MINIMIZED),
+    ),
+    (
+        &["window", "maximized"],
+        MCI_STATUS_ITEM,
+        Arg::Item(video::MCI_DGV_STATUS_WINDOW_MAXIMIZED),
     ),
     (
         &["position"],
@@ -772,6 +800,19 @@ fn send_string(cpu: &mut Cpu, text: &str, ret: u32, size: u32, hwnd: u32) -> Opt
             };
             id = device(cpu, i).id;
             let auto = device(cpu, i).auto;
+            // A play's keywords are the device's: those only digitalvideo
+            // has are unknown to the others.
+            let kind = device(cpu, i).kind;
+            let is_video = matches!(kind, video::MCI_DEVTYPE_DIGITAL_VIDEO | video::AVI_VIDEO);
+            if msg == MCI_PLAY
+                && !is_video
+                && let Err(e) = parse(&words[2..], PLAY, &mut Parms::default())
+            {
+                if auto {
+                    close_device(cpu, i);
+                }
+                return Some(e);
+            }
             let error = device_command(cpu, i, msg, flags, &mut p);
             // A device opened for the command closes, unless it plays,
             // or the command runs again after a call into USER32
