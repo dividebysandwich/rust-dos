@@ -4778,14 +4778,23 @@ fn simulate_iret_enables_the_vm_s_interrupts_from_a_32_bit_frame() {
 /// brought the program to level 0, so Simulate_Iret there changes where
 /// the level 0 code's IRETD goes: the program pushes an IRET frame to a
 /// place of its own and raises the interrupt, and the level 0 code calls
-/// Simulate_Iret and returns. The program goes on at its place, with its
-/// stack as before the frame.
+/// Simulate_Iret and returns. The frame is a 32-bit one, so the level 0
+/// code sets VMStat_PM_Use32 for the call: the system VM's status, as on
+/// Windows 98 SE, is a 16-bit client's. The program goes on at its place,
+/// with its stack as before the frame.
 #[test]
 fn simulate_iret_changes_where_level_0_code_returns_to() {
-    let level0 = [
-        0xCD, 0x20, 0x47, 0x00, 0x01, 0x00, // VMMCall Simulate_Iret
-        0xCF, // iretd
-    ];
+    let level0 = level0_code(|a| {
+        a.push(ebx)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_0001])?; // Get_Cur_VM_Handle
+        a.or(dword_ptr(ebx), 0x80)?; // VMStat_PM_Use32
+        a.int(0x20)?;
+        a.dd(&[0x0001_0047])?; // Simulate_Iret
+        a.and(dword_ptr(ebx), !0x80)?;
+        a.pop(ebx)?;
+        a.iretd()
+    });
     let program = gate_28h_program_calling(&level0, |a| {
         let mut setup = a.create_label();
         let mut done = a.create_label();
@@ -4807,6 +4816,23 @@ fn simulate_iret_changes_where_level_0_code_returns_to() {
         a.nop()
     });
     let (code, text) = run("simulate_iret_return", program);
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// The VM's status, read through Get_Cur_VM_Handle and CB_VM_Status, is
+/// the one Windows 98 SE's system VM has while a Win32 program runs, as a
+/// probe read it there: 1A62h, VMStat_PM_Exec and VMStat_PM_App set and
+/// VMStat_PM_Use32 clear.
+#[test]
+fn the_vm_s_status_is_windows_98_s_system_vm_s() {
+    let level0 = level0_code(|a| {
+        a.int(0x20)?;
+        a.dd(&[0x0001_0001])?; // Get_Cur_VM_Handle
+        a.cmp(dword_ptr(ebx), 0x1A62)?;
+        a.sete(bl)?;
+        a.iretd()
+    });
+    let (code, text) = run_through_gate_28h("vm_status", &level0);
     assert_eq!(code, 1, "{}", text);
 }
 

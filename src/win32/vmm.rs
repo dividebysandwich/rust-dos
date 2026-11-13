@@ -16,9 +16,9 @@
 //! stack: the built-in Windows runs no handler of its own before a
 //! program's level 0 code to save them there.
 //!
-//! The VM's status is that of a 32-bit protected-mode application
-//! (`VMStat_PM_Exec`, `VMStat_PM_App`, `VMStat_PM_Use32`), the Win32
-//! program. Level 0 code may change it, as VxDs do.
+//! The VM's status is the one Windows 98 SE's system VM has while a
+//! Win32 program runs (`SYSTEM_VM_STATUS`). Level 0 code may change it,
+//! as VxDs do.
 //!
 //! The routines follow the documented interface of each service (the
 //! Windows 95 DDK's VMM services reference). Their code is rust-dos's
@@ -42,9 +42,18 @@ const SIMULATE_IRET: u16 = 0x0047;
 
 /// `CB_VM_Status` bits (VMM.INC).
 const VMSTAT_PM_EXEC: u32 = 0x20;
-const VMSTAT_PM_APP: u32 = 0x40;
 const VMSTAT_PM_USE32: u32 = 0x80;
 const VMSTAT_VXD_EXEC: u32 = 0x100;
+
+/// `CB_VM_Status` of Windows 98 SE's system VM while a Win32 program runs,
+/// as a probe read it there through Get_Cur_VM_Handle from level 0 code
+/// the program ran: 1A62h, `VMStat_PM_Exec` and `VMStat_PM_App` among its
+/// bits and `VMStat_PM_Use32` not, the system VM's protected-mode client
+/// being the 16-bit KRNL386. (A second boot read 5A62h, with a bit more
+/// that comes and goes.) With this status Simulate_Iret pops a 16-bit
+/// client's frame (the DDK's rule for `VMStat_PM_Use32`); level 0 code
+/// that returns to a 32-bit frame sets `VMStat_PM_Use32` first.
+const SYSTEM_VM_STATUS: u32 = 0x1A62;
 
 /// The places in the code that other code refers to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -368,7 +377,7 @@ fn data(c: &mut Code, client: u32, rust_services: &[u16]) -> u32 {
     // The VM's control block: CB_VM_Status, CB_High_Linear and
     // CB_Client_Pointer.
     c.label(Label::VmBlock);
-    c.dword(VMSTAT_PM_EXEC | VMSTAT_PM_APP | VMSTAT_PM_USE32);
+    c.dword(SYSTEM_VM_STATUS);
     c.dword(0);
     c.dword(client);
 
