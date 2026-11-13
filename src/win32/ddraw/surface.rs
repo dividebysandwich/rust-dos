@@ -1457,6 +1457,9 @@ pub fn lock(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let (_, id) = hr!(surface_of(cpu, this));
     super::d3d::shadow::expose(cpu, id);
+    if !state(cpu).surface(id).is_some_and(Surface::is_primary) {
+        super::blt::drew(cpu);
+    }
     if desc_at == 0 || !cpu.bus.guest_probe(desc_at, 4, false) {
         return Some(DDERR_INVALIDPARAMS);
     }
@@ -1875,6 +1878,12 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         {
             return still_to_show(cpu, until, false);
         }
+        // The swap waits for its turn under the frame rate cap, as for
+        // a pending one.
+        let cmd = (flags & DDFLIP_NOVSYNC == 0) as u32;
+        if let Some(until) = crate::win32::pace::card_check(cpu, cmd) {
+            return still_to_show(cpu, until, flags & DDFLIP_WAIT != 0);
+        }
         // The card swaps its buffers; the surfaces keep theirs.
         voodoo::swap(cpu, flags & DDFLIP_NOVSYNC == 0);
         state(cpu).display.flip_polls = Default::default();
@@ -1895,10 +1904,31 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             // which flips.
             return still_to_show(cpu, pending, flags & DDFLIP_WAIT != 0);
         }
+    }
+    // A flip of the primary surface is a frame, which the frame rate cap
+    // may hold back as a pending flip does: one waiting for the retrace
+    // shows from the next frame of the display, one without it at once.
+    let frame = if primary {
+        let (timing, now) = display::timing(cpu);
+        let vsync = flags & DDFLIP_NOVSYNC == 0;
+        let at = if vsync { timing.next_display(now) } else { now };
+        let refresh = vsync.then(|| timing.frame_ns());
+        match crate::win32::pace::check(cpu, at, refresh) {
+            Ok(at) => Some(at),
+            Err(until) => return still_to_show(cpu, until, flags & DDFLIP_WAIT != 0),
+        }
+    } else {
+        None
+    };
+    if primary && flags & DDFLIP_NOVSYNC == 0 {
         let (timing, now) = display::timing(cpu);
         let display = &mut state(cpu).display;
         display.flip_at = timing.next_display(now);
         display.flip_polls = Default::default();
+    }
+    if let Some(at) = frame {
+        crate::win32::pace::shown(cpu, at);
+        super::blt::drew(cpu);
     }
     shown(cpu, id);
     // The pixels go round.
@@ -2210,6 +2240,9 @@ pub fn get_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(s) = state(cpu).surface(id).cloned() else {
         return Some(DDERR_INVALIDOBJECT);
     };
+    if !s.is_primary() {
+        super::blt::drew(cpu);
+    }
     if s.dc != 0 {
         return Some(DDERR_DCALREADYCREATED);
     }

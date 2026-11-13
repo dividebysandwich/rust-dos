@@ -54,6 +54,7 @@ mod oleaut32;
 mod oledlg;
 mod olepro32;
 mod opengl32;
+mod pace;
 mod advpack;
 pub(crate) mod realmode;
 mod registry;

@@ -882,7 +882,8 @@ pub fn share_lists(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// (`swap_card`). Without it a game that draws a frame in less than a
 /// frame's time, as Oni's menus do, swapped hundreds of times a second
 /// of emulated time, and each swap's drawing cost the host as much as
-/// one at the display's rate.
+/// one at the display's rate. The frame rate cap may hold a swap back
+/// further (`win32::pace`), the call coming back at its turn.
 fn swap_paced(cpu: &mut Cpu, hdc: u32) -> Option<u32> {
     let Some(index) = dc_context(cpu, hdc) else {
         return Some(FALSE);
@@ -899,7 +900,14 @@ fn swap_paced(cpu: &mut Cpu, hdc: u32) -> Option<u32> {
         cpu.set_eip(cpu.eip().wrapping_sub(4));
         return directdraw::wait_until(cpu, at, TRUE);
     }
+    let frame = match pace(cpu, index) {
+        Ok(frame) => frame,
+        Err(wait) => return wait,
+    };
     present(cpu, index);
+    if let Some(at) = frame {
+        crate::win32::pace::shown(cpu, at);
+    }
     if let Some((interval, _)) = paced {
         let (timing, now) = ddraw::display::timing(cpu);
         let at = timing.next_display(now) + u64::from(interval - 1) * timing.frame_ns();
@@ -908,6 +916,31 @@ fn swap_paced(cpu: &mut Cpu, hdc: u32) -> Option<u32> {
         }
     }
     Some(TRUE)
+}
+
+/// A swap of the context at `index` under the frame rate cap: Ok to go
+/// ahead, with the time a window's frame counts as shown at; the card's
+/// swaps count their own frames. Err with what the call returns while
+/// the thread waits for the cap's turn and the call runs again. A window
+/// shows the frame at once; its swap interval (`swap_paced`) already
+/// keeps it to that many of the display's frames, which the cap doesn't
+/// hold when its frame time is no longer.
+fn pace(cpu: &mut Cpu, index: usize) -> Result<Option<u64>, Option<u32>> {
+    let Some(c) = state(cpu).contexts[index].as_ref() else {
+        return Ok(None);
+    };
+    let (interval, double) = (c.swap_interval, double_buffered(c.format));
+    if full_screen(cpu, index) {
+        if double {
+            let cmd = (interval > 0) as u32;
+            crate::win32::pace::card_turn(cpu, cmd, TRUE)?;
+        }
+        return Ok(None);
+    }
+    let (timing, now) = ddraw::display::timing(cpu);
+    let paced = interval > 0 && double;
+    let refresh = paced.then(|| u64::from(interval) * timing.frame_ns());
+    crate::win32::pace::turn(cpu, now, refresh, TRUE).map(Some)
 }
 
 /// The context whose drawing the DC `hdc`'s window shows: the running

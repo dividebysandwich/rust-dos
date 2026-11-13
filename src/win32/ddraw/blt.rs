@@ -432,6 +432,40 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
     Ok(())
 }
 
+/// A blit to the surface `dst_id` under the frame rate cap (`fps_cap`):
+/// Ok to go ahead, or Err with what the call returns while the thread
+/// waits for the cap's turn and the call runs again. A program that blits
+/// its frames to the primary surface may blit there several times a
+/// frame, a part of the screen at a time, so a frame is a run of blits
+/// to the primary surface with nothing else drawn between them
+/// (`Display::blit_frame`): the first of them waits for the cap's turn,
+/// and the others go ahead. A blit to another surface, a lock or DC of
+/// one, a Direct3D scene and a flip start the next frame (`drew`). The
+/// 3dfx card's primary surface takes no part: its frames are its swaps.
+fn pace(cpu: &mut Cpu, dst_id: u32) -> Result<(), Option<u32>> {
+    let primary = state(cpu)
+        .surface(dst_id)
+        .is_some_and(|s| s.is_primary() && s.memory != surface::MEM_CARD);
+    if !primary {
+        drew(cpu);
+        return Ok(());
+    }
+    if state(cpu).display.blit_frame {
+        return Ok(());
+    }
+    let now = cpu.bus.clock.now_ns();
+    let at = crate::win32::pace::turn(cpu, now, None, DD_OK)?;
+    crate::win32::pace::shown(cpu, at);
+    state(cpu).display.blit_frame = true;
+    Ok(())
+}
+
+/// The program drew something other than the primary surface: its next
+/// blit to the primary surface starts a frame (`pace`).
+pub fn drew(cpu: &mut Cpu) {
+    state(cpu).display.blit_frame = false;
+}
+
 /// The surface `this` is, if a blit can draw on it or read it.
 fn ready(cpu: &mut Cpu, this: u32) -> Result<(u32, Surface), u32> {
     let (_, id) = surface_of(cpu, this)?;
@@ -598,6 +632,9 @@ pub fn blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         op.mirror_x = ddfx & DDBLTFX_MIRRORLEFTRIGHT != 0;
         op.mirror_y = ddfx & DDBLTFX_MIRRORUPDOWN != 0;
     }
+    if let Err(wait) = pace(cpu, dst_id) {
+        return wait;
+    }
     Some(match run(cpu, dst_id, &op) {
         Ok(()) => DD_OK,
         Err(e) => e,
@@ -654,6 +691,9 @@ pub fn blt_fast(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     if flags & DDBLTFAST_DESTCOLORKEY != 0 && d.key_set & 1 << KEY_DEST_BLT != 0 {
         op.dst_key = Some(d.keys[KEY_DEST_BLT]);
+    }
+    if let Err(wait) = pace(cpu, dst_id) {
+        return wait;
     }
     Some(match run(cpu, dst_id, &op) {
         Ok(()) => DD_OK,

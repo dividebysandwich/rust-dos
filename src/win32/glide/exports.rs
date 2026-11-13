@@ -571,6 +571,10 @@ pub(super) fn gr_buffer_clear(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
 }
 
 pub(super) fn gr_buffer_swap(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+    // The swap waits for its turn under the frame rate cap.
+    if let Err(wait) = crate::win32::pace::card_turn(cpu, api::swap_cmd(a[0]), 0) {
+        return wait;
+    }
     api::buffer_swap(cpu, a[0]);
     Some(0)
 }
