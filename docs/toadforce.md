@@ -1422,8 +1422,11 @@ DLLs are the emulator's.
   uploads and deletes, every `glGet` but `glGetError`, WGL with
   `SwapBuffers`, and every function of every other DLL draw them
   first. A function missing from the list costs a draw and no
-  picture. They are part of the saved state, so a state saved between
-  two calls draws the same frame after it is loaded.
+  picture. Only the calls of the drawing process draw them: another
+  process can't name what they draw with, and its call would draw
+  them as its own. They go with their process when it ends. They are
+  part of the saved state, so a state saved between two calls draws
+  the same frame after it is loaded.
 - **Glide** isn't offered on this card. A game that wants Glide is
   configured with a Voodoo.
 

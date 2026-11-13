@@ -528,6 +528,14 @@ fn missing(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// own `process_ended`, which takes the objects they had there.
 pub fn process_ended(cpu: &mut Cpu, pid: u32) {
     let s = state(cpu);
+    // The draws that wait for one of its contexts go with it: a process
+    // that ends by a fault made no call that drew them, and their device
+    // and context ids may be another process's next.
+    if let Some(w) = &s.waiting
+        && draw::waiting_pid(w, s).is_none_or(|p| p == pid)
+    {
+        s.waiting = None;
+    }
     for slot in s.contexts.iter_mut() {
         if slot.as_ref().is_some_and(|c| c.pid == pid) {
             *slot = None;
@@ -745,6 +753,26 @@ pub fn keeps_waiting(id: u16) -> bool {
 }
 
 pub use draw::flush_waiting;
+
+/// Draw what waits before the program calls the built-in function `id`,
+/// unless the draws may wait through it (`keeps_waiting`) or another
+/// process calls it. Another process can't name the draws' buffers or
+/// textures, and drawing them in its call would draw them as its own:
+/// the HAL would let go of the copies of textures the drawing process
+/// made (`hal::toadforce::bind`) each time the two take turns. The
+/// draws' own process draws them with its next call that flushes, or
+/// they go with it (`process_ended`).
+pub fn flush_before(cpu: &mut Cpu, id: u16) {
+    let s = state(cpu);
+    let Some(w) = &s.waiting else {
+        return;
+    };
+    let owner = draw::waiting_pid(w, s);
+    if keeps_waiting(id) || owner.is_some_and(|p| p != super::user32::current_pid(cpu)) {
+        return;
+    }
+    flush_waiting(cpu);
+}
 
 #[cfg(test)]
 mod waiting_tests {

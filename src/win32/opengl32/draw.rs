@@ -496,8 +496,7 @@ fn put(cpu: &mut Cpu, a: &Applied) -> bool {
 
 /// Whether two viewports are the same to the last bit.
 fn same_viewport(a: &inner_device::Viewport7, b: &inner_device::Viewport7) -> bool {
-    (a.x, a.y, a.width, a.height) == (b.x, b.y, b.width, b.height)
-        && (a.min_z.to_bits(), a.max_z.to_bits()) == (b.min_z.to_bits(), b.max_z.to_bits())
+    states::viewport_words(a) == states::viewport_words(b)
 }
 
 /// The primitives of `kind` (OpenGL's) that the vertices `order`
@@ -808,6 +807,13 @@ fn waiting_vertex(v: &ImmVertex) -> Vertex {
     };
     out.tex[..UNITS].copy_from_slice(&v.tex);
     out
+}
+
+/// The process of the context the draws `w` wait for, None when the
+/// context is gone.
+pub fn waiting_pid(w: &Waiting, s: &super::State) -> Option<u32> {
+    let c = s.contexts.get(w.context as usize)?.as_ref()?;
+    Some(c.pid)
 }
 
 /// Draw what waits (`Waiting`), if anything does.
