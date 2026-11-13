@@ -29,8 +29,9 @@ pub const API: &str = "https://almanac.rust-dos.com/api/v1";
 pub const API_VARIABLE: &str = "RUST_DOS_ALMANAC_API";
 
 /// The settings the almanac knows, by section and key: those of the
-/// machine a game runs on.
-pub const KEYS: [(&str, &str); 38] = [
+/// machine a game runs on, and the frame rate cap, which some games need
+/// (Test Drive 4 misbehaves above 60) and a benchmark's entry turns off.
+pub const KEYS: [(&str, &str); 39] = [
     ("emulator", "machine"),
     ("emulator", "cpu"),
     ("emulator", "core"),
@@ -53,6 +54,7 @@ pub const KEYS: [(&str, &str); 38] = [
     ("emulator", "monochrome"),
     ("emulator", "hard_disk_speed"),
     ("emulator", "floppy_disk_speed"),
+    ("emulator", "fps_cap"),
     ("sound", "sbtype"),
     ("sound", "sbbase"),
     ("sound", "irq"),
@@ -71,7 +73,11 @@ pub const KEYS: [(&str, &str); 38] = [
     ("joystick", "joysticktype"),
 ];
 
+/// Whether the almanac's setting `key` of `section` is one of `KEYS`,
+/// under its current name or an old one (`config::OLD_NAMES`), which a
+/// recommendation may still carry and the configuration still reads.
 fn known(section: &str, key: &str) -> bool {
+    let key = config::renamed(section, key);
     KEYS.iter()
         .any(|&(s, k)| s.eq_ignore_ascii_case(section) && k.eq_ignore_ascii_case(key))
 }
@@ -393,7 +399,9 @@ pub fn report_settings(
 }
 
 /// `base` with `settings` over it, those of `KEYS` only, as a profile's
-/// are layered over the configuration's (games.rs's `prepare`).
+/// are layered over the configuration's (games.rs's `prepare`). Each
+/// value goes through the configuration's parser, which ignores one it
+/// doesn't take (`fps_cap=500`), leaving `base`'s.
 pub fn layer(base: &Settings, settings: &[&Setting], home: Option<&Path>) -> Settings {
     let mut sections: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for s in settings {
@@ -874,7 +882,14 @@ mod tests {
         let count: usize = settings.values().map(BTreeMap::len).sum();
         assert_eq!(count, KEYS.len(), "every key has a value: {:?}", settings);
         assert!(settings["emulator"].contains_key("memsize"));
+        assert_eq!(settings["emulator"]["fps_cap"], "60");
+        assert!(!settings["emulator"].contains_key("voodoo_fps_cap"));
         assert!(!settings["emulator"].contains_key("scale"));
+        let off = Settings {
+            fps_cap: None,
+            ..Settings::default()
+        };
+        assert_eq!(report_settings(&off, None)["emulator"]["fps_cap"], "off");
         assert!(!settings.contains_key("drives"));
     }
 
@@ -901,6 +916,35 @@ mod tests {
         assert!(!layered.ems);
         assert_eq!(layered.scale, base.scale);
         assert_eq!(layered.cycles, base.cycles);
+    }
+
+    #[test]
+    fn a_recommendation_sets_the_frame_rate_cap_under_either_name() {
+        let setting = |key: &str, value: &str| Setting {
+            section: "emulator".into(),
+            key: key.into(),
+            value: value.into(),
+        };
+        let base = Settings {
+            fps_cap: Some(45),
+            ..Settings::default()
+        };
+        let layered = |given: &[Setting]| layer(&base, &given.iter().collect::<Vec<_>>(), None).fps_cap;
+        assert_eq!(layered(&[setting("fps_cap", "60")]), Some(60));
+        assert_eq!(layered(&[setting("fps_cap", "off")]), None);
+        assert_eq!(layered(&[setting("fps_cap", "0")]), None);
+        assert_eq!(layered(&[setting("voodoo_fps_cap", "30")]), Some(30));
+        assert_eq!(layered(&[setting("Voodoo_FPS_Cap", "off")]), None);
+        // What the parser doesn't take leaves the user's own value.
+        for bad in ["5", "241", "fast", "-60", "60 fps"] {
+            assert_eq!(layered(&[setting("fps_cap", bad)]), Some(45), "{}", bad);
+        }
+        let r = Recommendation {
+            source: Source::Consensus { reports: 2 },
+            rating: Ratings::default(),
+            settings: vec![setting("voodoo_fps_cap", "60")],
+        };
+        assert_eq!(r.usable().len(), 1, "the old name is the setting's");
     }
 
     #[test]
