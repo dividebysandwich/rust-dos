@@ -85,6 +85,7 @@ use super::level1::{Target, Texture};
 use super::raster::pipeline::DrawState;
 use super::raster::vertex::ScreenVertex;
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -159,9 +160,10 @@ pub trait Host {
     /// What the debugger's status calls it.
     fn name(&self) -> &str;
 
-    /// Whether it draws triangles with `state`. One it refuses goes to
-    /// the software renderer.
-    fn takes(&self, state: &DrawState) -> bool;
+    /// Why it doesn't draw triangles with `state`, in the words the
+    /// status counts such draws under, or None for a state it draws.
+    /// A draw it refuses goes to the software renderer.
+    fn declines(&self, state: &DrawState) -> Option<&'static str>;
 
     /// Draw `batch`. `memory` is card memory, for the textures and for
     /// a target the host has no copy of or a stale one, by `pages`.
@@ -634,6 +636,9 @@ pub struct Gpu {
     /// the software renderer with a host attached.
     read_backs: u64,
     pub declined: u64,
+    /// The declined draws by reason: the rasteriser's (`Raster::draw`)
+    /// and the host's (`Host::declines`).
+    declined_for: BTreeMap<&'static str, u64>,
     /// The read-backs by what asked for them (`Cause`).
     by_cause: [u64; Cause::NAMES.len()],
     /// The surfaces fetched for the program's reads (`read`), which
@@ -715,9 +720,24 @@ impl Gpu {
         self.writes
     }
 
-    /// Whether the host draws triangles with `state`.
-    pub fn takes(&self, state: &DrawState) -> bool {
-        self.host.borrow().as_ref().is_some_and(|h| h.takes(state))
+    /// Why the host doesn't draw triangles with `state`: None when it
+    /// draws them.
+    pub fn declines(&self, state: &DrawState) -> Option<&'static str> {
+        match &*self.host.borrow() {
+            Some(host) => host.declines(state),
+            None => Some("no host"),
+        }
+    }
+
+    /// Count a draw that went to the software renderer for `why`.
+    pub fn decline(&mut self, why: &'static str) {
+        self.declined += 1;
+        *self.declined_for.entry(why).or_insert(0) += 1;
+    }
+
+    /// The declined draws by reason, for the status.
+    pub fn declined_for(&self) -> &BTreeMap<&'static str, u64> {
+        &self.declined_for
     }
 
     /// Read back the surfaces that are ahead on the host and share a

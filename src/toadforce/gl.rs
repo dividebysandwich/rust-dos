@@ -1790,13 +1790,16 @@ impl Host for ToadForceGl {
         "OpenGL"
     }
 
-    fn takes(&self, state: &DrawState) -> bool {
+    fn declines(&self, state: &DrawState) -> Option<&'static str> {
         use Format::*;
-        if self.broken
-            || state.serial
-            || !matches!(state.target.colour.format, R5G6B5 | X8R8G8B8 | A8R8G8B8)
-        {
-            return false;
+        if self.broken {
+            return Some("host broken");
+        }
+        if state.serial {
+            return Some("serial state");
+        }
+        if !matches!(state.target.colour.format, R5G6B5 | X8R8G8B8 | A8R8G8B8) {
+            return Some("target format");
         }
         for step in &state.steps {
             match *step {
@@ -1808,7 +1811,7 @@ impl Host for ToadForceGl {
                     ..
                 } => {
                     let Some(tex) = &state.tex[stage as usize] else {
-                        return false;
+                        return Some("no texture");
                     };
                     let anisotropic = self.anisotropy > 0.0;
                     let native = shader::native(tex, anisotropic);
@@ -1816,14 +1819,14 @@ impl Host for ToadForceGl {
                     // the face they picked, which the host's cube
                     // sampler has no way to say.
                     if cube && bumped.is_some() {
-                        return false;
+                        return Some("bumped cube map");
                     }
                     // A block format's pixels have no value to compare
                     // with the key. `DEFINE_TEXTURE` refuses such a
                     // texture; this keeps the shader from a key texture
                     // the host doesn't make.
                     if keyed && !texture::has_key(tex.texture.format) {
-                        return false;
+                        return Some("key on a block format");
                     }
                     // A texture whose texels the shader reads on one
                     // stage and the host's filter samples on another
@@ -1832,7 +1835,7 @@ impl Host for ToadForceGl {
                         other.texture == tex.texture && shader::native(other, anisotropic) != native
                     });
                     if mixed {
-                        return false;
+                        return Some("texture sampled both ways");
                     }
                     // What follows is where the host's own filter goes
                     // another way than the card; the shader's reads of
@@ -1846,7 +1849,7 @@ impl Host for ToadForceGl {
                     // the two filters would change over elsewhere.
                     let first = tex.first_level.min(tex.texture.levels.saturating_sub(1));
                     if first > 0 && tex.mag != tex.min {
-                        return false;
+                        return Some("first level with two filters");
                     }
                     let mipped = tex.mip != Mip::None && tex.texture.levels > 1;
                     // OpenGL magnifies up to a level of detail of 0.5
@@ -1855,14 +1858,14 @@ impl Host for ToadForceGl {
                     // ("c" in its rules for magnification); the card
                     // minifies from 0 on.
                     if mipped && tex.mag == Filter::Linear && tex.min == Filter::Point {
-                        return false;
+                        return Some("linear magnify, point minify, mipped");
                     }
                     // The key is looked up in the level a sample reads
                     // first, the lower of the two it blends
                     // (`Sampler::keyed`); the host's lookup of the
                     // nearest level takes the closer one.
                     if keyed && mipped && tex.mip == Mip::Linear {
-                        return false;
+                        return Some("key with linear mip");
                     }
                     // A stage's sampling states are set on the host's
                     // texture, which another stage sampling the same
@@ -1873,19 +1876,23 @@ impl Host for ToadForceGl {
                             other.texture == tex.texture && Sampling::of(other) != now
                         });
                     if shared {
-                        return false;
+                        return Some("texture with two samplings");
                     }
                 }
                 // `SRCALPHASAT` for the destination is OpenGL 3.3's.
                 Step::Write {
                     blend: Some(Blend { dst: 11, .. }),
                     ..
-                } => return false,
+                } => return Some("SRCALPHASAT destination"),
                 _ => {}
             }
         }
         // SAFETY: the context is current (see the module comment).
-        unsafe { self.compiled(&shader::key(state, self.anisotropy > 0.0)) }
+        if unsafe { self.compiled(&shader::key(state, self.anisotropy > 0.0)) } {
+            None
+        } else {
+            Some("program failed")
+        }
     }
 
     fn status(&self) -> serde_json::Value {

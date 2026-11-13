@@ -201,8 +201,8 @@ impl Host for TestHost {
         "test"
     }
 
-    fn takes(&self, state: &DrawState) -> bool {
-        !(self.declines)(state)
+    fn declines(&self, state: &DrawState) -> Option<&'static str> {
+        (self.declines)(state).then_some("test")
     }
 
     fn draw(&mut self, batch: &Batch, memory: &[u8], pages: &Pages) -> Vec<Surface> {
@@ -721,6 +721,11 @@ fn the_hosts_draws_and_the_processors_keep_the_cards_order() {
         let host = rig.card.describe(Rig::live());
         assert_eq!(host["renderer"], "test");
         assert_eq!(host["host"]["declined_draws"], declined);
+        // Each is counted under its reason: the rasteriser's for the
+        // lines, the host's for the triangle.
+        let reasons = &host["host"]["declined_for"];
+        assert_eq!(reasons["points and lines"], 1);
+        assert_eq!(reasons["test"].as_u64().unwrap_or(0), u64::from(declined - 1));
         let log = log.borrow();
         assert_eq!(host["host"]["read_backs"], log.read_backs);
         // What the processor wrote into the target went to the host's

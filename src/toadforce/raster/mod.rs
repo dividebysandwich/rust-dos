@@ -369,11 +369,16 @@ impl Renderer {
         // The host draws filled triangles of the states it takes. A
         // draw that reads what it writes stays with the software
         // renderer, which draws it pixel by pixel in order.
-        let hosted = gpu.attached()
-            && draw.primitive >= 4
-            && !matches!(state.shape.fill, 1 | 2)
-            && !state.serial
-            && gpu.takes(&state);
+        let declined = if draw.primitive < 4 {
+            Some("points and lines")
+        } else if matches!(state.shape.fill, 1 | 2) {
+            Some("fill mode")
+        } else if state.serial {
+            Some("serial state")
+        } else {
+            gpu.declines(&state)
+        };
+        let hosted = gpu.attached() && declined.is_none();
         // What is queued is for one target and one renderer, and a
         // draw that reads what it writes is alone in the queue.
         let other = match hosted {
@@ -383,8 +388,8 @@ impl Renderer {
         if self.target != Some(state.target) || state.serial || other {
             self.flush(memory, gpu);
         }
-        if gpu.attached() && !hosted {
-            gpu.declined += 1;
+        if let Some(why) = declined.filter(|_| gpu.attached()) {
+            gpu.decline(why);
             // The software renderer draws over the pixels the host
             // left, and samples those it drew.
             if gpu.ahead() {

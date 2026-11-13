@@ -1149,7 +1149,10 @@ counts what the OpenGL renderer costs and misses:
   the frames one of them wanted.
 - `declined_draws`: draws the software renderer drew because OpenGL
   doesn't draw their state as the card does. Each reads its target
-  back first.
+  back first. `declined_for` has them by reason: `points and lines`,
+  `fill mode` and `serial state` are the rasteriser's, and the others
+  name the state the OpenGL renderer refused (`declines` in
+  `src/toadforce/gl.rs`).
 - `writes`: the times pixels the processor wrote into a surface the
   GPU had newer pixels of went to the GPU's copy as rectangles, with
   nothing read back. A surface written in parts of pixels or in too
