@@ -1342,6 +1342,26 @@ DLLs are the emulator's.
   The HAL copies into card memory only what the card can't read there:
   textures in system memory, palettized ones, and sizes that are no
   power of two.
+- **State kept between draws.** Most draws follow one with the same
+  states, textures and target, and the card's state is then right
+  already. What a draw is made from carries a stamp
+  (`ddraw/stamp.rs`): a number that no two values share, and that
+  changes when the value is borrowed to be written. A Direct3D device
+  keeps its states, textures, transforms, lights and target in one
+  stamped value (`d3d::device::Drawn`), and DirectDraw its objects in
+  another, so a write anywhere in them gives a new stamp with no call
+  for the writer to remember. The setters write only a value that
+  differs. The HAL keeps its last bind with the two stamps
+  (`hal/toadforce.rs`, `Kept`), and a draw that finds both unchanged
+  sends the card nothing and looks nothing up. Two things change
+  without a stamp and are compared by value: the pixels of a texture
+  the HAL keeps a copy of (the surface's uniqueness value), and the
+  parts of the pipeline's setup a bind reads. The card's state and the
+  kept bind are held together (`told::Told`), so that taking the
+  state to change it, as a clear does, drops the bind. Debug builds,
+  which the tests are, bind again for every kept draw and stop if the
+  bind sends a word or gives another result. `/api/win32/ddraw` counts
+  the binds and those kept.
 - **Direct3D 8** (`d3d8/`) sits on the Direct3D 7 device today and
   keeps doing so, with `D3DCAPS8` filled from the level's table and
   hardware vertex processing offered for fixed-function draws.
@@ -1353,6 +1373,27 @@ DLLs are the emulator's.
   immediate mode, arrays, display lists, pixel transfer) is kept apart
   from its WGL and Win32 parts and takes its calls through one interface,
   so that a booted Windows can later feed the same code (see below).
+- **OpenGL's draws wait for each other.** A game that draws a
+  triangle or a quad for each `glBegin` and `glEnd` would pay
+  Direct3D's work for a draw every time. The primitives of draws that
+  follow each other with the same state wait instead
+  (`opengl32::draw::Waiting`) and go to Direct3D as one draw, in the
+  order the program gave them. They hold what they are drawn with by
+  value: the device's state, and vertices the lights and texture
+  matrices were already applied to. A context's state as Direct3D's
+  is made once for each stamp of what its draws are made with, and
+  two are the same when every bit is. The draws that wait are drawn
+  when a draw with another state or of another context comes, when
+  they have 8192 vertices, and before any call of a function that
+  isn't known to leave the buffers and the textures' images alone
+  (`opengl32::keeps_waiting`). Those known are the functions that
+  give vertices and draw them and the ones that set a context's
+  state; `glClear`, `glReadPixels`, `glFlush`, `glFinish`, texture
+  uploads and deletes, every `glGet` but `glGetError`, WGL with
+  `SwapBuffers`, and every function of every other DLL draw them
+  first. A function missing from the list costs a draw and no
+  picture. They are part of the saved state, so a state saved between
+  two calls draws the same frame after it is loaded.
 - **Glide** isn't offered on this card. A game that wants Glide is
   configured with a Voodoo.
 
