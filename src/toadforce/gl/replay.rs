@@ -420,7 +420,9 @@ pub fn replay(bench: &Bench, rec: &Recording) {
             let mut over = 0;
             // What the software side changed: how many pixels, and the
             // rectangle they are in.
-            let thin = draw.primitive < 4 || st.shape.fill != 3;
+            // `FILLMODE` 1 and 2 only: the rasteriser fills a triangle
+            // of any other value.
+            let thin = draw.primitive < 4 || matches!(st.shape.fill, 1 | 2);
             let (mut changed, mut bounds) = (0u32, [u32::MAX, u32::MAX, 0, 0]);
             // The pixel that differs most: how far, where, and the
             // software's, the host's and the earlier colour.
@@ -464,6 +466,8 @@ pub fn replay(bench: &Bench, rec: &Recording) {
                 }
             }
             if thin {
+                // None for a draw that changed nothing.
+                let bounds = (changed > 0).then_some(bounds);
                 println!(
                     "points or lines: draw {draws}, primitive {} fill {} of {} vertices, \
                      {changed} pixels changed in {bounds:?}, {over} over; {key}",

@@ -36,9 +36,8 @@
 //! state the host takes are queued for it as the screen vertices of
 //! triangles, a point as its two and a line as the squares of its
 //! pixels, and the rest is queued as before. The queue holds one kind
-//! at a time:
-//! a draw of the other kind empties it first, so the host's draws and
-//! the software's reach a target in the card's order.
+//! at a time: a draw of the other kind empties it first, so the host's
+//! draws and the software's reach a target in the card's order.
 
 pub mod clip;
 pub mod combine;

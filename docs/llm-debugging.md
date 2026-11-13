@@ -1224,16 +1224,17 @@ and textures and its worst draw's vertices. Each draw of points or
 lines, or of triangles as their corners or edges, gets a line of its
 own with the pixels it changed and the rectangle they are in, which
 tells what on the screen the program draws that way.
-`TOADFORCE_REPLAY_OVER=N` counts the pixels over N instead. `TOADFORCE_REPLAY_SET=rs27=0,ts21=1`
-sets render states (`rs`) and stage states (`ts`, on every stage) by
-number on both sides before each draw, here the blend off and the
-anisotropy 1: what stops differing hangs on that state.
-`TOADFORCE_CAPTURE_WIDE=1` keeps the host's 16-bit targets in 8 bits
-a channel, as a host whose 5-6-5 format fails the test does.
-`TOADFORCE_REPLAY_PIXEL='350,25;100,300'` follows those pixels through
-the whole recording on the software side: each draw that changes one
-is printed with the pixel before and after it and the draw's steps,
-which gives the layers a pixel is made of and what each adds.
+`TOADFORCE_REPLAY_OVER=N` counts the pixels over N instead.
+`TOADFORCE_REPLAY_SET=rs27=0,ts21=1` sets render states (`rs`) and
+stage states (`ts`, on every stage) by number on both sides before
+each draw, here the blend off and the anisotropy 1: what stops
+differing hangs on that state. `TOADFORCE_CAPTURE_WIDE=1` keeps the
+host's 16-bit targets in 8 bits a channel, as a host whose 5-6-5
+format fails the test does. `TOADFORCE_REPLAY_PIXEL='350,25;100,300'`
+follows those pixels through the whole recording on the software
+side: each draw that changes one is printed with the pixel before and
+after it and the draw's steps, which gives the layers a pixel is made
+of and what each adds.
 
 ### 3dfx (Glide) games
 
