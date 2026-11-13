@@ -539,6 +539,25 @@ limit, so without a connection it goes on as it would with one:
   resources of DDRAW, DSOUND, DINPUT, DPLAYX, D3D8, DINPUT8 and the
   DirectMusic DLLs, which GetFileVersionInfo reads, say the same. A
   change takes effect for the next program that starts when none runs.
+* `win32_locale` is the system locale of the built-in Windows, the
+  language edition of Windows 98 it is: `en-US` (the default), `ru-RU`
+  (Russian), `pl-PL` (Polish), `cs-CZ` (Czech), `hu-HU` (Hungarian),
+  `el-GR` (Greek), `tr-TR` (Turkish) or `lt-LT` (Lithuanian). A program
+  made for that language's Windows needs it to show its text: its ANSI
+  bytes are read in the locale's code page (1251 for Russian, 1250 for
+  Polish, Czech and Hungarian, 1253 Greek, 1254 Turkish, 1257
+  Lithuanian), and the system's fonts and DEFAULT_CHARSET draw that code
+  page's letters. The locale sets GetACP and GetOEMCP, the conversions
+  of MultiByteToWideChar, WideCharToMultiByte and the C runtime, the
+  case and sorting of text, GetLocaleInfo's names and formats of dates,
+  numbers and money, GetSystemDefaultLCID and GetUserDefaultLCID, and
+  the registry's `Nls` values. Every one of these code pages is
+  installed under every locale, as on a Windows 98 with multilanguage
+  support, so a program that converts or draws text of another one
+  explicitly gets it. The keyboard types the US layout's characters
+  under every locale. Like `win32_version`, a change takes effect for
+  the next program that starts when none runs, and a saved state goes
+  on under the locale it was saved with.
 * `win32_trace` picks which calls of the built-in Windows' functions
   get a `[W32]` line in the [log file](README.md#log-file) (and `[W16]`
   for the 16-bit modules), with the caller's address, the arguments and

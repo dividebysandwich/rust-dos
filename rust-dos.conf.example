@@ -241,6 +241,11 @@
 # 98se. Programs are told it, and under 98 the DLLs have Windows 98's
 # functions.
 #win32_version=95
+# The system locale of the built-in Windows, the language edition of
+# Windows 98 it is: en-US (the default), ru-RU, pl-PL, cs-CZ, hu-HU, el-GR,
+# tr-TR or lt-LT. Programs made for that language's Windows need it to
+# show their text.
+#win32_locale=en-US
 # The depth of the built-in Windows' desktop: auto (the default), the
 # display adapter's own (32 bits a pixel, 24 on an S3 ViRGE, 16 on a 3dfx
 # Banshee or Voodoo3), or 8, 256 colours from a palette, for programs that
