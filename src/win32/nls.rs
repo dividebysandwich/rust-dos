@@ -388,14 +388,16 @@ pub fn oem(cpu: &Cpu) -> CodePage {
     current(cpu).oem()
 }
 
-/// The code page a conversion function's `number` names: CP_ACP,
-/// CP_THREAD_ACP and CP_OEMCP the system's, or a number. None for one
-/// there isn't, CP_MACCP among them.
+/// The code page a conversion function's `number` names: CP_ACP and
+/// CP_OEMCP the system's, or a number. None for one there isn't, CP_MACCP
+/// among them. CP_THREAD_ACP came with Windows 2000; Windows 95 and 98
+/// fail it with ERROR_INVALID_PARAMETER, and `win32_version` has no NT
+/// version that would take it.
 pub fn code_page(cpu: &Cpu, number: u32) -> Option<CodePage> {
     match number {
-        CP_ACP | CP_THREAD_ACP => Some(ansi(cpu)),
+        CP_ACP => Some(ansi(cpu)),
         CP_OEMCP => Some(oem(cpu)),
-        CP_MACCP => None,
+        CP_MACCP | CP_THREAD_ACP => None,
         _ => CodePage::by_number(number),
     }
 }
