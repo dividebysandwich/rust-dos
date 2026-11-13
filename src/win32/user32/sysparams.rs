@@ -306,7 +306,7 @@ fn put(cpu: &mut Cpu, at: u32, value: u32) -> u32 {
 }
 
 /// The value SystemParametersInfoA set for `action`, or `default`.
-fn param(cpu: &mut Cpu, action: u32, default: u32) -> u32 {
+pub(super) fn param(cpu: &mut Cpu, action: u32, default: u32) -> u32 {
     user(cpu)
         .params
         .iter()
@@ -380,6 +380,22 @@ pub fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             put(cpu, pv, v)
         }
         2 | 11 | 23 | 37 | 57 | 107 => {
+            set_param(cpu, action, ui);
+            TRUE
+        }
+        // SPI_GETMOUSEHOVERWIDTH, SPI_GETMOUSEHOVERHEIGHT and
+        // SPI_GETMOUSEHOVERTIME, and their SET actions: TrackMouseEvent's
+        // hover rectangle and time (track.rs), from Windows 98 on.
+        98 | 100 | 102 if crate::win32::version::is_98(cpu) => {
+            let (width, height, time) = super::track::hover_metrics(cpu);
+            let v = match action {
+                98 => width,
+                100 => height,
+                _ => time,
+            };
+            put(cpu, pv, v)
+        }
+        99 | 101 | 103 if crate::win32::version::is_98(cpu) => {
             set_param(cpu, action, ui);
             TRUE
         }

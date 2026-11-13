@@ -520,20 +520,25 @@ limit, so without a connection it goes on as it would with one:
   `95` (the default), `98` or `98se` (Windows 98 Second Edition). It is
   what GetVersion and GetVersionEx say (4.00.950, 4.10.1998 or 4.10.2222
   with " A " as its service pack), and what the registry's version
-  values and DirectX's version say. Under `98` and `98se` the built-in
-  DLLs have the functions Windows 98 added, such as MonitorFromWindow
-  and GetFileAttributesExA, and there is MSIMG32.DLL, with AlphaBlend,
-  GradientFill and TransparentBlt; under `95` a program that imports
-  one of those doesn't start, as on Windows 95, and its message names
-  the setting. These include USER32's GetAncestor, SendInput,
-  TrackMouseEvent and GetWindowInfo, which earlier releases of rust-dos
-  had under Windows 95 too, so a program that imports them needs `98`. Of
-  DirectX, the setting changes only the version the registry gives. The
-  built-in DirectX stays that of a machine with a later DirectX installed
-  (DirectDraw 7, D3D8), so it answers QueryInterface for IDirectDrawSurface7
-  and IDirectDraw7 even under `98se`, where a Windows 98 SE with only its
-  own DirectX 6.1 refuses them. A change takes effect for the next program
-  that starts when none runs.
+  values say. Under `98` and `98se` the built-in DLLs have the functions
+  Windows 98 added, such as MonitorFromWindow and GetFileAttributesExA,
+  and there is MSIMG32.DLL, with AlphaBlend, GradientFill and
+  TransparentBlt; under `95` a program that imports one of those
+  doesn't start, as on Windows 95, and its message names the setting.
+  These include USER32's GetAncestor, SendInput, TrackMouseEvent and
+  GetWindowInfo, which earlier releases of rust-dos had under Windows 95
+  too, so a program that imports them needs `98`. COMCTL32's
+  _TrackMouseEvent is there under every setting. The built-in DirectX
+  is the same under every setting (DirectDraw 7, D3D8 and DINPUT8), so
+  it answers QueryInterface for IDirectDrawSurface7 and IDirectDraw7.
+  What a program reads of its version is that of DirectX 8 as each
+  Windows could have it: 8.0a under `95`, which 8.1 doesn't support, and
+  8.1 under `98` and `98se`. The registry's
+  `HKLM\Software\Microsoft\DirectX` gives `Version` 4.08.00.0400 or
+  4.08.01.0881 and `InstalledVersion` 8.0 or 8.1, and the version
+  resources of DDRAW, DSOUND, DINPUT, DPLAYX, D3D8, DINPUT8 and the
+  DirectMusic DLLs, which GetFileVersionInfo reads, say the same. A
+  change takes effect for the next program that starts when none runs.
 * `win32_trace` picks which calls of the built-in Windows' functions
   get a `[W32]` line in the [log file](README.md#log-file) (and `[W16]`
   for the 16-bit modules), with the caller's address, the arguments and

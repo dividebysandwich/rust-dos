@@ -131,9 +131,8 @@ pub struct Input {
     /// The key that last went down with Alt held, VK_MENU for Alt itself:
     /// Alt's release is WM_SYSKEYUP only after Alt alone.
     pub sys_key: usize,
-    /// TrackMouseEvent's window, its TME_HOVER and TME_LEAVE flags and
-    /// its hover time (monitor.rs).
-    pub tracking: [u32; 3],
+    /// TrackMouseEvent's request, one for the desktop (track.rs).
+    pub tracking: Option<super::track::Tracking>,
     /// The screen saver (saver.rs): whether it is on and its timeout in
     /// seconds, from WIN.INI or SystemParametersInfo; and in microseconds
     /// of the emulated clock, when the last key or mouse input came and
@@ -712,7 +711,7 @@ fn button_event(cpu: &mut Cpu, b: usize, down: bool) {
 }
 
 /// The MK_ flags of the buttons and keys as the devices have them.
-fn mk_flags(input: &Input) -> u32 {
+pub(super) fn mk_flags(input: &Input) -> u32 {
     let mut flags = 0;
     for (vk, mk) in [
         (VK_LBUTTON, MK_LBUTTON),
@@ -771,7 +770,7 @@ pub fn window_moved(cpu: &mut Cpu, hwnd: u32, before: u32, changed: bool) {
 /// the capture or the one under the cursor.
 fn mouse_event_at(cpu: &mut Cpu, message: u32, _button: u32) {
     if message == WM_MOUSEMOVE {
-        super::monitor::mouse_moved(cpu);
+        super::track::mouse_moved(cpu);
     }
     let time = message::now_ms(cpu);
     let state = user(cpu);
