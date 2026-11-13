@@ -1021,11 +1021,15 @@ once. With `FILLMODE` 2 a triangle that isn't culled is drawn as the
 three lines of its edges, and with 1 as its three vertices' points.
 
 **Lines.** A line has one pixel in each column it crosses when it is
-longer along x, and one in each row otherwise: the pixel whose centre
-is nearest to the line there, and of two equally near the lower or
-the right one. The columns (or rows) are those whose centres lie
-between the two ends, the first end's included. The last end's pixel
-is drawn with `LASTPIXEL` 1 and left out with 0.
+at least as long along x as along y, and one in each row otherwise:
+the pixel whose centre is nearest to the line there, and of two
+equally near the lower or the right one. The columns (or rows) are
+those whose centres lie between the two ends. A centre exactly at the
+first end counts. A centre exactly at the last end counts with
+`LASTPIXEL` 1 and doesn't with 0, so a line that ends between two
+centres has the same pixels with either. A line of no length is the
+pixel whose centre is nearest to it with `LASTPIXEL` 1, and nothing
+with 0.
 
 **Points.** A point is a square around its position with sides of the
 vertex's point size, or `POINTSIZE` where the layout has none,
@@ -1043,7 +1047,11 @@ interpolated to the pixel's centre with perspective: each value times
 1 / w, and 1 / w itself, change linearly over the screen, and the
 value is their quotient. Depth changes linearly over the screen and
 is limited to 0 to 1. A colour channel is rounded to the nearest of
-0 to 255.
+0 to 255. Along a line the values change with the place along it and
+not across it: a pixel has those of the point of the line nearest to
+its centre, which for a pixel past an end is a point of the line
+continued. A point has its vertex's values at every pixel, but for a
+point sprite's coordinates.
 
 **The order of a fragment's steps.**
 

@@ -449,6 +449,13 @@ impl Bench {
         self.within(name, 1, scene);
     }
 
+    /// `close` with the same colours. Where no texture is sampled the
+    /// card works out the colours of a line's and a point's pixels and
+    /// the host fills them in unchanged, so they agree on any GPU.
+    fn exact(&self, name: &str, scene: impl Fn(&mut Rig)) {
+        self.within(name, 0, scene);
+    }
+
     /// `close` with channels at most `channel` apart.
     fn within(&self, name: &str, channel: u32, scene: impl Fn(&mut Rig)) {
         let bound = Bound { channel, ..CLOSE };
@@ -1391,14 +1398,21 @@ fn the_host_and_the_processor_take_turns() {
             rig.clear(CLEAR_COLOUR | CLEAR_DEPTH, 0xFF20_2020, 1.0, 0, &[]);
             rig.states(&[(RS_ZENABLE, 1)]);
             rig.draw(&quad_z(2.0, 2.0, 40.0, 0xFFFF_0000, 0.625));
-            // Lines are the software renderer's, over what the host
-            // drew.
+            // A line in a state the host declines (`SRCALPHASAT` for
+            // the destination) is the software renderer's, over what
+            // the host drew.
             let line = [
                 v(0.0, 20.5, WHITE, 0.0, 0.0),
                 v(60.0, 24.5, 0xFF00_FFFF, 0.0, 0.0),
             ];
             let words = words(&line);
+            rig.states(&[
+                (RS_ALPHABLENDENABLE, 1),
+                (RS_SRCBLEND, 2),
+                (RS_DESTBLEND, 11),
+            ]);
             rig.run(|w| encode::draw(w, 2, FVF, 2, &words));
+            rig.states(&[(RS_ALPHABLENDENABLE, 0)]);
             rig.draw(&quad_z(20.0, 12.0, 30.0, 0xFF00_FF00, 0.25));
             // A second target, cleared and drawn by the host, and
             // sampled as a texture.
@@ -2146,5 +2160,442 @@ fn a_target_sampled_with_the_alpha_of_its_bytes_agrees() {
         assert_eq!(status["host"]["read_backs"], 0, "{name}: {status}");
         let converts = status["host"]["counts"]["texture_converts"].as_u64();
         assert!(converts >= Some(1), "{name}: {status}");
+    }
+}
+
+/// Draw `vertices` as primitives of the kind `primitive`.
+fn draw_as(rig: &mut Rig, primitive: u32, vertices: &[V]) {
+    let words = words(vertices);
+    rig.run(|w| encode::draw(w, primitive, FVF, vertices.len() as u32, &words));
+}
+
+/// The line from (`x0`, `y0`) to (`x1`, `y1`): the colour, the depth,
+/// w and the coordinates all change along it.
+fn line(x0: f32, y0: f32, x1: f32, y1: f32) -> [V; 2] {
+    // Coordinates that put no texel's edge on an end of the line.
+    let mut a = v(x0, y0, 0xFFFF_2010, 0.013, 0.021);
+    let mut b = v(x1, y1, 0x6020_E0FF, 3.007, 2.011);
+    (a.z, b.z) = (0.25, 0.8125);
+    b.rhw = 0.25;
+    a.specular = 0x2000_0000;
+    b.specular = 0xE000_0000;
+    [a, b]
+}
+
+/// Lines from one point into every octant, with ends on pixel
+/// centres, between them and off the target; lines of less than a
+/// pixel and of no length; and a strip.
+fn lines(rig: &mut Rig) {
+    let mut list = Vec::new();
+    for (dx, dy) in [
+        (20.0, 0.0),
+        (20.0, 7.0),
+        (20.0, 20.0),
+        (7.3, 20.0),
+        (0.0, 20.5),
+        (-7.0, 20.0),
+        (-20.0, 20.0),
+        (-20.0, 6.75),
+        (-20.5, 0.0),
+        (-40.0, -9.0),
+        (-20.0, -20.0),
+        (-6.5, -40.0),
+        (0.0, -20.0),
+        (7.0, -19.5),
+        (20.0, -20.0),
+        (40.0, -7.25),
+    ] {
+        list.extend(line(31.0, 30.5, 31.0 + dx, 30.5 + dy));
+    }
+    list.extend(line(0.3, 60.7, 63.6, 62.2));
+    // The short ones with one w: a line whose 1 / w falls to a
+    // quarter inside a pixel reaches 0 within half a pixel of it,
+    // where the host has no change of the coordinates to pick a mip
+    // level by ("Where the OpenGL renderer may differ").
+    let short = [
+        line(3.0, 3.0, 3.0, 3.0),
+        line(5.5, 3.5, 5.75, 3.5),
+        line(8.25, 3.0, 9.0, 3.5),
+    ];
+    for mut ends in short {
+        ends[1].rhw = 1.0;
+        list.extend(ends);
+    }
+    draw_as(rig, 2, &list);
+    let strip = [line(2.0, 50.0, 30.0, 58.0), line(61.0, 44.0, 40.0, 63.0)].concat();
+    draw_as(rig, 3, &strip);
+}
+
+/// A viewport of a part of the target, or all of it.
+fn viewport(rig: &mut Rig, x: u32, y: u32, width: u32, height: u32) {
+    let viewport = Viewport {
+        x,
+        y,
+        width,
+        height,
+        min_z: 0.0,
+        max_z: 1.0,
+    };
+    rig.run(|w| encode::viewport(w, &viewport));
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn lines_agree() {
+    bench!(bench, "toadforce lines");
+    // Which pixels: both places of the pixel centres, with and
+    // without the last pixel, shaded and flat from either end.
+    for centre in [0, 1] {
+        for last in [0, 1] {
+            for (shade, flat_last) in [(2, 0), (1, 0), (1, 1)] {
+                let name = format!("lines centre {centre} last {last} shade {shade}/{flat_last}");
+                bench.exact(&name, |rig| {
+                    rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
+                    rig.states(&[
+                        (RS_PIXEL_CENTRE, centre),
+                        (RS_LASTPIXEL, last),
+                        (RS_SHADEMODE, shade),
+                        (RS_FLAT_VERTEX, flat_last),
+                    ]);
+                    lines(rig);
+                });
+            }
+        }
+    }
+    for format in [Format::X8R8G8B8, Format::R5G6B5] {
+        // The host interpolates a square's depth in single precision
+        // and rounds it by itself, as a triangle's: 2 steps of 24
+        // bits over these lines.
+        let bound = Bound {
+            channel: 0,
+            depth: 2,
+            ..CLOSE
+        };
+        let declined = bench.compare("lines", format, Some(Format::D24S8), bound, |rig| {
+            rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
+            rig.states(&[(RS_ZENABLE, 1)]);
+            lines(rig);
+        });
+        assert_eq!(declined, 0);
+    }
+    // Cut by a viewport and by the scissor rectangle.
+    bench.exact("lines in a viewport", |rig| {
+        rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
+        viewport(rig, 9, 14, 40, 31);
+        lines(rig);
+        viewport(rig, 0, 0, SIZE, SIZE);
+    });
+    bench.exact("lines in a scissor rectangle", |rig| {
+        rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
+        rig.run(|w| encode::scissor(w, true, [20, 5, 30, 44]));
+        lines(rig);
+        rig.run(|w| encode::scissor(w, false, [0; 4]));
+    });
+    // Behind and in front of a surface, with the depth written.
+    bench.exact("lines depth-tested", |rig| {
+        rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
+        rig.states(&[(RS_ZENABLE, 1)]);
+        rig.draw(&quad_z(0.0, 0.0, 64.0, 0xFF40_4040, 0.51));
+        lines(rig);
+        // And over the lines, a surface behind some of them.
+        rig.draw(&quad_z(10.0, 10.0, 44.0, 0xFF00_8000, 0.4));
+    });
+    bench.exact("lines blended", |rig| {
+        rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
+        rig.draw(&quad(8.0, 8.0, 40.0, 0xFF80_C020, 1.0));
+        rig.states(&[
+            (RS_ALPHABLENDENABLE, 1),
+            (RS_SRCBLEND, 5),
+            (RS_DESTBLEND, 6),
+        ]);
+        lines(rig);
+    });
+    // The alpha test, by the alpha that changes along a line.
+    bench.exact("lines alpha-tested", |rig| {
+        rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
+        rig.states(&[
+            (RS_ALPHATESTENABLE, 1),
+            (RS_ALPHAREF, 0xB1),
+            (RS_ALPHAFUNC, 5),
+        ]);
+        lines(rig);
+    });
+    // Fog by the specular colour's alpha, by depth and by w.
+    bench.exact("lines fog vertex", |rig| {
+        rig.states(&[(RS_FOGENABLE, 1), (RS_FOGCOLOR, 0x00A0_2060)]);
+        lines(rig);
+    });
+    for by_w in [0, 1] {
+        bench.exact(&format!("lines fog table by w {by_w}"), |rig| {
+            let (start, end) = match by_w {
+                0 => (0.2f32, 0.9f32),
+                _ => (1.0, 4.5),
+            };
+            rig.states(&[
+                (RS_FOGENABLE, 1),
+                (RS_FOGCOLOR, 0x00A0_2060),
+                (RS_FOGTABLEMODE, 3),
+                (RS_FOG_BY_W, by_w),
+                (RS_FOGSTART, start.to_bits()),
+                (RS_FOGEND, end.to_bits()),
+            ]);
+            lines(rig);
+        });
+    }
+    // Lines whose 1 / w falls to a quarter in less than a pixel: the
+    // host gets the pixel's own values at every corner of its square.
+    // No texture here: a mip filter would pick level 0 for such a
+    // pixel on the host, and fog by w differs where the centre has no
+    // positive 1 / w (#1003).
+    bench.exact("lines whose w runs out", |rig| {
+        rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
+        rig.states(&[
+            (RS_ZENABLE, 1),
+            (RS_FOGENABLE, 1),
+            (RS_FOGCOLOR, 0x00A0_2060),
+        ]);
+        let short = [
+            line(5.5, 3.5, 5.75, 3.5),
+            line(8.25, 3.0, 9.0, 3.5),
+            line(20.0, 20.0, 21.5, 20.75),
+            line(30.5, 30.5, 30.0, 32.25),
+        ]
+        .concat();
+        draw_as(rig, 2, &short);
+    });
+    // A line whose last pixel's centre is past its end, where its
+    // 1 / w is below 0: the software renderer draws the pixel, so the
+    // host has to as well.
+    bench.exact("a line whose w runs out past its end", |rig| {
+        rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
+        rig.states(&[(RS_ZENABLE, 1), (RS_PIXEL_CENTRE, 0), (RS_LASTPIXEL, 1)]);
+        let mut ends = line(40.0, 40.0, 60.0, 49.7);
+        ends[1].rhw = 1e-4;
+        draw_as(rig, 2, &ends);
+    });
+    // A depth bias moves a line's depth as a triangle's (`ZBIAS` is
+    // every fragment's): lines in the plane of a surface, drawn where
+    // only a nearer depth passes, show with a bias and not without.
+    for bias in [0, 1, 16] {
+        bench.exact(&format!("lines with a depth bias of {bias}"), |rig| {
+            rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
+            rig.states(&[(RS_ZENABLE, 1), (RS_ZFUNC, 2)]);
+            rig.draw(&quad_z(0.0, 0.0, 64.0, 0xFF40_4040, 0.375));
+            rig.states(&[(RS_ZBIAS, bias)]);
+            let mut flat = Vec::new();
+            for ends in [
+                line(4.0, 6.0, 60.0, 6.0),
+                line(4.0, 10.0, 60.0, 31.5),
+                line(12.25, 4.0, 20.75, 60.0),
+            ] {
+                flat.extend(ends.map(|mut v| {
+                    (v.z, v.rhw) = (0.375, 1.0);
+                    v
+                }));
+            }
+            draw_as(rig, 2, &flat);
+            // And lines that go through the surface.
+            lines(rig);
+            rig.states(&[(RS_ZBIAS, 0)]);
+        });
+    }
+    // A texture along the lines, with perspective: the nearest texel,
+    // the linear filter, and mip levels by the coordinates' change
+    // from a pixel to the next. A sample is a weight of 1/256 off
+    // where the host's interpolation puts a coordinate on the other
+    // side of a step, which is 1 in 255 of a channel on this texture
+    // ("A sample of a 2D texture" in `docs/toadforce.md`).
+    for (mag, min, mip) in [(1, 1, 0), (2, 2, 0), (2, 2, 1), (2, 2, 2)] {
+        let name = format!("lines textured {mag} {min} {mip}");
+        bench.within(&name, 1, |rig| {
+            rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
+            mipped(rig);
+            filter(rig, 0, mag, min, mip);
+            rig.stage(0, &[(TSS_COLOROP, OP_MODULATE), (TSS_ALPHAOP, OP_MODULATE)]);
+            lines(rig);
+        });
+    }
+    // Lines going into the distance: w grows 16 times along them, so
+    // a pixel covers more and more texels and the mip level changes
+    // along the line. Each level of the texture has its own blue.
+    for (min, mip) in [(1, 1), (2, 1), (2, 2)] {
+        let name = format!("lines into the distance, filter {min} mip {mip}");
+        bench.within(&name, 1, |rig| {
+            rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
+            let t = rig.texels(TEXTURE, Format::A8R8G8B8, 32, 6, false, ramp(32));
+            rig.texture(0, 1, &t);
+            filter(rig, 0, 2, min, mip);
+            let mut far = Vec::new();
+            for (x0, y0, x1, y1) in [
+                (2.0, 4.0, 62.0, 9.5),
+                (60.5, 14.0, 3.0, 30.0),
+                (6.0, 34.0, 20.5, 62.0),
+                (40.0, 61.0, 61.0, 36.5),
+                (30.0, 62.5, 34.0, 33.0),
+            ] {
+                let mut ends = line(x0, y0, x1, y1);
+                ends[1].rhw = 1.0 / 16.0;
+                ends[1].t = [5.37, 3.71, 0.0, 1.0];
+                far.extend(ends);
+            }
+            draw_as(rig, 2, &far);
+        });
+    }
+}
+
+/// `FVF` with a point size after the position.
+const FVF_SIZED: u32 = FVF | 0x020;
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn points_agree() {
+    bench!(bench, "toadforce points");
+    // At pixel centres, on their edges and corners, between them, and
+    // partly and wholly off the target.
+    let places = [
+        (10.0, 12.0),
+        (20.5, 12.5),
+        (30.25, 12.75),
+        (40.5, 12.0),
+        (50.0, 12.5),
+        (0.0, 40.0),
+        (63.5, 63.5),
+        (30.0, 40.25),
+        (-9.0, 30.0),
+        (31.999, 51.001),
+    ];
+    let points = |rig: &mut Rig| {
+        let list: Vec<V> = places
+            .iter()
+            .enumerate()
+            .map(|(i, &(x, y))| {
+                let mut p = v(x, y, 0xC010_F020 + 0x15_0011 * i as u32, 0.3, 0.6);
+                p.z = 0.1 + 0.08 * i as f32;
+                p.rhw = 1.0 / (1.0 + i as f32);
+                p
+            })
+            .collect();
+        draw_as(rig, 1, &list);
+    };
+    for centre in [0, 1] {
+        for size in [0.25f32, 1.0, 1.5, 2.0, 3.0, 7.25, 100.0] {
+            bench.exact(&format!("points centre {centre} size {size}"), |rig| {
+                rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
+                rig.states(&[(RS_PIXEL_CENTRE, centre), (RS_POINTSIZE, size.to_bits())]);
+                points(rig);
+            });
+        }
+    }
+    // The limits of the size, and a size in each vertex.
+    bench.exact("points size limits", |rig| {
+        rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
+        rig.states(&[
+            (RS_POINTSIZE_MIN, 2.5f32.to_bits()),
+            (RS_POINTSIZE_MAX, 6.0f32.to_bits()),
+        ]);
+        for size in [1.0f32, 4.0, 30.0] {
+            rig.states(&[(RS_POINTSIZE, size.to_bits())]);
+            points(rig);
+        }
+    });
+    bench.exact("points sized by the vertex", |rig| {
+        rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
+        rig.states(&[(RS_POINTSIZE, 9.0f32.to_bits())]);
+        let mut list = Vec::new();
+        for (i, &(x, y)) in places.iter().enumerate() {
+            let mut one = words(&[v(x, y, 0xFFE0_4080, 0.0, 0.0)]);
+            one.insert(4, (0.75 * (i + 1) as f32).to_bits());
+            list.extend(one);
+        }
+        rig.run(|w| encode::draw(w, 1, FVF_SIZED, places.len() as u32, &list));
+    });
+    // Depth-tested, blended and fogged.
+    bench.exact("points depth-tested and blended", |rig| {
+        rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
+        rig.states(&[(RS_ZENABLE, 1), (RS_POINTSIZE, 9.0f32.to_bits())]);
+        rig.draw(&quad_z(0.0, 0.0, 64.0, 0xFF40_4040, 0.45));
+        rig.states(&[
+            (RS_ALPHABLENDENABLE, 1),
+            (RS_SRCBLEND, 5),
+            (RS_DESTBLEND, 6),
+            (RS_FOGENABLE, 1),
+            (RS_FOGCOLOR, 0x00A0_2060),
+            (RS_FOGTABLEMODE, 3),
+            (RS_FOGSTART, 0.05f32.to_bits()),
+            (RS_FOGEND, 0.6f32.to_bits()),
+        ]);
+        points(rig);
+    });
+    // A texture: one texel all over a point, and all of the texture
+    // over a point sprite.
+    for sprite in [0, 1] {
+        for filtered in [1, 2] {
+            let name = format!("points textured sprite {sprite} filter {filtered}");
+            // A weight of 1/256 off, as any sample of a 2D texture.
+            bench.within(&name, 1, |rig| {
+                rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
+                let t = rig.texels(TEXTURE, Format::A8R8G8B8, 16, 1, false, ramp(16));
+                rig.texture(0, 1, &t);
+                filter(rig, 0, filtered, filtered, 0);
+                rig.stage(0, &[(TSS_COLOROP, OP_MODULATE)]);
+                rig.states(&[
+                    (RS_POINTSPRITEENABLE, sprite),
+                    (RS_POINTSIZE, 12.5f32.to_bits()),
+                ]);
+                points(rig);
+            });
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn triangles_as_lines_and_as_points_agree() {
+    bench!(bench, "toadforce fill modes");
+    for fill in [2, 1] {
+        for cull in [1, 2, 3] {
+            for shade in [2, 1] {
+                let name = format!("fill {fill} cull {cull} shade {shade}");
+                // A weight of 1/256 off, as any sample of a 2D
+                // texture.
+                bench.within(&name, 1, |rig| {
+                    rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
+                    let t = rig.texels(TEXTURE, Format::A8R8G8B8, 16, 1, false, ramp(16));
+                    rig.texture(0, 1, &t);
+                    filter(rig, 0, 2, 2, 0);
+                    rig.stage(0, &[(TSS_COLOROP, OP_MODULATE)]);
+                    rig.states(&[
+                        (RS_ZENABLE, 1),
+                        (RS_FILLMODE, fill),
+                        (RS_CULLMODE, cull),
+                        (RS_SHADEMODE, shade),
+                        (RS_POINTSIZE, 3.0f32.to_bits()),
+                    ]);
+                    // Two triangles that share an edge, facing one
+                    // way, with w and the colours changing.
+                    let mut pair = quad(6.0, 6.0, 30.0, 0xC0FF_FF00, 1.0);
+                    pair[1].rhw = 0.25;
+                    pair[3].rhw = 0.25;
+                    pair[4].diffuse = 0xFF00_FFFF;
+                    rig.draw(&pair);
+                    // One facing the other way, partly off the target.
+                    rig.draw(&[
+                        v(40.0, 30.0, 0xFFFF_0000, 0.0, 0.0),
+                        v(44.5, 70.0, 0xFF00_FF00, 0.0, 1.0),
+                        v(72.0, 36.0, 0xFF00_00FF, 1.0, 0.0),
+                    ]);
+                    // A fan and a strip.
+                    let fan = [
+                        v(20.0, 50.0, 0xFFFF_FFFF, 0.5, 0.5),
+                        v(8.0, 44.0, 0xFFFF_0000, 0.0, 0.0),
+                        v(30.0, 42.0, 0xFF00_FF00, 1.0, 0.0),
+                        v(34.0, 58.0, 0xFF00_00FF, 1.0, 1.0),
+                        v(10.0, 60.0, 0xFFFF_FF00, 0.0, 1.0),
+                    ];
+                    draw_as(rig, 6, &fan);
+                    draw_as(rig, 5, &fan);
+                });
+            }
+        }
     }
 }
