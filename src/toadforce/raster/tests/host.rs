@@ -46,8 +46,8 @@ struct Log {
     images_from_copies: u32,
 }
 
-/// Picks the states a host refuses.
-type Declines = fn(&DrawState) -> bool;
+/// Picks the states a host refuses, and why.
+type Declines = fn(&DrawState) -> Option<Decline>;
 
 /// A surface as the host has it.
 struct Copy {
@@ -201,16 +201,8 @@ impl Host for TestHost {
         "test"
     }
 
-    /// Every test host leaves a state with `POINTSPRITEENABLE` on to
-    /// the software renderer, so a scene can put a draw of the
-    /// processor's among the host's: the state changes nothing of a
-    /// line or a triangle. It counts under `no texture`.
     fn declines(&self, state: &DrawState) -> Option<Decline> {
-        if state.shape.point_sprite {
-            return Some(Decline::NoTexture);
-        }
-        // The test host has no program for the states it refuses.
-        (self.declines)(state).then_some(Decline::ProgramFailed)
+        (self.declines)(state)
     }
 
     fn draw(&mut self, batch: &Batch, memory: &[u8], pages: &Pages) -> Vec<Surface> {
@@ -525,13 +517,21 @@ fn colour(format: Format) -> bool {
     matches!(format, Format::R5G6B5 | Format::X8R8G8B8 | Format::A8R8G8B8)
 }
 
-fn takes_all(_: &DrawState) -> bool {
-    false
+fn takes_all(_: &DrawState) -> Option<Decline> {
+    None
 }
 
-/// A host that has no shader for flat shading yet.
-fn declines_flat(state: &DrawState) -> bool {
-    state.shape.flat
+/// A host that leaves a state with `POINTSPRITEENABLE` on to the
+/// software renderer, so a scene can put a draw of the processor's
+/// among the host's: the state changes nothing of a line or a
+/// triangle. It counts under `no texture`.
+fn declines_sprites(state: &DrawState) -> Option<Decline> {
+    state.shape.point_sprite.then_some(Decline::NoTexture)
+}
+
+/// One that also has no program for flat shading yet.
+fn declines_flat(state: &DrawState) -> Option<Decline> {
+    declines_sprites(state).or(state.shape.flat.then_some(Decline::ProgramFailed))
 }
 
 const FORMAT: Format = Format::X8R8G8B8;
@@ -723,7 +723,7 @@ fn mixed(rig: &mut Rig) {
 #[test]
 fn the_hosts_draws_and_the_processors_keep_the_cards_order() {
     // The lines, and the flat triangle where the host refuses it.
-    let hosts: [(Declines, u32); 2] = [(takes_all, 1), (declines_flat, 2)];
+    let hosts: [(Declines, u32); 2] = [(declines_sprites, 1), (declines_flat, 2)];
     for (declines, declined) in hosts {
         let (rig, log) = same(declines, mixed);
         // What the processor wrote and no draw covered is there.
@@ -1092,8 +1092,8 @@ fn a_surface_the_host_drew_into_is_sampled_as_a_texture() {
     assert_eq!(rig.px(12, 20), 0x20_E0A0);
     assert_eq!(rig.px(40, 2), 0x10_3050);
     // And with the software renderer drawing the second target.
-    fn declines_textured(state: &DrawState) -> bool {
-        state.tex[0].is_some()
+    fn declines_textured(state: &DrawState) -> Option<Decline> {
+        state.tex[0].is_some().then_some(Decline::ProgramFailed)
     }
     same(declines_textured, render_to_texture);
 }
@@ -1218,7 +1218,7 @@ fn texture_writes(rig: &mut Rig) {
 
 #[test]
 fn a_texture_the_host_keeps_is_copied_again_after_each_write() {
-    let (rig, log) = same(takes_all, texture_writes);
+    let (rig, log) = same(declines_sprites, texture_writes);
     // A copy at first, and one after each of the seven writes.
     assert_eq!(log.borrow().texture_uploads, 8);
     // The lines.
