@@ -1945,52 +1945,58 @@ a four-core host, and MDK2 and Giants in a heavier scene.
 How the two work is in "The built-in Windows" ("State kept between
 draws" and "OpenGL's draws wait for each other"). Frames a second in
 the scenes of the table above, each run alone on the machine with
-`cycles=max`, two windows of 20 seconds, the build before the passes
-and the one after in the same session:
+`cycles=max`, two windows of 20 seconds with the profiler off, the
+build before the passes and the one after in the same session:
 
 | Game | Before | After | Draws a frame | Binds kept |
 |---|---|---|---|---|
-| Oni, training room | 24.8, 24.6 | 37.8, 38.1 | 2718 to 181 | 45% |
-| No One Lives Forever | 39.9, 39.9 | 47.4, 47.9 | 1903 | 83% |
+| Oni, training room | 25.9, 25.9 | 41.0, 41.0 | 2718 to 181 | 44% |
+| No One Lives Forever | 40.2, 39.8 | 47.1, 47.7 | 1903 | 82% |
 | Giants | 37.2, 37.3 | 37.6, 37.2 | 545 | 51% |
-| MDK2, first level's dive | 48.7, 49.7 | 47.6, 48.9 | 285 to 58 | none |
+| MDK2, first level's dive | 50.8, 49.5 | 47.0, 47.2 | 288 to 57 | none |
 
-MDK2 runs at 85% to 87% of full speed before and 82% to 84% after.
+MDK2 runs at 85% to 89% of full speed before and 81% after. Giants'
+row is of an earlier session, before the review's changes.
 
 Oni's 2700 `glEnd`s a frame become 181 draws, and of those nearly
 half find the card's state as they need it. Its profile after:
-`cpu.jit` 51%, and no zone of the layers between the game and the
-card above 4% (`hle.d3d.bind` was 17% and is below 1%). What a call
-from the game costs is next there: `hle.win32.args`,
-`hle.win32.after`, `hle.win32` and `hle.opengl.call` are 12.7%
-together for 1.2 million calls a second, about 90 ns a call, in four
-parts of about equal size: the trap out of the recompiled code with
-the processor's snapshot for a page fault, the arguments read through
-the page tables, the handler, and what follows it. Two costs of every
-call went with these passes: the arguments were read one walk of the
-page tables each, and once a process had made a file mapping every
-call built a list of the running processes to sweep the mappings
-with.
+`cpu.jit` 53%, and no zone of the layers between the game and the
+card above 4.5% (`hle.d3d.bind` was 17% and its parts are 1%
+together). What a call from the game costs is next there:
+`hle.win32` (4.4%), `hle.win32.after` (3.6%), `hle.win32.args`
+(2.1%) and `hle.opengl.call` (1.8%) are 11.9% together for 1.2
+million calls a second, about 85 ns a call: the trap out of the
+recompiled code with the processor's snapshot for a page fault, what
+follows the handler, the arguments read through the page tables, and
+the handler. Two costs of every call went with these passes: the
+arguments were read one walk of the page tables each, and once a
+process had made a file mapping every call built a list of the
+running processes to sweep the mappings with.
 
 No One Lives Forever draws each fan with its own `DrawPrimitive`,
 and 83% of them keep the card's state. Giants keeps half its binds
 and its frame rate: the bind was no cost there, and its `hle.win32`
 is the count of its state calls, pass 4's.
 
-MDK2's draws join five to one, and none of the 58 left keeps a bind:
-each differs from the one before it. Its frame rate stays where it
-was, within the spread of the takes. The draws were not what holds it
-below full speed: `hle.d3d.bind` and `hle.d3d.draw` went from 11% of
-its thread to 3%, and the calls themselves (`hle.win32` with its
-`.args` and `.after`, and `hle.opengl.call`) are 41% where they were
-46%. The call made most is `SleepEx`, 270 thousand times a second,
-each a reschedule (issue 1007).
+MDK2's draws join five to one, and none of the 57 left keeps a bind:
+each differs from the one before it. The passes don't help it: its
+takes after are 2.3 to 3.8 frames a second below those before, and
+the two ranges don't overlap (in an earlier session they did: 48.7
+and 49.7 before, 47.6 and 48.9 after). Why it is lower isn't known.
+The thread does less for the draws, `hle.d3d.bind` and `hle.d3d.draw`
+going from 11% to 3% and the calls themselves (`hle.win32` with its
+`.args` and `.after`, and `hle.opengl.call`) from 46% to 41%, and it
+is 87% busy at 81% of full speed, so the processor's time isn't what
+holds the game back. The call made most is `SleepEx`, 270 thousand
+times a second, each a reschedule (issue 1007), and what the game's
+threads do with the time between them is what to look at first.
 
 The pictures are the same: deterministic runs on the software
 renderer at 100000 cycles, the same inputs at the same emulated
 times, twelve frames in play (half a second apart, a second apart
 in MDK2's dive) for Oni, MDK2, No One Lives Forever, Giants and
-Zanzarah, with no pixel differing between the builds.
+Zanzarah (the English 1.010 build), with no pixel differing between
+the builds.
 
 Phases 2 and 3 come before the OpenGL renderer so that the reference
 exists before the renderer that is tested against it, and so that
