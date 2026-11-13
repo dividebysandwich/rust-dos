@@ -905,6 +905,28 @@ mod tests {
     }
 
     #[test]
+    fn layering_takes_the_system_locale_and_drops_an_unknown_one() {
+        use crate::config::Win32Locale;
+        let locale = |value: &str| Setting {
+            section: "emulator".into(),
+            key: "win32_locale".into(),
+            value: value.into(),
+        };
+        let base = Settings {
+            win32_locale: Win32Locale::PlPl,
+            ..Settings::default()
+        };
+        let russian = locale("ru-RU");
+        assert_eq!(layer(&base, &[&russian], None).win32_locale, Win32Locale::RuRu);
+        // A locale the built-in Windows doesn't have leaves the base's, as
+        // the configuration file's parser warns and keeps it.
+        let japanese = locale("ja-JP");
+        assert_eq!(layer(&base, &[&japanese], None).win32_locale, Win32Locale::PlPl);
+        let reported = report_settings(&base, None);
+        assert_eq!(reported["emulator"]["win32_locale"], "pl-PL");
+    }
+
+    #[test]
     fn blessed_settings_win() {
         let candidate = |slug: &str, hash_match: bool, source: Source| Candidate {
             slug: slug.into(),

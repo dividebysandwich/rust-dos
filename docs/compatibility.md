@@ -25,8 +25,9 @@ settings of a game only when the checksums match. That works for DOS
 games and for games on the built-in Windows, which start from the same
 prompt. The almanac carries the machine's settings only: the graphics
 card, processor, speed, memory, DPMI, the DOS and Windows versions, the
-Windows desktop's colour depth (`win32_depth`), the 3D cards, the sound
-cards, the joystick and the disks' speeds.
+Windows desktop's colour depth (`win32_depth`) and system locale
+(`win32_locale`), the 3D cards, the sound cards, the joystick and the
+disks' speeds.
 
 A version a report adds is filed under its program's platform: DOS,
 Windows 3.1 (an NE file) or Windows 95/98 (a PE file). For a Windows

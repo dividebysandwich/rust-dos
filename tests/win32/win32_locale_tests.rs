@@ -271,6 +271,30 @@ fn a_russian_windows_has_its_code_pages_and_names() {
     assert_eq!(peek_bytes(&cpu, at + S_UPPER, 4), b"\xCF\xD0\xC8Z");
 }
 
+/// A state saved under one locale goes on under it, whatever the setting
+/// is when it is loaded: the running programs keep the code pages they
+/// started with, and the setting waits for the next first program. A
+/// reset keeps the setting.
+#[test]
+fn a_state_keeps_the_locale_it_was_saved_with() {
+    use rust_dos::win32::nls;
+    let (data, calls) = code_page_calls();
+    let (saved, _) = run("state_locale", Win32Locale::RuRu, &data, &calls);
+    let state = rust_dos::savestate::machine::save(&saved);
+    // Another machine, set to US English, loads it.
+    let mut cpu = Cpu::new(PathBuf::from("target/test_win32_locale/state_locale"));
+    cpu.bus.win32.enabled = true;
+    cpu.bus.win32.locale = Win32Locale::EnUs;
+    assert_eq!(nls::current(&cpu).lcid, 0x0409);
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    assert_eq!(nls::current(&cpu).lcid, 0x0419);
+    assert_eq!(nls::ansi(&cpu).number(), 1251);
+    assert_eq!(cpu.bus.win32.locale, Win32Locale::EnUs);
+    cpu.bus.win32.locale = Win32Locale::PlPl;
+    cpu.bus.win32.reset();
+    assert_eq!(cpu.bus.win32.locale, Win32Locale::PlPl);
+}
+
 #[test]
 fn a_us_windows_keeps_code_page_1252() {
     let (data, calls) = code_page_calls();
