@@ -171,6 +171,45 @@ opcode, `win32_version=98se` when a message names the version, more
   [copy-protection.md](copy-protection.md) has the image each
   protection needs and the tools that make it.
 
+### Games in other languages
+
+A game translated for a Windows of another language may need that
+Windows' locale, `win32_locale` in
+[`[emulator]`](../CONFIGURATION.md#emulator). The built-in Windows is a
+US English one unless the setting says otherwise.
+
+Set it when a game's text shows as question marks, accented Latin
+letters where another alphabet belongs (`Ñòàðò` for a Russian word), or
+the wrong letters with diacritics. That happens in what Windows draws
+for the game: its launcher or setup, dialogs, message boxes, menus and
+window titles. Text a game draws with its own fonts usually shows right
+under any locale, so a game can have an unreadable launcher and
+readable menus.
+
+Which games need it:
+
+* **Russian** and the other languages written in Cyrillic (Ukrainian,
+  Belarusian, Bulgarian, Serbian in Cyrillic): `ru-RU`.
+* **Central European languages** with letters outside Western Europe's
+  (Polish, Czech, Slovak, Hungarian, Slovenian, Croatian, Romanian):
+  `pl-PL`, `cs-CZ` or `hu-HU`. All three read text in the same code
+  page; pick the game's language for its date and number formats.
+* **Greek**: `el-GR`.
+* **Turkish**: `tr-TR`.
+* **Baltic languages** (Lithuanian, Latvian, Estonian): `lt-LT`.
+
+Games in English and in Western European languages (French, German,
+Spanish, Italian, Portuguese, Dutch and the Nordic languages) need
+nothing: their letters are in the default locale's code page.
+
+Japanese, Chinese and Korean games, and Hebrew and Arabic ones, have no
+locale yet. Run those on a
+[Windows 95 or 98 image](#windows-games-on-a-windows-95-or-98-image) of
+that language.
+
+The almanac carries the setting, so a game with a report gets its
+locale with `almanac_auto`.
+
 ### Installer archives
 
 These games' InstallShield archives were unpacked by
