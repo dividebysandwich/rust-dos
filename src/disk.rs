@@ -210,8 +210,15 @@ pub(crate) fn new_entry_name(name: &str) -> String {
 /// 256-color collections in a folder of that name, and its 1.3 patch
 /// copies one.
 pub(crate) fn host_private(name: &str) -> bool {
-    const DESKTOP: [&str; 7] =
-        [".DS_Store", ".localized", ".Spotlight-V100", ".Trashes", ".fseventsd", ".TemporaryItems", ".directory"];
+    const DESKTOP: [&str; 7] = [
+        ".DS_Store",
+        ".localized",
+        ".Spotlight-V100",
+        ".Trashes",
+        ".fseventsd",
+        ".TemporaryItems",
+        ".directory",
+    ];
     name.starts_with(".rust-dos")
         || (name.starts_with('.') && name.ends_with(".rust-dos-partial"))
         || name.starts_with("._")
