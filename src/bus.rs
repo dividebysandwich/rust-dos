@@ -305,6 +305,9 @@ pub struct Bus {
     /// The program waits for a swap the frame rate cap holds back
     /// (`exec::held`).
     pub hold: Option<Hold>,
+    /// The frame rate cap (`fps_cap`), which every card's and API's
+    /// present goes through, the 3dfx card's sharing it.
+    pub frame_cap: crate::frame_cap::Shared,
     /// What to tell the user on the screen, a title over details, for the
     /// frontend to show.
     pub notices: Vec<(String, String)>,
@@ -2967,6 +2970,20 @@ impl Bus {
                 }
             }
         }
+    }
+
+    /// The frame rate cap (`fps_cap`): None for none.
+    pub fn set_fps_cap(&mut self, fps: Option<u32>) {
+        self.frame_cap.set_fps(fps);
+    }
+
+    /// The timing the window refreshes at with a variable refresh rate
+    /// while a program shows frames through the frame rate cap: the
+    /// cap's frame times, when the cap is below the monitor's refresh
+    /// rate (`FrameCap::refresh_timing`).
+    pub fn frame_cap_timing(&mut self) -> Option<crate::video::crt::CrtTiming> {
+        let cap = self.frame_cap.get().refresh_timing(self.clock.now_ns())?;
+        (cap.hz() < self.refresh_timing().hz()).then_some(cap)
     }
 
     /// The video timing of the picture the monitor shows: the 3dfx card's

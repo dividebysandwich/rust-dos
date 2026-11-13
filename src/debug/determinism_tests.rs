@@ -1490,6 +1490,7 @@ const SECTION_FIELDS: &[(&str, &str)] = &[
     ("isapnp", "PNP"),
     ("vfx1", "VFX1"),
     ("win32", "W32"),
+    ("frame_cap", "PACE"),
 ];
 
 /// The tags of the sections the save state's code writes.

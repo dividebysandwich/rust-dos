@@ -983,34 +983,65 @@ fn its_swaps_are_the_frames_drawn_while_it_shows() {
 fn the_frame_rate_cap_holds_swaps_to_its_frame_times() {
     let mut bus = bus(Board::Standard);
     init(&mut bus);
-    bus.set_voodoo_fps_cap(Some(20));
+    bus.set_fps_cap(Some(20));
     let front = |bus: &Bus| r(bus, STATUS) >> 10 & 3;
-    // The first swap waits for the next 50 ms mark, and the program with it.
+    let due_ms = |ticks: u64| ticks as f64 * 1000.0 / 1_193_182.0;
+    // The first swap happens at once.
     wait_ms(&mut bus, 10.0);
     w(&mut bus, SWAPBUFFER_CMD, 0);
-    assert_eq!(front(&bus), 0, "not swapped yet");
+    assert_eq!(front(&bus), 1, "swapped at once");
+    assert!(bus.hold.is_none());
+    // One soon after waits for the next 50 ms mark, and the program
+    // with it.
+    w(&mut bus, SWAPBUFFER_CMD, 0);
+    assert_eq!(front(&bus), 1, "not swapped yet");
     let hold = bus.hold.expect("the program waits");
-    let due_ms = |ticks: u64| ticks as f64 * 1000.0 / 1_193_182.0;
     assert!((due_ms(hold.until) - 50.0).abs() < 0.01, "due at {} ms", due_ms(hold.until));
     wait_ms(&mut bus, 41.0);
-    assert_eq!(front(&bus), 1, "swapped at its time");
-    // A swap soon after waits a whole frame; one later than a frame, for
-    // the next mark.
-    w(&mut bus, SWAPBUFFER_CMD, 0);
-    assert!((due_ms(bus.hold.unwrap().until) - 100.0).abs() < 0.01);
-    wait_ms(&mut bus, 50.0);
-    assert_eq!(front(&bus), 0);
+    assert_eq!(front(&bus), 0, "swapped at its time");
+    // One later than its turn happens when it comes, and the next waits
+    // for the mark after it.
     wait_ms(&mut bus, 70.0);
     w(&mut bus, SWAPBUFFER_CMD, 0);
-    assert!((due_ms(bus.hold.unwrap().until) - 200.0).abs() < 0.01);
+    assert_eq!(front(&bus), 1, "a late swap isn't held");
+    w(&mut bus, SWAPBUFFER_CMD, 0);
+    assert!((due_ms(bus.hold.unwrap().until) - 150.0).abs() < 0.01);
     // A write behind the held swap waits for it.
     w(&mut bus, COLOR0, 0);
-    assert_eq!(front(&bus), 1);
-    assert!(bus.clock.now_ns() >= 200_000_000);
-    // Without the cap, swaps happen at once.
-    bus.set_voodoo_fps_cap(None);
-    w(&mut bus, SWAPBUFFER_CMD, 0);
     assert_eq!(front(&bus), 0);
+    assert!(bus.clock.now_ns() >= 150_000_000);
+    // Without the cap, swaps happen at once.
+    bus.set_fps_cap(None);
+    w(&mut bus, SWAPBUFFER_CMD, 0);
+    assert_eq!(front(&bus), 1);
+}
+
+#[test]
+fn a_swap_at_the_retrace_isnt_held_by_a_cap_at_the_cards_rate() {
+    let mut bus = bus(Board::Standard);
+    init(&mut bus);
+    let hz = bus.voodoo.as_ref().unwrap().refresh_hz();
+    // A cap at the card's own rate holds no swap that waits for the
+    // retrace: the retrace already keeps them to that rate.
+    bus.set_fps_cap(Some(hz.ceil() as u32));
+    for _ in 0..10 {
+        w(&mut bus, SWAPBUFFER_CMD, 1);
+        assert!(bus.hold.is_none(), "held at {} ns", bus.clock.now_ns());
+        w(&mut bus, COLOR0, 0);
+        wait_ms(&mut bus, 1.0);
+    }
+    // At half the rate, the swap waits for its turn, and then for a
+    // retrace: the one nearest its turn, every other retrace.
+    bus.set_fps_cap(Some((hz / 2.0).floor() as u32));
+    let mut shown = Vec::new();
+    for _ in 0..20 {
+        w(&mut bus, SWAPBUFFER_CMD, 1);
+        w(&mut bus, COLOR0, 0);
+        shown.push(bus.frame_cap.get().last().unwrap());
+    }
+    let frame = (1e9 / hz) as u64;
+    let gaps: Vec<u64> = shown.windows(2).map(|w| w[1] - w[0]).collect();
+    assert!(gaps[2..].iter().all(|&gap| gap.abs_diff(2 * frame) < 1000), "{:?} at {} Hz", gaps, hz);
 }
 
 #[test]
