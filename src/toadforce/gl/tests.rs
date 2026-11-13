@@ -449,6 +449,13 @@ impl Bench {
         self.within(name, 1, scene);
     }
 
+    /// `close` with the same colours. Where no texture is sampled the
+    /// card works out the colours of a line's and a point's pixels and
+    /// the host fills them in unchanged, so they agree on any GPU.
+    fn exact(&self, name: &str, scene: impl Fn(&mut Rig)) {
+        self.within(name, 0, scene);
+    }
+
     /// `close` with channels at most `channel` apart.
     fn within(&self, name: &str, channel: u32, scene: impl Fn(&mut Rig)) {
         let bound = Bound { channel, ..CLOSE };
@@ -2242,7 +2249,7 @@ fn lines_agree() {
         for last in [0, 1] {
             for (shade, flat_last) in [(2, 0), (1, 0), (1, 1)] {
                 let name = format!("lines centre {centre} last {last} shade {shade}/{flat_last}");
-                bench.close(&name, |rig| {
+                bench.exact(&name, |rig| {
                     rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
                     rig.states(&[
                         (RS_PIXEL_CENTRE, centre),
@@ -2256,7 +2263,10 @@ fn lines_agree() {
         }
     }
     for format in [Format::X8R8G8B8, Format::R5G6B5] {
-        let bound = close(Format::D24S8);
+        let bound = Bound {
+            channel: 0,
+            ..close(Format::D24S8)
+        };
         let declined = bench.compare("lines", format, Some(Format::D24S8), bound, |rig| {
             rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
             rig.states(&[(RS_ZENABLE, 1)]);
@@ -2265,20 +2275,20 @@ fn lines_agree() {
         assert_eq!(declined, 0);
     }
     // Cut by a viewport and by the scissor rectangle.
-    bench.close("lines in a viewport", |rig| {
+    bench.exact("lines in a viewport", |rig| {
         rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
         viewport(rig, 9, 14, 40, 31);
         lines(rig);
         viewport(rig, 0, 0, SIZE, SIZE);
     });
-    bench.close("lines in a scissor rectangle", |rig| {
+    bench.exact("lines in a scissor rectangle", |rig| {
         rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
         rig.run(|w| encode::scissor(w, true, [20, 5, 30, 44]));
         lines(rig);
         rig.run(|w| encode::scissor(w, false, [0; 4]));
     });
     // Behind and in front of a surface, with the depth written.
-    bench.close("lines depth-tested", |rig| {
+    bench.exact("lines depth-tested", |rig| {
         rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
         rig.states(&[(RS_ZENABLE, 1)]);
         rig.draw(&quad_z(0.0, 0.0, 64.0, 0xFF40_4040, 0.51));
@@ -2286,7 +2296,7 @@ fn lines_agree() {
         // And over the lines, a surface behind some of them.
         rig.draw(&quad_z(10.0, 10.0, 44.0, 0xFF00_8000, 0.4));
     });
-    bench.close("lines blended", |rig| {
+    bench.exact("lines blended", |rig| {
         rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
         rig.draw(&quad(8.0, 8.0, 40.0, 0xFF80_C020, 1.0));
         rig.states(&[
@@ -2297,7 +2307,7 @@ fn lines_agree() {
         lines(rig);
     });
     // The alpha test, by the alpha that changes along a line.
-    bench.close("lines alpha-tested", |rig| {
+    bench.exact("lines alpha-tested", |rig| {
         rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
         rig.states(&[
             (RS_ALPHATESTENABLE, 1),
@@ -2307,12 +2317,12 @@ fn lines_agree() {
         lines(rig);
     });
     // Fog by the specular colour's alpha, by depth and by w.
-    bench.close("lines fog vertex", |rig| {
+    bench.exact("lines fog vertex", |rig| {
         rig.states(&[(RS_FOGENABLE, 1), (RS_FOGCOLOR, 0x00A0_2060)]);
         lines(rig);
     });
     for by_w in [0, 1] {
-        bench.close(&format!("lines fog table by w {by_w}"), |rig| {
+        bench.exact(&format!("lines fog table by w {by_w}"), |rig| {
             let (start, end) = match by_w {
                 0 => (0.2f32, 0.9f32),
                 _ => (1.0, 4.5),
@@ -2330,7 +2340,7 @@ fn lines_agree() {
     }
     // Lines whose 1 / w falls to a quarter in less than a pixel: the
     // host gets the pixel's own values at every corner of its square.
-    bench.close("lines whose w runs out", |rig| {
+    bench.exact("lines whose w runs out", |rig| {
         rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
         rig.states(&[
             (RS_ZENABLE, 1),
@@ -2345,6 +2355,16 @@ fn lines_agree() {
         ]
         .concat();
         draw_as(rig, 2, &short);
+    });
+    // A line whose last pixel's centre is past its end, where its
+    // 1 / w is below 0: the software renderer draws the pixel, so the
+    // host has to as well.
+    bench.exact("a line whose w runs out past its end", |rig| {
+        rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
+        rig.states(&[(RS_ZENABLE, 1), (RS_PIXEL_CENTRE, 0), (RS_LASTPIXEL, 1)]);
+        let mut ends = line(40.0, 40.0, 60.0, 49.7);
+        ends[1].rhw = 1e-4;
+        draw_as(rig, 2, &ends);
     });
     // A texture along the lines, with perspective: the nearest texel,
     // the linear filter, and mip levels by the coordinates' change
@@ -2397,7 +2417,7 @@ fn points_agree() {
     };
     for centre in [0, 1] {
         for size in [0.25f32, 1.0, 1.5, 2.0, 3.0, 7.25, 100.0] {
-            bench.close(&format!("points centre {centre} size {size}"), |rig| {
+            bench.exact(&format!("points centre {centre} size {size}"), |rig| {
                 rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
                 rig.states(&[(RS_PIXEL_CENTRE, centre), (RS_POINTSIZE, size.to_bits())]);
                 points(rig);
@@ -2405,7 +2425,7 @@ fn points_agree() {
         }
     }
     // The limits of the size, and a size in each vertex.
-    bench.close("points size limits", |rig| {
+    bench.exact("points size limits", |rig| {
         rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
         rig.states(&[
             (RS_POINTSIZE_MIN, 2.5f32.to_bits()),
@@ -2416,7 +2436,7 @@ fn points_agree() {
             points(rig);
         }
     });
-    bench.close("points sized by the vertex", |rig| {
+    bench.exact("points sized by the vertex", |rig| {
         rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
         rig.states(&[(RS_POINTSIZE, 9.0f32.to_bits())]);
         let mut list = Vec::new();
@@ -2428,7 +2448,7 @@ fn points_agree() {
         rig.run(|w| encode::draw(w, 1, FVF_SIZED, places.len() as u32, &list));
     });
     // Depth-tested, blended and fogged.
-    bench.close("points depth-tested and blended", |rig| {
+    bench.exact("points depth-tested and blended", |rig| {
         rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
         rig.states(&[(RS_ZENABLE, 1), (RS_POINTSIZE, 9.0f32.to_bits())]);
         rig.draw(&quad_z(0.0, 0.0, 64.0, 0xFF40_4040, 0.45));
