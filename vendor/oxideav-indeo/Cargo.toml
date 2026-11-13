@@ -1,0 +1,29 @@
+[package]
+name = "oxideav-indeo"
+version = "0.0.4"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/OxideAV/oxideav-indeo"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust Intel Indeo video codec family (Indeo 2 / 3 / 4 / 5) for the oxideav framework"
+
+readme = "README.md"
+homepage = "https://github.com/OxideAV/oxideav-indeo"
+keywords = ["multimedia", "video", "indeo", "rt21", "codec"]
+categories = ["multimedia::encoding", "multimedia::video"]
+exclude = ["/tests", "/fuzz", "/benches"]
+
+[dependencies]
+oxideav-core = "0.1"
+
+[dev-dependencies]
+# Criterion drives the decode benchmarks, on the same 0.5 line as the
+# other OxideAV crates with benches.
+criterion = "0.5"
+
+# `indeo3_decode` times the Indeo 3 picture decoder over the two staged
+# IV32 corpora in tests/data/.
+[[bench]]
+name = "indeo3_decode"
+harness = false

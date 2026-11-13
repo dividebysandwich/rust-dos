@@ -252,7 +252,7 @@ fn bound(c: &mut Context) -> &mut Texture {
 }
 
 /// The texture `name` of the current context, as it is now.
-pub fn texture(c: &Context, name: u32) -> Option<&Texture> {
+pub fn texture(c: &super::Settings, name: u32) -> Option<&Texture> {
     c.textures.iter().find(|t| t.name == name)
 }
 

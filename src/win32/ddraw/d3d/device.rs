@@ -17,6 +17,7 @@ use super::super::{
     DDERR_INVALIDPIXELFORMAT, V_D3D1, V_D3D2, V_D3D3, V_D3D7, V_DEVICE1, V_DEVICE2, V_DEVICE3,
     V_SURFACE1, V_SURFACE4, V_SURFACE7, V_VIEWPORT1, V_VIEWPORT2, V_VIEWPORT3, state,
 };
+use super::super::stamp::Stamped;
 use super::pipeline::{IDENTITY, Matrix};
 use super::{
     D3D_OK, D3DERR_NOCURRENTVIEWPORT, D3DERR_NOVIEWPORTS, D3DERR_SCENE_IN_SCENE,
@@ -85,9 +86,51 @@ pub struct Begin {
     pub indices: Vec<u32>,
 }
 
-/// A device.
+/// A device: what its draws are made from (`Drawn`, whose fields are
+/// read and written as the device's own), and what it keeps beside
+/// that.
+///
+/// The first is stamped (`stamp::Stamped`): every change to it gives
+/// the device a new stamp, and what the HAL derived from the device for
+/// one draw holds for the next while the stamp is the same
+/// (`hal::toadforce::bind`). The fields here are the ones a draw
+/// changes itself or that no draw is made from, which would otherwise
+/// change the stamp with every draw.
 #[derive(Clone, Debug, Default)]
 pub struct Device {
+    drawn: Stamped<Drawn>,
+    pub in_scene: bool,
+    /// D3DCLIPSTATUS's words.
+    pub clip_status: [u32; 8],
+    /// D3DSTATS's counts: triangles, lines, points, spans, vertices.
+    pub stats: [u32; 5],
+    pub begin: Option<Begin>,
+    /// The state blocks, by their handles less 1, and the one being
+    /// recorded.
+    pub blocks: Vec<Option<Vec<Change>>>,
+    pub recording: Option<Vec<Change>>,
+}
+
+impl std::ops::Deref for Device {
+    type Target = Drawn;
+
+    fn deref(&self) -> &Drawn {
+        &self.drawn
+    }
+}
+
+/// Any change to what draws are made from: the device's stamp changes
+/// with it.
+impl std::ops::DerefMut for Device {
+    fn deref_mut(&mut self) -> &mut Drawn {
+        &mut self.drawn
+    }
+}
+
+/// What a device's draws are made from: its states, textures,
+/// transforms, lights and viewport, and the surfaces it draws into.
+#[derive(Clone, Debug, Default)]
+pub struct Drawn {
     /// The version of IDirect3D it was made through: 1 (a surface's), 2,
     /// 3 or 7.
     pub version: u32,
@@ -104,7 +147,6 @@ pub struct Device {
     pub depth: u32,
     /// The card's texture units.
     pub tmus: u32,
-    pub in_scene: bool,
     /// The render states, by their number; the light states.
     pub render: Vec<u32>,
     pub light_states: Vec<u32>,
@@ -123,20 +165,11 @@ pub struct Device {
     pub lights: Vec<LightSlot>,
     /// The user's clip planes.
     pub planes: Vec<[f32; 4]>,
-    /// D3DCLIPSTATUS's words.
-    pub clip_status: [u32; 8],
     /// The viewports added to it (objects and the interfaces it holds),
     /// and the current one.
     pub viewports: Vec<(u32, u32)>,
     pub current: (u32, u32),
     pub handles: Vec<Handle>,
-    /// D3DSTATS's counts: triangles, lines, points, spans, vertices.
-    pub stats: [u32; 5],
-    pub begin: Option<Begin>,
-    /// The state blocks, by their handles less 1, and the one being
-    /// recorded.
-    pub blocks: Vec<Option<Vec<Change>>>,
-    pub recording: Option<Vec<Change>>,
     /// What OpenGL (`win32::opengl32`) draws with that Direct3D 7
     /// hasn't: the scissor box (left, top, right, bottom on the
     /// target), the depth bias in steps of the 16-bit depth buffer, and
@@ -182,39 +215,85 @@ crate::state_fields!(Begin {
     count,
     indices
 });
-crate::state_fields!(Device {
-    version,
-    ddraw,
-    target,
-    target_iface,
-    depth,
-    tmus,
-    in_scene,
-    render,
-    light_states,
-    stages,
-    textures,
-    transforms,
-    bound,
-    viewport,
-    material,
-    lights,
-    planes,
-    clip_status,
-    viewports,
-    current,
-    handles,
-    stats,
-    begin,
-    blocks,
-    recording,
-    scissor,
-    depth_bias,
-    color_off,
-    tnl
-} skip {
-    gl_pixel_centres
-});
+// The fields in the order a device had them as one struct, which is
+// the order a saved state has them in. `gl_pixel_centres` isn't saved
+// (see the field). A loaded device has a new stamp.
+impl crate::savestate::State for Device {
+    fn save(&self, w: &mut crate::savestate::Writer) {
+        let d: &Drawn = self;
+        d.version.save(w);
+        d.ddraw.save(w);
+        d.target.save(w);
+        d.target_iface.save(w);
+        d.depth.save(w);
+        d.tmus.save(w);
+        self.in_scene.save(w);
+        d.render.save(w);
+        d.light_states.save(w);
+        d.stages.save(w);
+        d.textures.save(w);
+        d.transforms.save(w);
+        d.bound.save(w);
+        d.viewport.save(w);
+        d.material.save(w);
+        d.lights.save(w);
+        d.planes.save(w);
+        self.clip_status.save(w);
+        d.viewports.save(w);
+        d.current.save(w);
+        d.handles.save(w);
+        self.stats.save(w);
+        self.begin.save(w);
+        self.blocks.save(w);
+        self.recording.save(w);
+        d.scissor.save(w);
+        d.depth_bias.save(w);
+        d.color_off.save(w);
+        d.tnl.save(w);
+    }
+
+    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        let Device {
+            drawn,
+            in_scene,
+            clip_status,
+            stats,
+            begin,
+            blocks,
+            recording,
+        } = self;
+        let d: &mut Drawn = drawn;
+        d.version.load(r)?;
+        d.ddraw.load(r)?;
+        d.target.load(r)?;
+        d.target_iface.load(r)?;
+        d.depth.load(r)?;
+        d.tmus.load(r)?;
+        in_scene.load(r)?;
+        d.render.load(r)?;
+        d.light_states.load(r)?;
+        d.stages.load(r)?;
+        d.textures.load(r)?;
+        d.transforms.load(r)?;
+        d.bound.load(r)?;
+        d.viewport.load(r)?;
+        d.material.load(r)?;
+        d.lights.load(r)?;
+        d.planes.load(r)?;
+        clip_status.load(r)?;
+        d.viewports.load(r)?;
+        d.current.load(r)?;
+        d.handles.load(r)?;
+        stats.load(r)?;
+        begin.load(r)?;
+        blocks.load(r)?;
+        recording.load(r)?;
+        d.scissor.load(r)?;
+        d.depth_bias.load(r)?;
+        d.color_off.load(r)?;
+        d.tnl.load(r)
+    }
+}
 
 /// The version of IDirect3DDevice a vtable is.
 pub fn version(vtable: usize) -> u32 {
@@ -338,7 +417,7 @@ pub const TRANSFORMS: usize = 24;
 
 impl Device {
     pub fn new(version: u32, ddraw: u32, target: u32, target_iface: u32, tmus: u32) -> Device {
-        let mut d = Device {
+        let mut d = Drawn {
             version,
             ddraw,
             target,
@@ -350,7 +429,7 @@ impl Device {
             textures: vec![0; STAGES as usize],
             transforms: vec![IDENTITY; TRANSFORMS],
             planes: vec![[0.0; 4]; 6],
-            ..Device::default()
+            ..Drawn::default()
         };
         let one = 1.0f32.to_bits();
         let defaults = [
@@ -424,7 +503,16 @@ impl Device {
                 d.stages[(s * 32 + t) as usize] = v;
             }
         }
-        d
+        Device {
+            drawn: Stamped::new(d),
+            ..Device::default()
+        }
+    }
+
+    /// The stamp of what the device's draws are made from: the same
+    /// for as long as none of it changed.
+    pub fn stamp(&self) -> u64 {
+        Stamped::stamp(&self.drawn)
     }
 
     pub fn stage(&self, stage: u32, kind: u32) -> u32 {

@@ -37,7 +37,7 @@ use super::super::ddraw::surface::{
 };
 use super::super::ddraw::{self, Format, V_DD7, V_DEVICE7, V_SURFACE7, voodoo};
 use super::super::glide::hw::Card;
-use super::{Context, DLL, context_index, current, hglrc, new_context, state};
+use super::{DLL, context_index, current, hglrc, new_context, state};
 use crate::cpu::Cpu;
 
 const TRUE: u32 = 1;
@@ -1035,7 +1035,7 @@ pub fn get_extensions_string(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// vertices where OpenGL's whole viewport puts them, for one that goes
 /// past the buffers' edges (the identity for one inside them). None if
 /// none of it is on the buffers.
-pub fn inner_viewport(c: &Context) -> Option<(Viewport7, Matrix)> {
+pub fn inner_viewport(c: &super::Settings) -> Option<(Viewport7, Matrix)> {
     let [x, y, w, h] = c.viewport.map(i64::from);
     let (width, height) = (i64::from(c.width), i64::from(c.height));
     let (left, right) = (x.max(0), (x + w).min(width));
