@@ -149,7 +149,9 @@ fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
             }
         }
         VIEWPORT => {
-            if let (Some(v), Some(i)) = (words(6).map(|v| v.to_vec()), inner(cpu, id)) {
+            if let (Some(v), Some(i)) = (words(6).map(|v| v.to_vec()), inner(cpu, id))
+                && inner_states::viewport_words(&i.viewport)[..] != v[..]
+            {
                 i.viewport = Viewport7 {
                     x: v[0],
                     y: v[1],
@@ -168,21 +170,27 @@ fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
             }
         }
         LIGHT => {
-            if let (Some(l), Some(i)) = (words(26).map(|v| v.to_vec()), inner(cpu, id)) {
+            if let (Some(l), Some(i)) = (words(26).map(|v| v.to_vec()), inner(cpu, id))
+                && i.lights.iter().find(|s| s.index == c.a).is_none_or(|s| s.light[..] != l[..])
+            {
                 inner_states::light_slot(i, c.a).light.copy_from_slice(&l);
             }
         }
         LIGHT_ENABLE => {
-            if let Some(i) = inner(cpu, id) {
-                inner_states::light_slot(i, c.a).enabled = c.b != 0;
+            let on = c.b != 0;
+            if let Some(i) = inner(cpu, id)
+                && i.lights.iter().find(|s| s.index == c.a).is_none_or(|s| s.enabled != on)
+            {
+                inner_states::light_slot(i, c.a).enabled = on;
             }
         }
         TEXTURE => set_texture_now(cpu, id, c.a, value),
         PLANE => {
+            let at = c.a as usize;
             if let (Some(p), Some(i)) = (words(4).map(|v| v.to_vec()), inner(cpu, id))
-                && let Some(plane) = i.planes.get_mut(c.a as usize)
+                && i.planes.get(at).is_some_and(|plane| plane.map(f32::to_bits)[..] != p[..])
             {
-                *plane = std::array::from_fn(|k| f32::from_bits(p[k]));
+                i.planes[at] = std::array::from_fn(|k| f32::from_bits(p[k]));
             }
         }
         STREAM => {

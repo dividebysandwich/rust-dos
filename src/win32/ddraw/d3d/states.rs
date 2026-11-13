@@ -103,21 +103,27 @@ fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
             }
         }
         CHANGE_LIGHT => {
-            if let (Some(d), Ok(l)) = (get(cpu, id), <[u32; 26]>::try_from(&c.data[..])) {
+            if let (Some(d), Ok(l)) = (get(cpu, id), <[u32; 26]>::try_from(&c.data[..]))
+                && d.lights.iter().find(|s| s.index == c.a).is_none_or(|s| s.light != l)
+            {
                 light_slot(d, c.a).light = l;
             }
         }
         CHANGE_LIGHT_ENABLE => {
-            if let Some(d) = get(cpu, id) {
-                light_slot(d, c.a).enabled = c.b != 0;
+            let on = c.b != 0;
+            if let Some(d) = get(cpu, id)
+                && d.lights.iter().find(|s| s.index == c.a).is_none_or(|s| s.enabled != on)
+            {
+                light_slot(d, c.a).enabled = on;
             }
         }
         CHANGE_TEXTURE => set_stage_texture(cpu, id, c.a, value),
         CHANGE_PLANE => {
+            let at = c.a as usize;
             if let (Some(d), Ok(p)) = (get(cpu, id), <[u32; 4]>::try_from(&c.data[..]))
-                && let Some(plane) = d.planes.get_mut(c.a as usize)
+                && d.planes.get(at).is_some_and(|plane| plane.map(f32::to_bits) != p)
             {
-                *plane = p.map(f32::from_bits);
+                d.planes[at] = p.map(f32::from_bits);
             }
         }
         _ => {}
@@ -161,7 +167,9 @@ fn current(d: &Device, c: &Change) -> Change {
     change(c.kind, c.a, b, data)
 }
 
-fn viewport_words(v: &Viewport7) -> [u32; 6] {
+/// A viewport as the words a change has: the depths' to the last bit,
+/// so that two viewports are the same when their words are.
+pub fn viewport_words(v: &Viewport7) -> [u32; 6] {
     [
         v.x,
         v.y,
