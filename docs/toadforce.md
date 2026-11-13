@@ -1308,6 +1308,14 @@ DLLs are the emulator's.
   (`Bus::toadforce_submit`), so both run one decoder. Blits the card
   doesn't do as DirectDraw's own code does (stretches, which sample
   differently, mirrors, destination keys) stay with that code.
+- **The frame rate cap.** The card's presents are the built-in
+  Windows': DirectDraw's flips (Direct3D 8's full-screen `Present`
+  among them), blits to the primary surface, and the windowed presents
+  of `SwapBuffers` and Direct3D 8. `fps_cap` holds them back there
+  (`win32::pace`), before the card gets its `FLIP` or `BLT`, as it does
+  on every other card; the card has no cap of its own (CONFIGURATION.md's
+  "Frame rate cap"). A guest's driver writing `FLIP` to the ring would
+  get none: there is no such driver yet.
 - **The queue.** The words handed over that way wait in a queue and
   run together, in their order. A game's draws are small, and one by
   itself is a few rows on one thread; a queue of them goes to the
@@ -1704,7 +1712,10 @@ Volume 1 with both of the card's renderers.
 
 Measured on 2026-11-13 on the development machine, with nothing else
 running on it: real time, `cycles=max`, the window hidden, sound on a
-muted WASAPI device. The build is #992's last commit (`54dc652b`),
+muted WASAPI device. These runs came before the frame rate cap
+covered every card; a measurement of how fast a game can draw now runs
+with `fps_cap=off` (or `--fps-cap off`), as the cap's 60 by default
+would hold a faster game to 60. The build is #992's last commit (`54dc652b`),
 whose code is main's after #992 (`0f096bb4`) but for MCI video. The
 runs marked * are of that build with an uncommitted first version of
 the reason counter of `declined_for`, which draws the same; their

@@ -1632,24 +1632,28 @@ address mapped to when it was set.
   [Start the emulator](#1-start-the-emulator)). `SDL_VIDEO_DRIVER=dummy`
   and `--hidden` alone take the null output, so a timing run on a real
   device has to set `SDL_AUDIO_DRIVER` as well.
-- **Measuring speed.** `/api/stats` reports `mips` (host speed while
+- **Measuring speed.** A frame rate measured through a run is at most the
+  frame rate cap (`fps_cap`, 60 by default, CONFIGURATION.md's "Frame rate
+  cap"), which holds the 3dfx card's swaps and the built-in Windows'
+  presents: start a run that measures how fast a game draws with
+  `--fps-cap off`, and check `video.fps_cap` in `/api/status` (null for off)
+  before quoting a frame rate. `/api/stats` reports `mips` (host speed while
   executing guest code), `emulated_mips` (guest instructions per wall-clock
   second) and the decode-cache hit rate, averaged over about a second. Its
   `frame` object has the settings window's Stats page numbers and the
   emulated speed over the last quarter second: the game runs at full speed
   when `emulated_speed` (emulated seconds a wall second) stays near 1,
   `frame.fps` is the frames the program draws a second (the top-level `fps`
-  counts the window's frames), and `cpu_use` is the percent of the wall
-  time the emulator's main thread works (running the machine and drawing
-  the picture), so 100 minus it is that thread's time to spare, on one host
+  counts the window's frames), and `cpu_use` is the percent of the wall time
+  the emulator's main thread works (running the machine and drawing the
+  picture), so 100 minus it is that thread's time to spare, on one host
   core. `audio_driver` is what played the sound during the run. Its
-  `frame_times` object covers the host's last 1024 frames while the
-  machine runs (about 17 s at 60 frames a second), from one start of the
-  main loop to the next, waiting included: `frames` and `seconds` (how
-  many so far, and how long they took), `longest_ms`, and the
-  nearest-rank percentiles `p50_ms`, `p90_ms` and `p99_ms`. Use a release
-  build and a CPU-bound scene, such as the Stunts intro, when comparing
-  emulator changes.
+  `frame_times` object covers the host's last 1024 frames while the machine
+  runs (about 17 s at 60 frames a second), from one start of the main loop
+  to the next, waiting included: `frames` and `seconds` (how many so far,
+  and how long they took), `longest_ms`, and the nearest-rank percentiles
+  `p50_ms`, `p90_ms` and `p99_ms`. Use a release build and a CPU-bound
+  scene, such as the Stunts intro, when comparing emulator changes.
 - **Every frame's time with `/api/frames`.** For the frames of a whole
   run, such as how many took over 50 ms, ask `/api/frames?after=N` at
   least once every 1024 frames, each time with the `count` the answer
