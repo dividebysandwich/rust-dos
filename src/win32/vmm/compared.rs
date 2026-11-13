@@ -1,5 +1,5 @@
-//! Programs of the Windows 98 era
-//! read VMM's locked code object, which VMM_GetVxDLocationList reports,
+//! Programs of the Windows 98 era read
+//! VMM's locked code object, which VMM_GetVxDLocationList reports,
 //! and look in it for these, byte for byte.
 /// Code of Simulate_Iret's case of a 16-bit protected-mode client: it
 /// pops IP, CS and FLAGS from the client's stack (at FS:Client_SP) into
