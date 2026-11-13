@@ -395,6 +395,10 @@ pub struct DirectDrawInfo {
     /// exclusive mode.
     pub mode_owner: u32,
     pub exclusive: u32,
+    /// The times Direct3D's HAL on a ToadForce brought the card's
+    /// state up to a device's for a draw, and those of them that found
+    /// it there already (`hal::toadforce::bind`).
+    pub binds: [u64; 2],
     pub surfaces: Vec<SurfaceInfo>,
 }
 

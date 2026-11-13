@@ -740,6 +740,11 @@ pub fn service(cpu: &mut Cpu, id: u16) {
         // built-in Windows doesn't have.
         _ => {
             cpu.bus.win32.calls = cpu.bus.win32.calls.wrapping_add(1);
+            // OpenGL's draws that wait are drawn before a function
+            // that may read what they draw or change what they name.
+            if cpu.bus.win32.opengl32.waiting.is_some() {
+                opengl32::flush_before(cpu, id);
+            }
             if id >= FIRST_MISSING {
                 missing(cpu, id - FIRST_MISSING);
             } else if crate::win16::in_16bit_code(cpu) {

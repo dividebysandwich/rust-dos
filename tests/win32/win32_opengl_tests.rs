@@ -631,6 +631,103 @@ fn the_color_mask_on_a_toadforce_writes_the_channels_it_lets_through() {
     assert_eq!(pixel(&cpu, data, 60, 60), [0, 0, 255]);
 }
 
+#[test]
+fn draws_of_one_state_on_a_toadforce_reach_direct3d_as_one() {
+    // Three triangles, the last over the first, with a call of the
+    // function `between` after the first: how often Direct3D's HAL
+    // set the card up for a draw.
+    let binds = |name: &str, between: Option<(usize, u32)>| {
+        let (exe, data) = program(&data(), |a, l| {
+            let mut c = Calls { next: 0 };
+            start(a, l, &mut c)?;
+            let both = [Arg::I(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)];
+            c.api(a, l, CLEAR, &both)?;
+            triangle(a, l, &mut c, [1.0, 0.0, 0.0], BOTTOM_LEFT)?;
+            if let Some((function, cap)) = between {
+                c.api(a, l, function, &[Arg::I(cap)])?;
+            }
+            triangle(a, l, &mut c, [0.0, 1.0, 0.0], TOP_RIGHT)?;
+            triangle(a, l, &mut c, [0.0, 0.0, 1.0], BOTTOM_LEFT)?;
+            read_back(a, l, &mut c)?;
+            finish(a, l)
+        });
+        let mut cpu = machine_on(name, Draws::ToadForce, exe);
+        run_until_done(&mut cpu, data);
+        card_drew(&cpu, Draws::ToadForce);
+        // In the order they were given: the third over the first.
+        assert_eq!(pixel(&cpu, data, 4, 4), [0, 0, 255], "{name}");
+        assert_eq!(pixel(&cpu, data, 60, 60), [0, 255, 0], "{name}");
+        rust_dos::win32::snapshot::ddraw(&cpu).binds[0]
+    };
+    assert_eq!(binds("waiting_one", None), 1);
+    // A capability set to what it is leaves the state the same.
+    assert_eq!(binds("waiting_same", Some((DISABLE, GL_DEPTH_TEST))), 1);
+    // With another state the draws after it are a draw of their own.
+    assert_eq!(binds("waiting_two", Some((ENABLE, GL_DEPTH_TEST))), 2);
+}
+
+#[test]
+fn a_draw_on_a_toadforce_has_its_texture_as_it_was_when_it_was_given() {
+    let mut d = data();
+    for i in 0..4 {
+        put(&mut d, TEXELS + 4 * i, &[255, 0, 0, 255]);
+        put(&mut d, TEXELS + 0x40 + 4 * i, &[0, 255, 0, 255]);
+    }
+    put_f32s(
+        &mut d,
+        VERTICES,
+        &[
+            -1.0, -1.0, 0.0, 1.0, -1.0, 0.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0,
+        ],
+    );
+    put_f32s(
+        &mut d,
+        TEX_COORDS,
+        &[0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0],
+    );
+    for (i, v) in [0u32, 1, 2, 0, 2, 3].iter().enumerate() {
+        put32(&mut d, INDICES + 4 * i as u32, *v);
+    }
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        c.api(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(TEXTURE)])?;
+        c.api(a, l, ENABLE_CLIENT_STATE, &[Arg::I(GL_VERTEX_ARRAY)])?;
+        let vertices = [Arg::I(3), Arg::I(GL_FLOAT), Arg::I(0), Arg::At(VERTICES)];
+        c.api(a, l, VERTEX_POINTER, &vertices)?;
+        c.api(a, l, ENABLE_CLIENT_STATE, &[Arg::I(GL_TEXTURE_COORD_ARRAY)])?;
+        let coords = [Arg::I(2), Arg::I(GL_FLOAT), Arg::I(0), Arg::At(TEX_COORDS)];
+        c.api(a, l, TEX_COORD_POINTER, &coords)?;
+        let replace = [
+            Arg::I(GL_TEXTURE_ENV),
+            Arg::I(GL_TEXTURE_ENV_MODE),
+            Arg::I(GL_REPLACE),
+        ];
+        let quad = [
+            Arg::I(GL_TRIANGLES),
+            Arg::I(6),
+            Arg::I(GL_UNSIGNED_INT),
+            Arg::At(INDICES),
+        ];
+        // The window in red texels, then the texture's image again in
+        // green and the right half of the window with that.
+        texture_2x2(a, l, &mut c, TEXTURE, TEXELS)?;
+        c.api(a, l, TEX_ENVI, &replace)?;
+        c.api(a, l, DRAW_ELEMENTS, &quad)?;
+        texture_2x2(a, l, &mut c, TEXTURE, TEXELS + 0x40)?;
+        let right = [Arg::I(32), Arg::I(0), Arg::I(32), Arg::I(64)];
+        c.api(a, l, VIEWPORT, &right)?;
+        c.api(a, l, DRAW_ELEMENTS, &quad)?;
+        read_back(a, l, &mut c)?;
+        finish(a, l)
+    });
+    let mut cpu = machine_on("waiting_texture", Draws::ToadForce, exe);
+    run_until_done(&mut cpu, data);
+    card_drew(&cpu, Draws::ToadForce);
+    assert_eq!(pixel(&cpu, data, 16, 32), [255, 0, 0]);
+    assert_eq!(pixel(&cpu, data, 48, 32), [0, 255, 0]);
+}
+
 /// Draw a triangle of color `rgb` with the corners `corners`.
 fn triangle(
     a: &mut CodeAssembler,
