@@ -3879,6 +3879,137 @@ fn a_toadforce_tests_depth_blends_and_fogs() {
     assert_rgb(&p, 32, 48, [128, 255, 128], 12);
 }
 
+/// The render target's pixels after `scene` on a ToadForce, with the
+/// HAL's binds: all of them, and those that found the card's state
+/// right already (`hal::toadforce::bind`). A debug build binds again
+/// on each of those and stops if that sends the card anything.
+fn scene_binds(test: &str, scene: &Scene) -> (Vec<u16>, [u64; 2]) {
+    let mut checked = Vec::new();
+    let (exe, data) = scene_program_with(scene, 16, false, &mut checked);
+    let mut cpu = machine_toadforce(test, exe);
+    run_until_done(&mut cpu, data);
+    drew_on_the_card(&cpu, scene);
+    let n = peek(&cpu, data + CALLS);
+    let r = results(&cpu, data, n);
+    assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+    let pixels = (0..64 * 64)
+        .map(|i| {
+            let at = data + PIXELS + 2 * i;
+            (peek(&cpu, at & !3) >> (8 * (at & 2))) as u16
+        })
+        .collect();
+    (pixels, rust_dos::win32::snapshot::ddraw(&cpu).binds)
+}
+
+#[test]
+fn a_toadforce_keeps_its_state_for_draws_of_the_same_states() {
+    // Three draws with nothing set between them: the first binds the
+    // card's state, the others find it there.
+    let third = |n: f32| quad(21.0 * n, 0.0, 21.0 * (n + 1.0), 64.0, 0.5, RED);
+    let scene = toadforce_scene(vec![
+        Step::Draw(third(0.0)),
+        Step::Draw(third(1.0)),
+        Step::Draw(third(2.0)),
+    ]);
+    let (p, binds) = scene_binds("toadforce_kept", &scene);
+    assert_eq!(binds, [3, 2]);
+    for x in [10, 31, 52] {
+        assert_rgb(&p, x, 30, [255, 0, 0], 0);
+    }
+
+    // A state set to the value it has is no change either.
+    let scene = toadforce_scene(vec![
+        Step::State(RS_SHADEMODE, 2),
+        Step::Draw(third(0.0)),
+        Step::State(RS_SHADEMODE, 2),
+        Step::Stage(TSS_COLOROP, TOP_MODULATE),
+        Step::Draw(third(1.0)),
+    ]);
+    let (_, binds) = scene_binds("toadforce_kept_same", &scene);
+    assert_eq!(binds, [2, 1]);
+}
+
+#[test]
+fn a_toadforce_draw_after_a_change_has_the_new_state() {
+    let green = [0x07E0; 64];
+    let (left, right) = (
+        quad(0.0, 0.0, 32.0, 64.0, 0.5, WHITE),
+        quad(32.0, 0.0, 64.0, 64.0, 0.5, WHITE),
+    );
+    let draws = |before: Vec<Step>, change: Vec<Step>| {
+        let mut steps = before;
+        steps.push(Step::Draw(left.clone()));
+        steps.extend(change);
+        steps.push(Step::Draw(right.clone()));
+        steps
+    };
+    type Case = (&'static str, bool, Vec<Step>, Vec<Step>, [u32; 3]);
+    let cases: Vec<Case> = vec![
+        // A render state: the second quad is added to the blue behind
+        // it.
+        (
+            "render",
+            false,
+            vec![Step::State(RS_SRCBLEND, 2), Step::State(RS_DESTBLEND, 2)],
+            vec![Step::State(RS_ALPHABLENDENABLE, 1)],
+            [0, 255, 255],
+        ),
+        // A stage state: the second quad has the vertices' white in
+        // place of the texture's green.
+        (
+            "stage",
+            false,
+            vec![],
+            vec![Step::Stage(TSS_COLOROP, TOP_SELECTARG2)],
+            [255, 255, 255],
+        ),
+        // The texture's surface: with its color key set, the second
+        // quad's texels are all left out. Where the card samples the
+        // texture, and of the HAL's copy of one in system memory.
+        (
+            "key",
+            false,
+            vec![Step::State(RS_COLORKEYENABLE, 1)],
+            vec![Step::Key(0x07E0)],
+            [0, 0, 255],
+        ),
+        (
+            "key_copy",
+            true,
+            vec![Step::State(RS_COLORKEYENABLE, 1)],
+            vec![Step::Key(0x07E0)],
+            [0, 0, 255],
+        ),
+    ];
+    for (name, texture_system, before, change, want) in cases {
+        let scene = Scene {
+            clear: BLUE,
+            texture: Some(green),
+            texture_system,
+            ..toadforce_scene(draws(before, change))
+        };
+        let (p, binds) = scene_binds(&format!("toadforce_change_{name}"), &scene);
+        assert_eq!(binds, [2, 0], "{name}");
+        assert_rgb(&p, 16, 30, [0, 255, 0], 0);
+        assert_rgb(&p, 48, 30, want, 0);
+    }
+
+    // A clear takes the card's state to set the target: the draw after
+    // it binds anew, and draws over what was cleared.
+    let scene = Scene {
+        clear: BLUE,
+        ..toadforce_scene(vec![
+            Step::Draw(left.clone()),
+            Step::Clear(D3DCLEAR_TARGET, RED),
+            Step::Draw(right.clone()),
+        ])
+    };
+    let (p, binds) = scene_binds("toadforce_change_clear", &scene);
+    assert_eq!(binds, [2, 0]);
+    assert_rgb(&p, 16, 30, [255, 0, 0], 0);
+    assert_rgb(&p, 48, 30, [255, 255, 255], 0);
+}
+
 #[test]
 fn a_toadforce_draws_direct3d_6_flat_shading_points_and_lines() {
     let scene = Scene {

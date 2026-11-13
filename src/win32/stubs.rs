@@ -470,6 +470,7 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     };
     cpu.set_eip(cpu.eip().wrapping_add(4));
     let esp = cpu.esp();
+    let profile = crate::profile::zone(crate::profile::Zone::Win32Args);
     // The arguments, in an array on the stack unless there are more than
     // 16: this runs for every call the program makes.
     let mut few = [0u32; 16];
@@ -481,9 +482,22 @@ pub fn call(cpu: &mut Cpu, id: u16) {
             &mut many
         }
     };
-    for (i, arg) in args.iter_mut().enumerate() {
-        *arg = cpu.bus.guest_read_32(esp.wrapping_add(4 + 4 * i as u32));
+    // Read in one piece: the page tables are walked once for each
+    // page the arguments are on, which is one for nearly every call.
+    let mut raw = [0u8; 64];
+    let mut more = Vec::new();
+    let raw: &mut [u8] = match raw.get_mut(..4 * args.len()) {
+        Some(raw) => raw,
+        None => {
+            more.resize(4 * args.len(), 0);
+            &mut more
+        }
+    };
+    cpu.bus.guest_read_bytes(esp.wrapping_add(4), raw);
+    for (arg, word) in args.iter_mut().zip(raw.as_chunks::<4>().0) {
+        *arg = u32::from_le_bytes(*word);
     }
+    drop(profile);
     let args = &*args;
     if cpu.bus.guest_faulted() {
         return;
@@ -498,7 +512,12 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     if cpu.bus.toadforce_queued() && settles(id) {
         super::screen::settle(cpu);
     }
-    let result = (api.handler)(cpu, args);
+    let result = {
+        let _profile = std::ptr::eq(dll, &super::opengl32::DLL)
+            .then(|| crate::profile::zone(crate::profile::Zone::OpenGlCall));
+        (api.handler)(cpu, args)
+    };
+    let _profile = crate::profile::zone(crate::profile::Zone::Win32After);
     // File mappings no handle or view holds go, then the files whose
     // last handle the function closed close in DOS.
     if !cpu.bus.win32.sections.is_empty() && super::kernel32::sweep_mappings(cpu) {
