@@ -1702,72 +1702,156 @@ Volume 1 with both of the card's renderers.
 
 ### Frame rates against the target
 
-Measured in real time with `cycles=max`, alone on the development
-machine, sound on a muted device. Each is one run of 20 seconds, so a
-rough figure.
+Measured on 2026-11-13 on the development machine, with nothing else
+running on it: real time, `cycles=max`, the window hidden, sound on a
+muted WASAPI device. The build is main after #992 (`0f096bb4`); the
+runs marked * are of that build with the reason counter of
+`declined_for` added, which draws the same. Each run reaches play by
+a scripted route, checked on a screenshot before and after, and then
+counts the card's flips (`SwapBuffers` presents in Oni and MDK2) over
+two windows of 20 seconds, one after the other in the same session.
+The table gives both.
 
-| Game and scene | ToadForce, software | ToadForce, OpenGL | Voodoo3, software | Voodoo3, OpenGL |
-|---|---|---|---|---|
-| Giants, first mission, 800x600 (2026-11-12, after phase 3) | 14 | | 21 | 17 |
-| Oni, training room, 640x480 (2026-11-11, with #944) | 15 | | 23 | 29 |
-| Giants, the same (2026-11-12, step 4c) | 15 | 25 | | |
-| Oni, the same (2026-11-12, step 4c) | 15 | 20 | | |
-| Giants, the same (2026-11-12, step 4d, 4c measured again beside it: 23) | | 28 | | |
-| Oni, the same (2026-11-12, step 4d, 4c beside it: 18) | | 19.5 | | |
-| Nocturne, first room of Volume 1, 640x480, 32 bits | not measured | not measured | | |
+| Game and scene | OpenGL | Software | Emulated speed | Thread busy | Draws a frame | Read-backs a second |
+|---|---|---|---|---|---|---|
+| Oni, training room, 640x480 | 25.8, 26.2 | 14.6, 15.1 * | 1.00 | 81%, 86% | 2724 | 0 |
+| Grom, the tutorial's first screen, 800x600 | 27.6, 28.8 (28.7, 29.7 *) | 41.7, 40.7 * | 1.00 | 75%, 84% | 294 | 165, 173 |
+| Nocturne, first room of Volume 1, 640x480 | 35.6, 35.1 | | 1.00 | 84%, 84% | 45 | 0 |
+| Giants, first mission, on the beach, 800x600 | 37.2, 36.7 * | 12.5, 12.7 * | 1.00 | 83%, 84% | 546, 522 | 0 |
+| No One Lives Forever, first mission, 640x480 | 40.3, 40.4 | | 1.00 | 81%, 83% | 1902 | 0 |
+| MDK2, the dive that opens level 1, 640x480 | 50.0, 50.1 | | 0.87 | 89%, 91% | 286 | 0 |
+| Max Payne, tutorial, 640x480 | 53.4, 53.7 | | 1.00 | 87%, 83% | 107 | 0 |
+| Zanzarah, the Fairy Garden, 640x480 | 59.9, 60.0 | | 1.00 | 79%, 79% | 198 | 0 |
+| Black & White | blocked | | | | | |
 
-With OpenGL at step 4c the emulator's thread is 86% busy in Giants
-and 82% in Oni, as it was in software: it still transforms and clips
-every vertex, hands the host a draw call for each of the game's
-(Oni's are a few triangles each, 1.65 million of them to the training
-room), and waits for the GPU at each read-back listed under "What the
-first games showed".
+The emulated processor halts in Zanzarah alone, for 6.5% of the time:
+the game is at its cap of 60. Black & White doesn't start: its
+SafeDisc check fails (#889). The software column has the games below
+30 and Giants.
 
-Step 4d took Giants' five read-backs a frame away, which were 18% of
-the thread's busy time. Where the thread's busy time goes after it
-(`/api/profile`, zones in `docs/profiling.md`):
+What the table doesn't show:
 
-| Zone | Giants | Oni |
-|---|---|---|
-| `cpu.jit`, the game's code | 33% | 29% |
-| `hle.win32`, the built-in Windows outside the zones below | 27% | 23% |
-| `toadforce`, the card: decoding, transform, lighting, clipping | 20% | 4% |
-| `toadforce.host`, the OpenGL renderer's calls | 10% | 3% |
-| `toadforce.readback` | 0% | 5% |
-| `hle.d3d.bind`, the card's state brought up to the device's | 1% | 16% |
-| `hle.d3d.draw` and `hle.opengl` | 1% | 8% |
+- **A four-core host.** The target names one, and every figure here is
+  from the eight-core development machine. The thread that the figures
+  depend on is one thread, so the OpenGL column should hold; the
+  software renderer's won't.
+- **MDK2 beyond the dive.** The route ends in the fall that opens the
+  first level, and the interior after it draws more. MDK2 is also the
+  one game below full speed: the emulated machine runs at 87% of real
+  time there, with the thread 90% busy.
+- **Giants in a fight.** The beach at the mission's start has 530 draws
+  a frame. A run of this route that stopped on the game's options
+  menu, with the scene behind it, had 995 and 33 frames a second.
+- **A Voodoo3 beside it.** The last figures for one (2026-11-11 and
+  11-12, one run each): Giants 21 in software and 17 with OpenGL, Oni
+  23 and 29.
 
-What is left for phase 6, largest first, with what each is worth:
+### Phase 6: what limits each game
 
-- **Oni: the Direct3D layer's work for each `glEnd`** (`hle.d3d.bind`,
-  `hle.d3d.draw`, `hle.opengl`: 24% of the busy time, for 97 draws a
-  frame of a few triangles each). The OpenGL front end sets its
-  whole state on its Direct3D device before every draw, and the HAL
-  compares all of it again. Draws with equal state gathered in the
-  front end into one draw would take most of it.
-- **Giants: transform and lighting on the processor** (`toadforce`,
-  20%). Moving the vertex work to the GPU, which the interface
-  between the card and the host was kept open for.
-- **`hle.win32` outside Direct3D** (23% to 27%): not looked into yet.
-  A profile by API call comes first.
-- **The host's own calls** (`toadforce.host`, 3% to 10%): state and
-  uniforms are set for every run, 290 a frame in Giants. Skipping
-  what didn't change is worth a part of the 10%.
-- **Oni's `SwapBuffers`** (5%): done. The back buffer is in the
-  desktop's format when the desktop has 32 bits, as a real driver
-  gives a windowed context, with `BLT` to the window. Oni's pictures
-  changed with it, as the target isn't dithered to 16 bits any more.
-- **Zanzarah's driver reads** (0.4 read-backs a frame): which
-  DirectDraw calls ask, and whether a `BLT` with a colour key on
-  the host covers them.
+A profile of the emulator's thread over 20 seconds of the same scene,
+after the two windows (`/api/profile`, zones in `docs/profiling.md`).
+The figures are shares of the thread's busy time.
 
-Giants stays under 30 on every card, the Voodoo3 drawn by the host's
-GPU included, with the emulated machine at full speed and the
-emulator's thread 84% to 98% busy. What limits it is the work on that
-thread: the game's own code and the Direct3D layer's. A faster
-renderer alone doesn't bring it to the target, so phase 6 starts with
-a profile of that thread. Oni gains from the renderer: the Voodoo3 is
-at 29 with OpenGL and at 23 without.
+| Zone | Oni | Grom | Nocturne | Giants | NOLF | MDK2 | Max Payne | Zanzarah |
+|---|---|---|---|---|---|---|---|---|
+| `cpu.jit`, the game's code | 35% | 23% | 77% | 44% | 47% | 20% | 57% | 56% |
+| `hle.win32`, the built-in Windows outside the zones below | 15% | 4% | 1% | 22% | 11% | 45% | 12% | 14% |
+| `hle.d3d.bind`, the card's state brought up to the device's | 18% | 1% | 0% | 0% | 14% | 7% | 0% | 0% |
+| `hle.d3d.draw` and `hle.opengl` | 10% | 1% | 1% | 0% | 7% | 5% | 0% | 0% |
+| `toadforce`, the card: decoding, transform, lighting, clipping | 4% | 5% | 1% | 17% | 6% | 2% | 15% | 15% |
+| `toadforce.host`, the OpenGL renderer's calls | 3% | 18% | 3% | 9% | 6% | 4% | 6% | 8% |
+| `toadforce.readback` | 0% | 43% | 0% | 0% | 0% | 0% | 0% | 0% |
+
+The two games below 30, with their three largest costs:
+
+- **Oni** (26). The game's own code is 35%, spread over many places:
+  the hottest block has 1.8%. Then `hle.d3d.bind` at 18%: the OpenGL
+  front end draws each `glEnd` through a Direct3D device, and
+  `hal::bind` brings the card's whole state up to the device's before
+  every one, 2700 times a frame for 3450 triangles. Then `hle.win32`
+  at 15%, which is the dispatch of the immediate-mode calls
+  themselves: 232 thousand `glVertex3f`, 217 thousand `glTexCoord4f`
+  and 194 thousand `glColor4ub` a second, each a trap out of the
+  emulated processor. With `hle.d3d.draw` and `hle.opengl` the layers
+  between the game and the card take 43%, and the card and its host
+  renderer 7%. In software the card's zone grows to 39% and the rate
+  falls to 15.
+- **Grom** (28). `toadforce.readback` is 43% and `toadforce.host` 18%:
+  the host renderer draws triangles only, and Grom draws 36 primitives
+  of points or lines a frame (`declined_for` counts every declined
+  draw there under `points and lines`). Each goes to the software
+  renderer, which needs the target's and the z-buffer's pixels from
+  the GPU first and sends what it drew back after: 6 read-backs a
+  frame of an 800x600 target, 170 a second. The game's code is 23%.
+  With no host there is nothing to read back, which is why software
+  is ahead at 41.
+
+The others, all above the target here:
+
+- **Nocturne** (35). The game's code is 77% of the thread, and the
+  card, its host renderer and the Direct3D layer 6% together. It
+  transforms and lights by itself. `mem.device` (5%) is the game's
+  reads and writes of card memory (it locks the back buffer twice a
+  frame), and `dynrec.fallback` (5%) the instructions the recompiler
+  hands to the interpreter.
+- **Giants** (37). The game's code is 44%. `hle.win32` at 22% is the
+  count of its state calls: 103 thousand `SetRenderState` and 80
+  thousand `SetTextureStageState` a second, close to 5000 a frame for
+  530 draws, and 21 thousand vertex buffer locks. `toadforce` at 17%
+  is transform, lighting and clipping of 9000 triangles a frame on
+  the processor. In software the card's zone is 63% and the rate
+  12.5.
+- **No One Lives Forever** (40). `hle.d3d.bind` is 14% and
+  `hle.d3d.draw` 7% for 1900 `DrawPrimitive` fans a frame: the same
+  cost for each draw as Oni's.
+- **MDK2** (50, at 87% speed). `hle.win32` is 45%: about a million
+  immediate-mode OpenGL calls a second (`glTexCoord2f` 262 thousand,
+  `glVertex3fv`, `glVertex4f`, `glTexCoord2fv`, `glColor3ubv` and
+  `glNormal3sv` 127 to 137 thousand each) and 217 thousand `SleepEx`.
+- **Max Payne** (53) and **Zanzarah** (60, capped). The game's code is
+  over half, and the card's transform and lighting 15%.
+
+The passes, in the order to take them. A pass comes earlier the more
+games it helps and the further below 30 they are.
+
+1. **Points and lines on the host renderer.** Grom, 28: 43% of its
+   thread's busy time is read-backs for the draws the host declines.
+   The host draws them as the software renderer does (the rules of
+   "Rasterising"), or takes them as triangles the card builds. Small,
+   and the one pass that by itself should put a game over the target.
+2. **`hal::bind` for a draw whose state didn't change.** Oni, 26, and
+   No One Lives Forever and MDK2: 18%, 14% and 7%. The device keeps
+   what it sent to the card and compares all of it again for each
+   draw. A count of state changes on the device, checked first, makes
+   an unchanged draw cost a comparison of two numbers.
+3. **The OpenGL front end's draws.** Oni and MDK2: `hle.d3d.draw` and
+   `hle.opengl`, 10% and 5%, and the rest of `hle.d3d.bind`.
+   Consecutive `glEnd`s of equal state gathered into one draw, and
+   the front end's matrices, lights and materials sent as level 1
+   state so that the card transforms (what is left of phase 5 too).
+4. **The cost of an API call from the game.** MDK2 at 45% and below
+   full speed, Giants 22%, Oni 15%, and 11% to 14% in three more. Per
+   call it is the trap out of the recompiled code, the lookup of the
+   handler and the reading of its arguments from the stack. To
+   measure first: what a call that does next to nothing costs (MDK2's
+   `SleepEx` is close to one), and whether the recompiler can call
+   the handlers of the hottest entry points (`glVertex*`,
+   `glTexCoord*`, `glColor*`, `SetRenderState`,
+   `SetTextureStageState`) without leaving its block.
+5. **Transform and lighting on the GPU.** Giants, Max Payne and
+   Zanzarah: 15% to 17%. None is below 30, so it waits for the passes
+   above, unless a later scene of Giants needs it: its draws double in
+   the scene measured behind the menu.
+6. **The host renderer's own calls** (`toadforce.host`, 3% to 9%
+   outside Grom): state and uniforms set for every run. Skipping what
+   didn't change is worth a part of it.
+7. **The game's own code** (`cpu.jit`, the largest zone of six games
+   and all there is in Nocturne). This is the recompiler's speed and
+   outside the card. Nocturne's `dynrec.fallback` and `mem.device`,
+   10% together, are the place to start.
+
+Before any of them counts as done, the table above is taken again on
+a four-core host, and MDK2 and Giants in a heavier scene.
 
 Phases 2 and 3 come before the OpenGL renderer so that the reference
 exists before the renderer that is tested against it, and so that
