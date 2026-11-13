@@ -14,10 +14,18 @@
 //!   the state (`DrawState::clip`), for the host to cut the pixels by.
 //!   Slot `n`'s coordinates are in `tex[n]` of every vertex, whichever
 //!   set of the program's vertex they came from.
-//! - **What the host declines.** A state `Host::declines` names, lines,
-//!   points, triangles that aren't filled and draws that read the
-//!   surface they write are drawn by the software renderer, in the
-//!   card's order with the host's.
+//! - **Points and lines** reach the host as triangles too, so the
+//!   card's rules decide their pixels and the host's own rules for
+//!   lines and points are never used. A point is the two triangles
+//!   of its square. A line is a square for each run of its pixels in
+//!   a row, with the line's values at the square's corners
+//!   (`raster::setup::Prim::squares`): a host that fills a triangle
+//!   by the pixel centres inside it, with the top and left edges its
+//!   own, covers the line's pixels and no other. A triangle drawn as
+//!   its edges or its corners (`FILLMODE`) is those lines and points.
+//! - **What the host declines.** A state `Host::declines` names and a
+//!   draw that reads the surface it writes are drawn by the software
+//!   renderer, in the card's order with the host's.
 //! - **Who has the newer pixels.** A surface the host drew into is
 //!   ahead on the host (`Gpu::ahead`), and card memory is stale there
 //!   until `Gpu::settle` reads it back. The card's own work on the
@@ -473,15 +481,11 @@ impl Cause {
 }
 
 /// Why a draw went to the software renderer with a host attached, for
-/// the status (`declined_for`): the rasteriser's reasons, then the
+/// the status (`declined_for`): the rasteriser's reason, then the
 /// host's (`Host::declines`). The names are the debugger's API, listed
 /// in `docs/llm-debugging.md`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decline {
-    /// Points or lines, which the host doesn't draw.
-    PointsAndLines,
-    /// Triangles drawn as points or as their edges.
-    FillMode,
     /// A draw that reads what it writes, drawn pixel by pixel in order.
     Serial,
     /// The host is gone, as its window and context are.
@@ -515,9 +519,7 @@ pub enum Decline {
 }
 
 impl Decline {
-    pub const NAMES: [&str; 16] = [
-        "points and lines",
-        "fill mode",
+    pub const NAMES: [&str; 14] = [
         "serial state",
         "no host",
         "host broken",
