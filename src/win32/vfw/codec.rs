@@ -10,7 +10,7 @@
 
 use crate::win32::gdi32::surface::dib_stride;
 use oxideav_indeo::indeo3::{DecodedPicture, FrameHeader, Indeo3PictureDecoder};
-use oxideav_indeo::indeo5::{HostBuffer, Indeo5Decoder, pack_yuy2};
+use oxideav_indeo::indeo5::Iv50Decoder;
 
 const IV31: u32 = u32::from_le_bytes(*b"IV31");
 const IV32: u32 = u32::from_le_bytes(*b"IV32");
@@ -59,9 +59,8 @@ pub fn supported(compression: u32, width: u32, height: u32) -> bool {
 
 enum Decoder {
     Indeo3(Box<Indeo3PictureDecoder>),
-    /// With the last frame's output and size, which a frame that fails
-    /// to decode leaves as it is.
-    Indeo5(Box<Indeo5Decoder>, Option<(HostBuffer, (u32, u32))>),
+    /// It keeps its picture when a frame fails to decode.
+    Indeo5(Box<Iv50Decoder>),
     Indeo4(Box<super::indeo4::Decoder>),
     Cinepak(Box<super::cinepak::Decoder>),
 }
@@ -93,7 +92,7 @@ impl Codec {
     pub fn new(compression: u32) -> Codec {
         Codec(match upper(compression) {
             IV31 | IV32 => Some(Decoder::Indeo3(Box::default())),
-            IV50 => Some(Decoder::Indeo5(Box::default(), None)),
+            IV50 => Some(Decoder::Indeo5(Box::default())),
             IV41 => Some(Decoder::Indeo4(Box::new(super::indeo4::Decoder::new()))),
             CVID => Some(Decoder::Cinepak(Box::default())),
             _ => None,
@@ -120,11 +119,7 @@ impl Codec {
                 }
                 d.decode(frame).map(|_| ()).map_err(|e| format!("{e:?}"))
             }
-            Some(Decoder::Indeo5(d, last)) => {
-                let out = d.decode(frame).map_err(|e| e.to_string())?;
-                *last = Some((out.output, out.dimensions));
-                Ok(())
-            }
+            Some(Decoder::Indeo5(d)) => d.decode(frame).map(|_| ()).map_err(|e| e.to_string()),
             Some(Decoder::Indeo4(d)) => d.decode(frame),
             Some(Decoder::Cinepak(d)) => d.decode(frame, CINEPAK_MAX as usize),
             None => Err("no decoder".to_string()),
@@ -139,13 +134,14 @@ impl Codec {
                 let picture = d.previous()?;
                 (picture.width == width && picture.height == height).then(|| indeo3_dib(picture))
             }
-            Decoder::Indeo5(_, last) => {
-                let (output, size) = last.as_ref()?;
-                if *size != (width, height) {
+            Decoder::Indeo5(d) => {
+                let size = (width as usize, height as usize);
+                if d.dimensions() != Some(size) {
                     return None;
                 }
-                let yuy2 = pack_yuy2(output, width as usize, height as usize)?;
-                Some(yuy2_dib(&yuy2, width as usize, height as usize))
+                let (y, u, v) = (d.y()?, d.u()?, d.v()?);
+                let planes = [(y.data, y.stride), (u.data, u.stride), (v.data, v.stride)];
+                iv50_dib(planes, size)
             }
             Decoder::Indeo4(d) => {
                 let p = d.picture()?;
@@ -231,24 +227,31 @@ fn yvu9_dib(luma: &[u8], u: &[u8], v: &[u8], (w, h): (usize, usize), cw: usize) 
     out
 }
 
-/// A picture in YUY2, whose chroma is what Indeo 5's codec gives that
-/// format, as a DIB. `width` is even, as YUY2's are.
-fn yuy2_dib(yuy2: &[u8], width: usize, height: usize) -> Vec<u8> {
-    let stride = dib_stride(width as i32, 24);
-    let mut out = vec![0; stride * height];
-    for (y, line) in yuy2.chunks_exact(width * 2).enumerate() {
-        let row = &mut out[(height - 1 - y) * stride..][..width * 3];
-        for (&[y0, u, y1, v], d) in line
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .zip(row.as_chunks_mut::<6>().0)
-        {
-            d[..3].copy_from_slice(&bgr(y0, u, v));
-            d[3..].copy_from_slice(&bgr(y1, u, v));
+/// Indeo 5's picture as a DIB, from its luma, U and V planes: each is
+/// its bytes and the distance between its rows. The planes are YVU9's,
+/// so each chroma sample colours its 4x4 block. None if a plane is
+/// smaller than a picture of `w` by `h` needs.
+fn iv50_dib(planes: [(&[u8], usize); 3], (w, h): (usize, usize)) -> Option<Vec<u8>> {
+    let (cw, ch) = (w.div_ceil(4), h.div_ceil(4));
+    let fits = |(data, stride): (&[u8], usize), w: usize, h: usize| {
+        h == 0 || (stride >= w && data.len() >= (h - 1) * stride + w)
+    };
+    let [luma, u, v] = planes;
+    if !fits(luma, w, h) || !fits(u, cw, ch) || !fits(v, cw, ch) {
+        return None;
+    }
+    let stride = dib_stride(w as i32, 24);
+    let mut out = vec![0; stride * h];
+    for y in 0..h {
+        let ys = &luma.0[y * luma.1..][..w];
+        let us = &u.0[y / 4 * u.1..][..cw];
+        let vs = &v.0[y / 4 * v.1..][..cw];
+        let row = &mut out[(h - 1 - y) * stride..][..w * 3];
+        for (x, (&yv, d)) in ys.iter().zip(row.as_chunks_mut::<3>().0).enumerate() {
+            *d = bgr(yv, us[x / 4], vs[x / 4]);
         }
     }
-    out
+    Some(out)
 }
 
 #[cfg(test)]
@@ -256,14 +259,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn yuy2_rows_go_bottom_up_with_padding() {
-        // Two rows of 2 pixels: white, then black. Black chroma is 128.
-        let yuy2 = [235, 128, 235, 128, 16, 128, 16, 128];
-        let dib = yuy2_dib(&yuy2, 2, 2);
+    fn indeo_5_rows_go_bottom_up_with_padding() {
+        // Two rows of 2 pixels, white then black, in a plane whose rows
+        // are 3 apart. Chroma of 128 is grey.
+        let luma: (&[u8], usize) = (&[235, 235, 99, 16, 16, 99], 3);
+        let chroma: (&[u8], usize) = (&[128], 1);
+        let dib = iv50_dib([luma, chroma, chroma], (2, 2)).unwrap();
         assert_eq!(
             dib,
             [0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 0, 0]
         );
+        // A picture larger than its planes has no DIB.
+        assert!(iv50_dib([luma, chroma, chroma], (4, 2)).is_none());
+        assert!(iv50_dib([luma, chroma, chroma], (2, 8)).is_none());
     }
 
     #[test]
