@@ -1660,11 +1660,53 @@ fn setting_exclusive_mode_again_shows_the_window_the_program_hid() {
     assert_eq!(r[4] & WS_VISIBLE, WS_VISIBLE);
     assert_eq!(r[5], 0);
     // The level set again shows it and makes it topmost while it is the
-    // foreground window, as test_window_style finds on Windows: the
-    // mouse is then over it again.
+    // foreground window, as test_window_style finds on Windows.
     assert_eq!(r[6], 0);
     assert_eq!(r[7], 1);
     assert_eq!(r[8] & WS_EX_TOPMOST, WS_EX_TOPMOST);
+}
+
+/// Exclusive mode set on a hidden 200x100 popup window, which isn't the
+/// foreground window: whether the window is visible afterwards, its
+/// rectangle and its extended style.
+fn hidden_level_program() -> (Vec<u8>, u32) {
+    program(
+        &[SCREEN_USER32, ("DDRAW.DLL", &["DirectDrawCreate"])],
+        &screen_data(),
+        |a, l| {
+            let mut c = Calls { next: 0 };
+            styled_window(a, l, &mut c, (200, 100), WS_POPUP)?;
+            let create = [Arg::I(0), Arg::At(DD), Arg::I(0)];
+            c.api(a, l, S_DIRECT_DRAW_CREATE, &create)?;
+            let level = [Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)];
+            c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &level)?;
+            c.api(a, l, S_IS_WINDOW_VISIBLE, &[Arg::Val(HWND)])?;
+            let rect = [Arg::Val(HWND), Arg::At(RECT)];
+            c.api(a, l, S_GET_WINDOW_RECT, &rect)?;
+            let gwl_exstyle = -20i32 as u32;
+            let ex_style = [Arg::Val(HWND), Arg::I(gwl_exstyle)];
+            c.api(a, l, S_GET_WINDOW_LONG, &ex_style)?;
+            finish(a, l)
+        },
+    )
+}
+
+#[test]
+fn exclusive_mode_covers_the_screen_with_a_hidden_window_it_leaves_hidden() {
+    let (program, data) = hidden_level_program();
+    let mut cpu = machine("hidden_level", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 6);
+    assert_eq!(r[1..3], [0; 2]);
+    // Wine's test_window_style finds this on Windows: the window covers
+    // the screen, and as it wasn't the foreground window, its style and
+    // extended style stay as they were. DirectDraw places the window
+    // before it activates it.
+    assert_eq!(r[3], 0);
+    assert_eq!(r[4], 1);
+    let rect: Vec<u32> = (0..4).map(|i| peek(&cpu, data + RECT + 4 * i)).collect();
+    assert_eq!(rect, [0, 0, 640, 480]);
+    assert_eq!(r[5] & WS_EX_TOPMOST, 0);
 }
 
 /// A DEVMODEA at `offset` with `fields` and the size and depth given.

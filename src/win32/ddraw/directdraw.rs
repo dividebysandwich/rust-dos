@@ -296,10 +296,15 @@ pub fn set_cooperative_level(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // focus, as with SetActiveWindow. Wine's ddraw tests
     // (test_window_style) find the rectangle and the style on Windows
     // after SetCooperativeLevel alone, also when the level is set again.
-    // A 3dfx card's object leaves the window as it is.
+    // A 3dfx card's object doesn't move, show or raise the window, and
+    // only activates it.
     if exclusive && flags & DDSCL_NOWINDOWCHANGES == 0 {
-        if let Some(mut vars) = fullscreen_vars(cpu, id).filter(|_| !card) {
-            vars[0] = WINDOW_EXCLUSIVE;
+        let place = if card {
+            None
+        } else {
+            fullscreen_vars(cpu, id, WINDOW_EXCLUSIVE)
+        };
+        if let Some(vars) = place {
             return task::start(cpu, task::DD_ACTIVATE, vars, 0);
         }
         let user = &cpu.bus.win32.user;
@@ -521,15 +526,17 @@ pub fn set_display_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// (`activate_step`), unless it was set with DDSCL_NOWINDOWCHANGES.
 /// DD_OK.
 fn cover_screen(cpu: &mut Cpu, id: u32) -> Option<u32> {
-    match fullscreen_vars(cpu, id) {
+    match fullscreen_vars(cpu, id, WINDOW_FULLSCREEN) {
         Some(vars) => task::start(cpu, task::DD_ACTIVATE, vars, 0),
         None => Some(DD_OK),
     }
 }
 
-/// The variables of the `WINDOW_FULLSCREEN` task for the object `id`, or
-/// None when it would change nothing or the level doesn't ask for it.
-fn fullscreen_vars(cpu: &mut Cpu, id: u32) -> Option<Vec<u32>> {
+/// The variables of the task `kind` (`WINDOW_FULLSCREEN` or
+/// `WINDOW_EXCLUSIVE`) that makes the window of the object `id` cover the
+/// screen, or None when it would change nothing, the level doesn't ask
+/// for it, or there is no such object.
+fn fullscreen_vars(cpu: &mut Cpu, id: u32, kind: u32) -> Option<Vec<u32>> {
     use user32::window::{WS_EX_TOPMOST, WS_MAXIMIZE, WS_VISIBLE};
     let d = ddraw(cpu, id)?;
     // MakeFullscreen asks whether the focus window is the foreground
@@ -555,7 +562,7 @@ fn fullscreen_vars(cpu: &mut Cpu, id: u32) -> Option<Vec<u32>> {
     if level & DDSCL_EXCLUSIVE == 0 || level & DDSCL_NOWINDOWCHANGES != 0 || done {
         return None;
     }
-    Some(vec![WINDOW_FULLSCREEN, top, w as u32, h as u32, focus])
+    Some(vec![kind, top, w as u32, h as u32, focus])
 }
 
 /// RestoreDisplayMode(this).
