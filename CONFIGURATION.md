@@ -3649,11 +3649,12 @@ frame counts in:
   for the next one.
 - A program that is sometimes faster and sometimes slower waits only
   for the frames that come early. A late frame counts in the first
-  frame time it missed, or a tenth of a second before it showed if it
+  frame time it missed, or a quarter of a second before it showed if it
   missed more, and the frames after it show as soon as they are done
-  until they are back at the turns: a program that runs its game in
-  steps of the clock between frames would otherwise spend the time its
-  next frames wait on catching up, and fall further behind.
+  until they are back at the turns. Without that, each long frame would
+  cost a turn, and a program whose frames are uneven would show fewer
+  frames than the cap though it can draw more (Grom's menu, whose
+  simulation takes up to 190 ms in one frame).
 - A present that waits for the display's retrace (a flip, or a swap
   with a swap interval) is already held to the display's rate. With the
   cap at that rate or above it, the cap holds none of its frames. Below
@@ -3661,6 +3662,15 @@ frame counts in:
   the retrace nearest its turn, which may be up to half a retrace before
   it: a cap of 30 on a 60 Hz display shows every other retrace, though
   the display's rate is never exactly 60.
+
+The cap counts in the machine's emulated time only: its turns, the time
+a frame comes and the time a held frame waits for. While a frame waits,
+emulated time runs on as it does for any wait, and with nothing else to
+run the machine idles to the turn. How fast the host runs the machine
+changes only how long that takes on the wall clock. So a run with
+`--deterministic` holds the same frames until the same emulated times
+each time, and a fixed `cycles` that runs slower than real time holds
+no frame that is late in emulated time.
 
 While a frame waits, the program waits with it, and nothing else does:
 

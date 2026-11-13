@@ -13,16 +13,27 @@
 //! waits for the start of the next one, and its frames come at the
 //! cap's frame times; one that draws slower shows each frame as it is
 //! done. A frame that comes late counts in the first frame time it
-//! missed, or a tenth of a second before it showed, and the frames after
-//! it show at once until they are back in step (`shown`). The window,
-//! with `vrr`, refreshes at the cap's frame times while a program shows
-//! its frames through it (`refresh_timing`).
+//! missed, or a quarter of a second before it showed, and the frames
+//! after it show at once until they are back in step (`shown`). The
+//! window, with `vrr`, refreshes at the cap's frame times while a
+//! program shows its frames through it (`refresh_timing`).
 //!
 //! A present that waits for the display's retrace already shows no more
 //! frames than the display does: with the cap at or above the display's
 //! rate, the cap holds none of its frames, and below it the frame shows
-//! at the first retrace after the cap's frame time, the later of the
-//! two.
+//! at the retrace nearest its turn (`wait`).
+//!
+//! The clock is the machine's emulated time, and only it: the turns, the
+//! time a present asks about and the time a held present waits for are
+//! all emulated nanoseconds, and a held present waits as a thread waits
+//! for a timeout, while the machine's time runs on, its interrupts and
+//! other threads run, and with nothing to run it idles to the turn. How
+//! fast the host runs the machine changes how long the hold takes on the
+//! wall clock, never which frames are held or until when. A run with
+//! `--deterministic` therefore holds the same frames until the same
+//! emulated times every time, and a fixed `cycles` below real time
+//! holds no frame that is late in emulated time, however late it is on
+//! the wall clock.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -59,13 +70,14 @@ const ACTIVE_NS: u64 = 1_000_000_000;
 
 /// How far a late frame lets the frames after it catch up, in ns: they
 /// show at once, in the frame times it missed, up to this long before
-/// it. A program that runs its game in steps of the clock between frames
-/// takes the time a frame was held from the next ones: Grom's menu at
-/// 150,000 cycles draws 71 frames a second without the cap, and under a
-/// cap of 60 takes about 100 ms over the frame after many it held: 22
-/// frames a second when late frames let none catch up, 43 with a tenth
-/// of a second.
-const CATCH_UP_NS: u64 = 100_000_000;
+/// it. Without it, a program whose frames are uneven loses a turn to
+/// each long frame and stays below the cap though it could keep it:
+/// Grom's menu at 150,000 cycles draws 71 frames a second without the
+/// cap, most in 2.6 ms and about 23 a second with a 35 ms step of its
+/// simulation, up to five steps (190 ms) in one. Under a cap of 60 it
+/// showed 55 a second with a tenth of a second of catch-up and 60 with
+/// a quarter, which covers its longest frames.
+const CATCH_UP_NS: u64 = 250_000_000;
 
 /// The cap and the frames it let through.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -304,15 +316,38 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_a_second_late_lets_a_tenth_of_a_second_catch_up() {
+    fn a_program_with_long_frames_now_and_then_gets_the_cap() {
+        // Like Grom's menu at 150,000 cycles: frames of 2.6 ms, a 35 ms
+        // step of its simulation in one frame in three, and once a second
+        // five steps in one frame. Uncapped that is 61 frames a second,
+        // and a cap of 60 shows 60.
+        let ms = 1_000_000;
+        let mut work = Vec::new();
+        for i in 0..23 {
+            work.extend([2_600_000, 2_600_000]);
+            work.push(if i == 11 { 190 * ms } else { 37 * ms });
+        }
+        let shown = presented(60, &work, 1200);
+        assert!(rate(&shown) > 59.5, "{}", rate(&shown));
+        // No second shows more than the cap and the frames it caught up.
+        let late = shown.windows(2).filter(|w| w[1] - w[0] > 100 * ms).count();
+        assert!(late > 0);
+        for (i, &t) in shown.iter().enumerate() {
+            let in_second = shown[i..].iter().take_while(|&&u| u < t + 1_000_000_000).count();
+            assert!(in_second <= 60 + 15, "{} frames in the second from {} ns", in_second, t);
+        }
+    }
+
+    #[test]
+    fn a_frame_a_second_late_lets_a_quarter_of_a_second_catch_up() {
         let frame = 1_000_000_000 / 60;
         let mut cap = cap(60);
         cap.shown(frame);
         let late = 1_000_000_000 + frame;
         cap.shown(late);
-        // It counts a tenth of a second before it showed, at 0.917 s: the
-        // six frames after it show at once, in the frame times up to the
-        // one it showed in, and the next waits.
+        // It counts a quarter of a second before it showed, at 0.767 s:
+        // the 15 frames after it show at once, in the frame times up to
+        // the one it showed in, and the next waits.
         let mut now = late;
         let mut at_once = 0;
         while cap.wait(now + 1000, None).is_none() {
@@ -320,7 +355,7 @@ mod tests {
             cap.shown(now);
             at_once += 1;
         }
-        assert_eq!(at_once, 6);
+        assert_eq!(at_once, 15);
     }
 
     #[test]
@@ -407,7 +442,7 @@ mod tests {
         let shared = Shared::default();
         shared.set_fps(Some(30));
         shared.shown(123);
-        // Late: it counts a tenth of a second before it showed.
+        // Late: it counts a quarter of a second before it showed.
         shared.shown(500 * MS);
         let mut w = Writer::new();
         shared.save(&mut w);
