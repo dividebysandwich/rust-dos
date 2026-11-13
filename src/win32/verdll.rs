@@ -405,10 +405,14 @@ const FIXED_SIZE: usize = 52;
 /// version of the file unless the table says otherwise, with its name.
 fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
     let base = name.trim_end_matches(".DLL").trim_end_matches(".dll");
-    // Windows 95's own files are 4.00.950. DirectX's are 6.0's, as the
-    // registry says (Windows 98 and DirectX 6.1 differ: see p5-win98).
+    // Windows 95's own files are 4.00.950. DirectX's are those of the
+    // DirectX the registry gives (version.rs): DirectX 8.0a and 8.1 give
+    // the DLLs of their runtime their own version, as DxDiag shows them
+    // on Windows 98 with 8.1 (DDRAW, DSOUND and DINPUT 4.08.01.0881).
+    let directx = super::version::directx(windows).file;
     let version: [u16; 4] = match base.to_ascii_uppercase().as_str() {
-        "DDRAW" | "DSOUND" | "DINPUT" | "DPLAYX" => [4, 6, 0, 318],
+        "DDRAW" | "DSOUND" | "DINPUT" | "DPLAYX" | "D3D8" | "DINPUT8" => directx,
+        "DMUSIC" | "DMIME" | "DMLOADER" | "DMSTYLE" | "DMBAND" | "DMCOMPOS" => directx,
         // DirectX 5 to 7 leave DirectX 3's DPLAY.DLL as it is: Windows 98
         // SE and a Windows 95 machine with DirectX 7 both have
         // 4.03.00.1096, of July 1997.
@@ -418,8 +422,6 @@ fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
         "MSVCRT" => [6, 0, 8168, 0],
         "GLIDE2X" => [2, 46, 0, 0],
         "GLIDE3X" => [3, 3, 0, 667],
-        // DirectX 8.1's.
-        "D3D8" | "DINPUT8" => [4, 8, 1, 881],
         // Windows 98 SE's.
         "MSIMG32" => [5, 0, 1693, 1],
         "MSACM32" | "DCIMAN32" if windows.is_98() => [4, 3, 0, 1998],
@@ -1224,5 +1226,23 @@ mod tests {
         let key = b"\\StringFileInfo\\040904E4\\FileVersion";
         let found = query(resource.bytes(), key, true).unwrap();
         assert_eq!(found.text.unwrap(), b"4.03.00.1096\0");
+    }
+
+    /// DirectX's DLLs have the version the registry gives: 8.0a's under
+    /// Windows 95, 8.1's under 98.
+    #[test]
+    fn directxs_files_have_the_registrys_version() {
+        let key = b"\\StringFileInfo\\040904E4\\FileVersion";
+        for (windows, version) in [
+            (WindowsVersion::Win95, &b"4.08.00.0400\0"[..]),
+            (WindowsVersion::Win98, b"4.08.01.0881\0"),
+            (WindowsVersion::Win98Se, b"4.08.01.0881\0"),
+        ] {
+            for name in ["DDRAW.DLL", "DSOUND.DLL", "DINPUT.DLL", "D3D8.DLL", "DMUSIC.DLL"] {
+                let resource = builtin_resource(name, windows);
+                let found = query(resource.bytes(), key, true).unwrap();
+                assert_eq!(found.text.unwrap(), version, "{name} {windows:?}");
+            }
+        }
     }
 }

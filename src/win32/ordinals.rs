@@ -7,9 +7,8 @@
 //!
 //! `ordinals/<dll>.txt` lists the exports of the DLL as Windows 98 SE has
 //! it, made by `tools/win98_ordinals.py` from the DLLs on its CD (DirectX
-//! 6.1's DDRAW, DSOUND, DINPUT and DirectMusic, the DirectX the built-in
-//! Windows reports): a line an export, its ordinal and its name, or "-"
-//! for one exported by ordinal only.
+//! 6.1's DDRAW, DSOUND, DINPUT and DirectMusic): a line an export, its
+//! ordinal and its name, or "-" for one exported by ordinal only.
 //!
 //! A built-in function's ordinal follows these rules, which the tests
 //! check:

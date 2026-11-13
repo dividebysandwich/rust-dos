@@ -527,12 +527,18 @@ limit, so without a connection it goes on as it would with one:
   doesn't start, as on Windows 95, and its message names the setting.
   These include USER32's GetAncestor, SendInput, TrackMouseEvent and
   GetWindowInfo, which earlier releases of rust-dos had under Windows 95
-  too, so a program that imports them needs `98`. DirectX is the same
-  under every setting: that of a machine with DirectX 7.0a installed
-  (DirectDraw 7, with D3D8 besides), so it answers QueryInterface for
-  IDirectDrawSurface7 and IDirectDraw7, and the registry gives DirectX's
-  version as 4.07.00.0716. A change takes effect for the next program
-  that starts when none runs.
+  too, so a program that imports them needs `98`. COMCTL32's
+  _TrackMouseEvent is there under every setting. The built-in DirectX
+  is the same under every setting (DirectDraw 7, D3D8 and DINPUT8), so
+  it answers QueryInterface for IDirectDrawSurface7 and IDirectDraw7.
+  What a program reads of its version is that of DirectX 8 as each
+  Windows could have it: 8.0a under `95`, which 8.1 doesn't support, and
+  8.1 under `98` and `98se`. The registry's
+  `HKLM\Software\Microsoft\DirectX` gives `Version` 4.08.00.0400 or
+  4.08.01.0881 and `InstalledVersion` 8.0 or 8.1, and the version
+  resources of DDRAW, DSOUND, DINPUT, DPLAYX, D3D8, DINPUT8 and the
+  DirectMusic DLLs, which GetFileVersionInfo reads, say the same. A
+  change takes effect for the next program that starts when none runs.
 * `win32_trace` picks which calls of the built-in Windows' functions
   get a `[W32]` line in the [log file](README.md#log-file) (and `[W16]`
   for the 16-bit modules), with the caller's address, the arguments and

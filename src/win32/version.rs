@@ -85,24 +85,55 @@ pub struct Info {
     pub version_name: &'static str,
     pub product_name: &'static str,
     pub sub_version: &'static str,
-    /// HKLM\Software\Microsoft\DirectX's Version and InstalledVersion:
-    /// `DIRECTX` under every version.
-    pub directx: &'static str,
-    pub directx_installed: Option<[u8; 8]>,
     /// MSVCRT's _osver: GetVersion's high word, which Windows 98's
     /// MSVCRT keeps with its top bit.
     pub osver: u32,
 }
 
-/// The DirectX the registry gives, Version and InstalledVersion: 7.0a's,
-/// as its installer writes them, under every version of Windows. The
-/// built-in DLLs are the same under each, and they are DirectX 7's:
-/// DirectDraw answers for IDirectDraw7 and IDirectDrawSurface7, and
-/// Direct3D for IDirect3DDevice7, with the behaviour probes on Windows 98
-/// SE with DirectX 7.0a gave. A registry with the DirectX Windows came
-/// with (6.0 for Windows 95's, 6.1 for 98's) told programs that check it,
-/// such as Black & White, that they can't run.
-const DIRECTX: (&str, [u8; 8]) = ("4.07.00.0716", [0, 0, 0, 7, 0, 0, 0, 0]);
+/// The DirectX installed: what the registry gives in
+/// HKLM\Software\Microsoft\DirectX and the version resources of
+/// DirectX's DLLs (verdll.rs) have, both from `file`. The built-in DLLs
+/// are the same under every version of Windows and include DirectX 8's
+/// D3D8.DLL and DINPUT8.DLL, so the DirectX is the 8 a real machine of
+/// that version could have: 8.1 for Windows 98 (its release for the
+/// earlier systems, 4.08.01.0881), and 8.0a for Windows 95, which 8.1
+/// doesn't support (4.08.00.0400, as 8.0's). A registry with the DirectX
+/// Windows came with (6.0 or 6.1) told programs that check it, such as
+/// Black & White, that they can't run, and one with 7 tells those that
+/// need 8 the same, while D3D8 is there.
+pub struct DirectX {
+    /// The DLLs' file version, and the registry's Version from it.
+    pub file: [u16; 4],
+}
+
+impl DirectX {
+    /// The registry's Version: "4.08.01.0881".
+    pub fn version(&self) -> String {
+        let [a, b, c, d] = self.file;
+        format!("{}.{:02}.{:02}.{:04}", a, b, c, d)
+    }
+
+    /// The registry's InstalledVersion: the major and minor version as
+    /// two big-endian double words, 8 and 1 for 8.1.
+    pub fn installed(&self) -> [u8; 8] {
+        [0, 0, 0, self.file[1] as u8, 0, 0, 0, self.file[2] as u8]
+    }
+}
+
+static DIRECTX_8_0A: DirectX = DirectX {
+    file: [4, 8, 0, 400],
+};
+static DIRECTX_8_1: DirectX = DirectX {
+    file: [4, 8, 1, 881],
+};
+
+/// The DirectX installed under `version`.
+pub fn directx(version: WindowsVersion) -> &'static DirectX {
+    match version {
+        WindowsVersion::Win95 => &DIRECTX_8_0A,
+        WindowsVersion::Win98 | WindowsVersion::Win98Se => &DIRECTX_8_1,
+    }
+}
 
 static WIN95: Info = Info {
     get_version: 0xC000_0004,
@@ -114,8 +145,6 @@ static WIN95: Info = Info {
     version_name: "Windows 95",
     product_name: "Microsoft Windows 95",
     sub_version: "",
-    directx: DIRECTX.0,
-    directx_installed: Some(DIRECTX.1),
     osver: 0x4000,
 };
 
@@ -129,8 +158,6 @@ static WIN98: Info = Info {
     version_name: "Windows 98",
     product_name: "Microsoft Windows 98",
     sub_version: " ",
-    directx: DIRECTX.0,
-    directx_installed: Some(DIRECTX.1),
     osver: 0xC000,
 };
 
@@ -144,8 +171,6 @@ static WIN98SE: Info = Info {
     version_name: "Windows 98",
     product_name: "Microsoft Windows 98",
     sub_version: " A ",
-    directx: DIRECTX.0,
-    directx_installed: Some(DIRECTX.1),
     osver: 0xC000,
 };
 
@@ -162,24 +187,25 @@ pub fn info(version: WindowsVersion) -> &'static Info {
 /// saved under another version doesn't keep its own.
 pub fn registry_values(version: WindowsVersion) -> String {
     let i = info(version);
-    let installed = match i.directx_installed {
-        Some(bytes) => {
-            let hex: Vec<String> = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-            format!("hex:{}", hex.join(","))
-        }
-        None => "-".to_string(),
-    };
+    let dx = directx(version);
+    let installed: Vec<String> = dx.installed().iter().map(|b| format!("{:02x}", b)).collect();
+    let installed = installed.join(",");
     format!(
         "REGEDIT4\r\n\r\n\
          [HKEY_LOCAL_MACHINE\\Software\\Microsoft\\DirectX]\r\n\
          \"Version\"=\"{}\"\r\n\
-         \"InstalledVersion\"={}\r\n\r\n\
+         \"InstalledVersion\"=hex:{}\r\n\r\n\
          [HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion]\r\n\
          \"VersionNumber\"=\"{}\"\r\n\
          \"Version\"=\"{}\"\r\n\
          \"ProductName\"=\"{}\"\r\n\
          \"SubVersionNumber\"=\"{}\"\r\n",
-        i.directx, installed, i.version_number, i.version_name, i.product_name, i.sub_version
+        dx.version(),
+        installed,
+        i.version_number,
+        i.version_name,
+        i.product_name,
+        i.sub_version
     )
 }
 
@@ -221,9 +247,6 @@ pub static ONLY_98: &[(&str, &[&str])] = &[
             "GetLongPathNameA",
         ],
     ),
-    // COMCTL32 4.71, which came with Internet Explorer 4 and Windows 98;
-    // the built-in one says it is 4.70 (DllGetVersion), Windows 95's.
-    ("COMCTL32.DLL", &["_TrackMouseEvent"]),
 ];
 
 /// Whether the DLL `dll` exports `function` under `version`.
@@ -232,4 +255,22 @@ pub fn exports(version: WindowsVersion, dll: &str, function: &str) -> bool {
         || !ONLY_98
             .iter()
             .any(|(d, names)| d.eq_ignore_ascii_case(dll) && names.contains(&function))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// USER32's TrackMouseEvent is Windows 98's, and COMCTL32's
+    /// _TrackMouseEvent is there under Windows 95 too, as COMCTL32 has it
+    /// from 4.70 on (Windows 95 OSR2, NT 4.0, Internet Explorer 3.01).
+    #[test]
+    fn comctl32_tracks_the_mouse_under_every_version() {
+        use WindowsVersion::*;
+        assert!(!exports(Win95, "USER32.DLL", "TrackMouseEvent"));
+        assert!(exports(Win98, "USER32.DLL", "TrackMouseEvent"));
+        for version in [Win95, Win98, Win98Se] {
+            assert!(exports(version, "COMCTL32.DLL", "_TrackMouseEvent"));
+        }
+    }
 }
