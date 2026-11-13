@@ -198,7 +198,12 @@ Which games need it:
   page; pick the game's language for its date and number formats.
 * **Greek**: `el-GR`.
 * **Turkish**: `tr-TR`.
-* **Baltic languages** (Lithuanian, Latvian, Estonian): `lt-LT`.
+* **Baltic languages** (Estonian, Latvian, Lithuanian): `lt-LT`, the
+  one locale with the Baltic code page.
+
+Where a group shares a locale, a game in another of its languages shows
+its text right, with the dates, month names and number formats of the
+locale's own language.
 
 Games in English and in Western European languages (French, German,
 Spanish, Italian, Portuguese, Dutch and the Nordic languages) need
