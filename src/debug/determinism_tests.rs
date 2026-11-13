@@ -1047,6 +1047,10 @@ fn settings(dir: &Path) -> rust_dos::config::Settings {
     s.network.ne2000 = true;
     s.network.ipx = rust_dos::net::IpxMode::On;
     s.voodoo.enabled = true;
+    // The frame rate cap at its default: the program's swaps of the 3dfx
+    // card wait for its turns, which must come at the same emulated times
+    // whatever the host does.
+    s.fps_cap = Some(60);
     s.powervr = Some(rust_dos::powervr::Chip::Pcx2);
     s.capture_dir = dir.join("capture");
     s

@@ -3111,6 +3111,9 @@ const DDFLIP_DONOTWAIT: u32 = 0x20;
 enum Present {
     /// Flip, with these flags, in a 320x200 full-screen mode.
     Flip(u32),
+    /// Flip, with these flags, then Sleep for this many milliseconds:
+    /// a frame every so often in emulated time.
+    FlipEvery(u32, u32),
     /// In a window: a fill of an offscreen surface, then two blits of it
     /// to the primary surface, each a part of the frame.
     Blit,
@@ -3140,6 +3143,7 @@ fn start_worker(a: &mut CodeAssembler, l: &Layout, create_thread: usize) -> Resu
 /// counting them in FRAMES, while a second thread counts in WORKER.
 fn capped_program(present: Present) -> (Vec<u8>, u32) {
     const CREATE_THREAD: usize = 3;
+    const SLEEP: usize = 4;
     let mut d = flip_chain_data();
     if let Present::Blit = present {
         desc(&mut d, DESC, DDSD_CAPS, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
@@ -3149,11 +3153,11 @@ fn capped_program(present: Present) -> (Vec<u8>, u32) {
             put32(&mut d, RECT + 4 * i as u32, *v);
         }
     }
-    let kernel32: (&str, &[&str]) = ("KERNEL32.dll", &["CreateThread"]);
+    let kernel32: (&str, &[&str]) = ("KERNEL32.dll", &["CreateThread", "Sleep"]);
     program(&[USER32, DDRAW, kernel32], &d, |a, l| {
         let mut c = Calls { next: 0 };
         match present {
-            Present::Flip(_) => start_flip_chain(a, l, &mut c)?,
+            Present::Flip(_) | Present::FlipEvery(..) => start_flip_chain(a, l, &mut c)?,
             Present::Blit => {
                 start(a, l, &mut c, (100, 50, 200, 100))?;
                 c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &[Arg::Val(HWND), Arg::I(DDSCL_NORMAL)])?;
@@ -3167,6 +3171,11 @@ fn capped_program(present: Present) -> (Vec<u8>, u32) {
         match present {
             Present::Flip(flags) => {
                 c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(flags)])?;
+            }
+            Present::FlipEvery(flags, ms) => {
+                c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(flags)])?;
+                a.push(ms)?;
+                a.call(l.import(SLEEP))?;
             }
             Present::Blit => {
                 let fill = [Arg::I(0), Arg::I(0), Arg::I(0), Arg::I(DDBLT_COLORFILL | DDBLT_WAIT), Arg::At(FX)];
@@ -3227,6 +3236,19 @@ fn flips_without_the_retrace_come_at_the_caps_rate() {
     assert!((rate - 30.0).abs() < 1.5, "{} flips a second with DDFLIP_DONOTWAIT", rate);
     let (uncapped, _) = capped_rate("cap_flip_off", Present::Flip(DDFLIP_WAIT | DDFLIP_NOVSYNC), None);
     assert!(uncapped > 200.0, "{} flips a second without the cap", uncapped);
+}
+
+#[test]
+fn a_program_presenting_every_10_ms_gets_the_caps_rate() {
+    // A frame every 10 ms of emulated time is 100 a second uncapped; a
+    // cap of 60 holds each to its turn, and the Sleep that follows starts
+    // from there.
+    let every = Present::FlipEvery(DDFLIP_NOVSYNC | DDFLIP_DONOTWAIT, 10);
+    let (uncapped, _) = capped_rate("cap_every_10_off", every, None);
+    assert!((uncapped - 100.0).abs() < 2.0, "{} flips a second without the cap", uncapped);
+    let (rate, worker) = capped_rate("cap_every_10", every, Some(60));
+    assert!((rate - 60.0).abs() < 1.0, "{} flips a second under a cap of 60", rate);
+    assert!(worker > 100_000, "the other thread ran {} passes", worker);
 }
 
 #[test]
