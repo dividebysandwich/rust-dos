@@ -149,27 +149,51 @@ struct Source {
 
 /// The texels of `src` as red, green, blue and alpha bytes, row by row
 /// from the first the program gave, with the unpack state of `c`
-/// (alignment, row length, rows and pixels skipped).
-fn unpack(cpu: &mut Cpu, unpack: [u32; 4], src: &Source) -> Option<Vec<[u8; 4]>> {
-    let n = components(src.format)?;
-    let size = type_size(src.kind)?;
-    let pixel = n * size;
+/// (alignment, row length, rows and pixels skipped). The error is
+/// OpenGL's: GL_INVALID_OPERATION for a packed type whose format has
+/// another number of components (the three-component types take GL_RGB
+/// alone), and GL_INVALID_ENUM for a format or type there isn't and
+/// for texels that can't be read.
+fn unpack(cpu: &mut Cpu, unpack: [u32; 4], src: &Source) -> Result<Vec<[u8; 4]>, u32> {
+    let n = components(src.format).ok_or(GL_INVALID_ENUM)?;
+    let packed = packed_type(src.kind);
+    // The bytes of a pixel, and of one of its elements.
+    let (pixel, size) = match packed {
+        Some((bytes, widths, _)) => {
+            let fits = match widths.len() {
+                3 => src.format == GL_RGB,
+                _ => src.format == GL_RGBA || src.format == GL_BGRA_EXT,
+            };
+            if !fits {
+                return Err(GL_INVALID_OPERATION);
+            }
+            (bytes, bytes)
+        }
+        None => {
+            let size = type_size(src.kind).ok_or(GL_INVALID_ENUM)?;
+            (n * size, size)
+        }
+    };
     let row_pixels = if unpack[1] > 0 { unpack[1] } else { src.width };
     let align = unpack[0].max(1);
-    let stride = row_pixels
-        .checked_mul(pixel)?
-        .checked_next_multiple_of(align)?;
-    let skip = unpack[2]
-        .checked_mul(stride)?
-        .checked_add(unpack[3].checked_mul(pixel)?)?;
-    let start = src.at.checked_add(skip)?;
-    let len = src
-        .height
-        .saturating_sub(1)
-        .checked_mul(stride)?
-        .checked_add(src.width.checked_mul(pixel)?)? as usize;
+    let place = || {
+        let stride = row_pixels
+            .checked_mul(pixel)?
+            .checked_next_multiple_of(align)?;
+        let skip = unpack[2]
+            .checked_mul(stride)?
+            .checked_add(unpack[3].checked_mul(pixel)?)?;
+        let start = src.at.checked_add(skip)?;
+        let len = src
+            .height
+            .saturating_sub(1)
+            .checked_mul(stride)?
+            .checked_add(src.width.checked_mul(pixel)?)? as usize;
+        Some((stride, start, len))
+    };
+    let (stride, start, len) = place().ok_or(GL_INVALID_ENUM)?;
     if src.at == 0 || len > 0x400_0000 || !cpu.bus.guest_probe(start, len, false) {
-        return None;
+        return Err(GL_INVALID_ENUM);
     }
     let mut bytes = vec![0u8; len];
     cpu.bus.guest_read_bytes(start, &mut bytes);
@@ -178,14 +202,56 @@ fn unpack(cpu: &mut Cpu, unpack: [u32; 4], src: &Source) -> Option<Vec<[u8; 4]>>
         let row = &bytes[(y * stride) as usize..];
         for x in 0..src.width {
             let p = &row[(x * pixel) as usize..];
-            let c = |i: u32| {
-                let at = (i * size) as usize;
-                (component(&p[at..at + size as usize], src.kind) * 255.0 + 0.5) as u8
-            };
-            out.push(rgba_of(src.format, c));
+            out.push(match packed {
+                Some((_, widths, rev)) => {
+                    let mut v = [0u8; 4];
+                    v[..size as usize].copy_from_slice(&p[..size as usize]);
+                    let v = u32::from_le_bytes(v);
+                    rgba_of(src.format, |i| packed_component(v, widths, rev, i))
+                }
+                None => rgba_of(src.format, |i| {
+                    let at = (i * size) as usize;
+                    (component(&p[at..at + size as usize], src.kind) * 255.0 + 0.5) as u8
+                }),
+            });
         }
     }
-    Some(out)
+    Ok(out)
+}
+
+/// A packed pixel type of OpenGL 1.2 (GL_UNSIGNED_SHORT_5_6_5 and the
+/// others): the bytes of the one element that holds a whole pixel, the
+/// bits of each component in the order the format names them, and
+/// whether the first component is in the lowest bits (the types ending
+/// in _REV) or in the highest.
+fn packed_type(kind: u32) -> Option<(u32, &'static [u32], bool)> {
+    Some(match kind {
+        0x8032 => (1, &[3, 3, 2], false),
+        0x8362 => (1, &[3, 3, 2], true),
+        0x8363 => (2, &[5, 6, 5], false),
+        0x8364 => (2, &[5, 6, 5], true),
+        0x8033 => (2, &[4, 4, 4, 4], false),
+        0x8365 => (2, &[4, 4, 4, 4], true),
+        0x8034 => (2, &[5, 5, 5, 1], false),
+        0x8366 => (2, &[5, 5, 5, 1], true),
+        0x8035 => (4, &[8, 8, 8, 8], false),
+        0x8367 => (4, &[8, 8, 8, 8], true),
+        0x8036 => (4, &[10, 10, 10, 2], false),
+        0x8368 => (4, &[10, 10, 10, 2], true),
+        _ => return None,
+    })
+}
+
+/// Component `i` of the packed pixel `v`, as a byte.
+fn packed_component(v: u32, widths: &[u32], rev: bool, i: u32) -> u8 {
+    let i = i as usize;
+    let shift: u32 = if rev {
+        widths[..i].iter().sum()
+    } else {
+        widths[i + 1..].iter().sum()
+    };
+    let max = (1u32 << widths[i]) - 1;
+    ((((v >> shift) & max) * 255 + max / 2) / max) as u8
 }
 
 /// A texel of `format` as red, green, blue and alpha, from its
@@ -517,9 +583,9 @@ fn define(cpu: &mut Cpu, img: &Image, texels: Option<Vec<[u8; 4]>>) {
             };
             let store = ctx(cpu).map_or([4, 0, 0, 0], |c| c.unpack);
             match unpack(cpu, store, &src) {
-                Some(t) => Some(t),
-                None => {
-                    error(cpu, GL_INVALID_ENUM);
+                Ok(t) => Some(t),
+                Err(e) => {
+                    error(cpu, e);
                     return;
                 }
             }
@@ -671,9 +737,12 @@ pub fn tex_sub_image_2d(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         kind,
         at,
     };
-    let Some(texels) = unpack(cpu, unpack_state, &src) else {
-        error(cpu, GL_INVALID_ENUM);
-        return Some(0);
+    let texels = match unpack(cpu, unpack_state, &src) {
+        Ok(t) => t,
+        Err(e) => {
+            error(cpu, e);
+            return Some(0);
+        }
     };
     let base = base_of(t.internal).unwrap_or(if t.alpha { Base::Rgba } else { Base::Rgb });
     let words: Vec<u16> = texels.into_iter().map(|p| encode(p, base)).collect();
@@ -1139,6 +1208,40 @@ mod tests {
         // Luminance from red, and alpha textures white.
         assert_eq!(encode([255, 0, 0, 255], Base::Luminance), 0xFFFF);
         assert_eq!(encode([0, 0, 0, 0x80], Base::Alpha), 0x8FFF);
+    }
+
+    /// OpenGL 1.2's table of packed types: the first component is in
+    /// the highest bits, or in the lowest for a type ending in _REV.
+    #[test]
+    fn packed_pixels_hold_their_components_in_the_types_bit_order() {
+        let texel = |kind: u32, format: u32, v: u32| {
+            let (_, widths, rev) = packed_type(kind).unwrap();
+            rgba_of(format, |i| packed_component(v, widths, rev, i))
+        };
+        // GL_UNSIGNED_SHORT_5_6_5 and its _REV.
+        assert_eq!(texel(0x8363, GL_RGB, 0xF800), [255, 0, 0, 255]);
+        assert_eq!(texel(0x8364, GL_RGB, 0xF800), [0, 0, 255, 255]);
+        // GL_UNSIGNED_SHORT_1_5_5_5_REV with GL_BGRA: the 1-5-5-5
+        // pixels of a DirectDraw surface. GL_UNSIGNED_SHORT_5_5_5_1
+        // has the alpha bit lowest.
+        assert_eq!(texel(0x8366, GL_BGRA_EXT, 0xFC00), [255, 0, 0, 255]);
+        assert_eq!(texel(0x8034, GL_RGBA, 0xF801), [255, 0, 0, 255]);
+        // GL_UNSIGNED_INT_8_8_8_8_REV with GL_BGRA is blue, green, red
+        // and alpha bytes in memory, as GL_UNSIGNED_BYTE is; without
+        // _REV the bytes come the other way round.
+        assert_eq!(
+            texel(0x8367, GL_BGRA_EXT, 0x8011_2233),
+            [0x11, 0x22, 0x33, 0x80]
+        );
+        assert_eq!(
+            texel(0x8035, GL_BGRA_EXT, 0x3322_1180),
+            [0x11, 0x22, 0x33, 0x80]
+        );
+        assert_eq!(texel(0x8365, GL_RGBA, 0xF00F), [255, 0, 0, 255]);
+        assert_eq!(texel(0x8368, GL_RGBA, 0xC000_03FF), [255, 0, 0, 255]);
+        assert_eq!(texel(0x8032, GL_RGB, 0xE3), [255, 0, 255, 255]);
+        assert_eq!(texel(0x8362, GL_RGB, 0xC7), [255, 0, 255, 255]);
+        assert_eq!(packed_type(GL_UNSIGNED_BYTE), None);
     }
 
     #[test]
