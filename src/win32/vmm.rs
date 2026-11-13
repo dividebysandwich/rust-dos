@@ -52,13 +52,11 @@ enum Label {
     GetCurVmHandle,
     EnableVmInts,
     SimulateIret,
-    Iret16,
     Iret32,
     IretV86,
     IretFlags,
     IretExit,
     ServiceTable,
-    ReadyQueue,
     ReadyHead,
     VmBlock,
     DebuggerWelcome,
@@ -267,7 +265,6 @@ fn simulate_iret(c: &mut Code) {
     // cleared here, its lower half written by the compared code.
     c.emit(&[0x8E, 0x65, 0x34]); // mov fs, [ebp+34h]: Client_SS
     c.emit(&[0x66, 0xC7, 0x45, 0x26, 0x00, 0x00]); // mov word [ebp+26h], 0
-    c.label(Label::Iret16);
     let start = c.bytes.len();
     // Leaves AX the popped flags with EAX's upper half 0, and CX the
     // flags that changed; jumps to `IretExit` if IF didn't change. Its
@@ -364,7 +361,6 @@ fn data(c: &mut Code, client: u32, rust_services: &[u16]) -> u32 {
 
     // The scheduler's ready queue, the VMs ready to run: the one VM, which
     // runs, is its head and the current VM.
-    c.label(Label::ReadyQueue);
     c.emit(&compared::READY_QUEUE_SIGNATURE);
     c.label(Label::ReadyHead);
     c.refer(&[], Label::VmBlock, Fixup::Abs32);

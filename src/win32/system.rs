@@ -393,8 +393,10 @@ fn write_vmm_data(cpu: &mut Cpu, phys: u32) {
     let rust_services = RUST_VMM_SERVICES.map(|service| service as u16);
     let code = vmm::build(SYSTEM + VMM_CODE, SYSTEM + CLIENT_REGS, &rust_services);
     cpu.bus.load_bytes((phys + VMM_CODE) as usize, &code.bytes);
-    cpu.bus.write_32(ddb + DDB_SERVICE_TABLE as usize, code.service_table);
-    cpu.bus.write_32(ddb + DDB_SERVICE_TABLE_SIZE as usize, code.services);
+    cpu.bus
+        .write_32(ddb + DDB_SERVICE_TABLE as usize, code.service_table);
+    cpu.bus
+        .write_32(ddb + DDB_SERVICE_TABLE_SIZE as usize, code.services);
     write_dynamic_vxds(cpu, phys);
     let mut list = Vec::with_capacity(VXD_LOCATIONS_LEN as usize);
     list.extend_from_slice(&(SYSTEM + VMM_DDB).to_le_bytes());
@@ -613,8 +615,9 @@ fn vmm_entry(cpu: &mut Cpu, service: u32) -> Option<u32> {
     if service >> 16 != 1 {
         return None;
     }
-    let table = cpu.bus.guest_read_32(SYSTEM + VMM_DDB + DDB_SERVICE_TABLE);
-    let size = cpu.bus.guest_read_32(SYSTEM + VMM_DDB + DDB_SERVICE_TABLE_SIZE);
+    let ddb = SYSTEM + VMM_DDB;
+    let table = cpu.bus.guest_read_32(ddb + DDB_SERVICE_TABLE);
+    let size = cpu.bus.guest_read_32(ddb + DDB_SERVICE_TABLE_SIZE);
     let number = service & 0xFFFF;
     if table == 0 || number >= size {
         return None;
@@ -955,8 +958,11 @@ pub fn idt(cpu: &mut Cpu, vector: u8) {
         // VxDCall from level 3, and the INT, 2 bytes before the dword.
         Some(Entry::System(mut ctx)) if vector == 0x20 => {
             let service = cpu.bus.guest_read_32(ctx.eip);
-            let from_vmm = (SYSTEM + VMM_CODE..SYSTEM + VXDS).contains(&ctx.eip);
-            let entry = vmm_entry(cpu, service & !0x8000).filter(|_| !from_vmm);
+            // A stub's call of its service skips the table, whose entry
+            // is the stub. Other calls from VMM's code go through it.
+            let stub = (SYSTEM + VMM_CODE..SYSTEM + VXDS).contains(&ctx.eip)
+                && RUST_VMM_SERVICES.contains(&(service & !0x8000));
+            let entry = vmm_entry(cpu, service & !0x8000).filter(|_| !stub);
             if let Some(entry) = entry {
                 if service & 0x8000 == 0 {
                     let esp = ctx.gpr[ESP].wrapping_sub(4);
@@ -1053,14 +1059,13 @@ mod tests {
     use super::super::vmm::compared;
     use super::*;
 
-    /// The SHA-256 digest of `data` in lowercase hex, for the strings
-    /// VMM's object must not hold, which are known only by their digests.
-    fn sha256_hex(data: &[u8]) -> String {
-        use sha2::{Digest, Sha256};
-        Sha256::digest(data)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+    /// The 32 bytes of a SHA-256 digest written as 64 hex digits, for the
+    /// strings VMM's object must not hold, which are known only by their
+    /// digests.
+    fn digest_bytes(hex: &str) -> [u8; 32] {
+        std::array::from_fn(|i| {
+            u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).expect("a hex digest")
+        })
     }
 
     /// VMM's locked code object, as the location list reports it, of a
@@ -1078,24 +1083,31 @@ mod tests {
         // The block's linear addresses, at its physical ones.
         let at = |lin: u32| (phys + (lin - SYSTEM)) as usize;
         let list = at(ctx.gpr[EAX]);
-        assert_eq!(cpu.bus.read_32(list), SYSTEM + VMM_DDB, "VMM's record first");
+        assert_eq!(
+            cpu.bus.read_32(list),
+            SYSTEM + VMM_DDB,
+            "VMM's record first"
+        );
         assert!(cpu.bus.read_8(list + 4) >= 1, "VMM has an object");
         let (address, size) = (cpu.bus.read_32(list + 5), cpu.bus.read_32(list + 9));
         assert_eq!(cpu.bus.read_8(list + 13), OBJECT_LOCKED_CODE);
-        (0..size as usize).map(|i| cpu.bus.read_8(at(address) + i)).collect()
+        (0..size as usize)
+            .map(|i| cpu.bus.read_8(at(address) + i))
+            .collect()
     }
 
     /// The bytes of Windows 98 SE's VMM that programs compare exactly
     /// (`vmm::compared`) are in VMM's locked code object, where programs
-    /// scan it: at a start more than 128 bytes before its end. The four
+    /// scan it: each wholly in the object's first (size - 128) bytes, so
+    /// that it starts more than 128 bytes before the end. The four
     /// strings of Windows' debugger and debug builds that programs expect
     /// not to find there, known here by their lengths and SHA-256
-    /// digests, aren't.
+    /// digests, are nowhere in the object.
     #[test]
     fn vmm_s_object_holds_what_programs_compare_and_not_what_they_reject() {
         let object = vmm_object();
-        let window = object.len() - 128;
-        let found = |item: &[u8]| (0..window).any(|at| object[at..].starts_with(item));
+        let window = &object[..object.len() - 128];
+        let found = |item: &[u8]| window.windows(item.len()).any(|w| w == item);
         assert!(found(&compared::SIMULATE_IRET_PM16), "Simulate_Iret's code");
         assert!(found(compared::DEBUGGER_WELCOME), "the debugger's greeting");
         assert!(found(compared::DEBUGGER_PROMPT), "the debugger's prompt");
@@ -1119,9 +1131,11 @@ mod tests {
             ),
         ];
         for (len, digest) in absent {
-            let at = (0..window)
-                .filter(|&at| at + len <= object.len())
-                .find(|&at| sha256_hex(&object[at..at + len]) == digest);
+            use sha2::{Digest, Sha256};
+            let digest = digest_bytes(digest);
+            let at = object
+                .windows(len)
+                .position(|bytes| Sha256::digest(bytes)[..] == digest);
             assert_eq!(at, None, "a string of {len} bytes that must be absent");
         }
     }

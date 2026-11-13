@@ -4721,17 +4721,18 @@ fn simulate_iret_enables_the_vm_s_interrupts() {
 
 /// Simulate_Iret for a 32-bit client (VMStat_PM_Use32) on a stack
 /// segment above 64K: three dwords at SS:ESP, CS and the flags the low
-/// words of theirs, Client_ESP 12 bytes on.
+/// words of theirs, Client_ESP 12 bytes on. The interrupt flag goes from
+/// set to clear as the frame has it.
 #[test]
 fn simulate_iret_pops_a_32_bit_frame() {
     let case = IretCase {
         status: 0xE0,
         ss: 0x013F,
         esp: ICA,
-        eflags: 0x0004_0000,
-        frame: &[0x4321, 0x8765, 0x0137, 0xFFFF, 0x0202, 0xFFFF],
+        eflags: 0x0004_0202,
+        frame: &[0x4321, 0x8765, 0x0137, 0xFFFF, 0x0046, 0xFFFF],
         frame_at: FrameAt::Linear(ICA),
-        expected: (0x8765_4321, 0x0137, 0x0004_0202, ICA + 12),
+        expected: (0x8765_4321, 0x0137, 0x0004_0046, ICA + 12),
     };
     let (code, text) = run_through_gate_28h("simulate_iret_pm32", &simulate_iret_level0(&case));
     assert_eq!(code, 1, "{}", text);
@@ -4752,6 +4753,24 @@ fn simulate_iret_pops_a_32_bit_frame_at_sp_in_a_small_segment() {
         expected: (0x5678, 0x0137, 0x0004_0202, 0x0FEC),
     };
     let (code, text) = run_through_gate_28h("simulate_iret_vxd", &simulate_iret_level0(&case));
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// A 32-bit frame that turns the client's interrupt flag on goes through
+/// the same flags handling as a 16-bit one: the flags are written with IF
+/// off and Enable_VM_Ints turns it on.
+#[test]
+fn simulate_iret_enables_the_vm_s_interrupts_from_a_32_bit_frame() {
+    let case = IretCase {
+        status: 0xE0,
+        ss: 0x013F,
+        esp: ICA,
+        eflags: 0x0004_0002,
+        frame: &[0x4321, 0x8765, 0x0137, 0xFFFF, 0x0203, 0xFFFF],
+        frame_at: FrameAt::Linear(ICA),
+        expected: (0x8765_4321, 0x0137, 0x0004_0203, ICA + 12),
+    };
+    let (code, text) = run_through_gate_28h("simulate_iret_pm32_sti", &simulate_iret_level0(&case));
     assert_eq!(code, 1, "{}", text);
 }
 
