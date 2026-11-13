@@ -10,6 +10,7 @@
 //! drawn in any order, by any number of threads.
 
 use super::pipeline::{SLOTS, Shape};
+use super::span::N;
 use super::texel::Rgba;
 use super::vertex::ScreenVertex;
 
@@ -418,9 +419,9 @@ impl Prim {
     /// perspective is the planes at each pixel's centre, and their
     /// change from a pixel to the next is the planes' too. The colours
     /// are the pixel's own, rounded as `span.rs` rounds them: a line
-    /// whose colours change has a square for each pixel. A pixel whose
-    /// corners the planes give no positive 1 / w has its centre's
-    /// values at every corner.
+    /// whose colours change has a square for each run of pixels of the
+    /// same colours. A pixel whose corners the planes give no positive
+    /// 1 / w has its centre's values at every corner.
     pub fn squares(&self, shape: &Shape, mut out: impl FnMut(&[ScreenVertex; 4])) {
         let Cover::Rows(spans) = &self.cover else {
             return;
@@ -464,6 +465,13 @@ impl Prim {
                     true => at(fx + dx, fy + dy, q[i], colours),
                     false => at(fx, fy, centre, colours),
                 };
+                // The software renderer draws a pixel whose centre has
+                // no positive 1 / w too, and a host cuts away a corner
+                // without one. Values that are the same at every
+                // corner don't depend on it, so the corners get 1.
+                if !sound && !(centre.is_finite() && centre > 0.0) {
+                    corners[i].rhw = 1.0;
+                }
                 corners[i].x = x.0 as f32 + side + dx + 0.5;
                 corners[i].y = y as f32 + side + dy + 0.5;
             }
@@ -472,25 +480,41 @@ impl Prim {
         };
         for (row, &(first, end)) in spans.iter().enumerate() {
             let y = self.rows.0 + row as i32;
-            // One square for the row where the colours are the same
-            // all along the line.
-            if let Some(flat) = self.flat
-                && square((first, end), y, flat)
-            {
-                continue;
-            }
-            for x in first..end {
-                // The pixel's place as `span.rs` works it out.
-                let fx = first as f32 - self.ox + (x - first) as f32;
-                let fy = y as f32 - self.oy;
-                let w = 1.0 / self.q.eval(fx, fy);
-                let colours = self.flat.unwrap_or_else(|| {
+            let fy = y as f32 - self.oy;
+            // A pixel's colours, from its place as `span.rs` works it
+            // out: from the first pixel of its chunk of `span::N`.
+            let colours = |x: i32| {
+                self.flat.unwrap_or_else(|| {
+                    let start = first + (x - first) / N as i32 * N as i32;
+                    let fx = start as f32 - self.ox + (x - start) as f32;
+                    let w = 1.0 / self.q.eval(fx, fy);
                     (
                         colour(&self.diffuse, fx, fy, w),
                         colour(&self.specular, fx, fy, w),
                     )
-                });
-                square((x, x + 1), y, colours);
+                })
+            };
+            // A square for each run of pixels with the same colours,
+            // which is the whole row where the line has one colour,
+            // and one for each of its pixels where the planes aren't
+            // sound at the run's corners.
+            let mut x = first;
+            let mut run = colours(x);
+            while x < end {
+                let (mut to, mut next) = (x + 1, run);
+                while to < end {
+                    next = colours(to);
+                    if next != run {
+                        break;
+                    }
+                    to += 1;
+                }
+                if !square((x, to), y, run) {
+                    for x in x..to {
+                        square((x, x + 1), y, run);
+                    }
+                }
+                (x, run) = (to, next);
             }
         }
     }

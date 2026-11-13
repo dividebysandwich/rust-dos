@@ -914,9 +914,9 @@ on the processor, and it has:
   interpolates to a pixel's centre is the line's value at it, with
   the coordinates' change from pixel to pixel for the level of
   detail. The colours are worked out by the card for each pixel, with
-  its rounding: a line whose colours change has a square a pixel. A
-  point is the two triangles of its square, with the limits of its
-  size applied by the card.
+  its rounding: a line whose colours change has a square for each run
+  of pixels of the same colours. A point is the two triangles of its
+  square, with the limits of its size applied by the card.
 
 It declines these states, which the software renderer draws:
 
