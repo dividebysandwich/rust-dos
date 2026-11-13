@@ -9,8 +9,8 @@
 //! is empty, as one after a restore is, and its owner starts it again.
 
 use crate::win32::gdi32::surface::dib_stride;
-use oxideav_indeo::indeo3::{DecodedPicture, FrameHeader, Indeo3PictureDecoder};
-use oxideav_indeo::indeo5::Iv50Decoder;
+use oxideav_indeo::indeo3::{FrameHeader, Indeo3PictureDecoder};
+use oxideav_indeo::indeo5::{Iv50Decoder, MAX_PICTURE_PIXELS};
 
 const IV31: u32 = u32::from_le_bytes(*b"IV31");
 const IV32: u32 = u32::from_le_bytes(*b"IV32");
@@ -50,7 +50,8 @@ pub fn upper(compression: u32) -> u32 {
 pub fn supported(compression: u32, width: u32, height: u32) -> bool {
     match upper(compression) {
         IV31 | IV32 => (1..=INDEO3_MAX.0).contains(&width) && (1..=INDEO3_MAX.1).contains(&height),
-        IV50 => width >= 1 && height >= 1,
+        // The decoder refuses a frame of a larger area.
+        IV50 => width >= 1 && height >= 1 && width as u64 * height as u64 <= MAX_PICTURE_PIXELS,
         IV41 => (1..=4096).contains(&width) && (1..=4096).contains(&height),
         CVID => (1..=CINEPAK_MAX).contains(&width) && (1..=CINEPAK_MAX).contains(&height),
         _ => false,
@@ -59,7 +60,9 @@ pub fn supported(compression: u32, width: u32, height: u32) -> bool {
 
 enum Decoder {
     Indeo3(Box<Indeo3PictureDecoder>),
-    /// It keeps its picture when a frame fails to decode.
+    /// It keeps its picture when a frame fails to decode, but for a
+    /// key frame that changes the picture's size or bands: that one
+    /// clears it until the next key frame decodes.
     Indeo5(Box<Iv50Decoder>),
     Indeo4(Box<super::indeo4::Decoder>),
     Cinepak(Box<super::cinepak::Decoder>),
@@ -79,7 +82,7 @@ impl std::fmt::Debug for Codec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self.0 {
             Some(Decoder::Indeo3(_)) => "Codec(Indeo 3)",
-            Some(Decoder::Indeo5(..)) => "Codec(Indeo 5)",
+            Some(Decoder::Indeo5(_)) => "Codec(Indeo 5)",
             Some(Decoder::Indeo4(_)) => "Codec(Indeo 4)",
             Some(Decoder::Cinepak(_)) => "Codec(Cinepak)",
             None => "Codec(None)",
@@ -104,8 +107,10 @@ impl Codec {
     }
 
     /// Decompress one frame. After an error the picture stays the one
-    /// before, but for Cinepak's: a Cinepak frame that fails partway
-    /// keeps the blocks it drew, as FFmpeg's decoder does.
+    /// before, but for Cinepak's and one case of Indeo 5's: a Cinepak
+    /// frame that fails partway keeps the blocks it drew, as FFmpeg's
+    /// decoder does, and an Indeo 5 key frame that changes the size or
+    /// the bands and fails leaves no picture.
     pub fn decode(&mut self, frame: &[u8]) -> Result<(), String> {
         match &mut self.0 {
             Some(Decoder::Indeo3(d)) => {
@@ -129,25 +134,31 @@ impl Codec {
     /// The last picture as a bottom-up 24-bit DIB, if it is `width` by
     /// `height`.
     pub fn picture(&self, width: u32, height: u32) -> Option<Vec<u8>> {
+        let size = (width as usize, height as usize);
         match self.0.as_ref()? {
             Decoder::Indeo3(d) => {
-                let picture = d.previous()?;
-                (picture.width == width && picture.height == height).then(|| indeo3_dib(picture))
-            }
-            Decoder::Indeo5(d) => {
-                let size = (width as usize, height as usize);
-                if d.dimensions() != Some(size) {
+                let p = d.previous()?;
+                if (p.width, p.height) != (width, height) {
                     return None;
                 }
+                let (w, cw) = (width as usize, p.chroma_width as usize);
+                yvu9_dib([(&p.luma, w), (&p.chroma_u, cw), (&p.chroma_v, cw)], size)
+            }
+            Decoder::Indeo5(d) => {
                 let (y, u, v) = (d.y()?, d.u()?, d.v()?);
+                if (y.width, y.height) != size {
+                    return None;
+                }
                 let planes = [(y.data, y.stride), (u.data, u.stride), (v.data, v.stride)];
-                iv50_dib(planes, size)
+                yvu9_dib(planes, size)
             }
             Decoder::Indeo4(d) => {
                 let p = d.picture()?;
-                (p.width == width as usize && p.height == height as usize).then(|| {
-                    yvu9_dib(&p.y, &p.u, &p.v, (p.width, p.height), p.chroma_width())
-                })
+                if (p.width, p.height) != size {
+                    return None;
+                }
+                let cw = p.chroma_width();
+                yvu9_dib([(&p.y, p.width), (&p.u, cw), (&p.v, cw)], size)
             }
             Decoder::Cinepak(d) => {
                 // A frame is coded in blocks of 4 by 4 pixels, so a movie
@@ -200,38 +211,11 @@ pub fn bgr(y: u8, u: u8, v: u8) -> [u8; 3] {
     [b, g, r].map(|c| c.clamp(0, 255) as u8)
 }
 
-/// An Indeo 3 picture as a DIB.
-fn indeo3_dib(picture: &DecodedPicture) -> Vec<u8> {
-    yvu9_dib(
-        &picture.luma,
-        &picture.chroma_u,
-        &picture.chroma_v,
-        (picture.width as usize, picture.height as usize),
-        picture.chroma_width as usize,
-    )
-}
-
-/// A YVU9 picture (Indeo 3's and 4's) as a DIB: each chroma sample, of
-/// rows `cw` wide, colours its 4x4 block.
-fn yvu9_dib(luma: &[u8], u: &[u8], v: &[u8], (w, h): (usize, usize), cw: usize) -> Vec<u8> {
-    let stride = dib_stride(w as i32, 24);
-    let mut out = vec![0; stride * h];
-    for y in 0..h {
-        let crow = y / 4 * cw;
-        let ys = &luma[y * w..y * w + w];
-        let row = &mut out[(h - 1 - y) * stride..][..w * 3];
-        for (x, (&yv, d)) in ys.iter().zip(row.as_chunks_mut::<3>().0).enumerate() {
-            *d = bgr(yv, u[crow + x / 4], v[crow + x / 4]);
-        }
-    }
-    out
-}
-
-/// Indeo 5's picture as a DIB, from its luma, U and V planes: each is
-/// its bytes and the distance between its rows. The planes are YVU9's,
-/// so each chroma sample colours its 4x4 block. None if a plane is
-/// smaller than a picture of `w` by `h` needs.
-fn iv50_dib(planes: [(&[u8], usize); 3], (w, h): (usize, usize)) -> Option<Vec<u8>> {
+/// A YVU9 picture (Indeo 3's, 4's and 5's) as a DIB, from its luma, U
+/// and V planes: each is its bytes and the distance between its rows.
+/// Each chroma sample colours its 4x4 block. None if a plane is smaller
+/// than a picture of `w` by `h` needs.
+fn yvu9_dib(planes: [(&[u8], usize); 3], (w, h): (usize, usize)) -> Option<Vec<u8>> {
     let (cw, ch) = (w.div_ceil(4), h.div_ceil(4));
     let fits = |(data, stride): (&[u8], usize), w: usize, h: usize| {
         h == 0 || (stride >= w && data.len() >= (h - 1) * stride + w)
@@ -259,19 +243,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn indeo_5_rows_go_bottom_up_with_padding() {
+    fn yvu9_rows_go_bottom_up_with_padding() {
         // Two rows of 2 pixels, white then black, in a plane whose rows
         // are 3 apart. Chroma of 128 is grey.
         let luma: (&[u8], usize) = (&[235, 235, 99, 16, 16, 99], 3);
         let chroma: (&[u8], usize) = (&[128], 1);
-        let dib = iv50_dib([luma, chroma, chroma], (2, 2)).unwrap();
+        let dib = yvu9_dib([luma, chroma, chroma], (2, 2)).unwrap();
         assert_eq!(
             dib,
             [0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 0, 0]
         );
         // A picture larger than its planes has no DIB.
-        assert!(iv50_dib([luma, chroma, chroma], (4, 2)).is_none());
-        assert!(iv50_dib([luma, chroma, chroma], (2, 8)).is_none());
+        assert!(yvu9_dib([luma, chroma, chroma], (4, 2)).is_none());
+        assert!(yvu9_dib([luma, chroma, chroma], (2, 8)).is_none());
     }
 
     #[test]
@@ -428,6 +412,8 @@ mod tests {
         assert!(supported(u32::from_le_bytes(*b"cvid"), 320, 240));
         assert!(!supported(u32::from_le_bytes(*b"MSVC"), 320, 240));
         assert!(!supported(IV32, 800, 600));
+        assert!(supported(iv50, 4096, 4096));
+        assert!(!supported(iv50, 4097, 4096));
         assert!(!Codec::new(iv50).is_empty());
         assert!(Codec::new(0).is_empty());
     }
