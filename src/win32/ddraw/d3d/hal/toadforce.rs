@@ -273,6 +273,27 @@ fn kept(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> {
     same.then_some(k.card)
 }
 
+/// A kept bind's draw counts as a use of the copies it draws with, as
+/// the bind it skips would have made it (`cached`): the clock moves on
+/// and the copies have its time. So the least recently used copy that
+/// `room` lets go of, and the clock and times a saved state has, are
+/// the same whether a draw found its bind kept or bound again, as
+/// debug builds do (`CHECK_KEPT`).
+fn used_again(cpu: &mut Cpu) {
+    let hal = hal(cpu);
+    hal.clock = hal.clock.wrapping_add(1);
+    let clock = hal.clock;
+    let Some(k) = hal.told.kept() else {
+        return;
+    };
+    let copies = k.copies;
+    for c in hal.textures.iter_mut() {
+        if copies.iter().any(|&(id, _)| id != 0 && id == c.surface) {
+            c.used = clock;
+        }
+    }
+}
+
 /// The state the HAL gives the card.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sent {
@@ -939,12 +960,18 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
     if kept.is_some() {
         hal(cpu).binds[1] += 1;
         if !CHECK_KEPT {
+            used_again(cpu);
             return kept;
         }
     }
     let target = {
         let _profile = crate::profile::zone(crate::profile::Zone::D3dBindTarget);
-        target(cpu, d)?
+        target(cpu, d)
+    };
+    let Some(target) = target else {
+        // `CHECK_KEPT`: a kept bind draws, so this one must as well.
+        assert!(kept.is_none(), "a bind's target changed without its stamp: {kept:?} kept");
+        return None;
     };
     let pid = current_pid(cpu);
     if hal(cpu).pid != pid {
