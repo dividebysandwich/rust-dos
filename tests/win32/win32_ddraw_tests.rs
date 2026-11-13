@@ -1407,6 +1407,7 @@ const SCREEN_USER32: (&str, &[&str]) = (
         "GetWindowRect",
         "IsWindowVisible",
         "GetWindowLongA",
+        "SetWindowLongA",
     ],
 );
 const S_CREATE_WINDOW: usize = 0;
@@ -1420,8 +1421,9 @@ const S_GET_DESKTOP_WINDOW: usize = 7;
 const S_GET_WINDOW_RECT: usize = 8;
 const S_IS_WINDOW_VISIBLE: usize = 9;
 const S_GET_WINDOW_LONG: usize = 10;
+const S_SET_WINDOW_LONG: usize = 11;
 /// DirectDrawCreate, after SCREEN_USER32's.
-const S_DIRECT_DRAW_CREATE: usize = 11;
+const S_DIRECT_DRAW_CREATE: usize = 12;
 
 const DD_RESTORE_DISPLAY_MODE: u32 = 19;
 const WM_DISPLAYCHANGE: u32 = 0x7E;
@@ -1606,6 +1608,63 @@ fn the_hidden_window_of_exclusive_mode_is_shown_and_topmost() {
     // window again (SetWindowPos with HWND_NOTOPMOST).
     assert_eq!(r[6], 0);
     assert_eq!(r[7] & WS_EX_TOPMOST, 0);
+}
+
+/// Exclusive mode set twice without a mode change, as Black & White sets
+/// it: a visible 200x100 popup window, SetCooperativeLevel with
+/// DDSCL_EXCLUSIVE and DDSCL_FULLSCREEN, the window's rectangle; then
+/// SetWindowLongA puts in a style without WS_VISIBLE, which hides the
+/// window, and SetCooperativeLevel sets the same level again: whether
+/// the window is visible after each and its extended style.
+fn level_again_program() -> (Vec<u8>, u32) {
+    program(
+        &[SCREEN_USER32, ("DDRAW.DLL", &["DirectDrawCreate"])],
+        &screen_data(),
+        |a, l| {
+            let mut c = Calls { next: 0 };
+            screen_window(a, l, &mut c, (200, 100))?;
+            let create = [Arg::I(0), Arg::At(DD), Arg::I(0)];
+            c.api(a, l, S_DIRECT_DRAW_CREATE, &create)?;
+            let level = [Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)];
+            c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &level)?;
+            let rect = [Arg::Val(HWND), Arg::At(RECT)];
+            c.api(a, l, S_GET_WINDOW_RECT, &rect)?;
+            let gwl_style = -16i32 as u32;
+            let style = [Arg::Val(HWND), Arg::I(gwl_style), Arg::I(WS_POPUP)];
+            c.api(a, l, S_SET_WINDOW_LONG, &style)?;
+            c.api(a, l, S_IS_WINDOW_VISIBLE, &[Arg::Val(HWND)])?;
+            c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &level)?;
+            c.api(a, l, S_IS_WINDOW_VISIBLE, &[Arg::Val(HWND)])?;
+            let gwl_exstyle = -20i32 as u32;
+            let ex_style = [Arg::Val(HWND), Arg::I(gwl_exstyle)];
+            c.api(a, l, S_GET_WINDOW_LONG, &ex_style)?;
+            finish(a, l)
+        },
+    )
+}
+
+#[test]
+fn setting_exclusive_mode_again_shows_the_window_the_program_hid() {
+    let (program, data) = level_again_program();
+    let mut cpu = machine("level_again", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 9);
+    assert_eq!(r[1..3], [0; 2]);
+    // SetCooperativeLevel makes the window of exclusive full-screen mode
+    // cover the screen, without a mode change (Wine's ddraw tests,
+    // test_window_style, check the rectangle on Windows).
+    assert_eq!(r[3], 1);
+    let rect: Vec<u32> = (0..4).map(|i| peek(&cpu, data + RECT + 4 * i)).collect();
+    assert_eq!(rect, [0, 0, 640, 480]);
+    // A style without WS_VISIBLE hides the window.
+    assert_eq!(r[4] & WS_VISIBLE, WS_VISIBLE);
+    assert_eq!(r[5], 0);
+    // The level set again shows it and makes it topmost while it is the
+    // foreground window, as test_window_style finds on Windows: the
+    // mouse is then over it again.
+    assert_eq!(r[6], 0);
+    assert_eq!(r[7], 1);
+    assert_eq!(r[8] & WS_EX_TOPMOST, WS_EX_TOPMOST);
 }
 
 /// A DEVMODEA at `offset` with `fields` and the size and depth given.
