@@ -73,8 +73,8 @@ const SEED: &str = r#"REGEDIT4
 @="C:\\WINDOWS\\NOTEPAD.EXE %1"
 
 [HKEY_LOCAL_MACHINE\Software\Microsoft\DirectX]
-"Version"="4.06.00.0318"
-"InstalledVersion"=hex:00,00,00,06,00,00,00,00
+"Version"="4.07.00.0716"
+"InstalledVersion"=hex:00,00,00,07,00,00,00,00
 
 [HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion]
 "VersionNumber"="4.00.950"
@@ -995,12 +995,13 @@ mod tests {
         assert_eq!(value("RegisteredOwner"), b"Someone\0");
         // The values keep their places.
         assert_eq!(registry.key(key).values[0].name, "VersionNumber");
-        // DirectX 6.1 of Windows 98 SE, which has no InstalledVersion.
+        // DirectX 7.0a, which the built-in DLLs are.
         let dx = registry
             .find(LOCAL_MACHINE, "SOFTWARE\\Microsoft\\DirectX")
             .unwrap();
-        assert_eq!(registry.value(dx, "Version").unwrap().data, b"4.06.03.0518\0");
-        assert!(registry.value(dx, "InstalledVersion").is_none());
+        assert_eq!(registry.value(dx, "Version").unwrap().data, b"4.07.00.0716\0");
+        let installed = &registry.value(dx, "InstalledVersion").unwrap().data;
+        assert_eq!(installed[..], [0, 0, 0, 7, 0, 0, 0, 0]);
     }
 
     #[test]

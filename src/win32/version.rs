@@ -85,14 +85,24 @@ pub struct Info {
     pub version_name: &'static str,
     pub product_name: &'static str,
     pub sub_version: &'static str,
-    /// HKLM\Software\Microsoft\DirectX's Version and InstalledVersion;
-    /// Windows 98 has no InstalledVersion.
+    /// HKLM\Software\Microsoft\DirectX's Version and InstalledVersion:
+    /// `DIRECTX` under every version.
     pub directx: &'static str,
     pub directx_installed: Option<[u8; 8]>,
     /// MSVCRT's _osver: GetVersion's high word, which Windows 98's
     /// MSVCRT keeps with its top bit.
     pub osver: u32,
 }
+
+/// The DirectX the registry gives, Version and InstalledVersion: 7.0a's,
+/// as its installer writes them, under every version of Windows. The
+/// built-in DLLs are the same under each, and they are DirectX 7's:
+/// DirectDraw answers for IDirectDraw7 and IDirectDrawSurface7, and
+/// Direct3D for IDirect3DDevice7, with the behaviour probes on Windows 98
+/// SE with DirectX 7.0a gave. A registry with the DirectX Windows came
+/// with (6.0 for Windows 95's, 6.1 for 98's) told programs that check it,
+/// such as Black & White, that they can't run.
+const DIRECTX: (&str, [u8; 8]) = ("4.07.00.0716", [0, 0, 0, 7, 0, 0, 0, 0]);
 
 static WIN95: Info = Info {
     get_version: 0xC000_0004,
@@ -104,8 +114,8 @@ static WIN95: Info = Info {
     version_name: "Windows 95",
     product_name: "Microsoft Windows 95",
     sub_version: "",
-    directx: "4.06.00.0318",
-    directx_installed: Some([0, 0, 0, 6, 0, 0, 0, 0]),
+    directx: DIRECTX.0,
+    directx_installed: Some(DIRECTX.1),
     osver: 0x4000,
 };
 
@@ -119,8 +129,8 @@ static WIN98: Info = Info {
     version_name: "Windows 98",
     product_name: "Microsoft Windows 98",
     sub_version: " ",
-    directx: "4.06.02.0436",
-    directx_installed: None,
+    directx: DIRECTX.0,
+    directx_installed: Some(DIRECTX.1),
     osver: 0xC000,
 };
 
@@ -134,8 +144,8 @@ static WIN98SE: Info = Info {
     version_name: "Windows 98",
     product_name: "Microsoft Windows 98",
     sub_version: " A ",
-    directx: "4.06.03.0518",
-    directx_installed: None,
+    directx: DIRECTX.0,
+    directx_installed: Some(DIRECTX.1),
     osver: 0xC000,
 };
 
