@@ -9,8 +9,8 @@
 //! compressed texture and the stencil test.
 
 use super::win32_d3d_tests::{
-    Arg, Calls, DONE, RESULTS, copy, finish, machine, machine_toadforce, peek, peek_f32, program,
-    put_f32s, put32, results, run_until_done,
+    Arg, Calls, DONE, Layout, RESULTS, copy, finish, machine, machine_toadforce, peek, peek_f32,
+    program, put_f32s, put32, results, run_until_done,
 };
 use iced_x86::code_asm::*;
 
@@ -700,4 +700,364 @@ fn a_toadforce_has_a_device_with_a_stencil_and_compressed_textures() {
     let counts = cpu.bus.toadforce.as_ref().expect("a ToadForce").counts();
     assert_eq!(counts.rejected, 0);
     assert_eq!(counts.draws, 2);
+}
+
+// Cube textures and blended vertices on a ToadForce.
+
+const DEV_CREATE_CUBE_TEXTURE: u32 = 22;
+const RES_GET_TYPE: u32 = 10;
+const BASE_GET_LEVEL_COUNT: u32 = 13;
+const CUBE_GET_CUBE_MAP_SURFACE: u32 = 15;
+const CUBE_LOCK_RECT: u32 = 16;
+const CUBE_UNLOCK_RECT: u32 = 17;
+const D3DRTYPE_CUBETEXTURE: u32 = 5;
+const D3DERR_NOTAVAILABLE: u32 = 0x8876_086A;
+const D3DRS_CULLMODE: u32 = 22;
+const D3DRS_LIGHTING: u32 = 137;
+/// XYZRHW with one set of three texture coordinates.
+const FVF_CUBE: u32 = 0x1_0104;
+/// XYZB1 with a diffuse colour: one weight. With LASTBETA_UBYTE4 the
+/// one beta is the matrix indices.
+const FVF_WEIGHT: u32 = 0x046;
+const FVF_INDICES: u32 = 0x1046;
+
+/// The D3DPRESENT_PARAMETERS of the ToadForce programs: 640x480 R5G6B5
+/// in full screen, one back buffer that can be locked, and a depth
+/// buffer with a stencil.
+fn toadforce_present(d: &mut [u8]) {
+    d[CLASS as usize..CLASS as usize + 7].copy_from_slice(b"Static\0");
+    for (i, v) in [640, 480, D3DFMT_R5G6B5, 1, 0, D3DSWAPEFFECT_DISCARD]
+        .iter()
+        .enumerate()
+    {
+        put32(d, PRESENT + 4 * i as u32, *v);
+    }
+    put32(d, PRESENT + 32, 1);
+    put32(d, PRESENT + 36, D3DFMT_D24S8);
+    put32(d, PRESENT + 40, D3DPRESENTFLAG_LOCKABLE_BACKBUFFER);
+}
+
+/// The start of a ToadForce program: a window, Direct3D 8 and a device
+/// with hardware vertex processing, cleared to blue. Four calls.
+fn toadforce_device(a: &mut CodeAssembler, l: &Layout, c: &mut Calls) -> Result<(), IcedError> {
+    c.api(
+        a,
+        l,
+        CREATE_WINDOW,
+        &[
+            Arg::I(0),
+            Arg::At(CLASS),
+            Arg::At(CLASS),
+            Arg::I(WS_POPUP | WS_VISIBLE),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(640),
+            Arg::I(480),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(0x40_0000),
+            Arg::I(0),
+        ],
+    )?;
+    a.mov(dword_ptr(l.at(HWND)), eax)?;
+    a.mov(dword_ptr(l.at(PRESENT + 24)), eax)?;
+    c.api(a, l, DIRECT3D_CREATE8, &[Arg::I(D3D_SDK_VERSION)])?;
+    a.mov(dword_ptr(l.at(D3D)), eax)?;
+    c.com(
+        a,
+        l,
+        D3D,
+        D3D8_CREATE_DEVICE,
+        &[
+            Arg::I(0),
+            Arg::I(D3DDEVTYPE_HAL),
+            Arg::Val(HWND),
+            Arg::I(D3DCREATE_HARDWARE_VERTEXPROCESSING),
+            Arg::At(PRESENT),
+            Arg::At(DEVICE),
+        ],
+    )?;
+    let clear = [
+        Arg::I(0),
+        Arg::I(0),
+        Arg::I(7),
+        Arg::I(0xFF00_0080),
+        Arg::I(1.0f32.to_bits()),
+        Arg::I(0),
+    ];
+    c.com(a, l, DEVICE, DEV_CLEAR, &clear)
+}
+
+/// The end of a ToadForce program: the back buffer locked and the
+/// pixels at `read` copied to PIXELS, and the number of calls kept.
+fn toadforce_pixels(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    c: &mut Calls,
+    read: &[(u32, u32)],
+) -> Result<(), IcedError> {
+    let back = [Arg::I(0), Arg::I(0), Arg::At(BACK)];
+    c.com(a, l, DEVICE, DEV_GET_BACK_BUFFER, &back)?;
+    let lock = [Arg::At(BACK_LOCKED), Arg::I(0), Arg::I(0)];
+    c.com(a, l, BACK, SURF_LOCK_RECT, &lock)?;
+    for (i, &(x, y)) in read.iter().enumerate() {
+        a.mov(eax, dword_ptr(l.at(BACK_LOCKED)))?;
+        a.imul_3(eax, eax, y as i32)?;
+        a.add(eax, dword_ptr(l.at(BACK_LOCKED + 4)))?;
+        a.movzx(eax, word_ptr(eax + 2 * x))?;
+        a.mov(dword_ptr(l.at(PIXELS + 4 * i as u32)), eax)?;
+    }
+    Ok(())
+}
+
+/// The colours of the cube texture's faces, in the order of
+/// D3DCUBEMAP_FACES: +x, -x, +y, -y, +z, -z.
+const FACE_COLOURS: [u32; 6] = [
+    0xFFFF_0000,
+    0xFF00_FFFF,
+    0xFFFF_FF00,
+    0xFF00_FF00,
+    0xFF00_00FF,
+    0xFFFF_00FF,
+];
+
+/// The program: a cube texture of 4x4 A8R8G8B8 faces, each locked and
+/// filled with its colour, sampled by two quads of screen vertices
+/// whose texture coordinates point along +x and along -y. Then the
+/// calls whose results the test checks: the texture's level count and
+/// type, a face that doesn't exist, a cube texture whose edge isn't a
+/// power of two, and the formats CheckDeviceFormat is asked about.
+fn cube_program() -> (Vec<u8>, u32) {
+    let mut d = vec![0u8; DATA_SIZE];
+    toadforce_present(&mut d);
+    let mut quad = |at: u32, x0: f32, direction: [f32; 3]| {
+        let corners = [
+            [0.0, 0.0],
+            [32.0, 0.0],
+            [0.0, 32.0],
+            [32.0, 0.0],
+            [32.0, 32.0],
+            [0.0, 32.0],
+        ];
+        for (i, [x, y]) in corners.into_iter().enumerate() {
+            let [u, v, w] = direction;
+            put_f32s(&mut d, at + 28 * i as u32, &[x0 + x, y, 0.5, 1.0, u, v, w]);
+        }
+    };
+    quad(QUAD, 0.0, [1.0, 0.1, 0.2]);
+    quad(QUAD1, 32.0, [0.1, -1.0, 0.2]);
+    program(&[USER32, D3D8], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        toadforce_device(a, l, &mut c)?;
+        let create = |edge: u32, out: u32| {
+            [
+                Arg::I(edge),
+                Arg::I(1),
+                Arg::I(0),
+                Arg::I(D3DFMT_A8R8G8B8),
+                Arg::I(D3DPOOL_MANAGED),
+                Arg::At(out),
+            ]
+        };
+        c.com(a, l, DEVICE, DEV_CREATE_CUBE_TEXTURE, &create(4, TEXTURE))?;
+        for (face, colour) in FACE_COLOURS.into_iter().enumerate() {
+            let face = Arg::I(face as u32);
+            let lock = [face, Arg::I(0), Arg::At(TEX_LOCKED), Arg::I(0), Arg::I(0)];
+            c.com(a, l, TEXTURE, CUBE_LOCK_RECT, &lock)?;
+            // Four rows of four pixels, a pitch apart.
+            a.mov(edx, dword_ptr(l.at(TEX_LOCKED + 4)))?;
+            a.mov(eax, colour)?;
+            a.cld()?;
+            for _ in 0..4 {
+                a.mov(edi, edx)?;
+                a.mov(ecx, 4u32)?;
+                a.rep().stosd()?;
+                a.add(edx, dword_ptr(l.at(TEX_LOCKED)))?;
+            }
+            c.com(a, l, TEXTURE, CUBE_UNLOCK_RECT, &[face, Arg::I(0)])?;
+        }
+        c.com(a, l, DEVICE, DEV_SET_VERTEX_SHADER, &[Arg::I(FVF_CUBE)])?;
+        c.com(a, l, DEVICE, DEV_BEGIN_SCENE, &[])?;
+        let texture = [Arg::I(0), Arg::Val(TEXTURE)];
+        c.com(a, l, DEVICE, DEV_SET_TEXTURE, &texture)?;
+        for quad in [QUAD, QUAD1] {
+            let args = [
+                Arg::I(D3DPT_TRIANGLELIST),
+                Arg::I(2),
+                Arg::At(quad),
+                Arg::I(28),
+            ];
+            c.com(a, l, DEVICE, DEV_DRAW_PRIMITIVE_UP, &args)?;
+        }
+        c.com(a, l, DEVICE, DEV_END_SCENE, &[])?;
+        toadforce_pixels(a, l, &mut c, &CUBE_READ)?;
+        let face = [Arg::I(5), Arg::I(0), Arg::At(SOURCE)];
+        c.com(a, l, TEXTURE, CUBE_GET_CUBE_MAP_SURFACE, &face)?;
+        // The eight calls the test tells apart.
+        c.com(a, l, TEXTURE, BASE_GET_LEVEL_COUNT, &[])?;
+        c.com(a, l, TEXTURE, RES_GET_TYPE, &[])?;
+        let face = [Arg::I(6), Arg::I(0), Arg::At(SOURCE1)];
+        c.com(a, l, TEXTURE, CUBE_GET_CUBE_MAP_SURFACE, &face)?;
+        c.com(a, l, DEVICE, DEV_CREATE_CUBE_TEXTURE, &create(6, ODD_TEXTURE))?;
+        for (usage, format) in [
+            (0, D3DFMT_A8R8G8B8),
+            (0, D3DFMT_DXT1),
+            (0, D3DFMT_D24S8),
+            (D3DUSAGE_DEPTHSTENCIL, D3DFMT_D24S8),
+        ] {
+            c.com(
+                a,
+                l,
+                D3D,
+                D3D8_CHECK_DEVICE_FORMAT,
+                &[
+                    Arg::I(0),
+                    Arg::I(D3DDEVTYPE_HAL),
+                    Arg::I(D3DFMT_R5G6B5),
+                    Arg::I(usage),
+                    Arg::I(D3DRTYPE_CUBETEXTURE),
+                    Arg::I(format),
+                ],
+            )?;
+        }
+        c.com(a, l, DEVICE, DEV_GET_DEVICE_CAPS, &[Arg::At(DEVICE_CAPS)])?;
+        a.mov(dword_ptr(l.at(RESULTS + 4 * CALLS)), c.next as i32)?;
+        finish(a, l)
+    })
+}
+
+/// The pixels the cube program reads: in the first quad, in the second
+/// and past both.
+const CUBE_READ: [(u32, u32); 3] = [(16, 16), (48, 16), (100, 16)];
+
+#[test]
+fn a_toadforce_makes_cube_textures_in_direct3d_8() {
+    let (exe, data) = cube_program();
+    let mut cpu = machine_toadforce("d3d8_toadforce_cube", exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + DONE), 1);
+    let calls = peek(&cpu, data + RESULTS + 4 * CALLS);
+    let r = results(&cpu, data, calls);
+    // Every call after CreateWindowExA and Direct3DCreate8 succeeds up
+    // to the last nine. Those are: one level and D3DRTYPE_CUBETEXTURE;
+    // no seventh face; no cube texture with an edge of 6; A8R8G8B8 and
+    // DXT1 are cube texture formats, and a depth format is none, as a
+    // texture or as a depth buffer; GetDeviceCaps.
+    let (draws, told) = r.split_at(r.len() - 9);
+    assert!(draws[2..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+    assert_eq!(
+        told,
+        [
+            1,
+            D3DRTYPE_CUBETEXTURE,
+            D3DERR_INVALIDCALL,
+            D3DERR_INVALIDCALL,
+            0,
+            0,
+            D3DERR_NOTAVAILABLE,
+            D3DERR_NOTAVAILABLE,
+            0
+        ]
+    );
+    assert_ne!(peek(&cpu, data + SOURCE), 0);
+    assert_eq!(peek(&cpu, data + SOURCE1), 0);
+    assert_eq!(peek(&cpu, data + ODD_TEXTURE), 0);
+    // D3DPTEXTURECAPS_CUBEMAP, MIPCUBEMAP and CUBEMAP_POW2.
+    assert_eq!(peek(&cpu, data + DEVICE_CAPS + 4 * 15) & 0x3_0800, 0x3_0800);
+    // CubeTextureFilterCaps are the TextureFilterCaps: the card filters
+    // a cube texture's faces as it does a texture.
+    let filters = peek(&cpu, data + DEVICE_CAPS + 4 * 16);
+    assert_ne!(filters, 0);
+    assert_eq!(peek(&cpu, data + DEVICE_CAPS + 4 * 17), filters);
+    // A face is 4 pixels of 4 bytes wide.
+    assert_eq!(peek(&cpu, data + TEX_LOCKED), 16);
+    let pixel = |i: u32| peek(&cpu, data + PIXELS + 4 * i);
+    // The red of +x, the green of -y, and the blue of the Clear.
+    assert_eq!([pixel(0), pixel(1), pixel(2)], [0xF800, 0x07E0, 0x0010]);
+    let counts = cpu.bus.toadforce.as_ref().expect("a ToadForce").counts();
+    assert_eq!(counts.rejected, 0);
+    assert_eq!(counts.draws, 2);
+}
+
+/// The pixels the blending program reads: in the triangle the weights
+/// moved, where it would be without them, and in the triangle the
+/// indices moved.
+const BLEND_READ: [(u32, u32); 3] = [(300, 20), (100, 20), (400, 260)];
+
+/// The program: the world matrix 1 moves by the width of the top left
+/// quarter. A red triangle in that quarter, each vertex with a weight
+/// of 0.25 for matrix 0, is drawn with D3DVBF_1WEIGHTS: three quarters
+/// of the way. A green one in the bottom left quarter, each vertex
+/// with the index 1, is drawn with D3DVBF_0WEIGHTS and indexed
+/// blending: all the way.
+fn card_blend_program() -> (Vec<u8>, u32) {
+    let mut d = vec![0u8; DATA_SIZE];
+    toadforce_present(&mut d);
+    put_f32s(&mut d, MATRICES, &moving([0.0; 3]));
+    put_f32s(&mut d, MATRICES + 64, &moving([1.0, 0.0, 0.0]));
+    let mut triangle = |at: u32, top: f32, beta: u32, colour: u32| {
+        for (i, [x, y]) in [[-1.0, top], [0.0, top], [-1.0, top - 1.0]].into_iter().enumerate() {
+            let at = at + 20 * i as u32;
+            put_f32s(&mut d, at, &[x, y, 0.5]);
+            put32(&mut d, at + 12, beta);
+            put32(&mut d, at + 16, colour);
+        }
+    };
+    triangle(VERTICES, 1.0, 0.25f32.to_bits(), 0xFFFF_0000);
+    triangle(VERTICES1, 0.0, 1, 0xFF00_FF00);
+    program(&[USER32, D3D8], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        toadforce_device(a, l, &mut c)?;
+        let state = |a: &mut CodeAssembler, c: &mut Calls, s: u32, v: u32| {
+            c.com(a, l, DEVICE, DEV_SET_RENDER_STATE, &[Arg::I(s), Arg::I(v)])
+        };
+        let draw = |a: &mut CodeAssembler, c: &mut Calls, vertices: u32| {
+            let args = [
+                Arg::I(D3DPT_TRIANGLELIST),
+                Arg::I(1),
+                Arg::At(vertices),
+                Arg::I(20),
+            ];
+            c.com(a, l, DEVICE, DEV_DRAW_PRIMITIVE_UP, &args)
+        };
+        for k in 0..2 {
+            let args = [Arg::I(D3DTS_WORLD + k), Arg::At(MATRICES + 64 * k)];
+            c.com(a, l, DEVICE, DEV_SET_TRANSFORM, &args)?;
+        }
+        state(a, &mut c, D3DRS_LIGHTING, 0)?;
+        state(a, &mut c, D3DRS_CULLMODE, 1)?;
+        c.com(a, l, DEVICE, DEV_BEGIN_SCENE, &[])?;
+        c.com(a, l, DEVICE, DEV_SET_VERTEX_SHADER, &[Arg::I(FVF_WEIGHT)])?;
+        state(a, &mut c, D3DRS_VERTEXBLEND, D3DVBF_1WEIGHTS)?;
+        draw(a, &mut c, VERTICES)?;
+        c.com(a, l, DEVICE, DEV_SET_VERTEX_SHADER, &[Arg::I(FVF_INDICES)])?;
+        state(a, &mut c, D3DRS_VERTEXBLEND, D3DVBF_0WEIGHTS)?;
+        state(a, &mut c, D3DRS_INDEXEDVERTEXBLENDENABLE, 1)?;
+        draw(a, &mut c, VERTICES1)?;
+        c.com(a, l, DEVICE, DEV_END_SCENE, &[])?;
+        toadforce_pixels(a, l, &mut c, &BLEND_READ)?;
+        a.mov(dword_ptr(l.at(RESULTS + 4 * CALLS)), c.next as i32)?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn a_toadforce_blends_vertices_by_their_weights_and_the_pipeline_by_their_indices() {
+    let (exe, data) = card_blend_program();
+    let mut cpu = machine_toadforce("d3d8_toadforce_blend", exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + DONE), 1);
+    let calls = peek(&cpu, data + RESULTS + 4 * CALLS);
+    let r = results(&cpu, data, calls);
+    assert!(r[2..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+    let pixel = |i: u32| peek(&cpu, data + PIXELS + 4 * i);
+    // Red 240 pixels to the right of where the vertices are, the blue
+    // of the Clear where they are, and green 320 pixels to the right.
+    assert_eq!([pixel(0), pixel(1), pixel(2)], [0xF800, 0x0010, 0x07E0]);
+    // The card transformed the draw blended by weights. The one whose
+    // matrices the indices name came from the pipeline, as screen
+    // vertices.
+    let counts = cpu.bus.toadforce.as_ref().expect("a ToadForce").counts();
+    assert_eq!(counts.rejected, 0);
+    assert_eq!((counts.draws, counts.transformed), (2, 1), "{counts:?}");
 }

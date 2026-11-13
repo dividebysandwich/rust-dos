@@ -2818,31 +2818,85 @@ fn the_lobby_builds_addresses_and_is_not_lobbied() {
     assert_eq!(word(DP_APPS), 0, "applications");
 }
 
-/// On a Voodoo3, DirectDraw made with GUID_NULL, as programs that keep
-/// the display's NULL GUID in a structure pass it, and its caps.
-#[test]
-fn the_voodoo3_display_has_3d_and_takes_guid_null() {
+/// Where `caps_program` has GetCaps put the emulation's caps.
+const HEL_CAPS: u32 = ENTRIES;
+/// DDBD_16 and DDBD_32, depths in dwZBufferBitDepths.
+const DDBD_16: u32 = 0x400;
+const DDBD_32: u32 = 0x100;
+
+/// A program that makes DirectDraw with GUID_NULL, as programs that keep
+/// the display's NULL GUID in a structure pass it, and asks for its
+/// caps: the driver's at CAPS, the emulation's at HEL_CAPS, both
+/// DDCAPS of DirectX 6's size.
+fn caps_program() -> (Vec<u8>, u32) {
     const DD_GET_CAPS: u32 = 11;
     let mut d = data();
-    // DESC: GUID_NULL. CAPS: a DDCAPS of DirectX 6's size.
     put32(&mut d, CAPS, 380);
-    let (program, data) = program(&[DDRAW], &d, |a, l| {
+    put32(&mut d, HEL_CAPS, 380);
+    program(&[DDRAW], &d, |a, l| {
         let mut c = Calls { next: 0 };
         c.api(a, l, 0, &[Arg::At(DESC), Arg::At(DD), Arg::I(0)])?;
-        c.com(a, l, DD, DD_GET_CAPS, &[Arg::At(CAPS), Arg::I(0)])?;
+        let caps = [Arg::At(CAPS), Arg::At(HEL_CAPS)];
+        c.com(a, l, DD, DD_GET_CAPS, &caps)?;
         finish(a, l, 1)
-    });
+    })
+}
+
+/// The 3D the caps `caps_program` got say: DDCAPS_3D in the driver's
+/// and the emulation's dwCaps, the driver's surface caps of a 3D
+/// device (textures, mipmaps, 3D devices, Z buffers), and the driver's
+/// dwZBufferBitDepths.
+fn caps_3d(cpu: &Cpu, data: u32) -> (bool, bool, bool, u32) {
+    const DDSCAPS_MIPMAP: u32 = 0x40_0000;
+    assert_eq!(results(cpu, data, 2), [0, 0]);
+    let three_d = |at| peek(cpu, data + at + 4) & 1 != 0;
+    let surface = DDSCAPS_TEXTURE | DDSCAPS_MIPMAP | DDSCAPS_3DDEVICE | DDSCAPS_ZBUFFER;
+    let surface_caps = peek(cpu, data + CAPS + 0x84);
+    assert_eq!(
+        surface_caps & surface,
+        peek(cpu, data + CAPS + 0x16C) & surface,
+        "ddsOldCaps and ddsCaps"
+    );
+    let all = surface_caps & surface == surface;
+    assert!(all || surface_caps & surface == 0, "{surface_caps:X}");
+    (
+        three_d(CAPS),
+        three_d(HEL_CAPS),
+        all,
+        peek(cpu, data + CAPS + 0x38),
+    )
+}
+
+/// On a Voodoo3, DirectDraw made with GUID_NULL, and its caps: the
+/// driver's say 3D with 16-bit Z buffers, as 3dfx's driver does.
+#[test]
+fn the_voodoo3_display_has_3d_and_takes_guid_null() {
+    let (program, data) = caps_program();
     let mut cpu = machine("voodoo3_caps", program);
     run_until(&mut cpu, data, 1);
-    assert_eq!(results(&cpu, data, 2), [0, 0]);
-    let caps = peek(&cpu, data + CAPS + 4);
-    assert_eq!(caps & 1, 1, "DDCAPS_3D: {caps:X}");
-    let surface_caps = peek(&cpu, data + CAPS + 0x84);
-    let zbuffer = 0x2_0000;
-    assert_eq!(
-        surface_caps & (DDSCAPS_3DDEVICE | zbuffer),
-        DDSCAPS_3DDEVICE | zbuffer
-    );
+    assert_eq!(caps_3d(&cpu, data), (true, false, true, DDBD_16));
+}
+
+/// A ToadForce's driver has a Direct3D HAL, so its caps say 3D, with
+/// 16- and 32-bit Z buffers, as its device description does.
+/// Nocturne's renderers look for 3D hardware by DDCAPS_3D alone and
+/// say there is none without it.
+#[test]
+fn a_toadforce_display_has_3d_in_its_caps() {
+    let (program, data) = caps_program();
+    let mut cpu = vesa_machine("toadforce_caps", Adapter::ToadForce, program);
+    run_until(&mut cpu, data, 1);
+    assert_eq!(caps_3d(&cpu, data), (true, false, true, DDBD_16 | DDBD_32));
+}
+
+/// A display with no Direct3D HAL, an S3 Trio64, has no 3D in its
+/// caps.
+#[test]
+fn a_display_without_3d_has_none_in_its_caps() {
+    let (program, data) = caps_program();
+    let mut cpu = vesa_machine("trio64_caps", Adapter::S3, program);
+    run_until(&mut cpu, data, 1);
+    assert_eq!(caps_3d(&cpu, data), (false, false, false, 0));
 }
 
 // IDirectDraw4: its ID, and the DirectDraw object's memory and
@@ -4153,6 +4207,13 @@ fn keyed_blits_into_a_toadforces_memory_keep_what_the_keys_say() {
     let mut cpu = vesa_machine("keyed_blit_toadforce", Adapter::ToadForce, program);
     keyed_blits_keep_what_the_keys_say(&mut cpu, data, 19);
     assert_eq!(toad(&cpu, toad_regs::ERROR), 0);
+    // The card copied the three blits of the source's own size from the
+    // surface in system memory, out of a block of its memory the
+    // driver wrote them to: through the key, as it is, and the middle
+    // columns through the key. The stretched ones and the one through
+    // a destination key are the processor's.
+    let card = cpu.bus.toadforce.as_ref().unwrap();
+    assert_eq!(card.counts().blt, 3);
 }
 
 // The data of the program that blits inside video memory.

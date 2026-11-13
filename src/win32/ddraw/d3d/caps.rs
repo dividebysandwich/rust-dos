@@ -207,10 +207,17 @@ pub fn write_desc7(cpu: &mut Cpu, at: u32, offer: Offer, tnl: bool) {
     write_f32(cpu, at + 0xC0, 65536.0);
     let guid = if tnl { IID_TNLHAL } else { IID_HAL };
     guid.write(cpu, at + 0xC4);
-    // Six clip planes of the user's, no vertex blending; the vertex
-    // processing caps: texture generation, material sources, vertex
-    // fog, directional and positional lights and the local viewer.
-    cpu.bus.guest_write_32(at + 0xD4, 6);
+    // wMaxUserClipPlanes and wMaxVertexBlendMatrices: six clip planes
+    // of the user's, and the world matrices a card that transforms
+    // blends a vertex between. A card that doesn't reports no vertex
+    // blending, as the Voodoo3's driver did. Then the vertex processing
+    // caps: texture generation, material sources, vertex fog,
+    // directional and positional lights and the local viewer.
+    let blend = match hal::transforms(offer.kind) {
+        true => crate::toadforce::caps::BLEND_MATRICES,
+        false => 0,
+    };
+    cpu.bus.guest_write_32(at + 0xD4, 6 | blend << 16);
     cpu.bus.guest_write_32(at + 0xD8, 0x3E);
 }
 
@@ -247,6 +254,9 @@ mod tests {
         write_desc7(&mut cpu, AT, voodoo3(), false);
         assert_eq!(read(&mut cpu, 0x74), DDBD_16, "render target depths");
         assert_eq!(read(&mut cpu, 0x78), DDBD_16, "depth buffer depths");
+        // Six clip planes, and no vertex blending on a card that
+        // doesn't transform.
+        assert_eq!(read(&mut cpu, 0xD4), 6, "clip planes and blend matrices");
 
         write_desc(&mut cpu, AT, DESC_V3, Some(voodoo3()));
         assert_eq!(read(&mut cpu, 0x9C), DDBD_16, "render target depths");

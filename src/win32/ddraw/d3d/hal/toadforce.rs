@@ -59,7 +59,8 @@ use super::super::device::{
     TSS_ALPHAOP, TSS_COLOROP,
 };
 use super::super::pipeline::{
-    self, LIGHT_GLSPOT, Layout, Matrix, Rasterizer, SHADE_FLAT, ScreenVertex, Setup, Vertex,
+    self, Blend, LIGHT_GLSPOT, Layout, Matrix, Rasterizer, SHADE_FLAT, ScreenVertex, Setup,
+    Vertex,
 };
 use super::{Description, Fill};
 use crate::cpu::Cpu;
@@ -213,7 +214,8 @@ impl Sent {
 
 /// The render states of the card's transform and lighting, which a
 /// draw of screen vertices leaves at their reset values.
-const GEOMETRY: [u32; 13] = [
+const GEOMETRY: [u32; 14] = [
+    states::RS_VERTEXBLEND,
     states::RS_RANGEFOGENABLE,
     states::RS_CLIPPING,
     states::RS_LIGHTING,
@@ -671,6 +673,8 @@ fn render_value(d: &Device, def: &Def, setup: &Setup, depth: Option<Format>, lit
         RS_FOGVERTEXMODE => setup.fog.map_or(0, |f| f.mode),
         RS_RANGEFOGENABLE => setup.fog.is_some_and(|f| f.range) as u32,
         RS_CLIPPLANEENABLE => (1 << setup.planes.len().min(CLIP_PLANES)) - 1,
+        // As many weights as the card's vertices have (`card_layout`).
+        RS_VERTEXBLEND => blended(setup).map_or(0, |matrices| matrices.len() as u32 - 1),
         // The pipeline culls, makes the lines and points of the other
         // fill modes, and gives a flat primitive's vertices one color.
         RS_CULLMODE => 1,
@@ -877,6 +881,11 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
             (level1::TRANSFORM_VIEW, setup.view),
             (level1::TRANSFORM_PROJECTION, projection),
         ];
+        // The world matrices a blended vertex's weights weigh, the
+        // first of which is the world matrix.
+        for (k, matrix) in blended(setup).into_iter().flatten().enumerate() {
+            transforms.push((level1::TRANSFORM_WORLD + k as u32, *matrix));
+        }
         for stage in matrix_stages(d) {
             let matrix = d.transforms[TS_TEXTURE0 + stage as usize];
             transforms.push((level1::TRANSFORM_TEXTURE + stage, matrix));
@@ -1570,10 +1579,50 @@ fn card_light(l: &pipeline::Light) -> Light {
     }
 }
 
-/// Whether the card can transform and light a draw with `setup` as
-/// the pipeline would: its state then holds everything the pipeline
-/// goes by, in values the card's commands take.
-fn can_transform(d: &Device, setup: &Setup) -> bool {
+/// The world matrices the card blends the vertices of a draw with
+/// `setup` between, one more than the weights it takes from each
+/// vertex: None for a draw that isn't blended, or is blended in a way
+/// the card doesn't have (`can_transform`). Blending with no weight
+/// puts every vertex through the first matrix alone.
+fn blended(setup: &Setup) -> Option<&[Matrix]> {
+    match &setup.blend {
+        Some(Blend::Weights {
+            count,
+            indexed: false,
+            matrices,
+        }) if *count < matrices.len() => Some(&matrices[..count + 1]),
+        _ => None,
+    }
+}
+
+/// Whether the card blends the vertices of `layout` as `setup` says,
+/// or the draw isn't blended. The card has `caps::BLEND_MATRICES`
+/// world matrices and weighs a vertex through the first of them by
+/// the vertex's weights and what they leave of 1, which is what the
+/// pipeline does when each vertex has the weights the state counts.
+/// Matrices picked by the vertex's indices and tweening aren't the
+/// card's, and a vertex with fewer weights than the state counts gets
+/// the last matrix from the pipeline and the one after its weights
+/// from the card.
+fn can_blend(setup: &Setup, layout: &Layout) -> bool {
+    let finite = |matrix: &Matrix| matrix.iter().all(|n| n.is_finite());
+    match (&setup.blend, blended(setup)) {
+        (None, _) => true,
+        (Some(_), Some(matrices)) => {
+            let weights = matrices.len() - 1;
+            matrices.len() <= caps::BLEND_MATRICES as usize
+                && weights <= layout.weights as usize
+                && matrices.iter().all(finite)
+        }
+        (Some(_), None) => false,
+    }
+}
+
+/// Whether the card can transform and light a draw of vertices of
+/// `layout` with `setup` as the pipeline would: its state then holds
+/// everything the pipeline goes by, in values the card's commands
+/// take.
+fn can_transform(d: &Device, setup: &Setup, layout: &Layout) -> bool {
     let finite = |numbers: &[f32]| numbers.iter().all(|n| n.is_finite());
     let m = &setup.view_map;
     // The card cuts at z of 0 to w, and its depths are 0 to 1.
@@ -1617,7 +1666,7 @@ fn can_transform(d: &Device, setup: &Setup) -> bool {
             .lighting
             .as_ref()
             .is_none_or(|l| l.sources.iter().all(|&source| source <= 2));
-    setup.blend.is_none()
+    can_blend(setup, layout)
         && stages
         && modes
         && depths
@@ -1627,10 +1676,12 @@ fn can_transform(d: &Device, setup: &Setup) -> bool {
         && setup.planes.iter().all(|plane| finite(plane))
 }
 
-/// The card's layout for vertices of `layout`, and the words of one.
-fn card_layout(layout: &Layout) -> (u32, usize) {
-    let mut fvf = 0x002;
-    let mut words = 3;
+/// The card's layout for vertices of `layout` with `weights` blending
+/// weights after the position (0 to 3), and the words of one.
+fn card_layout(layout: &Layout, weights: usize) -> (u32, usize) {
+    // The position alone, or with one to three weights.
+    let mut fvf = [0x002, 0x006, 0x008, 0x00A][weights];
+    let mut words = 3 + weights;
     for (present, bit, size) in [
         (layout.normal.is_some(), 0x010, 3),
         (layout.diffuse.is_some(), 0x040, 1),
@@ -1650,9 +1701,11 @@ fn card_layout(layout: &Layout) -> (u32, usize) {
     (fvf, words)
 }
 
-/// The words of the vertex `v` in the card's layout for `layout`.
-fn card_vertex(words: &mut Vec<u32>, layout: &Layout, v: &Vertex) {
+/// The words of the vertex `v` in the card's layout for `layout`
+/// with `weights` blending weights.
+fn card_vertex(words: &mut Vec<u32>, layout: &Layout, weights: usize, v: &Vertex) {
     words.extend(v.position[..3].iter().map(|n| n.to_bits()));
+    words.extend(v.weights[..weights].iter().map(|n| n.to_bits()));
     if layout.normal.is_some() {
         words.extend(v.normal.iter().map(|n| n.to_bits()));
     }
@@ -1708,16 +1761,18 @@ fn pipeline_transforms() -> bool {
 /// The draw commands for `kind` primitives of `vertices` in the order
 /// `order`, whose places are all among them, or as they are: one
 /// command where it has at most `limit` words, and otherwise lists of
-/// the draw's primitives in commands of at most that.
+/// the draw's primitives in commands of at most that. Each vertex has
+/// `weights` blending weights.
 fn geometry_words(
     layout: &Layout,
+    weights: usize,
     vertices: &[Vertex],
     kind: u32,
     order: Option<&[u32]>,
     limit: usize,
 ) -> Vec<u32> {
     let count = vertices.len();
-    let (fvf, size) = card_layout(layout);
+    let (fvf, size) = card_layout(layout, weights);
     let mut words = Vec::new();
     let mut all = Vec::new();
     // The draw in one command, where it fits: all the vertices of a
@@ -1729,7 +1784,7 @@ fn geometry_words(
             let fits = count <= 0x1_0000 && 5 + count * size <= limit;
             if fits {
                 for v in vertices {
-                    card_vertex(&mut all, layout, v);
+                    card_vertex(&mut all, layout, weights, v);
                 }
                 encode::draw(&mut words, kind, fvf, count as u32, &all);
             }
@@ -1747,7 +1802,7 @@ fn geometry_words(
                     // Past what one command holds, the rest isn't
                     // needed.
                     if named as usize * size <= limit {
-                        card_vertex(&mut all, layout, &vertices[i as usize]);
+                        card_vertex(&mut all, layout, weights, &vertices[i as usize]);
                     }
                 }
                 indexed.push(*place as u16);
@@ -1787,7 +1842,7 @@ fn geometry_words(
                 let at = place(i);
                 let next = places.len() as u16;
                 let index = *places.entry(at).or_insert_with(|| {
-                    card_vertex(&mut all, layout, &vertices[at]);
+                    card_vertex(&mut all, layout, weights, &vertices[at]);
                     next
                 });
                 indexed.push(index);
@@ -1813,7 +1868,7 @@ pub fn draw_geometry(
 ) -> bool {
     let count = vertices.len();
     if pipeline_transforms()
-        || !can_transform(d, setup)
+        || !can_transform(d, setup, layout)
         || order.is_some_and(|o| o.iter().any(|&i| i as usize >= count))
     {
         return false;
@@ -1824,7 +1879,8 @@ pub fn draw_geometry(
     if card.clip[0] == card.clip[2] || card.clip[1] == card.clip[3] {
         return true;
     }
-    let words = geometry_words(layout, vertices, kind, order, COMMAND_WORDS);
+    let weights = blended(setup).map_or(0, |matrices| matrices.len() - 1);
+    let words = geometry_words(layout, weights, vertices, kind, order, COMMAND_WORDS);
     if !words.is_empty() {
         submit(cpu, &words);
         drew(cpu, &card);
@@ -2002,10 +2058,10 @@ mod tests {
             pipeline::TRIANGLEFAN,
         ] {
             for order in [None, Some(&order[..])] {
-                let whole = geometry_words(&layout, &vertices, kind, order, COMMAND_WORDS);
+                let whole = geometry_words(&layout, 0, &vertices, kind, order, COMMAND_WORDS);
                 assert_eq!(command::length(whole[0]), whole.len(), "one command");
                 // A command of 30 words holds few triangles.
-                let split = geometry_words(&layout, &vertices, kind, order, 30);
+                let split = geometry_words(&layout, 0, &vertices, kind, order, 30);
                 assert!(command::framed(&split));
                 let mut at = 0;
                 let mut commands = 0;
@@ -2027,6 +2083,7 @@ mod tests {
         let order = [998, 3, 500, 3, 500, 999];
         let words = geometry_words(
             &layout,
+            0,
             &vertices,
             pipeline::TRIANGLELIST,
             Some(&order),
