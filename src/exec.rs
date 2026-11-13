@@ -1578,6 +1578,9 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     if reads_clock {
         crate::idle::clock_read(cpu, trap.0, trap.1);
     }
+    if std::mem::take(&mut cpu.bus.observe.polled) {
+        crate::idle::yield_poll(cpu, trap.0, trap.1);
+    }
     if cpu.idle {
         // No thread can run: time passes to the next timer event.
         cpu.idle = false;

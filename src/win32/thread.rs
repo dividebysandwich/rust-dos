@@ -240,6 +240,13 @@ fn enter(cpu: &mut Cpu, (p, t): At) {
 /// The next thread after `after` in turn that can run, if one can: the
 /// threads of all processes, in order.
 fn next_ready(win32: &Win32, after: Option<At>) -> Option<At> {
+    next_where(win32, after, |(p, t)| {
+        win32.processes[p].threads[t].ready() && crate::win16::task::may_run(win32, p, t)
+    })
+}
+
+/// The next thread after `after` in turn for which `pick` holds.
+fn next_where(win32: &Win32, after: Option<At>, pick: impl Fn(At) -> bool) -> Option<At> {
     let all: Vec<At> = win32
         .processes
         .iter()
@@ -251,9 +258,7 @@ fn next_ready(win32: &Win32, after: Option<At>) -> Option<At> {
         .map_or(0, |i| i + 1);
     (0..all.len())
         .map(|k| all[(start + k) % all.len()])
-        .find(|&(p, t)| {
-            win32.processes[p].threads[t].ready() && crate::win16::task::may_run(win32, p, t)
-        })
+        .find(|&at| pick(at))
 }
 
 /// The running thread doesn't go on for now (it waits, was suspended or
@@ -270,6 +275,67 @@ pub fn reschedule(cpu: &mut Cpu) {
     match next_ready(win32, current(win32)) {
         Some(at) => enter(cpu, at),
         None => idle(cpu),
+    }
+}
+
+/// Sleep(0): the running thread gives the rest of its turn to another
+/// that is ready and of its priority or a higher one, and true if one
+/// takes it. With no such thread, Sleep(0) returns at once and the
+/// thread goes on with its turn, which isn't started over: a ready thread
+/// of a lower priority doesn't get the processor from it (Sleep's
+/// documentation until Windows Server 2003, which changed that). Nothing
+/// changes then, and an idle proof follows the call (`idle::pure_call`):
+/// a thread that waits for a flag in a Sleep(0) loop while the others
+/// wait is a busy-wait loop, armed at the call (`idle::yield_poll`) and
+/// skipped to the next event like any other. Switching to itself instead
+/// saved and loaded the thread's whole state at every call, which ended
+/// the proof, and took the host about a microsecond: MDK2's worker thread
+/// spins so, 14 instructions a pass, while the main thread waits for the
+/// retrace in SwapBuffers, and the host ran the spin several times slower
+/// than the emulated time it covered (#1007).
+pub fn yield_turn(cpu: &mut Cpu) -> bool {
+    let win32 = &cpu.bus.win32;
+    let Some(running) = current(win32) else {
+        return false;
+    };
+    let mine = win32.processes[running.0].threads[running.1].priority;
+    let takes = |(p, t): At| {
+        let thread = &win32.processes[p].threads[t];
+        (p, t) != running
+            && thread.ready()
+            && thread.priority >= mine
+            && crate::win16::task::may_run(win32, p, t)
+    };
+    // A thread a higher priority took the processor from is at the head
+    // of its priority's queue (`take_preempted`), with the rest of its
+    // turn.
+    let preempted = win32
+        .preempted
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(i, &(id, used))| {
+            let at = find(win32, id).filter(|&at| takes(at))?;
+            Some((i, at, used))
+        });
+    let next = next_where(win32, Some(running), takes);
+    match (preempted, next) {
+        (Some((i, at, used)), _) => {
+            cpu.bus.win32.preempted.remove(i);
+            save(cpu, Context::of(cpu));
+            resume(cpu, at, used);
+            true
+        }
+        (None, Some(at)) => {
+            save(cpu, Context::of(cpu));
+            enter(cpu, at);
+            true
+        }
+        (None, None) => {
+            crate::idle::pure_call(cpu, None);
+            cpu.bus.observe.polled = true;
+            false
+        }
     }
 }
 

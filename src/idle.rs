@@ -43,16 +43,17 @@
 //! loop is proven again from there (`clock_read`).
 //!
 //! **Where loops come from.** A head is armed at the service trap where the
-//! BIOS keyboard's status call found no key or the built-in Windows's clock
-//! was read many times in a row, after many reads of the VGA's status or
-//! latches of the PIT's count with no other port between them, and where
-//! two timer events in a row found the CPU at the same instruction with the
-//! same flags and registers but for one (a loop, whose register may be a
-//! time read that the event between moved on). A head whose passes were
-//! skipped is armed again at the next event, as its loop usually goes on
-//! after it, and whenever an event finds the CPU there later, as a game
-//! comes back to its frame limiter every frame. Failed proofs at a head
-//! make the next tries at it rarer.
+//! BIOS keyboard's status call found no key, the built-in Windows's clock
+//! was read or its Sleep(0) found no other thread to run many times in a
+//! row, after many reads of the VGA's status or latches of the PIT's count
+//! with no other port between them, and where two timer events in a row
+//! found the CPU at the same instruction with the same flags and registers
+//! but for one (a loop, whose register may be a time read that the event
+//! between moved on). A head whose passes were skipped is armed again at
+//! the next event, as its loop usually goes on after it, and whenever an
+//! event finds the CPU there later, as a game comes back to its frame
+//! limiter every frame. Failed proofs at a head make the next tries at it
+//! rarer.
 
 mod time;
 
@@ -271,7 +272,8 @@ pub struct Observe {
     pub on: bool,
     /// Skipping is on.
     pub enabled: bool,
-    /// Set by the BIOS keyboard's status call finding no key.
+    /// Set by the BIOS keyboard's status call finding no key, and by a
+    /// Sleep(0) of the built-in Windows that found no other thread to run.
     pub polled: bool,
     /// Set by an access the proof can't follow, to what it was.
     failed: Cell<Option<&'static str>>,
@@ -907,6 +909,17 @@ fn head_of(cpu: &Cpu) -> Head {
 /// The BIOS keyboard's status call found no key, at the service trap at
 /// `cs:eip`. Arms it once that happened enough times in a row.
 pub fn keyboard_poll(cpu: &mut Cpu, cs: u16, eip: u32) {
+    let head = Head { cs, eip, pe: cpu.pe() };
+    poll_at(cpu, head);
+}
+
+/// A Sleep(0) of the built-in Windows found no other thread to run, at the
+/// service trap at `cs:eip`: the thread waits in a loop for another to
+/// change something, as at a keyboard poll, and the place is armed once
+/// that happened enough times in a row. The loop runs only while the other
+/// threads wait, often for a few milliseconds between two events, which
+/// an event finding the CPU in it would arm too late.
+pub fn yield_poll(cpu: &mut Cpu, cs: u16, eip: u32) {
     let head = Head { cs, eip, pe: cpu.pe() };
     poll_at(cpu, head);
 }
