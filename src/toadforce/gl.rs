@@ -33,7 +33,7 @@
 //!   coordinates, since the host's are at half.
 //!
 //! What it doesn't draw as the software renderer does, it declines
-//! (`Host::takes`), and the software renderer draws that.
+//! (`Host::declines`), and the software renderer draws that.
 //!
 //! The host is made, used and dropped on the thread whose OpenGL
 //! context it was given, while that context is current.
@@ -437,7 +437,7 @@ pub struct ToadForceGl {
     changes: u64,
     textures: HashMap<Texture, Texels>,
     /// The programs by `shader::key` of the steps they draw, made when
-    /// `takes` first sees the steps (`compiled`).
+    /// `declines` first sees the steps (`compiled`).
     programs: RefCell<HashMap<shader::Key, Program<Uniforms>>>,
     /// The keys whose program the host didn't compile.
     failed: RefCell<HashSet<shader::Key>>,
@@ -1115,7 +1115,7 @@ impl ToadForceGl {
     }
 
     /// Whether the host has the program of `key` (`shader::key`),
-    /// compiled now if it is new. `takes` asks first, so a state whose
+    /// compiled now if it is new. `declines` asks first, so a state whose
     /// program doesn't compile goes to the software renderer from its
     /// first draw on, and no draw the host took is left undrawn.
     ///
@@ -1971,7 +1971,7 @@ impl Host for ToadForceGl {
                 if count == 0 || !self.fixed(state) {
                     continue;
                 }
-                // `takes` compiled it.
+                // `declines` compiled it.
                 let key = shader::key(state, self.anisotropy > 0.0);
                 for (stage, tex) in state.tex.iter().enumerate() {
                     if let Some(tex) = tex {

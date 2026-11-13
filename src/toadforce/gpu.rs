@@ -14,7 +14,7 @@
 //!   the state (`DrawState::clip`), for the host to cut the pixels by.
 //!   Slot `n`'s coordinates are in `tex[n]` of every vertex, whichever
 //!   set of the program's vertex they came from.
-//! - **What the host declines.** A state `Host::takes` refuses, lines,
+//! - **What the host declines.** A state `Host::declines` names, lines,
 //!   points, triangles that aren't filled and draws that read the
 //!   surface they write are drawn by the software renderer, in the
 //!   card's order with the host's.
@@ -632,12 +632,11 @@ pub struct Gpu {
     /// The screen shows the picture from the host's copy this frame
     /// (`shows`): the next `shown` reads nothing back.
     presents: bool,
-    /// How many surfaces were read back, and how many draws went to
-    /// the software renderer with a host attached.
+    /// How many surfaces were read back.
     read_backs: u64,
-    pub declined: u64,
-    /// The declined draws by reason: the rasteriser's (`Raster::draw`)
-    /// and the host's (`Host::declines`).
+    /// The draws that went to the software renderer with a host
+    /// attached, by reason: the rasteriser's (`Renderer::draw`) and the
+    /// host's (`Host::declines`).
     declined_for: BTreeMap<&'static str, u64>,
     /// The read-backs by what asked for them (`Cause`).
     by_cause: [u64; Cause::NAMES.len()],
@@ -731,8 +730,13 @@ impl Gpu {
 
     /// Count a draw that went to the software renderer for `why`.
     pub fn decline(&mut self, why: &'static str) {
-        self.declined += 1;
         *self.declined_for.entry(why).or_insert(0) += 1;
+    }
+
+    /// How many draws went to the software renderer with a host
+    /// attached.
+    pub fn declined(&self) -> u64 {
+        self.declined_for.values().sum()
     }
 
     /// The declined draws by reason, for the status.

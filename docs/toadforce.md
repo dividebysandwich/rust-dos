@@ -978,7 +978,7 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   fourth vertex, the one that gives it its colours. The vertex work
   moves to the GPU later, if a measurement asks for it.
 - **A draw the host doesn't take.** The host is asked for each state
-  (`Host::takes`). A draw it declines (a state it has no shader for
+  (`Host::declines`). A draw it declines (a state it has no shader for
   yet) is drawn by the software renderer, and so are lines, points,
   triangles drawn as outlines or corners, and a draw that samples the
   surface it writes: the target and the textures are read back first,
