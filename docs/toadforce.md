@@ -757,6 +757,7 @@ smoke and particles.
 | The alpha test and the colour key after a filtered sample | a pixel whose alpha is within the sample's bound of the reference is drawn by one renderer and not by the other. Measured: 0 to 6 pixels a frame of Zanzarah's leaves |
 | Depth | 1 step of a 16-bit buffer, 4 steps of a 24-bit one: the host interpolates depth in single precision and rounds it by itself. A depth half-way between two steps goes either way, and so does a test between two surfaces closer than the bound: Giants' marks on the ground, 2 steps of 24 bits in front of it, differ by more than 8 on 0.06% of the frame's pixels, where one renderer alone drew the mark |
 | Blending done by the host GPU | 1 in 255 on a channel; one step of the target's on a 16-bit target |
+| Lines and points | the same pixels, with the same colours where no texture is sampled: the card works out both. Depth and samples are within the bounds above (measured on lines: samples 1 in 255, depth 1 step of 16 bits and 2 of 24). `ZBIAS` moves a line's depth as a triangle's on both. A pixel of a line within half a pixel of where the line's 1 / w falls to 0, or past it, gets its own values at every corner of its square, so a mip filter picks level 0 for it and fog by w takes w as 1 where the centre has no positive 1 / w (#1003) |
 | 16-bit targets on a host with no renderable 565 format, or one that doesn't round a blend to the nearest value | blended layers keep 8 bits until they are read back; several steps of the target's |
 
 Tests compare the two renderers on fixed scenes with these bounds (see
@@ -898,7 +899,24 @@ on the processor, and it has:
 - `CLEAR` on a buffer the host has (`Host::clear`). A depth that is
   neither the nearest nor the farthest is written as pixels, since the
   host's clear converts only those two for certain; with the stencil
-  kept, such a clear is left to the processor.
+  kept, such a clear is left to the processor;
+- points, lines, and triangles drawn as their corners or their edges
+  (`FILLMODE`), as triangles the card builds. OpenGL leaves it to the
+  GPU which pixels a `GL_LINES` line or a `GL_POINTS` point has, so
+  the host draws neither. The card works out a line's pixels by the
+  rule of "Rasterising" (`Prim::line`) and hands the host a square
+  for each run of them in a row, from pixel edge to pixel edge
+  (`Prim::squares`). A triangle covers the pixel centres inside it,
+  and a centre on the diagonal the square's two triangles share goes
+  to one of them by the top-left rule, so the squares cover the
+  line's pixels and no other on any host. The corners carry the
+  line's depth, 1 / w and coordinates there, and what the host
+  interpolates to a pixel's centre is the line's value at it, with
+  the coordinates' change from pixel to pixel for the level of
+  detail. The colours are worked out by the card for each pixel, with
+  its rounding: a line whose colours change has a square for each run
+  of pixels of the same colours. A point is the two triangles of its
+  square, with the limits of its size applied by the card.
 
 It declines these states, which the software renderer draws:
 
@@ -925,7 +943,7 @@ compile is declined from its first draw on, since the program is
 compiled when the host is asked whether it takes the state.
 
 The agreement tests (`toadforce::gl::tests`, which need a desktop OpenGL
-context) draw 332 scenes in software and through the host and compare
+context) draw 422 scenes in software and through the host and compare
 card memory. On a GeForce RTX 4080: untextured triangles, every stage
 operation at each result scale, four stages with four textures, the
 alpha test, fog, the specular add, the stencil operations, the write
@@ -943,8 +961,18 @@ by a mean of 1.5 over that square. Depth is within 1 step
 of 16 bits and 4 of 24. That host's 565 format fails the test at
 start, so its 16-bit targets were compared in 8 bits a channel alone,
 and were within one step of the target's with up to five blended
-layers. A scene for each declined state checks that the software
-renderer draws it.
+layers. Lines into every octant, of less than a pixel and of no
+length, with either place of the pixel centres, with and without the
+last pixel, shaded and flat, cut by a viewport and by the scissor
+rectangle, blended, alpha-tested and fogged have the same pixels
+with the same colours, and so do points of every size at and between
+the pixel centres, and triangles drawn as their corners. So do
+lines in the plane of a surface with a `ZBIAS` of 0, 1 and 16.
+Textured lines, lines whose w grows 16 times along them with each
+mip filter, and triangles drawn as their edges are within 1, and a
+line's depth within 1 step of 16 bits and 2 of 24. The tests assert
+these figures and no looser ones. A scene for each declined state
+checks that the software renderer draws it.
 
 Not built yet: the vertex work on the GPU, the picture from the host's
 texture, `BLT` and `FILL` on the host, the host options, and the
@@ -971,22 +999,24 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   (`DrawState`) and its triangles as screen vertices, after the
   card's transform, lighting, clipping and culling. A triangle the
   card culls, or one with no area, never reaches the host, so the
-  host has no winding to agree on. The clip rectangle stays in the
-  state for the host to cut the pixels by. The coordinates of texture
-  slot `n` are in set `n` of every vertex, whichever set of the
-  program's vertex they came from, and a flat-shaded triangle has a
-  fourth vertex, the one that gives it its colours. The vertex work
-  moves to the GPU later, if a measurement asks for it.
+  host has no winding to agree on. A point comes as the two
+  triangles of its square and a line as a square for each run of its
+  pixels in a row, so the host needs no rule of its own for either.
+  The clip rectangle stays in the state for the host to cut the
+  pixels by. The coordinates of texture slot `n` are in set `n` of
+  every vertex, whichever set of the program's vertex they came from,
+  and a flat-shaded triangle has a fourth vertex, the one that gives
+  it its colours. The vertex work moves to the GPU later, if a
+  measurement asks for it.
 - **A draw the host doesn't take.** The host is asked for each state
   (`Host::declines`). A draw it declines (a state it has no shader for
-  yet) is drawn by the software renderer, and so are lines, points,
-  triangles drawn as outlines or corners, and a draw that samples the
-  surface it writes: the target and the textures are read back first,
-  and the target is uploaded again before the host's next draw into
-  it. The host renderer can so be built up state by state, and a rare
-  state stays right at the cost of speed. The queue holds draws of
-  one renderer at a time, and a draw of the other empties it first,
-  which keeps the card's order on a target.
+  yet) is drawn by the software renderer, and so is a draw that
+  samples the surface it writes: the target and the textures are read
+  back first, and the target is uploaded again before the host's next
+  draw into it. The host renderer can so be built up state by state,
+  and a rare state stays right at the cost of speed. The queue holds
+  draws of one renderer at a time, and a draw of the other empties it
+  first, which keeps the card's order on a target.
 - **Who has the newer pixels.** A surface the host drew into is ahead
   on the host, and card memory is stale there. Before the emulator's
   own code reads that memory on the processor the card reads the
@@ -1729,6 +1759,7 @@ session. The table gives both.
 |---|---|---|---|---|---|---|
 | Oni, training room, 640x480 | 25.8, 26.2 | 14.6, 15.1 * | 1.00 | 81%, 86% | 2724 | 0 |
 | Grom, the tutorial's first screen, 800x600 | 27.6, 28.8 (28.7, 29.7 *) | 41.7, 40.7 * | 1.00 | 75%, 84% | 294 | 165, 173 |
+| Grom, the same, with lines on the host renderer † | 103.6, 103.8 | | 1.00 | 83%, 84% | 294 | 0 |
 | Nocturne, first room of Volume 1, 640x480 | 35.6, 35.1 | | 1.00 | 84%, 84% | 45 | 0 |
 | Giants, first mission, on the beach, 800x600 | 37.2, 36.7 * | 12.5, 12.7 * | 1.00 | 83%, 84% | 546, 522 | 0 |
 | No One Lives Forever, first mission, 640x480 | 40.3, 40.4 | | 1.00 | 81%, 83% | 1902 | 0 |
@@ -1740,7 +1771,10 @@ session. The table gives both.
 The emulated processor halts in Zanzarah alone, for 6.5% of the time:
 the game is at its cap of 60. Black & White doesn't start: its
 SafeDisc check fails (#889). The software column has the games below
-30 and Giants.
+30 and Giants. The row marked † is of the build that draws points and
+lines on the host renderer (`4c492b99`, pass 1 below), measured the
+same way in one session with main's build of that day (`b5ee6fc5`),
+which ran at 30.0 and 29.8 with 180 read-backs a second.
 
 What the table doesn't show:
 
@@ -1797,7 +1831,11 @@ The two games below 30, with their three largest costs:
   the GPU first and sends what it drew back after: 6 read-backs a
   frame of an 800x600 target, 170 a second. The game's code is 23%.
   With no host there is nothing to read back, which is why software
-  is ahead at 41.
+  is ahead at 41. The 12 draws are the frames of the three health
+  bars under the portraits, four lines each. With the host drawing
+  them (pass 1) nothing is declined or read back and the rate is 99
+  and 103: the game's code is 51% of the thread, the card 14%,
+  `hle.win32` 12% and the host renderer 7%.
 
 The others, all above the target here:
 
@@ -1833,9 +1871,9 @@ comes last whatever its share.
 
 1. **Points and lines on the host renderer.** Grom, 28: 43% of its
    thread's busy time is read-backs for the draws the host declines.
-   The host draws them as the software renderer does (the rules of
-   "Rasterising"), or takes them as triangles the card builds. Small,
-   and the one pass that by itself should put a game over the target.
+   Done: the host takes them as triangles the card builds, which
+   cover the pixels of the rules of "Rasterising" on any GPU ("The
+   OpenGL renderer"), and Grom runs at 104.
 2. **`hal::bind` for a draw whose state didn't change.** Oni, 26, and
    No One Lives Forever and MDK2: 18%, 14% and 7%. The device keeps
    what it sent to the card and compares all of it again for each
