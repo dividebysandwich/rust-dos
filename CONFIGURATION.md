@@ -208,6 +208,8 @@ limit, so without a connection it goes on as it would with one:
   as `30`, gives a game that would draw faster only the speed for that
   many frames a second; a higher one lets a game go past the display's
   rate. It applies at once, and the search for the speed starts over.
+  While a program shows its frames through the frame rate cap
+  (`fps_cap`), `auto` aims for no more than the cap.
 * `auto_busy_os` (`true`, the default, or `false`): whether
   `cycles=auto` gives a program all the host has while it keeps a
   system that idles busy. Windows 95 and 98 halt the processor while
@@ -3633,7 +3635,7 @@ run, and the settings window has it on its Display page.
 
 The cap's turns are the multiples of its frame time (1/60 s at 60) in
 emulated time. A frame may show in a frame time after the one the last
-frame showed in:
+frame counts in:
 
 - A program faster than the cap waits for the next turn, so its frames
   come at the cap's rate, at the turns.
@@ -3641,7 +3643,12 @@ frame showed in:
   done, and keeps its own rate: a frame late for its turn doesn't wait
   for the next one.
 - A program that is sometimes faster and sometimes slower waits only
-  for the frames that come early.
+  for the frames that come early. A late frame counts in the first
+  frame time it missed, or a tenth of a second before it showed if it
+  missed more, and the frames after it show as soon as they are done
+  until they are back at the turns: a program that runs its game in
+  steps of the clock between frames would otherwise spend the time its
+  next frames wait on catching up, and fall further behind.
 - A present that waits for the display's retrace (a flip, or a swap
   with a swap interval) is already held to the display's rate. With the
   cap at that rate or above it, the cap holds none of its frames. Below

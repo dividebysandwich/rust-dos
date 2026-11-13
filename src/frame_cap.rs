@@ -9,11 +9,14 @@
 //!
 //! The cap's frames are the multiples of its frame time (1/30 s at 30)
 //! in emulated time. A frame may show in a frame time after the one the
-//! last frame showed in, so a program that draws faster than the cap
+//! last frame counts in, so a program that draws faster than the cap
 //! waits for the start of the next one, and its frames come at the
 //! cap's frame times; one that draws slower shows each frame as it is
-//! done. The window, with `vrr`, refreshes at the cap's frame times
-//! while a program shows its frames through it (`refresh_timing`).
+//! done. A frame that comes late counts in the first frame time it
+//! missed, or a tenth of a second before it showed, and the frames after
+//! it show at once until they are back in step (`shown`). The window,
+//! with `vrr`, refreshes at the cap's frame times while a program shows
+//! its frames through it (`refresh_timing`).
 //!
 //! A present that waits for the display's retrace already shows no more
 //! frames than the display does: with the cap at or above the display's
@@ -54,6 +57,16 @@ pub fn name(fps: Option<u32>) -> String {
 /// frame times until then.
 const ACTIVE_NS: u64 = 1_000_000_000;
 
+/// How far a late frame lets the frames after it catch up, in ns: they
+/// show at once, in the frame times it missed, up to this long before
+/// it. A program that runs its game in steps of the clock between frames
+/// takes the time a frame was held from the next ones: Grom's menu at
+/// 150,000 cycles draws 71 frames a second without the cap, and under a
+/// cap of 60 takes about 100 ms over the frame after many it held: 22
+/// frames a second when late frames let none catch up, 43 with a tenth
+/// of a second.
+const CATCH_UP_NS: u64 = 100_000_000;
+
 /// The cap and the frames it let through.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FrameCap {
@@ -63,6 +76,9 @@ pub struct FrameCap {
     /// When the last frame showed, in emulated ns; None before the
     /// first.
     last: Option<u64>,
+    /// The frame time the last frame counts in (`shown`), in emulated
+    /// ns: the next frame may show in the one after it.
+    slot: Option<u64>,
 }
 
 impl FrameCap {
@@ -104,13 +120,22 @@ impl FrameCap {
             return None;
         }
         let slack = refresh_ns.map_or(0, |refresh| refresh / 2);
-        let next = ((self.last? + slack) / frame + 1) * frame - slack;
+        let next = ((self.slot? + slack) / frame + 1) * frame - slack;
         (at < next).then_some(next)
     }
 
-    /// A frame showed at `at`.
+    /// A frame showed at `at`. A frame later than a frame time after the
+    /// last counts in the frame time after the last one's, or no more
+    /// than `CATCH_UP_NS` before it showed: the frames after it may show
+    /// at once until they are back in step.
     pub fn shown(&mut self, at: u64) {
         self.last = Some(at);
+        self.slot = Some(match (self.slot, self.frame_ns()) {
+            (Some(slot), Some(frame)) if at > slot + frame => {
+                (slot + frame).max(at.saturating_sub(CATCH_UP_NS))
+            }
+            _ => at,
+        });
     }
 
     /// The steady timing of the cap's frames, a retrace at every
@@ -152,7 +177,7 @@ impl Shared {
     /// Forget the frames shown, as a new machine or a loaded state that
     /// has none.
     pub fn forget(&self) {
-        self.update(|cap| cap.last = None);
+        self.update(|cap| (cap.last, cap.slot) = (None, None));
     }
 
     fn update(&self, f: impl FnOnce(&mut FrameCap)) {
@@ -165,13 +190,16 @@ impl Shared {
 /// A save state keeps the frames shown, the cap being the setting's.
 impl State for Shared {
     fn save(&self, w: &mut Writer) {
-        self.get().last.save(w);
+        let cap = self.get();
+        cap.last.save(w);
+        cap.slot.save(w);
     }
 
     fn load(&mut self, r: &mut Reader) -> Result<()> {
-        let mut last = None;
+        let (mut last, mut slot) = (None, None);
         last.load(r)?;
-        self.update(|cap| cap.last = last);
+        slot.load(r)?;
+        self.update(|cap| (cap.last, cap.slot) = (last, slot));
         Ok(())
     }
 }
@@ -264,6 +292,38 @@ mod tests {
     }
 
     #[test]
+    fn a_late_frame_lets_the_next_ones_catch_up() {
+        // Nine frames of a fifth of a frame time, then one of four: the
+        // late one's missed frame times go to the fast ones after it, 60
+        // a second; letting none catch up held every fast one and gave 46.
+        let frame = 1_000_000_000 / 60;
+        let mut work = vec![frame / 5; 9];
+        work.push(frame * 4);
+        let shown = presented(60, &work, 601);
+        assert!((rate(&shown) - 60.0).abs() < 0.5, "{}", rate(&shown));
+    }
+
+    #[test]
+    fn a_frame_a_second_late_lets_a_tenth_of_a_second_catch_up() {
+        let frame = 1_000_000_000 / 60;
+        let mut cap = cap(60);
+        cap.shown(frame);
+        let late = 1_000_000_000 + frame;
+        cap.shown(late);
+        // It counts a tenth of a second before it showed, at 0.917 s: the
+        // six frames after it show at once, in the frame times up to the
+        // one it showed in, and the next waits.
+        let mut now = late;
+        let mut at_once = 0;
+        while cap.wait(now + 1000, None).is_none() {
+            now += 1000;
+            cap.shown(now);
+            at_once += 1;
+        }
+        assert_eq!(at_once, 6);
+    }
+
+    #[test]
     fn a_retrace_a_little_faster_than_twice_the_cap_shows_every_other_one() {
         // A display of 60.00006 Hz under a cap of 30: every frame waits for
         // the retrace, and shows at the one nearest its turn. The first
@@ -347,12 +407,16 @@ mod tests {
         let shared = Shared::default();
         shared.set_fps(Some(30));
         shared.shown(123);
+        // Late: it counts a tenth of a second before it showed.
+        shared.shown(500 * MS);
         let mut w = Writer::new();
         shared.save(&mut w);
         let mut other = Shared::default();
         other.set_fps(Some(50));
         other.load(&mut Reader::new(&w.buf)).unwrap();
-        assert_eq!(other.get().last(), Some(123));
+        assert_eq!(other.get().last(), Some(500 * MS));
         assert_eq!(other.get().fps(), Some(50));
+        assert_eq!(other.get().slot, shared.get().slot);
+        assert_ne!(other.get().slot, other.get().last());
     }
 }
