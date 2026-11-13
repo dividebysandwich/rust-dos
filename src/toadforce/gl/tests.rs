@@ -2263,9 +2263,13 @@ fn lines_agree() {
         }
     }
     for format in [Format::X8R8G8B8, Format::R5G6B5] {
+        // The host interpolates a square's depth in single precision
+        // and rounds it by itself, as a triangle's: 2 steps of 24
+        // bits over these lines.
         let bound = Bound {
             channel: 0,
-            ..close(Format::D24S8)
+            depth: 2,
+            ..CLOSE
         };
         let declined = bench.compare("lines", format, Some(Format::D24S8), bound, |rig| {
             rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
@@ -2340,6 +2344,9 @@ fn lines_agree() {
     }
     // Lines whose 1 / w falls to a quarter in less than a pixel: the
     // host gets the pixel's own values at every corner of its square.
+    // No texture here: a mip filter would pick level 0 for such a
+    // pixel on the host, and fog by w differs where the centre has no
+    // positive 1 / w (#1003).
     bench.exact("lines whose w runs out", |rig| {
         rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
         rig.states(&[
@@ -2366,17 +2373,72 @@ fn lines_agree() {
         ends[1].rhw = 1e-4;
         draw_as(rig, 2, &ends);
     });
+    // A depth bias moves a line's depth as a triangle's (`ZBIAS` is
+    // every fragment's): lines in the plane of a surface, drawn where
+    // only a nearer depth passes, show with a bias and not without.
+    for bias in [0, 1, 16] {
+        bench.exact(&format!("lines with a depth bias of {bias}"), |rig| {
+            rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
+            rig.states(&[(RS_ZENABLE, 1), (RS_ZFUNC, 2)]);
+            rig.draw(&quad_z(0.0, 0.0, 64.0, 0xFF40_4040, 0.375));
+            rig.states(&[(RS_ZBIAS, bias)]);
+            let mut flat = Vec::new();
+            for ends in [
+                line(4.0, 6.0, 60.0, 6.0),
+                line(4.0, 10.0, 60.0, 31.5),
+                line(12.25, 4.0, 20.75, 60.0),
+            ] {
+                flat.extend(ends.map(|mut v| {
+                    (v.z, v.rhw) = (0.375, 1.0);
+                    v
+                }));
+            }
+            draw_as(rig, 2, &flat);
+            // And lines that go through the surface.
+            lines(rig);
+            rig.states(&[(RS_ZBIAS, 0)]);
+        });
+    }
     // A texture along the lines, with perspective: the nearest texel,
     // the linear filter, and mip levels by the coordinates' change
-    // from a pixel to the next.
+    // from a pixel to the next. A sample is a weight of 1/256 off
+    // where the host's interpolation puts a coordinate on the other
+    // side of a step, which is 1 in 255 of a channel on this texture
+    // ("A sample of a 2D texture" in `docs/toadforce.md`).
     for (mag, min, mip) in [(1, 1, 0), (2, 2, 0), (2, 2, 1), (2, 2, 2)] {
         let name = format!("lines textured {mag} {min} {mip}");
-        bench.sampled(&name, 2, false, |rig| {
+        bench.within(&name, 1, |rig| {
             rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
             mipped(rig);
             filter(rig, 0, mag, min, mip);
             rig.stage(0, &[(TSS_COLOROP, OP_MODULATE), (TSS_ALPHAOP, OP_MODULATE)]);
             lines(rig);
+        });
+    }
+    // Lines going into the distance: w grows 16 times along them, so
+    // a pixel covers more and more texels and the mip level changes
+    // along the line. Each level of the texture has its own blue.
+    for (min, mip) in [(1, 1), (2, 1), (2, 2)] {
+        let name = format!("lines into the distance, filter {min} mip {mip}");
+        bench.within(&name, 1, |rig| {
+            rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
+            let t = rig.texels(TEXTURE, Format::A8R8G8B8, 32, 6, false, ramp(32));
+            rig.texture(0, 1, &t);
+            filter(rig, 0, 2, min, mip);
+            let mut far = Vec::new();
+            for (x0, y0, x1, y1) in [
+                (2.0, 4.0, 62.0, 9.5),
+                (60.5, 14.0, 3.0, 30.0),
+                (6.0, 34.0, 20.5, 62.0),
+                (40.0, 61.0, 61.0, 36.5),
+                (30.0, 62.5, 34.0, 33.0),
+            ] {
+                let mut ends = line(x0, y0, x1, y1);
+                ends[1].rhw = 1.0 / 16.0;
+                ends[1].t = [5.37, 3.71, 0.0, 1.0];
+                far.extend(ends);
+            }
+            draw_as(rig, 2, &far);
         });
     }
 }
@@ -2469,7 +2531,8 @@ fn points_agree() {
     for sprite in [0, 1] {
         for filtered in [1, 2] {
             let name = format!("points textured sprite {sprite} filter {filtered}");
-            bench.sampled(&name, filtered, false, |rig| {
+            // A weight of 1/256 off, as any sample of a 2D texture.
+            bench.within(&name, 1, |rig| {
                 rig.clear(1, 0xFF10_2030, 1.0, 0, &[]);
                 let t = rig.texels(TEXTURE, Format::A8R8G8B8, 16, 1, false, ramp(16));
                 rig.texture(0, 1, &t);
@@ -2493,7 +2556,9 @@ fn triangles_as_lines_and_as_points_agree() {
         for cull in [1, 2, 3] {
             for shade in [2, 1] {
                 let name = format!("fill {fill} cull {cull} shade {shade}");
-                bench.sampled(&name, 2, false, |rig| {
+                // A weight of 1/256 off, as any sample of a 2D
+                // texture.
+                bench.within(&name, 1, |rig| {
                     rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
                     let t = rig.texels(TEXTURE, Format::A8R8G8B8, 16, 1, false, ramp(16));
                     rig.texture(0, 1, &t);

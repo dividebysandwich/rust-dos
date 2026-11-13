@@ -870,7 +870,7 @@ fn the_host_gets_lines_and_points_as_the_triangles_of_their_pixels() {
         apart += (a != b) as u32;
         rig.memory[at..at + 2].copy_from_slice(&a.to_le_bytes());
     }
-    assert!(apart <= 8, "{apart} depths differ");
+    assert_eq!(apart, 4, "depths that differ");
     assert!(rig.memory == software.memory);
 }
 
