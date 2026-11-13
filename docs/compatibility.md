@@ -187,30 +187,42 @@ boxes, menus and window titles. Text a game draws with its own fonts
 usually shows right under any locale, so a game can have an unreadable
 launcher and readable menus.
 
-Which games need it:
+The locale of each language, by the group of languages that shares a
+code page:
 
-* **Languages written in Cyrillic** (Belarusian, Bulgarian, Russian,
-  Serbian in Cyrillic, Ukrainian): `ru-RU`, the one locale with the
-  Cyrillic code page.
-* **Central European languages** with letters outside Western Europe's
-  (Polish, Czech, Slovak, Hungarian, Slovenian, Croatian, Romanian):
-  `pl-PL`, `cs-CZ` or `hu-HU`. All three read text in the same code
-  page; pick the game's language for its date and number formats.
+* **Baltic**: Estonian `et-EE`, Latvian `lv-LV`, Lithuanian `lt-LT`.
+* **Central European**: Croatian `hr-HR`, Czech `cs-CZ`, Hungarian
+  `hu-HU`, Polish `pl-PL`, Romanian `ro-RO`, Serbian in Latin script
+  `sr-Latn-YU`, Slovak `sk-SK`, Slovenian `sl-SI`.
+* **Cyrillic**: Belarusian `be-BY`, Bulgarian `bg-BG`, Russian
+  `ru-RU`, Serbian in Cyrillic script `sr-Cyrl-YU`, Ukrainian `uk-UA`.
 * **Greek**: `el-GR`.
 * **Turkish**: `tr-TR`.
-* **Baltic languages** (Estonian, Latvian, Lithuanian): `lt-LT`, the
-  one locale with the Baltic code page.
+* **Western European**: Danish `da-DK`, Dutch `nl-NL`, English
+  `en-GB` and `en-US`, Finnish `fi-FI`, French `fr-FR`, German
+  `de-DE`, Italian `it-IT`, Norwegian `nb-NO`, Portuguese `pt-BR` and
+  `pt-PT`, Spanish `es-ES`, Swedish `sv-SE`. Their letters are in the
+  default locale's code page, so their games' text shows right under
+  `en-US` too; their own locale gives their dates, numbers and
+  language id.
 
-Where a group shares a locale, a game in another of its languages shows
-its text right, with the dates, month names and number formats of the
-locale's own language.
+A locale of the wrong group shows the game's text as described above.
+One of the right group but another language shows the text right, with
+that language's month names and date and number formats, and a game
+that picks its language by the system's language id may pick the wrong
+one or English.
 
-Games in English and in Western European languages (French, German,
-Spanish, Italian, Portuguese, Dutch and the Nordic languages) need
-nothing: their letters are in the default locale's code page.
+Macedonian has no locale, since Windows had none before Windows 2000:
+a Macedonian game's text shows right under any Cyrillic locale. Other languages of these
+code pages without a locale of their own (Catalan, Icelandic, the
+regional forms of German, French and Spanish, and others) take the
+nearest one of their group.
 
-Japanese, Chinese and Korean games, and Hebrew and Arabic ones, have no
-locale yet. Run those on a
+Japanese, Chinese and Korean games
+([#1017](https://github.com/dividebysandwich/rust-dos/issues/1017)),
+and Hebrew and Arabic ones
+([#1018](https://github.com/dividebysandwich/rust-dos/issues/1018)),
+have no locale yet. Run those on a
 [Windows 95 or 98 image](#windows-games-on-a-windows-95-or-98-image) of
 that language.
 
