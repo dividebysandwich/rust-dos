@@ -290,7 +290,10 @@ mod tests {
                 }
             }
         }
-        println!("pictures of {} chunks: {pictures}, hash {hash:016x}", video.chunks.len());
+        println!(
+            "pictures of {} chunks: {pictures}, hash {hash:016x}",
+            video.chunks.len()
+        );
     }
 
     #[test]
