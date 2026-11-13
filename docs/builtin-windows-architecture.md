@@ -805,7 +805,9 @@ rust-dos is GPL-2.0-or-later.
   code is used. HX DOS Extender has no license file, so it serves as a
   reference and a test, not a source.
 - Nothing from Microsoft is used or shipped: no DLLs, fonts or headers
-  beyond what Wine's and MinGW's public headers document.
+  beyond what Wine's and MinGW's public headers document. The one
+  exception is the 92 bytes of VMM that programs compare exactly (rule
+  5 under "Rules the code follows").
 
 ## Rules the code follows
 
@@ -826,6 +828,21 @@ rust-dos is GPL-2.0-or-later.
    reads the disc image as on Windows 98. A protection is never patched,
    skipped or detected by name. An image that can't pass the check
    because of how it was made fails it, as on Windows 98.
+
+   One exception ships bytes of Microsoft's. Programs of the Windows 98
+   era read VMM's locked code object, the first object of VMM's record
+   in VMM_GetVxDLocationList's list, and compare parts of it byte for
+   byte with Windows 98 SE's. No code written from a specification can
+   match a comparison of exact bytes, so on 2026-11-13 the project's
+   owner ruled these bytes part of the interface: 44 bytes of
+   Simulate_Iret's code, the 24-byte greeting and the 20-byte prompt of
+   VMM's debugger interface, and a 4-byte signature, 92 bytes in all.
+   They live in `src/win32/vmm/compared.rs`, each a named constant, and
+   nowhere else. The built-in VMM's code runs the 44 bytes as part of
+   its own Simulate_Iret; the rest of the object is rust-dos's own,
+   written from the DDK's documentation (`src/win32/vmm.rs`). The
+   exception covers exactly the bytes programs compare, and no more;
+   each new case is the project's owner's decision.
 6. **Installs come from the game's own installer** where it runs, and
    from unpacking its archives or an installed copy with registry keys
    from the profile where it doesn't (see "Setup programs").

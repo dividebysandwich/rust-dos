@@ -4556,6 +4556,241 @@ fn get_ddb_finds_vxds_in_the_ddb_list() {
     assert_eq!(code, 1, "{}", text);
 }
 
+/// Where a Simulate_Iret test puts the frame the service pops: at a
+/// linear address, or at an offset in the thread's TIB (FS).
+#[derive(Clone, Copy)]
+enum FrameAt {
+    Linear(u32),
+    Tib(u32),
+}
+
+/// A call of Simulate_Iret: the VM's status and the client's SS, ESP and
+/// EFlags before it, the frame's words and where they are, and Client_EIP,
+/// Client_CS, Client_EFlags and Client_ESP after it.
+struct IretCase {
+    status: u32,
+    ss: u16,
+    esp: u32,
+    eflags: u32,
+    frame: &'static [u16],
+    frame_at: FrameAt,
+    expected: (u32, u16, u32, u32),
+}
+
+/// The intra-application communication area of the BIOS's data
+/// (0040:00F0h), 16 bytes no system uses, where the tests put a frame
+/// for the client's SS:SP to point at.
+const ICA: u32 = 0x4F0;
+
+/// Level 0 code that calls Simulate_Iret through INT 20h in `case`: it
+/// finds the client register structure through Get_Cur_VM_Handle and the
+/// VM's CB_Client_Pointer, saves the VM's status and the client's
+/// registers the service uses, puts the case's in their place and the
+/// frame where it goes, and calls the service. EBX is 1 when the
+/// registers came back as they were and the client's are what the case
+/// expects. The client's registers and the status are put back before
+/// the IRETD, which they are the frame of.
+fn simulate_iret_level0(case: &IretCase) -> Vec<u8> {
+    level0_code(|a| {
+        let mut fail = a.create_label();
+        let mut restore = a.create_label();
+        a.push(ebp)?;
+        a.push(esi)?;
+        a.push(edi)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_0001])?; // Get_Cur_VM_Handle
+        a.mov(edx, ebx)?;
+        a.mov(edi, dword_ptr(edx + 8))?; // CB_Client_Pointer
+        a.push(dword_ptr(edx))?; // CB_VM_Status
+        for field in [0x24, 0x28, 0x2C, 0x30, 0x34] {
+            a.push(dword_ptr(edi + field))?;
+        }
+        for (i, &word) in case.frame.iter().enumerate() {
+            let offset = 2 * i as u32;
+            match case.frame_at {
+                FrameAt::Linear(at) => a.mov(word_ptr(at + offset), word as u32)?,
+                FrameAt::Tib(at) => a.mov(word_ptr(at + offset).fs(), word as u32)?,
+            }
+        }
+        a.mov(dword_ptr(edx), case.status)?;
+        a.mov(dword_ptr(edi + 0x34), case.ss as u32)?;
+        a.mov(dword_ptr(edi + 0x30), case.esp)?;
+        a.mov(dword_ptr(edi + 0x2C), case.eflags)?;
+        a.mov(dword_ptr(edi + 0x24), 0xCCCC_CCCCu32)?;
+        a.mov(dword_ptr(edi + 0x28), 0)?;
+        a.mov(eax, 0x1111_1111)?;
+        a.mov(ebx, 0x3333_3333)?;
+        a.mov(ecx, 0x2222_2222)?;
+        a.mov(esi, 0x4444_4444)?;
+        a.mov(ebp, 0x5555_5555)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_0047])?; // Simulate_Iret
+        // EDX and EDI are checked by what follows using them.
+        for (reg, value) in [
+            (eax, 0x1111_1111u32),
+            (ebx, 0x3333_3333),
+            (ecx, 0x2222_2222),
+            (esi, 0x4444_4444),
+            (ebp, 0x5555_5555),
+        ] {
+            a.cmp(reg, value)?;
+            a.jne(fail)?;
+        }
+        let (client_eip, client_cs, client_eflags, client_esp) = case.expected;
+        a.cmp(dword_ptr(edi + 0x24), client_eip)?;
+        a.jne(fail)?;
+        a.cmp(word_ptr(edi + 0x28), client_cs as u32)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(edi + 0x2C), client_eflags)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(edi + 0x30), client_esp)?;
+        a.jne(fail)?;
+        a.mov(eax, 1)?;
+        a.jmp(restore)?;
+        a.set_label(&mut fail)?;
+        a.xor(eax, eax)?;
+        a.set_label(&mut restore)?;
+        for field in [0x34, 0x30, 0x2C, 0x28, 0x24] {
+            a.pop(dword_ptr(edi + field))?;
+        }
+        a.pop(dword_ptr(edx))?;
+        a.mov(ebx, eax)?;
+        a.pop(edi)?;
+        a.pop(esi)?;
+        a.pop(ebp)?;
+        a.iretd()
+    })
+}
+
+/// Simulate_Iret for a VM in V86 mode (CB_VM_Status without
+/// VMStat_PM_Exec): it pops IP, CS and FLAGS from the VM's memory at
+/// SS * 16 + SP, the upper halves of Client_EIP and Client_ESP stay, and
+/// the flags are the popped word with NT and IOPL clear and VM set.
+#[test]
+fn simulate_iret_pops_a_v86_frame() {
+    let case = IretCase {
+        status: 0,
+        ss: 0x0040,
+        esp: 0x1234_00F0,
+        eflags: 0x0004_0000,
+        frame: &[0x1234, 0x5678, 0x7202],
+        frame_at: FrameAt::Linear(ICA),
+        expected: (0xCCCC_1234, 0x5678, 0x0002_0202, 0x1234_00F6),
+    };
+    let (code, text) = run_through_gate_28h("simulate_iret_v86", &simulate_iret_level0(&case));
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// Simulate_Iret for a 16-bit protected-mode client (VMStat_PM_Exec
+/// alone): three words at SS:SP through the client's selector, Client_EIP
+/// the popped IP and Client_ESP SP + 6, zero-extended; only the low word
+/// of Client_EFlags comes from the frame. The interrupt flag goes from
+/// set to clear as the frame has it.
+#[test]
+fn simulate_iret_pops_a_16_bit_frame() {
+    let case = IretCase {
+        status: 0x60,
+        ss: 0x013F,
+        esp: 0x1234_0000 | ICA,
+        eflags: 0x0004_0202,
+        frame: &[0x1234, 0x0137, 0x0046],
+        frame_at: FrameAt::Linear(ICA),
+        expected: (0x1234, 0x0137, 0x0004_0046, ICA + 6),
+    };
+    let (code, text) = run_through_gate_28h("simulate_iret_pm16", &simulate_iret_level0(&case));
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// A frame that turns the client's interrupt flag on: Simulate_Iret
+/// writes the flags with it off and turns it on through Enable_VM_Ints,
+/// so the client has it on afterwards.
+#[test]
+fn simulate_iret_enables_the_vm_s_interrupts() {
+    let case = IretCase {
+        status: 0x60,
+        ss: 0x013F,
+        esp: ICA,
+        eflags: 0x0004_0002,
+        frame: &[0x1234, 0x0137, 0x0203],
+        frame_at: FrameAt::Linear(ICA),
+        expected: (0x1234, 0x0137, 0x0004_0203, ICA + 6),
+    };
+    let (code, text) = run_through_gate_28h("simulate_iret_sti", &simulate_iret_level0(&case));
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// Simulate_Iret for a 32-bit client (VMStat_PM_Use32) on a stack
+/// segment above 64K: three dwords at SS:ESP, CS and the flags the low
+/// words of theirs, Client_ESP 12 bytes on.
+#[test]
+fn simulate_iret_pops_a_32_bit_frame() {
+    let case = IretCase {
+        status: 0xE0,
+        ss: 0x013F,
+        esp: ICA,
+        eflags: 0x0004_0000,
+        frame: &[0x4321, 0x8765, 0x0137, 0xFFFF, 0x0202, 0xFFFF],
+        frame_at: FrameAt::Linear(ICA),
+        expected: (0x8765_4321, 0x0137, 0x0004_0202, ICA + 12),
+    };
+    let (code, text) = run_through_gate_28h("simulate_iret_pm32", &simulate_iret_level0(&case));
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// Simulate_Iret in VxD nested execution (VMStat_VxD_Exec) pops a 32-bit
+/// frame too, and on a stack segment of 64K or less (the TIB's, 4K) at
+/// SP: ESP's upper half doesn't count.
+#[test]
+fn simulate_iret_pops_a_32_bit_frame_at_sp_in_a_small_segment() {
+    let case = IretCase {
+        status: 0x160,
+        ss: 0x0147,
+        esp: 0xABCD_0FE0,
+        eflags: 0x0004_0202,
+        frame: &[0x5678, 0x0000, 0x0137, 0x0000, 0x0202, 0x0000],
+        frame_at: FrameAt::Tib(0xFE0),
+        expected: (0x5678, 0x0137, 0x0004_0202, 0x0FEC),
+    };
+    let (code, text) = run_through_gate_28h("simulate_iret_vxd", &simulate_iret_level0(&case));
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// The client register structure is the frame of the interrupt that
+/// brought the program to level 0, so Simulate_Iret there changes where
+/// the level 0 code's IRETD goes: the program pushes an IRET frame to a
+/// place of its own and raises the interrupt, and the level 0 code calls
+/// Simulate_Iret and returns. The program goes on at its place, with its
+/// stack as before the frame.
+#[test]
+fn simulate_iret_changes_where_level_0_code_returns_to() {
+    let level0 = [
+        0xCD, 0x20, 0x47, 0x00, 0x01, 0x00, // VMMCall Simulate_Iret
+        0xCF, // iretd
+    ];
+    let program = gate_28h_program_calling(&level0, |a| {
+        let mut setup = a.create_label();
+        let mut done = a.create_label();
+        a.xor(ebx, ebx)?;
+        a.mov(esi, esp)?;
+        a.pushfd()?;
+        a.push(cs)?;
+        // The frame's EIP, the CALL's return address: the code after it.
+        a.call(setup)?;
+        a.cmp(esp, esi)?;
+        a.jne(done)?;
+        a.mov(ebx, 1)?;
+        a.jmp(done)?;
+        a.set_label(&mut setup)?;
+        a.int(5)?;
+        // Back here, the frame unused.
+        a.add(esp, 12)?;
+        a.set_label(&mut done)?;
+        a.nop()
+    });
+    let (code, text) = run("simulate_iret_return", program);
+    assert_eq!(code, 1, "{}", text);
+}
+
 /// Level 0 code assembled by `f`, which may jump only within itself.
 fn level0_code(f: impl FnOnce(&mut CodeAssembler) -> Result<(), IcedError>) -> Vec<u8> {
     let mut a = CodeAssembler::new(32).unwrap();
@@ -4572,6 +4807,17 @@ fn run_through_gate_28h(name: &str, level0: &[u8]) -> (u8, String) {
 /// of the data section, through a gate of level 3 for vector 5 with
 /// selector 28h. The program ends with EBX's bit 0 after it returns.
 fn gate_28h_program(level0: &[u8]) -> Vec<u8> {
+    gate_28h_program_calling(level0, |a| {
+        a.xor(ebx, ebx)?;
+        a.int(5)
+    })
+}
+
+/// `gate_28h_program` with `call` raising vector 5, which sets EBX.
+fn gate_28h_program_calling(
+    level0: &[u8],
+    call: impl FnOnce(&mut CodeAssembler) -> Result<(), IcedError>,
+) -> Vec<u8> {
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
     let mut data = vec![0u8; 0x30 + level0.len().max(0x10)];
     data[0x30..0x30 + level0.len()].copy_from_slice(level0);
@@ -4593,8 +4839,10 @@ fn gate_28h_program(level0: &[u8]) -> Vec<u8> {
         a.mov(word_ptr(esi + 4), 0xEE00)?;
         a.shr(eax, 16)?;
         a.mov(word_ptr(esi + 6), ax)?;
-        a.xor(ebx, ebx)?;
-        a.int(5)?;
+        // ESI, which has the gate's address, stays as it is.
+        a.push(esi)?;
+        call(a)?;
+        a.pop(esi)?;
         // Put the gate back.
         a.mov(eax, dword_ptr(l.at(0x10)))?;
         a.mov(dword_ptr(esi), eax)?;
