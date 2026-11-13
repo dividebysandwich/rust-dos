@@ -12,9 +12,10 @@ disc as it is.
 1. Find the game's protection in the table below, and the image it
    needs.
 2. Make that image of your disc with one of the tools in [Dumping a
-   disc](#dumping-a-disc). If you don't know the protection, make the
-   most complete image: Alcohol 120% with subchannel data and data
-   position measurement (DPM).
+   disc](#dumping-a-disc): redumper for most discs, and disc-archiver
+   with redumper for a SecuROM disc. If you don't know the protection,
+   make the most complete image: Alcohol 120% with subchannel data and
+   data position measurement (DPM).
 3. Mount the image as the game's CD (see [Mounting the
    image](#mounting-the-image)), with every file the dump made beside it.
 4. Start the game. If the check fails, see [When the check
@@ -27,7 +28,7 @@ beyond this, such as which of their discs to mount.
 
 | Protection | The image it needs |
 |---|---|
-| SafeDisc 1 and 2 | Whole 2352-byte sectors: BIN and CUE, CHD, or Alcohol 120% in raw mode. An ISO fails. |
+| SafeDisc 1 and 2 | Whole 2352-byte sectors: redumper's BIN and CUE, CHD, or Alcohol 120% in raw mode. An ISO fails. |
 | SecuROM 4.8, and any other disc protection | Alcohol 120% with the subchannel and DPM data |
 | Code wheels, manual lookups | The manual or wheel as a PDF or picture (see [Manuals and code wheels](#manuals-and-code-wheels)) |
 
@@ -42,7 +43,8 @@ What each image keeps:
 - SecuROM 4.8 also reads the subchannel and times reads to find where
   sectors lie on the disc. A CUE sheet keeps the subchannel only with a
   `.sub` or `.subcode` file beside it, and never the sectors' positions.
-  An Alcohol 120% image made with DPM keeps the positions.
+  An Alcohol 120% image made with DPM keeps the positions, and so does
+  disc-archiver's `.mds`.
 
 ## DOS games
 
@@ -71,10 +73,34 @@ profile, and Ctrl+Shift+M shows it over the game:
 
 ## Dumping a disc
 
+Rip the discs you own and obtained legally with
+[redumper](https://github.com/superg/redumper), the dumper Redump uses.
+It reads every sector raw, with the disc's subchannel, and writes a CUE
+sheet and BIN files beside its own files (`.scram`, `.subcode`, `.toc`,
+`.log` and others). It reads a CD completely only in a drive it knows:
+`redumper --list-recommended-drives` lists them. Mount the CUE sheet,
+with the `.subcode` file beside it under the name redumper gave it. That
+image keeps what SafeDisc checks, and the subchannel.
+
+redumper doesn't measure DPM, which SecuROM 4.8 and later check. For a
+SecuROM disc, use
+[disc-archiver](https://github.com/kibertoad/refurbished-dinosaurs-toolkit/tree/main/packages/disc-archiver)
+with redumper. It dumps the disc with redumper, measures the DPM data
+in the same drive (on Windows only), and writes it into an Alcohol 120%
+`.mds`: its `mds` copy (`.mds` and `.mdf`), and an `.mds` beside the
+BIN files of its `bincue-split` copy. Mount that `.mds`. The archiver's
+`.mds` holds no subchannel, and rust-dos doesn't read redumper's
+`.subcode` beside an `.mds` yet
+([#1038](https://github.com/dividebysandwich/rust-dos/issues/1038)), so
+the image has the DPM data without the marks SecuROM keeps in the
+subchannel. disc-archiver's README has the commands and says when it
+measures.
+
 | Tool | What it makes | Good for |
 |---|---|---|
-| [redumper](https://github.com/superg/redumper) or [DiscImageCreator](https://github.com/saramibreak/DiscImageCreator) | CUE, BIN and a `.subcode` or `.sub` subchannel file | SafeDisc |
-| [Alcohol 120%](https://www.alcohol-soft.com/), with subchannel and DPM | `.mds` and `.mdf` | Every protection in the table |
+| [redumper](https://github.com/superg/redumper) | CUE, BIN and a `.subcode` subchannel file | SafeDisc, and any disc whose check reads only sectors and subchannel |
+| [disc-archiver](https://github.com/kibertoad/refurbished-dinosaurs-toolkit/tree/main/packages/disc-archiver) with redumper | redumper's dump, and an `.mds` with the DPM data and no subchannel | SecuROM 4.8 and later: the DPM data |
+| [Alcohol 120%](https://www.alcohol-soft.com/), with subchannel and DPM | `.mds` and `.mdf` | Every protection in the table, both in one image |
 | [chdman](https://docs.mamedev.org/tools/chdman.html), from a CUE and BIN dump | `.chd` | SafeDisc; rust-dos reads no subchannel from a CHD |
 
 Each tool's own documentation says how to make an exact copy with it:
@@ -82,15 +108,16 @@ raw sectors of 2352 bytes, the subchannel, and DPM where the tool has
 it. Keep every file the tool makes together, under the names it gave
 them.
 
-Rust-DOS reads Alcohol 120% descriptors of version 1, of CDs, with the
-tracks in one `.mdf` file.
+Rust-DOS reads Alcohol 120% descriptors of version 1, of CDs, with each
+track in one data file beside the descriptor.
 
 Images you already have from BlindWrite 5 or 6 (`.b5t` or `.b6t`, with
-their data files and `.bwa` DPM file) or CloneCD (`.ccd`, `.img` and
-`.sub`, one session) work too: a BlindWrite image with subchannel and DPM
-keeps what Alcohol 120%'s does, and a CloneCD image what a CUE and BIN
-with a subchannel file do. [CD images](../CONFIGURATION.md#cd-images)
-lists every format and what each keeps.
+their data files and `.bwa` DPM file), CloneCD (`.ccd`, `.img` and
+`.sub`, one session) or DiscImageCreator (CUE, BIN and `.sub`) work too:
+a BlindWrite image with subchannel and DPM keeps what Alcohol 120%'s
+does, and a CloneCD or DiscImageCreator image what redumper's does.
+[CD images](../CONFIGURATION.md#cd-images) lists every format and what
+each keeps.
 
 ## Mounting the image
 
