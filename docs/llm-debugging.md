@@ -1149,7 +1149,19 @@ counts what the OpenGL renderer costs and misses:
   the frames one of them wanted.
 - `declined_draws`: draws the software renderer drew because OpenGL
   doesn't draw their state as the card does. Each reads its target
-  back first.
+  back first. `declined_for` has them by reason, every reason listed
+  with its count (`Decline` in `src/toadforce/gpu.rs`):
+  - the rasteriser's: `serial state` (a draw that reads what it
+    writes);
+  - `no host`: draws after the window and its renderer are gone;
+  - the OpenGL renderer's (`declines` in `src/toadforce/gl.rs`):
+    `host broken` (no framebuffer the card's surfaces fit),
+    `program failed` (a shader that didn't compile), and the states
+    it doesn't draw as the card does: `target format`, `no texture`,
+    `bumped cube map`, `key on a block format`,
+    `texture sampled both ways`, `first level with two filters`,
+    `linear magnify, point minify, mipped`, `key with linear mip`,
+    `texture with two samplings` and `SRCALPHASAT destination`.
 - `writes`: the times pixels the processor wrote into a surface the
   GPU had newer pixels of went to the GPU's copy as rectangles, with
   nothing read back. A surface written in parts of pixels or in too
@@ -1208,17 +1220,21 @@ Then it draws draw by draw, the host starting each draw from the
 software renderer's pixels, and lists the states by how many pixels
 differ by more than 17 after their draws: drawn by the software
 renderer alone, by the host alone or by both, with the state's steps
-and textures and its worst draw's vertices. `TOADFORCE_REPLAY_OVER=N`
-counts the pixels over N instead. `TOADFORCE_REPLAY_SET=rs27=0,ts21=1`
-sets render states (`rs`) and stage states (`ts`, on every stage) by
-number on both sides before each draw, here the blend off and the
-anisotropy 1: what stops differing hangs on that state.
-`TOADFORCE_CAPTURE_WIDE=1` keeps the host's 16-bit targets in 8 bits
-a channel, as a host whose 5-6-5 format fails the test does.
-`TOADFORCE_REPLAY_PIXEL='350,25;100,300'` follows those pixels through
-the whole recording on the software side: each draw that changes one
-is printed with the pixel before and after it and the draw's steps,
-which gives the layers a pixel is made of and what each adds.
+and textures and its worst draw's vertices. Each draw of points or
+lines, or of triangles as their corners or edges, gets a line of its
+own with the pixels it changed and the rectangle they are in, which
+tells what on the screen the program draws that way.
+`TOADFORCE_REPLAY_OVER=N` counts the pixels over N instead.
+`TOADFORCE_REPLAY_SET=rs27=0,ts21=1` sets render states (`rs`) and
+stage states (`ts`, on every stage) by number on both sides before
+each draw, here the blend off and the anisotropy 1: what stops
+differing hangs on that state. `TOADFORCE_CAPTURE_WIDE=1` keeps the
+host's 16-bit targets in 8 bits a channel, as a host whose 5-6-5
+format fails the test does. `TOADFORCE_REPLAY_PIXEL='350,25;100,300'`
+follows those pixels through the whole recording on the software
+side: each draw that changes one is printed with the pixel before and
+after it and the draw's steps, which gives the layers a pixel is made
+of and what each adds.
 
 ### 3dfx (Glide) games
 

@@ -3945,6 +3945,7 @@ const USER32_TRACK: (&str, &[&str]) = (
         "GetMessageA",
         "PeekMessageA",
         "SystemParametersInfoA",
+        "DispatchMessageA",
     ],
 );
 const KERNEL32_TRACK: (&str, &[&str]) = (
@@ -3962,16 +3963,19 @@ const TRACK_MOUSE_EVENT: usize = 2;
 const TRACK_GET_MESSAGE: usize = 3;
 const TRACK_PEEK_MESSAGE: usize = 4;
 const TRACK_SPI: usize = 5;
-const TRACK_GET_TICK_COUNT: usize = 6;
-const TRACK_SLEEP: usize = 7;
-const TRACK_LOAD_LIBRARY: usize = 8;
-const TRACK_GET_PROC_ADDRESS: usize = 9;
-const TRACK_GET_LAST_ERROR: usize = 10;
+const TRACK_DISPATCH_MESSAGE: usize = 6;
+const TRACK_GET_TICK_COUNT: usize = 7;
+const TRACK_SLEEP: usize = 8;
+const TRACK_LOAD_LIBRARY: usize = 9;
+const TRACK_GET_PROC_ADDRESS: usize = 10;
+const TRACK_GET_LAST_ERROR: usize = 11;
 /// The TRACKMOUSEEVENT of the requests, the one of TME_QUERY, the MSG
-/// GetMessageA fills, what SystemParametersInfoA writes, and names.
+/// GetMessageA fills and what it returned, what SystemParametersInfoA
+/// writes, and names.
 const TME: u32 = 0xE00;
 const TME_QUERIED: u32 = 0xE20;
 const TRACK_MSG: u32 = 0xE40;
+const TRACK_GOT: u32 = 0xE5C;
 const SPI_VALUE: u32 = 0xE60;
 const COMCTL32_NAME: u32 = 0xE80;
 const TRACK_NAME: u32 = 0xEA0;
@@ -4036,20 +4040,27 @@ fn query(c: &mut Calls, a: &mut CodeAssembler, l: &Layout, slot: u32) -> Result<
     Ok(())
 }
 
-/// GetMessageA for `message` alone: the thread waits for it.
+/// GetMessageA and DispatchMessageA until `message` comes, as a
+/// program's message loop takes and dispatches them: the hover comes
+/// from a WM_SYSTIMER that DispatchMessageA runs. GetMessageA's result
+/// for `message` goes to the next result.
 fn wait_for(
     c: &mut Calls,
     a: &mut CodeAssembler,
     l: &Layout,
     message: u32,
 ) -> Result<(), IcedError> {
-    let m = Arg::I(message);
-    c.api(
-        a,
-        l,
-        TRACK_GET_MESSAGE,
-        &[Arg::At(TRACK_MSG), Arg::I(0), m, m],
-    )
+    let mut next = a.create_label();
+    a.set_label(&mut next)?;
+    push(a, l, &[Arg::At(TRACK_MSG), Arg::I(0), Arg::I(0), Arg::I(0)])?;
+    a.call(l.import(TRACK_GET_MESSAGE))?;
+    a.mov(dword_ptr(l.at(TRACK_GOT)), eax)?;
+    push(a, l, &[Arg::At(TRACK_MSG)])?;
+    a.call(l.import(TRACK_DISPATCH_MESSAGE))?;
+    a.cmp(dword_ptr(l.at(TRACK_MSG + 4)), message as i32)?;
+    a.jne(next)?;
+    a.mov(eax, dword_ptr(l.at(TRACK_GOT)))?;
+    c.keep(a, l)
 }
 
 /// PeekMessageA for `message` alone, taking it.
