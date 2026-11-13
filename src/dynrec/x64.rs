@@ -481,14 +481,15 @@ fn dev_thunk(ops: &mut Asm, tlb: Option<(i32, i32)>, memref: DynamicLabel) {
     );
 }
 
-/// ST(dst) = a + b, or a - b, as `F80::add` and `F80::sub` add their 80
-/// bits (`fpu::arithmetic::addsub_st` and `addsub_value`): where both are
-/// registers that aren't empty or doubles, not an infinity or a NaN held as
-/// a double, and the sum comes to a double's range; a routine of the
-/// trampoline's that translated code calls with the physical registers a
-/// and b in R8D and R9D (8 for the double in XMM15) and dst | sub << 8 in
-/// R10D, which returns EAX = 0, or 1 with nothing changed for the handler's
-/// code. RCX, RDX and R8-R10 are changed.
+/// ST(dst) = a + b, or a - b, rounded to the control word's precision
+/// where `narrow_addsub` does, else as `F80::add` and `F80::sub` add their
+/// 80 bits (`fpu::arithmetic::addsub_st` and `addsub_value`): where both
+/// are registers that aren't empty or doubles, not an infinity or a NaN
+/// held as a double, and the sum comes to a double's range; a routine of
+/// the trampoline's that translated code calls with the physical registers
+/// a and b in R8D and R9D (8 for the double in XMM15) and dst | sub << 8
+/// in R10D, which returns EAX = 0, or 1 with nothing changed for the
+/// handler's code. RCX, RDX, R8-R10 and XMM2-XMM5 are changed.
 fn fpu_addsub(ops: &mut Asm) {
     let slow = ops.new_dynamic_label();
     let wide = ops.new_dynamic_label();
@@ -690,7 +691,14 @@ fn narrow_addsub(ops: &mut Asm, wide: DynamicLabel) {
         ; xor rax, rdx
         ; sar rax, 63
         ; lea rdx, [rdx + rax * 2 + 1]
+        // Below the smallest normal single the 80 bits' sum: a single's
+        // denormals are coarser than the 24 bits a 387 keeps there.
         ; =>single
+        ; mov rax, rdx
+        ; shl rax, 1
+        ; shr rax, 53
+        ; cmp eax, 1023 - 126
+        ; jb =>wide
         ; movq xmm4, rdx
         ; cvtsd2ss xmm4, xmm4
         // A normal single, or the 80 bits' sum.

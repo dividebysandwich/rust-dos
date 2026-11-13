@@ -1,17 +1,17 @@
 //! The AArch64 code generator.
 //!
 //! Registers while translated code runs: X19 the CPU, X20 the context
-//! (`JitCtx`), X21 RAM, X22 RAM's code generations, W23 set when a store hit
-//! the block's later bytes, X27 the CPU plus `HI` and X29 the CPU plus
-//! `REGS` (the CPU's fields past X19's offsets' reach), W28 the guest's arithmetic flags where the code
-//! has changed them (see `Gen::dirty`); W24-W26 hold the operations'
-//! temporaries (`uop::T`), which calls keep, D8 and D9 the FPU
-//! instructions' doubles (`uop::X`), which calls keep too, and X0-X17 and
-//! D16-D17 are scratch (X18, the platform's register, is never touched). The guest's registers stay
-//! in the CPU. AArch64 has neither the parity nor the auxiliary carry flag,
-//! so the code computes the guest's flags the way `cpu::alu` defines them,
-//! with a parity table in the context, and only those that are live (see
-//! `flags`).
+//! (`JitCtx`), X21 RAM, X22 RAM's code generations, W23 set when a store
+//! hit the block's later bytes, X27 the CPU plus `HI` and X29 the CPU plus
+//! `REGS` (the CPU's fields past X19's offsets' reach), W28 the guest's
+//! arithmetic flags where the code has changed them (see `Gen::dirty`);
+//! W24-W26 hold the operations' temporaries (`uop::T`), which calls keep,
+//! D8 and D9 the FPU instructions' doubles (`uop::X`), which calls keep
+//! too, and X0-X17 and D16-D21 are scratch (X18, the platform's register,
+//! is never touched). The guest's registers stay in the CPU. AArch64 has
+//! neither the parity nor the auxiliary carry flag, so the code computes
+//! the guest's flags the way `cpu::alu` defines them, with a parity table
+//! in the context, and only those that are live (see `flags`).
 
 // dynasm converts the registers it is given at run time with `into`, and
 // checks the bit field operands it is given with comparisons that are
@@ -149,11 +149,13 @@ pub fn trampoline() -> Trampoline {
     Trampoline { bytes: ops.finalize().expect("trampoline"), enter, exit, addsub }
 }
 
-/// ST(dst) = a + b, or a - b with W3 set, as `F80::add` and `F80::sub`
+/// ST(dst) = a + b, or a - b with W3 set, rounded to the control word's
+/// precision where `narrow_addsub` does, else as `F80::add` and `F80::sub`
 /// add their 80 bits, where x86-64's `Gen::fpu_addsub` does; a routine of
 /// the trampoline's that translated code calls with the physical registers
 /// a, b and dst in W0-W2 (8 for the double in D16), which returns W0 = 0,
-/// or 1 with nothing changed for the handler's code. X0-X15 are changed.
+/// or 1 with nothing changed for the handler's code. X0-X15, X17 and
+/// D17-D21 are changed.
 fn fpu_addsub(ops: &mut Asm) {
     let slow = ops.new_dynamic_label();
     dynasm!(ops ; .arch aarch64 ; mov w8, w0 ; mov w9, w1 ; mov w15, w2 ; mov w17, w3);
@@ -315,7 +317,12 @@ fn narrow_addsub(ops: &mut Asm, wide: DynamicLabel) {
         ; asr x6, x6, 63
         ; add x7, x7, x6, lsl 1
         ; add x7, x7, 1
+        // Below the smallest normal single the 80 bits' sum: a single's
+        // denormals are coarser than the 24 bits a 387 keeps there.
         ; =>single
+        ; ubfx x6, x7, 52, 11
+        ; cmp w6, 1023 - 126
+        ; b.lo =>wide
         ; fmov d19, x7
         ; fcvt s19, d19
         // A normal single, or the 80 bits' sum.

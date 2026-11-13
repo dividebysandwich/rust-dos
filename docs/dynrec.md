@@ -300,13 +300,12 @@ The interpreter computes products, quotients, loads, stores and
 comparisons with doubles, and sums and differences on the registers' 80
 bits (`F80::add`), or as doubles rounded to the control word's precision
 (see [Sums at 53 and 24 bits](#sums-at-53-and-24-bits)). So each FPU
-register keeps the double it comes to
-beside its 80 bits (`f80::FpuRegs`): an instruction that gives a register
-a double stores only that, and the 80 bits are made from it when
-something asks for them (a sum, FSTP of 10 bytes, FSAVE, a saved state).
-The double is always what the 80 bits would come to (`f80::canon_f64`: a
-denormal is 0 and a NaN quiet, as a double that went through 80 bits
-always was).
+register keeps the double it comes to beside its 80 bits
+(`f80::FpuRegs`): an instruction that gives a register a double stores
+only that, and the 80 bits are made from it when something asks for them
+(a sum, FSTP of 10 bytes, FSAVE, a saved state). The double is always
+what the 80 bits would come to (`f80::canon_f64`: a denormal is 0 and a
+NaN quiet, as a double that went through 80 bits always was).
 
 `dynrec/fpu.rs` translates these forms, which then run on the doubles
 with SSE2 on x86-64 hosts and the FP instructions on ARM64 hosts (which

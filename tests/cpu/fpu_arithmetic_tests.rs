@@ -864,5 +864,11 @@ fn narrow_sums_leave_the_rest_to_the_80_bits() {
     // Sums a double holds and a single's exponent doesn't.
     assert_eq!(narrow_sum(0x007F, 1e300, 1e300), None);
     assert_eq!(narrow_sum(0x007F, 1e-300, 1e-300), None);
+    // A sum just below the smallest normal single, which a single's
+    // denormals would round up to it and a 387 keeps; just above it, a
+    // tie that goes down to it.
+    let min_single = f32::MIN_POSITIVE as f64;
+    assert_eq!(narrow_sum(0x007F, min_single, -(2f64.powi(-150))), None);
+    assert_eq!(narrow_sum(0x007F, min_single, 2f64.powi(-150)), Some(min_single));
     assert_eq!(narrow_sum(0x027F, 1e300, 1e300), Some(2e300));
 }

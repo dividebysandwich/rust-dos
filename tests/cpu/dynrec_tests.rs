@@ -4644,7 +4644,7 @@ fn fpu_single_stores_round_as_the_control_word_says_on_both_cores() {
 /// Doubles whose sums round differently at 53 and at 24 bits, and those a
 /// narrow sum leaves to the 80 bits: infinities, a NaN, a denormal, and
 /// numbers whose sums leave a double's or a single's range.
-const NARROW_DOUBLES: [u64; 16] = [
+const NARROW_DOUBLES: [u64; 17] = [
     0x3FF0_0000_0000_0000, // 1
     0x3E70_0000_0001_0000, // 2^-24 + 2^-60
     0x3E70_0000_0000_0000, // 2^-24
@@ -4661,6 +4661,7 @@ const NARROW_DOUBLES: [u64; 16] = [
     0x3810_0000_0000_0000, // the smallest normal single, 2^-126
     0x7FF0_0000_0000_0000, // infinity
     0x7FF8_0000_0000_0001, // a NaN
+    0xB690_0000_0000_0000, // -2^-150
 ];
 /// The control words the sums run with: 53 and 24 bits to nearest, 64
 /// bits, 53 bits rounding down and the precision field's unused value.
@@ -4678,7 +4679,11 @@ fn sums_at_precisions() -> (Rig, DynStats) {
     let (mut a, mut b) = twins(|rig| {
         for k in 0..count {
             let at = input + 24 * k;
-            for (o, v) in [(0, NARROW_DOUBLES[(k % n) as usize]), (8, NARROW_DOUBLES[(k / n % n) as usize])] {
+            let pair = [
+                (0, NARROW_DOUBLES[(k % n) as usize]),
+                (8, NARROW_DOUBLES[(k / n % n) as usize]),
+            ];
+            for (o, v) in pair {
                 rig.write32(at + o, v as u32);
                 rig.write32(at + o + 4, (v >> 32) as u32);
             }
@@ -4719,7 +4724,8 @@ fn sums_at_precisions() -> (Rig, DynStats) {
 fn fpu_sums_round_to_the_control_words_precision_on_both_cores() {
     let (b, _) = sums_at_precisions();
     let n = NARROW_DOUBLES.len();
-    // The sum of NARROW_DOUBLES[i] and NARROW_DOUBLES[j] as a double, with PRECISIONS[p].
+    // The sum of NARROW_DOUBLES[i] and NARROW_DOUBLES[j] as a double,
+    // with PRECISIONS[p].
     let sum = |i: usize, j: usize, p: usize| {
         let at = DATA + 0x10000 + 40 * (p * n * n + j * n + i) as u32;
         f64::from_bits(b.read32(at) as u64 | (b.read32(at + 4) as u64) << 32)
@@ -4735,6 +4741,10 @@ fn fpu_sums_round_to_the_control_words_precision_on_both_cores() {
     assert_eq!(sum(one, more, 1), 1.0 + 2f64.powi(-23));
     assert_eq!(sum(odd, bit24, 1), 1.0 + 2f64.powi(-22));
     assert_eq!(sum(one, tenth, 1), 1.100000023841858);
+    // Below the smallest normal single a 387 keeps 24 bits with its 15
+    // bits of exponent, where a single's denormals would round up.
+    let (min_single, minus_tiny) = (13, 16);
+    assert_eq!(sum(min_single, minus_tiny, 1), 2f64.powi(-126) - 2f64.powi(-150));
     // At 64 bits the sum keeps what a double hasn't, and stores as the
     // double it rounds to.
     assert_eq!(sum(one, more, 2), 1.0 + 2f64.powi(-24));

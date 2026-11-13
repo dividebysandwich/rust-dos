@@ -20,12 +20,7 @@ pub fn get_pop_dst_index(instr: &Instruction) -> usize {
 /// (`fpu_addsub` in `dynrec/x64.rs` and `dynrec/a64.rs`), case for case.
 #[inline]
 pub fn narrow_sum(control: u16, a: f64, b: f64) -> Option<f64> {
-    // The precision field (bits 8 and 9) and the rounding (10 and 11).
-    let single = match control & 0x0F00 {
-        0x0200 => false,
-        0x0000 => true,
-        _ => return None,
-    };
+    let single = narrow_precision(control)?;
     // An infinity or a NaN among the operands makes the sum one.
     let sum = a + b;
     if sum == 0.0 {
@@ -54,8 +49,27 @@ pub fn narrow_sum(control: u16, a: f64, b: f64) -> Option<f64> {
             bits -= 1;
         }
     }
-    let narrow = f64::from_bits(bits) as f32;
-    narrow.is_normal().then_some(narrow as f64)
+    // Below the smallest normal single, a single's denormals are coarser
+    // than the 24 bits a 387 keeps there with its 15 bits of exponent
+    // (2^-126 - 2^-150 would round up to 2^-126), so the 80 bits add it.
+    let wide = f64::from_bits(bits);
+    if wide.abs() < f32::MIN_POSITIVE as f64 {
+        return None;
+    }
+    let narrow = wide as f32;
+    narrow.is_finite().then_some(narrow as f64)
+}
+
+/// Whether `narrow_sum` rounds with control word `control`: Some(true)
+/// at 24 bits, Some(false) at 53, to nearest both; None otherwise.
+#[inline]
+pub fn narrow_precision(control: u16) -> Option<bool> {
+    // The precision field (bits 8 and 9) and the rounding (10 and 11).
+    match control & 0x0F00 {
+        0x0200 => Some(false),
+        0x0000 => Some(true),
+        _ => None,
+    }
 }
 
 /// ST(dst) = ST(a) + ST(b), or - with `sub`: rounded to the control
@@ -68,7 +82,10 @@ pub fn addsub_st(cpu: &mut Cpu, dst: usize, a: usize, b: usize, sub: bool) {
         cpu.fpu_set_f64(dst, sum);
         return;
     }
-    if let (Some(x), Some(y)) = (cpu.fpu_only_double(a), cpu.fpu_only_double(b))
+    // The control word first, so that sums at 64 bits (DOS programs')
+    // don't look at the registers' bits for nothing.
+    if narrow_precision(cpu.fpu_control).is_some()
+        && let (Some(x), Some(y)) = (cpu.fpu_only_double(a), cpu.fpu_only_double(b))
         && let Some(sum) = narrow_sum(cpu.fpu_control, x, if sub { -y } else { y })
     {
         cpu.fpu_set_f64(dst, sum);
@@ -101,7 +118,9 @@ pub fn addsub_value(cpu: &mut Cpu, kind: u32, value: f64) {
         cpu.fpu_set_f64(0, sum);
         return;
     }
-    if let Some(st0) = cpu.fpu_only_double(0) {
+    if narrow_precision(cpu.fpu_control).is_some()
+        && let Some(st0) = cpu.fpu_only_double(0)
+    {
         let sum = match kind {
             ADD_VALUE => narrow_sum(cpu.fpu_control, st0, value),
             SUB_VALUE => narrow_sum(cpu.fpu_control, st0, -value),
