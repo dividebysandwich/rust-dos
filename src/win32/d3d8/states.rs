@@ -100,16 +100,19 @@ fn is_kind(cpu: &mut Cpu, id: u32, vtable: usize) -> bool {
             .is_some_and(|o| o.vtable as usize == vtable)
 }
 
-/// Make the change.
+/// Make the change. The inner device's states are written only when
+/// the value differs: a write gives it a new stamp, and the next draw
+/// then binds the card's state anew (`ddraw::d3d::device::Device`).
 fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
     let value = c.data.first().copied().unwrap_or(0);
     let words = |n: usize| (c.data.len() == n).then_some(&c.data[..]);
     match c.kind {
         RENDER => {
+            let at = c.a as usize;
             if let Some(i) = inner(cpu, id)
-                && let Some(r) = i.render.get_mut(c.a as usize)
+                && i.render.get(at).is_some_and(|r| *r != value)
             {
-                *r = value;
+                i.render[at] = value;
             }
         }
         STAGE => {
@@ -119,10 +122,11 @@ fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
             {
                 *s = value;
             }
+            let value = inner_stage(c.b, value);
             if let Some(i) = inner(cpu, id)
-                && let Some(s) = i.stages.get_mut(at)
+                && i.stages.get(at).is_some_and(|s| *s != value)
             {
-                *s = inner_stage(c.b, value);
+                i.stages[at] = value;
             }
         }
         TRANSFORM => {
@@ -131,7 +135,9 @@ fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
             };
             let m: [u32; 16] = m.try_into().unwrap_or([0; 16]);
             if let Some(t) = inner_transform(c.a) {
-                if let Some(i) = inner(cpu, id) {
+                if let Some(i) = inner(cpu, id)
+                    && i.transforms[t].map(f32::to_bits) != m
+                {
                     i.transforms[t] = m.map(f32::from_bits);
                 }
             } else if let Some(d) = get(cpu, id) {
@@ -143,7 +149,9 @@ fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
             }
         }
         VIEWPORT => {
-            if let (Some(v), Some(i)) = (words(6).map(|v| v.to_vec()), inner(cpu, id)) {
+            if let (Some(v), Some(i)) = (words(6).map(|v| v.to_vec()), inner(cpu, id))
+                && inner_states::viewport_words(&i.viewport)[..] != v[..]
+            {
                 i.viewport = Viewport7 {
                     x: v[0],
                     y: v[1],
@@ -155,26 +163,34 @@ fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
             }
         }
         MATERIAL => {
-            if let (Some(m), Some(i)) = (words(17).map(|v| v.to_vec()), inner(cpu, id)) {
+            if let (Some(m), Some(i)) = (words(17).map(|v| v.to_vec()), inner(cpu, id))
+                && i.material[..] != m[..]
+            {
                 i.material.copy_from_slice(&m);
             }
         }
         LIGHT => {
-            if let (Some(l), Some(i)) = (words(26).map(|v| v.to_vec()), inner(cpu, id)) {
+            if let (Some(l), Some(i)) = (words(26).map(|v| v.to_vec()), inner(cpu, id))
+                && i.lights.iter().find(|s| s.index == c.a).is_none_or(|s| s.light[..] != l[..])
+            {
                 inner_states::light_slot(i, c.a).light.copy_from_slice(&l);
             }
         }
         LIGHT_ENABLE => {
-            if let Some(i) = inner(cpu, id) {
-                inner_states::light_slot(i, c.a).enabled = c.b != 0;
+            let on = c.b != 0;
+            if let Some(i) = inner(cpu, id)
+                && i.lights.iter().find(|s| s.index == c.a).is_none_or(|s| s.enabled != on)
+            {
+                inner_states::light_slot(i, c.a).enabled = on;
             }
         }
         TEXTURE => set_texture_now(cpu, id, c.a, value),
         PLANE => {
+            let at = c.a as usize;
             if let (Some(p), Some(i)) = (words(4).map(|v| v.to_vec()), inner(cpu, id))
-                && let Some(plane) = i.planes.get_mut(c.a as usize)
+                && i.planes.get(at).is_some_and(|plane| plane.map(f32::to_bits)[..] != p[..])
             {
-                *plane = std::array::from_fn(|k| f32::from_bits(p[k]));
+                i.planes[at] = std::array::from_fn(|k| f32::from_bits(p[k]));
             }
         }
         STREAM => {

@@ -1380,6 +1380,26 @@ DLLs are the emulator's.
   The HAL copies into card memory only what the card can't read there:
   textures in system memory, palettized ones, and sizes that are no
   power of two.
+- **State kept between draws.** Most draws follow one with the same
+  states, textures and target, and the card's state is then right
+  already. What a draw is made from carries a stamp
+  (`ddraw/stamp.rs`): a number that no two values share, and that
+  changes when the value is borrowed to be written. A Direct3D device
+  keeps its states, textures, transforms, lights and target in one
+  stamped value (`d3d::device::Drawn`), and DirectDraw its objects in
+  another, so a write anywhere in them gives a new stamp with no call
+  for the writer to remember. The setters write only a value that
+  differs. The HAL keeps its last bind with the two stamps
+  (`hal/toadforce.rs`, `Kept`), and a draw that finds both unchanged
+  sends the card nothing and looks nothing up. Two things change
+  without a stamp and are compared by value: the pixels of a texture
+  the HAL keeps a copy of (the surface's uniqueness value), and the
+  parts of the pipeline's setup a bind reads. The card's state and the
+  kept bind are held together (`told::Told`), so that taking the
+  state to change it, as a clear does, drops the bind. Debug builds,
+  which the tests are, bind again for every kept draw and stop if the
+  bind sends a word or gives another result. `/api/win32/ddraw` counts
+  the binds and those kept.
 - **Direct3D 8** (`d3d8/`) sits on the Direct3D 7 device today and
   keeps doing so, with `D3DCAPS8` filled from the level's table and
   hardware vertex processing offered for fixed-function draws.
@@ -1391,6 +1411,30 @@ DLLs are the emulator's.
   immediate mode, arrays, display lists, pixel transfer) is kept apart
   from its WGL and Win32 parts and takes its calls through one interface,
   so that a booted Windows can later feed the same code (see below).
+- **OpenGL's draws wait for each other.** A game that draws a
+  triangle or a quad for each `glBegin` and `glEnd` would pay
+  Direct3D's work for a draw every time. The primitives of draws that
+  follow each other with the same state wait instead
+  (`opengl32::draw::Waiting`) and go to Direct3D as one draw, in the
+  order the program gave them. They hold what they are drawn with by
+  value: the device's state, and vertices the lights and texture
+  matrices were already applied to. A context's state as Direct3D's
+  is made once for each stamp of what its draws are made with, and
+  two are the same when every bit is. The draws that wait are drawn
+  when a draw with another state or of another context comes, when
+  they have 8192 vertices, and before any call of a function that
+  isn't known to leave the buffers and the textures' images alone
+  (`opengl32::keeps_waiting`). Those known are the functions that
+  give vertices and draw them and the ones that set a context's
+  state; `glClear`, `glReadPixels`, `glFlush`, `glFinish`, texture
+  uploads and deletes, every `glGet` but `glGetError`, WGL with
+  `SwapBuffers`, and every function of every other DLL draw them
+  first. A function missing from the list costs a draw and no
+  picture. Only the calls of the drawing process draw them: another
+  process can't name what they draw with, and its call would draw
+  them as its own. They go with their process when it ends. They are
+  part of the saved state, so a state saved between two calls draws
+  the same frame after it is loaded.
 - **Glide** isn't offered on this card. A game that wants Glide is
   configured with a Voodoo.
 
@@ -1765,7 +1809,7 @@ session. The table gives both.
 | No One Lives Forever, first mission, 640x480 | 40.3, 40.4 | | 1.00 | 81%, 83% | 1902 | 0 |
 | MDK2, the dive that opens level 1, 640x480 | 50.0, 50.1 | | 0.87 | 89%, 91% | 286 | 0 |
 | Max Payne, tutorial, 640x480 | 53.4, 53.7 | | 1.00 | 87%, 83% | 107 | 0 |
-| Zanzarah, the Fairy Garden, 640x480 | 59.9, 60.0 | | 1.00 | 79%, 79% | 198 | 0 |
+| Zanzarah (the English 1.010 build), the Fairy Garden, 640x480 | 59.9, 60.0 | | 1.00 | 79%, 79% | 198 | 0 |
 | Black & White | blocked | | | | | |
 
 The emulated processor halts in Zanzarah alone, for 6.5% of the time:
@@ -1874,16 +1918,15 @@ comes last whatever its share.
    Done: the host takes them as triangles the card builds, which
    cover the pixels of the rules of "Rasterising" on any GPU ("The
    OpenGL renderer"), and Grom runs at 104.
-2. **`hal::bind` for a draw whose state didn't change.** Oni, 26, and
-   No One Lives Forever and MDK2: 18%, 14% and 7%. The device keeps
-   what it sent to the card and compares all of it again for each
-   draw. A count of state changes on the device, checked first, makes
-   an unchanged draw cost a comparison of two numbers.
-3. **The OpenGL front end's draws.** Oni and MDK2: `hle.d3d.draw` and
-   `hle.opengl`, 10% and 5%, and the rest of `hle.d3d.bind`.
-   Consecutive `glEnd`s of equal state gathered into one draw, and
-   the front end's matrices, lights and materials sent as level 1
+2. **`hal::bind` for a draw whose state didn't change.** Done: see
+   "Passes 2 and 3" below.
+3. **The OpenGL front end's draws.** Consecutive draws of equal
+   state go to Direct3D as one: done, see below. What is left of it
+   is the front end's matrices, lights and materials sent as level 1
    state so that the card transforms (what is left of phase 5 too).
+   The layer's own transform of OpenGL's vertices (`hle.d3d.vertices`)
+   is 2% of the thread in Oni and MDK2, so this waits for a game that
+   it limits.
 4. **The cost of an API call from the game.** MDK2 at 45% and below
    full speed, Giants 22%, Oni 15%, and 11% to 14% in three more. Per
    call it is the trap out of the recompiled code, the lookup of the
@@ -1907,6 +1950,72 @@ comes last whatever its share.
 
 Before any of them counts as done, the table above is taken again on
 a four-core host, and MDK2 and Giants in a heavier scene.
+
+### Passes 2 and 3: state kept, and OpenGL's draws joined
+
+How the two work is in "The built-in Windows" ("State kept between
+draws" and "OpenGL's draws wait for each other"). Frames a second in
+the scenes of the table above, each run alone on the machine with
+`cycles=max`, two windows of 20 seconds with the profiler off, the
+build before the passes and the one after in the same session:
+
+| Game | Before | After | Draws a frame | Binds kept |
+|---|---|---|---|---|
+| Oni, training room | 25.9, 25.9 | 41.0, 41.0 | 2718 to 181 | 44% |
+| No One Lives Forever | 40.2, 39.8 | 47.1, 47.7 | 1903 | 82% |
+| Giants | 37.2, 37.3 | 37.6, 37.2 | 545 | 51% |
+| MDK2, first level's dive | 50.8, 49.5 | 47.0, 47.2 | 288 to 57 | none |
+
+MDK2 runs at 85% to 89% of full speed before and 81% after. Giants'
+row is of an earlier session, before the review's changes.
+
+Oni's 2700 `glEnd`s a frame become 181 draws, and of those nearly
+half find the card's state as they need it. Its profile after:
+`cpu.jit` 53%, and no zone of the layers between the game and the
+card above 4.5% (`hle.d3d.bind` was 17% and its parts are 1%
+together). What a call from the game costs is next there:
+`hle.win32` (4.4%), `hle.win32.after` (3.6%), `hle.win32.args`
+(2.1%) and `hle.opengl.call` (1.8%) are 11.9% together for 1.2
+million calls a second, about 85 ns a call: the trap out of the
+recompiled code with the processor's snapshot for a page fault, what
+follows the handler, the arguments read through the page tables, and
+the handler. Two costs of every call went with these passes: the
+arguments were read one walk of the page tables each, and once a
+process had made a file mapping every call built a list of the
+running processes to sweep the mappings with.
+
+No One Lives Forever draws each fan with its own `DrawPrimitive`,
+and 83% of them keep the card's state. Giants keeps half its binds
+and its frame rate: the bind was no cost there, and its `hle.win32`
+is the count of its state calls, pass 4's.
+
+MDK2's draws join five to one, and none of the 57 left keeps a bind:
+each differs from the one before it. The passes don't help it, and
+at `cycles=max` its takes after are 2 to 4 frames a second below
+those before. The game is at its own limit of 58 frames an emulated
+second on both builds, so its rate on the wall clock is 58 times the
+emulated speed, and what differs is the emulated time dropped: 11%
+to 16% before, 17% to 20% after. At a fixed speed the builds are
+equal: 43.4 and 44.1 frames a second before and 44.9 and 43.9 after
+at 70000 cycles, where nothing is dropped, and 43.0 and 43.7 before
+and 42.8 and 43.9 after at 90000, where both drop 23% with the
+thread a third idle. The time goes while the game waits in a loop of
+`SleepEx(0)`, which `cycles=max` can't pace, since it takes the
+host's time to follow the instructions run: 3900 to 4200 calls a
+frame before, 5100 to 6300 after. Each pass that takes host work out
+of a frame lowers the rate a little (51.2 and 50.1 before either,
+49.7 and 48.1 with the kept bind, 47.3 and 47.7 with the joined
+draws too), and at the title menu, with 392 primitives a frame,
+`cycles=max` settles at 15 to 18 thousand cycles a millisecond and 40
+frames a second with the thread half idle, on both builds. Where the
+dropped time goes is issue 1007's to find.
+
+The pictures are the same: deterministic runs on the software
+renderer at 100000 cycles, the same inputs at the same emulated
+times, twelve frames in play (half a second apart, a second apart
+in MDK2's dive) for Oni, MDK2, No One Lives Forever, Giants and
+Zanzarah (the English 1.010 build), with no pixel differing between
+the builds.
 
 Phases 2 and 3 come before the OpenGL renderer so that the reference
 exists before the renderer that is tested against it, and so that

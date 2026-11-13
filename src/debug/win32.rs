@@ -136,6 +136,7 @@ pub fn ddraw_json(cpu: &Cpu) -> Value {
         "mode": (d.mode.0 != 0).then(|| json!({"width": d.mode.0, "height": d.mode.1, "bits": d.mode.2})),
         "mode_owner": d.mode_owner,
         "exclusive": d.exclusive,
+        "binds": json!({"all": d.binds[0], "kept": d.binds[1]}),
         "surfaces": d.surfaces.iter().map(surface_json).collect::<Vec<_>>(),
     })
 }

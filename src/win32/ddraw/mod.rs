@@ -49,6 +49,7 @@ mod gamma;
 mod gpu_blt;
 pub(super) mod inspect;
 mod palette;
+pub mod stamp;
 pub mod toadforce;
 pub mod picture;
 pub(super) mod surface;
@@ -56,6 +57,7 @@ pub mod voodoo;
 
 use super::com::{self, E_INVALIDARG, E_NOINTERFACE, Guid, IID_IUNKNOWN, S_OK};
 use super::stubs::{Api, Conv, Dll, Vtable};
+use stamp::Stamped;
 use crate::cpu::Cpu;
 
 pub use display::owns_display;
@@ -1069,8 +1071,11 @@ impl Object {
 /// DirectDraw's state: the system's.
 #[derive(Clone, Debug, Default)]
 pub struct State {
-    /// The objects, by their ids less 1.
-    pub objects: Vec<Option<Object>>,
+    /// The objects, by their ids less 1. Stamped (`stamp::Stamped`):
+    /// what the Direct3D HAL derives from the surfaces and palettes
+    /// for a draw holds for the next while the stamp is the same.
+    /// `object_mut` and `surface_drawn` say which changes keep it.
+    pub objects: Stamped<Vec<Option<Object>>>,
     /// The display: the mode DirectDraw set and the object with exclusive
     /// mode, video memory and the processes' views of it.
     pub display: display::Display,
@@ -1109,8 +1114,34 @@ impl State {
         self.objects.get(id.checked_sub(1)? as usize)?.as_ref()
     }
 
+    /// The object `id` to change. The objects' stamp changes with it,
+    /// unless the object is one of Direct3D's alone (a device, a
+    /// viewport, a light, a material, a buffer): a device stamps what
+    /// its draws are made from itself (`d3d::device::Device`), and the
+    /// HAL compares what it takes from the others by value. Every draw
+    /// borrows its device here.
     pub fn object_mut(&mut self, id: u32) -> Option<&mut Object> {
-        self.objects.get_mut(id.checked_sub(1)? as usize)?.as_mut()
+        let at = id.checked_sub(1)? as usize;
+        let o = self.objects.get(at)?.as_ref()?;
+        let direct3d = o.d3d.is_some() && o.surface.is_none() && o.palette.is_none();
+        let objects = match direct3d {
+            true => Stamped::unstamped(&mut self.objects),
+            false => &mut *self.objects,
+        };
+        objects.get_mut(at)?.as_mut()
+    }
+
+    /// The pixels of the surface `id` changed: its uniqueness value is
+    /// `value` now. The objects' stamp stays, as every draw changes its
+    /// target's pixels: what is derived from a surface's pixels (the
+    /// HAL's copy of a texture) is checked by the surface's uniqueness
+    /// value beside the stamp.
+    pub fn surface_drawn(&mut self, id: u32, value: u32) {
+        let objects = Stamped::unstamped(&mut self.objects);
+        let object = id.checked_sub(1).and_then(|at| objects.get_mut(at as usize));
+        if let Some(s) = object.and_then(|o| o.as_mut()?.surface.as_mut()) {
+            s.uniqueness = value;
+        }
     }
 
     pub fn surface(&self, id: u32) -> Option<&surface::Surface> {
