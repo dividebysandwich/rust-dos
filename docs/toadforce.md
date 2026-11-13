@@ -943,7 +943,7 @@ compile is declined from its first draw on, since the program is
 compiled when the host is asked whether it takes the state.
 
 The agreement tests (`toadforce::gl::tests`, which need a desktop OpenGL
-context) draw 332 scenes in software and through the host and compare
+context) draw 415 scenes in software and through the host and compare
 card memory. On a GeForce RTX 4080: untextured triangles, every stage
 operation at each result scale, four stages with four textures, the
 alpha test, fog, the specular add, the stencil operations, the write
@@ -961,8 +961,15 @@ by a mean of 1.5 over that square. Depth is within 1 step
 of 16 bits and 4 of 24. That host's 565 format fails the test at
 start, so its 16-bit targets were compared in 8 bits a channel alone,
 and were within one step of the target's with up to five blended
-layers. A scene for each declined state checks that the software
-renderer draws it.
+layers. Lines into every octant, of less than a pixel and of no
+length, with either place of the pixel centres, with and without the
+last pixel, shaded and flat, cut by a viewport and by the scissor
+rectangle, blended, alpha-tested and fogged have the same pixels
+with the same colours, and so do points of every size at and between
+the pixel centres, and triangles drawn as their corners. Textured
+lines and triangles drawn as their edges are within 1, and a line's
+depth within 1 step of 16 bits and 2 of 24. A scene for each
+declined state checks that the software renderer draws it.
 
 Not built yet: the vertex work on the GPU, the picture from the host's
 texture, `BLT` and `FILL` on the host, the host options, and the
@@ -1738,6 +1745,7 @@ session. The table gives both.
 |---|---|---|---|---|---|---|
 | Oni, training room, 640x480 | 25.8, 26.2 | 14.6, 15.1 * | 1.00 | 81%, 86% | 2724 | 0 |
 | Grom, the tutorial's first screen, 800x600 | 27.6, 28.8 (28.7, 29.7 *) | 41.7, 40.7 * | 1.00 | 75%, 84% | 294 | 165, 173 |
+| Grom, the same, with lines on the host renderer † | 98.9, 103.4 | | 1.00 | 84%, 85% | 294 | 0 |
 | Nocturne, first room of Volume 1, 640x480 | 35.6, 35.1 | | 1.00 | 84%, 84% | 45 | 0 |
 | Giants, first mission, on the beach, 800x600 | 37.2, 36.7 * | 12.5, 12.7 * | 1.00 | 83%, 84% | 546, 522 | 0 |
 | No One Lives Forever, first mission, 640x480 | 40.3, 40.4 | | 1.00 | 81%, 83% | 1902 | 0 |
@@ -1749,7 +1757,9 @@ session. The table gives both.
 The emulated processor halts in Zanzarah alone, for 6.5% of the time:
 the game is at its cap of 60. Black & White doesn't start: its
 SafeDisc check fails (#889). The software column has the games below
-30 and Giants.
+30 and Giants. The row marked † is of the build that draws points and
+lines on the host renderer (`5531e89c`, pass 1 below), measured the
+same way on the same day.
 
 What the table doesn't show:
 
@@ -1806,7 +1816,11 @@ The two games below 30, with their three largest costs:
   the GPU first and sends what it drew back after: 6 read-backs a
   frame of an 800x600 target, 170 a second. The game's code is 23%.
   With no host there is nothing to read back, which is why software
-  is ahead at 41.
+  is ahead at 41. The 12 draws are the frames of the three health
+  bars under the portraits, four lines each. With the host drawing
+  them (pass 1) nothing is declined or read back and the rate is 99
+  and 103: the game's code is 51% of the thread, the card 14%,
+  `hle.win32` 12% and the host renderer 7%.
 
 The others, all above the target here:
 
@@ -1842,9 +1856,9 @@ comes last whatever its share.
 
 1. **Points and lines on the host renderer.** Grom, 28: 43% of its
    thread's busy time is read-backs for the draws the host declines.
-   The host draws them as the software renderer does (the rules of
-   "Rasterising"), or takes them as triangles the card builds. Small,
-   and the one pass that by itself should put a game over the target.
+   Done: the host takes them as triangles the card builds, which
+   cover the pixels of the rules of "Rasterising" on any GPU ("The
+   OpenGL renderer"), and Grom runs at 99 and 103.
 2. **`hal::bind` for a draw whose state didn't change.** Oni, 26, and
    No One Lives Forever and MDK2: 18%, 14% and 7%. The device keeps
    what it sent to the card and compares all of it again for each
