@@ -4791,6 +4791,88 @@ fn simulate_iret_changes_where_level_0_code_returns_to() {
     assert_eq!(code, 1, "{}", text);
 }
 
+/// A VxDJmp to a service VMM runs as guest code, Get_Cur_VM_Handle,
+/// jumps to it, so that it returns to the caller of the code that made
+/// the VxDJmp, with EBX the VM's handle: a control block whose status
+/// has VMStat_PM_Exec. Coming back after the dword instead clears EBX.
+#[test]
+fn a_vxd_jmp_to_a_guest_code_service_returns_to_the_caller_s_caller() {
+    let level0 = level0_code(|a| {
+        let mut jumper = a.create_label();
+        let mut done = a.create_label();
+        a.push(esi)?;
+        a.push(edi)?;
+        a.mov(edi, esp)?;
+        a.call(jumper)?;
+        a.mov(eax, ebx)?;
+        a.xor(ebx, ebx)?;
+        a.cmp(esp, edi)?;
+        a.jne(done)?;
+        a.test(eax, eax)?;
+        a.jz(done)?;
+        a.test(byte_ptr(eax), 0x20)?;
+        a.jz(done)?;
+        a.mov(ebx, 1)?;
+        a.set_label(&mut done)?;
+        a.pop(edi)?;
+        a.pop(esi)?;
+        a.iretd()?;
+        a.set_label(&mut jumper)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_8001])?; // VxDJmp Get_Cur_VM_Handle
+        a.xor(ebx, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run_through_gate_28h("vxd_jmp_guest_service", &level0);
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// INT 20h for a VMM service goes through VMM's service table, as on
+/// Windows 98, where VMM rewrites the INT 20h into a call through it: a
+/// program that replaces the entry of VMM_GetDDBList, which the built-in
+/// Windows runs in Rust, with a hook of its own gets its hook called,
+/// and once it puts the entry back, the service again. The hook returns
+/// 12345678h; the service returns VMM's DDB.
+#[test]
+fn a_hook_in_vmm_s_service_table_is_called() {
+    let level0 = level0_code(|a| {
+        let mut get_hook = a.create_label();
+        let mut done = a.create_label();
+        a.push(esi)?;
+        a.push(edi)?;
+        a.xor(ebx, ebx)?;
+        // The hook's address, which the CALL pushes.
+        a.call(get_hook)?;
+        a.mov(eax, 0x1234_5678)?;
+        a.ret()?;
+        a.set_label(&mut get_hook)?;
+        a.pop(edx)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_013F])?; // VMM_GetDDBList
+        a.mov(esi, eax)?; // VMM's DDB
+        a.mov(edi, dword_ptr(eax + 0x30))?; // DDB_Service_Table_Ptr
+        a.add(edi, 4 * 0x13F)?;
+        a.push(dword_ptr(edi))?;
+        a.mov(dword_ptr(edi), edx)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_013F])?;
+        a.pop(dword_ptr(edi))?;
+        a.cmp(eax, 0x1234_5678)?;
+        a.jne(done)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_013F])?;
+        a.cmp(eax, esi)?;
+        a.jne(done)?;
+        a.mov(ebx, 1)?;
+        a.set_label(&mut done)?;
+        a.pop(edi)?;
+        a.pop(esi)?;
+        a.iretd()
+    });
+    let (code, text) = run_through_gate_28h("vmm_table_hook", &level0);
+    assert_eq!(code, 1, "{}", text);
+}
+
 /// Level 0 code assembled by `f`, which may jump only within itself.
 fn level0_code(f: impl FnOnce(&mut CodeAssembler) -> Result<(), IcedError>) -> Vec<u8> {
     let mut a = CodeAssembler::new(32).unwrap();
