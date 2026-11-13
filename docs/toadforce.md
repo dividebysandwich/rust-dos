@@ -1798,7 +1798,7 @@ session. The table gives both.
 | No One Lives Forever, first mission, 640x480 | 40.3, 40.4 | | 1.00 | 81%, 83% | 1902 | 0 |
 | MDK2, the dive that opens level 1, 640x480 | 50.0, 50.1 | | 0.87 | 89%, 91% | 286 | 0 |
 | Max Payne, tutorial, 640x480 | 53.4, 53.7 | | 1.00 | 87%, 83% | 107 | 0 |
-| Zanzarah, the Fairy Garden, 640x480 | 59.9, 60.0 | | 1.00 | 79%, 79% | 198 | 0 |
+| Zanzarah (the English 1.010 build), the Fairy Garden, 640x480 | 59.9, 60.0 | | 1.00 | 79%, 79% | 198 | 0 |
 | Black & White | blocked | | | | | |
 
 The emulated processor halts in Zanzarah alone, for 6.5% of the time:
