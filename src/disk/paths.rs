@@ -330,7 +330,8 @@ impl DiskController {
     }
 
     /// The entries of a host directory with their DOS names (see
-    /// `short_names`), in sorted order. Hidden (dot) files are left out.
+    /// `short_names`), in sorted order, without the host's own files
+    /// (`host_private`).
     /// Every component of a path is looked up here, so the entries are
     /// kept while the folder doesn't change (`HostDirCache`).
     /// The flag says whether they are the kept ones.
@@ -343,7 +344,7 @@ impl DiskController {
             .into_iter()
             .flatten()
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| !name.starts_with('.'))
+            .filter(|name| !host_private(name))
             .collect();
         names.sort_by_key(|name| name.to_ascii_uppercase());
         let short = short_names(&names);

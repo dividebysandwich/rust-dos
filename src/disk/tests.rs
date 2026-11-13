@@ -103,6 +103,30 @@ fn host_files_are_found_by_long_and_short_name() {
     assert_eq!(files, ["DAYOFT~1.BIN", "DAYOFT~2.CUE"]);
 }
 
+/// A name that starts with a dot is a long name on Windows 95, with a
+/// short name made from what follows the dot. Myth: The Fallen Lords
+/// keeps its 256-color collections in "tags\local\.256", and its 1.3
+/// patch copies that folder by listing the one above it. The files of
+/// the host and of Rust-DOS itself stay out of sight.
+#[test]
+fn a_host_name_starting_with_a_dot_is_listed() {
+    let base = scratch("dot_names");
+    fs::create_dir_all(base.join("TAGS/.256")).unwrap();
+    fs::create_dir_all(base.join("TAGS/BINA")).unwrap();
+    fs::write(base.join("TAGS/.256/ingo"), b"art").unwrap();
+    for private in [".rust-dos-deleted", ".DS_Store", "._BINA", ".SAVE.rust-dos-partial"] {
+        fs::write(base.join("TAGS").join(private), b"x").unwrap();
+    }
+    let disk = DiskController::new(base.clone());
+
+    let names: Vec<String> =
+        disk.list_directory(r"C:\TAGS\*.*", 0x10).unwrap().into_iter().map(|e| e.filename).collect();
+    assert_eq!(names, ["..", ".", "256~1", "BINA"]);
+    assert!(disk.is_file(r"C:\TAGS\.256\INGO"));
+    assert!(disk.is_file(r"C:\TAGS\256~1\INGO"));
+    assert!(disk.resolve_path(r"C:\TAGS\256~1").unwrap().ends_with("TAGS/.256"));
+}
+
 /// A dot that ends a name leaves its extension empty, as DOS packs it:
 /// Menzoberranzan opens its palette as "COLORS.", the file COLORS. The
 /// root is a verbatim path on Windows (`\\?\`), where the host keeps the

@@ -153,7 +153,7 @@ impl DiskController {
         let mut clusters = 0u64;
         let mut dirs = Vec::new();
         for entry in hostfs::read_dir(dir).unwrap_or_default() {
-            if entry.name.to_string_lossy().starts_with('.') {
+            if host_private(&entry.name.to_string_lossy()) {
                 continue;
             }
             if entry.is_dir {
