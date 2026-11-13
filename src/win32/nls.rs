@@ -155,6 +155,19 @@ impl CodePage {
             .find(|&b| crate::video::CP437[b as usize] as u16 == c)
     }
 
+    /// The byte of `c`, or the best fit Windows gives a character the
+    /// code page lacks: an accented letter's bare letter (ä is 'a' in
+    /// code page 1251), as Windows 95 does already.
+    pub fn best_fit(self, c: u16) -> Option<u8> {
+        let mut c = c;
+        loop {
+            if let Some(b) = self.byte(c) {
+                return Some(b);
+            }
+            c = super::convert::decompose(c)?.0;
+        }
+    }
+
     /// `bytes` as UTF-16.
     pub fn decode(self, bytes: &[u8]) -> Vec<u16> {
         bytes.iter().map(|&b| self.char(b)).collect()

@@ -123,6 +123,8 @@ fn bad_arguments(from: u32, len: u32, to: u32, size: u32) -> bool {
 /// points to, or '?', and sets the BOOL `args[7]` points to. With
 /// WC_COMPOSITECHECK a letter and a combining mark become the accented
 /// letter, if the code page has it; the mark is dropped with WC_DISCARDNS.
+/// An accented letter the code page lacks becomes its bare letter unless
+/// WC_NO_BEST_FIT_CHARS asks for the default character.
 pub(super) fn wide_char_to_multi_byte(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[code_page, flags, from, len, to, size, default, used_default] = args else {
         unreachable!()
@@ -171,12 +173,17 @@ pub(super) fn wide_char_to_multi_byte(cpu: &mut Cpu, args: &[u32]) -> Option<u32
         0 => units.len(),
         _ => units.len().min(size as usize),
     };
+    let best_fit = flags & WC_NO_BEST_FIT_CHARS == 0;
     let mut used = false;
     let bytes: Vec<u16> = units
         .iter()
         .enumerate()
         .map(|(i, &c)| {
-            page.byte(c).unwrap_or_else(|| {
+            let byte = match best_fit {
+                true => page.best_fit(c),
+                false => page.byte(c),
+            };
+            byte.unwrap_or_else(|| {
                 used |= i < written;
                 default
             }) as u16

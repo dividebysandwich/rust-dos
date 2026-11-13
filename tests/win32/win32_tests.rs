@@ -6480,8 +6480,8 @@ fn a_program_formats_text_and_enumerates_locales() {
             a.cmp(dword_ptr(l.at(0x60)), 0x0078_2D35)?;
             a.sete(al)?;
             a.and(bl, al)?;
-            // One locale, then TRUE. The call over the callback pushes its
-            // address, the first argument.
+            // The eight locales of win32_locale, then TRUE. The call over
+            // the callback pushes its address, the first argument.
             let mut enumerate = a.create_label();
             a.push(1)?;
             a.call(enumerate)?;
@@ -6491,7 +6491,7 @@ fn a_program_formats_text_and_enumerates_locales() {
             a.ret_1(4)?;
             a.set_label(&mut enumerate)?;
             a.call(f("EnumSystemLocalesA"))?;
-            a.cmp(dword_ptr(l.at(0x48)), 1)?;
+            a.cmp(dword_ptr(l.at(0x48)), 8)?;
             a.sete(cl)?;
             a.cmp(eax, 1)?;
             a.sete(al)?;

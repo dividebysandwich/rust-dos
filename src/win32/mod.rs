@@ -476,6 +476,7 @@ impl Win32 {
             guest_replace: std::mem::take(&mut self.guest_replace),
             version: self.version,
             depth: self.depth,
+            locale: self.locale,
             dll_files: self.dll_files.take(),
             trace: trace::Trace::new(self.trace.level()),
             trace3d: self.trace3d.take(),
