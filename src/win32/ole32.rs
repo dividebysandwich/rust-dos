@@ -165,6 +165,18 @@ static APIS: &[Api] = &[
     stdcall("ILockBytes_Flush", 0, 1, stream::nothing),
     stdcall("ILockBytes_SetSize", 0, 3, stream::stream_set_size),
     stdcall("ReleaseStgMedium", 228, 1, medium::release_stg_medium),
+    stdcall(
+        "CoFileTimeToDosDateTime",
+        23,
+        3,
+        super::kernel32::time::file_time_to_dos_date_time,
+    ),
+    stdcall(
+        "CoDosDateTimeToFileTime",
+        21,
+        3,
+        super::kernel32::time::dos_date_time_to_file_time,
+    ),
 ];
 
 /// The vtables, by their places in this list.
