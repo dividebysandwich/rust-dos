@@ -9,12 +9,68 @@ pub fn get_pop_dst_index(instr: &Instruction) -> usize {
     if reg == Register::None || reg == Register::ST1 { 1 } else { reg.number() - Register::ST0.number() }
 }
 
-/// ST(dst) = ST(a) + ST(b), or - with `sub`, as the registers' 80 bits add
-/// (`F80::add`), or with `fpu_fast` as their doubles do (`sum`). The
-/// dynamic recompiler's code calls it too.
+/// a + b as a 387 gives it where its control word `control` keeps 53 or
+/// 24 bits of a result's significand and rounds to nearest, which is how
+/// Win32 programs run it (the C runtime sets 53 bits, Direct3D 24): the
+/// sum of the two doubles rounded once to that many bits. None where the
+/// control word asks for 64 bits or another rounding, and where the sum
+/// isn't zero or a normal number of the result's size (an infinity or a
+/// NaN, or a number a 387 keeps with its 15 bits of exponent): the 80
+/// bits add those (`F80::add`). The dynamic recompiler's code does the same
+/// (`fpu_addsub` in `dynrec/x64.rs` and `dynrec/a64.rs`), case for case.
+#[inline]
+pub fn narrow_sum(control: u16, a: f64, b: f64) -> Option<f64> {
+    // The precision field (bits 8 and 9) and the rounding (10 and 11).
+    let single = match control & 0x0F00 {
+        0x0200 => false,
+        0x0000 => true,
+        _ => return None,
+    };
+    // An infinity or a NaN among the operands makes the sum one.
+    let sum = a + b;
+    if sum == 0.0 {
+        return Some(sum);
+    }
+    if !sum.is_normal() {
+        return None;
+    }
+    if !single {
+        return Some(sum);
+    }
+    // To 24 bits, the double sum rounded again could come out a bit off
+    // where it was rounded already and is halfway between two singles.
+    // What the sum left out (`error`, exact: Knuth's two-sum) says
+    // whether it was rounded; a rounded sum is moved to its odd
+    // neighbour on the side of the true sum, which the second rounding
+    // takes the right way (53 bits are more than 24 and 2). Only a sum
+    // halfway between two singles comes out differently for it.
+    let part = sum - a;
+    let error = (a - (sum - part)) + (b - part);
+    let mut bits = sum.to_bits();
+    if error != 0.0 && bits & 1 == 0 {
+        if (error < 0.0) == (sum < 0.0) {
+            bits += 1;
+        } else {
+            bits -= 1;
+        }
+    }
+    let narrow = f64::from_bits(bits) as f32;
+    narrow.is_normal().then_some(narrow as f64)
+}
+
+/// ST(dst) = ST(a) + ST(b), or - with `sub`: rounded to the control
+/// word's precision where `narrow_sum` has it, else as the registers' 80
+/// bits add (`F80::add`), or with `fpu_fast` as their doubles do (`sum`).
+/// The dynamic recompiler's code calls it too.
 pub fn addsub_st(cpu: &mut Cpu, dst: usize, a: usize, b: usize, sub: bool) {
     if cpu.fpu_fast {
         let sum = sum(cpu.fpu_get_f64(a), cpu.fpu_get_f64(b), sub);
+        cpu.fpu_set_f64(dst, sum);
+        return;
+    }
+    if let (Some(x), Some(y)) = (cpu.fpu_only_double(a), cpu.fpu_only_double(b))
+        && let Some(sum) = narrow_sum(cpu.fpu_control, x, if sub { -y } else { y })
+    {
         cpu.fpu_set_f64(dst, sum);
         return;
     }
@@ -44,6 +100,17 @@ pub fn addsub_value(cpu: &mut Cpu, kind: u32, value: f64) {
         };
         cpu.fpu_set_f64(0, sum);
         return;
+    }
+    if let Some(st0) = cpu.fpu_only_double(0) {
+        let sum = match kind {
+            ADD_VALUE => narrow_sum(cpu.fpu_control, st0, value),
+            SUB_VALUE => narrow_sum(cpu.fpu_control, st0, -value),
+            _ => narrow_sum(cpu.fpu_control, value, -st0),
+        };
+        if let Some(sum) = sum {
+            cpu.fpu_set_f64(0, sum);
+            return;
+        }
     }
     let mut val = F80::new();
     val.set_f64(value);
@@ -98,55 +165,31 @@ pub fn divided_by_zero(cpu: &mut Cpu, i: usize) {
     }
 }
 
+/// An integer memory operand (a word or a dword) as the double it is.
+fn int_operand(cpu: &mut Cpu, instr: &Instruction) -> f64 {
+    let addr = calculate_addr(cpu, instr);
+    cpu.load_int_to_f80(addr, instr.memory_size()).get_f64()
+}
+
 // FIADD: Add Integer
 // ST(0) = ST(0) + [mem_int]
 pub fn fiadd(cpu: &mut Cpu, instr: &Instruction) {
-    let addr = calculate_addr(cpu, instr);
-    if cpu.fpu_fast {
-        let val = cpu.load_int_to_f80(addr, instr.memory_size()).get_f64();
-        addsub_value(cpu, ADD_VALUE, val);
-        return;
-    }
-    let val = cpu.load_int_to_f80(addr, instr.memory_size());
-    let mut st0 = cpu.fpu_get(0);
-    if st0.add(val) {
-        cpu.set_fpu_flag(FpuFlags::IE, true);
-    }
-    cpu.fpu_set(0, st0);
+    let val = int_operand(cpu, instr);
+    addsub_value(cpu, ADD_VALUE, val);
 }
 
 // FISUB: Subtract Integer
 // ST(0) = ST(0) - [mem_int]
 pub fn fisub(cpu: &mut Cpu, instr: &Instruction) {
-    let addr = calculate_addr(cpu, instr);
-    if cpu.fpu_fast {
-        let val = cpu.load_int_to_f80(addr, instr.memory_size()).get_f64();
-        addsub_value(cpu, SUB_VALUE, val);
-        return;
-    }
-    let val = cpu.load_int_to_f80(addr, instr.memory_size());
-    let mut st0 = cpu.fpu_get(0);
-    if st0.sub(val) {
-        cpu.set_fpu_flag(FpuFlags::IE, true);
-    }
-    cpu.fpu_set(0, st0);
+    let val = int_operand(cpu, instr);
+    addsub_value(cpu, SUB_VALUE, val);
 }
 
 // FISUBR: Subtract Integer Reverse
 // ST(0) = [mem_int] - ST(0)
 pub fn fisubr(cpu: &mut Cpu, instr: &Instruction) {
-    let addr = calculate_addr(cpu, instr);
-    if cpu.fpu_fast {
-        let val = cpu.load_int_to_f80(addr, instr.memory_size()).get_f64();
-        addsub_value(cpu, SUBR_VALUE, val);
-        return;
-    }
-    let mut val = cpu.load_int_to_f80(addr, instr.memory_size());
-    let st0 = cpu.fpu_get(0);
-    if val.sub(st0) {
-        cpu.set_fpu_flag(FpuFlags::IE, true);
-    }
-    cpu.fpu_set(0, val);
+    let val = int_operand(cpu, instr);
+    addsub_value(cpu, SUBR_VALUE, val);
 }
 
 // FIMUL: Multiply Integer

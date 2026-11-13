@@ -298,7 +298,9 @@ Each instruction becomes one of two things:
 
 The interpreter computes products, quotients, loads, stores and
 comparisons with doubles, and sums and differences on the registers' 80
-bits (`F80::add`). So each FPU register keeps the double it comes to
+bits (`F80::add`), or as doubles rounded to the control word's precision
+(see [Sums at 53 and 24 bits](#sums-at-53-and-24-bits)). So each FPU
+register keeps the double it comes to
 beside its 80 bits (`f80::FpuRegs`): an instruction that gives a register
 a double stores only that, and the 80 bits are made from it when
 something asks for them (a sum, FSTP of 10 bytes, FSAVE, a saved state).
@@ -318,8 +320,12 @@ compute what the handlers' own doubles do there), as their handlers do:
   (a larger one goes to the handler, which keeps all 64 bits);
 - FMUL, FDIV, FDIVR and their popping forms, with a single or ST(i) (a
   division by 0 through `fpu::arithmetic::divided_by_zero`);
-- FADD, FSUB, FSUBR and their popping forms: calls of the handlers' own
-  `fpu::arithmetic::addsub_st` and `addsub_value`, on the 80 bits;
+- FADD, FSUB, FSUBR and their popping forms, and FIADD, FISUB and
+  FISUBR: a routine of the trampoline's (`fpu_addsub`) that adds as the
+  handlers' `fpu::arithmetic::addsub_st` and `addsub_value` do, rounded
+  to the control word's precision or on the 80 bits, and leaves
+  infinities, NaNs, empty registers and results outside a double's range
+  to the handlers;
 - FCOM, FCOMP, FCOMPP and the FUCOMs with a single or ST(i), FNSTSW AX,
   FLDCW and FNSTCW.
 
@@ -342,6 +348,31 @@ compiler made the destination in the handler; nothing else differs.
 
 The lockstep tests compare the FPU's registers (their 80 bits), tags,
 stack top, status and control words after every batch.
+
+#### Sums at 53 and 24 bits
+
+A 387 rounds a sum to the precision its control word asks for. DOS
+programs leave that at 64 bits, where the sum is the 80 bits'
+(`F80::add`). Win32 programs don't: the C runtime sets 53 bits and
+Direct3D 24, and on a real machine every sum they compute comes out a
+double or a single. `fpu::arithmetic::narrow_sum` gives that sum where
+the control word asks for 53 or 24 bits and rounds to nearest, both
+operands are doubles and no more (`FpuRegs::only_double`), and the sum
+is zero or a normal number of that size: the two doubles added, and at
+24 bits the double sum rounded to a single. A double sum that was
+rounded already and lies halfway between two singles would round the
+wrong way there, so what the first rounding left out (Knuth's two-sum
+gives it exactly) moves such a sum to its odd neighbour first, which
+rounds as the exact sum does. Everything else goes to the 80 bits as
+before: another rounding, an operand with more than a double's bits, an
+infinity or a NaN, and a sum below or above the normal numbers, which a
+387 keeps with its 15 bits of exponent.
+
+The register then holds a double alone, so the stores, compares and
+conversions after it stay in translated code, where a sum on 80 bits
+leaves bits a double hasn't and sends them to the handlers. The
+trampoline's routine checks the control word on every call, so one
+block serves threads that run with different control words.
 
 #### Fast mode
 

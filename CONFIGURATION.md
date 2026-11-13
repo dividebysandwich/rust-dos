@@ -268,21 +268,25 @@ limit, so without a connection it goes on as it would with one:
   recompiler needs an x86-64 or ARM64 host; on others and in the browser
   the interpreter runs everything. `--core` overrides it. See
   [docs/dynrec.md](docs/dynrec.md).
-* `fpu` is how the FPU adds and subtracts: `exact` (the default) on 80
-  bits, as a real 387 does, or `fast` on the host's 64-bit doubles, as
-  it multiplies and divides anyway. `fast` saves host CPU in programs that
-  compute a lot with the FPU (Quake), on both cores, but isn't exact:
-  sums can differ from a real machine's in the last bits, they are always
-  rounded to nearest whatever the control word says, and FXCH keeps only
-  the doubles of the registers it exchanges (a value loaded as 80 bits
-  loses its last bits there). Saved states load in either mode. In both,
-  products, quotients, square roots and the transcendental functions are
-  the doubles', so they keep 53 bits of significand where a 387 keeps 64,
-  rounded to nearest whatever the control word says, and the control
-  word's precision field isn't used (a program that sets it to 53 bits,
-  as Win32 programs built with MSVC do, gets close to what a 387
-  gives). Loads, stores, integer conversions, compares and FRNDINT use
-  all 80 bits.
+* `fpu` is how the FPU adds and subtracts: `exact` (the default) as a
+  real 387 does, or `fast` on the host's 64-bit doubles, as it multiplies
+  and divides anyway. `exact` adds on 80 bits where the control word asks
+  for 64 bits of precision, which DOS programs run with, and rounds a sum
+  of two doubles to 53 or 24 bits where the control word asks for those
+  and rounds to nearest, which Win32 programs run with (the C runtime sets
+  53 bits, Direct3D 24). `fast` saves host CPU in programs that compute a
+  lot with the FPU at 64 bits of precision (Quake), on both cores, but
+  isn't exact: sums can differ from a real machine's in the last bits,
+  they are always rounded to nearest at 53 bits whatever the control word
+  says, and FXCH keeps only the doubles of the registers it exchanges (a
+  value loaded as 80 bits loses its last bits there). Saved states load in
+  either mode. In both, products, quotients, square roots and the
+  transcendental functions are the doubles', so they keep 53 bits of
+  significand where a 387 keeps 64, rounded to nearest whatever the
+  control word says, and the control word's precision field isn't used
+  for them (a program that sets it to 53 bits, as Win32 programs built
+  with MSVC do, gets close to what a 387 gives). Loads, stores, integer
+  conversions, compares and FRNDINT use all 80 bits.
 * `machine` is the display adapter programs find when they look for one, and
   so the graphics they choose: `svga` (the default, a VGA with VESA modes up
   to 1024x768, and 640x400 in truecolour as mode 213h, an OEM mode of S3

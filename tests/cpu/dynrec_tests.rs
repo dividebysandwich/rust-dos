@@ -4641,6 +4641,105 @@ fn fpu_single_stores_round_as_the_control_word_says_on_both_cores() {
     }
 }
 
+/// Doubles whose sums round differently at 53 and at 24 bits, and those a
+/// narrow sum leaves to the 80 bits: infinities, a NaN, a denormal, and
+/// numbers whose sums leave a double's or a single's range.
+const NARROW_DOUBLES: [u64; 16] = [
+    0x3FF0_0000_0000_0000, // 1
+    0x3E70_0000_0001_0000, // 2^-24 + 2^-60
+    0x3E70_0000_0000_0000, // 2^-24
+    0x3FF0_0000_2000_0000, // 1 + 2^-23
+    0xBFF0_0000_0000_0000, // -1
+    0x3FB9_9999_9999_999A, // 0.1
+    0x4008_0000_0000_0001, // 3 and a bit
+    0x0000_0000_0000_0000, // 0
+    0x8000_0000_0000_0000, // -0
+    0x7FEF_FFFF_FFFF_FFFF, // the largest double
+    0x0010_0000_0000_0000, // the smallest normal double
+    0x0000_0000_0000_0001, // a denormal
+    0x47EF_FFFF_E000_0000, // the largest single
+    0x3810_0000_0000_0000, // the smallest normal single, 2^-126
+    0x7FF0_0000_0000_0000, // infinity
+    0x7FF8_0000_0000_0001, // a NaN
+];
+/// The control words the sums run with: 53 and 24 bits to nearest, 64
+/// bits, 53 bits rounding down and the precision field's unused value.
+const PRECISIONS: [u32; 5] = [0x027F, 0x007F, 0x037F, 0x067F, 0x017F];
+
+/// Every pair of `NARROW_DOUBLES` added and subtracted with each of
+/// `PRECISIONS`, between registers and with a memory operand, on both
+/// cores: 40 bytes of results a pair and control word (the sum as a
+/// double and as 80 bits, the difference with the memory operand as 80
+/// bits, the reversed one with a single as a double).
+fn sums_at_precisions() -> (Rig, DynStats) {
+    let (input, output) = (DATA, DATA + 0x10000);
+    let n = NARROW_DOUBLES.len() as u32;
+    let count = n * n * PRECISIONS.len() as u32;
+    let (mut a, mut b) = twins(|rig| {
+        for k in 0..count {
+            let at = input + 24 * k;
+            for (o, v) in [(0, NARROW_DOUBLES[(k % n) as usize]), (8, NARROW_DOUBLES[(k / n % n) as usize])] {
+                rig.write32(at + o, v as u32);
+                rig.write32(at + o + 4, (v >> 32) as u32);
+            }
+            rig.write32(at + 16, PRECISIONS[(k / (n * n)) as usize]);
+        }
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut again = a.create_label();
+            a.fninit()?;
+            a.mov(esi, input)?;
+            a.mov(edi, output)?;
+            a.mov(ecx, count)?;
+            a.set_label(&mut again)?;
+            a.fldcw(word_ptr(esi + 16))?;
+            a.fld(qword_ptr(esi + 8))?;
+            a.fld(qword_ptr(esi))?;
+            a.fadd_2(st0, st1)?;
+            a.fst(qword_ptr(edi))?;
+            a.fstp(tword_ptr(edi + 8))?;
+            a.fld(qword_ptr(esi))?;
+            a.fsub(qword_ptr(esi + 8))?;
+            a.fstp(tword_ptr(edi + 18))?;
+            a.fld(qword_ptr(esi))?;
+            a.fsubr(dword_ptr(esi + 12))?;
+            a.fstp(qword_ptr(edi + 28))?;
+            a.fstp(st0)?;
+            a.add(esi, 24)?;
+            a.add(edi, 40)?;
+            a.dec(ecx)?;
+            a.jnz(again)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    (b, stats)
+}
+
+#[test]
+fn fpu_sums_round_to_the_control_words_precision_on_both_cores() {
+    let (b, _) = sums_at_precisions();
+    let n = NARROW_DOUBLES.len();
+    // The sum of NARROW_DOUBLES[i] and NARROW_DOUBLES[j] as a double, with PRECISIONS[p].
+    let sum = |i: usize, j: usize, p: usize| {
+        let at = DATA + 0x10000 + 40 * (p * n * n + j * n + i) as u32;
+        f64::from_bits(b.read32(at) as u64 | (b.read32(at + 4) as u64) << 32)
+    };
+    let (one, more, bit24, odd, tenth) = (0, 1, 2, 3, 5);
+    // At 53 bits, a double's own sum.
+    assert_eq!(sum(one, bit24, 0), 1.0 + 2f64.powi(-24));
+    assert_eq!(sum(one, tenth, 0), 1.0 + 0.1);
+    // At 24 bits: a tie goes to the even single, just over a tie goes
+    // up (the double sum alone, 1 + 2^-24 after its own rounding, would
+    // go down), and a tie above an odd single goes up.
+    assert_eq!(sum(one, bit24, 1), 1.0);
+    assert_eq!(sum(one, more, 1), 1.0 + 2f64.powi(-23));
+    assert_eq!(sum(odd, bit24, 1), 1.0 + 2f64.powi(-22));
+    assert_eq!(sum(one, tenth, 1), 1.100000023841858);
+    // At 64 bits the sum keeps what a double hasn't, and stores as the
+    // double it rounds to.
+    assert_eq!(sum(one, more, 2), 1.0 + 2f64.powi(-24));
+}
+
 #[test]
 fn fpu_sums_in_fast_mode_are_the_doubles_on_both_cores() {
     // The same sums come out otherwise (1 and a bit a double hasn't, ...),

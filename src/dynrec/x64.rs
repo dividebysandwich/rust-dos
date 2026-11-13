@@ -491,7 +491,9 @@ fn dev_thunk(ops: &mut Asm, tlb: Option<(i32, i32)>, memref: DynamicLabel) {
 /// code. RCX, RDX and R8-R10 are changed.
 fn fpu_addsub(ops: &mut Asm) {
     let slow = ops.new_dynamic_label();
-    dynasm!(ops ; .arch x64 ; push r11 ; push rsi ; mov r11d, r10d);
+    let wide = ops.new_dynamic_label();
+    narrow_addsub(ops, wide);
+    dynasm!(ops ; .arch x64 ; =>wide ; push r11 ; push rsi ; mov r11d, r10d);
     // Operand into (sign << 15 | exponent) and the 64-bit mantissa.
     f80_operand(ops, 0, 8, slow);
     f80_operand(ops, 2, 9, slow);
@@ -616,6 +618,131 @@ fn fpu_addsub(ops: &mut Asm) {
         ; pop rsi
         ; pop r11
         ; ret
+    );
+}
+
+/// `fpu_addsub` where the control word has a sum rounded to nearest at 53
+/// or 24 bits and both operands are doubles: the sum
+/// `fpu::arithmetic::narrow_sum` gives, case for case, stored as ST(dst)'s
+/// double; to `wide` with nothing but RAX, RCX, RDX and XMM2 to XMM5
+/// changed where it gives none, for the 80 bits' sum.
+fn narrow_addsub(ops: &mut Asm, wide: DynamicLabel) {
+    let (narrow, store, single) =
+        (ops.new_dynamic_label(), ops.new_dynamic_label(), ops.new_dynamic_label());
+    dynasm!(ops
+        ; .arch x64
+        // The precision field 53 bits (2) or 24 (0), rounding to nearest.
+        ; movzx ecx, WORD [rbx + FPU_CONTROL]
+        ; and ecx, 0xF00
+        ; jz =>narrow
+        ; cmp ecx, 0x200
+        ; jne =>wide
+        ; =>narrow
+    );
+    narrow_operand(ops, 8, 2, wide);
+    narrow_operand(ops, 9, 3, wide);
+    dynasm!(ops
+        ; .arch x64
+        // A difference adds b with its sign turned.
+        ; test r10d, 0x100
+        ; jz >plus
+        ; movq rax, xmm3
+        ; btc rax, 63
+        ; movq xmm3, rax
+        ; plus:
+        ; movapd xmm4, xmm2
+        ; addsd xmm4, xmm3
+        ; movq rdx, xmm4
+        // Zero, or a normal double; any other sum is the 80 bits'.
+        ; mov rax, rdx
+        ; shl rax, 1
+        ; jz =>store
+        ; shr rax, 53
+        ; dec eax
+        ; cmp eax, 0x7FD
+        ; ja =>wide
+        ; test WORD [rbx + FPU_CONTROL], 0x300
+        ; jnz =>store
+        // To 24 bits: the double as a single, unless it is halfway
+        // between two singles (the 29 bits a single leaves out are
+        // 1000...), where the sum's own rounding decides the way.
+        ; mov eax, edx
+        ; and eax, 0x1FFF_FFFF
+        ; cmp eax, 0x1000_0000
+        ; jne =>single
+        // What the sum left out, into XMM2: with
+        // part = sum - a, (a - (sum - part)) + (b - part).
+        ; movapd xmm5, xmm4
+        ; subsd xmm5, xmm2
+        ; subsd xmm3, xmm5
+        ; subsd xmm5, xmm4
+        ; addsd xmm2, xmm5
+        ; addsd xmm2, xmm3
+        // A rounded sum that is even goes to its odd neighbour on the
+        // true sum's side: one up in its bits where what it left out has
+        // its sign, else one down.
+        ; movq rax, xmm2
+        ; lea rcx, [rax + rax]
+        ; test rcx, rcx
+        ; jz =>single
+        ; test dl, 1
+        ; jnz =>single
+        ; xor rax, rdx
+        ; sar rax, 63
+        ; lea rdx, [rdx + rax * 2 + 1]
+        ; =>single
+        ; movq xmm4, rdx
+        ; cvtsd2ss xmm4, xmm4
+        // A normal single, or the 80 bits' sum.
+        ; movd eax, xmm4
+        ; shr eax, 23
+        ; movzx eax, al
+        ; dec eax
+        ; cmp eax, 0xFD
+        ; ja =>wide
+        ; cvtss2sd xmm4, xmm4
+        ; movq rdx, xmm4
+        // ST(dst): the double alone.
+        ; =>store
+        ; and r10d, 7
+        ; mov QWORD [rbx + r10 * 8 + FPU_F64], rdx
+        ; mov BYTE [rbx + r10 + FPU_STALE], 1
+        ; xor eax, eax
+        ; ret
+    );
+}
+
+/// Operand `narrow_addsub` has in R`idx`D (a physical register, or 8 for
+/// the double in XMM15) into XMM`x`, where it is a double and no more
+/// (`FpuRegs::only_double`); to `wide` for an empty register and for 80
+/// bits that hold more. RAX and RDX are changed.
+fn narrow_operand(ops: &mut Asm, idx: u8, x: u8, wide: DynamicLabel) {
+    let (value, done) = (ops.new_dynamic_label(), ops.new_dynamic_label());
+    dynasm!(ops
+        ; .arch x64
+        ; cmp Rd(idx), 8
+        ; je =>value
+        ; cmp BYTE [rbx + Rq(idx) + FPU_TAGS], FPU_EMPTY
+        ; je =>wide
+        ; movsd Rx(x), QWORD [rbx + Rq(idx) * 8 + FPU_F64]
+        ; cmp BYTE [rbx + Rq(idx) + FPU_STALE], 0
+        ; jne =>done
+        // The 80 bits count: a significand that ends at a double's 53
+        // bits, and isn't one of a number the double has as 0.
+        ; mov eax, Rd(idx)
+        ; shl eax, 4
+        ; mov rdx, QWORD [rbx + rax + FPU_X80]
+        ; test edx, 0x7FF
+        ; jnz =>wide
+        ; movq rax, Rx(x)
+        ; shl rax, 1
+        ; jnz =>done
+        ; test rdx, rdx
+        ; jnz =>wide
+        ; jmp =>done
+        ; =>value
+        ; movapd Rx(x), xmm15
+        ; =>done
     );
 }
 
