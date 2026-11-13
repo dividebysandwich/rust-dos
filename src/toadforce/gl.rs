@@ -33,7 +33,7 @@
 //!   coordinates, since the host's are at half.
 //!
 //! What it doesn't draw as the software renderer does, it declines
-//! (`Host::takes`), and the software renderer draws that.
+//! (`Host::declines`), and the software renderer draws that.
 //!
 //! The host is made, used and dropped on the thread whose OpenGL
 //! context it was given, while that context is current.
@@ -47,7 +47,7 @@ mod replay;
 mod tests;
 
 use super::format::{Format, Rect, Surface};
-use super::gpu::{self, Batch, Clear, Host, Pages, Stamp};
+use super::gpu::{self, Batch, Clear, Decline, Host, Pages, Stamp};
 use super::level1::Texture;
 use super::raster::pipeline::{self, Blend, DrawState, Shape, Step, Values};
 use super::raster::sample::{Address, Filter, Mip, Tex};
@@ -437,7 +437,7 @@ pub struct ToadForceGl {
     changes: u64,
     textures: HashMap<Texture, Texels>,
     /// The programs by `shader::key` of the steps they draw, made when
-    /// `takes` first sees the steps (`compiled`).
+    /// `declines` first sees the steps (`compiled`).
     programs: RefCell<HashMap<shader::Key, Program<Uniforms>>>,
     /// The keys whose program the host didn't compile.
     failed: RefCell<HashSet<shader::Key>>,
@@ -1115,7 +1115,7 @@ impl ToadForceGl {
     }
 
     /// Whether the host has the program of `key` (`shader::key`),
-    /// compiled now if it is new. `takes` asks first, so a state whose
+    /// compiled now if it is new. `declines` asks first, so a state whose
     /// program doesn't compile goes to the software renderer from its
     /// first draw on, and no draw the host took is left undrawn.
     ///
@@ -1790,16 +1790,16 @@ impl Host for ToadForceGl {
         "OpenGL"
     }
 
-    fn declines(&self, state: &DrawState) -> Option<&'static str> {
+    fn declines(&self, state: &DrawState) -> Option<Decline> {
         use Format::*;
         if self.broken {
-            return Some("host broken");
+            return Some(Decline::HostBroken);
         }
         if state.serial {
-            return Some("serial state");
+            return Some(Decline::Serial);
         }
         if !matches!(state.target.colour.format, R5G6B5 | X8R8G8B8 | A8R8G8B8) {
-            return Some("target format");
+            return Some(Decline::TargetFormat);
         }
         for step in &state.steps {
             match *step {
@@ -1811,7 +1811,7 @@ impl Host for ToadForceGl {
                     ..
                 } => {
                     let Some(tex) = &state.tex[stage as usize] else {
-                        return Some("no texture");
+                        return Some(Decline::NoTexture);
                     };
                     let anisotropic = self.anisotropy > 0.0;
                     let native = shader::native(tex, anisotropic);
@@ -1819,14 +1819,14 @@ impl Host for ToadForceGl {
                     // the face they picked, which the host's cube
                     // sampler has no way to say.
                     if cube && bumped.is_some() {
-                        return Some("bumped cube map");
+                        return Some(Decline::BumpedCube);
                     }
                     // A block format's pixels have no value to compare
                     // with the key. `DEFINE_TEXTURE` refuses such a
                     // texture; this keeps the shader from a key texture
                     // the host doesn't make.
                     if keyed && !texture::has_key(tex.texture.format) {
-                        return Some("key on a block format");
+                        return Some(Decline::KeyOnBlock);
                     }
                     // A texture whose texels the shader reads on one
                     // stage and the host's filter samples on another
@@ -1835,7 +1835,7 @@ impl Host for ToadForceGl {
                         other.texture == tex.texture && shader::native(other, anisotropic) != native
                     });
                     if mixed {
-                        return Some("texture sampled both ways");
+                        return Some(Decline::SampledBothWays);
                     }
                     // What follows is where the host's own filter goes
                     // another way than the card; the shader's reads of
@@ -1849,7 +1849,7 @@ impl Host for ToadForceGl {
                     // the two filters would change over elsewhere.
                     let first = tex.first_level.min(tex.texture.levels.saturating_sub(1));
                     if first > 0 && tex.mag != tex.min {
-                        return Some("first level with two filters");
+                        return Some(Decline::FirstLevelTwoFilters);
                     }
                     let mipped = tex.mip != Mip::None && tex.texture.levels > 1;
                     // OpenGL magnifies up to a level of detail of 0.5
@@ -1858,14 +1858,14 @@ impl Host for ToadForceGl {
                     // ("c" in its rules for magnification); the card
                     // minifies from 0 on.
                     if mipped && tex.mag == Filter::Linear && tex.min == Filter::Point {
-                        return Some("linear magnify, point minify, mipped");
+                        return Some(Decline::LinearMagPointMin);
                     }
                     // The key is looked up in the level a sample reads
                     // first, the lower of the two it blends
                     // (`Sampler::keyed`); the host's lookup of the
                     // nearest level takes the closer one.
                     if keyed && mipped && tex.mip == Mip::Linear {
-                        return Some("key with linear mip");
+                        return Some(Decline::KeyLinearMip);
                     }
                     // A stage's sampling states are set on the host's
                     // texture, which another stage sampling the same
@@ -1876,14 +1876,14 @@ impl Host for ToadForceGl {
                             other.texture == tex.texture && Sampling::of(other) != now
                         });
                     if shared {
-                        return Some("texture with two samplings");
+                        return Some(Decline::TwoSamplings);
                     }
                 }
                 // `SRCALPHASAT` for the destination is OpenGL 3.3's.
                 Step::Write {
                     blend: Some(Blend { dst: 11, .. }),
                     ..
-                } => return Some("SRCALPHASAT destination"),
+                } => return Some(Decline::SrcAlphaSatDestination),
                 _ => {}
             }
         }
@@ -1891,7 +1891,7 @@ impl Host for ToadForceGl {
         if unsafe { self.compiled(&shader::key(state, self.anisotropy > 0.0)) } {
             None
         } else {
-            Some("program failed")
+            Some(Decline::ProgramFailed)
         }
     }
 
@@ -1971,7 +1971,7 @@ impl Host for ToadForceGl {
                 if count == 0 || !self.fixed(state) {
                     continue;
                 }
-                // `takes` compiled it.
+                // `declines` compiled it.
                 let key = shader::key(state, self.anisotropy > 0.0);
                 for (stage, tex) in state.tex.iter().enumerate() {
                     if let Some(tex) = tex {

@@ -154,10 +154,10 @@ impl Host for HostLink {
     fn declines(
         &self,
         state: &rust_dos::toadforce::raster::pipeline::DrawState,
-    ) -> Option<&'static str> {
+    ) -> Option<rust_dos::toadforce::gpu::Decline> {
         match &*self.0.borrow() {
             Some(host) => host.declines(state),
-            None => Some("no window"),
+            None => Some(rust_dos::toadforce::gpu::Decline::NoHost),
         }
     }
 

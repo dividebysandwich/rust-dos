@@ -14,7 +14,7 @@
 //!   the state (`DrawState::clip`), for the host to cut the pixels by.
 //!   Slot `n`'s coordinates are in `tex[n]` of every vertex, whichever
 //!   set of the program's vertex they came from.
-//! - **What the host declines.** A state `Host::takes` refuses, lines,
+//! - **What the host declines.** A state `Host::declines` names, lines,
 //!   points, triangles that aren't filled and draws that read the
 //!   surface they write are drawn by the software renderer, in the
 //!   card's order with the host's.
@@ -85,7 +85,6 @@ use super::level1::{Target, Texture};
 use super::raster::pipeline::DrawState;
 use super::raster::vertex::ScreenVertex;
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -163,7 +162,7 @@ pub trait Host {
     /// Why it doesn't draw triangles with `state`, in the words the
     /// status counts such draws under, or None for a state it draws.
     /// A draw it refuses goes to the software renderer.
-    fn declines(&self, state: &DrawState) -> Option<&'static str>;
+    fn declines(&self, state: &DrawState) -> Option<Decline>;
 
     /// Draw `batch`. `memory` is card memory, for the textures and for
     /// a target the host has no copy of or a stale one, by `pages`.
@@ -473,6 +472,74 @@ impl Cause {
     ];
 }
 
+/// Why a draw went to the software renderer with a host attached, for
+/// the status (`declined_for`): the rasteriser's reasons, then the
+/// host's (`Host::declines`). The names are the debugger's API, listed
+/// in `docs/llm-debugging.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decline {
+    /// Points or lines, which the host doesn't draw.
+    PointsAndLines,
+    /// Triangles drawn as points or as their edges.
+    FillMode,
+    /// A draw that reads what it writes, drawn pixel by pixel in order.
+    Serial,
+    /// The host is gone, as its window and context are.
+    NoHost,
+    /// The host has no framebuffer the card's surfaces fit.
+    HostBroken,
+    /// The target's colour format isn't one the host draws into.
+    TargetFormat,
+    /// A stage samples a texture that isn't bound.
+    NoTexture,
+    /// A bump-mapped stage samples a cube map.
+    BumpedCube,
+    /// A colour key on a block-compressed texture.
+    KeyOnBlock,
+    /// One texture read by the shader on one stage and sampled by the
+    /// host's filter on another.
+    SampledBothWays,
+    /// A first level above 0 with one filter to magnify and another to
+    /// minify.
+    FirstLevelTwoFilters,
+    /// A mipmapped texture magnified linearly and minified by point.
+    LinearMagPointMin,
+    /// A colour key with linear mipmapping.
+    KeyLinearMip,
+    /// One texture with different sampling states on two stages.
+    TwoSamplings,
+    /// `SRCALPHASAT` as the destination's blend factor.
+    SrcAlphaSatDestination,
+    /// The state's shader didn't compile.
+    ProgramFailed,
+}
+
+impl Decline {
+    pub const NAMES: [&str; 16] = [
+        "points and lines",
+        "fill mode",
+        "serial state",
+        "no host",
+        "host broken",
+        "target format",
+        "no texture",
+        "bumped cube map",
+        "key on a block format",
+        "texture sampled both ways",
+        "first level with two filters",
+        "linear magnify, point minify, mipped",
+        "key with linear mip",
+        "texture with two samplings",
+        "SRCALPHASAT destination",
+        "program failed",
+    ];
+
+    /// The name the status counts it under.
+    pub fn name(self) -> &'static str {
+        Self::NAMES[self as usize]
+    }
+}
+
 /// The most rectangles of written pixels the card hands a host for one
 /// surface (`Host::write`). A surface written in more is read back
 /// around them.
@@ -632,13 +699,12 @@ pub struct Gpu {
     /// The screen shows the picture from the host's copy this frame
     /// (`shows`): the next `shown` reads nothing back.
     presents: bool,
-    /// How many surfaces were read back, and how many draws went to
-    /// the software renderer with a host attached.
+    /// How many surfaces were read back.
     read_backs: u64,
-    pub declined: u64,
-    /// The declined draws by reason: the rasteriser's (`Raster::draw`)
-    /// and the host's (`Host::declines`).
-    declined_for: BTreeMap<&'static str, u64>,
+    /// The draws that went to the software renderer with a host
+    /// attached, by reason: the rasteriser's (`Renderer::draw`) and the
+    /// host's (`Host::declines`).
+    declined_for: [u64; Decline::NAMES.len()],
     /// The read-backs by what asked for them (`Cause`).
     by_cause: [u64; Cause::NAMES.len()],
     /// The surfaces fetched for the program's reads (`read`), which
@@ -722,22 +788,32 @@ impl Gpu {
 
     /// Why the host doesn't draw triangles with `state`: None when it
     /// draws them.
-    pub fn declines(&self, state: &DrawState) -> Option<&'static str> {
+    pub fn declines(&self, state: &DrawState) -> Option<Decline> {
         match &*self.host.borrow() {
             Some(host) => host.declines(state),
-            None => Some("no host"),
+            None => Some(Decline::NoHost),
         }
     }
 
     /// Count a draw that went to the software renderer for `why`.
-    pub fn decline(&mut self, why: &'static str) {
-        self.declined += 1;
-        *self.declined_for.entry(why).or_insert(0) += 1;
+    pub fn decline(&mut self, why: Decline) {
+        self.declined_for[why as usize] += 1;
     }
 
-    /// The declined draws by reason, for the status.
-    pub fn declined_for(&self) -> &BTreeMap<&'static str, u64> {
-        &self.declined_for
+    /// How many draws went to the software renderer with a host
+    /// attached.
+    pub fn declined(&self) -> u64 {
+        self.declined_for.iter().sum()
+    }
+
+    /// The declined draws by reason, every reason named, for the
+    /// status.
+    pub fn declined_for(&self) -> serde_json::Value {
+        let counts = Decline::NAMES.iter().zip(self.declined_for);
+        counts
+            .map(|(name, count)| (name.to_string(), serde_json::json!(count)))
+            .collect::<serde_json::Map<_, _>>()
+            .into()
     }
 
     /// Read back the surfaces that are ahead on the host and share a
@@ -1148,6 +1224,19 @@ impl Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reasons are the debugger's API: each has its own name, and
+    /// `docs/llm-debugging.md` lists every one.
+    #[test]
+    fn the_debugging_guide_lists_every_reason_for_a_declined_draw() {
+        let guide = include_str!("../../docs/llm-debugging.md");
+        let guide = guide.split_whitespace().collect::<Vec<_>>().join(" ");
+        for (i, name) in Decline::NAMES.iter().enumerate() {
+            assert!(guide.contains(&format!("`{name}`")), "{name}");
+            assert!(!Decline::NAMES[..i].contains(name), "{name} twice");
+        }
+        assert_eq!(Decline::ProgramFailed.name(), "program failed");
+    }
 
     #[test]
     fn a_stamp_is_stale_once_a_page_of_its_bytes_is_written() {
