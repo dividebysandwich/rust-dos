@@ -1904,16 +1904,15 @@ comes last whatever its share.
    Done: the host takes them as triangles the card builds, which
    cover the pixels of the rules of "Rasterising" on any GPU ("The
    OpenGL renderer"), and Grom runs at 104.
-2. **`hal::bind` for a draw whose state didn't change.** Oni, 26, and
-   No One Lives Forever and MDK2: 18%, 14% and 7%. The device keeps
-   what it sent to the card and compares all of it again for each
-   draw. A count of state changes on the device, checked first, makes
-   an unchanged draw cost a comparison of two numbers.
-3. **The OpenGL front end's draws.** Oni and MDK2: `hle.d3d.draw` and
-   `hle.opengl`, 10% and 5%, and the rest of `hle.d3d.bind`.
-   Consecutive `glEnd`s of equal state gathered into one draw, and
-   the front end's matrices, lights and materials sent as level 1
+2. **`hal::bind` for a draw whose state didn't change.** Done: see
+   "Passes 2 and 3" below.
+3. **The OpenGL front end's draws.** Consecutive draws of equal
+   state go to Direct3D as one: done, see below. What is left of it
+   is the front end's matrices, lights and materials sent as level 1
    state so that the card transforms (what is left of phase 5 too).
+   The layer's own transform of OpenGL's vertices (`hle.d3d.vertices`)
+   is 2% of the thread in Oni and MDK2, so this waits for a game that
+   it limits.
 4. **The cost of an API call from the game.** MDK2 at 45% and below
    full speed, Giants 22%, Oni 15%, and 11% to 14% in three more. Per
    call it is the trap out of the recompiled code, the lookup of the
@@ -1937,6 +1936,58 @@ comes last whatever its share.
 
 Before any of them counts as done, the table above is taken again on
 a four-core host, and MDK2 and Giants in a heavier scene.
+
+### Passes 2 and 3: state kept, and OpenGL's draws joined
+
+How the two work is in "The built-in Windows" ("State kept between
+draws" and "OpenGL's draws wait for each other"). Frames a second in
+the scenes of the table above, each run alone on the machine with
+`cycles=max`, two windows of 20 seconds, the build before the passes
+and the one after in the same session:
+
+| Game | Before | After | Draws a frame | Binds kept |
+|---|---|---|---|---|
+| Oni, training room | 24.8, 24.6 | 37.8, 38.1 | 2718 to 181 | 45% |
+| No One Lives Forever | 39.9, 39.9 | 47.4, 47.9 | 1903 | 83% |
+| Giants | 37.2, 37.3 | 37.6, 37.2 | 545 | 51% |
+| MDK2, first level's dive | 48.7, 49.7 | 47.6, 48.9 | 285 to 58 | none |
+
+MDK2 runs at 85% to 87% of full speed before and 82% to 84% after.
+
+Oni's 2700 `glEnd`s a frame become 181 draws, and of those nearly
+half find the card's state as they need it. Its profile after:
+`cpu.jit` 51%, and no zone of the layers between the game and the
+card above 4% (`hle.d3d.bind` was 17% and is below 1%). What a call
+from the game costs is next there: `hle.win32.args`,
+`hle.win32.after`, `hle.win32` and `hle.opengl.call` are 12.7%
+together for 1.2 million calls a second, about 90 ns a call, in four
+parts of about equal size: the trap out of the recompiled code with
+the processor's snapshot for a page fault, the arguments read through
+the page tables, the handler, and what follows it. Two costs of every
+call went with these passes: the arguments were read one walk of the
+page tables each, and once a process had made a file mapping every
+call built a list of the running processes to sweep the mappings
+with.
+
+No One Lives Forever draws each fan with its own `DrawPrimitive`,
+and 83% of them keep the card's state. Giants keeps half its binds
+and its frame rate: the bind was no cost there, and its `hle.win32`
+is the count of its state calls, pass 4's.
+
+MDK2's draws join five to one, and none of the 58 left keeps a bind:
+each differs from the one before it. Its frame rate stays where it
+was, within the spread of the takes. The draws were not what holds it
+below full speed: `hle.d3d.bind` and `hle.d3d.draw` went from 11% of
+its thread to 3%, and the calls themselves (`hle.win32` with its
+`.args` and `.after`, and `hle.opengl.call`) are 41% where they were
+46%. The call made most is `SleepEx`, 270 thousand times a second,
+each a reschedule (issue 1007).
+
+The pictures are the same: deterministic runs on the software
+renderer at 100000 cycles, the same inputs at the same emulated
+times, twelve frames in play (half a second apart, a second apart
+in MDK2's dive) for Oni, MDK2, No One Lives Forever, Giants and
+Zanzarah, with no pixel differing between the builds.
 
 Phases 2 and 3 come before the OpenGL renderer so that the reference
 exists before the renderer that is tested against it, and so that
