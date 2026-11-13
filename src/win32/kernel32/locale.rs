@@ -39,8 +39,8 @@ fn info(l: &Locale, lctype: u32) -> Option<String> {
     let flag = |yes: bool| if yes { "1" } else { "0" };
     let text = match lctype {
         0x01 | 0x09 => return Some(format!("{:04X}", l.lang_id())),
-        0x02 if l.lcid == 0x0409 => "English (United States)",
-        0x02 | 0x1001 => i.language,
+        0x02 => i.full_language,
+        0x1001 => i.language,
         0x03 => i.abbrev_language,
         0x04 => i.native_language,
         0x05 | 0x0A => return Some(l.country.to_string()),

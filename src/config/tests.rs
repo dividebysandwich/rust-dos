@@ -1264,10 +1264,28 @@ fn the_desktop_depth_is_read() {
 }
 
 #[test]
+fn every_system_locale_is_read_and_written_back() {
+    for locale in Win32Locale::ALL {
+        let text = format!("[emulator]\nwin32_locale={}\n", locale.name());
+        let config = parse(&text, Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let settings = Settings::from_config(&config);
+        assert_eq!(settings.win32_locale, locale);
+        let written = entries(&settings, None)
+            .into_iter()
+            .find(|(_, key, _)| *key == "win32_locale")
+            .and_then(|(_, _, value)| value);
+        assert_eq!(written.as_deref(), Some(locale.name()));
+    }
+}
+
+#[test]
 fn the_system_locale_is_read() {
     for (value, locale) in [
         ("en-US", Win32Locale::EnUs),
         ("ru-RU", Win32Locale::RuRu),
+        ("sr-latn-yu", Win32Locale::SrLatnYu),
+        ("de_DE", Win32Locale::DeDe),
         ("RU_ru", Win32Locale::RuRu),
         ("pl-PL", Win32Locale::PlPl),
         ("el-GR", Win32Locale::ElGr),

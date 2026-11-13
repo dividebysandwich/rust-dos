@@ -924,6 +924,12 @@ mod tests {
         assert_eq!(layer(&base, &[&japanese], None).win32_locale, Win32Locale::PlPl);
         let reported = report_settings(&base, None);
         assert_eq!(reported["emulator"]["win32_locale"], "pl-PL");
+        // Every locale goes through by its name and is reported by it.
+        for l in Win32Locale::ALL {
+            let layered = layer(&base, &[&locale(l.name())], None);
+            assert_eq!(layered.win32_locale, l);
+            assert_eq!(report_settings(&layered, None)["emulator"]["win32_locale"], l.name());
+        }
     }
 
     #[test]

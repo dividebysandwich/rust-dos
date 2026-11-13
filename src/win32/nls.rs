@@ -3,12 +3,12 @@
 //!
 //! The system locale is the `win32_locale` setting, the localized
 //! Windows 98 the built-in Windows is: English (United States) by
-//! default, or Russian, Polish, Czech, Hungarian, Greek, Turkish or
-//! Lithuanian. One table (`LOCALES`) says what each of them is: its
-//! locale id, its ANSI and OEM code pages (CP_ACP and CP_OEMCP, GetACP,
-//! GetOEMCP), the character set of the system's fonts and of
-//! DEFAULT_CHARSET, its keyboard layout's name, and GetLocaleInfo's
-//! information and formats (locales.rs). Every function that converts
+//! default, or one of the European locales of code pages 1250 to 1254
+//! and 1257. One table (`LOCALES`, in locales.rs, generated from
+//! tools/locales.txt) says what each of them is: its locale id, its ANSI
+//! and OEM code pages (CP_ACP and CP_OEMCP, GetACP, GetOEMCP), the
+//! character set of the system's fonts and of DEFAULT_CHARSET, and
+//! GetLocaleInfo's information and formats. Every function that converts
 //! between the system's code pages and Unicode takes them from here.
 //!
 //! As with `win32_version`, the setting is read when the first program
@@ -29,19 +29,7 @@ pub mod tables;
 
 use crate::cpu::Cpu;
 
-pub use crate::config::Win32Locale;
-pub use locales::Info;
-
-crate::state_enum!(Win32Locale {
-    Win32Locale::EnUs,
-    Win32Locale::RuRu,
-    Win32Locale::PlPl,
-    Win32Locale::CsCz,
-    Win32Locale::HuHu,
-    Win32Locale::ElGr,
-    Win32Locale::TrTr,
-    Win32Locale::LtLt,
-});
+pub use locales::{Info, LOCALES, Win32Locale};
 
 /// A code page of one byte a character: its number, the characters of
 /// its bytes from 80h on, and whether it is a DOS (OEM) code page, whose
@@ -292,74 +280,6 @@ const fn locale(
     }
 }
 
-/// The locales, the default first.
-pub const LOCALES: [Locale; 8] = [
-    locale(
-        Win32Locale::EnUs,
-        0x0409,
-        (1252, 437, 10000),
-        ANSI_CHARSET,
-        1,
-        &locales::EN_US,
-    ),
-    locale(
-        Win32Locale::RuRu,
-        0x0419,
-        (1251, 866, 10007),
-        RUSSIAN_CHARSET,
-        7,
-        &locales::RU_RU,
-    ),
-    locale(
-        Win32Locale::PlPl,
-        0x0415,
-        (1250, 852, 10029),
-        EASTEUROPE_CHARSET,
-        48,
-        &locales::PL_PL,
-    ),
-    locale(
-        Win32Locale::CsCz,
-        0x0405,
-        (1250, 852, 10029),
-        EASTEUROPE_CHARSET,
-        42,
-        &locales::CS_CZ,
-    ),
-    locale(
-        Win32Locale::HuHu,
-        0x040E,
-        (1250, 852, 10029),
-        EASTEUROPE_CHARSET,
-        36,
-        &locales::HU_HU,
-    ),
-    locale(
-        Win32Locale::ElGr,
-        0x0408,
-        (1253, 737, 10006),
-        GREEK_CHARSET,
-        30,
-        &locales::EL_GR,
-    ),
-    locale(
-        Win32Locale::TrTr,
-        0x041F,
-        (1254, 857, 10081),
-        TURKISH_CHARSET,
-        90,
-        &locales::TR_TR,
-    ),
-    locale(
-        Win32Locale::LtLt,
-        0x0427,
-        (1257, 775, 10029),
-        BALTIC_CHARSET,
-        370,
-        &locales::LT_LT,
-    ),
-];
-
 /// The locale of a `win32_locale` value.
 pub fn of(id: Win32Locale) -> &'static Locale {
     LOCALES
@@ -531,6 +451,132 @@ mod tests {
             assert_eq!(charset(l.charset).unwrap().code_page, l.ansi, "{:?}", l.id);
             assert!(l.oem().is_oem() && !l.ansi().is_oem());
             assert_eq!(by_lcid(l.lcid).unwrap().id, l.id);
+        }
+    }
+
+    /// The letters of a date or time picture outside its quotes.
+    fn picture_letters(format: &str) -> String {
+        let mut quoted = false;
+        format
+            .chars()
+            .filter(|&c| {
+                if c == '\'' {
+                    quoted = !quoted;
+                }
+                !quoted && c.is_alphabetic()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_locale_is_whole() {
+        // The ISO 639 language of each primary language id.
+        let languages = [
+            (0x02, "bg"),
+            (0x05, "cs"),
+            (0x06, "da"),
+            (0x07, "de"),
+            (0x08, "el"),
+            (0x09, "en"),
+            (0x0A, "es"),
+            (0x0B, "fi"),
+            (0x0C, "fr"),
+            (0x0E, "hu"),
+            (0x10, "it"),
+            (0x13, "nl"),
+            (0x14, "no"),
+            (0x15, "pl"),
+            (0x16, "pt"),
+            (0x18, "ro"),
+            (0x19, "ru"),
+            (0x1A, "hr"),
+            (0x1B, "sk"),
+            (0x1D, "sv"),
+            (0x1F, "tr"),
+            (0x22, "uk"),
+            (0x23, "be"),
+            (0x24, "sl"),
+            (0x25, "et"),
+            (0x26, "lv"),
+            (0x27, "lt"),
+        ];
+        for l in &LOCALES {
+            let i = l.info;
+            let name = l.id.name();
+            // The setting's name is the language's and the country's.
+            assert_eq!(Win32Locale::parse(name), Some(l.id));
+            assert!(name.starts_with(i.iso_language) || i.iso_language == "no");
+            assert!(name.ends_with(i.iso_country), "{name}");
+            // LANG_CROATIAN is LANG_SERBIAN: sublanguages 2 and 3 are
+            // Serbian.
+            let primary = l.lcid & 0x3FF;
+            let sub = l.lcid >> 10 & 0x3F;
+            let language = match (primary, sub) {
+                (0x1A, 2 | 3) => "sr",
+                _ => languages.iter().find(|(p, _)| *p == primary).unwrap().1,
+            };
+            assert_eq!(language, i.iso_language, "{name}");
+            // Every text is in the locale's own code page.
+            let page = l.ansi();
+            let texts = [
+                i.full_language,
+                i.language,
+                i.native_language,
+                i.country,
+                i.native_country,
+                i.currency,
+                i.short_date,
+                i.long_date,
+                i.time_format,
+                i.am,
+                i.pm,
+                i.thousand,
+                i.money_thousand,
+            ];
+            let names = i.days.iter().chain(&i.abbrev_days);
+            let names = names.chain(&i.months).chain(&i.abbrev_months);
+            for text in texts.iter().chain(names) {
+                let units: Vec<u16> = text.encode_utf16().collect();
+                assert_eq!(page.decode(&page.encode(&units)), units, "{name}: {text}");
+            }
+            let names = i.days.iter().chain(&i.abbrev_days);
+            assert!(
+                names
+                    .chain(&i.months)
+                    .chain(&i.abbrev_months)
+                    .all(|n| !n.is_empty())
+            );
+            // The pictures have a day, a month and a year, and no letter
+            // GetDateFormat would copy as it is; the time an hour and
+            // minutes, of 12 hours with the 12-hour clock.
+            for date in [i.short_date, i.long_date] {
+                let letters = picture_letters(date);
+                assert!(letters.chars().all(|c| "dMy".contains(c)), "{name}: {date}");
+                assert!(['d', 'M', 'y'].iter().all(|&p| letters.contains(p)));
+            }
+            let time = picture_letters(i.time_format);
+            assert!(time.chars().all(|c| "hHmst".contains(c)), "{name}");
+            assert!(time.contains('m') && (time.contains('h') || time.contains('H')));
+            assert_eq!(time.contains('h'), i.hours24 == "0", "{name}");
+            // The date order and separator are the short date's.
+            let mut order: Vec<char> = picture_letters(i.short_date).chars().collect();
+            order.dedup();
+            let date_order = match order[..] {
+                ['M', 'd', 'y'] => "0",
+                ['d', 'M', 'y'] => "1",
+                _ => "2",
+            };
+            assert_eq!(i.date_order, date_order, "{name}");
+            assert!(i.short_date.contains(i.date_separator), "{name}");
+            // The numbers' settings are numbers in their range.
+            let int = |s: &str| s.parse::<u32>().unwrap();
+            assert!(int(i.measure) <= 1 && int(i.negative_number) <= 4);
+            assert!(int(i.currency_order) <= 3 && int(i.negative_currency) <= 15);
+            assert!(int(i.first_day) <= 6 && int(i.hours24) <= 1);
+            assert_eq!(i.grouping, "3;0");
+            assert_eq!(i.intl_symbol.len(), 3);
+            assert_eq!((i.iso_language.len(), i.iso_country.len()), (2, 2));
+            assert_eq!((i.abbrev_language.len(), i.abbrev_country.len()), (3, 3));
         }
     }
 }

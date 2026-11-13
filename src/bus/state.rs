@@ -873,7 +873,7 @@ mod tests {
         (55, 0x33AE_9F33_F125_1478), // a video device's full-screen play
         (56, 0x0BF5_7A03_9493_E7DE), // TrackMouseEvent's request, one for the desktop
         (57, 0xB847_1A2D_27D3_3646), // OpenGL's draws that wait
-        (58, 0xF659_B128_6EA8_0730), // the system locale
+        (58, 0xDC7D_5C01_8FC2_8FD2), // the system locale
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
