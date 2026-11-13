@@ -494,8 +494,8 @@ pub fn call(cpu: &mut Cpu, id: u16) {
         }
     };
     cpu.bus.guest_read_bytes(esp.wrapping_add(4), raw);
-    for (arg, word) in args.iter_mut().zip(raw.chunks_exact(4)) {
-        *arg = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+    for (arg, word) in args.iter_mut().zip(raw.as_chunks::<4>().0) {
+        *arg = u32::from_le_bytes(*word);
     }
     let args = &*args;
     if cpu.bus.guest_faulted() {
