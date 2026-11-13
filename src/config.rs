@@ -148,8 +148,7 @@ pub struct Config {
     /// (`voodoo_memory`), what draws
     /// for it (`voodoo_renderer`), at what size (`voodoo_scale`) and with
     /// how many samples a pixel (`voodoo_msaa`), texture anisotropy
-    /// (`voodoo_anisotropy`), and the most frames a second programs may show
-    /// on it (`voodoo_fps_cap`, 0 for no cap).
+    /// (`voodoo_anisotropy`).
     pub voodoo: Option<bool>,
     pub voodoo_model: Option<crate::voodoo::Model>,
     pub voodoo_memory: Option<crate::voodoo::Board>,
@@ -166,9 +165,11 @@ pub struct Config {
     pub voodoo_readback_gpu: Option<bool>,
     pub voodoo_msaa: Option<u32>,
     pub voodoo_anisotropy: Option<u32>,
-    pub voodoo_fps_cap: Option<u32>,
     /// The gamma Glide applies to the guest, or off.
     pub voodoo_gamma: Option<Option<f32>>,
+    /// The most frames a second a program may show, on any card
+    /// (`fps_cap`, or its old name `voodoo_fps_cap`): 0 for no cap.
+    pub fps_cap: Option<u32>,
     /// The PowerVR card (`powervr`): its chip, or None for no card; and
     /// its texture filtering (`powervr_filter`).
     pub powervr: Option<Option<crate::powervr::Chip>>,
@@ -353,6 +354,28 @@ impl Config {
     pub fn drive(&self, drive: u8) -> Option<&MountSpec> {
         self.drives.iter().find(|spec| spec.drive == drive)
     }
+}
+
+/// Settings that were renamed: section, old name and current name. A
+/// file's line under the old name still sets the setting, and the line
+/// takes the current name when the settings window writes it.
+pub const OLD_NAMES: [(&str, &str, &str); 1] = [("emulator", "voodoo_fps_cap", "fps_cap")];
+
+/// The current name of the setting `key` (in lower case) of `section`.
+fn current_name(section: Section, key: &str) -> &str {
+    OLD_NAMES
+        .iter()
+        .find(|&&(s, old, _)| s == section.name() && old == key)
+        .map_or(key, |&(_, _, new)| new)
+}
+
+/// The current name of the setting `key` of the section named `section`,
+/// in any case, as a report or a recommendation may name it.
+pub fn renamed<'a>(section: &str, key: &'a str) -> &'a str {
+    OLD_NAMES
+        .iter()
+        .find(|&&(s, old, _)| s.eq_ignore_ascii_case(section) && old.eq_ignore_ascii_case(key))
+        .map_or(key, |&(_, _, new)| new)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -96,6 +96,11 @@ impl DebugHub {
                 "width": w, "height": h,
                 // The picture as screenshots have it.
                 "frame": {"width": frame_w, "height": frame_h},
+                // The frame rate cap in force (`fps_cap`, null for off),
+                // which a frame rate measured through the run can't pass,
+                // and when the last frame it let through showed.
+                "fps_cap": cpu.bus.frame_cap.get().fps(),
+                "last_capped_frame_ms": cpu.bus.frame_cap.get().last().map(|ns| ns as f64 / 1e6),
                 // Page flipping: the Start Address the program set and the
                 // one latched for display, plus the registers that decide
                 // the memory layout.

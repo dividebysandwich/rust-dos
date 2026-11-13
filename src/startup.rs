@@ -208,6 +208,9 @@ pub(crate) fn apply_args(settings: &mut Settings, args: &Args) -> Result<(), Str
     if args.vrr {
         settings.vrr = true;
     }
+    if let Some(fps) = args.fps_cap {
+        settings.fps_cap = fps.0;
+    }
     if let Some(output) = args.audio_output {
         settings.audio_output = output;
     }

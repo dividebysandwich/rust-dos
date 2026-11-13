@@ -56,6 +56,7 @@ pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate
     crate::video::bios::install(&mut cpu.bus, settings.video_setup());
     cpu.bus.configure_voodoo(settings.voodoo_board());
     cpu.bus.set_voodoo_texture_sampling(settings.voodoo.texture_sampling);
+    cpu.bus.set_fps_cap(settings.fps_cap);
     cpu.set_env_rules(settings.environment());
     crate::voodoo::overlay::provide(&mut cpu.bus);
     cpu.bus.configure_powervr(settings.powervr);
@@ -188,6 +189,7 @@ impl Hardware {
             cpu.bus.configure_voodoo(voodoo);
         }
         cpu.bus.set_voodoo_texture_sampling(settings.voodoo.texture_sampling);
+        cpu.bus.set_fps_cap(settings.fps_cap);
         let env = settings.environment();
         if env != self.env {
             cpu.set_env_rules(env);

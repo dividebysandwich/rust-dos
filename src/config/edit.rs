@@ -21,10 +21,10 @@ enum Line {
 /// The section and kind of every line.
 fn classify(lines: &[String]) -> Vec<(Section, Line)> {
     let mut section = Section::None;
-    let key_of = |text: &str| {
+    let key_of = |section: Section, text: &str| {
         let key = text.split_once('=')?.0.trim();
         (!key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '_'))
-            .then(|| key.to_ascii_lowercase())
+            .then(|| super::current_name(section, &key.to_ascii_lowercase()).to_string())
     };
     lines
         .iter()
@@ -48,10 +48,10 @@ fn classify(lines: &[String]) -> Vec<(Section, Line)> {
                 | Section::Vfx1
                 | Section::Drives => {
                     if let Some(comment) = line.strip_prefix(['#', ';']) {
-                        key_of(comment.trim_start_matches(['#', ';']).trim_start())
+                        key_of(section, comment.trim_start_matches(['#', ';']).trim_start())
                             .map_or(Line::Other, Line::Example)
                     } else {
-                        key_of(line).map_or(Line::Other, Line::Setting)
+                        key_of(section, line).map_or(Line::Other, Line::Setting)
                     }
                 }
                 _ => Line::Other,
@@ -108,6 +108,19 @@ fn insertion_point(lines: &mut Vec<String>, section: Section, key: Option<&str>)
 
 /// `line` (`key=value`) with a new value, keeping the key as written and
 /// the spacing around the '='.
+/// `line`, a `key=value` line, with the key `key`: a setting's line under
+/// an old name (`OLD_NAMES`) gets the current one when it is written.
+fn with_key(line: &str, key: &str) -> String {
+    let eq = line.find('=').unwrap_or(line.len());
+    let name = line[..eq].trim();
+    if name.eq_ignore_ascii_case(key) {
+        return line.to_string();
+    }
+    let indent = line.len() - line.trim_start().len();
+    let gap = line[..eq].len() - line[..eq].trim_end().len();
+    format!("{}{}{}{}", &line[..indent], key, &line[eq - gap..eq], &line[eq..])
+}
+
 fn with_value(line: &str, value: &str) -> String {
     let eq = line.find('=').unwrap_or(line.len());
     let rest = line.get(eq + 1..).unwrap_or("");
@@ -124,7 +137,7 @@ fn set_key(lines: &mut Vec<String>, section: Section, key: &str, value: Option<&
     let existing: Vec<usize> =
         (0..lines.len()).filter(|&i| layout[i].0 == section && layout[i].1 == setting).collect();
     match (existing.last(), value) {
-        (Some(&i), Some(value)) => lines[i] = with_value(&lines[i], value),
+        (Some(&i), Some(value)) => lines[i] = with_value(&with_key(&lines[i], key), value),
         (Some(_), None) => {
             for i in existing {
                 lines[i] = format!("#{}", lines[i]);

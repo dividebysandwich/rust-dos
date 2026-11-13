@@ -56,6 +56,8 @@ pub(super) enum Item {
     /// Frames shown when the machine's are due, for a display with a
     /// variable refresh rate.
     Vrr,
+    /// The most frames a second a program may show, on any card.
+    FpsCap,
     /// The picture in a 3D scene, the scene, what a headset's controllers
     /// do and whether the sound follows the viewer.
     VrMode,
@@ -146,7 +148,6 @@ pub(super) enum Item {
     VoodooDither,
     VoodooAnisotropy,
     VoodooTextureSampling,
-    VoodooFpsCap,
     VoodooGamma,
     /// Fetch Glide's DOS overlay (GLIDE2X.OVL).
     VoodooOverlay,
@@ -323,6 +324,7 @@ impl Item {
             Fullscreen => "Fullscreen",
             Aspect => "Fixed aspect ratio",
             Vrr => "Variable refresh rate",
+            FpsCap => "Frame rate cap",
             VrMode => "3D scene",
             VrScene => "Scene",
             VrControllers => "Headset controllers",
@@ -383,7 +385,6 @@ impl Item {
             VoodooDither => "3dfx dithering",
             VoodooAnisotropy => "3dfx anisotropic filtering",
             VoodooTextureSampling => "3dfx texture sampling",
-            VoodooFpsCap => "3dfx frame rate cap",
             VoodooGamma => "3dfx gamma",
             VoodooOverlay => "  Download Glide's DOS overlay...",
             PowerVr => "PowerVR card",
@@ -621,7 +622,7 @@ impl Item {
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
             Item::RewindMemory => s.rewind,
             Item::AutoFps | Item::AutoBusyOs => matches!(s.cycles, CpuSpeed::Auto(_)),
-            Item::VoodooMemory | Item::VoodooRenderer | Item::VoodooTextureSampling | Item::VoodooFpsCap | Item::VoodooGamma => s.voodoo.enabled,
+            Item::VoodooMemory | Item::VoodooRenderer | Item::VoodooTextureSampling | Item::VoodooGamma => s.voodoo.enabled,
             Item::PowerVrFilter => s.powervr.is_some(),
             Item::VeriteRisc | Item::VeriteIrq => s.machine.is_verite(),
             Item::ToadForceMemory | Item::ToadForceRenderer => s.machine.is_toadforce(),
@@ -661,12 +662,12 @@ impl Item {
     pub(super) fn applies(self) -> Applies {
         use Item::*;
         match self {
-            Scale | Fullscreen | Aspect | Vrr | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
+            Scale | Fullscreen | Aspect | Vrr | FpsCap | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
             Cycles | AutoFps | AutoBusyOs | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | PauseInSettings | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
             | ToadForceRenderer
-            | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooDither | VoodooTextureSampling | VoodooAnisotropy | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
+            | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooDither | VoodooTextureSampling | VoodooAnisotropy | VoodooOverlay | PowerVrFilter => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             MonitorEffects => Applies::Now,
             Post => Applies::NextStart,
@@ -722,6 +723,10 @@ impl Item {
             Fullscreen => on_off(s.fullscreen),
             Aspect => s.aspect.name().to_string(),
             Vrr => on_off(s.vrr),
+            FpsCap => match s.fps_cap {
+                None => "Off".to_string(),
+                Some(n) => format!("{} fps", n),
+            },
             VrMode => match s.vr.mode {
                 crate::vr::VrMode::Off => "off",
                 crate::vr::VrMode::Desktop => "3d in 2d window",
@@ -840,10 +845,6 @@ impl Item {
             VoodooAnisotropy => match s.voodoo.anisotropy {
                 1 => "Off".to_string(),
                 n => format!("{}x anisotropic", n),
-            },
-            VoodooFpsCap => match s.voodoo.fps_cap {
-                None => "Off".to_string(),
-                Some(n) => format!("{} fps", n),
             },
             VoodooGamma => match s.voodoo.gamma {
                 None => "Off".to_string(),

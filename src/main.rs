@@ -1632,16 +1632,17 @@ fn main() -> Result<ExitCode, String> {
         // The VFX1 on the desk of the 3D scene, and the head wearing it.
         display.set_vfx1(settings.vfx1.enabled);
         vfx1_host.track(&mut cpu.bus, vfx1_worn, &settings.vfx1, waiting || det.is_some());
-        cpu.bus.set_voodoo_fps_cap(settings.voodoo.fps_cap);
+        cpu.bus.set_fps_cap(settings.fps_cap);
         cpu.bus.set_voodoo_texture_sampling(settings.voodoo.texture_sampling);
         cpu.bus.set_powervr_filter(settings.powervr_filter);
         // With a variable refresh rate, each frame runs to a vertical
         // retrace of the machine's display and is shown when it is due,
         // so the window refreshes at the machine's rate, where the host's
-        // display goes that fast; under the 3dfx frame rate cap, at the
-        // cap's frame times, which the card's swaps keep to.
+        // display goes that fast; while a program shows its frames
+        // through the frame rate cap, on any card, at the cap's frame
+        // times, which its presents keep to.
         let refresh = (settings.vrr && !waiting && det.is_none())
-            .then(|| cpu.bus.voodoo_cap_timing().unwrap_or_else(|| cpu.bus.refresh_timing()))
+            .then(|| cpu.bus.frame_cap_timing().unwrap_or_else(|| cpu.bus.refresh_timing()))
             .filter(|timing| display.shows_hz(timing.hz()));
         let batch_end = if waiting {
             cpu.bus.clock.icount

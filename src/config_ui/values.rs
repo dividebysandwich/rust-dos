@@ -26,10 +26,27 @@ pub(super) fn cycle<T: PartialEq + Clone>(values: &[T], current: &T, dir: isize)
 }
 
 /// `s` with each of `values` put in by `set`, in turn.
-/// The 3dfx frame rate caps to pick from: none, and the rates games ran
-/// at and that divide common refresh rates evenly.
-const FPS_CAPS: [Option<u32>; 13] =
-    [None, Some(20), Some(24), Some(25), Some(30), Some(35), Some(40), Some(45), Some(48), Some(50), Some(60), Some(72), Some(120)];
+/// The frame rate caps to pick from: none, the rates games ran at and
+/// that divide common refresh rates evenly, and the rates of faster
+/// displays.
+const FPS_CAPS: [Option<u32>; 16] = [
+    None,
+    Some(20),
+    Some(24),
+    Some(25),
+    Some(30),
+    Some(35),
+    Some(40),
+    Some(45),
+    Some(48),
+    Some(50),
+    Some(60),
+    Some(72),
+    Some(75),
+    Some(120),
+    Some(144),
+    Some(240),
+];
 
 /// The 3dfx gammas to pick from: none, then 0.1 to 2.0 in steps of 0.1.
 fn gammas() -> impl Iterator<Item = Option<f32>> {
@@ -196,6 +213,7 @@ impl Item {
             Fullscreen => on_off(|s, on| s.fullscreen = on),
             Aspect => each(s, AspectRatio::ALL, |s, aspect| s.aspect = aspect),
             Vrr => on_off(|s, on| s.vrr = on),
+            FpsCap => each(s, FPS_CAPS, |s, fps| s.fps_cap = fps),
             VrMode => each(s, crate::vr::VrMode::ALL, |s, mode| s.vr.mode = mode),
             VrControllers => each(s, crate::vr::VrControllers::ALL, |s, c| s.vr.controllers = c),
             VrSpatialAudio => on_off(|s, on| s.vr.spatial_audio = on),
@@ -252,7 +270,6 @@ impl Item {
             VoodooDither => on_off(|s, on| s.voodoo.dither = on),
             VoodooMsaa => each(s, [1, 2, 4, 8], |s, samples| s.voodoo.msaa = samples),
             VoodooAnisotropy => each(s, [1, 2, 4, 8, 16], |s, n| s.voodoo.anisotropy = n),
-            VoodooFpsCap => each(s, FPS_CAPS, |s, fps| s.voodoo.fps_cap = fps),
             VoodooGamma => each(s, gammas(), |s, gamma| s.voodoo.gamma = gamma),
             PowerVr => {
                 use crate::powervr::Chip;
