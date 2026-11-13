@@ -71,6 +71,7 @@ pub mod trace3d;
 pub mod user32;
 pub mod version;
 mod verdll;
+mod vmm;
 mod vfw;
 pub(crate) mod winmm;
 mod winspool;
