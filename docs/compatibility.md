@@ -179,12 +179,13 @@ Windows' locale, `win32_locale` in
 US English one unless the setting says otherwise.
 
 Set it when a game's text shows as question marks, accented Latin
-letters where another alphabet belongs (`Ñòàðò` for a Russian word), or
-the wrong letters with diacritics. That happens in what Windows draws
-for the game: its launcher or setup, dialogs, message boxes, menus and
-window titles. Text a game draws with its own fonts usually shows right
-under any locale, so a game can have an unreadable launcher and
-readable menus.
+letters where another alphabet belongs (any Cyrillic or Greek text
+comes out as a run like `Ñòàðò`), or the wrong letters with diacritics
+(Central European, Turkish and Baltic text). That happens in what
+Windows draws for the game: its launcher or setup, dialogs, message
+boxes, menus and window titles. Text a game draws with its own fonts
+usually shows right under any locale, so a game can have an unreadable
+launcher and readable menus.
 
 Which games need it:
 
