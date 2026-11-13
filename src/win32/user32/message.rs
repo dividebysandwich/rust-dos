@@ -937,7 +937,7 @@ pub fn post(cpu: &mut Cpu, tid: u32, msg: Msg) {
 }
 
 /// The time and cursor position a message posted now has.
-fn stamp(cpu: &Cpu, mut msg: Msg) -> Msg {
+pub(super) fn stamp(cpu: &Cpu, mut msg: Msg) -> Msg {
     msg.time = now_ms(cpu);
     let (x, y) = cpu.bus.win32.user.input.cursor;
     msg.x = x;
@@ -1446,6 +1446,13 @@ pub fn dispatch_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_WINDOW_HANDLE);
         return Some(0);
     }
+    // The hover's system timer (track.rs): DispatchMessage runs it, and
+    // the window procedure doesn't see it, as NT's and ReactOS's system
+    // timer procedures and Wine's dispatch_message do.
+    if m.message == WM_SYSTIMER && m.wparam == super::track::ID_TRACK_MOUSE {
+        super::track::hover_timer(cpu, m.hwnd);
+        return Some(0);
+    }
     let proc = w.proc;
     if !callable(proc) {
         return Some(0);
@@ -1799,7 +1806,7 @@ fn idle_done(cpu: &mut Cpu, t: &Task, result: u32) -> Next {
 }
 
 /// The smallest time between a timer's messages, in milliseconds.
-const MIN_ELAPSE: u32 = 10;
+pub(super) const MIN_ELAPSE: u32 = 10;
 
 /// SetTimer(hwnd, id, elapse, proc): the timer's id.
 pub fn set_timer(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {

@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 56;
+const WIN32_VERSION: u16 = 57;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -885,7 +885,8 @@ mod tests {
         (53, 0x59CC_53A1_8176_269C), // a filter graph's full-screen mode
         (54, 0xB1D0_B934_F547_E963), // Direct3D 8's cube textures
         (55, 0x33AE_9F33_F125_1478), // a video device's full-screen play
-        (56, 0xC25B_496E_12F6_82CF), // DirectDraw's run of blits to the primary surface
+        (56, 0x0BF5_7A03_9493_E7DE), // TrackMouseEvent's request, one for the desktop
+        (57, 0xDB58_8994_45E8_3D3B), // DirectDraw's run of blits to the primary surface
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

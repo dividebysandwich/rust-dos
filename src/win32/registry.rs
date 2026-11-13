@@ -73,8 +73,8 @@ const SEED: &str = r#"REGEDIT4
 @="C:\\WINDOWS\\NOTEPAD.EXE %1"
 
 [HKEY_LOCAL_MACHINE\Software\Microsoft\DirectX]
-"Version"="4.06.00.0318"
-"InstalledVersion"=hex:00,00,00,06,00,00,00,00
+"Version"="4.08.00.0400"
+"InstalledVersion"=hex:00,00,00,08,00,00,00,00
 
 [HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion]
 "VersionNumber"="4.00.950"
@@ -936,7 +936,7 @@ crate::state_fields!(Registry {
 
 #[cfg(test)]
 mod tests {
-    use super::super::version::WindowsVersion::{Win95, Win98Se};
+    use super::super::version::WindowsVersion::{Win95, Win98, Win98Se};
     use super::*;
 
     #[test]
@@ -995,12 +995,26 @@ mod tests {
         assert_eq!(value("RegisteredOwner"), b"Someone\0");
         // The values keep their places.
         assert_eq!(registry.key(key).values[0].name, "VersionNumber");
-        // DirectX 6.1 of Windows 98 SE, which has no InstalledVersion.
-        let dx = registry
-            .find(LOCAL_MACHINE, "SOFTWARE\\Microsoft\\DirectX")
-            .unwrap();
-        assert_eq!(registry.value(dx, "Version").unwrap().data, b"4.06.03.0518\0");
-        assert!(registry.value(dx, "InstalledVersion").is_none());
+    }
+
+    /// DirectX 8 is installed, as the built-in has D3D8 and DINPUT8: 8.0a
+    /// under Windows 95, which 8.1 doesn't support, 8.1 under 98, as their
+    /// installers write Version and InstalledVersion.
+    #[test]
+    fn directxs_version_follows_the_setting() {
+        for (windows, version, installed) in [
+            (Win95, &b"4.08.00.0400\0"[..], [0, 0, 0, 8, 0, 0, 0, 0]),
+            (Win98, b"4.08.01.0881\0", [0, 0, 0, 8, 0, 0, 0, 1]),
+            (Win98Se, b"4.08.01.0881\0", [0, 0, 0, 8, 0, 0, 0, 1]),
+        ] {
+            let registry = Registry::seeded(None, windows);
+            let dx = registry
+                .find(LOCAL_MACHINE, "SOFTWARE\\Microsoft\\DirectX")
+                .unwrap();
+            let value = |name| registry.value(dx, name).unwrap().data.clone();
+            assert_eq!(value("Version"), version, "{windows:?}");
+            assert_eq!(value("InstalledVersion"), installed, "{windows:?}");
+        }
     }
 
     #[test]
