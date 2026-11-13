@@ -157,8 +157,14 @@ impl CodePage {
 
     /// The byte of `c`, or the best fit Windows gives a character the
     /// code page lacks: an accented letter's bare letter (ä is 'a' in
-    /// code page 1251), as Windows 95 does already.
+    /// code page 1251), as Windows 95 does already. Code page 1257 has no
+    /// such fits: Windows' table for it (WindowsBestFit/bestfit1257.txt
+    /// of the Unicode Consortium's MICSFT mappings) fits only the
+    /// full-width forms, so À has no byte there.
     pub fn best_fit(self, c: u16) -> Option<u8> {
+        if self.number == 1257 {
+            return self.byte(c);
+        }
         let mut c = c;
         loop {
             if let Some(b) = self.byte(c) {
@@ -496,6 +502,25 @@ mod tests {
             ansi.decode(&[0xA8, 0xB8]),
             "Ёё".encode_utf16().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn best_fits_are_windows() {
+        // As the WindowsBestFit tables of the Unicode Consortium's MICSFT
+        // mappings have them: Ā is 'A' in 1252 and 1251, ä 'a' in 1251;
+        // 1257 fits no accented letter.
+        let page = |n| CodePage::by_number(n).unwrap();
+        assert_eq!(page(1252).best_fit(0x0100), Some(b'A'));
+        assert_eq!(page(1251).best_fit(0x00E4), Some(b'a'));
+        assert_eq!(page(1257).best_fit(0x00C0), None);
+        assert_eq!(page(1257).best_fit(0x0104), Some(0xC0));
+        // 1253's undefined AAh, D2h and FFh are end-user-defined
+        // characters, so Ò and ÿ fit their bare letters and ª has none.
+        assert_eq!(page(1253).char(0xAA), 0xF8F9);
+        assert_eq!(page(1253).best_fit(0x00D2), Some(b'O'));
+        assert_eq!(page(1253).best_fit(0x00FF), Some(b'y'));
+        assert_eq!(page(1253).best_fit(0x00AA), None);
+        assert_eq!(page(1257).char(0xA1), 0xF8FC);
     }
 
     #[test]

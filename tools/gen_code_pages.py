@@ -15,6 +15,11 @@ number, as MultiByteToWideChar converts the undefined bytes 81h, 8Dh, 8Fh,
 that character (code page 857's D5h, whose number is its E5h's Õ), the
 undefined byte stands for U+F700 plus its number, in the private use
 area, so that every byte converts to a character and back.
+
+Windows gives five undefined bytes of code pages 1253 and 1257 its
+end-user-defined characters instead (EUDC below), as the MBTABLEs of the
+consortium's MAPPINGS/VENDORS/MICSFT/WindowsBestFit/bestfit1253.txt and
+bestfit1257.txt list them ("Undefined -> EUDC").
 """
 
 import os
@@ -23,6 +28,12 @@ import sys
 ANSI = [1250, 1251, 1252, 1253, 1254, 1257]
 OEM = [437, 737, 775, 850, 852, 855, 857, 866, 869]
 SUBDIR = {cp: "WINDOWS" for cp in ANSI} | {cp: "PC" for cp in OEM}
+
+# The undefined bytes Windows maps to end-user-defined characters.
+EUDC = {
+    1253: {0xAA: 0xF8F9, 0xD2: 0xF8FA, 0xFF: 0xF8FB},
+    1257: {0xA1: 0xF8FC, 0xA5: 0xF8FD},
+}
 
 
 def read(path):
@@ -52,6 +63,9 @@ def main(folder, path):
         table = read(os.path.join(folder, f"CP{cp}.TXT"))
         for b in range(0x80):
             assert table.get(b, b) == b, (cp, b)
+        for b in EUDC.get(cp, {}):
+            assert b not in table, (cp, b)
+        table |= EUDC.get(cp, {})
         defined = set(table.values())
         high = [
             table.get(b, 0xF700 + b if b in defined else b) for b in range(0x80, 0x100)
