@@ -53,7 +53,7 @@ pub mod texel;
 pub mod vertex;
 
 use super::format::Rect;
-use super::gpu::{self, Gpu};
+use super::gpu::{self, Decline, Gpu};
 use super::level1::{Draw, Indices, Level1, Target, Vertices};
 use super::regs::Error;
 use mem::Mem;
@@ -374,11 +374,11 @@ impl Renderer {
         let declined = if !attached {
             None
         } else if draw.primitive < 4 {
-            Some("points and lines")
+            Some(Decline::PointsAndLines)
         } else if matches!(state.shape.fill, 1 | 2) {
-            Some("fill mode")
+            Some(Decline::FillMode)
         } else if state.serial {
-            Some("serial state")
+            Some(Decline::Serial)
         } else {
             gpu.declines(&state)
         };

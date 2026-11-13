@@ -1149,13 +1149,20 @@ counts what the OpenGL renderer costs and misses:
   the frames one of them wanted.
 - `declined_draws`: draws the software renderer drew because OpenGL
   doesn't draw their state as the card does. Each reads its target
-  back first. `declined_for` has them by reason: `points and lines`,
-  `fill mode` and `serial state` are the rasteriser's, `no window`
-  counts draws after the window and its renderer are gone, and the
-  others are the OpenGL renderer's (`declines` in
-  `src/toadforce/gl.rs`): the state it refused, `host broken` when
-  it has no framebuffer the card's surfaces fit, and `program failed`
-  for a shader that didn't compile.
+  back first. `declined_for` has them by reason, every reason listed
+  with its count (`Decline` in `src/toadforce/gpu.rs`):
+  - the rasteriser's: `points and lines`, `fill mode` (triangles
+    drawn as points or edges) and `serial state` (a draw that reads
+    what it writes);
+  - `no host`: draws after the window and its renderer are gone;
+  - the OpenGL renderer's (`declines` in `src/toadforce/gl.rs`):
+    `host broken` (no framebuffer the card's surfaces fit),
+    `program failed` (a shader that didn't compile), and the states
+    it doesn't draw as the card does: `target format`, `no texture`,
+    `bumped cube map`, `key on a block format`,
+    `texture sampled both ways`, `first level with two filters`,
+    `linear magnify, point minify, mipped`, `key with linear mip`,
+    `texture with two samplings` and `SRCALPHASAT destination`.
 - `writes`: the times pixels the processor wrote into a surface the
   GPU had newer pixels of went to the GPU's copy as rectangles, with
   nothing read back. A surface written in parts of pixels or in too

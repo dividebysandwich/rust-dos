@@ -1704,13 +1704,15 @@ Volume 1 with both of the card's renderers.
 
 Measured on 2026-11-13 on the development machine, with nothing else
 running on it: real time, `cycles=max`, the window hidden, sound on a
-muted WASAPI device. The build is main after #992 (`0f096bb4`); the
-runs marked * are of that build with the reason counter of
-`declined_for` added, which draws the same. Each run reaches play by
-a scripted route, checked on a screenshot before and after, and then
-counts the card's flips (`SwapBuffers` presents in Oni and MDK2) over
-two windows of 20 seconds, one after the other in the same session.
-The table gives both.
+muted WASAPI device. The build is #992's last commit (`54dc652b`),
+whose code is main's after #992 (`0f096bb4`) but for MCI video. The
+runs marked * are of that build with an uncommitted first version of
+the reason counter of `declined_for`, which draws the same; their
+profiles report the build as `54dc652b` with changes. Each run reaches
+play by a scripted route, checked on a screenshot before and after,
+and then counts the card's flips (`SwapBuffers` presents in Oni and
+MDK2) over two windows of 20 seconds, one after the other in the same
+session. The table gives both.
 
 | Game and scene | OpenGL | Software | Emulated speed | Thread busy | Draws a frame | Read-backs a second |
 |---|---|---|---|---|---|---|
@@ -1777,9 +1779,9 @@ The two games below 30, with their three largest costs:
   renderer 7%. In software the card's zone grows to 39% and the rate
   falls to 15.
 - **Grom** (28). `toadforce.readback` is 43% and `toadforce.host` 18%:
-  the host renderer draws triangles only, and Grom draws 36 primitives
-  of points or lines a frame (`declined_for` counts every declined
-  draw there under `points and lines`). Each goes to the software
+  the host renderer draws triangles only, and 12 draws a frame of
+  Grom's are of points or lines (`declined_draws` grew by 7092 and
+  7344 over the windows of the two runs). Each goes to the software
   renderer, which needs the target's and the z-buffer's pixels from
   the GPU first and sends what it drew back after: 6 read-backs a
   frame of an 800x600 target, 170 a second. The game's code is 23%.
@@ -1789,7 +1791,7 @@ The two games below 30, with their three largest costs:
 The others, all above the target here:
 
 - **Nocturne** (35). The game's code is 77% of the thread, and the
-  card, its host renderer and the Direct3D layer 6% together. It
+  card, its host renderer and the Direct3D layer 5% together. It
   transforms and lights by itself. `mem.device` (5%) is the game's
   reads and writes of card memory (it locks the back buffer twice a
   frame), and `dynrec.fallback` (5%) the instructions the recompiler
@@ -1811,8 +1813,12 @@ The others, all above the target here:
 - **Max Payne** (53) and **Zanzarah** (60, capped). The game's code is
   over half, and the card's transform and lighting 15%.
 
-The passes, in the order to take them. A pass comes earlier the more
-games it helps and the further below 30 they are.
+The passes, in the order to take them. A pass on the card or the
+Windows layers comes earlier the larger the share of the thread it
+takes from the games below 30 (Grom and Oni), then the more games it
+helps; one whose gain needs a measurement first (4) comes after those
+whose share is known. The game's own code, the recompiler's work,
+comes last whatever its share.
 
 1. **Points and lines on the host renderer.** Grom, 28: 43% of its
    thread's busy time is read-backs for the draws the host declines.
@@ -1838,13 +1844,13 @@ games it helps and the further below 30 they are.
    the handlers of the hottest entry points (`glVertex*`,
    `glTexCoord*`, `glColor*`, `SetRenderState`,
    `SetTextureStageState`) without leaving its block.
-5. **Transform and lighting on the GPU.** Giants, Max Payne and
+5. **The host renderer's own calls** (`toadforce.host`, 3% to 9%
+   outside Grom, Oni's included): state and uniforms set for every
+   run. Skipping what didn't change is worth a part of it.
+6. **Transform and lighting on the GPU.** Giants, Max Payne and
    Zanzarah: 15% to 17%. None is below 30, so it waits for the passes
    above, unless a later scene of Giants needs it: its draws double in
    the scene measured behind the menu.
-6. **The host renderer's own calls** (`toadforce.host`, 3% to 9%
-   outside Grom): state and uniforms set for every run. Skipping what
-   didn't change is worth a part of it.
 7. **The game's own code** (`cpu.jit`, the largest zone of six games
    and all there is in Nocturne). This is the recompiler's speed and
    outside the card. Nocturne's `dynrec.fallback` and `mem.device`,
