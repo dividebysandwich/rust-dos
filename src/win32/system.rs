@@ -20,9 +20,13 @@
 //! room for code like SafeDisc's (which clears five debug registers), so
 //! that it doesn't run into the next vectors' handlers while it is
 //! there: the timer's (vector 8) is a few after the exceptions'.
+//!
+//! The block is VMM's locked code object as well, and ends with VMM's
+//! code (vmm.rs): the services that a program's level 0 code calls
+//! through INT 20h run in Rust here (`vxd_service`) or as that code.
 
 use super::memory::{Memory, PAGE, SYSTEM, USER, WRITABLE};
-use super::{Context, EAX, ECX, EDI, EDX, ESP, ID_IDT, IDT_TRAPS, ROM_BASE, realmode};
+use super::{Context, EAX, ECX, EDI, EDX, ESP, ID_IDT, IDT_TRAPS, ROM_BASE, realmode, vmm};
 use crate::bus::Bus;
 use crate::cpu::{CR0_PE, CR0_PG, CR4_OSFXSR, Cpu, CpuFlags, DescTable, Seg, SegCache, alu};
 use crate::dpmi::descriptor;
@@ -41,6 +45,14 @@ pub const LDT_OFFSET: u32 = LDT;
 pub const LDT_ENTRIES: u32 = 0x2000;
 const RING0_STACK: u32 = LDT + 8 * LDT_ENTRIES;
 const RING0_STACK_TOP: u32 = RING0_STACK + 2 * PAGE;
+/// VMM's client register structure (VMM.INC's Client_Reg_Struc, 48h
+/// bytes), the program's state as VMM's services see it, at the top of
+/// the level 0 stack as on Windows 9x (`vmm`).
+const CLIENT_REGS: u32 = RING0_STACK_TOP - 0x48;
+/// The level 0 stack's top, the TSS's ESP0, at Client_ES: the frame of
+/// an interrupt or exception from level 3 fills Client_EIP to Client_SS,
+/// and an exception's error code Client_Error.
+const RING0_ESP: u32 = CLIENT_REGS + 0x38;
 /// The handlers the IDT's gates lead to, `HANDLER_SIZE` bytes each: a
 /// jump to the vector's trap in the ROM, and room for a program's own
 /// code in its place.
@@ -62,11 +74,16 @@ const VXD_LOCATIONS_LEN: u32 = 5 + 9;
 /// built-in Windows had these VxDs, whose block has 0 here, keeps the
 /// empty list it had.
 const DEVICE_LIST: u32 = (VXD_LOCATIONS + VXD_LOCATIONS_LEN).next_multiple_of(4);
+/// VMM's code (`vmm`): the routines of the services the built-in Windows
+/// runs as guest code, VMM's service table and the VM's control block.
+/// It ends VMM's locked code object. VMM's data before it stays where a
+/// state saved before VMM had code has it.
+const VMM_CODE: u32 = (DEVICE_LIST + 4).next_multiple_of(16);
 /// The dynamically loaded VxDs, `VXD_SIZE` bytes each, in load order:
 /// the VxD's locked code object (`VXD_OBJECT_SIZE` bytes: its control
 /// procedure and its DDB), then VXDLDR's DeviceInfo with its ObjectInfo
 /// array and the module's name.
-const VXDS: u32 = (DEVICE_LIST + 4).next_multiple_of(16);
+const VXDS: u32 = VMM_CODE + vmm::SIZE;
 const VXD_CONTROL: u32 = 0x00;
 const VXD_DDB: u32 = 0x10;
 const VXD_OBJECT_SIZE: u32 = VXD_DDB + DDB_SIZE;
@@ -117,7 +134,8 @@ fn write_descriptor(cpu: &mut Cpu, at: u32, desc: u64) {
 /// Make the system block (`pages` in a row at `phys`) and map it, open to
 /// level 3 as Windows 95's system arena is: the GDT, the IDT and the
 /// handlers its gates lead to, the TSS with the level 0 stack and the LDT
-/// with the program's selectors, the TIB's at `tib`.
+/// with the program's selectors, the TIB's at `tib`, and VMM's data and
+/// code.
 pub fn build_tables(cpu: &mut Cpu, memory: &mut Memory, phys: u32, tib: u32) -> Option<()> {
     for page in 0..SYSTEM_BLOCK_PAGES {
         memory.map(
@@ -159,7 +177,7 @@ pub fn build_tables(cpu: &mut Cpu, memory: &mut Memory, phys: u32, tib: u32) -> 
         write_descriptor(cpu, phys + IDT + 8 * vector, gate);
     }
     let tss = (phys + TSS) as usize;
-    cpu.bus.write_32(tss + 4, SYSTEM + RING0_STACK_TOP);
+    cpu.bus.write_32(tss + 4, SYSTEM + RING0_ESP);
     cpu.bus.write_32(tss + 8, DATA0 as u32);
     cpu.bus.write_16(tss + 0x66, (IOPB - TSS) as u16);
     cpu.bus.write_8((phys + IOPB_END) as usize, 0xFF);
@@ -193,6 +211,8 @@ const DDB_FLAGS: u32 = 0x0A;
 const DDB_NAME: u32 = 0x0C;
 const DDB_INIT_ORDER: u32 = 0x14;
 const DDB_CONTROL_PROC: u32 = 0x18;
+const DDB_SERVICE_TABLE: u32 = 0x30;
+const DDB_SERVICE_TABLE_SIZE: u32 = 0x34;
 const DDB_PREV: u32 = 0x3C;
 const DDB_SIZE_FIELD: u32 = 0x40;
 const DDB_RESERVED: u32 = 0x44;
@@ -348,8 +368,10 @@ const DDB_RESERVED_BYTES: &[u8; 12] = b"1vsR2vsR3vsR";
 ///
 /// VMM's DDB has the fields of Windows 98 SE's VMM that say what it is:
 /// the name, the id 0001h, version 4.10 for both the DDK and VMM, its
-/// size and the three reserved signatures. It has no procedures and no
-/// service table: the built-in Windows runs VMM's services itself.
+/// size and the three reserved signatures, and VMM's service table
+/// (`vmm`), with an entry point in VMM's object for each service the
+/// built-in Windows has. It has no control procedure: the built-in
+/// Windows sends VMM no system control messages.
 ///
 /// The list is packed records, one for each VxD in load order: the DDB's
 /// address, a byte with the number of objects, and for each object its
@@ -359,7 +381,7 @@ const DDB_RESERVED_BYTES: &[u8; 12] = b"1vsR2vsR3vsR";
 /// the start, before VXDLDR's. The built-in Windows has VMM alone, whose
 /// locked code is this block up to the dynamically loaded VxDs: the
 /// IDT's gates lead to its handlers, as Windows 98's lead into VMM's
-/// objects.
+/// objects, and VMM's code (`VMM_CODE`) ends it.
 ///
 /// The VxDs loaded since the start are `write_dynamic_vxds`'s, each with
 /// an object of its own after VMM's, as no two VxDs' objects overlap on
@@ -368,6 +390,13 @@ const DDB_RESERVED_BYTES: &[u8; 12] = b"1vsR2vsR3vsR";
 fn write_vmm_data(cpu: &mut Cpu, phys: u32) {
     let ddb = (phys + VMM_DDB) as usize;
     write_ddb(&mut cpu.bus, ddb, b"VMM     ", 0x0001, 0x040A, (4, 10));
+    let rust_services = RUST_VMM_SERVICES.map(|service| service as u16);
+    let code = vmm::build(SYSTEM + VMM_CODE, SYSTEM + CLIENT_REGS, &rust_services);
+    cpu.bus.load_bytes((phys + VMM_CODE) as usize, &code.bytes);
+    cpu.bus
+        .write_32(ddb + DDB_SERVICE_TABLE as usize, code.service_table);
+    cpu.bus
+        .write_32(ddb + DDB_SERVICE_TABLE_SIZE as usize, code.services);
     write_dynamic_vxds(cpu, phys);
     let mut list = Vec::with_capacity(VXD_LOCATIONS_LEN as usize);
     list.extend_from_slice(&(SYSTEM + VMM_DDB).to_le_bytes());
@@ -493,6 +522,11 @@ const VMM_GET_DDB_LIST: u32 = 0x0001_013F;
 const GET_DDB: u32 = 0x0001_0146;
 const VXDLDR_GET_DEVICE_LIST: u32 = 0x0027_0005;
 
+/// The VMM services of those `vxd_service` runs, which VMM's service
+/// table has a stub for in VMM's code (`vmm`). A VMM service added to
+/// `vxd_service` goes here too.
+const RUST_VMM_SERVICES: [u32; 3] = [VMM_GET_VXD_LOCATION_LIST, VMM_GET_DDB_LIST, GET_DDB];
+
 /// The most DDBs Get_DDB looks at, so that a list a program has made
 /// circular can't keep it going.
 const DDB_LIST_LIMIT: usize = 1024;
@@ -525,10 +559,15 @@ const DDB_LIST_LIMIT: usize = 1024;
 /// `DEVICE_LIST`. The built-in Windows has those of `DYNAMIC_VXDS` that
 /// the machine has.
 ///
+/// The VMM services here (`RUST_VMM_SERVICES`) are reached through VMM's
+/// service table, whose entries for them are stubs in VMM's code that
+/// call here; the services VMM runs as guest code aren't here at all
+/// (`vmm_entry`).
+///
 /// Windows 98's VMM also rewrites the INT 20h and its dword into a call
 /// through the VxD's service table, so that the next call goes there
-/// directly. The built-in Windows has no service tables and leaves the
-/// code as it is: each call comes back here.
+/// directly. The built-in Windows leaves the code as it is: each call
+/// comes back to `idt`, which looks the table up each time.
 fn vxd_service(cpu: &mut Cpu, service: u32, ctx: &mut Context) -> bool {
     match service {
         VMM_GET_VXD_LOCATION_LIST => {
@@ -562,6 +601,30 @@ fn vxd_service(cpu: &mut Cpu, service: u32, ctx: &mut Context) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+/// The entry point of VMM's service `service` (VxD id and service
+/// number, as INT 20h's dword has them without bit 15), from the service
+/// table of VMM's DDB as memory has it, a program's hook if it replaced
+/// the entry: the routines VMM runs as guest code (`vmm`) and the stubs
+/// of those run in Rust. None for another VxD's service, a service past
+/// the table's end or with no entry, and in the process of a state saved
+/// before VMM had code, whose DDB has no table.
+fn vmm_entry(cpu: &mut Cpu, service: u32) -> Option<u32> {
+    if service >> 16 != 1 {
+        return None;
+    }
+    let ddb = SYSTEM + VMM_DDB;
+    let table = cpu.bus.guest_read_32(ddb + DDB_SERVICE_TABLE);
+    let size = cpu.bus.guest_read_32(ddb + DDB_SERVICE_TABLE_SIZE);
+    let number = service & 0xFFFF;
+    if table == 0 || number >= size {
+        return None;
+    }
+    match cpu.bus.guest_read_32(table.wrapping_add(4 * number)) {
+        0 => None,
+        entry => Some(entry),
     }
 }
 
@@ -826,7 +889,10 @@ enum Entry {
 /// the third dword of a frame from level 0, its EFLAGS, reads as a CS with
 /// RPL 3 when CF is set.
 fn gate_entry(cpu: &mut Cpu) -> Option<Entry> {
-    let top = SYSTEM + RING0_STACK_TOP;
+    // The TSS's ESP0, where the processor put the frame from level 3:
+    // `RING0_ESP`, or the stack's end in a state saved before the client
+    // register structure was there.
+    let top = cpu.bus.guest_read_32(SYSTEM + TSS + 4);
     let sp = cpu.esp();
     let read = |cpu: &mut Cpu, at: u32| cpu.bus.guest_read_32(at);
     if read(cpu, sp + 4) == CODE0 as u32 && read(cpu, sp) > 0xFFFF {
@@ -877,14 +943,36 @@ pub fn idt(cpu: &mut Cpu, vector: u8) {
         // INT 20h at level 0 is a VxD's call of a VMM or VxD service, its
         // number in the dword after the INT, as SafeDisc 2.30's level 0
         // code makes it. The service's bit 15 marks a VxDJmp, which
-        // doesn't come back; the number is in bits 0-14. The services the
-        // built-in Windows has run (`vxd_service`), and the code goes on
-        // after the dword, or for a VxDJmp at the return address on the
-        // stack. For any other, there being no VxDs, it ends the program,
-        // naming the service, as for VxDCall from level 3, and the INT, 2
-        // bytes before the dword.
+        // doesn't come back; the number is in bits 0-14. A VMM service
+        // with an entry in VMM's service table is called there, as
+        // Windows 98's VMM calls it through the table once it has
+        // rewritten the INT 20h, so that an entry a program has replaced
+        // with a hook of its own is the one that runs: returning after
+        // the dword, or for a VxDJmp jumped to. The services the built-in
+        // Windows runs in Rust run (`vxd_service`) when VMM's code calls
+        // them, from the stubs that are their entries in the table, or
+        // when the table has no entry for them (a state saved before VMM
+        // had code), and the code goes on after the dword, or for a
+        // VxDJmp at the return address on the stack. For any other, there
+        // being no VxDs, it ends the program, naming the service, as for
+        // VxDCall from level 3, and the INT, 2 bytes before the dword.
         Some(Entry::System(mut ctx)) if vector == 0x20 => {
             let service = cpu.bus.guest_read_32(ctx.eip);
+            // A stub's call of its service skips the table, whose entry
+            // is the stub. Other calls from VMM's code go through it.
+            let stub = (SYSTEM + VMM_CODE..SYSTEM + VXDS).contains(&ctx.eip)
+                && RUST_VMM_SERVICES.contains(&(service & !0x8000));
+            let entry = vmm_entry(cpu, service & !0x8000).filter(|_| !stub);
+            if let Some(entry) = entry {
+                if service & 0x8000 == 0 {
+                    let esp = ctx.gpr[ESP].wrapping_sub(4);
+                    cpu.bus.guest_write_32(esp, ctx.eip.wrapping_add(4));
+                    ctx.gpr[ESP] = esp;
+                }
+                ctx.eip = entry;
+                enter_user(cpu, &ctx);
+                return;
+            }
             if vxd_service(cpu, service & !0x8000, &mut ctx) {
                 if service & 0x8000 != 0 {
                     // VxDJmp: the service returns to the caller's caller,
@@ -963,4 +1051,92 @@ fn reflect(cpu: &mut Cpu, vector: u8, ctx: Context) {
 /// The trap ids of the IDT's vectors.
 pub fn idt_id(vector: u8) -> u16 {
     ID_IDT | vector as u16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::memory::{Memory, Pool};
+    use super::super::vmm::compared;
+    use super::*;
+
+    /// The 32 bytes of a SHA-256 digest written as 64 hex digits, for the
+    /// strings VMM's object must not hold, which are known only by their
+    /// digests.
+    fn digest_bytes(hex: &str) -> [u8; 32] {
+        std::array::from_fn(|i| {
+            u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).expect("a hex digest")
+        })
+    }
+
+    /// VMM's locked code object, as the location list reports it, of a
+    /// system block built as a process's is.
+    fn vmm_object() -> Vec<u8> {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.win32.pool = Pool::take(&mut cpu.bus, 0x40_0000);
+        let mut memory = Memory::new(&mut cpu.bus).expect("a page directory");
+        let phys = memory
+            .pages(&mut cpu.bus, SYSTEM_BLOCK_PAGES)
+            .expect("the system block's pages");
+        build_tables(&mut cpu, &mut memory, phys, 0).expect("the system block");
+        let mut ctx = Context::default();
+        assert!(vxd_service(&mut cpu, VMM_GET_VXD_LOCATION_LIST, &mut ctx));
+        // The block's linear addresses, at its physical ones.
+        let at = |lin: u32| (phys + (lin - SYSTEM)) as usize;
+        let list = at(ctx.gpr[EAX]);
+        assert_eq!(
+            cpu.bus.read_32(list),
+            SYSTEM + VMM_DDB,
+            "VMM's record first"
+        );
+        assert!(cpu.bus.read_8(list + 4) >= 1, "VMM has an object");
+        let (address, size) = (cpu.bus.read_32(list + 5), cpu.bus.read_32(list + 9));
+        assert_eq!(cpu.bus.read_8(list + 13), OBJECT_LOCKED_CODE);
+        (0..size as usize)
+            .map(|i| cpu.bus.read_8(at(address) + i))
+            .collect()
+    }
+
+    /// The bytes of Windows 98 SE's VMM that programs compare exactly
+    /// (`vmm::compared`) are in VMM's locked code object, where programs
+    /// scan it: each wholly in the object's first (size - 128) bytes, so
+    /// that it starts more than 128 bytes before the end. The four
+    /// strings of Windows' debugger and debug builds that programs expect
+    /// not to find there, known here by their lengths and SHA-256
+    /// digests, are nowhere in the object.
+    #[test]
+    fn vmm_s_object_holds_what_programs_compare_and_not_what_they_reject() {
+        let object = vmm_object();
+        let window = &object[..object.len() - 128];
+        let found = |item: &[u8]| window.windows(item.len()).any(|w| w == item);
+        assert!(found(&compared::SIMULATE_IRET_PM16), "Simulate_Iret's code");
+        assert!(found(compared::DEBUGGER_WELCOME), "the debugger's greeting");
+        assert!(found(compared::DEBUGGER_PROMPT), "the debugger's prompt");
+        assert!(found(&compared::READY_QUEUE_SIGNATURE), "the ready queue");
+        let absent: [(usize, &str); 4] = [
+            (
+                17,
+                "8244268bddd3881d7e99bbbf245a510e83672d0b98c05245faeb209a0c90433f",
+            ),
+            (
+                20,
+                "8dbf0ddc1f1ba7b7f5c625e76b4e603674b65fc9915a856da860d9e78a9d83e0",
+            ),
+            (
+                26,
+                "7cf1d01d4a19410eb1d27b399c050cd224cb4b370cedb618a9f2a972fb871d75",
+            ),
+            (
+                27,
+                "d0d59e32a74b9d305962a1c69e4284388d31beefc4d302936d110d2ea327b707",
+            ),
+        ];
+        for (len, digest) in absent {
+            use sha2::{Digest, Sha256};
+            let digest = digest_bytes(digest);
+            let at = object
+                .windows(len)
+                .position(|bytes| Sha256::digest(bytes)[..] == digest);
+            assert_eq!(at, None, "a string of {len} bytes that must be absent");
+        }
+    }
 }
