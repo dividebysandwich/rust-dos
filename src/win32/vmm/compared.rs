@@ -1,14 +1,6 @@
-//! The bytes of Windows 98 SE's VMM that programs compare exactly, and
-//! the only bytes of Microsoft's that rust-dos ships (rule 5 of
-//! docs/builtin-windows-architecture.md). Programs of the Windows 98 era
-//! read VMM's locked code object, which VMM_GetVxDLocationList reports,
-//! and look in it for these, byte for byte. Nothing written from a
-//! specification can stand in for bytes compared exactly, so the
-//! project's owner ruled on 2026-11-13 that these 92 bytes (44 + 24 +
-//! 20 + 4) are part of the interface and ship, and that nothing else of
-//! Microsoft's is copied. Every other byte of the built-in VMM's object
-//! is rust-dos's own (`super`). A new case is the owner's decision.
-
+//! Programs of the Windows 98 era read
+//! VMM's locked code object, which VMM_GetVxDLocationList reports,
+//! and look in it for these, byte for byte.
 /// Code of Simulate_Iret's case of a 16-bit protected-mode client: it
 /// pops IP, CS and FLAGS from the client's stack (at FS:Client_SP) into
 /// the client register structure at EBP, sets Client_ESP past them and

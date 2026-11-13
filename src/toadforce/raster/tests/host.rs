@@ -15,7 +15,7 @@ use super::*;
 use crate::toadforce::blit;
 use crate::toadforce::command;
 use crate::toadforce::format::Rect;
-use crate::toadforce::gpu::{self, Batch, Host, Pages, Stamp};
+use crate::toadforce::gpu::{self, Batch, Decline, Host, Pages, Stamp};
 use crate::toadforce::raster::mem::Mem;
 use crate::toadforce::raster::pipeline::{self, DrawState};
 use crate::toadforce::raster::setup::Prim;
@@ -46,8 +46,8 @@ struct Log {
     images_from_copies: u32,
 }
 
-/// Picks the states a host refuses.
-type Declines = fn(&DrawState) -> bool;
+/// Picks the states a host refuses, and why.
+type Declines = fn(&DrawState) -> Option<Decline>;
 
 /// A surface as the host has it.
 struct Copy {
@@ -201,8 +201,8 @@ impl Host for TestHost {
         "test"
     }
 
-    fn takes(&self, state: &DrawState) -> bool {
-        !(self.declines)(state)
+    fn declines(&self, state: &DrawState) -> Option<Decline> {
+        (self.declines)(state)
     }
 
     fn draw(&mut self, batch: &Batch, memory: &[u8], pages: &Pages) -> Vec<Surface> {
@@ -517,13 +517,21 @@ fn colour(format: Format) -> bool {
     matches!(format, Format::R5G6B5 | Format::X8R8G8B8 | Format::A8R8G8B8)
 }
 
-fn takes_all(_: &DrawState) -> bool {
-    false
+fn takes_all(_: &DrawState) -> Option<Decline> {
+    None
 }
 
-/// A host that has no shader for flat shading yet.
-fn declines_flat(state: &DrawState) -> bool {
-    state.shape.flat
+/// A host that leaves a state with `POINTSPRITEENABLE` on to the
+/// software renderer, so a scene can put a draw of the processor's
+/// among the host's: the state changes nothing of a line or a
+/// triangle. It counts under `no texture`.
+fn declines_sprites(state: &DrawState) -> Option<Decline> {
+    state.shape.point_sprite.then_some(Decline::NoTexture)
+}
+
+/// One that also has no program for flat shading yet.
+fn declines_flat(state: &DrawState) -> Option<Decline> {
+    declines_sprites(state).or(state.shape.flat.then_some(Decline::ProgramFailed))
 }
 
 const FORMAT: Format = Format::X8R8G8B8;
@@ -647,7 +655,7 @@ fn mixed(rig: &mut Rig) {
     let colour = rig.colour();
     rig.clear(CLEAR_COLOUR | CLEAR_DEPTH, 0xFF20_2020, 1.0, 0);
     rig.states(&[(RS_ZENABLE, 1)]);
-    // One run of commands: triangles, lines the host never gets,
+    // One run of commands: triangles, lines the host doesn't take,
     // triangles again, a clear of a corner and a triangle over it.
     let error = rig.run(|w| {
         encode::draw(w, 4, TL, 3, &corner(2.0, 2.0, 40.0, 0.5, 0xFFFF_0000));
@@ -656,7 +664,9 @@ fn mixed(rig: &mut Rig) {
             vertex_z(60.0, 24.5, 0.1, 0xFFFF_FFFF, 0.0, 0.0),
         ]
         .concat();
+        encode::render_state(w, &[(RS_POINTSPRITEENABLE, 1)]);
         encode::draw(w, 2, TL, 2, &line);
+        encode::render_state(w, &[(RS_POINTSPRITEENABLE, 0)]);
         encode::draw(w, 4, TL, 3, &corner(6.0, 12.0, 30.0, 0.3, 0xFF00_FF00));
         encode::clear(w, CLEAR_COLOUR, 0x33_3333, 0.0, 0, &[rect(56, 0, 8, 8)]);
         encode::draw(w, 4, TL, 3, &corner(52.0, 0.0, 10.0, 0.3, 0xFFFF_FFFF));
@@ -713,7 +723,7 @@ fn mixed(rig: &mut Rig) {
 #[test]
 fn the_hosts_draws_and_the_processors_keep_the_cards_order() {
     // The lines, and the flat triangle where the host refuses it.
-    let hosts: [(Declines, u32); 2] = [(takes_all, 1), (declines_flat, 2)];
+    let hosts: [(Declines, u32); 2] = [(declines_sprites, 1), (declines_flat, 2)];
     for (declines, declined) in hosts {
         let (rig, log) = same(declines, mixed);
         // What the processor wrote and no draw covered is there.
@@ -721,12 +731,147 @@ fn the_hosts_draws_and_the_processors_keep_the_cards_order() {
         let host = rig.card.describe(Rig::live());
         assert_eq!(host["renderer"], "test");
         assert_eq!(host["host"]["declined_draws"], declined);
+        // Each is counted under its reason.
+        let reasons = &host["host"]["declined_for"];
+        assert_eq!(reasons["no texture"], 1);
+        assert_eq!(reasons["program failed"], u64::from(declined - 1));
         let log = log.borrow();
         assert_eq!(host["host"]["read_backs"], log.read_backs);
         // What the processor wrote into the target went to the host's
         // copy of it.
         assert!(log.uploads >= 2 && log.writes >= 1);
     }
+}
+
+/// Lines, points and triangles drawn as their outlines and their
+/// corners, in the states that change which pixels they have.
+fn lines_and_points(rig: &mut Rig) {
+    rig.clear(CLEAR_COLOUR | CLEAR_DEPTH, 0xFF20_2020, 1.0, 0);
+    rig.states(&[(RS_ZENABLE, 1)]);
+    let line = |x0: f32, y0: f32, x1: f32, y1: f32| {
+        [
+            vertex_z(x0, y0, 0.25, 0xFFFF_FFFF, 0.0, 0.0),
+            vertex_z(x1, y1, 0.75, 0xFF40_80C0, 0.0, 0.0),
+        ]
+        .concat()
+    };
+    for centre in [0, 1] {
+        rig.states(&[(RS_PIXEL_CENTRE, centre)]);
+        // From one point into every octant, with ends on pixel
+        // centres, between them and off the target, then lines of one
+        // pixel and of none.
+        let mut lines = Vec::new();
+        for (dx, dy) in [
+            (20.0, 0.0),
+            (20.0, 7.0),
+            (20.0, 20.0),
+            (7.3, 20.0),
+            (0.0, 20.5),
+            (-7.0, 20.0),
+            (-20.0, 20.0),
+            (-20.0, 6.75),
+            (-20.5, 0.0),
+            (-40.0, -9.0),
+            (-20.0, -20.0),
+            (-6.5, -40.0),
+            (0.0, -20.0),
+            (7.0, -19.5),
+            (20.0, -20.0),
+            (40.0, -7.25),
+        ] {
+            lines.extend(line(31.0, 30.5, 31.0 + dx, 30.5 + dy));
+        }
+        lines.extend(line(3.0, 3.0, 3.0, 3.0));
+        lines.extend(line(5.5, 3.5, 5.75, 3.5));
+        lines.extend(line(8.25, 3.0, 9.0, 3.5));
+        let count = (lines.len() / 8) as u32;
+        // With and without the last pixel, shaded and flat.
+        for (last, shade) in [(1, 2), (0, 2), (0, 1), (1, 1)] {
+            rig.states(&[(RS_LASTPIXEL, last), (RS_SHADEMODE, shade)]);
+            assert_eq!(rig.run(|w| encode::draw(w, 2, TL, count, &lines)), 0);
+        }
+        rig.states(&[(RS_LASTPIXEL, 1), (RS_SHADEMODE, 2)]);
+        // A strip, clipped by a viewport smaller than the target.
+        let strip = [line(-10.0, 50.0, 30.0, 58.0), line(70.0, 44.0, 40.0, 70.0)].concat();
+        let part = Viewport {
+            x: 4,
+            y: 40,
+            width: 50,
+            height: 20,
+            min_z: 0.0,
+            max_z: 1.0,
+        };
+        assert_eq!(rig.run(|w| encode::viewport(w, &part)), 0);
+        assert_eq!(rig.run(|w| encode::draw(w, 3, TL, 4, &strip)), 0);
+        let whole = Viewport {
+            x: 0,
+            y: 0,
+            width: SIZE,
+            height: SIZE,
+            ..part
+        };
+        assert_eq!(rig.run(|w| encode::viewport(w, &whole)), 0);
+        // Points of every size, at centres, on edges and half outside.
+        for size in [1.0f32, 1.5, 2.0, 3.0, 7.25] {
+            rig.states(&[(RS_POINTSIZE, size.to_bits())]);
+            let mut points = Vec::new();
+            for (x, y) in [
+                (10.0, 12.0),
+                (20.5, 12.5),
+                (30.25, 12.75),
+                (0.0, 40.0),
+                (63.5, 63.5),
+            ] {
+                points.extend(vertex_z(x, y, 0.5, 0xFF10_F020, 0.0, 0.0));
+            }
+            assert_eq!(rig.run(|w| encode::draw(w, 1, TL, 5, &points)), 0);
+        }
+        // A triangle as its outline and as its corners, facing each
+        // way, with the back culled.
+        rig.states(&[(RS_POINTSIZE, 3.0f32.to_bits()), (RS_CULLMODE, 3)]);
+        for fill in [2, 1, 3] {
+            rig.states(&[(RS_FILLMODE, fill)]);
+            let front = corner(34.0, 2.0, 20.0, 0.1, 0xFFE0_E000);
+            assert_eq!(rig.draw(4, &front), 0);
+            let back = [
+                vertex_z(2.0, 34.0, 0.1, 0xFF00_E0E0, 0.0, 0.0),
+                vertex_z(2.0, 54.0, 0.1, 0xFF00_E0E0, 0.0, 0.0),
+                vertex_z(22.0, 34.0, 0.1, 0xFF00_E0E0, 0.0, 0.0),
+            ]
+            .concat();
+            assert_eq!(rig.draw(4, &back), 0);
+        }
+        rig.states(&[(RS_CULLMODE, 1)]);
+    }
+}
+
+#[test]
+fn the_host_gets_lines_and_points_as_the_triangles_of_their_pixels() {
+    // The test host fills the triangles it is given by the card's
+    // rule for triangles, so equal colours mean the squares of a line
+    // and of a point cover the line's and the point's pixels and no
+    // other, with their colours.
+    let mut software = Rig::new(FORMAT, Some(DEPTH_FORMAT));
+    lines_and_points(&mut software);
+    let (mut rig, log) = hosted(takes_all);
+    lines_and_points(&mut rig);
+    rig.card.settle(&mut rig.memory, None);
+    let host = rig.card.describe(Rig::live());
+    assert_eq!(host["host"]["declined_draws"], 0);
+    assert!(log.borrow().triangles > 400);
+    // A depth is the line's plane worked out again from a square's
+    // corners, which rounds to the next step of the buffer at a pixel
+    // half-way between two.
+    let mut apart = 0;
+    for at in (DEPTH as usize..).step_by(2).take((SIZE * SIZE) as usize) {
+        let depth = |rig: &Rig| u16::from_le_bytes([rig.memory[at], rig.memory[at + 1]]);
+        let (a, b) = (depth(&software), depth(&rig));
+        assert!(a.abs_diff(b) <= 1, "depth {a} and {b}");
+        apart += (a != b) as u32;
+        rig.memory[at..at + 2].copy_from_slice(&a.to_le_bytes());
+    }
+    assert_eq!(apart, 4, "depths that differ");
+    assert!(rig.memory == software.memory);
 }
 
 #[test]
@@ -947,8 +1092,8 @@ fn a_surface_the_host_drew_into_is_sampled_as_a_texture() {
     assert_eq!(rig.px(12, 20), 0x20_E0A0);
     assert_eq!(rig.px(40, 2), 0x10_3050);
     // And with the software renderer drawing the second target.
-    fn declines_textured(state: &DrawState) -> bool {
-        state.tex[0].is_some()
+    fn declines_textured(state: &DrawState) -> Option<Decline> {
+        state.tex[0].is_some().then_some(Decline::ProgramFailed)
     }
     same(declines_textured, render_to_texture);
 }
@@ -1043,8 +1188,9 @@ fn texture_writes(rig: &mut Rig) {
     aim(rig, &main);
     assert_eq!(rig.draw(5, &quad(0.0, 16.0, 16.0)), 0);
 
-    // Into the texture with nothing bound: lines, which the software
-    // renderer draws, and then two triangles of the host's.
+    // Into the texture with nothing bound: lines the host doesn't
+    // take, which the software renderer draws, and then two triangles
+    // of the host's.
     let line = [
         vertex(0.0, 8.5, 0xFFFF_FFFF, 0.0, 0.0),
         vertex(64.0, 12.5, 0xFFFF_FFFF, 0.0, 0.0),
@@ -1059,7 +1205,9 @@ fn texture_writes(rig: &mut Rig) {
         rig.stage(0, &plain);
         assert_eq!(rig.run(|w| encode::set_texture(w, 0, 0)), 0);
         aim(rig, &into);
+        rig.states(&[(RS_POINTSPRITEENABLE, (*primitive == 2) as u32)]);
         assert_eq!(rig.draw(*primitive, vertices), 0);
+        rig.states(&[(RS_POINTSPRITEENABLE, 0)]);
         aim(rig, &main);
         assert_eq!(rig.run(|w| encode::set_texture(w, 0, 1)), 0);
         rig.stage(0, &sampled);
@@ -1070,7 +1218,7 @@ fn texture_writes(rig: &mut Rig) {
 
 #[test]
 fn a_texture_the_host_keeps_is_copied_again_after_each_write() {
-    let (rig, log) = same(takes_all, texture_writes);
+    let (rig, log) = same(declines_sprites, texture_writes);
     // A copy at first, and one after each of the seven writes.
     assert_eq!(log.borrow().texture_uploads, 8);
     // The lines.
