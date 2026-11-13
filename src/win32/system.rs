@@ -390,13 +390,13 @@ const DDB_RESERVED_BYTES: &[u8; 12] = b"1vsR2vsR3vsR";
 fn write_vmm_data(cpu: &mut Cpu, phys: u32) {
     let ddb = (phys + VMM_DDB) as usize;
     write_ddb(&mut cpu.bus, ddb, b"VMM     ", 0x0001, 0x040A, (4, 10));
-    // The VMM services `vxd_service` runs.
-    let rust_services = [VMM_GET_VXD_LOCATION_LIST, VMM_GET_DDB_LIST, GET_DDB];
-    let rust_services = rust_services.map(|service| service as u16);
+    let rust_services = RUST_VMM_SERVICES.map(|service| service as u16);
     let code = vmm::build(SYSTEM + VMM_CODE, SYSTEM + CLIENT_REGS, &rust_services);
     cpu.bus.load_bytes((phys + VMM_CODE) as usize, &code.bytes);
-    cpu.bus.write_32(ddb + DDB_SERVICE_TABLE as usize, code.service_table);
-    cpu.bus.write_32(ddb + DDB_SERVICE_TABLE_SIZE as usize, code.services);
+    cpu.bus
+        .write_32(ddb + DDB_SERVICE_TABLE as usize, code.service_table);
+    cpu.bus
+        .write_32(ddb + DDB_SERVICE_TABLE_SIZE as usize, code.services);
     write_dynamic_vxds(cpu, phys);
     let mut list = Vec::with_capacity(VXD_LOCATIONS_LEN as usize);
     list.extend_from_slice(&(SYSTEM + VMM_DDB).to_le_bytes());
@@ -522,6 +522,11 @@ const VMM_GET_DDB_LIST: u32 = 0x0001_013F;
 const GET_DDB: u32 = 0x0001_0146;
 const VXDLDR_GET_DEVICE_LIST: u32 = 0x0027_0005;
 
+/// The VMM services of those `vxd_service` runs, which VMM's service
+/// table has a stub for in VMM's code (`vmm`). A VMM service added to
+/// `vxd_service` goes here too.
+const RUST_VMM_SERVICES: [u32; 3] = [VMM_GET_VXD_LOCATION_LIST, VMM_GET_DDB_LIST, GET_DDB];
+
 /// The most DDBs Get_DDB looks at, so that a list a program has made
 /// circular can't keep it going.
 const DDB_LIST_LIMIT: usize = 1024;
@@ -554,13 +559,15 @@ const DDB_LIST_LIMIT: usize = 1024;
 /// `DEVICE_LIST`. The built-in Windows has those of `DYNAMIC_VXDS` that
 /// the machine has.
 ///
-/// The services VMM runs as guest code aren't here: `vmm_entry` finds
-/// their entry points.
+/// The VMM services here (`RUST_VMM_SERVICES`) are reached through VMM's
+/// service table, whose entries for them are stubs in VMM's code that
+/// call here; the services VMM runs as guest code aren't here at all
+/// (`vmm_entry`).
 ///
 /// Windows 98's VMM also rewrites the INT 20h and its dword into a call
 /// through the VxD's service table, so that the next call goes there
 /// directly. The built-in Windows leaves the code as it is: each call
-/// comes back here.
+/// comes back to `idt`, which looks the table up each time.
 fn vxd_service(cpu: &mut Cpu, service: u32, ctx: &mut Context) -> bool {
     match service {
         VMM_GET_VXD_LOCATION_LIST => {
@@ -599,16 +606,18 @@ fn vxd_service(cpu: &mut Cpu, service: u32, ctx: &mut Context) -> bool {
 
 /// The entry point of VMM's service `service` (VxD id and service
 /// number, as INT 20h's dword has them without bit 15), from the service
-/// table of VMM's DDB as memory has it: those VMM runs as guest code
-/// (`vmm`). None for another VxD's service, a service past the table's
-/// end or with no entry, and in the process of a state saved before VMM
-/// had code, whose DDB has no table.
+/// table of VMM's DDB as memory has it, a program's hook if it replaced
+/// the entry: the routines VMM runs as guest code (`vmm`) and the stubs
+/// of those run in Rust. None for another VxD's service, a service past
+/// the table's end or with no entry, and in the process of a state saved
+/// before VMM had code, whose DDB has no table.
 fn vmm_entry(cpu: &mut Cpu, service: u32) -> Option<u32> {
     if service >> 16 != 1 {
         return None;
     }
-    let table = cpu.bus.guest_read_32(SYSTEM + VMM_DDB + DDB_SERVICE_TABLE);
-    let size = cpu.bus.guest_read_32(SYSTEM + VMM_DDB + DDB_SERVICE_TABLE_SIZE);
+    let ddb = SYSTEM + VMM_DDB;
+    let table = cpu.bus.guest_read_32(ddb + DDB_SERVICE_TABLE);
+    let size = cpu.bus.guest_read_32(ddb + DDB_SERVICE_TABLE_SIZE);
     let number = service & 0xFFFF;
     if table == 0 || number >= size {
         return None;
@@ -934,17 +943,36 @@ pub fn idt(cpu: &mut Cpu, vector: u8) {
         // INT 20h at level 0 is a VxD's call of a VMM or VxD service, its
         // number in the dword after the INT, as SafeDisc 2.30's level 0
         // code makes it. The service's bit 15 marks a VxDJmp, which
-        // doesn't come back; the number is in bits 0-14. The services the
-        // built-in Windows runs in Rust run (`vxd_service`), and the code
-        // goes on after the dword, or for a VxDJmp at the return address
-        // on the stack. Those VMM runs as guest code are called at their
-        // entry point, as Windows 98's VMM calls them through the service
-        // table: returning after the dword, or for a VxDJmp jumped to.
-        // For any other, there being no VxDs, it ends the program, naming
-        // the service, as for VxDCall from level 3, and the INT, 2 bytes
-        // before the dword.
+        // doesn't come back; the number is in bits 0-14. A VMM service
+        // with an entry in VMM's service table is called there, as
+        // Windows 98's VMM calls it through the table once it has
+        // rewritten the INT 20h, so that an entry a program has replaced
+        // with a hook of its own is the one that runs: returning after
+        // the dword, or for a VxDJmp jumped to. The services the built-in
+        // Windows runs in Rust run (`vxd_service`) when VMM's code calls
+        // them, from the stubs that are their entries in the table, or
+        // when the table has no entry for them (a state saved before VMM
+        // had code), and the code goes on after the dword, or for a
+        // VxDJmp at the return address on the stack. For any other, there
+        // being no VxDs, it ends the program, naming the service, as for
+        // VxDCall from level 3, and the INT, 2 bytes before the dword.
         Some(Entry::System(mut ctx)) if vector == 0x20 => {
             let service = cpu.bus.guest_read_32(ctx.eip);
+            // A stub's call of its service skips the table, whose entry
+            // is the stub. Other calls from VMM's code go through it.
+            let stub = (SYSTEM + VMM_CODE..SYSTEM + VXDS).contains(&ctx.eip)
+                && RUST_VMM_SERVICES.contains(&(service & !0x8000));
+            let entry = vmm_entry(cpu, service & !0x8000).filter(|_| !stub);
+            if let Some(entry) = entry {
+                if service & 0x8000 == 0 {
+                    let esp = ctx.gpr[ESP].wrapping_sub(4);
+                    cpu.bus.guest_write_32(esp, ctx.eip.wrapping_add(4));
+                    ctx.gpr[ESP] = esp;
+                }
+                ctx.eip = entry;
+                enter_user(cpu, &ctx);
+                return;
+            }
             if vxd_service(cpu, service & !0x8000, &mut ctx) {
                 if service & 0x8000 != 0 {
                     // VxDJmp: the service returns to the caller's caller,
@@ -955,16 +983,6 @@ pub fn idt(cpu: &mut Cpu, vector: u8) {
                 } else {
                     ctx.eip = ctx.eip.wrapping_add(4);
                 }
-                enter_user(cpu, &ctx);
-                return;
-            }
-            if let Some(entry) = vmm_entry(cpu, service & !0x8000) {
-                if service & 0x8000 == 0 {
-                    let esp = ctx.gpr[ESP].wrapping_sub(4);
-                    cpu.bus.guest_write_32(esp, ctx.eip.wrapping_add(4));
-                    ctx.gpr[ESP] = esp;
-                }
-                ctx.eip = entry;
                 enter_user(cpu, &ctx);
                 return;
             }
@@ -1041,90 +1059,13 @@ mod tests {
     use super::super::vmm::compared;
     use super::*;
 
-    /// SHA-256 of `data` (FIPS 180-4), for the strings VMM's object must
-    /// not hold, which are known only by their digests.
-    fn sha256(data: &[u8]) -> [u8; 32] {
-        const K: [u32; 64] = [
-            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-            0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-            0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-            0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-            0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-            0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-            0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-            0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-            0xc67178f2,
-        ];
-        let mut h: [u32; 8] = [
-            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-            0x5be0cd19,
-        ];
-        let mut message = data.to_vec();
-        message.push(0x80);
-        while message.len() % 64 != 56 {
-            message.push(0);
-        }
-        message.extend_from_slice(&(data.len() as u64 * 8).to_be_bytes());
-        for block in message.chunks(64) {
-            let mut w = [0u32; 64];
-            for (i, word) in block.chunks(4).enumerate() {
-                w[i] = u32::from_be_bytes(word.try_into().unwrap());
-            }
-            for i in 16..64 {
-                let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-                let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-                w[i] = w[i - 16]
-                    .wrapping_add(s0)
-                    .wrapping_add(w[i - 7])
-                    .wrapping_add(s1);
-            }
-            let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
-            for i in 0..64 {
-                let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-                let ch = (e & f) ^ (!e & g);
-                let t1 = hh
-                    .wrapping_add(s1)
-                    .wrapping_add(ch)
-                    .wrapping_add(K[i])
-                    .wrapping_add(w[i]);
-                let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-                let maj = (a & b) ^ (a & c) ^ (b & c);
-                let t2 = s0.wrapping_add(maj);
-                hh = g;
-                g = f;
-                f = e;
-                e = d.wrapping_add(t1);
-                d = c;
-                c = b;
-                b = a;
-                a = t1.wrapping_add(t2);
-            }
-            for (x, y) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
-                *x = x.wrapping_add(y);
-            }
-        }
-        let mut digest = [0; 32];
-        for (out, word) in digest.chunks_mut(4).zip(h) {
-            out.copy_from_slice(&word.to_be_bytes());
-        }
-        digest
-    }
-
-    fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
-    }
-
-    #[test]
-    fn sha256_matches_the_standard_s_examples() {
-        assert_eq!(
-            hex(&sha256(b"abc")),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-        assert_eq!(
-            hex(&sha256(b"")),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
+    /// The 32 bytes of a SHA-256 digest written as 64 hex digits, for the
+    /// strings VMM's object must not hold, which are known only by their
+    /// digests.
+    fn digest_bytes(hex: &str) -> [u8; 32] {
+        std::array::from_fn(|i| {
+            u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).expect("a hex digest")
+        })
     }
 
     /// VMM's locked code object, as the location list reports it, of a
@@ -1142,24 +1083,31 @@ mod tests {
         // The block's linear addresses, at its physical ones.
         let at = |lin: u32| (phys + (lin - SYSTEM)) as usize;
         let list = at(ctx.gpr[EAX]);
-        assert_eq!(cpu.bus.read_32(list), SYSTEM + VMM_DDB, "VMM's record first");
+        assert_eq!(
+            cpu.bus.read_32(list),
+            SYSTEM + VMM_DDB,
+            "VMM's record first"
+        );
         assert!(cpu.bus.read_8(list + 4) >= 1, "VMM has an object");
         let (address, size) = (cpu.bus.read_32(list + 5), cpu.bus.read_32(list + 9));
         assert_eq!(cpu.bus.read_8(list + 13), OBJECT_LOCKED_CODE);
-        (0..size as usize).map(|i| cpu.bus.read_8(at(address) + i)).collect()
+        (0..size as usize)
+            .map(|i| cpu.bus.read_8(at(address) + i))
+            .collect()
     }
 
     /// The bytes of Windows 98 SE's VMM that programs compare exactly
     /// (`vmm::compared`) are in VMM's locked code object, where programs
-    /// scan it: at a start more than 128 bytes before its end. The four
+    /// scan it: each wholly in the object's first (size - 128) bytes, so
+    /// that it starts more than 128 bytes before the end. The four
     /// strings of Windows' debugger and debug builds that programs expect
     /// not to find there, known here by their lengths and SHA-256
-    /// digests, aren't.
+    /// digests, are nowhere in the object.
     #[test]
     fn vmm_s_object_holds_what_programs_compare_and_not_what_they_reject() {
         let object = vmm_object();
-        let window = object.len() - 128;
-        let found = |item: &[u8]| (0..window).any(|at| object[at..].starts_with(item));
+        let window = &object[..object.len() - 128];
+        let found = |item: &[u8]| window.windows(item.len()).any(|w| w == item);
         assert!(found(&compared::SIMULATE_IRET_PM16), "Simulate_Iret's code");
         assert!(found(compared::DEBUGGER_WELCOME), "the debugger's greeting");
         assert!(found(compared::DEBUGGER_PROMPT), "the debugger's prompt");
@@ -1183,9 +1131,11 @@ mod tests {
             ),
         ];
         for (len, digest) in absent {
-            let at = (0..window)
-                .filter(|&at| at + len <= object.len())
-                .find(|&at| hex(&sha256(&object[at..at + len])) == digest);
+            use sha2::{Digest, Sha256};
+            let digest = digest_bytes(digest);
+            let at = object
+                .windows(len)
+                .position(|bytes| Sha256::digest(bytes)[..] == digest);
             assert_eq!(at, None, "a string of {len} bytes that must be absent");
         }
     }
