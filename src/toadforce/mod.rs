@@ -395,7 +395,8 @@ impl ToadForce {
             "host": {
                 "read_backs": self.gpu.read_backs(),
                 "read_backs_for": self.gpu.causes(),
-                "declined_draws": self.gpu.declined,
+                "declined_draws": self.gpu.declined(),
+                "declined_for": self.gpu.declined_for(),
                 "writes": self.gpu.writes(),
                 "counts": self.gpu.status(),
             },
