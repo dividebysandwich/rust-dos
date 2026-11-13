@@ -805,9 +805,7 @@ rust-dos is GPL-2.0-or-later.
   code is used. HX DOS Extender has no license file, so it serves as a
   reference and a test, not a source.
 - Nothing from Microsoft is used or shipped: no DLLs, fonts or headers
-  beyond what Wine's and MinGW's public headers document. The one
-  exception is the 92 bytes of VMM that programs compare exactly (rule
-  5 under "Rules the code follows").
+  beyond what Wine's and MinGW's public headers document.
 
 ## Rules the code follows
 
