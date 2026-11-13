@@ -497,6 +497,7 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     for (arg, word) in args.iter_mut().zip(raw.as_chunks::<4>().0) {
         *arg = u32::from_le_bytes(*word);
     }
+    drop(profile);
     let args = &*args;
     if cpu.bus.guest_faulted() {
         return;
@@ -511,7 +512,6 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     if cpu.bus.toadforce_queued() && settles(id) {
         super::screen::settle(cpu);
     }
-    drop(profile);
     let result = {
         let _profile = std::ptr::eq(dll, &super::opengl32::DLL)
             .then(|| crate::profile::zone(crate::profile::Zone::OpenGlCall));
