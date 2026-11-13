@@ -21,11 +21,13 @@
 //! was, SPI_GETMOUSEHOVERWIDTH by SPI_GETMOUSEHOVERHEIGHT pixels, for
 //! the hover time: the request's, or SPI_GETMOUSEHOVERTIME's for
 //! HOVER_DEFAULT. A move out of the rectangle starts it again at the
-//! cursor. Once the time is over the window gets the hover message, and
-//! the hover request ends, the leave one going on. The time is on the
-//! emulated clock, and is the window's thread's: the thread looks at it
-//! as it gets messages, and a thread waiting for messages wakes for it,
-//! as for a timer.
+//! cursor. The time is a system timer of the window (`ID_TRACK_MOUSE`),
+//! as Windows has it (ReactOS's ID_EVENT_SYSTIMER_MOUSEHOVER, Wine's
+//! SYSTEM_TIMER_TRACK_MOUSE): the window's thread gets its WM_SYSTIMER as
+//! it gets messages, on the emulated clock, and DispatchMessage of it
+//! posts the hover message and ends the hover request, the leave one
+//! going on. A program that doesn't dispatch the WM_SYSTIMER gets no
+//! hover, as on Windows.
 //!
 //! COMCTL32 has _TrackMouseEvent from version 4.70 on (Windows NT 4.0,
 //! Windows 95 OSR2, Internet Explorer 3.01), which is the version the
@@ -34,7 +36,7 @@
 //! a timer of its own; the built-in one has this file's under each.
 
 use super::input::{HTCLIENT, HTNOWHERE, hit_test};
-use super::message::{self, Msg};
+use super::message::{self, Msg, Timer};
 use super::{
     ERROR_INVALID_FLAGS, ERROR_INVALID_PARAMETER, ERROR_INVALID_WINDOW_HANDLE, FALSE, State, TRUE,
     current_tid, read_words, set_error, user, write_words,
@@ -55,6 +57,10 @@ pub const WM_MOUSEHOVER: u32 = 0x2A1;
 pub const WM_NCMOUSELEAVE: u32 = 0x2A2;
 pub const WM_MOUSELEAVE: u32 = 0x2A3;
 
+/// The id of the hover's system timer: ReactOS's ID_TME_TIMER and Wine's
+/// SYSTEM_TIMER_TRACK_MOUSE.
+pub const ID_TRACK_MOUSE: u32 = 0xFFFA;
+
 /// HOVER_DEFAULT: the system's hover time.
 const HOVER_DEFAULT: u32 = 0xFFFF_FFFF;
 /// TRACKMOUSEEVENT's size.
@@ -72,17 +78,13 @@ pub struct Tracking {
     pub hover_ms: u32,
     /// The middle of the hover rectangle on the screen.
     pub origin: (i32, i32),
-    /// When the hover time is over, in microseconds of the emulated
-    /// clock; 0 without `TME_HOVER`.
-    pub due: u64,
 }
 
 crate::state_fields!(Tracking {
     hwnd,
     flags,
     hover_ms,
-    origin,
-    due
+    origin
 });
 
 /// TrackMouseEvent(info) and COMCTL32's _TrackMouseEvent(info). A wrong
@@ -136,8 +138,8 @@ pub fn track_mouse_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let mut t = user(cpu).input.tracking.take().unwrap_or(asked);
     if flags & TME_CANCEL != 0 {
         t.flags &= !(flags & (TME_HOVER | TME_LEAVE));
-        if t.flags & TME_HOVER == 0 {
-            t.due = 0;
+        if flags & TME_HOVER != 0 {
+            kill_hover_timer(user(cpu), hwnd);
         }
     } else {
         t.flags |= flags & (TME_HOVER | TME_LEAVE);
@@ -149,21 +151,47 @@ pub fn track_mouse_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 hover
             };
             t.origin = user(cpu).input.cursor;
-            t.due = cpu.bus.clock.now_micros() + t.hover_ms as u64 * 1000;
+            set_hover_timer(cpu, hwnd, t.hover_ms);
         }
     }
     if t.flags & (TME_HOVER | TME_LEAVE) != 0 {
-        let tid = current_tid(cpu);
-        let other_thread = user(cpu).window(hwnd).is_some_and(|w| w.tid != tid);
         user(cpu).input.tracking = Some(t);
-        // The hover time is the window's thread's. When that is another
-        // thread, it may be waiting for messages until a time that
-        // doesn't know of the hover: it looks again.
-        if other_thread {
-            crate::win32::thread::wake(cpu);
-        }
     }
     Some(TRUE)
+}
+
+/// The hover's system timer for `hwnd`, on the window's thread, due
+/// `ms` from now, in place of the one it had.
+fn set_hover_timer(cpu: &mut Cpu, hwnd: u32, ms: u32) {
+    let Some(tid) = user(cpu).window(hwnd).map(|w| w.tid) else {
+        return;
+    };
+    let now = cpu.bus.clock.now_micros();
+    let elapse = ms.max(message::MIN_ELAPSE);
+    let other_thread = tid != current_tid(cpu);
+    let state = user(cpu);
+    kill_hover_timer(state, hwnd);
+    state.timers.push(Timer {
+        hwnd,
+        id: ID_TRACK_MOUSE,
+        tid,
+        elapse,
+        due: now + elapse as u64 * 1000,
+        proc: 0,
+        system: true,
+    });
+    // The thread running sets its own wait's end when it next waits;
+    // another one may be waiting until a time that doesn't know of the
+    // timer, and looks again.
+    if other_thread {
+        crate::win32::thread::wake(cpu);
+    }
+}
+
+fn kill_hover_timer(state: &mut State, hwnd: u32) {
+    state
+        .timers
+        .retain(|t| !(t.system && t.hwnd == hwnd && t.id == ID_TRACK_MOUSE));
 }
 
 /// TME_QUERY: the TRACKMOUSEEVENT that would make the desktop's request,
@@ -269,6 +297,7 @@ fn end(cpu: &mut Cpu) {
     let Some(t) = user(cpu).input.tracking.take() else {
         return;
     };
+    kill_hover_timer(user(cpu), t.hwnd);
     if t.flags & TME_LEAVE != 0 {
         post_leave(cpu, &t);
     }
@@ -279,7 +308,6 @@ fn end(cpu: &mut Cpu) {
 /// asked for one, and a hover rectangle the cursor has left starts again
 /// around it.
 pub fn mouse_moved(cpu: &mut Cpu) {
-    let now = cpu.bus.clock.now_micros();
     let (width, height, _) = hover_metrics(cpu);
     let state = user(cpu);
     let cursor = state.input.cursor;
@@ -293,33 +321,26 @@ pub fn mouse_moved(cpu: &mut Cpu) {
     let t = state.input.tracking.as_mut().unwrap();
     if t.flags & TME_HOVER != 0 && !in_hover_rect(t.origin, cursor, width, height) {
         t.origin = cursor;
-        t.due = now + t.hover_ms as u64 * 1000;
+        let (hwnd, ms) = (t.hwnd, t.hover_ms);
+        set_hover_timer(cpu, hwnd, ms);
     }
 }
 
-/// When the hover time of the thread `tid` is over, if the desktop's
-/// request tracks the hover of one of its windows.
-pub fn hover_due(state: &State, tid: u32) -> Option<u64> {
-    let t = state.input.tracking.as_ref()?;
-    let mine = state.window(t.hwnd).is_some_and(|w| w.tid == tid);
-    (mine && t.flags & TME_HOVER != 0).then_some(t.due)
-}
-
-/// The thread `tid` looks for messages: if the hover time of its window
-/// is over, the window gets the hover message, and the hover request
-/// ends.
-pub fn hover_tick(cpu: &mut Cpu, tid: u32) {
-    let now = cpu.bus.clock.now_micros();
-    if hover_due(user(cpu), tid).is_none_or(|due| due > now) {
-        return;
-    }
+/// DispatchMessage of the hover's WM_SYSTIMER for `hwnd`: the hover time
+/// is over, so the timer stops, and with the cursor still on the part
+/// of the window tracked, the window gets the hover message and the
+/// hover request ends. A cursor gone without a move USER saw ends the
+/// request as a move would.
+pub fn hover_timer(cpu: &mut Cpu, hwnd: u32) {
     let state = user(cpu);
+    kill_hover_timer(state, hwnd);
     let Some(t) = state.input.tracking.clone() else {
         return;
     };
+    if t.hwnd != hwnd || t.flags & TME_HOVER == 0 {
+        return;
+    }
     if !on_part(state, &t) {
-        // The cursor left without a move USER saw: the request ends as
-        // for a move.
         end(cpu);
         return;
     }
@@ -329,7 +350,6 @@ pub fn hover_tick(cpu: &mut Cpu, tid: u32) {
         *tracking = None;
     } else if let Some(left) = tracking.as_mut() {
         left.flags &= !TME_HOVER;
-        left.due = 0;
     }
     let (x, y) = state.input.cursor;
     if t.flags & TME_NONCLIENT != 0 {
@@ -344,7 +364,7 @@ pub fn hover_tick(cpu: &mut Cpu, tid: u32) {
 }
 
 /// The window `hwnd` is destroyed: a request for it ends without a
-/// message.
+/// message (its timers go with the window).
 pub fn window_destroyed(state: &mut State, hwnd: u32) {
     if state
         .input
