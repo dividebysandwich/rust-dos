@@ -151,8 +151,14 @@ impl Host for HostLink {
         "OpenGL"
     }
 
-    fn takes(&self, state: &rust_dos::toadforce::raster::pipeline::DrawState) -> bool {
-        self.0.borrow().as_ref().is_some_and(|h| h.takes(state))
+    fn declines(
+        &self,
+        state: &rust_dos::toadforce::raster::pipeline::DrawState,
+    ) -> Option<rust_dos::toadforce::gpu::Decline> {
+        match &*self.0.borrow() {
+            Some(host) => host.declines(state),
+            None => Some(rust_dos::toadforce::gpu::Decline::NoHost),
+        }
     }
 
     fn draw(&mut self, batch: &gpu::Batch, memory: &[u8], pages: &gpu::Pages) -> Vec<Surface> {

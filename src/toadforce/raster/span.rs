@@ -9,7 +9,7 @@ use super::math;
 use super::mem::Mem;
 use super::pipeline::{Arg, DrawState, Fog, REGS, Reg, Step};
 use super::sample::{Sampler, cube_face};
-use super::setup::{Plane, Prim};
+use super::setup::{Prim, colour};
 use super::texel::{self, A, B, G, R, Rgba};
 use crate::toadforce::format::Format;
 use crate::toadforce::level1::depth_value;
@@ -47,13 +47,6 @@ impl Default for Chunk {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// A colour's four channels from their planes over w.
-#[inline]
-fn colour(planes: &[Plane; 4], fx: f32, fy: f32, w: f32) -> Rgba {
-    // A number that is none casts to 0.
-    planes.map(|p| (p.eval(fx, fy) * w + 0.5).clamp(0.0, 255.0) as u8)
 }
 
 /// A colour as a pixel of `format`, a render target's: each channel
