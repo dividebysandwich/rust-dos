@@ -57,27 +57,34 @@ pub fn set(cpu: &mut Cpu, id: u32, c: Change) {
     apply(cpu, id, &c);
 }
 
-/// Make the change.
+/// Make the change. Programs set states to the values they have
+/// already, many times a frame: a state is written only when the
+/// value differs, since a write gives the device a new stamp and the
+/// next draw then binds the card's state anew (`device::Device`).
 fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
     let value = c.data.first().copied().unwrap_or(0);
     match c.kind {
         CHANGE_RENDER => render(cpu, id, c.a, value),
         CHANGE_STAGE => {
+            let at = (c.a * 32 + c.b) as usize;
             if let Some(d) = get(cpu, id)
-                && let Some(s) = d.stages.get_mut((c.a * 32 + c.b) as usize)
+                && d.stages.get(at).is_some_and(|s| *s != value)
             {
-                *s = value;
+                d.stages[at] = value;
             }
         }
         CHANGE_TRANSFORM => {
+            let at = c.a as usize;
             if let (Some(d), Ok(m)) = (get(cpu, id), <[u32; 16]>::try_from(&c.data[..]))
-                && let Some(t) = d.transforms.get_mut(c.a as usize)
+                && d.transforms.get(at).is_some_and(|t| t.map(f32::to_bits) != m)
             {
-                *t = m.map(f32::from_bits);
+                d.transforms[at] = m.map(f32::from_bits);
             }
         }
         CHANGE_VIEWPORT => {
-            if let (Some(d), Ok(v)) = (get(cpu, id), <[u32; 6]>::try_from(&c.data[..])) {
+            if let (Some(d), Ok(v)) = (get(cpu, id), <[u32; 6]>::try_from(&c.data[..]))
+                && viewport_words(&d.viewport) != v
+            {
                 d.viewport = Viewport7 {
                     x: v[0],
                     y: v[1],
@@ -89,7 +96,9 @@ fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
             }
         }
         CHANGE_MATERIAL => {
-            if let (Some(d), Ok(m)) = (get(cpu, id), <[u32; 17]>::try_from(&c.data[..])) {
+            if let (Some(d), Ok(m)) = (get(cpu, id), <[u32; 17]>::try_from(&c.data[..]))
+                && d.material != m
+            {
                 d.material = m;
             }
         }
@@ -195,6 +204,11 @@ pub fn set_stage_texture(cpu: &mut Cpu, id: u32, stage: u32, iface: u32) {
     let Some(d) = get(cpu, id) else {
         return;
     };
+    // The texture the stage has already: nothing changes, the
+    // references neither.
+    if d.textures.get(stage as usize) == Some(&iface) {
+        return;
+    }
     let Some(slot) = d.textures.get_mut(stage as usize) else {
         return;
     };
@@ -212,8 +226,8 @@ fn render(cpu: &mut Cpu, id: u32, s: u32, value: u32) {
     let Some(d) = get(cpu, id) else {
         return;
     };
-    if let Some(r) = d.render.get_mut(s as usize) {
-        *r = value;
+    if d.render.get(s as usize).is_some_and(|r| *r != value) {
+        d.render[s as usize] = value;
     }
     let stage0: Vec<(u32, u32)> = match s {
         RS_TEXTUREADDRESS => ADDRESS_STATES.map(|t| (t, value)).to_vec(),
@@ -267,7 +281,9 @@ fn render(cpu: &mut Cpu, id: u32, s: u32, value: u32) {
         _ => vec![],
     };
     for (kind, v) in stage0 {
-        d.stages[kind as usize] = v;
+        if d.stages[kind as usize] != v {
+            d.stages[kind as usize] = v;
+        }
     }
     if s == RS_TEXTUREHANDLE {
         let surface = d

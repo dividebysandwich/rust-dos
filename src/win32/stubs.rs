@@ -470,6 +470,7 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     };
     cpu.set_eip(cpu.eip().wrapping_add(4));
     let esp = cpu.esp();
+    let profile = crate::profile::zone(crate::profile::Zone::Win32Args);
     // The arguments, in an array on the stack unless there are more than
     // 16: this runs for every call the program makes.
     let mut few = [0u32; 16];
@@ -498,7 +499,13 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     if cpu.bus.toadforce_queued() && settles(id) {
         super::screen::settle(cpu);
     }
-    let result = (api.handler)(cpu, args);
+    drop(profile);
+    let result = {
+        let _profile = std::ptr::eq(dll, &super::opengl32::DLL)
+            .then(|| crate::profile::zone(crate::profile::Zone::OpenGlCall));
+        (api.handler)(cpu, args)
+    };
+    let _profile = crate::profile::zone(crate::profile::Zone::Win32After);
     // File mappings no handle or view holds go, then the files whose
     // last handle the function closed close in DOS.
     if !cpu.bus.win32.sections.is_empty() && super::kernel32::sweep_mappings(cpu) {

@@ -53,6 +53,7 @@ use super::super::super::surface::{
     self, DDPF_ALPHAPIXELS, DDPF_FOURCC, DDPF_PALETTEINDEXED8, DDPF_RGB, DDPF_ZBUFFER, KEY_SRC_BLT,
     MEM_VIDEO,
 };
+use super::super::super::stamp::Stamped;
 use super::super::super::{Format as DdFormat, current_pid, display, state};
 use super::super::device::{
     Device, RS_TEXTUREMAPBLEND, TA_TEXTURE, TOP_DISABLE, TOP_SELECTARG1, TSS_ALPHAARG1,
@@ -60,7 +61,7 @@ use super::super::device::{
 };
 use super::super::pipeline::{
     self, Blend, LIGHT_GLSPOT, Layout, Matrix, Rasterizer, SHADE_FLAT, ScreenVertex, Setup,
-    Vertex,
+    Vertex, ViewMap,
 };
 use super::{Description, Fill};
 use crate::cpu::Cpu;
@@ -137,10 +138,12 @@ pub struct Hal {
     pub textures: Vec<Cached>,
     /// A count of binds, for the least recently used copy.
     pub clock: u32,
-    /// What the card has of the HAL's state, as far as the HAL knows.
-    /// None after a state was loaded, and before the first draw: the
-    /// card is then set to level 1's defaults and told everything.
-    pub sent: Option<Sent>,
+    /// What the card has of the HAL's state, as far as the HAL knows,
+    /// and the last bind while the card's state is still that bind's.
+    pub told: told::Told,
+    /// Binds, and those of them that found the card's state to be the
+    /// one kept and sent nothing.
+    pub binds: [u64; 2],
     /// The `Undrawn` reasons logged so far, one bit each.
     pub logged: u32,
     /// The textures in place the card was last found to take
@@ -152,7 +155,123 @@ crate::state_fields!(Hal {
     pid,
     textures,
     clock
-} skip { sent, logged, taken });
+} skip { told, binds, logged, taken });
+
+/// What the card was told, kept so that its two parts can't come apart.
+mod told {
+    use super::{Kept, Sent};
+
+    /// The card's state as the HAL sent it (`Sent`), and the bind that
+    /// made it so (`Kept`). The second holds only while the first is
+    /// that bind's: taking the state to change it drops the bind, and
+    /// only a bind puts one back, so a clear, a new device or a lost
+    /// card can't leave a kept bind that names a state the card no
+    /// longer has. Neither is saved: after a load there is none.
+    #[derive(Clone, Debug, Default)]
+    pub struct Told {
+        sent: Option<Sent>,
+        kept: Option<Kept>,
+    }
+
+    impl Told {
+        /// The card's state, to change and `put` back. None before the
+        /// first draw and after a load.
+        pub(super) fn take(&mut self) -> Option<Sent> {
+            self.kept = None;
+            self.sent.take()
+        }
+
+        /// The card has the state `sent`, as a bind left it if `kept`.
+        pub(super) fn put(&mut self, sent: Sent, kept: Option<Kept>) {
+            self.sent = Some(sent);
+            self.kept = kept;
+        }
+
+        /// Whether the HAL told the card anything yet.
+        pub(super) fn known(&self) -> bool {
+            self.sent.is_some()
+        }
+
+        /// The last bind, while the card's state is its.
+        pub(super) fn kept(&self) -> Option<&Kept> {
+            self.kept.as_ref()
+        }
+
+        /// The kept bind names something that went: a copy's block.
+        pub(super) fn drop_kept(&mut self) {
+            self.kept = None;
+        }
+    }
+}
+
+/// A bind and what it was made from. A draw whose device, surfaces
+/// and setup are these again finds the card in the state this bind
+/// left, and has nothing to send (`kept`).
+#[derive(Clone, Debug)]
+pub struct Kept {
+    /// The stamps of the device's states (`Device::stamp`) and of
+    /// DirectDraw's objects (`State::objects`).
+    device: u64,
+    objects: u64,
+    /// The process that drew.
+    pid: u32,
+    /// Whether the card transforms the vertices.
+    lit: bool,
+    /// What a bind takes from the pipeline's setup for screen vertices:
+    /// the viewport, and the projection's last column (`RS_FOG_BY_W`).
+    view_map: ViewMap,
+    by_w: [f32; 4],
+    /// The whole setup, for vertices the card transforms.
+    setup: Option<Box<Setup>>,
+    /// The textures the card has copies of, and what `stamp` gave for
+    /// each: the pixels a copy is of change without the objects' stamp
+    /// (`State::surface_drawn`). 0 is no surface.
+    copies: [(u32, u32); UNITS as usize],
+    card: Card,
+}
+
+/// Whether a kept bind is checked by binding again: the bind must then
+/// send nothing and give the same `Card`. In debug builds, which the
+/// tests are, so that every draw of every test checks that no input of
+/// a bind changes without its stamp.
+const CHECK_KEPT: bool = cfg!(debug_assertions);
+
+/// The projection's last column, which says whether w is the distance
+/// from the eye.
+fn by_w(setup: &Setup) -> [f32; 4] {
+    let p = &setup.projection;
+    [p[3], p[7], p[11], p[15]]
+}
+
+/// What `stamp` gives for the surface `id` now, 0 for none.
+fn stamp_of(st: &super::super::super::State, id: u32) -> u32 {
+    st.surface(id).map_or(0, |s| stamp(st, s))
+}
+
+/// The kept bind's `Card`, if the card's state is still that bind's and
+/// a bind of `d` with `setup` would be made from the same: the device
+/// and the objects have its stamps, the copies' surfaces their pixels,
+/// and the setup's parts a bind reads are equal.
+fn kept(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> {
+    if cpu.bus.toadforce.as_ref().map_or(0, |card| card.level()) != 1 {
+        return None;
+    }
+    let pid = current_pid(cpu);
+    let st = &*state(cpu);
+    let k = st.hal_toadforce.told.kept()?;
+    let same = k.device == d.stamp()
+        && k.objects == Stamped::stamp(&st.objects)
+        && k.pid == pid
+        && k.lit == lit
+        && k.view_map == setup.view_map
+        && k.by_w == by_w(setup)
+        && (!lit || k.setup.as_deref() == Some(setup))
+        && k
+            .copies
+            .iter()
+            .all(|&(id, stamp)| id == 0 || stamp_of(st, id) == stamp);
+    same.then_some(k.card)
+}
 
 /// The state the HAL gives the card.
 #[derive(Clone, Debug, PartialEq)]
@@ -569,7 +688,7 @@ fn submit(cpu: &mut Cpu, words: &[u32]) {
 /// the level's defaults.
 fn sent(cpu: &mut Cpu) -> Sent {
     let level = cpu.bus.toadforce.as_ref().map_or(0, |card| card.level());
-    match hal(cpu).sent.take() {
+    match hal(cpu).told.take() {
         Some(sent) if level == 1 => sent,
         _ => {
             cpu.bus.toadforce_register_write(regs::LEVEL, 1);
@@ -758,7 +877,7 @@ fn stage_value(d: &Device, at: u32, def: &Def, diffuse_alpha: bool, lit: bool) -
 
 /// How a batch of primitives is drawn: nothing the card doesn't have in
 /// its own state.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Card {
     /// The render target, for the count of what was drawn of the
     /// picture shown.
@@ -809,8 +928,24 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
 /// `bind`, with `lit` for vertices the card transforms and lights:
 /// the card then has the device's matrices, lights, material and clip
 /// planes too, which `can_transform` found it to take.
+///
+/// Most draws follow one with the same states, textures and target.
+/// The card's state is then right already, and finding that out costs
+/// a comparison of stamps (`kept`) where a bind looks every state and
+/// every texture up again.
 fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> {
-    let target = target(cpu, d)?;
+    hal(cpu).binds[0] += 1;
+    let kept = kept(cpu, d, setup, lit);
+    if kept.is_some() {
+        hal(cpu).binds[1] += 1;
+        if !CHECK_KEPT {
+            return kept;
+        }
+    }
+    let target = {
+        let _profile = crate::profile::zone(crate::profile::Zone::D3dBindTarget);
+        target(cpu, d)?
+    };
     let pid = current_pid(cpu);
     if hal(cpu).pid != pid {
         // The copies are in the video memory of the process that drew
@@ -821,6 +956,7 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
     hal(cpu).clock = hal(cpu).clock.wrapping_add(1);
     let mut sent = sent(cpu);
     let mut words = Vec::new();
+    let asked_lit = lit;
 
     if sent.target != Some(target) {
         encode::render_target(&mut words, Some(&target));
@@ -933,6 +1069,7 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
     }
 
     // The textures of the stages in use.
+    let profile = crate::profile::zone(crate::profile::Zone::D3dBindTextures);
     let stages = (0..caps::STAGES)
         .take_while(|&s| d.stage(s, TSS_COLOROP) != TOP_DISABLE)
         .count() as u32;
@@ -942,12 +1079,17 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
     let mut sets = 0;
     let mut cube = false;
     let key = d.state(super::RS_COLORKEYENABLE) != 0;
+    let mut copies = [(0, 0); UNITS as usize];
     for unit in 0..UNITS {
         let surface = (unit < stages)
             .then(|| texture_of(cpu, d, unit as usize))
             .flatten();
         let texture = surface.and_then(|id| {
-            let texture = texture(cpu, id, key);
+            let texture = in_place(cpu, id).or_else(|| {
+                // A copy is of the surface's pixels as they are now.
+                copies[unit as usize] = (id, stamp_of(state(cpu), id));
+                cached(cpu, id, key)
+            });
             if texture.is_none() {
                 undrawn(cpu, Undrawn::Texture, id);
             }
@@ -990,6 +1132,8 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
         && first_alpha == Some(false);
 
     // The states that differ from the card's.
+    drop(profile);
+    let profile = crate::profile::zone(crate::profile::Zone::D3dBindStates);
     let depth = target.depth.map(|depth| depth.format);
     let mut pairs = Vec::new();
     for (have, id) in sent.render.iter_mut().zip(render_states()) {
@@ -1020,9 +1164,9 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
             encode::stage_state(&mut words, stage, &pairs);
         }
     }
+    drop(profile);
     submit(cpu, &words);
-    hal(cpu).sent = Some(sent);
-    Some(Card {
+    let card = Card {
         target: (
             target.colour.offset,
             target.colour.pitch,
@@ -1032,7 +1176,28 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
         sets,
         projected: !lit && (0..sets as u32).any(|stage| projected(d, stage)),
         cube,
-    })
+    };
+    if let Some(kept) = kept {
+        // `CHECK_KEPT`: the bind found kept is the one just made.
+        assert!(
+            words.is_empty() && kept == card,
+            "a bind's input changed without its stamp: {} words sent, {kept:?} kept, {card:?} bound",
+            words.len(),
+        );
+    }
+    let bind = Kept {
+        device: d.stamp(),
+        objects: Stamped::stamp(&state(cpu).objects),
+        pid,
+        lit: asked_lit,
+        view_map: setup.view_map,
+        by_w: by_w(setup),
+        setup: asked_lit.then(|| Box::new(setup.clone())),
+        copies,
+        card,
+    };
+    hal(cpu).told.put(sent, Some(bind));
+    Some(card)
 }
 
 // Textures.
@@ -1070,12 +1235,6 @@ fn chain(cpu: &mut Cpu, id: u32) -> Vec<u32> {
         at = next;
     }
     levels
-}
-
-/// The surface `id` as a texture of the card: where it is, or the
-/// HAL's copy of it. `key`: D3DRENDERSTATE_COLORKEYENABLE is on.
-fn texture(cpu: &mut Cpu, id: u32, key: bool) -> Option<Texture> {
-    in_place(cpu, id).or_else(|| cached(cpu, id, key))
 }
 
 /// The faces of the texture `id`: itself, or the six of a cube map,
@@ -1174,6 +1333,10 @@ fn in_place(cpu: &mut Cpu, id: u32) -> Option<Texture> {
 const TAKEN: usize = 64;
 
 fn hash_words(words: &[u32]) -> u32 {
+    hash(words.iter().copied())
+}
+
+fn hash(words: impl Iterator<Item = u32>) -> u32 {
     let mut h = 0x811C_9DC5u32;
     for w in words {
         h = (h ^ w).wrapping_mul(0x0100_0193);
@@ -1242,14 +1405,13 @@ fn stamp(st: &super::super::super::State, s: &surface::Surface) -> u32 {
         return s.uniqueness;
     }
     let subs = s.children.iter().filter_map(|&id| st.surface(id));
-    let all: Vec<u32> = std::iter::once(s.uniqueness)
-        .chain(subs.map(|sub| sub.uniqueness))
-        .collect();
-    hash_words(&all)
+    hash(std::iter::once(s.uniqueness).chain(subs.map(|sub| sub.uniqueness)))
 }
 
 /// Drop the copies `gone` picks, and give their blocks back.
 fn forget(cpu: &mut Cpu, gone: impl Fn(&Cached) -> bool) {
+    // A kept bind may name one of them.
+    hal(cpu).told.drop_kept();
     let (drop, keep): (Vec<Cached>, Vec<Cached>) = std::mem::take(&mut hal(cpu).textures)
         .into_iter()
         .partition(|c| gone(c));
@@ -1397,7 +1559,7 @@ fn image(cpu: &mut Cpu, id: u32, keyed: bool) -> Option<Image> {
 /// A device is made: the card goes to level 1.
 pub fn created(cpu: &mut Cpu) {
     let sent = sent(cpu);
-    hal(cpu).sent = Some(sent);
+    hal(cpu).told.put(sent, None);
 }
 
 /// The device `gone` goes: with the last one the copies' blocks go back
@@ -1410,7 +1572,7 @@ pub fn release(cpu: &mut Cpu, gone: u32) {
     // A process that ended or lost its video memory has no copies left,
     // so the blocks given back are the copies' still.
     forget(cpu, |_| true);
-    let known = hal(cpu).sent.is_some();
+    let known = hal(cpu).told.known();
     *hal(cpu) = Hal::default();
     if known {
         // The level's defaults: no render target and no texture.
@@ -1436,6 +1598,7 @@ pub fn video_memory_lost(cpu: &mut Cpu) {
     // The queued draws are for the surfaces that were there.
     screen::settle(cpu);
     hal(cpu).textures.clear();
+    hal(cpu).told.drop_kept();
 }
 
 // Drawing.
@@ -1961,7 +2124,7 @@ pub fn clear(cpu: &mut Cpu, d: &Device, rects: &[[i32; 4]], fill: Fill) {
         &list,
     );
     submit(cpu, &words);
-    hal(cpu).sent = Some(sent);
+    hal(cpu).told.put(sent, None);
     let c = target.colour;
     if flags & level1::CLEAR_COLOUR != 0 {
         let whole = [crate::win32::gdi32::Rect {

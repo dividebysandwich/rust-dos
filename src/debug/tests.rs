@@ -1884,7 +1884,13 @@ fn win32_trace_level_changes_at_run_time() {
 fn ddraw_without_a_program_has_no_surfaces() {
     let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
     let v = reply(&mut cpu, &mut hub, Cmd::Win32Ddraw).unwrap();
-    let expected = json!({"mode": null, "mode_owner": 0, "exclusive": 0, "surfaces": []});
+    let expected = json!({
+        "mode": null,
+        "mode_owner": 0,
+        "exclusive": 0,
+        "binds": {"all": 0, "kept": 0},
+        "surfaces": [],
+    });
     assert_eq!(v, expected);
     let e = reply(&mut cpu, &mut hub, Cmd::Win32Surface { id: 1, keyed: false }).unwrap_err();
     assert_eq!(e.0, 404, "{}", e.1);

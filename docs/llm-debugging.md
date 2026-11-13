@@ -1486,7 +1486,11 @@ back to `collapsed` after; `off` writes none.
 `GET /api/win32/ddraw` lists DirectDraw's surfaces, with the display
 `mode` DirectDraw set (null on the desktop's) and the ids of the
 DirectDraw objects that set it (`mode_owner`) and have exclusive mode
-(`exclusive`). Each surface has its `id`, the `pid` of its process, its
+(`exclusive`). `binds` counts the draws Direct3D's HAL on a ToadForce
+brought the card's state up to the device's for (`all`), and those of
+them that found the card's state right already and sent nothing
+(`kept`): a low share of kept ones in a scene that draws with few
+states says something writes a state before every draw. Each surface has its `id`, the `pid` of its process, its
 `interfaces` (the addresses the program passes as `this`, which the
 log's `[W32]` lines show), `width`, `height`, `pitch`, `format` (flags,
 FourCC, bits a pixel, red, green, blue and alpha masks), `caps`,

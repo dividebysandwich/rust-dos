@@ -409,20 +409,40 @@ fn apply(cpu: &mut Cpu) -> Option<(usize, u32, bool)> {
     let faces = !(c.caps & CAP_CULL_FACE != 0 && c.cull_face == GL_FRONT_AND_BACK);
     let a = applied(c)?;
     let d = inner_device::get(cpu, a.inner)?;
+    // Most draws follow one with the same state. Only what differs is
+    // written: a write gives the device a new stamp, and the HAL then
+    // binds the card's state anew (`inner_device::Device`).
     for (s, v) in a.render {
-        d.render[s as usize] = v;
+        if d.render[s as usize] != v {
+            d.render[s as usize] = v;
+        }
     }
     for (stage, s, v) in a.stages {
-        d.stages[(stage * 32 + s) as usize] = v;
+        let at = (stage * 32 + s) as usize;
+        if d.stages[at] != v {
+            d.stages[at] = v;
+        }
     }
-    d.transforms[1] = a.world;
-    d.transforms[2] = IDENTITY;
-    d.transforms[3] = a.projection;
-    d.viewport = a.viewport;
-    d.scissor = a.scissor;
-    d.depth_bias = a.depth_bias;
-    d.color_off = a.color_off;
-    d.gl_pixel_centres = true;
+    for (which, matrix) in [(1, a.world), (2, IDENTITY), (3, a.projection)] {
+        if d.transforms[which].map(f32::to_bits) != matrix.map(f32::to_bits) {
+            d.transforms[which] = matrix;
+        }
+    }
+    if !same_viewport(&d.viewport, &a.viewport) {
+        d.viewport = a.viewport;
+    }
+    if d.scissor != a.scissor {
+        d.scissor = a.scissor;
+    }
+    if d.depth_bias != a.depth_bias {
+        d.depth_bias = a.depth_bias;
+    }
+    if d.color_off != a.color_off {
+        d.color_off = a.color_off;
+    }
+    if !d.gl_pixel_centres {
+        d.gl_pixel_centres = true;
+    }
     let held: Vec<u32> = d.textures.iter().take(UNITS).copied().collect();
     for (stage, &iface) in a.textures.iter().enumerate() {
         if held[stage] != iface {
@@ -430,6 +450,12 @@ fn apply(cpu: &mut Cpu) -> Option<(usize, u32, bool)> {
         }
     }
     Some((index, a.inner, faces))
+}
+
+/// Whether two viewports are the same to the last bit.
+fn same_viewport(a: &inner_device::Viewport7, b: &inner_device::Viewport7) -> bool {
+    (a.x, a.y, a.width, a.height) == (b.x, b.y, b.width, b.height)
+        && (a.min_z.to_bits(), a.max_z.to_bits()) == (b.min_z.to_bits(), b.max_z.to_bits())
 }
 
 /// The primitives of `kind` (OpenGL's) that the vertices `order`
@@ -616,7 +642,11 @@ fn draw(
         return;
     }
     let profile = crate::profile::zone(crate::profile::Zone::OpenGl);
-    let Some((index, inner, faces)) = apply(cpu) else {
+    let applied = {
+        let _profile = crate::profile::zone(crate::profile::Zone::OpenGlApply);
+        apply(cpu)
+    };
+    let Some((index, inner, faces)) = applied else {
         return;
     };
     let all: Vec<u32>;
@@ -680,6 +710,7 @@ pub fn begin(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// glEnd().
 pub fn end(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    let profile = crate::profile::zone(crate::profile::Zone::OpenGlEnd);
     let Some(c) = ctx(cpu) else {
         return Some(0);
     };
@@ -705,6 +736,7 @@ pub fn end(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         })
         .collect();
     let backs: Option<Vec<u32>> = sided.then(|| gathered.iter().map(|v| v.back).collect());
+    drop(profile);
     draw(cpu, kind, &vertices, backs.as_deref(), None);
     Some(0)
 }
@@ -736,6 +768,7 @@ fn texture_coords(m: &Option<Matrix>, t: [f32; 4]) -> [f32; 4] {
 /// A vertex of glVertex: one with the current color and texture
 /// coordinates, between glBegin and glEnd.
 pub fn vertex(cpu: &mut Cpu, position: [f32; 4]) {
+    let _profile = crate::profile::zone(crate::profile::Zone::OpenGlVertex);
     let Some(c) = ctx(cpu) else {
         return;
     };

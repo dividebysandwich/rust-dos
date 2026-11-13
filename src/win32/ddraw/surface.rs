@@ -421,9 +421,7 @@ fn next_uniqueness(cpu: &mut Cpu) -> u32 {
 /// The surface `id` changed: its uniqueness value with it.
 pub fn changed(cpu: &mut Cpu, id: u32) {
     let value = next_uniqueness(cpu);
-    if let Some(s) = surface(cpu, id) {
-        s.uniqueness = value;
-    }
+    state(cpu).surface_drawn(id, value);
 }
 
 /// Count a frame at the next retrace if the surface `id` is the primary
