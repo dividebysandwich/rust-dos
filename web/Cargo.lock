@@ -849,7 +849,6 @@ dependencies = [
 [[package]]
 name = "oxideav-indeo"
 version = "0.0.4"
-source = "git+https://github.com/OxideAV/oxideav-indeo?rev=7fa59e6b6ea951602d428a8fbb74e71723249517#7fa59e6b6ea951602d428a8fbb74e71723249517"
 dependencies = [
  "oxideav-core",
 ]

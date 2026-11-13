@@ -63,6 +63,7 @@ icon = ["assets/rust-dos.png", "packaging/linux/rust-dos.png"]
 # tests the crates too.
 [workspace]
 members = ["crates/*"]
+exclude = ["vendor/oxideav-indeo"]
 default-members = ["."]
 
 [workspace.package]
@@ -90,9 +91,11 @@ rust-dos-ne = { path = "crates/ne" }
 rust-dos-installshield = { path = "crates/installshield" }
 # Indeo Video 3 and 5, the codecs of Video for Windows files (MSVFW32's
 # DrawDib and AVIFIL32's AVIStreamGetFrame). Pinned: its API changes
-# between 0.0.x versions. The revision is the Indeo 5 decoder that
-# follows Intel's driver (issue 985), until release 0.0.5 has it.
-oxideav-indeo = { git = "https://github.com/OxideAV/oxideav-indeo", rev = "7fa59e6b6ea951602d428a8fbb74e71723249517" }
+# between 0.0.x versions. vendor/oxideav-indeo is the crate's source with
+# the Indeo 5 decoder that follows Intel's driver (issue 985), until
+# release 0.0.5 has it: vendor/README.md says how to go back to the
+# registry's.
+oxideav-indeo = { path = "vendor/oxideav-indeo" }
 # MPEG-1 video and its Layer II audio, which MCI's MPEGVideo device
 # plays, and the framework's packet and frame types the audio decoder
 # takes. Pinned as oxideav-indeo is.

@@ -258,6 +258,41 @@ mod tests {
         assert!(yvu9_dib([luma, chroma, chroma], (2, 8)).is_none());
     }
 
+    /// Prints a hash of every picture of the first video stream of the
+    /// AVI file that RUST_DOS_AVI names, and how many of its chunks gave
+    /// one. Two builds that print the same line decode the movie to the
+    /// same pictures, which checks a change of a decoder:
+    /// `RUST_DOS_AVI=movie.avi cargo test --lib vfw::codec -- --ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore = "needs a movie: set RUST_DOS_AVI"]
+    fn hash_of_a_movies_pictures() {
+        let path = std::env::var("RUST_DOS_AVI").expect("RUST_DOS_AVI names an AVI file");
+        let file = std::fs::read(path).unwrap();
+        let bytes = |at: u32, len: u32| file.get(at as usize..)?.get(..len as usize);
+        let mut read = |at: u32, len: u32| bytes(at, len).map(<[u8]>::to_vec);
+        let avi = crate::win32::vfw::avi::parse(file.len() as u32, &mut read).unwrap();
+        let vids = u32::from_le_bytes(*b"vids");
+        let video = avi.streams.iter().find(|s| s.kind() == vids).unwrap();
+        // BITMAPINFOHEADER's biWidth, biHeight and biCompression.
+        let field = |at: usize| u32::from_le_bytes(video.format[at..at + 4].try_into().unwrap());
+        let (width, height) = (field(4), (field(8) as i32).unsigned_abs());
+        let mut codec = Codec::new(field(16));
+        assert!(!codec.is_empty(), "no decoder for the stream");
+        // FNV-1a over the DIBs.
+        let (mut hash, mut pictures) = (0xcbf2_9ce4_8422_2325u64, 0);
+        for chunk in &video.chunks {
+            let _ = codec.decode(bytes(chunk.offset, chunk.size).unwrap());
+            if let Some(dib) = codec.picture(width, height) {
+                pictures += 1;
+                for b in dib {
+                    hash = (hash ^ b as u64).wrapping_mul(0x100_0000_01b3);
+                }
+            }
+        }
+        println!("pictures of {} chunks: {pictures}, hash {hash:016x}", video.chunks.len());
+    }
+
     #[test]
     fn dib_sizes_pad_rows_and_stop_at_32_bits() {
         assert_eq!(dib_size(24, 2, 3), Some(24));
