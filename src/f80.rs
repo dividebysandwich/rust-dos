@@ -769,14 +769,18 @@ impl FpuRegs {
 
     /// Register `i`'s double where its 80 bits are that double and no
     /// more: a register that is stale, or one whose significand ends at a
-    /// double's 53 bits, and isn't a number below a double's range that
-    /// the double has as 0.
+    /// double's 53 bits and has the integer bit set where the double isn't
+    /// 0 and no bits where it is. That leaves out a number below a
+    /// double's range, which the double has as 0, and the formats a 387
+    /// doesn't take (an unnormal, a pseudo-zero or a pseudo-infinity),
+    /// whose double `F80::get_f64` makes as if the integer bit were set.
     #[inline]
     pub fn only_double(&self, i: usize) -> Option<f64> {
         let value = self.f64s[i];
         if self.stale[i] == 0 {
             let significand = self.x80[i].st as u64;
-            if significand & 0x7FF != 0 || (value == 0.0 && significand != 0) {
+            let whole = if value == 0.0 { significand == 0 } else { significand >> 63 == 1 };
+            if significand & 0x7FF != 0 || !whole {
                 return None;
             }
         }

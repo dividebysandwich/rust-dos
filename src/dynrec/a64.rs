@@ -345,8 +345,8 @@ fn narrow_addsub(ops: &mut Asm, wide: DynamicLabel) {
 
 /// Operand W`idx` of `narrow_addsub` (a physical register, or 8 for D16)
 /// into D`x`, where it is a double and no more (`FpuRegs::only_double`);
-/// to `wide` for an empty register and for 80 bits that hold more. X6
-/// and X7 are changed.
+/// to `wide` for an empty register and for 80 bits that hold more or
+/// another value. X6 and X7 are changed.
 fn narrow_operand(ops: &mut Asm, idx: u8, x: u8, wide: DynamicLabel) {
     let (value, done) = (ops.new_dynamic_label(), ops.new_dynamic_label());
     dynasm!(ops
@@ -360,14 +360,18 @@ fn narrow_operand(ops: &mut Asm, idx: u8, x: u8, wide: DynamicLabel) {
         ; ldrb w6, [x13, X(idx)]
         ; cbnz w6, =>done
         // The 80 bits count: a significand that ends at a double's 53
-        // bits, and isn't one of a number the double has as 0.
+        // bits, with the integer bit set where the double isn't 0 and
+        // nothing where it is.
         ; add x6, x11, X(idx), lsl 4
         ; ldr x6, [x6]
         ; tst x6, 0x7FF
         ; b.ne =>wide
         ; fmov x7, D(x)
         ; lsl x7, x7, 1
-        ; cbnz x7, =>done
+        ; cbz x7, >zero
+        ; tbnz x6, 63, =>done
+        ; b =>wide
+        ; zero:
         ; cbnz x6, =>wide
         ; b =>done
         ; =>value

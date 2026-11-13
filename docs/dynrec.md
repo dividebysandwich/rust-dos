@@ -363,7 +363,8 @@ rounded already and lies halfway between two singles would round the
 wrong way there, so what the first rounding left out (Knuth's two-sum
 gives it exactly) moves such a sum to its odd neighbour first, which
 rounds as the exact sum does. Everything else goes to the 80 bits as
-before: another rounding, an operand with more than a double's bits, an
+before: another rounding, an operand with more than a double's bits or
+in a format a 387 doesn't take (an unnormal, a pseudo-zero), an
 infinity or a NaN, and a sum below or above the normal numbers, which a
 387 keeps with its 15 bits of exponent.
 
