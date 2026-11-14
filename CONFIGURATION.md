@@ -3735,11 +3735,13 @@ What counts as a frame:
 - blits to the primary surface: a program that blits a frame in parts
   makes one frame of the blits in a row with nothing else drawn
   between them, and the first of them waits for the turn (a blit to
-  another surface, a lock or a device context of one, a Direct3D
-  scene or a flip starts the next frame);
-- `SwapBuffers` of a double-buffered OpenGL context, and Direct3D 8's
-  `Present` in a window, which copy the back buffer to the screen (on
-  a ToadForce, with the card's own copy).
+  another surface, a lock or a device context of one, or a Direct3D
+  scene starts the next frame; blits right after a flip are part of
+  the frame it showed);
+- `SwapBuffers` of an OpenGL context in a window, and of a
+  double-buffered one full screen, and Direct3D 8's `Present` in a
+  window, which copy the back buffer to the screen (on a ToadForce,
+  with the card's own copy).
 
 It doesn't apply to DOS programs on a VGA, an EGA or a VESA screen:
 they have no call that hands over a frame, and their frames come at the
