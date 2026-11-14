@@ -1003,10 +1003,13 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   triangles of its square and a line as a square for each run of its
   pixels in a row, so the host needs no rule of its own for either.
   The clip rectangle stays in the state for the host to cut the
-  pixels by. The coordinates of texture slot `n` are in set `n` of
-  every vertex, whichever set of the program's vertex they came from,
-  and a flat-shaded triangle has a fourth vertex, the one that gives
-  it its colours. The vertex work moves to the GPU later, if a
+  pixels by. A vertex is queued as the host's vertex buffer takes it
+  (`gpu::Vertex`, 88 bytes: the position, the two colours and four
+  sets of coordinates), so a run's triangles go there in one copy.
+  The coordinates of texture slot `n` are in set `n` of every vertex,
+  whichever set of the program's vertex they came from, and the three
+  vertices of a flat-shaded triangle all have the colours of the one
+  that gives it them. The vertex work moves to the GPU later, if a
   measurement asks for it.
 - **A draw the host doesn't take.** The host is asked for each state
   (`Host::declines`). A draw it declines (a state it has no shader for
@@ -1400,6 +1403,25 @@ DLLs are the emulator's.
   which the tests are, bind again for every kept draw and stop if the
   bind sends a word or gives another result. `/api/win32/ddraw` counts
   the binds and those kept.
+- **Screen vertices go from the program's memory to the queue.** A
+  draw of transformed vertices has nothing for the pipeline to work
+  out unless a triangle needs cutting, a point or a line needs its
+  pixels, or a flat-shaded triangle its colours. `hal::draw_screen`
+  (`hal/toadforce/direct.rs`) writes such a draw into the card's
+  queue as one `DRAW_INDEXED` triangle list: the vertices read from
+  the program's memory into the command's words, in one copy where
+  the program's layout is the card's (`D3DFVF_TLVERTEX` with one
+  stage) and gathered word by word otherwise, and the indices of the
+  triangles the cull mode keeps, a strip's and a fan's too. It
+  declines points, lines, the wireframe and point fill modes, flat
+  shading, a clip status the program asked for, a draw with a vertex
+  outside the guard band or, while the device clips, outside the
+  depth range, a draw too large for one command, and vertices in
+  memory that isn't plain RAM: those go through the pipeline, as
+  every draw of vertices to transform does. A test draws 8000
+  made-up draws both ways and compares the triangles the card gets,
+  word for word.
+  `/api/win32/ddraw` counts the draws of each way (`screen_draws`).
 - **Direct3D 8** (`d3d8/`) sits on the Direct3D 7 device today and
   keeps doing so, with `D3DCAPS8` filled from the level's table and
   hardware vertex processing offered for fixed-function draws.
@@ -2016,6 +2038,92 @@ times, twelve frames in play (half a second apart, a second apart
 in MDK2's dive) for Oni, MDK2, No One Lives Forever, Giants and
 Zanzarah (the English 1.010 build), with no pixel differing between
 the builds.
+
+### Pass 4: a screen vertex's way to the host
+
+Black & White transforms its own vertices and draws them with
+`DrawIndexedPrimitive`, 756 draws a frame (755.7 on average), 32,400
+vertices and 15,700 triangles in the scene measured here (the start
+of the movement tutorial, 800 by 600). On the way from the
+program's memory to the host's vertex buffer a vertex was copied ten
+times: the draw's bytes into a `Vec`, a `Vertex`, a `Processed` of
+about 212 bytes, a triangle's corner, a `ScreenVertex`, the card's
+words in the HAL's batch, the card's queue, the card's
+`ScreenVertex` of 160 bytes, a second one for each corner of each
+triangle with its coordinate sets in the slots, and the 88 bytes of
+the host's vertex, written field by field. It is now copied four
+times: into the queue's words ("Screen vertices go from the
+program's memory to the queue" above), the card's `ScreenVertex`,
+the host's vertex for each corner
+(`gpu::Vertex`), and the bytes the host moves to its pixel centres.
+
+Where the emulator thread's busy time goes, from a profile of 20
+seconds on each build, as milliseconds of a frame (the share times
+85% of the frame's time at the rates below). The profiles were taken
+with other work on the machine, so the figures are approximate:
+
+| Zone | Before | After |
+|---|---|---|
+| `cpu.jit`, the game's code | 14.4 | 13.6 |
+| `toadforce.host` | 2.9 | 1.8 |
+| `toadforce` | 2.3 | 2.1 |
+| `hle.win32` | 2.0 | 0.8 |
+| `hle.d3d.draw` and `hle.d3d.vertices` | 3.2 | 0.6 |
+| `hle.d3d.bind` and its parts | 1.1 | 0.9 |
+| The rest | 2.6 | 2.1 |
+| A frame's busy time | 28.6 | 21.8 |
+
+`DrawIndexedPrimitive` was 21.0% of the busy time and is 8.6%. Of
+the frame's 756 draws, 755 (754.7 on average) go the direct way and
+one, with 141 vertices, through the pipeline. What the game's calls
+cost besides is small here: about 3,200 calls a frame, of which the
+trap and the arguments are about 1% of the busy time.
+
+Frames a second, each run alone on the machine with `cycles=max`
+and the profiler off, main's build and the pass's in turn in one
+session: five runs of two 15-second windows for Black & White, and
+two runs of two 20-second windows for the others (Giants and No One
+Lives Forever from a saved state, Oni by its route):
+
+| Game | Before | After | Draws the direct way |
+|---|---|---|---|
+| Black & White, tutorial | 29.8 (29.5 to 30.0) | 39.1 (38.8 to 39.3) | 755 of 756 |
+| No One Lives Forever | 55.1 to 56.8 | 59.9 to 60.0 | 1904 of 1904 |
+| Giants | 38.8 to 39.0 | 41.0 to 41.5 | 263 of 981 |
+| Oni, training room | 46.9 to 47.2 | 47.2 to 47.4 | none |
+
+No One Lives Forever is at the 60 frames of its display mode after
+the pass, with the emulator's thread 71% to 77% busy where it was
+85%.
+
+The last column is a frame's draws the direct way out of those and
+the batches the pipeline handed the card (`screen_draws` in
+`/api/win32/ddraw`). A pipeline batch is a declined draw of screen
+vertices, an execute buffer, a vertex buffer `ProcessVertices`
+filled, or a draw of vertices to transform that the card doesn't
+transform itself, so Giants' 718 others aren't all screen draws the
+direct path declined. Giants draws most of its vertices
+untransformed, on the card's transform and lighting, and Oni's reach
+the device from the OpenGL front end already read: both gain from
+the host's queue alone. The OpenGL renderer also keeps the buffer it
+gathers a batch's vertices in from batch to batch, where it took a
+new one of some hundred kilobytes twelve times a frame.
+
+The pictures are main's: deterministic runs on the software renderer
+from a saved state, twelve frames at equal emulated times for Black
+& White (1.5 seconds apart), No One Lives Forever and Giants (a
+second apart), with no pixel differing and the same count of
+instructions run. The OpenGL renderer doesn't draw in a deterministic
+run, so the host's queue is covered there by the tests that draw each
+scene on both renderers (`toadforce::gl`).
+
+The card's draws join into runs of one state on the host as before:
+this scene's 756 draws make 560 runs, so its states change too often
+for joining to give more. `cycles=max` leaves 15% of each frame idle
+(`MAX_BUSY_SHARE`); given the whole frame, a build with the direct
+path alone ran the scene at 42.6 where it ran at 35.4 with 85%, with
+no emulated time dropped and the sound queue never dry on a quiet
+host. Whether that holds on a busy or a small one is issue 1059's.
 
 Phases 2 and 3 come before the OpenGL renderer so that the reference
 exists before the renderer that is tested against it, and so that

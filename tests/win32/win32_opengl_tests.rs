@@ -1635,6 +1635,7 @@ const GL_LIGHT_MODEL_AMBIENT: u32 = 0x0B53;
 const GL_LIGHTING_BIT: u32 = 0x40;
 const GL_SHORT: u32 = 0x1402;
 const GL_NORMAL_ARRAY: u32 = 0x8075;
+const GL_INVALID_ENUM: u32 = 0x0500;
 const GL_INVALID_VALUE: u32 = 0x0501;
 const GL_INVALID_OPERATION: u32 = 0x0502;
 
@@ -1969,4 +1970,150 @@ fn swaps_in_a_window_come_at_the_frame_rate_caps_rate() {
     assert!(worker > 100_000, "the other thread ran {worker} passes");
     let (uncapped, _) = rate("swap_cap_off", None);
     assert!(uncapped > 60.0, "{uncapped} swaps a second without the cap");
+}
+
+/// GL_MAX_TEXTURE_SIZE is the card's: 256 on a Voodoo3, whose
+/// glTexImage2D refuses a 512 by 512 texture, and 2048 on a ToadForce,
+/// which takes it. Both take texels in GL_EXT_packed_pixels' types
+/// (GL_RGBA as GL_UNSIGNED_INT_8_8_8_8). The ToadForce takes OpenGL
+/// 1.2's _REV types too (Myth II 1.8.1 gives GL_BGRA as
+/// GL_UNSIGNED_INT_8_8_8_8_REV), and refuses a four-component type with
+/// GL_RGB, with texels or without; 3dfx's ICD has no _REV type, and
+/// the Voodoo3 refuses it as a type there isn't.
+#[test]
+fn the_largest_texture_is_the_cards_and_texels_come_packed() {
+    const GL_MAX_TEXTURE_SIZE: u32 = 0x0D33;
+    const GL_BGRA: u32 = 0x80E1;
+    const GL_UNSIGNED_INT_8_8_8_8: u32 = 0x8035;
+    const GL_UNSIGNED_INT_8_8_8_8_REV: u32 = 0x8367;
+    for (card, name, largest, big, rev, mismatched) in [
+        (
+            Draws::Voodoo3,
+            "a Voodoo3",
+            256.0,
+            GL_INVALID_VALUE,
+            GL_INVALID_ENUM,
+            GL_INVALID_ENUM,
+        ),
+        (
+            Draws::ToadForce,
+            "a ToadForce",
+            2048.0,
+            0,
+            0,
+            GL_INVALID_OPERATION,
+        ),
+    ] {
+        let mut at = 0;
+        let (exe, data) = program(&data(), |a, l| {
+            let mut c = Calls { next: 0 };
+            start(a, l, &mut c)?;
+            let size = [Arg::I(GL_MAX_TEXTURE_SIZE), Arg::At(OUT)];
+            c.api(a, l, GET_FLOATV, &size)?;
+            c.api(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(TEXTURE)])?;
+            let bind = [Arg::I(GL_TEXTURE_2D), Arg::Val(TEXTURE)];
+            c.api(a, l, BIND_TEXTURE, &bind)?;
+            let image = |side, format, kind, texels| {
+                [
+                    Arg::I(GL_TEXTURE_2D),
+                    Arg::I(0),
+                    Arg::I(GL_RGBA),
+                    Arg::I(side),
+                    Arg::I(side),
+                    Arg::I(0),
+                    Arg::I(format),
+                    Arg::I(kind),
+                    texels,
+                ]
+            };
+            let none = image(512, GL_RGBA, GL_UNSIGNED_BYTE, Arg::I(0));
+            c.api(a, l, TEX_IMAGE_2D, &none)?;
+            at = c.next;
+            c.api(a, l, GET_ERROR, &[])?;
+            let packed = image(2, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, Arg::At(TEXELS));
+            c.api(a, l, TEX_IMAGE_2D, &packed)?;
+            c.api(a, l, GET_ERROR, &[])?;
+            let mismatched = image(2, GL_RGB, GL_UNSIGNED_INT_8_8_8_8_REV, Arg::At(TEXELS));
+            c.api(a, l, TEX_IMAGE_2D, &mismatched)?;
+            c.api(a, l, GET_ERROR, &[])?;
+            let no_texels = image(2, GL_RGB, GL_UNSIGNED_INT_8_8_8_8_REV, Arg::I(0));
+            c.api(a, l, TEX_IMAGE_2D, &no_texels)?;
+            c.api(a, l, GET_ERROR, &[])?;
+            let extension = image(2, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, Arg::At(TEXELS));
+            c.api(a, l, TEX_IMAGE_2D, &extension)?;
+            c.api(a, l, GET_ERROR, &[])?;
+            finish(a, l)
+        });
+        let mut cpu = machine_on("largest_texture", card, exe);
+        run_until_done(&mut cpu, data);
+        let r = |i: u32| peek(&cpu, data + RESULTS + 4 * i);
+        assert_eq!(floats(&cpu, data, OUT)[0], largest, "{name}");
+        assert_eq!(r(at), big, "512 by 512 on {name}");
+        assert_eq!(r(at + 2), rev, "_REV texels on {name}");
+        assert_eq!(r(at + 4), mismatched, "{name}");
+        assert_eq!(r(at + 6), mismatched, "no texels on {name}");
+        assert_eq!(r(at + 8), 0, "GL_EXT_packed_pixels' texels on {name}");
+    }
+}
+
+/// glReadPixels gives the pixels in the packed types texels may come
+/// in, each component in the type's bits: a blue screen is 0x0000FFFF
+/// as GL_RGBA in GL_UNSIGNED_INT_8_8_8_8, 0xFF0000FF as GL_BGRA in
+/// GL_UNSIGNED_INT_8_8_8_8_REV and 0x001F as GL_RGB in
+/// GL_UNSIGNED_SHORT_5_6_5. The Voodoo3 has GL_EXT_packed_pixels' types
+/// alone, and refuses the others as types there aren't.
+#[test]
+fn pixels_read_back_in_the_packed_types_texels_come_in() {
+    const GL_BGRA: u32 = 0x80E1;
+    const GL_UNSIGNED_INT_8_8_8_8: u32 = 0x8035;
+    const GL_UNSIGNED_INT_8_8_8_8_REV: u32 = 0x8367;
+    const GL_UNSIGNED_SHORT_5_6_5: u32 = 0x8363;
+    let reads = [
+        (GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, 0x0000_FFFFu32),
+        (GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, 0xFF00_00FF),
+        (GL_RGB, GL_UNSIGNED_SHORT_5_6_5, 0x001F),
+    ];
+    for (card, name, core) in [
+        (Draws::Voodoo3, "a Voodoo3", false),
+        (Draws::ToadForce, "a ToadForce", true),
+    ] {
+        let mut at = 0;
+        let (exe, data) = program(&data(), |a, l| {
+            let mut c = Calls { next: 0 };
+            start(a, l, &mut c)?;
+            let blue = [Arg::F(0.0), Arg::F(0.0), Arg::F(1.0), Arg::F(1.0)];
+            c.api(a, l, CLEAR_COLOR, &blue)?;
+            c.api(a, l, CLEAR, &[Arg::I(GL_COLOR_BUFFER_BIT)])?;
+            at = c.next;
+            for (i, (format, kind, _)) in reads.iter().enumerate() {
+                let one = [
+                    Arg::I(0),
+                    Arg::I(0),
+                    Arg::I(1),
+                    Arg::I(1),
+                    Arg::I(*format),
+                    Arg::I(*kind),
+                    Arg::At(PIXELS + 4 * i as u32),
+                ];
+                c.api(a, l, READ_PIXELS, &one)?;
+                c.api(a, l, GET_ERROR, &[])?;
+            }
+            finish(a, l)
+        });
+        let mut cpu = machine_on("packed_read_back", card, exe);
+        run_until_done(&mut cpu, data);
+        let r = |i: u32| peek(&cpu, data + RESULTS + 4 * i);
+        for (i, (_, kind, value)) in reads.iter().enumerate() {
+            let taken = core || *kind == GL_UNSIGNED_INT_8_8_8_8;
+            let error = r(at + 2 * i as u32 + 1);
+            let pixel = peek(&cpu, data + PIXELS + 4 * i as u32);
+            if taken {
+                assert_eq!(error, 0, "{kind:#x} on {name}");
+                assert_eq!(pixel, *value, "{kind:#x} on {name}");
+            } else {
+                assert_eq!(error, GL_INVALID_ENUM, "{kind:#x} on {name}");
+                assert_eq!(pixel, 0, "{kind:#x} on {name}");
+            }
+        }
+    }
 }

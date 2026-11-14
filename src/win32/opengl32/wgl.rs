@@ -315,9 +315,13 @@ pub const WGL_EXTENSIONS_AT: u32 = 0x300;
 /// 3dfx's Banshee and Voodoo3 ICD (3DFXOGL.DLL) that are here. Its own
 /// list has more (paletted textures, texture compression, point
 /// parameters and others), which aren't. GL_EXT_bgra is in it, and
-/// Myth II 1.8.3 takes an OpenGL 1.1 device only with it.
+/// Myth II 1.8.3 takes an OpenGL 1.1 device only with it. So is
+/// GL_EXT_packed_pixels, in the ICD of driver 1.1.51 and in later ones,
+/// whose type checks take its five types and none of OpenGL 1.2's
+/// others (`PackedPixels`).
 pub const EXTENSIONS: &str = "GL_ARB_multitexture GL_EXT_bgra \
-    GL_EXT_compiled_vertex_array GL_EXT_texture_env_add WGL_EXT_swap_control";
+    GL_EXT_compiled_vertex_array GL_EXT_packed_pixels GL_EXT_texture_env_add \
+    WGL_EXT_swap_control";
 /// The WGL extensions, as wglGetExtensionsStringEXT gives them.
 pub const WGL_EXTENSIONS: &str = "WGL_EXT_extensions_string WGL_EXT_swap_control";
 
@@ -326,6 +330,48 @@ pub const WGL_EXTENSIONS: &str = "WGL_EXT_extensions_string WGL_EXT_swap_control
 /// aren't.
 pub const VOODOO2_EXTENSIONS: &str = "GL_ARB_multitexture GL_EXT_bgra \
     GL_EXT_compiled_vertex_array WGL_EXT_swap_control";
+
+/// The packed pixel types a driver takes for texels and pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackedPixels {
+    /// None: the Voodoo2's ICD, whose extensions here don't have
+    /// GL_EXT_packed_pixels.
+    None,
+    /// GL_EXT_packed_pixels' five, GL_UNSIGNED_BYTE_3_3_2 to
+    /// GL_UNSIGNED_INT_10_10_10_2: 3dfx's Banshee and Voodoo3 ICD,
+    /// whose type checks have these and no other.
+    Extension,
+    /// OpenGL 1.2's twelve, the _REV types and 5-6-5 besides: the
+    /// ToadForce's driver. Its version is still 1.1 (1.2 also has 3D
+    /// textures and glDrawRangeElements, which aren't here), and its
+    /// extensions list GL_EXT_packed_pixels; Myth and Myth II give their
+    /// textures in the _REV types whatever the version says.
+    Core12,
+}
+
+impl PackedPixels {
+    /// Whether the driver takes the packed type `kind`.
+    pub fn takes(self, kind: u32) -> bool {
+        let extension = (0x8032..=0x8036).contains(&kind);
+        match self {
+            PackedPixels::None => false,
+            PackedPixels::Extension => extension,
+            PackedPixels::Core12 => extension || (0x8362..=0x8368).contains(&kind),
+        }
+    }
+}
+
+/// The packed pixel types of the driver, by the card as `write_strings`
+/// names it.
+pub fn packed_pixels(cpu: &Cpu) -> PackedPixels {
+    if hal::toadforce::there(cpu) {
+        PackedPixels::Core12
+    } else if super::super::glide::hw::board(cpu).is_some_and(|b| b.card == Card::Voodoo2) {
+        PackedPixels::None
+    } else {
+        PackedPixels::Extension
+    }
+}
 
 /// The extensions of a Banshee or Voodoo3 with `tmus` texture units. A
 /// Banshee's one unit has no multitexture, as Mesa's driver leaves it
@@ -1108,5 +1154,26 @@ mod tests {
         assert!(voodoo3.contains(&"GL_EXT_bgra"));
         assert!(banshee.contains(&"GL_EXT_bgra"));
         assert_eq!(banshee.len() + 1, voodoo3.len());
+        // As the 3DFXOGL.DLL of driver 1.1.51 lists it.
+        assert!(voodoo3.contains(&"GL_EXT_packed_pixels"));
+        assert!(banshee.contains(&"GL_EXT_packed_pixels"));
+    }
+
+    /// 3dfx's ICD takes GL_EXT_packed_pixels' five types and none of the
+    /// _REV ones; the ToadForce's driver takes OpenGL 1.2's twelve.
+    #[test]
+    fn each_driver_takes_the_packed_types_it_says() {
+        for kind in 0x8032..=0x8036 {
+            assert!(PackedPixels::Extension.takes(kind));
+            assert!(PackedPixels::Core12.takes(kind));
+            assert!(!PackedPixels::None.takes(kind));
+        }
+        for kind in 0x8362..=0x8368 {
+            assert!(!PackedPixels::Extension.takes(kind));
+            assert!(PackedPixels::Core12.takes(kind));
+        }
+        assert!(!PackedPixels::Core12.takes(0x8369));
+        assert!(EXTENSIONS.split(' ').any(|e| e == "GL_EXT_packed_pixels"));
+        assert!(!VOODOO2_EXTENSIONS.contains("GL_EXT_packed_pixels"));
     }
 }

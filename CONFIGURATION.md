@@ -2090,30 +2090,36 @@ Q at the head (where audio plays, or else the last sector read or sought)
 and the disc's catalog number. A BlindWrite or Alcohol 120% image read with
 subchannel (2448-byte sectors) keeps what the disc had, deliberately bad Q
 included, and so does a subchannel file beside a CUE sheet, CloneCD
-descriptor or bare image: a file named as the sheet or one of its data
-files, with the extension `.sub` (CloneCD's and DiscImageCreator's, each
-channel's 12 bytes after the one before, from sector 0) or `.subcode`
-(redumper's, raw and interleaved, from the lead-in on), 96 bytes a sector.
-Which of the two layouts a file has, and where it starts, is found from the
-Q positions in it, whatever its extension; a file whose size isn't whole
-sectors, or whose Qs agree on neither layout, is left alone, and the next
-one named so is looked for. A dump made with redumper or DiscImageCreator
-writes its subchannel to such a file: keep it beside the CUE sheet, under
-the sheet's name. A CUE sheet with only its BIN files has no subchannel of
-the disc's own. For other images and sectors the drive makes P and Q from
-the disc's layout, with R-W empty. A Q whose CRC is bad reads back as it is
-through READ CD, and READ SUB-CHANNEL reports the layout's position in its
-place, as a drive keeps the last good one. MSCDEX's Q channel reports the
-same position. The catalog number and the tracks' copy and pre-emphasis
-flags come from a BlindWrite descriptor, a CloneCD descriptor's CATALOG and
-control bits, or from a CUE sheet's CATALOG and FLAGS, and both the IDE
-drive and MSCDEX report them; the flags also come from an Alcohol 120%
-descriptor. The data position measurement (DPM) that BlindWrite keeps in its
-descriptor or a `.bwa` file, and Alcohol 120% in its descriptor, says where
-the pressed disc had its sectors, and the drive takes the time to reach them
-there when it times a read. Reads on the IDE drive, and ASPI requests with
-an event on the built-in Windows, take the time a 40x drive takes to move
-its head, wait for the sector to come round and read it
+descriptor, Alcohol 120% descriptor or bare image: a file in the same
+folder, named as the sheet, the descriptor or one of its data files, with
+the extension `.sub` (CloneCD's and DiscImageCreator's, each channel's 12
+bytes after the one before, from sector 0) or `.subcode` (redumper's, raw
+and interleaved, from the lead-in on), 96 bytes a sector. Which of the two
+layouts a file has, and where it starts, is found from the Q positions in
+it, whatever its extension. A file whose size isn't whole sectors, or whose
+Qs don't put the disc's sectors where its tracks have them, is left alone,
+and the next one named so is looked for. A file that stops before the disc
+ends, or starts after sector 0, gives the sectors it has, and the others get
+P and Q made from the layout. Where an Alcohol 120% image keeps subchannel
+of its own, that is read, and the file only for the sectors it keeps none
+of. The log file says which file is read, or why one found isn't. A dump
+made with redumper or DiscImageCreator writes its subchannel to such a file:
+keep it beside the CUE sheet, under the sheet's name, or beside
+disc-archiver's `.mds`, under its name. A CUE sheet with only its BIN files
+has no subchannel of the disc's own. For other images and sectors the drive
+makes P and Q from the disc's layout, with R-W empty. A Q whose CRC is bad
+reads back as it is through READ CD, and READ SUB-CHANNEL reports the
+layout's position in its place, as a drive keeps the last good one. MSCDEX's
+Q channel reports the same position. The catalog number and the tracks' copy
+and pre-emphasis flags come from a BlindWrite descriptor, a CloneCD
+descriptor's CATALOG and control bits, or from a CUE sheet's CATALOG and
+FLAGS, and both the IDE drive and MSCDEX report them; the flags also come
+from an Alcohol 120% descriptor. The data position measurement (DPM) that
+BlindWrite keeps in its descriptor or a `.bwa` file, and Alcohol 120% in its
+descriptor, says where the pressed disc had its sectors, and the drive takes
+the time to reach them there when it times a read. Reads on the IDE drive,
+and ASPI requests with an event on the built-in Windows, take the time a 40x
+drive takes to move its head, wait for the sector to come round and read it
 ([#630](https://github.com/dividebysandwich/rust-dos/pull/630)); without DPM
 data the sectors lie on a pressed disc's usual spiral. Copy protections such
 as SecuROM 4.8 time reads to check where sectors are.

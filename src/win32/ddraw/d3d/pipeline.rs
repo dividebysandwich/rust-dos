@@ -699,15 +699,52 @@ impl Coord {
     /// what it divides them by at each pixel, 1 unless the stage is
     /// projected.
     fn sampled(&self, c: [f32; 4]) -> [f32; 4] {
+        self.sampled_of(c, 0.0, 1.0)
+    }
+
+    /// `sampled` over any kind of number: `c` with `zero` and `one` of
+    /// that kind.
+    fn sampled_of<T: Copy>(&self, c: [T; 4], zero: T, one: T) -> [T; 4] {
         match self.projected {
-            None => [c[0], c[1], c[2], 1.0],
+            None => [c[0], c[1], c[2], one],
             Some(by) => std::array::from_fn(|i| match i {
                 3 => c[by],
                 i if i < by => c[i],
-                _ => 0.0,
+                _ => zero,
             }),
         }
     }
+
+    /// Where the four numbers a card takes for the slot come from in a
+    /// transformed vertex of `layout`, as `keep` and `sampled` make
+    /// them of one: `screen_stage` says whether the slot is one of the
+    /// stages a screen vertex has coordinates for (`Setup::screen_stages`).
+    /// A caller that copies the numbers out of the program's memory
+    /// gets the ones the pipeline's screen vertex has.
+    pub fn screen_parts(&self, layout: &Layout, screen_stage: bool) -> [Part; 4] {
+        let (zero, one) = (Part::Number(0.0), Part::Number(1.0));
+        if !screen_stage {
+            return [zero, zero, zero, one];
+        }
+        let numbers = self.numbers(layout);
+        let at = layout.tex[self.set & 7].0 / 4;
+        let kept = std::array::from_fn(|i| match i {
+            i if i < numbers => Part::Word(at + i as u32),
+            3 => one,
+            _ => zero,
+        });
+        self.sampled_of(kept, zero, one)
+    }
+}
+
+/// Where a number of a screen vertex comes from in a transformed vertex
+/// as the program has it (`Coord::screen_parts`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Part {
+    /// The vertex's 32-bit word of this number, counted from its start.
+    Word(u32),
+    /// The same number for every vertex.
+    Number(f32),
 }
 
 impl Setup {
@@ -1731,6 +1768,46 @@ fn triangle(
     }
 }
 
+/// Twice the area of the polygon of `n` corners on the screen, each the
+/// x and y `at` gives: above 0 for a clockwise one. Every caller that
+/// culls goes by this sum, in this order, so a triangle is culled or
+/// drawn the same whichever path it takes to the card.
+pub fn area(n: usize, at: impl Fn(usize) -> (f32, f32)) -> f32 {
+    let mut area = 0.0;
+    for i in 0..n {
+        let (a, b) = (at(i), at((i + 1) % n));
+        area += a.0 * b.1 - b.0 * a.1;
+    }
+    area
+}
+
+/// Whether D3DRENDERSTATE_CULLMODE `cull` culls a polygon of `area`.
+pub fn culled(cull: u32, area: f32) -> bool {
+    match cull {
+        CULL_CW => area > 0.0,
+        CULL_CCW => area < 0.0,
+        _ => false,
+    }
+}
+
+/// Whether a transformed vertex at `x`, `y` and `z` is inside every
+/// plane `clip_planes` gives transformed vertices with `setup`, and has
+/// a place there at all (`finite`), as `triangle` tests a corner: a
+/// triangle of such vertices goes to the card whole. Made once for a
+/// draw, with the planes `triangle` clips its transformed vertices at,
+/// and asked for each vertex.
+pub fn tl_inside(setup: &Setup) -> impl FnMut([f32; 3]) -> bool {
+    let planes = clip_planes(setup, true);
+    let mut p = Processed {
+        tl: true,
+        ..Processed::default()
+    };
+    move |[x, y, z]| {
+        p.clip = [x, y, z, 1.0];
+        finite(&p) && planes.iter().all(|plane| plane.distance(&p) >= 0.0)
+    }
+}
+
 /// Draw the clipped polygon `poly` of a triangle, as the fill mode says,
 /// unless it is culled.
 fn polygon(
@@ -1753,17 +1830,8 @@ fn polygon(
         spilled = poly.iter().map(|(v, _)| screen(setup, v)).collect();
         &spilled[..]
     };
-    let mut area = 0.0;
-    for i in 0..screens.len() {
-        let (a, b) = (&screens[i], &screens[(i + 1) % screens.len()]);
-        area += a.x * b.y - b.x * a.y;
-    }
-    let culled = match setup.cull {
-        CULL_CW => area > 0.0,
-        CULL_CCW => area < 0.0,
-        _ => false,
-    };
-    if culled {
+    let area = area(screens.len(), |i| (screens[i].x, screens[i].y));
+    if culled(setup.cull, area) {
         return;
     }
     match setup.fill {

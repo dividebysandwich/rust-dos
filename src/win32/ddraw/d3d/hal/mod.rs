@@ -25,6 +25,7 @@ use super::device::Device;
 use super::pipeline::{Layout, Rasterizer, ScreenVertex, Setup, Vertex};
 use crate::cpu::Cpu;
 
+pub use toadforce::Source;
 pub(in crate::win32::ddraw) use voodoo::card_fill;
 pub use voodoo::{
     RS_ALPHABLENDENABLE, RS_ALPHAREF, RS_ALPHATESTENABLE, RS_COLORKEYENABLE, RS_DITHERENABLE,
@@ -168,6 +169,15 @@ pub fn description(kind: Kind) -> Description {
     }
 }
 
+/// The largest width and height of a texture on a card of `kind`, as
+/// its description says (`Description::texture_max`).
+pub fn texture_max(kind: Kind) -> u32 {
+    match kind {
+        Kind::Voodoo => voodoo::TEXTURE_MAX,
+        Kind::ToadForce => crate::toadforce::caps::TEXTURE_MAX,
+    }
+}
+
 /// Whether `kind` can do a stage's operation, for ValidateDevice.
 pub fn can_do(kind: Kind, op: u32) -> bool {
     match kind {
@@ -234,6 +244,25 @@ pub fn draw_geometry(
     match kind_of(cpu, d) {
         Kind::Voodoo => false,
         Kind::ToadForce => toadforce::draw_geometry(cpu, d, setup, layout, vertices, kind, order),
+    }
+}
+
+/// Draw `kind` primitives of the device `d`'s transformed vertices of
+/// `layout`, which are at `from` in the program's memory, on a card
+/// that takes them from there: the triangles drawn. None when the card
+/// of `d` doesn't, or can't for this draw, with nothing drawn: the
+/// pipeline then reads them, and hands the card what it makes of them.
+pub fn draw_screen(
+    cpu: &mut Cpu,
+    d: &Device,
+    setup: &Setup,
+    layout: &Layout,
+    kind: u32,
+    from: &Source,
+) -> Option<u32> {
+    match kind_of(cpu, d) {
+        Kind::Voodoo => None,
+        Kind::ToadForce => toadforce::draw_screen(cpu, d, setup, layout, kind, from),
     }
 }
 

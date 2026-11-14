@@ -651,6 +651,124 @@ fn blindwrite_subchannel_sessions_and_catalog_number() {
     assert_eq!(q[..3], [0x41, 0x02, 0x01]);
 }
 
+/// The Q a pressed disc has at sector `lba` of the disc of
+/// `alcohol_split_disc`: a data track 1 to sector 31, then audio track 2
+/// with a pregap to 181.
+fn split_disc_q(lba: u32) -> [u8; 12] {
+    let bcd = |v: u32| (((v / 10) << 4) | (v % 10)) as u8;
+    let (control, track, index, relative) = match lba {
+        0..31 => (0x41, 1, 1, lba),
+        31..181 => (0x01, 2, 0, 180 - lba),
+        _ => (0x01, 2, 1, lba - 181),
+    };
+    let abs = lba + 150;
+    let mut q = [
+        control,
+        track,
+        index,
+        bcd(relative / 75 / 60),
+        bcd(relative / 75 % 60),
+        bcd(relative % 75),
+        0,
+        bcd(abs / 75 / 60),
+        bcd(abs / 75 % 60),
+        bcd(abs % 75),
+        0,
+        0,
+    ];
+    let crc = cdimage::q_crc(&q);
+    q[10..12].copy_from_slice(&crc.to_be_bytes());
+    q
+}
+
+/// The bincue-split copy of refurbished-dinosaurs-toolkit's disc
+/// archiver: a data track holding `iso_image` in "Synth (Track 1).bin",
+/// an audio track after a pregap of 150 in "Synth (Track 2).bin", and
+/// the archiver's descriptor of them with its DPM data, Synth.mds. Beside
+/// it, Synth.subcode as redumper writes it (raw P-W from sector -150 to
+/// 100 past the lead-out), with the disc's Q, R holding the sector's low
+/// byte, and the Q CRC of the sectors in `bad` broken. Returns the
+/// descriptor's path.
+fn alcohol_split_disc(dir: &std::path::Path, iso_image: &[u8], bad: &[u32]) -> std::path::PathBuf {
+    let mut data = iso_image.to_vec();
+    data.resize(31 * 2048, 0);
+    fs::write(dir.join("Synth (Track 1).bin"), cdimage::mode1_2352(&data)).unwrap();
+    fs::write(dir.join("Synth (Track 2).bin"), cdimage::audio(450)).unwrap();
+    let mds = dir.join("Synth.mds");
+    fs::write(
+        &mds,
+        include_bytes!("../../src/cdrom/testdata/toolkit-split.mds"),
+    )
+    .unwrap();
+    let mut subcode = vec![0u8; 150 * 96];
+    for lba in 0..481u32 {
+        let mut linear = [0u8; 96];
+        linear[12..24].copy_from_slice(&split_disc_q(lba));
+        if bad.contains(&lba) {
+            linear[22] ^= 0x80;
+            linear[23] ^= 0x01;
+        }
+        linear[24] = lba as u8;
+        subcode.extend(rust_dos::cdrom::interleave_subchannel(&linear));
+    }
+    subcode.extend(vec![0u8; 100 * 96]);
+    fs::write(dir.join("Synth.subcode"), subcode).unwrap();
+    mds
+}
+
+#[test]
+fn an_alcohol_descriptor_with_a_subcode_file_beside_it() {
+    let dir = cdimage::scratch("ide_alcohol_subcode");
+    fs::create_dir_all(dir.join("c")).unwrap();
+    let image = iso("TESTDISC", &[file("HELLO.TXT", b"hello")]);
+    let mds = alcohol_split_disc(&dir, &image, &[20, 200]);
+    let mut bus = Bus::new(dir.join("c"));
+    bus.mount_drive(3, &mds, MountOptions::default(), false)
+        .unwrap();
+    bus.set_cycles_per_ms(1000);
+    bus.attach_ide();
+    // The descriptor's DPM data is in force with the file's subchannel.
+    let disc = bus.disk.cd_image(3).unwrap();
+    assert_eq!(
+        disc.dpm().map(|d| (d.start, d.resolution, d.angles.len())),
+        Some((0, 10, 48))
+    );
+
+    let read_cd = |lba: u32, sub: u8| {
+        let l = lba.to_be_bytes();
+        [0xBE, 0, l[0], l[1], l[2], l[3], 0, 0, 1, 0, sub, 0]
+    };
+    for lba in [16, 20, 100, 200] {
+        // Formatted Q: the file's, a broken CRC as it is.
+        let q = packet(&mut bus, read_cd(lba, 2), 16).unwrap();
+        let mut want = split_disc_q(lba);
+        if [20, 200].contains(&lba) {
+            want[10] ^= 0x80;
+            want[11] ^= 0x01;
+        }
+        assert_eq!(q[..12], want, "sector {}", lba);
+        // Raw P-W, the file's: R holds the sector's low byte, and P is
+        // clear even in track 2's pregap, where the layout would set it.
+        let raw = packet(&mut bus, read_cd(lba, 1), 96).unwrap();
+        let r: u8 = (0..8).fold(0, |r, i| (r << 1) | ((raw[i] >> 5) & 1));
+        assert_eq!(r, lba as u8, "sector {}", lba);
+        assert!(raw.iter().all(|b| b & 0x80 == 0), "sector {}", lba);
+    }
+    // READ SUB-CHANNEL after reading a sector whose Q is bad: the position
+    // of the layout, as a drive reports the last good one.
+    let l = 200u32.to_be_bytes();
+    packet(
+        &mut bus,
+        [0xBE, 0, l[0], l[1], l[2], l[3], 0, 0, 1, 0xF8, 0, 0],
+        2352,
+    )
+    .unwrap();
+    let position = packet(&mut bus, [0x42, 0, 0x40, 1, 0, 0, 0, 0, 16, 0, 0, 0], 16).unwrap();
+    assert_eq!((position[5], position[6], position[7]), (0x10, 2, 1));
+    assert_eq!(u32::from_be_bytes(position[8..12].try_into().unwrap()), 200);
+    assert_eq!(u32::from_be_bytes(position[12..16].try_into().unwrap()), 19);
+}
+
 #[test]
 fn a_disc_without_subchannel_reads_the_layouts() {
     let (mut bus, image) = drive("made_subchannel");

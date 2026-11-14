@@ -29,7 +29,7 @@ beyond this, such as which of their discs to mount.
 | Protection | The image it needs |
 |---|---|
 | SafeDisc 1 and 2 | Whole 2352-byte sectors: redumper's BIN and CUE, CHD, or Alcohol 120% in raw mode. An ISO fails. |
-| SecuROM 4.8, and any other disc protection | Alcohol 120% with the subchannel and DPM data |
+| SecuROM 4.8, and any other disc protection | Alcohol 120% with the subchannel and DPM data, or disc-archiver's `.mds` with redumper's `.subcode` beside it |
 | Code wheels, manual lookups | The manual or wheel as a PDF or picture (see [Manuals and code wheels](#manuals-and-code-wheels)) |
 
 What each image keeps:
@@ -44,7 +44,9 @@ What each image keeps:
   sectors lie on the disc. A CUE sheet keeps the subchannel only with a
   `.sub` or `.subcode` file beside it, and never the sectors' positions.
   An Alcohol 120% image made with DPM keeps the positions, and so does
-  disc-archiver's `.mds`.
+  disc-archiver's `.mds`. An `.mds` keeps the subchannel in its `.mdf`
+  when Alcohol 120% made it with subchannel, or with a `.sub` or
+  `.subcode` file beside it.
 
 ## DOS games
 
@@ -85,21 +87,22 @@ image keeps what SafeDisc checks, and the subchannel.
 redumper doesn't measure DPM, which SecuROM 4.8 and later check. For a
 SecuROM disc, use
 [disc-archiver](https://github.com/kibertoad/refurbished-dinosaurs-toolkit/tree/main/packages/disc-archiver)
-with redumper. It dumps the disc with redumper, measures the DPM data
-in the same drive (on Windows only), and writes it into an Alcohol 120%
-`.mds`: its `mds` copy (`.mds` and `.mdf`), and an `.mds` beside the
-BIN files of its `bincue-split` copy. Mount that `.mds`. The archiver's
-`.mds` holds no subchannel, and rust-dos doesn't read redumper's
-`.subcode` beside an `.mds` yet
-([#1038](https://github.com/dividebysandwich/rust-dos/issues/1038)), so
-the image has the DPM data without the marks SecuROM keeps in the
-subchannel. disc-archiver's README has the commands and says when it
-measures.
+with redumper. It dumps the disc with redumper, measures the DPM data in the
+same drive (on Windows only), and writes it into an Alcohol 120% `.mds`: its
+`mds` copy (`.mds` and `.mdf`), and an `.mds` beside the BIN files of its
+`bincue-split` copy. The `.mds` holds no subchannel, and redumper's
+`.subcode` stays in the dump's `archival` folder. Copy the `.subcode` beside
+the `.mds` (`bincue-split/<name>.subcode` or `mds/<name>.subcode`), keeping
+its name, and mount the `.mds`. The image then has both the DPM data and the
+disc's subchannel. Rust-dos looks for the subchannel file only beside the
+`.mds`, named as the `.mds` or one of its data files, with `.subcode` or
+`.sub`. The log file says which file it reads, or why it reads none it
+found. disc-archiver's README has the commands and says when it measures.
 
 | Tool | What it makes | Good for |
 |---|---|---|
 | [redumper](https://github.com/superg/redumper) | CUE, BIN and a `.subcode` subchannel file | SafeDisc, and any disc whose check reads only sectors and subchannel |
-| [disc-archiver](https://github.com/kibertoad/refurbished-dinosaurs-toolkit/tree/main/packages/disc-archiver) with redumper | redumper's dump, and an `.mds` with the DPM data and no subchannel | SecuROM 4.8 and later: the DPM data |
+| [disc-archiver](https://github.com/kibertoad/refurbished-dinosaurs-toolkit/tree/main/packages/disc-archiver) with redumper | redumper's dump, and an `.mds` with the DPM data; with redumper's `.subcode` copied beside it, the subchannel too | SecuROM 4.8 and later: the DPM data and the subchannel |
 | [Alcohol 120%](https://www.alcohol-soft.com/), with subchannel and DPM | `.mds` and `.mdf` | Every protection in the table, both in one image |
 | [chdman](https://docs.mamedev.org/tools/chdman.html), from a CUE and BIN dump | `.chd` | SafeDisc; rust-dos reads no subchannel from a CHD |
 
@@ -144,9 +147,11 @@ label](../CONFIGURATION.md#the-cds-drive-letter-and-label)).
    the formats the table names for its protection.
 2. **The wrong disc:** a game on several CDs may check only one of them.
    Its readme or [compatibility.md](compatibility.md) says which.
-3. **A file missing beside the image:** a `.sub` or `.subcode` file has
-   to have the CUE sheet's name or a data file's, and an image's data
-   files (and BlindWrite's `.bwa` file) stay beside its descriptor.
+3. **A file missing beside the image:** a `.sub` or `.subcode` file has to
+   have the name of the CUE sheet, the `.mds` or a data file, and an image's
+   data files (and BlindWrite's `.bwa` file) stay beside its descriptor. The
+   log file says which subchannel file is read, the sectors it has, and why
+   any other one found isn't read.
 4. **The other Windows:** a game that fails on the built-in Windows may
    pass on a Windows 98 image, and the other way round.
 5. **On the built-in Windows, a message naming a function or DLL:** the

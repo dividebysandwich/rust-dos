@@ -685,6 +685,73 @@ fn a_text_file_opens_in_notepad() {
     }
 }
 
+/// With no taskbar, SHAppBarMessage answers 0: no bar hides at any edge
+/// of the screen (ABM_GETAUTOHIDEBAR, as Myth II asks at its start), the
+/// taskbar has no place (ABM_GETTASKBARPOS) and a window can't register
+/// as a bar (ABM_NEW). SHELL32 on a Windows 95 without Explorer's
+/// taskbar answers the same, and so does Wine's when no appbar window
+/// is there. The other messages (ABM_REMOVE, ABM_QUERYPOS, ABM_SETPOS,
+/// ABM_GETSTATE, ABM_ACTIVATE, ABM_SETAUTOHIDEBAR and
+/// ABM_WINDOWPOSCHANGED) answer 0 too, and none writes the APPBARDATA:
+/// Wine's appbar test checks that the window and the rectangle a
+/// program gives stay as they were. Each call takes its two arguments
+/// off the stack.
+#[test]
+fn no_application_bar_without_a_taskbar() {
+    const ABM_NEW: i32 = 0;
+    const ABM_GETTASKBARPOS: i32 = 5;
+    const ABM_GETAUTOHIDEBAR: i32 = 7;
+    const OTHERS: [i32; 7] = [1, 2, 3, 4, 6, 8, 9];
+    const UNSET: i32 = 0xCCCC_CCCCu32 as i32;
+    // An APPBARDATA: cbSize 36, then the window, message, edge, rectangle
+    // and lParam. The window and the rectangle are a pattern no answer
+    // writes.
+    let mut data = vec![0u8; 0x40];
+    put(&mut data, 0x00, &36u32.to_le_bytes());
+    put(&mut data, 0x04, &[0xCC; 4]);
+    put(&mut data, 0x10, &[0xCC; 16]);
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        ("SHELL32.dll", &["SHAppBarMessage"]),
+    ];
+    let code = program(imports, &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        a.mov(esi, esp)?;
+        for edge in 0..4 {
+            a.mov(dword_ptr(l.at(0x0C) as u64), edge)?;
+            call(a, l.import(1), &[ABM_GETAUTOHIDEBAR, l.at(0)])?;
+            check_eax(a, 0, edge as u32)?;
+        }
+        call(a, l.import(1), &[ABM_GETTASKBARPOS, l.at(0)])?;
+        check_eax(a, 0, 4)?;
+        call(a, l.import(1), &[ABM_NEW, l.at(0)])?;
+        check_eax(a, 0, 5)?;
+        // Bit 6: the other messages' answers, what is left of the
+        // window and the rectangle after the pattern, and the stack, all
+        // 0.
+        a.xor(edi, edi)?;
+        for message in OTHERS {
+            call(a, l.import(1), &[message, l.at(0)])?;
+            a.or(edi, eax)?;
+        }
+        for offset in [0x04, 0x10, 0x14, 0x18, 0x1C] {
+            a.mov(eax, dword_ptr(l.at(offset) as u64))?;
+            a.xor(eax, UNSET)?;
+            a.or(edi, eax)?;
+        }
+        a.mov(eax, esp)?;
+        a.sub(eax, esi)?;
+        a.or(eax, edi)?;
+        check_eax(a, 0, 6)?;
+        exit(a, l.import(0))
+    });
+    for core in CORES {
+        let mut cpu = machine("appbar", core, &[("T.EXE", code.clone())]);
+        run_to_exit(&mut cpu);
+        assert_eq!(cpu.errorlevel, 0x7F, "{core:?}");
+    }
+}
+
 #[test]
 fn notepad_shows_a_readme_that_winexec_opens() {
     const WM_CLOSE: i32 = 0x10;

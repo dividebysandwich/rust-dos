@@ -456,6 +456,26 @@ impl ToadForce {
         self.queue.len() >= QUEUE_WORDS || self.queue_due(live)
     }
 
+    /// The queue, taken out of the card for a driver to write whole
+    /// commands at its end, where they stay: `queue_put` gives it
+    /// back. Until then the card has nothing queued, so the driver
+    /// does nothing in between that runs the queue or adds to it.
+    pub fn queue_take(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.queue)
+    }
+
+    /// The queue back from `queue_take`, which held `before` words
+    /// then. True when it is to be run now, as `queue` says.
+    pub fn queue_put(&mut self, words: Vec<u32>, before: usize, live: Live) -> bool {
+        debug_assert!(self.queue.is_empty(), "commands were queued past a taken queue");
+        debug_assert!(words.len() >= before && command::framed(&words[before..]));
+        if before == 0 && !words.is_empty() {
+            self.queue_since = live.ns;
+        }
+        self.queue = words;
+        self.queue.len() >= QUEUE_WORDS || self.queue_due(live)
+    }
+
     /// Whether commands are queued.
     #[inline]
     pub fn queued(&self) -> bool {

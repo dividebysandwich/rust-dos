@@ -90,7 +90,8 @@
 
 use super::format::{Format, Rect, Surface};
 use super::level1::{Target, Texture};
-use super::raster::pipeline::DrawState;
+use super::raster::pipeline::{DrawState, SLOTS};
+use super::raster::texel::Rgba;
 use super::raster::vertex::ScreenVertex;
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
@@ -99,20 +100,75 @@ use std::sync::Arc;
 /// The bytes of a page of card memory, as the writes are counted.
 pub const PAGE: u32 = 4096;
 
+/// A vertex of a triangle queued for a host, laid out as a host's
+/// vertex buffer has it (`BYTES` bytes with no gaps), so a run's
+/// vertices go there in one copy: the position (x, y, z and 1 / w),
+/// the two colours, and the coordinates of each slot, where the
+/// shader looks for them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+pub struct Vertex {
+    pub place: [f32; 4],
+    pub diffuse: Rgba,
+    pub specular: Rgba,
+    pub tex: [[f32; 4]; SLOTS],
+}
+
+impl Vertex {
+    /// The bytes of one.
+    pub const BYTES: usize = 24 + 16 * SLOTS;
+
+    /// `v` with the colours of `colours` (the vertex itself, or the
+    /// one that gives a flat-shaded triangle its colours), each slot
+    /// taking the coordinate set `sets` names for it.
+    pub fn of(v: &ScreenVertex, colours: &ScreenVertex, sets: &[u8]) -> Self {
+        let mut tex = [[0.0; 4]; SLOTS];
+        for (slot, to) in tex.iter_mut().enumerate() {
+            *to = v.tex[sets.get(slot).map_or(slot, |&set| set as usize)];
+        }
+        Vertex {
+            place: [v.x, v.y, v.z, v.rhw],
+            diffuse: colours.diffuse,
+            specular: colours.specular,
+            tex,
+        }
+    }
+
+    /// The vertex with its coordinates in the slots' sets, for a
+    /// renderer that takes screen vertices.
+    #[cfg(test)]
+    pub fn screen(&self) -> ScreenVertex {
+        let mut v = ScreenVertex {
+            x: self.place[0],
+            y: self.place[1],
+            z: self.place[2],
+            rhw: self.place[3],
+            diffuse: self.diffuse,
+            specular: self.specular,
+            ..ScreenVertex::default()
+        };
+        v.tex[..SLOTS].copy_from_slice(&self.tex);
+        v
+    }
+
+    /// The bytes of `vertices`, as a vertex buffer takes them.
+    pub fn bytes(vertices: &[Vertex]) -> &[u8] {
+        const { assert!(size_of::<Vertex>() == Vertex::BYTES) };
+        // SAFETY: a `Vertex` is `repr(C)` of `f32`s and bytes with no
+        // padding (the assertion above), so every byte of the slice
+        // is initialised, and a byte has no alignment to keep. The
+        // bytes are those of `vertices`, borrowed as long.
+        unsafe { std::slice::from_raw_parts(vertices.as_ptr().cast(), size_of_val(vertices)) }
+    }
+}
+
 /// The triangles queued with one state.
 pub struct Run {
     pub state: Arc<DrawState>,
-    /// Their vertices in `Batch::vertices`: three a triangle, and four
-    /// where the state is flat-shaded (`Shape::flat`), the fourth the
-    /// vertex that gives the triangle its colours.
+    /// Their vertices in `Batch::vertices`, three a triangle. Those of
+    /// a flat-shaded triangle (`Shape::flat`) all have the colours of
+    /// the vertex that gives it them.
     pub vertices: Range<usize>,
-}
-
-impl Run {
-    /// The vertices of one triangle of the run.
-    pub fn stride(&self) -> usize {
-        if self.state.shape.flat { 4 } else { 3 }
-    }
 }
 
 /// What a host draws at once: runs for one render target, in the
@@ -120,7 +176,7 @@ impl Run {
 pub struct Batch<'a> {
     pub target: Target,
     pub runs: &'a [Run],
-    pub vertices: &'a [ScreenVertex],
+    pub vertices: &'a [Vertex],
 }
 
 /// What a `CLEAR` writes to one buffer of the render target.
