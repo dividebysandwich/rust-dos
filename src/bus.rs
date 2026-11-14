@@ -41,7 +41,9 @@ pub trait Device {
     fn step(&mut self) {}
 }
 
-/// RAM when the configuration doesn't say.
+/// RAM of a machine made without a size (`Bus::new`), and of one whose
+/// configuration doesn't set `memsize` with a CPU up to a Pentium
+/// (`config::default_memsize` has the rule).
 pub const DEFAULT_MEMORY_MB: usize = 16;
 
 /// log2 of the bytes of RAM each code generation counter covers: small
@@ -430,6 +432,12 @@ pub struct Bus {
     /// `WATCHED_BLOCK` makes the recompiler's writes bump every block's
     /// generation, for the debugger's heatmap (`set_write_tracking`).
     pub code_blocks: Vec<u8>,
+
+    /// Whether the size of the memory is the default for the machine's CPU
+    /// and display adapter, `memsize` not being set (`config::Memory`).
+    /// The front end sets it at start and after it loads a save state,
+    /// from the settings the load leaves (`slots::loaded_settings`).
+    pub memory_derived: bool,
 
     /// Optional observer for every `log_string` line. Installed by the debug
     /// server so log output can be streamed to remote clients.
@@ -2737,6 +2745,14 @@ impl Bus {
                         self.video_mode = new_mode;
                         self.vga.mark_dirty_full();
                     }
+                    // A ToadForce counts the VGA's retraces, with the
+                    // timing the registers give it from this write on.
+                    // Only the miscellaneous output, the sequencer and
+                    // the CRTC hold timing: palette and attribute
+                    // writes don't reach the card.
+                    if self.toadforce.is_some() && matches!(port, 0x3C2 | 0x3C5 | 0x3B5 | 0x3D5) {
+                        self.toadforce_retime();
+                    }
                 } else {
                     // Unhandled port write: log the first few to each port.
                     const LOGGED: u8 = 8;
@@ -3043,6 +3059,12 @@ impl Bus {
         if !std::mem::take(&mut self.vga.mode_switched) || self.video_mode == VideoMode::Vesa {
             return;
         }
+        self.show_register_mode();
+    }
+
+    /// Show the mode the VGA's registers describe, where it is another
+    /// kind than the one shown: text or graphics, 256 colours or fewer.
+    pub(crate) fn show_register_mode(&mut self) {
         let colours256 = |mode: VideoMode| mode == VideoMode::Graphics320x200;
         if let Some(mode) = self.vga.register_mode()
             && (mode.is_text() != self.video_mode.is_text() || colours256(mode) != colours256(self.video_mode))

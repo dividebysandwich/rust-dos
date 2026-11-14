@@ -602,6 +602,8 @@ pub fn set_mode(cpu: &mut Cpu, al: u8) {
         let (font, _) = video_bios::graphics_font(mode);
         set_vector(cpu, 0x43, rom_pointer(font));
     }
+    // A ToadForce counts the retraces of the mode's timing from here.
+    cpu.bus.toadforce_retime();
 }
 
 /// INT 10h AH=05h AL=80h-83h on a Tandy or PCjr: 80h reads the page the

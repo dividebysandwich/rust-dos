@@ -67,8 +67,10 @@ pub struct Settings {
     /// The FPU adds and subtracts as the host does (`fpu=fast`): faster,
     /// not exact (`Cpu::fpu_fast`).
     pub fpu_fast: bool,
-    /// RAM in MB.
-    pub memsize: usize,
+    /// RAM in MB as `memsize` sets it, or None while it isn't set: the
+    /// machine then has what `default_memsize` gives its CPU and display
+    /// adapter. `memory_mb` is the size either way.
+    pub memsize: Option<usize>,
     /// Expanded memory (EMS).
     pub ems: bool,
     /// Upper memory blocks.
@@ -190,7 +192,7 @@ impl Default for Settings {
             cpu: CpuModel::I486,
             core: CoreMode::Auto,
             fpu_fast: false,
-            memsize: crate::bus::DEFAULT_MEMORY_MB,
+            memsize: None,
             ems: true,
             umb: true,
             dpmi: true,
@@ -342,7 +344,9 @@ impl Settings {
             cpu: config.cpu.unwrap_or(default.cpu),
             core: config.core.unwrap_or(default.core),
             fpu_fast: config.fpu_fast.unwrap_or(default.fpu_fast),
-            memsize: config.memsize.unwrap_or(default.memsize).min(config.cpu.unwrap_or(default.cpu).max_memsize()),
+            memsize: config
+                .memsize
+                .map(|mb| mb.min(config.cpu.unwrap_or(default.cpu).max_memsize())),
             ems: config.ems.unwrap_or(default.ems),
             umb: config.umb.unwrap_or(default.umb),
             dpmi: config.dpmi.unwrap_or(default.dpmi),
@@ -389,6 +393,68 @@ impl Settings {
             vr: config.vr.clone(),
             vfx1: config.vfx1,
         }
+    }
+}
+
+/// The RAM in MB of a machine whose `memsize` isn't set, from its CPU and
+/// its display adapter: what a machine of the CPU's years came with. Up to
+/// a Pentium that is `DEFAULT_MEMORY_MB` (16), which runs DOS programs,
+/// some of which fail with more. A Pentium MMX, K6-2 or Pentium Pro has
+/// 32, a Pentium II 64 and a Pentium III 128. A ToadForce, whose games
+/// (2000 to 2002) recommend 128 MB, brings any CPU to 128, or to the most
+/// the CPU takes (`CpuModel::max_memsize`: 64 with a 386).
+pub fn default_memsize(cpu: CpuModel, machine: Adapter) -> usize {
+    let by_cpu = match cpu {
+        CpuModel::I386 | CpuModel::I486 | CpuModel::Pentium => crate::bus::DEFAULT_MEMORY_MB,
+        CpuModel::PentiumMmx | CpuModel::K6_2 | CpuModel::PentiumPro => 32,
+        CpuModel::PentiumII => 64,
+        CpuModel::PentiumIII => 128,
+    };
+    let by_card = if machine.is_toadforce() { 128 } else { 0 };
+    by_cpu.max(by_card).min(cpu.max_memsize())
+}
+
+impl Settings {
+    /// The machine's RAM in MB: `memsize` where it is set, else
+    /// `default_memsize` of the CPU and the display adapter; no more than
+    /// the CPU takes.
+    pub fn memory_mb(&self) -> usize {
+        self.memsize
+            .unwrap_or_else(|| default_memsize(self.cpu, self.machine))
+            .min(self.cpu.max_memsize())
+    }
+
+    /// The RAM a machine with these settings starts with.
+    pub fn memory(&self) -> Memory {
+        let cpu = self.cpu.describe();
+        let source = match self.memsize {
+            Some(_) => "memsize".to_string(),
+            None if self.machine.is_toadforce() => {
+                format!("the default for a {} with a ToadForce", cpu)
+            }
+            None => format!("the default for a {}", cpu),
+        };
+        Memory { mb: self.memory_mb(), derived: self.memsize.is_none(), source }
+    }
+}
+
+/// The RAM a machine starts with, and where its size comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Memory {
+    /// The size in MB.
+    pub mb: usize,
+    /// Whether `memsize` isn't set, so the size is `default_memsize`'s.
+    pub derived: bool,
+    /// "memsize", or "the default for a Pentium II".
+    pub source: String,
+}
+
+impl Memory {
+    /// Tell the machine made with this memory where its size comes from:
+    /// a line in the log, and `Bus::memory_derived` for the debug server.
+    pub fn tell(&self, bus: &mut crate::bus::Bus) {
+        bus.memory_derived = self.derived;
+        bus.log_string(&format!("[CONFIG] {} MB of memory ({})", self.mb, self.source));
     }
 }
 
@@ -478,7 +544,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         ),
         (Emulator, "core", Some(settings.core.name().to_string())),
         (Emulator, "fpu", Some(if settings.fpu_fast { "fast" } else { "exact" }.to_string())),
-        (Emulator, "memsize", Some(settings.memsize.to_string())),
+        (Emulator, "memsize", settings.memsize.map(|mb| mb.to_string())),
         (Emulator, "ems", yes_no(settings.ems)),
         (Emulator, "umb", yes_no(settings.umb)),
         (Emulator, "dpmi", yes_no(settings.dpmi)),
