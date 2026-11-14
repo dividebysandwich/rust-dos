@@ -1925,12 +1925,13 @@ What is left, none of it needed for the target:
   it has no pull request. Giants is the one it would move, and the
   first step is to measure how much of `hle.win32` there is the trap
   and how much the handlers.
-- **The host renderer's own calls** (pass 5). `toadforce.host` is 3%
-  to 9% of the thread.
-- **The game's own code** (pass 7). Nocturne is 78% its own code and
-  at 41: the recompiler's speed and the busy share are what move it.
-- **Scenes not measured**: MDK2's interiors, a fight in Giants, later
-  levels of every game, and a real four-core processor.
+- **The host renderer's own calls** (pass 5, issue 1069).
+  `toadforce.host` is 3% to 9% of the thread.
+- **The game's own code** (pass 7, issue 1070). Nocturne is 78% its
+  own code and at 41: the recompiler's speed and the busy share are
+  what move it.
+- **Scenes not measured** (issue 1071): MDK2's interiors, a fight in
+  Giants, later levels of every game, and a real four-core processor.
 
 ### Phase 6: what limits each game
 
