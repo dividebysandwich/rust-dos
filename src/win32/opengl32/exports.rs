@@ -7,7 +7,7 @@
 //! are their places (see `stubs`).
 
 use super::super::stubs::Api;
-use super::{attrib, draw, imm, light, matrix, missing, state, stdcall, texture, wgl};
+use super::{attrib, draw, imm, light, lists, matrix, missing, state, stdcall, texture, wgl};
 
 /// The functions: OPENGL32.DLL's exports in the order of their
 /// ordinals, then the extensions' functions, which wglGetProcAddress
@@ -26,8 +26,8 @@ pub static APIS: &[Api] = &[
     stdcall("glBindTexture", 13, 2, texture::bind_texture),
     stdcall("glBitmap", 14, 7, missing),
     stdcall("glBlendFunc", 15, 2, state::blend_func),
-    stdcall("glCallList", 16, 1, missing),
-    stdcall("glCallLists", 17, 3, missing),
+    stdcall("glCallList", 16, 1, lists::call_list),
+    stdcall("glCallLists", 17, 3, lists::call_lists),
     stdcall("glClear", 18, 1, draw::clear),
     stdcall("glClearAccum", 19, 4, missing),
     stdcall("glClearColor", 20, 4, state::clear_color),
@@ -76,7 +76,7 @@ pub static APIS: &[Api] = &[
     stdcall("glCopyTexSubImage1D", 63, 6, missing),
     stdcall("glCopyTexSubImage2D", 64, 8, texture::copy_tex_sub_image_2d),
     stdcall("glCullFace", 65, 1, state::cull_face),
-    stdcall("glDeleteLists", 67, 2, missing),
+    stdcall("glDeleteLists", 67, 2, lists::delete_lists),
     stdcall("glDeleteTextures", 68, 2, texture::delete_textures),
     stdcall("glDepthFunc", 69, 1, state::depth_func),
     stdcall("glDepthMask", 70, 1, state::depth_mask),
@@ -93,7 +93,7 @@ pub static APIS: &[Api] = &[
     stdcall("glEnable", 81, 1, state::enable),
     stdcall("glEnableClientState", 82, 1, state::enable_client_state),
     stdcall("glEnd", 83, 0, draw::end),
-    stdcall("glEndList", 84, 0, missing),
+    stdcall("glEndList", 84, 0, lists::end_list),
     stdcall("glEvalCoord1d", 85, 2, missing),
     stdcall("glEvalCoord1dv", 86, 1, missing),
     stdcall("glEvalCoord1f", 87, 1, missing),
@@ -115,7 +115,7 @@ pub static APIS: &[Api] = &[
     stdcall("glFogiv", 103, 2, state::fogiv),
     stdcall("glFrontFace", 104, 1, state::front_face),
     stdcall("glFrustum", 105, 12, matrix::frustum),
-    stdcall("glGenLists", 106, 1, missing),
+    stdcall("glGenLists", 106, 1, lists::gen_lists),
     stdcall("glGenTextures", 107, 2, texture::gen_textures),
     stdcall("glGetBooleanv", 108, 2, state::get_booleanv),
     stdcall("glGetClipPlane", 109, 2, missing),
@@ -172,7 +172,7 @@ pub static APIS: &[Api] = &[
     stdcall("glInitNames", 150, 0, missing),
     stdcall("glInterleavedArrays", 151, 3, draw::interleaved_arrays),
     stdcall("glIsEnabled", 152, 1, state::is_enabled),
-    stdcall("glIsList", 153, 1, missing),
+    stdcall("glIsList", 153, 1, lists::is_list),
     stdcall("glIsTexture", 154, 1, texture::is_texture),
     stdcall("glLightModelf", 155, 2, light::light_modelf),
     stdcall("glLightModelfv", 156, 2, light::light_modelfv),
@@ -184,7 +184,7 @@ pub static APIS: &[Api] = &[
     stdcall("glLightiv", 162, 3, light::lightiv),
     stdcall("glLineStipple", 163, 2, missing),
     stdcall("glLineWidth", 164, 1, state::line_width),
-    stdcall("glListBase", 165, 1, missing),
+    stdcall("glListBase", 165, 1, lists::list_base),
     stdcall("glLoadIdentity", 166, 0, matrix::load_identity),
     stdcall("glLoadMatrixd", 167, 1, matrix::load_matrixd),
     stdcall("glLoadMatrixf", 168, 1, matrix::load_matrixf),
@@ -205,7 +205,7 @@ pub static APIS: &[Api] = &[
     stdcall("glMatrixMode", 183, 1, matrix::matrix_mode),
     stdcall("glMultMatrixd", 184, 1, matrix::mult_matrixd),
     stdcall("glMultMatrixf", 185, 1, matrix::mult_matrixf),
-    stdcall("glNewList", 186, 2, missing),
+    stdcall("glNewList", 186, 2, lists::new_list),
     stdcall("glNormal3b", 187, 3, imm::normal3b),
     stdcall("glNormal3bv", 188, 1, imm::normal3bv),
     stdcall("glNormal3d", 189, 6, imm::normal3d),

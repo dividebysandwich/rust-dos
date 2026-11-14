@@ -3235,9 +3235,9 @@ What the card doesn't do, and what to choose instead:
   any other `machine`. Vertex shaders run on the processor, for a game
   that asks Direct3D 8 for software or mixed vertex processing.
 * OpenGL games that need more than the built-in OpenGL 1.1 has: a
-  stencil buffer, more than two textures at once, compressed textures,
-  cube maps or display lists. Where the game also has a Direct3D
-  renderer, pick that in its options.
+  stencil buffer, more than two textures at once, compressed textures
+  or cube maps. Where the game also has a Direct3D renderer, pick that
+  in its options.
 * Glide games: `voodoo=true`, or `machine=svga_voodoo3` or
   `svga_banshee` ([3dfx Voodoo Graphics](#3dfx-voodoo-graphics)).
 * Games on a Windows 95 or 98 disk image. No booted system has a driver

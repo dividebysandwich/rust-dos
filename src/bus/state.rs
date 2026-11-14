@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 58;
+const WIN32_VERSION: u16 = 61;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -874,6 +874,7 @@ mod tests {
         (56, 0x0BF5_7A03_9493_E7DE), // TrackMouseEvent's request, one for the desktop
         (57, 0xB847_1A2D_27D3_3646), // OpenGL's draws that wait
         (58, 0xDC7D_5C01_8FC2_8FD2), // the system locale
+        (61, 0x6E30_E64C_7C17_01E3), // OpenGL's display lists
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

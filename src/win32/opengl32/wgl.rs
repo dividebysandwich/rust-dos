@@ -801,6 +801,7 @@ fn destroy(cpu: &mut Cpu, index: usize) {
     if c.strings != 0 {
         super::super::kernel32::free_pages(cpu, c.strings);
     }
+    super::lists::context_gone(cpu, &c);
 }
 
 /// wglCreateLayerContext(hdc, layer): the main plane's is a context.
@@ -909,11 +910,16 @@ pub fn copy_context(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(FALSE)
 }
 
-/// wglShareLists(a, b): the contexts' textures aren't shared, which
-/// programs with one context don't miss.
+/// wglShareLists(a, b): `b` has the display lists of `a` from here
+/// on, those there and those either makes later. It fails when `b`
+/// has lists of its own, as Windows has it. The contexts' textures
+/// aren't shared, which programs with one context don't miss.
 pub fn share_lists(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let ok = context_index(cpu, args[0]).is_some() && context_index(cpu, args[1]).is_some();
-    Some(ok as u32)
+    let (Some(a), Some(b)) = (context_index(cpu, args[0]), context_index(cpu, args[1])) else {
+        super::super::gdi32::set_error(cpu, ERROR_INVALID_HANDLE);
+        return Some(FALSE);
+    };
+    Some(super::lists::share(cpu, a, b) as u32)
 }
 
 /// SwapBuffers(hdc): show what the context drawing to the DC's window
