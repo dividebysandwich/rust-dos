@@ -330,6 +330,9 @@ impl DebugHub {
         self.told_starts = cpu.programs.started;
         self.told_ends = cpu.programs.ended;
         self.append(cpu, Kind::StateLoaded, None, json!({"source": source}));
+        // The loaded machine's processes, before a stop lists what is
+        // kept.
+        self.drop_ended_spots(cpu);
         if self.paused {
             self.pause_hit = Some(PauseReason::Load);
             self.flush_stop(cpu);

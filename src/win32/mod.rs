@@ -1341,24 +1341,16 @@ pub fn has_memory(cpu: &Cpu) -> bool {
     cpu.bus.win32.pool.is_some()
 }
 
-/// The byte at `lin` in the page tables at `cr3`, whichever the
-/// processor has, for the debugger's watchpoints: in the physical page
-/// mapped there or kept by a PAGE_NOACCESS entry, or in the page file.
-/// None where the page isn't committed, or before the built-in Windows
-/// has its memory.
-pub fn peek_in(cpu: &Cpu, cr3: u32, lin: u32) -> Option<u8> {
-    cpu.bus.win32.pool.as_ref()?;
-    let tables = memory::Memory::tables(cr3);
-    let phys = match tables.kept(&cpu.bus, lin) {
-        Some(Kept::PageFile) => {
-            let mut byte = [0];
-            tables.read(&cpu.bus, lin, &mut byte)?;
-            return Some(byte[0]);
-        }
-        Some(Kept::Ram(page)) => page | lin & 0xFFF,
-        None => tables.translate(&cpu.bus, lin)?,
-    };
-    Some(cpu.bus.peek_8(phys as usize))
+/// Fill `data` from `lin` in the page tables at `cr3`, whichever the
+/// processor has, for the debugger's watchpoints: from the physical page
+/// mapped there or kept by a PAGE_NOACCESS entry, or from the page file.
+/// The tables are walked once for each page. The bytes of a page that
+/// isn't committed stay as they were, and so do all of them before the
+/// built-in Windows has its memory.
+pub fn read_in(cpu: &Cpu, cr3: u32, lin: u32, data: &mut [u8]) {
+    if has_memory(cpu) {
+        memory::Memory::tables(cr3).peek(&cpu.bus, lin, data);
+    }
 }
 
 /// The pages of the page tables the processor has that are in the page

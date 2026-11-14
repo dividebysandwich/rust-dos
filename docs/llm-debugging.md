@@ -1673,8 +1673,12 @@ back changes no bytes and stops nothing. When the process ends, its
 breakpoints and watchpoints go with it, and the journal has a
 `breakpoint_removed` or `watchpoint_removed` entry with `process_ended`
 for each: a process started later can get the same page tables and
-other code at the same addresses. The pages of images, stacks and views
-of files are kept by physical address.
+other code at the same addresses. A save state's load without
+`strict_match` keeps them, as it keeps the physical ones, when the
+loaded machine has their process, and drops those of an address space
+none of its processes has, with the same journal entries after
+`state_loaded`. The pages of images, stacks and views of files are kept
+by physical address.
 
 ## 6. Pitfalls
 

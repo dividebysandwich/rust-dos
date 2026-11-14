@@ -329,8 +329,11 @@ impl DebugHub {
     /// process that starts later can be given the same page tables and
     /// put other code and data at those addresses, as the same program
     /// started again does; a debugger on Windows forgets a process's
-    /// breakpoints when it ends too.
-    fn drop_ended_spots(&mut self, cpu: &Cpu) {
+    /// breakpoints when it ends too. A save state's load runs this as
+    /// well: the loaded machine has the processes of the moment it was
+    /// saved, so a spot in an address space none of them has goes the
+    /// same way, and the others stay, as physical ones do.
+    pub(super) fn drop_ended_spots(&mut self, cpu: &Cpu) {
         self.seen_processes_ended = cpu.programs.processes_ended;
         let ended: Vec<Spot> = self
             .breakpoints

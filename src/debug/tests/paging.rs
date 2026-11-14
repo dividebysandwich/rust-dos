@@ -109,6 +109,21 @@ fn returns(value: u8) -> [u8; 6] {
     [0xB8, value, 0, 0, 0, 0xC3]
 }
 
+/// A machine with `memory_mb` MB at the shell's prompt, with the
+/// built-in Windows on and `paging_program` as T.EXE in its folder; the
+/// address of the program's data.
+fn paging_shell(name: &str, memory_mb: usize, pages: u32, sweep: bool) -> (Cpu, u32) {
+    let dir = crate::test_dir::path(&format!("debug-{name}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (program, data) = paging_program(pages, sweep);
+    std::fs::write(dir.join("T.EXE"), program).unwrap();
+    let mut cpu = Cpu::with_memory(dir, memory_mb);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(Default::default());
+    cpu.load_shell();
+    (cpu, data)
+}
+
 /// A machine with `memory_mb` MB running `paging_program` under the
 /// built-in Windows, with a hub, at the program's stage 1; the address
 /// of the program's data and of its block.
@@ -118,14 +133,7 @@ fn paging_machine(
     pages: u32,
     sweep: bool,
 ) -> (Cpu, DebugHub, u32, u32) {
-    let dir = crate::test_dir::path(&format!("debug-{name}"));
-    std::fs::create_dir_all(&dir).unwrap();
-    let (program, data) = paging_program(pages, sweep);
-    std::fs::write(dir.join("T.EXE"), program).unwrap();
-    let mut cpu = Cpu::with_memory(dir, memory_mb);
-    cpu.bus.win32.enabled = true;
-    cpu.host_console = Some(Default::default());
-    cpu.load_shell();
+    let (mut cpu, data) = paging_shell(name, memory_mb, pages, sweep);
     assert!(cpu.load_executable("T.EXE", None));
     let mut hub = DebugHub::for_tests(&cpu);
     until_stage(&mut cpu, &mut hub, data, 1);
@@ -747,4 +755,315 @@ fn a_linear_watchpoint_reads_its_own_address_space_whichever_runs() {
     go(&mut cpu, &mut hub, data, 1);
     assert_eq!(exit_code(&mut cpu, &mut hub), 1);
     assert!(spot.ended(&cpu));
+}
+
+/// The stages P.EXE waits in: before it starts its child, and once the
+/// child has ended.
+const STARTING: u8 = 8;
+const CHILD_ENDED: u8 = 9;
+
+/// P.EXE, a Win32 program that starts T.EXE and lives as long as it
+/// does, and the address of its data, which has `BLOCK`, `READY` and `GO`
+/// where T.EXE's has them. It commits four pages as T.EXE does, puts
+/// MOV EAX,77h; RET at 100h in them, waits in stage `STARTING`, starts
+/// T.EXE and then, until T.EXE has ended, counts in the block's first
+/// double word, calls the code at 100h and sleeps a millisecond. It
+/// waits in stage `CHILD_ENDED` then, calls the code once more and ends
+/// with what that returns.
+fn launcher_program() -> (Vec<u8>, u32) {
+    use iced_x86::code_asm::*;
+    use rust_dos_pe::{self as pe, Builder, Imp};
+    const LINE: u32 = 0x20;
+    const STARTUP_INFO: u32 = 0x40;
+    const PROCESS_INFORMATION: u32 = 0x90;
+    let mut b = Builder::exe(WIN32_BASE);
+    b.subsystem(pe::SUBSYSTEM_CONSOLE);
+    let names = [
+        "VirtualAlloc",
+        "CreateProcessA",
+        "Sleep",
+        "WaitForSingleObject",
+    ];
+    let imports = names.map(Imp::Name);
+    let iat = b.imports(&[("KERNEL32.DLL", &imports[..])]).concat();
+    let f = |name: &str| dword_ptr(iat[names.iter().position(|n| *n == name).unwrap()] as u64);
+    let mut bytes = [0; 0xB0];
+    bytes[LINE as usize..][..5].copy_from_slice(b"T.EXE");
+    bytes[STARTUP_INFO as usize] = 68;
+    let flags = pe::SCN_INITIALIZED_DATA | pe::SCN_READ | pe::SCN_WRITE;
+    let data = WIN32_BASE + b.section(".data", &bytes, flags);
+    let at = |offset: u32| dword_ptr((data + offset) as u64);
+    let code_rva = b.next_rva();
+    let mut a = CodeAssembler::new(32).unwrap();
+    let mut code = || -> Result<(), IcedError> {
+        // PAGE_READWRITE, MEM_COMMIT | MEM_RESERVE, four pages, anywhere.
+        for arg in [4, 0x3000, 0x4000, 0] {
+            a.push(arg)?;
+        }
+        a.call(f("VirtualAlloc"))?;
+        a.mov(at(BLOCK), eax)?;
+        a.mov(dword_ptr(eax + 0x100), 0x77B8)?;
+        a.mov(word_ptr(eax + 0x104), 0xC300)?;
+        a.mov(at(READY), STARTING as i32)?;
+        let mut start = a.create_label();
+        a.set_label(&mut start)?;
+        a.cmp(at(GO), STARTING as i32)?;
+        a.jne(start)?;
+        a.push((data + PROCESS_INFORMATION) as i32)?;
+        a.push((data + STARTUP_INFO) as i32)?;
+        for _ in 0..6 {
+            a.push(0)?;
+        }
+        a.push((data + LINE) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateProcessA"))?;
+        let mut again = a.create_label();
+        a.set_label(&mut again)?;
+        a.mov(eax, at(BLOCK))?;
+        a.inc(dword_ptr(eax))?;
+        a.add(eax, 0x100)?;
+        a.call(eax)?;
+        a.push(1)?;
+        a.call(f("Sleep"))?;
+        a.push(0)?;
+        a.push(at(PROCESS_INFORMATION))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.test(eax, eax)?;
+        a.jnz(again)?;
+        a.mov(at(READY), CHILD_ENDED as i32)?;
+        let mut wait = a.create_label();
+        a.set_label(&mut wait)?;
+        a.cmp(at(GO), CHILD_ENDED as i32)?;
+        a.jne(wait)?;
+        a.mov(eax, at(BLOCK))?;
+        a.add(eax, 0x100)?;
+        a.call(eax)?;
+        a.ret()
+    };
+    code().unwrap();
+    let code = a.assemble((WIN32_BASE + code_rva) as u64).unwrap();
+    b.section(
+        ".text",
+        &code,
+        pe::SCN_CODE | pe::SCN_EXECUTE | pe::SCN_READ,
+    );
+    b.entry(code_rva);
+    (b.build(), data)
+}
+
+/// Two processes alive at once, with the same linear addresses in both:
+/// a launcher and the program it started, each with code at 100h in a
+/// block at the same address. A breakpoint and a watchpoint set in the
+/// started program's address space don't stop the launcher, which runs
+/// the code at the breakpoint's address and writes the watched one over
+/// and over. They stop the program, and go with a journal entry when it
+/// ends, while the launcher lives on.
+#[test]
+fn linear_spots_stop_only_their_own_process_of_two() {
+    use super::super::pm::Spot;
+    let (mut cpu, data) = paging_shell("lin-two", 32, 4, false);
+    let (launcher, launcher_data) = launcher_program();
+    assert_eq!(launcher_data, data, "one layout for both programs' data");
+    let dir = crate::test_dir::path("debug-lin-two");
+    std::fs::write(dir.join("P.EXE"), launcher).unwrap();
+    assert!(cpu.load_executable("P.EXE", None));
+    let mut hub = DebugHub::for_tests(&cpu);
+    // The launcher, before it starts the program.
+    until_stage(&mut cpu, &mut hub, data, STARTING);
+    let launcher = cpu.cr3;
+    go(&mut cpu, &mut hub, data, STARTING);
+    // The launcher's READY is never 1, so this is the program, T.EXE,
+    // in its own address space.
+    until_stage(&mut cpu, &mut hub, data, 1);
+    let child = cpu.cr3;
+    let block = block_of(&mut cpu, &mut hub, data);
+    let at = block + 0x100;
+    write_lin(&mut cpu, &mut hub, at, &returns(0x55)).unwrap();
+    let addr = format!("lin:{:08X}", at);
+    let watch = format!("lin:{:08X}", block);
+    let set = Cmd::AddBreakpoint {
+        addr: addr.clone(),
+        once: false,
+    };
+    reply(&mut cpu, &mut hub, set).unwrap();
+    let set = Cmd::AddWatchpoint {
+        addr: watch.clone(),
+        len: 4,
+    };
+    let listed = reply(&mut cpu, &mut hub, set).unwrap();
+    assert_eq!(listed["watchpoints"][0]["value"], "00000000");
+
+    // The launcher goes round while the program waits, in its own
+    // address space: the count in its block grows, at the watched linear
+    // address, and each round calls the code at the breakpoint's.
+    // Neither stops the machine, and the watchpoint reads the program's
+    // block all along.
+    assert_ne!(launcher, child);
+    let own = |lin: u32| Spot::Lin { cr3: launcher, lin };
+    assert_eq!(
+        own(data + BLOCK).value(&cpu, 4),
+        Some(block),
+        "the same linear address in both"
+    );
+    assert_eq!(own(at).value(&cpu, 2), Some(0x77B8));
+    let first = own(block).value(&cpu, 4).unwrap();
+    for _ in 0..400 {
+        run(&mut cpu, &mut hub, 1);
+        assert!(!hub.paused, "{:?}", entries_of(&hub, "paused").pop());
+    }
+    let last = own(block).value(&cpu, 4).unwrap();
+    assert!(
+        last >= first + 3,
+        "the launcher's rounds: {first} to {last}"
+    );
+    let listed = reply(&mut cpu, &mut hub, Cmd::ListWatchpoints).unwrap();
+    assert_eq!(listed["watchpoints"][0]["value"], "00000000");
+
+    // The program goes on: its write and its call stop it.
+    until_stage(&mut cpu, &mut hub, data, 1);
+    assert_eq!(cpu.cr3, child);
+    go(&mut cpu, &mut hub, data, 1);
+    let stop = next_stop(&mut cpu, &mut hub);
+    assert_eq!(
+        stop["watch"],
+        json!({"addr": watch, "len": 4, "old": "00000000", "new": "00005678"}),
+        "{}",
+        stop
+    );
+    assert_eq!(cpu.cr3, child);
+    resume(&mut cpu, &mut hub);
+    let stop = next_stop(&mut cpu, &mut hub);
+    assert_eq!(stop["breakpoint"].as_str(), Some(addr.as_str()), "{}", stop);
+    assert_eq!((cpu.cr3, cpu.eip()), (child, at));
+    resume(&mut cpu, &mut hub);
+
+    // It ends, and the launcher, alive, waits in its last stage. The
+    // spots went with the program.
+    until_stage(&mut cpu, &mut hub, data, CHILD_ENDED);
+    assert_ne!(cpu.cr3, child);
+    let listed = reply(&mut cpu, &mut hub, Cmd::ListBreakpoints).unwrap();
+    assert_eq!(listed["breakpoints"], json!([]));
+    let listed = reply(&mut cpu, &mut hub, Cmd::ListWatchpoints).unwrap();
+    assert_eq!(listed["watchpoints"], json!([]));
+    let removed = entries_of(&hub, "breakpoint_removed");
+    assert_eq!(removed.len(), 1, "{:?}", removed);
+    assert_eq!(
+        (&removed[0]["addr"], &removed[0]["process_ended"]),
+        (&json!(addr), &json!(true))
+    );
+    let removed = entries_of(&hub, "watchpoint_removed");
+    assert_eq!(removed.len(), 1, "{:?}", removed);
+    assert_eq!(
+        (&removed[0]["addr"], &removed[0]["process_ended"]),
+        (&json!(watch), &json!(true))
+    );
+    go(&mut cpu, &mut hub, data, CHILD_ENDED);
+    assert_eq!(exit_code(&mut cpu, &mut hub), 0x77);
+}
+
+/// Load the save state `state` as `POST /api/state/load` without
+/// `strict_match` does: the front end loads it and tells the hub.
+fn load_state(cpu: &mut Cpu, hub: &mut DebugHub, state: &[u8]) -> Value {
+    let load = Cmd::LoadState {
+        path: "s".into(),
+        strict_match: false,
+        check_files: false,
+        folders: Vec::new(),
+    };
+    let sent = send(cpu, hub, load);
+    let request = hub.next_state_request().expect("a load to carry out");
+    rust_dos::savestate::machine::load(cpu, state).unwrap();
+    hub.state_done(cpu, request, Ok(json!({"loaded": true})));
+    answer(cpu, hub, sent, 0).unwrap()
+}
+
+/// A save state's load keeps the breakpoints and watchpoints kept by
+/// linear address whose process the loaded machine has, as it keeps
+/// physical ones, and they stop it there. It drops those whose address
+/// space no process of the loaded machine has, each with the journal
+/// entry of a process that ended, before anything lists them: a load
+/// through the debug server and one from the window alike.
+#[test]
+fn a_loaded_state_keeps_the_linear_spots_of_its_processes_and_drops_the_others() {
+    use rust_dos::savestate::machine;
+    let (mut cpu, data) = paging_shell("lin-load", 32, 4, false);
+    let at_prompt = machine::save(&cpu);
+    assert!(cpu.load_executable("T.EXE", None));
+    let mut hub = DebugHub::for_tests(&cpu);
+    until_stage(&mut cpu, &mut hub, data, 1);
+    let block = block_of(&mut cpu, &mut hub, data);
+    let at = block + 0x100;
+    write_lin(&mut cpu, &mut hub, at, &returns(0x55)).unwrap();
+    let in_program = machine::save(&cpu);
+    let addr = format!("lin:{:08X}", at);
+    let watch = format!("lin:{:08X}", block);
+    let set = |cpu: &mut Cpu, hub: &mut DebugHub| {
+        let set = Cmd::AddBreakpoint {
+            addr: addr.clone(),
+            once: false,
+        };
+        reply(cpu, hub, set).unwrap();
+        let set = Cmd::AddWatchpoint {
+            addr: watch.clone(),
+            len: 4,
+        };
+        reply(cpu, hub, set).unwrap();
+    };
+    let kept = |cpu: &mut Cpu, hub: &mut DebugHub| {
+        let breakpoints = reply(cpu, hub, Cmd::ListBreakpoints).unwrap();
+        let watchpoints = reply(cpu, hub, Cmd::ListWatchpoints).unwrap();
+        let count = |list: &Value| list.as_array().unwrap().len();
+        (
+            count(&breakpoints["breakpoints"]),
+            count(&watchpoints["watchpoints"]),
+        )
+    };
+    let dropped = |hub: &DebugHub| {
+        let of = |kind: &str| {
+            let entries = entries_of(hub, kind);
+            let ended = entries.iter().filter(|e| e["process_ended"] == true);
+            ended.count()
+        };
+        (of("breakpoint_removed"), of("watchpoint_removed"))
+    };
+    set(&mut cpu, &mut hub);
+
+    // The state with the program in it, both ways: its process has the
+    // address space the spots are in.
+    load_state(&mut cpu, &mut hub, &in_program);
+    assert_eq!(kept(&mut cpu, &mut hub), (1, 1));
+    machine::load(&mut cpu, &in_program).unwrap();
+    hub.state_loaded_elsewhere(&cpu, "window");
+    assert_eq!(kept(&mut cpu, &mut hub), (1, 1));
+    assert_eq!(dropped(&hub), (0, 0));
+
+    // The state from the prompt, before the program: no process.
+    load_state(&mut cpu, &mut hub, &at_prompt);
+    assert_eq!(kept(&mut cpu, &mut hub), (0, 0), "before the machine ran");
+    assert_eq!(dropped(&hub), (1, 1));
+    let journal = entries(&hub);
+    let place = |kind: &str| journal.iter().rposition(|e| e["type"] == kind).unwrap();
+    assert!(place("state_loaded") < place("breakpoint_removed"));
+    let removed = entries_of(&hub, "watchpoint_removed").pop().unwrap();
+    assert_eq!(removed["addr"], json!(watch));
+
+    // Back in the program, the spots set again stop it.
+    machine::load(&mut cpu, &in_program).unwrap();
+    hub.state_loaded_elsewhere(&cpu, "window");
+    set(&mut cpu, &mut hub);
+    go(&mut cpu, &mut hub, data, 1);
+    let stop = next_stop(&mut cpu, &mut hub);
+    assert_eq!(stop["reason"].as_str(), Some("watchpoint"), "{}", stop);
+    resume(&mut cpu, &mut hub);
+    let stop = next_stop(&mut cpu, &mut hub);
+    assert_eq!(stop["breakpoint"].as_str(), Some(addr.as_str()), "{}", stop);
+
+    // Paused there, the window loads the state from the prompt: the
+    // stop it makes lists neither.
+    machine::load(&mut cpu, &at_prompt).unwrap();
+    hub.state_loaded_elsewhere(&cpu, "window");
+    assert_eq!(dropped(&hub), (2, 2));
+    let stop = entries_of(&hub, "paused").pop().unwrap();
+    assert_eq!(stop["reason"].as_str(), Some("load"), "{}", stop);
+    assert_eq!(kept(&mut cpu, &mut hub), (0, 0));
 }

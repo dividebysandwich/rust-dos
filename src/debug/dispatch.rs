@@ -110,7 +110,7 @@ impl DebugHub {
         // page file, and its linear one when the address had one.
         let addr = a.byte(cpu, 0).map(|p| format!("{:05X}", p));
         let linear = a.lin.map(|l| format!("{:08X}", l));
-        let page_file = places.contains(&pm::Place::PageFile);
+        let page_file = places.iter().any(|p| matches!(p, pm::Place::PageFile(_)));
         self.record(
             cpu,
             Kind::MemoryWritten,

@@ -695,6 +695,37 @@ impl Memory {
         Some(())
     }
 
+    /// Fill `data` from `lin` as a debugger sees it, without a page
+    /// fault and with one walk of the tables for each page: the bytes of
+    /// a present page and of one that PAGE_NOACCESS keeps come from its
+    /// physical page with no device's read side effects, and those of a
+    /// page in the page file from there. The bytes of a page that isn't
+    /// committed stay as they were.
+    pub fn peek(&self, bus: &Bus, lin: u32, data: &mut [u8]) {
+        for (offset, run) in Bus::page_runs(lin, data.len()) {
+            let at = lin.wrapping_add(offset as u32);
+            let part = &mut data[offset..offset + run];
+            let Some(entry) = self.entry(bus, at).filter(|&entry| entry != 0) else {
+                continue;
+            };
+            if entry & PRESENT == 0 && is_paged(entry) {
+                let page_file = bus.win32.pool.as_ref().map(|pool| &pool.page_file);
+                match page_file.and_then(|page_file| page_file.contents(entry >> 12)) {
+                    Some(page) => {
+                        let from = (at & 0xFFF) as usize;
+                        part.copy_from_slice(&page[from..from + run]);
+                    }
+                    None => part.fill(0),
+                }
+            } else {
+                let phys = (entry & !0xFFF | at & 0xFFF) as usize;
+                for (i, byte) in part.iter_mut().enumerate() {
+                    *byte = bus.peek_8(phys + i);
+                }
+            }
+        }
+    }
+
     /// Write `data` at `lin`, which is mapped or in the page file, whose
     /// copy is written there: no page fault, and no physical page taken.
     pub fn write(&self, bus: &mut Bus, lin: u32, data: &[u8]) -> Option<()> {
