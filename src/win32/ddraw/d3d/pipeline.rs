@@ -699,14 +699,12 @@ impl Coord {
 
     /// The vertex's set for the slot, as a transformed vertex keeps it
     /// and as `coordinates` gives a set with no matrix: its numbers,
-    /// 0 for those it doesn't have, and for a fourth it doesn't have
-    /// its last number, which a projected stage with no count divides
-    /// by (`card_geometry::last_as_fourth`).
+    /// and for those it doesn't have 0, or 1 for the fourth.
     fn keep(&self, layout: &Layout, v: &Vertex) -> [f32; 4] {
         let numbers = self.numbers(layout);
-        let mut c = [0.0; 4];
+        let mut c = [0.0, 0.0, 0.0, 1.0];
         c[..numbers].copy_from_slice(&v.tex[self.set & 7][..numbers]);
-        card_geometry::last_as_fourth(c, numbers)
+        c
     }
 
     /// The coordinates `c` of the slot as a card takes a stage's: the
@@ -745,8 +743,6 @@ impl Coord {
         let at = layout.tex[self.set & 7].0 / 4;
         let kept = std::array::from_fn(|i| match i {
             i if i < numbers => Part::Word(at + i as u32),
-            // The last number of a set is its fourth too (`keep`).
-            3 if numbers > 0 => Part::Word(at + numbers as u32 - 1),
             3 => one,
             _ => zero,
         });
@@ -1937,14 +1933,10 @@ mod tests {
             ..Setup::default()
         };
         let p = process(&setup, &[v], &layout)[0];
-        // A set kept as it is has its last number as the fourth too,
-        // for a projected stage to divide by.
-        assert_eq!(p.tex[0], [0.25, 0.75, 0.0, 0.75]);
+        assert_eq!(p.tex[0], [0.25, 0.75, 0.0, 1.0]);
         assert_eq!(p.tex[1], [0.5, 1.5, 0.0, 1.0]);
         assert_eq!(p.tex[2], [5.0, 5.0, 9.0, 1.0]);
-        // The normal's three numbers have no count to end at, so the
-        // last of them is the fourth as well.
-        assert_eq!(p.tex[3], [0.0, 0.0, -1.0, -1.0]);
+        assert_eq!(p.tex[3], [0.0, 0.0, -1.0, 1.0]);
         assert_eq!(p.tex[4], [0.0, 0.0, 0.0, 1.0]);
     }
 

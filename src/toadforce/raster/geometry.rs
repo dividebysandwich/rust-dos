@@ -247,9 +247,8 @@ pub fn fog_factor(mode: u32, start: f32, end: f32, density: f32, d: f32) -> f32 
 /// is the one to the vertex with `local_viewer` (`LOCALVIEWER`), and
 /// straight ahead, (0, 0, 1), without. With a texture `matrix` and
 /// its count, a 1 goes after the last number, the matrix follows, and
-/// of what comes out the counted numbers stay, with a fourth of 1
-/// when it isn't counted. Without a matrix a fourth number that isn't
-/// there is the last that is (`last_as_fourth`). The Direct3D
+/// of what comes out the counted numbers stay; a fourth number not
+/// counted, or not there without a matrix, is 1. The Direct3D
 /// pipeline makes its coordinates with this too
 /// (`win32::ddraw::d3d::pipeline::Coord`).
 pub fn coordinates(
@@ -303,22 +302,13 @@ pub fn coordinates(
                 _ => 0.0,
             })
         }
-        None => last_as_fourth(c, numbers),
+        None => {
+            if numbers < 4 {
+                c[3] = 1.0;
+            }
+            c
+        }
     }
-}
-
-/// The coordinates `c` of a set with `numbers` numbers, the rest 0,
-/// with its last number as the fourth too, or 1 for a set with none. A
-/// stage that divides without a count (`TEXTURETRANSFORMFLAGS` 256)
-/// divides by the fourth, and so by the last number the vertex has
-/// for it, as Direct3D 9's reference rasteriser was measured to.
-pub fn last_as_fourth(mut c: [f32; 4], numbers: usize) -> [f32; 4] {
-    match numbers {
-        0 => c[3] = 1.0,
-        1..=3 => c[3] = c[numbers - 1],
-        _ => {}
-    }
-    c
 }
 
 /// Where a slot's coordinates come from, and the matrix they go

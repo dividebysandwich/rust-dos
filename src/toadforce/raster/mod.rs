@@ -159,7 +159,7 @@ impl Queue<'_> {
                     }
                     // The corners have the point's colours.
                     let t = kept(t, shape);
-                    vertices.extend(t.iter().map(|c| gpu::Vertex::of(c, c, sets)));
+                    vertices.extend(t.iter().map(|c| gpu::Vertex::of(c, sets)));
                     **count += 1;
                 }
             }
@@ -187,9 +187,9 @@ impl Queue<'_> {
                 line.squares(shape, |c| {
                     for t in [[0, 1, 2], [1, 3, 2]] {
                         let t = kept(t.map(|i| c[i]), shape);
-                        vertices.extend(t.iter().map(|v| {
-                            let colours = if shape.flat { &c[0] } else { v };
-                            gpu::Vertex::of(v, colours, &[])
+                        vertices.extend(t.iter().map(|v| match shape.flat {
+                            true => gpu::Vertex::flat(v, &c[0], &[]),
+                            false => gpu::Vertex::of(v, &[]),
                         }));
                     }
                 });
@@ -359,9 +359,9 @@ fn polygon<V: std::borrow::Borrow<ScreenVertex>>(
             Queue::Host(vertices, count) => {
                 for i in 1..n - 1 {
                     if Prim::facing(fan(i), shape.cull).is_some() {
-                        vertices.extend(fan(i).map(|v| {
-                            let colours = if shape.flat { provoking } else { v };
-                            gpu::Vertex::of(v, colours, sets)
+                        vertices.extend(fan(i).map(|v| match shape.flat {
+                            true => gpu::Vertex::flat(v, provoking, sets),
+                            false => gpu::Vertex::of(v, sets),
                         }));
                         **count += 1;
                     }

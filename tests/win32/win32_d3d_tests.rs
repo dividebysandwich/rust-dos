@@ -4261,20 +4261,13 @@ fn projected_texture_coordinates_are_divided_by_the_last_one() {
     let scene = generated_scene(matrix, 3 | TTFF_PROJECTED);
     assert_quarters(&draw_scene("voodoo3_projected", &scene));
     assert_quarters(&draw_scene_toadforce("toadforce_projected", &scene));
-    // Transformed vertices keep their set, and with no count the last
-    // number the vertex has for it divides it, as on Direct3D 9's
-    // reference rasteriser: the third of a set of three, which is 2
-    // here beside twice u and twice v.
-    let corner = |x: f32, y: f32| [x, y, 0.5, 1.0, x / 32.0, y / 32.0, 2.0];
-    let (a, b) = (corner(0.0, 0.0), corner(64.0, 0.0));
-    let (c, d) = (corner(0.0, 64.0), corner(64.0, 64.0));
-    // D3DFVF_XYZRHW, one set, D3DFVF_TEXCOORDSIZE3(0).
-    let fvf = D3DFVF_XYZRHW | 0x100 | 1 << 16;
+    // Transformed vertices keep their set, and with no count the
+    // fourth coordinate divides it, which is 1 for a set of two. The
+    // ToadForce takes such vertices with four coordinates a set.
     let scene = Scene {
         steps: vec![
-            Step::State(RS_CULLMODE, 1),
             Step::Stage(TSS_TEXTURETRANSFORMFLAGS, TTFF_PROJECTED),
-            Step::World(fvf, bits(&[a, b, c, b, d, c].concat()), 6),
+            Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE)),
         ],
         ..scene
     };

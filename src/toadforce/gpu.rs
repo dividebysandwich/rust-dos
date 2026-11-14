@@ -118,23 +118,31 @@ impl Vertex {
     /// The bytes of one.
     pub const BYTES: usize = 24 + 16 * SLOTS;
 
-    /// `v` with the colours of `colours` (the vertex itself, or the
-    /// one that gives a flat-shaded triangle its colours), each slot
-    /// taking the coordinate set `sets` names for it. The specular
-    /// colour's alpha, the fog factor, is `v`'s own either way: fog
-    /// isn't flat (`setup::planes`).
-    pub fn of(v: &ScreenVertex, colours: &ScreenVertex, sets: &[u8]) -> Self {
+    /// `v`, each slot taking the coordinate set `sets` names for it.
+    pub fn of(v: &ScreenVertex, sets: &[u8]) -> Self {
         let mut tex = [[0.0; 4]; SLOTS];
         for (slot, to) in tex.iter_mut().enumerate() {
             *to = v.tex[sets.get(slot).map_or(slot, |&set| set as usize)];
         }
+        Vertex {
+            place: [v.x, v.y, v.z, v.rhw],
+            diffuse: v.diffuse,
+            specular: v.specular,
+            tex,
+        }
+    }
+
+    /// `v` as a vertex of a flat-shaded primitive, with the colours of
+    /// `colours`, the vertex that gives the primitive them. The
+    /// specular colour's alpha, the fog factor, stays `v`'s own: fog
+    /// isn't flat (`setup::planes`).
+    pub fn flat(v: &ScreenVertex, colours: &ScreenVertex, sets: &[u8]) -> Self {
         let mut specular = colours.specular;
         specular[A] = v.specular[A];
         Vertex {
-            place: [v.x, v.y, v.z, v.rhw],
             diffuse: colours.diffuse,
             specular,
-            tex,
+            ..Vertex::of(v, sets)
         }
     }
 

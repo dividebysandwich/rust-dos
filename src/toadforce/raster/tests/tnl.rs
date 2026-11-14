@@ -980,9 +980,9 @@ fn a_projected_stage_divides_by_its_last_coordinate() {
     let fvf = XYZ | TEX1 | 2 << 16;
     assert_eq!(rig.run(|w| encode::draw(w, 5, fvf, 4, &vertices)), 0);
     assert_eq!(quarters(&rig), picture);
-    // A set of fewer numbers is divided by its last: two numbers, u
-    // twice what it was and v of 2, come to a row of two texels once
-    // across.
+    // A set of fewer numbers has a fourth of 1 and isn't divided:
+    // two numbers, u twice what it was and v of 2, are a row of two
+    // texels twice across.
     let mut rig = Rig::unlit();
     rig.texture(Format::A8R8G8B8, &[&[0xFF00_0000, 0xFFFF_0000]], None);
     rig.stage(0, &[(TSS_TEXTURETRANSFORMFLAGS, 256)]);
@@ -996,7 +996,8 @@ fn a_projected_stage_divides_by_its_last_coordinate() {
     };
     let vertices = set(2.0, 0.0, 2.0);
     assert_eq!(rig.run(|w| encode::draw(w, 5, XYZ | TEX1, 4, &vertices)), 0);
-    assert_eq!(quarters(&rig), [0, 0x00FF_0000, 0, 0x00FF_0000]);
+    assert_eq!(quarters(&rig), [0x00FF_0000; 4]);
+    assert_eq!(rig.px(8, 16), 0);
 }
 
 #[test]

@@ -657,7 +657,7 @@ impl ToadForceGl {
                 // A new copy of the target each time, from memory.
                 self.forget();
                 fill(&mut memory);
-                let vertices = triangle(c).map(|v| gpu::Vertex::of(&v, &v, &[]));
+                let vertices = triangle(c).map(|v| gpu::Vertex::of(&v, &[]));
                 let runs = [gpu::Run {
                     state: state(blend),
                     vertices: 0..3,
@@ -705,7 +705,7 @@ impl ToadForceGl {
         // A target read back unchanged.
         self.forget();
         fill(&mut memory);
-        let vertices = triangle([0; 4]).map(|v| gpu::Vertex::of(&v, &v, &[]));
+        let vertices = triangle([0; 4]).map(|v| gpu::Vertex::of(&v, &[]));
         let mut hidden = (*state(None)).clone();
         hidden.clip = [0, 0, 0, 0];
         let runs = [gpu::Run {

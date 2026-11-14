@@ -80,10 +80,12 @@ ones that differ from what Direct3D was measured or documented to do:
   near and far planes, as Direct3D's cards with hardware vertex processing
   do. Direct3D's software vertex processing projects every vertex then, and
   so does the pipeline of the built-in Windows for the draws it transforms.
-- A projected stage of a vertex in screen space divides by the coordinate
-  the count names, as for the vertices the card transforms. Direct3D 9's
-  reference rasteriser divides by the set's last number whatever the count.
-  One rule for both kinds of vertex; no known game depends on it.
+- A projected stage divides by the coordinate the count names, and with no
+  count by the fourth, which is 1 for a set of fewer numbers. Direct3D 9's
+  reference rasteriser divides by the set's last number with no count, and
+  for a vertex in screen space whatever the count. No known game depends on
+  it, and giving a vertex its set's last number as the fourth cost a
+  twentieth of the frame rate in the games measured (Oni, Black & White).
 - A projected stage's coordinates over 0 are a float's quotient, sampled
   past the texture's end or as 0. Direct3D 9's reference rasteriser samples
   the first texel. No known game depends on it; matching costs a comparison
@@ -1178,10 +1180,8 @@ they are fewer than four and zeros behind that (a set of two numbers is (u,
 v, 1, 0), and what is generated is three numbers and a 1), and the first
 count numbers of the result are the stage's coordinates; those not counted
 are 0, and the fourth 1. Without a count the coordinates are passed on:
-those the stage hasn't got are 0, but the fourth, which is then the last
-number the stage has, and 1 for a stage with no numbers at all (the set of a
-layout that lacks it). "Textures" says which of them a stage with 256 in
-`TEXTURETRANSFORMFLAGS` divides the others by.
+those the stage hasn't got are 0, and the fourth 1. "Textures" says which of
+them a stage with 256 in `TEXTURETRANSFORMFLAGS` divides the others by.
 
 **Point sizes.** A vertex's size is the layout's, or `POINTSIZE`.
 With `POINTSCALEENABLE` 1 it is multiplied by the viewport's height
@@ -1200,13 +1200,12 @@ difference.
 
 **Vertices.** A field the layout lacks has its default: the diffuse colour
 is white with alpha 255, the specular colour is 0, and a texture coordinate
-a set lacks is 0, but the fourth, which is the set's last number, or 1 for a
-set the layout hasn't got. A 1 / w that is 0, negative or no finite number
-counts as 1. Positions are in pixels from the render target's top left. With
-`PIXEL_CENTRE` 0 the centre of the top left pixel is at (0, 0), and with 1
-at (0.5, 0.5). A position is limited to 32768 pixels either side of 0 and
-rounded to 1/256 of a pixel. A primitive with a position that is no finite
-number is not drawn.
+a set lacks is 0, or 1 for the fourth. A 1 / w that is 0, negative or no
+finite number counts as 1. Positions are in pixels from the render target's
+top left. With `PIXEL_CENTRE` 0 the centre of the top left pixel is at (0,
+0), and with 1 at (0.5, 0.5). A position is limited to 32768 pixels either
+side of 0 and rounded to 1/256 of a pixel. A primitive with a position that
+is no finite number is not drawn.
 
 **Primitives.** A strip's triangle i (from 0) has the vertices i, i + 1, i +
 2, and every odd one has the first two the other way round, so all wind
@@ -1475,16 +1474,16 @@ right or bottom edge, so a texel's centre is half a texel in. A stage's
 coordinates at a pixel are the first two of its set, or with 256 in
 `TEXTURETRANSFORMFLAGS` those two divided by the coordinate the flags' count
 names as the last, at each pixel: the second with a count of 2, and with a
-count of 0 the fourth, which is the last number the vertex has for the stage
-("Texture coordinates"). This is what Direct3D 9's reference rasteriser does
-with the vertices it transforms; for a vertex in screen space it divides by
-the last number of the set whatever the count, where the card goes by the
-count. (Direct3D 7's software rasteriser never divides.) A division by 0 is
-a float's: a coordinate over 0 is past the end of the card's whole numbers
-on its side and stops there, and 0 over 0 is no number, which is sampled as
-0. The nearest filter (1) takes the texel a coordinate falls in. The linear
-filter (2) mixes the four texels around it by the distances to their centres
-in 1/256 of a texel.
+count of 0 the fourth, which is 1 for a set of fewer numbers ("Texture
+coordinates"). With a count this is what Direct3D 9's reference rasteriser
+does with the vertices it transforms. Without one, and for every vertex in
+screen space, it divides by the last number the set has, where the card goes
+by the count. (Direct3D 7's software rasteriser never divides.) A division
+by 0 is a float's: a coordinate over 0 is past the end of the card's whole
+numbers on its side and stops there, and 0 over 0 is no number, which is
+sampled as 0. The nearest filter (1) takes the texel a coordinate falls in.
+The linear filter (2) mixes the four texels around it by the distances to
+their centres in 1/256 of a texel.
 
 The level of detail is half the base-2 logarithm of the larger of two
 numbers: the squared length, in texels of level 0, of the step the
@@ -1757,8 +1756,7 @@ number.
 - `TEXTURETRANSFORMFLAGS` is the count of coordinates the stage's texture
   transform gives, 0 for no transform, plus 256 to divide them by the last:
   the first two (three of a cube map) by the coordinate the count ends at,
-  or with a count of 0 by the fourth, which is then the last number the
-  vertex has for the stage.
+  or with a count of 0 by the fourth.
 - `MINFILTER` 3 is the anisotropic filter, and `MAGFILTER` 3 the
   linear one ("Textures").
 - `COLOR_SCALE` and `ALPHA_SCALE` multiply the stage's results by 1, 2
