@@ -913,6 +913,17 @@ fn a_bar_over_the_ram_or_the_roms_mirror_decodes_nothing() {
         set_config(&mut cpu, register, back);
     }
     assert_eq!(int10(&mut cpu, 0x4F02, 0x4101, 0, 0), 0x004F);
+    // Nor does a restored state that asks for one, and nothing of it is
+    // restored.
+    assert_eq!(int10(&mut cpu, 0x4F04, 0, 0x000F, 1), 0x004F);
+    int10::set_mode(&mut cpu, 0x03);
+    set_config(&mut cpu, 0x14, 0);
+    assert_eq!(int10(&mut cpu, 0x4F04, 0, 0x000F, 2), 0x014F);
+    assert_eq!(cpu.bus.video_mode, VideoMode::Text80x25Color);
+    set_config(&mut cpu, 0x14, INITIAL_MEMORY);
+    assert_eq!(int10(&mut cpu, 0x4F04, 0, 0x000F, 2), 0x004F);
+    assert_eq!(cpu.bus.video_mode, VideoMode::Vesa);
+    assert!(cpu.bus.vbe.lfb);
 
     // Card memory with its first half over the RAM of a machine with
     // 96 MB: the half above the RAM doesn't decode either.
@@ -1087,9 +1098,10 @@ fn a_reset_of_the_machine_keeps_configuration_space() {
         .write_32(0xC800_0000 + regs::MODE_WIDTH as usize, 640);
     cpu.bus.write_32(0xC810_0000, 0x0102_0304);
     cpu.bus.write_32(0xC000_0000 + 64, 0x0A0B_0C0D);
-    let resets: [fn(&mut Cpu); 2] = [|cpu| cpu.bus.restore_dos_machine(), |cpu| {
-        cpu.close_program()
-    }];
+    let resets: [fn(&mut Cpu); 2] = [
+        |cpu| cpu.bus.restore_dos_machine(),
+        |cpu| cpu.close_program(),
+    ];
     for reset in resets {
         reset(&mut cpu);
         assert_eq!(config(&mut cpu, 0x10), 0xC800_0000);
@@ -1101,10 +1113,7 @@ fn a_reset_of_the_machine_keeps_configuration_space() {
         // The registers are reset; the ring and card memory keep what
         // they held.
         assert_eq!(cpu.bus.read_32(0xC800_0000), regs::ID_VALUE);
-        assert_eq!(
-            cpu.bus.read_32(0xC800_0000 + regs::MODE_WIDTH as usize),
-            0
-        );
+        assert_eq!(cpu.bus.read_32(0xC800_0000 + regs::MODE_WIDTH as usize), 0);
         assert_eq!(cpu.bus.read_32(0xC810_0000), 0x0102_0304);
         assert_eq!(cpu.bus.read_32(0xC000_0000 + 64), 0x0A0B_0C0D);
         cpu.bus

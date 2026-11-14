@@ -364,7 +364,9 @@ mod tests {
         let row: Vec<u32> = (0..8).map(|x| pixel(&memory, &dst, x, 0)).collect();
         assert_eq!(
             row,
-            [0x5555, 0x5555, 0xF81E, 0xF81E, 0x781F, 0x781F, 0x5555, 0x5555]
+            [
+                0x5555, 0x5555, 0xF81E, 0xF81E, 0x781F, 0x781F, 0x5555, 0x5555
+            ]
         );
     }
 }

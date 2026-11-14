@@ -353,7 +353,7 @@ fn mode_info(cpu: &mut Cpu, number: u16, addr: usize) -> u16 {
         Some(LFB_BASE as u32)
     };
     if base.is_none() {
-        block[0..2].copy_from_slice(&0x001Bu16.to_le_bytes());
+        block[0] &= !0x80;
     }
     block[40..44].copy_from_slice(&base.unwrap_or(0).to_le_bytes());
     write_bytes(&mut cpu.bus, addr, &block);
@@ -471,12 +471,16 @@ fn save_restore_state(cpu: &mut Cpu) -> u16 {
                 let pitch = cpu.bus.guest_read_32((addr + 6) as u32);
                 let start = cpu.bus.guest_read_32((addr + 10) as u32);
                 // A block the BIOS didn't save, with a picture outside
-                // its memory: nothing of it is restored.
-                if past_bios_memory(&cpu.bus, start, pitch, m.height) {
+                // its memory, or one that asks for a linear frame buffer
+                // while a ToadForce's BAR 1 decodes nothing, which
+                // function 02h refuses too: nothing of it is restored.
+                let lfb = mode & 0x4000 != 0;
+                let outside = past_bios_memory(&cpu.bus, start, pitch, m.height);
+                if outside || (lfb && no_frame_buffer(&cpu.bus)) {
                     return FAILED;
                 }
                 if cpu.bus.vbe.mode != Some(*m) {
-                    enter_mode(&mut cpu.bus, m, mode & 0x4000 != 0, true);
+                    enter_mode(&mut cpu.bus, m, lfb, true);
                 }
                 cpu.bus.vbe.bank = cpu.bus.guest_read_32((addr + 2) as u32) % (VRAM_SIZE / WINDOW_SIZE) as u32;
                 cpu.bus.vbe.pitch = pitch;

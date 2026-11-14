@@ -221,9 +221,10 @@ register or a command names it.
   4 MB fails and changes nothing.
 - While BAR 1 decodes nothing (chapter 2), the BIOS has no linear frame
   buffer to give. Function 4F01h reports its modes without one (bit 7
-  of the mode attributes clear, and 0 for the address), and function
-  4F02h fails a mode set that asks for one. The banked window at A0000h
-  is there as before.
+  of the mode attributes clear, and 0 for the address), and functions
+  4F02h and 4F04h fail a mode set or a restored state that asks for
+  one, changing nothing. The banked window at A0000h is there as
+  before.
 - The memory of the standard VGA modes (text, the planar modes, mode
   13h) is the VGA's own and no part of card memory.
 
