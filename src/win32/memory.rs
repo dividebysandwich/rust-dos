@@ -181,6 +181,39 @@ pub struct PageFile {
     hand: u32,
 }
 
+/// How many pages the page file gave and took since the emulator started:
+/// the pages of zeros that got a physical page (on their first touch, or
+/// sent out holding zeros), the pages read back from it, and the pages
+/// written out to it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PagingCounts {
+    pub zero_ins: u64,
+    pub ins: u64,
+    pub outs: u64,
+}
+
+/// The page file now, for the debugger's status.
+#[derive(Clone, Copy, Debug)]
+pub struct PageFileStatus {
+    /// The pages it may hold and those it holds.
+    pub size: u32,
+    pub used: u32,
+    /// The physical pages of programs' own memory that may go out to it.
+    pub pageable: usize,
+    pub counts: PagingCounts,
+}
+
+/// The page file's state and counts, if the built-in Windows runs.
+pub fn page_file_status(bus: &Bus) -> Option<PageFileStatus> {
+    let page_file = &bus.win32.pool.as_ref()?.page_file;
+    Some(PageFileStatus {
+        size: page_file.size,
+        used: page_file.used,
+        pageable: page_file.pageable.len(),
+        counts: bus.win32.paging,
+    })
+}
+
 impl PageFile {
     /// The pages it has room for.
     pub fn room(&self) -> u32 {
@@ -836,6 +869,7 @@ pub fn page_out(bus: &mut Bus) -> bool {
     pool.give(phys);
     bus.write_32(at as usize, paged_entry(slot, protect));
     bus.win32.tlb_stale = true;
+    bus.win32.paging.outs += 1;
     true
 }
 
@@ -884,6 +918,9 @@ pub fn page_in(bus: &mut Bus, cr3: u32, lin: u32) -> PageIn {
     };
     if let Some(data) = data {
         bus.load_bytes(phys as usize, &data);
+        bus.win32.paging.ins += 1;
+    } else {
+        bus.win32.paging.zero_ins += 1;
     }
     bus.write_32(at, phys | protection_bits(protect));
     let pool = bus.win32.pool.as_mut().expect("checked");

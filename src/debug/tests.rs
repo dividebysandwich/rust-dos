@@ -1867,6 +1867,7 @@ fn win32_without_a_program_has_no_processes() {
         "pending": null,
         "processes": [],
         "trace": "collapsed",
+        "page_file": null,
     });
     assert_eq!(v, expected);
 }

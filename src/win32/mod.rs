@@ -81,6 +81,7 @@ mod wow32;
 mod ws2_32;
 mod wsock32;
 
+pub use memory::{PageFileStatus, PagingCounts, page_file_status};
 pub use snapshot::snapshot;
 pub use stubs::function_name;
 
@@ -374,6 +375,9 @@ pub struct Win32 {
     /// since the processor's TLB was last flushed: whoever has the
     /// processor flushes it before the program runs on.
     pub(crate) tlb_stale: bool,
+    /// What the page file did since the emulator started, for the
+    /// debugger's status.
+    pub(crate) paging: memory::PagingCounts,
     /// The kernel objects, which the processes' handles are of.
     pub(crate) objects: object::Objects,
     /// The DOS process the programs run in, and the stack its DOS stub
@@ -1579,4 +1583,5 @@ crate::state_fields!(Win32 {
     wait_due,
     system_clock,
     tlb_stale,
+    paging,
 });
