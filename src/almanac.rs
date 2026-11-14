@@ -398,49 +398,6 @@ pub fn report_settings(
     map
 }
 
-/// The settings of `KEYS` that came after the almanac's schema version 2,
-/// which a server that hasn't been updated rejects a report for: it
-/// refuses a whole report with a key it doesn't know.
-const NEWER_KEYS: [(&str, &str); 1] = [("emulator", "fps_cap")];
-
-/// A setting the almanac's schema lists (`GET /schema`).
-#[derive(Debug, Deserialize)]
-pub struct SchemaSetting {
-    pub section: String,
-    pub key: String,
-}
-
-/// The almanac's schema: its version and the settings it takes.
-#[derive(Debug, Deserialize)]
-pub struct Schema {
-    pub version: u32,
-    pub settings: Vec<SchemaSetting>,
-}
-
-/// `settings` without the keys the almanac whose `schema` this is
-/// doesn't take, so that it takes the report; without its schema (it
-/// didn't answer), without `NEWER_KEYS`. The almanac of today (schema
-/// version 2) takes no `fps_cap`, and one that does carries it.
-pub fn for_server(
-    mut settings: BTreeMap<String, BTreeMap<String, String>>,
-    schema: Option<&Schema>,
-) -> BTreeMap<String, BTreeMap<String, String>> {
-    let takes = |section: &str, key: &str| match schema {
-        Some(schema) => schema
-            .settings
-            .iter()
-            .any(|s| s.section.eq_ignore_ascii_case(section) && s.key.eq_ignore_ascii_case(key)),
-        None => !NEWER_KEYS
-            .iter()
-            .any(|&(s, k)| s.eq_ignore_ascii_case(section) && k.eq_ignore_ascii_case(key)),
-    };
-    for (section, keys) in settings.iter_mut() {
-        keys.retain(|key, _| takes(section, key));
-    }
-    settings.retain(|_, keys| !keys.is_empty());
-    settings
-}
-
 /// `base` with `settings` over it, those of `KEYS` only, as a profile's
 /// are layered over the configuration's (games.rs's `prepare`). Each
 /// value goes through the configuration's parser, which ignores one it
@@ -845,10 +802,6 @@ pub mod client {
                 (game.slug, version)
             }
         };
-        // Only the settings this almanac takes: it refuses a whole report
-        // with one it doesn't know.
-        let schema = get::<Schema>("/schema").ok();
-        let settings = for_server(settings.clone(), schema.as_ref());
         let body = serde_json::json!({
             "game": slug,
             "version_id": version,
@@ -963,57 +916,6 @@ mod tests {
         assert!(!layered.ems);
         assert_eq!(layered.scale, base.scale);
         assert_eq!(layered.cycles, base.cycles);
-    }
-
-    #[test]
-    fn a_report_carries_the_frame_rate_cap_only_to_an_almanac_that_takes_it() {
-        // `GET /schema` of the almanac deployed now (version 2), cut to
-        // three settings, and of its version 3, which added fps_cap.
-        let v2: Schema = serde_json::from_str(
-            r#"{"version":2,"settings":[
-                {"section":"emulator","key":"machine","label":"Machine","group":"machine","options":["vga"]},
-                {"section":"emulator","key":"cycles","label":"CPU cycles","group":"machine","options":null},
-                {"section":"sound","key":"sbtype","label":"Sound Blaster","group":"sound","options":["sb16"]}]}"#,
-        )
-        .unwrap();
-        let v3: Schema = serde_json::from_str(
-            r#"{"version":3,"settings":[
-                {"section":"emulator","key":"machine","label":"Machine","group":"machine","options":["vga"]},
-                {"section":"emulator","key":"cycles","label":"CPU cycles","group":"machine","options":null},
-                {"section":"emulator","key":"fps_cap","label":"Frame rate cap","group":"machine","options":null},
-                {"section":"sound","key":"sbtype","label":"Sound Blaster","group":"sound","options":["sb16"]}]}"#,
-        )
-        .unwrap();
-        let report = report_settings(&Settings::default(), None);
-        assert_eq!(report["emulator"]["fps_cap"], "60");
-        let sent = for_server(report.clone(), Some(&v2));
-        assert!(!sent["emulator"].contains_key("fps_cap"));
-        assert_eq!(sent["emulator"]["cycles"], report["emulator"]["cycles"]);
-        assert!(sent["sound"].contains_key("sbtype"));
-        assert!(!sent.contains_key("joystick"), "a section left empty goes");
-        let sent = for_server(report.clone(), Some(&v3));
-        assert_eq!(sent["emulator"]["fps_cap"], "60");
-        // An almanac that didn't give its schema gets what version 2 takes.
-        let sent = for_server(report.clone(), None);
-        assert!(!sent["emulator"].contains_key("fps_cap"));
-        assert_eq!(sent.values().map(BTreeMap::len).sum::<usize>(), KEYS.len() - 1);
-    }
-
-    /// Against an almanac server at `API_VARIABLE`, which this sets no
-    /// default for: a report of the default settings goes through,
-    /// whatever schema the server has. Run with
-    /// `RUST_DOS_ALMANAC_API=http://127.0.0.1:PORT/api/v1 cargo test --lib
-    /// a_report_goes_through_to_a_live_almanac -- --ignored`.
-    #[cfg(all(feature = "sdl", not(target_arch = "wasm32")))]
-    #[test]
-    #[ignore = "needs an almanac server"]
-    fn a_report_goes_through_to_a_live_almanac() {
-        assert!(std::env::var(API_VARIABLE).is_ok(), "set {}", API_VARIABLE);
-        let settings = report_settings(&Settings::default(), None);
-        let name = format!("Frame rate cap test {}", std::process::id());
-        let about = About { year: Some(1999), publisher: None, notes: None, key: None };
-        let reported = report(&Subject::New(name), &[], None, Rating::Green, &settings, &about);
-        assert!(reported.is_ok(), "{:?}", reported.err());
     }
 
     #[test]
