@@ -877,6 +877,24 @@ pub fn page_in(bus: &mut Bus, cr3: u32, lin: u32) -> PageIn {
     PageIn::Done
 }
 
+/// Keep the page at `lin` of the page tables at `cr3` in the pool: give
+/// it its physical page if it is in the page file, and never send it
+/// there again. For a page the system maps at a second place, whose
+/// entry there `page_out` wouldn't change.
+pub fn pin(bus: &mut Bus, cr3: u32, lin: u32) {
+    page_in(bus, cr3, lin);
+    let table = bus.read_32((cr3 + 4 * (lin >> 22)) as usize);
+    if table & PRESENT == 0 {
+        return;
+    }
+    let entry = bus.read_32(((table & !0xFFF) + 4 * ((lin >> 12) & 0x3FF)) as usize);
+    if entry & PRESENT != 0
+        && let Some(pool) = bus.win32.pool.as_mut()
+    {
+        pool.page_file.pageable.remove(&(entry & !0xFFF));
+    }
+}
+
 /// Write `data` at `lin` in the memory of the process `pid`, through its
 /// own page tables, whichever process runs and whether or not a service
 /// is running: for work the system finishes later, outside the call that

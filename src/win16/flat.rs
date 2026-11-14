@@ -183,11 +183,14 @@ fn alias(
     let first = address & !(PAGE - 1);
     let end = (address as u64 + len.max(1) as u64).min(1 << 32);
     let pages = (end - first as u64).div_ceil(PAGE as u64) as u32;
+    // A page in the page file gets its physical page, and none of them
+    // goes out to the page file while the window maps it too.
     let entries = with_memory(cpu, source, |m, bus| {
         (0..pages)
             .map(|i| {
-                m.entry(bus, first.wrapping_add(i * PAGE))
-                    .filter(|e| e & PRESENT != 0)
+                let lin = first.wrapping_add(i * PAGE);
+                crate::win32::memory::pin(bus, m.cr3, lin);
+                m.entry(bus, lin).filter(|e| e & PRESENT != 0)
             })
             .collect::<Vec<_>>()
     })?;
