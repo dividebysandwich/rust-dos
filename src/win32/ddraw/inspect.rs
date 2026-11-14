@@ -166,12 +166,18 @@ fn read_row(cpu: &Cpu, pid: u32, sf: &Surface, offset: u32, data: &mut [u8]) -> 
             while done < data.len() {
                 let lin = start.wrapping_add(done as u32);
                 let run = (0x1000 - (lin & 0xFFF) as usize).min(data.len() - done);
-                let phys = process
-                    .memory
-                    .translate(&cpu.bus, lin)
-                    .ok_or_else(|| format!("page at {:08X} isn't there", lin))?;
-                for (i, byte) in data[done..done + run].iter_mut().enumerate() {
-                    *byte = cpu.bus.peek_8(phys as usize + i);
+                let part = &mut data[done..done + run];
+                match process.memory.translate(&cpu.bus, lin) {
+                    Some(phys) => {
+                        for (i, byte) in part.iter_mut().enumerate() {
+                            *byte = cpu.bus.peek_8(phys as usize + i);
+                        }
+                    }
+                    // A page in the page file is read from there.
+                    None => process
+                        .memory
+                        .read(&cpu.bus, lin, part)
+                        .ok_or_else(|| format!("page at {:08X} isn't there", lin))?,
                 }
                 done += run;
             }

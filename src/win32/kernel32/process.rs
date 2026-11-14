@@ -4,7 +4,7 @@
 use super::threads::{process_of, thread_of};
 use super::{ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, TRUE, set_error, string_at};
 use crate::cpu::Cpu;
-use crate::win32::memory::{PAGE, PRIVATE, SYSTEM};
+use crate::win32::memory::{Memory, PAGE, PRIVATE, SYSTEM};
 use crate::win32::object;
 use crate::win32::task::{self, Next, Task};
 use crate::win32::{create_process_from, launcher, process};
@@ -566,13 +566,17 @@ pub(super) fn set_priority_class(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-/// The physical address of `lin` in the process `p`'s memory, where the
-/// program may reach it.
-fn user_page(cpu: &Cpu, p: usize, lin: u32) -> Option<u32> {
+/// The page tables of the process `p`, if the program may reach `lin`
+/// there: its page is mapped, or in the page file with a protection that
+/// lets the program touch it.
+fn user_page(cpu: &Cpu, p: usize, lin: u32) -> Option<Memory> {
     if !(PRIVATE..SYSTEM).contains(&lin) {
         return None;
     }
-    cpu.bus.win32.processes[p].memory.translate(&cpu.bus, lin)
+    let memory = &cpu.bus.win32.processes[p].memory;
+    memory
+        .reachable(&cpu.bus, lin)
+        .then(|| Memory::tables(memory.cr3))
 }
 
 /// ReadProcessMemory(process, address, buffer, size, read) and
@@ -597,22 +601,19 @@ fn process_memory(cpu: &mut Cpu, args: &[u32], write: bool) -> Option<u32> {
     while done < size {
         let lin = address.wrapping_add(done);
         // A page of a view of a file the other process hasn't read yet is
-        // read from the file, as its own touch would.
+        // read from the file, as its own touch would. One in the page file
+        // is read or written there.
         crate::win32::mapping::fault_in_process(cpu, p, lin);
-        let Some(phys) = user_page(cpu, p, lin) else {
+        let Some(memory) = user_page(cpu, p, lin) else {
             break;
         };
         let len = (PAGE - (lin & (PAGE - 1))).min(size - done);
         let mut bytes = vec![0; len as usize];
         if write {
             cpu.bus.guest_read_bytes(buffer + done, &mut bytes);
-            for (i, &b) in bytes.iter().enumerate() {
-                cpu.bus.write_8(phys as usize + i, b);
-            }
+            let _ = memory.write(&mut cpu.bus, lin, &bytes);
         } else {
-            for (i, b) in bytes.iter_mut().enumerate() {
-                *b = cpu.bus.read_8(phys as usize + i);
-            }
+            let _ = memory.read(&cpu.bus, lin, &mut bytes);
             cpu.bus.guest_write_bytes(buffer + done, &bytes);
         }
         done += len;

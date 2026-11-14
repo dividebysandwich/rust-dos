@@ -17,7 +17,25 @@ fn hex(v: u32) -> String {
 pub fn win32_json(cpu: &Cpu) -> Value {
     let mut json = snapshot_json(&rust_dos::win32::snapshot(cpu));
     json["trace"] = json!(rust_dos::win32::trace::level(cpu).name());
+    json["page_file"] = page_file_json(cpu);
     json
+}
+
+/// The page file, in pages: its size, the committed pages in it, the
+/// physical pages that may go out to it, and since start the pages of
+/// zeros given a physical page, those read back and those written out.
+/// Null before the built-in Windows has its memory.
+fn page_file_json(cpu: &Cpu) -> Value {
+    rust_dos::win32::page_file_status(&cpu.bus).map_or(Value::Null, |p| {
+        json!({
+            "size": p.size,
+            "used": p.used,
+            "pageable": p.pageable,
+            "zero_ins": p.counts.zero_ins,
+            "ins": p.counts.ins,
+            "outs": p.counts.outs,
+        })
+    })
 }
 
 pub fn snapshot_json(s: &Snapshot) -> Value {

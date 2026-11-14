@@ -925,8 +925,11 @@ impl Bus {
         if self.observe.on {
             self.observe.wrote(start, end);
         }
-        for g in &mut self.page_gen[(start >> GEN_SHIFT)..=((end - 1) >> GEN_SHIFT)] {
-            *g = g.wrapping_add(1);
+        let (first, last) = (start >> GEN_SHIFT, (end - 1) >> GEN_SHIFT);
+        if first <= last {
+            for g in &mut self.page_gen[first..=last] {
+                *g = g.wrapping_add(1);
+            }
         }
     }
 

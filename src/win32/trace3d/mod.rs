@@ -150,14 +150,25 @@ fn peek(cpu: &Cpu, at: u32) -> Option<u32> {
         }
         return Some(u32::from_le_bytes(b));
     }
-    let phys = super::running(cpu)?.memory.translate(&cpu.bus, at)? as usize;
+    let memory = &super::running(cpu)?.memory;
+    let Some(phys) = memory.translate(&cpu.bus, at) else {
+        // A page in the page file is read from there.
+        return memory.read_32(&cpu.bus, at);
+    };
+    let phys = phys as usize;
     cpu.bus
         .is_plain_ram(phys, 4)
         .then(|| cpu.bus.ram_read::<4>(phys))
 }
 
 fn peek_8(cpu: &Cpu, at: u32) -> Option<u8> {
-    let phys = super::running(cpu)?.memory.translate(&cpu.bus, at)? as usize;
+    let memory = &super::running(cpu)?.memory;
+    let Some(phys) = memory.translate(&cpu.bus, at) else {
+        let mut byte = [0];
+        memory.read(&cpu.bus, at, &mut byte)?;
+        return Some(byte[0]);
+    };
+    let phys = phys as usize;
     cpu.bus
         .is_plain_ram(phys, 1)
         .then(|| cpu.bus.ram_read::<1>(phys) as u8)
