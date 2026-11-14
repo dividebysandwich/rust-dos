@@ -47,7 +47,7 @@ use super::exports::APIS;
 use super::texture::{self, GL_TEXTURE_2D, GL_TEXTURE0, IMAGE_MOST};
 use super::{
     Array, Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, GL_OUT_OF_MEMORY,
-    State, UNITS, ctx, current, draw, error, matrix, state,
+    State, UNITS, ctx, current, draw, error, matrix, pname, state,
 };
 use crate::cpu::Cpu;
 use std::collections::{BTreeMap, HashMap};
@@ -186,7 +186,7 @@ enum Size {
     /// This many.
     Bytes(u32),
     /// As many values as the parameter name in the argument before it
-    /// has (`pname_values`), of this many bytes each.
+    /// has (`pname::values`), of this many bytes each.
     Pname(u32),
     /// As many values as the count in the argument at this place, of
     /// this many bytes each.
@@ -428,26 +428,6 @@ fn stub_id(at: usize) -> u16 {
 
 // The sizes of what pointers point at.
 
-/// How many values the parameter `pname` has in the functions that
-/// take a parameter's name and a pointer to its values (glLightfv,
-/// glMaterialfv, glLightModelfv, glFogfv, glTexEnvfv,
-/// glTexParameterfv, glTexGenfv and their integer and double forms).
-/// OpenGL's names are numbers of one space, so one table has them all.
-fn pname_values(pname: u32) -> usize {
-    match pname {
-        // GL_AMBIENT, GL_DIFFUSE, GL_SPECULAR, GL_POSITION, GL_EMISSION,
-        // GL_AMBIENT_AND_DIFFUSE, GL_LIGHT_MODEL_AMBIENT, GL_FOG_COLOR,
-        // GL_TEXTURE_ENV_COLOR, GL_TEXTURE_BORDER_COLOR, GL_OBJECT_PLANE,
-        // GL_EYE_PLANE.
-        0x1200..=0x1203 | 0x1600 | 0x1602 | 0x0B53 | 0x0B66 | 0x2201 | 0x1004 | 0x2501 | 0x2502 => {
-            4
-        }
-        // GL_SPOT_DIRECTION, GL_COLOR_INDEXES.
-        0x1204 | 0x1603 => 3,
-        _ => 1,
-    }
-}
-
 /// The bytes of one of glCallLists' names of the type `kind`: GL_BYTE
 /// to GL_4_BYTES.
 fn name_size(kind: u32) -> Option<usize> {
@@ -566,7 +546,7 @@ fn copy(cpu: &mut Cpu, p: &Pointer, args: &[u32], out: &mut Vec<u8>) -> bool {
     let count = |n: u32, bytes: usize| (n as usize).checked_mul(bytes).filter(|_| (n as i32) > 0);
     let len = match p.size {
         Size::Bytes(n) => Some(n as usize),
-        Size::Pname(bytes) => Some(pname_values(arg(p.arg.wrapping_sub(1))) * bytes as usize),
+        Size::Pname(bytes) => Some(pname::values(arg(p.arg.wrapping_sub(1))) * bytes as usize),
         Size::Count(n, bytes) => count(arg(n), bytes as usize),
         Size::Names => name_size(arg(1)).and_then(|bytes| count(arg(0), bytes)),
         Size::Image {
@@ -1351,11 +1331,6 @@ mod tests {
         );
         assert_eq!(pointer("glVertex3f"), [None, None]);
         assert_eq!(pointer("glBindTexture"), [None, None]);
-        // The parameters' values: a color's four, a direction's three,
-        // one otherwise.
-        assert_eq!(pname_values(0x1201), 4);
-        assert_eq!(pname_values(0x1204), 3);
-        assert_eq!(pname_values(0x1601), 1);
     }
 
     #[test]

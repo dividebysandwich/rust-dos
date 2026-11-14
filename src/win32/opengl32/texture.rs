@@ -1144,11 +1144,7 @@ pub fn tex_envi(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// glTexEnvfv(target, pname, params).
 pub fn tex_envfv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let n = if args[1] == GL_TEXTURE_ENV_COLOR {
-        4
-    } else {
-        1
-    };
+    let n = super::pname::values(args[1]);
     if let Some(v) = read_floats(cpu, args[2], n) {
         env(cpu, args[0], args[1], &v);
     }
@@ -1159,7 +1155,7 @@ pub fn tex_envfv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// largest as 0 to 1.
 pub fn tex_enviv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let color = args[1] == GL_TEXTURE_ENV_COLOR;
-    let n = if color { 4 } else { 1 };
+    let n = super::pname::values(args[1]);
     let at = args[2];
     if at == 0 || !cpu.bus.guest_probe(at, n * 4, false) {
         return Some(0);

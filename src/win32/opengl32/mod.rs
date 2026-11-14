@@ -80,6 +80,7 @@ mod imm;
 mod light;
 mod lists;
 mod matrix;
+mod pname;
 mod shade;
 mod state;
 mod texture;
