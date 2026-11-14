@@ -316,10 +316,12 @@ pub(super) fn global_unfix(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// GlobalCompact(minimum) and LocalCompact: the largest block there is
-/// room for, which nothing has to move for.
+/// room for, which nothing has to move for: what is left of the memory
+/// and the page file's room together, as GlobalAlloc can commit
+/// (`Pool::commit_room`).
 pub(super) fn global_compact(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    let available = cpu.bus.win32.pool.as_ref().map_or(0, |p| p.available());
-    Some(available)
+    let room = cpu.bus.win32.pool.as_ref().map_or(0, |p| p.commit_room());
+    Some(room.saturating_mul(crate::win32::memory::PAGE))
 }
 
 /// LocalShrink(handle, size): Win32's local heap doesn't shrink; 0.
@@ -328,12 +330,22 @@ pub(super) fn local_shrink(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 /// GlobalMemoryStatus(status): the machine's memory, what the processes
-/// have left of it, and the private arena's address space.
+/// have left of it, the page file and what it has room for, and the
+/// private arena's address space. A program can commit what is left of
+/// the memory and the page file's room together (`Pool::commit_room`).
 pub(super) fn global_memory_status(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     const MEMORYSTATUS: u32 = 32;
     let at = args[0];
     let total = cpu.bus.ram().len() as u32;
-    let available = cpu.bus.win32.pool.as_ref().map_or(0, |p| p.available());
+    let pool = cpu.bus.win32.pool.as_ref();
+    let available = pool.map_or(0, |p| p.available());
+    let (page_file, page_file_room) = pool.map_or((0, 0), |p| {
+        let f = &p.page_file;
+        (
+            f.size * crate::win32::memory::PAGE,
+            f.room() * crate::win32::memory::PAGE,
+        )
+    });
     let load = 100 - (available as u64 * 100 / total.max(1) as u64).min(100) as u32;
     let (virtual_total, virtual_free) = crate::win32::with_process(cpu, |p, _| {
         let total = crate::win32::memory::SHARED - crate::win32::memory::PRIVATE;
@@ -351,9 +363,8 @@ pub(super) fn global_memory_status(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         load,
         total,
         available,
-        // The swap file: as much again, which Windows 95 has by default.
-        total * 2,
-        available + total,
+        page_file,
+        page_file_room,
         virtual_total,
         virtual_free,
     ];

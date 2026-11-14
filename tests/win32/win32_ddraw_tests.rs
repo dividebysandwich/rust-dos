@@ -105,6 +105,11 @@ fn peek(cpu: &Cpu, lin: u32) -> u32 {
     let pte = cpu
         .bus
         .read_32((pde & !0xFFF) as usize + 4 * ((lin >> 12) & 0x3FF) as usize);
+    // A committed page the program hasn't touched is in the page file,
+    // all zeros: not present, bit 7 set and no place there.
+    if pte & 1 == 0 && pte & 0x80 != 0 && pte >> 12 == 0 {
+        return 0;
+    }
     assert!(pte & 1 != 0, "no page at {lin:X}");
     cpu.bus
         .read_32((pte & !0xFFF) as usize + (lin & 0xFFF) as usize)
