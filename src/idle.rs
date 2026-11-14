@@ -1227,14 +1227,31 @@ fn finish(
     if let Some(until) = by_service {
         limit = until;
     }
+    // The passes the counters let run the same. Where there was room for
+    // one and none does, as when the flags the head compares come from
+    // comparing a counter, the loop is no closer to a skip at its next
+    // proof than at this one: that is a failure, which backs off, rather
+    // than a proof started again every few passes.
+    let mut counted_run = None;
+    if let Some(pass) = &counted
+        && period > 0
+        && limit > visit.icount
+    {
+        let room = limit.min(cpu.bus.clock.deadline) - visit.icount;
+        let most = (room / period).min(COUNTED_PASSES);
+        let (same, values) = counted_passes(cpu, pass, most);
+        if most > 0 && same == 0 {
+            return cpu.bus.observe.fail("count passes");
+        }
+        counted_run = Some((same, values));
+    }
+    let o = &mut cpu.bus.observe;
     let head = o.head();
     o.stop();
     o.succeed(head);
     if period > 0 && limit > visit.icount {
         let mut passes = u64::MAX;
-        if let Some(pass) = counted {
-            let most = ((limit.min(cpu.bus.clock.deadline) - visit.icount) / period).min(COUNTED_PASSES);
-            let (same, values) = counted_passes(cpu, &pass, most);
+        if let Some((same, values)) = counted_run {
             for (addr, value) in values {
                 cpu.bus.write_8(addr, value);
             }
