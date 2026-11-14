@@ -16,7 +16,7 @@ there.
 
 | Chapter | State |
 |---|---|
-| 1 to 8 | frozen: implemented in `src/toadforce` and `src/bus/toadforce.rs` |
+| 1 to 8 | frozen: implemented in `src/toadforce` and `src/bus/toadforce.rs`, with the card's place on the PCI bus in `src/pci.rs` and the video BIOS beside it in `src/interrupts/vbe.rs`, `src/interrupts/int10.rs` and `src/video/bios.rs` |
 | 9, level 0 | frozen, with them |
 | 9, level 1 | provisional: implemented in `src/toadforce/level1` and drawn by `src/toadforce/raster`. A machine's card offers the level for the emulator's own drivers, and it may change before it is released |
 
@@ -75,15 +75,21 @@ One function with a type 00h header.
 | 2Ch | subsystem vendor ID | 1234h |
 | 2Eh | subsystem ID | 5446h |
 | 30h | expansion ROM | 0, not writable |
-| 3Ch | interrupt line | writable; 11 after reset |
+| 3Ch | interrupt line | writable; 11 at power-on |
 | 3Dh | interrupt pin | 01h (INTA#) |
 
 The other bits of the command register read as 0. The three BARs
 decode while bit 1 is set. A BAR whose base is 0 decodes nothing, and
-neither does one a guest puts over the machine's RAM. The legacy VGA
-ports (3B0h to 3DFh) and the VGA memory at A0000h to BFFFFh decode
-whatever the command register holds, as they do on the emulator's other
-display adapters: a guest can't turn the VGA off there.
+neither does one a guest puts over the machine's RAM, or over the
+128 KB at the top of the address space (FFFE0000h and above), where
+the system's ROM is mirrored. A BAR decodes its whole window or none of
+it: one with any byte over the RAM or the mirror decodes nothing below
+or above them either. Where a guest puts two BARs over each other, an
+address in both is card memory's if BAR 1 is one of them, and the
+registers' otherwise. The legacy VGA ports (3B0h to 3DFh) and the VGA
+memory at A0000h to BFFFFh decode whatever the command register holds,
+as they do on the emulator's other display adapters: a guest can't turn
+the VGA off there.
 
 The emulator's BIOS doesn't enumerate PCI, so the card starts as a PCI
 BIOS leaves the boot display adapter: I/O and memory decoding on, and
@@ -104,9 +110,11 @@ expansion ROM of this function.
 ## 3. Registers (BAR 0)
 
 Each register is one word at a word-aligned offset. A read of 1 or 2
-bytes inside a register returns those bytes of its value. A write of
-less than a whole aligned word is ignored. Offsets this chapter doesn't
-list read as 0 and ignore writes.
+bytes inside a register returns those bytes of its value. A read of 2
+or 4 bytes that isn't aligned and takes in two registers returns the
+bytes of each that it covers, and like every read changes neither. A
+write of less than a whole aligned word is ignored. Offsets this
+chapter doesn't list read as 0 and ignore writes.
 
 | Offset | Name | Access | Reset | Meaning |
 |---|---|---|---|---|
@@ -207,7 +215,15 @@ register or a command names it.
   A0000h, and what a VBE mode set clears. The BIOS reports 4 MB and
   gives BAR 1's address as the linear frame buffer's. A guest that uses
   both keeps its own data clear of them, or doesn't call the BIOS while
-  it has data there. The BIOS never touches the rest.
+  it has data there. The BIOS never touches the rest, and never shows
+  it: a line length (function 4F06h), a display start (4F07h) or a
+  restored state (4F04h) that would take a VBE mode's picture past the
+  4 MB fails and changes nothing.
+- While BAR 1 decodes nothing (chapter 2), the BIOS has no linear frame
+  buffer to give. Function 4F01h reports its modes without one (bit 7
+  of the mode attributes clear, and 0 for the address), and function
+  4F02h fails a mode set that asks for one. The banked window at A0000h
+  is there as before.
 - The memory of the standard VGA modes (text, the planar modes, mode
   13h) is the VGA's own and no part of card memory.
 
@@ -299,19 +315,22 @@ arguments follow.
 
 ### Rejections
 
-A command with an opcode the level doesn't have, a length its opcode
-doesn't allow, or an argument this document calls invalid is rejected:
-it draws nothing and sets no state, and the card goes on with the next
-command. A command is checked in that order, and within its arguments
-values before ranges, so one with several faults has the code of the
-first: `BAD_OPCODE`, then `BAD_LENGTH`, then `BAD_VALUE`, then
-`BAD_RANGE`, and after those what depends on the card's state,
-`BAD_HANDLE` and `BAD_STATE`.
+The card looks at a header's length first, since the length is what
+leads to the next command. A header whose length is 0, or reaches past
+the commands submitted or past the end of the ring, leaves no next
+command to find. The card rejects it with `BAD_LENGTH`, whatever its
+opcode is, and drops the rest of what was submitted: `RING_GET` becomes
+`RING_PUT`.
 
-A header whose length is 0, or reaches past the commands submitted or
-past the end of the ring, leaves no next command to find. The card
-rejects it with `BAD_LENGTH` and drops the rest of what was submitted:
-`RING_GET` becomes `RING_PUT`.
+A command whose length leads to the next one, and that has an opcode
+the level doesn't have, a length its opcode doesn't allow, or an
+argument this document calls invalid, is rejected: it draws nothing and
+sets no state, and the card goes on with the next command. Such a
+command is checked in that order, and within its arguments values
+before ranges, so one with several faults has the code of the first:
+`BAD_OPCODE`, then `BAD_LENGTH`, then `BAD_VALUE`, then `BAD_RANGE`,
+and after those what depends on the card's state, `BAD_HANDLE` and
+`BAD_STATE`.
 
 The first rejection while `ERROR` is 0 sets `ERROR` to its code,
 `ERROR_AT` to where it was, bit 2 of `STATUS` and bit 2 of
@@ -366,7 +385,9 @@ mode takes the screen.
 Bit 0 of `STATUS`, `SCANLINE` and `FRAME` follow the VGA's timing: bit 0
 is set while port 3DAh reports vertical retrace, `SCANLINE` is the line
 the VGA is on, and `FRAME` counts the retraces that began, each of which
-also sets bit 0 of `IRQ_STATUS`.
+also sets bit 0 of `IRQ_STATUS`. When the VGA's timing changes, by a
+mode set or by a write to its registers, the retraces before the change
+are the old timing's and those after it the new one's.
 
 ### `MODE_ENABLE` = 1: the card's mode
 
@@ -406,10 +427,13 @@ While the card's mode is shown:
   mode's picture (4F06h, the line length, and 4F07h, the display start)
   fail with AH = 02h, since the picture on the screen isn't the BIOS's.
 
-A write of 0 brings the VGA's picture back: what its registers
-describe, and the VBE mode that was set when the card's mode took the
-screen, with its display start. Both writes cancel a pending flip, and
-card memory is unchanged by either.
+A write of 0 brings the VGA's picture back. If a VBE mode was set when
+the card's mode took the screen, that mode is back, with its display
+start. Otherwise the picture is what the VGA's registers describe at
+the write: a switch between text and graphics, or between 16 and 256
+colours, that a guest made through them under the card's mode shows
+now. Both writes cancel a pending flip, and card memory is unchanged by
+either.
 
 The emulator's window shows a mode less than 640 pixels wide with each
 pixel doubled across and down, as it shows the VBE modes of that size.
@@ -421,8 +445,9 @@ With the card's mode shown, `MODE_HEIGHT` and `MODE_REFRESH` below are
 the mode shown's values, and all times are the emulated clock's:
 
 - a frame has `MODE_HEIGHT` + `MODE_HEIGHT` / 16 + 1 lines (the
-  division rounded down), a round figure near the monitor timings of
-  the time (480 lines in 525, 768 in 806),
+  division rounded down): 511 for a mode of 480 lines and 817 for one
+  of 768, round figures near the 525 and 806 of the monitor timings of
+  the time,
 - a line lasts 1 000 000 000 / (`MODE_REFRESH` x the lines of a frame)
   nanoseconds, rounded down, and a frame its lines' time: up to a
   nanosecond a line less than 1 / `MODE_REFRESH` seconds,
@@ -435,7 +460,9 @@ the mode shown's values, and all times are the emulated clock's:
   of `IRQ_STATUS` is set, and a pending flip takes place.
 
 `FRAME` counts through changes of mode, the card's and the VGA's alike.
-The moment of a change counts no blank of its own.
+The moment of a change counts no blank of its own. From that moment the
+blanks are the new timing's, at its rate and its position in the frame:
+after a write of 0 to `MODE_ENABLE`, or a `RESET`, the VGA's retraces.
 
 Port 3DAh reports the same timing while the card's mode is shown, so
 the machine has one display timing at a time: its bit 3 is bit 0 of
@@ -462,9 +489,19 @@ first one's surface is never shown.
 INTA# is asserted while `IRQ_STATUS` and `IRQ_ENABLE` have a set bit in
 common, and released when they don't. The bits of `IRQ_STATUS` are set
 by their events whether enabled or not, and stay set until the guest
-writes 1 to them. The request goes up at the event's time on the
-emulated clock, on the line the interrupt line register names, and
-moves with it when the guest writes another.
+writes 1 to them. The request is on the line the interrupt line
+register names, and moves with it when the guest writes another.
+
+A bit of `IRQ_STATUS` is set at its event's time on the emulated clock,
+and a read of the register at that time has it. The request of an
+event a write causes (a flip made at once, a rejection, a write to
+`IRQ_ENABLE` or `IRQ_STATUS`) is up or down when the write returns. The
+request of a vertical blank, and of the flip made at one, goes up later
+than the bit is set: the emulator delivers the interrupts of its
+devices on the grid of the system timer's clock (1 193 182 Hz), so the
+request is up at the first tick after the instruction the blank began
+at, at most one tick (838 ns) after that instruction. A handler finds
+the bit set whenever it runs, because the register is exact.
 
 | Bit | Set when |
 |---|---|

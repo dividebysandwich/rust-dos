@@ -7,6 +7,12 @@
 //! the vertical blanks that began since the last time. Every entry
 //! point of the card syncs first, at an emulated time its caller fixes,
 //! so what a guest reads doesn't depend on how often the host looks.
+//!
+//! The blanks between two syncs are counted with one timing, the one
+//! the display had at the first of them. The card's own changes with a
+//! write to the card, which syncs. The VGA's changes without the card
+//! being reached, so whoever changes it has the card sync at that
+//! moment (`retimed`, `Bus::toadforce_retime`).
 
 use super::caps;
 use super::format::Format;
@@ -268,6 +274,14 @@ impl Display {
         self.shown.map_or(live.vga, |s| s.timing())
     }
 
+    /// Whether the display's timing at `live` is another than the one
+    /// the blanks since the last `sync` are counted with: the VGA's
+    /// changed while the VGA has the screen. A `sync` at the moment of
+    /// the change counts the blanks up to it with the timing they had.
+    pub fn retimed(&self, live: Live) -> bool {
+        self.timing_at(live) != self.beam.timing
+    }
+
     /// Count the vertical blanks that began up to `live`, and make the
     /// flip that waited for one.
     pub fn sync(&mut self, live: Live) -> Synced {
@@ -379,6 +393,10 @@ impl Display {
             regs::MODE_ENABLE => {
                 let was = self.shown.take().is_some();
                 self.beam.pending = None;
+                // The VGA's timing as the caller has it. On the bus the
+                // VGA is held to the card's until the screen is its
+                // again, after this write, and the bus has the display
+                // sync once more then (`retimed`).
                 self.beam.timing = self.timing_at(live);
                 return Ok(if was { Change::Mode } else { Change::None });
             }

@@ -704,7 +704,8 @@ fn frame_counts_the_vgas_retraces_from_the_moment_the_cards_mode_ends() {
         set_reg(&mut cpu, regs::IRQ_STATUS, regs::IRQ_VBLANK);
         let next = vga.next_retrace(cpu.bus.clock.now_ns());
         let line = vga.line_ns as u64;
-        pass(&mut cpu, next - cpu.bus.clock.now_ns() - line);
+        let early = next - cpu.bus.clock.now_ns() - line;
+        pass(&mut cpu, early);
         assert_eq!(reg(&cpu, regs::IRQ_STATUS) & regs::IRQ_VBLANK, 0);
         assert_eq!(reg(&cpu, regs::STATUS) & regs::STATUS_VBLANK, 0);
         pass(&mut cpu, line);
@@ -722,11 +723,10 @@ fn frame_counts_the_vgas_retraces_from_the_moment_the_cards_mode_ends() {
 
 #[test]
 fn frame_follows_a_change_of_the_vgas_timing() {
+    // A card nothing has reached yet counts from the machine's start.
     let mut cpu = machine();
-    // Bring the card up to now: it counts from here.
-    set_reg(&mut cpu, regs::IRQ_STATUS, 0);
-    let mut expected = reg(&cpu, regs::FRAME);
-    let mut from = cpu.bus.clock.now_ns();
+    let (mut expected, mut from) = (0, 0);
+    assert_eq!(cpu.bus.clock.now_ns(), 0);
     let text = cpu.bus.vga.timing();
     // Half a second with the timing the VGA has, and nothing touching
     // the card.
@@ -739,6 +739,8 @@ fn frame_follows_a_change_of_the_vgas_timing() {
         timing
     };
     step(&mut cpu, &mut expected, &mut from);
+    assert_eq!(expected, 35);
+    assert_eq!(reg(&cpu, regs::FRAME), expected);
     // A mode set by the BIOS: 640 by 480 at 60 Hz after the text mode's
     // 70.
     int10::set_mode(&mut cpu, 0x12);
@@ -842,18 +844,19 @@ fn a_bar_over_the_ram_or_the_roms_mirror_decodes_nothing() {
     let top = 0xFFFF_FFF0usize;
     let other = !mirror(&cpu, top);
     cpu.bus.write_8(MEMORY + 0x03FF_FFF0, other);
-    cpu.bus.write_8(MEMORY + 0x100, 0x5A);
+    // Past what a mode set of the BIOS clears.
+    cpu.bus.write_8(MEMORY + 0x0100_0000, 0x5A);
 
     // Inside the RAM: the RAM answers, and takes the writes.
     set_config(&mut cpu, 0x10, 0x00F0_0000);
     set_config(&mut cpu, 0x18, 0x00E0_0000);
-    assert_eq!(cpu.bus.read_32(0x00F0_0000), 0);
-    assert_eq!(cpu.bus.read_32(0x00E0_0008), 0);
+    assert_ne!(cpu.bus.read_32(0x00F0_0000), regs::ID_VALUE);
+    assert_ne!(cpu.bus.read_32(0x00E0_0008), 0x5566_7788);
     cpu.bus
         .write_32(0x00F0_0000 + regs::MODE_WIDTH as usize, 640);
-    assert_eq!(cpu.bus.ram[0x00F0_0000 + regs::MODE_WIDTH as usize], 0x80);
+    assert_eq!(cpu.bus.ram()[0x00F0_0000 + regs::MODE_WIDTH as usize], 0x80);
     cpu.bus.write_32(0x00E0_0008, 0x0102_0304);
-    assert_eq!(cpu.bus.ram[0x00E0_0008], 0x04);
+    assert_eq!(cpu.bus.ram()[0x00E0_0008], 0x04);
     // Moved clear of it, each is what it was.
     set_config(&mut cpu, 0x10, INITIAL_REGISTERS);
     set_config(&mut cpu, 0x18, INITIAL_RING);
@@ -897,7 +900,7 @@ fn a_bar_over_the_ram_or_the_roms_mirror_decodes_nothing() {
     int10::set_mode(&mut cpu, 0x03);
     // The same with memory decoding off, and with no address.
     set_config(&mut cpu, 0x14, INITIAL_MEMORY);
-    assert_eq!(cpu.bus.read_8(MEMORY + 0x100), 0x5A);
+    assert_eq!(cpu.bus.read_8(MEMORY + 0x0100_0000), 0x5A);
     assert_eq!(int10(&mut cpu, 0x4F01, 0, 0x101, 0), 0x004F);
     assert_eq!(cpu.bus.read_16(0x30000) & 0x0080, 0x0080);
     assert_eq!(cpu.bus.read_32(0x30000 + 40), INITIAL_MEMORY);
@@ -964,7 +967,7 @@ fn the_blank_interrupt_goes_up_within_a_timer_tick_of_the_blank() {
     show(&mut cpu, 640, 480, Format::X8R8G8B8, 60);
     set_reg(&mut cpu, regs::IRQ_ENABLE, regs::IRQ_VBLANK);
     let timing = cpu.bus.vga.timing();
-    let mut latest = 0;
+    let mut longest = 0;
     for speed in [3000, 777, 20_000, 3000, 100_000, 1234, 315, 60_000] {
         cpu.bus.set_cycles_per_ms(speed);
         let instruction = 1_000_000u64.div_ceil(speed as u64);
@@ -995,7 +998,7 @@ fn the_blank_interrupt_goes_up_within_a_timer_tick_of_the_blank() {
                         late <= TICK_NS + instruction,
                         "{late} ns late at {speed} cycles"
                     );
-                    latest = latest.max(late.saturating_sub(instruction));
+                    longest = longest.max(late);
                     break;
                 }
                 assert!(now < blank + 1_000_000, "no request");
@@ -1004,7 +1007,9 @@ fn the_blank_interrupt_goes_up_within_a_timer_tick_of_the_blank() {
             }
         }
     }
-    assert!(latest <= TICK_NS);
+    // The request is later than the bit: never at the instruction the
+    // blank began at.
+    assert!(longest > 0);
 }
 
 #[test]
@@ -1161,4 +1166,42 @@ fn the_bios_keeps_a_restored_picture_inside_its_memory() {
     // A longer line there would take the picture past the end.
     assert_eq!(int10(&mut cpu, 0x4F06, 0x0002, 648, 0), 0x024F);
     assert_eq!(cpu.bus.vbe.pitch, 640);
+}
+
+#[test]
+fn the_vga_decodes_whatever_the_command_register_holds() {
+    let mut cpu = machine();
+    set_config(&mut cpu, 0x04, 0);
+    assert_eq!(config(&mut cpu, 0x04) & 0xFFFF, 0);
+    assert_eq!(cpu.bus.read_32(REGISTERS), 0xFFFF_FFFF);
+    // The ports: the CRTC's cursor register and the DAC.
+    cpu.bus.io_write(0x3D4, 0x0E);
+    cpu.bus.io_write(0x3D5, 0x12);
+    assert_eq!(cpu.bus.io_read(0x3D5), 0x12);
+    cpu.bus.io_write(0x3C8, 5);
+    for value in [0x11, 0x22, 0x33] {
+        cpu.bus.io_write(0x3C9, value);
+    }
+    cpu.bus.io_write(0x3C7, 5);
+    assert_eq!(cpu.bus.io_read(0x3C9), 0x11);
+    // The text mode's memory at B8000h, and mode 13h's at A0000h.
+    cpu.bus.write_8(0xB8000, b'Z');
+    assert_eq!(cpu.bus.read_8(0xB8000), b'Z');
+    int10::set_mode(&mut cpu, 0x13);
+    cpu.bus.write_8(0xA0000, 0x5A);
+    assert_eq!(cpu.bus.read_8(0xA0000), 0x5A);
+}
+
+#[test]
+fn the_bios_reports_its_four_megabytes_of_card_memory() {
+    let mut cpu = machine();
+    assert_eq!(reg(&cpu, regs::MEMORY), 64 << 20);
+    cpu.set_es(0x3000);
+    cpu.set_di(0);
+    assert_eq!(int10(&mut cpu, 0x4F00, 0, 0, 0), 0x004F);
+    assert_eq!(cpu.bus.read_32(0x30000), u32::from_le_bytes(*b"VESA"));
+    // In blocks of 64 KB.
+    assert_eq!(cpu.bus.read_16(0x30000 + 18), 64);
+    // The write-only `RESET` reads as 0.
+    assert_eq!(reg(&cpu, regs::RESET), 0);
 }

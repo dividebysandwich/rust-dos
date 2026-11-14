@@ -170,6 +170,25 @@ mod tests {
     }
 
     #[test]
+    fn a_fill_writes_the_bits_the_format_doesnt_define() {
+        let s = surface(0, 2, 1, Format::X8R8G8B8);
+        let mut memory = vec![0u8; 16];
+        fill(&mut memory, &s, &rect(1, 0, 1, 1), 0xA1B2_C3D4);
+        assert_eq!(memory[4..8], [0xD4, 0xC3, 0xB2, 0xA1]);
+        assert_eq!(memory[..4], [0; 4]);
+        // And a copy keeps them.
+        blt(
+            &mut memory,
+            &s,
+            &rect(0, 0, 1, 1),
+            &s,
+            &rect(1, 0, 1, 1),
+            None,
+        );
+        assert_eq!(memory[..4], [0xD4, 0xC3, 0xB2, 0xA1]);
+    }
+
+    #[test]
     fn a_copy_moves_pixels_between_surfaces_of_different_pitch() {
         let src = surface(0, 6, 4, Format::R5G6B5);
         let dst = Surface {
