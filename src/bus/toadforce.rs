@@ -17,6 +17,10 @@ use crate::toadforce::{Change, Effects, Live, ToadForce, caps, command, regs};
 use crate::video::VideoMode;
 use crate::video::vbe::{self, VbeMode};
 
+/// Where the BIOS ROM's mirror begins: the last 128 KB of the address
+/// space, which no window of the card decodes over.
+const ROM_MIRROR: u64 = 0xFFFE_0000;
+
 /// Where an access to memory the card decodes goes, but for card
 /// memory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,6 +100,7 @@ impl Bus {
             // frame buffer is where its BAR 1 is and not where the
             // adapter's BIOS data was just written to say.
             self.toadforce_moved();
+            self.toadforce_retime();
             return;
         }
         self.toadforce_flush();
@@ -112,6 +117,9 @@ impl Bus {
             .resize(wanted.map_or(vbe::VRAM_SIZE, |memory| memory as usize));
         if self.toadforce() {
             self.toadforce_moved();
+            // A new card counts the VGA's retraces from now on, and not
+            // from the first time something reaches it.
+            self.toadforce_retime();
         }
         self.vga.mark_dirty_full();
         self.clock.schedule(self.next_event());
@@ -125,20 +133,39 @@ impl Bus {
         }
     }
 
+    /// Where `bar`'s window is and how long, if it decodes: the card
+    /// decodes memory, the BAR has an address, and no byte of the
+    /// window is over the RAM or over the BIOS ROM's mirror at the top
+    /// of the address space. A window with a part there decodes none of
+    /// the rest either (chapter 2 of `docs/toadforce-spec.md`).
+    fn toadforce_window(&self, bar: Bar) -> Option<(u32, u32)> {
+        let (base, size) = self.toadforce.as_deref()?.pci.window(bar)?;
+        let clear = base as usize >= self.ram.len() && base as u64 + size as u64 <= ROM_MIRROR;
+        clear.then_some((base, size))
+    }
+
     /// Where physical address `addr` is in the card's registers or its
-    /// ring, if it is. The windows count where they are above the RAM
-    /// and below the BIOS ROM's mirror at the top.
+    /// ring, if it is. Where a guest put windows over each other, an
+    /// address in card memory's is card memory's, which the bus looks
+    /// for before it asks here, and one the registers share with the
+    /// ring is the registers'.
+    ///
+    /// Which windows decode was decided when they last moved
+    /// (`toadforce_moved`): here the address is only compared with
+    /// them.
     #[inline]
     pub(crate) fn toadforce_at(&self, addr: usize) -> Option<Window> {
-        let card = self.toadforce.as_deref()?;
-        if addr < self.ram.len() || addr >= 0xFFFE_0000 {
-            return None;
-        }
-        let addr = addr as u32;
-        if let Some(offset) = card.pci.offset_in(Bar::Registers, addr) {
+        let [registers, ring] = self.toadforce.as_deref()?.decoded;
+        let addr = u32::try_from(addr).ok()?;
+        let offset_in = |window: Option<(u32, u32)>| {
+            let (base, size) = window?;
+            let offset = addr.wrapping_sub(base);
+            (offset < size).then_some(offset)
+        };
+        if let Some(offset) = offset_in(registers) {
             return Some(Window::Registers(offset));
         }
-        card.pci.offset_in(Bar::Ring, addr).map(Window::Ring)
+        offset_in(ring).map(Window::Ring)
     }
 
     /// `len` bytes (1, 2 or 4) read at `at`. A read of part of a
@@ -515,6 +542,35 @@ impl Bus {
         self.sync_toadforce_irq();
     }
 
+    /// The VGA's timing may have changed: a mode set, a write to its
+    /// registers, or the card's mode ending, which gives the VGA its
+    /// own timing back. While the VGA has the screen, the card counts
+    /// its retraces (chapter 6 of `docs/toadforce-spec.md`): those up to
+    /// now with the timing they had, and those from now on with the new
+    /// one, at its rate and its place in the frame. The card is reached
+    /// only when the timing is another, so the many writes to the VGA
+    /// that leave it alone cost a comparison.
+    ///
+    /// Every place that changes the VGA's timing on a machine with the
+    /// card calls this when it is done. Without the call the card
+    /// would go on counting with the old timing until something next
+    /// reached it, and `FRAME` and the blank's interrupt would depend
+    /// on when that was.
+    pub(crate) fn toadforce_retime(&mut self) {
+        if self.toadforce.is_none() {
+            return;
+        }
+        let live = self.toadforce_live();
+        let Some(card) = &mut self.toadforce else {
+            return;
+        };
+        if !card.display.retimed(live) {
+            return;
+        }
+        let fx = card.service(live);
+        self.toadforce_effects(fx);
+    }
+
     /// The surface the card shows moved, or a colour of its palette
     /// changed: the screen shows it from the next frame.
     fn toadforce_picture(&mut self) {
@@ -592,14 +648,25 @@ impl Bus {
                 self.vbe.latched_start = legacy.start;
                 self.video_mode = legacy.video_mode;
                 self.vga.set_fixed_timing(legacy.timing);
+                // A standard mode is the one the VGA's registers
+                // describe now. A program may have written them under
+                // the card's mode, where a switch they make doesn't
+                // show (`settle_register_mode`).
+                if legacy.video_mode != VideoMode::Vesa {
+                    self.show_register_mode();
+                }
                 self.log_string(&format!(
                     "[TOADFORCE] Back to the VGA's {:?}",
-                    legacy.video_mode
+                    self.video_mode
                 ));
             }
         }
         self.note_display_start();
         self.vga.mark_dirty_full();
+        // The write that ended or began the card's mode had the VGA's
+        // timing as it was before this: the card counts with the one
+        // the display has now.
+        self.toadforce_retime();
     }
 
     /// The colours of the card's own mode, while it shows one.
@@ -644,17 +711,22 @@ impl Bus {
     }
 
     /// A BAR, the card's decoding or its interrupt line changed: the
-    /// linear frame buffer is where BAR 1 says, while that isn't over
-    /// the RAM, and a request the card has up moves to the new line.
+    /// linear frame buffer is where BAR 1 says, while its window
+    /// decodes (`toadforce_window`), the registers and the ring are
+    /// where `toadforce_at` finds them, and a request the card has up
+    /// moves to the new line.
     pub(crate) fn toadforce_moved(&mut self) {
-        let Some(card) = self.toadforce.as_deref() else {
+        if !self.toadforce() {
             return;
-        };
-        self.vbe.lfb_base = card
-            .pci
-            .window(Bar::Memory)
-            .map(|(base, _)| base)
-            .filter(|&base| base as usize >= self.ram.len());
+        }
+        self.vbe.lfb_base = self.toadforce_window(Bar::Memory).map(|(base, _)| base);
+        let decoded = [
+            self.toadforce_window(Bar::Registers),
+            self.toadforce_window(Bar::Ring),
+        ];
+        if let Some(card) = &mut self.toadforce {
+            card.decoded = decoded;
+        }
         self.sync_toadforce_irq();
     }
 

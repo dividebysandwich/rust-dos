@@ -200,6 +200,9 @@ fn video_bios(cpu: &mut Cpu, ah: u8, al: u8, service: impl FnOnce(&mut Cpu)) {
     if let Some(display) = display {
         display.restore(&mut cpu.bus);
     }
+    // The service may have left the VGA another timing (a mode set, a
+    // state restored), which a ToadForce counts the retraces of.
+    cpu.bus.toadforce_retime();
 }
 
 /// Write `text` with the video BIOS's teletype output (INT 10h AH=0Eh) on

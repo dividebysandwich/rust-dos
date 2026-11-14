@@ -344,11 +344,34 @@ fn mode_info(cpu: &mut Cpu, number: u16, addr: usize) -> u16 {
     block[31..39].copy_from_slice(&color_masks(mode.bpp));
     // The S3's frame buffer is where its registers put it for the mode
     // (`s3_program_mode`).
-    // A ToadForce's is its BAR 1, wherever the system put that.
-    let moved = cpu.bus.vbe.lfb_base.filter(|_| cpu.bus.toadforce());
-    block[40..44].copy_from_slice(&moved.unwrap_or(LFB_BASE as u32).to_le_bytes());
+    // A ToadForce's is its BAR 1, wherever the system put that. While
+    // the BAR decodes nothing the card has no linear frame buffer, and
+    // the mode is reported without one.
+    let base = if cpu.bus.toadforce() {
+        cpu.bus.vbe.lfb_base
+    } else {
+        Some(LFB_BASE as u32)
+    };
+    if base.is_none() {
+        block[0] &= !0x80;
+    }
+    block[40..44].copy_from_slice(&base.unwrap_or(0).to_le_bytes());
     write_bytes(&mut cpu.bus, addr, &block);
     SUCCESS
+}
+
+/// Whether a ToadForce has no linear frame buffer to give a mode: its
+/// BAR 1 decodes nothing (chapter 4 of `docs/toadforce-spec.md`).
+fn no_frame_buffer(bus: &Bus) -> bool {
+    bus.toadforce() && bus.vbe.lfb_base.is_none()
+}
+
+/// Whether a VBE mode's picture of `height` lines of `pitch` bytes from
+/// `start` reaches past the video BIOS's memory on a ToadForce, whose
+/// card memory goes on after it (chapter 4 of `docs/toadforce-spec.md`).
+/// The other adapters have no memory there, and their display wraps.
+fn past_bios_memory(bus: &Bus, start: u32, pitch: u32, height: u16) -> bool {
+    bus.toadforce() && start as u64 + pitch as u64 * height as u64 > VRAM_SIZE as u64
 }
 
 /// Function 02h: set mode BX (bit 14 with the linear frame buffer, bit 15
@@ -368,6 +391,14 @@ fn set_mode(cpu: &mut Cpu, bx: u16) -> u16 {
         return FAILED;
     };
     let mode = &mode;
+    if bx & 0x4000 != 0 && no_frame_buffer(&cpu.bus) {
+        let line = format!(
+            "[BIOS] VESA mode {:03X}h has no linear frame buffer: BAR 1 decodes nothing",
+            bx & MODE_NUMBER
+        );
+        cpu.bus.log_string(&line);
+        return FAILED;
+    }
     enter_mode(&mut cpu.bus, mode, bx & 0x4000 != 0, keep);
     cpu.bus.banshee_mode_set();
     // BIOS data area: the mode byte S3 BIOSes use (68h-80h), and the text
@@ -414,6 +445,8 @@ pub fn enter_mode(bus: &mut Bus, mode: &VbeMode, lfb: bool, keep: bool) {
     if bus.vga.adapter.is_verite() {
         bus.verite_program_mode(mode);
     }
+    // A ToadForce counts the retraces of the mode's timing from here.
+    bus.toadforce_retime();
 }
 
 /// Function 04h: the size of the state buffer (DL=0), and saving (DL=1)
@@ -435,12 +468,23 @@ fn save_restore_state(cpu: &mut Cpu) -> u16 {
             let mode = cpu.bus.guest_read_16((addr) as u32);
             if let Some(m) = vbe::adapter_mode(mode, cpu.bus.vga.adapter).filter(|_| mode != 0) {
                 let m = &m;
+                let pitch = cpu.bus.guest_read_32((addr + 6) as u32);
+                let start = cpu.bus.guest_read_32((addr + 10) as u32);
+                // A block the BIOS didn't save, with a picture outside
+                // its memory, or one that asks for a linear frame buffer
+                // while a ToadForce's BAR 1 decodes nothing, which
+                // function 02h refuses too: nothing of it is restored.
+                let lfb = mode & 0x4000 != 0;
+                let outside = past_bios_memory(&cpu.bus, start, pitch, m.height);
+                if outside || (lfb && no_frame_buffer(&cpu.bus)) {
+                    return FAILED;
+                }
                 if cpu.bus.vbe.mode != Some(*m) {
-                    enter_mode(&mut cpu.bus, m, mode & 0x4000 != 0, true);
+                    enter_mode(&mut cpu.bus, m, lfb, true);
                 }
                 cpu.bus.vbe.bank = cpu.bus.guest_read_32((addr + 2) as u32) % (VRAM_SIZE / WINDOW_SIZE) as u32;
-                cpu.bus.vbe.pitch = cpu.bus.guest_read_32((addr + 6) as u32);
-                cpu.bus.vbe.start = cpu.bus.guest_read_32((addr + 10) as u32);
+                cpu.bus.vbe.pitch = pitch;
+                cpu.bus.vbe.start = start;
                 cpu.bus.note_display_start();
                 cpu.bus.vga.mark_dirty_full();
             }
@@ -519,6 +563,10 @@ fn scan_line_length(cpu: &mut Cpu) -> u16 {
         let pitch = pitch.div_ceil(8) * 8;
         let pitch = pitch.div_ceil(bytes_per_pixel) * bytes_per_pixel;
         if pitch < mode.width as u32 * bytes_per_pixel || pitch * mode.height as u32 > VRAM_SIZE as u32 || pitch > 0xFFFF {
+            return INVALID_NOW;
+        }
+        // From the display start as it is, too.
+        if past_bios_memory(&cpu.bus, cpu.bus.vbe.start, pitch, mode.height) {
             return INVALID_NOW;
         }
         cpu.bus.vbe.pitch = pitch;

@@ -2599,3 +2599,122 @@ fn triangles_as_lines_and_as_points_agree() {
         }
     }
 }
+
+/// Level 0's `FILL` and `BLT` alone, on a surface the host has ahead
+/// and between it and card memory: values and pixels with bits their
+/// format doesn't define, which a fill writes and a copy keeps
+/// (chapter 9 of `docs/toadforce-spec.md`). Nothing here is drawn, so
+/// the host has no rounding of its own to add.
+fn fills_and_copies(rig: &mut Rig) {
+    use crate::toadforce::command::encode::{blt, fill};
+    let (colour, second) = (rig.surface(COLOUR), rig.surface(SECOND));
+    let all = rect(0, 0, SIZE, SIZE);
+    let bytes = rig.format.bytes();
+    // The second surface in card memory, every bit of it used.
+    for y in 0..SIZE {
+        let row: Vec<u8> = (0..SIZE * bytes)
+            .map(|i| (i * 37 + y * 101 + (i / bytes) * 59) as u8)
+            .collect();
+        poke(rig, second.at(0, y) as u32, &row);
+    }
+    // A clear puts the colour buffer on the host, and a fill of all of
+    // it gives every bit a value that is the same either way.
+    rig.clear(CLEAR_COLOUR, 0xFF00_0000, 1.0, 0, &[]);
+    rig.run(|w| fill(w, &colour, &all, 0x5A12_3456));
+    let key = {
+        let at = second.at(3, 2);
+        let mut word = [0u8; 4];
+        word[..bytes as usize].copy_from_slice(&rig.memory[at..at + bytes as usize]);
+        u32::from_le_bytes(word)
+    };
+    rig.run(|w| {
+        fill(w, &colour, &rect(4, 4, 20, 6), 0xA5FE_DCBA);
+        fill(w, &colour, &rect(10, 8, 30, 30), 0x00FF_00FF);
+        fill(w, &colour, &rect(63, 63, 1, 1), 0xFFFF_FFFF);
+        // Within the host's surface, apart.
+        blt(
+            w,
+            &colour,
+            &rect(44, 44, 16, 16),
+            &colour,
+            &rect(2, 2, 16, 16),
+            None,
+        );
+        // From card memory into it, and through a key.
+        blt(
+            w,
+            &colour,
+            &rect(0, 46, 16, 16),
+            &second,
+            &rect(8, 8, 16, 16),
+            None,
+        );
+        blt(
+            w,
+            &colour,
+            &rect(20, 44, 12, 12),
+            &second,
+            &rect(0, 0, 12, 12),
+            Some(key),
+        );
+        // From it into card memory's surface.
+        blt(
+            w,
+            &second,
+            &rect(32, 0, 24, 24),
+            &colour,
+            &rect(0, 0, 24, 24),
+            None,
+        );
+        // Within it over itself, stretched, and keyed from it: the
+        // processor's, after a read-back.
+        blt(
+            w,
+            &colour,
+            &rect(6, 6, 20, 20),
+            &colour,
+            &rect(2, 2, 20, 20),
+            None,
+        );
+        blt(
+            w,
+            &second,
+            &rect(0, 32, 32, 32),
+            &colour,
+            &rect(0, 0, 16, 16),
+            None,
+        );
+        blt(
+            w,
+            &second,
+            &rect(40, 40, 16, 16),
+            &colour,
+            &rect(0, 0, 16, 16),
+            Some(0x5A12_3456),
+        );
+        // And a fill after them, on whichever side the surface is.
+        fill(w, &colour, &rect(30, 2, 8, 3), 0x8001_7FFE);
+    });
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn fills_and_copies_have_the_bytes_the_processor_writes() {
+    bench!(bench, "toadforce fills and copies");
+    let exact = Bound {
+        channel: 0,
+        outliers: 0,
+        ..CLOSE
+    };
+    for format in [Format::A8R8G8B8, Format::X8R8G8B8, Format::R5G6B5] {
+        for wide in [false, true] {
+            if format == Format::R5G6B5 && !wide && !bench.host().packed() {
+                println!("the host's 5-6-5 format doesn't pass: only 8 bits a channel compared");
+                continue;
+            }
+            bench.wide.set(wide);
+            let name = format!("fills and copies {format:?} wide {wide}");
+            bench.compare(&name, format, None, exact, fills_and_copies);
+        }
+    }
+}
