@@ -3,9 +3,9 @@
 //!
 //! A push keeps every group the context has state for, and the pop puts
 //! back those of the mask the push was given. The groups this DLL keeps
-//! nothing of, such as the accumulation buffer, evaluators, hints, the
-//! pixel transfer modes and display lists, are pushed and popped with
-//! nothing in them.
+//! nothing of, such as the accumulation buffer, evaluators, hints and
+//! the pixel transfer modes, are pushed and popped with nothing in
+//! them.
 
 use super::light::Lighting;
 use super::{
@@ -35,6 +35,7 @@ const GL_VIEWPORT_BIT: u32 = 0x800;
 const GL_TRANSFORM_BIT: u32 = 0x1000;
 pub const GL_ENABLE_BIT: u32 = 0x2000;
 const GL_COLOR_BUFFER_BIT: u32 = 0x4000;
+const GL_LIST_BIT: u32 = 0x2_0000;
 const GL_TEXTURE_BIT: u32 = 0x4_0000;
 const GL_SCISSOR_BIT: u32 = 0x8_0000;
 
@@ -83,6 +84,7 @@ pub struct Attrib {
     pub env_color: [[f32; 4]; UNITS],
     pub bound: [u32; UNITS],
     pub tex_params: [TexParams; UNITS],
+    pub list_base: u32,
 }
 
 /// The capabilities each group keeps the enables of; the enable group
@@ -160,6 +162,7 @@ fn save(c: &Context, mask: u32) -> Attrib {
         env_color: c.env_color,
         bound: c.bound,
         tex_params: std::array::from_fn(|u| tex_params(c, c.bound[u])),
+        list_base: c.lists.base,
     }
 }
 
@@ -238,6 +241,9 @@ fn restore(c: &mut Context, a: &Attrib) {
     }
     if on(GL_PIXEL_MODE_BIT) {
         c.read_buffer = a.read_buffer;
+    }
+    if on(GL_LIST_BIT) {
+        c.lists.base = a.list_base;
     }
     if on(GL_TEXTURE_BIT) {
         c.active_unit = a.active_unit;
@@ -328,7 +334,8 @@ crate::state_fields!(Attrib {
     env_mode,
     env_color,
     bound,
-    tex_params
+    tex_params,
+    list_base
 });
 
 #[cfg(test)]

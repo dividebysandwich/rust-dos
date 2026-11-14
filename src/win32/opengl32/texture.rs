@@ -178,6 +178,37 @@ pub(super) fn pixel_layout(
     }
 }
 
+/// The most bytes an image the program gives may take.
+pub(super) const IMAGE_MOST: usize = 0x400_0000;
+
+/// Where an image of `width` by `height` pixels of `pixel` bytes is
+/// under the unpack state `unpack` (alignment, row length, rows and
+/// pixels skipped): the bytes from one row to the next, the bytes
+/// from the address the program gave to the first pixel, and the
+/// bytes from there to the end of the last. None when they don't fit
+/// the address space. glTexImage2D reads its texels by it, and a
+/// display list copies them by it (`lists`).
+pub(super) fn span(
+    unpack: [u32; 4],
+    width: u32,
+    height: u32,
+    pixel: u32,
+) -> Option<(u32, u32, usize)> {
+    let row_pixels = if unpack[1] > 0 { unpack[1] } else { width };
+    let align = unpack[0].max(1);
+    let stride = row_pixels
+        .checked_mul(pixel)?
+        .checked_next_multiple_of(align)?;
+    let skip = unpack[2]
+        .checked_mul(stride)?
+        .checked_add(unpack[3].checked_mul(pixel)?)?;
+    let len = height
+        .saturating_sub(1)
+        .checked_mul(stride)?
+        .checked_add(width.checked_mul(pixel)?)? as usize;
+    Some((stride, skip, len))
+}
+
 /// The texels of `src` as red, green, blue and alpha bytes, row by row
 /// from the first the program gave, with the unpack state of `c`
 /// (alignment, row length, rows and pixels skipped). The error is
@@ -186,25 +217,12 @@ pub(super) fn pixel_layout(
 fn unpack(cpu: &mut Cpu, unpack: [u32; 4], src: &Source) -> Result<Vec<[u8; 4]>, u32> {
     let types = super::wgl::packed_pixels(cpu);
     let (pixel, size, packed) = pixel_layout(src.format, src.kind, types)?;
-    let row_pixels = if unpack[1] > 0 { unpack[1] } else { src.width };
-    let align = unpack[0].max(1);
     let place = || {
-        let stride = row_pixels
-            .checked_mul(pixel)?
-            .checked_next_multiple_of(align)?;
-        let skip = unpack[2]
-            .checked_mul(stride)?
-            .checked_add(unpack[3].checked_mul(pixel)?)?;
-        let start = src.at.checked_add(skip)?;
-        let len = src
-            .height
-            .saturating_sub(1)
-            .checked_mul(stride)?
-            .checked_add(src.width.checked_mul(pixel)?)? as usize;
-        Some((stride, start, len))
+        let (stride, skip, len) = span(unpack, src.width, src.height, pixel)?;
+        Some((stride, src.at.checked_add(skip)?, len))
     };
     let (stride, start, len) = place().ok_or(GL_INVALID_ENUM)?;
-    if src.at == 0 || len > 0x400_0000 || !cpu.bus.guest_probe(start, len, false) {
+    if src.at == 0 || len > IMAGE_MOST || !cpu.bus.guest_probe(start, len, false) {
         return Err(GL_INVALID_ENUM);
     }
     let mut bytes = vec![0u8; len];
