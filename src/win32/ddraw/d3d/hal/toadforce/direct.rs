@@ -457,7 +457,7 @@ mod tests {
         };
         let sets = r.below(5) as usize;
         let mut projected = false;
-        for stage in 0..sets {
+        for (stage, coord) in setup.coords[..sets].iter_mut().enumerate() {
             // A stage takes its own set, another one, or one the
             // vertex lacks, and is projected now and then, with a
             // count or without.
@@ -474,7 +474,7 @@ mod tests {
             ];
             let flags = flags[r.below(6) as usize];
             projected |= flags & TTFF_PROJECTED != 0;
-            setup.coords[stage] = Coord::of(index, flags, &IDENTITY);
+            *coord = Coord::of(index, flags, &IDENTITY);
         }
         let card = Card {
             sets,
