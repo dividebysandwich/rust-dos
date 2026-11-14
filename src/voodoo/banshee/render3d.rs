@@ -836,17 +836,17 @@ pub(crate) mod tests {
         write(&mut v, LEFT_OVERLAY_BUF, 0x10_0000, at(10));
         assert_eq!(write(&mut v, SWAPBUFFER_CMD, 0, at(10)).hold_to, None);
         assert_eq!(v.read(VID_CURR_OVERLAY_START_ADDR, at(10)), 0x10_0000);
-        // The next, 2 ms on, waits for the 50 ms mark, and the program
-        // with it.
+        // The next, 2 ms on, waits for its turn, 50 ms after the first,
+        // and the program with it.
         write(&mut v, LEFT_OVERLAY_BUF, 0x20_0000, at(12));
         let due = write(&mut v, SWAPBUFFER_CMD, 0, at(12)).hold_to.expect("held");
-        assert_eq!(due, (50_000_000 * PIT_HZ).div_ceil(1_000_000_000));
+        assert_eq!(due, (60_000_000 * PIT_HZ).div_ceil(1_000_000_000));
         assert_eq!(v.read(VID_CURR_OVERLAY_START_ADDR, at(12)), 0x10_0000);
-        v.service(Now { ns: 50_000_000, ticks: due });
-        assert_eq!(v.read(VID_CURR_OVERLAY_START_ADDR, at(50)), 0x20_0000);
+        v.service(Now { ns: 60_000_000, ticks: due });
+        assert_eq!(v.read(VID_CURR_OVERLAY_START_ADDR, at(60)), 0x20_0000);
         // Shown at the timer tick of the turn, within a microsecond of it.
         let last = v.frame_cap.get().last().expect("a frame shown");
-        assert!((50_000_000..50_001_000).contains(&last), "{last}");
+        assert!((60_000_000..60_001_000).contains(&last), "{last}");
     }
 
     /// A program that swaps at the retrace of a 75 Hz mode, each swap as
