@@ -68,8 +68,9 @@ const TEXTURE_MAX_ANISOTROPY: u32 = 0x84FE;
 const MAX_TEXTURE_MAX_ANISOTROPY: u32 = 0x84FF;
 
 /// The bytes of a vertex as the host gets it: the position, the two
-/// colours, and four coordinate sets (`shader::ATTRIBUTES`).
-const VERTEX_BYTES: usize = 88;
+/// colours, and four coordinate sets (`shader::ATTRIBUTES`), which is
+/// how the card queues it (`gpu::Vertex`).
+const VERTEX_BYTES: usize = gpu::Vertex::BYTES;
 
 /// The texture unit textures are bound to while they are filled, past
 /// the stages' units (`shader::unit`, `shader::key_unit`).
@@ -380,29 +381,20 @@ fn snap(v: f32) -> f32 {
     ((v.clamp(-limit, limit) as f64 * 256.0).round() / 256.0) as f32
 }
 
-/// The triangles of a run as the host's vertices, added to `out`.
-/// Gives how many vertices there are.
-fn vertices(shape: &Shape, stride: usize, from: &[ScreenVertex], out: &mut Vec<u8>) -> usize {
+/// The triangles of a run as the host's vertices, added to `out`:
+/// the card's, with x and y where the host's pixels are. Gives how
+/// many vertices there are.
+fn vertices(shape: &Shape, from: &[gpu::Vertex], out: &mut Vec<u8>) -> usize {
     // The host's pixel centres are at half coordinates.
     let shift = if shape.half_centre { 0.0 } else { 0.5 };
-    let mut count = 0;
-    for triangle in from.chunks_exact(stride) {
-        // A flat-shaded triangle has the colours of its fourth vertex.
-        let colours = triangle.get(3).unwrap_or(&triangle[0]);
-        for v in &triangle[..3] {
-            let colours = if shape.flat { colours } else { v };
-            for number in [snap(v.x) + shift, snap(v.y) + shift, v.z, v.rhw] {
-                out.extend_from_slice(&number.to_ne_bytes());
-            }
-            out.extend_from_slice(&colours.diffuse);
-            out.extend_from_slice(&colours.specular);
-            for number in v.tex[..pipeline::SLOTS].iter().flatten() {
-                out.extend_from_slice(&number.to_ne_bytes());
-            }
-            count += 1;
+    let first = out.len();
+    out.extend_from_slice(gpu::Vertex::bytes(from));
+    for vertex in out[first..].as_chunks_mut::<VERTEX_BYTES>().0 {
+        for number in vertex[..8].as_chunks_mut::<4>().0 {
+            *number = (snap(f32::from_ne_bytes(*number)) + shift).to_ne_bytes();
         }
     }
-    count
+    from.len()
 }
 
 /// The OpenGL host renderer.
@@ -660,7 +652,7 @@ impl ToadForceGl {
                 // A new copy of the target each time, from memory.
                 self.forget();
                 fill(&mut memory);
-                let vertices = triangle(c);
+                let vertices = triangle(c).map(|v| gpu::Vertex::of(&v, &v, &[]));
                 let runs = [gpu::Run {
                     state: state(blend),
                     vertices: 0..3,
@@ -708,7 +700,7 @@ impl ToadForceGl {
         // A target read back unchanged.
         self.forget();
         fill(&mut memory);
-        let vertices = triangle([0; 4]);
+        let vertices = triangle([0; 4]).map(|v| gpu::Vertex::of(&v, &v, &[]));
         let mut hidden = (*state(None)).clone();
         hidden.clip = [0, 0, 0, 0];
         let runs = [gpu::Run {
@@ -1959,7 +1951,7 @@ impl Host for ToadForceGl {
             let mut first = 0;
             for run in batch.runs {
                 let from = &batch.vertices[run.vertices.clone()];
-                let count = vertices(&run.state.shape, run.stride(), from, &mut bytes);
+                let count = vertices(&run.state.shape, from, &mut bytes);
                 firsts.push((first as i32, count as i32));
                 first += count;
             }
