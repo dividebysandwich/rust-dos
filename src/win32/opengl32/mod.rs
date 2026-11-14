@@ -130,13 +130,16 @@ pub const MODELVIEW_DEPTH: usize = 32;
 pub const PROJECTION_DEPTH: usize = 2;
 pub const TEXTURE_DEPTH: usize = 2;
 /// The largest texture's width and height, as GL_MAX_TEXTURE_SIZE gives
-/// it: a Banshee's or Voodoo3's 256, or a ToadForce's.
-pub fn max_texture_size(cpu: &Cpu) -> u32 {
-    if super::screen::is_toadforce(cpu) {
-        crate::toadforce::caps::TEXTURE_MAX
-    } else {
-        256
-    }
+/// it: that of the card the current context draws on, as its Direct3D
+/// HAL describes it (`hal::texture_max`). That is 256 on a 3dfx card,
+/// the Voodoo2 included, and 2048 on a ToadForce.
+pub fn max_texture_size(cpu: &mut Cpu) -> u32 {
+    use super::ddraw::d3d::hal;
+    let offer = match ctx(cpu).map(|c| c.dd) {
+        Some(dd) => hal::card(cpu, dd),
+        None => hal::adapter(cpu),
+    };
+    offer.map_or(hal::voodoo::TEXTURE_MAX, |o| hal::texture_max(o.kind))
 }
 
 /// A vertex array: whether it is on, and glXxxPointer's size, type,

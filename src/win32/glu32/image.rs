@@ -13,7 +13,7 @@
 //! store aren't kept by the built-in OPENGL32, and are the defaults
 //! here.
 
-use super::super::opengl32::{self as gl};
+use super::super::opengl32 as gl;
 use super::{GLU_INVALID_ENUM, GLU_INVALID_VALUE, GLU_OUT_OF_MEMORY, log_once};
 use crate::cpu::Cpu;
 

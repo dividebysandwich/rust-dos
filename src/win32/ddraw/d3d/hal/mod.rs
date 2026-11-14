@@ -168,6 +168,15 @@ pub fn description(kind: Kind) -> Description {
     }
 }
 
+/// The largest width and height of a texture on a card of `kind`, as
+/// its description says (`Description::texture_max`).
+pub fn texture_max(kind: Kind) -> u32 {
+    match kind {
+        Kind::Voodoo => voodoo::TEXTURE_MAX,
+        Kind::ToadForce => crate::toadforce::caps::TEXTURE_MAX,
+    }
+}
+
 /// Whether `kind` can do a stage's operation, for ValidateDevice.
 pub fn can_do(kind: Kind, op: u32) -> bool {
     match kind {

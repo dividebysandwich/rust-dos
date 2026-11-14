@@ -876,6 +876,9 @@ pub fn can_do(op: u32) -> bool {
     OPS.contains(&op)
 }
 
+/// The largest width and height of a texture on a Voodoo: 256.
+pub const TEXTURE_MAX: u32 = 256;
+
 /// What the device description says of a Voodoo, as 3dfx's Direct3D
 /// driver described it: 16-bit render targets and depth buffers,
 /// textures from 1 to 256 pixels a side in powers of 2 with an aspect
@@ -901,7 +904,7 @@ pub fn description() -> super::Description {
         // the same through a 16-bit shadow (`shadow.rs`).
         target_depths: 0x400,
         z_depths: 0x400,
-        texture_max: 256,
+        texture_max: TEXTURE_MAX,
         texture_aspect: 8,
         // D3DPRASTERCAPS_: a w buffer, and fog by w.
         raster: 0x4_0000 | 0x10_0000,
