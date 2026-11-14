@@ -9,6 +9,8 @@ use rust_dos::keylayout::Layout;
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 
+mod paging;
+
 fn mouse_machine(mode: u16, max_x: u16, max_y: u16) -> (Cpu, DebugHub) {
     let mut cpu = Cpu::new(".".into());
     cpu.set_ax(mode);
@@ -730,7 +732,7 @@ fn a_loaded_state_leaves_no_breakpoint_watchpoint_or_stop_from_before() {
     ask(&mut cpu, &mut hub, Cmd::AddWatchpoint { addr: "0200:0000".into(), len: 2 }, 0).unwrap();
     let on = Cmd::BreakOn { exceptions: Some(1), clear_exceptions: None, mode_switch: Some(true), program_start: None, program_exit: Some(true) };
     ask(&mut cpu, &mut hub, on, 0).unwrap();
-    hub.temp_breakpoint = Some(0x1234);
+    hub.temp_breakpoint = Some(super::pm::Spot::Phys(0x1234));
     let typed = Cmd::Input { events: vec![InputEvent::Wait { ms: 60_000 }], wait: true };
     let sent = send(&mut cpu, &mut hub, typed);
     answer(&mut cpu, &mut hub, sent, 0).unwrap();

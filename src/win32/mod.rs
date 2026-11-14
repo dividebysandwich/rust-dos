@@ -81,7 +81,7 @@ mod wow32;
 mod ws2_32;
 mod wsock32;
 
-pub use memory::{PageFileStatus, PagingCounts, page_file_status};
+pub use memory::{Kept, PageFileStatus, PagedRange, PagingCounts, page_file_status};
 pub use snapshot::snapshot;
 pub use stubs::function_name;
 
@@ -1208,6 +1208,7 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     crate::win16::flat::process_ending(cpu, pid);
     let process = cpu.bus.win32.processes.remove(index);
     process.memory.release(&mut cpu.bus);
+    cpu.programs.processes_ended += 1;
     registry::process_ended(cpu, process.id);
     user32::process_ended(cpu, process.id, &tids);
     gdi32::process_ended(cpu, process.id);
@@ -1278,17 +1279,85 @@ fn peek_32(cpu: &Cpu, lin: u32) -> Option<u32> {
     running(cpu)?.memory.read_32(&cpu.bus, lin)
 }
 
-/// The byte at `lin` of the page tables the processor has (CR3), read
-/// without a page fault where its page is in the page file: for the
-/// debugger, whose reads walk the tables as the processor would and find
-/// such a page missing. None where the page isn't there either way.
-pub fn peek_paged(cpu: &Cpu, lin: u32) -> Option<u8> {
-    if cpu.cr0 & crate::cpu::CR0_PG == 0 || cpu.bus.win32.pool.is_none() {
-        return None;
+/// The page tables the processor has (CR3), for the debugger, whose reads
+/// and writes walk them as the processor would and find a page that isn't
+/// present missing. None unless paging is on and the built-in Windows has
+/// its memory: only then are the tables its own, with its entries for
+/// pages that aren't present.
+fn debugger_tables(cpu: &Cpu) -> Option<memory::Memory> {
+    (cpu.cr0 & crate::cpu::CR0_PG != 0 && cpu.bus.win32.pool.is_some())
+        .then(|| memory::Memory::tables(cpu.cr3))
+}
+
+/// Whether the processor's tables are the built-in Windows's, where a
+/// page of a program's own memory can be in the page file.
+pub fn has_page_file(cpu: &Cpu) -> bool {
+    debugger_tables(cpu).is_some()
+}
+
+/// Where the debugger finds the page at `lin` when the processor's tables
+/// don't have it present: in the page file, or in the physical page a
+/// PAGE_NOACCESS page keeps. None where the page is present or isn't
+/// committed.
+pub fn kept_page(cpu: &Cpu, lin: u32) -> Option<Kept> {
+    debugger_tables(cpu)?.kept(&cpu.bus, lin)
+}
+
+/// Fill `data` from `lin`, whose pages are in the page file, from their
+/// contents there: no page fault, and the pages stay where they are.
+/// None where a page isn't in the page file or present.
+pub fn peek_paged(cpu: &Cpu, lin: u32, data: &mut [u8]) -> Option<()> {
+    debugger_tables(cpu)?.read(&cpu.bus, lin, data)
+}
+
+/// Write `data` at `lin`, whose pages are in the page file, into their
+/// contents there, as the system's own writes do (`Memory::write`): no
+/// page fault, the pages stay where they are, and a page of zeros gets a
+/// place for its contents, which takes no more of the page file's room
+/// than the page had as it was committed. None, with pages before it
+/// written, where a page isn't in the page file or present: check with
+/// `kept_page` first.
+pub fn poke_paged(cpu: &mut Cpu, lin: u32, data: &[u8]) -> Option<()> {
+    debugger_tables(cpu)?.write(&mut cpu.bus, lin, data)
+}
+
+/// Whether the page at `lin` is one of a program's own memory, which goes
+/// out to the page file and comes back at another physical address: what
+/// the debugger keeps by its linear address.
+pub fn page_moves(cpu: &Cpu, lin: u32) -> bool {
+    debugger_tables(cpu).is_some_and(|m| m.moves(&cpu.bus, lin))
+}
+
+/// Whether a process of the built-in Windows has the page tables at
+/// `cr3`: the debugger keeps breakpoints and watchpoints by linear address
+/// in them while it does.
+pub fn tables_live(cpu: &Cpu, cr3: u32) -> bool {
+    cr3 != 0 && has_memory(cpu) && cpu.bus.win32.processes.iter().any(|p| p.memory.cr3 == cr3)
+}
+
+/// Whether the built-in Windows has its memory: from its session's start
+/// to its end.
+pub fn has_memory(cpu: &Cpu) -> bool {
+    cpu.bus.win32.pool.is_some()
+}
+
+/// Fill `data` from `lin` in the page tables at `cr3`, whichever the
+/// processor has, for the debugger's watchpoints: from the physical page
+/// mapped there or kept by a PAGE_NOACCESS entry, or from the page file.
+/// The tables are walked once for each page. The bytes of a page that
+/// isn't committed stay as they were, and so do all of them before the
+/// built-in Windows has its memory.
+pub fn read_in(cpu: &Cpu, cr3: u32, lin: u32, data: &mut [u8]) {
+    if has_memory(cpu) {
+        memory::Memory::tables(cr3).peek(&cpu.bus, lin, data);
     }
-    let mut byte = [0];
-    memory::Memory::tables(cpu.cr3).read(&cpu.bus, lin, &mut byte)?;
-    Some(byte[0])
+}
+
+/// The pages of the page tables the processor has that are in the page
+/// file, as at most `limit` runs, and whether there are more. None before
+/// the built-in Windows has its memory, or with paging off.
+pub fn paged_ranges(cpu: &Cpu, limit: usize) -> Option<(Vec<PagedRange>, bool)> {
+    Some(debugger_tables(cpu)?.paged_ranges(&cpu.bus, limit))
 }
 
 /// Whether the running function of a built-in DLL was called from guest
@@ -1412,6 +1481,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         let a20 = win32.a20;
         for process in std::mem::take(&mut win32.processes) {
             process.memory.release(&mut cpu.bus);
+            cpu.programs.processes_ended += 1;
             registry::process_ended(cpu, process.id);
         }
         // DirectPlay's objects leave their sessions, which the room would

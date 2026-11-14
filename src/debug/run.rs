@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use super::journal::{Kind, OpState};
 use super::status::at_idle_prompt;
 use super::trace::TraceEntry;
-use super::{Answer, BreakpointHit, DebugHub, PauseReason, Reply, Watch, heat, journal};
+use super::{Answer, BreakpointHit, DebugHub, PauseReason, Reply, Spot, heat, journal};
 use crate::cpu::Cpu;
 use crate::video;
 
@@ -151,6 +151,12 @@ impl DebugHub {
         if self.run_wait.as_ref().is_some_and(|r| r.before.is_none()) && !self.break_program_start && !self.start_once {
             self.seen_starts = cpu.programs.started;
         }
+        // Breakpoints and watchpoints are set between batches.
+        let lin_kept = self.kept_spots().any(|s| matches!(s, Spot::Lin { .. }));
+        self.lin_kept = lin_kept;
+        if self.lin_kept {
+            self.drop_ended_spots(cpu);
+        }
         self.tracing_now
             || self.step_budget.is_some()
             || self.temp_breakpoint.is_some()
@@ -174,12 +180,21 @@ impl DebugHub {
     /// executes. Returns true if execution must stop (the hub is now paused).
     #[inline]
     fn check_before_exec(&mut self, cpu: &Cpu, phys_ip: usize, ram: &[u8]) -> bool {
+        // A process ended, or the built-in Windows's session did: the
+        // spots kept in its address space go before another process can
+        // be given its page tables.
+        if self.lin_kept
+            && (cpu.programs.processes_ended != self.seen_processes_ended
+                || !rust_dos::win32::has_memory(cpu))
+        {
+            self.drop_ended_spots(cpu);
+        }
         // Memory the last instruction (or an interrupt handler of the
         // emulator's) changed.
         for w in &mut self.watchpoints {
-            let now = Watch::read(cpu, w.phys, w.len);
+            let now = w.read(cpu);
             if now != w.value {
-                self.watch_hit = Some((w.phys, w.len, w.value, now));
+                self.watch_hit = Some((w.spot, w.len, w.value, now));
                 w.value = now;
                 self.enter_pause(PauseReason::Watchpoint);
                 return true;
@@ -226,18 +241,26 @@ impl DebugHub {
             self.enter_pause(PauseReason::ProgramStart);
             return true;
         }
-        if !self.skip_bp_once
-            && (self.temp_breakpoint == Some(phys_ip) || self.breakpoints.contains(&phys_ip))
-        {
-            let target = self.temp_breakpoint.take() == Some(phys_ip);
-            let user = self.breakpoints.contains(&phys_ip);
-            let once = user && self.once.remove(&phys_ip);
-            if once {
-                self.breakpoints.remove(&phys_ip);
+        if !self.skip_bp_once && (self.temp_breakpoint.is_some() || !self.breakpoints.is_empty()) {
+            // The instruction's physical address, and where pages move
+            // its linear one: a breakpoint on such a page is kept by that
+            // (`Spot::Lin`), and hits wherever the page is by now.
+            let here = [Spot::running(cpu), Some(Spot::Phys(phys_ip))];
+            let here = || here.into_iter().flatten();
+            let user = here().find(|s| self.breakpoints.contains(s));
+            let target = here().find(|s| self.temp_breakpoint == Some(*s));
+            if user.is_some() || target.is_some() {
+                if target.is_some() {
+                    self.temp_breakpoint = None;
+                }
+                let once = user.is_some_and(|s| self.once.remove(&s));
+                if let Some(spot) = user.filter(|_| once) {
+                    self.breakpoints.remove(&spot);
+                }
+                self.breakpoint_hit = Some(BreakpointHit { user, once, target });
+                self.enter_pause(PauseReason::Breakpoint);
+                return true;
             }
-            self.breakpoint_hit = Some(BreakpointHit { phys: phys_ip, user, once, target });
-            self.enter_pause(PauseReason::Breakpoint);
-            return true;
         }
         self.skip_bp_once = false;
 
@@ -290,9 +313,63 @@ impl DebugHub {
         false
     }
 
+    /// Where the breakpoints, the run-to target and the watchpoints are.
+    fn kept_spots(&self) -> impl Iterator<Item = Spot> + '_ {
+        let watched = self.watchpoints.iter().map(|w| w.spot);
+        self.breakpoints
+            .iter()
+            .copied()
+            .chain(self.temp_breakpoint)
+            .chain(watched)
+    }
+
+    /// Drop the breakpoints, the run-to target and the watchpoints kept by
+    /// linear address in an address space whose process has ended, and
+    /// journal the breakpoints and watchpoints with `process_ended`. A
+    /// process that starts later can be given the same page tables and
+    /// put other code and data at those addresses, as the same program
+    /// started again does; a debugger on Windows forgets a process's
+    /// breakpoints when it ends too. A save state's load runs this as
+    /// well: the loaded machine has the processes of the moment it was
+    /// saved, so a spot in an address space none of them has goes the
+    /// same way, and the others stay, as physical ones do.
+    pub(super) fn drop_ended_spots(&mut self, cpu: &Cpu) {
+        self.seen_processes_ended = cpu.programs.processes_ended;
+        let ended: Vec<Spot> = self
+            .breakpoints
+            .iter()
+            .copied()
+            .filter(|s| s.ended(cpu))
+            .collect();
+        for spot in ended {
+            self.breakpoints.remove(&spot);
+            self.once.remove(&spot);
+            let fields = json!({"addr": spot.name(), "process_ended": true});
+            self.record(cpu, Kind::BreakpointRemoved, fields);
+        }
+        if self.temp_breakpoint.is_some_and(|s| s.ended(cpu)) {
+            self.temp_breakpoint = None;
+        }
+        let (ended, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.watchpoints)
+            .into_iter()
+            .partition(|w| w.spot.ended(cpu));
+        self.watchpoints = kept;
+        for w in ended {
+            let fields = json!({"addr": w.spot.name(), "process_ended": true});
+            self.record(cpu, Kind::WatchpointRemoved, fields);
+        }
+        let lin_kept = self.kept_spots().any(|s| matches!(s, Spot::Lin { .. }));
+        self.lin_kept = lin_kept;
+    }
+
     /// Call after the execution batch: delivers pause notifications and
     /// streams new trace entries.
     pub fn end_batch(&mut self, cpu: &Cpu) {
+        // A process that ended at the batch's last instruction, before
+        // its stop lists what is kept.
+        if self.lin_kept {
+            self.drop_ended_spots(cpu);
+        }
         // Programs that started or ended in the batch, then its stop.
         if self.shared.is_some() {
             self.tell_programs(cpu);

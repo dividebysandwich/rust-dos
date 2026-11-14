@@ -234,6 +234,15 @@ fn settles(id: u16) -> bool {
         .is_some_and(|word| word >> (id & 63) & 1 != 0)
 }
 
+/// What a ToadForce's driver queued is drawn before the function `id`
+/// runs, if it may read video memory or let the program read it. A
+/// display list does the same before each call it replays.
+pub fn settle_before(cpu: &mut Cpu, id: u16) {
+    if cpu.bus.toadforce_queued() && settles(id) {
+        super::screen::settle(cpu);
+    }
+}
+
 /// The DLL and function of the id `id`.
 pub fn api(id: u16) -> Option<(&'static Dll, &'static Api)> {
     let dll = DLLS.get((id >> 10) as usize)?;
@@ -507,14 +516,13 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     let traced = super::trace::on(cpu);
     let caller = traced.then(|| super::peek_32(cpu, esp));
     let caller = caller.flatten().unwrap_or(0);
-    // What a ToadForce's driver queued is drawn before a function that
-    // may read video memory or let the program read it.
-    if cpu.bus.toadforce_queued() && settles(id) {
-        super::screen::settle(cpu);
-    }
-    let result = {
-        let _profile = std::ptr::eq(dll, &super::opengl32::DLL)
-            .then(|| crate::profile::zone(crate::profile::Zone::OpenGlCall));
+    settle_before(cpu, id);
+    let result = if std::ptr::eq(dll, &super::opengl32::DLL) {
+        // OpenGL's calls go by its display lists, which record them
+        // while one is being compiled.
+        let _profile = crate::profile::zone(crate::profile::Zone::OpenGlCall);
+        super::opengl32::call(cpu, (id & 0x3FF) as usize, api, args)
+    } else {
         (api.handler)(cpu, args)
     };
     let _profile = crate::profile::zone(crate::profile::Zone::Win32After);
