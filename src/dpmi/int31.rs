@@ -599,9 +599,7 @@ pub(super) fn can_retile(cpu: &mut Cpu, first: usize, count: usize, needed: usiz
 pub(super) fn retile(cpu: &mut Cpu, first: usize, count: usize, base: u32, bytes: u32) -> usize {
     let needed = tiles(bytes);
     let c = client(cpu);
-    for index in first + count..first + needed {
-        c.ldt[index] = LDT_FIXED;
-    }
+    c.ldt[first + count..first + needed].fill(LDT_FIXED);
     for index in first + needed..first + count {
         free_entry(cpu, index);
     }

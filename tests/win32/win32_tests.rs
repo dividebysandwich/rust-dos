@@ -920,6 +920,278 @@ fn idle_lockstep(test: &str, image: Vec<u8>) -> rust_dos::idle::IdleStats {
     skipping.bus.observe.stats
 }
 
+/// A thread that waits for a flag in a Sleep(0) loop while the main
+/// thread sleeps, as MDK2's worker thread waits while the main thread
+/// waits for the retrace (#1007): with no other thread ready, Sleep(0)
+/// returns at once and changes nothing, so the loop's passes are skipped
+/// to the end of the main thread's Sleep, and come out the same as when
+/// they all run.
+#[test]
+fn a_sleep_zero_loop_with_nothing_else_ready_is_skipped() {
+    let names: &[&str] = &["CreateThread", "Sleep", "WaitForSingleObject"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The flag at 0.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        let mut spin = a.create_label();
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(over)?;
+        // The thread: Sleep(0) until the flag is set.
+        a.set_label(&mut spin)?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.cmp(dword_ptr(l.data), 0)?;
+        a.je(spin)?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        a.mov(esi, eax)?;
+        a.push(30)?;
+        a.call(f("Sleep"))?;
+        a.mov(dword_ptr(l.data), 1)?;
+        a.push(-1)?;
+        a.push(esi)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let stats = idle_lockstep("sleep_zero_wait", image);
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
+/// The same wait with a count of its passes in memory, as
+/// `while (!flag) { Sleep(0); n++; }` keeps: the passes differ in the
+/// count alone, and are skipped with it moved on as they would have.
+#[test]
+fn a_sleep_zero_loop_that_counts_while_it_waits_is_skipped() {
+    let names: &[&str] = &["CreateThread", "Sleep", "WaitForSingleObject"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The flag at 0, the count at 4.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        let mut spin = a.create_label();
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(over)?;
+        // The thread: Sleep(0) and count until the flag is set.
+        a.set_label(&mut spin)?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.inc(dword_ptr(l.at(4)))?;
+        a.cmp(dword_ptr(l.data), 0)?;
+        a.je(spin)?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        a.mov(esi, eax)?;
+        a.push(30)?;
+        a.call(f("Sleep"))?;
+        a.mov(dword_ptr(l.data), 1)?;
+        a.push(-1)?;
+        a.push(esi)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let stats = idle_lockstep("sleep_zero_count_wait", image);
+    assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
+/// A Sleep(0) loop that leaves after 50 ms by GetTickCount, alone in its
+/// process: skipped or run, it reads the clock 50 ms on when it leaves,
+/// neither sooner nor later.
+#[test]
+fn a_sleep_zero_loop_with_a_timeout_leaves_on_time() {
+    let names: &[&str] = &["GetTickCount", "Sleep"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut spin = a.create_label();
+        let mut late = a.create_label();
+        a.call(f("GetTickCount"))?;
+        a.mov(ebx, eax)?;
+        a.set_label(&mut spin)?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.call(f("GetTickCount"))?;
+        a.sub(eax, ebx)?;
+        a.cmp(eax, 50)?;
+        a.jb(spin)?;
+        a.jne(late)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()?;
+        a.set_label(&mut late)?;
+        a.ret()
+    });
+    let stats = idle_lockstep("sleep_zero_timeout", image);
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// Sleep(0) loops that count their passes, in memory and in a register,
+/// and leave after 100000: every pass counts, skipped or run.
+#[test]
+fn a_sleep_zero_loop_that_counts_runs_all_its_passes() {
+    let names: &[&str] = &["Sleep", "SleepEx"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The count at 0.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut memory = a.create_label();
+        let mut register = a.create_label();
+        let mut wrong = a.create_label();
+        a.set_label(&mut memory)?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.inc(dword_ptr(l.data))?;
+        a.cmp(dword_ptr(l.data), 100_000)?;
+        a.jb(memory)?;
+        // Alertable: no APC is queued, so it returns 0.
+        a.mov(edi, 100_000)?;
+        a.set_label(&mut register)?;
+        a.push(1)?;
+        a.push(0)?;
+        a.call(f("SleepEx"))?;
+        a.test(eax, eax)?;
+        a.jnz(wrong)?;
+        a.dec(edi)?;
+        a.jnz(register)?;
+        a.cmp(dword_ptr(l.data), 100_000)?;
+        a.jne(wrong)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()?;
+        a.set_label(&mut wrong)?;
+        a.mov(eax, 1)?;
+        a.ret()
+    });
+    let stats = idle_lockstep("sleep_zero_count", image);
+    // The memory loop's flags at the head come from comparing its count,
+    // so no two passes are the same: its proofs fail and back off rather
+    // than start again every few calls.
+    assert!(failed_by(&stats, "count passes") > 0, "{stats:?}");
+    assert!(stats.starts < 1000, "{stats:?}");
+}
+
+/// A thread of normal priority waits in a Sleep(0) loop for a flag that a
+/// thread of the lowest priority sets: Sleep(0) doesn't give way to that
+/// one, which gets the processor at the end of the waiting one's turn,
+/// skipped or run.
+#[test]
+fn a_sleep_zero_loop_waits_for_a_thread_of_a_lower_priority() {
+    let names: &[&str] = &[
+        "CreateThread",
+        "SetThreadPriority",
+        "ResumeThread",
+        "Sleep",
+        "WaitForSingleObject",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The flag at 0.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        let mut count = a.create_label();
+        let mut spin = a.create_label();
+        a.push(0)?;
+        a.push(4)?; // CREATE_SUSPENDED
+        a.push(0)?;
+        a.call(over)?;
+        // The thread: count a while, then set the flag.
+        a.mov(ecx, 1000)?;
+        a.set_label(&mut count)?;
+        a.loop_(count)?;
+        a.mov(dword_ptr(l.data), 1)?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        a.mov(esi, eax)?;
+        a.push(-2)?; // THREAD_PRIORITY_LOWEST
+        a.push(esi)?;
+        a.call(f("SetThreadPriority"))?;
+        a.push(esi)?;
+        a.call(f("ResumeThread"))?;
+        a.set_label(&mut spin)?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.cmp(dword_ptr(l.data), 0)?;
+        a.je(spin)?;
+        a.push(-1)?;
+        a.push(esi)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let stats = idle_lockstep("sleep_zero_lower", image);
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// A program whose one thread waits in a Sleep(0) loop for a flag that
+/// its multimedia timer's function sets 20 ms on: the loop leaves when
+/// the timer comes, skipped or run. The timer's thread keeps the process
+/// alive, so it ends with ExitProcess.
+#[test]
+fn a_sleep_zero_loop_waits_for_a_multimedia_timer() {
+    let k32: &[&str] = &["GetTickCount", "Sleep", "ExitProcess"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", k32), ("WINMM.DLL", &["timeSetEvent"])];
+    // The flag at 0.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(k32.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        let mut spin = a.create_label();
+        let mut wrong = a.create_label();
+        let mut exit = a.create_label();
+        a.call(f("GetTickCount"))?;
+        a.mov(ebx, eax)?;
+        a.push(0)?; // TIME_ONESHOT
+        a.push(0)?;
+        a.call(over)?;
+        // The timer's function.
+        a.mov(dword_ptr(l.data), 1)?;
+        a.ret_1(20)?;
+        a.set_label(&mut over)?;
+        a.push(1)?;
+        a.push(20)?;
+        a.call(l.import(k32.len()))?;
+        a.test(eax, eax)?;
+        a.jz(wrong)?;
+        a.set_label(&mut spin)?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.cmp(dword_ptr(l.data), 0)?;
+        a.je(spin)?;
+        // The timer came 20 ms on, to the millisecond.
+        a.call(f("GetTickCount"))?;
+        a.sub(eax, ebx)?;
+        a.sub(eax, 20)?;
+        a.cmp(eax, 1)?;
+        a.ja(wrong)?;
+        a.mov(eax, 0x2A)?;
+        a.jmp(exit)?;
+        a.set_label(&mut wrong)?;
+        a.mov(eax, 1)?;
+        a.set_label(&mut exit)?;
+        a.push(eax)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let stats = idle_lockstep("sleep_zero_timer", image);
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
 /// The number of proofs that failed for `why`.
 fn failed_by(stats: &rust_dos::idle::IdleStats, why: &str) -> u64 {
     stats
@@ -1599,6 +1871,77 @@ fn slept_ms(test: &str, spin: bool) -> u8 {
 fn a_sleep_ends_on_time_also_while_another_thread_spins() {
     let slept = [slept_ms("sleep_alone", false), slept_ms("sleep_spinning", true)];
     assert_eq!(slept, [10, 10], "alone, spinning");
+}
+
+/// Whether a thread of priority `priority`, which counts for ever, ran
+/// while the main thread, of normal priority, called Sleep(0) 10 times
+/// right after starting it.
+fn ran_during_sleep_zero(test: &str, priority: i32) -> bool {
+    let names: &[&str] = &[
+        "CreateThread",
+        "SetThreadPriority",
+        "ResumeThread",
+        "Sleep",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The thread's count at 0.
+    let data = vec![0; 0x10];
+    let (code, out) = run(
+        test,
+        program(BASE, false, imports, &data, |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let mut over = a.create_label();
+            let mut again = a.create_label();
+            let mut yield_ = a.create_label();
+            a.push(0)?;
+            a.push(4)?; // CREATE_SUSPENDED
+            a.push(0)?;
+            a.call(over)?;
+            // The thread: count for ever.
+            a.set_label(&mut again)?;
+            a.add(dword_ptr(l.at(0)), 1)?;
+            a.jmp(again)?;
+            a.set_label(&mut over)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.call(f("CreateThread"))?;
+            a.mov(esi, eax)?;
+            a.push(priority)?;
+            a.push(esi)?;
+            a.call(f("SetThreadPriority"))?;
+            a.push(esi)?;
+            a.call(f("ResumeThread"))?;
+            a.mov(edi, 10)?;
+            a.set_label(&mut yield_)?;
+            a.push(0)?;
+            a.call(f("Sleep"))?;
+            a.dec(edi)?;
+            a.jnz(yield_)?;
+            // 1 if the thread counted, else 0.
+            a.xor(eax, eax)?;
+            a.cmp(dword_ptr(l.at(0)), 0)?;
+            a.setne(al)?;
+            a.push(eax)?;
+            a.call(f("ExitProcess"))?;
+            a.int3()
+        }),
+    );
+    assert!(out.is_empty(), "{out}");
+    code == 1
+}
+
+/// Sleep(0) gives the rest of the thread's turn to a ready thread of its
+/// priority, and returns at once when the only one ready has a lower
+/// priority, as Sleep's documentation had it until Windows Server 2003.
+/// The calls are made well within the main thread's turn, which a thread
+/// of a lower priority wouldn't get at all on Windows 98 while it can
+/// run.
+#[test]
+fn sleep_zero_gives_way_to_a_thread_of_its_priority_only() {
+    let normal = ran_during_sleep_zero("sleep_zero_normal", 0);
+    let lowest = ran_during_sleep_zero("sleep_zero_lowest", -2);
+    assert_eq!((normal, lowest), (true, false), "normal, lowest");
 }
 
 /// Threads started and ended one after another, more than the LDT has

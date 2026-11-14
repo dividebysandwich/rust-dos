@@ -70,7 +70,7 @@ default-members = ["."]
 authors = ["dividebysandwich"]
 repository = "https://github.com/dividebysandwich/rust-dos"
 license = "GPL-2.0-or-later"
-version = "1.8.3"
+version = "1.9.0"
 edition = "2024"
 
 [dependencies]
@@ -114,7 +114,6 @@ rust-dos-mpu401 = { path = "crates/mpu401" }
 iced-x86 = "1.21.0"
 # Searching memory for known code (src/game_fixes.rs).
 memchr = "2.8"
-font8x8 = "0.3.1"
 chrono = "0.4.45"
 gif = "0.14.2"
 bitflags = "2.13.2"

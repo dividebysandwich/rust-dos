@@ -273,8 +273,8 @@ impl Client {
             return None;
         }
         let mut run = 0;
-        for i in RESERVED_LDT..LDT_ENTRIES {
-            run = if self.ldt[i] == LDT_FREE { run + 1 } else { 0 };
+        for (i, &entry) in self.ldt.iter().enumerate().skip(RESERVED_LDT) {
+            run = if entry == LDT_FREE { run + 1 } else { 0 };
             if run == count {
                 return Some(i + 1 - count);
             }
@@ -636,9 +636,7 @@ fn selector_base(cpu: &Cpu, selector: u16) -> Option<u32> {
 fn allocate(cpu: &mut Cpu, count: usize, desc: u64, use_: u8) -> Option<usize> {
     let client = client(cpu);
     let first = client.free_entries(count)?;
-    for i in first..first + count {
-        client.ldt[i] = use_;
-    }
+    client.ldt[first..first + count].fill(use_);
     let ldt = client.block;
     for i in first..first + count {
         write_desc(&mut cpu.bus, ldt, i, desc);

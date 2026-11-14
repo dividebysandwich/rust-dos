@@ -912,12 +912,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "font8x8"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "875488b8711a968268c7cf5d139578713097ca4635a76044e8fe8eedf831d07e"
-
-[[package]]
 name = "form_urlencoded"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2214,7 +2208,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos"
-version = "1.8.3"
+version = "1.9.0"
 dependencies = [
  "ab_glyph_rasterizer",
  "ash",
@@ -2230,7 +2224,6 @@ dependencies = [
  "dynasmrt",
  "embed-resource",
  "flate2",
- "font8x8",
  "getrandom 0.3.4",
  "gif",
  "glam",
@@ -2286,21 +2279,21 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-audio-core"
-version = "1.8.3"
+version = "1.9.0"
 dependencies = [
  "rust-dos-savestate",
 ]
 
 [[package]]
 name = "rust-dos-dma"
-version = "1.8.3"
+version = "1.9.0"
 dependencies = [
  "rust-dos-savestate",
 ]
 
 [[package]]
 name = "rust-dos-gus"
-version = "1.8.3"
+version = "1.9.0"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-dma",
@@ -2311,14 +2304,14 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-hostdirs"
-version = "1.8.3"
+version = "1.9.0"
 dependencies = [
  "dirs",
 ]
 
 [[package]]
 name = "rust-dos-installshield"
-version = "1.8.3"
+version = "1.9.0"
 dependencies = [
  "flate2",
  "md-5",
@@ -2326,7 +2319,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-lpt-dac"
-version = "1.8.3"
+version = "1.9.0"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-savestate",
@@ -2334,7 +2327,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-mpu401"
-version = "1.8.3"
+version = "1.9.0"
 dependencies = [
  "midir",
  "rust-dos-audio-core",
@@ -2347,7 +2340,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-mt32"
-version = "1.8.3"
+version = "1.9.0"
 dependencies = [
  "libloading 0.9.0",
  "rust-dos-hostdirs",
@@ -2355,11 +2348,11 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-ne"
-version = "1.8.3"
+version = "1.9.0"
 
 [[package]]
 name = "rust-dos-opl"
-version = "1.8.3"
+version = "1.9.0"
 dependencies = [
  "nuked-opl3",
  "rust-dos-audio-core",
@@ -2368,11 +2361,11 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-pe"
-version = "1.8.3"
+version = "1.9.0"
 
 [[package]]
 name = "rust-dos-rc"
-version = "1.8.3"
+version = "1.9.0"
 dependencies = [
  "rust-dos-savestate",
  "rust-dos-zip",
@@ -2380,7 +2373,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-runlock"
-version = "1.8.3"
+version = "1.9.0"
 dependencies = [
  "libc",
  "rust-dos-hostdirs",
@@ -2391,11 +2384,11 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-savestate"
-version = "1.8.3"
+version = "1.9.0"
 
 [[package]]
 name = "rust-dos-sc55"
-version = "1.8.3"
+version = "1.9.0"
 dependencies = [
  "dirs",
  "rust-dos-hostdirs",
@@ -2406,7 +2399,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-soundblaster"
-version = "1.8.3"
+version = "1.9.0"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-dma",
@@ -2420,7 +2413,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-tandy"
-version = "1.8.3"
+version = "1.9.0"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-savestate",
@@ -2428,7 +2421,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-zip"
-version = "1.8.3"
+version = "1.9.0"
 dependencies = [
  "flate2",
  "zip",

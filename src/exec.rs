@@ -1515,7 +1515,7 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     }
     cpu.bus.guest_paging = None;
     if std::mem::take(&mut cpu.bus.observe.polled) {
-        crate::idle::keyboard_poll(cpu, trap.0, trap.1);
+        crate::idle::service_polled(cpu, trap.0, trap.1);
     }
     if cpu.idle {
         // A BIOS service is waiting for input: skip ahead to the next
@@ -1577,6 +1577,9 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     cpu.bus.guest_paging = None;
     if reads_clock {
         crate::idle::clock_read(cpu, trap.0, trap.1);
+    }
+    if std::mem::take(&mut cpu.bus.observe.polled) {
+        crate::idle::service_polled(cpu, trap.0, trap.1);
     }
     if cpu.idle {
         // No thread can run: time passes to the next timer event.

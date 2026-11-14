@@ -2358,8 +2358,7 @@ mod tests {
                 let numbers = if projected { 4 } else { 2 };
                 assert_eq!(draw.fvf.words, 6 + sets * numbers);
                 assert_eq!(draw.fvf.words, card.layout().1);
-                for set in 0..sets {
-                    let (at, n) = draw.fvf.sets[set];
+                for (set, &(at, n)) in draw.fvf.sets[..sets].iter().enumerate() {
                     assert_eq!((at as usize, n as usize), (6 + set * numbers, numbers));
                 }
                 assert_eq!(draw.fvf.sets[sets], (0, 0));
