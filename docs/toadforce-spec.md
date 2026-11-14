@@ -103,7 +103,9 @@ registers' otherwise. An access of 2 or 4 bytes is card memory's when
 all its bytes are in card memory's window. Otherwise it goes whole to
 the registers' or the ring's window if its first byte is there, even
 where its other bytes are in card memory's or past the window's end;
-those past the end read as 0, and a write drops them. The legacy VGA
+those past the end read as 0, and a write drops them. An access that
+begins in card memory's window alone and runs past its end is made byte
+by byte, each byte going where its own address does. The legacy VGA
 ports (3B0h to 3DFh) and the VGA memory at A0000h to BFFFFh decode
 whatever the command register holds, as they do on the emulator's
 other display adapters: a guest can't turn the VGA off there.

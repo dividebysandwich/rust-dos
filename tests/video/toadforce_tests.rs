@@ -1214,3 +1214,117 @@ fn the_bios_reports_its_four_megabytes_of_card_memory() {
     // The write-only `RESET` reads as 0.
     assert_eq!(reg(&cpu, regs::RESET), 0);
 }
+
+#[test]
+fn an_access_past_a_windows_end_goes_whole_to_its_first_bytes_window() {
+    let mut cpu = machine();
+    let last = RING + regs::RING_SIZE as usize - 4;
+    let end = MEMORY + reg(&cpu, regs::MEMORY) as usize;
+    cpu.bus.write_32(RING, 0xAABB_CCDD);
+    cpu.bus.write_32(last, 0x1122_3344);
+
+    // The registers with the ring right after them: a read from their
+    // last bytes has no byte of the ring, and a write there is dropped.
+    set_config(&mut cpu, 0x10, INITIAL_RING - regs::REGISTERS_SIZE);
+    assert_eq!(cpu.bus.read_32(RING - regs::REGISTERS_SIZE as usize), regs::ID_VALUE);
+    assert_eq!(cpu.bus.read_32(RING - 2), 0);
+    assert_eq!(cpu.bus.read_16(RING - 1), 0);
+    cpu.bus.write_32(RING - 2, 0xFFFF_FFFF);
+    cpu.bus.write_16(RING - 1, 0xFFFF);
+    assert_eq!(cpu.bus.read_32(RING), 0xAABB_CCDD);
+
+    // The ring with the registers right after it: its last bytes, and
+    // zeros where the registers' first would be.
+    let after = RING + regs::RING_SIZE as usize;
+    set_config(&mut cpu, 0x10, after as u32);
+    assert_eq!(cpu.bus.read_32(after), regs::ID_VALUE);
+    assert_eq!(cpu.bus.read_32(after - 2), 0x0000_1122);
+    assert_eq!(cpu.bus.read_16(after - 1), 0x0011);
+    cpu.bus.write_32(after - 2, 0xA1B2_C3D4);
+    assert_eq!(cpu.bus.read_32(last), 0xC3D4_3344);
+    cpu.bus.write_16(after - 1, 0x5566);
+    assert_eq!(cpu.bus.read_32(last), 0x66D4_3344);
+    assert_eq!(cpu.bus.read_32(after), regs::ID_VALUE);
+    cpu.bus.write_32(last, 0x1122_3344);
+
+    // The registers over card memory's last 64 KB. An access with all
+    // its bytes in card memory is card memory's. One that runs past the
+    // end goes whole to the registers, its first byte being in their
+    // window too: it reads no byte of card memory and writes none.
+    cpu.bus.write_8(end - 2, 0x77);
+    cpu.bus.write_8(end - 1, 0x88);
+    set_config(&mut cpu, 0x10, end as u32 - regs::REGISTERS_SIZE);
+    assert_eq!(cpu.bus.read_16(end - 2), 0x8877);
+    assert_eq!(cpu.bus.read_32(end - 4) >> 16, 0x8877);
+    assert_eq!(cpu.bus.read_32(end - 2), 0);
+    assert_eq!(cpu.bus.read_16(end - 1), 0);
+    cpu.bus.write_32(end - 2, 0xFFFF_FFFF);
+    cpu.bus.write_16(end - 1, 0xFFFF);
+    assert_eq!(cpu.bus.read_16(end - 2), 0x8877);
+    set_config(&mut cpu, 0x10, INITIAL_REGISTERS);
+
+    // The ring over card memory's last megabyte, the same: the ring's
+    // last bytes, and its bytes written.
+    set_config(&mut cpu, 0x18, end as u32 - regs::RING_SIZE);
+    assert_eq!(cpu.bus.read_16(end - 2), 0x8877);
+    assert_eq!(cpu.bus.read_32(end - 2), 0x0000_1122);
+    assert_eq!(cpu.bus.read_16(end - 1), 0x0011);
+    cpu.bus.write_32(end - 2, 0xA1B2_C3D4);
+    cpu.bus.write_16(end - 1, 0x5566);
+    assert_eq!(cpu.bus.read_16(end - 2), 0x8877);
+    set_config(&mut cpu, 0x18, INITIAL_RING);
+    assert_eq!(cpu.bus.read_32(last), 0x66D4_3344);
+
+    // An access that begins in card memory alone and runs past its end
+    // is made byte by byte: card memory's bytes, and for the others
+    // nothing, or the window that is there.
+    assert_eq!(cpu.bus.read_32(end - 2), 0xFFFF_8877);
+    set_config(&mut cpu, 0x18, end as u32);
+    assert_eq!(cpu.bus.read_32(end - 2), 0xCCDD_8877);
+    cpu.bus.write_32(end - 2, 0x0102_0304);
+    assert_eq!(cpu.bus.read_16(end - 2), 0x0304);
+    assert_eq!(cpu.bus.read_32(end), 0xAABB_0102);
+}
+
+#[test]
+fn the_windows_that_decode_follow_the_bars_the_command_register_and_a_loaded_state() {
+    let mut cpu = machine();
+    cpu.bus.write_32(RING + 8, 0x5566_7788);
+    let (registers, ring) = (0xC800_0000usize, 0xC900_0000usize);
+    let here = |cpu: &Cpu, registers: usize, ring: usize| {
+        (cpu.bus.read_32(registers), cpu.bus.read_32(ring + 8)) == (regs::ID_VALUE, 0x5566_7788)
+    };
+    let gone = |cpu: &Cpu, registers: usize, ring: usize| {
+        (cpu.bus.read_32(registers), cpu.bus.read_32(ring + 8)) == (u32::MAX, u32::MAX)
+    };
+    assert!(here(&cpu, REGISTERS, RING));
+
+    // A write to a BAR.
+    set_config(&mut cpu, 0x10, registers as u32);
+    set_config(&mut cpu, 0x18, ring as u32);
+    assert!(here(&cpu, registers, ring));
+    assert!(gone(&cpu, REGISTERS, RING));
+
+    // A write to the command register.
+    set_config(&mut cpu, 0x04, 0x0001);
+    assert!(gone(&cpu, registers, ring));
+    set_config(&mut cpu, 0x04, 0x0003);
+    assert!(here(&cpu, registers, ring));
+
+    // A loaded state: the windows are where the state has the BARs,
+    // whatever the machine it is loaded into had.
+    let state = rust_dos::savestate::machine::save(&cpu);
+    set_config(&mut cpu, 0x10, INITIAL_REGISTERS);
+    set_config(&mut cpu, 0x18, INITIAL_RING);
+    assert!(here(&cpu, REGISTERS, RING));
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    assert!(here(&cpu, registers, ring));
+    assert!(gone(&cpu, REGISTERS, RING));
+    // And with memory decoding off in the state.
+    set_config(&mut cpu, 0x04, 0x0001);
+    let off = rust_dos::savestate::machine::save(&cpu);
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    assert!(here(&cpu, registers, ring));
+    rust_dos::savestate::machine::load(&mut cpu, &off).unwrap();
+    assert!(gone(&cpu, registers, ring));
+}
