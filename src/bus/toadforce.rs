@@ -248,6 +248,31 @@ impl Bus {
         }
     }
 
+    /// `toadforce_submit` for commands written where they are queued:
+    /// `write` adds whole commands to the end of the words it is given,
+    /// the card's queue, or leaves them as they were. The queue is out
+    /// of the card meanwhile, so `write` reads the program's memory
+    /// only where that is plain RAM (`guest_read_ram`) and hands the
+    /// card nothing else. Without a card the words go nowhere.
+    pub fn toadforce_submit_with<T>(&mut self, write: impl FnOnce(&mut Bus, &mut Vec<u32>) -> T) -> T {
+        let Some(card) = &mut self.toadforce else {
+            return write(self, &mut Vec::new());
+        };
+        let mut words = card.queue_take();
+        let before = words.len();
+        let out = write(self, &mut words);
+        let added = words.len() != before;
+        let live = self.toadforce_live();
+        let card = self.toadforce.as_mut().expect("the card was there before");
+        if card.queue_put(words, before, live) {
+            self.toadforce_flush();
+        } else if before == 0 && added {
+            // The timer wakes the card for the queue's deadline.
+            self.clock.schedule(self.next_event());
+        }
+        out
+    }
+
     /// Whether commands of `toadforce_submit` wait to be run.
     #[inline]
     pub fn toadforce_queued(&self) -> bool {

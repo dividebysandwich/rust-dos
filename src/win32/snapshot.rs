@@ -399,6 +399,11 @@ pub struct DirectDrawInfo {
     /// state up to a device's for a draw, and those of them that found
     /// it there already (`hal::toadforce::bind`).
     pub binds: [u64; 2],
+    /// The draws of screen vertices that went from the program's
+    /// memory to a ToadForce's command queue and their vertices, and
+    /// the batches the pipeline handed the card and the vertices of
+    /// the primitives in them (`hal::toadforce::draw_screen`).
+    pub screen_draws: [u64; 4],
     pub surfaces: Vec<SurfaceInfo>,
 }
 

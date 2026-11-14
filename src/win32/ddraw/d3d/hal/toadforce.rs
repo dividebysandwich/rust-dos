@@ -74,6 +74,9 @@ use crate::toadforce::level1::{
 use crate::toadforce::{caps, regs};
 use crate::win32::screen;
 
+mod direct;
+pub use direct::Source;
+
 /// The textures a draw has at once: the card's four
 /// (`caps::TEXTURES_AT_ONCE`), which are the stages whose texture
 /// coordinates the pipeline gives a screen vertex.
@@ -149,13 +152,19 @@ pub struct Hal {
     /// The textures in place the card was last found to take
     /// (`in_place`), newest last: most draws bind one of them again.
     pub taken: Vec<Texture>,
+    /// The draws of screen vertices that went from the program's
+    /// memory to the card (`direct::draw`) and their vertices, and
+    /// those the pipeline kept and theirs.
+    pub screen_draws: [u64; 4],
+    /// The buffers of `direct::draw`.
+    pub scratch: direct::Scratch,
 }
 
 crate::state_fields!(Hal {
     pid,
     textures,
     clock
-} skip { told, binds, logged, taken });
+} skip { told, binds, logged, taken, screen_draws, scratch });
 
 /// What the card was told, kept so that its two parts can't come apart.
 mod told {
@@ -1650,6 +1659,7 @@ pub struct Raster<'a> {
 impl Raster<'_> {
     pub fn new(cpu: &mut Cpu, card: Card) -> Raster<'_> {
         let (fvf, vertex_words) = card.layout();
+        hal(cpu).screen_draws[2] += 1;
         Raster {
             cpu,
             card,
@@ -1709,6 +1719,7 @@ impl Raster<'_> {
         if self.words.is_empty() {
             return;
         }
+        hal(self.cpu).screen_draws[3] += (self.words.len() / self.vertex_words) as u64;
         submit(self.cpu, &self.words);
         drew(self.cpu, &self.card);
     }
@@ -2076,6 +2087,27 @@ pub fn draw_geometry(
         drew(cpu, &card);
     }
     true
+}
+
+/// Draw `kind` primitives of the device `d`'s transformed vertices of
+/// `layout` at `from` in the program's memory, from there to the
+/// card's queue (`direct`): the triangles drawn, or None for a draw
+/// the pipeline keeps, with nothing drawn.
+pub fn draw_screen(
+    cpu: &mut Cpu,
+    d: &Device,
+    setup: &Setup,
+    layout: &Layout,
+    kind: u32,
+    from: &Source,
+) -> Option<u32> {
+    let drawn = direct::draw(cpu, d, setup, layout, kind, from);
+    if drawn.is_some() {
+        let counts = &mut hal(cpu).screen_draws;
+        counts[0] += 1;
+        counts[1] += from.count as u64;
+    }
+    drawn
 }
 
 impl Rasterizer for Raster<'_> {
