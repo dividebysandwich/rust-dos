@@ -1896,6 +1896,21 @@ fn ddraw_without_a_program_has_no_surfaces() {
             "pipeline": 0,
             "pipeline_vertices": 0,
         },
+        "gl_draws": {
+            "card": 0,
+            "card_vertices": 0,
+            "refused": 0,
+            "no_card": 0,
+            "asked": 0,
+            "numbers": 0,
+            "modelview": 0,
+            "light": 0,
+            "shininess": 0,
+            "material": 0,
+            "flat": 0,
+            "sides": 0,
+            "edges": 0,
+        },
         "surfaces": [],
     });
     assert_eq!(v, expected);
