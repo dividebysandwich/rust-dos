@@ -55,7 +55,11 @@ pub fn parse(value: &str) -> Option<Option<u32>> {
     if value.eq_ignore_ascii_case("off") || value == "0" {
         return Some(None);
     }
-    value.parse().ok().filter(|fps| RATES.contains(fps)).map(Some)
+    value
+        .parse()
+        .ok()
+        .filter(|fps| RATES.contains(fps))
+        .map(Some)
 }
 
 /// `fps_cap`'s value as the configuration file writes it.
@@ -160,7 +164,14 @@ impl FrameCap {
         if now.saturating_sub(last) > ACTIVE_NS {
             return None;
         }
-        Some(CrtTiming { line_ns: frame, hdisplay_ns: frame, total: 1, display: 1, retrace_start: 0, retrace_end: 1 })
+        Some(CrtTiming {
+            line_ns: frame,
+            hdisplay_ns: frame,
+            total: 1,
+            display: 1,
+            retrace_start: 0,
+            retrace_end: 1,
+        })
     }
 }
 
@@ -266,8 +277,17 @@ mod tests {
             now += MS / 2;
         }
         let second = shown[30] - shown[0];
-        assert!((second as i64 - 1_000_000_000).abs() < 34 * MS as i64, "{} ns", second);
-        assert!(shown.windows(2).skip(1).all(|w| w[1] - w[0] == 1_000_000_000 / 30));
+        assert!(
+            (second as i64 - 1_000_000_000).abs() < 34 * MS as i64,
+            "{} ns",
+            second
+        );
+        assert!(
+            shown
+                .windows(2)
+                .skip(1)
+                .all(|w| w[1] - w[0] == 1_000_000_000 / 30)
+        );
     }
 
     /// The times a program's frames show at under a cap of `fps`, when
@@ -299,7 +319,11 @@ mod tests {
         let shown = presented(60, &[frame * 2 / 3], 121);
         // The first frames come as soon as they are drawn, one in each
         // frame time; from the fourth on each waits for its turn.
-        assert!(shown[3..].windows(2).all(|w| w[1] - w[0] == frame), "{:?}", &shown[..6]);
+        assert!(
+            shown[3..].windows(2).all(|w| w[1] - w[0] == frame),
+            "{:?}",
+            &shown[..6]
+        );
         assert!((rate(&shown) - 60.0).abs() < 0.5, "{}", rate(&shown));
     }
 
@@ -333,8 +357,16 @@ mod tests {
         let late = shown.windows(2).filter(|w| w[1] - w[0] > 100 * ms).count();
         assert!(late > 0);
         for (i, &t) in shown.iter().enumerate() {
-            let in_second = shown[i..].iter().take_while(|&&u| u < t + 1_000_000_000).count();
-            assert!(in_second <= 60 + 15, "{} frames in the second from {} ns", in_second, t);
+            let in_second = shown[i..]
+                .iter()
+                .take_while(|&&u| u < t + 1_000_000_000)
+                .count();
+            assert!(
+                in_second <= 60 + 15,
+                "{} frames in the second from {} ns",
+                in_second,
+                t
+            );
         }
     }
 
@@ -365,7 +397,11 @@ mod tests {
         // two come as they are drawn, in two frame times of the cap.
         let refresh = 16_666_650;
         let shown = at_retraces(30, refresh, 61);
-        assert!(shown[1..].windows(2).all(|w| w[1] - w[0] == 2 * refresh), "{:?}", &shown[..6]);
+        assert!(
+            shown[1..].windows(2).all(|w| w[1] - w[0] == 2 * refresh),
+            "{:?}",
+            &shown[..6]
+        );
     }
 
     #[test]

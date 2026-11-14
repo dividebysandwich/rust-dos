@@ -971,10 +971,10 @@ fn present_buffer(
     let back_dd = dd_surface_of(cpu, back);
     if p[PP_WINDOWED] == 0 {
         // Full screen: the flip chain goes round, at the next frame but
-        // for D3DPRESENT_INTERVAL_IMMEDIATE. Present waits for its turn
-        // under the frame rate cap either way (DDFLIP_WAIT).
+        // for D3DPRESENT_INTERVAL_IMMEDIATE. Flip waits for the frame
+        // rate cap's turn whatever the flags (`surface::frame_held`).
         let flags = if p[PP_INTERVAL] == PRESENT_INTERVAL_IMMEDIATE {
-            8 | 1
+            8
         } else {
             1
         };

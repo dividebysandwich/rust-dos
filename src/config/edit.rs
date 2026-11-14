@@ -106,8 +106,6 @@ fn insertion_point(lines: &mut Vec<String>, section: Section, key: Option<&str>)
     }
 }
 
-/// `line` (`key=value`) with a new value, keeping the key as written and
-/// the spacing around the '='.
 /// `line`, a `key=value` line, with the key `key`: a setting's line under
 /// an old name (`OLD_NAMES`) gets the current one when it is written.
 fn with_key(line: &str, key: &str) -> String {
@@ -121,6 +119,8 @@ fn with_key(line: &str, key: &str) -> String {
     format!("{}{}{}{}", &line[..indent], key, &line[eq - gap..eq], &line[eq..])
 }
 
+/// `line` (`key=value`) with a new value, keeping the key as written and
+/// the spacing around the '='.
 fn with_value(line: &str, value: &str) -> String {
     let eq = line.find('=').unwrap_or(line.len());
     let rest = line.get(eq + 1..).unwrap_or("");

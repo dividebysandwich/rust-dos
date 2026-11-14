@@ -286,8 +286,15 @@ impl Voodoo {
     }
 
     /// `retired` swaps happened: their buffers shown, and the command
-    /// FIFOs that waited for them go on.
-    pub(crate) fn banshee_swaps_done(&mut self, retired: usize, now: Now, effect: &mut Effect) {
+    /// FIFOs that waited for them go on, as they do once the swap the
+    /// frame rate cap held back went ahead (`released`).
+    pub(crate) fn banshee_swaps_done(
+        &mut self,
+        retired: usize,
+        released: bool,
+        now: Now,
+        effect: &mut Effect,
+    ) {
         for _ in 0..retired {
             let addr = self
                 .banshee
@@ -299,16 +306,19 @@ impl Voodoo {
                 self.banshee_show(addr, mark);
             }
         }
-        if retired > 0 && self.swaps.is_empty() {
+        if (retired > 0 || released) && !self.banshee_fifo_waits() {
             for n in 0..2 {
                 self.run_banshee_fifo(n, now, effect);
             }
         }
     }
 
-    /// Whether the command FIFOs wait for a swap's retrace.
+    /// Whether the command FIFOs wait for a swap: one waiting for its
+    /// retrace, or one the frame rate cap holds back. The packets after
+    /// that one set the next frame's leftOverlayBuf, which the held swap
+    /// still has to take, and may swap again.
     pub(crate) fn banshee_fifo_waits(&self) -> bool {
-        !self.swaps.is_empty()
+        !self.swaps.is_empty() || self.deferred.is_some()
     }
 
     /// TMU 0's texture space from 600000h: texture memory from its
@@ -837,6 +847,49 @@ pub(crate) mod tests {
         // Shown at the timer tick of the turn, within a microsecond of it.
         let last = v.frame_cap.get().last().expect("a frame shown");
         assert!((50_000_000..50_001_000).contains(&last), "{last}");
+    }
+
+    /// A command FIFO stops at a swap the frame rate cap holds back, as
+    /// at one waiting for its retrace: the next frame's leftOverlayBuf,
+    /// further on, is the next swap's, and the FIFO goes on after it.
+    #[test]
+    fn a_command_fifo_waits_behind_a_swap_the_cap_holds() {
+        use crate::timer::PIT_HZ;
+        let (a, b, c) = (0x10_0000u32, 0x20_0000u32, 0x30_0000u32);
+        let mut v = card();
+        v.frame_cap.set_fps(Some(20));
+        let at = |ms: u64| Now {
+            ns: ms * 1_000_000,
+            ticks: ms * PIT_HZ / 1000,
+        };
+        let cmd = |v: &mut Voodoo, reg: u32, data: u32| {
+            v.write(0x8_0000 | reg, data, 0xFFFF_FFFF, at(10));
+        };
+        // A ring of one page at 0xF0_0000.
+        let ring = 0xF0_0000u32;
+        cmd(&mut v, 0x24, 0x100);
+        cmd(&mut v, 0x20, ring >> 12);
+        cmd(&mut v, 0x2C, ring);
+        let packet = |regnum: usize, data: u32| [1 << 16 | (4 * regnum as u32) << 1 | 1, data];
+        let words: Vec<u32> = [
+            packet(LEFT_OVERLAY_BUF, a),
+            packet(SWAPBUFFER_CMD, 0),
+            packet(LEFT_OVERLAY_BUF, b),
+            packet(SWAPBUFFER_CMD, 0),
+            packet(LEFT_OVERLAY_BUF, c),
+        ]
+        .concat();
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        v.fbi.ram.write_bytes(ring as usize, &bytes);
+        // cmdBump: all of them at once.
+        cmd(&mut v, 0x28, words.len() as u32);
+        let overlay = |v: &Voodoo| v.banshee.as_ref().unwrap().overlay_addr;
+        assert_eq!(overlay(&v), a, "the first swap happens at once");
+        let due = v.deferred_swap().expect("the second waits for its turn");
+        assert_eq!(v.reg[LEFT_OVERLAY_BUF] & 0xFF_FFFF, b, "the FIFO waits");
+        v.service(Now { ns: 50_000_000, ticks: due });
+        assert_eq!(overlay(&v), b, "it shows its own frame");
+        assert_eq!(v.reg[LEFT_OVERLAY_BUF] & 0xFF_FFFF, c, "and the FIFO goes on");
     }
 
     #[test]

@@ -1911,12 +1911,14 @@ impl Voodoo {
     /// they go on (a Banshee's next swap among the timer events) put in
     /// `effect`.
     fn service_into(&mut self, now: Now, effect: &mut Effect) {
+        let mut released = false;
         if let Some((data, due)) = self.deferred
             && due <= now.ticks
         {
             self.deferred = None;
             let turn = crate::timer::mul_div_ceil(due, 1_000_000_000, PIT_HZ);
-            self.swap_now(data, now, turn, &mut Effect::default());
+            self.swap_now(data, now, turn, effect);
+            released = true;
         }
         let ticks = now.ticks;
         let mut retired = 0;
@@ -1930,7 +1932,7 @@ impl Voodoo {
             retired += 1;
         }
         if self.banshee.is_some() {
-            self.banshee_swaps_done(retired, now, effect);
+            self.banshee_swaps_done(retired, released, now, effect);
         }
     }
 

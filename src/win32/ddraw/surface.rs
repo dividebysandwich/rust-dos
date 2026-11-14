@@ -1906,38 +1906,36 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     // A flip shown at a frame waits for the frame of the last.
     let primary = s.is_primary();
-    if primary && flags & DDFLIP_NOVSYNC == 0 {
-        if let Some(pending) = display::flip_pending(cpu) {
-            // Flip runs again when that frame begins: the call that ends
-            // the wait stands for the polls until the frame, the last of
-            // which flips.
-            return still_to_show(cpu, pending, flags & DDFLIP_WAIT != 0);
-        }
+    if primary
+        && flags & DDFLIP_NOVSYNC == 0
+        && let Some(pending) = display::flip_pending(cpu)
+    {
+        // Flip runs again when that frame begins: the call that ends the
+        // wait stands for the polls until the frame, the last of which
+        // flips.
+        return still_to_show(cpu, pending, flags & DDFLIP_WAIT != 0);
     }
     // A flip of the primary surface is a frame, which the frame rate cap
     // may hold back (`frame_held`): one waiting for the retrace shows
-    // from the next frame of the display, one without it at once.
-    let frame = if primary {
+    // from the next frame of the display, one without it at once. Blits
+    // to the primary surface right after it, with nothing drawn between,
+    // touch up the frame it showed (a cursor, a counter) and aren't held
+    // as another (`blt::pace`).
+    if primary {
         let (timing, now) = display::timing(cpu);
         let vsync = flags & DDFLIP_NOVSYNC == 0;
         let at = if vsync { timing.next_display(now) } else { now };
-        let refresh = vsync.then(|| timing.frame_ns());
-        match crate::win32::pace::check(cpu, at, refresh) {
-            Ok(at) => Some(at),
+        let at = match crate::win32::pace::check(cpu, at, vsync.then(|| timing.frame_ns())) {
+            Ok(at) => at,
             Err(until) => return frame_held(cpu, until),
-        }
-    } else {
-        None
-    };
-    if primary && flags & DDFLIP_NOVSYNC == 0 {
-        let (timing, now) = display::timing(cpu);
+        };
         let display = &mut state(cpu).display;
-        display.flip_at = timing.next_display(now);
-        display.flip_polls = Default::default();
-    }
-    if let Some(at) = frame {
+        if vsync {
+            display.flip_at = timing.next_display(now);
+            display.flip_polls = Default::default();
+        }
+        display.blit_frame = true;
         crate::win32::pace::shown(cpu, at);
-        super::blt::drew(cpu);
     }
     shown(cpu, id);
     // The pixels go round.

@@ -440,8 +440,9 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
 /// to the primary surface with nothing else drawn between them
 /// (`Display::blit_frame`): the first of them waits for the cap's turn,
 /// and the others go ahead. A blit to another surface, a lock or DC of
-/// one, a Direct3D scene and a flip start the next frame (`drew`). The
-/// 3dfx card's primary surface takes no part: its frames are its swaps.
+/// one and a Direct3D scene start the next frame (`drew`); blits right
+/// after a flip are part of the frame it showed. The 3dfx card's
+/// primary surface takes no part: its frames are its swaps.
 fn pace(cpu: &mut Cpu, dst_id: u32) -> Result<(), Option<u32>> {
     let primary = state(cpu)
         .surface(dst_id)

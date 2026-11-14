@@ -32,7 +32,12 @@ pub fn check(cpu: &Cpu, at: u64, refresh_ns: Option<u64>) -> Result<u64, u64> {
 
 /// `check`, the thread waiting for the cap's turn if it has to: Err with
 /// what the call returns then (`wait`).
-pub fn turn(cpu: &mut Cpu, at: u64, refresh_ns: Option<u64>, result: u32) -> Result<u64, Option<u32>> {
+pub fn turn(
+    cpu: &mut Cpu,
+    at: u64,
+    refresh_ns: Option<u64>,
+    result: u32,
+) -> Result<u64, Option<u32>> {
     check(cpu, at, refresh_ns).map_err(|until| wait(cpu, until, result))
 }
 
