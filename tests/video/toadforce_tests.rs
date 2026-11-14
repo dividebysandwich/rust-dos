@@ -968,6 +968,25 @@ fn where_two_bars_overlap_card_memory_answers_then_the_registers() {
     assert_eq!(cpu.bus.read_32(RING), 0x1234_5678);
     assert_eq!(cpu.bus.read_32(RING + regs::MODE_WIDTH as usize), 0);
     assert_eq!(cpu.bus.read_32(RING + 0x1_0000), 0x0A0B_0C0D);
+
+    // The registers in the last 64 KB of card memory's window: an
+    // access that runs past the window's end has card memory's bytes,
+    // then those past it (nothing here), as the bytes one by one do.
+    let end = MEMORY + cpu.bus.vbe.vram.len();
+    set_config(&mut cpu, 0x10, (end - 0x1_0000) as u32);
+    cpu.bus.write_16(end - 2, 0xBEEF);
+    let bytes = |cpu: &Cpu| [0, 1, 2, 3].map(|i| cpu.bus.read_8(end - 2 + i));
+    assert_eq!(bytes(&cpu), [0xEF, 0xBE, 0xFF, 0xFF]);
+    assert_eq!(cpu.bus.read_32(end - 2), u32::from_le_bytes(bytes(&cpu)));
+    assert_eq!(cpu.bus.read_16(end - 1), 0xFFBE);
+    // A dword from the end of the registers into the ring after them:
+    // the registers' bytes, then the ring's.
+    set_config(&mut cpu, 0x10, INITIAL_REGISTERS);
+    set_config(&mut cpu, 0x18, INITIAL_REGISTERS);
+    let at = REGISTERS + 0xFFFE;
+    let bytes = |cpu: &Cpu| [0, 1, 2, 3].map(|i| cpu.bus.read_8(at + i));
+    assert_eq!(bytes(&cpu), [0, 0, 0x0D, 0x0C]);
+    assert_eq!(cpu.bus.read_32(at), u32::from_le_bytes(bytes(&cpu)));
 }
 
 #[test]

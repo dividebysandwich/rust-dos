@@ -217,7 +217,7 @@ impl Bus {
             self.vbe.lfb_offset(at, 4).is_some()
                 || self.s3_mmio(at).is_some()
                 || self.mach64_mmio(at).is_some()
-                || self.toadforce_at(at).is_some()
+                || self.toadforce_at(at, 1).is_some()
         };
         let len32 = len as u32;
         if self.voodoo_at(last) != Some(first + len32 - 4) || other(dst) || other(last) {
@@ -287,7 +287,7 @@ impl Bus {
                 || self.s3_mmio(at).is_some()
                 || self.mach64_mmio(at).is_some()
                 || self.powervr_at(at).is_some()
-                || self.toadforce_at(at).is_some()
+                || self.toadforce_at(at, 1).is_some()
         };
         if self.voodoo_at(last) != Some(first + (len - 1) as u32) || other(addr) || other(last) {
             return None;

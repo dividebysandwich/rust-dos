@@ -86,10 +86,12 @@ the system's ROM is mirrored. A BAR decodes its whole window or none of
 it: one with any byte over the RAM or the mirror decodes nothing below
 or above them either. Where a guest puts two BARs over each other, an
 address in both is card memory's if BAR 1 is one of them, and the
-registers' otherwise. The legacy VGA ports (3B0h to 3DFh) and the VGA
-memory at A0000h to BFFFFh decode whatever the command register holds,
-as they do on the emulator's other display adapters: a guest can't turn
-the VGA off there.
+registers' otherwise. That holds for each byte of an access: one that
+runs past the end of a window has each byte from where that byte's
+address is. The legacy VGA ports (3B0h to 3DFh) and the VGA memory at
+A0000h to BFFFFh decode whatever the command register holds, as they
+do on the emulator's other display adapters: a guest can't turn the
+VGA off there.
 
 The emulator's BIOS doesn't enumerate PCI, so the card starts as a PCI
 BIOS leaves the boot display adapter: I/O and memory decoding on, and
@@ -499,10 +501,13 @@ event a write causes (a flip made at once, a rejection, a write to
 `IRQ_ENABLE` or `IRQ_STATUS`) is up or down when the write returns. The
 request of a vertical blank, and of the flip made at one, goes up later
 than the bit is set: the emulator delivers the interrupts of its
-devices on the grid of the system timer's clock (1 193 182 Hz), so the
-request is up at the first tick after the instruction the blank began
-at, at most one tick (838 ns) after that instruction. A handler finds
-the bit set whenever it runs, because the register is exact.
+devices on the grid of the system timer's clock (1 193 182 Hz) and
+between instructions. The request is up when the instruction that
+reaches the first tick after the instruction the blank began at ends:
+at most one tick (838 ns) after that instruction, and later by the
+rest of an instruction that is running when the tick comes, such as an
+I/O access, which takes up to a microsecond. A handler finds the bit
+set whenever it runs, because the register is exact.
 
 | Bit | Set when |
 |---|---|
