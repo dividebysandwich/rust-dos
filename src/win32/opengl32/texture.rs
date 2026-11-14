@@ -277,7 +277,7 @@ pub(super) fn pack_pixel(rgba: [u8; 4], format: u32, packed: Packed) -> u32 {
             widths[i + 1..].iter().sum()
         };
         let max = (1u32 << bits) - 1;
-        v |= (ordered[i] as u32 * max + 127) / 255 << shift;
+        v |= ((ordered[i] as u32 * max + 127) / 255) << shift;
     }
     v
 }
