@@ -454,10 +454,13 @@ fn release_surface(cpu: &mut Cpu, t: &Texture) {
     }
 }
 
-/// glDeleteTextures(n, textures): the units they are bound to have the
-/// default texture again. The textures are gone for every context that
-/// had them; a unit of another context that one was bound to draws
-/// untextured until it binds a texture again.
+/// glDeleteTextures(n, textures): the textures are gone for every
+/// context that had them, and each unit they were bound to has the
+/// default texture again, in all the contexts of the group. OpenGL
+/// says so for the context that deletes and leaves the others'
+/// bindings undefined. A name left bound there would be the next
+/// texture glGenTextures gives that name to, and glTexImage2D through
+/// it would make the deleted name a texture again.
 pub fn delete_textures(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [n, at] = args[..] else {
         return Some(0);
@@ -480,7 +483,10 @@ pub fn delete_textures(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if let Some(textures) = lists::textures_mut(s, index) {
             gone.extend(textures.extract_if(.., |t| named(t.name)));
         }
-        if let Some(Some(c)) = s.contexts.get_mut(index) {
+        let group = s.contexts.get(index).and_then(Option::as_ref);
+        let group = group.map(|c| c.lists.group);
+        let sharing = s.contexts.iter_mut().flatten();
+        for c in sharing.filter(|c| Some(c.lists.group) == group) {
             for b in c.bound.iter_mut().filter(|b| named(**b)) {
                 *b = 0;
             }

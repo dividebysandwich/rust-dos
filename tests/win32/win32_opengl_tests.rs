@@ -3359,3 +3359,85 @@ fn a_saved_state_has_the_shared_textures() {
     run_until_step(&mut cpu, data, 2);
     assert!(shot(&cpu, data, PIXELS) == before, "after the load");
 }
+
+/// glDeleteTextures takes a texture's name off the units of every
+/// context that shares it. The second context has the first's texture
+/// bound when the first deletes it and makes another, which gets the
+/// name again: the second's unit is back at the default texture, and
+/// it draws untextured, where a binding left behind would have drawn
+/// with the new texture.
+#[test]
+fn a_deleted_texture_is_unbound_in_the_contexts_that_share_it() {
+    const GL_TEXTURE_BINDING_2D: u32 = 0x8069;
+    const SECOND: u32 = KEPT;
+    const NAME: u32 = KEPT + 8;
+    const AGAIN: u32 = KEPT + 12;
+    const BINDING: u32 = KEPT + 16;
+    const GREEN_TEXELS: u32 = TEXELS + 0x10;
+    let mut d = lists_data();
+    put(&mut d, TEXELS, [[255u8, 0, 0, 255]; 4].as_flattened());
+    put(&mut d, GREEN_TEXELS, [[0u8, 255, 0, 255]; 4].as_flattened());
+    put(&mut d, BINDING, &[0xFF; 4]);
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let current = |a: &mut CodeAssembler, c: &mut Calls, context: u32| {
+            c.api(a, l, WGL_MAKE_CURRENT, &[Arg::Val(HDC), Arg::Val(context)])
+        };
+        // The window textured with what is bound, in the color `rgb`.
+        let draw = |a: &mut CodeAssembler, rgb: [f32; 3], to: u32| -> Result<(), IcedError> {
+            clear_blue(a, l)?;
+            gl(a, l, COLOR3F, &rgb.map(Arg::F))?;
+            gl(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+            for [x, y] in corners(WHOLE) {
+                let st = [x, y].map(|v| Arg::F((v + 1.0) / 2.0));
+                gl(a, l, TEX_COORD2F, &st)?;
+                gl(a, l, VERTEX2F, &[Arg::F(x), Arg::F(y)])?;
+            }
+            gl(a, l, END, &[])?;
+            read_into(a, l, to)
+        };
+        c.api(a, l, WGL_CREATE_CONTEXT, &[Arg::Val(HDC)])?;
+        a.mov(dword_ptr(l.at(SECOND)), eax)?;
+        c.api(a, l, WGL_SHARE_LISTS, &[Arg::Val(HGLRC), Arg::Val(SECOND)])?;
+        gl(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(NAME)])?;
+        texture_2x2(a, l, &mut c, NAME, TEXELS)?;
+        current(a, &mut c, SECOND)?;
+        gl(a, l, ENABLE, &[Arg::I(GL_TEXTURE_2D)])?;
+        gl(a, l, BIND_TEXTURE, &[Arg::I(GL_TEXTURE_2D), Arg::Val(NAME)])?;
+        draw(a, [1.0, 1.0, 1.0], SHOTS[0])?;
+        // The first deletes it and makes a green one.
+        current(a, &mut c, HGLRC)?;
+        gl(a, l, DELETE_TEXTURES, &[Arg::I(1), Arg::At(NAME)])?;
+        gl(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(AGAIN)])?;
+        texture_2x2(a, l, &mut c, AGAIN, GREEN_TEXELS)?;
+        // The second, which bound nothing since.
+        current(a, &mut c, SECOND)?;
+        let binding = [Arg::I(GL_TEXTURE_BINDING_2D), Arg::At(BINDING)];
+        gl(a, l, GET_INTEGERV, &binding)?;
+        draw(a, [1.0, 1.0, 0.0], SHOTS[1])?;
+        // The first still has the green one bound.
+        current(a, &mut c, HGLRC)?;
+        gl(a, l, ENABLE, &[Arg::I(GL_TEXTURE_2D)])?;
+        draw(a, [1.0, 1.0, 1.0], SHOTS[2])?;
+        finish(a, l)
+    });
+    let mut cpu = machine("texture_share_delete", true, exe);
+    run_until_done(&mut cpu, data);
+    let [name, again, binding] = [NAME, AGAIN, BINDING].map(|at| peek(&cpu, data + at));
+    assert!(
+        name != 0 && again == name,
+        "the name given again: {name} {again}"
+    );
+    assert_eq!(binding, 0, "the second's binding");
+    let all = |at: u32, rgb: u32| shot(&cpu, data, at).iter().all(|&p| p == rgb);
+    assert!(
+        all(SHOTS[0], 0x00_00FF),
+        "the first's texture in the second"
+    );
+    assert!(
+        all(SHOTS[1], 0x00_FFFF),
+        "the unit the deleted texture was on"
+    );
+    assert!(all(SHOTS[2], 0x00_FF00), "the new texture in the first");
+}
