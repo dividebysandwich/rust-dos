@@ -21,14 +21,17 @@ impl Bus {
             return None;
         }
         let mut walk = walk_tables(self, paging, lin, write);
-        // A page of a view of a file the built-in Windows hasn't read yet
-        // is read now (error code bit 0 clear: no page there). One that
-        // needs a page the pool doesn't have faults, and the system's
-        // handler makes room.
+        // A page of the program's memory in the page file gets its
+        // physical page now, and a page of a view of a file the built-in
+        // Windows hasn't read yet is read (error code bit 0 clear: no page
+        // there). One that needs a page the pool doesn't have faults, and
+        // the system's handler makes room.
         if let Err(error) = walk
             && error & 1 == 0
-            && crate::win32::mapping::page_in(self, paging.cr3, lin)
-                == crate::win32::mapping::PageIn::Done
+            && (crate::win32::memory::page_in(self, paging.cr3, lin)
+                == crate::win32::memory::PageIn::Done
+                || crate::win32::mapping::page_in(self, paging.cr3, lin)
+                    == crate::win32::mapping::PageIn::Done)
         {
             walk = walk_tables(self, paging, lin, write);
         }

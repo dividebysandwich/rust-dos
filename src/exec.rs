@@ -1565,6 +1565,10 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     // dropped when the call is done.
     cpu.bus.disk_io.clear();
     crate::win32::service(cpu, id);
+    // A page the service sent to the page file may be in the TLB.
+    if std::mem::take(&mut cpu.bus.win32.tlb_stale) {
+        cpu.tlb.flush();
+    }
     if observed {
         crate::idle::after_service(cpu);
     }

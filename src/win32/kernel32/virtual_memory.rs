@@ -4,8 +4,10 @@
 //! A region is reserved at a multiple of 64 KB, a whole number of pages
 //! long, in the private arena (4 MB to 2 GB). Its pages are committed
 //! one by one, each with a protection (a PAGE_ value) that its page table
-//! entry keeps: PAGE_NOACCESS pages have their physical page in an entry
-//! that isn't present, so touching them faults. Where Windows 95's answers
+//! entry keeps. A page is committed in the page file and gets its
+//! physical page when it is first touched (`memory::page_in`); one with
+//! PAGE_NOACCESS has it in an entry that isn't present, or stays in the
+//! page file, so touching it faults. Where Windows 95's answers
 //! differ from NT's these are Windows 95's: VirtualQuery says
 //! PAGE_NOACCESS for reserved pages, a size of 0 is ERROR_NOT_ENOUGH_MEMORY,
 //! MEM_RESET and PAGE_GUARD aren't there (ERROR_INVALID_PARAMETER), and so
@@ -16,7 +18,7 @@ use crate::bus::Bus;
 use crate::cpu::{Cpu, CpuModel};
 use crate::win32::memory::{
     GRANULARITY, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE, Memory, PAGE, PAGE_NOACCESS, PAGE_READWRITE,
-    PRESENT, PRIVATE, SHARED, SYSTEM, USER, WRITABLE, protection, protection_bits,
+    PRESENT, PRIVATE, SHARED, SYSTEM, USER, WRITABLE, is_paged, protection, protection_bits,
 };
 use crate::win32::object::{self, Kind};
 use crate::win32::{Process, mapping, running};
@@ -64,22 +66,29 @@ fn flush(cpu: &mut Cpu, first: u32, end: u32) {
     }
 }
 
-/// Commit the pages from `first` to `end` with the protection `protect`;
-/// those committed already get it. With no memory for them, the pages it
-/// committed go again and it fails.
+/// Commit the pages from `first` to `end` with the protection `protect`,
+/// in the page file until they are touched (`Memory::commit_paged`);
+/// those committed already get it. With no room for the new ones in the
+/// pool and the page file together, nothing changes and it fails.
 fn commit(memory: &mut Memory, bus: &mut Bus, first: u32, end: u32, protect: u32) -> bool {
-    let mut new = Vec::new();
-    for page in (first..end).step_by(PAGE as usize) {
-        if memory.set_protection(bus, page, protect) {
-            continue;
-        }
-        if memory.commit_page(bus, page, protect).is_none() {
-            for page in new {
+    let new: Vec<u32> = (first..end)
+        .step_by(PAGE as usize)
+        .filter(|&page| memory.entry(bus, page).unwrap_or(0) == 0)
+        .collect();
+    let room = bus.win32.pool.as_ref().map_or(0, |p| p.commit_room());
+    if new.len() as u32 > room {
+        return false;
+    }
+    for (i, &page) in new.iter().enumerate() {
+        if memory.commit_paged(bus, page, PAGE, protect).is_none() {
+            for &page in &new[..i] {
                 memory.unmap(bus, page);
             }
             return false;
         }
-        new.push(page);
+    }
+    for page in (first..end).step_by(PAGE as usize) {
+        memory.set_protection(bus, page, protect);
     }
     true
 }
@@ -410,8 +419,8 @@ pub(super) fn virtual_lock(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 /// Whether the program may read (or with `write` write) the page at
 /// `page`, by its page table entry: no page fault is recorded. A page of
-/// a view of a file not read yet is there to the program as the view
-/// allows, since touching it reads it.
+/// a view of a file not read yet, or one in the page file, is there to
+/// the program as its protection allows, since touching it brings it in.
 fn page_allows(cpu: &Cpu, page: u32, write: bool) -> bool {
     let Some(process) = running(cpu) else {
         return false;
@@ -419,6 +428,7 @@ fn page_allows(cpu: &Cpu, page: u32, write: bool) -> bool {
     let entry = process.memory.entry(&cpu.bus, page).unwrap_or(0);
     let entry = match mapping::unread_protection(&cpu.bus, process, page) {
         Some(protect) => protection_bits(protect),
+        None if is_paged(entry) => protection(entry).map_or(0, protection_bits),
         None => entry,
     };
     let needed = PRESENT | USER | if write { WRITABLE } else { 0 };

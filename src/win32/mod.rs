@@ -370,6 +370,10 @@ pub struct Win32 {
     pub(crate) running: usize,
     /// Where the processes' pages come from.
     pool: Option<memory::Pool>,
+    /// Whether a page went out to the page file (`memory::page_out`)
+    /// since the processor's TLB was last flushed: whoever has the
+    /// processor flushes it before the program runs on.
+    pub(crate) tlb_stale: bool,
     /// The kernel objects, which the processes' handles are of.
     pub(crate) objects: object::Objects,
     /// The DOS process the programs run in, and the stack its DOS stub
@@ -1267,8 +1271,7 @@ pub(crate) fn fatal_with(cpu: &mut Cpu, what: &str, ctx: Option<&Context>, code:
 /// there. For what a message or a log line says, which mustn't fault a
 /// function that has already ended the process.
 fn peek_32(cpu: &Cpu, lin: u32) -> Option<u32> {
-    let phys = running(cpu)?.memory.translate(&cpu.bus, lin)?;
-    Some(cpu.bus.read_32(phys as usize))
+    running(cpu)?.memory.read_32(&cpu.bus, lin)
 }
 
 /// Whether the running function of a built-in DLL was called from guest
@@ -1562,4 +1565,5 @@ crate::state_fields!(Win32 {
     trace3d,
     wait_due,
     system_clock,
+    tlb_stale,
 });

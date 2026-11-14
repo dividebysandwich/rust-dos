@@ -291,7 +291,10 @@ pub fn fault_in_process(cpu: &mut Cpu, index: usize, lin: u32) -> bool {
     for _ in 0..4 {
         match read_in(&mut cpu.bus, index, lin, keep) {
             PageIn::Done => {
-                if index == cpu.bus.win32.running {
+                // Reading it may have sent a page to the page file.
+                if std::mem::take(&mut cpu.bus.win32.tlb_stale) {
+                    cpu.tlb.flush();
+                } else if index == cpu.bus.win32.running {
                     cpu.tlb.flush_page(lin);
                 }
                 return true;

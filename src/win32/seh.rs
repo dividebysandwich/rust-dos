@@ -427,14 +427,32 @@ fn simulated(cpu: &Cpu, error: Option<u32>, eip: u32) -> Option<u32> {
     }
 }
 
+/// A page fault at `lin` in the running process: if the page is in the
+/// page file, give it its physical page. Whether it was one and has it
+/// now.
+pub(crate) fn page_in(cpu: &mut Cpu, lin: u32) -> bool {
+    let done = super::memory::page_in(&mut cpu.bus, cpu.cr3, lin) == super::memory::PageIn::Done;
+    if std::mem::take(&mut cpu.bus.win32.tlb_stale) {
+        cpu.tlb.flush();
+    } else if done {
+        cpu.tlb.flush_page(lin);
+    }
+    done
+}
+
 /// A fault in the program, at `ctx`: an exception for its handlers.
 pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
     if vector == 14 && process(cpu).current.is_some() && grow_stack(cpu, cpu.cr2) {
         super::system::enter_user(cpu, &ctx);
         return;
     }
-    // A page that isn't there (error code bit 0 clear) of a view of a
-    // file, read from the file now.
+    // A page that isn't there (error code bit 0 clear) of the program's
+    // memory in the page file, given its physical page now.
+    if vector == 14 && error.is_some_and(|e| e & 1 == 0) && page_in(cpu, cpu.cr2) {
+        super::system::enter_user(cpu, &ctx);
+        return;
+    }
+    // One of a view of a file, read from the file now.
     if vector == 14 && error.is_some_and(|e| e & 1 == 0) && super::mapping::fault_in(cpu, cpu.cr2) {
         super::system::enter_user(cpu, &ctx);
         return;
