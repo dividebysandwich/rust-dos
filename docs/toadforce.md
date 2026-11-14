@@ -95,7 +95,7 @@ level 1 contains, from what each asks of a card on the built-in Windows.
 | Max Payne | 2001 | Direct3D 8 | Hardware vertex processing, A8R8G8B8 and DXT1, DXT3, DXT5 textures, D24S8, up to 7 point and spot lights |
 | Zanzarah | 2002 | Direct3D 7 | DXTn in the texture format list (#583, #606); the T&L HAL device |
 | Grom: Terror in Tibet | 2002 | Direct3D | A texture format with 8 bits a channel (#645) |
-| Nocturne | 1999 | Direct3D 6 interfaces, from its DirectX 7 renderer | `DDCAPS_3D` in the driver's caps, A8R8G8B8 textures and a 32-bit target with a Z32 z-buffer |
+| Nocturne | 1999 | Direct3D 6 interfaces, from its DirectX 7 renderer | `DDCAPS_3D` in the driver's caps, A8R8G8B8 textures and a 32-bit target with a 32-bit z-buffer (D24X8 on the card) |
 
 Nocturne needs nothing of the card that the eight didn't. It is on the
 list for what it asks of the host renderer: it locks its back buffer and
@@ -321,11 +321,12 @@ pixels, and a write to a texture takes effect at the next draw. No
 command is needed to tell the card that memory changed. `Lock` in
 DirectDraw returns a pointer into BAR 1, as it does on the Voodoo3.
 
-The emulator implements this the way it does for the Voodoo3
-(`src/voodoo/tracker.rs`), generalised: each range of card memory is
-current either in memory or on the host's GPU, a guest read of a range
-that is newer on the GPU reads it back first, and each 4 KB page has a
-write counter that the texture and vertex buffer caches compare.
+The emulator implements this as it does for the Voodoo3
+(`src/voodoo/tracker.rs`), generalised: each surface is current either
+in card memory or on the host's GPU, a guest read of one that is newer
+on the GPU is answered from the GPU's pixels, and each 4 KB page has a
+write counter (`gpu::Pages`) that the host's copies of textures and
+surfaces compare (see "Between the card and the host renderer").
 
 The memory size is `toadforce_memory`, 64 MB by default. The whole of it
 is the video memory the driver reports.
@@ -354,6 +355,9 @@ register writes). A test feeds the same command stream through the ring
 and through `submit` and compares the results.
 
 ### Commands of level 1
+
+Level 1 has level 0's commands (`NOP`, `FILL`, `BLT` and `FLIP`, see
+"Level 0: display and 2D") and the ones below.
 
 State:
 
@@ -427,6 +431,16 @@ There are no state blocks, display lists or matrix stacks in the card:
 the driver or the API layer keeps those and sends the resulting state.
 
 ## Feature levels
+
+### Level 0: display and 2D
+
+Level 0 is what the card has after reset, with `LEVEL` at 0: the mode
+registers and four commands, `NOP`, `FILL`, `BLT` and `FLIP`, on
+surfaces of 8, 16 and 32 bits a pixel up to 4096 a side. Its capability
+table has five entries: that size, the formats `FILL`, `BLT` and a mode
+take, and the range of `MODE_REFRESH`. The built-in Windows' GDI and
+DirectDraw run on it. It is released and frozen: `caps.rs` and
+`command.rs` hold copies of its table and its commands.
 
 ### Level 1: fixed function
 
@@ -531,8 +545,8 @@ GeForce3 families: `ARB_multitexture`, `ARB_texture_compression`,
 `NV_vertex_array_range`, `NV_texture_env_combine4`) are left out: a game
 that finds them missing uses its ARB path, which every other vendor's
 card took. The card has the state behind each of them. The built-in
-OPENGL32 offers OpenGL 1.1 on it with fewer extensions (issue 1077, see
-"The built-in Windows").
+OPENGL32 offers OpenGL 1.1 on it with fewer extensions (#1077, see "The
+built-in Windows").
 
 ### Level 2: Direct3D 8.1 shaders (outline)
 
@@ -555,10 +569,9 @@ and where the OpenGL renderer may differ.
 
 Transform, lighting, fog factors, texture coordinate generation and
 clipping are computed in IEEE single precision, in the order Direct3D's
-pipeline in the built-in Windows uses
-(`src/win32/ddraw/d3d/pipeline.rs`), which Wine's conformance tests
-check. Screen positions are rounded to 1/256 of a pixel before
-rasterising.
+pipeline in the built-in Windows uses (`src/win32/ddraw/d3d/pipeline.rs`),
+which Wine's conformance tests check. Screen positions are rounded to
+1/256 of a pixel before rasterising.
 
 Anything the guest can read back from vertex processing
 (`ProcessVertices`, clip status, extents) is always computed by this
@@ -638,7 +651,7 @@ smoke and particles.
 
 | Source | Bound |
 |---|---|
-| Vertex arithmetic in a vertex shader (operation order, fused multiply-add) | positions within 1/256 pixel, so a pixel on a triangle's edge may fall on the other side |
+| Vertex arithmetic on the host: the vertex shader's conversion of the card's screen positions, rounded to 1/256 of a pixel, to the host's coordinates, and its operation order and fused multiply-add once it transforms and lights (#1066) | positions within 1/256 pixel, so a pixel on a triangle's edge may fall on the other side |
 | Interpolation of colours and coordinates | 1 in 255 on a stage input. An operation that multiplies its result passes the step on multiplied: 8 after `DOTPRODUCT3` and `MODULATE2X` (Giants' ground, measured) |
 | A sample of a 2D texture | 1 in 255, and 2 with a projected texture. The shader takes the card's steps in the card's whole numbers (`shader::SAMPLING`): the level of detail, the levels and the filter, the coordinates in 1/256 of a texel, the weights of 8 bits. What is left is a coordinate or a level of detail that the host's interpolation puts on the other side of one of those steps: a weight one of 256 off, or the next level where the level of detail is within 1/4096 of the change. Coordinates the card has exactly (a texel to a pixel from whole coordinates) give the same texels |
 | A sample of a cube map | 1 in 255 on a smooth texture, 3 where neighbouring texels differ by most of a channel's range. The host's own filter samples it: it rounds a weight to its 8 bits where the card cuts it off, works out the face's coordinates in its own arithmetic, and picks the mip level |
@@ -670,6 +683,12 @@ A draw's state reduces to two keys, as in wined3d:
 
 Matrices, lights, material, factors and fog parameters are values
 supplied with the draw and are in neither key.
+
+The fragment key is built (`raster::pipeline`, the steps). The vertex
+key is the design for a vertex shader and isn't built: the card's
+vertex work runs on the processor for both renderers, as code of the
+software renderer (`raster::geometry`, `raster::light`), and moves to
+the GPU with #1066.
 
 A key is lowered once into a short list of typed operations (sample
 stage 2, modulate, add signed, clamp, fog blend). Two back ends consume
@@ -710,24 +729,28 @@ one path, the HAL.
 ### The OpenGL renderer
 
 On the existing context (`glow`, OpenGL 3.2 core, `src/display/gl.rs`),
-shared with the window and the Voodoo renderer, and replayed on the main
-thread as the Voodoo's mirror is: the card records decoded commands, and
-the display runs them once a host frame and whenever something needs the
-pixels.
+shared with the window and the Voodoo renderer. The card and the display
+run on one thread, and the card hands the renderer its queued draws
+directly, at the points where the software renderer would draw them
+(see "Between the card and the host renderer").
 
 - **Vertex work** is the card's, on the processor: the host gets screen
   vertices after the card's transform, lighting, clipping and culling.
   The card is shaped for a generated vertex shader to do it, with vertex
   buffers in card memory as host buffers cached by offset and page write
   counters (#1066).
-- **Textures** are host textures cached by handle, with the write
-  counters of the pages their levels cover. A changed page re-decodes
-  and re-uploads the levels on it.
+- **Textures** are host textures decoded once and kept by their
+  description (format, size, levels and the offset of each image), with
+  the write counters of the pages their images cover. A write to any of
+  those pages decodes and uploads every image again.
 - **Render targets** are host framebuffers. A target drawn on the GPU is
-  marked newer there; a guest read of its memory, a `BLT` from it on the
-  processor, a save state, or a switch to the software renderer reads
-  the rows back first. A `Lock` for writing the whole surface discards
-  the GPU's copy instead of reading it back.
+  marked newer there. The card's own work on it on the processor (a
+  declined draw, a `BLT` or `FILL` the host doesn't take) and a switch to
+  the software renderer read the rows back into card memory first. A
+  save state and the program's reads of it read nothing back into card
+  memory, and the program's writes only where they write parts of
+  pixels or more than 1024 rectangles (see "Between the card and the
+  host renderer").
 - **16-bit targets** are host framebuffers in the 565 format
   (`GL_RGB565`, renderable since OpenGL 4.1 and with
   `ARB_ES2_compatibility`), so the host's blend result is rounded to
@@ -1104,8 +1127,12 @@ holds no commands still to run, since the card consumes them at each
 contents are saved with the rest.
 
 With `--deterministic` no GPU link is attached, as for the Voodoo, and
-the software renderer draws. A change to the OpenGL renderer can't be
-compared in deterministic runs, as AGENTS.md says of the Voodoo's.
+the software renderer draws, so a change to the OpenGL renderer isn't
+run there, as AGENTS.md says of the Voodoo's. To compare the two
+renderers' frames at equal emulated times,
+`RUST_DOS_TOADFORCE_GL_DETERMINISTIC=1` keeps OpenGL drawing in a
+deterministic run (see "The window's side"); such a run's frames depend
+on the host's GPU.
 
 ## Guest software
 
@@ -1328,10 +1355,14 @@ level the card offers comes with level 2 (#1075).
   memory and state after.
 - **Frozen levels.** A golden copy of each released level's capability
   table and accepted command list (`caps.rs`, `command.rs`).
-- **Save states.** Save in the middle of a frame, load, and compare the
-  finished frame with an uninterrupted run, in deterministic mode.
-- **Determinism.** The determinism tests
-  (`src/debug/determinism_tests.rs`) with a ToadForce scene.
+- **Save states.** A card saved after a draw and loaded draws the next
+  one into the same memory as the card that went on
+  (`raster::tests`), and a machine's loaded state has the card as it
+  was (`tests/video/toadforce_tests.rs`).
+- **Determinism.** The software renderer draws the same pixels with any
+  number of workers (`raster::tests`). The determinism tests
+  (`src/debug/determinism_tests.rs`) have no machine with a ToadForce
+  (#1088).
 
 ## Alternatives considered
 
@@ -1360,12 +1391,13 @@ save state that is just memory, `Lock` pointers into the card, and a
 software renderer that draws where the guest looks. The write counters
 and the ownership tracking recover most of its speed.
 
-**Transform and lighting always on the processor.** The pixels would
-then depend less on the host, since both renderers would get the same
-screen vertices. It gives up the vertex shader path that a current GPU
-runs for nothing, and puts the cost on the emulation thread for every
-frame of the games this card is for. Guest-readable results stay on the
-processor either way.
+**Transform and lighting always on the processor.** This is what the
+emulator does now, and both renderers get the same screen vertices, so
+the pixels depend less on the host. The card isn't defined around it:
+a definition that needed the processor would give up the vertex shader
+path that a current GPU runs for nothing, and keep the cost on the
+emulation thread for every frame of the games this card is for (#1066).
+Guest-readable results stay on the processor either way.
 
 **Handing DXT blocks to the host GPU.** Less host memory and no decode.
 Vendors' decoders round differently, so the same texture would give
