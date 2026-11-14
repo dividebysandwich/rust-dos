@@ -413,6 +413,11 @@ fn copy_in(volume: &FatVolume, at: crate::fat::EntryRef, path: &Path) -> Result<
     }
 }
 
+/// How the file beside a host file that `copy_out` writes first ends:
+/// ".NAME.rust-dos-partial". Host drives don't show it
+/// (`disk::host_private`).
+pub(crate) const PARTIAL: &str = ".rust-dos-partial";
+
 /// Write the disk's file `entry` to the host file `target`, through a
 /// file beside it that takes its place when it's whole, dated as on the
 /// disk. Where the frontend keeps the files (`hostfs`), which may not
@@ -422,10 +427,17 @@ fn copy_out(volume: &FatVolume, entry: &Entry, target: &Path) -> Result<(), Stri
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let direct = fs::is_foreign(target);
-    let partial = if direct { target.to_path_buf() } else { target.with_file_name(format!(
-        ".{}.rust-dos-partial",
-        target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-    )) };
+    let partial = if direct {
+        target.to_path_buf()
+    } else {
+        target.with_file_name(format!(
+            ".{}{PARTIAL}",
+            target
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        ))
+    };
     let result = (|| {
         let mut out = fs::File::create(&partial).map_err(|e| e.to_string())?;
         let mut buf = vec![0u8; COPY_CHUNK];

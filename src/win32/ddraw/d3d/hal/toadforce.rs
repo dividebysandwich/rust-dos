@@ -74,6 +74,9 @@ use crate::toadforce::level1::{
 use crate::toadforce::{caps, regs};
 use crate::win32::screen;
 
+mod direct;
+pub use direct::Source;
+
 /// The textures a draw has at once: the card's four
 /// (`caps::TEXTURES_AT_ONCE`), which are the stages whose texture
 /// coordinates the pipeline gives a screen vertex.
@@ -149,13 +152,20 @@ pub struct Hal {
     /// The textures in place the card was last found to take
     /// (`in_place`), newest last: most draws bind one of them again.
     pub taken: Vec<Texture>,
+    /// The draws of screen vertices that went from the program's
+    /// memory to the card (`direct::draw`) and their vertices, and the
+    /// batches the pipeline handed the card (`Raster::finish`) and the
+    /// vertices of their commands.
+    pub screen_draws: [u64; 4],
+    /// The buffers of `direct::draw`.
+    pub scratch: direct::Scratch,
 }
 
 crate::state_fields!(Hal {
     pid,
     textures,
     clock
-} skip { told, binds, logged, taken });
+} skip { told, binds, logged, taken, screen_draws, scratch });
 
 /// What the card was told, kept so that its two parts can't come apart.
 mod told {
@@ -1645,6 +1655,8 @@ pub struct Raster<'a> {
     /// where its header is.
     primitive: u32,
     header: usize,
+    /// The vertices of the commands closed so far.
+    vertices: u64,
 }
 
 impl Raster<'_> {
@@ -1658,6 +1670,7 @@ impl Raster<'_> {
             words: Vec::new(),
             primitive: 0,
             header: 0,
+            vertices: 0,
         }
     }
 
@@ -1670,6 +1683,7 @@ impl Raster<'_> {
         let count = (len - 4) / self.vertex_words;
         self.words[self.header] = crate::toadforce::command::header(level1::DRAW, len);
         self.words[self.header + 3] = count as u32;
+        self.vertices += count as u64;
         self.primitive = 0;
     }
 
@@ -1709,6 +1723,9 @@ impl Raster<'_> {
         if self.words.is_empty() {
             return;
         }
+        let counts = &mut hal(self.cpu).screen_draws;
+        counts[2] += 1;
+        counts[3] += self.vertices;
         submit(self.cpu, &self.words);
         drew(self.cpu, &self.card);
     }
@@ -2076,6 +2093,27 @@ pub fn draw_geometry(
         drew(cpu, &card);
     }
     true
+}
+
+/// Draw `kind` primitives of the device `d`'s transformed vertices of
+/// `layout` at `from` in the program's memory, from there to the
+/// card's queue (`direct`): the triangles drawn, or None for a draw
+/// the pipeline keeps, with nothing drawn.
+pub fn draw_screen(
+    cpu: &mut Cpu,
+    d: &Device,
+    setup: &Setup,
+    layout: &Layout,
+    kind: u32,
+    from: &Source,
+) -> Option<u32> {
+    let drawn = direct::draw(cpu, d, setup, layout, kind, from);
+    if drawn.is_some() {
+        let counts = &mut hal(cpu).screen_draws;
+        counts[0] += 1;
+        counts[1] += from.count as u64;
+    }
+    drawn
 }
 
 impl Rasterizer for Raster<'_> {

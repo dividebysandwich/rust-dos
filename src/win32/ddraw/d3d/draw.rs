@@ -16,6 +16,7 @@ use super::device::{
     RS_SPECULARMATERIALSOURCE, TSS_TEXCOORDINDEX, TSS_TEXTURETRANSFORMFLAGS, device_of, get,
     version,
 };
+use super::hal::Source;
 use super::pipeline::{
     self, Blend, Fog, Layout, Light, Lighting, Material, Prim, Processed, Setup, Vertex, ViewMap,
 };
@@ -26,7 +27,6 @@ use super::{
 };
 use crate::cpu::Cpu;
 use crate::win32::trace3d::Pass;
-use std::sync::Arc;
 
 // DrawPrimitive's flags.
 pub const D3DDP_DONOTCLIP: u32 = 0x4;
@@ -57,6 +57,24 @@ fn check_kind(kind: u32) -> Result<(), u32> {
     }
 }
 
+/// Whether a draw may read `count` vertices of `layout` at `at`: not
+/// more than Direct3D takes, and all there.
+fn vertices_there(cpu: &mut Cpu, at: u32, layout: &Layout, count: u32) -> Result<(), u32> {
+    let len = (layout.size as u64) * count as u64;
+    if len > 0x100_0000 || count > 0 && !probe(cpu, at, len as u32, false) {
+        return Err(DDERR_INVALIDPARAMS);
+    }
+    Ok(())
+}
+
+/// Whether a draw may read `count` indices (WORDs) at `at`.
+fn indices_there(cpu: &mut Cpu, at: u32, count: u32) -> Result<(), u32> {
+    if count > 0x10_0000 || count > 0 && !probe(cpu, at, count * 2, false) {
+        return Err(DDERR_INVALIDPARAMS);
+    }
+    Ok(())
+}
+
 /// `count` vertices of `layout` at `at`.
 pub fn read_vertices(
     cpu: &mut Cpu,
@@ -64,29 +82,34 @@ pub fn read_vertices(
     layout: &Layout,
     count: u32,
 ) -> Result<Vec<Vertex>, u32> {
-    let len = (layout.size as u64) * count as u64;
-    if len > 0x100_0000 || count > 0 && !probe(cpu, at, len as u32, false) {
-        return Err(DDERR_INVALIDPARAMS);
-    }
-    let bytes = read_bytes(cpu, at, len as u32);
-    Ok(bytes
+    vertices_there(cpu, at, layout, count)?;
+    Ok(vertices_at(cpu, at, layout, count))
+}
+
+/// `read_vertices` of vertices `vertices_there` found there.
+fn vertices_at(cpu: &mut Cpu, at: u32, layout: &Layout, count: u32) -> Vec<Vertex> {
+    let bytes = read_bytes(cpu, at, layout.size * count);
+    bytes
         .chunks_exact(layout.size.max(1) as usize)
         .map(|v| layout.read(v))
-        .collect())
+        .collect()
 }
 
 /// `count` indices (WORDs) at `at`.
 fn read_indices(cpu: &mut Cpu, at: u32, count: u32) -> Result<Vec<u32>, u32> {
-    if count > 0x10_0000 || count > 0 && !probe(cpu, at, count * 2, false) {
-        return Err(DDERR_INVALIDPARAMS);
-    }
+    indices_there(cpu, at, count)?;
+    Ok(indices_at(cpu, at, count))
+}
+
+/// `read_indices` of indices `indices_there` found there.
+fn indices_at(cpu: &mut Cpu, at: u32, count: u32) -> Vec<u32> {
     let bytes = read_bytes(cpu, at, count * 2);
-    Ok(bytes
+    bytes
         .as_chunks::<2>()
         .0
         .iter()
         .map(|b| u16::from_le_bytes([b[0], b[1]]) as u32)
-        .collect())
+        .collect()
 }
 
 /// A D3DLIGHT7's words as the pipeline has a light.
@@ -391,6 +414,67 @@ pub fn draw_blended(
     Ok(())
 }
 
+/// Draw `kind` primitives of the vertices of `layout` at `from` in the
+/// program's memory with the device `id`, as `draw` draws them once
+/// they are read.
+///
+/// Transformed vertices go from there to a card that takes them so
+/// (`hal::draw_screen`), which most draws of them do: the pipeline has
+/// nothing to work out for a triangle that needs no cutting. The
+/// others, and every draw of vertices to transform, are read and drawn
+/// by `draw`'s path.
+fn draw_from(
+    cpu: &mut Cpu,
+    id: u32,
+    version: u32,
+    layout: &Layout,
+    kind: u32,
+    from: &Source,
+    flags: u32,
+) -> Result<(), u32> {
+    vertices_there(cpu, from.at, layout, from.count)?;
+    if let Some((at, count)) = from.indices {
+        indices_there(cpu, at, count)?;
+    }
+    // Probed above, so read without probing again.
+    let read = |cpu: &mut Cpu| {
+        let vertices = vertices_at(cpu, from.at, layout, from.count);
+        let order = from.indices.map(|(at, count)| indices_at(cpu, at, count));
+        (vertices, order)
+    };
+    if !layout.rhw {
+        let (vertices, order) = read(cpu);
+        let order = order.as_deref();
+        return draw(cpu, id, version, layout, kind, &vertices, order, flags);
+    }
+    check_kind(kind)?;
+    let Some(setup) = setup(cpu, Pass::Draw, id, version, layout, flags) else {
+        return Err(DDERR_INVALIDPARAMS);
+    };
+    let drawn = {
+        let _profile = crate::profile::zone(crate::profile::Zone::D3dDraw);
+        super::device::lend(cpu, id, |cpu, d| {
+            super::hal::draw_screen(cpu, d, &setup, layout, kind, from)
+        })
+        .flatten()
+    };
+    if let Some(triangles) = drawn {
+        let Some(d) = get(cpu, id) else {
+            return Ok(());
+        };
+        d.stats[0] = d.stats[0].wrapping_add(triangles);
+        d.stats[4] = d.stats[4].wrapping_add(from.count);
+        // The target's pixels changed, for a texture made of it.
+        let target = d.target;
+        super::super::surface::changed(cpu, target);
+        return Ok(());
+    }
+    let (vertices, order) = read(cpu);
+    let prims = primitives(kind, order.as_deref(), vertices.len())?;
+    draw_set_up(cpu, id, &setup, layout, &vertices, None, &prims, flags);
+    Ok(())
+}
+
 /// Draw on a card that transforms and lights vertices itself, which
 /// gets them as the program gave them. False when the device's card
 /// doesn't, or can't for this draw (`hal::draw_geometry`).
@@ -594,17 +678,13 @@ pub fn draw_primitive(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(D3DERR_INBEGIN);
     }
     let layout = hr!(vertex_format(vtable, vt));
-    let vertices = hr!(read_vertices(cpu, at, &layout, count));
-    hr!(draw(
-        cpu,
-        id,
-        version(vtable),
-        &layout,
-        kind,
-        &vertices,
-        None,
-        flags
-    ));
+    let from = Source {
+        at,
+        count,
+        indices: None,
+    };
+    let version = version(vtable);
+    hr!(draw_from(cpu, id, version, &layout, kind, &from, flags));
     Some(D3D_OK)
 }
 
@@ -619,18 +699,13 @@ pub fn draw_indexed_primitive(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(D3DERR_INBEGIN);
     }
     let layout = hr!(vertex_format(vtable, vt));
-    let vertices = hr!(read_vertices(cpu, at, &layout, count));
-    let order = hr!(read_indices(cpu, indices, icount));
-    hr!(draw(
-        cpu,
-        id,
-        version(vtable),
-        &layout,
-        kind,
-        &vertices,
-        Some(&order),
-        flags
-    ));
+    let from = Source {
+        at,
+        count,
+        indices: Some((indices, icount)),
+    };
+    let version = version(vtable);
+    hr!(draw_from(cpu, id, version, &layout, kind, &from, flags));
     Some(D3D_OK)
 }
 
@@ -738,9 +813,20 @@ pub fn draw_indexed_primitive_strided(cpu: &mut Cpu, args: &[u32]) -> Option<u32
     Some(D3D_OK)
 }
 
-/// The vertices `start` to `start + count` of the vertex buffer `vb`,
-/// its layout, and what ProcessVertices kept of them.
-fn buffer_vertices(cpu: &mut Cpu, vb: u32, start: u32, count: u32) -> Result<BufferVertices, u32> {
+/// Draw `kind` primitives of the vertices `start` to `start + count`
+/// of the vertex buffer `vb`, in the order of the `indices` (where
+/// they are and how many) or as they are.
+#[allow(clippy::too_many_arguments)]
+fn draw_buffer(
+    cpu: &mut Cpu,
+    id: u32,
+    version: u32,
+    vb: u32,
+    (start, count): (u32, u32),
+    kind: u32,
+    indices: Option<(u32, u32)>,
+    flags: u32,
+) -> Result<(), u32> {
     let (_, bid) = super::vertexbuffer::buffer_of(cpu, vb)?;
     let b = super::object(cpu, bid)
         .and_then(|o| o.buffer.clone())
@@ -753,48 +839,29 @@ fn buffer_vertices(cpu: &mut Cpu, vb: u32, start: u32, count: u32) -> Result<Buf
         return Err(DDERR_INVALIDPARAMS);
     }
     let at = b.memory + start * layout.size;
-    let vertices = read_vertices(cpu, at, &layout, count)?;
-    Ok(BufferVertices {
-        layout,
-        vertices,
-        clipped: b.clipped,
-        start: start as usize,
-    })
-}
-
-/// A vertex buffer's layout, its vertices from `start` on, and what
-/// ProcessVertices kept of the buffer.
-struct BufferVertices {
-    layout: Layout,
-    vertices: Vec<Vertex>,
-    clipped: Arc<Vec<Option<Clipped>>>,
-    start: usize,
-}
-
-/// Draw `kind` primitives of a vertex buffer's `vertices` (in the order
-/// `order`, or as they are), clipped at their clip coordinates if
-/// ProcessVertices kept them.
-fn draw_buffer(
-    cpu: &mut Cpu,
-    id: u32,
-    version: u32,
-    b: &BufferVertices,
-    kind: u32,
-    order: Option<&[u32]>,
-    flags: u32,
-) -> Result<(), u32> {
-    let (layout, vertices) = (&b.layout, &b.vertices);
     // ProcessVertices keeps clip coordinates only in a buffer of
-    // transformed vertices: a buffer of others draws as any draw of
-    // them does, on a card that transforms them if the device has one.
-    if !layout.rhw {
-        return draw(cpu, id, version, layout, kind, vertices, order, flags);
+    // transformed vertices, and a draw takes them only where it kept
+    // some: the others draw as any draw of the program's vertices
+    // does, from where they are.
+    let range = start as usize..(start + count) as usize;
+    let kept = layout.rhw
+        && b.clipped
+            .get(range.clone())
+            .is_some_and(|kept| kept.iter().any(Option::is_some));
+    if !kept {
+        let from = Source { at, count, indices };
+        return draw_from(cpu, id, version, &layout, kind, &from, flags);
     }
-    let prims = primitives(kind, order, vertices.len())?;
-    let clip = b.clipped.get(b.start..b.start + vertices.len());
-    draw_clipped(
-        cpu, id, version, layout, vertices, clip, &prims, flags, None,
-    )
+    // The transformed vertices, clipped at their clip coordinates
+    // where ProcessVertices kept them.
+    let vertices = read_vertices(cpu, at, &layout, count)?;
+    let order = match indices {
+        Some((at, count)) => Some(read_indices(cpu, at, count)?),
+        None => None,
+    };
+    let prims = primitives(kind, order.as_deref(), vertices.len())?;
+    let clip = b.clipped.get(range);
+    draw_clipped(cpu, id, version, &layout, &vertices, clip, &prims, flags, None)
 }
 
 /// DrawPrimitiveVB(this, type, buffer, start, count, flags).
@@ -803,16 +870,9 @@ pub fn draw_primitive_vb(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (vtable, id) = hr!(device_of(cpu, this));
-    let buffer = hr!(buffer_vertices(cpu, vb, start, count));
-    hr!(draw_buffer(
-        cpu,
-        id,
-        version(vtable),
-        &buffer,
-        kind,
-        None,
-        flags
-    ));
+    let version = version(vtable);
+    let range = (start, count);
+    hr!(draw_buffer(cpu, id, version, vb, range, kind, None, flags));
     Some(D3D_OK)
 }
 
@@ -827,17 +887,9 @@ pub fn draw_indexed_primitive_vb3(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let count = super::object(cpu, bid)
         .and_then(|o| o.buffer.as_ref().map(|b| b.count))
         .unwrap_or(0);
-    let buffer = hr!(buffer_vertices(cpu, vb, 0, count));
-    let order = hr!(read_indices(cpu, indices, icount));
-    hr!(draw_buffer(
-        cpu,
-        id,
-        version(vtable),
-        &buffer,
-        kind,
-        Some(&order),
-        flags
-    ));
+    let (version, order) = (version(vtable), Some((indices, icount)));
+    let range = (0, count);
+    hr!(draw_buffer(cpu, id, version, vb, range, kind, order, flags));
     Some(D3D_OK)
 }
 
@@ -848,17 +900,9 @@ pub fn draw_indexed_primitive_vb7(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (vtable, id) = hr!(device_of(cpu, this));
-    let buffer = hr!(buffer_vertices(cpu, vb, start, count));
-    let order = hr!(read_indices(cpu, indices, icount));
-    hr!(draw_buffer(
-        cpu,
-        id,
-        version(vtable),
-        &buffer,
-        kind,
-        Some(&order),
-        flags
-    ));
+    let (version, order) = (version(vtable), Some((indices, icount)));
+    let range = (start, count);
+    hr!(draw_buffer(cpu, id, version, vb, range, kind, order, flags));
     Some(D3D_OK)
 }
 

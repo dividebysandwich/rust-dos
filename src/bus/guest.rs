@@ -102,6 +102,25 @@ impl Bus {
         }
     }
 
+    /// Fill `data` from the memory at `lin` if every byte of it is in
+    /// plain RAM, which reading changes nothing of: false otherwise,
+    /// with `data` in part filled. For a caller that reads into a
+    /// buffer it has taken out of a device (the ToadForce's command
+    /// queue), where a read of device memory would find the device
+    /// without it.
+    pub fn guest_read_ram(&mut self, lin: u32, data: &mut [u8]) -> bool {
+        for (offset, run) in Self::page_runs(lin, data.len()) {
+            let Some(addr) = self.guest_physical(lin.wrapping_add(offset as u32), false) else {
+                return false;
+            };
+            if !self.is_plain_ram(addr, run) {
+                return false;
+            }
+            data[offset..offset + run].copy_from_slice(&self.ram[addr..addr + run]);
+        }
+        true
+    }
+
     /// Whether the `len` bytes at `lin` can be read, or written with
     /// `write`: false when a page isn't there, which the service's access
     /// would have found, so it can stop before it does anything it can't

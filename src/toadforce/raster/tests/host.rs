@@ -277,11 +277,13 @@ impl Host for TestHost {
             let state = &*run.state;
             let ctx = span::Ctx::new(mem, state);
             let sets = &slots[..state.coords.len()];
-            for t in batch.vertices[run.vertices.clone()].chunks(run.stride()) {
+            for t in batch.vertices[run.vertices.clone()].as_chunks::<3>().0 {
                 log.triangles += 1;
-                let provoking = t.get(3).unwrap_or(&t[0]);
+                // A flat-shaded triangle's vertices all have its
+                // colours.
+                let t = t.map(|v| v.screen());
                 let v = [&t[0], &t[1], &t[2]];
-                let Some(prim) = Prim::triangle(v, provoking, &state.shape, state.clip, sets)
+                let Some(prim) = Prim::triangle(v, &t[0], &state.shape, state.clip, sets)
                 else {
                     continue;
                 };

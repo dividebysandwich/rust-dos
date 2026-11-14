@@ -1663,10 +1663,27 @@ pub fn read_pixels(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             return Some(0);
         }
     };
-    if kind != GL_UNSIGNED_BYTE {
-        error(cpu, GL_INVALID_ENUM);
-        return Some(0);
-    }
+    // GL_UNSIGNED_BYTE, or a packed type the driver takes, with a
+    // format of as many components (`texture::pixel_layout`): a type
+    // that texels may come in comes back too.
+    let packed = if kind == GL_UNSIGNED_BYTE {
+        None
+    } else {
+        let types = super::wgl::packed_pixels(cpu);
+        match texture::pixel_layout(format, kind, types) {
+            Ok((_, _, Some(packed))) => Some(packed),
+            Ok(_) => {
+                error(cpu, GL_INVALID_ENUM);
+                return Some(0);
+            }
+            Err(e) => {
+                error(cpu, e);
+                return Some(0);
+            }
+        }
+    };
+    // The bytes of a pixel.
+    let components = packed.map_or(components, |p| p.0);
     if w == 0 || h == 0 || at == 0 {
         return Some(0);
     }
@@ -1699,6 +1716,11 @@ pub fn read_pixels(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         row.clear();
         for p in &pixels[(r * width) as usize..((r + 1) * width) as usize] {
             let [red, g, b, a] = *p;
+            if let Some(packed) = packed {
+                let v = texture::pack_pixel(*p, format, packed).to_le_bytes();
+                row.extend_from_slice(&v[..packed.0 as usize]);
+                continue;
+            }
             match format {
                 GL_RGB => row.extend_from_slice(&[red, g, b]),
                 GL_BGR_EXT => row.extend_from_slice(&[b, g, red]),
