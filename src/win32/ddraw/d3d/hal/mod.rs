@@ -25,7 +25,7 @@ use super::device::Device;
 use super::pipeline::{Layout, Rasterizer, ScreenVertex, Setup, Vertex};
 use crate::cpu::Cpu;
 
-pub use toadforce::Source;
+pub use toadforce::{Gl, Source};
 pub(in crate::win32::ddraw) use voodoo::card_fill;
 pub use voodoo::{
     RS_ALPHABLENDENABLE, RS_ALPHAREF, RS_ALPHATESTENABLE, RS_COLORKEYENABLE, RS_DITHERENABLE,
@@ -244,6 +244,37 @@ pub fn draw_geometry(
     match kind_of(cpu, d) {
         Kind::Voodoo => false,
         Kind::ToadForce => toadforce::draw_geometry(cpu, d, setup, layout, vertices, kind, order),
+    }
+}
+
+/// Whether the card of the DirectDraw object `dd` transforms and
+/// lights vertices itself, and isn't asked to leave it to the
+/// processor (`toadforce::pipeline_transforms`).
+pub fn transforms_gl(cpu: &mut Cpu, dd: u32) -> Result<(), bool> {
+    match card(cpu, dd).map(|offer| offer.kind) {
+        Some(Kind::ToadForce) if toadforce::pipeline_transforms() => Err(true),
+        Some(Kind::ToadForce) => Ok(()),
+        _ => Err(false),
+    }
+}
+
+/// Draw OpenGL's primitives `lists` of `vertices`, which aren't in
+/// screen space, on a card that transforms and lights vertices itself,
+/// with OpenGL's lights and materials `gl` (`toadforce::draw_gl`).
+/// False, with nothing drawn, when the card of `d` doesn't, or can't
+/// for this draw.
+pub fn draw_gl(
+    cpu: &mut Cpu,
+    d: &Device,
+    setup: &Setup,
+    gl: &Gl,
+    layout: &Layout,
+    vertices: &[Vertex],
+    lists: &[(u32, Vec<u32>)],
+) -> bool {
+    match kind_of(cpu, d) {
+        Kind::Voodoo => false,
+        Kind::ToadForce => toadforce::draw_gl(cpu, d, setup, gl, layout, vertices, lists),
     }
 }
 

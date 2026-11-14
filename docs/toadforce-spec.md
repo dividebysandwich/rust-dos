@@ -650,9 +650,6 @@ rectangle isn't checked against the render target.
 | 13 to 16 | emissive colour |
 | 17 | specular power |
 
-The card has one material, which lights the back of a triangle too
-under `TWO_SIDED_LIGHTING`.
-
 **`SET_LIGHT`, 0016h.** Length 29.
 
 | Word | Argument |
@@ -689,6 +686,23 @@ Turning on a slot no `SET_LIGHT` has set is rejected with `BAD_STATE`.
 | 2 to 5 | the plane's four coefficients, in world space |
 
 The planes in use are those whose bits `CLIPPLANEENABLE` has.
+
+**`SET_BACK_MATERIAL`, 0019h.** Length 18. The words of
+`SET_MATERIAL`, for the material of the back of a triangle that
+`TWO_SIDED_LIGHTING` lights. `SET_MATERIAL` sets both materials, so a
+program that sends it alone has one material; this command after it
+gives the back its own.
+
+**`SET_AMBIENT`, 001Ah.** Length 4.
+
+| Word | Argument |
+|---|---|
+| 1 to 3 | the ambient light's red, green and blue |
+
+The ambient light as numbers, where the state `AMBIENT` has a byte for
+each channel. The two set the same light: the one sent last holds, and
+a write of `AMBIENT` in a `SET_RENDER_STATE` counts whether or not it
+changes the state's value.
 
 **`SET_RENDER_TARGET`, 0020h.** Length 9.
 
@@ -964,9 +978,33 @@ ambient colour only, and a spot with one has a rho of 0. A light
 whose f isn't a number above 0, or is infinite, adds nothing.
 
 With `TWO_SIDED_LIGHTING` 1 or 2 a triangle that shows its back has
-the colours the vertices get with their normals turned round. The
-back shows where the triangle is counterclockwise on the screen with
-1, and clockwise with 2. Lines and points have the front's colours.
+the colours the vertices get with their normals turned round and the
+back's material (`SET_BACK_MATERIAL`). The back shows where the
+triangle is counterclockwise on the screen with 1, and clockwise with
+2. Lines and points have the front's colours. The card chooses the
+side for each triangle. OpenGL chooses it for the whole of a quad or a
+polygon, so an OpenGL driver lights two-sided quads and polygons
+itself.
+
+`COLORVERTEX_FACES` says which sides take a vertex's colour where a
+material source names one: bit 0 the front, bit 1 the back. The other
+side has its material's colour.
+
+The card's lighting is Direct3D's, and an OpenGL driver gets
+OpenGL 1.1's from it except in these, which no game is known to draw
+and a check in the driver would cost every lit draw:
+
+- A vertex's colours are four bytes, so a colour glColorMaterial
+  takes is rounded to a 255th.
+- A normal longer than 1 (a scaled modelview matrix without
+  GL_NORMALIZE) gives a highlight a cosine above 1, which the card
+  takes for 1 and OpenGL raises to the shininess.
+- A vertex with a w of 0 is lit at its x, y and z.
+
+With `SINGLE_COLOUR` 1 the specular sum is worked out whatever
+`SPECULARENABLE` says and added to the diffuse colour before that is
+limited, and the specular colour is black: OpenGL 1.1's lighting,
+which has one colour for a vertex.
 
 Each channel is then limited to 0 to 1 and becomes c * 255 rounded to
 the nearest whole number.
@@ -1143,7 +1181,7 @@ of the pixel's own row is not defined.
 #### Render states
 
 The numbers and values are Direct3D 8's `D3DRS` ones where Direct3D
-has the state. 256 to 258 are the card's own.
+has the state. 256 to 261 are the card's own.
 
 | Number | Name | Values | Reset |
 |---|---|---|---|
@@ -1215,6 +1253,8 @@ has the state. 256 to 258 are the card's own.
 | 257 | `FLAT_VERTEX` | 0 or 1 | 0 |
 | 258 | `TWO_SIDED_LIGHTING` | 0 to 2 | 0 |
 | 259 | `FOG_BY_W` | 0 or 1 | 0 |
+| 260 | `SINGLE_COLOUR` | 0 or 1 | 0 |
+| 261 | `COLORVERTEX_FACES` | 1 to 3 | 3 |
 
 - `ZENABLE` has no value for a W buffer.
 - `SHADEMODE` is 1 flat or 2 Gouraud.
@@ -1231,6 +1271,11 @@ has the state. 256 to 258 are the card's own.
   side with 1 and the clockwise side with 2.
 - `FOG_BY_W`: the distance table fog goes by, 0 a fragment's depth
   and 1 its w.
+- `SINGLE_COLOUR`: 1 adds the specular light to a lit vertex's
+  diffuse colour (OpenGL 1.1), 0 keeps it in the specular colour.
+- `COLORVERTEX_FACES`: the sides whose material takes the vertex's
+  colours with `COLORVERTEX`, bit 0 the front and bit 1 the back
+  (glColorMaterial's face).
 
 #### Stage states
 

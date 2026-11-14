@@ -404,6 +404,11 @@ pub struct DirectDrawInfo {
     /// the batches the pipeline handed the card and the vertices of
     /// the primitives in them (`hal::toadforce::draw_screen`).
     pub screen_draws: [u64; 4],
+    /// OpenGL's draws on a ToadForce by where they were transformed
+    /// and lit, each count with its name: those the card took and
+    /// their vertices, those it refused, and the processor's by reason
+    /// (`opengl32::tnl::Why`).
+    pub gl_draws: Vec<(&'static str, u64)>,
     pub surfaces: Vec<SurfaceInfo>,
 }
 

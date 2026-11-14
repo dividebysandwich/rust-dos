@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 59;
+const WIN32_VERSION: u16 = 60;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -875,6 +875,7 @@ mod tests {
         (57, 0xB847_1A2D_27D3_3646), // OpenGL's draws that wait
         (58, 0xDC7D_5C01_8FC2_8FD2), // the system locale
         (59, 0xCDE1_505E_0044_1486), // the page file behind programs' own memory
+        (60, 0xD3C0_8CBC_2BF4_4B49), // OpenGL's vertices as given, and the card's lights
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

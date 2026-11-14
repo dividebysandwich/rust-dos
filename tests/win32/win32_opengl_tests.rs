@@ -1658,8 +1658,34 @@ fn floats(cpu: &Cpu, data: u32, offset: u32) -> [f32; 4] {
     std::array::from_fn(|i| f32::from_bits(peek(cpu, data + offset + 4 * i as u32)))
 }
 
+/// OpenGL's draws on a ToadForce by where they were transformed and
+/// lit: those the card took, and those the processor did. None was
+/// refused by the card.
+fn transformed(cpu: &Cpu) -> (u64, u64) {
+    let counts = rust_dos::win32::snapshot::ddraw(cpu).gl_draws;
+    let of = |name: &str| counts.iter().find(|c| c.0 == name).map_or(0, |c| c.1);
+    assert_eq!(of("refused"), 0, "{counts:?}");
+    let processor = counts
+        .iter()
+        .filter(|c| !["card", "card_vertices", "refused"].contains(&c.0))
+        .map(|c| c.1)
+        .sum();
+    (of("card"), processor)
+}
+
 #[test]
 fn lighting_colors_vertices_by_their_normals_from_calls_and_arrays() {
+    lit_by_normals(Draws::Voodoo3);
+}
+
+/// The card lights both draws itself, to the colors the processor
+/// gives them on a Voodoo3.
+#[test]
+fn lighting_on_a_toadforce_is_the_cards() {
+    lit_by_normals(Draws::ToadForce);
+}
+
+fn lit_by_normals(card: Draws) {
     let mut d = data();
     // Light 0's diffuse color.
     put_f32s(&mut d, VECTORS, &[1.0, 0.5, 0.25, 1.0]);
@@ -1716,9 +1742,12 @@ fn lighting_colors_vertices_by_their_normals_from_calls_and_arrays() {
         error_at = c.next - 1;
         finish(a, l)
     });
-    let mut cpu = machine("lighting", true, exe);
+    let mut cpu = machine_on("lighting", card, exe);
     run_until_done(&mut cpu, data);
     assert_eq!(peek(&cpu, data + RESULTS + 4 * error_at), 0, "glGetError");
+    card_drew(&cpu, card);
+    let on_card = if card == Draws::ToadForce { 2 } else { 0 };
+    assert_eq!(transformed(&cpu), (on_card, 2 - on_card));
     // Equation 2.1: the scene's ambient 0.2 times the material's 0.2,
     // and n.L 0.8 times the material's diffuse 0.8 times the light's.
     let lit = [0.04 + 0.64, 0.04 + 0.64 * 0.5, 0.04 + 0.64 * 0.25];
@@ -1733,7 +1762,7 @@ fn lighting_colors_vertices_by_their_normals_from_calls_and_arrays() {
 /// counter-clockwise, so its front shows, and the top right one
 /// clockwise, so its back shows. With `two_side`, lighting is
 /// two-sided.
-fn two_sided(two_side: bool) -> (Cpu, u32) {
+fn two_sided(two_side: bool, card: Draws) -> (Cpu, u32) {
     let mut d = data();
     put_f32s(&mut d, VECTORS, &[0.0, 0.0, -1.0, 0.0]);
     put_f32s(&mut d, VECTORS + 16, &[1.0, 0.0, 0.0, 1.0]);
@@ -1765,24 +1794,31 @@ fn two_sided(two_side: bool) -> (Cpu, u32) {
         read_back(a, l, &mut c)?;
         finish(a, l)
     });
-    let mut cpu = machine(&format!("two_sided_{two_side}"), true, exe);
+    let mut cpu = machine_on(&format!("two_sided_{two_side}"), card, exe);
     run_until_done(&mut cpu, data);
+    card_drew(&cpu, card);
+    let on_card = (card == Draws::ToadForce) as u64;
+    assert_eq!(transformed(&cpu), (on_card, 1 - on_card));
     (cpu, data)
 }
 
 #[test]
 fn two_sided_lighting_lights_the_back_that_shows_with_the_back_material() {
-    let ambient = [0.04; 3];
-    // The front faces away from the light: the ambient term alone.
-    let (cpu, data) = two_sided(true);
-    near(pixel(&cpu, data, 4, 4), ambient);
-    // The back faces it, and is the back material's green.
-    near(pixel(&cpu, data, 60, 60), [0.04, 1.0, 0.04]);
-    // One-sided, the back shows the front's color, of the front
-    // material and the normal as given.
-    let (cpu, data) = two_sided(false);
-    near(pixel(&cpu, data, 4, 4), ambient);
-    near(pixel(&cpu, data, 60, 60), ambient);
+    // On a ToadForce the card lights the triangles, with a material
+    // for each side.
+    for card in [Draws::Voodoo3, Draws::ToadForce] {
+        let ambient = [0.04; 3];
+        // The front faces away from the light: the ambient term alone.
+        let (cpu, data) = two_sided(true, card);
+        near(pixel(&cpu, data, 4, 4), ambient);
+        // The back faces it, and is the back material's green.
+        near(pixel(&cpu, data, 60, 60), [0.04, 1.0, 0.04]);
+        // One-sided, the back shows the front's color, of the front
+        // material and the normal as given.
+        let (cpu, data) = two_sided(false, card);
+        near(pixel(&cpu, data, 4, 4), ambient);
+        near(pixel(&cpu, data, 60, 60), ambient);
+    }
 }
 
 #[test]
@@ -1914,6 +1950,7 @@ fn the_3d_trace_names_opengls_enums_and_counts_its_calls() {
 #[test]
 fn the_largest_texture_is_the_cards_and_texels_come_packed() {
     const GL_MAX_TEXTURE_SIZE: u32 = 0x0D33;
+    const GL_MAX_TEXTURE_UNITS_ARB: u32 = 0x84E2;
     const GL_BGRA: u32 = 0x80E1;
     const GL_UNSIGNED_INT_8_8_8_8: u32 = 0x8035;
     const GL_UNSIGNED_INT_8_8_8_8_REV: u32 = 0x8367;
@@ -1941,6 +1978,8 @@ fn the_largest_texture_is_the_cards_and_texels_come_packed() {
             start(a, l, &mut c)?;
             let size = [Arg::I(GL_MAX_TEXTURE_SIZE), Arg::At(OUT)];
             c.api(a, l, GET_FLOATV, &size)?;
+            let units = [Arg::I(GL_MAX_TEXTURE_UNITS_ARB), Arg::At(OUT + 16)];
+            c.api(a, l, GET_FLOATV, &units)?;
             c.api(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(TEXTURE)])?;
             let bind = [Arg::I(GL_TEXTURE_2D), Arg::Val(TEXTURE)];
             c.api(a, l, BIND_TEXTURE, &bind)?;
@@ -1979,6 +2018,9 @@ fn the_largest_texture_is_the_cards_and_texels_come_packed() {
         run_until_done(&mut cpu, data);
         let r = |i: u32| peek(&cpu, data + RESULTS + 4 * i);
         assert_eq!(floats(&cpu, data, OUT)[0], largest, "{name}");
+        // The units glActiveTextureARB takes, of which a ToadForce
+        // itself has four.
+        assert_eq!(floats(&cpu, data, OUT + 16)[0], 2.0, "units on {name}");
         assert_eq!(r(at), big, "512 by 512 on {name}");
         assert_eq!(r(at + 2), rev, "_REV texels on {name}");
         assert_eq!(r(at + 4), mismatched, "{name}");

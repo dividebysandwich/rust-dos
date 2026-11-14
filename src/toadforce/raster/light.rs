@@ -34,14 +34,19 @@ enum Source {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lighting {
     lamps: Vec<Lamp>,
-    material: Material,
-    /// `AMBIENT`, red first.
+    /// The material of the front, and of the back.
+    materials: [Material; 2],
+    /// The ambient light, red first.
     ambient: [f32; 3],
     specular: bool,
+    /// `SINGLE_COLOUR`: the specular light goes into the diffuse
+    /// colour.
+    single: bool,
     local_viewer: bool,
     /// The sources of the diffuse, specular, ambient and emissive
-    /// colours.
-    sources: [Source; 4],
+    /// colours of the front, and of the back: those of a side
+    /// `COLORVERTEX_FACES` leaves out are the material's.
+    sources: [[Source; 4]; 2],
 }
 
 impl Lighting {
@@ -69,39 +74,52 @@ impl Lighting {
             2 if l.state(RS_COLORVERTEX) != 0 && fvf.specular.is_some() => Source::Specular,
             _ => Source::Material,
         };
-        let ambient = super::geometry::colour(l.state(RS_AMBIENT));
+        let sources = [
+            source(RS_DIFFUSEMATERIALSOURCE),
+            source(RS_SPECULARMATERIALSOURCE),
+            source(RS_AMBIENTMATERIALSOURCE),
+            source(RS_EMISSIVEMATERIALSOURCE),
+        ];
+        let faces = l.state(RS_COLORVERTEX_FACES);
+        let side = |bit: u32| {
+            if faces & bit != 0 {
+                sources
+            } else {
+                [Source::Material; 4]
+            }
+        };
+        let single = l.state(RS_SINGLE_COLOUR) != 0;
         Lighting {
             lamps,
-            material: l.material,
-            ambient: [ambient[0], ambient[1], ambient[2]],
-            specular: l.state(RS_SPECULARENABLE) != 0,
+            materials: [l.material, l.material_back],
+            ambient: l.ambient,
+            specular: single || l.state(RS_SPECULARENABLE) != 0,
+            single,
             local_viewer: l.state(RS_LOCALVIEWER) != 0,
-            sources: [
-                source(RS_DIFFUSEMATERIALSOURCE),
-                source(RS_SPECULARMATERIALSOURCE),
-                source(RS_AMBIENTMATERIALSOURCE),
-                source(RS_EMISSIVEMATERIALSOURCE),
-            ],
+            sources: [side(1), side(2)],
         }
     }
 
     /// The diffuse and specular colours of a vertex at `eye` with the
     /// normal `n`, both in camera space, whose own colours are
     /// `diffuse` and `specular`. The specular colour's alpha is 1, for
-    /// no fog.
+    /// no fog. With `back` they are those of a triangle's back: `n` is
+    /// then the normal turned round already.
     pub fn light(
         &self,
         eye: [f32; 3],
         n: [f32; 3],
         diffuse: Option<[f32; 4]>,
         specular: Option<[f32; 4]>,
+        back: bool,
     ) -> ([f32; 4], [f32; 4]) {
-        let of = |which: usize, material: [f32; 4]| match self.sources[which] {
+        let sources = &self.sources[back as usize];
+        let of = |which: usize, material: [f32; 4]| match sources[which] {
             Source::Diffuse => diffuse.unwrap_or(material),
             Source::Specular => specular.unwrap_or(material),
             Source::Material => material,
         };
-        let m = &self.material;
+        let m = &self.materials[back as usize];
         let m_diffuse = of(0, m.diffuse);
         let m_specular = of(1, m.specular);
         let m_ambient = of(2, m.ambient);
@@ -176,7 +194,11 @@ impl Lighting {
         let mut out_s = [0.0, 0.0, 0.0, 1.0];
         for c in 0..3 {
             out_d[c] = m_emissive[c] + m_ambient[c] * ambient[c] + m_diffuse[c] * lit[c];
-            out_s[c] = m_specular[c] * shine[c];
+            if self.single {
+                out_d[c] += m_specular[c] * shine[c];
+            } else {
+                out_s[c] = m_specular[c] * shine[c];
+            }
         }
         out_d[3] = m_diffuse[3];
         (

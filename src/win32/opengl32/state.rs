@@ -628,7 +628,11 @@ pub fn get_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn values(cpu: &mut Cpu, p: u32) -> Option<(Vec<f64>, bool)> {
     let tmus = {
         let dd = ctx(cpu)?.dd;
-        super::super::ddraw::d3d::hal(cpu, dd).unwrap_or(1)
+        // The card's units, of which the layer has `UNITS`: a
+        // ToadForce has four, and glActiveTextureARB takes the first
+        // two.
+        let card = super::super::ddraw::d3d::hal(cpu, dd).unwrap_or(1);
+        card.min(super::UNITS as u32)
     };
     let wide = {
         let target = ctx(cpu)?.target;
