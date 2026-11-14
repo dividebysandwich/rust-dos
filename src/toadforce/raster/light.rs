@@ -44,11 +44,9 @@ pub struct Lighting {
     single: bool,
     local_viewer: bool,
     /// The sources of the diffuse, specular, ambient and emissive
-    /// colours.
-    sources: [Source; 4],
-    /// `COLORVERTEX_FACES`: whether the front's material takes those
-    /// sources, and whether the back's does.
-    faces: [bool; 2],
+    /// colours of the front, and of the back: those of a side
+    /// `COLORVERTEX_FACES` leaves out are the material's.
+    sources: [[Source; 4]; 2],
 }
 
 impl Lighting {
@@ -76,8 +74,21 @@ impl Lighting {
             2 if l.state(RS_COLORVERTEX) != 0 && fvf.specular.is_some() => Source::Specular,
             _ => Source::Material,
         };
-        let single = l.state(RS_SINGLE_COLOUR) != 0;
+        let sources = [
+            source(RS_DIFFUSEMATERIALSOURCE),
+            source(RS_SPECULARMATERIALSOURCE),
+            source(RS_AMBIENTMATERIALSOURCE),
+            source(RS_EMISSIVEMATERIALSOURCE),
+        ];
         let faces = l.state(RS_COLORVERTEX_FACES);
+        let side = |bit: u32| {
+            if faces & bit != 0 {
+                sources
+            } else {
+                [Source::Material; 4]
+            }
+        };
+        let single = l.state(RS_SINGLE_COLOUR) != 0;
         Lighting {
             lamps,
             materials: [l.material, l.material_back],
@@ -85,13 +96,7 @@ impl Lighting {
             specular: single || l.state(RS_SPECULARENABLE) != 0,
             single,
             local_viewer: l.state(RS_LOCALVIEWER) != 0,
-            sources: [
-                source(RS_DIFFUSEMATERIALSOURCE),
-                source(RS_SPECULARMATERIALSOURCE),
-                source(RS_AMBIENTMATERIALSOURCE),
-                source(RS_EMISSIVEMATERIALSOURCE),
-            ],
-            faces: [faces & 1 != 0, faces & 2 != 0],
+            sources: [side(1), side(2)],
         }
     }
 
@@ -108,11 +113,11 @@ impl Lighting {
         specular: Option<[f32; 4]>,
         back: bool,
     ) -> ([f32; 4], [f32; 4]) {
-        let own = self.faces[back as usize];
-        let of = |which: usize, material: [f32; 4]| match self.sources[which] {
-            Source::Diffuse if own => diffuse.unwrap_or(material),
-            Source::Specular if own => specular.unwrap_or(material),
-            _ => material,
+        let sources = &self.sources[back as usize];
+        let of = |which: usize, material: [f32; 4]| match sources[which] {
+            Source::Diffuse => diffuse.unwrap_or(material),
+            Source::Specular => specular.unwrap_or(material),
+            Source::Material => material,
         };
         let m = &self.materials[back as usize];
         let m_diffuse = of(0, m.diffuse);

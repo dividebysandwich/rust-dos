@@ -1181,7 +1181,7 @@ of the pixel's own row is not defined.
 #### Render states
 
 The numbers and values are Direct3D 8's `D3DRS` ones where Direct3D
-has the state. 256 to 258 are the card's own.
+has the state. 256 to 261 are the card's own.
 
 | Number | Name | Values | Reset |
 |---|---|---|---|
