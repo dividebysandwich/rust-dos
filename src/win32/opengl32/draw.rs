@@ -1482,6 +1482,73 @@ pub fn draw_elements(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
+/// A vertex with everything glVertex takes from the current values:
+/// its position, and the normal, color and texture coordinates in
+/// force when it was given. None of them is through a matrix or the
+/// lights.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct Whole {
+    pub position: [f32; 4],
+    pub normal: [f32; 3],
+    pub color: [f32; 4],
+    pub tex: [[f32; 4]; UNITS],
+}
+
+/// How many of a run's first vertices were given before the run set
+/// a color, a normal and each unit's texture coordinates: those take
+/// the current values of when the run is drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct Inherit {
+    pub color: u32,
+    pub normal: u32,
+    pub tex: [u32; UNITS],
+}
+
+/// Draw `kind` primitives of `vertices`, a glBegin to glEnd run that
+/// a display list kept as its vertices, as glDrawArrays draws those
+/// of the arrays: lit and with their texture coordinates through the
+/// texture matrices here, each as glVertex and glEnd would have made
+/// it. False, with nothing drawn, without a context or between a
+/// glBegin and its glEnd, where the run's own glBegin is an error.
+pub(super) fn draw_run(cpu: &mut Cpu, kind: u32, vertices: &[Whole], inherit: &Inherit) -> bool {
+    let Some(c) = ctx(cpu) else {
+        return false;
+    };
+    if c.begin.is_some() {
+        return false;
+    }
+    let profile = crate::profile::zone(crate::profile::Zone::OpenGlEnd);
+    // As glBegin leaves them.
+    c.vertices.clear();
+    let (color, normal, tex) = (c.color, c.normal, c.tex_coord);
+    let matrices = texture_matrices(c);
+    let lit = Lit::of(c);
+    let mut out = Vec::with_capacity(vertices.len());
+    let mut backs = two_sided(c).then(|| Vec::with_capacity(vertices.len()));
+    for (i, v) in vertices.iter().enumerate() {
+        let i = i as u32;
+        let rgba = if i < inherit.color { color } else { v.color };
+        let normal = if i < inherit.normal { normal } else { v.normal };
+        let [diffuse, back] = vertex_colors(lit.as_ref(), v.position, normal, rgba);
+        if let Some(backs) = &mut backs {
+            backs.push(back);
+        }
+        let mut made = Vertex {
+            position: homogeneous(v.position),
+            diffuse: Some(diffuse),
+            ..Vertex::default()
+        };
+        for u in 0..UNITS {
+            let t = if i < inherit.tex[u] { tex[u] } else { v.tex[u] };
+            made.tex[u] = texture_coords(&matrices[u], t);
+        }
+        out.push(made);
+    }
+    drop(profile);
+    draw(cpu, kind, &out, backs.as_deref(), None);
+    true
+}
+
 /// glLockArraysEXT(first, count) and glUnlockArraysEXT(): the arrays
 /// are read as they are drawn either way.
 pub fn lock_arrays(_: &mut Cpu, _: &[u32]) -> Option<u32> {

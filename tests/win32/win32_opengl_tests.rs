@@ -2984,3 +2984,127 @@ fn a_display_list_replays_a_function_that_is_not_there_yet() {
     assert_eq!(event("OPENGL32 not implemented: glRasterPos2i").1, 2);
     assert_eq!(event("OPENGL32.glCallList").1, 2);
 }
+
+#[test]
+fn a_lists_runs_of_vertices_draw_as_its_calls_do() {
+    runs_draw_alike(Draws::Voodoo3);
+}
+
+#[test]
+fn a_lists_runs_of_vertices_on_a_toadforce_draw_as_its_calls_do() {
+    runs_draw_alike(Draws::ToadForce);
+}
+
+/// A list draws its glBegin to glEnd runs as vertices it kept, in one
+/// step each, and under the 3D trace it replays their calls one by
+/// one. The same program on two machines, one of them traced, draws
+/// the same picture pixel for pixel both ways, and the picture its own
+/// calls drew; the current color and normal after the list are the
+/// last ones it gave.
+///
+/// The first quad's first vertex comes before the list's first color,
+/// and takes the color current when the list is called. The triangle
+/// is lit, with its colors as the material's by GL_COLOR_MATERIAL,
+/// and its vertices are given as arrays.
+fn runs_draw_alike(card: Draws) {
+    const GL_CURRENT_COLOR: u32 = 0x0B00;
+    const GL_CURRENT_NORMAL: u32 = 0x0B02;
+    const BLUE: u32 = LIST_DATA;
+    const CORNERS: u32 = LIST_DATA + 0x10;
+    const AFTER: u32 = KEPT;
+    let mut d = lists_data();
+    put_f32s(&mut d, BLUE, &[0.25, 0.5, 1.0]);
+    put_f32s(&mut d, CORNERS, TOP_RIGHT.as_flattened());
+    let mut error_at = 0;
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let scene = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+            let [c0, c1, c2, c3] = corners(LEFT);
+            gl(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+            gl(a, l, VERTEX2F, &c0.map(Arg::F))?;
+            gl(a, l, COLOR3F, &GREEN.map(Arg::F))?;
+            gl(a, l, VERTEX2F, &c1.map(Arg::F))?;
+            gl(a, l, TEX_COORD2F, &[Arg::F(0.5), Arg::F(0.25)])?;
+            gl(a, l, VERTEX2F, &c2.map(Arg::F))?;
+            gl(a, l, VERTEX2F, &c3.map(Arg::F))?;
+            gl(a, l, END, &[])?;
+            gl(a, l, ENABLE, &[Arg::I(GL_LIGHTING)])?;
+            gl(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+            gl(a, l, NORMAL3F, &[Arg::F(0.0), Arg::F(0.6), Arg::F(0.8)])?;
+            gl(a, l, VERTEX2FV, &[Arg::At(CORNERS)])?;
+            gl(a, l, COLOR3FV, &[Arg::At(BLUE)])?;
+            gl(a, l, VERTEX2FV, &[Arg::At(CORNERS + 8)])?;
+            gl(a, l, VERTEX2FV, &[Arg::At(CORNERS + 16)])?;
+            gl(a, l, END, &[])?;
+            gl(a, l, DISABLE, &[Arg::I(GL_LIGHTING)])
+        };
+        gl(a, l, ENABLE, &[Arg::I(GL_LIGHT0)])?;
+        gl(a, l, ENABLE, &[Arg::I(GL_COLOR_MATERIAL)])?;
+        clear_blue(a, l)?;
+        gl(a, l, COLOR3F, &RED.map(Arg::F))?;
+        scene(a)?;
+        read_into(a, l, SHOTS[0])?;
+        gl(a, l, NEW_LIST, &[Arg::I(1), Arg::I(GL_COMPILE)])?;
+        scene(a)?;
+        gl(a, l, END_LIST, &[])?;
+        // What the list read is gone by the time it is called.
+        for i in 0..3 {
+            a.mov(dword_ptr(l.at(BLUE + 4 * i)), 0)?;
+        }
+        clear_blue(a, l)?;
+        gl(a, l, COLOR3F, &RED.map(Arg::F))?;
+        gl(a, l, NORMAL3F, &[Arg::F(1.0), Arg::F(0.0), Arg::F(0.0)])?;
+        gl(a, l, CALL_LIST, &[Arg::I(1)])?;
+        gl(a, l, GET_FLOATV, &[Arg::I(GL_CURRENT_COLOR), Arg::At(AFTER)])?;
+        let normal = [Arg::I(GL_CURRENT_NORMAL), Arg::At(AFTER + 16)];
+        gl(a, l, GET_FLOATV, &normal)?;
+        read_into(a, l, SHOTS[1])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        error_at = c.next - 1;
+        finish(a, l)
+    });
+    let run = |traced: bool| {
+        let name = if traced { "list_runs_traced" } else { "list_runs" };
+        let mut cpu = machine_on(name, card, exe.clone());
+        // A file of this card's run: both cards' tests run at once.
+        let file = match card {
+            Draws::Voodoo3 => "voodoo3.trace",
+            Draws::ToadForce => "toadforce.trace",
+        };
+        let path = PathBuf::from(format!("target/test_win32_opengl/{name}/{file}"));
+        if traced {
+            rust_dos::win32::trace3d::start(&mut cpu, &path).unwrap();
+        }
+        run_until_done(&mut cpu, data);
+        assert_eq!(peek(&cpu, data + RESULTS + 4 * error_at), 0, "glGetError");
+        card_drew(&cpu, card);
+        if traced {
+            // Its own calls, the list's when it was compiled, and the
+            // list's again when it was called.
+            rust_dos::win32::trace3d::flush(&mut cpu);
+            let (events, counts) = super::win32_d3d_tests::read_trace(&path);
+            let event = |start: &str| super::win32_d3d_tests::event(&events, &counts, start);
+            assert_eq!(event("OPENGL32.glVertex2fv").1, 3 * 3);
+        }
+        let shots = [SHOTS[0], SHOTS[1]].map(|s| shot(&cpu, data, s));
+        let after = [floats(&cpu, data, AFTER), floats(&cpu, data, AFTER + 16)];
+        (shots, after)
+    };
+    let ([direct, called], after) = run(false);
+    // The quad from the red that was current to the list's green, the
+    // lit triangle, and the clear color where neither is.
+    let [r, g, _] = at(&direct, 1, 1);
+    assert!(r > 200 && g < 60, "the first vertex's color: {r} {g}");
+    let [r, g, _] = at(&direct, 28, 4);
+    assert!(r < 60 && g > 190, "the list's color: {r} {g}");
+    assert_ne!(at(&direct, 60, 60), [0, 0, 255]);
+    assert_eq!(at(&direct, 40, 8), [0, 0, 255]);
+    assert!(called == direct, "the list, its runs as vertices");
+    assert_eq!(after[0], [0.25, 0.5, 1.0, 1.0]);
+    assert_eq!(after[1][..3], [0.0, 0.6, 0.8]);
+    let ([traced_direct, traced_called], traced_after) = run(true);
+    assert!(traced_direct == direct, "the calls under the trace");
+    assert!(traced_called == called, "the list call by call");
+    assert_eq!(traced_after, after);
+}
