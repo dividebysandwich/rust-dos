@@ -275,9 +275,9 @@ pub(crate) struct RunArgs {
     #[arg(long, default_value_t = 100_000)]
     pub(crate) cycles: u32,
 
-    /// The machine's memory in MB
-    #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u32).range(1..=256))]
-    pub(crate) mem: u32,
+    /// The machine's memory in MB [default: 16, the 486's]
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=256))]
+    pub(crate) mem: Option<u32>,
 
     /// Print the text screen at the end when nothing was printed through
     /// DOS, for programs that write to the screen's memory

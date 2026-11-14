@@ -41,7 +41,9 @@ pub trait Device {
     fn step(&mut self) {}
 }
 
-/// RAM when the configuration doesn't say.
+/// RAM of a machine made without a size (`Bus::new`), and of one whose
+/// configuration doesn't set `memsize` with a CPU up to a Pentium
+/// (`config::default_memsize` has the rule).
 pub const DEFAULT_MEMORY_MB: usize = 16;
 
 /// log2 of the bytes of RAM each code generation counter covers: small
@@ -430,6 +432,12 @@ pub struct Bus {
     /// `WATCHED_BLOCK` makes the recompiler's writes bump every block's
     /// generation, for the debugger's heatmap (`set_write_tracking`).
     pub code_blocks: Vec<u8>,
+
+    /// Whether the size of the memory is the default for the machine's CPU
+    /// and display adapter, `memsize` not being set (`config::Memory`).
+    /// The front end sets it at start and after it loads a save state,
+    /// from the settings the load leaves (`slots::loaded_settings`).
+    pub memory_derived: bool,
 
     /// Optional observer for every `log_string` line. Installed by the debug
     /// server so log output can be streamed to remote clients.

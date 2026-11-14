@@ -349,14 +349,15 @@ const JUKEBOX_MOD_HANG: CodePatch = CodePatch {
 /// so would a real PC, which runs the same launchers.
 ///
 /// The patch makes it `VirtualSize:32M`, of the same length. 32 MB is
-/// what 16 MB of memory (`memsize`'s default) and the 20 MB swap file the
-/// same string asks for (`SwapMin:20M`) cover, so DOS/4GW can back it on
-/// a machine of the size the game asked for. It never gives the game less
-/// memory than 24 MB did. Both launchers append the string with the same
-/// loop (mov si,offset / lodsb / stosb / test al,al / jne / movsb), from
-/// their own offsets. For version 1.30, GOG's copy: LOLG.EXE of 2847
-/// bytes, MD5 1036beaf32bf4d25de4109d4a245d1a0, and SETUPG.EXE of 2262
-/// bytes, MD5 6f4b513ea0dcd4af601446bfab178b38.
+/// what 16 MB of memory (`memsize`'s default up to a Pentium) and the 20
+/// MB swap file the same string asks for (`SwapMin:20M`) cover, so
+/// DOS/4GW can back it on a machine of the size the game asked for, or
+/// one with more. It never gives the game less memory than 24 MB did.
+/// Both launchers append the string with the same loop (mov si,offset /
+/// lodsb / stosb / test al,al / jne / movsb), from their own offsets. For
+/// version 1.30, GOG's copy: LOLG.EXE of 2847 bytes, MD5
+/// 1036beaf32bf4d25de4109d4a245d1a0, and SETUPG.EXE of 2262 bytes, MD5
+/// 6f4b513ea0dcd4af601446bfab178b38.
 const LOL2_LAUNCHER: CodePatch = CodePatch {
     checks: &[
         // The string around the patch.
