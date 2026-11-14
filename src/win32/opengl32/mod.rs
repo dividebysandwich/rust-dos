@@ -129,8 +129,15 @@ pub const UNITS: usize = 2;
 pub const MODELVIEW_DEPTH: usize = 32;
 pub const PROJECTION_DEPTH: usize = 2;
 pub const TEXTURE_DEPTH: usize = 2;
-/// The largest texture: the card's 256 by 256.
-pub const MAX_TEXTURE_SIZE: u32 = 256;
+/// The largest texture's width and height, as GL_MAX_TEXTURE_SIZE gives
+/// it: a Banshee's or Voodoo3's 256, or a ToadForce's.
+pub fn max_texture_size(cpu: &Cpu) -> u32 {
+    if super::screen::is_toadforce(cpu) {
+        crate::toadforce::caps::TEXTURE_MAX
+    } else {
+        256
+    }
+}
 
 /// A vertex array: whether it is on, and glXxxPointer's size, type,
 /// stride and address.

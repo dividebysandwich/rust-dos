@@ -1901,3 +1901,61 @@ fn the_3d_trace_names_opengls_enums_and_counts_its_calls() {
         assert_eq!(event(call), (call, n));
     }
 }
+
+/// GL_MAX_TEXTURE_SIZE is the card's: 256 on a Voodoo3, whose
+/// glTexImage2D refuses a 512 by 512 texture, and 2048 on a ToadForce,
+/// which takes it. Both take texels in OpenGL 1.2's packed types (Myth
+/// II 1.8.1 gives GL_BGRA as GL_UNSIGNED_INT_8_8_8_8_REV), and refuse a
+/// four-component type with GL_RGB.
+#[test]
+fn the_largest_texture_is_the_cards_and_texels_come_packed() {
+    const GL_MAX_TEXTURE_SIZE: u32 = 0x0D33;
+    const GL_BGRA: u32 = 0x80E1;
+    const GL_UNSIGNED_INT_8_8_8_8_REV: u32 = 0x8367;
+    for (card, name, largest, big) in [
+        (Draws::Voodoo3, "a Voodoo3", 256.0, GL_INVALID_VALUE),
+        (Draws::ToadForce, "a ToadForce", 2048.0, 0),
+    ] {
+        let mut at = 0;
+        let (exe, data) = program(&data(), |a, l| {
+            let mut c = Calls { next: 0 };
+            start(a, l, &mut c)?;
+            let size = [Arg::I(GL_MAX_TEXTURE_SIZE), Arg::At(OUT)];
+            c.api(a, l, GET_FLOATV, &size)?;
+            c.api(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(TEXTURE)])?;
+            let bind = [Arg::I(GL_TEXTURE_2D), Arg::Val(TEXTURE)];
+            c.api(a, l, BIND_TEXTURE, &bind)?;
+            let image = |side, format, kind, texels| {
+                [
+                    Arg::I(GL_TEXTURE_2D),
+                    Arg::I(0),
+                    Arg::I(GL_RGBA),
+                    Arg::I(side),
+                    Arg::I(side),
+                    Arg::I(0),
+                    Arg::I(format),
+                    Arg::I(kind),
+                    texels,
+                ]
+            };
+            let none = image(512, GL_RGBA, GL_UNSIGNED_BYTE, Arg::I(0));
+            c.api(a, l, TEX_IMAGE_2D, &none)?;
+            at = c.next;
+            c.api(a, l, GET_ERROR, &[])?;
+            let packed = image(2, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, Arg::At(TEXELS));
+            c.api(a, l, TEX_IMAGE_2D, &packed)?;
+            c.api(a, l, GET_ERROR, &[])?;
+            let mismatched = image(2, GL_RGB, GL_UNSIGNED_INT_8_8_8_8_REV, Arg::At(TEXELS));
+            c.api(a, l, TEX_IMAGE_2D, &mismatched)?;
+            c.api(a, l, GET_ERROR, &[])?;
+            finish(a, l)
+        });
+        let mut cpu = machine_on("largest_texture", card, exe);
+        run_until_done(&mut cpu, data);
+        let r = |i: u32| peek(&cpu, data + RESULTS + 4 * i);
+        assert_eq!(floats(&cpu, data, OUT)[0], largest, "{name}");
+        assert_eq!(r(at), big, "512 by 512 on {name}");
+        assert_eq!(r(at + 2), 0, "packed texels on {name}");
+        assert_eq!(r(at + 4), GL_INVALID_OPERATION, "{name}");
+    }
+}

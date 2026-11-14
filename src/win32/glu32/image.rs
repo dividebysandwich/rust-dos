@@ -13,7 +13,7 @@
 //! store aren't kept by the built-in OPENGL32, and are the defaults
 //! here.
 
-use super::super::opengl32::{self as gl, MAX_TEXTURE_SIZE};
+use super::super::opengl32::{self as gl};
 use super::{GLU_INVALID_ENUM, GLU_INVALID_VALUE, GLU_OUT_OF_MEMORY, log_once};
 use crate::cpu::Cpu;
 
@@ -464,7 +464,8 @@ pub fn build_2d_mipmaps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let n = elements(format) as usize;
     let (mut w, mut h) = (width, height);
-    for (level, (nw, nh)) in level_sizes(width, height, MAX_TEXTURE_SIZE)
+    let max = gl::max_texture_size(cpu);
+    for (level, (nw, nh)) in level_sizes(width, height, max)
         .into_iter()
         .enumerate()
     {

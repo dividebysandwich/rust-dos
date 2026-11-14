@@ -12,8 +12,8 @@ use super::{
     CAP_NORMALIZE, CAP_POINT_SMOOTH, CAP_POLYGON_OFFSET_FILL, CAP_POLYGON_OFFSET_LINE,
     CAP_POLYGON_OFFSET_POINT, CAP_POLYGON_SMOOTH, CAP_POLYGON_STIPPLE, CAP_SCISSOR_TEST,
     CAP_STENCIL_TEST, CAP_TEXTURE_GEN, Context, GL_INVALID_ENUM, GL_INVALID_OPERATION,
-    GL_INVALID_VALUE, GL_NO_ERROR, MAX_TEXTURE_SIZE, MODELVIEW_DEPTH, PROJECTION_DEPTH,
-    TEXTURE_DEPTH, ctx, d, error, f, read_floats,
+    GL_INVALID_VALUE, GL_NO_ERROR, MODELVIEW_DEPTH, PROJECTION_DEPTH, TEXTURE_DEPTH, ctx, d,
+    error, f, max_texture_size, read_floats,
 };
 use crate::cpu::Cpu;
 
@@ -635,6 +635,7 @@ fn values(cpu: &mut Cpu, p: u32) -> Option<(Vec<f64>, bool)> {
         let surface = super::super::ddraw::state(cpu).surface(target);
         surface.is_some_and(|s| s.format.bits == 32)
     };
+    let max_texture = max_texture_size(cpu);
     let c = ctx(cpu)?;
     let unit = c.active_unit as usize;
     let one = |v: f64| Some((vec![v], false));
@@ -715,7 +716,7 @@ fn values(cpu: &mut Cpu, p: u32) -> Option<(Vec<f64>, bool)> {
         // GL_MAX_VIEWPORT_DIMS, GL_MAX_CLIENT_ATTRIB_STACK_DEPTH.
         0x0D31 => one(LIGHTS as f64),
         0x0D32 => one(6.0),
-        0x0D33 => one(MAX_TEXTURE_SIZE as f64),
+        0x0D33 => one(max_texture as f64),
         0x0D34 => one(256.0),
         0x0D35 => one(ATTRIB_DEPTH as f64),
         0x0D36 => one(MODELVIEW_DEPTH as f64),

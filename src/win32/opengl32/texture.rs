@@ -18,7 +18,7 @@ use super::super::ddraw::surface::{
 use super::super::ddraw::{self, Format, V_SURFACE7};
 use super::{
     Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, GL_OUT_OF_MEMORY,
-    MAX_TEXTURE_SIZE, Texture, UNITS, ctx, error, f, read_floats, state,
+    Texture, UNITS, ctx, error, f, max_texture_size, read_floats, state,
 };
 use crate::cpu::Cpu;
 
@@ -561,7 +561,10 @@ fn define(cpu: &mut Cpu, img: &Image, texels: Option<Vec<[u8; 4]>>) {
     };
     let (w, h, level) = (img.width, img.height, img.level);
     let pow2 = w.is_power_of_two() && h.is_power_of_two();
-    if img.border != 0 || !pow2 || w > MAX_TEXTURE_SIZE || h > MAX_TEXTURE_SIZE || level > 8 {
+    // No texture is bigger than the card's largest, which has the most
+    // levels.
+    let max = max_texture_size(cpu);
+    if img.border != 0 || !pow2 || w > max || h > max || level >= level_count(max, max) {
         error(cpu, GL_INVALID_VALUE);
         return;
     }
@@ -803,7 +806,7 @@ pub fn copy_tex_image_2d(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     }
     // No texture is bigger than the card's: a larger size isn't read.
-    if width > MAX_TEXTURE_SIZE || height > MAX_TEXTURE_SIZE {
+    if width.max(height) > max_texture_size(cpu) {
         error(cpu, GL_INVALID_VALUE);
         return Some(0);
     }
@@ -834,7 +837,7 @@ pub fn copy_tex_sub_image_2d(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         error(cpu, GL_INVALID_ENUM);
         return Some(0);
     }
-    if width > MAX_TEXTURE_SIZE || height > MAX_TEXTURE_SIZE {
+    if width.max(height) > max_texture_size(cpu) {
         error(cpu, GL_INVALID_VALUE);
         return Some(0);
     }
