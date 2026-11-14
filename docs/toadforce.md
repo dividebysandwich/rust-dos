@@ -2048,38 +2048,42 @@ the host's vertex for each corner
 
 Where the emulator thread's busy time goes, from a profile of 20
 seconds on each build, as milliseconds of a frame (the share times
-85% of the frame's time at the rates below):
+85% of the frame's time at the rates below). The profiles were taken
+with other work on the machine, so the figures are approximate:
 
 | Zone | Before | After |
 |---|---|---|
-| `cpu.jit`, the game's code | 14.1 | 13.7 |
-| `toadforce.host` | 3.5 | 3.0 |
-| `toadforce` | 2.3 | 1.8 |
-| `hle.win32` | 2.4 | 0.8 |
-| `hle.d3d.draw` and `hle.d3d.vertices` | 3.0 | 0.4 |
-| `hle.d3d.bind` and its parts | 1.0 | 0.9 |
-| The rest | 2.8 | 2.5 |
-| A frame's busy time | 29.1 | 23.1 |
+| `cpu.jit`, the game's code | 14.4 | 13.6 |
+| `toadforce.host` | 2.9 | 1.8 |
+| `toadforce` | 2.3 | 2.1 |
+| `hle.win32` | 2.0 | 0.8 |
+| `hle.d3d.draw` and `hle.d3d.vertices` | 3.2 | 0.6 |
+| `hle.d3d.bind` and its parts | 1.1 | 0.9 |
+| The rest | 2.6 | 2.1 |
+| A frame's busy time | 28.6 | 21.8 |
 
-`DrawIndexedPrimitive` was 19.0% of the busy time and is 6.4%. Of
+`DrawIndexedPrimitive` was 21.0% of the busy time and is 8.6%. Of
 the frame's 756 draws, 755 (754.7 on average) go the direct way and
 one, with 141 vertices, through the pipeline. What the game's calls
 cost besides is small here: about 3,200 calls a frame, of which the
 trap and the arguments are about 1% of the busy time.
 
 Frames a second, each run alone on the machine with `cycles=max`
-and the profiler off, main's build and that of the direct path and
-the host's queue ("After", without the kept buffer below) in turn in
-one session: five runs of two 15-second windows for Black & White, and
+and the profiler off, main's build and the pass's in turn in one
+session: five runs of two 15-second windows for Black & White, and
 two runs of two 20-second windows for the others (Giants and No One
 Lives Forever from a saved state, Oni by its route):
 
 | Game | Before | After | Draws the direct way |
 |---|---|---|---|
-| Black & White, tutorial | 29.2 (28.6 to 29.5) | 36.8 (36.2 to 37.4) | 755 of 756 |
-| No One Lives Forever | 53.4 to 54.6 | 60.0, its cap | 1904 of 1904 |
-| Giants | 37.5 to 37.9 | 38.4 to 39.6 | 263 of 981 |
-| Oni, training room | 45.6 to 46.3 | 47.2 to 48.0 | none |
+| Black & White, tutorial | 29.8 (29.5 to 30.0) | 39.1 (38.8 to 39.3) | 755 of 756 |
+| No One Lives Forever | 55.1 to 56.8 | 59.9 to 60.0 | 1904 of 1904 |
+| Giants | 38.8 to 39.0 | 41.0 to 41.5 | 263 of 981 |
+| Oni, training room | 46.9 to 47.2 | 47.2 to 47.4 | none |
+
+No One Lives Forever is at the 60 frames of its display mode after
+the pass, with the emulator's thread 71% to 77% busy where it was
+85%.
 
 The last column is a frame's draws the direct way out of those and
 the batches the pipeline handed the card (`screen_draws` in
@@ -2090,14 +2094,9 @@ transform itself, so Giants' 718 others aren't all screen draws the
 direct path declined. Giants draws most of its vertices
 untransformed, on the card's transform and lighting, and Oni's reach
 the device from the OpenGL front end already read: both gain from
-the host's queue alone.
-
-The OpenGL renderer also keeps the buffer it gathers a batch's
-vertices in from batch to batch, where it took a new one of some
-hundred kilobytes twelve times a frame. That was measured after the
-table, against the build of its "After" column in a session of three
-runs each: Black & White at 36.9 (36.8 to 37.6) without it and 38.2
-(37.6 to 38.6) with it.
+the host's queue alone. The OpenGL renderer also keeps the buffer it
+gathers a batch's vertices in from batch to batch, where it took a
+new one of some hundred kilobytes twelve times a frame.
 
 The pictures are main's: deterministic runs on the software renderer
 from a saved state, twelve frames at equal emulated times for Black
@@ -2110,7 +2109,8 @@ scene on both renderers (`toadforce::gl`).
 The card's draws join into runs of one state on the host as before:
 this scene's 756 draws make 560 runs, so its states change too often
 for joining to give more. `cycles=max` leaves 15% of each frame idle
-(`MAX_BUSY_SHARE`); with the whole frame the scene runs at 42.6, with
+(`MAX_BUSY_SHARE`); given the whole frame, a build with the direct
+path alone ran the scene at 42.6 where it ran at 35.4 with 85%, with
 no emulated time dropped and the sound queue never dry on a quiet
 host. Whether that holds on a busy or a small one is issue 1059's.
 
