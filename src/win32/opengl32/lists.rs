@@ -1751,6 +1751,79 @@ mod tests {
         assert_eq!((c.begin, c.error), (None, GL_INVALID_OPERATION));
     }
 
+    /// A list replayed with its runs as batches leaves the context as
+    /// the replay of all its calls does: the current color, normal and
+    /// both units' texture coordinates, and the materials that
+    /// GL_COLOR_MATERIAL makes follow the color, lit or not. The first
+    /// run sets each value after its first vertex, the second sets
+    /// none, and the third has a glMaterial between its vertices and
+    /// stays calls.
+    #[test]
+    fn a_batch_leaves_the_context_as_its_calls_do() {
+        const GL_TEXTURE1: u32 = GL_TEXTURE0 + 1;
+        const GL_FRONT: u32 = 0x0404;
+        const GL_SHININESS: u32 = 0x1601;
+        let shiny = [GL_FRONT, GL_SHININESS, 8.0f32.to_bits()];
+        let unit1 = [GL_TEXTURE1, 0.75f32.to_bits(), 0.5f32.to_bits()];
+        let list = list_of(&[
+            ("glBegin", &[4], None),
+            ("glVertex2f", &bits(&[0.0, 0.0]), None),
+            ("glColor4f", &bits(&[1.0, 0.5, 0.25, 0.5]), None),
+            ("glNormal3f", &bits(&[0.0, 0.0, -1.0]), None),
+            ("glTexCoord2f", &bits(&[0.25, 1.0]), None),
+            ("glVertex2f", &bits(&[1.0, 0.0]), None),
+            ("glColor3ub", &[10, 20, 30], None),
+            ("glMultiTexCoord2fARB", &unit1, None),
+            ("glVertex2f", &bits(&[0.0, 1.0]), None),
+            ("glEnd", &[], None),
+            ("glMaterialf", &shiny, None),
+            ("glBegin", &[1], None),
+            ("glVertex2f", &bits(&[0.0, 0.0]), None),
+            ("glVertex2f", &bits(&[1.0, 1.0]), None),
+            ("glEnd", &[], None),
+            ("glBegin", &[0], None),
+            ("glColor3f", &bits(&[0.0, 1.0, 0.0]), None),
+            ("glMaterialf", &shiny, None),
+            ("glVertex2f", &bits(&[0.5, 0.5]), None),
+            ("glEnd", &[], None),
+        ]);
+        assert_eq!(list.batches().len(), 2);
+        let by_call = List {
+            calls: list.calls.clone(),
+            words: list.words.clone(),
+            data: list.data.clone(),
+            ..List::default()
+        };
+        by_call.batches.set(Vec::new()).unwrap();
+        let after = |list: &List, lit: bool| {
+            let mut cpu = Cpu::new(".".into());
+            let tid = super::super::super::user32::current_tid(&cpu);
+            let mut c = super::super::new_context(1, 2, 3);
+            c.caps |= CAP_COLOR_MATERIAL;
+            if lit {
+                c.caps |= super::super::CAP_LIGHTING;
+                c.lighting.enabled = 1;
+            }
+            c.color = [0.5, 0.5, 0.5, 1.0];
+            c.normal = [0.0, 1.0, 0.0];
+            c.tex_coord = [[0.5, 0.5, 0.0, 1.0], [0.125, 0.25, 0.0, 1.0]];
+            let s = state(&mut cpu);
+            s.contexts.push(Some(c));
+            s.current.push((tid, super::super::hglrc(0), 0));
+            run(&mut cpu, list);
+            let c = ctx(&mut cpu).unwrap();
+            let current = (c.color, c.normal, c.tex_coord);
+            (current, c.lighting, c.begin, c.error, c.vertices.len())
+        };
+        for lit in [false, true] {
+            assert_eq!(after(&list, lit), after(&by_call, lit), "lit {lit}");
+        }
+        let ((color, normal, tex), ..) = after(&list, false);
+        assert_eq!(color, [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(normal, [0.0, 0.0, -1.0]);
+        assert_eq!(tex, [[0.25, 1.0, 0.0, 1.0], [0.75, 0.5, 0.0, 1.0]]);
+    }
+
     /// What a replay of a run costs call by call and as a batch, in
     /// nanoseconds for each vertex: a strip of 2000 vertices, each a
     /// glNormal3f and a glVertex3f as a model in a list is given,

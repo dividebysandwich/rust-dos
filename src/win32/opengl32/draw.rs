@@ -316,11 +316,12 @@ impl Applied {
 /// The device's state for the draws of the context `c` as it is now,
 /// None when its viewport is off its buffers and nothing is drawn. It
 /// is made once for each stamp of the context: a draw that follows
-/// another with nothing set between them finds it made.
-fn applied_of<'a>(c: &'a mut Context, shared: &[Texture]) -> Option<&'a Applied> {
+/// another with nothing set between them finds it made, and doesn't
+/// look for its group's textures in `lists`.
+fn applied_of<'a>(c: &'a mut Context, lists: &super::lists::Shared) -> Option<&'a Applied> {
     let stamp = c.stamp();
     if c.applied.as_ref().is_none_or(|(made, _)| *made != stamp) {
-        let made = applied(c, shared);
+        let made = applied(c, lists.textures(c.lists.group));
         c.applied = Some((stamp, made));
     }
     c.applied.as_ref()?.1.as_ref()
@@ -893,13 +894,12 @@ fn draw(
     };
     let vertices = sided.as_deref().unwrap_or(vertices);
     let stamp = c.stamp();
-    let shared = st.lists.textures(c.lists.group);
     // The draws that wait take this one if they are the context's and
     // have its state: its stamp, or the state made anew and equal.
     if let Some(w) = &mut st.waiting
         && w.context == index as u32
         && w.vertices.len() + vertices.len() <= WAITING_VERTICES
-        && (w.stamp == stamp || applied_of(c, shared).is_some_and(|a| a.same(&w.applied)))
+        && (w.stamp == stamp || applied_of(c, &st.lists).is_some_and(|a| a.same(&w.applied)))
     {
         let first = w.vertices.len() as u32;
         w.stamp = stamp;
@@ -914,7 +914,7 @@ fn draw(
         c.drawn = true;
         return;
     }
-    let Some(applied) = applied_of(c, shared).cloned() else {
+    let Some(applied) = applied_of(c, &st.lists).cloned() else {
         return;
     };
     c.drawn = true;
