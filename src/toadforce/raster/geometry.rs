@@ -476,9 +476,11 @@ impl Setup {
         };
         match &self.lighting {
             Some(lighting) => {
-                (v.diffuse, v.specular) = lighting.light(eye, normal, own_diffuse, own_specular);
+                (v.diffuse, v.specular) =
+                    lighting.light(eye, normal, own_diffuse, own_specular, false);
                 if self.two_sided != 0 {
-                    let (d, s) = lighting.light(eye, normal.map(|c| -c), own_diffuse, own_specular);
+                    let turned = normal.map(|c| -c);
+                    let (d, s) = lighting.light(eye, turned, own_diffuse, own_specular, true);
                     v.back = [d, s];
                 }
             }

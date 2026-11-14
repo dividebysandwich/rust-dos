@@ -5,8 +5,8 @@
 //!
 //! This is only the state as the program sets it. `shade.rs` evaluates
 //! the lighting equation over it for a vertex, as a function of this
-//! state and the vertex, so that a card that lights vertices itself can
-//! take the same state instead.
+//! state and the vertex, and a card that lights vertices itself takes
+//! the same state instead (`tnl.rs`).
 
 use super::state::{GL_BACK, GL_FRONT, GL_FRONT_AND_BACK};
 use super::{
@@ -27,9 +27,9 @@ pub fn index(light: u32) -> Option<usize> {
 }
 
 // Light parameters.
-const GL_AMBIENT: u32 = 0x1200;
-const GL_DIFFUSE: u32 = 0x1201;
-const GL_SPECULAR: u32 = 0x1202;
+pub(super) const GL_AMBIENT: u32 = 0x1200;
+pub(super) const GL_DIFFUSE: u32 = 0x1201;
+pub(super) const GL_SPECULAR: u32 = 0x1202;
 const GL_POSITION: u32 = 0x1203;
 const GL_SPOT_DIRECTION: u32 = 0x1204;
 const GL_SPOT_EXPONENT: u32 = 0x1205;
@@ -163,7 +163,7 @@ fn faces(face: u32) -> Option<&'static [usize]> {
 }
 
 /// The material properties glColorMaterial's `mode` names.
-fn tracked(mode: u32) -> &'static [u32] {
+pub(super) fn tracked(mode: u32) -> &'static [u32] {
     match mode {
         GL_AMBIENT_AND_DIFFUSE => &[GL_AMBIENT, GL_DIFFUSE],
         GL_EMISSION => &[GL_EMISSION],
@@ -460,6 +460,11 @@ fn material(cpu: &mut Cpu, face: u32, p: u32, v: Values) {
     let Some(c) = ctx(cpu) else {
         return;
     };
+    // The vertices given since glBegin have the materials as they
+    // were.
+    if c.begin.is_some() {
+        super::draw::light_gathered(c);
+    }
     let tracking = c.caps & CAP_COLOR_MATERIAL != 0;
     let l = &mut c.lighting;
     for &side in sides {

@@ -152,7 +152,7 @@ pub struct ToadForce {
 /// The version of the card's saved state, which a saved state's `TOAD`
 /// section and a recording (`capture`) carry. A change to what
 /// `state_fields!` below saves takes a new one.
-pub const STATE_VERSION: u16 = 3;
+pub const STATE_VERSION: u16 = 4;
 
 /// How long a queued command waits at most, in nanoseconds of the
 /// emulated clock: well under a frame, so that a picture drawn straight

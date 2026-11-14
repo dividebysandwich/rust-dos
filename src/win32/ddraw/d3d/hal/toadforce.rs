@@ -157,6 +157,9 @@ pub struct Hal {
     /// batches the pipeline handed the card (`Raster::finish`) and the
     /// vertices of their commands.
     pub screen_draws: [u64; 4],
+    /// OpenGL's draws by where they were transformed and lit
+    /// (`opengl32::tnl::count_names`).
+    pub gl_draws: [u64; crate::win32::opengl32::tnl::COUNTS],
     /// The buffers of `direct::draw`.
     pub scratch: direct::Scratch,
 }
@@ -165,7 +168,7 @@ crate::state_fields!(Hal {
     pid,
     textures,
     clock
-} skip { told, binds, logged, taken, screen_draws, scratch });
+} skip { told, binds, logged, taken, screen_draws, gl_draws, scratch });
 
 /// What the card was told, kept so that its two parts can't come apart.
 mod told {
@@ -214,6 +217,48 @@ mod told {
     }
 }
 
+/// OpenGL's part of the card's state for vertices the card transforms
+/// and lights: what Direct3D's device has no state for, which OpenGL's
+/// layer (`opengl32::tnl`) makes of its context and hands over with a
+/// draw (`draw_gl`). The matrices, the fog and the texture coordinates
+/// are the device's, as for Direct3D's draws.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Gl {
+    /// The render states of `GEOMETRY` OpenGL sets, by number: those
+    /// of lighting, and the vertex a flat primitive takes its colour
+    /// from. One it doesn't name is the device's.
+    pub states: Vec<(u32, u32)>,
+    /// The lights and materials, with GL_LIGHTING on.
+    pub lighting: Option<GlLighting>,
+}
+
+/// OpenGL's lights and materials as the card has them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GlLighting {
+    /// The front material, and the back one with two-sided lighting.
+    pub material: Material,
+    pub back: Option<Material>,
+    /// The scene's ambient light: red, green and blue.
+    pub ambient: [f32; 3],
+    /// The lights that are on, which take the card's first slots.
+    pub lights: Vec<Light>,
+}
+
+crate::state_fields!(Gl { states, lighting });
+crate::state_fields!(GlLighting {
+    material,
+    back,
+    ambient,
+    lights
+});
+
+impl Gl {
+    /// The value OpenGL gives the render state `id`, if it sets it.
+    fn state(&self, id: u32) -> Option<u32> {
+        self.states.iter().find(|s| s.0 == id).map(|s| s.1)
+    }
+}
+
 /// A bind and what it was made from. A draw whose device, surfaces
 /// and setup are these again finds the card in the state this bind
 /// left, and has nothing to send (`kept`).
@@ -231,8 +276,10 @@ pub struct Kept {
     /// the viewport, and the projection's last column (`RS_FOG_BY_W`).
     view_map: ViewMap,
     by_w: [f32; 4],
-    /// The whole setup, for vertices the card transforms.
+    /// The whole setup, for vertices the card transforms, and
+    /// OpenGL's part of their state.
     setup: Option<Box<Setup>>,
+    gl: Option<Box<Gl>>,
     /// The textures the card has copies of, and what `stamp` gave for
     /// each: the pixels a copy is of change without the objects' stamp
     /// (`State::surface_drawn`). 0 is no surface.
@@ -262,7 +309,7 @@ fn stamp_of(st: &super::super::super::State, id: u32) -> u32 {
 /// a bind of `d` with `setup` would be made from the same: the device
 /// and the objects have its stamps, the copies' surfaces their pixels,
 /// and the setup's parts a bind reads are equal.
-fn kept(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> {
+fn kept(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool, gl: Option<&Gl>) -> Option<Card> {
     if cpu.bus.toadforce.as_ref().map_or(0, |card| card.level()) != 1 {
         return None;
     }
@@ -276,6 +323,7 @@ fn kept(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> {
         && k.view_map == setup.view_map
         && k.by_w == by_w(setup)
         && (!lit || k.setup.as_deref() == Some(setup))
+        && k.gl.as_deref() == gl
         && k
             .copies
             .iter()
@@ -327,6 +375,11 @@ pub struct Sent {
 struct Geometry {
     transforms: [Matrix; TRANSFORMS],
     material: Material,
+    /// The back's material: `SET_MATERIAL` sets it with the front's.
+    back: Material,
+    /// The ambient light's numbers, while `SET_AMBIENT` was the last to
+    /// set it: a write of the `AMBIENT` state replaces them.
+    ambient: Option<[f32; 3]>,
     lights: [Light; LIGHTS],
     /// Bit n: light n is on.
     on: u32,
@@ -354,6 +407,8 @@ impl Sent {
             geometry: Geometry {
                 transforms: [pipeline::IDENTITY; TRANSFORMS],
                 material: Material::default(),
+                back: Material::default(),
+                ambient: None,
                 lights: [Light::default(); LIGHTS],
                 on: 0,
                 planes: [[0.0; 4]; CLIP_PLANES],
@@ -364,7 +419,7 @@ impl Sent {
 
 /// The render states of the card's transform and lighting, which a
 /// draw of screen vertices leaves at their reset values.
-const GEOMETRY: [u32; 14] = [
+const GEOMETRY: [u32; 18] = [
     states::RS_VERTEXBLEND,
     states::RS_RANGEFOGENABLE,
     states::RS_CLIPPING,
@@ -379,6 +434,10 @@ const GEOMETRY: [u32; 14] = [
     states::RS_AMBIENTMATERIALSOURCE,
     states::RS_EMISSIVEMATERIALSOURCE,
     states::RS_CLIPPLANEENABLE,
+    states::RS_FLAT_VERTEX,
+    states::RS_TWO_SIDED_LIGHTING,
+    states::RS_SINGLE_COLOUR,
+    states::RS_COLORVERTEX_FACES,
 ];
 
 /// The render states the HAL sets: the rasteriser's, and `GEOMETRY`.
@@ -795,12 +854,23 @@ fn checked(def: &Def, value: u32) -> u32 {
 }
 
 /// The value of the render state `def` for the device `d`. With
-/// `lit` the card transforms and lights the draw's vertices;
-/// without, they are the pipeline's screen vertices.
-fn render_value(d: &Device, def: &Def, setup: &Setup, depth: Option<Format>, lit: bool) -> u32 {
+/// `lit` the card transforms and lights the draw's vertices, with
+/// OpenGL's states `gl` where the draw is OpenGL's; without, they are
+/// the pipeline's screen vertices.
+fn render_value(
+    d: &Device,
+    def: &Def,
+    setup: &Setup,
+    depth: Option<Format>,
+    lit: bool,
+    gl: Option<&Gl>,
+) -> u32 {
     use states::*;
     if !lit && GEOMETRY.contains(&def.id) {
         return def.reset;
+    }
+    if let Some(value) = gl.and_then(|gl| gl.state(def.id)) {
+        return checked(def, value);
     }
     let lighting = setup.lighting.as_ref();
     let source = |which: usize| lighting.map_or(0, |l| l.sources[which]);
@@ -825,6 +895,10 @@ fn render_value(d: &Device, def: &Def, setup: &Setup, depth: Option<Format>, lit
         RS_CLIPPLANEENABLE => (1 << setup.planes.len().min(CLIP_PLANES)) - 1,
         // As many weights as the card's vertices have (`card_layout`).
         RS_VERTEXBLEND => blended(setup).map_or(0, |matrices| matrices.len() as u32 - 1),
+        // OpenGL's, which Direct3D's device has no state for.
+        RS_FLAT_VERTEX | RS_TWO_SIDED_LIGHTING | RS_SINGLE_COLOUR | RS_COLORVERTEX_FACES => {
+            def.reset
+        }
         // The pipeline culls, makes the lines and points of the other
         // fill modes, and gives a flat primitive's vertices one color.
         RS_CULLMODE => 1,
@@ -953,20 +1027,27 @@ impl Card {
 /// Whether the device `d` can be drawn by the card now. The card's
 /// state is then the device's, for screen vertices.
 pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
-    bind_as(cpu, d, setup, false)
+    bind_as(cpu, d, setup, false, None)
 }
 
 /// `bind`, with `lit` for vertices the card transforms and lights:
 /// the card then has the device's matrices, lights, material and clip
-/// planes too, which `can_transform` found it to take.
+/// planes too, which `can_transform` found it to take. With `gl`
+/// the draw is OpenGL's, and the lights and materials are those.
 ///
 /// Most draws follow one with the same states, textures and target.
 /// The card's state is then right already, and finding that out costs
 /// a comparison of stamps (`kept`) where a bind looks every state and
 /// every texture up again.
-fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> {
+fn bind_as(
+    cpu: &mut Cpu,
+    d: &Device,
+    setup: &Setup,
+    lit: bool,
+    gl: Option<&Gl>,
+) -> Option<Card> {
     hal(cpu).binds[0] += 1;
-    let kept = kept(cpu, d, setup, lit);
+    let kept = kept(cpu, d, setup, lit, gl);
     if kept.is_some() {
         hal(cpu).binds[1] += 1;
         if !CHECK_KEPT {
@@ -994,6 +1075,8 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
     let mut sent = sent(cpu);
     let mut words = Vec::new();
     let asked_lit = lit;
+    // The numbers OpenGL's ambient light has, sent after the states.
+    let mut ambient = None;
 
     if sent.target != Some(target) {
         encode::render_target(&mut words, Some(&target));
@@ -1081,21 +1164,24 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
             if g.material != material {
                 encode::material(&mut words, &material);
                 g.material = material;
+                g.back = material;
             }
-            for (slot, light) in l.lights.iter().enumerate() {
-                let light = card_light(light);
-                if g.lights[slot] != light {
-                    encode::light(&mut words, slot as u32, &light);
-                    g.lights[slot] = light;
-                }
+            let lights: Vec<Light> = l.lights.iter().map(card_light).collect();
+            send_lights(&mut words, g, &lights);
+        } else if let Some(l) = gl.and_then(|gl| gl.lighting.as_ref()) {
+            if g.material != l.material {
+                encode::material(&mut words, &l.material);
+                g.material = l.material;
+                g.back = l.material;
             }
-            let on = (1u32 << l.lights.len()) - 1;
-            for slot in 0..LIGHTS as u32 {
-                if (g.on ^ on) >> slot & 1 != 0 {
-                    encode::enable_light(&mut words, slot, on >> slot & 1 != 0);
-                }
+            if let Some(back) = l.back
+                && g.back != back
+            {
+                encode::back_material(&mut words, &back);
+                g.back = back;
             }
-            g.on = on;
+            send_lights(&mut words, g, &l.lights);
+            ambient = Some(l.ambient);
         }
         for (i, plane) in setup.planes.iter().take(CLIP_PLANES).enumerate() {
             if g.planes[i] != *plane {
@@ -1177,14 +1263,37 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
         let Some(def) = states::render(id) else {
             continue;
         };
-        let want = render_value(d, def, setup, depth, lit);
+        let want = render_value(d, def, setup, depth, lit, gl);
         if *have != want {
             pairs.push((id, want));
             *have = want;
+            // A write of `AMBIENT` replaces `SET_AMBIENT`'s numbers.
+            if id == states::RS_AMBIENT {
+                sent.geometry.ambient = None;
+            }
+        }
+    }
+    // The ambient light is the last of the two that was sent: the
+    // state's colour for Direct3D, which is sent again over OpenGL's
+    // numbers, and the numbers for OpenGL.
+    let lighting = lit && (setup.lighting.is_some() || ambient.is_some());
+    if lighting && ambient.is_none() && sent.geometry.ambient.take().is_some() {
+        let at = render_states().position(|id| id == states::RS_AMBIENT);
+        if let Some(at) = at
+            && !pairs.iter().any(|p| p.0 == states::RS_AMBIENT)
+        {
+            pairs.push((states::RS_AMBIENT, sent.render[at]));
         }
     }
     if !pairs.is_empty() {
         encode::render_state(&mut words, &pairs);
+    }
+    if lighting
+        && let Some(ambient) = ambient
+        && sent.geometry.ambient != Some(ambient)
+    {
+        encode::ambient(&mut words, &ambient);
+        sent.geometry.ambient = Some(ambient);
     }
     let per_stage = states::STAGE.len();
     for stage in 0..caps::STAGES {
@@ -1230,6 +1339,7 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
         view_map: setup.view_map,
         by_w: by_w(setup),
         setup: asked_lit.then(|| Box::new(setup.clone())),
+        gl: gl.map(|gl| Box::new(gl.clone())),
         copies,
         card,
     };
@@ -1762,6 +1872,25 @@ fn matrix_stages(d: &Device) -> impl Iterator<Item = u32> + '_ {
         .filter(|&stage| d.stage(stage, states::TSS_TEXTURETRANSFORMFLAGS) & 0xFF != 0)
 }
 
+/// Put `lights` in the card's first slots and turn those on, and the
+/// others off: the commands for what differs from what the card has
+/// (`g`).
+fn send_lights(words: &mut Vec<u32>, g: &mut Geometry, lights: &[Light]) {
+    for (slot, light) in lights.iter().enumerate() {
+        if g.lights[slot] != *light {
+            encode::light(words, slot as u32, light);
+            g.lights[slot] = *light;
+        }
+    }
+    let on = (1u32 << lights.len()) - 1;
+    for slot in 0..LIGHTS as u32 {
+        if (g.on ^ on) >> slot & 1 != 0 {
+            encode::enable_light(words, slot, on >> slot & 1 != 0);
+        }
+    }
+    g.on = on;
+}
+
 /// A light of the device as the card has one.
 fn card_light(l: &pipeline::Light) -> Light {
     Light {
@@ -1958,7 +2087,7 @@ fn as_list(kind: u32, n: usize) -> (u32, usize, Vec<usize>) {
 /// lit by the pipeline (`RUST_DOS_TOADFORCE_TNL=pipeline`): the way to
 /// tell what the card's transform and lighting changes in a scene, by
 /// drawing it both ways.
-fn pipeline_transforms() -> bool {
+pub fn pipeline_transforms() -> bool {
     static PIPELINE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *PIPELINE.get_or_init(|| {
         std::env::var("RUST_DOS_TOADFORCE_TNL").is_ok_and(|v| v.eq_ignore_ascii_case("pipeline"))
@@ -2080,7 +2209,7 @@ pub fn draw_geometry(
     {
         return false;
     }
-    let Some(card) = bind_as(cpu, d, setup, true) else {
+    let Some(card) = bind_as(cpu, d, setup, true, None) else {
         return false;
     };
     if card.clip[0] == card.clip[2] || card.clip[1] == card.clip[3] {
@@ -2088,6 +2217,87 @@ pub fn draw_geometry(
     }
     let weights = blended(setup).map_or(0, |matrices| matrices.len() - 1);
     let words = geometry_words(layout, weights, vertices, kind, order, COMMAND_WORDS);
+    if !words.is_empty() {
+        submit(cpu, &words);
+        drew(cpu, &card);
+    }
+    true
+}
+
+/// Count `n` more of OpenGL's draws at `place`
+/// (`opengl32::tnl::count_names`).
+pub fn count_gl(cpu: &mut Cpu, place: usize, n: u64) {
+    hal(cpu).gl_draws[place] += n;
+}
+
+/// Whether the card takes the numbers of OpenGL's lights and
+/// materials: all finite, and no more lights than it has slots.
+pub fn can_light(gl: &Gl) -> bool {
+    let finite = |numbers: &[f32]| numbers.iter().all(|n| n.is_finite());
+    let material = |m: &Material| {
+        finite(&[m.diffuse, m.ambient, m.specular, m.emissive].concat()) && m.power.is_finite()
+    };
+    gl.lighting.as_ref().is_none_or(|l| {
+        l.lights.len() <= LIGHTS
+            && material(&l.material)
+            && l.back.as_ref().is_none_or(material)
+            && finite(&l.ambient)
+            && l.lights.iter().all(|l| {
+                finite(&[l.diffuse, l.specular, l.ambient].concat())
+                    && finite(&[l.position, l.direction, l.attenuation].concat())
+                    && finite(&[l.range, l.falloff, l.theta, l.phi])
+            })
+    })
+}
+
+/// Draw OpenGL's primitives of `vertices`, which aren't in screen
+/// space, with the card transforming and lighting them by the device
+/// `d`'s matrices and OpenGL's lights and materials `gl`. `lists` are
+/// the primitives in their order, as lists of points (1), lines (2)
+/// or triangles (4) with the places of their vertices. False, with
+/// nothing drawn, when the card can't take the state: OpenGL's layer
+/// decides which draws come here (`opengl32::tnl`), and sends none
+/// that this refuses.
+pub fn draw_gl(
+    cpu: &mut Cpu,
+    d: &Device,
+    setup: &Setup,
+    gl: &Gl,
+    layout: &Layout,
+    vertices: &[Vertex],
+    lists: &[(u32, Vec<u32>)],
+) -> bool {
+    let count = vertices.len();
+    let inside = |order: &[u32]| order.iter().all(|&i| (i as usize) < count);
+    if setup.lighting.is_some()
+        || !can_transform(d, setup, layout)
+        || !can_light(gl)
+        || !lists.iter().all(|(_, order)| inside(order))
+    {
+        return false;
+    }
+    let Some(card) = bind_as(cpu, d, setup, true, Some(gl)) else {
+        return false;
+    };
+    if card.clip[0] == card.clip[2] || card.clip[1] == card.clip[3] {
+        return true;
+    }
+    let mut words = Vec::new();
+    for (kind, order) in lists {
+        let kind = match kind {
+            1 => pipeline::POINTLIST,
+            2 => pipeline::LINELIST,
+            _ => pipeline::TRIANGLELIST,
+        };
+        words.extend(geometry_words(
+            layout,
+            0,
+            vertices,
+            kind,
+            Some(order.as_slice()),
+            COMMAND_WORDS,
+        ));
+    }
     if !words.is_empty() {
         submit(cpu, &words);
         drew(cpu, &card);

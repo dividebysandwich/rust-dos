@@ -143,6 +143,11 @@ pub fn ddraw_json(cpu: &Cpu) -> Value {
             "pipeline": d.screen_draws[2],
             "pipeline_vertices": d.screen_draws[3],
         }),
+        "gl_draws": d
+            .gl_draws
+            .iter()
+            .map(|&(name, n)| (name.to_string(), json!(n)))
+            .collect::<Map<String, Value>>(),
         "surfaces": d.surfaces.iter().map(surface_json).collect::<Vec<_>>(),
     })
 }

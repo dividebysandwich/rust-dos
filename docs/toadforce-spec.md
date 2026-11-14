@@ -683,6 +683,23 @@ Turning on a slot no `SET_LIGHT` has set is rejected with `BAD_STATE`.
 
 The planes in use are those whose bits `CLIPPLANEENABLE` has.
 
+**`SET_BACK_MATERIAL`, 0019h.** Length 18. The words of
+`SET_MATERIAL`, for the material of the back of a triangle that
+`TWO_SIDED_LIGHTING` lights. `SET_MATERIAL` sets both materials, so a
+program that sends it alone has one material; this command after it
+gives the back its own.
+
+**`SET_AMBIENT`, 001Ah.** Length 4.
+
+| Word | Argument |
+|---|---|
+| 1 to 3 | the ambient light's red, green and blue |
+
+The ambient light as numbers, where the state `AMBIENT` has a byte for
+each channel. The two set the same light: the one sent last holds, and
+a write of `AMBIENT` in a `SET_RENDER_STATE` counts whether or not it
+changes the state's value.
+
 **`SET_RENDER_TARGET`, 0020h.** Length 9.
 
 | Word | Argument |
@@ -957,9 +974,19 @@ ambient colour only, and a spot with one has a rho of 0. A light
 whose f isn't a number above 0, or is infinite, adds nothing.
 
 With `TWO_SIDED_LIGHTING` 1 or 2 a triangle that shows its back has
-the colours the vertices get with their normals turned round. The
-back shows where the triangle is counterclockwise on the screen with
-1, and clockwise with 2. Lines and points have the front's colours.
+the colours the vertices get with their normals turned round and the
+back's material (`SET_BACK_MATERIAL`). The back shows where the
+triangle is counterclockwise on the screen with 1, and clockwise with
+2. Lines and points have the front's colours.
+
+`COLORVERTEX_FACES` says which sides take a vertex's colour where a
+material source names one: bit 0 the front, bit 1 the back. The other
+side has its material's colour.
+
+With `SINGLE_COLOUR` 1 the specular sum is worked out whatever
+`SPECULARENABLE` says and added to the diffuse colour before that is
+limited, and the specular colour is black: OpenGL 1.1's lighting,
+which has one colour for a vertex.
 
 Each channel is then limited to 0 to 1 and becomes c * 255 rounded to
 the nearest whole number.
@@ -1206,6 +1233,8 @@ has the state. 256 to 258 are the card's own.
 | 257 | `FLAT_VERTEX` | 0 or 1 | 0 |
 | 258 | `TWO_SIDED_LIGHTING` | 0 to 2 | 0 |
 | 259 | `FOG_BY_W` | 0 or 1 | 0 |
+| 260 | `SINGLE_COLOUR` | 0 or 1 | 0 |
+| 261 | `COLORVERTEX_FACES` | 1 to 3 | 3 |
 
 - `ZENABLE` has no value for a W buffer.
 - `SHADEMODE` is 1 flat or 2 Gouraud.
@@ -1222,6 +1251,11 @@ has the state. 256 to 258 are the card's own.
   side with 1 and the clockwise side with 2.
 - `FOG_BY_W`: the distance table fog goes by, 0 a fragment's depth
   and 1 its w.
+- `SINGLE_COLOUR`: 1 adds the specular light to a lit vertex's
+  diffuse colour (OpenGL 1.1), 0 keeps it in the specular colour.
+- `COLORVERTEX_FACES`: the sides whose material takes the vertex's
+  colours with `COLORVERTEX`, bit 0 the front and bit 1 the back
+  (glColorMaterial's face).
 
 #### Stage states
 
@@ -1301,10 +1335,13 @@ number.
   DirectDraw HAL has to match, and whether level 1 gives `BLT` a flag
   for the other, is settled with a comparison against DirectDraw on a
   real Windows 98.
-- **One material.** OpenGL has a material for each side of a
-  triangle, and the card has one, which lights the back too. A second
-  material would be a flag word in `SET_MATERIAL`, added with the game
-  that shows the difference.
+- **A side for each polygon.** OpenGL lights the back of a quad or a
+  polygon by the side the whole of it shows, and the card chooses for
+  each triangle. An OpenGL driver lights two-sided quads and polygons
+  itself until a draw command says which triangles make one.
+- **Colours as bytes.** A vertex's colours are four bytes, and
+  glColorMaterial takes the current colour as numbers. A driver lights
+  the vertices itself where a colour isn't a whole number of 255ths.
 - **Fog without a fog mode.** With `FOGENABLE` and neither a table
   nor a vertex mode, the fog factor is the specular colour's alpha,
   which a lit vertex has at 255. Whether Direct3D passes a lit

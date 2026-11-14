@@ -515,6 +515,53 @@ fn draw_on_card(
     true
 }
 
+/// Draw OpenGL's primitives `lists` of `vertices` with the device
+/// `id` on a card that transforms and lights vertices itself, with
+/// OpenGL's lights and materials `gl` (`hal::draw_gl`). False, with
+/// nothing drawn, when the device's card doesn't or can't.
+pub fn draw_gl(
+    cpu: &mut Cpu,
+    id: u32,
+    layout: &Layout,
+    vertices: &[Vertex],
+    gl: &super::hal::Gl,
+    lists: &[(u32, Vec<u32>)],
+) -> bool {
+    let made = {
+        let _profile = crate::profile::zone(crate::profile::Zone::D3dSetup);
+        setup(cpu, Pass::Draw, id, 8, layout, 0)
+    };
+    let Some(setup) = made else {
+        return false;
+    };
+    let drawn = {
+        let _profile = crate::profile::zone(crate::profile::Zone::D3dDraw);
+        super::device::lend(cpu, id, |cpu, d| {
+            super::hal::draw_gl(cpu, d, &setup, gl, layout, vertices, lists)
+        })
+    };
+    if drawn != Some(true) {
+        return false;
+    }
+    let Some(d) = get(cpu, id) else {
+        return true;
+    };
+    for (kind, order) in lists {
+        let n = order.len() as u32;
+        let (stat, primitives) = match kind {
+            1 => (2, n),
+            2 => (1, n / 2),
+            _ => (0, n / 3),
+        };
+        d.stats[stat] = d.stats[stat].wrapping_add(primitives);
+    }
+    d.stats[4] = d.stats[4].wrapping_add(vertices.len() as u32);
+    // The target's pixels changed, for a texture made of it.
+    let target = d.target;
+    super::super::surface::changed(cpu, target);
+    true
+}
+
 /// The `kind` primitives of `count` vertices, in the order `order` or
 /// as they are.
 fn primitives(kind: u32, order: Option<&[u32]>, count: usize) -> Result<Vec<Prim>, u32> {
