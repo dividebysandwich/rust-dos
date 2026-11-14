@@ -18,7 +18,7 @@ there.
 |---|---|
 | 1 to 8 | frozen: implemented in `src/toadforce` and `src/bus/toadforce.rs` |
 | 9, level 0 | frozen, with them |
-| 9, level 1 | provisional: the state, surface and draw commands are implemented in `src/toadforce/level1` and drawn by `src/toadforce/raster`, with the card's transform and lighting. A machine's card offers the level for the emulator's own drivers; it is frozen after phase 5, and may change until then |
+| 9, level 1 | provisional: the state, surface and draw commands are implemented in `src/toadforce/level1` and drawn by `src/toadforce/raster`, with the card's transform and lighting. A machine's card offers the level for the emulator's own drivers; it isn't frozen (#1083) and may change until it is |
 | 9, level 2 | not started |
 
 A frozen chapter changes only by adding what an earlier reader can't
