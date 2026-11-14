@@ -39,8 +39,10 @@
 //! and the vertices reach Direct3D's pipeline lit. The extensions are
 //! GL_ARB_multitexture (on a Voodoo3, with its two texture units; a
 //! Banshee has one and not the extension), GL_EXT_bgra,
-//! GL_EXT_compiled_vertex_array, GL_EXT_texture_env_add and
-//! WGL_EXT_swap_control.
+//! GL_EXT_compiled_vertex_array, GL_EXT_packed_pixels,
+//! GL_EXT_texture_env_add and WGL_EXT_swap_control. On a ToadForce,
+//! texels and pixels also come in OpenGL 1.2's other packed types
+//! (`wgl::PackedPixels`).
 //!
 //! On a machine with a Voodoo2 beside a display adapter that has no
 //! ICD of its own (one that is neither a Banshee, a Voodoo3 nor a

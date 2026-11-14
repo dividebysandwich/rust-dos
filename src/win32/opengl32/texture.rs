@@ -20,6 +20,7 @@ use super::{
     Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, GL_OUT_OF_MEMORY,
     Texture, UNITS, ctx, error, f, max_texture_size, read_floats, state,
 };
+use super::wgl::PackedPixels;
 use crate::cpu::Cpu;
 
 pub const GL_TEXTURE0: u32 = 0x84C0;
@@ -149,13 +150,17 @@ struct Source {
 
 /// How a pixel of `format` and `kind` is kept: its bytes, the bytes of
 /// one of its elements, and the packed type (`packed_type`) when `kind`
-/// is one. The error is OpenGL's: GL_INVALID_ENUM for a format or type
-/// there isn't, and GL_INVALID_OPERATION for a packed type whose format
-/// has another number of components (the three-component types take
-/// GL_RGB alone).
-fn pixel_layout(format: u32, kind: u32) -> Result<(u32, u32, Option<Packed>), u32> {
+/// is one the driver takes (`types`). The error is OpenGL's:
+/// GL_INVALID_ENUM for a format or type there isn't, and
+/// GL_INVALID_OPERATION for a packed type whose format has another
+/// number of components (the three-component types take GL_RGB alone).
+pub(super) fn pixel_layout(
+    format: u32,
+    kind: u32,
+    types: PackedPixels,
+) -> Result<(u32, u32, Option<Packed>), u32> {
     let n = components(format).ok_or(GL_INVALID_ENUM)?;
-    match packed_type(kind) {
+    match packed_type(kind).filter(|_| types.takes(kind)) {
         Some(packed) => {
             let fits = match packed.1.len() {
                 3 => format == GL_RGB,
@@ -179,7 +184,8 @@ fn pixel_layout(format: u32, kind: u32) -> Result<(u32, u32, Option<Packed>), u3
 /// OpenGL's: `pixel_layout`'s for the format and type, and
 /// GL_INVALID_ENUM for texels that can't be read.
 fn unpack(cpu: &mut Cpu, unpack: [u32; 4], src: &Source) -> Result<Vec<[u8; 4]>, u32> {
-    let (pixel, size, packed) = pixel_layout(src.format, src.kind)?;
+    let types = super::wgl::packed_pixels(cpu);
+    let (pixel, size, packed) = pixel_layout(src.format, src.kind, types)?;
     let row_pixels = if unpack[1] > 0 { unpack[1] } else { src.width };
     let align = unpack[0].max(1);
     let place = || {
@@ -227,7 +233,7 @@ fn unpack(cpu: &mut Cpu, unpack: [u32; 4], src: &Source) -> Result<Vec<[u8; 4]>,
 
 /// A packed pixel type: the bytes of its element, the bits of each
 /// component and whether the first is lowest (`packed_type`).
-type Packed = (u32, &'static [u32], bool);
+pub(super) type Packed = (u32, &'static [u32], bool);
 
 /// A packed pixel type of OpenGL 1.2 (GL_UNSIGNED_SHORT_5_6_5 and the
 /// others): the bytes of the one element that holds a whole pixel, the
@@ -250,6 +256,30 @@ fn packed_type(kind: u32) -> Option<Packed> {
         0x8368 => (4, &[10, 10, 10, 2], true),
         _ => return None,
     })
+}
+
+/// The packed pixel of `packed` that holds `rgba` with the components
+/// in the order `format` names them (GL_RGB, GL_RGBA or GL_BGRA), as
+/// glReadPixels writes it: each byte scaled to its bits, rounded.
+pub(super) fn pack_pixel(rgba: [u8; 4], format: u32, packed: Packed) -> u32 {
+    let (_, widths, rev) = packed;
+    let [r, g, b, a] = rgba;
+    let ordered = if format == GL_BGRA_EXT {
+        [b, g, r, a]
+    } else {
+        [r, g, b, a]
+    };
+    let mut v = 0;
+    for (i, &bits) in widths.iter().enumerate() {
+        let shift: u32 = if rev {
+            widths[..i].iter().sum()
+        } else {
+            widths[i + 1..].iter().sum()
+        };
+        let max = (1u32 << bits) - 1;
+        v |= (ordered[i] as u32 * max + 127) / 255 << shift;
+    }
+    v
 }
 
 /// Component `i` of the packed pixel `v`, as a byte.
@@ -580,7 +610,7 @@ fn define(cpu: &mut Cpu, img: &Image, texels: Option<Vec<[u8; 4]>>) {
     }
     // The format and type are checked with no texels (a NULL pointer)
     // too.
-    if let Err(e) = pixel_layout(img.format, img.kind) {
+    if let Err(e) = pixel_layout(img.format, img.kind, super::wgl::packed_pixels(cpu)) {
         error(cpu, e);
         return;
     }
@@ -1260,15 +1290,79 @@ mod tests {
         assert_eq!(texel(0x8368, GL_RGBA, 0xC000_03FF), [255, 0, 0, 255]);
         assert_eq!(texel(0x8032, GL_RGB, 0xE3), [255, 0, 255, 255]);
         assert_eq!(texel(0x8362, GL_RGB, 0xC7), [255, 0, 255, 255]);
+        // GL_UNSIGNED_SHORT_4_4_4_4 and GL_UNSIGNED_INT_10_10_10_2: red
+        // highest, alpha lowest.
+        assert_eq!(texel(0x8033, GL_RGBA, 0xF00F), [255, 0, 0, 255]);
+        assert_eq!(texel(0x8033, GL_BGRA_EXT, 0x0F0F), [0, 255, 0, 255]);
+        assert_eq!(texel(0x8036, GL_RGBA, 0xFFC0_0003), [255, 0, 0, 255]);
+        assert_eq!(texel(0x8036, GL_RGBA, 0x0000_0FFC), [0, 0, 255, 0]);
         assert_eq!(packed_type(GL_UNSIGNED_BYTE), None);
+    }
+
+    /// Each of the twelve packed types gives back, read, what was packed
+    /// into it, in each format it takes: the bit order is the same both
+    /// ways. Values that fit the narrowest bits (0 and 255) come back
+    /// whole.
+    #[test]
+    fn packing_a_pixel_and_reading_it_back_agree() {
+        let kinds = (0x8032..=0x8036).chain(0x8362..=0x8368);
+        let mut seen = 0;
+        for kind in kinds {
+            let packed = packed_type(kind).unwrap();
+            let formats: &[u32] = if packed.1.len() == 3 {
+                &[GL_RGB]
+            } else {
+                &[GL_RGBA, GL_BGRA_EXT]
+            };
+            for &format in formats {
+                for rgba in [
+                    [255, 0, 0, 255],
+                    [0, 255, 0, 0],
+                    [0, 0, 255, 255],
+                    [255, 255, 0, 0],
+                ] {
+                    let rgba = if packed.1.len() == 3 {
+                        [rgba[0], rgba[1], rgba[2], 255]
+                    } else {
+                        rgba
+                    };
+                    let v = pack_pixel(rgba, format, packed);
+                    let back = rgba_of(format, |i| packed_component(v, packed.1, packed.2, i));
+                    assert_eq!(back, rgba, "{kind:#x} {format:#x}");
+                    seen += 1;
+                }
+            }
+        }
+        assert_eq!(seen, 4 * (4 + 8 * 2));
+        // GL_UNSIGNED_INT_8_8_8_8_REV with GL_BGRA is the bytes blue,
+        // green, red, alpha in memory.
+        let v = pack_pixel(
+            [0x11, 0x22, 0x33, 0x80],
+            GL_BGRA_EXT,
+            packed_type(0x8367).unwrap(),
+        );
+        assert_eq!(v.to_le_bytes(), [0x33, 0x22, 0x11, 0x80]);
     }
 
     /// OpenGL 1.2: a packed type of three components takes GL_RGB, one
     /// of four GL_RGBA or GL_BGRA, and any other format is
-    /// GL_INVALID_OPERATION.
+    /// GL_INVALID_OPERATION. A driver that doesn't take the type answers
+    /// GL_INVALID_ENUM, as for any type it hasn't.
     #[test]
     fn a_packed_type_takes_formats_of_as_many_components() {
-        let bytes = |format, kind| pixel_layout(format, kind).map(|(pixel, _, _)| pixel);
+        let bytes = |format, kind| {
+            pixel_layout(format, kind, PackedPixels::Core12).map(|(pixel, _, _)| pixel)
+        };
+        let ext = |format, kind| pixel_layout(format, kind, PackedPixels::Extension).is_ok();
+        assert!(ext(GL_RGBA, 0x8035));
+        assert_eq!(
+            pixel_layout(GL_BGRA_EXT, 0x8367, PackedPixels::Extension).err(),
+            Some(GL_INVALID_ENUM)
+        );
+        assert_eq!(
+            pixel_layout(GL_RGB, 0x8032, PackedPixels::None).err(),
+            Some(GL_INVALID_ENUM)
+        );
         assert_eq!(bytes(GL_RGB, 0x8363), Ok(2));
         assert_eq!(bytes(GL_BGRA_EXT, 0x8367), Ok(4));
         assert_eq!(bytes(GL_RGBA, 0x8034), Ok(2));
