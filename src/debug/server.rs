@@ -2386,6 +2386,7 @@ BUILT-IN WINDOWS
                              the pages of the running address space that are in the
                              page file, as ranges {"addr","pages","zeros"}; "zeros":
                              pages of zeros with no contents kept there
+                             (features has "page_file" when this is there)
   POST /api/win32 {"trace":"all"}   set the win32_trace level (all, collapsed or off)
                              until the emulator stops; the reply is GET's
   GET  /api/win32/ddraw      DirectDraw's display mode and surfaces: interfaces (the

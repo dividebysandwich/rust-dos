@@ -234,20 +234,15 @@ impl DebugHub {
             let here = || here.into_iter().flatten();
             let user = here().find(|s| self.breakpoints.contains(s));
             let target = here().find(|s| self.temp_breakpoint == Some(*s));
-            if let Some(spot) = user.or(target) {
+            if user.is_some() || target.is_some() {
                 if target.is_some() {
                     self.temp_breakpoint = None;
                 }
                 let once = user.is_some_and(|s| self.once.remove(&s));
-                if once {
+                if let Some(spot) = user.filter(|_| once) {
                     self.breakpoints.remove(&spot);
                 }
-                self.breakpoint_hit = Some(BreakpointHit {
-                    spot,
-                    user: user.is_some(),
-                    once,
-                    target: target.is_some(),
-                });
+                self.breakpoint_hit = Some(BreakpointHit { user, once, target });
                 self.enter_pause(PauseReason::Breakpoint);
                 return true;
             }

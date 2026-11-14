@@ -196,9 +196,10 @@ pub enum Spot {
 
 impl Spot {
     /// The spot of an address: its linear address where the page moves,
-    /// else its physical address.
+    /// else the physical address `place` finds, which includes the page
+    /// a PAGE_NOACCESS entry keeps.
     pub fn of(cpu: &Cpu, a: &DebugAddr) -> Result<Spot, String> {
-        match (a.lin, a.phys) {
+        match (a.lin, a.byte(cpu, 0)) {
             (Some(lin), _) if rust_dos::win32::page_moves(cpu, lin) => {
                 Ok(Spot::Lin { cr3: cpu.cr3, lin })
             }
@@ -218,7 +219,25 @@ impl Spot {
     pub fn candidates(cpu: &Cpu, a: &DebugAddr) -> impl Iterator<Item = Spot> + use<> {
         let lin = a.lin.filter(|_| rust_dos::win32::has_page_file(cpu));
         let lin = lin.map(|lin| Spot::Lin { cr3: cpu.cr3, lin });
-        lin.into_iter().chain(a.phys.map(Spot::Phys))
+        lin.into_iter().chain(a.byte(cpu, 0).map(Spot::Phys))
+    }
+
+    /// The spot among `kept` that the address `a` names: one set at it in
+    /// the running address space, else one kept by `a`'s linear address
+    /// in another. The lists name a linear spot without its address
+    /// space, so this finds what they name while another process runs,
+    /// or after the one it was set in has ended.
+    pub fn find<I>(cpu: &Cpu, a: &DebugAddr, kept: impl Fn() -> I) -> Option<Spot>
+    where
+        I: Iterator<Item = Spot>,
+    {
+        let here = Spot::candidates(cpu, a).find(|c| kept().any(|s| s == *c));
+        here.or_else(|| {
+            let lin = a.lin?;
+            kept()
+                .filter(|s| matches!(*s, Spot::Lin { lin: l, .. } if l == lin))
+                .min()
+        })
     }
 
     /// The linear spot of the instruction about to run, where pages move.

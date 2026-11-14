@@ -372,6 +372,50 @@ fn a_write_to_an_untouched_page_stays_in_the_page_file_until_the_program_touches
     assert_eq!(exit_code(&mut cpu, &mut hub), 0x55);
 }
 
+/// A breakpoint and a watchpoint kept by linear address in another address
+/// space (another process's, or one that has ended) are removed by the
+/// name the lists give them, which doesn't say which address space it is.
+/// One of the running address space is removed first.
+#[test]
+fn a_spot_of_another_address_space_is_removed_by_its_listed_name() {
+    use super::super::{Watch, pm::Spot};
+    let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
+    let (lin, other) = (0x0003_0100, cpu.cr3 ^ 0x1000);
+    hub.breakpoints.insert(Spot::Lin { cr3: other, lin });
+    hub.breakpoints.insert(Spot::Phys(lin as usize));
+    hub.watchpoints.push(Watch {
+        spot: Spot::Lin { cr3: other, lin },
+        len: 2,
+        value: 0,
+    });
+    let name = format!("lin:{:08X}", lin);
+    let listed = reply(&mut cpu, &mut hub, Cmd::ListBreakpoints).unwrap();
+    assert_eq!(listed["breakpoints"], json!(["30100", name]));
+    // With paging off, the address's physical one is the running one.
+    let listed = reply(
+        &mut cpu,
+        &mut hub,
+        Cmd::RemoveBreakpoint(Some(name.clone())),
+    )
+    .unwrap();
+    assert_eq!(listed["breakpoints"], json!([name]));
+    let listed = reply(
+        &mut cpu,
+        &mut hub,
+        Cmd::RemoveBreakpoint(Some(name.clone())),
+    )
+    .unwrap();
+    assert_eq!(listed["breakpoints"], json!([]));
+    let gone = reply(
+        &mut cpu,
+        &mut hub,
+        Cmd::RemoveBreakpoint(Some(name.clone())),
+    );
+    assert_eq!(gone.unwrap_err().0, 404);
+    let listed = reply(&mut cpu, &mut hub, Cmd::RemoveWatchpoint(Some(name))).unwrap();
+    assert_eq!(listed["watchpoints"], json!([]));
+}
+
 /// A write is made whole or not at all: across a page in memory and one
 /// in the page file both parts are written, and one that runs into a
 /// page that isn't committed, or expects other bytes, writes nothing.

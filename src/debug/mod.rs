@@ -618,15 +618,15 @@ impl PauseReason {
     }
 }
 
-/// The breakpoint that stopped the machine: where it is, whether a user
-/// breakpoint is there (and was a one-shot one), and whether it was the
-/// target of a resume `until` or a step-over.
+/// The breakpoint that stopped the machine: the user breakpoint there, if
+/// one is (and whether it was a one-shot one), and the target of a resume
+/// `until` or a step-over, if it was one. The two can be kept apart, one
+/// by physical and one by linear address, at the same instruction.
 #[derive(Clone, Copy)]
 struct BreakpointHit {
-    spot: Spot,
-    user: bool,
+    user: Option<Spot>,
     once: bool,
-    target: bool,
+    target: Option<Spot>,
 }
 
 /// Memory the debugger watches: `len` bytes at `spot`, which held `value`

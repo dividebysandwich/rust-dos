@@ -17,12 +17,12 @@ impl DebugHub {
         let reason = self.pause_hit.take()?;
         let mut stop = json!({"reason": reason.name()});
         if let Some(hit) = self.breakpoint_hit.take() {
-            if hit.user {
-                stop["breakpoint"] = hit.spot.name().into();
+            if let Some(spot) = hit.user {
+                stop["breakpoint"] = spot.name().into();
                 stop["once"] = hit.once.into();
             }
-            if hit.target {
-                stop["target"] = hit.spot.name().into();
+            if let Some(spot) = hit.target {
+                stop["target"] = spot.name().into();
             }
         }
         match reason {

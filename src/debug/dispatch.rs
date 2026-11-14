@@ -421,8 +421,7 @@ impl DebugHub {
                     Reply::Json(self.breakpoints_json())
                 }
                 Some(a) => match parse_addr(cpu, &a) {
-                    Ok(a) => match Spot::candidates(cpu, &a).find(|s| self.breakpoints.contains(s))
-                    {
+                    Ok(a) => match Spot::find(cpu, &a, || self.breakpoints.iter().copied()) {
                         Some(spot) => {
                             self.breakpoints.remove(&spot);
                             self.once.remove(&spot);
@@ -464,8 +463,8 @@ impl DebugHub {
                 }
                 Some(a) => match parse_addr(cpu, &a) {
                     Ok(a) => {
-                        let set = |s: &Spot| self.watchpoints.iter().any(|w| w.spot == *s);
-                        match Spot::candidates(cpu, &a).find(set) {
+                        let kept = || self.watchpoints.iter().map(|w| w.spot);
+                        match Spot::find(cpu, &a, kept) {
                             Some(spot) => {
                                 self.watchpoints.retain(|w| w.spot != spot);
                                 self.record(

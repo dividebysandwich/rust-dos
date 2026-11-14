@@ -1514,7 +1514,9 @@ written, or sent out holding zeros) and false for pages whose contents
 are there. `?limit=N` lists at most N ranges (1000 by default), and
 `truncated` says there are more. `ranges` is null until the built-in
 Windows has its memory. Pause first: the list is of the process that
-runs at that moment, and its pages come and go as it runs.
+runs at that moment, and its pages come and go as it runs. The server's
+`features` has `page_file` when it has this list and reads, writes,
+breakpoints and watchpoints on pages in the page file.
 
 Ids, addresses and exit codes are 8-digit hex strings; handles and
 `last_error` are numbers. Pause the machine first for a view that
@@ -1661,9 +1663,12 @@ A breakpoint or a watchpoint on such a page is kept by its linear
 address in the address space it was set in, and is named so
 (`lin:00A30100`). It can be set while the page is in the page file, it
 stays on the page as the page goes out and comes back, and it stops only
-the process it was set in. A watchpoint keeps its value while the page
-is out: only a change of the bytes stops the machine. The pages of
-images, stacks and views of files are kept by physical address.
+the process it was set in. Its name doesn't say which process that is:
+`DELETE ?addr=lin:00A30100` removes the one of the running process, or
+while another runs (or after the process ended), one of the others set
+at that linear address. A watchpoint keeps its value while the page is
+out: only a change of the bytes stops the machine. The pages of images,
+stacks and views of files are kept by physical address.
 
 ## 6. Pitfalls
 

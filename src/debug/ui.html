@@ -686,15 +686,17 @@ function renderDisasm() {
   const rows = st.dis.rows.map((row) => {
     const tr = el("tr", { class: (row.current ? "current " : "") + (row.breakpoint ? "bp" : "") });
     const gutter = el("td", { class: "gutter", title: "Toggle a breakpoint" });
+    // By the row's own address, so that a breakpoint on a page the
+    // built-in Windows moves is kept by its linear address and found again.
     gutter.addEventListener("click", act(async () => {
-      if (!row.phys) return;
-      await toggleBreakpoint("phys:" + row.phys, row.breakpoint);
+      if (!row.phys && !row.label.includes(":")) return;
+      await toggleBreakpoint(rowAddr(row), row.breakpoint);
     }));
     tr.append(gutter,
       el("td", { class: "addr", textContent: row.label }),
       el("td", { class: "bytes", textContent: row.bytes }),
       el("td", { class: "asm", textContent: row.asm }));
-    tr.addEventListener("dblclick", () => row.phys && runTo("phys:" + row.phys));
+    tr.addEventListener("dblclick", () => (row.phys || row.label.includes(":")) && runTo(rowAddr(row)));
     return tr;
   });
   tbody.replaceChildren(...rows);
@@ -773,9 +775,14 @@ async function refreshMemory() {
 function renderMemory() {
   const { base, data, prev } = st.mem;
   const tbody = $("#mem tbody");
+  // Watchpoints kept by physical address, and those kept by linear
+  // address ("lin:"), which a linear view marks.
   const watched = new Set();
+  const watchedLin = new Set();
   for (const w of st.wps) {
-    for (let i = 0; i < w.len; i++) watched.add(parseInt(w.addr, 16) + i);
+    const lin = w.addr.toLowerCase().startsWith("lin:");
+    const at = parseInt(lin ? w.addr.slice(4) : w.addr, 16);
+    for (let i = 0; i < w.len; i++) (lin ? watchedLin : watched).add(at + i);
   }
   const rows = [];
   for (let row = 0; row < data.length; row += 16) {
@@ -791,6 +798,8 @@ function renderMemory() {
         // real-mode segments.
         const phys = base.prefix ? base.flat + i : (st.regs && st.regs.system.mode !== "real" ? -1 : base.seg * 16 + base.off + i);
         if (watched.has(phys)) td.classList.add("watched");
+      } else if (base.prefix === "lin:" && watchedLin.has(base.flat + i)) {
+        td.classList.add("watched");
       }
       td.addEventListener("click", () => editByte(td, i));
       tr.append(td);
@@ -873,15 +882,27 @@ async function refreshStack() {
 
 const EXCEPTIONS = [["00", "#DE"], ["06", "#UD"], ["0D", "#GP"], ["0E", "#PF"]];
 
+// Where a breakpoint or a watchpoint is, as the lists name it: a physical
+// address ("1F2A0"), or a linear one ("lin:00A30100") on a page the
+// built-in Windows moves. The address the server takes back, and the text
+// shown.
+function spotAddr(name) {
+  return name.includes(":") ? name : "phys:" + name;
+}
+
+function spotText(name) {
+  return name.includes(":") ? name.replace(":", " ") : "phys " + name;
+}
+
 async function refreshBreakpoints() {
   const v = await api("/api/breakpoints");
   st.bps = v.breakpoints;
   st.exceptions = v.exceptions;
   st.modeSwitch = v.mode_switch;
-  const items = st.bps.map((phys) => el("li", {},
-    el("span", { class: "grow", textContent: "phys " + phys }),
-    el("button", { textContent: "Show", onclick: () => showCode("phys:" + phys) }),
-    el("button", { textContent: "✕", title: "Remove", onclick: act(() => toggleBreakpoint("phys:" + phys, true)) })));
+  const items = st.bps.map((name) => el("li", {},
+    el("span", { class: "grow", textContent: spotText(name) }),
+    el("button", { textContent: "Show", onclick: () => showCode(spotAddr(name)) }),
+    el("button", { textContent: "✕", title: "Remove", onclick: act(() => toggleBreakpoint(spotAddr(name), true)) })));
   $("#bps").replaceChildren(...(items.length ? items : [el("li", { class: "empty", textContent: "No breakpoints. Click beside an instruction to set one." })]));
   const checks = $("#exc-checks");
   const box = (label, checked, onchange, title) => {
@@ -909,11 +930,11 @@ async function refreshWatchpoints() {
   const v = await api("/api/watchpoints");
   st.wps = v.watchpoints;
   const items = st.wps.map((w) => el("li", {},
-    el("span", { class: "grow", textContent: `phys ${w.addr} ${["", "byte", "word", "", "dword"][w.len]}` }),
+    el("span", { class: "grow", textContent: `${spotText(w.addr)} ${["", "byte", "word", "", "dword"][w.len]}` }),
     el("b", { textContent: w.value }),
-    el("button", { textContent: "Show", onclick: () => showMemory("phys:" + w.addr) }),
+    el("button", { textContent: "Show", onclick: () => showMemory(spotAddr(w.addr)) }),
     el("button", { textContent: "✕", title: "Remove", onclick: act(async () => {
-      await api(`/api/watchpoints?addr=phys:${w.addr}`, { method: "DELETE" });
+      await api(`/api/watchpoints?addr=${encodeURIComponent(spotAddr(w.addr))}`, { method: "DELETE" });
       await refreshWatchpoints();
     }) })));
   $("#wps").replaceChildren(...(items.length ? items : [el("li", { class: "empty", textContent: "Nothing watched." })]));
