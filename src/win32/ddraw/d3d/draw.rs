@@ -807,8 +807,8 @@ pub fn read_strided_vertices(
         for t in 0..layout.textures {
             let dims = layout.tex[t].1;
             let b = read(cpu, part(4 + t), i, 4 * dims)?;
-            for k in 0..dims as usize {
-                v.tex[t][k] = f(&b, k);
+            for (k, n) in v.tex[t][..dims as usize].iter_mut().enumerate() {
+                *n = f(&b, k);
             }
         }
         out.push(v);

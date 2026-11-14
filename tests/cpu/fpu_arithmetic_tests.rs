@@ -463,7 +463,8 @@ fn fprem_on_operands_it_does_not_reduce_as_the_x87() {
     const PSEUDOINF: u128 = 0x7FFF_0000_0000_0000_0000;
     // (instruction, ST(0), ST(1), empty, C3-C0 before, status word after,
     // ST(0) after)
-    let cases: [([u8; 2], u128, u128, u32, u16, u16, u128); 96] = [
+    type Case = ([u8; 2], u128, u128, u32, u16, u16, u128);
+    let cases: [Case; 96] = [
         (FPREM, FIVE, ZERO, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // 5/0
         (FPREM, FIVE, ZERO, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // 5/0
         (FPREM, INF, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // inf/3

@@ -157,8 +157,8 @@ impl ScreenVertex {
             v.specular = texel::from_word(word(at as usize));
         }
         for (set, &(at, numbers)) in fvf.sets.iter().enumerate() {
-            for i in 0..numbers as usize {
-                v.tex[set][i] = number(at as usize + i);
+            for (i, n) in v.tex[set][..numbers as usize].iter_mut().enumerate() {
+                *n = number(at as usize + i);
             }
         }
         v

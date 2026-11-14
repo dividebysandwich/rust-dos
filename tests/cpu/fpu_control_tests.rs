@@ -22,8 +22,8 @@ fn test_fninit_defaults() {
     assert_eq!(cpu.get_fpu_flags().bits(), 0, "FNINIT should clear Status Word");
     
     // Verify all tags are empty
-    for i in 0..8 {
-        assert_eq!(cpu.fpu_tags[i], FPU_TAG_EMPTY, "Tag {} should be EMPTY", i);
+    for (i, &tag) in cpu.fpu_tags.iter().enumerate() {
+        assert_eq!(tag, FPU_TAG_EMPTY, "Tag {} should be EMPTY", i);
     }
 }
 

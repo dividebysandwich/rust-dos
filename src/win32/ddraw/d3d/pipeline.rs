@@ -211,14 +211,14 @@ impl Layout {
             return None;
         }
         l.textures = count;
-        for i in 0..count {
+        for (i, tex) in l.tex[..count].iter_mut().enumerate() {
             let dims = match fvf >> (16 + 2 * i) & 3 {
                 0 => 2,
                 1 => 3,
                 2 => 4,
                 _ => 1,
             };
-            l.tex[i] = (at, dims);
+            *tex = (at, dims);
             at += 4 * dims;
         }
         l.size = at;
@@ -1175,8 +1175,8 @@ pub fn codes(setup: &Setup, p: &Processed) -> u32 {
     if z > b[5] * w {
         code |= CLIP_BACK;
     }
-    for i in 0..setup.planes.len().min(6) {
-        if p.planes[i] < 0.0 {
+    for (i, &d) in p.planes.iter().enumerate().take(setup.planes.len()) {
+        if d < 0.0 {
             code |= CLIP_GEN0 << i;
         }
     }

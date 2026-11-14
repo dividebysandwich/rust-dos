@@ -363,8 +363,8 @@ pub fn fxsave(cpu: &mut Cpu, instr: &Instruction, restore: bool) -> CpuResult {
         let sw = cpu.lin_read_16(lin as usize + 2);
         status::set_status_word(cpu, sw);
         let tags = cpu.lin_read_8(lin as usize + 4);
-        for i in 0..8 {
-            cpu.fpu_tags[i] = if tags >> i & 1 != 0 { FPU_TAG_VALID } else { FPU_TAG_EMPTY };
+        for (i, t) in cpu.fpu_tags.iter_mut().enumerate() {
+            *t = if tags >> i & 1 != 0 { FPU_TAG_VALID } else { FPU_TAG_EMPTY };
         }
         for i in 0..8 {
             let st = read_mem(cpu, slot(FX_ST, i), 16) & FPU_80_BITS_MAX;

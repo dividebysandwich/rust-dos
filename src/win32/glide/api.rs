@@ -2593,9 +2593,8 @@ pub fn set_state(cpu: &mut Cpu, bytes: &[u8; STATE_SIZE]) {
     g.render = w(19).min(1);
     g.constant = std::array::from_fn(|i| f32::from_bits(w(20 + i)));
     g.clip = std::array::from_fn(|i| w(24 + i));
-    for t in 0..2 {
+    for (t, s) in g.tmu.iter_mut().enumerate() {
         let at = 28 + 12 * t;
-        let s = &mut g.tmu[t];
         s.texture_mode = w(at);
         s.t_lod = w(at + 1);
         s.t_detail = w(at + 2);

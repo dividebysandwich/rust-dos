@@ -528,11 +528,11 @@ impl Voodoo {
         let Some(key) = self.mirror_layout() else {
             return;
         };
-        for unit in 0..texcount.min(self.tmu.len()) {
+        for t in st.tmu.iter().take(texcount.min(self.tmu.len())) {
             // A unit whose lodmin is 8 or more reads no texels (`raster`),
             // as Glide leaves one it doesn't use: its stale base address
             // may lie in a buffer, whose rows needn't come back for it.
-            let Some(t) = st.tmu[unit].as_ref().filter(|t| t.lodmin < 8 << 8) else {
+            let Some(t) = t.as_ref().filter(|t| t.lodmin < 8 << 8) else {
                 continue;
             };
             // The levels the LOD range reads, not the ones Glide's base
