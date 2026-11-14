@@ -225,8 +225,7 @@ impl Spot {
     /// The spot among `kept` that the address `a` names: one set at it in
     /// the running address space, else one kept by `a`'s linear address
     /// in another. The lists name a linear spot without its address
-    /// space, so this finds what they name while another process runs,
-    /// or after the one it was set in has ended.
+    /// space, so this finds what they name while another process runs.
     pub fn find<I>(cpu: &Cpu, a: &DebugAddr, kept: impl Fn() -> I) -> Option<Spot>
     where
         I: Iterator<Item = Spot>,
@@ -258,17 +257,27 @@ impl Spot {
     }
 
     /// The `len` bytes there (4 at most) as a number, low byte first;
-    /// unmapped bytes read as FFh. None for a linear spot while another
-    /// address space runs.
+    /// unmapped bytes read as FFh. A linear spot is read through its own
+    /// address space's tables, whichever runs, so a change the system
+    /// makes there while another process runs shows at once, as it does
+    /// at a physical spot. None for a linear spot whose process has ended.
     pub fn value(&self, cpu: &Cpu, len: u8) -> Option<u32> {
         let byte = |i: usize| match *self {
             Spot::Phys(phys) => cpu.bus.peek_8(phys + i),
-            Spot::Lin { lin, .. } => peek(cpu, lin.wrapping_add(i as u32)).unwrap_or(0xFF),
+            Spot::Lin { cr3, lin } => {
+                rust_dos::win32::peek_in(cpu, cr3, lin.wrapping_add(i as u32)).unwrap_or(0xFF)
+            }
         };
         match *self {
-            Spot::Lin { cr3, .. } if cr3 != cpu.cr3 || !rust_dos::win32::has_page_file(cpu) => None,
+            Spot::Lin { cr3, .. } if !rust_dos::win32::tables_live(cpu, cr3) => None,
             _ => Some((0..len as usize).fold(0, |v, i| v | (byte(i) as u32) << (8 * i))),
         }
+    }
+
+    /// Whether this is kept by linear address in an address space no
+    /// process has any more.
+    pub fn ended(&self, cpu: &Cpu) -> bool {
+        matches!(*self, Spot::Lin { cr3, .. } if !rust_dos::win32::tables_live(cpu, cr3))
     }
 }
 

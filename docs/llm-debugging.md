@@ -1665,10 +1665,16 @@ address in the address space it was set in, and is named so
 stays on the page as the page goes out and comes back, and it stops only
 the process it was set in. Its name doesn't say which process that is:
 `DELETE ?addr=lin:00A30100` removes the one of the running process, or
-while another runs (or after the process ended), one of the others set
-at that linear address. A watchpoint keeps its value while the page is
-out: only a change of the bytes stops the machine. The pages of images,
-stacks and views of files are kept by physical address.
+while another runs, one of the others set at that linear address. A
+watchpoint reads its process's memory whichever process runs, so a
+change the system makes there while another runs (a read that finishes
+later, for one) stops the machine at once; a page going out or coming
+back changes no bytes and stops nothing. When the process ends, its
+breakpoints and watchpoints go with it, and the journal has a
+`breakpoint_removed` or `watchpoint_removed` entry with `process_ended`
+for each: a process started later can get the same page tables and
+other code at the same addresses. The pages of images, stacks and views
+of files are kept by physical address.
 
 ## 6. Pitfalls
 

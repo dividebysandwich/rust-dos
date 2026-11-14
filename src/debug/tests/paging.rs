@@ -640,3 +640,111 @@ fn a_breakpoint_and_a_watchpoint_follow_a_page_out_to_the_page_file_and_back() {
     resume(&mut cpu, &mut hub);
     assert_eq!(exit_code(&mut cpu, &mut hub), 0x66);
 }
+
+/// The address of the block the program committed.
+fn block_of(cpu: &mut Cpu, hub: &mut DebugHub, data: u32) -> u32 {
+    u32::from_le_bytes(memory(cpu, hub, data + BLOCK, 4).try_into().unwrap())
+}
+
+/// A breakpoint and a watchpoint kept by linear address go when their
+/// process ends, each with a journal entry. The same program started
+/// again gets the same page tables and its block at the same address,
+/// where the old breakpoint would stop it and the old watchpoint would
+/// see its write: it runs to its end without a stop.
+#[test]
+fn linear_breakpoints_and_watchpoints_go_when_their_process_ends() {
+    let (mut cpu, mut hub, data, block) = paging_machine("lin-ended", 32, 4, false);
+    let cr3 = cpu.cr3;
+    let at = block + 0x100;
+    write_lin(&mut cpu, &mut hub, at, &returns(0x55)).unwrap();
+    let addr = format!("lin:{:08X}", at);
+    let watch = format!("lin:{:08X}", block);
+    let set = Cmd::AddBreakpoint {
+        addr: addr.clone(),
+        once: false,
+    };
+    reply(&mut cpu, &mut hub, set).unwrap();
+    let set = Cmd::AddWatchpoint {
+        addr: watch.clone(),
+        len: 4,
+    };
+    reply(&mut cpu, &mut hub, set).unwrap();
+    // Both stop this process.
+    go(&mut cpu, &mut hub, data, 1);
+    let stop = next_stop(&mut cpu, &mut hub);
+    assert_eq!(stop["reason"].as_str(), Some("watchpoint"), "{}", stop);
+    resume(&mut cpu, &mut hub);
+    let stop = next_stop(&mut cpu, &mut hub);
+    assert_eq!(stop["breakpoint"].as_str(), Some(addr.as_str()), "{}", stop);
+    resume(&mut cpu, &mut hub);
+    assert_eq!(exit_code(&mut cpu, &mut hub), 0x55);
+
+    // They went with it.
+    let listed = reply(&mut cpu, &mut hub, Cmd::ListBreakpoints).unwrap();
+    assert_eq!(listed["breakpoints"], json!([]));
+    let listed = reply(&mut cpu, &mut hub, Cmd::ListWatchpoints).unwrap();
+    assert_eq!(listed["watchpoints"], json!([]));
+    let removed = entries_of(&hub, "breakpoint_removed").pop().unwrap();
+    assert_eq!(
+        (&removed["addr"], &removed["process_ended"]),
+        (&json!(addr), &json!(true))
+    );
+    let removed = entries_of(&hub, "watchpoint_removed").pop().unwrap();
+    assert_eq!(
+        (&removed["addr"], &removed["process_ended"]),
+        (&json!(watch), &json!(true))
+    );
+
+    // The program again, in the same page tables at the same addresses.
+    assert!(cpu.load_executable("T.EXE", None));
+    until_stage(&mut cpu, &mut hub, data, 1);
+    let again = block_of(&mut cpu, &mut hub, data);
+    assert_eq!((cpu.cr3, again), (cr3, block), "where the old spots were");
+    write_lin(&mut cpu, &mut hub, at, &returns(0x66)).unwrap();
+    go(&mut cpu, &mut hub, data, 1);
+    assert_eq!(exit_code(&mut cpu, &mut hub), 0x66);
+}
+
+/// A watchpoint kept by linear address reads its process's memory
+/// through that process's page tables while the processor has others,
+/// as the system's write into a process that doesn't run (a read that
+/// finishes later) changes it; and once the process has ended it is
+/// dropped before it can read another's.
+#[test]
+fn a_linear_watchpoint_reads_its_own_address_space_whichever_runs() {
+    use super::super::pm::{self, Spot};
+    let (mut cpu, mut hub, data, block) = paging_machine("lin-other", 32, 4, false);
+    let at = block + 0x1000;
+    let spot = Spot::of_lin(&cpu, at).expect("committed");
+    assert!(matches!(spot, Spot::Lin { .. }), "{:?}", spot);
+    assert_eq!(spot.value(&cpu, 1), Some(0x11));
+    let Some(pm::Place::Phys(phys)) = pm::place(&cpu, at) else {
+        panic!("the second page is in memory");
+    };
+    // Another address space runs: the processor's tables don't map the
+    // block (the first megabyte's, which are the identity), and the
+    // system writes the process's page.
+    let own = cpu.cr3;
+    cpu.cr0 &= !crate::cpu::CR0_PG;
+    cpu.cr3 = 0;
+    cpu.bus.write_8(phys, 0x22);
+    assert_eq!(spot.value(&cpu, 1), Some(0x22));
+    assert!(!spot.ended(&cpu));
+    cpu.cr0 |= crate::cpu::CR0_PG;
+    cpu.cr3 = own;
+    // A page in the page file reads from there.
+    let zeros = Spot::of_lin(&cpu, block + 0x2000).expect("committed");
+    assert_eq!(zeros.value(&cpu, 4), Some(0));
+    // An address space no process has is an ended one.
+    let gone = Spot::Lin {
+        cr3: own ^ 0x1000,
+        lin: at,
+    };
+    assert!(gone.ended(&cpu));
+    assert_eq!(gone.value(&cpu, 1), None);
+    // The program ends: the spot's address space is no process's then.
+    write_lin(&mut cpu, &mut hub, block + 0x100, &returns(1)).unwrap();
+    go(&mut cpu, &mut hub, data, 1);
+    assert_eq!(exit_code(&mut cpu, &mut hub), 1);
+    assert!(spot.ended(&cpu));
+}

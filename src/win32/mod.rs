@@ -1208,6 +1208,7 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     crate::win16::flat::process_ending(cpu, pid);
     let process = cpu.bus.win32.processes.remove(index);
     process.memory.release(&mut cpu.bus);
+    cpu.programs.processes_ended += 1;
     registry::process_ended(cpu, process.id);
     user32::process_ended(cpu, process.id, &tids);
     gdi32::process_ended(cpu, process.id);
@@ -1325,6 +1326,39 @@ pub fn poke_paged(cpu: &mut Cpu, lin: u32, data: &[u8]) -> Option<()> {
 /// the debugger keeps by its linear address.
 pub fn page_moves(cpu: &Cpu, lin: u32) -> bool {
     debugger_tables(cpu).is_some_and(|m| m.moves(&cpu.bus, lin))
+}
+
+/// Whether a process of the built-in Windows has the page tables at
+/// `cr3`: the debugger keeps breakpoints and watchpoints by linear address
+/// in them while it does.
+pub fn tables_live(cpu: &Cpu, cr3: u32) -> bool {
+    cr3 != 0 && has_memory(cpu) && cpu.bus.win32.processes.iter().any(|p| p.memory.cr3 == cr3)
+}
+
+/// Whether the built-in Windows has its memory: from its session's start
+/// to its end.
+pub fn has_memory(cpu: &Cpu) -> bool {
+    cpu.bus.win32.pool.is_some()
+}
+
+/// The byte at `lin` in the page tables at `cr3`, whichever the
+/// processor has, for the debugger's watchpoints: in the physical page
+/// mapped there or kept by a PAGE_NOACCESS entry, or in the page file.
+/// None where the page isn't committed, or before the built-in Windows
+/// has its memory.
+pub fn peek_in(cpu: &Cpu, cr3: u32, lin: u32) -> Option<u8> {
+    cpu.bus.win32.pool.as_ref()?;
+    let tables = memory::Memory::tables(cr3);
+    let phys = match tables.kept(&cpu.bus, lin) {
+        Some(Kept::PageFile) => {
+            let mut byte = [0];
+            tables.read(&cpu.bus, lin, &mut byte)?;
+            return Some(byte[0]);
+        }
+        Some(Kept::Ram(page)) => page | lin & 0xFFF,
+        None => tables.translate(&cpu.bus, lin)?,
+    };
+    Some(cpu.bus.peek_8(phys as usize))
 }
 
 /// The pages of the page tables the processor has that are in the page
@@ -1455,6 +1489,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         let a20 = win32.a20;
         for process in std::mem::take(&mut win32.processes) {
             process.memory.release(&mut cpu.bus);
+            cpu.programs.processes_ended += 1;
             registry::process_ended(cpu, process.id);
         }
         // DirectPlay's objects leave their sessions, which the room would

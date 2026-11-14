@@ -677,6 +677,10 @@ pub struct ProgramEvents {
     /// Programs started and not yet ended: the ones a shell reload ends
     /// without an exit of their own (`Cpu::note_abort`).
     pub running: u32,
+    /// Processes of the built-in Windows that ended, its sessions'
+    /// last ones among them: the debugger drops the breakpoints and
+    /// watchpoints it keeps in their address spaces.
+    pub processes_ended: u64,
 }
 
 /// How a program ended.

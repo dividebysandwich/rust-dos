@@ -648,10 +648,11 @@ struct RunWait {
 }
 
 impl Watch {
-    /// The value there now. A watchpoint on a page that moves holds the
-    /// value it had while another address space runs: a page that goes
-    /// out to the page file or comes back keeps its bytes, so neither
-    /// changes the value.
+    /// The value there now. A watchpoint on a page that moves is read
+    /// through its address space's tables whichever runs: a page that
+    /// goes out to the page file or comes back keeps its bytes, so
+    /// neither changes the value. One whose process has ended holds its
+    /// value until the hook drops it (`drop_ended_spots`).
     fn read(&self, cpu: &Cpu) -> u32 {
         self.spot.value(cpu, self.len).unwrap_or(self.value)
     }
@@ -697,6 +698,12 @@ pub struct DebugHub {
     /// The watchpoint that stopped the machine: where it is, its length,
     /// and the value before and after.
     watch_hit: Option<(Spot, u8, u32, u32)>,
+    /// Whether a breakpoint, a run-to target or a watchpoint is kept by
+    /// linear address (`Spot::Lin`), as the last batch began, and
+    /// `cpu.programs.processes_ended` as the hook last saw it: those of a
+    /// process that ends go with it.
+    lin_kept: bool,
+    seen_processes_ended: u64,
     /// Pause at the entry point of every program DOS starts, and after
     /// every program ends; `start_once` pauses at the next one's only.
     break_program_start: bool,
@@ -840,6 +847,8 @@ impl DebugHub {
             seen_mode_switches: 0,
             watchpoints: Vec::new(),
             watch_hit: None,
+            lin_kept: false,
+            seen_processes_ended: 0,
             break_program_start: false,
             break_program_exit: false,
             start_once: false,
