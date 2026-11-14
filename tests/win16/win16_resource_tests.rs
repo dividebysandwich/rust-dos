@@ -91,10 +91,15 @@ const MEMORY_MB: usize = 6;
 const DATA: usize = 0xF_0000;
 /// The steps the largest block is found in.
 const STEP: u32 = 0x1_0000;
+/// The largest block GlobalAlloc gives: 16 MB less 64 KB.
+const MAX_ALLOC: u32 = 0xFF_0000;
 
-/// What is free for a fixed block on the machine, in 64 KB steps up to
-/// 4 MB: the largest block a program without the large resource gets.
-/// A binary search, as a block that fits has every smaller one fit. The
+/// What is free for a fixed block on the machine, in 64 KB steps: the
+/// largest block a program without the large resource gets. Committed
+/// memory includes the page file's, which is twice the machine's memory,
+/// so the search goes up to the largest block GlobalAlloc gives, and the
+/// machine has to be small enough that its memory runs out first. A
+/// binary search, as a block that fits has every smaller one fit. The
 /// runs go in the scratch directory `test`, one of the calling test's own.
 fn largest_block(test: &str) -> u32 {
     let fits = |steps: u32| {
@@ -102,7 +107,7 @@ fn largest_block(test: &str) -> u32 {
         run_in_memory(test, program, MEMORY_MB).0 == OK
     };
     // `fits(low)` holds, unless low is 0; `fits(high)` doesn't.
-    let (mut low, mut high) = (0, 0x40_0000 / STEP + 1);
+    let (mut low, mut high) = (0, MAX_ALLOC / STEP + 1);
     while high - low > 1 {
         let middle = (low + high) / 2;
         if fits(middle) {
@@ -112,6 +117,10 @@ fn largest_block(test: &str) -> u32 {
         }
     }
     assert!(low > 0, "no block can be allocated");
+    assert!(
+        low * STEP < MAX_ALLOC,
+        "the machine's memory doesn't run out before GlobalAlloc's limit"
+    );
     low * STEP
 }
 
@@ -147,7 +156,9 @@ fn a_resource_image_takes_no_memory_for_data_nothing_asked_for() {
 #[test]
 fn a_global_alloc_that_fails_takes_no_memory() {
     let free = largest_block("resource_failed_alloc_largest");
-    let (huge, alloc) = (2 * free, free - STEP);
+    // One step past the largest block that fits: it fails for want of
+    // memory, as it is within GlobalAlloc's limit.
+    let (huge, alloc) = (free + STEP, free - STEP);
     let mut code = Code::new();
     global_alloc(&mut code, huge).emit(&[
         0x85, 0xC0, // test ax,ax
