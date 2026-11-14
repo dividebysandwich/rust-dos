@@ -26,6 +26,19 @@ A frozen chapter changes only by adding what an earlier reader can't
 have relied on: a new register at a reserved offset, a new command, a
 new level.
 
+Two frozen rules were amended to say what the card does, where making
+it do what the text said would have cost the emulator time and no
+program or driver written for the card depends on the difference:
+
+- Chapter 2: a 2- or 4-byte access that runs past the end of a window
+  goes whole to the window its first byte is in. Sending each byte to
+  its own window would add a compare to every access to the
+  registers and the ring.
+- Chapter 7: the request of a vertical blank goes up on the system
+  timer's grid, up to a tick and an instruction after the blank, where
+  the text had it at the blank. Raising it between ticks would take a
+  second event path through the processor's loop.
+
 Each rule here has a test. Those of the card alone (registers, the
 ring, rejections, the display's timing, the commands) are beside the
 code in `src/toadforce`; those of the card in the machine (PCI, the
@@ -86,12 +99,14 @@ the system's ROM is mirrored. A BAR decodes its whole window or none of
 it: one with any byte over the RAM or the mirror decodes nothing below
 or above them either. Where a guest puts two BARs over each other, an
 address in both is card memory's if BAR 1 is one of them, and the
-registers' otherwise. That holds for each byte of an access: one that
-runs past the end of a window has each byte from where that byte's
-address is. The legacy VGA ports (3B0h to 3DFh) and the VGA memory at
-A0000h to BFFFFh decode whatever the command register holds, as they
-do on the emulator's other display adapters: a guest can't turn the
-VGA off there.
+registers' otherwise. An access of 2 or 4 bytes is card memory's when
+all its bytes are in card memory's window. Otherwise it goes whole to
+the registers' or the ring's window if its first byte is there, even
+where its other bytes are in card memory's or past the window's end;
+those past the end read as 0, and a write drops them. The legacy VGA
+ports (3B0h to 3DFh) and the VGA memory at A0000h to BFFFFh decode
+whatever the command register holds, as they do on the emulator's
+other display adapters: a guest can't turn the VGA off there.
 
 The emulator's BIOS doesn't enumerate PCI, so the card starts as a PCI
 BIOS leaves the boot display adapter: I/O and memory decoding on, and

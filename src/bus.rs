@@ -1061,7 +1061,7 @@ impl Bus {
         if let Some(at) = self.powervr_at(addr) {
             return self.powervr_read(at, 1) as u8;
         }
-        if let Some(at) = self.toadforce_at(addr, 1) {
+        if let Some(at) = self.toadforce_at(addr) {
             return self.toadforce_read(at, 1) as u8;
         }
         if let Some(offset) = self.voodoo_at(addr) {
@@ -1241,7 +1241,7 @@ impl Bus {
             self.write_vram(offset, &[value]);
             return true;
         }
-        if let Some(at) = self.toadforce_at(addr, 1) {
+        if let Some(at) = self.toadforce_at(addr) {
             self.toadforce_write(at, value as u32, 1);
             return true;
         }
@@ -1369,7 +1369,7 @@ impl Bus {
             self.mach64_mmio_write(at, value as u32, 2);
             return true;
         }
-        if let Some(at) = self.toadforce_at(addr, 2) {
+        if let Some(at) = self.toadforce_at(addr) {
             self.toadforce_write(at, value as u32, 2);
             return true;
         }
@@ -1418,7 +1418,7 @@ impl Bus {
         if let Some(at) = self.mach64_mmio(addr) {
             return self.mach64_mmio_read(at, 2) as u16;
         }
-        if let Some(at) = self.toadforce_at(addr, 2) {
+        if let Some(at) = self.toadforce_at(addr) {
             return self.toadforce_read(at, 2) as u16;
         }
         if let Some(offset) = self.voodoo_at(addr) {
@@ -1464,7 +1464,7 @@ impl Bus {
         if let Some(at) = self.mach64_mmio(addr) {
             return self.mach64_mmio_read(at, 4);
         }
-        if let Some(at) = self.toadforce_at(addr, 4) {
+        if let Some(at) = self.toadforce_at(addr) {
             return self.toadforce_read(at, 4);
         }
         if let Some(offset) = self.voodoo_at(addr) {
@@ -1508,7 +1508,7 @@ impl Bus {
             self.mach64_mmio_write(at, value, 4);
             return;
         }
-        if let Some(at) = self.toadforce_at(addr, 4) {
+        if let Some(at) = self.toadforce_at(addr) {
             self.toadforce_write(at, value, 4);
             return;
         }
@@ -2739,7 +2739,10 @@ impl Bus {
                     }
                     // A ToadForce counts the VGA's retraces, with the
                     // timing the registers give it from this write on.
-                    if self.toadforce.is_some() {
+                    // Only the miscellaneous output, the sequencer and
+                    // the CRTC hold timing: palette and attribute
+                    // writes don't reach the card.
+                    if self.toadforce.is_some() && matches!(port, 0x3C2 | 0x3C5 | 0x3B5 | 0x3D5) {
                         self.toadforce_retime();
                     }
                 } else {

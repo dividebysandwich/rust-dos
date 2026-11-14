@@ -147,6 +147,11 @@ pub struct ToadForce {
     /// The recording of what the card is given to draw, while one is
     /// made (`capture`). No part of the card's state.
     capture: capture::Slot,
+    /// Where the registers' and the ring's windows are and how long,
+    /// those that decode: worked out when a BAR, the command register
+    /// or the machine's RAM changes (`Bus::toadforce_moved`), so that
+    /// an access compares its address with them and nothing else.
+    pub decoded: [Option<(u32, u32)>; 2],
 }
 
 /// The version of the card's saved state, which a saved state's `TOAD`
@@ -200,7 +205,7 @@ crate::state_fields!(ToadForce {
     level1,
     queue,
     queue_since,
-} skip { counts, raster, gpu, capture });
+} skip { counts, raster, gpu, capture, decoded });
 
 impl ToadForce {
     /// A card with `memory` bytes of card memory (one of
@@ -231,6 +236,7 @@ impl ToadForce {
             queue_since: 0,
             counts: Counts::default(),
             capture: capture::Slot::default(),
+            decoded: [None; 2],
         }
     }
 

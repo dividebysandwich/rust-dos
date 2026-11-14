@@ -150,34 +150,22 @@ impl Bus {
     /// for before it asks here, and one the registers share with the
     /// ring is the registers'.
     ///
-    /// An access of `len` bytes is the window's when all of them are in
-    /// the window that has its first byte. One that begins in card
-    /// memory's window, or runs past the end of the window it begins
-    /// in, is none of these: the bus then splits it, and each part goes
-    /// where its own address does, so that every byte follows the same
-    /// order whatever the size of the access.
+    /// Which windows decode was decided when they last moved
+    /// (`toadforce_moved`): here the address is only compared with
+    /// them.
     #[inline]
-    pub(crate) fn toadforce_at(&self, addr: usize, len: usize) -> Option<Window> {
-        // No window that decodes has an address here.
-        if addr < self.ram.len() || addr as u64 >= ROM_MIRROR || self.toadforce.is_none() {
-            return None;
-        }
-        // Card memory's, or begun there.
-        if self.vbe.lfb_offset(addr, 1).is_some() {
-            return None;
-        }
-        // Where `addr` is in `bar`'s window, and whether the access ends
-        // in it.
-        let offset_in = |bar| {
-            let (base, size) = self.toadforce_window(bar)?;
-            let offset = (addr as u32).wrapping_sub(base);
-            (offset < size).then_some((offset, offset as u64 + len as u64 <= size as u64))
+    pub(crate) fn toadforce_at(&self, addr: usize) -> Option<Window> {
+        let [registers, ring] = self.toadforce.as_deref()?.decoded;
+        let addr = u32::try_from(addr).ok()?;
+        let offset_in = |window: Option<(u32, u32)>| {
+            let (base, size) = window?;
+            let offset = addr.wrapping_sub(base);
+            (offset < size).then_some(offset)
         };
-        if let Some((offset, whole)) = offset_in(Bar::Registers) {
-            return whole.then_some(Window::Registers(offset));
+        if let Some(offset) = offset_in(registers) {
+            return Some(Window::Registers(offset));
         }
-        let (offset, whole) = offset_in(Bar::Ring)?;
-        whole.then_some(Window::Ring(offset))
+        offset_in(ring).map(Window::Ring)
     }
 
     /// `len` bytes (1, 2 or 4) read at `at`. A read of part of a
@@ -724,13 +712,21 @@ impl Bus {
 
     /// A BAR, the card's decoding or its interrupt line changed: the
     /// linear frame buffer is where BAR 1 says, while its window
-    /// decodes (`toadforce_window`), and a request the card has up
+    /// decodes (`toadforce_window`), the registers and the ring are
+    /// where `toadforce_at` finds them, and a request the card has up
     /// moves to the new line.
     pub(crate) fn toadforce_moved(&mut self) {
         if !self.toadforce() {
             return;
         }
         self.vbe.lfb_base = self.toadforce_window(Bar::Memory).map(|(base, _)| base);
+        let decoded = [
+            self.toadforce_window(Bar::Registers),
+            self.toadforce_window(Bar::Ring),
+        ];
+        if let Some(card) = &mut self.toadforce {
+            card.decoded = decoded;
+        }
         self.sync_toadforce_irq();
     }
 
