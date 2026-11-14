@@ -88,12 +88,14 @@ fn memsizes(cpu: CpuModel) -> impl DoubleEndedIterator<Item = usize> + Clone {
 }
 
 /// The memory's slider: a square for every step above the least, and
-/// "(default)" while `memsize` isn't set and the size is the default for
+/// "(auto)" while `memsize` isn't set and the size is the default for
 /// the CPU and the display adapter.
 pub(super) fn memsize_bar(s: &Settings) -> String {
     let (mb, steps) = (s.memory_mb(), memsizes(s.cpu));
     let (full, cells) = (steps.clone().filter(|&m| m <= mb).count().saturating_sub(1), steps.count() - 1);
-    let default = if s.memsize.is_none() { " (default)" } else { "" };
+    // Short enough for the row with the 15 squares of a CPU that takes
+    // 512 MB: a longer value is shortened in the middle of the squares.
+    let default = if s.memsize.is_none() { " (auto)" } else { "" };
     format!("{:>3} MB {}{}{}", mb, "■".repeat(full), "·".repeat(cells - full), default)
 }
 

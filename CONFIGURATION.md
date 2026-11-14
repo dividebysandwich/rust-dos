@@ -443,7 +443,7 @@ limit, so without a connection it goes on as it would with one:
   with a 386, which takes no more), as the games that card is for ask
   for it. A `memsize` line sets the memory whatever the `cpu` and the
   card are, below these sizes too, for a program that runs only with
-  less. The settings window shows `(default)` beside a size that isn't
+  less. The settings window shows `(auto)` beside a size that isn't
   set, and saving keeps it out of the file, so it follows a later
   change of `cpu` or `machine`. A file that an earlier version's
   settings window saved with F2 has a `memsize` line (16, unless it was

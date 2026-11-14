@@ -420,8 +420,11 @@ impl ConfigUi {
         match (result, memory) {
             (Err(problem), _) => self.error(problem),
             // The host's note (a change that waits for the running
-            // program), and the memory's after it.
-            (Ok(Some(note)), Some(memory)) => self.info(format!("{}; the {}", note, memory)),
+            // program), and the memory's after it, short enough for
+            // both to fit the status line's 72 columns.
+            (Ok(Some(note)), Some(_)) => {
+                self.info(format!("{}; memory {} MB at next start", note, memory_mb))
+            }
             (Ok(Some(note)), None) => self.info(note),
             (Ok(None), _) if item.applies() == Applies::NextStart => {
                 self.info("Takes effect the next time Rust-DOS starts (F2 saves it)")

@@ -478,7 +478,7 @@ fn settings_change_live() {
 
     // Memory steps up to what the 486 takes and waits for the next start.
     ui.row = ui.items().iter().position(|&i| i == Item::Memsize).unwrap();
-    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some(" 16 MB ■■■■······· (default)"));
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some(" 16 MB ■■■■······· (auto)"));
     keys(&mut ui, &mut host, &[Right]);
     assert_eq!(host.applied.last().unwrap().memsize, Some(20));
     assert!(status(&ui).0.contains("next time"), "{:?}", status(&ui));
@@ -515,10 +515,12 @@ fn settings_change_live() {
     let applied = host.applied.last().unwrap();
     assert_eq!((applied.memsize, applied.memory_mb()), (None, 64));
     assert!(status(&ui).0.contains("default is now 64 MB"), "{:?}", status(&ui));
-    assert_eq!(Item::Memsize.value(&ui.settings, None), " 64 MB ■■■■■■■■■······ (default)");
+    assert_eq!(Item::Memsize.value(&ui.settings, None), " 64 MB ■■■■■■■■■······ (auto)");
     ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
     pick(&mut ui, &mut host, crate::video::adapter::Adapter::ToadForce.describe());
-    assert_eq!(Item::Memsize.value(&ui.settings, None), "128 MB ■■■■■■■■■■■···· (default)");
+    assert_eq!(Item::Memsize.value(&ui.settings, None), "128 MB ■■■■■■■■■■■···· (auto)");
+    // The row has room for it: 31 columns on the 80-column window.
+    assert!(Item::Memsize.value(&ui.settings, None).chars().count() <= 31);
     assert!(status(&ui).0.contains("default is now 128 MB"), "{:?}", status(&ui));
     // While a program runs the host says the card waits for it to end
     // (`pending_note`), and the memory's note follows its own.
@@ -526,7 +528,11 @@ fn settings_change_live() {
     host.note = Some(running.to_string());
     pick(&mut ui, &mut host, crate::video::adapter::Adapter::default().describe());
     let (note, _) = status(&ui);
-    assert!(note.starts_with(running) && note.contains("default is now 64 MB"), "{:?}", note);
+    assert_eq!(note, "Takes effect when the running program ends; memory 64 MB at next start");
+    // Both fit the status line, 72 columns on the 80-column screen
+    // (`fit` cuts the middle out of a longer one), also with a
+    // three-digit size.
+    assert!(note.chars().count() < 72, "{:?}", note);
     host.note = None;
     pick(&mut ui, &mut host, crate::video::adapter::Adapter::ToadForce.describe());
     // Set by the user, it stays through them, down to what a CPU takes.
