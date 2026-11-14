@@ -628,7 +628,8 @@ mod tests {
         assert_eq!(layout.tex[1].1, 2);
         let setup = pipeline::Setup::default();
         let p = pipeline::process(&setup, &vertices, &layout);
-        assert_eq!(p[0].tex[1], [0.25, 0.75, 0.0, 1.0]);
+        // Its two numbers, the last as the fourth too.
+        assert_eq!(p[0].tex[1], [0.25, 0.75, 0.0, 0.75]);
         // The first set, which the declaration doesn't load, is the
         // register's.
         assert_eq!(p[0].tex[0], [0.0, 0.0, 0.0, 1.0]);

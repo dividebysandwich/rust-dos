@@ -63,13 +63,15 @@ fn prim_caps(d: &Description) -> [u32; 13] {
     // its inverse, the destination's color and its inverse, and the
     // saturated source alpha.
     let src_blend = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x100 | 0x200 | 0x400 | d.blend;
-    // The destination has no factor that sets both.
-    let dest_blend = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | d.blend & 0x3FF;
+    // The destination has no factor that sets both (BOTHSRCALPHA and
+    // BOTHINVSRCALPHA, 0x800 and 0x1000).
+    let dest_blend = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | d.blend & 0x7FF;
     // D3DPSHADECAPS_: Gouraud color, specular, alpha, fog.
     let shade = 0x8 | 0x200 | 0x4000 | 0x8_0000 | 0x2 | 0x80;
     // D3DPTEXTURECAPS_: perspective, powers of 2, alpha, transparency,
-    // repeat not scaled by size, alpha in palettes, color key blending.
-    let texture = 0x1 | 0x2 | 0x4 | 0x8 | 0x40 | 0x80 | 0x1000 | d.texture;
+    // repeat not scaled by size, alpha in palettes, and the card's own,
+    // color key blending among them where it has it.
+    let texture = 0x1 | 0x2 | 0x4 | 0x8 | 0x40 | 0x80 | d.texture | d.texture7;
     // D3DPTFILTERCAPS_: the old nearest, linear and mipmapped ones, and
     // point and linear minification, magnification and mip filtering.
     let filter = 0x1
@@ -218,7 +220,7 @@ pub fn write_desc7(cpu: &mut Cpu, at: u32, offer: Offer, tnl: bool) {
         false => 0,
     };
     cpu.bus.guest_write_32(at + 0xD4, 6 | blend << 16);
-    cpu.bus.guest_write_32(at + 0xD8, 0x3E);
+    cpu.bus.guest_write_32(at + 0xD8, 0x3F);
 }
 
 #[cfg(test)]
@@ -273,18 +275,47 @@ mod tests {
 
     #[test]
     fn the_texture_op_caps_are_what_validate_device_accepts() {
-        // D3DTOP_DISABLE (1) to D3DTOP_LERP (26), on each card.
+        // D3DTOP_DISABLE (1) to D3DTOP_LERP (26), on each card, for a
+        // device of Direct3D 7 and one of Direct3D 8, whose caps have
+        // the operations Direct3D 8 added too.
         for kind in [VOODOO, hal::Kind::ToadForce] {
-            let ops = hal::description(kind).ops;
-            for op in 1..=26 {
-                assert_eq!(
-                    ops & 1 << (op - 1) != 0,
-                    hal::can_do(kind, op),
-                    "{kind:?}: D3DTOP {op}"
-                );
+            let d = hal::description(kind);
+            for (version, ops) in [(7, d.ops), (8, d.ops | d.ops8)] {
+                for op in 1..=26 {
+                    assert_eq!(
+                        ops & 1 << (op - 1) != 0,
+                        hal::can_do(kind, op, version),
+                        "{kind:?}, Direct3D {version}: D3DTOP {op}"
+                    );
+                }
+                assert!(!hal::can_do(kind, 0, version) && !hal::can_do(kind, 27, version));
             }
-            assert!(!hal::can_do(kind, 0) && !hal::can_do(kind, 27));
         }
+    }
+
+    /// What a ToadForce's descriptions say against what the card
+    /// does: its capability table (`toadforce::caps`) and the states
+    /// its HAL sends.
+    #[test]
+    fn a_toadforces_caps_are_what_the_card_does() {
+        let d = hal::description(hal::Kind::ToadForce);
+        // Table fog by w and by z and anisotropy, and no w buffer:
+        // `ZENABLE` has no value for one.
+        assert_eq!(d.raster & 0x4_0000, 0, "D3DPRASTERCAPS_WBUFFER");
+        assert_eq!(d.raster & 0x30_0000, 0x30_0000, "WFOG and ZFOG");
+        // Projected coordinates and cube maps, and no blend for a
+        // colour-keyed texel.
+        assert_eq!(d.texture & 0xC00, 0xC00, "PROJECTED and CUBEMAP");
+        assert_eq!((d.texture | d.texture7) & 0x1000, 0, "COLORKEYBLEND");
+        // Direct3D 7 has the operations up to DOTPRODUCT3 (24), and
+        // Direct3D 8 adds MULTIPLYADD and LERP.
+        assert_eq!(d.ops & 0xFF00_0000, 0);
+        assert_eq!(d.ops8, 0x300_0000);
+        // Every blend factor as the source's, and as the destination's
+        // all but the two that set both.
+        let caps = prim_caps(&d);
+        assert_eq!(caps[3] & 0x1FFF, 0x1FFF, "source factors");
+        assert_eq!(caps[4] & 0x1FFF, 0x7FF, "destination factors");
     }
 
     #[test]

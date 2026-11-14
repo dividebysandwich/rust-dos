@@ -4261,13 +4261,20 @@ fn projected_texture_coordinates_are_divided_by_the_last_one() {
     let scene = generated_scene(matrix, 3 | TTFF_PROJECTED);
     assert_quarters(&draw_scene("voodoo3_projected", &scene));
     assert_quarters(&draw_scene_toadforce("toadforce_projected", &scene));
-    // Transformed vertices keep their set, and with no count the
-    // fourth coordinate divides it, which is 1 for a set of two. The
-    // ToadForce takes such vertices with four coordinates a set.
+    // Transformed vertices keep their set, and with no count the last
+    // number the vertex has for it divides it, as on Direct3D 9's
+    // reference rasteriser: the third of a set of three, which is 2
+    // here beside twice u and twice v.
+    let corner = |x: f32, y: f32| [x, y, 0.5, 1.0, x / 32.0, y / 32.0, 2.0];
+    let (a, b) = (corner(0.0, 0.0), corner(64.0, 0.0));
+    let (c, d) = (corner(0.0, 64.0), corner(64.0, 64.0));
+    // D3DFVF_XYZRHW, one set, D3DFVF_TEXCOORDSIZE3(0).
+    let fvf = D3DFVF_XYZRHW | 0x100 | 1 << 16;
     let scene = Scene {
         steps: vec![
+            Step::State(RS_CULLMODE, 1),
             Step::Stage(TSS_TEXTURETRANSFORMFLAGS, TTFF_PROJECTED),
-            Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE)),
+            Step::World(fvf, bits(&[a, b, c, b, d, c].concat()), 6),
         ],
         ..scene
     };
@@ -4719,4 +4726,123 @@ fn a_toadforce_blends_the_normals_of_blended_vertices() {
     }
     assert_rgb(&p, 5, 5, [0, 0, 0], 0);
     assert_rgb(&p, 20, 32, [0, 0, 0], 0);
+}
+
+/// D3DSHADE_FLAT gives a triangle its first vertex's colours and
+/// leaves the fog, the specular colour's alpha, each vertex's own
+/// ("the specular alpha is interpolated"): a white square whose left
+/// vertices have no fog and whose right ones are all fog is white on
+/// the left and the fog's green on the right, in both its triangles.
+#[test]
+fn a_toadforce_interpolates_the_fog_of_a_flat_shaded_triangle() {
+    let square = quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE)
+        .into_iter()
+        .map(|v| with_fog(v, if v.x == 0.0 { 0xFF } else { 0 }))
+        .collect();
+    let scene = toadforce_scene(vec![
+        Step::State(RS_SHADEMODE, 1),
+        Step::State(RS_FOGENABLE, 1),
+        Step::State(RS_FOGCOLOR, 0x00_FF00),
+        Step::Draw(square),
+    ]);
+    let p = draw_scene_toadforce("toadforce_flat_fog", &scene);
+    // An eighth of the way across, an eighth of the colour is fog, in
+    // the first triangle and in the second.
+    assert_rgb(&p, 8, 30, [223, 255, 223], 12);
+    assert_rgb(&p, 8, 60, [223, 255, 223], 12);
+    assert_rgb(&p, 56, 4, [32, 255, 32], 12);
+    assert_rgb(&p, 56, 30, [32, 255, 32], 12);
+}
+
+const RS_WRAP0: u32 = 128;
+
+/// Red and green over blue and white, each a quarter of the texture.
+fn quarters() -> [u16; 64] {
+    std::array::from_fn(|i| match (i % 8 >= 4, i / 8 >= 4) {
+        (false, false) => 0xF800,
+        (true, false) => 0x07E0,
+        (false, true) => 0x001F,
+        (true, true) => 0xFFFF,
+    })
+}
+
+/// A square over the target whose u is 0.9 on the left and 0.3 on the
+/// right, in the texture's upper half.
+fn over_the_seam() -> Vec<Tl> {
+    quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE)
+        .into_iter()
+        .map(|v| Tl {
+            u: if v.x == 0.0 { 0.9 } else { 0.3 },
+            v: 0.25,
+            ..v
+        })
+        .collect()
+}
+
+/// Texture wrapping (D3DRENDERSTATE_WRAP0): a u that is half a turn or
+/// more from that of the triangle's highest vertex goes a turn towards
+/// it. The upper triangle's u goes from 0.9 on through 1 to 1.3, where
+/// without it u runs back from 0.9 to 0.3, and the lower one's from
+/// -0.1 to 0.3.
+#[test]
+fn a_toadforce_wraps_texture_coordinates_the_shorter_way_round() {
+    // Unwrapped: green down to u of 0.5, two thirds of the way.
+    let scene = Scene {
+        texture: Some(quarters()),
+        ..toadforce_scene(vec![Step::Draw(over_the_seam())])
+    };
+    let p = draw_scene_toadforce("toadforce_unwrapped", &scene);
+    assert_rgb(&p, 6, 16, [0, 255, 0], 0);
+    assert_rgb(&p, 32, 16, [0, 255, 0], 0);
+    assert_rgb(&p, 60, 16, [255, 0, 0], 0);
+    assert_rgb(&p, 32, 48, [0, 255, 0], 0);
+
+    // Wrapped: green up to u of 1, a quarter of the way, then red. The
+    // lower triangle's highest vertex is the right one, so its u runs
+    // from -0.1, green, on through 0 to 0.3.
+    let scene = Scene {
+        texture: Some(quarters()),
+        ..toadforce_scene(vec![Step::State(RS_WRAP0, 1), Step::Draw(over_the_seam())])
+    };
+    let p = draw_scene_toadforce("toadforce_wrap0", &scene);
+    assert_rgb(&p, 6, 16, [0, 255, 0], 0);
+    assert_rgb(&p, 32, 16, [255, 0, 0], 0);
+    assert_rgb(&p, 60, 16, [255, 0, 0], 0);
+    assert_rgb(&p, 8, 60, [0, 255, 0], 0);
+    assert_rgb(&p, 32, 48, [255, 0, 0], 0);
+}
+
+/// The same with vertices the card transforms: the HAL sends it the
+/// wrap states, and it wraps what it makes of the coordinates.
+#[test]
+fn a_toadforce_wraps_the_coordinates_of_vertices_it_transforms() {
+    let corner = |x: f32, y: f32| [x, y, 0.5, if x < 0.0 { 0.9 } else { 0.3 }, 0.25];
+    let (a, b) = (corner(-1.0, 1.0), corner(1.0, 1.0));
+    let (c, d) = (corner(-1.0, -1.0), corner(1.0, -1.0));
+    let square = || bits(&[a, b, c, b, d, c].concat());
+    let fvf = D3DFVF_XYZ | 0x100;
+    let scene = Scene {
+        texture: Some(quarters()),
+        ..toadforce_scene(vec![
+            Step::State(RS_LIGHTING, 0),
+            Step::World(fvf, square(), 6),
+        ])
+    };
+    let p = draw_scene32_toadforce("toadforce_world_unwrapped", &scene);
+    assert_eq!(p[16 * 64 + 6], 0x00_FF00);
+    assert_eq!(p[16 * 64 + 32], 0x00_FF00);
+    assert_eq!(p[16 * 64 + 60], 0xFF_0000);
+    let scene = Scene {
+        texture: Some(quarters()),
+        ..toadforce_scene(vec![
+            Step::State(RS_LIGHTING, 0),
+            Step::State(RS_WRAP0, 1),
+            Step::World(fvf, square(), 6),
+        ])
+    };
+    let p = draw_scene32_toadforce("toadforce_world_wrapped", &scene);
+    assert_eq!(p[16 * 64 + 6], 0x00_FF00);
+    assert_eq!(p[16 * 64 + 32], 0xFF_0000);
+    assert_eq!(p[48 * 64 + 32], 0xFF_0000);
+    assert_eq!(p[16 * 64 + 60], 0xFF_0000);
 }

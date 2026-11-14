@@ -218,7 +218,8 @@ fn setup_of(
     viewport: u32,
 ) -> Setup {
     let view_map = view_map(cpu, d, version, viewport);
-    let guard_band = super::hal::vertex_band(super::hal::kind_of(cpu, d));
+    let kind = super::hal::kind_of(cpu, d);
+    let guard_band = super::hal::vertex_band(kind);
     let s = |r: u32| d.state(r);
     let mut planes = Vec::new();
     if version >= 7 {
@@ -253,7 +254,11 @@ fn setup_of(
             lights,
             material,
             ambient: [a[0], a[1], a[2], 0.0],
-            specular: s(RS_SPECULARENABLE) != 0,
+            // Direct3D 7 gives a material whose power is 0.001 or less
+            // no highlight (measured on its vertex pipeline), where
+            // Direct3D 8 raises to the power as it is, and a power of
+            // 0 gives the whole highlight.
+            specular: s(RS_SPECULARENABLE) != 0 && !(version == 7 && material.power <= 0.001),
             local_viewer: s(RS_LOCALVIEWER) != 0,
             color_vertex: s(RS_COLORVERTEX) != 0,
             sources: [
@@ -287,6 +292,8 @@ fn setup_of(
         fog,
         clip: s(RS_CLIPPING) != 0 && flags & D3DDP_DONOTCLIP == 0,
         guard_band,
+        tl_depth_cut: !super::hal::transforms(kind),
+        local_viewer: s(RS_LOCALVIEWER) != 0,
         cull: s(RS_CULLMODE),
         fill: s(RS_FILLMODE),
         shade: s(RS_SHADEMODE),
@@ -301,8 +308,30 @@ fn setup_of(
         normalize: s(RS_NORMALIZENORMALS) != 0,
         screen_stages: (d.tmus as usize).min(pipeline::SCREEN_STAGES),
         blend: vertex_blend(d, version, layout),
+        wrap: wrap_bits(version, s),
     }
 }
+
+/// The D3DWRAPCOORD_ bits of each coordinate set, from the render
+/// states `s` reads of a device of Direct3D `version`.
+fn wrap_bits(version: u32, s: impl Fn(u32) -> u32) -> [u8; 8] {
+    std::array::from_fn(|set| {
+        let mut bits = s(RS_WRAP0 + set as u32) & 0xF;
+        // Before Direct3D 7 the first set's two coordinates have a
+        // state each, which D3DRENDERSTATE_WRAP0 superseded.
+        if set == 0 && version < 7 {
+            bits |= (s(RS_WRAPU) != 0) as u32 | ((s(RS_WRAPV) != 0) as u32) << 1;
+        }
+        bits as u8
+    })
+}
+
+/// D3DRENDERSTATE_WRAPU and WRAPV, Direct3D 5's and 6's wrapping of
+/// the one coordinate set's u and v, and D3DRENDERSTATE_WRAP0, the
+/// first of the eight states that have a set's D3DWRAPCOORD_ bits.
+const RS_WRAPU: u32 = 5;
+const RS_WRAPV: u32 = 6;
+const RS_WRAP0: u32 = 128;
 
 /// D3DRENDERSTATE_VERTEXBLEND.
 const RS_VERTEXBLEND: u32 = 151;
@@ -1109,4 +1138,28 @@ pub fn device_setup(
         setup.lighting = None;
     }
     Ok((id, setup.for_sets()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D3DRENDERSTATE_WRAPU and WRAPV are the first set's u and v
+    /// bits before Direct3D 7, and no state of Direct3D 7's.
+    #[test]
+    fn the_legacy_wrap_states_are_the_first_sets_bits() {
+        let states = |pairs: &'static [(u32, u32)]| {
+            move |id: u32| pairs.iter().find(|p| p.0 == id).map_or(0, |p| p.1)
+        };
+        assert_eq!(wrap_bits(6, states(&[(RS_WRAPU, 1)])), [1, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(wrap_bits(6, states(&[(RS_WRAPV, 1)])), [2, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            wrap_bits(6, states(&[(RS_WRAPU, 1), (RS_WRAP0, 8), (RS_WRAP0 + 3, 0x16)])),
+            [9, 0, 0, 6, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            wrap_bits(7, states(&[(RS_WRAPU, 1), (RS_WRAPV, 1), (RS_WRAP0 + 7, 3)])),
+            [0, 0, 0, 0, 0, 0, 0, 3]
+        );
+    }
 }

@@ -199,6 +199,80 @@ impl Queue<'_> {
     }
 }
 
+/// A texture coordinate of a primitive's vertex as cylindrical
+/// wrapping has it (`WRAP0` to `WRAP7`), where `base` is the
+/// coordinate of the primitive's base vertex (`wrap_base`): one that
+/// is half a turn or more from the base's goes a turn towards it,
+/// once, a turn being 1 as Direct3D counts it. So 0.1 beside a base
+/// of 0.9 is 1.1, exactly half a turn away moves, and 2.25 beside 0
+/// is 1.25 and no nearer. This is what Direct3D 7's software
+/// rasteriser and Direct3D 9's reference rasteriser were measured to
+/// do.
+pub fn wrapped(base: f32, c: f32) -> f32 {
+    let d = c - base;
+    if d >= 0.5 {
+        c - 1.0
+    } else if d <= -0.5 {
+        c + 1.0
+    } else {
+        c
+    }
+}
+
+/// Which of a primitive's vertices wrapping brings the others near:
+/// the highest on the screen, and of two that high the one further
+/// left, as Direct3D 9's reference rasteriser has it. `at` is each
+/// vertex's place there, across and down, or None for one that isn't
+/// in front of the eye, which is the base only when none is. Of
+/// vertices at one place, and of those whose place is no number, the
+/// first is taken.
+pub fn wrap_base(at: &[Option<(f32, f32)>]) -> usize {
+    let mut base: Option<(usize, (f32, f32))> = None;
+    for (i, place) in at.iter().enumerate() {
+        let Some((x, y)) = *place else { continue };
+        match base {
+            Some((_, (bx, by))) if !(y < by || y == by && x < bx) => {}
+            _ if x.is_nan() || y.is_nan() => {}
+            _ => base = Some((i, (x, y))),
+        }
+    }
+    base.map_or(0, |(i, _)| i)
+}
+
+/// The wrapping of `state` done to the coordinates of a primitive's
+/// vertices: `tex[k]` is those of vertex `k`, a set for each slot as
+/// `slot` numbers them, and vertex `base` is the one the others are
+/// brought near. Wrapping comes before the planes cut the primitive
+/// and before a projected stage divides, so what is interpolated
+/// between two vertices goes the way the wrapped coordinates say.
+fn wrap(
+    state: &DrawState,
+    base: usize,
+    slot: impl Fn(usize) -> usize,
+    tex: &mut [&mut [[f32; 4]]],
+) {
+    let mut done = 0u32;
+    for (i, &bits) in state.wrap.iter().enumerate() {
+        let at = slot(i);
+        // Two slots may be of one set of a vertex in screen space.
+        if bits == 0 || done >> at & 1 != 0 {
+            continue;
+        }
+        done |= 1 << at;
+        let first = tex[base][at];
+        for (k, tex) in tex.iter_mut().enumerate() {
+            if k == base {
+                continue;
+            }
+            for (number, c) in tex[at].iter_mut().enumerate() {
+                if bits >> number & 1 != 0 {
+                    *c = wrapped(first[number], *c);
+                }
+            }
+        }
+    }
+}
+
 /// One primitive of a draw, by its vertices' places in the draw's
 /// order.
 enum Piece {
@@ -256,6 +330,17 @@ fn polygon<V: std::borrow::Borrow<ScreenVertex>>(
         1 | 2 if !(1..n - 1).any(|i| Prim::facing(fan(i), shape.cull).is_some()) => {}
         1 => {
             for i in (0..n).filter(|i| outline.0 >> i & 1 != 0) {
+                // A flat triangle's points have its colours, and each
+                // its own fog.
+                if shape.flat {
+                    let mut corner = *at(i);
+                    let fog = corner.specular[texel::A];
+                    corner.diffuse = provoking.diffuse;
+                    corner.specular = provoking.specular;
+                    corner.specular[texel::A] = fog;
+                    queue.point(&corner, state, sets);
+                    continue;
+                }
                 queue.point(at(i), state, sets);
             }
         }
@@ -539,15 +624,33 @@ impl Renderer {
             false => Queue::Software(prims),
         };
         let (shape, sets) = (&state.shape, &state.sets[..]);
+        let wraps = state.wrap.iter().any(|&bits| bits != 0);
+        let set = |slot: usize| sets[slot] as usize;
         let v = |i: usize| &vertices[order[i] as usize];
         pieces(primitive, order.len(), |piece| match piece {
             Piece::Point(a) => queue.point(v(a), state, sets),
             Piece::Line(a, b) => {
                 let provoking = if shape.flat_last { v(b) } else { v(a) };
+                if wraps {
+                    let (mut a, mut b) = (*v(a), *v(b));
+                    let base = wrap_base(&[Some((a.x, a.y)), Some((b.x, b.y))]);
+                    wrap(state, base, set, &mut [&mut a.tex[..], &mut b.tex[..]]);
+                    queue.line(&a, &b, provoking, state, sets);
+                    return;
+                }
                 queue.line(v(a), v(b), provoking, state, sets);
             }
             Piece::Triangle(t, ends) => {
                 let provoking = v(t[if shape.flat_last { ends.1 } else { ends.0 }]);
+                if wraps {
+                    let mut corners = t.map(|i| *v(i));
+                    let base = wrap_base(&corners.map(|c| Some((c.x, c.y))));
+                    let [a, b, c] = &mut corners;
+                    let tex = &mut [&mut a.tex[..], &mut b.tex[..], &mut c.tex[..]];
+                    wrap(state, base, set, tex);
+                    polygon(&mut queue, &corners, (7, 7), provoking, state, sets);
+                    return;
+                }
                 polygon(&mut queue, &t.map(v), (7, 7), provoking, state, sets);
             }
         });
@@ -579,6 +682,7 @@ impl Renderer {
         // A slot's coordinates are worked out for the slot.
         let slots: [u8; pipeline::SLOTS] = std::array::from_fn(|i| i as u8);
         let sets = &slots[..state.coords.len()];
+        let wraps = state.wrap.iter().any(|&bits| bits != 0);
         let v = |i: usize| &lit[order[i] as usize];
         // What crosses a plane in force is cut there.
         pieces(primitive, order.len(), |piece| match piece {
@@ -594,7 +698,12 @@ impl Renderer {
                     return;
                 }
                 let provoking = setup.project(if shape.flat_last { b } else { a });
-                if let Some((a, b)) = clip::line(*a, *b, out) {
+                let (mut a, mut b) = (*a, *b);
+                if wraps {
+                    let base = wrap_base(&[a.seen(), b.seen()]);
+                    wrap(state, base, |slot| slot, &mut [&mut a.tex[..], &mut b.tex[..]]);
+                }
+                if let Some((a, b)) = clip::line(a, b, out) {
                     let (a, b) = (setup.project(&a), setup.project(&b));
                     queue.line(&a, &b, &provoking, state, sets);
                 }
@@ -605,6 +714,20 @@ impl Renderer {
                 if t[0].out & t[1].out & t[2].out != 0 {
                     return;
                 }
+                // The corners with their coordinates wrapped, where
+                // the state wraps any.
+                let own;
+                let t = if wraps {
+                    let mut corners = t.map(|v| *v);
+                    let base = wrap_base(&corners.map(|c| c.seen()));
+                    let [a, b, c] = &mut corners;
+                    let tex = &mut [&mut a.tex[..], &mut b.tex[..], &mut c.tex[..]];
+                    wrap(state, base, |slot| slot, tex);
+                    own = corners;
+                    [&own[0], &own[1], &own[2]]
+                } else {
+                    t
+                };
                 // The side that shows gives the colours.
                 let back = setup.back(t);
                 let side = |v: &geometry::Vertex| if back { v.turned() } else { *v };

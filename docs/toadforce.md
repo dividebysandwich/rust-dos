@@ -651,6 +651,16 @@ What a program reads back from vertex processing (`ProcessVertices`,
 clip status, extents) is Direct3D's pipeline's: the HAL leaves those
 draws to it, and the card never computes them.
 
+With `D3DRENDERSTATE_CLIPPING` off the two ways a draw's vertices are
+transformed differ, as they do on Windows. The card cuts the vertices it
+transforms at the near and far planes whatever the state says, which is what
+Direct3D 7, 8 and 9 were measured to draw with hardware vertex processing.
+The pipeline of the built-in Windows, which transforms the draws the card
+doesn't take, projects every vertex then, as Microsoft's software vertex
+processing does, and the card gets screen vertices: with the depth test on
+it leaves out the pixels whose depth is outside 0 to 1, and with it off it
+draws them all.
+
 ### Rasterising
 
 Triangles cover the pixels whose centres are inside them, with
@@ -739,6 +749,9 @@ smoke and particles.
 | A sample of a 2D texture | 1 in 255, and 2 with a projected texture. The shader takes the card's steps in the card's whole numbers (`shader::SAMPLING`): the level of detail, the levels and the filter, the coordinates in 1/256 of a texel, the weights of 8 bits. What is left is a coordinate or a level of detail that the host's interpolation puts on the other side of one of those steps: a weight one of 256 off, or the next level where the level of detail is within 1/4096 of the change. Coordinates the card has exactly (a texel to a pixel from whole coordinates) give the same texels |
 | A sample of a cube map | 1 in 255 on a smooth texture, 3 where neighbouring texels differ by most of a channel's range. The host's own filter samples it: it rounds a weight to its 8 bits where the card cuts it off, works out the face's coordinates in its own arithmetic, and picks the mip level |
 | Bump offsets from a linearly filtered bump texture | as the weights, except between texels whose offsets differ in sign: both renderers blend the signed bytes as unsigned ones, so there a weight that is one off can turn 127 into -128 |
+| Bump offsets and the bump stage's luminance | the shader multiplies the offsets by the stage's matrix and scales the luminance in the host's single precision: a coordinate one step of 1/256 of a texel off, as a sample's, and 1 in 255 on the colour the luminance scales |
+| A table fog factor | 1 in 255 on a channel: the shader works out the distance, the exponential and the factor's 8 bits in the host's single precision |
+| The colour key of a cube map | the host looks the key up at its own nearest texel, from face coordinates it works out itself: a pixel on the edge of a keyed texel may be dropped by one renderer and drawn by the other |
 | Anisotropic filtering, where the host has it | the host GPU's, which reads more texels than the card's stand-in (trilinear at the level of the shorter side); compared by eye and by a mean error. Measured: a mean of 1.5 and at most 29 on the test's square going into the distance; in Giants 12% of the frame's pixels, 0.2% of the frame by more than 8 (the ground's normal map through `DOTPRODUCT3`) |
 | The alpha test and the colour key after a filtered sample | a pixel whose alpha is within the sample's bound of the reference is drawn by one renderer and not by the other. Measured: 0 to 6 pixels a frame of Zanzarah's leaves |
 | Depth | 1 step of a 16-bit buffer, 4 steps of a 24-bit one: the host interpolates depth in single precision and rounds it by itself. A depth half-way between two steps goes either way, and so does a test between two surfaces closer than the bound: Giants' marks on the ground, 2 steps of 24 bits in front of it, differ by more than 8 on 0.06% of the frame's pixels, where one renderer alone drew the mark |
@@ -939,7 +952,7 @@ compile is declined from its first draw on, since the program is
 compiled when the host is asked whether it takes the state.
 
 The agreement tests (`toadforce::gl::tests`, which need a desktop OpenGL
-context) draw 422 scenes in software and through the host and compare
+context) draw 457 scenes in software and through the host and compare
 card memory. On a GeForce RTX 4080: untextured triangles, every stage
 operation at each result scale, four stages with four textures, the
 alpha test, fog, the specular add, the stencil operations, the write
@@ -1002,7 +1015,9 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   The coordinates of texture slot `n` are in set `n` of every vertex,
   whichever set of the program's vertex they came from, and the three
   vertices of a flat-shaded triangle all have the colours of the one
-  that gives it them.
+  that gives it them, each with its own fog factor in the specular
+  colour's alpha. The coordinates are wrapped already where a `WRAP`
+  state says so.
 - **A draw the host doesn't take.** The host is asked for each state
   (`Host::declines`). A draw it declines (the states listed under "The
   OpenGL renderer") is drawn by the software renderer, and so is a draw
@@ -1274,25 +1289,23 @@ are the emulator's.
   which the tests are, bind again for every kept draw and stop if the
   bind sends a word or gives another result. `/api/win32/ddraw` counts
   the binds and those kept.
-- **Screen vertices go from the program's memory to the queue.** A
-  draw of transformed vertices has nothing for the pipeline to work
-  out unless a triangle needs cutting, a point or a line needs its
-  pixels, or a flat-shaded triangle its colours. `hal::draw_screen`
-  (`hal/toadforce/direct.rs`) writes such a draw into the card's
-  queue as one `DRAW_INDEXED` triangle list: the vertices read from
-  the program's memory into the command's words, in one copy where
-  the program's layout is the card's (`D3DFVF_TLVERTEX` with one
-  stage) and gathered word by word otherwise, and the indices of the
-  triangles the cull mode keeps, a strip's and a fan's too. It
-  declines points, lines, the wireframe and point fill modes, flat
-  shading, a clip status the program asked for, a draw with a vertex
-  outside the guard band or, while the device clips, outside the
-  depth range, a draw too large for one command, and vertices in
-  memory that isn't plain RAM: those go through the pipeline, as
-  every draw of vertices to transform does. A test draws 8000
-  made-up draws both ways and compares the triangles the card gets,
-  word for word.
-  `/api/win32/ddraw` counts the draws of each way (`screen_draws`).
+- **Screen vertices go from the program's memory to the queue.** A draw of
+  transformed vertices has nothing for the pipeline to work out unless a
+  triangle needs cutting, a point or a line needs its pixels, or a
+  flat-shaded triangle its colours. `hal::draw_screen`
+  (`hal/toadforce/direct.rs`) writes such a draw into the card's queue as
+  one `DRAW_INDEXED` triangle list: the vertices read from the program's
+  memory into the command's words, in one copy where the program's layout is
+  the card's (`D3DFVF_TLVERTEX` with one stage) and gathered word by word
+  otherwise, and the indices of the triangles the cull mode keeps, a strip's
+  and a fan's too. It declines points, lines, the wireframe and point fill
+  modes, flat shading, texture wrapping (`D3DRENDERSTATE_WRAP0` to `WRAP7`),
+  a clip status the program asked for, a draw with a vertex outside the
+  guard band, a draw too large for one command, and vertices in memory that
+  isn't plain RAM: those go through the pipeline, as every draw of vertices
+  to transform does. A test draws 8000 made-up draws both ways and compares
+  the triangles the card gets, word for word. `/api/win32/ddraw` counts the
+  draws of each way (`screen_draws`).
 - **Direct3D 8** (`d3d8/`) sits on the Direct3D 7 device, with
   `D3DCAPS8` filled from the HAL's device description
   (`hal::description`, whose sizes and counts are the level's

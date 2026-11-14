@@ -91,7 +91,7 @@
 use super::format::{Format, Rect, Surface};
 use super::level1::{Target, Texture};
 use super::raster::pipeline::{DrawState, SLOTS};
-use super::raster::texel::Rgba;
+use super::raster::texel::{A, Rgba};
 use super::raster::vertex::ScreenVertex;
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
@@ -120,16 +120,20 @@ impl Vertex {
 
     /// `v` with the colours of `colours` (the vertex itself, or the
     /// one that gives a flat-shaded triangle its colours), each slot
-    /// taking the coordinate set `sets` names for it.
+    /// taking the coordinate set `sets` names for it. The specular
+    /// colour's alpha, the fog factor, is `v`'s own either way: fog
+    /// isn't flat (`setup::planes`).
     pub fn of(v: &ScreenVertex, colours: &ScreenVertex, sets: &[u8]) -> Self {
         let mut tex = [[0.0; 4]; SLOTS];
         for (slot, to) in tex.iter_mut().enumerate() {
             *to = v.tex[sets.get(slot).map_or(slot, |&set| set as usize)];
         }
+        let mut specular = colours.specular;
+        specular[A] = v.specular[A];
         Vertex {
             place: [v.x, v.y, v.z, v.rhw],
             diffuse: colours.diffuse,
-            specular: colours.specular,
+            specular,
             tex,
         }
     }
@@ -167,7 +171,8 @@ pub struct Run {
     pub state: Arc<DrawState>,
     /// Their vertices in `Batch::vertices`, three a triangle. Those of
     /// a flat-shaded triangle (`Shape::flat`) all have the colours of
-    /// the vertex that gives it them.
+    /// the vertex that gives it them, but for the specular colour's
+    /// alpha, which is each vertex's own fog factor.
     pub vertices: Range<usize>,
 }
 

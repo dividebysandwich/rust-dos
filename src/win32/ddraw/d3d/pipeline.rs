@@ -13,6 +13,8 @@
 //! vector is transformed by multiplying it on their left.
 
 use crate::fixed_vec::FixedVec;
+use crate::toadforce::level1 as card;
+use crate::toadforce::raster::light as card_light;
 
 /// A 4x4 matrix, row by row (D3DMATRIX's _11 to _44).
 pub type Matrix = [f32; 16];
@@ -49,21 +51,8 @@ fn point(v: [f32; 3], m: &Matrix) -> [f32; 3] {
     [r[0], r[1], r[2]]
 }
 
-fn vector(v: [f32; 3], m: &Matrix) -> [f32; 3] {
-    let r = transform([v[0], v[1], v[2], 0.0], m);
-    [r[0], r[1], r[2]]
-}
-
 fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
 }
 
 fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -84,31 +73,13 @@ fn normalize(a: [f32; 3]) -> [f32; 3] {
     }
 }
 
-/// The matrix that transforms normals as `m` transforms points: the
-/// inverse of its upper 3x3 part, transposed (its cofactors over its
-/// determinant). A singular matrix transforms them as itself.
-fn normal_matrix(m: &Matrix) -> [[f32; 3]; 3] {
-    let r0 = [m[0], m[1], m[2]];
-    let r1 = [m[4], m[5], m[6]];
-    let r2 = [m[8], m[9], m[10]];
-    let c0 = cross(r1, r2);
-    let det = dot(r0, c0);
-    if det.abs() < 1e-30 || !det.is_finite() {
-        return [r0, r1, r2];
-    }
-    let c1 = cross(r2, r0);
-    let c2 = cross(r0, r1);
-    let s = |c: [f32; 3]| [c[0] / det, c[1] / det, c[2] / det];
-    [s(c0), s(c1), s(c2)]
-}
-
-fn times(n: [f32; 3], m: &[[f32; 3]; 3]) -> [f32; 3] {
-    let mut r = [0.0; 3];
-    for (j, r) in r.iter_mut().enumerate() {
-        *r = n[0] * m[0][j] + n[1] * m[1][j] + n[2] * m[2][j];
-    }
-    r
-}
+// The matrix that transforms normals as a matrix transforms points
+// (the inverse of its upper 3x3 part, transposed, and the matrix itself
+// where it is singular), and a normal through it: the ToadForce's, so
+// that the vertices the pipeline keeps of a device on that card have
+// the normals of those the card transforms.
+use crate::toadforce::raster::geometry::{self as card_geometry, normal_matrix, times};
+use crate::toadforce::raster::wrap_base;
 
 // Flexible vertex formats.
 
@@ -437,6 +408,32 @@ pub const LIGHT_DIRECTIONAL: u32 = 3;
 pub const LIGHT_PARALLELPOINT: u32 = 4;
 pub const LIGHT_GLSPOT: u32 = 5;
 
+impl Light {
+    /// The light as a ToadForce has one: its lighting is the
+    /// pipeline's too (`lighting`), and the card's HAL sends it this.
+    pub fn card(&self) -> card::Light {
+        card::Light {
+            // Direct3D 5's second spot light is a spot light.
+            kind: if self.kind == LIGHT_GLSPOT {
+                LIGHT_SPOT
+            } else {
+                self.kind
+            },
+            diffuse: self.diffuse,
+            specular: self.specular,
+            ambient: self.ambient,
+            position: self.position,
+            direction: self.direction,
+            range: self.range,
+            falloff: self.falloff,
+            attenuation: self.attenuation,
+            theta: self.theta,
+            phi: self.phi,
+            spot_model: 0,
+        }
+    }
+}
+
 /// A material (D3DMATERIAL7's colors and power).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Material {
@@ -446,10 +443,6 @@ pub struct Material {
     pub emissive: [f32; 4],
     pub power: f32,
 }
-
-/// Where a lit vertex takes a color from (D3DMCS_), if not the material.
-pub const MCS_COLOR1: u32 = 1;
-pub const MCS_COLOR2: u32 = 2;
 
 /// How vertices are lit.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -485,20 +478,13 @@ pub struct Fog {
 
 /// How much of a color is left after fog of `mode` at `depth`: 1 none
 /// of it fogged, 0 all fog. Table fog uses it for each pixel.
+///
+/// It is the ToadForce's (`toadforce::raster::geometry::fog_factor`):
+/// the exponentials come from that card's own series, so a factor is
+/// the same on every host, and on a ToadForce the same whether the
+/// card or the pipeline fogged the vertex.
 pub fn fog_factor(mode: u32, start: f32, end: f32, density: f32, depth: f32) -> f32 {
-    let f = match mode {
-        FOG_EXP => (-density * depth).exp(),
-        FOG_EXP2 => (-(density * depth) * (density * depth)).exp(),
-        FOG_LINEAR => {
-            if end == start {
-                if depth < end { 1.0 } else { 0.0 }
-            } else {
-                (end - depth) / (end - start)
-            }
-        }
-        _ => 1.0,
-    };
-    if f.is_nan() { 1.0 } else { f.clamp(0.0, 1.0) }
+    card_geometry::fog_factor(mode, start, end, density, depth)
 }
 
 /// Geometry blending, Direct3D 8's D3DRS_VERTEXBLEND, which the
@@ -560,6 +546,19 @@ pub struct Setup {
     /// bottom. The card's is `hal::vertex_band`, at or a little inside
     /// the guard band the device reports.
     pub guard_band: [f32; 4],
+    /// Whether transformed vertices are cut at the depths 0 and 1
+    /// when the setup clips. A ToadForce does without: with the depth
+    /// test on it leaves out each pixel whose depth is outside 0 to 1,
+    /// and with it off it draws them, as Direct3D's cards were
+    /// measured to with a program's own transformed vertices. The
+    /// other cards limit a depth to their range, so for them the
+    /// pipeline cuts.
+    pub tl_depth_cut: bool,
+    /// D3DRENDERSTATE_LOCALVIEWER, for the texture coordinates made
+    /// of a reflection: the line of sight they throw back is the one
+    /// to the vertex with it, and straight ahead without, whether the
+    /// vertices are lit or not.
+    pub local_viewer: bool,
     pub cull: u32,
     pub fill: u32,
     pub shade: u32,
@@ -578,6 +577,10 @@ pub struct Setup {
     /// Geometry blending, if the vertices are blended: `world` is then
     /// the first world matrix only for tweening.
     pub blend: Option<Blend>,
+    /// D3DRENDERSTATE_WRAP0 to WRAP7, for each coordinate set its
+    /// D3DWRAPCOORD_ bits: a coordinate with its bit goes the shorter
+    /// way round between a primitive's vertices (`wrap`).
+    pub wrap: [u8; 8],
 }
 
 impl Default for Setup {
@@ -592,6 +595,8 @@ impl Default for Setup {
             fog: None,
             clip: true,
             guard_band: super::hal::voodoo::VERTEX_BAND,
+            tl_depth_cut: true,
+            local_viewer: true,
             cull: CULL_CCW,
             fill: 3,
             shade: 2,
@@ -599,6 +604,7 @@ impl Default for Setup {
             normalize: false,
             screen_stages: SCREEN_STAGES,
             blend: None,
+            wrap: [0; 8],
         }
     }
 }
@@ -664,7 +670,14 @@ impl Coord {
     /// makes them (`toadforce::raster::geometry::coordinates`): the set
     /// or what is generated, with a 1 after its last number, through
     /// the matrix. Of what comes out the first `count` stay.
-    fn make(&self, layout: &Layout, v: &Vertex, eye: [f32; 3], normal: [f32; 3]) -> [f32; 4] {
+    fn make(
+        &self,
+        layout: &Layout,
+        v: &Vertex,
+        eye: [f32; 3],
+        normal: [f32; 3],
+        local_viewer: bool,
+    ) -> [f32; 4] {
         // A slot that is no more than a set, as nearly every one of
         // every draw is, is a copy.
         if !self.made() {
@@ -672,7 +685,7 @@ impl Coord {
         }
         let matrix = self.matrix.as_ref().map(|(m, count)| (m, *count));
         let set = (v.tex[self.set & 7], self.numbers(layout));
-        crate::toadforce::raster::geometry::coordinates(self.generate, set, eye, normal, matrix)
+        card_geometry::coordinates(self.generate, set, eye, normal, local_viewer, matrix)
     }
 
     /// How many numbers the slot's set has in a vertex of `layout`: 0
@@ -686,12 +699,14 @@ impl Coord {
 
     /// The vertex's set for the slot, as a transformed vertex keeps it
     /// and as `coordinates` gives a set with no matrix: its numbers,
-    /// 0 for those it doesn't have, and 1 for a fourth it doesn't have.
+    /// 0 for those it doesn't have, and for a fourth it doesn't have
+    /// its last number, which a projected stage with no count divides
+    /// by (`card_geometry::last_as_fourth`).
     fn keep(&self, layout: &Layout, v: &Vertex) -> [f32; 4] {
         let numbers = self.numbers(layout);
-        let mut c = [0.0, 0.0, 0.0, 1.0];
+        let mut c = [0.0; 4];
         c[..numbers].copy_from_slice(&v.tex[self.set & 7][..numbers]);
-        c
+        card_geometry::last_as_fourth(c, numbers)
     }
 
     /// The coordinates `c` of the slot as a card takes a stage's: the
@@ -730,6 +745,8 @@ impl Coord {
         let at = layout.tex[self.set & 7].0 / 4;
         let kept = std::array::from_fn(|i| match i {
             i if i < numbers => Part::Word(at + i as u32),
+            // The last number of a set is its fourth too (`keep`).
+            3 if numbers > 0 => Part::Word(at + numbers as u32 - 1),
             3 => one,
             _ => zero,
         });
@@ -802,6 +819,39 @@ impl Processed {
         self.diffuse = provoking.diffuse;
         self.specular = provoking.specular;
         self.specular[3] = fog;
+    }
+
+    /// Texture wrapping (D3DRENDERSTATE_WRAP0 to WRAP7) between this
+    /// vertex and `base`, its primitive's base vertex (`wrap_base`):
+    /// each coordinate `setup` wraps that is half a turn or more from
+    /// `base`'s goes one turn towards it, a turn being 1. Direct3D
+    /// documents it as "the shortest route between texture
+    /// coordinates", with 0.0 and 1.0 taken as coincident, and this is
+    /// what its software rasterisers were measured to do. A slot wraps
+    /// as its stage's coordinate index says, which the documentation
+    /// keeps for that when the coordinates are generated. It is done
+    /// here, before clipping, and on a ToadForce by the card for the
+    /// vertices it transforms (`toadforce::raster::wrapped`), with the
+    /// same arithmetic.
+    fn wrap(&mut self, base: &Processed, setup: &Setup) {
+        for (slot, coord) in setup.coords.iter().enumerate() {
+            let bits = setup.wrap[coord.set & 7];
+            for i in (0..4).filter(|i| bits >> i & 1 != 0) {
+                self.tex[slot][i] =
+                    crate::toadforce::raster::wrapped(base.tex[slot][i], self.tex[slot][i]);
+            }
+        }
+    }
+
+    /// Where the vertex is seen, across and down, for telling which of
+    /// a primitive's vertices is highest: None for one that isn't in
+    /// front of the eye.
+    fn seen(&self) -> Option<(f32, f32)> {
+        let [x, y, _, w] = self.clip;
+        match self.tl {
+            true => Some((x, y)),
+            false => (w > 0.0).then(|| (x / w, -y / w)),
+        }
     }
 
     fn lerp(&self, o: &Processed, t: f32) -> Processed {
@@ -896,14 +946,48 @@ impl Rasterizer for Counter {
 
 // Transform and lighting.
 
-/// The lights in camera space, with what lighting needs of them.
-struct EyeLight {
-    light: Light,
-    position: [f32; 3],
-    /// For a directional or parallel point light: toward the light.
-    toward: [f32; 3],
-    /// The way a spot light points.
-    axis: [f32; 3],
+/// The ToadForce's lighting for `l`, with the lights in camera space
+/// by `setup`'s view matrix. The pipeline lights every vertex with
+/// the card's arithmetic (`toadforce::raster::light`): the formulas
+/// are Direct3D's, the cosines and powers come from the card's own
+/// series, which give the same on every host, and a device on that
+/// card gets the same colour for a vertex whether the card lit it or
+/// the pipeline kept the draw.
+fn lighting(l: &Lighting, setup: &Setup, world_view: &Matrix) -> card_light::Lighting {
+    let origin = point([0.0; 3], world_view);
+    let lamps = l
+        .lights
+        .iter()
+        .map(|light| match light.kind {
+            // A parallel point light shines on every vertex from where
+            // it is as seen from the object's origin.
+            LIGHT_PARALLELPOINT => {
+                let position = point(light.position, &setup.view);
+                card_light::Lamp::shining_from(&light.card(), normalize(sub(position, origin)))
+            }
+            _ => card_light::Lamp::new(&light.card(), &setup.view),
+        })
+        .collect();
+    let m = &l.material;
+    let material = card::Material {
+        diffuse: m.diffuse,
+        ambient: m.ambient,
+        specular: m.specular,
+        emissive: m.emissive,
+        power: m.power,
+    };
+    // A vertex without the color a source names has the material's:
+    // `Lighting::light` is given the colors the vertex has.
+    let own = l.color_vertex;
+    card_light::Lighting::of(
+        lamps,
+        material,
+        [l.ambient[0], l.ambient[1], l.ambient[2]],
+        l.specular,
+        l.local_viewer,
+        l.sources
+            .map(|source| card_light::Source::of(source, own, own)),
+    )
 }
 
 /// Run `input`, of `layout`, through transform, lighting and fog.
@@ -917,32 +1001,10 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
     let world_view = multiply(&setup.world, &setup.view);
     let all = multiply(&world_view, &setup.projection);
     let normals = normal_matrix(&world_view);
-    let lights: Vec<EyeLight> = setup
+    let lighting = setup
         .lighting
         .as_ref()
-        .map(|l| {
-            let origin = point([0.0; 3], &world_view);
-            l.lights
-                .iter()
-                .map(|light| {
-                    let position = point(light.position, &setup.view);
-                    let toward = match light.kind {
-                        LIGHT_DIRECTIONAL => {
-                            normalize(vector(light.direction, &setup.view).map(|c| -c))
-                        }
-                        LIGHT_PARALLELPOINT => normalize(sub(position, origin)),
-                        _ => [0.0; 3],
-                    };
-                    EyeLight {
-                        light: *light,
-                        position,
-                        toward,
-                        axis: normalize(vector(light.direction, &setup.view)),
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+        .map(|l| lighting(l, setup, &world_view));
     let mut blended = Blended::of(setup);
     let tween = match setup.blend {
         Some(Blend::Tween(f)) => Some(f),
@@ -990,7 +1052,9 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
             let n = if setup.normalize { normalize(n) } else { n };
             let mut out = Processed {
                 clip,
-                tex: std::array::from_fn(|slot| setup.coords[slot].make(layout, v, eye, n)),
+                tex: std::array::from_fn(|slot| {
+                    setup.coords[slot].make(layout, v, eye, n, setup.local_viewer)
+                }),
                 ..Processed::default()
             };
             for (i, plane) in setup.planes.iter().take(6).enumerate() {
@@ -999,9 +1063,9 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
                     + plane[2] * world[2]
                     + plane[3] * world[3];
             }
-            match &setup.lighting {
+            match &lighting {
                 Some(l) => {
-                    let (d, s) = light_vertex(l, &lights, v, eye, n);
+                    let (d, s) = l.light(eye, n, v.diffuse.map(rgba), v.specular.map(rgba));
                     out.diffuse = d;
                     out.specular = s;
                 }
@@ -1183,114 +1247,6 @@ pub fn codes(setup: &Setup, p: &Processed) -> u32 {
     code
 }
 
-/// The diffuse and specular colors of a vertex at `eye` (camera space)
-/// with the normal `n`.
-fn light_vertex(
-    l: &Lighting,
-    lights: &[EyeLight],
-    v: &Vertex,
-    eye: [f32; 3],
-    n: [f32; 3],
-) -> ([f32; 4], [f32; 4]) {
-    let source = |which: usize, material: [f32; 4]| -> [f32; 4] {
-        if !l.color_vertex {
-            return material;
-        }
-        match l.sources[which] {
-            MCS_COLOR1 => v.diffuse.map_or(material, rgba),
-            MCS_COLOR2 => v.specular.map_or(material, rgba),
-            _ => material,
-        }
-    };
-    let m_diffuse = source(0, l.material.diffuse);
-    let m_specular = source(1, l.material.specular);
-    let m_ambient = source(2, l.material.ambient);
-    let m_emissive = source(3, l.material.emissive);
-    let mut ambient = [l.ambient[0], l.ambient[1], l.ambient[2]];
-    let mut diffuse = [0.0f32; 3];
-    let mut specular = [0.0f32; 3];
-    let to_eye = if l.local_viewer {
-        normalize(eye.map(|c| -c))
-    } else {
-        [0.0, 0.0, -1.0]
-    };
-    for e in lights {
-        let light = &e.light;
-        let (dir, atten) = match light.kind {
-            LIGHT_DIRECTIONAL | LIGHT_PARALLELPOINT => (e.toward, 1.0),
-            _ => {
-                let to = sub(e.position, eye);
-                let d = length(to);
-                if light.range > 0.0 && d > light.range {
-                    continue;
-                }
-                let a = &light.attenuation;
-                let denom = a[0] + a[1] * d + a[2] * d * d;
-                let atten = if denom > 0.0 { 1.0 / denom } else { 1.0 };
-                (normalize(to), atten)
-            }
-        };
-        let spot = if matches!(light.kind, LIGHT_SPOT | LIGHT_GLSPOT) {
-            let rho = -dot(dir, e.axis);
-            let (inner, outer) = ((light.theta / 2.0).cos(), (light.phi / 2.0).cos());
-            // Outside the outer cone first, as the card has it: a
-            // light whose inner cone is the wider one, which Direct3D
-            // doesn't define, then lights the same on both.
-            if rho <= outer {
-                0.0
-            } else if rho > inner {
-                1.0
-            } else if inner > outer {
-                let f = (rho - outer) / (inner - outer);
-                if light.falloff == 1.0 {
-                    f
-                } else {
-                    f.powf(light.falloff)
-                }
-            } else {
-                1.0
-            }
-        } else {
-            1.0
-        };
-        let factor = atten * spot;
-        if factor <= 0.0 || !factor.is_finite() {
-            continue;
-        }
-        for (a, l) in ambient.iter_mut().zip(light.ambient) {
-            *a += l * factor;
-        }
-        let nl = dot(n, dir);
-        if nl > 0.0 {
-            for (d, l) in diffuse.iter_mut().zip(light.diffuse) {
-                *d += l * nl * factor;
-            }
-            if l.specular {
-                let h = normalize([dir[0] + to_eye[0], dir[1] + to_eye[1], dir[2] + to_eye[2]]);
-                let nh = dot(n, h);
-                if nh > 0.0 {
-                    let p = nh.powf(l.material.power);
-                    if p.is_finite() {
-                        for (s, l) in specular.iter_mut().zip(light.specular) {
-                            *s += l * p * factor;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let mut out_d = [0.0; 4];
-    let mut out_s = [0.0; 4];
-    for c in 0..3 {
-        out_d[c] =
-            (m_emissive[c] + m_ambient[c] * ambient[c] + m_diffuse[c] * diffuse[c]).clamp(0.0, 1.0);
-        out_s[c] = (m_specular[c] * specular[c]).clamp(0.0, 1.0);
-    }
-    out_d[3] = m_diffuse[3].clamp(0.0, 1.0);
-    out_s[3] = 1.0;
-    (out_d, out_s)
-}
-
 // Primitives.
 
 /// D3DPRIMITIVETYPE.
@@ -1413,12 +1369,13 @@ type Planes = FixedVec<Plane, MAX_PLANES>;
 /// The planes primitives are clipped at: the near and far planes and
 /// the user's when the setup clips, and the guard band always. A
 /// transformed vertex's near and far planes are z 0 and 1, as Wine's
-/// depth_clamp_test has them on Windows.
+/// depth_clamp_test has them on Windows, for a card that limits a
+/// depth to its range (`Setup::tl_depth_cut`).
 fn clip_planes(setup: &Setup, tl: bool) -> Planes {
     let mut planes = Planes::new(Plane::User(0));
     let band = setup.guard_band;
     if tl {
-        if setup.clip {
+        if setup.clip && setup.tl_depth_cut {
             planes.push(Plane::Above(2, 0.0));
             planes.push(Plane::Below(2, 1.0));
         }
@@ -1590,6 +1547,7 @@ pub fn draw(
     let tl_planes = clip_planes(setup, true);
     let mut scratch = clip_scratch();
     let flat = setup.shade == SHADE_FLAT;
+    let wraps = setup.wrap != [0; 8];
     for prim in prims {
         match *prim {
             Prim::Point(i) => {
@@ -1608,6 +1566,12 @@ pub fn draw(
                     continue;
                 };
                 let (mut va, mut vb) = (*va, *vb);
+                if wraps {
+                    match wrap_base(&[va.seen(), vb.seen()]) {
+                        0 => vb.wrap(&va, setup),
+                        _ => va.wrap(&vb, setup),
+                    }
+                }
                 if flat && let Some(p) = verts.get(provoking as usize) {
                     va.take_flat_colors(p);
                     vb.take_flat_colors(p);
@@ -1621,6 +1585,17 @@ pub fn draw(
                     continue;
                 }
                 let mut tri = idx.map(|i| verts[i as usize]);
+                if wraps {
+                    // The highest of the triangle's vertices on the
+                    // screen, as the card has it.
+                    let first = wrap_base(&tri.map(|t| t.seen()));
+                    let base = tri[first];
+                    for (k, t) in tri.iter_mut().enumerate() {
+                        if k != first {
+                            t.wrap(&base, setup);
+                        }
+                    }
+                }
                 if flat && let Some(p) = verts.get(provoking as usize) {
                     for t in tri.iter_mut() {
                         t.take_flat_colors(p);
@@ -1962,10 +1937,14 @@ mod tests {
             ..Setup::default()
         };
         let p = process(&setup, &[v], &layout)[0];
-        assert_eq!(p.tex[0], [0.25, 0.75, 0.0, 1.0]);
+        // A set kept as it is has its last number as the fourth too,
+        // for a projected stage to divide by.
+        assert_eq!(p.tex[0], [0.25, 0.75, 0.0, 0.75]);
         assert_eq!(p.tex[1], [0.5, 1.5, 0.0, 1.0]);
         assert_eq!(p.tex[2], [5.0, 5.0, 9.0, 1.0]);
-        assert_eq!(p.tex[3], [0.0, 0.0, -1.0, 1.0]);
+        // The normal's three numbers have no count to end at, so the
+        // last of them is the fourth as well.
+        assert_eq!(p.tex[3], [0.0, 0.0, -1.0, -1.0]);
         assert_eq!(p.tex[4], [0.0, 0.0, 0.0, 1.0]);
     }
 
@@ -2270,6 +2249,22 @@ mod tests {
         assert_eq!(fog_factor(FOG_LINEAR, 10.0, 20.0, 0.0, 15.0), 0.5);
         assert_eq!(fog_factor(FOG_LINEAR, 10.0, 20.0, 0.0, 30.0), 0.0);
         assert_eq!(fog_factor(FOG_EXP, 0.0, 0.0, 0.0, 30.0), 1.0);
+    }
+
+    /// Linear fog asks the start first and the end second, as
+    /// Direct3D 7's and 8's vertex pipelines were measured to: fog
+    /// that starts where it ends, or after, leaves what is nearer than
+    /// its start and fogs the rest whole.
+    #[test]
+    fn linear_fog_that_starts_where_it_ends_or_after() {
+        assert_eq!(fog_factor(FOG_LINEAR, 0.5, 0.5, 0.0, 0.25), 1.0);
+        assert_eq!(fog_factor(FOG_LINEAR, 0.5, 0.5, 0.0, 0.5), 0.0);
+        assert_eq!(fog_factor(FOG_LINEAR, 0.5, 0.5, 0.0, 0.75), 0.0);
+        assert_eq!(fog_factor(FOG_LINEAR, 0.0, 0.0, 0.0, 0.0), 0.0);
+        assert_eq!(fog_factor(FOG_LINEAR, 30.0, 12.0, 0.0, 8.0), 1.0);
+        assert_eq!(fog_factor(FOG_LINEAR, 30.0, 12.0, 0.0, 20.0), 1.0);
+        assert_eq!(fog_factor(FOG_LINEAR, 30.0, 12.0, 0.0, 30.0), 0.0);
+        assert_eq!(fog_factor(FOG_LINEAR, 30.0, 12.0, 0.0, 45.0), 0.0);
     }
 
     #[test]
@@ -2591,5 +2586,179 @@ mod tests {
         v.position2 = None;
         let out = process(&setup, &[v], &Layout::default());
         assert_eq!(out[0].clip, [0.0, 1.0, 0.5, 1.0]);
+    }
+
+    /// D3DRENDERSTATE_WRAP0: a coordinate with its bit that is half a
+    /// turn or more from that of the triangle's highest vertex goes a
+    /// turn towards it, 0 and 1 being the same place.
+    #[test]
+    fn a_wrapped_texture_coordinate_goes_the_shorter_way_round() {
+        let us = |wrap: u8, order: &[u32]| {
+            let mut setup = Setup {
+                view_map: ViewMap::dx7(0, 0, 100, 100, 0.0, 1.0),
+                cull: CULL_NONE,
+                ..Setup::default()
+            };
+            setup.wrap[0] = wrap;
+            let at = |x: f32, y: f32, u: f32| {
+                let mut v = vertex(x, y, 0.5);
+                v.tex[0] = [u, 0.75, 0.0, 1.0];
+                v
+            };
+            let verts = process(
+                &setup,
+                &[
+                    at(-0.5, 0.5, 0.9),
+                    at(0.5, 0.5, 0.1),
+                    at(0.0, -0.5, 0.5),
+                ],
+                &Layout::of(FVF_XYZ | 0x100).unwrap(),
+            );
+            let mut r = Recorder::default();
+            draw(
+                &setup,
+                &verts,
+                &assemble(TRIANGLELIST, order).unwrap(),
+                &mut r,
+            );
+            r.triangles[0].map(|v| (v.tex[0][0], v.tex[0][1]))
+        };
+        // Unwrapped, as the vertices have them.
+        assert_eq!(us(0, &[0, 1, 2]), [(0.9, 0.75), (0.1, 0.75), (0.5, 0.75)]);
+        // Wrapped in u: 0.1 is nearer 0.9 as 1.1. v has no bit.
+        assert_eq!(us(1, &[0, 1, 2]), [(0.9, 0.75), (1.1, 0.75), (0.5, 0.75)]);
+        // The highest vertex, and of the two that high the left one,
+        // is the one the others are brought near, wherever it comes in
+        // the triangle: the one with 0.9 here.
+        assert_eq!(us(1, &[1, 0, 2]), [(1.1, 0.75), (0.9, 0.75), (0.5, 0.75)]);
+        assert_eq!(us(1, &[2, 1, 0]), [(0.5, 0.75), (1.1, 0.75), (0.9, 0.75)]);
+        // v's bit alone leaves u.
+        assert_eq!(us(2, &[0, 1, 2]), [(0.9, 0.75), (0.1, 0.75), (0.5, 0.75)]);
+    }
+
+    /// The pipeline lights with the ToadForce's arithmetic, so a
+    /// vertex has the colours the card gives it, bit for bit.
+    #[test]
+    fn a_vertex_is_lit_as_a_toadforce_lights_it() {
+        let lights = vec![
+            Light {
+                kind: LIGHT_SPOT,
+                diffuse: [0.9, 0.7, 0.5, 1.0],
+                specular: [0.3, 0.6, 0.9, 1.0],
+                ambient: [0.05, 0.1, 0.15, 1.0],
+                position: [0.5, 0.25, -2.0],
+                direction: [-0.2, 0.1, 1.0],
+                range: 50.0,
+                falloff: 1.7,
+                attenuation: [0.4, 0.2, 0.1],
+                theta: 0.3,
+                phi: 2.2,
+            },
+            Light {
+                kind: LIGHT_DIRECTIONAL,
+                diffuse: [0.2, 0.3, 0.4, 1.0],
+                specular: [0.5, 0.5, 0.5, 1.0],
+                direction: [0.3, -0.4, 0.8],
+                ..Light::default()
+            },
+        ];
+        let material = Material {
+            diffuse: [0.8, 0.6, 0.9, 0.7],
+            ambient: [0.5, 0.4, 0.3, 1.0],
+            specular: [0.9, 0.8, 0.7, 1.0],
+            emissive: [0.02, 0.03, 0.04, 1.0],
+            power: 12.5,
+        };
+        let lighting = Lighting {
+            lights: lights.clone(),
+            material,
+            ambient: [0.1, 0.1, 0.2, 1.0],
+            specular: true,
+            local_viewer: true,
+            ..Lighting::default()
+        };
+        let setup = Setup {
+            lighting: Some(lighting),
+            ..Setup::default()
+        };
+        let mut v = vertex(0.3, -0.2, 1.5);
+        v.normal = [0.2, -0.3, -0.9];
+        let out = process(&setup, &[v], &Layout::of(FVF_XYZ | FVF_NORMAL).unwrap());
+
+        // The card's lighting of the same lights and material.
+        let identity = Setup::default().view;
+        let card = card_light::Lighting::of(
+            lights
+                .iter()
+                .map(|l| card_light::Lamp::new(&l.card(), &identity))
+                .collect(),
+            crate::toadforce::level1::Material {
+                diffuse: material.diffuse,
+                ambient: material.ambient,
+                specular: material.specular,
+                emissive: material.emissive,
+                power: material.power,
+            },
+            [0.1, 0.1, 0.2],
+            true,
+            true,
+            [card_light::Source::Material; 4],
+        );
+        let (diffuse, specular) = card.light([0.3, -0.2, 1.5], [0.2, -0.3, -0.9], None, None);
+        assert_eq!(out[0].diffuse, diffuse);
+        assert_eq!(out[0].specular[..3], specular[..3]);
+        // Both lights reach it, and the highlight is there.
+        assert!(diffuse[0] > 0.2 && specular[0] > 0.0, "{diffuse:?} {specular:?}");
+    }
+
+    /// A falloff and a specular power below 0 are raised to as they
+    /// are, which brightens, and one of 0 gives the whole light: what
+    /// Direct3D 8 does (and Direct3D 7, but for the powers `setup_of`
+    /// keeps from the lighting).
+    #[test]
+    fn a_falloff_or_a_power_below_0_brightens() {
+        let lit = |falloff: f32, power: f32| {
+            let lighting = Lighting {
+                lights: vec![Light {
+                    kind: LIGHT_SPOT,
+                    diffuse: [0.25; 4],
+                    specular: [0.25; 4],
+                    position: [0.0, 0.0, -1.0],
+                    direction: [0.3, 0.0, 1.0],
+                    range: 50.0,
+                    falloff,
+                    attenuation: [1.0, 0.0, 0.0],
+                    theta: 0.2,
+                    phi: 3.0,
+                    ..Light::default()
+                }],
+                material: Material {
+                    diffuse: [1.0; 4],
+                    specular: [1.0; 4],
+                    power,
+                    ..Material::default()
+                },
+                specular: true,
+                ..Lighting::default()
+            };
+            let setup = Setup {
+                lighting: Some(lighting),
+                ..Setup::default()
+            };
+            // Tilted, so the highlight's cosine is below 1.
+            let mut v = vertex(0.0, 0.0, 0.5);
+            v.normal = [0.0, 0.6, -0.8];
+            let out = process(&setup, &[v], &Layout::of(FVF_XYZ | FVF_NORMAL).unwrap());
+            (out[0].diffuse[0], out[0].specular[0])
+        };
+        let whole = lit(0.0, 0.0);
+        assert!(whole.0 > 0.0 && whole.0 < 1.0 && whole.1 > 0.0, "{whole:?}");
+        // The cone's share, below 1 here, to a power below 0 is above
+        // 1, and to one above 0 below it.
+        assert!(lit(-2.0, 0.0).0 > whole.0);
+        assert!(lit(4.0, 0.0).0 < whole.0);
+        // And so the highlight's cosine.
+        assert!(lit(0.0, -3.0).1 > whole.1);
+        assert!(lit(0.0, 3.0).1 < whole.1);
     }
 }

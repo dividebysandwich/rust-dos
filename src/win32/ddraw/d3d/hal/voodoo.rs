@@ -909,6 +909,10 @@ pub fn description() -> super::Description {
         // D3DPRASTERCAPS_: a w buffer, and fog by w.
         raster: 0x4_0000 | 0x10_0000,
         texture: 0,
+        // D3DPTEXTURECAPS_COLORKEYBLEND.
+        texture7: 0x1000,
+        raster8: 0,
+        ops8: 0,
         filter: 0,
         address: 0,
         blend: 0,

@@ -26,6 +26,15 @@ A frozen chapter changes only by adding what an earlier reader can't
 have relied on: a new register at a reserved offset, a new command, a
 new level.
 
+The card's contract is with the games that exist. Nobody writes new programs
+for it, so a rule here is there for the emulator's drivers and Direct3D
+front ends to rely on, and where it differs from what Direct3D does the
+specification says so and why. Level 1 follows measured Direct3D where a
+game shows the difference or where following costs nothing; where following
+would cost time for every vertex or pixel and no known game depends on it,
+the card keeps the cheaper rule. "Where the card differs from Direct3D" in
+chapter 9 lists the differences.
+
 Each rule here has a test. Those of the card alone (registers, the
 ring, rejections, the display's timing, the commands) are beside the
 code in `src/toadforce`; those of the card in the machine (PCI, the
@@ -581,6 +590,11 @@ word with a bit the table doesn't define. A colour of four numbers is
 red, green, blue, alpha. A colour in one word has alpha in bits 24 to
 31, red in 16 to 23, green in 8 to 15 and blue in 0 to 7.
 
+The rule for numbers is for a command's own arguments. The numbers of
+a vertex, in a draw command or in card memory, are taken as they are:
+"Transform and lighting" and "Drawing" say what one that isn't finite
+does.
+
 After a reset or a write to `LEVEL`: every render state and stage
 state has the reset value of its table below, every transform is the
 identity, the viewport and the scissor rectangle are zero and the
@@ -807,8 +821,10 @@ here are for all four draw commands.
   says which fields a vertex has and in which order: the position,
   the point size, the diffuse colour, the specular colour, and up to
   eight sets of one to four texture coordinates. A vertex is as many
-  words as its fields take. A code that names no layout, or one with a
-  reserved bit set, is rejected with `BAD_VALUE`.
+  words as its fields take. A code is rejected with `BAD_VALUE` when
+  it has bit 0 or one of bits 12 to 15 set, a position that is none of
+  those the next rule names, more than eight coordinate sets, or a
+  size other than 0 for a set past its count.
 - A layout whose position is x, y, z and 1 / w has vertices in
   screen space, which "Drawing" takes as they are. The other
   positions (x, y, z, and x, y, z with one to three weights) and a
@@ -882,17 +898,21 @@ matrix of `SET_TRANSFORM` is 16 numbers, row by row: a vector times a
 matrix is the vector's numbers times the matrix's columns. A position
 has a fourth number of 1.
 
-**Spaces.** The position times the world matrix is in world space,
-that times the view matrix in camera space, and that times the
-projection matrix in clip space, as x, y, z and w. With `VERTEXBLEND`
-n above 0 and a layout with weights, the first n weights of the
-vertex (or all it has, if fewer) and what they leave of 1 weigh the
-position through world matrices 0 to n, one each, and the normal
-likewise. A normal goes to camera space by the inverse of the world
-matrix times the view matrix, transposed, without the row and column
-of the translation. `NORMALIZENORMALS` 1 brings it to a length of 1
-there; a normal of length 0 stays. A layout without a normal has one
-of 0.
+**Spaces.** The position times the world matrix is in world space, that
+times the view matrix in camera space, and that times the projection matrix
+in clip space, as x, y, z and w. With `VERTEXBLEND` n above 0 and a layout
+with weights, the first n weights of the vertex (or all it has, if fewer)
+and what they leave of 1 weigh the position through world matrices 0 to n,
+one each, and the normal likewise. A normal goes to camera space by the
+inverse of the world matrix times the view matrix, transposed, without the
+row and column of the translation. Where those three rows and columns have
+no inverse (a determinant below 1e-30 in size, or none that is a number)
+every normal is (0, 0, 0), which no light lights. Direct3D goes on with the
+inverse of the last such matrix it could invert, and gives zeros only on a
+device that never had one; the card gives zeros every time, so that what a
+draw shows doesn't depend on the draws before it. `NORMALIZENORMALS` 1
+brings the normal to a length of 1 in camera space; a normal of length 0
+stays. A layout without a normal has one of 0.
 
 **The screen.** With the viewport's left, top, width, height and
 depths:
@@ -902,93 +922,155 @@ depths:
 - depth = near + z / w * (far - near)
 - 1 / w is the vertex's.
 
-**Clipping.** A primitive is cut where it crosses one of these, and
-what is outside isn't drawn: w below 1/65536; z below 0; x or y on the
-screen further than 16384 pixels from the render target's top left.
-These three are cut at with `CLIPPING` 0 as well. With `CLIPPING` 1
-also z above w, and each clip plane whose bit `CLIPPLANEENABLE` has: a
-plane (a, b, c, d) keeps the points whose world-space position (x, y,
-z, w) has a * x + b * y + c * z + d * w of 0 or more. Where an edge
-crosses, every value of the vertex is taken from the straight line
-between its ends in clip space. A point is dropped whole by its
-position. What is cut from a triangle is a convex polygon: filled, it
-covers the pixels the triangle did inside the planes. With `FILLMODE`
-2 the parts of the triangle's own edges that are inside are drawn, and
-no line along a plane; with 1 the triangle's own corners that are
-inside.
+**Clipping.** A primitive is cut where it crosses one of these, and what is
+outside isn't drawn: w below 1/65536; z below 0; z above w; x or y on the
+screen further than 16384 pixels from the render target's top left. These
+are cut at with `CLIPPING` 0 as well: the state changes nothing but the clip
+planes. (Measured on Direct3D 7, 8 and 9 with hardware vertex processing,
+where the state changes no pixel. Direct3D's own vertex pipeline, which a
+card that doesn't transform draws through, projects every vertex with the
+state at 0.) With `CLIPPING` 1 a primitive is also cut at each clip plane
+whose bit `CLIPPLANEENABLE` has: a plane (a, b, c, d) keeps the points whose
+world-space position (x, y, z, w) has a * x + b * y + c * z + d * w of 0 or
+more. Where an edge crosses, every value of the vertex is taken from the
+straight line between its ends in clip space. A point is dropped whole by
+its position. What is cut from a triangle is a convex polygon: filled, it
+covers the pixels the triangle did inside the planes. With `FILLMODE` 2 the
+parts of the triangle's own edges that are inside are drawn, and no line
+along a plane; with 1 the triangle's own corners that are inside.
 
 **Lighting.** With `LIGHTING` 0 the diffuse colour is the vertex's,
 or white, and the specular colour the vertex's, or black with alpha
 255. With 1 they are worked out in camera space, each channel of 0 to
-1:
+1, and the vertex's own colours are material colours at most:
 
 - diffuse = emissive + ambient * (`AMBIENT` + the sum of each
   light's ambient colour * f) + diffuse * the sum of each light's
   diffuse colour * (N . L) * f, with the alpha of the surface's
   diffuse colour
 - specular = specular * the sum of each light's specular colour *
-  (N . H)^power * f, with `SPECULARENABLE`, and alpha 255
+  (N . H)^power * f, with alpha 255. With `SPECULARENABLE` 0 it is
+  black with alpha 255.
 
-Emissive, ambient, diffuse and specular are the material's colours,
-or with `COLORVERTEX` 1 the vertex's diffuse (1) or specular (2)
-colour where the state `EMISSIVEMATERIALSOURCE`,
-`AMBIENTMATERIALSOURCE`, `DIFFUSEMATERIALSOURCE` or
-`SPECULARMATERIALSOURCE` names one the layout has. The sums are over
-the lights that are on. N is the normal. L points from the vertex to
-the light, with a length of 1: for a directional light the opposite
-of its direction, taken to camera space by the view matrix. H is L
-plus the direction to the eye, brought to a length of 1; the
-direction to the eye is from the vertex to the origin with
-`LOCALVIEWER` 1 and (0, 0, -1) with 0. A light adds diffuse and
-specular light only where N . L is above 0, and specular light only
-where N . H is too. A power of 0 or below counts as 0.
+Emissive, ambient, diffuse and specular are the material's colours, or with
+`COLORVERTEX` 1 the vertex's diffuse (1) or specular (2) colour where the
+state `EMISSIVEMATERIALSOURCE`, `AMBIENTMATERIALSOURCE`,
+`DIFFUSEMATERIALSOURCE` or `SPECULARMATERIALSOURCE` names one the layout
+has. The sums are over the lights that are on. N is the normal. L points
+from the vertex to the light, with a length of 1: for a directional light
+the opposite of its direction, taken to camera space by the view matrix. H
+is L plus the direction to the eye, brought to a length of 1; the direction
+to the eye is from the vertex to the origin with `LOCALVIEWER` 1 and (0, 0,
+-1) with 0. A light adds diffuse and specular light only where N . L is
+above 0, and specular light only where N . H is above 0 too. A normal of (0,
+0, 0) therefore takes a light's ambient colour and nothing else. An N . H
+above 1, which a normal longer than 1 gives, counts as 1.
 
-A point or spot light's f is 1 / (a0 + a1 * d + a2 * d * d), with d
-the distance from the vertex to the light's position (taken to camera
-space by the view matrix) and a0 to a2 its attenuation; a sum that
-isn't above 0 gives 1. Further than its range the light adds nothing.
-A directional light's f is 1. A spot light's f is multiplied by its
-cone: with rho the cosine of the angle between its direction and the
-line from it to the vertex, 0 where rho is at most cos(phi / 2);
-otherwise with spot model 0, 1 where rho is above cos(theta / 2) and
-((rho - cos(phi / 2)) / (cos(theta / 2) - cos(phi / 2)))^falloff
-between; with spot model 1, rho^falloff.
+A power x^y here, of a specular highlight or a spot's falloff, has an x
+above 0. It is 1 for a y of 0 and for an x of 1 and above, x^y for a y above
+0, and for a y below 0 it is 1 / x^-y, which is above 1, and no more than
+10^18. So a material power of 0 gives the whole highlight wherever N . H is
+above 0, and one below 0 a highlight that grows away from the mirror's
+direction, as Direct3D 8 and 9 give. Direct3D 7 gives no highlight for a
+power of 0.001 or less: the card has Direct3D 8's rule, and Direct3D 7's
+device turns `SPECULARENABLE` off for a lit draw with such a material, which
+gives its vertices the black specular colour they have there. Direct3D's own
+pipelines also drop a highlight whose (N . H)^power is below about 0.001.
+The card doesn't: at a light and a material of 1 such a highlight is a
+quarter of one step of a channel, and leaving it out makes the colour jump
+where the card's changes evenly.
 
-`SET_LIGHT` takes any finite numbers, and these formulas say what
-each lights. Every vertex is further than a range below 0, so such a
-light adds nothing. With theta above phi the cone is 1 wherever rho
-is above cos(phi / 2). The cosines are those of the angles as they
-are, however large. A direction of length 0 stays 0, where the others
-are brought to a length of 1: a directional light with one adds its
-ambient colour only, and a spot with one has a rho of 0. A light
-whose f isn't a number above 0, or is infinite, adds nothing.
+A point or spot light adds nothing, its ambient colour included, unless the
+vertex is nearer to it than its range: d below the range, with d the
+distance from the vertex to the light's position (taken to camera space by
+the view matrix). A vertex at the light's own position has no direction to
+it: it gets the light's ambient colour times f and nothing else. Its f is 1
+/ (a0 + a1 * d + a2 * d * d), with a0 to a2 its attenuation; with a sum that
+isn't above 0 the light adds nothing. A directional light's f is 1. A spot
+light's f is multiplied by its cone: with rho the cosine of the angle
+between its direction and the line from it to the vertex, 0 where rho is at
+most cos(phi / 2); otherwise with spot model 0, 1 where rho is above
+cos(theta / 2) and ((rho - cos(phi / 2)) / (cos(theta / 2) - cos(phi /
+2)))^falloff between; with spot model 1, rho^falloff. A falloff of 0 makes
+the cone 1 wherever rho is above cos(phi / 2), and one below 0 makes it
+larger than 1 between the two cosines, where the light is brighter than its
+colours. f is no more than 10^18.
+
+`SET_LIGHT` takes any finite numbers, and these formulas say what each
+lights, as Direct3D 8's do (Direct3D 7 refuses a light with theta above phi,
+an angle below 0, a phi above pi, a range below 0 or above the square root
+of the largest float, or a direction of no length, and its device refuses
+them before the card sees them). Every vertex is further than a range of 0
+or below, so such a light adds nothing. With theta above phi the cone is 1
+wherever rho is above cos(phi / 2). The cosines are those of the angles as
+they are, however large, so an angle below 0 is a cone of its size. A
+direction is brought to a length of 1, and one whose length is 0 as a float
+has it (the square root of the sum of the squares, which 1e-25 doesn't
+reach) is no direction: a directional light with one adds its ambient colour
+only, and a spot with one has a rho of 0, so it adds nothing with a phi up
+to pi and lights by its cone's formula with a larger one. A light whose f
+isn't a number above 0 adds nothing.
+
+The cosines, e^x and the powers are worked out with additions,
+multiplications and divisions alone, in a fixed order, so a vertex
+has the same colours on every host. They are within 2 / 1000000 of
+the cosine, within a millionth part of e^x and within a thousandth
+part of the power.
 
 With `TWO_SIDED_LIGHTING` 1 or 2 a triangle that shows its back has
 the colours the vertices get with their normals turned round. The
 back shows where the triangle is counterclockwise on the screen with
-1, and clockwise with 2. Lines and points have the front's colours.
+1, and clockwise with 2; a triangle with no area on the screen shows
+its front. A triangle that `FILLMODE` draws as lines or points has
+the colours of the side it shows. The primitives that are lines and
+points have the front's colours.
 
 Each channel is then limited to 0 to 1 and becomes c * 255 rounded to
-the nearest whole number.
+the nearest whole number. A channel that is no number becomes 0.
 
-**Fog.** With `FOGENABLE` 1, `FOGTABLEMODE` 0 and `FOGVERTEXMODE` not
-0, the specular colour's alpha becomes the fog factor of the vertex's
-distance d: (end - d) / (end - start) for mode 3, e^(-density * d)
-for 1, e^(-(density * d)^2) for 2, limited to 0 to 1. d is the size
-of the camera-space z, or with `RANGEFOGENABLE` 1 the distance from
-the origin there.
+**Fog.** With `FOGENABLE` 1, `FOGTABLEMODE` 0 and `FOGVERTEXMODE` not 0, the
+specular colour's alpha becomes the fog factor of the vertex's distance d, 1
+leaving all of the colour and 0 none. For mode 3 it is 1 where d is below
+the start; otherwise 0 where d is the end or more; otherwise (end - d) /
+(end - start). The questions are asked in that order, so fog that starts
+where it ends, or after, leaves what is nearer than its start and fogs the
+rest whole (measured on Direct3D 7's and 8's vertex pipelines). For mode 1
+it is e^(-density * d) and for 2 e^(-(density * d)^2), limited to 0 to 1. d
+is the size of the camera-space z, or with `RANGEFOGENABLE` 1 the distance
+from the origin there. The size of z is Direct3D 8's rule; Direct3D 7 takes
+z as it is, so what is behind the eye is unfogged there. In mode 1 a density
+times d below 0 gives 1, where Direct3D lets the factor pass 1 and keeps the
+lowest byte of the result, which fogs by a number that has nothing to do
+with the distance. A distance that is no number gives 1, and so does a
+factor that is none.
 
-**Texture coordinates.** The upper half of a stage's `TEXCOORDINDEX`
-says what its coordinates are: 0 the vertex's set, 1 the normal in
-camera space, 2 the position there, 3 the reflection R = I - 2 * (N .
-I) * N of I, the position brought to a length of 1, and 4 a sphere
-map's: (R.x / m + 1/2, R.y / m + 1/2) with m = 2 * the length of
-(R.x, R.y, 1 - R.z). With a count in `TEXTURETRANSFORMFLAGS` above 0
-they are multiplied by the stage's texture matrix, after a 1 is put
-behind the last of them when they are fewer than four, and the first
-count numbers of the result are the stage's coordinates. Without, the
-coordinates are passed on. A coordinate the stage hasn't got is 0, or
-1 for the fourth.
+Without vertex fog the specular alpha is the vertex's own, and 255 for a lit
+vertex and for one whose layout has no specular colour, so a draw with
+`FOGENABLE` 1 and neither fog mode is fogged by what the program put there.
+(Direct3D 7's `ProcessVertices` writes a lit vertex's specular colour as 0,
+alpha included, with `SPECULARENABLE` 0. The card's lit vertices have 255
+with either value of that state, as Direct3D 8's have with it on.) With
+`FOGTABLEMODE` not 0 the vertex's factor isn't used, so the card doesn't
+work it out, where Direct3D writes it into the vertex all the same.
+
+**Texture coordinates.** The upper half of a stage's `TEXCOORDINDEX` says
+what its coordinates are: 0 the vertex's set, 1 the normal in camera space,
+2 the position there, 3 the reflection R = I - 2 * (N . I) * N, and 4 a
+sphere map's: (R.x / m + 1/2, R.y / m + 1/2) with m = 2 * the length of
+(R.x, R.y, R.z - 1), and (1/2, 1/2) where m is 0. I is the line of sight:
+the position brought to a length of 1 with `LOCALVIEWER` 1, and (0, 0, 1)
+with 0, with or without `LIGHTING`. N is the normal with the length it has,
+1 only with `NORMALIZENORMALS`, and a normal of no length gives R = I. With
+a count in `TEXTURETRANSFORMFLAGS` above 0 the coordinates are multiplied by
+the stage's texture matrix, after a 1 is put behind the last of them when
+they are fewer than four and zeros behind that (a set of two numbers is (u,
+v, 1, 0), and what is generated is three numbers and a 1), and the first
+count numbers of the result are the stage's coordinates; those not counted
+are 0, and the fourth 1. Without a count the coordinates are passed on:
+those the stage hasn't got are 0, but the fourth, which is then the last
+number the stage has, and 1 for a stage with no numbers at all (the set of a
+layout that lacks it). "Textures" says which of them a stage with 256 in
+`TEXTURETRANSFORMFLAGS` divides the others by.
 
 **Point sizes.** A vertex's size is the layout's, or `POINTSIZE`.
 With `POINTSCALEENABLE` 1 it is multiplied by the viewport's height
@@ -998,34 +1080,68 @@ states `POINTSCALE_A` to `_C`; a sum that isn't above 0 leaves it.
 
 #### Drawing
 
-This section defines the pixels a draw writes. Every renderer of the
-card gives these pixels; the software renderer gives them bit for bit
-on every host.
+This section defines the pixels a draw writes. The software renderer
+defines them: it gives these pixels bit for bit on every host. The
+OpenGL renderer gives the same pixels but where a host GPU's
+arithmetic differs from the card's, and "Where the OpenGL renderer may
+differ" in `docs/toadforce.md` states the bound of each such
+difference.
 
-**Vertices.** A field the layout lacks has its default: the diffuse
-colour is white with alpha 255, the specular colour is 0, texture
-coordinates are 0. A 1 / w that is 0, negative or no finite number
-counts as 1. Positions are in pixels from the render target's top
-left. With `PIXEL_CENTRE` 0 the centre of the top left pixel is at
-(0, 0), and with 1 at (0.5, 0.5). A position is limited to 32768
-pixels either side of 0 and rounded to 1/256 of a pixel. A primitive
-with a position that is no finite number is not drawn.
+**Vertices.** A field the layout lacks has its default: the diffuse colour
+is white with alpha 255, the specular colour is 0, and a texture coordinate
+a set lacks is 0, but the fourth, which is the set's last number, or 1 for a
+set the layout hasn't got. A 1 / w that is 0, negative or no finite number
+counts as 1. Positions are in pixels from the render target's top left. With
+`PIXEL_CENTRE` 0 the centre of the top left pixel is at (0, 0), and with 1
+at (0.5, 0.5). A position is limited to 32768 pixels either side of 0 and
+rounded to 1/256 of a pixel. A primitive with a position that is no finite
+number is not drawn.
 
-**Primitives.** A strip's triangle i (from 0) has the vertices i,
-i + 1, i + 2, and every odd one has the first two the other way round,
-so all wind alike. A fan's triangle i has the vertices i + 1, i + 2
-and 0. With `SHADEMODE` flat a primitive has one vertex's colours all
-over, the first of its vertices in the draw's order (for a fan's
-triangle i that is vertex i + 1), or the last with `FLAT_VERTEX` 1.
+**Primitives.** A strip's triangle i (from 0) has the vertices i, i + 1, i +
+2, and every odd one has the first two the other way round, so all wind
+alike. A fan's triangle i has the vertices i + 1, i + 2 and 0. With
+`SHADEMODE` flat a primitive has one vertex's colours all over: the first of
+its vertices in the draw's order, which is vertex i for a strip's triangle
+i, vertex i + 1 for a fan's, and a line's first end, as Direct3D's
+rasterisers have it (measured on Direct3D 7's and 9's); or the last with
+`FLAT_VERTEX` 1. It is that vertex's diffuse colour, and the red, green and
+blue of its specular colour. The lines and the points `FILLMODE` makes of a
+flat triangle have the triangle's colours too. The specular colour's alpha,
+which is the fog factor of a vertex, stays each vertex's own and is
+interpolated, as Direct3D has it ("the specular alpha is interpolated").
 
-**Triangles.** A triangle with no area is not drawn, and neither is
-one `CULLMODE` culls: clockwise on the screen with 2,
-counterclockwise with 3. A triangle covers the pixels whose centres
-are inside it. A centre on an edge is covered when the edge is the
-triangle's top (horizontal, with the triangle below it) or on its
-left, so two triangles that share an edge cover each of its pixels
-once. With `FILLMODE` 2 a triangle that isn't culled is drawn as the
-three lines of its edges, and with 1 as its three vertices' points.
+**Wrapping.** `WRAP0` to `WRAP7` are for the coordinate sets 0 to 7, and bit
+n of one is for coordinate n of its set (bit 0 u, bit 1 v). A line or a
+triangle has a base vertex: the highest on the screen, and of two that high
+the one further left; of vertices at one place, the first in the primitive.
+A coordinate with its bit set is compared with the base's at each other
+vertex: where it is 0.5 or more above the base's, 1 is taken from it, and
+where it is 0.5 or more below, 1 is added. This is Direct3D's texture
+wrapping, which takes 0 and 1 for the same place, as its software
+rasterisers do it (measured on Direct3D 7's and on Direct3D 9's reference
+rasteriser, whose rule for two vertices of one height this is). A difference
+of exactly 0.5 moves, and a coordinate moves by 1 once: 2.25 beside a base
+of 0 becomes 1.25. The two vertices that aren't the base are each brought
+near it and not near each other, so the edge between them can go the longer
+way round. It is done before a primitive is clipped and before its
+coordinates are interpolated. A stage of a vertex the card transforms wraps
+what "Texture coordinates" makes of the set its `TEXCOORDINDEX` names, by
+that set's state, and takes the vertices' places on the screen before any
+plane cuts the primitive; a vertex that isn't in front of the eye (a w below
+1/65536) is the base only when none of the primitive's is. Points aren't
+wrapped. Direct3D's rasterisers were measured on triangles; the card does
+the same to a line's two ends.
+
+**Triangles.** A triangle with no area is not drawn, and neither is one
+`CULLMODE` culls: clockwise on the screen with 2, counterclockwise with 3. A
+triangle covers the pixels whose centres are inside it. A centre on an edge
+is covered when the edge is the triangle's top (horizontal, with the
+triangle below it) or on its left, so two triangles that share an edge cover
+each of its pixels once. With `FILLMODE` 2 a triangle that isn't culled is
+drawn as the three lines of its edges, and with 1 as its three vertices'
+points; a culled triangle has neither. (Direct3D 9's reference rasteriser
+culls both so; Direct3D 7's software rasteriser culls the lines and draws
+the points of a culled triangle.)
 
 **Lines.** A line has one pixel in each column it crosses when it is
 at least as long along x as along y, and one in each row otherwise:
@@ -1040,8 +1156,11 @@ with 0.
 
 **Points.** A point is a square around its position with sides of the
 vertex's point size, or `POINTSIZE` where the layout has none,
-limited to `POINTSIZE_MIN` and `POINTSIZE_MAX`. It covers pixels as
-two triangles would. With `POINTSPRITEENABLE` every coordinate set
+limited to `POINTSIZE_MIN` and `POINTSIZE_MAX`. Each of the three
+states counts as no less than 0 and no more than `CAPS[19]`, and
+with a minimum above the maximum the size is the minimum. It covers
+pixels as two triangles would. With `POINTSPRITEENABLE` every
+coordinate set
 goes from (0, 0) at the square's top left to (1, 1) at its bottom
 right.
 
@@ -1049,45 +1168,57 @@ right.
 target are not drawn, nor those outside the scissor rectangle when
 `SCISSORENABLE` is 1.
 
-**Values at a pixel.** Colours, texture coordinates and fog are
-interpolated to the pixel's centre with perspective: each value times
-1 / w, and 1 / w itself, change linearly over the screen, and the
-value is their quotient. Depth changes linearly over the screen and
-is limited to 0 to 1. A colour channel is rounded to the nearest of
-0 to 255. Along a line the values change with the place along it and
-not across it: a pixel has those of the point of the line nearest to
-its centre, which for a pixel past an end is a point of the line
-continued. A point has its vertex's values at every pixel, but for a
-point sprite's coordinates.
+**Values at a pixel.** Colours, texture coordinates and fog are interpolated
+to the pixel's centre with perspective: each value times 1 / w, and 1 / w
+itself, change linearly over the screen, and the value is their quotient.
+Depth changes linearly over the screen. A vertex in screen space may have a
+depth outside 0 to 1, and nothing is cut by it: with the depth test on
+(`ZENABLE` 1 and a depth buffer) a pixel whose depth is outside 0 to 1 isn't
+drawn and changes neither depth nor stencil, and with the test off it is
+drawn, its depth counting as the end of the range it is past wherever a
+depth is used. (Measured on Direct3D 7, 8 and 9 cards with a program's
+transformed vertices, with `CLIPPING` 1 and 0.) A screen vertex's 1 / w that
+is 0, negative or no number counts as 1, so its primitive is drawn. A colour
+channel is rounded to the nearest of 0 to 255. Along a line the values
+change with the place along it and not across it: a pixel has those of the
+point of the line nearest to its centre, which for a pixel past an end is a
+point of the line continued. A point has its vertex's values at every pixel,
+but for a point sprite's coordinates.
 
 **The order of a fragment's steps.**
 
 1. The depth and stencil tests, when no later step can drop the
    fragment; otherwise they come after step 5, so a dropped fragment
    leaves the depth and stencil as they were.
-2. The stages, from 0 up to the first whose `COLOROP` is 1. A colour
-   or alpha operation that reads a texture the stage hasn't got leaves
-   the fragment's colour or alpha as it was.
+2. The stages, from 0 up to the first whose `COLOROP` is 1, as
+   "Stages" says.
 3. With `SPECULARENABLE`, the specular colour is added to the red,
-   green and blue.
-4. With `FOGENABLE`, the red, green and blue are mixed with
-   `FOGCOLOR` by the fog factor f, 0 to 255: (c * f + fog * (255 - f)
-   + 127) / 255. With `FOGTABLEMODE` 0 the factor is the specular
-   colour's alpha. Otherwise it comes from the fragment's depth d, or
-   its w with `FOG_BY_W` 1: (end - d) / (end - start) for mode 3,
-   e^(-density * d) for 1, e^(-(density * d)^2) for 2. With
-   `FOGTABLEMODE` and `FOGVERTEXMODE` both 0, a lit vertex's specular
-   alpha is 255, so nothing is fogged.
+   green and blue, each sum limited to 255.
+4. With `FOGENABLE`, the red, green and blue are mixed with `FOGCOLOR` by
+   the fog factor f, 0 to 255: (c * f + fog * (255 - f) + 127) / 255. With
+   `FOGTABLEMODE` 0 the factor is the specular colour's alpha. Otherwise it
+   comes from the fragment's depth d, or its w with `FOG_BY_W` 1, by the
+   formulas of "Fog" above with the table's mode: for mode 3, 1 where d is
+   below the start, otherwise 0 where d is the end or more, otherwise (end -
+   d) / (end - start); e^(-density * d) for 1, e^(-(density * d)^2) for 2;
+   that number is limited to 0 to 1, and f is it times 255, rounded to the
+   nearest whole number. In mode 1 a density times d below 0 gives 1. With
+   `FOGTABLEMODE` and `FOGVERTEXMODE` both 0, a lit vertex's specular alpha
+   is 255, so nothing is fogged.
 5. The colour key and the alpha test. With `COLORKEYENABLE`, a
-   fragment is dropped when a texture with a colour key has the key
-   at the texel nearest to the fragment's coordinates. With
-   `ALPHATESTENABLE`, it is dropped unless its alpha against
-   `ALPHAREF` passes `ALPHAFUNC`.
+   fragment is dropped when a texture with a colour key that a stage
+   samples has the key at the texel nearest to the fragment's
+   coordinates. With `ALPHATESTENABLE`, it is dropped unless its
+   alpha against `ALPHAREF` passes `ALPHAFUNC`.
 6. With `DITHERENABLE` and an `R5G6B5` render target, the dither. The
    matrix below gives d for the pixel, by x and y modulo 4. Red and
    blue become (c + d / 2) / 8 and green (c + d / 4) / 4, each
    division rounded down and the result limited to the channel's
-   bits; step 8 writes those.
+   bits. The channel goes on as those bits widened to 8 by repeating
+   them from the top. Step 8's rounding gives the same bits back, so
+   without a blend they are what is written; with one, the blend
+   takes the widened channel, and what is written is the blend's
+   result as step 8 rounds it.
 
    | y \ x | 0 | 1 | 2 | 3 |
    |---|---|---|---|---|
@@ -1095,42 +1226,245 @@ point sprite's coordinates.
    | 1 | 12 | 4 | 14 | 6 |
    | 2 | 3 | 11 | 1 | 9 |
    | 3 | 15 | 7 | 13 | 5 |
-7. With `ALPHABLENDENABLE`, the blend with the pixel there.
-8. The write of the channels `COLORWRITEENABLE` names. A channel
-   goes to a 16-bit target rounded to the nearest value the target
-   holds: (c * 31 + 127) / 255 for five bits, (c * 63 + 127) / 255
-   for six. An `X8R8G8B8` target's top byte is written 0.
+7. With `ALPHABLENDENABLE`, the blend with the pixel there, as
+   "Blending" says.
+8. The write of the channels `COLORWRITEENABLE` names; the others
+   keep the pixel's. A channel goes to a 16-bit target rounded to
+   the nearest value the target holds: (c * 31 + 127) / 255 for five
+   bits, (c * 63 + 127) / 255 for six. An `X8R8G8B8` target's top
+   byte is written 0.
 
-**Depth and stencil.** Depth is kept as 16 bits in a `D16` buffer and
-24 bits in the others, where it is in bits 8 to 31 of a pixel and the
-stencil value in bits 0 to 7. A fragment's depth is z times the
-largest value, rounded to nearest, less `ZBIAS`, and not below 0. The
-depth test compares it with the pixel's by `ZFUNC` and passes always
-with `ZENABLE` 0 or no depth buffer. The stencil test, with
-`STENCILENABLE` and a `D24S8` buffer, compares `STENCILREF` with the
-pixel's stencil value by `STENCILFUNC`, both under `STENCILMASK`. The
-stencil value then changes by `STENCILFAIL` when the stencil test
-fails, `STENCILZFAIL` when it passes and the depth test fails, and
-`STENCILPASS` when both pass, in the bits `STENCILWRITEMASK` names. A
+**Stages.** A stage works on two values, `CURRENT`, which starts as
+the diffuse colour, and `TEMP`, which starts as 0. Its `COLOROP`
+gives the red, green and blue of its result and its `ALPHAOP` the
+alpha; the result goes to `CURRENT`, or to `TEMP` with `RESULTARG`
+5. Both operations read the values as they were before the stage. An
+argument is the colour its source has. With
+bit 4 each channel c of it becomes 255 - c, and with bit 5 every
+channel then becomes the alpha. In the table a, b and c are a
+channel of arguments 1, 2 and 0, each 0 to 255, m(x, y) is (x * y +
+127) / 255, and every division is rounded down:
+
+| Operation | Result |
+|---|---|
+| 2 `SELECTARG1` | a |
+| 3 `SELECTARG2` | b |
+| 4 `MODULATE` | m(a, b) |
+| 5 `MODULATE2X` | 2 * m(a, b) |
+| 6 `MODULATE4X` | 4 * m(a, b) |
+| 7 `ADD` | a + b |
+| 8 `ADDSIGNED` | a + b - 128 |
+| 9 `ADDSIGNED2X` | 2 * (a + b - 128) |
+| 10 `SUBTRACT` | a - b |
+| 11 `ADDSMOOTH` | a + b - m(a, b) |
+| 12 `BLENDDIFFUSEALPHA`, 13 `BLENDTEXTUREALPHA`, 14 `BLENDFACTORALPHA`, 16 `BLENDCURRENTALPHA` | (a * t + b * (255 - t) + 127) / 255, with t the alpha of the diffuse colour, of the stage's texture, of `TEXTUREFACTOR` or of `CURRENT` |
+| 15 `BLENDTEXTUREALPHAPM` | a + m(b, 255 - t), with t the alpha of the stage's texture |
+| 18 `MODULATEALPHA_ADDCOLOR` | a + m(t, b) |
+| 19 `MODULATECOLOR_ADDALPHA` | m(a, b) + t |
+| 20 `MODULATEINVALPHA_ADDCOLOR` | m(255 - t, b) + a |
+| 21 `MODULATEINVCOLOR_ADDALPHA` | m(255 - a, b) + t |
+| 25 `MULTIPLYADD` | c + m(a, b) |
+| 26 `LERP` | (c * a + (255 - c) * b + 127) / 255 |
+
+In 18 to 21, t is the alpha of argument 1, complemented with its bit
+4. The result is multiplied by `COLOR_SCALE` or `ALPHA_SCALE` and
+limited to 0 to 255.
+
+- `DOTPRODUCT3` (24) as a colour operation: with s the sum over red,
+  green and blue of (a - 128) * (b - 128), the result is 0 where s
+  is 0 or below and (4 * s + 127) / 255 otherwise, limited to 255,
+  times `COLOR_SCALE` and limited to 255 again. It goes to all four
+  channels, and the stage's alpha operation isn't worked out.
+- 18 to 21 and 24 mix alpha into colour. As an alpha operation each
+  gives argument 1, times `ALPHA_SCALE`.
+- An `ALPHAOP` of 1 leaves the alpha as it was, and so does one of
+  22 or 23.
+- A stage samples its texture where an operation of it reads
+  `TEXTURE`: as an argument the operation uses (`SELECTARG1` uses
+  argument 1 alone, `SELECTARG2` argument 2, 25 and 26 all three,
+  the others 1 and 2), or as the alpha of 13 and 15. A stage none of
+  whose operations does samples nothing, and its texture's colour
+  key drops nothing.
+- An operation that reads `TEXTURE` in a stage that has no texture
+  gives `CURRENT` as it is, without the scale. With `RESULTARG` 5
+  that copy goes to `TEMP`.
+
+**Bump mapping.** A stage whose `COLOROP` is `BUMPENVMAP` (22) or
+`BUMPENVMAPLUMINANCE` (23) changes neither `CURRENT` nor `TEMP`, and
+its alpha operation isn't worked out. It samples its texture as any
+stage does, and the sample's red and green bytes, read as signed
+numbers and divided by 128, are du and dv. With the stage's
+`BUMPENVMAT00` to `BUMPENVMAT11`, the stage after it samples its
+texture at coordinates moved by (du * mat00 + dv * mat10, du * mat01
++ dv * mat11): the offsets are added to the two coordinates once
+they are divided, on a cube map to the coordinates on the face, and
+the level of detail is that of the coordinates unmoved. The colour
+key is looked up at the moved coordinates. With 23, the red, green
+and blue of that sample are multiplied by l = the bump sample's blue
+byte / 255 * `BUMPENVLSCALE` + `BUMPENVLOFFSET`, limited to 0 to 1:
+each becomes c * l + 0.5, rounded down. The stage after is the next
+in number. Where that stage samples no texture, or is itself a bump
+stage, the offsets are dropped. A bump stage without a texture does
+nothing.
+
+**Blending.** The fragment s and the pixel d, each channel 0 to 255,
+with a factor for each, fs from `SRCBLEND` and fd from `DESTBLEND`,
+each 0 to 255 for each channel:
+
+| `BLENDOP` | Result |
+|---|---|
+| 1 | (s * fs + d * fd + 127) / 255 |
+| 2 | (s * fs - d * fd + 127) / 255 |
+| 3 | (d * fd - s * fs + 127) / 255 |
+| 4 | the smaller of s and d |
+| 5 | the larger of s and d |
+
+Each division is rounded down, below 0 too, and the result limited to
+0 to 255. 4 and 5 use no factor. The pixel is read from the target
+with each channel of five or six bits widened to 8 by repeating its
+bits from the top, and with an alpha of 255 where the target has
+none.
+
+| Factor | Value |
+|---|---|
+| 1 `ZERO` | 0 |
+| 2 `ONE` | 255 |
+| 3 `SRCCOLOR`, 4 `INVSRCCOLOR` | the fragment's channel, or 255 less it |
+| 5 `SRCALPHA`, 6 `INVSRCALPHA` | the fragment's alpha, or 255 less it |
+| 7 `DESTALPHA`, 8 `INVDESTALPHA` | the pixel's alpha, or 255 less it |
+| 9 `DESTCOLOR`, 10 `INVDESTCOLOR` | the pixel's channel, or 255 less it |
+| 11 `SRCALPHASAT` | the smaller of the fragment's alpha and 255 less the pixel's, and 255 for alpha |
+
+A `SRCBLEND` of 12 (`BOTHSRCALPHA`) blends as 5 with a `DESTBLEND` of 6, and
+13 (`BOTHINVSRCALPHA`) as 6 with 5, whatever `DESTBLEND` is. A `DESTBLEND`
+of 12 or 13 beside any other `SRCBLEND` is 0, as `ZERO`: Direct3D has the
+two for `SRCBLEND` only, and its software rasterisers leave nothing of the
+pixel for one as the destination's factor (measured on Direct3D 7's and on
+Direct3D 9's reference rasteriser).
+
+**Depth and stencil.** Depth is kept as 16 bits in a `D16` buffer and 24
+bits in the others, where it is in bits 8 to 31 of a pixel and the stencil
+value in bits 0 to 7. A fragment's depth is z times the largest value,
+rounded to nearest, less `ZBIAS`, and not below 0. (Direct3D 7's software
+rasteriser cuts the fraction off, which puts a z of 0.5 one step nearer than
+half the range; the nearest value is within half a step of z everywhere.)
+The depth test compares it with the pixel's by `ZFUNC` and passes always
+with `ZENABLE` 0 or no depth buffer; with the test on, a fragment whose z is
+outside 0 to 1 is dropped before both tests ("Values at a pixel"). The
+stencil test, with `STENCILENABLE` and a `D24S8` buffer, compares
+`STENCILREF` with the pixel's stencil value by `STENCILFUNC`, both under
+`STENCILMASK`. The stencil value then changes by `STENCILFAIL` when the
+stencil test fails, `STENCILZFAIL` when it passes and the depth test fails,
+and `STENCILPASS` when both pass, in the bits `STENCILWRITEMASK` names. A
 fragment that passes both is drawn, and writes its depth with
 `ZWRITEENABLE`.
 
-**Textures.** A coordinate of 0 is a texture's left or top edge and 1
-its right or bottom edge, so a texel's centre is half a texel in. The
-nearest filter takes the texel a coordinate falls in. The linear
-filter mixes the four texels around it by the distances to their
-centres in 1/256 of a texel. The level of detail is half the base-2
-logarithm of the larger of two numbers: the squared length, in
-texels of level 0, of the step the coordinates take for one pixel to
-the right, and for one pixel down. `MIPMAPLODBIAS` is added. At or
-below 0 the `MAGFILTER` applies to the level `MAXMIPLEVEL` names;
-above, the `MINFILTER`, on the level nearest to the level of detail
-with `MIPFILTER` 1, on the two around it mixed with 2, and on the
-level `MAXMIPLEVEL` names with 0. With `MIPFILTER` 1 or 2 the level
-of detail is limited to `MAXMIPLEVEL` and the last level first. With
-an anisotropic filter and `MAXANISOTROPY` a, the level follows the
-smaller of the two numbers, though not below the larger over a
-squared.
+**Textures.** A coordinate of 0 is a texture's left or top edge and 1 its
+right or bottom edge, so a texel's centre is half a texel in. A stage's
+coordinates at a pixel are the first two of its set, or with 256 in
+`TEXTURETRANSFORMFLAGS` those two divided by the coordinate the flags' count
+names as the last, at each pixel: the second with a count of 2, and with a
+count of 0 the fourth, which is the last number the vertex has for the stage
+("Texture coordinates"). This is what Direct3D 9's reference rasteriser does
+with the vertices it transforms; for a vertex in screen space it divides by
+the last number of the set whatever the count, where the card goes by the
+count. (Direct3D 7's software rasteriser never divides.) A division by 0 is
+a float's: a coordinate over 0 is past the end of the card's whole numbers
+on its side and stops there, and 0 over 0 is no number, which is sampled as
+0. The nearest filter (1) takes the texel a coordinate falls in. The linear
+filter (2) mixes the four texels around it by the distances to their centres
+in 1/256 of a texel.
+
+The level of detail is half the base-2 logarithm of the larger of two
+numbers: the squared length, in texels of level 0, of the step the
+coordinates take for one pixel to the right, and for one pixel down.
+`MIPMAPLODBIAS` is added. At or below 0, or where it is no number,
+the `MAGFILTER` applies to the level `MAXMIPLEVEL` names; above, the
+`MINFILTER`, on the level nearest to the level of detail with
+`MIPFILTER` 1, on the two around it mixed with 2, and on the level
+`MAXMIPLEVEL` names with 0. With `MIPFILTER` 1 or 2 the level of
+detail is limited to `MAXMIPLEVEL` and the last level first; a
+`MAXMIPLEVEL` past the last level is the last. The nearest level is
+the level of detail plus 0.5, rounded down. Of two levels the first
+is the level of detail rounded down, and the next has what is left
+of it, in 1/256 rounded down, as its weight. The logarithm is worked
+out as the cosines of "Transform and lighting" are, and is within
+2 / 100000 of the true one.
+
+A `MINFILTER` of 3 is the anisotropic filter: it filters as the
+linear one, and with `MAXANISOTROPY` a the level of detail follows
+the smaller of the two numbers, though not below the larger over a
+squared. The levels are used as `MIPFILTER` says, as with the other
+filters. A `MAGFILTER` of 3 is the linear filter.
+
+A coordinate c becomes a whole number of 1/256 of a texel in a level n
+texels wide or high: c * n * 256, worked out in double precision, limited to
+2147483520 either side of 0, less 128 for the linear filter, rounded down. A
+coordinate that is no number gives 0 for the whole of that. The number's
+upper bits (it divided by 256, rounded down) are the texel the nearest
+filter takes, and for the linear filter the first of the two it mixes along
+that direction, the next being one further; its lowest 8 bits are the weight
+f of the second. `ADDRESSU` and `ADDRESSV` bring each texel into the level:
+1 by its number modulo n, 2 by mirroring every other repeat, 3 by taking the
+nearest edge texel, and 4 by giving `BORDERCOLOR` for a texel outside. Two
+colours a and b mix channel by channel to (a * (256 - f) + b * f + 128) /
+256, rounded down. The linear filter mixes the two texels of the upper row
+and the two of the lower row by the weight across, and then the two results
+by the weight down. Two levels mix by the same formula with the next level's
+weight.
+
+A cube map is sampled by the first three coordinates of its stage, a
+direction (x, y, z), divided as above when the stage projects. The
+face is that of the coordinate largest in size, x before y and y
+before z among equals, and its sign, 0 counting as positive. The
+coordinates on the face are (u / m + 1) / 2 and (v / m + 1) / 2 with
+m the size of that largest coordinate and:
+
+| Face | u | v |
+|---|---|---|
+| +x | -z | -y |
+| -x | z | -y |
+| +y | x | z |
+| -y | x | -z |
+| +z | x | -y |
+| -z | -x | -y |
+
+A direction of length 0, or one with no number for its largest
+coordinate, gives face +x at (0.5, 0.5). The face is then sampled as
+a texture by itself, with the stage's address modes: a filter mixes
+no texels of another face. The level of detail comes from the
+squared length of the step all three coordinates take for a pixel,
+times the square of the face's width over 2 * m.
+
+**Texels.** A texel is four channels of 8 bits. A field of fewer bits
+is widened by repeating its bits from the top, so its largest value
+becomes 255, in `R5G6B5`, `X1R5G5B5`, `A1R5G5B5`, `A4R4G4B4` and the
+luminance of `L6V5U5`. One bit of alpha is 0 or 255, and a format
+without alpha has 255. `A8` is white with its alpha. `L8` and `A8L8`
+have their luminance as red, green and blue. A `P8` texel is its
+palette word, alpha included. The bump formats have du where red is,
+dv where green is and their luminance where blue is, 255 in `V8U8`,
+with alpha 255. The signed fields of five bits in `L6V5U5` are
+shifted up by three bits and not repeated, so -16 becomes -128 and
+15 becomes 120.
+
+A block of `DXT1` to `DXT5` has two colours of 5-6-5 bits, c0 and
+c1, widened as above to a and b, and 2 bits for each texel that pick
+one of four colours: a, b, and
+
+- (2 * a + b + 1) / 3 and (a + 2 * b + 1) / 3, each division rounded
+  down, in `DXT2` to `DXT5`, and in `DXT1` where the word c0 is above
+  c1;
+- (a + b) / 2, rounded down, and black with alpha 0, in `DXT1`
+  otherwise.
+
+`DXT1`'s other texels have alpha 255. `DXT2` and `DXT3` have 4 bits
+of alpha for each texel, times 17. `DXT4` and `DXT5` have two alphas
+a0 and a1 and 3 bits for each texel that pick one of eight: a0, a1,
+and with a0 above a1 the six ((7 - i) * a0 + i * a1 + 3) / 7 for i
+from 1 to 6, otherwise the four ((5 - i) * a0 + i * a1 + 2) / 5 for i
+from 1 to 4, then 0 and 255. The colours of `DXT2` and `DXT4` are
+taken as they are stored.
 
 **Order between draws.** A pixel sees the primitives in the order
 their commands came, and within a command in the order of its
@@ -1140,10 +1474,65 @@ what the primitives before it wrote. Within one primitive it reads
 what the primitive wrote to the rows above the pixel; what it reads
 of the pixel's own row is not defined.
 
+#### Where the card differs from Direct3D
+
+Each rule is stated where its subject is above; these are the ones that
+differ from what Direct3D was measured or documented to do, with the reason.
+
+- A vertex at a point or spot light's own position gets the light's ambient
+  colour. Direct3D adds nothing there. No known game depends on it; matching
+  costs a comparison for every vertex and light.
+- A spot light with no direction and a phi above pi lights by its cone's
+  formula. Direct3D 8 gives such a light nothing, and Direct3D 7 refuses it.
+  No known game depends on it; matching costs a comparison for every vertex
+  and spot light.
+- A highlight whose (N . H)^power is below about 0.001 is kept. Direct3D's
+  pipelines drop it, which makes the colour jump by a quarter of a step
+  where the card's changes evenly.
+- A material power of 0.001 or less gives the highlight of the formula, as
+  on Direct3D 8 and 9. Direct3D 7 gives none, and its device turns
+  `SPECULARENABLE` off for such a draw.
+- `SET_LIGHT` takes any finite numbers. Direct3D 7 refuses some, and its
+  device does before the card sees them.
+- Vertex fog's distance is the size of the camera-space z, as on Direct3D 8.
+  Direct3D 7 takes z as it is. Its device's draws go through the same card,
+  and no known game has fogged vertices behind the eye.
+- Exponential fog with density times distance below 0 gives a factor of 1.
+  Direct3D lets the factor pass 1 and keeps its lowest byte, which no
+  program can want.
+- A lit vertex's specular alpha is 255 with either value of
+  `SPECULARENABLE`. Direct3D 7's `ProcessVertices` writes 0 with the state
+  off.
+- A world-view matrix with no inverse gives every normal as zeros. Direct3D
+  goes on with the inverse of the last matrix it could invert, which makes a
+  draw depend on the draws before it.
+- With `CLIPPING` 0 the card still cuts the vertices it transforms at the
+  near and far planes, as Direct3D's cards with hardware vertex processing
+  do. Direct3D's software vertex processing projects every vertex then, and
+  so does the pipeline of the built-in Windows for the draws it transforms.
+- A projected stage of a vertex in screen space divides by the coordinate
+  the count names, as for the vertices the card transforms. Direct3D 9's
+  reference rasteriser divides by the set's last number whatever the count.
+  One rule for both kinds of vertex; no known game depends on it.
+- A projected stage's coordinates over 0 are a float's quotient, sampled
+  past the texture's end or as 0. Direct3D 9's reference rasteriser samples
+  the first texel. No known game depends on it; matching costs a comparison
+  for every pixel of a projected stage.
+- A culled triangle draws no points with `FILLMODE` 1, as on Direct3D 9's
+  reference rasteriser. Direct3D 7's software rasteriser draws them.
+- A line's two ends are wrapped as a triangle's vertices are. Direct3D's
+  rasterisers were measured on triangles only.
+- `COLORKEYENABLE` under a linear filter drops by the nearest texel.
+  Direct3D has no one rule there ("Render states").
+- `ZBIAS` is in steps of the depth buffer. Direct3D gives the state no scale
+  ("Render states").
+- Depth is rounded to the nearest step. Direct3D 7's software rasteriser
+  cuts the fraction off.
+
 #### Render states
 
 The numbers and values are Direct3D 8's `D3DRS` ones where Direct3D
-has the state. 256 to 258 are the card's own.
+has the state. 256 to 259 are the card's own.
 
 | Number | Name | Values | Reset |
 |---|---|---|---|
@@ -1218,10 +1607,30 @@ has the state. 256 to 258 are the card's own.
 
 - `ZENABLE` has no value for a W buffer.
 - `SHADEMODE` is 1 flat or 2 Gouraud.
-- `COLORKEYENABLE` (Direct3D 7's) drops a fragment where the texel
-  nearest its coordinate in a stage's texture, in the level the sample
-  reads first, has the texture's colour key. The texels around it are
-  filtered with their own colours, the key's included.
+- `COLORKEYENABLE` (Direct3D 7's) drops a fragment where the texel nearest
+  its coordinate in a stage's texture, in the level the sample reads first,
+  has the texture's colour key. The texels around it are filtered with their
+  own colours, the key's included, so a linear filter mixes the key's colour
+  into the texels beside a keyed one. Under the nearest filter this is what
+  Direct3D does. Under a linear filter Direct3D has no one rule: its
+  software rasteriser filters the key's colour in, as the card does, and
+  removes pixels in a dither pattern as dense as the keyed texels' weight in
+  the filter; its documented reference pipeline gives a keyed texel an alpha
+  of 0 before the filter and leaves the dropping to the alpha test; and a
+  GPU measured through its driver removes every pixel a keyed texel has any
+  weight in. The card drops by the nearest texel, the one with the largest
+  weight in the filter: the edge of what it drops is within a texel of where
+  each of the three puts it, and it needs no dither and no alpha test.
+- `SRCBLEND` and `DESTBLEND` take Direct3D's factors 1 to 13, and
+  "Blending" says what each is.
+- `ZBIAS` is in steps of the depth buffer: a fragment with a bias of n is n
+  steps nearer. Direct3D gives the state no scale. Its software rasteriser
+  ignores the state (measured, with 16 and with 24 bits of depth), and a GPU
+  measured through its driver moved a fragment about one step of a 16-bit
+  buffer for each step of the state from 2 up; what the cards of the time
+  did isn't known here.
+- `WRAP0` to `WRAP7` have bit 0 for a set's first coordinate to bit 3
+  for its fourth ("Wrapping").
 - `PIXEL_CENTRE`: 0 puts pixel centres at whole coordinates (Direct3D
   7 and 8), 1 at half ones (OpenGL).
 - `FLAT_VERTEX`: the vertex that gives a flat-shaded primitive its
@@ -1289,8 +1698,12 @@ number.
   in bits 16 to 31 what the coordinates are: 0 the vertex's set, 1 the
   normal, 2 the position, 3 the reflection vector, all three in camera
   space, and 4 a sphere map's.
-- `TEXTURETRANSFORMFLAGS` is the count of coordinates the stage's
-  texture transform gives, 0 for no transform, plus 256 to divide them
-  by the last.
+- `TEXTURETRANSFORMFLAGS` is the count of coordinates the stage's texture
+  transform gives, 0 for no transform, plus 256 to divide them by the last:
+  the first two (three of a cube map) by the coordinate the count ends at,
+  or with a count of 0 by the fourth, which is then the last number the
+  vertex has for the stage.
+- `MINFILTER` 3 is the anisotropic filter, and `MAGFILTER` 3 the
+  linear one ("Textures").
 - `COLOR_SCALE` and `ALPHA_SCALE` multiply the stage's results by 1, 2
   or 4 before they are clamped.

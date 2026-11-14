@@ -617,6 +617,7 @@ impl ToadForceGl {
                 tex: Default::default(),
                 sets: Vec::new(),
                 coords: Vec::new(),
+                wrap: Vec::new(),
                 shape: Shape {
                     half_centre: false,
                     cull: 1,
@@ -768,8 +769,9 @@ impl ToadForceGl {
             // The card's dither is the shader's.
             gl.disable(glow::DITHER);
             gl.disable(glow::TEXTURE_CUBE_MAP_SEAMLESS);
-            // Depth outside 0 to 1 is clamped, as `span.rs` clamps it,
-            // and cuts nothing off.
+            // Depth outside 0 to 1 cuts no triangle. Without the
+            // depth test it is clamped, as `span.rs` clamps it, and
+            // with the test the shader drops the fragment.
             gl.enable(glow::DEPTH_CLAMP);
         }
     }
@@ -1598,6 +1600,7 @@ impl ToadForceGl {
                 func,
                 write,
                 stencil,
+                ..
             } => Some((func, write, stencil)),
             _ => None,
         });

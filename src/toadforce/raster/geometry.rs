@@ -37,11 +37,12 @@ pub const PLANE_TOP: usize = 5;
 pub const PLANE_BOTTOM: usize = 6;
 pub const PLANE_USER: usize = 7;
 
-/// The planes that are cut at whatever `CLIPPING` says, since what is
-/// past them has no place on the screen. A card with transform and
-/// lighting cuts there whether the program asked for clipping or
-/// promised there is nothing to cut.
-const ALWAYS: u16 = 1 << PLANE_W | 1 << PLANE_NEAR | 0xF << PLANE_LEFT;
+/// The planes that are cut at whatever `CLIPPING` says: all but the
+/// state's clip planes. Direct3D hands a card that transforms the
+/// vertices as they are and leaves the cutting to it, and the state
+/// changed no pixel there, at the near plane or the far one (measured
+/// on Direct3D 7, 8 and 9 with hardware vertex processing).
+const ALWAYS: u16 = 1 << PLANE_W | 1 << PLANE_NEAR | 1 << PLANE_FAR | 0xF << PLANE_LEFT;
 
 /// The smallest w a vertex on the screen has.
 pub const W_MIN: f32 = 1.0 / 65536.0;
@@ -86,6 +87,13 @@ impl Vertex {
             dist: std::array::from_fn(|i| l(self.dist[i], o.dist[i])),
             out: 0,
         }
+    }
+
+    /// Where the vertex is seen, across and down, in shares of the
+    /// viewport: None for one that isn't in front of the eye.
+    pub fn seen(&self) -> Option<(f32, f32)> {
+        let [x, y, _, w] = self.clip;
+        (w >= W_MIN).then(|| (x / w, -y / w))
     }
 
     /// The vertex with the colours of its back.
@@ -138,21 +146,29 @@ pub fn normalize(a: [f32; 3]) -> [f32; 3] {
     }
 }
 
+/// A determinant smaller than this in size is taken for none.
+const DET_MIN: f32 = 1e-30;
+
 /// What takes a normal where `m` takes a position: the inverse of
-/// `m`'s upper left three by three, transposed. All 0 for a matrix
-/// that has no inverse.
-fn normal_matrix(m: &Matrix) -> [[f32; 3]; 3] {
+/// `m`'s upper left three by three, transposed. A matrix that has no
+/// inverse (a determinant below `DET_MIN` in size, or none that is a
+/// number) makes every normal zero, which lights nothing. Direct3D
+/// goes on with the inverse of the last matrix it could invert, so
+/// what a draw shows depends on the draws before it; a device that
+/// never had one has zero normals, and the card does that every time.
+/// The Direct3D pipeline takes its normals through this too.
+pub fn normal_matrix(m: &Matrix) -> [[f32; 3]; 3] {
     let row = |r: usize| [m[r * 4], m[r * 4 + 1], m[r * 4 + 2]];
     let (r0, r1, r2) = (row(0), row(1), row(2));
     let cofactors = [cross(r1, r2), cross(r2, r0), cross(r0, r1)];
     let det = dot(r0, cofactors[0]);
-    if det == 0.0 || !det.is_finite() {
+    if det.abs() < DET_MIN || !det.is_finite() {
         return [[0.0; 3]; 3];
     }
     cofactors.map(|c| c.map(|v| v / det))
 }
 
-fn times(n: [f32; 3], m: &[[f32; 3]; 3]) -> [f32; 3] {
+pub fn times(n: [f32; 3], m: &[[f32; 3]; 3]) -> [f32; 3] {
     std::array::from_fn(|col| n[0] * m[0][col] + n[1] * m[1][col] + n[2] * m[2][col])
 }
 
@@ -193,31 +209,55 @@ impl Fog {
         } else {
             eye[2].abs()
         };
-        let f = match self.mode {
-            1 => math::exp_neg(self.density * d),
-            2 => math::exp_neg((self.density * d) * (self.density * d)),
-            _ => (self.end - d) / (self.end - self.start),
-        };
-        // No number, as at the end of a fog that starts where it
-        // ends, is no fog.
-        if f.is_nan() { 1.0 } else { f.clamp(0.0, 1.0) }
+        fog_factor(self.mode, self.start, self.end, self.density, d)
     }
+}
+
+/// How much of a colour fog of `mode` (1 exponential, 2 its square, 3
+/// linear, anything else none) leaves at the distance `d`: 1 all of
+/// it, 0 none. Linear fog leaves all of the colour nearer than the
+/// start, none from the end on, and the share (end - d) / (end -
+/// start) between, asked in that order as Direct3D asks (measured on
+/// Direct3D 7's and 8's vertex pipelines): fog that starts where it
+/// ends, or after, leaves all nearer than the start and none from
+/// there on. The exponential kinds take a density below 0 as 0, where
+/// Direct3D lets the factor pass 1 and keeps its lowest byte. A
+/// distance that isn't a number, and a factor that isn't one, give 1.
+/// The Direct3D pipeline fogs its vertices with this too.
+pub fn fog_factor(mode: u32, start: f32, end: f32, density: f32, d: f32) -> f32 {
+    if d.is_nan() {
+        return 1.0;
+    }
+    let f = match mode {
+        1 => math::exp_neg(density * d),
+        2 => math::exp_neg((density * d) * (density * d)),
+        3 if d < start => 1.0,
+        3 if d >= end => 0.0,
+        3 => (end - d) / (end - start),
+        _ => 1.0,
+    };
+    if f.is_nan() { 1.0 } else { f.clamp(0.0, 1.0) }
 }
 
 /// The texture coordinates a slot makes: the first `numbers` of `set`
 /// when `generate` (D3DTSS_TCI_, the index's upper half) is 0, or the
 /// camera-space normal (1), position (2), reflection vector (3) or
 /// sphere map (4) of the vertex at `eye` in camera space with the
-/// normal `normal` there. With a texture `matrix` and its count, a 1
-/// goes after the last number, the matrix follows, and of what comes
-/// out the counted numbers stay; a fourth number not counted, or not
-/// there without a matrix, is 1. The Direct3D pipeline makes its
-/// coordinates with this too (`win32::ddraw::d3d::pipeline::Coord`).
+/// normal `normal` there. The line of sight the last two throw back
+/// is the one to the vertex with `local_viewer` (`LOCALVIEWER`), and
+/// straight ahead, (0, 0, 1), without. With a texture `matrix` and
+/// its count, a 1 goes after the last number, the matrix follows, and
+/// of what comes out the counted numbers stay, with a fourth of 1
+/// when it isn't counted. Without a matrix a fourth number that isn't
+/// there is the last that is (`last_as_fourth`). The Direct3D
+/// pipeline makes its coordinates with this too
+/// (`win32::ddraw::d3d::pipeline::Coord`).
 pub fn coordinates(
     generate: u32,
     (set, numbers): ([f32; 4], usize),
     eye: [f32; 3],
     normal: [f32; 3],
+    local_viewer: bool,
     matrix: Option<(&Matrix, usize)>,
 ) -> [f32; 4] {
     let (from, numbers): ([f32; 4], usize) = match generate {
@@ -231,7 +271,11 @@ pub fn coordinates(
         generate => {
             // The eye's line of sight to the vertex, thrown back by the
             // surface.
-            let sight = normalize(eye);
+            let sight = if local_viewer {
+                normalize(eye)
+            } else {
+                [0.0, 0.0, 1.0]
+            };
             let twice = 2.0 * dot(normal, sight);
             let r: [f32; 3] = std::array::from_fn(|i| sight[i] - twice * normal[i]);
             if generate == 3 {
@@ -239,7 +283,9 @@ pub fn coordinates(
             } else {
                 let z = 1.0 - r[2];
                 let m = 2.0 * (r[0] * r[0] + r[1] * r[1] + z * z).sqrt();
-                ([r[0] / m + 0.5, r[1] / m + 0.5, 0.0, 0.0], 2)
+                // Thrown straight back at the eye, the middle.
+                let at = |c: f32| if m > 0.0 { c / m + 0.5 } else { 0.5 };
+                ([at(r[0]), at(r[1]), 0.0, 0.0], 2)
             }
         }
     };
@@ -257,13 +303,22 @@ pub fn coordinates(
                 _ => 0.0,
             })
         }
-        None => {
-            if numbers < 4 {
-                c[3] = 1.0;
-            }
-            c
-        }
+        None => last_as_fourth(c, numbers),
     }
+}
+
+/// The coordinates `c` of a set with `numbers` numbers, the rest 0,
+/// with its last number as the fourth too, or 1 for a set with none. A
+/// stage that divides without a count (`TEXTURETRANSFORMFLAGS` 256)
+/// divides by the fourth, and so by the last number the vertex has
+/// for it, as Direct3D 9's reference rasteriser was measured to.
+pub fn last_as_fourth(mut c: [f32; 4], numbers: usize) -> [f32; 4] {
+    match numbers {
+        0 => c[3] = 1.0,
+        1..=3 => c[3] = c[numbers - 1],
+        _ => {}
+    }
+    c
 }
 
 /// Where a slot's coordinates come from, and the matrix they go
@@ -317,6 +372,8 @@ pub struct Setup {
     z: [f32; 2],
     /// Whether the eye-space position or normal is needed.
     eye: bool,
+    /// `LOCALVIEWER`, for the coordinates made of a reflection.
+    local_viewer: bool,
 }
 
 impl Setup {
@@ -361,11 +418,8 @@ impl Setup {
             .map(|i| (i, l.clip_planes[i]))
             .collect();
         let mut planes = ALWAYS;
-        if clipping {
-            planes |= 1 << PLANE_FAR;
-            for (i, _) in &user {
-                planes |= 1 << (PLANE_USER + i);
-            }
+        for (i, _) in &user {
+            planes |= 1 << (PLANE_USER + i);
         }
         let generated = slots.iter().any(|s| s.generate != 0);
         Setup {
@@ -407,6 +461,7 @@ impl Setup {
             x: [vx, half_w],
             y: [vy, half_h],
             z: [v.min_z, v.max_z - v.min_z],
+            local_viewer: on(RS_LOCALVIEWER),
         }
     }
 
@@ -508,6 +563,7 @@ impl Setup {
                 (set, numbers as usize),
                 eye,
                 normal,
+                self.local_viewer,
                 matrix,
             );
         }

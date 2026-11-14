@@ -526,8 +526,31 @@ pub fn set_light(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             return Some(DDERR_INVALIDPARAMS);
         }
     }
+    if !light_is_valid(&l) {
+        return Some(DDERR_INVALIDPARAMS);
+    }
     set(cpu, id, change(CHANGE_LIGHT, index, 0, l.to_vec()));
     Some(D3D_OK)
+}
+
+/// Whether Direct3D 7's SetLight takes the D3DLIGHT7 `l`, as measured
+/// on Windows: a point or spot light's range is 0 to the square root
+/// of the largest float, a spot's angles are 0 to pi with theta no
+/// more than phi, and a spot or a directional light points somewhere
+/// (a direction whose length a float takes for 0, such as 1e-25,
+/// doesn't). Direct3D 8 takes them all.
+fn light_is_valid(l: &[u32; 26]) -> bool {
+    let f = |i: usize| f32::from_bits(l[i]);
+    let (kind, range, theta, phi) = (l[0], f(19), f(24), f(25));
+    let pointing = f(16) * f(16) + f(17) * f(17) + f(18) * f(18) > 0.0;
+    let ranged = (0.0..=f32::MAX.sqrt()).contains(&range);
+    match kind {
+        super::pipeline::LIGHT_DIRECTIONAL => pointing,
+        super::pipeline::LIGHT_SPOT => {
+            ranged && pointing && theta >= 0.0 && theta <= phi && phi <= std::f32::consts::PI
+        }
+        _ => ranged,
+    }
 }
 
 /// GetLight(this, index, light).
@@ -988,5 +1011,46 @@ mod tests {
         assert_eq!(read(&mut cpu), CLAMP);
         set_stage(&mut cpu, id, 1, TSS_ADDRESSU, MIRROR);
         assert_eq!(read(&mut cpu), MIRROR);
+    }
+
+    /// What Direct3D 7's SetLight was measured to refuse, each beside
+    /// the nearest light it takes.
+    #[test]
+    fn set_light_refuses_what_direct3d_7_refuses() {
+        use super::super::pipeline::{LIGHT_DIRECTIONAL, LIGHT_SPOT};
+        // Kind, direction, range, theta and phi of a D3DLIGHT7.
+        let light = |kind: u32, direction: [f32; 3], range: f32, theta: f32, phi: f32| {
+            let mut l = [0u32; 26];
+            l[0] = kind;
+            for (i, d) in direction.iter().enumerate() {
+                l[16 + i] = d.to_bits();
+            }
+            (l[19], l[24], l[25]) = (range.to_bits(), theta.to_bits(), phi.to_bits());
+            light_is_valid(&l)
+        };
+        let (point, z) = (1, [0.0, 0.0, 1.0]);
+        let pi = std::f32::consts::PI;
+        // A point light: its range alone counts.
+        assert!(light(point, [0.0; 3], 0.0, 9.0, -9.0));
+        assert!(light(point, z, f32::MAX.sqrt(), 0.0, 0.0));
+        assert!(!light(point, z, -0.5, 0.0, 0.0));
+        assert!(!light(point, z, 2.0e19, 0.0, 0.0));
+        assert!(!light(point, z, f32::NAN, 0.0, 0.0));
+        // A spot: its range, its direction and its angles.
+        assert!(light(LIGHT_SPOT, z, 40.0, 0.25, 0.75));
+        assert!(light(LIGHT_SPOT, [0.0, 0.0, 7.0], 40.0, 0.75, 0.75));
+        assert!(light(LIGHT_SPOT, z, 40.0, pi, pi));
+        assert!(light(LIGHT_SPOT, z, 40.0, 0.0, 0.0));
+        assert!(!light(LIGHT_SPOT, z, 40.0, 0.75, 0.25));
+        assert!(!light(LIGHT_SPOT, z, 40.0, -0.25, 0.75));
+        assert!(!light(LIGHT_SPOT, z, 40.0, 0.25, -0.75));
+        assert!(!light(LIGHT_SPOT, z, 40.0, 0.25, 3.25));
+        assert!(!light(LIGHT_SPOT, z, -1.0, 0.25, 0.75));
+        assert!(!light(LIGHT_SPOT, [0.0; 3], 40.0, 0.25, 0.75));
+        assert!(!light(LIGHT_SPOT, [0.0, 2e-25, 0.0], 40.0, 0.25, 0.75));
+        // A directional light: its direction alone.
+        assert!(light(LIGHT_DIRECTIONAL, z, -3.0, 5.0, 1.0));
+        assert!(!light(LIGHT_DIRECTIONAL, [0.0; 3], 10.0, 0.0, 0.0));
+        assert!(!light(LIGHT_DIRECTIONAL, [3e-25, 0.0, 0.0], 10.0, 0.0, 0.0));
     }
 }

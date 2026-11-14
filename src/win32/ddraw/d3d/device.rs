@@ -1269,11 +1269,11 @@ pub fn validate_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(D3DERR_TOOMANYOPERATIONS);
     }
     for s in 0..used {
-        if !super::hal::can_do(kind, d.stage(s, TSS_COLOROP)) {
+        if !super::hal::can_do(kind, d.stage(s, TSS_COLOROP), 7) {
             return Some(super::D3DERR_UNSUPPORTEDCOLOROPERATION);
         }
         let alpha = d.stage(s, TSS_ALPHAOP);
-        if alpha != TOP_DISABLE && !super::hal::can_do(kind, alpha) {
+        if alpha != TOP_DISABLE && !super::hal::can_do(kind, alpha, 7) {
             return Some(super::D3DERR_UNSUPPORTEDALPHAOPERATION);
         }
     }

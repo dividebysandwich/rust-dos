@@ -143,6 +143,14 @@ pub struct Description {
     pub texture: u32,
     pub filter: u32,
     pub address: u32,
+    /// Bits a card adds that the caps of one version alone have:
+    /// D3DPTEXTURECAPS_ of Direct3D 7 and before (`texture7`), and
+    /// D3DPRASTERCAPS_ and D3DTEXOPCAPS_ of Direct3D 8 (`raster8`,
+    /// `ops8`: the stage operations Direct3D 8 added, which a device
+    /// of an older version has no states for).
+    pub texture7: u32,
+    pub raster8: u32,
+    pub ops8: u32,
     /// D3DPBLENDCAPS_ bits it adds, for the source factor and, those
     /// that are destination factors, for the destination.
     pub blend: u32,
@@ -178,11 +186,13 @@ pub fn texture_max(kind: Kind) -> u32 {
     }
 }
 
-/// Whether `kind` can do a stage's operation, for ValidateDevice.
-pub fn can_do(kind: Kind, op: u32) -> bool {
+/// Whether `kind` can do a stage's operation on a device of
+/// Direct3D `version`, for ValidateDevice: Direct3D 8 has operations
+/// the versions before it lack (`Description::ops8`).
+pub fn can_do(kind: Kind, op: u32, version: u32) -> bool {
     match kind {
         Kind::Voodoo => voodoo::can_do(op),
-        Kind::ToadForce => toadforce::can_do(op),
+        Kind::ToadForce => toadforce::can_do(op, version),
     }
 }
 

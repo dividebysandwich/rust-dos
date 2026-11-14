@@ -2,7 +2,7 @@
 //! and the lights that are on ("Lighting" in chapter 9 of
 //! `docs/toadforce-spec.md`). It is worked out in camera space.
 
-use super::geometry::{direction, dot, length, normalize, transform};
+use super::geometry::{Matrix, direction, dot, length, normalize, transform};
 use super::math;
 use super::vertex::Fvf;
 use crate::toadforce::level1::states::*;
@@ -12,22 +12,79 @@ use crate::toadforce::level1::{
 
 /// A light that is on, in camera space.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Lamp {
+pub struct Lamp {
     light: Light,
     position: [f32; 3],
-    /// The way a directional light or a spot points, of length 1.
+    /// The way a directional light or a spot points, of length 1, or
+    /// zeros for a light that points no way.
     axis: [f32; 3],
     /// The cosines of half a spot's inner and outer angles.
     inner: f32,
     outer: f32,
 }
 
+impl Lamp {
+    /// `light`, which is in world space, as `view` puts it in camera
+    /// space.
+    pub fn new(light: &Light, view: &Matrix) -> Lamp {
+        let p = light.position;
+        let position = transform([p[0], p[1], p[2], 1.0], view);
+        Lamp {
+            light: *light,
+            position: [position[0], position[1], position[2]],
+            axis: pointing(direction(light.direction, view)),
+            inner: math::cos(light.theta / 2.0),
+            outer: math::cos(light.phi / 2.0),
+        }
+    }
+
+    /// `light` as a directional one that shines from the way `toward`
+    /// in camera space, of length 1: Direct3D's parallel point light,
+    /// which the card has no kind for and its own commands never make.
+    pub fn shining_from(light: &Light, toward: [f32; 3]) -> Lamp {
+        Lamp {
+            light: Light {
+                kind: LIGHT_DIRECTIONAL,
+                ..*light
+            },
+            position: [0.0; 3],
+            axis: toward.map(|c| -c),
+            inner: 1.0,
+            outer: 1.0,
+        }
+    }
+}
+
+/// `way` with a length of 1, or zeros where it has none a float can
+/// divide by: Direct3D takes a direction of 1e-25 for none.
+fn pointing(way: [f32; 3]) -> [f32; 3] {
+    let len = length(way);
+    if len > 0.0 && len.is_finite() {
+        way.map(|c| c / len)
+    } else {
+        [0.0; 3]
+    }
+}
+
 /// Where a colour of the lit surface comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Source {
+pub enum Source {
     Material,
     Diffuse,
     Specular,
+}
+
+impl Source {
+    /// From a material source state's value (`D3DMCS_`), for a vertex
+    /// whose colours stand for the material's (`COLORVERTEX`) where it
+    /// has them: `diffuse` and `specular` say which it has.
+    pub fn of(value: u32, diffuse: bool, specular: bool) -> Source {
+        match value {
+            1 if diffuse => Source::Diffuse,
+            2 if specular => Source::Specular,
+            _ => Source::Material,
+        }
+    }
 }
 
 /// The lighting of a draw's state.
@@ -50,25 +107,12 @@ impl Lighting {
         let view = &l.transforms[TRANSFORM_VIEW as usize];
         let lamps = (0..LIGHTS)
             .filter(|i| l.lights_on >> i & 1 != 0)
-            .map(|i| {
-                let light = l.lights[i];
-                let p = light.position;
-                let position = transform([p[0], p[1], p[2], 1.0], view);
-                Lamp {
-                    light,
-                    position: [position[0], position[1], position[2]],
-                    axis: normalize(direction(light.direction, view)),
-                    inner: math::cos(light.theta / 2.0),
-                    outer: math::cos(light.phi / 2.0),
-                }
-            })
+            .map(|i| Lamp::new(&l.lights[i], view))
             .collect();
         // A colour the vertex hasn't got is the material's.
-        let source = |id: u32| match l.state(id) {
-            1 if l.state(RS_COLORVERTEX) != 0 && fvf.diffuse.is_some() => Source::Diffuse,
-            2 if l.state(RS_COLORVERTEX) != 0 && fvf.specular.is_some() => Source::Specular,
-            _ => Source::Material,
-        };
+        let own = l.state(RS_COLORVERTEX) != 0;
+        let (diffuse, specular) = (own && fvf.diffuse.is_some(), own && fvf.specular.is_some());
+        let source = |id: u32| Source::of(l.state(id), diffuse, specular);
         let ambient = super::geometry::colour(l.state(RS_AMBIENT));
         Lighting {
             lamps,
@@ -82,6 +126,31 @@ impl Lighting {
                 source(RS_AMBIENTMATERIALSOURCE),
                 source(RS_EMISSIVEMATERIALSOURCE),
             ],
+        }
+    }
+
+    /// The lighting of `lamps` on a surface of `material` under the
+    /// ambient light `ambient` (red, green, blue), for a renderer that
+    /// has those from somewhere else than the card's state: Direct3D's
+    /// pipeline, which lights the vertices it keeps with the card's
+    /// arithmetic, so a device draws one picture whichever of the two
+    /// lit a vertex. `sources` are those of the diffuse, specular,
+    /// ambient and emissive colours.
+    pub fn of(
+        lamps: Vec<Lamp>,
+        material: Material,
+        ambient: [f32; 3],
+        specular: bool,
+        local_viewer: bool,
+        sources: [Source; 4],
+    ) -> Lighting {
+        Lighting {
+            lamps,
+            material,
+            ambient,
+            specular,
+            local_viewer,
+            sources,
         }
     }
 
@@ -125,15 +194,23 @@ impl Lighting {
             } else {
                 let to: [f32; 3] = std::array::from_fn(|i| lamp.position[i] - eye[i]);
                 let d = length(to);
-                if d > light.range {
+                // A light reaches what is nearer than its range. A
+                // distance or a sum that is no number makes a factor
+                // that is none, which the test below leaves out.
+                if d >= light.range {
                     continue;
                 }
                 let a = &light.attenuation;
                 let under = a[0] + a[1] * d + a[2] * d * d;
-                (normalize(to), if under > 0.0 { 1.0 / under } else { 1.0 })
+                if under <= 0.0 {
+                    continue;
+                }
+                (normalize(to), 1.0 / under)
             };
             let cone = if light.kind == LIGHT_SPOT {
                 let rho = -dot(to, lamp.axis);
+                // A spot that points no way has a rho of 0, which is
+                // outside any cone up to half a turn wide.
                 if rho <= lamp.outer {
                     0.0
                 } else if light.spot_model == 1 {
@@ -147,10 +224,13 @@ impl Lighting {
             } else {
                 1.0
             };
+            // A falloff below 0 can make the cone's share any size:
+            // what the light adds stays a number.
             let factor = reach * cone;
-            if factor.is_nan() || factor <= 0.0 || factor.is_infinite() {
+            if factor.is_nan() || factor <= 0.0 {
                 continue;
             }
+            let factor = factor.min(math::POW_MAX);
             for (a, l) in ambient.iter_mut().zip(light.ambient) {
                 *a += l * factor;
             }

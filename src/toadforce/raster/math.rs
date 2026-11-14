@@ -53,22 +53,40 @@ pub fn exp_neg(x: f32) -> f32 {
     (sum * scale) as f32
 }
 
-/// `x` to the power `y`, for `x` of 0 to 1 and `y` of 0 and above: what
-/// a specular highlight and a spot light's falloff raise a cosine to.
-/// 1 for a `y` of 0 or below, whatever `x` is; otherwise 0 for an `x`
-/// of 0 or below or none, and 1 for one of 1 and above.
+/// `x` to the power `y`, for `x` of 0 to 1: what a specular highlight
+/// and a spot light's falloff raise a cosine to. 1 for a `y` of 0 or
+/// none, whatever `x` is; otherwise an `x` of 1 and above gives 1, and
+/// one of 0 or below or none gives 0 for a `y` above 0 and `POW_MAX`
+/// for one below. A `y` below 0 gives 1 over `x` to the power `-y`,
+/// `POW_MAX` at most.
 pub fn pow_unit(x: f32, y: f32) -> f32 {
-    if y.is_nan() || y <= 0.0 {
+    if y.is_nan() || y == 0.0 {
         return 1.0;
-    }
-    if x.is_nan() || x <= 0.0 {
-        return 0.0;
     }
     if x >= 1.0 {
         return 1.0;
     }
+    let none = x.is_nan() || x <= 0.0;
+    if y < 0.0 {
+        if none {
+            return POW_MAX;
+        }
+        let under = exp_neg(-log2(x) * std::f32::consts::LN_2 * -y);
+        return if under > 1.0 / POW_MAX {
+            1.0 / under
+        } else {
+            POW_MAX
+        };
+    }
+    if none {
+        return 0.0;
+    }
     exp_neg(-log2(x) * std::f32::consts::LN_2 * y)
 }
+
+/// The most `pow_unit` gives: what it is multiplied with stays a
+/// number.
+pub const POW_MAX: f32 = 1.0e18;
 
 /// The cosine of a finite `x`, in radians; 1 for one that is none.
 pub fn cos(x: f32) -> f32 {
@@ -103,6 +121,13 @@ mod tests {
         assert_eq!(pow_unit(-1.0, 3.0), 0.0);
         assert_eq!(pow_unit(1.0, 40.0), 1.0);
         assert_eq!(pow_unit(f32::NAN, 2.0), 0.0);
+        // A power below 0 is 1 over the power above it.
+        assert_eq!(pow_unit(0.5, -1.0), 2.0);
+        assert_eq!(pow_unit(0.25, -0.5), 2.0);
+        assert_eq!(pow_unit(1.0, -3.0), 1.0);
+        assert_eq!(pow_unit(0.0, -1.0), POW_MAX);
+        assert_eq!(pow_unit(1e-30, -4.0), POW_MAX);
+        assert_eq!(pow_unit(0.3, f32::NAN), 1.0);
         for x in [0.001f32, 0.2, 0.5, 0.9, 0.999] {
             for y in [0.5f32, 1.0, 2.0, 8.0, 50.0, 128.0] {
                 let want = x.powf(y);

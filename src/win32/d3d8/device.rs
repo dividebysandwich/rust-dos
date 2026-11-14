@@ -1315,10 +1315,10 @@ pub fn validate_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if op == 1 {
             break;
         }
-        if !hal::can_do(kind, op) {
+        if !hal::can_do(kind, op, 8) {
             return Some(D3DERR_UNSUPPORTEDCOLOROPERATION);
         }
-        if aop != 1 && !hal::can_do(kind, aop) {
+        if aop != 1 && !hal::can_do(kind, aop, 8) {
             return Some(D3DERR_UNSUPPORTEDALPHAOPERATION);
         }
         used += 1;

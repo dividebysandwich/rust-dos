@@ -11,7 +11,7 @@
 
 use super::pipeline::{SLOTS, Shape};
 use super::span::N;
-use super::texel::Rgba;
+use super::texel::{A, Rgba};
 use super::vertex::ScreenVertex;
 
 /// Positions are limited to this many pixels either side of 0, which
@@ -92,7 +92,9 @@ pub struct Prim {
     /// The colours' channels times 1 / w.
     pub diffuse: [Plane; 4],
     pub specular: [Plane; 4],
-    /// The colours, where the whole primitive has one of each.
+    /// The colours, where the whole primitive has one of each: its
+    /// vertices have the same, or it is flat-shaded and they have one
+    /// fog factor.
     pub flat: Option<(Rgba, Rgba)>,
     /// Each slot's coordinates (s, t, r, q) times 1 / w.
     pub tex: [[Plane; 4]; SLOTS],
@@ -121,14 +123,21 @@ fn planes<const V: usize>(
     let each = |f: &dyn Fn(&ScreenVertex) -> f64| std::array::from_fn::<f64, V, _>(|i| f(v[i]));
     let over_w =
         |f: &dyn Fn(&ScreenVertex) -> f32| plane(std::array::from_fn(|i| f(v[i]) as f64 * q[i]));
-    let same = |f: &dyn Fn(&ScreenVertex) -> Rgba| v.iter().all(|x| f(x) == f(v[0]));
-    let flat = if shape.flat {
-        Some((provoking.diffuse, provoking.specular))
-    } else if same(&|v| v.diffuse) && same(&|v| v.specular) {
-        Some((v[0].diffuse, v[0].specular))
-    } else {
-        None
+    // A vertex's two colours as the primitive has them: its own, or
+    // with flat shading those of the vertex that gives the primitive
+    // its colours. The specular colour's alpha is the fog factor and
+    // stays the vertex's own, so fog changes over a flat primitive as
+    // it does over a shaded one (Direct3D's D3DSHADE_FLAT).
+    let shaded = |v: &ScreenVertex| match shape.flat {
+        true => {
+            let mut specular = provoking.specular;
+            specular[A] = v.specular[A];
+            (provoking.diffuse, specular)
+        }
+        false => (v.diffuse, v.specular),
     };
+    let first = shaded(v[0]);
+    let flat = v.iter().all(|v| shaded(v) == first).then_some(first);
     let mut tex = [[Plane::default(); 4]; SLOTS];
     for (slot, &set) in tex.iter_mut().zip(sets) {
         for (i, plane) in slot.iter_mut().enumerate() {
@@ -143,8 +152,8 @@ fn planes<const V: usize>(
         oy: (origin.1 - half) as f32,
         z: plane(each(&|v| v.z as f64)),
         q: plane(q),
-        diffuse: [0, 1, 2, 3].map(|ch| over_w(&|v| v.diffuse[ch] as f32)),
-        specular: [0, 1, 2, 3].map(|ch| over_w(&|v| v.specular[ch] as f32)),
+        diffuse: [0, 1, 2, 3].map(|ch| over_w(&|v| shaded(v).0[ch] as f32)),
+        specular: [0, 1, 2, 3].map(|ch| over_w(&|v| shaded(v).1[ch] as f32)),
         flat,
         tex,
     }

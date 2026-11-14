@@ -29,11 +29,13 @@
 //!
 //! The pipeline keeps a draw (`draw` gives None) that it does more for:
 //! points and lines, the fill modes that draw them, flat shading, which
-//! gives a triangle's vertices one colour, a clip status or extents the
-//! program reads back, any vertex outside the band or the depths the
-//! pipeline cuts at (`pipeline::tl_inside`), which may leave a triangle
-//! to cut, more vertices than one command holds, and vertices in
-//! memory that isn't plain RAM.
+//! gives a triangle's vertices one colour, texture wrapping, which
+//! moves a triangle's coordinates, a clip status or extents the
+//! program reads back, any vertex outside the band the pipeline cuts
+//! at (`pipeline::tl_inside`), which may leave a triangle to cut, more
+//! vertices than one command holds, and vertices in memory that isn't
+//! plain RAM. A depth outside 0 to 1 keeps no draw from the card, which
+//! leaves such pixels out itself.
 
 use super::super::super::device::Device;
 use super::super::super::pipeline::{
@@ -295,6 +297,8 @@ pub fn draw(
         && (TRIANGLELIST..=TRIANGLEFAN).contains(&kind)
         && !matches!(setup.fill, FILL_POINT | FILL_WIREFRAME)
         && setup.shade != SHADE_FLAT
+        // The pipeline wraps texture coordinates before it clips.
+        && setup.wrap == [0; 8]
         && d.clip_status[0] & 3 == 0;
     let count = from.count as usize;
     let triangles = triangles(kind, from.indices.map_or(count, |(_, n)| n as usize));

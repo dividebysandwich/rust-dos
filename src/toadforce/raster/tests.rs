@@ -356,6 +356,49 @@ fn the_depth_test_keeps_the_nearer_fragment() {
     assert_eq!((rig.px(1, 1), rig.depth(1, 1)), (0x11, 0x3FFD));
 }
 
+/// A screen vertex's depth is the program's own, and nothing cuts a
+/// triangle by it. With the depth test on, the pixels whose depth is
+/// outside 0 to 1 aren't drawn (measured on Direct3D 7, 8 and 9 cards:
+/// a quad from z -1 to 2 is drawn where z is 0 to 1); with it off they
+/// all are.
+#[test]
+fn the_depth_test_leaves_out_a_depth_outside_0_to_1() {
+    let mut rig = Rig::new(Format::X8R8G8B8, Some(Format::D16));
+    // Two triangles of a square 32 wide whose depth runs from -1 on
+    // the left to 3 on the right: 0 at x 8 and 1 at x 16.
+    let v = |x: f32, y: f32| vertex_z(x, y, x / 8.0 - 1.0, 0xFF00_00AA, 0.0, 0.0);
+    let square: Vec<u32> = [
+        v(0.0, 0.0),
+        v(32.0, 0.0),
+        v(0.0, 32.0),
+        v(32.0, 0.0),
+        v(32.0, 32.0),
+        v(0.0, 32.0),
+    ]
+    .concat();
+    rig.clear(CLEAR_DEPTH, 0, 1.0, 0);
+    rig.states(&[(RS_ZENABLE, 1), (RS_ZFUNC, 8)]);
+    assert_eq!(rig.draw(4, &square), 0);
+    for y in [0, 13, 31] {
+        // A reset card's pixel centres are at whole coordinates: z is
+        // 0 in column 8 and 1 in column 16, which are both drawn.
+        for x in 0..SIZE {
+            let inside = (8..=16).contains(&x);
+            assert_eq!(rig.px(x, y) != 0, inside, "{x} {y}");
+            if !inside {
+                assert_eq!(rig.depth(x, y), 0xFFFF, "{x} {y}");
+            }
+        }
+    }
+    assert_eq!((rig.depth(8, 4), rig.depth(12, 4)), (0, 0x8000));
+    // Without the test every pixel is drawn, and no depth written.
+    rig.clear(CLEAR_COLOUR | CLEAR_DEPTH, 0, 1.0, 0);
+    rig.states(&[(RS_ZENABLE, 0)]);
+    assert_eq!(rig.draw(4, &square), 0);
+    assert_eq!(rig.drawn(0).len(), 32 * 32);
+    assert_eq!(rig.depth(4, 4), 0xFFFF);
+}
+
 #[test]
 fn a_fragment_the_alpha_test_drops_writes_no_depth() {
     let mut rig = Rig::new(Format::X8R8G8B8, Some(Format::D24X8));

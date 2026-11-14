@@ -60,7 +60,7 @@ use super::super::device::{
     TSS_ALPHAOP, TSS_COLOROP,
 };
 use super::super::pipeline::{
-    self, Blend, LIGHT_GLSPOT, Layout, Matrix, Rasterizer, SHADE_FLAT, ScreenVertex, Setup,
+    self, Blend, Layout, Matrix, Rasterizer, SHADE_FLAT, ScreenVertex, Setup,
     Vertex, ViewMap,
 };
 use super::{Description, Fill};
@@ -364,7 +364,7 @@ impl Sent {
 
 /// The render states of the card's transform and lighting, which a
 /// draw of screen vertices leaves at their reset values.
-const GEOMETRY: [u32; 14] = [
+const GEOMETRY: [u32; 22] = [
     states::RS_VERTEXBLEND,
     states::RS_RANGEFOGENABLE,
     states::RS_CLIPPING,
@@ -379,6 +379,16 @@ const GEOMETRY: [u32; 14] = [
     states::RS_AMBIENTMATERIALSOURCE,
     states::RS_EMISSIVEMATERIALSOURCE,
     states::RS_CLIPPLANEENABLE,
+    // Texture wrapping, which the pipeline does to the vertices it
+    // keeps before it clips them.
+    states::RS_WRAP0,
+    states::RS_WRAP0 + 1,
+    states::RS_WRAP0 + 2,
+    states::RS_WRAP0 + 3,
+    states::RS_WRAP0 + 4,
+    states::RS_WRAP0 + 5,
+    states::RS_WRAP0 + 6,
+    states::RS_WRAP0 + 7,
 ];
 
 /// The render states the HAL sets: the rasteriser's, and `GEOMETRY`.
@@ -486,10 +496,12 @@ pub fn there(cpu: &Cpu) -> bool {
 
 // What the device reports.
 
-/// The stage operations the card draws: all of Direct3D 7's but
-/// PREMODULATE.
-pub fn can_do(op: u32) -> bool {
-    states::Kind::Op.takes(op) && op <= 24
+/// The stage operations the card draws for a device of Direct3D
+/// `version`: all of that version's but PREMODULATE. MULTIPLYADD (25)
+/// and LERP (26) are Direct3D 8's: they take a third argument, which
+/// a device of an older version has no state for.
+pub fn can_do(op: u32, version: u32) -> bool {
+    states::Kind::Op.takes(op) && (op <= 24 || version >= 8)
 }
 
 fn rgb(bits: u32, a: u32, r: u32, g: u32, b: u32) -> DdFormat {
@@ -593,15 +605,28 @@ pub fn description() -> Description {
         // cards of the time with no limit reported it.
         texture_aspect: caps::TEXTURE_MAX,
         // D3DPRASTERCAPS_: anisotropic filtering, table fog by w and by
-        // z.
+        // z. No w buffer: the card's depth is z (`RS_ZENABLE`).
         raster: 0x2_0000 | 0x10_0000 | 0x20_0000,
-        texture: super::TEXTURECAPS_CUBEMAP,
+        // D3DPTEXTURECAPS_: cube maps, projected coordinates
+        // (D3DTTFF_PROJECTED), and coordinates that aren't scaled by
+        // the texture's size, which every HAL says to Direct3D 7.
+        texture: super::TEXTURECAPS_CUBEMAP | 0x400 | 0x40,
+        // No D3DPTEXTURECAPS_COLORKEYBLEND: the card drops a keyed
+        // texel's fragment and has no blend for one
+        // (D3DRENDERSTATE_COLORKEYBLENDENABLE).
+        texture7: 0,
+        // D3DPRASTERCAPS_COLORPERSPECTIVE: colours are interpolated
+        // with perspective, as texture coordinates are.
+        raster8: 0x40_0000,
+        // D3DTEXOPCAPS_MULTIPLYADD and LERP.
+        ops8: 0x300_0000,
         // D3DPTFILTERCAPS_: anisotropic minification and magnification,
         // and a linear filter between mipmap levels.
         filter: 0x400 | 0x400_0000 | 0x2_0000,
         // D3DPTADDRESSCAPS_: the border color.
         address: 0x8,
-        // D3DPBLENDCAPS_: every factor.
+        // D3DPBLENDCAPS_: every factor. The destination has all but
+        // the two that set both (`caps.rs`).
         blend: 0x1FFF,
         guard_band: VERTEX_BAND,
         // D3DSTENCILCAPS_: all eight operations.
@@ -810,6 +835,10 @@ fn render_value(d: &Device, def: &Def, setup: &Setup, depth: Option<Format>, lit
         RS_SHADEMODE if lit => 2 - (setup.shade == SHADE_FLAT) as u32,
         RS_CLIPPING => setup.clip as u32,
         RS_LIGHTING => lighting.is_some() as u32,
+        // A material Direct3D 7 gives no highlight (`setup_of`): the
+        // card would raise to its power, and without the state its lit
+        // vertices have the black specular colour the device's have.
+        RS_SPECULARENABLE if lit && lighting.is_some_and(|l| !l.specular) => 0,
         RS_AMBIENT => lighting.map_or(0, |l| pipeline::color(l.ambient)),
         RS_COLORVERTEX => lighting.is_some_and(|l| l.color_vertex) as u32,
         RS_LOCALVIEWER => lighting.is_some_and(|l| l.local_viewer) as u32,
@@ -825,6 +854,11 @@ fn render_value(d: &Device, def: &Def, setup: &Setup, depth: Option<Format>, lit
         RS_CLIPPLANEENABLE => (1 << setup.planes.len().min(CLIP_PLANES)) - 1,
         // As many weights as the card's vertices have (`card_layout`).
         RS_VERTEXBLEND => blended(setup).map_or(0, |matrices| matrices.len() as u32 - 1),
+        // Each coordinate set's wrapping, which the setup has with
+        // Direct3D 5's two states for the first set in it.
+        id if (RS_WRAP0..RS_WRAP0 + 8).contains(&id) => {
+            setup.wrap[(id - RS_WRAP0) as usize] as u32
+        }
         // The pipeline culls, makes the lines and points of the other
         // fill modes, and gives a flat primitive's vertices one color.
         RS_CULLMODE => 1,
@@ -1083,7 +1117,7 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
                 g.material = material;
             }
             for (slot, light) in l.lights.iter().enumerate() {
-                let light = card_light(light);
+                let light = light.card();
                 if g.lights[slot] != light {
                     encode::light(&mut words, slot as u32, &light);
                     g.lights[slot] = light;
@@ -1762,30 +1796,6 @@ fn matrix_stages(d: &Device) -> impl Iterator<Item = u32> + '_ {
         .filter(|&stage| d.stage(stage, states::TSS_TEXTURETRANSFORMFLAGS) & 0xFF != 0)
 }
 
-/// A light of the device as the card has one.
-fn card_light(l: &pipeline::Light) -> Light {
-    Light {
-        // Direct3D 5's second spot light is a spot light.
-        kind: if l.kind == LIGHT_GLSPOT {
-            level1::LIGHT_SPOT
-        } else {
-            l.kind
-        },
-        diffuse: l.diffuse,
-        specular: l.specular,
-        ambient: l.ambient,
-        position: l.position,
-        direction: l.direction,
-        // A range of 0 is no limit.
-        range: if l.range > 0.0 { l.range } else { f32::MAX },
-        falloff: l.falloff,
-        attenuation: l.attenuation,
-        theta: l.theta,
-        phi: l.phi,
-        spot_model: 0,
-    }
-}
-
 /// The world matrices the card blends the vertices of a draw with
 /// `setup` between, one more than the weights it takes from each
 /// vertex: None for a draw that isn't blended, or is blended in a way
@@ -1850,7 +1860,7 @@ fn can_transform(d: &Device, setup: &Setup, layout: &Layout) -> bool {
             && finite(&[m.diffuse, m.ambient, m.specular, m.emissive].concat())
             && m.power.is_finite()
             && l.lights.iter().all(|light| {
-                let l = card_light(light);
+                let l = light.card();
                 (level1::LIGHT_POINT..=level1::LIGHT_DIRECTIONAL).contains(&l.kind)
                     && finite(&[l.diffuse, l.specular, l.ambient].concat())
                     && finite(&[l.position, l.direction, l.attenuation].concat())

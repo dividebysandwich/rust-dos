@@ -131,8 +131,9 @@ impl ScreenVertex {
     /// The vertex whose words `word` gives, laid out as `fvf`, which is
     /// a transformed layout. A vertex without a diffuse colour is
     /// white, one without a specular colour has none, and a coordinate
-    /// a set lacks is 0, or 1 for the fourth. A reciprocal w that isn't
-    /// a positive number is 1.
+    /// a set lacks is 0, but the fourth, which is the set's last number
+    /// (`geometry::last_as_fourth`), or 1 for a set the vertex hasn't
+    /// got. A reciprocal w that isn't a positive number is 1.
     pub fn read(fvf: &Fvf, word: impl Fn(usize) -> u32) -> Self {
         let number = |at: usize| f32::from_bits(word(at));
         let rhw = number(3);
@@ -160,6 +161,7 @@ impl ScreenVertex {
             for (i, n) in v.tex[set][..numbers as usize].iter_mut().enumerate() {
                 *n = number(at as usize + i);
             }
+            v.tex[set] = super::geometry::last_as_fourth(v.tex[set], numbers as usize);
         }
         v
     }
@@ -233,8 +235,9 @@ mod tests {
         assert_eq!(texel::to_word(v.diffuse), 0x8040_2010);
         assert_eq!(v.specular, [0; 4]);
         assert_eq!(v.psize, None);
-        assert_eq!(v.tex[0], [7.0, 0.0, 0.0, 1.0]);
-        assert_eq!(v.tex[1], [1.0, 2.0, 3.0, 1.0]);
+        // A set's last number is its fourth too.
+        assert_eq!(v.tex[0], [7.0, 0.0, 0.0, 7.0]);
+        assert_eq!(v.tex[1], [1.0, 2.0, 3.0, 3.0]);
         assert_eq!(v.tex[2], [0.0, 0.0, 0.0, 1.0]);
         // A reciprocal w of 0, below 0 or no number is 1.
         for rhw in [0.0f32, -2.0, f32::NAN, f32::INFINITY] {

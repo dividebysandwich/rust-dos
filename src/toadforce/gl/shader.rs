@@ -129,10 +129,12 @@ int tf_address(int at, int size, int mode) {
 // of two texels, where the card's planes give the edge itself and the
 // host's interpolation a value a little to either side of it. A
 // sixteenth of a step is added so that such a value is on the card's
-// side of the edge.
+// side of the edge. The number stops where the card's does, and a
+// coordinate that is no number gives 0.
 int tf_fixed(float c, int size) {
+    if (isnan(c)) return 0;
     float at = c * float(size) * 256.0 + 0.0625;
-    return int(floor(clamp(at, -2147483648.0, 2147483520.0)));
+    return int(floor(clamp(at, -2147483520.0, 2147483520.0)));
 }
 ivec4 tf_texel(sampler2D s, int level, int x, int y, ivec4 border) {
     if (x < 0 || y < 0) return border;
@@ -152,8 +154,9 @@ ivec4 tf_level(sampler2D s, int level, vec2 at, ivec2 size0, bool linear, ivec2 
         int y = tf_address(p.y >> 8, size.y, mode.y);
         return tf_texel(s, level, x, y, border);
     }
-    // A texel's centre is half a texel inside it.
-    p -= 128;
+    // A texel's centre is half a texel inside it. A coordinate that
+    // is no number is 0 with the shift, as the card has it.
+    p -= ivec2(isnan(at.x) ? 0 : 128, isnan(at.y) ? 0 : 128);
     ivec2 f = p & 255;
     p = p >> 8;
     int x0 = tf_address(p.x, size.x, mode.x);
@@ -248,6 +251,14 @@ fn steps_key(steps: &[Step]) -> Vec<Step> {
     steps
         .iter()
         .filter_map(|step| match *step {
+            // The tests are the host's state. What the shader does
+            // for the step is drop a depth outside the range.
+            Step::Depth { ranged: true, .. } => Some(Step::Depth {
+                func: 0,
+                write: false,
+                stencil: None,
+                ranged: true,
+            }),
             Step::Depth { .. } => None,
             Step::Write { .. } => Some(Step::Write {
                 blend: None,
@@ -379,6 +390,11 @@ ivec4 mul(ivec4 a, ivec4 b) {
     // `write!` to a String can't fail.
     for step in steps {
         match *step {
+            // The host limits depth to its range (`DEPTH_CLAMP`), as
+            // the card does without the depth test.
+            Step::Depth { ranged: true, .. } => {
+                body.push_str("    if (v_z < 0.0 || v_z > 1.0) discard;\n");
+            }
             Step::Depth { .. } => {}
             Step::Colours { specular } => {
                 body.push_str("    dif = ivec4(clamp(v_diffuse, 0.0, 255.0) + 0.5);\n");
@@ -566,7 +582,14 @@ uniform ivec4 u_tb{stage};"
                         };
                         // Start, end and density.
                         let f = match mode {
-                            3 => "(u_fog.y - d) / (u_fog.y - u_fog.x)",
+                            // All of the colour nearer than the
+                            // start and none from the end on, asked
+                            // in that order, so the division is by
+                            // more than 0.
+                            3 => {
+                                "(d < u_fog.x ? 1.0 : d >= u_fog.y ? 0.0 : \
+                                 (u_fog.y - d) / (u_fog.y - u_fog.x))"
+                            }
                             1 => "exp(-max(u_fog.z * d, 0.0))",
                             _ => "exp(-(u_fog.z * d) * (u_fog.z * d))",
                         };
@@ -682,6 +705,7 @@ mod tests {
             func: 4,
             write: true,
             stencil: None,
+            ranged: false,
         };
         let write = |mask| Step::Write { blend: None, mask };
         let colours = Step::Colours { specular: false };

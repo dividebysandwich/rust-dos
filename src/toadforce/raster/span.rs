@@ -114,7 +114,8 @@ impl<'a> Ctx<'a> {
                     func,
                     write,
                     stencil,
-                } => self.depth(p, x, y, n, c, func, write, stencil),
+                    ranged,
+                } => self.depth(p, x, y, n, c, (func, write, ranged), stencil),
                 Step::Colours { specular } => {
                     match p.flat {
                         Some((diffuse, spec)) => {
@@ -199,6 +200,11 @@ impl<'a> Ctx<'a> {
                                     p.z.eval(fx + i as f32, fy).clamp(0.0, 1.0)
                                 };
                                 let f = match mode {
+                                    // In this order, which says
+                                    // what fog that ends before it
+                                    // starts does.
+                                    3 if d < v.fog_start => 1.0,
+                                    3 if d >= v.fog_end => 0.0,
                                     3 => (v.fog_end - d) / (v.fog_end - v.fog_start),
                                     1 => math::exp_neg(v.fog_density * d),
                                     _ => {
@@ -275,8 +281,7 @@ impl<'a> Ctx<'a> {
         y: i32,
         n: usize,
         c: &mut Chunk,
-        func: u32,
-        write: bool,
+        (func, write, ranged): (u32, bool, bool),
         stencil: Option<super::pipeline::Stencil>,
     ) {
         let v = &self.st.values;
@@ -298,9 +303,15 @@ impl<'a> Ctx<'a> {
                 continue;
             }
             let at = row + (x as usize + i) * bytes as usize;
-            let z = p.z.eval(fx + i as f32, fy).clamp(0.0, 1.0);
+            let z = p.z.eval(fx + i as f32, fy);
+            // With the depth test on, what is outside the buffer's
+            // range isn't drawn, and leaves the stencil as it is.
+            if ranged && !(0.0..=1.0).contains(&z) && !z.is_nan() {
+                c.mask &= !(1 << i);
+                continue;
+            }
             // A depth that is no number is the nearest.
-            let z = if z.is_nan() { 0.0 } else { z };
+            let z = if z.is_nan() { 0.0 } else { z.clamp(0.0, 1.0) };
             let new = (depth_value(d.format, z) << shift).saturating_sub(v.z_bias) & z_mask;
             let old = self.mem.pixel(at, bytes);
             let z_passes = combine::compare(func, new, old & z_mask);

@@ -314,9 +314,13 @@ impl<'a> Sampler<'a> {
     /// the left and up.
     #[inline]
     fn fixed(image: &Image, u: f32, v: f32, shift: f64) -> (i64, i64) {
-        const LIMIT: f64 = (1i64 << 31) as f64;
+        // The last number below 2^31 that single precision has. A
+        // coordinate stops there and at its negative before the shift
+        // comes off, in the host's shader too (`tf_fixed`), whose
+        // 32-bit integers the shift then can't take out of range.
+        const LIMIT: f64 = 2147483520.0;
         let to = |c: f32, size: i32| {
-            let at = (c as f64 * size as f64 * 256.0 - shift).clamp(-LIMIT, LIMIT);
+            let at = (c as f64 * size as f64 * 256.0).clamp(-LIMIT, LIMIT) - shift;
             // Rounded down: the cast rounds toward 0, which is one too
             // high below 0 unless the number is whole. A coordinate
             // that is none casts to 0, texel 0.
@@ -832,13 +836,13 @@ mod tests {
 
         fn fixed(tex: &Tex, level: u32, u: f32, v: f32, shift: f64) -> (i64, i64) {
             let (w, h) = tex.texture.level_size(level);
-            let limit = (1i64 << 31) as f64;
+            let limit = 2147483520.0;
             let to = |c: f32, size: u32| {
-                let at = (c as f64 * size as f64 * 256.0 - shift).floor();
+                let at = c as f64 * size as f64 * 256.0;
                 if at.is_nan() {
                     0
                 } else {
-                    at.clamp(-limit, limit) as i64
+                    (at.clamp(-limit, limit) - shift).floor() as i64
                 }
             };
             (to(u, w), to(v, h))
