@@ -32,8 +32,10 @@
 //!
 //! Every OpenGL 1.1 function is exported, since programs ask for all of
 //! them with GetProcAddress (Quake III's QGL does). Those that aren't
-//! here, such as display lists, evaluators, selection, feedback and the
-//! accumulation buffer, do nothing and say so in the log. Lighting is
+//! here, such as evaluators, selection, feedback and the accumulation
+//! buffer, do nothing and say so in the log. Display lists record the
+//! calls the program makes and give them to the same handlers again
+//! (`lists.rs`), those of the functions that aren't here too. Lighting is
 //! computed on the processor (`light.rs`, `shade.rs`), as a Voodoo3
 //! driver had to with no transform and lighting hardware on the card,
 //! and the vertices reach Direct3D's pipeline lit. The extensions are
@@ -76,15 +78,16 @@ mod draw;
 mod exports;
 mod imm;
 mod light;
+mod lists;
 mod matrix;
 mod shade;
 mod state;
 mod texture;
 pub mod wgl;
 
-pub use matrix::{mult as mult_matrix, ortho};
+pub use lists::{call, mult_matrix, ortho, tex_image_rgba};
 pub use state::get_string;
-pub use texture::{GL_TEXTURE_2D, rgba_of, tex_image_rgba};
+pub use texture::{GL_TEXTURE_2D, rgba_of};
 
 use super::ddraw::d3d::pipeline::{IDENTITY, Matrix};
 use super::ddraw::stamp::Stamped;
@@ -236,6 +239,9 @@ pub struct Context {
     /// glBegin's primitive under way and its vertices.
     pub begin: Option<u32>,
     pub vertices: Vec<ImmVertex>,
+    /// Its display lists: their group, the list base and the list
+    /// being compiled.
+    pub lists: lists::Own,
     pub swap_interval: u32,
     /// The time (ns) a window's next swap waits for: the start of the
     /// frame's picture the swap interval's frames after the last swap.
@@ -346,6 +352,8 @@ pub struct State {
     pub formats: Vec<(u32, u32)>,
     /// The draws that wait to go to Direct3D as one (`draw::Waiting`).
     pub waiting: Option<draw::Waiting>,
+    /// The contexts' display lists.
+    pub lists: lists::Shared,
     /// The functions that do nothing whose first call was logged.
     pub logged: Vec<u16>,
     /// The same for GLU32.DLL (glu32/), which works on OPENGL32's
@@ -516,10 +524,14 @@ pub const CAP_POLYGON_STIPPLE: u32 = 0x10_0000;
 pub const CAP_LOGIC_OP: u32 = 0x20_0000;
 
 /// A function that isn't here: it does nothing, and its first call is
-/// logged. Its name is the stub's that called it.
+/// logged. Its name is the stub's that called it, or the recorded
+/// function's when a display list calls it.
 fn missing(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let base = DLL.base + 0x1000;
-    let stub = cpu.eip().wrapping_sub(4).wrapping_sub(base) / super::stubs::STUB;
+    let stub = match state(cpu).lists.replaying() {
+        Some(at) => at as u32,
+        None => cpu.eip().wrapping_sub(4).wrapping_sub(base) / super::stubs::STUB,
+    };
     let id = stub as u16;
     if super::trace3d::on(cpu) {
         let name = exports::APIS.get(stub as usize).map_or("?", |a| a.name);
@@ -561,6 +573,7 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32) {
                 .is_some_and(Option::is_some)
     });
     s.contexts = contexts;
+    lists::sweep(s);
 }
 
 crate::state_fields!(Array {
@@ -659,6 +672,7 @@ crate::state_fields!(Context {
     tex_array,
     begin,
     vertices,
+    lists,
     swap_interval,
     swap_at,
     drawn
@@ -667,7 +681,8 @@ crate::state_fields!(State {
     contexts,
     current,
     formats,
-    waiting
+    waiting,
+    lists
 } skip { logged, glu_logged });
 
 /// Whether the draws that wait (`draw::Waiting`) may go on waiting
@@ -742,6 +757,16 @@ pub fn keeps_waiting(id: u16) -> bool {
         "glPushAttrib",
         "glPopAttrib",
         "glGetError",
+        // The lists free nothing the draws name, and a list's calls
+        // flush or wait each by its own function (`lists::issue`).
+        "glNewList",
+        "glEndList",
+        "glCallList",
+        "glCallLists",
+        "glListBase",
+        "glGenLists",
+        "glIsList",
+        "glDeleteLists",
     ];
     static BITS: std::sync::OnceLock<(u16, Vec<u64>)> = std::sync::OnceLock::new();
     let (first, bits) = BITS.get_or_init(|| {
@@ -814,6 +839,8 @@ mod waiting_tests {
             "glEnable",
             "glLoadMatrixf",
             "glTexParameteri",
+            "glCallList",
+            "glCallLists",
         ] {
             assert!(keeps_waiting(id(name)), "{name}");
         }
@@ -831,7 +858,7 @@ mod waiting_tests {
             "wglSwapBuffers",
             "wglMakeCurrent",
             "wglDeleteContext",
-            "glCallList",
+            "glBitmap",
         ] {
             assert!(!keeps_waiting(id(name)), "{name}");
         }

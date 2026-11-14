@@ -44,6 +44,9 @@ pub const FEATURES: &[&str] = &[
     "build",
     "memory_json",
     "screen_attrs",
+    // Memory reads, writes, breakpoints and watchpoints on pages in the
+    // built-in Windows's page file (`lin:` spots), and /api/win32/page_file.
+    "page_file",
 ];
 
 macro_rules! kinds {

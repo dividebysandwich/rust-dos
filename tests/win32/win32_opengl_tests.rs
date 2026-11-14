@@ -5,7 +5,8 @@
 //! with glReadPixels and swap the buffers with GDI's SwapBuffers; one
 //! that draws full screen on a Voodoo2 beside the VGA; and one on a
 //! machine without a 3dfx card, which loads the DLL but has no pixel
-//! format; and GLU32.DLL's mipmaps, matrices and texts on top of it.
+//! format; GLU32.DLL's mipmaps, matrices and texts on top of it; and
+//! display lists.
 //! The programs are PE files made with rust-dos-pe's builder, their
 //! code assembled with iced, as in win32_d3d_tests.rs. Each leaves its
 //! results in its data and spins, and the test looks at them while the
@@ -86,6 +87,26 @@ const OPENGL32: &[&str] = &[
     "glScalef",
     "glNormalPointer",
     "glColorMask",
+    "glNewList",
+    "glEndList",
+    "glCallList",
+    "glCallLists",
+    "glGenLists",
+    "glDeleteLists",
+    "glIsList",
+    "glListBase",
+    "glGetIntegerv",
+    "glColor3fv",
+    "glVertex2fv",
+    "glTranslatef",
+    "glDrawArrays",
+    "glArrayElement",
+    "glColorPointer",
+    "wglShareLists",
+    "wglDeleteContext",
+    "glRasterPos2i",
+    "glPixelStorei",
+    "glTexCoord2f",
 ];
 const GLU32: &[&str] = &[
     "gluBuild2DMipmaps",
@@ -146,6 +167,26 @@ const POP_ATTRIB: usize = GL + 43;
 const SCALEF: usize = GL + 44;
 const NORMAL_POINTER: usize = GL + 45;
 const COLOR_MASK: usize = GL + 46;
+const NEW_LIST: usize = GL + 47;
+const END_LIST: usize = GL + 48;
+const CALL_LIST: usize = GL + 49;
+const CALL_LISTS: usize = GL + 50;
+const GEN_LISTS: usize = GL + 51;
+const DELETE_LISTS: usize = GL + 52;
+const IS_LIST: usize = GL + 53;
+const LIST_BASE: usize = GL + 54;
+const GET_INTEGERV: usize = GL + 55;
+const COLOR3FV: usize = GL + 56;
+const VERTEX2FV: usize = GL + 57;
+const TRANSLATEF: usize = GL + 58;
+const DRAW_ARRAYS: usize = GL + 59;
+const ARRAY_ELEMENT: usize = GL + 60;
+const COLOR_POINTER: usize = GL + 61;
+const WGL_SHARE_LISTS: usize = GL + 62;
+const WGL_DELETE_CONTEXT: usize = GL + 63;
+const RASTER_POS2I: usize = GL + 64;
+const PIXEL_STOREI: usize = GL + 65;
+const TEX_COORD2F: usize = GL + 66;
 const GLU: usize = GL + OPENGL32.len();
 const BUILD_2D_MIPMAPS: usize = GLU;
 const ORTHO_2D: usize = GLU + 1;
@@ -426,19 +467,24 @@ impl Calls {
         index: usize,
         args: &[Arg],
     ) -> Result<(), IcedError> {
-        for arg in args.iter().rev() {
-            match *arg {
-                Arg::I(v) => a.push(v as i32)?,
-                Arg::F(v) => a.push(v.to_bits() as i32)?,
-                Arg::At(o) => a.push(l.at(o) as i32)?,
-                Arg::Val(o) => a.push(dword_ptr(l.at(o)))?,
-            }
-        }
-        a.call(dword_ptr(l.iat[index] as u64))?;
+        gl(a, l, index, args)?;
         a.mov(dword_ptr(l.at(RESULTS + 4 * self.next)), eax)?;
         self.next += 1;
         Ok(())
     }
+}
+
+/// Call the import `index` with `args`, its result left in EAX.
+fn gl(a: &mut CodeAssembler, l: &Layout, index: usize, args: &[Arg]) -> Result<(), IcedError> {
+    for arg in args.iter().rev() {
+        match *arg {
+            Arg::I(v) => a.push(v as i32)?,
+            Arg::F(v) => a.push(v.to_bits() as i32)?,
+            Arg::At(o) => a.push(l.at(o) as i32)?,
+            Arg::Val(o) => a.push(dword_ptr(l.at(o)))?,
+        }
+    }
+    a.call(dword_ptr(l.iat[index] as u64))
 }
 
 /// The end of a program: DONE set, and it spins, its memory there to
@@ -2047,4 +2093,894 @@ fn pixels_read_back_in_the_packed_types_texels_come_in() {
             }
         }
     }
+}
+
+// Display lists.
+
+const GL_COMPILE: u32 = 0x1300;
+const GL_COMPILE_AND_EXECUTE: u32 = 0x1301;
+const GL_LIST_MODE: u32 = 0x0B30;
+const GL_MAX_LIST_NESTING: u32 = 0x0B31;
+const GL_LIST_BASE: u32 = 0x0B32;
+const GL_LIST_INDEX: u32 = 0x0B33;
+const GL_LIST_BIT: u32 = 0x2_0000;
+const GL_MODELVIEW_MATRIX: u32 = 0x0BA6;
+const GL_PROJECTION_MATRIX: u32 = 0x0BA7;
+const GL_BYTE: u32 = 0x1400;
+const GL_COLOR_ARRAY: u32 = 0x8076;
+
+/// Where the list tests' programs read the window back: PIXELS and
+/// three more.
+const SHOTS: [u32; 4] = [PIXELS, 0x5000, 0x9000, 0xD000];
+/// Their vectors, arrays and strings, and values they keep.
+const LIST_DATA: u32 = 0x1_1000;
+const KEPT: u32 = LIST_DATA + 0x200;
+/// The step a program lets the test know it reached is in DONE; it
+/// goes on when GO is as much.
+const GO: u32 = 0xF4;
+
+const RED: [f32; 3] = [1.0, 0.0, 0.0];
+const GREEN: [f32; 3] = [0.0, 1.0, 0.0];
+/// The window's left and right halves and all of it: two corners.
+const LEFT: [f32; 4] = [-1.0, -1.0, 0.0, 1.0];
+const RIGHT: [f32; 4] = [0.0, -1.0, 1.0, 1.0];
+const WHOLE: [f32; 4] = [-1.0, -1.0, 1.0, 1.0];
+
+/// The data of the list tests' programs: `data` with room after it.
+fn lists_data() -> Vec<u8> {
+    let mut d = data();
+    d.resize(0x1_2000, 0);
+    d
+}
+
+/// Clear the color and depth buffers, the color to blue.
+fn clear_blue(a: &mut CodeAssembler, l: &Layout) -> Result<(), IcedError> {
+    let blue = [Arg::F(0.0), Arg::F(0.0), Arg::F(1.0), Arg::F(1.0)];
+    gl(a, l, CLEAR_COLOR, &blue)?;
+    let both = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT;
+    gl(a, l, CLEAR, &[Arg::I(both)])
+}
+
+/// The four corners of the rectangle `r`, counter-clockwise.
+fn corners([x0, y0, x1, y1]: [f32; 4]) -> [[f32; 2]; 4] {
+    [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+}
+
+/// Draw the rectangle `r` in the color `rgb`.
+fn quad(a: &mut CodeAssembler, l: &Layout, rgb: [f32; 3], r: [f32; 4]) -> Result<(), IcedError> {
+    gl(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+    gl(a, l, COLOR3F, &rgb.map(Arg::F))?;
+    for corner in corners(r) {
+        gl(a, l, VERTEX2F, &corner.map(Arg::F))?;
+    }
+    gl(a, l, END, &[])
+}
+
+/// Read the window's 64x64 pixels into the data at `to`.
+fn read_into(a: &mut CodeAssembler, l: &Layout, to: u32) -> Result<(), IcedError> {
+    let all = [
+        Arg::I(0),
+        Arg::I(0),
+        Arg::I(64),
+        Arg::I(64),
+        Arg::I(GL_RGBA),
+        Arg::I(GL_UNSIGNED_BYTE),
+        Arg::At(to),
+    ];
+    gl(a, l, READ_PIXELS, &all)
+}
+
+/// The red, green and blue of the 64x64 pixels read into `at`.
+fn shot(cpu: &Cpu, data: u32, at: u32) -> Vec<u32> {
+    (0..64 * 64)
+        .map(|i| peek(cpu, data + at + 4 * i) & 0xFF_FFFF)
+        .collect()
+}
+
+/// The pixel at (x, y) from the bottom left of a `shot`.
+fn at(shot: &[u32], x: usize, y: usize) -> [u8; 3] {
+    let p = shot[y * 64 + x];
+    [p as u8, (p >> 8) as u8, (p >> 16) as u8]
+}
+
+/// Ask for the error, and note which result it is.
+fn error(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    c: &mut Calls,
+    errors: &mut Vec<u32>,
+) -> Result<(), IcedError> {
+    c.api(a, l, GET_ERROR, &[])?;
+    errors.push(c.next - 1);
+    Ok(())
+}
+
+/// Step `step` done: DONE says so, and the program waits until the
+/// test lets it go on (`go_on`).
+fn wait(a: &mut CodeAssembler, l: &Layout, step: u32) -> Result<(), IcedError> {
+    a.mov(dword_ptr(l.at(DONE)), step)?;
+    let mut again = a.create_label();
+    a.set_label(&mut again)?;
+    a.cmp(dword_ptr(l.at(GO)), step as i32)?;
+    a.jb(again)
+}
+
+/// Let the program waiting at `step` go on.
+fn go_on(cpu: &mut Cpu, data: u32, step: u32) {
+    let lin = data + GO;
+    let pde = cpu
+        .bus
+        .read_32((cpu.cr3 & !0xFFF) as usize + 4 * (lin >> 22) as usize);
+    let pte = cpu
+        .bus
+        .read_32((pde & !0xFFF) as usize + 4 * ((lin >> 12) & 0x3FF) as usize);
+    assert!(pde & 1 != 0 && pte & 1 != 0, "no page at {lin:X}");
+    cpu.bus
+        .write_32((pte & !0xFFF) as usize + (lin & 0xFFF) as usize, step);
+}
+
+/// Run the program until it says it reached `step`.
+fn run_until_step(cpu: &mut Cpu, data: u32, step: u32) {
+    for _ in 0..400 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        run_batch(cpu, &mut NoHook, false);
+        let paged = cpu.cr0 & 0x8000_0001 == 0x8000_0001;
+        if paged && peek(cpu, data + DONE) == step {
+            return;
+        }
+    }
+    panic!("the program didn't reach step {step}: {:?}", printed(cpu));
+}
+
+#[test]
+fn a_display_list_draws_what_its_calls_drew() {
+    list_draws(Draws::Voodoo3);
+}
+
+#[test]
+fn a_display_list_on_a_toadforce_draws_what_its_calls_drew() {
+    list_draws(Draws::ToadForce);
+}
+
+/// A scene drawn by its calls, compiled into a list with GL_COMPILE,
+/// which draws nothing, drawn by glCallList, and compiled with
+/// GL_COMPILE_AND_EXECUTE, which draws it at once: the three pictures
+/// are the same pixel for pixel.
+fn list_draws(card: Draws) {
+    let mut error_at = 0;
+    let (exe, data) = program(&lists_data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let scene = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+            quad(a, l, RED, LEFT)?;
+            gl(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+            gl(a, l, COLOR3F, &GREEN.map(Arg::F))?;
+            for corner in TOP_RIGHT {
+                gl(a, l, VERTEX2F, &corner.map(Arg::F))?;
+            }
+            gl(a, l, END, &[])
+        };
+        clear_blue(a, l)?;
+        scene(a)?;
+        read_into(a, l, SHOTS[0])?;
+        clear_blue(a, l)?;
+        gl(a, l, NEW_LIST, &[Arg::I(1), Arg::I(GL_COMPILE)])?;
+        scene(a)?;
+        gl(a, l, END_LIST, &[])?;
+        read_into(a, l, SHOTS[1])?;
+        gl(a, l, CALL_LIST, &[Arg::I(1)])?;
+        read_into(a, l, SHOTS[2])?;
+        clear_blue(a, l)?;
+        gl(a, l, NEW_LIST, &[Arg::I(2), Arg::I(GL_COMPILE_AND_EXECUTE)])?;
+        scene(a)?;
+        gl(a, l, END_LIST, &[])?;
+        read_into(a, l, SHOTS[3])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        error_at = c.next - 1;
+        finish(a, l)
+    });
+    let mut cpu = machine_on("list_draws", card, exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * error_at), 0, "glGetError");
+    card_drew(&cpu, card);
+    let [direct, compiled, called, executed] = SHOTS.map(|s| shot(&cpu, data, s));
+    assert_eq!(at(&direct, 8, 8), [255, 0, 0]);
+    assert_eq!(at(&direct, 60, 60), [0, 255, 0]);
+    assert_eq!(at(&direct, 40, 8), [0, 0, 255]);
+    assert!(compiled.iter().all(|&p| p == 0xFF_0000), "GL_COMPILE drew");
+    assert!(called == direct, "glCallList");
+    assert!(executed == direct, "GL_COMPILE_AND_EXECUTE");
+}
+
+/// A list may leave a glBegin open for the calls after it, and
+/// glCallList is allowed between glBegin and glEnd: one list begins
+/// a quad and gives two of its corners, a second gives the others,
+/// and a third, called inside the program's own glBegin, a whole quad.
+#[test]
+fn display_lists_run_across_glbegin_and_glend() {
+    let mut error_at = 0;
+    let (exe, data) = program(&lists_data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let [c0, c1, c2, c3] = corners(LEFT);
+        gl(a, l, NEW_LIST, &[Arg::I(1), Arg::I(GL_COMPILE)])?;
+        gl(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+        gl(a, l, COLOR3F, &RED.map(Arg::F))?;
+        gl(a, l, VERTEX2F, &c0.map(Arg::F))?;
+        gl(a, l, VERTEX2F, &c1.map(Arg::F))?;
+        gl(a, l, END_LIST, &[])?;
+        gl(a, l, NEW_LIST, &[Arg::I(2), Arg::I(GL_COMPILE)])?;
+        gl(a, l, VERTEX2F, &c2.map(Arg::F))?;
+        gl(a, l, VERTEX2F, &c3.map(Arg::F))?;
+        gl(a, l, END_LIST, &[])?;
+        gl(a, l, NEW_LIST, &[Arg::I(3), Arg::I(GL_COMPILE)])?;
+        gl(a, l, COLOR3F, &GREEN.map(Arg::F))?;
+        for corner in corners(RIGHT) {
+            gl(a, l, VERTEX2F, &corner.map(Arg::F))?;
+        }
+        gl(a, l, END_LIST, &[])?;
+        clear_blue(a, l)?;
+        gl(a, l, CALL_LIST, &[Arg::I(1)])?;
+        gl(a, l, CALL_LIST, &[Arg::I(2)])?;
+        gl(a, l, END, &[])?;
+        gl(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+        gl(a, l, CALL_LIST, &[Arg::I(3)])?;
+        gl(a, l, END, &[])?;
+        read_into(a, l, PIXELS)?;
+        c.api(a, l, GET_ERROR, &[])?;
+        error_at = c.next - 1;
+        finish(a, l)
+    });
+    let mut cpu = machine("list_begin", true, exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * error_at), 0, "glGetError");
+    assert_eq!(pixel(&cpu, data, 16, 32), [255, 0, 0]);
+    assert_eq!(pixel(&cpu, data, 48, 32), [0, 255, 0]);
+}
+
+/// What a call's pointer points at is the list's from the moment the
+/// call is compiled: glColor3fv's color, glVertex2fv's corners, and
+/// the vertices and colors glDrawArrays and glArrayElement take from
+/// the arrays. The program writes over all of them after glEndList,
+/// and the lists draw what was there.
+#[test]
+fn a_display_list_keeps_the_data_of_when_it_was_compiled() {
+    const COLOR: u32 = LIST_DATA;
+    const CORNERS: u32 = LIST_DATA + 0x10;
+    const ARRAY: u32 = LIST_DATA + 0x40;
+    const COLORS: u32 = LIST_DATA + 0x80;
+    let mut d = lists_data();
+    put_f32s(&mut d, COLOR, &RED);
+    put_f32s(&mut d, CORNERS, corners(LEFT).as_flattened());
+    put_f32s(&mut d, ARRAY, corners(RIGHT).as_flattened());
+    put_f32s(&mut d, COLORS, &[GREEN; 4].concat());
+    let mut error_at = 0;
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        gl(a, l, ENABLE_CLIENT_STATE, &[Arg::I(GL_VERTEX_ARRAY)])?;
+        let vertices = [Arg::I(2), Arg::I(GL_FLOAT), Arg::I(0), Arg::At(ARRAY)];
+        gl(a, l, VERTEX_POINTER, &vertices)?;
+        gl(a, l, ENABLE_CLIENT_STATE, &[Arg::I(GL_COLOR_ARRAY)])?;
+        let colors = [Arg::I(3), Arg::I(GL_FLOAT), Arg::I(0), Arg::At(COLORS)];
+        gl(a, l, COLOR_POINTER, &colors)?;
+        // The left half by vectors and the right by glDrawArrays, then
+        // the right half by glArrayElement in a list of its own.
+        gl(a, l, NEW_LIST, &[Arg::I(1), Arg::I(GL_COMPILE)])?;
+        gl(a, l, COLOR3FV, &[Arg::At(COLOR)])?;
+        gl(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+        for i in 0..4 {
+            gl(a, l, VERTEX2FV, &[Arg::At(CORNERS + 8 * i)])?;
+        }
+        gl(a, l, END, &[])?;
+        gl(a, l, DRAW_ARRAYS, &[Arg::I(GL_QUADS), Arg::I(0), Arg::I(4)])?;
+        gl(a, l, END_LIST, &[])?;
+        gl(a, l, NEW_LIST, &[Arg::I(2), Arg::I(GL_COMPILE)])?;
+        gl(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+        for i in 0..4 {
+            gl(a, l, ARRAY_ELEMENT, &[Arg::I(i)])?;
+        }
+        gl(a, l, END, &[])?;
+        gl(a, l, END_LIST, &[])?;
+        // Everything the calls pointed at is zeros now, and the arrays
+        // point at nothing.
+        for at in (COLOR..COLORS + 0x30).step_by(4) {
+            a.mov(dword_ptr(l.at(at)), 0)?;
+        }
+        let nowhere = [Arg::I(2), Arg::I(GL_FLOAT), Arg::I(0), Arg::I(0)];
+        gl(a, l, VERTEX_POINTER, &nowhere)?;
+        clear_blue(a, l)?;
+        gl(a, l, CALL_LIST, &[Arg::I(1)])?;
+        read_into(a, l, SHOTS[0])?;
+        clear_blue(a, l)?;
+        gl(a, l, CALL_LIST, &[Arg::I(2)])?;
+        read_into(a, l, SHOTS[1])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        error_at = c.next - 1;
+        finish(a, l)
+    });
+    let mut cpu = machine("list_data", true, exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * error_at), 0, "glGetError");
+    let [first, second] = [SHOTS[0], SHOTS[1]].map(|s| shot(&cpu, data, s));
+    assert_eq!(at(&first, 16, 32), [255, 0, 0], "the vectors");
+    assert_eq!(at(&first, 48, 32), [0, 255, 0], "glDrawArrays");
+    assert_eq!(at(&second, 16, 32), [0, 0, 255]);
+    assert_eq!(at(&second, 48, 32), [0, 255, 0], "glArrayElement");
+}
+
+/// glTexImage2D in a list keeps the texels the unpack state picked
+/// when it was compiled: the last two of each row of four, with a row
+/// length of 4 and two pixels skipped. The program then puts the
+/// unpack state back and writes over the texels, and the list still
+/// gives the texture those four.
+#[test]
+fn a_display_list_keeps_texels_as_they_were_unpacked() {
+    const GL_UNPACK_ROW_LENGTH: u32 = 0x0CF2;
+    const GL_UNPACK_SKIP_PIXELS: u32 = 0x0CF4;
+    const GL_TEXTURE_MAG_FILTER: u32 = 0x2800;
+    let mut d = lists_data();
+    let texels = [
+        [9, 9, 9, 255],
+        [9, 9, 9, 255],
+        [255, 0, 0, 255],
+        [0, 255, 0, 255],
+        [9, 9, 9, 255],
+        [9, 9, 9, 255],
+        [0, 0, 255, 255],
+        [255, 255, 255, 255],
+    ];
+    put(&mut d, TEXELS, texels.as_flattened());
+    let mut error_at = 0;
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        gl(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(TEXTURE)])?;
+        gl(a, l, PIXEL_STOREI, &[Arg::I(GL_UNPACK_ROW_LENGTH), Arg::I(4)])?;
+        gl(a, l, PIXEL_STOREI, &[Arg::I(GL_UNPACK_SKIP_PIXELS), Arg::I(2)])?;
+        gl(a, l, NEW_LIST, &[Arg::I(1), Arg::I(GL_COMPILE)])?;
+        gl(a, l, BIND_TEXTURE, &[Arg::I(GL_TEXTURE_2D), Arg::Val(TEXTURE)])?;
+        let image = [
+            Arg::I(GL_TEXTURE_2D),
+            Arg::I(0),
+            Arg::I(GL_RGB),
+            Arg::I(2),
+            Arg::I(2),
+            Arg::I(0),
+            Arg::I(GL_RGBA),
+            Arg::I(GL_UNSIGNED_BYTE),
+            Arg::At(TEXELS),
+        ];
+        gl(a, l, TEX_IMAGE_2D, &image)?;
+        for filter in [GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER] {
+            let nearest = [Arg::I(GL_TEXTURE_2D), Arg::I(filter), Arg::I(GL_NEAREST)];
+            gl(a, l, TEX_PARAMETERI, &nearest)?;
+        }
+        gl(a, l, END_LIST, &[])?;
+        gl(a, l, PIXEL_STOREI, &[Arg::I(GL_UNPACK_ROW_LENGTH), Arg::I(0)])?;
+        gl(a, l, PIXEL_STOREI, &[Arg::I(GL_UNPACK_SKIP_PIXELS), Arg::I(0)])?;
+        for i in 0..8 {
+            a.mov(dword_ptr(l.at(TEXELS + 4 * i)), 0)?;
+        }
+        gl(a, l, CALL_LIST, &[Arg::I(1)])?;
+        gl(a, l, ENABLE, &[Arg::I(GL_TEXTURE_2D)])?;
+        let replace = [
+            Arg::I(GL_TEXTURE_ENV),
+            Arg::I(GL_TEXTURE_ENV_MODE),
+            Arg::I(GL_REPLACE),
+        ];
+        gl(a, l, TEX_ENVI, &replace)?;
+        gl(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+        for [x, y] in corners(WHOLE) {
+            let st = [x, y].map(|v| Arg::F((v + 1.0) / 2.0));
+            gl(a, l, TEX_COORD2F, &st)?;
+            gl(a, l, VERTEX2F, &[Arg::F(x), Arg::F(y)])?;
+        }
+        gl(a, l, END, &[])?;
+        read_into(a, l, PIXELS)?;
+        c.api(a, l, GET_ERROR, &[])?;
+        error_at = c.next - 1;
+        finish(a, l)
+    });
+    let mut cpu = machine("list_texels", true, exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * error_at), 0, "glGetError");
+    // The first row given is the bottom one.
+    assert_eq!(pixel(&cpu, data, 16, 16), [255, 0, 0]);
+    assert_eq!(pixel(&cpu, data, 48, 16), [0, 255, 0]);
+    assert_eq!(pixel(&cpu, data, 16, 48), [0, 0, 255]);
+    assert_eq!(pixel(&cpu, data, 48, 48), [255, 255, 255]);
+}
+
+/// Lists call lists 64 deep (GL_MAX_LIST_NESTING), and a call past
+/// that does nothing: of seventy lists that each move the modelview
+/// matrix one to the right and call the next, the first 64 run.
+#[test]
+fn display_lists_nest_sixty_four_deep() {
+    let (exe, data) = program(&lists_data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        for i in 1..=70 {
+            gl(a, l, NEW_LIST, &[Arg::I(i), Arg::I(GL_COMPILE)])?;
+            gl(a, l, TRANSLATEF, &[Arg::F(1.0), Arg::F(0.0), Arg::F(0.0)])?;
+            gl(a, l, CALL_LIST, &[Arg::I(i + 1)])?;
+            gl(a, l, END_LIST, &[])?;
+        }
+        gl(a, l, CALL_LIST, &[Arg::I(1)])?;
+        gl(a, l, GET_FLOATV, &[Arg::I(GL_MODELVIEW_MATRIX), Arg::At(OUT)])?;
+        // A list that calls itself stops at the same depth.
+        gl(a, l, LOAD_IDENTITY, &[])?;
+        gl(a, l, NEW_LIST, &[Arg::I(100), Arg::I(GL_COMPILE)])?;
+        gl(a, l, TRANSLATEF, &[Arg::F(1.0), Arg::F(0.0), Arg::F(0.0)])?;
+        gl(a, l, CALL_LIST, &[Arg::I(100)])?;
+        gl(a, l, END_LIST, &[])?;
+        gl(a, l, CALL_LIST, &[Arg::I(100)])?;
+        let again = [Arg::I(GL_MODELVIEW_MATRIX), Arg::At(OUT + 0x40)];
+        gl(a, l, GET_FLOATV, &again)?;
+        gl(a, l, GET_INTEGERV, &[Arg::I(GL_MAX_LIST_NESTING), Arg::At(KEPT)])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        finish(a, l)
+    });
+    let mut cpu = machine("list_nesting", true, exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(floats(&cpu, data, OUT + 48)[0], 64.0);
+    assert_eq!(floats(&cpu, data, OUT + 0x40 + 48)[0], 64.0);
+    assert_eq!(peek(&cpu, data + KEPT), 64, "GL_MAX_LIST_NESTING");
+}
+
+/// Text as programs draw it: a list for each character, which draws
+/// it and moves on by its width, and a string given to glCallLists as
+/// bytes with glListBase at the first character's list. Then every
+/// type glCallLists takes names the same list.
+#[test]
+fn glcalllists_draws_a_string_from_the_list_base() {
+    const STRING: u32 = LIST_DATA;
+    const NAMES: u32 = LIST_DATA + 0x10;
+    let mut d = lists_data();
+    put(&mut d, STRING, b"AB");
+    // 64 in each type from GL_BYTE to GL_4_BYTES, eight bytes each.
+    let names: [&[u8]; 10] = [
+        &[64],
+        &[64],
+        &[64, 0],
+        &[64, 0],
+        &[64, 0, 0, 0],
+        &[64, 0, 0, 0],
+        &64.0f32.to_le_bytes(),
+        &[0, 64],
+        &[0, 0, 64],
+        &[0, 0, 0, 64],
+    ];
+    for (i, name) in names.iter().enumerate() {
+        put(&mut d, NAMES + 8 * i as u32, name);
+    }
+    // -1 as a GL_BYTE, and three names in a row.
+    put(&mut d, NAMES + 0x60, &[0xFF]);
+    put(&mut d, NAMES + 0x68, &[64, 64, 64]);
+    let mut error_at = 0;
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let advance = [Arg::F(0.5), Arg::F(0.0), Arg::F(0.0)];
+        for (letter, color) in [(b'A', RED), (b'B', GREEN)] {
+            let list = [Arg::I(100 + letter as u32), Arg::I(GL_COMPILE)];
+            gl(a, l, NEW_LIST, &list)?;
+            quad(a, l, color, [-1.0, -1.0, -0.5, 1.0])?;
+            gl(a, l, TRANSLATEF, &advance)?;
+            gl(a, l, END_LIST, &[])?;
+        }
+        clear_blue(a, l)?;
+        gl(a, l, LIST_BASE, &[Arg::I(100)])?;
+        let string = [Arg::I(2), Arg::I(GL_UNSIGNED_BYTE), Arg::At(STRING)];
+        gl(a, l, CALL_LISTS, &string)?;
+        read_into(a, l, PIXELS)?;
+        // List 300 moves one to the right: 236 and each type's 64.
+        gl(a, l, LOAD_IDENTITY, &[])?;
+        gl(a, l, NEW_LIST, &[Arg::I(300), Arg::I(GL_COMPILE)])?;
+        gl(a, l, TRANSLATEF, &[Arg::F(1.0), Arg::F(0.0), Arg::F(0.0)])?;
+        gl(a, l, END_LIST, &[])?;
+        gl(a, l, LIST_BASE, &[Arg::I(236)])?;
+        for i in 0..10 {
+            let one = [Arg::I(1), Arg::I(GL_BYTE + i), Arg::At(NAMES + 8 * i)];
+            gl(a, l, CALL_LISTS, &one)?;
+        }
+        let three = [Arg::I(3), Arg::I(GL_UNSIGNED_BYTE), Arg::At(NAMES + 0x68)];
+        gl(a, l, CALL_LISTS, &three)?;
+        // A name below the base.
+        gl(a, l, LIST_BASE, &[Arg::I(301)])?;
+        let below = [Arg::I(1), Arg::I(GL_BYTE), Arg::At(NAMES + 0x60)];
+        gl(a, l, CALL_LISTS, &below)?;
+        gl(a, l, GET_FLOATV, &[Arg::I(GL_MODELVIEW_MATRIX), Arg::At(OUT)])?;
+        gl(a, l, GET_INTEGERV, &[Arg::I(GL_LIST_BASE), Arg::At(KEPT)])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        error_at = c.next - 1;
+        finish(a, l)
+    });
+    let mut cpu = machine("list_string", true, exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * error_at), 0, "glGetError");
+    assert_eq!(pixel(&cpu, data, 8, 32), [255, 0, 0], "A");
+    assert_eq!(pixel(&cpu, data, 24, 32), [0, 255, 0], "B");
+    assert_eq!(pixel(&cpu, data, 40, 32), [0, 0, 255]);
+    assert_eq!(floats(&cpu, data, OUT + 48)[0], 14.0, "the types' names");
+    assert_eq!(peek(&cpu, data + KEPT), 301, "GL_LIST_BASE");
+}
+
+/// The errors of the list functions, as OpenGL 1.1 gives them, and
+/// the lists' state as glGetIntegerv has it.
+#[test]
+fn the_list_functions_give_opengls_errors() {
+    const NAME: u32 = LIST_DATA;
+    let mut errors = Vec::new();
+    let mut results = 0;
+    let (exe, data) = program(&lists_data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let e = &mut errors;
+        let compile = |n: u32| [Arg::I(n), Arg::I(GL_COMPILE)];
+        let get = |p: u32, i: u32| [Arg::I(p), Arg::At(KEPT + 4 * i)];
+        // 0: glEndList without a list.
+        gl(a, l, END_LIST, &[])?;
+        error(a, l, &mut c, e)?;
+        // 1, 2: the name 0, and a mode there isn't.
+        gl(a, l, NEW_LIST, &compile(0))?;
+        error(a, l, &mut c, e)?;
+        gl(a, l, NEW_LIST, &[Arg::I(1), Arg::I(0x1234)])?;
+        error(a, l, &mut c, e)?;
+        // 3: glNewList inside a list, whose name and mode glGet has.
+        gl(a, l, NEW_LIST, &compile(1))?;
+        gl(a, l, NEW_LIST, &compile(2))?;
+        error(a, l, &mut c, e)?;
+        gl(a, l, GET_INTEGERV, &get(GL_LIST_INDEX, 0))?;
+        gl(a, l, GET_INTEGERV, &get(GL_LIST_MODE, 1))?;
+        // 4: a call with an error is compiled without it.
+        gl(a, l, BEGIN, &[Arg::I(0x99)])?;
+        error(a, l, &mut c, e)?;
+        gl(a, l, END_LIST, &[])?;
+        // 5: a negative range.
+        results = c.next;
+        c.api(a, l, GEN_LISTS, &[Arg::I(-1i32 as u32)])?;
+        error(a, l, &mut c, e)?;
+        // 6: a name without a list does nothing.
+        gl(a, l, CALL_LIST, &[Arg::I(999)])?;
+        error(a, l, &mut c, e)?;
+        // 7, 8: a negative count, and a type there isn't.
+        let names = |n: i32, kind: u32| [Arg::I(n as u32), Arg::I(kind), Arg::At(NAME)];
+        gl(a, l, CALL_LISTS, &names(-1, GL_UNSIGNED_BYTE))?;
+        error(a, l, &mut c, e)?;
+        gl(a, l, CALL_LISTS, &names(1, 0x1234))?;
+        error(a, l, &mut c, e)?;
+        // 9: a negative range.
+        gl(a, l, DELETE_LISTS, &[Arg::I(1), Arg::I(-1i32 as u32)])?;
+        error(a, l, &mut c, e)?;
+        // 10: the compiled call's error comes when the list runs.
+        gl(a, l, CALL_LIST, &[Arg::I(1)])?;
+        error(a, l, &mut c, e)?;
+        // 11, 12: glNewList and glGenLists between glBegin and glEnd.
+        gl(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+        gl(a, l, NEW_LIST, &compile(5))?;
+        gl(a, l, END, &[])?;
+        error(a, l, &mut c, e)?;
+        gl(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+        c.api(a, l, GEN_LISTS, &[Arg::I(1)])?;
+        gl(a, l, END, &[])?;
+        error(a, l, &mut c, e)?;
+        // Which names have lists, and the state.
+        for name in [1, 5, 2] {
+            c.api(a, l, IS_LIST, &[Arg::I(name)])?;
+        }
+        gl(a, l, GET_INTEGERV, &get(GL_MAX_LIST_NESTING, 2))?;
+        gl(a, l, GET_INTEGERV, &get(GL_LIST_INDEX, 3))?;
+        gl(a, l, GET_INTEGERV, &get(GL_LIST_MODE, 4))?;
+        // The list base is the list group's, which glPopAttrib puts
+        // back.
+        gl(a, l, LIST_BASE, &[Arg::I(5)])?;
+        gl(a, l, PUSH_ATTRIB, &[Arg::I(GL_LIST_BIT)])?;
+        gl(a, l, LIST_BASE, &[Arg::I(9)])?;
+        gl(a, l, POP_ATTRIB, &[])?;
+        gl(a, l, GET_INTEGERV, &get(GL_LIST_BASE, 5))?;
+        // 13, 14: with GL_COMPILE_AND_EXECUTE the list's glBegin has
+        // run, so glEndList before its glEnd is refused and leaves the
+        // list open; the one after the glEnd ends it.
+        gl(a, l, NEW_LIST, &[Arg::I(6), Arg::I(GL_COMPILE_AND_EXECUTE)])?;
+        gl(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+        gl(a, l, END_LIST, &[])?;
+        gl(a, l, END, &[])?;
+        error(a, l, &mut c, e)?;
+        gl(a, l, END_LIST, &[])?;
+        error(a, l, &mut c, e)?;
+        // 15: none left.
+        error(a, l, &mut c, e)?;
+        finish(a, l)
+    });
+    let mut cpu = machine("list_errors", true, exe);
+    run_until_done(&mut cpu, data);
+    let r = |i: u32| peek(&cpu, data + RESULTS + 4 * i);
+    let got: Vec<u32> = errors.iter().map(|&i| r(i)).collect();
+    let want = [
+        GL_INVALID_OPERATION,
+        GL_INVALID_VALUE,
+        GL_INVALID_ENUM,
+        GL_INVALID_OPERATION,
+        0,
+        GL_INVALID_VALUE,
+        0,
+        GL_INVALID_VALUE,
+        GL_INVALID_ENUM,
+        GL_INVALID_VALUE,
+        GL_INVALID_ENUM,
+        GL_INVALID_OPERATION,
+        GL_INVALID_OPERATION,
+        GL_INVALID_OPERATION,
+        0,
+        0,
+    ];
+    assert_eq!(got, want);
+    assert_eq!(r(results), 0, "glGenLists(-1)");
+    let kept: Vec<u32> = (0..6).map(|i| peek(&cpu, data + KEPT + 4 * i)).collect();
+    assert_eq!(kept, [1, GL_COMPILE, 64, 0, 0, 5]);
+    // glGenLists between glBegin and glEnd gives no name; list 1 is
+    // there, and neither of the two that glNewList refused.
+    let end = errors[12];
+    assert_eq!(r(end - 1), 0, "glGenLists in glBegin");
+    assert_eq!([r(end + 1), r(end + 2), r(end + 3)], [1, 0, 0], "glIsList");
+}
+
+/// glGenLists gives names no list has, each an empty list's from then
+/// on; glNewList on a name that has a list puts the new one in its
+/// place; and glDeleteLists takes the lists away, after which their
+/// names draw nothing and may be given out again.
+#[test]
+fn list_names_are_given_out_once_and_lists_are_replaced_and_deleted() {
+    const NAME: u32 = KEPT;
+    let mut first = 0;
+    let (exe, data) = program(&lists_data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        first = c.next;
+        // 0, 1: two ranges; the second list of the first is NAME.
+        c.api(a, l, GEN_LISTS, &[Arg::I(3)])?;
+        a.inc(eax)?;
+        a.mov(dword_ptr(l.at(NAME)), eax)?;
+        c.api(a, l, GEN_LISTS, &[Arg::I(2)])?;
+        a.mov(dword_ptr(l.at(NAME + 4)), eax)?;
+        // 2: a name of glGenLists' has a list, with nothing in it.
+        c.api(a, l, IS_LIST, &[Arg::Val(NAME)])?;
+        for color in [RED, GREEN] {
+            gl(a, l, NEW_LIST, &[Arg::Val(NAME), Arg::I(GL_COMPILE)])?;
+            quad(a, l, color, WHOLE)?;
+            gl(a, l, END_LIST, &[])?;
+        }
+        clear_blue(a, l)?;
+        gl(a, l, CALL_LIST, &[Arg::Val(NAME)])?;
+        read_into(a, l, SHOTS[0])?;
+        // The first range goes: its start is one below NAME.
+        a.mov(eax, dword_ptr(l.at(NAME)))?;
+        a.dec(eax)?;
+        a.push(3)?;
+        a.push(eax)?;
+        a.call(dword_ptr(l.iat[DELETE_LISTS] as u64))?;
+        // 3, 4: its list is gone, the second range's are there.
+        c.api(a, l, IS_LIST, &[Arg::Val(NAME)])?;
+        c.api(a, l, IS_LIST, &[Arg::Val(NAME + 4)])?;
+        clear_blue(a, l)?;
+        gl(a, l, CALL_LIST, &[Arg::Val(NAME)])?;
+        read_into(a, l, SHOTS[1])?;
+        // 5, 6: one more name, and no error.
+        c.api(a, l, GEN_LISTS, &[Arg::I(1)])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        finish(a, l)
+    });
+    let mut cpu = machine("list_names", true, exe);
+    run_until_done(&mut cpu, data);
+    let r = |i: u32| peek(&cpu, data + RESULTS + 4 * (first + i));
+    let (a, b, c) = (r(0), r(1), r(5));
+    assert_ne!(a, 0);
+    assert!(b >= a + 3 || b + 2 <= a, "{a} and {b} overlap");
+    assert!(c != 0 && !(b..b + 2).contains(&c), "{c} is one of {b}'s");
+    assert_eq!([r(2), r(3), r(4), r(6)], [1, 0, 1, 0]);
+    let [replaced, deleted] = [SHOTS[0], SHOTS[1]].map(|s| shot(&cpu, data, s));
+    assert!(replaced.iter().all(|&p| p == 0x00_FF00), "the second list");
+    assert!(deleted.iter().all(|&p| p == 0xFF_0000), "a deleted list drew");
+}
+
+/// What a list's calls change stays changed after glCallList: the
+/// modelview matrix, the current color, the texture bound, and the
+/// projection matrix, which GLU32's gluOrtho2D multiplies by its
+/// glOrtho. Compiling the list changes none of them.
+#[test]
+fn a_display_lists_state_changes_stay_after_the_call() {
+    const GL_CURRENT_COLOR: u32 = 0x0B00;
+    const GL_TEXTURE_BINDING_2D: u32 = 0x8069;
+    let mut error_at = 0;
+    let (exe, data) = program(&lists_data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        gl(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(TEXTURE)])?;
+        gl(a, l, NEW_LIST, &[Arg::I(1), Arg::I(GL_COMPILE)])?;
+        gl(a, l, TRANSLATEF, &[Arg::F(3.0), Arg::F(0.0), Arg::F(0.0)])?;
+        gl(a, l, COLOR3F, &GREEN.map(Arg::F))?;
+        gl(a, l, BIND_TEXTURE, &[Arg::I(GL_TEXTURE_2D), Arg::Val(TEXTURE)])?;
+        gl(a, l, MATRIX_MODE, &[Arg::I(GL_PROJECTION)])?;
+        let ortho: Vec<Arg> = [0.0, 4.0, 0.0, 4.0].into_iter().flat_map(double).collect();
+        gl(a, l, ORTHO_2D, &ortho)?;
+        gl(a, l, MATRIX_MODE, &[Arg::I(GL_MODELVIEW)])?;
+        gl(a, l, END_LIST, &[])?;
+        for (i, after) in [false, true].into_iter().enumerate() {
+            if after {
+                gl(a, l, CALL_LIST, &[Arg::I(1)])?;
+            }
+            let out = OUT + 0x100 * i as u32;
+            let get = |p: u32, at: u32| [Arg::I(p), Arg::At(out + at)];
+            gl(a, l, GET_FLOATV, &get(GL_MODELVIEW_MATRIX, 0))?;
+            gl(a, l, GET_FLOATV, &get(GL_PROJECTION_MATRIX, 0x40))?;
+            gl(a, l, GET_FLOATV, &get(GL_CURRENT_COLOR, 0x80))?;
+            gl(a, l, GET_INTEGERV, &get(GL_TEXTURE_BINDING_2D, 0x90))?;
+        }
+        c.api(a, l, GET_ERROR, &[])?;
+        error_at = c.next - 1;
+        finish(a, l)
+    });
+    let mut cpu = machine("list_state", true, exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * error_at), 0, "glGetError");
+    let texture = peek(&cpu, data + TEXTURE);
+    assert_ne!(texture, 0);
+    // Compiled: the matrices are the identity's, the color white.
+    assert_eq!(floats(&cpu, data, OUT + 48)[0], 0.0);
+    assert_eq!(floats(&cpu, data, OUT + 0x40)[0], 1.0);
+    assert_eq!(floats(&cpu, data, OUT + 0x80), [1.0; 4]);
+    assert_eq!(peek(&cpu, data + OUT + 0x90), 0);
+    // Called.
+    let out = OUT + 0x100;
+    assert_eq!(floats(&cpu, data, out + 48)[0], 3.0);
+    assert_eq!(floats(&cpu, data, out + 0x40)[0], 0.5);
+    assert_eq!(floats(&cpu, data, out + 0x80), [0.0, 1.0, 0.0, 1.0]);
+    assert_eq!(peek(&cpu, data + out + 0x90), texture);
+}
+
+/// wglShareLists gives a second context the first one's lists, those
+/// there and those made later by either, and they stay when the first
+/// context is deleted. A context that has lists of its own can't take
+/// another's.
+#[test]
+fn wglsharelists_shares_the_lists_of_two_contexts() {
+    const SECOND: u32 = KEPT;
+    const THIRD: u32 = KEPT + 4;
+    let mut first = 0;
+    let (exe, data) = program(&lists_data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        first = c.next;
+        let compile = |n: u32| [Arg::I(n), Arg::I(GL_COMPILE)];
+        let moves = [Arg::F(3.0), Arg::F(0.0), Arg::F(0.0)];
+        // 0, 1: a second context, sharing the first's lists.
+        c.api(a, l, WGL_CREATE_CONTEXT, &[Arg::Val(HDC)])?;
+        a.mov(dword_ptr(l.at(SECOND)), eax)?;
+        c.api(a, l, WGL_SHARE_LISTS, &[Arg::Val(HGLRC), Arg::Val(SECOND)])?;
+        gl(a, l, NEW_LIST, &compile(1))?;
+        gl(a, l, TRANSLATEF, &moves)?;
+        gl(a, l, END_LIST, &[])?;
+        // 2, 3: the second context has the list, and runs it.
+        c.api(a, l, WGL_MAKE_CURRENT, &[Arg::Val(HDC), Arg::Val(SECOND)])?;
+        c.api(a, l, IS_LIST, &[Arg::I(1)])?;
+        gl(a, l, CALL_LIST, &[Arg::I(1)])?;
+        gl(a, l, GET_FLOATV, &[Arg::I(GL_MODELVIEW_MATRIX), Arg::At(OUT)])?;
+        gl(a, l, NEW_LIST, &compile(2))?;
+        gl(a, l, END_LIST, &[])?;
+        // 4, 5: the first has the second's list.
+        c.api(a, l, WGL_MAKE_CURRENT, &[Arg::Val(HDC), Arg::Val(HGLRC)])?;
+        c.api(a, l, IS_LIST, &[Arg::I(2)])?;
+        // 6 to 8: the first context goes, its lists stay.
+        c.api(a, l, WGL_MAKE_CURRENT, &[Arg::Val(HDC), Arg::Val(SECOND)])?;
+        c.api(a, l, WGL_DELETE_CONTEXT, &[Arg::Val(HGLRC)])?;
+        c.api(a, l, IS_LIST, &[Arg::I(1)])?;
+        // 9 to 12: a third context has lists of its own, none of the
+        // others', and can't take them.
+        c.api(a, l, WGL_CREATE_CONTEXT, &[Arg::Val(HDC)])?;
+        a.mov(dword_ptr(l.at(THIRD)), eax)?;
+        c.api(a, l, WGL_MAKE_CURRENT, &[Arg::Val(HDC), Arg::Val(THIRD)])?;
+        gl(a, l, NEW_LIST, &compile(7))?;
+        gl(a, l, END_LIST, &[])?;
+        c.api(a, l, IS_LIST, &[Arg::I(1)])?;
+        c.api(a, l, WGL_SHARE_LISTS, &[Arg::Val(SECOND), Arg::Val(THIRD)])?;
+        // 13: its own list is still its own.
+        c.api(a, l, IS_LIST, &[Arg::I(7)])?;
+        finish(a, l)
+    });
+    let mut cpu = machine("list_share", true, exe);
+    run_until_done(&mut cpu, data);
+    let r: Vec<u32> = (0..14)
+        .map(|i| peek(&cpu, data + RESULTS + 4 * (first + i)))
+        .collect();
+    assert_ne!(r[0], 0, "a second context");
+    assert_eq!(r[1..9], [1, 1, 1, 1, 1, 1, 1, 1]);
+    assert_eq!(floats(&cpu, data, OUT + 48)[0], 3.0);
+    assert_ne!(r[9], 0, "a third context");
+    assert_eq!(r[10..], [1, 0, 0, 1]);
+}
+
+/// A saved state has the lists, the finished ones and the one being
+/// compiled: the program goes on from it to the same picture.
+#[test]
+fn a_saved_state_has_the_display_lists() {
+    const COLOR: u32 = LIST_DATA;
+    let mut d = lists_data();
+    put_f32s(&mut d, COLOR, &RED);
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        gl(a, l, NEW_LIST, &[Arg::I(1), Arg::I(GL_COMPILE)])?;
+        gl(a, l, COLOR3FV, &[Arg::At(COLOR)])?;
+        gl(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+        for corner in corners(LEFT) {
+            gl(a, l, VERTEX2F, &corner.map(Arg::F))?;
+        }
+        gl(a, l, END, &[])?;
+        gl(a, l, END_LIST, &[])?;
+        // The second list is half compiled when the state is saved.
+        gl(a, l, NEW_LIST, &[Arg::I(2), Arg::I(GL_COMPILE)])?;
+        gl(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+        gl(a, l, COLOR3F, &GREEN.map(Arg::F))?;
+        wait(a, l, 1)?;
+        for corner in corners(RIGHT) {
+            gl(a, l, VERTEX2F, &corner.map(Arg::F))?;
+        }
+        gl(a, l, END, &[])?;
+        gl(a, l, END_LIST, &[])?;
+        clear_blue(a, l)?;
+        gl(a, l, CALL_LIST, &[Arg::I(1)])?;
+        gl(a, l, CALL_LIST, &[Arg::I(2)])?;
+        read_into(a, l, PIXELS)?;
+        c.api(a, l, GET_ERROR, &[])?;
+        a.mov(dword_ptr(l.at(DONE)), 2)?;
+        finish_at(a)
+    });
+    let mut cpu = machine("list_state_saved", true, exe);
+    run_until_step(&mut cpu, data, 1);
+    let state = rust_dos::savestate::machine::save(&cpu);
+    go_on(&mut cpu, data, 1);
+    run_until_step(&mut cpu, data, 2);
+    let before = shot(&cpu, data, PIXELS);
+    assert_eq!(at(&before, 16, 32), [255, 0, 0]);
+    assert_eq!(at(&before, 48, 32), [0, 255, 0]);
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    assert!(shot(&cpu, data, PIXELS).iter().all(|&p| p == 0));
+    go_on(&mut cpu, data, 1);
+    run_until_step(&mut cpu, data, 2);
+    assert!(shot(&cpu, data, PIXELS) == before, "after the load");
+}
+
+/// Spin, the program's memory there to look at.
+fn finish_at(a: &mut CodeAssembler) -> Result<(), IcedError> {
+    let mut again = a.create_label();
+    a.set_label(&mut again)?;
+    a.jmp(again)
+}
+
+/// A function OpenGL here doesn't have is compiled as the call it is
+/// and called each time the list runs, under its own name: it starts
+/// to work in lists when it gets its handler.
+#[test]
+fn a_display_list_replays_a_function_that_is_not_there_yet() {
+    let (exe, data) = program(&lists_data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        gl(a, l, NEW_LIST, &[Arg::I(1), Arg::I(GL_COMPILE)])?;
+        gl(a, l, RASTER_POS2I, &[Arg::I(1), Arg::I(2)])?;
+        gl(a, l, END_LIST, &[])?;
+        gl(a, l, CALL_LIST, &[Arg::I(1)])?;
+        gl(a, l, CALL_LIST, &[Arg::I(1)])?;
+        finish(a, l)
+    });
+    let mut cpu = machine("list_missing", true, exe);
+    let path = PathBuf::from("target/test_win32_opengl/list_missing/t.trace");
+    rust_dos::win32::trace3d::start(&mut cpu, &path).unwrap();
+    run_until_done(&mut cpu, data);
+    rust_dos::win32::trace3d::flush(&mut cpu);
+    let (events, counts) = super::win32_d3d_tests::read_trace(&path);
+    let event = |start: &str| super::win32_d3d_tests::event(&events, &counts, start);
+    // Not when it was compiled, and twice by the two calls of the list.
+    assert_eq!(event("OPENGL32 not implemented: glRasterPos2i").1, 2);
+    assert_eq!(event("OPENGL32.glCallList").1, 2);
 }

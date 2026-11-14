@@ -67,6 +67,9 @@ impl DebugHub {
                     fields["folders"] = folders.clone();
                 }
                 self.record(cpu, Kind::StateLoaded, fields);
+                // The loaded machine's processes, before a stop lists
+                // what is kept.
+                self.drop_ended_spots(cpu);
                 if let Some((cleared, cancelled)) = reset {
                     value["debugger_reset"] = cleared.clone();
                     let ids = cancelled.clone();
