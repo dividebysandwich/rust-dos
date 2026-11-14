@@ -532,3 +532,79 @@ fn the_status_counts_what_was_asked_of_the_card() {
     // A look at the card changes nothing of it.
     assert_eq!(rig.card.counts(), counts);
 }
+
+#[test]
+fn a_length_with_no_next_command_comes_before_the_opcode() {
+    let mut rig = Rig::new();
+    let s = surface(0x2000);
+    // An opcode no level has, with a length of 0 and with one past what
+    // was submitted: there is no next command to go on with, whatever
+    // the opcode is, and the rest is dropped.
+    for length in [0, 3 + 11 + 1] {
+        let base = rig.read(regs::RING_GET);
+        let mut words = vec![command::header(0x7FFF, length), 0, 0];
+        encode::fill(&mut words, &s, &WHOLE, 0x55);
+        rig.run(&words);
+        assert_eq!(rig.error(), (Error::BadLength as u32, base), "{length}");
+        assert_eq!(rig.read(regs::RING_GET), base + 4 * words.len() as u32);
+        assert_eq!(pixel(&rig.memory, &s, 0, 0), 0);
+        rig.write(regs::ERROR, 0);
+    }
+    // With a length that leads to a next command the opcode is the
+    // fault, and the next command runs.
+    let base = rig.read(regs::RING_GET);
+    let mut words = vec![command::header(0x7FFF, 3), 0, 0];
+    encode::fill(&mut words, &s, &WHOLE, 0x55);
+    rig.run(&words);
+    assert_eq!(rig.error(), (Error::BadOpcode as u32, base));
+    assert_eq!(pixel(&rig.memory, &s, 0, 0), 0x55);
+    // So does a length its opcode doesn't allow.
+    rig.write(regs::ERROR, 0);
+    let base = rig.read(regs::RING_GET);
+    rig.run(&[command::header(command::FLIP, 2), 0]);
+    assert_eq!(rig.error(), (Error::BadLength as u32, base));
+    assert_eq!(rig.read(regs::RING_GET), base + 8);
+
+    // Past the end of the ring: the last word holds a header of two
+    // words with an opcode no level has, and a fill follows at 0.
+    let mut rig = Rig::new();
+    let last = regs::RING_SIZE - 4;
+    let mut filler = Vec::new();
+    while filler.len() < (last / 4) as usize {
+        let left = (last / 4) as usize - filler.len();
+        encode::nop(&mut filler, left.min(0xFFFF));
+    }
+    rig.run(&filler);
+    assert_eq!(rig.read(regs::RING_GET), last);
+    let mut words = vec![command::header(0x7FFF, 2)];
+    encode::fill(&mut words, &s, &WHOLE, 0x55);
+    let put = rig.ring(last, &words);
+    assert_eq!(put, 4 * 11);
+    rig.write(regs::RING_PUT, put);
+    assert_eq!(rig.error(), (Error::BadLength as u32, last));
+    assert_eq!(rig.read(regs::RING_GET), put);
+    assert_eq!(pixel(&rig.memory, &s, 0, 0), 0);
+}
+
+#[test]
+fn reset_starts_frame_again() {
+    let mut rig = Rig::new();
+    rig.mode();
+    let frame = rig.card.display.shown().unwrap().timing().frame_ns();
+    rig.ns = rig.first_blank() + 2 * frame + 5;
+    assert_eq!(rig.read(regs::FRAME), 3);
+    rig.write(regs::RESET, 1);
+    assert_eq!(rig.read(regs::FRAME), 0);
+    assert_eq!(rig.read(regs::IRQ_STATUS), 0);
+    // The count goes on from the reset with the VGA's retraces, and
+    // the moment of the reset is none.
+    let vga = CrtTiming::VGA_400;
+    let from = rig.ns;
+    rig.ns += 10 * vga.frame_ns();
+    assert_eq!(
+        rig.read(regs::FRAME) as u64,
+        vga.retraces(rig.ns) - vga.retraces(from)
+    );
+    assert_eq!(rig.read(regs::FRAME), 10);
+    assert_eq!(rig.read(regs::IRQ_STATUS), regs::IRQ_VBLANK);
+}

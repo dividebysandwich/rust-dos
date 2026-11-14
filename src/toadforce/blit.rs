@@ -306,4 +306,46 @@ mod tests {
         let row: Vec<u32> = (0..4).map(|x| pixel(&memory, &dst, x, 0)).collect();
         assert_eq!(row, [0x5555_5555, 0x0000_FF00, 0x0000_FF01, 0x7F00_FF00]);
     }
+
+    #[test]
+    fn a_colour_key_of_a_small_pixel_is_the_keys_low_bits() {
+        let all = rect(0, 0, 4, 1);
+        // `P8`: the key's low byte, whatever is above it.
+        let src = surface(0, 4, 1, Format::P8);
+        let dst = surface(64, 4, 1, Format::P8);
+        let mut memory = vec![0u8; 128];
+        for (x, value) in [7u32, 8, 7, 0x107].into_iter().enumerate() {
+            set(&mut memory, &src, x as u32, 0, value);
+        }
+        fill(&mut memory, &dst, &all, 0x55);
+        blt(&mut memory, &dst, &all, &src, &all, Some(0xFFFF_FF07));
+        let row: Vec<u32> = (0..4).map(|x| pixel(&memory, &dst, x, 0)).collect();
+        assert_eq!(row, [0x55, 8, 0x55, 0x55]);
+        // No key: every pixel is copied, the key's among them.
+        blt(&mut memory, &dst, &all, &src, &all, None);
+        let row: Vec<u32> = (0..4).map(|x| pixel(&memory, &dst, x, 0)).collect();
+        assert_eq!(row, [7, 8, 7, 7]);
+
+        // `R5G6B5`: the low 16 bits, all of which the format defines.
+        let src = surface(0, 4, 1, Format::R5G6B5);
+        let dst = surface(64, 4, 1, Format::R5G6B5);
+        let mut memory = vec![0u8; 128];
+        for (x, value) in [0xF81Fu32, 0xF81E, 0x781F, 0xF81F].into_iter().enumerate() {
+            set(&mut memory, &src, x as u32, 0, value);
+        }
+        fill(&mut memory, &dst, &all, 0x5555);
+        blt(&mut memory, &dst, &all, &src, &all, Some(0xABCD_F81F));
+        let row: Vec<u32> = (0..4).map(|x| pixel(&memory, &dst, x, 0)).collect();
+        assert_eq!(row, [0x5555, 0xF81E, 0x781F, 0x5555]);
+        // A stretch keys the pixels it takes.
+        let wide = rect(0, 0, 8, 1);
+        let dst = surface(64, 8, 1, Format::R5G6B5);
+        fill(&mut memory, &dst, &wide, 0x5555);
+        blt(&mut memory, &dst, &wide, &src, &all, Some(0xF81F));
+        let row: Vec<u32> = (0..8).map(|x| pixel(&memory, &dst, x, 0)).collect();
+        assert_eq!(
+            row,
+            [0x5555, 0x5555, 0xF81E, 0xF81E, 0x781F, 0x781F, 0x5555, 0x5555]
+        );
+    }
 }

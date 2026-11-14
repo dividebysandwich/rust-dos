@@ -669,6 +669,28 @@ mod tests {
     }
 
     #[test]
+    fn a_write_of_mode_enable_cancels_a_waiting_flip() {
+        for value in [1, 0] {
+            let mut d = Display::default();
+            mode(&mut d, 640, 480, 2, 60).unwrap();
+            let blank = d.next_blank().unwrap();
+            assert_eq!(d.flip(0x10_0000, true, MEMORY), Ok(false));
+            assert!(d.flip_pending());
+            assert_eq!(
+                d.write(regs::MODE_ENABLE, value, MEMORY, at(0)),
+                Ok(Change::Mode)
+            );
+            assert!(!d.flip_pending());
+            assert_eq!(d.status(at(0)) & regs::STATUS_FLIP_PENDING, 0);
+            // The blanks after it flip nothing.
+            let synced = d.sync(at(blank + 1_000_000_000));
+            assert!(synced.blank && !synced.flipped, "{value}");
+            assert_eq!(d.start(), 0);
+            assert_eq!(d.read(regs::MODE_START, at(blank + 1_000_000_000)), 0);
+        }
+    }
+
+    #[test]
     fn the_palette_keeps_24_bits() {
         let mut d = Display::default();
         d.write(regs::PALETTE + 4 * 255, 0xFF12_3456, MEMORY, at(0))

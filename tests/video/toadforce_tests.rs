@@ -668,3 +668,497 @@ fn a_built_in_drivers_commands_wait_and_run_in_their_order() {
         rust_dos::savestate::machine::save(&cpu) == rust_dos::savestate::machine::save(&loaded)
     );
 }
+
+/// The vertical retraces the timing `t` begins after `from` and up to
+/// `to`, in nanoseconds of the emulated clock.
+fn retraces(t: &rust_dos::video::crt::CrtTiming, from: u64, to: u64) -> u32 {
+    (t.retraces(to) - t.retraces(from)) as u32
+}
+
+#[test]
+fn frame_counts_the_vgas_retraces_from_the_moment_the_cards_mode_ends() {
+    // By a write of 0 to `MODE_ENABLE`, and by `RESET`.
+    for register in [regs::MODE_ENABLE, regs::RESET] {
+        let mut cpu = machine();
+        show(&mut cpu, 640, 480, Format::R5G6B5, 85);
+        let card = cpu.bus.vga.timing();
+        pass(&mut cpu, 3 * card.frame_ns() + 1_234_567);
+        let shown = reg(&cpu, regs::FRAME);
+        set_reg(&mut cpu, register, (register == regs::RESET) as u32);
+        assert_eq!(reg(&cpu, regs::MODE_ENABLE), 0);
+        // The change of mode counts no blank of its own, and `RESET`
+        // starts the count again.
+        let base = if register == regs::RESET { 0 } else { shown };
+        assert_eq!(reg(&cpu, regs::FRAME), base);
+        // The text mode's 70 frames a second, with nothing touching the
+        // card for a second of them.
+        let vga = cpu.bus.vga.timing();
+        assert_eq!(vga.display, 400);
+        let from = cpu.bus.clock.now_ns();
+        pass(&mut cpu, 1_000_000_000);
+        let now = cpu.bus.clock.now_ns();
+        let began = retraces(&vga, from, now);
+        assert!((69..=71).contains(&began), "{began}");
+        assert_eq!(reg(&cpu, regs::FRAME), base + began, "{register:X}h");
+        // The blank's bit follows the VGA's retrace too.
+        set_reg(&mut cpu, regs::IRQ_STATUS, regs::IRQ_VBLANK);
+        let next = vga.next_retrace(cpu.bus.clock.now_ns());
+        let line = vga.line_ns as u64;
+        pass(&mut cpu, next - cpu.bus.clock.now_ns() - line);
+        assert_eq!(reg(&cpu, regs::IRQ_STATUS) & regs::IRQ_VBLANK, 0);
+        assert_eq!(reg(&cpu, regs::STATUS) & regs::STATUS_VBLANK, 0);
+        pass(&mut cpu, line);
+        assert_eq!(
+            reg(&cpu, regs::IRQ_STATUS) & regs::IRQ_VBLANK,
+            regs::IRQ_VBLANK
+        );
+        assert_eq!(
+            reg(&cpu, regs::STATUS) & regs::STATUS_VBLANK,
+            regs::STATUS_VBLANK
+        );
+        assert_eq!(cpu.bus.io_read(0x3DA) & 0x08, 0x08);
+    }
+}
+
+#[test]
+fn frame_follows_a_change_of_the_vgas_timing() {
+    let mut cpu = machine();
+    // Bring the card up to now: it counts from here.
+    set_reg(&mut cpu, regs::IRQ_STATUS, 0);
+    let mut expected = reg(&cpu, regs::FRAME);
+    let mut from = cpu.bus.clock.now_ns();
+    let text = cpu.bus.vga.timing();
+    // Half a second with the timing the VGA has, and nothing touching
+    // the card.
+    let step = |cpu: &mut Cpu, expected: &mut u32, from: &mut u64| {
+        let timing = cpu.bus.vga.timing();
+        pass(cpu, 500_000_000);
+        let now = cpu.bus.clock.now_ns();
+        *expected += retraces(&timing, *from, now);
+        *from = now;
+        timing
+    };
+    step(&mut cpu, &mut expected, &mut from);
+    // A mode set by the BIOS: 640 by 480 at 60 Hz after the text mode's
+    // 70.
+    int10::set_mode(&mut cpu, 0x12);
+    let graphics = step(&mut cpu, &mut expected, &mut from);
+    assert_ne!(graphics.frame_ns(), text.frame_ns());
+    assert_eq!(reg(&cpu, regs::FRAME), expected);
+    // The registers by themselves: the Miscellaneous Output register's
+    // other clock.
+    let misc = cpu.bus.io_read(0x3CC);
+    cpu.bus.io_write(0x3C2, misc ^ 0x04);
+    let faster = step(&mut cpu, &mut expected, &mut from);
+    assert_ne!(faster.frame_ns(), graphics.frame_ns());
+    assert_eq!(reg(&cpu, regs::FRAME), expected);
+    // A VBE mode.
+    assert_eq!(int10(&mut cpu, 0x4F02, 0x4105, 0, 0), 0x004F);
+    let vesa = step(&mut cpu, &mut expected, &mut from);
+    assert_ne!(vesa.frame_ns(), faster.frame_ns());
+    assert_eq!(reg(&cpu, regs::FRAME), expected);
+    // The card's interrupt comes at the retrace of the mode set last.
+    set_reg(&mut cpu, regs::IRQ_STATUS, regs::IRQ_VBLANK);
+    set_reg(&mut cpu, regs::IRQ_ENABLE, regs::IRQ_VBLANK);
+    int10::set_mode(&mut cpu, 0x03);
+    let text = cpu.bus.vga.timing();
+    assert_eq!(text.display, 400);
+    set_reg(&mut cpu, regs::IRQ_STATUS, regs::IRQ_VBLANK);
+    assert!(!cpu.bus.pic.busy(11));
+    let now = cpu.bus.clock.now_ns();
+    let next = text.next_retrace(now);
+    pass(&mut cpu, next - now - text.line_ns as u64);
+    assert!(!cpu.bus.pic.busy(11));
+    pass(&mut cpu, 2 * text.line_ns as u64);
+    assert!(cpu.bus.pic.busy(11));
+}
+
+/// Write `value` to register `index` of the VGA's attribute controller.
+fn set_attribute(cpu: &mut Cpu, index: u8, value: u8) {
+    cpu.bus.io_read(0x3DA);
+    cpu.bus.io_write(0x3C0, index | 0x20);
+    cpu.bus.io_write(0x3C0, value);
+}
+
+#[test]
+fn the_vga_comes_back_in_the_mode_its_registers_describe() {
+    // From text to 256 colours by the registers, under the card's mode.
+    let mut cpu = machine();
+    show(&mut cpu, 640, 480, Format::X8R8G8B8, 60);
+    let mode_control = cpu.bus.vga.attribute_regs[0x10];
+    set_attribute(&mut cpu, 0x10, mode_control | 0x01);
+    cpu.bus.io_write(0x3CE, 0x05);
+    cpu.bus.io_write(0x3CF, 0x40);
+    // None of it shows while the card's mode does.
+    pass(&mut cpu, 50_000_000);
+    cpu.bus.sync_display();
+    assert_eq!(cpu.bus.video_mode, VideoMode::Vesa);
+    assert_eq!(video::frame_size(&cpu.bus), (640, 480));
+    set_reg(&mut cpu, regs::MODE_ENABLE, 0);
+    assert_eq!(cpu.bus.video_mode, VideoMode::Graphics320x200);
+
+    // And from mode 13h to text.
+    let mut cpu = machine();
+    int10::set_mode(&mut cpu, 0x13);
+    show(&mut cpu, 640, 480, Format::X8R8G8B8, 60);
+    let mode_control = cpu.bus.vga.attribute_regs[0x10];
+    set_attribute(&mut cpu, 0x10, mode_control & !0x01);
+    cpu.bus.io_write(0x3CE, 0x05);
+    cpu.bus.io_write(0x3CF, 0x10);
+    pass(&mut cpu, 50_000_000);
+    cpu.bus.sync_display();
+    set_reg(&mut cpu, regs::MODE_ENABLE, 0);
+    assert_eq!(cpu.bus.video_mode, VideoMode::Text80x25Color);
+
+    // Registers nobody wrote bring back the mode the BIOS set, the
+    // planar ones among them.
+    for (number, mode) in [
+        (0x12, VideoMode::Vga640x480),
+        (0x0D, VideoMode::Ega320x200),
+        (0x06, VideoMode::Cga640x200),
+        (0x01, VideoMode::Text40x25Color),
+    ] {
+        let mut cpu = machine();
+        int10::set_mode(&mut cpu, number);
+        assert_eq!(cpu.bus.video_mode, mode);
+        show(&mut cpu, 640, 480, Format::X8R8G8B8, 60);
+        set_reg(&mut cpu, regs::MODE_ENABLE, 0);
+        assert_eq!(cpu.bus.video_mode, mode, "mode {number:02X}h");
+    }
+}
+
+/// The byte the ROM's mirror at the top of the address space has for
+/// `addr`.
+fn mirror(cpu: &Cpu, addr: usize) -> u8 {
+    cpu.bus.read_8(0xE0000 + (addr & 0x1FFFF))
+}
+
+#[test]
+fn a_bar_over_the_ram_or_the_roms_mirror_decodes_nothing() {
+    let mut cpu = machine();
+    cpu.bus.write_32(RING + 8, 0x5566_7788);
+    // A byte of card memory where the ROM's mirror would be with BAR 1
+    // at FC000000h, and another than the ROM has there.
+    let top = 0xFFFF_FFF0usize;
+    let other = !mirror(&cpu, top);
+    cpu.bus.write_8(MEMORY + 0x03FF_FFF0, other);
+    cpu.bus.write_8(MEMORY + 0x100, 0x5A);
+
+    // Inside the RAM: the RAM answers, and takes the writes.
+    set_config(&mut cpu, 0x10, 0x00F0_0000);
+    set_config(&mut cpu, 0x18, 0x00E0_0000);
+    assert_eq!(cpu.bus.read_32(0x00F0_0000), 0);
+    assert_eq!(cpu.bus.read_32(0x00E0_0008), 0);
+    cpu.bus
+        .write_32(0x00F0_0000 + regs::MODE_WIDTH as usize, 640);
+    assert_eq!(cpu.bus.ram[0x00F0_0000 + regs::MODE_WIDTH as usize], 0x80);
+    cpu.bus.write_32(0x00E0_0008, 0x0102_0304);
+    assert_eq!(cpu.bus.ram[0x00E0_0008], 0x04);
+    // Moved clear of it, each is what it was.
+    set_config(&mut cpu, 0x10, INITIAL_REGISTERS);
+    set_config(&mut cpu, 0x18, INITIAL_RING);
+    assert_eq!(reg(&cpu, regs::MODE_WIDTH), 0);
+    assert_eq!(cpu.bus.read_32(RING + 8), 0x5566_7788);
+
+    // The ring with its last 128 KB over the ROM's mirror: no byte of it
+    // decodes, the ones below the mirror included.
+    set_config(&mut cpu, 0x18, 0xFFF0_0000);
+    assert_eq!(config(&mut cpu, 0x18), 0xFFF0_0000);
+    assert_eq!(cpu.bus.read_32(0xFFF0_0008), 0xFFFF_FFFF);
+    assert_eq!(cpu.bus.read_8(0xFFFE_0008), mirror(&cpu, 0xFFFE_0008));
+    cpu.bus.write_32(0xFFF0_0008, 0);
+    set_config(&mut cpu, 0x18, INITIAL_RING);
+    assert_eq!(cpu.bus.read_32(RING + 8), 0x5566_7788);
+    // The registers on the mirror.
+    set_config(&mut cpu, 0x10, 0xFFFF_0000);
+    assert_eq!(cpu.bus.read_8(0xFFFF_0000), mirror(&cpu, 0xFFFF_0000));
+    assert_eq!(cpu.bus.read_8(top), mirror(&cpu, top));
+    set_config(&mut cpu, 0x10, INITIAL_REGISTERS);
+    // Card memory reaching the top: none of it decodes, and the ROM
+    // keeps its mirror.
+    set_config(&mut cpu, 0x14, 0xFC00_0000);
+    assert_eq!(config(&mut cpu, 0x14), 0xFC00_0008);
+    assert_eq!(cpu.bus.read_8(top), mirror(&cpu, top));
+    assert_eq!(cpu.bus.read_8(0xFC00_0100), 0xFF);
+    cpu.bus.write_8(0xFC00_0100, 0);
+    assert_eq!(cpu.bus.vbe.lfb_base, None);
+    // The video BIOS then has no linear frame buffer to give: its modes
+    // say so, and a mode set that asks for one fails.
+    cpu.set_es(0x3000);
+    cpu.set_di(0);
+    assert_eq!(int10(&mut cpu, 0x4F01, 0, 0x101, 0), 0x004F);
+    assert_eq!(cpu.bus.read_16(0x30000) & 0x0080, 0);
+    assert_eq!(cpu.bus.read_16(0x30000) & 0x001B, 0x001B);
+    assert_eq!(cpu.bus.read_32(0x30000 + 40), 0);
+    assert_eq!(int10(&mut cpu, 0x4F02, 0x4101, 0, 0), 0x014F);
+    assert_eq!(cpu.bus.video_mode, VideoMode::Text80x25Color);
+    assert_eq!(int10(&mut cpu, 0x4F02, 0x0101, 0, 0), 0x004F);
+    assert_eq!(cpu.bus.video_mode, VideoMode::Vesa);
+    int10::set_mode(&mut cpu, 0x03);
+    // The same with memory decoding off, and with no address.
+    set_config(&mut cpu, 0x14, INITIAL_MEMORY);
+    assert_eq!(cpu.bus.read_8(MEMORY + 0x100), 0x5A);
+    assert_eq!(int10(&mut cpu, 0x4F01, 0, 0x101, 0), 0x004F);
+    assert_eq!(cpu.bus.read_16(0x30000) & 0x0080, 0x0080);
+    assert_eq!(cpu.bus.read_32(0x30000 + 40), INITIAL_MEMORY);
+    for (register, value, back) in [(0x04, 0x0001, 0x0003), (0x14, 0, INITIAL_MEMORY)] {
+        set_config(&mut cpu, register, value);
+        assert_eq!(int10(&mut cpu, 0x4F01, 0, 0x101, 0), 0x004F);
+        assert_eq!(cpu.bus.read_16(0x30000) & 0x0080, 0);
+        assert_eq!(cpu.bus.read_32(0x30000 + 40), 0);
+        assert_eq!(int10(&mut cpu, 0x4F02, 0x4101, 0, 0), 0x014F);
+        set_config(&mut cpu, register, back);
+    }
+    assert_eq!(int10(&mut cpu, 0x4F02, 0x4101, 0, 0), 0x004F);
+
+    // Card memory with its first half over the RAM of a machine with
+    // 96 MB: the half above the RAM doesn't decode either.
+    let mut cpu = Cpu::with_memory(PathBuf::from("."), 96);
+    let setup = VideoSetup {
+        adapter: Adapter::ToadForce,
+        ..Default::default()
+    };
+    bios::install(&mut cpu.bus, setup);
+    cpu.bus.write_8(MEMORY + (40 << 20), 0x5A);
+    set_config(&mut cpu, 0x14, 64 << 20);
+    assert_eq!(config(&mut cpu, 0x14), (64 << 20) | 0x08);
+    assert_eq!(cpu.bus.read_8((64 << 20) + (40 << 20)), 0xFF);
+    set_config(&mut cpu, 0x14, 128 << 20);
+    assert_eq!(cpu.bus.read_8((128 << 20) + (40 << 20)), 0x5A);
+}
+
+#[test]
+fn where_two_bars_overlap_card_memory_answers_then_the_registers() {
+    let mut cpu = machine();
+    cpu.bus.write_32(MEMORY, 0x0BAD_CAFE);
+    cpu.bus.write_32(MEMORY + 0x0010_0000, 0x0BAD_F00D);
+    cpu.bus.write_32(RING, 0x1234_5678);
+    // The registers inside card memory's window: card memory.
+    set_config(&mut cpu, 0x10, INITIAL_MEMORY);
+    assert_eq!(cpu.bus.read_32(MEMORY), 0x0BAD_CAFE);
+    cpu.bus.write_32(MEMORY + regs::MODE_WIDTH as usize, 640);
+    set_config(&mut cpu, 0x10, INITIAL_REGISTERS);
+    assert_eq!(reg(&cpu, regs::MODE_WIDTH), 0);
+    assert_eq!(cpu.bus.read_32(MEMORY + regs::MODE_WIDTH as usize), 640);
+    // The ring inside it, too.
+    set_config(&mut cpu, 0x18, INITIAL_MEMORY + 0x0010_0000);
+    assert_eq!(cpu.bus.read_32(MEMORY + 0x0010_0000), 0x0BAD_F00D);
+    // The ring over the registers: the registers, and past their 64 KB
+    // the ring.
+    set_config(&mut cpu, 0x18, INITIAL_REGISTERS);
+    assert_eq!(cpu.bus.read_32(REGISTERS), regs::ID_VALUE);
+    set_reg(&mut cpu, regs::MODE_WIDTH, 800);
+    assert_eq!(reg(&cpu, regs::MODE_WIDTH), 800);
+    cpu.bus.write_32(REGISTERS + 0x1_0000, 0x0A0B_0C0D);
+    set_config(&mut cpu, 0x18, INITIAL_RING);
+    assert_eq!(cpu.bus.read_32(RING), 0x1234_5678);
+    assert_eq!(cpu.bus.read_32(RING + regs::MODE_WIDTH as usize), 0);
+    assert_eq!(cpu.bus.read_32(RING + 0x1_0000), 0x0A0B_0C0D);
+}
+
+#[test]
+fn the_blank_interrupt_goes_up_within_a_timer_tick_of_the_blank() {
+    // A tick of the 1 193 182 Hz timer, rounded up.
+    const TICK_NS: u64 = 839;
+    let mut cpu = machine();
+    show(&mut cpu, 640, 480, Format::X8R8G8B8, 60);
+    set_reg(&mut cpu, regs::IRQ_ENABLE, regs::IRQ_VBLANK);
+    let timing = cpu.bus.vga.timing();
+    let mut latest = 0;
+    for speed in [3000, 777, 20_000, 3000, 100_000, 1234, 315, 60_000] {
+        cpu.bus.set_cycles_per_ms(speed);
+        let instruction = 1_000_000u64.div_ceil(speed as u64);
+        for _ in 0..8 {
+            set_reg(&mut cpu, regs::IRQ_STATUS, regs::IRQ_VBLANK);
+            assert!(!cpu.bus.pic.busy(11));
+            let blank = timing.next_retrace(cpu.bus.clock.now_ns());
+            let early = blank - cpu.bus.clock.now_ns();
+            if early > 20 * instruction {
+                pass(&mut cpu, early - 20 * instruction);
+            }
+            // One instruction after the other. The status register has
+            // the blank at the first instruction it has begun at, and the
+            // request follows within a tick of that instruction.
+            let mut seen = None;
+            loop {
+                let now = cpu.bus.clock.now_ns();
+                let status = reg(&cpu, regs::IRQ_STATUS) & regs::IRQ_VBLANK != 0;
+                assert_eq!(status, now >= blank, "at {now}, blank at {blank}");
+                if status {
+                    seen.get_or_insert(now);
+                }
+                if cpu.bus.pic.busy(11) {
+                    let seen = seen.expect("the request is up before the blank");
+                    assert!(seen - blank < instruction + 1);
+                    let late = now - seen;
+                    assert!(
+                        late <= TICK_NS + instruction,
+                        "{late} ns late at {speed} cycles"
+                    );
+                    latest = latest.max(late.saturating_sub(instruction));
+                    break;
+                }
+                assert!(now < blank + 1_000_000, "no request");
+                cpu.bus.clock.icount += 1;
+                cpu.bus.service_timers();
+            }
+        }
+    }
+    assert!(latest <= TICK_NS);
+}
+
+#[test]
+fn a_read_across_two_registers_has_bytes_of_each() {
+    let mut cpu = machine();
+    set_reg(&mut cpu, regs::MODE_WIDTH, 0x1122_3344);
+    set_reg(&mut cpu, regs::MODE_HEIGHT, 0x5566_7788);
+    let at = REGISTERS + regs::MODE_WIDTH as usize;
+    assert_eq!(cpu.bus.read_16(at + 3), 0x8811);
+    assert_eq!(cpu.bus.read_32(at + 1), 0x8811_2233);
+    assert_eq!(cpu.bus.read_32(at + 3), 0x6677_8811);
+    assert_eq!(cpu.bus.read_16(at + 1), 0x2233);
+    // The last byte of `ID` and the first of `LEVEL_MAX`.
+    let level_max = reg(&cpu, regs::LEVEL_MAX);
+    assert_eq!(
+        cpu.bus.read_16(REGISTERS + 3) as u32,
+        0x44 | (level_max & 0xFF) << 8
+    );
+    // Reading changes nothing, across registers either: the status the
+    // read passes over keeps its bits.
+    run(&mut cpu, &[command::header(0x7FFF, 1)]);
+    let status = reg(&cpu, regs::IRQ_STATUS);
+    assert_eq!(status & regs::IRQ_ERROR, regs::IRQ_ERROR);
+    cpu.bus.read_32(REGISTERS + regs::STATUS as usize + 2);
+    cpu.bus.read_16(REGISTERS + regs::IRQ_STATUS as usize + 3);
+    assert_eq!(reg(&cpu, regs::IRQ_STATUS), status);
+    assert_eq!(reg(&cpu, regs::ERROR), regs::Error::BadOpcode as u32);
+}
+
+#[test]
+fn port_3da_has_the_cards_blanking() {
+    let mut cpu = machine();
+    show(&mut cpu, 640, 480, Format::X8R8G8B8, 60);
+    let timing = cpu.bus.vga.timing();
+    let line = timing.line_ns as u64;
+    // Display enable goes off for the last fifth of a line.
+    assert_eq!(timing.hdisplay_ns as u64, line - line / 5);
+    let frame = timing.frame_ns();
+    let into = cpu.bus.clock.now_ns() % frame;
+    // The middle of line 10, and nine tenths through it.
+    pass(&mut cpu, frame - into + 10 * line + line / 2);
+    assert_eq!(timing.position(cpu.bus.clock.now_ns()).0, 10);
+    assert_eq!(cpu.bus.io_read(0x3DA) & 0x09, 0);
+    pass(&mut cpu, line * 2 / 5);
+    let (at, column) = timing.position(cpu.bus.clock.now_ns());
+    assert!(at == 10 && column >= timing.hdisplay_ns as u64);
+    assert_eq!(cpu.bus.io_read(0x3DA) & 0x09, 0x01);
+    assert_eq!(reg(&cpu, regs::STATUS) & regs::STATUS_VBLANK, 0);
+    // The start of the next line.
+    pass(&mut cpu, line / 5);
+    assert_eq!(timing.position(cpu.bus.clock.now_ns()).0, 11);
+    assert_eq!(cpu.bus.io_read(0x3DA) & 0x09, 0);
+    // Through the vertical blank both bits are set, in the part of a
+    // line display enable is on for elsewhere too.
+    pass(&mut cpu, 470 * line);
+    let (at, column) = timing.position(cpu.bus.clock.now_ns());
+    assert!(at == 481 && column < timing.hdisplay_ns as u64);
+    assert_eq!(cpu.bus.io_read(0x3DA) & 0x09, 0x09);
+    assert_eq!(
+        reg(&cpu, regs::STATUS) & regs::STATUS_VBLANK,
+        regs::STATUS_VBLANK
+    );
+    assert_eq!(reg(&cpu, regs::SCANLINE), 481);
+}
+
+#[test]
+fn a_reset_of_the_machine_keeps_configuration_space() {
+    let mut cpu = machine();
+    set_config(&mut cpu, 0x10, 0xC800_0000);
+    set_config(&mut cpu, 0x14, 0xC000_0000);
+    set_config(&mut cpu, 0x18, 0xC810_0000);
+    cpu.bus.io_write_wide(0xCF8, 0x8000_083C, 4);
+    cpu.bus.io_write_wide(0xCFC, 5, 1);
+    cpu.bus
+        .write_32(0xC800_0000 + regs::MODE_WIDTH as usize, 640);
+    cpu.bus.write_32(0xC810_0000, 0x0102_0304);
+    cpu.bus.write_32(0xC000_0000 + 64, 0x0A0B_0C0D);
+    let resets: [fn(&mut Cpu); 2] = [|cpu| cpu.bus.restore_dos_machine(), |cpu| {
+        cpu.close_program()
+    }];
+    for reset in resets {
+        reset(&mut cpu);
+        assert_eq!(config(&mut cpu, 0x10), 0xC800_0000);
+        assert_eq!(config(&mut cpu, 0x14), 0xC000_0008);
+        assert_eq!(config(&mut cpu, 0x18), 0xC810_0000);
+        assert_eq!(config(&mut cpu, 0x3C), 0x0105);
+        assert_eq!(config(&mut cpu, 0x04) & 0xFFFF, 0x0003);
+        assert_eq!(cpu.bus.vbe.lfb_base, Some(0xC000_0000));
+        // The registers are reset; the ring and card memory keep what
+        // they held.
+        assert_eq!(cpu.bus.read_32(0xC800_0000), regs::ID_VALUE);
+        assert_eq!(
+            cpu.bus.read_32(0xC800_0000 + regs::MODE_WIDTH as usize),
+            0
+        );
+        assert_eq!(cpu.bus.read_32(0xC810_0000), 0x0102_0304);
+        assert_eq!(cpu.bus.read_32(0xC000_0000 + 64), 0x0A0B_0C0D);
+        cpu.bus
+            .write_32(0xC800_0000 + regs::MODE_WIDTH as usize, 640);
+    }
+}
+
+#[test]
+fn a_small_mode_shows_with_its_pixels_doubled() {
+    let mut cpu = machine();
+    cpu.bus.write_16(MEMORY, 0xF800);
+    cpu.bus.write_16(MEMORY + 2, 0x07E0);
+    cpu.bus.write_16(MEMORY + 320 * 2, 0x001F);
+    show(&mut cpu, 320, 240, Format::R5G6B5, 60);
+    assert_eq!(video::frame_size(&cpu.bus), (640, 480));
+    for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+        assert_eq!(pixel(&mut cpu, x, y), (0xFF, 0, 0), "({x}, {y})");
+        assert_eq!(pixel(&mut cpu, 2 + x, y), (0, 0xFF, 0), "({x}, {y})");
+        assert_eq!(pixel(&mut cpu, x, 2 + y), (0, 0, 0xFF), "({x}, {y})");
+    }
+    // What the guest reads is the mode's own size.
+    assert_eq!(reg(&cpu, regs::MODE_WIDTH), 320);
+    let timing = cpu.bus.vga.timing();
+    assert_eq!((timing.display, timing.total), (240, 256));
+    // 639 pixels across are doubled, 640 aren't.
+    show(&mut cpu, 639, 400, Format::R5G6B5, 60);
+    assert_eq!(video::frame_size(&cpu.bus), (1278, 800));
+    show(&mut cpu, 640, 400, Format::R5G6B5, 60);
+    assert_eq!(video::frame_size(&cpu.bus), (640, 400));
+}
+
+#[test]
+fn the_bios_keeps_a_restored_picture_inside_its_memory() {
+    let mut cpu = machine();
+    assert_eq!(int10(&mut cpu, 0x4F02, 0x4101, 0, 0), 0x004F);
+    assert_eq!(int10(&mut cpu, 0x4F07, 0, 0, 16), 0x004F);
+    cpu.set_es(0x3000);
+    assert_eq!(int10(&mut cpu, 0x4F04, 0, 0x000F, 1), 0x004F);
+    let (pitch, start) = (cpu.bus.vbe.pitch, cpu.bus.vbe.start);
+    assert_eq!(cpu.bus.read_32(0x30000 + 10), start);
+    // What the BIOS saved comes back.
+    assert_eq!(int10(&mut cpu, 0x4F07, 0, 0, 0), 0x004F);
+    assert_eq!(int10(&mut cpu, 0x4F04, 0, 0x000F, 2), 0x004F);
+    assert_eq!((cpu.bus.vbe.pitch, cpu.bus.vbe.start), (pitch, start));
+    // A block with a picture that reaches past the BIOS's 4 MB of card
+    // memory is refused, and the picture stays where it was.
+    let last = (4 << 20) - 640 * 480;
+    for (at, value) in [(10, 5 << 20), (10, last + 1), (6, 16 << 10)] {
+        let good = cpu.bus.read_32(0x30000 + at);
+        cpu.bus.write_32(0x30000 + at, value);
+        assert_eq!(int10(&mut cpu, 0x4F04, 0, 0x000F, 2), 0x014F);
+        assert_eq!((cpu.bus.vbe.pitch, cpu.bus.vbe.start), (pitch, start));
+        cpu.bus.write_32(0x30000 + at, good);
+    }
+    // The last start that fits is taken.
+    cpu.bus.write_32(0x30000 + 10, last);
+    assert_eq!(int10(&mut cpu, 0x4F04, 0, 0x000F, 2), 0x004F);
+    assert_eq!(cpu.bus.vbe.start, last);
+    // A longer line there would take the picture past the end.
+    assert_eq!(int10(&mut cpu, 0x4F06, 0x0002, 648, 0), 0x024F);
+    assert_eq!(cpu.bus.vbe.pitch, 640);
+}
