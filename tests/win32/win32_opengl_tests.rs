@@ -2679,7 +2679,17 @@ fn the_list_functions_give_opengls_errors() {
         gl(a, l, LIST_BASE, &[Arg::I(9)])?;
         gl(a, l, POP_ATTRIB, &[])?;
         gl(a, l, GET_INTEGERV, &get(GL_LIST_BASE, 5))?;
-        // 13: none left.
+        // 13, 14: with GL_COMPILE_AND_EXECUTE the list's glBegin has
+        // run, so glEndList before its glEnd is refused and leaves the
+        // list open; the one after the glEnd ends it.
+        gl(a, l, NEW_LIST, &[Arg::I(6), Arg::I(GL_COMPILE_AND_EXECUTE)])?;
+        gl(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+        gl(a, l, END_LIST, &[])?;
+        gl(a, l, END, &[])?;
+        error(a, l, &mut c, e)?;
+        gl(a, l, END_LIST, &[])?;
+        error(a, l, &mut c, e)?;
+        // 15: none left.
         error(a, l, &mut c, e)?;
         finish(a, l)
     });
@@ -2701,6 +2711,8 @@ fn the_list_functions_give_opengls_errors() {
         GL_INVALID_ENUM,
         GL_INVALID_OPERATION,
         GL_INVALID_OPERATION,
+        GL_INVALID_OPERATION,
+        0,
         0,
     ];
     assert_eq!(got, want);

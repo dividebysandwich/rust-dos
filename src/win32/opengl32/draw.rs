@@ -1040,7 +1040,7 @@ fn homogeneous(p: [f32; 4]) -> [f32; 4] {
 // Vertex arrays.
 
 /// The bytes of one value of `kind`.
-fn type_size(kind: u32) -> Option<u32> {
+pub(super) fn type_size(kind: u32) -> Option<u32> {
     Some(match kind {
         GL_BYTE | GL_UNSIGNED_BYTE => 1,
         GL_SHORT | GL_UNSIGNED_SHORT => 2,
@@ -1184,11 +1184,17 @@ pub fn interleaved_arrays(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
+/// The bytes of one element of the array `a`, and from one to the
+/// next. A display list reads the arrays' elements by it too (`lists`).
+pub(super) fn element_size(a: &Array) -> Option<(u32, u32)> {
+    let bytes = a.size.checked_mul(type_size(a.kind)?)?;
+    Some((bytes, if a.stride == 0 { bytes } else { a.stride }))
+}
+
 /// An array's bytes for the elements `first` to `last`, and the stride
 /// they are at in them. None if they aren't all in memory.
 fn array_bytes(cpu: &mut Cpu, a: &Array, first: u32, last: u32) -> Option<(Vec<u8>, usize)> {
-    let elem = a.size * type_size(a.kind)?;
-    let stride = if a.stride == 0 { elem } else { a.stride };
+    let (elem, stride) = element_size(a)?;
     let start = a.at.checked_add(first.checked_mul(stride)?)?;
     let len = ((last - first) as usize) * stride as usize + elem as usize;
     if a.at == 0 || len > 0x1000_0000 || !cpu.bus.guest_probe(start, len, false) {

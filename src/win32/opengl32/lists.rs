@@ -47,7 +47,7 @@ use super::exports::APIS;
 use super::texture::{self, GL_TEXTURE_2D, GL_TEXTURE0, IMAGE_MOST};
 use super::{
     Array, Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, GL_OUT_OF_MEMORY,
-    State, UNITS, ctx, current, error, matrix, state,
+    State, UNITS, ctx, current, draw, error, matrix, state,
 };
 use crate::cpu::Cpu;
 use std::collections::{BTreeMap, HashMap};
@@ -471,18 +471,6 @@ fn name_size(kind: u32) -> Option<usize> {
     SIZES.get(kind.checked_sub(GL_BYTE)? as usize).copied()
 }
 
-/// The bytes of one value of the type `kind`, of those the arrays and
-/// images have.
-fn type_size(kind: u32) -> Option<u32> {
-    Some(match kind {
-        0x1400 | 0x1401 => 1,
-        0x1402 | 0x1403 => 2,
-        0x1404..=0x1406 => 4,
-        GL_DOUBLE => 8,
-        _ => return None,
-    })
-}
-
 /// The bytes of a pixel of `format` and `kind`: as the textures read
 /// them (`texture::pixel_layout`), and for the stencil and depth
 /// formats, which glDrawPixels alone takes, one value of the type.
@@ -492,7 +480,7 @@ fn pixel_bytes(cpu: &mut Cpu, format: u32, kind: u32) -> Option<u32> {
         Ok((pixel, _, _)) => Some(pixel),
         // GL_STENCIL_INDEX, GL_DEPTH_COMPONENT.
         Err(_) if matches!(format, 0x1901 | 0x1902) => {
-            type_size(kind).filter(|_| kind != GL_DOUBLE)
+            draw::type_size(kind).filter(|_| kind != GL_DOUBLE)
         }
         Err(_) => None,
     }
@@ -696,12 +684,6 @@ struct Elements {
     others: Vec<(Array, usize, Option<u32>)>,
 }
 
-/// The bytes of one element of the array `a`, and from one to the next.
-fn element_size(a: &Array) -> Option<(u32, u32)> {
-    let bytes = a.size.checked_mul(type_size(a.kind)?)?;
-    Some((bytes, if a.stride == 0 { bytes } else { a.stride }))
-}
-
 /// The arrays of the current context as immediate-mode functions.
 /// None without a vertex array, which no element draws without. An
 /// array of a size and type no function takes gives nothing.
@@ -741,7 +723,7 @@ fn elements(cpu: &mut Cpu) -> Option<Elements> {
 /// left out.
 fn push_element(cpu: &mut Cpu, open: &mut Open, e: &Elements, i: u32) {
     let address = |a: &Array| {
-        let (_, stride) = element_size(a)?;
+        let (_, stride) = draw::element_size(a)?;
         a.at.checked_add(i.checked_mul(stride)?)
     };
     let (vertex, at) = e.vertex;
@@ -800,7 +782,7 @@ fn push_arrays(cpu: &mut Cpu, open: &mut Open, at: usize, when: When, args: &[u3
         // that is a program's error.
         let (vertex, _) = e.vertex;
         let range = || {
-            let (bytes, stride) = element_size(&vertex)?;
+            let (bytes, stride) = draw::element_size(&vertex)?;
             let start = vertex.at.checked_add(args[1].checked_mul(stride)?)?;
             let len = (count - 1).checked_mul(stride)?.checked_add(bytes)?;
             args[1].checked_add(count - 1)?;
@@ -1179,10 +1161,13 @@ pub fn new_list(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// glEndList(): the open list takes its name, in place of the list
-/// that had it. A list may end between a glBegin of its own and the
-/// glEnd, which another list or the program gives.
+/// that had it. With GL_COMPILE a list may end between a glBegin of
+/// its own and the glEnd, which another list or the program gives:
+/// the glBegin hasn't run. With GL_COMPILE_AND_EXECUTE it has, and
+/// glEndList there is GL_INVALID_OPERATION and leaves the list open,
+/// as any function OpenGL 1.1 doesn't allow between glBegin and glEnd.
 pub fn end_list(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    let Some((index, _)) = current(cpu) else {
+    let Some(index) = outside_begin(cpu) else {
         return Some(0);
     };
     let Some(mut open) = take_open(cpu) else {
@@ -1263,7 +1248,13 @@ pub fn delete_lists(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     };
     if let Some(names) = names_mut(state(cpu), index) {
-        names.retain(|name, _| !(first..=last).contains(name));
+        // Only the names in the range are visited: a program that
+        // deletes its lists one by one doesn't go over all of them
+        // each time.
+        let gone: Vec<u32> = names.range(first..=last).map(|(&name, _)| name).collect();
+        for name in gone {
+            names.remove(&name);
+        }
     }
     Some(0)
 }
