@@ -71,10 +71,9 @@ fn flush(cpu: &mut Cpu, first: u32, end: u32) {
 /// those committed already get it. With no room for the new ones in the
 /// pool and the page file together, nothing changes and it fails.
 fn commit(memory: &mut Memory, bus: &mut Bus, first: u32, end: u32, protect: u32) -> bool {
-    let new: Vec<u32> = (first..end)
+    let (new, committed): (Vec<u32>, Vec<u32>) = (first..end)
         .step_by(PAGE as usize)
-        .filter(|&page| memory.entry(bus, page).unwrap_or(0) == 0)
-        .collect();
+        .partition(|&page| memory.entry(bus, page).unwrap_or(0) == 0);
     let room = bus.win32.pool.as_ref().map_or(0, |p| p.commit_room());
     if new.len() as u32 > room {
         return false;
@@ -87,7 +86,7 @@ fn commit(memory: &mut Memory, bus: &mut Bus, first: u32, end: u32, protect: u32
             return false;
         }
     }
-    for page in (first..end).step_by(PAGE as usize) {
+    for page in committed {
         memory.set_protection(bus, page, protect);
     }
     true

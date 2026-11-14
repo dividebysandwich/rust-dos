@@ -82,7 +82,7 @@ impl Bus {
 
     /// The parts of `len` bytes at `lin` that lie in one page each: their
     /// offset in the range and length.
-    fn page_runs(lin: u32, len: usize) -> impl Iterator<Item = (usize, usize)> {
+    pub(crate) fn page_runs(lin: u32, len: usize) -> impl Iterator<Item = (usize, usize)> {
         let mut done = 0;
         std::iter::from_fn(move || {
             (done < len).then(|| {

@@ -405,7 +405,10 @@ impl Memory {
     }
 
     /// Commit the page at `lin` with the protection `protect` (a PAGE_
-    /// value): a zeroed page from the pool.
+    /// value) for the program's own memory: a zeroed page from the pool,
+    /// which can go out to the page file (`page_out`) as a page brought
+    /// in from there can. Otherwise a pool full of such pages would leave
+    /// none to give a page in the page file when it is touched.
     pub fn commit_page(&mut self, bus: &mut Bus, lin: u32, protect: u32) -> Option<()> {
         let phys = self.page(bus)?;
         if self
@@ -414,6 +417,11 @@ impl Memory {
         {
             free_page(bus, phys);
             return None;
+        }
+        if let Some(at) = self.entry_at(bus, lin)
+            && let Some(pool) = bus.win32.pool.as_mut()
+        {
+            pool.page_file.pageable.insert(phys, at as u32);
         }
         Some(())
     }
@@ -628,7 +636,7 @@ impl Memory {
     /// Fill `data` from `lin`, without a page fault: the bytes of pages in
     /// the page file are read from it. None where a page isn't there.
     pub fn read(&self, bus: &Bus, lin: u32, data: &mut [u8]) -> Option<()> {
-        for (offset, run) in page_runs(lin, data.len()) {
+        for (offset, run) in Bus::page_runs(lin, data.len()) {
             let at = lin.wrapping_add(offset as u32);
             let part = &mut data[offset..offset + run];
             match self.place(bus, at)? {
@@ -651,7 +659,7 @@ impl Memory {
     /// Write `data` at `lin`, which is mapped or in the page file, whose
     /// copy is written there: no page fault, and no physical page taken.
     pub fn write(&self, bus: &mut Bus, lin: u32, data: &[u8]) -> Option<()> {
-        for (offset, run) in page_runs(lin, data.len()) {
+        for (offset, run) in Bus::page_runs(lin, data.len()) {
             let at = lin.wrapping_add(offset as u32);
             let part = &data[offset..offset + run];
             match self.place(bus, at)? {
@@ -689,9 +697,13 @@ impl Memory {
     /// zeroed whole becomes such a page again: a block of a heap zeroed
     /// for the program takes no physical page until it is touched.
     pub fn zero(&self, bus: &mut Bus, lin: u32, len: u32) {
-        for (offset, run) in page_runs(lin, len as usize) {
+        for (offset, run) in Bus::page_runs(lin, len as usize) {
             let at = lin.wrapping_add(offset as u32);
             match self.place(bus, at) {
+                Some(Place::Ram(phys)) => {
+                    let from = (phys | at & 0xFFF) as usize;
+                    bus.fill_ram(from..from + run, 0);
+                }
                 Some(Place::Paged(_, entry)) if entry >> 12 == 0 => {}
                 Some(Place::Paged(pte, entry)) if run == PAGE as usize => {
                     if let Some(pool) = bus.win32.pool.as_mut() {
@@ -699,12 +711,20 @@ impl Memory {
                         bus.write_32(pte, entry & 0xFFF);
                     }
                 }
-                Some(_) => {
-                    self.write(bus, at, &vec![0; run]);
+                Some(Place::Paged(..)) => {
+                    self.write(bus, at, &[0; PAGE as usize][..run]);
                 }
                 None => {}
             }
         }
+    }
+
+    /// Whether the program may reach the page at `lin`, as a touch would
+    /// find it: it is mapped, or in the page file with a protection that
+    /// lets the program touch it, so the touch brings it in.
+    pub fn reachable(&self, bus: &Bus, lin: u32) -> bool {
+        let entry = self.entry(bus, lin).unwrap_or(0);
+        entry & PRESENT != 0 || is_paged(entry) && protection(entry) != Some(PAGE_NOACCESS)
     }
 }
 
@@ -713,21 +733,6 @@ impl Memory {
 enum Place {
     Ram(u32),
     Paged(usize, u32),
-}
-
-/// The parts of `len` bytes at `lin` that lie in one page each: their
-/// offset in the range and length.
-fn page_runs(lin: u32, len: usize) -> impl Iterator<Item = (usize, usize)> {
-    let mut done = 0;
-    std::iter::from_fn(move || {
-        (done < len).then(|| {
-            let at = lin.wrapping_add(done as u32);
-            let run = ((PAGE - (at & (PAGE - 1))) as usize).min(len - done);
-            let part = (done, run);
-            done += run;
-            part
-        })
-    })
 }
 
 /// A zeroed physical page from the pool. When it has none left, a page
@@ -795,7 +800,10 @@ pub fn page_out(bus: &mut Bus) -> bool {
         };
         hand = phys;
         let entry = bus.read_32(at as usize);
-        if entry & PRESENT == 0 || entry & !0xFFF != phys {
+        // A page made PAGE_NOACCESS keeps its physical page in an entry
+        // that isn't present, and goes out as any other, with that
+        // protection: VirtualProtect may give it another later.
+        if entry == 0 || is_paged(entry) || entry & !0xFFF != phys {
             // Its entry has changed: not the page's any more.
             let pool = bus.win32.pool.as_mut().expect("checked");
             pool.page_file.pageable.remove(&phys);
@@ -904,7 +912,7 @@ pub fn write_process_bytes(bus: &mut Bus, pid: u32, lin: u32, data: &[u8]) {
         return;
     };
     let memory = Memory::tables(bus.win32.processes[p].memory.cr3);
-    for (offset, run) in page_runs(lin, data.len()) {
+    for (offset, run) in Bus::page_runs(lin, data.len()) {
         let at = lin.wrapping_add(offset as u32);
         let _ = memory.write(bus, at, &data[offset..offset + run]);
     }

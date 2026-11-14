@@ -4,9 +4,7 @@
 use super::threads::{process_of, thread_of};
 use super::{ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, TRUE, set_error, string_at};
 use crate::cpu::Cpu;
-use crate::win32::memory::{
-    Memory, PAGE, PAGE_NOACCESS, PRESENT, PRIVATE, SYSTEM, is_paged, protection,
-};
+use crate::win32::memory::{Memory, PAGE, PRIVATE, SYSTEM};
 use crate::win32::object;
 use crate::win32::task::{self, Next, Task};
 use crate::win32::{create_process_from, launcher, process};
@@ -576,10 +574,9 @@ fn user_page(cpu: &Cpu, p: usize, lin: u32) -> Option<Memory> {
         return None;
     }
     let memory = &cpu.bus.win32.processes[p].memory;
-    let entry = memory.entry(&cpu.bus, lin)?;
-    let reachable =
-        entry & PRESENT != 0 || is_paged(entry) && protection(entry) != Some(PAGE_NOACCESS);
-    reachable.then(|| Memory::tables(memory.cr3))
+    memory
+        .reachable(&cpu.bus, lin)
+        .then(|| Memory::tables(memory.cr3))
 }
 
 /// ReadProcessMemory(process, address, buffer, size, read) and

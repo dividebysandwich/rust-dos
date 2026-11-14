@@ -3502,6 +3502,103 @@ fn a_zeroed_block_takes_no_memory_until_it_is_touched() {
     );
 }
 
+/// A program that commits memory until VirtualAlloc fails, in the page
+/// file first and, with it full, the machine's last pages, can touch all
+/// it committed: the pages it took from the machine go out to the page
+/// file too, to make room for those that come in. A bit each in the exit
+/// code.
+#[test]
+fn a_program_touches_memory_committed_to_the_last_page() {
+    const MEM_COMMIT_RESERVE: i32 = 0x3000;
+    const PAGE_READWRITE: i32 = 4;
+    const BLOCK: i32 = 0x10_0000;
+    const PATTERN: i32 = 0x5A5A_5A5A;
+    let names: &[&str] = &["VirtualAlloc"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The first block's address at 0, the last page's at 4.
+    let exe = program(BASE, false, imports, &[0; 8], |a, l| {
+        let mut blocks = a.create_label();
+        let mut kept = a.create_label();
+        let mut pages = a.create_label();
+        let mut full = a.create_label();
+        let mut end = a.create_label();
+        a.xor(ebx, ebx)?;
+        // Blocks of a megabyte while there is room for one.
+        a.set_label(&mut blocks)?;
+        push_args(a, &[0, BLOCK, MEM_COMMIT_RESERVE, PAGE_READWRITE])?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        a.je(pages)?;
+        a.cmp(dword_ptr(l.at(0)), 0)?;
+        a.jne(kept)?;
+        a.mov(dword_ptr(l.at(0)), eax)?;
+        a.set_label(&mut kept)?;
+        a.jmp(blocks)?;
+        // Then pages while there is room for one.
+        a.set_label(&mut pages)?;
+        push_args(a, &[0, 0x1000, MEM_COMMIT_RESERVE, PAGE_READWRITE])?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        a.je(full)?;
+        a.mov(dword_ptr(l.at(4)), eax)?;
+        a.jmp(pages)?;
+        a.set_label(&mut full)?;
+        a.cmp(dword_ptr(l.at(0)), 0)?;
+        a.je(end)?;
+        a.cmp(dword_ptr(l.at(4)), 0)?;
+        a.je(end)?;
+        a.or(ebx, 1)?;
+        // The first dword of every page of the first block and of the
+        // last page: its address, mixed; then read back.
+        for check in [false, true] {
+            let mut next = a.create_label();
+            a.xor(edx, edx)?;
+            a.mov(esi, dword_ptr(l.at(0)))?;
+            a.mov(ecx, BLOCK >> 12)?;
+            a.set_label(&mut next)?;
+            a.mov(eax, esi)?;
+            a.xor(eax, PATTERN)?;
+            if check {
+                let mut same = a.create_label();
+                a.cmp(dword_ptr(esi), eax)?;
+                a.je(same)?;
+                a.inc(edx)?;
+                a.set_label(&mut same)?;
+            } else {
+                a.mov(dword_ptr(esi), eax)?;
+            }
+            a.add(esi, 0x1000)?;
+            a.dec(ecx)?;
+            a.jnz(next)?;
+            a.mov(esi, dword_ptr(l.at(4)))?;
+            a.mov(eax, esi)?;
+            a.xor(eax, PATTERN)?;
+            if check {
+                let mut same = a.create_label();
+                a.cmp(dword_ptr(esi), eax)?;
+                a.je(same)?;
+                a.inc(edx)?;
+                a.set_label(&mut same)?;
+            } else {
+                a.mov(dword_ptr(esi), eax)?;
+            }
+        }
+        a.test(edx, edx)?;
+        bit_if_equal(a, 1)?;
+        a.set_label(&mut end)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run_files_in("pagefile_last_page", &[("T.EXE", exe)], 8);
+    assert_eq!(
+        code,
+        3,
+        "the checks that failed: {:02b} {}",
+        !code & 3,
+        text
+    );
+}
+
 /// An argument a test program passes: a value, or ESI.
 #[derive(Clone, Copy)]
 enum Arg {

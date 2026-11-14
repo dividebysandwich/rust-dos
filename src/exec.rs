@@ -1513,6 +1513,7 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
             }
         }
     }
+    flush_stale_tlb(cpu);
     cpu.bus.guest_paging = None;
     if std::mem::take(&mut cpu.bus.observe.polled) {
         crate::idle::keyboard_poll(cpu, trap.0, trap.1);
@@ -1565,10 +1566,7 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     // dropped when the call is done.
     cpu.bus.disk_io.clear();
     crate::win32::service(cpu, id);
-    // A page the service sent to the page file may be in the TLB.
-    if std::mem::take(&mut cpu.bus.win32.tlb_stale) {
-        cpu.tlb.flush();
-    }
+    flush_stale_tlb(cpu);
     if observed {
         crate::idle::after_service(cpu);
     }
@@ -1591,12 +1589,23 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     true
 }
 
+/// Flush the TLB if a service sent a page of a program's memory to the
+/// page file (`win32::memory::page_out`): its translation may be there.
+/// Any service that reaches memory through the page tables can, when a
+/// page it finds in the page file needs a physical page.
+fn flush_stale_tlb(cpu: &mut Cpu) {
+    if std::mem::take(&mut cpu.bus.win32.tlb_stale) {
+        cpu.tlb.flush();
+    }
+}
+
 /// After a service that ran with paging on: if it found a page missing,
 /// undo it (the registers as they were, the port accesses it queued) and
 /// raise the page fault on its trap, which runs again once the system's
 /// handler has put the page there. True if it did.
 fn guest_page_fault(cpu: &mut Cpu, before: &(crate::cpu::CpuSnapshot, usize)) -> bool {
     cpu.bus.guest_paging = None;
+    flush_stale_tlb(cpu);
     let Some((lin, error)) = cpu.bus.guest_fault.take() else {
         return false;
     };
