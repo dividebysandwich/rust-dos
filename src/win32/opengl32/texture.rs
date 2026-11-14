@@ -623,7 +623,9 @@ fn make_surface(
     ddraw::add_ref(cpu, iface);
     // The surface holds its DirectDraw object, as one IDirectDraw7's
     // CreateSurface gave does: a texture another context shares keeps
-    // its texels when the context that made it is deleted.
+    // its texels when the context that made it is deleted. The
+    // deletion takes the object out of the Voodoo2's exclusive mode
+    // (`wgl::destroy`), so all it keeps is the memory.
     let creator = ddraw::state(cpu).object(ids[0]).map_or(0, |o| o.creator);
     if creator != 0
         && ddraw::add_ref(cpu, creator) != 0

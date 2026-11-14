@@ -3249,6 +3249,74 @@ fn shared_textures(card: Draws) {
     assert!(all(&kept, 0x00_00FF), "a texture whose context is gone");
 }
 
+/// On a Voodoo2 a context that shares textures with one that was
+/// deleted opens the card and draws with them. The deleted context's
+/// DirectDraw object stays while a texture made on it does, but out of
+/// the card's exclusive mode, as deleting the context left it before
+/// the object outlived it: the card is free for the other context.
+#[test]
+fn on_a_voodoo2_a_shared_texture_outlives_its_context_and_frees_the_card() {
+    const SECOND: u32 = KEPT;
+    const NAME: u32 = KEPT + 8;
+    let mut d = lists_data();
+    put(&mut d, TEXELS, [[255u8, 0, 0, 255]; 4].as_flattened());
+    let mut at_result = Vec::new();
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let mut note = |c: &Calls, what: &'static str| at_result.push((what, c.next - 1));
+        note(&c, "the first made current");
+        c.api(a, l, WGL_CREATE_CONTEXT, &[Arg::Val(HDC)])?;
+        a.mov(dword_ptr(l.at(SECOND)), eax)?;
+        c.api(a, l, WGL_SHARE_LISTS, &[Arg::Val(HGLRC), Arg::Val(SECOND)])?;
+        note(&c, "shared");
+        gl(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(NAME)])?;
+        texture_2x2(a, l, &mut c, NAME, TEXELS)?;
+        c.api(a, l, WGL_DELETE_CONTEXT, &[Arg::Val(HGLRC)])?;
+        note(&c, "the first deleted");
+        let second = [Arg::Val(HDC), Arg::Val(SECOND)];
+        c.api(a, l, WGL_MAKE_CURRENT, &second)?;
+        note(&c, "the second made current");
+        c.api(a, l, IS_TEXTURE, &[Arg::Val(NAME)])?;
+        note(&c, "the texture in the second");
+        gl(a, l, ENABLE, &[Arg::I(GL_TEXTURE_2D)])?;
+        gl(a, l, BIND_TEXTURE, &[Arg::I(GL_TEXTURE_2D), Arg::Val(NAME)])?;
+        clear_blue(a, l)?;
+        gl(a, l, COLOR3F, &[1.0, 1.0, 1.0].map(Arg::F))?;
+        gl(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+        for [x, y] in corners(WHOLE) {
+            let st = [x, y].map(|v| Arg::F((v + 1.0) / 2.0));
+            gl(a, l, TEX_COORD2F, &st)?;
+            gl(a, l, VERTEX2F, &[Arg::F(x), Arg::F(y)])?;
+        }
+        gl(a, l, END, &[])?;
+        read_into(a, l, PIXELS)?;
+        c.api(a, l, GET_ERROR, &[])?;
+        note(&c, "glGetError");
+        finish(a, l)
+    });
+    let mut cpu = machine_with("voodoo2_shared", Some(Board::Voodoo2), exe);
+    run_until_done(&mut cpu, data);
+    let results: Vec<(&str, u32)> = at_result
+        .iter()
+        .map(|&(what, i)| (what, peek(&cpu, data + RESULTS + 4 * i)))
+        .collect();
+    assert_eq!(
+        results,
+        [
+            ("the first made current", 1),
+            ("shared", 1),
+            ("the first deleted", 1),
+            ("the second made current", 1),
+            ("the texture in the second", 1),
+            ("glGetError", 0),
+        ]
+    );
+    assert!(cpu.bus.voodoo.as_ref().unwrap().output(), "the card shows");
+    let shot = shot(&cpu, data, PIXELS);
+    assert!(shot.iter().all(|&p| p == 0x00_00FF), "the shared texture");
+}
+
 /// A saved state has the textures two contexts share: the program
 /// goes on from it to the same picture.
 #[test]

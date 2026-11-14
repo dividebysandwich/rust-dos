@@ -798,6 +798,13 @@ fn destroy(cpu: &mut Cpu, index: usize) {
     if c.inner_iface != 0 {
         ddraw::release(cpu, c.inner_iface);
     }
+    // A texture another context shares keeps the DirectDraw object
+    // (`texture::make_surface`). On the Voodoo2 the object leaves the
+    // card's exclusive mode here, which closes the card, as it did when
+    // it went with the context: another context can open it.
+    if c.dd_iface != 0 && directdraw::is_card(cpu, c.dd) {
+        directdraw::set_cooperative_level(cpu, &[c.dd_iface, 0, DDSCL_NORMAL]);
+    }
     if c.dd_iface != 0 {
         ddraw::release(cpu, c.dd_iface);
     }
