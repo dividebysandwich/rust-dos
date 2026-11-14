@@ -1406,11 +1406,13 @@ DLLs are the emulator's.
   stage) and gathered word by word otherwise, and the indices of the
   triangles the cull mode keeps, a strip's and a fan's too. It
   declines points, lines, the wireframe and point fill modes, flat
-  shading, a clip status the program asked for, and a draw with a
-  vertex outside the guard band or, while the device clips, outside
-  the depth range: those go through the pipeline, as every draw of
-  vertices to transform does. A test draws 6000 made-up draws both
-  ways and compares the triangles the card gets, word for word.
+  shading, a clip status the program asked for, a draw with a vertex
+  outside the guard band or, while the device clips, outside the
+  depth range, a draw too large for one command, and vertices in
+  memory that isn't plain RAM: those go through the pipeline, as
+  every draw of vertices to transform does. A test draws 8000
+  made-up draws both ways and compares the triangles the card gets,
+  word for word.
   `/api/win32/ddraw` counts the draws of each way (`screen_draws`).
 - **Direct3D 8** (`d3d8/`) sits on the Direct3D 7 device today and
   keeps doing so, with `D3DCAPS8` filled from the level's table and
@@ -2028,19 +2030,20 @@ the builds.
 
 ### Pass 4: a screen vertex's way to the host
 
-Black & White transforms its own vertices and draws them with 755
-`DrawIndexedPrimitive` calls a frame, 32,400 vertices and 15,700
-triangles in the scene measured here (the start of the movement
-tutorial, 800 by 600). On the way from the program's memory to the
-host's vertex buffer a vertex was copied ten times: the draw's
-bytes into a `Vec`, a `Vertex`, a `Processed` of about 212 bytes, a
-triangle's corner, a `ScreenVertex`, the card's words in the HAL's
-batch, the card's queue, the card's `ScreenVertex` of 160 bytes, a
-second one for each corner of each triangle with its coordinate sets
-in the slots, and the 88 bytes of the host's vertex, written field by
-field. It is now copied four times: into the queue's words
-("Screen vertices go from the program's memory to the queue" above),
-the card's `ScreenVertex`, the host's vertex for each corner
+Black & White transforms its own vertices and draws them with
+`DrawIndexedPrimitive`, 756 draws a frame (755.7 on average), 32,400
+vertices and 15,700 triangles in the scene measured here (the start
+of the movement tutorial, 800 by 600). On the way from the
+program's memory to the host's vertex buffer a vertex was copied ten
+times: the draw's bytes into a `Vec`, a `Vertex`, a `Processed` of
+about 212 bytes, a triangle's corner, a `ScreenVertex`, the card's
+words in the HAL's batch, the card's queue, the card's
+`ScreenVertex` of 160 bytes, a second one for each corner of each
+triangle with its coordinate sets in the slots, and the 88 bytes of
+the host's vertex, written field by field. It is now copied four
+times: into the queue's words ("Screen vertices go from the
+program's memory to the queue" above), the card's `ScreenVertex`,
+the host's vertex for each corner
 (`gpu::Vertex`), and the bytes the host moves to its pixel centres.
 
 Where the emulator thread's busy time goes, from a profile of 20
@@ -2059,14 +2062,15 @@ seconds on each build, as milliseconds of a frame (the share times
 | A frame's busy time | 29.1 | 23.1 |
 
 `DrawIndexedPrimitive` was 19.0% of the busy time and is 6.4%. Of
-the frame's 755 draws, 754.7 go the direct way and one, with 141
-vertices, through the pipeline. What the game's calls cost besides
-is small here: about 3,200 calls a frame, of which the trap and the
-arguments are about 1% of the busy time.
+the frame's 756 draws, 755 (754.7 on average) go the direct way and
+one, with 141 vertices, through the pipeline. What the game's calls
+cost besides is small here: about 3,200 calls a frame, of which the
+trap and the arguments are about 1% of the busy time.
 
 Frames a second, each run alone on the machine with `cycles=max`
-and the profiler off, main's build and the branch's in turn in one
-session: five runs of two 15-second windows for Black & White, and
+and the profiler off, main's build and that of the direct path and
+the host's queue ("After", without the kept buffer below) in turn in
+one session: five runs of two 15-second windows for Black & White, and
 two runs of two 20-second windows for the others (Giants and No One
 Lives Forever from a saved state, Oni by its route):
 
@@ -2077,9 +2081,16 @@ Lives Forever from a saved state, Oni by its route):
 | Giants | 37.5 to 37.9 | 38.4 to 39.6 | 263 of 981 |
 | Oni, training room | 45.6 to 46.3 | 47.2 to 48.0 | none |
 
-Giants draws most of its vertices untransformed, on the card's
-transform and lighting, and Oni's reach the device from the OpenGL
-front end already read: both gain from the host's queue alone.
+The last column is a frame's draws the direct way out of those and
+the batches the pipeline handed the card (`screen_draws` in
+`/api/win32/ddraw`). A pipeline batch is a declined draw of screen
+vertices, an execute buffer, a vertex buffer `ProcessVertices`
+filled, or a draw of vertices to transform that the card doesn't
+transform itself, so Giants' 718 others aren't all screen draws the
+direct path declined. Giants draws most of its vertices
+untransformed, on the card's transform and lighting, and Oni's reach
+the device from the OpenGL front end already read: both gain from
+the host's queue alone.
 
 The OpenGL renderer also keeps the buffer it gathers a batch's
 vertices in from batch to batch, where it took a new one of some
@@ -2097,7 +2108,7 @@ run, so the host's queue is covered there by the tests that draw each
 scene on both renderers (`toadforce::gl`).
 
 The card's draws join into runs of one state on the host as before:
-this scene's 755 draws make 560 runs, so its states change too often
+this scene's 756 draws make 560 runs, so its states change too often
 for joining to give more. `cycles=max` leaves 15% of each frame idle
 (`MAX_BUSY_SHARE`); with the whole frame the scene runs at 42.6, with
 no emulated time dropped and the sound queue never dry on a quiet

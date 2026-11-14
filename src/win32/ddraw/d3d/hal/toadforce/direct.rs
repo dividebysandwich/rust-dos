@@ -421,8 +421,9 @@ mod tests {
     fn made_up(seed: u64) -> (Layout, Setup, Card, u32, Vec<u8>, Option<Vec<u16>>) {
         let mut r = Random(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         // Positions alone, the old transformed vertex, one colour, two
-        // sets, a set of three numbers, sets of four and of one, and
-        // four sets.
+        // sets, a set of three numbers, sets of four and of one, four
+        // sets, a point size (D3DFVF_PSIZE), and five to eight sets,
+        // some with a point size.
         let codes = [
             0x004,
             0x1C4,
@@ -431,10 +432,24 @@ mod tests {
             0x144 | 1 << 16,
             0x284 | 2 << 16 | 3 << 18,
             0x4C4,
+            0x1E4,
+            0x5C4,
+            0x6A4 | 1 << 22,
+            0x764,
+            0x8E4 | 2 << 18 | 3 << 30,
         ];
         let layout = Layout::of(codes[r.below(codes.len() as u32) as usize]).unwrap();
+        // The card's band, one that takes in every vertex made here,
+        // and one that leaves many of them out.
+        let bands = [
+            VERTEX_BAND,
+            VERTEX_BAND,
+            VERTEX_BAND,
+            [-1024.0, -1024.0, 1024.0, 1024.0],
+            [-150.0, -150.0, 850.0, 650.0],
+        ];
         let mut setup = Setup {
-            guard_band: VERTEX_BAND,
+            guard_band: bands[r.below(bands.len() as u32) as usize],
             clip: r.below(2) == 0,
             cull: 1 + r.below(3),
             screen_stages: [4, 4, 4, 2][r.below(4) as usize],
@@ -448,7 +463,7 @@ mod tests {
             // count or without.
             // What makes coordinates for a vertex to transform (a
             // generated set, a matrix's count) leaves these alone.
-            let index = [stage as u32, r.below(4), 7, stage as u32 | 2 << 16][r.below(4) as usize];
+            let index = [stage as u32, r.below(8), 7, stage as u32 | 2 << 16][r.below(4) as usize];
             let flags = [
                 0,
                 0,
@@ -469,8 +484,10 @@ mod tests {
         };
         let kind = TRIANGLELIST + r.below(3);
         let count = 3 + r.below(40) as usize;
-        // One draw in eight has a vertex the pipeline cuts at.
-        let stray = (r.below(8) == 0).then(|| (r.below(count as u32) as usize, r.below(6)));
+        // One draw in eight has a vertex the pipeline cuts at, or one
+        // on the band's edge, which it doesn't.
+        let stray = (r.below(8) == 0).then(|| (r.below(count as u32) as usize, r.below(8)));
+        let band = setup.guard_band;
         let mut bytes = Vec::new();
         for i in 0..count {
             let mut words = vec![0u32; layout.size as usize / 4];
@@ -487,7 +504,15 @@ mod tests {
                 Some((at, 3)) if at == i => place[2] = 1.5,
                 Some((at, 4)) if at == i => place[0] = f32::NAN,
                 Some((at, 5)) if at == i => place[2] = f32::INFINITY,
+                Some((at, 6)) if at == i => place[0] = band[0],
+                Some((at, 7)) if at == i => place[1] = band[3],
                 _ => {}
+            }
+            // A 1 / w the pipeline passes on as it is: 0, below 0, not
+            // a number, -0 and infinite.
+            if r.below(12) == 0 {
+                let rhw = [0.0, -1.5, f32::NAN, -0.0, f32::INFINITY];
+                place[3] = rhw[r.below(rhw.len() as u32) as usize];
             }
             // Corners that fall on each other give triangles with no
             // area.
@@ -521,7 +546,7 @@ mod tests {
     #[test]
     fn a_direct_draw_is_the_pipelines_triangles() {
         let (mut direct_draws, mut kept_draws) = (0, 0);
-        for seed in 0..6000 {
+        for seed in 0..8000 {
             let (layout, setup, card, kind, bytes, order) = made_up(seed);
             let size = layout.size as usize;
             let count = bytes.len() / size;
