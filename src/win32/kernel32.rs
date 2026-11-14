@@ -1057,19 +1057,24 @@ pub fn global_free(cpu: &mut Cpu, handle: u32) {
     global::global_free(cpu, &[handle]);
 }
 
-/// ANSI text in Unicode, by the ANSI code page.
-pub fn ansi_to_wide(bytes: &[u8]) -> Vec<u16> {
-    text::ansi_to_wide(bytes)
+/// ANSI text in Unicode, by the system's ANSI code page.
+pub fn ansi_to_wide(cpu: &Cpu, bytes: &[u8]) -> Vec<u16> {
+    text::ansi_to_wide(cpu, bytes)
 }
 
-/// Unicode text in the ANSI code page, '?' for what it lacks.
-pub fn wide_to_ansi(units: &[u16]) -> Vec<u8> {
-    text::wide_to_ansi(units)
+/// Unicode text in the system's ANSI code page, '?' for what it lacks.
+pub fn wide_to_ansi(cpu: &Cpu, units: &[u16]) -> Vec<u8> {
+    text::wide_to_ansi(cpu, units)
 }
 
-/// lstrcmpiA's comparison of two ANSI strings, without their zeros.
-pub fn compare_nocase(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
-    let (a, b) = (text::ansi_to_wide(a), text::ansi_to_wide(b));
+/// lstrcmpiA's comparison of two strings of the code page `page`,
+/// without their zeros.
+pub fn compare_nocase(
+    page: crate::win32::nls::CodePage,
+    a: &[u8],
+    b: &[u8],
+) -> std::cmp::Ordering {
+    let (a, b) = (page.decode(a), page.decode(b));
     sort::compare(sort::NORM_IGNORECASE, &a, &b)
 }
 

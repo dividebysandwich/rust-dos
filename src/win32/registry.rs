@@ -696,6 +696,7 @@ pub fn get(cpu: &mut Cpu) -> &mut Registry {
         });
         let mut registry = Registry::seeded(text.as_deref(), version);
         registry.import(&devices(cd));
+        registry.import(&super::nls::registry_values(cpu.bus.win32.os_locale));
         registry.dirty = false;
         cpu.bus.win32.registry = registry;
     }

@@ -1,0 +1,1299 @@
+# The locales of the built-in Windows (`win32_locale`), from which
+# tools/gen_locales.py writes src/win32/nls/locales.rs.
+#
+# Each block is one locale: "[name]" (the setting's value), then one
+# "key value" line per field. Lists (days from Monday, months) take "|"
+# between their items. A value is a Rust string's contents: \u{A0} is the
+# no-break space. "#" starts a comment line.
+#
+# Where the values come from:
+# - LCIDs, ANSI, OEM and Mac code pages: Appendix F, "Locale-Specific
+#   Code Page Information", of Nadine Kano's "Developing International
+#   Software for Windows 95 and Windows NT" (Microsoft Press, 1995),
+#   and Microsoft's published list of locale identifiers ([MS-LCID]).
+# - Names, months, days, separators and formats: the Unicode CLDR, with
+#   the forms the Windows of the time used where they differ (the
+#   language's English name with Windows' qualifier, the three-letter
+#   abbreviations of LOCALE_SABBREVLANGNAME, four-digit years in the
+#   short date as after Windows 98's year 2000 update), checked against
+#   Wine's locale tests where these cover a locale.
+# - Currencies: those of 1998, before the euro. Windows 98 SE shipped
+#   with each country's own currency; the euro came to these locales'
+#   settings with Windows' later updates, not with 98 SE.
+#
+# fields:
+#   lcid, code_pages (ANSI OEM Mac), country_code (LOCALE_ICOUNTRY)
+#   full_language (LOCALE_SLANGUAGE), language (LOCALE_SENGLANGUAGE, and
+#   setlocale's name with country), abbrev_language, native_language,
+#   iso_language, country, abbrev_country, native_country, iso_country,
+#   list, measure (0 metric), decimal, thousand, grouping,
+#   negative_number, currency, intl_symbol, money_decimal,
+#   money_thousand, currency_order (LOCALE_ICURRENCY), negative_currency
+#   (LOCALE_INEGCURR), date_separator, time_separator, short_date,
+#   long_date, time_format, date_order (0 MDY, 1 DMY, 2 YMD), hours24,
+#   am, pm, first_day (0 Monday, 6 Sunday), days, abbrev_days, months,
+#   abbrev_months.
+#
+# The first eight are the locales the setting started with; new ones go
+# at the end, since a saved state keeps a locale by its place here.
+
+[en-US]
+lcid 0409
+code_pages 1252 437 10000
+country_code 1
+full_language English (United States)
+language English
+abbrev_language ENU
+native_language English
+iso_language en
+country United States
+abbrev_country USA
+native_country United States
+iso_country US
+list ,
+measure 1
+decimal .
+thousand ,
+grouping 3;0
+negative_number 1
+currency $
+intl_symbol USD
+money_decimal .
+money_thousand ,
+currency_order 0
+negative_currency 0
+date_separator /
+time_separator :
+short_date M/d/yy
+long_date dddd, MMMM dd, yyyy
+time_format h:mm:ss tt
+date_order 0
+hours24 0
+am AM
+pm PM
+first_day 6
+days Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday
+abbrev_days Mon|Tue|Wed|Thu|Fri|Sat|Sun
+months January|February|March|April|May|June|July|August|September|October|November|December
+abbrev_months Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec
+
+[ru-RU]
+lcid 0419
+code_pages 1251 866 10007
+country_code 7
+full_language Russian
+language Russian
+abbrev_language RUS
+native_language русский
+iso_language ru
+country Russia
+abbrev_country RUS
+native_country Россия
+iso_country RU
+list ;
+measure 0
+decimal ,
+thousand \u{A0}
+grouping 3;0
+negative_number 1
+currency р.
+intl_symbol RUR
+money_decimal ,
+money_thousand \u{A0}
+currency_order 1
+negative_currency 5
+date_separator .
+time_separator :
+short_date dd.MM.yy
+long_date d MMMM yyyy 'г.'
+time_format H:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days понедельник|вторник|среда|четверг|пятница|суббота|воскресенье
+abbrev_days Пн|Вт|Ср|Чт|Пт|Сб|Вс
+months Январь|Февраль|Март|Апрель|Май|Июнь|Июль|Август|Сентябрь|Октябрь|Ноябрь|Декабрь
+abbrev_months янв|фев|мар|апр|май|июн|июл|авг|сен|окт|ноя|дек
+
+[pl-PL]
+lcid 0415
+code_pages 1250 852 10029
+country_code 48
+full_language Polish
+language Polish
+abbrev_language PLK
+native_language polski
+iso_language pl
+country Poland
+abbrev_country POL
+native_country Polska
+iso_country PL
+list ;
+measure 0
+decimal ,
+thousand \u{A0}
+grouping 3;0
+negative_number 1
+currency zł
+intl_symbol PLN
+money_decimal ,
+money_thousand \u{A0}
+currency_order 3
+negative_currency 8
+date_separator -
+time_separator :
+short_date yy-MM-dd
+long_date d MMMM yyyy
+time_format HH:mm:ss
+date_order 2
+hours24 1
+am
+pm
+first_day 0
+days poniedziałek|wtorek|środa|czwartek|piątek|sobota|niedziela
+abbrev_days Pn|Wt|Śr|Cz|Pt|So|N
+months styczeń|luty|marzec|kwiecień|maj|czerwiec|lipiec|sierpień|wrzesień|październik|listopad|grudzień
+abbrev_months sty|lut|mar|kwi|maj|cze|lip|sie|wrz|paź|lis|gru
+
+[cs-CZ]
+lcid 0405
+code_pages 1250 852 10029
+country_code 42
+full_language Czech
+language Czech
+abbrev_language CSY
+native_language čeština
+iso_language cs
+country Czech Republic
+abbrev_country CZE
+native_country Česká republika
+iso_country CZ
+list ;
+measure 0
+decimal ,
+thousand \u{A0}
+grouping 3;0
+negative_number 1
+currency Kč
+intl_symbol CZK
+money_decimal ,
+money_thousand \u{A0}
+currency_order 3
+negative_currency 8
+date_separator .
+time_separator :
+short_date d.M.yyyy
+long_date d. MMMM yyyy
+time_format H:mm:ss
+date_order 1
+hours24 1
+am dop.
+pm odp.
+first_day 0
+days pondělí|úterý|středa|čtvrtek|pátek|sobota|neděle
+abbrev_days po|út|st|čt|pá|so|ne
+months leden|únor|březen|duben|květen|červen|červenec|srpen|září|říjen|listopad|prosinec
+abbrev_months I|II|III|IV|V|VI|VII|VIII|IX|X|XI|XII
+
+[hu-HU]
+lcid 040E
+code_pages 1250 852 10029
+country_code 36
+full_language Hungarian
+language Hungarian
+abbrev_language HUN
+native_language magyar
+iso_language hu
+country Hungary
+abbrev_country HUN
+native_country Magyarország
+iso_country HU
+list ;
+measure 0
+decimal ,
+thousand \u{A0}
+grouping 3;0
+negative_number 1
+currency Ft
+intl_symbol HUF
+money_decimal ,
+money_thousand \u{A0}
+currency_order 3
+negative_currency 8
+date_separator .
+time_separator :
+short_date yyyy. MM. dd.
+long_date yyyy. MMMM d.
+time_format H:mm:ss
+date_order 2
+hours24 1
+am de.
+pm du.
+first_day 0
+days hétfő|kedd|szerda|csütörtök|péntek|szombat|vasárnap
+abbrev_days H|K|Sze|Cs|P|Szo|V
+months január|február|március|április|május|június|július|augusztus|szeptember|október|november|december
+abbrev_months jan.|febr.|márc.|ápr.|máj.|jún.|júl.|aug.|szept.|okt.|nov.|dec.
+
+[el-GR]
+lcid 0408
+code_pages 1253 737 10006
+country_code 30
+full_language Greek
+language Greek
+abbrev_language ELL
+native_language ελληνικά
+iso_language el
+country Greece
+abbrev_country GRC
+native_country Ελλάδα
+iso_country GR
+list ;
+measure 0
+decimal ,
+thousand .
+grouping 3;0
+negative_number 1
+currency Δρχ
+intl_symbol GRD
+money_decimal ,
+money_thousand .
+currency_order 1
+negative_currency 8
+date_separator /
+time_separator :
+short_date d/M/yyyy
+long_date dddd, d MMMM yyyy
+time_format h:mm:ss tt
+date_order 1
+hours24 0
+am πμ
+pm μμ
+first_day 0
+days Δευτέρα|Τρίτη|Τετάρτη|Πέμπτη|Παρασκευή|Σάββατο|Κυριακή
+abbrev_days Δευ|Τρι|Τετ|Πεμ|Παρ|Σαβ|Κυρ
+months Ιανουάριος|Φεβρουάριος|Μάρτιος|Απρίλιος|Μάιος|Ιούνιος|Ιούλιος|Αύγουστος|Σεπτέμβριος|Οκτώβριος|Νοέμβριος|Δεκέμβριος
+abbrev_months Ιαν|Φεβ|Μαρ|Απρ|Μαϊ|Ιουν|Ιουλ|Αυγ|Σεπ|Οκτ|Νοε|Δεκ
+
+[tr-TR]
+lcid 041F
+code_pages 1254 857 10081
+country_code 90
+full_language Turkish
+language Turkish
+abbrev_language TRK
+native_language Türkçe
+iso_language tr
+country Turkey
+abbrev_country TUR
+native_country Türkiye
+iso_country TR
+list ;
+measure 0
+decimal ,
+thousand .
+grouping 3;0
+negative_number 1
+currency TL
+intl_symbol TRL
+money_decimal ,
+money_thousand .
+currency_order 3
+negative_currency 8
+date_separator .
+time_separator :
+short_date dd.MM.yyyy
+long_date dd MMMM yyyy dddd
+time_format HH:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days Pazartesi|Salı|Çarşamba|Perşembe|Cuma|Cumartesi|Pazar
+abbrev_days Pzt|Sal|Çar|Per|Cum|Cmt|Paz
+months Ocak|Şubat|Mart|Nisan|Mayıs|Haziran|Temmuz|Ağustos|Eylül|Ekim|Kasım|Aralık
+abbrev_months Oca|Şub|Mar|Nis|May|Haz|Tem|Ağu|Eyl|Eki|Kas|Ara
+
+[lt-LT]
+lcid 0427
+code_pages 1257 775 10029
+country_code 370
+full_language Lithuanian
+language Lithuanian
+abbrev_language LTH
+native_language lietuvių
+iso_language lt
+country Lithuania
+abbrev_country LTU
+native_country Lietuva
+iso_country LT
+list ;
+measure 0
+decimal ,
+thousand \u{A0}
+grouping 3;0
+negative_number 1
+currency Lt
+intl_symbol LTL
+money_decimal ,
+money_thousand \u{A0}
+currency_order 3
+negative_currency 8
+date_separator .
+time_separator :
+short_date yyyy.MM.dd
+long_date yyyy 'm.' MMMM d 'd.'
+time_format HH:mm:ss
+date_order 2
+hours24 1
+am
+pm
+first_day 0
+days Pirmadienis|Antradienis|Trečiadienis|Ketvirtadienis|Penktadienis|Šeštadienis|Sekmadienis
+abbrev_days Pr|An|Tr|Kt|Pn|Št|Sk
+months sausis|vasaris|kovas|balandis|gegužė|birželis|liepa|rugpjūtis|rugsėjis|spalis|lapkritis|gruodis
+abbrev_months Sau|Vas|Kov|Bal|Geg|Bir|Lie|Rgp|Rgs|Spl|Lap|Grd
+
+# Code page 1257: Latvian and Estonian. Kano's table gives them OEM code
+# page 775 and no Mac code page; the Mac code page is Lithuanian's.
+
+[lv-LV]
+lcid 0426
+code_pages 1257 775 10029
+country_code 371
+full_language Latvian
+language Latvian
+abbrev_language LVI
+native_language latviešu
+iso_language lv
+country Latvia
+abbrev_country LVA
+native_country Latvija
+iso_country LV
+list ;
+measure 0
+decimal ,
+thousand \u{A0}
+grouping 3;0
+negative_number 1
+currency Ls
+intl_symbol LVL
+money_decimal ,
+money_thousand \u{A0}
+currency_order 2
+negative_currency 9
+date_separator .
+time_separator :
+short_date yyyy.MM.dd.
+long_date dddd, yyyy'. gada 'd. MMMM
+time_format HH:mm:ss
+date_order 2
+hours24 1
+am
+pm
+first_day 0
+days pirmdiena|otrdiena|trešdiena|ceturtdiena|piektdiena|sestdiena|svētdiena
+abbrev_days Pr|Ot|Tr|Ce|Pk|Se|Sv
+months janvāris|februāris|marts|aprīlis|maijs|jūnijs|jūlijs|augusts|septembris|oktobris|novembris|decembris
+abbrev_months Jan|Feb|Mar|Apr|Mai|Jūn|Jūl|Aug|Sep|Okt|Nov|Dec
+
+[et-EE]
+lcid 0425
+code_pages 1257 775 10029
+country_code 372
+full_language Estonian
+language Estonian
+abbrev_language ETI
+native_language eesti
+iso_language et
+country Estonia
+abbrev_country EST
+native_country Eesti
+iso_country EE
+list ;
+measure 0
+decimal ,
+thousand \u{A0}
+grouping 3;0
+negative_number 1
+currency kr
+intl_symbol EEK
+money_decimal ,
+money_thousand \u{A0}
+currency_order 3
+negative_currency 8
+date_separator .
+time_separator :
+short_date d.MM.yyyy
+long_date d. MMMM yyyy'. a.'
+time_format H:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days esmaspäev|teisipäev|kolmapäev|neljapäev|reede|laupäev|pühapäev
+abbrev_days E|T|K|N|R|L|P
+months jaanuar|veebruar|märts|aprill|mai|juuni|juuli|august|september|oktoober|november|detsember
+abbrev_months jaan|veebr|märts|apr|mai|juuni|juuli|aug|sept|okt|nov|dets
+
+# Code page 1251: Belarusian, Bulgarian, Serbian in Cyrillic and
+# Ukrainian. Kano's table gives Belarusian, Bulgarian and Ukrainian OEM
+# code page 866 (855 second), as Russian. Serbian in Cyrillic has no row
+# there; Windows NT 4.0 gave it OEM code page 855. Macedonian (042Fh)
+# isn't here: Kano's appendix lists it among the locales Windows "is
+# planning to support", and it came with Windows 2000.
+
+[be-BY]
+lcid 0423
+code_pages 1251 866 10007
+country_code 375
+full_language Belarusian
+language Belarusian
+abbrev_language BEL
+native_language беларуская
+iso_language be
+country Belarus
+abbrev_country BLR
+native_country Беларусь
+iso_country BY
+list ;
+measure 0
+decimal ,
+thousand \u{A0}
+grouping 3;0
+negative_number 1
+currency р.
+intl_symbol BYB
+money_decimal ,
+money_thousand \u{A0}
+currency_order 3
+negative_currency 8
+date_separator .
+time_separator :
+short_date dd.MM.yyyy
+long_date d MMMM yyyy
+time_format H:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days панядзелак|аўторак|серада|чацвер|пятніца|субота|нядзеля
+abbrev_days пн|аў|ср|чц|пт|сб|нд
+months Студзень|Люты|Сакавік|Красавік|Май|Чэрвень|Ліпень|Жнівень|Верасень|Кастрычнік|Лістапад|Снежань
+abbrev_months Сту|Лют|Сак|Кра|Май|Чэр|Ліп|Жні|Вер|Кас|Ліс|Сне
+
+[bg-BG]
+lcid 0402
+code_pages 1251 866 10007
+country_code 359
+full_language Bulgarian
+language Bulgarian
+abbrev_language BGR
+native_language български
+iso_language bg
+country Bulgaria
+abbrev_country BGR
+native_country България
+iso_country BG
+list ;
+measure 0
+decimal ,
+thousand \u{A0}
+grouping 3;0
+negative_number 1
+currency лв
+intl_symbol BGL
+money_decimal ,
+money_thousand \u{A0}
+currency_order 3
+negative_currency 8
+date_separator .
+time_separator :
+short_date dd.MM.yyyy
+long_date dd MMMM yyyy 'г.'
+time_format HH:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days понеделник|вторник|сряда|четвъртък|петък|събота|неделя
+abbrev_days пн|вт|ср|чт|пт|сб|нд
+months януари|февруари|март|април|май|юни|юли|август|септември|октомври|ноември|декември
+abbrev_months яну|фев|мар|апр|май|юни|юли|авг|сеп|окт|ное|дек
+
+[sr-Cyrl-YU]
+lcid 0C1A
+code_pages 1251 855 10007
+country_code 381
+full_language Serbian (Cyrillic)
+language Serbian
+abbrev_language SRB
+native_language српски
+iso_language sr
+country Yugoslavia
+abbrev_country YUG
+native_country Југославија
+iso_country YU
+list ;
+measure 0
+decimal ,
+thousand .
+grouping 3;0
+negative_number 1
+currency Дин.
+intl_symbol YUN
+money_decimal ,
+money_thousand .
+currency_order 3
+negative_currency 8
+date_separator .
+time_separator :
+short_date d.M.yyyy
+long_date d. MMMM yyyy
+time_format H:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days понедељак|уторак|среда|четвртак|петак|субота|недеља
+abbrev_days пон|уто|сре|чет|пет|суб|нед
+months јануар|фебруар|март|април|мај|јун|јул|август|септембар|октобар|новембар|децембар
+abbrev_months јан|феб|мар|апр|мај|јун|јул|авг|сеп|окт|нов|дец
+
+[uk-UA]
+lcid 0422
+code_pages 1251 866 10007
+country_code 380
+full_language Ukrainian
+language Ukrainian
+abbrev_language UKR
+native_language українська
+iso_language uk
+country Ukraine
+abbrev_country UKR
+native_country Україна
+iso_country UA
+list ;
+measure 0
+decimal ,
+thousand \u{A0}
+grouping 3;0
+negative_number 1
+currency грн.
+intl_symbol UAH
+money_decimal ,
+money_thousand \u{A0}
+currency_order 1
+negative_currency 5
+date_separator .
+time_separator :
+short_date dd.MM.yyyy
+long_date d MMMM yyyy' р.'
+time_format H:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days понеділок|вівторок|середа|четвер|п'ятниця|субота|неділя
+abbrev_days Пн|Вт|Ср|Чт|Пт|Сб|Нд
+months Січень|Лютий|Березень|Квітень|Травень|Червень|Липень|Серпень|Вересень|Жовтень|Листопад|Грудень
+abbrev_months Січ|Лют|Бер|Кві|Тра|Чер|Лип|Сер|Вер|Жов|Лис|Гру
+
+# Code page 1250: Croatian, Romanian, Serbian in Latin, Slovak and
+# Slovenian, all with OEM code page 852 in Kano's table (which gives
+# Croatian and Serbian in Latin no LCID; Windows NT 4.0 has 041Ah and
+# 081Ah). Croatian and Serbian take the Mac code page 10082.
+
+[hr-HR]
+lcid 041A
+code_pages 1250 852 10082
+country_code 385
+full_language Croatian
+language Croatian
+abbrev_language HRV
+native_language hrvatski
+iso_language hr
+country Croatia
+abbrev_country HRV
+native_country Hrvatska
+iso_country HR
+list ;
+measure 0
+decimal ,
+thousand .
+grouping 3;0
+negative_number 1
+currency kn
+intl_symbol HRK
+money_decimal ,
+money_thousand .
+currency_order 3
+negative_currency 8
+date_separator .
+time_separator :
+short_date d.M.yyyy
+long_date d. MMMM yyyy
+time_format H:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days ponedjeljak|utorak|srijeda|četvrtak|petak|subota|nedjelja
+abbrev_days pon|uto|sri|čet|pet|sub|ned
+months siječanj|veljača|ožujak|travanj|svibanj|lipanj|srpanj|kolovoz|rujan|listopad|studeni|prosinac
+abbrev_months sij|vlj|ožu|tra|svi|lip|srp|kol|ruj|lis|stu|pro
+
+[ro-RO]
+lcid 0418
+code_pages 1250 852 10029
+country_code 40
+full_language Romanian
+language Romanian
+abbrev_language ROM
+native_language română
+iso_language ro
+country Romania
+abbrev_country ROM
+native_country România
+iso_country RO
+list ;
+measure 0
+decimal ,
+thousand .
+grouping 3;0
+negative_number 1
+currency lei
+intl_symbol ROL
+money_decimal ,
+money_thousand .
+currency_order 3
+negative_currency 8
+date_separator .
+time_separator :
+short_date dd.MM.yyyy
+long_date d MMMM yyyy
+time_format HH:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days luni|marţi|miercuri|joi|vineri|sâmbătă|duminică
+abbrev_days Lu|Ma|Mi|Jo|Vi|Sâ|Du
+months ianuarie|februarie|martie|aprilie|mai|iunie|iulie|august|septembrie|octombrie|noiembrie|decembrie
+abbrev_months ian|feb|mar|apr|mai|iun|iul|aug|sep|oct|nov|dec
+
+[sr-Latn-YU]
+lcid 081A
+code_pages 1250 852 10082
+country_code 381
+full_language Serbian (Latin)
+language Serbian
+abbrev_language SRL
+native_language srpski
+iso_language sr
+country Yugoslavia
+abbrev_country YUG
+native_country Jugoslavija
+iso_country YU
+list ;
+measure 0
+decimal ,
+thousand .
+grouping 3;0
+negative_number 1
+currency Din.
+intl_symbol YUN
+money_decimal ,
+money_thousand .
+currency_order 3
+negative_currency 8
+date_separator .
+time_separator :
+short_date d.M.yyyy
+long_date d. MMMM yyyy
+time_format H:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days ponedeljak|utorak|sreda|četvrtak|petak|subota|nedelja
+abbrev_days pon|uto|sre|čet|pet|sub|ned
+months januar|februar|mart|april|maj|jun|jul|avgust|septembar|oktobar|novembar|decembar
+abbrev_months jan|feb|mar|apr|maj|jun|jul|avg|sep|okt|nov|dec
+
+[sk-SK]
+lcid 041B
+code_pages 1250 852 10029
+country_code 42
+full_language Slovak
+language Slovak
+abbrev_language SKY
+native_language slovenčina
+iso_language sk
+country Slovakia
+abbrev_country SVK
+native_country Slovensko
+iso_country SK
+list ;
+measure 0
+decimal ,
+thousand \u{A0}
+grouping 3;0
+negative_number 1
+currency Sk
+intl_symbol SKK
+money_decimal ,
+money_thousand \u{A0}
+currency_order 3
+negative_currency 8
+date_separator .
+time_separator :
+short_date d.M.yyyy
+long_date d. MMMM yyyy
+time_format H:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days pondelok|utorok|streda|štvrtok|piatok|sobota|nedeľa
+abbrev_days po|ut|st|št|pi|so|ne
+months január|február|marec|apríl|máj|jún|júl|august|september|október|november|december
+abbrev_months I|II|III|IV|V|VI|VII|VIII|IX|X|XI|XII
+
+[sl-SI]
+lcid 0424
+code_pages 1250 852 10029
+country_code 386
+full_language Slovenian
+language Slovenian
+abbrev_language SLV
+native_language slovenščina
+iso_language sl
+country Slovenia
+abbrev_country SVN
+native_country Slovenija
+iso_country SI
+list ;
+measure 0
+decimal ,
+thousand .
+grouping 3;0
+negative_number 1
+currency SIT
+intl_symbol SIT
+money_decimal ,
+money_thousand .
+currency_order 3
+negative_currency 8
+date_separator .
+time_separator :
+short_date d.M.yyyy
+long_date d. MMMM yyyy
+time_format H:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days ponedeljek|torek|sreda|četrtek|petek|sobota|nedelja
+abbrev_days pon|tor|sre|čet|pet|sob|ned
+months januar|februar|marec|april|maj|junij|julij|avgust|september|oktober|november|december
+abbrev_months jan|feb|mar|apr|maj|jun|jul|avg|sep|okt|nov|dec
+
+# Code page 1252: the Western European locales, all with OEM code page
+# 850 in Kano's table (437, 860 or 865 second). Spanish is the
+# traditional sort, 040Ah, the locale of Windows 98's Spanish edition;
+# the modern sort (0C0Ah) differs only in how it sorts "ch" and "ll",
+# which the built-in Windows' sort, by code page, doesn't do.
+
+[da-DK]
+lcid 0406
+code_pages 1252 850 10000
+country_code 45
+full_language Danish
+language Danish
+abbrev_language DAN
+native_language dansk
+iso_language da
+country Denmark
+abbrev_country DNK
+native_country Danmark
+iso_country DK
+list ;
+measure 0
+decimal ,
+thousand .
+grouping 3;0
+negative_number 1
+currency kr
+intl_symbol DKK
+money_decimal ,
+money_thousand .
+currency_order 2
+negative_currency 12
+date_separator -
+time_separator :
+short_date dd-MM-yyyy
+long_date d. MMMM yyyy
+time_format HH:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days mandag|tirsdag|onsdag|torsdag|fredag|lørdag|søndag
+abbrev_days ma|ti|on|to|fr|lø|sø
+months januar|februar|marts|april|maj|juni|juli|august|september|oktober|november|december
+abbrev_months jan|feb|mar|apr|maj|jun|jul|aug|sep|okt|nov|dec
+
+[de-DE]
+lcid 0407
+code_pages 1252 850 10000
+country_code 49
+full_language German (Standard)
+language German
+abbrev_language DEU
+native_language Deutsch
+iso_language de
+country Germany
+abbrev_country DEU
+native_country Deutschland
+iso_country DE
+list ;
+measure 0
+decimal ,
+thousand .
+grouping 3;0
+negative_number 1
+currency DM
+intl_symbol DEM
+money_decimal ,
+money_thousand .
+currency_order 3
+negative_currency 8
+date_separator .
+time_separator :
+short_date dd.MM.yyyy
+long_date dddd, d. MMMM yyyy
+time_format HH:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag
+abbrev_days Mo|Di|Mi|Do|Fr|Sa|So
+months Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember
+abbrev_months Jan|Feb|Mrz|Apr|Mai|Jun|Jul|Aug|Sep|Okt|Nov|Dez
+
+[en-GB]
+lcid 0809
+code_pages 1252 850 10000
+country_code 44
+full_language English (United Kingdom)
+language English
+abbrev_language ENG
+native_language English
+iso_language en
+country United Kingdom
+abbrev_country GBR
+native_country United Kingdom
+iso_country GB
+list ,
+measure 0
+decimal .
+thousand ,
+grouping 3;0
+negative_number 1
+currency £
+intl_symbol GBP
+money_decimal .
+money_thousand ,
+currency_order 0
+negative_currency 1
+date_separator /
+time_separator :
+short_date dd/MM/yyyy
+long_date dd MMMM yyyy
+time_format HH:mm:ss
+date_order 1
+hours24 1
+am AM
+pm PM
+first_day 0
+days Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday
+abbrev_days Mon|Tue|Wed|Thu|Fri|Sat|Sun
+months January|February|March|April|May|June|July|August|September|October|November|December
+abbrev_months Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec
+
+[es-ES]
+lcid 040A
+code_pages 1252 850 10000
+country_code 34
+full_language Spanish (Traditional Sort)
+language Spanish
+abbrev_language ESP
+native_language español
+iso_language es
+country Spain
+abbrev_country ESP
+native_country España
+iso_country ES
+list ;
+measure 0
+decimal ,
+thousand .
+grouping 3;0
+negative_number 1
+currency Pts
+intl_symbol ESP
+money_decimal ,
+money_thousand .
+currency_order 3
+negative_currency 8
+date_separator /
+time_separator :
+short_date dd/MM/yyyy
+long_date dddd, d' de 'MMMM' de 'yyyy
+time_format H:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days lunes|martes|miércoles|jueves|viernes|sábado|domingo
+abbrev_days lun|mar|mié|jue|vie|sáb|dom
+months enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre
+abbrev_months ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic
+
+[fi-FI]
+lcid 040B
+code_pages 1252 850 10000
+country_code 358
+full_language Finnish
+language Finnish
+abbrev_language FIN
+native_language suomi
+iso_language fi
+country Finland
+abbrev_country FIN
+native_country Suomi
+iso_country FI
+list ;
+measure 0
+decimal ,
+thousand \u{A0}
+grouping 3;0
+negative_number 1
+currency mk
+intl_symbol FIM
+money_decimal ,
+money_thousand \u{A0}
+currency_order 3
+negative_currency 8
+date_separator .
+time_separator :
+short_date d.M.yyyy
+long_date d. MMMM'ta 'yyyy
+time_format H:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days maanantai|tiistai|keskiviikko|torstai|perjantai|lauantai|sunnuntai
+abbrev_days ma|ti|ke|to|pe|la|su
+months tammikuu|helmikuu|maaliskuu|huhtikuu|toukokuu|kesäkuu|heinäkuu|elokuu|syyskuu|lokakuu|marraskuu|joulukuu
+abbrev_months tammi|helmi|maalis|huhti|touko|kesä|heinä|elo|syys|loka|marras|joulu
+
+[fr-FR]
+lcid 040C
+code_pages 1252 850 10000
+country_code 33
+full_language French (Standard)
+language French
+abbrev_language FRA
+native_language français
+iso_language fr
+country France
+abbrev_country FRA
+native_country France
+iso_country FR
+list ;
+measure 0
+decimal ,
+thousand \u{A0}
+grouping 3;0
+negative_number 1
+currency F
+intl_symbol FRF
+money_decimal ,
+money_thousand \u{A0}
+currency_order 3
+negative_currency 8
+date_separator /
+time_separator :
+short_date dd/MM/yyyy
+long_date dddd d MMMM yyyy
+time_format HH:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche
+abbrev_days lun.|mar.|mer.|jeu.|ven.|sam.|dim.
+months janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre
+abbrev_months janv.|févr.|mars|avr.|mai|juin|juil.|août|sept.|oct.|nov.|déc.
+
+[it-IT]
+lcid 0410
+code_pages 1252 850 10000
+country_code 39
+full_language Italian (Standard)
+language Italian
+abbrev_language ITA
+native_language italiano
+iso_language it
+country Italy
+abbrev_country ITA
+native_country Italia
+iso_country IT
+list ;
+measure 0
+decimal ,
+thousand .
+grouping 3;0
+negative_number 1
+currency L.
+intl_symbol ITL
+money_decimal ,
+money_thousand .
+currency_order 2
+negative_currency 9
+date_separator /
+time_separator .
+short_date dd/MM/yyyy
+long_date dddd d MMMM yyyy
+time_format H.mm.ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days lunedì|martedì|mercoledì|giovedì|venerdì|sabato|domenica
+abbrev_days lun|mar|mer|gio|ven|sab|dom
+months gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre
+abbrev_months gen|feb|mar|apr|mag|giu|lug|ago|set|ott|nov|dic
+
+[nb-NO]
+lcid 0414
+code_pages 1252 850 10000
+country_code 47
+full_language Norwegian (Bokmål)
+language Norwegian (Bokmål)
+abbrev_language NOR
+native_language norsk (bokmål)
+iso_language no
+country Norway
+abbrev_country NOR
+native_country Norge
+iso_country NO
+list ;
+measure 0
+decimal ,
+thousand \u{A0}
+grouping 3;0
+negative_number 1
+currency kr
+intl_symbol NOK
+money_decimal ,
+money_thousand \u{A0}
+currency_order 2
+negative_currency 12
+date_separator .
+time_separator :
+short_date dd.MM.yyyy
+long_date d. MMMM yyyy
+time_format HH:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days mandag|tirsdag|onsdag|torsdag|fredag|lørdag|søndag
+abbrev_days ma|ti|on|to|fr|lø|sø
+months januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember
+abbrev_months jan|feb|mar|apr|mai|jun|jul|aug|sep|okt|nov|des
+
+[nl-NL]
+lcid 0413
+code_pages 1252 850 10000
+country_code 31
+full_language Dutch (Standard)
+language Dutch
+abbrev_language NLD
+native_language Nederlands
+iso_language nl
+country Netherlands
+abbrev_country NLD
+native_country Nederland
+iso_country NL
+list ;
+measure 0
+decimal ,
+thousand .
+grouping 3;0
+negative_number 1
+currency f
+intl_symbol NLG
+money_decimal ,
+money_thousand .
+currency_order 2
+negative_currency 12
+date_separator -
+time_separator :
+short_date d-M-yyyy
+long_date dddd d MMMM yyyy
+time_format H:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days maandag|dinsdag|woensdag|donderdag|vrijdag|zaterdag|zondag
+abbrev_days ma|di|wo|do|vr|za|zo
+months januari|februari|maart|april|mei|juni|juli|augustus|september|oktober|november|december
+abbrev_months jan|feb|mrt|apr|mei|jun|jul|aug|sep|okt|nov|dec
+
+[pt-BR]
+lcid 0416
+code_pages 1252 850 10000
+country_code 55
+full_language Portuguese (Brazilian)
+language Portuguese
+abbrev_language PTB
+native_language português
+iso_language pt
+country Brazil
+abbrev_country BRA
+native_country Brasil
+iso_country BR
+list ;
+measure 0
+decimal ,
+thousand .
+grouping 3;0
+negative_number 1
+currency R$
+intl_symbol BRL
+money_decimal ,
+money_thousand .
+currency_order 2
+negative_currency 9
+date_separator /
+time_separator :
+short_date dd/MM/yyyy
+long_date dddd, d' de 'MMMM' de 'yyyy
+time_format H:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 6
+days segunda-feira|terça-feira|quarta-feira|quinta-feira|sexta-feira|sábado|domingo
+abbrev_days seg|ter|qua|qui|sex|sáb|dom
+months janeiro|fevereiro|março|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro
+abbrev_months jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez
+
+[pt-PT]
+lcid 0816
+code_pages 1252 850 10000
+country_code 351
+full_language Portuguese (Standard)
+language Portuguese
+abbrev_language PTG
+native_language português
+iso_language pt
+country Portugal
+abbrev_country PRT
+native_country Portugal
+iso_country PT
+list ;
+measure 0
+decimal ,
+thousand .
+grouping 3;0
+negative_number 1
+currency Esc.
+intl_symbol PTE
+money_decimal ,
+money_thousand .
+currency_order 3
+negative_currency 8
+date_separator -
+time_separator :
+short_date dd-MM-yyyy
+long_date dddd, d' de 'MMMM' de 'yyyy
+time_format H:mm:ss
+date_order 1
+hours24 1
+am
+pm
+first_day 0
+days segunda-feira|terça-feira|quarta-feira|quinta-feira|sexta-feira|sábado|domingo
+abbrev_days seg|ter|qua|qui|sex|sáb|dom
+months Janeiro|Fevereiro|Março|Abril|Maio|Junho|Julho|Agosto|Setembro|Outubro|Novembro|Dezembro
+abbrev_months Jan|Fev|Mar|Abr|Mai|Jun|Jul|Ago|Set|Out|Nov|Dez
+
+[sv-SE]
+lcid 041D
+code_pages 1252 850 10000
+country_code 46
+full_language Swedish
+language Swedish
+abbrev_language SVE
+native_language svenska
+iso_language sv
+country Sweden
+abbrev_country SWE
+native_country Sverige
+iso_country SE
+list ;
+measure 0
+decimal ,
+thousand \u{A0}
+grouping 3;0
+negative_number 1
+currency kr
+intl_symbol SEK
+money_decimal ,
+money_thousand \u{A0}
+currency_order 3
+negative_currency 8
+date_separator -
+time_separator :
+short_date yyyy-MM-dd
+long_date 'den 'd MMMM yyyy
+time_format HH:mm:ss
+date_order 2
+hours24 1
+am
+pm
+first_day 0
+days måndag|tisdag|onsdag|torsdag|fredag|lördag|söndag
+abbrev_days må|ti|on|to|fr|lö|sö
+months januari|februari|mars|april|maj|juni|juli|augusti|september|oktober|november|december
+abbrev_months jan|feb|mar|apr|maj|jun|jul|aug|sep|okt|nov|dec

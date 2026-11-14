@@ -30,7 +30,7 @@ pub const API_VARIABLE: &str = "RUST_DOS_ALMANAC_API";
 
 /// The settings the almanac knows, by section and key: those of the
 /// machine a game runs on.
-pub const KEYS: [(&str, &str); 38] = [
+pub const KEYS: [(&str, &str); 39] = [
     ("emulator", "machine"),
     ("emulator", "cpu"),
     ("emulator", "core"),
@@ -45,6 +45,7 @@ pub const KEYS: [(&str, &str); 38] = [
     ("emulator", "win32"),
     ("emulator", "win32_version"),
     ("emulator", "win32_depth"),
+    ("emulator", "win32_locale"),
     ("emulator", "voodoo"),
     ("emulator", "voodoo_model"),
     ("emulator", "voodoo_memory"),
@@ -901,6 +902,34 @@ mod tests {
         assert!(!layered.ems);
         assert_eq!(layered.scale, base.scale);
         assert_eq!(layered.cycles, base.cycles);
+    }
+
+    #[test]
+    fn layering_takes_the_system_locale_and_drops_an_unknown_one() {
+        use crate::config::Win32Locale;
+        let locale = |value: &str| Setting {
+            section: "emulator".into(),
+            key: "win32_locale".into(),
+            value: value.into(),
+        };
+        let base = Settings {
+            win32_locale: Win32Locale::PlPl,
+            ..Settings::default()
+        };
+        let russian = locale("ru-RU");
+        assert_eq!(layer(&base, &[&russian], None).win32_locale, Win32Locale::RuRu);
+        // A locale the built-in Windows doesn't have leaves the base's, as
+        // the configuration file's parser warns and keeps it.
+        let japanese = locale("ja-JP");
+        assert_eq!(layer(&base, &[&japanese], None).win32_locale, Win32Locale::PlPl);
+        let reported = report_settings(&base, None);
+        assert_eq!(reported["emulator"]["win32_locale"], "pl-PL");
+        // Every locale goes through by its name and is reported by it.
+        for l in Win32Locale::ALL {
+            let layered = layer(&base, &[&locale(l.name())], None);
+            assert_eq!(layered.win32_locale, l);
+            assert_eq!(report_settings(&layered, None)["emulator"]["win32_locale"], l.name());
+        }
     }
 
     #[test]

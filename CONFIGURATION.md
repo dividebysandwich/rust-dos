@@ -546,6 +546,39 @@ limit, so without a connection it goes on as it would with one:
   resources of DDRAW, DSOUND, DINPUT, DPLAYX, D3D8, DINPUT8 and the
   DirectMusic DLLs, which GetFileVersionInfo reads, say the same. A
   change takes effect for the next program that starts when none runs.
+* `win32_locale` is the system locale of the built-in Windows, the
+  language edition of Windows 98 it is. `en-US` is the default. The
+  values, by the ANSI code page they read text in:
+  * 1250 (Central European): `cs-CZ` Czech, `hr-HR` Croatian, `hu-HU`
+    Hungarian, `pl-PL` Polish, `ro-RO` Romanian, `sk-SK` Slovak,
+    `sl-SI` Slovenian, `sr-Latn-YU` Serbian in Latin script.
+  * 1251 (Cyrillic): `be-BY` Belarusian, `bg-BG` Bulgarian, `ru-RU`
+    Russian, `sr-Cyrl-YU` Serbian in Cyrillic script, `uk-UA`
+    Ukrainian.
+  * 1252 (Western European): `da-DK` Danish, `de-DE` German, `en-GB`
+    and `en-US` English, `es-ES` Spanish, `fi-FI` Finnish, `fr-FR`
+    French, `it-IT` Italian, `nb-NO` Norwegian, `nl-NL` Dutch, `pt-BR`
+    and `pt-PT` Portuguese, `sv-SE` Swedish.
+  * 1253 (Greek): `el-GR`.
+  * 1254 (Turkish): `tr-TR`.
+  * 1257 (Baltic): `et-EE` Estonian, `lt-LT` Lithuanian, `lv-LV`
+    Latvian.
+
+  A program made for that language's Windows needs it to show its
+  text: its ANSI bytes are read in the locale's code page, and the
+  system's fonts and DEFAULT_CHARSET draw that code page's letters. The
+  locale sets GetACP and GetOEMCP, the conversions of
+  MultiByteToWideChar, WideCharToMultiByte and the C runtime, the case
+  and sorting of text, GetLocaleInfo's names and formats of dates,
+  numbers and money (with the currencies of 1998, before the euro),
+  GetSystemDefaultLCID and GetUserDefaultLCID, and the registry's `Nls`
+  values. Every one of these code pages is installed under every
+  locale, as on a Windows 98 with multilanguage support, so a program
+  that converts or draws text of another one explicitly gets it. The
+  keyboard types the US layout's characters under every locale. Like
+  `win32_version`, a change takes effect for the next program that
+  starts when none runs, and a saved state goes on under the locale it
+  was saved with.
 * `win32_trace` picks which calls of the built-in Windows' functions
   get a `[W32]` line in the [log file](README.md#log-file) (and `[W16]`
   for the 16-bit modules), with the caller's address, the arguments and

@@ -619,7 +619,8 @@ pub fn wcsftime(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let format = wstr(cpu, format)?;
     let tm = read_tm(cpu, at)?;
-    let Some(wide) = wide_text(cpu, size, &format, &tm) else {
+    let cv = conv(cpu);
+    let Some(wide) = wide_text(cpu, cv, size, &format, &tm) else {
         set_errno(cpu, EILSEQ);
         return Some(0);
     };
@@ -636,9 +637,15 @@ pub fn wcsftime(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// What wcsftime writes for the wide `format` in a buffer of `size`
 /// characters: the text's characters up to its 0, and the 0 where there
 /// is room for it; nothing when strftime gives 0. None for a format with
-/// a character the code page has no byte for.
-fn wide_text(m: &mut impl Memory, size: u32, format: &[u16], tm: &Tm) -> Option<Vec<u16>> {
-    let format: Vec<u8> = format.iter().map(|&c| narrow(c)).collect::<Option<_>>()?;
+/// a character the code page of the conversions `cv` has no byte for.
+fn wide_text(
+    m: &mut impl Memory,
+    cv: Conv,
+    size: u32,
+    format: &[u16],
+    tm: &Tm,
+) -> Option<Vec<u16>> {
+    let format: Vec<u8> = format.iter().map(|&c| cv.narrow(c)).collect::<Option<_>>()?;
     let Some(text) = text_of(m, size.saturating_mul(2), &format, tm) else {
         return Some(Vec::new());
     };
@@ -646,7 +653,7 @@ fn wide_text(m: &mut impl Memory, size: u32, format: &[u16], tm: &Tm) -> Option<
         .into_iter()
         .take_while(|&b| b != 0)
         .take(size as usize)
-        .map(widen)
+        .map(|b| cv.widen(b))
         .collect();
     if wide.len() < size as usize {
         wide.push(0);
@@ -926,7 +933,8 @@ mod tests {
             let size: u32 = f[1].parse().unwrap();
             let mut buffer = vec![0x2A2A; 80];
             let (value, errno) =
-                match wide_text(&mut memory(), size, &unescape_wide(f[0]), &TIMES[1]) {
+                // The probe ran in the "C" locale.
+                match wide_text(&mut memory(), Conv(None), size, &unescape_wide(f[0]), &TIMES[1]) {
                     Some(wide) => {
                         buffer[..wide.len()].copy_from_slice(&wide);
                         (wide.iter().take_while(|&&c| c != 0).count() as u32, 0)

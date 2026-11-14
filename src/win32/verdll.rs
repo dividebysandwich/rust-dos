@@ -354,16 +354,18 @@ pub fn write_ansi(node: &Node) -> Vec<u8> {
     b
 }
 
-/// The node in the Unicode layout 32-bit files have.
+/// The node in the Unicode layout 32-bit files have. Its text is the
+/// built-in DLLs' own, English in code page 1252.
 pub fn write_unicode(node: &Node) -> Vec<u8> {
+    let western = crate::win32::nls::CodePage::WESTERN;
     let mut b = vec![0u8; 6];
-    for c in kernel32::ansi_to_wide(&node.key).into_iter().chain([0]) {
+    for c in western.decode(&node.key).into_iter().chain([0]) {
         b.extend_from_slice(&c.to_le_bytes());
     }
     b.resize(align(b.len()), 0);
     let value_len = if node.text {
         let text = node.value.strip_suffix(&[0]).unwrap_or(&node.value);
-        let wide = kernel32::ansi_to_wide(text);
+        let wide = western.decode(text);
         for c in wide.iter().chain(&[0]) {
             b.extend_from_slice(&c.to_le_bytes());
         }

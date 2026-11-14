@@ -1200,14 +1200,7 @@ pub fn load_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if buffer == 0 {
         return Some(0);
     }
-    let bytes: Vec<u8> = units
-        .iter()
-        .map(|&c| {
-            crate::win32::convert::CodePage::Ansi
-                .byte(c)
-                .unwrap_or(b'?')
-        })
-        .collect();
+    let bytes = crate::win32::nls::ansi(cpu).encode(&units);
     if size == 0 {
         return Some(0);
     }

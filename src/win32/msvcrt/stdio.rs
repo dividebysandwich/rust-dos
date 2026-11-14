@@ -878,9 +878,10 @@ fn text_mode(cpu: &mut Cpu, at: u32) -> Option<bool> {
 /// fputwc(ch, file): in text mode the character's byte in the code page,
 /// in binary mode its two bytes.
 pub fn fputwc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let cv = conv(cpu);
     let c = args[0] as u16;
     let data = if text_mode(cpu, args[1])? {
-        vec![narrow(c).unwrap_or(b'?')]
+        vec![cv.narrow(c).unwrap_or(b'?')]
     } else {
         c.to_le_bytes().to_vec()
     };
@@ -890,6 +891,7 @@ pub fn fputwc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// fgetwc(file): the next character, read as fputwc writes it.
 pub fn fgetwc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let cv = conv(cpu);
     let text = text_mode(cpu, args[0])?;
     let first = match getc(cpu, args[0]) {
         Got::Byte(b) => b,
@@ -898,7 +900,7 @@ pub fn fgetwc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         Got::End => return Some(0xFFFF),
     };
     if text {
-        return Some(widen(first) as u32);
+        return Some(cv.widen(first) as u32);
     }
     match getc(cpu, args[0]) {
         Got::Byte(b) => Some(u16::from_le_bytes([first, b]) as u32),
@@ -909,12 +911,13 @@ pub fn fgetwc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// ungetwc(ch, file).
 pub fn ungetwc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let cv = conv(cpu);
     let c = args[0] as u16;
     if c == 0xFFFF {
         return Some(0xFFFF);
     }
     let ok = if text_mode(cpu, args[1])? {
-        ungetc_byte(cpu, args[1], narrow(c).unwrap_or(b'?'))
+        ungetc_byte(cpu, args[1], cv.narrow(c).unwrap_or(b'?'))
     } else {
         let [lo, hi] = c.to_le_bytes();
         ungetc_byte(cpu, args[1], hi) && ungetc_byte(cpu, args[1], lo)
@@ -924,9 +927,10 @@ pub fn ungetwc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// fputws(text, file).
 pub fn fputws(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let cv = conv(cpu);
     let text = wstr(cpu, args[0])?;
     let data: Vec<u8> = if text_mode(cpu, args[1])? {
-        text.iter().map(|&c| narrow(c).unwrap_or(b'?')).collect()
+        text.iter().map(|&c| cv.narrow(c).unwrap_or(b'?')).collect()
     } else {
         text.iter().flat_map(|c| c.to_le_bytes()).collect()
     };
@@ -1102,9 +1106,10 @@ pub fn vsnwprintf(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// Print a wide format to a stream, as its bytes in the code page.
 fn wide_print_to(cpu: &mut Cpu, file: u32, format: u32, args: u32) -> Option<u32> {
+    let cv = conv(cpu);
     let format = wstr(cpu, format)?;
     let text = format::printf(cpu, &format, &mut Args { at: args }, true)?;
-    let data: Vec<u8> = text.iter().map(|&c| narrow(c).unwrap_or(b'?')).collect();
+    let data: Vec<u8> = text.iter().map(|&c| cv.narrow(c).unwrap_or(b'?')).collect();
     let n = write_stream(cpu, file, &data)?;
     Some(if n == data.len() {
         text.len() as u32

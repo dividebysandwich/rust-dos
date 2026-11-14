@@ -929,7 +929,7 @@ fn text_len(cpu: &mut Cpu, at: u32, wide: bool) -> u32 {
     }
     header::read_text(cpu, at, wide).map_or(0, |t| {
         if wide {
-            crate::win32::kernel32::ansi_to_wide(&t).len() as u32
+            crate::win32::kernel32::ansi_to_wide(cpu, &t).len() as u32
         } else {
             t.len() as u32
         }

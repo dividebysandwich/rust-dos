@@ -484,6 +484,9 @@ const STATIC_COLORS: [u32; 20] = [
 
 /// The stock objects and the system palette, made on GDI's first use.
 pub fn init(cpu: &mut Cpu) {
+    // The stock fonts are in the system locale's character set, Terminal
+    // in its OEM one.
+    let sys = crate::win32::nls::current(cpu).charset;
     let state = gdi(cpu);
     if !state.objects.is_empty() {
         return;
@@ -533,13 +536,13 @@ pub fn init(cpu: &mut Cpu) {
         }),
         None,
         Some(font(12, 8, 400, 255, 0x31, "Terminal")),
-        Some(font(12, 9, 400, 0, 0x31, "Courier")),
-        Some(font(12, 9, 400, 0, 0x22, "MS Sans Serif")),
-        Some(font(16, 7, 700, 0, 0x22, "System")),
-        Some(font(16, 0, 400, 0, 0x00, "")),
+        Some(font(12, 9, 400, sys, 0x31, "Courier")),
+        Some(font(12, 9, 400, sys, 0x22, "MS Sans Serif")),
+        Some(font(16, 7, 700, sys, 0x22, "System")),
+        Some(font(16, 0, 400, sys, 0x00, "")),
         None,
-        Some(font(16, 8, 400, 0, 0x31, "Fixedsys")),
-        Some(font(-11, 0, 400, 0, 0x00, "MS Sans Serif")),
+        Some(font(16, 8, 400, sys, 0x31, "Fixedsys")),
+        Some(font(-11, 0, 400, sys, 0x00, "MS Sans Serif")),
         None,
         None,
         Some(Kind::Bitmap {
@@ -1552,8 +1555,8 @@ static APIS: &[Api] = &[
         4,
         font::get_text_extent_point32_w,
     ),
-    stdcall("GetCharWidthW", 238, 4, font::get_char_width),
-    stdcall("GetCharWidth32W", 234, 4, font::get_char_width),
+    stdcall("GetCharWidthW", 238, 4, font::get_char_width_w),
+    stdcall("GetCharWidth32W", 234, 4, font::get_char_width_w),
     stdcall("CreateFontW", 152, 14, not_implemented),
     stdcall("CreateFontIndirectW", 151, 1, not_implemented),
     stdcall("GetTextMetricsW", 315, 2, not_implemented),

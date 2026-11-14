@@ -104,5 +104,5 @@ fn wide_name(cpu: &mut Cpu, at: u32) -> String {
         }
         units.push(c);
     }
-    crate::dosstr::from_bytes(&kernel32::wide_to_ansi(&units))
+    crate::dosstr::from_bytes(&kernel32::wide_to_ansi(cpu, &units))
 }
