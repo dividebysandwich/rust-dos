@@ -240,25 +240,29 @@ fn enter(cpu: &mut Cpu, (p, t): At) {
 /// The next thread after `after` in turn that can run, if one can: the
 /// threads of all processes, in order.
 fn next_ready(win32: &Win32, after: Option<At>) -> Option<At> {
-    next_where(win32, after, |(p, t)| {
-        win32.processes[p].threads[t].ready() && crate::win16::task::may_run(win32, p, t)
-    })
+    next_where(win32, after, |at| can_run(win32, at))
 }
 
-/// The next thread after `after` in turn for which `pick` holds.
+/// Whether the thread `at` can run: it is ready, and the Win16 lock lets
+/// it.
+fn can_run(win32: &Win32, (p, t): At) -> bool {
+    win32.processes[p].threads[t].ready() && crate::win16::task::may_run(win32, p, t)
+}
+
+/// The next thread after `after` in turn for which `pick` holds. Sleep(0)
+/// asks for it at every call, so the threads aren't collected first.
 fn next_where(win32: &Win32, after: Option<At>, pick: impl Fn(At) -> bool) -> Option<At> {
-    let all: Vec<At> = win32
-        .processes
-        .iter()
-        .enumerate()
-        .flat_map(|(p, process)| (0..process.threads.len()).map(move |t| (p, t)))
-        .collect();
+    let all = || {
+        win32
+            .processes
+            .iter()
+            .enumerate()
+            .flat_map(|(p, process)| (0..process.threads.len()).map(move |t| (p, t)))
+    };
     let start = after
-        .and_then(|a| all.iter().position(|&x| x == a))
+        .and_then(|a| all().position(|x| x == a))
         .map_or(0, |i| i + 1);
-    (0..all.len())
-        .map(|k| all[(start + k) % all.len()])
-        .find(|&at| pick(at))
+    all().skip(start).chain(all().take(start)).find(|&at| pick(at))
 }
 
 /// The running thread doesn't go on for now (it waits, was suspended or
@@ -267,7 +271,7 @@ fn next_where(win32: &Win32, after: Option<At>, pick: impl Fn(At) -> bool) -> Op
 pub fn reschedule(cpu: &mut Cpu) {
     let ctx = Context::of(cpu);
     save(cpu, ctx);
-    if let Some((at, used)) = take_preempted(&mut cpu.bus.win32) {
+    if let Some((at, used)) = take_preempted(&mut cpu.bus.win32, |_, _| true) {
         resume(cpu, at, used);
         return;
     }
@@ -286,53 +290,42 @@ pub fn reschedule(cpu: &mut Cpu) {
 /// documentation until Windows Server 2003, which changed that). Nothing
 /// changes then, and an idle proof follows the call (`idle::pure_call`):
 /// a thread that waits for a flag in a Sleep(0) loop while the others
-/// wait is a busy-wait loop, armed at the call (`idle::yield_poll`) and
-/// skipped to the next event like any other. Switching to itself instead
-/// saved and loaded the thread's whole state at every call, which ended
-/// the proof, and took the host about a microsecond: MDK2's worker thread
-/// spins so, 14 instructions a pass, while the main thread waits for the
-/// retrace in SwapBuffers, and the host ran the spin several times slower
-/// than the emulated time it covered (#1007).
+/// wait is a busy-wait loop, armed at the call (`idle::service_polled`)
+/// and skipped to the next event like any other. The call reads nothing
+/// but its argument, so a loop that also counts its passes is skipped
+/// too. Switching to itself instead saved and loaded the thread's whole
+/// state at every call, which ended the proof, and took the host about a
+/// microsecond: MDK2's worker thread spins so, 14 instructions a pass,
+/// while the main thread waits for the retrace in SwapBuffers, and the
+/// host ran the spin several times slower than the emulated time it
+/// covered (#1007).
 pub fn yield_turn(cpu: &mut Cpu) -> bool {
-    let win32 = &cpu.bus.win32;
+    let win32 = &mut cpu.bus.win32;
     let Some(running) = current(win32) else {
         return false;
     };
     let mine = win32.processes[running.0].threads[running.1].priority;
-    let takes = |(p, t): At| {
-        let thread = &win32.processes[p].threads[t];
-        (p, t) != running
-            && thread.ready()
-            && thread.priority >= mine
-            && crate::win16::task::may_run(win32, p, t)
-    };
+    let takes = |win32: &Win32, (p, t): At| win32.processes[p].threads[t].priority >= mine;
     // A thread a higher priority took the processor from is at the head
-    // of its priority's queue (`take_preempted`), with the rest of its
-    // turn.
-    let preempted = win32
-        .preempted
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(i, &(id, used))| {
-            let at = find(win32, id).filter(|&at| takes(at))?;
-            Some((i, at, used))
-        });
-    let next = next_where(win32, Some(running), takes);
-    match (preempted, next) {
-        (Some((i, at, used)), _) => {
-            cpu.bus.win32.preempted.remove(i);
-            save(cpu, Context::of(cpu));
-            resume(cpu, at, used);
-            true
-        }
-        (None, Some(at)) => {
+    // of its priority's queue, with the rest of its turn.
+    if let Some((at, used)) = take_preempted(win32, takes) {
+        save(cpu, Context::of(cpu));
+        resume(cpu, at, used);
+        return true;
+    }
+    let win32 = &cpu.bus.win32;
+    let next = next_where(win32, Some(running), |at| {
+        at != running && can_run(win32, at) && takes(win32, at)
+    });
+    match next {
+        Some(at) => {
             save(cpu, Context::of(cpu));
             enter(cpu, at);
             true
         }
-        (None, None) => {
+        None => {
             crate::idle::pure_call(cpu, None);
+            crate::idle::reads_arguments(cpu);
             cpu.bus.observe.polled = true;
             false
         }
@@ -342,7 +335,7 @@ pub fn yield_turn(cpu: &mut Cpu) -> bool {
 /// Run the first thread that can run, or else the idle loop, with nothing
 /// running to save (its process ended).
 pub fn run_next(cpu: &mut Cpu) {
-    if let Some((at, used)) = take_preempted(&mut cpu.bus.win32) {
+    if let Some((at, used)) = take_preempted(&mut cpu.bus.win32, |_, _| true) {
         resume(cpu, at, used);
         return;
     }
@@ -353,27 +346,33 @@ pub fn run_next(cpu: &mut Cpu) {
 }
 
 /// The thread a thread of a higher priority took the processor from last
-/// that can still run, and how much of its turn it had used, taken from
-/// `preempted`, as Windows puts a preempted thread back at the head of
-/// its priority's queue with what is left of its quantum. Without that,
-/// the thread after the preempting one in turn ran with a new turn: a
-/// multimedia timer of 10 ms, whose thread preempts every period,
-/// started the main thread's turn over each time, and another thread of
-/// the main one's priority never ran (Bedlam's Windows version waits on
-/// its loader thread for ever). The last one taken from goes first: when
-/// a thread that preempted another is preempted in turn, it is the one
-/// that goes on once the third stops. Those that can't run any more
-/// (ended, suspended) are dropped and get a new turn when they run again.
-fn take_preempted(win32: &mut Win32) -> Option<(At, u64)> {
-    while let Some((tid, used)) = win32.preempted.pop() {
-        let Some((p, t)) = find(win32, tid) else {
-            continue;
-        };
-        if Some((p, t)) != current(win32)
-            && win32.processes[p].threads[t].ready()
-            && crate::win16::task::may_run(win32, p, t)
-        {
-            return Some(((p, t), used));
+/// that can still run and for which `pick` holds, and how much of its
+/// turn it had used, taken from `preempted`, as Windows puts a preempted
+/// thread back at the head of its priority's queue with what is left of
+/// its quantum. Without that, the thread after the preempting one in turn
+/// ran with a new turn: a multimedia timer of 10 ms, whose thread
+/// preempts every period, started the main thread's turn over each time,
+/// and another thread of the main one's priority never ran (Bedlam's
+/// Windows version waits on its loader thread for ever). The last one
+/// taken from goes first: when a thread that preempted another is
+/// preempted in turn, it is the one that goes on once the third stops.
+/// Those that can't run any more (ended, suspended) are dropped and get a
+/// new turn when they run again; those `pick` passes over stay.
+fn take_preempted(win32: &mut Win32, pick: impl Fn(&Win32, At) -> bool) -> Option<(At, u64)> {
+    let mut i = win32.preempted.len();
+    while i > 0 {
+        i -= 1;
+        let (tid, used) = win32.preempted[i];
+        let at = find(win32, tid).filter(|&at| Some(at) != current(win32) && can_run(win32, at));
+        match at {
+            None => {
+                win32.preempted.remove(i);
+            }
+            Some(at) if pick(&*win32, at) => {
+                win32.preempted.remove(i);
+                return Some((at, used));
+            }
+            Some(_) => {}
         }
     }
     None
@@ -441,7 +440,7 @@ pub fn after_interrupt(cpu: &mut Cpu, ctx: Context) {
             if now.saturating_sub(win32.slice_start) >= SLICE {
                 // A thread preempted while another ran is at the head of
                 // the queue: it goes on before the next one in turn.
-                if let Some((at, used)) = take_preempted(win32) {
+                if let Some((at, used)) = take_preempted(win32, |_, _| true) {
                     save(cpu, ctx);
                     resume(cpu, at, used);
                     return;

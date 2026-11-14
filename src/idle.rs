@@ -906,20 +906,14 @@ fn head_of(cpu: &Cpu) -> Head {
     Head { cs: cpu.cs(), eip: cpu.eip(), pe: cpu.pe() }
 }
 
-/// The BIOS keyboard's status call found no key, at the service trap at
-/// `cs:eip`. Arms it once that happened enough times in a row.
-pub fn keyboard_poll(cpu: &mut Cpu, cs: u16, eip: u32) {
-    let head = Head { cs, eip, pe: cpu.pe() };
-    poll_at(cpu, head);
-}
-
-/// A Sleep(0) of the built-in Windows found no other thread to run, at the
-/// service trap at `cs:eip`: the thread waits in a loop for another to
-/// change something, as at a keyboard poll, and the place is armed once
-/// that happened enough times in a row. The loop runs only while the other
-/// threads wait, often for a few milliseconds between two events, which
-/// an event finding the CPU in it would arm too late.
-pub fn yield_poll(cpu: &mut Cpu, cs: u16, eip: u32) {
+/// A service set `Observe::polled`, at the service trap at `cs:eip`: the
+/// BIOS keyboard's status call found no key, or a Sleep(0) of the
+/// built-in Windows found no other thread to run. Either way the program
+/// waits in a loop for something else to change, and the place is armed
+/// once that happened enough times in a row. A Sleep(0) loop runs only
+/// while the other threads wait, often for a few milliseconds between two
+/// events, which an event finding the CPU in it would arm too late.
+pub fn service_polled(cpu: &mut Cpu, cs: u16, eip: u32) {
     let head = Head { cs, eip, pe: cpu.pe() };
     poll_at(cpu, head);
 }
