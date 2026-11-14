@@ -212,11 +212,10 @@ that language's month names and date and number formats, and a game
 that picks its language by the system's language id may pick the wrong
 one or English.
 
-Macedonian has no locale, since Windows had none before Windows 2000:
-a Macedonian game's text shows right under any Cyrillic locale. Other languages of these
-code pages without a locale of their own (Catalan, Icelandic, the
-regional forms of German, French and Spanish, and others) take the
-nearest one of their group.
+Languages of these code pages without a locale of their own (Catalan,
+Icelandic, Macedonian, the regional forms of German, French and
+Spanish, and others) take the nearest one of their group: a Macedonian
+game's text shows right under any Cyrillic locale.
 
 Japanese, Chinese and Korean games
 ([#1017](https://github.com/dividebysandwich/rust-dos/issues/1017)),
