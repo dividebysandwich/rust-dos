@@ -170,6 +170,9 @@ pub struct CdImage {
     /// The subchannel file beside the image, for the sectors whose own
     /// files keep none.
     sub_file: Option<SubFile>,
+    /// What opening the image found that the user should hear of: the
+    /// subchannel file it reads, or why it reads none it found.
+    notes: Vec<String>,
 }
 
 /// The error of reading a sector a drive can't read: one whose EDC
@@ -287,8 +290,7 @@ impl CdImage {
             image.files.push(backing);
         }
         image.mcn = sheet.catalog;
-        let names = sheet.files.iter().map(|f| f.name.as_str());
-        image.sub_file = sub_file(path, names).map(|(_, sub)| sub);
+        image.attach_sub_file(sheet.files.iter().map(|f| f.name.as_str()));
         Ok(image)
     }
 
@@ -486,14 +488,90 @@ impl CdImage {
         if image.tracks.is_empty() {
             return Err(error("it has no tracks".into()));
         }
+        let names = mds_file_names(path, &disc);
         image.dpm = disc.dpm;
+        image.attach_sub_file(names.iter().map(String::as_str));
         Ok(image)
     }
 
     fn open_bare(path: &Path) -> Result<Self, String> {
         let mut image = Self::bare(path, Backing::open(path, FileFormat::Binary)?)?;
-        image.sub_file = sub_file(path, std::iter::empty()).map(|(_, sub)| sub);
+        image.attach_sub_file(std::iter::empty());
         Ok(image)
+    }
+
+    /// Read the subchannel of the sectors whose files keep none from the
+    /// subchannel file beside the image (`sub_file`), named as the image
+    /// or as one of its data `files`, and note what was found and used.
+    /// The image's own subchannel stays in force where it keeps one, so a
+    /// file beside an image that keeps the subchannel of every sector
+    /// isn't read.
+    fn attach_sub_file<'a>(&mut self, files: impl Iterator<Item = &'a str>) {
+        let shown = crate::mount::display_host_path;
+        let lookup = sub_file(&self.path, files, Some(self.leadout()));
+        for (found, why) in &lookup.refused {
+            self.notes.push(format!(
+                "{} isn't read as the subchannel of {}: {}",
+                shown(found),
+                shown(&self.path),
+                why
+            ));
+        }
+        let Some(sub) = lookup.found else {
+            return;
+        };
+        let (own, all) = self.stored_subchannel();
+        let note = if own >= all {
+            format!(
+                "{} isn't read as the subchannel of {}: the image keeps the subchannel of every \
+                 sector itself",
+                shown(&sub.path),
+                shown(&self.path)
+            )
+        } else if own == 0 {
+            format!(
+                "Subchannel of {} from {} ({})",
+                shown(&self.path),
+                shown(&sub.path),
+                sub.describe()
+            )
+        } else {
+            format!(
+                "Subchannel of {}: its own for {} of its {} sectors, and from {} ({}) for the \
+                 other {}",
+                shown(&self.path),
+                own,
+                all,
+                shown(&sub.path),
+                sub.describe(),
+                all - own
+            )
+        };
+        self.notes.push(note);
+        if own < all {
+            self.sub_file = Some(sub);
+        }
+    }
+
+    /// How many sectors of the tracks the image's files keep the
+    /// subchannel of, and how many sectors the tracks have.
+    fn stored_subchannel(&self) -> (u64, u64) {
+        self.tracks.iter().fold((0, 0), |(own, all), t| {
+            let kept: u64 = t
+                .spans
+                .iter()
+                .filter(|s| s.subcode != Subcode::None)
+                .map(|s| s.end.min(t.end).saturating_sub(s.start.max(t.pregap_start)) as u64)
+                .sum();
+            (own + kept, all + (t.end - t.pregap_start) as u64)
+        })
+    }
+
+    /// What opening the image found that the user should hear of: the
+    /// subchannel file beside it that it reads, or why it reads none of
+    /// those it found.
+    pub fn notes(&self) -> &[String] {
+        &self.notes
     }
 
     #[cfg(feature = "chd")]
@@ -537,6 +615,7 @@ impl CdImage {
             mcn: None,
             dpm: None,
             sub_file: None,
+            notes: Vec::new(),
         }
     }
 
@@ -793,8 +872,10 @@ impl CdImage {
 /// programs write beside the image: CloneCD's and DiscImageCreator's
 /// `.sub` keep each of P to W's 12 bytes after the one before, from
 /// sector 0; redumper's `.subcode` keeps them raw, interleaved as a drive
-/// reads them, from the lead-in on.
+/// reads them, from the lead-in on (sector -45150) to past the lead-out's
+/// start.
 struct SubFile {
+    path: PathBuf,
     backing: Backing,
     /// The sector of the file's first 96 bytes (before 0 in the lead-in).
     first: i64,
@@ -809,12 +890,18 @@ impl SubFile {
     /// The subchannel file at `path`, with its layout found from the Q of
     /// sectors spread over it: of the two layouts, and the sector its
     /// first entry would be, the one most Qs with a good CRC and a place
-    /// in a track agree on, when that is more than half of them. None if
-    /// its size isn't whole entries or its Qs agree on no layout.
-    fn open(path: &Path) -> Option<Self> {
-        let backing = Backing::open(path, FileFormat::Binary).ok()?;
+    /// in a track agree on, when that is more than half of them. Fails,
+    /// saying why, if its size isn't whole entries, its Qs agree on no
+    /// layout, or it has no entry for some sector of a disc whose lead-out
+    /// starts at `leadout`: a file of another disc, or of a dump that
+    /// stopped early.
+    fn open(path: &Path, leadout: Option<u32>) -> Result<Self, String> {
+        let backing = Backing::open(path, FileFormat::Binary)?;
         if backing.len == 0 || backing.len % 96 != 0 {
-            return None;
+            return Err(format!(
+                "its {} bytes aren't whole sectors of 96 bytes",
+                backing.len
+            ));
         }
         let entries = backing.len / 96;
         let mut votes: Vec<((i64, bool), u32)> = Vec::new();
@@ -823,7 +910,9 @@ impl SubFile {
         for k in 0..samples {
             let entry = k * entries / samples;
             let mut sub = [0u8; 96];
-            backing.read_at(entry * 96, &mut sub).ok()?;
+            backing
+                .read_at(entry * 96, &mut sub)
+                .map_err(|e| e.to_string())?;
             for interleaved in [false, true] {
                 let linear = match interleaved {
                     true => super::deinterleave_subchannel(&sub),
@@ -842,12 +931,43 @@ impl SubFile {
                 }
             }
         }
-        let ((first, interleaved), n) = votes.into_iter().max_by_key(|&(_, n)| n)?;
-        (n * 2 > decoded).then_some(SubFile {
+        let no_layout = || "its Q subchannel doesn't say which sector each entry is".to_string();
+        let ((first, interleaved), n) = votes
+            .into_iter()
+            .max_by_key(|&(_, n)| n)
+            .ok_or_else(no_layout)?;
+        if n * 2 <= decoded {
+            return Err(no_layout());
+        }
+        let sub = SubFile {
+            path: path.to_path_buf(),
             backing,
             first,
             interleaved,
-        })
+        };
+        match leadout {
+            Some(leadout) if first > 0 || sub.end() < leadout as i64 => Err(format!(
+                "it has sectors {} to {}, and the disc has sectors 0 to {}",
+                first,
+                sub.end() - 1,
+                leadout as i64 - 1
+            )),
+            _ => Ok(sub),
+        }
+    }
+
+    /// The sector after the file's last entry.
+    fn end(&self) -> i64 {
+        self.first + (self.backing.len / 96) as i64
+    }
+
+    /// The file's layout and the sectors it has, for the log.
+    fn describe(&self) -> String {
+        let layout = match self.interleaved {
+            true => "raw P-W as redumper writes it",
+            false => "P to W one channel after the other, as CloneCD writes it",
+        };
+        format!("{}, sectors {} to {}", layout, self.first, self.end() - 1)
     }
 
     /// Where sector `lba`'s entry is in the file, if it has one.
@@ -871,11 +991,24 @@ impl SubFile {
     }
 }
 
+/// What `sub_file` found beside an image.
+struct SubLookup {
+    /// The subchannel file to read.
+    found: Option<SubFile>,
+    /// The files named as one that `SubFile::open` refused, and why.
+    refused: Vec<(PathBuf, String)>,
+}
+
 /// The subchannel file beside the image at `path` whose data files are
-/// named `files`, and where it is: of the files there, in any case, with
-/// the name of the image or of one of its files and the extension `.sub`
-/// or `.subcode`, in that order, the first that `SubFile::open` takes.
-fn sub_file<'a>(path: &Path, files: impl Iterator<Item = &'a str>) -> Option<(PathBuf, SubFile)> {
+/// named `files` (as a CUE sheet or a descriptor names them): of the
+/// files in the image's folder, in any case, with the name of the image
+/// or of one of its data files and the extension `.sub` or `.subcode`,
+/// in that order, the first that `SubFile::open` takes for a disc whose
+/// lead-out starts at `leadout`. Every image format that reads one
+/// looks for it here, and only here: a file elsewhere, as in the
+/// `archival` folder of a disc archiver's dump, is copied beside the
+/// image under one of these names.
+fn sub_file<'a>(path: &Path, files: impl Iterator<Item = &'a str>, leadout: Option<u32>) -> SubLookup {
     let stem = |name: &str| {
         let file = name.rsplit(['\\', '/']).next()?;
         Some(Path::new(file).file_stem()?.to_string_lossy().into_owned())
@@ -898,7 +1031,8 @@ fn sub_file<'a>(path: &Path, files: impl Iterator<Item = &'a str>) -> Option<(Pa
     // listed once, for those that aren't there as they are spelt.
     let dir = dir_of(path);
     let mut listing: Option<Vec<PathBuf>> = None;
-    names.iter().find_map(|name| {
+    let mut refused = Vec::new();
+    let found = names.iter().find_map(|name| {
         let exact = dir.join(name);
         let found = if hostfs::is_file(&exact) {
             exact
@@ -919,8 +1053,11 @@ fn sub_file<'a>(path: &Path, files: impl Iterator<Item = &'a str>) -> Option<(Pa
                 })?
                 .clone()
         };
-        SubFile::open(&found).map(|sub| (found, sub))
-    })
+        SubFile::open(&found, leadout)
+            .map_err(|why| refused.push((found, why)))
+            .ok()
+    });
+    SubLookup { found, refused }
 }
 
 /// `v` in binary-coded decimal.
@@ -1102,6 +1239,12 @@ fn mds_files(path: &Path) -> Vec<Result<PathBuf, String>> {
     else {
         return Vec::new();
     };
+    mds_files_of(path, &disc)
+}
+
+/// The files the Alcohol 120% descriptor `disc` at `path` keeps its
+/// sectors in, each found or why not.
+fn mds_files_of(path: &Path, disc: &super::mds::Descriptor) -> Vec<Result<PathBuf, String>> {
     let mut files: Vec<Result<PathBuf, String>> = Vec::new();
     for file in disc.files() {
         let file = mds_data_file(path, file);
@@ -1110,6 +1253,19 @@ fn mds_files(path: &Path) -> Vec<Result<PathBuf, String>> {
         }
     }
     files
+}
+
+/// The names of the data files of the Alcohol 120% descriptor `disc` at
+/// `path`, as `mds::data_file` makes them of the names it keeps.
+fn mds_file_names(path: &Path, disc: &super::mds::Descriptor) -> Vec<String> {
+    let descriptor = path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    disc.files()
+        .into_iter()
+        .map(|name| super::mds::data_file(&descriptor, name))
+        .collect()
 }
 
 /// The data file `name` of the Alcohol 120% descriptor at `path`
@@ -1292,18 +1448,26 @@ pub fn track_files(path: &Path) -> Vec<PathBuf> {
     if is_b6t(path) {
         return b6t_files(path).into_iter().filter_map(Result::ok).collect();
     }
+    // The subchannel file is the one the name rules find with a layout
+    // `SubFile::open` reads; whether it covers the disc is checked when
+    // the image is opened.
+    let side = |names: &mut dyn Iterator<Item = &str>| sub_file(path, names, None).found.map(|s| s.path);
     if is_mds(path) {
-        return mds_files(path).into_iter().filter_map(Result::ok).collect();
+        let Some(disc) = hostfs::read(path).ok().and_then(|d| super::mds::parse(&d).ok()) else {
+            return Vec::new();
+        };
+        let names = mds_file_names(path, &disc);
+        let files = mds_files_of(path, &disc).into_iter().filter_map(Result::ok);
+        return files.chain(side(&mut names.iter().map(String::as_str))).collect();
     }
     let Some(Ok(sheet)) = sheet(path) else {
         return Vec::new();
     };
-    let names = sheet.files.iter().map(|f| f.name.as_str());
     sheet
         .files
         .iter()
         .filter_map(|f| find_file(dir_of(path), &f.name).ok())
-        .chain(sub_file(path, names).map(|(p, _)| p))
+        .chain(side(&mut sheet.files.iter().map(|f| f.name.as_str())))
         .collect()
 }
 
@@ -2253,12 +2417,26 @@ mod tests {
         assert_eq!(raw[100], 0x11);
     }
 
+    /// The DPM data the disc archiver measured on its simulated drive for
+    /// the descriptors of `testdata/make_mds.py`.
+    fn toolkit_dpm() -> crate::cdrom::dpm::Dpm {
+        crate::cdrom::dpm::Dpm {
+            start: 0,
+            resolution: 10,
+            angles: vec![
+                283, 566, 849, 1132, 1414, 1697, 1980, 2263, 2546, 2828, 3111, 3394, 3677, 3959,
+                4242, 4524, 4807, 5090, 5372, 5655, 5946, 6237, 6528, 6818, 7109, 7400, 7691, 7982,
+                8273, 8564, 8854, 9145, 9436, 9727, 10017, 10308, 10599, 10889, 11180, 11469,
+                11752, 12034, 12316, 12599, 12881, 13163, 13444, 13726,
+            ],
+        }
+    }
+
     /// The MDS descriptors refurbished-dinosaurs-toolkit's disc archiver
     /// wrote (`testdata/make_mds.py`): its data track and audio track,
     /// and the DPM data it measured on its simulated drive.
     #[test]
     fn toolkit_mds_images() {
-        use crate::cdrom::dpm::Dpm;
         let dir = scratch("toolkit_mds");
         // The archiver writes every sector from track 1's INDEX 01 on,
         // track 2's pregap among them.
@@ -2277,16 +2455,7 @@ mod tests {
             include_bytes!("testdata/toolkit-plain.mds"),
         )
         .unwrap();
-        let measured = Dpm {
-            start: 0,
-            resolution: 10,
-            angles: vec![
-                283, 566, 849, 1132, 1414, 1697, 1980, 2263, 2546, 2828, 3111, 3394, 3676, 3959,
-                4242, 4524, 4807, 5090, 5372, 5655, 5946, 6237, 6528, 6818, 7109, 7400, 7691, 7982,
-                8273, 8563, 8854, 9145, 9436, 9726, 10017, 10308, 10598, 10889, 11180, 11469,
-                11752, 12034, 12316, 12598, 12880, 13163, 13445, 13726,
-            ],
-        };
+        let measured = toolkit_dpm();
         for (name, dpm) in [("dpm.mds", Some(&measured)), ("plain.mds", None)] {
             let image = CdImage::open(&dir.join(name)).unwrap();
             assert_eq!(
@@ -2311,6 +2480,227 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Sector `lba`'s subchannel in a side file of `image`: P and Q as the
+    /// layout makes them, R holding `lba`, and the Q's CRC broken where
+    /// `bad`.
+    fn side_sub(image: &CdImage, lba: u32, bad: bool) -> [u8; 96] {
+        let track = image.track_at(lba).unwrap();
+        let mut sub = linear_sub(track, lba, bad);
+        if lba < track.start {
+            sub[..12].fill(0xFF);
+        }
+        sub
+    }
+
+    /// A subchannel file of `image`'s disc, the Q of the sectors in `bad`
+    /// with a broken CRC: as redumper writes a `.subcode` when `raw`
+    /// (interleaved, from sector -150, which it didn't read, to 100
+    /// sectors past the lead-out's start), else as CloneCD writes a `.sub`
+    /// (from sector 0 to the lead-out).
+    fn side_file(image: &CdImage, bad: &[u32], raw: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        if raw {
+            out.extend(vec![0u8; 150 * 96]);
+        }
+        for lba in 0..image.leadout() {
+            let sub = side_sub(image, lba, bad.contains(&lba));
+            match raw {
+                true => out.extend(super::super::interleave_subchannel(&sub)),
+                false => out.extend(sub),
+            }
+        }
+        if raw {
+            out.extend(vec![0u8; 100 * 96]);
+        }
+        out
+    }
+
+    /// The bincue-split copy of the disc archiver: one .bin per track and
+    /// the descriptor of them with the DPM data (`testdata/make_mds.py`),
+    /// with redumper's `.subcode` or a CloneCD `.sub` beside it. The data
+    /// track and the audio track after its pregap read the side file's
+    /// subchannel at their own sectors, a Q whose CRC is broken as it is,
+    /// and the DPM data stays in force.
+    #[test]
+    fn toolkit_split_mds_with_a_subcode_file() {
+        let dir = scratch("toolkit_split");
+        // Track 2's file holds its pregap of 150 before its 300 sectors.
+        let data: Vec<u8> = (0..31).flat_map(|lba| mdf_sector(lba, true, None)).collect();
+        let audio: Vec<u8> = (31..481).flat_map(|lba| mdf_sector(lba, false, None)).collect();
+        fs::write(dir.join("Synth (Track 1).bin"), &data).unwrap();
+        fs::write(dir.join("Synth (Track 2).bin"), &audio).unwrap();
+        let mds = dir.join("Synth.mds");
+        fs::write(&mds, include_bytes!("testdata/toolkit-split.mds")).unwrap();
+        let plain = CdImage::open(&mds).unwrap();
+        assert_eq!(
+            layout(&plain),
+            [
+                (1, TrackMode::Mode1_2352, 1, 4, 0, 0, 31),
+                (2, TrackMode::Audio, 1, 0, 31, 181, 481)
+            ]
+        );
+        assert!(plain.notes().is_empty(), "{:?}", plain.notes());
+        let mut sub = [0u8; 96];
+        plain.read_subchannel(10, &mut sub).unwrap();
+        assert_eq!(sub[12..24], made_q(&plain.tracks()[0], 10), "made from the layout");
+
+        // A sector of each track, track 2's pregap among them.
+        let bad = [10, 100, 300];
+        for (name, raw) in [("Synth.subcode", true), ("SYNTH.SUB", false)] {
+            let _ = fs::remove_file(dir.join("Synth.subcode"));
+            fs::write(dir.join(name), side_file(&plain, &bad, raw)).unwrap();
+            let image = CdImage::open(&mds).unwrap();
+            assert_eq!(image.dpm(), Some(&toolkit_dpm()), "{}", name);
+            for lba in [0, 10, 30, 31, 100, 180, 181, 300, 480] {
+                image.read_subchannel(lba, &mut sub).unwrap();
+                let want = side_sub(&plain, lba, bad.contains(&lba));
+                assert_eq!(sub, want, "{} sector {}", name, lba);
+            }
+            // The Q with a broken CRC reads as the file has it; the
+            // position a drive reports there is the layout's.
+            image.read_subchannel(100, &mut sub).unwrap();
+            assert_ne!(
+                u16::from_be_bytes([sub[22], sub[23]]),
+                q_crc(&sub[12..24])
+            );
+            let at = image.q_position(100).unwrap();
+            assert_eq!((at.track, at.index, at.relative, at.absolute), (2, 0, 80, 100));
+            // On a host that ignores case the file goes by the name asked.
+            let lower = name.to_ascii_lowercase();
+            let notes = image.notes().join("\n").to_ascii_lowercase();
+            assert!(notes.contains(&lower) && notes.contains("subchannel of"), "{}", notes);
+            let files = track_files(&mds);
+            assert_eq!(files.len(), 3, "{:?}", files);
+            let last = files[2].file_name().unwrap().to_string_lossy().to_ascii_lowercase();
+            assert_eq!(last, lower);
+        }
+    }
+
+    /// An Alcohol image of one data track with DPM data and redumper's
+    /// `.subcode` beside it, named as the descriptor.
+    #[test]
+    fn alcohol_data_track_with_a_subcode_file() {
+        use crate::cdrom::{dpm::Dpm, mds};
+        let dir = scratch("alcohol_subcode");
+        let data: Vec<u8> = (0..300).flat_map(|lba| mdf_sector(lba, true, None)).collect();
+        fs::write(dir.join("game.mdf"), data).unwrap();
+        let tracks = [(0xAA, 0, 1, 0, 0, 150, 300)];
+        let words: &[u32] = &[0, 100, 3, 300, 600, 900];
+        fs::write(
+            dir.join("Game.mds"),
+            mds::build(&[&tracks], "*.mdf", &[(1, words)]),
+        )
+        .unwrap();
+        let plain = CdImage::open(&dir.join("Game.mds")).unwrap();
+        fs::write(dir.join("game.subcode"), side_file(&plain, &[42], true)).unwrap();
+        let image = CdImage::open(&dir.join("Game.mds")).unwrap();
+        assert_eq!(
+            image.dpm(),
+            Some(&Dpm {
+                start: 0,
+                resolution: 100,
+                angles: vec![300, 600, 900]
+            })
+        );
+        let mut sub = [0u8; 96];
+        image.read_subchannel(42, &mut sub).unwrap();
+        assert_eq!(sub, side_sub(&plain, 42, true));
+        image.read_subchannel(299, &mut sub).unwrap();
+        assert_eq!(sub, side_sub(&plain, 299, false));
+        assert_eq!(image.q_position(42).unwrap().absolute, 42);
+        let notes = image.notes().join("\n").to_ascii_lowercase();
+        assert!(
+            notes.contains("game.subcode") && notes.contains("redumper") && notes.contains("-150 to 399"),
+            "{}",
+            notes
+        );
+
+        // A file that stops before the disc does is of another disc, or
+        // of a dump that stopped: it isn't read, and the log says why.
+        let full = side_file(&plain, &[42], true);
+        fs::write(dir.join("game.subcode"), &full[..(150 + 200) * 96]).unwrap();
+        let image = CdImage::open(&dir.join("Game.mds")).unwrap();
+        image.read_subchannel(42, &mut sub).unwrap();
+        assert_eq!(sub[12..24], made_q(&plain.tracks()[0], 42));
+        assert_eq!(sub[24], 0);
+        let notes = image.notes().join("\n");
+        assert!(
+            notes.contains("isn't read") && notes.contains("sectors -150 to 199"),
+            "{}",
+            notes
+        );
+        // A .sub of the name is looked for first, in any case.
+        fs::write(dir.join("GAME.SUB"), side_file(&plain, &[7], false)).unwrap();
+        let image = CdImage::open(&dir.join("Game.mds")).unwrap();
+        image.read_subchannel(7, &mut sub).unwrap();
+        assert_eq!(sub, side_sub(&plain, 7, true));
+        assert!(image.notes().iter().all(|n| !n.contains("isn't read")), "{:?}", image.notes());
+    }
+
+    /// An Alcohol image that keeps subchannel in its data file reads its
+    /// own; a side file gives only the sectors it keeps none of.
+    #[test]
+    fn alcohol_subchannel_and_a_side_file() {
+        use crate::cdrom::mds;
+        let dir = scratch("alcohol_both");
+        // Track 1, data with subchannel whose Qs are the layout's with R
+        // zero; track 2, audio without, its pregap of 10 stored after
+        // track 1.
+        let made = Track::stored(1, TrackMode::Mode1_2352, 0, 0, 20, Span::new(0, 20, 0, 0, 2448));
+        let mut data = Vec::new();
+        for lba in 0..20 {
+            data.extend(mdf_sector(lba, true, Some(made_q(&made, lba))));
+        }
+        for lba in 20..50 {
+            data.extend(mdf_sector(lba, false, None));
+        }
+        fs::write(dir.join("disc.mdf"), &data).unwrap();
+        let tracks = [
+            (0xAA, 8, 1, 0, 0, 150, 20),
+            (0xA9, 0, 2, 30, 20 * 2448 + 10 * 2352, 10, 20),
+        ];
+        fs::write(dir.join("disc.mds"), mds::build(&[&tracks], "*.mdf", &[])).unwrap();
+        let plain = CdImage::open(&dir.join("disc.mds")).unwrap();
+        assert_eq!(
+            layout(&plain),
+            [
+                (1, TrackMode::Mode1_2352, 1, 4, 0, 0, 20),
+                (2, TrackMode::Audio, 1, 0, 20, 30, 50)
+            ]
+        );
+        fs::write(dir.join("disc.subcode"), side_file(&plain, &[5, 40], true)).unwrap();
+        let image = CdImage::open(&dir.join("disc.mds")).unwrap();
+        let mut sub = [0u8; 96];
+        image.read_subchannel(5, &mut sub).unwrap();
+        assert_eq!(sub[12..24], made_q(&made, 5), "the image's own Q");
+        assert_eq!(sub[24], 0);
+        for lba in [25, 40] {
+            image.read_subchannel(lba, &mut sub).unwrap();
+            assert_eq!(sub, side_sub(&plain, lba, lba == 40), "sector {}", lba);
+        }
+        let notes = image.notes().join("\n");
+        assert!(notes.contains("its own for 20 of its 50 sectors"), "{}", notes);
+
+        // With subchannel in every track the file beside it isn't read.
+        let mut data = Vec::new();
+        for lba in 0..50 {
+            data.extend(mdf_sector(lba, lba < 20, Some(made_q(&made, lba))));
+        }
+        fs::write(dir.join("disc.mdf"), &data).unwrap();
+        let tracks = [
+            (0xAA, 8, 1, 0, 0, 150, 20),
+            (0xA9, 8, 2, 30, 30 * 2448, 10, 20),
+        ];
+        fs::write(dir.join("disc.mds"), mds::build(&[&tracks], "*.mdf", &[])).unwrap();
+        let image = CdImage::open(&dir.join("disc.mds")).unwrap();
+        image.read_subchannel(40, &mut sub).unwrap();
+        assert_eq!(sub[12..24], made_q(&made, 40));
+        assert_eq!(sub[24], 0);
+        let notes = image.notes().join("\n");
+        assert!(notes.contains("keeps the subchannel of every sector"), "{}", notes);
+        assert_eq!(track_files(&dir.join("disc.mds")).len(), 2);
     }
 
     /// `mirage_disc_get_dpm_data_for_sector`'s angle of sector `lba`, in
