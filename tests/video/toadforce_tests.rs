@@ -1226,7 +1226,10 @@ fn an_access_past_a_windows_end_goes_whole_to_its_first_bytes_window() {
     // The registers with the ring right after them: a read from their
     // last bytes has no byte of the ring, and a write there is dropped.
     set_config(&mut cpu, 0x10, INITIAL_RING - regs::REGISTERS_SIZE);
-    assert_eq!(cpu.bus.read_32(RING - regs::REGISTERS_SIZE as usize), regs::ID_VALUE);
+    assert_eq!(
+        cpu.bus.read_32(RING - regs::REGISTERS_SIZE as usize),
+        regs::ID_VALUE
+    );
     assert_eq!(cpu.bus.read_32(RING - 2), 0);
     assert_eq!(cpu.bus.read_16(RING - 1), 0);
     cpu.bus.write_32(RING - 2, 0xFFFF_FFFF);
