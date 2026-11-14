@@ -427,10 +427,17 @@ fn copy_out(volume: &FatVolume, entry: &Entry, target: &Path) -> Result<(), Stri
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let direct = fs::is_foreign(target);
-    let partial = if direct { target.to_path_buf() } else { target.with_file_name(format!(
-        ".{}{PARTIAL}",
-        target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-    )) };
+    let partial = if direct {
+        target.to_path_buf()
+    } else {
+        target.with_file_name(format!(
+            ".{}{PARTIAL}",
+            target
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        ))
+    };
     let result = (|| {
         let mut out = fs::File::create(&partial).map_err(|e| e.to_string())?;
         let mut buf = vec![0u8; COPY_CHUNK];

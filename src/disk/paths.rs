@@ -162,7 +162,8 @@ impl DiskController {
             return false;
         }
         std::fs::canonicalize(dir.join(part)).is_ok_and(|long| {
-            long.file_name().is_some_and(|name| super::host_private(&name.to_string_lossy()))
+            long.file_name()
+                .is_some_and(|name| super::host_private(&name.to_string_lossy()))
         })
     }
 

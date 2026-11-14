@@ -217,11 +217,13 @@ pub(crate) fn new_entry_name(name: &str) -> String {
 /// `shared_disk::PARTIAL`.
 pub(crate) fn host_private(name: &str) -> bool {
     let starts = |prefix: &str| {
-        name.get(..prefix.len()).is_some_and(|s| s.eq_ignore_ascii_case(prefix))
+        name.get(..prefix.len())
+            .is_some_and(|s| s.eq_ignore_ascii_case(prefix))
     };
     let ends = |suffix: &str| {
         let at = name.len().wrapping_sub(suffix.len());
-        name.get(at..).is_some_and(|s| s.eq_ignore_ascii_case(suffix))
+        name.get(at..)
+            .is_some_and(|s| s.eq_ignore_ascii_case(suffix))
     };
     const DESKTOP: [&str; 11] = [
         ".DS_Store",

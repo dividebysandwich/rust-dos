@@ -59,10 +59,26 @@ fn a_device_name_may_end_in_a_colon() {
 /// "gitignore old.txt" keeps GITIGN~1.TXT beside ".gitignore".
 #[test]
 fn names_starting_with_a_dot_get_short_names_after_the_others() {
-    let names = [".256", "..foo", ".a.b", ".gitignore", ".gitignore2", "256", "gitignore old.txt"];
+    let names = [
+        ".256",
+        "..foo",
+        ".a.b",
+        ".gitignore",
+        ".gitignore2",
+        "256",
+        "gitignore old.txt",
+    ];
     assert_eq!(
         short_names(&names),
-        ["256~1", "FOO~1", "A~1.B", "GITIGN~2", "GITIGN~3", "256", "GITIGN~1.TXT"]
+        [
+            "256~1",
+            "FOO~1",
+            "A~1.B",
+            "GITIGN~2",
+            "GITIGN~3",
+            "256",
+            "GITIGN~1.TXT"
+        ]
     );
 }
 
@@ -127,17 +143,30 @@ fn a_host_name_starting_with_a_dot_is_listed() {
     fs::create_dir_all(base.join("TAGS/.256")).unwrap();
     fs::create_dir_all(base.join("TAGS/BINA")).unwrap();
     fs::write(base.join("TAGS/.256/ingo"), b"art").unwrap();
-    for private in [".rust-dos-deleted", ".DS_Store", "._BINA", ".SAVE.rust-dos-partial"] {
+    for private in [
+        ".rust-dos-deleted",
+        ".DS_Store",
+        "._BINA",
+        ".SAVE.rust-dos-partial",
+    ] {
         fs::write(base.join("TAGS").join(private), b"x").unwrap();
     }
     let mut disk = DiskController::new(base.clone());
 
-    let names: Vec<String> =
-        disk.list_directory(r"C:\TAGS\*.*", 0x10).unwrap().into_iter().map(|e| e.filename).collect();
+    let names: Vec<String> = disk
+        .list_directory(r"C:\TAGS\*.*", 0x10)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.filename)
+        .collect();
     assert_eq!(names, ["..", ".", "256~1", "BINA"]);
     assert!(disk.is_file(r"C:\TAGS\.256\INGO"));
     assert!(disk.is_file(r"C:\TAGS\256~1\INGO"));
-    assert!(disk.resolve_path(r"C:\TAGS\256~1").unwrap().ends_with("TAGS/.256"));
+    assert!(
+        disk.resolve_path(r"C:\TAGS\256~1")
+            .unwrap()
+            .ends_with("TAGS/.256")
+    );
     assert!(!disk.is_file(r"C:\TAGS\.DS_Store"));
     assert!(!disk.is_file(r"C:\TAGS\.rust-dos-deleted"));
     assert!(disk.open_file(r"C:\TAGS\._BINA", 0, PSP).is_err());
@@ -162,10 +191,16 @@ fn the_hosts_own_files_cant_be_reached_by_name() {
     assert!(disk.create_file(r"C:\.rust-dos-deleted", PSP).is_err());
     assert!(disk.create_file(r"C:\.Rust-Dos-Deleted", PSP).is_err());
     assert!(disk.create_file(r"C:\ONLY\.ds_store", PSP).is_err());
-    assert!(disk.rename_file(r"C:\GAME.DAT", r"C:\.rust-dos-deleted").is_err());
+    assert!(
+        disk.rename_file(r"C:\GAME.DAT", r"C:\.rust-dos-deleted")
+            .is_err()
+    );
     assert!(disk.rename_file(r"C:\GAME.DAT", r"C:\.DS_Store").is_err());
     assert!(disk.delete_file(r"C:\.rust-dos-deleted").is_err());
-    assert!(disk.set_file_attribute(r"C:\.rust-dos-deleted", 0x01).is_err());
+    assert!(
+        disk.set_file_attribute(r"C:\.rust-dos-deleted", 0x01)
+            .is_err()
+    );
     assert!(disk.create_directory(r"C:\.Trashes").is_err());
     // The Windows host's own short name for the list, where the volume
     // makes them.
