@@ -3095,3 +3095,202 @@ fn dxt_surfaces_are_whole_blocks_in_system_memory() {
     assert_eq!(caps & DDSCAPS_SYSTEMMEMORY, DDSCAPS_SYSTEMMEMORY);
     assert_eq!(peek(&cpu, data + DESC3 + 0x10), 32);
 }
+
+// The frame rate cap (`fps_cap`).
+
+/// Where the capped programs count their frames, and their second
+/// thread its passes.
+const FRAMES: u32 = 0x8A0;
+const WORKER: u32 = 0x8A4;
+const DDFLIP_WAIT: u32 = 0x1;
+const DDFLIP_NOVSYNC: u32 = 0x8;
+const DDFLIP_DONOTWAIT: u32 = 0x20;
+
+/// How a capped program presents its frames.
+#[derive(Clone, Copy)]
+enum Present {
+    /// Flip, with these flags, in a 320x200 full-screen mode.
+    Flip(u32),
+    /// Flip, with these flags, then Sleep for this many milliseconds:
+    /// a frame every so often in emulated time.
+    FlipEvery(u32, u32),
+    /// In a window: a fill of an offscreen surface, then two blits of it
+    /// to the primary surface, each a part of the frame.
+    Blit,
+}
+
+/// A thread that does nothing but count its passes in WORKER, started
+/// with CreateThread (the import `create_thread`).
+fn start_worker(a: &mut CodeAssembler, l: &Layout, create_thread: usize) -> Result<(), IcedError> {
+    // CreateThread's last three arguments, then its start address, which
+    // the call pushes: the code after it.
+    let mut start = a.create_label();
+    a.push(0)?;
+    a.push(0)?;
+    a.push(0)?;
+    a.call(start)?;
+    let mut spin = a.create_label();
+    a.set_label(&mut spin)?;
+    a.inc(dword_ptr(l.at(WORKER)))?;
+    a.jmp(spin)?;
+    a.set_label(&mut start)?;
+    a.push(0)?;
+    a.push(0)?;
+    a.call(l.import(create_thread))
+}
+
+/// A program that presents frames as fast as it can, `present`'s way,
+/// counting them in FRAMES, while a second thread counts in WORKER.
+fn capped_program(present: Present) -> (Vec<u8>, u32) {
+    const CREATE_THREAD: usize = 3;
+    const SLEEP: usize = 4;
+    let mut d = flip_chain_data();
+    if let Present::Blit = present {
+        desc(&mut d, DESC, DDSD_CAPS, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
+        desc(&mut d, LOCKED, DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT, DDSCAPS_OFFSCREENPLAIN, 16, 16, 0);
+        put32(&mut d, FX, 100);
+        for (i, v) in [100u32, 50, 116, 58, 100, 58, 116, 66].iter().enumerate() {
+            put32(&mut d, RECT + 4 * i as u32, *v);
+        }
+    }
+    let kernel32: (&str, &[&str]) = ("KERNEL32.dll", &["CreateThread", "Sleep"]);
+    program(&[USER32, DDRAW, kernel32], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        match present {
+            Present::Flip(_) | Present::FlipEvery(..) => start_flip_chain(a, l, &mut c)?,
+            Present::Blit => {
+                start(a, l, &mut c, (100, 50, 200, 100))?;
+                c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &[Arg::Val(HWND), Arg::I(DDSCL_NORMAL)])?;
+                c.com(a, l, DD, DD_CREATE_SURFACE, &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)])?;
+                c.com(a, l, DD, DD_CREATE_SURFACE, &[Arg::At(LOCKED), Arg::At(OFFSCREEN), Arg::I(0)])?;
+            }
+        }
+        start_worker(a, l, CREATE_THREAD)?;
+        let mut frame = a.create_label();
+        a.set_label(&mut frame)?;
+        match present {
+            Present::Flip(flags) => {
+                c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(flags)])?;
+            }
+            Present::FlipEvery(flags, ms) => {
+                c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(flags)])?;
+                a.push(ms)?;
+                a.call(l.import(SLEEP))?;
+            }
+            Present::Blit => {
+                let fill = [Arg::I(0), Arg::I(0), Arg::I(0), Arg::I(DDBLT_COLORFILL | DDBLT_WAIT), Arg::At(FX)];
+                c.com(a, l, OFFSCREEN, S_BLT, &fill)?;
+                for half in 0..2 {
+                    let rect = Arg::At(RECT + 16 * half);
+                    let blit = [rect, Arg::Val(OFFSCREEN), Arg::I(0), Arg::I(DDBLT_WAIT), Arg::I(0)];
+                    c.com(a, l, FRONT, S_BLT, &blit)?;
+                }
+            }
+        }
+        a.inc(dword_ptr(l.at(FRAMES)))?;
+        a.jmp(frame)
+    })
+}
+
+/// What a capped program does in a second of emulated time once it runs,
+/// under the cap `fps`: its frames a second, and its second thread's
+/// passes.
+fn capped_rate(test: &str, present: Present, fps: Option<u32>) -> (f64, u32) {
+    capped_rate_under(test, present, fps.into())
+}
+
+/// `capped_rate` under the cap `cap`.
+fn capped_rate_under(test: &str, present: Present, cap: rust_dos::frame_cap::Cap) -> (f64, u32) {
+    let (program, data) = capped_program(present);
+    let mut cpu = machine(test, program);
+    cpu.bus.set_fps_cap(cap);
+    let run_until = |cpu: &mut Cpu, done: &dyn Fn(&Cpu) -> bool| {
+        for _ in 0..200_000 {
+            cpu.bus.start_batch(cpu.bus.clock.icount + 5_000);
+            run_batch(cpu, &mut NoHook, false);
+            let paged = cpu.cr0 & 0x8000_0001 == 0x8000_0001;
+            if paged && done(cpu) {
+                return;
+            }
+        }
+        panic!("the program didn't get there: {:?}, at {:X}", printed(cpu), cpu.eip());
+    };
+    run_until(&mut cpu, &|cpu| peek(cpu, data + FRAMES) >= 3);
+    let (start, frames, worker) =
+        (cpu.bus.clock.now_ns(), peek(&cpu, data + FRAMES), peek(&cpu, data + WORKER));
+    let second = start + 1_000_000_000;
+    run_until(&mut cpu, &|cpu| cpu.bus.clock.now_ns() >= second);
+    let seconds = (cpu.bus.clock.now_ns() - start) as f64 / 1e9;
+    let shown = peek(&cpu, data + FRAMES) - frames;
+    (shown as f64 / seconds, peek(&cpu, data + WORKER) - worker)
+}
+
+#[test]
+fn flips_without_the_retrace_come_at_the_caps_rate() {
+    for fps in [60, 45] {
+        let (rate, _) = capped_rate("cap_flip_novsync", Present::Flip(DDFLIP_WAIT | DDFLIP_NOVSYNC), Some(fps));
+        assert!((rate - fps as f64).abs() < 1.5, "{} flips a second under a cap of {}", rate, fps);
+    }
+    let (rate, worker) = capped_rate("cap_flip_novsync", Present::Flip(DDFLIP_WAIT | DDFLIP_NOVSYNC), Some(30));
+    assert!((rate - 30.0).abs() < 1.5, "{} flips a second", rate);
+    // The flipping thread waits for its turns, and the other one runs.
+    assert!(worker > 100_000, "the other thread ran {} passes", worker);
+    // A flip that mustn't wait still waits for its turn: the program sees
+    // only that Flip took longer.
+    let (rate, _) = capped_rate("cap_flip_donotwait", Present::Flip(DDFLIP_NOVSYNC | DDFLIP_DONOTWAIT), Some(30));
+    assert!((rate - 30.0).abs() < 1.5, "{} flips a second with DDFLIP_DONOTWAIT", rate);
+    let (uncapped, _) = capped_rate("cap_flip_off", Present::Flip(DDFLIP_WAIT | DDFLIP_NOVSYNC), None);
+    assert!(uncapped > 200.0, "{} flips a second without the cap", uncapped);
+}
+
+#[test]
+fn a_program_presenting_every_10_ms_gets_the_caps_rate() {
+    // A frame every 10 ms of emulated time is 100 a second uncapped; a
+    // cap of 60 holds each to its turn, and the Sleep that follows starts
+    // from there.
+    let every = Present::FlipEvery(DDFLIP_NOVSYNC | DDFLIP_DONOTWAIT, 10);
+    let (uncapped, _) = capped_rate("cap_every_10_off", every, None);
+    assert!((uncapped - 100.0).abs() < 2.0, "{} flips a second without the cap", uncapped);
+    let (rate, worker) = capped_rate("cap_every_10", every, Some(60));
+    assert!((rate - 60.0).abs() < 1.0, "{} flips a second under a cap of 60", rate);
+    assert!(worker > 100_000, "the other thread ran {} passes", worker);
+}
+
+#[test]
+fn flips_at_the_retrace_under_a_lower_cap_come_at_the_caps_rate() {
+    let flip = Present::Flip(DDFLIP_WAIT);
+    let (display, _) = capped_rate("cap_flip_vsync_off", flip, None);
+    assert!(display > 55.0 && display < 75.0, "{} flips a second at the retrace", display);
+    // A cap at the display's rate, or above it, holds none of them back,
+    // nor one a hair below it (60 on a display of 60.00006 Hz).
+    for fps in [display.floor() as u32, display.ceil() as u32, 240] {
+        let (rate, _) = capped_rate("cap_flip_vsync_at", flip, Some(fps));
+        assert!((rate - display).abs() < 1.5, "{} flips a second under a cap of {}", rate, fps);
+    }
+    // Below it, a flip waits for its turn and then for the retrace
+    // nearest it, one frame a turn.
+    let (rate, worker) = capped_rate("cap_flip_vsync_30", flip, Some(30));
+    assert!((rate - 30.0).abs() < 1.5, "{} flips a second under a cap of 30", rate);
+    assert!(worker > 100_000, "the other thread ran {} passes", worker);
+}
+
+#[test]
+fn blits_to_the_primary_surface_arent_held() {
+    // Timing can't tell a frame blitted in parts (dirty rectangles, a
+    // sprite and what it covered) from whole frames, so the cap holds no
+    // blit: under a cap of 30 the program blits as often as without one.
+    let (uncapped, _) = capped_rate("cap_blit_off", Present::Blit, None);
+    let (rate, _) = capped_rate("cap_blit", Present::Blit, Some(30));
+    assert!(uncapped > 100.0, "{} frames a second without the cap", uncapped);
+    let close = (rate - uncapped).abs() < uncapped * 0.02;
+    assert!(close, "{} under a cap of 30, {} without", rate, uncapped);
+}
+
+#[test]
+fn flips_without_the_retrace_come_at_60_under_auto() {
+    let auto = rust_dos::frame_cap::Cap::Auto;
+    let flip = Present::Flip(DDFLIP_WAIT | DDFLIP_NOVSYNC);
+    let (rate, worker) = capped_rate_under("cap_flip_auto", flip, auto);
+    assert!((rate - 60.0).abs() < 1.5, "{} flips a second under auto", rate);
+    assert!(worker > 100_000, "the other thread ran {} passes", worker);
+}

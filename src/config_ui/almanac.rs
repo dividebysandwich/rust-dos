@@ -672,7 +672,7 @@ fn about(view: &AlmanacView, line: &Line) -> String {
                         .usable()
                         .iter()
                         .take(8)
-                        .map(|s| format!("{}={}", s.key, s.value))
+                        .map(|s| format!("{}={}", crate::config::renamed(&s.section, &s.key), s.value))
                         .collect();
                     format!("Settings {}: {}.", r.describe(), shown.join(" "))
                 }

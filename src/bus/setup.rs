@@ -109,6 +109,7 @@ impl Bus {
             powervr: None,
             powervr_line: None,
             hold: None,
+            frame_cap: Default::default(),
             notices: Vec::new(),
             glide_hint: None,
             ide: [None, None],

@@ -35,6 +35,32 @@ VRR must be on for the display and for windows: in the graphics
 driver's settings, or with *adaptive sync* on in the desktop. Leave this
 **off** with a fixed-rate display.
 
+# Frame rate cap {#fps-cap}
+
+The most frames a second a Windows or 3dfx game may show, on whichever
+card shows its picture. A game that could draw faster waits for each
+frame's turn, so its frames come at an even pace and the PC is spared
+the frames nobody sees. Sound, timers and the game's other threads go
+on while it waits. A game slower than the cap keeps its own rate.
+
+**Auto**, the default, holds a game to 60 frames a second, except one
+that waits for the screen's retrace: that one shows a frame at every
+retrace, as on the real PC, also on a 72, 75 or 85 Hz mode, and a game
+that times itself by its frames keeps its speed. A number holds every
+game to that rate, also one that waits for the retrace. A game set to a
+100 or 120 Hz mode draws that many frames a second under Auto; if the
+PC can't keep up, pick **60**.
+
+It applies where a game hands over whole frames: 3dfx swaps, DirectDraw
+flips, Direct3D 8's present and OpenGL's SwapBuffers. Blits to the
+screen and DOS games that draw on a VGA or VESA screen aren't held; DOS
+games keep the pace of the display's retraces, which they wait for
+themselves.
+
+Turn it **Off** for benchmarks and timedemos, which can show no more
+than the cap. With *Variable refresh rate* on, the window refreshes at
+the cap; a display faster than 60 Hz shows more with a higher cap.
+
 # Scaling filter {#filter}
 
 How the picture is blown up to the window's size:

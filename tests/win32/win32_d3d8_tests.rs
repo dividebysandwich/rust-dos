@@ -1061,3 +1061,78 @@ fn a_toadforce_blends_vertices_by_their_weights_and_the_pipeline_by_their_indice
     assert_eq!(counts.rejected, 0);
     assert_eq!((counts.draws, counts.transformed), (2, 1), "{counts:?}");
 }
+
+// The frame rate cap (`fps_cap`) at Present.
+
+const DEV_PRESENT: u32 = 15;
+const D3DPRESENT_INTERVAL_IMMEDIATE: u32 = 0x8000_0000;
+/// Where the capped program counts its frames, and its second thread
+/// its passes.
+const FRAMES: u32 = 0x1F00;
+const WORKER: u32 = 0x1F04;
+
+/// A full-screen program on a ToadForce presenting as fast as it can,
+/// with D3DPRESENT_INTERVAL_IMMEDIATE, counting its frames in FRAMES,
+/// while a second thread counts in WORKER.
+fn presenting_program() -> (Vec<u8>, u32) {
+    const CREATE_THREAD: usize = 2;
+    let mut d = vec![0u8; DATA_SIZE];
+    toadforce_present(&mut d);
+    put32(&mut d, PRESENT + 48, D3DPRESENT_INTERVAL_IMMEDIATE);
+    let kernel32: (&str, &[&str]) = ("KERNEL32.DLL", &["CreateThread"]);
+    program(&[USER32, D3D8, kernel32], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        toadforce_device(a, l, &mut c)?;
+        // CreateThread's last three arguments, then its start address,
+        // which the call pushes: the code after it, the thread's.
+        let (mut thread, mut spin, mut frame) =
+            (a.create_label(), a.create_label(), a.create_label());
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(thread)?;
+        a.set_label(&mut spin)?;
+        a.inc(dword_ptr(l.at(WORKER)))?;
+        a.jmp(spin)?;
+        a.set_label(&mut thread)?;
+        a.push(0)?;
+        a.push(0)?;
+        c.api(a, l, CREATE_THREAD, &[])?;
+        a.set_label(&mut frame)?;
+        let present = [Arg::I(0), Arg::I(0), Arg::I(0), Arg::I(0)];
+        c.com(a, l, DEVICE, DEV_PRESENT, &present)?;
+        a.inc(dword_ptr(l.at(FRAMES)))?;
+        a.jmp(frame)
+    })
+}
+
+#[test]
+fn present_comes_at_the_frame_rate_caps_rate() {
+    let (exe, data) = presenting_program();
+    let rate = |test: &str, fps: Option<u32>| {
+        let mut cpu = machine_toadforce(test, exe.clone());
+        cpu.bus.set_fps_cap(fps);
+        let run_until = |cpu: &mut rust_dos::cpu::Cpu, done: &dyn Fn(&rust_dos::cpu::Cpu) -> bool| {
+            for _ in 0..200_000 {
+                cpu.bus.start_batch(cpu.bus.clock.icount + 5_000);
+                rust_dos::exec::run_batch(cpu, &mut rust_dos::exec::NoHook, false);
+                if cpu.cr0 & 0x8000_0001 == 0x8000_0001 && done(cpu) {
+                    return;
+                }
+            }
+            panic!("the program didn't get there, at {:X}", cpu.eip());
+        };
+        run_until(&mut cpu, &|cpu| peek(cpu, data + FRAMES) >= 3);
+        let start = cpu.bus.clock.now_ns();
+        let (frames, worker) = (peek(&cpu, data + FRAMES), peek(&cpu, data + WORKER));
+        run_until(&mut cpu, &|cpu| cpu.bus.clock.now_ns() >= start + 1_000_000_000);
+        let seconds = (cpu.bus.clock.now_ns() - start) as f64 / 1e9;
+        let shown = f64::from(peek(&cpu, data + FRAMES) - frames) / seconds;
+        (shown, peek(&cpu, data + WORKER) - worker)
+    };
+    let (capped, worker) = rate("d3d8_present_cap_30", Some(30));
+    assert!((capped - 30.0).abs() < 1.5, "{capped} presents a second");
+    assert!(worker > 100_000, "the other thread ran {worker} passes");
+    let (uncapped, _) = rate("d3d8_present_cap_off", None);
+    assert!(uncapped > 60.0, "{uncapped} presents a second without the cap");
+}

@@ -24,6 +24,13 @@
 # when the machine draws it, at its own rate (70 Hz for VGA) rather than
 # a steady 60 Hz. VRR must be on in the graphics driver or desktop too.
 #vrr=false
+# The most frames a second a program may show, on any card: off, or 10 to
+# 240. A game that draws faster waits for each frame's turn; one that
+# draws slower keeps its own rate. It covers 3dfx swaps, DirectDraw
+# flips and blits to the screen, Direct3D 8's Present and SwapBuffers;
+# DOS games on a VGA keep the pace of the retraces they wait for. Turn it
+# off for benchmarks and timedemos. voodoo_fps_cap is its old name.
+#fps_cap=60
 # How the picture is scaled up: nearest (sharp pixels) or linear (smooth).
 # Only without a CRT shader, which does its own scaling.
 #filter=nearest

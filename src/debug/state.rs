@@ -3,7 +3,9 @@
 use serde_json::{Value, json};
 
 use super::journal::{Kind, OpState};
-use super::{DebugHub, LowInput, Need, PauseReason, Reply, SpeedRequest, StateRequest};
+use super::{
+    DebugHub, LowInput, Need, PauseReason, Reply, SettingChange, SpeedRequest, StateRequest,
+};
 use crate::cpu::Cpu;
 
 impl DebugHub {
@@ -192,12 +194,18 @@ impl DebugHub {
         None
     }
 
-    /// The front end carried out `request`: `result` is the speed now, or
-    /// why it can't be. A change appends `speed_changed`.
+    /// The front end carried out `request`: `result` is the setting now,
+    /// or why it can't be. A change appends `speed_changed` (the CPU
+    /// speed) or `fps_cap_changed` (the frame rate cap), and either moves
+    /// `state_seq`: both change how the machine runs from then on.
     pub fn speed_done(&mut self, cpu: &Cpu, request: SpeedRequest, result: Result<Value, String>) {
         let reply = match result {
             Ok(value) => {
-                self.record(cpu, Kind::SpeedChanged, json!({"cycles": value.get("cycles"), "source": "debugger"}));
+                let (kind, key) = match request.change {
+                    SettingChange::Cycles(_) => (Kind::SpeedChanged, "cycles"),
+                    SettingChange::FpsCap(_) => (Kind::FpsCapChanged, "fps_cap"),
+                };
+                self.record(cpu, kind, json!({ key: value.get(key), "source": "debugger" }));
                 Reply::Json(value)
             }
             Err(e) => Reply::bad(e),

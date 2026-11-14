@@ -335,7 +335,7 @@ impl Core {
         let fast = !waiting && !self.ui.is_open() && self.autoinput_step();
         let m = &mut self.m;
         m.cpu.bus.apply_freezes();
-        m.cpu.bus.set_voodoo_fps_cap(m.settings.voodoo.fps_cap);
+        m.cpu.bus.set_fps_cap(m.settings.fps_cap);
         let batch_end = if m.cpu.bus.exit_requested || waiting {
             self.target_ticks = m.cpu.bus.clock.now_ticks();
             self.tick_rem = 0;

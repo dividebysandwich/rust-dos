@@ -1219,6 +1219,14 @@ are the emulator's.
   (`Bus::toadforce_submit`), so both run one decoder. Blits the card
   doesn't do as DirectDraw's own code does (stretches, which sample
   differently, mirrors, destination keys) stay with that code.
+- **The frame rate cap.** The card's presents are the built-in
+  Windows': DirectDraw's flips (Direct3D 8's full-screen `Present`
+  among them) and the windowed presents of `SwapBuffers` and Direct3D
+  8. `fps_cap` holds them back there (`win32::pace`), before the card
+  gets its `FLIP` or `BLT`, as it does on every other card; the card
+  has no cap of its own (CONFIGURATION.md's "Frame rate cap"). Blits to
+  the primary surface aren't held, and a `FLIP` written to the ring by
+  a guest's driver wouldn't be either.
 - **The queue.** The words handed over that way wait in a queue and
   run together, in their order. A game's draws are small, and one by
   itself is a few rows on one thread; a queue of them goes to the

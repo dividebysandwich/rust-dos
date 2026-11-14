@@ -8,7 +8,8 @@
 //! are never seen, and some games (Descent) play badly at such rates. So
 //! the speed goes up in steps while the frame rate follows, back to where
 //! it stopped following, and never past the display's refresh rate, or
-//! the frame rate the user asks for instead (`auto_fps`).
+//! the frame rate the user asks for instead (`auto_fps`), or the frame
+//! rate cap while the program presents through it (`fps_cap`).
 //!
 //! The frames are counted on the bus (`Activity`): page flips, or where a
 //! program draws out of sight and copies the finished picture to video
@@ -697,7 +698,8 @@ pub struct Measurement {
     /// The share of that moved on drives.
     pub io: f64,
     /// The frame rate to aim for: the display's refresh rate, or the
-    /// user's (`auto_fps`).
+    /// user's (`auto_fps`), and no more than the frame rate cap's while
+    /// the program presents through it.
     pub refresh: f64,
     /// Emulated seconds a second of the host's time: 1 kept real time,
     /// less fell behind (and dropped what it didn't catch up on).
@@ -1225,6 +1227,14 @@ impl AutoSpeed {
             (Some(fps), _) => fps as f64,
             (None, Some(v)) if v.output() => v.refresh_hz(),
             (None, _) => bus.vga.peek_timing().hz(),
+        };
+        // The frame rate cap shows no more frames than its rate while a
+        // program presents through it, as a display shows no more than
+        // its refresh rate: more speed only adds to the time its frames
+        // are held.
+        let refresh = match bus.frame_cap.get().refresh_timing(now.ns) {
+            Some(cap) => refresh.min(cap.hz()),
+            None => refresh,
         };
         let mut fps = (frames > 0).then(|| frames as f64 / seconds);
         if let (Some(rate), Some((before, tries))) = (fps, self.unsettled) {

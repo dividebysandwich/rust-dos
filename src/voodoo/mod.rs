@@ -291,8 +291,6 @@ pub struct VoodooSettings {
     pub msaa: u32,
     /// The texture anisotropy OpenGL uses, 1 for none.
     pub anisotropy: u32,
-    /// The most frames a second programs may show on the card, if capped.
-    pub fps_cap: Option<u32>,
     /// Glide's gamma factor for the guest's SST_*GAMMA variables, if set.
     pub gamma: Option<f32>,
     /// Whether OpenGL dithers to 5-6-5 as the card does where a game
@@ -315,7 +313,6 @@ impl Default for VoodooSettings {
             scale_shader: true,
             msaa: 1,
             anisotropy: 1,
-            fps_cap: None,
             gamma: None,
             dither: true,
             gpu_reads: true,
@@ -593,12 +590,10 @@ pub struct Voodoo {
     pub swaps: VecDeque<PendingSwap>,
     last_swap: u64,
     fifo_writes: u32,
-    /// The most frames a second the program may show (`voodoo_fps_cap`),
-    /// the time of the last swap it let through, in ns, and a swap
-    /// waiting for its turn: its swapbufferCMD and when it is due, in PIT
-    /// ticks.
-    fps_cap: Option<u32>,
-    capped_at: u64,
+    /// The machine's frame rate cap (`fps_cap`), shared with the bus, and
+    /// a swap waiting for its turn under it: its swapbufferCMD and when it
+    /// is due, in PIT ticks.
+    pub(crate) frame_cap: crate::frame_cap::Shared,
     deferred: Option<(u32, u64)>,
     /// The picture changed since the display last looked, or the card
     /// took or gave back the monitor.
@@ -747,8 +742,7 @@ impl Voodoo {
             swaps: VecDeque::new(),
             last_swap: 0,
             fifo_writes: 0,
-            fps_cap: None,
-            capped_at: 0,
+            frame_cap: Default::default(),
             deferred: None,
             display_dirty: true,
             showing: false,
@@ -837,7 +831,6 @@ impl Voodoo {
         self.front_jobs = None;
         self.last_swap = 0;
         self.fifo_writes = 0;
-        self.capped_at = 0;
         self.deferred = None;
         self.fbi.frontbuf = 0;
         self.fbi.backbuf = 1;
@@ -1790,39 +1783,54 @@ impl Voodoo {
 
     /// When retrace number `k` begins, in PIT ticks, rounded up.
     fn retrace_ticks(&self, k: u64) -> u64 {
-        let frame = self.timing.frame_ns();
-        let ns = k.saturating_sub(1) * frame + self.timing.retrace_start as u64 * self.timing.line_ns as u64;
-        (ns as u128 * PIT_HZ as u128).div_ceil(1_000_000_000) as u64
+        (self.retrace_ns(k) as u128 * PIT_HZ as u128).div_ceil(1_000_000_000) as u64
     }
 
-    /// The frame rate cap (`voodoo_fps_cap`): None for none.
-    pub fn set_fps_cap(&mut self, fps: Option<u32>) {
-        self.fps_cap = fps.filter(|&fps| fps > 0);
+    /// When retrace number `k` begins, in ns.
+    fn retrace_ns(&self, k: u64) -> u64 {
+        let line = self.timing.line_ns as u64;
+        k.saturating_sub(1) * self.timing.frame_ns() + self.timing.retrace_start as u64 * line
     }
 
-    /// The steady timing the frame rate cap shows frames at, if there is
-    /// a cap: a retrace at every multiple of its frame time, which capped
-    /// swaps happen at.
-    pub fn cap_timing(&self) -> Option<CrtTiming> {
-        let fps = self.fps_cap?;
-        let frame = (1_000_000_000 / fps as u64) as u32;
-        Some(CrtTiming { line_ns: frame, hdisplay_ns: frame, total: 1, display: 1, retrace_start: 0, retrace_end: 1 })
+    /// The retrace a swap with the swapbufferCMD `data` made now waits
+    /// for: `bits 8:1` retraces after the last swap's and at least the
+    /// next. None for a swap without bit 0, which happens at once.
+    pub(crate) fn swap_retrace(&self, data: u32, now: Now) -> Option<u64> {
+        if data & 1 == 0 {
+            return None;
+        }
+        let interval = ((data >> 1) & 0xFF) as u64;
+        let after = self.swaps.back().map_or(self.last_swap, |s| s.retrace);
+        Some((self.retraces(now.ns) + 1).max(after + interval.max(1)))
+    }
+
+    /// When a swap with the swapbufferCMD `data` made now would show, in
+    /// ns: at once, or at the retrace it waits for.
+    pub fn swap_shows_at(&self, data: u32, now: Now) -> u64 {
+        match self.swap_retrace(data, now) {
+            None => now.ns,
+            Some(k) => self.retrace_ns(k),
+        }
+    }
+
+    /// The display's frame time for a swap with the swapbufferCMD `data`
+    /// if it waits for a retrace, as the frame rate cap takes it
+    /// (`FrameCap::wait`).
+    pub fn swap_refresh_ns(&self, data: u32) -> Option<u64> {
+        (data & 1 != 0).then(|| self.timing.frame_ns())
     }
 
     /// swapbufferCMD: the buffers swap now; with bit 0, the swap also
-    /// stays pending until the retrace it waits for, `bits 8:1` retraces
-    /// after the last swap and at least the next. Under a frame rate cap,
-    /// a swap waits for the first of the cap's frame times a frame after
-    /// the last, and the program waits with it (`Effect::hold_to`), so
-    /// frames come at an even pace when it could draw them faster.
+    /// stays pending until the retrace it waits for (`swap_retrace`). A
+    /// swap the frame rate cap holds back (`FrameCap::wait`) waits for
+    /// its turn, and the program with it (`Effect::hold_to`), so frames
+    /// come at an even pace when it could draw them faster.
     pub(crate) fn swap(&mut self, data: u32, now: Now, effect: &mut Effect) {
         self.backlog.borrow_mut().swapped();
-        if let Some(cap) = self.cap_timing() {
-            let frame = cap.frame_ns();
-            let earliest = if self.capped_at == 0 { now.ns } else { now.ns.max(self.capped_at + frame) };
-            let at = earliest.div_ceil(frame) * frame;
-            self.capped_at = at;
-            let due = (at as u128 * PIT_HZ as u128).div_ceil(1_000_000_000) as u64;
+        let at = self.swap_shows_at(data, now);
+        let turn = self.frame_cap.wait(at, self.swap_refresh_ns(data));
+        if let Some(until) = turn {
+            let due = (until as u128 * PIT_HZ as u128).div_ceil(1_000_000_000) as u64;
             if due > now.ticks {
                 self.deferred = Some((data, due));
                 effect.hold_to = Some(due);
@@ -1830,24 +1838,30 @@ impl Voodoo {
                 return;
             }
         }
-        self.swap_now(data, now, effect);
+        self.swap_now(data, now, turn.unwrap_or(0), effect);
     }
 
-    fn swap_now(&mut self, data: u32, now: Now, effect: &mut Effect) {
+    /// The swap with the swapbufferCMD `data` goes ahead, its turn under
+    /// the frame rate cap having come at `turn` ns (0 for none): a Voodoo
+    /// Graphics' or Voodoo2's, or a Banshee's (`banshee_swap`).
+    fn swap_now(&mut self, data: u32, now: Now, turn: u64, effect: &mut Effect) {
+        // Within the PIT tick of its turn, a swap counts from its turn.
+        self.frame_cap.shown(self.swap_shows_at(data, now).max(turn));
+        if self.banshee.is_some() {
+            self.banshee_swap(data, now, effect);
+            return;
+        }
         let mark = self.swap_mark();
         self.rotate_buffers();
         self.shown_up_to(mark);
-        let current = self.retraces(now.ns);
-        if data & 1 == 0 {
-            self.last_swap = current;
-            return;
+        match self.swap_retrace(data, now) {
+            None => self.last_swap = self.retraces(now.ns),
+            Some(retrace) => {
+                let due = self.retrace_ticks(retrace);
+                self.swaps.push_back(PendingSwap { retrace, due });
+                effect.reschedule = true;
+            }
         }
-        let interval = ((data >> 1) & 0xFF) as u64;
-        let after = self.swaps.back().map_or(self.last_swap, |s| s.retrace);
-        let retrace = (current + 1).max(after + interval.max(1));
-        let due = self.retrace_ticks(retrace);
-        self.swaps.push_back(PendingSwap { retrace, due });
-        effect.reschedule = true;
     }
 
     fn rotate_buffers(&mut self) {
@@ -1897,11 +1911,14 @@ impl Voodoo {
     /// they go on (a Banshee's next swap among the timer events) put in
     /// `effect`.
     fn service_into(&mut self, now: Now, effect: &mut Effect) {
+        let mut released = false;
         if let Some((data, due)) = self.deferred
             && due <= now.ticks
         {
             self.deferred = None;
-            self.swap_now(data, now, &mut Effect::default());
+            let turn = crate::timer::mul_div_ceil(due, 1_000_000_000, PIT_HZ);
+            self.swap_now(data, now, turn, effect);
+            released = true;
         }
         let ticks = now.ticks;
         let mut retired = 0;
@@ -1915,7 +1932,7 @@ impl Voodoo {
             retired += 1;
         }
         if self.banshee.is_some() {
-            self.banshee_swaps_done(retired, now, effect);
+            self.banshee_swaps_done(retired, released, now, effect);
         }
     }
 
@@ -2388,7 +2405,9 @@ impl State for Voodoo {
         self.deferred.is_some().save(w);
         data.save(w);
         due.save(w);
-        self.capped_at.save(w);
+        // Where the last capped swap's time was: the frame rate cap's own
+        // section has it now (`Bus::frame_cap`).
+        0u64.save(w);
         // Then a Voodoo2's own.
         self.cmdfifo.save(w);
         self.svert.save(w);
@@ -2435,13 +2454,18 @@ impl State for Voodoo {
         self.swaps.load(r)?;
         self.last_swap.load(r)?;
         self.fifo_writes.load(r)?;
-        let (mut deferred, mut data, mut due) = (false, 0u32, 0u64);
-        self.capped_at = 0;
+        let (mut deferred, mut data, mut due, mut capped_at) = (false, 0u32, 0u64, 0u64);
         if !r.is_empty() {
             deferred.load(r)?;
             data.load(r)?;
             due.load(r)?;
-            self.capped_at.load(r)?;
+            capped_at.load(r)?;
+        }
+        // A state saved before the frame rate cap had a section of its
+        // own has the card's last capped swap here, for the cap. A later
+        // state's section comes after this one and replaces it.
+        if capped_at != 0 {
+            self.frame_cap.shown(capped_at);
         }
         self.deferred = deferred.then_some((data, due));
         self.cmdfifo = Default::default();

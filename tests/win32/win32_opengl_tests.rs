@@ -93,6 +93,7 @@ const GLU32: &[&str] = &[
     "gluErrorString",
     "gluGetString",
 ];
+const KERNEL32: &[&str] = &["CreateThread"];
 const CREATE_WINDOW: usize = 0;
 const GET_DC: usize = 1;
 const CHOOSE_PIXEL_FORMAT: usize = 2;
@@ -151,6 +152,7 @@ const BUILD_2D_MIPMAPS: usize = GLU;
 const ORTHO_2D: usize = GLU + 1;
 const ERROR_STRING: usize = GLU + 2;
 const GLU_GET_STRING: usize = GLU + 3;
+const CREATE_THREAD: usize = GLU + GLU32.len();
 
 /// A program importing the functions above, with `data` and the code
 /// `f` makes, and where its data is.
@@ -162,12 +164,14 @@ fn program(
     let list =
         |names: &[&'static str]| -> Vec<Imp> { names.iter().map(|n| Imp::Name(n)).collect() };
     let (user, gdi, gl, glu) = (list(USER32), list(GDI32), list(OPENGL32), list(GLU32));
+    let kernel = list(KERNEL32);
     let iat = b
         .imports(&[
             ("USER32.DLL", &user),
             ("GDI32.DLL", &gdi),
             ("OPENGL32.DLL", &gl),
             ("GLU32.DLL", &glu),
+            ("KERNEL32.DLL", &kernel),
         ])
         .concat();
     let data_rva = b.section(
@@ -1901,6 +1905,71 @@ fn the_3d_trace_names_opengls_enums_and_counts_its_calls() {
     for (call, n) in calls {
         assert_eq!(event(call), (call, n));
     }
+}
+
+#[test]
+fn swaps_in_a_window_come_at_the_frame_rate_caps_rate() {
+    // A window swapping as fast as it can, its swap interval 0, under a
+    // cap of 30, while a second thread counts its passes.
+    const SET_NAME: u32 = 0x160;
+    const SET: u32 = 0x10;
+    const FRAMES: u32 = 0x18;
+    const WORKER: u32 = 0x1C;
+    let mut d = data();
+    put(&mut d, SET_NAME, b"wglSwapIntervalEXT\0");
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        c.api(a, l, WGL_GET_PROC_ADDRESS, &[Arg::At(SET_NAME)])?;
+        a.mov(dword_ptr(l.at(SET)), eax)?;
+        a.push(0)?;
+        a.call(dword_ptr(l.at(SET)))?;
+        // CreateThread's last three arguments, then its start address,
+        // which the call pushes: the code after it, the thread's.
+        let (mut thread, mut frame, mut spin) = (a.create_label(), a.create_label(), a.create_label());
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(thread)?;
+        a.set_label(&mut spin)?;
+        a.inc(dword_ptr(l.at(WORKER)))?;
+        a.jmp(spin)?;
+        a.set_label(&mut thread)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(dword_ptr(l.iat[CREATE_THREAD] as u64))?;
+        a.set_label(&mut frame)?;
+        a.push(dword_ptr(l.at(HDC)))?;
+        a.call(dword_ptr(l.iat[SWAP_BUFFERS] as u64))?;
+        a.inc(dword_ptr(l.at(FRAMES)))?;
+        a.jmp(frame)
+    });
+    let rate = |test: &str, fps: Option<u32>| {
+        let mut cpu = machine(test, true, exe.clone());
+        cpu.bus.set_fps_cap(fps);
+        let run_until = |cpu: &mut Cpu, done: &dyn Fn(&Cpu) -> bool| {
+            for _ in 0..200_000 {
+                cpu.bus.start_batch(cpu.bus.clock.icount + 5_000);
+                run_batch(cpu, &mut NoHook, false);
+                if cpu.cr0 & 0x8000_0001 == 0x8000_0001 && done(cpu) {
+                    return;
+                }
+            }
+            panic!("the program didn't get there: {:?}", printed(cpu));
+        };
+        run_until(&mut cpu, &|cpu| peek(cpu, data + FRAMES) >= 3);
+        let start = cpu.bus.clock.now_ns();
+        let (frames, worker) = (peek(&cpu, data + FRAMES), peek(&cpu, data + WORKER));
+        run_until(&mut cpu, &|cpu| cpu.bus.clock.now_ns() >= start + 1_000_000_000);
+        let seconds = (cpu.bus.clock.now_ns() - start) as f64 / 1e9;
+        let shown = f64::from(peek(&cpu, data + FRAMES) - frames) / seconds;
+        (shown, peek(&cpu, data + WORKER) - worker)
+    };
+    let (capped, worker) = rate("swap_cap_30", Some(30));
+    assert!((capped - 30.0).abs() < 1.5, "{capped} swaps a second");
+    assert!(worker > 100_000, "the other thread ran {worker} passes");
+    let (uncapped, _) = rate("swap_cap_off", None);
+    assert!(uncapped > 60.0, "{uncapped} swaps a second without the cap");
 }
 
 /// GL_MAX_TEXTURE_SIZE is the card's: 256 on a Voodoo3, whose

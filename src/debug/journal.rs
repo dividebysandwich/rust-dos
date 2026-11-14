@@ -100,6 +100,7 @@ kinds! {
     StateLoaded = "state_loaded", true;
     DebuggerReset = "debugger_reset", true;
     SpeedChanged = "speed_changed", true;
+    FpsCapChanged = "fps_cap_changed", true;
     SettingsWindow = "settings_window", true;
     HostInput = "host_input", true;
     Shutdown = "shutdown", true;

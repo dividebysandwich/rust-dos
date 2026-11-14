@@ -415,6 +415,9 @@ pub enum Cmd {
     /// Change the CPU speed (`cycles`) as the settings window does, which
     /// the front end does (`next_speed_request`).
     Speed { cycles: String },
+    /// Change the frame rate cap (`fps_cap`) as the settings window
+    /// does, which the front end does (`next_speed_request`).
+    FpsCap { cap: rust_dos::frame_cap::Cap },
     /// Turn the emulator off: the front end leaves its loop, and the
     /// journal ends with `shutdown`.
     Quit,
@@ -444,10 +447,20 @@ pub struct StateRequest {
     reply: oneshot::Sender<Answer>,
 }
 
-/// A CPU speed to change to, which the front end carries out
-/// (`DebugHub::next_speed_request`) and answers (`DebugHub::speed_done`).
+/// A setting the front end changes for a remote client.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SettingChange {
+    /// The CPU speed, as `cycles` takes it.
+    Cycles(String),
+    /// The frame rate cap, checked as the configuration's `fps_cap`.
+    FpsCap(rust_dos::frame_cap::Cap),
+}
+
+/// A CPU speed or frame rate cap to change to, which the front end
+/// carries out (`DebugHub::next_speed_request`) and answers
+/// (`DebugHub::speed_done`).
 pub struct SpeedRequest {
-    pub cycles: String,
+    pub change: SettingChange,
     ctx: Ctx,
     if_state: Option<u64>,
     reply: oneshot::Sender<Answer>,

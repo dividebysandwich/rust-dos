@@ -1463,14 +1463,28 @@ fn main() -> Result<ExitCode, String> {
             dbg.state_done(&cpu, request, result);
         }
         while let Some(request) = dbg.next_speed_request() {
-            let result = CpuSpeed::parse(&request.cycles).and_then(|cycles| {
-                if det.is_some() && !matches!(cycles, CpuSpeed::Fixed(_)) {
-                    return Err("deterministic mode runs at a fixed speed: give a number of cycles".to_string());
+            let result = match &request.change {
+                debug::SettingChange::Cycles(cycles) => {
+                    CpuSpeed::parse(cycles).and_then(|cycles| {
+                        if det.is_some() && !matches!(cycles, CpuSpeed::Fixed(_)) {
+                            return Err(
+                                "deterministic mode runs at a fixed speed: give a number of cycles"
+                                    .to_string(),
+                            );
+                        }
+                        let new = Settings { cycles, ..settings.clone() };
+                        host!().apply(&new)?;
+                        Ok(serde_json::json!({"cycles": cycles.to_string()}))
+                    })
                 }
-                let new = Settings { cycles, ..settings.clone() };
-                host!().apply(&new)?;
-                Ok(serde_json::json!({"cycles": cycles.to_string()}))
-            });
+                // The server checked the value. A setting that fails to
+                // apply is the client's answer, and the machine runs on.
+                &debug::SettingChange::FpsCap(fps_cap) => {
+                    let new = Settings { fps_cap, ..settings.clone() };
+                    let name = rust_dos::frame_cap::name(fps_cap);
+                    host!().apply(&new).map(|_| serde_json::json!({ "fps_cap": name }))
+                }
+            };
             dbg.speed_done(&cpu, request, result);
             told_cycles = settings.cycles;
         }
@@ -1632,16 +1646,17 @@ fn main() -> Result<ExitCode, String> {
         // The VFX1 on the desk of the 3D scene, and the head wearing it.
         display.set_vfx1(settings.vfx1.enabled);
         vfx1_host.track(&mut cpu.bus, vfx1_worn, &settings.vfx1, waiting || det.is_some());
-        cpu.bus.set_voodoo_fps_cap(settings.voodoo.fps_cap);
+        cpu.bus.set_fps_cap(settings.fps_cap);
         cpu.bus.set_voodoo_texture_sampling(settings.voodoo.texture_sampling);
         cpu.bus.set_powervr_filter(settings.powervr_filter);
         // With a variable refresh rate, each frame runs to a vertical
         // retrace of the machine's display and is shown when it is due,
         // so the window refreshes at the machine's rate, where the host's
-        // display goes that fast; under the 3dfx frame rate cap, at the
-        // cap's frame times, which the card's swaps keep to.
+        // display goes that fast; while a program shows its frames
+        // through the frame rate cap, on any card, at the cap's frame
+        // times, which its presents keep to.
         let refresh = (settings.vrr && !waiting && det.is_none())
-            .then(|| cpu.bus.voodoo_cap_timing().unwrap_or_else(|| cpu.bus.refresh_timing()))
+            .then(|| cpu.bus.frame_cap_timing().unwrap_or_else(|| cpu.bus.refresh_timing()))
             .filter(|timing| display.shows_hz(timing.hz()));
         let batch_end = if waiting {
             cpu.bus.clock.icount

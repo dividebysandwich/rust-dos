@@ -33,6 +33,7 @@ const ISAPNP_VERSION: u16 = 1;
 const PIT2_VERSION: u16 = 1;
 const TSC_VERSION: u16 = 1;
 const KEY_QUEUE_VERSION: u16 = 1;
+const FRAME_CAP_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 /// Each field is labelled with its name, for comparing states part by
@@ -55,6 +56,7 @@ impl Bus {
             powervr,
             powervr_line,
             hold: _,
+            frame_cap,
             notices: _,
             glide_hint: _,
             ide,
@@ -314,6 +316,11 @@ impl Bus {
         if let Some(voodoo) = voodoo {
             w.section(b"3DFX", VOODOO_VERSION, |w| voodoo.save(w));
         }
+        // The frame rate cap's last frame, which a 3dfx card's section
+        // held before every card's present went through the cap: in a
+        // section of its own, on every machine, so states saved before it
+        // load (with the 3dfx card's, if they have one).
+        w.section(b"PACE", FRAME_CAP_VERSION, |w| frame_cap.save(w));
         // A PowerVR card, likewise.
         if let Some(powervr) = powervr {
             w.section(b"PVR ", POWERVR_VERSION, |w| {
@@ -379,6 +386,7 @@ impl Bus {
             powervr,
             powervr_line,
             hold: _,
+            frame_cap,
             notices: _,
             glide_hint: _,
             ide,
@@ -643,11 +651,17 @@ impl Bus {
             (true, None) => return Err(StateError::Mismatch("it has a ViBRA16C and this machine hasn't".into())),
             (false, Some(_)) => return Err(StateError::Mismatch("this machine has a ViBRA16C and it hasn't".into())),
         }
+        // A state saved before the cap had its section has the 3dfx
+        // card's last capped frame, which the card's load puts in.
+        frame_cap.forget();
         match (r.next_is(b"3DFX"), voodoo) {
             (true, Some(voodoo)) => voodoo.load(&mut r.section(b"3DFX", VOODOO_VERSION)?)?,
             (false, None) => {}
             (true, None) => return Err(StateError::Mismatch("it has a 3dfx card and this machine hasn't".into())),
             (false, Some(_)) => return Err(StateError::Mismatch("this machine has a 3dfx card and it hasn't".into())),
+        }
+        if r.next_is(b"PACE") {
+            frame_cap.load(&mut r.section(b"PACE", FRAME_CAP_VERSION)?)?;
         }
         match (r.next_is(b"PVR "), powervr) {
             (true, Some(powervr)) => {
