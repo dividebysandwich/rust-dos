@@ -147,11 +147,11 @@ label](../CONFIGURATION.md#the-cds-drive-letter-and-label)).
    the formats the table names for its protection.
 2. **The wrong disc:** a game on several CDs may check only one of them.
    Its readme or [compatibility.md](compatibility.md) says which.
-3. **A file missing beside the image:** a `.sub` or `.subcode` file has
-   to have the name of the CUE sheet, the `.mds` or a data file, and an
-   image's data files (and BlindWrite's `.bwa` file) stay beside its
-   descriptor. A subchannel file that doesn't cover the whole disc isn't
-   read; the log file says so.
+3. **A file missing beside the image:** a `.sub` or `.subcode` file has to
+   have the name of the CUE sheet, the `.mds` or a data file, and an image's
+   data files (and BlindWrite's `.bwa` file) stay beside its descriptor. The
+   log file says which subchannel file is read, the sectors it has, and why
+   any other one found isn't read.
 4. **The other Windows:** a game that fails on the built-in Windows may
    pass on a Windows 98 image, and the other way round.
 5. **On the built-in Windows, a message naming a function or DLL:** the
