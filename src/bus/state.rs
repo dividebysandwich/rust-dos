@@ -874,6 +874,7 @@ mod tests {
         (56, 0x0BF5_7A03_9493_E7DE), // TrackMouseEvent's request, one for the desktop
         (57, 0xB847_1A2D_27D3_3646), // OpenGL's draws that wait
         (58, 0xDC7D_5C01_8FC2_8FD2), // the system locale
+        (59, 0x562C_015A_1C2C_16AD), // OpenGL's vertices as given, and the card's lights
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

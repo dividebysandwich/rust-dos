@@ -1017,7 +1017,7 @@ fn draw(
         return;
     }
     let dd = c.dd;
-    let transforms = hal::transforms(cpu, dd);
+    let transforms = hal::transforms_gl(cpu, dd);
     let st = state(cpu);
     let Some(Some(c)) = st.contexts.get_mut(index) else {
         return;
@@ -1052,9 +1052,12 @@ fn draw(
     let (vertices, card, count) = match path {
         Ok(gl) => {
             let matrices = texture_matrices(c);
+            // A vertex lit before its draw has that color, with the
+            // lights off since.
+            let color = |v: &ImmVertex| v.lit.map_or(argb(v.color), |lit| lit[0]);
             let vertices: Vec<Vertex> = raw
                 .iter()
-                .map(|v| pipeline_vertex(v, argb(v.color), &matrices))
+                .map(|v| pipeline_vertex(v, color(v), &matrices))
                 .collect();
             (vertices, Some(gl), tnl::COUNT_CARD)
         }

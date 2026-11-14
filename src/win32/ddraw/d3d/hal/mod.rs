@@ -250,7 +250,7 @@ pub fn draw_geometry(
 /// Whether the card of the DirectDraw object `dd` transforms and
 /// lights vertices itself, and isn't asked to leave it to the
 /// processor (`toadforce::pipeline_transforms`).
-pub fn transforms(cpu: &mut Cpu, dd: u32) -> Result<(), bool> {
+pub fn transforms_gl(cpu: &mut Cpu, dd: u32) -> Result<(), bool> {
     match card(cpu, dd).map(|offer| offer.kind) {
         Some(Kind::ToadForce) if toadforce::pipeline_transforms() => Err(true),
         Some(Kind::ToadForce) => Ok(()),

@@ -27,6 +27,7 @@ use super::super::ddraw::d3d::pipeline::{IDENTITY, Matrix, Prim};
 use super::light::{
     self, GL_AMBIENT, GL_DIFFUSE, GL_EMISSION, GL_SPECULAR, LIGHTS, Light, Lighting, Material,
 };
+use super::shade;
 use super::state::{GL_BACK, GL_CW, GL_FILL, GL_FLAT, GL_FRONT};
 use super::{CAP_COLOR_MATERIAL, CAP_LIGHTING, CAP_NORMALIZE, Context, ImmVertex};
 use crate::toadforce::level1::{self, states};
@@ -75,6 +76,10 @@ pub enum Why {
     Colour,
     /// A lit vertex at infinity (w of 0).
     Position,
+    /// A normal longer than 1 in eye coordinates under a specular
+    /// material: its highlight's cosine may be above 1, which OpenGL
+    /// raises to the shininess and the card takes for 1.
+    Normal,
     /// glMaterial between glBegin and glEnd: the vertices before it
     /// were lit with the material it replaced.
     Material,
@@ -90,7 +95,7 @@ pub enum Why {
 }
 
 impl Why {
-    pub const ALL: [Why; 12] = [
+    pub const ALL: [Why; 13] = [
         Why::NoCard,
         Why::Asked,
         Why::Numbers,
@@ -99,6 +104,7 @@ impl Why {
         Why::Shininess,
         Why::Colour,
         Why::Position,
+        Why::Normal,
         Why::Material,
         Why::Flat,
         Why::Sides,
@@ -116,6 +122,7 @@ impl Why {
             Why::Shininess => "shininess",
             Why::Colour => "colour",
             Why::Position => "position",
+            Why::Normal => "normal",
             Why::Material => "material",
             Why::Flat => "flat",
             Why::Sides => "sides",
@@ -171,7 +178,7 @@ fn lights_through(m: &Matrix) -> bool {
     let det = r0[0] * cross[0] + r0[1] * cross[1] + r0[2] * cross[2];
     det != 0.0
         && det.is_finite()
-        && super::shade::normal_matrix(m).is_some()
+        && shade::normal_matrix(m).is_some()
         && [m[3], m[7], m[11], m[15]] == [0.0, 0.0, 0.0, 1.0]
 }
 
@@ -245,9 +252,10 @@ fn card_material(l: &Lighting, side: usize, tracked: bool) -> level1::Material {
     }
 }
 
-/// The card's lighting state for the context `c`, or why it has none
-/// that lights as `shade` does.
-fn lighting(c: &Context) -> Result<Gl, Why> {
+/// The card's lighting state for the context `c`, and whether a
+/// material in it is specular; or why the card has no state that
+/// lights as `shade` does.
+fn lighting(c: &Context) -> Result<(Gl, bool), Why> {
     let l = &c.lighting;
     let modelview = c.modelview.last().copied().unwrap_or(IDENTITY);
     if !lights_through(&modelview) {
@@ -255,12 +263,14 @@ fn lighting(c: &Context) -> Result<Gl, Why> {
     }
     let tracked = c.caps & CAP_COLOR_MATERIAL != 0;
     let sides = if l.two_side { 2 } else { 1 };
+    let mut shines = false;
     for side in 0..sides {
         let m = &l.materials[side];
         let specular = (tracked && l.tracks(side, GL_SPECULAR)) || m.specular[..3] != [0.0; 3];
         if specular && m.shininess == 0.0 {
             return Err(Why::Shininess);
         }
+        shines |= specular;
     }
     let mut lights = Vec::new();
     for i in (0..LIGHTS).filter(|i| l.enabled >> i & 1 != 0) {
@@ -301,7 +311,7 @@ fn lighting(c: &Context) -> Result<Gl, Why> {
         (states::RS_SINGLE_COLOUR, 1),
         (states::RS_COLORVERTEX_FACES, faces),
     ];
-    Ok(Gl {
+    let gl = Gl {
         states,
         lighting: Some(GlLighting {
             material: card_material(l, 0, tracked),
@@ -309,7 +319,8 @@ fn lighting(c: &Context) -> Result<Gl, Why> {
             ambient: [l.ambient[0], l.ambient[1], l.ambient[2]],
             lights,
         }),
-    })
+    };
+    Ok((gl, shines))
 }
 
 /// The card's state for a draw of the context `c`: the primitives
@@ -359,7 +370,7 @@ pub fn decide(
             lighting: None,
         });
     }
-    let gl = lighting(c)?;
+    let (gl, shines) = lighting(c)?;
     if !can_light(&gl) {
         return Err(Why::Numbers);
     }
@@ -371,6 +382,8 @@ pub fn decide(
     let tracked = c.caps & CAP_COLOR_MATERIAL != 0;
     // The alpha is the diffuse colour's.
     let alpha = tracked && light::tracked(l.color_mode).contains(&GL_DIFFUSE);
+    // Normals that aren't brought to a length of 1 may be longer.
+    let long = (shines && c.caps & CAP_NORMALIZE == 0).then(|| shade::normal_matrix(&modelview));
     for (i, v) in raw.iter().enumerate() {
         if !named(i) {
             continue;
@@ -380,6 +393,14 @@ pub fn decide(
         }
         if v.position[3] == 0.0 {
             return Err(Why::Position);
+        }
+        if let Some(normals) = &long {
+            let n = shade::eye_normal(normals.as_ref(), v.normal, false);
+            // The 128th power of this much over 1 is a thousandth
+            // over.
+            if n[0] * n[0] + n[1] * n[1] + n[2] * n[2] > 1.000_02 {
+                return Err(Why::Normal);
+            }
         }
         if tracked && !(v.color[..3].iter().all(|&x| byte(x)) && (!alpha || byte(v.color[3]))) {
             return Err(Why::Colour);
@@ -578,9 +599,18 @@ mod tests {
 
     #[test]
     fn lit_vertices_at_infinity_or_lit_already_stay_on_the_processor() {
-        let c = context();
+        let mut c = context();
         let prims = [Prim::Triangle([0, 1, 2], 2, 7)];
         let mut raw = [vertex([1.0; 4]); 3];
+        // A normal of length 2 matters to a highlight alone, and not
+        // when OpenGL brings normals to a length of 1.
+        raw[0].normal = [0.0, 0.0, 2.0];
+        assert!(decide(&c, 1, &prims, &raw, None).is_ok());
+        c.lighting.materials[0].specular = [1.0; 4];
+        c.lighting.materials[0].shininess = 20.0;
+        assert_eq!(decide(&c, 1, &prims, &raw, None), Err(Why::Normal));
+        c.caps |= CAP_NORMALIZE;
+        assert!(decide(&c, 1, &prims, &raw, None).is_ok());
         raw[1].position[3] = 0.0;
         assert_eq!(decide(&c, 1, &prims, &raw, None), Err(Why::Position));
         raw[1].position[3] = 1.0;
@@ -680,6 +710,10 @@ mod tests {
         if d.chance(0.5) {
             c.caps |= CAP_NORMALIZE;
         }
+        let tracked = d.chance(0.5);
+        if tracked {
+            c.caps |= CAP_COLOR_MATERIAL;
+        }
         let l = &mut c.lighting;
         l.enabled = 0;
         for i in 0..1 + (d.roll() * 3.0) as usize {
@@ -718,8 +752,7 @@ mod tests {
                 m.shininess = d.between(1.0, 64.0);
             }
         }
-        if d.chance(0.5) {
-            c.caps |= CAP_COLOR_MATERIAL;
+        if tracked {
             l.color_face = [GL_FRONT, GL_BACK, 0x0408][(d.roll() * 3.0) as usize];
             let modes = [
                 light::GL_AMBIENT_AND_DIFFUSE,
@@ -800,7 +833,7 @@ mod tests {
     #[test]
     fn the_card_lights_as_the_processor_does() {
         use super::super::matrix;
-        use super::super::shade::{self, Input};
+        use super::super::shade::Input;
         let mut d = Dice(1078);
         let (mut compared, mut worst) = (0, 0);
         for _ in 0..3000 {
@@ -818,7 +851,12 @@ mod tests {
                 ..ImmVertex::default()
             };
             let prims = [Prim::Triangle([0, 1, 2], 2, 7)];
-            let gl = decide(&c, 1, &prims, &[v; 3], None).expect("a state the card lights");
+            let gl = match decide(&c, 1, &prims, &[v; 3], None) {
+                Ok(gl) => gl,
+                // A long normal's highlight is the processor's.
+                Err(Why::Normal) => continue,
+                Err(why) => panic!("the dice gave a state the card doesn't light: {why:?}"),
+            };
             let modelview = c.modelview[0];
             let eye = matrix::apply(&modelview, v.position);
             if on_a_cones_edge(&c.lighting, eye) {
@@ -848,7 +886,7 @@ mod tests {
             }
             compared += 1;
         }
-        assert!(compared > 2500, "{compared} compared");
+        assert!(compared > 1500, "{compared} compared");
         // Not all of them to the bit: the tolerance is in use.
         assert!(worst <= 1);
     }
