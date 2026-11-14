@@ -435,6 +435,9 @@ pub struct ToadForceGl {
     failed: RefCell<HashSet<shader::Key>>,
     /// Counted up with every batch.
     batch: u64,
+    /// The bytes of a batch's vertices, kept from batch to batch for
+    /// their room.
+    vertex_bytes: Vec<u8>,
     /// For the status: the runs drawn, and the surfaces and textures
     /// copied from card memory.
     runs: u64,
@@ -525,6 +528,7 @@ impl ToadForceGl {
                 programs: RefCell::default(),
                 failed: RefCell::default(),
                 batch: 0,
+                vertex_bytes: Vec::new(),
                 runs: 0,
                 uploads: 0,
                 decodes: 0,
@@ -1946,7 +1950,8 @@ impl Host for ToadForceGl {
             let gl = Rc::clone(&self.gl);
             gl.viewport(0, 0, colour.width as i32, colour.height as i32);
             // Every run's vertices in one buffer.
-            let mut bytes = Vec::new();
+            let mut bytes = std::mem::take(&mut self.vertex_bytes);
+            bytes.clear();
             let mut firsts = Vec::with_capacity(batch.runs.len());
             let mut first = 0;
             for run in batch.runs {
@@ -1958,6 +1963,7 @@ impl Host for ToadForceGl {
             gl.bind_vertex_array(Some(self.array));
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.buffer));
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, &bytes, glow::STREAM_DRAW);
+            self.vertex_bytes = bytes;
             for (run, (first, count)) in batch.runs.iter().zip(firsts) {
                 let state = &*run.state;
                 if count == 0 || !self.fixed(state) {
