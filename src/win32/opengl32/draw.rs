@@ -44,8 +44,8 @@ use super::texture::{self, GL_ADD, GL_CLAMP, GL_DECAL, GL_LINEAR, GL_REPLACE};
 use super::{
     Array, CAP_ALPHA_TEST, CAP_BLEND, CAP_COLOR_MATERIAL, CAP_CULL_FACE, CAP_DEPTH_TEST,
     CAP_DITHER, CAP_FOG, CAP_LIGHTING, CAP_NORMALIZE, CAP_POLYGON_OFFSET_FILL, CAP_SCISSOR_TEST,
-    Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, ImmVertex, Settings, UNITS,
-    ctx,
+    Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, ImmVertex, Settings,
+    Texture, UNITS, ctx,
     current, error, signed_unit, state,
 };
 use crate::cpu::Cpu;
@@ -265,8 +265,9 @@ fn stage_states(mode: u32, t: &super::Texture) -> Vec<(u32, u32)> {
 
 /// A context's state as its Direct3D device's: what `put` puts on the
 /// device before a draw. Made from what the context's draws are made
-/// with and nothing else, so it holds while that has its stamp
-/// (`applied_of`).
+/// with and the textures of its group, which give the context a new
+/// stamp when one changes, so it holds while the context has its
+/// stamp (`applied_of`).
 #[derive(Clone, Debug, Default)]
 pub struct Applied {
     inner: u32,
@@ -316,18 +317,19 @@ impl Applied {
 /// None when its viewport is off its buffers and nothing is drawn. It
 /// is made once for each stamp of the context: a draw that follows
 /// another with nothing set between them finds it made.
-fn applied_of(c: &mut Context) -> Option<&Applied> {
+fn applied_of<'a>(c: &'a mut Context, shared: &[Texture]) -> Option<&'a Applied> {
     let stamp = c.stamp();
     if c.applied.as_ref().is_none_or(|(made, _)| *made != stamp) {
-        let made = applied(c);
+        let made = applied(c, shared);
         c.applied = Some((stamp, made));
     }
     c.applied.as_ref()?.1.as_ref()
 }
 
-/// The device's state for drawing what a context draws with `c`: None
-/// when its viewport is off its buffers, and nothing is drawn.
-fn applied(c: &Settings) -> Option<Applied> {
+/// The device's state for drawing what a context draws with `c` and
+/// the textures `shared` of its group: None when its viewport is off
+/// its buffers, and nothing is drawn.
+fn applied(c: &Settings, shared: &[Texture]) -> Option<Applied> {
     let (viewport, fit) = super::wgl::inner_viewport(c)?;
     let on = |cap: u32| c.caps & cap != 0;
     let depth = on(CAP_DEPTH_TEST);
@@ -396,7 +398,7 @@ fn applied(c: &Settings) -> Option<Applied> {
         if !c.texture_2d[unit] {
             continue;
         }
-        let Some(t) = texture::texture(c, c.bound[unit]) else {
+        let Some(t) = texture::find(c, shared, c.bound[unit]) else {
             continue;
         };
         if t.iface == 0 || t.defined & 1 == 0 {
@@ -891,12 +893,13 @@ fn draw(
     };
     let vertices = sided.as_deref().unwrap_or(vertices);
     let stamp = c.stamp();
+    let shared = st.lists.textures(c.lists.group);
     // The draws that wait take this one if they are the context's and
     // have its state: its stamp, or the state made anew and equal.
     if let Some(w) = &mut st.waiting
         && w.context == index as u32
         && w.vertices.len() + vertices.len() <= WAITING_VERTICES
-        && (w.stamp == stamp || applied_of(c).is_some_and(|a| a.same(&w.applied)))
+        && (w.stamp == stamp || applied_of(c, shared).is_some_and(|a| a.same(&w.applied)))
     {
         let first = w.vertices.len() as u32;
         w.stamp = stamp;
@@ -911,7 +914,7 @@ fn draw(
         c.drawn = true;
         return;
     }
-    let Some(applied) = applied_of(c).cloned() else {
+    let Some(applied) = applied_of(c, shared).cloned() else {
         return;
     };
     c.drawn = true;
@@ -1480,6 +1483,73 @@ pub fn draw_elements(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let order: Vec<u32> = indices.iter().map(|i| i - first).collect();
     draw(cpu, kind, &v, backs.as_deref(), Some(&order));
     Some(0)
+}
+
+/// A vertex with everything glVertex takes from the current values:
+/// its position, and the normal, color and texture coordinates in
+/// force when it was given. None of them is through a matrix or the
+/// lights.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct Whole {
+    pub position: [f32; 4],
+    pub normal: [f32; 3],
+    pub color: [f32; 4],
+    pub tex: [[f32; 4]; UNITS],
+}
+
+/// How many of a run's first vertices were given before the run set
+/// a color, a normal and each unit's texture coordinates: those take
+/// the current values of when the run is drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct Inherit {
+    pub color: u32,
+    pub normal: u32,
+    pub tex: [u32; UNITS],
+}
+
+/// Draw `kind` primitives of `vertices`, a glBegin to glEnd run that
+/// a display list kept as its vertices, as glDrawArrays draws those
+/// of the arrays: lit and with their texture coordinates through the
+/// texture matrices here, each as glVertex and glEnd would have made
+/// it. False, with nothing drawn, without a context or between a
+/// glBegin and its glEnd, where the run's own glBegin is an error.
+pub(super) fn draw_run(cpu: &mut Cpu, kind: u32, vertices: &[Whole], inherit: &Inherit) -> bool {
+    let Some(c) = ctx(cpu) else {
+        return false;
+    };
+    if c.begin.is_some() {
+        return false;
+    }
+    let profile = crate::profile::zone(crate::profile::Zone::OpenGlEnd);
+    // As glBegin leaves them.
+    c.vertices.clear();
+    let (color, normal, tex) = (c.color, c.normal, c.tex_coord);
+    let matrices = texture_matrices(c);
+    let lit = Lit::of(c);
+    let mut out = Vec::with_capacity(vertices.len());
+    let mut backs = two_sided(c).then(|| Vec::with_capacity(vertices.len()));
+    for (i, v) in vertices.iter().enumerate() {
+        let i = i as u32;
+        let rgba = if i < inherit.color { color } else { v.color };
+        let normal = if i < inherit.normal { normal } else { v.normal };
+        let [diffuse, back] = vertex_colors(lit.as_ref(), v.position, normal, rgba);
+        if let Some(backs) = &mut backs {
+            backs.push(back);
+        }
+        let mut made = Vertex {
+            position: homogeneous(v.position),
+            diffuse: Some(diffuse),
+            ..Vertex::default()
+        };
+        for u in 0..UNITS {
+            let t = if i < inherit.tex[u] { tex[u] } else { v.tex[u] };
+            made.tex[u] = texture_coords(&matrices[u], t);
+        }
+        out.push(made);
+    }
+    drop(profile);
+    draw(cpu, kind, &out, backs.as_deref(), None);
+    true
 }
 
 /// glLockArraysEXT(first, count) and glUnlockArraysEXT(): the arrays

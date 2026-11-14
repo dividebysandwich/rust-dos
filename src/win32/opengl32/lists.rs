@@ -33,21 +33,36 @@
 //! type for each element, and glEnd.
 //!
 //! A list is three flat arrays (`List`): its calls, their argument
-//! words and the bytes copied for them. Nothing is worked out ahead of
-//! a replay; a later form that keeps a list's fixed geometry as a
-//! batch can be made from them.
+//! words and the bytes copied for them.
 //!
-//! Lists belong to a group of contexts (`Shared`): a context starts
+//! A run of calls from a glBegin to its glEnd that only give vertices
+//! (glVertex, glColor, glNormal, glTexCoord and glMultiTexCoordARB) is
+//! also kept as those vertices (`Batch`), made once when the list is
+//! compiled. A replay draws a batch in one step, as glDrawArrays draws
+//! the arrays' vertices (`draw::draw_run`), in place of a call for
+//! each value: the vertices are lit and transformed as the context is
+//! at the replay, those given before the run set a color, a normal or
+//! texture coordinates take the current ones, and the current values
+//! after it are the run's last. The recording stays what the list is:
+//! the saved state has it alone, a batch is made from it again after a
+//! load, and the calls are replayed one by one where a batch can't
+//! stand for them (inside a glBegin that is still open, and under the
+//! 3D trace, which lists every call).
+//!
+//! Lists belong to a group of contexts (`Group`): a context starts
 //! with a group of its own, and wglShareLists puts a context into
-//! another's. A group goes with the last context that has it.
+//! another's. A group goes with the last context that has it. The
+//! group has the contexts' texture objects too (`texture.rs`), which
+//! is all that contexts of OpenGL 1.1 share: the lists and the
+//! textures.
 
 use super::super::kernel32;
 use super::super::stubs::{self, Api};
 use super::exports::APIS;
 use super::texture::{self, GL_TEXTURE_2D, GL_TEXTURE0, IMAGE_MOST};
 use super::{
-    Array, Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, GL_OUT_OF_MEMORY,
-    State, UNITS, ctx, current, draw, error, matrix, state,
+    Array, CAP_COLOR_MATERIAL, Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE,
+    GL_OUT_OF_MEMORY, State, Texture, UNITS, ctx, current, draw, error, imm, matrix, pname, state,
 };
 use crate::cpu::Cpu;
 use std::collections::{BTreeMap, HashMap};
@@ -87,12 +102,45 @@ pub struct Call {
 }
 
 /// A display list: its calls in order, their argument words, and the
-/// bytes copied for their pointer arguments.
+/// bytes copied for their pointer arguments. `batches` are its runs of
+/// vertices, made from those the first time they are asked for.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct List {
     pub calls: Vec<Call>,
     pub words: Vec<u32>,
     pub data: Vec<u8>,
+    batches: OnceLock<Vec<Batch>>,
+}
+
+impl List {
+    /// Its runs of vertices, in the order of their calls.
+    fn batches(&self) -> &[Batch] {
+        self.batches.get_or_init(|| batches(self))
+    }
+}
+
+/// A run of a list's calls kept as its vertices: the calls from
+/// `first`, a glBegin of `kind` primitives, to its glEnd, `calls` of
+/// them, all of the others one of `imm`'s functions. `inherit` tells
+/// which vertices came before the run's first color, normal and
+/// texture coordinates, and `last` are the ones it set last, which
+/// are the current ones after it.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Batch {
+    first: u32,
+    calls: u32,
+    kind: u32,
+    vertices: Vec<draw::Whole>,
+    inherit: draw::Inherit,
+    last: Last,
+}
+
+/// The current values a run leaves: those it set.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Last {
+    color: Option<[f32; 4]>,
+    normal: Option<[f32; 3]>,
+    tex: [Option<[f32; 4]>; UNITS],
 }
 
 /// The list a context has open between glNewList and glEndList: its
@@ -135,14 +183,24 @@ impl Own {
 /// The lists of a group, by their names.
 type Names = BTreeMap<u32, Arc<List>>;
 
-/// The lists of every context: the groups by their numbers, the last
-/// number given, and how many contexts have a list open (`call`
+/// What the contexts of a group share: its number, the display lists
+/// by their names, and the texture objects but the one named 0, which
+/// is each context's own.
+#[derive(Clone, Debug, Default)]
+struct Group {
+    id: u32,
+    lists: Names,
+    textures: Vec<Texture>,
+}
+
+/// The lists and textures of every context: the groups, the last
+/// group's number, and how many contexts have a list open (`call`
 /// records nothing while it is 0). `depth` counts the lists running
 /// inside one another, and `replaying` is the function a replay is
 /// calling; both are set only inside one call of the program's.
 #[derive(Clone, Debug, Default)]
 pub struct Shared {
-    groups: Vec<(u32, Names)>,
+    groups: Vec<Group>,
     last_group: u32,
     compiling: u32,
     depth: u32,
@@ -155,10 +213,17 @@ impl Shared {
     pub fn replaying(&self) -> Option<u16> {
         self.replaying
     }
+
+    /// The textures of the group `group`: none for the group a context
+    /// that made no list or texture yet has.
+    pub fn textures(&self, group: u32) -> &[Texture] {
+        let found = self.groups.iter().find(|g| g.id == group);
+        found.map_or(&[], |g| &g.textures)
+    }
 }
 
 crate::state_fields!(Call { api, copied, args });
-crate::state_fields!(List { calls, words, data });
+crate::state_fields!(List { calls, words, data } skip { batches });
 crate::state_fields!(Open {
     name,
     mode,
@@ -171,6 +236,11 @@ crate::state_fields!(Own {
     open,
     scratch,
     scratch_size
+});
+crate::state_fields!(Group {
+    id,
+    lists,
+    textures
 });
 crate::state_fields!(Shared {
     groups,
@@ -186,7 +256,7 @@ enum Size {
     /// This many.
     Bytes(u32),
     /// As many values as the parameter name in the argument before it
-    /// has (`pname_values`), of this many bytes each.
+    /// has (`pname::values`), of this many bytes each.
     Pname(u32),
     /// As many values as the count in the argument at this place, of
     /// this many bytes each.
@@ -403,6 +473,12 @@ fn place_of(name: &str) -> Option<usize> {
     places.get(name).map(|&at| at as usize)
 }
 
+/// Which of `imm`'s functions each export is, by its place.
+fn attributes() -> &'static [Option<imm::Spec>] {
+    static SPECS: OnceLock<Vec<Option<imm::Spec>>> = OnceLock::new();
+    SPECS.get_or_init(|| APIS.iter().map(|api| imm::spec(api.name)).collect())
+}
+
 /// The places of glBegin and glEnd.
 fn begin_end() -> (usize, usize) {
     static PLACES: OnceLock<(usize, usize)> = OnceLock::new();
@@ -427,26 +503,6 @@ fn stub_id(at: usize) -> u16 {
 }
 
 // The sizes of what pointers point at.
-
-/// How many values the parameter `pname` has in the functions that
-/// take a parameter's name and a pointer to its values (glLightfv,
-/// glMaterialfv, glLightModelfv, glFogfv, glTexEnvfv,
-/// glTexParameterfv, glTexGenfv and their integer and double forms).
-/// OpenGL's names are numbers of one space, so one table has them all.
-fn pname_values(pname: u32) -> usize {
-    match pname {
-        // GL_AMBIENT, GL_DIFFUSE, GL_SPECULAR, GL_POSITION, GL_EMISSION,
-        // GL_AMBIENT_AND_DIFFUSE, GL_LIGHT_MODEL_AMBIENT, GL_FOG_COLOR,
-        // GL_TEXTURE_ENV_COLOR, GL_TEXTURE_BORDER_COLOR, GL_OBJECT_PLANE,
-        // GL_EYE_PLANE.
-        0x1200..=0x1203 | 0x1600 | 0x1602 | 0x0B53 | 0x0B66 | 0x2201 | 0x1004 | 0x2501 | 0x2502 => {
-            4
-        }
-        // GL_SPOT_DIRECTION, GL_COLOR_INDEXES.
-        0x1204 | 0x1603 => 3,
-        _ => 1,
-    }
-}
 
 /// The bytes of one of glCallLists' names of the type `kind`: GL_BYTE
 /// to GL_4_BYTES.
@@ -566,7 +622,7 @@ fn copy(cpu: &mut Cpu, p: &Pointer, args: &[u32], out: &mut Vec<u8>) -> bool {
     let count = |n: u32, bytes: usize| (n as usize).checked_mul(bytes).filter(|_| (n as i32) > 0);
     let len = match p.size {
         Size::Bytes(n) => Some(n as usize),
-        Size::Pname(bytes) => Some(pname_values(arg(p.arg.wrapping_sub(1))) * bytes as usize),
+        Size::Pname(bytes) => Some(pname::values(arg(p.arg.wrapping_sub(1))) * bytes as usize),
         Size::Count(n, bytes) => count(arg(n), bytes as usize),
         Size::Names => name_size(arg(1)).and_then(|bytes| count(arg(0), bytes)),
         Size::Image {
@@ -889,6 +945,129 @@ pub fn tex_image_rgba(
     }
 }
 
+// The runs of vertices.
+
+/// The run that starts with the glBegin at `first` of `list`'s calls.
+/// None when the calls up to the glEnd aren't all vertices' values
+/// with their data in the list, for a primitive there isn't, a
+/// texture unit there isn't, and without a glEnd: those are replayed
+/// call by call, with the errors and the open glBegin they leave.
+fn batch_at(list: &List, first: usize) -> Option<Batch> {
+    let (_, end) = begin_end();
+    let attributes = attributes();
+    let kind = *list.words.get(list.calls[first].args as usize)?;
+    if kind > GL_POLYGON {
+        return None;
+    }
+    let mut current = draw::Whole::default();
+    let mut vertices = Vec::new();
+    let mut last = Last::default();
+    // How many vertices came before each value was first set.
+    let (mut color, mut normal, mut tex) = (None, None, [None; UNITS]);
+    for (n, call) in list.calls[first + 1..].iter().enumerate() {
+        let at = call.api as usize;
+        let count = vertices.len() as u32;
+        if at == end {
+            let inherit = draw::Inherit {
+                color: color.unwrap_or(count),
+                normal: normal.unwrap_or(count),
+                tex: tex.map(|t| t.unwrap_or(count)),
+            };
+            return Some(Batch {
+                first: first as u32,
+                calls: n as u32 + 2,
+                kind,
+                vertices,
+                inherit,
+                last,
+            });
+        }
+        let spec = attributes.get(at)?.as_ref()?;
+        let from = call.args as usize;
+        let words = list.words.get(from..from + spec.words())?;
+        let array = match spec.pointer() {
+            Some(arg) if call.copied >> arg & 1 != 0 => Some(copied(list, words[arg])),
+            Some(_) => return None,
+            None => None,
+        };
+        match imm::given(spec, words, array)? {
+            imm::Given::Vertex(position) => vertices.push(draw::Whole {
+                position,
+                ..current
+            }),
+            imm::Given::Color(c) => {
+                current.color = c;
+                last.color = Some(c);
+                color.get_or_insert(count);
+            }
+            imm::Given::Normal(n) => {
+                current.normal = n;
+                last.normal = Some(n);
+                normal.get_or_insert(count);
+            }
+            imm::Given::TexCoord(unit, t) => {
+                current.tex[unit] = t;
+                last.tex[unit] = Some(t);
+                tex[unit].get_or_insert(count);
+            }
+        }
+    }
+    None
+}
+
+/// The runs of vertices of `list`.
+fn batches(list: &List) -> Vec<Batch> {
+    let (begin, _) = begin_end();
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < list.calls.len() {
+        let batch = (list.calls[at].api as usize == begin).then(|| batch_at(list, at));
+        match batch.flatten() {
+            Some(batch) => {
+                at += batch.calls as usize;
+                out.push(batch);
+            }
+            None => at += 1,
+        }
+    }
+    out
+}
+
+/// Draw the run `batch` in place of its calls. False when its calls
+/// have to be replayed instead: under the 3D trace, which lists each
+/// of them, and where `draw::draw_run` doesn't draw.
+fn run_batch(cpu: &mut Cpu, batch: &Batch) -> bool {
+    if super::super::trace3d::on(cpu) {
+        return false;
+    }
+    if !draw::draw_run(cpu, batch.kind, &batch.vertices, &batch.inherit) {
+        return false;
+    }
+    let Some(c) = ctx(cpu) else {
+        return true;
+    };
+    let last = &batch.last;
+    if let Some(color) = last.color {
+        c.color = color;
+        // As glColor: the material properties glColorMaterial tracks
+        // follow the current color. The vertices were lit with their
+        // own colors in those properties, so the last one is all the
+        // materials keep.
+        if c.caps & CAP_COLOR_MATERIAL != 0 {
+            c.lighting.track(color);
+        }
+    }
+    if let Some(normal) = last.normal {
+        c.normal = normal;
+    }
+    for (unit, t) in last.tex.iter().enumerate() {
+        if let Some(t) = *t {
+            c.tex_coord[unit] = t;
+        }
+    }
+    true
+}
+
 // Replaying.
 
 /// The bytes copied for a call's argument whose word is `offset`.
@@ -973,28 +1152,42 @@ fn issue(cpu: &mut Cpu, at: usize, api: &Api, args: &[u32], tight: bool) {
     }
 }
 
-/// Run the calls of `list` in order.
+/// Run the call `call` of `list`.
+fn replay(cpu: &mut Cpu, list: &List, call: &Call) {
+    let at = call.api as usize;
+    let (Some(api), Some(desc)) = (APIS.get(at), descs().get(at)) else {
+        return;
+    };
+    let mut args = [0u32; 16];
+    let n = (api.args as usize).min(args.len());
+    let Some(words) = list.words.get(call.args as usize..call.args as usize + n) else {
+        return;
+    };
+    let args = &mut args[..n];
+    args.copy_from_slice(words);
+    if call.copied != 0 && !place(cpu, list, call, args) {
+        return;
+    }
+    issue(cpu, at, api, args, call.copied != 0 && desc.image());
+}
+
+/// Run the calls of `list` in order, its runs of vertices each in one
+/// step.
 fn run(cpu: &mut Cpu, list: &List) {
-    let descs = descs();
-    for call in &list.calls {
-        let at = call.api as usize;
-        let (Some(api), Some(desc)) = (APIS.get(at), descs.get(at)) else {
-            continue;
-        };
-        let mut args = [0u32; 16];
-        let n = (api.args as usize).min(args.len());
-        let Some(words) = list.words.get(call.args as usize..call.args as usize + n) else {
-            continue;
-        };
-        let args = &mut args[..n];
-        args.copy_from_slice(words);
-        if call.copied != 0 && !place(cpu, list, call, args) {
+    let mut batches = list.batches().iter().peekable();
+    let mut at = 0;
+    while let Some(call) = list.calls.get(at) {
+        if let Some(batch) = batches.next_if(|b| b.first as usize == at)
+            && run_batch(cpu, batch)
+        {
+            at += batch.calls as usize;
             continue;
         }
-        issue(cpu, at, api, args, call.copied != 0 && desc.image());
+        replay(cpu, list, call);
         if cpu.bus.guest_faulted() {
             return;
         }
+        at += 1;
     }
 }
 
@@ -1020,49 +1213,89 @@ fn execute(cpu: &mut Cpu, name: u32) {
 
 // The groups.
 
+/// The group of the context at `index`, if it has one yet.
+fn group(s: &State, index: usize) -> Option<&Group> {
+    let id = s.contexts.get(index)?.as_ref()?.lists.group;
+    s.lists.groups.iter().find(|g| g.id == id)
+}
+
+/// The group of the context at `index`, a new one of its own if it
+/// has none.
+fn group_mut(s: &mut State, index: usize) -> Option<&mut Group> {
+    let own = &mut s.contexts.get_mut(index)?.as_mut()?.lists;
+    if own.group == 0 {
+        s.lists.last_group += 1;
+        own.group = s.lists.last_group;
+        s.lists.groups.push(Group {
+            id: own.group,
+            ..Group::default()
+        });
+    }
+    let id = own.group;
+    s.lists.groups.iter_mut().find(|g| g.id == id)
+}
+
 /// The lists the context at `index` has, if its group has any yet.
 fn names(s: &State, index: usize) -> Option<&Names> {
-    let group = s.contexts.get(index)?.as_ref()?.lists.group;
-    let found = s.lists.groups.iter().find(|g| g.0 == group)?;
-    Some(&found.1)
+    Some(&group(s, index)?.lists)
 }
 
 /// The lists the context at `index` has, in a new group of its own if
 /// it has none.
 fn names_mut(s: &mut State, index: usize) -> Option<&mut Names> {
-    let own = &mut s.contexts.get_mut(index)?.as_mut()?.lists;
-    if own.group == 0 {
-        s.lists.last_group += 1;
-        own.group = s.lists.last_group;
-        s.lists.groups.push((own.group, Names::new()));
+    Some(&mut group_mut(s, index)?.lists)
+}
+
+/// The textures of the group of the context at `index`, to change, in
+/// a new group of its own if it has none. Every context of the group
+/// gets a new stamp: the textures are part of what its draws are made
+/// with, and aren't in its settings.
+pub fn textures_mut(s: &mut State, index: usize) -> Option<&mut Vec<Texture>> {
+    let id = group_mut(s, index)?.id;
+    let sharing = s.contexts.iter_mut().flatten();
+    for c in sharing.filter(|c| c.lists.group == id) {
+        c.restamp();
     }
-    let group = own.group;
-    let found = s.lists.groups.iter_mut().find(|g| g.0 == group)?;
-    Some(&mut found.1)
+    let group = s.lists.groups.iter_mut().find(|g| g.id == id)?;
+    Some(&mut group.textures)
+}
+
+/// Count the contexts that have a list open again.
+fn count_open(s: &mut State) {
+    let open = s.contexts.iter().flatten().filter(|c| c.lists.open.is_some());
+    s.lists.compiling = open.count() as u32;
 }
 
 /// The contexts changed: the groups no context has go, and the count
-/// of open lists is taken again.
-pub fn sweep(s: &mut State) {
-    let contexts = || s.contexts.iter().flatten();
-    let used: Vec<u32> = contexts().map(|c| c.lists.group).collect();
-    let compiling = contexts().filter(|c| c.lists.open.is_some()).count() as u32;
-    s.lists.groups.retain(|g| used.contains(&g.0));
-    s.lists.compiling = compiling;
+/// of open lists is taken again. The textures of the groups that went
+/// are given back, with their surfaces still held.
+pub fn sweep(s: &mut State) -> Vec<Texture> {
+    let used: Vec<u32> = s.contexts.iter().flatten().map(|c| c.lists.group).collect();
+    let mut gone = Vec::new();
+    s.lists.groups.retain_mut(|g| {
+        let keep = used.contains(&g.id);
+        if !keep {
+            gone.append(&mut g.textures);
+        }
+        keep
+    });
+    count_open(s);
+    gone
 }
 
 /// The context `c` was deleted: its memory for replays is freed, and
-/// its lists go unless another context shares them.
+/// its lists and textures go unless another context shares them.
 pub fn context_gone(cpu: &mut Cpu, c: &Context) {
     if c.lists.scratch != 0 {
         kernel32::free_pages(cpu, c.lists.scratch);
     }
-    sweep(state(cpu));
+    let gone = sweep(state(cpu));
+    texture::release(cpu, &gone);
 }
 
-/// wglShareLists: the context at `to` takes the lists of the one at
-/// `from`. As Windows has it, it fails when `to` has lists of its
-/// own; contexts of two processes share nothing.
+/// wglShareLists: the context at `to` takes the lists and textures of
+/// the one at `from`. As Windows has it, it fails when `to` has lists
+/// or textures of its own; contexts of two processes share nothing.
 pub fn share(cpu: &mut Cpu, from: usize, to: usize) -> bool {
     let s = state(cpu);
     let pid = |s: &State, i: usize| s.contexts.get(i).and_then(Option::as_ref).map(|c| c.pid);
@@ -1072,16 +1305,19 @@ pub fn share(cpu: &mut Cpu, from: usize, to: usize) -> bool {
     if from == to {
         return true;
     }
-    if names(s, to).is_some_and(|n| !n.is_empty()) {
+    if group(s, to).is_some_and(|g| !g.lists.is_empty() || !g.textures.is_empty()) {
         return false;
     }
-    if names_mut(s, from).is_none() {
+    if group_mut(s, from).is_none() {
         return false;
     }
     let group = s.contexts[from].as_ref().map_or(0, |c| c.lists.group);
     if let Some(c) = &mut s.contexts[to] {
         c.lists.group = group;
+        // It draws with other textures from here on.
+        c.restamp();
     }
+    // The group it had goes, with neither lists nor textures in it.
     sweep(s);
     true
 }
@@ -1123,7 +1359,7 @@ pub fn new_list(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 ..Open::default()
             });
         }
-        sweep(s);
+        count_open(s);
         return Some(0);
     };
     error(cpu, e);
@@ -1148,11 +1384,14 @@ pub fn end_list(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     list.calls.shrink_to_fit();
     list.words.shrink_to_fit();
     list.data.shrink_to_fit();
+    // Its runs of vertices are made here, once, and not at its first
+    // call.
+    list.batches();
     let s = state(cpu);
     if let Some(names) = names_mut(s, index) {
         names.insert(open.name, Arc::new(open.list));
     }
-    sweep(s);
+    count_open(s);
     Some(0)
 }
 
@@ -1351,11 +1590,249 @@ mod tests {
         );
         assert_eq!(pointer("glVertex3f"), [None, None]);
         assert_eq!(pointer("glBindTexture"), [None, None]);
-        // The parameters' values: a color's four, a direction's three,
-        // one otherwise.
-        assert_eq!(pname_values(0x1201), 4);
-        assert_eq!(pname_values(0x1204), 3);
-        assert_eq!(pname_values(0x1601), 1);
+    }
+
+    /// A list of the calls `calls`: each an export's name, its argument
+    /// words, and what its pointer points at.
+    fn list_of(calls: &[(&str, &[u32], Option<&[u8]>)]) -> List {
+        let mut list = List::default();
+        for &(name, args, bytes) in calls {
+            let at = place_of(name).expect(name);
+            let desc = descs()[at];
+            let mut call = Call {
+                api: at as u16,
+                copied: 0,
+                args: list.words.len() as u32,
+            };
+            list.words.extend_from_slice(args);
+            if let Some(bytes) = bytes {
+                let arg = desc.pointers[0].unwrap().arg as usize;
+                list.words[call.args as usize + arg] = list.data.len() as u32;
+                call.copied = 1 << arg;
+                list.data
+                    .extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                list.data.extend_from_slice(bytes);
+            }
+            list.calls.push(call);
+        }
+        list
+    }
+
+    fn bits(values: &[f32]) -> Vec<u32> {
+        values.iter().map(|v| v.to_bits()).collect()
+    }
+
+    /// A glBegin to glEnd run of vertices is kept as the vertices, each
+    /// with the values in force when it was given: the first vertex
+    /// came before the run's color and takes the current one, none has
+    /// a normal of the run's, and the second unit's coordinates are
+    /// given from the start.
+    #[test]
+    fn a_run_of_vertices_is_kept_as_a_batch() {
+        const GL_TEXTURE1: u32 = GL_TEXTURE0 + 1;
+        let green = [0u8, 255, 0];
+        let corner: Vec<u8> = [3.0f32, 4.0, 5.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let st = [GL_TEXTURE1, 0.5f32.to_bits(), 0.25f32.to_bits()];
+        let list = list_of(&[
+            ("glMatrixMode", &[0x1700], None),
+            ("glBegin", &[4], None),
+            ("glMultiTexCoord2fARB", &st, None),
+            ("glVertex2f", &bits(&[1.0, 2.0]), None),
+            ("glColor3ubv", &[0], Some(&green)),
+            ("glVertex3fv", &[0], Some(&corner)),
+            ("glVertex2i", &[7, 8], None),
+            ("glEnd", &[], None),
+            ("glLoadIdentity", &[], None),
+        ]);
+        let [batch] = list.batches() else {
+            panic!("one run: {:?}", list.batches());
+        };
+        assert_eq!((batch.first, batch.calls, batch.kind), (1, 7, 4));
+        let positions: Vec<[f32; 4]> = batch.vertices.iter().map(|v| v.position).collect();
+        assert_eq!(
+            positions,
+            [
+                [1.0, 2.0, 0.0, 1.0],
+                [3.0, 4.0, 5.0, 1.0],
+                [7.0, 8.0, 0.0, 1.0]
+            ]
+        );
+        let green = [0.0, 1.0, 0.0, 1.0];
+        assert_eq!(batch.vertices[1].color, green);
+        assert_eq!(batch.vertices[2].color, green);
+        assert!(batch.vertices.iter().all(|v| v.tex[1] == [0.5, 0.25, 0.0, 1.0]));
+        let inherit = draw::Inherit {
+            color: 1,
+            normal: 3,
+            tex: [3, 0],
+        };
+        assert_eq!(batch.inherit, inherit);
+        let last = Last {
+            color: Some(green),
+            normal: None,
+            tex: [None, Some([0.5, 0.25, 0.0, 1.0])],
+        };
+        assert_eq!(batch.last, last);
+    }
+
+    /// A run stays calls when a batch couldn't stand for it: with a call
+    /// between glBegin and glEnd that gives no vertex's value, without
+    /// its glEnd, for a primitive or a texture unit there isn't, and
+    /// with an array the list has no copy of.
+    #[test]
+    fn a_run_a_batch_cannot_stand_for_stays_calls() {
+        let v = bits(&[1.0, 2.0]);
+        let vertex = ("glVertex2f", &v[..], None);
+        let begin = ("glBegin", &[7u32][..], None);
+        let end = ("glEnd", &[][..], None);
+        let none = |calls: &[(&str, &[u32], Option<&[u8]>)]| {
+            assert_eq!(list_of(calls).batches(), [], "{calls:?}");
+        };
+        none(&[begin, vertex, ("glEdgeFlag", &[1], None), end]);
+        none(&[begin, vertex, ("glCallList", &[2], None), end]);
+        none(&[begin, vertex]);
+        none(&[("glBegin", &[10], None), vertex, end]);
+        let unit = [GL_TEXTURE0 + UNITS as u32, 0, 0];
+        none(&[begin, ("glMultiTexCoord2fARB", &unit, None), vertex, end]);
+        none(&[begin, ("glVertex2fv", &[0x1000], None), end]);
+        // The run after one that stays calls is a batch.
+        let list = list_of(&[begin, vertex, begin, vertex, end]);
+        assert_eq!(list.batches().len(), 1);
+        assert_eq!(list.batches()[0].first, 2);
+    }
+
+    /// A replay draws a run in one step and leaves the current values
+    /// its calls would: the color and normal are the run's last, and
+    /// the context's block for copies, which replaying glColor3fv
+    /// would have asked for, isn't there. Inside a glBegin of the
+    /// program's the calls are replayed, and the run's own glBegin is
+    /// the error it is there.
+    #[test]
+    fn a_replay_draws_a_run_in_one_step() {
+        let mut cpu = Cpu::new(".".into());
+        let tid = super::super::super::user32::current_tid(&cpu);
+        let s = state(&mut cpu);
+        s.contexts.push(Some(super::super::new_context(1, 2, 3)));
+        s.current.push((tid, super::super::hglrc(0), 0));
+        let blue: Vec<u8> = [0.0f32, 0.0, 1.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let corner = bits(&[1.0, 2.0]);
+        let up = bits(&[0.0, 1.0, 0.0]);
+        let list = list_of(&[
+            ("glBegin", &[4], None),
+            ("glColor3fv", &[0], Some(&blue)),
+            ("glVertex2f", &corner, None),
+            ("glNormal3f", &up, None),
+            ("glEnd", &[], None),
+        ]);
+        run(&mut cpu, &list);
+        let c = ctx(&mut cpu).unwrap();
+        assert_eq!(c.color, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(c.normal, [0.0, 1.0, 0.0]);
+        assert_eq!((c.lists.scratch, c.begin, c.error), (0, None, 0));
+
+        let green = bits(&[0.0, 1.0, 0.0]);
+        let list = list_of(&[
+            ("glBegin", &[4], None),
+            ("glColor3f", &green, None),
+            ("glVertex2f", &corner, None),
+            ("glEnd", &[], None),
+        ]);
+        assert_eq!(list.batches().len(), 1);
+        c.begin = Some(7);
+        run(&mut cpu, &list);
+        let c = ctx(&mut cpu).unwrap();
+        assert_eq!(c.color, [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!((c.begin, c.error), (None, GL_INVALID_OPERATION));
+    }
+
+    /// What a replay of a run costs call by call and as a batch, in
+    /// nanoseconds for each vertex: a strip of 2000 vertices, each a
+    /// glNormal3f and a glVertex3f as a model in a list is given,
+    /// unlit and lit by one light. The context has no window, so the
+    /// vertices are made and lit and not drawn; the drawing is the
+    /// same work both ways. A timing measurement, to run alone:
+    /// `cargo test --release --lib a_runs_replay_cost -- --ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore = "a timing measurement, for a machine with nothing else running"]
+    fn a_runs_replay_cost() {
+        const VERTICES: usize = 2000;
+        const REPLAYS: u32 = 500;
+        let mut cpu = Cpu::new(".".into());
+        let tid = super::super::super::user32::current_tid(&cpu);
+        let s = state(&mut cpu);
+        s.contexts.push(Some(super::super::new_context(1, 2, 3)));
+        s.current.push((tid, super::super::hglrc(0), 0));
+        let words: Vec<(Vec<u32>, Vec<u32>)> = (0..VERTICES)
+            .map(|i| {
+                let turn = i as f32 * 0.01;
+                let normal = bits(&[turn.cos(), turn.sin(), 0.0]);
+                let vertex = bits(&[turn.cos() * 2.0, turn.sin() * 2.0, (i % 2) as f32]);
+                (normal, vertex)
+            })
+            .collect();
+        let mut calls: Vec<(&str, &[u32], Option<&[u8]>)> = vec![("glBegin", &[8], None)];
+        for (normal, vertex) in &words {
+            calls.push(("glNormal3f", normal, None));
+            calls.push(("glVertex3f", vertex, None));
+        }
+        calls.push(("glEnd", &[], None));
+        let batched = list_of(&calls);
+        assert_eq!(batched.batches().len(), 1);
+        // The same list with no runs kept: every call is replayed.
+        let by_call = list_of(&calls);
+        by_call.batches.set(Vec::new()).unwrap();
+        let time = |cpu: &mut Cpu, list: &List| {
+            let start = std::time::Instant::now();
+            for _ in 0..REPLAYS {
+                run(cpu, list);
+            }
+            start.elapsed().as_nanos() as f64 / (REPLAYS as f64 * VERTICES as f64)
+        };
+        for lit in [false, true] {
+            if lit {
+                let c = ctx(&mut cpu).unwrap();
+                c.caps |= super::super::CAP_LIGHTING;
+                c.lighting.enabled = 1;
+            }
+            // Three rounds, the two ways in turn, and the best of each.
+            let mut best = [f64::MAX; 2];
+            for _ in 0..3 {
+                best[0] = best[0].min(time(&mut cpu, &by_call));
+                best[1] = best[1].min(time(&mut cpu, &batched));
+            }
+            let [calls, batch] = best;
+            println!(
+                "lit {lit}: {calls:.1} ns a vertex call by call, {batch:.1} ns as a batch, \
+                 {:.1} times",
+                calls / batch
+            );
+        }
+    }
+
+    /// Every export that is one of the vertex functions takes the
+    /// arguments its name says.
+    #[test]
+    fn the_vertex_functions_take_the_arguments_of_their_names() {
+        let mut found = 0;
+        for api in APIS.iter() {
+            if let Some(spec) = imm::spec(api.name) {
+                assert_eq!(spec.words(), api.args as usize, "{}", api.name);
+                found += 1;
+            }
+        }
+        // glVertex has 24 forms, glNormal 10, and glColor, glTexCoord
+        // and glMultiTexCoordARB 32 each.
+        assert_eq!(found, 24 + 10 + 3 * 32);
+        for name in ["glVertexPointer", "glColorMask", "glNormalPointer", "glColorMaterial"] {
+            assert!(imm::spec(name).is_none(), "{name}");
+        }
     }
 
     #[test]
@@ -1469,6 +1946,7 @@ mod tests {
             }],
             words: vec![0],
             data: vec![2, 0, 0, 0, 7, 8],
+            ..List::default()
         };
         names_mut(&mut state, 0)
             .unwrap()

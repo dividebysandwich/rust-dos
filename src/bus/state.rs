@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 61;
+const WIN32_VERSION: u16 = 62;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -876,6 +876,7 @@ mod tests {
         (58, 0xDC7D_5C01_8FC2_8FD2), // the system locale
         (59, 0xCDE1_505E_0044_1486), // the page file behind programs' own memory
         (61, 0x9267_6BA0_CE58_B06F), // OpenGL's display lists
+        (62, 0x9F78_ACB5_CCD2_8975), // OpenGL's textures in their contexts' group
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

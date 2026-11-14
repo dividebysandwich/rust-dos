@@ -107,6 +107,8 @@ const OPENGL32: &[&str] = &[
     "glRasterPos2i",
     "glPixelStorei",
     "glTexCoord2f",
+    "glIsTexture",
+    "glDeleteTextures",
 ];
 const GLU32: &[&str] = &[
     "gluBuild2DMipmaps",
@@ -187,6 +189,8 @@ const WGL_DELETE_CONTEXT: usize = GL + 63;
 const RASTER_POS2I: usize = GL + 64;
 const PIXEL_STOREI: usize = GL + 65;
 const TEX_COORD2F: usize = GL + 66;
+const IS_TEXTURE: usize = GL + 67;
+const DELETE_TEXTURES: usize = GL + 68;
 const GLU: usize = GL + OPENGL32.len();
 const BUILD_2D_MIPMAPS: usize = GLU;
 const ORTHO_2D: usize = GLU + 1;
@@ -2983,4 +2987,307 @@ fn a_display_list_replays_a_function_that_is_not_there_yet() {
     // Not when it was compiled, and twice by the two calls of the list.
     assert_eq!(event("OPENGL32 not implemented: glRasterPos2i").1, 2);
     assert_eq!(event("OPENGL32.glCallList").1, 2);
+}
+
+#[test]
+fn a_lists_runs_of_vertices_draw_as_its_calls_do() {
+    runs_draw_alike(Draws::Voodoo3);
+}
+
+#[test]
+fn a_lists_runs_of_vertices_on_a_toadforce_draw_as_its_calls_do() {
+    runs_draw_alike(Draws::ToadForce);
+}
+
+/// A list draws its glBegin to glEnd runs as vertices it kept, in one
+/// step each, and under the 3D trace it replays their calls one by
+/// one. The same program on two machines, one of them traced, draws
+/// the same picture pixel for pixel both ways, and the picture its own
+/// calls drew; the current color and normal after the list are the
+/// last ones it gave.
+///
+/// The first quad's first vertex comes before the list's first color,
+/// and takes the color current when the list is called. The triangle
+/// is lit, with its colors as the material's by GL_COLOR_MATERIAL,
+/// and its vertices are given as arrays.
+fn runs_draw_alike(card: Draws) {
+    const GL_CURRENT_COLOR: u32 = 0x0B00;
+    const GL_CURRENT_NORMAL: u32 = 0x0B02;
+    const BLUE: u32 = LIST_DATA;
+    const CORNERS: u32 = LIST_DATA + 0x10;
+    const AFTER: u32 = KEPT;
+    let mut d = lists_data();
+    put_f32s(&mut d, BLUE, &[0.25, 0.5, 1.0]);
+    put_f32s(&mut d, CORNERS, TOP_RIGHT.as_flattened());
+    let mut error_at = 0;
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let scene = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+            let [c0, c1, c2, c3] = corners(LEFT);
+            gl(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+            gl(a, l, VERTEX2F, &c0.map(Arg::F))?;
+            gl(a, l, COLOR3F, &GREEN.map(Arg::F))?;
+            gl(a, l, VERTEX2F, &c1.map(Arg::F))?;
+            gl(a, l, TEX_COORD2F, &[Arg::F(0.5), Arg::F(0.25)])?;
+            gl(a, l, VERTEX2F, &c2.map(Arg::F))?;
+            gl(a, l, VERTEX2F, &c3.map(Arg::F))?;
+            gl(a, l, END, &[])?;
+            gl(a, l, ENABLE, &[Arg::I(GL_LIGHTING)])?;
+            gl(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+            gl(a, l, NORMAL3F, &[Arg::F(0.0), Arg::F(0.6), Arg::F(0.8)])?;
+            gl(a, l, VERTEX2FV, &[Arg::At(CORNERS)])?;
+            gl(a, l, COLOR3FV, &[Arg::At(BLUE)])?;
+            gl(a, l, VERTEX2FV, &[Arg::At(CORNERS + 8)])?;
+            gl(a, l, VERTEX2FV, &[Arg::At(CORNERS + 16)])?;
+            gl(a, l, END, &[])?;
+            gl(a, l, DISABLE, &[Arg::I(GL_LIGHTING)])
+        };
+        gl(a, l, ENABLE, &[Arg::I(GL_LIGHT0)])?;
+        gl(a, l, ENABLE, &[Arg::I(GL_COLOR_MATERIAL)])?;
+        clear_blue(a, l)?;
+        gl(a, l, COLOR3F, &RED.map(Arg::F))?;
+        scene(a)?;
+        read_into(a, l, SHOTS[0])?;
+        gl(a, l, NEW_LIST, &[Arg::I(1), Arg::I(GL_COMPILE)])?;
+        scene(a)?;
+        gl(a, l, END_LIST, &[])?;
+        // What the list read is gone by the time it is called.
+        for i in 0..3 {
+            a.mov(dword_ptr(l.at(BLUE + 4 * i)), 0)?;
+        }
+        clear_blue(a, l)?;
+        gl(a, l, COLOR3F, &RED.map(Arg::F))?;
+        gl(a, l, NORMAL3F, &[Arg::F(1.0), Arg::F(0.0), Arg::F(0.0)])?;
+        gl(a, l, CALL_LIST, &[Arg::I(1)])?;
+        gl(a, l, GET_FLOATV, &[Arg::I(GL_CURRENT_COLOR), Arg::At(AFTER)])?;
+        let normal = [Arg::I(GL_CURRENT_NORMAL), Arg::At(AFTER + 16)];
+        gl(a, l, GET_FLOATV, &normal)?;
+        read_into(a, l, SHOTS[1])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        error_at = c.next - 1;
+        finish(a, l)
+    });
+    let run = |traced: bool| {
+        let name = if traced { "list_runs_traced" } else { "list_runs" };
+        let mut cpu = machine_on(name, card, exe.clone());
+        // A file of this card's run: both cards' tests run at once.
+        let file = match card {
+            Draws::Voodoo3 => "voodoo3.trace",
+            Draws::ToadForce => "toadforce.trace",
+        };
+        let path = PathBuf::from(format!("target/test_win32_opengl/{name}/{file}"));
+        if traced {
+            rust_dos::win32::trace3d::start(&mut cpu, &path).unwrap();
+        }
+        run_until_done(&mut cpu, data);
+        assert_eq!(peek(&cpu, data + RESULTS + 4 * error_at), 0, "glGetError");
+        card_drew(&cpu, card);
+        if traced {
+            // Its own calls, the list's when it was compiled, and the
+            // list's again when it was called.
+            rust_dos::win32::trace3d::flush(&mut cpu);
+            let (events, counts) = super::win32_d3d_tests::read_trace(&path);
+            let event = |start: &str| super::win32_d3d_tests::event(&events, &counts, start);
+            assert_eq!(event("OPENGL32.glVertex2fv").1, 3 * 3);
+        }
+        let shots = [SHOTS[0], SHOTS[1]].map(|s| shot(&cpu, data, s));
+        let after = [floats(&cpu, data, AFTER), floats(&cpu, data, AFTER + 16)];
+        (shots, after)
+    };
+    let ([direct, called], after) = run(false);
+    // The quad from the red that was current to the list's green, the
+    // lit triangle, and the clear color where neither is.
+    let [r, g, _] = at(&direct, 1, 1);
+    assert!(r > 200 && g < 60, "the first vertex's color: {r} {g}");
+    let [r, g, _] = at(&direct, 28, 4);
+    assert!(r < 60 && g > 190, "the list's color: {r} {g}");
+    assert_ne!(at(&direct, 60, 60), [0, 0, 255]);
+    assert_eq!(at(&direct, 40, 8), [0, 0, 255]);
+    assert!(called == direct, "the list, its runs as vertices");
+    assert_eq!(after[0], [0.25, 0.5, 1.0, 1.0]);
+    assert_eq!(after[1][..3], [0.0, 0.6, 0.8]);
+    let ([traced_direct, traced_called], traced_after) = run(true);
+    assert!(traced_direct == direct, "the calls under the trace");
+    assert!(traced_called == called, "the list call by call");
+    assert_eq!(traced_after, after);
+}
+
+#[test]
+fn wglsharelists_shares_the_textures_of_two_contexts() {
+    shared_textures(Draws::Voodoo3);
+}
+
+#[test]
+fn wglsharelists_on_a_toadforce_shares_the_textures_of_two_contexts() {
+    shared_textures(Draws::ToadForce);
+}
+
+/// Two contexts that share their lists have one set of texture
+/// objects, as contexts of OpenGL 1.1 do: a texture one makes is the
+/// other's under the same name, with its image, and a name either is
+/// given is one neither has. A texture one deletes is gone for both.
+/// When the context that made a texture is deleted, the other still
+/// draws with it. A context that has a texture of its own can't take
+/// another's.
+fn shared_textures(card: Draws) {
+    const SECOND: u32 = KEPT;
+    const THIRD: u32 = KEPT + 4;
+    const RED_NAME: u32 = KEPT + 8;
+    const GREEN_NAME: u32 = KEPT + 12;
+    const OWN_NAME: u32 = KEPT + 16;
+    const GREEN_TEXELS: u32 = TEXELS + 0x10;
+    let mut d = lists_data();
+    put(&mut d, TEXELS, [[255u8, 0, 0, 255]; 4].as_flattened());
+    put(&mut d, GREEN_TEXELS, [[0u8, 255, 0, 255]; 4].as_flattened());
+    // The results looked at, by what they are.
+    let mut at_result = Vec::new();
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let mut note = |c: &Calls, what: &'static str| at_result.push((what, c.next - 1));
+        let current = |a: &mut CodeAssembler, c: &mut Calls, context: u32| {
+            c.api(a, l, WGL_MAKE_CURRENT, &[Arg::Val(HDC), Arg::Val(context)])
+        };
+        // The window textured with what is bound, in the color `rgb`.
+        let draw = |a: &mut CodeAssembler, rgb: [f32; 3], to: u32| -> Result<(), IcedError> {
+            clear_blue(a, l)?;
+            gl(a, l, COLOR3F, &rgb.map(Arg::F))?;
+            gl(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+            for [x, y] in corners(WHOLE) {
+                let st = [x, y].map(|v| Arg::F((v + 1.0) / 2.0));
+                gl(a, l, TEX_COORD2F, &st)?;
+                gl(a, l, VERTEX2F, &[Arg::F(x), Arg::F(y)])?;
+            }
+            gl(a, l, END, &[])?;
+            read_into(a, l, to)
+        };
+        let white = [1.0, 1.0, 1.0];
+        c.api(a, l, WGL_CREATE_CONTEXT, &[Arg::Val(HDC)])?;
+        a.mov(dword_ptr(l.at(SECOND)), eax)?;
+        c.api(a, l, WGL_SHARE_LISTS, &[Arg::Val(HGLRC), Arg::Val(SECOND)])?;
+        note(&c, "shared");
+        // The first context makes a red texture, and the second draws
+        // with it.
+        gl(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(RED_NAME)])?;
+        texture_2x2(a, l, &mut c, RED_NAME, TEXELS)?;
+        current(a, &mut c, SECOND)?;
+        c.api(a, l, IS_TEXTURE, &[Arg::Val(RED_NAME)])?;
+        note(&c, "the first's texture in the second");
+        gl(a, l, ENABLE, &[Arg::I(GL_TEXTURE_2D)])?;
+        gl(a, l, BIND_TEXTURE, &[Arg::I(GL_TEXTURE_2D), Arg::Val(RED_NAME)])?;
+        draw(a, white, SHOTS[0])?;
+        // The second makes a green one, under another name, and the
+        // first draws with it.
+        gl(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(GREEN_NAME)])?;
+        texture_2x2(a, l, &mut c, GREEN_NAME, GREEN_TEXELS)?;
+        current(a, &mut c, HGLRC)?;
+        c.api(a, l, IS_TEXTURE, &[Arg::Val(GREEN_NAME)])?;
+        note(&c, "the second's texture in the first");
+        gl(a, l, BIND_TEXTURE, &[Arg::I(GL_TEXTURE_2D), Arg::Val(GREEN_NAME)])?;
+        draw(a, white, SHOTS[1])?;
+        // The first deletes the green one, which the second still has
+        // bound: it is gone there too, and the second draws untextured.
+        gl(a, l, DELETE_TEXTURES, &[Arg::I(1), Arg::At(GREEN_NAME)])?;
+        current(a, &mut c, SECOND)?;
+        c.api(a, l, IS_TEXTURE, &[Arg::Val(GREEN_NAME)])?;
+        note(&c, "the deleted texture in the second");
+        draw(a, [1.0, 1.0, 0.0], SHOTS[2])?;
+        // The first context goes, and the texture it made stays.
+        c.api(a, l, WGL_DELETE_CONTEXT, &[Arg::Val(HGLRC)])?;
+        note(&c, "the first context deleted");
+        c.api(a, l, IS_TEXTURE, &[Arg::Val(RED_NAME)])?;
+        note(&c, "the first's texture after it");
+        gl(a, l, BIND_TEXTURE, &[Arg::I(GL_TEXTURE_2D), Arg::Val(RED_NAME)])?;
+        draw(a, white, SHOTS[3])?;
+        c.api(a, l, GET_ERROR, &[])?;
+        note(&c, "glGetError");
+        // A third context with a texture of its own can't take the
+        // second's, and has none of them.
+        c.api(a, l, WGL_CREATE_CONTEXT, &[Arg::Val(HDC)])?;
+        a.mov(dword_ptr(l.at(THIRD)), eax)?;
+        current(a, &mut c, THIRD)?;
+        gl(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(OWN_NAME)])?;
+        c.api(a, l, WGL_SHARE_LISTS, &[Arg::Val(SECOND), Arg::Val(THIRD)])?;
+        note(&c, "sharing into a context with a texture");
+        gl(a, l, DELETE_TEXTURES, &[Arg::I(1), Arg::At(OWN_NAME)])?;
+        c.api(a, l, WGL_SHARE_LISTS, &[Arg::Val(SECOND), Arg::Val(THIRD)])?;
+        note(&c, "sharing into a context with none");
+        c.api(a, l, IS_TEXTURE, &[Arg::Val(RED_NAME)])?;
+        note(&c, "the texture in the third");
+        finish(a, l)
+    });
+    let mut cpu = machine_on("texture_share", card, exe);
+    run_until_done(&mut cpu, data);
+    let results: Vec<(&str, u32)> = at_result
+        .iter()
+        .map(|&(what, i)| (what, peek(&cpu, data + RESULTS + 4 * i)))
+        .collect();
+    assert_eq!(
+        results,
+        [
+            ("shared", 1),
+            ("the first's texture in the second", 1),
+            ("the second's texture in the first", 1),
+            ("the deleted texture in the second", 0),
+            ("the first context deleted", 1),
+            ("the first's texture after it", 1),
+            ("glGetError", 0),
+            ("sharing into a context with a texture", 0),
+            ("sharing into a context with none", 1),
+            ("the texture in the third", 1),
+        ]
+    );
+    let names = [RED_NAME, GREEN_NAME].map(|n| peek(&cpu, data + n));
+    assert!(names[0] != 0 && names[1] != 0 && names[0] != names[1], "{names:?}");
+    card_drew(&cpu, card);
+    let [red, green, untextured, kept] = SHOTS.map(|s| shot(&cpu, data, s));
+    let all = |shot: &[u32], rgb: u32| shot.iter().all(|&p| p == rgb);
+    assert!(all(&red, 0x00_00FF), "the first's texture in the second");
+    assert!(all(&green, 0x00_FF00), "the second's texture in the first");
+    assert!(all(&untextured, 0x00_FFFF), "a deleted texture");
+    assert!(all(&kept, 0x00_00FF), "a texture whose context is gone");
+}
+
+/// A saved state has the textures two contexts share: the program
+/// goes on from it to the same picture.
+#[test]
+fn a_saved_state_has_the_shared_textures() {
+    const SECOND: u32 = KEPT;
+    const NAME: u32 = KEPT + 8;
+    let mut d = lists_data();
+    put(&mut d, TEXELS, [[255u8, 0, 0, 255]; 4].as_flattened());
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        c.api(a, l, WGL_CREATE_CONTEXT, &[Arg::Val(HDC)])?;
+        a.mov(dword_ptr(l.at(SECOND)), eax)?;
+        c.api(a, l, WGL_SHARE_LISTS, &[Arg::Val(HGLRC), Arg::Val(SECOND)])?;
+        gl(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(NAME)])?;
+        texture_2x2(a, l, &mut c, NAME, TEXELS)?;
+        wait(a, l, 1)?;
+        c.api(a, l, WGL_MAKE_CURRENT, &[Arg::Val(HDC), Arg::Val(SECOND)])?;
+        gl(a, l, ENABLE, &[Arg::I(GL_TEXTURE_2D)])?;
+        gl(a, l, BIND_TEXTURE, &[Arg::I(GL_TEXTURE_2D), Arg::Val(NAME)])?;
+        clear_blue(a, l)?;
+        gl(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+        for [x, y] in corners(WHOLE) {
+            gl(a, l, VERTEX2F, &[Arg::F(x), Arg::F(y)])?;
+        }
+        gl(a, l, END, &[])?;
+        read_into(a, l, PIXELS)?;
+        a.mov(dword_ptr(l.at(DONE)), 2)?;
+        finish_at(a)
+    });
+    let mut cpu = machine("texture_share_saved", true, exe);
+    run_until_step(&mut cpu, data, 1);
+    let state = rust_dos::savestate::machine::save(&cpu);
+    go_on(&mut cpu, data, 1);
+    run_until_step(&mut cpu, data, 2);
+    let before = shot(&cpu, data, PIXELS);
+    assert!(before.iter().all(|&p| p == 0x00_00FF), "the shared texture");
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    go_on(&mut cpu, data, 1);
+    run_until_step(&mut cpu, data, 2);
+    assert!(shot(&cpu, data, PIXELS) == before, "after the load");
 }

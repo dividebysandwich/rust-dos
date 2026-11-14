@@ -785,13 +785,16 @@ pub fn create_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// The context at `index` goes, with what it holds.
 fn destroy(cpu: &mut Cpu, index: usize) {
-    super::texture::release_all(cpu, index);
+    super::texture::release_default(cpu, index);
     drop_buffers(cpu, index);
     let Some(c) = state(cpu).contexts.get_mut(index).and_then(Option::take) else {
         return;
     };
     let h = hglrc(index);
     state(cpu).current.retain(|x| x.1 != h);
+    // Its lists and textures go unless another context shares them,
+    // the textures before the device that may still hold one.
+    super::lists::context_gone(cpu, &c);
     if c.inner_iface != 0 {
         ddraw::release(cpu, c.inner_iface);
     }
@@ -801,7 +804,6 @@ fn destroy(cpu: &mut Cpu, index: usize) {
     if c.strings != 0 {
         super::super::kernel32::free_pages(cpu, c.strings);
     }
-    super::lists::context_gone(cpu, &c);
 }
 
 /// wglCreateLayerContext(hdc, layer): the main plane's is a context.
@@ -910,10 +912,10 @@ pub fn copy_context(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(FALSE)
 }
 
-/// wglShareLists(a, b): `b` has the display lists of `a` from here
-/// on, those there and those either makes later. It fails when `b`
-/// has lists of its own, as Windows has it. The contexts' textures
-/// aren't shared, which programs with one context don't miss.
+/// wglShareLists(a, b): `b` has the display lists and the texture
+/// objects of `a` from here on, those there and those either makes
+/// later, which is all that contexts of OpenGL 1.1 share. It fails
+/// when `b` has lists or textures of its own, as Windows has it.
 pub fn share_lists(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (Some(a), Some(b)) = (context_index(cpu, args[0]), context_index(cpu, args[1])) else {
         super::super::gdi32::set_error(cpu, ERROR_INVALID_HANDLE);
