@@ -200,6 +200,7 @@ impl Bus {
             key_waits: _,
             unhandled_writes: _,
             attribute_reset: _,
+            memory_derived: _,
             log_hook: _,
             log_backlog: _,
             audio_hook: _,
@@ -513,6 +514,9 @@ impl Bus {
             key_waits: _,
             unhandled_writes: _,
             attribute_reset: _,
+            // The front end's, which sets it from the settings a load
+            // leaves (`slots::loaded_settings`).
+            memory_derived: _,
             log_hook: _,
             log_backlog: _,
             audio_hook: _,
@@ -876,7 +880,8 @@ mod tests {
         (58, 0xDC7D_5C01_8FC2_8FD2), // the system locale
         (59, 0xCDE1_505E_0044_1486), // the page file behind programs' own memory
         (61, 0x9267_6BA0_CE58_B06F), // OpenGL's display lists
-        (63, 0x8F9A_2816_A26A_F1BE), // OpenGL's vertices as given, and the card's lights
+        (62, 0x9F78_ACB5_CCD2_8975), // OpenGL's textures in their contexts' group
+        (63, 0xD1E3_14A4_31DE_2AAA), // OpenGL's vertices as given, and the card's lights
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

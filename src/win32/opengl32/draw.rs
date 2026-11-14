@@ -49,9 +49,8 @@ use super::tnl::{self, Why};
 use super::{
     Array, CAP_ALPHA_TEST, CAP_BLEND, CAP_COLOR_MATERIAL, CAP_CULL_FACE, CAP_DEPTH_TEST,
     CAP_DITHER, CAP_FOG, CAP_LIGHTING, CAP_NORMALIZE, CAP_POLYGON_OFFSET_FILL, CAP_SCISSOR_TEST,
-    Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, ImmVertex, Settings, UNITS,
-    ctx,
-    current, error, signed_unit, state,
+    Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, ImmVertex, Settings, Texture,
+    UNITS, ctx, current, error, signed_unit, state,
 };
 use crate::cpu::Cpu;
 
@@ -333,8 +332,9 @@ fn stage_states(mode: u32, t: &super::Texture) -> Vec<(u32, u32)> {
 
 /// A context's state as its Direct3D device's: what `put` puts on the
 /// device before a draw. Made from what the context's draws are made
-/// with and nothing else, so it holds while that has its stamp
-/// (`applied_of`).
+/// with and the textures of its group, which give the context a new
+/// stamp when one changes, so it holds while the context has its
+/// stamp (`applied_of`).
 #[derive(Clone, Debug, Default)]
 pub struct Applied {
     inner: u32,
@@ -383,19 +383,21 @@ impl Applied {
 /// The device's state for the draws of the context `c` as it is now,
 /// None when its viewport is off its buffers and nothing is drawn. It
 /// is made once for each stamp of the context: a draw that follows
-/// another with nothing set between them finds it made.
-fn applied_of(c: &mut Context) -> Option<&Applied> {
+/// another with nothing set between them finds it made, and doesn't
+/// look for its group's textures in `lists`.
+fn applied_of<'a>(c: &'a mut Context, lists: &super::lists::Shared) -> Option<&'a Applied> {
     let stamp = c.stamp();
     if c.applied.as_ref().is_none_or(|(made, _)| *made != stamp) {
-        let made = applied(c);
+        let made = applied(c, lists.textures(c.lists.group));
         c.applied = Some((stamp, made));
     }
     c.applied.as_ref()?.1.as_ref()
 }
 
-/// The device's state for drawing what a context draws with `c`: None
-/// when its viewport is off its buffers, and nothing is drawn.
-fn applied(c: &Settings) -> Option<Applied> {
+/// The device's state for drawing what a context draws with `c` and
+/// the textures `shared` of its group: None when its viewport is off
+/// its buffers, and nothing is drawn.
+fn applied(c: &Settings, shared: &[Texture]) -> Option<Applied> {
     let (viewport, fit) = super::wgl::inner_viewport(c)?;
     let on = |cap: u32| c.caps & cap != 0;
     let depth = on(CAP_DEPTH_TEST);
@@ -464,7 +466,7 @@ fn applied(c: &Settings) -> Option<Applied> {
         if !c.texture_2d[unit] {
             continue;
         }
-        let Some(t) = texture::texture(c, c.bound[unit]) else {
+        let Some(t) = texture::find(c, shared, c.bound[unit]) else {
             continue;
         };
         if t.iface == 0 || t.defined & 1 == 0 {
@@ -1144,7 +1146,7 @@ fn draw(
     }
     let mut prims = primitives(kind, order);
     // Nothing is drawn with a viewport off the buffers.
-    if prims.is_empty() || applied_of(c).is_none() {
+    if prims.is_empty() || applied_of(c, &st.lists).is_none() {
         return;
     }
     let per = polygon_triangles(kind);
@@ -1183,7 +1185,7 @@ fn draw(
             && w.card.is_some() == on_card
             && w.count() + raw.len() <= WAITING_VERTICES
             && ((w.stamp == stamp && w.lit_stamp == lit_stamp)
-                || (applied_of(c).is_some_and(|a| a.same(&w.applied))
+                || (applied_of(c, &st.lists).is_some_and(|a| a.same(&w.applied))
                     && (!on_card || w.card.as_ref() == card_of(c))))
     });
     let n = raw.len() as u64;
@@ -1215,7 +1217,7 @@ fn draw(
             }
         }));
     } else {
-        let Some(applied) = applied_of(c).cloned() else {
+        let Some(applied) = applied_of(c, &st.lists).cloned() else {
             return;
         };
         let card = if on_card { card_of(c).cloned() } else { None };
@@ -1760,6 +1762,65 @@ pub fn draw_elements(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let order: Vec<u32> = indices.iter().map(|i| i - first).collect();
     draw(cpu, kind, &v, Some(&order), Some(&used));
     Some(0)
+}
+
+/// A vertex with everything glVertex takes from the current values:
+/// its position, and the normal, color and texture coordinates in
+/// force when it was given. None of them is through a matrix or the
+/// lights.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct Whole {
+    pub position: [f32; 4],
+    pub normal: [f32; 3],
+    pub color: [f32; 4],
+    pub tex: [[f32; 4]; UNITS],
+}
+
+/// How many of a run's first vertices were given before the run set
+/// a color, a normal and each unit's texture coordinates: those take
+/// the current values of when the run is drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct Inherit {
+    pub color: u32,
+    pub normal: u32,
+    pub tex: [u32; UNITS],
+}
+
+/// Draw `kind` primitives of `vertices`, a glBegin to glEnd run that
+/// a display list kept as its vertices, as glEnd draws those it
+/// gathered: each is the vertex glVertex would have made, with the
+/// current values where the run set none before it, and `draw`
+/// transforms and lights them on the card or here. False, with
+/// nothing drawn, without a context or between a glBegin and its
+/// glEnd, where the run's own glBegin is an error.
+pub(super) fn draw_run(cpu: &mut Cpu, kind: u32, vertices: &[Whole], inherit: &Inherit) -> bool {
+    let Some(c) = ctx(cpu) else {
+        return false;
+    };
+    if c.begin.is_some() {
+        return false;
+    }
+    let profile = crate::profile::zone(crate::profile::Zone::OpenGlEnd);
+    // As glBegin leaves them.
+    c.vertices.clear();
+    let (color, normal, tex) = (c.color, c.normal, c.tex_coord);
+    let out: Vec<ImmVertex> = vertices
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let i = i as u32;
+            ImmVertex {
+                position: v.position,
+                normal: if i < inherit.normal { normal } else { v.normal },
+                color: if i < inherit.color { color } else { v.color },
+                lit: None,
+                tex: std::array::from_fn(|u| if i < inherit.tex[u] { tex[u] } else { v.tex[u] }),
+            }
+        })
+        .collect();
+    drop(profile);
+    draw(cpu, kind, &out, None, None);
+    true
 }
 
 /// glLockArraysEXT(first, count) and glUnlockArraysEXT(): the arrays

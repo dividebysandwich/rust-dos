@@ -77,7 +77,7 @@ impl Machine {
         let CpuSpeed::Fixed(cycles) = settings.cycles else {
             return Err(format!("the speed must be fixed, not {:?}", settings.cycles));
         };
-        let mut cpu = Cpu::with_memory(c_dir.to_path_buf(), settings.memsize);
+        let mut cpu = Cpu::with_memory(c_dir.to_path_buf(), settings.memory_mb());
         if let Some(path) = log {
             cpu.bus.log_file = rust_dos::log::LogFile::create(path).ok();
         }
