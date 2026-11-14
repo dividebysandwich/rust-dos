@@ -1906,7 +1906,7 @@ fn the_3d_trace_names_opengls_enums_and_counts_its_calls() {
 /// glTexImage2D refuses a 512 by 512 texture, and 2048 on a ToadForce,
 /// which takes it. Both take texels in OpenGL 1.2's packed types (Myth
 /// II 1.8.1 gives GL_BGRA as GL_UNSIGNED_INT_8_8_8_8_REV), and refuse a
-/// four-component type with GL_RGB.
+/// four-component type with GL_RGB, with texels or without.
 #[test]
 fn the_largest_texture_is_the_cards_and_texels_come_packed() {
     const GL_MAX_TEXTURE_SIZE: u32 = 0x0D33;
@@ -1948,6 +1948,9 @@ fn the_largest_texture_is_the_cards_and_texels_come_packed() {
             let mismatched = image(2, GL_RGB, GL_UNSIGNED_INT_8_8_8_8_REV, Arg::At(TEXELS));
             c.api(a, l, TEX_IMAGE_2D, &mismatched)?;
             c.api(a, l, GET_ERROR, &[])?;
+            let no_texels = image(2, GL_RGB, GL_UNSIGNED_INT_8_8_8_8_REV, Arg::I(0));
+            c.api(a, l, TEX_IMAGE_2D, &no_texels)?;
+            c.api(a, l, GET_ERROR, &[])?;
             finish(a, l)
         });
         let mut cpu = machine_on("largest_texture", card, exe);
@@ -1957,5 +1960,6 @@ fn the_largest_texture_is_the_cards_and_texels_come_packed() {
         assert_eq!(r(at), big, "512 by 512 on {name}");
         assert_eq!(r(at + 2), 0, "packed texels on {name}");
         assert_eq!(r(at + 4), GL_INVALID_OPERATION, "{name}");
+        assert_eq!(r(at + 6), GL_INVALID_OPERATION, "no texels on {name}");
     }
 }

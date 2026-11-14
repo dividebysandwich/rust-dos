@@ -147,33 +147,39 @@ struct Source {
     at: u32,
 }
 
-/// The texels of `src` as red, green, blue and alpha bytes, row by row
-/// from the first the program gave, with the unpack state of `c`
-/// (alignment, row length, rows and pixels skipped). The error is
-/// OpenGL's: GL_INVALID_OPERATION for a packed type whose format has
-/// another number of components (the three-component types take GL_RGB
-/// alone), and GL_INVALID_ENUM for a format or type there isn't and
-/// for texels that can't be read.
-fn unpack(cpu: &mut Cpu, unpack: [u32; 4], src: &Source) -> Result<Vec<[u8; 4]>, u32> {
-    let n = components(src.format).ok_or(GL_INVALID_ENUM)?;
-    let packed = packed_type(src.kind);
-    // The bytes of a pixel, and of one of its elements.
-    let (pixel, size) = match packed {
-        Some((bytes, widths, _)) => {
-            let fits = match widths.len() {
-                3 => src.format == GL_RGB,
-                _ => src.format == GL_RGBA || src.format == GL_BGRA_EXT,
+/// How a pixel of `format` and `kind` is kept: its bytes, the bytes of
+/// one of its elements, and the packed type (`packed_type`) when `kind`
+/// is one. The error is OpenGL's: GL_INVALID_ENUM for a format or type
+/// there isn't, and GL_INVALID_OPERATION for a packed type whose format
+/// has another number of components (the three-component types take
+/// GL_RGB alone).
+fn pixel_layout(format: u32, kind: u32) -> Result<(u32, u32, Option<Packed>), u32> {
+    let n = components(format).ok_or(GL_INVALID_ENUM)?;
+    match packed_type(kind) {
+        Some(packed) => {
+            let fits = match packed.1.len() {
+                3 => format == GL_RGB,
+                _ => format == GL_RGBA || format == GL_BGRA_EXT,
             };
             if !fits {
                 return Err(GL_INVALID_OPERATION);
             }
-            (bytes, bytes)
+            Ok((packed.0, packed.0, Some(packed)))
         }
         None => {
-            let size = type_size(src.kind).ok_or(GL_INVALID_ENUM)?;
-            (n * size, size)
+            let size = type_size(kind).ok_or(GL_INVALID_ENUM)?;
+            Ok((n * size, size, None))
         }
-    };
+    }
+}
+
+/// The texels of `src` as red, green, blue and alpha bytes, row by row
+/// from the first the program gave, with the unpack state of `c`
+/// (alignment, row length, rows and pixels skipped). The error is
+/// OpenGL's: `pixel_layout`'s for the format and type, and
+/// GL_INVALID_ENUM for texels that can't be read.
+fn unpack(cpu: &mut Cpu, unpack: [u32; 4], src: &Source) -> Result<Vec<[u8; 4]>, u32> {
+    let (pixel, size, packed) = pixel_layout(src.format, src.kind)?;
     let row_pixels = if unpack[1] > 0 { unpack[1] } else { src.width };
     let align = unpack[0].max(1);
     let place = || {
@@ -219,12 +225,16 @@ fn unpack(cpu: &mut Cpu, unpack: [u32; 4], src: &Source) -> Result<Vec<[u8; 4]>,
     Ok(out)
 }
 
+/// A packed pixel type: the bytes of its element, the bits of each
+/// component and whether the first is lowest (`packed_type`).
+type Packed = (u32, &'static [u32], bool);
+
 /// A packed pixel type of OpenGL 1.2 (GL_UNSIGNED_SHORT_5_6_5 and the
 /// others): the bytes of the one element that holds a whole pixel, the
 /// bits of each component in the order the format names them, and
 /// whether the first component is in the lowest bits (the types ending
 /// in _REV) or in the highest.
-fn packed_type(kind: u32) -> Option<(u32, &'static [u32], bool)> {
+fn packed_type(kind: u32) -> Option<Packed> {
     Some(match kind {
         0x8032 => (1, &[3, 3, 2], false),
         0x8362 => (1, &[3, 3, 2], true),
@@ -566,6 +576,12 @@ fn define(cpu: &mut Cpu, img: &Image, texels: Option<Vec<[u8; 4]>>) {
     let max = max_texture_size(cpu);
     if img.border != 0 || !pow2 || w > max || h > max || level >= level_count(max, max) {
         error(cpu, GL_INVALID_VALUE);
+        return;
+    }
+    // The format and type are checked with no texels (a NULL pointer)
+    // too.
+    if let Err(e) = pixel_layout(img.format, img.kind) {
+        error(cpu, e);
         return;
     }
     let alpha = has_alpha(base);
@@ -1245,6 +1261,24 @@ mod tests {
         assert_eq!(texel(0x8032, GL_RGB, 0xE3), [255, 0, 255, 255]);
         assert_eq!(texel(0x8362, GL_RGB, 0xC7), [255, 0, 255, 255]);
         assert_eq!(packed_type(GL_UNSIGNED_BYTE), None);
+    }
+
+    /// OpenGL 1.2: a packed type of three components takes GL_RGB, one
+    /// of four GL_RGBA or GL_BGRA, and any other format is
+    /// GL_INVALID_OPERATION.
+    #[test]
+    fn a_packed_type_takes_formats_of_as_many_components() {
+        let bytes = |format, kind| pixel_layout(format, kind).map(|(pixel, _, _)| pixel);
+        assert_eq!(bytes(GL_RGB, 0x8363), Ok(2));
+        assert_eq!(bytes(GL_BGRA_EXT, 0x8367), Ok(4));
+        assert_eq!(bytes(GL_RGBA, 0x8034), Ok(2));
+        assert_eq!(bytes(GL_BGR_EXT, 0x8363), Err(GL_INVALID_OPERATION));
+        assert_eq!(bytes(GL_RGBA, 0x8363), Err(GL_INVALID_OPERATION));
+        assert_eq!(bytes(GL_RGB, 0x8367), Err(GL_INVALID_OPERATION));
+        assert_eq!(bytes(GL_LUMINANCE, 0x8033), Err(GL_INVALID_OPERATION));
+        assert_eq!(bytes(GL_RGB, GL_UNSIGNED_SHORT), Ok(6));
+        assert_eq!(bytes(0, 0x8367), Err(GL_INVALID_ENUM));
+        assert_eq!(bytes(GL_RGB, 0), Err(GL_INVALID_ENUM));
     }
 
     #[test]
