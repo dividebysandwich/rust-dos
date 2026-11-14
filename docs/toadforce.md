@@ -116,7 +116,7 @@ numbered list (`SVGA3D_DEVCAP_MAX_LIGHTS`, `MAX_TEXTURES`,
 headers are public under GPL-2.0 or MIT. Taken: the shape of the command
 set and of the capability table. Not taken: its surfaces, which are
 host objects the guest copies into; ToadForce keeps contents in card
-memory (see "Memory").
+memory (see "Memory (BAR 1)").
 
 **wined3d.** Derives a compact key from the fixed-function state
 (`struct ffp_frag_settings`: per stage the colour and alpha operation,
@@ -295,7 +295,7 @@ All are 32 bits, little-endian.
 `STATUS`, `FRAME` and `SCANLINE` follow the emulated clock, so they read
 the same in two deterministic runs. There is no busy bit: the card has
 finished every command by the time the write to `RING_PUT` returns (see
-"Command ring").
+"Command ring (BAR 2)").
 
 Writing `LEVEL` selects the table `CAPS` shows and the commands the
 card accepts. A driver written for level 1 writes 1 and gets level 1's
@@ -716,10 +716,8 @@ with transform and lighting for every vertex before it, on threads the
 emulated machine also needs. The aim is a 640x480 game with one or two
 textures playable on it. A game at 1024x768 with four textures, or one
 that leans on hardware T&L for its vertex counts, doesn't reach full
-speed, and a user with such a game needs a host with OpenGL 3.2. On an
-eight-core host Giants' first mission at 800x600 drew a third of the
-frames in software that it drew with the OpenGL renderer, and Oni's
-training room at 640x480 somewhat over half.
+speed, and a user with such a game needs a host with OpenGL 3.2. The
+two renderers' frame rates in the target games are in #1071.
 
 It doesn't break rule 2 of the built-in Windows, which keeps a second
 3D pipeline out of the Direct3D layer: this renderer is the card's, as

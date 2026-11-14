@@ -12,18 +12,21 @@ and its tests ("Defined behaviour" in `docs/toadforce.md`). This document
 lists those commands and their arguments, and leaves the arithmetic
 there.
 
-## Status
+## What is frozen
 
 | Chapter | State |
 |---|---|
 | 1 to 8 | frozen: implemented in `src/toadforce` and `src/bus/toadforce.rs` |
 | 9, level 0 | frozen, with them |
-| 9, level 1 | provisional: the state, surface and draw commands are implemented in `src/toadforce/level1` and drawn by `src/toadforce/raster`, with the card's transform and lighting. A machine's card offers the level for the emulator's own drivers; it isn't frozen (#1083) and may change until it is |
-| 9, level 2 | not started |
+| 9, level 1 | provisional (#1083): implemented in `src/toadforce/level1` and drawn by `src/toadforce/raster`. A machine's card offers the level for the emulator's own drivers, and it may change until it is frozen |
+
+There is no level 2 (#1075).
 
 A frozen chapter changes only by adding what an earlier reader can't
 have relied on: a new register at a reserved offset, a new command, a
-new level. "Open points" at the end lists what is still to settle.
+new level. Where a rule may change or gain an addition, or hasn't been
+compared with the real system, its text names the issue that settles
+it.
 
 Each rule here has a test. Those of the card alone (registers, the
 ring, rejections, the display's timing, the commands) are beside the
@@ -348,6 +351,8 @@ wrong.
 ## 6. Display
 
 The card has two sources for the picture, and `MODE_ENABLE` picks one.
+It has no gamma ramp. One would be a table of registers beside
+`PALETTE`, added with the level whose games ask for it (#928).
 
 ### `MODE_ENABLE` = 0: the VGA
 
@@ -419,7 +424,10 @@ With the card's mode shown, `MODE_HEIGHT` and `MODE_REFRESH` below are
 the mode shown's values, and all times are the emulated clock's:
 
 - a frame has `MODE_HEIGHT` + `MODE_HEIGHT` / 16 + 1 lines (the
-  division rounded down),
+  division rounded down), a round figure near the monitor timings of
+  the time (480 lines in 525, 768 in 806). The blank of a mode's real
+  timing would be a register at a reserved offset whose reset value
+  gives this figure (#1086),
 - a line lasts 1 000 000 000 / (`MODE_REFRESH` x the lines of a frame)
   nanoseconds, rounded down, and a frame its lines' time: up to a
   nanosecond a line less than 1 / `MODE_REFRESH` seconds,
@@ -539,7 +547,11 @@ command is rejected with `BAD_RANGE`.
   `((2x + 1) * sw) / (2 * dw)` and row `((2y + 1) * sh) / (2 * dh)`,
   divisions rounded down: the source pixel under the destination
   pixel's centre. Overlapping memory is read as for a copy: the whole
-  source rectangle before any pixel is written.
+  source rectangle before any pixel is written. DirectDraw's code in
+  the built-in Windows takes the pixel under the top left corner, so
+  that driver sends the card no stretches. Which rule a Windows 98
+  DirectDraw HAL has to match, and whether level 1 gives `BLT` a flag
+  for the other, is #927.
 - With bit 0 of the flags, a source pixel whose value equals the low
   bits of the colour key leaves its destination pixel as it was. The
   comparison covers the bits the source's format defines: bits 24 to 31
@@ -563,12 +575,11 @@ made at once whatever the flag says.
 ### Level 1
 
 Opcodes 0010h to 00FFh. Level 1 has level 0's commands too. This
-section is provisional until the level is frozen, which waits for the
-card's transform and lighting and for the games the Direct3D driver
-proves the commands against. `LEVEL_MAX` reports the level before
-then, for the drivers that are part of the emulator and change with
-it. A driver in a guest that uses a provisional level may find it
-changed by a later version of the emulator.
+section is provisional until the level is frozen (#1083). `LEVEL_MAX`
+reports the level before then, for the drivers that are part of the
+emulator and change with it. A driver in a guest that uses a
+provisional level may find it changed by a later version of the
+emulator.
 
 A number in an argument is an IEEE single-precision value in its word.
 One that isn't finite is rejected with `BAD_VALUE`, and so is any
@@ -645,6 +656,10 @@ rectangle isn't checked against the render target.
 | 9 to 12 | specular colour |
 | 13 to 16 | emissive colour |
 | 17 | specular power |
+
+The card has one material, which lights the back of a triangle too
+under `TWO_SIDED_LIGHTING`. OpenGL's back material would be a flag word
+in this command (#1087).
 
 **`SET_LIGHT`, 0016h.** Length 29.
 
@@ -1068,7 +1083,11 @@ point sprite's coordinates.
    + 127) / 255. With `FOGTABLEMODE` 0 the factor is the specular
    colour's alpha. Otherwise it comes from the fragment's depth d, or
    its w with `FOG_BY_W` 1: (end - d) / (end - start) for mode 3,
-   e^(-density * d) for 1, e^(-(density * d)^2) for 2.
+   e^(-density * d) for 1, e^(-(density * d)^2) for 2. With
+   `FOGTABLEMODE` and `FOGVERTEXMODE` both 0, a lit vertex's specular
+   alpha is 255, so nothing is fogged; whether Direct3D passes a lit
+   vertex's own specular alpha on there isn't checked against a real
+   Windows (#946).
 5. The colour key and the alpha test. With `COLORKEYENABLE`, a
    fragment is dropped when a texture with a colour key has the key
    at the texel nearest to the fragment's coordinates. With
@@ -1285,31 +1304,3 @@ number.
   by the last.
 - `COLOR_SCALE` and `ALPHA_SCALE` multiply the stage's results by 1, 2
   or 4 before they are clamped.
-
-## Open points
-
-- **Blank lines.** `MODE_HEIGHT` / 16 + 1 is a round figure near what
-  monitor timings of the time used (480 lines in 525, 768 in 806). A
-  game that measures the retrace's length could ask for another. A
-  change would be a register for the blank's lines at a reserved
-  offset, whose reset value gives today's figure.
-- **Stretches.** `BLT` takes the source pixel under each destination
-  pixel's centre. DirectDraw's code in the built-in Windows takes the
-  one under its top left corner, so that driver leaves stretches to
-  that code and sends the card only what both do alike: fills, and
-  copies of equal size. Which of the two a Windows 98 driver's
-  DirectDraw HAL has to match, and whether level 1 gives `BLT` a flag
-  for the other, is settled with a comparison against DirectDraw on a
-  real Windows 98.
-- **One material.** OpenGL has a material for each side of a
-  triangle, and the card has one, which lights the back too. A second
-  material would be a flag word in `SET_MATERIAL`, added with the game
-  that shows the difference.
-- **Fog without a fog mode.** With `FOGENABLE` and neither a table
-  nor a vertex mode, the fog factor is the specular colour's alpha,
-  which a lit vertex has at 255. Whether Direct3D passes a lit
-  vertex's own specular alpha on there isn't checked against a real
-  Windows.
-- **Gamma.** The card has no gamma ramp, so DirectDraw's gamma control
-  does nothing on it. A ramp would be a table of registers beside
-  `PALETTE`, added with the level whose games ask for it.
