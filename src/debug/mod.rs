@@ -41,6 +41,7 @@ use crate::cpu::Cpu;
 use crate::video::{self, VideoMode};
 use keys::PcKey;
 pub use pm::{parse_addr, parse_hex};
+use pm::Spot;
 pub(crate) use input::keys_for_char;
 pub(crate) use status::stop_fields;
 pub use status::{folders_json, regs_json};
@@ -377,6 +378,11 @@ pub enum Cmd {
     Win32Trace(rust_dos::config::Win32Trace),
     /// DirectDraw's display mode and surfaces.
     Win32Ddraw,
+    /// The pages of the running address space that are in the built-in
+    /// Windows's page file, as at most `limit` ranges.
+    Win32PageFile {
+        limit: usize,
+    },
     /// Have the ToadForce record what it is given to draw into the new
     /// file `path`, until `flips` page flips or with 0 until told to
     /// end; with no `path`, end the recording.
@@ -612,21 +618,21 @@ impl PauseReason {
     }
 }
 
-/// The breakpoint that stopped the machine: its address, whether a user
-/// breakpoint is there (and was a one-shot one), and whether it was the
-/// target of a resume `until` or a step-over.
+/// The breakpoint that stopped the machine: the user breakpoint there, if
+/// one is (and whether it was a one-shot one), and the target of a resume
+/// `until` or a step-over, if it was one. The two can be kept apart, one
+/// by physical and one by linear address, at the same instruction.
 #[derive(Clone, Copy)]
 struct BreakpointHit {
-    phys: usize,
-    user: bool,
+    user: Option<Spot>,
     once: bool,
-    target: bool,
+    target: Option<Spot>,
 }
 
-/// Memory the debugger watches: `len` bytes at physical address `phys`,
-/// which held `value` when last looked at.
+/// Memory the debugger watches: `len` bytes at `spot`, which held `value`
+/// when last looked at.
 struct Watch {
-    phys: usize,
+    spot: Spot,
     len: u8,
     value: u32,
 }
@@ -642,8 +648,13 @@ struct RunWait {
 }
 
 impl Watch {
-    fn read(cpu: &Cpu, phys: usize, len: u8) -> u32 {
-        (0..len as usize).fold(0, |v, i| v | (cpu.bus.peek_8(phys + i) as u32) << (8 * i))
+    /// The value there now. A watchpoint on a page that moves is read
+    /// through its address space's tables whichever runs: a page that
+    /// goes out to the page file or comes back keeps its bytes, so
+    /// neither changes the value. One whose process has ended holds its
+    /// value until the hook drops it (`drop_ended_spots`).
+    fn read(&self, cpu: &Cpu) -> u32 {
+        self.spot.value(cpu, self.len).unwrap_or(self.value)
     }
 }
 
@@ -653,8 +664,8 @@ pub struct DebugHub {
 
     pub paused: bool,
     step_budget: Option<u64>,
-    breakpoints: HashSet<usize>,
-    temp_breakpoint: Option<usize>,
+    breakpoints: HashSet<Spot>,
+    temp_breakpoint: Option<Spot>,
     /// Skip the breakpoint check for the first instruction after resuming,
     /// so continuing from a breakpoint doesn't immediately re-trigger it.
     skip_bp_once: bool,
@@ -663,7 +674,7 @@ pub struct DebugHub {
     pause_by: Option<u64>,
     breakpoint_hit: Option<BreakpointHit>,
     /// The breakpoints that go once they stop the machine.
-    once: HashSet<usize>,
+    once: HashSet<Spot>,
     /// The control request whose operation is under way.
     current_op: Option<u64>,
     /// The request being carried out.
@@ -684,9 +695,15 @@ pub struct DebugHub {
     seen_exceptions: u64,
     seen_mode_switches: u64,
     watchpoints: Vec<Watch>,
-    /// The watchpoint that stopped the machine: its address and length,
+    /// The watchpoint that stopped the machine: where it is, its length,
     /// and the value before and after.
-    watch_hit: Option<(usize, u8, u32, u32)>,
+    watch_hit: Option<(Spot, u8, u32, u32)>,
+    /// Whether a breakpoint, a run-to target or a watchpoint is kept by
+    /// linear address (`Spot::Lin`), as the last batch began, and
+    /// `cpu.programs.processes_ended` as the hook last saw it: those of a
+    /// process that ends go with it.
+    lin_kept: bool,
+    seen_processes_ended: u64,
     /// Pause at the entry point of every program DOS starts, and after
     /// every program ends; `start_once` pauses at the next one's only.
     break_program_start: bool,
@@ -830,6 +847,8 @@ impl DebugHub {
             seen_mode_switches: 0,
             watchpoints: Vec::new(),
             watch_hit: None,
+            lin_kept: false,
+            seen_processes_ended: 0,
             break_program_start: false,
             break_program_exit: false,
             start_once: false,
