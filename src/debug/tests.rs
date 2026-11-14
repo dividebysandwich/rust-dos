@@ -1889,6 +1889,12 @@ fn ddraw_without_a_program_has_no_surfaces() {
         "mode_owner": 0,
         "exclusive": 0,
         "binds": {"all": 0, "kept": 0},
+        "screen_draws": {
+            "direct": 0,
+            "direct_vertices": 0,
+            "pipeline": 0,
+            "pipeline_vertices": 0,
+        },
         "surfaces": [],
     });
     assert_eq!(v, expected);

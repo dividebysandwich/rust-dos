@@ -27,6 +27,7 @@ pub fn info(cpu: &Cpu) -> DirectDrawInfo {
         mode_owner: s.display.mode_owner,
         exclusive: s.display.exclusive,
         binds: s.hal_toadforce.binds,
+        screen_draws: s.hal_toadforce.screen_draws,
         surfaces,
     }
 }

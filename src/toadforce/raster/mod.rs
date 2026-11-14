@@ -105,7 +105,7 @@ pub struct Renderer {
     /// The triangles queued for the host renderer. While there are
     /// any, `runs` is empty.
     host_runs: Vec<gpu::Run>,
-    host_vertices: Vec<ScreenVertex>,
+    host_vertices: Vec<gpu::Vertex>,
     /// The primitives queued for the host so far, counted as the
     /// software renderer's are: a triangle and a line one, a point
     /// its two triangles.
@@ -121,18 +121,11 @@ enum Queue<'a> {
     /// its two triangles and a line as the squares of its pixels
     /// (`Prim::squares`), so the host covers the pixels the card's
     /// rules give, and its own rules for lines and points are never
-    /// asked.
-    Host(&'a mut Vec<ScreenVertex>, &'a mut u64),
-}
-
-/// A vertex with each slot's coordinates where the host looks for
-/// them.
-fn slotted(v: &ScreenVertex, sets: &[u8]) -> ScreenVertex {
-    let mut out = *v;
-    for (slot, &set) in sets.iter().enumerate() {
-        out.tex[slot] = v.tex[set as usize];
-    }
-    out
+    /// asked. Each vertex is made the host's as it is queued
+    /// (`gpu::Vertex::of`), with its slots' coordinates and, in a
+    /// flat-shaded triangle, the colours of the vertex that gives
+    /// them: the queue is what the host's vertex buffer takes.
+    Host(&'a mut Vec<gpu::Vertex>, &'a mut u64),
 }
 
 /// A clockwise triangle of a point or of a line's square, turned
@@ -164,11 +157,9 @@ impl Queue<'_> {
                     if Prim::facing([&t[0], &t[1], &t[2]], 1).is_none() {
                         continue;
                     }
+                    // The corners have the point's colours.
                     let t = kept(t, shape);
-                    vertices.extend(t.iter().map(|c| slotted(c, sets)));
-                    if shape.flat {
-                        vertices.push(slotted(v, sets));
-                    }
+                    vertices.extend(t.iter().map(|c| gpu::Vertex::of(c, c, sets)));
                     **count += 1;
                 }
             }
@@ -191,13 +182,15 @@ impl Queue<'_> {
         match self {
             Queue::Software(prims) => prims.push(line),
             Queue::Host(vertices, count) => {
+                // The corners have their coordinates in the slots
+                // already, and the pixels' colours.
                 line.squares(shape, |c| {
                     for t in [[0, 1, 2], [1, 3, 2]] {
-                        vertices.extend(kept(t.map(|i| c[i]), shape));
-                        // The corners have the pixels' colours.
-                        if shape.flat {
-                            vertices.push(c[0]);
-                        }
+                        let t = kept(t.map(|i| c[i]), shape);
+                        vertices.extend(t.iter().map(|v| {
+                            let colours = if shape.flat { &c[0] } else { v };
+                            gpu::Vertex::of(v, colours, &[])
+                        }));
                     }
                 });
                 **count += 1;
@@ -281,10 +274,10 @@ fn polygon<V: std::borrow::Borrow<ScreenVertex>>(
             Queue::Host(vertices, count) => {
                 for i in 1..n - 1 {
                     if Prim::facing(fan(i), shape.cull).is_some() {
-                        vertices.extend(fan(i).map(|v| slotted(v, sets)));
-                        if shape.flat {
-                            vertices.push(slotted(provoking, sets));
-                        }
+                        vertices.extend(fan(i).map(|v| {
+                            let colours = if shape.flat { provoking } else { v };
+                            gpu::Vertex::of(v, colours, sets)
+                        }));
                         **count += 1;
                     }
                 }

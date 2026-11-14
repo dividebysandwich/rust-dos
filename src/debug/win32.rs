@@ -137,6 +137,12 @@ pub fn ddraw_json(cpu: &Cpu) -> Value {
         "mode_owner": d.mode_owner,
         "exclusive": d.exclusive,
         "binds": json!({"all": d.binds[0], "kept": d.binds[1]}),
+        "screen_draws": json!({
+            "direct": d.screen_draws[0],
+            "direct_vertices": d.screen_draws[1],
+            "pipeline": d.screen_draws[2],
+            "pipeline_vertices": d.screen_draws[3],
+        }),
         "surfaces": d.surfaces.iter().map(surface_json).collect::<Vec<_>>(),
     })
 }
