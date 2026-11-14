@@ -208,9 +208,9 @@ All are 32 bits, little-endian.
 | 018h | `RING_PUT` | R/W | byte offset after the last command written |
 | 01Ch | `RING_GET` | R | byte offset the card has consumed to |
 | 020h | `ERROR` | R/WC | code of the first rejection; any write clears it |
-| 024h | `ERROR_AT` | R | ring offset of that command, FFFFFFFFh for a register write |
+| 024h | `ERROR_AT` | R | ring offset of that command, FFFFFFFFh for a register write, FFFFFFFEh for a command the emulator's drivers handed over directly |
 | 028h | `MEMORY` | R | size of card memory in bytes |
-| 02Ch | `RESET` | W | writing 1 resets registers and command state |
+| 02Ch | `RESET` | W | a write with bit 0 set resets registers and command state |
 | 040h | `MODE_ENABLE` | R/W | 1: scan out the mode below instead of the VGA's |
 | 044h | `MODE_WIDTH` | R/W | |
 | 048h | `MODE_HEIGHT` | R/W | |
@@ -223,10 +223,10 @@ All are 32 bits, little-endian.
 | 100h- | `CAPS[n]` | R | capability table of `LEVEL` (see "Feature levels") |
 | 400h- | `PALETTE[n]` | R/W | the 256 colours of a P8 mode |
 
-`STATUS`, `FRAME` and `SCANLINE` follow the emulated clock, so they read
-the same in two deterministic runs. There is no busy bit: the card has
-finished every command by the time the write to `RING_PUT` returns (see
-"Command ring (BAR 2)").
+`STATUS`, `IRQ_STATUS`, `MODE_START`, `FRAME` and `SCANLINE` follow the
+emulated clock, so they read the same in two deterministic runs. There
+is no busy bit: the card has finished every command by the time the
+write to `RING_PUT` returns (see "Command ring (BAR 2)").
 
 Writing `LEVEL` selects the table `CAPS` shows and the commands the
 card accepts. A driver written for level 1 writes 1 and gets level 1's
@@ -278,11 +278,16 @@ acknowledgement sets `ERROR` and `ERROR_AT`, and the card goes on with
 the next command. A length that leaves no next command to find (0, or
 past what was submitted) drops the rest of the submission.
 
-The emulator exposes the decoder to the built-in Windows as a function
-(`submit(&[u32])`) that takes the same words. The built-in Direct3D
-calls it without going through the bus, which saves a register write
-through the bus for every word. A test feeds the same command stream
-through the ring and through `submit` and compares the results.
+The built-in Windows' drivers hand the card the same words without the
+ring, through `Bus::toadforce_submit`, which saves a write through the
+bus for every word. The commands wait in a queue and run together
+before the next write to the card's registers, ring or memory, when the
+queue is full, or `QUEUE_NS` (5 ms of emulated time) after the first of
+them ("The queue" in "The built-in Windows" lists the other points).
+The queue runs through the card's decoder (`ToadForce::submit`), and a
+command rejected there sets `ERROR_AT` to FFFFFFFEh. A test feeds the
+same command stream through the ring and through `submit` and compares
+the results.
 
 ### Commands of level 1
 
@@ -299,7 +304,7 @@ State:
 | `SET_VIEWPORT` | x, y, width, height, min z, max z |
 | `SET_SCISSOR` | enable, rectangle |
 | `SET_MATERIAL` | diffuse, ambient, specular, emissive, power |
-| `SET_LIGHT` | slot 0 to 7, type, colours, position, direction, range, attenuation, cone, spot model |
+| `SET_LIGHT` | slot 0 to 7, type, colours, position, direction, range, falloff, attenuation, cone, spot model |
 | `ENABLE_LIGHT` | slot, on or off |
 | `SET_CLIP_PLANE` | index 0 to 5, 4 floats |
 
@@ -322,8 +327,8 @@ Drawing:
 |---|---|
 | `DRAW` | primitive type, vertex format, count, vertices inline |
 | `DRAW_INDEXED` | the same with 16-bit indices inline |
-| `DRAW_BUFFER` | primitive type, vertex format, stride, vertex buffer offset, first, count |
-| `DRAW_BUFFER_INDEXED` | the same with an index buffer offset, or indices inline |
+| `DRAW_BUFFER` | primitive type, vertex format, stride, offset of the first vertex, count |
+| `DRAW_BUFFER_INDEXED` | the same with an index buffer offset or indices inline, and an index count |
 
 A palette is 256 words of card memory, which a `P8` texture names by
 their offset. It needs no command and no handle: the guest writes it as
@@ -456,8 +461,8 @@ card's 8 lights, and the two draw the same way. On a GeForce, Direct3D 7
 transformed and lit the plain HAL device's vertices on the processor and
 the card drew XYZRHW vertices. Here the card transforms and lights the
 untransformed vertices of either device, and the pipeline
-(`src/win32/ddraw/d3d/pipeline.rs`) those of the draws the card can't,
-with the same picture.
+(`src/win32/ddraw/d3d/pipeline.rs`) those of the draws the card can't.
+The two are separate code (see "Vertices").
 
 For OpenGL the level is shaped as version 1.3 with these extensions,
 each of which NVIDIA's table lists for both the GeForce 256/2 and the
@@ -489,10 +494,14 @@ section covers names that section.
   it did on a GeForce2, on a device made with software or mixed vertex
   processing. The adapter's capabilities and a device with hardware
   vertex processing alone report none. `CreatePixelShader` fails.
-- **Direct3D 8.** `CreateVolumeTexture` fails, the only multisample
-  type is none, and points are one pixel wide (`MaxPointSize` is 1.0).
-  Vertices blended by index and tweened ones are worked out on the
-  processor, on a device with software vertex processing.
+- **Points.** Direct3D draws points one pixel wide (Direct3D 8's
+  `MaxPointSize` is 1.0): the HAL leaves the card's point size states
+  at their reset values, so the point sizes, point sprites and distance
+  scaling of the level 1 table aren't reached through Direct3D.
+- **Direct3D 8.** `CreateVolumeTexture` fails, and the only
+  multisample type is none. Vertices blended by index and tweened ones
+  are worked out on the processor, on a device with software vertex
+  processing.
 - **W buffer.** The card has none. A program that turns one on
   (`D3DZB_USEW`) draws with the z-buffer.
 - **Gamma ramp.** The card has none. DirectDraw's gamma control and
@@ -617,41 +626,64 @@ and where the OpenGL renderer may differ.
 
 ### Vertices
 
-Transform, lighting, fog factors, texture coordinate generation and
-clipping are computed in IEEE single precision, in the order Direct3D's
-pipeline in the built-in Windows uses (`src/win32/ddraw/d3d/pipeline.rs`),
-which Wine's conformance tests check. Screen positions are rounded to
-1/256 of a pixel before rasterising.
+The card's own code defines transform, lighting, fog factors, texture
+coordinate generation and clipping: `raster::geometry`, `raster::light`
+and `raster::math`, on the processor for both renderers. It computes in
+IEEE single precision, with these exceptions, so that its results are
+the same on every host:
 
-Anything the guest can read back from vertex processing
-(`ProcessVertices`, clip status, extents) is always computed by this
-code on the processor, in both renderers.
+- cosines, e to a power and the powers of specular highlights and spot
+  falloffs come from its own series in the four exactly rounded
+  operations (`math.rs`), and not from the host's C library;
+- a triangle's winding (`geometry::clockwise`) and a depth's value in
+  the buffer (`level1::depth_value`) are worked out in double
+  precision;
+- a vertex blended between world matrices is blended in camera space,
+  each matrix's world and view product applied and the results
+  weighted.
+
+Of Direct3D's pipeline in the built-in Windows
+(`src/win32/ddraw/d3d/pipeline.rs`) it shares only the function that
+makes texture coordinates (`geometry::coordinates`). Screen positions
+are rounded to 1/256 of a pixel before rasterising.
+
+What a program reads back from vertex processing (`ProcessVertices`,
+clip status, extents) is Direct3D's pipeline's: the HAL leaves those
+draws to it, and the card never computes them.
 
 ### Rasterising
 
 Triangles cover the pixels whose centres are inside them, with
 Direct3D's top-left rule for centres on an edge. The pixel centre is at
-whole or at half coordinates as the card state says. Lines and points
-follow Direct3D's rules. Colours, fog and texture coordinates are
-interpolated with perspective correction; depth is interpolated linearly
-in screen space and stored as `round(z * (2^bits - 1))`.
+whole or at half coordinates as the card state says. A line has the
+pixel whose centre is nearest to it in each column it crosses (each row
+for a steep one), and a point is a square of its size covered as two
+triangles are: the specification's "Drawing" has the rules. Colours, fog
+and texture coordinates are interpolated with perspective correction;
+depth is interpolated linearly in screen space and stored as
+`round(z * (2^bits - 1))`.
 
 ### Texels
 
-A texture sample is four 8-bit channels. Formats with fewer bits are
-widened by bit replication. DXT blocks are decoded by one decoder with
-fixed integer formulas (for the two interpolated colours of a four-colour
-block, `(2*a + b + 1) / 3`), which both renderers use: the OpenGL
-renderer uploads the decoded texels instead of handing the blocks to
-the host's GPU, whose decoders round differently from one vendor to the
-next. Textures of this period fit many times over in a current GPU's
-memory when decoded.
+A texture sample is four 8-bit channels. Unsigned fields with fewer bits
+are widened by bit replication, and signed ones (the du and dv of
+`L6V5U5`) by a shift, so that they keep their share of the signed range.
+DXT blocks are decoded by one decoder with fixed integer formulas (for
+the two interpolated colours of a four-colour block,
+`(2*a + b + 1) / 3`), which both renderers use: the OpenGL renderer
+uploads the decoded texels instead of handing the blocks to the host's
+GPU, whose decoders round differently from one vendor to the next.
+Textures of this period fit many times over in a current GPU's memory
+when decoded.
 
 Bilinear filtering weights have 8 fraction bits. The mip level is chosen
-from the larger of the two screen-space derivatives. Anisotropic
-filtering in the software renderer is trilinear filtering at the level
-the smaller derivative gives; this is the one place where the reference
-is deliberately simpler than the GPU.
+from the larger of the two screen-space derivatives. With anisotropic
+filtering the software renderer takes the level from the smaller
+derivative instead, or from the larger divided by the anisotropy where
+that is more, and samples it with the stage's mip filter: trilinear
+filtering with a linear mip filter, one level with a nearest one, and
+the first level without mip maps. This is the one place where the
+reference is deliberately simpler than the GPU.
 
 ### The stage cascade
 
@@ -666,11 +698,12 @@ sign and extra range only inside an operation:
   `s = (a.r-128)*(b.r-128) + (a.g-128)*(b.g-128) + (a.b-128)*(b.b-128)`,
   is 0 when `s` is 0 or less and `min(255, (4 * s + 127) / 255)`
   otherwise, the division rounded down, replicated to all channels.
-- `BUMPENVMAP` reads signed (du, dv) from its texture, multiplies them
-  by the stage's 2x2 matrix in floating point, adds the result to the
-  next stage's texture coordinates, and passes `CURRENT` through.
-  `BUMPENVMAPLUMINANCE` also multiplies the next stage's sample by
-  `L * scale + offset`.
+- `BUMPENVMAP` reads signed (du, dv) from its texture as bytes
+  divided by 128, multiplies them by the stage's 2x2 matrix in floating
+  point, adds the result to the next stage's texture coordinates, and
+  passes `CURRENT` through. `BUMPENVMAPLUMINANCE` also multiplies the
+  next stage's sample by `L / 255 * scale + offset`, limited to 0 to
+  1.
 - Every stage result is clamped to 0 to 255.
 
 The generated shaders compute the cascade in GLSL integers with the same
@@ -780,10 +813,9 @@ directly, at the points where the software renderer would draw them
 (see "Between the card and the host renderer").
 
 - **Vertex work** is the card's, on the processor: the host gets screen
-  vertices after the card's transform, lighting, clipping and culling.
-  The card is shaped for a generated vertex shader to do it, with vertex
-  buffers in card memory as host buffers cached by offset and page write
-  counters.
+  vertices after the card's transform, lighting, clipping and culling,
+  and keeps no copies of the vertex buffers in card memory. The card is
+  shaped so that a generated vertex shader could do the work instead.
 - **Textures** are host textures decoded once and kept by their
   description (format, size, levels and the offset of each image), with
   the write counters of the pages their images cover. A write to any of
@@ -885,7 +917,8 @@ It declines these states, which the software renderer draws:
 
 - bump offsets on a cube map: they move the coordinates on the face the
   direction picked, and the host's cube sampler takes a direction;
-- with the host's own filter (an anisotropic sample), what that filter
+- with the host's own filter (a cube map, and an anisotropic sample
+  where the host has the filter: `shader::native`), what that filter
   does another way than the card: `MAXMIPLEVEL` above 0 with different
   filters for magnifying and minifying (the card changes filter by the
   pixel's size in texels of level 0, the host by the level it is
@@ -1150,14 +1183,17 @@ them again.
 
 A saved state has whatever is newer on the GPU read back into its copy
 of card memory ("Between the card and the host renderer"), and `impl
-State` for the card saves the registers, the state the commands set (a
-fixed-size block: render and stage states, matrices, lights, material,
-clip planes, the texture and palette tables), the mode shown, a
-pending flip, the position in the frame and the ring. Loading rebuilds
-the host caches from card memory, as the Voodoo's `Resync` does. The ring
-holds no commands still to run, since the card consumes them at each
-`RING_PUT`, but the guest reads back what it wrote there, so its
-contents are saved with the rest.
+State` for the card saves its PCI configuration, the registers, the
+state the commands set (a fixed-size block: render and stage states,
+matrices, lights, material, clip planes, the texture and palette
+tables), the mode shown, a pending flip, the position in the frame,
+what the VGA's side of the display was when the card's mode took the
+screen (`Legacy`), the ring, and the built-in drivers' queue with the
+time its first command came. Loading rebuilds the host caches from card
+memory, as the Voodoo's `Resync` does. The ring holds no commands still
+to run, since the card consumes them at each `RING_PUT`, but the guest
+reads back what it wrote there, so its contents are saved with the
+rest.
 
 With `--deterministic` no GPU link is attached, as for the Voodoo, and
 the software renderer draws, so a change to the OpenGL renderer isn't
@@ -1258,10 +1294,13 @@ are the emulator's.
   word for word.
   `/api/win32/ddraw` counts the draws of each way (`screen_draws`).
 - **Direct3D 8** (`d3d8/`) sits on the Direct3D 7 device, with
-  `D3DCAPS8` filled from the level's table, hardware and mixed vertex
-  processing offered for fixed-function draws, the HAL's texture
-  formats, cube textures over DirectDraw's cube maps, and a D24S8 depth
-  buffer. Vertex shaders run on the processor.
+  `D3DCAPS8` filled from the HAL's device description
+  (`hal::description`, whose sizes and counts are the level's
+  constants in `toadforce::caps`) and bits of its own (`d3d8/caps.rs`),
+  hardware and mixed vertex processing offered for fixed-function
+  draws, the HAL's texture formats, cube textures over DirectDraw's
+  cube maps, and a D24S8 depth buffer. Vertex shaders run on the
+  processor.
 - **OpenGL** (`opengl32/`) is 1.1 on the Direct3D 7 device, and so draws
   on this card through the Direct3D HAL, with the extensions it has on a
   Voodoo3. It lights and transforms by itself and hands the device lit
@@ -1299,46 +1338,34 @@ are the emulator's.
 
 ### A booted Windows 98
 
-A booted Windows needs a driver, which the project would write and ship.
-None exists: a booted Windows 98 sees a VESA card. SoftGPU's
-drivers show that a driver is feasible and give MIT-licensed references
-for each part:
+No driver for the card exists for a booted Windows 95 or 98, which
+sees a VESA card without 3D. The card is shaped so that one can be a
+thin translation of Direct3D's driver interface. SoftGPU's drivers,
+under the MIT licence, do each part of such a driver for other virtual
+hardware:
 
 - **The display minidriver** (16-bit, Open Watcom, on Microsoft's DIB
-  engine), which sets modes through the mode registers. VMDisp9x and
-  boxv9x, which it is based on, do this for Bochs' VBE registers.
-- **The DirectDraw and Direct3D HAL** (a 32-bit DLL named through
-  `DCICOMMAND`). The command set is close to Direct3D's own driver
-  command stream, `DrawPrimitives2`: `D3DDP2OP_RENDERSTATE`,
+  engine) sets modes through the adapter's mode registers. VMDisp9x
+  and boxv9x, on which SoftGPU's is based, do this for Bochs' VBE
+  registers; the card's are its `MODE` registers.
+- **The DirectDraw and Direct3D HAL** is a 32-bit DLL named through
+  `DCICOMMAND`. The card's command set is close to Direct3D's own
+  driver command stream, `DrawPrimitives2`: `D3DDP2OP_RENDERSTATE`,
   `TEXTURESTAGESTATE`, `SETTRANSFORM`, `SETMATERIAL`, `SETLIGHT`,
   `CREATELIGHT`, `SETCLIPPLANE`, `SETRENDERTARGET`, `CLEAR`,
   `VIEWPORTINFO`, `ZRANGE` and the draw tokens each map to one card
-  command. The driver reports `D3DDEVCAPS_HWTRANSFORMANDLIGHT` and
-  `D3DDEVCAPS_DRAWPRIMITIVES2EX`, the texture formats as
-  `DDSURFACEDESC` entries (FourCC ones for DXT), and `D3DCAPS8` through
+  command. A HAL reports `D3DDEVCAPS_HWTRANSFORMANDLIGHT` and
+  `D3DDEVCAPS_DRAWPRIMITIVES2EX`, the texture formats as `DDSURFACEDESC`
+  entries (FourCC ones for DXT), and `D3DCAPS8` through
   `GetDriverInfo2`. Microsoft's Direct3D runtime does the API's
   validation, state blocks and managed textures.
-- **OpenGL** comes after the two: OpenGL games run on the built-in
-  Windows. There are three ways to add it, and the choice isn't made:
-  - A thin installable client driver, found through the
-    `OPENGL_GETINFO` escape, that writes each OpenGL call into the ring,
-    with the client arrays a draw uses copied in at the draw. The card
-    runs the calls through the Rust front end of the built-in OPENGL32.
-    Both kinds of Windows then get one OpenGL implementation with one
-    behaviour, for the least code. The card gains a second family of
-    commands, defined by OpenGL 1.3 itself, and the OpenGL contexts
-    become card state that save states hold. This is the preferred way.
-  - An old Mesa (up to about version 7, whose drivers still received
-    fixed-function state and could use hardware T&L) with a driver for
-    the card. Current Mesa hands its drivers fixed function already
-    turned into shaders, which level 1 can't run. The card keeps one
-    command family, at the price of a second OpenGL implementation
-    whose behaviour can differ from the built-in one, in an old code
-    base.
-  - A complete OpenGL 1.3 front end of our own in guest code: the same
-    second implementation, and the most code.
+- **OpenGL** on a booted Windows takes an installable client driver.
+  The card has no command for OpenGL calls, and level 1 runs no
+  shaders, which current Mesa's drivers are handed fixed function
+  turned into. The built-in OPENGL32's front end takes its calls
+  through one interface, apart from its WGL and Win32 parts.
 
-The driver would be handed to the guest on a disk the emulator
+A guest driver can be handed to the guest on a disk the emulator
 generates, as `src/shared_disk.rs` does for shared folders.
 
 ## Configuration

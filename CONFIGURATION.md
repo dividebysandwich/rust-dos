@@ -3212,22 +3212,22 @@ call to `<dir>/trace.txt`.
 `machine=svga_toadforce` makes the display adapter a ToadForce, a card
 Rust-DOS defines itself: no such hardware existed. To DOS programs it is
 the `svga` adapter, with the same VESA modes. Windows programs that
-Rust-DOS runs without Windows get its 64 MB of video memory for the
-desktop and for DirectDraw's surfaces, and DirectDraw modes up to
-1600x1200 at 8, 16 and 32 bits a pixel; DirectDraw's colour fills and
-its copies between surfaces in video memory are the card's own
-commands. Direct3D up to version 8 draws on it, in 16- and 32-bit
-modes, with textures up to 2048 pixels a side in 16- and 32-bit,
-compressed (DXT1 to DXT5) and bump-map formats, four textures at once,
-cube maps, and a 24-bit depth buffer with stencil. The card transforms
-and lights vertices itself: Direct3D 7 lists its T&L HAL device, and
-Direct3D 8 offers hardware vertex processing. Games that need those,
-which a Voodoo3 lacks, run on this card
-([docs/compatibility.md](docs/compatibility.md) names them). OpenGL
-1.1 draws on it too, in a window or full screen, in the desktop's 16 or
-32 bits of color with a 16-bit depth buffer. Your graphics card draws
-its 3D through OpenGL where the window has OpenGL 3.2, and the
-processor draws it elsewhere.
+Rust-DOS runs without Windows get its video memory (`toadforce_memory`,
+64 MB by default) for the desktop and for DirectDraw's surfaces, and
+DirectDraw modes up to 1600x1200 at 8, 16 and 32 bits a pixel;
+DirectDraw's colour fills and its copies between surfaces in video
+memory are the card's own commands. Direct3D up to version 8 draws on
+it, in 16- and 32-bit modes, with textures up to 2048 pixels a side in
+16- and 32-bit, compressed (DXT1 to DXT5) and bump-map formats, four
+textures at once, cube maps, and a 24-bit depth buffer with stencil. The
+card transforms and lights vertices itself: Direct3D 7 lists its T&L HAL
+device, and Direct3D 8 offers hardware vertex processing. Games that
+need those, which a Voodoo3 lacks, run on this card
+([docs/compatibility.md](docs/compatibility.md) names them). OpenGL 1.1
+draws on it too, in a window or full screen, in the desktop's 16 or 32
+bits of color with a 16-bit depth buffer. Your graphics card draws its
+3D through OpenGL where the window has OpenGL 3.2, and the processor
+draws it elsewhere.
 
 What the card doesn't do, and what to choose instead:
 
