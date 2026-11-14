@@ -98,6 +98,9 @@ pub struct Renderer {
     /// Kept from draw to draw for their room.
     vertices: Vec<ScreenVertex>,
     lit: Vec<geometry::Vertex>,
+    /// The vertices of `lit` on the screen with the colours of a
+    /// triangle's back, where both sides are lit.
+    backs: Vec<ScreenVertex>,
     /// For each vertex of a draw the card transforms, its place in
     /// `lit`, or `u32::MAX` while no index has named it.
     places: Vec<u32>,
@@ -426,6 +429,22 @@ impl Renderer {
                     }
                     *i = *place;
                 }
+                // Each vertex goes to the screen once, however many
+                // primitives have it. One outside a plane has no place
+                // there: what is left of its primitives after the cut
+                // does (`assemble_lit`).
+                let on_screen = |v: &geometry::Vertex, turned: bool| match (v.out, turned) {
+                    (0, false) => setup.project(v),
+                    (0, true) => setup.project(&v.turned()),
+                    _ => ScreenVertex::default(),
+                };
+                self.vertices
+                    .extend(self.lit.iter().map(|v| on_screen(v, false)));
+                self.backs.clear();
+                if setup.two_sided() {
+                    self.backs
+                        .extend(self.lit.iter().map(|v| on_screen(v, true)));
+                }
             }
         }
 
@@ -565,6 +584,8 @@ impl Renderer {
     ) {
         let Renderer {
             lit,
+            vertices,
+            backs,
             order,
             prims,
             host_vertices,
@@ -584,7 +605,7 @@ impl Renderer {
         pieces(primitive, order.len(), |piece| match piece {
             Piece::Point(a) => {
                 if v(a).out == 0 {
-                    queue.point(&setup.project(v(a)), state, sets);
+                    queue.point(&vertices[order[a] as usize], state, sets);
                 }
             }
             Piece::Line(a, b) => {
@@ -599,24 +620,26 @@ impl Renderer {
                     queue.line(&a, &b, &provoking, state, sets);
                 }
             }
-            Piece::Triangle(t, ends) => {
-                let t = t.map(v);
+            Piece::Triangle(places, ends) => {
+                let t = places.map(v);
                 let out = t[0].out | t[1].out | t[2].out;
                 if t[0].out & t[1].out & t[2].out != 0 {
                     return;
                 }
                 // The side that shows gives the colours.
                 let back = setup.back(t);
-                let side = |v: &geometry::Vertex| if back { v.turned() } else { *v };
-                let provoking =
-                    setup.project(&side(t[if shape.flat_last { ends.1 } else { ends.0 }]));
-                // Most triangles cross no plane, and go to the screen
-                // without the room a cut one needs.
+                let first = places[if shape.flat_last { ends.1 } else { ends.0 }];
+                // Most triangles cross no plane, and are their
+                // vertices as they went to the screen.
                 if out == 0 {
-                    let corners = t.map(|v| setup.project(&side(v)));
-                    polygon(&mut queue, &corners, (7, 7), &provoking, state, sets);
+                    let shown = if back { &*backs } else { &*vertices };
+                    let on_screen = |i: usize| &shown[order[i] as usize];
+                    let corners = places.map(on_screen);
+                    polygon(&mut queue, &corners, (7, 7), on_screen(first), state, sets);
                     return;
                 }
+                let side = |v: &geometry::Vertex| if back { v.turned() } else { *v };
+                let provoking = setup.project(&side(v(first)));
                 let mut cut = clip::Polygon::triangle(t.map(side));
                 cut.cut(out);
                 let mut corners = [ScreenVertex::default(); clip::CORNERS];

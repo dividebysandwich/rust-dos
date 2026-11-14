@@ -515,15 +515,17 @@ fn draw_on_card(
     true
 }
 
-/// Draw OpenGL's primitives `lists` of `vertices` with the device
-/// `id` on a card that transforms and lights vertices itself, with
-/// OpenGL's lights and materials `gl` (`hal::draw_gl`). False, with
-/// nothing drawn, when the device's card doesn't or can't.
+/// Draw OpenGL's primitives `lists` of the `count` vertices `packed`,
+/// which are in the card's layout for `layout`, with the device `id`
+/// on a card that transforms and lights vertices itself, with OpenGL's
+/// lights and materials `gl` (`hal::draw_gl`). False, with nothing
+/// drawn, when the device's card doesn't or can't.
 pub fn draw_gl(
     cpu: &mut Cpu,
     id: u32,
     layout: &Layout,
-    vertices: &[Vertex],
+    packed: &[u32],
+    count: u32,
     gl: &super::hal::Gl,
     lists: &[(u32, Vec<u32>)],
 ) -> bool {
@@ -537,7 +539,7 @@ pub fn draw_gl(
     let drawn = {
         let _profile = crate::profile::zone(crate::profile::Zone::D3dDraw);
         super::device::lend(cpu, id, |cpu, d| {
-            super::hal::draw_gl(cpu, d, &setup, gl, layout, vertices, lists)
+            super::hal::draw_gl(cpu, d, &setup, gl, layout, packed, lists)
         })
     };
     if drawn != Some(true) {
@@ -555,7 +557,7 @@ pub fn draw_gl(
         };
         d.stats[stat] = d.stats[stat].wrapping_add(primitives);
     }
-    d.stats[4] = d.stats[4].wrapping_add(vertices.len() as u32);
+    d.stats[4] = d.stats[4].wrapping_add(count);
     // The target's pixels changed, for a texture made of it.
     let target = d.target;
     super::super::surface::changed(cpu, target);

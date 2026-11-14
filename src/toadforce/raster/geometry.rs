@@ -410,6 +410,11 @@ impl Setup {
         }
     }
 
+    /// Whether a triangle's back has colours of its own.
+    pub fn two_sided(&self) -> bool {
+        self.two_sided != 0
+    }
+
     /// Whether the triangle of `v` shows its back, which has colours
     /// of its own.
     pub fn back(&self, v: [&Vertex; 3]) -> bool {

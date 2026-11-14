@@ -777,8 +777,78 @@ pub struct Waiting {
     /// OpenGL's part of the card's state, when the card transforms and
     /// lights them (`tnl::state_of`): draws join only with the same.
     card: Option<hal::Gl>,
+    /// The vertices the processor transforms.
     vertices: Vec<Vertex>,
+    /// The vertices the card transforms, in the words the card takes
+    /// them in (`pack`): the draw's command is made of them as they
+    /// are.
+    packed: Vec<u32>,
     prims: Vec<Prim>,
+}
+
+impl Waiting {
+    /// Whether the card lights the vertices, and so takes their
+    /// normals.
+    fn lit(&self) -> bool {
+        self.card.as_ref().is_some_and(|gl| gl.lighting.is_some())
+    }
+
+    /// How many vertices wait.
+    fn count(&self) -> usize {
+        match &self.card {
+            Some(_) => self.packed.len() / packed_words(self.lit()),
+            None => self.vertices.len(),
+        }
+    }
+}
+
+/// The words of a vertex the card transforms: its position, its
+/// normal if the card lights it (`lit`), its color and two numbers
+/// for each unit, which is the card's layout of `layout` and of
+/// `lit_layout` (`hal::toadforce::card_layout`).
+const fn packed_words(lit: bool) -> usize {
+    if lit { 7 + 2 * UNITS } else { 4 + 2 * UNITS }
+}
+
+/// Add the vertex `v` to `out` as the card takes it, with the color
+/// `color` and its texture coordinates through `matrices`: the words
+/// `hal::toadforce::card_vertex` makes of `pipeline_vertex`'s.
+fn pack(
+    out: &mut Vec<u32>,
+    v: &ImmVertex,
+    color: u32,
+    matrices: &[Option<Matrix>; UNITS],
+    lit: bool,
+) {
+    let [x, y, z, _] = homogeneous(v.position).map(f32::to_bits);
+    let tex: [[u32; 4]; UNITS] =
+        std::array::from_fn(|u| texture_coords(&matrices[u], v.tex[u]).map(f32::to_bits));
+    const { assert!(UNITS == 2) };
+    let [s, t] = [tex[0], tex[1]];
+    if lit {
+        let [nx, ny, nz] = v.normal.map(f32::to_bits);
+        out.extend_from_slice(&[x, y, z, nx, ny, nz, color, s[0], s[1], t[0], t[1]]);
+    } else {
+        out.extend_from_slice(&[x, y, z, color, s[0], s[1], t[0], t[1]]);
+    }
+}
+
+/// A packed vertex as a saved state has it.
+fn unpacked(words: &[u32], lit: bool) -> SavedVertex {
+    let number = |i: usize| f32::from_bits(words[i]);
+    let rest = if lit { 6 } else { 3 };
+    SavedVertex {
+        position: [number(0), number(1), number(2), 1.0],
+        normal: if lit {
+            [number(3), number(4), number(5)]
+        } else {
+            [0.0; 3]
+        },
+        color: words[rest],
+        tex: std::array::from_fn(|u| {
+            [number(rest + 1 + 2 * u), number(rest + 2 + 2 * u), 0.0, 1.0]
+        }),
+    }
 }
 
 /// A waiting vertex in a saved state.
@@ -810,16 +880,24 @@ impl crate::savestate::State for Waiting {
         self.context.save(w);
         self.applied.save(w);
         self.card.save(w);
-        let vertices: Vec<SavedVertex> = self
-            .vertices
-            .iter()
-            .map(|v| SavedVertex {
-                position: v.position,
-                normal: v.normal,
-                color: v.diffuse.unwrap_or(0),
-                tex: std::array::from_fn(|u| v.tex[u]),
-            })
-            .collect();
+        let lit = self.lit();
+        let vertices: Vec<SavedVertex> = match &self.card {
+            Some(_) => self
+                .packed
+                .chunks_exact(packed_words(lit))
+                .map(|words| unpacked(words, lit))
+                .collect(),
+            None => self
+                .vertices
+                .iter()
+                .map(|v| SavedVertex {
+                    position: v.position,
+                    normal: v.normal,
+                    color: v.diffuse.unwrap_or(0),
+                    tex: std::array::from_fn(|u| v.tex[u]),
+                })
+                .collect(),
+        };
         vertices.save(w);
         let prims: Vec<[u32; 6]> = self
             .prims
@@ -839,7 +917,23 @@ impl crate::savestate::State for Waiting {
         self.card.load(r)?;
         let mut vertices: Vec<SavedVertex> = Vec::new();
         vertices.load(r)?;
-        self.vertices = vertices.iter().map(waiting_vertex).collect();
+        self.vertices.clear();
+        self.packed.clear();
+        match &self.card {
+            Some(_) => {
+                let lit = self.lit();
+                for saved in &vertices {
+                    let v = ImmVertex {
+                        position: saved.position,
+                        normal: saved.normal,
+                        tex: saved.tex,
+                        ..ImmVertex::default()
+                    };
+                    pack(&mut self.packed, &v, saved.color, &[None; UNITS], lit);
+                }
+            }
+            None => self.vertices = vertices.iter().map(waiting_vertex).collect(),
+        }
         let mut prims: Vec<[u32; 6]> = Vec::new();
         prims.load(r)?;
         self.prims = prims
@@ -859,15 +953,17 @@ impl crate::savestate::State for Waiting {
 /// the same but for the stamp: for the test of their saved state.
 #[cfg(test)]
 pub fn waiting_for_tests() -> Waiting {
+    // The card lights them, so they have their normals.
     let vertex = |x: f32| {
-        let mut v = Vertex {
+        let mut v = ImmVertex {
             position: [x, 2.0, 3.0, 1.0],
             normal: [0.0, x, 1.0],
-            diffuse: Some(0x8040_2010),
-            ..Vertex::default()
+            ..ImmVertex::default()
         };
         v.tex[1] = [0.25, 0.5, 0.0, 1.0];
-        v
+        let mut words = Vec::new();
+        pack(&mut words, &v, 0x8040_2010, &[None; UNITS], true);
+        words
     };
     Waiting {
         context: 0,
@@ -894,7 +990,8 @@ pub fn waiting_for_tests() -> Waiting {
                 ..Default::default()
             }),
         }),
-        vertices: (0..4).map(|i| vertex(i as f32)).collect(),
+        vertices: Vec::new(),
+        packed: (0..4).flat_map(|i| vertex(i as f32)).collect(),
         prims: vec![
             Prim::Point(3),
             Prim::Line(0, 1, 1),
@@ -909,6 +1006,7 @@ pub fn same_waiting(a: &Waiting, b: &Waiting) -> bool {
         && a.applied.same(&b.applied)
         && a.card == b.card
         && a.vertices == b.vertices
+        && a.packed == b.packed
         && a.prims == b.prims
 }
 
@@ -979,7 +1077,8 @@ pub fn flush_waiting(cpu: &mut Cpu) {
     } else {
         layout()
     };
-    if !d3d_draw::draw_gl(cpu, inner, &layout, &w.vertices, gl, &lists) {
+    let count = w.count() as u32;
+    if !d3d_draw::draw_gl(cpu, inner, &layout, &w.packed, count, gl, &lists) {
         // `tnl::checks` gave the card a draw it doesn't take, or the
         // target isn't in card memory, where Direct3D's pipeline draws
         // nothing either (`d3d::draw::rasterize`). The count shows it.
@@ -1060,17 +1159,9 @@ fn draw(
     let stamp = c.stamp();
     let lit_stamp = super::Stamped::stamp(&c.lighting);
     let (vertices, on_card, count) = match path {
-        Ok(()) => {
-            let matrices = texture_matrices(c);
-            // A vertex lit before its draw has that color, with the
-            // lights off since.
-            let color = |v: &ImmVertex| v.lit.map_or(argb(v.color), |lit| lit[0]);
-            let vertices: Vec<Vertex> = raw
-                .iter()
-                .map(|v| pipeline_vertex(v, color(v), &matrices))
-                .collect();
-            (vertices, true, tnl::COUNT_CARD)
-        }
+        // The card's vertices go to those that wait as they are
+        // packed, below.
+        Ok(()) => (Vec::new(), true, tnl::COUNT_CARD),
         Err(why) => {
             let (vertices, backs) = shaded(c, raw, used);
             // Points and lines take the front colors.
@@ -1090,17 +1181,32 @@ fn draw(
     let joins = st.waiting.as_ref().is_some_and(|w| {
         w.context == index as u32
             && w.card.is_some() == on_card
-            && w.vertices.len() + vertices.len() <= WAITING_VERTICES
+            && w.count() + raw.len() <= WAITING_VERTICES
             && ((w.stamp == stamp && w.lit_stamp == lit_stamp)
                 || (applied_of(c).is_some_and(|a| a.same(&w.applied))
                     && (!on_card || w.card.as_ref() == card_of(c))))
     });
     let n = raw.len() as u64;
+    // The card's vertices as it takes them, added to `packed`.
+    let matrices = texture_matrices(c);
+    let lit = on_card && card_of(c).is_some_and(|gl| gl.lighting.is_some());
+    let pack_all = |packed: &mut Vec<u32>| {
+        packed.reserve(raw.len() * packed_words(lit));
+        for v in raw {
+            // A vertex lit before its draw has that color, with the
+            // lights off since.
+            let color = v.lit.map_or(argb(v.color), |lit| lit[0]);
+            pack(packed, v, color, &matrices, lit);
+        }
+    };
     if let Some(w) = st.waiting.as_mut().filter(|_| joins) {
-        let first = w.vertices.len() as u32;
+        let first = w.count() as u32;
         w.stamp = stamp;
         w.lit_stamp = lit_stamp;
-        w.vertices.extend_from_slice(&vertices);
+        match on_card {
+            true => pack_all(&mut w.packed),
+            false => w.vertices.extend_from_slice(&vertices),
+        }
         w.prims.extend(prims.iter().map(|p| match *p {
             Prim::Point(a) => Prim::Point(a + first),
             Prim::Line(a, b, flat) => Prim::Line(a + first, b + first, flat + first),
@@ -1113,6 +1219,10 @@ fn draw(
             return;
         };
         let card = if on_card { card_of(c).cloned() } else { None };
+        let mut packed = Vec::new();
+        if on_card {
+            pack_all(&mut packed);
+        }
         let waiting = Waiting {
             context: index as u32,
             stamp,
@@ -1120,6 +1230,7 @@ fn draw(
             applied,
             card,
             vertices,
+            packed,
             prims,
         };
         flush_waiting(cpu);
@@ -2022,6 +2133,42 @@ mod tests {
         assert_eq!(showing(GL_POLYGON), [false, false]);
         // As separate triangles each shows its own side.
         assert_eq!(showing(GL_TRIANGLE_FAN), [false, true]);
+    }
+
+    /// A packed vertex is the words the card's layout has for the
+    /// vertex Direct3D's pipeline takes, with and without its normal,
+    /// and comes back from a saved state as it went.
+    #[test]
+    fn a_packed_vertex_is_the_cards_layout_of_the_pipelines() {
+        let v = ImmVertex {
+            position: [2.0, -4.0, 6.0, 2.0],
+            normal: [0.0, 0.6, 0.8],
+            tex: [[0.25, 0.5, 0.0, 1.0], [3.0, 1.0, 0.0, 2.0]],
+            ..ImmVertex::default()
+        };
+        let mut turned = IDENTITY;
+        turned[12] = 0.5;
+        let matrices = [Some(turned), None];
+        for (lit, layout) in [(false, layout()), (true, lit_layout())] {
+            let mut packed = Vec::new();
+            pack(&mut packed, &v, 0x8040_2010, &matrices, lit);
+            let (_, size) = hal::toadforce::card_layout(&layout, 0);
+            assert_eq!(packed_words(lit), size);
+            let mut words = Vec::new();
+            let vertex = pipeline_vertex(&v, 0x8040_2010, &matrices);
+            hal::toadforce::card_vertex(&mut words, &layout, 0, &vertex);
+            assert_eq!(packed, words, "lit {lit}");
+            let saved = unpacked(&packed, lit);
+            let again = ImmVertex {
+                position: saved.position,
+                normal: saved.normal,
+                tex: saved.tex,
+                ..ImmVertex::default()
+            };
+            let mut loaded = Vec::new();
+            pack(&mut loaded, &again, saved.color, &[None; UNITS], lit);
+            assert_eq!(loaded, packed, "lit {lit}");
+        }
     }
 
     #[test]

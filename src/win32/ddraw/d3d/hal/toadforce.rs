@@ -2014,7 +2014,7 @@ fn can_transform(d: &Device, setup: &Setup, layout: &Layout) -> bool {
 
 /// The card's layout for vertices of `layout` with `weights` blending
 /// weights after the position (0 to 3), and the words of one.
-fn card_layout(layout: &Layout, weights: usize) -> (u32, usize) {
+pub fn card_layout(layout: &Layout, weights: usize) -> (u32, usize) {
     // The position alone, or with one to three weights.
     let mut fvf = [0x002, 0x006, 0x008, 0x00A][weights];
     let mut words = 3 + weights;
@@ -2039,7 +2039,7 @@ fn card_layout(layout: &Layout, weights: usize) -> (u32, usize) {
 
 /// The words of the vertex `v` in the card's layout for `layout`
 /// with `weights` blending weights.
-fn card_vertex(words: &mut Vec<u32>, layout: &Layout, weights: usize, v: &Vertex) {
+pub fn card_vertex(words: &mut Vec<u32>, layout: &Layout, weights: usize, v: &Vertex) {
     words.extend(v.position[..3].iter().map(|n| n.to_bits()));
     words.extend(v.weights[..weights].iter().map(|n| n.to_bits()));
     if layout.normal.is_some() {
@@ -2107,8 +2107,22 @@ fn geometry_words(
     order: Option<&[u32]>,
     limit: usize,
 ) -> Vec<u32> {
-    let count = vertices.len();
     let (fvf, size) = card_layout(layout, weights);
+    let put = |words: &mut Vec<u32>, i: usize| card_vertex(words, layout, weights, &vertices[i]);
+    words_of(fvf, size, vertices.len(), &put, kind, order, limit)
+}
+
+/// `geometry_words` for `count` vertices of `size` words in the card's
+/// layout `fvf`, of which `put` adds the one at a place.
+fn words_of(
+    fvf: u32,
+    size: usize,
+    count: usize,
+    put: &dyn Fn(&mut Vec<u32>, usize),
+    kind: u32,
+    order: Option<&[u32]>,
+    limit: usize,
+) -> Vec<u32> {
     let mut words = Vec::new();
     let mut all = Vec::new();
     // The draw in one command, where it fits: all the vertices of a
@@ -2119,8 +2133,8 @@ fn geometry_words(
         None => {
             let fits = count <= 0x1_0000 && 5 + count * size <= limit;
             if fits {
-                for v in vertices {
-                    card_vertex(&mut all, layout, weights, v);
+                for i in 0..count {
+                    put(&mut all, i);
                 }
                 encode::draw(&mut words, kind, fvf, count as u32, &all);
             }
@@ -2138,7 +2152,7 @@ fn geometry_words(
                     // Past what one command holds, the rest isn't
                     // needed.
                     if named as usize * size <= limit {
-                        card_vertex(&mut all, layout, weights, &vertices[i as usize]);
+                        put(&mut all, i as usize);
                     }
                 }
                 indexed.push(*place as u16);
@@ -2178,7 +2192,7 @@ fn geometry_words(
                 let at = place(i);
                 let next = places.len() as u16;
                 let index = *places.entry(at).or_insert_with(|| {
-                    card_vertex(&mut all, layout, weights, &vertices[at]);
+                    put(&mut all, at);
                     next
                 });
                 indexed.push(index);
@@ -2250,9 +2264,11 @@ pub fn can_light(gl: &Gl) -> bool {
     })
 }
 
-/// Draw OpenGL's primitives of `vertices`, which aren't in screen
-/// space, with the card transforming and lighting them by the device
-/// `d`'s matrices and OpenGL's lights and materials `gl`. `lists` are
+/// Draw OpenGL's primitives of the vertices `packed`, which aren't in
+/// screen space and are in the card's layout for `layout` already
+/// (`card_layout`, `card_vertex`), with the card transforming and
+/// lighting them by the device `d`'s matrices and OpenGL's lights and
+/// materials `gl`. `lists` are
 /// the primitives in their order, as lists of points (1), lines (2)
 /// or triangles (4) with the places of their vertices. False, with
 /// nothing drawn, when the card can't take the state: OpenGL's layer
@@ -2264,10 +2280,11 @@ pub fn draw_gl(
     setup: &Setup,
     gl: &Gl,
     layout: &Layout,
-    vertices: &[Vertex],
+    packed: &[u32],
     lists: &[(u32, Vec<u32>)],
 ) -> bool {
-    let count = vertices.len();
+    let (fvf, size) = card_layout(layout, 0);
+    let count = packed.len() / size;
     let inside = |order: &[u32]| order.iter().all(|&i| (i as usize) < count);
     if setup.lighting.is_some()
         || !can_transform(d, setup, layout)
@@ -2282,21 +2299,33 @@ pub fn draw_gl(
     if card.clip[0] == card.clip[2] || card.clip[1] == card.clip[3] {
         return true;
     }
+    let kind_of = |kind: u32| match kind {
+        1 => pipeline::POINTLIST,
+        2 => pipeline::LINELIST,
+        _ => pipeline::TRIANGLELIST,
+    };
     let mut words = Vec::new();
-    for (kind, order) in lists {
-        let kind = match kind {
-            1 => pipeline::POINTLIST,
-            2 => pipeline::LINELIST,
-            _ => pipeline::TRIANGLELIST,
-        };
-        words.extend(geometry_words(
-            layout,
-            0,
-            vertices,
-            kind,
-            Some(order.as_slice()),
-            COMMAND_WORDS,
-        ));
+    match lists {
+        // One list that fits a command with all the vertices, as most
+        // do, is the words as they are and the places: the card
+        // transforms a vertex only if a place names it.
+        [(kind, order)]
+            if count <= 0x1_0000
+                && 5 + packed.len() + order.len().div_ceil(2) <= COMMAND_WORDS =>
+        {
+            let indexed: Vec<u16> = order.iter().map(|&i| i as u16).collect();
+            words.reserve(5 + packed.len() + indexed.len().div_ceil(2));
+            encode::draw_indexed(&mut words, kind_of(*kind), fvf, count as u32, packed, &indexed);
+        }
+        _ => {
+            let put = |words: &mut Vec<u32>, i: usize| {
+                words.extend_from_slice(&packed[i * size..][..size])
+            };
+            for (kind, order) in lists {
+                let order = Some(order.as_slice());
+                words.extend(words_of(fvf, size, count, &put, kind_of(*kind), order, COMMAND_WORDS));
+            }
+        }
     }
     if !words.is_empty() {
         submit(cpu, &words);

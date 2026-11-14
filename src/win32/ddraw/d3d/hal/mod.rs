@@ -258,8 +258,9 @@ pub fn transforms_gl(cpu: &mut Cpu, dd: u32) -> Result<(), bool> {
     }
 }
 
-/// Draw OpenGL's primitives `lists` of `vertices`, which aren't in
-/// screen space, on a card that transforms and lights vertices itself,
+/// Draw OpenGL's primitives `lists` of the vertices `packed`, which
+/// aren't in screen space and are in the card's layout for `layout`,
+/// on a card that transforms and lights vertices itself,
 /// with OpenGL's lights and materials `gl` (`toadforce::draw_gl`).
 /// False, with nothing drawn, when the card of `d` doesn't, or can't
 /// for this draw.
@@ -269,12 +270,12 @@ pub fn draw_gl(
     setup: &Setup,
     gl: &Gl,
     layout: &Layout,
-    vertices: &[Vertex],
+    packed: &[u32],
     lists: &[(u32, Vec<u32>)],
 ) -> bool {
     match kind_of(cpu, d) {
         Kind::Voodoo => false,
-        Kind::ToadForce => toadforce::draw_gl(cpu, d, setup, gl, layout, vertices, lists),
+        Kind::ToadForce => toadforce::draw_gl(cpu, d, setup, gl, layout, packed, lists),
     }
 }
 
