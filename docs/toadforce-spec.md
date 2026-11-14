@@ -30,10 +30,11 @@ Two frozen rules were amended to say what the card does, where making
 it do what the text said would have cost the emulator time and no
 program or driver written for the card depends on the difference:
 
-- Chapter 2: a 2- or 4-byte access that runs past the end of a window
-  goes whole to the window its first byte is in. Sending each byte to
-  its own window would add a compare to every access to the
-  registers and the ring.
+- Chapter 2: a 2- or 4-byte access that begins in the registers' or
+  the ring's window and runs past its end goes whole to that window.
+  Sending each byte to its own window would add a compare to every
+  access to the registers and the ring. One that begins in card
+  memory's window alone is made byte by byte.
 - Chapter 7: the request of a vertical blank goes up on the system
   timer's grid, up to a tick and an instruction after the blank, where
   the text had it at the blank. Raising it between ticks would take a
