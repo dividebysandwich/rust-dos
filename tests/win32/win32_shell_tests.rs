@@ -689,7 +689,8 @@ fn a_text_file_opens_in_notepad() {
 /// of the screen (ABM_GETAUTOHIDEBAR, as Myth II asks at its start), the
 /// taskbar has no place (ABM_GETTASKBARPOS) and a window can't register
 /// as a bar (ABM_NEW). SHELL32 on a Windows 95 without Explorer's
-/// taskbar answers the same.
+/// taskbar answers the same. Each call takes its two arguments off the
+/// stack.
 #[test]
 fn no_application_bar_without_a_taskbar() {
     const ABM_NEW: i32 = 0;
@@ -699,10 +700,13 @@ fn no_application_bar_without_a_taskbar() {
     // and lParam.
     let mut data = vec![0u8; 0x40];
     put(&mut data, 0x00, &36u32.to_le_bytes());
-    let imports: &[(&str, &[&str])] =
-        &[("KERNEL32.dll", &["ExitProcess"]), ("SHELL32.dll", &["SHAppBarMessage"])];
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        ("SHELL32.dll", &["SHAppBarMessage"]),
+    ];
     let code = program(imports, &data, |a, l| {
         a.xor(ebx, ebx)?;
+        a.mov(esi, esp)?;
         for edge in 0..4 {
             a.mov(dword_ptr(l.at(0x0C) as u64), edge)?;
             call(a, l.import(1), &[ABM_GETAUTOHIDEBAR, l.at(0)])?;
@@ -712,12 +716,15 @@ fn no_application_bar_without_a_taskbar() {
         check_eax(a, 0, 4)?;
         call(a, l.import(1), &[ABM_NEW, l.at(0)])?;
         check_eax(a, 0, 5)?;
+        a.mov(eax, esp)?;
+        a.sub(eax, esi)?;
+        check_eax(a, 0, 6)?;
         exit(a, l.import(0))
     });
     for core in CORES {
         let mut cpu = machine("appbar", core, &[("T.EXE", code.clone())]);
         run_to_exit(&mut cpu);
-        assert_eq!(cpu.errorlevel, 0x3F, "{core:?}");
+        assert_eq!(cpu.errorlevel, 0x7F, "{core:?}");
     }
 }
 
