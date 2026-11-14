@@ -3060,7 +3060,12 @@ fn runs_draw_alike(card: Draws) {
         gl(a, l, COLOR3F, &RED.map(Arg::F))?;
         gl(a, l, NORMAL3F, &[Arg::F(1.0), Arg::F(0.0), Arg::F(0.0)])?;
         gl(a, l, CALL_LIST, &[Arg::I(1)])?;
-        gl(a, l, GET_FLOATV, &[Arg::I(GL_CURRENT_COLOR), Arg::At(AFTER)])?;
+        gl(
+            a,
+            l,
+            GET_FLOATV,
+            &[Arg::I(GL_CURRENT_COLOR), Arg::At(AFTER)],
+        )?;
         let normal = [Arg::I(GL_CURRENT_NORMAL), Arg::At(AFTER + 16)];
         gl(a, l, GET_FLOATV, &normal)?;
         read_into(a, l, SHOTS[1])?;
@@ -3069,7 +3074,11 @@ fn runs_draw_alike(card: Draws) {
         finish(a, l)
     });
     let run = |traced: bool| {
-        let name = if traced { "list_runs_traced" } else { "list_runs" };
+        let name = if traced {
+            "list_runs_traced"
+        } else {
+            "list_runs"
+        };
         let mut cpu = machine_on(name, card, exe.clone());
         // A file of this card's run: both cards' tests run at once.
         let file = match card {
@@ -3175,7 +3184,12 @@ fn shared_textures(card: Draws) {
         c.api(a, l, IS_TEXTURE, &[Arg::Val(RED_NAME)])?;
         note(&c, "the first's texture in the second");
         gl(a, l, ENABLE, &[Arg::I(GL_TEXTURE_2D)])?;
-        gl(a, l, BIND_TEXTURE, &[Arg::I(GL_TEXTURE_2D), Arg::Val(RED_NAME)])?;
+        gl(
+            a,
+            l,
+            BIND_TEXTURE,
+            &[Arg::I(GL_TEXTURE_2D), Arg::Val(RED_NAME)],
+        )?;
         draw(a, white, SHOTS[0])?;
         // The second makes a green one, under another name, and the
         // first draws with it.
@@ -3184,7 +3198,12 @@ fn shared_textures(card: Draws) {
         current(a, &mut c, HGLRC)?;
         c.api(a, l, IS_TEXTURE, &[Arg::Val(GREEN_NAME)])?;
         note(&c, "the second's texture in the first");
-        gl(a, l, BIND_TEXTURE, &[Arg::I(GL_TEXTURE_2D), Arg::Val(GREEN_NAME)])?;
+        gl(
+            a,
+            l,
+            BIND_TEXTURE,
+            &[Arg::I(GL_TEXTURE_2D), Arg::Val(GREEN_NAME)],
+        )?;
         draw(a, white, SHOTS[1])?;
         // The first deletes the green one, which the second still has
         // bound: it is gone there too, and the second draws untextured.
@@ -3198,7 +3217,12 @@ fn shared_textures(card: Draws) {
         note(&c, "the first context deleted");
         c.api(a, l, IS_TEXTURE, &[Arg::Val(RED_NAME)])?;
         note(&c, "the first's texture after it");
-        gl(a, l, BIND_TEXTURE, &[Arg::I(GL_TEXTURE_2D), Arg::Val(RED_NAME)])?;
+        gl(
+            a,
+            l,
+            BIND_TEXTURE,
+            &[Arg::I(GL_TEXTURE_2D), Arg::Val(RED_NAME)],
+        )?;
         draw(a, white, SHOTS[3])?;
         c.api(a, l, GET_ERROR, &[])?;
         note(&c, "glGetError");
@@ -3239,7 +3263,10 @@ fn shared_textures(card: Draws) {
         ]
     );
     let names = [RED_NAME, GREEN_NAME].map(|n| peek(&cpu, data + n));
-    assert!(names[0] != 0 && names[1] != 0 && names[0] != names[1], "{names:?}");
+    assert!(
+        names[0] != 0 && names[1] != 0 && names[0] != names[1],
+        "{names:?}"
+    );
     card_drew(&cpu, card);
     let [red, green, untextured, kept] = SHOTS.map(|s| shot(&cpu, data, s));
     let all = |shot: &[u32], rgb: u32| shot.iter().all(|&p| p == rgb);

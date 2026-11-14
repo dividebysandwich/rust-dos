@@ -1262,7 +1262,11 @@ pub fn textures_mut(s: &mut State, index: usize) -> Option<&mut Vec<Texture>> {
 
 /// Count the contexts that have a list open again.
 fn count_open(s: &mut State) {
-    let open = s.contexts.iter().flatten().filter(|c| c.lists.open.is_some());
+    let open = s
+        .contexts
+        .iter()
+        .flatten()
+        .filter(|c| c.lists.open.is_some());
     s.lists.compiling = open.count() as u32;
 }
 
@@ -1663,7 +1667,12 @@ mod tests {
         let green = [0.0, 1.0, 0.0, 1.0];
         assert_eq!(batch.vertices[1].color, green);
         assert_eq!(batch.vertices[2].color, green);
-        assert!(batch.vertices.iter().all(|v| v.tex[1] == [0.5, 0.25, 0.0, 1.0]));
+        assert!(
+            batch
+                .vertices
+                .iter()
+                .all(|v| v.tex[1] == [0.5, 0.25, 0.0, 1.0])
+        );
         let inherit = draw::Inherit {
             color: 1,
             normal: 3,
@@ -1903,7 +1912,12 @@ mod tests {
         // glVertex has 24 forms, glNormal 10, and glColor, glTexCoord
         // and glMultiTexCoordARB 32 each.
         assert_eq!(found, 24 + 10 + 3 * 32);
-        for name in ["glVertexPointer", "glColorMask", "glNormalPointer", "glColorMaterial"] {
+        for name in [
+            "glVertexPointer",
+            "glColorMask",
+            "glNormalPointer",
+            "glColorMaterial",
+        ] {
             assert!(imm::spec(name).is_none(), "{name}");
         }
     }

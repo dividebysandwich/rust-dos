@@ -44,9 +44,8 @@ use super::texture::{self, GL_ADD, GL_CLAMP, GL_DECAL, GL_LINEAR, GL_REPLACE};
 use super::{
     Array, CAP_ALPHA_TEST, CAP_BLEND, CAP_COLOR_MATERIAL, CAP_CULL_FACE, CAP_DEPTH_TEST,
     CAP_DITHER, CAP_FOG, CAP_LIGHTING, CAP_NORMALIZE, CAP_POLYGON_OFFSET_FILL, CAP_SCISSOR_TEST,
-    Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, ImmVertex, Settings,
-    Texture, UNITS, ctx,
-    current, error, signed_unit, state,
+    Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, ImmVertex, Settings, Texture,
+    UNITS, ctx, current, error, signed_unit, state,
 };
 use crate::cpu::Cpu;
 
