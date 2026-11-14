@@ -703,6 +703,7 @@ pub fn enter_user(cpu: &mut Cpu, ctx: &Context) {
         cpu.cr4 |= CR4_OSFXSR;
     }
     cpu.tlb.flush();
+    cpu.bus.win32.tlb_stale = false;
     cpu.gdtr = DescTable {
         base: SYSTEM + GDT,
         limit: (GDT_ENTRIES * 8 - 1) as u16,

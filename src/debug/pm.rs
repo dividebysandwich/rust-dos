@@ -30,9 +30,19 @@ impl DebugAddr {
         }
     }
 
-    /// `len` bytes from here; unmapped bytes read as FFh.
+    /// `len` bytes from here; unmapped bytes read as FFh. A page of the
+    /// built-in Windows's page file, which isn't mapped, reads as its
+    /// contents there.
     pub fn read(&self, cpu: &Cpu, len: usize) -> Vec<u8> {
-        (0..len).map(|i| self.byte(cpu, i).map_or(0xFF, |p| cpu.bus.peek_8(p))).collect()
+        (0..len)
+            .map(|i| match (self.byte(cpu, i), self.lin) {
+                (Some(p), _) => cpu.bus.peek_8(p),
+                (None, Some(lin)) => {
+                    rust_dos::win32::peek_paged(cpu, lin.wrapping_add(i as u32)).unwrap_or(0xFF)
+                }
+                (None, None) => 0xFF,
+            })
+            .collect()
     }
 }
 

@@ -100,7 +100,7 @@ pub(super) fn alloc(cpu: &mut Cpu, heap: u32, flags: u32, size: u32) -> Result<u
         Some(None) => Err(ERROR_NOT_ENOUGH_MEMORY),
         Some(Some(at)) => {
             if flags & HEAP_ZERO_MEMORY != 0 {
-                cpu.bus.guest_fill(at, size as usize, 0);
+                with_process(cpu, |p, bus| p.memory.zero(bus, at, size));
             }
             Ok(at)
         }
@@ -150,7 +150,7 @@ pub(super) fn realloc(
         to
     };
     if flags & HEAP_ZERO_MEMORY != 0 && size > old {
-        cpu.bus.guest_fill(to + old, (size - old) as usize, 0);
+        with_process(cpu, |p, bus| p.memory.zero(bus, to + old, size - old));
     }
     Ok(to)
 }

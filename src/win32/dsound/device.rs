@@ -134,11 +134,14 @@ pub fn catch_up(cpu: &mut Cpu) {
 }
 
 /// Reads a process's memory through its page tables, a page at a time.
+/// A page in the page file is read from there, without a page fault.
 pub struct Reader<'a> {
     bus: &'a Bus,
     memory: Option<&'a super::super::memory::Memory>,
     page: u32,
     phys: Option<u32>,
+    /// The bytes of the page, when it is in the page file.
+    paged: Option<Vec<u8>>,
 }
 
 impl<'a> Reader<'a> {
@@ -154,6 +157,7 @@ impl<'a> Reader<'a> {
             memory,
             page: u32::MAX,
             phys: None,
+            paged: None,
         }
     }
 
@@ -163,6 +167,18 @@ impl<'a> Reader<'a> {
         if page != self.page {
             self.page = page;
             self.phys = self.memory.and_then(|m| m.translate(self.bus, page));
+            self.paged = None;
+            if self.phys.is_none()
+                && let Some(memory) = self.memory
+            {
+                let mut bytes = vec![0; 0x1000];
+                if memory.read(self.bus, page, &mut bytes).is_some() {
+                    self.paged = Some(bytes);
+                }
+            }
+        }
+        if let Some(bytes) = &self.paged {
+            return bytes[(lin & 0xFFF) as usize];
         }
         self.phys
             .map_or(0, |p| self.bus.read_8((p | (lin & 0xFFF)) as usize))
