@@ -874,7 +874,8 @@ mod tests {
         (56, 0x0BF5_7A03_9493_E7DE), // TrackMouseEvent's request, one for the desktop
         (57, 0xB847_1A2D_27D3_3646), // OpenGL's draws that wait
         (58, 0xDC7D_5C01_8FC2_8FD2), // the system locale
-        (61, 0x6E30_E64C_7C17_01E3), // OpenGL's display lists
+        (59, 0xCDE1_505E_0044_1486), // the page file behind programs' own memory
+        (61, 0x9267_6BA0_CE58_B06F), // OpenGL's display lists
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

@@ -2173,6 +2173,61 @@ fn a_handler_on_a_stack_above_the_threads_returns_to_its_caller() {
     assert_eq!(code, 3, "{}", out);
 }
 
+/// A thread that runs on a stack of committed pages it hasn't touched
+/// yet, as a program's own coroutine stacks are, and takes an exception
+/// there: the record and context go on pages of the page file, which the
+/// system's writes bring in, and the handler runs.
+#[test]
+fn an_exception_on_a_stack_of_untouched_pages_reaches_its_handler() {
+    const MEM_COMMIT_RESERVE: i32 = 0x3000;
+    const PAGE_READWRITE: i32 = 4;
+    const HIGH: i32 = 0x6000_0000;
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["VirtualAlloc", "ExitProcess"])];
+    // Data: the thread's stack pointer.
+    let (code, out) = run(
+        "seh_untouched_stack",
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            let mut handler = a.create_label();
+            let mut start = a.create_label();
+            let mut fail = a.create_label();
+            a.jmp(start)?;
+            a.set_label(&mut fail)?;
+            a.push(99)?;
+            a.call(l.import(1))?;
+            // The handler: on after the 2-byte DIV with 5 in EAX.
+            a.set_label(&mut handler)?;
+            a.mov(eax, dword_ptr(esp + 12))?;
+            a.add(dword_ptr(eax + 0xB8), 2)?;
+            a.mov(dword_ptr(eax + 0xB0), 5)?;
+            a.xor(eax, eax)?;
+            a.ret()?;
+            a.set_label(&mut start)?;
+            push_args(a, &[HIGH, 0x10000, MEM_COMMIT_RESERVE, PAGE_READWRITE])?;
+            a.call(l.import(0))?;
+            a.cmp(eax, HIGH)?;
+            a.jne(fail)?;
+            // 40h bytes above a page boundary: the frame is on the page
+            // above it, the record and the context go on the page below,
+            // which nothing has touched.
+            a.mov(dword_ptr(l.at(0)), esp)?;
+            a.mov(esp, HIGH + 0x8040)?;
+            push_label(a, handler)?;
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+            a.xor(edx, edx)?;
+            a.xor(ecx, ecx)?;
+            a.mov(eax, 1)?;
+            a.div(ecx)?;
+            a.pop(dword_ptr(0).fs())?;
+            a.mov(esp, dword_ptr(l.at(0)))?;
+            a.push(eax)?;
+            a.call(l.import(1))?;
+            a.int3()
+        }),
+    );
+    assert_eq!(code, 5, "{}", out);
+}
+
 /// An exception raised in a handler, as Windows 98 dispatches it: the
 /// system's frame around that handler marks it as nested, the handlers
 /// up to and with the frame whose handler raised it see
@@ -3648,6 +3703,298 @@ fn a_full_heap_raises_an_exception_with_heap_generate_exceptions() {
     );
     assert_eq!(code, 0xFF);
     assert!(text.contains("C0000017"), "{}", text);
+}
+
+/// The memory a program commits is backed by the page file, as on
+/// Windows 98: a zeroed GlobalAlloc block as large as the machine's
+/// memory succeeds, another one after it too, and the program can touch
+/// every page of both, more than the machine has, and read back what it
+/// wrote, pages it never wrote being zeros. GlobalMemoryStatus's page
+/// file has less room after, and a commit past the memory and the page
+/// file together fails. A bit each in the exit code.
+#[test]
+fn a_program_commits_and_touches_more_memory_than_the_machine_has() {
+    const GMEM_ZEROINIT: i32 = 0x40;
+    const MEM_COMMIT_RESERVE: i32 = 0x3000;
+    const PAGE_READWRITE: i32 = 4;
+    const SECOND: i32 = 0x40_0000;
+    const PATTERN: i32 = 0x5A5A_5A5A;
+    let names: &[&str] = &["GlobalMemoryStatus", "GlobalAlloc", "VirtualAlloc"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // MEMORYSTATUS before at 0 and after at 20h; the blocks at 40h, 44h.
+    let (code, text) = run(
+        "pagefile",
+        program(BASE, false, imports, &[0; 0x50], |a, l| {
+            let total = dword_ptr(l.at(8));
+            let mut end = a.create_label();
+            a.xor(ebx, ebx)?;
+            a.push(l.at(0) as i32)?;
+            a.call(l.import(0))?;
+            a.push(total)?;
+            a.push(GMEM_ZEROINIT)?;
+            a.call(l.import(1))?;
+            a.mov(dword_ptr(l.at(0x40)), eax)?;
+            a.test(eax, eax)?;
+            a.je(end)?;
+            a.or(ebx, 1)?;
+            push_args(a, &[0, SECOND])?;
+            a.call(l.import(1))?;
+            a.mov(dword_ptr(l.at(0x44)), eax)?;
+            a.test(eax, eax)?;
+            a.je(end)?;
+            a.or(ebx, 2)?;
+            // The first dword of every page of both: its address, mixed.
+            for (block, pages) in [(0x40, None), (0x44, Some(SECOND >> 12))] {
+                let mut next = a.create_label();
+                a.mov(esi, dword_ptr(l.at(block)))?;
+                match pages {
+                    Some(pages) => a.mov(ecx, pages)?,
+                    None => {
+                        a.mov(ecx, total)?;
+                        a.shr(ecx, 12)?;
+                    }
+                }
+                a.set_label(&mut next)?;
+                a.mov(eax, esi)?;
+                a.xor(eax, PATTERN)?;
+                a.mov(dword_ptr(esi), eax)?;
+                a.add(esi, 0x1000)?;
+                a.dec(ecx)?;
+                a.jnz(next)?;
+            }
+            // Read back, with the rest of the zeroed block's pages zeros.
+            a.xor(edx, edx)?;
+            for (block, pages) in [(0x40, None), (0x44, Some(SECOND >> 12))] {
+                let mut next = a.create_label();
+                let mut same = a.create_label();
+                let mut zero = a.create_label();
+                a.mov(esi, dword_ptr(l.at(block)))?;
+                match pages {
+                    Some(pages) => a.mov(ecx, pages)?,
+                    None => {
+                        a.mov(ecx, total)?;
+                        a.shr(ecx, 12)?;
+                    }
+                }
+                a.set_label(&mut next)?;
+                a.mov(eax, esi)?;
+                a.xor(eax, PATTERN)?;
+                a.cmp(dword_ptr(esi), eax)?;
+                a.je(same)?;
+                a.inc(edx)?;
+                a.set_label(&mut same)?;
+                if pages.is_none() {
+                    a.cmp(dword_ptr(esi + 0x800), 0)?;
+                    a.je(zero)?;
+                    a.inc(edx)?;
+                    a.set_label(&mut zero)?;
+                }
+                a.add(esi, 0x1000)?;
+                a.dec(ecx)?;
+                a.jnz(next)?;
+            }
+            a.test(edx, edx)?;
+            bit_if_equal(a, 2)?;
+            a.push(l.at(0x20) as i32)?;
+            a.call(l.import(0))?;
+            a.mov(eax, dword_ptr(l.at(0x34)))?;
+            a.cmp(eax, dword_ptr(l.at(0x14)))?;
+            let mut more = a.create_label();
+            a.jae(more)?;
+            a.or(ebx, 8)?;
+            a.set_label(&mut more)?;
+            // The memory and the page file's room together, and a page
+            // more, can't be committed; a megabyte can.
+            a.mov(eax, dword_ptr(l.at(0x2C)))?;
+            a.add(eax, dword_ptr(l.at(0x34)))?;
+            a.add(eax, 0x1000)?;
+            a.push(PAGE_READWRITE)?;
+            a.push(MEM_COMMIT_RESERVE)?;
+            a.push(eax)?;
+            a.push(0)?;
+            a.call(l.import(2))?;
+            a.test(eax, eax)?;
+            bit_if_equal(a, 4)?;
+            push_args(a, &[0, 0x10_0000, MEM_COMMIT_RESERVE, PAGE_READWRITE])?;
+            a.call(l.import(2))?;
+            a.test(eax, eax)?;
+            let mut failed = a.create_label();
+            a.je(failed)?;
+            a.or(ebx, 0x20)?;
+            a.set_label(&mut failed)?;
+            a.nop()?;
+            a.set_label(&mut end)?;
+            a.mov(eax, ebx)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b} {}",
+        !code & 0x3F,
+        text
+    );
+}
+
+/// A zeroed block takes no physical memory until it is touched: after
+/// GlobalAlloc(GMEM_ZEROINIT) of 8 MB, GlobalMemoryStatus has nearly as
+/// much physical memory available as before, and 8 MB less room in the
+/// page file. Touching a page takes it from the physical memory. A bit
+/// each in the exit code.
+#[test]
+fn a_zeroed_block_takes_no_memory_until_it_is_touched() {
+    const GMEM_ZEROINIT: i32 = 0x40;
+    const SIZE: i32 = 0x80_0000;
+    let names: &[&str] = &["GlobalMemoryStatus", "GlobalAlloc"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // MEMORYSTATUS before at 0, after the block at 20h, after a touch at
+    // 40h.
+    let (code, text) = run(
+        "zeroedblock",
+        program(BASE, false, imports, &[0; 0x60], |a, l| {
+            a.xor(ebx, ebx)?;
+            a.push(l.at(0) as i32)?;
+            a.call(l.import(0))?;
+            push_args(a, &[GMEM_ZEROINIT, SIZE])?;
+            a.call(l.import(1))?;
+            a.mov(esi, eax)?;
+            a.push(l.at(0x20) as i32)?;
+            a.call(l.import(0))?;
+            // dwAvailPhys down by less than 64 KB (the heap's own pages).
+            a.mov(eax, dword_ptr(l.at(0x0C)))?;
+            a.sub(eax, dword_ptr(l.at(0x2C)))?;
+            a.cmp(eax, 0x1_0000)?;
+            let mut much = a.create_label();
+            a.jae(much)?;
+            a.or(ebx, 1)?;
+            a.set_label(&mut much)?;
+            // dwAvailPageFile down by the block.
+            a.mov(eax, dword_ptr(l.at(0x14)))?;
+            a.sub(eax, dword_ptr(l.at(0x34)))?;
+            a.cmp(eax, SIZE)?;
+            bit_if_equal(a, 1)?;
+            // A page of it touched: a page less physical memory, a page
+            // more room in the page file.
+            a.mov(dword_ptr(esi + 0x4000), 1)?;
+            a.push(l.at(0x40) as i32)?;
+            a.call(l.import(0))?;
+            a.mov(eax, dword_ptr(l.at(0x2C)))?;
+            a.sub(eax, dword_ptr(l.at(0x4C)))?;
+            a.cmp(eax, 0x1000)?;
+            bit_if_equal(a, 2)?;
+            a.mov(eax, dword_ptr(l.at(0x54)))?;
+            a.sub(eax, dword_ptr(l.at(0x34)))?;
+            a.cmp(eax, 0x1000)?;
+            bit_if_equal(a, 3)?;
+            a.mov(eax, ebx)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(
+        code,
+        0xF,
+        "the checks that failed: {:04b} {}",
+        !code & 0xF,
+        text
+    );
+}
+
+/// A program that commits memory until VirtualAlloc fails, in the page
+/// file first and, with it full, the machine's last pages, can touch all
+/// it committed: the pages it took from the machine go out to the page
+/// file too, to make room for those that come in. A bit each in the exit
+/// code.
+#[test]
+fn a_program_touches_memory_committed_to_the_last_page() {
+    const MEM_COMMIT_RESERVE: i32 = 0x3000;
+    const PAGE_READWRITE: i32 = 4;
+    const BLOCK: i32 = 0x10_0000;
+    const PATTERN: i32 = 0x5A5A_5A5A;
+    let names: &[&str] = &["VirtualAlloc"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The first block's address at 0, the last page's at 4.
+    let exe = program(BASE, false, imports, &[0; 8], |a, l| {
+        let mut blocks = a.create_label();
+        let mut kept = a.create_label();
+        let mut pages = a.create_label();
+        let mut full = a.create_label();
+        let mut end = a.create_label();
+        a.xor(ebx, ebx)?;
+        // Blocks of a megabyte while there is room for one.
+        a.set_label(&mut blocks)?;
+        push_args(a, &[0, BLOCK, MEM_COMMIT_RESERVE, PAGE_READWRITE])?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        a.je(pages)?;
+        a.cmp(dword_ptr(l.at(0)), 0)?;
+        a.jne(kept)?;
+        a.mov(dword_ptr(l.at(0)), eax)?;
+        a.set_label(&mut kept)?;
+        a.jmp(blocks)?;
+        // Then pages while there is room for one.
+        a.set_label(&mut pages)?;
+        push_args(a, &[0, 0x1000, MEM_COMMIT_RESERVE, PAGE_READWRITE])?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        a.je(full)?;
+        a.mov(dword_ptr(l.at(4)), eax)?;
+        a.jmp(pages)?;
+        a.set_label(&mut full)?;
+        a.cmp(dword_ptr(l.at(0)), 0)?;
+        a.je(end)?;
+        a.cmp(dword_ptr(l.at(4)), 0)?;
+        a.je(end)?;
+        a.or(ebx, 1)?;
+        // The first dword of every page of the first block and of the
+        // last page: its address, mixed; then read back.
+        for check in [false, true] {
+            let mut next = a.create_label();
+            a.xor(edx, edx)?;
+            a.mov(esi, dword_ptr(l.at(0)))?;
+            a.mov(ecx, BLOCK >> 12)?;
+            a.set_label(&mut next)?;
+            a.mov(eax, esi)?;
+            a.xor(eax, PATTERN)?;
+            if check {
+                let mut same = a.create_label();
+                a.cmp(dword_ptr(esi), eax)?;
+                a.je(same)?;
+                a.inc(edx)?;
+                a.set_label(&mut same)?;
+            } else {
+                a.mov(dword_ptr(esi), eax)?;
+            }
+            a.add(esi, 0x1000)?;
+            a.dec(ecx)?;
+            a.jnz(next)?;
+            a.mov(esi, dword_ptr(l.at(4)))?;
+            a.mov(eax, esi)?;
+            a.xor(eax, PATTERN)?;
+            if check {
+                let mut same = a.create_label();
+                a.cmp(dword_ptr(esi), eax)?;
+                a.je(same)?;
+                a.inc(edx)?;
+                a.set_label(&mut same)?;
+            } else {
+                a.mov(dword_ptr(esi), eax)?;
+            }
+        }
+        a.test(edx, edx)?;
+        bit_if_equal(a, 1)?;
+        a.set_label(&mut end)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run_files_in("pagefile_last_page", &[("T.EXE", exe)], 8);
+    assert_eq!(
+        code,
+        3,
+        "the checks that failed: {:02b} {}",
+        !code & 3,
+        text
+    );
 }
 
 /// An argument a test program passes: a value, or ESI.

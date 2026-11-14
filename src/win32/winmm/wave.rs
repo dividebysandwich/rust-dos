@@ -225,20 +225,7 @@ fn out_of(cpu: &mut Cpu, handle: u32) -> Option<usize> {
 /// Write the double word `value` at `lin` in the memory of the process
 /// `pid`, whichever runs.
 fn write_32(cpu: &mut Cpu, pid: u32, lin: u32, value: u32) {
-    let bytes = value.to_le_bytes();
-    for (n, byte) in bytes.into_iter().enumerate() {
-        let at = lin.wrapping_add(n as u32);
-        let phys = cpu
-            .bus
-            .win32
-            .processes
-            .iter()
-            .find(|p| p.id == pid)
-            .and_then(|p| p.memory.translate(&cpu.bus, at));
-        if let Some(phys) = phys {
-            cpu.bus.write_8(phys as usize, byte);
-        }
-    }
+    crate::win32::memory::write_process_bytes(&mut cpu.bus, pid, lin, &value.to_le_bytes());
 }
 
 /// The double word at `lin` in the memory of the process `pid`.
