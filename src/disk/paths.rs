@@ -143,13 +143,15 @@ impl DiskController {
     }
 
     /// Whether a folder's entries settle that the path component `part`
-    /// isn't in it when none matches it. They leave out names starting
-    /// with a dot, and the host may know a name by a spelling they don't
-    /// match: Windows has short names of its own (with a "~"), and Windows
-    /// and macOS fold the case of letters beyond ASCII. Such names go to
-    /// the host. A dot that ends a name is gone by now (`dos_component`).
+    /// isn't in it when none matches it. The host may know a name by a
+    /// spelling they don't match: Windows has short names of its own (with
+    /// a "~"), and Windows and macOS fold the case of letters beyond ASCII.
+    /// Such names go to the host. The host's own files (`host_private`),
+    /// which the entries leave out, are settled missing, so programs can't
+    /// open them either. A dot that ends a name is gone by now
+    /// (`dos_component`).
     fn entries_settle(part: &str) -> bool {
-        !part.starts_with('.') && !part.contains('~') && part.is_ascii()
+        !part.contains('~') && part.is_ascii()
     }
 
     /// `locate`, and whether a component of the path isn't among its

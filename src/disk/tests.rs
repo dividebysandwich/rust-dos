@@ -117,7 +117,7 @@ fn a_host_name_starting_with_a_dot_is_listed() {
     for private in [".rust-dos-deleted", ".DS_Store", "._BINA", ".SAVE.rust-dos-partial"] {
         fs::write(base.join("TAGS").join(private), b"x").unwrap();
     }
-    let disk = DiskController::new(base.clone());
+    let mut disk = DiskController::new(base.clone());
 
     let names: Vec<String> =
         disk.list_directory(r"C:\TAGS\*.*", 0x10).unwrap().into_iter().map(|e| e.filename).collect();
@@ -125,6 +125,9 @@ fn a_host_name_starting_with_a_dot_is_listed() {
     assert!(disk.is_file(r"C:\TAGS\.256\INGO"));
     assert!(disk.is_file(r"C:\TAGS\256~1\INGO"));
     assert!(disk.resolve_path(r"C:\TAGS\256~1").unwrap().ends_with("TAGS/.256"));
+    assert!(!disk.is_file(r"C:\TAGS\.DS_Store"));
+    assert!(!disk.is_file(r"C:\TAGS\.rust-dos-deleted"));
+    assert!(disk.open_file(r"C:\TAGS\._BINA", 0, PSP).is_err());
 }
 
 /// A dot that ends a name leaves its extension empty, as DOS packs it:

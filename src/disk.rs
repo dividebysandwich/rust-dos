@@ -204,19 +204,23 @@ pub(crate) fn new_entry_name(name: &str) -> String {
 /// Whether a host folder's entry `name` is the host's or Rust-DOS's own
 /// and no file of the drive: an overlay's list of deleted names, a file
 /// still being copied in, and what macOS and Linux desktops leave in the
-/// folders they show. Programs don't see these. Any other name that
-/// starts with a dot is a file like the rest, as on Windows 95, where
-/// ".256" is a long name with the short name 256~1: Myth keeps its
-/// 256-color collections in a folder of that name, and its 1.3 patch
-/// copies one.
+/// folders they show and on the disks they mount. Programs don't see
+/// these, in a listing or by name. Any other name that starts with a dot
+/// is a file like the rest, as on Windows 95, where ".256" is a long name
+/// with the short name 256~1: Myth keeps its 256-color collections in a
+/// folder of that name, and its 1.3 patch copies one.
 pub(crate) fn host_private(name: &str) -> bool {
-    const DESKTOP: [&str; 7] = [
+    const DESKTOP: [&str; 11] = [
         ".DS_Store",
         ".localized",
         ".Spotlight-V100",
         ".Trashes",
         ".fseventsd",
         ".TemporaryItems",
+        ".DocumentRevisions-V100",
+        ".VolumeIcon.icns",
+        ".apdisk",
+        ".com.apple.timemachine.donotpresent",
         ".directory",
     ];
     name.starts_with(".rust-dos")
