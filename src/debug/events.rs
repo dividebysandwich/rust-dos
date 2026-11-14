@@ -17,12 +17,12 @@ impl DebugHub {
         let reason = self.pause_hit.take()?;
         let mut stop = json!({"reason": reason.name()});
         if let Some(hit) = self.breakpoint_hit.take() {
-            if hit.user {
-                stop["breakpoint"] = format!("{:05X}", hit.phys).into();
+            if let Some(spot) = hit.user {
+                stop["breakpoint"] = spot.name().into();
                 stop["once"] = hit.once.into();
             }
-            if hit.target {
-                stop["target"] = format!("{:05X}", hit.phys).into();
+            if let Some(spot) = hit.target {
+                stop["target"] = spot.name().into();
             }
         }
         match reason {
@@ -35,10 +35,10 @@ impl DebugHub {
         {
             stop["exception"] = e;
         }
-        if let Some((phys, len, old, new)) = self.watch_hit.take() {
+        if let Some((spot, len, old, new)) = self.watch_hit.take() {
             let digits = len as usize * 2;
             stop["watch"] = json!({
-                "addr": format!("{:05X}", phys),
+                "addr": spot.name(),
                 "len": len,
                 "old": format!("{:0width$X}", old, width = digits),
                 "new": format!("{:0width$X}", new, width = digits),
@@ -330,6 +330,9 @@ impl DebugHub {
         self.told_starts = cpu.programs.started;
         self.told_ends = cpu.programs.ended;
         self.append(cpu, Kind::StateLoaded, None, json!({"source": source}));
+        // The loaded machine's processes, before a stop lists what is
+        // kept.
+        self.drop_ended_spots(cpu);
         if self.paused {
             self.pause_hit = Some(PauseReason::Load);
             self.flush_stop(cpu);

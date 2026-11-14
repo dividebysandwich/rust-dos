@@ -309,7 +309,8 @@ fn process_info(
 }
 
 /// The process's command line, read through its page tables without a
-/// fault: None where its page isn't there.
+/// fault, from the page file where its page is there: None where its
+/// page isn't committed.
 fn command_line(cpu: &Cpu, process: &Process) -> Option<String> {
     if process.command_line == 0 {
         return None;
@@ -318,8 +319,9 @@ fn command_line(cpu: &Cpu, process: &Process) -> Option<String> {
     // A command line is at most 32 KB.
     for i in 0..0x8000 {
         let lin = process.command_line.wrapping_add(i);
-        let phys = process.memory.translate(&cpu.bus, lin)?;
-        match cpu.bus.read_8(phys as usize) {
+        let mut byte = [0];
+        process.memory.read(&cpu.bus, lin, &mut byte)?;
+        match byte[0] {
             0 => break,
             b => bytes.push(b),
         }

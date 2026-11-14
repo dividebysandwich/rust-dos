@@ -123,6 +123,7 @@ fn router(state: AppState) -> Router {
         .route("/api/exceptions", get(exceptions))
         .route("/api/win32", get(win32).post(win32_post))
         .route("/api/win32/ddraw", get(win32_ddraw))
+        .route("/api/win32/page_file", get(win32_page_file))
         .route("/api/toadforce/capture", post(toadforce_capture))
         .route("/api/win32/ddraw/surface/{id}", get(win32_surface))
         .route("/ws/trace", get(ws_trace))
@@ -1762,6 +1763,23 @@ async fn win32_ddraw(State(s): State<AppState>) -> ApiResult {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PageFileQuery {
+    /// The most ranges to list (1000 by default).
+    limit: Option<usize>,
+}
+
+async fn win32_page_file(State(s): State<AppState>, Query(q): Query<PageFileQuery>) -> ApiResult {
+    s.call_json(
+        Cmd::Win32PageFile {
+            limit: q.limit.unwrap_or(1000),
+        },
+        DEFAULT_TIMEOUT,
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SurfaceQuery {
     /// `png` (the default) or `raw`.
     format: Option<String>,
@@ -2316,7 +2334,10 @@ EXECUTION CONTROL
                              (features has "memory_json" when json is there)
   PUT  /api/memory {"addr":"B800:0000","hex":"41 1F"}  (or "base64"); replies with
                              the bytes replaced ("old") and read back ("new");
-                             "expect":"20 07" writes only if those bytes are there (409)
+                             "expect":"20 07" writes only if those bytes are there (409);
+                             whole or not at all (400 when a byte is on an unmapped
+                             page); a page in the built-in Windows's page file is
+                             read and written there and stays there ("page_file")
   GET  /api/disasm?addr=CS:IP&count=20[&format=json]   json: "lines" and "rows"
                                            ({label, phys, bytes, asm, len, current, breakpoint})
                   a lin: or phys: address decodes as the running code does (32-bit
@@ -2330,6 +2351,9 @@ EXECUTION CONTROL
                   {"program_exit":true}: pause after each program ends ("exit":{name,code,resident,aborted})
   GET/POST/DELETE /api/watchpoints   {"addr":"DS:0100","len":2}  pause when the 1, 2 or
                   4 bytes there change (DELETE without addr = all)
+                  Both are kept by physical address ("1F2A0"), and on a page of a Win32
+                  program's own memory, which its page file moves, by linear address
+                  in that address space ("lin:00A30100")
   GET  /api/ivt              interrupt vector table (real mode)
   Addresses: SEG:OFF (in protected mode SEL:OFF32 through the GDT/LDT; register
   names like CS:EIP, DS:ESI), lin:ADDR (through the page tables), phys:ADDR or ADDR.
@@ -2338,7 +2362,8 @@ PROTECTED MODE
   GET  /api/gdt  /api/ldt    descriptors, decoded
   GET  /api/idt              interrupt, trap and task gates
   GET  /api/tss              the current TSS (stacks, CR3, registers, I/O map)
-  GET  /api/pagewalk?addr=lin:00401000   page directory/table entries and flags
+  GET  /api/pagewalk?addr=lin:00401000   page directory/table entries and flags;
+                             "page_file": in the built-in Windows's page file
   GET  /api/exceptions       the last 64 exceptions (vector, error code, CS:EIP, CR2)
   GET  /api/xms              XMS handles, A20 and the HMA
   GET  /api/net              The IPX driver's sockets, ECBs and packets, and the LAN
@@ -2356,7 +2381,12 @@ BUILT-IN WINDOWS
                              threads (state, wait objects and timeout, CS:EIP, ESP,
                              TIB, last error, priority, suspend count) and its handles
                              (object kind, state, name, reference count); "trace",
-                             the win32_trace level
+                             the win32_trace level; "page_file", its size and counts
+  GET  /api/win32/page_file[?limit=1000]
+                             the pages of the running address space that are in the
+                             page file, as ranges {"addr","pages","zeros"}; "zeros":
+                             pages of zeros with no contents kept there
+                             (features has "page_file" when this is there)
   POST /api/win32 {"trace":"all"}   set the win32_trace level (all, collapsed or off)
                              until the emulator stops; the reply is GET's
   GET  /api/win32/ddraw      DirectDraw's display mode and surfaces: interfaces (the
