@@ -7,16 +7,21 @@
 //! (`win32::pace`). Once the frame shows, the present tells the cap
 //! (`shown`).
 //!
-//! The cap's frames are the multiples of its frame time (1/30 s at 30)
-//! in emulated time. A frame may show in a frame time after the one the
-//! last frame counts in, so a program that draws faster than the cap
-//! waits for the start of the next one, and its frames come at the
-//! cap's frame times; one that draws slower shows each frame as it is
-//! done. A frame that comes late counts in the first frame time it
-//! missed, or a quarter of a second before it showed, and the frames
-//! after it show at once until they are back in step (`shown`). The
-//! window, with `vrr`, refreshes at the cap's frame times while a
-//! program shows its frames through it (`refresh_timing`).
+//! Under a cap, no two frames show closer together than its frame time
+//! (1/30 s at 30), in emulated time. Each frame has a turn, a frame time
+//! after the last one's, and a program that draws faster than the cap
+//! waits for it, so its frames come a frame time apart; one that draws
+//! slower shows each frame as it is done. A late frame shows when it
+//! comes, and its turn is then: the frames after it wait a frame time
+//! each, as after any other, and don't make up for it (`shown`). A
+//! program that is late now and then therefore shows fewer frames than
+//! the cap, evenly, where frames let through at once to make up the
+//! number would come in bursts: with a quarter of a second of them,
+//! Grom's menu showed 60 a second, four in five under 3 ms after the
+//! one before, and a display of 60 Hz showed 20 of them; Myth II under
+//! a cap of 75 showed frames from 9.5 ms apart. The window, with `vrr`,
+//! refreshes at the cap's rate while a program shows its frames through
+//! it (`refresh_timing`).
 //!
 //! A present that waits for the display's retrace already shows no more
 //! frames than the display does: with the cap at or above the display's
@@ -128,33 +133,22 @@ pub fn name(cap: Cap) -> String {
 /// frame times until then.
 const ACTIVE_NS: u64 = 1_000_000_000;
 
-/// How far a late frame lets the frames after it catch up, in ns: they
-/// show at once, in the frame times it missed, up to this long before
-/// it. Without it, a program whose frames are uneven loses a turn to
-/// each long frame and stays below the cap though it could keep it:
-/// Grom's menu at 150,000 cycles draws 71 frames a second without the
-/// cap, most in 2.6 ms and about 23 a second with a 35 ms step of its
-/// simulation, up to five steps (190 ms) in one. Under a cap of 60 it
-/// showed 55 a second with a tenth of a second of catch-up and 60 with
-/// a quarter, which covers its longest frames.
-const CATCH_UP_NS: u64 = 250_000_000;
-
 /// The cap and the frames it let through.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FrameCap {
     /// The setting's cap, which a save state doesn't keep.
     cap: Cap,
-    /// The last present to ask (`Shared::wait`) waited for the
-    /// retrace, which `auto` doesn't hold: the display's own refresh
-    /// paces the window then (`refresh_timing`). A save state doesn't
-    /// keep it: only the host's window and `cycles=auto` read it, never
-    /// the machine, and the first present after a load sets it again.
-    synced: bool,
+    /// The display's frame time, if the last present to ask (`wait`)
+    /// waited for its retrace, which `auto` doesn't hold: the display's
+    /// own refresh paces the window then (`refresh_timing`), and a frame
+    /// shows at the retrace nearest its turn (`shown`). A save state
+    /// doesn't keep it: the first present after a load sets it again.
+    retrace: Option<u64>,
     /// When the last frame showed, in emulated ns; None before the
     /// first.
     last: Option<u64>,
-    /// The frame time the last frame counts in (`shown`), in emulated
-    /// ns: the next frame may show in the one after it.
+    /// The last frame's turn (`shown`), in emulated ns: the next frame
+    /// may show a frame time after it.
     slot: Option<u64>,
 }
 
@@ -195,7 +189,8 @@ impl FrameCap {
     /// turn would otherwise wait for the next one, a frame shown every
     /// third retrace in place of every second (a cap of 30 on a display
     /// of 60.00006 Hz showed 25 frames a second).
-    pub fn wait(&self, at: u64, refresh_ns: Option<u64>) -> Option<u64> {
+    pub fn wait(&mut self, at: u64, refresh_ns: Option<u64>) -> Option<u64> {
+        self.retrace = refresh_ns;
         let frame = self.frame_ns()?;
         if refresh_ns.is_some() && self.cap == Cap::Auto {
             return None;
@@ -204,31 +199,34 @@ impl FrameCap {
             return None;
         }
         let slack = refresh_ns.map_or(0, |refresh| refresh / 2);
-        let next = ((self.slot? + slack) / frame + 1) * frame - slack;
+        let next = (self.slot? + frame).saturating_sub(slack);
         (at < next).then_some(next)
     }
 
-    /// A frame showed at `at`. A frame later than a frame time after the
-    /// last counts in the frame time after the last one's, or no more
-    /// than `CATCH_UP_NS` before it showed: the frames after it may show
-    /// at once until they are back in step.
+    /// A frame showed at `at`. Its turn was a frame time after the last
+    /// one's, and it counts there if it showed by then; a later one
+    /// counts when it showed, so the frames after a late one don't make
+    /// up for it. A present that waits for the retrace shows at the
+    /// retrace nearest its turn (`wait`), up to half a retrace before
+    /// or after it, and counts at the turn: the retraces it shows at
+    /// then keep the cap's rate (60 a second on a display of 70 Hz, a
+    /// frame every retrace with one in seven left out).
     pub fn shown(&mut self, at: u64) {
         self.last = Some(at);
+        let slack = self.retrace.map_or(0, |refresh| refresh / 2);
         self.slot = Some(match (self.slot, self.frame_ns()) {
-            (Some(slot), Some(frame)) if at > slot + frame => {
-                (slot + frame).max(at.saturating_sub(CATCH_UP_NS))
-            }
+            (Some(slot), Some(frame)) if at <= slot + frame + slack => slot + frame,
             _ => at,
         });
     }
 
-    /// The steady timing of the cap's frames, a retrace at every
-    /// multiple of its frame time, while a program shows its frames
-    /// through it (one in the last second before `now`): the window,
-    /// with `vrr`, refreshes at those times. None under `auto` while the
-    /// program waits for the retrace, which `auto` doesn't hold.
+    /// A steady timing at the cap's rate, a retrace at every multiple
+    /// of its frame time, while a program shows its frames through it
+    /// (one in the last second before `now`): the window, with `vrr`,
+    /// refreshes at those times. None under `auto` while the program
+    /// waits for the retrace, which `auto` doesn't hold.
     pub fn refresh_timing(&self, now: u64) -> Option<CrtTiming> {
-        if self.synced && self.cap == Cap::Auto {
+        if self.retrace.is_some() && self.cap == Cap::Auto {
             return None;
         }
         let frame = self.frame_ns()? as u32;
@@ -266,11 +264,22 @@ impl Shared {
         self.update(|cap| cap.shown(at));
     }
 
-    /// `FrameCap::wait`, which also notes whether the present waits for
-    /// the retrace.
+    /// `shown` for a present that asked `wait` with `refresh_ns` some
+    /// time before, with a save state loaded in between perhaps (the
+    /// 3dfx card's held swap), which doesn't keep what `wait` noted.
+    pub fn shown_later(&self, at: u64, refresh_ns: Option<u64>) {
+        self.update(|cap| {
+            cap.retrace = refresh_ns;
+            cap.shown(at);
+        });
+    }
+
+    /// `FrameCap::wait`.
     pub fn wait(&self, at: u64, refresh_ns: Option<u64>) -> Option<u64> {
-        self.update(|cap| cap.synced = refresh_ns.is_some());
-        self.get().wait(at, refresh_ns)
+        let mut cap = self.0.get();
+        let until = cap.wait(at, refresh_ns);
+        self.0.set(cap);
+        until
     }
 
     /// Forget the frames shown, as a new machine or a loaded state that
@@ -324,9 +333,9 @@ mod tests {
     fn a_frame_soon_after_waits_for_the_next_frame_time() {
         let mut cap = cap(20);
         cap.shown(10 * MS);
-        assert_eq!(cap.wait(12 * MS, None), Some(50 * MS));
-        assert_eq!(cap.wait(49 * MS, None), Some(50 * MS));
-        assert_eq!(cap.wait(50 * MS, None), None);
+        assert_eq!(cap.wait(12 * MS, None), Some(60 * MS));
+        assert_eq!(cap.wait(59 * MS, None), Some(60 * MS));
+        assert_eq!(cap.wait(60 * MS, None), None);
     }
 
     #[test]
@@ -335,8 +344,8 @@ mod tests {
         cap.shown(50 * MS);
         assert_eq!(cap.wait(120 * MS, None), None);
         cap.shown(120 * MS);
-        // In the frame time of 100 ms to 150 ms: the next at 150 ms.
-        assert_eq!(cap.wait(130 * MS, None), Some(150 * MS));
+        // The next a frame time after it, not after the turn it missed.
+        assert_eq!(cap.wait(130 * MS, None), Some(170 * MS));
     }
 
     #[test]
@@ -358,12 +367,7 @@ mod tests {
             "{} ns",
             second
         );
-        assert!(
-            shown
-                .windows(2)
-                .skip(1)
-                .all(|w| w[1] - w[0] == 1_000_000_000 / 30)
-        );
+        assert!(shown.windows(2).all(|w| w[1] - w[0] == 1_000_000_000 / 30));
     }
 
     /// The times a program's frames show at under a cap of `fps`, when
@@ -393,10 +397,9 @@ mod tests {
     fn a_program_faster_than_the_cap_gets_the_cap() {
         let frame = 1_000_000_000 / 60;
         let shown = presented(60, &[frame * 2 / 3], 121);
-        // The first frames come as soon as they are drawn, one in each
-        // frame time; from the fourth on each waits for its turn.
+        // Every frame after the first waits for its turn.
         assert!(
-            shown[3..].windows(2).all(|w| w[1] - w[0] == frame),
+            shown.windows(2).all(|w| w[1] - w[0] == frame),
             "{:?}",
             &shown[..6]
         );
@@ -404,32 +407,41 @@ mod tests {
     }
 
     #[test]
-    fn a_late_frame_lets_the_next_ones_catch_up() {
-        // Nine frames of a fifth of a frame time, then one of four: the
-        // late one's missed frame times go to the fast ones after it, 60
-        // a second; letting none catch up held every fast one and gave 46.
+    fn the_frames_after_a_late_one_dont_make_up_for_it() {
+        // Nine frames of a fifth of a frame time, then one of four: each
+        // fast one waits a frame time, the ones after the late one too,
+        // so ten frames take thirteen frame times, 46 a second. Shown at
+        // once until the number was made up, they gave 60, three of them
+        // a fifth of a frame time apart after every late one.
         let frame = 1_000_000_000 / 60;
         let mut work = vec![frame / 5; 9];
         work.push(frame * 4);
         let shown = presented(60, &work, 601);
-        assert!((rate(&shown) - 60.0).abs() < 0.5, "{}", rate(&shown));
+        assert!(shown.windows(2).all(|w| w[1] - w[0] >= frame));
+        assert!(
+            (rate(&shown) - 600.0 / 13.0).abs() < 0.1,
+            "{}",
+            rate(&shown)
+        );
     }
 
     #[test]
-    fn a_program_with_long_frames_now_and_then_gets_the_cap() {
+    fn a_program_with_long_frames_now_and_then_shows_no_bursts() {
         // Like Grom's menu at 150,000 cycles: frames of 2.6 ms, a 35 ms
         // step of its simulation in one frame in three, and once a second
         // five steps in one frame. Uncapped that is 61 frames a second,
-        // and a cap of 60 shows 60.
+        // two in three of them 2.6 ms after the one before. Under a cap
+        // of 60 none comes sooner than a frame time after the last, and
+        // no second has more than 60.
         let ms = 1_000_000;
+        let frame = 1_000_000_000 / 60;
         let mut work = Vec::new();
         for i in 0..23 {
             work.extend([2_600_000, 2_600_000]);
             work.push(if i == 11 { 190 * ms } else { 37 * ms });
         }
         let shown = presented(60, &work, 1200);
-        assert!(rate(&shown) > 59.5, "{}", rate(&shown));
-        // No second shows more than the cap and the frames it caught up.
+        assert!(shown.windows(2).all(|w| w[1] - w[0] >= frame));
         let late = shown.windows(2).filter(|w| w[1] - w[0] > 100 * ms).count();
         assert!(late > 0);
         for (i, &t) in shown.iter().enumerate() {
@@ -438,7 +450,7 @@ mod tests {
                 .take_while(|&&u| u < t + 1_000_000_000)
                 .count();
             assert!(
-                in_second <= 60 + 15,
+                in_second <= 60,
                 "{} frames in the second from {} ns",
                 in_second,
                 t
@@ -447,34 +459,24 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_a_second_late_lets_a_quarter_of_a_second_catch_up() {
+    fn a_frame_a_second_late_lets_none_show_at_once() {
         let frame = 1_000_000_000 / 60;
         let mut cap = cap(60);
         cap.shown(frame);
         let late = 1_000_000_000 + frame;
+        assert_eq!(cap.wait(late, None), None);
         cap.shown(late);
-        // It counts a quarter of a second before it showed, at 0.767 s:
-        // the 15 frames after it show at once, in the frame times up to
-        // the one it showed in, and the next waits.
-        let mut now = late;
-        let mut at_once = 0;
-        while cap.wait(now + 1000, None).is_none() {
-            now += 1000;
-            cap.shown(now);
-            at_once += 1;
-        }
-        assert_eq!(at_once, 15);
+        assert_eq!(cap.wait(late + 1000, None), Some(late + frame));
     }
 
     #[test]
     fn a_retrace_a_little_faster_than_twice_the_cap_shows_every_other_one() {
         // A display of 60.00006 Hz under a cap of 30: every frame waits for
-        // the retrace, and shows at the one nearest its turn. The first
-        // two come as they are drawn, in two frame times of the cap.
+        // the retrace, and shows at the one nearest its turn.
         let refresh = 16_666_650;
         let shown = at_retraces(30, refresh, 61);
         assert!(
-            shown[1..].windows(2).all(|w| w[1] - w[0] == 2 * refresh),
+            shown.windows(2).all(|w| w[1] - w[0] == 2 * refresh),
             "{:?}",
             &shown[..6]
         );
@@ -489,12 +491,15 @@ mod tests {
     }
 
     #[test]
-    fn fast_and_slow_frames_in_turn_average_out() {
-        // Half a frame time, then one and a half: on average the cap's,
-        // and the cap holds only the first fast frame.
+    fn of_fast_and_slow_frames_in_turn_only_the_fast_ones_wait() {
+        // Half a frame time, then one and a half: the fast one waits for
+        // its turn, a frame time after the slow one showed, and the slow
+        // one shows when it is done, so two frames take two and a half
+        // frame times, 24 a second under a cap of 30.
         let frame = 1_000_000_000 / 30;
         let shown = presented(30, &[frame / 2, frame * 3 / 2], 61);
-        assert!((rate(&shown) - 30.0).abs() < 0.5, "{}", rate(&shown));
+        assert!(shown.windows(2).all(|w| w[1] - w[0] >= frame));
+        assert!((rate(&shown) - 24.0).abs() < 0.1, "{}", rate(&shown));
     }
 
     #[test]
@@ -509,6 +514,25 @@ mod tests {
         assert!((rate(&shown) - 60.0).abs() < 0.5, "{}", rate(&shown));
         let gaps = shown.windows(2).map(|w| w[1] - w[0]);
         assert!(gaps.clone().all(|gap| gap <= 2 * (1_000_000_000 / 70)));
+    }
+
+    #[test]
+    fn a_frame_at_the_retrace_after_its_turn_counts_at_the_turn() {
+        // 60 a second on a display of 70 Hz: a frame whose turn is 7 ms
+        // before a retrace shows at it, and the next one's turn is a
+        // frame time after that turn. Without the retrace, as a held
+        // swap finds it after a state is loaded unless the swap says so
+        // (`shown_later`), it would count as late, 7 ms later.
+        let (frame, refresh) = (1_000_000_000 / 60, 1_000_000_000 / 70);
+        let shared = Shared::default();
+        shared.set(Some(60));
+        shared.shown(10 * MS);
+        let at = 10 * MS + frame + 7 * MS;
+        shared.shown_later(at, Some(refresh));
+        assert_eq!(shared.get().slot, Some(10 * MS + frame));
+        assert_eq!(shared.get().last(), Some(at));
+        shared.shown_later(at + frame + 7 * MS, None);
+        assert_eq!(shared.get().slot, Some(at + frame + 7 * MS));
     }
 
     /// The times frames show at under a cap of `fps` when each waits for
@@ -614,8 +638,8 @@ mod tests {
     fn a_state_keeps_the_last_frame_and_not_the_cap() {
         let shared = Shared::default();
         shared.set(Some(30));
-        shared.shown(123);
-        // Late: it counts a quarter of a second before it showed.
+        shared.shown(480 * MS);
+        // At a retrace before its turn: it counts at the turn.
         shared.shown(500 * MS);
         let mut w = Writer::new();
         shared.save(&mut w);

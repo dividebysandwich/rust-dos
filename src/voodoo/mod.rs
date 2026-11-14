@@ -1846,7 +1846,8 @@ impl Voodoo {
     /// Graphics' or Voodoo2's, or a Banshee's (`banshee_swap`).
     fn swap_now(&mut self, data: u32, now: Now, turn: u64, effect: &mut Effect) {
         // Within the PIT tick of its turn, a swap counts from its turn.
-        self.frame_cap.shown(self.swap_shows_at(data, now).max(turn));
+        let at = self.swap_shows_at(data, now).max(turn);
+        self.frame_cap.shown_later(at, self.swap_refresh_ns(data));
         if self.banshee.is_some() {
             self.banshee_swap(data, now, effect);
             return;

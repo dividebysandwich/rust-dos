@@ -980,7 +980,7 @@ fn its_swaps_are_the_frames_drawn_while_it_shows() {
 }
 
 #[test]
-fn the_frame_rate_cap_holds_swaps_to_its_frame_times() {
+fn the_frame_rate_cap_holds_swaps_a_frame_time_apart() {
     let mut bus = bus(Board::Standard);
     init(&mut bus);
     bus.set_fps_cap(Some(20));
@@ -991,25 +991,27 @@ fn the_frame_rate_cap_holds_swaps_to_its_frame_times() {
     w(&mut bus, SWAPBUFFER_CMD, 0);
     assert_eq!(front(&bus), 1, "swapped at once");
     assert!(bus.hold.is_none());
-    // One soon after waits for the next 50 ms mark, and the program
-    // with it.
+    // One soon after waits for its turn, 50 ms after the first, and the
+    // program with it.
     w(&mut bus, SWAPBUFFER_CMD, 0);
     assert_eq!(front(&bus), 1, "not swapped yet");
     let hold = bus.hold.expect("the program waits");
-    assert!((due_ms(hold.until) - 50.0).abs() < 0.01, "due at {} ms", due_ms(hold.until));
-    wait_ms(&mut bus, 41.0);
+    assert!((due_ms(hold.until) - 60.0).abs() < 0.01, "due at {} ms", due_ms(hold.until));
+    wait_ms(&mut bus, 51.0);
     assert_eq!(front(&bus), 0, "swapped at its time");
     // One later than its turn happens when it comes, and the next waits
-    // for the mark after it.
+    // 50 ms from then: it doesn't make up for the late one.
     wait_ms(&mut bus, 70.0);
+    let late = bus.clock.now_ns() as f64 / 1e6;
     w(&mut bus, SWAPBUFFER_CMD, 0);
     assert_eq!(front(&bus), 1, "a late swap isn't held");
     w(&mut bus, SWAPBUFFER_CMD, 0);
-    assert!((due_ms(bus.hold.unwrap().until) - 150.0).abs() < 0.01);
+    let due = due_ms(bus.hold.unwrap().until);
+    assert!((due - late - 50.0).abs() < 0.05, "due at {} ms after one at {} ms", due, late);
     // A write behind the held swap waits for it.
     w(&mut bus, COLOR0, 0);
     assert_eq!(front(&bus), 0);
-    assert!(bus.clock.now_ns() >= 150_000_000);
+    assert!(bus.clock.now_ns() as f64 / 1e6 >= due - 0.01);
     // Without the cap, swaps happen at once.
     bus.set_fps_cap(None);
     w(&mut bus, SWAPBUFFER_CMD, 0);

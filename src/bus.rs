@@ -2980,8 +2980,8 @@ impl Bus {
 
     /// The timing the window refreshes at with a variable refresh rate
     /// while a program shows frames through the frame rate cap: the
-    /// cap's frame times, when the cap is below the monitor's refresh
-    /// rate (`FrameCap::refresh_timing`).
+    /// cap's rate, when the cap is below the monitor's refresh rate
+    /// (`FrameCap::refresh_timing`).
     pub fn frame_cap_timing(&mut self) -> Option<crate::video::crt::CrtTiming> {
         let cap = self.frame_cap.get().refresh_timing(self.clock.now_ns())?;
         (cap.hz() < self.refresh_timing().hz()).then_some(cap)
