@@ -3,33 +3,19 @@
 This document says why the card exists, how it is defined, how the
 emulator draws it and what the guest software does with it. What a guest
 sees of the card is specified in `toadforce-spec.md`. Facts taken from
-other projects have their source in "References". Work that isn't done
-is in the project's issues, which the text names where it touches them.
+other projects have their source in "References".
 
 ## The problem
 
-The newest 3D card rust-dos emulates is the Voodoo3. Its limits are the
-real card's: 16-bit colour and depth, 256x256 textures, two texture
+The Voodoo3, the newest real 3D card rust-dos emulates, has the real
+card's limits: 16-bit colour and depth, 256x256 textures, two texture
 units, no compressed textures, no hardware transform and lighting, and a
 short list of texture stage operations. Games from 2000 on were written
 for the GeForce 256, GeForce2, Radeon and their successors, and many
-either require what those cards added or take untested paths without it.
-
-Cases seen on the Voodoo3:
-
-- Zanzarah reads DDS textures only when `EnumTextureFormats` lists a
-  DXTn format. Without one it reads BMP files through code with two bugs
-  of its own (#583, #606). The game patches written for them (#593,
-  #613) were closed, because they work around a card below the game's
-  minimum, where the answer is a card that meets it.
-- Grom asserts when no listed texture format has 8 bits a channel
-  (#645).
-- Giants: Citizen Kabuto draws its terrain tiles wrong without bump
-  mapping, and its options screen lists object bump mapping, landscape
-  bump mapping and environment mapping as unavailable.
-- Max Payne asks for A8R8G8B8, X8R8G8B8, DXT1, DXT3, DXT5, the bump
-  formats and a D24S8 depth buffer, and is refused each.
-- #615 asks for a card with DXTn and collects these games.
+either require what those cards added or take untested paths without
+it: Zanzarah reads its DDS textures only when a DXTn format is listed,
+Grom asserts when no texture format has 8 bits a channel, and Giants:
+Citizen Kabuto draws its terrain wrong without bump mapping.
 
 Emulating a real card of that class at register level is not practical
 today. 86Box has no merged NV3, TNT or GeForce device. envytools' prose
@@ -46,11 +32,10 @@ driver, which uses every corner of the chip.
 ToadForce is a PCI display adapter that never existed. rust-dos defines
 it: its PCI identity, registers, memory layout, command set,
 capabilities, and the arithmetic of its pixel pipeline. Its feature set
-is that of the cards the target games were written for, taken as a
-union: hardware transform and lighting, four textures at once, DXT1 to
-DXT5, 32-bit colour, 24-bit depth with stencil, cube maps, and every
-Direct3D 7 and 8 texture stage operation, including the three bump
-mapping ones.
+is that of the cards of 2000 to 2002, taken as a union: hardware
+transform and lighting, four textures at once, DXT1 to DXT5, 32-bit
+colour, 24-bit depth with stencil, cube maps, and every Direct3D 7 and 8
+texture stage operation, including the three bump mapping ones.
 
 Five points define the design:
 
@@ -79,28 +64,6 @@ Five points define the design:
 5. The built-in Windows drives the card. The command set is shaped so
    that a driver for a booted Windows 98 is a thin translation of
    Direct3D's driver interface (see "A booted Windows 98").
-
-## Target games
-
-The card was designed against nine games. The first eight decided what
-level 1 contains, from what each asks of a card on the built-in Windows.
-
-| Game | Year | API | What it takes of the card beyond a Voodoo3 |
-|---|---|---|---|
-| Giants: Citizen Kabuto | 2000 | Direct3D 7 | The T&L HAL device, `DOTPRODUCT3`, `MODULATE4X` and `ADDSMOOTH`, texture coordinates from the camera-space position and the reflection vector, cube maps and 256-texel render targets, a 32-bit target with a stencil z-buffer |
-| The Operative: No One Lives Forever | 2000 | Direct3D 7 | DXT1, DXT3 and DXT5 textures, a z-buffer with 8 bits of stencil |
-| MDK2 | 2000 | OpenGL | 32-bit textures; with "Hardware T&L" ticked in its launcher, OpenGL lighting with lights and materials |
-| Black & White | 2001 | Direct3D 7 | An 800x600 scene of screen vertices: it transforms by itself |
-| Oni | 2001 | OpenGL | It looks up `ARB_multitexture`, `ARB_texture_compression` and `EXT_blend_color`, and plays without them |
-| Max Payne | 2001 | Direct3D 8 | Hardware vertex processing, A8R8G8B8 and DXT1, DXT3, DXT5 textures, D24S8, up to 7 point and spot lights |
-| Zanzarah | 2002 | Direct3D 7 | DXTn in the texture format list (#583, #606); the T&L HAL device |
-| Grom: Terror in Tibet | 2002 | Direct3D | A texture format with 8 bits a channel (#645) |
-| Nocturne | 1999 | Direct3D 6 interfaces, from its DirectX 7 renderer | `DDCAPS_3D` in the driver's caps, A8R8G8B8 textures and a 32-bit target with a 32-bit z-buffer (D24X8 on the card) |
-
-Nocturne needs nothing of the card that the eight didn't. It is on the
-list for what it asks of the host renderer: it locks its back buffer and
-copies a z-buffer every frame (see "Between the card and the host
-renderer").
 
 ## Precedents
 
@@ -138,46 +101,14 @@ partly ported from Wine's, under the terms in
 key. Version 3.0 replaced that with a pair of general shaders that read
 the state from a uniform buffer, with specialised variants compiled in
 the background, to remove the pause when a new key first appears.
-Dolphin made the same move in 2017. Taken: the per-key generator first,
-because it is simpler to test against a reference, with the general
-shader kept as the answer if compile pauses show up in games (see
-"Shader cache").
-
-**xemu's NV2A.** Hashes a `ShaderState` (fixed-function vertex state or
-a vertex program, the register combiners, the texture modes including
-the two bump environment modes and the dot product modes), keeps an LRU
-cache of GLSL programs, and stores compiled program binaries on disk by
-hash. It has OpenGL and Vulkan back ends and no software one. Taken: the
-disk cache of program binaries.
+Dolphin made the same move in 2017. Taken: the per-key generator,
+because it is simpler to test against a reference.
 
 **Dolphin.** Moved its combiner emulation from floating point to integer
 shader arithmetic in 2014, because float results differed from the
 console and between drivers. Taken: integer arithmetic for the stage
 cascade, in the reference and in the generated shaders, so the two give
 the same values from the same inputs.
-
-**SoftGPU (VMDisp9x, VMHAL9x, Mesa9x).** Working, MIT-licensed Windows
-9x drivers for virtual cards: a 16-bit display minidriver built with
-Open Watcom on top of Microsoft's DIB engine, a VxD, and a 32-bit
-DirectDraw and Direct3D HAL DLL that answers the DirectX 8 driver
-interface, with hardware T&L, and draws through Mesa. It does not do
-bump mapping or shaders. Taken: the reference for a Windows 98 driver,
-including how DirectDraw finds the 32-bit DLL (`DCICOMMAND` with
-`DDGET32BITDRIVERNAME`) and how OPENGL32 finds an installable client
-driver (the `OPENGL_GETINFO` escape and the `OpenGLDrivers` registry
-key).
-
-**qemu-3dfx.** Marshals Glide and OpenGL calls from guest wrapper DLLs
-to the host's libraries. Direct3D reaches the host through wined3d
-running in the guest on the OpenGL pass-through. Not taken: what the
-guest sees is then the host's OpenGL driver, with its extension list and
-its behaviour, which differs from machine to machine and can't be saved
-or replayed.
-
-**virgl and Venus.** Send Gallium state with TGSI shaders, or serialised
-Vulkan. Both suit guests that have a Mesa driver stack; Windows 98 has
-none, and games of 2000 to 2002 speak the fixed-function APIs, which a
-state-level command set carries with far less guest code.
 
 ## Rules of the design
 
@@ -197,7 +128,7 @@ state-level command set carries with far less guest code.
 5. **A released level is frozen.** A test holds each released level's
    capability table and command list, and a change to one fails it.
    Level 0 is released. Level 1 is provisional while the emulator's own
-   drivers are its only users (#1083).
+   drivers are its only users.
 6. **Era limits where a game can see them.** Sizes and counts a game
    reads (texture size, simultaneous textures, memory) stay within what
    cards of 2000 to 2002 reported, because games size their data from
@@ -214,7 +145,7 @@ state-level command set carries with far less guest code.
    - The work can go to the GPU whole: untransformed vertices, lights
      and stage state, with buffers and textures uploaded once and found
      again by their place in card memory. The pixels do. The vertex work
-     is the card's on the processor (#1066).
+     is the card's on the processor.
    - A command is complete for the guest when `RING_PUT` returns, and
      the GPU need not have drawn it by then. The ownership tracking
      makes up the difference, reading pixels back only when the guest
@@ -222,7 +153,7 @@ state-level command set carries with far less guest code.
 
    The software renderer is the definition, the test reference and the
    fallback. It is several times slower than a GPU, and too slow for
-   some target games at their usual resolutions. Speed work on it comes
+   some games at their usual resolutions. Speed work on it comes
    after the OpenGL renderer's, and no feature of the card is held back
    or bent to make it faster.
 
@@ -349,10 +280,9 @@ past what was submitted) drops the rest of the submission.
 
 The emulator exposes the decoder to the built-in Windows as a function
 (`submit(&[u32])`) that takes the same words. The built-in Direct3D
-calls it without going through the bus, which removes the cost #538
-measures on the Voodoo3 (12 to 15% of the emulation thread spent on
-register writes). A test feeds the same command stream through the ring
-and through `submit` and compares the results.
+calls it without going through the bus, which saves a register write
+through the bus for every word. A test feeds the same command stream
+through the ring and through `submit` and compares the results.
 
 ### Commands of level 1
 
@@ -486,41 +416,39 @@ Reasons for the values a game can see:
 - Four textures at once and 2048 texels a side are within what cards of
   2001 reported, by our recollection of the GeForce3. No capability dump
   was found to confirm these numbers, or the counts of lights, clip
-  planes and anisotropy (#1083 asks for one before the level is frozen).
+  planes and anisotropy.
   A game that loops over the count, or sizes a shadow or light map from
   the size, gets a value it was tested with. Eight textures at once
   would cost nothing to draw, and would save a game a pass that a
   current GPU doesn't notice. Cards reported eight only from late 2002,
-  by our recollection, so most of the target games never ran with that
+  by our recollection, so most games of the period never ran with that
   value, and some engines size fixed arrays from the largest one their
   developers saw.
 - There is no W buffer. Games used one against z-fighting in 16-bit
   depth, and only on cards that reported it; the GeForce cards, by our
   recollection, did not, so the z-buffer path is the one games were
-  tested on most, and 24-bit depth removes most of the reason for it. Of
-  the target games only Giants takes a W buffer when one is offered, as
-  on the Voodoo3, and it plays on plain Z without (#1081). A later level
-  can add it. A frozen level could never drop it.
+  tested on most, and 24-bit depth removes most of the reason for it.
+  Giants: Citizen Kabuto, which takes the Voodoo3's W buffer, plays on
+  plain Z without one. A later level can add it. A frozen level could
+  never drop it.
 - The stage operations go beyond any one real card on purpose. A
   GeForce2 had `DOTPRODUCT3` and, by the evidence found, no `BUMPENVMAP`
   (NVIDIA lists `NV_texture_shader` for the GeForce3 family only); the
   Matrox G400 and the Radeon had `BUMPENVMAP`. With generated shaders
   each operation costs a few lines, and a card that accepts all of them
-  never sends a game down a fallback path. This also settles #488 and
-  #491 for games that move to this card.
-- A8R8G8B8 and the 8-bit formats are what Grom needs; DXT1 to DXT5 what
-  Zanzarah needs. Max Payne also asks about R8G8B8, Q8W8V8U8, W11V11U10
-  and D32, which the level lacks, and takes what it has.
+  never sends a game down a fallback path.
+- The texture formats are those games of the period ask for: 32-bit
+  with alpha, the 8-bit ones, and DXT1 to DXT5. A game that also asks
+  for one the level lacks (Max Payne asks about R8G8B8, Q8W8V8U8,
+  W11V11U10 and D32) takes one it has.
 - Hardware T&L with 8 lights is what Direct3D 7's T&L HAL devices
-  offered. Giants makes the T&L HAL device and on it turns on the bump
-  mapping it draws with `DOTPRODUCT3` (reviewers tie its Dot3 to a T&L
-  card). Max Payne lights with up to 7 point and spot lights at once and
-  Giants with 3 directional ones.
-- Vertex blending is by weights, without indices. Max Payne draws its
-  characters with indexed blending (28 world matrices) on software
-  vertex processing. With the capabilities reporting no indexed
-  blending, Direct3D 8 does it and tweening on the processor, as it did
-  on the cards of 2001.
+  offered. Some games turn features on only for a T&L device: Giants:
+  Citizen Kabuto makes the T&L HAL device and draws its bump mapping
+  there with `DOTPRODUCT3`.
+- Vertex blending is by weights, without indices. With the capabilities
+  reporting no indexed blending, Direct3D 8 does it and tweening on the
+  processor, as it did on the cards of 2001; Max Payne draws its
+  characters that way, with 28 world matrices.
 
 The Direct3D devices offered on this card are the HAL and the T&L HAL.
 The T&L HAL's description has `D3DDEVCAPS_HWTRANSFORMANDLIGHT` and the
@@ -545,17 +473,10 @@ GeForce3 families: `ARB_multitexture`, `ARB_texture_compression`,
 `NV_vertex_array_range`, `NV_texture_env_combine4`) are left out: a game
 that finds them missing uses its ARB path, which every other vendor's
 card took. The card has the state behind each of them. The built-in
-OPENGL32 offers OpenGL 1.1 on it with fewer extensions (#1077, see "The
-built-in Windows").
+OPENGL32 offers OpenGL 1.1 on it with fewer extensions (see "The built-in
+Windows").
 
-### Level 2: Direct3D 8.1 shaders (outline)
-
-Not designed in detail and not built (#1075): none of the nine target
-games needs it. It would add vertex shaders 1.1 and pixel shaders 1.1 to
-1.4 as Direct3D bytecode (`DEFINE_SHADER`, `SET_SHADER`,
-`SET_SHADER_CONSTANTS`), vertex streams with declarations, 32-bit
-indices, volume textures, and indexed vertex blending. On level 1,
-Direct3D 8 runs vertex shaders on the processor
+Level 1 has no shaders. Direct3D 8 runs vertex shaders on the processor
 (`src/win32/d3d8/shader.rs`), as it did on a GeForce2, and reports no
 pixel shaders.
 
@@ -651,7 +572,7 @@ smoke and particles.
 
 | Source | Bound |
 |---|---|
-| Vertex arithmetic on the host: the vertex shader's conversion of the card's screen positions, rounded to 1/256 of a pixel, to the host's coordinates, and its operation order and fused multiply-add once it transforms and lights (#1066) | positions within 1/256 pixel, so a pixel on a triangle's edge may fall on the other side |
+| Vertex arithmetic on the host: the vertex shader's conversion of the card's screen positions, rounded to 1/256 of a pixel, to the host's coordinates, and its operation order and fused multiply-add once it transforms and lights | positions within 1/256 pixel, so a pixel on a triangle's edge may fall on the other side |
 | Interpolation of colours and coordinates | 1 in 255 on a stage input. An operation that multiplies its result passes the step on multiplied: 8 after `DOTPRODUCT3` and `MODULATE2X` (Giants' ground, measured) |
 | A sample of a 2D texture | 1 in 255, and 2 with a projected texture. The shader takes the card's steps in the card's whole numbers (`shader::SAMPLING`): the level of detail, the levels and the filter, the coordinates in 1/256 of a texel, the weights of 8 bits. What is left is a coordinate or a level of detail that the host's interpolation puts on the other side of one of those steps: a weight one of 256 off, or the next level where the level of detail is within 1/4096 of the change. Coordinates the card has exactly (a texel to a pixel from whole coordinates) give the same texels |
 | A sample of a cube map | 1 in 255 on a smooth texture, 3 where neighbouring texels differ by most of a channel's range. The host's own filter samples it: it rounds a weight to its 8 bits where the card cuts it off, works out the face's coordinates in its own arithmetic, and picks the mip level |
@@ -660,7 +581,7 @@ smoke and particles.
 | The alpha test and the colour key after a filtered sample | a pixel whose alpha is within the sample's bound of the reference is drawn by one renderer and not by the other. Measured: 0 to 6 pixels a frame of Zanzarah's leaves |
 | Depth | 1 step of a 16-bit buffer, 4 steps of a 24-bit one: the host interpolates depth in single precision and rounds it by itself. A depth half-way between two steps goes either way, and so does a test between two surfaces closer than the bound: Giants' marks on the ground, 2 steps of 24 bits in front of it, differ by more than 8 on 0.06% of the frame's pixels, where one renderer alone drew the mark |
 | Blending done by the host GPU | 1 in 255 on a channel; one step of the target's on a 16-bit target |
-| Lines and points | the same pixels, with the same colours where no texture is sampled: the card works out both. Depth and samples are within the bounds above (measured on lines: samples 1 in 255, depth 1 step of 16 bits and 2 of 24). `ZBIAS` moves a line's depth as a triangle's on both. A pixel of a line within half a pixel of where the line's 1 / w falls to 0, or past it, gets its own values at every corner of its square, so a mip filter picks level 0 for it and fog by w takes w as 1 where the centre has no positive 1 / w (#1003) |
+| Lines and points | the same pixels, with the same colours where no texture is sampled: the card works out both. Depth and samples are within the bounds above (measured on lines: samples 1 in 255, depth 1 step of 16 bits and 2 of 24). `ZBIAS` moves a line's depth as a triangle's on both. A pixel of a line within half a pixel of where the line's 1 / w falls to 0, or past it, gets its own values at every corner of its square, so a mip filter picks level 0 for it and fog by w takes w as 1 where the centre has no positive 1 / w |
 | 16-bit targets on a host with no renderable 565 format, or one that doesn't round a blend to the nearest value | blended layers keep 8 bits until they are read back; several steps of the target's |
 
 Tests compare the two renderers on fixed scenes with these bounds (see
@@ -687,8 +608,7 @@ supplied with the draw and are in neither key.
 The fragment key is built (`raster::pipeline`, the steps). The vertex
 key is the design for a vertex shader and isn't built: the card's
 vertex work runs on the processor for both renderers, as code of the
-software renderer (`raster::geometry`, `raster::light`), and moves to
-the GPU with #1066.
+software renderer (`raster::geometry`, `raster::light`).
 
 A key is lowered once into a short list of typed operations (sample
 stage 2, modulate, add signed, clamp, fog blend). Two back ends consume
@@ -716,8 +636,7 @@ with transform and lighting for every vertex before it, on threads the
 emulated machine also needs. The aim is a 640x480 game with one or two
 textures playable on it. A game at 1024x768 with four textures, or one
 that leans on hardware T&L for its vertex counts, doesn't reach full
-speed, and a user with such a game needs a host with OpenGL 3.2. The
-two renderers' frame rates in the target games are in #1071.
+speed, and a user with such a game needs a host with OpenGL 3.2.
 
 It doesn't break rule 2 of the built-in Windows, which keeps a second
 3D pipeline out of the Direct3D layer: this renderer is the card's, as
@@ -736,7 +655,7 @@ directly, at the points where the software renderer would draw them
   vertices after the card's transform, lighting, clipping and culling.
   The card is shaped for a generated vertex shader to do it, with vertex
   buffers in card memory as host buffers cached by offset and page write
-  counters (#1066).
+  counters.
 - **Textures** are host textures decoded once and kept by their
   description (format, size, levels and the offset of each image), with
   the write counters of the pages their images cover. A write to any of
@@ -769,15 +688,13 @@ directly, at the points where the software renderer would draw them
   without a blend as the card's bits widened, so only blended layers
   are wider than the card's.
 - **The visible surface** is shown from its host texture without
-  passing through card memory, which is what #334 asks for on the
-  Voodoo.
+  passing through card memory.
 - **`BLT` and `FILL`** between surfaces that are current on the GPU run
-  there (#502 asks the same for the Banshee).
+  there.
 - **Host options** that don't change what the guest reads (an internal
   resolution scale, multisampling, forced anisotropy, like
   `voodoo_scale` and `voodoo_msaa`) fit the design, since a read-back
-  can be filtered down to the target's own size. The renderer has none
-  (#1079).
+  can be filtered down to the target's own size. The renderer has none.
 
 The renderer is behind `gpu::Host` (`src/toadforce/gl.rs`), on desktop
 OpenGL 3.2, and the window attaches it to the card of a running machine
@@ -892,8 +809,7 @@ line's depth within 1 step of 16 bits and 2 of 24. The tests assert
 these figures and no looser ones. A scene for each declined state
 checks that the software renderer draws it.
 
-CI has no run of these tests: they are run by hand on a host with a GPU
-(#1082).
+They are run by hand on a host with a GPU.
 
 OpenGL through `glow` is kept, instead of adding wgpu or Vulkan, because
 the window, the Voodoo renderer and the libretro core's frontends all
@@ -975,7 +891,7 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   out no addresses the card knows of, so the card reads everything back
   when a write of `RING_PUT` returns, as the specification promises:
   such a driver gets the host's speed only once its reads are known some
-  other way (#1076).
+  other way.
 - **A saved state** is written from a shared card too. It keeps card
   memory with every surface read back into a copy, and what the
   processor wrote of those surfaces over it
@@ -995,7 +911,7 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   buffer of another size. Without a host nothing is counted. A page is
   coarser than a small surface: Giants' 64x64 targets lie 16 KiB apart
   off the page boundaries, so a write to one makes its neighbours'
-  copies stale (#1084).
+  copies stale.
 - **What stays on the host.** A `CLEAR` of a whole surface makes the
   host's copy the newer one whatever card memory holds, so a stale or
   missing copy costs nothing. Games clear and draw small targets every
@@ -1101,15 +1017,6 @@ so two draws that differ in the depth test, the blend, the masks or a
 texture's sampling states share a program. A game of this period sets
 tens to a few hundred distinct state combinations, and each run compiles
 them again.
-
-Two things fit the design and aren't built (#1080). Compiled program
-binaries can be stored on disk by a hash of the generated source
-(`glGetProgramBinary`, core since OpenGL 4.1), so a game's second run
-compiles nothing. If a first run pauses for its compiles, the answer is
-a general shader that reads the lowered operation list from uniforms and
-draws until the specialised one is compiled, which is what DXVK 3.0 and
-Dolphin do. The operation list makes that shader an interpreter of a
-small instruction set.
 
 ### Save states and determinism
 
@@ -1229,13 +1136,13 @@ are the emulator's.
   buffer. Vertex shaders run on the processor.
 - **OpenGL** (`opengl32/`) is 1.1 on the Direct3D 7 device, and so draws
   on this card through the Direct3D HAL, with the extensions it has on a
-  Voodoo3 (Oni and MDK2 play on it). It lights and transforms by itself
-  and hands the device lit vertices (#1078), and it offers none of what
-  OpenGL 1.3 adds, although the card has the states for it (#1077,
-  #1056). Its OpenGL front end (contexts, state, immediate mode, arrays,
-  display lists, pixel transfer) is kept apart from its WGL and Win32
-  parts and takes its calls through one interface, so that a booted
-  Windows can feed the same code (see below).
+  Voodoo3. It lights and transforms by itself and hands the device lit
+  vertices, and it offers none of what OpenGL 1.3 adds, although the
+  card has the states for it. Its OpenGL front end (contexts, state,
+  immediate mode, arrays, display lists, pixel transfer) is kept apart
+  from its WGL and Win32 parts and takes its calls through one
+  interface, so that a booted Windows can feed the same code (see
+  below).
 - **OpenGL's draws wait for each other.** A game that draws a
   triangle or a quad for each `glBegin` and `glEnd` would pay
   Direct3D's work for a draw every time. The primitives of draws that
@@ -1266,7 +1173,7 @@ are the emulator's.
 ### A booted Windows 98
 
 A booted Windows needs a driver, which the project would write and ship.
-None exists (#1076): a booted Windows 98 sees a VESA card. SoftGPU's
+None exists: a booted Windows 98 sees a VESA card. SoftGPU's
 drivers show that a driver is feasible and give MIT-licensed references
 for each part:
 
@@ -1307,11 +1214,6 @@ for each part:
 The driver would be handed to the guest on a disk the emulator
 generates, as `src/shared_disk.rs` does for shared folders.
 
-The driver waits because the built-in Windows runs the target games
-without it, and because it should be written against a command set that
-the built-in Windows has exercised in real games and that is frozen
-(#1083).
-
 ## Configuration
 
 The keys follow the Voodoo's, and CONFIGURATION.md describes them for
@@ -1323,8 +1225,7 @@ users.
 | `toadforce_memory` | `32`, `64`, `128` | `64` |
 | `toadforce_renderer` | `auto`, `opengl`, `software` | `auto`: OpenGL where the window has a desktop OpenGL 3.2 context |
 
-A card with one level of 3D has none to choose, so a key for the highest
-level the card offers comes with level 2 (#1075).
+The card has one level of 3D, so no key chooses one.
 
 ## Testing
 
@@ -1335,12 +1236,12 @@ level the card offers comes with level 2 (#1075).
 - **Wine's conformance tests.** `tests/conformance` runs Wine's ddraw
   and d3d8 tests with a Voodoo3, where the tests of DXT textures in
   video memory, cube maps and T&L lights skip. They don't run on a
-  ToadForce (#1085).
+  ToadForce.
 - **Renderer agreement.** Fixed scenes (one for each stage operation,
   fog mode, blend mode, texture format and filter) drawn by both
   renderers and compared within the bounds of "Where the OpenGL renderer
   may differ" (`toadforce::gl::tests`). They need a desktop OpenGL
-  context and are run by hand; CI doesn't run them (#1082).
+  context and are run by hand; CI doesn't run them.
 - **A game's draws through both renderers.** `POST
   /api/toadforce/capture` records what the card is given
   (`toadforce::capture`), and the ignored test `replay_a_capture`
@@ -1359,49 +1260,7 @@ level the card offers comes with level 2 (#1075).
   was (`tests/video/toadforce_tests.rs`).
 - **Determinism.** The software renderer draws the same pixels with any
   number of workers (`raster::tests`). The determinism tests
-  (`src/debug/determinism_tests.rs`) have no machine with a ToadForce
-  (#1088).
-
-## Alternatives considered
-
-**A real card at register level (GeForce 256/2, Radeon).** It would run
-the vendor's own drivers on a booted Windows with no guest code of ours.
-The documentation isn't there (see "The problem"), the driver would
-exercise undocumented behaviour from its first frame, and the feature
-set would be one card's: a GeForce2 still lacks `BUMPENVMAP`.
-
-**The Voodoo 4 or 5 (VSA-100).** #615 names it. It is close to the
-Voodoo3 the emulator has, and adds 32-bit colour, 2048 texels and DXT
-and FXT1. It has no hardware T&L and no bump mapping operations, so it
-answers Zanzarah and Grom and none of the T&L games. It remains a
-reasonable small project of its own for Glide games in 32-bit colour,
-and this card doesn't replace it.
-
-**Passing API calls to the host (qemu-3dfx's way).** The least code for
-the first picture. The guest then sees the host's driver, save states
-would have to capture a host OpenGL context, and deterministic runs
-would have nothing to draw with.
-
-**Host-side objects, as SVGA3D's surfaces.** Textures and targets would
-live only on the host and be filled by copy commands. It avoids
-read-backs on `Lock`, and costs what card memory gives for nothing: a
-save state that is just memory, `Lock` pointers into the card, and a
-software renderer that draws where the guest looks. The write counters
-and the ownership tracking recover most of its speed.
-
-**Transform and lighting always on the processor.** This is what the
-emulator does now, and both renderers get the same screen vertices, so
-the pixels depend less on the host. The card isn't defined around it:
-a definition that needed the processor would give up the vertex shader
-path that a current GPU runs for nothing, and keep the cost on the
-emulation thread for every frame of the games this card is for (#1066).
-Guest-readable results stay on the processor either way.
-
-**Handing DXT blocks to the host GPU.** Less host memory and no decode.
-Vendors' decoders round differently, so the same texture would give
-different texels on different machines, and the software renderer would
-have to pick one of them. Decoding once in our own code costs little for
-textures of this size.
+  (`src/debug/determinism_tests.rs`) have no machine with a ToadForce.
 
 ## Licensing
 
@@ -1409,9 +1268,7 @@ The card's definition and its emulation are new code under the project's
 GPL-2.0-or-later. Wine's fixed-function shader generator (LGPL-2.1 or
 later) can be ported under the terms the project already uses for Wine's
 Direct3D. VMware's SVGA3D headers (GPL-2.0 or MIT) are a model for the
-command and capability lists; no code is needed from them. xemu's shader
-generators are a reference to read; its licence was not checked for this
-document, and has to be before any of its code is ported. A Windows 98
+command and capability lists; no code is needed from them. A Windows 98
 driver based on VMDisp9x and VMHAL9x (MIT) is compatible with the
 project's licence. Nothing from Microsoft's DDKs is copied: the licence
 of the Windows 98 and 2000 DDK samples wasn't established, so they are
@@ -1443,11 +1300,6 @@ Paravirtual and emulated cards:
 - SoftGPU: https://github.com/JHRobotics/softgpu
 - VMDisp9x: https://github.com/JHRobotics/vmdisp9x
 - VMHAL9x: https://github.com/JHRobotics/vmhal9x
-- qemu-3dfx: https://github.com/kjliew/qemu-3dfx/wiki/QEMU-3D-APIs-Pass-Through
-- virgl: https://docs.mesa3d.org/drivers/virgl/
-- xemu's shader generators: https://github.com/xemu-project/xemu/tree/master/hw/xbox/nv2a/pgraph/glsl
-- xemu's shader cache: https://github.com/xemu-project/xemu/blob/master/hw/xbox/nv2a/pgraph/gl/shaders.c
-- NV2A combiners: https://xboxdevwiki.net/NV2A/Pixel_Combiner
 - envytools' register database: https://github.com/envytools/envytools/tree/master/rnndb/graph
 - 86Box's video devices: https://github.com/86Box/86Box/tree/master/src/video
 - `ARB_ES2_compatibility`, which adds `GL_RGB565` (issue 12 on
@@ -1468,16 +1320,7 @@ Windows driver interfaces:
 - DirectX 8 capabilities through `GetDriverInfo2`:
   https://learn.microsoft.com/en-us/previous-versions/windows/drivers/display/reporting-directx-8-0-style-direct3d-capabilities
 
-Cards and games:
+Cards:
 
 - NVIDIA's table of OpenGL extension support (pages 4 to 6):
   https://developer.download.nvidia.com/opengl/specs/nv30specs.pdf
-- Giants and Dot3: https://www.tomshardware.com/reviews/radeon-8500,385-5.html
-  and https://www.beyond3d.com/content/reviews/13/3
-- Max Payne's requirements: https://legacy.3drealms.com/news/2001/06/max_payne_specs.html
-- Max Payne's use of T&L: https://www.computerbase.de/artikel/grafikkarten/asus-v8440-td-und-v8460-ultra-td-test.74/seite-14
-
-In this repository: #615 (a card with DXTn), #583 and #606 (Zanzarah),
-#645 (Grom), #593 and #613 (the closed game patches), #538 (the cost of
-register writes), #334 and #502 (GPU-owned frame buffers and 2D),
-#488 and #491 (stage operations on the Voodoo3 HAL).

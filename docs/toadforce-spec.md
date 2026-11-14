@@ -18,15 +18,13 @@ there.
 |---|---|
 | 1 to 8 | frozen: implemented in `src/toadforce` and `src/bus/toadforce.rs` |
 | 9, level 0 | frozen, with them |
-| 9, level 1 | provisional (#1083): implemented in `src/toadforce/level1` and drawn by `src/toadforce/raster`. A machine's card offers the level for the emulator's own drivers, and it may change until it is frozen |
+| 9, level 1 | provisional: implemented in `src/toadforce/level1` and drawn by `src/toadforce/raster`. A machine's card offers the level for the emulator's own drivers, and it may change before it is released |
 
-There is no level 2 (#1075).
+There is no level above 1.
 
 A frozen chapter changes only by adding what an earlier reader can't
 have relied on: a new register at a reserved offset, a new command, a
-new level. Where a rule may change or gain an addition, or hasn't been
-compared with the real system, its text names the issue that settles
-it.
+new level.
 
 Each rule here has a test. Those of the card alone (registers, the
 ring, rejections, the display's timing, the commands) are beside the
@@ -351,8 +349,7 @@ wrong.
 ## 6. Display
 
 The card has two sources for the picture, and `MODE_ENABLE` picks one.
-It has no gamma ramp. One would be a table of registers beside
-`PALETTE`, added with the level whose games ask for it (#928).
+It has no gamma ramp.
 
 ### `MODE_ENABLE` = 0: the VGA
 
@@ -425,9 +422,7 @@ the mode shown's values, and all times are the emulated clock's:
 
 - a frame has `MODE_HEIGHT` + `MODE_HEIGHT` / 16 + 1 lines (the
   division rounded down), a round figure near the monitor timings of
-  the time (480 lines in 525, 768 in 806). The blank of a mode's real
-  timing would be a register at a reserved offset whose reset value
-  gives this figure (#1086),
+  the time (480 lines in 525, 768 in 806),
 - a line lasts 1 000 000 000 / (`MODE_REFRESH` x the lines of a frame)
   nanoseconds, rounded down, and a frame its lines' time: up to a
   nanosecond a line less than 1 / `MODE_REFRESH` seconds,
@@ -549,9 +544,7 @@ command is rejected with `BAD_RANGE`.
   pixel's centre. Overlapping memory is read as for a copy: the whole
   source rectangle before any pixel is written. DirectDraw's code in
   the built-in Windows takes the pixel under the top left corner, so
-  that driver sends the card no stretches. Which rule a Windows 98
-  DirectDraw HAL has to match, and whether level 1 gives `BLT` a flag
-  for the other, is #927.
+  that driver sends the card no stretches.
 - With bit 0 of the flags, a source pixel whose value equals the low
   bits of the colour key leaves its destination pixel as it was. The
   comparison covers the bits the source's format defines: bits 24 to 31
@@ -575,10 +568,10 @@ made at once whatever the flag says.
 ### Level 1
 
 Opcodes 0010h to 00FFh. Level 1 has level 0's commands too. This
-section is provisional until the level is frozen (#1083). `LEVEL_MAX`
-reports the level before then, for the drivers that are part of the
-emulator and change with it. A driver in a guest that uses a
-provisional level may find it changed by a later version of the
+section is provisional, and may change before the level is released.
+`LEVEL_MAX` reports the level before then, for the drivers that are
+part of the emulator and change with it. A driver in a guest that uses
+a provisional level may find it changed by a later version of the
 emulator.
 
 A number in an argument is an IEEE single-precision value in its word.
@@ -658,8 +651,7 @@ rectangle isn't checked against the render target.
 | 17 | specular power |
 
 The card has one material, which lights the back of a triangle too
-under `TWO_SIDED_LIGHTING`. OpenGL's back material would be a flag word
-in this command (#1087).
+under `TWO_SIDED_LIGHTING`.
 
 **`SET_LIGHT`, 0016h.** Length 29.
 
@@ -1085,9 +1077,7 @@ point sprite's coordinates.
    its w with `FOG_BY_W` 1: (end - d) / (end - start) for mode 3,
    e^(-density * d) for 1, e^(-(density * d)^2) for 2. With
    `FOGTABLEMODE` and `FOGVERTEXMODE` both 0, a lit vertex's specular
-   alpha is 255, so nothing is fogged; whether Direct3D passes a lit
-   vertex's own specular alpha on there isn't checked against a real
-   Windows (#946).
+   alpha is 255, so nothing is fogged.
 5. The colour key and the alpha test. With `COLORKEYENABLE`, a
    fragment is dropped when a texture with a colour key has the key
    at the texel nearest to the fragment's coordinates. With
