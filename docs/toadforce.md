@@ -1594,9 +1594,11 @@ Each phase is one or a few pull requests that leave main working.
    implementation of phases 1 to 5. The target: every game of the
    primary list (the eight of phase 0 and Nocturne) holds a stable 30
    frames a second, with some to spare, measured on a four-core host
-   as well as a larger one. Reached with #1042 and #1061 on main: the
-   nine run at 39 to 148 on the development machine and the same held
-   to four of its processors (see "Phase 6 results").
+   as well as a larger one. Reached with #1042 and #1061 merged into
+   main: the nine run at 39 to 148 on the eight-core development
+   machine, and at the same rates with the emulator held to four of its
+   logical processors. No real four-core processor was measured (see
+   "Phase 6 results").
 
 Postponed, with no place in the order (decided 2026-11-12):
 
@@ -1866,15 +1868,17 @@ The busy share and the draws are the merged build's on the whole
 machine. The emulated machine runs at full speed in every run but
 main's MDK2. MDK2, Max Payne, No One Lives Forever and Zanzarah are at
 the 60 Hz of their modes, so their room to spare is the thread's idle
-share. The others stop at 85% busy, where `cycles=max` holds the
-thread (issue 1059: without that limit Black & White ran at 42.6).
+share. The others but Giants' beach stop at 84% to 86% busy, where
+`cycles=max` holds the thread (issue 1059: without that limit Black &
+White ran at 42.6).
 
-Four processors change nothing beyond the spread between sessions
-(Giants' menu scene is 1.4 higher there): the card and the display run
-on the emulator's one thread, and the rest of the process needs
-little. The four are an affinity mask on this machine, so they have
-the clock rate and the caches of a 7700X. A four-core processor of an
-older generation is slower for that thread, and none was measured.
+On four processors the rates move by less than 2 frames a second, up
+in some games and down in others (Giants' menu scene 1.4 higher, Grom
+1.9 lower): the card and the display run on the emulator's one
+thread, and the rest of the process needs little. The four are an
+affinity mask on this machine, so they have the clock rate and the
+caches of a 7700X. A four-core processor of an older generation is
+slower for that thread, and none was measured.
 
 Against the table of 2026-11-13: Oni went from 26 to 49 (passes 2 and
 3), Grom from 28 to 148 (pass 1), No One Lives Forever from 40 to the
@@ -1883,40 +1887,46 @@ display's 60 (pass 2, then the direct path from main's 56), MDK2 from
 starting to 39.6 (SafeDisc's check, then the direct path), Nocturne
 from 35 to 41 and Giants from 37 to 43. The scenes are the same but
 for three. Giants' beach is another view of the same place, with 509
-draws for 530, and its menu scene is the heavier one that "What the
-table doesn't show" asks for. Zanzarah's draws less than the Fairy
-Garden did (61 draws for 198), so its row only shows that the game
-holds its cap. MDK2 is still measured in the dive, and the interior
-after it isn't.
+draws for 530, and its menu scene is the one behind the options menu
+that "What the table doesn't show" names, with 981 draws for 995. No
+fight was measured. Zanzarah's scene draws less than the Fairy Garden
+did (61 draws for 198), so its row only shows that the game holds its
+cap. MDK2 is still measured in the dive, and the interior after it
+isn't.
 
 Where the thread's time goes now, from a profile of 20 seconds of
 each scene on the merged build, held to the four processors (shares
 of the busy time; these ran beside other jobs, so their frame rates
 don't count). Black & White's is the profile of #1061's last commit
-on the whole machine. An empty cell is a zone below 1%.
+on the whole machine. A row is the sum of the zones it names. An
+empty cell is a sum below 1%.
 
 | Zone | Black & White | Nocturne | Giants, menu | Giants, beach | Oni | MDK2 | Max Payne | NOLF | Zanzarah | Grom |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `cpu.jit` and `cpu.interp`, the game's code | 64% | 78% | 33% | 44% | 55% | 38% | 56% | 62% | 44% | 49% |
-| `hle.win32` with `.args` and `.after` | 3% | | 28% | 20% | 12% | 13% | 12% | 7% | 15% | 11% |
-| `hle.opengl` and its parts | | | | | 9% | 23% | | | | |
-| `hle.d3d.bind`, `.draw` and `.vertices` | 7% | | 3% | 1% | 6% | 9% | | 6% | 1% | 8% |
+| `cpu.jit` and `cpu.interp`, the game's code | 64% | 78% | 33% | 44% | 55% | 38% | 57% | 62% | 44% | 49% |
+| `hle.win32` with `.args` and `.after` | 4% | | 28% | 21% | 12% | 13% | 12% | 8% | 16% | 13% |
+| `hle.opengl` and its parts | | | | | 9% | 24% | | | | |
+| `hle.d3d.bind`, `.draw` and `.vertices` | 7% | | 3% | 2% | 7% | 10% | 2% | 8% | 3% | 8% |
 | `toadforce` | 10% | | 22% | 20% | 3% | 3% | 15% | 8% | 20% | 19% |
 | `toadforce.host` | 8% | 3% | 7% | 6% | 4% | 3% | 4% | 6% | 9% | 5% |
 
 What is left, none of it needed for the target:
 
 - **The busy share** (issue 1059). `cycles=max` keeps 15% of every
-  frame idle. Black & White, Nocturne, Giants and Oni stop there.
+  frame idle. Black & White, Nocturne, Giants' menu scene and Oni stop
+  there.
 - **Transform and lighting on the GPU** (pass 6, issue 1066). The
   card's own work is 15% to 22% of the thread in Giants, Zanzarah,
   Grom and Max Payne.
 - **The cost of an API call** (pass 4, issue 1067). Giants' state
-  calls are 20% to 28% of its thread with their handlers, and the
-  immediate-mode OpenGL calls of MDK2 and Oni 26% and 14%. No game is
-  below 30 for it, so it has no pull request. Giants is the one it
-  would move, and the first step is to measure how much of
-  `hle.win32` there is the trap and how much the handlers.
+  calls are 21% to 28% of its thread with their handlers, and the
+  immediate-mode OpenGL calls of MDK2 and Oni, `hle.win32` and
+  `hle.opengl` together, 37% and 21%. No game is below 30 for it, so
+  it has no pull request. Giants is the one it would move, and the
+  first step is to measure how much of `hle.win32` there is the trap
+  and how much the handlers.
+- **The host renderer's own calls** (pass 5). `toadforce.host` is 3%
+  to 9% of the thread.
 - **The game's own code** (pass 7). Nocturne is 78% its own code and
   at 41: the recompiler's speed and the busy share are what move it.
 - **Scenes not measured**: MDK2's interiors, a fight in Giants, later
@@ -2034,8 +2044,9 @@ comes last whatever its share.
    10% together, are the place to start.
 
 The table was taken again after passes 1 to 3 and the direct path
-for screen vertices, with four processors and Giants in a heavier
-scene: "Phase 6 results" above. Passes 4 to 7 wait there, since no
+for screen vertices, also with the emulator held to four processors,
+and with Giants in a heavier scene: "Phase 6 results" above. MDK2 is
+still measured in the dive alone. Passes 4 to 7 wait there, since no
 game needs them for the target.
 
 ### Passes 2 and 3: state kept, and OpenGL's draws joined
