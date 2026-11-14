@@ -168,8 +168,8 @@ pub struct Config {
     /// The gamma Glide applies to the guest, or off.
     pub voodoo_gamma: Option<Option<f32>>,
     /// The most frames a second a program may show, on any card
-    /// (`fps_cap`, or its old name `voodoo_fps_cap`): 0 for no cap.
-    pub fps_cap: Option<u32>,
+    /// (`fps_cap`, or its old name `voodoo_fps_cap`).
+    pub fps_cap: Option<crate::frame_cap::Cap>,
     /// The PowerVR card (`powervr`): its chip, or None for no card; and
     /// its texture filtering (`powervr_filter`).
     pub powervr: Option<Option<crate::powervr::Chip>>,

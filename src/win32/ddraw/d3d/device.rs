@@ -1007,8 +1007,6 @@ pub fn begin_scene(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(D3DERR_SCENE_IN_SCENE);
     }
     d.in_scene = true;
-    // A scene draws the next frame (`blt::pace`).
-    crate::win32::ddraw::blt::drew(cpu);
     Some(D3D_OK)
 }
 

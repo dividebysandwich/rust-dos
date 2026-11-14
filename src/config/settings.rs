@@ -26,8 +26,8 @@ pub struct Settings {
     pub aspect: AspectRatio,
     pub vrr: bool,
     /// The most frames a second a program may show, on any card
-    /// (`fps_cap`); None for no cap.
-    pub fps_cap: Option<u32>,
+    /// (`fps_cap`).
+    pub fps_cap: crate::frame_cap::Cap,
     pub filter: Filter,
     pub shader: Shader,
     /// The CRT look's own settings.
@@ -170,7 +170,7 @@ impl Default for Settings {
             fullscreen: false,
             aspect: AspectRatio::None,
             vrr: false,
-            fps_cap: crate::frame_cap::DEFAULT_FPS,
+            fps_cap: crate::frame_cap::DEFAULT,
             filter: Filter::Nearest,
             shader: Shader::None,
             crt: CrtSettings::default(),
@@ -289,7 +289,7 @@ impl Settings {
             fullscreen: config.fullscreen.unwrap_or(default.fullscreen),
             aspect: config.aspect.unwrap_or(default.aspect),
             vrr: config.vrr.unwrap_or(default.vrr),
-            fps_cap: config.fps_cap.map_or(default.fps_cap, |n| (n > 0).then_some(n)),
+            fps_cap: config.fps_cap.unwrap_or(default.fps_cap),
             filter: config.filter.unwrap_or(default.filter),
             shader: config.shader.unwrap_or(default.shader),
             crt: CrtSettings {

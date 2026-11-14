@@ -23,6 +23,12 @@
 //! rate, the cap holds none of its frames, and below it the frame shows
 //! at the retrace nearest its turn (`wait`).
 //!
+//! The default, `auto` (`Cap::Auto`), holds a present that doesn't wait
+//! for the retrace to 60 frames a second and none that does: a program
+//! that waits for the retrace of a 72, 75 or 85 Hz mode shows a frame at
+//! each as on the real machine, and one that counts its frames for its
+//! timing keeps its speed. A rate set by number holds every present.
+//!
 //! The clock is the machine's emulated time, and only it: the turns, the
 //! time a present asks about and the time a held present waits for are
 //! all emulated nanoseconds, and a held present waits as a thread waits
@@ -44,27 +50,77 @@ use crate::video::crt::CrtTiming;
 /// The rates `fps_cap` takes, in frames a second.
 pub const RATES: std::ops::RangeInclusive<u32> = 10..=240;
 
-/// `fps_cap` when the configuration doesn't set it: the rate of most
-/// displays. A program slower than it keeps its own rate.
-pub const DEFAULT_FPS: Option<u32> = Some(60);
+/// A value of `fps_cap`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Cap {
+    /// `off` (or 0): no cap. A machine made without settings (the
+    /// tests, the benchmarks) has none.
+    #[default]
+    Off,
+    /// `auto`, the default: `AUTO_FPS` for a present that doesn't wait
+    /// for the display's retrace, and none for one that does, which
+    /// shows at the display's rate as on the real machine. A program
+    /// that waits for the retrace of a 72, 75 or 85 Hz mode runs at that
+    /// rate, and one that counts frames for its timing at its speed.
+    Auto,
+    /// A rate of `RATES` for every present, also one that waits for the
+    /// retrace of a faster display.
+    Fps(u32),
+}
 
-/// A value of `fps_cap`: Some(None) for `off` (or 0), Some(Some(fps))
-/// for a rate of `RATES`, None for anything else.
-pub fn parse(value: &str) -> Option<Option<u32>> {
+/// `fps_cap` when the configuration doesn't set it.
+pub const DEFAULT: Cap = Cap::Auto;
+
+/// The rate `auto` holds presents that don't wait for the retrace to:
+/// the rate of most displays. A program slower than it keeps its own.
+pub const AUTO_FPS: u32 = 60;
+
+impl Cap {
+    /// The rate of a present that doesn't wait for the retrace, None
+    /// for none.
+    pub fn rate(self) -> Option<u32> {
+        match self {
+            Cap::Off => None,
+            Cap::Auto => Some(AUTO_FPS),
+            Cap::Fps(fps) => Some(fps),
+        }
+    }
+}
+
+/// A rate, None or 0 for no cap.
+impl From<Option<u32>> for Cap {
+    fn from(fps: Option<u32>) -> Cap {
+        match fps {
+            Some(fps) if fps > 0 => Cap::Fps(fps),
+            _ => Cap::Off,
+        }
+    }
+}
+
+/// A value of `fps_cap`: `auto`, `off` (or 0) or a rate of `RATES`;
+/// None for anything else.
+pub fn parse(value: &str) -> Option<Cap> {
     let value = value.trim();
     if value.eq_ignore_ascii_case("off") || value == "0" {
-        return Some(None);
+        return Some(Cap::Off);
+    }
+    if value.eq_ignore_ascii_case("auto") {
+        return Some(Cap::Auto);
     }
     value
         .parse()
         .ok()
         .filter(|fps| RATES.contains(fps))
-        .map(Some)
+        .map(Cap::Fps)
 }
 
 /// `fps_cap`'s value as the configuration file writes it.
-pub fn name(fps: Option<u32>) -> String {
-    fps.map_or("off".to_string(), |fps| fps.to_string())
+pub fn name(cap: Cap) -> String {
+    match cap {
+        Cap::Off => "off".to_string(),
+        Cap::Auto => "auto".to_string(),
+        Cap::Fps(fps) => fps.to_string(),
+    }
 }
 
 /// How long after its last frame a program counts as still showing
@@ -86,9 +142,12 @@ const CATCH_UP_NS: u64 = 250_000_000;
 /// The cap and the frames it let through.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FrameCap {
-    /// The most frames a second, None for no cap: the setting's, which a
-    /// save state doesn't keep.
-    fps: Option<u32>,
+    /// The setting's cap, which a save state doesn't keep.
+    cap: Cap,
+    /// The last present to ask (`Shared::wait`) waited for the
+    /// retrace, which `auto` doesn't hold: the display's own refresh,
+    /// and not the cap's, paces the window then (`refresh_timing`).
+    synced: bool,
     /// When the last frame showed, in emulated ns; None before the
     /// first.
     last: Option<u64>,
@@ -98,13 +157,16 @@ pub struct FrameCap {
 }
 
 impl FrameCap {
-    /// `fps_cap`: None (or 0) for no cap.
-    pub fn set_fps(&mut self, fps: Option<u32>) {
-        self.fps = fps.filter(|&fps| fps > 0);
+    /// `fps_cap`: a `Cap`, or a rate with None (or 0) for no cap.
+    pub fn set(&mut self, cap: impl Into<Cap>) {
+        self.cap = match cap.into() {
+            Cap::Fps(0) => Cap::Off,
+            cap => cap,
+        };
     }
 
-    pub fn fps(&self) -> Option<u32> {
-        self.fps
+    pub fn cap(&self) -> Cap {
+        self.cap
     }
 
     /// When the last frame showed, in emulated ns.
@@ -112,9 +174,10 @@ impl FrameCap {
         self.last
     }
 
-    /// The cap's frame time in ns, if there is a cap.
+    /// The cap's frame time in ns for a present that doesn't wait for
+    /// the retrace, if there is a cap.
     pub fn frame_ns(&self) -> Option<u64> {
-        self.fps.map(|fps| 1_000_000_000 / u64::from(fps))
+        self.cap.rate().map(|fps| 1_000_000_000 / u64::from(fps))
     }
 
     /// A frame that would show at `at` (emulated ns): None if it may,
@@ -122,7 +185,7 @@ impl FrameCap {
     /// (at the first retrace after it, for a present that waits for
     /// one). `refresh_ns` is the display's frame time for a present that
     /// waits for its retrace, which the cap doesn't hold when its own
-    /// frame time is no longer.
+    /// frame time is no longer, nor under `auto`.
     ///
     /// Such a present shows at the retrace nearest its turn, which may
     /// come up to half a retrace before it: the display's rate is never
@@ -132,6 +195,9 @@ impl FrameCap {
     /// of 60.00006 Hz showed 25 frames a second).
     pub fn wait(&self, at: u64, refresh_ns: Option<u64>) -> Option<u64> {
         let frame = self.frame_ns()?;
+        if refresh_ns.is_some() && self.cap == Cap::Auto {
+            return None;
+        }
         if refresh_ns.is_some_and(|refresh| frame <= refresh) {
             return None;
         }
@@ -157,8 +223,12 @@ impl FrameCap {
     /// The steady timing of the cap's frames, a retrace at every
     /// multiple of its frame time, while a program shows its frames
     /// through it (one in the last second before `now`): the window,
-    /// with `vrr`, refreshes at those times.
+    /// with `vrr`, refreshes at those times. None under `auto` while the
+    /// program waits for the retrace, which `auto` doesn't hold.
     pub fn refresh_timing(&self, now: u64) -> Option<CrtTiming> {
+        if self.synced && self.cap == Cap::Auto {
+            return None;
+        }
         let frame = self.frame_ns()? as u32;
         let last = self.last?;
         if now.saturating_sub(last) > ACTIVE_NS {
@@ -185,15 +255,19 @@ impl Shared {
         self.0.get()
     }
 
-    pub fn set_fps(&self, fps: Option<u32>) {
-        self.update(|cap| cap.set_fps(fps));
+    pub fn set(&self, cap: impl Into<Cap>) {
+        let cap = cap.into();
+        self.update(|c| c.set(cap));
     }
 
     pub fn shown(&self, at: u64) {
         self.update(|cap| cap.shown(at));
     }
 
+    /// `FrameCap::wait`, which also notes whether the present waits for
+    /// the retrace.
     pub fn wait(&self, at: u64, refresh_ns: Option<u64>) -> Option<u64> {
+        self.update(|cap| cap.synced = refresh_ns.is_some());
         self.get().wait(at, refresh_ns)
     }
 
@@ -235,7 +309,7 @@ mod tests {
 
     fn cap(fps: u32) -> FrameCap {
         let mut cap = FrameCap::default();
-        cap.set_fps(Some(fps));
+        cap.set(Some(fps));
         cap
     }
 
@@ -438,7 +512,12 @@ mod tests {
     /// The times frames show at under a cap of `fps` when each waits for
     /// a retrace of the display of frame time `refresh`, drawn at once.
     fn at_retraces(fps: u32, refresh: u64, frames: usize) -> Vec<u64> {
-        let mut cap = cap(fps);
+        at_retraces_under(Cap::Fps(fps), refresh, frames)
+    }
+
+    fn at_retraces_under(under: Cap, refresh: u64, frames: usize) -> Vec<u64> {
+        let mut cap = FrameCap::default();
+        cap.set(under);
         let mut shown = Vec::new();
         let mut retrace = refresh;
         for _ in 0..frames {
@@ -454,12 +533,68 @@ mod tests {
     }
 
     #[test]
+    fn auto_holds_a_present_without_the_retrace_to_60() {
+        let mut cap = FrameCap::default();
+        cap.set(Cap::Auto);
+        let mut now = MS;
+        let mut shown = Vec::new();
+        for _ in 0..121 {
+            if let Some(until) = cap.wait(now, None) {
+                now = until;
+            }
+            cap.shown(now);
+            shown.push(now);
+            now += MS;
+        }
+        assert!((rate(&shown) - 60.0).abs() < 0.5, "{}", rate(&shown));
+    }
+
+    #[test]
+    fn auto_shows_a_75_hz_retrace_wait_at_75_and_a_cap_of_60_at_60() {
+        let refresh = 1_000_000_000 / 75;
+        let auto = at_retraces_under(Cap::Auto, refresh, 151);
+        assert!((rate(&auto) - 75.0).abs() < 0.1, "{}", rate(&auto));
+        let sixty = at_retraces_under(Cap::Fps(60), refresh, 121);
+        assert!((rate(&sixty) - 60.0).abs() < 0.5, "{}", rate(&sixty));
+    }
+
+    #[test]
+    fn under_auto_the_window_keeps_the_displays_refresh_while_frames_wait_for_it() {
+        let shared = Shared::default();
+        shared.set(Cap::Auto);
+        shared.wait(10 * MS, None);
+        shared.shown(10 * MS);
+        let timing = shared.get().refresh_timing(20 * MS).unwrap();
+        assert_eq!(timing.frame_ns(), 1_000_000_000 / 60);
+        shared.wait(30 * MS, Some(1_000_000_000 / 75));
+        shared.shown(30 * MS);
+        assert_eq!(shared.get().refresh_timing(40 * MS), None);
+    }
+
+    #[test]
+    fn the_setting_reads_auto_off_and_rates() {
+        assert_eq!(parse("auto"), Some(Cap::Auto));
+        assert_eq!(parse(" AUTO "), Some(Cap::Auto));
+        assert_eq!(parse("off"), Some(Cap::Off));
+        assert_eq!(parse("0"), Some(Cap::Off));
+        assert_eq!(parse("75"), Some(Cap::Fps(75)));
+        assert_eq!(parse("9"), None);
+        assert_eq!(parse("241"), None);
+        for cap in [Cap::Auto, Cap::Off, Cap::Fps(45)] {
+            assert_eq!(parse(&name(cap)), Some(cap));
+        }
+        assert_eq!(DEFAULT, Cap::Auto);
+    }
+
+    #[test]
     fn no_cap_holds_nothing() {
         let mut cap = FrameCap::default();
         cap.shown(10 * MS);
         assert_eq!(cap.wait(10 * MS, None), None);
-        cap.set_fps(Some(0));
-        assert_eq!(cap.fps(), None);
+        cap.set(Some(0));
+        assert_eq!(cap.cap(), Cap::Off);
+        cap.set(Cap::Fps(0));
+        assert_eq!(cap.cap(), Cap::Off);
         assert_eq!(cap.refresh_timing(10 * MS), None);
     }
 
@@ -476,17 +611,17 @@ mod tests {
     #[test]
     fn a_state_keeps_the_last_frame_and_not_the_cap() {
         let shared = Shared::default();
-        shared.set_fps(Some(30));
+        shared.set(Some(30));
         shared.shown(123);
         // Late: it counts a quarter of a second before it showed.
         shared.shown(500 * MS);
         let mut w = Writer::new();
         shared.save(&mut w);
         let mut other = Shared::default();
-        other.set_fps(Some(50));
+        other.set(Some(50));
         other.load(&mut Reader::new(&w.buf)).unwrap();
         assert_eq!(other.get().last(), Some(500 * MS));
-        assert_eq!(other.get().fps(), Some(50));
+        assert_eq!(other.get().cap(), Cap::Fps(50));
         assert_eq!(other.get().slot, shared.get().slot);
         assert_ne!(other.get().slot, other.get().last());
     }

@@ -120,7 +120,8 @@ limit, so without a connection it goes on as it would with one:
   is slower than the machine's rate, frames come at 60 Hz as without
   it. `--vrr` turns it on.
 * `fps_cap` is the most frames a second a program may show, on any card:
-  `off`, or 10 to 240; 60 by default. See [Frame rate
+  `auto` (the default: 60, and a frame that waits for the retrace at the
+  display's rate), `off`, or 10 to 240. See [Frame rate
   cap](#frame-rate-cap). `--fps-cap` sets it for a run.
   `voodoo_fps_cap` is its old name, still read.
 * `filter` is how the picture is scaled up: `nearest` (the default, sharp
@@ -3673,13 +3674,23 @@ and `IPXNET` lines in imported DOSBox configurations are left out.
 
 ## Frame rate cap
 
-`fps_cap` (60 by default, `off`, or 10 to 240) is the most frames a
-second a program may show, whichever card shows them, for an even pace
-without lowering `cycles`, and so the host doesn't draw frames nobody
-sees. Some games misbehave above 60 (Test Drive 4). `voodoo_fps_cap`
-is its old name: a file with that line still sets it, and the settings
-window writes the line back as `fps_cap`. `--fps-cap` sets it for one
-run, and the settings window has it on its Display page.
+`fps_cap` (`auto` by default, `off`, or 10 to 240) is the most frames
+a second a program may show, whichever card shows them, for an even
+pace without lowering `cycles`, and so the host doesn't draw frames
+nobody sees. Some games misbehave above 60 (Test Drive 4).
+`voodoo_fps_cap` is its old name: a file with that line still sets it,
+and the settings window writes the line back as `fps_cap`. `--fps-cap`
+sets it for one run, the settings window has it on its Display page,
+and the libretro core among its Video options.
+
+- `auto` holds a frame that doesn't wait for the display's retrace to
+  60 a second, and holds none that does: those show at the display's
+  rate, as on the real machine. A program that waits for the retrace
+  of a 72, 75 or 85 Hz mode shows a frame at each, and one that counts
+  its frames for its timing keeps its speed.
+- A number holds every frame to that rate, also one that waits for the
+  retrace of a faster display.
+- `off` holds none.
 
 The cap's turns are the multiples of its frame time (1/60 s at 60) in
 emulated time. A frame may show in a frame time after the one the last
@@ -3699,9 +3710,9 @@ frame counts in:
   frames than the cap though it can draw more (Grom's menu, whose
   simulation takes up to 190 ms in one frame).
 - A present that waits for the display's retrace (a flip, or a swap
-  with a swap interval) is already held to the display's rate. With the
-  cap at that rate or above it, the cap holds none of its frames. Below
-  it, the frame waits for its turn and then for a retrace, and shows at
+  with a swap interval) is already held to the display's rate. Under
+  `auto`, or with the cap at that rate or above it, the cap holds none
+  of its frames. Below it, the frame waits for its turn and then for a retrace, and shows at
   the retrace nearest its turn, which may be up to half a retrace before
   it: a cap of 30 on a 60 Hz display shows every other retrace, though
   the display's rate is never exactly 60.
@@ -3732,12 +3743,6 @@ What counts as a frame:
 - DirectDraw's flips of the primary surface, and Direct3D 8's full
   screen `Present`, which flips, on every display adapter (a ToadForce,
   a Banshee or Voodoo3, the software SVGA);
-- blits to the primary surface: a program that blits a frame in parts
-  makes one frame of the blits in a row with nothing else drawn
-  between them, and the first of them waits for the turn (a blit to
-  another surface, a lock or a device context of one, or a Direct3D
-  scene starts the next frame; blits right after a flip are part of
-  the frame it showed);
 - `SwapBuffers` of an OpenGL context in a window, and of a
   double-buffered one full screen, and Direct3D 8's `Present` in a
   window, which copy the back buffer to the screen (on a ToadForce,
@@ -3746,8 +3751,13 @@ What counts as a frame:
 It doesn't apply to DOS programs on a VGA, an EGA or a VESA screen:
 they have no call that hands over a frame, and their frames come at the
 display's retraces, which they wait for themselves. Nor does it apply
-to GDI drawing, to locks and device contexts of the primary surface, or
-to a single-buffered OpenGL context's `glFlush`.
+to blits to the primary surface, to GDI drawing, to locks and device
+contexts of the primary surface, or to a single-buffered OpenGL
+context's `glFlush`. A program may blit one frame in many parts (a
+sprite and what it covered, each changed rectangle), and the time
+between blits can't tell those parts from whole frames: holding each to
+the cap's rate would hold a game that blits ten parts a frame to 6
+frames a second.
 
 With `vrr=true`, while a program shows its frames through the cap (one
 in the last second) and the cap is below the display's rate, the window
@@ -3757,10 +3767,11 @@ otherwise.
 Benchmarks and timedemos report at most the cap: turn it off
 (`fps_cap=off`, `--fps-cap off`) to measure how fast a game can draw.
 A display faster than 60 Hz with `vrr` shows more frames with a higher
-cap. `/api/status` has the cap in force as `video.fps_cap`, for a
-script to check before it quotes a frame rate. The almanac may set the
-cap for a game, as it sets the machine's settings (`almanac_auto`), to
-a rate or to `off`.
+cap. `/api/status` has the cap in force as `video.fps_cap` (`"auto"`,
+a rate, or null for off), for a script to check before it quotes a
+frame rate, and the debug server's `POST /api/fps_cap` changes it for
+the rest of a run. The almanac may set the cap for a game, as it sets
+the machine's settings (`almanac_auto`), to `auto`, a rate or `off`.
 
 ## CRT shaders
 
@@ -4051,7 +4062,7 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `--no-boot` | Start at the DOS prompt, without booting the disk image marked `-boot` in `[drives]` |
 | `-s, --scale N` | The window scale factor, 1 to 16 |
 | `--vrr` | Show frames at the machine's refresh rate, for a VRR display (`vrr`) |
-| `--fps-cap FPS` | The most frames a second a program may show, `off` or 10 to 240 (`fps_cap`, see [Frame rate cap](#frame-rate-cap)) |
+| `--fps-cap FPS` | The most frames a second a program may show, `auto`, `off` or 10 to 240 (`fps_cap`, see [Frame rate cap](#frame-rate-cap)) |
 | `--hidden` | Keep the window hidden; the picture is still drawn with OpenGL, `voodoo_renderer=opengl` included, for runs driven through the debug server (on a host without OpenGL 3, SDL's renderer and the software rasterizer draw it, as with a visible window) |
 | `--audio-output OUTPUT` | What plays the sound: `auto`, `sdl` or `null` (`audio_output` in [`[mixer]`](#mixer)) |
 | `--mute` | Start with the sound off, as Ctrl+F8 does: the sound device plays silence, and the debug server's stream and recordings keep the sound |

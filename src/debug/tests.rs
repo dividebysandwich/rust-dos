@@ -1594,8 +1594,11 @@ fn requests_sent_together_take_effect_in_the_order_sent() {
             hub.state_done(&cpu, request, result);
         }
         while let Some(request) = hub.next_speed_request() {
-            let cycles = request.cycles.clone();
-            hub.speed_done(&cpu, request, Ok(serde_json::json!({"cycles": cycles})));
+            let reply = match &request.change {
+                super::SettingChange::Cycles(cycles) => serde_json::json!({"cycles": cycles}),
+                super::SettingChange::FpsCap(value) => serde_json::json!({"fps_cap": value}),
+            };
+            hub.speed_done(&cpu, request, Ok(reply));
         }
     }
     let statuses: Vec<u16> = answers

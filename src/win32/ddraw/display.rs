@@ -65,10 +65,6 @@ pub struct Display {
     /// The polls of that flip, or of the 3D-only card's pending swap,
     /// that found it still to show: calls of Flip or GetFlipStatus.
     pub flip_polls: Polls,
-    /// The program blitted to the primary surface and drew nothing else
-    /// since: its next blit there is part of the same frame, which the
-    /// frame rate cap let through (`blt::pace`).
-    pub blit_frame: bool,
 }
 
 /// Failed polls in a row of something the display does at a frame, by
@@ -427,8 +423,7 @@ crate::state_fields!(Display {
     blocks,
     views,
     flip_at,
-    flip_polls,
-    blit_frame
+    flip_polls
 });
 
 crate::state_fields!(Polls {

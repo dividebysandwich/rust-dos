@@ -1641,10 +1641,12 @@ address mapped to when it was set.
   and `--hidden` alone take the null output, so a timing run on a real
   device has to set `SDL_AUDIO_DRIVER` as well.
 - **Measuring speed.** A frame rate measured through a run is at most the
-  frame rate cap (`fps_cap`, 60 by default, CONFIGURATION.md's "Frame rate
+  frame rate cap (`fps_cap`, `auto` by default: 60, and the display's rate
+  for a present that waits for the retrace; CONFIGURATION.md's "Frame rate
   cap"), which holds the 3dfx card's swaps and the built-in Windows'
   presents: start a run that measures how fast a game draws with
-  `--fps-cap off`, and check `video.fps_cap` in `/api/status` (null for off)
+  `--fps-cap off` (or `POST /api/fps_cap {"fps_cap":"off"}`), and check
+  `video.fps_cap` in `/api/status` ("auto", a rate, or null for off)
   before quoting a frame rate. `/api/stats` reports `mips` (host speed while
   executing guest code), `emulated_mips` (guest instructions per wall-clock
   second) and the decode-cache hit rate, averaged over about a second. Its

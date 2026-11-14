@@ -821,6 +821,7 @@ pub mod client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame_cap::Cap;
 
     #[test]
     fn a_profile_keeps_what_the_report_says_of_its_game() {
@@ -883,14 +884,19 @@ mod tests {
         let count: usize = settings.values().map(BTreeMap::len).sum();
         assert_eq!(count, KEYS.len(), "every key has a value: {:?}", settings);
         assert!(settings["emulator"].contains_key("memsize"));
-        assert_eq!(settings["emulator"]["fps_cap"], "60");
+        assert_eq!(settings["emulator"]["fps_cap"], "auto");
         assert!(!settings["emulator"].contains_key("voodoo_fps_cap"));
         assert!(!settings["emulator"].contains_key("scale"));
         let off = Settings {
-            fps_cap: None,
+            fps_cap: Cap::Off,
             ..Settings::default()
         };
         assert_eq!(report_settings(&off, None)["emulator"]["fps_cap"], "off");
+        let thirty = Settings {
+            fps_cap: Cap::Fps(30),
+            ..Settings::default()
+        };
+        assert_eq!(report_settings(&thirty, None)["emulator"]["fps_cap"], "30");
         assert!(!settings.contains_key("drives"));
     }
 
@@ -927,18 +933,19 @@ mod tests {
             value: value.into(),
         };
         let base = Settings {
-            fps_cap: Some(45),
+            fps_cap: Cap::Fps(45),
             ..Settings::default()
         };
         let layered = |given: &[Setting]| layer(&base, &given.iter().collect::<Vec<_>>(), None).fps_cap;
-        assert_eq!(layered(&[setting("fps_cap", "60")]), Some(60));
-        assert_eq!(layered(&[setting("fps_cap", "off")]), None);
-        assert_eq!(layered(&[setting("fps_cap", "0")]), None);
-        assert_eq!(layered(&[setting("voodoo_fps_cap", "30")]), Some(30));
-        assert_eq!(layered(&[setting("Voodoo_FPS_Cap", "off")]), None);
+        assert_eq!(layered(&[setting("fps_cap", "60")]), Cap::Fps(60));
+        assert_eq!(layered(&[setting("fps_cap", "auto")]), Cap::Auto);
+        assert_eq!(layered(&[setting("fps_cap", "off")]), Cap::Off);
+        assert_eq!(layered(&[setting("fps_cap", "0")]), Cap::Off);
+        assert_eq!(layered(&[setting("voodoo_fps_cap", "30")]), Cap::Fps(30));
+        assert_eq!(layered(&[setting("Voodoo_FPS_Cap", "off")]), Cap::Off);
         // What the parser doesn't take leaves the user's own value.
         for bad in ["5", "241", "fast", "-60", "60 fps"] {
-            assert_eq!(layered(&[setting("fps_cap", bad)]), Some(45), "{}", bad);
+            assert_eq!(layered(&[setting("fps_cap", bad)]), Cap::Fps(45), "{}", bad);
         }
         let r = Recommendation {
             source: Source::Consensus { reports: 2 },

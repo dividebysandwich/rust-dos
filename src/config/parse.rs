@@ -278,9 +278,9 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         // `voodoo_fps_cap` is the old name, from when only
                         // the 3dfx card's swaps were capped (`OLD_NAMES`).
                         "fps_cap" | "voodoo_fps_cap" => match crate::frame_cap::parse(value) {
-                            Some(fps) => config.fps_cap = Some(fps.unwrap_or(0)),
+                            Some(cap) => config.fps_cap = Some(cap),
                             None => warn(format!(
-                                "invalid {} '{}' (off, or 10 to 240)",
+                                "invalid {} '{}' (auto, off, or 10 to 240)",
                                 key.to_ascii_lowercase(),
                                 value
                             )),

@@ -787,7 +787,7 @@ fn changed_settings() -> Settings {
         fullscreen: true,
         aspect: AspectRatio::FourThree,
         vrr: true,
-        fps_cap: Some(30),
+        fps_cap: crate::frame_cap::Cap::Fps(30),
         filter: Filter::Linear,
         shader: Shader::Crt,
         crt: CrtSettings { curvature: 70, glow: 90 },
@@ -1317,21 +1317,23 @@ fn the_win32_dll_folder_and_the_dlls_it_replaces_are_read() {
 }
 
 #[test]
-fn the_frame_rate_cap_is_60_unless_set() {
+fn the_frame_rate_cap_is_auto_unless_set() {
+    use crate::frame_cap::Cap;
     let settings = |text: &str| Settings::from_config(&parse(text, Path::new("/cfg"), None)).fps_cap;
-    assert_eq!(Settings::default().fps_cap, Some(60));
-    assert_eq!(settings("[emulator]\nscale=2\n"), Some(60));
-    assert_eq!(settings("[emulator]\nfps_cap=30\n"), Some(30));
-    assert_eq!(settings("[emulator]\nfps_cap=240\n"), Some(240));
+    assert_eq!(Settings::default().fps_cap, Cap::Auto);
+    assert_eq!(settings("[emulator]\nscale=2\n"), Cap::Auto);
+    assert_eq!(settings("[emulator]\nfps_cap=auto\n"), Cap::Auto);
+    assert_eq!(settings("[emulator]\nfps_cap=30\n"), Cap::Fps(30));
+    assert_eq!(settings("[emulator]\nfps_cap=240\n"), Cap::Fps(240));
     // off, or 0, under the name and the old one alike.
     for line in ["fps_cap=off", "fps_cap=0", "voodoo_fps_cap=off", "VOODOO_FPS_CAP=Off", "voodoo_fps_cap=0"] {
-        assert_eq!(settings(&format!("[emulator]\n{}\n", line)), None, "{}", line);
+        assert_eq!(settings(&format!("[emulator]\n{}\n", line)), Cap::Off, "{}", line);
     }
-    assert_eq!(settings("[emulator]\nvoodoo_fps_cap=45\n"), Some(45));
+    assert_eq!(settings("[emulator]\nvoodoo_fps_cap=45\n"), Cap::Fps(45));
     for bad in ["fps_cap=9", "fps_cap=241", "fps_cap=fast", "voodoo_fps_cap=1000"] {
         let config = parse(&format!("[emulator]\n{}\n", bad), Path::new("/cfg"), None);
         assert_eq!(config.warnings.len(), 1, "{}", bad);
-        assert_eq!(Settings::from_config(&config).fps_cap, Some(60), "{}", bad);
+        assert_eq!(Settings::from_config(&config).fps_cap, Cap::Auto, "{}", bad);
     }
 }
 
@@ -1339,13 +1341,15 @@ fn the_frame_rate_cap_is_60_unless_set() {
 fn the_old_name_of_the_frame_rate_cap_is_written_under_the_new_one() {
     let text = "[emulator]\n  voodoo_fps_cap = 30\nscale=2\n";
     let before = Settings::from_config(&parse(text, Path::new("/cfg"), None));
-    assert_eq!(before.fps_cap, Some(30));
-    let after = Settings { fps_cap: Some(45), ..before.clone() };
+    assert_eq!(before.fps_cap, crate::frame_cap::Cap::Fps(30));
+    let after = Settings { fps_cap: crate::frame_cap::Cap::Fps(45), ..before.clone() };
     let saved = update_text(text, &before, &after, &[], None);
     assert_eq!(saved, "[emulator]\n  fps_cap = 45\nscale=2\n");
     // Saving all of them adds no second line for it.
     let all = complete_text(text, Path::new("/cfg"), &before, &before, &[], None);
     assert!(all.contains("voodoo_fps_cap = 30") && !all.contains("\nfps_cap"), "{}", all);
-    let none = Settings { fps_cap: None, ..before.clone() };
+    let none = Settings { fps_cap: crate::frame_cap::Cap::Off, ..before.clone() };
     assert!(update_text(text, &before, &none, &[], None).contains("  fps_cap = off\n"));
+    let auto = Settings { fps_cap: crate::frame_cap::Cap::Auto, ..before.clone() };
+    assert!(update_text(text, &before, &auto, &[], None).contains("  fps_cap = auto\n"));
 }

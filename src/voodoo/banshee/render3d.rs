@@ -824,7 +824,7 @@ pub(crate) mod tests {
     fn the_frame_rate_cap_holds_a_swap_back_until_its_turn() {
         use crate::timer::PIT_HZ;
         let mut v = card();
-        v.frame_cap.set_fps(Some(20));
+        v.frame_cap.set(Some(20));
         let at = |ms: u64| Now {
             ns: ms * 1_000_000,
             ticks: ms * PIT_HZ / 1000,
@@ -849,6 +849,56 @@ pub(crate) mod tests {
         assert!((50_000_000..50_001_000).contains(&last), "{last}");
     }
 
+    /// A program that swaps at the retrace of a 75 Hz mode, each swap as
+    /// soon as the last one showed: the times its frames show at under
+    /// the cap `cap`.
+    fn swaps_at_75_hz(cap: crate::frame_cap::Cap) -> Vec<u64> {
+        use crate::timer::PIT_HZ;
+        use crate::video::crt::CrtTiming;
+        let at = |ns: u64| Now {
+            ns,
+            ticks: ns * PIT_HZ / 1_000_000_000,
+        };
+        // 500 lines of 26.666 us: 75.0 Hz.
+        let hz75 = CrtTiming {
+            line_ns: 26_666,
+            hdisplay_ns: 20_000,
+            total: 500,
+            display: 480,
+            retrace_start: 481,
+            retrace_end: 484,
+        };
+        let mut v = card();
+        v.frame_cap.set(cap);
+        let mut now = 10_000_000;
+        v.set_timing(hz75, at(now));
+        let mut shown = Vec::new();
+        for _ in 0..151 {
+            v.service(at(now));
+            let swap = 0x20_0000 + 4 * SWAPBUFFER_CMD as u32;
+            if let Some(due) = v.write(swap, 1 << 1 | 1, 0xFFFF_FFFF, at(now)).hold_to {
+                let ns = (due as u128 * 1_000_000_000 / PIT_HZ as u128) as u64;
+                v.service(Now { ns, ticks: due });
+            }
+            let last = v.frame_cap.get().last().expect("a frame shown");
+            shown.push(last);
+            now = last + 100_000;
+        }
+        shown
+    }
+
+    #[test]
+    fn swaps_at_the_retrace_of_a_75_hz_mode_show_75_under_auto_and_60_under_60() {
+        use crate::frame_cap::Cap;
+        let rate = |shown: &[u64]| {
+            (shown.len() - 1) as f64 * 1e9 / (shown[shown.len() - 1] - shown[0]) as f64
+        };
+        let auto = swaps_at_75_hz(Cap::Auto);
+        assert!((rate(&auto) - 75.0).abs() < 0.5, "{} under auto", rate(&auto));
+        let sixty = swaps_at_75_hz(Cap::Fps(60));
+        assert!((rate(&sixty) - 60.0).abs() < 0.5, "{} under a cap of 60", rate(&sixty));
+    }
+
     /// A command FIFO stops at a swap the frame rate cap holds back, as
     /// at one waiting for its retrace: the next frame's leftOverlayBuf,
     /// further on, is the next swap's, and the FIFO goes on after it.
@@ -857,7 +907,7 @@ pub(crate) mod tests {
         use crate::timer::PIT_HZ;
         let (a, b, c) = (0x10_0000u32, 0x20_0000u32, 0x30_0000u32);
         let mut v = card();
-        v.frame_cap.set_fps(Some(20));
+        v.frame_cap.set(Some(20));
         let at = |ms: u64| Now {
             ns: ms * 1_000_000,
             ticks: ms * PIT_HZ / 1000,

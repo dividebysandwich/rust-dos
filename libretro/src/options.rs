@@ -123,10 +123,11 @@ fn definitions() -> Vec<Definition> {
         Definition {
             key: "fps_cap",
             desc: "Frame rate cap",
-            info: "The most frames a second a program may show, on any card: a program that could draw more waits for its turn, which spares the host the frames nobody sees. 60 unless rust-dos.conf sets it.",
+            info: "The most frames a second a program may show, on any card: a program that could draw more waits for its turn, which spares the host the frames nobody sees. Auto: 60, and a program that waits for the display's retrace shows a frame at each, also at 72, 75 or 85 Hz. A number holds every program to it. Auto unless rust-dos.conf sets it.",
             category: "video",
             target: config("emulator", "fps_cap"),
             values: configured(&[
+                ("auto", "Auto"),
                 ("off", "Off"),
                 ("30", "30"),
                 ("50", "50"),

@@ -1463,14 +1463,24 @@ fn main() -> Result<ExitCode, String> {
             dbg.state_done(&cpu, request, result);
         }
         while let Some(request) = dbg.next_speed_request() {
-            let result = CpuSpeed::parse(&request.cycles).and_then(|cycles| {
-                if det.is_some() && !matches!(cycles, CpuSpeed::Fixed(_)) {
-                    return Err("deterministic mode runs at a fixed speed: give a number of cycles".to_string());
-                }
-                let new = Settings { cycles, ..settings.clone() };
-                host!().apply(&new)?;
-                Ok(serde_json::json!({"cycles": cycles.to_string()}))
-            });
+            let result = match &request.change {
+                debug::SettingChange::Cycles(cycles) => CpuSpeed::parse(cycles).and_then(|cycles| {
+                    if det.is_some() && !matches!(cycles, CpuSpeed::Fixed(_)) {
+                        return Err("deterministic mode runs at a fixed speed: give a number of cycles".to_string());
+                    }
+                    let new = Settings { cycles, ..settings.clone() };
+                    host!().apply(&new)?;
+                    Ok(serde_json::json!({"cycles": cycles.to_string()}))
+                }),
+                debug::SettingChange::FpsCap(value) => match rust_dos::frame_cap::parse(value) {
+                    Some(fps_cap) => {
+                        let new = Settings { fps_cap, ..settings.clone() };
+                        host!().apply(&new)?;
+                        Ok(serde_json::json!({"fps_cap": rust_dos::frame_cap::name(fps_cap)}))
+                    }
+                    None => Err(format!("invalid fps_cap '{}' (auto, off, or 10 to 240)", value)),
+                },
+            };
             dbg.speed_done(&cpu, request, result);
             told_cycles = settings.cycles;
         }

@@ -7,6 +7,7 @@ use crate::config::{AspectRatio, MidiSynth, Settings};
 use crate::cpu::{CoreMode, CpuModel};
 use crate::disk::{DriveInfo, DriveKind};
 use crate::diskio::{DiskSpeed, NoiseMode};
+use crate::frame_cap::Cap;
 use crate::joystick::{JoystickType, MAX_DEADZONE};
 use crate::mixer::{ChorusPreset, DEFAULT_MIX, MAX_LEVEL, MAX_MIX, ReverbPreset};
 use crate::mount::expand_host_path;
@@ -26,26 +27,27 @@ pub(super) fn cycle<T: PartialEq + Clone>(values: &[T], current: &T, dir: isize)
 }
 
 /// `s` with each of `values` put in by `set`, in turn.
-/// The frame rate caps to pick from: none, the rates games ran at and
-/// that divide common refresh rates evenly, and the rates of faster
+/// The frame rate caps to pick from: auto, none, the rates games ran at
+/// and that divide common refresh rates evenly, and the rates of faster
 /// displays.
-const FPS_CAPS: [Option<u32>; 16] = [
-    None,
-    Some(20),
-    Some(24),
-    Some(25),
-    Some(30),
-    Some(35),
-    Some(40),
-    Some(45),
-    Some(48),
-    Some(50),
-    Some(60),
-    Some(72),
-    Some(75),
-    Some(120),
-    Some(144),
-    Some(240),
+const FPS_CAPS: [Cap; 17] = [
+    Cap::Auto,
+    Cap::Off,
+    Cap::Fps(20),
+    Cap::Fps(24),
+    Cap::Fps(25),
+    Cap::Fps(30),
+    Cap::Fps(35),
+    Cap::Fps(40),
+    Cap::Fps(45),
+    Cap::Fps(48),
+    Cap::Fps(50),
+    Cap::Fps(60),
+    Cap::Fps(72),
+    Cap::Fps(75),
+    Cap::Fps(120),
+    Cap::Fps(144),
+    Cap::Fps(240),
 ];
 
 /// The 3dfx gammas to pick from: none, then 0.1 to 2.0 in steps of 0.1.

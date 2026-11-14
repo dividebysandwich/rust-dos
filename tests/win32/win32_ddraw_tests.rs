@@ -3209,9 +3209,14 @@ fn capped_program(present: Present) -> (Vec<u8>, u32) {
 /// under the cap `fps`: its frames a second, and its second thread's
 /// passes.
 fn capped_rate(test: &str, present: Present, fps: Option<u32>) -> (f64, u32) {
+    capped_rate_under(test, present, fps.into())
+}
+
+/// `capped_rate` under the cap `cap`.
+fn capped_rate_under(test: &str, present: Present, cap: rust_dos::frame_cap::Cap) -> (f64, u32) {
     let (program, data) = capped_program(present);
     let mut cpu = machine(test, program);
-    cpu.bus.set_fps_cap(fps);
+    cpu.bus.set_fps_cap(cap);
     let run_until = |cpu: &mut Cpu, done: &dyn Fn(&Cpu) -> bool| {
         for _ in 0..200_000 {
             cpu.bus.start_batch(cpu.bus.clock.icount + 5_000);
@@ -3283,11 +3288,21 @@ fn flips_at_the_retrace_under_a_lower_cap_come_at_the_caps_rate() {
 }
 
 #[test]
-fn a_frame_blitted_in_parts_is_one_frame_under_the_cap() {
-    let (rate, worker) = capped_rate("cap_blit", Present::Blit, Some(30));
-    // The two blits to the primary surface make one frame: holding each
-    // would give 15.
-    assert!((rate - 30.0).abs() < 1.5, "{} frames a second", rate);
+fn blits_to_the_primary_surface_arent_held() {
+    // Timing can't tell a frame blitted in parts (dirty rectangles, a
+    // sprite and what it covered) from whole frames, so the cap holds no
+    // blit: under a cap of 30 the program blits as often as without one.
+    let (uncapped, _) = capped_rate("cap_blit_off", Present::Blit, None);
+    let (rate, _) = capped_rate("cap_blit", Present::Blit, Some(30));
+    assert!(uncapped > 100.0, "{} frames a second without the cap", uncapped);
+    assert!((rate - uncapped).abs() < uncapped * 0.02, "{} under a cap of 30, {} without", rate, uncapped);
+}
+
+#[test]
+fn flips_without_the_retrace_come_at_60_under_auto() {
+    let auto = rust_dos::frame_cap::Cap::Auto;
+    let (rate, worker) = capped_rate_under("cap_flip_auto", Present::Flip(DDFLIP_WAIT | DDFLIP_NOVSYNC), auto);
+    assert!((rate - 60.0).abs() < 1.5, "{} flips a second under auto", rate);
     assert!(worker > 100_000, "the other thread ran {} passes", worker);
 }
 

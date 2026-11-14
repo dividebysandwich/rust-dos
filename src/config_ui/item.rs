@@ -724,8 +724,9 @@ impl Item {
             Aspect => s.aspect.name().to_string(),
             Vrr => on_off(s.vrr),
             FpsCap => match s.fps_cap {
-                None => "Off".to_string(),
-                Some(n) => format!("{} fps", n),
+                crate::frame_cap::Cap::Auto => "Auto".to_string(),
+                crate::frame_cap::Cap::Off => "Off".to_string(),
+                crate::frame_cap::Cap::Fps(n) => format!("{} fps", n),
             },
             VrMode => match s.vr.mode {
                 crate::vr::VrMode::Off => "off",

@@ -223,8 +223,11 @@ fn run_machine(dir: std::path::PathBuf, rx: mpsc::Receiver<super::super::Request
             hub.state_done(&cpu, request, result);
         }
         while let Some(request) = hub.next_speed_request() {
-            let cycles = request.cycles.clone();
-            hub.speed_done(&cpu, request, Ok(json!({"cycles": cycles})));
+            let reply = match &request.change {
+                super::super::SettingChange::Cycles(cycles) => json!({"cycles": cycles}),
+                super::super::SettingChange::FpsCap(value) => json!({"fps_cap": value}),
+            };
+            hub.speed_done(&cpu, request, Ok(reply));
         }
         if !hub.paused {
             let hot = hub.begin_batch(&cpu);

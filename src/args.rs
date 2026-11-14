@@ -18,8 +18,10 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) vrr: bool,
 
-    /// The most frames a second a program may show, on any card: off, or
-    /// 10 to 240 [default: 60, or the config file's fps_cap]
+    /// The most frames a second a program may show, on any card: auto
+    /// (60, and a present that waits for the retrace at the display's
+    /// rate), off, or 10 to 240 [default: auto, or the config file's
+    /// fps_cap]
     #[arg(long, value_name = "FPS", value_parser = parse_fps_cap)]
     pub(crate) fps_cap: Option<FpsCap>,
 
@@ -304,12 +306,14 @@ fn parse_audio_output(value: &str) -> Result<rust_dos::audio::OutputChoice, Stri
     rust_dos::audio::OutputChoice::parse(value).ok_or_else(|| "auto, sdl or null".to_string())
 }
 
-/// `--fps-cap`'s value: the most frames a second, None for off.
+/// `--fps-cap`'s value.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct FpsCap(pub(crate) Option<u32>);
+pub(crate) struct FpsCap(pub(crate) rust_dos::frame_cap::Cap);
 
 fn parse_fps_cap(value: &str) -> Result<FpsCap, String> {
-    rust_dos::frame_cap::parse(value).map(FpsCap).ok_or_else(|| "off, or 10 to 240".to_string())
+    rust_dos::frame_cap::parse(value)
+        .map(FpsCap)
+        .ok_or_else(|| "auto, off, or 10 to 240".to_string())
 }
 
 /// `--vr-graphics`'s value.

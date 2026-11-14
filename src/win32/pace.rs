@@ -1,5 +1,5 @@
 //! The frame rate cap (`fps_cap`, `crate::frame_cap`) at the built-in
-//! Windows' presents: DirectDraw's Flip and blits to the primary surface,
+//! Windows' presents: DirectDraw's Flip of the primary surface,
 //! Direct3D 8's Present, SwapBuffers and Glide's grBufferSwap. A present
 //! the cap holds back blocks its thread until the cap's turn, as a wait
 //! for the retrace does (`directdraw::wait_until`), and runs again then:

@@ -2972,9 +2972,10 @@ impl Bus {
         }
     }
 
-    /// The frame rate cap (`fps_cap`): None for none.
-    pub fn set_fps_cap(&mut self, fps: Option<u32>) {
-        self.frame_cap.set_fps(fps);
+    /// The frame rate cap (`fps_cap`): a `Cap`, or a rate with None for
+    /// none.
+    pub fn set_fps_cap(&mut self, cap: impl Into<crate::frame_cap::Cap>) {
+        self.frame_cap.set(cap);
     }
 
     /// The timing the window refreshes at with a variable refresh rate

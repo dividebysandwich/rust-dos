@@ -98,6 +98,7 @@ fn router(state: AppState) -> Router {
         .route("/api/drive/{letter}", put(mount).post(mount).delete(unmount))
         .route("/api/state/{action}", post(state_file))
         .route("/api/speed", post(speed))
+        .route("/api/fps_cap", post(fps_cap))
         .route("/api/control/{action}", post(control))
         .route("/api/control/wait", get(wait_pause))
         .route("/api/registers", get(regs_get).put(regs_put))
@@ -1315,6 +1316,18 @@ async fn speed(State(s): State<AppState>, body: Bytes) -> ApiResult {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct FpsCapBody {
+    /// As `fps_cap` in the configuration file: auto, off or a number.
+    fps_cap: String,
+}
+
+async fn fps_cap(State(s): State<AppState>, body: Bytes) -> ApiResult {
+    let b: FpsCapBody = from_value(parse_body(&body)?)?;
+    s.call_json(Cmd::FpsCap { value: b.fps_cap }, DEFAULT_TIMEOUT).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ControlBody {
     count: Option<u64>,
     until: Option<String>,
@@ -2450,6 +2463,9 @@ SPEED
   POST   /api/speed {"cycles":"auto"}   the CPU speed, as `cycles` takes it
                    (auto, auto 5000, max or a number); /api/status has
                    cycles_per_ms, the speed it runs at now
+  POST   /api/fps_cap {"fps_cap":"off"}   the frame rate cap, as `fps_cap`
+                   takes it (auto, off or 10 to 240), for the rest of the
+                   run; /api/status has video.fps_cap
 
 WEBSOCKETS
   /ws/events[?after=S&volatile=false&log_after=N]

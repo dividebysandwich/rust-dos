@@ -1455,9 +1455,6 @@ pub fn lock(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let (_, id) = hr!(surface_of(cpu, this));
     super::d3d::shadow::expose(cpu, id);
-    if !state(cpu).surface(id).is_some_and(Surface::is_primary) {
-        super::blt::drew(cpu);
-    }
     if desc_at == 0 || !cpu.bus.guest_probe(desc_at, 4, false) {
         return Some(DDERR_INVALIDPARAMS);
     }
@@ -1917,10 +1914,7 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     // A flip of the primary surface is a frame, which the frame rate cap
     // may hold back (`frame_held`): one waiting for the retrace shows
-    // from the next frame of the display, one without it at once. Blits
-    // to the primary surface right after it, with nothing drawn between,
-    // touch up the frame it showed (a cursor, a counter) and aren't held
-    // as another (`blt::pace`).
+    // from the next frame of the display, one without it at once.
     if primary {
         let (timing, now) = display::timing(cpu);
         let vsync = flags & DDFLIP_NOVSYNC == 0;
@@ -1934,7 +1928,6 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             display.flip_at = timing.next_display(now);
             display.flip_polls = Default::default();
         }
-        display.blit_frame = true;
         crate::win32::pace::shown(cpu, at);
     }
     shown(cpu, id);
@@ -2247,9 +2240,6 @@ pub fn get_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(s) = state(cpu).surface(id).cloned() else {
         return Some(DDERR_INVALIDOBJECT);
     };
-    if !s.is_primary() {
-        super::blt::drew(cpu);
-    }
     if s.dc != 0 {
         return Some(DDERR_DCALREADYCREATED);
     }

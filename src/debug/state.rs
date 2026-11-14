@@ -197,7 +197,9 @@ impl DebugHub {
     pub fn speed_done(&mut self, cpu: &Cpu, request: SpeedRequest, result: Result<Value, String>) {
         let reply = match result {
             Ok(value) => {
-                self.record(cpu, Kind::SpeedChanged, json!({"cycles": value.get("cycles"), "source": "debugger"}));
+                if let Some(cycles) = value.get("cycles") {
+                    self.record(cpu, Kind::SpeedChanged, json!({"cycles": cycles, "source": "debugger"}));
+                }
                 Reply::Json(value)
             }
             Err(e) => Reply::bad(e),
