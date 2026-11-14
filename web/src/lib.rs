@@ -1332,7 +1332,7 @@ impl PageHost<'_> {
         }
         let programs_before = self.cpu.programs_loaded;
         let registry = prepared.registry.as_deref();
-        for warning in games::start(&mut self.cpu, &prepared.install, registry) {
+        for warning in games::start(self.cpu, &prepared.install, registry) {
             let line = format!("[CONFIG] Warning: games/{}.conf: {}", id, warning);
             self.cpu.bus.log_string(&line);
         }

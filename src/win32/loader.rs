@@ -1206,12 +1206,9 @@ pub(super) fn map_builtin_named(cpu: &mut crate::cpu::Cpu, name: &str) -> Option
 /// `len` bytes at `lin` in `memory`, read through its page tables
 /// without a page fault: None where a page isn't there.
 pub(crate) fn peek(bus: &Bus, memory: &Memory, lin: u32, len: usize) -> Option<Vec<u8>> {
-    (0..len as u32)
-        .map(|i| {
-            let phys = memory.translate(bus, lin.wrapping_add(i))?;
-            Some(bus.read_8(phys as usize))
-        })
-        .collect()
+    let mut bytes = vec![0; len];
+    memory.read(bus, lin, &mut bytes)?;
+    Some(bytes)
 }
 
 pub(super) fn peek_32(bus: &Bus, memory: &Memory, lin: u32) -> Option<u32> {
@@ -1223,8 +1220,9 @@ pub(super) fn peek_32(bus: &Bus, memory: &Memory, lin: u32) -> Option<u32> {
 pub(crate) fn peek_string(bus: &Bus, memory: &Memory, lin: u32, max: usize) -> Option<Vec<u8>> {
     let mut bytes = Vec::new();
     while bytes.len() < max {
-        let phys = memory.translate(bus, lin.wrapping_add(bytes.len() as u32))?;
-        match bus.read_8(phys as usize) {
+        let mut b = [0];
+        memory.read(bus, lin.wrapping_add(bytes.len() as u32), &mut b)?;
+        match b[0] {
             0 => break,
             b => bytes.push(b),
         }

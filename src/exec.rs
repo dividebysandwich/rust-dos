@@ -241,6 +241,7 @@ fn run<const HOT: bool, const DYN: bool, const PROF: bool>(cpu: &mut Cpu, fetch:
             }
             if cpu.bus.win32.due(cpu.bus.clock.now_ticks()) {
                 crate::win32::timer(cpu);
+                flush_stale_tlb(cpu);
             }
         }
 
@@ -358,6 +359,7 @@ impl Cpu {
             self.bus.service_timers();
             if self.bus.win32.due(self.bus.clock.now_ticks()) {
                 crate::win32::timer(self);
+                flush_stale_tlb(self);
             }
         }
         // Callers may have raised interrupts or changed the PICs directly.
@@ -1513,9 +1515,10 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
             }
         }
     }
+    flush_stale_tlb(cpu);
     cpu.bus.guest_paging = None;
     if std::mem::take(&mut cpu.bus.observe.polled) {
-        crate::idle::keyboard_poll(cpu, trap.0, trap.1);
+        crate::idle::service_polled(cpu, trap.0, trap.1);
     }
     if cpu.idle {
         // A BIOS service is waiting for input: skip ahead to the next
@@ -1565,6 +1568,7 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     // dropped when the call is done.
     cpu.bus.disk_io.clear();
     crate::win32::service(cpu, id);
+    flush_stale_tlb(cpu);
     if observed {
         crate::idle::after_service(cpu);
     }
@@ -1578,6 +1582,9 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     if reads_clock {
         crate::idle::clock_read(cpu, trap.0, trap.1);
     }
+    if std::mem::take(&mut cpu.bus.observe.polled) {
+        crate::idle::service_polled(cpu, trap.0, trap.1);
+    }
     if cpu.idle {
         // No thread can run: time passes to the next timer event.
         cpu.idle = false;
@@ -1587,12 +1594,25 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     true
 }
 
+/// Flush the TLB if a service, or the built-in Windows's timer work,
+/// sent a page of a program's memory to the page file
+/// (`win32::memory::page_out`): its translation may be there. Any work
+/// that takes a page from the pool can, and so can any service that
+/// reaches memory through the page tables, when a page it finds in the
+/// page file needs a physical page.
+fn flush_stale_tlb(cpu: &mut Cpu) {
+    if std::mem::take(&mut cpu.bus.win32.tlb_stale) {
+        cpu.tlb.flush();
+    }
+}
+
 /// After a service that ran with paging on: if it found a page missing,
 /// undo it (the registers as they were, the port accesses it queued) and
 /// raise the page fault on its trap, which runs again once the system's
 /// handler has put the page there. True if it did.
 fn guest_page_fault(cpu: &mut Cpu, before: &(crate::cpu::CpuSnapshot, usize)) -> bool {
     cpu.bus.guest_paging = None;
+    flush_stale_tlb(cpu);
     let Some((lin, error)) = cpu.bus.guest_fault.take() else {
         return false;
     };

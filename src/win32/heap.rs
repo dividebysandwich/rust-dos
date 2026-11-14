@@ -1,6 +1,7 @@
 //! Heaps (HeapCreate, HeapAlloc and their family): blocks of ranges of
 //! the process's address space, given out first fit, the pages behind
-//! them committed as the heap grows. A heap made with a maximum size has
+//! them committed as the heap grows, in the page file until they are
+//! touched (`Memory::commit_paged`). A heap made with a maximum size has
 //! one range of that size; a growable one, as the process heap is, takes
 //! another range when its ranges are full. The blocks' sizes are kept
 //! here, not in the heap's memory, so a program that writes past a
@@ -8,7 +9,6 @@
 //! heaps.
 
 use super::memory::{GRANULARITY, MEM_PRIVATE, Memory, PAGE, PAGE_READWRITE, PRIVATE, SHARED};
-use super::memory::{USER, WRITABLE};
 use crate::bus::Bus;
 
 /// Blocks start at multiples of this, as on Windows.
@@ -75,7 +75,10 @@ impl Heap {
         let mut heap = Heap::new(base, len, growable);
         let initial = initial.min(len).next_multiple_of(PAGE);
         if initial > 0 {
-            if memory.commit(bus, base, initial, USER | WRITABLE).is_none() {
+            if memory
+                .commit_paged(bus, base, initial, PAGE_READWRITE)
+                .is_none()
+            {
                 heap.destroy(memory, bus);
                 return None;
             }
@@ -119,7 +122,7 @@ impl Heap {
         if needed > segment.committed {
             let from = segment.base + segment.committed;
             if memory
-                .commit(bus, from, needed - segment.committed, USER | WRITABLE)
+                .commit_paged(bus, from, needed - segment.committed, PAGE_READWRITE)
                 .is_none()
             {
                 return false;

@@ -14,9 +14,7 @@ pub fn fninit(cpu: &mut Cpu) {
     // Reset FPU status registers here.
     cpu.set_fpu_flags(FpuFlags::empty());
     // Clear stack
-    for i in 0..8 {
-        cpu.fpu_tags[i] = FPU_TAG_EMPTY;
-    }
+    cpu.fpu_tags = [FPU_TAG_EMPTY; 8];
 }
 
 // FNCLEX: Clear FPU Exceptions
@@ -157,9 +155,9 @@ fn load_env(cpu: &mut Cpu, addr: usize, size: usize) {
 
 /// Load the tag word `tag_word` gives: empty or not, per register.
 fn set_tag_word(cpu: &mut Cpu, tag_word: u16) {
-    for i in 0..8 {
+    for (i, t) in cpu.fpu_tags.iter_mut().enumerate() {
         let tag = (tag_word >> (i * 2)) & 0x03;
-        cpu.fpu_tags[i] = if tag == 0b11 { FPU_TAG_EMPTY } else { FPU_TAG_VALID };
+        *t = if tag == 0b11 { FPU_TAG_EMPTY } else { FPU_TAG_VALID };
     }
 }
 

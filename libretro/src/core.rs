@@ -765,14 +765,14 @@ impl Core {
         for (_, (scan, extended)) in self.held.drain() {
             keyboard::key_event(bus, scan, extended, false, None);
         }
-        for port in 0..2 {
+        for keys in self.pad_keys {
             for (i, &(_, scan, extended)) in PAD_KEYS.iter().enumerate() {
-                if self.pad_keys[port] & (1 << i) != 0 {
+                if keys & (1 << i) != 0 {
                     keyboard::key_event(bus, scan, extended, false, None);
                 }
             }
-            self.pad_keys[port] = 0;
         }
+        self.pad_keys = [0; 2];
         for button in 0..3 {
             if bus.mouse.buttons & (1 << button) != 0 {
                 bus.mouse.button_up(button);

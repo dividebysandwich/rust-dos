@@ -499,8 +499,8 @@ impl File {
     /// MMIOINFO block.
     fn read_info(&mut self, cpu: &mut Cpu, at: u32) {
         self.disk_offset = cpu.bus.guest_read_32(at + I_DISK_OFFSET);
-        for k in 0..3 {
-            self.adw_info[k] = cpu.bus.guest_read_32(at + I_ADW_INFO + 4 * k as u32);
+        for (k, info) in self.adw_info.iter_mut().enumerate() {
+            *info = cpu.bus.guest_read_32(at + I_ADW_INFO + 4 * k as u32);
         }
     }
 }

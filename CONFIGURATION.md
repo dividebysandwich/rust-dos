@@ -1550,7 +1550,7 @@ profile:
 
 | Setting | Set it to | Why |
 |---|---|---|
-| `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too. With the Banshee it is the only card Direct3D 8 runs on, and the only one OpenGL draws on in a window: on a Voodoo2 add-on card OpenGL draws full screen, and a Voodoo Graphics has none. [docs/3dfx.md](docs/3dfx.md) has the other cards. `GLIDE2X.DLL` and `GLIDE3X.DLL` are there only with a 3dfx card. GDI and DirectDraw games run on it too |
+| `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too. Of the 3dfx cards, it and the Banshee are the ones Direct3D 8 runs on and OpenGL draws on in a window: on a Voodoo2 add-on card OpenGL draws full screen, and a Voodoo Graphics has none. [docs/3dfx.md](docs/3dfx.md) has the other cards. `GLIDE2X.DLL` and `GLIDE3X.DLL` are there only with a 3dfx card. GDI and DirectDraw games run on it too. A game from 2000 on that asks for more than a Voodoo3 has (32-bit color, large textures, hardware transform and lighting) takes `svga_toadforce` ([ToadForce](#toadforce)) |
 | `cpu` | `pentium_ii` | The default 486 has no time stamp counter (RDTSC) or MMX, which many games of the time use: such a game stops with an invalid opcode. The Pentium II has both |
 | `memsize` | leave it out, or `128` for a 3D game from 1998 on | Without it a Pentium II has 64 MB, which most Windows 98 games asked for (the default 486 has 16 MB). The game's heaps and its DirectDraw surfaces come out of it, and it is what the game is told the machine has |
 | `win32_version` | `98se` | The setups and games tested with the built-in Windows were tested under Windows 98 SE. Under the default, `95`, a program that imports a function Windows 98 added doesn't start, and its message names this setting |
@@ -3233,24 +3233,43 @@ call to `<dir>/trace.txt`.
 `machine=svga_toadforce` makes the display adapter a ToadForce, a card
 Rust-DOS defines itself: no such hardware existed. To DOS programs it is
 the `svga` adapter, with the same VESA modes. Windows programs that
-Rust-DOS runs without Windows get its 64 MB of video memory for the
-desktop and for DirectDraw's surfaces, and DirectDraw modes up to
-1600x1200 at 8, 16 and 32 bits a pixel; DirectDraw's colour fills and
-its copies between surfaces in video memory are the card's own
-commands. Direct3D up to version 8 draws on it, in 16- and 32-bit
-modes, with textures up to 2048 pixels a side in 16- and 32-bit,
-compressed (DXT1 to DXT5) and bump-map formats, four textures at once,
-cube maps, and a 24-bit depth buffer with stencil. The card transforms
-and lights vertices itself: Direct3D 7 lists its T&L HAL device, and
-Direct3D 8 offers hardware vertex processing. Games that need those,
-which a Voodoo3 lacks, run on this card
-([docs/compatibility.md](docs/compatibility.md) names them). OpenGL
-1.1 draws on it too, in a window or full screen, with 16-bit color and
-depth as on a Voodoo3. Your graphics card draws its 3D through OpenGL
-where the window has OpenGL 3.2, and the processor draws it elsewhere.
-It has no Glide and no vertex or pixel shaders. No system booted from
-a disk image has a driver for it: a booted Windows uses it as a plain
-VGA.
+Rust-DOS runs without Windows get its video memory (`toadforce_memory`,
+64 MB by default) for the desktop and for DirectDraw's surfaces, and
+DirectDraw modes up to 1600x1200 at 8, 16 and 32 bits a pixel;
+DirectDraw's colour fills and its copies between surfaces in video
+memory are the card's own commands. Direct3D up to version 8 draws on
+it, in 16- and 32-bit modes, with textures up to 2048 pixels a side in
+16- and 32-bit, compressed (DXT1 to DXT5) and bump-map formats, four
+textures at once, cube maps, and a 24-bit depth buffer with stencil. The
+card transforms and lights vertices itself: Direct3D 7 lists its T&L HAL
+device, and Direct3D 8 offers hardware vertex processing. Games that
+need those, which a Voodoo3 lacks, run on this card
+([docs/compatibility.md](docs/compatibility.md) names them). OpenGL 1.1
+draws on it too, in a window or full screen, in the desktop's 16 or 32
+bits of color with a 16-bit depth buffer. Your graphics card draws its
+3D through OpenGL where the window has OpenGL 3.2, and the processor
+draws it elsewhere.
+
+What the card doesn't do, and what to choose instead:
+
+* Games that need pixel shaders: the card has none, and neither has
+  any other `machine`. Vertex shaders run on the processor, for a game
+  that asks Direct3D 8 for software or mixed vertex processing.
+* OpenGL games that need more than the built-in OpenGL 1.1 has: a
+  stencil buffer, more than two textures at once, compressed textures,
+  cube maps or display lists. Where the game also has a Direct3D
+  renderer, pick that in its options.
+* Glide games: `voodoo=true`, or `machine=svga_voodoo3` or
+  `svga_banshee` ([3dfx Voodoo Graphics](#3dfx-voodoo-graphics)).
+* Games on a Windows 95 or 98 disk image. No booted system has a driver
+  for the card, and Windows uses it as a plain VGA there: give the
+  image a card it has a driver for, such as `svga_voodoo3`
+  ([docs/win9x-howto.md](docs/win9x-howto.md)).
+* A game's brightness or gamma slider: the card has no gamma ramp, and
+  the picture stays as it is.
+* Sharper pictures than the game's own: the card draws at the
+  resolution the game sets, without anti-aliasing. Set a higher
+  resolution in the game.
 
 ```ini
 [emulator]
@@ -3280,7 +3299,8 @@ computer: use it when a picture looks wrong with OpenGL, and report
 the game. The two differ only where OpenGL isn't there: `auto` then
 draws on the processor without a word, and `opengl` says so in the
 log first. A run with `--deterministic` draws on the processor whatever
-the setting.
+the setting. Drawing on the processor is too slow for some games at
+their usual resolutions: choose a lower one in the game there.
 
 ## PowerVR PCX1 and PCX2
 

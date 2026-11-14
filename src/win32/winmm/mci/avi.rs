@@ -448,8 +448,8 @@ pub mod tests {
         let stride = dib_stride(w as i32, 24);
         let mut out = vec![0; stride * h as usize];
         for row in out.chunks_exact_mut(stride) {
-            for d in row[..w as usize * 3].chunks_exact_mut(3) {
-                d.copy_from_slice(&px);
+            for d in row[..w as usize * 3].as_chunks_mut::<3>().0 {
+                *d = px;
             }
         }
         out

@@ -1485,6 +1485,13 @@ With `win32` on, a Win32 console program runs on the built-in Windows
   mutex's `owner` and `count`, a thread's `exit_code`...), `name` and
   `refs` (handles of it and the system's holds). `std` lists the handles
   of standard input, output and error.
+- `page_file`, in pages: its `size` (twice the machine's memory), the
+  committed pages it holds (`used`), the physical pages of programs' own
+  memory that may go out to it (`pageable`), and since start the pages
+  of zeros given a physical page (`zero_ins`, most of them on a
+  program's first touch of memory it committed), the pages read back
+  (`ins`) and those written out to make room (`outs`). Null until the
+  built-in Windows has its memory.
 
 Ids, addresses and exit codes are 8-digit hex strings; handles and
 `last_error` are numbers. Pause the machine first for a view that

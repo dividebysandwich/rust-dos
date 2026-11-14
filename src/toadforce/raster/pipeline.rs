@@ -7,7 +7,8 @@
 //! hold no numbers of a draw (factors, references, fog distances),
 //! which are in `Values`, so two draws that differ in those have equal
 //! steps. The software renderer runs the steps over the pixels of a
-//! row (`span.rs`); the OpenGL renderer will print them as a shader.
+//! row (`span.rs`); the OpenGL renderer prints them as a shader
+//! (`gl/shader.rs`).
 
 use super::combine::Op;
 use super::sample::{Address, Filter, Mip, Tex};

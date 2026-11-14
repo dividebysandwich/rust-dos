@@ -931,7 +931,7 @@ mod tests {
             }
             let f: Vec<&str> = line.split('\t').collect();
             let size: u32 = f[1].parse().unwrap();
-            let mut buffer = vec![0x2A2A; 80];
+            let mut buffer = [0x2A2A; 80];
             let (value, errno) =
                 // The probe ran in the "C" locale.
                 match wide_text(&mut memory(), Conv(None), size, &unescape_wide(f[0]), &TIMES[1]) {
