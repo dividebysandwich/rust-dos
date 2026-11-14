@@ -3687,9 +3687,12 @@ and the libretro core among its Video options.
   60 a second, and holds none that does: those show at the display's
   rate, as on the real machine. A program that waits for the retrace
   of a 72, 75 or 85 Hz mode shows a frame at each, and one that counts
-  its frames for its timing keeps its speed.
+  its frames for its timing keeps its speed. A program synced to a 100
+  or 120 Hz mode (a Glide game offers them) shows 100 or 120 frames a
+  second, and the host draws each of them.
 - A number holds every frame to that rate, also one that waits for the
-  retrace of a faster display.
+  retrace of a faster display: on a host too slow for a game's 100 or
+  120 Hz mode, `fps_cap=60` holds it to 60.
 - `off` holds none.
 
 The cap's turns are the multiples of its frame time (1/60 s at 60) in
@@ -3712,10 +3715,11 @@ frame counts in:
 - A present that waits for the display's retrace (a flip, or a swap
   with a swap interval) is already held to the display's rate. Under
   `auto`, or with the cap at that rate or above it, the cap holds none
-  of its frames. Below it, the frame waits for its turn and then for a retrace, and shows at
-  the retrace nearest its turn, which may be up to half a retrace before
-  it: a cap of 30 on a 60 Hz display shows every other retrace, though
-  the display's rate is never exactly 60.
+  of its frames. With a number below it, the frame waits for its turn
+  and then for a retrace, and shows at the retrace nearest its turn,
+  which may be up to half a retrace before it: a cap of 30 on a 60 Hz
+  display shows every other retrace, though the display's rate is never
+  exactly 60.
 
 The cap counts in the machine's emulated time only: its turns, the time
 a frame comes and the time a held frame waits for. While a frame waits,

@@ -145,8 +145,10 @@ pub struct FrameCap {
     /// The setting's cap, which a save state doesn't keep.
     cap: Cap,
     /// The last present to ask (`Shared::wait`) waited for the
-    /// retrace, which `auto` doesn't hold: the display's own refresh,
-    /// and not the cap's, paces the window then (`refresh_timing`).
+    /// retrace, which `auto` doesn't hold: the display's own refresh
+    /// paces the window then (`refresh_timing`). A save state doesn't
+    /// keep it: only the host's window and `cycles=auto` read it, never
+    /// the machine, and the first present after a load sets it again.
     synced: bool,
     /// When the last frame showed, in emulated ns; None before the
     /// first.

@@ -26,7 +26,6 @@ pub(super) fn cycle<T: PartialEq + Clone>(values: &[T], current: &T, dir: isize)
     values[(at + dir).rem_euclid(values.len() as isize) as usize].clone()
 }
 
-/// `s` with each of `values` put in by `set`, in turn.
 /// The frame rate caps to pick from: auto, none, the rates games ran at
 /// and that divide common refresh rates evenly, and the rates of faster
 /// displays.
@@ -62,6 +61,7 @@ pub(super) fn describe_blocksize(frames: u16) -> String {
     format!("{} frames ({:.1} ms{})", frames, ms, default)
 }
 
+/// `s` with each of `values` put in by `set`, in turn.
 fn each<T>(s: &Settings, values: impl IntoIterator<Item = T>, set: impl Fn(&mut Settings, T)) -> Vec<Settings> {
     values
         .into_iter()

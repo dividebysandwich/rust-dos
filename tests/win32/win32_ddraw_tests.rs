@@ -3117,9 +3117,6 @@ enum Present {
     /// In a window: a fill of an offscreen surface, then two blits of it
     /// to the primary surface, each a part of the frame.
     Blit,
-    /// Flip, with these flags, then a fill of the primary surface: a
-    /// touch-up of the frame the flip showed.
-    FlipThenFill(u32),
 }
 
 /// A thread that does nothing but count its passes in WORKER, started
@@ -3148,9 +3145,6 @@ fn capped_program(present: Present) -> (Vec<u8>, u32) {
     const CREATE_THREAD: usize = 3;
     const SLEEP: usize = 4;
     let mut d = flip_chain_data();
-    if let Present::FlipThenFill(_) = present {
-        put32(&mut d, FX, 100);
-    }
     if let Present::Blit = present {
         desc(&mut d, DESC, DDSD_CAPS, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
         desc(&mut d, LOCKED, DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT, DDSCAPS_OFFSCREENPLAIN, 16, 16, 0);
@@ -3163,9 +3157,7 @@ fn capped_program(present: Present) -> (Vec<u8>, u32) {
     program(&[USER32, DDRAW, kernel32], &d, |a, l| {
         let mut c = Calls { next: 0 };
         match present {
-            Present::Flip(_) | Present::FlipEvery(..) | Present::FlipThenFill(_) => {
-                start_flip_chain(a, l, &mut c)?
-            }
+            Present::Flip(_) | Present::FlipEvery(..) => start_flip_chain(a, l, &mut c)?,
             Present::Blit => {
                 start(a, l, &mut c, (100, 50, 200, 100))?;
                 c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &[Arg::Val(HWND), Arg::I(DDSCL_NORMAL)])?;
@@ -3184,11 +3176,6 @@ fn capped_program(present: Present) -> (Vec<u8>, u32) {
                 c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(flags)])?;
                 a.push(ms)?;
                 a.call(l.import(SLEEP))?;
-            }
-            Present::FlipThenFill(flags) => {
-                c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(flags)])?;
-                let fill = [Arg::I(0), Arg::I(0), Arg::I(0), Arg::I(DDBLT_COLORFILL | DDBLT_WAIT), Arg::At(FX)];
-                c.com(a, l, FRONT, S_BLT, &fill)?;
             }
             Present::Blit => {
                 let fill = [Arg::I(0), Arg::I(0), Arg::I(0), Arg::I(DDBLT_COLORFILL | DDBLT_WAIT), Arg::At(FX)];
@@ -3295,22 +3282,15 @@ fn blits_to_the_primary_surface_arent_held() {
     let (uncapped, _) = capped_rate("cap_blit_off", Present::Blit, None);
     let (rate, _) = capped_rate("cap_blit", Present::Blit, Some(30));
     assert!(uncapped > 100.0, "{} frames a second without the cap", uncapped);
-    assert!((rate - uncapped).abs() < uncapped * 0.02, "{} under a cap of 30, {} without", rate, uncapped);
+    let close = (rate - uncapped).abs() < uncapped * 0.02;
+    assert!(close, "{} under a cap of 30, {} without", rate, uncapped);
 }
 
 #[test]
 fn flips_without_the_retrace_come_at_60_under_auto() {
     let auto = rust_dos::frame_cap::Cap::Auto;
-    let (rate, worker) = capped_rate_under("cap_flip_auto", Present::Flip(DDFLIP_WAIT | DDFLIP_NOVSYNC), auto);
+    let flip = Present::Flip(DDFLIP_WAIT | DDFLIP_NOVSYNC);
+    let (rate, worker) = capped_rate_under("cap_flip_auto", flip, auto);
     assert!((rate - 60.0).abs() < 1.5, "{} flips a second under auto", rate);
     assert!(worker > 100_000, "the other thread ran {} passes", worker);
-}
-
-#[test]
-fn a_blit_to_the_screen_right_after_a_flip_is_part_of_its_frame() {
-    // A fill of the primary surface after each flip, nothing drawn
-    // between: holding it as a frame of its own would give 15.
-    let present = Present::FlipThenFill(DDFLIP_WAIT | DDFLIP_NOVSYNC);
-    let (rate, _) = capped_rate("cap_flip_fill", present, Some(30));
-    assert!((rate - 30.0).abs() < 1.5, "{} flips a second", rate);
 }

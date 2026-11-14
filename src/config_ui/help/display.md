@@ -47,7 +47,9 @@ on while it waits. A game slower than the cap keeps its own rate.
 that waits for the screen's retrace: that one shows a frame at every
 retrace, as on the real PC, also on a 72, 75 or 85 Hz mode, and a game
 that times itself by its frames keeps its speed. A number holds every
-game to that rate, also one that waits for the retrace.
+game to that rate, also one that waits for the retrace. A game set to a
+100 or 120 Hz mode draws that many frames a second under Auto; if the
+PC can't keep up, pick **60**.
 
 It applies where a game hands over whole frames: 3dfx swaps, DirectDraw
 flips, Direct3D 8's present and OpenGL's SwapBuffers. Blits to the

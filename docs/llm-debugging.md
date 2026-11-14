@@ -1024,15 +1024,16 @@ curl -s $J -XPOST -d '{"until_ms":8000}' $H/api/control/resume
   next request is taken wherever the host's frame got to, so its journal
   entry (`icount`, `emu_ns`) differs from run to run.
 - **Input:** input, and requests that change the machine (`run`, memory
-  and register writes, mounts, `/api/speed`, loading a state, reboots),
-  are taken only while the machine is paused or the settings window is
-  open, which takes its input at once (HTTP 409 otherwise). Input is delivered at fixed points in emulated time, every 10
-  ms, from the time the machine resumes: one scan code per point, and
+  and register writes, mounts, `/api/speed`, `/api/fps_cap`, loading a
+  state, reboots), are taken only while the machine is paused or the
+  settings window is open, which takes its input at once (HTTP 409
+  otherwise). Input is delivered at fixed points in emulated time, every
+  10 ms, from the time the machine resumes: one scan code per point, and
   `wait` and `hold_ms` count emulated milliseconds. While the machine is
-  paused the reply comes at once, with `"held":true`, as if `?wait=false`
-  had been passed; `/api/ops/N` (N is the reply's `op`) is `done` once the
-  input was delivered. Two runs with the same input and stops give the
-  same journal, but for `t_ms`.
+  paused the reply comes at once, with `"held":true`, as if
+  `?wait=false` had been passed; `/api/ops/N` (N is the reply's `op`) is
+  `done` once the input was delivered. Two runs with the same input and
+  stops give the same journal, but for `t_ms`.
 - **Stopping at a time:** `resume {"until_ms":N}` pauses when emulated time
   reaches N ms since power-on, with `"reason":"time"`. Compare runs there:
   `/api/status` has `icount` and `activity.emulated_ns`, and
