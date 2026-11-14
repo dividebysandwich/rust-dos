@@ -4,11 +4,11 @@
 //! A ToadForce transforms and lights vertices itself, as a GeForce
 //! does, and its OpenGL driver hands it the vertices as the program
 //! gave them, with the matrices, the lights and the materials as the
-//! card's state. `decide` is the one place that says whether a draw
-//! goes that way: it gives the card's lighting state for the draw
-//! (`hal::Gl`), or why the processor transforms and lights it
-//! (`Why`), as it does every draw on a 3dfx card (`shade.rs`, and
-//! Direct3D's pipeline).
+//! card's state. `state_of` and `checks` are the one place that says
+//! whether a draw goes that way: they give the card's lighting state
+//! for the draw (`hal::Gl`), or why the processor transforms and
+//! lights it (`Why`), as it does every draw on a 3dfx card
+//! (`shade.rs`, and Direct3D's pipeline).
 //!
 //! The card's lighting is Direct3D's with what OpenGL adds to it: a
 //! material for the back, the ambient light as numbers, the specular
@@ -23,13 +23,13 @@
 //! `/api/win32/ddraw` counts the draws of each.
 
 use super::super::ddraw::d3d::hal::toadforce::{Gl, GlLighting, can_light};
-use super::super::ddraw::d3d::pipeline::{IDENTITY, Matrix, Prim};
+use super::super::ddraw::d3d::pipeline::{IDENTITY, Matrix};
+use super::super::ddraw::stamp::Stamped;
 use super::light::{
     self, GL_AMBIENT, GL_DIFFUSE, GL_EMISSION, GL_SPECULAR, LIGHTS, Light, Lighting, Material,
 };
 use super::shade;
 use super::state::{GL_BACK, GL_CW, GL_FILL, GL_FLAT, GL_FRONT};
-use super::super::ddraw::stamp::Stamped;
 use super::{CAP_COLOR_MATERIAL, CAP_LIGHTING, CAP_NORMALIZE, Context, ImmVertex};
 use crate::toadforce::level1::{self, states};
 
@@ -118,8 +118,10 @@ impl Why {
 }
 
 /// The counts of OpenGL's draws by where they were transformed: those
-/// the card took and their vertices, those it refused at the last
-/// moment (none, unless `decide` and the HAL disagree), and then the
+/// the card took and their vertices, the batches of them that weren't
+/// drawn at the flush (`draw::flush_waiting`: none, unless `checks`
+/// and the HAL disagree or the target isn't the card's to draw in;
+/// their draws are counted as the card's too), and then the
 /// processor's by `Why::ALL`.
 pub const COUNTS: usize = 3 + Why::ALL.len();
 pub const COUNT_CARD: usize = 0;
@@ -316,7 +318,7 @@ pub fn state_of(c: &mut Context) -> &State {
     &c.card.as_ref().unwrap().2
 }
 
-/// The part of `decide` that the context's state alone settles.
+/// The card's state for the context `c`, made anew (`state_of`).
 fn state(c: &Context) -> State {
     let modelview = c.modelview.last().copied().unwrap_or(IDENTITY);
     let projection = c.projection.last().copied().unwrap_or(IDENTITY);
@@ -342,12 +344,18 @@ fn state(c: &Context) -> State {
     Ok(gl)
 }
 
-/// Whether the card draws as the processor would the primitives
-/// `prims`, which come `per` triangles to a polygon, of the vertices
-/// `raw`, of which `used` marks those a primitive names (all of them
-/// without it), in a context `c` whose state the card takes
-/// (`state_of`). An error is why the processor transforms and lights
-/// the draw.
+/// Whether the card draws as the processor would the `prims`
+/// primitives (`draw::primitives`) of a draw, which come `per`
+/// triangles to a polygon, of the vertices `raw`, in a context `c`
+/// whose state the card takes (`state_of`). An error is why the
+/// processor transforms and lights the draw.
+///
+/// It looks at no primitive and at one vertex: what it asks follows
+/// from the kind of primitive. A quad's two triangles (`per` 2) and a
+/// polygon's (`per` usize::MAX, more than one) have inner edges, and
+/// OpenGL chooses one side for all of them. Flat, a quad takes the
+/// colour of its last vertex, which its first triangle doesn't have,
+/// and a polygon that of its first, which all of its triangles have.
 ///
 /// What the card does otherwise than OpenGL without a check here,
 /// since each would cost every lit draw a pass over its vertices and
@@ -355,46 +363,25 @@ fn state(c: &Context) -> State {
 /// rounded to a byte, a normal longer than 1 has a highlight's cosine
 /// above 1 taken for 1, and a lit vertex with a w of 0 is at its x, y
 /// and z.
-pub fn checks(
-    c: &Context,
-    per: usize,
-    prims: &[Prim],
-    raw: &[ImmVertex],
-    used: Option<&[bool]>,
-) -> Result<(), Why> {
-    let flat = c.shade_model == GL_FLAT;
-    let filled = c.polygon_mode == GL_FILL;
-    // Smooth, filled primitives have nothing to look for.
-    if flat || !filled {
-        for p in prims {
-            match *p {
-                Prim::Triangle(t, provoking, edges) => {
-                    if flat && !t.contains(&provoking) {
-                        return Err(Why::Flat);
-                    }
-                    if !filled && edges != 7 {
-                        return Err(Why::Edges);
-                    }
-                }
-                Prim::Line(_, b, provoking) if flat && provoking != b => return Err(Why::Flat),
-                _ => {}
-            }
-        }
+pub fn checks(c: &Context, per: usize, prims: usize, raw: &[ImmVertex]) -> Result<(), Why> {
+    let quads = per == 2;
+    let polygons = quads || (per == usize::MAX && prims > 1);
+    if quads && c.shade_model == GL_FLAT {
+        return Err(Why::Flat);
+    }
+    if polygons && c.polygon_mode != GL_FILL {
+        return Err(Why::Edges);
     }
     if c.caps & CAP_LIGHTING == 0 {
         return Ok(());
     }
-    if c.lighting.two_side
-        && per != 1
-        && prims.len() != 1
-        && prims.iter().any(|p| matches!(p, Prim::Triangle(..)))
-    {
+    if polygons && c.lighting.two_side {
         return Err(Why::Sides);
     }
     // A vertex lit already was given before a glMaterial of its
-    // glBegin.
-    let lit = |(i, v): (usize, &ImmVertex)| v.lit.is_some() && used.is_none_or(|u| u[i]);
-    if raw.iter().enumerate().any(lit) {
+    // glBegin. That lights every vertex given so far
+    // (`draw::light_gathered`), so the first is one of them.
+    if raw.first().is_some_and(|v| v.lit.is_some()) {
         return Err(Why::Material);
     }
     Ok(())
@@ -407,17 +394,17 @@ pub fn checks(
 pub fn decide(
     c: &Context,
     per: usize,
-    prims: &[Prim],
+    prims: &[super::super::ddraw::d3d::pipeline::Prim],
     raw: &[ImmVertex],
-    used: Option<&[bool]>,
 ) -> Result<Gl, Why> {
     let gl = state(c)?;
-    checks(c, per, prims, raw, used)?;
+    checks(c, per, prims.len(), raw)?;
     Ok(gl)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::ddraw::d3d::pipeline::Prim;
     use super::*;
 
     fn context() -> Context {
@@ -438,7 +425,7 @@ mod tests {
 
     fn triangle(c: &Context) -> Result<Gl, Why> {
         let raw = [vertex([1.0; 4]); 3];
-        decide(c, 1, &[Prim::Triangle([0, 1, 2], 2, 7)], &raw, None)
+        decide(c, 1, &[Prim::Triangle([0, 1, 2], 2, 7)], &raw)
     }
 
     #[test]
@@ -544,7 +531,7 @@ mod tests {
             Prim::Triangle([0, 1, 2], 3, 3),
             Prim::Triangle([0, 2, 3], 3, 6),
         ];
-        assert_eq!(decide(&c, 2, &quad, &raw, None), Err(Why::Sides));
+        assert_eq!(decide(&c, 2, &quad, &raw), Err(Why::Sides));
     }
 
     #[test]
@@ -555,7 +542,7 @@ mod tests {
         c.lighting.materials[0].emission = [0.1; 4];
         let prims = [Prim::Triangle([0, 1, 2], 2, 7)];
         let bytes = [vertex([1.0, 128.0 / 255.0, 0.0, 7.0 / 255.0]); 3];
-        let gl = decide(&c, 1, &prims, &bytes, None).unwrap();
+        let gl = decide(&c, 1, &prims, &bytes).unwrap();
         assert!(gl.states.contains(&(states::RS_COLORVERTEX, 1)));
         assert!(gl.states.contains(&(states::RS_DIFFUSEMATERIALSOURCE, 1)));
         assert!(gl.states.contains(&(states::RS_AMBIENTMATERIALSOURCE, 1)));
@@ -569,7 +556,7 @@ mod tests {
         // A colour between two bytes goes to the card too, which
         // rounds it.
         let floats = [vertex([0.5, 0.5, 0.5, 1.0]); 3];
-        assert!(decide(&c, 1, &prims, &floats, None).is_ok());
+        assert!(decide(&c, 1, &prims, &floats).is_ok());
     }
 
     #[test]
@@ -581,22 +568,59 @@ mod tests {
             Prim::Triangle([0, 1, 2], 3, 3),
             Prim::Triangle([0, 2, 3], 3, 6),
         ];
-        assert!(decide(&c, 2, &quad, &raw, None).is_ok());
+        assert!(decide(&c, 2, &quad, &raw).is_ok());
         c.shade_model = GL_FLAT;
-        assert_eq!(decide(&c, 2, &quad, &raw, None), Err(Why::Flat));
+        assert_eq!(decide(&c, 2, &quad, &raw), Err(Why::Flat));
         // A polygon's colour is its first vertex's, one of each
         // triangle's.
         let polygon = [
             Prim::Triangle([0, 1, 2], 0, 3),
             Prim::Triangle([0, 2, 3], 0, 6),
         ];
-        assert!(decide(&c, usize::MAX, &polygon, &raw, None).is_ok());
+        assert!(decide(&c, usize::MAX, &polygon, &raw).is_ok());
         c.polygon_mode = super::super::state::GL_LINE;
-        assert_eq!(
-            decide(&c, usize::MAX, &polygon, &raw, None),
-            Err(Why::Edges)
-        );
-        assert!(decide(&c, 1, &[Prim::Triangle([0, 1, 2], 2, 7)], &raw, None).is_ok());
+        assert_eq!(decide(&c, usize::MAX, &polygon, &raw), Err(Why::Edges));
+        assert!(decide(&c, 1, &[Prim::Triangle([0, 1, 2], 2, 7)], &raw).is_ok());
+    }
+
+    /// `checks` goes by the kind of primitive alone. For every kind and
+    /// count of vertices, what it says is what the primitives
+    /// `draw::primitives` makes of them give, looked at one by one.
+    #[test]
+    fn the_kind_of_primitive_says_what_its_triangles_would() {
+        use super::super::draw::{polygon_triangles, primitives};
+        for kind in 0..=9 {
+            for n in 1..=10u32 {
+                let order: Vec<u32> = (0..n).collect();
+                let prims = primitives(kind, &order);
+                if prims.is_empty() {
+                    continue;
+                }
+                let raw = vec![vertex([1.0; 4]); n as usize];
+                let per = polygon_triangles(kind);
+                let flat = prims.iter().any(|p| match *p {
+                    Prim::Triangle(t, provoking, _) => !t.contains(&provoking),
+                    Prim::Line(_, b, provoking) => provoking != b,
+                    Prim::Point(_) => false,
+                });
+                let inner = prims
+                    .iter()
+                    .any(|p| matches!(*p, Prim::Triangle(_, _, edges) if edges != 7));
+                let polygons = per != 1 && prims.len() != 1;
+                let mut c = context();
+                c.shade_model = GL_FLAT;
+                let why = decide(&c, per, &prims, &raw).err();
+                assert_eq!(why == Some(Why::Flat), flat, "kind {kind}, {n}");
+                c.shade_model = super::super::state::GL_SMOOTH;
+                c.polygon_mode = super::super::state::GL_LINE;
+                let why = decide(&c, per, &prims, &raw).err();
+                assert_eq!(why == Some(Why::Edges), inner, "kind {kind}, {n}");
+                c.polygon_mode = GL_FILL;
+                c.lighting.two_side = true;
+                let why = decide(&c, per, &prims, &raw).err();
+                assert_eq!(why == Some(Why::Sides), polygons, "kind {kind}, {n}");
+            }
+        }
     }
 
     #[test]
@@ -604,12 +628,12 @@ mod tests {
         let c = context();
         let prims = [Prim::Triangle([0, 1, 2], 2, 7)];
         let mut raw = [vertex([1.0; 4]); 3];
-        assert!(decide(&c, 1, &prims, &raw, None).is_ok());
-        raw[2].lit = Some([0, 0]);
-        assert_eq!(decide(&c, 1, &prims, &raw, None), Err(Why::Material));
-        // A vertex no primitive names isn't asked.
-        let used = [true, true, false];
-        assert!(decide(&c, 1, &prims, &raw, Some(&used)).is_ok());
+        assert!(decide(&c, 1, &prims, &raw).is_ok());
+        // A glMaterial after the first two vertices lit them
+        // (`draw::light_gathered`).
+        raw[0].lit = Some([0, 0]);
+        raw[1].lit = Some([0, 0]);
+        assert_eq!(decide(&c, 1, &prims, &raw), Err(Why::Material));
     }
 
     #[test]
@@ -850,7 +874,7 @@ mod tests {
                 ..ImmVertex::default()
             };
             let prims = [Prim::Triangle([0, 1, 2], 2, 7)];
-            let gl = match decide(&c, 1, &prims, &[v; 3], None) {
+            let gl = match decide(&c, 1, &prims, &[v; 3]) {
                 Ok(gl) => gl,
                 Err(why) => panic!("the dice gave a state the card doesn't light: {why:?}"),
             };
@@ -928,7 +952,7 @@ mod tests {
             ..ImmVertex::default()
         };
         let prims = [Prim::Triangle([0, 1, 2], 2, 7)];
-        let gl = decide(&c, 1, &prims, &[v; 3], None).unwrap();
+        let gl = decide(&c, 1, &prims, &[v; 3]).unwrap();
         let input = Input {
             position: v.position,
             normal: v.normal,
@@ -963,19 +987,29 @@ mod tests {
         let (mut worst, mut differ) = (0.0f64, 0);
         for _ in 0..20000 {
             let (x, y) = (d.between(0.0, 64.0) as u32, d.between(0.0, 64.0) as u32);
-            let (w, h) = (d.between(16.0, 1984.0) as u32, d.between(16.0, 1984.0) as u32);
-            let mut l = level1::Level1::default();
-            l.viewport = level1::Viewport {
-                x,
-                y,
-                width: w,
-                height: h,
-                min_z: 0.0,
-                max_z: 1.0,
+            let (w, h) = (
+                d.between(16.0, 1984.0) as u32,
+                d.between(16.0, 1984.0) as u32,
+            );
+            let l = level1::Level1 {
+                viewport: level1::Viewport {
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                    min_z: 0.0,
+                    max_z: 1.0,
+                },
+                ..Default::default()
             };
             let setup = Setup::new(&l, &[], &fvf);
             let cw = d.between(0.05, 4000.0);
-            let clip = [d.between(-cw, cw), d.between(-cw, cw), d.between(0.0, cw), cw];
+            let clip = [
+                d.between(-cw, cw),
+                d.between(-cw, cw),
+                d.between(0.0, cw),
+                cw,
+            ];
             let mut v = setup.vertex(|_| 0);
             v.clip = clip;
             let card = setup.project(&v);

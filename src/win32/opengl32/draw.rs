@@ -581,7 +581,7 @@ fn same_viewport(a: &inner_device::Viewport7, b: &inner_device::Viewport7) -> bo
 /// third of each triangle of a strip or fan, and the first of a
 /// polygon. Direct3D takes the first vertex of a line or triangle and
 /// the second of a fan's triangle.
-fn primitives(kind: u32, order: &[u32]) -> Vec<Prim> {
+pub(super) fn primitives(kind: u32, order: &[u32]) -> Vec<Prim> {
     let n = order.len();
     let mut out = Vec::new();
     match kind {
@@ -662,7 +662,7 @@ fn primitives(kind: u32, order: &[u32]) -> Vec<Prim> {
 
 /// How many of the triangles `primitives` makes of `kind` make one
 /// OpenGL polygon: two for a quad, all of them for a polygon.
-fn polygon_triangles(kind: u32) -> usize {
+pub(super) fn polygon_triangles(kind: u32) -> usize {
     match kind {
         GL_QUADS | GL_QUAD_STRIP => 2,
         GL_POLYGON => usize::MAX,
@@ -775,7 +775,7 @@ pub struct Waiting {
     lit_stamp: u64,
     applied: Applied,
     /// OpenGL's part of the card's state, when the card transforms and
-    /// lights them (`tnl::decide`): draws join only with the same.
+    /// lights them (`tnl::state_of`): draws join only with the same.
     card: Option<hal::Gl>,
     vertices: Vec<Vertex>,
     prims: Vec<Prim>,
@@ -980,8 +980,9 @@ pub fn flush_waiting(cpu: &mut Cpu) {
         layout()
     };
     if !d3d_draw::draw_gl(cpu, inner, &layout, &w.vertices, gl, &lists) {
-        // `tnl::decide` gave the card a draw it doesn't take: a
-        // disagreement between the two, which the count shows.
+        // `tnl::checks` gave the card a draw it doesn't take, or the
+        // target isn't in card memory, where Direct3D's pipeline draws
+        // nothing either (`d3d::draw::rasterize`). The count shows it.
         static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         hal::toadforce::count_gl(cpu, tnl::COUNT_REFUSED, 1);
         if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -995,7 +996,7 @@ pub fn flush_waiting(cpu: &mut Cpu) {
 /// program gave them, in the order `order` or as they are. With
 /// `used`, only the vertices it marks are named by a primitive.
 ///
-/// The card transforms and lights them where `tnl::decide` says it
+/// The card transforms and lights them where `tnl::checks` says it
 /// does as the processor would; otherwise they are lit here and go
 /// through Direct3D's pipeline. Either way they join the draws that
 /// wait if those have the context's state and go the same way, and
@@ -1050,7 +1051,7 @@ fn draw(
     let per = polygon_triangles(kind);
     let path = match transforms {
         Ok(()) => match tnl::state_of(c) {
-            Ok(_) => tnl::checks(c, per, &prims, raw, used),
+            Ok(_) => tnl::checks(c, per, prims.len(), raw),
             Err(why) => Err(*why),
         },
         Err(true) => Err(Why::Asked),
