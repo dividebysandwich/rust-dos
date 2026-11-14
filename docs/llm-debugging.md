@@ -461,9 +461,9 @@ curl -s -XPOST $H/api/control/resume
   pauses right after an instruction changes those 1, 2 or 4 bytes. The
   `paused` reply and event carry `"reason":"watchpoint"` and
   `"watch":{"addr","len","old","new"}`. `GET` lists them with their values;
-  `DELETE ?addr=` removes one, `DELETE` without it removes all. Like
-  breakpoints they are physical addresses, and they slow the machine down
-  to the interpreter while any is set.
+  `DELETE ?addr=` removes one, `DELETE` without it removes all. They are
+  kept as breakpoints are (see [Addresses](#5-addresses)), and they slow
+  the machine down to the interpreter while any is set.
 - **If a wait times out,** the breakpoint wasn't hit. Check
   `/api/breakpoints` and `/api/status`, and whether the program was loaded
   at a different segment.
@@ -595,7 +595,22 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
   - Write with `PUT /api/memory {"addr":"1000:0200","hex":"90 90"}`. Writes
     also invalidate the decoded-instruction cache, so patching code works.
     The reply has the bytes the write replaced (`old`) and what reads back
-    (`new`), which can differ from the data in VGA memory.
+    (`new`), which can differ from the data in VGA memory, the first
+    byte's physical address (`addr`) and, for an address that isn't
+    physical, its linear one (`linear`).
+  - A write is made whole or not at all: when a byte of it is on a page
+    that isn't mapped, or past the end of memory, the reply is HTTP 400
+    and nothing is written. Read-only pages and the ROMs are written.
+  - Reads, writes and the disassembly find every byte in the same place,
+    so what was written reads back. Under the built-in Windows that
+    includes the committed pages of a program that have no physical page:
+    those in its page file (see
+    [Win32 programs](#win32-programs-the-built-in-windows)), which are
+    read and written there, and pages made PAGE_NOACCESS. A page in the
+    page file stays there, with its protection, and comes in when the
+    program touches it: the debugger's reads and writes bring no page in
+    and send none out. A write that reached the page file has
+    `"page_file":true`, and `addr` is null when its first byte did.
   - Write only if the memory holds what you expect with `"expect"`:
     `PUT /api/memory {"addr":"DS:0200","hex":"21 43","expect":"CD AB"}`.
     When the bytes there differ, nothing is written and the reply is HTTP
@@ -1442,7 +1457,9 @@ access rights.
 - **Tables:** `/api/gdt`, `/api/ldt` and `/api/idt` decode descriptors and
   gates; `/api/tss` shows the ring stacks and saved registers;
   `/api/pagewalk?addr=lin:00401000` shows the page directory and table
-  entries; `/api/xms` lists XMS handles (where extenders put their memory).
+  entries, with `page_file` true for a page in the built-in Windows's
+  page file and the entry's `slot` there (0 for a page of zeros);
+  `/api/xms` lists XMS handles (where extenders put their memory).
 - **Network:** `/api/net` shows the IPX driver (node, IRQ, open sockets,
   listening ECBs, events, completions waiting for its IRQ, held packets and
   counts of what became of packets) and the LAN (state, room, frames in and
@@ -1488,6 +1505,16 @@ With `win32` on, a Win32 console program runs on the built-in Windows
   program's first touch of memory it committed), the pages read back
   (`ins`) and those written out to make room (`outs`). Null until the
   built-in Windows has its memory.
+
+`GET /api/win32/page_file` lists the pages of the running address space
+(`cr3`) that are in the page file, as `ranges` of pages next to each
+other: `addr` (the first page's linear address), `pages`, and `zeros`,
+true for pages of zeros with no contents kept (committed and never
+written, or sent out holding zeros) and false for pages whose contents
+are there. `?limit=N` lists at most N ranges (1000 by default), and
+`truncated` says there are more. `ranges` is null until the built-in
+Windows has its memory. Pause first: the list is of the process that
+runs at that moment, and its pages come and go as it runs.
 
 Ids, addresses and exit codes are 8-digit hex strings; handles and
 `last_error` are numbers. Pause the machine first for a view that
@@ -1622,9 +1649,21 @@ Addresses are always hex, as in DEBUG.COM:
   paging is on.
 - `phys:ADDR`, or just `ADDR`: a physical address (`B8000`, `0x12345`).
 
-A decimal-looking number like `100` means 0x100. Breakpoints are kept by
-physical address, so a breakpoint on a paged address follows the page the
-address mapped to when it was set.
+A decimal-looking number like `100` means 0x100. Breakpoints and
+watchpoints are kept by physical address, so one on a paged address
+follows the physical page the address mapped to when it was set. The
+lists and stops name it by that address (`1F2A0`).
+
+The pages of a Win32 program's own memory (its heaps and what it commits
+with VirtualAlloc) are the exception: the built-in Windows sends them
+out to its page file and brings them back at another physical address.
+A breakpoint or a watchpoint on such a page is kept by its linear
+address in the address space it was set in, and is named so
+(`lin:00A30100`). It can be set while the page is in the page file, it
+stays on the page as the page goes out and comes back, and it stops only
+the process it was set in. A watchpoint keeps its value while the page
+is out: only a change of the bytes stops the machine. The pages of
+images, stacks and views of files are kept by physical address.
 
 ## 6. Pitfalls
 

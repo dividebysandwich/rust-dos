@@ -38,6 +38,23 @@ fn page_file_json(cpu: &Cpu) -> Value {
     })
 }
 
+/// The pages of the address space the processor runs in (CR3) that are
+/// in the page file: runs of pages next to each other, each with its
+/// first page's linear address, its length in pages, and whether they
+/// are pages of zeros with no contents kept there. `truncated` when
+/// there are more than `limit` runs. `ranges` is null before the
+/// built-in Windows has its memory.
+pub fn paged_json(cpu: &Cpu, limit: usize) -> Value {
+    let Some((ranges, truncated)) = rust_dos::win32::paged_ranges(cpu, limit) else {
+        return json!({"cr3": hex(cpu.cr3), "ranges": Value::Null, "truncated": false});
+    };
+    let ranges: Vec<Value> = ranges
+        .iter()
+        .map(|r| json!({"addr": hex(r.start), "pages": r.pages, "zeros": r.zeros}))
+        .collect();
+    json!({"cr3": hex(cpu.cr3), "ranges": ranges, "truncated": truncated})
+}
+
 pub fn snapshot_json(s: &Snapshot) -> Value {
     json!({
         "enabled": s.enabled,

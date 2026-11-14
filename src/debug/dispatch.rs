@@ -7,6 +7,7 @@ use serde_json::{Map, Value, json};
 use super::input::expand_input;
 use super::journal::{Kind, OpKind, OpState};
 use super::status::{at_idle_prompt, bytes_record, drives_json, ivt_json, net_json, printer_json, screen_text, serial_json, set_regs, sound_json, stop_reply};
+use super::pm::Spot;
 use super::{Cmd, Ctx, DebugHub, LowInput, Need, PauseReason, Reply, Request, RunWait, SpeedRequest, StateRequest, Watch, journal, parse_addr, pm, regs_json, trace};
 use crate::cpu::Cpu;
 use crate::disk::{DriveKind, MountOptions};
@@ -67,6 +68,71 @@ impl DebugHub {
         let reply = self.dispatch(cpu, cmd);
         let ctx = self.finish();
         self.answer(&ctx, tx, reply);
+    }
+
+    /// Write `data` at `a`, all of it or none; with `expect`, only if the
+    /// bytes there are those. A page in the built-in Windows's page file
+    /// is written there and stays there.
+    fn write_memory(
+        &mut self,
+        cpu: &mut Cpu,
+        a: pm::DebugAddr,
+        data: &[u8],
+        expect: Option<Vec<u8>>,
+    ) -> Reply {
+        // A write that can't be made says so whatever the bytes there.
+        let places = match a.places(cpu, data.len()) {
+            Ok(places) => places,
+            Err(e) => return Reply::bad(e.message()),
+        };
+        // What the debugger's reads give, before and after.
+        let old = a.read(cpu, data.len());
+        let guarded = expect.is_some();
+        if let Some(expect) = expect.filter(|e| *e != old) {
+            let (found, expected) = (trace::hex_bytes(&old), trace::hex_bytes(&expect));
+            let error = format!(
+                "the memory holds {found}, not the expected {expected}; nothing was written"
+            );
+            let body = json!({"error": error, "found": found, "expected": expected});
+            return Reply::ErrorJson(409, body);
+        }
+        if let Err(e) = a.write(cpu, data) {
+            return Reply::bad(e.message());
+        }
+        // The debugger's own changes don't stop the machine.
+        for w in &mut self.watchpoints {
+            w.value = w.read(cpu);
+        }
+        // The bytes replaced and what reads back, which can differ from
+        // the data: VGA memory reads through the read mode.
+        let new = a.read(cpu, data.len());
+        // The first byte's physical address, null when its page is in the
+        // page file, and its linear one when the address had one.
+        let addr = a.byte(cpu, 0).map(|p| format!("{:05X}", p));
+        let linear = a.lin.map(|l| format!("{:08X}", l));
+        let page_file = places.contains(&pm::Place::PageFile);
+        self.record(
+            cpu,
+            Kind::MemoryWritten,
+            json!({
+                "addr": addr,
+                "linear": linear,
+                "len": data.len(),
+                "old": bytes_record(&old),
+                "new": bytes_record(&new),
+                "expect": guarded,
+                "page_file": page_file,
+            }),
+        );
+        Reply::Json(json!({
+            "ok": true,
+            "addr": addr,
+            "linear": linear,
+            "written": data.len(),
+            "old": trace::hex_bytes(&old),
+            "new": trace::hex_bytes(&new),
+            "page_file": page_file,
+        }))
     }
 
     /// Carry out a command the hub answers at once.
@@ -228,9 +294,9 @@ impl DebugHub {
                 Reply::bad(format!("until_ms {} has passed: emulated time is {} ms", ms, cpu.bus.clock.now_ns() / 1_000_000))
             }
             Cmd::Resume { until, until_ms } => {
-                let target = match until.as_deref().map(|a| parse_addr(cpu, a).and_then(breakpoint_phys)) {
+                let target = match until.as_deref().map(|a| spot_at(cpu, a)) {
                     Some(Err(e)) => return Reply::bad(e),
-                    Some(Ok(phys)) => Some(phys),
+                    Some(Ok(spot)) => Some(spot),
                     None => None,
                 };
                 self.take_over();
@@ -252,7 +318,11 @@ impl DebugHub {
                     Some(next) => self.temp_breakpoint = Some(next),
                     None => self.step_budget = Some(1),
                 }
-                self.start_op(cpu, OpKind::StepOver, json!({"until": target.map(|p| format!("{:05X}", p))}));
+                self.start_op(
+                    cpu,
+                    OpKind::StepOver,
+                    json!({"until": target.map(|s| s.name())}),
+                );
                 Reply::Json(json!({"ok": true, "paused": false}))
             }
             Cmd::WaitPause => match self.paused.then(|| self.current_stop()).flatten() {
@@ -320,77 +390,21 @@ impl DebugHub {
                 Reply::bad(format!("expect has {} bytes, the data {}", expect.len(), data.len()))
             }
             Cmd::WriteMem { addr, data, expect } => match parse_addr(cpu, &addr) {
-                Ok(a) => {
-                    let targets: Option<Vec<usize>> = (0..data.len()).map(|i| a.byte(cpu, i)).collect();
-                    let peek = |cpu: &Cpu, t: &[usize]| t.iter().map(|&p| cpu.bus.peek_8(p)).collect::<Vec<u8>>();
-                    match targets {
-                        Some(t) if t.iter().all(|&p| p < cpu.bus.ram().len() || cpu.bus.vbe.lfb_offset(p, 1).is_some()) => {
-                            let old = peek(cpu, &t);
-                            let guarded = expect.is_some();
-                            if let Some(expect) = expect.filter(|e| *e != old) {
-                                let (found, expected) = (trace::hex_bytes(&old), trace::hex_bytes(&expect));
-                                Reply::ErrorJson(
-                                    409,
-                                    json!({
-                                        "error": format!(
-                                            "the memory holds {found}, not the expected {expected}; nothing was written"
-                                        ),
-                                        "found": found,
-                                        "expected": expected,
-                                    }),
-                                )
-                            } else {
-                                for (p, b) in t.iter().zip(&data) {
-                                    // The debugger patches the ROMs too.
-                                    if rust_dos::bus::Bus::is_rom(*p) {
-                                        cpu.bus.write_rom(*p, &[*b]);
-                                    } else {
-                                        cpu.bus.write_8(*p, *b);
-                                    }
-                                }
-                                // The debugger's own changes don't stop the
-                                // machine.
-                                for w in &mut self.watchpoints {
-                                    w.value = Watch::read(cpu, w.phys, w.len);
-                                }
-                                // The bytes replaced and what reads back,
-                                // which can differ from the data: VGA memory
-                                // reads through the read mode.
-                                let new = peek(cpu, &t);
-                                let addr = format!("{:05X}", a.phys.unwrap_or(0));
-                                self.record(cpu, Kind::MemoryWritten, json!({
-                                    "addr": addr,
-                                    "len": data.len(),
-                                    "old": bytes_record(&old),
-                                    "new": bytes_record(&new),
-                                    "expect": guarded,
-                                }));
-                                Reply::Json(json!({
-                                    "ok": true,
-                                    "addr": addr,
-                                    "written": data.len(),
-                                    "old": trace::hex_bytes(&old),
-                                    "new": trace::hex_bytes(&new),
-                                }))
-                            }
-                        }
-                        Some(_) => Reply::bad("write extends past end of memory"),
-                        None => Reply::bad("write reaches an unmapped page"),
-                    }
-                }
+                Ok(a) => self.write_memory(cpu, a, &data, expect),
                 Err(e) => Reply::bad(e),
             },
             Cmd::Disasm { addr, count, bits } => self.disasm(cpu, addr, count, bits),
             Cmd::ListBreakpoints => Reply::Json(self.breakpoints_json()),
-            Cmd::AddBreakpoint { addr, once } => match parse_addr(cpu, &addr).and_then(breakpoint_phys) {
-                Ok(phys) => {
-                    self.breakpoints.insert(phys);
+            Cmd::AddBreakpoint { addr, once } => match spot_at(cpu, &addr) {
+                Ok(spot) => {
+                    self.breakpoints.insert(spot);
                     if once {
-                        self.once.insert(phys);
+                        self.once.insert(spot);
                     } else {
-                        self.once.remove(&phys);
+                        self.once.remove(&spot);
                     }
-                    self.record(cpu, Kind::BreakpointSet, json!({"addr": format!("{:05X}", phys), "once": once}));
+                    let fields = json!({"addr": spot.name(), "once": once});
+                    self.record(cpu, Kind::BreakpointSet, fields);
                     Reply::Json(self.breakpoints_json())
                 }
                 Err(e) => Reply::bad(e),
@@ -406,16 +420,19 @@ impl DebugHub {
                     self.record(cpu, Kind::BreakpointRemoved, json!({"all": true}));
                     Reply::Json(self.breakpoints_json())
                 }
-                Some(a) => match parse_addr(cpu, &a).and_then(breakpoint_phys) {
-                    Ok(phys) => {
-                        if self.breakpoints.remove(&phys) {
-                            self.once.remove(&phys);
-                            self.record(cpu, Kind::BreakpointRemoved, json!({"addr": format!("{:05X}", phys)}));
+                Some(a) => match parse_addr(cpu, &a) {
+                    Ok(a) => match Spot::candidates(cpu, &a).find(|s| self.breakpoints.contains(s))
+                    {
+                        Some(spot) => {
+                            self.breakpoints.remove(&spot);
+                            self.once.remove(&spot);
+                            self.record(cpu, Kind::BreakpointRemoved, json!({"addr": spot.name()}));
                             Reply::Json(self.breakpoints_json())
-                        } else {
-                            Reply::Error(404, format!("no breakpoint at {:05X}", phys))
                         }
-                    }
+                        None => {
+                            Reply::Error(404, format!("no breakpoint at {}", not_found_at(cpu, &a)))
+                        }
+                    },
                     Err(e) => Reply::bad(e),
                 },
             },
@@ -424,11 +441,16 @@ impl DebugHub {
                 if !matches!(len, 1 | 2 | 4) {
                     return Reply::bad("len is 1, 2 or 4");
                 }
-                match parse_addr(cpu, &addr).and_then(breakpoint_phys) {
-                    Ok(phys) => {
-                        self.watchpoints.retain(|w| w.phys != phys);
-                        self.watchpoints.push(Watch { phys, len, value: Watch::read(cpu, phys, len) });
-                        self.record(cpu, Kind::WatchpointSet, json!({"addr": format!("{:05X}", phys), "len": len}));
+                match spot_at(cpu, &addr) {
+                    Ok(spot) => {
+                        self.watchpoints.retain(|w| w.spot != spot);
+                        let value = spot.value(cpu, len).unwrap_or(0);
+                        self.watchpoints.push(Watch { spot, len, value });
+                        self.record(
+                            cpu,
+                            Kind::WatchpointSet,
+                            json!({"addr": spot.name(), "len": len}),
+                        );
                         Reply::Json(self.watchpoints_json(cpu))
                     }
                     Err(e) => Reply::bad(e),
@@ -440,15 +462,23 @@ impl DebugHub {
                     self.record(cpu, Kind::WatchpointRemoved, json!({"all": true}));
                     Reply::Json(self.watchpoints_json(cpu))
                 }
-                Some(a) => match parse_addr(cpu, &a).and_then(breakpoint_phys) {
-                    Ok(phys) => {
-                        let before = self.watchpoints.len();
-                        self.watchpoints.retain(|w| w.phys != phys);
-                        if self.watchpoints.len() < before {
-                            self.record(cpu, Kind::WatchpointRemoved, json!({"addr": format!("{:05X}", phys)}));
-                            Reply::Json(self.watchpoints_json(cpu))
-                        } else {
-                            Reply::Error(404, format!("no watchpoint at {:05X}", phys))
+                Some(a) => match parse_addr(cpu, &a) {
+                    Ok(a) => {
+                        let set = |s: &Spot| self.watchpoints.iter().any(|w| w.spot == *s);
+                        match Spot::candidates(cpu, &a).find(set) {
+                            Some(spot) => {
+                                self.watchpoints.retain(|w| w.spot != spot);
+                                self.record(
+                                    cpu,
+                                    Kind::WatchpointRemoved,
+                                    json!({"addr": spot.name()}),
+                                );
+                                Reply::Json(self.watchpoints_json(cpu))
+                            }
+                            None => Reply::Error(
+                                404,
+                                format!("no watchpoint at {}", not_found_at(cpu, &a)),
+                            ),
                         }
                     }
                     Err(e) => Reply::bad(e),
@@ -543,6 +573,7 @@ impl DebugHub {
                 Reply::Json(super::win32::win32_json(cpu))
             }
             Cmd::Win32Ddraw => Reply::Json(super::win32::ddraw_json(cpu)),
+            Cmd::Win32PageFile { limit } => Reply::Json(super::win32::paged_json(cpu, limit)),
             Cmd::ToadForceCapture { path, flips } => {
                 let file = path.as_deref().map(std::path::Path::new);
                 if !cpu.bus.toadforce() {
@@ -631,17 +662,15 @@ fn changes_machine(cmd: &Cmd) -> bool {
 /// code or repeats before getting there (a call, an interrupt, a loop, a
 /// repeated string instruction). None for the others, which a single step
 /// does.
-fn step_over_target(cpu: &Cpu) -> Option<usize> {
+fn step_over_target(cpu: &Cpu) -> Option<Spot> {
     let cs = cpu.seg_cache(crate::cpu::Seg::CS);
     let code32 = cs.attr & crate::cpu::ATTR_DB != 0;
     let eip = cpu.eip();
-    let bytes: Vec<u8> = (0..15u32)
-        .map(|i| cpu.peek_translate(cs.base.wrapping_add(eip.wrapping_add(i))).map_or(0xFF, |p| cpu.bus.peek_8(p as usize)))
-        .collect();
+    let bytes = pm::read_lin(cpu, cs.base.wrapping_add(eip), 15);
     let len = step_over_len(&bytes, code32)?;
     let next = eip.wrapping_add(len as u32);
     let next = if code32 { next } else { next & 0xFFFF };
-    cpu.peek_translate(cs.base.wrapping_add(next)).map(|p| p as usize)
+    Spot::of_lin(cpu, cs.base.wrapping_add(next))
 }
 
 /// The length of the instruction in `bytes` if stepping over it runs to
@@ -663,9 +692,15 @@ pub(super) fn step_over_len(bytes: &[u8], code32: bool) -> Option<usize> {
     over.then_some(instr.len())
 }
 
-/// Where a breakpoint at an address goes: its physical address.
-fn breakpoint_phys(a: pm::DebugAddr) -> Result<usize, String> {
-    a.phys.ok_or_else(|| "address is on an unmapped page".to_string())
+/// Where a breakpoint or a watchpoint at the address `addr` is kept.
+fn spot_at(cpu: &Cpu, addr: &str) -> Result<Spot, String> {
+    parse_addr(cpu, addr).and_then(|a| Spot::of(cpu, &a))
+}
+
+/// How a reply names the address `a` that has no breakpoint or
+/// watchpoint: as one set there would be listed.
+fn not_found_at(cpu: &Cpu, a: &pm::DebugAddr) -> String {
+    Spot::of(cpu, a).map_or_else(|_| "an unmapped page".to_string(), |s| s.name())
 }
 
 /// Mount (or replace) a drive from the debug API. Without explicit options

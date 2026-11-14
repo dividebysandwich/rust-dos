@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use super::journal::{Kind, OpState};
 use super::status::at_idle_prompt;
 use super::trace::TraceEntry;
-use super::{Answer, BreakpointHit, DebugHub, PauseReason, Reply, Watch, heat, journal};
+use super::{Answer, BreakpointHit, DebugHub, PauseReason, Reply, Spot, heat, journal};
 use crate::cpu::Cpu;
 use crate::video;
 
@@ -177,9 +177,9 @@ impl DebugHub {
         // Memory the last instruction (or an interrupt handler of the
         // emulator's) changed.
         for w in &mut self.watchpoints {
-            let now = Watch::read(cpu, w.phys, w.len);
+            let now = w.read(cpu);
             if now != w.value {
-                self.watch_hit = Some((w.phys, w.len, w.value, now));
+                self.watch_hit = Some((w.spot, w.len, w.value, now));
                 w.value = now;
                 self.enter_pause(PauseReason::Watchpoint);
                 return true;
@@ -226,18 +226,31 @@ impl DebugHub {
             self.enter_pause(PauseReason::ProgramStart);
             return true;
         }
-        if !self.skip_bp_once
-            && (self.temp_breakpoint == Some(phys_ip) || self.breakpoints.contains(&phys_ip))
-        {
-            let target = self.temp_breakpoint.take() == Some(phys_ip);
-            let user = self.breakpoints.contains(&phys_ip);
-            let once = user && self.once.remove(&phys_ip);
-            if once {
-                self.breakpoints.remove(&phys_ip);
+        if !self.skip_bp_once && (self.temp_breakpoint.is_some() || !self.breakpoints.is_empty()) {
+            // The instruction's physical address, and where pages move
+            // its linear one: a breakpoint on such a page is kept by that
+            // (`Spot::Lin`), and hits wherever the page is by now.
+            let here = [Spot::running(cpu), Some(Spot::Phys(phys_ip))];
+            let here = || here.into_iter().flatten();
+            let user = here().find(|s| self.breakpoints.contains(s));
+            let target = here().find(|s| self.temp_breakpoint == Some(*s));
+            if let Some(spot) = user.or(target) {
+                if target.is_some() {
+                    self.temp_breakpoint = None;
+                }
+                let once = user.is_some_and(|s| self.once.remove(&s));
+                if once {
+                    self.breakpoints.remove(&spot);
+                }
+                self.breakpoint_hit = Some(BreakpointHit {
+                    spot,
+                    user: user.is_some(),
+                    once,
+                    target: target.is_some(),
+                });
+                self.enter_pause(PauseReason::Breakpoint);
+                return true;
             }
-            self.breakpoint_hit = Some(BreakpointHit { phys: phys_ip, user, once, target });
-            self.enter_pause(PauseReason::Breakpoint);
-            return true;
         }
         self.skip_bp_once = false;
 

@@ -18,11 +18,11 @@ impl DebugHub {
         let mut stop = json!({"reason": reason.name()});
         if let Some(hit) = self.breakpoint_hit.take() {
             if hit.user {
-                stop["breakpoint"] = format!("{:05X}", hit.phys).into();
+                stop["breakpoint"] = hit.spot.name().into();
                 stop["once"] = hit.once.into();
             }
             if hit.target {
-                stop["target"] = format!("{:05X}", hit.phys).into();
+                stop["target"] = hit.spot.name().into();
             }
         }
         match reason {
@@ -35,10 +35,10 @@ impl DebugHub {
         {
             stop["exception"] = e;
         }
-        if let Some((phys, len, old, new)) = self.watch_hit.take() {
+        if let Some((spot, len, old, new)) = self.watch_hit.take() {
             let digits = len as usize * 2;
             stop["watch"] = json!({
-                "addr": format!("{:05X}", phys),
+                "addr": spot.name(),
                 "len": len,
                 "old": format!("{:0width$X}", old, width = digits),
                 "new": format!("{:0width$X}", new, width = digits),

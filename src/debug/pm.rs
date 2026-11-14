@@ -1,18 +1,88 @@
 //! Protected-mode views for the debugger: address parsing through
 //! selectors and page tables, the descriptor tables, the TSS, page walks,
-//! XMS handles and the exception log. Everything here only reads: nothing
-//! faults, sets accessed bits or fills the TLB.
+//! XMS handles and the exception log, and the debugger's own reads and
+//! writes of memory. The views only read, and nothing here faults, sets
+//! accessed bits, fills the TLB or moves a page.
+//!
+//! Every read and write the debugger makes by a linear address goes
+//! through `place`, so a read and a write of an address find the same
+//! byte: in the physical page the processor's tables map, or under the
+//! built-in Windows in the page a PAGE_NOACCESS entry keeps or in the
+//! page file. A page in the page file is read and written there and
+//! stays there: looking at a program doesn't move its pages.
 
+use rust_dos::win32::Kept;
 use serde_json::{Value, json};
 
 use crate::cpu::fault::exception_name;
 use crate::cpu::seg::{self, Descriptor};
 use crate::cpu::{ATTR_DB, Cpu, Seg};
 
+/// Where the debugger reads and writes a byte.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// At this physical address.
+    Phys(usize),
+    /// In the built-in Windows's page file: a committed page of a
+    /// program's own memory that has no physical page now.
+    PageFile,
+}
+
+/// Where the byte at the linear address `lin` is, or None if its page
+/// isn't mapped or committed.
+pub fn place(cpu: &Cpu, lin: u32) -> Option<Place> {
+    if let Some(p) = cpu.peek_translate(lin) {
+        return Some(Place::Phys(p as usize));
+    }
+    Some(match rust_dos::win32::kept_page(cpu, lin)? {
+        Kept::Ram(page) => Place::Phys((page | lin & 0xFFF) as usize),
+        Kept::PageFile => Place::PageFile,
+    })
+}
+
+/// The byte at the linear address `lin`, or None if its page isn't
+/// mapped or committed.
+pub fn peek(cpu: &Cpu, lin: u32) -> Option<u8> {
+    match place(cpu, lin)? {
+        Place::Phys(p) => Some(cpu.bus.peek_8(p)),
+        Place::PageFile => {
+            let mut byte = [0];
+            rust_dos::win32::peek_paged(cpu, lin, &mut byte)?;
+            Some(byte[0])
+        }
+    }
+}
+
+/// `len` bytes from the linear address `lin`; unmapped bytes read as FFh.
+pub fn read_lin(cpu: &Cpu, lin: u32, len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|i| peek(cpu, lin.wrapping_add(i as u32)).unwrap_or(0xFF))
+        .collect()
+}
+
+/// Why the debugger didn't write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteError {
+    /// A byte is on a page that isn't mapped or committed.
+    Unmapped,
+    /// A byte's physical address is past the end of memory.
+    PastEnd,
+}
+
+impl WriteError {
+    pub fn message(self) -> &'static str {
+        match self {
+            WriteError::Unmapped => "write reaches an unmapped page; nothing was written",
+            WriteError::PastEnd => "write extends past end of memory; nothing was written",
+        }
+    }
+}
+
 /// An address the debugger was given, resolved.
 #[derive(Clone, Copy, Debug)]
 pub struct DebugAddr {
-    /// Physical address of the first byte (None: its page isn't mapped).
+    /// Physical address of the first byte (None: its page isn't mapped, or
+    /// is in the page file).
     pub phys: Option<usize>,
     /// The linear address, when the address was segmented or linear:
     /// following bytes are translated page by page.
@@ -22,27 +92,164 @@ pub struct DebugAddr {
 }
 
 impl DebugAddr {
-    /// Physical address of byte `i`, or None if its page isn't mapped.
-    pub fn byte(&self, cpu: &Cpu, i: usize) -> Option<usize> {
-        match self.lin {
-            Some(lin) => cpu.peek_translate(lin.wrapping_add(i as u32)).map(|p| p as usize),
-            None => self.phys.map(|p| p + i),
+    /// The linear address `lin`.
+    pub fn linear(cpu: &Cpu, lin: u32) -> DebugAddr {
+        DebugAddr {
+            phys: cpu.peek_translate(lin).map(|p| p as usize),
+            lin: Some(lin),
+            segoff: None,
         }
     }
 
-    /// `len` bytes from here; unmapped bytes read as FFh. A page of the
-    /// built-in Windows's page file, which isn't mapped, reads as its
-    /// contents there.
+    /// Where byte `i` is, or None if its page isn't mapped or committed.
+    pub fn place(&self, cpu: &Cpu, i: usize) -> Option<Place> {
+        match self.lin {
+            Some(lin) => place(cpu, lin.wrapping_add(i as u32)),
+            None => self.phys.map(|p| Place::Phys(p + i)),
+        }
+    }
+
+    /// Physical address of byte `i`, or None if it has none: its page
+    /// isn't mapped, or is in the page file.
+    pub fn byte(&self, cpu: &Cpu, i: usize) -> Option<usize> {
+        match self.place(cpu, i) {
+            Some(Place::Phys(p)) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// `len` bytes from here; unmapped bytes read as FFh.
     pub fn read(&self, cpu: &Cpu, len: usize) -> Vec<u8> {
-        (0..len)
-            .map(|i| match (self.byte(cpu, i), self.lin) {
-                (Some(p), _) => cpu.bus.peek_8(p),
-                (None, Some(lin)) => {
-                    rust_dos::win32::peek_paged(cpu, lin.wrapping_add(i as u32)).unwrap_or(0xFF)
+        self.read_from(cpu, 0, len)
+    }
+
+    /// `len` bytes from byte `from` on; unmapped bytes read as FFh.
+    pub fn read_from(&self, cpu: &Cpu, from: usize, len: usize) -> Vec<u8> {
+        match self.lin {
+            Some(lin) => read_lin(cpu, lin.wrapping_add(from as u32), len),
+            None => (from..from + len)
+                .map(|i| self.phys.map_or(0xFF, |p| cpu.bus.peek_8(p + i)))
+                .collect(),
+        }
+    }
+
+    /// Where each of the `len` bytes from here is, if all of them can be
+    /// written.
+    pub fn places(&self, cpu: &Cpu, len: usize) -> Result<Vec<Place>, WriteError> {
+        let places: Option<Vec<Place>> = (0..len).map(|i| self.place(cpu, i)).collect();
+        let places = places.ok_or(WriteError::Unmapped)?;
+        let in_memory = |place: &Place| match *place {
+            Place::Phys(p) => p < cpu.bus.ram().len() || cpu.bus.vbe.lfb_offset(p, 1).is_some(),
+            Place::PageFile => self.lin.is_some(),
+        };
+        if places.iter().all(in_memory) {
+            Ok(places)
+        } else {
+            Err(WriteError::PastEnd)
+        }
+    }
+
+    /// Write `data` here, all of it or, where a byte can't be written,
+    /// none: every byte's place is found before the first is written.
+    /// Pages the program may not write (read-only, PAGE_NOACCESS) are
+    /// written and keep their protection, and so are the ROMs.
+    pub fn write(&self, cpu: &mut Cpu, data: &[u8]) -> Result<(), WriteError> {
+        let places = self.places(cpu, data.len())?;
+        let mut i = 0;
+        while i < data.len() {
+            match (places[i], self.lin) {
+                (Place::Phys(p), _) => {
+                    // The debugger patches the ROMs too.
+                    if rust_dos::bus::Bus::is_rom(p) {
+                        cpu.bus.write_rom(p, &data[i..i + 1]);
+                    } else {
+                        cpu.bus.write_8(p, data[i]);
+                    }
+                    i += 1;
                 }
-                (None, None) => 0xFF,
-            })
-            .collect()
+                (Place::PageFile, lin) => {
+                    // The rest of the page, which is in the page file too.
+                    let lin = lin.unwrap_or(0).wrapping_add(i as u32);
+                    let run = (0x1000 - (lin & 0xFFF) as usize).min(data.len() - i);
+                    rust_dos::win32::poke_paged(cpu, lin, &data[i..i + run])
+                        .ok_or(WriteError::Unmapped)?;
+                    i += run;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Where a breakpoint or a watchpoint is kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Spot {
+    /// A physical address: it follows the physical page the address
+    /// mapped to when it was set, whatever maps it later.
+    Phys(usize),
+    /// A linear address in the address space whose page directory is at
+    /// `cr3`: a page of a program's own memory under the built-in
+    /// Windows, which goes out to the page file and comes back at another
+    /// physical address.
+    Lin { cr3: u32, lin: u32 },
+}
+
+impl Spot {
+    /// The spot of an address: its linear address where the page moves,
+    /// else its physical address.
+    pub fn of(cpu: &Cpu, a: &DebugAddr) -> Result<Spot, String> {
+        match (a.lin, a.phys) {
+            (Some(lin), _) if rust_dos::win32::page_moves(cpu, lin) => {
+                Ok(Spot::Lin { cr3: cpu.cr3, lin })
+            }
+            (_, Some(phys)) => Ok(Spot::Phys(phys)),
+            _ => Err("address is on an unmapped page".to_string()),
+        }
+    }
+
+    /// The spot of the linear address `lin`, if its page is mapped or
+    /// committed.
+    pub fn of_lin(cpu: &Cpu, lin: u32) -> Option<Spot> {
+        Spot::of(cpu, &DebugAddr::linear(cpu, lin)).ok()
+    }
+
+    /// The spots an address may be kept as, the linear one first: to find
+    /// a breakpoint or a watchpoint set at it.
+    pub fn candidates(cpu: &Cpu, a: &DebugAddr) -> impl Iterator<Item = Spot> + use<> {
+        let lin = a.lin.filter(|_| rust_dos::win32::has_page_file(cpu));
+        let lin = lin.map(|lin| Spot::Lin { cr3: cpu.cr3, lin });
+        lin.into_iter().chain(a.phys.map(Spot::Phys))
+    }
+
+    /// The linear spot of the instruction about to run, where pages move.
+    #[inline]
+    pub fn running(cpu: &Cpu) -> Option<Spot> {
+        let lin = cpu.seg_cache(Seg::CS).base.wrapping_add(cpu.eip());
+        rust_dos::win32::has_page_file(cpu).then_some(Spot::Lin { cr3: cpu.cr3, lin })
+    }
+
+    /// As the lists and stops name it: a physical address, or `lin:` and
+    /// a linear one, which reads back as an address in the same address
+    /// space.
+    pub fn name(&self) -> String {
+        match *self {
+            Spot::Phys(phys) => format!("{:05X}", phys),
+            Spot::Lin { lin, .. } => format!("lin:{:08X}", lin),
+        }
+    }
+
+    /// The `len` bytes there (4 at most) as a number, low byte first;
+    /// unmapped bytes read as FFh. None for a linear spot while another
+    /// address space runs.
+    pub fn value(&self, cpu: &Cpu, len: u8) -> Option<u32> {
+        let byte = |i: usize| match *self {
+            Spot::Phys(phys) => cpu.bus.peek_8(phys + i),
+            Spot::Lin { lin, .. } => peek(cpu, lin.wrapping_add(i as u32)).unwrap_or(0xFF),
+        };
+        match *self {
+            Spot::Lin { cr3, .. } if cr3 != cpu.cr3 || !rust_dos::win32::has_page_file(cpu) => None,
+            _ => Some((0..len as usize).fold(0, |v, i| v | (byte(i) as u32) << (8 * i))),
+        }
     }
 }
 
@@ -111,8 +318,7 @@ pub fn peek_descriptor(cpu: &Cpu, selector: u16) -> Option<Descriptor> {
 fn peek_u32(cpu: &Cpu, lin: u32) -> Option<u32> {
     let mut v = 0;
     for i in 0..4 {
-        let p = cpu.peek_translate(lin.wrapping_add(i))?;
-        v |= (cpu.bus.peek_8(p as usize) as u32) << (8 * i);
+        v |= (peek(cpu, lin.wrapping_add(i))? as u32) << (8 * i);
     }
     Some(v)
 }
@@ -151,7 +357,7 @@ pub fn parse_addr(cpu: &Cpu, s: &str) -> Result<DebugAddr, String> {
     let lower = s.to_ascii_lowercase();
     if let Some(rest) = lower.strip_prefix("lin:") {
         let lin = parse_hex(rest)?;
-        return Ok(DebugAddr { phys: cpu.peek_translate(lin).map(|p| p as usize), lin: Some(lin), segoff: None });
+        return Ok(DebugAddr::linear(cpu, lin));
     }
     if let Some(rest) = lower.strip_prefix("phys:") {
         return physical(cpu, rest);
@@ -417,9 +623,15 @@ pub fn pagewalk_json(cpu: &Cpu, lin: u32) -> Value {
         "cr3": format!("{:08X}", cpu.cr3),
         "pde": {"addr": format!("{:08X}", pde_addr), "value": format!("{:08X}", pde), "flags": flags(pde, true)},
         "physical": cpu.peek_translate(lin).map(|p| format!("{:08X}", p)),
+        // The built-in Windows's page, committed with no physical page.
+        "page_file": place(cpu, lin) == Some(Place::PageFile),
     });
     if let Some((addr, e)) = pte {
         v["pte"] = json!({"addr": format!("{:08X}", addr), "value": format!("{:08X}", e), "flags": flags(e, false)});
+        if v["page_file"] == true {
+            // Its place there, 0 for a page of zeros with no contents kept.
+            v["pte"]["slot"] = (e >> 12).into();
+        }
     }
     v
 }
