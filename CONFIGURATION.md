@@ -1528,7 +1528,7 @@ profile:
 
 | Setting | Set it to | Why |
 |---|---|---|
-| `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too. Of the 3dfx cards, it and the Banshee are the ones Direct3D 8 runs on and OpenGL draws on in a window: on a Voodoo2 add-on card OpenGL draws full screen, and a Voodoo Graphics has none. A game from 2000 on that asks for more than a Voodoo3 has (32-bit color, large textures, hardware transform and lighting) takes `svga_toadforce` ([ToadForce](#toadforce)). [docs/3dfx.md](docs/3dfx.md) has the other cards. `GLIDE2X.DLL` and `GLIDE3X.DLL` are there only with a 3dfx card. GDI and DirectDraw games run on it too |
+| `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too. Of the 3dfx cards, it and the Banshee are the ones Direct3D 8 runs on and OpenGL draws on in a window: on a Voodoo2 add-on card OpenGL draws full screen, and a Voodoo Graphics has none. [docs/3dfx.md](docs/3dfx.md) has the other cards. `GLIDE2X.DLL` and `GLIDE3X.DLL` are there only with a 3dfx card. GDI and DirectDraw games run on it too. A game from 2000 on that asks for more than a Voodoo3 has (32-bit color, large textures, hardware transform and lighting) takes `svga_toadforce` ([ToadForce](#toadforce)) |
 | `cpu` | `pentium_ii` | The default 486 has no time stamp counter (RDTSC) or MMX, which many games of the time use: such a game stops with an invalid opcode. The Pentium II has both |
 | `memsize` | `64`, or `128` for a 3D game from 1998 on | The default 16 MB is less than most Windows 98 games asked for. The game's heaps and its DirectDraw surfaces come out of it, and it is what the game is told the machine has |
 | `win32_version` | `98se` | The setups and games tested with the built-in Windows were tested under Windows 98 SE. Under the default, `95`, a program that imports a function Windows 98 added doesn't start, and its message names this setting |
@@ -3232,10 +3232,12 @@ processor draws it elsewhere.
 What the card doesn't do, and what to choose instead:
 
 * Games that need pixel shaders: the card has none, and neither has
-  any other `machine`. Vertex shaders run, on the processor.
-* OpenGL games that need more than OpenGL 1.1 with two textures at
-  once: a stencil buffer, compressed textures or cube maps. Where the
-  game also has a Direct3D renderer, pick that in its options.
+  any other `machine`. Vertex shaders run on the processor, for a game
+  that asks Direct3D 8 for software or mixed vertex processing.
+* OpenGL games that need more than the built-in OpenGL 1.1 has: a
+  stencil buffer, more than two textures at once, compressed textures,
+  cube maps or display lists. Where the game also has a Direct3D
+  renderer, pick that in its options.
 * Glide games: `voodoo=true`, or `machine=svga_voodoo3` or
   `svga_banshee` ([3dfx Voodoo Graphics](#3dfx-voodoo-graphics)).
 * Games on a Windows 95 or 98 disk image. No booted system has a driver
@@ -3271,9 +3273,8 @@ computer: use it when a picture looks wrong with OpenGL, and report
 the game. The two differ only where OpenGL isn't there: `auto` then
 draws on the processor without a word, and `opengl` says so in the
 log first. A run with `--deterministic` draws on the processor whatever
-the setting. Drawing on the processor is several times slower, and too
-slow for some games at their usual resolutions: choose a lower one in
-the game there.
+the setting. Drawing on the processor is too slow for some games at
+their usual resolutions: choose a lower one in the game there.
 
 ## PowerVR PCX1 and PCX2
 
