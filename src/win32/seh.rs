@@ -235,14 +235,15 @@ pub fn read_context(
 }
 
 /// Whether the `len` bytes at `lin` have pages behind them, looked up
-/// without recording a page fault.
+/// without recording a page fault. A page in the page file counts: the
+/// accesses there bring it in.
 fn present(cpu: &Cpu, lin: u32, len: u32) -> bool {
     let process = super::running(cpu).expect("a Win32 process");
     let last = lin.wrapping_add(len.saturating_sub(1));
     last >= lin
         && (lin & !(PAGE - 1)..=last)
             .step_by(PAGE as usize)
-            .all(|page| process.memory.translate(&cpu.bus, page).is_some())
+            .all(|page| process.memory.reachable(&cpu.bus, page))
 }
 
 /// A page fault at `address` in the running thread's stack, below what is
@@ -427,14 +428,41 @@ fn simulated(cpu: &Cpu, error: Option<u32>, eip: u32) -> Option<u32> {
     }
 }
 
+/// A page fault at `lin` in the running process: if the page is in the
+/// page file, give it its physical page. Whether it was one and has it
+/// now.
+pub(crate) fn page_in(cpu: &mut Cpu, lin: u32) -> bool {
+    use super::memory::PageIn;
+    let mut result = super::memory::page_in(&mut cpu.bus, cpu.cr3, lin);
+    // With no page of a program's own memory to send to the page file,
+    // pages of read-only views of files make room, as they do for a
+    // view's page (`mapping::fault_in`).
+    if result == PageIn::Full && super::mapping::evict(&mut cpu.bus) {
+        cpu.bus.win32.tlb_stale = true;
+        result = super::memory::page_in(&mut cpu.bus, cpu.cr3, lin);
+    }
+    let done = result == PageIn::Done;
+    if std::mem::take(&mut cpu.bus.win32.tlb_stale) {
+        cpu.tlb.flush();
+    } else if done {
+        cpu.tlb.flush_page(lin);
+    }
+    done
+}
+
 /// A fault in the program, at `ctx`: an exception for its handlers.
 pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
     if vector == 14 && process(cpu).current.is_some() && grow_stack(cpu, cpu.cr2) {
         super::system::enter_user(cpu, &ctx);
         return;
     }
-    // A page that isn't there (error code bit 0 clear) of a view of a
-    // file, read from the file now.
+    // A page that isn't there (error code bit 0 clear) of the program's
+    // memory in the page file, given its physical page now.
+    if vector == 14 && error.is_some_and(|e| e & 1 == 0) && page_in(cpu, cpu.cr2) {
+        super::system::enter_user(cpu, &ctx);
+        return;
+    }
+    // One of a view of a file, read from the file now.
     if vector == 14 && error.is_some_and(|e| e & 1 == 0) && super::mapping::fault_in(cpu, cpu.cr2) {
         super::system::enter_user(cpu, &ctx);
         return;

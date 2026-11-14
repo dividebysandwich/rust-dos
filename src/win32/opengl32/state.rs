@@ -648,6 +648,10 @@ fn values(cpu: &mut Cpu, p: u32) -> Option<(Vec<f64>, bool)> {
     if let Some(v) = light::get(c, p) {
         return Some(v);
     }
+    // GL_LIST_BASE, GL_LIST_INDEX, GL_LIST_MODE, GL_MAX_LIST_NESTING.
+    if let Some(v) = c.lists.get(p) {
+        return one(v);
+    }
     match p {
         // GL_CURRENT_COLOR, GL_CURRENT_TEXTURE_COORDS, GL_CURRENT_NORMAL.
         0x0B00 => Some((floats(&c.color), true)),

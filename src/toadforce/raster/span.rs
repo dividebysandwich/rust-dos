@@ -104,8 +104,8 @@ impl<'a> Ctx<'a> {
         if p.q.flat() {
             c.w[..n].fill(1.0 / p.q.at);
         } else {
-            for i in 0..n {
-                c.w[i] = 1.0 / p.q.eval(fx + i as f32, fy);
+            for (i, w) in c.w[..n].iter_mut().enumerate() {
+                *w = 1.0 / p.q.eval(fx + i as f32, fy);
             }
         }
         for step in &st.steps {
@@ -225,8 +225,7 @@ impl<'a> Ctx<'a> {
                     }
                 }
                 Step::Dither => {
-                    for i in 0..n {
-                        let cur = &mut c.regs[Reg::Current as usize][i];
+                    for (i, cur) in c.regs[Reg::Current as usize][..n].iter_mut().enumerate() {
                         *cur = combine::dither(*cur, x + i as i32, y);
                     }
                 }

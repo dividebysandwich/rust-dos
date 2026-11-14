@@ -560,7 +560,7 @@ impl Decoder {
         // As FFmpeg, the layout is kept only once it is set up.
         self.layout = Layout::default();
         let scalable = layout.luma_bands != 1;
-        for p in 0..3 {
+        for (p, plane) in self.planes.iter_mut().enumerate() {
             let (w, h, n) = if p == 0 {
                 (layout.width, layout.height, layout.luma_bands)
             } else {
@@ -578,7 +578,6 @@ impl Decoder {
             let align = if p == 0 { 16 } else { 8 };
             let pitch = (bw as usize).next_multiple_of(align);
             let aheight = (bh as usize).next_multiple_of(align);
-            let plane = &mut self.planes[p];
             plane.width = w;
             plane.height = h;
             plane.bands = (0..n)

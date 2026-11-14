@@ -452,10 +452,10 @@ impl Net {
     /// to be looked for often.
     pub fn active(&self) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
-        if self.hub.is_some() {
-            return true;
-        }
-        false
+        let active = self.hub.is_some();
+        #[cfg(target_arch = "wasm32")]
+        let active = false;
+        active
     }
 
     /// The network thread, started if it isn't running.

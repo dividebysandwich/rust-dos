@@ -17,7 +17,42 @@ fn hex(v: u32) -> String {
 pub fn win32_json(cpu: &Cpu) -> Value {
     let mut json = snapshot_json(&rust_dos::win32::snapshot(cpu));
     json["trace"] = json!(rust_dos::win32::trace::level(cpu).name());
+    json["page_file"] = page_file_json(cpu);
     json
+}
+
+/// The page file, in pages: its size, the committed pages in it, the
+/// physical pages that may go out to it, and since start the pages of
+/// zeros given a physical page, those read back and those written out.
+/// Null before the built-in Windows has its memory.
+fn page_file_json(cpu: &Cpu) -> Value {
+    rust_dos::win32::page_file_status(&cpu.bus).map_or(Value::Null, |p| {
+        json!({
+            "size": p.size,
+            "used": p.used,
+            "pageable": p.pageable,
+            "zero_ins": p.counts.zero_ins,
+            "ins": p.counts.ins,
+            "outs": p.counts.outs,
+        })
+    })
+}
+
+/// The pages of the address space the processor runs in (CR3) that are
+/// in the page file: runs of pages next to each other, each with its
+/// first page's linear address, its length in pages, and whether they
+/// are pages of zeros with no contents kept there. `truncated` when
+/// there are more than `limit` runs. `ranges` is null before the
+/// built-in Windows has its memory.
+pub fn paged_json(cpu: &Cpu, limit: usize) -> Value {
+    let Some((ranges, truncated)) = rust_dos::win32::paged_ranges(cpu, limit) else {
+        return json!({"cr3": hex(cpu.cr3), "ranges": Value::Null, "truncated": false});
+    };
+    let ranges: Vec<Value> = ranges
+        .iter()
+        .map(|r| json!({"addr": hex(r.start), "pages": r.pages, "zeros": r.zeros}))
+        .collect();
+    json!({"cr3": hex(cpu.cr3), "ranges": ranges, "truncated": truncated})
 }
 
 pub fn snapshot_json(s: &Snapshot) -> Value {

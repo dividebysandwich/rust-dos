@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde_json::{Map, Value, json};
 
 use super::trace::TraceEntry;
-use super::{DebugHub, Need, Reply, TraceQuery, Watch, parse_addr, parse_hex, pm, trace};
+use super::{DebugHub, Need, Reply, Spot, TraceQuery, parse_addr, parse_hex, pm, trace};
 use crate::cpu::{Cpu, CpuFlags};
 use crate::disk::drive_letter;
 use crate::mount::display_host_path;
@@ -53,6 +53,12 @@ impl DebugHub {
             "uptime_ms": cpu.bus.start_time.elapsed().as_millis() as u64,
             "fps": (self.fps * 10.0).round() / 10.0,
             "cycles_per_ms": cpu.bus.clock.cycles_per_ms(),
+            // The RAM, and whether its size is the default for the CPU
+            // and the display adapter (`memsize` isn't set).
+            "memory": {
+                "mb": cpu.bus.ram().len() >> 20,
+                "derived": cpu.bus.memory_derived,
+            },
             // Deterministic mode: the clock's start, the machine's clock
             // now, emulated time, and every how many emulated ms input is
             // delivered. Null when off.
@@ -96,15 +102,6 @@ impl DebugHub {
                 "width": w, "height": h,
                 // The picture as screenshots have it.
                 "frame": {"width": frame_w, "height": frame_h},
-                // The frame rate cap in force (`fps_cap`: "auto", a rate,
-                // or null for off), which a frame rate measured through
-                // the run can't pass, and when the last frame it let
-                // through showed.
-                "fps_cap": match cpu.bus.frame_cap.get().cap() {
-                    rust_dos::frame_cap::Cap::Auto => json!("auto"),
-                    cap => json!(cap.rate()),
-                },
-                "last_capped_frame_ms": cpu.bus.frame_cap.get().last().map(|ns| ns as f64 / 1e6),
                 // Page flipping: the Start Address the program set and the
                 // one latched for display, plus the registers that decide
                 // the memory layout.
@@ -234,6 +231,16 @@ impl DebugHub {
         // What draws the window on the host (the `[DISPLAY]` line). Set
         // apart from the rest, which is at json!'s recursion limit.
         status["display"] = self.display.clone().into();
+        // The frame rate cap in force (`fps_cap`: "auto", a rate, or null
+        // for off), which a frame rate measured through the run can't
+        // pass, and when the last frame it let through showed. Set apart
+        // for the same reason.
+        let cap = cpu.bus.frame_cap.get();
+        status["video"]["fps_cap"] = match cap.cap() {
+            rust_dos::frame_cap::Cap::Auto => json!("auto"),
+            cap => json!(cap.rate()),
+        };
+        status["video"]["last_capped_frame_ms"] = json!(cap.last().map(|ns| ns as f64 / 1e6));
         // The journal: its last and oldest entries, the last that changed
         // the machine, the stop it is in, the control operation under way,
         // and whether a strict-match save could be done now.
@@ -344,14 +351,18 @@ impl DebugHub {
             },
         };
         let cur = cpu.peek_translate(cpu.seg_cache(crate::cpu::Seg::CS).base.wrapping_add(cpu.eip())).map(|p| p as usize);
+        // A row's breakpoint is found as one set at its address would be.
+        let row = |at: usize| pm::DebugAddr {
+            phys: start.byte(cpu, at),
+            lin: start.lin.map(|lin| lin.wrapping_add(at as u32)),
+            segoff: None,
+        };
         let mut lines = Vec::new();
         let mut rows = Vec::new();
         let mut at = 0usize;
         for _ in 0..count.min(1000) {
             let p = start.byte(cpu, at);
-            let bytes: Vec<u8> = (0..15)
-                .map(|i| start.byte(cpu, at + i).map_or(0xFF, |a| cpu.bus.peek_8(a)))
-                .collect();
+            let bytes = start.read_from(cpu, at, 15);
             let (len, text) = if let Some(name) = trace::trap_name(&bytes, None, cpu.pm()) {
                 (trace::trap_len(&bytes), name)
             } else {
@@ -366,7 +377,7 @@ impl DebugHub {
                 trace::disasm_one(&bytes, ip, code32)
             };
             let current = p.is_some() && p == cur;
-            let breakpoint = p.is_some_and(|p| self.breakpoints.contains(&p));
+            let breakpoint = Spot::candidates(cpu, &row(at)).any(|s| self.breakpoints.contains(&s));
             let marker = match (current, breakpoint) {
                 (true, true) => "=>*",
                 (true, false) => "=> ",
@@ -383,6 +394,9 @@ impl DebugHub {
             rows.push(json!({
                 "label": label,
                 "phys": p.map(|p| format!("{:05X}", p)),
+                // The row's linear address, when the listing's has one: a
+                // breakpoint set by it follows a page that moves.
+                "lin": row(at).lin.map(|lin| format!("{:08X}", lin)),
                 "bytes": hex,
                 "asm": text,
                 "len": len,
@@ -400,9 +414,9 @@ impl DebugHub {
             .iter()
             .map(|w| {
                 json!({
-                    "addr": format!("{:05X}", w.phys),
+                    "addr": w.spot.name(),
                     "len": w.len,
-                    "value": format!("{:0width$X}", Watch::read(cpu, w.phys, w.len), width = w.len as usize * 2),
+                    "value": format!("{:0width$X}", w.read(cpu), width = w.len as usize * 2),
                 })
             })
             .collect();
@@ -417,9 +431,9 @@ impl DebugHub {
         let exceptions: Vec<String> =
             (0..32).filter(|i| self.break_exceptions & (1 << i) != 0).map(|i| format!("{:02X}", i)).collect();
         json!({
-            "breakpoints": v.iter().map(|p| format!("{:05X}", p)).collect::<Vec<_>>(),
+            "breakpoints": v.iter().map(Spot::name).collect::<Vec<_>>(),
             // The breakpoints among them that go once they stop the machine.
-            "once": once.iter().map(|p| format!("{:05X}", p)).collect::<Vec<_>>(),
+            "once": once.iter().map(Spot::name).collect::<Vec<_>>(),
             "exceptions": exceptions,
             "mode_switch": self.break_mode_switch,
             "program_start": self.break_program_start,

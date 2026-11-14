@@ -920,6 +920,278 @@ fn idle_lockstep(test: &str, image: Vec<u8>) -> rust_dos::idle::IdleStats {
     skipping.bus.observe.stats
 }
 
+/// A thread that waits for a flag in a Sleep(0) loop while the main
+/// thread sleeps, as MDK2's worker thread waits while the main thread
+/// waits for the retrace (#1007): with no other thread ready, Sleep(0)
+/// returns at once and changes nothing, so the loop's passes are skipped
+/// to the end of the main thread's Sleep, and come out the same as when
+/// they all run.
+#[test]
+fn a_sleep_zero_loop_with_nothing_else_ready_is_skipped() {
+    let names: &[&str] = &["CreateThread", "Sleep", "WaitForSingleObject"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The flag at 0.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        let mut spin = a.create_label();
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(over)?;
+        // The thread: Sleep(0) until the flag is set.
+        a.set_label(&mut spin)?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.cmp(dword_ptr(l.data), 0)?;
+        a.je(spin)?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        a.mov(esi, eax)?;
+        a.push(30)?;
+        a.call(f("Sleep"))?;
+        a.mov(dword_ptr(l.data), 1)?;
+        a.push(-1)?;
+        a.push(esi)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let stats = idle_lockstep("sleep_zero_wait", image);
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
+/// The same wait with a count of its passes in memory, as
+/// `while (!flag) { Sleep(0); n++; }` keeps: the passes differ in the
+/// count alone, and are skipped with it moved on as they would have.
+#[test]
+fn a_sleep_zero_loop_that_counts_while_it_waits_is_skipped() {
+    let names: &[&str] = &["CreateThread", "Sleep", "WaitForSingleObject"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The flag at 0, the count at 4.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        let mut spin = a.create_label();
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(over)?;
+        // The thread: Sleep(0) and count until the flag is set.
+        a.set_label(&mut spin)?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.inc(dword_ptr(l.at(4)))?;
+        a.cmp(dword_ptr(l.data), 0)?;
+        a.je(spin)?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        a.mov(esi, eax)?;
+        a.push(30)?;
+        a.call(f("Sleep"))?;
+        a.mov(dword_ptr(l.data), 1)?;
+        a.push(-1)?;
+        a.push(esi)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let stats = idle_lockstep("sleep_zero_count_wait", image);
+    assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
+/// A Sleep(0) loop that leaves after 50 ms by GetTickCount, alone in its
+/// process: skipped or run, it reads the clock 50 ms on when it leaves,
+/// neither sooner nor later.
+#[test]
+fn a_sleep_zero_loop_with_a_timeout_leaves_on_time() {
+    let names: &[&str] = &["GetTickCount", "Sleep"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut spin = a.create_label();
+        let mut late = a.create_label();
+        a.call(f("GetTickCount"))?;
+        a.mov(ebx, eax)?;
+        a.set_label(&mut spin)?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.call(f("GetTickCount"))?;
+        a.sub(eax, ebx)?;
+        a.cmp(eax, 50)?;
+        a.jb(spin)?;
+        a.jne(late)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()?;
+        a.set_label(&mut late)?;
+        a.ret()
+    });
+    let stats = idle_lockstep("sleep_zero_timeout", image);
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// Sleep(0) loops that count their passes, in memory and in a register,
+/// and leave after 100000: every pass counts, skipped or run.
+#[test]
+fn a_sleep_zero_loop_that_counts_runs_all_its_passes() {
+    let names: &[&str] = &["Sleep", "SleepEx"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The count at 0.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut memory = a.create_label();
+        let mut register = a.create_label();
+        let mut wrong = a.create_label();
+        a.set_label(&mut memory)?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.inc(dword_ptr(l.data))?;
+        a.cmp(dword_ptr(l.data), 100_000)?;
+        a.jb(memory)?;
+        // Alertable: no APC is queued, so it returns 0.
+        a.mov(edi, 100_000)?;
+        a.set_label(&mut register)?;
+        a.push(1)?;
+        a.push(0)?;
+        a.call(f("SleepEx"))?;
+        a.test(eax, eax)?;
+        a.jnz(wrong)?;
+        a.dec(edi)?;
+        a.jnz(register)?;
+        a.cmp(dword_ptr(l.data), 100_000)?;
+        a.jne(wrong)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()?;
+        a.set_label(&mut wrong)?;
+        a.mov(eax, 1)?;
+        a.ret()
+    });
+    let stats = idle_lockstep("sleep_zero_count", image);
+    // The memory loop's flags at the head come from comparing its count,
+    // so no two passes are the same: its proofs fail and back off rather
+    // than start again every few calls.
+    assert!(failed_by(&stats, "count passes") > 0, "{stats:?}");
+    assert!(stats.starts < 1000, "{stats:?}");
+}
+
+/// A thread of normal priority waits in a Sleep(0) loop for a flag that a
+/// thread of the lowest priority sets: Sleep(0) doesn't give way to that
+/// one, which gets the processor at the end of the waiting one's turn,
+/// skipped or run.
+#[test]
+fn a_sleep_zero_loop_waits_for_a_thread_of_a_lower_priority() {
+    let names: &[&str] = &[
+        "CreateThread",
+        "SetThreadPriority",
+        "ResumeThread",
+        "Sleep",
+        "WaitForSingleObject",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The flag at 0.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        let mut count = a.create_label();
+        let mut spin = a.create_label();
+        a.push(0)?;
+        a.push(4)?; // CREATE_SUSPENDED
+        a.push(0)?;
+        a.call(over)?;
+        // The thread: count a while, then set the flag.
+        a.mov(ecx, 1000)?;
+        a.set_label(&mut count)?;
+        a.loop_(count)?;
+        a.mov(dword_ptr(l.data), 1)?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        a.mov(esi, eax)?;
+        a.push(-2)?; // THREAD_PRIORITY_LOWEST
+        a.push(esi)?;
+        a.call(f("SetThreadPriority"))?;
+        a.push(esi)?;
+        a.call(f("ResumeThread"))?;
+        a.set_label(&mut spin)?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.cmp(dword_ptr(l.data), 0)?;
+        a.je(spin)?;
+        a.push(-1)?;
+        a.push(esi)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let stats = idle_lockstep("sleep_zero_lower", image);
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// A program whose one thread waits in a Sleep(0) loop for a flag that
+/// its multimedia timer's function sets 20 ms on: the loop leaves when
+/// the timer comes, skipped or run. The timer's thread keeps the process
+/// alive, so it ends with ExitProcess.
+#[test]
+fn a_sleep_zero_loop_waits_for_a_multimedia_timer() {
+    let k32: &[&str] = &["GetTickCount", "Sleep", "ExitProcess"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", k32), ("WINMM.DLL", &["timeSetEvent"])];
+    // The flag at 0.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(k32.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        let mut spin = a.create_label();
+        let mut wrong = a.create_label();
+        let mut exit = a.create_label();
+        a.call(f("GetTickCount"))?;
+        a.mov(ebx, eax)?;
+        a.push(0)?; // TIME_ONESHOT
+        a.push(0)?;
+        a.call(over)?;
+        // The timer's function.
+        a.mov(dword_ptr(l.data), 1)?;
+        a.ret_1(20)?;
+        a.set_label(&mut over)?;
+        a.push(1)?;
+        a.push(20)?;
+        a.call(l.import(k32.len()))?;
+        a.test(eax, eax)?;
+        a.jz(wrong)?;
+        a.set_label(&mut spin)?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.cmp(dword_ptr(l.data), 0)?;
+        a.je(spin)?;
+        // The timer came 20 ms on, to the millisecond.
+        a.call(f("GetTickCount"))?;
+        a.sub(eax, ebx)?;
+        a.sub(eax, 20)?;
+        a.cmp(eax, 1)?;
+        a.ja(wrong)?;
+        a.mov(eax, 0x2A)?;
+        a.jmp(exit)?;
+        a.set_label(&mut wrong)?;
+        a.mov(eax, 1)?;
+        a.set_label(&mut exit)?;
+        a.push(eax)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let stats = idle_lockstep("sleep_zero_timer", image);
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
 /// The number of proofs that failed for `why`.
 fn failed_by(stats: &rust_dos::idle::IdleStats, why: &str) -> u64 {
     stats
@@ -1601,6 +1873,77 @@ fn a_sleep_ends_on_time_also_while_another_thread_spins() {
     assert_eq!(slept, [10, 10], "alone, spinning");
 }
 
+/// Whether a thread of priority `priority`, which counts for ever, ran
+/// while the main thread, of normal priority, called Sleep(0) 10 times
+/// right after starting it.
+fn ran_during_sleep_zero(test: &str, priority: i32) -> bool {
+    let names: &[&str] = &[
+        "CreateThread",
+        "SetThreadPriority",
+        "ResumeThread",
+        "Sleep",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The thread's count at 0.
+    let data = vec![0; 0x10];
+    let (code, out) = run(
+        test,
+        program(BASE, false, imports, &data, |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let mut over = a.create_label();
+            let mut again = a.create_label();
+            let mut yield_ = a.create_label();
+            a.push(0)?;
+            a.push(4)?; // CREATE_SUSPENDED
+            a.push(0)?;
+            a.call(over)?;
+            // The thread: count for ever.
+            a.set_label(&mut again)?;
+            a.add(dword_ptr(l.at(0)), 1)?;
+            a.jmp(again)?;
+            a.set_label(&mut over)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.call(f("CreateThread"))?;
+            a.mov(esi, eax)?;
+            a.push(priority)?;
+            a.push(esi)?;
+            a.call(f("SetThreadPriority"))?;
+            a.push(esi)?;
+            a.call(f("ResumeThread"))?;
+            a.mov(edi, 10)?;
+            a.set_label(&mut yield_)?;
+            a.push(0)?;
+            a.call(f("Sleep"))?;
+            a.dec(edi)?;
+            a.jnz(yield_)?;
+            // 1 if the thread counted, else 0.
+            a.xor(eax, eax)?;
+            a.cmp(dword_ptr(l.at(0)), 0)?;
+            a.setne(al)?;
+            a.push(eax)?;
+            a.call(f("ExitProcess"))?;
+            a.int3()
+        }),
+    );
+    assert!(out.is_empty(), "{out}");
+    code == 1
+}
+
+/// Sleep(0) gives the rest of the thread's turn to a ready thread of its
+/// priority, and returns at once when the only one ready has a lower
+/// priority, as Sleep's documentation had it until Windows Server 2003.
+/// The calls are made well within the main thread's turn, which a thread
+/// of a lower priority wouldn't get at all on Windows 98 while it can
+/// run.
+#[test]
+fn sleep_zero_gives_way_to_a_thread_of_its_priority_only() {
+    let normal = ran_during_sleep_zero("sleep_zero_normal", 0);
+    let lowest = ran_during_sleep_zero("sleep_zero_lowest", -2);
+    assert_eq!((normal, lowest), (true, false), "normal, lowest");
+}
+
 /// Threads started and ended one after another, more than the LDT has
 /// selectors for and more stacks than memory holds at once: each takes
 /// the place of one that ended. The exit code is the last one's.
@@ -1828,6 +2171,61 @@ fn a_handler_on_a_stack_above_the_threads_returns_to_its_caller() {
         }),
     );
     assert_eq!(code, 3, "{}", out);
+}
+
+/// A thread that runs on a stack of committed pages it hasn't touched
+/// yet, as a program's own coroutine stacks are, and takes an exception
+/// there: the record and context go on pages of the page file, which the
+/// system's writes bring in, and the handler runs.
+#[test]
+fn an_exception_on_a_stack_of_untouched_pages_reaches_its_handler() {
+    const MEM_COMMIT_RESERVE: i32 = 0x3000;
+    const PAGE_READWRITE: i32 = 4;
+    const HIGH: i32 = 0x6000_0000;
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["VirtualAlloc", "ExitProcess"])];
+    // Data: the thread's stack pointer.
+    let (code, out) = run(
+        "seh_untouched_stack",
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            let mut handler = a.create_label();
+            let mut start = a.create_label();
+            let mut fail = a.create_label();
+            a.jmp(start)?;
+            a.set_label(&mut fail)?;
+            a.push(99)?;
+            a.call(l.import(1))?;
+            // The handler: on after the 2-byte DIV with 5 in EAX.
+            a.set_label(&mut handler)?;
+            a.mov(eax, dword_ptr(esp + 12))?;
+            a.add(dword_ptr(eax + 0xB8), 2)?;
+            a.mov(dword_ptr(eax + 0xB0), 5)?;
+            a.xor(eax, eax)?;
+            a.ret()?;
+            a.set_label(&mut start)?;
+            push_args(a, &[HIGH, 0x10000, MEM_COMMIT_RESERVE, PAGE_READWRITE])?;
+            a.call(l.import(0))?;
+            a.cmp(eax, HIGH)?;
+            a.jne(fail)?;
+            // 40h bytes above a page boundary: the frame is on the page
+            // above it, the record and the context go on the page below,
+            // which nothing has touched.
+            a.mov(dword_ptr(l.at(0)), esp)?;
+            a.mov(esp, HIGH + 0x8040)?;
+            push_label(a, handler)?;
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+            a.xor(edx, edx)?;
+            a.xor(ecx, ecx)?;
+            a.mov(eax, 1)?;
+            a.div(ecx)?;
+            a.pop(dword_ptr(0).fs())?;
+            a.mov(esp, dword_ptr(l.at(0)))?;
+            a.push(eax)?;
+            a.call(l.import(1))?;
+            a.int3()
+        }),
+    );
+    assert_eq!(code, 5, "{}", out);
 }
 
 /// An exception raised in a handler, as Windows 98 dispatches it: the
@@ -3305,6 +3703,298 @@ fn a_full_heap_raises_an_exception_with_heap_generate_exceptions() {
     );
     assert_eq!(code, 0xFF);
     assert!(text.contains("C0000017"), "{}", text);
+}
+
+/// The memory a program commits is backed by the page file, as on
+/// Windows 98: a zeroed GlobalAlloc block as large as the machine's
+/// memory succeeds, another one after it too, and the program can touch
+/// every page of both, more than the machine has, and read back what it
+/// wrote, pages it never wrote being zeros. GlobalMemoryStatus's page
+/// file has less room after, and a commit past the memory and the page
+/// file together fails. A bit each in the exit code.
+#[test]
+fn a_program_commits_and_touches_more_memory_than_the_machine_has() {
+    const GMEM_ZEROINIT: i32 = 0x40;
+    const MEM_COMMIT_RESERVE: i32 = 0x3000;
+    const PAGE_READWRITE: i32 = 4;
+    const SECOND: i32 = 0x40_0000;
+    const PATTERN: i32 = 0x5A5A_5A5A;
+    let names: &[&str] = &["GlobalMemoryStatus", "GlobalAlloc", "VirtualAlloc"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // MEMORYSTATUS before at 0 and after at 20h; the blocks at 40h, 44h.
+    let (code, text) = run(
+        "pagefile",
+        program(BASE, false, imports, &[0; 0x50], |a, l| {
+            let total = dword_ptr(l.at(8));
+            let mut end = a.create_label();
+            a.xor(ebx, ebx)?;
+            a.push(l.at(0) as i32)?;
+            a.call(l.import(0))?;
+            a.push(total)?;
+            a.push(GMEM_ZEROINIT)?;
+            a.call(l.import(1))?;
+            a.mov(dword_ptr(l.at(0x40)), eax)?;
+            a.test(eax, eax)?;
+            a.je(end)?;
+            a.or(ebx, 1)?;
+            push_args(a, &[0, SECOND])?;
+            a.call(l.import(1))?;
+            a.mov(dword_ptr(l.at(0x44)), eax)?;
+            a.test(eax, eax)?;
+            a.je(end)?;
+            a.or(ebx, 2)?;
+            // The first dword of every page of both: its address, mixed.
+            for (block, pages) in [(0x40, None), (0x44, Some(SECOND >> 12))] {
+                let mut next = a.create_label();
+                a.mov(esi, dword_ptr(l.at(block)))?;
+                match pages {
+                    Some(pages) => a.mov(ecx, pages)?,
+                    None => {
+                        a.mov(ecx, total)?;
+                        a.shr(ecx, 12)?;
+                    }
+                }
+                a.set_label(&mut next)?;
+                a.mov(eax, esi)?;
+                a.xor(eax, PATTERN)?;
+                a.mov(dword_ptr(esi), eax)?;
+                a.add(esi, 0x1000)?;
+                a.dec(ecx)?;
+                a.jnz(next)?;
+            }
+            // Read back, with the rest of the zeroed block's pages zeros.
+            a.xor(edx, edx)?;
+            for (block, pages) in [(0x40, None), (0x44, Some(SECOND >> 12))] {
+                let mut next = a.create_label();
+                let mut same = a.create_label();
+                let mut zero = a.create_label();
+                a.mov(esi, dword_ptr(l.at(block)))?;
+                match pages {
+                    Some(pages) => a.mov(ecx, pages)?,
+                    None => {
+                        a.mov(ecx, total)?;
+                        a.shr(ecx, 12)?;
+                    }
+                }
+                a.set_label(&mut next)?;
+                a.mov(eax, esi)?;
+                a.xor(eax, PATTERN)?;
+                a.cmp(dword_ptr(esi), eax)?;
+                a.je(same)?;
+                a.inc(edx)?;
+                a.set_label(&mut same)?;
+                if pages.is_none() {
+                    a.cmp(dword_ptr(esi + 0x800), 0)?;
+                    a.je(zero)?;
+                    a.inc(edx)?;
+                    a.set_label(&mut zero)?;
+                }
+                a.add(esi, 0x1000)?;
+                a.dec(ecx)?;
+                a.jnz(next)?;
+            }
+            a.test(edx, edx)?;
+            bit_if_equal(a, 2)?;
+            a.push(l.at(0x20) as i32)?;
+            a.call(l.import(0))?;
+            a.mov(eax, dword_ptr(l.at(0x34)))?;
+            a.cmp(eax, dword_ptr(l.at(0x14)))?;
+            let mut more = a.create_label();
+            a.jae(more)?;
+            a.or(ebx, 8)?;
+            a.set_label(&mut more)?;
+            // The memory and the page file's room together, and a page
+            // more, can't be committed; a megabyte can.
+            a.mov(eax, dword_ptr(l.at(0x2C)))?;
+            a.add(eax, dword_ptr(l.at(0x34)))?;
+            a.add(eax, 0x1000)?;
+            a.push(PAGE_READWRITE)?;
+            a.push(MEM_COMMIT_RESERVE)?;
+            a.push(eax)?;
+            a.push(0)?;
+            a.call(l.import(2))?;
+            a.test(eax, eax)?;
+            bit_if_equal(a, 4)?;
+            push_args(a, &[0, 0x10_0000, MEM_COMMIT_RESERVE, PAGE_READWRITE])?;
+            a.call(l.import(2))?;
+            a.test(eax, eax)?;
+            let mut failed = a.create_label();
+            a.je(failed)?;
+            a.or(ebx, 0x20)?;
+            a.set_label(&mut failed)?;
+            a.nop()?;
+            a.set_label(&mut end)?;
+            a.mov(eax, ebx)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b} {}",
+        !code & 0x3F,
+        text
+    );
+}
+
+/// A zeroed block takes no physical memory until it is touched: after
+/// GlobalAlloc(GMEM_ZEROINIT) of 8 MB, GlobalMemoryStatus has nearly as
+/// much physical memory available as before, and 8 MB less room in the
+/// page file. Touching a page takes it from the physical memory. A bit
+/// each in the exit code.
+#[test]
+fn a_zeroed_block_takes_no_memory_until_it_is_touched() {
+    const GMEM_ZEROINIT: i32 = 0x40;
+    const SIZE: i32 = 0x80_0000;
+    let names: &[&str] = &["GlobalMemoryStatus", "GlobalAlloc"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // MEMORYSTATUS before at 0, after the block at 20h, after a touch at
+    // 40h.
+    let (code, text) = run(
+        "zeroedblock",
+        program(BASE, false, imports, &[0; 0x60], |a, l| {
+            a.xor(ebx, ebx)?;
+            a.push(l.at(0) as i32)?;
+            a.call(l.import(0))?;
+            push_args(a, &[GMEM_ZEROINIT, SIZE])?;
+            a.call(l.import(1))?;
+            a.mov(esi, eax)?;
+            a.push(l.at(0x20) as i32)?;
+            a.call(l.import(0))?;
+            // dwAvailPhys down by less than 64 KB (the heap's own pages).
+            a.mov(eax, dword_ptr(l.at(0x0C)))?;
+            a.sub(eax, dword_ptr(l.at(0x2C)))?;
+            a.cmp(eax, 0x1_0000)?;
+            let mut much = a.create_label();
+            a.jae(much)?;
+            a.or(ebx, 1)?;
+            a.set_label(&mut much)?;
+            // dwAvailPageFile down by the block.
+            a.mov(eax, dword_ptr(l.at(0x14)))?;
+            a.sub(eax, dword_ptr(l.at(0x34)))?;
+            a.cmp(eax, SIZE)?;
+            bit_if_equal(a, 1)?;
+            // A page of it touched: a page less physical memory, a page
+            // more room in the page file.
+            a.mov(dword_ptr(esi + 0x4000), 1)?;
+            a.push(l.at(0x40) as i32)?;
+            a.call(l.import(0))?;
+            a.mov(eax, dword_ptr(l.at(0x2C)))?;
+            a.sub(eax, dword_ptr(l.at(0x4C)))?;
+            a.cmp(eax, 0x1000)?;
+            bit_if_equal(a, 2)?;
+            a.mov(eax, dword_ptr(l.at(0x54)))?;
+            a.sub(eax, dword_ptr(l.at(0x34)))?;
+            a.cmp(eax, 0x1000)?;
+            bit_if_equal(a, 3)?;
+            a.mov(eax, ebx)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(
+        code,
+        0xF,
+        "the checks that failed: {:04b} {}",
+        !code & 0xF,
+        text
+    );
+}
+
+/// A program that commits memory until VirtualAlloc fails, in the page
+/// file first and, with it full, the machine's last pages, can touch all
+/// it committed: the pages it took from the machine go out to the page
+/// file too, to make room for those that come in. A bit each in the exit
+/// code.
+#[test]
+fn a_program_touches_memory_committed_to_the_last_page() {
+    const MEM_COMMIT_RESERVE: i32 = 0x3000;
+    const PAGE_READWRITE: i32 = 4;
+    const BLOCK: i32 = 0x10_0000;
+    const PATTERN: i32 = 0x5A5A_5A5A;
+    let names: &[&str] = &["VirtualAlloc"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The first block's address at 0, the last page's at 4.
+    let exe = program(BASE, false, imports, &[0; 8], |a, l| {
+        let mut blocks = a.create_label();
+        let mut kept = a.create_label();
+        let mut pages = a.create_label();
+        let mut full = a.create_label();
+        let mut end = a.create_label();
+        a.xor(ebx, ebx)?;
+        // Blocks of a megabyte while there is room for one.
+        a.set_label(&mut blocks)?;
+        push_args(a, &[0, BLOCK, MEM_COMMIT_RESERVE, PAGE_READWRITE])?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        a.je(pages)?;
+        a.cmp(dword_ptr(l.at(0)), 0)?;
+        a.jne(kept)?;
+        a.mov(dword_ptr(l.at(0)), eax)?;
+        a.set_label(&mut kept)?;
+        a.jmp(blocks)?;
+        // Then pages while there is room for one.
+        a.set_label(&mut pages)?;
+        push_args(a, &[0, 0x1000, MEM_COMMIT_RESERVE, PAGE_READWRITE])?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        a.je(full)?;
+        a.mov(dword_ptr(l.at(4)), eax)?;
+        a.jmp(pages)?;
+        a.set_label(&mut full)?;
+        a.cmp(dword_ptr(l.at(0)), 0)?;
+        a.je(end)?;
+        a.cmp(dword_ptr(l.at(4)), 0)?;
+        a.je(end)?;
+        a.or(ebx, 1)?;
+        // The first dword of every page of the first block and of the
+        // last page: its address, mixed; then read back.
+        for check in [false, true] {
+            let mut next = a.create_label();
+            a.xor(edx, edx)?;
+            a.mov(esi, dword_ptr(l.at(0)))?;
+            a.mov(ecx, BLOCK >> 12)?;
+            a.set_label(&mut next)?;
+            a.mov(eax, esi)?;
+            a.xor(eax, PATTERN)?;
+            if check {
+                let mut same = a.create_label();
+                a.cmp(dword_ptr(esi), eax)?;
+                a.je(same)?;
+                a.inc(edx)?;
+                a.set_label(&mut same)?;
+            } else {
+                a.mov(dword_ptr(esi), eax)?;
+            }
+            a.add(esi, 0x1000)?;
+            a.dec(ecx)?;
+            a.jnz(next)?;
+            a.mov(esi, dword_ptr(l.at(4)))?;
+            a.mov(eax, esi)?;
+            a.xor(eax, PATTERN)?;
+            if check {
+                let mut same = a.create_label();
+                a.cmp(dword_ptr(esi), eax)?;
+                a.je(same)?;
+                a.inc(edx)?;
+                a.set_label(&mut same)?;
+            } else {
+                a.mov(dword_ptr(esi), eax)?;
+            }
+        }
+        a.test(edx, edx)?;
+        bit_if_equal(a, 1)?;
+        a.set_label(&mut end)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run_files_in("pagefile_last_page", &[("T.EXE", exe)], 8);
+    assert_eq!(
+        code,
+        3,
+        "the checks that failed: {:02b} {}",
+        !code & 3,
+        text
+    );
 }
 
 /// An argument a test program passes: a value, or ESI.

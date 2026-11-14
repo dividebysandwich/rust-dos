@@ -537,13 +537,19 @@ section covers names that section.
   bits. The stencil calls do nothing and the stencil test passes for
   every pixel, so what a program masks with the stencil buffer is drawn
   unmasked.
-- **Functions that do nothing.** Display lists, `glDrawPixels`,
-  `glBitmap` and the raster position, `glCopyPixels`, texture
-  coordinate generation (`glTexGen`), user clip planes, 1D textures,
-  stipples, `glLogicOp`, colour index mode, the accumulation buffer,
-  evaluators, selection and feedback log their first call and do
-  nothing else. The calls between `glNewList` and `glEndList` run at
-  once, and `glCallList` draws nothing.
+- **Functions that do nothing.** `glDrawPixels`, `glBitmap` and the
+  raster position, `glCopyPixels`, texture coordinate generation
+  (`glTexGen`), user clip planes, 1D textures, stipples, `glLogicOp`,
+  colour index mode, the accumulation buffer, evaluators, selection and
+  feedback log their first call and do nothing else. A display list
+  records calls of these with the rest and does nothing for them when
+  it runs. Text that a program draws from the lists of
+  `wglUseFontBitmaps` or `wglUseFontOutlines` doesn't show: both
+  functions fail and make no lists.
+- **Display lists.** A list runs the calls it recorded one by one, as
+  the program's own calls run, so drawing from a list costs what
+  drawing without it does. `wglShareLists` shares the lists of two
+  contexts and leaves each its own textures.
 - **Reading back.** `glReadPixels` of `GL_DEPTH_COMPONENT` and
   `glGetTexImage` leave the program's buffer as it was. A proxy texture
   is refused with `GL_INVALID_ENUM`, and `glGetTexLevelParameter`

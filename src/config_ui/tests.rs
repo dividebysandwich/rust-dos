@@ -77,6 +77,8 @@ struct FakeHost {
     reinserted: Vec<u8>,
     /// The program the almanac is asked about.
     almanac: Option<crate::almanac::Program>,
+    /// The note `apply` returns, as the real host's while a program runs.
+    note: Option<String>,
 }
 
 impl FakeHost {
@@ -120,6 +122,7 @@ impl FakeHost {
             synced: vec![],
             reinserted: vec![],
             almanac: None,
+            note: None,
         }
     }
 }
@@ -134,7 +137,7 @@ impl Host for FakeHost {
         if self.no_shaders && settings.shader != Shader::None {
             return Err("CRT shaders need OpenGL 3".to_string());
         }
-        Ok(None)
+        Ok(self.note.clone())
     }
 
     fn mount(&mut self, spec: MountSpec, replace: bool) -> Result<PathBuf, String> {
@@ -475,9 +478,9 @@ fn settings_change_live() {
 
     // Memory steps up to what the 486 takes and waits for the next start.
     ui.row = ui.items().iter().position(|&i| i == Item::Memsize).unwrap();
-    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some(" 16 MB ■■■■·······"));
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some(" 16 MB ■■■■······· (auto)"));
     keys(&mut ui, &mut host, &[Right]);
-    assert_eq!(host.applied.last().unwrap().memsize, 20);
+    assert_eq!(host.applied.last().unwrap().memsize, Some(20));
     assert!(status(&ui).0.contains("next time"), "{:?}", status(&ui));
     // Typed, no further than 2 MB and what the CPU takes, and back to 16
     // with Delete.
@@ -492,17 +495,64 @@ fn settings_change_live() {
     keys(&mut ui, &mut host, &[End, Backspace, Backspace, Backspace]);
     ui.text("62", &mut host);
     keys(&mut ui, &mut host, &[Enter, Right, Right, Right]);
-    assert_eq!(host.applied.last().unwrap().memsize, 128);
+    assert_eq!(host.applied.last().unwrap().memsize, Some(128));
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("128 MB ■■■■■■■■■■■"));
     for _ in 0..10 {
         ui.key(Left, &mut host);
     }
-    assert_eq!(host.applied.last().unwrap().memsize, 4);
+    assert_eq!(host.applied.last().unwrap().memsize, Some(4));
     keys(&mut ui, &mut host, &[Left, Left]);
-    assert_eq!(host.applied.last().unwrap().memsize, 2);
+    assert_eq!(host.applied.last().unwrap().memsize, Some(2));
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("  2 MB ···········"));
     keys(&mut ui, &mut host, &[Delete]);
-    assert_eq!(host.applied.last().unwrap().memsize, 16);
+    assert_eq!(host.applied.last().unwrap().memsize, None);
+    assert_eq!(host.applied.last().unwrap().memory_mb(), 16);
+
+    // While it isn't set, another CPU or display adapter changes the
+    // default it shows, for the next start.
+    ui.row = ui.items().iter().position(|&i| i == Item::Cpu).unwrap();
+    pick(&mut ui, &mut host, "Pentium II");
+    let applied = host.applied.last().unwrap();
+    assert_eq!((applied.memsize, applied.memory_mb()), (None, 64));
+    assert!(status(&ui).0.contains("default is now 64 MB"), "{:?}", status(&ui));
+    assert_eq!(Item::Memsize.value(&ui.settings, None), " 64 MB ■■■■■■■■■······ (auto)");
+    ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
+    pick(&mut ui, &mut host, crate::video::adapter::Adapter::ToadForce.describe());
+    assert_eq!(Item::Memsize.value(&ui.settings, None), "128 MB ■■■■■■■■■■■···· (auto)");
+    // The row has room for it: 31 columns on the 80-column window.
+    assert!(Item::Memsize.value(&ui.settings, None).chars().count() <= 31);
+    assert!(status(&ui).0.contains("default is now 128 MB"), "{:?}", status(&ui));
+    // While a program runs the host says the card waits for it to end
+    // (`pending_note`), and the memory's note follows its own.
+    let running = "Takes effect when the running program ends";
+    host.note = Some(running.to_string());
+    pick(&mut ui, &mut host, crate::video::adapter::Adapter::default().describe());
+    let (note, _) = status(&ui);
+    assert_eq!(note, "Takes effect when the running program ends; memory 64 MB at next start");
+    // Both fit the status line, 72 columns on the 80-column screen
+    // (`fit` cuts the middle out of a longer one), also with a
+    // three-digit size.
+    assert!(note.chars().count() < 72, "{:?}", note);
+    host.note = None;
+    pick(&mut ui, &mut host, crate::video::adapter::Adapter::ToadForce.describe());
+    // Set by the user, it stays through them, down to what a CPU takes.
+    ui.row = ui.items().iter().position(|&i| i == Item::Memsize).unwrap();
+    keys(&mut ui, &mut host, &[Left]);
+    assert_eq!(host.applied.last().unwrap().memsize, Some(96));
+    ui.row = ui.items().iter().position(|&i| i == Item::Cpu).unwrap();
+    pick(&mut ui, &mut host, "Pentium III");
+    assert_eq!(host.applied.last().unwrap().memory_mb(), 96);
+    assert!(!status(&ui).0.contains("default"), "{:?}", status(&ui));
+    pick(&mut ui, &mut host, "386");
+    assert_eq!(host.applied.last().unwrap().memsize, Some(64));
+    // Back to the test's machine.
+    ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
+    pick(&mut ui, &mut host, crate::video::adapter::Adapter::default().describe());
+    ui.row = ui.items().iter().position(|&i| i == Item::Cpu).unwrap();
+    pick(&mut ui, &mut host, "486");
+    ui.row = ui.items().iter().position(|&i| i == Item::Memsize).unwrap();
+    keys(&mut ui, &mut host, &[Delete]);
+    assert_eq!(host.applied.last().unwrap().memsize, None);
 
     // The disk speed changes at once.
     ui.row = ui.items().iter().position(|&i| i == Item::FloppyDiskSpeed).unwrap();

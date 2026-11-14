@@ -291,17 +291,27 @@ pub fn fault_in_process(cpu: &mut Cpu, index: usize, lin: u32) -> bool {
     for _ in 0..4 {
         match read_in(&mut cpu.bus, index, lin, keep) {
             PageIn::Done => {
-                if index == cpu.bus.win32.running {
+                // Reading it may have sent a page to the page file.
+                if std::mem::take(&mut cpu.bus.win32.tlb_stale) {
+                    cpu.tlb.flush();
+                } else if index == cpu.bus.win32.running {
                     cpu.tlb.flush_page(lin);
                 }
                 return true;
             }
             PageIn::No => return false,
             PageIn::Full => {
+                // `read_in` sends no page of a program's own memory to the
+                // page file to make room, so when no view's page can go
+                // and the reserve is used up, one goes out here.
                 if evict(&mut cpu.bus) {
                     cpu.tlb.flush();
                 } else if keep == 0 {
-                    return false;
+                    if !memory::page_out(&mut cpu.bus) {
+                        return false;
+                    }
+                    cpu.tlb.flush();
+                    cpu.bus.win32.tlb_stale = false;
                 }
                 // With what room evicting made, or with nothing left to
                 // evict, the page may take from the reserve.

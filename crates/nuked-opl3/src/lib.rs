@@ -423,11 +423,7 @@ impl Opl3Device {
     pub fn reset(&mut self, sample_rate: Option<u32>) -> Result<(), OplError> {
         let new_sample_rate = sample_rate.unwrap_or(self.sample_rate);
         self.inner_chip.reset(new_sample_rate);
-        for file in 0..2 {
-            for reg in 0..256 {
-                self.registers[file][reg] = 0;
-            }
-        }
+        self.registers = [[0; 256]; 2];
         self.stats = Opl3DeviceStats::default();
         Ok(())
     }

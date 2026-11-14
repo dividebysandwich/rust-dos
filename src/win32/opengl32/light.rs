@@ -686,9 +686,11 @@ mod tests {
 
     #[test]
     fn color_material_tracks_the_faces_and_modes_it_names() {
-        let mut l = Lighting::default();
-        l.color_face = GL_BACK;
-        l.color_mode = GL_EMISSION;
+        let mut l = Lighting {
+            color_face: GL_BACK,
+            color_mode: GL_EMISSION,
+            ..Lighting::default()
+        };
         l.track([0.5, 0.25, 0.0, 1.0]);
         assert_eq!(l.materials[0], Material::default());
         assert_eq!(l.materials[1].emission, [0.5, 0.25, 0.0, 1.0]);

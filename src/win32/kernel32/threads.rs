@@ -343,7 +343,10 @@ pub(super) fn get_thread_priority(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(thread_at(cpu, at).priority as u32)
 }
 
-/// SetThreadPriority(handle, priority): kept; threads take turns
+/// SetThreadPriority(handle, priority): kept. A thread of a higher
+/// priority preempts at a timer event (`thread::preempt`) and Sleep(0)
+/// gives way only to the same priority or a higher one
+/// (`thread::yield_turn`); at the end of a turn, threads take turns
 /// whatever their priority.
 pub(super) fn set_thread_priority(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(at) = thread_of(cpu, args[0]) else {

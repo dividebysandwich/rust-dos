@@ -108,6 +108,9 @@ pub fn reset_for_shell(bus: &mut Bus) {
         bus.vga.sum_to_gray(0..256);
     }
     bus.vbe.reset();
+    // A ToadForce counts the retraces of the text mode's timing from
+    // here.
+    bus.toadforce_retime();
 }
 
 /// Whether the VGA BIOS sums the palettes it loads to grey (BDA 0489h bit
