@@ -1506,20 +1506,21 @@ them that found the card's state right already and sent nothing
 states says something writes a state before every draw.
 `screen_draws` counts the draws of screen vertices the HAL sent the
 card from the program's memory (`direct`, with their vertices in
-`direct_vertices`) and the batches the pipeline handed it instead
-(`pipeline`, `pipeline_vertices`): a scene with many pipeline batches
-draws untransformed vertices, or screen vertices the direct path
-declines (lines, points, wireframe, flat shading, a vertex outside
-the guard band). Each surface has its `id`, the `pid` of its process,
-its `interfaces` (the addresses the program passes as `this`, which
-the log's `[W32]` lines show),
-`width`, `height`, `pitch`, `format` (flags, FourCC, bits a pixel, red,
-green, blue and alpha masks), `caps`, `memory` (`system`, `video`,
-`card`, the 3dfx card's, or `none`) and `address`, `locked`, `lost`,
-its color `keys` (`src_blt`, `dest_blt` and the overlay ones, each a
-low and high value), the ids of its `palette`, `clipper`, `root` and
-`attached` surfaces, and the `version` of the interfaces it was made
-through (1, 4 or 7).
+`direct_vertices`) and the batches the pipeline handed it (`pipeline`,
+`pipeline_vertices`): a scene with many pipeline batches draws
+vertices to transform that the card doesn't transform itself, execute
+buffers, or screen vertices the direct path declines (lines, points,
+wireframe, flat shading, a clip status the program reads, a vertex
+outside the guard band). Each surface has its `id`, the `pid` of its
+process, its `interfaces` (the addresses the program passes as
+`this`, which the log's `[W32]` lines show), `width`, `height`,
+`pitch`, `format` (flags, FourCC, bits a pixel, red, green, blue and
+alpha masks), `caps`, `memory` (`system`, `video`, `card`, the 3dfx
+card's, or `none`) and `address`, `locked`, `lost`, its color `keys`
+(`src_blt`, `dest_blt` and the overlay ones, each a low and high
+value), the ids of its `palette`, `clipper`, `root` and `attached`
+surfaces, and the `version` of the interfaces it was made through (1,
+4 or 7).
 
 `GET /api/win32/ddraw/surface/{id}` shows a surface's pixels as a PNG
 (`?format=raw` for RGB24 rows). With `?keyed=true` the pixels its source

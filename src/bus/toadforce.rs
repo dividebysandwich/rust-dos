@@ -254,7 +254,10 @@ impl Bus {
     /// of the card meanwhile, so `write` reads the program's memory
     /// only where that is plain RAM (`guest_read_ram`) and hands the
     /// card nothing else. Without a card the words go nowhere.
-    pub fn toadforce_submit_with<T>(&mut self, write: impl FnOnce(&mut Bus, &mut Vec<u32>) -> T) -> T {
+    pub fn toadforce_submit_with<T>(
+        &mut self,
+        write: impl FnOnce(&mut Bus, &mut Vec<u32>) -> T,
+    ) -> T {
         let Some(card) = &mut self.toadforce else {
             return write(self, &mut Vec::new());
         };

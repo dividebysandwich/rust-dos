@@ -153,8 +153,9 @@ pub struct Hal {
     /// (`in_place`), newest last: most draws bind one of them again.
     pub taken: Vec<Texture>,
     /// The draws of screen vertices that went from the program's
-    /// memory to the card (`direct::draw`) and their vertices, and
-    /// those the pipeline kept and theirs.
+    /// memory to the card (`direct::draw`) and their vertices, and the
+    /// batches the pipeline handed the card (`Raster::finish`) and the
+    /// vertices of their commands.
     pub screen_draws: [u64; 4],
     /// The buffers of `direct::draw`.
     pub scratch: direct::Scratch,
@@ -1654,12 +1655,13 @@ pub struct Raster<'a> {
     /// where its header is.
     primitive: u32,
     header: usize,
+    /// The vertices of the commands closed so far.
+    vertices: u64,
 }
 
 impl Raster<'_> {
     pub fn new(cpu: &mut Cpu, card: Card) -> Raster<'_> {
         let (fvf, vertex_words) = card.layout();
-        hal(cpu).screen_draws[2] += 1;
         Raster {
             cpu,
             card,
@@ -1668,6 +1670,7 @@ impl Raster<'_> {
             words: Vec::new(),
             primitive: 0,
             header: 0,
+            vertices: 0,
         }
     }
 
@@ -1680,6 +1683,7 @@ impl Raster<'_> {
         let count = (len - 4) / self.vertex_words;
         self.words[self.header] = crate::toadforce::command::header(level1::DRAW, len);
         self.words[self.header + 3] = count as u32;
+        self.vertices += count as u64;
         self.primitive = 0;
     }
 
@@ -1719,7 +1723,9 @@ impl Raster<'_> {
         if self.words.is_empty() {
             return;
         }
-        hal(self.cpu).screen_draws[3] += (self.words.len() / self.vertex_words) as u64;
+        let counts = &mut hal(self.cpu).screen_draws;
+        counts[2] += 1;
+        counts[3] += self.vertices;
         submit(self.cpu, &self.words);
         drew(self.cpu, &self.card);
     }

@@ -206,14 +206,21 @@ struct Draw<'a> {
     order: Option<&'a [u16]>,
 }
 
+/// How many triangles `named` vertices make at most in a draw of
+/// `kind`: as many as the draw names, through its indices or as they
+/// are.
+fn triangles(kind: u32, named: usize) -> usize {
+    match kind {
+        TRIANGLELIST => named / 3,
+        _ => named.saturating_sub(2),
+    }
+}
+
 impl Draw<'_> {
     /// How many triangles the draw's vertices make at most.
     fn triangles(&self) -> usize {
         let named = self.order.map_or(self.count, |order| order.len());
-        match self.kind {
-            TRIANGLELIST => named / 3,
-            _ => named.saturating_sub(2),
-        }
+        triangles(self.kind, named)
     }
 
     /// Add the draw's `DRAW_INDEXED` to `words`: the triangles drawn.
@@ -235,9 +242,10 @@ impl Draw<'_> {
             let at = first + i * plan.words;
             [words[at], words[at + 1], words[at + 2]].map(f32::from_bits)
         };
+        let mut inside = pipeline::tl_inside(setup);
         if !vertices(words)
             || words.len() != first + count * plan.words
-            || !(0..count).all(|i| pipeline::tl_inside(setup, place(words, i)))
+            || !(0..count).all(|i| inside(place(words, i)))
         {
             words.truncate(start);
             return None;
@@ -289,11 +297,7 @@ pub fn draw(
         && setup.shade != SHADE_FLAT
         && d.clip_status[0] & 3 == 0;
     let count = from.count as usize;
-    let named = from.indices.map_or(count, |(_, n)| n as usize);
-    let triangles = match kind {
-        TRIANGLELIST => named / 3,
-        _ => named.saturating_sub(2),
-    };
+    let triangles = triangles(kind, from.indices.map_or(count, |(_, n)| n as usize));
     if !whole || triangles == 0 || from.count > level1::DRAW_VERTICES {
         return None;
     }
@@ -554,9 +558,10 @@ mod tests {
                 true
             });
             assert_eq!(words[0], 0xDEAD_BEEF);
+            let mut inside_of = pipeline::tl_inside(&setup);
             let inside = bytes.chunks_exact(size).all(|v| {
                 let v = layout.read(v);
-                pipeline::tl_inside(&setup, [v.position[0], v.position[1], v.position[2]])
+                inside_of([v.position[0], v.position[1], v.position[2]])
             });
             match made {
                 None => {

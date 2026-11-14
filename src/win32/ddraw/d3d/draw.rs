@@ -16,10 +16,10 @@ use super::device::{
     RS_SPECULARMATERIALSOURCE, TSS_TEXCOORDINDEX, TSS_TEXTURETRANSFORMFLAGS, device_of, get,
     version,
 };
+use super::hal::Source;
 use super::pipeline::{
     self, Blend, Fog, Layout, Light, Lighting, Material, Prim, Processed, Setup, Vertex, ViewMap,
 };
-use super::hal::Source;
 use super::vertexbuffer::Clipped;
 use super::{
     D3D_OK, D3DERR_INBEGIN, D3DERR_INVALIDPRIMITIVETYPE, D3DERR_INVALIDVERTEXTYPE,
@@ -27,7 +27,6 @@ use super::{
 };
 use crate::cpu::Cpu;
 use crate::win32::trace3d::Pass;
-use std::sync::Arc;
 
 // DrawPrimitive's flags.
 pub const D3DDP_DONOTCLIP: u32 = 0x4;
@@ -84,23 +83,33 @@ pub fn read_vertices(
     count: u32,
 ) -> Result<Vec<Vertex>, u32> {
     vertices_there(cpu, at, layout, count)?;
+    Ok(vertices_at(cpu, at, layout, count))
+}
+
+/// `read_vertices` of vertices `vertices_there` found there.
+fn vertices_at(cpu: &mut Cpu, at: u32, layout: &Layout, count: u32) -> Vec<Vertex> {
     let bytes = read_bytes(cpu, at, layout.size * count);
-    Ok(bytes
+    bytes
         .chunks_exact(layout.size.max(1) as usize)
         .map(|v| layout.read(v))
-        .collect())
+        .collect()
 }
 
 /// `count` indices (WORDs) at `at`.
 fn read_indices(cpu: &mut Cpu, at: u32, count: u32) -> Result<Vec<u32>, u32> {
     indices_there(cpu, at, count)?;
+    Ok(indices_at(cpu, at, count))
+}
+
+/// `read_indices` of indices `indices_there` found there.
+fn indices_at(cpu: &mut Cpu, at: u32, count: u32) -> Vec<u32> {
     let bytes = read_bytes(cpu, at, count * 2);
-    Ok(bytes
+    bytes
         .as_chunks::<2>()
         .0
         .iter()
         .map(|b| u16::from_le_bytes([b[0], b[1]]) as u32)
-        .collect())
+        .collect()
 }
 
 /// A D3DLIGHT7's words as the pipeline has a light.
@@ -427,16 +436,14 @@ fn draw_from(
     if let Some((at, count)) = from.indices {
         indices_there(cpu, at, count)?;
     }
-    let read = |cpu: &mut Cpu| -> Result<(Vec<Vertex>, Option<Vec<u32>>), u32> {
-        let vertices = read_vertices(cpu, from.at, layout, from.count)?;
-        let order = match from.indices {
-            Some((at, count)) => Some(read_indices(cpu, at, count)?),
-            None => None,
-        };
-        Ok((vertices, order))
+    // Probed above, so read without probing again.
+    let read = |cpu: &mut Cpu| {
+        let vertices = vertices_at(cpu, from.at, layout, from.count);
+        let order = from.indices.map(|(at, count)| indices_at(cpu, at, count));
+        (vertices, order)
     };
     if !layout.rhw {
-        let (vertices, order) = read(cpu)?;
+        let (vertices, order) = read(cpu);
         let order = order.as_deref();
         return draw(cpu, id, version, layout, kind, &vertices, order, flags);
     }
@@ -462,7 +469,7 @@ fn draw_from(
         super::super::surface::changed(cpu, target);
         return Ok(());
     }
-    let (vertices, order) = read(cpu)?;
+    let (vertices, order) = read(cpu);
     let prims = primitives(kind, order.as_deref(), vertices.len())?;
     draw_set_up(cpu, id, &setup, layout, &vertices, None, &prims, flags);
     Ok(())
@@ -839,53 +846,22 @@ fn draw_buffer(
     let range = start as usize..(start + count) as usize;
     let kept = layout.rhw
         && b.clipped
-            .get(range)
+            .get(range.clone())
             .is_some_and(|kept| kept.iter().any(Option::is_some));
     if !kept {
         let from = Source { at, count, indices };
         return draw_from(cpu, id, version, &layout, kind, &from, flags);
     }
+    // The transformed vertices, clipped at their clip coordinates
+    // where ProcessVertices kept them.
     let vertices = read_vertices(cpu, at, &layout, count)?;
     let order = match indices {
         Some((at, count)) => Some(read_indices(cpu, at, count)?),
         None => None,
     };
-    let buffer = BufferVertices {
-        layout,
-        vertices,
-        clipped: b.clipped,
-        start: start as usize,
-    };
-    draw_kept(cpu, id, version, &buffer, kind, order.as_deref(), flags)
-}
-
-/// A vertex buffer's layout, its vertices from `start` on, and what
-/// ProcessVertices kept of the buffer.
-struct BufferVertices {
-    layout: Layout,
-    vertices: Vec<Vertex>,
-    clipped: Arc<Vec<Option<Clipped>>>,
-    start: usize,
-}
-
-/// Draw `kind` primitives of a vertex buffer's transformed `vertices`
-/// (in the order `order`, or as they are), clipped at their clip
-/// coordinates where ProcessVertices kept them.
-fn draw_kept(
-    cpu: &mut Cpu,
-    id: u32,
-    version: u32,
-    b: &BufferVertices,
-    kind: u32,
-    order: Option<&[u32]>,
-    flags: u32,
-) -> Result<(), u32> {
-    let (layout, vertices) = (&b.layout, &b.vertices);
-    let prims = primitives(kind, order, vertices.len())?;
-    let clip = b.clipped.get(b.start..b.start + vertices.len());
-    draw_clipped(
-        cpu, id, version, layout, vertices, clip, &prims, flags, None,
-    )
+    let prims = primitives(kind, order.as_deref(), vertices.len())?;
+    let clip = b.clipped.get(range);
+    draw_clipped(cpu, id, version, &layout, &vertices, clip, &prims, flags, None)
 }
 
 /// DrawPrimitiveVB(this, type, buffer, start, count, flags).

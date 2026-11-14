@@ -1792,19 +1792,20 @@ pub fn culled(cull: u32, area: f32) -> bool {
 
 /// Whether a transformed vertex at `x`, `y` and `z` is inside every
 /// plane `clip_planes` gives transformed vertices with `setup`, and has
-/// a place there at all (`finite`): a triangle of such vertices goes to
-/// the card whole.
-pub fn tl_inside(setup: &Setup, [x, y, z]: [f32; 3]) -> bool {
-    let band = setup.guard_band;
-    let depth = !setup.clip || (z - 0.0 >= 0.0 && 1.0 - z >= 0.0);
-    x.is_finite()
-        && y.is_finite()
-        && z.is_finite()
-        && depth
-        && x - band[0] >= 0.0
-        && band[2] - x >= 0.0
-        && y - band[1] >= 0.0
-        && band[3] - y >= 0.0
+/// a place there at all (`finite`), as `triangle` tests a corner: a
+/// triangle of such vertices goes to the card whole. Made once for a
+/// draw, with the planes `triangle` clips its transformed vertices at,
+/// and asked for each vertex.
+pub fn tl_inside(setup: &Setup) -> impl FnMut([f32; 3]) -> bool {
+    let planes = clip_planes(setup, true);
+    let mut p = Processed {
+        tl: true,
+        ..Processed::default()
+    };
+    move |[x, y, z]| {
+        p.clip = [x, y, z, 1.0];
+        finite(&p) && planes.iter().all(|plane| plane.distance(&p) >= 0.0)
+    }
 }
 
 /// Draw the clipped polygon `poly` of a triangle, as the fill mode says,
