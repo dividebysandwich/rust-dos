@@ -241,6 +241,7 @@ fn run<const HOT: bool, const DYN: bool, const PROF: bool>(cpu: &mut Cpu, fetch:
             }
             if cpu.bus.win32.due(cpu.bus.clock.now_ticks()) {
                 crate::win32::timer(cpu);
+                flush_stale_tlb(cpu);
             }
         }
 
@@ -358,6 +359,7 @@ impl Cpu {
             self.bus.service_timers();
             if self.bus.win32.due(self.bus.clock.now_ticks()) {
                 crate::win32::timer(self);
+                flush_stale_tlb(self);
             }
         }
         // Callers may have raised interrupts or changed the PICs directly.
@@ -1589,10 +1591,12 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     true
 }
 
-/// Flush the TLB if a service sent a page of a program's memory to the
-/// page file (`win32::memory::page_out`): its translation may be there.
-/// Any service that reaches memory through the page tables can, when a
-/// page it finds in the page file needs a physical page.
+/// Flush the TLB if a service, or the built-in Windows's timer work,
+/// sent a page of a program's memory to the page file
+/// (`win32::memory::page_out`): its translation may be there. Any work
+/// that takes a page from the pool can, and so can any service that
+/// reaches memory through the page tables, when a page it finds in the
+/// page file needs a physical page.
 fn flush_stale_tlb(cpu: &mut Cpu) {
     if std::mem::take(&mut cpu.bus.win32.tlb_stale) {
         cpu.tlb.flush();

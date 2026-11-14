@@ -172,6 +172,11 @@ pub struct PageFile {
     /// The physical pages of programs' own memory, which can go out to
     /// it, with the address of the page table entry that maps each.
     pageable: BTreeMap<u32, u32>,
+    /// Pages of programs' own memory that the system maps a second time
+    /// (`pin`), which stay in the pool until the last of those mappings
+    /// goes (`unpin`): how many there are and the page table entry
+    /// address `pageable` had for each.
+    pinned: BTreeMap<u32, (u32, u32)>,
     /// The page the last search for one to write out stopped at.
     hand: u32,
 }
@@ -245,6 +250,7 @@ impl Pool {
     /// Give the physical page `phys` back.
     fn give(&mut self, phys: u32) {
         self.page_file.pageable.remove(&phys);
+        self.page_file.pinned.remove(&phys);
         self.free.push(phys);
     }
 
@@ -885,21 +891,55 @@ pub fn page_in(bus: &mut Bus, cr3: u32, lin: u32) -> PageIn {
     PageIn::Done
 }
 
-/// Keep the page at `lin` of the page tables at `cr3` in the pool: give
-/// it its physical page if it is in the page file, and never send it
-/// there again. For a page the system maps at a second place, whose
-/// entry there `page_out` wouldn't change.
-pub fn pin(bus: &mut Bus, cr3: u32, lin: u32) {
-    page_in(bus, cr3, lin);
+/// The physical page of the present page at `lin` of the page tables at
+/// `cr3`.
+fn present_page(bus: &Bus, cr3: u32, lin: u32) -> Option<u32> {
     let table = bus.read_32((cr3 + 4 * (lin >> 22)) as usize);
     if table & PRESENT == 0 {
-        return;
+        return None;
     }
     let entry = bus.read_32(((table & !0xFFF) + 4 * ((lin >> 12) & 0x3FF)) as usize);
-    if entry & PRESENT != 0
-        && let Some(pool) = bus.win32.pool.as_mut()
-    {
-        pool.page_file.pageable.remove(&(entry & !0xFFF));
+    (entry & PRESENT != 0).then_some(entry & !0xFFF)
+}
+
+/// Keep the page at `lin` of the page tables at `cr3` in the pool until
+/// as many `unpin`s as `pin`s have been made: give it its physical page
+/// if it is in the page file, and send it there no more meanwhile. For a
+/// page the system maps at a second place, whose entry there `page_out`
+/// wouldn't change.
+pub fn pin(bus: &mut Bus, cr3: u32, lin: u32) {
+    page_in(bus, cr3, lin);
+    let Some(phys) = present_page(bus, cr3, lin) else {
+        return;
+    };
+    let Some(file) = bus.win32.pool.as_mut().map(|p| &mut p.page_file) else {
+        return;
+    };
+    if let Some(at) = file.pageable.remove(&phys) {
+        file.pinned.insert(phys, (1, at));
+    } else if let Some((count, _)) = file.pinned.get_mut(&phys) {
+        *count += 1;
+    }
+}
+
+/// One of the second mappings `pin` was made for has gone: the page at
+/// `lin` of the page tables at `cr3` can go out to the page file again
+/// once none is left.
+pub fn unpin(bus: &mut Bus, cr3: u32, lin: u32) {
+    let Some(phys) = present_page(bus, cr3, lin) else {
+        return;
+    };
+    let Some(file) = bus.win32.pool.as_mut().map(|p| &mut p.page_file) else {
+        return;
+    };
+    let Some((count, at)) = file.pinned.get_mut(&phys) else {
+        return;
+    };
+    *count -= 1;
+    if *count == 0 {
+        let at = *at;
+        file.pinned.remove(&phys);
+        file.pageable.insert(phys, at);
     }
 }
 
@@ -931,6 +971,7 @@ crate::state_fields!(PageFile {
     slots,
     free_slots,
     pageable,
+    pinned,
     hand
 });
 crate::state_fields!(Region {
@@ -940,3 +981,185 @@ crate::state_fields!(Region {
     kind
 });
 crate::state_fields!(Memory { cr3, regions });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::Cpu;
+    use crate::cpu::paging::GuestPaging;
+
+    /// A process's page tables on a machine whose pool has `pages` pages
+    /// left, with a page file of `file` pages.
+    fn machine(pages: u32, file: u32) -> (Cpu, Memory) {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.win32.pool = Pool::take(&mut cpu.bus, 0x40_0000);
+        let memory = Memory::new(&mut cpu.bus).expect("a page directory");
+        let pool = cpu.bus.win32.pool.as_mut().expect("a pool");
+        pool.len = pool.next + pages * PAGE;
+        pool.page_file.size = file;
+        (cpu, memory)
+    }
+
+    fn file(cpu: &Cpu) -> &PageFile {
+        &cpu.bus.win32.pool.as_ref().expect("a pool").page_file
+    }
+
+    /// The `n`th page of the program's memory.
+    fn page(n: u32) -> u32 {
+        PRIVATE + n * PAGE
+    }
+
+    /// Touch the page at `lin` as the program does: bring it in, as the
+    /// page fault does, and fill it with `byte` where it is now.
+    fn touch(cpu: &mut Cpu, memory: &Memory, lin: u32, byte: u8) {
+        if memory.translate(&cpu.bus, lin).is_none() {
+            assert_eq!(page_in(&mut cpu.bus, memory.cr3, lin), PageIn::Done);
+        }
+        let phys = memory.translate(&cpu.bus, lin).expect("present") as usize;
+        cpu.bus.fill_ram(phys..phys + PAGE as usize, byte);
+    }
+
+    /// The `len` bytes at `lin`, wherever they are.
+    fn bytes(cpu: &Cpu, memory: &Memory, lin: u32, len: usize) -> Vec<u8> {
+        let mut data = vec![0xEE; len];
+        memory.read(&cpu.bus, lin, &mut data).expect("committed");
+        data
+    }
+
+    /// More pages touched than the pool has: some go out to the page
+    /// file, and every page reads back what was written to it, whether it
+    /// is in the pool or the page file, and again after each has come
+    /// back in.
+    #[test]
+    fn pages_sent_to_the_page_file_keep_their_bytes() {
+        let (mut cpu, mut memory) = machine(4, 32);
+        memory
+            .commit_paged(&mut cpu.bus, page(0), 8 * PAGE, PAGE_READWRITE)
+            .expect("room in the page file");
+        for n in 0..8 {
+            touch(&mut cpu, &memory, page(n), n as u8 + 1);
+        }
+        let out = (0..8)
+            .filter(|&n| memory.translate(&cpu.bus, page(n)).is_none())
+            .count();
+        assert!(out >= 5, "only {out} pages went out");
+        assert!(cpu.bus.win32.tlb_stale, "pages went out");
+        for n in 0..8 {
+            let all = bytes(&cpu, &memory, page(n), PAGE as usize);
+            assert!(all.iter().all(|&b| b == n as u8 + 1), "page {n}");
+        }
+        for n in (0..8).rev() {
+            if memory.translate(&cpu.bus, page(n)).is_none() {
+                assert_eq!(page_in(&mut cpu.bus, memory.cr3, page(n)), PageIn::Done);
+            }
+            let phys = memory.translate(&cpu.bus, page(n)).expect("in") as usize;
+            assert_eq!(cpu.bus.read_8(phys + 0x123), n as u8 + 1, "page {n}");
+        }
+    }
+
+    /// The system's write across a page in the pool and one in the page
+    /// file that was never touched: the first part goes to the physical
+    /// page, the second to the page file, which takes no physical page
+    /// for it, and a read across both gives the bytes back.
+    #[test]
+    fn a_write_across_a_page_in_the_pool_and_one_in_the_page_file() {
+        let (mut cpu, mut memory) = machine(8, 32);
+        memory
+            .commit_paged(&mut cpu.bus, page(0), 2 * PAGE, PAGE_READWRITE)
+            .expect("room");
+        touch(&mut cpu, &memory, page(0), 0x11);
+        let available = cpu.bus.win32.pool.as_ref().unwrap().available();
+        let data = [1, 2, 3, 4, 5, 6, 7, 8];
+        let at = page(1) - 4;
+        memory.write(&mut cpu.bus, at, &data).expect("committed");
+        assert_eq!(cpu.bus.win32.pool.as_ref().unwrap().available(), available);
+        let entry = memory.entry(&cpu.bus, page(1)).expect("an entry");
+        assert!(is_paged(entry) && entry >> 12 != 0, "{entry:08X}");
+        assert_eq!(bytes(&cpu, &memory, at, 8), data);
+        assert_eq!(bytes(&cpu, &memory, page(1) + 4, 4), [0; 4]);
+        assert_eq!(page_in(&mut cpu.bus, memory.cr3, page(1)), PageIn::Done);
+        let phys = memory.translate(&cpu.bus, page(1)).expect("in") as usize;
+        assert_eq!(cpu.bus.read_32(phys), 0x0807_0605);
+        assert_eq!(file(&cpu).free_slots.len(), file(&cpu).slots.len());
+    }
+
+    /// A service's write through the page tables of more pages than the
+    /// pool has, each brought in on the way (`Bus::guest_write_bytes`):
+    /// the pages that go out to make room for the next keep what was
+    /// written to them.
+    #[test]
+    fn a_service_writes_more_pages_than_the_pool_has() {
+        let (mut cpu, mut memory) = machine(3, 32);
+        memory
+            .commit_paged(&mut cpu.bus, page(0), 6 * PAGE, PAGE_READWRITE)
+            .expect("room");
+        let data: Vec<u8> = (0..6 * PAGE - 10).map(|i| (i / PAGE + 1) as u8).collect();
+        // The built-in Windows runs with the A20 gate open.
+        cpu.bus.set_a20(true);
+        cpu.bus.guest_paging = Some(GuestPaging {
+            cr3: memory.cr3,
+            user: true,
+            write_protect: false,
+            pse: false,
+        });
+        cpu.bus.guest_write_bytes(page(0) + 5, &data);
+        assert!(!cpu.bus.guest_faulted());
+        cpu.bus.guest_paging = None;
+        assert_eq!(bytes(&cpu, &memory, page(0) + 5, data.len()), data);
+    }
+
+    /// Pages decommitted, or of a process that ended, give their places in
+    /// the page file back, and their physical pages to the pool.
+    #[test]
+    fn decommitted_pages_free_their_places_in_the_page_file() {
+        for end in [false, true] {
+            let (mut cpu, mut memory) = machine(3, 32);
+            memory
+                .commit_paged(&mut cpu.bus, page(0), 6 * PAGE, PAGE_READWRITE)
+                .expect("room");
+            for n in 0..6 {
+                touch(&mut cpu, &memory, page(n), 0x40 + n as u8);
+            }
+            assert!(file(&cpu).used > 0);
+            if end {
+                memory.release(&mut cpu.bus);
+            } else {
+                for n in 0..6 {
+                    memory.unmap(&mut cpu.bus, page(n));
+                }
+            }
+            let f = file(&cpu);
+            assert_eq!(f.used, 0, "process ended: {end}");
+            assert_eq!(f.free_slots.len(), f.slots.len(), "process ended: {end}");
+            assert!(f.pageable.is_empty(), "process ended: {end}");
+        }
+    }
+
+    /// A page pinned twice stays in the pool while pages go out around
+    /// it, and can go out again only after both pins are undone.
+    #[test]
+    fn a_pinned_page_stays_until_its_last_pin_goes() {
+        let (mut cpu, mut memory) = machine(3, 32);
+        memory
+            .commit_paged(&mut cpu.bus, page(0), 5 * PAGE, PAGE_READWRITE)
+            .expect("room");
+        touch(&mut cpu, &memory, page(0), 1);
+        pin(&mut cpu.bus, memory.cr3, page(0));
+        pin(&mut cpu.bus, memory.cr3, page(0));
+        let phys = memory.translate(&cpu.bus, page(0)).expect("in");
+        for n in 1..5 {
+            touch(&mut cpu, &memory, page(n), 2);
+        }
+        assert_eq!(memory.translate(&cpu.bus, page(0)), Some(phys));
+        unpin(&mut cpu.bus, memory.cr3, page(0));
+        assert!(!file(&cpu).pageable.contains_key(&(phys & !0xFFF)));
+        unpin(&mut cpu.bus, memory.cr3, page(0));
+        assert!(file(&cpu).pageable.contains_key(&(phys & !0xFFF)));
+        assert!(file(&cpu).pinned.is_empty());
+        for n in 1..5 {
+            touch(&mut cpu, &memory, page(n), 3);
+        }
+        assert_eq!(memory.translate(&cpu.bus, page(0)), None, "went out");
+        assert_eq!(bytes(&cpu, &memory, page(0), 4), [1; 4]);
+    }
+}

@@ -1274,6 +1274,19 @@ fn peek_32(cpu: &Cpu, lin: u32) -> Option<u32> {
     running(cpu)?.memory.read_32(&cpu.bus, lin)
 }
 
+/// The byte at `lin` of the page tables the processor has (CR3), read
+/// without a page fault where its page is in the page file: for the
+/// debugger, whose reads walk the tables as the processor would and find
+/// such a page missing. None where the page isn't there either way.
+pub fn peek_paged(cpu: &Cpu, lin: u32) -> Option<u8> {
+    if cpu.cr0 & crate::cpu::CR0_PG == 0 || cpu.bus.win32.pool.is_none() {
+        return None;
+    }
+    let mut byte = [0];
+    memory::Memory::tables(cpu.cr3).read(&cpu.bus, lin, &mut byte)?;
+    Some(byte[0])
+}
+
 /// Whether the running function of a built-in DLL was called from guest
 /// code (`loader::GUEST`): its return address, at ESP, is in such a DLL.
 fn called_from_guest(cpu: &Cpu) -> bool {

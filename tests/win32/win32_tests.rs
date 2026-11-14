@@ -1830,6 +1830,61 @@ fn a_handler_on_a_stack_above_the_threads_returns_to_its_caller() {
     assert_eq!(code, 3, "{}", out);
 }
 
+/// A thread that runs on a stack of committed pages it hasn't touched
+/// yet, as a program's own coroutine stacks are, and takes an exception
+/// there: the record and context go on pages of the page file, which the
+/// system's writes bring in, and the handler runs.
+#[test]
+fn an_exception_on_a_stack_of_untouched_pages_reaches_its_handler() {
+    const MEM_COMMIT_RESERVE: i32 = 0x3000;
+    const PAGE_READWRITE: i32 = 4;
+    const HIGH: i32 = 0x6000_0000;
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["VirtualAlloc", "ExitProcess"])];
+    // Data: the thread's stack pointer.
+    let (code, out) = run(
+        "seh_untouched_stack",
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            let mut handler = a.create_label();
+            let mut start = a.create_label();
+            let mut fail = a.create_label();
+            a.jmp(start)?;
+            a.set_label(&mut fail)?;
+            a.push(99)?;
+            a.call(l.import(1))?;
+            // The handler: on after the 2-byte DIV with 5 in EAX.
+            a.set_label(&mut handler)?;
+            a.mov(eax, dword_ptr(esp + 12))?;
+            a.add(dword_ptr(eax + 0xB8), 2)?;
+            a.mov(dword_ptr(eax + 0xB0), 5)?;
+            a.xor(eax, eax)?;
+            a.ret()?;
+            a.set_label(&mut start)?;
+            push_args(a, &[HIGH, 0x10000, MEM_COMMIT_RESERVE, PAGE_READWRITE])?;
+            a.call(l.import(0))?;
+            a.cmp(eax, HIGH)?;
+            a.jne(fail)?;
+            // 40h bytes above a page boundary: the frame is on the page
+            // above it, the record and the context go on the page below,
+            // which nothing has touched.
+            a.mov(dword_ptr(l.at(0)), esp)?;
+            a.mov(esp, HIGH + 0x8040)?;
+            push_label(a, handler)?;
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+            a.xor(edx, edx)?;
+            a.xor(ecx, ecx)?;
+            a.mov(eax, 1)?;
+            a.div(ecx)?;
+            a.pop(dword_ptr(0).fs())?;
+            a.mov(esp, dword_ptr(l.at(0)))?;
+            a.push(eax)?;
+            a.call(l.import(1))?;
+            a.int3()
+        }),
+    );
+    assert_eq!(code, 5, "{}", out);
+}
+
 /// An exception raised in a handler, as Windows 98 dispatches it: the
 /// system's frame around that handler marks it as nested, the handlers
 /// up to and with the frame whose handler raised it see

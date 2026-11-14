@@ -316,10 +316,12 @@ pub(super) fn global_unfix(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// GlobalCompact(minimum) and LocalCompact: the largest block there is
-/// room for, which nothing has to move for.
+/// room for, which nothing has to move for: what is left of the memory
+/// and the page file's room together, as GlobalAlloc can commit
+/// (`Pool::commit_room`).
 pub(super) fn global_compact(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    let available = cpu.bus.win32.pool.as_ref().map_or(0, |p| p.available());
-    Some(available)
+    let room = cpu.bus.win32.pool.as_ref().map_or(0, |p| p.commit_room());
+    Some(room.saturating_mul(crate::win32::memory::PAGE))
 }
 
 /// LocalShrink(handle, size): Win32's local heap doesn't shrink; 0.
