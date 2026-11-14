@@ -205,9 +205,6 @@ enum Size {
     /// A bitmap under the unpack state: the places of its width and
     /// height, or 32 by 32 without (glPolygonStipple).
     Bitmap(Option<(u8, u8)>),
-    /// An evaluator's control points (glMap1, glMap2): the places of
-    /// each dimension's stride and order, and the bytes of a value.
-    Map([Option<(u8, u8)>; 2], u32),
 }
 
 /// A pointer argument: its place and what it points at.
@@ -372,10 +369,9 @@ fn describe(api: &Api) -> Desc {
         "glTexImage2D" => Desc::pointer(8, image(3, Some(4), 6)),
         "glTexSubImage1D" => Desc::pointer(6, image(3, None, 4)),
         "glTexSubImage2D" => Desc::pointer(8, image(4, Some(5), 6)),
-        "glMap1f" => Desc::pointer(5, Size::Map([Some((3, 4)), None], 4)),
-        "glMap1d" => Desc::pointer(7, Size::Map([Some((5, 6)), None], 8)),
-        "glMap2f" => Desc::pointer(9, Size::Map([Some((3, 4)), Some((7, 8))], 4)),
-        "glMap2d" => Desc::pointer(13, Size::Map([Some((5, 6)), Some((11, 12))], 8)),
+        // glMap1 and glMap2 do nothing yet, so a list keeps their
+        // control points' address and none of the points. They need a
+        // size here when they get a handler.
         _ => match vector(name) {
             // glRectfv(v1, v2): two corners.
             Some((None, bytes)) if name.starts_with("glRect") => {
@@ -452,18 +448,6 @@ fn pname_values(pname: u32) -> usize {
     }
 }
 
-/// The values of a control point of the evaluator target `target`
-/// (GL_MAP1_COLOR_4 to GL_MAP1_VERTEX_4, and GL_MAP2's).
-fn map_values(target: u32) -> Option<u32> {
-    const VALUES: [u32; 9] = [4, 1, 3, 1, 2, 3, 4, 3, 4];
-    let at = match target {
-        0x0D90..=0x0D98 => target - 0x0D90,
-        0x0DB0..=0x0DB8 => target - 0x0DB0,
-        _ => return None,
-    };
-    Some(VALUES[at as usize])
-}
-
 /// The bytes of one of glCallLists' names of the type `kind`: GL_BYTE
 /// to GL_4_BYTES.
 fn name_size(kind: u32) -> Option<usize> {
@@ -500,7 +484,9 @@ fn read(cpu: &mut Cpu, at: u32, len: usize, out: &mut Vec<u8>) -> bool {
 
 /// Add to `out` the image at `at`, `width` by `height`, as rows with
 /// nothing between or before them: the pixels the unpack state in
-/// force picks. A bitmap's rows start at a byte's first bit.
+/// force picks. A bitmap's rows start at a byte's first bit. An image
+/// with no pixels has nothing to copy: its rows would be zero bytes
+/// apart, and the pixels skipped could still make one to read.
 fn copy_image(
     cpu: &mut Cpu,
     at: u32,
@@ -509,7 +495,7 @@ fn copy_image(
     out: &mut Vec<u8>,
 ) -> bool {
     let unpack = ctx(cpu).map_or([4, 0, 0, 0], |c| c.unpack);
-    if (width as i32) < 0 || (height as i32) < 0 {
+    if width == 0 || height == 0 || (width as i32) < 0 || (height as i32) < 0 {
         return false;
     }
     let mut bytes = Vec::new();
@@ -583,22 +569,6 @@ fn copy(cpu: &mut Cpu, p: &Pointer, args: &[u32], out: &mut Vec<u8>) -> bool {
         Size::Pname(bytes) => Some(pname_values(arg(p.arg.wrapping_sub(1))) * bytes as usize),
         Size::Count(n, bytes) => count(arg(n), bytes as usize),
         Size::Names => name_size(arg(1)).and_then(|bytes| count(arg(0), bytes)),
-        Size::Map(dims, bytes) => {
-            // The last point's values end the data: each dimension's
-            // order less one strides on, then one point.
-            let values = map_values(arg(0)).and_then(|point| {
-                let mut values = point;
-                for (stride, order) in dims.into_iter().flatten() {
-                    let (stride, order) = (arg(stride), arg(order));
-                    if (stride as i32) < point as i32 || (order as i32) < 1 {
-                        return None;
-                    }
-                    values = values.checked_add((order - 1).checked_mul(stride)?)?;
-                }
-                Some(values)
-            });
-            values.and_then(|n| count(n, bytes as usize))
-        }
         Size::Image {
             width,
             height,
@@ -1432,6 +1402,28 @@ mod tests {
             assert_eq!(desc(name).0.when, When::Compiled, "{name}");
         }
         assert_eq!(desc("glDrawElements").0.when, When::Elements);
+    }
+
+    /// A bitmap of no columns copies nothing, however many rows it has:
+    /// with pixels skipped there is a byte to read, and the rows, zero
+    /// bytes apart, would be gone through two billion times.
+    #[test]
+    fn an_image_with_no_pixels_copies_nothing() {
+        let mut cpu = Cpu::new(".".into());
+        let mut c = super::super::new_context(1, 2, 3);
+        c.unpack = [1, 0, 0, 8];
+        let tid = super::super::super::user32::current_tid(&cpu);
+        let s = state(&mut cpu);
+        s.contexts.push(Some(c));
+        s.current.push((tid, super::super::hglrc(0), 0));
+        assert!(cpu.bus.guest_probe(0x1000, 1, false));
+        let mut out = Vec::new();
+        for size in [(0, 0x7FFF_FFFF), (8, 0)] {
+            assert!(!copy_image(&mut cpu, 0x1000, size, None, &mut out));
+        }
+        let rgba = Some((GL_RGBA, GL_UNSIGNED_BYTE));
+        assert!(!copy_image(&mut cpu, 0x1000, (0, 4), rgba, &mut out));
+        assert!(out.is_empty());
     }
 
     #[test]
