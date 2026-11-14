@@ -101,7 +101,9 @@ impl DiskController {
     /// nothing on the host then, which needs no stat to tell. Each
     /// component is the entry's long name, or, where it matches nothing,
     /// the name to create it under (`new_entry_name`). A name the entries
-    /// can't rule out (`entries_settle`) is never missing.
+    /// can't rule out (`entries_settle`) is never missing. None for a path
+    /// through one of the host's own files (`host_private`), by its name
+    /// or by the host's short name for it.
     fn walk_host(&self, drive_num: u8, rest: &str) -> Option<(PathBuf, String, bool)> {
         let drive = self.drive(drive_num)?;
         // Drives held in memory have no host paths; callers look there
@@ -120,7 +122,15 @@ impl DiskController {
         // it.
         let mut sure = true;
         for part in Self::logical_components(drive, rest) {
+            // The host's own files aren't the drive's (`host_private`):
+            // no call reaches them, to open, make, rename or delete.
+            if super::host_private(part) {
+                return None;
+            }
             let (entries, found) = self.find_host_entry(&full_path, part);
+            if found.is_none() && Self::host_alias_of_private(&full_path, part) {
+                return None;
+            }
             if found.is_none() && sure {
                 if Self::entries_settle(part) && !entries.is_empty() {
                     missing = true;
@@ -142,13 +152,27 @@ impl DiskController {
         }
     }
 
+    /// Whether `part`, which no entry of the folder `dir` matches, is a
+    /// short name the Windows host has for one of its own files
+    /// (`host_private`): "RUST-D~1" for an overlay's ".rust-dos-deleted"
+    /// on a volume that makes 8.3 names. Only such names ("~") can be
+    /// one, and only a name the host finds is asked for its long name.
+    fn host_alias_of_private(dir: &Path, part: &str) -> bool {
+        if !cfg!(windows) || !part.contains('~') {
+            return false;
+        }
+        std::fs::canonicalize(dir.join(part)).is_ok_and(|long| {
+            long.file_name().is_some_and(|name| super::host_private(&name.to_string_lossy()))
+        })
+    }
+
     /// Whether a folder's entries settle that the path component `part`
     /// isn't in it when none matches it. The host may know a name by a
     /// spelling they don't match: Windows has short names of its own (with
     /// a "~"), and Windows and macOS fold the case of letters beyond ASCII.
-    /// Such names go to the host. The host's own files (`host_private`),
-    /// which the entries leave out, are settled missing, so programs can't
-    /// open them either. A dot that ends a name is gone by now
+    /// Such names go to the host. A name that starts with a dot is an
+    /// entry like the others; the host's own files (`host_private`) never
+    /// get here (`walk_host`). A dot that ends a name is gone by now
     /// (`dos_component`).
     fn entries_settle(part: &str) -> bool {
         !part.contains('~') && part.is_ascii()

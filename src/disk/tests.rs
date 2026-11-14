@@ -53,6 +53,19 @@ fn a_device_name_may_end_in_a_colon() {
     assert_eq!(&disk.sft_entry(h).unwrap().name, b"EMMXXXX0   ");
 }
 
+/// Windows drops the dots a name starts with before it makes the short
+/// name. Names with a dot first are numbered after the others, so the
+/// names that host drives gave before they listed them stay the same:
+/// "gitignore old.txt" keeps GITIGN~1.TXT beside ".gitignore".
+#[test]
+fn names_starting_with_a_dot_get_short_names_after_the_others() {
+    let names = [".256", "..foo", ".a.b", ".gitignore", ".gitignore2", "256", "gitignore old.txt"];
+    assert_eq!(
+        short_names(&names),
+        ["256~1", "FOO~1", "A~1.B", "GITIGN~2", "GITIGN~3", "256", "GITIGN~1.TXT"]
+    );
+}
+
 #[test]
 fn long_names_get_dosbox_short_names() {
     let names = [
@@ -128,6 +141,39 @@ fn a_host_name_starting_with_a_dot_is_listed() {
     assert!(!disk.is_file(r"C:\TAGS\.DS_Store"));
     assert!(!disk.is_file(r"C:\TAGS\.rust-dos-deleted"));
     assert!(disk.open_file(r"C:\TAGS\._BINA", 0, PSP).is_err());
+}
+
+/// The host's own files are out of reach by any name and any call: in a
+/// folder that holds nothing else, in another case, and to create,
+/// rename, delete or change. An overlay's list of deleted names stays
+/// as Rust-DOS wrote it.
+#[test]
+fn the_hosts_own_files_cant_be_reached_by_name() {
+    let base = scratch("dot_private");
+    fs::create_dir_all(base.join("ONLY")).unwrap();
+    fs::write(base.join("ONLY/.DS_Store"), b"finder").unwrap();
+    fs::write(base.join(".rust-dos-deleted"), b"list").unwrap();
+    fs::write(base.join("GAME.DAT"), b"data").unwrap();
+    let mut disk = DiskController::new(base.clone());
+
+    assert!(!disk.is_file(r"C:\ONLY\.DS_Store"));
+    assert!(disk.open_file(r"C:\ONLY\.DS_Store", 0, PSP).is_err());
+    assert!(!disk.is_file(r"C:\.RUST-DOS-DELETED"));
+    assert!(disk.create_file(r"C:\.rust-dos-deleted", PSP).is_err());
+    assert!(disk.create_file(r"C:\.Rust-Dos-Deleted", PSP).is_err());
+    assert!(disk.create_file(r"C:\ONLY\.ds_store", PSP).is_err());
+    assert!(disk.rename_file(r"C:\GAME.DAT", r"C:\.rust-dos-deleted").is_err());
+    assert!(disk.rename_file(r"C:\GAME.DAT", r"C:\.DS_Store").is_err());
+    assert!(disk.delete_file(r"C:\.rust-dos-deleted").is_err());
+    assert!(disk.set_file_attribute(r"C:\.rust-dos-deleted", 0x01).is_err());
+    assert!(disk.create_directory(r"C:\.Trashes").is_err());
+    // The Windows host's own short name for the list, where the volume
+    // makes them.
+    assert!(!disk.is_file(r"C:\RUST-D~1"));
+    assert!(disk.open_file(r"C:\RUST-D~1", 0, PSP).is_err());
+    assert_eq!(fs::read(base.join(".rust-dos-deleted")).unwrap(), b"list");
+    assert_eq!(fs::read(base.join("ONLY/.DS_Store")).unwrap(), b"finder");
+    assert!(base.join("GAME.DAT").is_file());
 }
 
 /// A dot that ends a name leaves its extension empty, as DOS packs it:
