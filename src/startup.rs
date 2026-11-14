@@ -65,7 +65,11 @@ pub(crate) fn startup_boot(cpu: &mut Cpu, skip: bool) -> Option<u8> {
 /// The CPU is boxed: it is about 136 KB, and in a debug build every move of
 /// it gets its own copy in the frame of `main` and here. Unboxed, `main`'s
 /// frame was about 630 KB and startup overflowed Windows's 1 MB main thread stack.
-pub(crate) fn create_cpu(args: &Args, config: &config::Config, memory: &config::Memory) -> Result<Box<Cpu>, String> {
+pub(crate) fn create_cpu(
+    args: &Args,
+    config: &config::Config,
+    memory: &config::Memory,
+) -> Result<Box<Cpu>, String> {
     use crate::disk::DRIVE_C;
 
     let mut warnings = config.warnings.clone();
@@ -194,7 +198,8 @@ pub(crate) fn game_to_launch(
     };
     let memory = match &startup_game {
         Some((entry, text, dir)) => {
-            games::prepare(&entry.id, settings, text, dir, rust_dos::hostdirs::home_dir().as_deref())?.settings.memory()
+            let home = rust_dos::hostdirs::home_dir();
+            games::prepare(&entry.id, settings, text, dir, home.as_deref())?.settings.memory()
         }
         None => settings.memory(),
     };

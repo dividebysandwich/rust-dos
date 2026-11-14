@@ -169,7 +169,11 @@ impl Core {
         let (settings, mut warnings) = content::settings(&base, &options, plan.overlay.as_ref());
         let home = content::home();
         let memory = match &plan.profile {
-            Some(p) => rust_dos::games::prepare(&p.id, &settings, &p.text, &p.dir, home.as_deref())?.settings.memory(),
+            Some(p) => {
+                let prepared =
+                    rust_dos::games::prepare(&p.id, &settings, &p.text, &p.dir, home.as_deref())?;
+                prepared.settings.memory()
+            }
             None => settings.memory(),
         };
 

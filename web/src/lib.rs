@@ -1278,7 +1278,7 @@ impl PageHost<'_> {
     fn load_slot(&mut self, slot: u8) -> Result<String, String> {
         let data = self.states.get(&self.state_key(slot)).ok_or("empty")?;
         let (header, state) = slots::decode(data)?;
-        let mut hardware = slots::loaded_settings(&header, self.settings);
+        let hardware = slots::loaded_settings(&header, self.settings);
         // A failed `machine::load` puts the machine back by itself; the
         // machine from before is needed only when the hardware changes, to
         // put that back too.
@@ -1302,6 +1302,9 @@ impl PageHost<'_> {
             }
             return Err(e.to_string());
         }
+        // `loaded_settings` leaves `memsize` unset only where the state's
+        // size is the default for its hardware.
+        self.cpu.bus.memory_derived = hardware.memsize.is_none();
         // The state's time stamp counter goes on at this machine's speed.
         self.cpu.set_tsc_speed(self.settings.cycles);
         self.pacer.rebase(&mut self.cpu.bus, Instant::now());

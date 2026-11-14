@@ -2407,13 +2407,13 @@ SAVE STATES
                    /api/speed), except with --deterministic. A booted
                    system's disk copy goes into the image this machine
                    has in the drive, not the one the state names.
-                   "differences" lists the hardware settings, drives,
-                   folders, images, files and deterministic start time
-                   that differed from this machine's, if any. A failed load
-                   (400) changes nothing ("loaded":false, "unchanged":true).
-                   Replies have "saved"/"loaded", the state's "header"
-                   (with its "media"), "format" and "emulator" (this
-                   version).
+                   "differences" lists the hardware settings, memory
+                   size, drives, folders, images, files and deterministic
+                   start time that differed from this machine's, if any.
+                   A failed load (400) changes nothing ("loaded":false,
+                   "unchanged":true). Replies have "saved"/"loaded", the
+                   state's "header" (with its "media"), "format" and
+                   "emulator" (this version).
                    "strict_match":true on either: only while paused with
                    no step or run pending, and for a save no queued input
                    left to type (409 {"error","paused"} otherwise). A load

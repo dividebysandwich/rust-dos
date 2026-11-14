@@ -376,16 +376,18 @@ pub fn best(candidates: &[Candidate]) -> Option<&Candidate> {
 }
 
 /// The settings a report sends: `settings`' values of `KEYS`, by section.
-/// The memory is the size the machine has (`Settings::memory_mb`), also
-/// where `memsize` isn't set: the default for its CPU and display adapter
-/// is what the game ran with, and whoever takes the report's settings
-/// may have another.
+/// The memory is `memory_mb`, the size the machine runs with, also where
+/// `memsize` isn't set: the default for its CPU and display adapter is
+/// what the game ran with, and whoever takes the report's settings may
+/// have another. (A CPU chosen in the settings window changes the
+/// settings' default at once, the machine's memory at the next start.)
 pub fn report_settings(
     settings: &Settings,
+    memory_mb: usize,
     home: Option<&Path>,
 ) -> BTreeMap<String, BTreeMap<String, String>> {
     let mut map: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    let memory = Settings { memsize: Some(settings.memory_mb()), ..settings.clone() };
+    let memory = Settings { memsize: Some(memory_mb), ..settings.clone() };
     for (section, key, value) in config::values(&memory, home) {
         if let Some(value) = value
             && known(section, key)
@@ -876,18 +878,19 @@ mod tests {
 
     #[test]
     fn reports_send_only_the_machines_settings() {
-        let settings = report_settings(&Settings::default(), None);
+        let default = Settings::default();
+        let settings = report_settings(&default, default.memory_mb(), None);
         let count: usize = settings.values().map(BTreeMap::len).sum();
         assert_eq!(count, KEYS.len(), "every key has a value: {:?}", settings);
         assert_eq!(settings["emulator"]["memsize"], "16", "the default, though memsize isn't set");
         assert!(!settings["emulator"].contains_key("scale"));
         assert!(!settings.contains_key("drives"));
-        // The size the machine has: the default for its CPU and display
-        // adapter, or what memsize sets.
+        // The size the machine runs with, whatever the settings give now:
+        // a Pentium II chosen after a start with the 486's 16 MB.
         let pentium_ii = Settings { cpu: crate::cpu::CpuModel::PentiumII, ..Settings::default() };
-        assert_eq!(report_settings(&pentium_ii, None)["emulator"]["memsize"], "64");
-        let set = Settings { memsize: Some(24), ..pentium_ii };
-        assert_eq!(report_settings(&set, None)["emulator"]["memsize"], "24");
+        assert_eq!(pentium_ii.memory_mb(), 64);
+        assert_eq!(report_settings(&pentium_ii, 16, None)["emulator"]["memsize"], "16");
+        assert_eq!(report_settings(&pentium_ii, 64, None)["emulator"]["memsize"], "64");
     }
 
     /// A recommendation that sets the CPU or the display adapter and no
@@ -960,13 +963,14 @@ mod tests {
         // the configuration file's parser warns and keeps it.
         let japanese = locale("ja-JP");
         assert_eq!(layer(&base, &[&japanese], None).win32_locale, Win32Locale::PlPl);
-        let reported = report_settings(&base, None);
+        let reported = report_settings(&base, base.memory_mb(), None);
         assert_eq!(reported["emulator"]["win32_locale"], "pl-PL");
         // Every locale goes through by its name and is reported by it.
         for l in Win32Locale::ALL {
             let layered = layer(&base, &[&locale(l.name())], None);
             assert_eq!(layered.win32_locale, l);
-            assert_eq!(report_settings(&layered, None)["emulator"]["win32_locale"], l.name());
+            let reported = report_settings(&layered, layered.memory_mb(), None);
+            assert_eq!(reported["emulator"]["win32_locale"], l.name());
         }
     }
 

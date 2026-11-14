@@ -435,7 +435,8 @@ pub struct Bus {
 
     /// Whether the size of the memory is the default for the machine's CPU
     /// and display adapter, `memsize` not being set (`config::Memory`).
-    /// The front end sets it; a save state of another size ends it.
+    /// The front end sets it at start and after it loads a save state,
+    /// from the settings the load leaves (`slots::loaded_settings`).
     pub memory_derived: bool,
 
     /// Optional observer for every `log_string` line. Installed by the debug
