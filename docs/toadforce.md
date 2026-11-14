@@ -1594,7 +1594,9 @@ Each phase is one or a few pull requests that leave main working.
    implementation of phases 1 to 5. The target: every game of the
    primary list (the eight of phase 0 and Nocturne) holds a stable 30
    frames a second, with some to spare, measured on a four-core host
-   as well as a larger one.
+   as well as a larger one. Reached with #1042 and #1061 on main: the
+   nine run at 39 to 148 on the development machine and the same held
+   to four of its processors (see "Phase 6 results").
 
 Postponed, with no place in the order (decided 2026-11-12):
 
@@ -1826,6 +1828,100 @@ What the table doesn't show:
   11-12, one run each): Giants 21 in software and 17 with OpenGL, Oni
   23 and 29.
 
+### Phase 6 results (2026-11-14)
+
+The target is 30 frames a second with room to spare in the nine
+primary games. Every one is above it, on the whole machine and held to
+four processors: the lowest is Black & White at 39.
+
+The build is main (`94028090`, with passes 1 to 3) with two pull
+requests merged into it: #1042, which lets `SleepEx(0)` give up the
+rest of the emulated slice (MDK2, issue 1007), and #1061, the direct
+path for draws of screen vertices (Black & White, issue 1026). The
+frame cap of #1028 isn't in it. The machine is an AMD Ryzen 7 7700X
+(8 cores, 16 logical processors) with nothing else running: every
+session held the run lock exclusive, and the process lists at its
+start and after each game had no other emulator or build. Real time,
+`cycles=max`, the window hidden, sound on a muted WASAPI device. Each
+run loads a save state of the scene, recorded on main's build, lets it
+settle for 10 seconds and counts the card's flips over three windows
+of 12 seconds. The table gives the median and the range, main's build
+and the merged one in the same session, and the merged build again
+with the process held to four logical processors (0, 2, 4 and 6).
+
+| Game and scene | Main | With #1042 and #1061 | On four processors | Thread busy | Draws a frame |
+|---|---|---|---|---|---|
+| Black & White, the first island, 800x600 | 29.9 (29.9 to 29.9) | 39.6 (39.5 to 39.7) | 39.4 (39.1 to 39.5) | 84% | 772 |
+| Nocturne, first room of Volume 1, 640x480 | 39.7 (39.6 to 39.7) | 40.7 (40.7 to 40.8) | 40.6 (40.6 to 40.7) | 85% | 44 |
+| Giants, the options menu over the beach, 800x600 | 39.5 (39.2 to 39.6) | 40.2 (40.1 to 40.2) | 41.6 (41.3 to 41.6) | 85% | 981 |
+| Giants, first mission, the beach in play | 41.8 (41.7 to 41.9) | 42.9 (42.1 to 43.2) | 42.5 (41.8 to 42.7) | 75% to 81% | 509 |
+| Oni, training room, 640x480 | 49.0 (48.7 to 49.0) | 49.5 (48.4 to 49.7) | 49.0 (48.8 to 49.2) | 86% | 181 |
+| MDK2, the dive that opens level 1, 640x480 | 47.8 (44.6 to 49.6), at 77% to 86% speed | 60.0 | 60.0 | 50% to 67% | 65 |
+| Max Payne, tutorial, 640x480 | 59.3 (59.3 to 59.8) | 59.9 (59.8 to 59.9) | 60.0 | 84% | 107 |
+| No One Lives Forever, first mission, 640x480 | 56.4 (56.4 to 56.8) | 60.0 | 60.0 | 73% | 1903 |
+| Zanzarah (the English 1.010 build), inside the house where the game starts, 640x480 | 60.0 | 60.0 | 60.0 | 25% | 61 |
+| Grom, the tutorial's first screen, 800x600 | 134.5 (134.2 to 137.3) | 148.3 (148.3 to 148.5) | 146.4 (146.4 to 147.9) | 85% | 294 |
+
+The busy share and the draws are the merged build's on the whole
+machine. The emulated machine runs at full speed in every run but
+main's MDK2. MDK2, Max Payne, No One Lives Forever and Zanzarah are at
+the 60 Hz of their modes, so their room to spare is the thread's idle
+share. The others stop at 85% busy, where `cycles=max` holds the
+thread (issue 1059: without that limit Black & White ran at 42.6).
+
+Four processors change nothing beyond the spread between sessions
+(Giants' menu scene is 1.4 higher there): the card and the display run
+on the emulator's one thread, and the rest of the process needs
+little. The four are an affinity mask on this machine, so they have
+the clock rate and the caches of a 7700X. A four-core processor of an
+older generation is slower for that thread, and none was measured.
+
+Against the table of 2026-11-13: Oni went from 26 to 49 (passes 2 and
+3), Grom from 28 to 148 (pass 1), No One Lives Forever from 40 to the
+display's 60 (pass 2, then the direct path from main's 56), MDK2 from
+50 at 87% speed to 60 at full speed (#1042), Black & White from not
+starting to 39.6 (SafeDisc's check, then the direct path), Nocturne
+from 35 to 41 and Giants from 37 to 43. The scenes are the same but
+for three. Giants' beach is another view of the same place, with 509
+draws for 530, and its menu scene is the heavier one that "What the
+table doesn't show" asks for. Zanzarah's draws less than the Fairy
+Garden did (61 draws for 198), so its row only shows that the game
+holds its cap. MDK2 is still measured in the dive, and the interior
+after it isn't.
+
+Where the thread's time goes now, from a profile of 20 seconds of
+each scene on the merged build, held to the four processors (shares
+of the busy time; these ran beside other jobs, so their frame rates
+don't count). Black & White's is the profile of #1061's last commit
+on the whole machine. An empty cell is a zone below 1%.
+
+| Zone | Black & White | Nocturne | Giants, menu | Giants, beach | Oni | MDK2 | Max Payne | NOLF | Zanzarah | Grom |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `cpu.jit` and `cpu.interp`, the game's code | 64% | 78% | 33% | 44% | 55% | 38% | 56% | 62% | 44% | 49% |
+| `hle.win32` with `.args` and `.after` | 3% | | 28% | 20% | 12% | 13% | 12% | 7% | 15% | 11% |
+| `hle.opengl` and its parts | | | | | 9% | 23% | | | | |
+| `hle.d3d.bind`, `.draw` and `.vertices` | 7% | | 3% | 1% | 6% | 9% | | 6% | 1% | 8% |
+| `toadforce` | 10% | | 22% | 20% | 3% | 3% | 15% | 8% | 20% | 19% |
+| `toadforce.host` | 8% | 3% | 7% | 6% | 4% | 3% | 4% | 6% | 9% | 5% |
+
+What is left, none of it needed for the target:
+
+- **The busy share** (issue 1059). `cycles=max` keeps 15% of every
+  frame idle. Black & White, Nocturne, Giants and Oni stop there.
+- **Transform and lighting on the GPU** (pass 6, issue 1066). The
+  card's own work is 15% to 22% of the thread in Giants, Zanzarah,
+  Grom and Max Payne.
+- **The cost of an API call** (pass 4, issue 1067). Giants' state
+  calls are 20% to 28% of its thread with their handlers, and the
+  immediate-mode OpenGL calls of MDK2 and Oni 26% and 14%. No game is
+  below 30 for it, so it has no pull request. Giants is the one it
+  would move, and the first step is to measure how much of
+  `hle.win32` there is the trap and how much the handlers.
+- **The game's own code** (pass 7). Nocturne is 78% its own code and
+  at 41: the recompiler's speed and the busy share are what move it.
+- **Scenes not measured**: MDK2's interiors, a fight in Giants, later
+  levels of every game, and a real four-core processor.
+
 ### Phase 6: what limits each game
 
 A profile of the emulator's thread over 20 seconds of the same scene,
@@ -1937,8 +2033,10 @@ comes last whatever its share.
    outside the card. Nocturne's `dynrec.fallback` and `mem.device`,
    10% together, are the place to start.
 
-Before any of them counts as done, the table above is taken again on
-a four-core host, and MDK2 and Giants in a heavier scene.
+The table was taken again after passes 1 to 3 and the direct path
+for screen vertices, with four processors and Giants in a heavier
+scene: "Phase 6 results" above. Passes 4 to 7 wait there, since no
+game needs them for the target.
 
 ### Passes 2 and 3: state kept, and OpenGL's draws joined
 
