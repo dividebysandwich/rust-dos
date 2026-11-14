@@ -3224,12 +3224,29 @@ and lights vertices itself: Direct3D 7 lists its T&L HAL device, and
 Direct3D 8 offers hardware vertex processing. Games that need those,
 which a Voodoo3 lacks, run on this card
 ([docs/compatibility.md](docs/compatibility.md) names them). OpenGL
-1.1 draws on it too, in a window or full screen, with 16-bit color and
-depth as on a Voodoo3. Your graphics card draws its 3D through OpenGL
-where the window has OpenGL 3.2, and the processor draws it elsewhere.
-It has no Glide and no vertex or pixel shaders. No system booted from
-a disk image has a driver for it: a booted Windows uses it as a plain
-VGA.
+1.1 draws on it too, in a window or full screen, in the desktop's 16 or
+32 bits of color with a 16-bit depth buffer. Your graphics card draws
+its 3D through OpenGL where the window has OpenGL 3.2, and the
+processor draws it elsewhere.
+
+What the card doesn't do, and what to choose instead:
+
+* Games that need pixel shaders: the card has none, and neither has
+  any other `machine`. Vertex shaders run, on the processor.
+* OpenGL games that need more than OpenGL 1.1 with two textures at
+  once: a stencil buffer, compressed textures or cube maps. Where the
+  game also has a Direct3D renderer, pick that in its options.
+* Glide games: `voodoo=true`, or `machine=svga_voodoo3` or
+  `svga_banshee` ([3dfx Voodoo Graphics](#3dfx-voodoo-graphics)).
+* Games on a Windows 95 or 98 disk image. No booted system has a driver
+  for the card, and Windows uses it as a plain VGA there: give the
+  image a card it has a driver for, such as `svga_voodoo3`
+  ([docs/win9x-howto.md](docs/win9x-howto.md)).
+* A game's brightness or gamma slider: the card has no gamma ramp, and
+  the picture stays as it is.
+* Sharper pictures than the game's own: the card draws at the
+  resolution the game sets, without anti-aliasing. Set a higher
+  resolution in the game.
 
 ```ini
 [emulator]
@@ -3254,7 +3271,9 @@ computer: use it when a picture looks wrong with OpenGL, and report
 the game. The two differ only where OpenGL isn't there: `auto` then
 draws on the processor without a word, and `opengl` says so in the
 log first. A run with `--deterministic` draws on the processor whatever
-the setting.
+the setting. Drawing on the processor is several times slower, and too
+slow for some games at their usual resolutions: choose a lower one in
+the game there.
 
 ## PowerVR PCX1 and PCX2
 

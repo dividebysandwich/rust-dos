@@ -429,8 +429,8 @@ Reasons for the values a game can see:
   recollection, did not, so the z-buffer path is the one games were
   tested on most, and 24-bit depth removes most of the reason for it.
   Giants: Citizen Kabuto, which takes the Voodoo3's W buffer, plays on
-  plain Z without one. A later level can add it. A frozen level could
-  never drop it.
+  plain Z without one. A frozen level could never drop it, so the level
+  leaves out what its games don't need.
 - The stage operations go beyond any one real card on purpose. A
   GeForce2 had `DOTPRODUCT3` and, by the evidence found, no `BUMPENVMAP`
   (NVIDIA lists `NV_texture_shader` for the GeForce3 family only); the
@@ -476,9 +476,163 @@ card took. The card has the state behind each of them. The built-in
 OPENGL32 offers OpenGL 1.1 on it with fewer extensions (see "The built-in
 Windows").
 
-Level 1 has no shaders. Direct3D 8 runs vertex shaders on the processor
-(`src/win32/d3d8/shader.rs`), as it did on a GeForce2, and reports no
-pixel shaders.
+## Limitations
+
+What the card, its drivers in the built-in Windows and its renderers
+don't do in this version, by what a program or a user notices. Where
+another section describes the behaviour, the entry names the section,
+which has the precise statement.
+
+### What a program can't get from the card
+
+- **Shaders.** The card has no vertex or pixel shaders. Direct3D 8 runs
+  vertex shaders 1.1 on the processor (`src/win32/d3d8/shader.rs`), as
+  it did on a GeForce2, on a device made with software or mixed vertex
+  processing. The adapter's capabilities and a device with hardware
+  vertex processing alone report none. `CreatePixelShader` fails, so a
+  Direct3D 8 program that needs pixel shaders doesn't run on the card.
+- **Direct3D 8.** `CreateVolumeTexture` fails, and the only multisample
+  type is none. Points are one pixel wide (`MaxPointSize` is 1.0): the
+  card's point sizes and point sprites aren't used by Direct3D. Vertices
+  blended by index and tweened ones are worked out on the processor, on
+  a device with software vertex processing.
+- **W buffer.** The card has none. A program that turns one on
+  (`D3DZB_USEW`) draws with the z-buffer. Direct3D 7's device
+  descriptions don't list the capability, and Direct3D 8's capabilities
+  list it.
+- **Gamma ramp.** The card has none. DirectDraw's gamma control and
+  Direct3D 8's `SetGammaRamp` keep the ramp and give it back, and the
+  picture stays as it was: a brightness slider or a fade that a game
+  makes with the ramp shows nothing.
+- **Render targets and depth buffers.** Direct3D draws into 5-6-5 and
+  32-bit surfaces in video memory. It doesn't draw in a 256-colour mode
+  or into a 5-5-5 surface. A depth buffer has 16 bits, or 24 in a 32-bit
+  pixel with or without 8 bits of stencil: there is no 16-bit depth
+  buffer with stencil and none of 3 bytes a pixel, and Direct3D 7's
+  device descriptions list depths of 16 and 32 bits and leave out 24
+  (`DDBD_24`).
+- **Textures in DirectDraw.** A compressed texture asked for in video
+  memory is refused with `DDERR_NOTEXTUREHW`; one made in system memory
+  or without a memory flag draws. A cube map made without all six faces
+  draws as no texture. Direct3D 7's device descriptions report four
+  texture coordinate sets in `dwFVFCaps`, where the card takes eight.
+- **The command set.** The card has one material, which lights the back
+  of a triangle too, 16-bit indices, vertex blending by weights without
+  indices, and no `PREMODULATE` stage operation. The table of "Level 1:
+  fixed function" has the values.
+- **OpenGL.** The built-in OPENGL32 reports version 1.1.0 on the card,
+  with `GL_ARB_multitexture`, `GL_EXT_bgra`,
+  `GL_EXT_compiled_vertex_array`, `GL_EXT_packed_pixels`,
+  `GL_EXT_texture_env_add` and `WGL_EXT_swap_control`, and none of the
+  other extensions "Level 1: fixed function" lists. A program gets two
+  texture units, 2D textures up to 2048 a side, the desktop's 16 or 32
+  bits of colour and a 16-bit depth buffer. The pixel formats have no
+  stencil, alpha or accumulation buffer, and the stencil calls do
+  nothing: the stencil test passes for every pixel, so what a program
+  masks with the stencil buffer is drawn unmasked. Compressed textures,
+  cube maps, the combine and dot product texture environments and
+  anisotropic filtering aren't reached through OpenGL. A proxy texture
+  is refused with `GL_INVALID_ENUM`, and `glReadPixels` of
+  `GL_DEPTH_COMPONENT` leaves the program's buffer as it was. The
+  driver takes OpenGL 1.2's packed pixel types, which its version and
+  extensions don't name.
+- **Glide.** The card has none. A game that draws with Glide is
+  configured with a Voodoo card.
+
+### Where the card runs
+
+- **The built-in Windows only.** The drivers are the emulator's own
+  DLLs. No driver exists for a booted Windows 95 or 98, which sees a
+  VESA card without 3D, and DOS programs see the same ("A booted
+  Windows 98"). A game on a Windows image needs another display adapter
+  that has a driver, such as `svga_voodoo3`.
+- **Level 1 is provisional.** A driver in a guest that uses it has no
+  promise that another version of the emulator takes the same commands
+  (rule 5). With the OpenGL renderer the card reads every surface back
+  when such a driver's write of `RING_PUT` returns, a read-back for
+  every submission ("Between the card and the host renderer").
+- **GDI draws on the processor.** DirectDraw's fills, equal-sized
+  copies and flips are the card's commands. GDI's drawing on the
+  desktop writes card memory itself, and so do DirectDraw's stretched
+  and mirrored blits and those with a destination colour key ("The
+  built-in Windows").
+
+### Where the picture can differ
+
+- **Between the two renderers.** The OpenGL renderer's pixels are
+  within the bounds of "Where the OpenGL renderer may differ" of the
+  software renderer's, which are the card's. Setting
+  `toadforce_renderer` to `software` gives the card's own pixels on
+  every host.
+- **Anisotropic filtering.** The software renderer filters trilinearly
+  at the level of the shorter side, and the OpenGL renderer uses the
+  host's anisotropic filter where the host has one. This is the largest
+  difference between the two ("Texels").
+- **A batch the host can't draw.** When the host has no complete
+  framebuffer for a target, the batch being drawn is drawn by neither
+  renderer, and the software renderer draws from the next one on. Only
+  a host whose driver lacks a format OpenGL 3.2 requires gets there.
+- **From Direct3D's rules.** On a 16-bit target the card dithers before
+  the blend ("After the cascade"), so blended layers band slightly more
+  than on a card that dithers after it. Direct3D's two cubic
+  magnification filters are the linear one. Vertex fog goes by the
+  camera-space z under any projection, and the reflection vector and
+  the sphere map take the direction from the eye to the vertex whatever
+  `LOCALVIEWER` says; no test compares either with a real Direct3D.
+- **Display timing.** A mode of the card has a vertical blank of the
+  mode's height / 16 + 1 lines, which is near the monitor timings of
+  the time and equal to none of them. A program that measures the
+  retrace gets that figure.
+
+### What costs speed
+
+- **Transform and lighting run on the processor** with both renderers:
+  the card transforms, lights, clips and culls every vertex on the
+  emulator's thread, and the OpenGL renderer gets screen vertices
+  ("The OpenGL renderer"). The setup of a draw (matrix products, lights
+  in camera space) is built again for every draw.
+- **OpenGL's vertices** are transformed and lit by the front end, on
+  the processor as well, and reach the card already in screen space
+  ("The built-in Windows").
+- **The software renderer** is several times slower than a GPU and too
+  slow for some games at their usual resolutions ("The software
+  renderer"). It draws wherever the OpenGL renderer doesn't: a host
+  without desktop OpenGL 3.2, a window drawn by SDL's renderer, the web
+  build, and a run with `--deterministic`.
+- **Declined states.** A draw in a state the OpenGL renderer declines
+  is drawn in software, after the target and its depth buffer are read
+  back and before they are uploaded again ("The OpenGL renderer" lists
+  the states).
+- **Programs are compiled when first drawn with.** The OpenGL renderer
+  compiles a state's program on the emulator's thread, in the frame
+  that first uses the state, and keeps it in memory only. A game pauses
+  briefly at each new state combination, in every run ("Shader cache").
+- **Read-backs.** With the OpenGL renderer, card memory gets a
+  surface's pixels from the GPU when the processor needs them. That
+  happens for a stretched, mirrored or destination-keyed blit of a
+  surface the host drew, for a z-buffer filled with DirectDraw's `Blt`
+  (`DDBLT_DEPTHFILL`), for a keyed copy of more than 4096 runs of
+  pixels or from a source the host drew, for the picture of a
+  256-colour mode or a mode shown doubled, once a frame, and for a
+  program's polls of port 3DAh between the host's draws into the
+  surface shown. `/api/status` counts them by cause.
+- **Copies made again.** The host knows that card memory changed by
+  4 KiB page, so a write to one small surface makes the host's copies
+  of the others on its page stale, and they are uploaded again. The
+  Direct3D HAL converts a palettized texture to 8-8-8-8, and again
+  whenever its palette changes.
+
+### What the host side lacks
+
+- **Picture options.** The OpenGL renderer draws at the card's own
+  resolution, without multisampling, with the anisotropy the game sets.
+  `toadforce_memory` and `toadforce_renderer` are the card's only keys;
+  there is no counterpart of `voodoo_scale` or `voodoo_msaa`.
+- **Programs kept on disk.** None are: each run compiles its programs
+  again.
+- **A renderer for other hosts.** The OpenGL renderer needs a desktop
+  OpenGL 3.2 context. On a host without one the software renderer
+  draws.
 
 ## Defined behaviour
 
@@ -618,9 +772,8 @@ that list:
 - the OpenGL renderer prints it as GLSL.
 
 Stage semantics are written once, in the lowering, and each back end
-implements only the primitive operations. A new stage operation, or the
-shaders of level 2, are additions to the lowering and to the two small
-sets of primitives.
+implements only the primitive operations. A new stage operation is an
+addition to the lowering and to the two small sets of primitives.
 
 ### The software renderer
 
