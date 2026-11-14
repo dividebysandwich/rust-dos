@@ -695,7 +695,11 @@ fn alcohol_split_disc(dir: &std::path::Path, iso_image: &[u8], bad: &[u32]) -> s
     fs::write(dir.join("Synth (Track 1).bin"), cdimage::mode1_2352(&data)).unwrap();
     fs::write(dir.join("Synth (Track 2).bin"), cdimage::audio(450)).unwrap();
     let mds = dir.join("Synth.mds");
-    fs::write(&mds, include_bytes!("../../src/cdrom/testdata/toolkit-split.mds")).unwrap();
+    fs::write(
+        &mds,
+        include_bytes!("../../src/cdrom/testdata/toolkit-split.mds"),
+    )
+    .unwrap();
     let mut subcode = vec![0u8; 150 * 96];
     for lba in 0..481u32 {
         let mut linear = [0u8; 96];
@@ -719,12 +723,16 @@ fn an_alcohol_descriptor_with_a_subcode_file_beside_it() {
     let image = iso("TESTDISC", &[file("HELLO.TXT", b"hello")]);
     let mds = alcohol_split_disc(&dir, &image, &[20, 200]);
     let mut bus = Bus::new(dir.join("c"));
-    bus.mount_drive(3, &mds, MountOptions::default(), false).unwrap();
+    bus.mount_drive(3, &mds, MountOptions::default(), false)
+        .unwrap();
     bus.set_cycles_per_ms(1000);
     bus.attach_ide();
     // The descriptor's DPM data is in force with the file's subchannel.
     let disc = bus.disk.cd_image(3).unwrap();
-    assert_eq!(disc.dpm().map(|d| (d.start, d.resolution, d.angles.len())), Some((0, 10, 48)));
+    assert_eq!(
+        disc.dpm().map(|d| (d.start, d.resolution, d.angles.len())),
+        Some((0, 10, 48))
+    );
 
     let read_cd = |lba: u32, sub: u8| {
         let l = lba.to_be_bytes();

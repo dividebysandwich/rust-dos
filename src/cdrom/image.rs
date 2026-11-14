@@ -1008,7 +1008,11 @@ struct SubLookup {
 /// looks for it here, and only here: a file elsewhere, as in the
 /// `archival` folder of a disc archiver's dump, is copied beside the
 /// image under one of these names.
-fn sub_file<'a>(path: &Path, files: impl Iterator<Item = &'a str>, leadout: Option<u32>) -> SubLookup {
+fn sub_file<'a>(
+    path: &Path,
+    files: impl Iterator<Item = &'a str>,
+    leadout: Option<u32>,
+) -> SubLookup {
     let stem = |name: &str| {
         let file = name.rsplit(['\\', '/']).next()?;
         Some(Path::new(file).file_stem()?.to_string_lossy().into_owned())
@@ -1451,14 +1455,20 @@ pub fn track_files(path: &Path) -> Vec<PathBuf> {
     // The subchannel file is the one the name rules find with a layout
     // `SubFile::open` reads; whether it covers the disc is checked when
     // the image is opened.
-    let side = |names: &mut dyn Iterator<Item = &str>| sub_file(path, names, None).found.map(|s| s.path);
+    let side =
+        |names: &mut dyn Iterator<Item = &str>| sub_file(path, names, None).found.map(|s| s.path);
     if is_mds(path) {
-        let Some(disc) = hostfs::read(path).ok().and_then(|d| super::mds::parse(&d).ok()) else {
+        let Some(disc) = hostfs::read(path)
+            .ok()
+            .and_then(|d| super::mds::parse(&d).ok())
+        else {
             return Vec::new();
         };
         let names = mds_file_names(path, &disc);
         let files = mds_files_of(path, &disc).into_iter().filter_map(Result::ok);
-        return files.chain(side(&mut names.iter().map(String::as_str))).collect();
+        return files
+            .chain(side(&mut names.iter().map(String::as_str)))
+            .collect();
     }
     let Some(Ok(sheet)) = sheet(path) else {
         return Vec::new();
@@ -2527,8 +2537,12 @@ mod tests {
     fn toolkit_split_mds_with_a_subcode_file() {
         let dir = scratch("toolkit_split");
         // Track 2's file holds its pregap of 150 before its 300 sectors.
-        let data: Vec<u8> = (0..31).flat_map(|lba| mdf_sector(lba, true, None)).collect();
-        let audio: Vec<u8> = (31..481).flat_map(|lba| mdf_sector(lba, false, None)).collect();
+        let data: Vec<u8> = (0..31)
+            .flat_map(|lba| mdf_sector(lba, true, None))
+            .collect();
+        let audio: Vec<u8> = (31..481)
+            .flat_map(|lba| mdf_sector(lba, false, None))
+            .collect();
         fs::write(dir.join("Synth (Track 1).bin"), &data).unwrap();
         fs::write(dir.join("Synth (Track 2).bin"), &audio).unwrap();
         let mds = dir.join("Synth.mds");
@@ -2544,7 +2558,11 @@ mod tests {
         assert!(plain.notes().is_empty(), "{:?}", plain.notes());
         let mut sub = [0u8; 96];
         plain.read_subchannel(10, &mut sub).unwrap();
-        assert_eq!(sub[12..24], made_q(&plain.tracks()[0], 10), "made from the layout");
+        assert_eq!(
+            sub[12..24],
+            made_q(&plain.tracks()[0], 10),
+            "made from the layout"
+        );
 
         // A sector of each track, track 2's pregap among them.
         let bad = [10, 100, 300];
@@ -2561,19 +2579,27 @@ mod tests {
             // The Q with a broken CRC reads as the file has it; the
             // position a drive reports there is the layout's.
             image.read_subchannel(100, &mut sub).unwrap();
-            assert_ne!(
-                u16::from_be_bytes([sub[22], sub[23]]),
-                q_crc(&sub[12..24])
-            );
+            assert_ne!(u16::from_be_bytes([sub[22], sub[23]]), q_crc(&sub[12..24]));
             let at = image.q_position(100).unwrap();
-            assert_eq!((at.track, at.index, at.relative, at.absolute), (2, 0, 80, 100));
+            assert_eq!(
+                (at.track, at.index, at.relative, at.absolute),
+                (2, 0, 80, 100)
+            );
             // On a host that ignores case the file goes by the name asked.
             let lower = name.to_ascii_lowercase();
             let notes = image.notes().join("\n").to_ascii_lowercase();
-            assert!(notes.contains(&lower) && notes.contains("subchannel of"), "{}", notes);
+            assert!(
+                notes.contains(&lower) && notes.contains("subchannel of"),
+                "{}",
+                notes
+            );
             let files = track_files(&mds);
             assert_eq!(files.len(), 3, "{:?}", files);
-            let last = files[2].file_name().unwrap().to_string_lossy().to_ascii_lowercase();
+            let last = files[2]
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_ascii_lowercase();
             assert_eq!(last, lower);
         }
     }
@@ -2584,7 +2610,9 @@ mod tests {
     fn alcohol_data_track_with_a_subcode_file() {
         use crate::cdrom::{dpm::Dpm, mds};
         let dir = scratch("alcohol_subcode");
-        let data: Vec<u8> = (0..300).flat_map(|lba| mdf_sector(lba, true, None)).collect();
+        let data: Vec<u8> = (0..300)
+            .flat_map(|lba| mdf_sector(lba, true, None))
+            .collect();
         fs::write(dir.join("game.mdf"), data).unwrap();
         let tracks = [(0xAA, 0, 1, 0, 0, 150, 300)];
         let words: &[u32] = &[0, 100, 3, 300, 600, 900];
@@ -2612,7 +2640,9 @@ mod tests {
         assert_eq!(image.q_position(42).unwrap().absolute, 42);
         let notes = image.notes().join("\n").to_ascii_lowercase();
         assert!(
-            notes.contains("game.subcode") && notes.contains("redumper") && notes.contains("-150 to 399"),
+            notes.contains("game.subcode")
+                && notes.contains("redumper")
+                && notes.contains("-150 to 399"),
             "{}",
             notes
         );
@@ -2636,7 +2666,11 @@ mod tests {
         let image = CdImage::open(&dir.join("Game.mds")).unwrap();
         image.read_subchannel(7, &mut sub).unwrap();
         assert_eq!(sub, side_sub(&plain, 7, true));
-        assert!(image.notes().iter().all(|n| !n.contains("isn't read")), "{:?}", image.notes());
+        assert!(
+            image.notes().iter().all(|n| !n.contains("isn't read")),
+            "{:?}",
+            image.notes()
+        );
     }
 
     /// An Alcohol image that keeps subchannel in its data file reads its
@@ -2648,7 +2682,14 @@ mod tests {
         // Track 1, data with subchannel whose Qs are the layout's with R
         // zero; track 2, audio without, its pregap of 10 stored after
         // track 1.
-        let made = Track::stored(1, TrackMode::Mode1_2352, 0, 0, 20, Span::new(0, 20, 0, 0, 2448));
+        let made = Track::stored(
+            1,
+            TrackMode::Mode1_2352,
+            0,
+            0,
+            20,
+            Span::new(0, 20, 0, 0, 2448),
+        );
         let mut data = Vec::new();
         for lba in 0..20 {
             data.extend(mdf_sector(lba, true, Some(made_q(&made, lba))));
@@ -2681,7 +2722,11 @@ mod tests {
             assert_eq!(sub, side_sub(&plain, lba, lba == 40), "sector {}", lba);
         }
         let notes = image.notes().join("\n");
-        assert!(notes.contains("its own for 20 of its 50 sectors"), "{}", notes);
+        assert!(
+            notes.contains("its own for 20 of its 50 sectors"),
+            "{}",
+            notes
+        );
 
         // With subchannel in every track the file beside it isn't read.
         let mut data = Vec::new();
@@ -2699,7 +2744,11 @@ mod tests {
         assert_eq!(sub[12..24], made_q(&made, 40));
         assert_eq!(sub[24], 0);
         let notes = image.notes().join("\n");
-        assert!(notes.contains("keeps the subchannel of every sector"), "{}", notes);
+        assert!(
+            notes.contains("keeps the subchannel of every sector"),
+            "{}",
+            notes
+        );
         assert_eq!(track_files(&dir.join("disc.mds")).len(), 2);
     }
 
