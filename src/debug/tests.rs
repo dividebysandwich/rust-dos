@@ -1596,7 +1596,9 @@ fn requests_sent_together_take_effect_in_the_order_sent() {
         while let Some(request) = hub.next_speed_request() {
             let reply = match &request.change {
                 super::SettingChange::Cycles(cycles) => serde_json::json!({"cycles": cycles}),
-                super::SettingChange::FpsCap(value) => serde_json::json!({"fps_cap": value}),
+                super::SettingChange::FpsCap(cap) => {
+                    serde_json::json!({"fps_cap": rust_dos::frame_cap::name(*cap)})
+                }
             };
             hub.speed_done(&cpu, request, Ok(reply));
         }

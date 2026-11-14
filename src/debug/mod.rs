@@ -417,7 +417,7 @@ pub enum Cmd {
     Speed { cycles: String },
     /// Change the frame rate cap (`fps_cap`) as the settings window
     /// does, which the front end does (`next_speed_request`).
-    FpsCap { value: String },
+    FpsCap { cap: rust_dos::frame_cap::Cap },
     /// Turn the emulator off: the front end leaves its loop, and the
     /// journal ends with `shutdown`.
     Quit,
@@ -452,8 +452,8 @@ pub struct StateRequest {
 pub enum SettingChange {
     /// The CPU speed, as `cycles` takes it.
     Cycles(String),
-    /// The frame rate cap, as `fps_cap` takes it.
-    FpsCap(String),
+    /// The frame rate cap, checked as the configuration's `fps_cap`.
+    FpsCap(rust_dos::frame_cap::Cap),
 }
 
 /// A CPU speed or frame rate cap to change to, which the front end

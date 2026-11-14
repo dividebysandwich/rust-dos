@@ -57,8 +57,8 @@ impl DebugHub {
                 self.speed_requests.push(SpeedRequest { change, ctx, if_state, reply: tx });
                 return;
             }
-            Cmd::FpsCap { value } => {
-                let change = super::SettingChange::FpsCap(value);
+            Cmd::FpsCap { cap } => {
+                let change = super::SettingChange::FpsCap(cap);
                 self.speed_requests.push(SpeedRequest { change, ctx, if_state, reply: tx });
                 return;
             }

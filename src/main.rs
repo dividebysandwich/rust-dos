@@ -1464,22 +1464,26 @@ fn main() -> Result<ExitCode, String> {
         }
         while let Some(request) = dbg.next_speed_request() {
             let result = match &request.change {
-                debug::SettingChange::Cycles(cycles) => CpuSpeed::parse(cycles).and_then(|cycles| {
-                    if det.is_some() && !matches!(cycles, CpuSpeed::Fixed(_)) {
-                        return Err("deterministic mode runs at a fixed speed: give a number of cycles".to_string());
-                    }
-                    let new = Settings { cycles, ..settings.clone() };
-                    host!().apply(&new)?;
-                    Ok(serde_json::json!({"cycles": cycles.to_string()}))
-                }),
-                debug::SettingChange::FpsCap(value) => match rust_dos::frame_cap::parse(value) {
-                    Some(fps_cap) => {
-                        let new = Settings { fps_cap, ..settings.clone() };
+                debug::SettingChange::Cycles(cycles) => {
+                    CpuSpeed::parse(cycles).and_then(|cycles| {
+                        if det.is_some() && !matches!(cycles, CpuSpeed::Fixed(_)) {
+                            return Err(
+                                "deterministic mode runs at a fixed speed: give a number of cycles"
+                                    .to_string(),
+                            );
+                        }
+                        let new = Settings { cycles, ..settings.clone() };
                         host!().apply(&new)?;
-                        Ok(serde_json::json!({"fps_cap": rust_dos::frame_cap::name(fps_cap)}))
-                    }
-                    None => Err(format!("invalid fps_cap '{}' (auto, off, or 10 to 240)", value)),
-                },
+                        Ok(serde_json::json!({"cycles": cycles.to_string()}))
+                    })
+                }
+                // The server checked the value. A setting that fails to
+                // apply is the client's answer, and the machine runs on.
+                &debug::SettingChange::FpsCap(fps_cap) => {
+                    let new = Settings { fps_cap, ..settings.clone() };
+                    let name = rust_dos::frame_cap::name(fps_cap);
+                    host!().apply(&new).map(|_| serde_json::json!({ "fps_cap": name }))
+                }
             };
             dbg.speed_done(&cpu, request, result);
             told_cycles = settings.cycles;
