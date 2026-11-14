@@ -669,9 +669,19 @@ async function refreshDisasm() {
   renderDisasm();
 }
 
-// The address a row starts at, as the server takes it.
+// The address a row starts at, as the server takes it: its segment and
+// offset, else its linear address, which a listing asked for as "lin:"
+// has (a breakpoint there is then kept by it where the built-in Windows
+// moves the page), else its physical one.
 function rowAddr(row) {
-  return row.label.includes(":") || !row.phys ? row.label : "phys:" + row.phys;
+  if (row.label.includes(":")) return row.label;
+  if (row.lin) return "lin:" + row.lin;
+  return row.phys ? "phys:" + row.phys : row.label;
+}
+
+// Whether a row has an address to set a breakpoint at or to run to.
+function rowHasAddr(row) {
+  return Boolean(row.phys || row.lin || row.label.includes(":"));
 }
 
 // Where CS:EIP is among the rows shown, by physical address.
@@ -689,14 +699,14 @@ function renderDisasm() {
     // By the row's own address, so that a breakpoint on a page the
     // built-in Windows moves is kept by its linear address and found again.
     gutter.addEventListener("click", act(async () => {
-      if (!row.phys && !row.label.includes(":")) return;
+      if (!rowHasAddr(row)) return;
       await toggleBreakpoint(rowAddr(row), row.breakpoint);
     }));
     tr.append(gutter,
       el("td", { class: "addr", textContent: row.label }),
       el("td", { class: "bytes", textContent: row.bytes }),
       el("td", { class: "asm", textContent: row.asm }));
-    tr.addEventListener("dblclick", () => (row.phys || row.label.includes(":")) && runTo(rowAddr(row)));
+    tr.addEventListener("dblclick", () => rowHasAddr(row) && runTo(rowAddr(row)));
     return tr;
   });
   tbody.replaceChildren(...rows);

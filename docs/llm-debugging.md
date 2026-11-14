@@ -624,8 +624,9 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
 - **Interrupt vectors:** `GET /api/ivt`. `hle:true` means the vector still
   points at the emulator's built-in handler, so a program has not hooked it.
 - **Disassembly as data:** `GET /api/disasm?format=json` has, next to the
-  text `lines`, `rows` of `{label, phys, bytes, asm, len, current,
-  breakpoint}`.
+  text `lines`, `rows` of `{label, phys, lin, bytes, asm, len, current,
+  breakpoint}`. `lin` is the row's linear address, null in a listing
+  asked for by a physical address.
 - **Disassembly's code size:** an address with a selector decodes as its
   segment's code, 16 or 32-bit. A `lin:` or `phys:` address has no
   segment, so it decodes like the code running now: 32-bit under the

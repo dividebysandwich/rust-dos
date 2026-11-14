@@ -301,6 +301,9 @@ fn a_write_to_an_untouched_page_stays_in_the_page_file_until_the_program_touches
     .unwrap();
     assert_eq!(rows["rows"][0]["bytes"], "B8 55 00 00 00");
     assert_eq!(rows["rows"][0]["phys"], Value::Null);
+    // The second row's own linear address, which the debugger's page
+    // sets a breakpoint by.
+    assert_eq!(rows["rows"][1]["lin"], json!(format!("{:08X}", at + 5)));
     assert!(
         rows["rows"][1]["asm"].as_str().unwrap().contains("ret"),
         "{}",

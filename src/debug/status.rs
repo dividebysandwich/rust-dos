@@ -378,6 +378,9 @@ impl DebugHub {
             rows.push(json!({
                 "label": label,
                 "phys": p.map(|p| format!("{:05X}", p)),
+                // The row's linear address, when the listing's has one: a
+                // breakpoint set by it follows a page that moves.
+                "lin": row(at).lin.map(|lin| format!("{:08X}", lin)),
                 "bytes": hex,
                 "asm": text,
                 "len": len,
