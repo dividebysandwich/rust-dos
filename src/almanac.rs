@@ -376,12 +376,17 @@ pub fn best(candidates: &[Candidate]) -> Option<&Candidate> {
 }
 
 /// The settings a report sends: `settings`' values of `KEYS`, by section.
+/// The memory is the size the machine has (`Settings::memory_mb`), also
+/// where `memsize` isn't set: the default for its CPU and display adapter
+/// is what the game ran with, and whoever takes the report's settings
+/// may have another.
 pub fn report_settings(
     settings: &Settings,
     home: Option<&Path>,
 ) -> BTreeMap<String, BTreeMap<String, String>> {
     let mut map: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    for (section, key, value) in config::values(settings, home) {
+    let memory = Settings { memsize: Some(settings.memory_mb()), ..settings.clone() };
+    for (section, key, value) in config::values(&memory, home) {
         if let Some(value) = value
             && known(section, key)
         {
@@ -874,9 +879,42 @@ mod tests {
         let settings = report_settings(&Settings::default(), None);
         let count: usize = settings.values().map(BTreeMap::len).sum();
         assert_eq!(count, KEYS.len(), "every key has a value: {:?}", settings);
-        assert!(settings["emulator"].contains_key("memsize"));
+        assert_eq!(settings["emulator"]["memsize"], "16", "the default, though memsize isn't set");
         assert!(!settings["emulator"].contains_key("scale"));
         assert!(!settings.contains_key("drives"));
+        // The size the machine has: the default for its CPU and display
+        // adapter, or what memsize sets.
+        let pentium_ii = Settings { cpu: crate::cpu::CpuModel::PentiumII, ..Settings::default() };
+        assert_eq!(report_settings(&pentium_ii, None)["emulator"]["memsize"], "64");
+        let set = Settings { memsize: Some(24), ..pentium_ii };
+        assert_eq!(report_settings(&set, None)["emulator"]["memsize"], "24");
+    }
+
+    /// A recommendation that sets the CPU or the display adapter and no
+    /// memsize gets the memory that is their default, unless the
+    /// configuration sets memsize.
+    #[test]
+    fn a_recommended_cpu_brings_its_default_memory() {
+        use crate::cpu::CpuModel;
+        let setting = |key: &str, value: &str| Setting {
+            section: "emulator".into(),
+            key: key.into(),
+            value: value.into(),
+        };
+        let cpu = setting("cpu", "pentium_ii");
+        let layered = layer(&Settings::default(), &[&cpu], None);
+        assert_eq!(layered.cpu, CpuModel::PentiumII);
+        assert_eq!((layered.memsize, layered.memory_mb()), (None, 64));
+        let card = setting("machine", "svga_toadforce");
+        assert_eq!(layer(&Settings::default(), &[&card], None).memory_mb(), 128);
+
+        // The configuration's memsize stays, and so does the
+        // recommendation's own.
+        let base = Settings { memsize: Some(16), ..Settings::default() };
+        assert_eq!(layer(&base, &[&cpu], None).memory_mb(), 16);
+        let memsize = setting("memsize", "32");
+        let layered = layer(&Settings::default(), &[&cpu, &memsize], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (Some(32), 32));
     }
 
     #[test]
@@ -898,7 +936,7 @@ mod tests {
             ..Settings::default()
         };
         let layered = layer(&base, &given.iter().collect::<Vec<_>>(), None);
-        assert_eq!(layered.memsize, 8);
+        assert_eq!(layered.memsize, Some(8));
         assert!(!layered.ems);
         assert_eq!(layered.scale, base.scale);
         assert_eq!(layered.cycles, base.cycles);

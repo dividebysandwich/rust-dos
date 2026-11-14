@@ -475,9 +475,9 @@ fn settings_change_live() {
 
     // Memory steps up to what the 486 takes and waits for the next start.
     ui.row = ui.items().iter().position(|&i| i == Item::Memsize).unwrap();
-    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some(" 16 MB ■■■■·······"));
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some(" 16 MB ■■■■······· (default)"));
     keys(&mut ui, &mut host, &[Right]);
-    assert_eq!(host.applied.last().unwrap().memsize, 20);
+    assert_eq!(host.applied.last().unwrap().memsize, Some(20));
     assert!(status(&ui).0.contains("next time"), "{:?}", status(&ui));
     // Typed, no further than 2 MB and what the CPU takes, and back to 16
     // with Delete.
@@ -492,17 +492,49 @@ fn settings_change_live() {
     keys(&mut ui, &mut host, &[End, Backspace, Backspace, Backspace]);
     ui.text("62", &mut host);
     keys(&mut ui, &mut host, &[Enter, Right, Right, Right]);
-    assert_eq!(host.applied.last().unwrap().memsize, 128);
+    assert_eq!(host.applied.last().unwrap().memsize, Some(128));
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("128 MB ■■■■■■■■■■■"));
     for _ in 0..10 {
         ui.key(Left, &mut host);
     }
-    assert_eq!(host.applied.last().unwrap().memsize, 4);
+    assert_eq!(host.applied.last().unwrap().memsize, Some(4));
     keys(&mut ui, &mut host, &[Left, Left]);
-    assert_eq!(host.applied.last().unwrap().memsize, 2);
+    assert_eq!(host.applied.last().unwrap().memsize, Some(2));
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("  2 MB ···········"));
     keys(&mut ui, &mut host, &[Delete]);
-    assert_eq!(host.applied.last().unwrap().memsize, 16);
+    assert_eq!(host.applied.last().unwrap().memsize, None);
+    assert_eq!(host.applied.last().unwrap().memory_mb(), 16);
+
+    // While it isn't set, another CPU or display adapter changes the
+    // default it shows, for the next start.
+    ui.row = ui.items().iter().position(|&i| i == Item::Cpu).unwrap();
+    pick(&mut ui, &mut host, "Pentium II");
+    let applied = host.applied.last().unwrap();
+    assert_eq!((applied.memsize, applied.memory_mb()), (None, 64));
+    assert!(status(&ui).0.contains("default is now 64 MB"), "{:?}", status(&ui));
+    assert_eq!(Item::Memsize.value(&ui.settings, None), " 64 MB ■■■■■■■■■······ (default)");
+    ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
+    pick(&mut ui, &mut host, crate::video::adapter::Adapter::ToadForce.describe());
+    assert_eq!(Item::Memsize.value(&ui.settings, None), "128 MB ■■■■■■■■■■■···· (default)");
+    assert!(status(&ui).0.contains("default is now 128 MB"), "{:?}", status(&ui));
+    // Set by the user, it stays through them, down to what a CPU takes.
+    ui.row = ui.items().iter().position(|&i| i == Item::Memsize).unwrap();
+    keys(&mut ui, &mut host, &[Left]);
+    assert_eq!(host.applied.last().unwrap().memsize, Some(96));
+    ui.row = ui.items().iter().position(|&i| i == Item::Cpu).unwrap();
+    pick(&mut ui, &mut host, "Pentium III");
+    assert_eq!(host.applied.last().unwrap().memory_mb(), 96);
+    assert!(!status(&ui).0.contains("default"), "{:?}", status(&ui));
+    pick(&mut ui, &mut host, "386");
+    assert_eq!(host.applied.last().unwrap().memsize, Some(64));
+    // Back to the test's machine.
+    ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
+    pick(&mut ui, &mut host, crate::video::adapter::Adapter::default().describe());
+    ui.row = ui.items().iter().position(|&i| i == Item::Cpu).unwrap();
+    pick(&mut ui, &mut host, "486");
+    ui.row = ui.items().iter().position(|&i| i == Item::Memsize).unwrap();
+    keys(&mut ui, &mut host, &[Delete]);
+    assert_eq!(host.applied.last().unwrap().memsize, None);
 
     // The disk speed changes at once.
     ui.row = ui.items().iter().position(|&i| i == Item::FloppyDiskSpeed).unwrap();

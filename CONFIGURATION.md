@@ -256,7 +256,9 @@ limit, so without a connection it goes on as it would with one:
   DOSBox configuration's `cputype` of a Pentium imports as `pentium`, of
   a Pentium MMX as `pentium_mmx`, of a Pentium Pro as `pentium_pro`, of
   a Pentium II as `pentium_ii`, and of a Pentium III or DOSBox-X's
-  `experimental` as `pentium_iii`.
+  `experimental` as `pentium_iii`. The `cpu` also gives the memory of a
+  machine without a `memsize` line: 16 MB up to a Pentium and 32 to
+  128 MB with the later ones (see `memsize`).
 * `core` is what runs the programs' instructions: `auto` (the default)
   runs the interpreter, and the dynamic recompiler for a program from the
   moment it switches to protected mode until it ends, as DOSBox's
@@ -423,11 +425,28 @@ limit, so without a connection it goes on as it would with one:
   ffmpeg, VLC and mpv play, at 60 frames a second of the machine's time
   with its sound, so they keep in step through pauses and fast forward;
   a recording stops at 1 GB.
-* `memsize` is the RAM in MB (default 16), from 2 to as much as
-  motherboards took for the `cpu`: 64 MB for a 386, 128 MB for a 486,
-  256 MB for a Pentium and 512 MB for a Pentium MMX, K6-2, Pentium Pro,
-  Pentium II or Pentium III. More than the CPU
-  takes is warned about and cut to its most. Memory above the first
+* `memsize` is the RAM in MB, from 2 to as much as motherboards took
+  for the `cpu`: 64 MB for a 386, 128 MB for a 486, 256 MB for a Pentium
+  and 512 MB for a Pentium MMX, K6-2, Pentium Pro, Pentium II or Pentium
+  III. More than the CPU takes is warned about and cut to its most.
+  Without the setting, the machine has what one with its `cpu` came
+  with:
+
+  | `cpu` | Memory without `memsize` |
+  |---|---|
+  | `386`, `486`, `pentium` | 16 MB |
+  | `pentium_mmx`, `k6_2`, `pentium_pro` | 32 MB |
+  | `pentium_ii` | 64 MB |
+  | `pentium_iii` | 128 MB |
+
+  With `machine=svga_toadforce` it has 128 MB with any `cpu` (64 MB
+  with a 386, which takes no more), as the games that card is for ask
+  for it. A `memsize` line sets the memory whatever the `cpu` and the
+  card are, below these sizes too: some DOS programs fail with more
+  than 16 or 32 MB. The settings window shows `(default)` beside a size
+  that isn't set, and saving keeps it out of the file, so it follows a
+  later change of `cpu` or `machine`. The log's `MB of memory` line says
+  which of the two the machine started with. Memory above the first
   megabyte is extended memory for DOS extenders and XMS; XMS 3.0's 32-bit
   functions and INT 15h E801h/E820h report all of it, HIMEM's older calls
   and the CMOS at most 64 MB, as on a real machine. Save states and rewind
@@ -1508,7 +1527,6 @@ windows=builtin
 [emulator]
 machine=svga_voodoo3
 cpu=pentium_ii
-memsize=64
 win32_version=98se
 
 [drives]
@@ -1530,7 +1548,7 @@ profile:
 |---|---|---|
 | `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too. With the Banshee it is the only card Direct3D 8 runs on, and the only one OpenGL draws on in a window: on a Voodoo2 add-on card OpenGL draws full screen, and a Voodoo Graphics has none. [docs/3dfx.md](docs/3dfx.md) has the other cards. `GLIDE2X.DLL` and `GLIDE3X.DLL` are there only with a 3dfx card. GDI and DirectDraw games run on it too |
 | `cpu` | `pentium_ii` | The default 486 has no time stamp counter (RDTSC) or MMX, which many games of the time use: such a game stops with an invalid opcode. The Pentium II has both |
-| `memsize` | `64`, or `128` for a 3D game from 1998 on | The default 16 MB is less than most Windows 98 games asked for. The game's heaps and its DirectDraw surfaces come out of it, and it is what the game is told the machine has |
+| `memsize` | leave it out, or `128` for a 3D game from 1998 on | Without it a Pentium II has 64 MB, which most Windows 98 games asked for (the default 486 has 16 MB). The game's heaps and its DirectDraw surfaces come out of it, and it is what the game is told the machine has |
 | `win32_version` | `98se` | The setups and games tested with the built-in Windows were tested under Windows 98 SE. Under the default, `95`, a program that imports a function Windows 98 added doesn't start, and its message names this setting |
 | `win32_depth` | `8` only for a game that says it needs 256 colours, `16` for one that says it needs 16 bits | The default desktop has the card's own depth (16 bits on a Voodoo3, 32 on an S3 Trio, 24 on a ViRGE). A GDI game that draws with a palette needs `8`. A game that checks the desktop's depth before it sets its own mode, such as Moto Racer, needs `16` on a card whose desktop is deeper. Other DirectDraw games set their own mode and don't need it |
 | `cycles` | leave it at `auto` | The game's timers follow the emulated clock, and `auto` finds the speed its frames need |
@@ -1568,7 +1586,6 @@ windows=builtin
 [emulator]
 machine=svga_voodoo3
 cpu=pentium_ii
-memsize=64
 win32_version=98se
 
 [drives]
@@ -2973,7 +2990,6 @@ with 16 MB, and `machine=svga_banshee` a Voodoo Banshee:
 [emulator]
 machine=svga_voodoo3
 cpu=pentium_iii
-memsize=128
 ```
 
 The Voodoo Graphics and the Voodoo2 are add-on cards next to the display
@@ -3235,6 +3251,11 @@ VGA.
 [emulator]
 machine=svga_toadforce
 ```
+
+The machine has 128 MB of memory with this card unless `memsize` says
+otherwise, which is what the games it is for recommend. The `cpu` stays
+the default 486 unless it is set; most of those games want
+`cpu=pentium_iii`.
 
 | Setting | Values | What it does |
 |---|---|---|

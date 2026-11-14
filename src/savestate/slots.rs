@@ -170,6 +170,22 @@ fn entries(text: &str) -> std::collections::BTreeMap<String, String> {
     out
 }
 
+/// The settings a machine has once the state of `header` is loaded into
+/// one with `settings`: the state's hardware (`machine_settings`) and its
+/// memory size, which the state brings whatever `memsize` or its default
+/// would give (bus/state.rs). `memsize` stays as `settings` have it, set
+/// or not, where that gives the state's size on the state's hardware, so
+/// a load doesn't set a `memsize` nobody chose; otherwise it is the
+/// state's size.
+pub fn loaded_settings(header: &Header, settings: &Settings) -> Settings {
+    let mut hardware = machine_settings(&header.machine, settings);
+    hardware.memsize = settings.memsize;
+    if hardware.memory_mb() != header.memsize {
+        hardware.memsize = Some(header.memsize);
+    }
+    hardware
+}
+
 /// `base` with the hardware settings of `from`.
 fn with_machine(base: &Settings, from: &Settings) -> Settings {
     Settings {
@@ -352,15 +368,42 @@ mod tests {
 
     #[test]
     fn the_hardware_settings_come_back() {
-        let mut settings = Settings { machine: Adapter::Cga, cpu: CpuModel::I386, memsize: 8, ems: false, ..Default::default() };
+        let mut settings = Settings { machine: Adapter::Cga, cpu: CpuModel::I386, memsize: Some(8), ems: false, ..Default::default() };
         settings.sound.gus.enabled = false;
         settings.scale = 3;
         let text = machine_text(&settings);
         let current = Settings { scale: 2, ..Default::default() };
         let loaded = machine_settings(&text, &current);
-        assert_eq!((loaded.machine, loaded.cpu, loaded.memsize, loaded.ems), (Adapter::Cga, CpuModel::I386, 8, false));
+        assert_eq!((loaded.machine, loaded.cpu, loaded.memsize, loaded.ems), (Adapter::Cga, CpuModel::I386, Some(8), false));
         assert_eq!(loaded.sound, settings.sound);
         assert_eq!(loaded.scale, 2, "the display's settings stay");
+    }
+
+    /// A state's memory is its own: the default for its CPU and card,
+    /// which may have been another when it was saved, doesn't change it.
+    #[test]
+    fn a_state_keeps_its_memory_size_whatever_the_default() {
+        // Saved with 16 MB on a Pentium III with a ToadForce and no
+        // `memsize`, as before the default came from the machine.
+        let saved =
+            Settings { machine: Adapter::ToadForce, cpu: CpuModel::PentiumIII, ..Default::default() };
+        assert_eq!(saved.memory_mb(), 128);
+        let header = Header { machine: machine_text(&saved), memsize: 16, ..Default::default() };
+        assert!(!header.machine.contains("memsize"), "{}", header.machine);
+        let loaded = loaded_settings(&header, &Settings::default());
+        assert_eq!(loaded.cpu, CpuModel::PentiumIII);
+        assert_eq!((loaded.memsize, loaded.memory_mb()), (Some(16), 16));
+        // Into a machine with a `memsize` of its own too.
+        let set = Settings { memsize: Some(64), ..Default::default() };
+        assert_eq!(loaded_settings(&header, &set).memory_mb(), 16);
+
+        // A state with the size the settings give keeps them as they are:
+        // not set, or set.
+        let header = Header { memsize: 128, ..header };
+        assert_eq!(loaded_settings(&header, &Settings::default()).memsize, None);
+        assert_eq!(loaded_settings(&header, &Settings::default()).memory_mb(), 128);
+        let set = Settings { memsize: Some(128), ..Default::default() };
+        assert_eq!(loaded_settings(&header, &set).memsize, Some(128));
     }
 
     #[test]

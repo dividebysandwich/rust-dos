@@ -411,12 +411,19 @@ impl ConfigUi {
     pub(super) fn changed(&mut self, item: Item, host: &mut dyn Host) {
         let result = host.apply(&self.settings);
         self.status = None;
+        let memory_mb = self.settings.memory_mb();
+        let memory_changed = std::mem::replace(&mut self.memory_mb, memory_mb) != memory_mb;
         match result {
             Err(problem) => self.error(problem),
             Ok(Some(note)) => self.info(note),
             Ok(None) if item.applies() == Applies::NextStart => {
                 self.info("Takes effect the next time Rust-DOS starts (F2 saves it)")
             }
+            // Another CPU or display adapter while `memsize` isn't set.
+            Ok(None) if memory_changed && self.settings.memsize.is_none() => self.info(format!(
+                "The memory's default is now {} MB: from the next time Rust-DOS starts (F2 saves it)",
+                memory_mb
+            )),
             Ok(None) => {}
         }
         // Conflicts between the cards, as the configuration file reports them.

@@ -53,6 +53,12 @@ impl DebugHub {
             "uptime_ms": cpu.bus.start_time.elapsed().as_millis() as u64,
             "fps": (self.fps * 10.0).round() / 10.0,
             "cycles_per_ms": cpu.bus.clock.cycles_per_ms(),
+            // The RAM, and whether its size is the default for the CPU
+            // and the display adapter (`memsize` isn't set).
+            "memory": {
+                "mb": cpu.bus.ram().len() >> 20,
+                "derived": cpu.bus.memory_derived,
+            },
             // Deterministic mode: the clock's start, the machine's clock
             // now, emulated time, and every how many emulated ms input is
             // delivered. Null when off.

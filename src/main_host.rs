@@ -364,9 +364,8 @@ impl MainHost<'_, '_> {
     /// machine as it was.
     fn load_state(&mut self, path: &std::path::Path, header: slots::Header, state: &[u8]) -> Result<slots::Header, String> {
         let (old_settings, old_hardware) = (self.settings.clone(), self.machine.clone());
-        let mut hardware = slots::machine_settings(&header.machine, self.settings);
-        // The memory the state has, which it brings (bus/state.rs).
-        hardware.memsize = header.memsize;
+        // With the memory the state has, which it brings (bus/state.rs).
+        let mut hardware = slots::loaded_settings(&header, self.settings);
         // The speed isn't the machine's hardware: outside deterministic
         // mode the machine goes on at the speed it runs at (`--cycles`,
         // the configuration's, the last one the window or /api/speed set).

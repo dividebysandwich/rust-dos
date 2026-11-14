@@ -219,7 +219,9 @@ impl Machine {
         if !config.drives.is_empty() {
             warnings.push("[drives]: there are no host directories in the browser; add files to C: instead".into());
         }
-        let mut cpu = Cpu::with_memory(PathBuf::from("/"), settings.memsize);
+        let memory = settings.memory();
+        let mut cpu = Cpu::with_memory(PathBuf::from("/"), memory.mb);
+        memory.tell(&mut cpu.bus);
         // (The browser has no recompiler: every core is the interpreter.)
         // With auto the page hands over what the browser's layout types.
         warnings.extend(rust_dos::hardware::configure(&mut cpu, &settings, Layout::us()));
@@ -1276,8 +1278,7 @@ impl PageHost<'_> {
     fn load_slot(&mut self, slot: u8) -> Result<String, String> {
         let data = self.states.get(&self.state_key(slot)).ok_or("empty")?;
         let (header, state) = slots::decode(data)?;
-        let mut hardware = slots::machine_settings(&header.machine, self.settings);
-        hardware.memsize = header.memsize;
+        let mut hardware = slots::loaded_settings(&header, self.settings);
         // A failed `machine::load` puts the machine back by itself; the
         // machine from before is needed only when the hardware changes, to
         // put that back too.
@@ -1918,14 +1919,14 @@ mod tests {
     #[test]
     fn the_page_addresss_settings_apply_but_are_not_saved() {
         let m = Machine::new("[emulator]\nmemsize=8\n", "[emulator]\nmemsize=32\n");
-        assert_eq!(m.settings.memsize, 32);
+        assert_eq!(m.settings.memsize, Some(32));
         // The settings window saves as `save_settings` does, after a change
         // to something else.
         let mut changed = m.settings.clone();
         changed.sound.opl3 = !changed.sound.opl3;
         let text = config::complete_text(&m.saved.text, Path::new("/"), &m.saved.settings, &changed, &[], None);
         let saved = Settings::from_config(&config::parse(&text, Path::new("/"), None));
-        assert_eq!(saved.memsize, 8);
+        assert_eq!(saved.memsize, Some(8));
         assert_eq!(saved.sound.opl3, changed.sound.opl3);
     }
 

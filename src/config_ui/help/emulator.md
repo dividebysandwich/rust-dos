@@ -305,7 +305,14 @@ What draws the ToadForce's 3D:
 # Memory {#memsize}
 
 The PC's RAM. **16 MB** runs nearly every DOS game. Windows 95 and a few
-late games want **32** or **64 MB**.
+late games want **32** or **64 MB**, and Windows games from 1998 on **64**
+or **128 MB**.
+
+While it says **(default)**, the memory follows the processor and the
+display adapter: **16 MB** up to a Pentium, **32 MB** with a Pentium MMX,
+K6-2 or Pentium Pro, **64 MB** with a Pentium II, and **128 MB** with a
+Pentium III or with a ToadForce. A size you set stays whatever they are;
+**Delete** goes back to the default.
 
 How much there can be depends on the processor, as with the motherboards
 of its day: up to **64 MB** with a 386, **128 MB** with a 486, **256 MB**

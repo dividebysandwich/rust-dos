@@ -81,7 +81,7 @@ pub fn load(m: &mut Machine, buf: &[u8]) -> Result<slots::Header, String> {
     if let Some(why) = slots::refusal(&header, m.cpu.bus.ram().len() >> 20) {
         return Err(why);
     }
-    let hardware = slots::machine_settings(&header.machine, &m.settings);
+    let hardware = slots::loaded_settings(&header, &m.settings);
     // A failed `machine::load` puts the machine back by itself; the
     // machine from before is needed only when the hardware changes, to
     // put that back too.

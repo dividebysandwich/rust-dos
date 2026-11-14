@@ -22,8 +22,9 @@ pub struct RunOptions {
     pub dir: PathBuf,
     /// Instructions per emulated millisecond.
     pub cycles: u32,
-    /// The machine's memory in MB.
-    pub memory_mb: usize,
+    /// The machine's memory in MB, or None for the default of the
+    /// machine's CPU (`config::default_memsize`).
+    pub memory_mb: Option<usize>,
     /// Print the text screen at the end if nothing went through DOS's
     /// console: for programs that write to the screen's memory.
     pub screen: bool,
@@ -55,12 +56,12 @@ pub fn run(options: RunOptions) -> i32 {
         eprintln!("rust-dos: {} is not a folder", options.dir.display());
         return ABORTED;
     }
-    let mut cpu = Box::new(Cpu::with_memory(options.dir.clone(), options.memory_mb));
     let settings = Settings {
         memsize: options.memory_mb,
         win32: options.win32,
         ..Settings::default()
     };
+    let mut cpu = Box::new(Cpu::with_memory(options.dir.clone(), settings.memory_mb()));
     for warning in crate::hardware::configure(&mut cpu, &settings, crate::keylayout::Layout::us()) {
         cpu.bus.log_string(&format!("[RUN] {}", warning));
     }

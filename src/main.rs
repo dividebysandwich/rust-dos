@@ -93,7 +93,7 @@ fn main() -> Result<ExitCode, String> {
                 command: run.command,
                 dir: run.dir.unwrap_or_else(|| std::path::PathBuf::from(".")),
                 cycles: run.cycles,
-                memory_mb: run.mem as usize,
+                memory_mb: run.mem.map(|mb| mb as usize),
                 screen: run.screen,
                 win32: run.win32,
             });
@@ -182,7 +182,7 @@ fn main() -> Result<ExitCode, String> {
             .then(rust_dos::version_check::Check::start);
     // A game to launch: its profile, read now so its memory size is the
     // machine's.
-    let (startup_game, memory_mb) = game_to_launch(&args, &config, &settings)?;
+    let (startup_game, memory) = game_to_launch(&args, &config, &settings)?;
 
     let mut cursor_visible = true;
     let mut last_blink = std::time::Instant::now();
@@ -263,7 +263,7 @@ fn main() -> Result<ExitCode, String> {
     let mut det = args
         .deterministic
         .then(|| rust_dos::deterministic::Deterministic::new(args.start_time.unwrap_or_else(rust_dos::deterministic::default_start)));
-    let mut cpu = create_cpu(&args, &config, memory_mb)?;
+    let mut cpu = create_cpu(&args, &config, &memory)?;
     if let Some(path) = &args.trace_3d {
         rust_dos::win32::trace3d::start(&mut cpu, path)
             .map_err(|e| format!("The 3D trace can't be written to {}: {}", path.display(), e))?;

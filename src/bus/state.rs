@@ -200,6 +200,7 @@ impl Bus {
             key_waits: _,
             unhandled_writes: _,
             attribute_reset: _,
+            memory_derived: _,
             log_hook: _,
             log_backlog: _,
             audio_hook: _,
@@ -513,6 +514,7 @@ impl Bus {
             key_waits: _,
             unhandled_writes: _,
             attribute_reset: _,
+            memory_derived,
             log_hook: _,
             log_backlog: _,
             audio_hook: _,
@@ -526,6 +528,7 @@ impl Bus {
                 return Err(StateError::Invalid(format!("{} KB of memory", len / 1024)));
             }
             *ram = vec![0; len];
+            *memory_derived = false;
             *page_gen = vec![0; len >> super::GEN_SHIFT];
             *code_blocks = vec![0; len >> super::GEN_SHIFT];
         }

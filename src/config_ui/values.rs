@@ -87,11 +87,14 @@ fn memsizes(cpu: CpuModel) -> impl DoubleEndedIterator<Item = usize> + Clone {
     MEMSIZES.into_iter().filter(move |&mb| mb <= cpu.max_memsize())
 }
 
-/// The memory's slider: a square for every step above the least.
-pub(super) fn memsize_bar(mb: usize, cpu: CpuModel) -> String {
-    let steps = memsizes(cpu);
+/// The memory's slider: a square for every step above the least, and
+/// "(default)" while `memsize` isn't set and the size is the default for
+/// the CPU and the display adapter.
+pub(super) fn memsize_bar(s: &Settings) -> String {
+    let (mb, steps) = (s.memory_mb(), memsizes(s.cpu));
     let (full, cells) = (steps.clone().filter(|&m| m <= mb).count().saturating_sub(1), steps.count() - 1);
-    format!("{:>3} MB {}{}", mb, "■".repeat(full), "·".repeat(cells - full))
+    let default = if s.memsize.is_none() { " (default)" } else { "" };
+    format!("{:>3} MB {}{}{}", mb, "■".repeat(full), "·".repeat(cells - full), default)
 }
 
 /// A value of up to `max` as `text` and a bar of small squares, one for
@@ -231,7 +234,7 @@ impl Item {
             Fpu => on_off(|s, on| s.fpu_fast = on),
             Cpu => each(s, CpuModel::ALL, |s, cpu| {
                 s.cpu = cpu;
-                s.memsize = s.memsize.min(cpu.max_memsize());
+                s.memsize = s.memsize.map(|mb| mb.min(cpu.max_memsize()));
             }),
             Machine => each(s, crate::video::adapter::Adapter::ALL, |s, machine| s.machine = machine),
             Voodoo => on_off(|s, on| s.voodoo.enabled = on),
@@ -487,7 +490,7 @@ impl Item {
             }
             Memsize => {
                 let steps: Vec<usize> = memsizes(s.cpu).collect();
-                s.memsize = step_number(&steps, s.memsize, dir);
+                s.memsize = Some(step_number(&steps, s.memory_mb(), dir));
             }
             Volume(channel) => s.mixer.set_level(channel, step_units(s.mixer.level(channel), dir, 10, MAX_LEVEL)),
             ReverbMix => s.mixer.reverb_mix = step_units(s.mixer.reverb_mix, dir, 10, MAX_MIX),
@@ -534,7 +537,7 @@ impl Item {
             Item::UltraDir => s.sound.gus.ultradir.clone().unwrap_or_default(),
             Item::Volume(channel) => s.mixer.level(channel).to_string(),
             Item::CaptureDir => s.capture_dir.display().to_string(),
-            Item::Memsize => s.memsize.to_string(),
+            Item::Memsize => s.memory_mb().to_string(),
             Item::Deadzone => s.joystick.deadzone.to_string(),
             Item::MouseSensitivity => s.mouse_sensitivity.to_string(),
             Item::CrtCurvature => s.crt.curvature.to_string(),
@@ -575,7 +578,7 @@ impl Item {
                 if mb > s.cpu.max_memsize() {
                     return Err(format!("A {} takes up to {} MB", s.cpu.describe(), s.cpu.max_memsize()));
                 }
-                s.memsize = mb;
+                s.memsize = Some(mb);
             }
             Item::Deadzone => s.joystick.deadzone = crate::joystick::parse_deadzone(text)?,
             Item::MouseSensitivity => s.mouse_sensitivity = crate::config::parse_mouse_sensitivity(text)?,
@@ -626,10 +629,8 @@ impl Item {
                 s.mixer.set_level(channel, 100);
                 changed
             }
-            Item::Memsize => {
-                let default = Settings::default().memsize.min(s.cpu.max_memsize());
-                std::mem::replace(&mut s.memsize, default) != default
-            }
+            // Not set: the default for the CPU and the display adapter.
+            Item::Memsize => s.memsize.take().is_some(),
             Item::Deadzone => {
                 let default = crate::joystick::JoystickSettings::default().deadzone;
                 std::mem::replace(&mut s.joystick.deadzone, default) != default
