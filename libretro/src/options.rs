@@ -200,7 +200,7 @@ fn definitions() -> Vec<Definition> {
         Definition {
             key: "memsize",
             desc: "Memory (restart)",
-            info: "RAM in MB, up to 64 MB on a 386, 128 MB on a 486, 256 MB on a Pentium and 512 MB on a Pentium MMX or later. Takes effect when the content is started again.",
+            info: "RAM in MB, up to 64 MB on a 386, 128 MB on a 486, 256 MB on a Pentium and 512 MB on a Pentium MMX or later. Without a size here or in rust-dos.conf, 16 MB up to a Pentium, 32 MB with a Pentium MMX, K6-2 or Pentium Pro, 64 MB with a Pentium II and 128 MB with a Pentium III or a ToadForce. Takes effect when the content is started again.",
             category: "system",
             target: config("emulator", "memsize"),
             values: configured(&[

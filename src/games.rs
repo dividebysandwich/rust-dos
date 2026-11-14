@@ -1469,7 +1469,7 @@ mod tests {
             "{}",
             text
         );
-        assert_eq!(prepared.settings.memsize, 32);
+        assert_eq!(prepared.settings.memsize, Some(32));
         assert_eq!(prepared.autoexec, ["C:", "a.exe"]);
 
         // Edited, it is made again under its id; left alone, it stays as

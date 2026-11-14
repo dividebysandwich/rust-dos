@@ -40,6 +40,7 @@ pub use edit::{
     DriveChange, Saving, autoexec_lines, complete_text, load_autoexec, save, save_autoexec, update_text, with_autoexec,
 };
 pub use parse::{MAX_MEMSIZE, MIN_MEMSIZE, parse, parse_memsize};
+pub use settings::{Memory, default_memsize};
 pub use settings::{Settings, parse_mouse_sensitivity};
 pub use types::{
     AspectRatio, DesktopDepth, DosVersion, Filter, MidiSynth, Mt32Model, SoundConfig, Win32Locale,

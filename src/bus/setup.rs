@@ -156,6 +156,7 @@ impl Bus {
             page_gen: vec![0; ram_len >> GEN_SHIFT],
             observe: crate::idle::Observe::default(),
             code_blocks: vec![0; ram_len >> GEN_SHIFT],
+            memory_derived: false,
             log_hook: None,
             log_backlog: None,
             audio_hook: None,

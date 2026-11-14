@@ -168,17 +168,22 @@ impl Core {
         let plan = content::plan(content.as_deref(), &dirs, options.boot(), options.boot_os())?;
         let (settings, mut warnings) = content::settings(&base, &options, plan.overlay.as_ref());
         let home = content::home();
-        let memsize = match &plan.profile {
-            Some(p) => rust_dos::games::prepare(&p.id, &settings, &p.text, &p.dir, home.as_deref())?.settings.memsize,
-            None => settings.memsize,
+        let memory = match &plan.profile {
+            Some(p) => {
+                let prepared =
+                    rust_dos::games::prepare(&p.id, &settings, &p.text, &p.dir, home.as_deref())?;
+                prepared.settings.memory()
+            }
+            None => settings.memory(),
         };
 
-        let mut cpu = Box::new(Cpu::with_memory(plan.c_root.clone(), memsize));
+        let mut cpu = Box::new(Cpu::with_memory(plan.c_root.clone(), memory.mb));
         let log = *cb;
         cpu.bus.log_hook = Some(Box::new(move |line: &str| {
             let level = if line.contains("Warning") { RETRO_LOG_WARN } else { RETRO_LOG_DEBUG };
             log.log(level, line);
         }));
+        memory.tell(&mut cpu.bus);
         // Printouts go in the core's folder in the save directory.
         cpu.bus.printer_dir = Some(dirs.data.join("printouts"));
         warnings.extend(hardware::configure(&mut cpu, &settings, Layout::us()));

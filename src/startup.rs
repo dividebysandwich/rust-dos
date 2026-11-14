@@ -65,7 +65,11 @@ pub(crate) fn startup_boot(cpu: &mut Cpu, skip: bool) -> Option<u8> {
 /// The CPU is boxed: it is about 136 KB, and in a debug build every move of
 /// it gets its own copy in the frame of `main` and here. Unboxed, `main`'s
 /// frame was about 630 KB and startup overflowed Windows's 1 MB main thread stack.
-pub(crate) fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize) -> Result<Box<Cpu>, String> {
+pub(crate) fn create_cpu(
+    args: &Args,
+    config: &config::Config,
+    memory: &config::Memory,
+) -> Result<Box<Cpu>, String> {
     use crate::disk::DRIVE_C;
 
     let mut warnings = config.warnings.clone();
@@ -96,7 +100,7 @@ pub(crate) fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize)
         _ => std::path::PathBuf::from("."),
     };
 
-    let mut cpu = Box::new(Cpu::with_memory(root_path.clone(), memory_mb));
+    let mut cpu = Box::new(Cpu::with_memory(root_path.clone(), memory.mb));
     cpu.bus.log_file = open_log_file(args.log.as_deref())?;
     // The debug server's log takes the lines logged before it starts.
     if args.debug_server.is_some() {
@@ -137,6 +141,7 @@ pub(crate) fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize)
     for warning in &warnings {
         cpu.bus.log_string(&format!("[CONFIG] Warning: {}", warning));
     }
+    memory.tell(&mut cpu.bus);
     Ok(cpu)
 }
 
@@ -168,13 +173,13 @@ pub(crate) fn open_log_file(path: Option<&std::path::Path>) -> Result<Option<rus
 type Launch = (GameEntry, String, PathBuf);
 
 /// The game to launch at startup (`--game`, or the one `--import` made a
-/// profile of): its entry, its text and its folder, and the memory size of
-/// the machine, which is the game's.
+/// profile of): its entry, its text and its folder, and the memory of the
+/// machine, which is the game's.
 pub(crate) fn game_to_launch(
     args: &Args,
     config: &config::Config,
     settings: &Settings,
-) -> Result<(Option<Launch>, usize), String> {
+) -> Result<(Option<Launch>, config::Memory), String> {
     let imported = match &args.import {
         Some(source) => {
             let dir = games_dir(config.source.as_deref()).ok_or("--import needs a configuration file, beside which the games folder is")?;
@@ -191,13 +196,14 @@ pub(crate) fn game_to_launch(
         Some(query) => Some(find_game(config.source.as_deref(), query)?),
         None => None,
     };
-    let memory_mb = match &startup_game {
+    let memory = match &startup_game {
         Some((entry, text, dir)) => {
-            games::prepare(&entry.id, settings, text, dir, rust_dos::hostdirs::home_dir().as_deref())?.settings.memsize
+            let home = rust_dos::hostdirs::home_dir();
+            games::prepare(&entry.id, settings, text, dir, home.as_deref())?.settings.memory()
         }
-        None => settings.memsize,
+        None => settings.memory(),
     };
-    Ok((startup_game, memory_mb))
+    Ok((startup_game, memory))
 }
 
 /// The command line's options over the configuration's settings.

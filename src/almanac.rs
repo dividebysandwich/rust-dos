@@ -376,12 +376,19 @@ pub fn best(candidates: &[Candidate]) -> Option<&Candidate> {
 }
 
 /// The settings a report sends: `settings`' values of `KEYS`, by section.
+/// The memory is `memory_mb`, the size the machine runs with, also where
+/// `memsize` isn't set: the default for its CPU and display adapter is
+/// what the game ran with, and whoever takes the report's settings may
+/// have another. (A CPU chosen in the settings window changes the
+/// settings' default at once, the machine's memory at the next start.)
 pub fn report_settings(
     settings: &Settings,
+    memory_mb: usize,
     home: Option<&Path>,
 ) -> BTreeMap<String, BTreeMap<String, String>> {
     let mut map: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    for (section, key, value) in config::values(settings, home) {
+    let memory = Settings { memsize: Some(memory_mb), ..settings.clone() };
+    for (section, key, value) in config::values(&memory, home) {
         if let Some(value) = value
             && known(section, key)
         {
@@ -395,6 +402,14 @@ pub fn report_settings(
 
 /// `base` with `settings` over it, those of `KEYS` only, as a profile's
 /// are layered over the configuration's (games.rs's `prepare`).
+///
+/// Reports send the memory the game ran with, set or not, so a
+/// recommendation always has a `memsize`. Where `base` doesn't set it and
+/// the recommended size is the default for the recommended CPU and display
+/// adapter, it stays unset: the machine gets the same size, and saving
+/// the settings writes no `memsize` line that would stop it following a
+/// later change of the CPU or the adapter. Any other recommended size is
+/// set, below the default too, as the game is known to run with it.
 pub fn layer(base: &Settings, settings: &[&Setting], home: Option<&Path>) -> Settings {
     let mut sections: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for s in settings {
@@ -410,7 +425,13 @@ pub fn layer(base: &Settings, settings: &[&Setting], home: Option<&Path>) -> Set
     for (section, lines) in sections {
         text.push_str(&format!("\n[{}]\n{}\n", section, lines.join("\n")));
     }
-    Settings::from_config(&config::parse(&text, Path::new("/"), home))
+    let mut layered = Settings::from_config(&config::parse(&text, Path::new("/"), home));
+    if base.memsize.is_none()
+        && layered.memsize == Some(config::default_memsize(layered.cpu, layered.machine))
+    {
+        layered.memsize = None;
+    }
+    layered
 }
 
 /// How long a program waits for the almanac at most, in the host's time:
@@ -871,12 +892,79 @@ mod tests {
 
     #[test]
     fn reports_send_only_the_machines_settings() {
-        let settings = report_settings(&Settings::default(), None);
+        let default = Settings::default();
+        let settings = report_settings(&default, default.memory_mb(), None);
         let count: usize = settings.values().map(BTreeMap::len).sum();
         assert_eq!(count, KEYS.len(), "every key has a value: {:?}", settings);
-        assert!(settings["emulator"].contains_key("memsize"));
+        assert_eq!(settings["emulator"]["memsize"], "16", "the default, though memsize isn't set");
         assert!(!settings["emulator"].contains_key("scale"));
         assert!(!settings.contains_key("drives"));
+        // The size the machine runs with, whatever the settings give now:
+        // a Pentium II chosen after a start with the 486's 16 MB.
+        let pentium_ii = Settings { cpu: crate::cpu::CpuModel::PentiumII, ..Settings::default() };
+        assert_eq!(pentium_ii.memory_mb(), 64);
+        assert_eq!(report_settings(&pentium_ii, 16, None)["emulator"]["memsize"], "16");
+        assert_eq!(report_settings(&pentium_ii, 64, None)["emulator"]["memsize"], "64");
+    }
+
+    /// A recommendation that sets the CPU or the display adapter and no
+    /// memsize gets the memory that is their default, unless the
+    /// configuration sets memsize.
+    #[test]
+    fn a_recommended_cpu_brings_its_default_memory() {
+        use crate::cpu::CpuModel;
+        let setting = |key: &str, value: &str| Setting {
+            section: "emulator".into(),
+            key: key.into(),
+            value: value.into(),
+        };
+        let cpu = setting("cpu", "pentium_ii");
+        let layered = layer(&Settings::default(), &[&cpu], None);
+        assert_eq!(layered.cpu, CpuModel::PentiumII);
+        assert_eq!((layered.memsize, layered.memory_mb()), (None, 64));
+        let card = setting("machine", "svga_toadforce");
+        assert_eq!(layer(&Settings::default(), &[&card], None).memory_mb(), 128);
+
+        // The configuration's memsize stays, and so does the
+        // recommendation's own.
+        let base = Settings { memsize: Some(16), ..Settings::default() };
+        assert_eq!(layer(&base, &[&cpu], None).memory_mb(), 16);
+        let memsize = setting("memsize", "32");
+        let layered = layer(&Settings::default(), &[&cpu, &memsize], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (Some(32), 32));
+    }
+
+    /// A recommended memsize that is the default of the recommended CPU
+    /// and display adapter leaves memsize unset; any other is set, below
+    /// the default too; and over a memsize the user set, the
+    /// recommendation's is set as before.
+    #[test]
+    fn a_recommended_default_memory_stays_unset() {
+        let setting = |key: &str, value: &str| Setting {
+            section: "emulator".into(),
+            key: key.into(),
+            value: value.into(),
+        };
+        let cpu = setting("cpu", "pentium_ii");
+        let unset = Settings::default();
+        let layered = layer(&unset, &[&cpu, &setting("memsize", "64")], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (None, 64));
+        let card = setting("machine", "svga_toadforce");
+        let layered = layer(&unset, &[&card, &setting("memsize", "128")], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (None, 128));
+        // The old reports' 16 MB beside a Pentium II: what the game ran with.
+        let layered = layer(&unset, &[&cpu, &setting("memsize", "16")], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (Some(16), 16));
+        let layered = layer(&unset, &[&cpu, &setting("memsize", "128")], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (Some(128), 128));
+
+        // The user's own memsize is replaced by the recommendation's, which
+        // is then set even where it is the default.
+        let own = Settings { memsize: Some(32), ..Settings::default() };
+        let layered = layer(&own, &[&cpu, &setting("memsize", "64")], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (Some(64), 64));
+        let layered = layer(&own, &[&cpu], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (Some(32), 32));
     }
 
     #[test]
@@ -898,7 +986,7 @@ mod tests {
             ..Settings::default()
         };
         let layered = layer(&base, &given.iter().collect::<Vec<_>>(), None);
-        assert_eq!(layered.memsize, 8);
+        assert_eq!(layered.memsize, Some(8));
         assert!(!layered.ems);
         assert_eq!(layered.scale, base.scale);
         assert_eq!(layered.cycles, base.cycles);
@@ -922,13 +1010,14 @@ mod tests {
         // the configuration file's parser warns and keeps it.
         let japanese = locale("ja-JP");
         assert_eq!(layer(&base, &[&japanese], None).win32_locale, Win32Locale::PlPl);
-        let reported = report_settings(&base, None);
+        let reported = report_settings(&base, base.memory_mb(), None);
         assert_eq!(reported["emulator"]["win32_locale"], "pl-PL");
         // Every locale goes through by its name and is reported by it.
         for l in Win32Locale::ALL {
             let layered = layer(&base, &[&locale(l.name())], None);
             assert_eq!(layered.win32_locale, l);
-            assert_eq!(report_settings(&layered, None)["emulator"]["win32_locale"], l.name());
+            let reported = report_settings(&layered, layered.memory_mb(), None);
+            assert_eq!(reported["emulator"]["win32_locale"], l.name());
         }
     }
 

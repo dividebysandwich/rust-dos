@@ -306,6 +306,9 @@ impl ConfigUi {
         };
         let usable = recommendation.usable();
         self.settings = almanac::layer(&self.settings, &usable, self.home.as_deref());
+        // The memory these settings give, so the next change made by hand
+        // doesn't report the recommendation's CPU's default as its own.
+        self.memory_mb = self.settings.memory_mb();
         self.almanac = None;
         let about = format!(
             "{} settings for {} ({})",
@@ -325,7 +328,13 @@ impl ConfigUi {
     /// it has none), the program's file, to `subject`, on a thread of its
     /// own.
     fn send_report(&mut self, subject: Subject, name: String, host: &mut dyn Host) {
-        let settings = almanac::report_settings(&self.settings, self.home.as_deref());
+        // The RAM the game ran with: another CPU or display adapter chosen
+        // since the start changes the settings' default, not the machine.
+        let memory_mb = match host.memory().len() >> 20 {
+            0 => self.settings.memory_mb(),
+            mb => mb,
+        };
+        let settings = almanac::report_settings(&self.settings, memory_mb, self.home.as_deref());
         let Some(view) = &mut self.almanac else {
             return;
         };

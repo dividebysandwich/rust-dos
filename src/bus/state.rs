@@ -200,6 +200,7 @@ impl Bus {
             key_waits: _,
             unhandled_writes: _,
             attribute_reset: _,
+            memory_derived: _,
             log_hook: _,
             log_backlog: _,
             audio_hook: _,
@@ -513,6 +514,9 @@ impl Bus {
             key_waits: _,
             unhandled_writes: _,
             attribute_reset: _,
+            // The front end's, which sets it from the settings a load
+            // leaves (`slots::loaded_settings`).
+            memory_derived: _,
             log_hook: _,
             log_backlog: _,
             audio_hook: _,

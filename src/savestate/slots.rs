@@ -132,12 +132,16 @@ pub fn machine_settings(text: &str, settings: &Settings) -> Settings {
 
 /// How the hardware settings `text` (see `machine_text`) differ from the
 /// hardware of `settings`, a sentence each naming the setting: empty if
-/// they are the same.
+/// they are the same. The memory isn't among them: a `memsize` that isn't
+/// set gives a size that depends on the CPU, the display adapter and the
+/// rust-dos that saved the state, so `memory_difference` compares the
+/// sizes themselves.
 pub fn machine_differences(text: &str, settings: &Settings) -> Vec<String> {
     // Both as this rust-dos writes them, whatever wrote the state's.
     let state = entries(&machine_text(&machine_settings(text, &Settings::default())));
     let now = entries(&machine_text(settings));
-    let mut keys: Vec<&String> = state.keys().chain(now.keys()).collect();
+    let mut keys: Vec<&String> =
+        state.keys().chain(now.keys()).filter(|k| *k != "emulator.memsize").collect();
     keys.sort_unstable();
     keys.dedup();
     let shown = |v: Option<&String>| v.map_or_else(|| "the default".to_string(), |v| v.clone());
@@ -145,6 +149,13 @@ pub fn machine_differences(text: &str, settings: &Settings) -> Vec<String> {
         .filter(|k| state.get(*k) != now.get(*k))
         .map(|k| format!("{}: the state has {}, this machine has {}", k, shown(state.get(k)), shown(now.get(k))))
         .collect()
+}
+
+/// How the memory of a state (`Header::memsize`) differs from the RAM
+/// this machine has, both in MB, if it does.
+pub fn memory_difference(state_mb: usize, now_mb: usize) -> Option<String> {
+    (state_mb != now_mb)
+        .then(|| format!("memory: the state has {} MB, this machine has {} MB", state_mb, now_mb))
 }
 
 /// How the deterministic mode of a state (its clock's start time, None
@@ -168,6 +179,24 @@ fn entries(text: &str) -> std::collections::BTreeMap<String, String> {
         }
     }
     out
+}
+
+/// The settings a machine has once the state of `header` is loaded into
+/// one with `settings`: the state's hardware (`machine_settings`) and its
+/// memory size, which the state brings whatever `memsize` or its default
+/// would give (bus/state.rs). `memsize` stays as `settings` have it, set
+/// or not, where that gives the state's size on the state's hardware, so
+/// a load doesn't set a `memsize` nobody chose; otherwise it is the
+/// state's size.
+pub fn loaded_settings(header: &Header, settings: &Settings) -> Settings {
+    let mut hardware = machine_settings(&header.machine, settings);
+    // No more than the state's CPU takes, as the settings window cuts it
+    // when the CPU changes.
+    hardware.memsize = settings.memsize.map(|mb| mb.min(hardware.cpu.max_memsize()));
+    if hardware.memory_mb() != header.memsize {
+        hardware.memsize = Some(header.memsize);
+    }
+    hardware
 }
 
 /// `base` with the hardware settings of `from`.
@@ -352,15 +381,51 @@ mod tests {
 
     #[test]
     fn the_hardware_settings_come_back() {
-        let mut settings = Settings { machine: Adapter::Cga, cpu: CpuModel::I386, memsize: 8, ems: false, ..Default::default() };
+        let mut settings = Settings { machine: Adapter::Cga, cpu: CpuModel::I386, memsize: Some(8), ems: false, ..Default::default() };
         settings.sound.gus.enabled = false;
         settings.scale = 3;
         let text = machine_text(&settings);
         let current = Settings { scale: 2, ..Default::default() };
         let loaded = machine_settings(&text, &current);
-        assert_eq!((loaded.machine, loaded.cpu, loaded.memsize, loaded.ems), (Adapter::Cga, CpuModel::I386, 8, false));
+        assert_eq!((loaded.machine, loaded.cpu, loaded.memsize, loaded.ems), (Adapter::Cga, CpuModel::I386, Some(8), false));
         assert_eq!(loaded.sound, settings.sound);
         assert_eq!(loaded.scale, 2, "the display's settings stay");
+    }
+
+    /// A state's memory is its own: the default for its CPU and card,
+    /// which may have been another when it was saved, doesn't change it.
+    #[test]
+    fn a_state_keeps_its_memory_size_whatever_the_default() {
+        // Saved with 16 MB on a Pentium III with a ToadForce and no
+        // `memsize`, as before the default came from the machine.
+        let saved =
+            Settings { machine: Adapter::ToadForce, cpu: CpuModel::PentiumIII, ..Default::default() };
+        assert_eq!(saved.memory_mb(), 128);
+        let header = Header { machine: machine_text(&saved), memsize: 16, ..Default::default() };
+        assert!(!header.machine.contains("memsize"), "{}", header.machine);
+        let loaded = loaded_settings(&header, &Settings::default());
+        assert_eq!(loaded.cpu, CpuModel::PentiumIII);
+        assert_eq!((loaded.memsize, loaded.memory_mb()), (Some(16), 16));
+        // Into a machine with a `memsize` of its own too.
+        let set = Settings { memsize: Some(64), ..Default::default() };
+        assert_eq!(loaded_settings(&header, &set).memory_mb(), 16);
+
+        // A state with the size the settings give keeps them as they are:
+        // not set, or set.
+        let header = Header { memsize: 128, ..header };
+        assert_eq!(loaded_settings(&header, &Settings::default()).memsize, None);
+        assert_eq!(loaded_settings(&header, &Settings::default()).memory_mb(), 128);
+        let set = Settings { memsize: Some(128), ..Default::default() };
+        assert_eq!(loaded_settings(&header, &set).memsize, Some(128));
+
+        // A size set for a bigger CPU is cut to what the state's takes,
+        // so saving the settings writes no more than it takes.
+        let on_486 = Settings { memsize: Some(128), ..Default::default() };
+        let header = Header { machine: machine_text(&on_486), memsize: 128, ..Default::default() };
+        let pentium_iii =
+            Settings { cpu: CpuModel::PentiumIII, memsize: Some(512), ..Default::default() };
+        let loaded = loaded_settings(&header, &pentium_iii);
+        assert_eq!((loaded.cpu, loaded.memsize), (CpuModel::I486, Some(128)));
     }
 
     #[test]
@@ -393,6 +458,18 @@ mod tests {
         assert_eq!(differences.len(), 3, "{:?}", differences);
         assert!(differences.iter().any(|d| d == "emulator.machine: the state has cga, this machine has the default"), "{:?}", differences);
         assert!(differences.iter().any(|d| d.contains("this machine has the default")), "{:?}", differences);
+
+        // `memsize` set or not, only the sizes count: a state with a set
+        // 64 MB matches a Pentium II with the default 64.
+        let pentium_ii = Settings { cpu: CpuModel::PentiumII, ..Default::default() };
+        let set = machine_text(&Settings { memsize: Some(64), ..pentium_ii.clone() });
+        assert!(set.contains("memsize=64"), "{}", set);
+        assert_eq!(machine_differences(&set, &pentium_ii), Vec::<String>::new());
+        assert_eq!(memory_difference(64, 64), None);
+        assert_eq!(
+            memory_difference(16, 128).as_deref(),
+            Some("memory: the state has 16 MB, this machine has 128 MB")
+        );
     }
 
     #[test]

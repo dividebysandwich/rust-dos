@@ -818,7 +818,7 @@ impl Item {
             Fpu => if s.fpu_fast { "fast (not exact)" } else { "exact" }.to_string(),
             Cpu => s.cpu.describe().to_string(),
             Machine => s.machine.describe().to_string(),
-            Memsize => memsize_bar(s.memsize, s.cpu),
+            Memsize => memsize_bar(s),
             Voodoo => on_off(s.voodoo.enabled),
             VoodooMemory => s.voodoo.board.describe().to_string(),
             VoodooRenderer => match s.voodoo.renderer {

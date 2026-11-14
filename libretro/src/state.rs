@@ -81,7 +81,7 @@ pub fn load(m: &mut Machine, buf: &[u8]) -> Result<slots::Header, String> {
     if let Some(why) = slots::refusal(&header, m.cpu.bus.ram().len() >> 20) {
         return Err(why);
     }
-    let hardware = slots::machine_settings(&header.machine, &m.settings);
+    let hardware = slots::loaded_settings(&header, &m.settings);
     // A failed `machine::load` puts the machine back by itself; the
     // machine from before is needed only when the hardware changes, to
     // put that back too.
@@ -106,6 +106,9 @@ pub fn load(m: &mut Machine, buf: &[u8]) -> Result<slots::Header, String> {
         }
         return Err(e.to_string());
     }
+    // `loaded_settings` leaves `memsize` unset only where the state's size
+    // is the default for its hardware.
+    m.cpu.bus.memory_derived = hardware.memsize.is_none();
     // The state's time stamp counter goes on at this machine's speed.
     m.cpu.set_tsc_speed(m.settings.cycles);
     Ok(header)
