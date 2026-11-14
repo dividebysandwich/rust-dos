@@ -131,7 +131,10 @@ fn set(cpu: &mut Cpu, kind: Kind, n: usize, t: Type, array: bool, args: &[u32]) 
                 // The material properties glColorMaterial tracks follow
                 // the current color (section 2.13.3).
                 if c.caps & CAP_COLOR_MATERIAL != 0 {
-                    c.lighting.track(c.color);
+                    // Unstamped: the card's state leaves out the
+                    // colours the vertices give, and is made again
+                    // when glColorMaterial or its enable changes.
+                    super::Stamped::unstamped(&mut c.lighting).track(c.color);
                 }
             }
         }

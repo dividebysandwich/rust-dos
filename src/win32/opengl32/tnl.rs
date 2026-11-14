@@ -29,6 +29,7 @@ use super::light::{
 };
 use super::shade;
 use super::state::{GL_BACK, GL_CW, GL_FILL, GL_FLAT, GL_FRONT};
+use super::super::ddraw::stamp::Stamped;
 use super::{CAP_COLOR_MATERIAL, CAP_LIGHTING, CAP_NORMALIZE, Context, ImmVertex};
 use crate::toadforce::level1::{self, states};
 
@@ -71,15 +72,6 @@ pub enum Why {
     /// A specular material with a shininess of 0, which shines where
     /// the half vector is behind the surface: 0 to the power 0 is 1.
     Shininess,
-    /// A colour glColorMaterial takes that isn't a whole number of
-    /// 255ths, which is what the card's vertices have.
-    Colour,
-    /// A lit vertex at infinity (w of 0).
-    Position,
-    /// A normal longer than 1 in eye coordinates under a specular
-    /// material: its highlight's cosine may be above 1, which OpenGL
-    /// raises to the shininess and the card takes for 1.
-    Normal,
     /// glMaterial between glBegin and glEnd: the vertices before it
     /// were lit with the material it replaced.
     Material,
@@ -95,16 +87,13 @@ pub enum Why {
 }
 
 impl Why {
-    pub const ALL: [Why; 13] = [
+    pub const ALL: [Why; 10] = [
         Why::NoCard,
         Why::Asked,
         Why::Numbers,
         Why::Modelview,
         Why::Light,
         Why::Shininess,
-        Why::Colour,
-        Why::Position,
-        Why::Normal,
         Why::Material,
         Why::Flat,
         Why::Sides,
@@ -120,9 +109,6 @@ impl Why {
             Why::Modelview => "modelview",
             Why::Light => "light",
             Why::Shininess => "shininess",
-            Why::Colour => "colour",
-            Why::Position => "position",
-            Why::Normal => "normal",
             Why::Material => "material",
             Why::Flat => "flat",
             Why::Sides => "sides",
@@ -154,13 +140,6 @@ pub fn count_of(why: Why) -> usize {
 
 fn finite(numbers: &[f32]) -> bool {
     numbers.iter().all(|n| n.is_finite())
-}
-
-/// Whether a colour's channel is one a byte holds: the card's vertex
-/// colours are bytes, each 255th a step.
-fn byte(x: f32) -> bool {
-    let k = (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
-    k as f32 / 255.0 == x
 }
 
 /// Whether the card turns normals as OpenGL does through `m`, and
@@ -252,10 +231,9 @@ fn card_material(l: &Lighting, side: usize, tracked: bool) -> level1::Material {
     }
 }
 
-/// The card's lighting state for the context `c`, and whether a
-/// material in it is specular; or why the card has no state that
-/// lights as `shade` does.
-fn lighting(c: &Context) -> Result<(Gl, bool), Why> {
+/// The card's lighting state for the context `c`, or why the card has
+/// no state that lights as `shade` does.
+fn lighting(c: &Context) -> Result<Gl, Why> {
     let l = &c.lighting;
     let modelview = c.modelview.last().copied().unwrap_or(IDENTITY);
     if !lights_through(&modelview) {
@@ -263,14 +241,12 @@ fn lighting(c: &Context) -> Result<(Gl, bool), Why> {
     }
     let tracked = c.caps & CAP_COLOR_MATERIAL != 0;
     let sides = if l.two_side { 2 } else { 1 };
-    let mut shines = false;
     for side in 0..sides {
         let m = &l.materials[side];
         let specular = (tracked && l.tracks(side, GL_SPECULAR)) || m.specular[..3] != [0.0; 3];
         if specular && m.shininess == 0.0 {
             return Err(Why::Shininess);
         }
-        shines |= specular;
     }
     let mut lights = Vec::new();
     for i in (0..LIGHTS).filter(|i| l.enabled >> i & 1 != 0) {
@@ -320,21 +296,28 @@ fn lighting(c: &Context) -> Result<(Gl, bool), Why> {
             lights,
         }),
     };
-    Ok((gl, shines))
+    Ok(gl)
 }
 
-/// The card's state for a draw of the context `c`: the primitives
-/// `prims`, which come `per` triangles to a polygon, of the vertices
-/// `raw`, of which `used` marks those a primitive names (all of them
-/// without it). An error is why the processor transforms and lights
-/// the draw.
-pub fn decide(
-    c: &Context,
-    per: usize,
-    prims: &[Prim],
-    raw: &[ImmVertex],
-    used: Option<&[bool]>,
-) -> Result<Gl, Why> {
+/// What a context's state gives each of its draws: the card's state,
+/// or why the processor transforms and lights them.
+pub type State = Result<Gl, Why>;
+
+/// The card's state for the draws of the context `c` as it is, kept
+/// for as long as its settings and its lighting have their stamps: a
+/// draw that follows another with nothing set between them costs the
+/// two comparisons.
+pub fn state_of(c: &mut Context) -> &State {
+    let stamps = (c.stamp(), Stamped::stamp(&c.lighting));
+    if c.card.as_ref().is_none_or(|(a, b, _)| (*a, *b) != stamps) {
+        let made = state(c);
+        c.card = Some((stamps.0, stamps.1, made));
+    }
+    &c.card.as_ref().unwrap().2
+}
+
+/// The part of `decide` that the context's state alone settles.
+fn state(c: &Context) -> State {
     let modelview = c.modelview.last().copied().unwrap_or(IDENTITY);
     let projection = c.projection.last().copied().unwrap_or(IDENTITY);
     // The card's depths are 0 to 1, as its viewport takes them
@@ -344,25 +327,7 @@ pub fn decide(
     if !finite(&modelview) || !finite(&projection) || !depths || depth < 0.0 {
         return Err(Why::Numbers);
     }
-    let flat = c.shade_model == GL_FLAT;
-    let filled = c.polygon_mode == GL_FILL;
-    for p in prims {
-        match *p {
-            Prim::Triangle(t, provoking, edges) => {
-                if flat && !t.contains(&provoking) {
-                    return Err(Why::Flat);
-                }
-                if !filled && edges != 7 {
-                    return Err(Why::Edges);
-                }
-            }
-            Prim::Line(_, b, provoking) if flat && provoking != b => return Err(Why::Flat),
-            _ => {}
-        }
-    }
-    let lit = c.caps & CAP_LIGHTING != 0;
-    let named = |i: usize| used.is_none_or(|u| u[i]);
-    if !lit {
+    if c.caps & CAP_LIGHTING == 0 {
         // With the colours they have, and a w of 0 taken for 1 as the
         // pipeline takes it.
         return Ok(Gl {
@@ -370,42 +335,84 @@ pub fn decide(
             lighting: None,
         });
     }
-    let (gl, shines) = lighting(c)?;
+    let gl = lighting(c)?;
     if !can_light(&gl) {
         return Err(Why::Numbers);
     }
-    let l = &c.lighting;
-    let triangles = prims.iter().any(|p| matches!(p, Prim::Triangle(..)));
-    if l.two_side && triangles && per != 1 && prims.len() != 1 {
-        return Err(Why::Sides);
-    }
-    let tracked = c.caps & CAP_COLOR_MATERIAL != 0;
-    // The alpha is the diffuse colour's.
-    let alpha = tracked && light::tracked(l.color_mode).contains(&GL_DIFFUSE);
-    // Normals that aren't brought to a length of 1 may be longer.
-    let long = (shines && c.caps & CAP_NORMALIZE == 0).then(|| shade::normal_matrix(&modelview));
-    for (i, v) in raw.iter().enumerate() {
-        if !named(i) {
-            continue;
-        }
-        if v.lit.is_some() {
-            return Err(Why::Material);
-        }
-        if v.position[3] == 0.0 {
-            return Err(Why::Position);
-        }
-        if let Some(normals) = &long {
-            let n = shade::eye_normal(normals.as_ref(), v.normal, false);
-            // The 128th power of this much over 1 is a thousandth
-            // over.
-            if n[0] * n[0] + n[1] * n[1] + n[2] * n[2] > 1.000_02 {
-                return Err(Why::Normal);
+    Ok(gl)
+}
+
+/// Whether the card draws as the processor would the primitives
+/// `prims`, which come `per` triangles to a polygon, of the vertices
+/// `raw`, of which `used` marks those a primitive names (all of them
+/// without it), in a context `c` whose state the card takes
+/// (`state_of`). An error is why the processor transforms and lights
+/// the draw.
+///
+/// What the card does otherwise than OpenGL without a check here,
+/// since each would cost every lit draw a pass over its vertices and
+/// no game was seen to draw them: a colour glColorMaterial takes is
+/// rounded to a byte, a normal longer than 1 has a highlight's cosine
+/// above 1 taken for 1, and a lit vertex with a w of 0 is at its x, y
+/// and z.
+pub fn checks(
+    c: &Context,
+    per: usize,
+    prims: &[Prim],
+    raw: &[ImmVertex],
+    used: Option<&[bool]>,
+) -> Result<(), Why> {
+    let flat = c.shade_model == GL_FLAT;
+    let filled = c.polygon_mode == GL_FILL;
+    // Smooth, filled primitives have nothing to look for.
+    if flat || !filled {
+        for p in prims {
+            match *p {
+                Prim::Triangle(t, provoking, edges) => {
+                    if flat && !t.contains(&provoking) {
+                        return Err(Why::Flat);
+                    }
+                    if !filled && edges != 7 {
+                        return Err(Why::Edges);
+                    }
+                }
+                Prim::Line(_, b, provoking) if flat && provoking != b => return Err(Why::Flat),
+                _ => {}
             }
         }
-        if tracked && !(v.color[..3].iter().all(|&x| byte(x)) && (!alpha || byte(v.color[3]))) {
-            return Err(Why::Colour);
-        }
     }
+    if c.caps & CAP_LIGHTING == 0 {
+        return Ok(());
+    }
+    if c.lighting.two_side
+        && per != 1
+        && prims.len() != 1
+        && prims.iter().any(|p| matches!(p, Prim::Triangle(..)))
+    {
+        return Err(Why::Sides);
+    }
+    // A vertex lit already was given before a glMaterial of its
+    // glBegin.
+    let lit = |(i, v): (usize, &ImmVertex)| v.lit.is_some() && used.is_none_or(|u| u[i]);
+    if raw.iter().enumerate().any(lit) {
+        return Err(Why::Material);
+    }
+    Ok(())
+}
+
+/// The card's state for a draw of the context `c` (`state_of` and
+/// `checks` in one, without the context's copy), or why the processor
+/// transforms and lights it.
+#[cfg(test)]
+pub fn decide(
+    c: &Context,
+    per: usize,
+    prims: &[Prim],
+    raw: &[ImmVertex],
+    used: Option<&[bool]>,
+) -> Result<Gl, Why> {
+    let gl = state(c)?;
+    checks(c, per, prims, raw, used)?;
     Ok(gl)
 }
 
@@ -559,15 +566,10 @@ mod tests {
         let m = gl.lighting.unwrap().material;
         assert_eq!((m.diffuse, m.ambient), ([0.0; 4], [0.0; 4]));
         assert_eq!(m.emissive, [0.1; 4]);
+        // A colour between two bytes goes to the card too, which
+        // rounds it.
         let floats = [vertex([0.5, 0.5, 0.5, 1.0]); 3];
-        assert_eq!(decide(&c, 1, &prims, &floats, None), Err(Why::Colour));
-        // A vertex no primitive names isn't asked.
-        let used = [false, false, false];
-        assert!(decide(&c, 1, &prims, &floats, Some(&used)).is_ok());
-        // An alpha only the diffuse colour takes.
-        c.lighting.color_mode = GL_EMISSION;
-        let alpha = [vertex([1.0, 1.0, 1.0, 0.3]); 3];
-        assert!(decide(&c, 1, &prims, &alpha, None).is_ok());
+        assert!(decide(&c, 1, &prims, &floats, None).is_ok());
     }
 
     #[test]
@@ -598,24 +600,16 @@ mod tests {
     }
 
     #[test]
-    fn lit_vertices_at_infinity_or_lit_already_stay_on_the_processor() {
-        let mut c = context();
+    fn vertices_lit_already_stay_on_the_processor() {
+        let c = context();
         let prims = [Prim::Triangle([0, 1, 2], 2, 7)];
         let mut raw = [vertex([1.0; 4]); 3];
-        // A normal of length 2 matters to a highlight alone, and not
-        // when OpenGL brings normals to a length of 1.
-        raw[0].normal = [0.0, 0.0, 2.0];
         assert!(decide(&c, 1, &prims, &raw, None).is_ok());
-        c.lighting.materials[0].specular = [1.0; 4];
-        c.lighting.materials[0].shininess = 20.0;
-        assert_eq!(decide(&c, 1, &prims, &raw, None), Err(Why::Normal));
-        c.caps |= CAP_NORMALIZE;
-        assert!(decide(&c, 1, &prims, &raw, None).is_ok());
-        raw[1].position[3] = 0.0;
-        assert_eq!(decide(&c, 1, &prims, &raw, None), Err(Why::Position));
-        raw[1].position[3] = 1.0;
         raw[2].lit = Some([0, 0]);
         assert_eq!(decide(&c, 1, &prims, &raw, None), Err(Why::Material));
+        // A vertex no primitive names isn't asked.
+        let used = [true, true, false];
+        assert!(decide(&c, 1, &prims, &raw, Some(&used)).is_ok());
     }
 
     #[test]
@@ -731,7 +725,12 @@ mod tests {
             light.position = [p[0] * w, p[1] * w, p[2] * w, w];
             light.attenuation = [d.roll(), d.roll() * 0.2, d.roll() * 0.05];
             if d.chance(0.5) {
-                light.cutoff = d.between(10.0, 85.0);
+                // Half of space now and then: the widest cone.
+                light.cutoff = if d.chance(0.15) {
+                    90.0
+                } else {
+                    d.between(10.0, 85.0)
+                };
                 light.exponent = if d.chance(0.3) {
                     0.0
                 } else {
@@ -853,16 +852,31 @@ mod tests {
             let prims = [Prim::Triangle([0, 1, 2], 2, 7)];
             let gl = match decide(&c, 1, &prims, &[v; 3], None) {
                 Ok(gl) => gl,
-                // A long normal's highlight is the processor's.
-                Err(Why::Normal) => continue,
                 Err(why) => panic!("the dice gave a state the card doesn't light: {why:?}"),
             };
             let modelview = c.modelview[0];
             let eye = matrix::apply(&modelview, v.position);
+            // Left out, as the card's rule is another there
+            // (`checks`): a vertex within a thousandth of a cone's
+            // edge, which the two may put on different sides.
             if on_a_cones_edge(&c.lighting, eye) {
                 continue;
             }
             let normals = shade::normal_matrix(&modelview);
+            // And a normal longer than 1 under a specular material
+            // without GL_NORMALIZE, whose highlight's cosine the card
+            // takes for 1 where OpenGL raises it to the shininess.
+            let long = shade::eye_normal(normals.as_ref(), v.normal, false);
+            let shines = (0..2).any(|side| {
+                (tracked && c.lighting.tracks(side, GL_SPECULAR))
+                    || c.lighting.materials[side].specular[..3] != [0.0; 3]
+            });
+            if shines
+                && c.caps & CAP_NORMALIZE == 0
+                && long.iter().map(|n| n * n).sum::<f32>() > 1.000_02
+            {
+                continue;
+            }
             let input = Input {
                 position: eye,
                 normal: shade::eye_normal(normals.as_ref(), v.normal, c.caps & CAP_NORMALIZE != 0),
@@ -889,5 +903,94 @@ mod tests {
         assert!(compared > 1500, "{compared} compared");
         // Not all of them to the bit: the tolerance is in use.
         assert!(worst <= 1);
+    }
+
+    /// A vertex at a light's position gets nothing from the light on
+    /// the card, as from the layer's shading: the direction to the
+    /// light has no length there.
+    #[test]
+    fn a_vertex_at_a_lights_position_gets_nothing_from_it_either_way() {
+        use super::super::shade::Input;
+        let mut c = context();
+        c.modelview = vec![IDENTITY];
+        let l = &mut c.lighting;
+        l.enabled = 1;
+        l.lights[0].position = [0.0, 0.0, -5.0, 1.0];
+        l.lights[0].diffuse = [1.0; 4];
+        l.lights[0].ambient = [0.0; 4];
+        l.lights[0].attenuation = [1.0, 0.0, 0.0];
+        l.ambient = [0.0; 4];
+        l.materials[0].diffuse = [0.5; 4];
+        let v = ImmVertex {
+            position: [0.0, 0.0, -5.0, 1.0],
+            normal: [0.0, 0.0, 1.0],
+            color: [1.0; 4],
+            ..ImmVertex::default()
+        };
+        let prims = [Prim::Triangle([0, 1, 2], 2, 7)];
+        let gl = decide(&c, 1, &prims, &[v; 3], None).unwrap();
+        let input = Input {
+            position: v.position,
+            normal: v.normal,
+            color: None,
+        };
+        let processor = shade::shade(&c.lighting, &input);
+        let card = card_colours(&c, &gl, &v);
+        assert_eq!(processor[0], [0.0, 0.0, 0.0, 0.5]);
+        assert_eq!(card, processor);
+    }
+
+    /// Where the card puts a vertex on the screen against where the
+    /// pipeline does, from the same clip coordinates (the product of
+    /// the three matrices is the same to the bit either way). The
+    /// card works out left + (x / w + 1) * width / 2, as its
+    /// specification says, and the pipeline centre + x * (1 / w) *
+    /// width / 2. OpenGL asks for neither order, only for x / w scaled
+    /// and moved to the viewport, and both are within a 2000th of a
+    /// pixel of that worked out in double precision, in viewports up
+    /// to 2048 pixels: a 125th of the 16th of a pixel the card's
+    /// rasteriser snaps a position to. A position near the middle of
+    /// two such steps may be snapped to either, which moves an edge by
+    /// a 16th of a pixel and gives the few pixels on it to the
+    /// triangle on its other side.
+    #[test]
+    fn the_card_and_the_pipeline_put_a_vertex_within_a_2000th_of_a_pixel() {
+        use super::super::super::ddraw::d3d::pipeline::ViewMap;
+        use crate::toadforce::raster::geometry::Setup;
+        use crate::toadforce::raster::vertex::Fvf;
+        let mut d = Dice(4);
+        let fvf = Fvf::parse(0x002).unwrap();
+        let (mut worst, mut differ) = (0.0f64, 0);
+        for _ in 0..20000 {
+            let (x, y) = (d.between(0.0, 64.0) as u32, d.between(0.0, 64.0) as u32);
+            let (w, h) = (d.between(16.0, 1984.0) as u32, d.between(16.0, 1984.0) as u32);
+            let mut l = level1::Level1::default();
+            l.viewport = level1::Viewport {
+                x,
+                y,
+                width: w,
+                height: h,
+                min_z: 0.0,
+                max_z: 1.0,
+            };
+            let setup = Setup::new(&l, &[], &fvf);
+            let cw = d.between(0.05, 4000.0);
+            let clip = [d.between(-cw, cw), d.between(-cw, cw), d.between(0.0, cw), cw];
+            let mut v = setup.vertex(|_| 0);
+            v.clip = clip;
+            let card = setup.project(&v);
+            let pipeline = ViewMap::dx7(x, y, w, h, 0.0, 1.0).screen(clip);
+            let exact = [
+                x as f64 + (clip[0] as f64 / cw as f64 + 1.0) * w as f64 / 2.0,
+                y as f64 + (1.0 - clip[1] as f64 / cw as f64) * h as f64 / 2.0,
+            ];
+            for (k, of) in [(0, card.x), (1, card.y), (0, pipeline[0]), (1, pipeline[1])] {
+                worst = worst.max((of as f64 - exact[k]).abs());
+            }
+            differ += (card.x != pipeline[0] || card.y != pipeline[1]) as u32;
+        }
+        assert!(worst <= 1.0 / 2000.0, "{worst}");
+        // The two orders do round differently: the bound is in use.
+        assert!(differ > 0);
     }
 }

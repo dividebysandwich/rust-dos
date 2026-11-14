@@ -770,6 +770,9 @@ pub struct Waiting {
     /// state.
     context: u32,
     stamp: u64,
+    /// The stamp of the context's lighting then. Not saved: a draw
+    /// after a load compares the card's state itself.
+    lit_stamp: u64,
     applied: Applied,
     /// OpenGL's part of the card's state, when the card transforms and
     /// lights them (`tnl::decide`): draws join only with the same.
@@ -869,6 +872,7 @@ pub fn waiting_for_tests() -> Waiting {
     Waiting {
         context: 0,
         stamp: 77,
+        lit_stamp: 0,
         applied: Applied {
             inner: 5,
             render: vec![(7, 1)],
@@ -1045,12 +1049,17 @@ fn draw(
     }
     let per = polygon_triangles(kind);
     let path = match transforms {
-        Ok(()) => tnl::decide(c, per, &prims, raw, used),
+        Ok(()) => match tnl::state_of(c) {
+            Ok(_) => tnl::checks(c, per, &prims, raw, used),
+            Err(why) => Err(*why),
+        },
         Err(true) => Err(Why::Asked),
         Err(false) => Err(Why::NoCard),
     };
-    let (vertices, card, count) = match path {
-        Ok(gl) => {
+    let stamp = c.stamp();
+    let lit_stamp = super::Stamped::stamp(&c.lighting);
+    let (vertices, on_card, count) = match path {
+        Ok(()) => {
             let matrices = texture_matrices(c);
             // A vertex lit before its draw has that color, with the
             // lights off since.
@@ -1059,7 +1068,7 @@ fn draw(
                 .iter()
                 .map(|v| pipeline_vertex(v, color(v), &matrices))
                 .collect();
-            (vertices, Some(gl), tnl::COUNT_CARD)
+            (vertices, true, tnl::COUNT_CARD)
         }
         Err(why) => {
             let (vertices, backs) = shaded(c, raw, used);
@@ -1068,24 +1077,28 @@ fn draw(
                 Some(backs) if triangles => back_faces(c, &vertices, &backs, &mut prims, per),
                 _ => vertices,
             };
-            (vertices, None, tnl::count_of(why))
+            (vertices, false, tnl::count_of(why))
         }
     };
-    let stamp = c.stamp();
     c.drawn = true;
     // The draws that wait take this one if they are the context's, go
     // the same way and have its state: its stamp, or the state made
     // anew and equal.
+    // The card's state is the context's copy (`tnl::state_of`), which
+    // the two stamps stand for.
     let joins = st.waiting.as_ref().is_some_and(|w| {
         w.context == index as u32
-            && w.card == card
+            && w.card.is_some() == on_card
             && w.vertices.len() + vertices.len() <= WAITING_VERTICES
-            && (w.stamp == stamp || applied_of(c).is_some_and(|a| a.same(&w.applied)))
+            && ((w.stamp == stamp && w.lit_stamp == lit_stamp)
+                || (applied_of(c).is_some_and(|a| a.same(&w.applied))
+                    && (!on_card || w.card.as_ref() == card_of(c))))
     });
-    let (on_card, n) = (card.is_some(), raw.len() as u64);
+    let n = raw.len() as u64;
     if let Some(w) = st.waiting.as_mut().filter(|_| joins) {
         let first = w.vertices.len() as u32;
         w.stamp = stamp;
+        w.lit_stamp = lit_stamp;
         w.vertices.extend_from_slice(&vertices);
         w.prims.extend(prims.iter().map(|p| match *p {
             Prim::Point(a) => Prim::Point(a + first),
@@ -1098,9 +1111,11 @@ fn draw(
         let Some(applied) = applied_of(c).cloned() else {
             return;
         };
+        let card = if on_card { card_of(c).cloned() } else { None };
         let waiting = Waiting {
             context: index as u32,
             stamp,
+            lit_stamp,
             applied,
             card,
             vertices,
@@ -1112,6 +1127,16 @@ fn draw(
     hal::toadforce::count_gl(cpu, count, 1);
     if on_card {
         hal::toadforce::count_gl(cpu, tnl::COUNT_VERTICES, n);
+    }
+}
+
+/// The card's state of the context `c`, when it has one that is made
+/// for its stamps.
+fn card_of(c: &Context) -> Option<&hal::Gl> {
+    let stamps = (c.stamp(), super::Stamped::stamp(&c.lighting));
+    match &c.card {
+        Some((a, b, Ok(gl))) if (*a, *b) == stamps => Some(gl),
+        _ => None,
     }
 }
 

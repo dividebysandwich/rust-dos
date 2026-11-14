@@ -216,6 +216,11 @@ pub struct Context {
     /// The Direct3D state of `settings`, with the stamp it was made
     /// under (`draw::applied_of`). Not saved: it is made again.
     pub(super) applied: Option<(u64, Option<draw::Applied>)>,
+    /// The card's state for `settings` and `lighting`, or why the
+    /// processor transforms and lights their draws, with the two
+    /// stamps it was made under (`tnl::state_of`). Not saved: it is
+    /// made again.
+    pub(super) card: Option<(u64, u64, tnl::State)>,
     /// The strings glGetString gives, in the process's memory.
     pub strings: u32,
     pub error: u32,
@@ -230,8 +235,9 @@ pub struct Context {
     pub pack: [u32; 4],
     pub active_unit: u32,
     pub client_unit: u32,
-    /// The lights, the materials and the lighting model.
-    pub lighting: light::Lighting,
+    /// The lights, the materials and the lighting model, stamped as
+    /// the settings are: the card's state is made from both.
+    pub lighting: Stamped<light::Lighting>,
     /// glPushAttrib's stack.
     pub attribs: Vec<attrib::Attrib>,
     /// The current color, texture coordinates and normal.
@@ -673,7 +679,7 @@ crate::state_fields!(Context {
     swap_interval,
     swap_at,
     drawn
-} skip { applied });
+} skip { applied, card });
 crate::state_fields!(State {
     contexts,
     current,

@@ -988,10 +988,18 @@ itself.
 
 `COLORVERTEX_FACES` says which sides take a vertex's colour where a
 material source names one: bit 0 the front, bit 1 the back. The other
-side has its material's colour. A vertex's colours are four bytes:
-an OpenGL driver, whose glColorMaterial takes the current colour as
-numbers, lights the vertices itself where a colour isn't a whole
-number of 255ths.
+side has its material's colour.
+
+The card's lighting is Direct3D's, and an OpenGL driver gets
+OpenGL 1.1's from it except in these, which no game is known to draw
+and a check in the driver would cost every lit draw:
+
+- A vertex's colours are four bytes, so a colour glColorMaterial
+  takes is rounded to a 255th.
+- A normal longer than 1 (a scaled modelview matrix without
+  GL_NORMALIZE) gives a highlight a cosine above 1, which the card
+  takes for 1 and OpenGL raises to the shininess.
+- A vertex with a w of 0 is lit at its x, y and z.
 
 With `SINGLE_COLOUR` 1 the specular sum is worked out whatever
 `SPECULARENABLE` says and added to the diffuse colour before that is
