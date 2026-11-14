@@ -402,6 +402,14 @@ pub fn report_settings(
 
 /// `base` with `settings` over it, those of `KEYS` only, as a profile's
 /// are layered over the configuration's (games.rs's `prepare`).
+///
+/// Reports send the memory the game ran with, set or not, so a
+/// recommendation always has a `memsize`. Where `base` doesn't set it and
+/// the recommended size is the default for the recommended CPU and display
+/// adapter, it stays unset: the machine gets the same size, and saving
+/// the settings writes no `memsize` line that would stop it following a
+/// later change of the CPU or the adapter. Any other recommended size is
+/// set, below the default too, as the game is known to run with it.
 pub fn layer(base: &Settings, settings: &[&Setting], home: Option<&Path>) -> Settings {
     let mut sections: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for s in settings {
@@ -417,7 +425,13 @@ pub fn layer(base: &Settings, settings: &[&Setting], home: Option<&Path>) -> Set
     for (section, lines) in sections {
         text.push_str(&format!("\n[{}]\n{}\n", section, lines.join("\n")));
     }
-    Settings::from_config(&config::parse(&text, Path::new("/"), home))
+    let mut layered = Settings::from_config(&config::parse(&text, Path::new("/"), home));
+    if base.memsize.is_none()
+        && layered.memsize == Some(config::default_memsize(layered.cpu, layered.machine))
+    {
+        layered.memsize = None;
+    }
+    layered
 }
 
 /// How long a program waits for the almanac at most, in the host's time:
@@ -917,6 +931,39 @@ mod tests {
         assert_eq!(layer(&base, &[&cpu], None).memory_mb(), 16);
         let memsize = setting("memsize", "32");
         let layered = layer(&Settings::default(), &[&cpu, &memsize], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (Some(32), 32));
+    }
+
+    /// A recommended memsize that is the default of the recommended CPU
+    /// and display adapter leaves memsize unset; any other is set, below
+    /// the default too; and over a memsize the user set, the
+    /// recommendation's is set as before.
+    #[test]
+    fn a_recommended_default_memory_stays_unset() {
+        let setting = |key: &str, value: &str| Setting {
+            section: "emulator".into(),
+            key: key.into(),
+            value: value.into(),
+        };
+        let cpu = setting("cpu", "pentium_ii");
+        let unset = Settings::default();
+        let layered = layer(&unset, &[&cpu, &setting("memsize", "64")], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (None, 64));
+        let card = setting("machine", "svga_toadforce");
+        let layered = layer(&unset, &[&card, &setting("memsize", "128")], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (None, 128));
+        // The old reports' 16 MB beside a Pentium II: what the game ran with.
+        let layered = layer(&unset, &[&cpu, &setting("memsize", "16")], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (Some(16), 16));
+        let layered = layer(&unset, &[&cpu, &setting("memsize", "128")], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (Some(128), 128));
+
+        // The user's own memsize is replaced by the recommendation's, which
+        // is then set even where it is the default.
+        let own = Settings { memsize: Some(32), ..Settings::default() };
+        let layered = layer(&own, &[&cpu, &setting("memsize", "64")], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (Some(64), 64));
+        let layered = layer(&own, &[&cpu], None);
         assert_eq!((layered.memsize, layered.memory_mb()), (Some(32), 32));
     }
 

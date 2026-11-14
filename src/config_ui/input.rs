@@ -413,18 +413,21 @@ impl ConfigUi {
         self.status = None;
         let memory_mb = self.settings.memory_mb();
         let memory_changed = std::mem::replace(&mut self.memory_mb, memory_mb) != memory_mb;
-        match result {
-            Err(problem) => self.error(problem),
-            Ok(Some(note)) => self.info(note),
-            Ok(None) if item.applies() == Applies::NextStart => {
+        // Another CPU or display adapter while `memsize` isn't set.
+        let memory = (memory_changed && self.settings.memsize.is_none()).then(|| {
+            format!("memory's default is now {} MB from the next start (F2 saves it)", memory_mb)
+        });
+        match (result, memory) {
+            (Err(problem), _) => self.error(problem),
+            // The host's note (a change that waits for the running
+            // program), and the memory's after it.
+            (Ok(Some(note)), Some(memory)) => self.info(format!("{}; the {}", note, memory)),
+            (Ok(Some(note)), None) => self.info(note),
+            (Ok(None), _) if item.applies() == Applies::NextStart => {
                 self.info("Takes effect the next time Rust-DOS starts (F2 saves it)")
             }
-            // Another CPU or display adapter while `memsize` isn't set.
-            Ok(None) if memory_changed && self.settings.memsize.is_none() => self.info(format!(
-                "The memory's default is now {} MB: from the next time Rust-DOS starts (F2 saves it)",
-                memory_mb
-            )),
-            Ok(None) => {}
+            (Ok(None), Some(memory)) => self.info(format!("The {}", memory)),
+            (Ok(None), None) => {}
         }
         // Conflicts between the cards, as the configuration file reports them.
         if self.page == Page::Sound

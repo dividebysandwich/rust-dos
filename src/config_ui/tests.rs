@@ -77,6 +77,8 @@ struct FakeHost {
     reinserted: Vec<u8>,
     /// The program the almanac is asked about.
     almanac: Option<crate::almanac::Program>,
+    /// The note `apply` returns, as the real host's while a program runs.
+    note: Option<String>,
 }
 
 impl FakeHost {
@@ -120,6 +122,7 @@ impl FakeHost {
             synced: vec![],
             reinserted: vec![],
             almanac: None,
+            note: None,
         }
     }
 }
@@ -134,7 +137,7 @@ impl Host for FakeHost {
         if self.no_shaders && settings.shader != Shader::None {
             return Err("CRT shaders need OpenGL 3".to_string());
         }
-        Ok(None)
+        Ok(self.note.clone())
     }
 
     fn mount(&mut self, spec: MountSpec, replace: bool) -> Result<PathBuf, String> {
@@ -517,6 +520,15 @@ fn settings_change_live() {
     pick(&mut ui, &mut host, crate::video::adapter::Adapter::ToadForce.describe());
     assert_eq!(Item::Memsize.value(&ui.settings, None), "128 MB ■■■■■■■■■■■···· (default)");
     assert!(status(&ui).0.contains("default is now 128 MB"), "{:?}", status(&ui));
+    // While a program runs the host says the card waits for it to end
+    // (`pending_note`), and the memory's note follows its own.
+    let running = "Takes effect when the running program ends";
+    host.note = Some(running.to_string());
+    pick(&mut ui, &mut host, crate::video::adapter::Adapter::default().describe());
+    let (note, _) = status(&ui);
+    assert!(note.starts_with(running) && note.contains("default is now 64 MB"), "{:?}", note);
+    host.note = None;
+    pick(&mut ui, &mut host, crate::video::adapter::Adapter::ToadForce.describe());
     // Set by the user, it stays through them, down to what a CPU takes.
     ui.row = ui.items().iter().position(|&i| i == Item::Memsize).unwrap();
     keys(&mut ui, &mut host, &[Left]);

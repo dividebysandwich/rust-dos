@@ -442,16 +442,20 @@ limit, so without a connection it goes on as it would with one:
   With `machine=svga_toadforce` it has 128 MB with any `cpu` (64 MB
   with a 386, which takes no more), as the games that card is for ask
   for it. A `memsize` line sets the memory whatever the `cpu` and the
-  card are, below these sizes too: some DOS programs fail with more
-  than 16 or 32 MB. The settings window shows `(default)` beside a size
-  that isn't set, and saving keeps it out of the file, so it follows a
-  later change of `cpu` or `machine`. The log's `MB of memory` line says
-  which of the two the machine started with. Memory above the first
-  megabyte is extended memory for DOS extenders and XMS; XMS 3.0's 32-bit
-  functions and INT 15h E801h/E820h report all of it, HIMEM's older calls
-  and the CMOS at most 64 MB, as on a real machine. Save states and rewind
-  hold all of it, so they grow with it. Windows 95 with 512 MB may need
-  its file cache limited (`MaxFileCache` in SYSTEM.INI's `[vcache]`).
+  card are, below these sizes too, for a program that runs only with
+  less. The settings window shows `(default)` beside a size that isn't
+  set, and saving keeps it out of the file, so it follows a later
+  change of `cpu` or `machine`. A file that an earlier version's
+  settings window saved with F2 has a `memsize` line (16, unless it was
+  changed), and that line sets the memory: delete it, or press Delete on
+  the memory's row and then F2, for the default. The log's `MB of
+  memory` line says which of the two the machine started with. Memory
+  above the first megabyte is extended memory for DOS extenders and XMS;
+  XMS 3.0's 32-bit functions and INT 15h E801h/E820h report all of it,
+  HIMEM's older calls and the CMOS at most 64 MB, as on a real machine.
+  Save states and rewind hold all of it, so they grow with it. Windows 95
+  with 512 MB may need its file cache limited (`MaxFileCache` in
+  SYSTEM.INI's `[vcache]`).
 * `ems` gives programs expanded memory (LIM EMS 4.0, INT 67h), which
   many games of the early 1990s want: `true` (the default) or `false`.
   As with EMM386, 16 KB pages of extended memory show through a page
@@ -1887,10 +1891,11 @@ it needs it. The cantina scene needs more than the 24 MB allow, so
 DOS/4GW refuses the block (DPMI error 8016h) and the game exits. GOG's
 copy does the same in DOSBox, and the game's `-LOWMEM` switch avoids
 it. The fix changes the 24 to 32 in the launcher as it loads, which the
-20 MB swap file the same setting asks for covers with `memsize`'s
-default 16 MB. The fix was made for GOG's copy, version 1.30: LOLG.EXE
-of 2847 bytes, MD5 `1036beaf32bf4d25de4109d4a245d1a0`, and SETUPG.EXE
-of 2262 bytes, MD5 `6f4b513ea0dcd4af601446bfab178b38`.
+20 MB swap file the same setting asks for covers with 16 MB of memory,
+the default up to a Pentium, or more. The fix was made for GOG's copy,
+version 1.30: LOLG.EXE of 2847 bytes, MD5
+`1036beaf32bf4d25de4109d4a245d1a0`, and SETUPG.EXE of 2262 bytes, MD5
+`6f4b513ea0dcd4af601446bfab178b38`.
 
 MicroProse's DSWAP.EXE checks the install disk with sector reads, and
 PLAYER.EXE checks a buffer the copy protection fills. Neither is needed
