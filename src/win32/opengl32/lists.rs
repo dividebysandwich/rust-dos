@@ -49,9 +49,12 @@
 //! stand for them (inside a glBegin that is still open, and under the
 //! 3D trace, which lists every call).
 //!
-//! Lists belong to a group of contexts (`Shared`): a context starts
+//! Lists belong to a group of contexts (`Group`): a context starts
 //! with a group of its own, and wglShareLists puts a context into
-//! another's. A group goes with the last context that has it.
+//! another's. A group goes with the last context that has it. The
+//! group has the contexts' texture objects too (`texture.rs`), which
+//! is all that contexts of OpenGL 1.1 share: the lists and the
+//! textures.
 
 use super::super::kernel32;
 use super::super::stubs::{self, Api};
@@ -59,7 +62,7 @@ use super::exports::APIS;
 use super::texture::{self, GL_TEXTURE_2D, GL_TEXTURE0, IMAGE_MOST};
 use super::{
     Array, CAP_COLOR_MATERIAL, Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE,
-    GL_OUT_OF_MEMORY, State, UNITS, ctx, current, draw, error, imm, matrix, pname, state,
+    GL_OUT_OF_MEMORY, State, Texture, UNITS, ctx, current, draw, error, imm, matrix, pname, state,
 };
 use crate::cpu::Cpu;
 use std::collections::{BTreeMap, HashMap};
@@ -180,14 +183,24 @@ impl Own {
 /// The lists of a group, by their names.
 type Names = BTreeMap<u32, Arc<List>>;
 
-/// The lists of every context: the groups by their numbers, the last
-/// number given, and how many contexts have a list open (`call`
+/// What the contexts of a group share: its number, the display lists
+/// by their names, and the texture objects but the one named 0, which
+/// is each context's own.
+#[derive(Clone, Debug, Default)]
+struct Group {
+    id: u32,
+    lists: Names,
+    textures: Vec<Texture>,
+}
+
+/// The lists and textures of every context: the groups, the last
+/// group's number, and how many contexts have a list open (`call`
 /// records nothing while it is 0). `depth` counts the lists running
 /// inside one another, and `replaying` is the function a replay is
 /// calling; both are set only inside one call of the program's.
 #[derive(Clone, Debug, Default)]
 pub struct Shared {
-    groups: Vec<(u32, Names)>,
+    groups: Vec<Group>,
     last_group: u32,
     compiling: u32,
     depth: u32,
@@ -199,6 +212,13 @@ impl Shared {
     /// function it stands for by the stub that called it.
     pub fn replaying(&self) -> Option<u16> {
         self.replaying
+    }
+
+    /// The textures of the group `group`: none for the group a context
+    /// that made no list or texture yet has.
+    pub fn textures(&self, group: u32) -> &[Texture] {
+        let found = self.groups.iter().find(|g| g.id == group);
+        found.map_or(&[], |g| &g.textures)
     }
 }
 
@@ -216,6 +236,11 @@ crate::state_fields!(Own {
     open,
     scratch,
     scratch_size
+});
+crate::state_fields!(Group {
+    id,
+    lists,
+    textures
 });
 crate::state_fields!(Shared {
     groups,
@@ -1188,49 +1213,89 @@ fn execute(cpu: &mut Cpu, name: u32) {
 
 // The groups.
 
+/// The group of the context at `index`, if it has one yet.
+fn group(s: &State, index: usize) -> Option<&Group> {
+    let id = s.contexts.get(index)?.as_ref()?.lists.group;
+    s.lists.groups.iter().find(|g| g.id == id)
+}
+
+/// The group of the context at `index`, a new one of its own if it
+/// has none.
+fn group_mut(s: &mut State, index: usize) -> Option<&mut Group> {
+    let own = &mut s.contexts.get_mut(index)?.as_mut()?.lists;
+    if own.group == 0 {
+        s.lists.last_group += 1;
+        own.group = s.lists.last_group;
+        s.lists.groups.push(Group {
+            id: own.group,
+            ..Group::default()
+        });
+    }
+    let id = own.group;
+    s.lists.groups.iter_mut().find(|g| g.id == id)
+}
+
 /// The lists the context at `index` has, if its group has any yet.
 fn names(s: &State, index: usize) -> Option<&Names> {
-    let group = s.contexts.get(index)?.as_ref()?.lists.group;
-    let found = s.lists.groups.iter().find(|g| g.0 == group)?;
-    Some(&found.1)
+    Some(&group(s, index)?.lists)
 }
 
 /// The lists the context at `index` has, in a new group of its own if
 /// it has none.
 fn names_mut(s: &mut State, index: usize) -> Option<&mut Names> {
-    let own = &mut s.contexts.get_mut(index)?.as_mut()?.lists;
-    if own.group == 0 {
-        s.lists.last_group += 1;
-        own.group = s.lists.last_group;
-        s.lists.groups.push((own.group, Names::new()));
+    Some(&mut group_mut(s, index)?.lists)
+}
+
+/// The textures of the group of the context at `index`, to change, in
+/// a new group of its own if it has none. Every context of the group
+/// gets a new stamp: the textures are part of what its draws are made
+/// with, and aren't in its settings.
+pub fn textures_mut(s: &mut State, index: usize) -> Option<&mut Vec<Texture>> {
+    let id = group_mut(s, index)?.id;
+    let sharing = s.contexts.iter_mut().flatten();
+    for c in sharing.filter(|c| c.lists.group == id) {
+        c.restamp();
     }
-    let group = own.group;
-    let found = s.lists.groups.iter_mut().find(|g| g.0 == group)?;
-    Some(&mut found.1)
+    let group = s.lists.groups.iter_mut().find(|g| g.id == id)?;
+    Some(&mut group.textures)
+}
+
+/// Count the contexts that have a list open again.
+fn count_open(s: &mut State) {
+    let open = s.contexts.iter().flatten().filter(|c| c.lists.open.is_some());
+    s.lists.compiling = open.count() as u32;
 }
 
 /// The contexts changed: the groups no context has go, and the count
-/// of open lists is taken again.
-pub fn sweep(s: &mut State) {
-    let contexts = || s.contexts.iter().flatten();
-    let used: Vec<u32> = contexts().map(|c| c.lists.group).collect();
-    let compiling = contexts().filter(|c| c.lists.open.is_some()).count() as u32;
-    s.lists.groups.retain(|g| used.contains(&g.0));
-    s.lists.compiling = compiling;
+/// of open lists is taken again. The textures of the groups that went
+/// are given back, with their surfaces still held.
+pub fn sweep(s: &mut State) -> Vec<Texture> {
+    let used: Vec<u32> = s.contexts.iter().flatten().map(|c| c.lists.group).collect();
+    let mut gone = Vec::new();
+    s.lists.groups.retain_mut(|g| {
+        let keep = used.contains(&g.id);
+        if !keep {
+            gone.append(&mut g.textures);
+        }
+        keep
+    });
+    count_open(s);
+    gone
 }
 
 /// The context `c` was deleted: its memory for replays is freed, and
-/// its lists go unless another context shares them.
+/// its lists and textures go unless another context shares them.
 pub fn context_gone(cpu: &mut Cpu, c: &Context) {
     if c.lists.scratch != 0 {
         kernel32::free_pages(cpu, c.lists.scratch);
     }
-    sweep(state(cpu));
+    let gone = sweep(state(cpu));
+    texture::release(cpu, &gone);
 }
 
-/// wglShareLists: the context at `to` takes the lists of the one at
-/// `from`. As Windows has it, it fails when `to` has lists of its
-/// own; contexts of two processes share nothing.
+/// wglShareLists: the context at `to` takes the lists and textures of
+/// the one at `from`. As Windows has it, it fails when `to` has lists
+/// or textures of its own; contexts of two processes share nothing.
 pub fn share(cpu: &mut Cpu, from: usize, to: usize) -> bool {
     let s = state(cpu);
     let pid = |s: &State, i: usize| s.contexts.get(i).and_then(Option::as_ref).map(|c| c.pid);
@@ -1240,16 +1305,19 @@ pub fn share(cpu: &mut Cpu, from: usize, to: usize) -> bool {
     if from == to {
         return true;
     }
-    if names(s, to).is_some_and(|n| !n.is_empty()) {
+    if group(s, to).is_some_and(|g| !g.lists.is_empty() || !g.textures.is_empty()) {
         return false;
     }
-    if names_mut(s, from).is_none() {
+    if group_mut(s, from).is_none() {
         return false;
     }
     let group = s.contexts[from].as_ref().map_or(0, |c| c.lists.group);
     if let Some(c) = &mut s.contexts[to] {
         c.lists.group = group;
+        // It draws with other textures from here on.
+        c.restamp();
     }
+    // The group it had goes, with neither lists nor textures in it.
     sweep(s);
     true
 }
@@ -1291,7 +1359,7 @@ pub fn new_list(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 ..Open::default()
             });
         }
-        sweep(s);
+        count_open(s);
         return Some(0);
     };
     error(cpu, e);
@@ -1323,7 +1391,7 @@ pub fn end_list(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     if let Some(names) = names_mut(s, index) {
         names.insert(open.name, Arc::new(open.list));
     }
-    sweep(s);
+    count_open(s);
     Some(0)
 }
 

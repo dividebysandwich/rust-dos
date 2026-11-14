@@ -44,8 +44,8 @@ use super::texture::{self, GL_ADD, GL_CLAMP, GL_DECAL, GL_LINEAR, GL_REPLACE};
 use super::{
     Array, CAP_ALPHA_TEST, CAP_BLEND, CAP_COLOR_MATERIAL, CAP_CULL_FACE, CAP_DEPTH_TEST,
     CAP_DITHER, CAP_FOG, CAP_LIGHTING, CAP_NORMALIZE, CAP_POLYGON_OFFSET_FILL, CAP_SCISSOR_TEST,
-    Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, ImmVertex, Settings, UNITS,
-    ctx,
+    Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, ImmVertex, Settings,
+    Texture, UNITS, ctx,
     current, error, signed_unit, state,
 };
 use crate::cpu::Cpu;
@@ -265,8 +265,9 @@ fn stage_states(mode: u32, t: &super::Texture) -> Vec<(u32, u32)> {
 
 /// A context's state as its Direct3D device's: what `put` puts on the
 /// device before a draw. Made from what the context's draws are made
-/// with and nothing else, so it holds while that has its stamp
-/// (`applied_of`).
+/// with and the textures of its group, which give the context a new
+/// stamp when one changes, so it holds while the context has its
+/// stamp (`applied_of`).
 #[derive(Clone, Debug, Default)]
 pub struct Applied {
     inner: u32,
@@ -316,18 +317,19 @@ impl Applied {
 /// None when its viewport is off its buffers and nothing is drawn. It
 /// is made once for each stamp of the context: a draw that follows
 /// another with nothing set between them finds it made.
-fn applied_of(c: &mut Context) -> Option<&Applied> {
+fn applied_of<'a>(c: &'a mut Context, shared: &[Texture]) -> Option<&'a Applied> {
     let stamp = c.stamp();
     if c.applied.as_ref().is_none_or(|(made, _)| *made != stamp) {
-        let made = applied(c);
+        let made = applied(c, shared);
         c.applied = Some((stamp, made));
     }
     c.applied.as_ref()?.1.as_ref()
 }
 
-/// The device's state for drawing what a context draws with `c`: None
-/// when its viewport is off its buffers, and nothing is drawn.
-fn applied(c: &Settings) -> Option<Applied> {
+/// The device's state for drawing what a context draws with `c` and
+/// the textures `shared` of its group: None when its viewport is off
+/// its buffers, and nothing is drawn.
+fn applied(c: &Settings, shared: &[Texture]) -> Option<Applied> {
     let (viewport, fit) = super::wgl::inner_viewport(c)?;
     let on = |cap: u32| c.caps & cap != 0;
     let depth = on(CAP_DEPTH_TEST);
@@ -396,7 +398,7 @@ fn applied(c: &Settings) -> Option<Applied> {
         if !c.texture_2d[unit] {
             continue;
         }
-        let Some(t) = texture::texture(c, c.bound[unit]) else {
+        let Some(t) = texture::find(c, shared, c.bound[unit]) else {
             continue;
         };
         if t.iface == 0 || t.defined & 1 == 0 {
@@ -891,12 +893,13 @@ fn draw(
     };
     let vertices = sided.as_deref().unwrap_or(vertices);
     let stamp = c.stamp();
+    let shared = st.lists.textures(c.lists.group);
     // The draws that wait take this one if they are the context's and
     // have its state: its stamp, or the state made anew and equal.
     if let Some(w) = &mut st.waiting
         && w.context == index as u32
         && w.vertices.len() + vertices.len() <= WAITING_VERTICES
-        && (w.stamp == stamp || applied_of(c).is_some_and(|a| a.same(&w.applied)))
+        && (w.stamp == stamp || applied_of(c, shared).is_some_and(|a| a.same(&w.applied)))
     {
         let first = w.vertices.len() as u32;
         w.stamp = stamp;
@@ -911,7 +914,7 @@ fn draw(
         c.drawn = true;
         return;
     }
-    let Some(applied) = applied_of(c).cloned() else {
+    let Some(applied) = applied_of(c, shared).cloned() else {
         return;
     };
     c.drawn = true;

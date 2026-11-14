@@ -273,6 +273,12 @@ impl Context {
     pub fn stamp(&self) -> u64 {
         Stamped::stamp(&self.settings)
     }
+
+    /// Something its draws are made with that isn't in its settings
+    /// changed: a texture of its group (`lists::textures_mut`).
+    pub fn restamp(&mut self) {
+        let _: &mut Settings = &mut self.settings;
+    }
 }
 
 /// What a context's draws are made with: its buffers, matrices,
@@ -338,7 +344,10 @@ pub struct Settings {
     /// The texture bound to each unit, by its name (0 for the default
     /// texture).
     pub bound: [u32; UNITS],
-    pub textures: Vec<Texture>,
+    /// The default texture, named 0, which is the context's own. The
+    /// named ones are its group's, which wglShareLists gives another
+    /// context too (`lists::Shared`).
+    pub default_texture: Texture,
 }
 
 /// OpenGL's state: the system's.
@@ -480,6 +489,7 @@ fn new_context(pid: u32, window: u32, format: u32) -> Context {
         draw_buffer: state::GL_BACK_BUFFER,
         read_buffer: state::GL_BACK_BUFFER,
         env_mode: [texture::GL_MODULATE; UNITS],
+        default_texture: texture::new(0),
         caps: CAP_DITHER,
         ..Settings::default()
     };
@@ -574,6 +584,8 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32) {
                 .is_some_and(Option::is_some)
     });
     s.contexts = contexts;
+    // The surfaces of the textures that go with them are DirectDraw's
+    // objects of the process, which its own `process_ended` takes.
     lists::sweep(s);
 }
 
@@ -647,7 +659,7 @@ crate::state_fields!(Settings {
     env_mode,
     env_color,
     bound,
-    textures
+    default_texture
 });
 crate::state_fields!(Context {
     settings,

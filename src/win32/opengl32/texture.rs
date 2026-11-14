@@ -17,8 +17,8 @@ use super::super::ddraw::surface::{
 };
 use super::super::ddraw::{self, Format, V_SURFACE7};
 use super::{
-    Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, GL_OUT_OF_MEMORY,
-    Texture, UNITS, ctx, error, f, max_texture_size, read_floats, state,
+    GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, GL_OUT_OF_MEMORY, Settings, State,
+    Texture, UNITS, ctx, current, error, f, lists, max_texture_size, read_floats, state,
 };
 use super::wgl::PackedPixels;
 use crate::cpu::Cpu;
@@ -348,36 +348,71 @@ fn encode(rgba: [u8; 4], base: Base) -> u16 {
     }
 }
 
-/// The texture named `name` of the context `c`, made if it isn't there
-/// (the default texture, 0, and names glGenTextures gave or not).
-fn texture_mut(c: &mut Context, name: u32) -> &mut Texture {
-    match c.textures.iter().position(|t| t.name == name) {
-        Some(i) => &mut c.textures[i],
-        None => {
-            c.textures.push(Texture {
-                name,
-                min_filter: GL_NEAREST_MIPMAP_LINEAR,
-                mag_filter: GL_LINEAR,
-                wrap_s: GL_REPEAT,
-                wrap_t: GL_REPEAT,
-                ..Texture::default()
-            });
-            c.textures.last_mut().expect("just pushed")
-        }
+// Where the textures are. The one named 0, the default texture, is a
+// context's own (`Settings::default_texture`). The named ones belong
+// to the context's group, with its display lists (`lists::Shared`): a
+// context starts with a group of its own, and after wglShareLists two
+// contexts have the same textures under the same names, as contexts
+// of OpenGL 1.1 that share their lists do. A texture's surfaces are of
+// the DirectDraw object of the context that gave it its image.
+
+/// A texture named `name` as a new one is: no image, and OpenGL's
+/// filters and wrap modes.
+pub(super) fn new(name: u32) -> Texture {
+    Texture {
+        name,
+        min_filter: GL_NEAREST_MIPMAP_LINEAR,
+        mag_filter: GL_LINEAR,
+        wrap_s: GL_REPEAT,
+        wrap_t: GL_REPEAT,
+        ..Texture::default()
     }
 }
 
 const GL_NEAREST_MIPMAP_LINEAR: u32 = 0x2702;
 
-/// The texture bound to the active unit.
-fn bound(c: &mut Context) -> &mut Texture {
-    let name = c.bound[c.active_unit as usize];
-    texture_mut(c, name)
+/// The texture named `name` of a context with the settings `c` whose
+/// group's textures are `shared`, as it is now.
+pub fn find<'a>(c: &'a Settings, shared: &'a [Texture], name: u32) -> Option<&'a Texture> {
+    if name == 0 {
+        return Some(&c.default_texture);
+    }
+    shared.iter().find(|t| t.name == name)
 }
 
-/// The texture `name` of the current context, as it is now.
-pub fn texture(c: &super::Settings, name: u32) -> Option<&Texture> {
-    c.textures.iter().find(|t| t.name == name)
+/// Whether the context at `index` has a texture named `name`.
+fn exists(s: &State, index: usize, name: u32) -> bool {
+    let Some(Some(c)) = s.contexts.get(index) else {
+        return false;
+    };
+    find(c, s.lists.textures(c.lists.group), name).is_some()
+}
+
+/// The texture named `name` of the context at `index`, to change, made
+/// if it isn't there (names glGenTextures gave or not). Every context
+/// that has the texture draws with it as it is after the change.
+fn texture_mut(s: &mut State, index: usize, name: u32) -> Option<&mut Texture> {
+    if name == 0 {
+        return Some(&mut s.contexts.get_mut(index)?.as_mut()?.default_texture);
+    }
+    let textures = lists::textures_mut(s, index)?;
+    let at = match textures.iter().position(|t| t.name == name) {
+        Some(at) => at,
+        None => {
+            textures.push(new(name));
+            textures.len() - 1
+        }
+    };
+    textures.get_mut(at)
+}
+
+/// The texture bound to the active unit of the current context.
+fn bound(cpu: &mut Cpu) -> Option<&mut Texture> {
+    let (index, _) = current(cpu)?;
+    let s = state(cpu);
+    let c = s.contexts.get(index)?.as_ref()?;
+    let name = c.bound[c.active_unit as usize];
+    texture_mut(s, index, name)
 }
 
 /// glGenTextures(n, textures).
@@ -393,15 +428,18 @@ pub fn gen_textures(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if n == 0 || at == 0 || !cpu.bus.guest_probe(at, n as usize * 4, true) {
         return Some(0);
     }
-    let Some(c) = ctx(cpu) else {
+    let Some((index, _)) = current(cpu) else {
+        return Some(0);
+    };
+    let Some(textures) = lists::textures_mut(state(cpu), index) else {
         return Some(0);
     };
     let mut names = Vec::with_capacity(n as usize);
-    let mut next = c.textures.iter().map(|t| t.name).max().unwrap_or(0);
+    let mut next = textures.iter().map(|t| t.name).max().unwrap_or(0);
     for _ in 0..n {
         next += 1;
         names.push(next);
-        texture_mut(c, next);
+        textures.push(new(next));
     }
     for (i, name) in names.into_iter().enumerate() {
         cpu.bus.guest_write_32(at + 4 * i as u32, name);
@@ -417,7 +455,9 @@ fn release_surface(cpu: &mut Cpu, t: &Texture) {
 }
 
 /// glDeleteTextures(n, textures): the units they are bound to have the
-/// default texture again.
+/// default texture again. The textures are gone for every context that
+/// had them; a unit of another context that one was bound to draws
+/// untextured until it binds a texture again.
 pub fn delete_textures(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [n, at] = args[..] else {
         return Some(0);
@@ -434,33 +474,37 @@ pub fn delete_textures(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         .map(|i| cpu.bus.guest_read_32(at + 4 * i))
         .collect();
     let mut gone = Vec::new();
-    if let Some(c) = ctx(cpu) {
-        for name in names.into_iter().filter(|&n| n != 0) {
-            if let Some(i) = c.textures.iter().position(|t| t.name == name) {
-                gone.push(c.textures.remove(i));
-            }
-            for b in c.bound.iter_mut() {
-                if *b == name {
-                    *b = 0;
-                }
+    if let Some((index, _)) = current(cpu) {
+        let s = state(cpu);
+        let named = |name: u32| name != 0 && names.contains(&name);
+        if let Some(textures) = lists::textures_mut(s, index) {
+            gone.extend(textures.extract_if(.., |t| named(t.name)));
+        }
+        if let Some(Some(c)) = s.contexts.get_mut(index) {
+            for b in c.bound.iter_mut().filter(|b| named(**b)) {
+                *b = 0;
             }
         }
     }
-    for t in &gone {
-        release_surface(cpu, t);
-    }
+    release(cpu, &gone);
     Some(0)
 }
 
-/// Let go of the textures of the context at `index`.
-pub fn release_all(cpu: &mut Cpu, index: usize) {
-    let textures = match state(cpu).contexts.get_mut(index) {
-        Some(Some(c)) => std::mem::take(&mut c.textures),
-        _ => return,
-    };
-    for t in &textures {
+/// Let go of the surfaces of `textures`, which no context has any
+/// more.
+pub fn release(cpu: &mut Cpu, textures: &[Texture]) {
+    for t in textures {
         release_surface(cpu, t);
     }
+}
+
+/// Let go of the default texture of the context at `index`.
+pub fn release_default(cpu: &mut Cpu, index: usize) {
+    let texture = match state(cpu).contexts.get_mut(index) {
+        Some(Some(c)) => std::mem::replace(&mut c.default_texture, new(0)),
+        _ => return,
+    };
+    release_surface(cpu, &texture);
 }
 
 /// glBindTexture(target, texture).
@@ -471,20 +515,28 @@ pub fn bind_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         return Some(0);
     }
-    if let Some(c) = ctx(cpu) {
+    let Some((index, _)) = current(cpu) else {
+        return Some(0);
+    };
+    let s = state(cpu);
+    if let Some(Some(c)) = s.contexts.get_mut(index) {
         let unit = c.active_unit as usize;
         c.bound[unit] = args[1];
-        texture_mut(c, args[1]);
+    }
+    // A name that has no texture yet gets one. One that has is left
+    // as it is, and so are the contexts that share it.
+    if !exists(s, index, args[1]) {
+        texture_mut(s, index, args[1]);
     }
     Some(0)
 }
 
 /// glIsTexture(texture).
 pub fn is_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let Some(c) = ctx(cpu) else {
+    let Some((index, _)) = current(cpu) else {
         return Some(0);
     };
-    Some((args[0] != 0 && texture(c, args[0]).is_some()) as u32)
+    Some((args[0] != 0 && exists(state(cpu), index, args[0])) as u32)
 }
 
 /// The levels a texture of `width` by `height` has, down to 1 by 1.
@@ -569,6 +621,16 @@ fn make_surface(
         return None;
     }
     ddraw::add_ref(cpu, iface);
+    // The surface holds its DirectDraw object, as one IDirectDraw7's
+    // CreateSurface gave does: a texture another context shares keeps
+    // its texels when the context that made it is deleted.
+    let creator = ddraw::state(cpu).object(ids[0]).map_or(0, |o| o.creator);
+    if creator != 0
+        && ddraw::add_ref(cpu, creator) != 0
+        && let Some(o) = ddraw::state(cpu).object_mut(ids[0])
+    {
+        o.holds_creator = true;
+    }
     Some((ids, iface))
 }
 
@@ -633,10 +695,12 @@ fn define(cpu: &mut Cpu, img: &Image, texels: Option<Vec<[u8; 4]>>) {
         return;
     }
     let alpha = has_alpha(base);
-    let Some(c) = ctx(cpu) else {
+    let Some(dd) = ctx(cpu).map(|c| c.dd) else {
         return;
     };
-    let (dd, t) = (c.dd, bound(c).clone());
+    let Some(t) = bound(cpu).cloned() else {
+        return;
+    };
     let unpacked = match texels {
         Some(t) => Some(t),
         None if img.at == 0 => None,
@@ -700,8 +764,8 @@ fn define(cpu: &mut Cpu, img: &Image, texels: Option<Vec<[u8; 4]>>) {
 
 /// Put `t` back as the bound texture of the active unit.
 fn store(cpu: &mut Cpu, t: Texture) {
-    if let Some(c) = ctx(cpu) {
-        *bound(c) = t;
+    if let Some(bound) = bound(cpu) {
+        *bound = t;
     }
 }
 
@@ -785,7 +849,9 @@ pub fn tex_sub_image_2d(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     };
     let unpack_state = c.unpack;
-    let t = bound(c).clone();
+    let Some(t) = bound(cpu).cloned() else {
+        return Some(0);
+    };
     let Some(&id) = t.levels.get(level as usize) else {
         error(cpu, GL_INVALID_OPERATION);
         return Some(0);
@@ -908,10 +974,9 @@ pub fn copy_tex_sub_image_2d(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(texels) = read_frame(cpu, x as i32, y as i32, width, height) else {
         return Some(0);
     };
-    let Some(c) = ctx(cpu) else {
+    let Some(t) = bound(cpu).cloned() else {
         return Some(0);
     };
-    let t = bound(c).clone();
     let Some(&id) = t.levels.get(level as usize) else {
         error(cpu, GL_INVALID_OPERATION);
         return Some(0);
@@ -928,10 +993,9 @@ fn parameter(cpu: &mut Cpu, target: u32, p: u32, v: f32) {
         error(cpu, GL_INVALID_ENUM);
         return;
     }
-    let Some(c) = ctx(cpu) else {
+    let Some(t) = bound(cpu) else {
         return;
     };
-    let t = bound(c);
     let e = v as u32;
     let ok = match p {
         GL_TEXTURE_MIN_FILTER => {
@@ -1000,10 +1064,30 @@ pub fn tex_parameteriv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
+/// glPopAttrib's textures: each of `params` is a texture's name and
+/// the filters and wrap modes it had at the push, which the texture
+/// of that name has again if it is still there.
+pub fn restore_params(cpu: &mut Cpu, params: &[[u32; 5]]) {
+    let Some((index, _)) = current(cpu) else {
+        return;
+    };
+    let s = state(cpu);
+    for &[name, min, mag, wrap_s, wrap_t] in params {
+        if !exists(s, index, name) {
+            continue;
+        }
+        if let Some(t) = texture_mut(s, index, name) {
+            t.min_filter = min;
+            t.mag_filter = mag;
+            t.wrap_s = wrap_s;
+            t.wrap_t = wrap_t;
+        }
+    }
+}
+
 /// The bound texture's parameter `p`.
 fn get_parameter(cpu: &mut Cpu, p: u32) -> Option<f32> {
-    let c = ctx(cpu)?;
-    let t = bound(c);
+    let t = bound(cpu)?;
     let v = match p {
         GL_TEXTURE_MIN_FILTER => t.min_filter,
         GL_TEXTURE_MAG_FILTER => t.mag_filter,
@@ -1042,8 +1126,7 @@ pub fn get_tex_parameteriv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// The bound texture's level parameter `p` of `level`.
 fn level_parameter(cpu: &mut Cpu, level: u32, p: u32) -> Option<f32> {
-    let c = ctx(cpu)?;
-    let t = bound(c).clone();
+    let t = bound(cpu)?.clone();
     let defined = t.defined & 1 << level.min(31) != 0;
     let (w, h) = if defined {
         ((t.width >> level).max(1), (t.height >> level).max(1))
