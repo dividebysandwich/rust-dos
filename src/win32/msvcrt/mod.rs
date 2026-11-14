@@ -234,6 +234,9 @@ const S_LOCALE: u32 = 0x38;
 const S_ABNORMAL: u32 = 0x3C;
 /// The handler `_set_new_handler` set.
 const S_NEW_HANDLER: u32 = 0x40;
+/// LC_CTYPE's locale (0 "C", 1 the system's), which the multibyte and
+/// wide characters convert by, whatever the other categories are.
+const S_CTYPE: u32 = 0x44;
 const S_SIGNALS: u32 = 0x80;
 /// The locale's names and `lconv`, and the texts it points to
 /// (`startup.rs`).
@@ -451,13 +454,34 @@ fn varargs(cpu: &Cpu, fixed: u32) -> u32 {
     cpu.esp().wrapping_add(4 + 4 * fixed)
 }
 
-/// The ANSI code page's character of `byte`, and the other way.
-fn widen(byte: u8) -> u16 {
-    super::convert::CodePage::Ansi.char(byte)
+/// How the multibyte and wide characters of the locale the program set
+/// (`setlocale`) convert, as `mbtowc` and `wctomb` do: by the system's
+/// ANSI code page once `setlocale` picked the system's locale for
+/// LC_CTYPE (LC_ALL or LC_CTYPE itself). The "C" locale has no code page:
+/// its bytes are the first 256 characters, and a character above them
+/// has no byte (#909).
+#[derive(Clone, Copy)]
+struct Conv(Option<super::nls::CodePage>);
+
+impl Conv {
+    fn widen(self, byte: u8) -> u16 {
+        match self.0 {
+            Some(page) => page.char(byte),
+            None => byte as u16,
+        }
+    }
+
+    fn narrow(self, c: u16) -> Option<u8> {
+        match self.0 {
+            Some(page) => page.byte(c),
+            None => u8::try_from(c).ok(),
+        }
+    }
 }
 
-fn narrow(c: u16) -> Option<u8> {
-    super::convert::CodePage::Ansi.byte(c)
+/// The conversions of the LC_CTYPE locale the program set.
+fn conv(cpu: &mut Cpu) -> Conv {
+    Conv((state(cpu, S_CTYPE) != 0).then(|| super::nls::ansi(cpu)))
 }
 
 /// The running thread's id.
@@ -838,7 +862,8 @@ fn init(bus: &mut Bus, process: &mut super::Process) -> Option<()> {
     w.bytes(var_at(V_WCTYPE), &wctype)?;
     w.u32(var_at(V_PWCTYPE), var_at(V_WCTYPE))?;
     w.u32(var_at(V_MB_CUR_MAX), 1)?;
-    w.bytes(var_at(V_MBCTYPE), &mbcs::table(1252).unwrap())?;
+    let acp = super::nls::of(w.bus.win32.os_locale).ansi;
+    w.bytes(var_at(V_MBCTYPE), &mbcs::table(acp).unwrap())?;
     let casemap: Vec<u8> = (0..=255u8)
         .map(|c| match c {
             b'a'..=b'z' => c - 32,
@@ -876,7 +901,8 @@ fn init(bus: &mut Bus, process: &mut super::Process) -> Option<()> {
     w.bytes(var_at(V_HUGE), &f64::INFINITY.to_le_bytes())?;
     w.bytes(var_at(V_LC_TIME_C), &strftime::lc_time_c(var_at(V_LC_TIME_C)))?;
     w.u32(state_at(S_ATEXIT), 0)?;
-    w.u32(state_at(S_MBCP), 1252)?;
+    let acp = super::nls::of(w.bus.win32.os_locale).ansi;
+    w.u32(state_at(S_MBCP), acp)?;
     cxx::init(&mut w)?;
 
     // The command line, the program's path, the arguments and the

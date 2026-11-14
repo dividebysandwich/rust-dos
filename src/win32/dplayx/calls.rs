@@ -141,14 +141,14 @@ fn provider_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let Some(&(guid, name)) = PROVIDERS.get(next) else {
         return Next::Done(DP_OK);
     };
-    let wide = t.var(WIDE) != 0;
+    let chars = guest::Chars::of(cpu, t.var(WIDE) != 0);
     let (callback, context) = (t.var(CALLBACK), t.var(CONTEXT));
     let name: Vec<u16> = name.encode_utf16().collect();
     let at = t.scratch;
     guid.write(cpu, at);
     if t.var(KIND) == PROVIDER_LIST {
         // (GUID, name, major version, minor version, context).
-        let text = guest::str_bytes(&name, wide);
+        let text = guest::str_bytes(&name, chars);
         cpu.bus.guest_write_bytes(at + 16, &text);
         let args = [
             at,
@@ -163,7 +163,7 @@ fn provider_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let address = super::address::of_provider(&guid);
     let name_at = at + 16 + address.len() as u32;
     cpu.bus.guest_write_bytes(at + 16, &address);
-    let name = guest::name_blob(&Some(name), &None, wide);
+    let name = guest::name_blob(&Some(name), &None, chars);
     name.write(cpu, name_at);
     let args = [
         at,
@@ -221,19 +221,20 @@ fn session_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         return Next::call(callback, &args, 2);
     };
     if version == 1 {
-        let bytes = guest::desc1(&found.info);
+        let bytes = guest::desc1(&found.info, crate::win32::nls::ansi(cpu));
         cpu.bus.guest_write_bytes(desc_at, &bytes);
         return Next::call(callback, &[desc_at, context, timeout_at, 0], 1);
     }
     let mut blob = Blob::default();
-    guest::desc2(&mut blob, &found.info, &[], t.var(WIDE) != 0);
+    let chars = guest::Chars::of(cpu, t.var(WIDE) != 0);
+    guest::desc2(&mut blob, &found.info, &[], chars);
     if blob.len() > 4096 - 8 {
         blob = Blob::default();
         let info = super::session::Info {
             name: None,
             ..found.info.clone()
         };
-        guest::desc2(&mut blob, &info, &[], false);
+        guest::desc2(&mut blob, &info, &[], chars);
     }
     blob.write(cpu, desc_at);
     Next::call(callback, &[desc_at, timeout_at, 0, context], 1)
@@ -265,8 +266,9 @@ fn player_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         let at = t.scratch;
         if t.var(VERSION) == 1 {
             // (id, short name, long name, flags, context), ANSI.
-            let short = guest::name1(&e.short);
-            let long = guest::name1(&e.long);
+            let page = crate::win32::nls::ansi(cpu);
+            let short = guest::name1(&e.short, page);
+            let long = guest::name1(&e.long, page);
             let (short, long) = (
                 &short[..short.len().min(2047)],
                 &long[..long.len().min(2047)],
@@ -278,9 +280,10 @@ fn player_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             return Next::call(callback, &[item, at, at + 2048, flags, context], 1);
         }
         // (id, player type, name, flags, context).
-        let mut name = guest::name_blob(&e.short, &e.long, t.var(WIDE) != 0);
+        let chars = guest::Chars::of(cpu, t.var(WIDE) != 0);
+        let mut name = guest::name_blob(&e.short, &e.long, chars);
         if name.len() > 4096 {
-            name = guest::name_blob(&None, &None, false);
+            name = guest::name_blob(&None, &None, chars);
         }
         name.write(cpu, at);
         let kind = (!e.group) as u32;

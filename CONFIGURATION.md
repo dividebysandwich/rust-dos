@@ -274,21 +274,28 @@ limit, so without a connection it goes on as it would with one:
   recompiler needs an x86-64 or ARM64 host; on others and in the browser
   the interpreter runs everything. `--core` overrides it. See
   [docs/dynrec.md](docs/dynrec.md).
-* `fpu` is how the FPU adds and subtracts: `exact` (the default) on 80
-  bits, as a real 387 does, or `fast` on the host's 64-bit doubles, as
-  it multiplies and divides anyway. `fast` saves host CPU in programs that
-  compute a lot with the FPU (Quake), on both cores, but isn't exact:
-  sums can differ from a real machine's in the last bits, they are always
-  rounded to nearest whatever the control word says, and FXCH keeps only
-  the doubles of the registers it exchanges (a value loaded as 80 bits
-  loses its last bits there). Saved states load in either mode. In both,
-  products, quotients, square roots and the transcendental functions are
-  the doubles', so they keep 53 bits of significand where a 387 keeps 64,
-  rounded to nearest whatever the control word says, and the control
-  word's precision field isn't used (a program that sets it to 53 bits,
-  as Win32 programs built with MSVC do, gets close to what a 387
-  gives). Loads, stores, integer conversions, compares and FRNDINT use
-  all 80 bits.
+* `fpu` is how the FPU adds and subtracts: `exact` (the default) close to
+  what a real 387 does, or `fast` on the host's 64-bit doubles, as it
+  multiplies and divides anyway. `exact` adds on 80 bits where the control
+  word asks for 64 bits of precision, which DOS programs run with, and
+  rounds a sum of two doubles to 53 or 24 bits where the control word asks
+  for those and rounds to nearest, which Win32 programs run with (the C
+  runtime sets 53 bits, Direct3D 24). Under the other roundings, and with an
+  operand that has more bits than a double, a sum is the 80 bits' at any
+  precision, and the 80 bits drop the bits shifted out of the significand
+  whatever the rounding control says. `fast` saves host CPU in programs that
+  compute a lot with the FPU at 64 bits of precision (Quake), on both cores,
+  but isn't exact: sums can differ from a real machine's in the last bits,
+  they are always rounded to nearest at 53 bits whatever the control word
+  says, and FXCH keeps only the doubles of the registers it exchanges (a
+  value loaded as 80 bits loses its last bits there). Saved states load in
+  either mode. In both, products, quotients, square roots and the
+  transcendental functions are the doubles', so they keep 53 bits of
+  significand where a 387 keeps 64, rounded to nearest whatever the control
+  word says, and the control word's precision field isn't used for them (a
+  program that sets it to 53 bits, as Win32 programs built with MSVC do,
+  gets close to what a 387 gives). Loads, stores, integer conversions,
+  compares and FRNDINT use all 80 bits.
 * `machine` is the display adapter programs find when they look for one, and
   so the graphics they choose: `svga` (the default, a VGA with VESA modes up
   to 1024x768, and 640x400 in truecolour as mode 213h, an OEM mode of S3
@@ -545,6 +552,39 @@ limit, so without a connection it goes on as it would with one:
   resources of DDRAW, DSOUND, DINPUT, DPLAYX, D3D8, DINPUT8 and the
   DirectMusic DLLs, which GetFileVersionInfo reads, say the same. A
   change takes effect for the next program that starts when none runs.
+* `win32_locale` is the system locale of the built-in Windows, the
+  language edition of Windows 98 it is. `en-US` is the default. The
+  values, by the ANSI code page they read text in:
+  * 1250 (Central European): `cs-CZ` Czech, `hr-HR` Croatian, `hu-HU`
+    Hungarian, `pl-PL` Polish, `ro-RO` Romanian, `sk-SK` Slovak,
+    `sl-SI` Slovenian, `sr-Latn-YU` Serbian in Latin script.
+  * 1251 (Cyrillic): `be-BY` Belarusian, `bg-BG` Bulgarian, `ru-RU`
+    Russian, `sr-Cyrl-YU` Serbian in Cyrillic script, `uk-UA`
+    Ukrainian.
+  * 1252 (Western European): `da-DK` Danish, `de-DE` German, `en-GB`
+    and `en-US` English, `es-ES` Spanish, `fi-FI` Finnish, `fr-FR`
+    French, `it-IT` Italian, `nb-NO` Norwegian, `nl-NL` Dutch, `pt-BR`
+    and `pt-PT` Portuguese, `sv-SE` Swedish.
+  * 1253 (Greek): `el-GR`.
+  * 1254 (Turkish): `tr-TR`.
+  * 1257 (Baltic): `et-EE` Estonian, `lt-LT` Lithuanian, `lv-LV`
+    Latvian.
+
+  A program made for that language's Windows needs it to show its
+  text: its ANSI bytes are read in the locale's code page, and the
+  system's fonts and DEFAULT_CHARSET draw that code page's letters. The
+  locale sets GetACP and GetOEMCP, the conversions of
+  MultiByteToWideChar, WideCharToMultiByte and the C runtime, the case
+  and sorting of text, GetLocaleInfo's names and formats of dates,
+  numbers and money (with the currencies of 1998, before the euro),
+  GetSystemDefaultLCID and GetUserDefaultLCID, and the registry's `Nls`
+  values. Every one of these code pages is installed under every
+  locale, as on a Windows 98 with multilanguage support, so a program
+  that converts or draws text of another one explicitly gets it. The
+  keyboard types the US layout's characters under every locale. Like
+  `win32_version`, a change takes effect for the next program that
+  starts when none runs, and a saved state goes on under the locale it
+  was saved with.
 * `win32_trace` picks which calls of the built-in Windows' functions
   get a `[W32]` line in the [log file](README.md#log-file) (and `[W16]`
   for the 16-bit modules), with the caller's address, the arguments and

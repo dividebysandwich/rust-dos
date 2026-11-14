@@ -2277,7 +2277,8 @@ pub fn translate_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// GetKeyboardLayout(tid), ActivateKeyboardLayout and
-/// LoadKeyboardLayoutA: US English.
+/// LoadKeyboardLayoutA: US English, whatever the system locale, as the
+/// keys type the US layout's characters.
 pub fn get_keyboard_layout(_cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0x0409_0409)
 }
@@ -2306,9 +2307,9 @@ pub fn get_keyboard_type(_cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     })
 }
 
-/// GetKBCodePage.
-pub fn get_kb_code_page(_cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(437)
+/// GetKBCodePage: the system's OEM code page.
+pub fn get_kb_code_page(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(crate::win32::nls::oem(cpu).number())
 }
 
 /// keybd_event(vk, scan, flags, extra): a key as if it was typed.

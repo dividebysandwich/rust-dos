@@ -772,3 +772,103 @@ fn fscale_truncates_all_64_bits_and_flags_denormals_and_empty_registers() {
     let underflow = [false, true, true, false, false];
     assert_eq!(scale(&[bits(1.0)], nearest), (indefinite, underflow));
 }
+
+/// The sum of the doubles `a` and `b` rounded once to `bits` bits of
+/// significand, to nearest and ties to even, worked out on integers.
+/// The operands' exponents are within 60 of each other.
+fn sum_rounded_to(a: f64, b: f64, bits: u32) -> f64 {
+    let parts = |v: f64| {
+        let w = v.to_bits();
+        let man = (w & ((1 << 52) - 1) | 1 << 52) as i128;
+        ((w >> 52 & 0x7FF) as i32, if v < 0.0 { -man } else { man })
+    };
+    let ((ea, ma), (eb, mb)) = (parts(a), parts(b));
+    let low = ea.min(eb);
+    let total = (ma << (ea - low)) + (mb << (eb - low));
+    if total == 0 {
+        return 0.0;
+    }
+    let (negative, mut man) = (total < 0, total.unsigned_abs());
+    // The value is man * 2^(low - 1075).
+    let mut exp = low - 1075;
+    let len = 128 - man.leading_zeros();
+    if len > bits {
+        let cut = len - bits;
+        let (half, rest) = (1u128 << (cut - 1), man & ((1u128 << cut) - 1));
+        man >>= cut;
+        exp += cut as i32;
+        if rest > half || (rest == half && man & 1 == 1) {
+            man += 1;
+        }
+    }
+    let value = man as f64 * 2f64.powi(exp);
+    if negative { -value } else { value }
+}
+
+#[test]
+fn narrow_sums_are_the_exact_sum_rounded_once() {
+    use rust_dos::instructions::fpu::arithmetic::narrow_sum;
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut halfway = 0;
+    for round in 0..400_000 {
+        // Two doubles with exponents up to 60 apart; every other pair
+        // made of few bits, whose sums land halfway between two singles
+        // far more often.
+        let coarse = round % 2 == 0;
+        let mut double = |exp: u64| {
+            let man = if coarse { next() & 0xF_FF00_0010_0000 } else { next() & ((1 << 52) - 1) };
+            f64::from_bits(next() & 1 << 63 | exp << 52 | man)
+        };
+        let base = 1023 - 30 + round % 60;
+        let (a, b) = (double(base), double(base - 30 + round / 60 % 60));
+        for (control, bits) in [(0x027F, 53), (0x007F, 24)] {
+            let expected = sum_rounded_to(a, b, bits);
+            assert_eq!(
+                narrow_sum(control, a, b).map(f64::to_bits),
+                Some(expected.to_bits()),
+                "{a:e} + {b:e} at {bits} bits"
+            );
+        }
+        if (a + b).to_bits() & 0x1FFF_FFFF == 0x1000_0000 {
+            halfway += 1;
+        }
+    }
+    assert!(halfway > 100, "only {halfway} sums halfway between two singles");
+}
+
+#[test]
+fn narrow_sums_leave_the_rest_to_the_80_bits() {
+    use rust_dos::instructions::fpu::arithmetic::narrow_sum;
+    // 64 bits of precision, another rounding, the unused precision.
+    for control in [0x037F, 0x067F, 0x0A7F, 0x0E7F, 0x017F, 0x0C7F] {
+        assert_eq!(narrow_sum(control, 1.0, 2.0), None, "{control:04X}");
+    }
+    for control in [0x027F, 0x007F] {
+        assert_eq!(narrow_sum(control, 1.0, 2.0), Some(3.0));
+        // An exact zero keeps the sign the doubles give it.
+        assert_eq!(narrow_sum(control, 1.5, -1.5).map(f64::to_bits), Some(0));
+        assert_eq!(narrow_sum(control, -0.0, -0.0).map(f64::to_bits), Some((-0.0f64).to_bits()));
+        assert_eq!(narrow_sum(control, f64::INFINITY, 1.0), None);
+        assert_eq!(narrow_sum(control, f64::INFINITY, f64::NEG_INFINITY), None);
+        assert_eq!(narrow_sum(control, f64::NAN, 1.0), None);
+        assert_eq!(narrow_sum(control, f64::MAX, f64::MAX), None);
+        // A sum below the normal doubles, which a 387 keeps whole.
+        assert_eq!(narrow_sum(control, 3.0 * f64::MIN_POSITIVE, -2.5 * f64::MIN_POSITIVE), None);
+    }
+    // Sums a double holds and a single's exponent doesn't.
+    assert_eq!(narrow_sum(0x007F, 1e300, 1e300), None);
+    assert_eq!(narrow_sum(0x007F, 1e-300, 1e-300), None);
+    // A sum just below the smallest normal single, which a single's
+    // denormals would round up to it and a 387 keeps; just above it, a
+    // tie that goes down to it.
+    let min_single = f32::MIN_POSITIVE as f64;
+    assert_eq!(narrow_sum(0x007F, min_single, -(2f64.powi(-150))), None);
+    assert_eq!(narrow_sum(0x007F, min_single, 2f64.powi(-150)), Some(min_single));
+    assert_eq!(narrow_sum(0x027F, 1e300, 1e300), Some(2e300));
+}

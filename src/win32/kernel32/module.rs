@@ -552,8 +552,11 @@ fn resource_subdir(cpu: &Cpu, root: u32, dir: u32, want: &Res) -> Option<u32> {
 /// The data entry of the resource `name` of type `kind` in the module at
 /// `base`: in the language `language`, or one of the same primary
 /// language, or a neutral one; with no language asked for, the neutral
-/// one or else the first. Its address, the HRSRC.
+/// one, the system locale's language, its language with no sublanguage,
+/// US English, or else the first, as Windows looks for them. Its address,
+/// the HRSRC.
 fn find(cpu: &Cpu, base: u32, kind: &Res, name: &Res, language: Option<u16>) -> Result<u32, u32> {
+    const LANG_ENGLISH_US: u16 = 0x0409;
     let root = resource_root(cpu, base).ok_or(ERROR_RESOURCE_DATA_NOT_FOUND)?;
     let names = resource_subdir(cpu, root, root, kind).ok_or(ERROR_RESOURCE_TYPE_NOT_FOUND)?;
     let languages = resource_subdir(cpu, root, names, name).ok_or(ERROR_RESOURCE_NAME_NOT_FOUND)?;
@@ -575,10 +578,13 @@ fn find(cpu: &Cpu, base: u32, kind: &Res, name: &Res, language: Option<u16>) -> 
                     .find(|(id, _)| id & 0x3FF == language & 0x3FF)
             })
             .or_else(|| entries.iter().find(|(id, _)| *id == 0)),
-        None => entries
-            .iter()
-            .find(|(id, _)| *id == 0)
-            .or_else(|| entries.first()),
+        None => {
+            let system = crate::win32::nls::current(cpu).lang_id() as u16;
+            [0, system, system & 0x3FF, LANG_ENGLISH_US]
+                .into_iter()
+                .find_map(|want| entries.iter().find(|(id, _)| *id == want))
+                .or_else(|| entries.first())
+        }
     };
     found
         .map(|(_, target)| root.wrapping_add(*target))

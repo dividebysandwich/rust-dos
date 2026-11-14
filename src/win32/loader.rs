@@ -287,11 +287,11 @@ fn build(
     let data = memory.reserve(None, GRANULARITY, PRIVATE, SHARED)?;
     memory.commit(bus, data, 2 * PAGE, USER | WRITABLE)?;
     let mut line = crate::dosstr::to_bytes(line);
-    let bus = &mut cpu.bus;
     line.truncate(PAGE as usize / 2 - 1);
     line.push(0);
+    let wide = super::kernel32::ansi_to_wide(cpu, &line);
+    let bus = &mut cpu.bus;
     memory.write(bus, data, &line)?;
-    let wide = super::kernel32::ansi_to_wide(&line);
     let wide: Vec<u8> = wide.iter().flat_map(|c| c.to_le_bytes()).collect();
     memory.write(bus, data + PAGE, &wide)?;
     process.command_line = data;

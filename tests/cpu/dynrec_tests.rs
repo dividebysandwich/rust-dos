@@ -4641,6 +4641,184 @@ fn fpu_single_stores_round_as_the_control_word_says_on_both_cores() {
     }
 }
 
+/// Doubles whose sums round differently at 53 and at 24 bits, and those a
+/// narrow sum leaves to the 80 bits: infinities, a NaN, a denormal, and
+/// numbers whose sums leave a double's or a single's range.
+const NARROW_DOUBLES: [u64; 17] = [
+    0x3FF0_0000_0000_0000, // 1
+    0x3E70_0000_0001_0000, // 2^-24 + 2^-60
+    0x3E70_0000_0000_0000, // 2^-24
+    0x3FF0_0000_2000_0000, // 1 + 2^-23
+    0xBFF0_0000_0000_0000, // -1
+    0x3FB9_9999_9999_999A, // 0.1
+    0x4008_0000_0000_0001, // 3 and a bit
+    0x0000_0000_0000_0000, // 0
+    0x8000_0000_0000_0000, // -0
+    0x7FEF_FFFF_FFFF_FFFF, // the largest double
+    0x0010_0000_0000_0000, // the smallest normal double
+    0x0000_0000_0000_0001, // a denormal
+    0x47EF_FFFF_E000_0000, // the largest single
+    0x3810_0000_0000_0000, // the smallest normal single, 2^-126
+    0x7FF0_0000_0000_0000, // infinity
+    0x7FF8_0000_0000_0001, // a NaN
+    0xB690_0000_0000_0000, // -2^-150
+];
+/// The control words the sums run with, four to a run: every precision
+/// (53, 24 and 64 bits, and the precision field's unused value) with
+/// every rounding (to nearest, down, up and toward 0).
+const PRECISIONS: [[u32; 4]; 4] = [
+    [0x027F, 0x007F, 0x037F, 0x017F],
+    [0x067F, 0x047F, 0x077F, 0x057F],
+    [0x0A7F, 0x087F, 0x0B7F, 0x097F],
+    [0x0E7F, 0x0C7F, 0x0F7F, 0x0D7F],
+];
+
+/// Every pair of `NARROW_DOUBLES` added and subtracted with each of
+/// `controls`, between registers, with memory operands and popping, on
+/// both cores: 56 bytes of results a pair and control word (the sum as a
+/// double and as 80 bits, the difference with a double in memory as 80
+/// bits, the reversed one with a single as a double, FSUBRP's difference
+/// plus a dword integer (FIADD) as 80 bits, and the first double less a
+/// word integer (FISUB) as a double).
+fn sums_at_precisions(controls: &[u32; 4]) -> Rig {
+    let (input, output) = (DATA, DATA + 0x8000);
+    let n = NARROW_DOUBLES.len() as u32;
+    let count = n * n * controls.len() as u32;
+    let (mut a, mut b) = twins(|rig| {
+        for k in 0..count {
+            let at = input + 24 * k;
+            let pair = [
+                (0, NARROW_DOUBLES[(k % n) as usize]),
+                (8, NARROW_DOUBLES[(k / n % n) as usize]),
+            ];
+            for (o, v) in pair {
+                rig.write32(at + o, v as u32);
+                rig.write32(at + o + 4, (v >> 32) as u32);
+            }
+            rig.write32(at + 16, controls[(k / (n * n)) as usize]);
+        }
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut again = a.create_label();
+            a.fninit()?;
+            a.mov(esi, input)?;
+            a.mov(edi, output)?;
+            a.mov(ecx, count)?;
+            a.set_label(&mut again)?;
+            a.fldcw(word_ptr(esi + 16))?;
+            a.fld(qword_ptr(esi + 8))?;
+            a.fld(qword_ptr(esi))?;
+            a.fadd_2(st0, st1)?;
+            a.fst(qword_ptr(edi))?;
+            a.fstp(tword_ptr(edi + 8))?;
+            a.fld(qword_ptr(esi))?;
+            a.fsub(qword_ptr(esi + 8))?;
+            a.fstp(tword_ptr(edi + 18))?;
+            a.fld(qword_ptr(esi))?;
+            a.fsubr(dword_ptr(esi + 12))?;
+            a.fstp(qword_ptr(edi + 28))?;
+            a.fld(qword_ptr(esi))?;
+            a.fsubrp(st1, st0)?;
+            a.fiadd(dword_ptr(esi + 12))?;
+            a.fstp(tword_ptr(edi + 36))?;
+            a.fld(qword_ptr(esi))?;
+            a.fisub(word_ptr(esi + 6))?;
+            a.fstp(qword_ptr(edi + 46))?;
+            a.add(esi, 24)?;
+            a.add(edi, 56)?;
+            a.dec(ecx)?;
+            a.jnz(again)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    b
+}
+
+#[test]
+fn fpu_sums_round_to_the_control_words_precision_on_both_cores() {
+    // The other roundings, which the cores compare and nothing more.
+    for controls in &PRECISIONS[1..] {
+        sums_at_precisions(controls);
+    }
+    let b = sums_at_precisions(&PRECISIONS[0]);
+    let n = NARROW_DOUBLES.len();
+    // The sum of NARROW_DOUBLES[i] and NARROW_DOUBLES[j] as a double,
+    // with PRECISIONS[0][p].
+    let sum = |i: usize, j: usize, p: usize| {
+        let at = DATA + 0x8000 + 56 * (p * n * n + j * n + i) as u32;
+        f64::from_bits(b.read32(at) as u64 | (b.read32(at + 4) as u64) << 32)
+    };
+    let (one, more, bit24, odd, tenth) = (0, 1, 2, 3, 5);
+    // At 53 bits, a double's own sum.
+    assert_eq!(sum(one, bit24, 0), 1.0 + 2f64.powi(-24));
+    assert_eq!(sum(one, tenth, 0), 1.0 + 0.1);
+    // At 24 bits: a tie goes to the even single, just over a tie goes
+    // up (the double sum alone, 1 + 2^-24 after its own rounding, would
+    // go down), and a tie above an odd single goes up.
+    assert_eq!(sum(one, bit24, 1), 1.0);
+    assert_eq!(sum(one, more, 1), 1.0 + 2f64.powi(-23));
+    assert_eq!(sum(odd, bit24, 1), 1.0 + 2f64.powi(-22));
+    assert_eq!(sum(one, tenth, 1), 1.100000023841858);
+    // Below the smallest normal single a 387 keeps 24 bits with its 15
+    // bits of exponent, where a single's denormals would round up.
+    let (min_single, minus_tiny) = (13, 16);
+    assert_eq!(sum(min_single, minus_tiny, 1), 2f64.powi(-126) - 2f64.powi(-150));
+    // At 64 bits the sum keeps what a double hasn't, and stores as the
+    // double it rounds to.
+    assert_eq!(sum(one, more, 2), 1.0 + 2f64.powi(-24));
+}
+
+#[test]
+fn fpu_sums_leave_formats_a_387_does_not_take_to_the_80_bits_on_both_cores() {
+    // A pseudo-zero, an unnormal and a pseudo-infinity (no integer bit),
+    // whose doubles come out as if they had one, plus 1 at 53, 24 and 64
+    // bits: the same sum, the 80 bits', at each.
+    const ODD: [(u16, u64); 3] =
+        [(0x3FFF, 0), (0x3FFF, 0x4000_0000_0000_0000), (0x7FFF, 0)];
+    let (input, output) = (DATA, DATA + 0x100);
+    let controls = [0x027F, 0x007F, 0x037F];
+    let (mut a, mut b) = twins(|rig| {
+        for (k, (exponent, significand)) in ODD.into_iter().enumerate() {
+            let at = input + 16 * k as u32;
+            rig.write32(at, significand as u32);
+            rig.write32(at + 4, (significand >> 32) as u32);
+            rig.write16(at + 8, exponent);
+        }
+        rig.write32(input + 0x40, 0);
+        rig.write32(input + 0x44, 0x3FF0_0000);
+        for (p, control) in controls.into_iter().enumerate() {
+            rig.write16(input + 0x50 + 2 * p as u32, control);
+        }
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.fninit()?;
+            for p in 0..controls.len() as u32 {
+                a.fldcw(word_ptr(input + 0x50 + 2 * p))?;
+                for k in 0..ODD.len() as u32 {
+                    a.fld(qword_ptr(input + 0x40))?;
+                    a.fld(tword_ptr(input + 16 * k))?;
+                    a.faddp(st1, st0)?;
+                    a.fstp(tword_ptr(output + 0x10 * (p * ODD.len() as u32 + k)))?;
+                }
+            }
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    // The 80 bits FSTP stored at `at`.
+    let tword = |at: u32| {
+        let low = b.read32(at) as u128 | (b.read32(at + 4) as u128) << 32;
+        low | (b.read32(at + 8) as u128 & 0xFFFF) << 64
+    };
+    let width = ODD.len() as u32;
+    for k in 0..width {
+        let wide = tword(output + 0x10 * (2 * width + k));
+        for p in 0..2 {
+            let at = output + 0x10 * (p * width + k);
+            assert_eq!(tword(at), wide, "value {k}, control {:04X}", controls[p as usize]);
+        }
+    }
+}
+
 #[test]
 fn fpu_sums_in_fast_mode_are_the_doubles_on_both_cores() {
     // The same sums come out otherwise (1 and a bit a double hasn't, ...),

@@ -344,6 +344,9 @@ pub struct Paragraph {
 /// A help file, read.
 #[derive(Debug, Default)]
 pub struct HelpFile {
+    /// The title |SYSTEM gives, its ANSI bytes one char each
+    /// (`dosstr`), so that the window caption gets the file's bytes and
+    /// shows them in the system's code page.
     pub title: String,
     /// The |SYSTEM minor version: 15 for Windows 3.0, 21 for 3.1, 33
     /// for Windows 95's.
@@ -522,14 +525,14 @@ impl HelpFile {
         let mut title = String::new();
         let mut contents = None;
         if minor <= 16 {
-            title = String::from_utf8_lossy(c_str(s, 12)).into_owned();
+            title = crate::dosstr::from_bytes(c_str(s, 12));
         } else {
             let mut at = 12;
             while at + 4 <= s.len() {
                 let (kind, len) = (u16_at(s, at), u16_at(s, at + 2) as usize);
                 match kind {
                     1 if title.is_empty() => {
-                        title = String::from_utf8_lossy(c_str(s, at + 4)).into_owned();
+                        title = crate::dosstr::from_bytes(c_str(s, at + 4));
                     }
                     3 if len == 4 => contents = Some(u32_at(s, at + 4)),
                     _ => {}

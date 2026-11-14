@@ -160,10 +160,12 @@ fn format_insert(cpu: &mut Cpu, spec: &[u8], value: u32) -> Option<Vec<u8>> {
     let mut number = false;
     let mut text = match spec.get(i) {
         Some(b's') if !wide => read_string(cpu, value)?,
-        Some(b's') => wide_to_ansi(&read_wide_string(cpu, value)?),
-        Some(b'S') => wide_to_ansi(&read_wide_string(cpu, value)?),
+        Some(b's' | b'S') => {
+            let units = read_wide_string(cpu, value)?;
+            wide_to_ansi(cpu, &units)
+        }
         Some(b'c') if !wide => vec![value as u8],
-        Some(b'c' | b'C') => wide_to_ansi(&[value as u16]),
+        Some(b'c' | b'C') => wide_to_ansi(cpu, &[value as u16]),
         Some(&c @ (b'd' | b'i' | b'u' | b'x' | b'X')) => {
             number = true;
             let mut s = match c {
