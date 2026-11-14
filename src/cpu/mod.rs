@@ -1479,6 +1479,16 @@ impl Cpu {
         self.fpu_stack.get_f64(actual_idx)
     }
 
+    /// ST(i)'s double where the register holds no more than it
+    /// (`FpuRegs::only_double`), and isn't empty.
+    pub fn fpu_only_double(&self, index: usize) -> Option<f64> {
+        let actual_idx = (self.fpu_top.wrapping_add(index)) & 7;
+        if self.fpu_tags[actual_idx] == crate::cpu::FPU_TAG_EMPTY {
+            return None;
+        }
+        self.fpu_stack.only_double(actual_idx)
+    }
+
     // Set ST(i) relative to Top
     pub fn fpu_set(&mut self, index: usize, val: F80) {
         let actual_idx = (self.fpu_top + index) & 7;

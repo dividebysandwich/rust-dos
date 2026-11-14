@@ -182,8 +182,7 @@ gdi32/mapping: skipped mapping.c:470
 gdi32/palette: palette: 9 tests executed (0 marked as todo, 0 failures), 0 skipped.
 gdi32/pen: pen: 668 tests executed (0 marked as todo, 0 failures), 0 skipped.
 kernel32/alloc: alloc: 54 tests executed (0 marked as todo, 0 failures), 0 skipped.
-kernel32/codepage: codepage: 77 tests executed (0 marked as todo, 0 failures), 4 skipped.
-kernel32/codepage: skipped codepage.c:260 (x2)
+kernel32/codepage: codepage: 91 tests executed (0 marked as todo, 0 failures), 2 skipped.
 kernel32/codepage: skipped codepage.c:317 (x2)
 kernel32/directory: directory: 52 tests executed (0 marked as todo, 0 failures), 4 skipped.
 kernel32/directory: skipped directory.c:66
@@ -222,11 +221,11 @@ kernel32/heap: skipped heap.c:478
 kernel32/heap: skipped heap.c:848
 kernel32/loader: loader: 5 tests executed (0 marked as todo, 0 failures), 1 skipped.
 kernel32/loader: skipped loader.c:512
-kernel32/locale: locale: 398 tests executed (0 marked as todo, 0 failures), 12 skipped.
+kernel32/locale: locale: 420 tests executed (0 marked as todo, 1 failure), 11 skipped.
 kernel32/locale: skipped locale.c:2572
 kernel32/locale: skipped locale.c:152
 kernel32/locale: skipped locale.c:198
-kernel32/locale: skipped locale.c:553
+kernel32/locale: failed locale.c:562
 kernel32/locale: skipped locale.c:642
 kernel32/locale: skipped locale.c:1535
 kernel32/locale: skipped locale.c:2123

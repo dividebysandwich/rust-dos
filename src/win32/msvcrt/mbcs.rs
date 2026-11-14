@@ -136,13 +136,14 @@ pub fn getmbcp(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(state(cpu, S_MBCP))
 }
 
-/// _setmbcp(cp): -3 (_MB_CP_ANSI) and -4 (_MB_CP_LOCALE) are 1252, -2
-/// (_MB_CP_OEM) 437, -1 (_MB_CP_SBCS) single bytes. 0, or -1 with errno
-/// EINVAL for a code page there isn't.
+/// _setmbcp(cp): -3 (_MB_CP_ANSI) and -4 (_MB_CP_LOCALE) are the
+/// system's ANSI code page, -2 (_MB_CP_OEM) its OEM one, -1
+/// (_MB_CP_SBCS) single bytes. 0, or -1 with errno EINVAL for a code page
+/// there isn't.
 pub fn setmbcp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let cp = match args[0] as i32 {
-        -3 | -4 => 1252,
-        -2 => 437,
+        -3 | -4 => crate::win32::nls::ansi(cpu).number(),
+        -2 => crate::win32::nls::oem(cpu).number(),
         -1 => 0,
         cp => cp as u32,
     };

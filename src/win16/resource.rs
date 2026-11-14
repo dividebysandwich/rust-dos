@@ -11,6 +11,7 @@ use super::{Module16, global};
 use crate::cpu::Cpu;
 use crate::win32::Module;
 use crate::win32::memory::{PAGE, PRIVATE, SHARED, USER};
+use crate::win32::nls::CodePage;
 use rust_dos_ne as ne;
 use rust_dos_pe as pe;
 
@@ -37,8 +38,8 @@ fn key(id: &ne::ResId) -> Key {
     }
 }
 
-fn wide(bytes: &[u8]) -> Vec<u8> {
-    crate::win32::kernel32::ansi_to_wide(bytes)
+fn wide(page: CodePage, bytes: &[u8]) -> Vec<u8> {
+    page.decode(bytes)
         .iter()
         .flat_map(|c| c.to_le_bytes())
         .collect()
@@ -80,8 +81,9 @@ impl Reader<'_> {
     }
 }
 
-/// A 32-bit resource being written.
-struct Writer(Vec<u8>);
+/// A 32-bit resource being written, its text from the code page of the
+/// 16-bit one's.
+struct Writer(Vec<u8>, CodePage);
 
 impl Writer {
     fn u16(&mut self, v: u16) {
@@ -93,7 +95,7 @@ impl Writer {
     }
 
     fn wsz(&mut self, s: &[u8]) {
-        self.0.extend_from_slice(&wide(s));
+        self.0.extend_from_slice(&wide(self.1, s));
         self.u16(0);
     }
 
@@ -105,9 +107,9 @@ impl Writer {
 }
 
 /// A 16-bit dialog template in its 32-bit form.
-pub fn dialog32(bytes: &[u8]) -> Vec<u8> {
+pub fn dialog32(page: CodePage, bytes: &[u8]) -> Vec<u8> {
     let mut r = Reader { bytes, at: 0 };
-    let mut w = Writer(Vec::new());
+    let mut w = Writer(Vec::new(), page);
     let style = r.u32();
     let count = r.u8();
     w.u32(style);
@@ -183,9 +185,9 @@ const MF_POPUP: u16 = 0x0010;
 const MF_END: u16 = 0x0080;
 
 /// A 16-bit menu template in its 32-bit form.
-fn menu32(bytes: &[u8]) -> Vec<u8> {
+fn menu32(page: CodePage, bytes: &[u8]) -> Vec<u8> {
     let mut r = Reader { bytes, at: 0 };
-    let mut w = Writer(Vec::new());
+    let mut w = Writer(Vec::new(), page);
     let (version, offset) = (r.u16(), r.u16());
     w.u16(version);
     w.u16(offset);
@@ -215,14 +217,14 @@ fn menu_items(r: &mut Reader, w: &mut Writer, depth: u32) {
 }
 
 /// A 16-bit string table block in its 32-bit form.
-fn strings32(bytes: &[u8]) -> Vec<u8> {
+fn strings32(page: CodePage, bytes: &[u8]) -> Vec<u8> {
     let mut r = Reader { bytes, at: 0 };
-    let mut w = Writer(Vec::new());
+    let mut w = Writer(Vec::new(), page);
     for _ in 0..16 {
         let len = r.u8() as usize;
         let text = r.bytes.get(r.at..r.at + len).unwrap_or(&[]).to_vec();
         r.at += len;
-        let units = crate::win32::kernel32::ansi_to_wide(&text);
+        let units = page.decode(&text);
         w.u16(units.len() as u16);
         for u in units {
             w.u16(u);
@@ -233,7 +235,7 @@ fn strings32(bytes: &[u8]) -> Vec<u8> {
 
 /// A 16-bit accelerator table in its 32-bit form.
 fn accelerators32(bytes: &[u8]) -> Vec<u8> {
-    let mut w = Writer(Vec::new());
+    let mut w = Writer(Vec::new(), CodePage::WESTERN);
     for entry in bytes.as_chunks::<5>().0 {
         w.u16(entry[0] as u16);
         w.u16(u16::from_le_bytes([entry[1], entry[2]]));
@@ -247,11 +249,11 @@ fn accelerators32(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// The 32-bit form of the resource `data` of the type `kind`.
-fn convert(kind: &Key, data: &[u8]) -> Vec<u8> {
+fn convert(page: CodePage, kind: &Key, data: &[u8]) -> Vec<u8> {
     match kind {
-        Key::Id(RT_DIALOG) => dialog32(data),
-        Key::Id(RT_MENU) => menu32(data),
-        Key::Id(RT_STRING) => strings32(data),
+        Key::Id(RT_DIALOG) => dialog32(page, data),
+        Key::Id(RT_MENU) => menu32(page, data),
+        Key::Id(RT_STRING) => strings32(page, data),
         Key::Id(RT_ACCELERATOR) => accelerators32(data),
         _ => data.to_vec(),
     }
@@ -260,7 +262,7 @@ fn convert(kind: &Key, data: &[u8]) -> Vec<u8> {
 /// The resource section of the resources `resources` (type, name, data)
 /// at the RVA `rva`, and the length of its directories, data entries and
 /// names, which come before the resources' data.
-fn section(resources: &[(Key, Key, Vec<u8>)], rva: u32) -> (Vec<u8>, usize) {
+fn section(page: CodePage, resources: &[(Key, Key, Vec<u8>)], rva: u32) -> (Vec<u8>, usize) {
     use std::collections::BTreeMap;
     let mut tree: BTreeMap<&Key, BTreeMap<&Key, &[u8]>> = BTreeMap::new();
     for (kind, name, data) in resources {
@@ -293,7 +295,7 @@ fn section(resources: &[(Key, Key, Vec<u8>)], rva: u32) -> (Vec<u8>, usize) {
                 && !strings.iter().any(|(k, _)| *k == key)
             {
                 strings.push((key, at + string_bytes.len()));
-                let units = crate::win32::kernel32::ansi_to_wide(s.as_bytes());
+                let units = page.decode(s.as_bytes());
                 string_bytes.extend_from_slice(&(units.len() as u16).to_le_bytes());
                 for u in units {
                     string_bytes.extend_from_slice(&u.to_le_bytes());
@@ -368,8 +370,8 @@ fn build_image32(name: &str, rsrc: &[u8], base: u32) -> Vec<u8> {
 
 /// The resource section of the module's 32-bit image, and how much of
 /// the image, from its start, comes before the resources' data.
-fn section_of(module: &Module16) -> (Vec<u8>, u32) {
-    let (rsrc, directory_len) = section(&resources_of(module), RSRC_RVA);
+fn section_of(page: CodePage, module: &Module16) -> (Vec<u8>, u32) {
+    let (rsrc, directory_len) = section(page, &resources_of(page, module), RSRC_RVA);
     (rsrc, RSRC_RVA + directory_len as u32)
 }
 
@@ -384,12 +386,13 @@ fn section_of(module: &Module16) -> (Vec<u8>, u32) {
 /// of Metal Marines' METALENG.DLL, and they would otherwise take that
 /// much of the machine's memory.
 pub fn image32(cpu: &mut Cpu, index: usize) -> u32 {
+    let page = crate::win32::nls::ansi(cpu);
     let module = &cpu.bus.win32.win16.modules[index];
     if module.resources32 != 0 {
         return module.resources32;
     }
     let name = format!("{}.16", module.name);
-    let (rsrc, eager) = section_of(module);
+    let (rsrc, eager) = section_of(page, module);
     // The headers' page and the resource section: the image is built
     // only once its base is known.
     let size = (RSRC_RVA + rsrc.len() as u32).next_multiple_of(PAGE);
@@ -437,6 +440,7 @@ pub fn image32(cpu: &mut Cpu, index: usize) -> u32 {
 /// data. True when they have pages, or `base` isn't such an image; false
 /// when there is no memory for them.
 pub fn page_in(cpu: &mut Cpu, base: u32, at: u32, len: u32) -> bool {
+    let page = crate::win32::nls::ansi(cpu);
     if !super::in_win16(cpu) {
         return true;
     }
@@ -468,7 +472,7 @@ pub fn page_in(cpu: &mut Cpu, base: u32, at: u32, len: u32) -> bool {
     let file = match &module.image32 {
         Some(file) => file.clone(),
         None => {
-            let (rsrc, _) = section_of(module);
+            let (rsrc, _) = section_of(page, module);
             let name = format!("{}.16", module.name);
             let file: std::sync::Arc<[u8]> = build_image32(&name, &rsrc, base).into();
             cpu.bus.win32.win16.modules[index].image32 = Some(file.clone());
@@ -489,7 +493,7 @@ pub fn page_in(cpu: &mut Cpu, base: u32, at: u32, len: u32) -> bool {
 }
 
 /// The module's resources, in their 32-bit forms.
-fn resources_of(module: &Module16) -> Vec<(Key, Key, Vec<u8>)> {
+fn resources_of(page: CodePage, module: &Module16) -> Vec<(Key, Key, Vec<u8>)> {
     let Ok(parsed) = ne::Module::parse(&module.file) else {
         return Vec::new();
     };
@@ -500,7 +504,7 @@ fn resources_of(module: &Module16) -> Vec<(Key, Key, Vec<u8>)> {
             let Ok(data) = parsed.resource_data(&module.file, res) else {
                 continue;
             };
-            out.push((k.clone(), key(&res.id), convert(&k, data)));
+            out.push((k.clone(), key(&res.id), convert(page, &k, data)));
         }
     }
     // The names the name table gives resources, as the 32-bit functions

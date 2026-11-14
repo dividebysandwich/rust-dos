@@ -34,6 +34,8 @@ const HEADER: usize = 0x24;
 
 struct Reader<'a> {
     b: &'a [u8],
+    /// The code page of the library's strings.
+    page: CodePage,
     /// Where the names' table starts.
     names: usize,
     /// The help strings' table of words, from its 16-bit length on.
@@ -61,7 +63,8 @@ impl Reader<'_> {
 
     /// The name at `offset` in the names' table.
     fn name(&self, offset: u16) -> Option<String> {
-        self.cstr(self.names + offset as usize).map(ansi)
+        let page = self.page;
+        self.cstr(self.names + offset as usize).map(|b| ansi(page, b))
     }
 
     /// A string as SLTG keeps them: its length, or FFFFh for none, then
@@ -72,7 +75,7 @@ impl Reader<'_> {
             return Some((None, 2));
         }
         let bytes = self.b.get(at + 2..at + 2 + len as usize)?;
-        Some((Some(ansi(bytes)), 2 + len as usize))
+        Some((Some(ansi(self.page, bytes)), 2 + len as usize))
     }
 
     /// A help string: words of the table, picked by the bits of the
@@ -90,7 +93,7 @@ impl Reader<'_> {
             if !out.is_empty() {
                 out.push(' ');
             }
-            out.push_str(&ansi(word));
+            out.push_str(&ansi(self.page, word));
             // A table without a tree reads no bits for its one word, and
             // would give it forever.
             if table.first() != Some(&0x80) {
@@ -132,12 +135,14 @@ fn lookup_code<'t>(table: &'t [u8], bits: &mut Bits) -> Option<&'t [u8]> {
 }
 
 /// Read the SLTG library `b`; None if it isn't one.
-pub fn read(b: &[u8]) -> Option<TypeLib> {
+/// The library in `b`, its strings in the code page `page`.
+pub fn read(b: &[u8], page: CodePage) -> Option<TypeLib> {
     if b.get(..4)? != SIGNATURE {
         return None;
     }
     let mut r = Reader {
         b,
+        page,
         names: 0,
         help: 0,
     };
@@ -415,7 +420,7 @@ fn read_refs(r: &Reader, lib: &mut TypeLib, at: usize) -> Option<Vec<Ref>> {
 
 /// The imported library "*\G{guid}#major.minor#lcid#file#" at `at`.
 fn read_import(r: &Reader, at: usize) -> Option<ImportLib> {
-    let text = ansi(r.cstr(at)?);
+    let text = ansi(r.page, r.cstr(at)?);
     let rest = text.strip_prefix("*\\G")?;
     let (guid, rest) = rest.split_at(rest.find('}')? + 1);
     let mut parts = rest.strip_prefix('#')?.split('#');
@@ -695,6 +700,7 @@ mod tests {
         let b = [0, 0, 4, 0, 0, 0, 1, b'H', b'i', 0, 0xFF, 0xFF];
         let r = Reader {
             b: &b,
+            page: crate::win32::nls::CodePage::WESTERN,
             names: 0,
             help: 0,
         };

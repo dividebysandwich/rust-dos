@@ -25,8 +25,9 @@ settings of a game only when the checksums match. That works for DOS
 games and for games on the built-in Windows, which start from the same
 prompt. The almanac carries the machine's settings only: the graphics
 card, processor, speed, memory, DPMI, the DOS and Windows versions, the
-Windows desktop's colour depth (`win32_depth`), the 3D cards, the sound
-cards, the joystick and the disks' speeds.
+Windows desktop's colour depth (`win32_depth`) and system locale
+(`win32_locale`), the 3D cards, the sound cards, the joystick and the
+disks' speeds.
 
 A version a report adds is filed under its program's platform: DOS,
 Windows 3.1 (an NE file) or Windows 95/98 (a PE file). For a Windows
@@ -169,6 +170,63 @@ opcode, `win32_version=98se` when a message names the version, more
   image without DPM data SecuROM 4.8's, as on Windows 98.
   [copy-protection.md](copy-protection.md) has the image each
   protection needs and the tools that make it.
+
+### Games in other languages
+
+A game translated for a Windows of another language may need that
+Windows' locale, `win32_locale` in
+[`[emulator]`](../CONFIGURATION.md#emulator). The built-in Windows is a
+US English one unless the setting says otherwise.
+
+Set it when a game's text shows as question marks, accented Latin
+letters where another alphabet belongs (any Cyrillic or Greek text
+comes out as a run like `Ñòàðò`), or the wrong letters with diacritics
+(Central European, Turkish and Baltic text). That happens in what
+Windows draws for the game: its launcher or setup, dialogs, message
+boxes, menus and window titles. Text a game draws with its own fonts
+usually shows right under any locale, so a game can have an unreadable
+launcher and readable menus.
+
+The locale of each language, by the group of languages that shares a
+code page:
+
+* **Baltic**: Estonian `et-EE`, Latvian `lv-LV`, Lithuanian `lt-LT`.
+* **Central European**: Croatian `hr-HR`, Czech `cs-CZ`, Hungarian
+  `hu-HU`, Polish `pl-PL`, Romanian `ro-RO`, Serbian in Latin script
+  `sr-Latn-YU`, Slovak `sk-SK`, Slovenian `sl-SI`.
+* **Cyrillic**: Belarusian `be-BY`, Bulgarian `bg-BG`, Russian
+  `ru-RU`, Serbian in Cyrillic script `sr-Cyrl-YU`, Ukrainian `uk-UA`.
+* **Greek**: `el-GR`.
+* **Turkish**: `tr-TR`.
+* **Western European**: Danish `da-DK`, Dutch `nl-NL`, English
+  `en-GB` and `en-US`, Finnish `fi-FI`, French `fr-FR`, German
+  `de-DE`, Italian `it-IT`, Norwegian `nb-NO`, Portuguese `pt-BR` and
+  `pt-PT`, Spanish `es-ES`, Swedish `sv-SE`. Their letters are in the
+  default locale's code page, so their games' text shows right under
+  `en-US` too; their own locale gives their dates, numbers and
+  language id.
+
+A locale of the wrong group shows the game's text as described above.
+One of the right group but another language shows the text right, with
+that language's month names and date and number formats, and a game
+that picks its language by the system's language id may pick the wrong
+one or English.
+
+Languages of these code pages without a locale of their own (Catalan,
+Icelandic, Macedonian, the regional forms of German, French and
+Spanish, and others) take the nearest one of their group: a Macedonian
+game's text shows right under any Cyrillic locale.
+
+Japanese, Chinese and Korean games
+([#1017](https://github.com/dividebysandwich/rust-dos/issues/1017)),
+and Hebrew and Arabic ones
+([#1018](https://github.com/dividebysandwich/rust-dos/issues/1018)),
+have no locale yet. Run those on a
+[Windows 95 or 98 image](#windows-games-on-a-windows-95-or-98-image) of
+that language.
+
+The almanac carries the setting, so a game with a report gets its
+locale with `almanac_auto`.
 
 ### Installer archives
 

@@ -45,6 +45,7 @@ mod mpr;
 mod msacm32;
 mod msimg32;
 mod msvcrt;
+pub mod nls;
 mod ntdll;
 pub(crate) mod object;
 #[cfg(test)]
@@ -341,6 +342,11 @@ pub struct Win32 {
     /// of them started.
     pub depth: crate::config::DesktopDepth,
     desktop_depth: crate::config::DesktopDepth,
+    /// The system locale (the `win32_locale` setting), and the locale
+    /// the running processes see, the setting's when the first of them
+    /// started (nls.rs).
+    pub locale: nls::Win32Locale,
+    pub(crate) os_locale: nls::Win32Locale,
     /// The desktop's size as ChangeDisplaySettings set it, and the
     /// process that set it: None while it is its own (screen.rs).
     desktop_size: Option<(u32, u32, u32)>,
@@ -470,6 +476,7 @@ impl Win32 {
             guest_replace: std::mem::take(&mut self.guest_replace),
             version: self.version,
             depth: self.depth,
+            locale: self.locale,
             dll_files: self.dll_files.take(),
             trace: trace::Trace::new(self.trace.level()),
             trace3d: self.trace3d.take(),
@@ -772,6 +779,7 @@ fn start(cpu: &mut Cpu) {
     win32.a20 = a20;
     win32.cr4 = cr4;
     version::start(win32);
+    nls::start(win32);
     dll_files::sync(&mut cpu.bus);
     boot::session_starts(cpu);
     loop {
@@ -1536,6 +1544,7 @@ crate::state_fields!(Win32 {
     boot,
     win16,
     desktop_depth,
+    os_locale,
     atoms,
     desktop_size,
     wnaspi32,
@@ -1547,6 +1556,7 @@ crate::state_fields!(Win32 {
     guest_replace,
     version,
     depth,
+    locale,
     dll_files,
     trace,
     trace3d,

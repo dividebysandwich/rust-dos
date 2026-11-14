@@ -438,14 +438,18 @@ pub(super) fn get_private_profile_section_w(cpu: &mut Cpu, args: &[u32]) -> Opti
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(0);
     }
-    let section = wide_to_ansi(&read_wide_string(cpu, section)?);
+    let section = read_wide_string(cpu, section)?;
+    let section = wide_to_ansi(cpu, &section);
     let file = match file {
         0 => None,
-        at => Some(wide_to_ansi(&read_wide_string(cpu, at)?)),
+        at => {
+            let units = read_wide_string(cpu, at)?;
+            Some(wide_to_ansi(cpu, &units))
+        }
     };
     let sections = load(cpu, file.as_deref());
     let lines = find(&sections, &section).map_or(Vec::new(), |s| section_lines(s, true));
-    let lines: Vec<Vec<u16>> = lines.iter().map(|line| ansi_to_wide(line)).collect();
+    let lines: Vec<Vec<u16>> = lines.iter().map(|line| ansi_to_wide(cpu, line)).collect();
     put_wide_list(cpu, to, size, &lines)
 }
 

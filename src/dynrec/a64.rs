@@ -1,17 +1,17 @@
 //! The AArch64 code generator.
 //!
 //! Registers while translated code runs: X19 the CPU, X20 the context
-//! (`JitCtx`), X21 RAM, X22 RAM's code generations, W23 set when a store hit
-//! the block's later bytes, X27 the CPU plus `HI` and X29 the CPU plus
-//! `REGS` (the CPU's fields past X19's offsets' reach), W28 the guest's arithmetic flags where the code
-//! has changed them (see `Gen::dirty`); W24-W26 hold the operations'
-//! temporaries (`uop::T`), which calls keep, D8 and D9 the FPU
-//! instructions' doubles (`uop::X`), which calls keep too, and X0-X17 and
-//! D16-D17 are scratch (X18, the platform's register, is never touched). The guest's registers stay
-//! in the CPU. AArch64 has neither the parity nor the auxiliary carry flag,
-//! so the code computes the guest's flags the way `cpu::alu` defines them,
-//! with a parity table in the context, and only those that are live (see
-//! `flags`).
+//! (`JitCtx`), X21 RAM, X22 RAM's code generations, W23 set when a store
+//! hit the block's later bytes, X27 the CPU plus `HI` and X29 the CPU plus
+//! `REGS` (the CPU's fields past X19's offsets' reach), W28 the guest's
+//! arithmetic flags where the code has changed them (see `Gen::dirty`);
+//! W24-W26 hold the operations' temporaries (`uop::T`), which calls keep,
+//! D8 and D9 the FPU instructions' doubles (`uop::X`), which calls keep
+//! too, and X0-X17 and D16-D21 are scratch (X18, the platform's register,
+//! is never touched). The guest's registers stay in the CPU. AArch64 has
+//! neither the parity nor the auxiliary carry flag, so the code computes
+//! the guest's flags the way `cpu::alu` defines them, with a parity table
+//! in the context, and only those that are live (see `flags`).
 
 // dynasm converts the registers it is given at run time with `into`, and
 // checks the bit field operands it is given with comparisons that are
@@ -149,17 +149,22 @@ pub fn trampoline() -> Trampoline {
     Trampoline { bytes: ops.finalize().expect("trampoline"), enter, exit, addsub }
 }
 
-/// ST(dst) = a + b, or a - b with W3 set, as `F80::add` and `F80::sub`
+/// ST(dst) = a + b, or a - b with W3 set, rounded to the control word's
+/// precision where `narrow_addsub` does, else as `F80::add` and `F80::sub`
 /// add their 80 bits, where x86-64's `Gen::fpu_addsub` does; a routine of
 /// the trampoline's that translated code calls with the physical registers
 /// a, b and dst in W0-W2 (8 for the double in D16), which returns W0 = 0,
-/// or 1 with nothing changed for the handler's code. X0-X15 are changed.
+/// or 1 with nothing changed for the handler's code. X0-X15, X17 and
+/// D17-D21 are changed.
 fn fpu_addsub(ops: &mut Asm) {
     let slow = ops.new_dynamic_label();
     dynasm!(ops ; .arch aarch64 ; mov w8, w0 ; mov w9, w1 ; mov w15, w2 ; mov w17, w3);
     for (reg, off) in [(11, layout::fpu::X80), (12, layout::fpu::F64), (13, layout::fpu::STALE), (14, layout::fpu::TAGS)] {
         dynasm!(ops ; .arch aarch64 ; add XSP(reg), x29, (off - REGS) as u32);
     }
+    let wide = ops.new_dynamic_label();
+    narrow_addsub(ops, wide);
+    dynasm!(ops ; .arch aarch64 ; =>wide);
     // Operand into (sign << 15 | exponent) and the 64-bit mantissa.
     f80_operand(ops, 8, 0, 2, slow);
     f80_operand(ops, 9, 1, 3, slow);
@@ -246,6 +251,132 @@ fn fpu_addsub(ops: &mut Asm) {
         ; =>slow
         ; movz w0, 1
         ; ret
+    );
+}
+
+/// `fpu_addsub` where the control word has a sum rounded to nearest at 53
+/// or 24 bits and both operands are doubles: the sum
+/// `fpu::arithmetic::narrow_sum` gives, case for case, stored as ST(dst)'s
+/// double; to `wide` with nothing but X4 to X7, X10 and D17 to D21
+/// changed where it gives none, for the 80 bits' sum.
+fn narrow_addsub(ops: &mut Asm, wide: DynamicLabel) {
+    let (narrow, store, single) =
+        (ops.new_dynamic_label(), ops.new_dynamic_label(), ops.new_dynamic_label());
+    mov32(ops, 4, layout::fpu::CONTROL as u32);
+    dynasm!(ops
+        ; .arch aarch64
+        // The precision field 53 bits (2) or 24 (0), rounding to nearest.
+        ; ldrh w4, [x19, x4]
+        ; ands w5, w4, 0xF00
+        ; b.eq =>narrow
+        ; cmp w5, 0x200
+        ; b.ne =>wide
+        ; =>narrow
+    );
+    narrow_operand(ops, 8, 17, wide);
+    narrow_operand(ops, 9, 18, wide);
+    dynasm!(ops
+        ; .arch aarch64
+        // A difference adds b with its sign turned.
+        ; cbz w17, >plus
+        ; fneg d18, d18
+        ; plus:
+        ; fadd d19, d17, d18
+        ; fmov x7, d19
+        // Zero, or a normal double; any other sum is the 80 bits'.
+        ; lsl x6, x7, 1
+        ; cbz x6, =>store
+        ; lsr x6, x6, 53
+        ; sub w6, w6, 1
+        ; cmp w6, 0x7FD
+        ; b.hi =>wide
+        ; tst w4, 0x300
+        ; b.ne =>store
+        // To 24 bits: the double as a single, unless it is halfway
+        // between two singles (the 29 bits a single leaves out are
+        // 1000...), where the sum's own rounding decides the way.
+        ; and w6, w7, 0x1FFF_FFFF
+        ; movz w10, 0x1000, lsl 16
+        ; cmp w6, w10
+        ; b.ne =>single
+        // What the sum left out, into D21: with part = sum - a,
+        // (a - (sum - part)) + (b - part).
+        ; fsub d20, d19, d17
+        ; fsub d21, d19, d20
+        ; fsub d21, d17, d21
+        ; fsub d20, d18, d20
+        ; fadd d21, d21, d20
+        // A rounded sum that is even goes to its odd neighbour on the
+        // true sum's side: one up in its bits where what it left out has
+        // its sign, else one down.
+        ; fmov x6, d21
+        ; lsl x10, x6, 1
+        ; cbz x10, =>single
+        ; tbnz w7, 0, =>single
+        ; eor x6, x6, x7
+        ; asr x6, x6, 63
+        ; add x7, x7, x6, lsl 1
+        ; add x7, x7, 1
+        // Below the smallest normal single the 80 bits' sum: a single's
+        // denormals are coarser than the 24 bits a 387 keeps there.
+        ; =>single
+        ; ubfx x6, x7, 52, 11
+        ; cmp w6, 1023 - 126
+        ; b.lo =>wide
+        ; fmov d19, x7
+        ; fcvt s19, d19
+        // A normal single, or the 80 bits' sum.
+        ; fmov w6, s19
+        ; ubfx w6, w6, 23, 8
+        ; sub w6, w6, 1
+        ; cmp w6, 0xFD
+        ; b.hi =>wide
+        ; fcvt d19, s19
+        ; fmov x7, d19
+        // ST(dst): the double alone.
+        ; =>store
+        ; str x7, [x12, x15, lsl 3]
+        ; movz w6, 1
+        ; strb w6, [x13, x15]
+        ; mov w0, wzr
+        ; ret
+    );
+}
+
+/// Operand W`idx` of `narrow_addsub` (a physical register, or 8 for D16)
+/// into D`x`, where it is a double and no more (`FpuRegs::only_double`);
+/// to `wide` for an empty register and for 80 bits that hold more or
+/// another value. X6 and X7 are changed.
+fn narrow_operand(ops: &mut Asm, idx: u8, x: u8, wide: DynamicLabel) {
+    let (value, done) = (ops.new_dynamic_label(), ops.new_dynamic_label());
+    dynasm!(ops
+        ; .arch aarch64
+        ; cmp WSP(idx), 8
+        ; b.eq =>value
+        ; ldrb w6, [x14, X(idx)]
+        ; cmp w6, FPU_EMPTY
+        ; b.eq =>wide
+        ; ldr D(x), [x12, X(idx), lsl 3]
+        ; ldrb w6, [x13, X(idx)]
+        ; cbnz w6, =>done
+        // The 80 bits count: a significand that ends at a double's 53
+        // bits, with the integer bit set where the double isn't 0 and
+        // nothing where it is.
+        ; add x6, x11, X(idx), lsl 4
+        ; ldr x6, [x6]
+        ; tst x6, 0x7FF
+        ; b.ne =>wide
+        ; fmov x7, D(x)
+        ; lsl x7, x7, 1
+        ; cbz x7, >zero
+        ; tbnz x6, 63, =>done
+        ; b =>wide
+        ; zero:
+        ; cbnz x6, =>wide
+        ; b =>done
+        ; =>value
+        ; fmov D(x), d16
+        ; =>done
     );
 }
 

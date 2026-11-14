@@ -394,8 +394,9 @@ fn minus_one(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0xFFFF)
 }
 
-fn code_page(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(437)
+/// GetKBCodePage: the system's OEM code page, as the 32-bit one says.
+fn code_page(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(crate::win32::nls::oem(cpu).number())
 }
 
 fn r16(cpu: &Cpu, at: u32) -> u32 {
