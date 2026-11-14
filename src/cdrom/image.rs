@@ -1262,24 +1262,26 @@ fn mds_files_of(path: &Path, disc: &super::mds::Descriptor) -> Vec<Result<PathBu
 /// The names of the data files of the Alcohol 120% descriptor `disc` at
 /// `path`, as `mds::data_file` makes them of the names it keeps.
 fn mds_file_names(path: &Path, disc: &super::mds::Descriptor) -> Vec<String> {
+    disc.files()
+        .into_iter()
+        .map(|name| mds_data_name(path, name))
+        .collect()
+}
+
+/// The name of the data file `name` of the Alcohol 120% descriptor at
+/// `path` (`mds::data_file`).
+fn mds_data_name(path: &Path, name: &str) -> String {
     let descriptor = path
         .file_name()
         .map(|n| n.to_string_lossy())
         .unwrap_or_default();
-    disc.files()
-        .into_iter()
-        .map(|name| super::mds::data_file(&descriptor, name))
-        .collect()
+    super::mds::data_file(&descriptor, name)
 }
 
 /// The data file `name` of the Alcohol 120% descriptor at `path`
 /// (`mds::data_file`), found beside it in any case.
 fn mds_data_file(path: &Path, name: &str) -> Result<PathBuf, String> {
-    let descriptor = path
-        .file_name()
-        .map(|n| n.to_string_lossy())
-        .unwrap_or_default();
-    find_file(dir_of(path), &super::mds::data_file(&descriptor, name))
+    find_file(dir_of(path), &mds_data_name(path, name))
 }
 
 /// The `.bwa` file of DPM data beside the BlindWrite descriptor at `path`,
@@ -1446,17 +1448,22 @@ fn sheet(path: &Path) -> Option<Result<CueSheet, String>> {
 
 /// The files a CUE sheet or a BlindWrite, CloneCD or Alcohol 120%
 /// descriptor at `path` keeps its tracks in, those that are there, with
-/// the subchannel or DPM file beside it; none if `path` isn't one that
-/// `CdImage::open` reads as one.
+/// the DPM file beside it and the subchannel file beside it that the
+/// image reads; none if `path` isn't one that `CdImage::open` reads as
+/// one.
 pub fn track_files(path: &Path) -> Vec<PathBuf> {
     if is_b6t(path) {
         return b6t_files(path).into_iter().filter_map(Result::ok).collect();
     }
-    // The subchannel file is the one the name rules find with a layout
-    // `SubFile::open` reads; whether it covers the disc is checked when
-    // the image is opened.
-    let side =
-        |names: &mut dyn Iterator<Item = &str>| sub_file(path, names, None).found.map(|s| s.path);
+    // The subchannel file the image reads: whether a file named as one
+    // covers the disc, and whether the image keeps the subchannel of
+    // every sector itself, is known only from the open image. It is
+    // opened only when such a file is there, since opening decodes the
+    // length of a sheet's compressed audio files.
+    let side = |names: &mut dyn Iterator<Item = &str>| {
+        sub_file(path, names, None).found?;
+        CdImage::open(path).ok()?.sub_file.map(|s| s.path)
+    };
     if is_mds(path) {
         let Some(disc) = hostfs::read(path)
             .ok()
@@ -2661,6 +2668,14 @@ mod tests {
             "{}",
             notes
         );
+        let name = |p: &PathBuf| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_ascii_lowercase()
+        };
+        let names = |files: Vec<PathBuf>| files.iter().map(name).collect::<Vec<_>>();
+        assert_eq!(names(track_files(&dir.join("Game.mds"))), ["game.mdf"]);
         // A .sub of the name is looked for first, in any case.
         fs::write(dir.join("GAME.SUB"), side_file(&plain, &[7], false)).unwrap();
         let image = CdImage::open(&dir.join("Game.mds")).unwrap();
@@ -2670,6 +2685,16 @@ mod tests {
             image.notes().iter().all(|n| !n.contains("isn't read")),
             "{:?}",
             image.notes()
+        );
+        // The .sub refused, the .subcode after it is read and recorded.
+        fs::write(dir.join("GAME.SUB"), &full[..(150 + 200) * 96]).unwrap();
+        fs::write(dir.join("game.subcode"), &full).unwrap();
+        let image = CdImage::open(&dir.join("Game.mds")).unwrap();
+        image.read_subchannel(42, &mut sub).unwrap();
+        assert_eq!(sub, side_sub(&plain, 42, true));
+        assert_eq!(
+            names(track_files(&dir.join("Game.mds"))),
+            ["game.mdf", "game.subcode"]
         );
     }
 
@@ -2749,7 +2774,10 @@ mod tests {
             "{}",
             notes
         );
-        assert_eq!(track_files(&dir.join("disc.mds")).len(), 2);
+        // A save state records the files the image reads, so not the side
+        // file.
+        let files = track_files(&dir.join("disc.mds"));
+        assert_eq!(files.len(), 1, "{:?}", files);
     }
 
     /// `mirage_disc_get_dpm_data_for_sector`'s angle of sector `lba`, in
