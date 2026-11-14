@@ -156,6 +156,17 @@ mod tests {
         assert_eq!(read32(&c, 0x2C), 0x5446_1234);
         assert_eq!(read32(&c, 0x30), 0);
         assert_eq!(read32(&c, 0x3C), 0x0000_010B);
+        // No expansion ROM to size or place, no fourth BAR, and the
+        // read-only fields stay what they are.
+        let mut c = c;
+        for reg in [0x00, 0x08, 0x1C, 0x2C, 0x30, 0x34] {
+            let before = read32(&c, reg);
+            write32(&mut c, reg, u32::MAX);
+            assert_eq!(read32(&c, reg), before, "{reg:02X}h");
+        }
+        // The interrupt pin isn't the system's to write.
+        write32(&mut c, 0x3C, 0xFFFF_FF05);
+        assert_eq!(read32(&c, 0x3C), 0x0000_0105);
     }
 
     #[test]

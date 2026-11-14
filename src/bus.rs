@@ -2737,6 +2737,14 @@ impl Bus {
                         self.video_mode = new_mode;
                         self.vga.mark_dirty_full();
                     }
+                    // A ToadForce counts the VGA's retraces, with the
+                    // timing the registers give it from this write on.
+                    // Only the miscellaneous output, the sequencer and
+                    // the CRTC hold timing: palette and attribute
+                    // writes don't reach the card.
+                    if self.toadforce.is_some() && matches!(port, 0x3C2 | 0x3C5 | 0x3B5 | 0x3D5) {
+                        self.toadforce_retime();
+                    }
                 } else {
                     // Unhandled port write: log the first few to each port.
                     const LOGGED: u8 = 8;
@@ -3043,6 +3051,12 @@ impl Bus {
         if !std::mem::take(&mut self.vga.mode_switched) || self.video_mode == VideoMode::Vesa {
             return;
         }
+        self.show_register_mode();
+    }
+
+    /// Show the mode the VGA's registers describe, where it is another
+    /// kind than the one shown: text or graphics, 256 colours or fewer.
+    pub(crate) fn show_register_mode(&mut self) {
         let colours256 = |mode: VideoMode| mode == VideoMode::Graphics320x200;
         if let Some(mode) = self.vga.register_mode()
             && (mode.is_text() != self.video_mode.is_text() || colours256(mode) != colours256(self.video_mode))
