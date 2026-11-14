@@ -221,7 +221,7 @@ kernel32/heap: skipped heap.c:478
 kernel32/heap: skipped heap.c:848
 kernel32/loader: loader: 5 tests executed (0 marked as todo, 0 failures), 1 skipped.
 kernel32/loader: skipped loader.c:512
-kernel32/locale: locale: 417 tests executed (0 marked as todo, 1 failure), 11 skipped.
+kernel32/locale: locale: 420 tests executed (0 marked as todo, 1 failure), 11 skipped.
 kernel32/locale: skipped locale.c:2572
 kernel32/locale: skipped locale.c:152
 kernel32/locale: skipped locale.c:198

@@ -32,6 +32,7 @@ const IMPORTS: &[(&str, &[&str])] = &[
             "WideCharToMultiByte",
             "GetLocaleInfoA",
             "CompareStringA",
+            "GetDateFormatA",
         ],
     ),
     ("USER32.DLL", &["CharUpperBuffA"]),
@@ -312,10 +313,15 @@ fn a_us_windows_keeps_code_page_1252() {
 /// at x 0, and by TextOutW at x 32, in white on black. The pixels and
 /// the DC's character set.
 fn draw_de(test: &str, locale: Win32Locale) -> (Vec<u8>, u32) {
+    draw(test, locale, 0xC4, 0x0414)
+}
+
+/// As `draw_de`, with the byte `byte` and the character `wide`.
+fn draw(test: &str, locale: Win32Locale, byte: u8, wide: u16) -> (Vec<u8>, u32) {
     use Arg::*;
     let mut data = vec![0u8; DATA_SIZE];
-    put(&mut data, S_DE, b"\xC4\0");
-    put(&mut data, S_DE_WIDE, &[0x14, 0x04, 0, 0]);
+    put(&mut data, S_DE, &[byte, 0]);
+    put(&mut data, S_DE_WIDE, &[wide as u8, (wide >> 8) as u8, 0, 0]);
     let mut bmi = Vec::new();
     for v in [40u32, 64, -16i32 as u32] {
         bmi.extend_from_slice(&v.to_le_bytes());
@@ -371,6 +377,108 @@ fn a_russian_windows_draws_cyrillic_from_ansi_and_unicode() {
     let (us, charset) = draw_de("us_text", Win32Locale::EnUs);
     assert_eq!(charset, 0);
     assert_ne!(glyph(&us, 0), from_ansi);
+}
+
+/// What a program reads under `locale`, in its ANSI code page: the
+/// system's locale id, January's name, and 2 January 2000 (a Sunday) in
+/// the short and the long date format.
+fn dates(test: &str, locale: Win32Locale) -> (u32, [Vec<u8>; 3]) {
+    use Arg::*;
+    const TIME: u32 = 0x700;
+    const SHORT: u32 = 0x740;
+    const LONG: u32 = 0x780;
+    const DATE_SHORTDATE: u32 = 1;
+    const DATE_LONGDATE: u32 = 2;
+    let mut data = vec![0u8; DATA_SIZE];
+    let time: Vec<u8> = [2000u16, 1, 0, 2, 0, 0, 0, 0]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    put(&mut data, TIME, &time);
+    let user = I(LOCALE_USER_DEFAULT);
+    let calls = vec![
+        call("GetSystemDefaultLCID", &[]),
+        call(
+            "GetLocaleInfoA",
+            &[user, I(LOCALE_SMONTHNAME1), At(S_MONTH), I(32)],
+        ),
+        call(
+            "GetDateFormatA",
+            &[user, I(DATE_SHORTDATE), At(TIME), I(0), At(SHORT), I(64)],
+        ),
+        call(
+            "GetDateFormatA",
+            &[user, I(DATE_LONGDATE), At(TIME), I(0), At(LONG), I(64)],
+        ),
+    ];
+    let (cpu, at) = run(test, locale, &data, &calls);
+    let r = results(&cpu, at, calls.len());
+    let text = |offset: u32, len: u32| peek_bytes(&cpu, at + offset, len - 1);
+    let read = [text(S_MONTH, r[1]), text(SHORT, r[2]), text(LONG, r[3])];
+    (r[0], read)
+}
+
+/// Latvian (1257), Ukrainian (1251), Romanian (1250) and German (1252):
+/// each locale's id, names and date formats reach the program in its
+/// code page, and its system font draws its letters from their bytes as
+/// from Unicode.
+#[test]
+fn locales_of_each_code_page_give_their_names_and_dates() {
+    use rust_dos::win32::nls::CodePage;
+    let cases = [
+        (
+            Win32Locale::LvLv,
+            0x0426,
+            1257,
+            [
+                "janvāris",
+                "2000.01.02.",
+                "svētdiena, 2000. gada 2. janvāris",
+            ],
+            'ā',
+        ),
+        (
+            Win32Locale::UkUa,
+            0x0422,
+            1251,
+            ["Січень", "02.01.2000", "2 Січень 2000 р."],
+            'ї',
+        ),
+        (
+            Win32Locale::RoRo,
+            0x0418,
+            1250,
+            ["ianuarie", "02.01.2000", "2 ianuarie 2000"],
+            'ş',
+        ),
+        (
+            Win32Locale::DeDe,
+            0x0407,
+            1252,
+            ["Januar", "02.01.2000", "Sonntag, 2. Januar 2000"],
+            'ß',
+        ),
+    ];
+    for (locale, lcid, number, expected, letter) in cases {
+        let page = CodePage::by_number(number).unwrap();
+        let ansi = |s: &str| page.encode(&s.encode_utf16().collect::<Vec<_>>());
+        let name = locale.name();
+        let (read_lcid, read) = dates(&format!("dates_{name}"), locale);
+        assert_eq!(read_lcid, lcid, "{name}");
+        for (got, want) in read.iter().zip(expected) {
+            assert_eq!(*got, ansi(want), "{name}: {want}");
+        }
+        let wide = letter as u16;
+        let byte = ansi(&letter.to_string())[0];
+        assert!(byte >= 0x80, "{name}: {letter} has a byte of its own");
+        let (pixels, _) = draw(&format!("letter_{name}"), locale, byte, wide);
+        let from_ansi = glyph(&pixels, 0);
+        assert!(
+            from_ansi.iter().any(|&row| row != 0),
+            "{name}: {letter} is drawn"
+        );
+        assert_eq!(from_ansi, glyph(&pixels, 32), "{name}: {letter}");
+    }
 }
 
 #[test]
