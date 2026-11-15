@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 68;
+const WIN32_VERSION: u16 = 71;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -883,7 +883,7 @@ mod tests {
         (62, 0x9F78_ACB5_CCD2_8975), // OpenGL's textures in their contexts' group
         (63, 0xD1E3_14A4_31DE_2AAA), // OpenGL's vertices as given, and the card's lights
         (67, 0xD1E3_14A4_31DE_2AAA), // a Direct3D device made as a software device
-        (68, 0x2779_962D_7A44_1D77), // copy-on-write views paged, pages held for a fault
+        (71, 0x2779_962D_7A44_1D77), // copy-on-write views paged, pages held for a fault
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
