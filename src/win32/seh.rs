@@ -428,20 +428,46 @@ fn simulated(cpu: &Cpu, error: Option<u32>, eip: u32) -> Option<u32> {
     }
 }
 
-/// A page fault at `lin` in the running process: if the page is in the
-/// page file, give it its physical page. Whether it was one and has it
-/// now.
-pub(crate) fn page_in(cpu: &mut Cpu, lin: u32) -> bool {
+/// The hash `memory::retry` tells the faults of one instruction apart by:
+/// the page tables and the registers it faulted with, which the
+/// instruction, or a service, has again each time it runs again from its
+/// start. Not the flags, whose RF a fault may set.
+fn retry_key(cr3: u32, ctx: &Context) -> u64 {
+    let words = ctx.gpr.iter().copied().chain([cr3, ctx.eip]);
+    let words = words.chain(ctx.seg.iter().map(|&s| s as u32));
+    words.fold(0xCBF2_9CE4_8422_2325, |hash: u64, word| {
+        (hash ^ word as u64).wrapping_mul(0x100_0000_01B3)
+    })
+}
+
+/// A page fault at `lin` in the running process, of the instruction that
+/// faulted in `ctx`: if the page is in the page file, give it its
+/// physical page, and keep it in the pool while that instruction faults
+/// (`memory::retry`). Whether it was one and has it now.
+pub(crate) fn page_in(cpu: &mut Cpu, lin: u32, ctx: &Context) -> bool {
     use super::memory::PageIn;
+    super::memory::retry(&mut cpu.bus, retry_key(cpu.cr3, ctx));
+    // Pages not used lately make room first, a batch at a time.
+    if super::memory::is_paged_at(&cpu.bus, cpu.cr3, lin) && super::mapping::make_room(&mut cpu.bus)
+    {
+        cpu.bus.win32.tlb_stale = true;
+    }
     let mut result = super::memory::page_in(&mut cpu.bus, cpu.cr3, lin);
     // With no page of a program's own memory to send to the page file,
-    // pages of read-only views of files make room, as they do for a
-    // view's page (`mapping::fault_in`).
-    if result == PageIn::Full && super::mapping::evict(&mut cpu.bus) {
+    // pages of views of files make room, as they do for a view's page
+    // (`mapping::fault_in`): those not used lately first.
+    if result == PageIn::Full
+        && (super::mapping::sweep(&mut cpu.bus) || super::mapping::evict(&mut cpu.bus, true))
+    {
         cpu.bus.win32.tlb_stale = true;
         result = super::memory::page_in(&mut cpu.bus, cpu.cr3, lin);
     }
     let done = result == PageIn::Done;
+    if done {
+        super::memory::hold(&mut cpu.bus, cpu.cr3, lin);
+    } else if result == PageIn::Full {
+        super::memory::out_of_memory(&mut cpu.bus, lin);
+    }
     if std::mem::take(&mut cpu.bus.win32.tlb_stale) {
         cpu.tlb.flush();
     } else if done {
@@ -458,12 +484,14 @@ pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
     }
     // A page that isn't there (error code bit 0 clear) of the program's
     // memory in the page file, given its physical page now.
-    if vector == 14 && error.is_some_and(|e| e & 1 == 0) && page_in(cpu, cpu.cr2) {
+    if vector == 14 && error.is_some_and(|e| e & 1 == 0) && page_in(cpu, cpu.cr2, &ctx) {
         super::system::enter_user(cpu, &ctx);
         return;
     }
-    // One of a view of a file, read from the file now.
+    // One of a view of a file, read from the file now, and held as
+    // `page_in` holds a page (it told `memory::retry` of the instruction).
     if vector == 14 && error.is_some_and(|e| e & 1 == 0) && super::mapping::fault_in(cpu, cpu.cr2) {
+        super::memory::hold(&mut cpu.bus, cpu.cr3, cpu.cr2);
         super::system::enter_user(cpu, &ctx);
         return;
     }

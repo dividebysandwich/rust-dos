@@ -1508,8 +1508,11 @@ With `win32` on, a Win32 console program runs on the built-in Windows
   memory that may go out to it (`pageable`), and since start the pages
   of zeros given a physical page (`zero_ins`, most of them on a
   program's first touch of memory it committed), the pages read back
-  (`ins`) and those written out to make room (`outs`). Null until the
-  built-in Windows has its memory.
+  (`ins`) and those written out to make room (`outs`). For views of
+  mapped files: the pages read from their files (`view_reads`), those
+  given back to the pool to make room (`view_evicted`), and the searches
+  that gave them back (`view_sweeps`), each of which gives back a batch.
+  Null until the built-in Windows has its memory.
 
 `GET /api/win32/page_file` lists the pages of the running address space
 (`cr3`) that are in the page file, as `ranges` of pages next to each

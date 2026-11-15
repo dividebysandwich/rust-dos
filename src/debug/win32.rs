@@ -23,8 +23,10 @@ pub fn win32_json(cpu: &Cpu) -> Value {
 
 /// The page file, in pages: its size, the committed pages in it, the
 /// physical pages that may go out to it, and since start the pages of
-/// zeros given a physical page, those read back and those written out.
-/// Null before the built-in Windows has its memory.
+/// zeros given a physical page, those read back and those written out;
+/// and the pages of views of files read from their files, those given
+/// back to the pool, and the searches that gave them back. Null before
+/// the built-in Windows has its memory.
 fn page_file_json(cpu: &Cpu) -> Value {
     rust_dos::win32::page_file_status(&cpu.bus).map_or(Value::Null, |p| {
         json!({
@@ -34,6 +36,9 @@ fn page_file_json(cpu: &Cpu) -> Value {
             "zero_ins": p.counts.zero_ins,
             "ins": p.counts.ins,
             "outs": p.counts.outs,
+            "view_reads": p.counts.reads,
+            "view_evicted": p.counts.evicted,
+            "view_sweeps": p.counts.sweeps,
         })
     })
 }

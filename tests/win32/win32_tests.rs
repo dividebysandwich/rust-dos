@@ -3335,18 +3335,39 @@ fn a_program_uses_heaps_global_memory_and_mappings() {
 /// Run T.EXE from a folder with `files` to its end, on a machine with
 /// `memory_mb` MB of RAM; its exit code and what it printed.
 fn run_files_in(test: &str, files: &[(&str, Vec<u8>)], memory_mb: usize) -> (u8, String) {
+    let (code, text, _) = run_files_counted(test, files, memory_mb);
+    (code, text)
+}
+
+/// `run_files_in`, with the paging counts of the run, as they were at
+/// the end of its last batch that ran before the built-in Windows gave
+/// its memory back and its counts went with it.
+fn run_files_counted(
+    test: &str,
+    files: &[(&str, Vec<u8>)],
+    memory_mb: usize,
+) -> (u8, String, rust_dos::win32::PagingCounts) {
     let mut cpu = Cpu::with_memory(scratch(test, files), memory_mb);
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
     assert!(cpu.load_executable("T.EXE", None));
-    assert!(
-        run_to_exit(&mut cpu, 400),
-        "the program didn't end: {:?}",
-        printed(&cpu)
-    );
+    let mut counts = rust_dos::win32::PagingCounts::default();
+    let mut ended = false;
+    for _ in 0..400 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        let stop = run_batch(&mut cpu, &mut NoHook, false);
+        if cpu.bus.win32.active() {
+            counts = rust_dos::win32::paging_counts(&cpu.bus);
+        }
+        if stop == StopReason::ShellReloaded {
+            ended = true;
+            break;
+        }
+    }
+    assert!(ended, "the program didn't end: {:?}", printed(&cpu));
     assert!(!cpu.bus.win32.active());
-    (cpu.errorlevel, printed(&cpu))
+    (cpu.errorlevel, printed(&cpu), counts)
 }
 
 /// A read-only mapping of a file larger than the machine's memory, as
@@ -3533,6 +3554,240 @@ fn a_read_write_mapping_writes_back_only_the_pages_it_read() {
     expected[0x1005] = 0x55;
     let written = fs::read(PathBuf::from("target/test_win32").join(test).join("RW.DAT")).unwrap();
     assert!(written == expected, "the file isn't the one expected");
+}
+
+/// The data file of the mapping tests that write every page: `pages`
+/// pages, each starting with its number.
+fn numbered_pages(pages: u32) -> Vec<u8> {
+    let mut file = vec![0u8; (pages * 0x1000) as usize];
+    for page in 0..pages {
+        let at = (page * 0x1000) as usize;
+        file[at..at + 4].copy_from_slice(&page.to_le_bytes());
+    }
+    file
+}
+
+/// Write `page ^ mark` at offset 8 of each of `pages` pages of the view
+/// at ESI, then check twice that each still has its number at 0 and that
+/// value at 8, setting `bit` of EBX if all do the first time and the next
+/// bit if they do the second, when pages that left memory once come back
+/// a second time. Uses EAX, ECX and EDX.
+fn write_and_check_every_page(
+    a: &mut CodeAssembler,
+    pages: u32,
+    mark: u32,
+    bit: u32,
+) -> Result<(), IcedError> {
+    let mut write = a.create_label();
+    a.xor(edx, edx)?;
+    a.set_label(&mut write)?;
+    a.mov(eax, edx)?;
+    a.shl(eax, 12)?;
+    a.mov(ecx, edx)?;
+    a.xor(ecx, mark as i32)?;
+    a.mov(dword_ptr(esi + eax + 8), ecx)?;
+    a.inc(edx)?;
+    a.cmp(edx, pages as i32)?;
+    a.jne(write)?;
+    for pass in 0..2 {
+        let mut check = a.create_label();
+        let mut wrong = a.create_label();
+        a.xor(edx, edx)?;
+        a.set_label(&mut check)?;
+        a.mov(eax, edx)?;
+        a.shl(eax, 12)?;
+        a.cmp(dword_ptr(esi + eax), edx)?;
+        a.jne(wrong)?;
+        a.mov(ecx, edx)?;
+        a.xor(ecx, mark as i32)?;
+        a.cmp(dword_ptr(esi + eax + 8), ecx)?;
+        a.jne(wrong)?;
+        a.inc(edx)?;
+        a.cmp(edx, pages as i32)?;
+        a.jne(check)?;
+        a.set_label(&mut wrong)?;
+        a.cmp(edx, pages as i32)?;
+        bit_if_equal(a, bit + pass)?;
+    }
+    Ok(())
+}
+
+/// A copy-on-write view (PAGE_WRITECOPY, FILE_MAP_COPY) of a file larger
+/// than the machine's memory, every page of it written, as Oni maps and
+/// fixes up its level files: the written pages leave memory for the page
+/// file and come back from there, and the file keeps what it had. Then,
+/// with memory full of the view's pages, services write and read memory
+/// the program committed and never touched (ReadFile into it, WriteFile
+/// from it), whose pages need room that only the view's pages can make.
+/// Windows 98 pages all of it. A bit each in the exit code.
+#[test]
+fn a_copy_on_write_mapping_larger_than_memory_sends_written_pages_to_the_page_file() {
+    const PAGES: u32 = 24 * 256;
+    const MARK: u32 = 0xA5A5_0000;
+    const TEXT: &[u8] = b"read into memory the page file held\r\n";
+    const GENERIC_READ: i32 = 0x8000_0000u32 as i32;
+    const FILE_SHARE_READ: i32 = 1;
+    const OPEN_EXISTING: i32 = 3;
+    const PAGE_WRITECOPY: i32 = 8;
+    const FILE_MAP_COPY: i32 = 1;
+    const MEM_COMMIT: i32 = 0x1000;
+    const PAGE_READWRITE: i32 = 4;
+    const BUFFER: i32 = 0x10000;
+    let file = numbered_pages(PAGES);
+    let names: &[&str] = &[
+        "CreateFileA",
+        "CreateFileMappingA",
+        "MapViewOfFile",
+        "VirtualAlloc",
+        "ReadFile",
+        "GetStdHandle",
+        "WriteFile",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // Data: the files' names at 0 and 10h, ReadFile's count at 20h and
+    // WriteFile's at 24h.
+    let mut data = b"BIG.DAT\0".to_vec();
+    data.resize(0x10, 0);
+    data.extend_from_slice(b"SMALL.TXT\0");
+    data.resize(0x30, 0);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let (read, written) = (l.at(0x20), l.at(0x24));
+        let open = |a: &mut CodeAssembler, name: u64| {
+            push_args(
+                a,
+                &[name as i32, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0],
+            )?;
+            a.call(f("CreateFileA"))
+        };
+        a.xor(ebx, ebx)?;
+        open(a, l.at(0))?;
+        push_args(a, &[PAGE_WRITECOPY, 0, 0, 0])?;
+        a.push(0)?;
+        a.push(eax)?;
+        a.call(f("CreateFileMappingA"))?;
+        push_args(a, &[FILE_MAP_COPY, 0, 0, 0])?;
+        a.push(eax)?;
+        a.call(f("MapViewOfFile"))?;
+        a.mov(esi, eax)?;
+        a.test(esi, esi)?;
+        a.setne(cl)?;
+        a.cmp(cl, 1)?;
+        bit_if_equal(a, 0)?;
+        write_and_check_every_page(a, PAGES, MARK, 1)?;
+        // Committed, in the page file and never touched.
+        push_args(a, &[0, BUFFER, MEM_COMMIT, PAGE_READWRITE])?;
+        a.call(f("VirtualAlloc"))?;
+        a.mov(edi, eax)?;
+        open(a, l.at(0x10))?;
+        a.push(0)?;
+        a.push(read as i32)?;
+        a.push(TEXT.len() as i32)?;
+        a.lea(ecx, dword_ptr(edi + 0x8000))?;
+        a.push(ecx)?;
+        a.push(eax)?;
+        a.call(f("ReadFile"))?;
+        a.cmp(dword_ptr(read), TEXT.len() as i32)?;
+        bit_if_equal(a, 3)?;
+        a.push(STD_OUTPUT_HANDLE)?;
+        a.call(f("GetStdHandle"))?;
+        a.push(0)?;
+        a.push(written as i32)?;
+        a.push(TEXT.len() as i32)?;
+        a.lea(ecx, dword_ptr(edi + 0x8000))?;
+        a.push(ecx)?;
+        a.push(eax)?;
+        a.call(f("WriteFile"))?;
+        a.cmp(dword_ptr(written), TEXT.len() as i32)?;
+        bit_if_equal(a, 4)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let test = "mapping_copy_on_write_pages";
+    let files = [
+        ("T.EXE", exe),
+        ("BIG.DAT", file.clone()),
+        ("SMALL.TXT", TEXT.to_vec()),
+    ];
+    let (code, text, counts) = run_files_counted(test, &files, 16);
+    assert_eq!(code, 0x1F, "the checks that failed: {:05b} {}", !code & 0x1F, text);
+    // A search for pages to give back gives back a batch, so it serves
+    // many faults: one search for every 16 pages brought in, at most.
+    let faults = counts.ins + counts.reads + counts.zero_ins;
+    assert!(faults > 6144, "{counts:?}");
+    assert!(counts.sweeps * 16 <= faults, "{counts:?}");
+    assert_eq!(text.as_bytes(), TEXT);
+    let after = fs::read(PathBuf::from("target/test_win32").join(test).join("BIG.DAT")).unwrap();
+    assert!(after == file, "the file of a copy-on-write view changed");
+}
+
+/// A read-write view of a file larger than the machine's memory, every
+/// page of it written: the written pages are written to the file as they
+/// leave memory, and read from it again when they are touched again. A
+/// bit each in the exit code.
+#[test]
+fn a_read_write_mapping_larger_than_memory_writes_pages_to_its_file_as_they_leave() {
+    const PAGES: u32 = 24 * 256;
+    const MARK: u32 = 0x5A5A_0000;
+    const GENERIC_READ_WRITE: i32 = 0xC000_0000u32 as i32;
+    const OPEN_EXISTING: i32 = 3;
+    const PAGE_READWRITE: i32 = 4;
+    const FILE_MAP_WRITE: i32 = 2;
+    let file = numbered_pages(PAGES);
+    let names: &[&str] = &[
+        "CreateFileA",
+        "CreateFileMappingA",
+        "MapViewOfFile",
+        "UnmapViewOfFile",
+        "CloseHandle",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"BIG.DAT\0".to_vec();
+    data.resize(0x10, 0);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        push_args(
+            a,
+            &[l.at(0) as i32, GENERIC_READ_WRITE, 0, 0, OPEN_EXISTING, 0, 0],
+        )?;
+        a.call(f("CreateFileA"))?;
+        a.mov(edi, eax)?;
+        push_args(a, &[PAGE_READWRITE, 0, 0, 0])?;
+        a.push(0)?;
+        a.push(edi)?;
+        a.call(f("CreateFileMappingA"))?;
+        a.mov(ebp, eax)?;
+        push_args(a, &[FILE_MAP_WRITE, 0, 0, 0])?;
+        a.push(ebp)?;
+        a.call(f("MapViewOfFile"))?;
+        a.mov(esi, eax)?;
+        a.test(esi, esi)?;
+        a.setne(cl)?;
+        a.cmp(cl, 1)?;
+        bit_if_equal(a, 0)?;
+        write_and_check_every_page(a, PAGES, MARK, 1)?;
+        a.push(esi)?;
+        a.call(f("UnmapViewOfFile"))?;
+        a.push(ebp)?;
+        a.call(f("CloseHandle"))?;
+        a.push(edi)?;
+        a.call(f("CloseHandle"))?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let test = "mapping_read_write_pages";
+    let (code, text) = run_files_in(test, &[("T.EXE", exe), ("BIG.DAT", file.clone())], 16);
+    assert_eq!(code, 7, "the checks that failed: {:03b} {}", !code & 7, text);
+    // The pages that left memory are in the file already, the rest since
+    // the view went.
+    let after = fs::read(PathBuf::from("target/test_win32").join(test).join("BIG.DAT")).unwrap();
+    let mut expected = file;
+    for page in 0..PAGES {
+        let at = (page * 0x1000 + 8) as usize;
+        expected[at..at + 4].copy_from_slice(&(page ^ MARK).to_le_bytes());
+    }
+    assert!(after == expected, "the file doesn't have what the view wrote");
 }
 
 /// ReleaseStgMedium, as Windows' table of it has it: a global block no
