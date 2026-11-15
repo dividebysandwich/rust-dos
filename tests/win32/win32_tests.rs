@@ -3612,6 +3612,19 @@ fn write_and_check_every_page(
     Ok(())
 }
 
+/// The paging of a run that went three times through a view of `pages`
+/// pages, more than memory holds (`write_and_check_every_page`). Each
+/// pass brings most of its pages in, and none twice: fewer than three
+/// times `pages` in all, where views that thrash bring in millions. A
+/// search for pages to give back gives back a batch, so it serves many
+/// faults: one search for every 16 pages brought in, at most.
+fn paged_a_view_without_thrashing(counts: rust_dos::win32::PagingCounts, pages: u32) {
+    let faults = counts.ins + counts.reads + counts.zero_ins;
+    assert!(faults > pages as u64, "{counts:?}");
+    assert!(faults < 3 * pages as u64, "pages came in again: {counts:?}");
+    assert!(counts.sweeps * 16 <= faults, "{counts:?}");
+}
+
 /// A copy-on-write view (PAGE_WRITECOPY, FILE_MAP_COPY) of a file larger
 /// than the machine's memory, every page of it written, as Oni maps and
 /// fixes up its level files: the written pages leave memory for the page
@@ -3711,11 +3724,7 @@ fn a_copy_on_write_mapping_larger_than_memory_sends_written_pages_to_the_page_fi
     ];
     let (code, text, counts) = run_files_counted(test, &files, 16);
     assert_eq!(code, 0x1F, "the checks that failed: {:05b} {}", !code & 0x1F, text);
-    // A search for pages to give back gives back a batch, so it serves
-    // many faults: one search for every 16 pages brought in, at most.
-    let faults = counts.ins + counts.reads + counts.zero_ins;
-    assert!(faults > 6144, "{counts:?}");
-    assert!(counts.sweeps * 16 <= faults, "{counts:?}");
+    paged_a_view_without_thrashing(counts, PAGES);
     assert_eq!(text.as_bytes(), TEXT);
     let after = fs::read(PathBuf::from("target/test_win32").join(test).join("BIG.DAT")).unwrap();
     assert!(after == file, "the file of a copy-on-write view changed");
@@ -3777,8 +3786,10 @@ fn a_read_write_mapping_larger_than_memory_writes_pages_to_its_file_as_they_leav
         a.ret()
     });
     let test = "mapping_read_write_pages";
-    let (code, text) = run_files_in(test, &[("T.EXE", exe), ("BIG.DAT", file.clone())], 16);
+    let files = [("T.EXE", exe), ("BIG.DAT", file.clone())];
+    let (code, text, counts) = run_files_counted(test, &files, 16);
     assert_eq!(code, 7, "the checks that failed: {:03b} {}", !code & 7, text);
+    paged_a_view_without_thrashing(counts, PAGES);
     // The pages that left memory are in the file already, the rest since
     // the view went.
     let after = fs::read(PathBuf::from("target/test_win32").join(test).join("BIG.DAT")).unwrap();
