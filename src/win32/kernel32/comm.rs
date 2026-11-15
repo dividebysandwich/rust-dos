@@ -24,7 +24,8 @@
 use super::{ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, TRUE, set_error};
 use crate::bus::Bus;
 use crate::cpu::Cpu;
-use crate::win16::comm::{self as win16, Line};
+use crate::win16::comm::{self as win16, Flow, Line};
+use crate::win32::process;
 use std::collections::VecDeque;
 
 /// The DCB's size and its fields' places.
@@ -95,6 +96,9 @@ const MAX_BAUD: u32 = 115_200;
 /// MAXDWORD in a timeout.
 const MAXDWORD: u32 = u32::MAX;
 
+/// What a ReadFile that PurgeComm ended fails with.
+const ERROR_OPERATION_ABORTED: u32 = 995;
+
 /// How often a thread waiting in ReadFile looks for characters, in
 /// microseconds. 115200 bauds bring 11 characters in that time, fewer
 /// than the 16 the FIFO holds.
@@ -118,17 +122,17 @@ pub struct Port {
     pub xoff: bool,
     pub brk: bool,
     /// The DCB the port was last set up with.
-    pub dcb: Vec<u8>,
+    pub dcb: [u8; DCB_SIZE],
     /// SetCommMask's events.
     pub mask: u32,
     /// The CE_ errors since ClearCommError last gave them.
     pub errors: u32,
     /// The COMMTIMEOUTS, its five dwords.
-    pub timeouts: Vec<u32>,
+    pub timeouts: [u32; 5],
     /// When the last character came in, by the clock's microseconds.
     pub received_at: u64,
-    /// When the ReadFile waiting for characters began, if one does.
-    pub read_since: Option<u64>,
+    /// The ReadFiles that wait for characters, one a thread.
+    pub reads: Vec<Waiting>,
 }
 
 crate::state_fields!(Port {
@@ -145,7 +149,23 @@ crate::state_fields!(Port {
     errors,
     timeouts,
     received_at,
-    read_since
+    reads
+});
+
+/// A ReadFile that waits for characters: the thread it holds, when it
+/// began by the clock's microseconds, and whether PurgeComm's
+/// PURGE_RXABORT ended it.
+#[derive(Clone, Debug, Default)]
+pub struct Waiting {
+    pub thread: u32,
+    pub since: u64,
+    pub aborted: bool,
+}
+
+crate::state_fields!(Waiting {
+    thread,
+    since,
+    aborted
 });
 
 /// Whether a Win32 program has port `n` open.
@@ -171,32 +191,36 @@ pub(super) fn may_open(cpu: &Cpu, n: usize) -> Result<(), u32> {
 /// or 9600,n,8,1, with DTR and RTS on, XON and XOFF the usual characters
 /// and no timeouts. False for settings the UART can't do.
 pub(super) fn open(cpu: &mut Cpu, sft: u16, n: usize) -> bool {
-    let Some((line, flags)) = win16::port_settings(cpu, n) else {
+    let Some((line, flow)) = win16::port_settings(cpu, n) else {
         return false;
     };
-    let mut dcb = vec![0u8; DCB_SIZE];
+    let mut dcb = [0u8; DCB_SIZE];
     put_32(&mut dcb, DCB_LENGTH, DCB_SIZE as u32);
     put_32(&mut dcb, DCB_BAUD, MAX_BAUD / line.divisor as u32);
-    // Windows 3.1's flags, which are the low bits of Win32's but for
-    // the DTR and RTS controls, here on.
-    let mut win32_flags = F_BINARY
-        | DTR_CONTROL_ENABLE << DTR_CONTROL_SHIFT
-        | RTS_CONTROL_ENABLE << RTS_CONTROL_SHIFT;
-    if flags & 0x0004 != 0 {
-        win32_flags |= F_PARITY;
+    // fParity with a parity, and DTR and RTS on, or in handshake with
+    // hardware flow control.
+    let mut flags = match flow {
+        Flow::None => {
+            DTR_CONTROL_ENABLE << DTR_CONTROL_SHIFT | RTS_CONTROL_ENABLE << RTS_CONTROL_SHIFT
+        }
+        Flow::XonXoff => {
+            F_OUTX
+                | F_INX
+                | DTR_CONTROL_ENABLE << DTR_CONTROL_SHIFT
+                | RTS_CONTROL_ENABLE << RTS_CONTROL_SHIFT
+        }
+        Flow::Hardware => {
+            F_OUTX_CTS_FLOW
+                | F_OUTX_DSR_FLOW
+                | DTR_CONTROL_HANDSHAKE << DTR_CONTROL_SHIFT
+                | RTS_CONTROL_HANDSHAKE << RTS_CONTROL_SHIFT
+        }
+    };
+    flags |= F_BINARY;
+    if line.parity != 0 {
+        flags |= F_PARITY;
     }
-    if flags & 0x0300 != 0 {
-        win32_flags |= F_OUTX | F_INX;
-    }
-    if flags & 0x0018 != 0 {
-        win32_flags |= F_OUTX_CTS_FLOW
-            | F_OUTX_DSR_FLOW
-            | DTR_CONTROL_HANDSHAKE << DTR_CONTROL_SHIFT
-            | RTS_CONTROL_HANDSHAKE << RTS_CONTROL_SHIFT;
-        win32_flags &= !(DTR_CONTROL_ENABLE << DTR_CONTROL_SHIFT);
-        win32_flags &= !(RTS_CONTROL_ENABLE << RTS_CONTROL_SHIFT);
-    }
-    put_32(&mut dcb, DCB_FLAGS, win32_flags);
+    put_32(&mut dcb, DCB_FLAGS, flags);
     dcb[DCB_BYTESIZE] = line.size;
     dcb[DCB_PARITY] = line.parity;
     dcb[DCB_STOPBITS] = line.stop;
@@ -213,7 +237,6 @@ pub(super) fn open(cpu: &mut Cpu, sft: u16, n: usize) -> bool {
         in_size: QUEUE,
         out_size: QUEUE,
         dcb,
-        timeouts: vec![0; 5],
         ..Port::default()
     });
     true
@@ -231,9 +254,6 @@ pub(crate) fn file_closed(bus: &mut Bus, sft: u16) {
 /// The place in the open ports of the port of the file whose DOS file
 /// table entry is `sft`.
 pub(super) fn port_of_file(cpu: &Cpu, sft: u16) -> Option<usize> {
-    if cpu.bus.win32.comm.is_empty() {
-        return None;
-    }
     cpu.bus.win32.comm.iter().position(|p| p.sft == sft)
 }
 
@@ -243,7 +263,7 @@ fn port(cpu: &mut Cpu, handle: u32) -> Option<usize> {
     let i = super::file::open_of(cpu, handle).and_then(|open| port_of_file(cpu, open.sft));
     match i {
         Some(i) => {
-            pump(cpu, i);
+            pump(cpu, i, 0);
             Some(i)
         }
         None => {
@@ -256,11 +276,14 @@ fn port(cpu: &mut Cpu, handle: u32) -> Option<usize> {
 /// Bring the open port `i` up to now, as the port driver's interrupt
 /// handler would have: what was received into its queue while it has
 /// room, the line errors the UART noted, and the held characters out once
-/// nothing holds them.
-fn pump(cpu: &mut Cpu, i: usize) {
+/// nothing holds them. A ReadFile of `want` characters takes them as they
+/// come, so the queue then has room for at least that many: the driver
+/// moves them into the read's buffer, past the queue's size.
+fn pump(cpu: &mut Cpu, i: usize, want: usize) {
     let port = &cpu.bus.win32.comm[i];
     let n = port.id as usize;
-    let room = (port.in_size as usize).saturating_sub(port.input.len());
+    let size = (port.in_size as usize).max(want);
+    let room = size.saturating_sub(port.input.len());
     let mut received = Vec::new();
     while received.len() < room {
         match cpu.bus.serial_receive(n) {
@@ -342,9 +365,10 @@ pub(super) fn setup_comm(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// PurgeComm(handle, flags): PURGE_TXCLEAR empties the transmit queue
 /// and the UART's but for the character going out, PURGE_RXCLEAR the
-/// receive queue and the UART's. PURGE_TXABORT and PURGE_RXABORT end
-/// the reads and writes that wait, and none does: a ReadFile that waits
-/// holds its thread.
+/// receive queue and the UART's. PURGE_RXABORT ends the ReadFiles other
+/// threads wait in, which fail with ERROR_OPERATION_ABORTED.
+/// PURGE_TXABORT ends the writes that wait, and none does: the UART takes
+/// all of a WriteFile at once.
 pub(super) fn purge_comm(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let flags = args[1];
     let all = PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR;
@@ -363,6 +387,11 @@ pub(super) fn purge_comm(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         while cpu.bus.serial_receive(n).is_some() {}
         cpu.bus.win32.comm[i].input.clear();
     }
+    if flags & PURGE_RXABORT != 0 {
+        for read in &mut cpu.bus.win32.comm[i].reads {
+            read.aborted = true;
+        }
+    }
     Some(TRUE)
 }
 
@@ -371,7 +400,7 @@ pub(super) fn get_comm_state(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(i) = port(cpu, args[0]) else {
         return Some(FALSE);
     };
-    let dcb = cpu.bus.win32.comm[i].dcb.clone();
+    let dcb = cpu.bus.win32.comm[i].dcb;
     write_out(cpu, args[1], &dcb).then_some(TRUE)
 }
 
@@ -414,7 +443,9 @@ pub(super) fn set_comm_state(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(i) = port(cpu, args[0]) else {
         return Some(FALSE);
     };
-    let mut dcb = read_in(cpu, args[1], DCB_SIZE)?;
+    let bytes = read_in(cpu, args[1], DCB_SIZE)?;
+    let mut dcb = [0u8; DCB_SIZE];
+    dcb.copy_from_slice(&bytes);
     let Some(line) = dcb_line(&dcb) else {
         return invalid(cpu);
     };
@@ -509,7 +540,7 @@ pub(super) fn escape_comm_function(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         CLRBREAK => comm_break(cpu, i, false),
         _ => return invalid(cpu),
     }
-    pump(cpu, i);
+    pump(cpu, i, 0);
     Some(TRUE)
 }
 
@@ -567,7 +598,7 @@ pub(super) fn set_comm_timeouts(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(FALSE);
     };
     let bytes = read_in(cpu, args[1], 20)?;
-    cpu.bus.win32.comm[i].timeouts = (0..5).map(|k| get_32(&bytes, k * 4)).collect();
+    cpu.bus.win32.comm[i].timeouts = std::array::from_fn(|k| get_32(&bytes, k * 4));
     Some(TRUE)
 }
 
@@ -576,15 +607,18 @@ pub(super) fn set_comm_timeouts(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// `received_at` and `queued` waiting: never (None), or by the total
 /// timeout of ReadTotalTimeoutMultiplier times `n` plus
 /// ReadTotalTimeoutConstant milliseconds, or ReadIntervalTimeout after a
-/// character once one came. With ReadIntervalTimeout and the multiplier
-/// MAXDWORD and a constant below it, the constant is the time to wait
-/// for one character.
-fn read_due(timeouts: &[u32], n: u32, since: u64, received_at: u64, queued: usize) -> Option<u64> {
-    let &[interval, multiplier, constant, ..] = timeouts else {
-        return None;
-    };
+/// character once one came. In the form that waits for one character
+/// (`one_character`), the constant is the time to wait for it.
+fn read_due(
+    timeouts: &[u32; 5],
+    n: u32,
+    since: u64,
+    received_at: u64,
+    queued: usize,
+) -> Option<u64> {
+    let &[interval, multiplier, constant, ..] = timeouts;
     let ms = |ms: u64| ms.saturating_mul(1000);
-    let total = if interval == MAXDWORD && multiplier == MAXDWORD {
+    let total = if one_character(timeouts) {
         Some(constant as u64)
     } else if multiplier != 0 || constant != 0 {
         Some((multiplier as u64).saturating_mul(n as u64) + constant as u64)
@@ -603,53 +637,65 @@ fn read_due(timeouts: &[u32], n: u32, since: u64, received_at: u64, queued: usiz
 /// Whether a ReadFile of `n` characters returns at once with the
 /// `queued` the receive queue has: with all of them, or with what there
 /// is when ReadIntervalTimeout is MAXDWORD and the total timeouts 0, or
-/// with one or more when ReadIntervalTimeout and the multiplier are
-/// MAXDWORD and the constant isn't (`read_due`).
-fn read_now(timeouts: &[u32], n: u32, queued: usize) -> bool {
-    let &[interval, multiplier, constant, ..] = timeouts else {
-        return true;
-    };
+/// with one or more in the form that waits for one (`one_character`).
+fn read_now(timeouts: &[u32; 5], n: u32, queued: usize) -> bool {
+    let &[interval, multiplier, constant, ..] = timeouts;
     queued >= n as usize
         || (interval == MAXDWORD && multiplier == 0 && constant == 0)
-        || (interval == MAXDWORD
-            && multiplier == MAXDWORD
-            && constant != 0
-            && constant != MAXDWORD
-            && queued > 0)
+        || (one_character(timeouts) && queued > 0)
+}
+
+/// Whether the timeouts are the form COMMTIMEOUTS's documentation gives
+/// for a read that returns as soon as one character is there:
+/// ReadIntervalTimeout and the multiplier MAXDWORD, and the constant
+/// above 0 and below MAXDWORD, the time to wait for that character.
+/// Outside those bounds of the constant the general rules hold.
+fn one_character(timeouts: &[u32; 5]) -> bool {
+    let &[interval, multiplier, constant, ..] = timeouts;
+    interval == MAXDWORD && multiplier == MAXDWORD && constant != 0 && constant != MAXDWORD
 }
 
 /// ReadFile of the open port `i`: up to `n` characters of its receive
 /// queue to `buffer`, as its timeouts say. Without them it waits for all
-/// `n`. The count read and no error; None when a page isn't there, or
-/// the thread waits for characters, and the call runs again then.
+/// `n`. The count read and no error, or ERROR_OPERATION_ABORTED for a
+/// read PurgeComm ended; None when a page isn't there, or the thread
+/// waits for characters, and the call runs again then.
 pub(super) fn read(cpu: &mut Cpu, i: usize, buffer: u32, n: u32) -> Option<(u32, Option<u32>)> {
-    pump(cpu, i);
+    pump(cpu, i, n as usize);
     let now = cpu.bus.clock.now_micros();
-    let port = &cpu.bus.win32.comm[i];
+    let thread = process(cpu).current_thread().map_or(0, |t| t.id);
+    let port = &mut cpu.bus.win32.comm[i];
+    let waiting = port.reads.iter().position(|r| r.thread == thread);
+    if let Some(w) = waiting
+        && port.reads[w].aborted
+    {
+        port.reads.remove(w);
+        return Some((0, Some(ERROR_OPERATION_ABORTED)));
+    }
     let queued = port.input.len();
     if !read_now(&port.timeouts, n, queued) {
-        let since = port.read_since.unwrap_or(now);
+        let since = waiting.map_or(now, |w| port.reads[w].since);
         let due = read_due(&port.timeouts, n, since, port.received_at, queued);
         if due.is_none_or(|due| now < due) {
-            cpu.bus.win32.comm[i].read_since = Some(since);
+            if waiting.is_none() {
+                port.reads.push(Waiting {
+                    thread,
+                    since,
+                    aborted: false,
+                });
+            }
             let poll = now + READ_POLL;
             super::file::retry_at(cpu, Some(due.map_or(poll, |due| due.min(poll))));
             return None;
         }
     }
+    port.reads.retain(|r| r.thread != thread);
     let count = queued.min(n as usize);
-    let bytes: Vec<u8> = cpu.bus.win32.comm[i]
-        .input
-        .iter()
-        .take(count)
-        .copied()
-        .collect();
+    let bytes: Vec<u8> = port.input.iter().take(count).copied().collect();
     if !write_out(cpu, buffer, &bytes) {
         return None;
     }
-    let port = &mut cpu.bus.win32.comm[i];
-    port.input.drain(..count);
-    port.read_since = None;
+    cpu.bus.win32.comm[i].input.drain(..count);
     Some((count as u32, None))
 }
 
@@ -659,14 +705,14 @@ pub(super) fn read(cpu: &mut Cpu, i: usize, buffer: u32, n: u32) -> Option<(u32,
 /// written; None when a page isn't there.
 pub(super) fn write(cpu: &mut Cpu, i: usize, buffer: u32, n: u32) -> Option<(u32, Option<u32>)> {
     let bytes = read_in(cpu, buffer, n as usize)?;
-    pump(cpu, i);
+    pump(cpu, i, 0);
     let port = &mut cpu.bus.win32.comm[i];
     if port.xoff || port.brk {
         port.held.extend(&bytes);
     } else {
-        let n = port.id as usize;
+        let id = port.id as usize;
         for byte in bytes {
-            cpu.bus.serial_send(n, byte);
+            cpu.bus.serial_send(id, byte);
         }
     }
     Some((n, None))
@@ -726,6 +772,14 @@ mod tests {
         assert!(!read_now(&one, 4, 0));
         assert!(read_now(&one, 4, 1));
         assert_eq!(read_due(&one, 4, 1000, 0, 0), Some(51_000));
+        // With a constant of 0 that form isn't there: the total timeout
+        // of MAXDWORD milliseconds a character holds.
+        let none = [MAXDWORD, MAXDWORD, 0, 0, 0];
+        assert!(!read_now(&none, 4, 1));
+        assert_eq!(
+            read_due(&none, 4, 1000, 0, 1),
+            Some(1000 + 4 * MAXDWORD as u64 * 1000)
+        );
         // A total timeout of 10 ms a character plus 5 ms.
         let total = [0, 10, 5, 0, 0];
         assert_eq!(read_due(&total, 4, 1000, 0, 0), Some(46_000));

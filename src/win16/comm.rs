@@ -405,12 +405,21 @@ pub(crate) fn let_go(bus: &mut Bus, n: usize) {
     bus.serial_lines_off_when_sent(n, MCR_DTR | MCR_RTS);
 }
 
+/// The flow control the fifth field of a port's line in WIN.INI's [ports]
+/// asks for: none, XON/XOFF ("x") or the CTS, DSR, DTR and RTS lines
+/// ("p").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Flow {
+    None,
+    XonXoff,
+    Hardware,
+}
+
 /// The line WIN.INI's [ports] has for port `n` ("COM1:=9600,n,8,1,x"),
-/// or 9600,n,8,1, and its DCB's flags: fBinary, fParity with a parity,
-/// and the flow control a fifth field asks for. A port starts with this
-/// when it opens. None for settings that can't be read or that the UART
-/// can't do.
-pub(crate) fn port_settings(cpu: &mut Cpu, n: usize) -> Option<(Line, u16)> {
+/// or 9600,n,8,1, and the flow control it asks for. A port starts with
+/// this when it opens. None for settings that can't be read or that the
+/// UART can't do.
+pub(crate) fn port_settings(cpu: &mut Cpu, n: usize) -> Option<(Line, Flow)> {
     let dcb = settings_dcb(cpu, n)?;
     let line = Line {
         divisor: divisor(dcb_word(&dcb, DCB_BAUD)).ok()?,
@@ -418,7 +427,15 @@ pub(crate) fn port_settings(cpu: &mut Cpu, n: usize) -> Option<(Line, u16)> {
         parity: dcb[DCB_PARITY],
         stop: dcb[DCB_STOPBITS],
     };
-    Some((line, dcb_word(&dcb, DCB_FLAGS)))
+    let flags = dcb_word(&dcb, DCB_FLAGS);
+    let flow = if flags & (F_OUTX_CTS_FLOW | F_OUTX_DSR_FLOW) != 0 {
+        Flow::Hardware
+    } else if flags & (F_OUTX | F_INX) != 0 {
+        Flow::XonXoff
+    } else {
+        Flow::None
+    };
+    Some((line, flow))
 }
 
 /// The DCB of WIN.INI's settings for port `n` (`port_settings`).
