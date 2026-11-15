@@ -1000,23 +1000,26 @@ fn the_frame_rate_cap_holds_swaps_a_frame_time_apart() {
     wait_ms(&mut bus, 51.0);
     assert_eq!(front(&bus), 0, "swapped at its time");
     // One long after its turn happens when it comes, and the turns start
-    // again from it: the next waits 50 ms from then, and doesn't make up
-    // for the late one.
+    // again from it as from a swap a frame time late: the next happens
+    // at once too, and the one after it waits 50 ms from the late one.
     wait_ms(&mut bus, 270.0);
     let late = bus.clock.now_ns() as f64 / 1e6;
     w(&mut bus, SWAPBUFFER_CMD, 0);
     assert_eq!(front(&bus), 1, "a late swap isn't held");
+    wait_ms(&mut bus, 1.0);
+    w(&mut bus, SWAPBUFFER_CMD, 0);
+    assert_eq!(front(&bus), 0, "nor the one after it");
     w(&mut bus, SWAPBUFFER_CMD, 0);
     let due = due_ms(bus.hold.unwrap().until);
     assert!((due - late - 50.0).abs() < 0.05, "due at {} ms after one at {} ms", due, late);
     // A write behind the held swap waits for it.
     w(&mut bus, COLOR0, 0);
-    assert_eq!(front(&bus), 0);
+    assert_eq!(front(&bus), 1);
     assert!(bus.clock.now_ns() as f64 / 1e6 >= due - 0.01);
     // Without the cap, swaps happen at once.
     bus.set_fps_cap(None);
     w(&mut bus, SWAPBUFFER_CMD, 0);
-    assert_eq!(front(&bus), 1);
+    assert_eq!(front(&bus), 0);
 }
 
 #[test]

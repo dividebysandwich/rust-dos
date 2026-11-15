@@ -3760,7 +3760,8 @@ one's, in emulated time:
 - A program faster than the cap waits for the turn, so its frames come
   at the cap's rate, a frame time apart.
 - A program slower than the cap shows each frame as soon as it is
-  done, and keeps its own rate.
+  done, and keeps its own rate. The cap holds none of its frames,
+  uneven as they may be.
 - A frame that comes after its turn shows at once. If it is no more
   than three frame times late (50 ms at 60), the turns keep their
   schedule: the frames after it show sooner than a frame time apart
@@ -3769,17 +3770,18 @@ one's, in emulated time:
   speed.
 - From a frame later than that (a load, a menu that steps its
   simulation for a tenth of a second between frames) the schedule
-  starts again: the frames after it wait a frame time each and don't
-  make up for it. A game that draws in bursts between such steps
-  therefore counts fewer frames under a cap than the cap's number.
-  Grom's menu at 150,000 cycles spends 114 to 190 ms on each step of
-  its simulation and draws frames 3 ms apart between them, 71 a second
-  without a cap, of which a 60 Hz display shows about 20. Under a cap
-  of 60 each frame of a burst waits a frame time, and the next step
-  comes due sooner, so it shows 18 a second, about what a game synced
-  to a 60 Hz display shows. That is the rate of a simulation that runs
-  on the clock, which keeps its speed under the cap; with more cycles
-  the menu shows 60.
+  starts again: the next frame shows as soon as it is done, and the
+  ones after it wait a frame time each. A game that draws in bursts
+  between such steps therefore counts fewer frames under a cap than
+  the cap's number. Grom's menu at 150,000 cycles spends 114 to 190 ms
+  on each step of its simulation and draws frames 3 ms apart between
+  them, 71 a second without a cap, of which a 60 Hz display shows
+  about 20. Under a cap of 60 the frames of a burst after the first
+  two wait a frame time each, and the next step comes due sooner, so
+  it shows 25 a second, more than a game synced to a 60 Hz display
+  shows. That is the rate of a simulation that runs on the clock,
+  which keeps its speed under the cap; with more cycles the menu shows
+  60.
 - A present that waits for the display's retrace (a flip, or a swap
   with a swap interval) is already held to the display's rate. Under
   `auto`, or with the cap at that rate or above it, the cap holds none

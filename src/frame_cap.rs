@@ -23,17 +23,23 @@
 //! late frame it showed 66.5, and 74.9 with one or two frame times
 //! kept, the 50 ms frame costing the frames after it 37 ms.
 //!
-//! A frame later than that starts the schedule again from when it
-//! shows: the frames after it wait a frame time each, and no more than
+//! A frame later than that starts the schedule again, as from a frame
+//! that came a frame time late: the next frame shows as soon as it is
+//! drawn, the ones after it wait a frame time each, and no more than
 //! three frames ever make up for a late one. Grom's menu, which steps
 //! its simulation for 114 to 190 ms between frames drawn in under 3 ms,
-//! shows 18 frames a second under a cap of 60, a frame time apart; let
-//! through until the number was made up, it showed 60, four in five
-//! under 3 ms after the one before, of which a display of 60 Hz showed
-//! 20. What the frames after such a late one wait for is counted
-//! (`Counters`), so that a program running slow for it can be told. The
-//! window, with `vrr`, refreshes at the cap's rate while a program shows
-//! its frames through it (`refresh_timing`).
+//! shows 25 frames a second under a cap of 60; let through until the
+//! number was made up, it showed 60, four in five under 3 ms after the
+//! one before, of which a display of 60 Hz showed 20. The frame time
+//! kept is for a program slower than the cap whose frames are uneven:
+//! Myth II at 50 frames a second, its frames 13 to 26 ms, starts the
+//! schedule again three times a second, and with the schedule started
+//! from the late frame itself the short frame after each waited for
+//! its turn, 46 holds in 20 s and 13 frames fewer. With a frame time
+//! kept none waits. What the frames after such a late one wait for is
+//! counted (`Counters`), so that a program running slow for it can be
+//! told. The window, with `vrr`, refreshes at the cap's rate while a
+//! program shows its frames through it (`refresh_timing`).
 //!
 //! A present that waits for the display's retrace already shows no more
 //! frames than the display does: with the cap at or above the display's
@@ -177,11 +183,11 @@ pub struct Counters {
     pub reanchors: u64,
     /// The time held frames waited that the schedule would not have made
     /// them wait had it not started again, in ns: a fresh start moves the
-    /// turns back by how late its frame was, and the frames held after it
-    /// wait up to that much longer than under the turns before, until the
-    /// next fresh start. Over the emulated time, the most a program that
-    /// steps its logic once a frame ran slow for the cap's turns starting
-    /// again.
+    /// turns back by how late its frame was less a frame time, and the
+    /// frames held after it wait up to that much longer than under the
+    /// turns before, until the next fresh start. Over the emulated time,
+    /// the most a program that steps its logic once a frame ran slow for
+    /// the cap's turns starting again.
     pub dropped_ns: u64,
 }
 
@@ -318,8 +324,11 @@ impl FrameCap {
     /// frame showed no more than `LATE_FRAMES` frame times after it: a
     /// frame that waited for its turn, and a late one, which the next
     /// ones make up for. From a frame later than that the schedule
-    /// starts again, the next turn a frame time after it showed, so that
-    /// no more frames than that make up for it at once. A present that
+    /// starts again as from a frame a frame time late: the next turn is
+    /// when it showed, and the one after that a frame time later. One
+    /// frame makes up for it, so that a program slower than the cap
+    /// whose short frames follow long ones isn't held after each fresh
+    /// start, and no more than `LATE_FRAMES` ever do at once. A present that
     /// waits for the retrace shows at the retrace nearest its turn
     /// (`wait`), up to half a retrace before or after it, which isn't
     /// late: the retraces it shows at keep the cap's rate (60 a second on
@@ -366,8 +375,8 @@ impl FrameCap {
             // again had no use for those turns, as one slower than the
             // cap that speeds up (a load, then a menu) had none.
             self.counters.reanchors += 1;
-            self.owed = (at - turn).min(OWED_MOST_NS);
-            at
+            self.owed = (at - turn - frame).min(OWED_MOST_NS);
+            at - frame
         });
     }
 
@@ -383,7 +392,7 @@ impl FrameCap {
     /// program's without the cap, and settles at the same speed: a
     /// program held to 60 that would draw 120 has speed to spare, and one
     /// that draws its frames in bursts between long steps (Grom's menu
-    /// shows 18 a second under a cap of 60 and 71 without, at one speed)
+    /// shows 25 a second under a cap of 60 and 71 without, at one speed)
     /// isn't short of the cap's rate for the frames the cap spread out.
     /// The frames are reckoned at the held frames' average time, so that
     /// the short frames of a program whose frames take long and short
@@ -544,28 +553,33 @@ mod tests {
             "the next one's turn is past"
         );
         assert_eq!(on_time.counters().reanchors, 0);
-        // 10 ms later than that, they start again from it.
+        // 10 ms later than that, they start again from it as from a
+        // frame that came a frame time late: the next one shows as soon
+        // as it is drawn, and the one after it a frame time after the
+        // late one.
         let late = kept + 10 * MS;
         assert_eq!(cap.wait(late, None), None);
         cap.shown(late);
-        assert_eq!(cap.wait(late + 5 * MS, None), Some(late + 50 * MS));
+        assert_eq!(cap.wait(late + 5 * MS, None), None);
+        cap.shown(late + 5 * MS);
+        assert_eq!(cap.wait(late + 10 * MS, None), Some(late + 50 * MS));
         assert_eq!(cap.counters().reanchors, 1);
         assert_eq!(cap.counters().dropped_ns, 0, "nothing waited yet");
-        // The frame held for 45 ms would have shown at once on the turns
+        // The frame held for 40 ms would have shown at once on the turns
         // before, and so the ones after it, until they have waited as
         // long as the turns moved back by.
         cap.shown(late + 50 * MS);
-        assert_eq!(cap.counters().dropped_ns, 45 * MS);
+        assert_eq!(cap.counters().dropped_ns, 40 * MS);
         let mut now = late + 50 * MS;
         for _ in 0..9 {
             now = cap.wait(now + 5 * MS, None).unwrap();
             cap.shown(now);
         }
         let counted = cap.counters();
-        assert_eq!((counted.shown, counted.held, counted.late), (12, 10, 1));
+        assert_eq!((counted.shown, counted.held, counted.late), (13, 10, 2));
         assert_eq!(
             (counted.reanchors, counted.dropped_ns),
-            (1, late - 100 * MS)
+            (1, late - 150 * MS)
         );
     }
 
@@ -587,10 +601,10 @@ mod tests {
 
     #[test]
     fn a_program_slower_than_the_cap_that_speeds_up_is_owed_one_fresh_start() {
-        // 20 frames a second for 10 s, its turns started again every
-        // other frame, 66.7 ms late, then frames of 5 ms. Only the last
-        // fresh start's lateness counts: the ones before it added up to
-        // a second, which the first second of fast frames counted as
+        // 20 frames a second for 10 s, its turns started again at every
+        // frame, each moving them back by 33.3 ms, then frames of 5 ms.
+        // Only the last fresh start counts: the ones before it added up
+        // to a second, which the first second of fast frames counted as
         // dropped.
         let mut cap = cap(60);
         let mut now = 0;
@@ -599,13 +613,13 @@ mod tests {
             assert_eq!(cap.wait(now, None), None);
             cap.shown(now);
         }
-        assert_eq!(cap.counters().reanchors, 99);
+        assert_eq!(cap.counters().reanchors, 198);
         for _ in 0..600 {
             now = cap.wait(now + 5 * MS, None).unwrap_or(now + 5 * MS);
             cap.shown(now);
         }
         let dropped = cap.counters().dropped_ns;
-        assert_eq!(dropped, 66_666_668);
+        assert_eq!(dropped, 33_333_334);
     }
 
     #[test]
@@ -617,7 +631,7 @@ mod tests {
         let mut now = 10_000 * MS;
         cap.shown(now);
         for _ in 0..600 {
-            now = cap.wait(now + MS, None).unwrap();
+            now = cap.wait(now + MS, None).unwrap_or(now + MS);
             cap.shown(now);
         }
         assert_eq!(cap.counters().dropped_ns, OWED_MOST_NS);
@@ -754,20 +768,45 @@ mod tests {
     }
 
     #[test]
-    fn the_frames_after_a_frame_too_late_dont_make_up_for_it() {
+    fn one_frame_after_a_frame_too_late_makes_up_for_it() {
         // Nine frames of a fifth of a frame time, then one that comes a
-        // frame time later than a frame may: each fast one waits a frame
-        // time, the ones after the late one too, so the ten take as long
-        // as they would without a cap, and no two come closer together
-        // than a frame time.
+        // frame time later than a frame may: the first fast one after it
+        // shows as it is drawn, and each of the others waits a frame
+        // time after the late one's. Only that one and the next come
+        // closer than a frame time after the frame before them, and no
+        // three frames come within a frame time but for the late one's.
         let frame = 1_000_000_000 / 60;
         let mut work = vec![frame / 5; 9];
         work.push(frame * (LATE_FRAMES + 2));
         let shown = presented(60, &work, 601);
-        assert!(shown.windows(2).all(|w| w[1] - w[0] >= frame));
+        let late = |i: usize| shown[i] - shown[i - 1] > LATE_FRAMES * frame;
+        for i in 3..shown.len() {
+            let apart = shown[i] - shown[i - 1];
+            assert!(apart >= frame || late(i - 1) || late(i - 2), "{i}");
+            assert!(shown[i] - shown[i - 2] >= frame || late(i - 2), "{i}");
+        }
         let rate = rate(&shown);
-        let expected = 600.0 / (11 + LATE_FRAMES) as f64;
+        let expected = 600.0 / (10 + LATE_FRAMES) as f64;
         assert!((rate - expected).abs() < 0.1, "{rate}");
+    }
+
+    #[test]
+    fn a_program_slower_than_the_cap_whose_frames_are_uneven_is_never_held() {
+        // Frames of 10 and 30 ms by turns, 50 a second, and of 5 and 29
+        // ms, 58.8, under a cap of 60. The frames fall behind their turns
+        // by a little each, and every so often one starts the turns
+        // again. Started from that frame itself, the short frame after
+        // it came before its turn and waited 6.7 ms, as it would for a
+        // 60 Hz retrace; a program that steps its logic once a frame ran
+        // 1% slow for it. Started as from a frame a frame time late, no
+        // frame is held.
+        for work in [[10 * MS, 30 * MS], [5 * MS, 29 * MS]] {
+            let (shown, cap) = presented_by(cap(60), &work, 601);
+            let counted = cap.counters();
+            assert!(counted.reanchors > 0);
+            assert_eq!((counted.held, counted.dropped_ns), (0, 0), "{work:?}");
+            assert_eq!(shown[600], 300 * (work[0] + work[1]) + work[0]);
+        }
     }
 
     #[test]
@@ -777,7 +816,7 @@ mod tests {
         // five steps in one frame. Uncapped that is 61 frames a second,
         // two in three of them 2.6 ms after the one before. Under a cap
         // of 60 the frames after a step make up for as many frame times
-        // as a frame may be late, and no more: none after the five
+        // as a frame may be late, and no more: one after the five
         // steps, and no second has more than 60 and those.
         let ms = 1_000_000;
         let frame = 1_000_000_000 / 60;
@@ -800,9 +839,10 @@ mod tests {
                 in_second,
                 t
             );
-            // After the five steps, a frame time apart.
-            if i > 0 && t - shown[i - 1] > 100 * ms {
-                assert!(shown[i + 1] - t >= frame);
+            // After the five steps, one frame as it is drawn, and the
+            // next a frame time after the steps' frame.
+            if i > 0 && i + 2 < shown.len() && t - shown[i - 1] > 100 * ms {
+                assert!(shown[i + 2] - t >= frame);
             }
         }
     }
@@ -842,9 +882,10 @@ mod tests {
     fn a_program_stepping_on_the_clock_loses_no_time_and_shows_what_a_retrace_wait_would() {
         // Uncapped, the program draws 72 frames a second, in bursts of
         // ten 2.8 ms apart after each step, of which a 60 Hz display
-        // shows 20. Under a cap of 60 the frames of a burst wait a frame
+        // shows 20. Under a cap of 60 the first frame after a step's
+        // shows as it is drawn and the others of a burst wait a frame
         // time each, and the time they wait the program spends on steps
-        // that came due meanwhile: it shows 18 a second, a display 18 of
+        // that came due meanwhile: it shows 24 a second, a display 18 of
         // them, and its simulation keeps its speed. A present that waits
         // for a 60 Hz retrace, as on a machine with the display synced,
         // shows 13.5. So the cap shows no fewer frames than a display of
@@ -865,7 +906,7 @@ mod tests {
         let free_rate = rate(&free);
         let held_rate = rate(&held);
         assert!((free_rate - 72.0).abs() < 1.0, "{free_rate}");
-        assert!((held_rate - 18.0).abs() < 1.0, "{held_rate}");
+        assert!((held_rate - 24.3).abs() < 1.0, "{held_rate}");
         assert!(held_rate > rate(&synced), "{}", rate(&synced));
         let (seen_held, seen_free) = (seen_at_60(&held), seen_at_60(&free));
         assert!(seen_held > 0.8 * seen_free, "{seen_held} of {seen_free}");
@@ -875,14 +916,16 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_a_second_late_lets_none_show_at_once() {
+    fn a_frame_a_second_late_lets_one_more_show_at_once() {
         let frame = 1_000_000_000 / 60;
         let mut cap = cap(60);
         cap.shown(frame);
         let late = 1_000_000_000 + frame;
         assert_eq!(cap.wait(late, None), None);
         cap.shown(late);
-        assert_eq!(cap.wait(late + 1000, None), Some(late + frame));
+        assert_eq!(cap.wait(late + 1000, None), None);
+        cap.shown(late + 1000);
+        assert_eq!(cap.wait(late + 2000, None), Some(late + frame));
     }
 
     #[test]
