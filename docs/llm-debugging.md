@@ -1722,7 +1722,16 @@ by physical address.
   presents: start a run that measures how fast a game draws with
   `--fps-cap off` (or `POST /api/fps_cap {"fps_cap":"off"}`), and check
   `video.fps_cap` in `/api/status` ("auto", a rate, or null for off)
-  before quoting a frame rate. `/api/stats` reports `mips` (host speed while
+  before quoting a frame rate. `fps_cap` in `/api/stats` (`features` has
+  `fps_cap_stats`) counts what the cap did to the frames since the machine
+  started: `shown` (the frames through it, without the presents it leaves
+  to the display's retrace), `held` (those that waited for their turn),
+  `late` (those that came after it), `reanchors` (those late enough for the
+  turns to start again from them) and `dropped_ms` (the time held frames
+  waited because of that). Take the difference of two readings:
+  `dropped_ms` over the emulated time between them is the most a game
+  whose logic steps once a frame ran slow for the cap, and `held` at 0
+  says the cap held nothing. `/api/stats` reports `mips` (host speed while
   executing guest code), `emulated_mips` (guest instructions per wall-clock
   second) and the decode-cache hit rate, averaged over about a second. Its
   `frame` object has the settings window's Stats page numbers and the

@@ -3754,22 +3754,28 @@ A cap below the rate a game draws at by itself slows a game whose
 logic is tied to its frames: Glover's logo screens, drawn at 20 frames
 a second, last longer under `fps_cap=10`.
 
-Under a cap, no two frames show closer together than its frame time
-(1/60 s at 60), in emulated time. Each frame has a turn, a frame time
-after the last one's:
+Each frame has a turn, a frame time (1/60 s at 60) after the last
+one's, in emulated time:
 
 - A program faster than the cap waits for the turn, so its frames come
   at the cap's rate, a frame time apart.
 - A program slower than the cap shows each frame as soon as it is
   done, and keeps its own rate.
-- A program that is sometimes faster and sometimes slower waits only
-  for the frames that come early. A late frame shows when it is done,
-  and the next one's turn is a frame time after that: the frames after
-  a late one don't show sooner to make up for it. Such a program shows
-  fewer frames than the cap, evenly spaced, where making up the number
-  would show them in bursts a display can't tell apart (Grom's menu,
-  whose simulation takes up to 190 ms in one frame, with frames of
-  3 ms between).
+- A frame that comes after its turn shows at once. If it is no more
+  than three frame times late (50 ms at 60), the turns keep their
+  schedule: the frames after it show sooner than a frame time apart
+  until they are back on it. The program gets the time back and shows
+  the cap's rate, and a game whose logic steps once a frame keeps its
+  speed.
+- From a frame later than that (a load, a menu that steps its
+  simulation for a tenth of a second between frames) the schedule
+  starts again: the frames after it wait a frame time each and don't
+  make up for it. A game that draws in bursts between such steps
+  therefore counts fewer frames under a cap than the cap's number,
+  because frames closer together than the cap's frame time aren't
+  shown: Grom's menu, whose simulation takes up to 190 ms in one frame
+  with frames of 3 ms between, counts 71 a second without a cap, of
+  which a 60 Hz display shows 18.
 - A present that waits for the display's retrace (a flip, or a swap
   with a swap interval) is already held to the display's rate. Under
   `auto`, or with the cap at that rate or above it, the cap holds none
@@ -3824,6 +3830,22 @@ frames a second.
 With `vrr=true`, while a program shows its frames through the cap (one
 in the last second) and the cap is below the display's rate, the window
 refreshes at the cap's rate, as it does at the display's otherwise.
+
+The debug server's `/api/stats` counts what the cap did since the
+machine started, in `fps_cap`:
+
+- `shown`: the frames that went through the cap. A present the cap
+  leaves to the display's retrace isn't among them.
+- `held`: those that waited for their turn.
+- `late`: those that came after it.
+- `reanchors`: those late enough for the schedule to start again.
+- `dropped_ms`: the time held frames waited because the schedule had
+  started again, which they wouldn't have waited on the turns before.
+
+A game whose logic is tied to its frames ran slow for the cap by at
+most `dropped_ms` out of the emulated time. Near zero, the cap cost it
+no time. If it grows by seconds a minute in a game that plays slow,
+raise the cap or turn it off.
 
 Benchmarks and timedemos report at most the cap: turn it off
 (`fps_cap=off`, `--fps-cap off`) to measure how fast a game can draw.
