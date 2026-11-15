@@ -607,8 +607,12 @@ pub(super) fn set_comm_timeouts(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// `received_at` and `queued` waiting: never (None), or by the total
 /// timeout of ReadTotalTimeoutMultiplier times `n` plus
 /// ReadTotalTimeoutConstant milliseconds, or ReadIntervalTimeout after a
-/// character once one came. In the form that waits for one character
-/// (`one_character`), the constant is the time to wait for it.
+/// character once one came. With ReadIntervalTimeout MAXDWORD there is
+/// no interval timeout, a constant of MAXDWORD means no total timeout
+/// either, and a multiplier of MAXDWORD makes the constant the time to
+/// wait for one character, as in Windows NT's serial driver
+/// (serial.sys's SerialStartRead, whose sample is in Microsoft's
+/// Windows-driver-samples).
 fn read_due(
     timeouts: &[u32; 5],
     n: u32,
@@ -618,8 +622,12 @@ fn read_due(
 ) -> Option<u64> {
     let &[interval, multiplier, constant, ..] = timeouts;
     let ms = |ms: u64| ms.saturating_mul(1000);
-    let total = if one_character(timeouts) {
-        Some(constant as u64)
+    let total = if interval == MAXDWORD {
+        match (multiplier, constant) {
+            (_, MAXDWORD) => None,
+            (MAXDWORD, _) => Some(constant as u64),
+            _ => Some((multiplier as u64).saturating_mul(n as u64) + constant as u64),
+        }
     } else if multiplier != 0 || constant != 0 {
         Some((multiplier as u64).saturating_mul(n as u64) + constant as u64)
     } else {
@@ -635,24 +643,21 @@ fn read_due(
 }
 
 /// Whether a ReadFile of `n` characters returns at once with the
-/// `queued` the receive queue has: with all of them, or with what there
-/// is when ReadIntervalTimeout is MAXDWORD and the total timeouts 0, or
-/// with one or more in the form that waits for one (`one_character`).
-fn read_now(timeouts: &[u32; 5], n: u32, queued: usize) -> bool {
+/// `queued` the receive queue has, `first` when it hasn't waited yet:
+/// with all of them; with what there is, even nothing, when
+/// ReadIntervalTimeout is MAXDWORD and the total timeouts 0; and with
+/// ReadIntervalTimeout MAXDWORD and a constant below MAXDWORD, with what
+/// there is if there is something when the read starts, or with the
+/// first character to come when the multiplier is MAXDWORD too, which
+/// is the form COMMTIMEOUTS's documentation describes (`read_due`).
+fn read_now(timeouts: &[u32; 5], n: u32, queued: usize, first: bool) -> bool {
     let &[interval, multiplier, constant, ..] = timeouts;
     queued >= n as usize
         || (interval == MAXDWORD && multiplier == 0 && constant == 0)
-        || (one_character(timeouts) && queued > 0)
-}
-
-/// Whether the timeouts are the form COMMTIMEOUTS's documentation gives
-/// for a read that returns as soon as one character is there:
-/// ReadIntervalTimeout and the multiplier MAXDWORD, and the constant
-/// above 0 and below MAXDWORD, the time to wait for that character.
-/// Outside those bounds of the constant the general rules hold.
-fn one_character(timeouts: &[u32; 5]) -> bool {
-    let &[interval, multiplier, constant, ..] = timeouts;
-    interval == MAXDWORD && multiplier == MAXDWORD && constant != 0 && constant != MAXDWORD
+        || (interval == MAXDWORD
+            && constant != MAXDWORD
+            && queued > 0
+            && (first || multiplier == MAXDWORD))
 }
 
 /// ReadFile of the open port `i`: up to `n` characters of its receive
@@ -673,11 +678,21 @@ pub(super) fn read(cpu: &mut Cpu, i: usize, buffer: u32, n: u32) -> Option<(u32,
         return Some((0, Some(ERROR_OPERATION_ABORTED)));
     }
     let queued = port.input.len();
-    if !read_now(&port.timeouts, n, queued) {
+    if !read_now(&port.timeouts, n, queued, waiting.is_none()) {
         let since = waiting.map_or(now, |w| port.reads[w].since);
         let due = read_due(&port.timeouts, n, since, port.received_at, queued);
         if due.is_none_or(|due| now < due) {
             if waiting.is_none() {
+                // The reads of threads that ended while they waited go.
+                let processes = &cpu.bus.win32.processes;
+                let alive = |id: u32| {
+                    processes
+                        .iter()
+                        .flat_map(|p| &p.threads)
+                        .any(|t| t.id == id && t.exit_code.is_none())
+                };
+                let port = &mut cpu.bus.win32.comm[i];
+                port.reads.retain(|r| alive(r.thread));
                 port.reads.push(Waiting {
                     thread,
                     since,
@@ -762,24 +777,32 @@ mod tests {
     #[test]
     fn reads_end_as_the_timeouts_say() {
         // No timeouts: all of it, however long that takes.
-        assert!(!read_now(&[0; 5], 4, 3));
-        assert!(read_now(&[0; 5], 4, 4));
+        assert!(!read_now(&[0; 5], 4, 3, true));
+        assert!(read_now(&[0; 5], 4, 4, false));
         assert_eq!(read_due(&[0; 5], 4, 1000, 0, 3), None);
         // What there is, at once.
-        assert!(read_now(&[MAXDWORD, 0, 0, 0, 0], 4, 0));
+        assert!(read_now(&[MAXDWORD, 0, 0, 0, 0], 4, 0, true));
         // One character or more, waiting up to the constant for one.
         let one = [MAXDWORD, MAXDWORD, 50, 0, 0];
-        assert!(!read_now(&one, 4, 0));
-        assert!(read_now(&one, 4, 1));
+        assert!(!read_now(&one, 4, 0, true));
+        assert!(read_now(&one, 4, 1, false));
         assert_eq!(read_due(&one, 4, 1000, 0, 0), Some(51_000));
-        // With a constant of 0 that form isn't there: the total timeout
-        // of MAXDWORD milliseconds a character holds.
+        // With a constant of 0 the wait for one character ends at once,
+        // as serial.sys's total timer of 0 does.
         let none = [MAXDWORD, MAXDWORD, 0, 0, 0];
-        assert!(!read_now(&none, 4, 1));
-        assert_eq!(
-            read_due(&none, 4, 1000, 0, 1),
-            Some(1000 + 4 * MAXDWORD as u64 * 1000)
-        );
+        assert_eq!(read_due(&none, 4, 1000, 0, 0), Some(1000));
+        // With a constant of MAXDWORD there is no timeout: all of it.
+        let never = [MAXDWORD, MAXDWORD, MAXDWORD, 0, 0];
+        assert!(!read_now(&never, 4, 1, true));
+        assert_eq!(read_due(&never, 4, 1000, 0, 1), None);
+        // ReadIntervalTimeout MAXDWORD with other totals: what there is
+        // when the read starts with something, else all of it within the
+        // total timeout.
+        let some = [MAXDWORD, 10, 5, 0, 0];
+        assert!(read_now(&some, 4, 1, true));
+        assert!(!read_now(&some, 4, 0, true));
+        assert!(!read_now(&some, 4, 1, false));
+        assert_eq!(read_due(&some, 4, 1000, 0, 1), Some(46_000));
         // A total timeout of 10 ms a character plus 5 ms.
         let total = [0, 10, 5, 0, 0];
         assert_eq!(read_due(&total, 4, 1000, 0, 0), Some(46_000));

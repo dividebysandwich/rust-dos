@@ -28,7 +28,9 @@ const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_INVALID_PARAMETER: u32 = 87;
+const ERROR_OPERATION_ABORTED: u32 = 995;
 
+const PURGE_RXABORT: u32 = 2;
 const PURGE_ALL: u32 = 0xF;
 const CLRDTR: u32 = 6;
 
@@ -49,6 +51,10 @@ const IMPORTS: &[&str] = &[
     "GetLastError",
     "GetStdHandle",
     "ExitProcess",
+    "CreateProcessA",
+    "WaitForSingleObject",
+    "CreateThread",
+    "Sleep",
 ];
 
 /// The data's places.
@@ -214,7 +220,12 @@ fn scratch(name: &str, exe: Vec<u8>) -> PathBuf {
 /// COM2, no COM3 or COM4) to its end: the machine, its exit code and
 /// what it printed.
 fn run(test: &str, exe: Vec<u8>) -> (Cpu, u8, String) {
-    let mut cpu = Cpu::new(scratch(test, exe));
+    run_in(scratch(test, exe))
+}
+
+/// Run T.EXE of the folder `base` as `run` does.
+fn run_in(base: PathBuf) -> (Cpu, u8, String) {
+    let mut cpu = Cpu::new(base);
     cpu.bus.configure_serial(&SerialSettings::default());
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
@@ -375,4 +386,80 @@ fn reads_wait_for_characters_as_the_timeouts_say() {
     assert_eq!(code, PASSED, "{text}");
     assert!(text.starts_with("AT\r"), "{text:?}");
     assert!(text.contains("OK\r\n"), "{text:?}");
+}
+
+#[test]
+fn a_port_closes_with_the_process_that_had_it_open() {
+    // CHILD.EXE opens COM2 and ends without closing it.
+    let child = program(&data(), |a, l| {
+        open_com2(a, l, 1)?;
+        call(a, l, "ExitProcess", &[0])
+    });
+    const CHILD: u32 = 0x0A0;
+    const STARTUP: u32 = 0x100;
+    const INFO: u32 = 0x150;
+    let mut data = data();
+    data[CHILD as usize..][..10].copy_from_slice(b"CHILD.EXE\0");
+    // STARTUPINFOA's cb.
+    data[STARTUP as usize] = 68;
+    let exe = program(&data, |a, l| {
+        let args = [0, l.at(CHILD), 0, 0, 0, 0, 0, 0, l.at(STARTUP), l.at(INFO)];
+        call(a, l, "CreateProcessA", &args)?;
+        expect_eax(a, l, 1, 1)?;
+        // Its end, with this process still there, frees the port.
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(INFO) as u64))?;
+        a.call(l.import("WaitForSingleObject"))?;
+        expect_eax(a, l, 0, 2)?;
+        open_com2(a, l, 3)?;
+        call(a, l, "ExitProcess", &[PASSED as u32])
+    });
+    let base = scratch("comm_child", exe);
+    fs::write(base.join("CHILD.EXE"), child).unwrap();
+    let (_, code, text) = run_in(base);
+    assert_eq!(code, PASSED, "{text}");
+}
+
+#[test]
+fn purge_comm_ends_the_read_another_thread_waits_in() {
+    const RESULT: u32 = 0x0A0;
+    const ERROR: u32 = 0x0A4;
+    const THREAD: u32 = 0x0A8;
+    let exe = program(&data(), |a, l| {
+        open_com2(a, l, 1)?;
+        // CreateThread's last three arguments, then its start address,
+        // which the call pushes: the code after it, the thread's. With no
+        // timeouts its ReadFile waits for 64 characters, which the modem
+        // never sends.
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        let mut create = a.create_label();
+        a.call(create)?;
+        call_port(a, l, "ReadFile", &[l.at(BUFFER), 64, l.at(COUNT), 0])?;
+        a.mov(dword_ptr(l.at(RESULT) as u64), eax)?;
+        call(a, l, "GetLastError", &[])?;
+        a.mov(dword_ptr(l.at(ERROR) as u64), eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut create)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(l.import("CreateThread"))?;
+        a.mov(dword_ptr(l.at(THREAD) as u64), eax)?;
+        a.mov(dword_ptr(l.at(RESULT) as u64), 7)?;
+        // Once the thread waits, PURGE_RXABORT ends its read.
+        call(a, l, "Sleep", &[20])?;
+        call_port(a, l, "PurgeComm", &[PURGE_RXABORT])?;
+        expect_eax(a, l, 1, 2)?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(THREAD) as u64))?;
+        a.call(l.import("WaitForSingleObject"))?;
+        expect_eax(a, l, 0, 3)?;
+        expect_dword(a, l, RESULT, 0, 4)?;
+        expect_dword(a, l, ERROR, ERROR_OPERATION_ABORTED, 5)?;
+        expect_dword(a, l, COUNT, 0, 6)?;
+        call(a, l, "ExitProcess", &[PASSED as u32])
+    });
+    let (_, code, text) = run("comm_purge", exe);
+    assert_eq!(code, PASSED, "{text}");
 }
