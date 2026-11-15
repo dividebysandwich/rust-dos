@@ -1087,7 +1087,9 @@ impl Pacer {
 /// no frame sleeps. Returns the stall due by `now_ns`, if one is.
 pub fn test_stall(now_ns: u64) -> Option<Duration> {
     use std::sync::{Mutex, OnceLock};
-    static STALLS: OnceLock<Option<Mutex<Vec<(u64, u64)>>>> = OnceLock::new();
+    /// The stalls not yet made, as (emulated ms, length in ms).
+    type Stalls = Mutex<Vec<(u64, u64)>>;
+    static STALLS: OnceLock<Option<Stalls>> = OnceLock::new();
     let stalls = STALLS.get_or_init(|| {
         let text = std::env::var("RUST_DOS_TEST_STALL").ok()?;
         let mut stalls: Vec<(u64, u64)> = text
