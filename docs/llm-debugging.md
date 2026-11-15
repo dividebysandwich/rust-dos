@@ -1149,7 +1149,14 @@ and `commands`: how many `nop`, `fill`, `blt` and `flip` commands and
 commands of `level1` it carried out since power-on, from the ring and
 from the built-in Windows' driver alike, and how many commands and
 register writes it `rejected`. A game whose DirectDraw blits stay on
-the CPU has `fill` and `blt` at 0.
+the CPU has `fill` and `blt` at 0. Of level 1's commands, `draws` are
+the draw commands, `transformed` those of them with vertices for the
+card to transform, and `primitives` the triangles, lines and points
+they queued. For a draw the card transforms, that is what is left
+after its cut at the planes and its culling. For a draw the OpenGL
+renderer's vertex shader transforms it is every triangle of the draw,
+since the GPU cuts and culls them. So one scene counts more
+`primitives` with the OpenGL renderer than with the software one.
 
 `renderer` is what draws the card's triangles: `software`, or `OpenGL`
 with `toadforce_renderer` `auto` or `opengl` in a window that has
@@ -1189,13 +1196,17 @@ counts what the OpenGL renderer costs and misses:
   `lock` counts the times the program read such a surface and the
   card fetched its pixels from the GPU to answer.
 - `counts`: the renderer's own, null with `software`: `batches` and
-  `runs` (draw calls), `surface_uploads` and `texture_uploads` from
-  card memory, `texture_converts` (images of textures filled from a
-  surface the GPU has, with nothing read back), `clears` and `blits`
-  done on the GPU, `presents` (frames the window showed from the
-  GPU's surface), the shader `programs` compiled and
-  `failed_programs`, the `surfaces` and `textures` it holds, and
-  `packed_565` (whether 16-bit targets are the GPU's 5-6-5 format).
+  `runs` (draw calls), `transformed_runs` (those of them whose
+  vertices the GPU's vertex shader took to the screen, where the card
+  transforms the others on the processor) and `transforming_programs`
+  (the shader programs made for them), `surface_uploads` and
+  `texture_uploads` from card memory, `texture_converts` (images of
+  textures filled from a surface the GPU has, with nothing read
+  back), `clears` and `blits` done on the GPU, `presents` (frames the
+  window showed from the GPU's surface), the shader `programs`
+  compiled and `failed_programs`, the `surfaces` and `textures` it
+  holds, and `packed_565` (whether 16-bit targets are the GPU's 5-6-5
+  format).
 
 A run with `--deterministic` draws the card in software, so that its
 pictures are the same on every host. To compare the two renderers at
@@ -1552,16 +1563,22 @@ card from the program's memory (`direct`, with their vertices in
 vertices to transform that the card doesn't transform itself, execute
 buffers, or screen vertices the direct path declines (lines, points,
 wireframe, flat shading, a clip status the program reads, a vertex
-outside the guard band). Each surface has its `id`, the `pid` of its
-process, its `interfaces` (the addresses the program passes as
-`this`, which the log's `[W32]` lines show), `width`, `height`,
-`pitch`, `format` (flags, FourCC, bits a pixel, red, green, blue and
-alpha masks), `caps`, `memory` (`system`, `video`, `card`, the 3dfx
-card's, or `none`) and `address`, `locked`, `lost`, its color `keys`
-(`src_blt`, `dest_blt` and the overlay ones, each a low and high
-value), the ids of its `palette`, `clipper`, `root` and `attached`
-surfaces, and the `version` of the interfaces it was made through (1,
-4 or 7).
+outside the guard band). `gl_draws` counts OpenGL's draws on a
+ToadForce by where they were transformed and lit: `card` (and their
+vertices in `card_vertices`), `refused` (batches the HAL turned down
+at the flush, which weren't drawn) and the processor's by reason
+(`no_card`, `asked` for `RUST_DOS_TOADFORCE_TNL=pipeline`, `numbers`,
+`modelview`, `light`, `shininess`, `material`, `flat`, `sides`,
+`edges`; `opengl32::tnl::Why` says what each is). Each surface has
+its `id`, the `pid` of its process, its `interfaces` (the addresses
+the program passes as `this`, which the log's `[W32]` lines show),
+`width`, `height`, `pitch`, `format` (flags, FourCC, bits a pixel,
+red, green, blue and alpha masks), `caps`, `memory` (`system`,
+`video`, `card`, the 3dfx card's, or `none`) and `address`, `locked`,
+`lost`, its color `keys` (`src_blt`, `dest_blt` and the overlay ones,
+each a low and high value), the ids of its `palette`, `clipper`,
+`root` and `attached` surfaces, and the `version` of the interfaces
+it was made through (1, 4 or 7).
 
 `GET /api/win32/ddraw/surface/{id}` shows a surface's pixels as a PNG
 (`?format=raw` for RGB24 rows). With `?keyed=true` the pixels its source

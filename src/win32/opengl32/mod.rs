@@ -35,10 +35,14 @@
 //! here, such as evaluators, selection, feedback and the accumulation
 //! buffer, do nothing and say so in the log. Display lists record the
 //! calls the program makes and give them to the same handlers again
-//! (`lists.rs`), those of the functions that aren't here too. Lighting is
-//! computed on the processor (`light.rs`, `shade.rs`), as a Voodoo3
-//! driver had to with no transform and lighting hardware on the card,
-//! and the vertices reach Direct3D's pipeline lit. The extensions are
+//! (`lists.rs`), those of the functions that aren't here too. On a 3dfx
+//! card lighting is computed on the processor (`light.rs`,
+//! `shade.rs`), as a Voodoo3 driver had to with no transform and
+//! lighting hardware on the card, and the vertices reach Direct3D's
+//! pipeline lit. A ToadForce transforms and lights the vertices
+//! itself, with the matrices, lights and materials as its state, as a
+//! GeForce's driver had it do; `tnl.rs` says which draws go that way
+//! and which stay on the processor. The extensions are
 //! GL_ARB_multitexture (on a Voodoo3, with its two texture units; a
 //! Banshee has one and not the extension), GL_EXT_bgra,
 //! GL_EXT_compiled_vertex_array, GL_EXT_packed_pixels,
@@ -84,6 +88,7 @@ mod pname;
 mod shade;
 mod state;
 mod texture;
+pub mod tnl;
 pub mod wgl;
 
 pub use lists::{call, mult_matrix, ortho, tex_image_rgba};
@@ -159,14 +164,19 @@ pub struct Array {
     pub at: u32,
 }
 
-/// A vertex as glBegin and glEnd gather it: the position, the color
-/// (ARGB) and the color a back face takes, which differs from it only
-/// with two-sided lighting, and each unit's texture coordinates.
+/// A vertex as glBegin and glEnd or the arrays give it: the position,
+/// the normal, the color and each unit's texture coordinates, none of
+/// them through a matrix or the lights yet. The draw puts them through
+/// (`draw::draw`), on the card or on the processor.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ImmVertex {
     pub position: [f32; 4],
-    pub color: u32,
-    pub back: u32,
+    pub normal: [f32; 3],
+    pub color: [f32; 4],
+    /// The front and back colors (ARGB) of a vertex that was lit
+    /// before its draw: one given before a glMaterial between glBegin
+    /// and glEnd, which has the materials as they were.
+    pub lit: Option<[u32; 2]>,
     pub tex: [[f32; 4]; UNITS],
 }
 
@@ -210,6 +220,11 @@ pub struct Context {
     /// The Direct3D state of `settings`, with the stamp it was made
     /// under (`draw::applied_of`). Not saved: it is made again.
     pub(super) applied: Option<(u64, Option<draw::Applied>)>,
+    /// The card's state for `settings` and `lighting`, or why the
+    /// processor transforms and lights their draws, with the two
+    /// stamps it was made under (`tnl::state_of`). Not saved: it is
+    /// made again.
+    pub(super) card: Option<(u64, u64, tnl::State)>,
     /// The strings glGetString gives, in the process's memory.
     pub strings: u32,
     pub error: u32,
@@ -224,8 +239,9 @@ pub struct Context {
     pub pack: [u32; 4],
     pub active_unit: u32,
     pub client_unit: u32,
-    /// The lights, the materials and the lighting model.
-    pub lighting: light::Lighting,
+    /// The lights, the materials and the lighting model, stamped as
+    /// the settings are: the card's state is made from both.
+    pub lighting: Stamped<light::Lighting>,
     /// glPushAttrib's stack.
     pub attribs: Vec<attrib::Attrib>,
     /// The current color, texture coordinates and normal.
@@ -598,8 +614,9 @@ crate::state_fields!(Array {
 });
 crate::state_fields!(ImmVertex {
     position,
+    normal,
     color,
-    back,
+    lit,
     tex
 });
 crate::state_fields!(Texture {
@@ -689,7 +706,7 @@ crate::state_fields!(Context {
     swap_interval,
     swap_at,
     drawn
-} skip { applied });
+} skip { applied, card });
 crate::state_fields!(State {
     contexts,
     current,

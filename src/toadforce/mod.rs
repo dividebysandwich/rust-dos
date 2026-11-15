@@ -157,7 +157,7 @@ pub struct ToadForce {
 /// The version of the card's saved state, which a saved state's `TOAD`
 /// section and a recording (`capture`) carry. A change to what
 /// `state_fields!` below saves takes a new one.
-pub const STATE_VERSION: u16 = 3;
+pub const STATE_VERSION: u16 = 4;
 
 /// How long a queued command waits at most, in nanoseconds of the
 /// emulated clock: well under a frame, so that a picture drawn straight
@@ -178,7 +178,8 @@ pub struct Counts {
     /// The commands level 1 adds.
     pub level1: u64,
     /// The draw commands among them, and the triangles, lines and
-    /// points they drew.
+    /// points they queued (`raster::Drawn::primitives`: a draw a host
+    /// transforms counts its triangles before the cut and culling).
     pub draws: u64,
     pub primitives: u64,
     /// The draws whose vertices the card transformed and lit.

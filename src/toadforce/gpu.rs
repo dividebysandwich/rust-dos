@@ -162,13 +162,126 @@ impl Vertex {
     }
 }
 
+/// Where a vertex the host transforms has its values, in words from
+/// the vertex's first. The position is its first three words.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layout {
+    /// Words of a vertex.
+    pub words: u8,
+    pub normal: Option<u8>,
+    pub diffuse: Option<u8>,
+    pub specular: Option<u8>,
+    /// For each slot of the draw, where its coordinate set is and how
+    /// many numbers it has, 0 for a slot the draw doesn't have.
+    pub sets: [(u8, u8); SLOTS],
+}
+
+/// Fog worked out at the vertices of a run the host transforms, from
+/// a vertex's place in camera space (`raster::geometry`'s `Fog`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VertexFog {
+    /// `FOGVERTEXMODE`: 1 and 2 the exponential ones, 3 linear.
+    pub mode: u32,
+    pub start: f32,
+    pub end: f32,
+    pub density: f32,
+    /// By the distance from the eye, and not by the depth.
+    pub range: bool,
+}
+
+/// A light that is on, in camera space, for a run the host lights
+/// (`raster::light`'s `Lamp`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lamp {
+    /// `LIGHT_POINT`, `LIGHT_SPOT` or `LIGHT_DIRECTIONAL`.
+    pub kind: u32,
+    pub position: [f32; 3],
+    /// The way a directional light or a spot points, of length 1.
+    pub axis: [f32; 3],
+    pub diffuse: [f32; 3],
+    pub specular: [f32; 3],
+    pub ambient: [f32; 3],
+    pub range: f32,
+    pub attenuation: [f32; 3],
+    /// The cosines of half a spot's inner and outer angles.
+    pub inner: f32,
+    pub outer: f32,
+    pub falloff: f32,
+    pub spot_model: u32,
+}
+
+/// The lighting of a run the host lights, as `raster::light` has it
+/// for the front of a triangle.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Lights {
+    pub lamps: Vec<Lamp>,
+    /// The material's diffuse, specular, ambient and emissive colours.
+    pub material: [[f32; 4]; 4],
+    pub power: f32,
+    pub ambient: [f32; 3],
+    pub specular: bool,
+    /// The specular light goes into the diffuse colour.
+    pub single: bool,
+    pub local_viewer: bool,
+    /// Where the four colours of `material` come from: 0 the material,
+    /// 1 the vertex's diffuse colour, 2 its specular one.
+    pub sources: [u8; 4],
+    /// What takes a normal to camera space, row by row, and whether
+    /// the result is made of length 1.
+    pub normals: [f32; 9],
+    pub normalize: bool,
+}
+
+/// The transform of a run whose vertices the host takes to the screen
+/// itself, as `raster::geometry` does: a row vector times `all`, then
+/// to the viewport.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Transform {
+    /// World, view and projection in one, row by row.
+    pub all: [f32; 16],
+    /// Screen x = `x[0]` + (clip x / w + 1) * `x[1]`, screen y =
+    /// `y[0]` + (1 - clip y / w) * `y[1]` and depth = `z[0]` + clip z /
+    /// w * `z[1]`.
+    pub x: [f32; 2],
+    pub y: [f32; 2],
+    pub z: [f32; 2],
+    /// Whether triangles are cut at the far plane.
+    pub far: bool,
+    /// The fog that goes into the specular colour's alpha, and world
+    /// and view in one, which take a vertex to camera space for it.
+    pub fog: Option<VertexFog>,
+    pub eye: [f32; 16],
+    /// The lights the vertices' colours come from, or None for the
+    /// colours the vertices have.
+    pub lights: Option<Box<Lights>>,
+    pub layout: Layout,
+}
+
+/// The vertices of a run the host transforms.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Geometry {
+    pub transform: Transform,
+    /// The vertices' words in `Batch::words`, as the program gave
+    /// them.
+    pub words: Range<usize>,
+    /// The triangles in `Batch::indices`, three vertices each,
+    /// counted from the first vertex of `words`.
+    pub indices: Range<usize>,
+}
+
 /// The triangles queued with one state.
 pub struct Run {
     pub state: Arc<DrawState>,
     /// Their vertices in `Batch::vertices`, three a triangle. Those of
     /// a flat-shaded triangle (`Shape::flat`) all have the colours of
-    /// the vertex that gives it them.
+    /// the vertex that gives it them. Empty for a run with
+    /// `geometry`.
     pub vertices: Range<usize>,
+    /// The vertices the host transforms, for a run the card didn't
+    /// take to the screen (`Host::transforms`). The host cuts its
+    /// triangles at the planes the card cuts at, and leaves out those
+    /// `Shape::cull` names.
+    pub geometry: Option<Geometry>,
 }
 
 /// What a host draws at once: runs for one render target, in the
@@ -177,6 +290,9 @@ pub struct Batch<'a> {
     pub target: Target,
     pub runs: &'a [Run],
     pub vertices: &'a [Vertex],
+    /// The vertices of the runs with a `geometry`.
+    pub words: &'a [u32],
+    pub indices: &'a [u32],
 }
 
 /// What a `CLEAR` writes to one buffer of the render target.
@@ -227,6 +343,12 @@ pub trait Host {
     /// status counts such draws under, or None for a state it draws.
     /// A draw it refuses goes to the software renderer.
     fn declines(&self, state: &DrawState) -> Option<Decline>;
+
+    /// Whether it takes the vertices of a draw with `state`, which it
+    /// doesn't decline, to the screen itself (`Run::geometry`).
+    fn transforms(&self, _state: &DrawState) -> bool {
+        false
+    }
 
     /// Draw `batch`. `memory` is card memory, for the textures and for
     /// a target the host has no copy of or a stale one, by `pages`.
@@ -851,6 +973,13 @@ impl Gpu {
             Some(host) => host.declines(state),
             None => Some(Decline::NoHost),
         }
+    }
+
+    /// Whether the host takes the vertices of a draw with `state`
+    /// to the screen itself.
+    pub fn transforms(&self, state: &DrawState) -> bool {
+        let host = self.host.borrow();
+        host.as_ref().is_some_and(|host| host.transforms(state))
     }
 
     /// Count a draw that went to the software renderer for `why`.
