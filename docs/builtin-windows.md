@@ -112,6 +112,12 @@ Windows has. `GLIDE2X.DLL` and `GLIDE3X.DLL` are among them only with a
 so a game that checks for Glide by its file sees none without one. A DLL
 of the same name that a game copies to C: wins over the built-in one.
 
+`WING32.DLL`, WinG, is among them too. Games of 1995 that draw through
+WinG installed it from their CDs; on the built-in Windows they find it
+there without that, and a WinG that a game brings in its own folder
+isn't loaded in its place. WinG's halftone brushes are solid brushes of
+their colour, without WinG's dithering.
+
 ### Notepad
 
 `C:\WINDOWS\NOTEPAD.EXE` is there, read-only, as on Windows 98, and the
