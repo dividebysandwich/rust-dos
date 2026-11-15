@@ -83,7 +83,9 @@ mod wow32;
 mod ws2_32;
 mod wsock32;
 
-pub use memory::{Kept, PageFileStatus, PagedRange, PagingCounts, page_file_status};
+pub use memory::{
+    Kept, PageFileStatus, PagedRange, PagingCounts, page_file_status, paging_counts,
+};
 pub use snapshot::snapshot;
 pub use stubs::function_name;
 
