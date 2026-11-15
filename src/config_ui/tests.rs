@@ -1391,6 +1391,7 @@ fn the_stats_page_draws_its_numbers_and_graphs() {
         code_bytes: 2 << 20,
         fps_history: vec![30.0, 35.0, 70.0],
         cpu_history: vec![40.0; 120],
+        cap: None,
     });
     let has = |frame: &Frame, c: Rgb| {
         frame.rgba.as_chunks::<4>().0.iter().any(|px| px[..3] == [c.0, c.1, c.2])
