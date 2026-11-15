@@ -375,11 +375,11 @@ pub(super) mod tests {
         assert_eq!(back[0].name, "F.FON");
         assert_eq!(back[0].fonts[0].face, "Kept");
         assert_eq!(back[0].fonts[0].data, files[0].fonts[0].data);
-        // Version 67 saved the names alone.
+        // Version 69 saved the names alone.
         let mut w = Writer::new();
-        w.section(b"TEST", 67, |w| vec!["OLD.FON".to_string()].save(w));
+        w.section(b"TEST", 69, |w| vec!["OLD.FON".to_string()].save(w));
         let mut r = Reader::new(&w.buf);
-        let mut section = r.section_of(b"TEST", &[67, FONTS_SAVED]).unwrap();
+        let mut section = r.section_of(b"TEST", &[69, FONTS_SAVED]).unwrap();
         let mut old: Vec<AddedFile> = Vec::new();
         old.load(&mut section).unwrap();
         assert!(section.is_empty());

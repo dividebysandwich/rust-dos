@@ -419,6 +419,7 @@ impl DebugHub {
     }
 
     pub(super) fn stats_json(&self, cpu: &Cpu) -> Value {
+        let cap = cpu.bus.frame_cap.get().counters();
         fn dynrec_exits(d: &rust_dos::dynrec::DynStats) -> Value {
             const NAMES: [&str; 16] = [
                 "", "fault", "smc", "panic", "next", "deadline", "stale", "gp0", "limit", "unlinked", "de", "watched",
@@ -561,6 +562,15 @@ impl DebugHub {
                 "p90_ms": millis(f.p90),
                 "p99_ms": millis(f.p99),
             })),
+            // What the frame rate cap did to the frames that came to it
+            // since the machine started (`frame_cap::Counters`).
+            "fps_cap": {
+                "shown": cap.shown,
+                "held": cap.held,
+                "late": cap.late,
+                "reanchors": cap.reanchors,
+                "dropped_ms": cap.dropped_ns as f64 / 1e6,
+            },
         })
     }
 

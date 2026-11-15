@@ -185,12 +185,12 @@ impl Page {
                 VrResolution, VrFoveation, VrRefresh, VrGraphics,
             ],
             Page::Display => {
-                &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, MonitorEffects, Composite, CompositeEra]
+                &[Scale, Fullscreen, Aspect, Vrr, FpsCap, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, MonitorEffects, Composite, CompositeEra]
             }
             Page::Emulator => &[
                 Cycles, AutoFps, AutoBusyOs, Core, Fpu, Cpu, Post, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooScaleShader, VoodooMsaa,
                 VoodooDither,
-                VoodooAnisotropy, VoodooTextureSampling, VoodooFpsCap, VoodooGamma, VoodooOverlay, PowerVr, PowerVrFilter,
+                VoodooAnisotropy, VoodooTextureSampling, VoodooGamma, VoodooOverlay, PowerVr, PowerVrFilter,
                 VeriteRisc, VeriteMhz, VeriteRom, VeriteIrq, ToadForceMemory, ToadForceRenderer,
                 Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, FloppyController, HardDiskSpeed, FloppyDiskSpeed, Joystick,

@@ -1168,6 +1168,27 @@ fn underruns_and_frame_times_are_told_in_ms() {
     assert_eq!(times["longest_ms"], 32.0);
     assert_eq!(times["p50_ms"], 16.0);
     assert_eq!(times["p99_ms"], 32.0);
+    assert_eq!(stats["fps_cap"]["shown"], 0, "no frame through the cap yet");
+
+    // A cap of 20: a frame at 50 ms, one held from 55 ms to its turn at
+    // 100, and one at 400, from which the turns start again; the one
+    // after it shows as it is drawn, and the next waits 40 ms that the
+    // turns before wouldn't have asked.
+    let cap = cpu.bus.frame_cap.clone();
+    cap.set(Some(20));
+    cap.shown(50_000_000);
+    assert_eq!(cap.wait(55_000_000, None), Some(100_000_000));
+    cap.shown(100_000_000);
+    cap.shown(400_000_000);
+    assert_eq!(cap.wait(405_000_000, None), None);
+    cap.shown(405_000_000);
+    assert_eq!(cap.wait(410_000_000, None), Some(450_000_000));
+    cap.shown(450_000_000);
+    let stats = reply(&mut cpu, &mut hub, Cmd::Stats).unwrap();
+    let counted = serde_json::json!({
+        "shown": 5, "held": 2, "late": 2, "reanchors": 1, "dropped_ms": 40.0,
+    });
+    assert_eq!(stats["fps_cap"], counted);
 
     let frames = reply(&mut cpu, &mut hub, Cmd::Frames { after: 1 }).unwrap();
     assert_eq!(frames["count"], 2);
@@ -1596,8 +1617,13 @@ fn requests_sent_together_take_effect_in_the_order_sent() {
             hub.state_done(&cpu, request, result);
         }
         while let Some(request) = hub.next_speed_request() {
-            let cycles = request.cycles.clone();
-            hub.speed_done(&cpu, request, Ok(serde_json::json!({"cycles": cycles})));
+            let reply = match &request.change {
+                super::SettingChange::Cycles(cycles) => serde_json::json!({"cycles": cycles}),
+                super::SettingChange::FpsCap(cap) => {
+                    serde_json::json!({"fps_cap": rust_dos::frame_cap::name(*cap)})
+                }
+            };
+            hub.speed_done(&cpu, request, Ok(reply));
         }
     }
     let statuses: Vec<u16> = answers

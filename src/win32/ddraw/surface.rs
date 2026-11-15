@@ -1617,6 +1617,17 @@ fn still_to_show(cpu: &mut Cpu, until: u64, wait: bool) -> Option<u32> {
     super::directdraw::wait_until(cpu, until, DD_OK)
 }
 
+/// A flip the frame rate cap holds back until `until`: the thread waits
+/// for it and Flip runs again then, with DDFLIP_DONOTWAIT too. The cap
+/// is the emulator's own and the program has no way to know of it, so it
+/// only takes time: an error would send a program that flips without
+/// waiting (Grom: DDFLIP_NOVSYNC | DDFLIP_DONOTWAIT) round its loop, to
+/// flip again or draw its frame again, the work the cap is there to
+/// spare.
+fn frame_held(cpu: &mut Cpu, until: u64) -> Option<u32> {
+    crate::win32::pace::wait(cpu, until, DD_OK)
+}
+
 // Attached surfaces.
 
 /// Whether `s` is a back buffer that AddAttachedSurface made part of a
@@ -1873,6 +1884,12 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         {
             return still_to_show(cpu, until, false);
         }
+        // The swap waits for its turn under the frame rate cap, the
+        // thread with it whatever the flags (`frame_held`).
+        let cmd = (flags & DDFLIP_NOVSYNC == 0) as u32;
+        if let Some(until) = crate::win32::pace::card_check(cpu, cmd) {
+            return frame_held(cpu, until);
+        }
         // The card swaps its buffers; the surfaces keep theirs.
         voodoo::swap(cpu, flags & DDFLIP_NOVSYNC == 0);
         state(cpu).display.flip_polls = Default::default();
@@ -1886,17 +1903,32 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     // A flip shown at a frame waits for the frame of the last.
     let primary = s.is_primary();
-    if primary && flags & DDFLIP_NOVSYNC == 0 {
-        if let Some(pending) = display::flip_pending(cpu) {
-            // Flip runs again when that frame begins: the call that ends
-            // the wait stands for the polls until the frame, the last of
-            // which flips.
-            return still_to_show(cpu, pending, flags & DDFLIP_WAIT != 0);
-        }
+    if primary
+        && flags & DDFLIP_NOVSYNC == 0
+        && let Some(pending) = display::flip_pending(cpu)
+    {
+        // Flip runs again when that frame begins: the call that ends the
+        // wait stands for the polls until the frame, the last of which
+        // flips.
+        return still_to_show(cpu, pending, flags & DDFLIP_WAIT != 0);
+    }
+    // A flip of the primary surface is a frame, which the frame rate cap
+    // may hold back (`frame_held`): one waiting for the retrace shows
+    // from the next frame of the display, one without it at once.
+    if primary {
         let (timing, now) = display::timing(cpu);
+        let vsync = flags & DDFLIP_NOVSYNC == 0;
+        let at = if vsync { timing.next_display(now) } else { now };
+        let at = match crate::win32::pace::check(cpu, at, vsync.then(|| timing.frame_ns())) {
+            Ok(at) => at,
+            Err(until) => return frame_held(cpu, until),
+        };
         let display = &mut state(cpu).display;
-        display.flip_at = timing.next_display(now);
-        display.flip_polls = Default::default();
+        if vsync {
+            display.flip_at = timing.next_display(now);
+            display.flip_polls = Default::default();
+        }
+        crate::win32::pace::shown(cpu, at);
     }
     shown(cpu, id);
     // The pixels go round.

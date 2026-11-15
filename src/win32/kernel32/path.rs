@@ -400,6 +400,8 @@ pub(super) fn get_temp_file_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let file = name(n);
         match super::file::open_file(cpu, &file, super::file::GENERIC_WRITE, 0, 1) {
             Ok((sft, _)) => {
+                // A name such as COM1.TMP opened a serial port.
+                super::comm::file_closed(&mut cpu.bus, sft);
                 cpu.bus.disk.close_file(sft);
                 put_string(cpu, buffer, u32::MAX, &file)?;
                 set_error(cpu, 0);
