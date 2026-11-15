@@ -200,17 +200,6 @@ nearest-neighbour magnification.
 Works with both **Rust-DOS** and **OpenGL** and takes effect immediately.
 Mip levels, texture wrapping and clamping still follow the game.
 
-# 3dfx frame rate cap {#voodoo-fps-cap}
-
-The most frames a second a game may show on the 3dfx card. A game that
-could draw faster waits for each frame's turn, so its frames come at an
-even pace: smoother than slowing the whole PC down with the CPU speed.
-Interrupts, sound and the game's clock go on while it waits.
-
-Pick a rate the game reaches everywhere: a frame that comes late waits
-for the next turn. **30** or **60** suit a 60 Hz display; with
-*Variable refresh rate* on, the window refreshes at the cap.
-
 # 3dfx gamma {#voodoo-gamma}
 
 The gamma Glide gives the game's 3dfx picture, as the environment

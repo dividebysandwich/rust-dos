@@ -1,8 +1,10 @@
 //! The Stats page: the frames a second the program draws and the host's
 //! CPU use in big digits, each in a panel with a graph of its last half
-//! minute, and the emulated CPU's numbers below them. And the performance
-//! overlay: the two numbers and small graphs of them at the bottom right
-//! of the picture while the window is closed (Ctrl+Shift+F12).
+//! minute, and the emulated CPU's numbers below them, with what the frame
+//! rate cap does while a program shows its frames through it. And the
+//! performance overlay: the two numbers and small graphs of them at the
+//! bottom right of the picture while the window is closed
+//! (Ctrl+Shift+F12), and a line of what the cap does under them.
 
 use super::draw::{self, BigFont, Grid, Layout, Rgb};
 use super::{ConfigUi, Plot};
@@ -47,7 +49,23 @@ fn details(view: &StatsView) -> Vec<(&'static str, &'static str, String)> {
     if crate::dynrec::AVAILABLE {
         details.push(("Code cache", "Code", size(view.code_bytes)));
     }
+    if let Some(cap) = view.cap {
+        details.extend([
+            ("Cap shown", "Capped", format!("{:.0}/s", cap.shown)),
+            ("Cap held", "Held", format!("{:.0}/s", cap.held)),
+            ("Cap late", "Late", format!("{:.0}/s", cap.late)),
+            ("Cap resets", "Resets", format!("{:.0}/s", cap.reanchors)),
+            ("Cap lost", "Lost", format!("{:.1}%", cap.dropped)),
+        ]);
+    }
     details
+}
+
+/// The overlay's line of what the frame rate cap does: the frames it
+/// held a second, and the share of the time lost to its schedule's
+/// fresh starts.
+fn cap_line(cap: &crate::stats::CapView) -> String {
+    format!("Held {:.0} lost {:.1}%", cap.held, cap.dropped)
 }
 
 /// One of the page's two panels.
@@ -67,12 +85,14 @@ struct Panel {
 /// Draw the performance overlay at the bottom right of `frame`: the
 /// frames a second and the host's CPU use, each over a small graph of its
 /// last half minute, side by side on a panel like the window's, but half
-/// as opaque, so the picture shows through.
+/// as opaque, so the picture shows through. While a program shows its
+/// frames through the frame rate cap, a line under them says what the
+/// cap does (`cap_line`).
 fn draw_overlay(frame: &mut Frame, view: &StatsView) {
     let (width, height) = (frame.width as usize, frame.height as usize);
     let cell_h = if height >= 300 { 16 } else { 8 };
     let graph = (width / 64).clamp(8, 12);
-    let (cols, rows) = (2 * graph + 3, 3);
+    let (cols, rows) = (2 * graph + 3, 3 + usize::from(view.cap.is_some()));
     if cols * 8 + 16 > width || (rows + 1) * cell_h > height {
         return;
     }
@@ -87,9 +107,20 @@ fn draw_overlay(frame: &mut Frame, view: &StatsView) {
         grid.text(col, 0, label, draw::TEXT);
         grid.text(col + graph - value.len(), 0, value, *color);
     }
+    if let Some(cap) = &view.cap {
+        grid.text_to(1, 3, &cap_line(cap), draw::TEXT, cols - 1);
+    }
     draw::render_blended(&grid, &layout, frame, draw::PANEL_ALPHA / 2);
     for (i, (.., history, max, color)) in panels.into_iter().enumerate() {
-        draw::plot(frame, &layout, (1 + i * (graph + 1), 1, graph, rows - 1), history, max, color, draw::OPAQUE / 2);
+        draw::plot(
+            frame,
+            &layout,
+            (1 + i * (graph + 1), 1, graph, 2),
+            history,
+            max,
+            color,
+            draw::OPAQUE / 2,
+        );
     }
 }
 
@@ -345,6 +376,55 @@ mod tests {
         ui.toggle_overlay();
         ui.draw_overlay(&mut Frame::new(100, 20));
         ui.draw_overlay(&mut Frame::new(320, 200));
+    }
+
+    #[test]
+    fn what_the_frame_rate_cap_does_shows_while_frames_go_through_it() {
+        let mut view = StatsView {
+            fps: 60.0,
+            refresh_hz: 60.0,
+            ..Default::default()
+        };
+        let cap_rows = |view: &StatsView| {
+            details(view)
+                .into_iter()
+                .filter(|(label, ..)| label.starts_with("Cap "))
+                .map(|(label, _, value)| format!("{label} {value}"))
+                .collect::<Vec<_>>()
+        };
+        assert!(cap_rows(&view).is_empty());
+        let mut ui = ConfigUi::new();
+        ui.toggle_overlay();
+        ui.set_stats(view.clone());
+        let mut without = Frame::new(640, 400);
+        ui.draw_overlay(&mut without);
+
+        view.cap = Some(crate::stats::CapView {
+            shown: 60.0,
+            held: 58.0,
+            late: 1.0,
+            reanchors: 0.0,
+            dropped: 0.5,
+        });
+        assert_eq!(
+            cap_rows(&view),
+            [
+                "Cap shown 60/s",
+                "Cap held 58/s",
+                "Cap late 1/s",
+                "Cap resets 0/s",
+                "Cap lost 0.5%"
+            ]
+        );
+        assert_eq!(cap_line(view.cap.as_ref().unwrap()), "Held 58 lost 0.5%");
+        ui.set_stats(view);
+        let mut with = Frame::new(640, 400);
+        ui.draw_overlay(&mut with);
+        // A row taller, for the cap's line.
+        let lit = |frame: &Frame, x: usize, y: usize| {
+            frame.rgba[(y * frame.width as usize + x) * 4..][..3] != [0, 0, 0]
+        };
+        assert!(!lit(&without, 600, 335) && lit(&with, 600, 335));
     }
 
     #[test]

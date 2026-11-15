@@ -2087,12 +2087,7 @@ pub fn buffer_swap(cpu: &mut Cpu, interval: u32) {
     if !active(cpu) {
         return;
     }
-    let interval = interval.min(255);
-    let cmd = if interval > 0 {
-        (interval - 1) << 1 | 1
-    } else {
-        0
-    };
+    let cmd = swap_cmd(interval);
     if !hw::banshee(cpu) {
         hw::write(cpu, ALL, SWAPBUFFER_CMD, cmd);
         return;
@@ -2111,6 +2106,17 @@ pub fn buffer_swap(cpu: &mut Cpu, interval: u32) {
     s.back = (s.back + 1) % n;
     let render = gc(cpu).render;
     render_buffer(cpu, render);
+}
+
+/// The swapbufferCMD of grBufferSwap(`interval`): at once with 0, or
+/// after `interval` vertical retraces.
+pub fn swap_cmd(interval: u32) -> u32 {
+    let interval = interval.min(255);
+    if interval > 0 {
+        (interval - 1) << 1 | 1
+    } else {
+        0
+    }
 }
 
 /// Swaps waiting for their retrace (grBufferNumPending).
