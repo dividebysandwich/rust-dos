@@ -546,10 +546,6 @@ section covers names that section.
   it runs. Text that a program draws from the lists of
   `wglUseFontBitmaps` or `wglUseFontOutlines` doesn't show: both
   functions fail and make no lists.
-- **Display lists.** A list runs the calls it recorded one by one, as
-  the program's own calls run, so drawing from a list costs what
-  drawing without it does. `wglShareLists` shares the lists of two
-  contexts and leaves each its own textures.
 - **Reading back.** `glReadPixels` of `GL_DEPTH_COMPONENT` and
   `glGetTexImage` leave the program's buffer as it was. A proxy texture
   is refused with `GL_INVALID_ENUM`, and `glGetTexLevelParameter`

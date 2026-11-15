@@ -475,15 +475,10 @@ pub fn fogi(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-/// How many values the fog parameter `p` has.
-fn fog_values(p: u32) -> usize {
-    if p == GL_FOG_COLOR { 4 } else { 1 }
-}
-
 /// glFogfv(pname, params).
 pub fn fogfv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let p = args[0];
-    if let Some(v) = read_floats(cpu, args[1], fog_values(p)) {
+    if let Some(v) = read_floats(cpu, args[1], super::pname::values(p)) {
         fog(cpu, p, &v);
     }
     Some(0)
@@ -493,7 +488,7 @@ pub fn fogfv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// to the most positive as -1 to 1.
 pub fn fogiv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (p, at) = (args[0], args[1]);
-    let n = fog_values(p);
+    let n = super::pname::values(p);
     if at == 0 || !cpu.bus.guest_probe(at, n * 4, false) {
         return Some(0);
     }

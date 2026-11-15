@@ -11,7 +11,7 @@
 use super::state::{GL_BACK, GL_FRONT, GL_FRONT_AND_BACK};
 use super::{
     CAP_COLOR_MATERIAL, Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, ctx,
-    error, matrix, signed_unit,
+    error, matrix, pname, signed_unit,
 };
 use crate::cpu::Cpu;
 
@@ -215,34 +215,35 @@ fn set_color(m: &mut Material, p: u32, c: [f32; 4]) {
     }
 }
 
-/// How many values the light parameter `p` has, None for one there
-/// isn't.
+/// How many values the light parameter `p` has (`pname::values`), None
+/// for one there isn't.
 fn light_values(p: u32) -> Option<usize> {
-    Some(match p {
-        GL_AMBIENT | GL_DIFFUSE | GL_SPECULAR | GL_POSITION => 4,
-        GL_SPOT_DIRECTION => 3,
-        GL_SPOT_EXPONENT..=GL_QUADRATIC_ATTENUATION => 1,
-        _ => return None,
-    })
+    let light = matches!(p, GL_AMBIENT..=GL_QUADRATIC_ATTENUATION);
+    light.then(|| pname::values(p))
 }
 
 /// How many values the material parameter `p` has.
 fn material_values(p: u32) -> Option<usize> {
-    Some(match p {
-        GL_AMBIENT | GL_DIFFUSE | GL_SPECULAR | GL_EMISSION | GL_AMBIENT_AND_DIFFUSE => 4,
-        GL_SHININESS => 1,
-        GL_COLOR_INDEXES => 3,
-        _ => return None,
-    })
+    let material = matches!(
+        p,
+        GL_AMBIENT
+            | GL_DIFFUSE
+            | GL_SPECULAR
+            | GL_EMISSION
+            | GL_AMBIENT_AND_DIFFUSE
+            | GL_SHININESS
+            | GL_COLOR_INDEXES
+    );
+    material.then(|| pname::values(p))
 }
 
 /// How many values the lighting model parameter `p` has.
 fn model_values(p: u32) -> Option<usize> {
-    Some(match p {
-        GL_LIGHT_MODEL_AMBIENT => 4,
-        GL_LIGHT_MODEL_LOCAL_VIEWER | GL_LIGHT_MODEL_TWO_SIDE => 1,
-        _ => return None,
-    })
+    let model = matches!(
+        p,
+        GL_LIGHT_MODEL_AMBIENT | GL_LIGHT_MODEL_LOCAL_VIEWER | GL_LIGHT_MODEL_TWO_SIDE
+    );
+    model.then(|| pname::values(p))
 }
 
 /// Whether `p` is a color, which integers give from -1 to 1.

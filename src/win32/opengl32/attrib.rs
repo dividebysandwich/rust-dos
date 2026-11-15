@@ -14,7 +14,7 @@ use super::{
     CAP_NORMALIZE, CAP_POINT_SMOOTH, CAP_POLYGON_OFFSET_FILL, CAP_POLYGON_OFFSET_LINE,
     CAP_POLYGON_OFFSET_POINT, CAP_POLYGON_SMOOTH, CAP_POLYGON_STIPPLE, CAP_SCISSOR_TEST,
     CAP_STENCIL_TEST, CAP_TEXTURE_GEN, Context, GL_INVALID_OPERATION, GL_STACK_OVERFLOW,
-    GL_STACK_UNDERFLOW, UNITS, ctx, error,
+    GL_STACK_UNDERFLOW, Texture, UNITS, ctx, current, error, state,
 };
 use crate::cpu::Cpu;
 
@@ -114,16 +114,18 @@ const GROUP_CAPS: &[(u32, u32)] = &[
     (GL_TEXTURE_BIT, CAP_TEXTURE_GEN),
 ];
 
-/// The parameters of the texture `name`, if there is one.
-fn tex_params(c: &Context, name: u32) -> TexParams {
-    match super::texture::texture(c, name) {
+/// The parameters of the texture `name`, if there is one: the
+/// context's default texture, or one of `shared`, its group's.
+fn tex_params(c: &Context, shared: &[Texture], name: u32) -> TexParams {
+    match super::texture::find(c, shared, name) {
         Some(t) => [name, t.min_filter, t.mag_filter, t.wrap_s, t.wrap_t],
         None => [name, 0, 0, 0, 0],
     }
 }
 
-/// What a push of `mask` keeps of `c`.
-fn save(c: &Context, mask: u32) -> Attrib {
+/// What a push of `mask` keeps of `c`, whose group's textures are
+/// `shared`.
+fn save(c: &Context, shared: &[Texture], mask: u32) -> Attrib {
     Attrib {
         mask,
         caps: c.caps,
@@ -161,12 +163,14 @@ fn save(c: &Context, mask: u32) -> Attrib {
         env_mode: c.env_mode,
         env_color: c.env_color,
         bound: c.bound,
-        tex_params: std::array::from_fn(|u| tex_params(c, c.bound[u])),
+        tex_params: std::array::from_fn(|u| tex_params(c, shared, c.bound[u])),
         list_base: c.lists.base,
     }
 }
 
-/// Put back in `c` the groups `a` was pushed with.
+/// Put back in `c` the groups `a` was pushed with, but the bound
+/// textures' parameters, which aren't the context's alone
+/// (`texture::restore_params`).
 fn restore(c: &mut Context, a: &Attrib) {
     let m = a.mask;
     let on = |bit: u32| m & bit != 0;
@@ -250,22 +254,16 @@ fn restore(c: &mut Context, a: &Attrib) {
         c.env_mode = a.env_mode;
         c.env_color = a.env_color;
         c.bound = a.bound;
-        // The bound textures' parameters, of those that are still there.
-        for p in a.tex_params {
-            let [name, min, mag, s, t] = p;
-            if let Some(tex) = c.textures.iter_mut().find(|t| t.name == name) {
-                tex.min_filter = min;
-                tex.mag_filter = mag;
-                tex.wrap_s = s;
-                tex.wrap_t = t;
-            }
-        }
     }
 }
 
 /// glPushAttrib(mask).
 pub fn push_attrib(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let Some(c) = ctx(cpu) else {
+    let Some((index, _)) = current(cpu) else {
+        return Some(0);
+    };
+    let s = state(cpu);
+    let Some(Some(c)) = s.contexts.get_mut(index) else {
         return Some(0);
     };
     let e = if c.begin.is_some() {
@@ -273,7 +271,7 @@ pub fn push_attrib(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else if c.attribs.len() >= ATTRIB_DEPTH {
         GL_STACK_OVERFLOW
     } else {
-        let a = save(c, args[0]);
+        let a = save(c, s.lists.textures(c.lists.group), args[0]);
         c.attribs.push(a);
         return Some(0);
     };
@@ -291,7 +289,12 @@ pub fn pop_attrib(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         return Some(0);
     }
     match c.attribs.pop() {
-        Some(a) => restore(c, &a),
+        Some(a) => {
+            restore(c, &a);
+            if a.mask & GL_TEXTURE_BIT != 0 {
+                super::texture::restore_params(cpu, &a.tex_params);
+            }
+        }
         None => error(cpu, GL_STACK_UNDERFLOW),
     }
     Some(0)
@@ -345,7 +348,7 @@ mod tests {
     #[test]
     fn a_pop_puts_back_only_the_groups_pushed() {
         let mut c = super::super::new_context(0, 0, 1);
-        let a = save(&c, GL_LIGHTING_BIT);
+        let a = save(&c, &[], GL_LIGHTING_BIT);
         c.caps |= CAP_LIGHTING | CAP_BLEND;
         c.lighting.enabled = 0b101;
         c.lighting.two_side = true;
@@ -364,7 +367,7 @@ mod tests {
     #[test]
     fn the_enable_group_keeps_every_enable_and_nothing_else() {
         let mut c = super::super::new_context(0, 0, 1);
-        let a = save(&c, GL_ENABLE_BIT);
+        let a = save(&c, &[], GL_ENABLE_BIT);
         c.caps |= CAP_LIGHTING | CAP_BLEND | CAP_NORMALIZE;
         c.lighting.enabled = 0xFF;
         c.texture_2d[0] = true;
