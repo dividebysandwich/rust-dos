@@ -342,7 +342,7 @@ fn map_image(
                 .iter()
                 .any(|s| s.writable() && page < s.rva + s.mapped_size() && s.rva < page + PAGE);
         let phys = memory.page(bus)?;
-        memory.map(
+        memory.map_pageable(
             bus,
             base + page,
             phys,

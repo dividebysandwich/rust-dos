@@ -457,12 +457,33 @@ impl Memory {
             free_page(bus, phys);
             return None;
         }
+        self.make_pageable(bus, lin, phys);
+        Some(())
+    }
+
+    /// Map the physical page `phys`, which `page` gave, at `lin` with the
+    /// entry bits `flags`, as a page of a module's image: it can go out
+    /// to the page file as the program's own memory does. Windows pages
+    /// an image out too (its code and the data not written back to its
+    /// file, written data to the swap file), so a program can load
+    /// images larger than the memory left beside them, as a game's DLL
+    /// of 10 MB of bitmaps on a machine of 16 MB. A page that stayed in
+    /// the pool would leave none for the program's own pages to come
+    /// back in.
+    pub fn map_pageable(&mut self, bus: &mut Bus, lin: u32, phys: u32, flags: u32) -> Option<()> {
+        self.map(bus, lin, phys, flags)?;
+        self.make_pageable(bus, lin, phys);
+        Some(())
+    }
+
+    /// Let the physical page `phys`, mapped at `lin`, go out to the page
+    /// file (`page_out`).
+    fn make_pageable(&self, bus: &mut Bus, lin: u32, phys: u32) {
         if let Some(at) = self.entry_at(bus, lin)
             && let Some(pool) = bus.win32.pool.as_mut()
         {
             pool.page_file.pageable.insert(phys, at as u32);
         }
-        Some(())
     }
 
     /// Commit the `len` bytes at `lin` (whole pages, none of them
@@ -1263,6 +1284,40 @@ mod tests {
         assert!(!cpu.bus.guest_faulted());
         cpu.bus.guest_paging = None;
         assert_eq!(bytes(&cpu, &memory, page(0) + 5, data.len()), data);
+    }
+
+    /// An image of more pages than the pool has, mapped page by page as
+    /// the loader maps one and then written whole: its pages go out to
+    /// the page file to make room for the next, every byte reads back,
+    /// and a page of the program's own memory still comes in after it.
+    #[test]
+    fn an_image_larger_than_the_pool_is_paged() {
+        let (mut cpu, mut memory) = machine(4, 32);
+        let image = page(16);
+        for n in 0..8 {
+            let phys = memory.page(&mut cpu.bus).expect("a page, one going out");
+            memory
+                .map_pageable(&mut cpu.bus, image + n * PAGE, phys, USER)
+                .expect("mapped");
+        }
+        let data: Vec<u8> = (0..8 * PAGE).map(|i| (i / PAGE + 1) as u8).collect();
+        memory.write(&mut cpu.bus, image, &data).expect("written");
+        memory
+            .commit_paged(&mut cpu.bus, page(0), PAGE, PAGE_READWRITE)
+            .expect("room");
+        touch(&mut cpu, &memory, page(0), 0x5A);
+        assert_eq!(bytes(&cpu, &memory, image, data.len()), data);
+        for n in 0..8 {
+            if memory.translate(&cpu.bus, image + n * PAGE).is_none() {
+                assert_eq!(
+                    page_in(&mut cpu.bus, memory.cr3, image + n * PAGE),
+                    PageIn::Done
+                );
+            }
+        }
+        assert_eq!(bytes(&cpu, &memory, page(0), 4), [0x5A; 4]);
+        let entry = memory.entry(&cpu.bus, image).expect("an entry");
+        assert_eq!(protection(entry), Some(PAGE_READONLY), "{entry:08X}");
     }
 
     /// Pages decommitted, or of a process that ended, give their places in
