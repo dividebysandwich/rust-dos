@@ -234,9 +234,7 @@ fn render(cpu: &mut Cpu, id: u32, s: u32, value: u32) {
     let Some(d) = get(cpu, id) else {
         return;
     };
-    if d.render.get(s as usize).is_some_and(|r| *r != value) {
-        d.render[s as usize] = value;
-    }
+    d.set_state(s, value);
     let stage0: Vec<(u32, u32)> = match s {
         RS_TEXTUREADDRESS => ADDRESS_STATES.map(|t| (t, value)).to_vec(),
         RS_TEXTUREADDRESSU => vec![(TSS_ADDRESSU, value)],

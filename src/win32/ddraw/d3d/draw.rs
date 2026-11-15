@@ -199,7 +199,7 @@ pub fn setup_in(
         if crate::win32::trace3d::on(cpu) {
             let textures: Vec<bool> = d.textures.iter().map(|&t| t != 0).collect();
             let lights = d.lights.iter().filter(|l| l.enabled).count();
-            let (render, stages) = (&d.render, &d.stages);
+            let (render, stages) = (d.states(), &d.stages);
             crate::win32::trace3d::draw(
                 cpu, pass, version, layout.fvf, render, stages, &textures, lights,
             );
@@ -254,11 +254,7 @@ fn setup_of(
             lights,
             material,
             ambient: [a[0], a[1], a[2], 0.0],
-            // Direct3D 7 gives a material whose power is 0.001 or less
-            // no highlight (measured on its vertex pipeline), where
-            // Direct3D 8 raises to the power as it is, and a power of
-            // 0 gives the whole highlight.
-            specular: s(RS_SPECULARENABLE) != 0 && !(version == 7 && material.power <= 0.001),
+            specular: highlights(version, s(RS_SPECULARENABLE), material.power),
             local_viewer: s(RS_LOCALVIEWER) != 0,
             color_vertex: s(RS_COLORVERTEX) != 0,
             sources: [
@@ -308,30 +304,19 @@ fn setup_of(
         normalize: s(RS_NORMALIZENORMALS) != 0,
         screen_stages: (d.tmus as usize).min(pipeline::SCREEN_STAGES),
         blend: vertex_blend(d, version, layout),
-        wrap: wrap_bits(version, s),
+        wrap: d.wrap(version),
     }
 }
 
-/// The D3DWRAPCOORD_ bits of each coordinate set, from the render
-/// states `s` reads of a device of Direct3D `version`.
-fn wrap_bits(version: u32, s: impl Fn(u32) -> u32) -> [u8; 8] {
-    std::array::from_fn(|set| {
-        let mut bits = s(RS_WRAP0 + set as u32) & 0xF;
-        // Before Direct3D 7 the first set's two coordinates have a
-        // state each, which D3DRENDERSTATE_WRAP0 superseded.
-        if set == 0 && version < 7 {
-            bits |= (s(RS_WRAPU) != 0) as u32 | ((s(RS_WRAPV) != 0) as u32) << 1;
-        }
-        bits as u8
-    })
+/// Whether a lit draw through an interface of Direct3D `version` with
+/// D3DRENDERSTATE_SPECULARENABLE `enable` and a material of `power`
+/// has highlights. Direct3D 7 gives a material whose power is 0.001 or
+/// less none (measured on its vertex pipeline), where Direct3D 8
+/// raises to the power as it is, and a power of 0 gives the whole
+/// highlight.
+fn highlights(version: u32, enable: u32, power: f32) -> bool {
+    enable != 0 && !(version == 7 && power <= 0.001)
 }
-
-/// D3DRENDERSTATE_WRAPU and WRAPV, Direct3D 5's and 6's wrapping of
-/// the one coordinate set's u and v, and D3DRENDERSTATE_WRAP0, the
-/// first of the eight states that have a set's D3DWRAPCOORD_ bits.
-const RS_WRAPU: u32 = 5;
-const RS_WRAPV: u32 = 6;
-const RS_WRAP0: u32 = 128;
 
 /// D3DRENDERSTATE_VERTEXBLEND.
 const RS_VERTEXBLEND: u32 = 151;
@@ -1142,24 +1127,62 @@ pub fn device_setup(
 
 #[cfg(test)]
 mod tests {
+    use super::super::device::{RS_WRAP0, RS_WRAPU, RS_WRAPV};
     use super::*;
+    use crate::savestate::{Reader, State, Writer};
 
     /// D3DRENDERSTATE_WRAPU and WRAPV are the first set's u and v
     /// bits before Direct3D 7, and no state of Direct3D 7's.
     #[test]
     fn the_legacy_wrap_states_are_the_first_sets_bits() {
-        let states = |pairs: &'static [(u32, u32)]| {
-            move |id: u32| pairs.iter().find(|p| p.0 == id).map_or(0, |p| p.1)
+        let wrap = |version: u32, pairs: &[(u32, u32)]| {
+            let mut d = Device::new(version, 0, 0, 0, 2);
+            for &(s, v) in pairs {
+                d.set_state(s, v);
+            }
+            d.wrap(version)
         };
-        assert_eq!(wrap_bits(6, states(&[(RS_WRAPU, 1)])), [1, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(wrap_bits(6, states(&[(RS_WRAPV, 1)])), [2, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(wrap(6, &[(RS_WRAPU, 1)]), [1, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(wrap(6, &[(RS_WRAPV, 1)]), [2, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(
-            wrap_bits(6, states(&[(RS_WRAPU, 1), (RS_WRAP0, 8), (RS_WRAP0 + 3, 0x16)])),
+            wrap(6, &[(RS_WRAPU, 1), (RS_WRAP0, 8), (RS_WRAP0 + 3, 0x16)]),
             [9, 0, 0, 6, 0, 0, 0, 0]
         );
         assert_eq!(
-            wrap_bits(7, states(&[(RS_WRAPU, 1), (RS_WRAPV, 1), (RS_WRAP0 + 7, 3)])),
+            wrap(7, &[(RS_WRAPU, 1), (RS_WRAPV, 1), (RS_WRAP0 + 7, 3)]),
             [0, 0, 0, 0, 0, 0, 0, 3]
         );
+        // A state written back to 0 takes its bits away.
+        assert_eq!(wrap(6, &[(RS_WRAP0, 3), (RS_WRAP0, 0)]), [0; 8]);
+    }
+
+    /// Direct3D 7 has no highlight for a power of 0.001 or less;
+    /// Direct3D 8 and the versions before 7 have it.
+    #[test]
+    fn direct3d_7_drops_the_highlight_of_a_power_up_to_a_thousandth() {
+        assert!(highlights(7, 1, 0.0011));
+        assert!(!highlights(7, 1, 0.001));
+        assert!(!highlights(7, 1, 0.0));
+        assert!(!highlights(7, 1, -2.0));
+        assert!(highlights(8, 1, 0.0));
+        assert!(highlights(6, 1, 0.0));
+        assert!(!highlights(8, 0, 10.0));
+    }
+
+    /// The draws' wrap bits are worked out when a state is written, and
+    /// a device that is reset or loaded from a saved state works them
+    /// out again.
+    #[test]
+    fn a_reset_or_loaded_device_has_its_wrap_states_bits() {
+        let mut d = Device::new(6, 0, 0, 0, 2);
+        d.set_state(RS_WRAP0 + 2, 5);
+        d.set_state(RS_WRAPV, 1);
+        let mut w = Writer::new();
+        d.save(&mut w);
+        let mut loaded = Device::default();
+        loaded.load(&mut Reader::new(&w.buf)).unwrap();
+        assert_eq!(loaded.wrap(6), [2, 0, 5, 0, 0, 0, 0, 0]);
+        loaded.reset_states([(RS_WRAP0 + 1, 1)]);
+        assert_eq!(loaded.wrap(6), [0, 1, 0, 0, 0, 0, 0, 0]);
     }
 }

@@ -147,9 +147,18 @@ pub struct Drawn {
     pub depth: u32,
     /// The card's texture units.
     pub tmus: u32,
-    /// The render states, by their number; the light states.
-    pub render: Vec<u32>,
+    /// The render states, by their number (`Device::state`, written
+    /// through `Device::set_state`); the light states.
+    render: Vec<u32>,
     pub light_states: Vec<u32>,
+    /// What the draws take from the wrap states, worked out when one
+    /// is written so that a draw only copies it (`Device::wrap`):
+    /// D3DRENDERSTATE_WRAP0 to WRAP7's D3DWRAPCOORD_ bits, and
+    /// Direct3D 5's and 6's WRAPU and WRAPV as the first set's u and v
+    /// bits. A saved state has `render`, and a loaded device works
+    /// these out again.
+    wrap: [u8; 8],
+    wrap_uv: u8,
     /// The texture stages' states: 32 a stage.
     pub stages: Vec<u32>,
     /// The texture interface of each stage, which the device holds.
@@ -184,6 +193,15 @@ pub struct Drawn {
     /// coordinates do, where Direct3D's are on them. OpenGL sets it for
     /// each draw, so a save state leaves it out.
     pub gl_pixel_centres: bool,
+}
+
+impl Drawn {
+    /// `wrap` and `wrap_uv` from the render states.
+    fn derive_wrap(&mut self) {
+        let s = |r: u32| self.render.get(r as usize).copied().unwrap_or(0);
+        self.wrap = std::array::from_fn(|set| (s(RS_WRAP0 + set as u32) & 0xF) as u8);
+        self.wrap_uv = (s(RS_WRAPU) != 0) as u8 | ((s(RS_WRAPV) != 0) as u8) << 1;
+    }
 }
 
 crate::state_fields!(Handle {
@@ -271,6 +289,7 @@ impl crate::savestate::State for Device {
         d.tmus.load(r)?;
         in_scene.load(r)?;
         d.render.load(r)?;
+        d.derive_wrap();
         d.light_states.load(r)?;
         d.stages.load(r)?;
         d.textures.load(r)?;
@@ -335,6 +354,12 @@ pub fn lend<T>(cpu: &mut Cpu, id: u32, f: impl FnOnce(&mut Cpu, &Device) -> T) -
 pub const RS_TEXTUREHANDLE: u32 = 1;
 pub const RS_TEXTUREADDRESS: u32 = 3;
 pub const RS_TEXTUREPERSPECTIVE: u32 = 4;
+/// D3DRENDERSTATE_WRAPU and WRAPV, Direct3D 5's and 6's wrapping of
+/// the one coordinate set's u and v, and D3DRENDERSTATE_WRAP0, the
+/// first of the eight states that have a set's D3DWRAPCOORD_ bits.
+pub const RS_WRAPU: u32 = 5;
+pub const RS_WRAPV: u32 = 6;
+pub const RS_WRAP0: u32 = 128;
 pub const RS_ZENABLE: u32 = 7;
 pub const RS_FILLMODE: u32 = 8;
 pub const RS_SHADEMODE: u32 = 9;
@@ -503,10 +528,54 @@ impl Device {
                 d.stages[(s * 32 + t) as usize] = v;
             }
         }
+        d.derive_wrap();
         Device {
             drawn: Stamped::new(d),
             ..Device::default()
         }
+    }
+
+    /// The render states, by their number.
+    pub fn states(&self) -> &[u32] {
+        &self.render
+    }
+
+    /// Set the render state `s` to `value`. A state the device hasn't
+    /// got, or one that has the value already, changes nothing: the
+    /// device keeps its stamp.
+    pub fn set_state(&mut self, s: u32, value: u32) {
+        if self.render.get(s as usize).is_none_or(|&r| r == value) {
+            return;
+        }
+        let d: &mut Drawn = self;
+        d.render[s as usize] = value;
+        if matches!(s, RS_WRAPU | RS_WRAPV) || (RS_WRAP0..RS_WRAP0 + 8).contains(&s) {
+            d.derive_wrap();
+        }
+    }
+
+    /// Every render state 0, but those `states` gives a value.
+    pub fn reset_states(&mut self, states: impl IntoIterator<Item = (u32, u32)>) {
+        let d: &mut Drawn = self;
+        d.render.iter_mut().for_each(|r| *r = 0);
+        for (s, v) in states {
+            if let Some(r) = d.render.get_mut(s as usize) {
+                *r = v;
+            }
+        }
+        d.derive_wrap();
+    }
+
+    /// The D3DWRAPCOORD_ bits of each coordinate set for a draw through
+    /// an interface of Direct3D `version`: before 7 the first set's two
+    /// coordinates have a state each too, which D3DRENDERSTATE_WRAP0
+    /// superseded.
+    pub fn wrap(&self, version: u32) -> [u8; 8] {
+        let mut wrap = self.wrap;
+        if version < 7 {
+            wrap[0] |= self.wrap_uv;
+        }
+        wrap
     }
 
     /// The stamp of what the device's draws are made from: the same
