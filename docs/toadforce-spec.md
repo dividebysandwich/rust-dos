@@ -1048,11 +1048,13 @@ state at 0.) With `CLIPPING` 1 a primitive is also cut at each clip plane
 whose bit `CLIPPLANEENABLE` has: a plane (a, b, c, d) keeps the points whose
 world-space position (x, y, z, w) has a * x + b * y + c * z + d * w of 0 or
 more. Where an edge crosses, every value of the vertex is taken from the
-straight line between its ends in clip space. A point is dropped whole by
-its position. What is cut from a triangle is a convex polygon: filled, it
-covers the pixels the triangle did inside the planes. With `FILLMODE` 2 the
-parts of the triangle's own edges that are inside are drawn, and no line
-along a plane; with 1 the triangle's own corners that are inside.
+straight line between its ends in clip space, and its z is 0 at the near
+plane and its w at the far one exactly, so its depth is the end of the
+depth range. A point is dropped whole by its position. What is cut from a
+triangle is a convex polygon: filled, it covers the pixels the triangle did
+inside the planes. With `FILLMODE` 2 the parts of the triangle's own edges
+that are inside are drawn, and no line along a plane; with 1 the triangle's
+own corners that are inside.
 
 **Lighting.** With `LIGHTING` 0 the diffuse colour is the vertex's,
 or white, and the specular colour the vertex's, or black with alpha
@@ -1289,7 +1291,9 @@ depth outside 0 to 1, and nothing is cut by it: with the depth test on
 drawn and changes neither depth nor stencil, and with the test off it is
 drawn, its depth counting as the end of the range it is past wherever a
 depth is used. (Measured on Direct3D 7, 8 and 9 cards with a program's
-transformed vertices, with `CLIPPING` 1 and 0.) A screen vertex's 1 / w that
+transformed vertices, with `CLIPPING` 1 and 0.) Only a primitive with a
+vertex whose depth is outside 0 to 1 has such a pixel: every pixel of the
+others is drawn, with a depth of 0 to 1. A screen vertex's 1 / w that
 is 0, negative or no number counts as 1, so its primitive is drawn. A colour
 channel is rounded to the nearest of 0 to 255. Along a line the values
 change with the place along it and not across it: a pixel has those of the

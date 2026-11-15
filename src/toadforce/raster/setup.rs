@@ -87,6 +87,11 @@ pub struct Prim {
     pub oy: f32,
     /// Depth.
     pub z: Plane,
+    /// Whether a vertex has a depth outside 0 to 1. Depth changes
+    /// linearly between the vertices, so only then is a pixel's
+    /// outside it, and one that the plane's rounding puts a step past
+    /// the range's end is inside.
+    pub z_outside: bool,
     /// 1 / w.
     pub q: Plane,
     /// The colours' channels times 1 / w.
@@ -151,6 +156,7 @@ fn planes<const V: usize>(
         ox: (origin.0 - half) as f32,
         oy: (origin.1 - half) as f32,
         z: plane(each(&|v| v.z as f64)),
+        z_outside: v.iter().any(|v| v.z < 0.0 || v.z > 1.0),
         q: plane(q),
         diffuse: [0, 1, 2, 3].map(|ch| over_w(&|v| shaded(v).0[ch] as f32)),
         specular: [0, 1, 2, 3].map(|ch| over_w(&|v| shaded(v).1[ch] as f32)),

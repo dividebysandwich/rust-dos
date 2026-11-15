@@ -399,6 +399,41 @@ fn the_depth_test_leaves_out_a_depth_outside_0_to_1() {
     assert_eq!(rig.depth(4, 4), 0xFFFF);
 }
 
+/// Depth changes linearly between the vertices, so a triangle whose
+/// vertices are all inside 0 to 1 has no pixel outside it: one that
+/// the rounding of its depth's plane puts a step past the range's end
+/// is drawn with the depth test on as it is with the test off.
+#[test]
+fn rounding_drops_no_pixel_of_a_triangle_inside_the_depth_range() {
+    let mut rig = Rig::new(Format::X8R8G8B8, Some(Format::D16));
+    rig.states(&[(RS_ZFUNC, 8)]);
+    let mut pixels = 0;
+    for i in 0..300u32 {
+        // Triangles with a left edge at an end of the range that
+        // goes through pixel centres, which are the triangle's, and
+        // a third vertex at a place that is no whole pixel.
+        let f = |n: u32| (i * n % 61) as f32 / 61.0;
+        let end = (i % 2) as f32;
+        let v = |x: f32, y: f32, z: f32| vertex_z(x, y, z, 0xFF00_00AA, 0.0, 0.0);
+        let triangle: Vec<u32> = [
+            v(2.0, 3.0, end),
+            v(30.0 + 20.0 * f(7), 4.0 + 5.0 * f(11), 0.1 + 0.8 * f(19)),
+            v(50.0, 19.0, end),
+        ]
+        .concat();
+        let mut drawn = [0, 0];
+        for (test, count) in drawn.iter_mut().enumerate() {
+            rig.clear(CLEAR_COLOUR | CLEAR_DEPTH, 0, 1.0, 0);
+            rig.states(&[(RS_ZENABLE, test as u32)]);
+            assert_eq!(rig.draw(4, &triangle), 0);
+            *count = rig.drawn(0).len();
+        }
+        assert_eq!(drawn[0], drawn[1], "{i}");
+        pixels += drawn[0];
+    }
+    assert!(pixels > 0);
+}
+
 #[test]
 fn a_fragment_the_alpha_test_drops_writes_no_depth() {
     let mut rig = Rig::new(Format::X8R8G8B8, Some(Format::D24X8));

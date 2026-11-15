@@ -306,7 +306,9 @@ impl<'a> Ctx<'a> {
             let z = p.z.eval(fx + i as f32, fy);
             // With the depth test on, what is outside the buffer's
             // range isn't drawn, and leaves the stencil as it is.
-            if ranged && !(0.0..=1.0).contains(&z) && !z.is_nan() {
+            // Only a primitive with a vertex outside it has such a
+            // pixel (`Prim::z_outside`).
+            if ranged && p.z_outside && !(0.0..=1.0).contains(&z) && !z.is_nan() {
                 c.mask &= !(1 << i);
                 continue;
             }

@@ -2580,9 +2580,6 @@ mod tests {
         assert_eq!(out[0].clip, [0.0, 1.0, 0.5, 1.0]);
     }
 
-    /// D3DRENDERSTATE_WRAP0: a coordinate with its bit that is half a
-    /// turn or more from that of the triangle's highest vertex goes a
-    /// turn towards it, 0 and 1 being the same place.
     /// A transformed vertex with a depth outside 0 to 1 is cut by the
     /// setup that clips for a card that limits depth to its range,
     /// and left to the card that leaves such pixels out itself.
@@ -2598,6 +2595,9 @@ mod tests {
         }
     }
 
+    /// D3DRENDERSTATE_WRAP0: a coordinate with its bit that is half a
+    /// turn or more from that of the triangle's highest vertex goes a
+    /// turn towards it, 0 and 1 being the same place.
     #[test]
     fn a_wrapped_texture_coordinate_goes_the_shorter_way_round() {
         let us = |wrap: u8, order: &[u32]| {
