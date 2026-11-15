@@ -538,19 +538,25 @@ fn compare(func: u32, value: u32, reference: u32) -> bool {
 /// description's D3DPTEXTURECAPS_ALPHAPALETTE offers, and 255 in any
 /// other.
 fn palette(cpu: &mut Cpu, id: u32) -> [u32; 256] {
-    let mut out = [0xFF00_0000; 256];
     let pal = state(cpu).surface(id).map_or(0, |s| s.palette);
     let Some((_, pid)) = (pal != 0)
         .then(|| super::super::super::this(cpu, pal))
         .flatten()
     else {
-        return out;
+        return [0xFF00_0000; 256];
     };
-    let Some(p) = state(cpu).object(pid).and_then(|o| o.palette.as_ref()) else {
-        return out;
-    };
-    let alpha = p.caps & DDPCAPS_ALPHA != 0;
-    for (o, [r, g, b, a]) in out.iter_mut().zip(p.entries.as_chunks::<4>().0) {
+    match state(cpu).object(pid).and_then(|o| o.palette.as_ref()) {
+        Some(p) => argb_entries(p.caps, &p.entries),
+        None => [0xFF00_0000; 256],
+    }
+}
+
+/// A palette's entries (red, green, blue and flags each) as ARGB: the
+/// flags byte is the alpha if `caps` has DDPCAPS_ALPHA, else 255.
+fn argb_entries(caps: u32, entries: &[u8]) -> [u32; 256] {
+    let mut out = [0xFF00_0000; 256];
+    let alpha = caps & DDPCAPS_ALPHA != 0;
+    for (o, [r, g, b, a]) in out.iter_mut().zip(entries.as_chunks::<4>().0) {
         let a = if alpha { *a as u32 } else { 0xFF };
         *o = a << 24 | (*r as u32) << 16 | (*g as u32) << 8 | *b as u32;
     }
@@ -1258,6 +1264,18 @@ mod tests {
         assert_eq!(depth_raw(0.0, 0xFFFF), 0);
         assert_eq!(depth_raw(0.5, 0xFFFF), 0x8000);
         assert_eq!(depth_raw(2.0, 0xFFFF_FF00), 0xFFFF_FF00);
+    }
+
+    #[test]
+    fn a_palette_with_alpha_gives_its_entries_alpha() {
+        // DDPCAPS_8BIT, with DDPCAPS_ALPHA and without.
+        let entries = [0x11, 0x22, 0x33, 0x40, 0xAA, 0xBB, 0xCC, 0x00];
+        let with = argb_entries(0x4 | DDPCAPS_ALPHA, &entries);
+        assert_eq!(with[..2], [0x4011_2233, 0x00AA_BBCC]);
+        let without = argb_entries(0x4, &entries);
+        assert_eq!(without[..2], [0xFF11_2233, 0xFFAA_BBCC]);
+        // Entries the palette hasn't got are opaque black.
+        assert_eq!(with[2], 0xFF00_0000);
     }
 
     #[test]
