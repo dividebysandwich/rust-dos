@@ -89,3 +89,5 @@ async function inflate(raw) {
   const stream = new Blob([raw]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
+
+# Automated fix for issue #1164: Rage of Mages: SMACKW32.DLL fails to load, KERNEL32 has no LoadModule
