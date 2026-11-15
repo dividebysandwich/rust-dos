@@ -109,6 +109,10 @@ pub struct Renderer {
     /// any, `runs` is empty.
     host_runs: Vec<gpu::Run>,
     host_vertices: Vec<gpu::Vertex>,
+    /// The vertices and the triangles of the runs the host transforms
+    /// (`gpu::Geometry`).
+    host_words: Vec<u32>,
+    host_indices: Vec<u32>,
     /// The primitives queued for the host so far, counted as the
     /// software renderer's are: a triangle and a line one, a point
     /// its two triangles.
@@ -399,6 +403,33 @@ impl Renderer {
         // and the others through transform and lighting first.
         let geometry =
             (!draw.fvf.transformed).then(|| geometry::Setup::new(l, &state.coords, &draw.fvf));
+        // The host draws the primitives of the states it takes. A
+        // draw that reads what it writes stays with the software
+        // renderer, which draws it pixel by pixel in order. `declined`
+        // is why a host doesn't draw it, and None with no host.
+        let attached = gpu.attached();
+        let declined = if !attached {
+            None
+        } else if state.serial {
+            Some(Decline::Serial)
+        } else {
+            gpu.declines(&state)
+        };
+        let hosted = attached && declined.is_none();
+        // A host that transforms takes the vertices of filled,
+        // smooth triangles as the program gave them: the card neither
+        // transforms them nor puts the triangles together.
+        let shape = &state.shape;
+        let plain = (4..=6).contains(&draw.primitive) && !matches!(shape.fill, 1 | 2);
+        if let Some(setup) = &geometry
+            && hosted
+            && plain
+            && !shape.flat
+            && gpu.transforms(&state)
+            && let Some(transform) = setup.hosted()
+        {
+            return Ok(self.host_geometry(draw, state, transform, memory, gpu));
+        }
         // Word `i` of vertex `n`.
         let word = |n: usize, i: usize| match draw.vertices {
             Vertices::Inline(words) => words[n * draw.fvf.words + i],
@@ -448,19 +479,6 @@ impl Renderer {
             }
         }
 
-        // The host draws the primitives of the states it takes. A
-        // draw that reads what it writes stays with the software
-        // renderer, which draws it pixel by pixel in order. `declined`
-        // is why a host doesn't draw it, and None with no host.
-        let attached = gpu.attached();
-        let declined = if !attached {
-            None
-        } else if state.serial {
-            Some(Decline::Serial)
-        } else {
-            gpu.declines(&state)
-        };
-        let hosted = attached && declined.is_none();
         // What is queued is for one target and one renderer, and a
         // draw that reads what it writes is alone in the queue.
         let other = match hosted {
@@ -500,7 +518,11 @@ impl Renderer {
         let colour = state.target.colour;
         if hosted {
             let vertices = first..self.host_vertices.len();
-            let run = gpu::Run { state, vertices };
+            let run = gpu::Run {
+                state,
+                vertices,
+                geometry: None,
+            };
             if run.vertices.is_empty() {
                 return Ok(None);
             }
@@ -508,7 +530,10 @@ impl Renderer {
             // A draw with the state of the one before it is one run
             // with it: the host sets its state up once for both.
             match self.host_runs.last_mut() {
-                Some(last) if Arc::ptr_eq(&last.state, &run.state) || *last.state == *run.state => {
+                Some(last)
+                    if last.geometry.is_none()
+                        && (Arc::ptr_eq(&last.state, &run.state) || *last.state == *run.state) =>
+                {
                     last.vertices.end = run.vertices.end;
                 }
                 _ => self.host_runs.push(run),
@@ -540,6 +565,92 @@ impl Renderer {
             primitives,
             span: colour.span(&whole),
         }))
+    }
+
+    /// Queue the triangles of `draw`, whose vertices are in
+    /// `self.order`, for a host that takes them through `transform`.
+    /// Gives how many there are, counting those the host then cuts
+    /// away or leaves out for their winding.
+    fn host_geometry(
+        &mut self,
+        draw: &Draw,
+        state: Arc<DrawState>,
+        transform: gpu::Transform,
+        memory: &mut [u8],
+        gpu: &mut Gpu,
+    ) -> Option<Drawn> {
+        if self.target != Some(state.target) || !self.runs.is_empty() {
+            self.flush(memory, gpu);
+        }
+        self.target = Some(state.target);
+        let n = self.order.len();
+        let triangles = match draw.primitive {
+            4 => n / 3,
+            _ => n.saturating_sub(2),
+        };
+        if triangles == 0 {
+            return None;
+        }
+        // The vertices the indices name, from the first to the last.
+        let low = *self.order.iter().min().unwrap() as usize;
+        let high = *self.order.iter().max().unwrap() as usize;
+        let words = draw.fvf.words;
+        let start = self.host_words.len();
+        match draw.vertices {
+            Vertices::Inline(all) => {
+                self.host_words
+                    .extend_from_slice(&all[low * words..(high + 1) * words]);
+            }
+            Vertices::Buffer { offset, stride, .. } => {
+                for n in low..=high {
+                    let at = offset as usize + n * stride as usize;
+                    let bytes = &memory[at..at + 4 * words];
+                    self.host_words
+                        .extend(bytes.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)));
+                }
+            }
+        }
+        let end = self.host_words.len();
+        let colour = state.target.colour;
+        // A draw with the state and the transform of the one before
+        // it is one run with it, its vertices after that one's.
+        let first = self.host_indices.len();
+        let base = match self.host_runs.last_mut() {
+            Some(gpu::Run {
+                state: last,
+                geometry: Some(geometry),
+                ..
+            }) if geometry.transform == transform
+                && (Arc::ptr_eq(last, &state) || **last == *state) =>
+            {
+                geometry.words.end = end;
+                (start - geometry.words.start) / words
+            }
+            _ => {
+                self.host_runs.push(gpu::Run {
+                    state,
+                    vertices: 0..0,
+                    geometry: Some(gpu::Geometry {
+                        transform,
+                        words: start..end,
+                        indices: first..first,
+                    }),
+                });
+                0
+            }
+        };
+        let (order, indices) = (&self.order, &mut self.host_indices);
+        pieces(draw.primitive, n, |piece| {
+            if let Piece::Triangle(t, _) = piece {
+                indices.extend(t.map(|i| (base + order[i] as usize - low) as u32));
+            }
+        });
+        let run = self.host_runs.last_mut().and_then(|run| run.geometry.as_mut());
+        run.expect("the run was just queued").indices.end = self.host_indices.len();
+        Some(Drawn {
+            primitives: triangles as u64,
+            span: gpu::range(&colour),
+        })
     }
 
     /// The primitives of the vertices in `self.order`, queued: for
@@ -669,10 +780,14 @@ impl Renderer {
                 target: self.target.expect("what is queued has a target"),
                 runs: &self.host_runs,
                 vertices: &self.host_vertices,
+                words: &self.host_words,
+                indices: &self.host_indices,
             };
             gpu.draw(&batch, &reads, memory);
             self.host_runs.clear();
             self.host_vertices.clear();
+            self.host_words.clear();
+            self.host_indices.clear();
             self.target = None;
             return;
         }

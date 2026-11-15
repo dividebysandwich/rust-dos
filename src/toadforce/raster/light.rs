@@ -5,6 +5,7 @@
 use super::geometry::{direction, dot, length, normalize, transform};
 use super::math;
 use super::vertex::Fvf;
+use crate::toadforce::gpu;
 use crate::toadforce::level1::states::*;
 use crate::toadforce::level1::{
     LIGHT_DIRECTIONAL, LIGHT_SPOT, LIGHTS, Level1, Light, Material, TRANSFORM_VIEW,
@@ -50,6 +51,43 @@ pub struct Lighting {
 }
 
 impl Lighting {
+    /// The lighting as a host works it out for the front of a
+    /// triangle, with normals through `normals` to camera space.
+    pub fn hosted(&self, normals: &[[f32; 3]; 3], normalize: bool) -> gpu::Lights {
+        let three = |c: [f32; 4]| [c[0], c[1], c[2]];
+        let lamps = self.lamps.iter().map(|lamp| gpu::Lamp {
+            kind: lamp.light.kind,
+            position: lamp.position,
+            axis: lamp.axis,
+            diffuse: three(lamp.light.diffuse),
+            specular: three(lamp.light.specular),
+            ambient: three(lamp.light.ambient),
+            range: lamp.light.range,
+            attenuation: lamp.light.attenuation,
+            inner: lamp.inner,
+            outer: lamp.outer,
+            falloff: lamp.light.falloff,
+            spot_model: lamp.light.spot_model,
+        });
+        let m = &self.materials[0];
+        gpu::Lights {
+            lamps: lamps.collect(),
+            material: [m.diffuse, m.specular, m.ambient, m.emissive],
+            power: m.power,
+            ambient: self.ambient,
+            specular: self.specular,
+            single: self.single,
+            local_viewer: self.local_viewer,
+            sources: self.sources[0].map(|source| match source {
+                Source::Material => 0,
+                Source::Diffuse => 1,
+                Source::Specular => 2,
+            }),
+            normals: std::array::from_fn(|i| normals[i / 3][i % 3]),
+            normalize,
+        }
+    }
+
     /// The lighting of the state `l` for vertices laid out as `fvf`.
     pub fn new(l: &Level1, fvf: &Fvf) -> Lighting {
         let view = &l.transforms[TRANSFORM_VIEW as usize];

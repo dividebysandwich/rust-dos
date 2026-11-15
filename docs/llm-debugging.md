@@ -1189,13 +1189,17 @@ counts what the OpenGL renderer costs and misses:
   `lock` counts the times the program read such a surface and the
   card fetched its pixels from the GPU to answer.
 - `counts`: the renderer's own, null with `software`: `batches` and
-  `runs` (draw calls), `surface_uploads` and `texture_uploads` from
-  card memory, `texture_converts` (images of textures filled from a
-  surface the GPU has, with nothing read back), `clears` and `blits`
-  done on the GPU, `presents` (frames the window showed from the
-  GPU's surface), the shader `programs` compiled and
-  `failed_programs`, the `surfaces` and `textures` it holds, and
-  `packed_565` (whether 16-bit targets are the GPU's 5-6-5 format).
+  `runs` (draw calls), `transformed_runs` (those of them whose
+  vertices the GPU's vertex shader took to the screen, where the card
+  transforms the others on the processor) and `transforming_programs`
+  (the shader programs made for them), `surface_uploads` and
+  `texture_uploads` from card memory, `texture_converts` (images of
+  textures filled from a surface the GPU has, with nothing read
+  back), `clears` and `blits` done on the GPU, `presents` (frames the
+  window showed from the GPU's surface), the shader `programs`
+  compiled and `failed_programs`, the `surfaces` and `textures` it
+  holds, and `packed_565` (whether 16-bit targets are the GPU's 5-6-5
+  format).
 
 A run with `--deterministic` draws the card in software, so that its
 pictures are the same on every host. To compare the two renderers at
