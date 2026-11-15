@@ -31,7 +31,7 @@
 //! - The functions are `cdecl`, as Windows 98's are.
 
 use super::call;
-use super::memory::write_process_bytes;
+use super::mapping::write_process_bytes;
 use super::object::{self, Kind};
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
@@ -374,7 +374,7 @@ crate::state_fields!(Finished {
 /// Write a finished command's data, residual count, target status and
 /// sense into its block and buffer, then its status byte.
 fn finish(cpu: &mut Cpu, done: &Finished) {
-    let mut write = |lin: u32, bytes: &[u8]| write_process_bytes(&mut cpu.bus, done.pid, lin, bytes);
+    let mut write = |lin: u32, bytes: &[u8]| write_process_bytes(cpu, done.pid, lin, bytes);
     write(done.buf, &done.data);
     if let Some(residual) = done.residual {
         write(done.srb + EXEC_BUF_LEN, &residual.to_le_bytes());

@@ -1126,7 +1126,9 @@ dependencies = [
 
 [[package]]
 name = "oxideav-indeo"
-version = "0.0.4"
+version = "0.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05ac490cb166845303f292f5d161508c64ffa150004a18ab46d0e6aadcc3ff76"
 dependencies = [
  "oxideav-core",
 ]

@@ -303,6 +303,7 @@ pub fn close_of(cpu: &mut Cpu, pid: u32, handle: u32) -> bool {
 /// Close in DOS the files whose objects went.
 pub fn close_files(bus: &mut crate::bus::Bus) {
     for sft in std::mem::take(&mut bus.win32.objects.closed) {
+        crate::win32::kernel32::comm::file_closed(bus, sft);
         bus.disk.close_file(sft);
     }
 }
