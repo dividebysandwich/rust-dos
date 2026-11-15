@@ -221,11 +221,12 @@ pub fn make_room(bus: &mut Bus) -> bool {
 
 /// Give back to the pool a batch of the pages that no program touched
 /// since the last sweep, of both kinds: those of views of files
-/// (`evict`) and those of programs' own memory, which go out to the page
-/// file (`memory::page_out_unused`); and clear the accessed bits of the
-/// others. A page untouched from one sweep to the next goes, whichever
-/// kind it is, so neither kind keeps pages the other needs. Whether any
-/// went; the TLB is then stale. Every process must be in the list.
+/// (`evict`) and those of programs' own memory and modules' images,
+/// which go out to the page file (`memory::page_out_unused`); and clear
+/// the accessed bits of the others. A page untouched from one sweep to
+/// the next goes, whichever kind it is, so neither kind keeps pages the
+/// other needs. Whether any went; the TLB is then stale. Every process
+/// must be in the list.
 pub fn sweep(bus: &mut Bus) -> bool {
     let views = evict(bus, false);
     let pageable = bus
@@ -348,6 +349,27 @@ pub fn fault_in_process(cpu: &mut Cpu, index: usize, lin: u32) -> bool {
         cpu.tlb.flush_page(lin);
     }
     done
+}
+
+/// Write `data` at `lin` in the memory of the process `pid`, through its
+/// own page tables, whichever process runs and whether or not a service
+/// is running: for work the system finishes later, outside the call that
+/// asked for it (a wave block's flags, an ASPI command's results). A page
+/// of a view of a file that isn't in memory, not read yet or given back
+/// to the pool, is read in first, as the program's own write would read
+/// it. Bytes on pages the process hasn't mapped are left out.
+pub fn write_process_bytes(cpu: &mut Cpu, pid: u32, lin: u32, data: &[u8]) {
+    let Some(p) = cpu.bus.win32.processes.iter().position(|p| p.id == pid) else {
+        return;
+    };
+    let memory = memory::Memory::tables(cpu.bus.win32.processes[p].memory.cr3);
+    for (offset, run) in Bus::page_runs(lin, data.len()) {
+        let at = lin.wrapping_add(offset as u32);
+        let part = &data[offset..offset + run];
+        if memory.write(&mut cpu.bus, at, part).is_none() && fault_in_process(cpu, p, at) {
+            let _ = memory.write(&mut cpu.bus, at, part);
+        }
+    }
 }
 
 /// `fault_in_process` without the TLB, which may be stale after it

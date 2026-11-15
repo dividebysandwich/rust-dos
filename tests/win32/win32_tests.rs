@@ -4017,6 +4017,247 @@ fn a_read_write_mapping_larger_than_memory_writes_pages_to_its_file_as_they_leav
     assert!(after == expected, "the file doesn't have what the view wrote");
 }
 
+/// A program whose image and a copy-on-write view of a file, 12 MB each,
+/// are together more than the 16 MB machine holds, and whose loops touch
+/// a page of each in turn: it writes `page ^ mark` at offset 8 of every
+/// page of both, then checks twice that each has its number at 0 and its
+/// value at 8. The image's pages and the view's written ones go out to
+/// the page file on one clock and come back, and neither kind thrashes
+/// for the other. A bit each in the exit code.
+#[test]
+fn an_image_and_a_copy_on_write_view_larger_than_memory_together_page() {
+    const PAGES: u32 = 12 * 256;
+    const IMAGE_MARK: u32 = 0x6969_0000;
+    const VIEW_MARK: u32 = 0x9696_0000;
+    const GENERIC_READ: i32 = 0x8000_0000u32 as i32;
+    const FILE_SHARE_READ: i32 = 1;
+    const OPEN_EXISTING: i32 = 3;
+    const PAGE_WRITECOPY: i32 = 8;
+    const FILE_MAP_COPY: i32 = 1;
+    let names: &[&str] = &["CreateFileA", "CreateFileMappingA", "MapViewOfFile"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // Data: the file's name in the first page, after its number.
+    let mut data = numbered_pages(PAGES);
+    data[0x10..0x18].copy_from_slice(b"BIG.DAT\0");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        push_args(
+            a,
+            &[l.at(0x10) as i32, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0],
+        )?;
+        a.call(f("CreateFileA"))?;
+        push_args(a, &[PAGE_WRITECOPY, 0, 0, 0])?;
+        a.push(0)?;
+        a.push(eax)?;
+        a.call(f("CreateFileMappingA"))?;
+        push_args(a, &[FILE_MAP_COPY, 0, 0, 0])?;
+        a.push(eax)?;
+        a.call(f("MapViewOfFile"))?;
+        a.mov(edi, eax)?;
+        a.mov(esi, l.at(0) as u32)?;
+        a.test(edi, edi)?;
+        a.setne(cl)?;
+        a.cmp(cl, 1)?;
+        bit_if_equal(a, 0)?;
+        let mut write = a.create_label();
+        a.xor(edx, edx)?;
+        a.set_label(&mut write)?;
+        a.mov(eax, edx)?;
+        a.shl(eax, 12)?;
+        for (base, mark) in [(esi, IMAGE_MARK), (edi, VIEW_MARK)] {
+            a.mov(ecx, edx)?;
+            a.xor(ecx, mark as i32)?;
+            a.mov(dword_ptr(base + eax + 8), ecx)?;
+        }
+        a.inc(edx)?;
+        a.cmp(edx, PAGES as i32)?;
+        a.jne(write)?;
+        for pass in 0..2 {
+            let mut check = a.create_label();
+            let mut wrong = a.create_label();
+            a.xor(edx, edx)?;
+            a.set_label(&mut check)?;
+            a.mov(eax, edx)?;
+            a.shl(eax, 12)?;
+            for (base, mark) in [(esi, IMAGE_MARK), (edi, VIEW_MARK)] {
+                a.cmp(dword_ptr(base + eax), edx)?;
+                a.jne(wrong)?;
+                a.mov(ecx, edx)?;
+                a.xor(ecx, mark as i32)?;
+                a.cmp(dword_ptr(base + eax + 8), ecx)?;
+                a.jne(wrong)?;
+            }
+            a.inc(edx)?;
+            a.cmp(edx, PAGES as i32)?;
+            a.jne(check)?;
+            a.set_label(&mut wrong)?;
+            a.cmp(edx, PAGES as i32)?;
+            bit_if_equal(a, 1 + pass)?;
+        }
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let test = "image_and_copy_on_write_view";
+    let file = numbered_pages(PAGES);
+    let files = [("T.EXE", exe), ("BIG.DAT", file.clone())];
+    let (code, text, counts) = run_files_counted(test, &files, 16);
+    assert_eq!(code, 7, "the checks that failed: {:03b} {}", !code & 7, text);
+    paged_a_view_without_thrashing(counts, 2 * PAGES);
+    // Both kinds left memory.
+    assert!(counts.outs > PAGES as u64 / 2, "{counts:?}");
+    assert!(counts.evicted > PAGES as u64 / 2, "{counts:?}");
+    let after = fs::read(PathBuf::from("target/test_win32").join(test).join("BIG.DAT")).unwrap();
+    assert!(after == file, "the file of a copy-on-write view changed");
+}
+
+/// A CD-ROM read that the system finishes after the call, into a buffer
+/// on a page of a read-write view of a file that left memory while the
+/// read waited: the program reads through the rest of the view, more
+/// than memory holds, before it waits for the read. The system reads the
+/// page in again to write the sector there, as the program's own write
+/// would. A bit each in the exit code.
+#[test]
+fn a_read_finished_later_into_a_view_page_that_left_memory_reaches_it() {
+    const PAGES: u32 = 24 * 256;
+    const GENERIC_READ_WRITE: i32 = 0xC000_0000u32 as i32;
+    const OPEN_EXISTING: i32 = 3;
+    const PAGE_READWRITE: i32 = 4;
+    const FILE_MAP_WRITE: i32 = 2;
+    const SRB: u32 = 0x40;
+    const EVENT: u32 = 0x100;
+    let dir = cdimage::scratch("wnaspi32_view");
+    let image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    fs::write(dir.join("GAME.BIN"), cdimage::mode1_2352(&image)).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n";
+    fs::write(&cue, sheet).unwrap();
+
+    let file = numbered_pages(PAGES);
+    let aspi: &[&str] = &["GetASPI32SupportInfo", "SendASPI32Command"];
+    let kernel: &[&str] = &[
+        "CreateFileA",
+        "CreateFileMappingA",
+        "MapViewOfFile",
+        "UnmapViewOfFile",
+        "CloseHandle",
+        "CreateEventA",
+        "WaitForSingleObject",
+    ];
+    let imports: &[(&str, &[&str])] = &[("WNASPI32.DLL", aspi), ("KERNEL32.DLL", kernel)];
+    // Data: the file's name at 0, a READ(10) of the primary volume
+    // descriptor with SRB_EVENT_NOTIFY at SRB, its event at EVENT.
+    let mut data = b"BIG.DAT\0".to_vec();
+    data.resize(0x110, 0);
+    let mut srb = read10_srb(16);
+    srb[3] |= 0x40;
+    data[SRB as usize..SRB as usize + srb.len()].copy_from_slice(&srb);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| match aspi.iter().position(|n| *n == name) {
+            Some(i) => l.import(i),
+            None => l.import(aspi.len() + kernel.iter().position(|n| *n == name).unwrap()),
+        };
+        a.xor(ebx, ebx)?;
+        push_args(
+            a,
+            &[l.at(0) as i32, GENERIC_READ_WRITE, 0, 0, OPEN_EXISTING, 0, 0],
+        )?;
+        a.call(f("CreateFileA"))?;
+        a.mov(edi, eax)?;
+        push_args(a, &[PAGE_READWRITE, 0, 0, 0])?;
+        a.push(0)?;
+        a.push(edi)?;
+        a.call(f("CreateFileMappingA"))?;
+        a.mov(ebp, eax)?;
+        push_args(a, &[FILE_MAP_WRITE, 0, 0, 0])?;
+        a.push(ebp)?;
+        a.call(f("MapViewOfFile"))?;
+        a.mov(esi, eax)?;
+        // A manual-reset event, not signaled, in the block and kept.
+        push_args(a, &[0, 1, 0, 0])?;
+        a.call(f("CreateEventA"))?;
+        a.mov(dword_ptr(l.at(SRB + 24)), eax)?;
+        a.mov(dword_ptr(l.at(EVENT)), eax)?;
+        // The read into the view's first page: pending, as the drive
+        // spins up first.
+        a.mov(dword_ptr(l.at(SRB + 0x10)), esi)?;
+        a.push(l.at(SRB) as i32)?;
+        a.call(f("SendASPI32Command"))?;
+        a.add(esp, 4)?;
+        a.cmp(eax, 0)?;
+        bit_if_equal(a, 0)?;
+        // Every other page has its number, and is written as the first
+        // one was: more of them than memory holds, so the first page
+        // leaves memory.
+        let mut next = a.create_label();
+        let mut wrong = a.create_label();
+        a.mov(edx, 1)?;
+        a.set_label(&mut next)?;
+        a.mov(eax, edx)?;
+        a.shl(eax, 12)?;
+        a.cmp(dword_ptr(esi + eax), edx)?;
+        a.jne(wrong)?;
+        a.mov(dword_ptr(esi + eax + 8), edx)?;
+        a.inc(edx)?;
+        a.cmp(edx, PAGES as i32)?;
+        a.jne(next)?;
+        a.set_label(&mut wrong)?;
+        a.cmp(edx, PAGES as i32)?;
+        bit_if_equal(a, 1)?;
+        // The read was still pending then, so it ends after the page left.
+        a.cmp(byte_ptr(l.at(SRB + 1)), 0)?;
+        bit_if_equal(a, 5)?;
+        // The read ends, done, with the sector in the buffer.
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(EVENT)))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.cmp(eax, 0)?;
+        bit_if_equal(a, 2)?;
+        a.cmp(byte_ptr(l.at(SRB + 1)), 1)?;
+        bit_if_equal(a, 3)?;
+        a.cmp(dword_ptr(esi + 1), 0x3030_4443)?;
+        bit_if_equal(a, 4)?;
+        a.push(esi)?;
+        a.call(f("UnmapViewOfFile"))?;
+        a.push(ebp)?;
+        a.call(f("CloseHandle"))?;
+        a.push(edi)?;
+        a.call(f("CloseHandle"))?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let test = "aspi_into_view_page";
+    let files = [("T.EXE", exe), ("BIG.DAT", file)];
+    let mut cpu = Cpu::with_memory(scratch(test, &files), 16);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    let mut evicted = 0;
+    let mut ended = false;
+    for _ in 0..400 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        let stop = run_batch(&mut cpu, &mut NoHook, false);
+        if cpu.bus.win32.active() {
+            evicted = rust_dos::win32::paging_counts(&cpu.bus).evicted;
+        }
+        if stop == StopReason::ShellReloaded {
+            ended = true;
+            break;
+        }
+    }
+    assert!(ended, "the program didn't end: {:?}", printed(&cpu));
+    let (code, text) = (cpu.errorlevel, printed(&cpu));
+    assert_eq!(code, 0x3F, "the checks that failed: {:06b} {}", !code & 0x3F, text);
+    assert!(evicted as u32 > PAGES / 2, "{evicted} pages of the view left memory");
+    // The sector reached the file too, when the view went.
+    let after = fs::read(PathBuf::from("target/test_win32").join(test).join("BIG.DAT")).unwrap();
+    assert_eq!(&after[1..6], b"CD001");
+}
+
 /// ReleaseStgMedium, as Windows' table of it has it: a global block no
 /// object owns is freed, a stream and the object that owns a medium are
 /// released, a block an object owns is left alone, and the medium is

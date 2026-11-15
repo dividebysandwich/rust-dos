@@ -218,7 +218,8 @@ pub struct PageFileStatus {
     /// The pages it may hold and those it holds.
     pub size: u32,
     pub used: u32,
-    /// The physical pages of programs' own memory that may go out to it.
+    /// The physical pages of programs' own memory and of modules' images
+    /// that may go out to it.
     pub pageable: usize,
     pub counts: PagingCounts,
 }
@@ -241,7 +242,8 @@ pub fn page_file_status(bus: &Bus) -> Option<PageFileStatus> {
 }
 
 impl PageFile {
-    /// How many physical pages of programs' own memory may go out to it.
+    /// How many physical pages of programs' own memory and of modules'
+    /// images may go out to it.
     pub fn pageable_len(&self) -> usize {
         self.pageable.len()
     }
@@ -989,7 +991,8 @@ pub struct PagedRange {
 }
 
 /// A zeroed physical page from the pool. When it has none left, a page
-/// of a program's own memory goes out to the page file to make one.
+/// of programs' own memory or modules' images goes out to the page file
+/// to make one.
 pub fn pool_page(bus: &mut Bus) -> Option<u32> {
     let page = match take_page(bus) {
         Some(page) => page,
@@ -1076,16 +1079,17 @@ pub fn page_out(bus: &mut Bus) -> bool {
     true
 }
 
-/// Write up to `most` pages of programs' own memory that no program has
-/// touched since the last search (their entries' accessed bits, which it
-/// clears on the others) out to the page file, in one pass over them
-/// that starts where the last search stopped (`hand`, which it moves to
-/// the last page it sent): with `mapping::evict`, a batch of the pages
-/// not used lately, of both kinds. How many went. The TLB is stale after
-/// it when it sent a page or cleared an accessed bit: the processor sets
-/// the bit only when it walks the tables, so a page whose translation
-/// stayed in the TLB would look unused at the next search however often
-/// the program touched it.
+/// Write up to `most` pages of programs' own memory and modules' images
+/// that no program has touched since the last search (their entries'
+/// accessed bits, which it clears on the others) out to the page file,
+/// in one pass over them that starts where the last search stopped
+/// (`hand`, which it moves to the last page it sent): with
+/// `mapping::evict`, a batch of the pages not used lately, of both
+/// kinds. How many went. The TLB is stale after it when it sent a page
+/// or cleared an accessed bit: the processor sets the bit only when it
+/// walks the tables, so a page whose translation stayed in the TLB
+/// would look unused at the next search however often the program
+/// touched it.
 pub fn page_out_unused(bus: &mut Bus, most: usize) -> usize {
     let Some(pool) = bus.win32.pool.as_ref() else {
         return 0;
@@ -1347,8 +1351,8 @@ pub fn out_of_memory(bus: &mut Bus, lin: u32) {
     let line = format!(
         "[W32] Out of memory: the page at {lin:08X} can't come in. Of the pool's {} pages, \
          {held} are held for the instruction that faulted, {pinned} are pinned by the \
-         system, {} of programs' memory may go out, and the rest are the system's own; \
-         the page file has room for {} more",
+         system, {} of programs' own memory and modules' images may go out, and the rest \
+         are the system's own; the page file has room for {} more",
         pool.len / PAGE,
         file.pageable.len(),
         file.room(),
@@ -1374,21 +1378,6 @@ pub fn unpin(bus: &mut Bus, cr3: u32, lin: u32) {
         let at = *at;
         file.pinned.remove(&phys);
         file.pageable.insert(phys, at);
-    }
-}
-
-/// Write `data` at `lin` in the memory of the process `pid`, through its
-/// own page tables, whichever process runs and whether or not a service
-/// is running: for work the system finishes later, outside the call that
-/// asked for it. Bytes on pages the process hasn't mapped are left out.
-pub fn write_process_bytes(bus: &mut Bus, pid: u32, lin: u32, data: &[u8]) {
-    let Some(p) = bus.win32.processes.iter().position(|p| p.id == pid) else {
-        return;
-    };
-    let memory = Memory::tables(bus.win32.processes[p].memory.cr3);
-    for (offset, run) in Bus::page_runs(lin, data.len()) {
-        let at = lin.wrapping_add(offset as u32);
-        let _ = memory.write(bus, at, &data[offset..offset + run]);
     }
 }
 
