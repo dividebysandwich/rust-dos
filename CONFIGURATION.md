@@ -1851,9 +1851,11 @@ sets up, such as the mixing fixes, also waits for a driver that hasn't
 set itself up yet. The patch is part of the game's memory, so a save
 state keeps it, and a state saved without it stays unpatched until the
 game starts again. Some patch a program's file as DOS loads it, from
-the shell or by EXEC, when every piece the fix checks is as the game
-shipped it; the file on the disk doesn't change. Others skip a program
-the game starts, with the exit code it would have given.
+the shell or by EXEC, or as the built-in Windows loads a Win32 program,
+when every piece the fix checks is as the game shipped it; the file on
+the disk doesn't change. A Windows booted from a disk image loads its
+programs itself, so the Win32 fixes don't reach it. Others skip a
+program the game starts, with the exit code it would have given.
 
 | Name | Game | What goes wrong | What the fix does |
 |------|------|-----------------|-------------------|
@@ -1863,6 +1865,7 @@ the game starts, with the exit code it would have given.
 | `lol2-virtual-size` | Lands of Lore: Guardians of Destiny | In Huline's cantina, after Baccata speaks, the game stops with "Memory allocation of 1309694 bytes failed!!" | Patches its launchers, LOLG.EXE and SETUPG.EXE, when LOLG.DAT is beside them, to give DOS/4GW 32 MB of virtual memory instead of 24 MB |
 | `microprose-dswap` | F-117A, F-19, Gunship 2000, Covert Action | DSWAP.EXE wants the original install disk and waits for it | Skips DSWAP.EXE with exit code 1, as if the disk was there |
 | `microprose-player` | The same games | Their PLAYER.EXE, the title and cutscene player, loops forever without the copy protection's data | Skips PLAYER.EXE, when DSWAP.EXE is beside it, with exit code 0 |
+| `td4-intro-camera` | Test Drive 4 (version 1.2 only, on the built-in Windows) | At 60 frames a second the race is seen from just above the car, or at lower rates from too close or too far, for the whole race | Patches 3.EXE as it loads to move the intro's last camera shot by the game's ticks instead of its frames |
 
 The two Titus games share a sound engine that turns each signed sample
 into an unsigned 0 to 63 and scales it by the note's volume without
@@ -1902,10 +1905,30 @@ PLAYER.EXE checks a buffer the copy protection fills. Neither is needed
 for play. PLAYER.EXE is a common name (Millennia's intro player has it
 too), so only the one with DSWAP.EXE beside it is skipped.
 
+Test Drive 4 shows four camera shots of the cars before a race, each
+40 of the game's ticks long (35 a second). The last one starts the
+camera far behind the car and moves it closer by the same step in every
+frame drawn, and the race keeps the camera where the shot left it. The
+shot was made for 35 frames a second, where it ends at the distance of
+the race's chase view. At 60, the rate a Voodoo 2 synchronised to a 60
+Hz display gives on a fast PC, the camera ends just above the car; at
+30 it stops a little farther out, and below that far behind. A real PC
+does the same. The fix moves the step from the frame to the tick, so
+the shot ends at the chase view's distance at any frame rate. It is
+for version 1.2, which the game's patch TD42UP.EXE makes: 3.EXE of
+451072 bytes, SHA-256
+`cce7cb8904a9e9d9976504dbe7989629f766f08dd9f0b0ad24cbcb08c7062601`.
+Without the fix, on version 1.0 or on a Windows image, F4 in the race
+steps through the camera views, each at its own distance; the fifth
+press reaches the chase view. `voodoo_fps_cap=30` ([3dfx frame rate
+cap](#3dfx-frame-rate-cap)) holds the intro to 30 frames a second, where
+the shot ends a little behind the chase view's distance.
+
 To add a fix: an entry in `FIXES` in `src/game_fixes.rs` with a name of its
 own, the game, the reason, and how to recognise it; a test that runs it
-(`tests/program/game_fixes_tests.rs`, or `tests/dos/exec_tests.rs` for a
-program skipped as it starts); and a row in the table above.
+(`tests/program/game_fixes_tests.rs`, `tests/dos/exec_tests.rs` for a
+program skipped as it starts, or `tests/win32/win32_tests.rs` for a Win32
+program); and a row in the table above.
 
 ## RetroAchievements
 

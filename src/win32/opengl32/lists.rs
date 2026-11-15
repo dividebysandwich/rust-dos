@@ -1822,7 +1822,7 @@ mod tests {
             run(&mut cpu, list);
             let c = ctx(&mut cpu).unwrap();
             let current = (c.color, c.normal, c.tex_coord);
-            (current, c.lighting, c.begin, c.error, c.vertices.len())
+            (current, *c.lighting, c.begin, c.error, c.vertices.len())
         };
         for lit in [false, true] {
             assert_eq!(after(&list, lit), after(&by_call, lit), "lit {lit}");

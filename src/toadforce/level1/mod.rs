@@ -25,6 +25,8 @@ pub const SET_MATERIAL: u16 = 0x0015;
 pub const SET_LIGHT: u16 = 0x0016;
 pub const ENABLE_LIGHT: u16 = 0x0017;
 pub const SET_CLIP_PLANE: u16 = 0x0018;
+pub const SET_BACK_MATERIAL: u16 = 0x0019;
+pub const SET_AMBIENT: u16 = 0x001A;
 pub const SET_RENDER_TARGET: u16 = 0x0020;
 pub const CLEAR: u16 = 0x0021;
 pub const DEFINE_TEXTURE: u16 = 0x0022;
@@ -280,6 +282,9 @@ pub enum Command<'a> {
         rect: [u32; 4],
     },
     Material(Material),
+    BackMaterial(Material),
+    /// The ambient light's red, green and blue.
+    Ambient([f32; 3]),
     Light {
         slot: usize,
         light: Light,
@@ -328,6 +333,22 @@ impl Command<'_> {
     /// writes card memory.
     pub fn sets_state(&self) -> bool {
         !matches!(self, Command::Clear { .. } | Command::Draw(_))
+    }
+
+    /// Whether the command sets state that only transform and lighting
+    /// read: the steps a fragment goes through (`Lowered`) are made
+    /// from none of it.
+    fn sets_geometry_only(&self) -> bool {
+        matches!(
+            self,
+            Command::Transform { .. }
+                | Command::Material(_)
+                | Command::BackMaterial(_)
+                | Command::Ambient(_)
+                | Command::Light { .. }
+                | Command::EnableLight { .. }
+                | Command::ClipPlane { .. }
+        )
     }
 }
 
@@ -393,6 +414,8 @@ pub fn lengths(opcode: u16) -> Option<(usize, usize)> {
         SET_LIGHT => (29, 0),
         ENABLE_LIGHT => (3, 0),
         SET_CLIP_PLANE => (6, 0),
+        SET_BACK_MATERIAL => (18, 0),
+        SET_AMBIENT => (4, 0),
         SET_RENDER_TARGET => (9, 0),
         CLEAR => (5, 4),
         DEFINE_TEXTURE => (11, 2),
@@ -505,17 +528,23 @@ pub fn decode(opcode: u16, words: &[u32], memory: u32) -> Result<Command<'_>, Er
                 rect: [words[2], words[3], words[4], words[5]],
             }
         }
-        SET_MATERIAL => {
+        SET_MATERIAL | SET_BACK_MATERIAL => {
             let v: [f32; 17] = floats(&words[1..])?;
             let four = |at: usize| [v[at], v[at + 1], v[at + 2], v[at + 3]];
-            Command::Material(Material {
+            let material = Material {
                 diffuse: four(0),
                 ambient: four(4),
                 specular: four(8),
                 emissive: four(12),
                 power: v[16],
-            })
+            };
+            if opcode == SET_MATERIAL {
+                Command::Material(material)
+            } else {
+                Command::BackMaterial(material)
+            }
         }
+        SET_AMBIENT => Command::Ambient(floats(&words[1..])?),
         SET_LIGHT => {
             let slot = below(words[1], LIGHTS)?;
             let kind = words[2];
@@ -801,6 +830,12 @@ pub struct Level1 {
     /// Left, top, width and height.
     pub scissor: [u32; 4],
     pub material: Material,
+    /// The material of a triangle's back, where both sides are lit:
+    /// `SET_MATERIAL`'s too, until `SET_BACK_MATERIAL` gives another.
+    pub material_back: Material,
+    /// The ambient light's red, green and blue: `AMBIENT`'s channels,
+    /// or `SET_AMBIENT`'s numbers, whichever came last.
+    pub ambient: [f32; 3],
     pub lights: [Light; LIGHTS],
     /// Bit n: light n is on.
     pub lights_on: u32,
@@ -830,6 +865,8 @@ crate::state_fields!(Level1 {
     textures,
     bound,
     lowered,
+    material_back,
+    ambient,
 });
 
 impl Default for Level1 {
@@ -853,6 +890,8 @@ impl Default for Level1 {
             scissor_on: false,
             scissor: [0; 4],
             material: Material::default(),
+            material_back: Material::default(),
+            ambient: [0.0; 3],
             lights: [Light::default(); LIGHTS],
             lights_on: 0,
             clip_planes: [[0.0; 4]; CLIP_PLANES],
@@ -891,7 +930,9 @@ impl Level1 {
     /// processor (`ToadForce::execute`).
     pub fn apply(&mut self, command: Command) -> Result<(), Error> {
         // `CLEAR` leaves the state as it is, and a frame starts with one.
-        if command.sets_state() {
+        // A matrix, a material or a light is read by transform and
+        // lighting alone, and a program sets them between most draws.
+        if command.sets_state() && !command.sets_geometry_only() {
             self.lowered.forget();
         }
         match command {
@@ -899,6 +940,10 @@ impl Level1 {
             Command::RenderState(pairs) => {
                 for pair in pairs.as_chunks::<2>().0 {
                     self.render[pair[0] as usize] = pair[1];
+                    if pair[0] == states::RS_AMBIENT {
+                        let [r, g, b, _] = super::raster::geometry::colour(pair[1]);
+                        self.ambient = [r, g, b];
+                    }
                 }
             }
             Command::StageState { stage, pairs } => {
@@ -912,7 +957,12 @@ impl Level1 {
                 self.scissor_on = enable;
                 self.scissor = rect;
             }
-            Command::Material(material) => self.material = material,
+            Command::Material(material) => {
+                self.material = material;
+                self.material_back = material;
+            }
+            Command::BackMaterial(material) => self.material_back = material,
+            Command::Ambient(ambient) => self.ambient = ambient,
             Command::Light { slot, light } => self.lights[slot] = light,
             Command::EnableLight { slot, on } => {
                 // A light that was never set has nothing to shine with.
@@ -1089,6 +1139,17 @@ pub mod encode {
         let colours = [m.diffuse, m.ambient, m.specular, m.emissive];
         out.extend(colours.iter().flatten().map(|v| v.to_bits()));
         out.push(m.power.to_bits());
+    }
+
+    pub fn back_material(out: &mut Vec<u32>, m: &Material) {
+        let at = out.len();
+        material(out, m);
+        out[at] = header(SET_BACK_MATERIAL, 18);
+    }
+
+    pub fn ambient(out: &mut Vec<u32>, ambient: &[f32; 3]) {
+        out.push(header(SET_AMBIENT, 4));
+        out.extend(ambient.map(f32::to_bits));
     }
 
     pub fn light(out: &mut Vec<u32>, slot: u32, l: &Light) {
