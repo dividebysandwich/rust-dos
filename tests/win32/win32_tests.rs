@@ -14732,3 +14732,160 @@ fn an_olepro32_function_not_written_fails_guest_code_with_e_notimpl() {
     let (code, out) = run_with_guest_dll("olepro32_guest", exe, "OLEUSER.DLL", dll, false);
     assert_eq!(code, 3, "the checks that failed: {:02b} {out}", !code & 3);
 }
+
+/// An argument for `call_pushing`: a number or a register's value.
+#[derive(Clone, Copy)]
+enum Pushed {
+    Imm(i32),
+    Reg(AsmRegister32),
+}
+
+/// Call `function` with `args`, pushed last first, as stdcall takes them.
+fn call_pushing(
+    a: &mut CodeAssembler,
+    function: AsmMemoryOperand,
+    args: &[Pushed],
+) -> Result<(), IcedError> {
+    for &arg in args.iter().rev() {
+        match arg {
+            Pushed::Imm(v) => a.push(v)?,
+            Pushed::Reg(r) => a.push(r)?,
+        }
+    }
+    a.call(function)
+}
+
+/// WinG's WING32.DLL, which 32-bit games of 1995 import and their setups
+/// installed: WinGRecommendDIBFormat gives an 8-bit top-down format;
+/// WinGCreateBitmap makes a DIB section of a BITMAPINFO and writes its
+/// bits' address, which WinGGetDIBPointer gives with the header;
+/// WinGBitBlt and WinGStretchBlt copy between two WinG DCs; the colour
+/// table functions read and write the selected bitmap's table; and the
+/// halftone palette and brush are made. The program ends with the
+/// number of the first check that went wrong, or 0.
+#[test]
+fn wing32_makes_dib_bitmaps_and_blits_between_them() {
+    use Pushed::{Imm, Reg};
+    let wing: &[&str] = &[
+        "WinGRecommendDIBFormat",
+        "WinGCreateDC",
+        "WinGCreateBitmap",
+        "WinGGetDIBPointer",
+        "WinGBitBlt",
+        "WinGStretchBlt",
+        "WinGGetDIBColorTable",
+        "WinGSetDIBColorTable",
+        "WinGCreateHalftonePalette",
+        "WinGCreateHalftoneBrush",
+    ];
+    let imports: &[(&str, &[&str])] = &[("WING32.DLL", wing), ("GDI32.DLL", &["SelectObject"])];
+    let names: Vec<&str> = imports.iter().flat_map(|(_, n)| n.iter().copied()).collect();
+    // The BITMAPINFO at 0 with two colours at 0x28, the bits' addresses
+    // at 0x80 and 0x84, colours read at 0x90, a header at 0x100.
+    let (info, bits1, bits2, read, header) = (0u32, 0x80, 0x84, 0x90, 0x100);
+    let mut data = vec![0; 0x140];
+    data[0x28..0x30].copy_from_slice(&[0x33, 0x22, 0x11, 0, 0x66, 0x55, 0x44, 0]);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| Imm(l.at(offset) as i32);
+        let mut wrong = a.create_label();
+        let mut number = 0;
+        // Check that the doubleword at `offset` of the data is `value`.
+        let mut expect = |a: &mut CodeAssembler, offset: u32, value: i32| {
+            number += 1;
+            a.mov(ebx, number)?;
+            a.cmp(dword_ptr(l.at(offset)), value)?;
+            a.jne(wrong)
+        };
+        // EAX kept at 0x130 to check it.
+        let keep = |a: &mut CodeAssembler| a.mov(dword_ptr(l.at(0x130)), eax);
+
+        call_pushing(a, f("WinGRecommendDIBFormat"), &[at(info)])?;
+        keep(a)?;
+        expect(a, 0x130, 1)?;
+        expect(a, info, 40)?;
+        expect(a, info + 8, -1)?;
+        expect(a, info + 12, 0x0008_0001)?;
+        // 4 by 4 pixels, top-down, two colours.
+        a.mov(dword_ptr(l.at(info + 4)), 4)?;
+        a.mov(dword_ptr(l.at(info + 8)), -4)?;
+        a.mov(dword_ptr(l.at(info + 32)), 2)?;
+        // A DC in ESI and one in EDI, each with a bitmap selected; the
+        // second bitmap's handle stays in EBP.
+        for (dc, out) in [(esi, bits1), (edi, bits2)] {
+            call_pushing(a, f("WinGCreateDC"), &[])?;
+            a.mov(dc, eax)?;
+            call_pushing(a, f("WinGCreateBitmap"), &[Reg(dc), at(info), at(out)])?;
+            a.mov(ebp, eax)?;
+            call_pushing(a, f("SelectObject"), &[Reg(dc), Reg(ebp)])?;
+        }
+        call_pushing(a, f("WinGGetDIBPointer"), &[Reg(ebp), at(header)])?;
+        keep(a)?;
+        a.mov(eax, dword_ptr(l.at(bits2)))?;
+        a.mov(ebx, 100)?;
+        a.test(eax, eax)?;
+        a.je(wrong)?;
+        a.cmp(eax, dword_ptr(l.at(0x130)))?;
+        a.jne(wrong)?;
+        expect(a, header + 4, 4)?;
+        expect(a, header + 8, -4)?;
+        // Index 1 in the first row of the first bitmap, copied to the
+        // second's first row, then stretched to its rows 1 and 2.
+        a.mov(eax, dword_ptr(l.at(bits1)))?;
+        a.mov(dword_ptr(eax), 0x0101_0101)?;
+        let blt = [Reg(edi), Imm(0), Imm(0), Imm(4), Imm(1), Reg(esi), Imm(0), Imm(0)];
+        call_pushing(a, f("WinGBitBlt"), &blt)?;
+        keep(a)?;
+        expect(a, 0x130, 1)?;
+        let stretch = [
+            Reg(edi),
+            Imm(0),
+            Imm(1),
+            Imm(4),
+            Imm(2),
+            Reg(esi),
+            Imm(0),
+            Imm(0),
+            Imm(4),
+            Imm(1),
+        ];
+        call_pushing(a, f("WinGStretchBlt"), &stretch)?;
+        keep(a)?;
+        expect(a, 0x130, 1)?;
+        for (row, value) in [(0, 0x0101_0101), (1, 0x0101_0101), (2, 0x0101_0101), (3, 0)] {
+            a.mov(eax, dword_ptr(l.at(bits2)))?;
+            a.mov(eax, dword_ptr(eax + 4 * row))?;
+            keep(a)?;
+            expect(a, 0x130, value)?;
+        }
+        // The colour table: entry 1 read, then entry 0 set to entry 1's
+        // colour and read back.
+        let get = [Reg(esi), Imm(1), Imm(1), at(read)];
+        call_pushing(a, f("WinGGetDIBColorTable"), &get)?;
+        keep(a)?;
+        expect(a, 0x130, 1)?;
+        expect(a, read, 0x0044_5566)?;
+        let set = [Reg(esi), Imm(0), Imm(1), at(0x2C)];
+        call_pushing(a, f("WinGSetDIBColorTable"), &set)?;
+        keep(a)?;
+        expect(a, 0x130, 1)?;
+        let get = [Reg(esi), Imm(0), Imm(1), at(read + 4)];
+        call_pushing(a, f("WinGGetDIBColorTable"), &get)?;
+        expect(a, read + 4, 0x0044_5566)?;
+        call_pushing(a, f("WinGCreateHalftonePalette"), &[])?;
+        a.mov(ebx, 200)?;
+        a.test(eax, eax)?;
+        a.je(wrong)?;
+        let brush = [Reg(esi), Imm(0xFF), Imm(0)];
+        call_pushing(a, f("WinGCreateHalftoneBrush"), &brush)?;
+        a.mov(ebx, 201)?;
+        a.test(eax, eax)?;
+        a.je(wrong)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut wrong)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, out) = run("wing32", exe);
+    assert_eq!(code, 0, "check {code} went wrong {out}");
+}

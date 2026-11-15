@@ -75,6 +75,7 @@ pub mod version;
 mod verdll;
 mod vmm;
 mod vfw;
+mod wing32;
 pub(crate) mod winmm;
 mod winspool;
 mod wnaspi32;
