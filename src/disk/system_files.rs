@@ -155,7 +155,7 @@ impl DiskController {
 
     /// Whether `dos_path` names a system file or directory the drive
     /// hasn't.
-    pub(super) fn is_system_entry(&self, dos_path: &str) -> bool {
+    pub(crate) fn is_system_entry(&self, dos_path: &str) -> bool {
         self.shown(dos_path).is_some()
     }
 

@@ -31,6 +31,13 @@ pub enum Imp<'a> {
     Ordinal(u16),
 }
 
+/// Where an export leads: its code or data, or a forwarder's
+/// "DLL.Function" (or "DLL.#ordinal").
+enum Target {
+    Rva(u32),
+    Forward(String),
+}
+
 struct Built {
     name: String,
     rva: u32,
@@ -49,7 +56,7 @@ pub struct Builder {
     stack: (u32, u32),
     sections: Vec<Built>,
     dirs: [DataDir; 16],
-    exports: Vec<(Option<String>, u16, u32)>,
+    exports: Vec<(Option<String>, u16, Target)>,
     relocs: Vec<u32>,
     resources: BTreeMap<ResKey, BTreeMap<u16, BTreeMap<u16, Vec<u8>>>>,
 }
@@ -213,7 +220,20 @@ impl Builder {
     /// Export the function or variable at `rva` as `ordinal`, named
     /// `name` unless it is exported by ordinal only.
     pub fn export(&mut self, name: Option<&str>, ordinal: u16, rva: u32) -> &mut Self {
-        self.exports.push((name.map(str::to_string), ordinal, rva));
+        self.exports
+            .push((name.map(str::to_string), ordinal, Target::Rva(rva)));
+        self
+    }
+
+    /// Export `ordinal`, named `name` unless it is exported by ordinal
+    /// only, as a forwarder to `to`, "DLL.Function" or "DLL.#ordinal":
+    /// the loader looks the function up in that DLL.
+    pub fn export_forward(&mut self, name: Option<&str>, ordinal: u16, to: &str) -> &mut Self {
+        self.exports.push((
+            name.map(str::to_string),
+            ordinal,
+            Target::Forward(to.to_string()),
+        ));
         self
     }
 
@@ -300,13 +320,6 @@ impl Builder {
         let name_table = table + 4 * functions;
         let ordinal_table = name_table + 4 * named.len();
         let mut out = vec![0u8; ordinal_table + 2 * named.len()];
-        for &(_, ordinal, target) in &self.exports {
-            put32(
-                &mut out,
-                table + 4 * (ordinal as u32 - base) as usize,
-                target,
-            );
-        }
         let dll_name = out.len();
         out.extend_from_slice(dll.as_bytes());
         out.push(0);
@@ -320,6 +333,21 @@ impl Builder {
                 ordinal_table + 2 * i,
                 (*ordinal as u32 - base) as u16,
             );
+        }
+        // Each function's address, or its forwarder's string, which is in
+        // the directory.
+        for (_, ordinal, target) in &self.exports {
+            let at = table + 4 * (*ordinal as u32 - base) as usize;
+            let value = match target {
+                Target::Rva(target) => *target,
+                Target::Forward(to) => {
+                    let string = rva + out.len() as u32;
+                    out.extend_from_slice(to.as_bytes());
+                    out.push(0);
+                    string
+                }
+            };
+            put32(&mut out, at, value);
         }
         put32(&mut out, 12, rva + dll_name as u32);
         put32(&mut out, 16, base);

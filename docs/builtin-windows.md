@@ -118,6 +118,12 @@ there without that, and a WinG that a game brings in its own folder
 isn't loaded in its place. WinG's halftone brushes are solid brushes of
 their colour, without WinG's dithering.
 
+`MSVCRT20.DLL` and `MSVCRT40.DLL`, the C runtimes of Visual C++ 2 and
+4 that Windows 95 and 98 have beside `MSVCRT.DLL`, are there too, for
+programs and DLLs built with those compilers. Their functions are
+`MSVCRT.DLL`'s, so the three share one heap and one set of open files,
+where Windows' own keep one each.
+
 ### Notepad
 
 `C:\WINDOWS\NOTEPAD.EXE` is there, read-only, as on Windows 98, and the
