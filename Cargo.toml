@@ -89,20 +89,22 @@ rust-dos-ne = { path = "crates/ne" }
 # game profiles' installs (crates/installshield).
 rust-dos-installshield = { path = "crates/installshield" }
 # Indeo Video 3 and 5, the codecs of Video for Windows files (MSVFW32's
-# DrawDib and AVIFIL32's AVIStreamGetFrame). 0.0.5 is the first release
-# whose Indeo 5 decoder follows Intel's driver (issue 985). Pinned to
-# the exact version: its API changes between 0.0.x versions, and the
-# pictures it decodes go into deterministic runs and the game suite's
-# golden hashes, so a new release comes in only by changing this line,
-# once its pictures are checked. (Cargo reads a plain "0.0.5" as that
-# version alone too; the `=` makes it explicit.)
-oxideav-indeo = "=0.0.5"
+# DrawDib and AVIFIL32's AVIStreamGetFrame). Taken from a commit of the
+# kibertoad/oxideav-indeo fork until a release has its Indeo 5
+# transparency mask (issue 1151): a release replaces this line with an
+# exact version ("=0.0.x"). Pinned to one revision: the crate's API
+# changes between 0.0.x versions, and the pictures it decodes go into
+# deterministic runs and the game suite's golden hashes, so a new
+# version comes in only by changing this line, once its pictures are
+# checked.
+oxideav-indeo = { git = "https://github.com/kibertoad/oxideav-indeo", rev = "aff03bd12945e38445ae494446aebdafe3fd6a0f" }
 # MPEG-1 video and its Layer II audio, which MCI's MPEGVideo device
 # plays, and the framework's packet and frame types the audio decoder
-# takes. Pinned as oxideav-indeo is.
+# takes. Pinned as oxideav-indeo is. oxideav-indeo's commit above needs
+# oxideav-core 0.1.43.
 oxideav-mpeg12video = "=0.0.13"
 oxideav-mp2 = "=0.0.10"
-oxideav-core = "=0.1.42"
+oxideav-core = "=0.1.43"
 # The sound cards, each a crate of its own (crates/).
 rust-dos-opl = { path = "crates/opl" }
 rust-dos-tandy = { path = "crates/tandy" }
