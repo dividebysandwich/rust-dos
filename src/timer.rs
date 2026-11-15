@@ -1064,6 +1064,37 @@ impl Pacer {
     }
 }
 
+/// Stalls of the host made on purpose, to test how `Auto` takes them:
+/// `RUST_DOS_TEST_STALL` lists them as `AT_MS:LENGTH_MS`, separated by
+/// commas, and the frame that first runs past each emulated time sleeps
+/// for that long while its instructions run, as a read of a file the host
+/// doesn't have in its cache does. The variable is read once; without it,
+/// no frame sleeps. Returns the stall due by `now_ns`, if one is.
+pub fn test_stall(now_ns: u64) -> Option<Duration> {
+    use std::sync::{Mutex, OnceLock};
+    static STALLS: OnceLock<Option<Mutex<Vec<(u64, u64)>>>> = OnceLock::new();
+    let stalls = STALLS.get_or_init(|| {
+        let text = std::env::var("RUST_DOS_TEST_STALL").ok()?;
+        let mut stalls: Vec<(u64, u64)> = text
+            .split(',')
+            .filter_map(|stall| {
+                let (at, length) = stall.trim().split_once(':')?;
+                Some((at.trim().parse().ok()?, length.trim().parse().ok()?))
+            })
+            .collect();
+        // The latest first, so the next due is the last.
+        stalls.sort_unstable_by(|a, b| b.cmp(a));
+        Some(Mutex::new(stalls))
+    });
+    let mut stalls = stalls.as_ref()?.lock().ok()?;
+    let &(at_ms, length_ms) = stalls.last()?;
+    if now_ns < at_ms * 1_000_000 {
+        return None;
+    }
+    stalls.pop();
+    Some(Duration::from_millis(length_ms))
+}
+
 /// Frames summed up until their instructions took long enough to time
 /// (`HOST_SAMPLE`).
 #[derive(Default)]

@@ -1810,6 +1810,10 @@ fn main() -> Result<ExitCode, String> {
             }
         }
 
+        if let Some(stall) = rust_dos::timer::test_stall(cpu.bus.clock.now_ns()) {
+            eprintln!("[stall] test stall of {} ms", stall.as_millis());
+            std::thread::sleep(stall);
+        }
         let exec_time = batch_start.elapsed();
         let stalled = cpu.bus.clock.stalled - batch_stalled;
         let idle = cpu.bus.clock.idle - batch_idle;
