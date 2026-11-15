@@ -2247,7 +2247,12 @@ STATUS / SCREEN
                                            (emulated s per wall s, full speed while near 1); fps the
                                            program draws; cpu_use is the percent of one host core the
                                            main thread is busy; audio_driver; frame_times: longest
-                                           frame and percentiles over the last 1024 frames, in ms
+                                           frame and percentiles over the last 1024 frames, in ms;
+                                           fps_cap: the frames through the frame rate cap (shown),
+                                           those it held, those late for their turn, the times its
+                                           turns started again from a late one (reanchors), and
+                                           dropped_ms, the time held frames waited for that
+                                           (features has "fps_cap_stats")
   GET  /api/underruns                      the sound device's underruns: audio_driver (what played:
                                            never measure on dummy), events (stretches of dry
                                            checks), dry_checks, and the last 32 with the time since

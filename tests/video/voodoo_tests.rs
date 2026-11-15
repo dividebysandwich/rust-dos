@@ -999,9 +999,10 @@ fn the_frame_rate_cap_holds_swaps_a_frame_time_apart() {
     assert!((due_ms(hold.until) - 60.0).abs() < 0.01, "due at {} ms", due_ms(hold.until));
     wait_ms(&mut bus, 51.0);
     assert_eq!(front(&bus), 0, "swapped at its time");
-    // One later than its turn happens when it comes, and the next waits
-    // 50 ms from then: it doesn't make up for the late one.
-    wait_ms(&mut bus, 70.0);
+    // One long after its turn happens when it comes, and the turns start
+    // again from it: the next waits 50 ms from then, and doesn't make up
+    // for the late one.
+    wait_ms(&mut bus, 270.0);
     let late = bus.clock.now_ns() as f64 / 1e6;
     w(&mut bus, SWAPBUFFER_CMD, 0);
     assert_eq!(front(&bus), 1, "a late swap isn't held");

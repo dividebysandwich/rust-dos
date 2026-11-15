@@ -9,7 +9,10 @@
 //! the speed goes up in steps while the frame rate follows, back to where
 //! it stopped following, and never past the display's refresh rate, or
 //! the frame rate the user asks for instead (`auto_fps`), or the frame
-//! rate cap while the program presents through it (`fps_cap`).
+//! rate cap while the program presents through it (`fps_cap`). A program
+//! the cap holds counts with the frames it would have drawn meanwhile
+//! (`FrameCap::held_frames`), so the cap changes the rate the speed aims
+//! for and not what the program is read to draw at a speed.
 //!
 //! The frames are counted on the bus (`Activity`): page flips, or where a
 //! program draws out of sight and copies the finished picture to video
@@ -625,6 +628,9 @@ struct Mark {
     copies: u64,
     flips: u64,
     presents: u64,
+    /// The frames the program would have drawn while the frame rate cap
+    /// held it, in thousandths (`FrameCap::held_frames`).
+    held: u64,
     polls: u64,
     status_reads: u64,
     output: u64,
@@ -651,6 +657,7 @@ impl Mark {
             copies: a.copies,
             flips: a.flips,
             presents: a.presents,
+            held: bus.frame_cap.get().held_frames(),
             polls: a.polls,
             status_reads: a.status_reads,
             output: a.video_bytes + a.io_bytes,
@@ -1236,7 +1243,7 @@ impl AutoSpeed {
             Some(cap) => refresh.min(cap.hz()),
             None => refresh,
         };
-        let mut fps = (frames > 0).then(|| frames as f64 / seconds);
+        let mut fps = (frames > 0).then(|| Self::drawn(&mark, &now, frames) / seconds);
         if let (Some(rate), Some((before, tries))) = (fps, self.unsettled) {
             let settled = (rate / before - 1.0).abs() <= AGREE || tries + 1 >= TRIES;
             if !settled {
@@ -1312,6 +1319,13 @@ impl AutoSpeed {
             self.watch(current);
         }
         Some(next)
+    }
+
+    /// The frames a program drew between two marks, of which it showed
+    /// `frames`: those, and the ones it would have drawn while the frame
+    /// rate cap held it (`FrameCap::held_frames`).
+    fn drawn(mark: &Mark, now: &Mark, frames: u64) -> f64 {
+        frames as f64 + now.held.saturating_sub(mark.held) as f64 / 1000.0
     }
 
     /// Watch the frames of a step up from `from`, counting none of those
@@ -4258,6 +4272,63 @@ mod tests {
         assert!(speeds.iter().all(|&s| s <= 200_000), "{:?}", speeds);
         // A real-mode program's copies don't count: the real-mode speed.
         assert!(run_copying(false, 1_200_000, 10).iter().all(|&s| s == 3000));
+    }
+
+    /// The speeds `auto` runs a program at under the frame rate cap `cap`,
+    /// aiming for `target` frames a second, from 200,000 instructions per
+    /// ms on for `seconds` of emulated time. The program draws a frame in
+    /// `frame` instructions and shows it with a present that doesn't wait
+    /// for the retrace.
+    fn run_presenting(cap: crate::frame_cap::Cap, target: u32, frame: u64, seconds: u64) -> Vec<u32> {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(200_000);
+        bus.frame_cap.set(cap);
+        let mut auto = AutoSpeed::new(3000, Some(target));
+        let mut speeds = Vec::new();
+        while bus.clock.now_ns() < seconds * 1_000_000_000 {
+            bus.clock.icount += frame;
+            // A held present's thread blocks, and the machine idles.
+            while let Some(until) = bus.frame_cap.wait(bus.clock.now_ns(), None) {
+                let ns = until - bus.clock.now_ns();
+                let idle = (ns * bus.clock.cycles_per_ms() as u64).div_ceil(1_000_000);
+                bus.clock.icount += idle;
+                bus.clock.idle += idle;
+            }
+            bus.frame_cap.shown(bus.clock.now_ns());
+            bus.activity.swapped(1);
+            if let Some(speed) = auto.update(bus, true, HOST, 0) {
+                bus.set_cycles_per_ms(speed);
+                speeds.push(speed);
+            }
+        }
+        speeds
+    }
+
+    #[test]
+    fn the_frame_rate_cap_doesnt_change_the_speed_a_program_gets() {
+        use crate::frame_cap::Cap;
+        // 750,000 instructions a frame: 267 frames a second at 200,000
+        // instructions per ms, and 60 at 45,000. Without a cap the speed
+        // comes down to where the frames are the 60 it aims for.
+        let free = run_presenting(Cap::Off, 60, 750_000, 60);
+        let settled = *free.last().unwrap();
+        assert!((40_000..=60_000).contains(&settled), "{:?}", free);
+        // Held to 60, the program shows 60 at any speed above that. It
+        // still counts as drawing 267 at 200,000, with the frames it
+        // would have drawn while it was held, and the speed comes down
+        // the same way.
+        let near = |a: u32, b: u32| a.abs_diff(b) <= b / 20;
+        let same = |held: &[u32], free: &[u32]| near(held[0], free[0]) && near(held[held.len() - 1], free[free.len() - 1]);
+        for cap in [Cap::Auto, Cap::Fps(60)] {
+            let held = run_presenting(cap, 60, 750_000, 60);
+            assert!(same(&held, &free), "{:?}: {:?}, without {:?}", cap, held, free);
+        }
+        // A cap of 30 is the rate the speed aims for (the cap shows no
+        // more), and the speed is that of aiming for 30 without a cap.
+        let free = run_presenting(Cap::Off, 30, 750_000, 60);
+        let held = run_presenting(Cap::Fps(30), 60, 750_000, 60);
+        assert!(same(&held, &free), "{:?}, without {:?}", held, free);
     }
 
     #[test]

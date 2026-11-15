@@ -47,6 +47,8 @@ pub const FEATURES: &[&str] = &[
     // Memory reads, writes, breakpoints and watchpoints on pages in the
     // built-in Windows's page file (`lin:` spots), and /api/win32/page_file.
     "page_file",
+    // `fps_cap` in /api/stats: what the frame rate cap did to the frames.
+    "fps_cap_stats",
 ];
 
 macro_rules! kinds {

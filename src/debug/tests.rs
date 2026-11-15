@@ -1168,6 +1168,24 @@ fn underruns_and_frame_times_are_told_in_ms() {
     assert_eq!(times["longest_ms"], 32.0);
     assert_eq!(times["p50_ms"], 16.0);
     assert_eq!(times["p99_ms"], 32.0);
+    assert_eq!(stats["fps_cap"]["shown"], 0, "no frame through the cap yet");
+
+    // A cap of 20: a frame at 50 ms, one held from 55 ms to its turn at
+    // 100, and one at 400, from which the turns start again; the one
+    // after it waits 45 ms that the turns before wouldn't have asked.
+    let cap = cpu.bus.frame_cap.clone();
+    cap.set(Some(20));
+    cap.shown(50_000_000);
+    assert_eq!(cap.wait(55_000_000, None), Some(100_000_000));
+    cap.shown(100_000_000);
+    cap.shown(400_000_000);
+    assert_eq!(cap.wait(405_000_000, None), Some(450_000_000));
+    cap.shown(450_000_000);
+    let stats = reply(&mut cpu, &mut hub, Cmd::Stats).unwrap();
+    let counted = serde_json::json!({
+        "shown": 4, "held": 2, "late": 1, "reanchors": 1, "dropped_ms": 45.0,
+    });
+    assert_eq!(stats["fps_cap"], counted);
 
     let frames = reply(&mut cpu, &mut hub, Cmd::Frames { after: 1 }).unwrap();
     assert_eq!(frames["count"], 2);
