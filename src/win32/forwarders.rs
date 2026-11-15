@@ -104,10 +104,8 @@ mod tests {
     /// of the same name, and MSVCRT exports each.
     #[test]
     fn every_export_forwards_to_msvcrt() {
-        let msvcrt = super::super::stubs::image(
-            find_dll("MSVCRT.DLL").unwrap(),
-            WindowsVersion::Win98Se,
-        );
+        let msvcrt =
+            super::super::stubs::image(find_dll("MSVCRT.DLL").unwrap(), WindowsVersion::Win98Se);
         let msvcrt = msvcrt.exports().unwrap().unwrap();
         for f in FORWARDERS {
             let image = pe::Image::load(&file(f, WindowsVersion::Win98Se)).unwrap();
@@ -140,13 +138,19 @@ mod tests {
             })
             .collect();
         for f in FORWARDERS {
-            let size = pe::Image::load(&file(f, version)).unwrap().headers.size_of_image;
+            let size = pe::Image::load(&file(f, version))
+                .unwrap()
+                .headers
+                .size_of_image;
             spans.push((f.base, f.base + size, f.name));
         }
         spans.sort();
         for pair in spans.windows(2) {
             let ((_, end, a), (start, _, b)) = (pair[0], pair[1]);
-            assert!(end <= start, "{a} ends at {end:08X}, past {b}'s base {start:08X}");
+            assert!(
+                end <= start,
+                "{a} ends at {end:08X}, past {b}'s base {start:08X}"
+            );
         }
     }
 }
