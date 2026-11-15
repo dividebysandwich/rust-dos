@@ -921,10 +921,16 @@ impl Voodoo {
     /// in software, as one the program reads every frame is. A command
     /// whose bytes can't be bounded reads back all of the memory without
     /// it turning hot: the engine reads little of it, and every 3D buffer
-    /// hot would send all the drawing to software for a second.
+    /// hot would send all the drawing to software for a second. A command
+    /// over hot bytes keeps them hot (`Tracker::touch`), with nothing to
+    /// read back.
     pub(crate) fn banshee_2d_write(&mut self, reg: u32, data: u32) {
         let Some(b) = &self.banshee else { return };
-        if self.writes_queue() || self.gpu.borrow().tracker.any_gpu() {
+        let (any_gpu, any_hot) = {
+            let tracker = &self.gpu.borrow().tracker;
+            (tracker.any_gpu(), tracker.any_hot())
+        };
+        if self.writes_queue() || any_gpu {
             let size = self.fbi.ram.bytes() as u32;
             let footprint = b.engine.footprint(reg, data, size);
             // The command drawn on the GPU, where it can be, reads nothing
@@ -945,6 +951,16 @@ impl Voodoo {
                     }
                 }
                 Footprint::All => self.gpu_sync_all(),
+            }
+        } else if any_hot {
+            // Nothing to read back or wait for: the command runs on the
+            // CPU as before, and the hot bytes it uses stay hot.
+            let size = self.fbi.ram.bytes() as u32;
+            if let Footprint::Spans(spans) = b.engine.footprint(reg, data, size) {
+                let tracker = &mut self.gpu.borrow_mut().tracker;
+                for (start, end) in spans.into_iter().flatten() {
+                    tracker.touch(start, end);
+                }
             }
         }
         let Some(b) = &mut self.banshee else { return };

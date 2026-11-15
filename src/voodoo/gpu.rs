@@ -179,7 +179,9 @@ pub(crate) struct EngineCounts {
     pub left: std::collections::BTreeMap<&'static str, u64>,
 }
 
-/// Frames a page read back from the GPU stays hot: about a second.
+/// Frames of a period of the hot pages (`Tracker::cool`): a page read
+/// back from the GPU stays hot while the program reads it at least once
+/// a period, about a second, and cools after one without.
 pub(crate) const HOT_FRAMES: u32 = 60;
 
 impl Gpu {
@@ -672,8 +674,14 @@ impl Voodoo {
         self.gpu_catch_up_rows(range, false);
     }
 
-    /// `gpu_catch_up_in`, the rows read back hot if `hot`.
+    /// `gpu_catch_up_in`, the rows read back hot if `hot`. With `hot`,
+    /// the rows of the range that are hot already stay hot (`touch`),
+    /// whether anything there is behind or not: the program goes on
+    /// reading them.
     fn gpu_catch_up_rows(&self, range: Option<(u32, u32)>, hot: bool) {
+        if hot && let Some((start, end)) = range {
+            self.gpu.borrow_mut().tracker.touch(start, end);
+        }
         if !self.gpu_behind.get() {
             return;
         }
@@ -922,8 +930,8 @@ impl Voodoo {
         linear.then_some(at / 2)
     }
 
-    /// A frame of the card's picture went by: pages read back long
-    /// enough ago may be drawn on the GPU again.
+    /// A frame of the card's picture went by: pages the program hasn't
+    /// read for a period may be drawn on the GPU again.
     pub(crate) fn gpu_frame(&mut self) {
         let gpu = self.gpu.get_mut();
         gpu.frames += 1;
@@ -995,9 +1003,10 @@ impl Voodoo {
 
     /// Bytes `start..end` of the card's memory are about to be read or
     /// written here for the program: read back the pages there that only
-    /// the GPU has, which turn hot.
+    /// the GPU has, which turn hot, and those hot already stay hot.
     #[inline]
     pub(crate) fn gpu_sync(&self, start: u32, end: u32) {
+        self.gpu.borrow_mut().tracker.touch(start, end);
         self.gpu_sync_buffers(start, end);
         if self.gpu.borrow().tracker.any_gpu() {
             self.read_back(start, end, true);
@@ -1017,7 +1026,11 @@ impl Voodoo {
     /// are about to be read or written here (`gpu_sync`).
     #[inline]
     pub(crate) fn gpu_sync_bytes(&self, addr: u32, len: usize) {
-        if !self.gpu.borrow().tracker.any_gpu() && !self.gpu_behind.get() {
+        let quiet = {
+            let tracker = &self.gpu.borrow().tracker;
+            !tracker.any_gpu() && !tracker.any_hot()
+        };
+        if quiet && !self.gpu_behind.get() {
             return;
         }
         let start = addr & self.fbi.mask;

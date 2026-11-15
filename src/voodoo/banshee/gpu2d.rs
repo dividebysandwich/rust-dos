@@ -564,10 +564,10 @@ pub(crate) mod tests {
         // Each of these reads back the buffer: a frame between them
         // brings it back to the GPU.
         command_2d(&mut v, COPY, a, wide, (0, 0), (0, 0), (100, 10), 0);
-        v.gpu.get_mut().tracker.cool();
+        v.gpu.get_mut().tracker.cool_all();
         frame(&mut v, &model, A);
         command_2d(&mut v, 0x66 << 24 | 1, desktop, a, (0, 0), (0, 0), all, 0);
-        v.gpu.get_mut().tracker.cool();
+        v.gpu.get_mut().tracker.cool_all();
         frame(&mut v, &model, A);
         v.gpu_sync(A, A + 4);
         command_2d(&mut v, FILL, a, a, (0, 0), (0, 0), all, 0x1234);
@@ -684,7 +684,7 @@ pub(crate) mod tests {
                 if n.below(3) == 0 {
                     let buffer = if n.below(2) == 0 { A } else { B };
                     for (v, draw) in &mut cards {
-                        v.gpu.get_mut().tracker.cool();
+                        v.gpu.get_mut().tracker.cool_all();
                         draw(v, buffer);
                     }
                 }
