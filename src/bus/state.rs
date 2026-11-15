@@ -881,7 +881,8 @@ mod tests {
         (59, 0xCDE1_505E_0044_1486), // the page file behind programs' own memory
         (61, 0x9267_6BA0_CE58_B06F), // OpenGL's display lists
         (62, 0x9F78_ACB5_CCD2_8975), // OpenGL's textures in their contexts' group
-        (67, 0x9F78_ACB5_CCD2_8975), // a Direct3D device made as a software device
+        (63, 0xD1E3_14A4_31DE_2AAA), // OpenGL's vertices as given, and the card's lights
+        (67, 0xD1E3_14A4_31DE_2AAA), // a Direct3D device made as a software device
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

@@ -28,6 +28,10 @@ pub fn info(cpu: &Cpu) -> DirectDrawInfo {
         exclusive: s.display.exclusive,
         binds: s.hal_toadforce.binds,
         screen_draws: s.hal_toadforce.screen_draws,
+        gl_draws: crate::win32::opengl32::tnl::count_names()
+            .into_iter()
+            .zip(s.hal_toadforce.gl_draws)
+            .collect(),
         surfaces,
     }
 }

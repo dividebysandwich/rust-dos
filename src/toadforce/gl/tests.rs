@@ -356,9 +356,9 @@ impl Bench {
         hosted.card.set_host(Some(self.host()), &mut hosted.memory);
         scene(&mut hosted);
         hosted.card.settle(&mut hosted.memory, None);
-        let declined = hosted.card.describe(Rig::live())["host"]["declined_draws"]
-            .as_u64()
-            .unwrap();
+        let host = &hosted.card.describe(Rig::live())["host"];
+        let declined = host["declined_draws"].as_u64().unwrap();
+        let transformed = &host["counts"]["transformed_runs"];
 
         // The colour buffers, channel by channel.
         let (mut differing, mut largest, mut outliers, mut sum) = (0, 0, 0, 0u64);
@@ -427,7 +427,8 @@ impl Bench {
         println!(
             "{name} ({format:?}{}): {differing} pixels differ, largest {largest}, \
              mean {mean:.3}, {outliers} over {}; depth {depth_differing} differ, \
-             largest {depth_largest}; stencil {stencil_differing} differ; {declined} declined",
+             largest {depth_largest}; stencil {stencil_differing} differ; {declined} declined; \
+             {transformed} transformed",
             if self.wide.get() { ", 8-bit" } else { "" },
             bound.channel,
         );
@@ -2717,4 +2718,303 @@ fn fills_and_copies_have_the_bytes_the_processor_writes() {
             bench.compare(&name, format, None, exact, fills_and_copies);
         }
     }
+}
+
+/// A position, a colour and a coordinate set of two numbers, for the
+/// card to transform: 6 words.
+const FVF_UNLIT: u32 = 0x002 | 0x040 | 0x100;
+
+/// The words of a vertex of `FVF_UNLIT`.
+fn unlit(p: [f32; 3], diffuse: u32, u: f32, t: f32) -> [u32; 6] {
+    [
+        p[0].to_bits(),
+        p[1].to_bits(),
+        p[2].to_bits(),
+        diffuse,
+        u.to_bits(),
+        t.to_bits(),
+    ]
+}
+
+/// A projection with the eye's plane at `near` and a field of view of
+/// 90 degrees, and the world turned about its y axis and moved away
+/// from the eye.
+fn perspective(rig: &mut Rig, near: f32, turn: f32, away: f32) {
+    let far = 40.0;
+    let q = far / (far - near);
+    let projection = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, q, 1.0, 0.0, 0.0, -q * near, 0.0,
+    ];
+    let (s, c) = turn.sin_cos();
+    let world = [
+        c, 0.0, -s, 0.0, 0.0, 1.0, 0.0, 0.0, s, 0.0, c, 0.0, 0.0, 0.0, away, 1.0,
+    ];
+    rig.run(|w| {
+        encode::transform(w, TRANSFORM_PROJECTION, &projection);
+        encode::transform(w, TRANSFORM_WORLD, &world);
+    });
+}
+
+/// Triangles for the card to transform: a floor that runs through the
+/// eye's plane and past the far one, a strip and a fan that turn
+/// their backs or their fronts, and indexed ones.
+fn in_space(rig: &mut Rig) {
+    let draw = |rig: &mut Rig, primitive: u32, vertices: &[[u32; 6]]| {
+        let words: Vec<u32> = vertices.iter().flatten().copied().collect();
+        rig.run(|w| encode::draw(w, primitive, FVF_UNLIT, vertices.len() as u32, &words));
+    };
+    // The floor, from behind the eye to past the far plane.
+    draw(
+        rig,
+        4,
+        &[
+            unlit([-6.0, -1.5, -30.0], 0xFFFF_FFFF, 0.0, 0.0),
+            unlit([6.0, -1.5, -30.0], 0xFFFF_8080, 6.0, 0.0),
+            unlit([6.0, -1.5, 60.0], 0xFF80_FF80, 6.0, 40.0),
+            unlit([-6.0, -1.5, -30.0], 0xFFFF_FFFF, 0.0, 0.0),
+            unlit([6.0, -1.5, 60.0], 0xFF80_FF80, 6.0, 40.0),
+            unlit([-6.0, -1.5, 60.0], 0xFF80_80FF, 0.0, 40.0),
+        ],
+    );
+    // A strip that folds, so half of it shows its back.
+    let strip: Vec<[u32; 6]> = (0..8)
+        .map(|i| {
+            let x = -2.0 + 0.6 * (i / 2) as f32;
+            let (y, z) = match i % 2 {
+                0 => (-0.5, 0.2 * (i / 2 % 2) as f32),
+                _ => (1.2, 0.9 - 0.3 * (i / 2) as f32),
+            };
+            unlit([x, y, z], 0xFF20_2020 + 0x1F_0F07 * i, x, y)
+        })
+        .collect();
+    draw(rig, 5, &strip);
+    // A fan about a point nearer the eye.
+    let fan: Vec<[u32; 6]> = std::iter::once(unlit([1.0, 0.3, -1.0], 0xFFFF_FFFF, 0.5, 0.5))
+        .chain((0..7).map(|i| {
+            let a = i as f32;
+            let (s, c) = a.sin_cos();
+            unlit([1.0 + c, 0.3 + s, 0.4], 0xFF00_40FF + 0x20_1000 * i, c, s)
+        }))
+        .collect();
+    draw(rig, 6, &fan);
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn the_vertices_the_host_transforms_agree() {
+    bench!(bench, "toadforce transform");
+    // The host cuts and rounds the positions in its own arithmetic,
+    // and interpolates from the vertices where the card does from the
+    // rounded corners: a colour or a depth is a step off in places,
+    // and a pixel a texel's edge runs through has the texel of the
+    // other side.
+    let bound = Bound {
+        outliers: 4,
+        ..CLOSE
+    };
+    for cull in [1, 2, 3] {
+        for (clipping, centre) in [(1, 0), (0, 1)] {
+            for textured in [false, true] {
+                let name = format!("cull {cull} clipping {clipping} textured {textured}");
+                let scene = |rig: &mut Rig| {
+                    rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
+                    rig.states(&[
+                        (RS_LIGHTING, 0),
+                        (RS_ZENABLE, 1),
+                        (RS_CULLMODE, cull),
+                        (RS_CLIPPING, clipping),
+                        (RS_PIXEL_CENTRE, centre),
+                    ]);
+                    if textured {
+                        let t = rig.texels(TEXTURE, Format::A8R8G8B8, 8, 1, false, pattern);
+                        rig.texture(0, 1, &t);
+                        filter(rig, 0, 1, 1, 0);
+                    }
+                    perspective(rig, 0.25, 0.3, 4.0);
+                    in_space(rig);
+                    viewport(rig, 9, 14, 40, 31);
+                    perspective(rig, 0.5, -0.4, 3.0);
+                    in_space(rig);
+                    viewport(rig, 0, 0, SIZE, SIZE);
+                };
+                let declined =
+                    bench.compare(&name, Format::A8R8G8B8, Some(Format::D16), bound, scene);
+                assert_eq!(declined, 0, "{name}");
+            }
+        }
+    }
+    // Fog at the vertices: linear and the two exponential ones, by
+    // the depth and by the distance from the eye.
+    for mode in [1, 2, 3] {
+        for range in [0, 1] {
+            let name = format!("vertex fog {mode} range {range}");
+            let scene = |rig: &mut Rig| {
+                rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
+                rig.states(&[
+                    (RS_LIGHTING, 0),
+                    (RS_ZENABLE, 1),
+                    (RS_FOGENABLE, 1),
+                    (RS_FOGCOLOR, 0x00C0_40FF),
+                    (RS_FOGVERTEXMODE, mode),
+                    (RS_RANGEFOGENABLE, range),
+                    (RS_FOGSTART, 2.0f32.to_bits()),
+                    (RS_FOGEND, 9.0f32.to_bits()),
+                    (RS_FOGDENSITY, 0.2f32.to_bits()),
+                ]);
+                perspective(rig, 0.25, 0.3, 4.0);
+                in_space(rig);
+            };
+            let declined = bench.compare(&name, Format::A8R8G8B8, Some(Format::D16), bound, scene);
+            assert_eq!(declined, 0, "{name}");
+        }
+    }
+    // The host did transform them: the three draws, each in a
+    // command list of its own.
+    let mut rig = Rig::new(Format::A8R8G8B8, Some(Format::D16));
+    rig.card.set_host(Some(bench.host()), &mut rig.memory);
+    rig.states(&[(RS_LIGHTING, 0)]);
+    perspective(&mut rig, 0.25, 0.3, 4.0);
+    in_space(&mut rig);
+    rig.card.settle(&mut rig.memory, None);
+    let counts = &rig.card.describe(Rig::live())["host"]["counts"];
+    assert_eq!(counts["transformed_runs"], 3, "{counts}");
+}
+
+/// A position, a normal, a colour and a coordinate set of two
+/// numbers, for the card to transform and light: 9 words.
+const FVF_LIT: u32 = 0x002 | 0x010 | 0x040 | 0x100;
+
+/// A sphere of `FVF_LIT` vertices about `centre`, as a list of
+/// triangles, its normals pointing out and twice as long as 1.
+fn sphere(centre: [f32; 3], radius: f32, diffuse: u32) -> Vec<u32> {
+    let (rings, sides) = (6, 10);
+    let at = |ring: u32, side: u32| {
+        let a = std::f32::consts::PI * ring as f32 / rings as f32;
+        let b = std::f32::consts::TAU * side as f32 / sides as f32;
+        let n = [a.sin() * b.cos(), a.cos(), a.sin() * b.sin()];
+        let p: [f32; 3] = std::array::from_fn(|i| centre[i] + radius * n[i]);
+        [
+            p[0].to_bits(),
+            p[1].to_bits(),
+            p[2].to_bits(),
+            (2.0 * n[0]).to_bits(),
+            (2.0 * n[1]).to_bits(),
+            (2.0 * n[2]).to_bits(),
+            diffuse,
+            (side as f32 / sides as f32).to_bits(),
+            (ring as f32 / rings as f32).to_bits(),
+        ]
+    };
+    let mut words = Vec::new();
+    for ring in 0..rings {
+        for side in 0..sides {
+            let corners = [
+                at(ring, side),
+                at(ring + 1, side),
+                at(ring + 1, side + 1),
+                at(ring, side),
+                at(ring + 1, side + 1),
+                at(ring, side + 1),
+            ];
+            words.extend(corners.iter().flatten());
+        }
+    }
+    words
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn the_vertices_the_host_lights_agree() {
+    bench!(bench, "toadforce lighting");
+    // A colour is the sum of the lights' shares, each rounded by the
+    // host in its own order, and a highlight's power is the host's
+    // `pow`: a step or two of a channel.
+    let bound = Bound {
+        channel: 2,
+        outliers: 4,
+        ..CLOSE
+    };
+    let material = Material {
+        diffuse: [0.8, 0.7, 0.6, 1.0],
+        ambient: [0.3, 0.3, 0.4, 1.0],
+        specular: [0.9, 0.9, 0.9, 1.0],
+        emissive: [0.05, 0.0, 0.1, 1.0],
+        power: 12.0,
+    };
+    let light = |kind: u32, spot_model: u32| Light {
+        kind,
+        diffuse: [0.9, 0.8, 0.7, 1.0],
+        specular: [0.6, 0.7, 0.9, 1.0],
+        ambient: [0.1, 0.05, 0.0, 1.0],
+        position: [-3.0, 3.0, -2.0],
+        direction: [0.5, -0.6, 0.7],
+        range: 30.0,
+        falloff: 2.0,
+        attenuation: [0.4, 0.05, 0.01],
+        theta: 0.5,
+        phi: 1.3,
+        spot_model,
+    };
+    let lamps = [
+        ("directional", light(LIGHT_DIRECTIONAL, 0)),
+        ("point", light(LIGHT_POINT, 0)),
+        ("spot", light(LIGHT_SPOT, 0)),
+        ("spot of OpenGL", light(LIGHT_SPOT, 1)),
+    ];
+    for (name, lamp) in &lamps {
+        // Plain; then with specular light, a near eye, normals made
+        // of length 1 and the vertex's colour for the material's
+        // diffuse and ambient ones; then that with the specular light
+        // in the diffuse colour and fog.
+        for variant in 0..3 {
+            let name = format!("lit by a {name} light, variant {variant}");
+            let scene = |rig: &mut Rig| {
+                rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
+                let on = (variant > 0) as u32;
+                rig.states(&[
+                    (RS_LIGHTING, 1),
+                    (RS_ZENABLE, 1),
+                    (RS_SPECULARENABLE, on),
+                    (RS_LOCALVIEWER, on),
+                    (RS_NORMALIZENORMALS, on),
+                    (RS_COLORVERTEX, on),
+                    (RS_DIFFUSEMATERIALSOURCE, on),
+                    (RS_AMBIENTMATERIALSOURCE, on),
+                    (RS_SINGLE_COLOUR, (variant == 2) as u32),
+                    (RS_FOGENABLE, (variant == 2) as u32),
+                    (RS_FOGCOLOR, 0x00C0_40FF),
+                    (RS_FOGVERTEXMODE, 3),
+                    (RS_FOGSTART, 2.0f32.to_bits()),
+                    (RS_FOGEND, 9.0f32.to_bits()),
+                ]);
+                rig.run(|w| {
+                    encode::material(w, &material);
+                    encode::ambient(w, &[0.2, 0.25, 0.3]);
+                    encode::light(w, 0, lamp);
+                    encode::enable_light(w, 0, true);
+                    // A second light, which every scene has.
+                    let mut fill = light(LIGHT_POINT, 0);
+                    fill.position = [4.0, -1.0, 1.0];
+                    fill.diffuse = [0.2, 0.3, 0.5, 1.0];
+                    encode::light(w, 3, &fill);
+                    encode::enable_light(w, 3, true);
+                });
+                perspective(rig, 0.25, 0.3, 4.0);
+                let words = sphere([0.0, 0.0, 0.0], 1.6, 0xFFC0_E0A0);
+                let count = (words.len() / 9) as u32;
+                rig.run(|w| encode::draw(w, 4, FVF_LIT, count, &words));
+            };
+            let declined = bench.compare(&name, Format::A8R8G8B8, Some(Format::D16), bound, scene);
+            assert_eq!(declined, 0, "{name}");
+        }
+    }
+    // The host did light them.
+    let mut rig = Rig::new(Format::A8R8G8B8, Some(Format::D16));
+    rig.card.set_host(Some(bench.host()), &mut rig.memory);
+    perspective(&mut rig, 0.25, 0.3, 4.0);
+    let words = sphere([0.0, 0.0, 0.0], 1.6, 0xFFC0_E0A0);
+    rig.run(|w| encode::draw(w, 4, FVF_LIT, (words.len() / 9) as u32, &words));
+    rig.card.settle(&mut rig.memory, None);
+    let counts = &rig.card.describe(Rig::live())["host"]["counts"];
+    assert_eq!(counts["transformed_runs"], 1, "{counts}");
 }

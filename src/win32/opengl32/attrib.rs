@@ -133,7 +133,7 @@ fn save(c: &Context, shared: &[Texture], mask: u32) -> Attrib {
         color: c.color,
         tex_coord: c.tex_coord,
         normal: c.normal,
-        lighting: c.lighting,
+        lighting: *c.lighting,
         shade_model: c.shade_model,
         matrix_mode: c.matrix_mode,
         fog_mode: c.fog_mode,
@@ -197,7 +197,7 @@ fn restore(c: &mut Context, a: &Attrib) {
         c.normal = a.normal;
     }
     if on(GL_LIGHTING_BIT) {
-        c.lighting = a.lighting;
+        *c.lighting = a.lighting;
         c.shade_model = a.shade_model;
     }
     if on(GL_TRANSFORM_BIT) {
