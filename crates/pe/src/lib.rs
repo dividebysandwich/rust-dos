@@ -810,7 +810,7 @@ fn apply_relocation(slot: &mut [u8], kind: u8, delta: u32) {
 /// virtual size counts: the loader maps it too (see `Image::load`). None
 /// for bytes in no section's raw data (zeros the loader adds) or past the
 /// end of the file, which is `len` bytes long.
-fn file_offset(headers: &Headers, rva: u32, width: u32, len: usize) -> Option<usize> {
+pub fn file_offset(headers: &Headers, rva: u32, width: u32, len: usize) -> Option<usize> {
     let end = rva.checked_add(width)?;
     let at = if end <= headers.size_of_headers {
         rva

@@ -1088,6 +1088,8 @@ pub struct State {
     /// Direct3D's HAL on a ToadForce: its copies of textures in card
     /// memory.
     pub hal_toadforce: d3d::hal::toadforce::Hal,
+    /// The software devices' decoded textures.
+    pub hal_software: d3d::hal::software::Hal,
     /// Windows whose procedure the program set in front of DirectDraw's
     /// before the object that put DirectDraw's there went: (process,
     /// window, the procedure DirectDraw's passes the messages on to).
@@ -1462,4 +1464,4 @@ crate::state_fields!(State {
     hal,
     hal_toadforce,
     chained
-});
+} skip { hal_software });

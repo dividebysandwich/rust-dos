@@ -17,11 +17,11 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 66;
+const WIN32_VERSION: u16 = 69;
 /// The W32 versions an older rust-dos saved that this one still loads:
-/// 62's keeps only the names of the font files a program added
+/// 67's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`).
-const WIN32_OLDER: [u16; 1] = [62];
+const WIN32_OLDER: [u16; 1] = [67];
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -886,7 +886,9 @@ mod tests {
         (59, 0xCDE1_505E_0044_1486), // the page file behind programs' own memory
         (61, 0x9267_6BA0_CE58_B06F), // OpenGL's display lists
         (62, 0x9F78_ACB5_CCD2_8975), // OpenGL's textures in their contexts' group
-        (66, 0x9F78_ACB5_CCD2_8975), // the fonts of files AddFontResource added
+        (63, 0xD1E3_14A4_31DE_2AAA), // OpenGL's vertices as given, and the card's lights
+        (67, 0xD1E3_14A4_31DE_2AAA), // a Direct3D device made as a software device
+        (69, 0xD1E3_14A4_31DE_2AAA), // the fonts of files AddFontResource added
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

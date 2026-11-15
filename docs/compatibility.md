@@ -149,6 +149,13 @@ opcode, `win32_version=98se` when a message names the version, more
   room](../CONFIGURATION.md#directplay-games-on-the-built-in-windows)
   over the IPX connection, the only one the game takes; it lists the
   TCP/IP one but ignores it, on Windows too (tested with the demo).
+* **Test Drive 4**: update it to version 1.2 with its patch,
+  TD42UP.EXE, which runs on the built-in Windows. The game fix
+  `td4-intro-camera` then keeps the race camera behind the car at any
+  frame rate ([game fixes](../CONFIGURATION.md#game-fixes)). On 1.0,
+  which the fix doesn't patch, a fast machine starts each race with the
+  camera just above the car: press F4 five times to get the chase view
+  back, or set `voodoo_fps_cap=30`.
 * **Wages of War**: `win32_depth=8`; it says it must run with 256
   colours and stops on the default desktop, which has more. Its setup
   (InstallShield 3's 32-bit engine) runs, and its archives also unpack

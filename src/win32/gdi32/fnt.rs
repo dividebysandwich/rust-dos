@@ -163,7 +163,7 @@ impl Fnt {
 /// added. An older state has the files' names only: their fonts load as
 /// none, so a program that added them draws in GDI's own faces after the
 /// state is loaded, as it did when it was saved.
-pub const FONTS_SAVED: u16 = 66;
+pub const FONTS_SAVED: u16 = 69;
 
 /// A file AddFontResourceA added: its name as the program gave it, and
 /// its raster fonts (none for a TrueType file).
@@ -372,11 +372,11 @@ pub(super) mod tests {
         assert_eq!(back[0].name, "F.FON");
         assert_eq!(back[0].fonts[0].face, "Kept");
         assert_eq!(back[0].fonts[0].data, files[0].fonts[0].data);
-        // Version 62 saved the names alone.
+        // Version 67 saved the names alone.
         let mut w = Writer::new();
-        w.section(b"TEST", 62, |w| vec!["OLD.FON".to_string()].save(w));
+        w.section(b"TEST", 67, |w| vec!["OLD.FON".to_string()].save(w));
         let mut r = Reader::new(&w.buf);
-        let mut section = r.section_of(b"TEST", &[62, FONTS_SAVED]).unwrap();
+        let mut section = r.section_of(b"TEST", &[67, FONTS_SAVED]).unwrap();
         let mut old: Vec<AddedFile> = Vec::new();
         old.load(&mut section).unwrap();
         assert!(section.is_empty());
@@ -392,4 +392,5 @@ pub(super) mod tests {
         assert!(r.is_empty());
         assert_eq!(bare[0].fonts[0].face, "Kept");
     }
+
 }
