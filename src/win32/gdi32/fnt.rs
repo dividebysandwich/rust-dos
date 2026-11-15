@@ -185,7 +185,8 @@ impl crate::savestate::State for AddedFile {
     fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
         self.name.load(r)?;
         self.fonts.clear();
-        if r.version() < FONTS_SAVED {
+        // Bytes outside a section are in this rust-dos's own layout.
+        if r.version().is_some_and(|v| v < FONTS_SAVED) {
             return Ok(());
         }
         for _ in 0..r.count()? {
@@ -243,13 +244,13 @@ fn ne_fonts(file: &[u8]) -> Option<Vec<Fnt>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     /// A version 3.0 FNT of the face `face`, `height` pixels high, with
     /// the characters 20h to 22h: a blank 3 wide, a 2 wide bar and a 9
     /// wide glyph lit in its first and last columns.
-    fn fnt(face: &str, height: u16) -> Vec<u8> {
+    pub(in super::super) fn fnt(face: &str, height: u16) -> Vec<u8> {
         let mut d = vec![0u8; 0x94];
         d[0..2].copy_from_slice(&0x300u16.to_le_bytes());
         d[0x44..0x46].copy_from_slice(&10u16.to_le_bytes());
@@ -381,5 +382,14 @@ mod tests {
         assert!(section.is_empty());
         assert_eq!(old[0].name, "OLD.FON");
         assert!(old[0].fonts.is_empty());
+        // Bytes read outside a section are this build's layout, fonts
+        // and all.
+        let mut w = Writer::new();
+        files.save(&mut w);
+        let mut r = Reader::new(&w.buf);
+        let mut bare: Vec<AddedFile> = Vec::new();
+        bare.load(&mut r).unwrap();
+        assert!(r.is_empty());
+        assert_eq!(bare[0].fonts[0].face, "Kept");
     }
 }

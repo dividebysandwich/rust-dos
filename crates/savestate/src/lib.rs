@@ -121,17 +121,21 @@ impl Writer {
 pub struct Reader<'a> {
     data: &'a [u8],
     pos: usize,
-    version: u16,
+    version: Option<u16>,
 }
 
 impl<'a> Reader<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0, version: 0 }
+        Self {
+            data,
+            pos: 0,
+            version: None,
+        }
     }
 
-    /// The version of the section this reads (`section_of`), 0 for bytes
-    /// outside one.
-    pub fn version(&self) -> u16 {
+    /// The version of the section this reads (`section_of`), or None for
+    /// bytes outside one, which are in this rust-dos's own layout.
+    pub fn version(&self) -> Option<u16> {
         self.version
     }
 
@@ -177,7 +181,7 @@ impl<'a> Reader<'a> {
         let mut len = 0u32;
         len.load(self)?;
         let mut section = Reader::new(self.take(len as usize)?);
-        section.version = saved;
+        section.version = Some(saved);
         Ok(section)
     }
 
@@ -601,7 +605,8 @@ mod tests {
         assert!(matches!(Reader::new(&w.buf).section(b"TEST", 2), Err(StateError::Mismatch(_))));
         // A reader of older versions too tells which one it read.
         let mut r = Reader::new(&w.buf);
-        assert_eq!(r.section_of(b"TEST", &[1, 2]).unwrap().version(), 1);
+        assert_eq!(r.section_of(b"TEST", &[1, 2]).unwrap().version(), Some(1));
+        assert_eq!(Reader::new(&w.buf).version(), None);
         assert!(Reader::new(&w.buf).section_of(b"TEST", &[0, 2]).is_err());
         assert!(Reader::new(&w.buf).section(b"OTHR", 1).is_err());
         let mut short = Reader::new(&w.buf[..w.buf.len() - 1]);
