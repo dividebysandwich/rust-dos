@@ -1814,18 +1814,19 @@ fn a_rate_the_size_lacks_opens_the_sizes_own_mode() {
 }
 
 #[test]
-fn sixty_hz_opens_the_card_as_it_always_did() {
-    // Most games ask for 60 Hz. A Voodoo Graphics or Voodoo2 runs the
-    // frame Glide sets (504 lines at 640x480) at exactly 60 Hz with the
-    // DAC's clock left to its select pins; a Voodoo3 runs VESA's 640x480
-    // at 59.94 Hz.
+fn sixty_hz_runs_vesas_640x480_on_every_card() {
+    // Most games ask for 60 Hz. Every card runs VESA's 640x480 then: 525
+    // lines, 480 of them shown, at 25.175 MHz, 59.94 Hz. A Voodoo
+    // Graphics' or Voodoo2's clock comes from its DAC's PLL, as 3dfx's
+    // libraries program it for every mode.
     for board in [Board::Standard, Board::Voodoo2] {
         let test = format!("refresh_60_{board:?}");
         let (program, data) = refresh_program(GR_RESOLUTION_640X480, GR_REFRESH_60HZ);
         let mut cpu = machine(&test, Some(board), program);
         run_until_done(&mut cpu, data);
         let t = cpu.bus.voodoo.as_ref().unwrap().timing();
-        assert_eq!((t.total, t.line_ns), (504, 1_000_000_000 / 60 / 504), "{board:?}");
+        assert_eq!((t.total, t.display), (525, 480), "{board:?}");
+        assert!((t.hz() - 59.94).abs() < 0.02, "{board:?}: {}", t.hz());
     }
     let (opened, got) = open_at(
         "refresh_60_v3",

@@ -553,28 +553,10 @@ fn open_voodoo(
     );
     write(cpu, FBI, FBI_INIT3, init3 | (height - 1) << 22);
 
-    if refresh == 60 {
-        // The video timing: a quarter of the line and a twentieth of the
-        // frame blanked, at the card's 60 Hz with the DAC's clock from
-        // its select pins (`Voodoo::video_clock`).
-        dac_write(cpu, DAC_PLL_ADDR, PLL_CTRL);
-        dac_write(cpu, DAC_PLL_DATA, 0);
-        let hsync_on = (width / 16).max(8);
-        let htotal = width + (width / 4).max(32);
-        let vsync_on = 3;
-        let vtotal = height + (height / 20).max(10);
-        write(
-            cpu,
-            FBI,
-            H_SYNC,
-            (htotal - hsync_on - 2) << 16 | (hsync_on - 1),
-        );
-        write(cpu, FBI, V_SYNC, (vtotal - vsync_on) << 16 | vsync_on);
-        write(cpu, FBI, BACK_PORCH, 16 << 16 | (hsync_on * 2));
-    } else {
-        voodoo_timing(cpu, width, height, refresh);
-    }
-    write(cpu, FBI, VIDEO_DIMENSIONS, (height - 1) << 16 | (width - 1));
+    voodoo_timing(cpu, width, height, refresh);
+    // The width less one and the height as it is, as 3dfx's libraries
+    // write them (sst1InitVideo).
+    write(cpu, FBI, VIDEO_DIMENSIONS, height << 16 | (width - 1));
     // A Voodoo Graphics' video clock, then the monitor.
     if !v2 {
         pci_write(cpu, 0xC0, 0);

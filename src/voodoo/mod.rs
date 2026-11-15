@@ -1782,8 +1782,9 @@ impl Voodoo {
     /// The video timing the registers give: hSync, vSync and
     /// videoDimensions' frame at the DAC's video clock (`video_clock`),
     /// or at 60 Hz while the DAC's clock 0 comes from its select pins,
-    /// which the emulator doesn't model (DOSBox-X always runs the card at
-    /// 60 Hz). None while the registers describe no frame.
+    /// which the emulator doesn't model: a program that never programs
+    /// the PLL runs the card at 60 Hz, as DOSBox-X does. None while the
+    /// registers describe no frame.
     fn register_timing(&self) -> Option<CrtTiming> {
         let (h, v, dims) = (self.reg[H_SYNC], self.reg[V_SYNC], self.reg[VIDEO_DIMENSIONS]);
         let video = self.chip.video;
