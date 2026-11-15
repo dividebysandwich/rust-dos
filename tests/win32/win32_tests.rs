@@ -595,11 +595,11 @@ fn are_file_apis_ansi_follows_set_file_apis_to_oem_and_ansi() {
 
 /// Run Test Drive 4's last intro shot in a program made of the
 /// `td4-intro-camera` fix's pieces, at their RVAs in a file of the size
-/// the fix wants, with `game_fixes` at `fixes`. The program runs the 40
-/// ticks of the shot through the tick's code for view 11, then 69 frames
-/// (60 a second) through the frame's, and ends with the camera's
-/// distance / 4096.
-fn td4_intro_camera(fixes: bool) -> u8 {
+/// the fix wants, with `game_fixes` at `fixes`, on the game's track
+/// `track`. The program runs the 40 ticks of the shot through the tick's
+/// jump table at view 11, then `frames` frames through the frame's code
+/// for view 11, and ends with the camera's distance / 4096.
+fn td4_intro_camera(fixes: bool, track: u32, frames: u32) -> u8 {
     use rust_dos::game_fixes::{Kind, by_name};
     let Kind::Win32 {
         program,
@@ -610,12 +610,15 @@ fn td4_intro_camera(fixes: bool) -> u8 {
         panic!("td4-intro-camera patches a Win32 program");
     };
     const DISTANCE: u64 = 0x46_ADCC;
+    const TRACK: u64 = 0x45_A675;
     const TEXT: usize = 0x1000;
     let mut a = CodeAssembler::new(32).unwrap();
     let mut tick = a.create_label();
     let mut ticks = a.create_label();
-    let mut frames = a.create_label();
+    let mut frame = a.create_label();
+    let mut done = a.create_label();
     a.mov(dword_ptr(DISTANCE), 972_800).unwrap();
+    a.mov(dword_ptr(TRACK), track).unwrap();
     a.mov(esi, 40).unwrap();
     a.set_label(&mut ticks).unwrap();
     a.push(0).unwrap();
@@ -623,22 +626,26 @@ fn td4_intro_camera(fixes: bool) -> u8 {
     a.add(esp, 4).unwrap();
     a.dec(esi).unwrap();
     a.jnz(ticks).unwrap();
-    a.mov(esi, 69).unwrap();
-    a.set_label(&mut frames).unwrap();
+    a.mov(esi, frames).unwrap();
+    a.test(esi, esi).unwrap();
+    a.jz(done).unwrap();
+    a.set_label(&mut frame).unwrap();
     a.call(0x40_852C).unwrap();
     a.dec(esi).unwrap();
-    a.jnz(frames).unwrap();
+    a.jnz(frame).unwrap();
+    a.set_label(&mut done).unwrap();
     a.mov(eax, dword_ptr(DISTANCE)).unwrap();
     a.sar(eax, 12).unwrap();
     a.ret().unwrap();
-    // The tick's function up to its switch, at view 11.
+    // The tick's function up to its switch, at view 11: through its
+    // jump table, which the fix changes.
     a.set_label(&mut tick).unwrap();
     a.push(ebx).unwrap();
     a.push(esi).unwrap();
     a.push(edi).unwrap();
     a.push(ebp).unwrap();
     a.mov(ebp, esp).unwrap();
-    a.jmp(0x40_8706).unwrap();
+    a.jmp(dword_ptr(0x40_86B5u64)).unwrap();
     let entry = a.assemble((BASE as usize + TEXT) as u64).unwrap();
 
     let mut text = vec![0u8; 0x7800];
@@ -676,7 +683,7 @@ fn td4_intro_camera(fixes: bool) -> u8 {
     assert!(file.len() <= size);
     file.resize(size, 0);
 
-    let test = format!("td4_intro_camera_{fixes}");
+    let test = format!("td4_intro_camera_{fixes}_{track}_{frames}");
     let mut cpu = Cpu::new(scratch(&test, &[(program, file)]));
     cpu.bus.win32.enabled = true;
     cpu.bus.game_fixes = fixes;
@@ -690,9 +697,18 @@ fn td4_intro_camera(fixes: bool) -> u8 {
 #[test]
 fn test_drive_4_s_race_camera_ends_the_intro_where_the_race_view_is() {
     // 972800 - 40 * 3700h is 409600, the race's chase view.
-    assert_eq!(td4_intro_camera(true), 100);
-    // As the game shipped it, 69 frames take the camera to 1280.
-    assert_eq!(td4_intro_camera(false), 0);
+    assert_eq!(td4_intro_camera(true, 0, 69), 100);
+    // As the game shipped it, 69 frames (60 a second) take the camera to
+    // 1280.
+    assert_eq!(td4_intro_camera(false, 0, 69), 0);
+}
+
+#[test]
+fn test_drive_4_s_race_camera_stays_put_on_the_track_without_an_intro() {
+    // Track 12 runs the tick's code for view 11 through its race, and
+    // the frame's not at all: the camera stays at 972800 either way.
+    assert_eq!(td4_intro_camera(true, 12, 0), 237);
+    assert_eq!(td4_intro_camera(false, 12, 0), 237);
 }
 
 #[test]

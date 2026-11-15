@@ -444,21 +444,27 @@ const LOL2_SETUP_LAUNCHER: CodePatch = CodePatch {
 /// The fix moves the step from the frame to the tick: the frame's code
 /// subtracts 0, and the tick's code for view 11, which only updates the
 /// camera, subtracts 3700h before it does. The camera then ends the shot
-/// at 409600 at any frame rate. Offsets are RVAs: the program loads at
-/// 400000h. For version 1.2, the one its patch TD42UP.EXE makes: 3.EXE
-/// of 451072 bytes, SHA-256
+/// at 409600 at any frame rate.
+///
+/// The tick runs its code for the intro's views whenever the intro's
+/// counter (767408h) is set, but the frame only off track 12 (45A675h),
+/// which has no intro: its race starts with the counter set and never
+/// counts it down, in whatever view the last race left, which is 11
+/// after a race without F4. There the tick's step would pull the camera
+/// through the car, so the patched tick checks the track as the frame
+/// does. Its code needs more room than view 11's, so view 10 takes view
+/// 9's code, which is the same, and view 11 the room of both.
+///
+/// Offsets are RVAs: the program loads at 400000h. For version 1.2, the
+/// one its patch TD42UP.EXE makes: 3.EXE of 451072 bytes, SHA-256
 /// cce7cb8904a9e9d9976504dbe7989629f766f08dd9f0b0ad24cbcb08c7062601.
 const TD4_INTRO_CAMERA: CodePatch = CodePatch {
     checks: &[
-        // The frame's and the tick's jump tables, at view 11: the code
-        // the patches change.
+        // The frame's jump table, at view 11: the code the first patch
+        // changes.
         Bytes {
             at: 0x84BD,
             bytes: &[0x2C, 0x85, 0x40, 0x00],
-        },
-        Bytes {
-            at: 0x86B5,
-            bytes: &[0x06, 0x87, 0x40, 0x00],
         },
         // The tick's camera update, which the patched tick jumps to:
         // push 1 / push [ebp+14h] / call / add esp,8 / jmp to the end.
@@ -467,6 +473,15 @@ const TD4_INTRO_CAMERA: CodePatch = CodePatch {
             bytes: &[
                 0x6A, 0x01, 0x8B, 0x45, 0x14, 0x50, 0xE8, 0x67, 0xF3, 0xFF, 0xFF, 0x83, 0xC4, 0x08,
                 0xEB, 0x6B,
+            ],
+        },
+        // The tick's code for view 9, which view 10 takes: push 0 /
+        // push [ebp+14h] / call / add esp,8 / jmp to the end.
+        Bytes {
+            at: 0x86E6,
+            bytes: &[
+                0x6A, 0x00, 0x8B, 0x45, 0x14, 0x50, 0xE8, 0x1A, 0xF3, 0xFF, 0xFF, 0x83, 0xC4, 0x08,
+                0xEB, 0x1E,
             ],
         },
     ],
@@ -480,19 +495,31 @@ const TD4_INTRO_CAMERA: CodePatch = CodePatch {
             },
             &[0x81, 0x2D, 0xCC, 0xAD, 0x46, 0x00, 0x00, 0x00, 0x00, 0x00],
         ),
-        // The tick: its camera update (push 1 / push [ebp+14h] / call /
-        // add esp,8) becomes the frame's sub and a jmp to the same update
-        // at 8699h.
+        // The tick's jump table at views 10 and 11: 4086F6h and 408706h
+        // become 4086E6h (view 9's code) and 4086F6h.
         (
             Bytes {
-                at: 0x8706,
+                at: 0x86B1,
+                bytes: &[0xF6, 0x86, 0x40, 0x00, 0x06, 0x87, 0x40, 0x00],
+            },
+            &[0xE6, 0x86, 0x40, 0x00, 0xF6, 0x86, 0x40, 0x00],
+        ),
+        // The tick's code for views 10 and 11, each a camera update,
+        // becomes: cmp dword [45A675h],12 / je 8699h / the frame's sub /
+        // jmp 8699h, the update view 11 made.
+        (
+            Bytes {
+                at: 0x86F6,
                 bytes: &[
-                    0x6A, 0x01, 0x8B, 0x45, 0x14, 0x50, 0xE8, 0xFA, 0xF2, 0xFF, 0xFF, 0x83, 0xC4,
-                    0x08,
+                    0x6A, 0x00, 0x8B, 0x45, 0x14, 0x50, 0xE8, 0x0A, 0xF3, 0xFF, 0xFF, 0x83, 0xC4,
+                    0x08, 0xEB, 0x0E, 0x6A, 0x01, 0x8B, 0x45, 0x14, 0x50, 0xE8, 0xFA, 0xF2, 0xFF,
+                    0xFF, 0x83, 0xC4, 0x08,
                 ],
             },
             &[
-                0x81, 0x2D, 0xCC, 0xAD, 0x46, 0x00, 0x00, 0x37, 0x00, 0x00, 0xEB, 0x87, 0x90, 0x90,
+                0x83, 0x3D, 0x75, 0xA6, 0x45, 0x00, 0x0C, 0x74, 0x9A, 0x81, 0x2D, 0xCC, 0xAD,
+                0x46, 0x00, 0x00, 0x37, 0x00, 0x00, 0xEB, 0x8E, 0x90, 0x90, 0x90, 0x90, 0x90,
+                0x90, 0x90, 0x90, 0x90,
             ],
         ),
     ],
