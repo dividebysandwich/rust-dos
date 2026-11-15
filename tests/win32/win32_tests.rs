@@ -3518,6 +3518,74 @@ fn run_files_counted(
     (cpu.errorlevel, printed(&cpu), counts)
 }
 
+/// A program whose image is larger than the machine's memory: 24 MB of
+/// initialized data on a 16 MB machine, as Shadow of the Horned Rat loads
+/// a DLL of 10 MB of bitmaps beside its own memory. The image's pages go
+/// out to the page file as the loader maps them, and come back as the
+/// program touches them: it finds each page's number there, writes a
+/// value to each page, and finds the values after the pages went out
+/// again. A bit each in the exit code.
+#[test]
+fn an_image_larger_than_memory_loads_and_its_pages_come_back() {
+    const PAGES: u32 = 24 * 256;
+    const MARK: u32 = 0x3C3C_0000;
+    let mut data = vec![0u8; (PAGES * 0x1000) as usize];
+    for page in 0..PAGES {
+        let at = (page * 0x1000) as usize;
+        data[at..at + 4].copy_from_slice(&page.to_le_bytes());
+    }
+    // The page at EAX << 12 of the data at ESI, in EAX: whether it has
+    // its number (EDX) at 0, and with `mark` the number xor MARK at 8.
+    let compare = |a: &mut CodeAssembler, wrong: CodeLabel, mark: bool| {
+        a.mov(eax, edx)?;
+        a.shl(eax, 12)?;
+        a.cmp(dword_ptr(esi + eax), edx)?;
+        a.jne(wrong)?;
+        if mark {
+            a.mov(ecx, edx)?;
+            a.xor(ecx, MARK as i32)?;
+            a.cmp(dword_ptr(esi + eax + 8), ecx)?;
+            a.jne(wrong)?;
+        }
+        Ok::<(), IcedError>(())
+    };
+    let exe = program(BASE, false, &[], &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        a.mov(esi, l.at(0) as u32)?;
+        for (bit, mark) in [(0, false), (1, true)] {
+            if mark {
+                let mut write = a.create_label();
+                a.xor(edx, edx)?;
+                a.set_label(&mut write)?;
+                a.mov(eax, edx)?;
+                a.shl(eax, 12)?;
+                a.mov(ecx, edx)?;
+                a.xor(ecx, MARK as i32)?;
+                a.mov(dword_ptr(esi + eax + 8), ecx)?;
+                a.inc(edx)?;
+                a.cmp(edx, PAGES as i32)?;
+                a.jne(write)?;
+            }
+            let mut check = a.create_label();
+            let mut wrong = a.create_label();
+            a.xor(edx, edx)?;
+            a.set_label(&mut check)?;
+            compare(a, wrong, mark)?;
+            a.inc(edx)?;
+            a.cmp(edx, PAGES as i32)?;
+            a.jne(check)?;
+            a.set_label(&mut wrong)?;
+            a.cmp(edx, PAGES as i32)?;
+            bit_if_equal(a, bit)?;
+        }
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let test = "image_larger_than_memory";
+    let (code, text) = run_files_in(test, &[("T.EXE", exe)], 16);
+    assert_eq!(code, 3, "the checks that failed: {:02b} {}", !code & 3, text);
+}
+
 /// A read-only mapping of a file larger than the machine's memory, as
 /// Windows 95 has it: making and viewing it takes no memory, a page is
 /// read from the file when it is touched, by the program or by a system
