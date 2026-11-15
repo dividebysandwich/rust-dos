@@ -233,8 +233,17 @@ pub fn native(tex: &Tex, anisotropic: bool) -> bool {
     tex.texture.cube || (anisotropic && tex.anisotropy > 1)
 }
 
-/// The key of the program that draws `state`.
-pub fn key(state: &DrawState, anisotropic: bool) -> Key {
+/// The key of the program that draws `state`, for vertices that have
+/// a depth outside 0 to 1 where `outside` says so.
+///
+/// With the depth test on (`Step::Depth`'s `ranged`) the card leaves
+/// out a pixel whose depth is outside 0 to 1, which the program of
+/// such vertices does with a `discard`. A `discard` keeps the host
+/// from testing depth before the shader runs, for every pixel of the
+/// draw, so the vertices nearly every draw has, whose depths are all
+/// inside the range and so are those of their pixels, get the program
+/// without one.
+pub fn key(state: &DrawState, anisotropic: bool, outside: bool) -> Key {
     let mut native_stages = 0;
     for (stage, tex) in state.tex.iter().enumerate() {
         if tex.as_ref().is_some_and(|tex| native(tex, anisotropic)) {
@@ -242,18 +251,19 @@ pub fn key(state: &DrawState, anisotropic: bool) -> Key {
         }
     }
     Key {
-        steps: steps_key(&state.steps),
+        steps: steps_key(&state.steps, outside),
         native: native_stages,
     }
 }
 
-fn steps_key(steps: &[Step]) -> Vec<Step> {
+fn steps_key(steps: &[Step], outside: bool) -> Vec<Step> {
     steps
         .iter()
         .filter_map(|step| match *step {
             // The tests are the host's state. What the shader does
-            // for the step is drop a depth outside the range.
-            Step::Depth { ranged: true, .. } => Some(Step::Depth {
+            // for the step is drop a depth outside the range, which
+            // only vertices `outside` it can give.
+            Step::Depth { ranged: true, .. } if outside => Some(Step::Depth {
                 func: 0,
                 write: false,
                 stencil: None,
@@ -709,10 +719,33 @@ mod tests {
         };
         let write = |mask| Step::Write { blend: None, mask };
         let colours = Step::Colours { specular: false };
-        let a = steps_key(&[depth, colours, write(0xF)]);
-        let b = steps_key(&[colours, write(0x7)]);
+        let a = steps_key(&[depth, colours, write(0xF)], false);
+        let b = steps_key(&[colours, write(0x7)], false);
         assert_eq!(a, b);
-        assert_ne!(a, steps_key(&[colours, Step::Dither, write(0xF)]));
+        assert_ne!(a, steps_key(&[colours, Step::Dither, write(0xF)], false));
+    }
+
+    /// The depth test's range takes a `discard`, which keeps the host
+    /// from testing depth early, only for vertices with a depth
+    /// outside it: the others have the program of a draw without it.
+    #[test]
+    fn only_vertices_outside_the_depth_range_have_its_discard() {
+        let ranged = Step::Depth {
+            func: 4,
+            write: true,
+            stencil: None,
+            ranged: true,
+        };
+        let steps = [ranged, Step::Colours { specular: false }];
+        let program = |outside: bool| {
+            fragment(&Key {
+                steps: steps_key(&steps, outside),
+                native: 0,
+            })
+        };
+        assert_eq!(steps_key(&steps, false), steps_key(&steps[1..], true));
+        assert!(!program(false).contains("discard"));
+        assert!(program(true).contains("v_z < 0.0 || v_z > 1.0) discard"));
     }
 
     #[test]
