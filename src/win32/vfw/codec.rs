@@ -3,7 +3,9 @@
 //! Indeo Video Interactive 4 (IV41, indeo4/), and Cinepak (CVID,
 //! `iccvid.dll`, cinepak.rs). Windows 98 installs codecs for the four.
 //! A picture comes out as what ICDecompress gives for a BI_RGB output of
-//! 24 bits: a bottom-up DIB.
+//! 24 bits: a bottom-up DIB. An Indeo 5 movie with transparency comes
+//! out as IR50_32.DLL writes it, with the stream's transparency colour
+//! in its transparent pixels for the program to key out.
 //!
 //! A save state doesn't keep a decoder's picture: a copy of a decoder
 //! is empty, as one after a restore is, and its owner starts it again.
@@ -150,7 +152,12 @@ impl Codec {
                     return None;
                 }
                 let planes = [(y.data, y.stride), (u.data, u.stride), (v.data, v.stride)];
-                yvu9_dib(planes, size)
+                let mut dib = yvu9_dib(planes, size)?;
+                if let Some(t) = d.transparency() {
+                    let mask = (t.mask.data, t.mask.stride);
+                    fill_transparent(&mut dib, t.colour, mask, size);
+                }
+                Some(dib)
             }
             Decoder::Indeo4(d) => {
                 let p = d.picture()?;
@@ -167,6 +174,34 @@ impl Codec {
                 // gives, which goes by the stream's size too.
                 let (w, h) = d.size();
                 (w >= width as usize && h >= height as usize).then(|| cinepak_dib(d, width, height))
+            }
+        }
+    }
+}
+
+/// Write an Indeo 5 picture's transparency colour (`[red, green, blue]`,
+/// black when the stream has none) to the pixels of a 24-bit DIB that
+/// the mask makes transparent. The mask is its bytes and the distance
+/// between its rows, a byte per pixel, 0 for transparent. IR50_32.DLL
+/// (R.5.04.15.2.41, Windows 98 SE's) does this when it decompresses to
+/// an RGB DIB: given a frame of a movie with transparency, it writes
+/// every pixel of the output, the colour where the mask is transparent
+/// and the picture elsewhere, and a program keys the colour out.
+/// Rent-A-Hero's overlay movies have a black colour, and the game blits
+/// them with a black source key.
+fn fill_transparent(
+    dib: &mut [u8],
+    colour: Option<[u8; 3]>,
+    (mask, mask_stride): (&[u8], usize),
+    (w, h): (usize, usize),
+) {
+    let [r, g, b] = colour.unwrap_or([0; 3]);
+    let stride = dib_stride(w as i32, 24);
+    for (y, m) in mask.chunks(mask_stride).take(h).enumerate() {
+        let row = dib[(h - 1 - y) * stride..][..w * 3].as_chunks_mut::<3>().0;
+        for (d, &o) in row.iter_mut().zip(m) {
+            if o == 0 {
+                *d = [b, g, r];
             }
         }
     }
@@ -256,6 +291,58 @@ mod tests {
         // A picture larger than its planes has no DIB.
         assert!(yvu9_dib([luma, chroma, chroma], (4, 2)).is_none());
         assert!(yvu9_dib([luma, chroma, chroma], (2, 8)).is_none());
+    }
+
+    #[test]
+    fn transparent_indeo5_pixels_take_the_colour() {
+        // Two rows of 3 pixels, all white, under a mask whose rows are 4
+        // apart: the middle of the top row and the left of the bottom
+        // row are transparent. The colour is red 1, green 2, blue 3.
+        let luma: (&[u8], usize) = (&[235; 6], 3);
+        let chroma: (&[u8], usize) = (&[128], 1);
+        let white = yvu9_dib([luma, chroma, chroma], (3, 2)).unwrap();
+        let mask = [255, 0, 255, 0, 0, 255, 255, 255];
+        let mut dib = white.clone();
+        fill_transparent(&mut dib, Some([1, 2, 3]), (&mask, 4), (3, 2));
+        let w = [255; 3];
+        // Bottom-up rows of 9 bytes padded to 12, in blue, green, red.
+        let bottom = [[3, 2, 1], w, w].concat();
+        let top = [w, [3, 2, 1], w].concat();
+        assert_eq!(dib, [&bottom[..], &[0; 3], &top, &[0; 3]].concat());
+        // A stream with no colour fills black.
+        let mut dib = white;
+        fill_transparent(&mut dib, None, (&mask, 4), (3, 2));
+        assert_eq!(dib[..3], [0; 3]);
+        assert_eq!(dib[12..18], [255, 255, 255, 0, 0, 0]);
+    }
+
+    /// An intra frame of a 16 by 8 Indeo 5 movie with transparency,
+    /// built bit by bit: one coded macroblock, the colour red 1, green
+    /// 2, blue 3, and a run-coded mask whose first two pixels are
+    /// transparent and the rest opaque.
+    const IV50_TRANSPARENT: [u8; 48] = [
+        31, 0, 8, 120, 4, 0, 1, 0, 3, 3, 4, 6, 0, 0, 0, 16, 0, 0, 0, 0, 0, 30, 191, 84, 126, 169,
+        252, 119, 249, 128, 0, 1, 1, 1, 0, 0, 0, 128, 0, 64, 0, 112, 224, 14, 0, 2, 254, 5,
+    ];
+
+    #[test]
+    fn indeo5_pictures_carry_the_transparency_colour() {
+        let mut codec = Codec::new(IV50);
+        codec.decode(&IV50_TRANSPARENT).unwrap();
+        let dib = codec.picture(16, 8).unwrap();
+        let Some(Decoder::Indeo5(d)) = &codec.0 else {
+            unreachable!()
+        };
+        let (y, u, v) = (d.y().unwrap(), d.u().unwrap(), d.v().unwrap());
+        let planes = [(y.data, y.stride), (u.data, u.stride), (v.data, v.stride)];
+        let plain = yvu9_dib(planes, (16, 8)).unwrap();
+        // The top row is the DIB's last: its first two pixels take the
+        // colour, and every other pixel is the picture's.
+        let top = 7 * 48;
+        assert_eq!(dib[top..top + 6], [3, 2, 1, 3, 2, 1]);
+        assert_ne!(plain[top..top + 3], [3, 2, 1]);
+        assert_eq!(dib[..top], plain[..top]);
+        assert_eq!(dib[top + 6..], plain[top + 6..]);
     }
 
     /// Prints a hash of every picture of the first video stream of the

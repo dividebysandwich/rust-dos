@@ -1115,9 +1115,9 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "oxideav-core"
-version = "0.1.42"
+version = "0.1.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16003ef2cd554e10f0c451d7a74b4c56b32473d50c174aefb3bdbe4139b9c14d"
+checksum = "ce90bfbe978dfc46d0c98d137b7c4566ac8eaae8c9209585eb53a8aedb0ef53c"
 dependencies = [
  "bytemuck",
  "serde_json",
@@ -1127,8 +1127,7 @@ dependencies = [
 [[package]]
 name = "oxideav-indeo"
 version = "0.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05ac490cb166845303f292f5d161508c64ffa150004a18ab46d0e6aadcc3ff76"
+source = "git+https://github.com/kibertoad/oxideav-indeo?rev=bb5587acc7cf974c5b7ee3aae5699eddbb309a39#bb5587acc7cf974c5b7ee3aae5699eddbb309a39"
 dependencies = [
  "oxideav-core",
 ]
