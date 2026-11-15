@@ -1793,6 +1793,85 @@ fn win_exec_starts_a_program_or_says_why_not() {
     assert_eq!(cpu.errorlevel, 3, "{}", printed(&cpu));
 }
 
+/// LoadModule, which Windows 95 and 98 export and Smacker's UPX-packed
+/// SMACKW32.DLL imports: a name without an extension is a program's
+/// (C, for C.EXE), and the child's command line is its path, a space
+/// and the LOADPARMS32's Pascal string. Over 31 for the program
+/// started, 2 for one not found.
+#[test]
+fn load_module_starts_a_program_or_says_why_not() {
+    let child = {
+        let names: &[&str] = &["GetStdHandle", "GetCommandLineA", "lstrlenA", "WriteFile"];
+        let names = [names, &["ExitProcess"]].concat();
+        let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &names)];
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            a.call(l.import(1))?;
+            a.mov(esi, eax)?;
+            a.push(eax)?;
+            a.call(l.import(2))?;
+            a.mov(edi, eax)?;
+            a.push(STD_OUTPUT_HANDLE)?;
+            a.call(l.import(0))?;
+            a.push(0)?;
+            a.push(l.at(0) as i32)?;
+            a.push(edi)?;
+            a.push(esi)?;
+            a.push(eax)?;
+            a.call(l.import(3))?;
+            a.push(0)?;
+            a.call(l.import(4))?;
+            a.int3()
+        })
+    };
+    let names: &[&str] = &["LoadModule", "Sleep", "ExitProcess"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The names at 0 and 0x10, LOADPARMS32 at 0x20, the arguments at 0x30
+    // and the show command at 0x40.
+    let mut data = b"C".to_vec();
+    data.resize(0x10, 0);
+    data.extend_from_slice(b"NONE");
+    data.resize(0x40, 0);
+    data[0x30] = 11;
+    data[0x31..0x3C].copy_from_slice(b"an argument");
+    data.extend_from_slice(&[2, 0, 1, 0]);
+    data.resize(0x48, 0);
+    let parent = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        for (field, value) in [(0x24, 0x30), (0x28, 0x40)] {
+            a.mov(dword_ptr(l.at(field)), l.at(value) as i32)?;
+        }
+        a.push(l.at(0x20) as i32)?;
+        a.push(l.at(0) as i32)?;
+        a.call(f("LoadModule"))?;
+        a.cmp(eax, 31)?;
+        a.seta(bl)?;
+        a.push(l.at(0x20) as i32)?;
+        a.push(l.at(0x10) as i32)?;
+        a.call(f("LoadModule"))?;
+        a.cmp(eax, 2)?;
+        a.sete(al)?;
+        a.shl(al, 1)?;
+        a.or(bl, al)?;
+        // The child ends before the parent.
+        a.push(100)?;
+        a.call(f("Sleep"))?;
+        a.movzx(eax, bl)?;
+        a.push(eax)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let files = &[("T.EXE", parent), ("C.EXE", child)];
+    let mut cpu = Cpu::new(scratch("load_module", files));
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 3, "{}", printed(&cpu));
+    let text = printed(&cpu);
+    assert!(text.contains("C.EXE an argument"), "{text}");
+}
+
 /// A command line naming its program without quotes, in a folder with
 /// spaces in its name: the program is found by the line up to each space
 /// in turn ("V1.0", "V1.0 GAME\C.EXE"), as Windows finds it, and starts.
