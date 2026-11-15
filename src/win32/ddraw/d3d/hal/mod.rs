@@ -300,7 +300,7 @@ pub fn draw_gl(
     lists: &[(u32, Vec<u32>)],
 ) -> bool {
     match kind_of(cpu, d) {
-        Kind::Voodoo => false,
+        Kind::Voodoo | Kind::Software => false,
         Kind::ToadForce => toadforce::draw_gl(cpu, d, setup, gl, layout, packed, lists),
     }
 }
