@@ -2633,7 +2633,7 @@ fn flat_fog_wrapping_and_the_ends_of_the_ranges_agree() {
             for (v, colour) in q.iter_mut().zip(colours) {
                 v.diffuse = colour;
                 let fog = 0x20 + 0xD0 * v.t[0] as u32;
-                v.specular = fog << 24 | 0x0030_2010 * (1 + v.t[1] as u32);
+                v.specular = (fog << 24) | (0x0030_2010 * (1 + v.t[1] as u32));
             }
             rig.states(&[
                 (RS_SHADEMODE, 1),
