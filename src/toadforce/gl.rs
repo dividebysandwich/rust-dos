@@ -397,6 +397,14 @@ fn vertices(shape: &Shape, from: &[gpu::Vertex], out: &mut Vec<u8>) -> usize {
     from.len()
 }
 
+/// The bytes of `words`, as a buffer of the host takes them.
+fn words(words: &[u32]) -> &[u8] {
+    // SAFETY: every byte of a `u32` is initialised, and a byte has no
+    // alignment to keep. The bytes are those of `words`, borrowed as
+    // long.
+    unsafe { std::slice::from_raw_parts(words.as_ptr().cast(), size_of_val(words)) }
+}
+
 /// The OpenGL host renderer.
 pub struct ToadForceGl {
     gl: Rc<glow::Context>,
@@ -416,6 +424,12 @@ pub struct ToadForceGl {
     from_depth: glow::Framebuffer,
     array: glow::VertexArray,
     buffer: glow::Buffer,
+    /// The vertex array, the vertices and the indices of the runs
+    /// whose vertices the host transforms. The array's attributes are
+    /// set for each run, by its layout.
+    tnl_array: glow::VertexArray,
+    tnl_buffer: glow::Buffer,
+    tnl_indices: glow::Buffer,
     /// A vertex array without attributes, for `CONVERT`.
     plain: glow::VertexArray,
     /// The picture the window shows (`composite`): its framebuffer,
@@ -433,6 +447,11 @@ pub struct ToadForceGl {
     programs: RefCell<HashMap<shader::Key, Program<Uniforms>>>,
     /// The keys whose program the host didn't compile.
     failed: RefCell<HashSet<shader::Key>>,
+    /// The programs that transform (`shader::VERTEX_TNL`), made when
+    /// `transforms` first sees the steps, and the keys of those that
+    /// didn't compile.
+    tnl: RefCell<HashMap<shader::Key, Program<Uniforms>>>,
+    tnl_failed: RefCell<HashSet<shader::Key>>,
     /// Counted up with every batch.
     batch: u64,
     /// The bytes of a batch's vertices, kept from batch to batch for
@@ -441,6 +460,8 @@ pub struct ToadForceGl {
     /// For the status: the runs drawn, and the surfaces and textures
     /// copied from card memory.
     runs: u64,
+    /// The runs among them whose vertices the host transformed.
+    transformed: u64,
     uploads: u64,
     decodes: u64,
     /// The images of textures filled from a copy, and the clears,
@@ -506,6 +527,12 @@ impl ToadForceGl {
             for (index, _) in shader::ATTRIBUTES {
                 gl.enable_vertex_attrib_array(index);
             }
+            let tnl_array = gl.create_vertex_array()?;
+            let tnl_buffer = gl.create_buffer()?;
+            let tnl_indices = gl.create_buffer()?;
+            gl.bind_vertex_array(Some(tnl_array));
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(tnl_indices));
+            gl.enable_vertex_attrib_array(0);
             gl.bind_vertex_array(None);
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
             ToadForceGl {
@@ -519,6 +546,9 @@ impl ToadForceGl {
                 from_depth,
                 array,
                 buffer,
+                tnl_array,
+                tnl_buffer,
+                tnl_indices,
                 plain,
                 picture: None,
                 convert,
@@ -527,9 +557,12 @@ impl ToadForceGl {
                 textures: HashMap::new(),
                 programs: RefCell::default(),
                 failed: RefCell::default(),
+                tnl: RefCell::default(),
+                tnl_failed: RefCell::default(),
                 batch: 0,
                 vertex_bytes: Vec::new(),
                 runs: 0,
+                transformed: 0,
                 uploads: 0,
                 decodes: 0,
                 converts: 0,
@@ -661,11 +694,14 @@ impl ToadForceGl {
                 let runs = [gpu::Run {
                     state: state(blend),
                     vertices: 0..3,
+                    geometry: None,
                 }];
                 let batch = Batch {
                     target,
                     runs: &runs,
                     vertices: &vertices,
+                    words: &[],
+                    indices: &[],
                 };
                 self.draw(&batch, &memory, &pages);
                 if self.broken || !self.read_back(&colour, &mut memory, None) {
@@ -711,11 +747,14 @@ impl ToadForceGl {
         let runs = [gpu::Run {
             state: Arc::new(hidden),
             vertices: 0..3,
+            geometry: None,
         }];
         let batch = Batch {
             target,
             runs: &runs,
             vertices: &vertices,
+            words: &[],
+            indices: &[],
         };
         self.draw(&batch, &memory, &pages);
         let mut back = vec![0u8; memory.len()];
@@ -1150,6 +1189,218 @@ impl ToadForceGl {
                 self.failed.borrow_mut().insert(key.clone());
                 false
             }
+        }
+    }
+
+    /// Whether the host has the program that draws `key` from
+    /// vertices it transforms, compiling it at the key's first use.
+    ///
+    /// # Safety
+    ///
+    /// The context is current.
+    unsafe fn compiled_tnl(&self, key: &shader::Key) -> bool {
+        if self.tnl.borrow().contains_key(key) {
+            return true;
+        }
+        if self.tnl_failed.borrow().contains(key) {
+            return false;
+        }
+        let fragment = shader::fragment_tnl(key);
+        let made = compile::<Uniforms>(
+            &self.gl,
+            self.glsl,
+            shader::VERTEX_TNL,
+            &fragment,
+            &shader::ATTRIBUTES_TNL,
+        );
+        // `compile` leaves the program in use.
+        // SAFETY: the caller's.
+        unsafe { self.gl.use_program(None) };
+        match made {
+            Ok(program) => {
+                self.tnl.borrow_mut().insert(key.clone(), program);
+                true
+            }
+            Err(e) => {
+                let e = e.replacen("a 3dfx shader", "a ToadForce shader", 1);
+                eprintln!("[TOADFORCE] {e}: the card transforms the vertices of this state");
+                self.tnl_failed.borrow_mut().insert(key.clone());
+                false
+            }
+        }
+    }
+
+    /// Point the attributes of the vertex array bound, whose buffer
+    /// is bound too, at the vertices laid out as `layout` from the
+    /// buffer's byte `base`. What a vertex lacks is what the card
+    /// gives it: no normal, a white diffuse colour, a black specular
+    /// one with no fog, and 0, 0, 0 and 1 for a coordinate set's
+    /// numbers.
+    ///
+    /// # Safety
+    ///
+    /// The context is current.
+    unsafe fn layout(gl: &glow::Context, layout: &gpu::Layout, base: i32) {
+        let stride = 4 * layout.words as i32;
+        // SAFETY: the caller's.
+        unsafe {
+            gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, stride, base);
+            match layout.normal {
+                Some(at) => {
+                    let at = base + 4 * at as i32;
+                    gl.enable_vertex_attrib_array(7);
+                    gl.vertex_attrib_pointer_f32(7, 3, glow::FLOAT, false, stride, at);
+                }
+                None => {
+                    gl.disable_vertex_attrib_array(7);
+                    gl.vertex_attrib_3_f32(7, 0.0, 0.0, 0.0);
+                }
+            }
+            let colours = [(1, layout.diffuse, 255.0), (2, layout.specular, 0.0)];
+            for (index, at, rgb) in colours {
+                match at {
+                    Some(at) => {
+                        let at = base + 4 * at as i32;
+                        gl.enable_vertex_attrib_array(index);
+                        gl.vertex_attrib_pointer_f32(
+                            index,
+                            4,
+                            glow::UNSIGNED_BYTE,
+                            false,
+                            stride,
+                            at,
+                        );
+                    }
+                    None => {
+                        gl.disable_vertex_attrib_array(index);
+                        gl.vertex_attrib_4_f32(index, rgb, rgb, rgb, 255.0);
+                    }
+                }
+            }
+            for (slot, &(at, numbers)) in layout.sets.iter().enumerate() {
+                let index = 3 + slot as u32;
+                if numbers == 0 {
+                    gl.disable_vertex_attrib_array(index);
+                    gl.vertex_attrib_4_f32(index, 0.0, 0.0, 0.0, 1.0);
+                } else {
+                    let at = base + 4 * at as i32;
+                    gl.enable_vertex_attrib_array(index);
+                    gl.vertex_attrib_pointer_f32(
+                        index,
+                        numbers.min(4) as i32,
+                        glow::FLOAT,
+                        false,
+                        stride,
+                        at,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Give the program `u` is of, which is in use, the lighting
+    /// `lights`, with `eye` to take a vertex to camera space.
+    ///
+    /// # Safety
+    ///
+    /// The context is current.
+    unsafe fn lights(gl: &glow::Context, u: &Uniforms, lights: &gpu::Lights, eye: &[f32; 16]) {
+        let lamps = &lights.lamps[..lights.lamps.len().min(8)];
+        let four = |of: &dyn Fn(&gpu::Lamp) -> [f32; 4]| -> Vec<f32> {
+            lamps.iter().flat_map(of).collect()
+        };
+        let with = |v: [f32; 3], w: f32| [v[0], v[1], v[2], w];
+        let arrays = [
+            four(&|l| with(l.position, l.kind as f32)),
+            four(&|l| with(l.axis, l.range)),
+            four(&|l| with(l.diffuse, l.falloff)),
+            four(&|l| with(l.specular, l.spot_model as f32)),
+            four(&|l| with(l.ambient, 0.0)),
+            four(&|l| with(l.attenuation, 0.0)),
+            four(&|l| [l.inner, l.outer, 0.0, 0.0]),
+        ];
+        // SAFETY: the caller's.
+        unsafe {
+            gl.uniform_1_i32(u.lights.as_ref(), lamps.len() as i32);
+            gl.uniform_matrix_4_f32_slice(u.eye.as_ref(), false, eye);
+            if !lamps.is_empty() {
+                for (at, values) in u.lamps.iter().zip(&arrays) {
+                    gl.uniform_4_f32_slice(at.as_ref(), values);
+                }
+            }
+            gl.uniform_4_f32_slice(u.mat.as_ref(), lights.material.as_flattened());
+            let [r, g, b] = lights.ambient;
+            gl.uniform_4_f32(u.lmisc.as_ref(), r, g, b, lights.power);
+            let [d, s, a, e] = lights.sources.map(|source| source as i32);
+            gl.uniform_4_i32(u.lsrc.as_ref(), d, s, a, e);
+            gl.uniform_4_i32(
+                u.lflags.as_ref(),
+                lights.specular as i32,
+                lights.single as i32,
+                lights.local_viewer as i32,
+                lights.normalize as i32,
+            );
+            gl.uniform_matrix_3_f32_slice(u.normals.as_ref(), false, &lights.normals);
+        }
+    }
+
+    /// Draw the triangles of `geometry` with the program `u` is of,
+    /// which is in use, from the transforming runs' vertex array. The
+    /// array of the other runs is bound again after it.
+    ///
+    /// # Safety
+    ///
+    /// The context is current, in the state `fixed` leaves.
+    unsafe fn draw_geometry(&self, u: &Uniforms, shape: &Shape, geometry: &gpu::Geometry) {
+        let gl = &*self.gl;
+        let t = &geometry.transform;
+        // SAFETY: the caller's.
+        unsafe {
+            gl.uniform_matrix_4_f32_slice(u.all.as_ref(), false, &t.all);
+            gl.uniform_2_f32(u.x.as_ref(), t.x[0], t.x[1]);
+            gl.uniform_2_f32(u.y.as_ref(), t.y[0], t.y[1]);
+            gl.uniform_3_f32(u.z.as_ref(), t.z[0], t.z[1], t.far as u8 as f32);
+            // The host's pixel centres are at half coordinates.
+            let shift = if shape.half_centre { 0.0 } else { 0.5 };
+            gl.uniform_1_f32(u.shift.as_ref(), shift);
+            match &t.fog {
+                Some(fog) => {
+                    let mode = fog.mode as f32 + if fog.range { 4.0 } else { 0.0 };
+                    gl.uniform_matrix_4_f32_slice(u.eye.as_ref(), false, &t.eye);
+                    gl.uniform_4_f32(u.vfog.as_ref(), fog.start, fog.end, fog.density, mode);
+                }
+                None => gl.uniform_4_f32(u.vfog.as_ref(), 0.0, 0.0, 0.0, 0.0),
+            }
+            match &t.lights {
+                Some(lights) => Self::lights(gl, u, lights, &t.eye),
+                None => gl.uniform_1_i32(u.lights.as_ref(), -1),
+            }
+            gl.bind_vertex_array(Some(self.tnl_array));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.tnl_buffer));
+            Self::layout(gl, &t.layout, 4 * geometry.words.start as i32);
+            // The card's y goes down where the host's goes up, so a
+            // triangle clockwise on the card is counterclockwise here.
+            gl.front_face(glow::CCW);
+            match shape.cull {
+                2 => gl.cull_face(glow::FRONT),
+                _ => gl.cull_face(glow::BACK),
+            }
+            if matches!(shape.cull, 2 | 3) {
+                gl.enable(glow::CULL_FACE);
+            }
+            gl.enable(glow::CLIP_DISTANCE0);
+            gl.enable(glow::CLIP_DISTANCE0 + 1);
+            gl.draw_elements(
+                glow::TRIANGLES,
+                geometry.indices.len() as i32,
+                glow::UNSIGNED_INT,
+                4 * geometry.indices.start as i32,
+            );
+            gl.disable(glow::CLIP_DISTANCE0);
+            gl.disable(glow::CLIP_DISTANCE0 + 1);
+            gl.disable(glow::CULL_FACE);
+            gl.bind_vertex_array(Some(self.array));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.buffer));
         }
     }
 
@@ -1895,6 +2146,15 @@ impl Host for ToadForceGl {
         }
     }
 
+    fn transforms(&self, state: &DrawState) -> bool {
+        // OpenGL ES has no clip distances.
+        if self.broken || self.glsl == Glsl::Es300 {
+            return false;
+        }
+        // SAFETY: the context is current (see the module comment).
+        unsafe { self.compiled_tnl(&shader::key(state, self.anisotropy > 0.0, false)) }
+    }
+
     fn status(&self) -> serde_json::Value {
         serde_json::json!({
             "batches": self.batch,
@@ -1902,6 +2162,8 @@ impl Host for ToadForceGl {
             "surface_uploads": self.uploads,
             "texture_uploads": self.decodes,
             "programs": self.programs.borrow().len(),
+            "transforming_programs": self.tnl.borrow().len(),
+            "transformed_runs": self.transformed,
             "failed_programs": self.failed.borrow().len(),
             "surfaces": self.copies.len(),
             "textures": self.textures.len(),
@@ -1979,9 +2241,22 @@ impl Host for ToadForceGl {
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.buffer));
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, &bytes, glow::STREAM_DRAW);
             self.vertex_bytes = bytes;
+            if !batch.words.is_empty() {
+                gl.bind_vertex_array(Some(self.tnl_array));
+                gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.tnl_buffer));
+                gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, words(batch.words), glow::STREAM_DRAW);
+                gl.buffer_data_u8_slice(
+                    glow::ELEMENT_ARRAY_BUFFER,
+                    words(batch.indices),
+                    glow::STREAM_DRAW,
+                );
+                gl.bind_vertex_array(Some(self.array));
+                gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.buffer));
+            }
             for (run, (first, count, outside)) in batch.runs.iter().zip(firsts) {
                 let state = &*run.state;
-                if count == 0 || !self.fixed(state) {
+                let geometry = run.geometry.as_ref().filter(|g| !g.indices.is_empty());
+                if (count == 0 && geometry.is_none()) || !self.fixed(state) {
                     continue;
                 }
                 // `declines` compiled the program without the range's
@@ -2001,10 +2276,17 @@ impl Host for ToadForceGl {
                         self.bind(stage, tex, key.native(stage));
                     }
                 }
-                if !self.compiled(&key) {
+                let made = match geometry {
+                    Some(_) => self.compiled_tnl(&key),
+                    None => self.compiled(&key),
+                };
+                if !made {
                     continue;
                 }
-                let programs = self.programs.borrow();
+                let programs = match geometry {
+                    Some(_) => self.tnl.borrow(),
+                    None => self.programs.borrow(),
+                };
                 let program = &programs[&key];
                 gl.use_program(Some(program.program));
                 // A write without a blend into a 5-6-5 target.
@@ -2014,7 +2296,13 @@ impl Host for ToadForceGl {
                     .any(|step| matches!(step, Step::Write { blend: None, .. }));
                 let pack = plain && colour.format == Format::R5G6B5;
                 Self::uniforms(&gl, &program.uniforms, state, pack);
-                gl.draw_arrays(glow::TRIANGLES, first, count);
+                match geometry {
+                    Some(geometry) => {
+                        self.transformed += 1;
+                        self.draw_geometry(&program.uniforms, &state.shape, geometry);
+                    }
+                    None => gl.draw_arrays(glow::TRIANGLES, first, count),
+                }
             }
             self.prune();
             self.leave();
@@ -2464,7 +2752,8 @@ impl Drop for ToadForceGl {
         // SAFETY: the context is current (see the module comment), and
         // the objects are this host's.
         unsafe {
-            for (_, program) in self.programs.get_mut().drain() {
+            let programs = self.programs.get_mut().drain();
+            for (_, program) in programs.chain(self.tnl.get_mut().drain()) {
                 gl.delete_program(program.program);
             }
             gl.delete_program(self.convert.program);
@@ -2479,6 +2768,9 @@ impl Drop for ToadForceGl {
             gl.delete_vertex_array(self.plain);
             gl.delete_vertex_array(self.array);
             gl.delete_buffer(self.buffer);
+            gl.delete_vertex_array(self.tnl_array);
+            gl.delete_buffer(self.tnl_buffer);
+            gl.delete_buffer(self.tnl_indices);
         }
     }
 }

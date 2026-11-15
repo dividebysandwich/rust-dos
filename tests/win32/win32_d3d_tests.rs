@@ -1364,6 +1364,8 @@ enum Api {
     /// Direct3D 7 on the T&L HAL device, which a card that transforms
     /// and lights has.
     D3D7Tnl,
+    /// Direct3D 7 on the RGB device, which draws on the processor.
+    D3D7Rgb,
 }
 
 struct Scene {
@@ -1392,6 +1394,18 @@ fn tnl_guid(data: &mut [u8], offset: u32) {
     guid(data, offset, 0xF504_9E78, 0x4861, 0x11D2, d4);
 }
 
+/// IID_IDirect3DRGBDevice at `offset`.
+fn rgb_guid(data: &mut [u8], offset: u32) {
+    let d4 = [0xA3, 0x1A, 0x00, 0xAA, 0x00, 0xB9, 0x33, 0x56];
+    guid(data, offset, 0xA466_5C60, 0x2673, 0x11CF, d4);
+}
+
+/// IID_IDirect3DRampDevice at `offset`.
+fn ramp_guid(data: &mut [u8], offset: u32) {
+    let d4 = [0xA3, 0x1A, 0x00, 0xAA, 0x00, 0xB9, 0x33, 0x56];
+    guid(data, offset, 0xF208_6B20, 0x259F, 0x11CF, d4);
+}
+
 /// A program drawing `scene`, which ends with the target locked.
 fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
     scene_program_in(scene, 16)
@@ -1416,6 +1430,9 @@ fn scene_program_with(
     let mut d = data();
     if scene.api == Api::D3D7Tnl {
         tnl_guid(&mut d, IID_HAL);
+    }
+    if scene.api == Api::D3D7Rgb {
+        rgb_guid(&mut d, IID_HAL);
     }
     let size = if scene.api != Api::D3D6 { 124 } else { 108 };
     let (zw, zh) = if let Some(board) = scene.card {
@@ -3758,6 +3775,58 @@ fn the_3d_trace_has_what_an_enumeration_offered_and_what_the_callback_said() {
     assert_eq!(counts[textures[0].as_str()], 1);
 }
 
+const DEV2_ENUM_TEXTURE_FORMATS: u32 = 9;
+/// What the program's texture format callback saw: every format's
+/// DDPIXELFORMAT flags ORed together, and how many formats there were.
+const SEEN_FLAGS: u32 = 0x34;
+const SEEN_COUNT: u32 = 0x38;
+
+#[test]
+fn direct3d_5s_enum_texture_formats_lists_only_rgb_and_palettized_formats() {
+    // A ToadForce has FOURCC, alpha, luminance and bump formats too,
+    // which IDirect3DDevice3's list hands out as DDPIXELFORMAT.
+    // Warhammer: Dark Omen takes each format IDirect3DDevice2 gives it
+    // that isn't palettized as RGB, and spins on a zero channel mask.
+    let mut d = data();
+    target_desc(&mut d, DESC, 108, 64, 64);
+    let (exe, data) = program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        // The callback (surface description, context), its address
+        // pushed by the CALL over it.
+        let mut after = a.create_label();
+        a.call(after)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(eax, dword_ptr(eax + 0x4C))?;
+        a.or(dword_ptr(l.at(SEEN_FLAGS)), eax)?;
+        a.inc(dword_ptr(l.at(SEEN_COUNT)))?;
+        a.mov(eax, 1)?;
+        a.ret_1(8)?;
+        a.set_label(&mut after)?;
+        a.pop(dword_ptr(l.at(ENUM_OK)))?;
+        start(a, l, &mut c, false, false)?;
+        let args = [Arg::At(IID_D3D2), Arg::At(D3D)];
+        c.com(a, l, DD, QUERY_INTERFACE, &args)?;
+        let args = [Arg::At(DESC), Arg::At(TARGET), Arg::I(0)];
+        c.com(a, l, DD, DD_CREATE_SURFACE, &args)?;
+        let args = [Arg::At(IID_HAL), Arg::Val(TARGET), Arg::At(DEVICE)];
+        c.com(a, l, D3D, D3D2_CREATE_DEVICE, &args)?;
+        let args = [Arg::Val(ENUM_OK), Arg::I(0)];
+        c.com(a, l, DEVICE, DEV2_ENUM_TEXTURE_FORMATS, &args)?;
+        a.mov(dword_ptr(l.at(CALLS)), c.next)?;
+        finish(a, l)
+    });
+    let mut cpu = machine_toadforce("enum_texture_formats_v2", exe);
+    run_until_done(&mut cpu, data);
+    let n = peek(&cpu, data + CALLS);
+    let r = results(&cpu, data, n);
+    assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+    // DDPF_ALPHA, DDPF_FOURCC, DDPF_LUMINANCE and DDPF_BUMPDUDV.
+    let flags = peek(&cpu, data + SEEN_FLAGS);
+    assert_eq!(flags & (0x2 | 0x4 | 0x2_0000 | 0x8_0000), 0, "{flags:X}");
+    // Six RGB formats and P8.
+    assert_eq!(peek(&cpu, data + SEEN_COUNT), 7);
+}
+
 // The same scenes on a ToadForce, whose HAL sends them to the card as
 // level 1 commands. The card's pixels are defined
 // (`docs/toadforce-spec.md`), so these are exact.
@@ -4556,9 +4625,11 @@ fn tnl_device_program(test: &str, toadforce: bool) -> (Cpu, u32, Vec<String>) {
 fn a_toadforce_has_direct3d_7s_t_and_l_hal_device_beside_the_hal_one() {
     const TNL: u32 = 0x1_0000;
     let (cpu, data, devices) = tnl_device_program("tnl_device_toadforce", true);
-    // The HAL device, then the T&L HAL device, which alone says the
-    // card transforms and lights.
-    assert_eq!(devices.len(), 2, "{devices:#?}");
+    // The RGB device, the HAL device, then the T&L HAL device, which
+    // alone says the card transforms and lights.
+    assert_eq!(devices.len(), 3, "{devices:#?}");
+    assert!(devices[0].contains("\"RGB Emulation\""), "{devices:#?}");
+    let devices = &devices[1..];
     assert!(devices[0].contains("\"Direct3D HAL\""), "{devices:#?}");
     assert!(devices[1].contains("\"Direct3D T&L HAL\""), "{devices:#?}");
     let devcaps = |line: &str| {
@@ -4579,10 +4650,11 @@ fn a_toadforce_has_direct3d_7s_t_and_l_hal_device_beside_the_hal_one() {
     // four world matrices the card blends a vertex between.
     assert_eq!(peek(&cpu, data + CAPS7 + 0xD4), 6 | 4 << 16);
 
-    // A Voodoo3 has the HAL device alone, and makes no other.
+    // A Voodoo3 has the RGB device and the HAL device, and makes no
+    // T&L HAL device.
     let (cpu, data, devices) = tnl_device_program("tnl_device_voodoo3", false);
-    assert_eq!(devices.len(), 1, "{devices:#?}");
-    assert_eq!(devcaps(&devices[0]) & TNL, 0);
+    assert_eq!(devices.len(), 2, "{devices:#?}");
+    assert_eq!(devcaps(&devices[1]) & TNL, 0);
     let r = results(&cpu, data, peek(&cpu, data + CALLS));
     assert_eq!(r.last(), Some(&0x8007_000E), "results: {r:X?}");
 }
@@ -4838,4 +4910,312 @@ fn a_toadforce_wraps_the_coordinates_of_vertices_it_transforms() {
     assert_eq!(p[16 * 64 + 32], 0xFF_0000);
     assert_eq!(p[48 * 64 + 32], 0xFF_0000);
     assert_eq!(p[16 * 64 + 60], 0xFF_0000);
+}
+
+// The software devices: Ramp and RGB, which draw on the processor into
+// any surface, with or without a 3D card.
+
+fn rgb_scene(steps: Vec<Step>) -> Scene {
+    Scene {
+        api: Api::D3D7Rgb,
+        ..toadforce_scene(steps)
+    }
+}
+
+/// The render target's pixels after `scene` on the RGB device of a
+/// Voodoo3 machine. A ToadForce's HAL, whose pixels are exact
+/// (`docs/toadforce-spec.md`), draws the same scene, and the two agree
+/// on every pixel within `tolerance` in each channel of 8 bits.
+fn draw_rgb_scene(test: &str, scene: Scene, tolerance: u32) -> Vec<u16> {
+    let p = draw_scene(test, &scene);
+    let hal = Scene {
+        api: Api::D3D7,
+        ..scene
+    };
+    let card = draw_scene_toadforce(&format!("{test}_toadforce"), &hal);
+    for y in 0..64 {
+        for x in 0..64 {
+            let (got, want) = (rgb(&p, x, y), rgb(&card, x, y));
+            assert!(
+                near(got, want, tolerance),
+                "pixel ({x}, {y}): {got:?}, a ToadForce's {want:?}"
+            );
+        }
+    }
+    p
+}
+
+/// One step of a 5-bit channel, as 8 bits: where colors are worked out
+/// between the vertices, the two round the last bit differently.
+const STEP: u32 = 9;
+
+#[test]
+fn the_rgb_device_draws_a_gouraud_shaded_triangle() {
+    let scene = rgb_scene(vec![Step::Draw(corners())]);
+    let p = draw_rgb_scene("rgb_gouraud", scene, STEP);
+    assert_rgb(&p, 5, 5, [255, 0, 0], 16);
+    assert_rgb(&p, 57, 5, [0, 255, 0], 24);
+    assert_rgb(&p, 5, 57, [0, 0, 255], 24);
+    assert_rgb(&p, 22, 22, [85, 85, 85], 24);
+    assert_rgb(&p, 60, 60, [0, 0, 0], 0);
+}
+
+#[test]
+fn the_rgb_device_samples_a_texture_and_leaves_out_its_key() {
+    // Red, green, blue and white quarters.
+    let texels = std::array::from_fn(|i| match (i % 8 >= 4, i / 8 >= 4) {
+        (false, false) => 0xF800,
+        (true, false) => 0x07E0,
+        (false, true) => 0x001F,
+        (true, true) => 0xFFFF,
+    });
+    let scene = Scene {
+        texture: Some(texels),
+        ..rgb_scene(vec![Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE))])
+    };
+    let p = draw_rgb_scene("rgb_textured", scene, 0);
+    assert_rgb(&p, 16, 16, [255, 0, 0], 0);
+    assert_rgb(&p, 48, 16, [0, 255, 0], 0);
+    assert_rgb(&p, 16, 48, [0, 0, 255], 0);
+    assert_rgb(&p, 63, 63, [255, 255, 255], 0);
+
+    let scene = Scene {
+        clear: BLUE,
+        texture: Some(texels),
+        texture_system: true,
+        ..rgb_scene(vec![
+            Step::Key(0x07E0),
+            Step::State(RS_COLORKEYENABLE, 1),
+            Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE)),
+        ])
+    };
+    let p = draw_rgb_scene("rgb_keyed", scene, 0);
+    assert_rgb(&p, 16, 16, [255, 0, 0], 0);
+    assert_rgb(&p, 48, 16, [0, 0, 255], 0);
+    assert_rgb(&p, 48, 48, [255, 255, 255], 0);
+}
+
+#[test]
+fn the_rgb_device_tests_depth_blends_and_fogs() {
+    let scene = Scene {
+        zbuffer: Some(1.0),
+        ..rgb_scene(vec![
+            Step::State(RS_ZENABLE, 1),
+            Step::Draw(quad(0.0, 0.0, 32.0, 64.0, 0.25, GREEN)),
+            Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.75, RED)),
+        ])
+    };
+    let p = draw_rgb_scene("rgb_ztest", scene, 0);
+    assert_rgb(&p, 10, 30, [0, 255, 0], 0);
+    assert_rgb(&p, 50, 30, [255, 0, 0], 0);
+
+    let scene = Scene {
+        clear: BLUE,
+        ..rgb_scene(vec![
+            Step::State(RS_ALPHABLENDENABLE, 1),
+            Step::State(RS_SRCBLEND, 5),
+            Step::State(RS_DESTBLEND, 6),
+            Step::Draw(quad(0.0, 0.0, 32.0, 64.0, 0.5, 0x80FF_0000)),
+        ])
+    };
+    let p = draw_rgb_scene("rgb_blend", scene, STEP);
+    assert_rgb(&p, 16, 30, [128, 0, 127], 12);
+    assert_rgb(&p, 48, 30, [0, 0, 255], 0);
+
+    let fogged = |alpha: u32, x0: f32, x1: f32| {
+        quad(x0, 0.0, x1, 32.0, 0.5, WHITE)
+            .into_iter()
+            .map(|v| with_fog(v, alpha))
+            .collect()
+    };
+    let table = quad(0.0, 32.0, 64.0, 64.0, 0.5, WHITE)
+        .into_iter()
+        .map(|v| Tl { rhw: 0.5, ..v })
+        .collect();
+    let scene = rgb_scene(vec![
+        Step::State(RS_FOGENABLE, 1),
+        Step::State(RS_FOGCOLOR, 0x00_FF00),
+        Step::Draw(fogged(0, 0.0, 32.0)),
+        Step::Draw(fogged(0xFF, 32.0, 64.0)),
+        Step::State(RS_FOGTABLEMODE, 3),
+        Step::State(RS_FOGSTART, 0f32.to_bits()),
+        Step::State(RS_FOGEND, 1f32.to_bits()),
+        Step::Draw(table),
+    ]);
+    let p = draw_rgb_scene("rgb_fog", scene, STEP);
+    assert_rgb(&p, 16, 16, [0, 255, 0], 0);
+    assert_rgb(&p, 48, 16, [255, 255, 255], 0);
+    assert_rgb(&p, 32, 48, [128, 255, 128], 12);
+}
+
+const D3D2_ENUM_DEVICES: u32 = 3;
+/// What the device list's callback saw: how many devices, and for each
+/// the first word of its GUID and its HAL and HEL descriptions' color
+/// models.
+const SEEN: u32 = 0x40;
+const SEEN_GUIDS: u32 = 0x44;
+const SEEN_HAL: u32 = 0x64;
+const SEEN_HEL: u32 = 0x84;
+
+/// A machine with a Super VGA and no 3D card, the built-in Windows on
+/// and `program` loaded from the shell as T.EXE.
+fn machine_without_3d(test: &str, program: Vec<u8>) -> Cpu {
+    let base = PathBuf::from("target/test_win32_d3d").join(test);
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    fs::write(base.join("T.EXE"), program).unwrap();
+    let mut cpu = Cpu::new(base);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    cpu
+}
+
+/// A program that lists IDirect3D2's devices, then makes the Ramp
+/// device on a 64x64 target in video memory with a 16-bit depth buffer
+/// in system memory, as Warhammer: Dark Omen does: the machine after
+/// it, and its data.
+fn ramp_device_program(test: &str, machine: fn(&str, Vec<u8>) -> Cpu) -> (Cpu, u32) {
+    let mut d = data();
+    target_desc(&mut d, DESC, 108, 64, 64);
+    ramp_guid(&mut d, IID_HAL);
+    // The depth buffer's DDSURFACEDESC: 16 bits (DDSD_ZBUFFERBITDEPTH),
+    // in system memory.
+    put32(&mut d, Z_DESC, 108);
+    let flags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | 0x40;
+    put32(&mut d, Z_DESC + 0x04, flags);
+    put32(&mut d, Z_DESC + 0x08, 64);
+    put32(&mut d, Z_DESC + 0x0C, 64);
+    put32(&mut d, Z_DESC + 0x18, 16);
+    let caps = DDSCAPS_ZBUFFER | DDSCAPS_SYSTEMMEMORY;
+    put32(&mut d, Z_DESC + 0x68, caps);
+    let (exe, data) = program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        // The callback (guid, description, name, HAL description, HEL
+        // description, context), which goes on.
+        let mut after = a.create_label();
+        a.call(after)?;
+        a.mov(ecx, dword_ptr(l.at(SEEN)))?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.mov(dword_ptr(ecx * 4 + l.at(SEEN_GUIDS)), eax)?;
+        a.mov(eax, dword_ptr(esp + 16))?;
+        a.mov(eax, dword_ptr(eax + 8))?;
+        a.mov(dword_ptr(ecx * 4 + l.at(SEEN_HAL)), eax)?;
+        a.mov(eax, dword_ptr(esp + 20))?;
+        a.mov(eax, dword_ptr(eax + 8))?;
+        a.mov(dword_ptr(ecx * 4 + l.at(SEEN_HEL)), eax)?;
+        a.inc(dword_ptr(l.at(SEEN)))?;
+        a.mov(eax, 1)?;
+        a.ret_1(24)?;
+        a.set_label(&mut after)?;
+        a.pop(dword_ptr(l.at(ENUM_OK)))?;
+        start(a, l, &mut c, false, false)?;
+        let args = [Arg::At(IID_D3D2), Arg::At(D3D)];
+        c.com(a, l, DD, QUERY_INTERFACE, &args)?;
+        let args = [Arg::Val(ENUM_OK), Arg::I(0)];
+        c.com(a, l, D3D, D3D2_ENUM_DEVICES, &args)?;
+        let args = [Arg::At(DESC), Arg::At(TARGET), Arg::I(0)];
+        c.com(a, l, DD, DD_CREATE_SURFACE, &args)?;
+        let args = [Arg::At(Z_DESC), Arg::At(ZBUF), Arg::I(0)];
+        c.com(a, l, DD, DD_CREATE_SURFACE, &args)?;
+        c.com(a, l, TARGET, SURF_ADD_ATTACHED_SURFACE, &[Arg::Val(ZBUF)])?;
+        let args = [Arg::At(IID_HAL), Arg::Val(TARGET), Arg::At(DEVICE)];
+        c.com(a, l, D3D, D3D2_CREATE_DEVICE, &args)?;
+        a.mov(dword_ptr(l.at(CALLS)), c.next)?;
+        finish(a, l)
+    });
+    let mut cpu = machine(test, exe);
+    run_until_done(&mut cpu, data);
+    (cpu, data)
+}
+
+/// The devices the list saw: their GUIDs' first words, and their HAL
+/// and HEL descriptions' color models.
+fn seen_devices(cpu: &Cpu, data: u32) -> Vec<[u32; 3]> {
+    (0..peek(cpu, data + SEEN))
+        .map(|i| [SEEN_GUIDS, SEEN_HAL, SEEN_HEL].map(|at| peek(cpu, data + at + 4 * i)))
+        .collect()
+}
+
+const RAMP: u32 = 0xF208_6B20;
+const RGB: u32 = 0xA466_5C60;
+const HAL: u32 = 0x84E6_3DE0;
+
+#[test]
+fn direct3d_5_lists_the_ramp_and_rgb_devices_before_the_hal() {
+    // D3DCOLOR_MONO and D3DCOLOR_RGB: a software device's description
+    // is its HEL one, the HAL's its HAL one.
+    let (cpu, data) = ramp_device_program("ramp_device_toadforce", machine_toadforce);
+    let want = [[RAMP, 0, 1], [RGB, 0, 2], [HAL, 2, 2]];
+    assert_eq!(seen_devices(&cpu, data), want);
+    // The Ramp device is made on a target in video memory with a depth
+    // buffer in system memory.
+    let r = results(&cpu, data, peek(&cpu, data + CALLS));
+    assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+
+    // Without a 3D card, the software devices alone.
+    let (cpu, data) = ramp_device_program("ramp_device_svga", machine_without_3d);
+    assert_eq!(seen_devices(&cpu, data), [[RAMP, 0, 1], [RGB, 0, 2]]);
+    let r = results(&cpu, data, peek(&cpu, data + CALLS));
+    assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+}
+
+#[test]
+fn the_rgb_device_draws_without_a_3d_card() {
+    let scene = rgb_scene(vec![Step::Draw(quad(0.0, 0.0, 32.0, 64.0, 0.5, RED))]);
+    let (exe, data) = scene_program(&scene);
+    let mut cpu = machine_without_3d("rgb_without_3d", exe);
+    run_until_done(&mut cpu, data);
+    let n = peek(&cpu, data + CALLS);
+    let r = results(&cpu, data, n);
+    assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+    let p: Vec<u16> = (0..64 * 64)
+        .map(|i| {
+            let at = data + PIXELS + 2 * i;
+            (peek(&cpu, at & !3) >> (8 * (at & 2))) as u16
+        })
+        .collect();
+    assert_rgb(&p, 16, 30, [255, 0, 0], 0);
+    assert_rgb(&p, 48, 30, [0, 0, 0], 0);
+}
+
+#[test]
+fn the_rgb_device_runs_a_stage_that_reads_no_texture() {
+    // D3DTSS_COLORARG1. The stage selects the texture factor, and the
+    // device has no texture: the stage still runs.
+    const TSS_COLORARG1: u32 = 2;
+    let scene = rgb_scene(vec![
+        Step::Stage(TSS_COLOROP, TOP_SELECTARG1),
+        Step::Stage(TSS_COLORARG1, TA_TFACTOR),
+        Step::State(RS_TEXTUREFACTOR, GREEN),
+        Step::Draw(quad(0.0, 0.0, 32.0, 64.0, 0.5, RED)),
+    ]);
+    let p = draw_rgb_scene("rgb_factor", scene, 0);
+    assert_rgb(&p, 16, 30, [0, 255, 0], 0);
+    assert_rgb(&p, 48, 30, [0, 0, 0], 0);
+}
+
+#[test]
+fn the_rgb_device_biases_depth() {
+    // D3DRENDERSTATE_ZBIAS, which the description offers: the red quad
+    // at the green one's depth passes the test of less with a bias,
+    // and the blue one without doesn't.
+    const RS_ZBIAS: u32 = 47;
+    let scene = Scene {
+        zbuffer: Some(1.0),
+        ..rgb_scene(vec![
+            Step::State(RS_ZENABLE, 1),
+            Step::State(RS_ZFUNC, 2),
+            Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, GREEN)),
+            Step::State(RS_ZBIAS, 16),
+            Step::Draw(quad(0.0, 0.0, 32.0, 64.0, 0.5, RED)),
+            Step::State(RS_ZBIAS, 0),
+            Step::Draw(quad(32.0, 0.0, 64.0, 64.0, 0.5, BLUE)),
+        ])
+    };
+    let p = draw_rgb_scene("rgb_zbias", scene, 0);
+    assert_rgb(&p, 16, 30, [255, 0, 0], 0);
+    assert_rgb(&p, 48, 30, [0, 255, 0], 0);
 }

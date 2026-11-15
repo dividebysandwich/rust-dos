@@ -17,6 +17,7 @@ use super::math;
 use super::pipeline::{Coord, SLOTS};
 use super::texel::{self, Rgba};
 use super::vertex::{Fvf, ScreenVertex};
+use crate::toadforce::gpu;
 use crate::toadforce::level1::states::*;
 use crate::toadforce::level1::{
     CLIP_PLANES, Level1, TRANSFORM_PROJECTION, TRANSFORM_TEXTURE, TRANSFORM_VIEW, TRANSFORM_WORLD,
@@ -455,6 +456,67 @@ impl Setup {
         }
     }
 
+    /// Whether a triangle's back has colours of its own.
+    pub fn two_sided(&self) -> bool {
+        self.two_sided != 0
+    }
+
+    /// Whether a host can take vertices through this transform: none
+    /// of blended matrices, a back lit by itself, coordinates the card
+    /// makes or puts through a matrix, point sizes and clip planes of
+    /// the program's. It allocates nothing, so a draw asks it before
+    /// it asks the host (`Host::transforms`, which may compile a
+    /// program) and before `hosted` builds the transform.
+    pub fn hostable(&self) -> bool {
+        self.two_sided == 0
+            && self.blend == 0
+            && self.point_size.is_none()
+            && self.user.is_empty()
+            && self.slots.len() <= SLOTS
+            && self
+                .slots
+                .iter()
+                .all(|s| s.generate == 0 && s.matrix.is_none())
+            && self.fvf.words <= u8::MAX as usize
+    }
+
+    /// The transform as a host takes vertices through it, or None
+    /// for one a host doesn't do (`hostable`).
+    pub fn hosted(&self) -> Option<gpu::Transform> {
+        if !self.hostable() {
+            return None;
+        }
+        let mut sets = [(0, 0); SLOTS];
+        for (to, slot) in sets.iter_mut().zip(&self.slots) {
+            *to = slot.set;
+        }
+        Some(gpu::Transform {
+            all: self.all,
+            x: self.x,
+            y: self.y,
+            z: self.z,
+            far: self.planes >> PLANE_FAR & 1 != 0,
+            fog: self.fog.map(|fog| gpu::VertexFog {
+                mode: fog.mode,
+                start: fog.start,
+                end: fog.end,
+                density: fog.density,
+                range: fog.range,
+            }),
+            eye: self.world_view[0],
+            lights: self.lighting.as_ref().map(|lighting| {
+                Box::new(lighting.hosted(&self.normals[0], self.normalize))
+            }),
+            layout: gpu::Layout {
+                words: self.fvf.words as u8,
+                normal: self.fvf.normal,
+                diffuse: self.fvf.diffuse,
+                specular: self.fvf.specular,
+                sets,
+            },
+        })
+    }
+
     /// Whether the triangle of `v` shows its back, which has colours
     /// of its own.
     pub fn back(&self, v: [&Vertex; 3]) -> bool {
@@ -521,9 +583,11 @@ impl Setup {
         };
         match &self.lighting {
             Some(lighting) => {
-                (v.diffuse, v.specular) = lighting.light(eye, normal, own_diffuse, own_specular);
+                (v.diffuse, v.specular) =
+                    lighting.light(eye, normal, own_diffuse, own_specular, false);
                 if self.two_sided != 0 {
-                    let (d, s) = lighting.light(eye, normal.map(|c| -c), own_diffuse, own_specular);
+                    let turned = normal.map(|c| -c);
+                    let (d, s) = lighting.light(eye, turned, own_diffuse, own_specular, true);
                     v.back = [d, s];
                 }
             }

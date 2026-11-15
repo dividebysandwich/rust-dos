@@ -2,13 +2,15 @@
 //! is. Direct3D 7 and earlier, Direct3D 8 and OpenGL all draw through
 //! what is here, and none of them knows the card behind it.
 //!
-//! Two cards have a HAL:
+//! Two cards have a HAL, and the software devices draw like one:
 //!
 //! - `voodoo`: a Banshee, a Voodoo3, or a Voodoo Graphics or Voodoo2
 //!   add-on card, drawn on through the Glide layer as 3dfx's Direct3D
 //!   driver drew.
 //! - `toadforce`: the ToadForce (`crate::toadforce`), drawn on with its
 //!   level 1 commands.
+//! - `software`: the Ramp and RGB devices, which draw on the processor
+//!   into any surface, with or without a 3D card.
 //!
 //! `card` tells which one draws for a DirectDraw object, and with it
 //! what the device reports (`Offer`). Before each batch of primitives
@@ -17,6 +19,7 @@
 //! its depth buffer. `created`, `release` and `process_ended` follow
 //! the devices' lives, for the memory a HAL keeps on its card.
 
+pub mod software;
 pub mod toadforce;
 pub mod voodoo;
 
@@ -25,7 +28,7 @@ use super::device::Device;
 use super::pipeline::{Layout, Rasterizer, ScreenVertex, Setup, Vertex};
 use crate::cpu::Cpu;
 
-pub use toadforce::Source;
+pub use toadforce::{Gl, Source};
 pub(in crate::win32::ddraw) use voodoo::card_fill;
 pub use voodoo::{
     RS_ALPHABLENDENABLE, RS_ALPHAREF, RS_ALPHATESTENABLE, RS_COLORKEYENABLE, RS_DITHERENABLE,
@@ -38,6 +41,8 @@ pub enum Kind {
     #[default]
     Voodoo,
     ToadForce,
+    /// The software devices (`software`), on any card.
+    Software,
 }
 
 impl Kind {
@@ -47,10 +52,10 @@ impl Kind {
     }
 
     pub fn from_code(code: u32) -> Kind {
-        if code == Kind::ToadForce as u32 {
-            Kind::ToadForce
-        } else {
-            Kind::Voodoo
+        match code {
+            c if c == Kind::ToadForce as u32 => Kind::ToadForce,
+            c if c == Kind::Software as u32 => Kind::Software,
+            _ => Kind::Voodoo,
         }
     }
 }
@@ -74,6 +79,14 @@ pub fn card(cpu: &mut Cpu, dd: u32) -> Option<Offer> {
         });
     }
     adapter(cpu)
+}
+
+/// What a software device offers: one texture at once.
+pub fn software() -> Offer {
+    Offer {
+        kind: Kind::Software,
+        units: software::UNITS,
+    }
 }
 
 /// The HAL of the display adapter, if Direct3D has one there: a
@@ -101,7 +114,7 @@ pub fn adapter(cpu: &Cpu) -> Option<Offer> {
 /// HAL device for, beside the HAL one. None on a card that doesn't.
 pub fn tnl_lights(kind: Kind) -> Option<u32> {
     match kind {
-        Kind::Voodoo => None,
+        Kind::Voodoo | Kind::Software => None,
         Kind::ToadForce => Some(toadforce::TNL_LIGHTS),
     }
 }
@@ -112,8 +125,12 @@ pub fn transforms(kind: Kind) -> bool {
     tnl_lights(kind).is_some()
 }
 
-/// The card that draws for the device `d`.
+/// The card that draws for the device `d`, or the processor for a
+/// software device.
 pub fn kind_of(cpu: &mut Cpu, d: &Device) -> Kind {
+    if d.model != 0 {
+        return Kind::Software;
+    }
     card(cpu, d.ddraw).map_or(Kind::Voodoo, |offer| offer.kind)
 }
 
@@ -174,6 +191,7 @@ pub fn description(kind: Kind) -> Description {
     match kind {
         Kind::Voodoo => voodoo::description(),
         Kind::ToadForce => toadforce::description(),
+        Kind::Software => software::description(),
     }
 }
 
@@ -183,6 +201,7 @@ pub fn texture_max(kind: Kind) -> u32 {
     match kind {
         Kind::Voodoo => voodoo::TEXTURE_MAX,
         Kind::ToadForce => crate::toadforce::caps::TEXTURE_MAX,
+        Kind::Software => software::TEXTURE_MAX,
     }
 }
 
@@ -193,6 +212,7 @@ pub fn can_do(kind: Kind, op: u32, version: u32) -> bool {
     match kind {
         Kind::Voodoo => voodoo::can_do(op),
         Kind::ToadForce => toadforce::can_do(op, version),
+        Kind::Software => software::can_do(op),
     }
 }
 
@@ -202,15 +222,18 @@ pub fn vertex_band(kind: Kind) -> [f32; 4] {
     match kind {
         Kind::Voodoo => voodoo::VERTEX_BAND,
         Kind::ToadForce => toadforce::VERTEX_BAND,
+        Kind::Software => software::VERTEX_BAND,
     }
 }
 
-/// Whether a surface of `format` in video memory can be a render target
-/// of the card `kind`, and whether one can be its depth buffer.
+/// Whether a surface of `format` in video memory (or, `video` false,
+/// elsewhere) can be a render target of the card `kind`, and whether
+/// one can be its depth buffer.
 pub fn takes_target(cpu: &mut Cpu, kind: Kind, format: &Format, video: bool) -> bool {
     match kind {
         Kind::Voodoo => voodoo::takes_target(cpu, format, video),
         Kind::ToadForce => toadforce::takes_target(format, video),
+        Kind::Software => software::takes_target(format),
     }
 }
 
@@ -218,6 +241,7 @@ pub fn takes_depth(cpu: &mut Cpu, kind: Kind, format: &Format, video: bool) -> b
     match kind {
         Kind::Voodoo => voodoo::takes_depth(cpu, format, video),
         Kind::ToadForce => toadforce::takes_depth(format, video),
+        Kind::Software => software::takes_depth(format),
     }
 }
 
@@ -226,6 +250,7 @@ pub fn takes_depth(cpu: &mut Cpu, kind: Kind, format: &Format, video: bool) -> b
 pub enum Card {
     Voodoo(voodoo::Card),
     ToadForce(toadforce::Card),
+    Software(software::Card),
 }
 
 /// Whether the device `d` can be drawn by its card now, and the card's
@@ -234,6 +259,7 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     match kind_of(cpu, d) {
         Kind::Voodoo => voodoo::bind(cpu, d, setup).map(Card::Voodoo),
         Kind::ToadForce => toadforce::bind(cpu, d, setup).map(Card::ToadForce),
+        Kind::Software => software::bind(cpu, d, setup).map(Card::Software),
     }
 }
 
@@ -252,8 +278,40 @@ pub fn draw_geometry(
     order: Option<&[u32]>,
 ) -> bool {
     match kind_of(cpu, d) {
-        Kind::Voodoo => false,
+        Kind::Voodoo | Kind::Software => false,
         Kind::ToadForce => toadforce::draw_geometry(cpu, d, setup, layout, vertices, kind, order),
+    }
+}
+
+/// Whether the card of the DirectDraw object `dd` transforms and
+/// lights vertices itself, and isn't asked to leave it to the
+/// processor (`toadforce::pipeline_transforms`).
+pub fn transforms_gl(cpu: &mut Cpu, dd: u32) -> Result<(), bool> {
+    match card(cpu, dd).map(|offer| offer.kind) {
+        Some(Kind::ToadForce) if toadforce::pipeline_transforms() => Err(true),
+        Some(Kind::ToadForce) => Ok(()),
+        _ => Err(false),
+    }
+}
+
+/// Draw OpenGL's primitives `lists` of the vertices `packed`, which
+/// aren't in screen space and are in the card's layout for `layout`,
+/// on a card that transforms and lights vertices itself,
+/// with OpenGL's lights and materials `gl` (`toadforce::draw_gl`).
+/// False, with nothing drawn, when the card of `d` doesn't, or can't
+/// for this draw.
+pub fn draw_gl(
+    cpu: &mut Cpu,
+    d: &Device,
+    setup: &Setup,
+    gl: &Gl,
+    layout: &Layout,
+    packed: &[u32],
+    lists: &[(u32, Vec<u32>)],
+) -> bool {
+    match kind_of(cpu, d) {
+        Kind::Voodoo | Kind::Software => false,
+        Kind::ToadForce => toadforce::draw_gl(cpu, d, setup, gl, layout, packed, lists),
     }
 }
 
@@ -271,7 +329,7 @@ pub fn draw_screen(
     from: &Source,
 ) -> Option<u32> {
     match kind_of(cpu, d) {
-        Kind::Voodoo => None,
+        Kind::Voodoo | Kind::Software => None,
         Kind::ToadForce => toadforce::draw_screen(cpu, d, setup, layout, kind, from),
     }
 }
@@ -280,6 +338,7 @@ pub fn draw_screen(
 pub enum Raster<'a> {
     Voodoo(voodoo::Raster<'a>),
     ToadForce(toadforce::Raster<'a>),
+    Software(software::Raster<'a>),
 }
 
 impl Raster<'_> {
@@ -288,6 +347,7 @@ impl Raster<'_> {
         match card {
             Card::Voodoo(card) => Raster::Voodoo(voodoo::Raster::new(cpu, card)),
             Card::ToadForce(card) => Raster::ToadForce(toadforce::Raster::new(cpu, card)),
+            Card::Software(card) => Raster::Software(software::Raster::new(cpu, card)),
         }
     }
 
@@ -296,6 +356,7 @@ impl Raster<'_> {
         match self {
             Raster::Voodoo(raster) => raster.finish(),
             Raster::ToadForce(raster) => raster.finish(),
+            Raster::Software(raster) => raster.finish(),
         }
     }
 }
@@ -305,6 +366,7 @@ impl Rasterizer for Raster<'_> {
         match self {
             Raster::Voodoo(raster) => raster.triangle(v),
             Raster::ToadForce(raster) => raster.triangle(v),
+            Raster::Software(raster) => raster.triangle(v),
         }
     }
 
@@ -312,6 +374,7 @@ impl Rasterizer for Raster<'_> {
         match self {
             Raster::Voodoo(raster) => raster.line(v),
             Raster::ToadForce(raster) => raster.line(v),
+            Raster::Software(raster) => raster.line(v),
         }
     }
 
@@ -319,6 +382,7 @@ impl Rasterizer for Raster<'_> {
         match self {
             Raster::Voodoo(raster) => raster.point(v),
             Raster::ToadForce(raster) => raster.point(v),
+            Raster::Software(raster) => raster.point(v),
         }
     }
 }
@@ -340,6 +404,7 @@ pub fn clear(cpu: &mut Cpu, d: &Device, rects: &[[i32; 4]], fill: Fill) {
     match kind_of(cpu, d) {
         Kind::Voodoo => voodoo::clear(cpu, d, rects, fill.target, fill.depth),
         Kind::ToadForce => toadforce::clear(cpu, d, rects, fill),
+        Kind::Software => software::clear(cpu, d, rects, fill),
     }
 }
 
@@ -356,6 +421,7 @@ pub fn created(cpu: &mut Cpu, dd: u32) {
 pub fn release(cpu: &mut Cpu, gone: u32) {
     voodoo::release(cpu, gone);
     toadforce::release(cpu, gone);
+    software::release(cpu, gone);
 }
 
 /// A process ended: the HALs give back the video memory they kept for

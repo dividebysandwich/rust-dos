@@ -161,6 +161,11 @@ impl Host for HostLink {
         }
     }
 
+    fn transforms(&self, state: &rust_dos::toadforce::raster::pipeline::DrawState) -> bool {
+        let host = self.0.borrow();
+        host.as_ref().is_some_and(|host| host.transforms(state))
+    }
+
     fn draw(&mut self, batch: &gpu::Batch, memory: &[u8], pages: &gpu::Pages) -> Vec<Surface> {
         match &mut *self.0.borrow_mut() {
             Some(host) => host.draw(batch, memory, pages),

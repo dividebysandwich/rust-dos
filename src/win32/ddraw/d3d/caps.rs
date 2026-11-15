@@ -5,9 +5,12 @@
 //! the stage operations and the filters. The rest is done by Direct3D
 //! on the processor (the "HEL" description: transform, lighting and
 //! clipping).
+//!
+//! A software device (`hal::software`) has an empty HAL description,
+//! and its HEL description says what it draws, the same way.
 
-use super::hal::{self, Description, Offer};
-use super::{IID_HAL, IID_TNLHAL, write_dwords, write_f32};
+use super::hal::{self, Description, Kind, Offer};
+use super::{IID_HAL, IID_RGB, IID_TNLHAL, write_dwords, write_f32};
 use crate::cpu::Cpu;
 
 /// The sizes of D3DDEVICEDESC: Direct3D 3's, 5's and 6's.
@@ -18,6 +21,13 @@ pub const DESC7: u32 = 236;
 
 pub const DESCRIPTION: &[u8] = b"Microsoft Direct3D Hardware acceleration through Direct3D HAL\0";
 pub const NAME: &[u8] = b"Direct3D HAL\0";
+
+/// The same of the software devices: the Ramp device, which Direct3D
+/// 5 and earlier list, and the RGB one.
+pub const RAMP_DESCRIPTION: &[u8] = b"Microsoft Direct3D Mono(Ramp) Software Emulation\0";
+pub const RAMP_NAME: &[u8] = b"Ramp Emulation\0";
+pub const RGB_DESCRIPTION: &[u8] = b"Microsoft Direct3D RGB Software Emulation\0";
+pub const RGB_NAME: &[u8] = b"RGB Emulation\0";
 
 /// The same of the T&L HAL device, which a card that transforms and
 /// lights vertices has too (Direct3D 7).
@@ -48,6 +58,17 @@ const D3DCOLOR_RGB: u32 = 2;
 /// with TL vertices, rendering after a flip, DrawPrimitives2, and a
 /// hardware rasterizer.
 const DEVCAPS: u32 = 0x1 | 0x10 | 0x40 | 0x100 | 0x200 | 0x400 | 0x800 | 0x2000 | 0x8_0000;
+
+/// A software device's: the same without textures in video memory and
+/// the hardware rasterizer.
+const SOFTWARE_DEVCAPS: u32 = 0x1 | 0x10 | 0x40 | 0x100 | 0x400 | 0x800 | 0x2000;
+
+fn devcaps(kind: Kind) -> u32 {
+    match kind {
+        Kind::Software => SOFTWARE_DEVCAPS,
+        _ => DEVCAPS,
+    }
+}
 
 /// D3DPRIMCAPS's words after its size, for lines and triangles.
 fn prim_caps(d: &Description) -> [u32; 13] {
@@ -109,6 +130,23 @@ fn stages(d: &Description, offer: Offer) -> u32 {
 /// `at` (the caller has probed them): the hardware's, as `offer`'s card
 /// has it, or with none what Direct3D does in software for it.
 pub fn write_desc(cpu: &mut Cpu, at: u32, size: u32, offer: Option<Offer>) {
+    write_desc_of(cpu, at, size, offer, D3DCOLOR_RGB);
+}
+
+/// Write the HEL description of a software device of the color model
+/// `model` (`software::MODEL_`): what it draws.
+pub fn write_software_desc(cpu: &mut Cpu, at: u32, size: u32, model: u32) {
+    write_desc_of(cpu, at, size, Some(hal::software()), model);
+}
+
+/// Write an empty description, its size alone: a software device's HAL
+/// description.
+pub fn write_empty_desc(cpu: &mut Cpu, at: u32, size: u32) {
+    cpu.bus.guest_fill(at, size as usize, 0);
+    cpu.bus.guest_write_32(at, size);
+}
+
+fn write_desc_of(cpu: &mut Cpu, at: u32, size: u32, offer: Option<Offer>, model: u32) {
     cpu.bus.guest_fill(at, size as usize, 0);
     let mut words = vec![0u32; 252 / 4];
     words[0] = size;
@@ -125,8 +163,8 @@ pub fn write_desc(cpu: &mut Cpu, at: u32, size: u32, offer: Option<Offer>) {
             | D3DDD_DEVICEZBUFFERBITDEPTH
             | D3DDD_MAXBUFFERSIZE
             | D3DDD_MAXVERTEXCOUNT;
-        words[2] = D3DCOLOR_RGB;
-        words[3] = DEVCAPS;
+        words[2] = model;
+        words[3] = devcaps(offer.kind);
         words[4] = 8;
         words[7] = 16;
         for base in [0x2C / 4, 0x64 / 4] {
@@ -180,7 +218,7 @@ pub fn write_desc(cpu: &mut Cpu, at: u32, size: u32, offer: Option<Offer>) {
 pub fn write_desc7(cpu: &mut Cpu, at: u32, offer: Offer, tnl: bool) {
     let d = hal::description(offer.kind);
     let mut words = vec![0u32; DESC7 as usize / 4];
-    words[0] = DEVCAPS | if tnl { DEVCAPS_TNL } else { 0 };
+    words[0] = devcaps(offer.kind) | if tnl { DEVCAPS_TNL } else { 0 };
     for base in [1, 0x3C / 4] {
         words[base] = 56;
         words[base + 1..base + 14].copy_from_slice(&prim_caps(&d));
@@ -207,7 +245,11 @@ pub fn write_desc7(cpu: &mut Cpu, at: u32, offer: Offer, tnl: bool) {
     words[0xBC / 4] = lights.unwrap_or(0xFFFF_FFFF);
     write_dwords(cpu, at, &words);
     write_f32(cpu, at + 0xC0, 65536.0);
-    let guid = if tnl { IID_TNLHAL } else { IID_HAL };
+    let guid = match (offer.kind, tnl) {
+        (Kind::Software, _) => IID_RGB,
+        (_, true) => IID_TNLHAL,
+        _ => IID_HAL,
+    };
     guid.write(cpu, at + 0xC4);
     // wMaxUserClipPlanes and wMaxVertexBlendMatrices: six clip planes
     // of the user's, and the world matrices a card that transforms

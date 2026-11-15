@@ -1061,7 +1061,8 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
             }
             match &lighting {
                 Some(l) => {
-                    let (d, s) = l.light(eye, n, v.diffuse.map(rgba), v.specular.map(rgba));
+                    let (d, s) =
+                        l.light(eye, n, v.diffuse.map(rgba), v.specular.map(rgba), false);
                     out.diffuse = d;
                     out.specular = s;
                 }
@@ -2711,7 +2712,7 @@ mod tests {
             true,
             [card_light::Source::Material; 4],
         );
-        let (diffuse, specular) = card.light([0.3, -0.2, 1.5], [0.2, -0.3, -0.9], None, None);
+        let (diffuse, specular) = card.light([0.3, -0.2, 1.5], [0.2, -0.3, -0.9], None, None, false);
         assert_eq!(out[0].diffuse, diffuse);
         assert_eq!(out[0].specular[..3], specular[..3]);
         // Both lights reach it, and the highlight is there.
