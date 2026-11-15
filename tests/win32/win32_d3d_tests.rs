@@ -3758,6 +3758,58 @@ fn the_3d_trace_has_what_an_enumeration_offered_and_what_the_callback_said() {
     assert_eq!(counts[textures[0].as_str()], 1);
 }
 
+const DEV2_ENUM_TEXTURE_FORMATS: u32 = 9;
+/// What the program's texture format callback saw: every format's
+/// DDPIXELFORMAT flags ORed together, and how many formats there were.
+const SEEN_FLAGS: u32 = 0x34;
+const SEEN_COUNT: u32 = 0x38;
+
+#[test]
+fn direct3d_5s_enum_texture_formats_lists_only_rgb_and_palettized_formats() {
+    // A ToadForce has FOURCC, alpha, luminance and bump formats too,
+    // which IDirect3DDevice3's list hands out as DDPIXELFORMAT.
+    // Warhammer: Dark Omen takes each format IDirect3DDevice2 gives it
+    // that isn't palettized as RGB, and spins on a zero channel mask.
+    let mut d = data();
+    target_desc(&mut d, DESC, 108, 64, 64);
+    let (exe, data) = program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        // The callback (surface description, context), its address
+        // pushed by the CALL over it.
+        let mut after = a.create_label();
+        a.call(after)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(eax, dword_ptr(eax + 0x4C))?;
+        a.or(dword_ptr(l.at(SEEN_FLAGS)), eax)?;
+        a.inc(dword_ptr(l.at(SEEN_COUNT)))?;
+        a.mov(eax, 1)?;
+        a.ret_1(8)?;
+        a.set_label(&mut after)?;
+        a.pop(dword_ptr(l.at(ENUM_OK)))?;
+        start(a, l, &mut c, false, false)?;
+        let args = [Arg::At(IID_D3D2), Arg::At(D3D)];
+        c.com(a, l, DD, QUERY_INTERFACE, &args)?;
+        let args = [Arg::At(DESC), Arg::At(TARGET), Arg::I(0)];
+        c.com(a, l, DD, DD_CREATE_SURFACE, &args)?;
+        let args = [Arg::At(IID_HAL), Arg::Val(TARGET), Arg::At(DEVICE)];
+        c.com(a, l, D3D, D3D2_CREATE_DEVICE, &args)?;
+        let args = [Arg::Val(ENUM_OK), Arg::I(0)];
+        c.com(a, l, DEVICE, DEV2_ENUM_TEXTURE_FORMATS, &args)?;
+        a.mov(dword_ptr(l.at(CALLS)), c.next)?;
+        finish(a, l)
+    });
+    let mut cpu = machine_toadforce("enum_texture_formats_v2", exe);
+    run_until_done(&mut cpu, data);
+    let n = peek(&cpu, data + CALLS);
+    let r = results(&cpu, data, n);
+    assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+    // DDPF_ALPHA, DDPF_FOURCC, DDPF_LUMINANCE and DDPF_BUMPDUDV.
+    let flags = peek(&cpu, data + SEEN_FLAGS);
+    assert_eq!(flags & (0x2 | 0x4 | 0x2_0000 | 0x8_0000), 0, "{flags:X}");
+    // Six RGB formats and P8.
+    assert_eq!(peek(&cpu, data + SEEN_COUNT), 7);
+}
+
 // The same scenes on a ToadForce, whose HAL sends them to the card as
 // level 1 commands. The card's pixels are defined
 // (`docs/toadforce-spec.md`), so these are exact.
