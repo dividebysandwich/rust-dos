@@ -534,7 +534,15 @@ fn gr_sst_win_open(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let Some((w, h)) = resolution_size(a[1]) else {
         return Some(0);
     };
-    if !api::open(cpu, w, h, api::refresh_hz(a[2]), a[3], a[4], a[5], a[6]) {
+    let mut refresh = api::refresh_hz(a[2]);
+    // On a Banshee or Voodoo3, Glide 3 takes the rate in Hz from
+    // FX_GLIDE_REFRESH instead (hwcInitVideo in 3dfx's minihwc).
+    if hw::banshee(cpu)
+        && let Some(hz) = hw::env_number(cpu, "FX_GLIDE_REFRESH")
+    {
+        refresh = Some(hz);
+    }
+    if !api::open(cpu, w, h, refresh, a[3], a[4], a[5], a[6]) {
         return Some(0);
     }
     let (w, h) = api::screen_size(cpu);

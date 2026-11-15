@@ -2751,11 +2751,21 @@ SubCulture on Windows 95 and Expendable on Windows 98 SE.
 
 The card swaps its buffers at the vertical retrace a game asks it to wait
 for, and reports the swaps still waiting and its busy state as the real
-one does, so games that pace themselves by it run at its 60 Hz. The
-triangles are drawn on up to four threads of their own: rust-dos keeps
-running the game meanwhile, and the picture is the same however many
-there are. Save states and rewind keep the card with everything in its
-memory.
+one does, so games that pace themselves by it run at its refresh rate.
+The rate comes from the video timing Glide programs: the frame in the
+card's video registers at the pixel clock of its DAC's PLL, which Glide
+sets for the rate a game asks for (at 640x480, 60, 75, 85 or 120 Hz).
+Until a program sets that clock, the card runs its frame at 60 Hz. The
+built-in Windows' Glide does the same, and on a Voodoo3 sets the mode at
+the rate asked for. A rate the size doesn't have opens at 60 Hz on a
+Voodoo Graphics or Voodoo2 and fails on a Voodoo3, as 3dfx's libraries
+do. The environment overrides the game's rate as they read it:
+`SST_SCREENREFRESH` on a Voodoo Graphics, `SSTV2_SCREENREFRESH` and
+`SSTV2_REFRESH_640x480` (by size) on a Voodoo2, and `FX_GLIDE_REFRESH`
+for Glide 3 on a Voodoo3. The triangles are drawn on up to four threads
+of their own: rust-dos keeps running the game meanwhile, and the picture
+is the same however many there are. Save states and rewind keep the card
+with everything in its memory.
 
 ### 3dfx Voodoo2
 

@@ -4,12 +4,15 @@
 //! Voodoo2 and a Voodoo3; one without a 3dfx card; and one that ends
 //! without closing Glide. Glide 3 (GLIDE3X.DLL) draws a program's own
 //! vertices, in arrays, strips and fans, and in clip coordinates. The
+//! refresh rate a program asks grSstWinOpen for becomes the card's. The
 //! programs are PE files made with rust-dos-pe's builder, their code
 //! assembled with iced, as in win32_ddraw_tests.rs.
 
 use iced_x86::code_asm::*;
 use rust_dos::cpu::{Cpu, HostConsole};
 use rust_dos::exec::{NoHook, StopReason, run_batch};
+use rust_dos::video::adapter::{Adapter, VideoSetup};
+use rust_dos::video::bios;
 use rust_dos::voodoo::Board;
 use rust_dos_pe::{self as pe, Builder, Imp};
 use std::fs;
@@ -99,12 +102,33 @@ fn machine(test: &str, board: Option<Board>, program: Vec<u8>) -> Cpu {
     fs::create_dir_all(&base).unwrap();
     fs::write(base.join("T.EXE"), program).unwrap();
     let mut cpu = Cpu::new(base);
-    cpu.bus.configure_voodoo(board);
+    install_card(&mut cpu, board);
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
     assert!(cpu.load_executable("T.EXE", None));
     cpu
+}
+
+/// Put the 3dfx card `board` in `cpu`. A Banshee or Voodoo3 is also the
+/// VGA, as on an `svga_voodoo3` machine, so its own clock times the
+/// screen.
+fn install_card(cpu: &mut Cpu, board: Option<Board>) {
+    let adapter = match board {
+        Some(Board::Voodoo3) => Some(Adapter::Voodoo3),
+        Some(Board::Banshee) => Some(Adapter::Banshee),
+        _ => None,
+    };
+    if let Some(adapter) = adapter {
+        bios::install(
+            &mut cpu.bus,
+            VideoSetup {
+                adapter,
+                ..Default::default()
+            },
+        );
+    }
+    cpu.bus.configure_voodoo(board);
 }
 
 fn printed(cpu: &Cpu) -> String {
@@ -190,8 +214,11 @@ const GLIDE: &[&str] = &[
 ];
 
 /// The functions' values the programs use.
+const GR_RESOLUTION_320X240: u32 = 1;
 const GR_RESOLUTION_512X384: u32 = 3;
 const GR_RESOLUTION_640X480: u32 = 7;
+const GR_RESOLUTION_800X600: u32 = 8;
+const GR_RESOLUTION_1024X768: u32 = 12;
 const GR_REFRESH_60HZ: u32 = 0;
 const GR_COLORFORMAT_ARGB: u32 = 0;
 const GR_ORIGIN_UPPER_LEFT: u32 = 0;
@@ -1575,4 +1602,182 @@ fn without_a_3dfx_card_there_is_no_glide3() {
     run_to_exit(&mut cpu);
     assert_eq!(cpu.errorlevel, 1);
     assert!(printed(&cpu).contains("GLIDE3X.DLL"), "{}", printed(&cpu));
+}
+
+/// GrScreenRefresh_t of each rate, in Hz.
+const REFRESH: [(u32, u32); 9] = [
+    (60, 0),
+    (70, 1),
+    (72, 2),
+    (75, 3),
+    (80, 4),
+    (90, 5),
+    (100, 6),
+    (85, 7),
+    (120, 8),
+];
+
+/// GrScreenRefresh_t of `hz`.
+fn refresh_of(hz: u32) -> u32 {
+    REFRESH.iter().find(|r| r.0 == hz).unwrap().1
+}
+
+/// A program that opens the card at `resolution` and `refresh` (a
+/// GrScreenRefresh_t), grSstWinOpen's result its result 2, and stays.
+fn refresh_program(resolution: u32, refresh: u32) -> (Vec<u8>, u32) {
+    let d = vec![0u8; DATA_SIZE];
+    program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        c.call(a, l, "_grGlideInit@0", &[])?;
+        c.call(a, l, "_grSstQueryHardware@4", &[Arg::At(HWCONFIG)])?;
+        c.call(
+            a,
+            l,
+            "_grSstWinOpen@28",
+            &[
+                Arg::I(0),
+                Arg::I(resolution),
+                Arg::I(refresh),
+                Arg::I(GR_COLORFORMAT_ARGB),
+                Arg::I(GR_ORIGIN_UPPER_LEFT),
+                Arg::I(2),
+                Arg::I(1),
+            ],
+        )?;
+        stay(a, l)
+    })
+}
+
+/// Open `board` at `resolution` and `refresh` with the variables `env`
+/// set: whether grSstWinOpen succeeded, and the card's refresh rate then.
+fn open_at(
+    test: &str,
+    board: Board,
+    resolution: u32,
+    refresh: u32,
+    env: &[(&str, &str)],
+) -> (bool, f64) {
+    let (program, data) = refresh_program(resolution, refresh);
+    let base = PathBuf::from("target/test_win32_glide").join(test);
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    fs::write(base.join("T.EXE"), program).unwrap();
+    let mut cpu = Cpu::new(base);
+    install_card(&mut cpu, Some(board));
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    for (name, value) in env {
+        assert!(cpu.set_env(name, value));
+    }
+    assert!(cpu.load_executable("T.EXE", None));
+    run_until_done(&mut cpu, data);
+    let opened = result(&cpu, data, 2) != 0;
+    (opened, cpu.bus.voodoo.as_ref().unwrap().timing().hz())
+}
+
+/// Whether `hz` is the rate `want` within one and a half percent. VESA's
+/// modes miss their names by up to that: its 640x480 at 72 Hz is 72.81 Hz.
+fn near(hz: f64, want: u32) -> bool {
+    (hz - want as f64).abs() < want as f64 * 0.015
+}
+
+#[test]
+fn gr_sst_win_open_runs_the_card_at_the_rate_asked_for() {
+    // The rates each card's Glide has at 640x480 besides 60 Hz: 3dfx's
+    // initialisation code for the Voodoo Graphics and Voodoo2, the mode
+    // table for the Voodoo3.
+    for (board, rates) in [
+        (Board::Standard, &[75, 85, 120][..]),
+        (Board::Voodoo2, &[75, 85, 120][..]),
+        (Board::Voodoo3, &[72, 75, 85, 100, 120][..]),
+    ] {
+        for &hz in rates {
+            let test = format!("refresh_{board:?}_{hz}");
+            let (opened, got) = open_at(&test, board, GR_RESOLUTION_640X480, refresh_of(hz), &[]);
+            assert!(opened, "{board:?} at {hz} Hz");
+            assert!(near(got, hz), "{board:?} at {hz} Hz runs at {got}");
+        }
+    }
+    // Other sizes: a Voodoo2's 800x600 at 120 Hz, a Voodoo3's 1024x768 at
+    // 100 Hz, and its 320x240, shown as 640x480, at 85.
+    for (board, resolution, hz) in [
+        (Board::Voodoo2, GR_RESOLUTION_800X600, 120),
+        (Board::Voodoo3, GR_RESOLUTION_1024X768, 100),
+        (Board::Voodoo3, GR_RESOLUTION_320X240, 85),
+    ] {
+        let test = format!("refresh_{board:?}_{resolution}_{hz}");
+        let (opened, got) = open_at(&test, board, resolution, refresh_of(hz), &[]);
+        assert!(opened && near(got, hz), "{board:?} {resolution} at {hz} Hz: {got}");
+    }
+}
+
+#[test]
+fn a_rate_the_size_lacks_fails_on_a_voodoo3_and_is_60_hz_on_a_voodoo2() {
+    // A Voodoo3's mode table has no 640x480 at 80 or 90 Hz: its
+    // grSstWinOpen fails. A Voodoo Graphics' and Voodoo2's library opens
+    // the size's own mode instead.
+    for hz in [70, 80, 90] {
+        let test = format!("refresh_v3_lacks_{hz}");
+        let refresh = refresh_of(hz);
+        let (opened, _) = open_at(&test, Board::Voodoo3, GR_RESOLUTION_640X480, refresh, &[]);
+        assert!(!opened, "a Voodoo3 has no 640x480 at {hz} Hz");
+        let test = format!("refresh_v2_lacks_{hz}");
+        let (opened, got) = open_at(&test, Board::Voodoo2, GR_RESOLUTION_640X480, refresh, &[]);
+        assert!(opened && near(got, 60), "a Voodoo2 asked for {hz} Hz: {got}");
+    }
+    // A value that is no rate: a Voodoo Graphics' library refuses it, the
+    // others open at 60 Hz.
+    let none = 0xFF;
+    let (opened, _) = open_at("refresh_none_v1", Board::Standard, GR_RESOLUTION_640X480, none, &[]);
+    assert!(!opened);
+    for board in [Board::Voodoo2, Board::Voodoo3] {
+        let test = format!("refresh_none_{board:?}");
+        let (opened, got) = open_at(&test, board, GR_RESOLUTION_640X480, none, &[]);
+        assert!(opened && near(got, 60), "{board:?}: {got}");
+    }
+}
+
+#[test]
+fn sixty_hz_opens_the_card_as_it_always_did() {
+    // Most games ask for 60 Hz. A Voodoo Graphics or Voodoo2 runs the
+    // frame Glide sets (504 lines at 640x480) at exactly 60 Hz with the
+    // DAC's clock left to its select pins; a Voodoo3 runs VESA's 640x480
+    // at 59.94 Hz.
+    for board in [Board::Standard, Board::Voodoo2] {
+        let test = format!("refresh_60_{board:?}");
+        let (program, data) = refresh_program(GR_RESOLUTION_640X480, GR_REFRESH_60HZ);
+        let mut cpu = machine(&test, Some(board), program);
+        run_until_done(&mut cpu, data);
+        let t = cpu.bus.voodoo.as_ref().unwrap().timing();
+        assert_eq!((t.total, t.line_ns), (504, 1_000_000_000 / 60 / 504), "{board:?}");
+    }
+    let (opened, got) = open_at(
+        "refresh_60_v3",
+        Board::Voodoo3,
+        GR_RESOLUTION_640X480,
+        GR_REFRESH_60HZ,
+        &[],
+    );
+    assert!(opened && (got - 59.94).abs() < 0.02, "{got}");
+}
+
+#[test]
+fn the_environment_overrides_the_rate_as_3dfxs_libraries_read_it() {
+    let at = |test: &str, board, refresh, env: &[(&str, &str)]| {
+        let (opened, got) = open_at(test, board, GR_RESOLUTION_640X480, refresh, env);
+        assert!(opened, "{test}");
+        got
+    };
+    let r60 = GR_REFRESH_60HZ;
+    let r85 = refresh_of(85);
+    assert!(near(at("env_v1", Board::Standard, r60, &[("SST_SCREENREFRESH", "75")]), 75));
+    assert!(near(at("env_v2", Board::Voodoo2, r60, &[("SSTV2_SCREENREFRESH", "120")]), 120));
+    // A number other than the library's rates is 60 Hz; the size's own
+    // variable comes last.
+    assert!(near(at("env_v2_72", Board::Voodoo2, r85, &[("SSTV2_SCREENREFRESH", "72")]), 60));
+    let both = [("SSTV2_SCREENREFRESH", "120"), ("SSTV2_REFRESH_640x480", "85")];
+    assert!(near(at("env_v2_size", Board::Voodoo2, r60, &both), 85));
+    // Glide 2 on a Voodoo3 doesn't read the Voodoo2's variables.
+    assert!(near(at("env_v3", Board::Voodoo3, r60, &[("SSTV2_SCREENREFRESH", "85")]), 60));
 }

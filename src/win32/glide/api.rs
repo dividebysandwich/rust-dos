@@ -637,14 +637,17 @@ pub fn resolution_size(resolution: u32) -> Option<(u32, u32)> {
     SIZES.get(resolution as usize).copied()
 }
 
-/// The rate of each of grSstWinOpen's refresh rates, in Hz.
-pub fn refresh_hz(refresh: u32) -> u32 {
+/// The rate of each of grSstWinOpen's refresh rates (GrScreenRefresh_t),
+/// in Hz; None for a value that is none of them, such as
+/// GR_REFRESH_NONE.
+pub fn refresh_hz(refresh: u32) -> Option<u32> {
     const RATES: [u32; 9] = [60, 70, 72, 75, 80, 90, 100, 85, 120];
-    RATES.get(refresh as usize).copied().unwrap_or(60)
+    RATES.get(refresh as usize).copied()
 }
 
 /// Open the card's display for the running process (grSstWinOpen):
-/// `width` x `height` at `refresh` Hz, colours passed in
+/// `width` x `height` at the rate `refresh` asks for, in Hz (None for no
+/// GrScreenRefresh_t; `hw::open_rate`), colours passed in
 /// `color_format`, Y from `origin`, with `colors` colour buffers and
 /// `auxes` auxiliary (depth or alpha) buffers. False if another process
 /// has the card, or the board can't.
@@ -653,7 +656,7 @@ pub fn open(
     cpu: &mut Cpu,
     width: u32,
     height: u32,
-    refresh: u32,
+    refresh: Option<u32>,
     color_format: u32,
     origin: u32,
     colors: u32,

@@ -207,7 +207,7 @@ impl Voodoo {
                 if fbi {
                     let reg = ((data >> 8) & 7) as usize;
                     if data & 0x800 == 0 {
-                        self.dac[reg] = data as u8;
+                        self.dac_write(reg, data as u8, now);
                     } else {
                         self.dac_read = self.dac_register(reg);
                     }
@@ -227,7 +227,7 @@ impl Voodoo {
                         if regnum == VIDEO_DIMENSIONS {
                             self.recompute_video_memory();
                         }
-                        self.update_timing();
+                        self.retime(now);
                     }
                 }
             }
@@ -562,5 +562,40 @@ mod tests {
         let row = 256;
         let texels = [0, 1, 2, 3].map(|at| ram.byte(row + at));
         assert_eq!(texels, [0x55, 0x66, 0x77, 0x88]);
+    }
+
+    #[test]
+    fn the_dacs_video_clock_sets_the_refresh_rate() {
+        // 3dfx's Voodoo2 library at 640x480 and 75 Hz: VESA's frame of
+        // 840x500, its DAC in 24-bit output (two clocks a pixel) and
+        // clock 0 at 63 MHz, M, N and P from sst1InitComputeClkParams.
+        let mut v = Voodoo::with_workers(Board::Voodoo2, 0);
+        reg(&mut v, H_SYNC, 775 << 16 | 63);
+        reg(&mut v, V_SYNC, 497 << 16 | 3);
+        reg(&mut v, VIDEO_DIMENSIONS, 479 << 16 | 639);
+        // Without a clock from the PLL: the 60 Hz frame.
+        assert_eq!(v.refresh_hz().round(), 60.0);
+        let dac = |v: &mut Voodoo, r: u32, value: u32| reg(v, DAC_DATA, r << 8 | value);
+        dac(&mut v, 6, 0x70);
+        dac(&mut v, 4, 0);
+        dac(&mut v, 5, 42);
+        dac(&mut v, 5, 1 << 5 | 3);
+        // Clock 0 from the pins still.
+        assert_eq!(v.refresh_hz().round(), 60.0);
+        dac(&mut v, 4, 0x0E);
+        dac(&mut v, 5, 0x20);
+        // 14.318 MHz x 44 / (5 x 2) = 63 MHz, 31.5 MHz a pixel.
+        assert!((v.refresh_hz() - 75.0).abs() < 0.01, "{}", v.refresh_hz());
+        // A state saved at 75 Hz loads at 75 Hz.
+        use crate::savestate::{Reader, State, Writer};
+        let mut w = Writer::new();
+        v.save(&mut w);
+        let mut loaded = Voodoo::with_workers(Board::Voodoo2, 0);
+        loaded.load(&mut Reader::new(&w.buf)).unwrap();
+        assert!((loaded.refresh_hz() - 75.0).abs() < 0.01, "{}", loaded.refresh_hz());
+        // Back to the pins: 60 Hz again.
+        dac(&mut v, 4, 0x0E);
+        dac(&mut v, 5, 0);
+        assert_eq!(v.refresh_hz().round(), 60.0);
     }
 }
