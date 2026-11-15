@@ -971,7 +971,8 @@ fn present_buffer(
     let back_dd = dd_surface_of(cpu, back);
     if p[PP_WINDOWED] == 0 {
         // Full screen: the flip chain goes round, at the next frame but
-        // for D3DPRESENT_INTERVAL_IMMEDIATE.
+        // for D3DPRESENT_INTERVAL_IMMEDIATE. Flip waits for the frame
+        // rate cap's turn whatever the flags (`surface::frame_held`).
         let flags = if p[PP_INTERVAL] == PRESENT_INTERVAL_IMMEDIATE {
             8
         } else {
@@ -992,6 +993,13 @@ fn present_buffer(
         }
         return Some(D3D_OK);
     }
+    // A window shows the frame at once, when the frame rate cap lets it.
+    let now = cpu.bus.clock.now_ns();
+    let at = match crate::win32::pace::turn(cpu, now, None, D3D_OK) {
+        Ok(at) => at,
+        Err(wait) => return wait,
+    };
+    crate::win32::pace::shown(cpu, at);
     shadow::expose(cpu, back_dd);
     let window = if override_window != 0 {
         override_window
