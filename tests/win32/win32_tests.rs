@@ -593,6 +593,108 @@ fn are_file_apis_ansi_follows_set_file_apis_to_oem_and_ansi() {
     assert_eq!(code, 7);
 }
 
+/// Run Test Drive 4's last intro shot in a program made of the
+/// `td4-intro-camera` fix's pieces, at their RVAs in a file of the size
+/// the fix wants, with `game_fixes` at `fixes`. The program runs the 40
+/// ticks of the shot through the tick's code for view 11, then 69 frames
+/// (60 a second) through the frame's, and ends with the camera's
+/// distance / 4096.
+fn td4_intro_camera(fixes: bool) -> u8 {
+    use rust_dos::game_fixes::{Kind, by_name};
+    let Kind::Win32 {
+        program,
+        size,
+        code,
+    } = by_name("td4-intro-camera").unwrap().kind
+    else {
+        panic!("td4-intro-camera patches a Win32 program");
+    };
+    const DISTANCE: u64 = 0x46_ADCC;
+    const TEXT: usize = 0x1000;
+    let mut a = CodeAssembler::new(32).unwrap();
+    let mut tick = a.create_label();
+    let mut ticks = a.create_label();
+    let mut frames = a.create_label();
+    a.mov(dword_ptr(DISTANCE), 972_800).unwrap();
+    a.mov(esi, 40).unwrap();
+    a.set_label(&mut ticks).unwrap();
+    a.push(0).unwrap();
+    a.call(tick).unwrap();
+    a.add(esp, 4).unwrap();
+    a.dec(esi).unwrap();
+    a.jnz(ticks).unwrap();
+    a.mov(esi, 69).unwrap();
+    a.set_label(&mut frames).unwrap();
+    a.call(0x40_852C).unwrap();
+    a.dec(esi).unwrap();
+    a.jnz(frames).unwrap();
+    a.mov(eax, dword_ptr(DISTANCE)).unwrap();
+    a.sar(eax, 12).unwrap();
+    a.ret().unwrap();
+    // The tick's function up to its switch, at view 11.
+    a.set_label(&mut tick).unwrap();
+    a.push(ebx).unwrap();
+    a.push(esi).unwrap();
+    a.push(edi).unwrap();
+    a.push(ebp).unwrap();
+    a.mov(ebp, esp).unwrap();
+    a.jmp(0x40_8706).unwrap();
+    let entry = a.assemble((BASE as usize + TEXT) as u64).unwrap();
+
+    let mut text = vec![0u8; 0x7800];
+    text[..entry.len()].copy_from_slice(&entry);
+    let pieces = code
+        .checks
+        .iter()
+        .chain(code.patches.iter().map(|(old, _)| old));
+    for b in pieces {
+        text[b.at - TEXT..][..b.bytes.len()].copy_from_slice(b.bytes);
+    }
+    // What the game's code calls and jumps to: the camera's update, a
+    // ret here, the frame's code after the sub, and the functions' end.
+    text[0x7A0B - TEXT] = 0xC3;
+    text[0x8536 - TEXT] = 0xC3;
+    text[0x8714 - TEXT..][..7].copy_from_slice(&[0x89, 0xEC, 0x5D, 0x5F, 0x5E, 0x5B, 0xC3]);
+
+    let mut b = Builder::exe(BASE);
+    b.subsystem(pe::SUBSYSTEM_CONSOLE);
+    let code_rva = b.section(
+        ".text",
+        &text,
+        pe::SCN_CODE | pe::SCN_EXECUTE | pe::SCN_READ,
+    );
+    assert_eq!(code_rva as usize, TEXT);
+    let rva = b.next_rva();
+    b.section_sized(
+        ".bss",
+        &[],
+        0x6_B000 - rva,
+        pe::SCN_INITIALIZED_DATA | pe::SCN_READ | pe::SCN_WRITE,
+    );
+    b.entry(code_rva);
+    let mut file = b.build();
+    assert!(file.len() <= size);
+    file.resize(size, 0);
+
+    let test = format!("td4_intro_camera_{fixes}");
+    let mut cpu = Cpu::new(scratch(&test, &[(program, file)]));
+    cpu.bus.win32.enabled = true;
+    cpu.bus.game_fixes = fixes;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable(program, None));
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    cpu.errorlevel
+}
+
+#[test]
+fn test_drive_4_s_race_camera_ends_the_intro_where_the_race_view_is() {
+    // 972800 - 40 * 3700h is 409600, the race's chase view.
+    assert_eq!(td4_intro_camera(true), 100);
+    // As the game shipped it, 69 frames take the camera to 1280.
+    assert_eq!(td4_intro_camera(false), 0);
+}
+
 #[test]
 fn a_function_the_built_in_windows_lacks_ends_the_program() {
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetVersion", "VirtualAllocEx"])];

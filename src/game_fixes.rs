@@ -4,7 +4,7 @@
 //! changes for a program that isn't recognised, and `game_fixes = false`
 //! or `game_fixes_off = <names>` turns them off.
 //!
-//! There are three kinds:
+//! There are four kinds:
 //!
 //! - [`Kind::Code`]: code bytes in conventional memory, patched in place.
 //!   The check runs when a program starts a reset of the Sound Blaster's
@@ -23,6 +23,10 @@
 //!   loads them, from the shell or by EXEC, before any of them runs. It is
 //!   for what a program hands on before a sound driver could start, such
 //!   as the environment Lands of Lore 2's launchers give DOS/4GW.
+//! - [`Kind::Win32`]: a Win32 program by name and size whose file is
+//!   patched as the built-in Windows loads it, such as Test Drive 4's.
+//!   Windows booted from a disk image loads its programs itself, and
+//!   they run as they are.
 //!
 //! The Sound Blaster fixes are for the driver of two Titus games of 1993
 //! with the same sound engine: Prehistorik 2 and Blues Brothers: Jukebox
@@ -48,8 +52,9 @@
 //!   adds nothing to the centre.
 //!
 //! To add a fix: an entry in [`FIXES`] with a name of its own, a test that
-//! runs it (`tests/program/game_fixes_tests.rs`, or
-//! `tests/dos/exec_tests.rs` for a program skipped at EXEC), and a line in
+//! runs it (`tests/program/game_fixes_tests.rs`,
+//! `tests/dos/exec_tests.rs` for a program skipped at EXEC, or
+//! `tests/win32/win32_tests.rs` for a Win32 program), and a line in
 //! CONFIGURATION.md's list of game fixes.
 
 use memchr::memmem::Finder;
@@ -62,7 +67,8 @@ pub struct Bytes {
 }
 
 /// Code to recognise and patch, by offset in its code segment (or, for
-/// [`Kind::AtLoad`], in its program file).
+/// [`Kind::AtLoad`], in its program file, and for [`Kind::Win32`], in its
+/// image: an RVA).
 pub struct CodePatch {
     /// Code that has to be there, unchanged, besides the patches' own.
     pub checks: &'static [Bytes],
@@ -96,6 +102,15 @@ pub enum Kind {
     AtLoad {
         programs: &'static [(&'static str, &'static CodePatch)],
         beside: Option<&'static str>,
+    },
+    /// A Win32 program whose file is patched as the built-in Windows
+    /// loads it: its file name, the file's size, and its code, by RVA.
+    /// Only a file of that size where every piece is as the game shipped
+    /// it is patched.
+    Win32 {
+        program: &'static str,
+        size: usize,
+        code: &'static CodePatch,
     },
 }
 
@@ -412,6 +427,77 @@ const LOL2_SETUP_LAUNCHER: CodePatch = CodePatch {
     )],
 };
 
+/// Test Drive 4's race camera, in the game's Win32 program (3.EXE, which
+/// TD4_3DFX.EXE starts). Before a race the game shows four shots of the
+/// cars, 40 of its 35-a-second ticks each, with the camera views 8 to 11
+/// of its view table. The last shot, view 11, starts the camera 972800
+/// units from the car and moves it closer by 3700h (14080) in every
+/// frame drawn. The race then starts with the camera where the shot left
+/// it, and it stays there: the view isn't reloaded until F4 picks
+/// another. 40 steps end at 409600, the distance of the race's own chase
+/// view (view 2), so the shot was made for a frame a tick, 35 frames a
+/// second. At 30 frames a second the camera stops farther out, and at
+/// 60, where a Voodoo 2 synchronised to a 60 Hz display runs it on a
+/// fast PC, 68 steps or so take it to 15360: the race is seen from just
+/// above the car. A real PC that fast does the same.
+///
+/// The fix moves the step from the frame to the tick: the frame's code
+/// subtracts 0, and the tick's code for view 11, which only updates the
+/// camera, subtracts 3700h before it does. The camera then ends the shot
+/// at 409600 at any frame rate. Offsets are RVAs: the program loads at
+/// 400000h. For version 1.2, the one its patch TD42UP.EXE makes: 3.EXE
+/// of 451072 bytes, SHA-256
+/// cce7cb8904a9e9d9976504dbe7989629f766f08dd9f0b0ad24cbcb08c7062601.
+const TD4_INTRO_CAMERA: CodePatch = CodePatch {
+    checks: &[
+        // The frame's and the tick's jump tables, at view 11: the code
+        // the patches change.
+        Bytes {
+            at: 0x84BD,
+            bytes: &[0x2C, 0x85, 0x40, 0x00],
+        },
+        Bytes {
+            at: 0x86B5,
+            bytes: &[0x06, 0x87, 0x40, 0x00],
+        },
+        // The tick's camera update, which the patched tick jumps to:
+        // push 1 / push [ebp+14h] / call / add esp,8 / jmp to the end.
+        Bytes {
+            at: 0x8699,
+            bytes: &[
+                0x6A, 0x01, 0x8B, 0x45, 0x14, 0x50, 0xE8, 0x67, 0xF3, 0xFF, 0xFF, 0x83, 0xC4, 0x08,
+                0xEB, 0x6B,
+            ],
+        },
+    ],
+    irq_handler: None,
+    patches: &[
+        // The frame: sub dword [46ADCCh],3700h subtracts 0.
+        (
+            Bytes {
+                at: 0x852C,
+                bytes: &[0x81, 0x2D, 0xCC, 0xAD, 0x46, 0x00, 0x00, 0x37, 0x00, 0x00],
+            },
+            &[0x81, 0x2D, 0xCC, 0xAD, 0x46, 0x00, 0x00, 0x00, 0x00, 0x00],
+        ),
+        // The tick: its camera update (push 1 / push [ebp+14h] / call /
+        // add esp,8) becomes the frame's sub and a jmp to the same update
+        // at 8699h.
+        (
+            Bytes {
+                at: 0x8706,
+                bytes: &[
+                    0x6A, 0x01, 0x8B, 0x45, 0x14, 0x50, 0xE8, 0xFA, 0xF2, 0xFF, 0xFF, 0x83, 0xC4,
+                    0x08,
+                ],
+            },
+            &[
+                0x81, 0x2D, 0xCC, 0xAD, 0x46, 0x00, 0x00, 0x37, 0x00, 0x00, 0xEB, 0x87, 0x90, 0x90,
+            ],
+        ),
+    ],
+};
+
 /// The fixes rust-dos knows.
 pub const FIXES: &[Fix] = &[
     Fix {
@@ -478,6 +564,16 @@ pub const FIXES: &[Fix] = &[
             exit_code: 0,
         },
     },
+    Fix {
+        name: "td4-intro-camera",
+        game: "Test Drive 4",
+        reason: "its race camera is as close as the intro's frame rate took it",
+        kind: Kind::Win32 {
+            program: "3.EXE",
+            size: 451_072,
+            code: &TD4_INTRO_CAMERA,
+        },
+    },
 ];
 
 /// The fix called `name`.
@@ -518,7 +614,7 @@ pub fn find_code(
             .iter()
             .map(|fix| match fix.kind {
                 Kind::Code(code) => Some(Finder::new(code.patches[0].0.bytes)),
-                Kind::SkipAtExec { .. } | Kind::AtLoad { .. } => None,
+                Kind::SkipAtExec { .. } | Kind::AtLoad { .. } | Kind::Win32 { .. } => None,
             })
             .collect()
     });
@@ -610,6 +706,46 @@ pub fn patch_at_load(
     })
 }
 
+/// The fix for the Win32 program file `bytes` that the built-in Windows
+/// loads from `path`, and the file as the fix patches it: `enabled` says
+/// whether a fix applies. None when no fix is for the program, or its
+/// file isn't as the game shipped it.
+pub fn patch_win32(
+    path: &str,
+    bytes: &[u8],
+    enabled: impl Fn(&Fix) -> bool,
+) -> Option<(&'static Fix, Vec<u8>)> {
+    FIXES.iter().filter(|fix| enabled(fix)).find_map(|fix| {
+        let Kind::Win32 {
+            program,
+            size,
+            code,
+        } = fix.kind
+        else {
+            return None;
+        };
+        if bytes.len() != size || !is_program(path, program, None, &|_| false) {
+            return None;
+        }
+        let headers = rust_dos_pe::Headers::parse(bytes).ok()?;
+        // Where a piece is in the file, from its RVA.
+        let at = |b: &Bytes| {
+            let rva = u32::try_from(b.at).ok()?;
+            rust_dos_pe::file_offset(&headers, rva, b.bytes.len() as u32, bytes.len())
+        };
+        let has = |b: &Bytes| at(b).is_some_and(|i| bytes[i..i + b.bytes.len()] == *b.bytes);
+        if !code.checks.iter().all(has) || !code.patches.iter().all(|(old, _)| has(old)) {
+            return None;
+        }
+        let mut patched = bytes.to_vec();
+        for (old, new) in code.patches {
+            let i = at(old)?;
+            patched[i..i + new.len()].copy_from_slice(new);
+        }
+        Some((fix, patched))
+    })
+}
+
 /// Whether `path` names the file `program` and, with `beside`, a file of
 /// that name is in the same directory: `is_file` says whether a path
 /// names a file.
@@ -633,7 +769,7 @@ mod tests {
     fn codes() -> impl Iterator<Item = (&'static Fix, &'static CodePatch)> {
         FIXES.iter().filter_map(|fix| match fix.kind {
             Kind::Code(code) => Some((fix, code)),
-            Kind::SkipAtExec { .. } | Kind::AtLoad { .. } => None,
+            Kind::SkipAtExec { .. } | Kind::AtLoad { .. } | Kind::Win32 { .. } => None,
         })
     }
 
@@ -645,6 +781,7 @@ mod tests {
             Kind::AtLoad { programs, .. } => {
                 programs.iter().map(|&(_, code)| (fix, code)).collect()
             }
+            Kind::Win32 { code, .. } => vec![(fix, code)],
             Kind::SkipAtExec { .. } => vec![],
         })
     }
@@ -906,6 +1043,65 @@ mod tests {
                 "LOLG.EXE"
             };
             assert!(patch_at_load(other, &bytes, is_file, |_| true).is_none());
+        }
+    }
+
+    /// A Win32 program file of `size` bytes at 400000h with the code's
+    /// pieces in its one section, at 1000h.
+    fn win32_file(code: &CodePatch, size: usize) -> Vec<u8> {
+        let end = pieces(code).map(|b| b.at + b.bytes.len()).max().unwrap();
+        let section = placed(code, 0, end + 0x40).split_off(0x1000);
+        let mut b = rust_dos_pe::Builder::exe(0x40_0000);
+        assert_eq!(b.section(".text", &section, rust_dos_pe::SCN_CODE), 0x1000);
+        b.entry(0x1000);
+        let mut file = b.build();
+        assert!(file.len() <= size);
+        file.resize(size, 0);
+        file
+    }
+
+    #[test]
+    fn patches_a_win32_program_as_it_loads() {
+        let win32: Vec<_> = FIXES
+            .iter()
+            .filter_map(|fix| match fix.kind {
+                Kind::Win32 {
+                    program,
+                    size,
+                    code,
+                } => Some((fix, program, size, code)),
+                _ => None,
+            })
+            .collect();
+        assert!(!win32.is_empty());
+        for (fix, program, size, code) in win32 {
+            let bytes = win32_file(code, size);
+            let path = format!("C:\\GAME\\{}", program.to_ascii_lowercase());
+            let headers = rust_dos_pe::Headers::parse(&bytes).unwrap();
+            let offset = |rva: usize| rva - 0x1000 + headers.sections[0].raw_offset as usize;
+            let (found, patched) = patch_win32(&path, &bytes, |_| true).unwrap();
+            assert_eq!(found.name, fix.name);
+            assert_eq!(patched.len(), bytes.len());
+            for (old, new) in code.patches {
+                let at = offset(old.at);
+                assert_eq!(&patched[at..at + new.len()], *new, "{}", fix.name);
+            }
+            // Patched once.
+            assert!(patch_win32(&path, &patched, |_| true).is_none());
+            // Not with the fix off, under another name, or of another
+            // size.
+            let off = vec![fix.name.to_string()];
+            assert!(patch_win32(&path, &bytes, |f| enabled(f, true, &off)).is_none());
+            assert!(patch_win32("C:\\GAME\\OTHER.EXE", &bytes, |_| true).is_none());
+            let mut longer = bytes.clone();
+            longer.push(0);
+            assert!(patch_win32(&path, &longer, |_| true).is_none());
+            // Not when any piece differs.
+            for b in pieces(code) {
+                let mut changed = bytes.clone();
+                changed[offset(b.at)] ^= 1;
+                assert!(patch_win32(&path, &changed, |_| true).is_none());
+            }
         }
     }
 }
