@@ -137,7 +137,13 @@ pub fn enum_devices7(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// EnumTextureFormats(this, callback, context) of a device: the texture
 /// formats, as DDSURFACEDESC for IDirect3DDevice and 2, as
-/// DDPIXELFORMAT from 3 on.
+/// DDPIXELFORMAT from 3 on. IDirect3DDevice and 2 list only the RGB
+/// and palettized formats, following what Direct3D 5's devices
+/// enumerate as Wine's `d3d_device2_EnumTextureFormats` has it: no
+/// FOURCC, alpha-only, luminance or bump formats (Wine's list for
+/// IDirect3DDevice3 and 7 adds DXT1 to DXT5 and the bump formats).
+/// Warhammer: Dark Omen takes every format it is given that isn't
+/// palettized as RGB and loops forever over DXT1's empty red mask.
 pub fn enum_texture_formats(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, callback, context] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
@@ -246,10 +252,14 @@ fn items(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         }
         kind => {
             let description = hal::description(hal::Kind::from_code(t.var(CARD)));
-            let list = if kind == Z_FORMATS {
-                description.z_formats
-            } else {
-                description.textures
+            let list = match kind {
+                Z_FORMATS => description.z_formats,
+                TEXTURES_DESC => description
+                    .textures
+                    .into_iter()
+                    .filter(|f| f.flags & surface::DDPF_RGB != 0)
+                    .collect(),
+                _ => description.textures,
             };
             let Some(f) = list.get(next) else {
                 return Next::Done(D3D_OK);
