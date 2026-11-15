@@ -3,6 +3,7 @@
 
 pub(super) mod atom;
 pub(super) mod change;
+pub(crate) mod comm;
 mod console;
 mod disk;
 mod env;
@@ -691,6 +692,20 @@ static APIS: &[Api] = &[
     stdcall("FindFirstChangeNotificationA", 282, 3, change::find_first),
     stdcall("FindNextChangeNotification", 288, 1, change::find_next),
     stdcall("FindCloseChangeNotification", 281, 1, change::find_close),
+    stdcall("SetupComm", 754, 3, comm::setup_comm),
+    stdcall("PurgeComm", 619, 2, comm::purge_comm),
+    stdcall("GetCommState", 327, 2, comm::get_comm_state),
+    stdcall("SetCommState", 688, 2, comm::set_comm_state),
+    stdcall("ClearCommError", 159, 3, comm::clear_comm_error),
+    stdcall("SetCommMask", 687, 2, comm::set_comm_mask),
+    stdcall("GetCommMask", 324, 2, comm::get_comm_mask),
+    stdcall("GetCommModemStatus", 325, 2, comm::get_comm_modem_status),
+    stdcall("EscapeCommFunction", 247, 2, comm::escape_comm_function),
+    stdcall("SetCommBreak", 685, 1, comm::set_comm_break),
+    stdcall("ClearCommBreak", 158, 1, comm::clear_comm_break),
+    stdcall("TransmitCommChar", 778, 2, comm::transmit_comm_char),
+    stdcall("GetCommTimeouts", 328, 2, comm::get_comm_timeouts),
+    stdcall("SetCommTimeouts", 689, 2, comm::set_comm_timeouts),
 ];
 
 /// The places in `APIS` of the system's own stubs.

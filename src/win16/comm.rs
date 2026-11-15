@@ -16,6 +16,7 @@
 //! COMSTAT of 5 (a status byte, cbInQue, cbOutQue).
 
 use super::global;
+use crate::bus::Bus;
 use crate::cpu::Cpu;
 use std::collections::VecDeque;
 
@@ -314,39 +315,138 @@ fn apply_dcb(cpu: &mut Cpu, n: usize, dcb: &[u8], brk: bool) -> Result<(), i16> 
     if !(5..=8).contains(&size) {
         return Err(IE_BYTESIZE);
     }
+    let line = Line {
+        divisor,
+        size,
+        parity: dcb[DCB_PARITY],
+        stop: dcb[DCB_STOPBITS],
+    };
+    set_line(&mut cpu.bus, n, line, brk);
+    let flags = dcb_word(dcb, DCB_FLAGS);
+    let dtr = flags & F_DTR_DISABLE == 0;
+    let rts = flags & F_RTS_DISABLE == 0;
+    set_modem_lines(&mut cpu.bus, n, dtr, rts);
+    Ok(())
+}
+
+/// A port's line: the UART's divisor of 115200 bauds, the data bits (5
+/// to 8), the parity (0 none, 1 odd, 2 even, 3 mark, 4 space) and the
+/// stop bits (0 one, 1 one and a half, 2 two), as the DCBs of Windows 3.1
+/// and Win32 both have them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Line {
+    pub divisor: u16,
+    pub size: u8,
+    pub parity: u8,
+    pub stop: u8,
+}
+
+/// Set port `n`'s UART to the line `line`, in a break while `brk`. Win32's
+/// comm functions (win32/kernel32/comm.rs) set the UART up with this and
+/// the functions below too, as Windows 95's one port driver does for
+/// both.
+pub(crate) fn set_line(bus: &mut Bus, n: usize, line: Line, brk: bool) {
     // Parity: none, odd, even, mark, space (the stick parity bits).
-    let parity = match dcb[DCB_PARITY] {
+    let parity = match line.parity {
         1 => 0x08,
         2 => 0x18,
         3 => 0x28,
         4 => 0x38,
         _ => 0,
     };
-    let stop = if dcb[DCB_STOPBITS] != 0 { 0x04 } else { 0 };
-    let lcr = (size - 5) | stop | parity | if brk { LCR_BREAK } else { 0 };
-    let bus = &mut cpu.bus;
+    let stop = if line.stop != 0 { 0x04 } else { 0 };
+    let lcr = (line.size - 5) | stop | parity | if brk { LCR_BREAK } else { 0 };
     bus.serial_set(n, UART_LCR, LCR_DLAB);
-    bus.serial_set(n, 0, divisor as u8);
-    bus.serial_set(n, 1, (divisor >> 8) as u8);
+    bus.serial_set(n, 0, line.divisor as u8);
+    bus.serial_set(n, 1, (line.divisor >> 8) as u8);
     bus.serial_set(n, UART_LCR, lcr);
-    let flags = dcb_word(dcb, DCB_FLAGS);
+}
+
+/// Turn port `n`'s DTR and RTS on or off.
+pub(crate) fn set_modem_lines(bus: &mut Bus, n: usize, dtr: bool, rts: bool) {
     let mut mcr = bus.serial_get(n, UART_MCR).unwrap_or(0) & !(MCR_DTR | MCR_RTS);
-    if flags & F_DTR_DISABLE == 0 {
+    if dtr {
         mcr |= MCR_DTR;
     }
-    if flags & F_RTS_DISABLE == 0 {
+    if rts {
         mcr |= MCR_RTS;
     }
     bus.serial_set(n, UART_MCR, mcr);
-    Ok(())
+}
+
+/// Turn port `n`'s DTR (with `dtr`) or RTS on or off, and leave the
+/// other as it is.
+pub(crate) fn set_modem_line(bus: &mut Bus, n: usize, dtr: bool, on: bool) {
+    let bit = if dtr { MCR_DTR } else { MCR_RTS };
+    set_bus_bits(bus, n, UART_MCR, bit, on);
+}
+
+/// Put port `n`'s line in a break, or end the break.
+pub(crate) fn set_break(bus: &mut Bus, n: usize, on: bool) {
+    set_bus_bits(bus, n, UART_LCR, LCR_BREAK, on);
+}
+
+/// Take port `n`'s UART over as the driver does when a port opens: no
+/// interrupts (none are serviced here) and no loopback left by a program
+/// before. What the UART received before goes, as the driver's start
+/// reads it out, and so do the line errors and changes it noted.
+pub(crate) fn take_over(bus: &mut Bus, n: usize) {
+    bus.serial_set(n, UART_IER, 0);
+    set_bus_bits(bus, n, UART_MCR, MCR_LOOP, false);
+    while bus.serial_receive(n).is_some() {}
+}
+
+/// Let go of port `n`'s UART as the driver's close does: no break, and
+/// DTR and RTS off once what it was sending is out. COMM.DRV's close
+/// waits for its transmit queue to empty before it drops them, so a
+/// modem that hangs up on DTR still sends the last characters.
+pub(crate) fn let_go(bus: &mut Bus, n: usize) {
+    set_bus_bits(bus, n, UART_LCR, LCR_BREAK, false);
+    bus.serial_lines_off_when_sent(n, MCR_DTR | MCR_RTS);
+}
+
+/// The line WIN.INI's [ports] has for port `n` ("COM1:=9600,n,8,1,x"),
+/// or 9600,n,8,1, and its DCB's flags: fBinary, fParity with a parity,
+/// and the flow control a fifth field asks for. A port starts with this
+/// when it opens. None for settings that can't be read or that the UART
+/// can't do.
+pub(crate) fn port_settings(cpu: &mut Cpu, n: usize) -> Option<(Line, u16)> {
+    let dcb = settings_dcb(cpu, n)?;
+    let line = Line {
+        divisor: divisor(dcb_word(&dcb, DCB_BAUD)).ok()?,
+        size: dcb[DCB_BYTESIZE],
+        parity: dcb[DCB_PARITY],
+        stop: dcb[DCB_STOPBITS],
+    };
+    Some((line, dcb_word(&dcb, DCB_FLAGS)))
+}
+
+/// The DCB of WIN.INI's settings for port `n` (`port_settings`).
+fn settings_dcb(cpu: &mut Cpu, n: usize) -> Option<[u8; DCB_SIZE]> {
+    let key = format!("COM{}:", n + 1);
+    let settings =
+        crate::win32::kernel32::profile_value(cpu, b"WIN.INI", b"ports", key.as_bytes())
+            .unwrap_or_else(|| b"9600,n,8,1".to_vec());
+    let mut def = key.into_bytes();
+    def.extend_from_slice(&settings);
+    build_dcb(&def)
+}
+
+/// Whether a Win16 program has port `n` open.
+pub(crate) fn is_open(cpu: &Cpu, n: usize) -> bool {
+    find(cpu, n as u32).is_some()
 }
 
 /// Change bits of port `n`'s UART register `reg`: those of `bits` on or
 /// off.
 fn set_bits(cpu: &mut Cpu, n: usize, reg: u16, bits: u8, on: bool) {
-    let value = cpu.bus.serial_get(n, reg).unwrap_or(0);
+    set_bus_bits(&mut cpu.bus, n, reg, bits, on);
+}
+
+fn set_bus_bits(bus: &mut Bus, n: usize, reg: u16, bits: u8, on: bool) {
+    let value = bus.serial_get(n, reg).unwrap_or(0);
     let value = if on { value | bits } else { value & !bits };
-    cpu.bus.serial_set(n, reg, value);
+    bus.serial_set(n, reg, value);
 }
 
 /// The linear address of the port's event word.
@@ -475,9 +575,9 @@ fn open_port(cpu: &mut Cpu, cid: u32) -> Option<usize> {
 
 /// OpenComm(name, cbInQueue, cbOutQueue): the port's id, or IE_BADID for
 /// a name that isn't a COM port's, IE_HARDWARE for a port the machine
-/// doesn't have, IE_OPEN for one open already. The port starts with
-/// WIN.INI's settings for it ([ports], "COM1:=9600,n,8,1,x"), or
-/// 9600,n,8,1, with DTR and RTS on.
+/// doesn't have, IE_OPEN for one open already, by a Win16 or a Win32
+/// program. The port starts with WIN.INI's settings for it ([ports],
+/// "COM1:=9600,n,8,1,x"), or 9600,n,8,1, with DTR and RTS on.
 pub fn open_comm(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let name = super::string_bytes(cpu, args[0], 16);
     // LPT ports aren't there: their ids would be 80h on.
@@ -487,15 +587,10 @@ pub fn open_comm(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if n >= PORTS || cpu.bus.serial.ports[n].is_none() {
         return ret(IE_HARDWARE);
     }
-    if find(cpu, n as u32).is_some() {
+    if find(cpu, n as u32).is_some() || crate::win32::kernel32::comm::is_open(&cpu.bus, n) {
         return ret(IE_OPEN);
     }
-    let key = format!("COM{}:", n + 1);
-    let settings = crate::win32::kernel32::profile_value(cpu, b"WIN.INI", b"ports", key.as_bytes())
-        .unwrap_or_else(|| b"9600,n,8,1".to_vec());
-    let mut def = key.into_bytes();
-    def.extend_from_slice(&settings);
-    let Some(dcb) = build_dcb(&def) else {
+    let Some(dcb) = settings_dcb(cpu, n) else {
         return ret(IE_DEFAULT);
     };
     let task = super::current_task(cpu).map_or(0, |t| cpu.bus.win32.win16.tasks[t].handle);
@@ -514,13 +609,7 @@ pub fn open_comm(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         global::free(cpu, block);
         return ret(IE_DEFAULT);
     }
-    // The driver takes the chip over: no interrupts (none are serviced
-    // here) and no loopback left by a program before.
-    cpu.bus.serial_set(n, UART_IER, 0);
-    set_bits(cpu, n, UART_MCR, MCR_LOOP, false);
-    // What the UART received before goes, as the driver's start reads it
-    // out, and so do the line errors and changes it noted.
-    while cpu.bus.serial_receive(n).is_some() {}
+    take_over(&mut cpu.bus, n);
     let lines = cpu.bus.serial_status(n).map_or(0, |(_, msr)| msr & 0xF0);
     cpu.bus.win32.win16.comm.push(Port {
         id: n as u8,
@@ -542,9 +631,7 @@ pub fn open_comm(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// held is dropped.
 fn close(cpu: &mut Cpu, i: usize) {
     let port = cpu.bus.win32.win16.comm.remove(i);
-    let n = port.id as usize;
-    set_bits(cpu, n, UART_LCR, LCR_BREAK, false);
-    cpu.bus.serial_lines_off_when_sent(n, MCR_DTR | MCR_RTS);
+    let_go(&mut cpu.bus, port.id as usize);
     global::free(cpu, port.block);
 }
 
