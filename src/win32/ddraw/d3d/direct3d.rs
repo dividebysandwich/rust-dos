@@ -418,16 +418,16 @@ fn create_object(
     })
 }
 
-/// D3DFINDDEVICESEARCH's flags.
-const D3DFDS_COLORMODEL: u32 = 0x1;
+/// D3DFINDDEVICESEARCH's flags. D3DFDS_COLORMODEL (1) is ignored.
 const D3DFDS_GUID: u32 = 0x2;
 const D3DFDS_HARDWARE: u32 = 0x4;
 
 /// FindDevice(this, search, result): the first device that matches the
 /// search, the HAL before the software devices, with its descriptions
-/// of the size the result has room for. The search may ask for a GUID,
-/// for hardware or software, and for a color model: the HAL and the RGB
-/// device draw in D3DCOLOR_RGB, the Ramp device in D3DCOLOR_MONO.
+/// of the size the result has room for. The search may ask for a GUID
+/// and for hardware or software. Windows ignores the color model a
+/// search asks for, and finds a device for any value, as Wine's d3d.c
+/// tests found, so D3DFDS_COLORMODEL matches every device.
 pub fn find_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, search, result] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
@@ -448,20 +448,14 @@ pub fn find_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let flags = cpu.bus.guest_read_32(search + 4);
     let hardware = cpu.bus.guest_read_32(search + 8) != 0;
-    let model = cpu.bus.guest_read_32(search + 12);
     let guid = Guid::read(cpu, search + 16);
     let card = super::hal::card(cpu, dd);
     let mut list = listed(card.map(|c| c.kind), d3d_version(vtable));
     list.retain(|&l| l != Listed::TnlHal);
     list.sort_by_key(|l| l.model() != 0);
     let found = list.into_iter().find(|&l| {
-        let color = match l {
-            Listed::Ramp => software::MODEL_MONO,
-            _ => software::MODEL_RGB,
-        };
         (flags & D3DFDS_GUID == 0 || guid == Some(l.guid()))
             && (flags & D3DFDS_HARDWARE == 0 || hardware == (l.model() == 0))
-            && (flags & D3DFDS_COLORMODEL == 0 || model == color)
     });
     let Some(device) = found else {
         return Some(DDERR_NOTFOUND);

@@ -5,8 +5,9 @@
 //!
 //! D3DVIEWPORT (Direct3D 3's) scales x/w and y/w from the rectangle's
 //! middle; D3DVIEWPORT2 maps a clip volume onto the rectangle. Whichever
-//! was set last is the one used; the other reads back with what the two
-//! have in common, as Wine's ddraw has it.
+//! was set last is the one used. D3DVIEWPORT reads back with scales
+//! worked out from the clip volume, D3DVIEWPORT2 with the rectangle and
+//! depths alone after a D3DVIEWPORT.
 
 use super::super::{
     DDERR_ALREADYINITIALIZED, DDERR_INVALIDOBJECT, DDERR_INVALIDPARAMS, DDERR_UNSUPPORTED, V_LIGHT,
@@ -114,7 +115,11 @@ fn check_out(cpu: &mut Cpu, at: u32) -> Result<(), u32> {
     Ok(())
 }
 
-/// GetViewport(this, viewport): D3DVIEWPORT.
+/// GetViewport(this, viewport): D3DVIEWPORT. Windows keeps a viewport
+/// as its clip volume and gives the scales back worked out from it, the
+/// rectangle's size over the volume's, rather than the scales set: Wine's
+/// d3d.c finds infinite scales for a volume of no size, whichever
+/// structure set it. The depths are 0 and 1.
 pub fn get_viewport(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, at] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
@@ -123,9 +128,21 @@ pub fn get_viewport(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     hr!(check_out(cpu, at));
     let v = get(cpu, id).cloned().unwrap_or_default();
     let mut d = v.data;
-    if v.v2 {
-        // The rectangle and depths; no scale or maximum.
-        d[4..8].fill(0);
+    let f = |i: usize| f32::from_bits(d[i]);
+    // The volume's width and height: twice the maximum of a
+    // D3DVIEWPORT, the clip size of a D3DVIEWPORT2.
+    let (w, h) = if v.v2 {
+        (f(6), f(7))
+    } else {
+        (2.0 * f(6), 2.0 * f(7))
+    };
+    if v.set {
+        d[4] = (d[2] as f32 / w).to_bits();
+        d[5] = (d[3] as f32 / h).to_bits();
+        d[6] = (w / 2.0).to_bits();
+        d[7] = (h / 2.0).to_bits();
+        d[8] = 0.0f32.to_bits();
+        d[9] = 1.0f32.to_bits();
     }
     write_dwords(cpu, at + 4, &d);
     Some(D3D_OK)
