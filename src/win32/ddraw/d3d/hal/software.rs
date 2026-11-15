@@ -12,13 +12,15 @@
 //! costs two copies of the pixels it touches.
 //!
 //! What it draws: triangles with the top-left fill rule and pixel
-//! centres on integer coordinates, lines and points; the depth test
-//! and write in 16- or 32-bit depth buffers; one texture stage with
-//! every operation up to D3DTOP_BLENDCURRENTALPHA, point or bilinear
-//! filtering, a mipmap level chosen for each triangle, the address
-//! modes and source color keys; specular, the alpha test, vertex and
-//! table fog and alpha blending with every factor. Not dithering, and
-//! not stencil, which its description doesn't offer.
+//! centres on integer coordinates, lines and points; the depth test,
+//! its bias and the write in 16- or 32-bit depth buffers; one texture
+//! stage with every operation up to D3DTOP_BLENDCURRENTALPHA, point or
+//! bilinear filtering, a level of detail worked out at each pixel of a
+//! triangle with its bias, point or linear mip filtering, the address
+//! modes, source color keys and palettes with alpha; specular, the
+//! alpha test, vertex and table fog and alpha blending with every
+//! factor. Not dithering, and not stencil, which its description
+//! doesn't offer.
 
 use super::super::super::surface::{
     self, DDPF_ALPHAPIXELS, DDPF_PALETTEINDEXED8, DDPF_RGB, DDPF_ZBUFFER, KEY_SRC_BLT, Surface,
@@ -29,7 +31,7 @@ use super::super::device::{
     RS_SPECULARENABLE, RS_SRCBLEND, RS_TEXTUREFACTOR, RS_TEXTUREMAPBLEND, RS_TEXTUREPERSPECTIVE,
     RS_ZENABLE, RS_ZFUNC, RS_ZWRITEENABLE, TA_TEXTURE, TOP_DISABLE, TOP_SELECTARG1, TSS_ADDRESSU,
     TSS_ADDRESSV, TSS_ALPHAARG1, TSS_ALPHAARG2, TSS_ALPHAOP, TSS_BORDERCOLOR, TSS_COLORARG1,
-    TSS_COLORARG2, TSS_COLOROP, TSS_MAGFILTER, TSS_MINFILTER, TSS_MIPFILTER,
+    TSS_COLORARG2, TSS_COLOROP, TSS_MAGFILTER, TSS_MINFILTER, TSS_MIPFILTER, TSS_MIPMAPLODBIAS,
 };
 use super::super::pipeline::{self, Rasterizer, ScreenVertex, Setup};
 use super::{
@@ -63,6 +65,35 @@ const DDBD_32: u32 = 0x100;
 /// D3DTOP_DISABLE to D3DTOP_BLENDCURRENTALPHA: the stage operations it
 /// draws.
 const LAST_OP: u32 = 16;
+
+/// D3DTOP_SELECTARG1 and SELECTARG2, which read one argument, and
+/// BLENDTEXTUREALPHA and BLENDTEXTUREALPHAPM, which read the texture's
+/// alpha whatever their arguments are.
+const TOP_SELECTARG2: u32 = 3;
+const TOP_BLENDTEXTUREALPHA: u32 = 13;
+const TOP_BLENDTEXTUREALPHAPM: u32 = 15;
+
+/// D3DRENDERSTATE_ZBIAS.
+const RS_ZBIAS: u32 = 47;
+
+/// D3DTFP_LINEAR: the mip filter that blends two levels.
+const MIP_LINEAR: u32 = 3;
+
+/// DDPCAPS_ALPHA: a palette whose entries' fourth bytes are alpha.
+const DDPCAPS_ALPHA: u32 = 0x400;
+
+/// Whether the half of a stage that runs `op` on `args` reads the
+/// texture.
+fn reads_texture(op: u32, args: [u32; 2]) -> bool {
+    let arg = |a: u32| a & 0xF == TA_TEXTURE;
+    match op {
+        TOP_DISABLE => false,
+        TOP_SELECTARG1 => arg(args[0]),
+        TOP_SELECTARG2 => arg(args[1]),
+        TOP_BLENDTEXTUREALPHA | TOP_BLENDTEXTUREALPHAPM => true,
+        _ => arg(args[0]) || arg(args[1]),
+    }
+}
 
 pub fn can_do(op: u32) -> bool {
     (1..=LAST_OP).contains(&op)
@@ -189,6 +220,9 @@ pub struct Card {
     clip: [i32; 4],
     z_func: u32,
     z_write: bool,
+    /// D3DRENDERSTATE_ZBIAS, 0 to 16: steps of a 16-bit depth buffer
+    /// taken off a pixel's depth before the test.
+    z_bias: u32,
     /// The alpha test's function and reference, if it is on.
     alpha_test: Option<(u32, u32)>,
     /// The blend's source and destination factors, if it is on.
@@ -209,6 +243,10 @@ pub struct Card {
     mag_linear: bool,
     min_linear: bool,
     mip: bool,
+    /// The mip filter blends the two levels nearest the pixel's.
+    mip_linear: bool,
+    /// D3DTSS_MIPMAPLODBIAS, added to each pixel's level of detail.
+    lod_bias: f32,
     address: [u32; 2],
     border: u32,
     perspective: bool,
@@ -239,19 +277,15 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         _ => super::super::device::depth_buffer(cpu, d).unwrap_or(0),
     };
     let texture = {
-        let uses = |op: u32, a1: u32, a2: u32| {
-            op != TOP_DISABLE && (a1 & 0xF == TA_TEXTURE || a2 & 0xF == TA_TEXTURE)
-        };
-        let color = uses(
+        let color = reads_texture(
             d.stage(0, TSS_COLOROP),
-            d.stage(0, TSS_COLORARG1),
-            d.stage(0, TSS_COLORARG2),
+            [d.stage(0, TSS_COLORARG1), d.stage(0, TSS_COLORARG2)],
         );
-        let alpha = uses(
-            d.stage(0, TSS_ALPHAOP),
-            d.stage(0, TSS_ALPHAARG1),
-            d.stage(0, TSS_ALPHAARG2),
-        );
+        let alpha = d.stage(0, TSS_COLOROP) != TOP_DISABLE
+            && reads_texture(
+                d.stage(0, TSS_ALPHAOP),
+                [d.stage(0, TSS_ALPHAARG1), d.stage(0, TSS_ALPHAARG2)],
+            );
         let iface = d.textures.first().copied().unwrap_or(0);
         match (color || alpha, iface) {
             (true, iface) if iface != 0 => super::super::super::this(cpu, iface)
@@ -289,6 +323,8 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         clip: [left, top, right, bottom],
         z_func: d.state(RS_ZFUNC),
         z_write: d.state(RS_ZWRITEENABLE) != 0,
+        // As the ToadForce's HAL takes it, with OpenGL's offset.
+        z_bias: (d.state(RS_ZBIAS) as i64 + d.depth_bias as i64).clamp(0, 16) as u32,
         alpha_test: (d.state(RS_ALPHATESTENABLE) != 0).then(|| {
             (
                 d.state(super::super::device::RS_ALPHAFUNC),
@@ -310,6 +346,8 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         mag_linear: d.stage(0, TSS_MAGFILTER) == 2,
         min_linear: d.stage(0, TSS_MINFILTER) == 2,
         mip: d.stage(0, TSS_MIPFILTER) > 1,
+        mip_linear: d.stage(0, TSS_MIPFILTER) == MIP_LINEAR,
+        lod_bias: f32::from_bits(d.stage(0, TSS_MIPMAPLODBIAS)),
         address: [d.stage(0, TSS_ADDRESSU), d.stage(0, TSS_ADDRESSV)],
         border: d.stage(0, TSS_BORDERCOLOR),
         perspective: d.version >= 7 || d.state(RS_TEXTUREPERSPECTIVE) != 0,
@@ -473,6 +511,15 @@ fn depth_raw(z: f32, mask: u32) -> u32 {
     ((z.clamp(0.0, 1.0) as f64 * max as f64 + 0.5) as u32) << mask.trailing_zeros()
 }
 
+/// `bias` steps of a 16-bit depth buffer as a raw value of a depth
+/// buffer of `mask`: a step of a wider one is the same share of its
+/// range.
+fn depth_bias(bias: u32, mask: u32) -> u32 {
+    let max = mask >> mask.trailing_zeros();
+    let bits = 32 - max.leading_zeros();
+    (bias << bits.saturating_sub(16)) << mask.trailing_zeros()
+}
+
 fn compare(func: u32, value: u32, reference: u32) -> bool {
     match func {
         1 => false,
@@ -484,6 +531,30 @@ fn compare(func: u32, value: u32, reference: u32) -> bool {
         7 => value >= reference,
         _ => true,
     }
+}
+
+/// The surface `id`'s palette as ARGB, or black. The entries' alpha is
+/// their fourth byte in a palette made with DDPCAPS_ALPHA, which the
+/// description's D3DPTEXTURECAPS_ALPHAPALETTE offers, and 255 in any
+/// other.
+fn palette(cpu: &mut Cpu, id: u32) -> [u32; 256] {
+    let mut out = [0xFF00_0000; 256];
+    let pal = state(cpu).surface(id).map_or(0, |s| s.palette);
+    let Some((_, pid)) = (pal != 0)
+        .then(|| super::super::super::this(cpu, pal))
+        .flatten()
+    else {
+        return out;
+    };
+    let Some(p) = state(cpu).object(pid).and_then(|o| o.palette.as_ref()) else {
+        return out;
+    };
+    let alpha = p.caps & DDPCAPS_ALPHA != 0;
+    for (o, [r, g, b, a]) in out.iter_mut().zip(p.entries.as_chunks::<4>().0) {
+        let a = if alpha { *a as u32 } else { 0xFF };
+        *o = a << 24 | (*r as u32) << 16 | (*g as u32) << 8 | *b as u32;
+    }
+    out
 }
 
 /// The texture of the surface `id`, decoded or as kept.
@@ -505,7 +576,7 @@ fn texture(cpu: &mut Cpu, id: u32, keyed: bool) -> Option<Arc<Texture>> {
         mix(s.uniqueness as u64);
         mix(s.keys[KEY_SRC_BLT].0 as u64 | (s.keys[KEY_SRC_BLT].1 as u64) << 32);
     }
-    let pal = super::voodoo::palette(cpu, id);
+    let pal = palette(cpu, id);
     for p in pal {
         mix(p as u64);
     }
@@ -533,7 +604,7 @@ fn texture(cpu: &mut Cpu, id: u32, keyed: bool) -> Option<Arc<Texture>> {
         let texels = raw
             .iter()
             .map(|&r| match paletted {
-                true => 0xFF00_0000 | pal[(r & 0xFF) as usize],
+                true => pal[(r & 0xFF) as usize],
                 false => decode(r, &s.format),
             })
             .collect();
@@ -697,7 +768,7 @@ fn draw(cpu: &mut Cpu, card: &Card, prims: &[Prim]) {
             Prim::Line(v) => line(&mut t, v),
             Prim::Point(v) => {
                 let (x, y) = (v.x.round() as i32, v.y.round() as i32);
-                shade(&mut t, x, y, &Frag::of(v, card.perspective), 0, false);
+                shade(&mut t, x, y, &Frag::of(v, card.perspective), 0.0);
             }
         }
     }
@@ -710,26 +781,34 @@ fn draw(cpu: &mut Cpu, card: &Card, prims: &[Prim]) {
     }
 }
 
-/// The mipmap level a triangle is drawn with, the one whose texels are
-/// closest to the size of its pixels, and whether its texels are
-/// smaller than its pixels (minified).
-fn level_of(t: &Target, frags: &[Frag; 3], area: f32) -> (usize, bool) {
+/// The texture's level of detail at a pixel of a triangle whose values
+/// are `planes`, `f` there: the base level's texels a step of one pixel
+/// across or down covers, the larger, as a power of 2, with the bias
+/// added. Above 0 the texels are smaller than the pixel (minified).
+fn lod_at(t: &Target, planes: &[[f32; 3]; VALUES], f: &Frag) -> f32 {
     let Some(texture) = &t.texture else {
-        return (0, false);
+        return 0.0;
     };
-    let uv = frags.map(|f| f.uv());
     let base = &texture.levels[0];
-    let du = [uv[1].0 - uv[0].0, uv[2].0 - uv[0].0].map(|d| d * base.width as f32);
-    let dv = [uv[1].1 - uv[0].1, uv[2].1 - uv[0].1].map(|d| d * base.height as f32);
-    let texels = (du[0] * dv[1] - du[1] * dv[0]).abs();
-    if !texels.is_finite() || area <= 0.0 || texels <= area {
-        return (0, false);
+    let q = f.0[UVQ + 2];
+    if q == 0.0 {
+        return 0.0;
     }
-    if !t.card.mip {
-        return (0, true);
+    // The derivatives of u / q and v / q, in texels, along x and y.
+    let d = |value: usize, axis: usize, size: u32| {
+        let (n, dn, dq) = (f.0[value], planes[value][axis], planes[UVQ + 2][axis]);
+        (dn * q - n * dq) / (q * q) * size as f32
+    };
+    let step = |axis: usize| {
+        let du = d(UVQ, axis, base.width);
+        let dv = d(UVQ + 1, axis, base.height);
+        du * du + dv * dv
+    };
+    let rho = step(0).max(step(1));
+    if !rho.is_finite() || rho <= 0.0 {
+        return t.card.lod_bias;
     }
-    let lod = 0.5 * (texels / area).log2();
-    ((lod.round() as usize).min(texture.levels.len() - 1), true)
+    0.5 * rho.log2() + t.card.lod_bias
 }
 
 /// Draw a triangle: the pixels whose centres are inside it, and those on
@@ -748,7 +827,6 @@ fn triangle(t: &mut Target, v: &[ScreenVertex; 3]) {
     let area = area.abs();
     let perspective = t.card.perspective;
     let frags = v.map(|v| Frag::of(&v, perspective));
-    let (level, minified) = level_of(t, &frags, area);
     // The edges opposite each vertex, a to b, as functions of the pixel
     // that are positive inside: x and y factors and a constant. A pixel
     // centre on an edge is in on a top or left edge.
@@ -782,7 +860,8 @@ fn triangle(t: &mut Target, v: &[ScreenVertex; 3]) {
             let f = Frag(std::array::from_fn(|k| {
                 planes[k][0] * fx + planes[k][1] * fy + planes[k][2]
             }));
-            shade(t, x, y, &f, level, minified);
+            let lod = lod_at(t, &planes, &f);
+            shade(t, x, y, &f, lod);
         }
     }
 }
@@ -808,7 +887,7 @@ fn line(t: &mut Target, v: &[ScreenVertex; 2]) {
             (v[0].y + dy * s).round() as i32,
         );
         let f = Frag(std::array::from_fn(|k| a.0[k] * (1.0 - s) + b.0[k] * s));
-        shade(t, x, y, &f, 0, false);
+        shade(t, x, y, &f, 0.0);
     }
 }
 
@@ -894,6 +973,34 @@ fn sample(
     Some(sum.map(|s| s / weight))
 }
 
+/// The texture's color at `u`, `v` for the level of detail `lod`
+/// (`lod_at`): the base level without a mip filter or where the texels
+/// aren't smaller than the pixel, else the nearest level, or with a
+/// linear mip filter the two levels around `lod` weighed by its
+/// fraction. None where the key leaves it out.
+fn sample_lod(texture: &Texture, lod: f32, card: &Card, u: f32, v: f32) -> Option<Color> {
+    let minified = lod > 0.0;
+    if !card.mip || !minified {
+        return sample(texture, (0, minified), card, u, v);
+    }
+    let last = (texture.levels.len() - 1) as f32;
+    if !card.mip_linear {
+        let level = lod.round().min(last) as usize;
+        return sample(texture, (level, true), card, u, v);
+    }
+    let low = lod.floor().min(last);
+    let high = (low + 1.0).min(last);
+    let a = sample(texture, (low as usize, true), card, u, v)?;
+    let w = (lod - low).clamp(0.0, 1.0);
+    if high == low || w == 0.0 {
+        return Some(a);
+    }
+    let Some(b) = sample(texture, (high as usize, true), card, u, v) else {
+        return Some(a);
+    };
+    Some(std::array::from_fn(|i| a[i] * (1.0 - w) + b[i] * w))
+}
+
 /// D3DTA_ arguments.
 const TA_DIFFUSE: u32 = 0;
 const TA_CURRENT: u32 = 1;
@@ -976,56 +1083,50 @@ fn blend_factor(f: u32, s: Color, d: Color) -> Color {
     }
 }
 
-/// Draw the pixel `x`, `y` with `f`, with the texture's `level`,
-/// filtered for texels smaller than the pixels if `minified`.
-fn shade(t: &mut Target, x: i32, y: i32, f: &Frag, level: usize, minified: bool) {
+/// Draw the pixel `x`, `y` with `f`, with the texture at the level of
+/// detail `lod` (`lod_at`).
+fn shade(t: &mut Target, x: i32, y: i32, f: &Frag, lod: f32) {
     let [cl, ct, cr, cb] = t.clip;
     if x < cl || x >= cr || y < ct || y >= cb {
         return;
     }
     let card = t.card;
-    // The depth test.
+    // The depth test, with the bias taken off the pixel's depth.
     let mut depth = None;
     if let Some((z, mask)) = &t.depth {
         let value = depth_raw(f.z(), *mask);
+        let value = value.saturating_sub(depth_bias(card.z_bias, *mask)) & *mask;
         let stored = z.get(x, y) & *mask;
         if !compare(card.z_func, value, stored) {
             return;
         }
         depth = Some(value | z.get(x, y) & !*mask);
     }
-    // The texture stage.
+    // The texture stage. A half of it that reads a texture the stage
+    // hasn't got passes the diffuse color on, as the ToadForce's does.
     let diffuse = f.diffuse();
     let mut out = diffuse;
-    if let Some(texture) = &t.texture {
-        let (u, v) = f.uv();
-        let Some(tex) = sample(texture, (level, minified), card, u, v) else {
-            return;
-        };
+    let tex = match &t.texture {
+        Some(texture) => {
+            let (u, v) = f.uv();
+            let Some(tex) = sample_lod(texture, lod, card, u, v) else {
+                return;
+            };
+            Some(tex)
+        }
+        None => None,
+    };
+    if card.color[0] != TOP_DISABLE {
         let factor = color_of(card.factor);
         let spec = f.specular();
-        if card.color[0] != TOP_DISABLE {
-            let args = [card.color[1], card.color[2]];
+        for (half, channels) in [(card.color, 0..3), (card.alpha, 3..4)] {
+            let args = [half[1], half[2]];
+            if tex.is_none() && reads_texture(half[0], args) {
+                continue;
+            }
+            let tex = tex.unwrap_or([0.0; 4]);
             operate(
-                card.color[0],
-                args,
-                tex,
-                diffuse,
-                spec,
-                factor,
-                0..3,
-                &mut out,
-            );
-            let args = [card.alpha[1], card.alpha[2]];
-            operate(
-                card.alpha[0],
-                args,
-                tex,
-                diffuse,
-                spec,
-                factor,
-                3..4,
-                &mut out,
+                half[0], args, tex, diffuse, spec, factor, channels, &mut out,
             );
         }
         if card.diffuse_alpha {
@@ -1157,5 +1258,50 @@ mod tests {
         assert_eq!(depth_raw(0.0, 0xFFFF), 0);
         assert_eq!(depth_raw(0.5, 0xFFFF), 0x8000);
         assert_eq!(depth_raw(2.0, 0xFFFF_FF00), 0xFFFF_FF00);
+    }
+
+    #[test]
+    fn a_depth_bias_is_in_steps_of_a_16_bit_buffer() {
+        assert_eq!(depth_bias(16, 0xFFFF), 16);
+        // 24 bits above 8 of stencil, and 32 bits.
+        assert_eq!(depth_bias(1, 0xFFFF_FF00), 0x1_0000);
+        assert_eq!(depth_bias(1, u32::MAX), 0x1_0000);
+    }
+
+    #[test]
+    fn a_linear_mip_filter_blends_the_two_nearest_levels() {
+        let level = |size: u32, argb: u32| Level {
+            width: size,
+            height: size,
+            texels: vec![argb; (size * size) as usize],
+            keyed: Vec::new(),
+        };
+        let texture = Texture {
+            levels: vec![level(4, 0xFFFF_0000), level(2, 0xFF00_00FF)],
+        };
+        let red = Some([1.0, 0.0, 0.0, 1.0]);
+        let linear = Card {
+            mip: true,
+            mip_linear: true,
+            ..Card::default()
+        };
+        let c = sample_lod(&texture, 0.25, &linear, 0.5, 0.5).unwrap();
+        assert_eq!(c, [0.75, 0.0, 0.25, 1.0]);
+        // Texels as big as the pixels or bigger: the base level.
+        assert_eq!(sample_lod(&texture, -1.0, &linear, 0.5, 0.5), red);
+        // The nearest level with a point mip filter, the base without
+        // one.
+        let point = Card {
+            mip_linear: false,
+            ..linear
+        };
+        assert_eq!(sample_lod(&texture, 0.25, &point, 0.5, 0.5), red);
+        let c = sample_lod(&texture, 0.75, &point, 0.5, 0.5);
+        assert_eq!(c, Some([0.0, 0.0, 1.0, 1.0]));
+        let none = Card {
+            mip: false,
+            ..point
+        };
+        assert_eq!(sample_lod(&texture, 0.75, &none, 0.5, 0.5), red);
     }
 }

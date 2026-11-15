@@ -164,10 +164,13 @@ that transforms and lights. The software devices draw on the processor
 into render targets and depth buffers in system or video memory, with
 any card. They differ from Windows 98's in a few ways:
 
-- The Ramp device reports its mono color model but draws in RGB, as the
-  RGB device does, and takes no 8-bit palettized render target.
+- The Ramp device reports its mono color model but lights, shades,
+  blends and takes textures as the RGB device does, and its description
+  says so. Windows' Ramp device lights in shades of one color through
+  each material's ramp. It takes no 8-bit palettized render target.
 - There is no MMX device.
-- They don't dither, and have no stencil buffer.
+- They draw with one texture stage, don't dither, and have no stencil
+  buffer.
 
 ### Screen savers
 

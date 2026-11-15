@@ -5009,3 +5009,42 @@ fn the_rgb_device_draws_without_a_3d_card() {
     assert_rgb(&p, 16, 30, [255, 0, 0], 0);
     assert_rgb(&p, 48, 30, [0, 0, 0], 0);
 }
+
+#[test]
+fn the_rgb_device_runs_a_stage_that_reads_no_texture() {
+    // D3DTSS_COLORARG1. The stage selects the texture factor, and the
+    // device has no texture: the stage still runs.
+    const TSS_COLORARG1: u32 = 2;
+    let scene = rgb_scene(vec![
+        Step::Stage(TSS_COLOROP, TOP_SELECTARG1),
+        Step::Stage(TSS_COLORARG1, TA_TFACTOR),
+        Step::State(RS_TEXTUREFACTOR, GREEN),
+        Step::Draw(quad(0.0, 0.0, 32.0, 64.0, 0.5, RED)),
+    ]);
+    let p = draw_rgb_scene("rgb_factor", scene, 0);
+    assert_rgb(&p, 16, 30, [0, 255, 0], 0);
+    assert_rgb(&p, 48, 30, [0, 0, 0], 0);
+}
+
+#[test]
+fn the_rgb_device_biases_depth() {
+    // D3DRENDERSTATE_ZBIAS, which the description offers: the red quad
+    // at the green one's depth passes the test of less with a bias,
+    // and the blue one without doesn't.
+    const RS_ZBIAS: u32 = 47;
+    let scene = Scene {
+        zbuffer: Some(1.0),
+        ..rgb_scene(vec![
+            Step::State(RS_ZENABLE, 1),
+            Step::State(RS_ZFUNC, 2),
+            Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, GREEN)),
+            Step::State(RS_ZBIAS, 16),
+            Step::Draw(quad(0.0, 0.0, 32.0, 64.0, 0.5, RED)),
+            Step::State(RS_ZBIAS, 0),
+            Step::Draw(quad(32.0, 0.0, 64.0, 64.0, 0.5, BLUE)),
+        ])
+    };
+    let p = draw_rgb_scene("rgb_zbias", scene, 0);
+    assert_rgb(&p, 16, 30, [255, 0, 0], 0);
+    assert_rgb(&p, 48, 30, [0, 255, 0], 0);
+}
