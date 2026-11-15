@@ -882,6 +882,7 @@ mod tests {
         (61, 0x9267_6BA0_CE58_B06F), // OpenGL's display lists
         (62, 0x9F78_ACB5_CCD2_8975), // OpenGL's textures in their contexts' group
         (63, 0xD1E3_14A4_31DE_2AAA), // OpenGL's vertices as given, and the card's lights
+        (67, 0xD1E3_14A4_31DE_2AAA), // a Direct3D device made as a software device
         (68, 0x2779_962D_7A44_1D77), // copy-on-write views paged, pages held for a fault
     ];
 

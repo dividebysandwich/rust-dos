@@ -10,13 +10,14 @@
 //! buffers and vertex buffers are objects of their own in DirectDraw's
 //! table, each with a single count for all its interfaces.
 //!
-//! The only device is the card's HAL ("Direct3D HAL"), there when the
-//! display adapter is a Banshee or Voodoo3 (`hal`). There is no software
-//! rasterizer: the RGB, Ramp and MMX devices aren't there, nor the
-//! reference rasterizer or a device with transform and lighting in
-//! hardware. Transform, lighting, clipping and fog are done on the
-//! processor (`pipeline.rs`), as Windows' Direct3D did them for the
-//! card; what comes out goes to the card's rasterizer.
+//! The devices (`direct3d::listed`) are the software Ramp and RGB
+//! devices, which draw on the processor (`hal::software`), the card's
+//! HAL ("Direct3D HAL") with a 3D card (`hal`), and the T&L HAL on a
+//! card that transforms. The MMX device and the reference rasterizer
+//! aren't there. Transform, lighting, clipping and fog are done on the
+//! processor (`pipeline.rs`), as Windows' Direct3D did them for a card
+//! without transform and lighting; what comes out goes to the device's
+//! rasterizer.
 //!
 //! Parts of this are ported from Wine 1.2.3's ddraw (device.c,
 //! executebuffer.c, viewport.c and others), which is under the GNU
