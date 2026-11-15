@@ -463,7 +463,16 @@ impl File {
             if self.proc_seek(cpu, base as i32, 0) == -1 {
                 return -1;
             }
-            self.grab_next(cpu, true);
+            let read = self.grab_next(cpu, true);
+            if read < (to - base) as i32 {
+                // The file can't be read up to `to` (it is open for
+                // writing only): the buffer starts at `to`, so a flush
+                // writes only what the program writes from there, and
+                // nothing the buffer held before over what lies between.
+                self.buf_offset = to;
+                self.end_read = self.buffer;
+                self.loaded = false;
+            }
         }
         self.next = self.buffer.wrapping_add(to - self.buf_offset);
         to as i32

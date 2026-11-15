@@ -900,6 +900,106 @@ fn mmio_reads_and_writes_riff_chunks() {
     }
 }
 
+/// BIG.DAT made through mmio's own buffer, open for writing only, as
+/// Shadow of the Horned Rat writes its saves: a RIFF chunk holding a
+/// 'big ' chunk of 9000 bytes, more than the 8 KB buffer, then a 'tail'
+/// chunk of 3. Each mmioAscend goes back to write a size before the
+/// buffer's place. Exit code 1 if every call worked.
+fn mmio_big_program() -> Vec<u8> {
+    const MMIO_WRITE: i32 = 1;
+    const MMIO_CREATE: i32 = 0x1000;
+    const MMIO_ALLOCBUF: i32 = 0x10000;
+    const MMIO_CREATERIFF: i32 = 0x20;
+    const NAME: u32 = 0x00;
+    const RIFF: u32 = 0x20;
+    const BIG: u32 = 0x40;
+    const TAIL: u32 = 0x60;
+    const BYTES: u32 = 0x100;
+    let mut data = vec![0u8; BYTES as usize + 9000];
+    put(&mut data, NAME as usize, b"BIG.DAT");
+    put(&mut data, (RIFF + 8) as usize, b"SAVE");
+    put(&mut data, BIG as usize, b"big ");
+    put(&mut data, TAIL as usize, b"tail");
+    for k in 0..9000 {
+        data[BYTES as usize + k] = (k * 7 + 1) as u8;
+    }
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        (
+            "WINMM.dll",
+            &[
+                "mmioOpenA",
+                "mmioAscend",
+                "mmioCreateChunk",
+                "mmioWrite",
+                "mmioClose",
+            ],
+        ),
+    ];
+    program(imports, &data, |a, l| {
+        let at = |offset: u32| l.at(offset) as i32;
+        a.xor(ebx, ebx)?;
+        let mut failed = a.create_label();
+        let flags = MMIO_CREATE | MMIO_WRITE | MMIO_ALLOCBUF;
+        call(a, l.import(1), &[at(NAME), 0, flags])?;
+        a.mov(esi, eax)?;
+        a.test(eax, eax)?;
+        a.jz(failed)?;
+        let steps: [(usize, [i32; 2], i32); 10] = [
+            (3, [at(RIFF), MMIO_CREATERIFF], 0),
+            (3, [at(BIG), 0], 0),
+            (4, [at(BYTES), 5000], 5000),
+            (4, [at(BYTES + 5000), 4000], 4000),
+            (2, [at(BIG), 0], 0),
+            (3, [at(TAIL), 0], 0),
+            (4, [at(BYTES), 3], 3),
+            (2, [at(TAIL), 0], 0),
+            (2, [at(RIFF), 0], 0),
+            (5, [0, 0], 0),
+        ];
+        for (import, args, ok) in steps {
+            for &arg in args.iter().rev() {
+                a.push(arg)?;
+            }
+            a.push(esi)?;
+            a.call(l.import(import))?;
+            a.cmp(eax, ok)?;
+            a.jne(failed)?;
+        }
+        a.mov(ebx, 1)?;
+        a.set_label(&mut failed)?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    })
+}
+
+/// A size written back before the buffer's place leaves the rest of the
+/// file as it was. Without the fix the buffer, which can't be read from
+/// a file open for writing only, went out from the start of its 8 KB
+/// with the end of the 'big ' chunk's data still in it, over the RIFF
+/// header and the start of the data.
+#[test]
+fn mmio_writes_chunks_larger_than_its_buffer_to_a_write_only_file() {
+    for core in CORES {
+        let files = [("T.EXE", mmio_big_program())];
+        let mut cpu = machine("mmio-big", core, &files, |_| {});
+        run_to_exit(&mut cpu, 20_000, |_| {});
+        assert_eq!(cpu.errorlevel, 1, "{core:?}: {:?}", printed(&cpu));
+        let out = fs::read(scratch_path("mmio-big").join("BIG.DAT")).unwrap();
+        let mut expected = b"RIFF".to_vec();
+        expected.extend((4 + 8 + 9000 + 8 + 4u32).to_le_bytes());
+        expected.extend(b"SAVEbig ");
+        expected.extend(9000u32.to_le_bytes());
+        expected.extend((0..9000).map(|k| (k * 7 + 1) as u8));
+        expected.extend(b"tail");
+        expected.extend(3u32.to_le_bytes());
+        expected.extend([1, 8, 15, 0]);
+        assert_eq!(out.len(), expected.len(), "{core:?}");
+        assert!(out == expected, "{core:?}: {:02X?}", &out[..24]);
+    }
+}
+
 // The sequencer test's data: its two MCI strings, the alias, an
 // MCI_SEQ_SET_PARMS (dwCallback, dwTimeFormat, dwAudio, dwTempo, dwPort,
 // dwSlave, dwMaster, dwOffset) and an MCI_STATUS_PARMS (dwCallback,
