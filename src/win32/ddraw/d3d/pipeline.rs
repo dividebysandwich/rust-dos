@@ -2583,6 +2583,21 @@ mod tests {
     /// D3DRENDERSTATE_WRAP0: a coordinate with its bit that is half a
     /// turn or more from that of the triangle's highest vertex goes a
     /// turn towards it, 0 and 1 being the same place.
+    /// A transformed vertex with a depth outside 0 to 1 is cut by the
+    /// setup that clips for a card that limits depth to its range,
+    /// and left to the card that leaves such pixels out itself.
+    #[test]
+    fn transformed_depths_are_cut_only_for_a_card_that_limits_them() {
+        for (cut, z) in [(true, -0.25), (true, 1.5), (false, -0.25), (false, 1.5)] {
+            let setup = Setup {
+                tl_depth_cut: cut,
+                ..Setup::default()
+            };
+            assert!(tl_inside(&setup)([10.0, 10.0, 0.5]));
+            assert_eq!(tl_inside(&setup)([10.0, 10.0, z]), !cut, "{cut} {z}");
+        }
+    }
+
     #[test]
     fn a_wrapped_texture_coordinate_goes_the_shorter_way_round() {
         let us = |wrap: u8, order: &[u32]| {

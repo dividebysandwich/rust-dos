@@ -910,6 +910,27 @@ mod tests {
         assert_eq!(lower(&l).unwrap().steps, [stencil]);
     }
 
+    /// `DESTBLEND` 12 or 13 beside another `SRCBLEND` leaves nothing
+    /// of the pixel, and as `SRCBLEND` either sets both factors.
+    #[test]
+    fn the_factors_that_set_both_are_zero_as_the_destination() {
+        let blend = |src: u32, dst: u32| {
+            let mut l = state();
+            l.render[RS_ALPHABLENDENABLE as usize] = 1;
+            l.render[RS_SRCBLEND as usize] = src;
+            l.render[RS_DESTBLEND as usize] = dst;
+            lower(&l).unwrap().steps.iter().find_map(|step| match *step {
+                Step::Write { blend, .. } => blend.map(|b| (b.src, b.dst)),
+                _ => None,
+            })
+        };
+        assert_eq!(blend(2, 12), Some((2, 1)));
+        assert_eq!(blend(5, 13), Some((5, 1)));
+        assert_eq!(blend(12, 2), Some((5, 6)));
+        assert_eq!(blend(13, 12), Some((6, 5)));
+        assert_eq!(blend(5, 6), Some((5, 6)));
+    }
+
     #[test]
     fn what_follows_the_stages_comes_in_the_cards_order() {
         let mut l = state();
