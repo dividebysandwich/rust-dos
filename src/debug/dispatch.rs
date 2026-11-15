@@ -54,7 +54,13 @@ impl DebugHub {
                 return;
             }
             Cmd::Speed { cycles } => {
-                self.speed_requests.push(SpeedRequest { cycles, ctx, if_state, reply: tx });
+                let change = super::SettingChange::Cycles(cycles);
+                self.speed_requests.push(SpeedRequest { change, ctx, if_state, reply: tx });
+                return;
+            }
+            Cmd::FpsCap { cap } => {
+                let change = super::SettingChange::FpsCap(cap);
+                self.speed_requests.push(SpeedRequest { change, ctx, if_state, reply: tx });
                 return;
             }
             Cmd::Screenshot { shader } => {
@@ -152,7 +158,8 @@ impl DebugHub {
             Cmd::Screenshot { .. }
             | Cmd::SaveState { .. }
             | Cmd::LoadState { .. }
-            | Cmd::Speed { .. } => {
+            | Cmd::Speed { .. }
+            | Cmd::FpsCap { .. } => {
                 unreachable!("answered later, by `handle`'s arrangement")
             }
             Cmd::Quit => {
@@ -650,6 +657,7 @@ fn changes_machine(cmd: &Cmd) -> bool {
             | Cmd::SwapImages
             | Cmd::LoadState { .. }
             | Cmd::Speed { .. }
+            | Cmd::FpsCap { .. }
             | Cmd::Reboot
             | Cmd::RebootShell
     )

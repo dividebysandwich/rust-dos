@@ -115,7 +115,6 @@ Banshee, which always has 16 MB. The others work for every 3dfx card.
 | `voodoo_dither` | `true`, `false` | Whether OpenGL dithers to 16 bits as the card does; `false` is smoother |
 | `voodoo_readback` | `gpu`, `exact` | What a game reads back from the card: OpenGL's picture, or the card's exact pixels drawn in software too |
 | `voodoo_texture_sampling` | `default`, `unfiltered` | The game's texture filtering, or nearest-neighbour |
-| `voodoo_fps_cap` | `off`, 10 to 240 | The most frames a second a game shows on the card |
 | `voodoo_gamma` | `off`, 0.1 to 2 | Glide's gamma, through `SST_RGAMMA`, `SST_GGAMMA` and `SST_BGAMMA` (add-on card only) |
 
 `voodoo`, `voodoo_model`, `voodoo_memory`, `voodoo_gamma` and `machine`
@@ -124,14 +123,16 @@ window's Emulator page has them as *Video card*, *3dfx Voodoo
 Graphics*, *3dfx card* (the chip and memory together), *3dfx drawn by*
 and the *3dfx* settings after it. They show only while *3dfx Voodoo
 Graphics* is on; on a Voodoo3 or Banshee, set the renderer, texture
-sampling and frame rate cap in the configuration file
+sampling in the configuration file
 ([#821](https://github.com/dividebysandwich/rust-dos/issues/821)).
+The card's swaps are held to `fps_cap`, the frame rate cap of every
+card (`voodoo_fps_cap` is its old name; see [Frame rate
+cap](../CONFIGURATION.md#frame-rate-cap)).
 
 The Voodoo2 is a single board: SLI, two Voodoo2s drawing alternate
 lines, isn't emulated, so games see one card. The libretro core draws a
 Banshee or Voodoo3 in software whatever `voodoo_renderer` says.
 
 [The 3dfx OpenGL renderer](../CONFIGURATION.md#the-3dfx-opengl-renderer)
-explains the OpenGL settings, and [3dfx frame rate
-cap](../CONFIGURATION.md#3dfx-frame-rate-cap) and [3dfx
-gamma](../CONFIGURATION.md#3dfx-gamma) the other two.
+explains the OpenGL settings, and [3dfx
+gamma](../CONFIGURATION.md#3dfx-gamma) the gamma.

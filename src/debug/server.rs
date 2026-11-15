@@ -98,6 +98,7 @@ fn router(state: AppState) -> Router {
         .route("/api/drive/{letter}", put(mount).post(mount).delete(unmount))
         .route("/api/state/{action}", post(state_file))
         .route("/api/speed", post(speed))
+        .route("/api/fps_cap", post(fps_cap))
         .route("/api/control/{action}", post(control))
         .route("/api/control/wait", get(wait_pause))
         .route("/api/registers", get(regs_get).put(regs_put))
@@ -1316,6 +1317,30 @@ async fn speed(State(s): State<AppState>, body: Bytes) -> ApiResult {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct FpsCapBody {
+    /// As `fps_cap` in the configuration file: auto, off or a number,
+    /// in a string or not. Null is off, as `/api/status` gives it, so a
+    /// client can send back the `video.fps_cap` it read there.
+    fps_cap: Value,
+}
+
+async fn fps_cap(State(s): State<AppState>, body: Bytes) -> ApiResult {
+    let b: FpsCapBody = from_value(parse_body(&body)?)?;
+    let value = match &b.fps_cap {
+        Value::String(value) => rust_dos::frame_cap::parse(value),
+        Value::Number(n) => rust_dos::frame_cap::parse(&n.to_string()),
+        Value::Null => Some(rust_dos::frame_cap::Cap::Off),
+        _ => None,
+    };
+    let Some(cap) = value else {
+        let why = format!("invalid fps_cap {} (auto, off, or 10 to 240)", b.fps_cap);
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, why));
+    };
+    s.call_json(Cmd::FpsCap { cap }, DEFAULT_TIMEOUT).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ControlBody {
     count: Option<u64>,
     until: Option<String>,
@@ -2210,7 +2235,8 @@ REQUESTS AND THE JOURNAL
   registers_written, breakpoint_set, breakpoint_removed, watchpoint_set,
   watchpoint_removed, break_on, drive_mounted, drive_unmounted,
   images_swapped, shared_synced, state_saved, state_loaded, debugger_reset,
-  speed_changed, settings_window, host_input, shutdown (always last).
+  speed_changed, fps_cap_changed, settings_window, host_input, shutdown
+  (always last).
 
 STATUS / SCREEN
   GET  /api/status                         emulator state, CS:IP, video mode, trace fill, fps, speed,
@@ -2221,7 +2247,12 @@ STATUS / SCREEN
                                            (emulated s per wall s, full speed while near 1); fps the
                                            program draws; cpu_use is the percent of one host core the
                                            main thread is busy; audio_driver; frame_times: longest
-                                           frame and percentiles over the last 1024 frames, in ms
+                                           frame and percentiles over the last 1024 frames, in ms;
+                                           fps_cap: the frames through the frame rate cap (shown),
+                                           those it held, those late for their turn, the times its
+                                           turns started again from a late one (reanchors), and
+                                           dropped_ms, the time held frames waited for that
+                                           (features has "fps_cap_stats")
   GET  /api/underruns                      the sound device's underruns: audio_driver (what played:
                                            never measure on dummy), events (stretches of dry
                                            checks), dry_checks, and the last 32 with the time since
@@ -2480,6 +2511,10 @@ SPEED
   POST   /api/speed {"cycles":"auto"}   the CPU speed, as `cycles` takes it
                    (auto, auto 5000, max or a number); /api/status has
                    cycles_per_ms, the speed it runs at now
+  POST   /api/fps_cap {"fps_cap":"off"}   the frame rate cap, as `fps_cap`
+                   takes it (auto, off or 10 to 240; a number or null
+                   for off too), for the rest of the run; /api/status
+                   has video.fps_cap. A change appends fps_cap_changed
 
 WEBSOCKETS
   /ws/events[?after=S&volatile=false&log_after=N]

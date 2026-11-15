@@ -26,6 +26,9 @@ impl Bus {
         }
         self.lower_banshee_irq();
         self.voodoo = board.map(Voodoo::new);
+        if let Some(v) = &mut self.voodoo {
+            v.frame_cap = self.frame_cap.clone();
+        }
         if board.is_some_and(|b| b.banshee().is_some()) {
             self.banshee_settle();
         } else {
@@ -437,21 +440,6 @@ impl Bus {
         if let Some(v) = &mut self.voodoo {
             v.set_texture_sampling(sampling);
         }
-    }
-
-    /// The frame rate cap of the 3dfx card's swaps (`voodoo_fps_cap`).
-    pub fn set_voodoo_fps_cap(&mut self, fps: Option<u32>) {
-        if let Some(v) = &mut self.voodoo {
-            v.set_fps_cap(fps);
-        }
-    }
-
-    /// The timing the window shows the 3dfx card's frames at with a
-    /// variable refresh rate: the frame rate cap's, when the card drives
-    /// the monitor and the cap is below its refresh rate.
-    pub fn voodoo_cap_timing(&self) -> Option<crate::video::crt::CrtTiming> {
-        let v = self.voodoo.as_ref().filter(|v| v.output())?;
-        v.cap_timing().filter(|cap| cap.hz() < v.refresh_hz())
     }
 
     /// For the debugger's status: what the 3dfx card is doing.

@@ -1,9 +1,10 @@
 //! What the settings window's Stats page and the performance overlay show:
 //! the frames per second the program draws (`Bus::frames_drawn`), the
 //! display's refresh rate, the emulated CPU's speed, how much of it the
-//! dynamic recompiler runs and how much it sits halted, and how much of the
-//! host's time the emulator takes, now and over the last half minute. The
-//! frontends record each of their frames here, with the page open or not.
+//! dynamic recompiler runs and how much it sits halted, how much of the
+//! host's time the emulator takes, now and over the last half minute, and
+//! what the frame rate cap does to the program's frames. The frontends
+//! record each of their frames here, with the page open or not.
 
 use crate::bus::Bus;
 use std::collections::VecDeque;
@@ -61,6 +62,25 @@ pub struct StatsView {
     /// The last half minute of `fps` and `cpu_use`, oldest first.
     pub fps_history: Vec<f32>,
     pub cpu_history: Vec<f32>,
+    /// What the frame rate cap did, while a program shows its frames
+    /// through it: None while none come.
+    pub cap: Option<CapView>,
+}
+
+/// What the frame rate cap did over a sample (`frame_cap::Counters`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CapView {
+    /// The frames that went through the cap a second, and of them those
+    /// that waited for their turn, those that came after it, and those
+    /// from which the schedule started again.
+    pub shown: f32,
+    pub held: f32,
+    pub late: f32,
+    pub reanchors: f32,
+    /// The time held frames waited for the schedule's fresh starts, in
+    /// percent of the emulated time: the most a game whose logic steps
+    /// once a frame ran slow for them.
+    pub dropped: f32,
 }
 
 /// The samples on their way, and the histories.
@@ -77,6 +97,8 @@ pub struct Stats {
     frames: u32,
     drawn: u64,
     last_drawn: Option<u64>,
+    /// The frame rate cap's counters when the sample began.
+    cap_from: Option<crate::frame_cap::Counters>,
     view: StatsView,
     fps_history: VecDeque<f32>,
     cpu_history: VecDeque<f32>,
@@ -92,6 +114,8 @@ impl Stats {
         let drawn = bus.frames_drawn;
         self.drawn += drawn - self.last_drawn.unwrap_or(drawn);
         self.last_drawn = Some(drawn);
+        let counters = bus.frame_cap.get().counters();
+        let cap_from = *self.cap_from.get_or_insert(counters);
         // A loaded save state can take the clock back; one that takes it
         // ahead is passed over by `clock_moved`.
         let now = bus.clock.now_ns();
@@ -122,6 +146,18 @@ impl Stats {
         let share = |part: u64, whole: u64| if whole == 0 { 0.0 } else { part as f32 * 100.0 / whole as f32 };
         self.view.recompiled = share(self.translated, self.executed);
         self.view.halted = share(self.halted, self.executed + self.halted);
+        self.view.cap = (counters.shown > cap_from.shown).then(|| {
+            let rate = |now: u64, from: u64| now.saturating_sub(from) as f32 / seconds;
+            let dropped = counters.dropped_ns.saturating_sub(cap_from.dropped_ns);
+            CapView {
+                shown: rate(counters.shown, cap_from.shown),
+                held: rate(counters.held, cap_from.held),
+                late: rate(counters.late, cap_from.late),
+                reanchors: rate(counters.reanchors, cap_from.reanchors),
+                dropped: share(dropped, self.emulated_ns),
+            }
+        });
+        self.cap_from = Some(counters);
         self.view.render_ms = self.render.as_secs_f32() * 1000.0 / self.frames as f32;
         for (history, value) in [(&mut self.fps_history, self.view.fps), (&mut self.cpu_history, self.view.cpu_use)] {
             if history.len() == HISTORY {
@@ -224,6 +260,36 @@ mod tests {
         }
         let view = stats.view();
         assert!((view.emulated_speed - 1.0).abs() < 0.01, "10 minutes ahead: {:?}", view);
+    }
+
+    #[test]
+    fn what_the_frame_rate_cap_did_comes_a_second() {
+        let mut bus = Bus::new(PathBuf::from("."));
+        let mut stats = Stats::new();
+        stats.record(&bus, FrameTimes::default());
+        for _ in 0..25 {
+            bus.clock.icount += bus.clock.cycles_per_ms() as u64 * 10;
+            stats.record(&bus, frame(10, 5));
+        }
+        assert_eq!(stats.view().cap, None, "no frame through the cap");
+        // A program held to 50, each frame after the first waiting 16 ms.
+        bus.frame_cap.set(Some(50));
+        let ms = 1_000_000;
+        for _ in 0..25 {
+            let now = bus.clock.now_ns();
+            let at = now + 4 * ms;
+            let until = bus.frame_cap.wait(at, None).unwrap_or(at);
+            bus.frame_cap.shown(until);
+            bus.clock.icount += (until - now) * bus.clock.cycles_per_ms() as u64 / ms;
+            stats.record(&bus, frame(20, 5));
+        }
+        let cap = stats.view().cap.unwrap();
+        assert!((cap.shown - 50.0).abs() < 5.0, "{:?}", cap);
+        assert!(
+            cap.held > 40.0 && cap.late == 0.0 && cap.dropped == 0.0,
+            "{:?}",
+            cap
+        );
     }
 
     #[test]

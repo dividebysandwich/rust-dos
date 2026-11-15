@@ -223,8 +223,13 @@ fn run_machine(dir: std::path::PathBuf, rx: mpsc::Receiver<super::super::Request
             hub.state_done(&cpu, request, result);
         }
         while let Some(request) = hub.next_speed_request() {
-            let cycles = request.cycles.clone();
-            hub.speed_done(&cpu, request, Ok(json!({"cycles": cycles})));
+            let reply = match &request.change {
+                super::super::SettingChange::Cycles(cycles) => json!({"cycles": cycles}),
+                super::super::SettingChange::FpsCap(cap) => {
+                    json!({"fps_cap": rust_dos::frame_cap::name(*cap)})
+                }
+            };
+            hub.speed_done(&cpu, request, Ok(reply));
         }
         if !hub.paused {
             let hot = hub.begin_batch(&cpu);
@@ -396,6 +401,32 @@ fn other_bodies_with_a_field_they_do_not_have_are_refused() {
     let refused = rig.post("/api/control/step", json!({"cnt": 5}));
     assert_eq!(refused.status, 400, "{}", refused.body);
     assert_eq!(rig.post("/api/speed", json!({"cycles": "max", "turbo": true})).status, 400);
+}
+
+#[test]
+fn a_frame_rate_cap_change_is_journalled_and_takes_what_the_status_gives() {
+    let rig = Rig::new("fps-cap");
+    let seq = |rig: &Rig| rig.get("/api/status").json()["state_seq"].as_u64().unwrap();
+    // `video.fps_cap` in `/api/status` is "auto", a number or null.
+    for (sent, taken) in [(json!("auto"), "auto"), (json!(30), "30"), (json!(null), "off")] {
+        let before = seq(&rig);
+        let changed = rig.post("/api/fps_cap", json!({ "fps_cap": sent }));
+        assert_eq!(changed.status, 200, "{}", changed.body);
+        assert_eq!(changed.json()["fps_cap"], taken);
+        assert!(seq(&rig) > before, "a change of {} moves state_seq", sent);
+    }
+    let journal = rig.get("/api/journal?after=0&type=fps_cap_changed").json();
+    let entries = journal["entries"].as_array().unwrap();
+    let taken: Vec<&str> = entries.iter().map(|e| e["fps_cap"].as_str().unwrap()).collect();
+    assert_eq!(taken, ["auto", "30", "off"]);
+    // What `fps_cap` doesn't take is refused before it reaches the
+    // machine, and changes nothing.
+    for bad in [json!([60]), json!("fast"), json!("9"), json!(241), json!(true)] {
+        let refused = rig.post("/api/fps_cap", json!({ "fps_cap": bad }));
+        assert_eq!(refused.status, 400, "{}: {}", bad, refused.body);
+    }
+    let journal = rig.get("/api/journal?after=0&type=fps_cap_changed").json();
+    assert_eq!(journal["entries"].as_array().unwrap().len(), 3);
 }
 
 #[test]
