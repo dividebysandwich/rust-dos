@@ -49,9 +49,11 @@ depends on it, and where Direct3D has no one behaviour, the card keeps its
 own rule. Each is stated where its subject is in chapter 9; these are the
 ones that differ from what Direct3D was measured or documented to do:
 
-- A vertex at a point or spot light's own position gets the light's ambient
-  colour. Direct3D adds nothing there. No known game depends on it; matching
-  costs a comparison for every vertex and light.
+- A vertex at a point light's own position gets the light's ambient colour,
+  and so does one at a spot light's with a phi above pi. Direct3D adds
+  nothing there; a spot with a smaller phi adds nothing on the card too. No
+  known game depends on it; matching costs a comparison for every vertex
+  and light.
 - A spot light with no direction and a phi above pi lights by its cone's
   formula. Direct3D 8 gives such a light nothing, and Direct3D 7 refuses it.
   No known game depends on it; matching costs a comparison for every vertex
