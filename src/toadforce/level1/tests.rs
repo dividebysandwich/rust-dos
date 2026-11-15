@@ -578,6 +578,8 @@ fn the_decoder_knows_every_command_the_level_lists() {
         (SET_LIGHT, 29),
         (ENABLE_LIGHT, 3),
         (SET_CLIP_PLANE, 6),
+        (SET_BACK_MATERIAL, 18),
+        (SET_AMBIENT, 4),
         (SET_RENDER_TARGET, 9),
         (CLEAR, 5),
         (DEFINE_TEXTURE, 11),

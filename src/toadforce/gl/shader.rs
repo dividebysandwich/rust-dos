@@ -57,6 +57,19 @@ pub const ATTRIBUTES: [(u32, &str); 3 + SLOTS] = [
     (6, "a_tex3"),
 ];
 
+/// The attributes of a program that transforms: those, and the
+/// normal.
+pub const ATTRIBUTES_TNL: [(u32, &str); 4 + SLOTS] = [
+    (0, "a_pos"),
+    (1, "a_diffuse"),
+    (2, "a_specular"),
+    (3, "a_tex0"),
+    (4, "a_tex1"),
+    (5, "a_tex2"),
+    (6, "a_tex3"),
+    (7, "a_normal"),
+];
+
 /// The vertex shader of every program. Dividing the position by 1 / w
 /// has the host interpolate the colours and the coordinates with
 /// perspective correction, as `setup.rs` does; depth goes linearly
@@ -103,6 +116,239 @@ void main() {
     v_z = a_pos.z;
 }
 ";
+
+/// The vertex shader of a program that transforms: a vertex as the
+/// program gave it, through `u_all` to the clip coordinates that put
+/// it on the screen where `geometry::Setup::project` does. The host
+/// cuts the triangles, at the planes of its own for the eye and the
+/// target's edges, and at `gl_ClipDistance` for the near and the far
+/// plane, and rounds the positions of what is left to its own grid,
+/// as the card cuts first and rounds what is left. A position rounded
+/// here would move a triangle that crosses the eye's plane: the
+/// nearer a pixel of it is than the vertex, the further.
+/// What it interpolates is then right on the pieces only when it is
+/// interpolated with perspective correction, so the values that go
+/// linearly over the screen aren't outputs here: `fragment_tnl` makes
+/// them from `gl_FragCoord.w`, which is 1 / w.
+///
+/// `u_all` is the card's matrix row by row, which OpenGL reads as its
+/// transpose: the product with a column is the card's row vector
+/// times its matrix. `u_x`, `u_y` and `u_z` are `Transform`'s, with
+/// the far plane's flag after `u_z`'s two, and `u_shift` is what goes
+/// from a position of the card to the host's pixels. `u_eye` takes a
+/// vertex to camera space for the fog of `u_vfog` (start, end,
+/// density, and the mode, 0 for none, plus 4 for fog by the distance
+/// from the eye), which is rounded to a byte as the card's is.
+///
+/// With `u_lights` of 0 and above the colours are `raster::light`'s
+/// for the front of a triangle, from that many lights: `u_lpos` (the
+/// position, and the kind), `u_laxis` (and the range), `u_ldiffuse`
+/// (and the falloff), `u_lspecular` (and the spot's formula),
+/// `u_lambient`, `u_latt` (the attenuation) and `u_lcone` (the
+/// cosines of the inner and the outer half angle); the material's
+/// colours in `u_mat` (diffuse, specular, ambient, emissive) from the
+/// sources of `u_lsrc`; the ambient light and the material's power in
+/// `u_lmisc`; and in `u_lflags` whether there is specular light,
+/// whether it goes into the diffuse colour, whether the eye is where
+/// it is and not infinitely far, and whether normals are made of
+/// length 1 after `u_normals` took them to camera space. The powers
+/// are the host's `pow`, where the card has its own series.
+pub const VERTEX_TNL: &str = "
+uniform vec2 u_scale;
+uniform float u_bias;
+uniform mat4 u_all;
+uniform vec2 u_x;
+uniform vec2 u_y;
+uniform vec3 u_z;
+uniform float u_shift;
+uniform mat4 u_eye;
+uniform vec4 u_vfog;
+uniform int u_lights;
+uniform vec4 u_lpos[8];
+uniform vec4 u_laxis[8];
+uniform vec4 u_ldiffuse[8];
+uniform vec4 u_lspecular[8];
+uniform vec4 u_lambient[8];
+uniform vec4 u_latt[8];
+uniform vec4 u_lcone[8];
+uniform vec4 u_mat[4];
+uniform vec4 u_lmisc;
+uniform ivec4 u_lsrc;
+uniform ivec4 u_lflags;
+uniform mat3 u_normals;
+in vec4 a_pos;
+in vec4 a_diffuse;
+in vec4 a_specular;
+in vec4 a_tex0;
+in vec4 a_tex1;
+in vec4 a_tex2;
+in vec4 a_tex3;
+in vec3 a_normal;
+out vec4 v_diffuse;
+out vec4 v_specular;
+out vec4 v_tex[4];
+out float v_zw;
+invariant gl_Position;
+// `math::pow_unit`.
+float pow_unit(float x, float y) {
+    if (!(y > 0.0)) {
+        return 1.0;
+    }
+    if (!(x > 0.0)) {
+        return 0.0;
+    }
+    return x >= 1.0 ? 1.0 : pow(x, y);
+}
+// `geometry::normalize`.
+vec3 unit(vec3 a) {
+    float len = length(a);
+    return len > 0.0 && !isinf(len) ? a / len : a;
+}
+vec4 source(int from, vec4 material, vec4 diffuse, vec4 specular) {
+    return from == 1 ? diffuse : from == 2 ? specular : material;
+}
+// `Lighting::light` for the vertex at `eye` with the normal `n`.
+void light(vec3 eye, vec3 n, vec4 own_diffuse, vec4 own_specular) {
+    vec4 m_diffuse = source(u_lsrc.x, u_mat[0], own_diffuse, own_specular);
+    vec4 m_specular = source(u_lsrc.y, u_mat[1], own_diffuse, own_specular);
+    vec4 m_ambient = source(u_lsrc.z, u_mat[2], own_diffuse, own_specular);
+    vec4 m_emissive = source(u_lsrc.w, u_mat[3], own_diffuse, own_specular);
+    vec3 ambient = u_lmisc.xyz;
+    vec3 lit = vec3(0.0);
+    vec3 shine = vec3(0.0);
+    vec3 to_eye = u_lflags.z != 0 ? unit(-eye) : vec3(0.0, 0.0, -1.0);
+    for (int i = 0; i < u_lights; i++) {
+        float kind = u_lpos[i].w;
+        vec3 axis = u_laxis[i].xyz;
+        vec3 to = -axis;
+        float reach = 1.0;
+        if (kind != 3.0) {
+            to = u_lpos[i].xyz - eye;
+            float d = length(to);
+            if (d > u_laxis[i].w) {
+                continue;
+            }
+            vec3 a = u_latt[i].xyz;
+            float under = a.x + a.y * d + a.z * d * d;
+            to = unit(to);
+            reach = under > 0.0 ? 1.0 / under : 1.0;
+        }
+        float cone = 1.0;
+        if (kind == 2.0) {
+            float rho = -dot(to, axis);
+            float inner = u_lcone[i].x;
+            float outer = u_lcone[i].y;
+            float falloff = u_ldiffuse[i].w;
+            if (rho <= outer) {
+                cone = 0.0;
+            } else if (u_lspecular[i].w == 1.0) {
+                cone = pow_unit(rho, falloff);
+            } else if (rho > inner || inner <= outer) {
+                cone = 1.0;
+            } else {
+                cone = pow_unit((rho - outer) / (inner - outer), falloff);
+            }
+        }
+        float factor = reach * cone;
+        if (!(factor > 0.0) || isinf(factor)) {
+            continue;
+        }
+        ambient += u_lambient[i].xyz * factor;
+        float facing = dot(n, to);
+        if (!(facing > 0.0)) {
+            continue;
+        }
+        lit += u_ldiffuse[i].xyz * facing * factor;
+        if (u_lflags.x != 0) {
+            float glint = dot(n, unit(to + to_eye));
+            if (glint > 0.0) {
+                shine += u_lspecular[i].xyz * pow_unit(glint, u_lmisc.w) * factor;
+            }
+        }
+    }
+    vec3 d = m_emissive.rgb + m_ambient.rgb * ambient + m_diffuse.rgb * lit;
+    vec3 s = vec3(0.0);
+    if (u_lflags.y != 0) {
+        d += m_specular.rgb * shine;
+    } else {
+        s = m_specular.rgb * shine;
+    }
+    // Bytes, as the card rounds a vertex's colours.
+    v_diffuse = floor(clamp(vec4(d, m_diffuse.a), 0.0, 1.0) * 255.0 + 0.5);
+    v_specular = floor(clamp(vec4(s, 1.0), 0.0, 1.0) * 255.0 + 0.5);
+}
+void main() {
+    vec4 c = u_all * vec4(a_pos.xyz, 1.0);
+    float w = c.w;
+    // The host's x and y times w, of the screen's
+    // x[0] + (c.x / w + 1) * x[1] and y[0] + (1 - c.y / w) * y[1].
+    vec2 at = vec2(
+        ((u_x.x + u_x.y + u_shift) * u_scale.x - 1.0) * w + c.x * u_x.y * u_scale.x,
+        ((u_y.x + u_y.y + u_shift) * u_scale.y - 1.0) * w - c.y * u_y.y * u_scale.y);
+    // Depth is z[0] + c.z / w * z[1], less the bias.
+    gl_Position = vec4(at, ((u_z.x - u_bias) * 2.0 - 1.0) * w + 2.0 * u_z.y * c.z, w);
+    gl_ClipDistance[0] = c.z;
+    gl_ClipDistance[1] = u_z.z != 0.0 ? w - c.z : 1.0;
+    v_diffuse = a_diffuse.zyxw;
+    v_specular = a_specular.zyxw;
+    vec3 e = vec3(0.0);
+    if (u_lights >= 0 || u_vfog.w != 0.0) {
+        e = (u_eye * vec4(a_pos.xyz, 1.0)).xyz;
+    }
+    if (u_lights >= 0) {
+        vec3 n = u_normals * a_normal;
+        if (u_lflags.w != 0) {
+            n = unit(n);
+        }
+        light(e, n, v_diffuse / 255.0, v_specular / 255.0);
+    }
+    if (u_vfog.w != 0.0) {
+        float d = u_vfog.w >= 4.0 ? length(e) : abs(e.z);
+        float mode = u_vfog.w >= 4.0 ? u_vfog.w - 4.0 : u_vfog.w;
+        float f = mode == 1.0 ? exp(-u_vfog.z * d)
+            : mode == 2.0 ? exp(-(u_vfog.z * d) * (u_vfog.z * d))
+            : (u_vfog.y - d) / (u_vfog.y - u_vfog.x);
+        // No number, as at the end of a fog that starts where it
+        // ends, is no fog.
+        f = isnan(f) ? 1.0 : clamp(f, 0.0, 1.0);
+        v_specular.a = floor(f * 255.0 + 0.5);
+    }
+    v_tex[0] = a_tex0;
+    v_tex[1] = a_tex1;
+    v_tex[2] = a_tex2;
+    v_tex[3] = a_tex3;
+    v_zw = u_z.x * w + u_z.y * c.z;
+}
+";
+
+/// The inputs of `fragment` that go linearly over the screen, and
+/// what `fragment_tnl` has in their place.
+const LINEAR: &str = "noperspective in vec4 v_stw[4];
+noperspective in float v_q;
+noperspective in float v_z;
+";
+const LINEAR_TNL: &str = "in float v_zw;
+";
+const MAIN: &str = "void main() {
+";
+const MAIN_TNL: &str = "void main() {
+    float v_q = gl_FragCoord.w;
+    vec4 v_stw[4];
+    for (int i = 0; i < 4; i++) {
+        v_stw[i] = v_tex[i] * v_q;
+    }
+    float v_z = v_zw * v_q;
+";
+
+/// The fragment shader of `key` for `VERTEX_TNL`: `fragment`'s, with
+/// 1 / w from the host's own, and the coordinates times it and the
+/// depth from what the host interpolates with perspective correction
+/// times it.
+pub fn fragment_tnl(key: &Key) -> String {
+    fragment(key)
+        .replacen(LINEAR, LINEAR_TNL, 1)
+        .replacen(MAIN, MAIN_TNL, 1)
+}
 
 /// `sample.rs` in GLSL, for the samples the shader takes itself. A
 /// stage's numbers come in its uniforms: `ts` is the size of level 0,
@@ -335,19 +581,20 @@ uniform vec3 u_fog;
 in vec4 v_diffuse;
 in vec4 v_specular;
 in vec4 v_tex[4];
-noperspective in vec4 v_stw[4];
-noperspective in float v_q;
-noperspective in float v_z;
-out vec4 o_color;
+",
+    );
+    head.push_str(LINEAR);
+    head.push_str(
+        "out vec4 o_color;
 ivec4 mul(ivec4 a, ivec4 b) {
     return (a * b + 127) / 255;
 }
 ",
     );
     head.push_str(SAMPLING);
-    let mut body = String::from(
-        "void main() {
-    ivec4 cur = ivec4(0);
+    let mut body = String::from(MAIN);
+    body.push_str(
+        "    ivec4 cur = ivec4(0);
     ivec4 tmp = ivec4(0);
     ivec4 dif = ivec4(0);
     ivec4 spc = ivec4(0);
@@ -626,6 +873,24 @@ uniform ivec4 u_tb{stage};"
 /// None, and setting it does nothing.
 pub struct Uniforms {
     pub scale: Option<glow::UniformLocation>,
+    /// `VERTEX_TNL`'s: `u_all`, `u_x`, `u_y`, `u_z`, `u_shift`,
+    /// `u_eye` and `u_vfog`, and the lighting's.
+    pub all: Option<glow::UniformLocation>,
+    pub x: Option<glow::UniformLocation>,
+    pub y: Option<glow::UniformLocation>,
+    pub z: Option<glow::UniformLocation>,
+    pub shift: Option<glow::UniformLocation>,
+    pub eye: Option<glow::UniformLocation>,
+    pub vfog: Option<glow::UniformLocation>,
+    pub lights: Option<glow::UniformLocation>,
+    /// `u_lpos`, `u_laxis`, `u_ldiffuse`, `u_lspecular`, `u_lambient`,
+    /// `u_latt` and `u_lcone`.
+    pub lamps: [Option<glow::UniformLocation>; 7],
+    pub mat: Option<glow::UniformLocation>,
+    pub lmisc: Option<glow::UniformLocation>,
+    pub lsrc: Option<glow::UniformLocation>,
+    pub lflags: Option<glow::UniformLocation>,
+    pub normals: Option<glow::UniformLocation>,
     /// The depth bias, as a part of the depth buffer's range.
     pub bias: Option<glow::UniformLocation>,
     pub factor: Option<glow::UniformLocation>,
@@ -656,6 +921,21 @@ impl Locations for Uniforms {
             }
             Uniforms {
                 scale: at("u_scale"),
+                all: at("u_all"),
+                x: at("u_x"),
+                y: at("u_y"),
+                z: at("u_z"),
+                shift: at("u_shift"),
+                eye: at("u_eye"),
+                vfog: at("u_vfog"),
+                lights: at("u_lights"),
+                lamps: ["lpos", "laxis", "ldiffuse", "lspecular", "lambient", "latt", "lcone"]
+                    .map(|name| at(&format!("u_{name}"))),
+                mat: at("u_mat"),
+                lmisc: at("u_lmisc"),
+                lsrc: at("u_lsrc"),
+                lflags: at("u_lflags"),
+                normals: at("u_normals"),
                 bias: at("u_bias"),
                 factor: at("u_factor"),
                 alpha_ref: at("u_alpha_ref"),
@@ -689,6 +969,18 @@ mod tests {
         let b = steps_key(&[colours, write(0x7)]);
         assert_eq!(a, b);
         assert_ne!(a, steps_key(&[colours, Step::Dither, write(0xF)]));
+    }
+
+    #[test]
+    fn a_transforming_programs_fragment_makes_the_linear_inputs() {
+        let key = Key {
+            steps: vec![Step::Colours { specular: false }],
+            native: 0,
+        };
+        let (plain, tnl) = (fragment(&key), fragment_tnl(&key));
+        assert!(plain.contains(LINEAR) && plain.contains(MAIN));
+        assert!(!tnl.contains("noperspective"));
+        assert!(tnl.contains(LINEAR_TNL) && tnl.contains(MAIN_TNL));
     }
 
     #[test]

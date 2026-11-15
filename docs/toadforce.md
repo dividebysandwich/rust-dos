@@ -307,6 +307,8 @@ State:
 | `SET_LIGHT` | slot 0 to 7, type, colours, position, direction, range, falloff, attenuation, cone, spot model |
 | `ENABLE_LIGHT` | slot, on or off |
 | `SET_CLIP_PLANE` | index 0 to 5, 4 floats |
+| `SET_BACK_MATERIAL` | the material of a triangle's back, as `SET_MATERIAL`'s |
+| `SET_AMBIENT` | the ambient light's red, green and blue as floats |
 
 Surfaces:
 
@@ -588,11 +590,14 @@ section covers names that section.
 
 ### What costs speed
 
-- **Vertex work on the processor**, with both renderers. The card
-  transforms, lights, clips and culls every vertex on the emulator's
-  thread, and works out a draw's setup (matrix products, lights in
-  camera space) again for every draw. The OpenGL front end transforms
-  and lights its vertices on the processor too.
+- **Vertex work on the processor.** The software renderer transforms,
+  lights, clips and culls every vertex on the emulator's thread, and
+  so does the OpenGL renderer for the draws its vertex shader doesn't
+  take ("The OpenGL renderer"): blended vertices, a back lit by
+  itself, generated or transformed texture coordinates, clip planes
+  of the program's, flat shading, lines and points. A draw's setup
+  (matrix products, lights in camera space) is worked out again for
+  every draw.
 - **The software renderer** is too slow for some games at their usual
   resolutions ("The software renderer"). It draws wherever the OpenGL
   renderer doesn't: a host without desktop OpenGL 3.2, a window drawn
@@ -630,9 +635,10 @@ and where the OpenGL renderer may differ.
 
 The card's own code defines transform, lighting, fog factors, texture
 coordinate generation and clipping: `raster::geometry`, `raster::light`
-and `raster::math`, on the processor for both renderers. It computes in
-IEEE single precision, with these exceptions, so that its results are
-the same on every host:
+and `raster::math`, on the processor. The software renderer draws from
+it alone, and the OpenGL renderer does for the draws its vertex shader
+doesn't take. It computes in IEEE single precision, with these
+exceptions, so that its results are the same on every host:
 
 - cosines, e to a power and the powers of specular highlights and spot
   falloffs come from its own series in the four exactly rounded
@@ -736,7 +742,8 @@ smoke and particles.
 
 | Source | Bound |
 |---|---|
-| Vertex arithmetic on the host: the vertex shader's conversion of the card's screen positions, rounded to 1/256 of a pixel, to the host's coordinates, and its operation order and fused multiply-add once it transforms and lights | positions within 1/256 pixel, so a pixel on a triangle's edge may fall on the other side |
+| Vertex arithmetic on the host: the vertex shader's conversion of the card's screen positions, rounded to 1/256 of a pixel, to the host's coordinates | positions within 1/256 pixel, so a pixel on a triangle's edge may fall on the other side |
+| Vertices the host transforms and lights: the matrix product and the division in the host's arithmetic, its own cut at the planes, its own rounding of positions to its grid, where the card rounds to 1/256 of a pixel after its cut, and lighting and fog in the host's operation order with its `pow` and `exp`, where the card has its own series | positions within 1/256 pixel, as above, and the bounds below on what is interpolated. Measured on the test's triangles, which cross the eye's plane and the far one: colours 1 in 255, depth 1 step of 16 bits, and up to 3 pixels of 4096 with the texel of the other side of a texel's edge; a lit sphere and fogged triangles came out with the card's colours. A draw the host transforms and one the card transforms don't give a surface the same depth to the last step, so a second pass over a surface whose depth test needs the first pass's depth (`ZFUNC` equal, or less or equal where the second comes out a step further) agrees only where both passes go the same way (#1132) |
 | Interpolation of colours and coordinates | 1 in 255 on a stage input. An operation that multiplies its result passes the step on multiplied: 8 after `DOTPRODUCT3` and `MODULATE2X` (Giants' ground, measured) |
 | A sample of a 2D texture | 1 in 255, and 2 with a projected texture. The shader takes the card's steps in the card's whole numbers (`shader::SAMPLING`): the level of detail, the levels and the filter, the coordinates in 1/256 of a texel, the weights of 8 bits. What is left is a coordinate or a level of detail that the host's interpolation puts on the other side of one of those steps: a weight one of 256 off, or the next level where the level of detail is within 1/4096 of the change. Coordinates the card has exactly (a texel to a pixel from whole coordinates) give the same texels |
 | A sample of a cube map | 1 in 255 on a smooth texture, 3 where neighbouring texels differ by most of a channel's range. The host's own filter samples it: it rounds a weight to its 8 bits where the card cuts it off, works out the face's coordinates in its own arithmetic, and picks the mip level |
@@ -770,9 +777,12 @@ Matrices, lights, material, factors and fog parameters are values
 supplied with the draw and are in neither key.
 
 The fragment key is built (`raster::pipeline`, the steps). The vertex
-key is the design for a vertex shader and isn't built: the card's
-vertex work runs on the processor for both renderers, as code of the
-software renderer (`raster::geometry`, `raster::light`).
+key is the design for a generated vertex shader and isn't built. The
+card's vertex work is code of the software renderer
+(`raster::geometry`, `raster::light`), on the processor. The OpenGL
+renderer has one fixed vertex shader that does the same work for most
+draws, with the lights and the fog as values (`shader::VERTEX_TNL`),
+and takes the others as the screen vertices that code makes.
 
 A key is lowered once into a short list of typed operations (sample
 stage 2, modulate, add signed, clamp, fog blend). Two back ends consume
@@ -814,10 +824,23 @@ run on one thread, and the card hands the renderer its queued draws
 directly, at the points where the software renderer would draw them
 (see "Between the card and the host renderer").
 
-- **Vertex work** is the card's, on the processor: the host gets screen
-  vertices after the card's transform, lighting, clipping and culling,
-  and keeps no copies of the vertex buffers in card memory. The card is
-  shaped so that a generated vertex shader could do the work instead.
+- **Vertex work** is the host's for most draws and the card's, on the
+  processor, for the rest. A draw of filled, smooth-shaded triangles
+  goes to the host as the program gave it (`gpu::Geometry`): the
+  vertex words, the triangles as indices, the product of world, view
+  and projection with the viewport, and the lights, the material and
+  the vertex fog of the state. A vertex shader takes the vertices to
+  the screen, lights them and works out their fog, and the host cuts
+  the triangles at the card's planes and leaves out those `CULLMODE`
+  names. The card keeps the draws with blend weights, with a back lit
+  by itself (`TWO_SIDED_LIGHTING`), with texture coordinates it makes
+  or puts through a texture matrix, with point sizes or with clip
+  planes of the program's (`geometry::Setup::hosted`), and flat
+  shading, lines and points: for those the host gets screen vertices
+  after the card's transform, lighting, clipping and culling. It
+  keeps no copies of the vertex buffers in card memory. Under
+  `--deterministic` the software renderer draws, so the card
+  transforms everything there.
 - **Textures** are host textures decoded once and kept by their
   description (format, size, levels and the offset of each image), with
   the write counters of the pages their images cover. A write to any of
@@ -1402,10 +1425,12 @@ The card has one level of 3D, so no key chooses one.
   video memory, cube maps and T&L lights skip. They don't run on a
   ToadForce.
 - **Renderer agreement.** Fixed scenes (one for each stage operation,
-  fog mode, blend mode, texture format and filter) drawn by both
-  renderers and compared within the bounds of "Where the OpenGL renderer
-  may differ" (`toadforce::gl::tests`). They need a desktop OpenGL
-  context and are run by hand; CI doesn't run them.
+  fog mode, blend mode, texture format and filter, and triangles the
+  host transforms: through the eye's plane and the far one, with each
+  cull mode and each vertex fog, and lit by each kind of light) drawn
+  by both renderers and compared within the bounds of "Where the
+  OpenGL renderer may differ" (`toadforce::gl::tests`). They need a
+  desktop OpenGL context and are run by hand; CI doesn't run them.
 - **A game's draws through both renderers.** `POST
   /api/toadforce/capture` records what the card is given
   (`toadforce::capture`), and the ignored test `replay_a_capture`

@@ -610,3 +610,108 @@ fn a_vertexs_weights_blend_the_world_matrices() {
     rig.triangles(0x006, &words(&vertices));
     assert_eq!(rig.drawn(0), corner);
 }
+
+/// A counterclockwise triangle over the target's top left half whose
+/// normals face away from the sun, with the colour `colour` at its
+/// vertices: its back, turned round, is lit.
+fn back_of(rig: &mut Rig, colour: u32) -> u32 {
+    let p = [[-1.0f32, 1.0, 0.5], [-1.0, -1.0, 0.5], [1.0, 1.0, 0.5]];
+    let mut vertices = Vec::new();
+    for p in p {
+        vertices.extend(words(&[p[0], p[1], p[2], 0.0, 0.0, 1.0]));
+        vertices.push(colour);
+    }
+    rig.triangles(XYZ | NORMAL | DIFFUSE, &vertices);
+    rig.px(8, 8)
+}
+
+#[test]
+fn the_back_of_a_triangle_has_a_material_of_its_own() {
+    let mut rig = Rig::new(Format::X8R8G8B8, None);
+    rig.states(&[
+        (RS_CULLMODE, 1),
+        (RS_TWO_SIDED_LIGHTING, 1),
+        (RS_COLORVERTEX, 0),
+    ]);
+    rig.light(0, &sun());
+    // `SET_MATERIAL` sets the material of both sides.
+    rig.material(&matte([1.0; 4]));
+    assert_eq!(back_of(&mut rig, 0), 0x00FF_FFFF);
+    let red = matte([1.0, 0.0, 0.0, 1.0]);
+    assert_eq!(rig.run(|w| encode::back_material(w, &red)), 0);
+    assert_eq!(back_of(&mut rig, 0), 0x00FF_0000);
+    // The front keeps its own.
+    assert_eq!(rig.lit([0.0, 0.0, -1.0]), 0x00FF_FFFF);
+    rig.material(&matte([0.0, 1.0, 0.0, 1.0]));
+    assert_eq!(back_of(&mut rig, 0), 0x0000_FF00);
+}
+
+#[test]
+fn the_ambient_light_is_the_states_colour_or_set_ambients_numbers() {
+    let mut rig = Rig::new(Format::X8R8G8B8, None);
+    rig.material(&Material {
+        ambient: [1.0; 4],
+        ..matte([0.0; 4])
+    });
+    rig.states(&[(RS_AMBIENT, 0x0080_4020)]);
+    assert_eq!(rig.lit([0.0, 0.0, -1.0]), 0x0080_4020);
+    // Numbers, which may be past what a byte holds.
+    assert_eq!(rig.run(|w| encode::ambient(w, &[0.25, 0.5, 2.0])), 0);
+    assert_eq!(rig.lit([0.0, 0.0, -1.0]), 0x0040_80FF);
+    // The state written again holds, with the value it had.
+    rig.states(&[(RS_AMBIENT, 0x0080_4020)]);
+    assert_eq!(rig.lit([0.0, 0.0, -1.0]), 0x0080_4020);
+}
+
+#[test]
+fn single_colour_adds_the_highlight_to_the_diffuse_colour() {
+    let mut rig = Rig::new(Format::X8R8G8B8, None);
+    rig.states(&[
+        (RS_SPECULARENABLE, 0),
+        (RS_LOCALVIEWER, 0),
+        (RS_SINGLE_COLOUR, 1),
+    ]);
+    rig.material(&Material {
+        specular: [0.5, 0.25, 0.0, 1.0],
+        power: 10.0,
+        ..matte([0.0, 0.0, 0.25, 1.0])
+    });
+    rig.light(0, &sun());
+    assert_eq!(rig.lit([0.0, 0.0, -1.0]), 0x0080_4040);
+    // The specular colour is black, so the rasteriser adds nothing
+    // more where it adds that.
+    rig.states(&[(RS_SPECULARENABLE, 1)]);
+    assert_eq!(rig.lit([0.0, 0.0, -1.0]), 0x0080_4040);
+    rig.states(&[(RS_SINGLE_COLOUR, 0)]);
+    assert_eq!(rig.lit([0.0, 0.0, -1.0]), 0x0080_4040);
+    rig.states(&[(RS_SPECULARENABLE, 0)]);
+    assert_eq!(rig.lit([0.0, 0.0, -1.0]), 0x0000_0040);
+}
+
+#[test]
+fn colorvertex_faces_names_the_sides_that_take_the_vertexs_colour() {
+    let mut rig = Rig::new(Format::X8R8G8B8, None);
+    rig.states(&[(RS_CULLMODE, 1), (RS_TWO_SIDED_LIGHTING, 1)]);
+    rig.material(&matte([1.0, 0.0, 0.0, 1.0]));
+    rig.light(0, &sun());
+    // A clockwise triangle that faces the sun, with blue vertices.
+    let front = |rig: &mut Rig| {
+        let p = [[-1.0f32, 1.0, 0.5], [1.0, 1.0, 0.5], [-1.0, -1.0, 0.5]];
+        let mut vertices = Vec::new();
+        for p in p {
+            vertices.extend(words(&[p[0], p[1], p[2], 0.0, 0.0, -1.0]));
+            vertices.push(0xFF00_00FF);
+        }
+        rig.triangles(XYZ | NORMAL | DIFFUSE, &vertices);
+        rig.px(8, 8)
+    };
+    // Both sides after a reset.
+    assert_eq!(front(&mut rig), 0x0000_00FF);
+    assert_eq!(back_of(&mut rig, 0xFF00_00FF), 0x0000_00FF);
+    rig.states(&[(RS_COLORVERTEX_FACES, 2)]);
+    assert_eq!(front(&mut rig), 0x00FF_0000);
+    assert_eq!(back_of(&mut rig, 0xFF00_00FF), 0x0000_00FF);
+    rig.states(&[(RS_COLORVERTEX_FACES, 1)]);
+    assert_eq!(front(&mut rig), 0x0000_00FF);
+    assert_eq!(back_of(&mut rig, 0xFF00_00FF), 0x00FF_0000);
+}
