@@ -241,8 +241,9 @@ pub struct DrawState {
     pub coords: Vec<Coord>,
     /// For each slot in use, `WRAP0` to `WRAP7`'s bits for its
     /// coordinate set: bit n has coordinate n go the shorter way round
-    /// between a primitive's vertices (`raster::wrap`).
-    pub wrap: Vec<u8>,
+    /// between a primitive's vertices (`raster::wrap`). 0 for a slot
+    /// not in use.
+    pub wrap: [u8; SLOTS],
     pub shape: Shape,
     /// Whether `Specular` is read.
     pub specular: bool,
@@ -722,10 +723,11 @@ pub fn lower(l: &Level1) -> Result<DrawState, Error> {
         clip,
         tex: texs,
         sets: coords.iter().map(|c| c.set).collect(),
-        wrap: coords
-            .iter()
-            .map(|c| (l.state(RS_WRAP0 + c.set as u32 % 8) & 0xF) as u8)
-            .collect(),
+        wrap: std::array::from_fn(|slot| {
+            coords.get(slot).map_or(0, |c: &Coord| {
+                (l.state(RS_WRAP0 + c.set as u32 % 8) & 0xF) as u8
+            })
+        }),
         coords,
         shape: Shape {
             half_centre: on(RS_PIXEL_CENTRE),

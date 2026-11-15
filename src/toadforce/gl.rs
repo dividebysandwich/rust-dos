@@ -617,7 +617,7 @@ impl ToadForceGl {
                 tex: Default::default(),
                 sets: Vec::new(),
                 coords: Vec::new(),
-                wrap: Vec::new(),
+                wrap: [0; pipeline::SLOTS],
                 shape: Shape {
                     half_centre: false,
                     cull: 1,

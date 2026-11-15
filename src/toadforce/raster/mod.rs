@@ -253,9 +253,12 @@ fn wrap(
 ) {
     let mut done = 0u32;
     for (i, &bits) in state.wrap.iter().enumerate() {
+        if bits == 0 {
+            continue;
+        }
         let at = slot(i);
         // Two slots may be of one set of a vertex in screen space.
-        if bits == 0 || done >> at & 1 != 0 {
+        if done >> at & 1 != 0 {
             continue;
         }
         done |= 1 << at;
@@ -624,7 +627,7 @@ impl Renderer {
             false => Queue::Software(prims),
         };
         let (shape, sets) = (&state.shape, &state.sets[..]);
-        let wraps = state.wrap.iter().any(|&bits| bits != 0);
+        let wraps = state.wrap != [0; pipeline::SLOTS];
         let set = |slot: usize| sets[slot] as usize;
         let v = |i: usize| &vertices[order[i] as usize];
         pieces(primitive, order.len(), |piece| match piece {
@@ -682,7 +685,7 @@ impl Renderer {
         // A slot's coordinates are worked out for the slot.
         let slots: [u8; pipeline::SLOTS] = std::array::from_fn(|i| i as u8);
         let sets = &slots[..state.coords.len()];
-        let wraps = state.wrap.iter().any(|&bits| bits != 0);
+        let wraps = state.wrap != [0; pipeline::SLOTS];
         let v = |i: usize| &lit[order[i] as usize];
         // What crosses a plane in force is cut there.
         pieces(primitive, order.len(), |piece| match piece {

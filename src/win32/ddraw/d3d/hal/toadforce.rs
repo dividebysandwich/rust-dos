@@ -319,6 +319,10 @@ pub struct Sent {
     textures: [Option<Texture>; UNITS as usize],
     bound: [bool; UNITS as usize],
     geometry: Geometry,
+    /// `WRAP0` to `WRAP7`. They are apart from `render` so that a
+    /// draw that wraps nothing, as nearly every draw does, pays one
+    /// comparison for the eight of them.
+    wrap: [u8; 8],
 }
 
 /// What the HAL gives the card for the vertices the card transforms
@@ -351,6 +355,7 @@ impl Sent {
             viewport: Viewport::default(),
             textures: Default::default(),
             bound: [false; UNITS as usize],
+            wrap: [0; 8],
             geometry: Geometry {
                 transforms: [pipeline::IDENTITY; TRANSFORMS],
                 material: Material::default(),
@@ -364,7 +369,7 @@ impl Sent {
 
 /// The render states of the card's transform and lighting, which a
 /// draw of screen vertices leaves at their reset values.
-const GEOMETRY: [u32; 22] = [
+const GEOMETRY: [u32; 14] = [
     states::RS_VERTEXBLEND,
     states::RS_RANGEFOGENABLE,
     states::RS_CLIPPING,
@@ -379,16 +384,6 @@ const GEOMETRY: [u32; 22] = [
     states::RS_AMBIENTMATERIALSOURCE,
     states::RS_EMISSIVEMATERIALSOURCE,
     states::RS_CLIPPLANEENABLE,
-    // Texture wrapping, which the pipeline does to the vertices it
-    // keeps before it clips them.
-    states::RS_WRAP0,
-    states::RS_WRAP0 + 1,
-    states::RS_WRAP0 + 2,
-    states::RS_WRAP0 + 3,
-    states::RS_WRAP0 + 4,
-    states::RS_WRAP0 + 5,
-    states::RS_WRAP0 + 6,
-    states::RS_WRAP0 + 7,
 ];
 
 /// The render states the HAL sets: the rasteriser's, and `GEOMETRY`.
@@ -854,11 +849,6 @@ fn render_value(d: &Device, def: &Def, setup: &Setup, depth: Option<Format>, lit
         RS_CLIPPLANEENABLE => (1 << setup.planes.len().min(CLIP_PLANES)) - 1,
         // As many weights as the card's vertices have (`card_layout`).
         RS_VERTEXBLEND => blended(setup).map_or(0, |matrices| matrices.len() as u32 - 1),
-        // Each coordinate set's wrapping, which the setup has with
-        // Direct3D 5's two states for the first set in it.
-        id if (RS_WRAP0..RS_WRAP0 + 8).contains(&id) => {
-            setup.wrap[(id - RS_WRAP0) as usize] as u32
-        }
         // The pipeline culls, makes the lines and points of the other
         // fill modes, and gives a flat primitive's vertices one color.
         RS_CULLMODE => 1,
@@ -1215,6 +1205,19 @@ fn bind_as(cpu: &mut Cpu, d: &Device, setup: &Setup, lit: bool) -> Option<Card> 
         if *have != want {
             pairs.push((id, want));
             *have = want;
+        }
+    }
+    // Each coordinate set's wrapping, which the setup has with
+    // Direct3D 5's two states for the first set in it. The card wraps
+    // the vertices it transforms; the pipeline has wrapped those it
+    // keeps before it clipped them, so the card gets none for them.
+    let wrap = if lit { setup.wrap } else { [0; 8] };
+    if sent.wrap != wrap {
+        for (set, (have, want)) in sent.wrap.iter_mut().zip(wrap).enumerate() {
+            if *have != want {
+                pairs.push((states::RS_WRAP0 + set as u32, want as u32));
+                *have = want;
+            }
         }
     }
     if !pairs.is_empty() {
