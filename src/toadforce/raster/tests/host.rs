@@ -44,6 +44,9 @@ struct Log {
     /// Images of textures taken from the host's copy of the surface
     /// they are.
     images_from_copies: u32,
+    /// Runs whose vertices the host was to transform (`Run::geometry`).
+    /// This host draws none of their triangles.
+    transformed_runs: u32,
 }
 
 /// Picks the states a host refuses, and why.
@@ -71,6 +74,9 @@ struct TestHost {
     textures: Vec<Texels>,
     /// The states the host refuses.
     declines: Declines,
+    /// Whether it takes the vertices of the states it doesn't refuse
+    /// to the screen itself (`Host::transforms`).
+    transforms: bool,
     log: Rc<RefCell<Log>>,
 }
 
@@ -205,8 +211,14 @@ impl Host for TestHost {
         (self.declines)(state)
     }
 
+    fn transforms(&self, _: &DrawState) -> bool {
+        self.transforms
+    }
+
     fn draw(&mut self, batch: &Batch, memory: &[u8], pages: &Pages) -> Vec<Surface> {
         self.log.borrow_mut().batches += 1;
+        let transformed = batch.runs.iter().filter(|r| r.geometry.is_some()).count();
+        self.log.borrow_mut().transformed_runs += transformed as u32;
         let surfaces: Vec<Surface> = std::iter::once(batch.target.colour)
             .chain(batch.target.depth_surface())
             .collect();
@@ -547,10 +559,159 @@ fn hosted(declines: Declines) -> (Rig, Rc<RefCell<Log>>) {
         copies: Vec::new(),
         textures: Vec::new(),
         declines,
+        transforms: false,
         log: log.clone(),
     };
     rig.card.set_host(Some(Box::new(host)), &mut rig.memory);
     (rig, log)
+}
+
+/// A rig with a host that takes every state and transforms the
+/// vertices of each draw it can, as the OpenGL one does.
+fn transforming() -> (Rig, Rc<RefCell<Log>>) {
+    let mut rig = Rig::new(FORMAT, Some(DEPTH_FORMAT));
+    let log = Rc::new(RefCell::new(Log::default()));
+    let host = TestHost {
+        copies: Vec::new(),
+        textures: Vec::new(),
+        declines: takes_all,
+        transforms: true,
+        log: log.clone(),
+    };
+    rig.card.set_host(Some(Box::new(host)), &mut rig.memory);
+    (rig, log)
+}
+
+/// What a draw of vertices the card transforms is made with, for
+/// `the_host_transforms_only_what_its_vertex_shader_does_as_the_card`.
+struct Untransformed {
+    name: &'static str,
+    states: &'static [(u32, u32)],
+    /// Stage 0's states, with a texture bound, for a layout with a
+    /// coordinate set.
+    stage: &'static [(u32, u32)],
+    primitive: u32,
+    fvf: u32,
+    /// The numbers after each vertex's position.
+    rest: &'static [f32],
+    /// Whether the host gets the vertices to transform.
+    host: bool,
+}
+
+#[test]
+fn the_host_transforms_only_what_its_vertex_shader_does_as_the_card() {
+    const XYZ: u32 = 0x002;
+    const XYZB1: u32 = 0x006;
+    const NORMAL: u32 = 0x010;
+    const PSIZE: u32 = 0x020;
+    const TEX1: u32 = 0x100;
+    let draw = |name, states, primitive, fvf, rest, host| Untransformed {
+        name,
+        states,
+        stage: &[],
+        primitive,
+        fvf,
+        rest,
+        host,
+    };
+    let lit: &[f32] = &[0.0, 0.0, -1.0];
+    let unlit = &[(RS_LIGHTING, 0)];
+    let coords = |name, stage, host| Untransformed {
+        stage,
+        ..draw(name, unlit, 4, XYZ | TEX1, &[0.25, 0.75], host)
+    };
+    let draws = [
+        draw("unlit list", unlit, 4, XYZ, &[], true),
+        draw("lit list", &[], 4, XYZ | NORMAL, lit, true),
+        draw("strip", &[], 5, XYZ | NORMAL, lit, true),
+        draw("fan", &[], 6, XYZ | NORMAL, lit, true),
+        draw(
+            "vertex fog",
+            &[(RS_FOGENABLE, 1), (RS_FOGVERTEXMODE, 3)],
+            4,
+            XYZ,
+            &[],
+            true,
+        ),
+        coords("coordinates", &[], true),
+        // Without lighting the back has the front's colours.
+        draw(
+            "two-sided unlit",
+            &[(RS_LIGHTING, 0), (RS_TWO_SIDED_LIGHTING, 1)],
+            4,
+            XYZ,
+            &[],
+            true,
+        ),
+        // A plane is cut at only with clipping on.
+        draw(
+            "clip plane without clipping",
+            &[(RS_CLIPPLANEENABLE, 1), (RS_CLIPPING, 0)],
+            4,
+            XYZ,
+            &[],
+            true,
+        ),
+        draw(
+            "two-sided",
+            &[(RS_TWO_SIDED_LIGHTING, 1)],
+            4,
+            XYZ | NORMAL,
+            lit,
+            false,
+        ),
+        draw("blended", &[(RS_VERTEXBLEND, 1)], 4, XYZB1, &[0.5], false),
+        draw("point sizes", unlit, 4, XYZ | PSIZE, &[2.0], false),
+        draw(
+            "point scale",
+            &[(RS_POINTSCALEENABLE, 1)],
+            4,
+            XYZ,
+            &[],
+            false,
+        ),
+        draw("clip plane", &[(RS_CLIPPLANEENABLE, 1)], 4, XYZ, &[], false),
+        coords(
+            "generated coordinates",
+            &[(TSS_TEXCOORDINDEX, 0x1_0000)],
+            false,
+        ),
+        coords("texture matrix", &[(TSS_TEXTURETRANSFORMFLAGS, 2)], false),
+        draw("flat", &[(RS_SHADEMODE, 1)], 4, XYZ, &[], false),
+        draw("wireframe", &[(RS_FILLMODE, 2)], 4, XYZ, &[], false),
+        draw("corners", &[(RS_FILLMODE, 1)], 4, XYZ, &[], false),
+        draw("lines", unlit, 2, XYZ, &[], false),
+        draw("points", unlit, 1, XYZ, &[], false),
+    ];
+    // A triangle over the target's top left half, in clip space.
+    let corners = [[-1.0f32, 1.0, 0.5], [1.0, 1.0, 0.5], [-1.0, -1.0, 0.5]];
+    for d in draws {
+        let (mut rig, log) = transforming();
+        if !d.states.is_empty() {
+            rig.states(d.states);
+        }
+        if d.fvf & TEX1 != 0 {
+            rig.texture(FORMAT, &[&[0xFFFF_FFFF]], None);
+            if !d.stage.is_empty() {
+                rig.stage(0, d.stage);
+            }
+        }
+        let count = if d.primitive == 2 { 2 } else { 3 };
+        let vertices: Vec<u32> = corners[..count]
+            .iter()
+            .flat_map(|p| p.iter().chain(d.rest).map(|n| n.to_bits()))
+            .collect();
+        let error = rig.run(|w| encode::draw(w, d.primitive, d.fvf, count as u32, &vertices));
+        assert_eq!(error, 0, "{}", d.name);
+        rig.card.settle(&mut rig.memory, None);
+        let log = log.borrow();
+        assert_eq!(log.transformed_runs > 0, d.host, "{}", d.name);
+        // The host draws it either way: the card's screen vertices
+        // where it doesn't transform them.
+        let host = rig.card.describe(Rig::live());
+        assert_eq!(host["host"]["declined_draws"], 0, "{}", d.name);
+        assert_eq!(log.batches, 1, "{}", d.name);
+    }
 }
 
 /// Run `scene` on a card that draws in software and on one with a

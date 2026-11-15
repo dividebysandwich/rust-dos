@@ -159,6 +159,25 @@ see these differences:
 - A child with a border gets its frame later, with one more WM_PAINT
   and WM_NCPAINT after UpdateWindow.
 
+### Direct3D's devices
+
+Direct3D lists the devices Windows 98 SE's DirectX 6.1 lists: the
+software devices first, Ramp (through IDirect3D and IDirect3D2) and RGB,
+then the HAL device where the card has one (a Banshee, a Voodoo3 or a
+ToadForce as the display adapter, or a Voodoo Graphics or Voodoo2
+add-on card in full screen), and Direct3D 7's T&L HAL device on a card
+that transforms and lights. The software devices draw on the processor
+into render targets and depth buffers in system or video memory, with
+any card. They differ from Windows 98's in a few ways:
+
+- The Ramp device reports its mono color model but lights, shades,
+  blends and takes textures as the RGB device does, and its description
+  says so. Windows' Ramp device lights in shades of one color through
+  each material's ramp. It takes no 8-bit palettized render target.
+- There is no MMX device.
+- They draw with one texture stage, don't dither, and have no stencil
+  buffer.
+
 ### Screen savers
 
 A screen saver starts after WIN.INI's `[windows]` `ScreenSaveTimeOut`
@@ -195,10 +214,6 @@ which image each protection needs and how to make it.
 
 ### What isn't there
 
-- **Software Direct3D.** Direct3D draws on the card's HAL alone: a
-  Banshee or Voodoo3 as the display adapter, or a Voodoo Graphics or
-  Voodoo2 add-on card in full screen. With another card a game finds no
-  3D device.
 - **DirectMusic's composition.** Segments, MIDI files, DLS instruments
   and bands play. Styles' patterns, chord and command tracks and the
   composer need the composition engine, which isn't there: they load and

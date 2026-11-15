@@ -139,6 +139,11 @@ pub struct Drawn {
     /// It was made as the T&L HAL device (Direct3D 7), which its
     /// description says.
     pub tnl: bool,
+    /// The color model of a software device, as its description says
+    /// (D3DCOLOR_MONO for the Ramp device, D3DCOLOR_RGB for the RGB
+    /// one), which the processor draws for (`hal::software`). 0 for a
+    /// device of the card's HAL.
+    pub model: u32,
     /// The render target, and the interface of it the device holds.
     pub target: u32,
     pub target_iface: u32,
@@ -250,6 +255,7 @@ impl crate::savestate::State for Device {
         d.depth_bias.save(w);
         d.color_off.save(w);
         d.tnl.save(w);
+        d.model.save(w);
     }
 
     fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
@@ -291,7 +297,8 @@ impl crate::savestate::State for Device {
         d.scissor.load(r)?;
         d.depth_bias.load(r)?;
         d.color_off.load(r)?;
-        d.tnl.load(r)
+        d.tnl.load(r)?;
+        d.model.load(r)
     }
 }
 
@@ -578,14 +585,16 @@ impl Device {
 /// an add-on card's buffer) with DDSCAPS_3DDEVICE, and its depth buffer,
 /// if it has one, is 16-bit. A Banshee or Voodoo3 also draws into 24-
 /// and 32-bit targets with 24- or 32-bit depth buffers, through 16-bit
-/// shadows of them (`shadow.rs`).
+/// shadows of them (`shadow.rs`). A software device draws into a
+/// target and a depth buffer wherever they are.
 pub fn check_target(cpu: &mut Cpu, kind: super::hal::Kind, id: u32) -> Result<(), u32> {
     let s = state(cpu).surface(id).cloned().ok_or(DDERR_INVALIDPARAMS)?;
     if s.caps[0] & surface::DDSCAPS_3DDEVICE == 0 {
         return Err(DDERR_INVALIDCAPS);
     }
     let video = s.memory == MEM_VIDEO || s.memory == MEM_CARD;
-    if !video || s.caps[0] & DDSCAPS_SYSTEMMEMORY != 0 {
+    let software = kind == super::hal::Kind::Software;
+    if !software && (!video || s.caps[0] & DDSCAPS_SYSTEMMEMORY != 0) {
         return Err(D3DERR_SURFACENOTINVIDMEM);
     }
     // The card's HAL says which formats it draws into.
@@ -604,9 +613,13 @@ pub fn check_target(cpu: &mut Cpu, kind: super::hal::Kind, id: u32) -> Result<()
     Ok(())
 }
 
-/// What the HAL of the device `id`'s card offers.
+/// What the HAL of the device `id`'s card offers, or a software
+/// device.
 pub fn offer_of(cpu: &mut Cpu, id: u32) -> super::hal::Offer {
-    let (dd, units) = get(cpu, id).map_or((0, 1), |d| (d.ddraw, d.tmus));
+    let (dd, units, model) = get(cpu, id).map_or((0, 1, 0), |d| (d.ddraw, d.tmus, d.model));
+    if model != 0 {
+        return super::hal::software();
+    }
     super::hal::card(cpu, dd).unwrap_or(super::hal::Offer {
         kind: super::hal::Kind::Voodoo,
         units,
@@ -635,7 +648,9 @@ pub fn depth_buffer(cpu: &mut Cpu, d: &Device) -> Option<u32> {
 
 /// Make a device of the DirectDraw object `dd` on the render target
 /// `target` (the program's interface `target_iface` of it), and give the
-/// program its interface `vtable` at `out`.
+/// program its interface `vtable` at `out`. `model` is a software
+/// device's color model (`Drawn::model`), 0 for the card's HAL device.
+#[allow(clippy::too_many_arguments)]
 pub fn create(
     cpu: &mut Cpu,
     version: u32,
@@ -644,11 +659,16 @@ pub fn create(
     vtable: usize,
     out: u32,
     tnl: bool,
+    model: u32,
 ) -> u32 {
     let Some((_, target)) = super::super::this(cpu, target_iface) else {
         return DDERR_INVALIDPARAMS;
     };
-    let Some(offer) = super::hal::card(cpu, dd) else {
+    let offer = match model {
+        0 => super::hal::card(cpu, dd),
+        _ => Some(super::hal::software()),
+    };
+    let Some(offer) = offer else {
         return com::E_OUTOFMEMORY;
     };
     let tmus = offer.units;
@@ -657,6 +677,7 @@ pub fn create(
     }
     let mut device = Device::new(version, dd, target, target_iface, tmus);
     device.tnl = tnl;
+    device.model = model;
     let (w, h, z) = {
         let z = z_buffer(cpu, target).is_some();
         let s = state(cpu).surface(target);
@@ -678,7 +699,9 @@ pub fn create(
     match super::add(cpu, dd, object, vtable, out) {
         Ok(_) => {
             super::super::add_ref(cpu, target_iface);
-            super::hal::created(cpu, dd);
+            if model == 0 {
+                super::hal::created(cpu, dd);
+            }
             D3D_OK
         }
         Err(e) => e,
@@ -748,8 +771,17 @@ pub fn get_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         sizes[i] = size;
     }
-    caps::write_desc(cpu, hal, sizes[0], Some(offer));
-    caps::write_desc(cpu, hel, sizes[1], None);
+    // A software device's description is the HEL's.
+    match get(cpu, id).map_or(0, |d| d.model) {
+        0 => {
+            caps::write_desc(cpu, hal, sizes[0], Some(offer));
+            caps::write_desc(cpu, hel, sizes[1], None);
+        }
+        model => {
+            caps::write_empty_desc(cpu, hal, sizes[0]);
+            caps::write_software_desc(cpu, hel, sizes[1], model);
+        }
+    }
     Some(D3D_OK)
 }
 
