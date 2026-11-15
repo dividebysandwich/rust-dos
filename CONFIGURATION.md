@@ -2765,15 +2765,16 @@ card's video registers at the pixel clock of its DAC's PLL, which Glide
 sets for the rate a game asks for (at 640x480, 60, 75, 85 or 120 Hz).
 Until a program sets that clock, the card runs its frame at 60 Hz. The
 built-in Windows' Glide does the same, and on a Voodoo3 sets the mode at
-the rate asked for. A rate the size doesn't have opens at 60 Hz on a
-Voodoo Graphics or Voodoo2 and fails on a Voodoo3, as 3dfx's libraries
-do. The environment overrides the game's rate as they read it:
-`SST_SCREENREFRESH` on a Voodoo Graphics, `SSTV2_SCREENREFRESH` and
-`SSTV2_REFRESH_640x480` (by size) on a Voodoo2, and `FX_GLIDE_REFRESH`
-for Glide 3 on a Voodoo3. The triangles are drawn on up to four threads
-of their own: rust-dos keeps running the game meanwhile, and the picture
-is the same however many there are. Save states and rewind keep the card
-with everything in its memory.
+the rate asked for. A rate the size doesn't have opens the size's own
+mode, as 3dfx's libraries do: 70 Hz at 640x400, 72 Hz at 512x384 on a
+Voodoo Graphics, and 60 Hz at the other sizes. The environment overrides
+the game's rate as they read it: `SST_SCREENREFRESH` on a Voodoo
+Graphics, `SSTV2_SCREENREFRESH` and `SSTV2_REFRESH_640x480` (by size) on
+a Voodoo2, and `FX_GLIDE_REFRESH` for Glide 3 on a Voodoo3. The
+triangles are drawn on up to four threads of their own: rust-dos keeps
+running the game meanwhile, and the picture is the same however many
+there are. Save states and rewind keep the card with everything in its
+memory.
 
 ### 3dfx Voodoo2
 
