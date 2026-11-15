@@ -607,12 +607,16 @@ pub(super) fn set_comm_timeouts(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// `received_at` and `queued` waiting: never (None), or by the total
 /// timeout of ReadTotalTimeoutMultiplier times `n` plus
 /// ReadTotalTimeoutConstant milliseconds, or ReadIntervalTimeout after a
-/// character once one came. With ReadIntervalTimeout MAXDWORD there is
-/// no interval timeout, a constant of MAXDWORD means no total timeout
-/// either, and a multiplier of MAXDWORD makes the constant the time to
-/// wait for one character, as in Windows NT's serial driver
-/// (serial.sys's SerialStartRead, whose sample is in Microsoft's
-/// Windows-driver-samples).
+/// character once one came, as Microsoft's documentation of COMMTIMEOUTS
+/// describes them; a timeout of 0 is one not used.
+///
+/// The documentation leaves most forms with ReadIntervalTimeout MAXDWORD
+/// open (`read_now` has the two it gives). For the others this goes by
+/// what Windows NT's serial driver does: there is no interval timeout, a
+/// constant of MAXDWORD sets no total timeout, and a multiplier of
+/// MAXDWORD makes the constant the time to wait for one character, so a
+/// constant of 0 ends the wait at once. Windows 98's port driver wasn't
+/// measured.
 fn read_due(
     timeouts: &[u32; 5],
     n: u32,
@@ -643,13 +647,16 @@ fn read_due(
 }
 
 /// Whether a ReadFile of `n` characters returns at once with the
-/// `queued` the receive queue has, `first` when it hasn't waited yet:
-/// with all of them; with what there is, even nothing, when
-/// ReadIntervalTimeout is MAXDWORD and the total timeouts 0; and with
-/// ReadIntervalTimeout MAXDWORD and a constant below MAXDWORD, with what
-/// there is if there is something when the read starts, or with the
-/// first character to come when the multiplier is MAXDWORD too, which
-/// is the form COMMTIMEOUTS's documentation describes (`read_due`).
+/// `queued` the receive queue has, `first` when it hasn't waited yet.
+/// It does with all `n`. COMMTIMEOUTS's documentation gives two more:
+/// with ReadIntervalTimeout MAXDWORD and both totals 0 a read takes what
+/// is there, even nothing; with ReadIntervalTimeout and the multiplier
+/// MAXDWORD and a constant above 0 and below MAXDWORD it takes what is
+/// there if anything is, else the first character to come within the
+/// constant. The rest goes by Windows NT's serial driver (`read_due`):
+/// with ReadIntervalTimeout MAXDWORD, a constant below MAXDWORD and other
+/// totals, a read that finds characters queued when it starts takes them,
+/// and one that finds none waits for all `n` within the total timeout.
 fn read_now(timeouts: &[u32; 5], n: u32, queued: usize, first: bool) -> bool {
     let &[interval, multiplier, constant, ..] = timeouts;
     queued >= n as usize
@@ -788,7 +795,7 @@ mod tests {
         assert!(read_now(&one, 4, 1, false));
         assert_eq!(read_due(&one, 4, 1000, 0, 0), Some(51_000));
         // With a constant of 0 the wait for one character ends at once,
-        // as serial.sys's total timer of 0 does.
+        // as Windows NT's serial driver ends it.
         let none = [MAXDWORD, MAXDWORD, 0, 0, 0];
         assert_eq!(read_due(&none, 4, 1000, 0, 0), Some(1000));
         // With a constant of MAXDWORD there is no timeout: all of it.
