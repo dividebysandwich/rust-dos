@@ -334,7 +334,10 @@ impl File {
         self.next = self.buffer;
         self.end_read = self.buffer;
         self.end_write = self.buffer.wrapping_add(self.cch);
-        self.loaded = true;
+        // A buffer taken for writing holds what it held before, none of
+        // the file's bytes: a seek in it reloads it before it moves on
+        // over them, or the next flush would write the old bytes there.
+        self.loaded = for_read;
         if !for_read {
             return self.cch as i32;
         }
@@ -431,8 +434,13 @@ impl File {
                 self.buf_offset as i64 + self.next.wrapping_sub(self.buffer) as i64 + offset as i64
             }
             2 => {
+                // The end counts what the buffer holds for the file and
+                // hasn't written yet, which the flush writes.
                 let end = if self.fcc == FOURCC_MEM {
                     self.cch
+                } else if self.flags & MMIO_DIRTY != 0 {
+                    let buffered = self.buf_offset + self.next.wrapping_sub(self.buffer);
+                    self.size.max(buffered)
                 } else {
                     self.size
                 };

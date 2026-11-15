@@ -900,29 +900,32 @@ fn mmio_reads_and_writes_riff_chunks() {
     }
 }
 
-/// BIG.DAT made through mmio's own buffer, open for writing only, as
-/// Shadow of the Horned Rat writes its saves: a RIFF chunk holding a
-/// 'big ' chunk of 9000 bytes, more than the 8 KB buffer, then a 'tail'
-/// chunk of 3. Each mmioAscend goes back to write a size before the
-/// buffer's place. Exit code 1 if every call worked.
-fn mmio_big_program() -> Vec<u8> {
-    const MMIO_WRITE: i32 = 1;
-    const MMIO_CREATE: i32 = 0x1000;
-    const MMIO_ALLOCBUF: i32 = 0x10000;
-    const MMIO_CREATERIFF: i32 = 0x20;
-    const NAME: u32 = 0x00;
-    const RIFF: u32 = 0x20;
-    const BIG: u32 = 0x40;
-    const TAIL: u32 = 0x60;
-    const BYTES: u32 = 0x100;
-    let mut data = vec![0u8; BYTES as usize + 9000];
-    put(&mut data, NAME as usize, b"BIG.DAT");
-    put(&mut data, (RIFF + 8) as usize, b"SAVE");
-    put(&mut data, BIG as usize, b"big ");
-    put(&mut data, TAIL as usize, b"tail");
-    for k in 0..9000 {
-        data[BYTES as usize + k] = (k * 7 + 1) as u8;
-    }
+const MMIO_WRITE: i32 = 1;
+const MMIO_READWRITE: i32 = 2;
+const MMIO_CREATE: i32 = 0x1000;
+const MMIO_ALLOCBUF: i32 = 0x10000;
+
+/// The mmio functions `mmio_calls_program` imports, by their place in
+/// its list of imports.
+const MMIO_OPEN: usize = 1;
+const MMIO_ASCEND: usize = 2;
+const MMIO_CREATE_CHUNK: usize = 3;
+const MMIO_WRITE_FN: usize = 4;
+const MMIO_CLOSE: usize = 5;
+const MMIO_SEEK: usize = 6;
+
+/// A call of `mmio_calls_program`: the import, its arguments after the
+/// file's handle, and what it returns.
+type MmioCall = (usize, Vec<i32>, i32);
+
+/// A program that opens the file named at the start of `data` with
+/// `flags` and makes `calls` on it, which get the address of an offset
+/// in `data`. Exit code 1 if every call returned what it should.
+fn mmio_calls_program(
+    data: &[u8],
+    flags: i32,
+    calls: impl FnOnce(&dyn Fn(u32) -> i32) -> Vec<MmioCall>,
+) -> Vec<u8> {
     let imports: &[(&str, &[&str])] = &[
         ("KERNEL32.dll", &["ExitProcess"]),
         (
@@ -933,31 +936,19 @@ fn mmio_big_program() -> Vec<u8> {
                 "mmioCreateChunk",
                 "mmioWrite",
                 "mmioClose",
+                "mmioSeek",
             ],
         ),
     ];
-    program(imports, &data, |a, l| {
+    program(imports, data, |a, l| {
         let at = |offset: u32| l.at(offset) as i32;
         a.xor(ebx, ebx)?;
         let mut failed = a.create_label();
-        let flags = MMIO_CREATE | MMIO_WRITE | MMIO_ALLOCBUF;
-        call(a, l.import(1), &[at(NAME), 0, flags])?;
+        call(a, l.import(MMIO_OPEN), &[at(0), 0, flags])?;
         a.mov(esi, eax)?;
         a.test(eax, eax)?;
         a.jz(failed)?;
-        let steps: [(usize, [i32; 2], i32); 10] = [
-            (3, [at(RIFF), MMIO_CREATERIFF], 0),
-            (3, [at(BIG), 0], 0),
-            (4, [at(BYTES), 5000], 5000),
-            (4, [at(BYTES + 5000), 4000], 4000),
-            (2, [at(BIG), 0], 0),
-            (3, [at(TAIL), 0], 0),
-            (4, [at(BYTES), 3], 3),
-            (2, [at(TAIL), 0], 0),
-            (2, [at(RIFF), 0], 0),
-            (5, [0, 0], 0),
-        ];
-        for (import, args, ok) in steps {
+        for (import, args, ok) in calls(&at) {
             for &arg in args.iter().rev() {
                 a.push(arg)?;
             }
@@ -971,6 +962,74 @@ fn mmio_big_program() -> Vec<u8> {
         a.push(ebx)?;
         a.call(l.import(0))?;
         a.int3()
+    })
+}
+
+/// The bytes the mmio tests write: byte `k` is `k * 7 + 1`.
+fn pattern(k: usize) -> u8 {
+    (k * 7 + 1) as u8
+}
+
+/// BIG.DAT made through mmio's own buffer, open for writing only, as
+/// Shadow of the Horned Rat writes its saves: a RIFF chunk holding a
+/// 'big ' chunk of 9000 bytes, more than the 8 KB buffer, then a 'tail'
+/// chunk of 3. Each mmioAscend goes back to write a size before the
+/// buffer's place.
+fn mmio_big_program() -> Vec<u8> {
+    const MMIO_CREATERIFF: i32 = 0x20;
+    const RIFF: u32 = 0x20;
+    const BIG: u32 = 0x40;
+    const TAIL: u32 = 0x60;
+    const BYTES: u32 = 0x100;
+    let mut data = vec![0u8; BYTES as usize + 9000];
+    put(&mut data, 0, b"BIG.DAT");
+    put(&mut data, (RIFF + 8) as usize, b"SAVE");
+    put(&mut data, BIG as usize, b"big ");
+    put(&mut data, TAIL as usize, b"tail");
+    for k in 0..9000 {
+        data[BYTES as usize + k] = pattern(k);
+    }
+    let flags = MMIO_CREATE | MMIO_WRITE | MMIO_ALLOCBUF;
+    mmio_calls_program(&data, flags, |at| {
+        vec![
+            (MMIO_CREATE_CHUNK, vec![at(RIFF), MMIO_CREATERIFF], 0),
+            (MMIO_CREATE_CHUNK, vec![at(BIG), 0], 0),
+            (MMIO_WRITE_FN, vec![at(BYTES), 5000], 5000),
+            (MMIO_WRITE_FN, vec![at(BYTES + 5000), 4000], 4000),
+            (MMIO_ASCEND, vec![at(BIG), 0], 0),
+            (MMIO_CREATE_CHUNK, vec![at(TAIL), 0], 0),
+            (MMIO_WRITE_FN, vec![at(BYTES), 3], 3),
+            (MMIO_ASCEND, vec![at(TAIL), 0], 0),
+            (MMIO_ASCEND, vec![at(RIFF), 0], 0),
+            (MMIO_CLOSE, vec![0], 0),
+        ]
+    })
+}
+
+/// SEEK.DAT made through mmio's own buffer with `mode`: 12000 bytes of
+/// the pattern, which the end is after while the buffer still holds the
+/// last 3808, then from 0 the 8202 bytes from the pattern's byte 1 on,
+/// which fill the buffer and go on into the next 8 KB, then a seek on
+/// to 8300, in that buffer, and the pattern's first 4 bytes there. The
+/// buffer still holds bytes it took before it went on.
+fn mmio_seek_on_program(mode: i32) -> Vec<u8> {
+    const BYTES: u32 = 0x100;
+    let mut data = vec![0u8; BYTES as usize + 12000];
+    put(&mut data, 0, b"SEEK.DAT");
+    for k in 0..12000 {
+        data[BYTES as usize + k] = pattern(k);
+    }
+    let flags = MMIO_CREATE | mode | MMIO_ALLOCBUF;
+    mmio_calls_program(&data, flags, |at| {
+        vec![
+            (MMIO_WRITE_FN, vec![at(BYTES), 12000], 12000),
+            (MMIO_SEEK, vec![0, 2], 12000),
+            (MMIO_SEEK, vec![0, 0], 0),
+            (MMIO_WRITE_FN, vec![at(BYTES + 1), 8202], 8202),
+            (MMIO_SEEK, vec![8300, 0], 8300),
+            (MMIO_WRITE_FN, vec![at(BYTES), 4], 4),
+            (MMIO_CLOSE, vec![0], 0),
+        ]
     })
 }
 
@@ -991,12 +1050,42 @@ fn mmio_writes_chunks_larger_than_its_buffer_to_a_write_only_file() {
         expected.extend((4 + 8 + 9000 + 8 + 4u32).to_le_bytes());
         expected.extend(b"SAVEbig ");
         expected.extend(9000u32.to_le_bytes());
-        expected.extend((0..9000).map(|k| (k * 7 + 1) as u8));
+        expected.extend((0..9000).map(pattern));
         expected.extend(b"tail");
         expected.extend(3u32.to_le_bytes());
         expected.extend([1, 8, 15, 0]);
         assert_eq!(out.len(), expected.len(), "{core:?}");
         assert!(out == expected, "{core:?}: {:02X?}", &out[..24]);
+    }
+}
+
+/// A seek on inside the buffer that writes went on into, over bytes the
+/// file has, leaves those bytes as they were, open for writing only or
+/// for reading and writing. A seek to the end counts the bytes still in
+/// the buffer. Without the fix the buffer counted as holding the file
+/// there, and the flush at the close wrote what it still held from the
+/// first 8 KB over the bytes from 8202 to 8300; the seek to the end
+/// gave 8192.
+#[test]
+fn mmio_seeks_on_in_a_buffer_writes_went_on_into() {
+    let mut expected: Vec<u8> = (0..12000).map(pattern).collect();
+    for (k, byte) in expected[..8202].iter_mut().enumerate() {
+        *byte = pattern(k + 1);
+    }
+    for (k, byte) in expected[8300..8304].iter_mut().enumerate() {
+        *byte = pattern(k);
+    }
+    for mode in [MMIO_WRITE, MMIO_READWRITE] {
+        for core in CORES {
+            let files = [("T.EXE", mmio_seek_on_program(mode))];
+            let mut cpu = machine("mmio-seek-on", core, &files, |_| {});
+            run_to_exit(&mut cpu, 20_000, |_| {});
+            assert_eq!(cpu.errorlevel, 1, "{mode} {core:?}: {:?}", printed(&cpu));
+            let out = fs::read(scratch_path("mmio-seek-on").join("SEEK.DAT")).unwrap();
+            assert_eq!(out.len(), expected.len(), "{mode} {core:?}");
+            let wrong = (0..out.len()).find(|&k| out[k] != expected[k]);
+            assert_eq!(wrong, None, "{mode} {core:?}");
+        }
     }
 }
 
