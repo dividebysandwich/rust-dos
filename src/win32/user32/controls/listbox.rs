@@ -335,6 +335,13 @@ impl ListBox {
         index
     }
 
+    /// The code page of the list's strings: its locale's, which is the
+    /// system's unless LB_SETLOCALE set another of the locales there are.
+    fn code_page(&self) -> crate::win32::nls::CodePage {
+        crate::win32::nls::by_lcid(self.locale)
+            .map_or(crate::win32::nls::CodePage::WESTERN, |l| l.ansi())
+    }
+
     /// LB_FINDSTRING's and LB_FINDSTRINGEXACT's search of a list with
     /// strings, or of one without by its data, from after `start`. None
     /// for a sorted list without strings and `exact`, which asks the
@@ -353,7 +360,9 @@ impl ListBox {
             for i in order {
                 let t = &self.items[i as usize].text;
                 if exact {
-                    if crate::win32::kernel32::compare_nocase(s, t) == Ordering::Equal {
+                    if crate::win32::kernel32::compare_nocase(self.code_page(), s, t)
+                        == Ordering::Equal
+                    {
                         return Some(i);
                     }
                 } else if prefix(t, 0)
@@ -388,7 +397,8 @@ impl ListBox {
         let (mut min, mut max) = (0, self.count());
         while min != max {
             let index = (min + max) / 2;
-            match crate::win32::kernel32::compare_nocase(s, &self.items[index as usize].text) {
+            let item = &self.items[index as usize].text;
+            match crate::win32::kernel32::compare_nocase(self.code_page(), s, item) {
                 Ordering::Equal => return Some(index),
                 Ordering::Less => max = index,
                 Ordering::Greater => min = index + 1,
@@ -402,7 +412,8 @@ impl ListBox {
         if !self.has_strings() {
             return self.find_string_pos(s);
         }
-        let cmp = |a: &[u8], b: &[u8]| match crate::win32::kernel32::compare_nocase(a, b) {
+        let page = self.code_page();
+        let cmp = |a: &[u8], b: &[u8]| match crate::win32::kernel32::compare_nocase(page, a, b) {
             Ordering::Less => -1,
             Ordering::Equal => 0,
             Ordering::Greater => 1,
@@ -1658,6 +1669,9 @@ pub fn listbox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         // Listing a directory isn't done.
         LB_DIR => LB_ERR,
         LB_GETLOCALE => c.l.locale as i32,
+        // A locale that isn't installed is refused, as IsValidLocale
+        // refuses it, and the list keeps its own.
+        LB_SETLOCALE if crate::win32::nls::by_lcid(wp).is_none() => LB_ERR,
         LB_SETLOCALE => std::mem::replace(&mut c.l.locale, wp) as i32,
         LB_INITSTORAGE => LB_OKAY,
         LB_SETCOUNT => c.set_count(wp as i32),
@@ -1870,7 +1884,7 @@ fn create(cpu: &mut Cpu, hwnd: u32, cs: u32) -> Option<u32> {
         page: 1,
         column_width: 150,
         horz_extent: (style & WS_HSCROLL != 0) as i32,
-        locale: 0x0409,
+        locale: crate::win32::nls::current(cpu).lcid,
         width: client.width(),
         height: client.height(),
         ..ListBox::default()

@@ -171,6 +171,12 @@ zones! {
     VoodooWait = "voodoo.wait",
     VoodooReadBack = "voodoo.readback",
     PowerVr = "powervr",
+    // The ToadForce: its commands (transform, lighting, clipping and
+    // the software renderer's queue), what it hands the host renderer,
+    // and the surfaces it reads back from it.
+    ToadForce = "toadforce",
+    ToadForceHost = "toadforce.host",
+    ToadForceReadBack = "toadforce.readback",
     // The emulator's BIOS, DOS and other services.
     HleInt08 = "hle.int08",
     HleInt09 = "hle.int09",
@@ -187,7 +193,34 @@ zones! {
     HleInline = "hle.inline",
     HleFar = "hle.far",
     Dpmi = "hle.dpmi",
+    // A call of a built-in Windows function: the trap and what is
+    // around the call, the arguments read off the program's stack, and
+    // what follows the function (closed files, the traces). The
+    // function itself is in `hle.win32` too, unless it is OpenGL's.
     Win32 = "hle.win32",
+    Win32Args = "hle.win32.args",
+    Win32After = "hle.win32.after",
+    // The built-in Direct3D's work on a draw: the pipeline's setup,
+    // its vertices (transform and lighting), the card's state
+    // (`hal::bind`: the render target, the textures, the states, and
+    // the rest under the plain name), and the primitives handed to
+    // the card.
+    D3dSetup = "hle.d3d.setup",
+    D3dVertices = "hle.d3d.vertices",
+    D3dBind = "hle.d3d.bind",
+    D3dBindTarget = "hle.d3d.bind.target",
+    D3dBindTextures = "hle.d3d.bind.textures",
+    D3dBindStates = "hle.d3d.bind.states",
+    D3dDraw = "hle.d3d.draw",
+    // The built-in OpenGL: its functions (`call`), of which glVertex
+    // (`vertex`) and glEnd's vertices (`end`) have their own, and a
+    // draw's work before Direct3D gets it: the context's state put
+    // on the device (`apply`) and the primitives (the plain name).
+    OpenGl = "hle.opengl",
+    OpenGlCall = "hle.opengl.call",
+    OpenGlVertex = "hle.opengl.vertex",
+    OpenGlEnd = "hle.opengl.end",
+    OpenGlApply = "hle.opengl.apply",
     // Port accesses, by the device that has the port.
     IoVga = "io.vga",
     IoPic = "io.pic",

@@ -49,6 +49,8 @@ const CUST_DATA: usize = 11;
 struct Reader<'a> {
     b: &'a [u8],
     segs: [Seg; 15],
+    /// The code page of the library's strings.
+    page: CodePage,
 }
 
 impl Reader<'_> {
@@ -76,7 +78,7 @@ impl Reader<'_> {
         }
         let at = seg.offset + offset as usize;
         let len = (self.u32(at + 8)? & 0xFF) as usize;
-        Some(ansi(self.b.get(at + 12..at + 12 + len)?))
+        Some(ansi(self.page, self.b.get(at + 12..at + 12 + len)?))
     }
 
     /// The string at `offset` in the strings' table.
@@ -87,7 +89,7 @@ impl Reader<'_> {
         }
         let at = seg.offset + offset as usize;
         let len = self.u16(at)? as usize;
-        Some(ansi(self.b.get(at + 2..at + 2 + len)?))
+        Some(ansi(self.page, self.b.get(at + 2..at + 2 + len)?))
     }
 
     /// The GUID at `offset` in the GUIDs' table.
@@ -155,7 +157,7 @@ impl Reader<'_> {
                     return Some(Value::Str(None));
                 }
                 let bytes = self.b.get(at + 6..at + 6 + len as usize)?;
-                return Some(Value::Str(Some(ansi(bytes))));
+                return Some(Value::Str(Some(ansi(self.page, bytes))));
             }
             _ => return Some(Value::Bits(vt, 0)),
         };
@@ -166,13 +168,15 @@ impl Reader<'_> {
 }
 
 /// Read the MSFT library `b`; None if it isn't one.
-pub fn read(b: &[u8]) -> Option<TypeLib> {
+/// The library in `b`, its strings in the code page `page`.
+pub fn read(b: &[u8], page: CodePage) -> Option<TypeLib> {
     if b.get(..4)? != SIGNATURE {
         return None;
     }
     let mut r = Reader {
         b,
         segs: [Seg::default(); 15],
+        page,
     };
     let h = |i: usize| -> Option<i32> {
         Some(i32::from_le_bytes(
@@ -247,7 +251,7 @@ fn read_imports(r: &Reader, lib: &mut TypeLib) {
             major,
             minor,
             lcid,
-            file: ansi(name),
+            file: ansi(r.page, name),
         });
         at = (at + 14 + size + 3) & !3;
     }

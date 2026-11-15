@@ -15,9 +15,6 @@ const ENABLE_LINE_INPUT: u32 = 0x02;
 /// a line.
 const DEFAULT_OUTPUT_MODE: u32 = 0x03;
 
-/// The code page of the console: DOS's.
-const CODE_PAGE: u32 = 437;
-
 /// INPUT_RECORD's size, and KEY_EVENT.
 const INPUT_RECORD: u32 = 20;
 const KEY_EVENT: u16 = 1;
@@ -307,9 +304,10 @@ pub(super) fn free_console(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-/// GetConsoleCP and GetConsoleOutputCP: DOS's code page.
-pub(super) fn get_console_cp(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(CODE_PAGE)
+/// GetConsoleCP and GetConsoleOutputCP: DOS's code page, the system's
+/// OEM one.
+pub(super) fn get_console_cp(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(crate::win32::nls::oem(cpu).number())
 }
 
 /// SetStdHandle(which, handle): STD_INPUT_HANDLE, STD_OUTPUT_HANDLE or

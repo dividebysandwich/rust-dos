@@ -94,6 +94,7 @@ fn definitions() -> Vec<Definition> {
                 ("svga_banshee", "3dfx Voodoo Banshee (Direct3D and OpenGL in booted Windows)"),
                 ("svga_ati_3drage", "ATI 3D RAGE (Direct3D and ATI3DCIF in booted Windows)"),
                 ("svga_ati_3drage2", "ATI 3D RAGE II (Direct3D and ATI3DCIF in booted Windows)"),
+                ("svga_toadforce", "ToadForce (64 MB, for Windows programs run without Windows)"),
                 ("svga_et4000", "Tseng ET4000 (HiColor, VBE 1.2)"),
                 ("vga", "VGA"),
                 ("ega", "EGA"),
@@ -118,6 +119,25 @@ fn definitions() -> Vec<Definition> {
             category: "video",
             target: config("emulator", "aspect"),
             values: configured(&[("none", "Native pixels"), ("4:3", "4:3"), ("5:4", "5:4"), ("16:10", "16:10"), ("16:9", "16:9")]),
+        },
+        Definition {
+            key: "fps_cap",
+            desc: "Frame rate cap",
+            info: "The most frames a second a program may show, on any card: a program that could draw more waits for its turn, which spares the host the frames nobody sees. Auto: 60, and a program that waits for the display's retrace shows a frame at each, also at 72, 75 or 85 Hz. A number holds every program to it. Auto unless rust-dos.conf sets it.",
+            category: "video",
+            target: config("emulator", "fps_cap"),
+            values: configured(&[
+                ("auto", "Auto"),
+                ("off", "Off"),
+                ("30", "30"),
+                ("50", "50"),
+                ("60", "60"),
+                ("72", "72"),
+                ("75", "75"),
+                ("120", "120"),
+                ("144", "144"),
+                ("240", "240"),
+            ]),
         },
         Definition {
             key: "voodoo",
@@ -199,7 +219,7 @@ fn definitions() -> Vec<Definition> {
         Definition {
             key: "memsize",
             desc: "Memory (restart)",
-            info: "RAM in MB, up to 64 MB on a 386, 128 MB on a 486, 256 MB on a Pentium and 512 MB on a Pentium MMX or later. Takes effect when the content is started again.",
+            info: "RAM in MB, up to 64 MB on a 386, 128 MB on a 486, 256 MB on a Pentium and 512 MB on a Pentium MMX or later. Without a size here or in rust-dos.conf, 16 MB up to a Pentium, 32 MB with a Pentium MMX, K6-2 or Pentium Pro, 64 MB with a Pentium II and 128 MB with a Pentium III or a ToadForce. Takes effect when the content is started again.",
             category: "system",
             target: config("emulator", "memsize"),
             values: configured(&[

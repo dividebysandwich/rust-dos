@@ -204,9 +204,11 @@ pub fn wait(cpu: &mut Cpu) {
             cpu.push(w);
         }
         cpu.set_ip(cpu.ip().wrapping_sub(3));
-        cpu.idle = true;
+        // Time passes to the deadline or the next timer event, counted
+        // apart from the halts a program asks for (`Clock::disk_wait`).
         let clock = &mut cpu.bus.clock;
         clock.deadline = clock.deadline.min(clock.icount_at(until));
+        clock.disk_wait += clock.skip_to_deadline();
     } else {
         let vector = cpu.pop() as u8;
         crate::interrupts::return_from_hle(cpu, vector);

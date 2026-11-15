@@ -32,6 +32,50 @@ fn run_lock_is_off_on_or_a_directory() {
 }
 
 #[test]
+fn toadforce_renderer_is_auto_opengl_or_software() {
+    use crate::toadforce::Renderer;
+    let get = |value: &str| {
+        let text = format!("[emulator]\ntoadforce_renderer={}\n", value);
+        parse(&text, Path::new("/cfg"), None)
+    };
+    for renderer in Renderer::ALL {
+        let config = get(renderer.name());
+        assert_eq!(config.toadforce_renderer, Some(renderer));
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    }
+    assert_eq!(get(" OpenGL ").toadforce_renderer, Some(Renderer::OpenGl));
+    for value in ["", "gl", "on", "vulkan"] {
+        let config = get(value);
+        assert_eq!(config.toadforce_renderer, None, "{value}");
+        let warned = |w: &String| w.contains("invalid toadforce_renderer");
+        assert!(config.warnings.iter().any(warned), "{value}");
+    }
+    // Without the setting the card draws with OpenGL where it can.
+    let settings = Settings::from_config(&parse("", Path::new("/cfg"), None));
+    assert_eq!(settings.toadforce_renderer, Renderer::Auto);
+}
+
+#[test]
+fn toadforce_memory_is_one_of_the_cards_sizes() {
+    let get = |value: &str| {
+        let text = format!("[emulator]\ntoadforce_memory={}\n", value);
+        parse(&text, Path::new("/cfg"), None)
+    };
+    for megabytes in [32, 64, 128] {
+        let config = get(&megabytes.to_string());
+        assert_eq!(config.toadforce_memory, Some(megabytes));
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    }
+    // 4128 MB is 32 MB more than 32 bits of bytes hold.
+    for value in ["0", "48", "256", "4128", "64MB"] {
+        let config = get(value);
+        assert_eq!(config.toadforce_memory, None, "{value}");
+        let warned = |w: &String| w.contains("invalid toadforce_memory");
+        assert!(config.warnings.iter().any(warned), "{value}");
+    }
+}
+
+#[test]
 fn xbrz_config_parses_and_invalid_shader_help_lists_it() {
     let config = parse("[emulator]\nshader=xbrz\n", Path::new("/cfg"), None);
     assert_eq!(config.shader, Some(crate::video::shader::Shader::Xbrz));
@@ -409,15 +453,15 @@ fn memsize_range() {
 fn memsize_goes_as_far_as_the_cpu_takes() {
     let config = parse("[emulator]\ncpu=pentium_mmx\nmemsize=512\n", Path::new("/cfg"), None);
     assert!(config.warnings.is_empty(), "{:?}", config.warnings);
-    assert_eq!(Settings::from_config(&config).memsize, 512);
+    assert_eq!(Settings::from_config(&config).memsize, Some(512));
     let config = parse("[emulator]\ncpu=pentium\nmemsize=512\n", Path::new("/cfg"), None);
     assert_eq!(config.warnings, ["memsize 512 MB is more than a Pentium takes: 256 MB"]);
-    assert_eq!(Settings::from_config(&config).memsize, 256);
+    assert_eq!(Settings::from_config(&config).memsize, Some(256));
     // Without a cpu, the default 486's.
     let config = parse("[emulator]\nmemsize=256\n", Path::new("/cfg"), None);
-    assert_eq!(Settings::from_config(&config).memsize, 128);
+    assert_eq!(Settings::from_config(&config).memsize, Some(128));
     let config = parse("[emulator]\ncpu=386\nmemsize=128\n", Path::new("/cfg"), None);
-    assert_eq!(Settings::from_config(&config).memsize, 64);
+    assert_eq!(Settings::from_config(&config).memsize, Some(64));
 }
 
 #[test]
@@ -425,8 +469,19 @@ fn a_game_section_names_the_profile() {
     let config = parse("[game]\nname = Commander Keen 4\n[autoexec]\nKEEN4E\n", Path::new("/cfg"), None);
     assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     assert_eq!(config.game_name.as_deref(), Some("Commander Keen 4"));
-    let config = parse("[game]\nname=\nyear=1991\n", Path::new("/cfg"), None);
+    let config = parse("[game]\nname=\ngenre=platform\n", Path::new("/cfg"), None);
     assert_eq!((config.game_name, config.warnings.len()), (None, 2));
+    // What the almanac is told of the game.
+    let text = "[game]\nyear=1991\npublisher=Apogee\nnotes=Fine\nuuid=0F8FAD5B-D9CB-469F-A165-70867728950E\n";
+    let config = parse(text, Path::new("/cfg"), None);
+    assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    assert_eq!(config.game_year, Some(1991));
+    assert_eq!(config.game_publisher.as_deref(), Some("Apogee"));
+    assert_eq!(config.game_notes.as_deref(), Some("Fine"));
+    assert_eq!(
+        config.game_uuid.as_deref(),
+        Some("0f8fad5b-d9cb-469f-a165-70867728950e")
+    );
     let config = parse("[game]\noverlay=true\nmanual=a.pdf\nmanual=b.png|Map\n", Path::new("/cfg"), None);
     assert!(config.game_overlay && config.warnings.is_empty());
     assert_eq!(config.game_manuals, ["a.pdf", "b.png|Map"]);
@@ -476,7 +531,7 @@ fn cpu_model() {
     let config = parse("[emulator]\ncpu=pentium_iii\nmemsize=512\n", Path::new("/cfg"), None);
     assert_eq!(config.cpu, Some(crate::cpu::CpuModel::PentiumIII));
     assert!(config.warnings.is_empty());
-    assert_eq!(Settings::from_config(&config).memsize, 512);
+    assert_eq!(Settings::from_config(&config).memsize, Some(512));
     let config = parse("[emulator]\ncpu=K6-2\n", Path::new("/cfg"), None);
     assert_eq!(config.cpu, Some(crate::cpu::CpuModel::K6_2));
     let config = parse("[emulator]\ncpu=8086\n", Path::new("/cfg"), None);
@@ -732,6 +787,7 @@ fn changed_settings() -> Settings {
         fullscreen: true,
         aspect: AspectRatio::FourThree,
         vrr: true,
+        fps_cap: crate::frame_cap::Cap::Fps(30),
         filter: Filter::Linear,
         shader: Shader::Crt,
         crt: CrtSettings { curvature: 70, glow: 90 },
@@ -749,7 +805,6 @@ fn changed_settings() -> Settings {
             scale_shader: false,
             msaa: 4,
             anisotropy: 8,
-            fps_cap: Some(30),
             gamma: Some(1.5),
             dither: false,
             gpu_reads: false,
@@ -762,6 +817,8 @@ fn changed_settings() -> Settings {
             rom: Some(PathBuf::from("/home/u/roms/verite.rom")),
             irq: 5,
         },
+        toadforce_memory: 128,
+        toadforce_renderer: crate::toadforce::Renderer::Software,
         capture_dir: PathBuf::from("/home/u/dos captures"),
         record_ui: true,
         record_shader: true,
@@ -771,7 +828,7 @@ fn changed_settings() -> Settings {
         cpu: CpuModel::I386,
         core: CoreMode::Dynamic,
         fpu_fast: true,
-        memsize: 32,
+        memsize: Some(32),
         ems: false,
         umb: false,
         dpmi: false,
@@ -780,6 +837,7 @@ fn changed_settings() -> Settings {
         win32_dlls_replace: Vec::new(),
         win32_version: WindowsVersion::Win98Se,
         win32_depth: DesktopDepth::Palette,
+        win32_locale: Win32Locale::RuRu,
         win32_trace: Win32Trace::Off,
         dos_high: false,
         dos_version: DosVersion::new(7, 10),
@@ -1056,7 +1114,7 @@ fn the_autoexec_section_is_edited_as_written() {
 
 #[test]
 fn missing_sections_go_before_autoexec() {
-    let settings = Settings { memsize: 8, ..Settings::default() };
+    let settings = Settings { memsize: Some(8), ..Settings::default() };
     let base = Settings::default();
     let changes = [(3, Some(MountSpec { drive: 3, path: "/d".into(), opts: Default::default() }))];
     assert_eq!(
@@ -1115,10 +1173,11 @@ fn saving_all_fills_in_every_setting() {
         // (The file's SoundFont; no Ultrasound directory, MT-32 or
         // Sound Canvas, LAN password, RetroAchievements account,
         // printer paths and programs, Win32 DLL folder or game fixes left
-        // out of its own.)
+        // out of its own, and no memsize, which stays the default for
+        // the CPU and the display adapter.)
         let wanted = !matches!(
             key,
-            "ultradir" | "awe32rom" | "mt32roms" | "mt32lib" | "sc55roms" | "midiport" | "password" | "username" | "token"
+            "memsize" | "ultradir" | "awe32rom" | "mt32roms" | "mt32lib" | "sc55roms" | "midiport" | "password" | "username" | "token"
                 | "verite_rom"
                 | "win32_dlls"
                 | "win32_dlls_replace"
@@ -1206,6 +1265,46 @@ fn the_desktop_depth_is_read() {
 }
 
 #[test]
+fn every_system_locale_is_read_and_written_back() {
+    for locale in Win32Locale::ALL {
+        let text = format!("[emulator]\nwin32_locale={}\n", locale.name());
+        let config = parse(&text, Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let settings = Settings::from_config(&config);
+        assert_eq!(settings.win32_locale, locale);
+        let written = entries(&settings, None)
+            .into_iter()
+            .find(|(_, key, _)| *key == "win32_locale")
+            .and_then(|(_, _, value)| value);
+        assert_eq!(written.as_deref(), Some(locale.name()));
+    }
+}
+
+#[test]
+fn the_system_locale_is_read() {
+    for (value, locale) in [
+        ("en-US", Win32Locale::EnUs),
+        ("ru-RU", Win32Locale::RuRu),
+        ("sr-latn-yu", Win32Locale::SrLatnYu),
+        ("de_DE", Win32Locale::DeDe),
+        ("RU_ru", Win32Locale::RuRu),
+        ("pl-PL", Win32Locale::PlPl),
+        ("el-GR", Win32Locale::ElGr),
+        ("lt-LT", Win32Locale::LtLt),
+    ] {
+        let text = format!("[emulator]\nwin32_locale={value}\n");
+        let config = parse(&text, Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(Settings::from_config(&config).win32_locale, locale);
+    }
+    assert_eq!(Settings::default().win32_locale, Win32Locale::EnUs);
+    // Japanese is a locale Windows 98 has, but not the built-in.
+    let config = parse("[emulator]\nwin32_locale=ja-JP\n", Path::new("/cfg"), None);
+    assert_eq!(config.warnings.len(), 1);
+    assert!(config.warnings[0].contains("ru-RU"), "{:?}", config.warnings);
+}
+
+#[test]
 fn the_win32_dll_folder_and_the_dlls_it_replaces_are_read() {
     let text = "[emulator]\nwin32_dlls=~/wine/i386-windows\n\
                 win32_dlls_replace=COMCTL32.DLL, comdlg32\n";
@@ -1216,4 +1315,160 @@ fn the_win32_dll_folder_and_the_dlls_it_replaces_are_read() {
     assert_eq!(settings.win32_dlls_replace, ["comctl32", "comdlg32"]);
     let none = Settings::from_config(&parse("[emulator]\nwin32_dlls=\n", Path::new("/cfg"), None));
     assert_eq!(none.win32_dlls, None);
+}
+
+#[test]
+fn the_frame_rate_cap_is_auto_unless_set() {
+    use crate::frame_cap::Cap;
+    let settings = |text: &str| Settings::from_config(&parse(text, Path::new("/cfg"), None)).fps_cap;
+    assert_eq!(Settings::default().fps_cap, Cap::Auto);
+    assert_eq!(settings("[emulator]\nscale=2\n"), Cap::Auto);
+    assert_eq!(settings("[emulator]\nfps_cap=auto\n"), Cap::Auto);
+    assert_eq!(settings("[emulator]\nfps_cap=30\n"), Cap::Fps(30));
+    assert_eq!(settings("[emulator]\nfps_cap=240\n"), Cap::Fps(240));
+    // off, or 0, under the name and the old one alike.
+    for line in ["fps_cap=off", "fps_cap=0", "voodoo_fps_cap=off", "VOODOO_FPS_CAP=Off", "voodoo_fps_cap=0"] {
+        assert_eq!(settings(&format!("[emulator]\n{}\n", line)), Cap::Off, "{}", line);
+    }
+    assert_eq!(settings("[emulator]\nvoodoo_fps_cap=45\n"), Cap::Fps(45));
+    for bad in ["fps_cap=9", "fps_cap=241", "fps_cap=fast", "voodoo_fps_cap=1000"] {
+        let config = parse(&format!("[emulator]\n{}\n", bad), Path::new("/cfg"), None);
+        assert_eq!(config.warnings.len(), 1, "{}", bad);
+        assert_eq!(Settings::from_config(&config).fps_cap, Cap::Auto, "{}", bad);
+    }
+}
+
+#[test]
+fn the_old_name_of_the_frame_rate_cap_is_written_under_the_new_one() {
+    let text = "[emulator]\n  voodoo_fps_cap = 30\nscale=2\n";
+    let before = Settings::from_config(&parse(text, Path::new("/cfg"), None));
+    assert_eq!(before.fps_cap, crate::frame_cap::Cap::Fps(30));
+    let after = Settings { fps_cap: crate::frame_cap::Cap::Fps(45), ..before.clone() };
+    let saved = update_text(text, &before, &after, &[], None);
+    assert_eq!(saved, "[emulator]\n  fps_cap = 45\nscale=2\n");
+    // Saving all of them adds no second line for it.
+    let all = complete_text(text, Path::new("/cfg"), &before, &before, &[], None);
+    assert!(all.contains("voodoo_fps_cap = 30") && !all.contains("\nfps_cap"), "{}", all);
+    let none = Settings { fps_cap: crate::frame_cap::Cap::Off, ..before.clone() };
+    assert!(update_text(text, &before, &none, &[], None).contains("  fps_cap = off\n"));
+    let auto = Settings { fps_cap: crate::frame_cap::Cap::Auto, ..before.clone() };
+    assert!(update_text(text, &before, &auto, &[], None).contains("  fps_cap = auto\n"));
+}
+
+/// The memory of a machine whose `memsize` isn't set, for every CPU,
+/// with a ToadForce and without.
+#[test]
+fn memsize_default_comes_from_the_cpu_and_the_card() {
+    use crate::cpu::CpuModel::*;
+    use crate::video::adapter::Adapter;
+    let table = [
+        (I386, 16, 64),
+        (I486, 16, 128),
+        (Pentium, 16, 128),
+        (PentiumMmx, 32, 128),
+        (K6_2, 32, 128),
+        (PentiumPro, 32, 128),
+        (PentiumII, 64, 128),
+        (PentiumIII, 128, 128),
+    ];
+    assert_eq!(table.map(|row| row.0), crate::cpu::CpuModel::ALL, "every CPU");
+    for (cpu, plain, with_card) in table {
+        for adapter in Adapter::ALL {
+            let wanted = if adapter == Adapter::ToadForce { with_card } else { plain };
+            assert_eq!(default_memsize(cpu, adapter), wanted, "{:?} {:?}", cpu, adapter);
+            let settings = Settings { cpu, machine: adapter, ..Settings::default() };
+            assert_eq!(settings.memory_mb(), wanted, "{:?} {:?}", cpu, adapter);
+            let memory = settings.memory();
+            assert_eq!((memory.mb, memory.derived), (wanted, true));
+            // No default is below the 16 MB there was before, or above
+            // what the CPU takes.
+            assert!((crate::bus::DEFAULT_MEMORY_MB..=cpu.max_memsize()).contains(&wanted));
+        }
+    }
+    // A 386 takes 64 MB, so that is what a ToadForce brings it to.
+    assert_eq!(default_memsize(I386, Adapter::ToadForce), I386.max_memsize());
+
+    // From the configuration file.
+    let memory = |text: &str| {
+        let config = parse(text, Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        Settings::from_config(&config).memory()
+    };
+    assert_eq!(memory("").mb, 16);
+    assert_eq!(memory("").source, "the default for a 486");
+    assert_eq!(memory("[emulator]\ncpu=pentium_ii\n").mb, 64);
+    assert_eq!(memory("[emulator]\ncpu=pentium_ii\n").source, "the default for a Pentium II");
+    assert_eq!(memory("[emulator]\ncpu=pentium_iii\n").mb, 128);
+    let toadforce = memory("[emulator]\nmachine=svga_toadforce\n");
+    assert_eq!((toadforce.mb, toadforce.derived), (128, true));
+    assert_eq!(toadforce.source, "the default for a 486 with a ToadForce");
+    assert_eq!(memory("[emulator]\nmachine=svga_toadforce\ncpu=386\n").mb, 64);
+}
+
+/// A `memsize` that is set is the memory, above the default or below it,
+/// up to what the CPU takes.
+#[test]
+fn memsize_set_wins_over_the_default() {
+    let memory = |text: &str| Settings::from_config(&parse(text, Path::new("/cfg"), None)).memory();
+    for (text, mb) in [
+        ("[emulator]\ncpu=pentium_iii\nmemsize=256\n", 256),
+        ("[emulator]\ncpu=pentium_iii\nmemsize=16\n", 16),
+        ("[emulator]\ncpu=pentium_ii\nmemsize=8\n", 8),
+        ("[emulator]\nmachine=svga_toadforce\nmemsize=16\n", 16),
+        ("[emulator]\nmachine=svga_toadforce\ncpu=pentium_iii\nmemsize=32\n", 32),
+        ("[emulator]\nmemsize=16\n", 16),
+        // Wherever its line is.
+        ("[emulator]\nmemsize=24\ncpu=pentium_iii\nmachine=svga_toadforce\n", 24),
+        // No further than the CPU takes.
+        ("[emulator]\ncpu=386\nmemsize=128\n", 64),
+    ] {
+        let memory = memory(text);
+        assert_eq!((memory.mb, memory.derived), (mb, false), "{}", text);
+        assert_eq!(memory.source, "memsize");
+    }
+}
+
+/// Saving keeps a `memsize` that isn't set out of the file, so the
+/// default goes on following the CPU and the display adapter.
+#[test]
+fn saving_keeps_an_unset_memsize_unset() {
+    use crate::cpu::CpuModel;
+    let lines = |text: &str| text.lines().map(str::to_string).collect::<Vec<_>>();
+    let text = "[emulator]\ncpu=pentium_ii\n";
+    let file = Settings::from_config(&parse(text, Path::new("/cfg"), None));
+    assert_eq!((file.memsize, file.memory_mb()), (None, 64));
+    assert_eq!(entries(&file, None).into_iter().find(|e| e.1 == "memsize").unwrap().2, None);
+
+    // Every setting written, another CPU chosen: no memsize line, and the
+    // file read again gives the new CPU's default.
+    let changed = Settings { cpu: CpuModel::PentiumIII, ..file.clone() };
+    let saved = complete_text(text, Path::new("/cfg"), &file, &changed, &[], None);
+    assert!(saved.contains("cpu=pentium_iii\n"), "{}", saved);
+    assert!(!has_key(&lines(&saved), Section::Emulator, "memsize"), "{}", saved);
+    let again = Settings::from_config(&parse(&saved, Path::new("/cfg"), None));
+    assert_eq!((again.memsize, again.memory_mb()), (None, 128));
+    // So with only the changes written, and with settings written from
+    // nothing, as a game profile is layered over them.
+    assert_eq!(update_text(text, &file, &changed, &[], None), "[emulator]\ncpu=pentium_iii\n");
+    assert!(!update_text("", &Settings::default(), &changed, &[], None).contains("memsize"));
+
+    // A memsize the window set is written, and Delete in the window
+    // comments its line out again.
+    let set = Settings { memsize: Some(32), ..changed.clone() };
+    let with_line = complete_text(&saved, Path::new("/cfg"), &changed, &set, &[], None);
+    assert!(with_line.contains("\nmemsize=32\n"), "{}", with_line);
+    let set_again = Settings::from_config(&parse(&with_line, Path::new("/cfg"), None));
+    assert_eq!((set_again.memsize, set_again.memory_mb()), (Some(32), 32));
+    let cleared = complete_text(&with_line, Path::new("/cfg"), &set, &changed, &[], None);
+    assert!(cleared.contains("\n#memsize=32\n"), "{}", cleared);
+    assert_eq!(Settings::from_config(&parse(&cleared, Path::new("/cfg"), None)).memory_mb(), 128);
+
+    // A line of the file's own stays, also when it says what the default
+    // would.
+    let own = "[emulator]\ncpu=pentium_ii\nmemsize=64\n";
+    let file = Settings::from_config(&parse(own, Path::new("/cfg"), None));
+    let changed = Settings { cpu: CpuModel::PentiumIII, ..file.clone() };
+    let saved = complete_text(own, Path::new("/cfg"), &file, &changed, &[], None);
+    assert!(saved.contains("\nmemsize=64\n"), "{}", saved);
+    assert_eq!(Settings::from_config(&parse(&saved, Path::new("/cfg"), None)).memory_mb(), 64);
 }

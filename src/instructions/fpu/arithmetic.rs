@@ -1,5 +1,5 @@
 use crate::cpu::{Cpu, FpuFlags};
-use crate::f80::{F80, F80_EXP_BIAS, canon_f64};
+use crate::f80::{F80, F80_EXP_BIAS, REAL_INDEFINITE, canon_f64};
 use crate::instructions::utils::calculate_addr;
 use iced_x86::{Instruction, MemorySize, OpKind, Register};
 
@@ -9,12 +9,85 @@ pub fn get_pop_dst_index(instr: &Instruction) -> usize {
     if reg == Register::None || reg == Register::ST1 { 1 } else { reg.number() - Register::ST0.number() }
 }
 
-/// ST(dst) = ST(a) + ST(b), or - with `sub`, as the registers' 80 bits add
-/// (`F80::add`), or with `fpu_fast` as their doubles do (`sum`). The
-/// dynamic recompiler's code calls it too.
+/// a + b as a 387 gives it where its control word `control` keeps 53 or
+/// 24 bits of a result's significand and rounds to nearest, which is how
+/// Win32 programs run it (the C runtime sets 53 bits, Direct3D 24): the
+/// sum of the two doubles rounded once to that many bits. None where the
+/// control word asks for 64 bits or another rounding, and where the sum
+/// isn't zero or a normal number of the result's size (an infinity or a
+/// NaN, or a number a 387 keeps with its 15 bits of exponent): the 80
+/// bits add those (`F80::add`). The dynamic recompiler's code does the same
+/// (`fpu_addsub` in `dynrec/x64.rs` and `dynrec/a64.rs`), case for case.
+#[inline]
+pub fn narrow_sum(control: u16, a: f64, b: f64) -> Option<f64> {
+    let single = narrow_precision(control)?;
+    // An infinity or a NaN among the operands makes the sum one.
+    let sum = a + b;
+    if sum == 0.0 {
+        return Some(sum);
+    }
+    if !sum.is_normal() {
+        return None;
+    }
+    if !single {
+        return Some(sum);
+    }
+    // To 24 bits, the double sum rounded again could come out a bit off
+    // where it was rounded already and is halfway between two singles.
+    // What the sum left out (`error`, exact: Knuth's two-sum) says
+    // whether it was rounded; a rounded sum is moved to its odd
+    // neighbour on the side of the true sum, which the second rounding
+    // takes the right way (53 bits are more than 24 and 2). Only a sum
+    // halfway between two singles comes out differently for it.
+    let part = sum - a;
+    let error = (a - (sum - part)) + (b - part);
+    let mut bits = sum.to_bits();
+    if error != 0.0 && bits & 1 == 0 {
+        if (error < 0.0) == (sum < 0.0) {
+            bits += 1;
+        } else {
+            bits -= 1;
+        }
+    }
+    // Below the smallest normal single, a single's denormals are coarser
+    // than the 24 bits a 387 keeps there with its 15 bits of exponent
+    // (2^-126 - 2^-150 would round up to 2^-126), so the 80 bits add it.
+    let wide = f64::from_bits(bits);
+    if wide.abs() < f32::MIN_POSITIVE as f64 {
+        return None;
+    }
+    let narrow = wide as f32;
+    narrow.is_finite().then_some(narrow as f64)
+}
+
+/// Whether `narrow_sum` rounds with control word `control`: Some(true)
+/// at 24 bits, Some(false) at 53, to nearest both; None otherwise.
+#[inline]
+pub fn narrow_precision(control: u16) -> Option<bool> {
+    // The precision field (bits 8 and 9) and the rounding (10 and 11).
+    match control & 0x0F00 {
+        0x0200 => Some(false),
+        0x0000 => Some(true),
+        _ => None,
+    }
+}
+
+/// ST(dst) = ST(a) + ST(b), or - with `sub`: rounded to the control
+/// word's precision where `narrow_sum` has it, else as the registers' 80
+/// bits add (`F80::add`), or with `fpu_fast` as their doubles do (`sum`).
+/// The dynamic recompiler's code calls it too.
 pub fn addsub_st(cpu: &mut Cpu, dst: usize, a: usize, b: usize, sub: bool) {
     if cpu.fpu_fast {
         let sum = sum(cpu.fpu_get_f64(a), cpu.fpu_get_f64(b), sub);
+        cpu.fpu_set_f64(dst, sum);
+        return;
+    }
+    // The control word first, so that sums at 64 bits (DOS programs')
+    // don't look at the registers' bits for nothing.
+    if narrow_precision(cpu.fpu_control).is_some()
+        && let (Some(x), Some(y)) = (cpu.fpu_only_double(a), cpu.fpu_only_double(b))
+        && let Some(sum) = narrow_sum(cpu.fpu_control, x, if sub { -y } else { y })
+    {
         cpu.fpu_set_f64(dst, sum);
         return;
     }
@@ -44,6 +117,19 @@ pub fn addsub_value(cpu: &mut Cpu, kind: u32, value: f64) {
         };
         cpu.fpu_set_f64(0, sum);
         return;
+    }
+    if narrow_precision(cpu.fpu_control).is_some()
+        && let Some(st0) = cpu.fpu_only_double(0)
+    {
+        let sum = match kind {
+            ADD_VALUE => narrow_sum(cpu.fpu_control, st0, value),
+            SUB_VALUE => narrow_sum(cpu.fpu_control, st0, -value),
+            _ => narrow_sum(cpu.fpu_control, value, -st0),
+        };
+        if let Some(sum) = sum {
+            cpu.fpu_set_f64(0, sum);
+            return;
+        }
     }
     let mut val = F80::new();
     val.set_f64(value);
@@ -98,55 +184,31 @@ pub fn divided_by_zero(cpu: &mut Cpu, i: usize) {
     }
 }
 
+/// An integer memory operand (a word or a dword) as the double it is.
+fn int_operand(cpu: &mut Cpu, instr: &Instruction) -> f64 {
+    let addr = calculate_addr(cpu, instr);
+    cpu.load_int_to_f80(addr, instr.memory_size()).get_f64()
+}
+
 // FIADD: Add Integer
 // ST(0) = ST(0) + [mem_int]
 pub fn fiadd(cpu: &mut Cpu, instr: &Instruction) {
-    let addr = calculate_addr(cpu, instr);
-    if cpu.fpu_fast {
-        let val = cpu.load_int_to_f80(addr, instr.memory_size()).get_f64();
-        addsub_value(cpu, ADD_VALUE, val);
-        return;
-    }
-    let val = cpu.load_int_to_f80(addr, instr.memory_size());
-    let mut st0 = cpu.fpu_get(0);
-    if st0.add(val) {
-        cpu.set_fpu_flag(FpuFlags::IE, true);
-    }
-    cpu.fpu_set(0, st0);
+    let val = int_operand(cpu, instr);
+    addsub_value(cpu, ADD_VALUE, val);
 }
 
 // FISUB: Subtract Integer
 // ST(0) = ST(0) - [mem_int]
 pub fn fisub(cpu: &mut Cpu, instr: &Instruction) {
-    let addr = calculate_addr(cpu, instr);
-    if cpu.fpu_fast {
-        let val = cpu.load_int_to_f80(addr, instr.memory_size()).get_f64();
-        addsub_value(cpu, SUB_VALUE, val);
-        return;
-    }
-    let val = cpu.load_int_to_f80(addr, instr.memory_size());
-    let mut st0 = cpu.fpu_get(0);
-    if st0.sub(val) {
-        cpu.set_fpu_flag(FpuFlags::IE, true);
-    }
-    cpu.fpu_set(0, st0);
+    let val = int_operand(cpu, instr);
+    addsub_value(cpu, SUB_VALUE, val);
 }
 
 // FISUBR: Subtract Integer Reverse
 // ST(0) = [mem_int] - ST(0)
 pub fn fisubr(cpu: &mut Cpu, instr: &Instruction) {
-    let addr = calculate_addr(cpu, instr);
-    if cpu.fpu_fast {
-        let val = cpu.load_int_to_f80(addr, instr.memory_size()).get_f64();
-        addsub_value(cpu, SUBR_VALUE, val);
-        return;
-    }
-    let mut val = cpu.load_int_to_f80(addr, instr.memory_size());
-    let st0 = cpu.fpu_get(0);
-    if val.sub(st0) {
-        cpu.set_fpu_flag(FpuFlags::IE, true);
-    }
-    cpu.fpu_set(0, val);
+    let val = int_operand(cpu, instr);
+    addsub_value(cpu, SUBR_VALUE, val);
 }
 
 // FIMUL: Multiply Integer
@@ -345,18 +407,87 @@ pub fn fdivrp(cpu: &mut Cpu, instr: &Instruction) {
 
 // --- ADVANCED ARITHMETIC ---
 
+/// The real indefinite, the NaN the FPU gives for a masked invalid
+/// operation.
+const INDEFINITE: F80 = F80 { st: REAL_INDEFINITE };
+
+/// What an operation on two registers gives when either is a NaN or a
+/// format the FPU doesn't take, with the invalid exception masked: the
+/// result and whether the operation is invalid (IE). An unsupported
+/// operand gives the real indefinite, a NaN goes through as `nan_result`
+/// says. None when both are numbers.
+fn unsupported_or_nan(a: F80, b: F80) -> Option<(F80, bool)> {
+    if a.is_unsupported() || b.is_unsupported() {
+        return Some((INDEFINITE, true));
+    }
+    a.nan_result(b)
+}
+
+/// What FPREM and FPREM1 give for ST(0) and ST(1) when they don't divide
+/// one by the other, with the invalid exception masked: the result and
+/// whether the operation is invalid (IE). None for a finite dividend and
+/// a finite divisor other than 0, which they reduce.
+fn fprem_special(st0: F80, st1: F80) -> Option<(F80, bool)> {
+    if let Some(nan) = unsupported_or_nan(st0, st1) {
+        return Some(nan);
+    }
+    if st0.is_infinite() || st1.is_zero() {
+        return Some((INDEFINITE, true));
+    }
+    None
+}
+
+/// Finish FPREM or FPREM1 on operands it doesn't reduce: ST(0) becomes
+/// `result`, IE is set if `invalid`, C1 and C2 are cleared and C0 and C3
+/// keep what they had.
+fn fprem_unreduced(cpu: &mut Cpu, result: F80, invalid: bool) {
+    if invalid {
+        cpu.set_fpu_flag(FpuFlags::IE, true);
+    }
+    cpu.set_fpu_flag(FpuFlags::C1 | FpuFlags::C2, false);
+    cpu.fpu_set_valid(0, result);
+}
+
 pub fn fprem_internal(cpu: &mut Cpu, ieee: bool) {
+    // An operand the FPU doesn't reduce: an empty register (a stack
+    // underflow, SF), a NaN, an unsupported format, an infinite dividend
+    // or a divisor of 0. As a Ryzen's x87 does with IE masked, ST(0)
+    // becomes the result (the real indefinite but for a NaN operand, which
+    // goes through), C1 and C2 are cleared and C0 and C3 keep what they
+    // had. C2 clear says the reduction is complete, so a loop that repeats
+    // FPREM while C2 is set (as fmod's do) ends.
+    let special = if cpu.fpu_is_empty(0) || cpu.fpu_is_empty(1) {
+        cpu.set_fpu_flag(FpuFlags::SF, true);
+        Some((INDEFINITE, true))
+    } else {
+        fprem_special(cpu.fpu_get(0), cpu.fpu_get(1))
+    };
+    if let Some((result, invalid)) = special {
+        fprem_unreduced(cpu, result, invalid);
+        return;
+    }
+
     let st0_obj = cpu.fpu_get(0);
     let st1_obj = cpu.fpu_get(1);
+    // An infinite divisor: the dividend as it is, the quotient 0.
+    if st1_obj.is_infinite() {
+        cpu.set_fpu_flag(
+            FpuFlags::C0 | FpuFlags::C1 | FpuFlags::C2 | FpuFlags::C3,
+            false,
+        );
+        return;
+    }
 
     let st0 = st0_obj.get_f64();
     let st1 = st1_obj.get_f64();
-
+    // Operands outside a double's range need the reduction on the 80
+    // bits (#913). Until then they give the real indefinite with IE, so
+    // that the wrong result is at least flagged: a divisor below the
+    // range (a denormal, or a normal number under 2^-1022) comes to 0
+    // here, and a dividend above it to an infinity, where the x87 reduces
+    // by the one, and part of the way for the other (C2 set).
     if st1 == 0.0 || st0.is_infinite() {
-        cpu.set_fpu_flag(FpuFlags::IE, true);
-        let mut nan = F80::new();
-        nan.set_real_indefinite();
-        cpu.fpu_set(0, nan);
+        fprem_unreduced(cpu, INDEFINITE, true);
         return;
     }
 
@@ -475,22 +606,125 @@ pub fn fchs(cpu: &mut Cpu) {
     cpu.set_fpu_flag(FpuFlags::C1, false);
 }
 
-// FSCALE: Scale by 2^trunc(ST(1))
-// ST(0) = ST(0) * 2^(trunc(ST(1)))
+/// What FSCALE gives for ST(0) and ST(1), both numbers, when it doesn't
+/// scale a finite number other than 0 by a finite power, with the invalid
+/// exception masked: the result and whether the operation is invalid
+/// (IE), as the table of FSCALE's results in Intel's manual has them. A
+/// zero or an infinity stays as it is, but for 0 * 2^+infinity and
+/// infinity * 2^-infinity, which are invalid; a finite number scaled by
+/// an infinite power becomes the infinity or the zero of its sign. None
+/// for a finite number other than 0 and a finite power, which `fscale`
+/// scales.
+fn fscale_special(st0: F80, st1: F80) -> Option<(F80, bool)> {
+    let up = !st1.get_sign();
+    if st0.is_zero() || st0.is_infinite() {
+        // A zero scaled up, or an infinity scaled down, without end.
+        let invalid = st1.is_infinite() && st0.is_zero() == up;
+        return Some(if invalid { (INDEFINITE, true) } else { (st0, false) });
+    }
+    if st1.is_infinite() {
+        let mut out = F80::new();
+        if up {
+            out.set_exponent(0x7FFF);
+            out.set_mantissa(1 << 63);
+        }
+        out.set_sign(st0.get_sign());
+        return Some((out, false));
+    }
+    None
+}
+
+/// FSCALE: ST(0) = ST(0) * 2^trunc(ST(1)). The exponent changes and the
+/// 64 bits of the significand stay, over the 80 bits' whole range: a
+/// result past it is an overflow (OE), and one below the smallest normal
+/// number a denormal or a zero, rounded as the control word's RC says
+/// (UE when that loses bits), as on the FPU with those exceptions masked.
 pub fn fscale(cpu: &mut Cpu) {
-    let mut st0 = cpu.fpu_get(0);
-    let st1 = cpu.fpu_get(1).get_f64().trunc();
-    // A normal number whose result is one: only the exponent changes, as
-    // on the FPU, with all 64 bits and the 80 bits' range.
-    let exp = st0.get_exponent() as f64;
-    if st0.is_normal() && st0.get_integer_bit() != 0 && (1.0..=32766.0).contains(&(exp + st1)) {
-        st0.set_exponent((exp + st1) as u16);
-        cpu.fpu_set(0, st0);
+    // C1 says whether the result was rounded up (0 on a stack underflow).
+    cpu.set_fpu_flag(FpuFlags::C1, false);
+    // An empty register: a stack underflow (SF), invalid, and ST(0)
+    // becomes the real indefinite.
+    if cpu.fpu_is_empty(0) || cpu.fpu_is_empty(1) {
+        cpu.set_fpu_flag(FpuFlags::SF | FpuFlags::IE, true);
+        cpu.fpu_set_valid(0, INDEFINITE);
         return;
     }
-    let res = st0.get_f64() * 2.0_f64.powf(st1);
-    st0.set_f64(res);
-    cpu.fpu_set(0, st0);
+    let (st0, st1) = (cpu.fpu_get(0), cpu.fpu_get(1));
+    let nan = unsupported_or_nan(st0, st1);
+    // Between numbers, a denormal or pseudo-denormal operand (DE), whatever
+    // the other one is, as SoftFloat's and Bochs's FSCALE have it. A zero
+    // has exponent 0 too but isn't one.
+    let denormal = |x: F80| x.is_denormal() && !x.is_zero();
+    if nan.is_none() && (denormal(st0) || denormal(st1)) {
+        cpu.set_fpu_flag(FpuFlags::DE, true);
+    }
+    if let Some((result, invalid)) = nan.or_else(|| fscale_special(st0, st1)) {
+        if invalid {
+            cpu.set_fpu_flag(FpuFlags::IE, true);
+        }
+        cpu.fpu_set(0, result);
+        return;
+    }
+    // ST(1) truncated toward 0 from all 64 bits of its significand: as a
+    // double, 4 - 2^-62 would round to 4 first. `round_int` gives nothing
+    // for a denormal or a zero (a power of 0) or from 2^63 up. A power
+    // past the 80 bits' range either way gives what one just past it does.
+    let power = match st1.round_int(3) {
+        Some(n) => n.clamp(-70000, 70000) as i32,
+        None if st1.is_denormal() => 0,
+        None if st1.get_sign() => -70000,
+        None => 70000,
+    };
+    let negative = st0.get_sign();
+    let mantissa = st0.get_mantissa();
+    // A denormal's significand as a normal one's, with its exponent below
+    // the smallest normal one's.
+    let shift = mantissa.leading_zeros();
+    let exp = st0.get_exponent().max(1) as i32 - shift as i32 + power;
+    let mantissa = mantissa << shift;
+    let rc = (cpu.fpu_control >> 10) & 0x03;
+    // Whether a result rounded as RC says goes away from zero.
+    let away = |half: bool, odd: bool, rest: bool| match rc {
+        0 => half && (rest || odd),
+        1 => negative && (half || rest),
+        2 => !negative && (half || rest),
+        _ => false,
+    };
+    let mut out = F80::new();
+    out.set_sign(negative);
+    if exp >= 0x7FFF {
+        // Overflow: the infinity, or the largest number toward zero.
+        cpu.set_fpu_flag(FpuFlags::OE | FpuFlags::PE, true);
+        let infinite = away(true, true, true);
+        out.set_exponent(if infinite { 0x7FFF } else { 0x7FFE });
+        out.set_mantissa(if infinite { 1 << 63 } else { u64::MAX });
+        cpu.set_fpu_flag(FpuFlags::C1, infinite);
+    } else if exp >= 1 {
+        out.set_exponent(exp as u16);
+        out.set_mantissa(mantissa);
+    } else {
+        // Below the normal numbers: a denormal, with the bits shifted out
+        // rounded.
+        let drop = (1 - exp) as u32;
+        let (kept, half, rest) = if drop > 64 {
+            (0, false, true)
+        } else {
+            let wide = (mantissa as u128) << 64 >> drop;
+            let below = wide as u64;
+            ((wide >> 64) as u64, below >> 63 == 1, below << 1 != 0)
+        };
+        let inexact = half || rest;
+        let up = away(half, kept & 1 == 1, rest);
+        let kept = if up { kept + 1 } else { kept };
+        if inexact {
+            cpu.set_fpu_flag(FpuFlags::UE | FpuFlags::PE, true);
+        }
+        cpu.set_fpu_flag(FpuFlags::C1, up);
+        // Rounding up to 1 << 63 makes the smallest normal number.
+        out.set_exponent((kept >> 63) as u16);
+        out.set_mantissa(kept);
+    }
+    cpu.fpu_set(0, out);
 }
 
 // FSQRT: Square Root

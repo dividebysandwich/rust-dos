@@ -10,13 +10,14 @@
 //! buffers and vertex buffers are objects of their own in DirectDraw's
 //! table, each with a single count for all its interfaces.
 //!
-//! The only device is the card's HAL ("Direct3D HAL"), there when the
-//! display adapter is a Banshee or Voodoo3 (`hal`). There is no software
-//! rasterizer: the RGB, Ramp and MMX devices aren't there, nor the
-//! reference rasterizer or a device with transform and lighting in
-//! hardware. Transform, lighting, clipping and fog are done on the
-//! processor (`pipeline.rs`), as Windows' Direct3D did them for the
-//! card; what comes out goes to the card's rasterizer.
+//! The devices (`direct3d::listed`) are the software Ramp and RGB
+//! devices, which draw on the processor (`hal::software`), the card's
+//! HAL ("Direct3D HAL") with a 3D card (`hal`), and the T&L HAL on a
+//! card that transforms. The MMX device and the reference rasterizer
+//! aren't there. Transform, lighting, clipping and fog are done on the
+//! processor (`pipeline.rs`), as Windows' Direct3D did them for a card
+//! without transform and lighting; what comes out goes to the device's
+//! rasterizer.
 //!
 //! Parts of this are ported from Wine 1.2.3's ddraw (device.c,
 //! executebuffer.c, viewport.c and others), which is under the GNU
@@ -616,18 +617,10 @@ pub fn of(cpu: &mut Cpu, this: u32) -> Option<(usize, u32)> {
     Some((vtable, id))
 }
 
-/// The number of texture units of the card the DirectDraw object `dd`
-/// draws on, if Direct3D has a HAL there: the display adapter's when it
-/// is a Banshee (1) or a Voodoo3 (2), or the add-on card's for the 3dfx
-/// device's DirectDraw object (a Voodoo Graphics or Voodoo2's).
+/// The number of textures the card the DirectDraw object `dd` draws on
+/// has at once, if Direct3D has a HAL there (`hal::card`).
 pub fn hal(cpu: &mut Cpu, dd: u32) -> Option<u32> {
-    if super::voodoo::is_card_object(cpu, dd) {
-        return crate::win32::glide::hw::board(cpu).map(|b| b.tmus);
-    }
-    match cpu.bus.vga.adapter.voodoo_board()? {
-        crate::voodoo::Board::Banshee => Some(1),
-        _ => Some(2),
-    }
+    hal::card(cpu, dd).map(|offer| offer.units)
 }
 
 /// Whether a DirectDraw object was made by DirectDrawCreateEx: its

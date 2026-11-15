@@ -39,6 +39,7 @@ macro_rules! hr {
 }
 
 mod blt;
+mod dxt_blt;
 mod clipper;
 pub mod d3d;
 pub(super) mod directdraw;
@@ -48,12 +49,15 @@ mod gamma;
 mod gpu_blt;
 pub(super) mod inspect;
 mod palette;
+pub mod stamp;
+pub mod toadforce;
 pub mod picture;
 pub(super) mod surface;
 pub mod voodoo;
 
 use super::com::{self, E_INVALIDARG, E_NOINTERFACE, Guid, IID_IUNKNOWN, S_OK};
 use super::stubs::{Api, Conv, Dll, Vtable};
+use stamp::Stamped;
 use crate::cpu::Cpu;
 
 pub use display::owns_display;
@@ -868,6 +872,7 @@ pub const DDERR_NOEXCLUSIVEMODE: u32 = dderr(225);
 pub const DDERR_NOTFOUND: u32 = dderr(255);
 pub const DDERR_NOOVERLAYHW: u32 = dderr(260);
 pub const DDERR_NORASTEROPHW: u32 = dderr(280);
+pub const DDERR_NOTEXTUREHW: u32 = dderr(330);
 pub const DDERR_OUTOFVIDEOMEMORY: u32 = dderr(380);
 pub const DDERR_SURFACEALREADYATTACHED: u32 = dderr(410);
 pub const DDERR_SURFACEBUSY: u32 = dderr(430);
@@ -1066,8 +1071,11 @@ impl Object {
 /// DirectDraw's state: the system's.
 #[derive(Clone, Debug, Default)]
 pub struct State {
-    /// The objects, by their ids less 1.
-    pub objects: Vec<Option<Object>>,
+    /// The objects, by their ids less 1. Stamped (`stamp::Stamped`):
+    /// what the Direct3D HAL derives from the surfaces and palettes
+    /// for a draw holds for the next while the stamp is the same.
+    /// `object_mut` and `surface_drawn` say which changes keep it.
+    pub objects: Stamped<Vec<Option<Object>>>,
     /// The display: the mode DirectDraw set and the object with exclusive
     /// mode, video memory and the processes' views of it.
     pub display: display::Display,
@@ -1075,8 +1083,13 @@ pub struct State {
     pub card: voodoo::CardDisplay,
     /// The last value GetUniquenessValue gave out.
     pub uniqueness: u32,
-    /// Direct3D's HAL: its texture heap on the card.
-    pub hal: d3d::hal::Hal,
+    /// Direct3D's HAL on a Voodoo: its texture heap on the card.
+    pub hal: d3d::hal::voodoo::Hal,
+    /// Direct3D's HAL on a ToadForce: its copies of textures in card
+    /// memory.
+    pub hal_toadforce: d3d::hal::toadforce::Hal,
+    /// The software devices' decoded textures.
+    pub hal_software: d3d::hal::software::Hal,
     /// Windows whose procedure the program set in front of DirectDraw's
     /// before the object that put DirectDraw's there went: (process,
     /// window, the procedure DirectDraw's passes the messages on to).
@@ -1103,8 +1116,34 @@ impl State {
         self.objects.get(id.checked_sub(1)? as usize)?.as_ref()
     }
 
+    /// The object `id` to change. The objects' stamp changes with it,
+    /// unless the object is one of Direct3D's alone (a device, a
+    /// viewport, a light, a material, a buffer): a device stamps what
+    /// its draws are made from itself (`d3d::device::Device`), and the
+    /// HAL compares what it takes from the others by value. Every draw
+    /// borrows its device here.
     pub fn object_mut(&mut self, id: u32) -> Option<&mut Object> {
-        self.objects.get_mut(id.checked_sub(1)? as usize)?.as_mut()
+        let at = id.checked_sub(1)? as usize;
+        let o = self.objects.get(at)?.as_ref()?;
+        let direct3d = o.d3d.is_some() && o.surface.is_none() && o.palette.is_none();
+        let objects = match direct3d {
+            true => Stamped::unstamped(&mut self.objects),
+            false => &mut *self.objects,
+        };
+        objects.get_mut(at)?.as_mut()
+    }
+
+    /// The pixels of the surface `id` changed: its uniqueness value is
+    /// `value` now. The objects' stamp stays, as every draw changes its
+    /// target's pixels: what is derived from a surface's pixels (the
+    /// HAL's copy of a texture) is checked by the surface's uniqueness
+    /// value beside the stamp.
+    pub fn surface_drawn(&mut self, id: u32, value: u32) {
+        let objects = Stamped::unstamped(&mut self.objects);
+        let object = id.checked_sub(1).and_then(|at| objects.get_mut(at as usize));
+        if let Some(s) = object.and_then(|o| o.as_mut()?.surface.as_mut()) {
+            s.uniqueness = value;
+        }
     }
 
     pub fn surface(&self, id: u32) -> Option<&surface::Surface> {
@@ -1423,5 +1462,6 @@ crate::state_fields!(State {
     card,
     uniqueness,
     hal,
+    hal_toadforce,
     chained
-});
+} skip { hal_software });

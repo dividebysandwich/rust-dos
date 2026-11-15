@@ -9,6 +9,8 @@ use rust_dos::keylayout::Layout;
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 
+mod paging;
+
 fn mouse_machine(mode: u16, max_x: u16, max_y: u16) -> (Cpu, DebugHub) {
     let mut cpu = Cpu::new(".".into());
     cpu.set_ax(mode);
@@ -730,7 +732,7 @@ fn a_loaded_state_leaves_no_breakpoint_watchpoint_or_stop_from_before() {
     ask(&mut cpu, &mut hub, Cmd::AddWatchpoint { addr: "0200:0000".into(), len: 2 }, 0).unwrap();
     let on = Cmd::BreakOn { exceptions: Some(1), clear_exceptions: None, mode_switch: Some(true), program_start: None, program_exit: Some(true) };
     ask(&mut cpu, &mut hub, on, 0).unwrap();
-    hub.temp_breakpoint = Some(0x1234);
+    hub.temp_breakpoint = Some(super::pm::Spot::Phys(0x1234));
     let typed = Cmd::Input { events: vec![InputEvent::Wait { ms: 60_000 }], wait: true };
     let sent = send(&mut cpu, &mut hub, typed);
     answer(&mut cpu, &mut hub, sent, 0).unwrap();
@@ -1166,6 +1168,33 @@ fn underruns_and_frame_times_are_told_in_ms() {
     assert_eq!(times["longest_ms"], 32.0);
     assert_eq!(times["p50_ms"], 16.0);
     assert_eq!(times["p99_ms"], 32.0);
+    assert_eq!(stats["fps_cap"]["shown"], 0, "no frame through the cap yet");
+
+    // A cap of 20: a frame at 50 ms, one held from 55 ms to its turn at
+    // 100, and one at 400, from which the turns start again; the one
+    // after it shows as it is drawn, and the next waits 40 ms that the
+    // turns before wouldn't have asked.
+    let cap = cpu.bus.frame_cap.clone();
+    cap.set(Some(20));
+    cap.shown(50_000_000);
+    assert_eq!(cap.wait(55_000_000, None), Some(100_000_000));
+    cap.shown(100_000_000);
+    cap.shown(400_000_000);
+    assert_eq!(cap.wait(405_000_000, None), None);
+    cap.shown(405_000_000);
+    assert_eq!(cap.wait(410_000_000, None), Some(450_000_000));
+    cap.shown(450_000_000);
+    let stats = reply(&mut cpu, &mut hub, Cmd::Stats).unwrap();
+    let counted = serde_json::json!({
+        "shown": 5, "held": 2, "late": 2, "reanchors": 1, "dropped_ms": 40.0,
+    });
+    assert_eq!(stats["fps_cap"], counted);
+
+    let frames = reply(&mut cpu, &mut hub, Cmd::Frames { after: 1 }).unwrap();
+    assert_eq!(frames["count"], 2);
+    assert_eq!(frames["first"], 1);
+    assert_eq!(frames["ms"], serde_json::json!([32.0]));
+    assert_eq!(frames["end_ms"], serde_json::json!([0.0]));
 }
 
 // ----- the journal --------------------------------------------------------
@@ -1588,8 +1617,13 @@ fn requests_sent_together_take_effect_in_the_order_sent() {
             hub.state_done(&cpu, request, result);
         }
         while let Some(request) = hub.next_speed_request() {
-            let cycles = request.cycles.clone();
-            hub.speed_done(&cpu, request, Ok(serde_json::json!({"cycles": cycles})));
+            let reply = match &request.change {
+                super::SettingChange::Cycles(cycles) => serde_json::json!({"cycles": cycles}),
+                super::SettingChange::FpsCap(cap) => {
+                    serde_json::json!({"fps_cap": rust_dos::frame_cap::name(*cap)})
+                }
+            };
+            hub.speed_done(&cpu, request, Ok(reply));
         }
     }
     let statuses: Vec<u16> = answers
@@ -1861,6 +1895,7 @@ fn win32_without_a_program_has_no_processes() {
         "pending": null,
         "processes": [],
         "trace": "collapsed",
+        "page_file": null,
     });
     assert_eq!(v, expected);
 }
@@ -1878,7 +1913,34 @@ fn win32_trace_level_changes_at_run_time() {
 fn ddraw_without_a_program_has_no_surfaces() {
     let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
     let v = reply(&mut cpu, &mut hub, Cmd::Win32Ddraw).unwrap();
-    let expected = json!({"mode": null, "mode_owner": 0, "exclusive": 0, "surfaces": []});
+    let expected = json!({
+        "mode": null,
+        "mode_owner": 0,
+        "exclusive": 0,
+        "binds": {"all": 0, "kept": 0},
+        "screen_draws": {
+            "direct": 0,
+            "direct_vertices": 0,
+            "pipeline": 0,
+            "pipeline_vertices": 0,
+        },
+        "gl_draws": {
+            "card": 0,
+            "card_vertices": 0,
+            "refused": 0,
+            "no_card": 0,
+            "asked": 0,
+            "numbers": 0,
+            "modelview": 0,
+            "light": 0,
+            "shininess": 0,
+            "material": 0,
+            "flat": 0,
+            "sides": 0,
+            "edges": 0,
+        },
+        "surfaces": [],
+    });
     assert_eq!(v, expected);
     let e = reply(&mut cpu, &mut hub, Cmd::Win32Surface { id: 1, keyed: false }).unwrap_err();
     assert_eq!(e.0, 404, "{}", e.1);

@@ -21,14 +21,17 @@ impl Bus {
             return None;
         }
         let mut walk = walk_tables(self, paging, lin, write);
-        // A page of a view of a file the built-in Windows hasn't read yet
-        // is read now (error code bit 0 clear: no page there). One that
-        // needs a page the pool doesn't have faults, and the system's
-        // handler makes room.
+        // A page of the program's memory in the page file gets its
+        // physical page now, and a page of a view of a file the built-in
+        // Windows hasn't read yet is read (error code bit 0 clear: no page
+        // there). One that needs a page the pool doesn't have faults, and
+        // the system's handler makes room.
         if let Err(error) = walk
             && error & 1 == 0
-            && crate::win32::mapping::page_in(self, paging.cr3, lin)
-                == crate::win32::mapping::PageIn::Done
+            && (crate::win32::memory::page_in(self, paging.cr3, lin)
+                == crate::win32::memory::PageIn::Done
+                || crate::win32::mapping::page_in(self, paging.cr3, lin)
+                    == crate::win32::mapping::PageIn::Done)
         {
             walk = walk_tables(self, paging, lin, write);
         }
@@ -79,7 +82,7 @@ impl Bus {
 
     /// The parts of `len` bytes at `lin` that lie in one page each: their
     /// offset in the range and length.
-    fn page_runs(lin: u32, len: usize) -> impl Iterator<Item = (usize, usize)> {
+    pub(crate) fn page_runs(lin: u32, len: usize) -> impl Iterator<Item = (usize, usize)> {
         let mut done = 0;
         std::iter::from_fn(move || {
             (done < len).then(|| {
@@ -98,15 +101,27 @@ impl Bus {
             let Some(addr) = self.guest_physical(lin.wrapping_add(offset as u32), false) else {
                 return;
             };
-            let to = &mut data[offset..offset + run];
-            if self.is_plain_ram(addr, run) {
-                to.copy_from_slice(&self.ram[addr..addr + run]);
-            } else {
-                for (i, byte) in to.iter_mut().enumerate() {
-                    *byte = self.read_8(addr + i);
-                }
-            }
+            self.read_into(addr, &mut data[offset..offset + run]);
         }
+    }
+
+    /// Fill `data` from the memory at `lin` if every byte of it is in
+    /// plain RAM, which reading changes nothing of: false otherwise,
+    /// with `data` in part filled. For a caller that reads into a
+    /// buffer it has taken out of a device (the ToadForce's command
+    /// queue), where a read of device memory would find the device
+    /// without it.
+    pub fn guest_read_ram(&mut self, lin: u32, data: &mut [u8]) -> bool {
+        for (offset, run) in Self::page_runs(lin, data.len()) {
+            let Some(addr) = self.guest_physical(lin.wrapping_add(offset as u32), false) else {
+                return false;
+            };
+            if !self.is_plain_ram(addr, run) {
+                return false;
+            }
+            data[offset..offset + run].copy_from_slice(&self.ram[addr..addr + run]);
+        }
+        true
     }
 
     /// Whether the `len` bytes at `lin` can be read, or written with
@@ -131,9 +146,8 @@ impl Bus {
             if self.is_plain_ram(addr, run) {
                 self.fill_ram(addr..addr + run, value);
             } else {
-                for i in 0..run {
-                    self.write_8(addr + i, value);
-                }
+                // A page's run is at most a page long.
+                self.write_run(addr, &[value; 0x1000][..run]);
             }
         }
     }
@@ -157,13 +171,7 @@ impl Bus {
             let Some(addr) = self.guest_physical(lin.wrapping_add(offset as u32), true) else {
                 return;
             };
-            if self.is_plain_ram(addr, run) {
-                self.load_bytes(addr, &data[offset..offset + run]);
-            } else {
-                for (i, &byte) in data[offset..offset + run].iter().enumerate() {
-                    self.write_8(addr + i, byte);
-                }
-            }
+            self.write_run(addr, &data[offset..offset + run]);
         }
     }
 }

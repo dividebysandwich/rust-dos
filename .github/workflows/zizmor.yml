@@ -4,6 +4,18 @@ name: zizmor
 # (https://docs.zizmor.sh). Any finding fails the run. It runs only when
 # something zizmor reads changes: workflows, dependabot.yml and composite
 # actions.
+#
+# The rust-cache steps of rust.yml and conformance.yml ignore
+# `cache-poisoning`. zizmor takes a push with a `tags` filter for a release
+# workflow and flags every cache it restores, and tag runs do build the
+# packages the release job publishes. But the caches are saved from main
+# alone (`save-if`), and nothing writes main's cache scope but those
+# workflows running main's own code: no workflow runs on
+# pull_request_target, issue_comment or the like, and a pull request's
+# runs save to its own scope. Poisoning one would take code already
+# running on main. Restoring no cache on tags would rebuild every package
+# from scratch for each release, and zizmor doesn't see a condition on the
+# step or on `lookup-only` anyway.
 on:
   # Pushes to main and tags only: a branch with a pull request runs through
   # `pull_request`.

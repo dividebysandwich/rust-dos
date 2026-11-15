@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 46;
+const WIN32_VERSION: u16 = 71;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -26,12 +26,14 @@ const VIRGE_VERSION: u16 = 1;
 const VERITE_VERSION: u16 = 3;
 const ET4000_VERSION: u16 = 1;
 const MACH64_VERSION: u16 = 1;
+const TOADFORCE_VERSION: u16 = crate::toadforce::STATE_VERSION;
 const SHARED_VERSION: u16 = 1;
 const SB_HIGH_SPEED_VERSION: u16 = 1;
 const ISAPNP_VERSION: u16 = 1;
 const PIT2_VERSION: u16 = 1;
 const TSC_VERSION: u16 = 1;
 const KEY_QUEUE_VERSION: u16 = 1;
+const FRAME_CAP_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 /// Each field is labelled with its name, for comparing states part by
@@ -54,6 +56,7 @@ impl Bus {
             powervr,
             powervr_line,
             hold: _,
+            frame_cap,
             notices: _,
             glide_hint: _,
             ide,
@@ -108,6 +111,8 @@ impl Bus {
             virge,
             verite,
             mach64,
+            toadforce,
+            toadforce_memory,
             retraces,
             last_flip,
             gate_array_shadow,
@@ -197,6 +202,7 @@ impl Bus {
             key_waits: _,
             unhandled_writes: _,
             attribute_reset: _,
+            memory_derived: _,
             log_hook: _,
             log_backlog: _,
             audio_hook: _,
@@ -227,7 +233,15 @@ impl Bus {
         // own so states saved before it load.
         w.section(b"KEYQ", KEY_QUEUE_VERSION, |w| kbd.save_queue(w));
         w.section(b"VIDE", VIDEO_VERSION, |w| {
-            save_all!(w; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
+            save_all!(w; video_mode, vga);
+            // A ToadForce's memory is saved with what its host renderer
+            // drew read back, into a copy: saving changes nothing.
+            w.label("vbe");
+            match toadforce.as_deref().and_then(|card| card.settled(&vbe.vram)) {
+                Some(memory) => vbe.save_with(&memory, w),
+                None => State::save(vbe, w),
+            }
+            save_all!(w; s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         });
         // An S3 ViRGE's engines, only on one, so other states load as they
         // did.
@@ -245,6 +259,13 @@ impl Bus {
         // An ATI mach64's registers and engine, only on one, likewise.
         if vga.adapter.is_mach64() {
             w.section(b"MC64", MACH64_VERSION, |w| mach64.save(w));
+        }
+        // A ToadForce's registers and ring, only on one, likewise. Its
+        // memory is the Super VGA's, in the section above. How much it
+        // has is the machine's setting, which the card saved carries.
+        let _ = toadforce_memory;
+        if let Some(toadforce) = toadforce {
+            w.section(b"TOAD", TOADFORCE_VERSION, |w| toadforce.save(w));
         }
         // A booted system's disks made of shared host directories, before
         // the drives, which need them for their checkpoints; only with
@@ -296,6 +317,11 @@ impl Bus {
         if let Some(voodoo) = voodoo {
             w.section(b"3DFX", VOODOO_VERSION, |w| voodoo.save(w));
         }
+        // The frame rate cap's last frame, which a 3dfx card's section
+        // held before every card's present went through the cap: in a
+        // section of its own, on every machine, so states saved before it
+        // load (with the 3dfx card's, if they have one).
+        w.section(b"PACE", FRAME_CAP_VERSION, |w| frame_cap.save(w));
         // A PowerVR card, likewise.
         if let Some(powervr) = powervr {
             w.section(b"PVR ", POWERVR_VERSION, |w| {
@@ -361,6 +387,7 @@ impl Bus {
             powervr,
             powervr_line,
             hold: _,
+            frame_cap,
             notices: _,
             glide_hint: _,
             ide,
@@ -415,6 +442,8 @@ impl Bus {
             virge,
             verite,
             mach64,
+            toadforce,
+            toadforce_memory,
             retraces,
             last_flip,
             gate_array_shadow,
@@ -493,6 +522,9 @@ impl Bus {
             key_waits: _,
             unhandled_writes: _,
             attribute_reset: _,
+            // The front end's, which sets it from the settings a load
+            // leaves (`slots::loaded_settings`).
+            memory_derived: _,
             log_hook: _,
             log_backlog: _,
             audio_hook: _,
@@ -566,6 +598,26 @@ impl Bus {
         if r.next_is(b"MC64") {
             mach64.load(&mut r.section(b"MC64", MACH64_VERSION)?)?;
         }
+        match (r.next_is(b"TOAD"), toadforce) {
+            (true, Some(toadforce)) => {
+                toadforce.load(&mut r.section(b"TOAD", TOADFORCE_VERSION)?)?;
+                // The card is the state's, with the memory it had there.
+                if toadforce.memory() as usize != vbe.vram.len() {
+                    let what = "a ToadForce whose memory isn't its size";
+                    return Err(StateError::Invalid(what.into()));
+                }
+                *toadforce_memory = toadforce.memory();
+            }
+            (false, None) => {}
+            (true, None) => {
+                let what = "it has a ToadForce and this machine hasn't";
+                return Err(StateError::Mismatch(what.into()));
+            }
+            (false, Some(_)) => {
+                let what = "this machine has a ToadForce and it hasn't";
+                return Err(StateError::Mismatch(what.into()));
+            }
+        }
         disk.shared_from_state = None;
         if r.next_is(b"SHRD") {
             let mut section = r.section(b"SHRD", SHARED_VERSION)?;
@@ -603,11 +655,17 @@ impl Bus {
             (true, None) => return Err(StateError::Mismatch("it has a ViBRA16C and this machine hasn't".into())),
             (false, Some(_)) => return Err(StateError::Mismatch("this machine has a ViBRA16C and it hasn't".into())),
         }
+        // A state saved before the cap had its section has the 3dfx
+        // card's last capped frame, which the card's load puts in.
+        frame_cap.forget();
         match (r.next_is(b"3DFX"), voodoo) {
             (true, Some(voodoo)) => voodoo.load(&mut r.section(b"3DFX", VOODOO_VERSION)?)?,
             (false, None) => {}
             (true, None) => return Err(StateError::Mismatch("it has a 3dfx card and this machine hasn't".into())),
             (false, Some(_)) => return Err(StateError::Mismatch("this machine has a 3dfx card and it hasn't".into())),
+        }
+        if r.next_is(b"PACE") {
+            frame_cap.load(&mut r.section(b"PACE", FRAME_CAP_VERSION)?)?;
         }
         match (r.next_is(b"PVR "), powervr) {
             (true, Some(powervr)) => {
@@ -755,6 +813,7 @@ impl Bus {
         if self.banshee().is_some() {
             self.banshee_settle();
         }
+        self.toadforce_after_load();
         if let Some(awe) = &mut self.awe {
             awe.after_load();
         }
@@ -821,6 +880,26 @@ mod tests {
         (44, 0xBE96_CD5A_0B06_51EC), // the program's allocator a DirectShow link uses
         (45, 0xBE96_CD5A_0B06_51EC), // a file mapping's views keep their protection
         (46, 0x5C6F_53A0_DDD4_1506), // ASPI requests' due times, the drive's head
+        (47, 0x5C6F_53A0_DDD4_1506), // MSVCRT's variables a page further on
+        (48, 0x39FB_7FAD_F632_9763), // OpenGL's lighting state and attribute stack
+        (49, 0x39FB_7FAD_F632_9763), // what a qsort or bsearch in progress keeps
+        (50, 0x39FB_7FAD_F632_9763), // MSVCRT's descriptors in ioinfo blocks
+        (51, 0x85E6_4D93_8609_5176), // the ToadForce HAL's copies of textures
+        (52, 0xB8ED_A219_CC6C_C4BC), // a device made as the T&L HAL device
+        (53, 0x59CC_53A1_8176_269C), // a filter graph's full-screen mode
+        (54, 0xB1D0_B934_F547_E963), // Direct3D 8's cube textures
+        (55, 0x33AE_9F33_F125_1478), // a video device's full-screen play
+        (56, 0x0BF5_7A03_9493_E7DE), // TrackMouseEvent's request, one for the desktop
+        (57, 0xB847_1A2D_27D3_3646), // OpenGL's draws that wait
+        (58, 0xDC7D_5C01_8FC2_8FD2), // the system locale
+        (59, 0xCDE1_505E_0044_1486), // the page file behind programs' own memory
+        (61, 0x9267_6BA0_CE58_B06F), // OpenGL's display lists
+        (62, 0x9F78_ACB5_CCD2_8975), // OpenGL's textures in their contexts' group
+        (63, 0xD1E3_14A4_31DE_2AAA), // OpenGL's vertices as given, and the card's lights
+        (65, 0x0208_3289_86A2_082E), // Win32's serial ports
+        (67, 0xD1E3_14A4_31DE_2AAA), // a Direct3D device made as a software device
+        (69, 0x0328_CB26_D841_A2ED), // Win32's serial ports, merged with 63's and 67's
+        (71, 0x0DD2_950E_C2FB_1628), // copy-on-write views paged, pages held for a fault
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

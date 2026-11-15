@@ -122,7 +122,7 @@ fn start_with_config(
 
 #[test]
 #[cfg(all(feature = "gl", target_os = "linux"))]
-#[ignore = "requires X11, desktop OpenGL and xdotool"]
+#[ignore = "requires X11, desktop OpenGL, xdotool and xte"]
 fn xbrz_window_screenshots_use_the_selected_shader() {
     let dir = std::env::temp_dir().join(format!("rust-dos-shader-window-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -161,11 +161,35 @@ fn xbrz_window_screenshots_use_the_selected_shader() {
         assert!(Instant::now() < deadline, "the shader test window opens");
         std::thread::sleep(Duration::from_millis(50));
     };
+    // xte presses the keys it is given. `xdotool key ctrl+F5` doesn't on
+    // Ubuntu 26.04 (xdotool 3.20160805, xkb-data 2.46): it holds Alt down
+    // as well, and the window gets Ctrl and Alt but no F5, as SDL's event
+    // log shows. Ctrl+Alt+F5 is the key's console switch in that keymap,
+    // which the X server keeps for itself.
     assert!(
         Command::new("xdotool")
-            .args(["key", "--window", &window, "ctrl+F5"])
+            .args(["windowfocus", "--sync", &window])
             .status()
             .unwrap()
+            .success()
+    );
+    // `--sync` gives up after 15 s and still exits with 0, and xte types
+    // into whichever window has the focus. `-f` gives the window the X
+    // server reports, the one `--sync` compares.
+    let focused = Command::new("xdotool")
+        .args(["getwindowfocus", "-f"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&focused.stdout).trim(),
+        window,
+        "the shader test window takes the focus"
+    );
+    assert!(
+        Command::new("xte")
+            .args(["keydown Control_L", "key F5", "keyup Control_L"])
+            .status()
+            .expect("xte (from xautomation) runs")
             .success()
     );
     let capture = loop {

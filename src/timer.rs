@@ -10,7 +10,7 @@
 //!
 //! Time is measured in PIT input clock ticks (1.193182 MHz).
 
-use crate::autospeed::AutoSpeed;
+use crate::autospeed::{AutoSpeed, Backlog};
 use crate::bus::Bus;
 use crate::video::crt::CrtTiming;
 use std::time::Duration;
@@ -22,7 +22,7 @@ pub use rust_dos_audio_core::{PIT_HZ, mul_div, mul_div_ceil};
 const FRAME: Duration = Duration::from_micros(16_667);
 /// How far emulated time may fall behind the wall clock before the backlog
 /// is dropped rather than caught up.
-const MAX_LAG: Duration = Duration::from_millis(50);
+pub(crate) const MAX_LAG: Duration = Duration::from_millis(50);
 /// A backlog of this much is one gap: running frames, it is dropped at
 /// `MAX_LAG`. The frontend stopped (a page in the background, a window
 /// being dragged, the host asleep), which says nothing of whether the host
@@ -54,6 +54,13 @@ const HOST_SAMPLE: Duration = Duration::from_millis(10);
 /// Instructions a frame has to run for a measurement of the host's speed
 /// to take it: fewer, and the frame's time is mostly not theirs.
 const SAMPLE_INSTRUCTIONS: u64 = 10_000;
+/// How much a frame's counts weigh in the busy share of the recent frames
+/// (`Pacer::end_cpu_frame`) against the next frame's: about half a second
+/// of frames at 60 a second carries most of it.
+const BUSY_DECAY: f64 = 0.97;
+/// The share of the recent frames' counts the processor halted from which
+/// GDI's blits no longer count as the host's work (`Pacer::end_cpu_frame`).
+const BLITS_UNTIL_HALTED: f64 = 0.5;
 /// How many times `SAMPLE_INSTRUCTIONS` a frame at the least speed `Max`
 /// and `Auto` go down to has room for (`Pacer::least_timed`). A frame
 /// doesn't run all of it: the guest halts or waits on a device for part
@@ -117,6 +124,18 @@ pub struct Clock {
     pub stalled: u64,
     /// Instruction counts skipped while the CPU waited for an interrupt.
     pub idle: u64,
+    /// Of `stalled`, the counts charged for work the emulator does in its
+    /// own code for the emulated machine (the built-in GDI's blits): the
+    /// host spends its time on it, as on instructions, so the host's speed
+    /// counts them as run: all of them while the recent frames halted
+    /// none of their counts, fewer the more they halted, and none from
+    /// `BLITS_UNTIL_HALTED` of them (`Pacer::end_cpu_frame`).
+    pub offloaded: u64,
+    /// Of `idle`, the counts skipped while a disk service waited out the
+    /// drive's time (`diskio::wait`): the program didn't ask for those.
+    /// Only differences between two points count, so a save state leaves
+    /// it out.
+    pub disk_wait: u64,
     batch_end: u64,
     cycles_per_ms: u32,
     base_icount: u64,
@@ -149,6 +168,8 @@ impl Clock {
             deadline: u64::MAX,
             stalled: 0,
             idle: 0,
+            offloaded: 0,
+            disk_wait: 0,
             batch_end: u64::MAX,
             cycles_per_ms: cycles_per_ms.clamp(MIN_CYCLES, MAX_CYCLES),
             base_icount: 0,
@@ -307,6 +328,15 @@ impl Clock {
         let n = self.stall_count(ns) * times;
         self.icount += n;
         self.stalled += n;
+    }
+
+    /// `stall` for `ns` nanoseconds of work done in the emulator's own code
+    /// (`offloaded`).
+    pub fn stall_offloaded(&mut self, ns: u64) {
+        let n = self.stall_count(ns);
+        self.icount += n;
+        self.stalled += n;
+        self.offloaded += n;
     }
 
     /// The instruction count `stall` adds for `ns` nanoseconds.
@@ -580,19 +610,30 @@ pub struct Pacer {
     /// to protected mode.
     auto: AutoSpeed,
     protected: bool,
-    /// As fast as the host keeps up with, averaged over frames.
-    host_max: Option<f64>,
+    /// As fast as the host keeps up with, estimated from its frames.
+    host: HostEstimate,
     /// The frames measured for the host's speed so far: the instructions
     /// they ran, the time those took and the rest of their work.
     sample: HostSample,
+    /// `Clock::offloaded`, `Clock::idle` and `Clock::icount` as the last
+    /// frame left them.
+    offloaded: u64,
+    idle: u64,
+    icount: u64,
+    /// The counts of the recent frames and those of them the processor
+    /// halted, each frame's weighing `BUSY_DECAY` times the next one's.
+    recent_ran: f64,
+    recent_idle: f64,
     /// The emulated time dropped behind the wall clock so far
-    /// (`MAX_LAG`): whether the host keeps up with the speed, for `Auto`.
+    /// (`MAX_LAG`), stalls and lag alike (`backlog` sorts them for `Auto`).
     /// And the emulated time the last frame ended at, and whether it ran
     /// on from the one before: the backlog after frames of a paused
     /// machine, which the frontend goes on drawing, is the pause's.
     lost_ns: u64,
     last_ns: u64,
     ran: bool,
+    /// Of `lost_ns`, what was lag rather than a stall, which `Auto` goes by.
+    backlog: Backlog,
     /// Whether the frames run by the wall clock (`batch_end`). A frontend
     /// that runs them at its own pace (libretro) drops nothing, so that
     /// `lost_ns` says nothing and the host estimate is all there is.
@@ -619,11 +660,17 @@ impl Pacer {
             speed,
             auto: AutoSpeed::new(speed.initial_cycles(), auto_fps),
             protected: false,
-            host_max: None,
+            host: HostEstimate::default(),
             sample: HostSample::default(),
+            offloaded: 0,
+            idle: 0,
+            icount: 0,
+            recent_ran: 0.0,
+            recent_idle: 0.0,
             lost_ns: 0,
             last_ns: 0,
             ran: false,
+            backlog: Backlog::default(),
             wall_paced: false,
             anchor_wall: now,
             anchor_ticks: 0,
@@ -642,6 +689,7 @@ impl Pacer {
     pub fn set_fast_forward(&mut self, on: bool, clock: &Clock, now: Instant) {
         if self.fast_forward && !on {
             self.auto.start_over();
+            self.backlog.start_over();
             self.anchor_to(clock, now);
         }
         self.fast_forward = on;
@@ -654,6 +702,7 @@ impl Pacer {
     /// speed it had to go back to (`Bus::end_work_boost`).
     pub fn rebase(&mut self, bus: &mut Bus, now: Instant) {
         self.auto.reset();
+        self.backlog.start_over();
         bus.activity.work_return = None;
         self.anchor_to(&bus.clock, now);
     }
@@ -727,6 +776,42 @@ impl Pacer {
         let watched = watched.min(exec);
         let (executed, exec, overhead) =
             (executed.saturating_sub(run), exec - watched, overhead + watched);
+        // The emulated time the built-in GDI's blits took (`Clock::offloaded`)
+        // is work the host did in `exec`, in its own code: it runs as many
+        // of those counts in that time as of instructions. Left out, the
+        // host would look as much slower as the program blits, and a speed
+        // it has the time for would never be tried: a game that draws its
+        // frames through GDI would leave the host idle the blits' share of
+        // the time, at a speed whose blits take longer than the host's.
+        //
+        // That holds for a program that keeps the processor busy: at a
+        // higher speed it draws more frames, and blits in the same share
+        // of its work. One that waits between its frames (a movie at its
+        // own pace) blits as often at any speed and has time to spare at
+        // the speed it runs, so the estimate doesn't hold it back, and its
+        // blits say nothing of what a higher speed would bring, which is
+        // instructions. Counted in full, the blits of Chaos Overlords'
+        // movie, halted 90 % of the time, took the estimate to 2.5 times
+        // the speed the host runs the game's next work at, and `Auto` went
+        // there when that work began. The blits count in full while the
+        // recent frames (about half a second's, as a single frame's would
+        // give a movie's frame that decodes and blits) halted none of
+        // their counts, not at all once they halted `BLITS_UNTIL_HALTED`
+        // of them, and in proportion between.
+        let clock = &cpu.bus.clock;
+        let offloaded = clock.offloaded.saturating_sub(self.offloaded);
+        let ran = clock.icount.saturating_sub(self.icount);
+        let idle = clock.idle.saturating_sub(self.idle).min(ran);
+        (self.offloaded, self.idle, self.icount) = (clock.offloaded, clock.idle, clock.icount);
+        self.recent_ran = self.recent_ran * BUSY_DECAY + ran as f64;
+        self.recent_idle = self.recent_idle * BUSY_DECAY + idle as f64;
+        let halted = if self.recent_ran > 0.0 {
+            self.recent_idle / self.recent_ran
+        } else {
+            1.0
+        };
+        let share = (1.0 - halted / BLITS_UNTIL_HALTED).clamp(0.0, 1.0);
+        let executed = executed + (offloaded as f64 * share) as u64;
         let next = self.end_frame(&cpu.bus, cpu.pm_latched, executed, exec, overhead);
         cpu.os_idles = self.auto.idles();
         // What a device may go back to in the middle of the next frame
@@ -809,8 +894,8 @@ impl Pacer {
         }
     }
 
-    /// The emulated time dropped behind the wall clock so far, for `Auto`
-    /// (`AutoSpeed::update`).
+    /// The emulated time dropped behind the wall clock so far, stalls and
+    /// lag alike: `Auto` goes by the lag only (`Backlog::frame`).
     pub fn lost(&self) -> Duration {
         Duration::from_nanos(self.lost_ns)
     }
@@ -884,14 +969,15 @@ impl Pacer {
             }
             CpuSpeed::Auto(_) => {
                 if let Some(ideal) = ideal {
-                    self.host_max = Some(self.host_max.map_or(ideal, |max| max * 0.9 + ideal * 0.1));
+                    self.host.add(ideal, current);
                 }
                 // No lower than frames can be timed at, or a busy host could
                 // cap the speed where nothing measures it again (with a base
                 // speed below that, as `auto 300` has in real mode).
                 let least = self.least_timed();
                 let host_max = self
-                    .host_max
+                    .host
+                    .max
                     .map_or(MAX_CYCLES, |max| (max as u32).clamp(least, MAX_CYCLES));
                 if protected != self.protected {
                     self.protected = protected;
@@ -912,10 +998,30 @@ impl Pacer {
                 if self.fast_forward {
                     return None;
                 }
-                let next = self.auto.update(bus, protected, host_max, self.lost_ns);
                 if self.wall_paced {
-                    return next;
+                    // How far the emulated time is behind the wall clock
+                    // now: what the next batch runs to catch up, as
+                    // `batch_end` reckons it.
+                    let since = Instant::now().saturating_duration_since(self.anchor_wall);
+                    let wall = self.anchor_ticks + duration_to_ticks(since);
+                    let behind = ticks_to_duration(wall.saturating_sub(bus.clock.now_ticks()));
+                    let behind_ns = behind.as_nanos() as u64;
+                    // A frame of a paused machine (the debugger, the
+                    // settings window, a rewind) runs nothing and falls
+                    // behind the wall clock by the pause: no batch_end
+                    // moves the anchor until it resumes.
+                    if self.ran {
+                        let lag = self.backlog.frame(behind_ns, self.lost_ns, current);
+                        if let Some(cut) = self.auto.falling_behind(bus, lag) {
+                            return Some(cut);
+                        }
+                    }
+                    let lag_ns = self.backlog.lag_ns();
+                    return self.auto.update(bus, protected, host_max, lag_ns);
                 }
+                let next = self
+                    .auto
+                    .update(bus, protected, host_max, self.backlog.lag_ns());
                 // Nothing tells that the host fell behind, but for its
                 // estimate: a heavier scene than it keeps up with at this
                 // speed.
@@ -991,6 +1097,68 @@ impl HostSample {
         ))
     }
 }
+
+/// `Auto`'s estimate of as fast as the host keeps up with, from the
+/// samples of its speed (`HostSample`).
+#[derive(Default)]
+struct HostEstimate {
+    max: Option<f64>,
+    /// Whether the last sample said the host can't run the speed it was
+    /// taken at.
+    short: bool,
+}
+
+impl HostEstimate {
+    /// Add a sample that says `ideal`, taken at the speed `current`. The
+    /// estimate moves a tenth of the way to each sample, so that a light
+    /// stretch of the program moves it little. Two samples in a row that
+    /// say the host can't run the speed it runs at move it half the way
+    /// down: the program went from work the host runs fast (a loading
+    /// loop) to work it runs slowly (drawing in a banked VESA window), and
+    /// the speed, which follows the estimate down, would otherwise stay
+    /// above what the host keeps up with for a dozen slow frames or more, a
+    /// second at a third of real time (Shannara's scene changes).
+    ///
+    /// A sample says that only below `HOST_SHORT` of the speed. A program
+    /// that runs flat out runs at the estimate, and samples scatter around
+    /// it: half of them fall below it, and half the way down to those
+    /// against a tenth up to the others would hold the estimate under what
+    /// the host has, by two thirds of the scatter.
+    ///
+    /// One such sample alone moves it a tenth. A stall of the host, or a
+    /// frame whose other work took long (a present, a shader compiled),
+    /// shrinks the time a sample's instructions had (`MAX_BUSY_SHARE`, down
+    /// to a tenth of a frame), and drops one sample below the speed of any
+    /// program running at more than a tenth of what the host has. Half the
+    /// way down from there would cut the speed of every program above half
+    /// the estimate, for a moment that says nothing of its work.
+    fn add(&mut self, ideal: f64, current: u32) {
+        let short = ideal < current as f64 * HOST_SHORT;
+        let was_short = std::mem::replace(&mut self.short, short);
+        self.max = Some(match self.max {
+            None => ideal,
+            Some(max) => {
+                let share = if short && was_short && ideal < max {
+                    HOST_FALL
+                } else {
+                    HOST_DRIFT
+                };
+                max + (ideal - max) * share
+            }
+        });
+    }
+}
+
+/// The share of the way to a sample of the host's speed that `Auto`'s
+/// estimate of it moves (`HostEstimate::add`).
+const HOST_DRIFT: f64 = 0.1;
+/// The share it moves down when two samples in a row say the host can't
+/// run the speed it runs at.
+const HOST_FALL: f64 = 0.5;
+/// The share of the speed below which a sample says the host can't run
+/// it: too far under the speed to be the scatter of samples taken at the
+/// estimate.
+const HOST_SHORT: f64 = 0.8;
 
 /// PIT channel 2's counter, as programs read it: the count on port 42h
 /// and the output on port 61h bit 5. Its gate is port 61h bit 0. Programs
@@ -1197,12 +1365,180 @@ impl Pit2 {
 
 crate::state_fields!(Pit0 { mode, reload, pending_reload, counting, stopped, armed, period_start, next_tc });
 crate::state_fields!(Pit2 { mode, reload, pending, gate, start, from, held, access, latched } skip { count_due });
-crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns } skip { tsc });
+crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns } skip { tsc, offloaded, disk_wait });
 crate::state_fields!(Tsc { base, icount, hz });
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The host estimate `Auto` keeps to, after `frames` of `executed`
+    /// instructions, `offloaded` counts of GDI's blits and `halted` counts
+    /// the processor waited, each 8 ms of the host's time, run `times`.
+    fn estimate_of(frames: &[(u64, u64, u64)], times: usize) -> f64 {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let mut pacer = Pacer::new(CpuSpeed::Auto(3000), None, Instant::now());
+        for &(executed, offloaded, halted) in frames.iter().cycle().take(frames.len() * times) {
+            let cycles = cpu.bus.clock.cycles_per_ms() as u64;
+            cpu.bus
+                .clock
+                .stall_offloaded(offloaded * 1_000_000 / cycles);
+            cpu.bus.clock.icount += executed + halted;
+            cpu.bus.clock.idle += halted;
+            let ms = Duration::from_millis;
+            pacer.end_cpu_frame(&mut cpu, executed, ms(8), Duration::ZERO);
+        }
+        pacer.host.max.unwrap()
+    }
+
+    fn host_estimate(executed: u64, offloaded: u64, halted: u64) -> f64 {
+        estimate_of(&[(executed, offloaded, halted)], 4)
+    }
+
+    /// A blit's emulated time is work the host did, in its own code, in
+    /// the frame's time: a host that runs half the instructions and blits
+    /// the rest in the same time keeps up with the same speed, where
+    /// leaving the blits out would halve it.
+    #[test]
+    fn the_hosts_speed_counts_blits_as_work() {
+        let all = host_estimate(200_000, 0, 0);
+        let half = host_estimate(100_000, 0, 0);
+        let blitting = host_estimate(100_000, 100_000, 0);
+        assert!((half / all - 0.5).abs() < 0.01, "{half} against {all}");
+        assert!(
+            (blitting / all - 1.0).abs() < 0.01,
+            "{blitting} against {all}"
+        );
+    }
+
+    /// A program that waits between its frames blits as often at any
+    /// speed: its blits count less the more it halts, and not at all from
+    /// `BLITS_UNTIL_HALTED`, where it gets the estimate of its
+    /// instructions.
+    #[test]
+    fn a_waiting_programs_blits_count_as_its_busy_share() {
+        let all = host_estimate(200_000, 0, 0);
+        let half = host_estimate(100_000, 0, 0);
+        // A quarter of the counts halted: half the blits.
+        let quarter_halted = host_estimate(100_000, 100_000, 200_000 / 3);
+        let waiting = host_estimate(100_000, 100_000, 200_000);
+        let expected = (100_000.0 + 100_000.0 * 0.5) / 200_000.0;
+        assert!(
+            (quarter_halted / all - expected).abs() < 0.02,
+            "{quarter_halted} against {all}"
+        );
+        assert!(
+            (waiting / half - 1.0).abs() < 0.01,
+            "{waiting} against {half}"
+        );
+    }
+
+    /// A movie's frame that decodes and blits, among frames that wait for
+    /// the next: the share halted is the recent frames', so its blits
+    /// don't count.
+    #[test]
+    fn a_movies_blitting_frame_counts_in_the_movies_busy_share() {
+        let waiting = (20_000, 0, 1_000_000);
+        let frames = |blits| {
+            [
+                waiting,
+                waiting,
+                waiting,
+                waiting,
+                waiting,
+                (100_000, blits, 0),
+            ]
+        };
+        let plain = estimate_of(&frames(0), 10);
+        let movie = estimate_of(&frames(100_000), 10);
+        // Counted in full for its own frame, the blits would add half.
+        assert!(
+            (movie / plain - 1.0).abs() < 0.01,
+            "{movie} against {plain}"
+        );
+    }
+
+    #[test]
+    fn the_host_estimate_falls_fast_when_the_host_cannot_run_the_speed() {
+        // Shannara: a loading loop takes the estimate and the speed to
+        // 1,135,918, then the drawing that follows runs at 250,000.
+        let mut host = HostEstimate {
+            max: Some(1_135_918.0),
+            short: false,
+        };
+        let mut frames = 0;
+        while let Some(max) = host.max.filter(|&max| max > 250_000.0 * 1.25) {
+            host.add(250_000.0, max as u32);
+            frames += 1;
+        }
+        // A tenth of the way each frame took 26. The first sample below
+        // the speed moves it a tenth, the ones after it half the way.
+        assert_eq!(frames, 5);
+    }
+
+    #[test]
+    fn the_host_estimate_drifts_where_the_host_keeps_up() {
+        let estimate = |max: Option<f64>, short: bool, ideal: f64, current: u32| {
+            let mut host = HostEstimate { max, short };
+            host.add(ideal, current);
+            host.max.unwrap()
+        };
+        // A sample below the estimate at a speed the host still runs
+        // moves it a tenth of the way, as one above it does.
+        assert_eq!(
+            estimate(Some(400_000.0), true, 300_000.0, 200_000),
+            390_000.0
+        );
+        assert_eq!(
+            estimate(Some(400_000.0), true, 500_000.0, 450_000),
+            410_000.0
+        );
+        assert_eq!(estimate(None, false, 500_000.0, 3000), 500_000.0);
+        // One sample below the speed it runs at, a stall of the host or a
+        // long present: a tenth of the way.
+        assert_eq!(
+            estimate(Some(400_000.0), false, 200_000.0, 400_000),
+            380_000.0
+        );
+        // The second in a row: half the way.
+        assert_eq!(
+            estimate(Some(400_000.0), true, 200_000.0, 400_000),
+            300_000.0
+        );
+    }
+
+    #[test]
+    fn a_stall_moves_the_host_estimate_a_tenth() {
+        // A program at 300,000 under an estimate of 400,000; one sample
+        // of a frame that stalled says 50,000, and the next ones the
+        // host's speed again.
+        let mut host = HostEstimate::default();
+        host.add(400_000.0, 300_000);
+        host.add(50_000.0, 300_000);
+        assert_eq!(host.max, Some(365_000.0));
+        host.add(400_000.0, 300_000);
+        assert!(!host.short);
+        assert_eq!(host.max, Some(368_500.0));
+    }
+
+    #[test]
+    fn the_scatter_of_a_flat_out_program_keeps_the_host_estimate() {
+        // A program that runs at the estimate, with samples a tenth above
+        // and below the host's 400,000 in turn and in pairs: the estimate
+        // stays within a fiftieth of it.
+        for pattern in [[1.1, 0.9, 1.1, 0.9], [1.1, 1.1, 0.9, 0.9]] {
+            let mut host = HostEstimate::default();
+            host.add(400_000.0, 400_000);
+            for _ in 0..100 {
+                for share in pattern {
+                    let speed = host.max.unwrap() as u32;
+                    host.add(400_000.0 * share, speed);
+                }
+            }
+            let max = host.max.unwrap();
+            assert!((max / 400_000.0 - 1.0).abs() < 0.02, "{max}");
+        }
+    }
 
     #[test]
     fn a_coarse_clock_never_makes_the_host_infinitely_fast() {

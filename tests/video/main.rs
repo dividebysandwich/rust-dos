@@ -26,6 +26,7 @@ mod powervr_tests;
 mod render_dirty_tests;
 mod tandy_tests;
 mod test_vga_integration;
+mod toadforce_tests;
 mod vbe_tests;
 mod verite_tests;
 mod vga_page_flip_tests;

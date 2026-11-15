@@ -121,6 +121,10 @@ pub const FVF_DIFFUSE: u32 = 0x040;
 pub const FVF_SPECULAR: u32 = 0x080;
 const FVF_RESERVED0: u32 = 0x001;
 const FVF_RESERVED2: u32 = 0xF000;
+/// Direct3D 8's D3DFVF_LASTBETA_UBYTE4: the last beta of an XYZBn
+/// position is the four bytes of the indices of the world matrices.
+/// Direct3D 8.1 has no D3DFVF_LASTBETA_D3DCOLOR; Direct3D 9 added it.
+pub const FVF_LASTBETA_UBYTE4: u32 = 0x1000;
 
 /// D3DVERTEX, D3DLVERTEX and D3DTLVERTEX, as FVF codes.
 pub const FVF_VERTEX: u32 = 0x112;
@@ -141,12 +145,29 @@ pub struct Layout {
     /// The texture coordinate sets: offset and number of floats of each.
     pub textures: usize,
     pub tex: [(u32, u32); 8],
+    /// The blending weights after x, y and z: how many floats.
+    pub weights: u32,
+    /// Where the indices of the world matrices are, as four bytes.
+    pub indices: Option<u32>,
 }
 
 impl Layout {
-    /// The layout of the FVF code `fvf`, if it is one.
+    /// The layout of the FVF code `fvf`, if it is one of Direct3D 7's
+    /// or before.
     pub fn of(fvf: u32) -> Option<Layout> {
-        if fvf & (FVF_RESERVED0 | FVF_RESERVED2) != 0 {
+        if fvf & FVF_RESERVED2 != 0 {
+            return None;
+        }
+        Layout::of_d3d8(fvf)
+    }
+
+    /// The layout of the FVF code `fvf`, if it is one of Direct3D 8's,
+    /// which may have D3DFVF_LASTBETA_UBYTE4. With it the last of the
+    /// XYZBn betas holds the matrix indices and the others are weights:
+    /// XYZB2 has one weight and the indices. Without betas the flag has
+    /// nothing to change, and is let be.
+    pub fn of_d3d8(fvf: u32) -> Option<Layout> {
+        if fvf & (FVF_RESERVED0 | (FVF_RESERVED2 & !FVF_LASTBETA_UBYTE4)) != 0 {
             return None;
         }
         let position = fvf & FVF_POSITION_MASK;
@@ -162,6 +183,14 @@ impl Layout {
             rhw,
             ..Layout::default()
         };
+        if !rhw {
+            let betas = (at - 12) / 4;
+            l.weights = betas;
+            if betas > 0 && fvf & FVF_LASTBETA_UBYTE4 != 0 {
+                l.weights = betas - 1;
+                l.indices = Some(at - 4);
+            }
+        }
         if fvf & FVF_NORMAL != 0 {
             l.normal = Some(at);
             at += 12;
@@ -182,14 +211,14 @@ impl Layout {
             return None;
         }
         l.textures = count;
-        for i in 0..count {
+        for (i, tex) in l.tex[..count].iter_mut().enumerate() {
             let dims = match fvf >> (16 + 2 * i) & 3 {
                 0 => 2,
                 1 => 3,
                 2 => 4,
                 _ => 1,
             };
-            l.tex[i] = (at, dims);
+            *tex = (at, dims);
             at += 4 * dims;
         }
         l.size = at;
@@ -217,6 +246,12 @@ impl Layout {
         if let Some(at) = self.normal {
             v.normal = [f(at), f(at + 4), f(at + 8)];
         }
+        for k in 0..self.weights.min(4) {
+            v.weights[k as usize] = f(12 + 4 * k);
+        }
+        if let Some(at) = self.indices {
+            v.indices = d(at).to_le_bytes();
+        }
         v.diffuse = self.diffuse.map(d);
         v.specular = self.specular.map(d);
         for i in 0..self.textures {
@@ -238,6 +273,14 @@ pub struct Vertex {
     pub diffuse: Option<u32>,
     pub specular: Option<u32>,
     pub tex: [[f32; 4]; 8],
+    /// The blending weights (the first four the vertex has, 0 for those
+    /// it hasn't) and the indices of the world matrices they weigh.
+    pub weights: [f32; 4],
+    pub indices: [u8; 4],
+    /// The second position and normal a declaration's vertex can have,
+    /// for tweening (D3DVSDE_POSITION2 and NORMAL2).
+    pub position2: Option<[f32; 3]>,
+    pub normal2: Option<[f32; 3]>,
 }
 
 /// A D3DCOLOR (ARGB) as red, green, blue and alpha from 0 to 1.
@@ -417,7 +460,6 @@ pub struct Lighting {
     pub ambient: [f32; 4],
     pub specular: bool,
     pub local_viewer: bool,
-    pub normalize: bool,
     /// Whether the vertex's colors stand for the material's, and which
     /// for each of diffuse, specular, ambient and emissive (`MCS_`).
     pub color_vertex: bool,
@@ -459,6 +501,32 @@ pub fn fog_factor(mode: u32, start: f32, end: f32, density: f32, depth: f32) -> 
     if f.is_nan() { 1.0 } else { f.clamp(0.0, 1.0) }
 }
 
+/// Geometry blending, Direct3D 8's D3DRS_VERTEXBLEND, which the
+/// runtime's software vertex processing does whatever the card can.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Blend {
+    /// Each vertex goes through the world matrices `matrices` in
+    /// proportion to its weights: `count` of them (0 to 3) from the
+    /// vertex, and one more that is 1 minus their sum. The position
+    /// that comes out is the sum of the vertex times each matrix times
+    /// its weight; the normal is that of the normal through each
+    /// matrix's inverse transpose (with the view's), as Wine's
+    /// `process_vertices_strided` has it. With `indexed` the vertex's
+    /// indices name the matrices among `matrices`, and an index past
+    /// them names the last, which the caller makes the identity that
+    /// every matrix not set is; without, they are the first 4.
+    Weights {
+        count: usize,
+        indexed: bool,
+        matrices: Vec<Matrix>,
+    },
+    /// D3DVBF_TWEENING: the position and normal are those of the
+    /// vertex's first and second, the second's share the factor
+    /// (D3DRS_TWEENFACTOR): position = position1 * (1 - factor) +
+    /// position2 * factor, as DirectX documents it.
+    Tween(f32),
+}
+
 /// D3DCULL_ modes.
 #[cfg(test)]
 pub const CULL_NONE: u32 = 1;
@@ -489,14 +557,27 @@ pub struct Setup {
     /// can't take coordinates.
     pub clip: bool,
     /// The band primitives are always clipped to: left, top, right,
-    /// bottom. The card's is `hal::VERTEX_BAND`, a pixel or two inside
+    /// bottom. The card's is `hal::vertex_band`, at or a little inside
     /// the guard band the device reports.
     pub guard_band: [f32; 4],
     pub cull: u32,
     pub fill: u32,
     pub shade: u32,
-    /// The texture coordinates each of the card's two stages takes.
-    pub tex_index: [usize; 2],
+    /// What each of a processed vertex's eight slots of texture
+    /// coordinates holds. For a draw, slot n is stage n's coordinates
+    /// (`Coord::of`); for ProcessVertices, set n of the vertices it
+    /// writes (`Setup::for_sets`).
+    pub coords: [Coord; 8],
+    /// D3DRENDERSTATE_NORMALIZENORMALS, for the normals that light
+    /// vertices and that texture coordinates are made from.
+    pub normalize: bool,
+    /// The stages whose coordinates a screen vertex gets: the card's
+    /// textures at once, `SCREEN_STAGES` at most. The others' are left
+    /// out, so a card with two pays for two.
+    pub screen_stages: usize,
+    /// Geometry blending, if the vertices are blended: `world` is then
+    /// the first world matrix only for tweening.
+    pub blend: Option<Blend>,
 }
 
 impl Default for Setup {
@@ -510,12 +591,181 @@ impl Default for Setup {
             lighting: None,
             fog: None,
             clip: true,
-            guard_band: super::hal::VERTEX_BAND,
+            guard_band: super::hal::voodoo::VERTEX_BAND,
             cull: CULL_CCW,
             fill: 3,
             shade: 2,
-            tex_index: [0, 1],
+            coords: std::array::from_fn(Coord::set),
+            normalize: false,
+            screen_stages: SCREEN_STAGES,
+            blend: None,
         }
+    }
+}
+
+/// D3DTTFF_PROJECTED in D3DTSS_TEXTURETRANSFORMFLAGS.
+pub const TTFF_PROJECTED: u32 = 0x100;
+
+/// Where the texture coordinates in a slot of a processed vertex come
+/// from: a stage's D3DTSS_TEXCOORDINDEX and
+/// D3DTSS_TEXTURETRANSFORMFLAGS, and its texture matrix.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Coord {
+    /// The vertex's coordinate set.
+    pub set: usize,
+    /// D3DTSS_TCI_, the index's upper half: 0 for the set, or the
+    /// camera-space normal (1), position (2) or reflection vector (3),
+    /// or Direct3D 8's sphere map (4), which Direct3D makes the
+    /// coordinates from. A transformed vertex has none of them, and
+    /// keeps its set.
+    pub generate: u32,
+    /// The texture matrix the coordinates go through, and how many
+    /// come out (D3DTTFF_COUNT1 to 4). Not for a transformed vertex.
+    pub matrix: Option<(Matrix, usize)>,
+    /// D3DTTFF_PROJECTED: the coordinate the others are divided by at
+    /// each pixel, which is the last one counted, or the fourth with
+    /// no count.
+    pub projected: Option<usize>,
+}
+
+impl Coord {
+    /// The vertex's set `set` as it is.
+    pub fn set(set: usize) -> Coord {
+        Coord {
+            set,
+            generate: 0,
+            matrix: None,
+            projected: None,
+        }
+    }
+
+    /// From a stage's TEXCOORDINDEX `index`, its TEXTURETRANSFORMFLAGS
+    /// `flags` and its texture matrix.
+    pub fn of(index: u32, flags: u32, matrix: &Matrix) -> Coord {
+        let count = (flags & 0xFF).min(4) as usize;
+        Coord {
+            set: (index & 7) as usize,
+            generate: index >> 16,
+            matrix: (count > 0).then_some((*matrix, count)),
+            projected: (flags & TTFF_PROJECTED != 0).then_some(match count {
+                0 => 3,
+                count => count - 1,
+            }),
+        }
+    }
+
+    /// Whether the slot is more than a set of the vertex.
+    fn made(&self) -> bool {
+        self.generate != 0 || self.matrix.is_some()
+    }
+
+    /// The coordinates of the slot for the vertex `v` at `eye` in
+    /// camera space with the normal `normal` there, as the ToadForce
+    /// makes them (`toadforce::raster::geometry::coordinates`): the set
+    /// or what is generated, with a 1 after its last number, through
+    /// the matrix. Of what comes out the first `count` stay.
+    fn make(&self, layout: &Layout, v: &Vertex, eye: [f32; 3], normal: [f32; 3]) -> [f32; 4] {
+        // A slot that is no more than a set, as nearly every one of
+        // every draw is, is a copy.
+        if !self.made() {
+            return self.keep(layout, v);
+        }
+        let matrix = self.matrix.as_ref().map(|(m, count)| (m, *count));
+        let set = (v.tex[self.set & 7], self.numbers(layout));
+        crate::toadforce::raster::geometry::coordinates(self.generate, set, eye, normal, matrix)
+    }
+
+    /// How many numbers the slot's set has in a vertex of `layout`: 0
+    /// for a set the vertex doesn't have.
+    fn numbers(&self, layout: &Layout) -> usize {
+        match self.set < layout.textures {
+            true => layout.tex[self.set].1.clamp(1, 4) as usize,
+            false => 0,
+        }
+    }
+
+    /// The vertex's set for the slot, as a transformed vertex keeps it
+    /// and as `coordinates` gives a set with no matrix: its numbers,
+    /// 0 for those it doesn't have, and 1 for a fourth it doesn't have.
+    fn keep(&self, layout: &Layout, v: &Vertex) -> [f32; 4] {
+        let numbers = self.numbers(layout);
+        let mut c = [0.0, 0.0, 0.0, 1.0];
+        c[..numbers].copy_from_slice(&v.tex[self.set & 7][..numbers]);
+        c
+    }
+
+    /// The coordinates `c` of the slot as a card takes a stage's: the
+    /// two (or, for a cube, three) it samples at, and in the fourth
+    /// what it divides them by at each pixel, 1 unless the stage is
+    /// projected.
+    fn sampled(&self, c: [f32; 4]) -> [f32; 4] {
+        self.sampled_of(c, 0.0, 1.0)
+    }
+
+    /// `sampled` over any kind of number: `c` with `zero` and `one` of
+    /// that kind.
+    fn sampled_of<T: Copy>(&self, c: [T; 4], zero: T, one: T) -> [T; 4] {
+        match self.projected {
+            None => [c[0], c[1], c[2], one],
+            Some(by) => std::array::from_fn(|i| match i {
+                3 => c[by],
+                i if i < by => c[i],
+                _ => zero,
+            }),
+        }
+    }
+
+    /// Where the four numbers a card takes for the slot come from in a
+    /// transformed vertex of `layout`, as `keep` and `sampled` make
+    /// them of one: `screen_stage` says whether the slot is one of the
+    /// stages a screen vertex has coordinates for (`Setup::screen_stages`).
+    /// A caller that copies the numbers out of the program's memory
+    /// gets the ones the pipeline's screen vertex has.
+    pub fn screen_parts(&self, layout: &Layout, screen_stage: bool) -> [Part; 4] {
+        let (zero, one) = (Part::Number(0.0), Part::Number(1.0));
+        if !screen_stage {
+            return [zero, zero, zero, one];
+        }
+        let numbers = self.numbers(layout);
+        let at = layout.tex[self.set & 7].0 / 4;
+        let kept = std::array::from_fn(|i| match i {
+            i if i < numbers => Part::Word(at + i as u32),
+            3 => one,
+            _ => zero,
+        });
+        self.sampled_of(kept, zero, one)
+    }
+}
+
+/// Where a number of a screen vertex comes from in a transformed vertex
+/// as the program has it (`Coord::screen_parts`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Part {
+    /// The vertex's 32-bit word of this number, counted from its start.
+    Word(u32),
+    /// The same number for every vertex.
+    Number(f32),
+}
+
+impl Setup {
+    /// The setup for ProcessVertices, whose vertices keep their sets:
+    /// slot n is set n. A stage that generates its coordinates or has
+    /// a texture matrix puts them in the set its index names, where a
+    /// draw of the vertices it wrote, which are transformed, finds
+    /// them. The first such stage has a set.
+    pub fn for_sets(mut self) -> Setup {
+        let stages = self.coords;
+        self.coords = std::array::from_fn(Coord::set);
+        for stage in stages.iter().filter(|c| c.made()) {
+            let slot = &mut self.coords[stage.set & 7];
+            if !slot.made() {
+                *slot = Coord {
+                    projected: None,
+                    ..*stage
+                };
+            }
+        }
+        self
     }
 }
 
@@ -533,6 +783,7 @@ pub struct Processed {
     pub diffuse: [f32; 4],
     /// The specular color, its alpha the fog factor.
     pub specular: [f32; 4],
+    /// The texture coordinates of each slot (`Setup::coords`).
     pub tex: [[f32; 4]; 8],
     /// The planes it is outside of (D3DCLIP_).
     pub code: u32,
@@ -569,8 +820,25 @@ impl Processed {
         for i in 0..6 {
             p.planes[i] = l(self.planes[i], o.planes[i]);
         }
+        // Transformed vertices are cut on the screen, where the card
+        // iterates the texture coordinates divided by w, and rhw: the
+        // point on the edge gets the coordinates the card would have
+        // drawn there. The colors, z and rhw, which the card iterates as
+        // they are, come from the straight line. Cut straight, the
+        // coordinates of a floor whose near corners lie far past the
+        // guard band stretch across what is left of it (Omikron, #280).
+        // The HAL draws every texture in perspective, whatever
+        // D3DRENDERSTATE_TEXTUREPERSPECTIVE says; a cut has to follow it
+        // if it ever draws one without (#838).
+        let rhw = [self.rhw, o.rhw];
+        let perspective = self.tl && o.tl && rhw.iter().all(|w| w.is_finite() && *w > 0.0);
         for i in 0..8 {
-            p.tex[i] = l4(self.tex[i], o.tex[i]);
+            p.tex[i] = if perspective {
+                let (a, b) = (self.tex[i], o.tex[i]);
+                std::array::from_fn(|k| l(a[k] * rhw[0], b[k] * rhw[1]) / p.rhw)
+            } else {
+                l4(self.tex[i], o.tex[i])
+            };
         }
         p
     }
@@ -578,7 +846,9 @@ impl Processed {
 
 /// A vertex on the screen, as the card's triangle setup takes it: x, y,
 /// z (0 to 1), rhw, the colors (the specular's alpha the fog factor),
-/// and the coordinates of the textures of the card's two stages.
+/// and the coordinates of the textures of the first `SCREEN_STAGES`
+/// stages, each with the number it is divided by at each pixel in the
+/// fourth place (1 unless the stage's coordinates are projected).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ScreenVertex {
     pub x: f32,
@@ -587,8 +857,13 @@ pub struct ScreenVertex {
     pub rhw: f32,
     pub diffuse: u32,
     pub specular: u32,
-    pub tex: [[f32; 2]; 2],
+    pub tex: [[f32; 4]; SCREEN_STAGES],
 }
+
+/// The stages whose texture coordinates a screen vertex carries: the
+/// most textures a card draws with at once, the ToadForce's four. A
+/// Voodoo takes those of its two units.
+pub const SCREEN_STAGES: usize = 4;
 
 /// What draws the primitives that come out of the pipeline: the card.
 /// Coordinates are inside the guard band, not the viewport: the
@@ -627,12 +902,17 @@ struct EyeLight {
     position: [f32; 3],
     /// For a directional or parallel point light: toward the light.
     toward: [f32; 3],
+    /// The way a spot light points.
+    axis: [f32; 3],
 }
 
 /// Run `input`, of `layout`, through transform, lighting and fog.
 pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processed> {
     if layout.rhw {
-        return input.iter().map(|v| transformed(v, layout)).collect();
+        return input
+            .iter()
+            .map(|v| transformed(setup, v, layout))
+            .collect();
     }
     let world_view = multiply(&setup.world, &setup.view);
     let all = multiply(&world_view, &setup.projection);
@@ -657,33 +937,70 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
                         light: *light,
                         position,
                         toward,
+                        axis: normalize(vector(light.direction, &setup.view)),
                     }
                 })
                 .collect()
         })
         .unwrap_or_default();
+    let mut blended = Blended::of(setup);
+    let tween = match setup.blend {
+        Some(Blend::Tween(f)) => Some(f),
+        _ => None,
+    };
+    // The normal is worked out for lighting and for the coordinates
+    // made from it.
+    let lit = setup.lighting.is_some();
+    let normal = lit || setup.coords.iter().any(|c| matches!(c.generate, 1 | 3 | 4));
     input
         .iter()
         .map(|v| {
+            let tweened;
+            let v = match tween {
+                Some(f) => {
+                    tweened = tween_vertex(v, f);
+                    &tweened
+                }
+                None => v,
+            };
             let p = [v.position[0], v.position[1], v.position[2], 1.0];
-            let clip = transform(p, &all);
+            // Where the vertex is in the world, its clip coordinates,
+            // where it is in camera space and its normal there.
+            let (world, clip, eye, n) = match blended.as_mut() {
+                Some(b) => {
+                    let (w, n) = b.place(v, normal);
+                    let e = transform(w, &setup.view);
+                    (w, transform(w, &b.view_projection), [e[0], e[1], e[2]], n)
+                }
+                None => {
+                    let n = if normal {
+                        times(v.normal, &normals)
+                    } else {
+                        [0.0; 3]
+                    };
+                    let w = if setup.planes.is_empty() {
+                        p
+                    } else {
+                        transform(p, &setup.world)
+                    };
+                    let eye = point([p[0], p[1], p[2]], &world_view);
+                    (w, transform(p, &all), eye, n)
+                }
+            };
+            let n = if setup.normalize { normalize(n) } else { n };
             let mut out = Processed {
                 clip,
-                tex: v.tex,
+                tex: std::array::from_fn(|slot| setup.coords[slot].make(layout, v, eye, n)),
                 ..Processed::default()
             };
-            if !setup.planes.is_empty() {
-                let w = transform(p, &setup.world);
-                for (i, plane) in setup.planes.iter().take(6).enumerate() {
-                    out.planes[i] =
-                        plane[0] * w[0] + plane[1] * w[1] + plane[2] * w[2] + plane[3] * w[3];
-                }
+            for (i, plane) in setup.planes.iter().take(6).enumerate() {
+                out.planes[i] = plane[0] * world[0]
+                    + plane[1] * world[1]
+                    + plane[2] * world[2]
+                    + plane[3] * world[3];
             }
-            let eye = point([p[0], p[1], p[2]], &world_view);
             match &setup.lighting {
                 Some(l) => {
-                    let n = times(v.normal, &normals);
-                    let n = if l.normalize { normalize(n) } else { n };
                     let (d, s) = light_vertex(l, &lights, v, eye, n);
                     out.diffuse = d;
                     out.specular = s;
@@ -701,6 +1018,99 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
             out
         })
         .collect()
+}
+
+/// The vertex `v` tweened by `factor`: its position, and its normal,
+/// moved that share of the way to its second ones. A vertex without a
+/// second one keeps its first.
+fn tween_vertex(v: &Vertex, factor: f32) -> Vertex {
+    let mix =
+        |a: [f32; 3], b: [f32; 3]| std::array::from_fn(|k| a[k] * (1.0 - factor) + b[k] * factor);
+    let mut out = *v;
+    if let Some(p2) = v.position2 {
+        let p = mix([v.position[0], v.position[1], v.position[2]], p2);
+        out.position = [p[0], p[1], p[2], v.position[3]];
+    }
+    if let Some(n2) = v.normal2 {
+        out.normal = mix(v.normal, n2);
+    }
+    out
+}
+
+/// What blending by weights needs while a draw's vertices go through
+/// it: the setup's matrices, and the normal matrices of those the
+/// vertices use, made when the first one does.
+struct Blended<'a> {
+    count: usize,
+    indexed: bool,
+    matrices: &'a [Matrix],
+    view: Matrix,
+    view_projection: Matrix,
+    normals: Vec<Option<[[f32; 3]; 3]>>,
+}
+
+impl<'a> Blended<'a> {
+    fn of(setup: &'a Setup) -> Option<Blended<'a>> {
+        let Some(Blend::Weights {
+            count,
+            indexed,
+            matrices,
+        }) = &setup.blend
+        else {
+            return None;
+        };
+        if matrices.is_empty() {
+            return None;
+        }
+        Some(Blended {
+            count: (*count).min(3),
+            indexed: *indexed,
+            matrices,
+            view: setup.view,
+            view_projection: multiply(&setup.view, &setup.projection),
+            normals: vec![None; matrices.len()],
+        })
+    }
+
+    /// The vertex `v` blended: where it is in the world, and with `lit`
+    /// its normal in camera space.
+    fn place(&mut self, v: &Vertex, lit: bool) -> ([f32; 4], [f32; 3]) {
+        let p = [v.position[0], v.position[1], v.position[2], 1.0];
+        let n = self.count;
+        let mut weights = [0.0f32; 4];
+        weights[..n].copy_from_slice(&v.weights[..n]);
+        weights[n] = v.weights[..n].iter().fold(1.0, |last, w| last - w);
+        let mut world = [0.0f32; 4];
+        let mut normal = [0.0f32; 3];
+        for (k, &weight) in weights.iter().enumerate().take(self.count + 1) {
+            // A matrix of no weight adds nothing.
+            if weight == 0.0 {
+                continue;
+            }
+            // An index past the matrices names the last (see `Blend`).
+            let m = if self.indexed {
+                v.indices[k] as usize
+            } else {
+                k
+            }
+            .min(self.matrices.len() - 1);
+            let t = transform(p, &self.matrices[m]);
+            for (w, t) in world.iter_mut().zip(t) {
+                *w += weight * t;
+            }
+            if lit {
+                let view = &self.view;
+                let matrix = &self.matrices[m];
+                let nm =
+                    self.normals[m].get_or_insert_with(|| normal_matrix(&multiply(matrix, view)));
+                let n = times(v.normal, nm);
+                for (a, n) in normal.iter_mut().zip(n) {
+                    *a += weight * n;
+                }
+            }
+        }
+        (world, normal)
+    }
 }
 
 /// The transformed vertex `p` at the clip coordinates `clip` it was
@@ -725,15 +1135,16 @@ pub fn at_clip_coordinates(
     out
 }
 
-/// A transformed vertex, as it is.
-fn transformed(v: &Vertex, _layout: &Layout) -> Processed {
+/// A transformed vertex, as it is, with its sets in the slots that
+/// take them.
+fn transformed(setup: &Setup, v: &Vertex, layout: &Layout) -> Processed {
     Processed {
         clip: [v.position[0], v.position[1], v.position[2], 1.0],
         rhw: v.position[3],
         tl: true,
         diffuse: rgba(v.diffuse.unwrap_or(0xFFFF_FFFF)),
         specular: rgba(v.specular.unwrap_or(0xFF00_0000)),
-        tex: v.tex,
+        tex: std::array::from_fn(|slot| setup.coords[slot].keep(layout, v)),
         ..Processed::default()
     }
 }
@@ -764,8 +1175,8 @@ pub fn codes(setup: &Setup, p: &Processed) -> u32 {
     if z > b[5] * w {
         code |= CLIP_BACK;
     }
-    for i in 0..setup.planes.len().min(6) {
-        if p.planes[i] < 0.0 {
+    for (i, &d) in p.planes.iter().enumerate().take(setup.planes.len()) {
+        if d < 0.0 {
             code |= CLIP_GEN0 << i;
         }
     }
@@ -820,13 +1231,15 @@ fn light_vertex(
             }
         };
         let spot = if matches!(light.kind, LIGHT_SPOT | LIGHT_GLSPOT) {
-            let axis = normalize(vector(light.direction, &IDENTITY));
-            let rho = -dot(dir, axis);
+            let rho = -dot(dir, e.axis);
             let (inner, outer) = ((light.theta / 2.0).cos(), (light.phi / 2.0).cos());
-            if rho > inner {
-                1.0
-            } else if rho <= outer {
+            // Outside the outer cone first, as the card has it: a
+            // light whose inner cone is the wider one, which Direct3D
+            // doesn't define, then lights the same on both.
+            if rho <= outer {
                 0.0
+            } else if rho > inner {
+                1.0
             } else if inner > outer {
                 let f = (rho - outer) / (inner - outer);
                 if light.falloff == 1.0 {
@@ -1146,10 +1559,6 @@ fn screen(setup: &Setup, p: &Processed) -> ScreenVertex {
     } else {
         setup.view_map.screen(p.clip)
     };
-    let tex = |stage: usize| {
-        let t = p.tex[setup.tex_index[stage] & 7];
-        [t[0], t[1]]
-    };
     ScreenVertex {
         x,
         y,
@@ -1157,7 +1566,10 @@ fn screen(setup: &Setup, p: &Processed) -> ScreenVertex {
         rhw,
         diffuse: color(p.diffuse),
         specular: color(p.specular),
-        tex: [tex(0), tex(1)],
+        tex: std::array::from_fn(|stage| match stage < setup.screen_stages {
+            true => setup.coords[stage].sampled(p.tex[stage]),
+            false => [0.0, 0.0, 0.0, 1.0],
+        }),
     }
 }
 
@@ -1356,6 +1768,46 @@ fn triangle(
     }
 }
 
+/// Twice the area of the polygon of `n` corners on the screen, each the
+/// x and y `at` gives: above 0 for a clockwise one. Every caller that
+/// culls goes by this sum, in this order, so a triangle is culled or
+/// drawn the same whichever path it takes to the card.
+pub fn area(n: usize, at: impl Fn(usize) -> (f32, f32)) -> f32 {
+    let mut area = 0.0;
+    for i in 0..n {
+        let (a, b) = (at(i), at((i + 1) % n));
+        area += a.0 * b.1 - b.0 * a.1;
+    }
+    area
+}
+
+/// Whether D3DRENDERSTATE_CULLMODE `cull` culls a polygon of `area`.
+pub fn culled(cull: u32, area: f32) -> bool {
+    match cull {
+        CULL_CW => area > 0.0,
+        CULL_CCW => area < 0.0,
+        _ => false,
+    }
+}
+
+/// Whether a transformed vertex at `x`, `y` and `z` is inside every
+/// plane `clip_planes` gives transformed vertices with `setup`, and has
+/// a place there at all (`finite`), as `triangle` tests a corner: a
+/// triangle of such vertices goes to the card whole. Made once for a
+/// draw, with the planes `triangle` clips its transformed vertices at,
+/// and asked for each vertex.
+pub fn tl_inside(setup: &Setup) -> impl FnMut([f32; 3]) -> bool {
+    let planes = clip_planes(setup, true);
+    let mut p = Processed {
+        tl: true,
+        ..Processed::default()
+    };
+    move |[x, y, z]| {
+        p.clip = [x, y, z, 1.0];
+        finite(&p) && planes.iter().all(|plane| plane.distance(&p) >= 0.0)
+    }
+}
+
 /// Draw the clipped polygon `poly` of a triangle, as the fill mode says,
 /// unless it is culled.
 fn polygon(
@@ -1378,17 +1830,8 @@ fn polygon(
         spilled = poly.iter().map(|(v, _)| screen(setup, v)).collect();
         &spilled[..]
     };
-    let mut area = 0.0;
-    for i in 0..screens.len() {
-        let (a, b) = (&screens[i], &screens[(i + 1) % screens.len()]);
-        area += a.x * b.y - b.x * a.y;
-    }
-    let culled = match setup.cull {
-        CULL_CW => area > 0.0,
-        CULL_CCW => area < 0.0,
-        _ => false,
-    };
-    if culled {
+    let area = area(screens.len(), |i| (screens[i].x, screens[i].y));
+    if culled(setup.cull, area) {
         return;
     }
     match setup.fill {
@@ -1472,6 +1915,102 @@ mod tests {
             position: [x, y, z, 1.0],
             ..Vertex::default()
         }
+    }
+
+    /// A matrix that is 0 but for `set`: each a place and its number.
+    fn sparse(set: &[(usize, f32)]) -> Matrix {
+        let mut m = [0.0; 16];
+        for &(at, n) in set {
+            m[at] = n;
+        }
+        m
+    }
+
+    #[test]
+    fn a_slot_takes_a_set_or_what_is_made_from_the_vertex() {
+        // XYZ, a normal and one set of two coordinates.
+        let layout = Layout::of(0x002 | 0x010 | 0x100).unwrap();
+        let mut v = vertex(1.0, 2.0, 4.0);
+        v.normal = [0.0, 0.0, -1.0];
+        v.tex[0] = [0.25, 0.75, 0.0, 0.0];
+        // The view moves the vertex 1 along x. The texture matrix
+        // doubles what goes in and adds its fourth number, which is the
+        // 1 after a position's three: a set of two has its 1 in the
+        // third place, where this matrix adds nothing.
+        let double = sparse(&[
+            (0, 2.0),
+            (5, 2.0),
+            (10, 2.0),
+            (12, 1.0),
+            (13, 1.0),
+            (14, 1.0),
+        ]);
+        let setup = Setup {
+            view: sparse(&[(0, 1.0), (5, 1.0), (10, 1.0), (15, 1.0), (12, 1.0)]),
+            coords: [
+                Coord::of(0, 0, &double),
+                Coord::of(0, 2, &double),
+                // The camera-space position, and the normal.
+                Coord::of(0x2_0000, 3, &double),
+                Coord::of(0x1_0000, 0, &double),
+                // A set the vertex doesn't have.
+                Coord::of(1, 0, &double),
+                Coord::set(5),
+                Coord::set(6),
+                Coord::set(7),
+            ],
+            ..Setup::default()
+        };
+        let p = process(&setup, &[v], &layout)[0];
+        assert_eq!(p.tex[0], [0.25, 0.75, 0.0, 1.0]);
+        assert_eq!(p.tex[1], [0.5, 1.5, 0.0, 1.0]);
+        assert_eq!(p.tex[2], [5.0, 5.0, 9.0, 1.0]);
+        assert_eq!(p.tex[3], [0.0, 0.0, -1.0, 1.0]);
+        assert_eq!(p.tex[4], [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn a_projected_stage_gives_the_card_its_divisor_last() {
+        let m = Setup::default().world;
+        // D3DTTFF_COUNT3 | PROJECTED divides by the third, and
+        // PROJECTED alone by the fourth.
+        assert_eq!(
+            Coord::of(0, 3 | 0x100, &m).sampled([2.0, 4.0, 8.0, 1.0]),
+            [2.0, 4.0, 0.0, 8.0]
+        );
+        assert_eq!(
+            Coord::of(0, 0x100, &m).sampled([2.0, 4.0, 8.0, 16.0]),
+            [2.0, 4.0, 8.0, 16.0]
+        );
+        assert_eq!(
+            Coord::of(0, 3, &m).sampled([2.0, 4.0, 8.0, 16.0]),
+            [2.0, 4.0, 8.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn process_vertices_puts_made_coordinates_in_the_set_the_stage_names() {
+        let m = Setup::default().world;
+        let mut stages: [Coord; 8] = std::array::from_fn(Coord::set);
+        // Stage 0 takes set 1 as it is, stage 1 makes set 1 from the
+        // position, and stage 2 would make it from the normal.
+        stages[0] = Coord::of(1, 0, &m);
+        stages[1] = Coord::of(1 | 0x2_0000, 2 | 0x100, &m);
+        stages[2] = Coord::of(1 | 0x1_0000, 0, &m);
+        let setup = Setup {
+            coords: stages,
+            ..Setup::default()
+        }
+        .for_sets();
+        assert_eq!(setup.coords[0], Coord::set(0));
+        assert_eq!(
+            setup.coords[1],
+            Coord {
+                projected: None,
+                ..stages[1]
+            }
+        );
+        assert_eq!(setup.coords[2], Coord::set(2));
     }
 
     fn near(a: f32, b: f32) -> bool {
@@ -1837,5 +2376,220 @@ mod tests {
             }
         }
         assert!(cut > 1000, "{cut} cut");
+    }
+
+    #[test]
+    fn a_transformed_triangle_cut_at_the_guard_band_keeps_its_texture_in_perspective() {
+        // A floor's near corner far right of the guard band, as Omikron
+        // draws one when the camera is close: rhw 100 times the others'.
+        // Every corner of what is left has the coordinates the card would
+        // iterate there across the whole triangle: u*rhw and rhw are
+        // linear on the screen.
+        let corner = |x: f32, y: f32, rhw: f32, u: f32| {
+            let mut p = Processed {
+                clip: [x, y, 0.5, 1.0],
+                rhw,
+                tl: true,
+                diffuse: [1.0; 4],
+                ..Processed::default()
+            };
+            p.tex[0] = [u, 1.0 - u, 0.0, 0.0];
+            p
+        };
+        let tri = [
+            corner(0.0, 0.0, 0.01, 0.0),
+            corner(20000.0, 100.0, 1.0, 50.0),
+            corner(0.0, 200.0, 0.01, 1.0),
+        ];
+        let setup = Setup {
+            cull: CULL_NONE,
+            ..Setup::default()
+        };
+        let mut r = Recorder::default();
+        draw(
+            &setup,
+            &tri,
+            &assemble(TRIANGLELIST, &[0, 1, 2]).unwrap(),
+            &mut r,
+        );
+        assert!(!r.triangles.is_empty());
+        // Barycentric weights of a point in the uncut triangle.
+        let [a, b, c] = tri.map(|p| (p.clip[0], p.clip[1]));
+        let area = (b.0 - a.0) * (c.1 - a.1) - (c.0 - a.0) * (b.1 - a.1);
+        let weights = |x: f32, y: f32| {
+            let wb = ((x - a.0) * (c.1 - a.1) - (c.0 - a.0) * (y - a.1)) / area;
+            let wc = ((b.0 - a.0) * (y - a.1) - (x - a.0) * (b.1 - a.1)) / area;
+            [1.0 - wb - wc, wb, wc]
+        };
+        let mut cut = 0;
+        for v in r.triangles.iter().flatten() {
+            assert!(v.x <= setup.guard_band[2] + 0.01, "{v:?}");
+            let w = weights(v.x, v.y);
+            let rhw: f32 = (0..3).map(|i| w[i] * tri[i].rhw).sum();
+            assert!((v.rhw - rhw).abs() <= 1e-4 * rhw.max(1.0), "{v:?}: rhw {rhw}");
+            for k in 0..2 {
+                let uw: f32 = (0..3).map(|i| w[i] * tri[i].tex[0][k] * tri[i].rhw).sum();
+                let want = uw / rhw;
+                assert!((v.tex[0][k] - want).abs() < 1e-3, "{v:?}: {k} {want}");
+            }
+            cut += (v.x > 1.0) as usize;
+        }
+        assert!(cut > 0);
+    }
+
+    fn translation(x: f32, y: f32, z: f32) -> Matrix {
+        let mut m = IDENTITY;
+        m[12] = x;
+        m[13] = y;
+        m[14] = z;
+        m
+    }
+
+    fn blended(count: usize, indexed: bool, matrices: Vec<Matrix>) -> Setup {
+        Setup {
+            blend: Some(Blend::Weights {
+                count,
+                indexed,
+                matrices,
+            }),
+            ..Setup::default()
+        }
+    }
+
+    #[test]
+    fn xyzb_layouts_with_ubyte4_indices() {
+        // Max Payne's: XYZB2, LASTBETA_UBYTE4, NORMAL, TEX1.
+        let l = Layout::of_d3d8(0x1118).unwrap();
+        assert_eq!((l.weights, l.indices, l.normal), (1, Some(16), Some(20)));
+        assert_eq!((l.tex[0].0, l.size), (32, 40));
+        // XYZB1 with LASTBETA_UBYTE4: no weights, only the indices.
+        let l = Layout::of_d3d8(0x1116).unwrap();
+        assert_eq!(
+            (l.weights, l.indices, l.normal, l.size),
+            (0, Some(12), Some(16), 36)
+        );
+        // XYZB3 without: three weights.
+        let l = Layout::of_d3d8(0x00A).unwrap();
+        assert_eq!((l.weights, l.indices, l.size), (3, None, 24));
+        // Direct3D 7 has no LASTBETA_UBYTE4.
+        assert_eq!(Layout::of(0x1118), None);
+        assert_eq!(Layout::of_d3d8(0x2118), None);
+
+        let mut bytes = Vec::new();
+        for f in [1.0f32, 2.0, 3.0, 0.25] {
+            bytes.extend(f.to_le_bytes());
+        }
+        bytes.extend([7, 200, 0, 0]);
+        bytes.extend([0; 20]);
+        let v = Layout::of_d3d8(0x1118).unwrap().read(&bytes);
+        assert_eq!(v.position, [1.0, 2.0, 3.0, 1.0]);
+        assert_eq!((v.weights[0], v.indices), (0.25, [7, 200, 0, 0]));
+    }
+
+    #[test]
+    fn blending_weighs_the_world_matrices() {
+        // Matrix 0 moves x by 2 and matrix 1 by 4. With one weight of
+        // 0.25 the second gets 0.75: x = 0.25 * 2 + 0.75 * 4 = 3.5.
+        let setup = blended(
+            1,
+            false,
+            vec![translation(2.0, 0.0, 0.0), translation(4.0, 0.0, 0.0)],
+        );
+        let mut v = vertex(0.0, 1.0, 0.5);
+        v.weights[0] = 0.25;
+        let out = process(&setup, &[v], &Layout::of_d3d8(0x6).unwrap());
+        assert_eq!(out[0].clip, [3.5, 1.0, 0.5, 1.0]);
+        // Three weights of 0.25, 0.25 and 0.5 leave none for matrix 3.
+        let setup = blended(
+            3,
+            false,
+            (0..4).map(|k| translation(0.0, k as f32, 0.0)).collect(),
+        );
+        v.weights = [0.25, 0.25, 0.5, 9.0];
+        let out = process(&setup, &[v], &Layout::of_d3d8(0xC).unwrap());
+        // y = 1 + 0.25 * 0 + 0.25 * 1 + 0.5 * 2.
+        assert_eq!(out[0].clip[1], 2.25);
+    }
+
+    #[test]
+    fn indexed_blending_takes_the_matrices_the_indices_name() {
+        let mut matrices = vec![IDENTITY; 256];
+        matrices[7] = translation(0.0, 1.0, 0.0);
+        matrices[200] = translation(0.0, 3.0, 0.0);
+        // The first weight, 0.75, is matrix 200's (the lowest byte's
+        // index); the last, 0.25, matrix 7's: y = 0.75 * 3 + 0.25 * 1.
+        let setup = blended(1, true, matrices.clone());
+        let mut v = vertex(0.0, 0.0, 0.5);
+        v.weights[0] = 0.75;
+        v.indices = [200, 7, 0, 0];
+        let out = process(&setup, &[v], &Layout::of_d3d8(0x1008).unwrap());
+        assert_eq!(out[0].clip, [0.0, 2.5, 0.5, 1.0]);
+        // D3DVBF_0WEIGHTS: the one matrix the first index names.
+        let setup = blended(0, true, matrices);
+        v.indices = [7, 200, 0, 0];
+        let out = process(&setup, &[v], &Layout::of_d3d8(0x1006).unwrap());
+        assert_eq!(out[0].clip, [0.0, 1.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn blended_normals_go_through_each_matrix_and_light_the_vertex() {
+        // A light from +x. Matrix 0 turns x to y (90 degrees about z),
+        // matrix 1 is the identity: half of each makes the normal (1, 0,
+        // 0) into (0.5, 0.5, 0), which lights 0.5 of the diffuse color
+        // as it is and 0.707 of it normalized.
+        let light = Light {
+            kind: LIGHT_DIRECTIONAL,
+            diffuse: [1.0, 1.0, 1.0, 1.0],
+            direction: [-1.0, 0.0, 0.0],
+            ..Light::default()
+        };
+        let lighting = Lighting {
+            lights: vec![light],
+            material: Material {
+                diffuse: [1.0, 1.0, 1.0, 1.0],
+                ..Material::default()
+            },
+            ..Lighting::default()
+        };
+        let turn = [
+            0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let mut setup = blended(1, false, vec![turn, IDENTITY]);
+        let mut v = vertex(0.0, 0.0, 0.5);
+        v.normal = [1.0, 0.0, 0.0];
+        v.weights[0] = 0.5;
+        let layout = Layout::of_d3d8(0x6 | FVF_NORMAL).unwrap();
+        setup.lighting = Some(lighting.clone());
+        let out = process(&setup, &[v], &layout);
+        assert!(near(out[0].diffuse[0], 0.5));
+        setup.normalize = true;
+        let out = process(&setup, &[v], &layout);
+        assert!(near(out[0].diffuse[0], 0.5f32.sqrt()));
+
+        // A normal goes through the inverse transpose: x scaled by 2
+        // scales a normal's x by 0.5, which lights 0.5 of the color.
+        let mut stretch = IDENTITY;
+        stretch[0] = 2.0;
+        let mut setup = blended(1, false, vec![stretch, IDENTITY]);
+        setup.lighting = Some(lighting);
+        v.weights[0] = 1.0;
+        let out = process(&setup, &[v], &layout);
+        assert!(near(out[0].diffuse[0], 0.5));
+    }
+
+    #[test]
+    fn tweening_moves_the_factor_of_the_way_to_the_second_position() {
+        let setup = Setup {
+            blend: Some(Blend::Tween(0.25)),
+            ..Setup::default()
+        };
+        let mut v = vertex(0.0, 1.0, 0.5);
+        v.position2 = Some([2.0, 1.0, 0.5]);
+        let out = process(&setup, &[v], &Layout::default());
+        assert_eq!(out[0].clip, [0.5, 1.0, 0.5, 1.0]);
+        // A vertex without a second position stays where it is.
+        v.position2 = None;
+        let out = process(&setup, &[v], &Layout::default());
+        assert_eq!(out[0].clip, [0.0, 1.0, 0.5, 1.0]);
     }
 }

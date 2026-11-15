@@ -3,8 +3,8 @@
 
 use super::{FALSE, TRUE, bytes_at, read_words, user, write_words};
 use crate::cpu::Cpu;
-use crate::win32::convert::{CodePage, decompose};
 use crate::win32::gdi32::{self, Rect, font};
+use crate::win32::nls::{self, CodePage};
 use crate::win32::task::{self, Next, Task};
 
 pub const DT_CENTER: u32 = 0x0001;
@@ -703,6 +703,7 @@ const WSPRINTF_MAX: usize = 1024;
 /// Format `format` with the arguments at `args`, as wsprintfA (or
 /// wsprintfW, `wide`) does: its characters, without the 0.
 fn wsprintf_core(cpu: &mut Cpu, format: &[u16], mut args: u32, wide: bool) -> Option<Vec<u16>> {
+    let acp = nls::ansi(cpu);
     let mut out: Vec<u16> = Vec::new();
     let mut i = 0;
     let mut next_arg = |cpu: &mut Cpu| {
@@ -773,8 +774,8 @@ fn wsprintf_core(cpu: &mut Cpu, format: &[u16], mut args: u32, wide: bool) -> Op
         // is "0x0409", as InstallShield's LANG.DAT names its sections).
         let mut prefix = 0;
         let mut text: Vec<u16> = match t as u8 {
-            b'c' => vec![char_arg(next_arg(cpu), wide_arg)],
-            b'C' => vec![char_arg(next_arg(cpu), !wide_arg)],
+            b'c' => vec![char_arg(acp, next_arg(cpu), wide_arg)],
+            b'C' => vec![char_arg(acp, next_arg(cpu), !wide_arg)],
             b's' => {
                 let at = next_arg(cpu);
                 string_arg(cpu, at, wide_arg)?
@@ -827,12 +828,8 @@ fn wsprintf_core(cpu: &mut Cpu, format: &[u16], mut args: u32, wide: bool) -> Op
     Some(out)
 }
 
-fn char_arg(v: u32, wide: bool) -> u16 {
-    if wide {
-        v as u16
-    } else {
-        CodePage::Ansi.char(v as u8)
-    }
+fn char_arg(acp: CodePage, v: u32, wide: bool) -> u16 {
+    if wide { v as u16 } else { acp.char(v as u8) }
 }
 
 /// A %s argument's characters: "(null)" for a null pointer.
@@ -856,21 +853,14 @@ fn string_arg(cpu: &mut Cpu, at: u32, wide: bool) -> Option<Vec<u16>> {
         }
         Some(out)
     } else {
-        Some(
-            bytes_at(cpu, at)?
-                .into_iter()
-                .map(|b| CodePage::Ansi.char(b))
-                .collect(),
-        )
+        let acp = nls::ansi(cpu);
+        Some(acp.decode(&bytes_at(cpu, at)?))
     }
 }
 
 /// Write the ANSI result of wsprintfA to `buffer`: its length.
 fn put_ansi(cpu: &mut Cpu, buffer: u32, text: &[u16]) -> u32 {
-    let mut b: Vec<u8> = text
-        .iter()
-        .map(|&c| CodePage::Ansi.byte(c).unwrap_or(b'?'))
-        .collect();
+    let mut b = nls::ansi(cpu).encode(text);
     let n = b.len() as u32;
     b.push(0);
     cpu.bus.guest_write_bytes(buffer, &b);
@@ -885,12 +875,8 @@ fn put_wide(cpu: &mut Cpu, buffer: u32, text: &[u16]) -> u32 {
 }
 
 fn ansi_format(cpu: &mut Cpu, at: u32) -> Option<Vec<u16>> {
-    Some(
-        bytes_at(cpu, at)?
-            .into_iter()
-            .map(|b| CodePage::Ansi.char(b))
-            .collect(),
-    )
+    let acp = nls::ansi(cpu);
+    Some(acp.decode(&bytes_at(cpu, at)?))
 }
 
 /// wsprintfA(buffer, format, ...): cdecl, the arguments on the stack.
@@ -933,22 +919,23 @@ pub fn wvsprintf_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 // The character functions.
 
-/// The character of the ANSI byte `b`.
-fn ansi_char(b: u8) -> char {
-    char::from_u32(CodePage::Ansi.char(b) as u32).unwrap_or('?')
+/// The character of the byte `b` of the code page `page`.
+fn ansi_char(page: CodePage, b: u8) -> char {
+    char::from_u32(page.char(b) as u32).unwrap_or('?')
 }
 
-/// The ANSI byte of `c`'s upper or lower case, or `b` itself when it has
-/// none in the code page.
-pub(crate) fn ansi_case(b: u8, upper: bool) -> u8 {
-    let c = ansi_char(b);
+/// The byte of the upper or lower case of the character `b` of the code
+/// page `page` (the system's ANSI one), or `b` itself when it has none in
+/// the code page.
+pub(crate) fn ansi_case(page: CodePage, b: u8, upper: bool) -> u8 {
+    let c = ansi_char(page, b);
     let mapped: Vec<char> = if upper {
         c.to_uppercase().collect()
     } else {
         c.to_lowercase().collect()
     };
     match mapped[..] {
-        [m] if (m as u32) < 0x1_0000 => CodePage::Ansi.byte(m as u16).unwrap_or(b),
+        [m] if (m as u32) < 0x1_0000 => page.byte(m as u16).unwrap_or(b),
         _ => b,
     }
 }
@@ -971,11 +958,12 @@ fn wide_case(c: u16, upper: bool) -> u16 {
 /// CharUpperA and CharLowerA: a character in the low word, or a string
 /// changed where it is.
 fn case_a(cpu: &mut Cpu, at: u32, upper: bool) -> Option<u32> {
+    let acp = nls::ansi(cpu);
     if at < 0x1_0000 {
-        return Some(ansi_case(at as u8, upper) as u32);
+        return Some(ansi_case(acp, at as u8, upper) as u32);
     }
     let bytes = bytes_at(cpu, at)?;
-    let new: Vec<u8> = bytes.iter().map(|&b| ansi_case(b, upper)).collect();
+    let new: Vec<u8> = bytes.iter().map(|&b| ansi_case(acp, b, upper)).collect();
     cpu.bus.guest_write_bytes(at, &new);
     Some(at)
 }
@@ -1000,7 +988,8 @@ fn case_buff_a(cpu: &mut Cpu, at: u32, len: u32, upper: bool) -> Option<u32> {
     if cpu.bus.guest_faulted() {
         return None;
     }
-    let new: Vec<u8> = b.iter().map(|&c| ansi_case(c, upper)).collect();
+    let acp = nls::ansi(cpu);
+    let new: Vec<u8> = b.iter().map(|&c| ansi_case(acp, c, upper)).collect();
     cpu.bus.guest_write_bytes(at, &new);
     Some(len)
 }
@@ -1100,28 +1089,30 @@ pub fn char_prev_w(_cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(if p > start { p - 2 } else { start })
 }
 
-fn test_a(args: &[u32], f: fn(char) -> bool) -> Option<u32> {
-    Some(f(ansi_char(args[0] as u8)) as u32)
+/// IsCharAlphaA and the like: the character of the system's ANSI code
+/// page.
+fn test_a(cpu: &Cpu, args: &[u32], f: fn(char) -> bool) -> Option<u32> {
+    Some(f(ansi_char(nls::ansi(cpu), args[0] as u8)) as u32)
 }
 
 fn test_w(args: &[u32], f: fn(char) -> bool) -> Option<u32> {
     Some(char::from_u32(args[0] & 0xFFFF).is_some_and(f) as u32)
 }
 
-pub fn is_char_alpha(_cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    test_a(args, char::is_alphabetic)
+pub fn is_char_alpha(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    test_a(cpu, args, char::is_alphabetic)
 }
 
-pub fn is_char_alpha_numeric(_cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    test_a(args, char::is_alphanumeric)
+pub fn is_char_alpha_numeric(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    test_a(cpu, args, char::is_alphanumeric)
 }
 
-pub fn is_char_upper(_cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    test_a(args, char::is_uppercase)
+pub fn is_char_upper(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    test_a(cpu, args, char::is_uppercase)
 }
 
-pub fn is_char_lower(_cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    test_a(args, char::is_lowercase)
+pub fn is_char_lower(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    test_a(cpu, args, char::is_lowercase)
 }
 
 pub fn is_char_alpha_w(_cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -1138,18 +1129,6 @@ pub fn is_char_upper_w(_cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 pub fn is_char_lower_w(_cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     test_w(args, char::is_lowercase)
-}
-
-/// The byte of `c` in `to`, or the nearest it has: the letter without
-/// its accent, or a question mark.
-fn best_fit(c: u16, to: CodePage) -> u8 {
-    if let Some(b) = to.byte(c) {
-        return b;
-    }
-    match decompose(c) {
-        Some((base, _)) => to.byte(base).unwrap_or(b'?'),
-        None => b'?',
-    }
 }
 
 fn convert(cpu: &mut Cpu, src: u32, dst: u32, len: Option<u32>, to_oem: bool) -> Option<u32> {
@@ -1171,18 +1150,17 @@ fn convert(cpu: &mut Cpu, src: u32, dst: u32, len: Option<u32>, to_oem: bool) ->
             b
         }
     };
-    let (from, to) = if to_oem {
-        (CodePage::Ansi, CodePage::Oem)
-    } else {
-        (CodePage::Oem, CodePage::Ansi)
-    };
+    let (ansi, oem) = (nls::ansi(cpu), nls::oem(cpu));
+    let (from, to) = if to_oem { (ansi, oem) } else { (oem, ansi) };
     let out: Vec<u8> = bytes
         .iter()
         .map(|&b| {
             if b < 0x80 {
                 b
             } else {
-                best_fit(from.char(b), to)
+                // The nearest character `to` has: the letter without its
+                // accent, or a question mark.
+                to.best_fit(from.char(b)).unwrap_or(b'?')
             }
         })
         .collect();
@@ -1255,9 +1233,15 @@ mod tests {
 
     #[test]
     fn ansi_case_maps_accented_letters() {
-        assert_eq!(ansi_case(b'a', true), b'A');
-        assert_eq!(ansi_case(0xE9, true), 0xC9);
-        assert_eq!(ansi_case(0xFF, true), 0x9F);
-        assert_eq!(ansi_case(b'1', true), b'1');
+        let w = CodePage::WESTERN;
+        assert_eq!(ansi_case(w, b'a', true), b'A');
+        assert_eq!(ansi_case(w, 0xE9, true), 0xC9);
+        assert_eq!(ansi_case(w, 0xFF, true), 0x9F);
+        assert_eq!(ansi_case(w, b'1', true), b'1');
+        // Cyrillic in code page 1251: я (FFh) and Я (DFh), ё (B8h) and Ё
+        // (A8h).
+        let cyrillic = CodePage::by_number(1251).unwrap();
+        assert_eq!(ansi_case(cyrillic, 0xFF, true), 0xDF);
+        assert_eq!(ansi_case(cyrillic, 0xA8, false), 0xB8);
     }
 }

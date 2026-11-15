@@ -131,7 +131,7 @@ pub fn parse_decl(tokens: &[u32]) -> Option<Decl> {
                     let kind = (t >> 16) & 0xF;
                     let reg = t & 0x1F;
                     let size = type_size(kind)?;
-                    if reg >= 16 {
+                    if reg as usize >= REGISTERS {
                         return None;
                     }
                     d.inputs.push(Input {
@@ -165,16 +165,27 @@ pub fn parse_decl(tokens: &[u32]) -> Option<Decl> {
 
 // Registers of a fixed-function declaration (D3DVSDE_).
 pub const REG_POSITION: u32 = 0;
+pub const REG_BLENDWEIGHT: u32 = 1;
+pub const REG_BLENDINDICES: u32 = 2;
 pub const REG_NORMAL: u32 = 3;
 pub const REG_DIFFUSE: u32 = 5;
 pub const REG_SPECULAR: u32 = 6;
 pub const REG_TEXCOORD0: u32 = 7;
+pub const REG_POSITION2: u32 = 15;
+pub const REG_NORMAL2: u32 = 16;
+
+/// The input registers a declaration can load: a function's v0 to v15,
+/// and for the fixed-function pipeline NORMAL2 past them.
+pub const REGISTERS: usize = 17;
+
+/// The input registers a function reads.
+const FUNCTION_INPUTS: u32 = 16;
 
 /// Whether a declaration can be drawn by the fixed-function pipeline:
-/// a normal of three floats, colors of D3DCOLOR.
+/// normals of three floats, colors of D3DCOLOR.
 fn fixed_function_ok(d: &Decl) -> bool {
     d.inputs.iter().all(|i| match i.reg {
-        REG_NORMAL => i.kind == 2,
+        REG_NORMAL | REG_NORMAL2 => i.kind == 2,
         REG_DIFFUSE | REG_SPECULAR => i.kind == 4,
         _ => true,
     })
@@ -292,7 +303,7 @@ const R_TEXCRDOUT: u32 = 6;
 
 /// A vertex being run through a function.
 struct Machine<'a> {
-    v: &'a [[f32; 4]; 16],
+    v: &'a [[f32; 4]],
     c: &'a [[f32; 4]],
     /// The constants DEF gave: the register and its value.
     defs: Vec<(usize, [f32; 4])>,
@@ -387,7 +398,7 @@ fn splat(x: f32) -> [f32; 4] {
 
 /// Run the function `f` (its tokens after the version) on a vertex with
 /// the inputs `v` and the constants `c`.
-pub fn run(f: &[u32], v: &[[f32; 4]; 16], c: &[[f32; 4]]) -> Output {
+pub fn run(f: &[u32], v: &[[f32; 4]], c: &[[f32; 4]]) -> Output {
     let mut m = Machine {
         v,
         c,
@@ -543,6 +554,9 @@ pub fn create_vertex_shader(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let Some(f) = read_function(cpu, function_at) else {
             return Some(D3DERR_INVALIDCALL);
         };
+        if parsed.inputs.iter().any(|i| i.reg >= FUNCTION_INPUTS) {
+            return Some(D3DERR_INVALIDCALL);
+        }
         f
     } else {
         if !fixed_function_ok(&parsed) {

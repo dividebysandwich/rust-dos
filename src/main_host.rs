@@ -303,6 +303,8 @@ impl MainHost<'_, '_> {
         }
         let this_machine = self.machine.settings(&compared);
         let mut differences = slots::machine_differences(&header.machine, &this_machine);
+        let ram_mb = self.cpu.bus.ram().len() >> 20;
+        differences.extend(slots::memory_difference(header.memsize, ram_mb));
         // The machine's clock is the mode's start plus emulated time.
         let start = self.deterministic.map(|start| start.format("%Y-%m-%d %H:%M:%S").to_string());
         differences.extend(slots::mode_difference(header.deterministic.as_deref(), start.as_deref()));
@@ -364,9 +366,8 @@ impl MainHost<'_, '_> {
     /// machine as it was.
     fn load_state(&mut self, path: &std::path::Path, header: slots::Header, state: &[u8]) -> Result<slots::Header, String> {
         let (old_settings, old_hardware) = (self.settings.clone(), self.machine.clone());
-        let mut hardware = slots::machine_settings(&header.machine, self.settings);
-        // The memory the state has, which it brings (bus/state.rs).
-        hardware.memsize = header.memsize;
+        // With the memory the state has, which it brings (bus/state.rs).
+        let mut hardware = slots::loaded_settings(&header, self.settings);
         // The speed isn't the machine's hardware: outside deterministic
         // mode the machine goes on at the speed it runs at (`--cycles`,
         // the configuration's, the last one the window or /api/speed set).
@@ -402,6 +403,9 @@ impl MainHost<'_, '_> {
             self.cpu.bus.log_string(&format!("[STATE] {} wasn't loaded: {}", path.display(), e));
             return Err(e);
         }
+        // `loaded_settings` leaves `memsize` unset only where the state's
+        // size is the default for its hardware.
+        self.cpu.bus.memory_derived = hardware.memsize.is_none();
         // Deterministic mode runs at the speed the machine's state brought
         // (a state saved at auto or max brings the speed it had then), so
         // the run from the state is the same whatever this machine ran at.
@@ -553,6 +557,7 @@ impl Host for MainHost<'_, '_> {
         self.cpu.bus.win32.guest_replace = new.win32_dlls_replace.clone();
         self.cpu.bus.win32.version = new.win32_version;
         self.cpu.bus.win32.depth = new.win32_depth;
+        self.cpu.bus.win32.locale = new.win32_locale;
         if new.win32_trace != old.win32_trace {
             rust_dos::win32::trace::set_level(self.cpu, new.win32_trace);
         }
@@ -864,8 +869,26 @@ impl Host for MainHost<'_, '_> {
         };
         if let Some(game) = self.game.as_ref() {
             program.name = game.name.clone();
+            let profile = self.game_profile(&game.id).ok();
+            program.about = profile.map(|(text, _)| rust_dos::almanac::About::of_profile(&text));
         }
         Some(program)
+    }
+
+    fn almanac_save_about(
+        &mut self,
+        about: &rust_dos::almanac::About,
+    ) -> Result<Option<rust_dos::almanac::About>, String> {
+        let Some(game) = self.game.as_ref() else {
+            return Ok(None);
+        };
+        let (text, dir) = self.game_profile(&game.id)?;
+        let new = about.into_profile(&text);
+        if new != text {
+            let path = dir.join(format!("{}.conf", game.id));
+            std::fs::write(&path, &new).map_err(|e| format!("{}: {}", path.display(), e))?;
+        }
+        Ok(Some(rust_dos::almanac::About::of_profile(&new)))
     }
 
     fn identify_game(&mut self, archive: &std::path::Path) -> Result<String, String> {

@@ -17,9 +17,10 @@ use super::super::ddraw::surface::{
 };
 use super::super::ddraw::{self, Format, V_SURFACE7};
 use super::{
-    Context, GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, GL_OUT_OF_MEMORY,
-    MAX_TEXTURE_SIZE, Texture, UNITS, ctx, error, f, read_floats, state,
+    GL_INVALID_ENUM, GL_INVALID_OPERATION, GL_INVALID_VALUE, GL_OUT_OF_MEMORY, Settings, State,
+    Texture, UNITS, ctx, current, error, f, lists, max_texture_size, read_floats, state,
 };
+use super::wgl::PackedPixels;
 use crate::cpu::Cpu;
 
 pub const GL_TEXTURE0: u32 = 0x84C0;
@@ -147,14 +148,53 @@ struct Source {
     at: u32,
 }
 
-/// The texels of `src` as red, green, blue and alpha bytes, row by row
-/// from the first the program gave, with the unpack state of `c`
-/// (alignment, row length, rows and pixels skipped).
-fn unpack(cpu: &mut Cpu, unpack: [u32; 4], src: &Source) -> Option<Vec<[u8; 4]>> {
-    let n = components(src.format)?;
-    let size = type_size(src.kind)?;
-    let pixel = n * size;
-    let row_pixels = if unpack[1] > 0 { unpack[1] } else { src.width };
+/// How a pixel of `format` and `kind` is kept: its bytes, the bytes of
+/// one of its elements, and the packed type (`packed_type`) when `kind`
+/// is one the driver takes (`types`). The error is OpenGL's:
+/// GL_INVALID_ENUM for a format or type there isn't, and
+/// GL_INVALID_OPERATION for a packed type whose format has another
+/// number of components (the three-component types take GL_RGB alone).
+pub(super) fn pixel_layout(
+    format: u32,
+    kind: u32,
+    types: PackedPixels,
+) -> Result<(u32, u32, Option<Packed>), u32> {
+    let n = components(format).ok_or(GL_INVALID_ENUM)?;
+    match packed_type(kind).filter(|_| types.takes(kind)) {
+        Some(packed) => {
+            let fits = match packed.1.len() {
+                3 => format == GL_RGB,
+                _ => format == GL_RGBA || format == GL_BGRA_EXT,
+            };
+            if !fits {
+                return Err(GL_INVALID_OPERATION);
+            }
+            Ok((packed.0, packed.0, Some(packed)))
+        }
+        None => {
+            let size = type_size(kind).ok_or(GL_INVALID_ENUM)?;
+            Ok((n * size, size, None))
+        }
+    }
+}
+
+/// The most bytes an image the program gives may take.
+pub(super) const IMAGE_MOST: usize = 0x400_0000;
+
+/// Where an image of `width` by `height` pixels of `pixel` bytes is
+/// under the unpack state `unpack` (alignment, row length, rows and
+/// pixels skipped): the bytes from one row to the next, the bytes
+/// from the address the program gave to the first pixel, and the
+/// bytes from there to the end of the last. None when they don't fit
+/// the address space. glTexImage2D reads its texels by it, and a
+/// display list copies them by it (`lists`).
+pub(super) fn span(
+    unpack: [u32; 4],
+    width: u32,
+    height: u32,
+    pixel: u32,
+) -> Option<(u32, u32, usize)> {
+    let row_pixels = if unpack[1] > 0 { unpack[1] } else { width };
     let align = unpack[0].max(1);
     let stride = row_pixels
         .checked_mul(pixel)?
@@ -162,14 +202,28 @@ fn unpack(cpu: &mut Cpu, unpack: [u32; 4], src: &Source) -> Option<Vec<[u8; 4]>>
     let skip = unpack[2]
         .checked_mul(stride)?
         .checked_add(unpack[3].checked_mul(pixel)?)?;
-    let start = src.at.checked_add(skip)?;
-    let len = src
-        .height
+    let len = height
         .saturating_sub(1)
         .checked_mul(stride)?
-        .checked_add(src.width.checked_mul(pixel)?)? as usize;
-    if src.at == 0 || len > 0x400_0000 || !cpu.bus.guest_probe(start, len, false) {
-        return None;
+        .checked_add(width.checked_mul(pixel)?)? as usize;
+    Some((stride, skip, len))
+}
+
+/// The texels of `src` as red, green, blue and alpha bytes, row by row
+/// from the first the program gave, with the unpack state of `c`
+/// (alignment, row length, rows and pixels skipped). The error is
+/// OpenGL's: `pixel_layout`'s for the format and type, and
+/// GL_INVALID_ENUM for texels that can't be read.
+fn unpack(cpu: &mut Cpu, unpack: [u32; 4], src: &Source) -> Result<Vec<[u8; 4]>, u32> {
+    let types = super::wgl::packed_pixels(cpu);
+    let (pixel, size, packed) = pixel_layout(src.format, src.kind, types)?;
+    let place = || {
+        let (stride, skip, len) = span(unpack, src.width, src.height, pixel)?;
+        Some((stride, src.at.checked_add(skip)?, len))
+    };
+    let (stride, start, len) = place().ok_or(GL_INVALID_ENUM)?;
+    if src.at == 0 || len > IMAGE_MOST || !cpu.bus.guest_probe(start, len, false) {
+        return Err(GL_INVALID_ENUM);
     }
     let mut bytes = vec![0u8; len];
     cpu.bus.guest_read_bytes(start, &mut bytes);
@@ -178,14 +232,84 @@ fn unpack(cpu: &mut Cpu, unpack: [u32; 4], src: &Source) -> Option<Vec<[u8; 4]>>
         let row = &bytes[(y * stride) as usize..];
         for x in 0..src.width {
             let p = &row[(x * pixel) as usize..];
-            let c = |i: u32| {
-                let at = (i * size) as usize;
-                (component(&p[at..at + size as usize], src.kind) * 255.0 + 0.5) as u8
-            };
-            out.push(rgba_of(src.format, c));
+            out.push(match packed {
+                Some((_, widths, rev)) => {
+                    let mut v = [0u8; 4];
+                    v[..size as usize].copy_from_slice(&p[..size as usize]);
+                    let v = u32::from_le_bytes(v);
+                    rgba_of(src.format, |i| packed_component(v, widths, rev, i))
+                }
+                None => rgba_of(src.format, |i| {
+                    let at = (i * size) as usize;
+                    (component(&p[at..at + size as usize], src.kind) * 255.0 + 0.5) as u8
+                }),
+            });
         }
     }
-    Some(out)
+    Ok(out)
+}
+
+/// A packed pixel type: the bytes of its element, the bits of each
+/// component and whether the first is lowest (`packed_type`).
+pub(super) type Packed = (u32, &'static [u32], bool);
+
+/// A packed pixel type of OpenGL 1.2 (GL_UNSIGNED_SHORT_5_6_5 and the
+/// others): the bytes of the one element that holds a whole pixel, the
+/// bits of each component in the order the format names them, and
+/// whether the first component is in the lowest bits (the types ending
+/// in _REV) or in the highest.
+fn packed_type(kind: u32) -> Option<Packed> {
+    Some(match kind {
+        0x8032 => (1, &[3, 3, 2], false),
+        0x8362 => (1, &[3, 3, 2], true),
+        0x8363 => (2, &[5, 6, 5], false),
+        0x8364 => (2, &[5, 6, 5], true),
+        0x8033 => (2, &[4, 4, 4, 4], false),
+        0x8365 => (2, &[4, 4, 4, 4], true),
+        0x8034 => (2, &[5, 5, 5, 1], false),
+        0x8366 => (2, &[5, 5, 5, 1], true),
+        0x8035 => (4, &[8, 8, 8, 8], false),
+        0x8367 => (4, &[8, 8, 8, 8], true),
+        0x8036 => (4, &[10, 10, 10, 2], false),
+        0x8368 => (4, &[10, 10, 10, 2], true),
+        _ => return None,
+    })
+}
+
+/// The packed pixel of `packed` that holds `rgba` with the components
+/// in the order `format` names them (GL_RGB, GL_RGBA or GL_BGRA), as
+/// glReadPixels writes it: each byte scaled to its bits, rounded.
+pub(super) fn pack_pixel(rgba: [u8; 4], format: u32, packed: Packed) -> u32 {
+    let (_, widths, rev) = packed;
+    let [r, g, b, a] = rgba;
+    let ordered = if format == GL_BGRA_EXT {
+        [b, g, r, a]
+    } else {
+        [r, g, b, a]
+    };
+    let mut v = 0;
+    for (i, &bits) in widths.iter().enumerate() {
+        let shift: u32 = if rev {
+            widths[..i].iter().sum()
+        } else {
+            widths[i + 1..].iter().sum()
+        };
+        let max = (1u32 << bits) - 1;
+        v |= ((ordered[i] as u32 * max + 127) / 255) << shift;
+    }
+    v
+}
+
+/// Component `i` of the packed pixel `v`, as a byte.
+fn packed_component(v: u32, widths: &[u32], rev: bool, i: u32) -> u8 {
+    let i = i as usize;
+    let shift: u32 = if rev {
+        widths[..i].iter().sum()
+    } else {
+        widths[i + 1..].iter().sum()
+    };
+    let max = (1u32 << widths[i]) - 1;
+    ((((v >> shift) & max) * 255 + max / 2) / max) as u8
 }
 
 /// A texel of `format` as red, green, blue and alpha, from its
@@ -224,36 +348,71 @@ fn encode(rgba: [u8; 4], base: Base) -> u16 {
     }
 }
 
-/// The texture named `name` of the context `c`, made if it isn't there
-/// (the default texture, 0, and names glGenTextures gave or not).
-fn texture_mut(c: &mut Context, name: u32) -> &mut Texture {
-    match c.textures.iter().position(|t| t.name == name) {
-        Some(i) => &mut c.textures[i],
-        None => {
-            c.textures.push(Texture {
-                name,
-                min_filter: GL_NEAREST_MIPMAP_LINEAR,
-                mag_filter: GL_LINEAR,
-                wrap_s: GL_REPEAT,
-                wrap_t: GL_REPEAT,
-                ..Texture::default()
-            });
-            c.textures.last_mut().expect("just pushed")
-        }
+// Where the textures are. The one named 0, the default texture, is a
+// context's own (`Settings::default_texture`). The named ones belong
+// to the context's group, with its display lists (`lists::Shared`): a
+// context starts with a group of its own, and after wglShareLists two
+// contexts have the same textures under the same names, as contexts
+// of OpenGL 1.1 that share their lists do. A texture's surfaces are of
+// the DirectDraw object of the context that gave it its image.
+
+/// A texture named `name` as a new one is: no image, and OpenGL's
+/// filters and wrap modes.
+pub(super) fn new(name: u32) -> Texture {
+    Texture {
+        name,
+        min_filter: GL_NEAREST_MIPMAP_LINEAR,
+        mag_filter: GL_LINEAR,
+        wrap_s: GL_REPEAT,
+        wrap_t: GL_REPEAT,
+        ..Texture::default()
     }
 }
 
 const GL_NEAREST_MIPMAP_LINEAR: u32 = 0x2702;
 
-/// The texture bound to the active unit.
-fn bound(c: &mut Context) -> &mut Texture {
-    let name = c.bound[c.active_unit as usize];
-    texture_mut(c, name)
+/// The texture named `name` of a context with the settings `c` whose
+/// group's textures are `shared`, as it is now.
+pub fn find<'a>(c: &'a Settings, shared: &'a [Texture], name: u32) -> Option<&'a Texture> {
+    if name == 0 {
+        return Some(&c.default_texture);
+    }
+    shared.iter().find(|t| t.name == name)
 }
 
-/// The texture `name` of the current context, as it is now.
-pub fn texture(c: &Context, name: u32) -> Option<&Texture> {
-    c.textures.iter().find(|t| t.name == name)
+/// Whether the context at `index` has a texture named `name`.
+fn exists(s: &State, index: usize, name: u32) -> bool {
+    let Some(Some(c)) = s.contexts.get(index) else {
+        return false;
+    };
+    find(c, s.lists.textures(c.lists.group), name).is_some()
+}
+
+/// The texture named `name` of the context at `index`, to change, made
+/// if it isn't there (names glGenTextures gave or not). Every context
+/// that has the texture draws with it as it is after the change.
+fn texture_mut(s: &mut State, index: usize, name: u32) -> Option<&mut Texture> {
+    if name == 0 {
+        return Some(&mut s.contexts.get_mut(index)?.as_mut()?.default_texture);
+    }
+    let textures = lists::textures_mut(s, index)?;
+    let at = match textures.iter().position(|t| t.name == name) {
+        Some(at) => at,
+        None => {
+            textures.push(new(name));
+            textures.len() - 1
+        }
+    };
+    textures.get_mut(at)
+}
+
+/// The texture bound to the active unit of the current context.
+fn bound(cpu: &mut Cpu) -> Option<&mut Texture> {
+    let (index, _) = current(cpu)?;
+    let s = state(cpu);
+    let c = s.contexts.get(index)?.as_ref()?;
+    let name = c.bound[c.active_unit as usize];
+    texture_mut(s, index, name)
 }
 
 /// glGenTextures(n, textures).
@@ -269,15 +428,18 @@ pub fn gen_textures(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if n == 0 || at == 0 || !cpu.bus.guest_probe(at, n as usize * 4, true) {
         return Some(0);
     }
-    let Some(c) = ctx(cpu) else {
+    let Some((index, _)) = current(cpu) else {
+        return Some(0);
+    };
+    let Some(textures) = lists::textures_mut(state(cpu), index) else {
         return Some(0);
     };
     let mut names = Vec::with_capacity(n as usize);
-    let mut next = c.textures.iter().map(|t| t.name).max().unwrap_or(0);
+    let mut next = textures.iter().map(|t| t.name).max().unwrap_or(0);
     for _ in 0..n {
         next += 1;
         names.push(next);
-        texture_mut(c, next);
+        textures.push(new(next));
     }
     for (i, name) in names.into_iter().enumerate() {
         cpu.bus.guest_write_32(at + 4 * i as u32, name);
@@ -292,8 +454,13 @@ fn release_surface(cpu: &mut Cpu, t: &Texture) {
     }
 }
 
-/// glDeleteTextures(n, textures): the units they are bound to have the
-/// default texture again.
+/// glDeleteTextures(n, textures): the textures are gone for every
+/// context that had them, and each unit they were bound to has the
+/// default texture again, in all the contexts of the group. OpenGL
+/// says so for the context that deletes and leaves the others'
+/// bindings undefined. A name left bound there would be the next
+/// texture glGenTextures gives that name to, and glTexImage2D through
+/// it would make the deleted name a texture again.
 pub fn delete_textures(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [n, at] = args[..] else {
         return Some(0);
@@ -310,33 +477,40 @@ pub fn delete_textures(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         .map(|i| cpu.bus.guest_read_32(at + 4 * i))
         .collect();
     let mut gone = Vec::new();
-    if let Some(c) = ctx(cpu) {
-        for name in names.into_iter().filter(|&n| n != 0) {
-            if let Some(i) = c.textures.iter().position(|t| t.name == name) {
-                gone.push(c.textures.remove(i));
-            }
-            for b in c.bound.iter_mut() {
-                if *b == name {
-                    *b = 0;
-                }
+    if let Some((index, _)) = current(cpu) {
+        let s = state(cpu);
+        let named = |name: u32| name != 0 && names.contains(&name);
+        if let Some(textures) = lists::textures_mut(s, index) {
+            gone.extend(textures.extract_if(.., |t| named(t.name)));
+        }
+        let group = s.contexts.get(index).and_then(Option::as_ref);
+        let group = group.map(|c| c.lists.group);
+        let sharing = s.contexts.iter_mut().flatten();
+        for c in sharing.filter(|c| Some(c.lists.group) == group) {
+            for b in c.bound.iter_mut().filter(|b| named(**b)) {
+                *b = 0;
             }
         }
     }
-    for t in &gone {
-        release_surface(cpu, t);
-    }
+    release(cpu, &gone);
     Some(0)
 }
 
-/// Let go of the textures of the context at `index`.
-pub fn release_all(cpu: &mut Cpu, index: usize) {
-    let textures = match state(cpu).contexts.get_mut(index) {
-        Some(Some(c)) => std::mem::take(&mut c.textures),
-        _ => return,
-    };
-    for t in &textures {
+/// Let go of the surfaces of `textures`, which no context has any
+/// more.
+pub fn release(cpu: &mut Cpu, textures: &[Texture]) {
+    for t in textures {
         release_surface(cpu, t);
     }
+}
+
+/// Let go of the default texture of the context at `index`.
+pub fn release_default(cpu: &mut Cpu, index: usize) {
+    let texture = match state(cpu).contexts.get_mut(index) {
+        Some(Some(c)) => std::mem::replace(&mut c.default_texture, new(0)),
+        _ => return,
+    };
+    release_surface(cpu, &texture);
 }
 
 /// glBindTexture(target, texture).
@@ -347,20 +521,28 @@ pub fn bind_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         return Some(0);
     }
-    if let Some(c) = ctx(cpu) {
+    let Some((index, _)) = current(cpu) else {
+        return Some(0);
+    };
+    let s = state(cpu);
+    if let Some(Some(c)) = s.contexts.get_mut(index) {
         let unit = c.active_unit as usize;
         c.bound[unit] = args[1];
-        texture_mut(c, args[1]);
+    }
+    // A name that has no texture yet gets one. One that has is left
+    // as it is, and so are the contexts that share it.
+    if !exists(s, index, args[1]) {
+        texture_mut(s, index, args[1]);
     }
     Some(0)
 }
 
 /// glIsTexture(texture).
 pub fn is_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let Some(c) = ctx(cpu) else {
+    let Some((index, _)) = current(cpu) else {
         return Some(0);
     };
-    Some((args[0] != 0 && texture(c, args[0]).is_some()) as u32)
+    Some((args[0] != 0 && exists(state(cpu), index, args[0])) as u32)
 }
 
 /// The levels a texture of `width` by `height` has, down to 1 by 1.
@@ -445,6 +627,18 @@ fn make_surface(
         return None;
     }
     ddraw::add_ref(cpu, iface);
+    // The surface holds its DirectDraw object, as one IDirectDraw7's
+    // CreateSurface gave does: a texture another context shares keeps
+    // its texels when the context that made it is deleted. The
+    // deletion takes the object out of the Voodoo2's exclusive mode
+    // (`wgl::destroy`), so all it keeps is the memory.
+    let creator = ddraw::state(cpu).object(ids[0]).map_or(0, |o| o.creator);
+    if creator != 0
+        && ddraw::add_ref(cpu, creator) != 0
+        && let Some(o) = ddraw::state(cpu).object_mut(ids[0])
+    {
+        o.holds_creator = true;
+    }
     Some((ids, iface))
 }
 
@@ -495,15 +689,26 @@ fn define(cpu: &mut Cpu, img: &Image, texels: Option<Vec<[u8; 4]>>) {
     };
     let (w, h, level) = (img.width, img.height, img.level);
     let pow2 = w.is_power_of_two() && h.is_power_of_two();
-    if img.border != 0 || !pow2 || w > MAX_TEXTURE_SIZE || h > MAX_TEXTURE_SIZE || level > 8 {
+    // No texture is bigger than the card's largest, which has the most
+    // levels.
+    let max = max_texture_size(cpu);
+    if img.border != 0 || !pow2 || w > max || h > max || level >= level_count(max, max) {
         error(cpu, GL_INVALID_VALUE);
         return;
     }
+    // The format and type are checked with no texels (a NULL pointer)
+    // too.
+    if let Err(e) = pixel_layout(img.format, img.kind, super::wgl::packed_pixels(cpu)) {
+        error(cpu, e);
+        return;
+    }
     let alpha = has_alpha(base);
-    let Some(c) = ctx(cpu) else {
+    let Some(dd) = ctx(cpu).map(|c| c.dd) else {
         return;
     };
-    let (dd, t) = (c.dd, bound(c).clone());
+    let Some(t) = bound(cpu).cloned() else {
+        return;
+    };
     let unpacked = match texels {
         Some(t) => Some(t),
         None if img.at == 0 => None,
@@ -517,9 +722,9 @@ fn define(cpu: &mut Cpu, img: &Image, texels: Option<Vec<[u8; 4]>>) {
             };
             let store = ctx(cpu).map_or([4, 0, 0, 0], |c| c.unpack);
             match unpack(cpu, store, &src) {
-                Some(t) => Some(t),
-                None => {
-                    error(cpu, GL_INVALID_ENUM);
+                Ok(t) => Some(t),
+                Err(e) => {
+                    error(cpu, e);
                     return;
                 }
             }
@@ -567,8 +772,8 @@ fn define(cpu: &mut Cpu, img: &Image, texels: Option<Vec<[u8; 4]>>) {
 
 /// Put `t` back as the bound texture of the active unit.
 fn store(cpu: &mut Cpu, t: Texture) {
-    if let Some(c) = ctx(cpu) {
-        *bound(c) = t;
+    if let Some(bound) = bound(cpu) {
+        *bound = t;
     }
 }
 
@@ -652,7 +857,9 @@ pub fn tex_sub_image_2d(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     };
     let unpack_state = c.unpack;
-    let t = bound(c).clone();
+    let Some(t) = bound(cpu).cloned() else {
+        return Some(0);
+    };
     let Some(&id) = t.levels.get(level as usize) else {
         error(cpu, GL_INVALID_OPERATION);
         return Some(0);
@@ -671,9 +878,12 @@ pub fn tex_sub_image_2d(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         kind,
         at,
     };
-    let Some(texels) = unpack(cpu, unpack_state, &src) else {
-        error(cpu, GL_INVALID_ENUM);
-        return Some(0);
+    let texels = match unpack(cpu, unpack_state, &src) {
+        Ok(t) => t,
+        Err(e) => {
+            error(cpu, e);
+            return Some(0);
+        }
     };
     let base = base_of(t.internal).unwrap_or(if t.alpha { Base::Rgba } else { Base::Rgb });
     let words: Vec<u16> = texels.into_iter().map(|p| encode(p, base)).collect();
@@ -690,6 +900,8 @@ pub fn read_frame(cpu: &mut Cpu, x: i32, y: i32, w: u32, h: u32) -> Option<Vec<[
     let s = ddraw::state(cpu).surface(target)?.clone();
     let mut out = Vec::with_capacity(w as usize * h as usize);
     let mut row = vec![0u8; s.pitch as usize];
+    // 5-6-5, or X8R8G8B8 (`wgl::color_bits`).
+    let bytes = s.bytes_per_pixel() as usize;
     for r in 0..i64::from(h) {
         let sy = i64::from(height) - 1 - (i64::from(y) + r);
         if sy < 0 || sy >= i64::from(s.height) {
@@ -703,8 +915,11 @@ pub fn read_frame(cpu: &mut Cpu, x: i32, y: i32, w: u32, h: u32) -> Option<Vec<[
                 out.push([0, 0, 0, 255]);
                 continue;
             }
-            let p = u16::from_le_bytes([row[sx as usize * 2], row[sx as usize * 2 + 1]]);
-            out.push(rgb565(p));
+            let at = sx as usize * bytes;
+            out.push(match bytes {
+                4 => [row[at + 2], row[at + 1], row[at], 255],
+                _ => rgb565(u16::from_le_bytes([row[at], row[at + 1]])),
+            });
         }
     }
     Some(out)
@@ -729,7 +944,7 @@ pub fn copy_tex_image_2d(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     }
     // No texture is bigger than the card's: a larger size isn't read.
-    if width > MAX_TEXTURE_SIZE || height > MAX_TEXTURE_SIZE {
+    if width.max(height) > max_texture_size(cpu) {
         error(cpu, GL_INVALID_VALUE);
         return Some(0);
     }
@@ -760,17 +975,16 @@ pub fn copy_tex_sub_image_2d(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         error(cpu, GL_INVALID_ENUM);
         return Some(0);
     }
-    if width > MAX_TEXTURE_SIZE || height > MAX_TEXTURE_SIZE {
+    if width.max(height) > max_texture_size(cpu) {
         error(cpu, GL_INVALID_VALUE);
         return Some(0);
     }
     let Some(texels) = read_frame(cpu, x as i32, y as i32, width, height) else {
         return Some(0);
     };
-    let Some(c) = ctx(cpu) else {
+    let Some(t) = bound(cpu).cloned() else {
         return Some(0);
     };
-    let t = bound(c).clone();
     let Some(&id) = t.levels.get(level as usize) else {
         error(cpu, GL_INVALID_OPERATION);
         return Some(0);
@@ -787,10 +1001,9 @@ fn parameter(cpu: &mut Cpu, target: u32, p: u32, v: f32) {
         error(cpu, GL_INVALID_ENUM);
         return;
     }
-    let Some(c) = ctx(cpu) else {
+    let Some(t) = bound(cpu) else {
         return;
     };
-    let t = bound(c);
     let e = v as u32;
     let ok = match p {
         GL_TEXTURE_MIN_FILTER => {
@@ -859,10 +1072,30 @@ pub fn tex_parameteriv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
+/// glPopAttrib's textures: each of `params` is a texture's name and
+/// the filters and wrap modes it had at the push, which the texture
+/// of that name has again if it is still there.
+pub fn restore_params(cpu: &mut Cpu, params: &[[u32; 5]]) {
+    let Some((index, _)) = current(cpu) else {
+        return;
+    };
+    let s = state(cpu);
+    for &[name, min, mag, wrap_s, wrap_t] in params {
+        if !exists(s, index, name) {
+            continue;
+        }
+        if let Some(t) = texture_mut(s, index, name) {
+            t.min_filter = min;
+            t.mag_filter = mag;
+            t.wrap_s = wrap_s;
+            t.wrap_t = wrap_t;
+        }
+    }
+}
+
 /// The bound texture's parameter `p`.
 fn get_parameter(cpu: &mut Cpu, p: u32) -> Option<f32> {
-    let c = ctx(cpu)?;
-    let t = bound(c);
+    let t = bound(cpu)?;
     let v = match p {
         GL_TEXTURE_MIN_FILTER => t.min_filter,
         GL_TEXTURE_MAG_FILTER => t.mag_filter,
@@ -901,8 +1134,7 @@ pub fn get_tex_parameteriv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// The bound texture's level parameter `p` of `level`.
 fn level_parameter(cpu: &mut Cpu, level: u32, p: u32) -> Option<f32> {
-    let c = ctx(cpu)?;
-    let t = bound(c).clone();
+    let t = bound(cpu)?.clone();
     let defined = t.defined & 1 << level.min(31) != 0;
     let (w, h) = if defined {
         ((t.width >> level).max(1), (t.height >> level).max(1))
@@ -1003,11 +1235,7 @@ pub fn tex_envi(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// glTexEnvfv(target, pname, params).
 pub fn tex_envfv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let n = if args[1] == GL_TEXTURE_ENV_COLOR {
-        4
-    } else {
-        1
-    };
+    let n = super::pname::values(args[1]);
     if let Some(v) = read_floats(cpu, args[2], n) {
         env(cpu, args[0], args[1], &v);
     }
@@ -1018,7 +1246,7 @@ pub fn tex_envfv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// largest as 0 to 1.
 pub fn tex_enviv(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let color = args[1] == GL_TEXTURE_ENV_COLOR;
-    let n = if color { 4 } else { 1 };
+    let n = super::pname::values(args[1]);
     let at = args[2];
     if at == 0 || !cpu.bus.guest_probe(at, n * 4, false) {
         return Some(0);
@@ -1134,6 +1362,122 @@ mod tests {
         // Luminance from red, and alpha textures white.
         assert_eq!(encode([255, 0, 0, 255], Base::Luminance), 0xFFFF);
         assert_eq!(encode([0, 0, 0, 0x80], Base::Alpha), 0x8FFF);
+    }
+
+    /// OpenGL 1.2's table of packed types: the first component is in
+    /// the highest bits, or in the lowest for a type ending in _REV.
+    #[test]
+    fn packed_pixels_hold_their_components_in_the_types_bit_order() {
+        let texel = |kind: u32, format: u32, v: u32| {
+            let (_, widths, rev) = packed_type(kind).unwrap();
+            rgba_of(format, |i| packed_component(v, widths, rev, i))
+        };
+        // GL_UNSIGNED_SHORT_5_6_5 and its _REV.
+        assert_eq!(texel(0x8363, GL_RGB, 0xF800), [255, 0, 0, 255]);
+        assert_eq!(texel(0x8364, GL_RGB, 0xF800), [0, 0, 255, 255]);
+        // GL_UNSIGNED_SHORT_1_5_5_5_REV with GL_BGRA: the 1-5-5-5
+        // pixels of a DirectDraw surface. GL_UNSIGNED_SHORT_5_5_5_1
+        // has the alpha bit lowest.
+        assert_eq!(texel(0x8366, GL_BGRA_EXT, 0xFC00), [255, 0, 0, 255]);
+        assert_eq!(texel(0x8034, GL_RGBA, 0xF801), [255, 0, 0, 255]);
+        // GL_UNSIGNED_INT_8_8_8_8_REV with GL_BGRA is blue, green, red
+        // and alpha bytes in memory, as GL_UNSIGNED_BYTE is; without
+        // _REV the bytes come the other way round.
+        assert_eq!(
+            texel(0x8367, GL_BGRA_EXT, 0x8011_2233),
+            [0x11, 0x22, 0x33, 0x80]
+        );
+        assert_eq!(
+            texel(0x8035, GL_BGRA_EXT, 0x3322_1180),
+            [0x11, 0x22, 0x33, 0x80]
+        );
+        assert_eq!(texel(0x8365, GL_RGBA, 0xF00F), [255, 0, 0, 255]);
+        assert_eq!(texel(0x8368, GL_RGBA, 0xC000_03FF), [255, 0, 0, 255]);
+        assert_eq!(texel(0x8032, GL_RGB, 0xE3), [255, 0, 255, 255]);
+        assert_eq!(texel(0x8362, GL_RGB, 0xC7), [255, 0, 255, 255]);
+        // GL_UNSIGNED_SHORT_4_4_4_4 and GL_UNSIGNED_INT_10_10_10_2: red
+        // highest, alpha lowest.
+        assert_eq!(texel(0x8033, GL_RGBA, 0xF00F), [255, 0, 0, 255]);
+        assert_eq!(texel(0x8033, GL_BGRA_EXT, 0x0F0F), [0, 255, 0, 255]);
+        assert_eq!(texel(0x8036, GL_RGBA, 0xFFC0_0003), [255, 0, 0, 255]);
+        assert_eq!(texel(0x8036, GL_RGBA, 0x0000_0FFC), [0, 0, 255, 0]);
+        assert_eq!(packed_type(GL_UNSIGNED_BYTE), None);
+    }
+
+    /// Each of the twelve packed types gives back, read, what was packed
+    /// into it, in each format it takes: the bit order is the same both
+    /// ways. Values that fit the narrowest bits (0 and 255) come back
+    /// whole.
+    #[test]
+    fn packing_a_pixel_and_reading_it_back_agree() {
+        let kinds = (0x8032..=0x8036).chain(0x8362..=0x8368);
+        let mut seen = 0;
+        for kind in kinds {
+            let packed = packed_type(kind).unwrap();
+            let formats: &[u32] = if packed.1.len() == 3 {
+                &[GL_RGB]
+            } else {
+                &[GL_RGBA, GL_BGRA_EXT]
+            };
+            for &format in formats {
+                for rgba in [
+                    [255, 0, 0, 255],
+                    [0, 255, 0, 0],
+                    [0, 0, 255, 255],
+                    [255, 255, 0, 0],
+                ] {
+                    let rgba = if packed.1.len() == 3 {
+                        [rgba[0], rgba[1], rgba[2], 255]
+                    } else {
+                        rgba
+                    };
+                    let v = pack_pixel(rgba, format, packed);
+                    let back = rgba_of(format, |i| packed_component(v, packed.1, packed.2, i));
+                    assert_eq!(back, rgba, "{kind:#x} {format:#x}");
+                    seen += 1;
+                }
+            }
+        }
+        assert_eq!(seen, 4 * (4 + 8 * 2));
+        // GL_UNSIGNED_INT_8_8_8_8_REV with GL_BGRA is the bytes blue,
+        // green, red, alpha in memory.
+        let v = pack_pixel(
+            [0x11, 0x22, 0x33, 0x80],
+            GL_BGRA_EXT,
+            packed_type(0x8367).unwrap(),
+        );
+        assert_eq!(v.to_le_bytes(), [0x33, 0x22, 0x11, 0x80]);
+    }
+
+    /// OpenGL 1.2: a packed type of three components takes GL_RGB, one
+    /// of four GL_RGBA or GL_BGRA, and any other format is
+    /// GL_INVALID_OPERATION. A driver that doesn't take the type answers
+    /// GL_INVALID_ENUM, as for any type it hasn't.
+    #[test]
+    fn a_packed_type_takes_formats_of_as_many_components() {
+        let bytes = |format, kind| {
+            pixel_layout(format, kind, PackedPixels::Core12).map(|(pixel, _, _)| pixel)
+        };
+        let ext = |format, kind| pixel_layout(format, kind, PackedPixels::Extension).is_ok();
+        assert!(ext(GL_RGBA, 0x8035));
+        assert_eq!(
+            pixel_layout(GL_BGRA_EXT, 0x8367, PackedPixels::Extension).err(),
+            Some(GL_INVALID_ENUM)
+        );
+        assert_eq!(
+            pixel_layout(GL_RGB, 0x8032, PackedPixels::None).err(),
+            Some(GL_INVALID_ENUM)
+        );
+        assert_eq!(bytes(GL_RGB, 0x8363), Ok(2));
+        assert_eq!(bytes(GL_BGRA_EXT, 0x8367), Ok(4));
+        assert_eq!(bytes(GL_RGBA, 0x8034), Ok(2));
+        assert_eq!(bytes(GL_BGR_EXT, 0x8363), Err(GL_INVALID_OPERATION));
+        assert_eq!(bytes(GL_RGBA, 0x8363), Err(GL_INVALID_OPERATION));
+        assert_eq!(bytes(GL_RGB, 0x8367), Err(GL_INVALID_OPERATION));
+        assert_eq!(bytes(GL_LUMINANCE, 0x8033), Err(GL_INVALID_OPERATION));
+        assert_eq!(bytes(GL_RGB, GL_UNSIGNED_SHORT), Ok(6));
+        assert_eq!(bytes(0, 0x8367), Err(GL_INVALID_ENUM));
+        assert_eq!(bytes(GL_RGB, 0), Err(GL_INVALID_ENUM));
     }
 
     #[test]

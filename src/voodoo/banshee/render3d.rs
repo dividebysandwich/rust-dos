@@ -7,7 +7,8 @@
 //! the video processor's overlay, at once or at a vertical retrace,
 //! while the command FIFOs wait for it; swapPending counts the swaps the
 //! status register reports; texBaseAddr is a byte address; and the 3D
-//! linear frame buffer has rows of 2048 pixels.
+//! linear frame buffer has rows of 2048 pixels. The Voodoo2's command
+//! FIFO, video, init and 2D blitter registers aren't there (`absent`).
 //!
 //! From 86Box's vid_voodoo_reg.c, vid_voodoo_render.c, vid_voodoo_fb.c
 //! and vid_voodoo_banshee.c (Sarah Walker, GPLv2) and sections 5 and 8
@@ -43,6 +44,26 @@ const KEPT: [usize; 8] = [
     RIGHT_OVERLAY_BUF,
 ];
 
+/// Whether the card has no register at dword `regnum` of the 3D space
+/// where a Voodoo2 has one. At byte addresses 1E0h-1E8h the Voodoo2 has
+/// its command FIFO's base, bump and read pointer, and at 200h-254h its
+/// video and init registers; the card has none of those (its command
+/// FIFOs have registers outside the 3D space), and its own registers
+/// there are matched before this. fbiSwapHistory at 258h is the card's
+/// too. At 2A8h-2FCh the Voodoo2 has its 2D blitter's registers
+/// (bltSrcBaseAddr to bltData). The Banshee's and the Voodoo3's
+/// specifications list 2A8h-2FCh as one reserved row, with no bits,
+/// chip or access ("Banshee High Performance Graphics Engine" rev. 1.1,
+/// "3D Memory Mapped Register Set", page 84; "Avenger (a.k.a. Voodoo3)"
+/// rev. 1.0, section 8, page 86). 3dfx's Glide 3 for both cards
+/// (h3regs.h) has reserved words at 1E0h-1E8h (reservedB) and at
+/// 2A8h-2FCh. The card's 2D engine has a register space of its own
+/// (`blit2d`). Writes there are dropped and reads give 0, as in MAME's
+/// Banshee.
+const fn absent(regnum: usize) -> bool {
+    matches!(regnum, 0x78..=0x7A | 0x80..=0x95 | 0xAA..=0xBF)
+}
+
 /// A buffer's stride register: bytes a row when linear (bit 15 clear),
 /// tiles a row of tiles when tiled.
 fn stride(value: u32) -> Stride {
@@ -63,8 +84,7 @@ impl Voodoo {
             STATUS => self.banshee_status(now),
             INTR_CTRL => self.banshee.as_ref().map_or(0, |b| b.intr_ctrl),
             regnum if KEPT.contains(&regnum) => self.reg[regnum],
-            // The Voodoo2's video and init registers aren't there.
-            0x80..=0x96 => 0,
+            regnum if absent(regnum) => 0,
             regnum => self.register_read(regnum as u32, now),
         }
     }
@@ -116,15 +136,14 @@ impl Voodoo {
             CLIP_LEFT_RIGHT1 | CLIP_TOP_BOTTOM1 | LEFT_OVERLAY_BUF | RIGHT_OVERLAY_BUF => {
                 self.reg[regnum] = data;
             }
-            SWAPBUFFER_CMD => self.banshee_swap(data, now, effect),
+            SWAPBUFFER_CMD => self.swap(data, now, effect),
             // From BAR0 or from a command FIFO packet alike.
             SWAP_PENDING => {
                 if let Some(b) = &mut self.banshee {
                     b.swap_count += 1;
                 }
             }
-            // The Voodoo2's video and init registers aren't there.
-            0x80..=0x96 => {}
+            regnum if absent(regnum) => {}
             _ => {
                 if self.chip.access[regnum] & WRITE != 0 {
                     self.register_to(regnum, chips, data, now, effect);
@@ -137,7 +156,6 @@ impl Voodoo {
     /// their strides: the colour buffer is the same whichever fbzMode
     /// and lfbMode pick.
     pub(crate) fn banshee_buffers(&mut self) {
-        self.blt_queue_stale();
         let col = self.reg[COL_BUFFER_ADDR] & 0xFF_FFF0;
         let aux = self.reg[AUX_BUFFER_ADDR] & 0xFF_FFF0;
         let (col_stride, aux_stride) = (
@@ -234,20 +252,17 @@ impl Voodoo {
     /// at the retrace `bits 8:1` retraces after the last swap, and the
     /// swap counts off swapPending's count then (86Box's
     /// `voodoo_reg_writel`). The address is taken now, so a program can
-    /// set the next one while the swap waits.
-    fn banshee_swap(&mut self, data: u32, now: Now, effect: &mut Effect) {
-        self.backlog.borrow_mut().swapped();
+    /// set the next one while the swap waits for its retrace. A swap the
+    /// frame rate cap holds back (`Voodoo::swap`) takes it when its turn
+    /// comes: the program waits for that turn before it writes more.
+    pub(crate) fn banshee_swap(&mut self, data: u32, now: Now, effect: &mut Effect) {
         let addr = self.reg[LEFT_OVERLAY_BUF] & 0xFF_FFFF;
-        let current = self.retraces(now.ns);
         let mark = self.swap_mark();
-        if data & 1 == 0 {
-            self.last_swap = current;
+        let Some(retrace) = self.swap_retrace(data, now) else {
+            self.last_swap = self.retraces(now.ns);
             self.banshee_show(addr, mark);
             return;
-        }
-        let interval = ((data >> 1) & 0xFF) as u64;
-        let after = self.swaps.back().map_or(self.last_swap, |s| s.retrace);
-        let retrace = (current + 1).max(after + interval.max(1));
+        };
         let due = self.retrace_ticks(retrace);
         self.swaps.push_back(PendingSwap { retrace, due });
         if let Some(b) = &mut self.banshee {
@@ -271,8 +286,15 @@ impl Voodoo {
     }
 
     /// `retired` swaps happened: their buffers shown, and the command
-    /// FIFOs that waited for them go on.
-    pub(crate) fn banshee_swaps_done(&mut self, retired: usize, now: Now, effect: &mut Effect) {
+    /// FIFOs that waited for them go on, as they do once the swap the
+    /// frame rate cap held back went ahead (`released`).
+    pub(crate) fn banshee_swaps_done(
+        &mut self,
+        retired: usize,
+        released: bool,
+        now: Now,
+        effect: &mut Effect,
+    ) {
         for _ in 0..retired {
             let addr = self
                 .banshee
@@ -284,16 +306,19 @@ impl Voodoo {
                 self.banshee_show(addr, mark);
             }
         }
-        if retired > 0 && self.swaps.is_empty() {
+        if (retired > 0 || released) && !self.banshee_fifo_waits() {
             for n in 0..2 {
                 self.run_banshee_fifo(n, now, effect);
             }
         }
     }
 
-    /// Whether the command FIFOs wait for a swap's retrace.
+    /// Whether the command FIFOs wait for a swap: one waiting for its
+    /// retrace, or one the frame rate cap holds back. The packets after
+    /// that one set the next frame's leftOverlayBuf, which the held swap
+    /// still has to take, and may swap again.
     pub(crate) fn banshee_fifo_waits(&self) -> bool {
-        !self.swaps.is_empty()
+        !self.swaps.is_empty() || self.deferred.is_some()
     }
 
     /// TMU 0's texture space from 600000h: texture memory from its
@@ -793,6 +818,128 @@ pub(crate) mod tests {
             Now::default(),
         );
         assert_eq!(v.fbi.ram.get(0x40_0000 / 2 + 2048 + 64 + 6), 0x001F);
+    }
+
+    #[test]
+    fn the_frame_rate_cap_holds_a_swap_back_until_its_turn() {
+        use crate::timer::PIT_HZ;
+        let mut v = card();
+        v.frame_cap.set(Some(20));
+        let at = |ms: u64| Now {
+            ns: ms * 1_000_000,
+            ticks: ms * PIT_HZ / 1000,
+        };
+        let write = |v: &mut Voodoo, regnum: usize, data: u32, now: Now| {
+            v.write(0x20_0000 + 4 * regnum as u32, data, 0xFFFF_FFFF, now)
+        };
+        // The first swap happens at once.
+        write(&mut v, LEFT_OVERLAY_BUF, 0x10_0000, at(10));
+        assert_eq!(write(&mut v, SWAPBUFFER_CMD, 0, at(10)).hold_to, None);
+        assert_eq!(v.read(VID_CURR_OVERLAY_START_ADDR, at(10)), 0x10_0000);
+        // The next, 2 ms on, waits for its turn, 50 ms after the first,
+        // and the program with it.
+        write(&mut v, LEFT_OVERLAY_BUF, 0x20_0000, at(12));
+        let due = write(&mut v, SWAPBUFFER_CMD, 0, at(12)).hold_to.expect("held");
+        assert_eq!(due, (60_000_000 * PIT_HZ).div_ceil(1_000_000_000));
+        assert_eq!(v.read(VID_CURR_OVERLAY_START_ADDR, at(12)), 0x10_0000);
+        v.service(Now { ns: 60_000_000, ticks: due });
+        assert_eq!(v.read(VID_CURR_OVERLAY_START_ADDR, at(60)), 0x20_0000);
+        // Shown at the timer tick of the turn, within a microsecond of it.
+        let last = v.frame_cap.get().last().expect("a frame shown");
+        assert!((60_000_000..60_001_000).contains(&last), "{last}");
+    }
+
+    /// A program that swaps at the retrace of a 75 Hz mode, each swap as
+    /// soon as the last one showed: the times its frames show at under
+    /// the cap `cap`.
+    fn swaps_at_75_hz(cap: crate::frame_cap::Cap) -> Vec<u64> {
+        use crate::timer::PIT_HZ;
+        use crate::video::crt::CrtTiming;
+        let at = |ns: u64| Now {
+            ns,
+            ticks: ns * PIT_HZ / 1_000_000_000,
+        };
+        // 500 lines of 26.666 us: 75.0 Hz.
+        let hz75 = CrtTiming {
+            line_ns: 26_666,
+            hdisplay_ns: 20_000,
+            total: 500,
+            display: 480,
+            retrace_start: 481,
+            retrace_end: 484,
+        };
+        let mut v = card();
+        v.frame_cap.set(cap);
+        let mut now = 10_000_000;
+        v.set_timing(hz75, at(now));
+        let mut shown = Vec::new();
+        for _ in 0..151 {
+            v.service(at(now));
+            let swap = 0x20_0000 + 4 * SWAPBUFFER_CMD as u32;
+            if let Some(due) = v.write(swap, 1 << 1 | 1, 0xFFFF_FFFF, at(now)).hold_to {
+                let ns = (due as u128 * 1_000_000_000 / PIT_HZ as u128) as u64;
+                v.service(Now { ns, ticks: due });
+            }
+            let last = v.frame_cap.get().last().expect("a frame shown");
+            shown.push(last);
+            now = last + 100_000;
+        }
+        shown
+    }
+
+    #[test]
+    fn swaps_at_the_retrace_of_a_75_hz_mode_show_75_under_auto_and_60_under_60() {
+        use crate::frame_cap::Cap;
+        let rate = |shown: &[u64]| {
+            (shown.len() - 1) as f64 * 1e9 / (shown[shown.len() - 1] - shown[0]) as f64
+        };
+        let auto = swaps_at_75_hz(Cap::Auto);
+        assert!((rate(&auto) - 75.0).abs() < 0.5, "{} under auto", rate(&auto));
+        let sixty = swaps_at_75_hz(Cap::Fps(60));
+        assert!((rate(&sixty) - 60.0).abs() < 0.5, "{} under a cap of 60", rate(&sixty));
+    }
+
+    /// A command FIFO stops at a swap the frame rate cap holds back, as
+    /// at one waiting for its retrace: the next frame's leftOverlayBuf,
+    /// further on, is the next swap's, and the FIFO goes on after it.
+    #[test]
+    fn a_command_fifo_waits_behind_a_swap_the_cap_holds() {
+        use crate::timer::PIT_HZ;
+        let (a, b, c) = (0x10_0000u32, 0x20_0000u32, 0x30_0000u32);
+        let mut v = card();
+        v.frame_cap.set(Some(20));
+        let at = |ms: u64| Now {
+            ns: ms * 1_000_000,
+            ticks: ms * PIT_HZ / 1000,
+        };
+        let cmd = |v: &mut Voodoo, reg: u32, data: u32| {
+            v.write(0x8_0000 | reg, data, 0xFFFF_FFFF, at(10));
+        };
+        // A ring of one page at 0xF0_0000.
+        let ring = 0xF0_0000u32;
+        cmd(&mut v, 0x24, 0x100);
+        cmd(&mut v, 0x20, ring >> 12);
+        cmd(&mut v, 0x2C, ring);
+        let packet = |regnum: usize, data: u32| [1 << 16 | (4 * regnum as u32) << 1 | 1, data];
+        let words: Vec<u32> = [
+            packet(LEFT_OVERLAY_BUF, a),
+            packet(SWAPBUFFER_CMD, 0),
+            packet(LEFT_OVERLAY_BUF, b),
+            packet(SWAPBUFFER_CMD, 0),
+            packet(LEFT_OVERLAY_BUF, c),
+        ]
+        .concat();
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        v.fbi.ram.write_bytes(ring as usize, &bytes);
+        // cmdBump: all of them at once.
+        cmd(&mut v, 0x28, words.len() as u32);
+        let overlay = |v: &Voodoo| v.banshee.as_ref().unwrap().overlay_addr;
+        assert_eq!(overlay(&v), a, "the first swap happens at once");
+        let due = v.deferred_swap().expect("the second waits for its turn");
+        assert_eq!(v.reg[LEFT_OVERLAY_BUF] & 0xFF_FFFF, b, "the FIFO waits");
+        v.service(Now { ns: 50_000_000, ticks: due });
+        assert_eq!(overlay(&v), b, "it shows its own frame");
+        assert_eq!(v.reg[LEFT_OVERLAY_BUF] & 0xFF_FFFF, c, "and the FIFO goes on");
     }
 
     #[test]
@@ -2251,6 +2398,56 @@ pub(crate) mod tests {
         // A download from 600000h lands from there on.
         v.write(0x60_0008, 0x1122_3344, 0xFFFF_FFFF, Now::default());
         assert_eq!(v.fbi.ram.get(0x50_0018 / 2), 0x3344);
+    }
+
+    #[test]
+    fn the_3d_space_has_no_voodoo2_blitter() {
+        // The Banshee's and Voodoo3's specifications list 2A8h-2FCh of
+        // the 3D space as reserved (`absent`). A CPU-to-screen copy that
+        // a Voodoo2 draws (as `blit`'s tests do) draws nothing here, from
+        // BAR0 or from a command FIFO, and the blitter's registers read 0.
+        for board in [Board::Banshee, Board::Voodoo3] {
+            let mut v = Voodoo::with_workers(board, 0);
+            let before = v.frame_buffer().to_bytes();
+            let copy = [
+                (BLT_ROP, 0xCCCC),
+                (BLT_DST_BASE_ADDR, 0),
+                (BLT_XY_STRIDES, 1280 << 16),
+                (BLT_DST_XY, 2 << 16 | 3),
+                (BLT_SIZE, 1 << 16 | 1),
+                (BLT_COMMAND, 1 << 31 | 2 << 3 | 1),
+                (BLT_DATA, 0x1234_5678),
+                (BLT_DATA, 0x9ABC_DEF0),
+            ];
+            for (regnum, data) in copy {
+                reg3d(&mut v, regnum, data);
+            }
+            for (regnum, data) in copy {
+                let mut effect = Effect::default();
+                v.banshee_3d_register(4 * regnum as u32, data, Now::default(), &mut effect);
+            }
+            assert!(v.frame_buffer().to_bytes() == before, "{board:?}");
+            assert!(!v.blt.active, "{board:?}");
+            for regnum in 0xAA..=0xBF {
+                let read = v.read(0x20_0000 + 4 * regnum, Now::default());
+                assert_eq!(read, 0, "{board:?} {:03X}h", 4 * regnum);
+            }
+        }
+    }
+
+    #[test]
+    fn the_3d_space_has_no_voodoo2_command_fifo_registers() {
+        // Glide 3's h3regs.h has reservedB at 1E0h-1E8h, where the
+        // Voodoo2 has cmdFifoBaseAddr, cmdFifoBump and cmdFifoRdPtr.
+        for board in [Board::Banshee, Board::Voodoo3] {
+            let mut v = Voodoo::with_workers(board, 0);
+            for regnum in [CMDFIFO_BASE_ADDR, CMDFIFO_BUMP, CMDFIFO_RD_PTR] {
+                reg3d(&mut v, regnum, 0x0012_3456);
+                let read = v.read(0x20_0000 + 4 * regnum as u32, Now::default());
+                assert_eq!(read, 0, "{board:?} {:03X}h", 4 * regnum);
+            }
+            assert_eq!((v.cmdfifo.base, v.cmdfifo.read), (0, 0), "{board:?}");
+        }
     }
 
     #[test]

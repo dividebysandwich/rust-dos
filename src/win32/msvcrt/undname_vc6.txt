@@ -1,0 +1,315 @@
+# __unDName's results in Visual C++ 6's MSVCRT.DLL (6.00.8337), which
+# undname.rs's tests hold it to: a line a name, with the flags (hex), the
+# decorated name and the result. The names are the inputs of Wine's
+# tests (dlls/msvcrt/tests/cpp.c) and more of the constructs Visual C++
+# 6 makes; the results are what Microsoft's DLL returned for them,
+# itself when it can't undecorate the name.
+2800	ABVVec4@ref2@dice@@	class dice::ref2::Vec4 const &
+2800	?AV?$CDB_GEN_BIG_ENUM_FLAG@W4CDB_WYSIWYG_BITS_ENUM@@$0H@@@	class CDB_GEN_BIG_ENUM_FLAG<enum CDB_WYSIWYG_BITS_ENUM,7>
+2800	?AV?$CDB_GEN_BIG_ENUM_FLAG@W4CDB_WYSIWYG_BITS_ENUM@@$0HO@@@	class CDB_GEN_BIG_ENUM_FLAG<enum CDB_WYSIWYG_BITS_ENUM,126>
+2800	?AV?$CDB_GEN_BIG_ENUM_FLAG@W4CDB_WYSIWYG_BITS_ENUM@@$0HOA@@@	class CDB_GEN_BIG_ENUM_FLAG<enum CDB_WYSIWYG_BITS_ENUM,2016>
+2800	?AV?$CDB_GEN_BIG_ENUM_FLAG@W4CDB_WYSIWYG_BITS_ENUM@@$0HOAA@@@	class CDB_GEN_BIG_ENUM_FLAG<enum CDB_WYSIWYG_BITS_ENUM,32256>
+2800	?AV?$CDB_GEN_BIG_ENUM_FLAG@W4CDB_WYSIWYG_BITS_ENUM@@$01@@@	?AV?$CDB_GEN_BIG_ENUM_FLAG@W4CDB_WYSIWYG_BITS_ENUM@@$01@@@
+2800	P8test@@AACXZ	signed char (__cdecl test::*)(void)
+2800	P8test@@BACXZ	signed char (__cdecl test::*)(void)const 
+0	??0bad_alloc@std@@QAE@ABV01@@Z	public: __thiscall std::bad_alloc::bad_alloc(class bad_alloc::bad_alloc const &)
+0	??0bad_alloc@std@@QAE@PBD@Z	public: __thiscall std::bad_alloc::bad_alloc(char const *)
+0	??0bad_cast@@AAE@PBQBD@Z	private: __thiscall bad_cast::bad_cast(char const * const *)
+0	??0bad_cast@@QAE@ABQBD@Z	public: __thiscall bad_cast::bad_cast(char const * const &)
+0	??0bad_cast@@QAE@ABV0@@Z	public: __thiscall bad_cast::bad_cast(class bad_cast const &)
+0	??0bad_exception@std@@QAE@ABV01@@Z	public: __thiscall std::bad_exception::bad_exception(class bad_exception::bad_exception const &)
+0	??0bad_exception@std@@QAE@PBD@Z	public: __thiscall std::bad_exception::bad_exception(char const *)
+0	??0?$basic_filebuf@DU?$char_traits@D@std@@@std@@QAE@ABV01@@Z	public: __thiscall std::basic_filebuf<char,struct std::char_traits<char> >::basic_filebuf<char,struct std::char_traits<char> >(class basic_filebuf<char,struct std::char_traits<char> >::basic_filebuf<char,struct std::char_traits<char> > const &)
+0	??0?$basic_filebuf@DU?$char_traits@D@std@@@std@@QAE@PAU_iobuf@@@Z	public: __thiscall std::basic_filebuf<char,struct std::char_traits<char> >::basic_filebuf<char,struct std::char_traits<char> >(struct _iobuf *)
+0	??0?$basic_filebuf@DU?$char_traits@D@std@@@std@@QAE@W4_Uninitialized@1@@Z	public: __thiscall std::basic_filebuf<char,struct std::char_traits<char> >::basic_filebuf<char,struct std::char_traits<char> >(enum basic_filebuf<char,struct std::char_traits<char> >::_Uninitialized)
+0	??0?$basic_filebuf@GU?$char_traits@G@std@@@std@@QAE@ABV01@@Z	public: __thiscall std::basic_filebuf<unsigned short,struct std::char_traits<unsigned short> >::basic_filebuf<unsigned short,struct std::char_traits<unsigned short> >(class basic_filebuf<unsigned short,struct std::char_traits<unsigned short> >::basic_filebuf<unsigned short,struct std::char_traits<unsigned short> > const &)
+0	??0?$basic_filebuf@GU?$char_traits@G@std@@@std@@QAE@PAU_iobuf@@@Z	public: __thiscall std::basic_filebuf<unsigned short,struct std::char_traits<unsigned short> >::basic_filebuf<unsigned short,struct std::char_traits<unsigned short> >(struct _iobuf *)
+0	??0?$basic_filebuf@GU?$char_traits@G@std@@@std@@QAE@W4_Uninitialized@1@@Z	public: __thiscall std::basic_filebuf<unsigned short,struct std::char_traits<unsigned short> >::basic_filebuf<unsigned short,struct std::char_traits<unsigned short> >(enum basic_filebuf<unsigned short,struct std::char_traits<unsigned short> >::_Uninitialized)
+0	??0?$basic_stringstream@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAE@ABV01@@Z	public: __thiscall std::basic_stringstream<char,struct std::char_traits<char>,class std::allocator<char> >::basic_stringstream<char,struct std::char_traits<char>,class std::allocator<char> >(class basic_stringstream<char,struct std::char_traits<char>,class std::allocator<char> >::basic_stringstream<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+0	??0?$basic_stringstream@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAE@ABV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@1@H@Z	public: __thiscall std::basic_stringstream<char,struct std::char_traits<char>,class std::allocator<char> >::basic_stringstream<char,struct std::char_traits<char>,class std::allocator<char> >(class basic_stringstream<char,struct std::char_traits<char>,class std::allocator<char> >::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,int)
+0	??0?$basic_stringstream@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAE@H@Z	public: __thiscall std::basic_stringstream<char,struct std::char_traits<char>,class std::allocator<char> >::basic_stringstream<char,struct std::char_traits<char>,class std::allocator<char> >(int)
+0	??0?$basic_stringstream@GU?$char_traits@G@std@@V?$allocator@G@2@@std@@QAE@ABV01@@Z	public: __thiscall std::basic_stringstream<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >::basic_stringstream<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >(class basic_stringstream<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >::basic_stringstream<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> > const &)
+0	??0?$basic_stringstream@GU?$char_traits@G@std@@V?$allocator@G@2@@std@@QAE@ABV?$basic_string@GU?$char_traits@G@std@@V?$allocator@G@2@@1@H@Z	public: __thiscall std::basic_stringstream<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >::basic_stringstream<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >(class basic_stringstream<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >::basic_string<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> > const &,int)
+0	??0?$basic_stringstream@GU?$char_traits@G@std@@V?$allocator@G@2@@std@@QAE@H@Z	public: __thiscall std::basic_stringstream<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >::basic_stringstream<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >(int)
+0	??0?$num_get@DV?$istreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@QAE@ABV_Locinfo@1@I@Z	public: __thiscall std::num_get<char,class std::istreambuf_iterator<char,struct std::char_traits<char> > >::num_get<char,class std::istreambuf_iterator<char,struct std::char_traits<char> > >(class num_get<char,class std::istreambuf_iterator<char,struct std::char_traits<char> > >::_Locinfo const &,unsigned int)
+0	??0?$num_get@DV?$istreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@QAE@I@Z	public: __thiscall std::num_get<char,class std::istreambuf_iterator<char,struct std::char_traits<char> > >::num_get<char,class std::istreambuf_iterator<char,struct std::char_traits<char> > >(unsigned int)
+0	??0?$num_get@GV?$istreambuf_iterator@GU?$char_traits@G@std@@@std@@@std@@QAE@ABV_Locinfo@1@I@Z	public: __thiscall std::num_get<unsigned short,class std::istreambuf_iterator<unsigned short,struct std::char_traits<unsigned short> > >::num_get<unsigned short,class std::istreambuf_iterator<unsigned short,struct std::char_traits<unsigned short> > >(class num_get<unsigned short,class std::istreambuf_iterator<unsigned short,struct std::char_traits<unsigned short> > >::_Locinfo const &,unsigned int)
+0	??0?$num_get@GV?$istreambuf_iterator@GU?$char_traits@G@std@@@std@@@std@@QAE@I@Z	public: __thiscall std::num_get<unsigned short,class std::istreambuf_iterator<unsigned short,struct std::char_traits<unsigned short> > >::num_get<unsigned short,class std::istreambuf_iterator<unsigned short,struct std::char_traits<unsigned short> > >(unsigned int)
+0	??0streambuf@@QAE@ABV0@@Z	public: __thiscall streambuf::streambuf(class streambuf const &)
+0	??0strstreambuf@@QAE@ABV0@@Z	public: __thiscall strstreambuf::strstreambuf(class strstreambuf const &)
+0	??0strstreambuf@@QAE@H@Z	public: __thiscall strstreambuf::strstreambuf(int)
+0	??0strstreambuf@@QAE@Q6APAXJ@ZS6AXPAX@Z@Z	public: __thiscall strstreambuf::strstreambuf(void * (__cdecl*const)(long),void (__cdecl*const volatile)(void *))
+0	??0strstreambuf@@QAE@PADH0@Z	public: __thiscall strstreambuf::strstreambuf(char *,int,char *)
+0	??0strstreambuf@@QAE@PAEH0@Z	public: __thiscall strstreambuf::strstreambuf(unsigned char *,int,unsigned char *)
+0	??0strstreambuf@@QAE@XZ	public: __thiscall strstreambuf::strstreambuf(void)
+0	??1__non_rtti_object@std@@UAE@XZ	public: virtual __thiscall std::__non_rtti_object::~__non_rtti_object(void)
+0	??1__non_rtti_object@@UAE@XZ	public: virtual __thiscall __non_rtti_object::~__non_rtti_object(void)
+0	??1?$num_get@DV?$istreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@UAE@XZ	public: virtual __thiscall std::num_get<char,class std::istreambuf_iterator<char,struct std::char_traits<char> > >::~num_get<char,class std::istreambuf_iterator<char,struct std::char_traits<char> > >(void)
+0	??1?$num_get@GV?$istreambuf_iterator@GU?$char_traits@G@std@@@std@@@std@@UAE@XZ	public: virtual __thiscall std::num_get<unsigned short,class std::istreambuf_iterator<unsigned short,struct std::char_traits<unsigned short> > >::~num_get<unsigned short,class std::istreambuf_iterator<unsigned short,struct std::char_traits<unsigned short> > >(void)
+0	??4istream_withassign@@QAEAAV0@ABV0@@Z	public: class istream_withassign & __thiscall istream_withassign::operator=(class istream_withassign const &)
+0	??4istream_withassign@@QAEAAVistream@@ABV1@@Z	public: class istream & __thiscall istream_withassign::operator=(class istream const &)
+0	??4istream_withassign@@QAEAAVistream@@PAVstreambuf@@@Z	public: class istream & __thiscall istream_withassign::operator=(class streambuf *)
+0	??5std@@YAAAV?$basic_istream@DU?$char_traits@D@std@@@0@AAV10@AAC@Z	class std::basic_istream<char,struct std::char_traits<char> > & __cdecl std::operator>>(class std::basic_istream<char,struct std::char_traits<char> > &,signed char &)
+0	??5std@@YAAAV?$basic_istream@DU?$char_traits@D@std@@@0@AAV10@AAD@Z	class std::basic_istream<char,struct std::char_traits<char> > & __cdecl std::operator>>(class std::basic_istream<char,struct std::char_traits<char> > &,char &)
+0	??5std@@YAAAV?$basic_istream@DU?$char_traits@D@std@@@0@AAV10@AAE@Z	class std::basic_istream<char,struct std::char_traits<char> > & __cdecl std::operator>>(class std::basic_istream<char,struct std::char_traits<char> > &,unsigned char &)
+0	??6?$basic_ostream@GU?$char_traits@G@std@@@std@@QAEAAV01@P6AAAVios_base@1@AAV21@@Z@Z	public: class std::basic_ostream<unsigned short,struct std::char_traits<unsigned short> > & __thiscall std::basic_ostream<unsigned short,struct std::char_traits<unsigned short> >::operator<<(class std::ios_base & (__cdecl*)(class std::ios_base &))
+0	??6?$basic_ostream@GU?$char_traits@G@std@@@std@@QAEAAV01@PAV?$basic_streambuf@GU?$char_traits@G@std@@@1@@Z	public: class std::basic_ostream<unsigned short,struct std::char_traits<unsigned short> > & __thiscall std::basic_ostream<unsigned short,struct std::char_traits<unsigned short> >::operator<<(class std::basic_streambuf<unsigned short,struct std::char_traits<unsigned short> > *)
+0	??6?$basic_ostream@GU?$char_traits@G@std@@@std@@QAEAAV01@PBX@Z	public: class std::basic_ostream<unsigned short,struct std::char_traits<unsigned short> > & __thiscall std::basic_ostream<unsigned short,struct std::char_traits<unsigned short> >::operator<<(void const *)
+0	??_8?$basic_fstream@DU?$char_traits@D@std@@@std@@7B?$basic_ostream@DU?$char_traits@D@std@@@1@@	const  std::basic_fstream<char,struct std::char_traits<char> >::`vbtable'{for `std::basic_ostream<char,struct std::char_traits<char> >'}
+0	??_8?$basic_fstream@GU?$char_traits@G@std@@@std@@7B?$basic_istream@GU?$char_traits@G@std@@@1@@	const  std::basic_fstream<unsigned short,struct std::char_traits<unsigned short> >::`vbtable'{for `std::basic_istream<unsigned short,struct std::char_traits<unsigned short> >'}
+0	??_8?$basic_fstream@GU?$char_traits@G@std@@@std@@7B?$basic_ostream@GU?$char_traits@G@std@@@1@@	const  std::basic_fstream<unsigned short,struct std::char_traits<unsigned short> >::`vbtable'{for `std::basic_ostream<unsigned short,struct std::char_traits<unsigned short> >'}
+0	??9std@@YA_NPBDABV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@0@@Z	bool __cdecl std::operator!=(char const *,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+0	??9std@@YA_NPBGABV?$basic_string@GU?$char_traits@G@std@@V?$allocator@G@2@@0@@Z	bool __cdecl std::operator!=(unsigned short const *,class std::basic_string<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> > const &)
+0	??A?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAADI@Z	public: char & __thiscall std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >::operator[](unsigned int)
+0	??A?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBEABDI@Z	public: char const & __thiscall std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >::operator[](unsigned int)const 
+0	??A?$basic_string@GU?$char_traits@G@std@@V?$allocator@G@2@@std@@QAEAAGI@Z	public: unsigned short & __thiscall std::basic_string<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >::operator[](unsigned int)
+0	??A?$basic_string@GU?$char_traits@G@std@@V?$allocator@G@2@@std@@QBEABGI@Z	public: unsigned short const & __thiscall std::basic_string<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >::operator[](unsigned int)const 
+0	?abs@std@@YAMABV?$complex@M@1@@Z	float __cdecl std::abs(class std::complex<float> const &)
+0	?abs@std@@YANABV?$complex@N@1@@Z	double __cdecl std::abs(class std::complex<double> const &)
+0	?abs@std@@YAOABV?$complex@O@1@@Z	long double __cdecl std::abs(class std::complex<long double> const &)
+0	?cin@std@@3V?$basic_istream@DU?$char_traits@D@std@@@1@A	class std::basic_istream<char,struct std::char_traits<char> >  std::cin
+0	?do_get@?$num_get@DV?$istreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@MBE?AV?$istreambuf_iterator@DU?$char_traits@D@std@@@2@V32@0AAVios_base@2@AAHAAG@Z	protected: virtual class std::istreambuf_iterator<char,struct std::char_traits<char> >  __thiscall std::num_get<char,class std::istreambuf_iterator<char,struct std::char_traits<char> > >::do_get(class std::istreambuf_iterator<char,struct std::char_traits<char> >,class std::istreambuf_iterator<char,struct std::char_traits<char> >,class std::ios_base &,int &,unsigned short &)const 
+0	?do_get@?$num_get@DV?$istreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@MBE?AV?$istreambuf_iterator@DU?$char_traits@D@std@@@2@V32@0AAVios_base@2@AAHAAI@Z	protected: virtual class std::istreambuf_iterator<char,struct std::char_traits<char> >  __thiscall std::num_get<char,class std::istreambuf_iterator<char,struct std::char_traits<char> > >::do_get(class std::istreambuf_iterator<char,struct std::char_traits<char> >,class std::istreambuf_iterator<char,struct std::char_traits<char> >,class std::ios_base &,int &,unsigned int &)const 
+0	?do_get@?$num_get@DV?$istreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@MBE?AV?$istreambuf_iterator@DU?$char_traits@D@std@@@2@V32@0AAVios_base@2@AAHAAJ@Z	protected: virtual class std::istreambuf_iterator<char,struct std::char_traits<char> >  __thiscall std::num_get<char,class std::istreambuf_iterator<char,struct std::char_traits<char> > >::do_get(class std::istreambuf_iterator<char,struct std::char_traits<char> >,class std::istreambuf_iterator<char,struct std::char_traits<char> >,class std::ios_base &,int &,long &)const 
+0	?do_get@?$num_get@DV?$istreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@MBE?AV?$istreambuf_iterator@DU?$char_traits@D@std@@@2@V32@0AAVios_base@2@AAHAAK@Z	protected: virtual class std::istreambuf_iterator<char,struct std::char_traits<char> >  __thiscall std::num_get<char,class std::istreambuf_iterator<char,struct std::char_traits<char> > >::do_get(class std::istreambuf_iterator<char,struct std::char_traits<char> >,class std::istreambuf_iterator<char,struct std::char_traits<char> >,class std::ios_base &,int &,unsigned long &)const 
+0	?do_get@?$num_get@DV?$istreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@MBE?AV?$istreambuf_iterator@DU?$char_traits@D@std@@@2@V32@0AAVios_base@2@AAHAAM@Z	protected: virtual class std::istreambuf_iterator<char,struct std::char_traits<char> >  __thiscall std::num_get<char,class std::istreambuf_iterator<char,struct std::char_traits<char> > >::do_get(class std::istreambuf_iterator<char,struct std::char_traits<char> >,class std::istreambuf_iterator<char,struct std::char_traits<char> >,class std::ios_base &,int &,float &)const 
+0	?_query_new_handler@@YAR6AHI@ZXZ	int (__cdecl*__cdecl _query_new_handler(void))(unsigned int)
+0	?register_callback@ios_base@std@@QAEXP6AXW4event@12@AAV12@H@ZH@Z	public: void __thiscall std::ios_base::register_callback(void (__cdecl*)(enum std::ios_base::event,class std::ios_base &,int),int)
+0	?seekg@?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV12@JW4seekdir@ios_base@2@@Z	public: class std::basic_istream<char,struct std::char_traits<char> > & __thiscall std::basic_istream<char,struct std::char_traits<char> >::seekg(long,enum std::ios_base::seekdir)
+0	?seekg@?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV12@V?$fpos@H@2@@Z	public: class std::basic_istream<char,struct std::char_traits<char> > & __thiscall std::basic_istream<char,struct std::char_traits<char> >::seekg(class std::fpos<int>)
+0	?seekg@?$basic_istream@GU?$char_traits@G@std@@@std@@QAEAAV12@JW4seekdir@ios_base@2@@Z	public: class std::basic_istream<unsigned short,struct std::char_traits<unsigned short> > & __thiscall std::basic_istream<unsigned short,struct std::char_traits<unsigned short> >::seekg(long,enum std::ios_base::seekdir)
+0	?seekg@?$basic_istream@GU?$char_traits@G@std@@@std@@QAEAAV12@V?$fpos@H@2@@Z	public: class std::basic_istream<unsigned short,struct std::char_traits<unsigned short> > & __thiscall std::basic_istream<unsigned short,struct std::char_traits<unsigned short> >::seekg(class std::fpos<int>)
+0	?seekoff@?$basic_filebuf@DU?$char_traits@D@std@@@std@@MAE?AV?$fpos@H@2@JW4seekdir@ios_base@2@H@Z	protected: virtual class std::fpos<int>  __thiscall std::basic_filebuf<char,struct std::char_traits<char> >::seekoff(long,enum std::ios_base::seekdir,int)
+0	?seekoff@?$basic_filebuf@GU?$char_traits@G@std@@@std@@MAE?AV?$fpos@H@2@JW4seekdir@ios_base@2@H@Z	protected: virtual class std::fpos<int>  __thiscall std::basic_filebuf<unsigned short,struct std::char_traits<unsigned short> >::seekoff(long,enum std::ios_base::seekdir,int)
+0	?set_new_handler@@YAP6AXXZP6AXXZ@Z	void (__cdecl*__cdecl set_new_handler(void (__cdecl*)(void)))(void)
+0	?str@?$basic_istringstream@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEXABV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@2@@Z	public: void __thiscall std::basic_istringstream<char,struct std::char_traits<char>,class std::allocator<char> >::str(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+0	?str@?$basic_istringstream@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBE?AV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@2@XZ	public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >  __thiscall std::basic_istringstream<char,struct std::char_traits<char>,class std::allocator<char> >::str(void)const 
+0	?str@?$basic_istringstream@GU?$char_traits@G@std@@V?$allocator@G@2@@std@@QAEXABV?$basic_string@GU?$char_traits@G@std@@V?$allocator@G@2@@2@@Z	public: void __thiscall std::basic_istringstream<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >::str(class std::basic_string<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> > const &)
+0	?str@?$basic_istringstream@GU?$char_traits@G@std@@V?$allocator@G@2@@std@@QBE?AV?$basic_string@GU?$char_traits@G@std@@V?$allocator@G@2@@2@XZ	public: class std::basic_string<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >  __thiscall std::basic_istringstream<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >::str(void)const 
+0	?str@?$basic_ostringstream@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEXABV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@2@@Z	public: void __thiscall std::basic_ostringstream<char,struct std::char_traits<char>,class std::allocator<char> >::str(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+0	?str@?$basic_ostringstream@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBE?AV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@2@XZ	public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >  __thiscall std::basic_ostringstream<char,struct std::char_traits<char>,class std::allocator<char> >::str(void)const 
+0	?str@?$basic_ostringstream@GU?$char_traits@G@std@@V?$allocator@G@2@@std@@QAEXABV?$basic_string@GU?$char_traits@G@std@@V?$allocator@G@2@@2@@Z	public: void __thiscall std::basic_ostringstream<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >::str(class std::basic_string<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> > const &)
+0	?str@?$basic_ostringstream@GU?$char_traits@G@std@@V?$allocator@G@2@@std@@QBE?AV?$basic_string@GU?$char_traits@G@std@@V?$allocator@G@2@@2@XZ	public: class std::basic_string<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >  __thiscall std::basic_ostringstream<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >::str(void)const 
+0	?str@?$basic_stringbuf@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEXABV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@2@@Z	public: void __thiscall std::basic_stringbuf<char,struct std::char_traits<char>,class std::allocator<char> >::str(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+0	?str@?$basic_stringbuf@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBE?AV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@2@XZ	public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >  __thiscall std::basic_stringbuf<char,struct std::char_traits<char>,class std::allocator<char> >::str(void)const 
+0	?str@?$basic_stringbuf@GU?$char_traits@G@std@@V?$allocator@G@2@@std@@QAEXABV?$basic_string@GU?$char_traits@G@std@@V?$allocator@G@2@@2@@Z	public: void __thiscall std::basic_stringbuf<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >::str(class std::basic_string<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> > const &)
+0	?str@?$basic_stringbuf@GU?$char_traits@G@std@@V?$allocator@G@2@@std@@QBE?AV?$basic_string@GU?$char_traits@G@std@@V?$allocator@G@2@@2@XZ	public: class std::basic_string<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >  __thiscall std::basic_stringbuf<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >::str(void)const 
+0	?str@?$basic_stringstream@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEXABV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@2@@Z	public: void __thiscall std::basic_stringstream<char,struct std::char_traits<char>,class std::allocator<char> >::str(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+0	?str@?$basic_stringstream@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBE?AV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@2@XZ	public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >  __thiscall std::basic_stringstream<char,struct std::char_traits<char>,class std::allocator<char> >::str(void)const 
+0	?str@?$basic_stringstream@GU?$char_traits@G@std@@V?$allocator@G@2@@std@@QAEXABV?$basic_string@GU?$char_traits@G@std@@V?$allocator@G@2@@2@@Z	public: void __thiscall std::basic_stringstream<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >::str(class std::basic_string<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> > const &)
+0	?str@?$basic_stringstream@GU?$char_traits@G@std@@V?$allocator@G@2@@std@@QBE?AV?$basic_string@GU?$char_traits@G@std@@V?$allocator@G@2@@2@XZ	public: class std::basic_string<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >  __thiscall std::basic_stringstream<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >::str(void)const 
+0	?_Sync@ios_base@std@@0_NA	private: static bool  std::ios_base::_Sync
+0	??_U@YAPAXI@Z	void * __cdecl operator new[](unsigned int)
+0	??_V@YAXPAX@Z	void __cdecl operator delete[](void *)
+0	??X?$_Complex_base@M@std@@QAEAAV01@ABM@Z	public: class std::_Complex_base<float> & __thiscall std::_Complex_base<float>::operator*=(float const &)
+0	??Xstd@@YAAAV?$complex@M@0@AAV10@ABV10@@Z	class std::complex<float> & __cdecl std::operator*=(class std::complex<float> &,class std::complex<float> const &)
+0	?aaa@@YAHAAUbbb@@@Z	int __cdecl aaa(struct bbb &)
+0	?aaa@@YAHBAUbbb@@@Z	int __cdecl aaa(struct bbb & volatile)
+0	?aaa@@YAHPAUbbb@@@Z	int __cdecl aaa(struct bbb *)
+0	?aaa@@YAHQAUbbb@@@Z	int __cdecl aaa(struct bbb * const)
+0	?aaa@@YAHRAUbbb@@@Z	int __cdecl aaa(struct bbb * volatile)
+0	?aaa@@YAHSAUbbb@@@Z	int __cdecl aaa(struct bbb * const volatile)
+0	??0aa.a@@QAE@XZ	??0aa.a@@QAE@XZ
+0	??0aa$_3a@@QAE@XZ	public: __thiscall aa$_3a::aa$_3a(void)
+0	??2?$aaa@AAUbbb@@AAUccc@@AAU2@@ddd@1eee@2@QAEHXZ	public: int __thiscall eee::eee::ddd::ddd::aaa<struct bbb &,struct ccc &,struct ccc &>::operator new(void)
+0	?pSW@@3P6GHKPAX0PAU_tagSTACKFRAME@@0P6GH0K0KPAK@ZP6GPAX0K@ZP6GK0K@ZP6GK00PAU_tagADDRESS@@@Z@ZA	int (__stdcall* pSW)(unsigned long,void *,void *,struct _tagSTACKFRAME *,void *,int (__stdcall*)(void *,unsigned long,void *,unsigned long,unsigned long *),void * (__stdcall*)(void *,unsigned long),unsigned long (__stdcall*)(void *,unsigned long),unsigned long (__stdcall*)(void *,void *,struct _tagADDRESS *))
+0	?$_aaa@Vbbb@@	_aaa<class bbb>
+0	?$aaa@Vbbb@ccc@@Vddd@2@	aaa<class ccc::bbb,class ccc::ddd>
+0	??0?$Foo@P6GHPAX0@Z@@QAE@PAD@Z	public: __thiscall Foo<int (__stdcall*)(void *,void *)>::Foo<int (__stdcall*)(void *,void *)>(char *)
+880	??0?$Foo@P6GHPAX0@Z@@QAE@PAD@Z	__thiscall Foo<int (__stdcall*)(void *,void *)>::Foo<int (__stdcall*)(void *,void *)>(char *)
+0	?Qux@Bar@@0PAP6AHPAV1@AAH1PAH@ZA	private: static int (__cdecl**  Bar::Qux)(class Bar *,int &,int &,int *)
+1800	?Qux@Bar@@0PAP6AHPAV1@AAH1PAH@ZA	Bar::Qux
+0	?$AAA@$DBAB@	AAA<`template-parameter257'>
+0	?$AAA@?C@	AAA<`template-parameter-2'>
+0	?$AAA@PAUBBB@@	AAA<struct BBB *>
+0	??$ccccc@PAVaaa@@@bar@bb@foo@@DGPAV0@PAV0@PAVee@@IPAPAVaaa@@1@Z	??$ccccc@PAVaaa@@@bar@bb@foo@@DGPAV0@PAV0@PAVee@@IPAPAVaaa@@1@Z
+0	?f@T@@QAEHQCY1BE@BO@D@Z	public: int __thiscall T::f(char (volatile * const)[20][30])
+0	?f@T@@QAEHQAY2BE@BO@CI@D@Z	public: int __thiscall T::f(char (* const)[20][30][40])
+0	??0?$Foo@U?$vector_c@H$00$01$0?1$0A@$0A@$0HPPPPPPP@$0HPPPPPPP@$0HPPPPPPP@$0HPPPPPPP@$0HPPPPPPP@$0HPPPPPPP@$0HPPPPPPP@$0HPPPPPPP@$0HPPPPPPP@$0HPPPPPPP@$0HPPPPPPP@$0HPPPPPPP@$0HPPPPPPP@$0HPPPPPPP@$0HPPPPPPP@@mpl@boost@@@@QAE@XZ	public: __thiscall Foo<struct boost::mpl::vector_c<int,1,2,-2,0,0,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647> >::Foo<struct boost::mpl::vector_c<int,1,2,-2,0,0,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647,2147483647> >(void)
+0	?swprintf@@YAHPAGIPBGZZ	int __cdecl swprintf(unsigned short *,unsigned int,unsigned short const *,...)
+0	?vswprintf@@YAHPAGIPBGPAD@Z	int __cdecl vswprintf(unsigned short *,unsigned int,unsigned short const *,char *)
+0	?vswprintf@@YAHPA_WIPB_WPAD@Z	int __cdecl vswprintf(wchar_t *,unsigned int,wchar_t const *,char *)
+0	?swprintf@@YAHPA_WIPB_WZZ	int __cdecl swprintf(wchar_t *,unsigned int,wchar_t const *,...)
+0	??Xstd@@YAAEAV?$complex@M@0@AEAV10@AEBV10@@Z	class std::complex<float> & __ptr64 __cdecl std::operator*=(class std::complex<float> & __ptr64,class std::complex<float> const & __ptr64)
+0	??$?DM@std@@YA?AV?$complex@M@0@ABMABV10@@Z	??$?DM@std@@YA?AV?$complex@M@0@ABMABV10@@Z
+0	?_R2@?BN@???$_Fabs@N@std@@YANAEBV?$complex@N@1@PEAH@Z@4NB	?_R2@?BN@???$_Fabs@N@std@@YANAEBV?$complex@N@1@PEAH@Z@4NB
+0	?vtordisp_thunk@std@@$4PPPPPPPM@3EAA_NXZ	[thunk]:public: virtual bool __cdecl std::vtordisp_thunk`vtordisp{4294967292,4}' (void) __ptr64
+0	??_9CView@@$BBII@AE	[thunk]: __thiscall CView::`vcall'{392,{flat}}' 
+0	?_dispatch@_impl_Engine@SalomeApp@@$R4CE@BA@PPPPPPPM@7AE_NAAVomniCallHandle@@@Z	?_dispatch@_impl_Engine@SalomeApp@@$R4CE@BA@PPPPPPPM@7AE_NAAVomniCallHandle@@@Z
+60	?_Doraise@bad_cast@std@@MEBAXXZ	protected: virtual void __cdecl std::bad_cast::_Doraise(void)
+0	??$run@XVTask_Render_Preview@@@QtConcurrent@@YA?AV?$QFuture@X@@PEAVTask_Render_Preview@@P82@EAAXXZ@Z	??$run@XVTask_Render_Preview@@@QtConcurrent@@YA?AV?$QFuture@X@@PEAVTask_Render_Preview@@P82@EAAXXZ@Z
+0	??_E?$TStrArray@$$BY0BAA@D$0BA@@@UAEPAXI@Z	public: virtual void * __thiscall TStrArray<char [256],16>::`vector deleting destructor'(unsigned int)
+0	??_R0?AVCC@DD@@@8	class DD::CC `RTTI Type Descriptor'
+0	??$meth@FD@DD@CC@@QAE_NK@Z	??$meth@FD@DD@CC@@QAE_NK@Z
+0	?x@@3PAY02HA	int (*  x)[3]
+0	?Qux@Bar@@0PAPAP6AHPAV1@AAH1PAH@ZA	private: static int (__cdecl** *  Bar::Qux)(class Bar *,int &,int &,int *)
+0	?x@@3PAW4myenum@@A	enum myenum *  x
+0	?pfunc@@3PAY0E@P6AXF@ZA	void (__cdecl*(*  pfunc)[4])(short)
+0	??$?0AEAVzzz@BB4@AA@@AEAV012@$0A@@?$pair@Vzzz@BB4@AA@@V123@@std@@QEAA@AEAVzzz@BB4@AA@@0@Z	??$?0AEAVzzz@BB4@AA@@AEAV012@$0A@@?$pair@Vzzz@BB4@AA@@V123@@std@@QEAA@AEAVzzz@BB4@AA@@0@Z
+0	??$?BH@?$foo@N@@QEAAHXZ	??$?BH@?$foo@N@@QEAAHXZ
+0	??Bcastop@@QAEHXZ	public: __thiscall castop::operator int(void)
+0	??Bcastop@@QAE?BHXZ	public: __thiscall castop::operator int const (void)
+0	?pfield@@3PTAA@@DT1@	char const volatile AA::* const volatile  pfield
+0	?ptititi1@@3PEQtititi@@IEQ1@	unsigned int tititi::* __ptr64  __ptr64 ptititi1
+0	?ptititi2@@3PERtititi@@IER1@	unsigned int const tititi::* __ptr64 const  __ptr64 ptititi2
+0	?ptititi3@@3PEStititi@@IES1@	unsigned int volatile tititi::* __ptr64 volatile  __ptr64 ptititi3
+0	?ptititi4@@3PETtititi@@IET1@	unsigned int const volatile tititi::* __ptr64 const volatile  __ptr64 ptititi4
+0	?ptititi4v@@3RETtititi@@IET1@	unsigned int const volatile tititi::* __ptr64 const volatile  __ptr64 ptititi4v
+0	?RegisterModuleUninitializer@<CrtImplementationDetails>@@YAXP$AAVEventHandler@System@@@Z	?RegisterModuleUninitializer@<CrtImplementationDetails>@@YAXP$AAVEventHandler@System@@@Z
+0	?RegisterModuleUninitializer@<CrtImplementationDetails>@@YAXBE$AAVEventHandler@System@@@Z	?RegisterModuleUninitializer@<CrtImplementationDetails>@@YAXBE$AAVEventHandler@System@@@Z
+0	??$forward@AEAUFFIValue@?1??call@FFIFunctionBinder@@CAHPEAUlua_State@@@Z@@std@@YAAEAUFFIValue@?1??call@FFIFunctionBinder@@CAHPEAUxlua_State@@@Z@AEAU1?1??23@CAH0@Z@@Z	??$forward@AEAUFFIValue@?1??call@FFIFunctionBinder@@CAHPEAUlua_State@@@Z@@std@@YAAEAUFFIValue@?1??call@FFIFunctionBinder@@CAHPEAUxlua_State@@@Z@AEAU1?1??23@CAH0@Z@@Z
+0	?$AAA@XX	AAA<void,void>
+0	?$AAA@	AAA<>
+0	?a@@3HA	int  a
+0	?a@@3_NA	bool  a
+0	?a@@3_JA	__int64  a
+0	?a@@3_KA	unsigned __int64  a
+0	?a@@3VC@@A	class C  a
+0	?a@@3UC@@A	struct C  a
+0	?a@@3TC@@A	union C  a
+0	?a@@3W4E@@A	enum E  a
+0	?a@@3PAHA	int *  a
+0	?a@@3PAVC@@A	class C *  a
+0	?a@@3PBDB	char const * const  a
+0	?a@@3QAHA	int *  a
+0	?a@@3AAHA	int &  a
+0	?a@@3NA	double  a
+0	?a@@3MA	float  a
+0	?a@@3PAPAHA	int * *  a
+0	?a@@3P6AHH@ZA	int (__cdecl* a)(int)
+0	?a@@3P8C@@AEHH@ZA	int (__thiscall C::* a)(int)
+0	?a@@3PQC@@HQ1@	int C::*  a
+0	?a@@3V?$T@H@@A	class T<int>  a
+0	?a@C@@2HA	public: static int  C::a
+0	?a@C@@2VD@@A	public: static class D  C::a
+0	?a@C@@0PAHA	private: static int *  C::a
+0	?a@C@@1_NB	protected: static bool const  C::a
+0	?a@@3PAY02HA	int (*  a)[3]
+0	?a@@3PAW4E@@A	enum E *  a
+0	?f@@YAHXZ	int __cdecl f(void)
+0	?f@@YA_NXZ	bool __cdecl f(void)
+0	?f@@YA_JXZ	__int64 __cdecl f(void)
+0	?f@@YA?AVC@@XZ	class C  __cdecl f(void)
+0	?f@@YAPAVC@@XZ	class C * __cdecl f(void)
+0	?f@@YAW4E@@XZ	enum E __cdecl f(void)
+0	?f@@YAPAHXZ	int * __cdecl f(void)
+0	?f@@YAABHXZ	int const & __cdecl f(void)
+0	?f@@YA?BHXZ	int const  __cdecl f(void)
+0	?f@@YAXH@Z	void __cdecl f(int)
+0	?f@@YAX_J@Z	void __cdecl f(__int64)
+0	?f@@YAXVC@@@Z	void __cdecl f(class C)
+0	?f@@YAXPAVC@@@Z	void __cdecl f(class C *)
+0	?f@@YAXAAVC@@@Z	void __cdecl f(class C &)
+0	?f@@YAXABVC@@@Z	void __cdecl f(class C const &)
+0	?f@@YAXP6AHH@Z@Z	void __cdecl f(int (__cdecl*)(int))
+0	?f@@YAXP8C@@AEHH@Z@Z	void __cdecl f(int (__thiscall C::*)(int))
+0	?f@@YAXPAY02H@Z	void __cdecl f(int (*)[3])
+0	?f@@YAXQAH@Z	void __cdecl f(int * const)
+0	?f@@YAXHZZ	void __cdecl f(int,...)
+0	?f@@YAXVC@@0@Z	void __cdecl f(class C,class C)
+0	?f@@YAXPAVC@@0@Z	void __cdecl f(class C *,class C *)
+0	?f@@YGXXZ	void __stdcall f(void)
+0	?f@@YIXXZ	void __fastcall f(void)
+0	?f@C@@QAEHXZ	public: int __thiscall C::f(void)
+0	?f@C@@QBEHXZ	public: int __thiscall C::f(void)const 
+0	?f@C@@UAEHXZ	public: virtual int __thiscall C::f(void)
+0	?f@C@@SAHXZ	public: static int __cdecl C::f(void)
+0	?f@C@@AAEHXZ	private: int __thiscall C::f(void)
+0	?f@C@@IAEHXZ	protected: int __thiscall C::f(void)
+0	?f@C@@QAE?AV1@XZ	public: class C  __thiscall C::f(void)
+0	?f@C@@QAEPAV1@XZ	public: class C * __thiscall C::f(void)
+0	??0C@@QAE@XZ	public: __thiscall C::C(void)
+0	??1C@@UAE@XZ	public: virtual __thiscall C::~C(void)
+0	??0C@@QAE@ABV0@@Z	public: __thiscall C::C(class C const &)
+0	??4C@@QAEAAV0@ABV0@@Z	public: class C & __thiscall C::operator=(class C const &)
+0	??0C@N@@QAE@ABV01@@Z	public: __thiscall N::C::C(class C::C const &)
+0	??BC@@QAEHXZ	public: __thiscall C::operator int(void)
+0	??_7C@@6B@	const  C::`vftable'
+0	??_GC@@UAEPAXI@Z	public: virtual void * __thiscall C::`scalar deleting destructor'(unsigned int)
+0	??_EC@@UAEPAXI@Z	public: virtual void * __thiscall C::`vector deleting destructor'(unsigned int)
+0	??_R0?AVC@@@8	class C `RTTI Type Descriptor'
+0	??_9C@@$BA@AE	[thunk]: __thiscall C::`vcall'{0,{flat}}' 
+0	?f@C@@W3AEXXZ	[thunk]:public: virtual void __thiscall C::f`adjustor{4}' (void)
+0	?f@C@@$4PPPPPPPM@A@AEXXZ	[thunk]:public: virtual void __thiscall C::f`vtordisp{4294967292,0}' (void)
+0	?f@?$T@H@@QAEXXZ	public: void __thiscall T<int>::f(void)
+0	??0?$T@H@@QAE@XZ	public: __thiscall T<int>::T<int>(void)
+0	?f@@YAXV?$T@H@@@Z	void __cdecl f(class T<int>)
+0	?f@@YAXV?$T@V?$U@H@@@@@Z	void __cdecl f(class T<class U<int> >)
+2800	?AV?$T@H@@	class T<int>
+2800	?AV?$T@$0A@@@	class T<0>
+2800	?AV?$T@$00@@	class T<1>
+2800	?AV?$T@$0BA@@@	class T<16>
+2800	?AV?$T@$0?0@@	class T<-1>
+2800	?AV?$T@$0?A@@@	class T<-0>
+2800	?AV?$T@$0HPPPPPPP@@@	class T<2147483647>
+2800	?AV?$T@$0IAAAAAAA@@@	class T<2147483648>
+2800	?AV?$T@PAH@@	class T<int *>
+2800	?AV?$T@PBD@@	class T<char const *>
+2800	?AV?$T@QAH@@	class T<int * const>
+2800	?AV?$T@PCH@@	class T<int volatile *>
+2800	?AV?$T@PDH@@	class T<int const volatile *>
+2800	?AV?$T@ABH@@	class T<int const &>
+2800	?AV?$T@AAVC@@@@	class T<class C &>
+2800	?AV?$T@P6AXXZ@@	class T<void (__cdecl*)(void)>
+2800	?AV?$T@P6GHH@Z@@	class T<int (__stdcall*)(int)>
+2800	?AV?$T@P8C@@AEXXZ@@	class T<void (__thiscall C::*)(void)>
+2800	?AV?$T@PQC@@H@@	class T<int C::*>
+2800	?AV?$T@VC@@V1@@@	class T<class C,class C>
+2800	?AV?$T@VC@@VD@@V1@V2@@@	class T<class C,class D,class C,class D>
+2800	?AV?$T@V?$U@H@@V1@@@	class T<class U<int>,class U<int> >
+2800	?AV?$T@V?$U@H@@@@	class T<class U<int> >
+2800	?AV?$T@V?$U@V?$W@H@@@@@@	class T<class U<class W<int> > >
+2800	?AV?$T@_J@@	class T<__int64>
+2800	?AV?$T@_K@@	class T<unsigned __int64>
+2800	?AV?$T@_N@@	class T<bool>
+2800	?AV?$T@_W@@	class T<wchar_t>
+2800	?AV?$T@W4E@@@@	class T<enum E>
+2800	?AV?$T@W4E@N@@@@	class T<enum N::E>
+2800	?AU?$T@H@N@@	struct N::T<int>
+2800	?AVInner@Outer@@	class Outer::Inner
+2800	?AV?$T@H@Outer@@	class Outer::T<int>
+2800	?AVInner@?$T@H@@	class T<int>::Inner
+2800	?AVInner@?$T@H@N@@	class N::T<int>::Inner
+2800	?AT?$T@H@@	union T<int>
+2800	?AW4E@@	enum E
+2800	?AUS@@	struct S
+2800	?AV?$T@N@@	class T<double>
+2800	?AV?$T@M@@	class T<float>
+2800	?AV?$T@O@@	class T<long double>
+2800	?AV?$T@C@@	class T<signed char>
+2800	?AV?$T@E@@	class T<unsigned char>
+2800	?AV?$T@F@@	class T<short>
+2800	?AV?$T@G@@	class T<unsigned short>
+2800	?AV?$T@I@@	class T<unsigned int>
+2800	?AV?$T@J@@	class T<long>
+2800	?AV?$T@K@@	class T<unsigned long>
+2800	?AV?$T@X@@	class T<void>
+2800	?AV?$T@$1?f@@YAXXZ@@	class T<&void __cdecl f(void)>
+2800	?AV?$T@$1?x@@3HA@@	class T<&int  x>
+2800	?AV?$T@H$0A@@@	class T<int,0>
+2800	?AV?$T@HH@@	class T<int,int>
+2800	?AV?$T@H0@@	?AV?$T@H0@@
+2800	?AVC@?A0xabcdef12@@	?AVC@?A0xabcdef12@@
+2800	?AVC@?1??f@@YAXXZ@	class `void __cdecl f(void)'::`2'::C
+2800	?AVC@?1??f@@YAXXZ@@	?AVC@?1??f@@YAXXZ@@
+2800	?AV?$T@PAY02H@@	class T<int (*)[3]>
+2800	?AV?$T@PAPAH@@	class T<int * *>
+2800	?AV?$T@PBV?$U@H@@@@	class T<class U<int> const *>
+2800	?AV?$T@V?$U@H@@PAV1@@@	class T<class U<int>,class U<int> *>
+2800	?AV?$T@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@@	class T<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > >
+2800	PAH	int *
+2800	H	int
+2800	?AH	int
+2800	ABH	int const &
+2800	PAVC@@	class C *
+2800	?AVC@@X	?AVC@@X
+2800	?AVC@@@	?AVC@@@
+2800	?AV?$T@H@@@	?AV?$T@H@@@
+2800	?AY02H	?AY02H
+2800	?AV?$T@$$BY02H@@	class T<int [3]>
+2800	?AV?$T@Y02H@@	?AV?$T@Y02H@@
+1000	?f@C@@QAEHXZ	C::f
+1000	?a@@3HA	a
+0	?f@C@@QAEHXZ@	?f@C@@QAEHXZ@
+0	?a@@3HAX	?a@@3HAX
+0	??0C@@QAE@XZX	??0C@@QAE@XZX

@@ -38,6 +38,15 @@ impl Rect {
         self.bottom - self.top
     }
 
+    /// The pixels it covers: none when it is empty.
+    pub fn pixels(&self) -> u64 {
+        if self.is_empty() {
+            0
+        } else {
+            self.width() as u64 * self.height() as u64
+        }
+    }
+
     /// Whether it has no area, as IsRectEmpty says.
     pub fn is_empty(&self) -> bool {
         self.right <= self.left || self.bottom <= self.top

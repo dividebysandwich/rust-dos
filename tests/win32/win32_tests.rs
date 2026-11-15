@@ -6,6 +6,7 @@
 use iced_x86::code_asm::*;
 use rust_dos::cpu::{CoreMode, Cpu, HostConsole};
 use rust_dos::exec::{NoHook, StopReason, run_batch};
+use rust_dos::voodoo::Board;
 use rust_dos_pe::{self as pe, Builder, Imp};
 use std::fs;
 use std::path::PathBuf;
@@ -269,6 +270,215 @@ fn a_program_runs_on_the_dynamic_recompiler() {
     assert_eq!(cpu.errorlevel as usize, HELLO.len());
 }
 
+/// Doubles for `_ftol`: zeros, fractions of both signs, values past 32
+/// bits, the largest double under 2^63 and -2^63, then what is out of
+/// range, denormals, infinities and NaNs.
+const FTOL_DOUBLES: &[f64] = &[
+    0.0,
+    -0.0,
+    0.5,
+    -0.5,
+    0.999_999,
+    -0.999_999,
+    1.0,
+    -1.0,
+    1.5,
+    -1.5,
+    2.5,
+    -2.5,
+    2.999_999_9,
+    -2.999_999_9,
+    123_456_789.987,
+    -123_456_789.987,
+    2_147_483_647.75,
+    -2_147_483_648.5,
+    1_099_511_627_776.75,
+    -4_503_599_627_370_495.5,
+    9_223_372_036_854_774_784.0,
+    -9_223_372_036_854_775_808.0,
+    9_223_372_036_854_775_808.0,
+    -9_223_372_036_854_777_856.0,
+    1e300,
+    -1e300,
+    5e-324,
+    -5e-324,
+    f64::INFINITY,
+    f64::NEG_INFINITY,
+    f64::NAN,
+    -f64::NAN,
+];
+
+/// 80-bit values for `_ftol` (sign and exponent, mantissa) whose 80 bits
+/// hold more than a double, and what FISTP stores of them truncated:
+/// 3 - 2^-62 and its negative, which a double would round to 3, 2^63 - 1,
+/// which a double would round past the range, and -(2^63 + 1).
+const FTOL_EXTENDED: &[(u16, u64, i64)] = &[
+    (0x4000, 0xBFFF_FFFF_FFFF_FFFF, 2),
+    (0xC000, 0xBFFF_FFFF_FFFF_FFFF, -2),
+    (0x403D, 0xFFFF_FFFF_FFFF_FFFF, i64::MAX),
+    (0xC03E, 0x8000_0000_0000_0001, i64::MIN),
+];
+
+/// What `_ftol` gives for `x`: truncated toward zero, or the integer
+/// indefinite for a NaN, an infinity or a value out of range.
+fn ftol_of(x: f64) -> i64 {
+    if x.is_nan() || x.abs() >= 9_223_372_036_854_775_808.0 {
+        i64::MIN
+    } else {
+        x.trunc() as i64
+    }
+}
+
+/// A program that calls MSVCRT's `_ftol` on each of `FTOL_DOUBLES` and
+/// `FTOL_EXTENDED`, 200 times over, with the control word `control`, and
+/// ends with 0 if every call returned what `ftol_of` says in EDX:EAX, left
+/// the control word as it was and popped ST(0). Otherwise it ends with the
+/// case's number plus 1 for a wrong result, 101 for a changed control word
+/// and 201 for a register left on the stack.
+fn ftol_program(control: u16) -> Vec<u8> {
+    const DOUBLES: u32 = 0x000;
+    const EXPECTED: u32 = 0x100;
+    const EXTENDED: u32 = 0x200;
+    const EXTENDED_EXPECTED: u32 = 0x280;
+    const CONTROL: u32 = 0x300;
+    const STORED: u32 = 0x304;
+    let mut data = vec![0u8; 0x310];
+    let put = |data: &mut Vec<u8>, at: u32, bytes: &[u8]| {
+        data[at as usize..at as usize + bytes.len()].copy_from_slice(bytes);
+    };
+    for (i, &x) in FTOL_DOUBLES.iter().enumerate() {
+        put(&mut data, DOUBLES + 8 * i as u32, &x.to_le_bytes());
+        put(
+            &mut data,
+            EXPECTED + 8 * i as u32,
+            &ftol_of(x).to_le_bytes(),
+        );
+    }
+    for (i, &(exponent, mantissa, n)) in FTOL_EXTENDED.iter().enumerate() {
+        put(&mut data, EXTENDED + 16 * i as u32, &mantissa.to_le_bytes());
+        put(
+            &mut data,
+            EXTENDED + 16 * i as u32 + 8,
+            &exponent.to_le_bytes(),
+        );
+        put(
+            &mut data,
+            EXTENDED_EXPECTED + 8 * i as u32,
+            &n.to_le_bytes(),
+        );
+    }
+    put(&mut data, CONTROL, &control.to_le_bytes());
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["ExitProcess"]),
+        ("MSVCRT.DLL", &["_ftol"]),
+    ];
+    let doubles = FTOL_DOUBLES.len() as u32;
+    let extended = FTOL_EXTENDED.len() as u32;
+    program(BASE, false, imports, &data, |a, l| {
+        let mut again = a.create_label();
+        let mut double = a.create_label();
+        let mut wide = a.create_label();
+        let mut check = a.create_label();
+        let mut wrong = a.create_label();
+        let mut changed = a.create_label();
+        let mut left = a.create_label();
+        let mut exit = a.create_label();
+        a.fninit()?;
+        a.fldcw(word_ptr(l.at(CONTROL)))?;
+        a.mov(edi, 200u32)?;
+        a.set_label(&mut again)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut double)?;
+        a.fld(qword_ptr(ebx * 8 + l.at(DOUBLES) as i32))?;
+        a.call(l.import(1))?;
+        a.mov(ecx, ebx)?;
+        a.cmp(eax, dword_ptr(ebx * 8 + l.at(EXPECTED) as i32))?;
+        a.jne(wrong)?;
+        a.cmp(edx, dword_ptr(ebx * 8 + (l.at(EXPECTED) + 4) as i32))?;
+        a.jne(wrong)?;
+        a.call(check)?;
+        a.inc(ebx)?;
+        a.cmp(ebx, doubles)?;
+        a.jb(double)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut wide)?;
+        a.mov(esi, ebx)?;
+        a.shl(esi, 4)?;
+        a.fld(tword_ptr(esi + l.at(EXTENDED) as i32))?;
+        a.call(l.import(1))?;
+        a.lea(ecx, dword_ptr(ebx + doubles as i32))?;
+        a.cmp(eax, dword_ptr(ebx * 8 + l.at(EXTENDED_EXPECTED) as i32))?;
+        a.jne(wrong)?;
+        a.cmp(
+            edx,
+            dword_ptr(ebx * 8 + (l.at(EXTENDED_EXPECTED) + 4) as i32),
+        )?;
+        a.jne(wrong)?;
+        a.call(check)?;
+        a.inc(ebx)?;
+        a.cmp(ebx, extended)?;
+        a.jb(wide)?;
+        a.dec(edi)?;
+        a.jnz(again)?;
+        a.xor(eax, eax)?;
+        a.jmp(exit)?;
+        // The control word as the caller had it, and the stack empty.
+        a.set_label(&mut check)?;
+        a.fnstcw(word_ptr(l.at(STORED)))?;
+        a.mov(ax, word_ptr(l.at(STORED)))?;
+        a.cmp(ax, word_ptr(l.at(CONTROL)))?;
+        a.jne(changed)?;
+        a.fnstsw(ax)?;
+        a.test(ax, 0x3800)?;
+        a.jnz(left)?;
+        a.ret()?;
+        a.set_label(&mut wrong)?;
+        a.lea(eax, dword_ptr(ecx + 1))?;
+        a.jmp(exit)?;
+        a.set_label(&mut changed)?;
+        a.lea(eax, dword_ptr(ecx + 101))?;
+        a.jmp(exit)?;
+        a.set_label(&mut left)?;
+        a.lea(eax, dword_ptr(ecx + 201))?;
+        a.set_label(&mut exit)?;
+        a.push(eax)?;
+        a.call(l.import(0))?;
+        a.int3()
+    })
+}
+
+/// MSVCRT's `_ftol` is Windows 98 SE's code, which the recompiler
+/// translates with the program's: on both cores it truncates toward zero,
+/// gives 8000000000000000h for what has no 64-bit integer, truncates the
+/// 80 bits of a register that holds more than a double, and leaves the
+/// caller's control word as it was, whatever it rounds to.
+#[test]
+fn ftol_truncates_and_keeps_the_control_word_on_both_cores() {
+    let calls = 200 * (FTOL_DOUBLES.len() + FTOL_EXTENDED.len()) as u64;
+    for control in [0x027F, 0x037F, 0x0F7F, 0x077F, 0x0B7F, 0x007F] {
+        for core in [CoreMode::Normal, CoreMode::Dynamic] {
+            let mut cpu = machine(
+                &format!("ftol_{control:04x}_{core:?}"),
+                ftol_program(control),
+            );
+            cpu.core = core;
+            let what = format!("control word {control:04X}h, {core:?}");
+            assert!(run_to_exit(&mut cpu, 400), "{what}: {}", printed(&cpu));
+            assert_eq!(cpu.errorlevel, 0, "{what}: case {} failed", cpu.errorlevel);
+            if core == CoreMode::Dynamic && rust_dos::dynrec::AVAILABLE {
+                // Each call runs 19 to 21 instructions of the loop and the
+                // 16 of _ftol, which the import reaches without the stub.
+                // Over 30 translated a call means _ftol ran translated.
+                let translated = cpu.dynrec.counts().executed;
+                assert!(
+                    translated > calls * 30,
+                    "{what}: {translated} translated for {calls} calls"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn a_program_is_relocated_when_its_base_is_taken() {
     // 90000000h is in the shared arena, where no program goes.
@@ -351,6 +561,154 @@ fn returning_from_the_entry_point_ends_with_its_value() {
         }),
     );
     assert_eq!(code, 0x2A);
+}
+
+#[test]
+fn are_file_apis_ansi_follows_set_file_apis_to_oem_and_ansi() {
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["AreFileApisANSI", "SetFileApisToOEM", "SetFileApisToANSI"],
+    )];
+    // Bit 0: ANSI at the start; bit 1: OEM after SetFileApisToOEM; bit
+    // 2: ANSI again after SetFileApisToANSI.
+    let (code, _) = run(
+        "file_apis",
+        program(BASE, false, imports, &[0], |a, l| {
+            a.call(l.import(0))?;
+            a.mov(ebx, eax)?;
+            a.call(l.import(1))?;
+            a.call(l.import(0))?;
+            a.test(eax, eax)?;
+            a.sete(al)?;
+            a.movzx(eax, al)?;
+            a.shl(eax, 1)?;
+            a.or(ebx, eax)?;
+            a.call(l.import(2))?;
+            a.call(l.import(0))?;
+            a.shl(eax, 2)?;
+            a.or(eax, ebx)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(code, 7);
+}
+
+/// Run Test Drive 4's last intro shot in a program made of the
+/// `td4-intro-camera` fix's pieces, at their RVAs in a file of the size
+/// the fix wants, with `game_fixes` at `fixes`, on the game's track
+/// `track`. The program runs the 40 ticks of the shot through the tick's
+/// jump table at view 11, then `frames` frames through the frame's code
+/// for view 11, and ends with the camera's distance / 4096.
+fn td4_intro_camera(fixes: bool, track: u32, frames: u32) -> u8 {
+    use rust_dos::game_fixes::{Kind, by_name};
+    let Kind::Win32 {
+        program,
+        size,
+        code,
+    } = by_name("td4-intro-camera").unwrap().kind
+    else {
+        panic!("td4-intro-camera patches a Win32 program");
+    };
+    const DISTANCE: u64 = 0x46_ADCC;
+    const TRACK: u64 = 0x45_A675;
+    const TEXT: usize = 0x1000;
+    let mut a = CodeAssembler::new(32).unwrap();
+    let mut tick = a.create_label();
+    let mut ticks = a.create_label();
+    let mut frame = a.create_label();
+    let mut done = a.create_label();
+    a.mov(dword_ptr(DISTANCE), 972_800).unwrap();
+    a.mov(dword_ptr(TRACK), track).unwrap();
+    a.mov(esi, 40).unwrap();
+    a.set_label(&mut ticks).unwrap();
+    a.push(0).unwrap();
+    a.call(tick).unwrap();
+    a.add(esp, 4).unwrap();
+    a.dec(esi).unwrap();
+    a.jnz(ticks).unwrap();
+    a.mov(esi, frames).unwrap();
+    a.test(esi, esi).unwrap();
+    a.jz(done).unwrap();
+    a.set_label(&mut frame).unwrap();
+    a.call(0x40_852C).unwrap();
+    a.dec(esi).unwrap();
+    a.jnz(frame).unwrap();
+    a.set_label(&mut done).unwrap();
+    a.mov(eax, dword_ptr(DISTANCE)).unwrap();
+    a.sar(eax, 12).unwrap();
+    a.ret().unwrap();
+    // The tick's function up to its switch, at view 11: through its
+    // jump table, which the fix changes.
+    a.set_label(&mut tick).unwrap();
+    a.push(ebx).unwrap();
+    a.push(esi).unwrap();
+    a.push(edi).unwrap();
+    a.push(ebp).unwrap();
+    a.mov(ebp, esp).unwrap();
+    a.jmp(dword_ptr(0x40_86B5u64)).unwrap();
+    let entry = a.assemble((BASE as usize + TEXT) as u64).unwrap();
+
+    let mut text = vec![0u8; 0x7800];
+    text[..entry.len()].copy_from_slice(&entry);
+    let pieces = code
+        .checks
+        .iter()
+        .chain(code.patches.iter().map(|(old, _)| old));
+    for b in pieces {
+        text[b.at - TEXT..][..b.bytes.len()].copy_from_slice(b.bytes);
+    }
+    // What the game's code calls and jumps to: the camera's update, a
+    // ret here, the frame's code after the sub, and the functions' end.
+    text[0x7A0B - TEXT] = 0xC3;
+    text[0x8536 - TEXT] = 0xC3;
+    text[0x8714 - TEXT..][..7].copy_from_slice(&[0x89, 0xEC, 0x5D, 0x5F, 0x5E, 0x5B, 0xC3]);
+
+    let mut b = Builder::exe(BASE);
+    b.subsystem(pe::SUBSYSTEM_CONSOLE);
+    let code_rva = b.section(
+        ".text",
+        &text,
+        pe::SCN_CODE | pe::SCN_EXECUTE | pe::SCN_READ,
+    );
+    assert_eq!(code_rva as usize, TEXT);
+    let rva = b.next_rva();
+    b.section_sized(
+        ".bss",
+        &[],
+        0x6_B000 - rva,
+        pe::SCN_INITIALIZED_DATA | pe::SCN_READ | pe::SCN_WRITE,
+    );
+    b.entry(code_rva);
+    let mut file = b.build();
+    assert!(file.len() <= size);
+    file.resize(size, 0);
+
+    let test = format!("td4_intro_camera_{fixes}_{track}_{frames}");
+    let mut cpu = Cpu::new(scratch(&test, &[(program, file)]));
+    cpu.bus.win32.enabled = true;
+    cpu.bus.game_fixes = fixes;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable(program, None));
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    cpu.errorlevel
+}
+
+#[test]
+fn test_drive_4_s_race_camera_ends_the_intro_where_the_race_view_is() {
+    // 972800 - 40 * 3700h is 409600, the race's chase view.
+    assert_eq!(td4_intro_camera(true, 0, 69), 100);
+    // As the game shipped it, 69 frames (60 a second) take the camera to
+    // 1280.
+    assert_eq!(td4_intro_camera(false, 0, 69), 0);
+}
+
+#[test]
+fn test_drive_4_s_race_camera_stays_put_on_the_track_without_an_intro() {
+    // Track 12 runs the tick's code for view 11 through its race, and
+    // the frame's not at all: the camera stays at 972800 either way.
+    assert_eq!(td4_intro_camera(true, 12, 0), 237);
+    assert_eq!(td4_intro_camera(false, 12, 0), 237);
 }
 
 #[test]
@@ -708,6 +1066,278 @@ fn idle_lockstep(test: &str, image: Vec<u8>) -> rust_dos::idle::IdleStats {
         skipping.bus.observe.stats
     );
     skipping.bus.observe.stats
+}
+
+/// A thread that waits for a flag in a Sleep(0) loop while the main
+/// thread sleeps, as MDK2's worker thread waits while the main thread
+/// waits for the retrace (#1007): with no other thread ready, Sleep(0)
+/// returns at once and changes nothing, so the loop's passes are skipped
+/// to the end of the main thread's Sleep, and come out the same as when
+/// they all run.
+#[test]
+fn a_sleep_zero_loop_with_nothing_else_ready_is_skipped() {
+    let names: &[&str] = &["CreateThread", "Sleep", "WaitForSingleObject"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The flag at 0.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        let mut spin = a.create_label();
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(over)?;
+        // The thread: Sleep(0) until the flag is set.
+        a.set_label(&mut spin)?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.cmp(dword_ptr(l.data), 0)?;
+        a.je(spin)?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        a.mov(esi, eax)?;
+        a.push(30)?;
+        a.call(f("Sleep"))?;
+        a.mov(dword_ptr(l.data), 1)?;
+        a.push(-1)?;
+        a.push(esi)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let stats = idle_lockstep("sleep_zero_wait", image);
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
+/// The same wait with a count of its passes in memory, as
+/// `while (!flag) { Sleep(0); n++; }` keeps: the passes differ in the
+/// count alone, and are skipped with it moved on as they would have.
+#[test]
+fn a_sleep_zero_loop_that_counts_while_it_waits_is_skipped() {
+    let names: &[&str] = &["CreateThread", "Sleep", "WaitForSingleObject"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The flag at 0, the count at 4.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        let mut spin = a.create_label();
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(over)?;
+        // The thread: Sleep(0) and count until the flag is set.
+        a.set_label(&mut spin)?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.inc(dword_ptr(l.at(4)))?;
+        a.cmp(dword_ptr(l.data), 0)?;
+        a.je(spin)?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        a.mov(esi, eax)?;
+        a.push(30)?;
+        a.call(f("Sleep"))?;
+        a.mov(dword_ptr(l.data), 1)?;
+        a.push(-1)?;
+        a.push(esi)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let stats = idle_lockstep("sleep_zero_count_wait", image);
+    assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
+/// A Sleep(0) loop that leaves after 50 ms by GetTickCount, alone in its
+/// process: skipped or run, it reads the clock 50 ms on when it leaves,
+/// neither sooner nor later.
+#[test]
+fn a_sleep_zero_loop_with_a_timeout_leaves_on_time() {
+    let names: &[&str] = &["GetTickCount", "Sleep"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut spin = a.create_label();
+        let mut late = a.create_label();
+        a.call(f("GetTickCount"))?;
+        a.mov(ebx, eax)?;
+        a.set_label(&mut spin)?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.call(f("GetTickCount"))?;
+        a.sub(eax, ebx)?;
+        a.cmp(eax, 50)?;
+        a.jb(spin)?;
+        a.jne(late)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()?;
+        a.set_label(&mut late)?;
+        a.ret()
+    });
+    let stats = idle_lockstep("sleep_zero_timeout", image);
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// Sleep(0) loops that count their passes, in memory and in a register,
+/// and leave after 100000: every pass counts, skipped or run.
+#[test]
+fn a_sleep_zero_loop_that_counts_runs_all_its_passes() {
+    let names: &[&str] = &["Sleep", "SleepEx"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The count at 0.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut memory = a.create_label();
+        let mut register = a.create_label();
+        let mut wrong = a.create_label();
+        a.set_label(&mut memory)?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.inc(dword_ptr(l.data))?;
+        a.cmp(dword_ptr(l.data), 100_000)?;
+        a.jb(memory)?;
+        // Alertable: no APC is queued, so it returns 0.
+        a.mov(edi, 100_000)?;
+        a.set_label(&mut register)?;
+        a.push(1)?;
+        a.push(0)?;
+        a.call(f("SleepEx"))?;
+        a.test(eax, eax)?;
+        a.jnz(wrong)?;
+        a.dec(edi)?;
+        a.jnz(register)?;
+        a.cmp(dword_ptr(l.data), 100_000)?;
+        a.jne(wrong)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()?;
+        a.set_label(&mut wrong)?;
+        a.mov(eax, 1)?;
+        a.ret()
+    });
+    let stats = idle_lockstep("sleep_zero_count", image);
+    // The memory loop's flags at the head come from comparing its count,
+    // so no two passes are the same: its proofs fail and back off rather
+    // than start again every few calls.
+    assert!(failed_by(&stats, "count passes") > 0, "{stats:?}");
+    assert!(stats.starts < 1000, "{stats:?}");
+}
+
+/// A thread of normal priority waits in a Sleep(0) loop for a flag that a
+/// thread of the lowest priority sets: Sleep(0) doesn't give way to that
+/// one, which gets the processor at the end of the waiting one's turn,
+/// skipped or run.
+#[test]
+fn a_sleep_zero_loop_waits_for_a_thread_of_a_lower_priority() {
+    let names: &[&str] = &[
+        "CreateThread",
+        "SetThreadPriority",
+        "ResumeThread",
+        "Sleep",
+        "WaitForSingleObject",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The flag at 0.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        let mut count = a.create_label();
+        let mut spin = a.create_label();
+        a.push(0)?;
+        a.push(4)?; // CREATE_SUSPENDED
+        a.push(0)?;
+        a.call(over)?;
+        // The thread: count a while, then set the flag.
+        a.mov(ecx, 1000)?;
+        a.set_label(&mut count)?;
+        a.loop_(count)?;
+        a.mov(dword_ptr(l.data), 1)?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        a.mov(esi, eax)?;
+        a.push(-2)?; // THREAD_PRIORITY_LOWEST
+        a.push(esi)?;
+        a.call(f("SetThreadPriority"))?;
+        a.push(esi)?;
+        a.call(f("ResumeThread"))?;
+        a.set_label(&mut spin)?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.cmp(dword_ptr(l.data), 0)?;
+        a.je(spin)?;
+        a.push(-1)?;
+        a.push(esi)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let stats = idle_lockstep("sleep_zero_lower", image);
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// A program whose one thread waits in a Sleep(0) loop for a flag that
+/// its multimedia timer's function sets 20 ms on: the loop leaves when
+/// the timer comes, skipped or run. The timer's thread keeps the process
+/// alive, so it ends with ExitProcess.
+#[test]
+fn a_sleep_zero_loop_waits_for_a_multimedia_timer() {
+    let k32: &[&str] = &["GetTickCount", "Sleep", "ExitProcess"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", k32), ("WINMM.DLL", &["timeSetEvent"])];
+    // The flag at 0.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(k32.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        let mut spin = a.create_label();
+        let mut wrong = a.create_label();
+        let mut exit = a.create_label();
+        a.call(f("GetTickCount"))?;
+        a.mov(ebx, eax)?;
+        a.push(0)?; // TIME_ONESHOT
+        a.push(0)?;
+        a.call(over)?;
+        // The timer's function.
+        a.mov(dword_ptr(l.data), 1)?;
+        a.ret_1(20)?;
+        a.set_label(&mut over)?;
+        a.push(1)?;
+        a.push(20)?;
+        a.call(l.import(k32.len()))?;
+        a.test(eax, eax)?;
+        a.jz(wrong)?;
+        a.set_label(&mut spin)?;
+        a.push(0)?;
+        a.call(f("Sleep"))?;
+        a.cmp(dword_ptr(l.data), 0)?;
+        a.je(spin)?;
+        // The timer came 20 ms on, to the millisecond.
+        a.call(f("GetTickCount"))?;
+        a.sub(eax, ebx)?;
+        a.sub(eax, 20)?;
+        a.cmp(eax, 1)?;
+        a.ja(wrong)?;
+        a.mov(eax, 0x2A)?;
+        a.jmp(exit)?;
+        a.set_label(&mut wrong)?;
+        a.mov(eax, 1)?;
+        a.set_label(&mut exit)?;
+        a.push(eax)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let stats = idle_lockstep("sleep_zero_timer", image);
+    assert!(stats.skipped > 0, "{stats:?}");
 }
 
 /// The number of proofs that failed for `why`.
@@ -1391,6 +2021,77 @@ fn a_sleep_ends_on_time_also_while_another_thread_spins() {
     assert_eq!(slept, [10, 10], "alone, spinning");
 }
 
+/// Whether a thread of priority `priority`, which counts for ever, ran
+/// while the main thread, of normal priority, called Sleep(0) 10 times
+/// right after starting it.
+fn ran_during_sleep_zero(test: &str, priority: i32) -> bool {
+    let names: &[&str] = &[
+        "CreateThread",
+        "SetThreadPriority",
+        "ResumeThread",
+        "Sleep",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The thread's count at 0.
+    let data = vec![0; 0x10];
+    let (code, out) = run(
+        test,
+        program(BASE, false, imports, &data, |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let mut over = a.create_label();
+            let mut again = a.create_label();
+            let mut yield_ = a.create_label();
+            a.push(0)?;
+            a.push(4)?; // CREATE_SUSPENDED
+            a.push(0)?;
+            a.call(over)?;
+            // The thread: count for ever.
+            a.set_label(&mut again)?;
+            a.add(dword_ptr(l.at(0)), 1)?;
+            a.jmp(again)?;
+            a.set_label(&mut over)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.call(f("CreateThread"))?;
+            a.mov(esi, eax)?;
+            a.push(priority)?;
+            a.push(esi)?;
+            a.call(f("SetThreadPriority"))?;
+            a.push(esi)?;
+            a.call(f("ResumeThread"))?;
+            a.mov(edi, 10)?;
+            a.set_label(&mut yield_)?;
+            a.push(0)?;
+            a.call(f("Sleep"))?;
+            a.dec(edi)?;
+            a.jnz(yield_)?;
+            // 1 if the thread counted, else 0.
+            a.xor(eax, eax)?;
+            a.cmp(dword_ptr(l.at(0)), 0)?;
+            a.setne(al)?;
+            a.push(eax)?;
+            a.call(f("ExitProcess"))?;
+            a.int3()
+        }),
+    );
+    assert!(out.is_empty(), "{out}");
+    code == 1
+}
+
+/// Sleep(0) gives the rest of the thread's turn to a ready thread of its
+/// priority, and returns at once when the only one ready has a lower
+/// priority, as Sleep's documentation had it until Windows Server 2003.
+/// The calls are made well within the main thread's turn, which a thread
+/// of a lower priority wouldn't get at all on Windows 98 while it can
+/// run.
+#[test]
+fn sleep_zero_gives_way_to_a_thread_of_its_priority_only() {
+    let normal = ran_during_sleep_zero("sleep_zero_normal", 0);
+    let lowest = ran_during_sleep_zero("sleep_zero_lowest", -2);
+    assert_eq!((normal, lowest), (true, false), "normal, lowest");
+}
+
 /// Threads started and ended one after another, more than the LDT has
 /// selectors for and more stacks than memory holds at once: each takes
 /// the place of one that ended. The exit code is the last one's.
@@ -1618,6 +2319,61 @@ fn a_handler_on_a_stack_above_the_threads_returns_to_its_caller() {
         }),
     );
     assert_eq!(code, 3, "{}", out);
+}
+
+/// A thread that runs on a stack of committed pages it hasn't touched
+/// yet, as a program's own coroutine stacks are, and takes an exception
+/// there: the record and context go on pages of the page file, which the
+/// system's writes bring in, and the handler runs.
+#[test]
+fn an_exception_on_a_stack_of_untouched_pages_reaches_its_handler() {
+    const MEM_COMMIT_RESERVE: i32 = 0x3000;
+    const PAGE_READWRITE: i32 = 4;
+    const HIGH: i32 = 0x6000_0000;
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["VirtualAlloc", "ExitProcess"])];
+    // Data: the thread's stack pointer.
+    let (code, out) = run(
+        "seh_untouched_stack",
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            let mut handler = a.create_label();
+            let mut start = a.create_label();
+            let mut fail = a.create_label();
+            a.jmp(start)?;
+            a.set_label(&mut fail)?;
+            a.push(99)?;
+            a.call(l.import(1))?;
+            // The handler: on after the 2-byte DIV with 5 in EAX.
+            a.set_label(&mut handler)?;
+            a.mov(eax, dword_ptr(esp + 12))?;
+            a.add(dword_ptr(eax + 0xB8), 2)?;
+            a.mov(dword_ptr(eax + 0xB0), 5)?;
+            a.xor(eax, eax)?;
+            a.ret()?;
+            a.set_label(&mut start)?;
+            push_args(a, &[HIGH, 0x10000, MEM_COMMIT_RESERVE, PAGE_READWRITE])?;
+            a.call(l.import(0))?;
+            a.cmp(eax, HIGH)?;
+            a.jne(fail)?;
+            // 40h bytes above a page boundary: the frame is on the page
+            // above it, the record and the context go on the page below,
+            // which nothing has touched.
+            a.mov(dword_ptr(l.at(0)), esp)?;
+            a.mov(esp, HIGH + 0x8040)?;
+            push_label(a, handler)?;
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+            a.xor(edx, edx)?;
+            a.xor(ecx, ecx)?;
+            a.mov(eax, 1)?;
+            a.div(ecx)?;
+            a.pop(dword_ptr(0).fs())?;
+            a.mov(esp, dword_ptr(l.at(0)))?;
+            a.push(eax)?;
+            a.call(l.import(1))?;
+            a.int3()
+        }),
+    );
+    assert_eq!(code, 5, "{}", out);
 }
 
 /// An exception raised in a handler, as Windows 98 dispatches it: the
@@ -2727,18 +3483,107 @@ fn a_program_uses_heaps_global_memory_and_mappings() {
 /// Run T.EXE from a folder with `files` to its end, on a machine with
 /// `memory_mb` MB of RAM; its exit code and what it printed.
 fn run_files_in(test: &str, files: &[(&str, Vec<u8>)], memory_mb: usize) -> (u8, String) {
+    let (code, text, _) = run_files_counted(test, files, memory_mb);
+    (code, text)
+}
+
+/// `run_files_in`, with the paging counts of the run, as they were at
+/// the end of its last batch that ran before the built-in Windows gave
+/// its memory back and its counts went with it.
+fn run_files_counted(
+    test: &str,
+    files: &[(&str, Vec<u8>)],
+    memory_mb: usize,
+) -> (u8, String, rust_dos::win32::PagingCounts) {
     let mut cpu = Cpu::with_memory(scratch(test, files), memory_mb);
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
     assert!(cpu.load_executable("T.EXE", None));
-    assert!(
-        run_to_exit(&mut cpu, 400),
-        "the program didn't end: {:?}",
-        printed(&cpu)
-    );
+    let mut counts = rust_dos::win32::PagingCounts::default();
+    let mut ended = false;
+    for _ in 0..400 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        let stop = run_batch(&mut cpu, &mut NoHook, false);
+        if cpu.bus.win32.active() {
+            counts = rust_dos::win32::paging_counts(&cpu.bus);
+        }
+        if stop == StopReason::ShellReloaded {
+            ended = true;
+            break;
+        }
+    }
+    assert!(ended, "the program didn't end: {:?}", printed(&cpu));
     assert!(!cpu.bus.win32.active());
-    (cpu.errorlevel, printed(&cpu))
+    (cpu.errorlevel, printed(&cpu), counts)
+}
+
+/// A program whose image is larger than the machine's memory: 24 MB of
+/// initialized data on a 16 MB machine, as Shadow of the Horned Rat loads
+/// a DLL of 10 MB of bitmaps beside its own memory. The image's pages go
+/// out to the page file as the loader maps them, and come back as the
+/// program touches them: it finds each page's number there, writes a
+/// value to each page, and finds the values after the pages went out
+/// again. A bit each in the exit code.
+#[test]
+fn an_image_larger_than_memory_loads_and_its_pages_come_back() {
+    const PAGES: u32 = 24 * 256;
+    const MARK: u32 = 0x3C3C_0000;
+    let mut data = vec![0u8; (PAGES * 0x1000) as usize];
+    for page in 0..PAGES {
+        let at = (page * 0x1000) as usize;
+        data[at..at + 4].copy_from_slice(&page.to_le_bytes());
+    }
+    // The page at EAX << 12 of the data at ESI, in EAX: whether it has
+    // its number (EDX) at 0, and with `mark` the number xor MARK at 8.
+    let compare = |a: &mut CodeAssembler, wrong: CodeLabel, mark: bool| {
+        a.mov(eax, edx)?;
+        a.shl(eax, 12)?;
+        a.cmp(dword_ptr(esi + eax), edx)?;
+        a.jne(wrong)?;
+        if mark {
+            a.mov(ecx, edx)?;
+            a.xor(ecx, MARK as i32)?;
+            a.cmp(dword_ptr(esi + eax + 8), ecx)?;
+            a.jne(wrong)?;
+        }
+        Ok::<(), IcedError>(())
+    };
+    let exe = program(BASE, false, &[], &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        a.mov(esi, l.at(0) as u32)?;
+        for (bit, mark) in [(0, false), (1, true)] {
+            if mark {
+                let mut write = a.create_label();
+                a.xor(edx, edx)?;
+                a.set_label(&mut write)?;
+                a.mov(eax, edx)?;
+                a.shl(eax, 12)?;
+                a.mov(ecx, edx)?;
+                a.xor(ecx, MARK as i32)?;
+                a.mov(dword_ptr(esi + eax + 8), ecx)?;
+                a.inc(edx)?;
+                a.cmp(edx, PAGES as i32)?;
+                a.jne(write)?;
+            }
+            let mut check = a.create_label();
+            let mut wrong = a.create_label();
+            a.xor(edx, edx)?;
+            a.set_label(&mut check)?;
+            compare(a, wrong, mark)?;
+            a.inc(edx)?;
+            a.cmp(edx, PAGES as i32)?;
+            a.jne(check)?;
+            a.set_label(&mut wrong)?;
+            a.cmp(edx, PAGES as i32)?;
+            bit_if_equal(a, bit)?;
+        }
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let test = "image_larger_than_memory";
+    let (code, text) = run_files_in(test, &[("T.EXE", exe)], 16);
+    assert_eq!(code, 3, "the checks that failed: {:02b} {}", !code & 3, text);
 }
 
 /// A read-only mapping of a file larger than the machine's memory, as
@@ -2927,6 +3772,492 @@ fn a_read_write_mapping_writes_back_only_the_pages_it_read() {
     assert!(written == expected, "the file isn't the one expected");
 }
 
+/// The data file of the mapping tests that write every page: `pages`
+/// pages, each starting with its number.
+fn numbered_pages(pages: u32) -> Vec<u8> {
+    let mut file = vec![0u8; (pages * 0x1000) as usize];
+    for page in 0..pages {
+        let at = (page * 0x1000) as usize;
+        file[at..at + 4].copy_from_slice(&page.to_le_bytes());
+    }
+    file
+}
+
+/// Write `page ^ mark` at offset 8 of each of `pages` pages of the view
+/// at ESI, then check twice that each still has its number at 0 and that
+/// value at 8, setting `bit` of EBX if all do the first time and the next
+/// bit if they do the second, when pages that left memory once come back
+/// a second time. Uses EAX, ECX and EDX.
+fn write_and_check_every_page(
+    a: &mut CodeAssembler,
+    pages: u32,
+    mark: u32,
+    bit: u32,
+) -> Result<(), IcedError> {
+    let mut write = a.create_label();
+    a.xor(edx, edx)?;
+    a.set_label(&mut write)?;
+    a.mov(eax, edx)?;
+    a.shl(eax, 12)?;
+    a.mov(ecx, edx)?;
+    a.xor(ecx, mark as i32)?;
+    a.mov(dword_ptr(esi + eax + 8), ecx)?;
+    a.inc(edx)?;
+    a.cmp(edx, pages as i32)?;
+    a.jne(write)?;
+    for pass in 0..2 {
+        let mut check = a.create_label();
+        let mut wrong = a.create_label();
+        a.xor(edx, edx)?;
+        a.set_label(&mut check)?;
+        a.mov(eax, edx)?;
+        a.shl(eax, 12)?;
+        a.cmp(dword_ptr(esi + eax), edx)?;
+        a.jne(wrong)?;
+        a.mov(ecx, edx)?;
+        a.xor(ecx, mark as i32)?;
+        a.cmp(dword_ptr(esi + eax + 8), ecx)?;
+        a.jne(wrong)?;
+        a.inc(edx)?;
+        a.cmp(edx, pages as i32)?;
+        a.jne(check)?;
+        a.set_label(&mut wrong)?;
+        a.cmp(edx, pages as i32)?;
+        bit_if_equal(a, bit + pass)?;
+    }
+    Ok(())
+}
+
+/// The paging of a run that went three times through a view of `pages`
+/// pages, more than memory holds (`write_and_check_every_page`). Each
+/// pass brings most of its pages in, and none twice: fewer than three
+/// times `pages` in all, where views that thrash bring in millions. A
+/// search for pages to give back gives back a batch, so it serves many
+/// faults: one search for every 16 pages brought in, at most.
+fn paged_a_view_without_thrashing(counts: rust_dos::win32::PagingCounts, pages: u32) {
+    let faults = counts.ins + counts.reads + counts.zero_ins;
+    assert!(faults > pages as u64, "{counts:?}");
+    assert!(faults < 3 * pages as u64, "pages came in again: {counts:?}");
+    assert!(counts.sweeps * 16 <= faults, "{counts:?}");
+}
+
+/// A copy-on-write view (PAGE_WRITECOPY, FILE_MAP_COPY) of a file larger
+/// than the machine's memory, every page of it written, as Oni maps and
+/// fixes up its level files: the written pages leave memory for the page
+/// file and come back from there, and the file keeps what it had. Then,
+/// with memory full of the view's pages, services write and read memory
+/// the program committed and never touched (ReadFile into it, WriteFile
+/// from it), whose pages need room that only the view's pages can make.
+/// Windows 98 pages all of it. A bit each in the exit code.
+#[test]
+fn a_copy_on_write_mapping_larger_than_memory_sends_written_pages_to_the_page_file() {
+    const PAGES: u32 = 24 * 256;
+    const MARK: u32 = 0xA5A5_0000;
+    const TEXT: &[u8] = b"read into memory the page file held\r\n";
+    const GENERIC_READ: i32 = 0x8000_0000u32 as i32;
+    const FILE_SHARE_READ: i32 = 1;
+    const OPEN_EXISTING: i32 = 3;
+    const PAGE_WRITECOPY: i32 = 8;
+    const FILE_MAP_COPY: i32 = 1;
+    const MEM_COMMIT: i32 = 0x1000;
+    const PAGE_READWRITE: i32 = 4;
+    const BUFFER: i32 = 0x10000;
+    let file = numbered_pages(PAGES);
+    let names: &[&str] = &[
+        "CreateFileA",
+        "CreateFileMappingA",
+        "MapViewOfFile",
+        "VirtualAlloc",
+        "ReadFile",
+        "GetStdHandle",
+        "WriteFile",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // Data: the files' names at 0 and 10h, ReadFile's count at 20h and
+    // WriteFile's at 24h.
+    let mut data = b"BIG.DAT\0".to_vec();
+    data.resize(0x10, 0);
+    data.extend_from_slice(b"SMALL.TXT\0");
+    data.resize(0x30, 0);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let (read, written) = (l.at(0x20), l.at(0x24));
+        let open = |a: &mut CodeAssembler, name: u64| {
+            push_args(
+                a,
+                &[name as i32, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0],
+            )?;
+            a.call(f("CreateFileA"))
+        };
+        a.xor(ebx, ebx)?;
+        open(a, l.at(0))?;
+        push_args(a, &[PAGE_WRITECOPY, 0, 0, 0])?;
+        a.push(0)?;
+        a.push(eax)?;
+        a.call(f("CreateFileMappingA"))?;
+        push_args(a, &[FILE_MAP_COPY, 0, 0, 0])?;
+        a.push(eax)?;
+        a.call(f("MapViewOfFile"))?;
+        a.mov(esi, eax)?;
+        a.test(esi, esi)?;
+        a.setne(cl)?;
+        a.cmp(cl, 1)?;
+        bit_if_equal(a, 0)?;
+        write_and_check_every_page(a, PAGES, MARK, 1)?;
+        // Committed, in the page file and never touched.
+        push_args(a, &[0, BUFFER, MEM_COMMIT, PAGE_READWRITE])?;
+        a.call(f("VirtualAlloc"))?;
+        a.mov(edi, eax)?;
+        open(a, l.at(0x10))?;
+        a.push(0)?;
+        a.push(read as i32)?;
+        a.push(TEXT.len() as i32)?;
+        a.lea(ecx, dword_ptr(edi + 0x8000))?;
+        a.push(ecx)?;
+        a.push(eax)?;
+        a.call(f("ReadFile"))?;
+        a.cmp(dword_ptr(read), TEXT.len() as i32)?;
+        bit_if_equal(a, 3)?;
+        a.push(STD_OUTPUT_HANDLE)?;
+        a.call(f("GetStdHandle"))?;
+        a.push(0)?;
+        a.push(written as i32)?;
+        a.push(TEXT.len() as i32)?;
+        a.lea(ecx, dword_ptr(edi + 0x8000))?;
+        a.push(ecx)?;
+        a.push(eax)?;
+        a.call(f("WriteFile"))?;
+        a.cmp(dword_ptr(written), TEXT.len() as i32)?;
+        bit_if_equal(a, 4)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let test = "mapping_copy_on_write_pages";
+    let files = [
+        ("T.EXE", exe),
+        ("BIG.DAT", file.clone()),
+        ("SMALL.TXT", TEXT.to_vec()),
+    ];
+    let (code, text, counts) = run_files_counted(test, &files, 16);
+    assert_eq!(code, 0x1F, "the checks that failed: {:05b} {}", !code & 0x1F, text);
+    paged_a_view_without_thrashing(counts, PAGES);
+    assert_eq!(text.as_bytes(), TEXT);
+    let after = fs::read(PathBuf::from("target/test_win32").join(test).join("BIG.DAT")).unwrap();
+    assert!(after == file, "the file of a copy-on-write view changed");
+}
+
+/// A read-write view of a file larger than the machine's memory, every
+/// page of it written: the written pages are written to the file as they
+/// leave memory, and read from it again when they are touched again. A
+/// bit each in the exit code.
+#[test]
+fn a_read_write_mapping_larger_than_memory_writes_pages_to_its_file_as_they_leave() {
+    const PAGES: u32 = 24 * 256;
+    const MARK: u32 = 0x5A5A_0000;
+    const GENERIC_READ_WRITE: i32 = 0xC000_0000u32 as i32;
+    const OPEN_EXISTING: i32 = 3;
+    const PAGE_READWRITE: i32 = 4;
+    const FILE_MAP_WRITE: i32 = 2;
+    let file = numbered_pages(PAGES);
+    let names: &[&str] = &[
+        "CreateFileA",
+        "CreateFileMappingA",
+        "MapViewOfFile",
+        "UnmapViewOfFile",
+        "CloseHandle",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"BIG.DAT\0".to_vec();
+    data.resize(0x10, 0);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        push_args(
+            a,
+            &[l.at(0) as i32, GENERIC_READ_WRITE, 0, 0, OPEN_EXISTING, 0, 0],
+        )?;
+        a.call(f("CreateFileA"))?;
+        a.mov(edi, eax)?;
+        push_args(a, &[PAGE_READWRITE, 0, 0, 0])?;
+        a.push(0)?;
+        a.push(edi)?;
+        a.call(f("CreateFileMappingA"))?;
+        a.mov(ebp, eax)?;
+        push_args(a, &[FILE_MAP_WRITE, 0, 0, 0])?;
+        a.push(ebp)?;
+        a.call(f("MapViewOfFile"))?;
+        a.mov(esi, eax)?;
+        a.test(esi, esi)?;
+        a.setne(cl)?;
+        a.cmp(cl, 1)?;
+        bit_if_equal(a, 0)?;
+        write_and_check_every_page(a, PAGES, MARK, 1)?;
+        a.push(esi)?;
+        a.call(f("UnmapViewOfFile"))?;
+        a.push(ebp)?;
+        a.call(f("CloseHandle"))?;
+        a.push(edi)?;
+        a.call(f("CloseHandle"))?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let test = "mapping_read_write_pages";
+    let files = [("T.EXE", exe), ("BIG.DAT", file.clone())];
+    let (code, text, counts) = run_files_counted(test, &files, 16);
+    assert_eq!(code, 7, "the checks that failed: {:03b} {}", !code & 7, text);
+    paged_a_view_without_thrashing(counts, PAGES);
+    // The pages that left memory are in the file already, the rest since
+    // the view went.
+    let after = fs::read(PathBuf::from("target/test_win32").join(test).join("BIG.DAT")).unwrap();
+    let mut expected = file;
+    for page in 0..PAGES {
+        let at = (page * 0x1000 + 8) as usize;
+        expected[at..at + 4].copy_from_slice(&(page ^ MARK).to_le_bytes());
+    }
+    assert!(after == expected, "the file doesn't have what the view wrote");
+}
+
+/// A program whose image and a copy-on-write view of a file, 12 MB each,
+/// are together more than the 16 MB machine holds, and whose loops touch
+/// a page of each in turn: it writes `page ^ mark` at offset 8 of every
+/// page of both, then checks twice that each has its number at 0 and its
+/// value at 8. The image's pages and the view's written ones go out to
+/// the page file on one clock and come back, and neither kind thrashes
+/// for the other. A bit each in the exit code.
+#[test]
+fn an_image_and_a_copy_on_write_view_larger_than_memory_together_page() {
+    const PAGES: u32 = 12 * 256;
+    const IMAGE_MARK: u32 = 0x6969_0000;
+    const VIEW_MARK: u32 = 0x9696_0000;
+    const GENERIC_READ: i32 = 0x8000_0000u32 as i32;
+    const FILE_SHARE_READ: i32 = 1;
+    const OPEN_EXISTING: i32 = 3;
+    const PAGE_WRITECOPY: i32 = 8;
+    const FILE_MAP_COPY: i32 = 1;
+    let names: &[&str] = &["CreateFileA", "CreateFileMappingA", "MapViewOfFile"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // Data: the file's name in the first page, after its number.
+    let mut data = numbered_pages(PAGES);
+    data[0x10..0x18].copy_from_slice(b"BIG.DAT\0");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        push_args(
+            a,
+            &[l.at(0x10) as i32, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0],
+        )?;
+        a.call(f("CreateFileA"))?;
+        push_args(a, &[PAGE_WRITECOPY, 0, 0, 0])?;
+        a.push(0)?;
+        a.push(eax)?;
+        a.call(f("CreateFileMappingA"))?;
+        push_args(a, &[FILE_MAP_COPY, 0, 0, 0])?;
+        a.push(eax)?;
+        a.call(f("MapViewOfFile"))?;
+        a.mov(edi, eax)?;
+        a.mov(esi, l.at(0) as u32)?;
+        a.test(edi, edi)?;
+        a.setne(cl)?;
+        a.cmp(cl, 1)?;
+        bit_if_equal(a, 0)?;
+        let mut write = a.create_label();
+        a.xor(edx, edx)?;
+        a.set_label(&mut write)?;
+        a.mov(eax, edx)?;
+        a.shl(eax, 12)?;
+        for (base, mark) in [(esi, IMAGE_MARK), (edi, VIEW_MARK)] {
+            a.mov(ecx, edx)?;
+            a.xor(ecx, mark as i32)?;
+            a.mov(dword_ptr(base + eax + 8), ecx)?;
+        }
+        a.inc(edx)?;
+        a.cmp(edx, PAGES as i32)?;
+        a.jne(write)?;
+        for pass in 0..2 {
+            let mut check = a.create_label();
+            let mut wrong = a.create_label();
+            a.xor(edx, edx)?;
+            a.set_label(&mut check)?;
+            a.mov(eax, edx)?;
+            a.shl(eax, 12)?;
+            for (base, mark) in [(esi, IMAGE_MARK), (edi, VIEW_MARK)] {
+                a.cmp(dword_ptr(base + eax), edx)?;
+                a.jne(wrong)?;
+                a.mov(ecx, edx)?;
+                a.xor(ecx, mark as i32)?;
+                a.cmp(dword_ptr(base + eax + 8), ecx)?;
+                a.jne(wrong)?;
+            }
+            a.inc(edx)?;
+            a.cmp(edx, PAGES as i32)?;
+            a.jne(check)?;
+            a.set_label(&mut wrong)?;
+            a.cmp(edx, PAGES as i32)?;
+            bit_if_equal(a, 1 + pass)?;
+        }
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let test = "image_and_copy_on_write_view";
+    let file = numbered_pages(PAGES);
+    let files = [("T.EXE", exe), ("BIG.DAT", file.clone())];
+    let (code, text, counts) = run_files_counted(test, &files, 16);
+    assert_eq!(code, 7, "the checks that failed: {:03b} {}", !code & 7, text);
+    paged_a_view_without_thrashing(counts, 2 * PAGES);
+    // Both kinds left memory.
+    assert!(counts.outs > PAGES as u64 / 2, "{counts:?}");
+    assert!(counts.evicted > PAGES as u64 / 2, "{counts:?}");
+    let after = fs::read(PathBuf::from("target/test_win32").join(test).join("BIG.DAT")).unwrap();
+    assert!(after == file, "the file of a copy-on-write view changed");
+}
+
+/// A CD-ROM read that the system finishes after the call, into a buffer
+/// on a page of a read-write view of a file that left memory while the
+/// read waited: the program reads through the rest of the view, more
+/// than memory holds, before it waits for the read. The system reads the
+/// page in again to write the sector there, as the program's own write
+/// would. A bit each in the exit code.
+#[test]
+fn a_read_finished_later_into_a_view_page_that_left_memory_reaches_it() {
+    const PAGES: u32 = 24 * 256;
+    const GENERIC_READ_WRITE: i32 = 0xC000_0000u32 as i32;
+    const OPEN_EXISTING: i32 = 3;
+    const PAGE_READWRITE: i32 = 4;
+    const FILE_MAP_WRITE: i32 = 2;
+    const SRB: u32 = 0x40;
+    const EVENT: u32 = 0x100;
+    let dir = cdimage::scratch("wnaspi32_view");
+    let image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    fs::write(dir.join("GAME.BIN"), cdimage::mode1_2352(&image)).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n";
+    fs::write(&cue, sheet).unwrap();
+
+    let file = numbered_pages(PAGES);
+    let aspi: &[&str] = &["GetASPI32SupportInfo", "SendASPI32Command"];
+    let kernel: &[&str] = &[
+        "CreateFileA",
+        "CreateFileMappingA",
+        "MapViewOfFile",
+        "UnmapViewOfFile",
+        "CloseHandle",
+        "CreateEventA",
+        "WaitForSingleObject",
+    ];
+    let imports: &[(&str, &[&str])] = &[("WNASPI32.DLL", aspi), ("KERNEL32.DLL", kernel)];
+    // Data: the file's name at 0, a READ(10) of the primary volume
+    // descriptor with SRB_EVENT_NOTIFY at SRB, its event at EVENT.
+    let mut data = b"BIG.DAT\0".to_vec();
+    data.resize(0x110, 0);
+    let mut srb = read10_srb(16);
+    srb[3] |= 0x40;
+    data[SRB as usize..SRB as usize + srb.len()].copy_from_slice(&srb);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| match aspi.iter().position(|n| *n == name) {
+            Some(i) => l.import(i),
+            None => l.import(aspi.len() + kernel.iter().position(|n| *n == name).unwrap()),
+        };
+        a.xor(ebx, ebx)?;
+        push_args(
+            a,
+            &[l.at(0) as i32, GENERIC_READ_WRITE, 0, 0, OPEN_EXISTING, 0, 0],
+        )?;
+        a.call(f("CreateFileA"))?;
+        a.mov(edi, eax)?;
+        push_args(a, &[PAGE_READWRITE, 0, 0, 0])?;
+        a.push(0)?;
+        a.push(edi)?;
+        a.call(f("CreateFileMappingA"))?;
+        a.mov(ebp, eax)?;
+        push_args(a, &[FILE_MAP_WRITE, 0, 0, 0])?;
+        a.push(ebp)?;
+        a.call(f("MapViewOfFile"))?;
+        a.mov(esi, eax)?;
+        // A manual-reset event, not signaled, in the block and kept.
+        push_args(a, &[0, 1, 0, 0])?;
+        a.call(f("CreateEventA"))?;
+        a.mov(dword_ptr(l.at(SRB + 24)), eax)?;
+        a.mov(dword_ptr(l.at(EVENT)), eax)?;
+        // The read into the view's first page: pending, as the drive
+        // spins up first.
+        a.mov(dword_ptr(l.at(SRB + 0x10)), esi)?;
+        a.push(l.at(SRB) as i32)?;
+        a.call(f("SendASPI32Command"))?;
+        a.add(esp, 4)?;
+        a.cmp(eax, 0)?;
+        bit_if_equal(a, 0)?;
+        // Every other page has its number, and is written as the first
+        // one was: more of them than memory holds, so the first page
+        // leaves memory.
+        let mut next = a.create_label();
+        let mut wrong = a.create_label();
+        a.mov(edx, 1)?;
+        a.set_label(&mut next)?;
+        a.mov(eax, edx)?;
+        a.shl(eax, 12)?;
+        a.cmp(dword_ptr(esi + eax), edx)?;
+        a.jne(wrong)?;
+        a.mov(dword_ptr(esi + eax + 8), edx)?;
+        a.inc(edx)?;
+        a.cmp(edx, PAGES as i32)?;
+        a.jne(next)?;
+        a.set_label(&mut wrong)?;
+        a.cmp(edx, PAGES as i32)?;
+        bit_if_equal(a, 1)?;
+        // The read was still pending then, so it ends after the page left.
+        a.cmp(byte_ptr(l.at(SRB + 1)), 0)?;
+        bit_if_equal(a, 5)?;
+        // The read ends, done, with the sector in the buffer.
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(EVENT)))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.cmp(eax, 0)?;
+        bit_if_equal(a, 2)?;
+        a.cmp(byte_ptr(l.at(SRB + 1)), 1)?;
+        bit_if_equal(a, 3)?;
+        a.cmp(dword_ptr(esi + 1), 0x3030_4443)?;
+        bit_if_equal(a, 4)?;
+        a.push(esi)?;
+        a.call(f("UnmapViewOfFile"))?;
+        a.push(ebp)?;
+        a.call(f("CloseHandle"))?;
+        a.push(edi)?;
+        a.call(f("CloseHandle"))?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let test = "aspi_into_view_page";
+    let files = [("T.EXE", exe), ("BIG.DAT", file)];
+    let mut cpu = Cpu::with_memory(scratch(test, &files), 16);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    let mut evicted = 0;
+    let mut ended = false;
+    for _ in 0..400 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        let stop = run_batch(&mut cpu, &mut NoHook, false);
+        if cpu.bus.win32.active() {
+            evicted = rust_dos::win32::paging_counts(&cpu.bus).evicted;
+        }
+        if stop == StopReason::ShellReloaded {
+            ended = true;
+            break;
+        }
+    }
+    assert!(ended, "the program didn't end: {:?}", printed(&cpu));
+    let (code, text) = (cpu.errorlevel, printed(&cpu));
+    assert_eq!(code, 0x3F, "the checks that failed: {:06b} {}", !code & 0x3F, text);
+    assert!(evicted as u32 > PAGES / 2, "{evicted} pages of the view left memory");
+    // The sector reached the file too, when the view went.
+    let after = fs::read(PathBuf::from("target/test_win32").join(test).join("BIG.DAT")).unwrap();
+    assert_eq!(&after[1..6], b"CD001");
+}
+
 /// ReleaseStgMedium, as Windows' table of it has it: a global block no
 /// object owns is freed, a stream and the object that owns a medium are
 /// released, a block an object owns is left alone, and the medium is
@@ -3014,6 +4345,67 @@ fn release_stg_medium_frees_what_the_medium_holds() {
     );
 }
 
+/// OLE32's CoFileTimeToDosDateTime and CoDosDateTimeToFileTime convert as
+/// KERNEL32's FileTimeToDosDateTime and DosDateTimeToFileTime do, with no
+/// time zone: 2001-03-15 12:34:56 is the DOS date 2A6Fh and time 645Ch
+/// both ways, and a time before 1980 has no DOS date. A bit each in the
+/// exit code.
+#[test]
+fn ole32_converts_between_file_times_and_dos_times() {
+    const FILE_TIME: u64 = 0x01C0_AD4C_574A_9800;
+    const BEFORE_1980: u64 = 0x01A8_E79F_E0A4_5300;
+    let imports: &[(&str, &[&str])] = &[(
+        "OLE32.DLL",
+        &["CoFileTimeToDosDateTime", "CoDosDateTimeToFileTime"],
+    )];
+    // Data: FILE_TIME at 0, BEFORE_1980 at 8, the DOS date at 10h and
+    // time at 12h, the FILETIME made back at 18h.
+    let mut data = vec![0u8; 0x20];
+    data[..8].copy_from_slice(&FILE_TIME.to_le_bytes());
+    data[8..16].copy_from_slice(&BEFORE_1980.to_le_bytes());
+    let (code, text) = run(
+        "ole32_dos_date_time",
+        program(BASE, false, imports, &data, |a, l| {
+            a.xor(ebx, ebx)?;
+            let to_dos = |a: &mut CodeAssembler, from: u32| {
+                a.push(l.at(0x12) as i32)?;
+                a.push(l.at(0x10) as i32)?;
+                a.push(l.at(from) as i32)?;
+                a.call(l.import(0))
+            };
+            to_dos(a, 0)?;
+            a.cmp(eax, 1)?;
+            bit_if_equal(a, 0)?;
+            a.cmp(word_ptr(l.at(0x10)), 0x2A6F)?;
+            bit_if_equal(a, 1)?;
+            a.cmp(word_ptr(l.at(0x12)), 0x645C)?;
+            bit_if_equal(a, 2)?;
+            a.push(l.at(0x18) as i32)?;
+            a.push(0x645C)?;
+            a.push(0x2A6F)?;
+            a.call(l.import(1))?;
+            a.cmp(eax, 1)?;
+            bit_if_equal(a, 3)?;
+            a.cmp(dword_ptr(l.at(0x18)), FILE_TIME as u32 as i32)?;
+            bit_if_equal(a, 4)?;
+            a.cmp(dword_ptr(l.at(0x1C)), (FILE_TIME >> 32) as i32)?;
+            bit_if_equal(a, 5)?;
+            to_dos(a, 8)?;
+            a.test(eax, eax)?;
+            bit_if_equal(a, 6)?;
+            a.mov(eax, ebx)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(
+        code,
+        0x7F,
+        "the checks that failed: {:07b} {}",
+        !code & 0x7F,
+        text
+    );
+}
+
 /// HeapAlloc with HEAP_GENERATE_EXCEPTIONS raises STATUS_NO_MEMORY when
 /// the heap is full; with no handler the program ends saying so.
 #[test]
@@ -3034,6 +4426,298 @@ fn a_full_heap_raises_an_exception_with_heap_generate_exceptions() {
     );
     assert_eq!(code, 0xFF);
     assert!(text.contains("C0000017"), "{}", text);
+}
+
+/// The memory a program commits is backed by the page file, as on
+/// Windows 98: a zeroed GlobalAlloc block as large as the machine's
+/// memory succeeds, another one after it too, and the program can touch
+/// every page of both, more than the machine has, and read back what it
+/// wrote, pages it never wrote being zeros. GlobalMemoryStatus's page
+/// file has less room after, and a commit past the memory and the page
+/// file together fails. A bit each in the exit code.
+#[test]
+fn a_program_commits_and_touches_more_memory_than_the_machine_has() {
+    const GMEM_ZEROINIT: i32 = 0x40;
+    const MEM_COMMIT_RESERVE: i32 = 0x3000;
+    const PAGE_READWRITE: i32 = 4;
+    const SECOND: i32 = 0x40_0000;
+    const PATTERN: i32 = 0x5A5A_5A5A;
+    let names: &[&str] = &["GlobalMemoryStatus", "GlobalAlloc", "VirtualAlloc"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // MEMORYSTATUS before at 0 and after at 20h; the blocks at 40h, 44h.
+    let (code, text) = run(
+        "pagefile",
+        program(BASE, false, imports, &[0; 0x50], |a, l| {
+            let total = dword_ptr(l.at(8));
+            let mut end = a.create_label();
+            a.xor(ebx, ebx)?;
+            a.push(l.at(0) as i32)?;
+            a.call(l.import(0))?;
+            a.push(total)?;
+            a.push(GMEM_ZEROINIT)?;
+            a.call(l.import(1))?;
+            a.mov(dword_ptr(l.at(0x40)), eax)?;
+            a.test(eax, eax)?;
+            a.je(end)?;
+            a.or(ebx, 1)?;
+            push_args(a, &[0, SECOND])?;
+            a.call(l.import(1))?;
+            a.mov(dword_ptr(l.at(0x44)), eax)?;
+            a.test(eax, eax)?;
+            a.je(end)?;
+            a.or(ebx, 2)?;
+            // The first dword of every page of both: its address, mixed.
+            for (block, pages) in [(0x40, None), (0x44, Some(SECOND >> 12))] {
+                let mut next = a.create_label();
+                a.mov(esi, dword_ptr(l.at(block)))?;
+                match pages {
+                    Some(pages) => a.mov(ecx, pages)?,
+                    None => {
+                        a.mov(ecx, total)?;
+                        a.shr(ecx, 12)?;
+                    }
+                }
+                a.set_label(&mut next)?;
+                a.mov(eax, esi)?;
+                a.xor(eax, PATTERN)?;
+                a.mov(dword_ptr(esi), eax)?;
+                a.add(esi, 0x1000)?;
+                a.dec(ecx)?;
+                a.jnz(next)?;
+            }
+            // Read back, with the rest of the zeroed block's pages zeros.
+            a.xor(edx, edx)?;
+            for (block, pages) in [(0x40, None), (0x44, Some(SECOND >> 12))] {
+                let mut next = a.create_label();
+                let mut same = a.create_label();
+                let mut zero = a.create_label();
+                a.mov(esi, dword_ptr(l.at(block)))?;
+                match pages {
+                    Some(pages) => a.mov(ecx, pages)?,
+                    None => {
+                        a.mov(ecx, total)?;
+                        a.shr(ecx, 12)?;
+                    }
+                }
+                a.set_label(&mut next)?;
+                a.mov(eax, esi)?;
+                a.xor(eax, PATTERN)?;
+                a.cmp(dword_ptr(esi), eax)?;
+                a.je(same)?;
+                a.inc(edx)?;
+                a.set_label(&mut same)?;
+                if pages.is_none() {
+                    a.cmp(dword_ptr(esi + 0x800), 0)?;
+                    a.je(zero)?;
+                    a.inc(edx)?;
+                    a.set_label(&mut zero)?;
+                }
+                a.add(esi, 0x1000)?;
+                a.dec(ecx)?;
+                a.jnz(next)?;
+            }
+            a.test(edx, edx)?;
+            bit_if_equal(a, 2)?;
+            a.push(l.at(0x20) as i32)?;
+            a.call(l.import(0))?;
+            a.mov(eax, dword_ptr(l.at(0x34)))?;
+            a.cmp(eax, dword_ptr(l.at(0x14)))?;
+            let mut more = a.create_label();
+            a.jae(more)?;
+            a.or(ebx, 8)?;
+            a.set_label(&mut more)?;
+            // The memory and the page file's room together, and a page
+            // more, can't be committed; a megabyte can.
+            a.mov(eax, dword_ptr(l.at(0x2C)))?;
+            a.add(eax, dword_ptr(l.at(0x34)))?;
+            a.add(eax, 0x1000)?;
+            a.push(PAGE_READWRITE)?;
+            a.push(MEM_COMMIT_RESERVE)?;
+            a.push(eax)?;
+            a.push(0)?;
+            a.call(l.import(2))?;
+            a.test(eax, eax)?;
+            bit_if_equal(a, 4)?;
+            push_args(a, &[0, 0x10_0000, MEM_COMMIT_RESERVE, PAGE_READWRITE])?;
+            a.call(l.import(2))?;
+            a.test(eax, eax)?;
+            let mut failed = a.create_label();
+            a.je(failed)?;
+            a.or(ebx, 0x20)?;
+            a.set_label(&mut failed)?;
+            a.nop()?;
+            a.set_label(&mut end)?;
+            a.mov(eax, ebx)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b} {}",
+        !code & 0x3F,
+        text
+    );
+}
+
+/// A zeroed block takes no physical memory until it is touched: after
+/// GlobalAlloc(GMEM_ZEROINIT) of 8 MB, GlobalMemoryStatus has nearly as
+/// much physical memory available as before, and 8 MB less room in the
+/// page file. Touching a page takes it from the physical memory. A bit
+/// each in the exit code.
+#[test]
+fn a_zeroed_block_takes_no_memory_until_it_is_touched() {
+    const GMEM_ZEROINIT: i32 = 0x40;
+    const SIZE: i32 = 0x80_0000;
+    let names: &[&str] = &["GlobalMemoryStatus", "GlobalAlloc"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // MEMORYSTATUS before at 0, after the block at 20h, after a touch at
+    // 40h.
+    let (code, text) = run(
+        "zeroedblock",
+        program(BASE, false, imports, &[0; 0x60], |a, l| {
+            a.xor(ebx, ebx)?;
+            a.push(l.at(0) as i32)?;
+            a.call(l.import(0))?;
+            push_args(a, &[GMEM_ZEROINIT, SIZE])?;
+            a.call(l.import(1))?;
+            a.mov(esi, eax)?;
+            a.push(l.at(0x20) as i32)?;
+            a.call(l.import(0))?;
+            // dwAvailPhys down by less than 64 KB (the heap's own pages).
+            a.mov(eax, dword_ptr(l.at(0x0C)))?;
+            a.sub(eax, dword_ptr(l.at(0x2C)))?;
+            a.cmp(eax, 0x1_0000)?;
+            let mut much = a.create_label();
+            a.jae(much)?;
+            a.or(ebx, 1)?;
+            a.set_label(&mut much)?;
+            // dwAvailPageFile down by the block.
+            a.mov(eax, dword_ptr(l.at(0x14)))?;
+            a.sub(eax, dword_ptr(l.at(0x34)))?;
+            a.cmp(eax, SIZE)?;
+            bit_if_equal(a, 1)?;
+            // A page of it touched: a page less physical memory, a page
+            // more room in the page file.
+            a.mov(dword_ptr(esi + 0x4000), 1)?;
+            a.push(l.at(0x40) as i32)?;
+            a.call(l.import(0))?;
+            a.mov(eax, dword_ptr(l.at(0x2C)))?;
+            a.sub(eax, dword_ptr(l.at(0x4C)))?;
+            a.cmp(eax, 0x1000)?;
+            bit_if_equal(a, 2)?;
+            a.mov(eax, dword_ptr(l.at(0x54)))?;
+            a.sub(eax, dword_ptr(l.at(0x34)))?;
+            a.cmp(eax, 0x1000)?;
+            bit_if_equal(a, 3)?;
+            a.mov(eax, ebx)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(
+        code,
+        0xF,
+        "the checks that failed: {:04b} {}",
+        !code & 0xF,
+        text
+    );
+}
+
+/// A program that commits memory until VirtualAlloc fails, in the page
+/// file first and, with it full, the machine's last pages, can touch all
+/// it committed: the pages it took from the machine go out to the page
+/// file too, to make room for those that come in. A bit each in the exit
+/// code.
+#[test]
+fn a_program_touches_memory_committed_to_the_last_page() {
+    const MEM_COMMIT_RESERVE: i32 = 0x3000;
+    const PAGE_READWRITE: i32 = 4;
+    const BLOCK: i32 = 0x10_0000;
+    const PATTERN: i32 = 0x5A5A_5A5A;
+    let names: &[&str] = &["VirtualAlloc"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The first block's address at 0, the last page's at 4.
+    let exe = program(BASE, false, imports, &[0; 8], |a, l| {
+        let mut blocks = a.create_label();
+        let mut kept = a.create_label();
+        let mut pages = a.create_label();
+        let mut full = a.create_label();
+        let mut end = a.create_label();
+        a.xor(ebx, ebx)?;
+        // Blocks of a megabyte while there is room for one.
+        a.set_label(&mut blocks)?;
+        push_args(a, &[0, BLOCK, MEM_COMMIT_RESERVE, PAGE_READWRITE])?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        a.je(pages)?;
+        a.cmp(dword_ptr(l.at(0)), 0)?;
+        a.jne(kept)?;
+        a.mov(dword_ptr(l.at(0)), eax)?;
+        a.set_label(&mut kept)?;
+        a.jmp(blocks)?;
+        // Then pages while there is room for one.
+        a.set_label(&mut pages)?;
+        push_args(a, &[0, 0x1000, MEM_COMMIT_RESERVE, PAGE_READWRITE])?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        a.je(full)?;
+        a.mov(dword_ptr(l.at(4)), eax)?;
+        a.jmp(pages)?;
+        a.set_label(&mut full)?;
+        a.cmp(dword_ptr(l.at(0)), 0)?;
+        a.je(end)?;
+        a.cmp(dword_ptr(l.at(4)), 0)?;
+        a.je(end)?;
+        a.or(ebx, 1)?;
+        // The first dword of every page of the first block and of the
+        // last page: its address, mixed; then read back.
+        for check in [false, true] {
+            let mut next = a.create_label();
+            a.xor(edx, edx)?;
+            a.mov(esi, dword_ptr(l.at(0)))?;
+            a.mov(ecx, BLOCK >> 12)?;
+            a.set_label(&mut next)?;
+            a.mov(eax, esi)?;
+            a.xor(eax, PATTERN)?;
+            if check {
+                let mut same = a.create_label();
+                a.cmp(dword_ptr(esi), eax)?;
+                a.je(same)?;
+                a.inc(edx)?;
+                a.set_label(&mut same)?;
+            } else {
+                a.mov(dword_ptr(esi), eax)?;
+            }
+            a.add(esi, 0x1000)?;
+            a.dec(ecx)?;
+            a.jnz(next)?;
+            a.mov(esi, dword_ptr(l.at(4)))?;
+            a.mov(eax, esi)?;
+            a.xor(eax, PATTERN)?;
+            if check {
+                let mut same = a.create_label();
+                a.cmp(dword_ptr(esi), eax)?;
+                a.je(same)?;
+                a.inc(edx)?;
+                a.set_label(&mut same)?;
+            } else {
+                a.mov(dword_ptr(esi), eax)?;
+            }
+        }
+        a.test(edx, edx)?;
+        bit_if_equal(a, 1)?;
+        a.set_label(&mut end)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run_files_in("pagefile_last_page", &[("T.EXE", exe)], 8);
+    assert_eq!(
+        code,
+        3,
+        "the checks that failed: {:02b} {}",
+        !code & 3,
+        text
+    );
 }
 
 /// An argument a test program passes: a value, or ESI.
@@ -4165,69 +5849,611 @@ fn a_vxd_service_at_level_0_keeps_interrupts_off() {
 }
 
 /// VXDLDR_GetDeviceList from level 0 through VxDJmp, which returns to the
-/// caller's caller: the built-in Windows has loaded no VxDs since its
-/// start, so the list is empty and EAX 0, and the code goes on after the
-/// CALL that led to the VxDJmp. The service leaves the flags as they
-/// were: CF, set before the CALL, is still set.
+/// caller's caller, after the CALL that led to the VxDJmp. As on Windows
+/// 98 SE, the list has the VxDs loaded since the start, the IDE port
+/// driver ESDI_506 first, the one loaded last. Each DeviceInfo has the
+/// signature "XVLD" at 0Fh, its DDB at 05h is the one Get_DDB finds by
+/// the DDB's name and lies in the VxD's locked code object, which the
+/// ObjectInfo array at 17h describes, and the module's name at 0Bh is
+/// ESDI_506's for the first. The service leaves the flags as they were:
+/// CF, set before the CALL, is still set. The machine has no PCI bus, so
+/// PCI's VxD isn't loaded: the list has 9 VxDs, and Get_DDB doesn't find
+/// PCI's id.
 #[test]
-fn vxdldr_get_device_list_is_empty() {
-    let (code, text) = run_through_gate_28h(
-        "vxdldr_device_list",
-        &[
-            0xB8, 0xFF, 0xFF, 0xFF, 0xFF, // mov eax, -1
-            0xF9, // stc
-            0xE8, 0x0B, 0x00, 0x00, 0x00, // call jump
-            0x0F, 0x92, 0xC1, // setc cl
-            0x85, 0xC0, // test eax, eax
-            0x0F, 0x94, 0xC3, // sete bl
-            0x20, 0xCB, // and bl, cl
-            0xCF, // iretd
-            0xCD, 0x20, 0x05, 0x80, 0x27, 0x00, // jump: VxDJmp GetDeviceList
-        ],
-    );
+fn vxdldr_get_device_list_lists_the_vxds_loaded_since_the_start() {
+    let program = gate_28h_program(&device_list_level0(9, false));
+    let (code, text) = run("vxdldr_device_list", program);
     assert_eq!(code, 1, "{}", text);
 }
 
-/// Run `level0` at level 0, as SafeDisc 2.30 does: at 30h of the data
-/// section, through a gate of level 3 for vector 5 with selector 28h. The
-/// program ends with EBX's bit 0 after it returns.
+/// The VxDs loaded since the start on a machine with a PCI bus (a
+/// Voodoo2 on it): PCI's VxD too, 10 in all, and Get_DDB finds its id.
+#[test]
+fn vxdldr_get_device_list_has_pci_on_a_machine_with_a_pci_bus() {
+    let program = gate_28h_program(&device_list_level0(10, true));
+    let mut cpu = Cpu::new(scratch("vxdldr_device_list_pci", &[("T.EXE", program)]));
+    cpu.bus.configure_voodoo(Some(Board::Voodoo2));
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 1, "{}", printed(&cpu));
+}
+
+/// Level 0 code that walks VXDLDR's device list as
+/// `vxdldr_get_device_list_lists_the_vxds_loaded_since_the_start` says,
+/// and sets EBX to 1 when it has `vxds` VxDs and Get_DDB finds PCI's id
+/// (0043h) if `pci`, and doesn't if not.
+fn device_list_level0(vxds: u32, pci: bool) -> Vec<u8> {
+    level0_code(|a| {
+        let mut jump = a.create_label();
+        let mut walk = a.create_label();
+        let mut end = a.create_label();
+        let mut fail = a.create_label();
+        a.push(ebp)?;
+        a.push(esi)?;
+        a.push(edi)?;
+        a.xor(ebp, ebp)?;
+        a.mov(eax, 0xFFFF_FFFFu32)?;
+        a.stc()?;
+        a.call(jump)?;
+        a.jnc(fail)?;
+        a.mov(esi, eax)?;
+        // The first module's name.
+        a.mov(edx, dword_ptr(esi + 0x0B))?;
+        a.cmp(dword_ptr(edx), 0x4944_5345)?; // "ESDI"
+        a.jne(fail)?;
+        a.set_label(&mut walk)?;
+        a.test(esi, esi)?;
+        a.jz(end)?;
+        a.cmp(dword_ptr(esi + 0x0F), 0x444C_5658)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 0x13), 1)?;
+        a.jne(fail)?;
+        // Get_DDB by the DDB's name finds the DDB.
+        a.mov(edx, dword_ptr(esi + 5))?;
+        a.lea(edi, dword_ptr(edx + 0x0C))?;
+        a.xor(eax, eax)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_0146])?;
+        a.cmp(ecx, edx)?;
+        a.jne(fail)?;
+        // The DDB is in the locked code object.
+        a.mov(edi, dword_ptr(esi + 0x17))?;
+        a.cmp(dword_ptr(edi + 8), 1)?;
+        a.jne(fail)?;
+        a.mov(eax, dword_ptr(edi))?;
+        a.cmp(edx, eax)?;
+        a.jb(fail)?;
+        a.add(eax, dword_ptr(edi + 4))?;
+        a.cmp(edx, eax)?;
+        a.jae(fail)?;
+        a.inc(ebp)?;
+        a.mov(esi, dword_ptr(esi))?;
+        a.jmp(walk)?;
+        a.set_label(&mut end)?;
+        a.cmp(ebp, vxds)?;
+        a.jne(fail)?;
+        // Get_DDB of PCI's id.
+        a.mov(eax, 0x43)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_0146])?;
+        a.test(ecx, ecx)?;
+        if pci {
+            a.jz(fail)?;
+        } else {
+            a.jnz(fail)?;
+        }
+        a.mov(ebx, 1)?;
+        a.set_label(&mut fail)?;
+        a.pop(edi)?;
+        a.pop(esi)?;
+        a.pop(ebp)?;
+        a.iretd()?;
+        // VxDJmp VXDLDR_GetDeviceList
+        a.set_label(&mut jump)?;
+        a.int(0x20)?;
+        a.dd(&[0x0027_8005])
+    })
+}
+
+/// VMM_GetDDBList returns VMM's DDB, the first of the list of all VxDs,
+/// and Get_DDB finds VxDs in that list as Windows 98 SE's does: by id in
+/// EAX (BIOS's, 003Dh) with ECX the DDB and the arithmetic flags clear,
+/// and with an id no VxD has with ECX 0 and CF set. The DDB found by id
+/// is in the list, after VMM's, and EAX, EDX and EDI stay as they were.
+/// VMM's DDB has its reserved signatures as MASM stores 'Rsv1' ("1vsR"
+/// in memory), and its DDB_Prev is the list's last DDB. The code sets EBX
+/// to 1 when all of that holds.
+#[test]
+fn get_ddb_finds_vxds_in_the_ddb_list() {
+    let level0 = level0_code(|a| {
+        let mut walk = a.create_label();
+        let mut found = a.create_label();
+        let mut fail = a.create_label();
+        a.push(esi)?;
+        a.push(edi)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_013F])?; // VMM_GetDDBList
+        a.mov(esi, eax)?;
+        a.cmp(dword_ptr(esi + 0x0C), 0x204D_4D56)?; // "VMM "
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 0x44), 0x5273_7631)?; // "1vsR"
+        a.jne(fail)?;
+        // VMM's DDB_Prev is the last DDB, with no DDB_Next.
+        a.mov(edx, dword_ptr(esi + 0x3C))?;
+        a.cmp(edx, esi)?;
+        a.je(fail)?;
+        a.cmp(dword_ptr(edx), 0)?;
+        a.jne(fail)?;
+        a.mov(eax, 0x3D)?;
+        a.mov(edx, 0x5A5A_5A5A)?;
+        a.mov(edi, 0x1111_1111)?;
+        a.stc()?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_0146])?; // Get_DDB
+        a.pushfd()?;
+        a.pop(ebx)?;
+        a.test(ebx, 0x8D5)?; // the arithmetic flags
+        a.mov(ebx, 0)?;
+        a.jnz(fail)?;
+        a.cmp(eax, 0x3D)?;
+        a.jne(fail)?;
+        a.cmp(edx, 0x5A5A_5A5A)?;
+        a.jne(fail)?;
+        a.cmp(edi, 0x1111_1111)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(ecx + 0x0C), 0x534F_4942)?; // "BIOS"
+        a.jne(fail)?;
+        a.set_label(&mut walk)?;
+        a.mov(esi, dword_ptr(esi))?;
+        a.test(esi, esi)?;
+        a.jz(fail)?;
+        a.cmp(esi, ecx)?;
+        a.je(found)?;
+        a.jmp(walk)?;
+        a.set_label(&mut found)?;
+        a.mov(eax, 0x1234)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_0146])?; // Get_DDB of no VxD
+        a.jnc(fail)?;
+        a.test(ecx, ecx)?;
+        a.jnz(fail)?;
+        a.mov(ebx, 1)?;
+        a.set_label(&mut fail)?;
+        a.pop(edi)?;
+        a.pop(esi)?;
+        a.iretd()
+    });
+    let (code, text) = run_through_gate_28h("get_ddb", &level0);
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// Where a Simulate_Iret test puts the frame the service pops: at a
+/// linear address, or at an offset in the thread's TIB (FS).
+#[derive(Clone, Copy)]
+enum FrameAt {
+    Linear(u32),
+    Tib(u32),
+}
+
+/// A call of Simulate_Iret: the VM's status and the client's SS, ESP and
+/// EFlags before it, the frame's words and where they are, and Client_EIP,
+/// Client_CS, Client_EFlags and Client_ESP after it.
+struct IretCase {
+    status: u32,
+    ss: u16,
+    esp: u32,
+    eflags: u32,
+    frame: &'static [u16],
+    frame_at: FrameAt,
+    expected: (u32, u16, u32, u32),
+}
+
+/// The intra-application communication area of the BIOS's data
+/// (0040:00F0h), 16 bytes no system uses, where the tests put a frame
+/// for the client's SS:SP to point at.
+const ICA: u32 = 0x4F0;
+
+/// Level 0 code that calls Simulate_Iret through INT 20h in `case`: it
+/// finds the client register structure through Get_Cur_VM_Handle and the
+/// VM's CB_Client_Pointer, saves the VM's status and the client's
+/// registers the service uses, puts the case's in their place and the
+/// frame where it goes, and calls the service. EBX is 1 when the
+/// registers came back as they were and the client's are what the case
+/// expects. The client's registers and the status are put back before
+/// the IRETD, which they are the frame of.
+fn simulate_iret_level0(case: &IretCase) -> Vec<u8> {
+    level0_code(|a| {
+        let mut fail = a.create_label();
+        let mut restore = a.create_label();
+        a.push(ebp)?;
+        a.push(esi)?;
+        a.push(edi)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_0001])?; // Get_Cur_VM_Handle
+        a.mov(edx, ebx)?;
+        a.mov(edi, dword_ptr(edx + 8))?; // CB_Client_Pointer
+        a.push(dword_ptr(edx))?; // CB_VM_Status
+        for field in [0x24, 0x28, 0x2C, 0x30, 0x34] {
+            a.push(dword_ptr(edi + field))?;
+        }
+        for (i, &word) in case.frame.iter().enumerate() {
+            let offset = 2 * i as u32;
+            match case.frame_at {
+                FrameAt::Linear(at) => a.mov(word_ptr(at + offset), word as u32)?,
+                FrameAt::Tib(at) => a.mov(word_ptr(at + offset).fs(), word as u32)?,
+            }
+        }
+        a.mov(dword_ptr(edx), case.status)?;
+        a.mov(dword_ptr(edi + 0x34), case.ss as u32)?;
+        a.mov(dword_ptr(edi + 0x30), case.esp)?;
+        a.mov(dword_ptr(edi + 0x2C), case.eflags)?;
+        a.mov(dword_ptr(edi + 0x24), 0xCCCC_CCCCu32)?;
+        a.mov(dword_ptr(edi + 0x28), 0)?;
+        a.mov(eax, 0x1111_1111)?;
+        a.mov(ebx, 0x3333_3333)?;
+        a.mov(ecx, 0x2222_2222)?;
+        a.mov(esi, 0x4444_4444)?;
+        a.mov(ebp, 0x5555_5555)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_0047])?; // Simulate_Iret
+        // EDX and EDI are checked by what follows using them.
+        for (reg, value) in [
+            (eax, 0x1111_1111u32),
+            (ebx, 0x3333_3333),
+            (ecx, 0x2222_2222),
+            (esi, 0x4444_4444),
+            (ebp, 0x5555_5555),
+        ] {
+            a.cmp(reg, value)?;
+            a.jne(fail)?;
+        }
+        let (client_eip, client_cs, client_eflags, client_esp) = case.expected;
+        a.cmp(dword_ptr(edi + 0x24), client_eip)?;
+        a.jne(fail)?;
+        a.cmp(word_ptr(edi + 0x28), client_cs as u32)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(edi + 0x2C), client_eflags)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(edi + 0x30), client_esp)?;
+        a.jne(fail)?;
+        a.mov(eax, 1)?;
+        a.jmp(restore)?;
+        a.set_label(&mut fail)?;
+        a.xor(eax, eax)?;
+        a.set_label(&mut restore)?;
+        for field in [0x34, 0x30, 0x2C, 0x28, 0x24] {
+            a.pop(dword_ptr(edi + field))?;
+        }
+        a.pop(dword_ptr(edx))?;
+        a.mov(ebx, eax)?;
+        a.pop(edi)?;
+        a.pop(esi)?;
+        a.pop(ebp)?;
+        a.iretd()
+    })
+}
+
+/// Simulate_Iret for a VM in V86 mode (CB_VM_Status without
+/// VMStat_PM_Exec): it pops IP, CS and FLAGS from the VM's memory at
+/// SS * 16 + SP, the upper halves of Client_EIP and Client_ESP stay, and
+/// the flags are the popped word with NT and IOPL clear and VM set.
+#[test]
+fn simulate_iret_pops_a_v86_frame() {
+    let case = IretCase {
+        status: 0,
+        ss: 0x0040,
+        esp: 0x1234_00F0,
+        eflags: 0x0004_0000,
+        frame: &[0x1234, 0x5678, 0x7202],
+        frame_at: FrameAt::Linear(ICA),
+        expected: (0xCCCC_1234, 0x5678, 0x0002_0202, 0x1234_00F6),
+    };
+    let (code, text) = run_through_gate_28h("simulate_iret_v86", &simulate_iret_level0(&case));
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// Simulate_Iret for a 16-bit protected-mode client (VMStat_PM_Exec
+/// alone): three words at SS:SP through the client's selector, Client_EIP
+/// the popped IP and Client_ESP SP + 6, zero-extended; only the low word
+/// of Client_EFlags comes from the frame. The interrupt flag goes from
+/// set to clear as the frame has it.
+#[test]
+fn simulate_iret_pops_a_16_bit_frame() {
+    let case = IretCase {
+        status: 0x60,
+        ss: 0x013F,
+        esp: 0x1234_0000 | ICA,
+        eflags: 0x0004_0202,
+        frame: &[0x1234, 0x0137, 0x0046],
+        frame_at: FrameAt::Linear(ICA),
+        expected: (0x1234, 0x0137, 0x0004_0046, ICA + 6),
+    };
+    let (code, text) = run_through_gate_28h("simulate_iret_pm16", &simulate_iret_level0(&case));
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// A frame that turns the client's interrupt flag on: Simulate_Iret
+/// writes the flags with it off and turns it on through Enable_VM_Ints,
+/// so the client has it on afterwards.
+#[test]
+fn simulate_iret_enables_the_vm_s_interrupts() {
+    let case = IretCase {
+        status: 0x60,
+        ss: 0x013F,
+        esp: ICA,
+        eflags: 0x0004_0002,
+        frame: &[0x1234, 0x0137, 0x0203],
+        frame_at: FrameAt::Linear(ICA),
+        expected: (0x1234, 0x0137, 0x0004_0203, ICA + 6),
+    };
+    let (code, text) = run_through_gate_28h("simulate_iret_sti", &simulate_iret_level0(&case));
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// Simulate_Iret for a 32-bit client (VMStat_PM_Use32) on a stack
+/// segment above 64K: three dwords at SS:ESP, CS and the flags the low
+/// words of theirs, Client_ESP 12 bytes on. The interrupt flag goes from
+/// set to clear as the frame has it.
+#[test]
+fn simulate_iret_pops_a_32_bit_frame() {
+    let case = IretCase {
+        status: 0xE0,
+        ss: 0x013F,
+        esp: ICA,
+        eflags: 0x0004_0202,
+        frame: &[0x4321, 0x8765, 0x0137, 0xFFFF, 0x0046, 0xFFFF],
+        frame_at: FrameAt::Linear(ICA),
+        expected: (0x8765_4321, 0x0137, 0x0004_0046, ICA + 12),
+    };
+    let (code, text) = run_through_gate_28h("simulate_iret_pm32", &simulate_iret_level0(&case));
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// Simulate_Iret in VxD nested execution (VMStat_VxD_Exec) pops a 32-bit
+/// frame too, and on a stack segment of 64K or less (the TIB's, 4K) at
+/// SP: ESP's upper half doesn't count.
+#[test]
+fn simulate_iret_pops_a_32_bit_frame_at_sp_in_a_small_segment() {
+    let case = IretCase {
+        status: 0x160,
+        ss: 0x0147,
+        esp: 0xABCD_0FE0,
+        eflags: 0x0004_0202,
+        frame: &[0x5678, 0x0000, 0x0137, 0x0000, 0x0202, 0x0000],
+        frame_at: FrameAt::Tib(0xFE0),
+        expected: (0x5678, 0x0137, 0x0004_0202, 0x0FEC),
+    };
+    let (code, text) = run_through_gate_28h("simulate_iret_vxd", &simulate_iret_level0(&case));
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// A 32-bit frame that turns the client's interrupt flag on goes through
+/// the same flags handling as a 16-bit one: the flags are written with IF
+/// off and Enable_VM_Ints turns it on.
+#[test]
+fn simulate_iret_enables_the_vm_s_interrupts_from_a_32_bit_frame() {
+    let case = IretCase {
+        status: 0xE0,
+        ss: 0x013F,
+        esp: ICA,
+        eflags: 0x0004_0002,
+        frame: &[0x4321, 0x8765, 0x0137, 0xFFFF, 0x0203, 0xFFFF],
+        frame_at: FrameAt::Linear(ICA),
+        expected: (0x8765_4321, 0x0137, 0x0004_0203, ICA + 12),
+    };
+    let (code, text) = run_through_gate_28h("simulate_iret_pm32_sti", &simulate_iret_level0(&case));
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// The client register structure is the frame of the interrupt that
+/// brought the program to level 0, so Simulate_Iret there changes where
+/// the level 0 code's IRETD goes: the program pushes an IRET frame to a
+/// place of its own and raises the interrupt, and the level 0 code calls
+/// Simulate_Iret and returns. The frame is a 32-bit one, so the level 0
+/// code sets VMStat_PM_Use32 for the call: the system VM's status, as on
+/// Windows 98 SE, is a 16-bit client's. The program goes on at its place,
+/// with its stack as before the frame.
+#[test]
+fn simulate_iret_changes_where_level_0_code_returns_to() {
+    let level0 = level0_code(|a| {
+        a.push(ebx)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_0001])?; // Get_Cur_VM_Handle
+        a.or(dword_ptr(ebx), 0x80)?; // VMStat_PM_Use32
+        a.int(0x20)?;
+        a.dd(&[0x0001_0047])?; // Simulate_Iret
+        a.and(dword_ptr(ebx), !0x80)?;
+        a.pop(ebx)?;
+        a.iretd()
+    });
+    let program = gate_28h_program_calling(&level0, |a| {
+        let mut setup = a.create_label();
+        let mut done = a.create_label();
+        a.xor(ebx, ebx)?;
+        a.mov(esi, esp)?;
+        a.pushfd()?;
+        a.push(cs)?;
+        // The frame's EIP, the CALL's return address: the code after it.
+        a.call(setup)?;
+        a.cmp(esp, esi)?;
+        a.jne(done)?;
+        a.mov(ebx, 1)?;
+        a.jmp(done)?;
+        a.set_label(&mut setup)?;
+        a.int(5)?;
+        // Back here, the frame unused.
+        a.add(esp, 12)?;
+        a.set_label(&mut done)?;
+        a.nop()
+    });
+    let (code, text) = run("simulate_iret_return", program);
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// The VM's status, read through Get_Cur_VM_Handle and CB_VM_Status, is
+/// the one Windows 98 SE's system VM has while a Win32 program runs, as a
+/// probe read it there: 1A62h, VMStat_PM_Exec and VMStat_PM_App set and
+/// VMStat_PM_Use32 clear.
+#[test]
+fn the_vm_s_status_is_windows_98_s_system_vm_s() {
+    let level0 = level0_code(|a| {
+        a.int(0x20)?;
+        a.dd(&[0x0001_0001])?; // Get_Cur_VM_Handle
+        a.cmp(dword_ptr(ebx), 0x1A62)?;
+        a.sete(bl)?;
+        a.iretd()
+    });
+    let (code, text) = run_through_gate_28h("vm_status", &level0);
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// A VxDJmp to a service VMM runs as guest code, Get_Cur_VM_Handle,
+/// jumps to it, so that it returns to the caller of the code that made
+/// the VxDJmp, with EBX the VM's handle: a control block whose status
+/// has VMStat_PM_Exec. Coming back after the dword instead clears EBX.
+#[test]
+fn a_vxd_jmp_to_a_guest_code_service_returns_to_the_caller_s_caller() {
+    let level0 = level0_code(|a| {
+        let mut jumper = a.create_label();
+        let mut done = a.create_label();
+        a.push(esi)?;
+        a.push(edi)?;
+        a.mov(edi, esp)?;
+        a.call(jumper)?;
+        a.mov(eax, ebx)?;
+        a.xor(ebx, ebx)?;
+        a.cmp(esp, edi)?;
+        a.jne(done)?;
+        a.test(eax, eax)?;
+        a.jz(done)?;
+        a.test(byte_ptr(eax), 0x20)?;
+        a.jz(done)?;
+        a.mov(ebx, 1)?;
+        a.set_label(&mut done)?;
+        a.pop(edi)?;
+        a.pop(esi)?;
+        a.iretd()?;
+        a.set_label(&mut jumper)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_8001])?; // VxDJmp Get_Cur_VM_Handle
+        a.xor(ebx, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run_through_gate_28h("vxd_jmp_guest_service", &level0);
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// INT 20h for a VMM service goes through VMM's service table, as on
+/// Windows 98, where VMM rewrites the INT 20h into a call through it: a
+/// program that replaces the entry of VMM_GetDDBList, which the built-in
+/// Windows runs in Rust, with a hook of its own gets its hook called,
+/// and once it puts the entry back, the service again. The hook returns
+/// 12345678h; the service returns VMM's DDB.
+#[test]
+fn a_hook_in_vmm_s_service_table_is_called() {
+    let level0 = level0_code(|a| {
+        let mut get_hook = a.create_label();
+        let mut done = a.create_label();
+        a.push(esi)?;
+        a.push(edi)?;
+        a.xor(ebx, ebx)?;
+        // The hook's address, which the CALL pushes.
+        a.call(get_hook)?;
+        a.mov(eax, 0x1234_5678)?;
+        a.ret()?;
+        a.set_label(&mut get_hook)?;
+        a.pop(edx)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_013F])?; // VMM_GetDDBList
+        a.mov(esi, eax)?; // VMM's DDB
+        a.mov(edi, dword_ptr(eax + 0x30))?; // DDB_Service_Table_Ptr
+        a.add(edi, 4 * 0x13F)?;
+        a.push(dword_ptr(edi))?;
+        a.mov(dword_ptr(edi), edx)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_013F])?;
+        a.pop(dword_ptr(edi))?;
+        a.cmp(eax, 0x1234_5678)?;
+        a.jne(done)?;
+        a.int(0x20)?;
+        a.dd(&[0x0001_013F])?;
+        a.cmp(eax, esi)?;
+        a.jne(done)?;
+        a.mov(ebx, 1)?;
+        a.set_label(&mut done)?;
+        a.pop(edi)?;
+        a.pop(esi)?;
+        a.iretd()
+    });
+    let (code, text) = run_through_gate_28h("vmm_table_hook", &level0);
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// Level 0 code assembled by `f`, which may jump only within itself.
+fn level0_code(f: impl FnOnce(&mut CodeAssembler) -> Result<(), IcedError>) -> Vec<u8> {
+    let mut a = CodeAssembler::new(32).unwrap();
+    f(&mut a).unwrap();
+    a.assemble(0).unwrap()
+}
+
+/// Run `level0` at level 0 (`gate_28h_program`).
 fn run_through_gate_28h(name: &str, level0: &[u8]) -> (u8, String) {
+    run(name, gate_28h_program(level0))
+}
+
+/// A program that runs `level0` at level 0, as SafeDisc 2.30 does: at 30h
+/// of the data section, through a gate of level 3 for vector 5 with
+/// selector 28h. The program ends with EBX's bit 0 after it returns.
+fn gate_28h_program(level0: &[u8]) -> Vec<u8> {
+    gate_28h_program_calling(level0, |a| {
+        a.xor(ebx, ebx)?;
+        a.int(5)
+    })
+}
+
+/// `gate_28h_program` with `call` raising vector 5, which sets EBX.
+fn gate_28h_program_calling(
+    level0: &[u8],
+    call: impl FnOnce(&mut CodeAssembler) -> Result<(), IcedError>,
+) -> Vec<u8> {
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
     let mut data = vec![0u8; 0x30 + level0.len().max(0x10)];
     data[0x30..0x30 + level0.len()].copy_from_slice(level0);
-    run(
-        name,
-        program(BASE, false, imports, &data, |a, l| {
-            // The IDT's base, from SIDT's 6 bytes at 0, and vector 5's
-            // gate, kept at 10h.
-            a.sidt(ptr(l.at(0)))?;
-            a.mov(esi, dword_ptr(l.at(2)))?;
-            a.add(esi, 5 * 8)?;
-            a.mov(eax, dword_ptr(esi))?;
-            a.mov(dword_ptr(l.at(0x10)), eax)?;
-            a.mov(eax, dword_ptr(esi + 4))?;
-            a.mov(dword_ptr(l.at(0x14)), eax)?;
-            // A 32-bit interrupt gate of level 3 to the code at 30h,
-            // selector 28h.
-            a.mov(eax, l.at(0x30) as u32)?;
-            a.mov(word_ptr(esi), ax)?;
-            a.mov(word_ptr(esi + 2), 0x28)?;
-            a.mov(word_ptr(esi + 4), 0xEE00)?;
-            a.shr(eax, 16)?;
-            a.mov(word_ptr(esi + 6), ax)?;
-            a.xor(ebx, ebx)?;
-            a.int(5)?;
-            // Put the gate back.
-            a.mov(eax, dword_ptr(l.at(0x10)))?;
-            a.mov(dword_ptr(esi), eax)?;
-            a.mov(eax, dword_ptr(l.at(0x14)))?;
-            a.mov(dword_ptr(esi + 4), eax)?;
-            a.and(ebx, 1)?;
-            a.push(ebx)?;
-            a.call(l.import(0))?;
-            a.int3()
-        }),
-    )
+    program(BASE, false, imports, &data, |a, l| {
+        // The IDT's base, from SIDT's 6 bytes at 0, and vector 5's
+        // gate, kept at 10h.
+        a.sidt(ptr(l.at(0)))?;
+        a.mov(esi, dword_ptr(l.at(2)))?;
+        a.add(esi, 5 * 8)?;
+        a.mov(eax, dword_ptr(esi))?;
+        a.mov(dword_ptr(l.at(0x10)), eax)?;
+        a.mov(eax, dword_ptr(esi + 4))?;
+        a.mov(dword_ptr(l.at(0x14)), eax)?;
+        // A 32-bit interrupt gate of level 3 to the code at 30h,
+        // selector 28h.
+        a.mov(eax, l.at(0x30) as u32)?;
+        a.mov(word_ptr(esi), ax)?;
+        a.mov(word_ptr(esi + 2), 0x28)?;
+        a.mov(word_ptr(esi + 4), 0xEE00)?;
+        a.shr(eax, 16)?;
+        a.mov(word_ptr(esi + 6), ax)?;
+        // ESI, which has the gate's address, stays as it is.
+        a.push(esi)?;
+        call(a)?;
+        a.pop(esi)?;
+        // Put the gate back.
+        a.mov(eax, dword_ptr(l.at(0x10)))?;
+        a.mov(dword_ptr(esi), eax)?;
+        a.mov(eax, dword_ptr(l.at(0x14)))?;
+        a.mov(dword_ptr(esi + 4), eax)?;
+        a.and(ebx, 1)?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    })
 }
 
 /// C.DLL, whose entry point returns FALSE, and exports F.
@@ -4397,6 +6623,539 @@ fn a_program_loads_and_frees_msvcrt_without_importing_it() {
         !(code ^ 0x55),
         text
     );
+}
+
+/// MSVCRT's run-time type information and `exception`, as Visual C++ 6's
+/// MSVCRT.DLL has them (the values a probe read on it): type_info::name
+/// undecorates the type's name once and keeps it, __RTtypeid and
+/// __RTDynamicCast follow the object's complete object locator, the
+/// exception constructor keeps a copy of its message for what(), with
+/// the vtable the DLL exports, and __unDName undecorates a function, but
+/// returns 0 without an allocator, even with a buffer.
+#[test]
+fn msvcrt_has_rtti_and_the_exception_class() {
+    let crt: &[&str] = &[
+        "?name@type_info@@QBEPBDXZ",
+        "__RTtypeid",
+        "__RTDynamicCast",
+        "??0exception@@QAE@ABQBD@Z",
+        "?what@exception@@UBEPBDXZ",
+        "??_7exception@@6B@",
+        "__unDName",
+        "strcmp",
+        "malloc",
+        "free",
+    ];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.DLL", crt)];
+    let mut data = vec![0; 0x160];
+    put(&mut data, 0x00, b"?f@@YAXH@Z\0");
+    put(&mut data, 0x10, b"void __cdecl f(int)\0");
+    put(&mut data, 0x30, b"class T<int>\0");
+    put(&mut data, 0x40, b"hello\0");
+    // Type descriptors: no vtable, an empty cache, the decorated name.
+    put(&mut data, 0xA8, b".?AV?$T@H@@\0");
+    put(&mut data, 0xC0, b".?AVD@@\0");
+    put(&mut data, 0xD0, b".?AVB@@\0");
+    put(&mut data, 0xE0, b".?AVU@@\0");
+    // D derives from B: the base class descriptors of D and B (the type,
+    // the bases it contains, where it is (0, -1, 0), its attributes) at
+    // E8h and 100h, their array at 118h, the hierarchy at 120h, the
+    // locator at 130h, D's vtable at 148h after a pointer to the locator,
+    // and a D at 150h. The program fills in the pointers.
+    put(&mut data, 0xEC, &1u32.to_le_bytes());
+    put(&mut data, 0xF4, &u32::MAX.to_le_bytes());
+    put(&mut data, 0x10C, &u32::MAX.to_le_bytes());
+    put(&mut data, 0x128, &2u32.to_le_bytes());
+    const TD_T: u32 = 0xA0;
+    const TD_D: u32 = 0xB8;
+    const TD_B: u32 = 0xC8;
+    const TD_U: u32 = 0xD8;
+    const OBJECT: u32 = 0x150;
+    let pointers: &[(u32, u32)] = &[
+        (0xE8, TD_D),
+        (0x100, TD_B),
+        (0x118, 0xE8),
+        (0x11C, 0x100),
+        (0x12C, 0x118),
+        (0x13C, TD_D),
+        (0x140, 0x120),
+        (0x144, 0x130),
+        (OBJECT, 0x148),
+        (0x48, 0x40),
+    ];
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        use Arg::I;
+        let c = |name: &str| l.import(crt.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| I(l.at(offset) as u32);
+        for &(offset, to) in pointers {
+            a.mov(dword_ptr(l.at(offset)), l.at(to) as i32)?;
+        }
+        a.xor(ebx, ebx)?;
+        // The name, then the same pointer again.
+        a.mov(ecx, l.at(TD_T) as u32)?;
+        a.call(c("?name@type_info@@QBEPBDXZ"))?;
+        a.mov(esi, eax)?;
+        call_with(a, c("strcmp"), &[Arg::Esi, at(0x30)])?;
+        a.add(esp, 8)?;
+        a.test(eax, eax)?;
+        check(a, false, 0)?;
+        a.mov(ecx, l.at(TD_T) as u32)?;
+        a.call(c("?name@type_info@@QBEPBDXZ"))?;
+        a.cmp(eax, esi)?;
+        check(a, false, 1)?;
+        // typeid of the D, and casts of it from B to D and to U.
+        call_with(a, c("__RTtypeid"), &[at(OBJECT)])?;
+        a.add(esp, 4)?;
+        a.cmp(eax, l.at(TD_D) as u32)?;
+        check(a, false, 2)?;
+        let cast = |to: u32| [at(OBJECT), I(0), at(TD_B), at(to), I(0)];
+        call_with(a, c("__RTDynamicCast"), &cast(TD_D))?;
+        a.add(esp, 20)?;
+        a.cmp(eax, l.at(OBJECT) as u32)?;
+        check(a, false, 3)?;
+        call_with(a, c("__RTDynamicCast"), &cast(TD_U))?;
+        a.add(esp, 20)?;
+        a.test(eax, eax)?;
+        check(a, false, 4)?;
+        // exception("hello"): what() and the vtable.
+        a.mov(ecx, l.at(0x50) as u32)?;
+        call_with(a, c("??0exception@@QAE@ABQBD@Z"), &[at(0x48)])?;
+        a.mov(ecx, l.at(0x50) as u32)?;
+        a.call(c("?what@exception@@UBEPBDXZ"))?;
+        a.mov(esi, eax)?;
+        call_with(a, c("strcmp"), &[Arg::Esi, at(0x40)])?;
+        a.add(esp, 8)?;
+        a.test(eax, eax)?;
+        check(a, false, 5)?;
+        a.mov(eax, c("??_7exception@@6B@"))?;
+        a.cmp(eax, dword_ptr(l.at(0x50)))?;
+        check(a, false, 6)?;
+        // __unDName(buffer, name, 64, NULL, NULL, 0) is 0, then
+        // __unDName(buffer, name, 64, malloc, free, 0) the buffer.
+        call_with(
+            a,
+            c("__unDName"),
+            &[at(0x60), at(0x00), I(64), I(0), I(0), I(0)],
+        )?;
+        a.add(esp, 24)?;
+        a.mov(edi, eax)?;
+        a.push(0)?;
+        a.push(c("free"))?;
+        a.push(c("malloc"))?;
+        a.push(64)?;
+        a.push(l.at(0x00) as i32)?;
+        a.push(l.at(0x60) as i32)?;
+        a.call(c("__unDName"))?;
+        a.add(esp, 24)?;
+        call_with(a, c("strcmp"), &[at(0x60), at(0x10)])?;
+        a.add(esp, 8)?;
+        a.or(eax, edi)?;
+        check(a, false, 7)?;
+        a.mov(eax, ebx)?;
+        a.xor(eax, 0x55)?;
+        a.ret()
+    });
+    let (code, text) = run_files("msvcrt_rtti", &[("T.EXE", exe)]);
+    assert_eq!(
+        code ^ 0x55,
+        0xFF,
+        "the checks that failed: {:08b}, {}",
+        !(code ^ 0x55),
+        text
+    );
+}
+
+/// The MSVCRT functions Visual C++ 6's MSVCP60, MSVCIRT and MFC42 import,
+/// with the values a probe read on Visual C++ 6's MSVCRT.DLL: _Getdays'
+/// names, _Strftime with the "C" locale's long date (whose "dd" keeps its
+/// zero, '#' or not), __crtCompareStringA with a count past the string's
+/// end, _ismbcdigit and _ismbcspace of a byte (its class bit) and of
+/// code page 932's full-width digit and space (0, as the built-in
+/// KERNEL32 has no types for them, #919), the descriptors' table and its
+/// bad entry, a longjmp out of a C++ frame whose objects
+/// __CxxLongjmpUnwind destroys, and malloc after _set_new_handler.
+#[test]
+fn msvcrt_has_what_msvcp60_msvcirt_and_mfc42_import() {
+    let crt: &[&str] = &[
+        "_Getdays",
+        "_Strftime",
+        "__crtCompareStringA",
+        "_ismbcdigit",
+        "_ismbcspace",
+        "_setmbcp",
+        "__pioinfo",
+        "__badioinfo",
+        "_get_osfhandle",
+        "_set_new_handler",
+        "malloc",
+        "strcmp",
+        "_setjmp3",
+        "longjmp",
+        "__CxxLongjmpUnwind",
+    ];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.DLL", crt)];
+    let mut data = vec![0; 0x1A0];
+    put(
+        &mut data,
+        0x00,
+        b":Sun:Sunday:Mon:Monday:Tue:Tuesday:Wed:Wednesday:Thu:Thursday:Fri:Friday:Sat:Saturday\0",
+    );
+    put(&mut data, 0x60, b"%#x\0");
+    put(&mut data, 0x68, b"Wednesday, January 02, 1980\0");
+    put(&mut data, 0x88, b"abc\0");
+    put(&mut data, 0x90, b"ABC\0");
+    // 2 Jan 1980, 00:03:05, a Wednesday.
+    let tm: Vec<u8> = [5u32, 3, 0, 2, 0, 80, 3, 1, 0]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    put(&mut data, 0xA0, &tm);
+    // A C++ function's frame at D0h in state 1, its FuncInfo at E0h with
+    // two states, and the unwind map at 100h: state 1 destroys with the
+    // code at 118h (adds 10h to the counter at C8h) and goes to state 0,
+    // which destroys with the code at 110h (adds 1) and goes to -1. The
+    // program fills in the addresses.
+    const COUNTER: u32 = 0xC8;
+    const FRAME: u32 = 0xD0;
+    const BUFFER: u32 = 0x120;
+    put(&mut data, 0xE0, &[0x20, 0x05, 0x93, 0x19, 2, 0, 0, 0]);
+    put(&mut data, 0x100, &u32::MAX.to_le_bytes());
+    put(&mut data, 0x110, &[0xFF, 0x05, 0, 0, 0, 0, 0xC3]);
+    put(&mut data, 0x118, &[0x83, 0x05, 0, 0, 0, 0, 0x10, 0xC3]);
+    let pointers: &[(u32, u32)] = &[
+        (0xE8, 0x100),
+        (0x104, 0x110),
+        (0x10C, 0x118),
+        (0x112, COUNTER),
+        (0x11A, COUNTER),
+    ];
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        use Arg::I;
+        let c = |name: &str| l.import(crt.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| I(l.at(offset) as u32);
+        for &(offset, to) in pointers {
+            a.mov(dword_ptr(l.at(offset)), l.at(to) as i32)?;
+        }
+        a.xor(ebx, ebx)?;
+        // _Getdays.
+        a.call(c("_Getdays"))?;
+        a.mov(esi, eax)?;
+        call_with(a, c("strcmp"), &[Arg::Esi, at(0x00)])?;
+        a.add(esp, 8)?;
+        a.test(eax, eax)?;
+        check(a, false, 0)?;
+        // _Strftime(buffer, 64, "%#x", tm, NULL): 27 and the long date.
+        call_with(
+            a,
+            c("_Strftime"),
+            &[at(0x160), I(64), at(0x60), at(0xA0), I(0)],
+        )?;
+        a.add(esp, 20)?;
+        a.mov(edi, eax)?;
+        call_with(a, c("strcmp"), &[at(0x160), at(0x68)])?;
+        a.add(esp, 8)?;
+        a.sub(edi, 27)?;
+        a.or(eax, edi)?;
+        check(a, false, 1)?;
+        // "abc" (a count of 9) and "ABC", case ignored: equal.
+        call_with(
+            a,
+            c("__crtCompareStringA"),
+            &[I(0x409), I(1), at(0x88), I(9), at(0x90), I(u32::MAX), I(0)],
+        )?;
+        a.add(esp, 28)?;
+        a.cmp(eax, 2)?;
+        check(a, false, 2)?;
+        // '7' is a digit (4), ' ' a space (8). In code page 932 the
+        // full-width digit 0x824F and space 0x8140 give 0 (and
+        // _setmbcp 0).
+        call_with(a, c("_ismbcdigit"), &[I(0x37)])?;
+        a.add(esp, 4)?;
+        a.mov(esi, eax)?;
+        call_with(a, c("_ismbcspace"), &[I(0x20)])?;
+        a.add(esp, 4)?;
+        a.add(esi, eax)?;
+        call_with(a, c("_setmbcp"), &[I(932)])?;
+        a.add(esp, 4)?;
+        a.add(esi, eax)?;
+        call_with(a, c("_ismbcdigit"), &[I(0x824F)])?;
+        a.add(esp, 4)?;
+        a.add(esi, eax)?;
+        call_with(a, c("_ismbcspace"), &[I(0x8140)])?;
+        a.add(esp, 4)?;
+        a.add(eax, esi)?;
+        a.cmp(eax, 12)?;
+        check(a, false, 3)?;
+        // stdout's handle in the first block, as _get_osfhandle has it.
+        a.mov(eax, c("__pioinfo"))?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.mov(esi, dword_ptr(eax + 36))?;
+        call_with(a, c("_get_osfhandle"), &[I(1)])?;
+        a.add(esp, 4)?;
+        a.cmp(eax, esi)?;
+        check(a, false, 4)?;
+        // malloc works after _set_new_handler.
+        call_with(a, c("_set_new_handler"), &[I(0)])?;
+        a.add(esp, 4)?;
+        call_with(a, c("malloc"), &[I(16)])?;
+        a.add(esp, 4)?;
+        a.test(eax, eax)?;
+        check(a, true, 5)?;
+        // In the frame: _setjmp3(buffer, 3, __CxxLongjmpUnwind, -1,
+        // FuncInfo), then longjmp(buffer, 7), which destroys both objects.
+        let mut back = a.create_label();
+        a.mov(eax, dword_ptr(0u64).fs())?;
+        a.mov(dword_ptr(l.at(FRAME)), eax)?;
+        a.mov(dword_ptr(l.at(FRAME + 8)), 1)?;
+        a.mov(eax, l.at(FRAME) as u32)?;
+        a.mov(dword_ptr(0u64).fs(), eax)?;
+        a.push(l.at(0xE0) as i32)?;
+        a.push(-1)?;
+        a.push(c("__CxxLongjmpUnwind"))?;
+        a.push(3)?;
+        a.push(l.at(BUFFER) as i32)?;
+        a.call(c("_setjmp3"))?;
+        a.add(esp, 20)?;
+        a.cmp(eax, 7)?;
+        a.je(back)?;
+        call_with(a, c("longjmp"), &[at(BUFFER), I(7)])?;
+        a.int3()?;
+        a.set_label(&mut back)?;
+        a.mov(eax, dword_ptr(l.at(FRAME)))?;
+        a.mov(dword_ptr(0u64).fs(), eax)?;
+        a.cmp(dword_ptr(l.at(COUNTER)), 0x11)?;
+        check(a, false, 6)?;
+        // The frame left in state -1; the bad entry's handle is -1.
+        a.mov(eax, c("__badioinfo"))?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.and(eax, dword_ptr(l.at(FRAME + 8)))?;
+        a.cmp(eax, -1)?;
+        check(a, false, 7)?;
+        a.mov(eax, ebx)?;
+        a.xor(eax, 0x55)?;
+        a.ret()
+    });
+    let (code, text) = run_files("msvcrt_msvcp60", &[("T.EXE", exe)]);
+    assert_eq!(
+        code ^ 0x55,
+        0xFF,
+        "the checks that failed: {:08b}, {}",
+        !(code ^ 0x55),
+        text
+    );
+}
+
+/// wcsftime as MSVCRT 6's: it formats into twice `size` bytes, then
+/// mbstowcs makes at most `size` wide characters of the text. "Wed 02"
+/// in 4 gives "Wed " with no 0 and 4; in 8 the text and its 0, and 6; in
+/// 3 nothing, as 6 bytes leave no room for the 0.
+#[test]
+fn msvcrt_wcsftime_takes_twice_its_size() {
+    let crt: &[&str] = &["wcsftime", "memcmp"];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.DLL", crt)];
+    fn wide(text: &str) -> Vec<u8> {
+        text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+    }
+    let mut data = vec![0; 0x100];
+    put(&mut data, 0x00, &wide("%a %d\0"));
+    // 2 Jan 1980, a Wednesday.
+    let tm: Vec<u8> = [5u32, 3, 0, 2, 0, 80, 3, 1, 0]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    put(&mut data, 0x20, &tm);
+    put(&mut data, 0x50, &wide("xxxxxxxxxxxxxxxx"));
+    put(&mut data, 0x70, &wide("xxxxxxxxxxxxxxxx"));
+    put(&mut data, 0x90, &wide("xxxxxxxxxxxxxxxx"));
+    put(&mut data, 0xB0, &wide("Wed x"));
+    put(&mut data, 0xC0, &wide("Wed 02\0"));
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        use Arg::I;
+        let c = |name: &str| l.import(crt.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| I(l.at(offset) as u32);
+        a.xor(ebx, ebx)?;
+        let cases: &[(u32, u32, u32, u32, u32)] = &[
+            // (buffer, size, result, expected text, its bytes)
+            (0x50, 4, 4, 0xB0, 10),
+            (0x70, 8, 6, 0xC0, 14),
+            (0x90, 3, 0, 0, 0),
+        ];
+        for (i, &(buffer, size, result, expected, len)) in cases.iter().enumerate() {
+            let bit = 2 * i as u32;
+            call_with(a, c("wcsftime"), &[at(buffer), I(size), at(0x00), at(0x20)])?;
+            a.add(esp, 16)?;
+            a.cmp(eax, result)?;
+            check(a, false, bit)?;
+            if len != 0 {
+                call_with(a, c("memcmp"), &[at(buffer), at(expected), I(len)])?;
+                a.add(esp, 12)?;
+                a.test(eax, eax)?;
+                check(a, false, bit + 1)?;
+            } else {
+                // Nothing written.
+                a.cmp(dword_ptr(l.at(buffer)), 0x0078_0078)?;
+                check(a, false, bit + 1)?;
+            }
+        }
+        a.mov(eax, ebx)?;
+        a.xor(eax, 0x55)?;
+        a.ret()
+    });
+    let (code, text) = run_files("msvcrt_wcsftime", &[("T.EXE", exe)]);
+    assert_eq!(
+        code ^ 0x55,
+        0x3F,
+        "the checks that failed: {:06b}, {}",
+        !(code ^ 0x55) & 0x3F,
+        text
+    );
+}
+
+/// _setjmp3 and _setjmp fill the jump buffer as the probe saw Visual
+/// C++ 6's MSVCRT.DLL fill it, in an exception frame at level 1: the
+/// frame, a level, the cookie "VC20", the unwind function and up to six
+/// words of its data, from the words after the count (0: the frame's
+/// level and no function; 2: the given level and function; 3: one word
+/// of data; 9: six), the rest of the buffer left as it was. _setjmp
+/// writes the frame and its level, and nothing after them. A count of 1
+/// takes the frame's level, which MSVCRT 6 reads from 0Ch bytes into
+/// the unwind function instead; no compiler passes that count.
+#[test]
+fn msvcrt_setjmp3_fills_the_jump_buffer() {
+    let crt: &[&str] = &["_setjmp3", "_setjmp", "memcmp"];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.DLL", crt)];
+    const FRAME: u32 = 0x00;
+    const AA: u32 = 0xAAAA_AAAA;
+    const VC20: u32 = 0x5643_3230;
+    // (count, or None for _setjmp, then the words from Registration on:
+    // Registration, TryLevel, Cookie, UnwindFunc, UnwindData[6], and two
+    // words after the buffer.)
+    let cases: &[(Option<u32>, [u32; 11])] = &[
+        (Some(0), [1, VC20, 0, AA, AA, AA, AA, AA, AA, AA, AA]),
+        (Some(1), [1, VC20, 0x1111, AA, AA, AA, AA, AA, AA, AA, AA]),
+        (
+            Some(2),
+            [0x2222, VC20, 0x1111, AA, AA, AA, AA, AA, AA, AA, AA],
+        ),
+        (
+            Some(3),
+            [0x2222, VC20, 0x1111, 0x3333, AA, AA, AA, AA, AA, AA, AA],
+        ),
+        (
+            Some(9),
+            [
+                0x2222, VC20, 0x1111, 0x3333, 0x4444, 0x5555, 0x6666, 0x7777, 0x8888, AA, AA,
+            ],
+        ),
+        (None, [1, AA, AA, AA, AA, AA, AA, AA, AA, AA, AA]),
+    ];
+    let buffer = |i: usize| 0x40 + 0x50 * i as u32;
+    let expected = |i: usize| 0x300 + 0x30 * i as u32;
+    let mut data = vec![0; 0x420];
+    // The frame: the next one, its handler, its scope table, level 1.
+    put(&mut data, FRAME as usize + 12, &1u32.to_le_bytes());
+    for (i, (_, words)) in cases.iter().enumerate() {
+        put(&mut data, buffer(i) as usize, &[0xAA; 0x50]);
+        let image: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        put(&mut data, expected(i) as usize + 4, &image);
+    }
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        use Arg::I;
+        let c = |name: &str| l.import(crt.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| I(l.at(offset) as u32);
+        a.xor(ebx, ebx)?;
+        a.mov(eax, dword_ptr(0u64).fs())?;
+        a.mov(dword_ptr(l.at(FRAME)), eax)?;
+        a.mov(eax, l.at(FRAME) as u32)?;
+        a.mov(dword_ptr(0u64).fs(), eax)?;
+        for (i, &(count, _)) in cases.iter().enumerate() {
+            a.mov(dword_ptr(l.at(expected(i))), l.at(FRAME) as i32)?;
+            match count {
+                Some(count) => {
+                    let words = [0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666, 0x7777];
+                    let mut args = vec![at(buffer(i)), I(count)];
+                    args.extend(words.iter().chain(&[0x8888, 0x9999]).map(|&w| I(w)));
+                    call_with(a, c("_setjmp3"), &args)?;
+                    a.add(esp, 4 * args.len() as i32)?;
+                }
+                None => {
+                    call_with(a, c("_setjmp"), &[at(buffer(i))])?;
+                    a.add(esp, 4)?;
+                }
+            }
+            call_with(
+                a,
+                c("memcmp"),
+                &[at(buffer(i) + 24), at(expected(i)), I(48)],
+            )?;
+            a.add(esp, 12)?;
+            a.test(eax, eax)?;
+            check(a, false, i as u32)?;
+        }
+        a.mov(eax, dword_ptr(l.at(FRAME)))?;
+        a.mov(dword_ptr(0u64).fs(), eax)?;
+        a.mov(eax, ebx)?;
+        a.xor(eax, 0x55)?;
+        a.ret()
+    });
+    let (code, text) = run_files("msvcrt_setjmp3", &[("T.EXE", exe)]);
+    assert_eq!(
+        code ^ 0x55,
+        0x3F,
+        "the checks that failed: {:06b}, {}",
+        !(code ^ 0x55) & 0x3F,
+        text
+    );
+}
+
+/// longjmp unwinds the exception frames made after setjmp, as the probe
+/// saw Visual C++ 6's MSVCRT.DLL do, even where setjmp was called outside
+/// every frame of the program's: the __finally of a frame of
+/// _except_handler3's runs once, then setjmp returns the value.
+#[test]
+fn msvcrt_longjmp_runs_the_finally_blocks_above_setjmp() {
+    let crt: &[&str] = &["_setjmp3", "longjmp", "_except_handler3"];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.DLL", crt)];
+    const BUFFER: u32 = 0x00;
+    const SCOPE: u32 = 0x40;
+    const COUNTER: u32 = 0x50;
+    const FINALLY: u32 = 0x60;
+    let mut data = vec![0; 0x80];
+    // The scope table's one entry: no enclosing level, no filter (a
+    // __finally), and the block, which adds 1 to the counter.
+    put(&mut data, SCOPE as usize, &u32::MAX.to_le_bytes());
+    put(&mut data, FINALLY as usize, &[0xFF, 0x05, 0, 0, 0, 0, 0xC3]);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        use Arg::I;
+        let c = |name: &str| l.import(crt.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        a.mov(dword_ptr(l.at(SCOPE + 8)), l.at(FINALLY) as i32)?;
+        a.mov(dword_ptr(l.at(FINALLY + 2)), l.at(COUNTER) as i32)?;
+        let mut back = a.create_label();
+        call_with(a, c("_setjmp3"), &[I(l.at(BUFFER) as u32), I(0)])?;
+        a.add(esp, 8)?;
+        a.cmp(eax, 9)?;
+        a.je(back)?;
+        // A frame of _except_handler3's at EBP - 10h, in its __try.
+        a.push(ebp)?;
+        a.mov(ebp, esp)?;
+        a.push(0)?;
+        a.push(l.at(SCOPE) as i32)?;
+        a.push(c("_except_handler3"))?;
+        a.push(dword_ptr(0u64).fs())?;
+        a.mov(dword_ptr(0u64).fs(), esp)?;
+        a.sub(esp, 8)?;
+        call_with(a, c("longjmp"), &[I(l.at(BUFFER) as u32), I(9)])?;
+        a.int3()?;
+        a.set_label(&mut back)?;
+        a.cmp(dword_ptr(l.at(COUNTER)), 1)?;
+        check(a, false, 0)?;
+        a.mov(eax, ebx)?;
+        a.xor(eax, 0x55)?;
+        a.ret()
+    });
+    let (code, text) = run_files("msvcrt_longjmp_seh", &[("T.EXE", exe)]);
+    assert_eq!(code ^ 0x55, 1, "the __finally didn't run once: {}", text);
 }
 
 /// The last FreeLibrary of MSVCRT.DLL, as a probe measured it on Windows
@@ -5134,8 +7893,8 @@ fn a_program_formats_text_and_enumerates_locales() {
             a.cmp(dword_ptr(l.at(0x60)), 0x0078_2D35)?;
             a.sete(al)?;
             a.and(bl, al)?;
-            // One locale, then TRUE. The call over the callback pushes its
-            // address, the first argument.
+            // Every locale of win32_locale, then TRUE. The call over
+            // the callback pushes its address, the first argument.
             let mut enumerate = a.create_label();
             a.push(1)?;
             a.call(enumerate)?;
@@ -5145,7 +7904,8 @@ fn a_program_formats_text_and_enumerates_locales() {
             a.ret_1(4)?;
             a.set_label(&mut enumerate)?;
             a.call(f("EnumSystemLocalesA"))?;
-            a.cmp(dword_ptr(l.at(0x48)), 1)?;
+            let locales = rust_dos::win32::nls::LOCALES.len() as u32;
+            a.cmp(dword_ptr(l.at(0x48)), locales)?;
             a.sete(cl)?;
             a.cmp(eax, 1)?;
             a.sete(al)?;
@@ -5638,6 +8398,114 @@ fn a_program_uses_msvcrt_files_heap_and_callbacks() {
     assert_eq!(code, 0);
 }
 
+/// qsort isn't stable, and bsearch finds one of the elements equal to the
+/// key: which order and which element a program gets depends on the
+/// steps each takes. Max Payne sorts its font's characters by width
+/// before it packs them into the font's texture, and another order of
+/// the characters of equal width gave its menu text other pixels. The
+/// orders here are what MSVCRT.DLL 6.00.8337 gives these elements, key
+/// and tag each, compared by key alone.
+#[test]
+fn msvcrt_qsort_and_bsearch_order_equal_elements_as_visual_cpp_6() {
+    let names: &[&str] = &["qsort", "bsearch", "printf", "exit"];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.dll", names)];
+    let keys = [0u32, 1, 2, 1, 2, 1, 0, 2, 1, 0, 0, 2, 1, 1, 2, 1, 0];
+    let mut d = Data::default();
+    let tag_format = d.text("%d ");
+    let none = d.text("- ");
+    let elements = d.add(
+        &keys
+            .iter()
+            .enumerate()
+            .flat_map(|(tag, key)| [key.to_le_bytes(), (tag as u32).to_le_bytes()])
+            .flatten()
+            .collect::<Vec<u8>>(),
+    );
+    let key = d.add(&[0; 4]);
+    let data_len = d.0.len() as u32;
+    let count = keys.len() as i32;
+    let exe = program(BASE, false, imports, &d.0, |a, l| {
+        // Assembled once to find where the compare function is.
+        let code = |a: &mut CodeAssembler, compare_at: u32| -> Result<CodeLabel, IcedError> {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let mut compare = a.create_label();
+            // (mov is the same length for every address, push isn't.)
+            a.mov(edi, compare_at)?;
+            a.push(edi)?;
+            a.push(8)?;
+            a.push(count)?;
+            a.push(l.at(elements) as i32)?;
+            a.call(f("qsort"))?;
+            a.add(esp, 16)?;
+            // The tags in their order.
+            a.xor(esi, esi)?;
+            let mut next = a.create_label();
+            a.set_label(&mut next)?;
+            a.push(dword_ptr(esi * 8 + l.at(elements + 4)))?;
+            a.push(l.at(tag_format) as i32)?;
+            a.call(f("printf"))?;
+            a.add(esp, 8)?;
+            a.inc(esi)?;
+            a.cmp(esi, count)?;
+            a.jb(next)?;
+            // The element bsearch finds for the keys 0 to 3.
+            a.xor(esi, esi)?;
+            let mut search = a.create_label();
+            a.set_label(&mut search)?;
+            a.mov(dword_ptr(l.at(key)), esi)?;
+            a.push(edi)?;
+            a.push(8)?;
+            a.push(count)?;
+            a.push(l.at(elements) as i32)?;
+            a.push(l.at(key) as i32)?;
+            a.call(f("bsearch"))?;
+            a.add(esp, 20)?;
+            let mut found = a.create_label();
+            let mut printed = a.create_label();
+            a.test(eax, eax)?;
+            a.jne(found)?;
+            a.push(l.at(none) as i32)?;
+            a.call(f("printf"))?;
+            a.add(esp, 4)?;
+            a.jmp(printed)?;
+            a.set_label(&mut found)?;
+            a.push(dword_ptr(eax + 4))?;
+            a.push(l.at(tag_format) as i32)?;
+            a.call(f("printf"))?;
+            a.add(esp, 8)?;
+            a.set_label(&mut printed)?;
+            a.inc(esi)?;
+            a.cmp(esi, 4)?;
+            a.jb(search)?;
+            a.push(0)?;
+            a.call(f("exit"))?;
+            a.int3()?;
+            // compare(a, b): the keys' order.
+            a.set_label(&mut compare)?;
+            a.mov(eax, dword_ptr(esp + 4))?;
+            a.mov(eax, dword_ptr(eax))?;
+            a.mov(ecx, dword_ptr(esp + 8))?;
+            a.sub(eax, dword_ptr(ecx))?;
+            a.ret()?;
+            Ok(compare)
+        };
+        let label = code(a, 0)?;
+        let ip = (l.data + data_len).next_multiple_of(0x1000) as u64;
+        let options = iced_x86::BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS;
+        let result = a.assemble_options(ip, options)?;
+        let compare_at = result.label_ip(&label)? as u32;
+        a.reset();
+        code(a, compare_at)?;
+        Ok(())
+    });
+    let (code, text) = run("msvcrt_sort", exe);
+    assert_eq!(
+        text, "9 16 6 10 0 5 3 1 8 13 12 15 11 14 4 2 7 10 8 11 - ",
+        "the order and the elements found"
+    );
+    assert_eq!(code, 0);
+}
+
 #[test]
 fn a_program_catches_its_cxx_exceptions() {
     let names: &[&str] = &["__CxxFrameHandler", "_CxxThrowException", "printf", "exit"];
@@ -5831,6 +8699,347 @@ fn a_program_catches_its_cxx_exceptions() {
     let (code, text) = run("msvcrt_cxx", exe);
     assert_eq!(text, "f\r\n");
     assert_eq!(code, 0);
+}
+
+/// A program whose functions make their frames with MSVCRT's
+/// `_EH_prolog`, as Visual C++ 6 builds them. It prints in hex the bits
+/// of what held:
+/// 1     EBX, ECX, EDX, ESI and EDI kept through the call
+/// 2     EAX the return address
+/// 4     EBP where the return address was, with the caller's EBP there
+///       and the function's return address above it
+/// 8     below EBP the state -1, the handler and the old fs:[0]
+/// 10h   fs:[0] and ESP the frame, at EBP - 0Ch
+/// 20h   the function's epilogue back in its caller with ESP, EBP and
+///       fs:[0] as before the call
+/// 40h   a char * thrown two frames up caught in the outer frame
+/// 80h   on after its try with the function's ESP
+/// 100h  the object of the inner frame destroyed once on the way
+/// 200h  the outer function back in its caller with ESP, EBP and fs:[0]
+///       as before the call
+fn eh_prolog_program() -> Vec<u8> {
+    let names: &[&str] = &[
+        "_EH_prolog",
+        "__CxxFrameHandler",
+        "_CxxThrowException",
+        "printf",
+        "exit",
+    ];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.dll", names)];
+    let mut d = Data::default();
+    let boom = d.text("boom");
+    let bits_format = d.text("%x\n");
+    let char_pointer = d.add(&[0; 8]);
+    d.text(".PAD");
+    let catchable = d.add(&[0; 28]);
+    let list = d.add(&[0; 8]);
+    let throw_info = d.add(&[0; 16]);
+    let thrown = d.add(&[0; 4]);
+    // The outer function: a try (state 0) with a catch (char *) into
+    // EBP - 14h. The inner one: an object (state 0) `destroy` destroys.
+    let outer = d.add(&[0; 28]);
+    let outer_unwind = d.add(&[0; 16]);
+    let outer_try = d.add(&[0; 20]);
+    let outer_handler = d.add(&[0; 16]);
+    let inner = d.add(&[0; 28]);
+    let inner_unwind = d.add(&[0; 8]);
+    let destroyed = d.add(&[0; 4]);
+    let bits = d.add(&[0; 4]);
+    let saved_fs = d.add(&[0; 4]);
+    let esp_before = d.add(&[0; 4]);
+    let outer_esp = d.add(&[0; 4]);
+    let data_len = d.0.len() as u32;
+    const CALLER_EBP: u32 = 0x1234_5678;
+    const KEPT: [(AsmRegister32, u32); 5] = [
+        (ebx, 0xB0B0_B0B0),
+        (ecx, 0xC0C0_C0C0),
+        (edx, 0xD0D0_D0D0),
+        (esi, 0x5151_5151),
+        (edi, 0xD1D1_D1D1),
+    ];
+    program(BASE, false, imports, &d.0, |a, l| {
+        let code = |a: &mut CodeAssembler, at: [u32; 7]| -> Result<[CodeLabel; 7], IcedError> {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let [
+                outer_thunk_at,
+                inner_thunk_at,
+                catch_at,
+                destroy_at,
+                after_at,
+                prolog_back,
+                main_back_at,
+            ] = at;
+            let mut outer_thunk = a.create_label();
+            let mut inner_thunk = a.create_label();
+            let mut outer_catch = a.create_label();
+            let mut destroy = a.create_label();
+            let mut after = a.create_label();
+            let mut after_prolog = a.create_label();
+            let mut main_back = a.create_label();
+            let mut probe = a.create_label();
+            let mut outer_function = a.create_label();
+            let mut inner_function = a.create_label();
+            let mut thrower = a.create_label();
+            let mut as_before = a.create_label();
+            let set = |a: &mut CodeAssembler, bit: u32| a.or(dword_ptr(l.at(bits)), bit as i32);
+            let put = |a: &mut CodeAssembler, offset: u32, value: u32| {
+                a.mov(dword_ptr(l.at(offset)), value as i32)
+            };
+            let data = |offset: u32| l.at(offset) as u32;
+            // The tables.
+            put(a, catchable, 1)?;
+            put(a, catchable + 4, data(char_pointer))?;
+            put(a, catchable + 12, u32::MAX)?;
+            put(a, catchable + 20, 4)?;
+            put(a, list, 1)?;
+            put(a, list + 4, data(catchable))?;
+            put(a, throw_info + 12, data(list))?;
+            put(a, outer, 0x1993_0520)?;
+            put(a, outer + 4, 2)?;
+            put(a, outer + 8, data(outer_unwind))?;
+            put(a, outer + 12, 1)?;
+            put(a, outer + 16, data(outer_try))?;
+            put(a, outer_unwind, u32::MAX)?;
+            put(a, outer_unwind + 8, u32::MAX)?;
+            put(a, outer_try + 8, 1)?;
+            put(a, outer_try + 12, 1)?;
+            put(a, outer_try + 16, data(outer_handler))?;
+            put(a, outer_handler + 4, data(char_pointer))?;
+            put(a, outer_handler + 8, -0x14i32 as u32)?;
+            put(a, outer_handler + 12, catch_at)?;
+            put(a, inner, 0x1993_0520)?;
+            put(a, inner + 4, 1)?;
+            put(a, inner + 8, data(inner_unwind))?;
+            put(a, inner_unwind, u32::MAX)?;
+            put(a, inner_unwind + 4, destroy_at)?;
+
+            // The caller: known registers, then the two functions.
+            a.mov(eax, dword_ptr(0u64).fs())?;
+            a.mov(dword_ptr(l.at(saved_fs)), eax)?;
+            a.mov(ebp, CALLER_EBP)?;
+            for (register, value) in KEPT {
+                a.mov(register, value)?;
+            }
+            a.mov(dword_ptr(l.at(esp_before)), esp)?;
+            a.call(probe)?;
+            a.set_label(&mut main_back)?;
+            a.call(as_before)?;
+            let mut skip = a.create_label();
+            a.jne(skip)?;
+            set(a, 0x20)?;
+            a.set_label(&mut skip)?;
+            a.call(outer_function)?;
+            a.call(as_before)?;
+            let mut skip = a.create_label();
+            a.jne(skip)?;
+            set(a, 0x200)?;
+            a.set_label(&mut skip)?;
+            a.push(dword_ptr(l.at(bits)))?;
+            a.push(l.at(bits_format) as i32)?;
+            a.call(f("printf"))?;
+            a.add(esp, 8)?;
+            a.push(0)?;
+            a.call(f("exit"))?;
+            a.int3()?;
+
+            // ZF set if ESP (less this call's return address), EBP and
+            // fs:[0] are as the caller had them before its first call.
+            a.set_label(&mut as_before)?;
+            a.lea(eax, dword_ptr(esp + 4))?;
+            a.cmp(eax, dword_ptr(l.at(esp_before)))?;
+            let mut done = a.create_label();
+            a.jne(done)?;
+            a.cmp(ebp, CALLER_EBP as i32)?;
+            a.jne(done)?;
+            a.mov(eax, dword_ptr(0u64).fs())?;
+            a.cmp(eax, dword_ptr(l.at(saved_fs)))?;
+            a.set_label(&mut done)?;
+            a.ret()?;
+
+            // A function that only makes its frame and takes it down.
+            a.set_label(&mut probe)?;
+            a.mov(eax, outer_thunk_at)?;
+            a.call(f("_EH_prolog"))?;
+            a.set_label(&mut after_prolog)?;
+            let mut skip = a.create_label();
+            for (register, value) in KEPT {
+                a.cmp(register, value as i32)?;
+                a.jne(skip)?;
+            }
+            set(a, 1)?;
+            a.set_label(&mut skip)?;
+            let mut skip = a.create_label();
+            a.cmp(eax, prolog_back as i32)?;
+            a.jne(skip)?;
+            set(a, 2)?;
+            a.set_label(&mut skip)?;
+            let mut skip = a.create_label();
+            a.mov(eax, dword_ptr(l.at(esp_before)))?;
+            a.sub(eax, 8)?;
+            a.cmp(ebp, eax)?;
+            a.jne(skip)?;
+            a.cmp(dword_ptr(ebp), CALLER_EBP as i32)?;
+            a.jne(skip)?;
+            a.cmp(dword_ptr(ebp + 4), main_back_at as i32)?;
+            a.jne(skip)?;
+            set(a, 4)?;
+            a.set_label(&mut skip)?;
+            let mut skip = a.create_label();
+            a.cmp(dword_ptr(ebp - 4), -1)?;
+            a.jne(skip)?;
+            a.cmp(dword_ptr(ebp - 8), outer_thunk_at as i32)?;
+            a.jne(skip)?;
+            a.mov(eax, dword_ptr(l.at(saved_fs)))?;
+            a.cmp(dword_ptr(ebp - 0x0C), eax)?;
+            a.jne(skip)?;
+            set(a, 8)?;
+            a.set_label(&mut skip)?;
+            let mut skip = a.create_label();
+            a.lea(eax, dword_ptr(ebp - 0x0C))?;
+            a.cmp(esp, eax)?;
+            a.jne(skip)?;
+            a.cmp(dword_ptr(0u64).fs(), eax)?;
+            a.jne(skip)?;
+            set(a, 0x10)?;
+            a.set_label(&mut skip)?;
+            a.mov(ecx, dword_ptr(ebp - 0x0C))?;
+            a.mov(dword_ptr(0u64).fs(), ecx)?;
+            a.mov(esp, ebp)?;
+            a.pop(ebp)?;
+            a.ret()?;
+
+            // try { inner(); } catch (char *p) { }
+            a.set_label(&mut outer_function)?;
+            a.mov(eax, outer_thunk_at)?;
+            a.call(f("_EH_prolog"))?;
+            a.sub(esp, 0x10)?;
+            a.mov(dword_ptr(ebp - 0x10), esp)?;
+            a.mov(dword_ptr(l.at(outer_esp)), esp)?;
+            a.mov(dword_ptr(ebp - 4), 0)?;
+            a.call(inner_function)?;
+            a.int3()?;
+
+            a.set_label(&mut outer_catch)?;
+            let mut skip = a.create_label();
+            a.cmp(dword_ptr(ebp - 0x14), data(boom) as i32)?;
+            a.jne(skip)?;
+            set(a, 0x40)?;
+            a.set_label(&mut skip)?;
+            a.mov(eax, after_at)?;
+            a.ret()?;
+
+            a.set_label(&mut after)?;
+            let mut skip = a.create_label();
+            a.cmp(esp, dword_ptr(l.at(outer_esp)))?;
+            a.jne(skip)?;
+            a.cmp(esp, dword_ptr(ebp - 0x10))?;
+            a.jne(skip)?;
+            set(a, 0x80)?;
+            a.set_label(&mut skip)?;
+            let mut skip = a.create_label();
+            a.cmp(dword_ptr(l.at(destroyed)), 1)?;
+            a.jne(skip)?;
+            set(a, 0x100)?;
+            a.set_label(&mut skip)?;
+            a.mov(ecx, dword_ptr(ebp - 0x0C))?;
+            a.mov(dword_ptr(0u64).fs(), ecx)?;
+            a.mov(esp, ebp)?;
+            a.pop(ebp)?;
+            a.ret()?;
+
+            // An object, then a call that throws.
+            a.set_label(&mut inner_function)?;
+            a.mov(eax, inner_thunk_at)?;
+            a.call(f("_EH_prolog"))?;
+            a.push(ecx)?;
+            a.mov(dword_ptr(ebp - 0x10), esp)?;
+            a.mov(dword_ptr(ebp - 4), 0)?;
+            a.call(thrower)?;
+            a.int3()?;
+
+            a.set_label(&mut destroy)?;
+            a.inc(dword_ptr(l.at(destroyed)))?;
+            a.ret()?;
+
+            // throw "boom";
+            a.set_label(&mut thrower)?;
+            put(a, thrown, data(boom))?;
+            a.push(data(throw_info) as i32)?;
+            a.push(data(thrown) as i32)?;
+            a.call(f("_CxxThrowException"))?;
+            a.int3()?;
+
+            a.set_label(&mut outer_thunk)?;
+            a.mov(eax, data(outer))?;
+            a.jmp(f("__CxxFrameHandler"))?;
+            a.set_label(&mut inner_thunk)?;
+            a.mov(eax, data(inner))?;
+            a.jmp(f("__CxxFrameHandler"))?;
+            Ok([
+                outer_thunk,
+                inner_thunk,
+                outer_catch,
+                destroy,
+                after,
+                after_prolog,
+                main_back,
+            ])
+        };
+        // The first pass's addresses take as many bytes as the real ones:
+        // CMP with a value below 80h has a shorter form.
+        let labels = code(a, [BASE; 7])?;
+        let ip = (l.data + data_len).next_multiple_of(0x1000) as u64;
+        let options = iced_x86::BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS;
+        let result = a.assemble_options(ip, options)?;
+        let mut at = [0; 7];
+        for (i, label) in labels.iter().enumerate() {
+            at[i] = result.label_ip(label)? as u32;
+        }
+        a.reset();
+        code(a, at)?;
+        Ok(())
+    })
+}
+
+/// MSVCRT's `__setlc_active` and `__unguarded_readlc_active` are
+/// variables the program can write, as MSVCP60's locale code does: it
+/// counts itself in and out of the second with InterlockedIncrement and
+/// InterlockedDecrement (Max Payne). The first is 0 while no setlocale
+/// runs. The program ends with the count it wrote and read back in the
+/// low four bits and the first variable above them: 1.
+#[test]
+fn msvcrt_locale_guards_are_variables() {
+    let names: &[&str] = &["__setlc_active", "__unguarded_readlc_active", "exit"];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.dll", names)];
+    let exe = program(BASE, false, imports, &[], |a, l| {
+        a.mov(eax, l.import(1))?;
+        a.lock().inc(dword_ptr(eax))?;
+        a.mov(ecx, dword_ptr(eax))?;
+        a.mov(eax, l.import(0))?;
+        a.mov(edx, dword_ptr(eax))?;
+        a.shl(edx, 4)?;
+        a.add(ecx, edx)?;
+        a.push(ecx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let (code, _) = run("msvcrt_locale_guards", exe);
+    assert_eq!(code, 1);
+}
+
+/// MSVCRT's `_EH_prolog` makes the frame Visual C++ 6's code asks of it
+/// (Max Payne's DLLs call it), and __CxxFrameHandler and
+/// _CxxThrowException catch and unwind through such frames, on both
+/// cores.
+#[test]
+fn eh_prolog_frames_hold_cxx_exceptions_on_both_cores() {
+    for core in [CoreMode::Normal, CoreMode::Dynamic] {
+        let mut cpu = machine(&format!("eh_prolog_{core:?}"), eh_prolog_program());
+        cpu.core = core;
+        assert!(run_to_exit(&mut cpu, 200), "{core:?}: {}", printed(&cpu));
+        assert_eq!(printed(&cpu), "3ff\r\n", "{core:?}");
+        assert_eq!(cpu.errorlevel, 0, "{core:?}");
+    }
 }
 
 /// What a script for `update_script` does to the window, or checks.
@@ -12097,4 +15306,161 @@ fn an_olepro32_function_not_written_fails_guest_code_with_e_notimpl() {
     });
     let (code, out) = run_with_guest_dll("olepro32_guest", exe, "OLEUSER.DLL", dll, false);
     assert_eq!(code, 3, "the checks that failed: {:02b} {out}", !code & 3);
+}
+
+/// An argument for `call_pushing`: a number or a register's value.
+#[derive(Clone, Copy)]
+enum Pushed {
+    Imm(i32),
+    Reg(AsmRegister32),
+}
+
+/// Call `function` with `args`, pushed last first, as stdcall takes them.
+fn call_pushing(
+    a: &mut CodeAssembler,
+    function: AsmMemoryOperand,
+    args: &[Pushed],
+) -> Result<(), IcedError> {
+    for &arg in args.iter().rev() {
+        match arg {
+            Pushed::Imm(v) => a.push(v)?,
+            Pushed::Reg(r) => a.push(r)?,
+        }
+    }
+    a.call(function)
+}
+
+/// WinG's WING32.DLL, which 32-bit games of 1995 import and their setups
+/// installed: WinGRecommendDIBFormat gives an 8-bit top-down format;
+/// WinGCreateBitmap makes a DIB section of a BITMAPINFO and writes its
+/// bits' address, which WinGGetDIBPointer gives with the header;
+/// WinGBitBlt and WinGStretchBlt copy between two WinG DCs; the colour
+/// table functions read and write the selected bitmap's table; and the
+/// halftone palette and brush are made. The program ends with the
+/// number of the first check that went wrong, or 0.
+#[test]
+fn wing32_makes_dib_bitmaps_and_blits_between_them() {
+    use Pushed::{Imm, Reg};
+    let wing: &[&str] = &[
+        "WinGRecommendDIBFormat",
+        "WinGCreateDC",
+        "WinGCreateBitmap",
+        "WinGGetDIBPointer",
+        "WinGBitBlt",
+        "WinGStretchBlt",
+        "WinGGetDIBColorTable",
+        "WinGSetDIBColorTable",
+        "WinGCreateHalftonePalette",
+        "WinGCreateHalftoneBrush",
+    ];
+    let imports: &[(&str, &[&str])] = &[("WING32.DLL", wing), ("GDI32.DLL", &["SelectObject"])];
+    let names: Vec<&str> = imports.iter().flat_map(|(_, n)| n.iter().copied()).collect();
+    // The BITMAPINFO at 0 with two colours at 0x28, the bits' addresses
+    // at 0x80 and 0x84, colours read at 0x90, a header at 0x100.
+    let (info, bits1, bits2, read, header) = (0u32, 0x80, 0x84, 0x90, 0x100);
+    let mut data = vec![0; 0x140];
+    data[0x28..0x30].copy_from_slice(&[0x33, 0x22, 0x11, 0, 0x66, 0x55, 0x44, 0]);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| Imm(l.at(offset) as i32);
+        let mut wrong = a.create_label();
+        let mut number = 0;
+        // Check that the doubleword at `offset` of the data is `value`.
+        let mut expect = |a: &mut CodeAssembler, offset: u32, value: i32| {
+            number += 1;
+            a.mov(ebx, number)?;
+            a.cmp(dword_ptr(l.at(offset)), value)?;
+            a.jne(wrong)
+        };
+        // EAX kept at 0x130 to check it.
+        let keep = |a: &mut CodeAssembler| a.mov(dword_ptr(l.at(0x130)), eax);
+
+        call_pushing(a, f("WinGRecommendDIBFormat"), &[at(info)])?;
+        keep(a)?;
+        expect(a, 0x130, 1)?;
+        expect(a, info, 40)?;
+        expect(a, info + 8, -1)?;
+        expect(a, info + 12, 0x0008_0001)?;
+        // 4 by 4 pixels, top-down, two colours.
+        a.mov(dword_ptr(l.at(info + 4)), 4)?;
+        a.mov(dword_ptr(l.at(info + 8)), -4)?;
+        a.mov(dword_ptr(l.at(info + 32)), 2)?;
+        // A DC in ESI and one in EDI, each with a bitmap selected; the
+        // second bitmap's handle stays in EBP.
+        for (dc, out) in [(esi, bits1), (edi, bits2)] {
+            call_pushing(a, f("WinGCreateDC"), &[])?;
+            a.mov(dc, eax)?;
+            call_pushing(a, f("WinGCreateBitmap"), &[Reg(dc), at(info), at(out)])?;
+            a.mov(ebp, eax)?;
+            call_pushing(a, f("SelectObject"), &[Reg(dc), Reg(ebp)])?;
+        }
+        call_pushing(a, f("WinGGetDIBPointer"), &[Reg(ebp), at(header)])?;
+        keep(a)?;
+        a.mov(eax, dword_ptr(l.at(bits2)))?;
+        a.mov(ebx, 100)?;
+        a.test(eax, eax)?;
+        a.je(wrong)?;
+        a.cmp(eax, dword_ptr(l.at(0x130)))?;
+        a.jne(wrong)?;
+        expect(a, header + 4, 4)?;
+        expect(a, header + 8, -4)?;
+        // Index 1 in the first row of the first bitmap, copied to the
+        // second's first row, then stretched to its rows 1 and 2.
+        a.mov(eax, dword_ptr(l.at(bits1)))?;
+        a.mov(dword_ptr(eax), 0x0101_0101)?;
+        let blt = [Reg(edi), Imm(0), Imm(0), Imm(4), Imm(1), Reg(esi), Imm(0), Imm(0)];
+        call_pushing(a, f("WinGBitBlt"), &blt)?;
+        keep(a)?;
+        expect(a, 0x130, 1)?;
+        let stretch = [
+            Reg(edi),
+            Imm(0),
+            Imm(1),
+            Imm(4),
+            Imm(2),
+            Reg(esi),
+            Imm(0),
+            Imm(0),
+            Imm(4),
+            Imm(1),
+        ];
+        call_pushing(a, f("WinGStretchBlt"), &stretch)?;
+        keep(a)?;
+        expect(a, 0x130, 1)?;
+        for (row, value) in [(0, 0x0101_0101), (1, 0x0101_0101), (2, 0x0101_0101), (3, 0)] {
+            a.mov(eax, dword_ptr(l.at(bits2)))?;
+            a.mov(eax, dword_ptr(eax + 4 * row))?;
+            keep(a)?;
+            expect(a, 0x130, value)?;
+        }
+        // The colour table: entry 1 read, then entry 0 set to entry 1's
+        // colour and read back.
+        let get = [Reg(esi), Imm(1), Imm(1), at(read)];
+        call_pushing(a, f("WinGGetDIBColorTable"), &get)?;
+        keep(a)?;
+        expect(a, 0x130, 1)?;
+        expect(a, read, 0x0044_5566)?;
+        let set = [Reg(esi), Imm(0), Imm(1), at(0x2C)];
+        call_pushing(a, f("WinGSetDIBColorTable"), &set)?;
+        keep(a)?;
+        expect(a, 0x130, 1)?;
+        let get = [Reg(esi), Imm(0), Imm(1), at(read + 4)];
+        call_pushing(a, f("WinGGetDIBColorTable"), &get)?;
+        expect(a, read + 4, 0x0044_5566)?;
+        call_pushing(a, f("WinGCreateHalftonePalette"), &[])?;
+        a.mov(ebx, 200)?;
+        a.test(eax, eax)?;
+        a.je(wrong)?;
+        let brush = [Reg(esi), Imm(0xFF), Imm(0)];
+        call_pushing(a, f("WinGCreateHalftoneBrush"), &brush)?;
+        a.mov(ebx, 201)?;
+        a.test(eax, eax)?;
+        a.je(wrong)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut wrong)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, out) = run("wing32", exe);
+    assert_eq!(code, 0, "check {code} went wrong {out}");
 }

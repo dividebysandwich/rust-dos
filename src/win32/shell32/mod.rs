@@ -164,6 +164,7 @@ static APIS: &[Api] = &[
     stdcall("SHGetNewLinkInfo", 286, 5, info::sh_get_new_link_info),
     stdcall("BrowseDialogProc", 0, 4, browse::dialog_proc),
     stdcall("CommandLineToArgvW", 125, 2, exec::command_line_to_argv),
+    stdcall("SHAppBarMessage", 264, 2, sh_app_bar_message),
 ];
 
 /// The vtables, by their places in this list (link.rs's constants).
@@ -287,6 +288,32 @@ fn null(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 fn nothing(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(0)
+}
+
+/// SHAppBarMessage(message, data): SHELL32 passes the message to the
+/// taskbar's window, and answers 0 to every message when there is none,
+/// as on a Windows 95 whose shell isn't Explorer; Wine's SHELL32 does
+/// the same when it finds no appbar window. There is no taskbar here,
+/// and the work area is the whole screen (SPI_GETWORKAREA), so:
+///
+/// - ABM_NEW fails: no window becomes an application bar, and a program
+///   that wanted one stays an ordinary window, which the documented
+///   failure tells it. Taking the bar and ignoring it would leave the
+///   work area the whole screen, under a bar the program thinks it
+///   reserved.
+/// - ABM_REMOVE, ABM_QUERYPOS, ABM_SETPOS, ABM_ACTIVATE and
+///   ABM_WINDOWPOSCHANGED, which a program sends for the bar it
+///   registered, have none to act on. The rectangle of ABM_QUERYPOS
+///   stays the program's.
+/// - ABM_GETSTATE: neither auto-hide nor always on top.
+/// - ABM_GETTASKBARPOS fails: there is no taskbar to give the place of,
+///   and the APPBARDATA stays as the program gave it.
+/// - ABM_GETAUTOHIDEBAR is NULL at every edge (Myth II asks for each
+///   edge before it takes the screen), and ABM_SETAUTOHIDEBAR fails.
+///
+/// The data is never read, so a short cbSize changes nothing.
+fn sh_app_bar_message(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }
 

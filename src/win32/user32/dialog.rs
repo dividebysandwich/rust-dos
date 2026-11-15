@@ -35,9 +35,9 @@ use super::{
     current_tid, make_long, read_words, set_error, user, write_words,
 };
 use crate::cpu::Cpu;
-use crate::win32::convert::CodePage;
 use crate::win32::gdi32::{self, Font, Kind, Rect};
 use crate::win32::kernel32;
+use crate::win32::nls::{self, CodePage};
 use crate::win32::task::{self, Next, Task};
 
 /// The dialog task's place in `task::TASKS`.
@@ -895,16 +895,13 @@ fn item(cpu: &mut Cpu, at: u32, ex_form: bool) -> (Item, u32) {
     (item, (p + 3) & !3)
 }
 
-/// UTF-16 to the ANSI code page.
-fn ansi(units: &[u16]) -> Vec<u8> {
-    units
-        .iter()
-        .map(|&c| CodePage::Ansi.byte(c).unwrap_or(b'?'))
-        .collect()
+/// UTF-16 to the code page `page`, and back.
+fn ansi(page: CodePage, units: &[u16]) -> Vec<u8> {
+    page.encode(units)
 }
 
-fn wide(bytes: &[u8]) -> Vec<u16> {
-    bytes.iter().map(|&b| CodePage::Ansi.char(b)).collect()
+fn wide(page: CodePage, bytes: &[u8]) -> Vec<u16> {
+    page.decode(bytes)
 }
 
 /// Write `bytes` and a 0 to the `size` bytes at `at`: `at`.
@@ -921,14 +918,19 @@ fn put_name(cpu: &mut Cpu, at: u32, size: u32, name: &Res, number_as_text: bool)
         Res::None => 0,
         Res::Id(n) if number_as_text => put(cpu, at, size, format!("#{}", n).as_bytes()),
         Res::Id(n) => *n as u32,
-        Res::Text(s) => put(cpu, at, size, &ansi(s)),
+        Res::Text(s) => {
+            let text = ansi(nls::ansi(cpu), s);
+            put(cpu, at, size, &text)
+        }
     }
 }
 
-/// The LOGFONTA of a template's font.
-fn template_font(h: &Header) -> Vec<u8> {
+/// The LOGFONTA of a template's font, its face's name in the system's
+/// ANSI code page.
+fn template_font(cpu: &Cpu, h: &Header) -> Vec<u8> {
+    let page = nls::ansi(cpu);
     if h.point == 0x7FFF {
-        return super::sysparams::sans_serif(false);
+        return super::sysparams::sans_serif(cpu, false);
     }
     // Points to pixels at 96 dots an inch, negative for the em height.
     let pixels = mul_div(h.point as i16 as i32, 96, 72);
@@ -943,7 +945,7 @@ fn template_font(h: &Header) -> Vec<u8> {
     log[20] = h.italic;
     // PROOF_QUALITY.
     log[26] = 2;
-    let face = ansi(&h.face);
+    let face = ansi(page, &h.face);
     let n = face.len().min(31);
     log[28..28 + n].copy_from_slice(&face[..n]);
     log
@@ -1196,7 +1198,10 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let name = match &h.menu {
                 Res::None => return goto(91),
                 Res::Id(n) => *n as u32,
-                Res::Text(s) => put(cpu, t.scratch + CLASS_AT, CLASS_SIZE, &ansi(s)),
+                Res::Text(s) => {
+                    let text = ansi(nls::ansi(cpu), s);
+                    put(cpu, t.scratch + CLASS_AT, CLASS_SIZE, &text)
+                }
             };
             call_api("LoadMenuA", &[t.var(C_INST), name], 91)
         }
@@ -1209,7 +1214,7 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             };
             let (mut xb, mut yb) = base_units(cpu);
             if !msgbox && h.style & DS_SETFONT != 0 {
-                let log = template_font(&h);
+                let log = template_font(cpu, &h);
                 let font = gdi32::add(cpu, Kind::Font { font: Font { log } });
                 t.set(C_FONT, font);
                 if font != 0 {
@@ -1318,7 +1323,8 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 Res::None => DIALOG_ATOM,
                 name => put_name(cpu, s + CLASS_AT, CLASS_SIZE, name, false),
             };
-            let caption = put(cpu, s + TITLE_AT, TITLE_SIZE, &ansi(&h.caption));
+            let caption = ansi(nls::ansi(cpu), &h.caption);
+            let caption = put(cpu, s + TITLE_AT, TITLE_SIZE, &caption);
             let (x, y) = if t.var(C_POS) == CW_USEDEFAULT {
                 (CW_USEDEFAULT, CW_USEDEFAULT)
             } else {
@@ -2693,13 +2699,14 @@ pub fn message_box(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// MessageBoxW and MessageBoxExW: their strings in the ANSI code page.
 pub fn message_box_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let acp = nls::ansi(cpu);
     let text = match args[1] {
         0 => Vec::new(),
-        at => ansi(&wide_string(cpu, at).0),
+        at => ansi(acp, &wide_string(cpu, at).0),
     };
     let caption = match args[2] {
         0 => b"Error".to_vec(),
-        at => ansi(&wide_string(cpu, at).0),
+        at => ansi(acp, &wide_string(cpu, at).0),
     };
     if cpu.bus.guest_faulted() {
         return None;
@@ -2722,7 +2729,7 @@ pub fn message_box_indirect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// A string of the module's string table, in the ANSI code page.
 fn load_string(cpu: &mut Cpu, inst: u32, id: u32) -> Option<Vec<u8>> {
     let units = super::resource::string_units(cpu, inst, id)?.unwrap_or_default();
-    Some(ansi(&units))
+    Some(ansi(nls::ansi(cpu), &units))
 }
 
 /// A message box's text: a string, or a string table's number.
@@ -2897,14 +2904,15 @@ fn box_template(
     }
     b.u16(0);
     b.u16(0);
-    b.string(&wide(caption));
+    let acp = nls::ansi(cpu);
+    b.string(&wide(acp, caption));
     if icon {
         let r = Rect::sized(ileft, (tiheight - iheight) / 2, iwidth, iheight);
         b.control(WS_CHILD | WS_VISIBLE | SS_ICON, r, MSGBOX_IDICON, 0x82, &[]);
     }
     let r = Rect::sized(tleft, (tiheight - theight) / 2, twidth, theight);
     let text_style = WS_CHILD | WS_VISIBLE | WS_GROUP | SS_NOPREFIX;
-    b.control(text_style, r, MSGBOX_IDTEXT, 0x82, &wide(text));
+    b.control(text_style, r, MSGBOX_IDTEXT, 0x82, &wide(acp, text));
     // Left to right in BUTTON_ORDER; the default is the one MB_DEFMASK
     // counts to.
     let default = ((style & MB_DEFMASK) >> 8) as usize;
@@ -2961,7 +2969,7 @@ fn message_box_with(
     } else {
         0
     };
-    let log = super::sysparams::sans_serif(false);
+    let log = super::sysparams::sans_serif(cpu, false);
     let font = gdi32::add(cpu, Kind::Font { font: Font { log } });
     let (template, default_id) = box_template(cpu, font, &text, &caption, style, icon != 0);
     let Some(pages) = kernel32::alloc_pages(cpu, template.len() as u32) else {

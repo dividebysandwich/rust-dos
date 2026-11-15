@@ -56,6 +56,8 @@ pub(super) enum Item {
     /// Frames shown when the machine's are due, for a display with a
     /// variable refresh rate.
     Vrr,
+    /// The most frames a second a program may show, on any card.
+    FpsCap,
     /// The picture in a 3D scene, the scene, what a headset's controllers
     /// do and whether the sound follows the viewer.
     VrMode,
@@ -146,7 +148,6 @@ pub(super) enum Item {
     VoodooDither,
     VoodooAnisotropy,
     VoodooTextureSampling,
-    VoodooFpsCap,
     VoodooGamma,
     /// Fetch Glide's DOS overlay (GLIDE2X.OVL).
     VoodooOverlay,
@@ -158,6 +159,10 @@ pub(super) enum Item {
     /// The dump of a Vérité board's ROM the RISC sees.
     VeriteRom,
     VeriteIrq,
+    /// The megabytes of memory a ToadForce has.
+    ToadForceMemory,
+    /// What draws a ToadForce's triangles.
+    ToadForceRenderer,
     Memsize,
     /// Expanded memory and upper memory blocks.
     Ems,
@@ -319,6 +324,7 @@ impl Item {
             Fullscreen => "Fullscreen",
             Aspect => "Fixed aspect ratio",
             Vrr => "Variable refresh rate",
+            FpsCap => "Frame rate cap",
             VrMode => "3D scene",
             VrScene => "Scene",
             VrControllers => "Headset controllers",
@@ -379,7 +385,6 @@ impl Item {
             VoodooDither => "3dfx dithering",
             VoodooAnisotropy => "3dfx anisotropic filtering",
             VoodooTextureSampling => "3dfx texture sampling",
-            VoodooFpsCap => "3dfx frame rate cap",
             VoodooGamma => "3dfx gamma",
             VoodooOverlay => "  Download Glide's DOS overlay...",
             PowerVr => "PowerVR card",
@@ -388,6 +393,8 @@ impl Item {
             VeriteMhz => "  RISC speed",
             VeriteRom => "  Board ROM",
             VeriteIrq => "  Vérité IRQ",
+            ToadForceMemory => "  ToadForce memory",
+            ToadForceRenderer => "  ToadForce drawn by",
             Ems => "Expanded memory (EMS)",
             Umb => "Upper memory (UMB)",
             DosHigh => "DOS high",
@@ -540,6 +547,7 @@ impl Item {
             Item::Core => crate::dynrec::AVAILABLE,
             // The browser draws with the emulator's own rasterizer only.
             Item::VoodooRenderer
+            | Item::ToadForceRenderer
             | Item::VoodooScale
             | Item::VoodooScaleShader
             | Item::VoodooMsaa
@@ -614,9 +622,10 @@ impl Item {
             Item::ChorusMix => s.mixer.chorus != ChorusPreset::Off,
             Item::RewindMemory => s.rewind,
             Item::AutoFps | Item::AutoBusyOs => matches!(s.cycles, CpuSpeed::Auto(_)),
-            Item::VoodooMemory | Item::VoodooRenderer | Item::VoodooTextureSampling | Item::VoodooFpsCap | Item::VoodooGamma => s.voodoo.enabled,
+            Item::VoodooMemory | Item::VoodooRenderer | Item::VoodooTextureSampling | Item::VoodooGamma => s.voodoo.enabled,
             Item::PowerVrFilter => s.powervr.is_some(),
             Item::VeriteRisc | Item::VeriteIrq => s.machine.is_verite(),
+            Item::ToadForceMemory | Item::ToadForceRenderer => s.machine.is_toadforce(),
             Item::VeriteMhz | Item::VeriteRom => {
                 s.machine.is_verite() && s.verite.risc == crate::verite::Risc::Lle
             }
@@ -653,11 +662,12 @@ impl Item {
     pub(super) fn applies(self) -> Applies {
         use Item::*;
         match self {
-            Scale | Fullscreen | Aspect | Vrr | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
+            Scale | Fullscreen | Aspect | Vrr | FpsCap | Filter | Shader | CrtCurvature | CrtGlow | Composite | CompositeEra => {
                 Applies::Now
             }
             Cycles | AutoFps | AutoBusyOs | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | PauseInSettings | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
-            | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooDither | VoodooTextureSampling | VoodooAnisotropy | VoodooFpsCap | VoodooOverlay | PowerVrFilter => Applies::Now,
+            | ToadForceRenderer
+            | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooDither | VoodooTextureSampling | VoodooAnisotropy | VoodooOverlay | PowerVrFilter => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             MonitorEffects => Applies::Now,
             Post => Applies::NextStart,
@@ -713,6 +723,11 @@ impl Item {
             Fullscreen => on_off(s.fullscreen),
             Aspect => s.aspect.name().to_string(),
             Vrr => on_off(s.vrr),
+            FpsCap => match s.fps_cap {
+                crate::frame_cap::Cap::Auto => "Auto".to_string(),
+                crate::frame_cap::Cap::Off => "Off".to_string(),
+                crate::frame_cap::Cap::Fps(n) => format!("{} fps", n),
+            },
             VrMode => match s.vr.mode {
                 crate::vr::VrMode::Off => "off",
                 crate::vr::VrMode::Desktop => "3d in 2d window",
@@ -809,7 +824,7 @@ impl Item {
             Fpu => if s.fpu_fast { "fast (not exact)" } else { "exact" }.to_string(),
             Cpu => s.cpu.describe().to_string(),
             Machine => s.machine.describe().to_string(),
-            Memsize => memsize_bar(s.memsize, s.cpu),
+            Memsize => memsize_bar(s),
             Voodoo => on_off(s.voodoo.enabled),
             VoodooMemory => s.voodoo.board.describe().to_string(),
             VoodooRenderer => match s.voodoo.renderer {
@@ -831,10 +846,6 @@ impl Item {
             VoodooAnisotropy => match s.voodoo.anisotropy {
                 1 => "Off".to_string(),
                 n => format!("{}x anisotropic", n),
-            },
-            VoodooFpsCap => match s.voodoo.fps_cap {
-                None => "Off".to_string(),
-                Some(n) => format!("{} fps", n),
             },
             VoodooGamma => match s.voodoo.gamma {
                 None => "Off".to_string(),
@@ -858,6 +869,12 @@ impl Item {
                 None => "Built-in loader".to_string(),
             },
             VeriteIrq => s.verite.irq.to_string(),
+            ToadForceMemory => format!("{} MB", s.toadforce_memory),
+            ToadForceRenderer => match s.toadforce_renderer {
+                crate::toadforce::Renderer::Auto => "Automatic".to_string(),
+                crate::toadforce::Renderer::OpenGl => "OpenGL".to_string(),
+                crate::toadforce::Renderer::Software => "Rust-DOS".to_string(),
+            },
             PowerVrFilter => match s.powervr_filter {
                 crate::powervr::tsp::Filter::Auto => "As the game sets it",
                 crate::powervr::tsp::Filter::Point => "Point (blocky)",

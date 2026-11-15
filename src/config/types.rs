@@ -201,6 +201,19 @@ impl DesktopDepth {
     }
 }
 
+pub use crate::win32::nls::Win32Locale;
+
+impl Win32Locale {
+    /// A locale name such as "ru-RU", in any case, with a hyphen or an
+    /// underscore.
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim().replace('_', "-");
+        Self::ALL
+            .into_iter()
+            .find(|l| l.name().eq_ignore_ascii_case(&s))
+    }
+}
+
 /// Which calls of the built-in Windows' functions the log gets a line
 /// for (`win32_trace`): every call; the first few of each call site's
 /// calls a second and a count of the rest (src/win32/trace.rs); or none.

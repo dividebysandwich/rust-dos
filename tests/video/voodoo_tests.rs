@@ -683,6 +683,39 @@ fn a_string_move_into_the_frame_buffer_writes_what_its_dwords_write() {
 }
 
 #[test]
+fn a_services_copy_into_the_frame_buffer_goes_in_words_and_dwords() {
+    // GDI's rows on the DC of a surface on the card (issue 910) go
+    // through the services' copies, which the card has to take as a
+    // program's copy would: no bytes, which it ignores. Ten pixels from
+    // an odd one (a word, four dwords, a word), read back the same, then
+    // four of them filled from another odd one.
+    let mut bus = bus(Board::Standard);
+    init(&mut bus);
+    w(&mut bus, LFB_MODE, 0);
+    let row: Vec<u8> = (0..20u32).map(|i| (i * 37 + 5) as u8).collect();
+    let at = |x: usize| (BASE + 0x40_0000 + 3 * 2048 + 2 * x) as u32;
+    bus.guest_write_bytes(at(1), &row);
+    for x in 0..12 {
+        let want = match x {
+            1..=10 => u16::from_le_bytes([row[2 * x - 2], row[2 * x - 1]]),
+            _ => 0,
+        };
+        assert_eq!(pixel(&bus, 0, x, 3), want, "pixel {x}");
+    }
+    let mut back = vec![0; row.len()];
+    bus.guest_read_bytes(at(1), &mut back);
+    assert_eq!(back, row, "read back");
+    bus.guest_fill(at(3), 8, 0x5A);
+    for x in 2..8 {
+        let want = match x {
+            3..=6 => 0x5A5A,
+            _ => u16::from_le_bytes([row[2 * x - 2], row[2 * x - 1]]),
+        };
+        assert_eq!(pixel(&bus, 0, x, 3), want, "filled pixel {x}");
+    }
+}
+
+#[test]
 fn a_string_move_into_a_banshee_writes_what_its_dwords_write() {
     const BAR1: usize = 0xD200_0000;
     const D3: usize = BASE + 0x20_0000;
@@ -741,6 +774,58 @@ fn a_string_move_into_a_banshee_writes_what_its_dwords_write() {
     // Above the tile base, BAR1 is tiled: a dword at a time.
     one.write_32(BASE + 0x0C, 0);
     assert!(!one.move_to_voodoo(0x1000, memory, bytes.len(), 4, false));
+}
+
+#[test]
+fn a_services_bytes_reach_a_banshees_memory_as_byte_accesses_do() {
+    const BAR1: usize = 0xD200_0000;
+    let memory = BAR1 + 0x10_0000;
+    // An odd start and length, as a row of a 16-bit surface GDI blits
+    // onto from an odd column: 3 bytes into a dword, 37 bytes.
+    let at = memory + 3;
+    let bytes: Vec<u8> = (0..37u32).map(|i| (i * 53 + 7) as u8).collect();
+    let (mut one, mut each) = (bus(Board::Voodoo3), bus(Board::Voodoo3));
+    for bus in [&mut one, &mut each] {
+        bus.set_a20(true);
+        // lfbMemoryConfig: the tile base at the top, all of BAR1 linear.
+        bus.write_32(BASE + 0x0C, 0x1FFF);
+        for i in (0..64).step_by(4) {
+            bus.write_32(memory + i, 0x5A5A_5A5A);
+        }
+    }
+    let dwords = |bus: &Bus| -> Vec<u32> {
+        (0..64)
+            .step_by(4)
+            .map(|i| bus.read_32(memory + i))
+            .collect()
+    };
+    // A service's write in one copy, and the same bytes one at a time.
+    one.guest_write_bytes(at as u32, &bytes);
+    for (i, &b) in bytes.iter().enumerate() {
+        each.write_8(at + i, b);
+    }
+    assert_eq!(dwords(&one), dwords(&each));
+    assert_eq!(one.read_32(memory), 0x075A_5A5A, "before the first");
+    assert_eq!(one.read_8(at + 37), 0x5A, "after the last");
+    // Read back the same ways, with a byte on each side.
+    let mut read = vec![0; bytes.len() + 2];
+    one.guest_read_bytes(at as u32 - 1, &mut read);
+    let each_read: Vec<u8> = (0..read.len()).map(|i| each.read_8(at - 1 + i)).collect();
+    assert_eq!(read, each_read);
+    assert_eq!(read[1..=bytes.len()], bytes[..]);
+    // Above the tile base BAR1 is tiled: its bytes are where the card
+    // lays them out, for a service as for the CPU.
+    for bus in [&mut one, &mut each] {
+        bus.write_32(BASE + 0x0C, 0x100);
+    }
+    one.guest_write_bytes(at as u32, &bytes);
+    for (i, &b) in bytes.iter().enumerate() {
+        each.write_8(at + i, b);
+    }
+    let mut tiled = vec![0; bytes.len()];
+    one.guest_read_bytes(at as u32, &mut tiled);
+    assert_eq!(tiled, bytes);
+    assert_eq!(dwords(&one), dwords(&each));
 }
 
 #[test]
@@ -895,37 +980,74 @@ fn its_swaps_are_the_frames_drawn_while_it_shows() {
 }
 
 #[test]
-fn the_frame_rate_cap_holds_swaps_to_its_frame_times() {
+fn the_frame_rate_cap_holds_swaps_a_frame_time_apart() {
     let mut bus = bus(Board::Standard);
     init(&mut bus);
-    bus.set_voodoo_fps_cap(Some(20));
+    bus.set_fps_cap(Some(20));
     let front = |bus: &Bus| r(bus, STATUS) >> 10 & 3;
-    // The first swap waits for the next 50 ms mark, and the program with it.
+    let due_ms = |ticks: u64| ticks as f64 * 1000.0 / 1_193_182.0;
+    // The first swap happens at once.
     wait_ms(&mut bus, 10.0);
     w(&mut bus, SWAPBUFFER_CMD, 0);
-    assert_eq!(front(&bus), 0, "not swapped yet");
+    assert_eq!(front(&bus), 1, "swapped at once");
+    assert!(bus.hold.is_none());
+    // One soon after waits for its turn, 50 ms after the first, and the
+    // program with it.
+    w(&mut bus, SWAPBUFFER_CMD, 0);
+    assert_eq!(front(&bus), 1, "not swapped yet");
     let hold = bus.hold.expect("the program waits");
-    let due_ms = |ticks: u64| ticks as f64 * 1000.0 / 1_193_182.0;
-    assert!((due_ms(hold.until) - 50.0).abs() < 0.01, "due at {} ms", due_ms(hold.until));
-    wait_ms(&mut bus, 41.0);
-    assert_eq!(front(&bus), 1, "swapped at its time");
-    // A swap soon after waits a whole frame; one later than a frame, for
-    // the next mark.
+    assert!((due_ms(hold.until) - 60.0).abs() < 0.01, "due at {} ms", due_ms(hold.until));
+    wait_ms(&mut bus, 51.0);
+    assert_eq!(front(&bus), 0, "swapped at its time");
+    // One long after its turn happens when it comes, and the turns start
+    // again from it as from a swap a frame time late: the next happens
+    // at once too, and the one after it waits 50 ms from the late one.
+    wait_ms(&mut bus, 270.0);
+    let late = bus.clock.now_ns() as f64 / 1e6;
     w(&mut bus, SWAPBUFFER_CMD, 0);
-    assert!((due_ms(bus.hold.unwrap().until) - 100.0).abs() < 0.01);
-    wait_ms(&mut bus, 50.0);
-    assert_eq!(front(&bus), 0);
-    wait_ms(&mut bus, 70.0);
+    assert_eq!(front(&bus), 1, "a late swap isn't held");
+    wait_ms(&mut bus, 1.0);
     w(&mut bus, SWAPBUFFER_CMD, 0);
-    assert!((due_ms(bus.hold.unwrap().until) - 200.0).abs() < 0.01);
+    assert_eq!(front(&bus), 0, "nor the one after it");
+    w(&mut bus, SWAPBUFFER_CMD, 0);
+    let due = due_ms(bus.hold.unwrap().until);
+    assert!((due - late - 50.0).abs() < 0.05, "due at {} ms after one at {} ms", due, late);
     // A write behind the held swap waits for it.
     w(&mut bus, COLOR0, 0);
     assert_eq!(front(&bus), 1);
-    assert!(bus.clock.now_ns() >= 200_000_000);
+    assert!(bus.clock.now_ns() as f64 / 1e6 >= due - 0.01);
     // Without the cap, swaps happen at once.
-    bus.set_voodoo_fps_cap(None);
+    bus.set_fps_cap(None);
     w(&mut bus, SWAPBUFFER_CMD, 0);
     assert_eq!(front(&bus), 0);
+}
+
+#[test]
+fn a_swap_at_the_retrace_isnt_held_by_a_cap_at_the_cards_rate() {
+    let mut bus = bus(Board::Standard);
+    init(&mut bus);
+    let hz = bus.voodoo.as_ref().unwrap().refresh_hz();
+    // A cap at the card's own rate holds no swap that waits for the
+    // retrace: the retrace already keeps them to that rate.
+    bus.set_fps_cap(Some(hz.ceil() as u32));
+    for _ in 0..10 {
+        w(&mut bus, SWAPBUFFER_CMD, 1);
+        assert!(bus.hold.is_none(), "held at {} ns", bus.clock.now_ns());
+        w(&mut bus, COLOR0, 0);
+        wait_ms(&mut bus, 1.0);
+    }
+    // At half the rate, the swap waits for its turn, and then for a
+    // retrace: the one nearest its turn, every other retrace.
+    bus.set_fps_cap(Some((hz / 2.0).floor() as u32));
+    let mut shown = Vec::new();
+    for _ in 0..20 {
+        w(&mut bus, SWAPBUFFER_CMD, 1);
+        w(&mut bus, COLOR0, 0);
+        shown.push(bus.frame_cap.get().last().unwrap());
+    }
+    let frame = (1e9 / hz) as u64;
+    let gaps: Vec<u64> = shown.windows(2).map(|w| w[1] - w[0]).collect();
+    assert!(gaps[2..].iter().all(|&gap| gap.abs_diff(2 * frame) < 1000), "{:?} at {} Hz", gaps, hz);
 }
 
 #[test]
@@ -1925,7 +2047,7 @@ fn gpu_blits_leave_the_memory_as_software_does() {
 fn gpu_blits_in_small_textures_leave_the_memory_as_software_does() {
     gpu_blits_within(rust_dos::voodoo::gl::Limits {
         max_texture_size: Some(256),
-        no_blit: false,
+        ..Default::default()
     });
 }
 
@@ -1942,8 +2064,8 @@ fn without_the_blit_program_blits_stay_on_the_cpu() {
 
     let (_sdl, _window, _context, gl, glsl) = gl_context("no blit program");
     let limits = Limits {
-        max_texture_size: None,
         no_blit: true,
+        ..Default::default()
     };
     let renderer = VoodooGl::with_limits(&gl, glsl, 1, 1, 1, limits).unwrap();
     assert!(renderer.banshee_problem().is_none());

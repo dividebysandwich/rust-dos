@@ -46,6 +46,8 @@ const ERROR_NEGATIVE_SEEK: u32 = 131;
 const ERROR_NOT_LOCKED: u32 = 158;
 const ERROR_BAD_NETPATH: u32 = 53;
 const ERROR_IO_INCOMPLETE: u32 = 996;
+pub(super) const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_GEN_FAILURE: u32 = 31;
 const STATUS_PENDING: u32 = 0x103;
 
 /// What _lopen, _lread and the others return when they fail.
@@ -151,11 +153,24 @@ pub(crate) fn open_file(
         _ => 0x40,
     };
     let disk = &mut cpu.bus.disk;
-    if disk.device(&name).is_some() {
-        return disk
+    if let Some(device) = disk.device(&name) {
+        // A serial port opens through VCOMM: one the machine has, once.
+        let port = device.com_port();
+        if let Some(n) = port {
+            super::comm::may_open(cpu, n)?;
+        }
+        let sft = cpu
+            .bus
+            .disk
             .open_file(&name, mode, psp)
-            .map(|sft| (sft, true))
-            .map_err(|e| e as u32);
+            .map_err(|e| e as u32)?;
+        if let Some(n) = port
+            && !super::comm::open(cpu, sft, n)
+        {
+            cpu.bus.disk.close_file(sft);
+            return Err(ERROR_GEN_FAILURE);
+        }
+        return Ok((sft, true));
     }
     if disk.is_directory(&name) {
         return Err(ERROR_ACCESS_DENIED);
@@ -199,8 +214,13 @@ pub(crate) fn new_file(cpu: &mut Cpu, sft: u16, access: u32, share: u32) -> u32 
 
 /// Whether the file `name` is open with access or sharing that opening it
 /// with `access` and `share` conflicts with: each handle's access must be
-/// what the others share. Windows 95 takes no access as reading.
+/// what the others share. Windows 95 takes no access as reading. The file
+/// of a program or DLL a process has loaded can't be opened for writing
+/// (`loaded_module`).
 pub(super) fn sharing_violation(cpu: &Cpu, name: &str, access: u32, share: u32) -> bool {
+    if access & GENERIC_WRITE != 0 && loaded_module(cpu, name) {
+        return true;
+    }
     let reading = |access: u32| match access & (GENERIC_READ | GENERIC_WRITE) {
         0 => GENERIC_READ,
         access => access,
@@ -229,6 +249,24 @@ pub(super) fn sharing_violation(cpu: &Cpu, name: &str, access: u32, share: u32) 
             }
             _ => false,
         })
+}
+
+/// Whether the file `name` is that of a program or DLL a process has
+/// loaded from it. Windows 9x keeps those open while they are loaded, and
+/// opening one for writing fails with ERROR_SHARING_VIOLATION: Windows 98
+/// SE's IMAGEHLP can't rebase a DLL the program has loaded
+/// (`win32_imagehlp_tests.rs`). The built-in DLLs aren't loaded from
+/// their files.
+fn loaded_module(cpu: &Cpu, name: &str) -> bool {
+    let disk = &cpu.bus.disk;
+    let key = disk.file_key(name);
+    cpu.bus
+        .win32
+        .processes
+        .iter()
+        .flat_map(|p| &p.modules)
+        .filter(|m| m.flags & crate::win32::loader::BUILTIN == 0)
+        .any(|m| disk.file_key(&m.path) == key)
 }
 
 /// CreateFileA(name, access, share, security, disposition, flags,
@@ -281,10 +319,16 @@ pub(super) fn create_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// the function again: `read_console` asked for that the DOS way
 /// (`hle_wait`), which a Win32 thread does by sleeping.
 pub(super) fn wait_for_keys(cpu: &mut Cpu) {
+    let deadline = Some(cpu.bus.clock.now_micros() + KEY_POLL);
+    retry_at(cpu, deadline);
+}
+
+/// The running thread sleeps until `deadline` (the clock's microseconds),
+/// then calls the function it is in again.
+pub(super) fn retry_at(cpu: &mut Cpu, deadline: Option<u64>) {
     cpu.hle_retry = false;
     cpu.idle = false;
     cpu.set_eip(cpu.eip().wrapping_sub(4));
-    let deadline = Some(cpu.bus.clock.now_micros() + KEY_POLL);
     thread::block(
         cpu,
         Wait {
@@ -374,6 +418,9 @@ fn read_open(cpu: &mut Cpu, open: Open, buffer: u32, n: u32) -> Option<(u32, Opt
     if !cpu.bus.guest_probe(buffer, n as usize, true) {
         return None;
     }
+    if let Some(i) = super::comm::port_of_file(cpu, open.sft) {
+        return super::comm::read(cpu, i, buffer, n);
+    }
     if is_console(cpu, open.sft) {
         let line = read_console_line(cpu, n)?;
         cpu.bus.guest_write_bytes(buffer, &line);
@@ -445,6 +492,9 @@ fn write_open(cpu: &mut Cpu, open: Open, buffer: u32, n: u32) -> Option<(u32, Op
     // All of it is there before any of it is written.
     if !cpu.bus.guest_probe(buffer, n as usize, false) {
         return None;
+    }
+    if let Some(i) = super::comm::port_of_file(cpu, open.sft) {
+        return super::comm::write(cpu, i, buffer, n);
     }
     let mut count = 0u32;
     let mut error = None;

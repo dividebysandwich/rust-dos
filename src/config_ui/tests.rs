@@ -75,6 +75,10 @@ struct FakeHost {
     boot_view: Option<BootView>,
     synced: Vec<u8>,
     reinserted: Vec<u8>,
+    /// The program the almanac is asked about.
+    almanac: Option<crate::almanac::Program>,
+    /// The note `apply` returns, as the real host's while a program runs.
+    note: Option<String>,
 }
 
 impl FakeHost {
@@ -117,6 +121,8 @@ impl FakeHost {
             boot_view: None,
             synced: vec![],
             reinserted: vec![],
+            almanac: None,
+            note: None,
         }
     }
 }
@@ -131,7 +137,7 @@ impl Host for FakeHost {
         if self.no_shaders && settings.shader != Shader::None {
             return Err("CRT shaders need OpenGL 3".to_string());
         }
-        Ok(None)
+        Ok(self.note.clone())
     }
 
     fn mount(&mut self, spec: MountSpec, replace: bool) -> Result<PathBuf, String> {
@@ -224,6 +230,10 @@ impl Host for FakeHost {
         self.variants.push((id.to_string(), variant.map(str::to_string), tool));
         self.running = true;
         Ok(format!("Starting {}", id))
+    }
+
+    fn almanac_program(&mut self) -> Option<crate::almanac::Program> {
+        self.almanac.clone()
     }
 
     fn create_game(&mut self, game: &NewGame, _settings: &Settings) -> Result<String, String> {
@@ -468,9 +478,9 @@ fn settings_change_live() {
 
     // Memory steps up to what the 486 takes and waits for the next start.
     ui.row = ui.items().iter().position(|&i| i == Item::Memsize).unwrap();
-    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some(" 16 MB ■■■■·······"));
+    assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some(" 16 MB ■■■■······· (auto)"));
     keys(&mut ui, &mut host, &[Right]);
-    assert_eq!(host.applied.last().unwrap().memsize, 20);
+    assert_eq!(host.applied.last().unwrap().memsize, Some(20));
     assert!(status(&ui).0.contains("next time"), "{:?}", status(&ui));
     // Typed, no further than 2 MB and what the CPU takes, and back to 16
     // with Delete.
@@ -485,17 +495,64 @@ fn settings_change_live() {
     keys(&mut ui, &mut host, &[End, Backspace, Backspace, Backspace]);
     ui.text("62", &mut host);
     keys(&mut ui, &mut host, &[Enter, Right, Right, Right]);
-    assert_eq!(host.applied.last().unwrap().memsize, 128);
+    assert_eq!(host.applied.last().unwrap().memsize, Some(128));
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("128 MB ■■■■■■■■■■■"));
     for _ in 0..10 {
         ui.key(Left, &mut host);
     }
-    assert_eq!(host.applied.last().unwrap().memsize, 4);
+    assert_eq!(host.applied.last().unwrap().memsize, Some(4));
     keys(&mut ui, &mut host, &[Left, Left]);
-    assert_eq!(host.applied.last().unwrap().memsize, 2);
+    assert_eq!(host.applied.last().unwrap().memsize, Some(2));
     assert_eq!(ui.item().map(|i| i.value(&ui.settings, None)).as_deref(), Some("  2 MB ···········"));
     keys(&mut ui, &mut host, &[Delete]);
-    assert_eq!(host.applied.last().unwrap().memsize, 16);
+    assert_eq!(host.applied.last().unwrap().memsize, None);
+    assert_eq!(host.applied.last().unwrap().memory_mb(), 16);
+
+    // While it isn't set, another CPU or display adapter changes the
+    // default it shows, for the next start.
+    ui.row = ui.items().iter().position(|&i| i == Item::Cpu).unwrap();
+    pick(&mut ui, &mut host, "Pentium II");
+    let applied = host.applied.last().unwrap();
+    assert_eq!((applied.memsize, applied.memory_mb()), (None, 64));
+    assert!(status(&ui).0.contains("default is now 64 MB"), "{:?}", status(&ui));
+    assert_eq!(Item::Memsize.value(&ui.settings, None), " 64 MB ■■■■■■■■■······ (auto)");
+    ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
+    pick(&mut ui, &mut host, crate::video::adapter::Adapter::ToadForce.describe());
+    assert_eq!(Item::Memsize.value(&ui.settings, None), "128 MB ■■■■■■■■■■■···· (auto)");
+    // The row has room for it: 31 columns on the 80-column window.
+    assert!(Item::Memsize.value(&ui.settings, None).chars().count() <= 31);
+    assert!(status(&ui).0.contains("default is now 128 MB"), "{:?}", status(&ui));
+    // While a program runs the host says the card waits for it to end
+    // (`pending_note`), and the memory's note follows its own.
+    let running = "Takes effect when the running program ends";
+    host.note = Some(running.to_string());
+    pick(&mut ui, &mut host, crate::video::adapter::Adapter::default().describe());
+    let (note, _) = status(&ui);
+    assert_eq!(note, "Takes effect when the running program ends; memory 64 MB at next start");
+    // Both fit the status line, 72 columns on the 80-column screen
+    // (`fit` cuts the middle out of a longer one), also with a
+    // three-digit size.
+    assert!(note.chars().count() < 72, "{:?}", note);
+    host.note = None;
+    pick(&mut ui, &mut host, crate::video::adapter::Adapter::ToadForce.describe());
+    // Set by the user, it stays through them, down to what a CPU takes.
+    ui.row = ui.items().iter().position(|&i| i == Item::Memsize).unwrap();
+    keys(&mut ui, &mut host, &[Left]);
+    assert_eq!(host.applied.last().unwrap().memsize, Some(96));
+    ui.row = ui.items().iter().position(|&i| i == Item::Cpu).unwrap();
+    pick(&mut ui, &mut host, "Pentium III");
+    assert_eq!(host.applied.last().unwrap().memory_mb(), 96);
+    assert!(!status(&ui).0.contains("default"), "{:?}", status(&ui));
+    pick(&mut ui, &mut host, "386");
+    assert_eq!(host.applied.last().unwrap().memsize, Some(64));
+    // Back to the test's machine.
+    ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
+    pick(&mut ui, &mut host, crate::video::adapter::Adapter::default().describe());
+    ui.row = ui.items().iter().position(|&i| i == Item::Cpu).unwrap();
+    pick(&mut ui, &mut host, "486");
+    ui.row = ui.items().iter().position(|&i| i == Item::Memsize).unwrap();
+    keys(&mut ui, &mut host, &[Delete]);
+    assert_eq!(host.applied.last().unwrap().memsize, None);
 
     // The disk speed changes at once.
     ui.row = ui.items().iter().position(|&i| i == Item::FloppyDiskSpeed).unwrap();
@@ -1334,6 +1391,7 @@ fn the_stats_page_draws_its_numbers_and_graphs() {
         code_bytes: 2 << 20,
         fps_history: vec![30.0, 35.0, 70.0],
         cpu_history: vec![40.0; 120],
+        cap: None,
     });
     let has = |frame: &Frame, c: Rgb| {
         frame.rgba.as_chunks::<4>().0.iter().any(|px| px[..3] == [c.0, c.1, c.2])
@@ -1596,7 +1654,7 @@ fn a_browser_gets_what_it_has() {
     ui.show_page(Page::Display);
     assert_eq!(
         ui.items(),
-        [Item::Aspect, Item::Filter, Item::Shader, Item::Monochrome, Item::Composite, Item::CompositeEra]
+        [Item::Aspect, Item::FpsCap, Item::Filter, Item::Shader, Item::Monochrome, Item::Composite, Item::CompositeEra]
     );
     pick(&mut ui, &mut host, "16:9");
     assert_eq!(host.applied.last().unwrap().aspect, crate::config::AspectRatio::SixteenNine);
@@ -1764,15 +1822,30 @@ fn the_games_page_launches_makes_and_deletes_games() {
     ui.text("Commander Keen", &mut host);
     keys(&mut ui, &mut host, &[Tab, End, Backspace, Backspace, Backspace, Backspace, Backspace]);
     ui.text("KEEN", &mut host);
-    keys(&mut ui, &mut host, &[Tab, Tab, Enter]);
+    // The year, publisher and notes for the almanac.
+    keys(&mut ui, &mut host, &[Tab, Tab]);
+    ui.text("1991", &mut host);
+    keys(&mut ui, &mut host, &[Tab]);
+    ui.text("Apogee", &mut host);
+    keys(&mut ui, &mut host, &[Tab]);
+    ui.text("Needs EMS", &mut host);
+    keys(&mut ui, &mut host, &[Tab, Enter]);
     assert!(status(&ui).1, "{:?}", status(&ui));
     assert!(ui.game_dialog.is_some());
     ui.draw(&mut Frame::new(640, 400));
-    keys(&mut ui, &mut host, &[BackTab]);
+    keys(&mut ui, &mut host, &[BackTab, BackTab, BackTab, BackTab]);
     ui.text("KEEN4E", &mut host);
     keys(&mut ui, &mut host, &[Enter]);
     assert!(ui.game_dialog.is_none(), "{:?}", status(&ui));
-    assert_eq!(host.created[0], NewGame { name: "Commander Keen".into(), directory: "C:\\KEEN".into(), command: "KEEN4E".into() });
+    let created = NewGame {
+        name: "Commander Keen".into(),
+        directory: "C:\\KEEN".into(),
+        command: "KEEN4E".into(),
+        year: "1991".into(),
+        publisher: "Apogee".into(),
+        notes: "Needs EMS".into(),
+    };
+    assert_eq!(host.created[0], created);
     assert_eq!(ui.games[ui.row].id, "commander-keen");
 
     // Del asks first; Esc keeps it, Enter deletes it.
@@ -2755,4 +2828,51 @@ fn crowded_pages_still_show_esc() {
         assert!(keys.contains(&UiKey::Esc), "{:?}: {:?}", page, keys);
         assert!(keys.contains(&UiKey::Tab), "{:?}: {:?}", page, keys);
     }
+}
+
+#[test]
+fn the_almanac_report_says_what_the_profile_says_of_the_game() {
+    use crate::almanac::{About, Program};
+    use UiKey::*;
+    let key = "0f8fad5b-d9cb-469f-a165-70867728950e".to_string();
+    let mut host = FakeHost::new();
+    // No name, so that no search goes out.
+    host.almanac = Some(Program {
+        about: Some(About {
+            year: Some(1991),
+            publisher: Some("Apogee".into()),
+            notes: None,
+            key: Some(key.clone()),
+        }),
+        ..Program::default()
+    });
+    let mut ui = opened(&host);
+    ui.open_almanac(true, &mut host);
+    // Search, Rating, then Year, Publisher and Notes: typing goes to the
+    // field the cursor is on, not to the name.
+    keys(&mut ui, &mut host, &[Down, Down, Down, Down]);
+    ui.text("Needs  EMS ", &mut host);
+    keys(&mut ui, &mut host, &[Up, Up, End, Backspace]);
+    ui.text("2", &mut host);
+    let about = ui.almanac.as_ref().unwrap().about();
+    let expected = About {
+        year: Some(1992),
+        publisher: Some("Apogee".into()),
+        notes: Some("Needs EMS".into()),
+        key: Some(key),
+    };
+    assert_eq!(about, Ok(expected));
+    // Enter goes on to the next field.
+    keys(&mut ui, &mut host, &[Enter]);
+    ui.text(" Software", &mut host);
+    let about = ui.almanac.as_ref().unwrap().about().unwrap();
+    assert_eq!(about.publisher.as_deref(), Some("Apogee Software"));
+    // A year that isn't one is refused.
+    keys(
+        &mut ui,
+        &mut host,
+        &[Up, End, Backspace, Backspace, Backspace, Backspace],
+    );
+    ui.text("93", &mut host);
+    assert!(ui.almanac.as_ref().unwrap().about().is_err());
 }

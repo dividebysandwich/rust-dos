@@ -269,6 +269,24 @@ impl HostFrames {
         self.count
     }
 
+    /// The frames counted after the first `after`, as far back as the last
+    /// `FRAME_WINDOW` go: the number of the first of them (from 0), and
+    /// each one's wall time and the emulated time at its end. A caller
+    /// that asks again within `FRAME_WINDOW` frames, from the count the
+    /// answer reached, gets every frame once.
+    pub fn since(&self, after: u64) -> (u64, Vec<(Duration, u64)>) {
+        let first = after
+            .max(self.count.saturating_sub(FRAME_WINDOW as u64))
+            .min(self.count);
+        let frames = (first..self.count)
+            .map(|n| {
+                let at = (n % FRAME_WINDOW as u64) as usize;
+                (Duration::from_micros(self.frames[at] as u64), self.ends[at])
+            })
+            .collect();
+        (first, frames)
+    }
+
     /// The longest frame that ended at the emulated time `ns` or later, of
     /// the last `FRAME_WINDOW`. A frame gets here when the next one starts,
     /// after AutoSpeed took its mark at the same emulated time, so the
@@ -500,6 +518,25 @@ mod tests {
             frames.frame(MS * 3, 200 + n);
         }
         assert_eq!(frames.longest_since(100), Some(MS * 3));
+    }
+
+    #[test]
+    fn since_gives_each_frame_once_while_the_ring_holds_it() {
+        let mut frames = HostFrames::new();
+        assert_eq!(frames.since(0), (0, vec![]));
+        frames.frame(MS * 5, 10);
+        frames.frame(MS * 80, 20);
+        assert_eq!(frames.since(0), (0, vec![(MS * 5, 10), (MS * 80, 20)]));
+        assert_eq!(frames.since(1), (1, vec![(MS * 80, 20)]));
+        assert_eq!(frames.since(9), (2, vec![]), "none after the last");
+        // Asked too late, the frames the ring dropped are skipped: the
+        // first number says how many.
+        for n in 0..FRAME_WINDOW as u64 {
+            frames.frame(MS * 3, 100 + n);
+        }
+        let (first, got) = frames.since(1);
+        assert_eq!((first, got.len()), (2, FRAME_WINDOW));
+        assert_eq!(got[0], (MS * 3, 100));
     }
 
     /// `AutoSpeed` marks the end of a frame before that frame gets here. A

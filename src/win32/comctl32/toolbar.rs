@@ -613,7 +613,7 @@ fn write_text(cpu: &mut Cpu, at: u32, text: &[u8], wide: bool, chars: usize) {
     }
     let n = text.len().min(chars - 1);
     if wide {
-        let mut units = kernel32::ansi_to_wide(&text[..n]);
+        let mut units = kernel32::ansi_to_wide(cpu, &text[..n]);
         units.push(0);
         let bytes: Vec<u8> = units.iter().flat_map(|u| u.to_le_bytes()).collect();
         cpu.bus.guest_write_bytes(at, &bytes);
@@ -1461,7 +1461,7 @@ fn add_string(cpu: &mut Cpu, hwnd: u32, t: &mut Toolbar, inst: u32, lp: u32, wid
             if next + 1 >= units.len() {
                 break;
             }
-            t.strings.push(tooltips::wide_to_ansi(&units[p..next]));
+            t.strings.push(tooltips::wide_to_ansi(cpu, &units[p..next]));
             p = next + 1;
         }
     } else {

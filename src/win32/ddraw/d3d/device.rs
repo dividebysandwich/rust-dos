@@ -11,14 +11,13 @@
 //! IDirect3DDevice, 2 and 3; one made through IDirect3D7 only
 //! IDirect3DDevice7.
 
-use super::super::surface::{
-    self, DDPF_RGB, DDSCAPS_SYSTEMMEMORY, DDSCAPS_ZBUFFER, MEM_CARD, MEM_VIDEO,
-};
+use super::super::surface::{self, DDSCAPS_SYSTEMMEMORY, DDSCAPS_ZBUFFER, MEM_CARD, MEM_VIDEO};
 use super::super::{
     DDERR_ALREADYINITIALIZED, DDERR_INVALIDCAPS, DDERR_INVALIDOBJECT, DDERR_INVALIDPARAMS,
     DDERR_INVALIDPIXELFORMAT, V_D3D1, V_D3D2, V_D3D3, V_D3D7, V_DEVICE1, V_DEVICE2, V_DEVICE3,
     V_SURFACE1, V_SURFACE4, V_SURFACE7, V_VIEWPORT1, V_VIEWPORT2, V_VIEWPORT3, state,
 };
+use super::super::stamp::Stamped;
 use super::pipeline::{IDENTITY, Matrix};
 use super::{
     D3D_OK, D3DERR_NOCURRENTVIEWPORT, D3DERR_NOVIEWPORTS, D3DERR_SCENE_IN_SCENE,
@@ -87,14 +86,64 @@ pub struct Begin {
     pub indices: Vec<u32>,
 }
 
-/// A device.
+/// A device: what its draws are made from (`Drawn`, whose fields are
+/// read and written as the device's own), and what it keeps beside
+/// that.
+///
+/// The first is stamped (`stamp::Stamped`): every change to it gives
+/// the device a new stamp, and what the HAL derived from the device for
+/// one draw holds for the next while the stamp is the same
+/// (`hal::toadforce::bind`). The fields here are the ones a draw
+/// changes itself or that no draw is made from, which would otherwise
+/// change the stamp with every draw.
 #[derive(Clone, Debug, Default)]
 pub struct Device {
+    drawn: Stamped<Drawn>,
+    pub in_scene: bool,
+    /// D3DCLIPSTATUS's words.
+    pub clip_status: [u32; 8],
+    /// D3DSTATS's counts: triangles, lines, points, spans, vertices.
+    pub stats: [u32; 5],
+    pub begin: Option<Begin>,
+    /// The state blocks, by their handles less 1, and the one being
+    /// recorded.
+    pub blocks: Vec<Option<Vec<Change>>>,
+    pub recording: Option<Vec<Change>>,
+}
+
+impl std::ops::Deref for Device {
+    type Target = Drawn;
+
+    fn deref(&self) -> &Drawn {
+        &self.drawn
+    }
+}
+
+/// Any change to what draws are made from: the device's stamp changes
+/// with it.
+impl std::ops::DerefMut for Device {
+    fn deref_mut(&mut self) -> &mut Drawn {
+        &mut self.drawn
+    }
+}
+
+/// What a device's draws are made from: its states, textures,
+/// transforms, lights and viewport, and the surfaces it draws into.
+#[derive(Clone, Debug, Default)]
+pub struct Drawn {
     /// The version of IDirect3D it was made through: 1 (a surface's), 2,
     /// 3 or 7.
     pub version: u32,
     /// The DirectDraw object it is of.
     pub ddraw: u32,
+    /// It was made as the T&L HAL device (Direct3D 7), which its
+    /// description says.
+    pub tnl: bool,
+    /// The color model of a software device, as its description says
+    /// (D3DCOLOR_MONO for the Ramp device, D3DCOLOR_RGB for the RGB
+    /// one), which the processor draws for (`hal::software`). 0 for a
+    /// device of the card's HAL.
+    pub model: u32,
     /// The render target, and the interface of it the device holds.
     pub target: u32,
     pub target_iface: u32,
@@ -103,7 +152,6 @@ pub struct Device {
     pub depth: u32,
     /// The card's texture units.
     pub tmus: u32,
-    pub in_scene: bool,
     /// The render states, by their number; the light states.
     pub render: Vec<u32>,
     pub light_states: Vec<u32>,
@@ -122,24 +170,17 @@ pub struct Device {
     pub lights: Vec<LightSlot>,
     /// The user's clip planes.
     pub planes: Vec<[f32; 4]>,
-    /// D3DCLIPSTATUS's words.
-    pub clip_status: [u32; 8],
     /// The viewports added to it (objects and the interfaces it holds),
     /// and the current one.
     pub viewports: Vec<(u32, u32)>,
     pub current: (u32, u32),
     pub handles: Vec<Handle>,
-    /// D3DSTATS's counts: triangles, lines, points, spans, vertices.
-    pub stats: [u32; 5],
-    pub begin: Option<Begin>,
-    /// The state blocks, by their handles less 1, and the one being
-    /// recorded.
-    pub blocks: Vec<Option<Vec<Change>>>,
-    pub recording: Option<Vec<Change>>,
     /// What OpenGL (`win32::opengl32`) draws with that Direct3D 7
     /// hasn't: the scissor box (left, top, right, bottom on the
     /// target), the depth bias in steps of the 16-bit depth buffer, and
-    /// whether the color buffer is left as it is (glColorMask).
+    /// whether the color buffer is left as it is (glColorMask), for a
+    /// card that writes all of a color or none of it. A card that masks
+    /// each channel takes OpenGL's mask from RS_COLORWRITEENABLE.
     pub scissor: Option<[u32; 4]>,
     pub depth_bias: i16,
     pub color_off: bool,
@@ -179,38 +220,87 @@ crate::state_fields!(Begin {
     count,
     indices
 });
-crate::state_fields!(Device {
-    version,
-    ddraw,
-    target,
-    target_iface,
-    depth,
-    tmus,
-    in_scene,
-    render,
-    light_states,
-    stages,
-    textures,
-    transforms,
-    bound,
-    viewport,
-    material,
-    lights,
-    planes,
-    clip_status,
-    viewports,
-    current,
-    handles,
-    stats,
-    begin,
-    blocks,
-    recording,
-    scissor,
-    depth_bias,
-    color_off
-} skip {
-    gl_pixel_centres
-});
+// The fields in the order a device had them as one struct, which is
+// the order a saved state has them in. `gl_pixel_centres` isn't saved
+// (see the field). A loaded device has a new stamp.
+impl crate::savestate::State for Device {
+    fn save(&self, w: &mut crate::savestate::Writer) {
+        let d: &Drawn = self;
+        d.version.save(w);
+        d.ddraw.save(w);
+        d.target.save(w);
+        d.target_iface.save(w);
+        d.depth.save(w);
+        d.tmus.save(w);
+        self.in_scene.save(w);
+        d.render.save(w);
+        d.light_states.save(w);
+        d.stages.save(w);
+        d.textures.save(w);
+        d.transforms.save(w);
+        d.bound.save(w);
+        d.viewport.save(w);
+        d.material.save(w);
+        d.lights.save(w);
+        d.planes.save(w);
+        self.clip_status.save(w);
+        d.viewports.save(w);
+        d.current.save(w);
+        d.handles.save(w);
+        self.stats.save(w);
+        self.begin.save(w);
+        self.blocks.save(w);
+        self.recording.save(w);
+        d.scissor.save(w);
+        d.depth_bias.save(w);
+        d.color_off.save(w);
+        d.tnl.save(w);
+        d.model.save(w);
+    }
+
+    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        let Device {
+            drawn,
+            in_scene,
+            clip_status,
+            stats,
+            begin,
+            blocks,
+            recording,
+        } = self;
+        let d: &mut Drawn = drawn;
+        d.version.load(r)?;
+        d.ddraw.load(r)?;
+        d.target.load(r)?;
+        d.target_iface.load(r)?;
+        d.depth.load(r)?;
+        d.tmus.load(r)?;
+        in_scene.load(r)?;
+        d.render.load(r)?;
+        d.light_states.load(r)?;
+        d.stages.load(r)?;
+        d.textures.load(r)?;
+        d.transforms.load(r)?;
+        d.bound.load(r)?;
+        d.viewport.load(r)?;
+        d.material.load(r)?;
+        d.lights.load(r)?;
+        d.planes.load(r)?;
+        clip_status.load(r)?;
+        d.viewports.load(r)?;
+        d.current.load(r)?;
+        d.handles.load(r)?;
+        stats.load(r)?;
+        begin.load(r)?;
+        blocks.load(r)?;
+        recording.load(r)?;
+        d.scissor.load(r)?;
+        d.depth_bias.load(r)?;
+        d.color_off.load(r)?;
+        d.tnl.load(r)?;
+        d.model.load(r)
+    }
+}
 
 /// The version of IDirect3DDevice a vtable is.
 pub fn version(vtable: usize) -> u32 {
@@ -289,6 +379,9 @@ pub const RS_SPECULARMATERIALSOURCE: u32 = 146;
 pub const RS_AMBIENTMATERIALSOURCE: u32 = 147;
 pub const RS_EMISSIVEMATERIALSOURCE: u32 = 148;
 pub const RS_CLIPPLANEENABLE: u32 = 152;
+// Direct3D 8's, which a device of version 8 has.
+pub const RS_COLORWRITEENABLE: u32 = 168;
+pub const RS_BLENDOP: u32 = 171;
 pub const RENDER_STATES: usize = 256;
 
 // Texture stage states.
@@ -308,7 +401,9 @@ pub const TSS_MINFILTER: u32 = 17;
 pub const TSS_MIPFILTER: u32 = 18;
 pub const TSS_MIPMAPLODBIAS: u32 = 19;
 pub const TSS_MAXANISOTROPY: u32 = 21;
-pub const TSS_LAST: u32 = 24;
+/// D3DTSS_TEXTURETRANSFORMFLAGS, the last of Direct3D 7's.
+pub const TSS_TEXTURETRANSFORMFLAGS: u32 = 24;
+pub const TSS_LAST: u32 = TSS_TEXTURETRANSFORMFLAGS;
 pub const STAGES: u32 = 8;
 
 pub const TOP_DISABLE: u32 = 1;
@@ -329,7 +424,7 @@ pub const TRANSFORMS: usize = 24;
 
 impl Device {
     pub fn new(version: u32, ddraw: u32, target: u32, target_iface: u32, tmus: u32) -> Device {
-        let mut d = Device {
+        let mut d = Drawn {
             version,
             ddraw,
             target,
@@ -341,7 +436,7 @@ impl Device {
             textures: vec![0; STAGES as usize],
             transforms: vec![IDENTITY; TRANSFORMS],
             planes: vec![[0.0; 4]; 6],
-            ..Device::default()
+            ..Drawn::default()
         };
         let one = 1.0f32.to_bits();
         let defaults = [
@@ -382,6 +477,12 @@ impl Device {
         if version == 1 {
             d.render[41] = 1;
         }
+        // Direct3D 8's states a device of version 8 starts with: every
+        // channel written, and D3DBLENDOP_ADD.
+        if version == 8 {
+            d.render[RS_COLORWRITEENABLE as usize] = 0xF;
+            d.render[RS_BLENDOP as usize] = 1;
+        }
         // D3DCOLOR_RGB.
         d.light_states[3] = 2;
         for s in 0..STAGES {
@@ -409,7 +510,16 @@ impl Device {
                 d.stages[(s * 32 + t) as usize] = v;
             }
         }
-        d
+        Device {
+            drawn: Stamped::new(d),
+            ..Device::default()
+        }
+    }
+
+    /// The stamp of what the device's draws are made from: the same
+    /// for as long as none of it changed.
+    pub fn stamp(&self) -> u64 {
+        Stamped::stamp(&self.drawn)
     }
 
     pub fn stage(&self, stage: u32, kind: u32) -> u32 {
@@ -475,30 +585,45 @@ impl Device {
 /// an add-on card's buffer) with DDSCAPS_3DDEVICE, and its depth buffer,
 /// if it has one, is 16-bit. A Banshee or Voodoo3 also draws into 24-
 /// and 32-bit targets with 24- or 32-bit depth buffers, through 16-bit
-/// shadows of them (`shadow.rs`).
-pub fn check_target(cpu: &mut Cpu, id: u32) -> Result<(), u32> {
+/// shadows of them (`shadow.rs`). A software device draws into a
+/// target and a depth buffer wherever they are.
+pub fn check_target(cpu: &mut Cpu, kind: super::hal::Kind, id: u32) -> Result<(), u32> {
     let s = state(cpu).surface(id).cloned().ok_or(DDERR_INVALIDPARAMS)?;
     if s.caps[0] & surface::DDSCAPS_3DDEVICE == 0 {
         return Err(DDERR_INVALIDCAPS);
     }
     let video = s.memory == MEM_VIDEO || s.memory == MEM_CARD;
-    if !video || s.caps[0] & DDSCAPS_SYSTEMMEMORY != 0 {
+    let software = kind == super::hal::Kind::Software;
+    if !software && (!video || s.caps[0] & DDSCAPS_SYSTEMMEMORY != 0) {
         return Err(D3DERR_SURFACENOTINVIDMEM);
     }
-    let f = s.format;
-    let wide = s.memory == MEM_VIDEO && crate::win32::glide::hw::banshee(cpu);
-    let rgb565 = f.bits == 16 && (f.r, f.g, f.b) == (0xF800, 0x07E0, 0x001F);
-    let rgb = matches!(f.bits, 24 | 32) && wide;
-    if f.flags & DDPF_RGB == 0 || !(rgb565 || rgb) {
+    // The card's HAL says which formats it draws into.
+    let in_video = s.memory == MEM_VIDEO;
+    if !super::hal::takes_target(cpu, kind, &s.format, in_video) {
         return Err(DDERR_INVALIDPIXELFORMAT);
     }
     if let Some(z) = z_buffer(cpu, id) {
-        let bits = state(cpu).surface(z).map_or(0, |z| z.format.bits);
-        if bits != 16 && !(matches!(bits, 24 | 32) && wide) {
+        let Some(z) = state(cpu).surface(z).cloned() else {
+            return Err(DDERR_INVALIDPIXELFORMAT);
+        };
+        if !super::hal::takes_depth(cpu, kind, &z.format, in_video && z.memory == MEM_VIDEO) {
             return Err(DDERR_INVALIDPIXELFORMAT);
         }
     }
     Ok(())
+}
+
+/// What the HAL of the device `id`'s card offers, or a software
+/// device.
+pub fn offer_of(cpu: &mut Cpu, id: u32) -> super::hal::Offer {
+    let (dd, units, model) = get(cpu, id).map_or((0, 1, 0), |d| (d.ddraw, d.tmus, d.model));
+    if model != 0 {
+        return super::hal::software();
+    }
+    super::hal::card(cpu, dd).unwrap_or(super::hal::Offer {
+        kind: super::hal::Kind::Voodoo,
+        units,
+    })
 }
 
 /// The depth buffer attached to the surface `id`.
@@ -523,7 +648,9 @@ pub fn depth_buffer(cpu: &mut Cpu, d: &Device) -> Option<u32> {
 
 /// Make a device of the DirectDraw object `dd` on the render target
 /// `target` (the program's interface `target_iface` of it), and give the
-/// program its interface `vtable` at `out`.
+/// program its interface `vtable` at `out`. `model` is a software
+/// device's color model (`Drawn::model`), 0 for the card's HAL device.
+#[allow(clippy::too_many_arguments)]
 pub fn create(
     cpu: &mut Cpu,
     version: u32,
@@ -531,17 +658,26 @@ pub fn create(
     target_iface: u32,
     vtable: usize,
     out: u32,
+    tnl: bool,
+    model: u32,
 ) -> u32 {
     let Some((_, target)) = super::super::this(cpu, target_iface) else {
         return DDERR_INVALIDPARAMS;
     };
-    let Some(tmus) = super::hal(cpu, dd) else {
+    let offer = match model {
+        0 => super::hal::card(cpu, dd),
+        _ => Some(super::hal::software()),
+    };
+    let Some(offer) = offer else {
         return com::E_OUTOFMEMORY;
     };
-    if let Err(e) = check_target(cpu, target) {
+    let tmus = offer.units;
+    if let Err(e) = check_target(cpu, offer.kind, target) {
         return e;
     }
     let mut device = Device::new(version, dd, target, target_iface, tmus);
+    device.tnl = tnl;
+    device.model = model;
     let (w, h, z) = {
         let z = z_buffer(cpu, target).is_some();
         let s = state(cpu).surface(target);
@@ -563,7 +699,9 @@ pub fn create(
     match super::add(cpu, dd, object, vtable, out) {
         Ok(_) => {
             super::super::add_ref(cpu, target_iface);
-            super::hal::created(cpu);
+            if model == 0 {
+                super::hal::created(cpu, dd);
+            }
             D3D_OK
         }
         Err(e) => e,
@@ -619,7 +757,7 @@ pub fn get_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (_, id) = hr!(device_of(cpu, this));
-    let tmus = get(cpu, id).map_or(1, |d| d.tmus);
+    let offer = offer_of(cpu, id);
     let mut sizes = [0; 2];
     for (i, at) in [hal, hel].into_iter().enumerate() {
         if !probe(cpu, at, 4, true) {
@@ -633,8 +771,17 @@ pub fn get_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         sizes[i] = size;
     }
-    caps::write_desc(cpu, hal, sizes[0], true, tmus);
-    caps::write_desc(cpu, hel, sizes[1], false, tmus);
+    // A software device's description is the HEL's.
+    match get(cpu, id).map_or(0, |d| d.model) {
+        0 => {
+            caps::write_desc(cpu, hal, sizes[0], Some(offer));
+            caps::write_desc(cpu, hel, sizes[1], None);
+        }
+        model => {
+            caps::write_empty_desc(cpu, hal, sizes[0]);
+            caps::write_software_desc(cpu, hel, sizes[1], model);
+        }
+    }
     Some(D3D_OK)
 }
 
@@ -647,8 +794,9 @@ pub fn get_caps7(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if !probe(cpu, desc, caps::DESC7, true) {
         return Some(DDERR_INVALIDPARAMS);
     }
-    let tmus = get(cpu, id).map_or(1, |d| d.tmus);
-    caps::write_desc7(cpu, desc, tmus);
+    let offer = offer_of(cpu, id);
+    let tnl = get(cpu, id).is_some_and(|d| d.tnl);
+    caps::write_desc7(cpu, desc, offer, tnl);
     Some(D3D_OK)
 }
 
@@ -972,7 +1120,12 @@ pub fn get_current_viewport(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     ))
 }
 
-/// SetRenderTarget(this, surface, flags). The viewport stays as it is.
+/// SetRenderTarget(this, surface, flags). The viewport and the render
+/// states stay as they are: D3DRENDERSTATE_ZENABLE keeps its value on a
+/// target without a depth buffer, where the device draws without the
+/// depth test, and the test is back when the device returns to a
+/// target with one. DirectX 7 on Windows 98 SE with a Voodoo3 does
+/// this.
 pub fn set_render_target(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, target, _] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
@@ -984,18 +1137,15 @@ pub fn set_render_target(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if state(cpu).surface(sid).is_none() {
         return Some(DDERR_INVALIDPARAMS);
     }
-    hr!(check_target(cpu, sid));
+    let kind = offer_of(cpu, id).kind;
+    hr!(check_target(cpu, kind, sid));
     super::super::add_ref(cpu, target);
-    let z = z_buffer(cpu, sid).is_some();
     let Some(d) = get(cpu, id) else {
         return Some(DDERR_INVALIDOBJECT);
     };
     let old = d.target_iface;
     d.target = sid;
     d.target_iface = target;
-    if !z {
-        d.render[RS_ZENABLE as usize] = 0;
-    }
     super::super::release(cpu, old);
     Some(D3D_OK)
 }
@@ -1028,7 +1178,7 @@ pub const CLEAR_STENCIL: u32 = 4;
 /// buffer the target doesn't have fails as `missing_buffer` says, and
 /// clears nothing.
 pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [this, count, rects, flags, color, z, _] = args[..] else {
+    let [this, count, rects, flags, color, z, stencil] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (_, id) = hr!(device_of(cpu, this));
@@ -1046,9 +1196,12 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if count != 0 && list.is_empty() {
         return Some(D3D_OK);
     }
-    let target = (flags & CLEAR_TARGET != 0).then_some(color);
-    let depth = (flags & CLEAR_ZBUFFER != 0).then_some(f32::from_bits(z));
-    super::hal::clear(cpu, &d, &list, target, depth);
+    let fill = super::hal::Fill {
+        target: (flags & CLEAR_TARGET != 0).then_some(color),
+        depth: (flags & CLEAR_ZBUFFER != 0).then_some(f32::from_bits(z)),
+        stencil: (flags & CLEAR_STENCIL != 0).then_some(stencil),
+    };
+    super::hal::clear(cpu, &d, &list, fill);
     Some(D3D_OK)
 }
 
@@ -1056,19 +1209,25 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// (IDirect3DViewport3) of `flags` on the device `d` that asks for a
 /// buffer its target doesn't have. D3DCLEAR_ZBUFFER or D3DCLEAR_STENCIL
 /// without a depth buffer attached fails with D3DERR_ZBUFFER_NOTPRESENT,
-/// D3DCLEAR_STENCIL with one fails with D3DERR_STENCILBUFFER_NOTPRESENT,
-/// as none of the depth buffers here has stencil bits. The call then
-/// clears nothing, the target included. DirectX 7 does this on Windows
-/// 95 with a Voodoo3, with the HAL and the RGB device alike, and so does
-/// Windows 11.
+/// D3DCLEAR_STENCIL with one fails with D3DERR_STENCILBUFFER_NOTPRESENT
+/// unless it has stencil bits and the card's HAL draws stencil (a
+/// ToadForce's; a Voodoo's has none). The call then clears nothing, the
+/// target included. DirectX 7 does this on Windows 95 with a Voodoo3,
+/// with the HAL and the RGB device alike, and so does Windows 11.
 pub fn missing_buffer(cpu: &mut Cpu, d: &Device, flags: u32) -> Option<u32> {
     if flags & (CLEAR_ZBUFFER | CLEAR_STENCIL) == 0 {
         return None;
     }
-    if depth_buffer(cpu, d).is_none() {
+    let Some(z) = depth_buffer(cpu, d) else {
         return Some(D3DERR_ZBUFFER_NOTPRESENT);
-    }
-    (flags & CLEAR_STENCIL != 0).then_some(D3DERR_STENCILBUFFER_NOTPRESENT)
+    };
+    // DDPF_STENCILBUFFER: the depth buffer has stencil bits.
+    let drawn = super::hal::description(super::hal::kind_of(cpu, d)).stencil != 0;
+    let stencil = drawn
+        && state(cpu)
+            .surface(z)
+            .is_some_and(|z| z.format.flags & surface::DDPF_STENCILBUFFER != 0);
+    (flags & CLEAR_STENCIL != 0 && !stencil).then_some(D3DERR_STENCILBUFFER_NOTPRESENT)
 }
 
 /// Clear keeps to the viewport (x, y, width, height): the rectangles
@@ -1112,7 +1271,8 @@ pub fn preload(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// ValidateDevice(this, passes): one pass, if the stages in use are no
-/// more than the card's texture units.
+/// more than the blend stages the device reports, and only the first
+/// of them, one for each texture unit, take a texture.
 pub fn validate_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, passes] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
@@ -1124,15 +1284,28 @@ pub fn validate_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let used = (0..STAGES)
         .take_while(|&s| d.stage(s, TSS_COLOROP) != TOP_DISABLE)
         .count() as u32;
-    if used > d.tmus {
+    let kind = super::hal::kind_of(cpu, &d);
+    // A card with a stage for each texture unit says 0 stages.
+    let stages = match super::hal::description(kind).stages {
+        0 => d.tmus,
+        stages => stages,
+    };
+    let texture = |s: u32, op: u32, args: [u32; 2]| {
+        d.stage(s, op) != TOP_DISABLE && args.iter().any(|&a| d.stage(s, a) & 0xF == TA_TEXTURE)
+    };
+    let textured = |s: u32| {
+        texture(s, TSS_COLOROP, [TSS_COLORARG1, TSS_COLORARG2])
+            || texture(s, TSS_ALPHAOP, [TSS_ALPHAARG1, TSS_ALPHAARG2])
+    };
+    if used > stages || (d.tmus..used).any(textured) {
         return Some(D3DERR_TOOMANYOPERATIONS);
     }
     for s in 0..used {
-        if !super::hal::can_do(d.stage(s, TSS_COLOROP)) {
+        if !super::hal::can_do(kind, d.stage(s, TSS_COLOROP)) {
             return Some(super::D3DERR_UNSUPPORTEDCOLOROPERATION);
         }
         let alpha = d.stage(s, TSS_ALPHAOP);
-        if alpha != TOP_DISABLE && !super::hal::can_do(alpha) {
+        if alpha != TOP_DISABLE && !super::hal::can_do(kind, alpha) {
             return Some(super::D3DERR_UNSUPPORTEDALPHAOPERATION);
         }
     }

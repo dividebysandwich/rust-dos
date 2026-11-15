@@ -2,9 +2,14 @@
 //! glMultiTexCoordARB, glNormal, and glVertex, which makes a vertex of
 //! them between glBegin and glEnd. Each function is one of `attribute!`
 //! for its kind, size and type, and whether it takes an array.
+//!
+//! A display list that keeps a glBegin to glEnd run as vertices
+//! (`lists::Batch`) reads its recorded calls with the same conversions:
+//! `spec` tells which of these functions an export is, and `given`
+//! what a call of it gives.
 
 use super::texture::GL_TEXTURE0;
-use super::{GL_INVALID_ENUM, UNITS, ctx, error};
+use super::{CAP_COLOR_MATERIAL, GL_INVALID_ENUM, UNITS, ctx, error, signed_unit};
 use crate::cpu::Cpu;
 
 /// What a function sets.
@@ -43,8 +48,19 @@ impl Type {
     }
 
     /// A value from its bytes or its argument's words; a color's
-    /// integers go from 0 to 1 (or -1 to 1 signed).
-    fn value(self, lo: u32, hi: u32, color: bool) -> f32 {
+    /// integers go from 0 to 1 (or -1 to 1 signed), and a normal's from
+    /// -1 to 1 as table 2.6 converts signed integers, (2c + 1) / (2^b -
+    /// 1).
+    fn value(self, lo: u32, hi: u32, kind: Kind) -> f32 {
+        if kind == Kind::Normal {
+            return match self {
+                Type::B => signed_unit(lo as u8 as i8 as f64, 8),
+                Type::S => signed_unit(lo as u16 as i16 as f64, 16),
+                Type::I => signed_unit(lo as i32 as f64, 32),
+                _ => self.value(lo, hi, Kind::Vertex),
+            };
+        }
+        let color = kind == Kind::Color;
         let (v, most) = match self {
             Type::B => (lo as u8 as i8 as f32, 127.0),
             Type::UB => (lo as u8 as f32, 255.0),
@@ -68,18 +84,37 @@ fn values(
     n: usize,
     t: Type,
     array: bool,
-    color: bool,
+    kind: Kind,
+) -> Option<[f32; 4]> {
+    if !array {
+        return decode(args, skip, n, t, None, kind);
+    }
+    let at = *args.get(skip)?;
+    let len = n * t.size() as usize;
+    if at == 0 || !cpu.bus.guest_probe(at, len, false) {
+        return None;
+    }
+    let mut b = vec![0u8; len];
+    cpu.bus.guest_read_bytes(at, &mut b);
+    decode(args, skip, n, t, Some(&b), kind)
+}
+
+/// The `n` values of a call from the bytes of its array, or without
+/// them from its arguments after `skip` of them.
+fn decode(
+    args: &[u32],
+    skip: usize,
+    n: usize,
+    t: Type,
+    array: Option<&[u8]>,
+    kind: Kind,
 ) -> Option<[f32; 4]> {
     let mut out = [0.0; 4];
-    if array {
-        let at = *args.get(skip)?;
+    if let Some(b) = array {
         let size = t.size();
-        let len = n * size as usize;
-        if at == 0 || !cpu.bus.guest_probe(at, len, false) {
+        if b.len() < n * size as usize {
             return None;
         }
-        let mut b = vec![0u8; len];
-        cpu.bus.guest_read_bytes(at, &mut b);
         for (i, o) in out.iter_mut().enumerate().take(n) {
             let p = &b[i * size as usize..];
             let word = |k: usize| {
@@ -88,7 +123,7 @@ fn values(
                 w[..have].copy_from_slice(&p[4 * k..4 * k + have]);
                 u32::from_le_bytes(w)
             };
-            *o = t.value(word(0), if t == Type::D { word(1) } else { 0 }, color);
+            *o = t.value(word(0), if t == Type::D { word(1) } else { 0 }, kind);
         }
     } else {
         let words = if t == Type::D { 2 } else { 1 };
@@ -96,7 +131,7 @@ fn values(
             let at = skip + i * words;
             let lo = *args.get(at)?;
             let hi = if t == Type::D { *args.get(at + 1)? } else { 0 };
-            *o = t.value(lo, hi, color);
+            *o = t.value(lo, hi, kind);
         }
     }
     Some(out)
@@ -105,18 +140,22 @@ fn values(
 /// Set an attribute, or make a vertex.
 fn set(cpu: &mut Cpu, kind: Kind, n: usize, t: Type, array: bool, args: &[u32]) {
     let skip = (kind == Kind::MultiTexCoord) as usize;
-    let Some(v) = values(cpu, args, skip, n, t, array, kind == Kind::Color) else {
+    let Some(v) = values(cpu, args, skip, n, t, array, kind) else {
         return;
     };
     match kind {
-        Kind::Vertex => {
-            let w = if n == 4 { v[3] } else { 1.0 };
-            let z = if n >= 3 { v[2] } else { 0.0 };
-            super::draw::vertex(cpu, [v[0], v[1], z, w]);
-        }
+        Kind::Vertex => super::draw::vertex(cpu, position(n, v)),
         Kind::Color => {
             if let Some(c) = ctx(cpu) {
-                c.color = [v[0], v[1], v[2], if n == 4 { v[3] } else { 1.0 }];
+                c.color = color(n, v);
+                // The material properties glColorMaterial tracks follow
+                // the current color (section 2.13.3).
+                if c.caps & CAP_COLOR_MATERIAL != 0 {
+                    // Unstamped: the card's state leaves out the
+                    // colours the vertices give, and is made again
+                    // when glColorMaterial or its enable changes.
+                    super::Stamped::unstamped(&mut c.lighting).track(c.color);
+                }
             }
         }
         Kind::Normal => {
@@ -125,28 +164,144 @@ fn set(cpu: &mut Cpu, kind: Kind, n: usize, t: Type, array: bool, args: &[u32]) 
             }
         }
         Kind::TexCoord | Kind::MultiTexCoord => {
-            let unit = if kind == Kind::TexCoord {
-                0
-            } else {
-                match args[0].checked_sub(GL_TEXTURE0) {
-                    Some(u) if (u as usize) < UNITS => u as usize,
-                    _ => {
-                        error(cpu, GL_INVALID_ENUM);
-                        return;
-                    }
-                }
+            let Some(unit) = unit(kind, args) else {
+                error(cpu, GL_INVALID_ENUM);
+                return;
             };
-            let t = [
-                v[0],
-                if n >= 2 { v[1] } else { 0.0 },
-                if n >= 3 { v[2] } else { 0.0 },
-                if n == 4 { v[3] } else { 1.0 },
-            ];
             if let Some(c) = ctx(cpu) {
-                c.tex_coord[unit] = t;
+                c.tex_coord[unit] = tex_coord(n, v);
             }
         }
     }
+}
+
+/// A vertex of `n` coordinates: z is 0 and w is 1 where it has none.
+fn position(n: usize, v: [f32; 4]) -> [f32; 4] {
+    let w = if n == 4 { v[3] } else { 1.0 };
+    let z = if n >= 3 { v[2] } else { 0.0 };
+    [v[0], v[1], z, w]
+}
+
+/// A color of `n` components: opaque without an alpha.
+fn color(n: usize, v: [f32; 4]) -> [f32; 4] {
+    [v[0], v[1], v[2], if n == 4 { v[3] } else { 1.0 }]
+}
+
+/// Texture coordinates of `n` values: t and r are 0 and q is 1 where
+/// there is none.
+fn tex_coord(n: usize, v: [f32; 4]) -> [f32; 4] {
+    [
+        v[0],
+        if n >= 2 { v[1] } else { 0.0 },
+        if n >= 3 { v[2] } else { 0.0 },
+        if n == 4 { v[3] } else { 1.0 },
+    ]
+}
+
+/// The texture unit a call gives coordinates for: the first, or the
+/// one glMultiTexCoord's first argument names. None for a unit there
+/// isn't.
+fn unit(kind: Kind, args: &[u32]) -> Option<usize> {
+    if kind == Kind::TexCoord {
+        return Some(0);
+    }
+    let unit = args.first()?.checked_sub(GL_TEXTURE0)? as usize;
+    (unit < UNITS).then_some(unit)
+}
+
+/// One of the functions here: what it sets, from how many values of
+/// which type, and whether it takes them in an array.
+#[derive(Clone, Copy)]
+pub struct Spec {
+    kind: Kind,
+    n: usize,
+    t: Type,
+    array: bool,
+}
+
+impl Spec {
+    /// The place of the argument that points at the values, for a
+    /// function that takes an array.
+    pub fn pointer(&self) -> Option<usize> {
+        self.array
+            .then_some((self.kind == Kind::MultiTexCoord) as usize)
+    }
+
+    /// How many argument words the function has.
+    pub fn words(&self) -> usize {
+        let values = match (self.array, self.t) {
+            (true, _) => 1,
+            (false, Type::D) => 2 * self.n,
+            (false, _) => self.n,
+        };
+        (self.kind == Kind::MultiTexCoord) as usize + values
+    }
+}
+
+/// The function the export `name` is, None for one that isn't one of
+/// these: glColor4ubv sets the color from an array of four unsigned
+/// bytes, and glMultiTexCoord2fARB a unit's coordinates from two
+/// floats.
+pub fn spec(name: &str) -> Option<Spec> {
+    const KINDS: [(&str, Kind); 5] = [
+        ("glVertex", Kind::Vertex),
+        ("glColor", Kind::Color),
+        ("glTexCoord", Kind::TexCoord),
+        ("glMultiTexCoord", Kind::MultiTexCoord),
+        ("glNormal", Kind::Normal),
+    ];
+    const TYPES: [(&str, Type); 8] = [
+        ("ub", Type::UB),
+        ("us", Type::US),
+        ("ui", Type::UI),
+        ("b", Type::B),
+        ("s", Type::S),
+        ("i", Type::I),
+        ("f", Type::F),
+        ("d", Type::D),
+    ];
+    let (rest, kind) = KINDS
+        .iter()
+        .find_map(|&(start, kind)| Some((name.strip_prefix(start)?, kind)))?;
+    let rest = match kind {
+        Kind::MultiTexCoord => rest.strip_suffix("ARB")?,
+        _ => rest,
+    };
+    let n = rest.chars().next()?.to_digit(10)? as usize;
+    let rest = &rest[1..];
+    let (rest, array) = match rest.strip_suffix('v') {
+        Some(rest) => (rest, true),
+        None => (rest, false),
+    };
+    let &(_, t) = TYPES.iter().find(|(letters, _)| *letters == rest)?;
+    Some(Spec { kind, n, t, array })
+}
+
+/// What a call of one of these functions gives.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Given {
+    Vertex([f32; 4]),
+    Color([f32; 4]),
+    Normal([f32; 3]),
+    TexCoord(usize, [f32; 4]),
+}
+
+/// What the call of `spec`'s function with the arguments `args` gives,
+/// `array` being the bytes its pointer points at. None when there are
+/// too few of them, and for a texture unit there isn't.
+pub fn given(spec: &Spec, args: &[u32], array: Option<&[u8]>) -> Option<Given> {
+    let Spec { kind, n, t, .. } = *spec;
+    if spec.array != array.is_some() {
+        return None;
+    }
+    let skip = (kind == Kind::MultiTexCoord) as usize;
+    let v = decode(args, skip, n, t, array, kind)?;
+    Some(match kind {
+        Kind::Vertex => Given::Vertex(position(n, v)),
+        Kind::Color => Given::Color(color(n, v)),
+        Kind::Normal => Given::Normal([v[0], v[1], v[2]]),
+        Kind::TexCoord | Kind::MultiTexCoord => Given::TexCoord(unit(kind, args)?, tex_coord(n, v)),
+    })
 }
 
 macro_rules! attribute {

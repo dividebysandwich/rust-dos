@@ -11,7 +11,8 @@ use super::crt::CrtTiming;
 
 /// Physical address of the linear frame buffer.
 pub const LFB_BASE: usize = 0xE000_0000;
-/// Video memory: 4 MB.
+/// Video memory: 4 MB. A ToadForce has more (`Vbe::resize`), which its
+/// own modes and commands use; its VESA BIOS knows these first 4 MB.
 pub const VRAM_SIZE: usize = 4 << 20;
 /// Size and granularity of the window at A0000h.
 pub const WINDOW_SIZE: usize = 0x10000;
@@ -182,8 +183,16 @@ impl Vbe {
         self.latched_start = 0;
         self.start_high = 0;
         if !keep {
-            self.vram.fill(0);
+            self.vram[..VRAM_SIZE].fill(0);
         }
+    }
+
+    /// Give the card `bytes` of video memory, a power of two and
+    /// `VRAM_SIZE` at least: what is there stays, as far as it fits.
+    pub fn resize(&mut self, bytes: usize) {
+        debug_assert!(bytes.is_power_of_two() && bytes >= VRAM_SIZE);
+        self.vram.resize(bytes, 0);
+        self.vram.shrink_to_fit();
     }
 
     /// Back to the standard VGA modes.
@@ -203,7 +212,7 @@ impl Vbe {
     #[inline]
     pub fn lfb_offset(&self, addr: usize, len: usize) -> Option<usize> {
         let offset = addr.checked_sub(self.lfb_base? as usize)?;
-        if offset + len > VRAM_SIZE {
+        if offset + len > self.vram.len() {
             return None;
         }
         match self.host_xor {
@@ -263,11 +272,16 @@ impl Vbe {
     }
 }
 
-/// The mode is saved by its number, and found again among the modes.
-impl crate::savestate::State for Vbe {
-    fn save(&self, w: &mut crate::savestate::Writer) {
+impl Vbe {
+    /// `save` with `memory` for the video memory: what a display
+    /// adapter that draws on the host has read back into a copy.
+    // A vector is what the state's writer takes.
+    #[allow(clippy::ptr_arg)]
+    pub fn save_with(&self, memory: &Vec<u8>, w: &mut crate::savestate::Writer) {
+        use crate::savestate::State;
+        debug_assert_eq!(memory.len(), self.vram.len());
         let Vbe {
-            vram,
+            vram: _,
             mode,
             lfb_base,
             lfb,
@@ -279,12 +293,19 @@ impl crate::savestate::State for Vbe {
             host_xor: _,
             scan_xor: _,
         } = self;
-        vram.save(w);
+        memory.save(w);
         mode.map_or(0, |m| m.number).save(w);
         mode.map_or((0, 0, 0), |m| (m.width, m.height, m.bpp)).save(w);
         lfb_base.save(w);
         crate::savestate::State::save(&(*lfb, *bank, *pitch), w);
         crate::savestate::State::save(&(*start, *latched_start, *start_high), w);
+    }
+}
+
+/// The mode is saved by its number, and found again among the modes.
+impl crate::savestate::State for Vbe {
+    fn save(&self, w: &mut crate::savestate::Writer) {
+        self.save_with(&self.vram, w);
     }
     fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
         let Vbe {

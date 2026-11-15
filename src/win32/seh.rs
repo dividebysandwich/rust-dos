@@ -235,14 +235,15 @@ pub fn read_context(
 }
 
 /// Whether the `len` bytes at `lin` have pages behind them, looked up
-/// without recording a page fault.
+/// without recording a page fault. A page in the page file counts: the
+/// accesses there bring it in.
 fn present(cpu: &Cpu, lin: u32, len: u32) -> bool {
     let process = super::running(cpu).expect("a Win32 process");
     let last = lin.wrapping_add(len.saturating_sub(1));
     last >= lin
         && (lin & !(PAGE - 1)..=last)
             .step_by(PAGE as usize)
-            .all(|page| process.memory.translate(&cpu.bus, page).is_some())
+            .all(|page| process.memory.reachable(&cpu.bus, page))
 }
 
 /// A page fault at `address` in the running thread's stack, below what is
@@ -427,15 +428,70 @@ fn simulated(cpu: &Cpu, error: Option<u32>, eip: u32) -> Option<u32> {
     }
 }
 
+/// The hash `memory::retry` tells the faults of one instruction apart by:
+/// the page tables and the registers it faulted with, which the
+/// instruction, or a service, has again each time it runs again from its
+/// start. Not the flags, whose RF a fault may set.
+fn retry_key(cr3: u32, ctx: &Context) -> u64 {
+    let words = ctx.gpr.iter().copied().chain([cr3, ctx.eip]);
+    let words = words.chain(ctx.seg.iter().map(|&s| s as u32));
+    words.fold(0xCBF2_9CE4_8422_2325, |hash: u64, word| {
+        (hash ^ word as u64).wrapping_mul(0x100_0000_01B3)
+    })
+}
+
+/// A page fault at `lin` in the running process, of the instruction that
+/// faulted in `ctx`: if the page is in the page file, give it its
+/// physical page, and keep it in the pool while that instruction faults
+/// (`memory::retry`). Whether it was one and has it now.
+pub(crate) fn page_in(cpu: &mut Cpu, lin: u32, ctx: &Context) -> bool {
+    use super::memory::PageIn;
+    super::memory::retry(&mut cpu.bus, retry_key(cpu.cr3, ctx));
+    // Pages not used lately make room first, a batch at a time.
+    if super::memory::is_paged_at(&cpu.bus, cpu.cr3, lin) && super::mapping::make_room(&mut cpu.bus)
+    {
+        cpu.bus.win32.tlb_stale = true;
+    }
+    let mut result = super::memory::page_in(&mut cpu.bus, cpu.cr3, lin);
+    // With no page of a program's own memory to send to the page file,
+    // pages of views of files make room, as they do for a view's page
+    // (`mapping::fault_in`): those not used lately first.
+    if result == PageIn::Full
+        && (super::mapping::sweep(&mut cpu.bus) || super::mapping::evict(&mut cpu.bus, true))
+    {
+        cpu.bus.win32.tlb_stale = true;
+        result = super::memory::page_in(&mut cpu.bus, cpu.cr3, lin);
+    }
+    let done = result == PageIn::Done;
+    if done {
+        super::memory::hold(&mut cpu.bus, cpu.cr3, lin);
+    } else if result == PageIn::Full {
+        super::memory::out_of_memory(&mut cpu.bus, lin);
+    }
+    if std::mem::take(&mut cpu.bus.win32.tlb_stale) {
+        cpu.tlb.flush();
+    } else if done {
+        cpu.tlb.flush_page(lin);
+    }
+    done
+}
+
 /// A fault in the program, at `ctx`: an exception for its handlers.
 pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
     if vector == 14 && process(cpu).current.is_some() && grow_stack(cpu, cpu.cr2) {
         super::system::enter_user(cpu, &ctx);
         return;
     }
-    // A page that isn't there (error code bit 0 clear) of a view of a
-    // file, read from the file now.
+    // A page that isn't there (error code bit 0 clear) of the program's
+    // memory in the page file, given its physical page now.
+    if vector == 14 && error.is_some_and(|e| e & 1 == 0) && page_in(cpu, cpu.cr2, &ctx) {
+        super::system::enter_user(cpu, &ctx);
+        return;
+    }
+    // One of a view of a file, read from the file now, and held as
+    // `page_in` holds a page (it told `memory::retry` of the instruction).
     if vector == 14 && error.is_some_and(|e| e & 1 == 0) && super::mapping::fault_in(cpu, cpu.cr2) {
+        super::memory::hold(&mut cpu.bus, cpu.cr3, cpu.cr2);
         super::system::enter_user(cpu, &ctx);
         return;
     }
@@ -897,13 +953,22 @@ pub fn raise_from_call(
     flags: u32,
     params: &[u32],
 ) -> Option<u32> {
+    let esp = cpu.esp().wrapping_add(4 + 4 * args);
+    raise_at(cpu, esp, code, flags, params)
+}
+
+/// Raise the exception from the function the running stub is of, at the
+/// caller's EIP after the call and the stack pointer `esp`: the caller's
+/// after the call, or one below the stub's return address, as a function
+/// it called would raise it. MSVCRT's C++ exceptions have their object
+/// there, which stays while the handlers run.
+pub fn raise_at(cpu: &mut Cpu, esp: u32, code: u32, flags: u32, params: &[u32]) -> Option<u32> {
     let mut ctx = Context::of(cpu);
-    let esp = cpu.esp();
-    ctx.eip = cpu.bus.guest_read_32(esp);
+    ctx.eip = cpu.bus.guest_read_32(cpu.esp());
     if cpu.bus.guest_faulted() {
         return None;
     }
-    ctx.gpr[ESP] = esp + 4 + 4 * args;
+    ctx.gpr[ESP] = esp;
     if let Some(thread) = process(cpu).current_thread_mut() {
         thread.fault.clear();
     }

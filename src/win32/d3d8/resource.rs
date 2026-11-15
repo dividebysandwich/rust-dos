@@ -5,31 +5,45 @@
 //! A surface is a DirectDraw surface of its device's DirectDraw object:
 //! a render target and a depth buffer in video memory, an image surface
 //! in system memory. A texture is a DirectDraw texture with its mipmap
-//! levels, in video memory for D3DPOOL_DEFAULT, managed for
+//! levels, in video memory for D3DPOOL_DEFAULT (a compressed one in
+//! system memory, where DirectDraw makes them), managed for
 //! D3DPOOL_MANAGED (in system memory, which the HAL copies to the card),
 //! and in system memory for the other pools; each level is a surface of
-//! Direct3D 8's whose count is the texture's. The HAL draws from 565,
-//! 1555 and 4444 textures where they are and copies the others,
-//! converted, to its heap on the card, so textures of the 32-bit formats
-//! work too though CheckDeviceFormat leaves them out, as the Voodoo3's
-//! driver did. Cube and volume textures fail, as the card has none.
+//! Direct3D 8's whose count is the texture's. A Voodoo's HAL draws
+//! from 565, 1555 and 4444 textures where they are and copies the
+//! others, converted, to its heap on the card, so textures of the
+//! 32-bit formats work too though CheckDeviceFormat leaves them out, as
+//! the Voodoo3's driver did. A ToadForce has the formats its HAL lists
+//! (`card_texture`): the 32-bit ones, the compressed ones, alpha and
+//! luminance, and the bump formats. A texture of a format other than
+//! RGB is made only on a card that samples it (`makes_texture`). A cube
+//! texture is a cube map of DirectDraw's, made on a card that samples
+//! cube textures (`card_cube`), which a ToadForce does. Volume textures
+//! fail.
 //!
 //! Vertex and index buffers are blocks of the process's memory.
 
 use super::super::ddraw::surface::{
-    self as dd_surface, DDPF_ALPHAPIXELS, DDPF_RGB, DDPF_ZBUFFER, DDSCAPS_3DDEVICE,
+    self as dd_surface, DDPF_ALPHAPIXELS, DDPF_FOURCC, DDPF_RGB, DDPF_ZBUFFER, DDSCAPS_3DDEVICE,
     DDSCAPS_COMPLEX, DDSCAPS_FLIP, DDSCAPS_MIPMAP, DDSCAPS_OFFSCREENPLAIN, DDSCAPS_PRIMARYSURFACE,
-    DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_VIDEOMEMORY, DDSCAPS_ZBUFFER,
-    DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_HEIGHT, DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH,
-    Desc,
+    DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_VIDEOMEMORY, DDSCAPS_ZBUFFER, DDSCAPS2_CUBEMAP,
+    DDSCAPS2_CUBEMAP_ALLFACES, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_HEIGHT, DDSD_MIPMAPCOUNT,
+    DDSD_PIXELFORMAT, DDSD_WIDTH, Desc,
 };
 use super::super::ddraw::{self, Format, V_SURFACE7};
 use super::{
-    D3D_OK, D3DERR_INVALIDCALL, D3DERR_NOTFOUND, D3DERR_OUTOFVIDEOMEMORY, Object, V_INDEXBUFFER8,
-    V_SURFACE8, V_TEXTURE8, V_VERTEXBUFFER8, add, object, of, state,
+    D3D_OK, D3DERR_INVALIDCALL, D3DERR_NOTFOUND, D3DERR_OUTOFVIDEOMEMORY, Object, V_CUBETEXTURE8,
+    V_INDEXBUFFER8, V_SURFACE8, V_TEXTURE8, V_VERTEXBUFFER8, add, object, of, state,
 };
 use crate::cpu::Cpu;
 use crate::win32::com::{self, Guid};
+
+// DDPF_ bits of the formats a ToadForce adds.
+const DDPF_ALPHA: u32 = 0x2;
+const DDPF_STENCILBUFFER: u32 = 0x4000;
+const DDPF_LUMINANCE: u32 = 0x2_0000;
+const DDPF_BUMPLUMINANCE: u32 = 0x4_0000;
+const DDPF_BUMPDUDV: u32 = 0x8_0000;
 
 // D3DFORMATs.
 pub const FMT_UNKNOWN: u32 = 0;
@@ -40,7 +54,19 @@ pub const FMT_R5G6B5: u32 = 23;
 pub const FMT_X1R5G5B5: u32 = 24;
 pub const FMT_A1R5G5B5: u32 = 25;
 pub const FMT_A4R4G4B4: u32 = 26;
+pub const FMT_A8: u32 = 28;
 pub const FMT_X4R4G4B4: u32 = 30;
+pub const FMT_L8: u32 = 50;
+pub const FMT_A8L8: u32 = 51;
+pub const FMT_V8U8: u32 = 60;
+pub const FMT_L6V5U5: u32 = 61;
+pub const FMT_X8L8V8U8: u32 = 62;
+pub const FMT_DXT1: u32 = u32::from_le_bytes(*b"DXT1");
+pub const FMT_DXT2: u32 = u32::from_le_bytes(*b"DXT2");
+pub const FMT_DXT3: u32 = u32::from_le_bytes(*b"DXT3");
+pub const FMT_DXT4: u32 = u32::from_le_bytes(*b"DXT4");
+pub const FMT_DXT5: u32 = u32::from_le_bytes(*b"DXT5");
+pub const FMT_D24S8: u32 = 75;
 pub const FMT_D16_LOCKABLE: u32 = 70;
 pub const FMT_D24X8: u32 = 77;
 pub const FMT_D16: u32 = 80;
@@ -61,6 +87,7 @@ pub const USAGE_DEPTHSTENCIL: u32 = 0x2;
 // D3DRESOURCETYPE.
 const RTYPE_SURFACE: u32 = 1;
 const RTYPE_TEXTURE: u32 = 3;
+const RTYPE_CUBETEXTURE: u32 = 5;
 const RTYPE_VERTEXBUFFER: u32 = 6;
 const RTYPE_INDEXBUFFER: u32 = 7;
 
@@ -93,7 +120,9 @@ pub struct Surface {
 }
 
 /// A texture: its root DirectDraw surface's interface, which it holds,
-/// and its levels (surfaces of Direct3D 8's).
+/// and its levels (surfaces of Direct3D 8's). A cube texture has the
+/// levels of its six faces, one face's after another's, in the order
+/// of D3DCUBEMAP_FACES.
 #[derive(Clone, Debug, Default)]
 pub struct Texture {
     pub dd: u32,
@@ -103,6 +132,36 @@ pub struct Texture {
     pub usage: u32,
     pub pool: u32,
     pub lod: u32,
+    pub cube: bool,
+}
+
+/// The faces of a cube texture.
+const FACES: usize = 6;
+
+impl Texture {
+    /// How many levels it has: each face's, for a cube texture.
+    pub fn level_count(&self) -> usize {
+        match self.cube {
+            true => self.levels.len() / FACES,
+            false => self.levels.len(),
+        }
+    }
+
+    /// The surface of the level `level` of the face `face`, which is 0
+    /// for a texture that isn't a cube.
+    pub fn level(&self, face: u32, level: u32) -> Option<u32> {
+        let (face, level) = (face as usize, level as usize);
+        let faces = if self.cube { FACES } else { 1 };
+        if face >= faces || level >= self.level_count() {
+            return None;
+        }
+        self.levels.get(face * self.level_count() + level).copied()
+    }
+
+    /// The levels of each face: of the texture, when it isn't a cube.
+    pub fn faces(&self) -> impl Iterator<Item = &[u32]> {
+        self.levels.chunks(self.level_count().max(1))
+    }
 }
 
 /// A vertex or index buffer: its memory in the process.
@@ -149,7 +208,8 @@ crate::state_fields!(Texture {
     format,
     usage,
     pool,
-    lod
+    lod,
+    cube
 });
 crate::state_fields!(Buffer {
     index,
@@ -169,6 +229,15 @@ crate::state_fields!(SwapChain {
 pub fn dd_format(format: u32) -> Option<Format> {
     let rgb = |bits: u32, r: u32, g: u32, b: u32, a: u32| Format {
         flags: DDPF_RGB | if a != 0 { DDPF_ALPHAPIXELS } else { 0 },
+        fourcc: 0,
+        bits,
+        r,
+        g,
+        b,
+        a,
+    };
+    let other = |flags: u32, bits: u32, r: u32, g: u32, b: u32, a: u32| Format {
+        flags,
         fourcc: 0,
         bits,
         r,
@@ -197,8 +266,93 @@ pub fn dd_format(format: u32) -> Option<Format> {
             g: 0xFF_FFFF,
             ..Format::default()
         },
+        // The stencil's bits, the depth's mask and the stencil's.
+        FMT_D24S8 => Format {
+            flags: DDPF_ZBUFFER | DDPF_STENCILBUFFER,
+            bits: 32,
+            r: 8,
+            g: 0xFFFF_FF00,
+            b: 0xFF,
+            ..Format::default()
+        },
+        FMT_A8 => other(DDPF_ALPHA, 8, 0, 0, 0, 0xFF),
+        FMT_L8 => other(DDPF_LUMINANCE, 8, 0xFF, 0, 0, 0),
+        FMT_A8L8 => other(DDPF_LUMINANCE | DDPF_ALPHAPIXELS, 16, 0xFF, 0, 0, 0xFF00),
+        // The bump formats: du, dv and luminance where red, green and
+        // blue are.
+        FMT_V8U8 => other(DDPF_BUMPDUDV, 16, 0xFF, 0xFF00, 0, 0),
+        FMT_L6V5U5 => other(
+            DDPF_BUMPDUDV | DDPF_BUMPLUMINANCE,
+            16,
+            0x1F,
+            0x3E0,
+            0xFC00,
+            0,
+        ),
+        FMT_X8L8V8U8 => other(
+            DDPF_BUMPDUDV | DDPF_BUMPLUMINANCE,
+            32,
+            0xFF,
+            0xFF00,
+            0xFF_0000,
+            0,
+        ),
+        FMT_DXT1 | FMT_DXT2 | FMT_DXT3 | FMT_DXT4 | FMT_DXT5 => Format {
+            flags: DDPF_FOURCC,
+            fourcc: format,
+            ..Format::default()
+        },
         _ => return None,
     })
+}
+
+/// Whether the display adapter's card samples textures of `format`:
+/// the formats a Voodoo3's driver listed, or the ones a ToadForce's HAL
+/// has.
+pub fn card_texture(cpu: &Cpu, format: u32) -> bool {
+    use super::super::ddraw::d3d::hal;
+    match super::caps::card(cpu) {
+        Some(hal::Kind::ToadForce) => dd_format(format)
+            .is_some_and(|f| hal::description(hal::Kind::ToadForce).textures.contains(&f)),
+        _ => matches!(
+            format,
+            FMT_R5G6B5 | FMT_X1R5G5B5 | FMT_A1R5G5B5 | FMT_A4R4G4B4 | FMT_X4R4G4B4
+        ),
+    }
+}
+
+/// Whether the display adapter's card has depth buffers of `format`: a
+/// ToadForce has one with a stencil too.
+pub fn card_depth(cpu: &Cpu, format: u32) -> bool {
+    use super::super::ddraw::d3d::hal;
+    match format {
+        FMT_D16 | FMT_D16_LOCKABLE | FMT_D24X8 => true,
+        FMT_D24S8 => super::caps::card(cpu) == Some(hal::Kind::ToadForce),
+        _ => false,
+    }
+}
+
+/// Whether a surface or texture of `format`, `w` by `h` pixels, is
+/// whole blocks of 4 by 4 where the format is compressed. Direct3D 8
+/// makes a compressed one only so (Wine's d3d8 test_surface_blocks);
+/// its smaller mipmap levels may be less than a block.
+fn whole_blocks(format: u32, w: u32, h: u32) -> bool {
+    let compressed = dd_format(format).is_some_and(|f| dd_surface::dxt_format(&f).is_some());
+    !compressed || (w.is_multiple_of(4) && h.is_multiple_of(4))
+}
+
+/// Whether CreateTexture makes a texture of `format` on the display
+/// adapter's card. The RGB formats are made on every card, which the
+/// HAL converts where the card doesn't sample them, as the Voodoo3's
+/// driver made the 32-bit ones. The others (compressed, luminance,
+/// alpha and bump) are only the card's that samples them: elsewhere
+/// CreateTexture fails as CheckDeviceFormat does.
+fn makes_texture(cpu: &Cpu, format: u32) -> bool {
+    match dd_format(format) {
+        Some(f) if f.flags & DDPF_RGB != 0 => true,
+        Some(_) => card_texture(cpu, format),
+        None => false,
+    }
 }
 
 /// The D3DFORMAT of a display depth.
@@ -222,6 +376,8 @@ pub enum Role {
     Depth,
     Image,
     Texture(u32),
+    /// A cube texture: its six faces, each with this many levels.
+    Cube(u32),
     /// The primary surface and its back buffers, for full screen.
     Primary(u32),
 }
@@ -250,6 +406,10 @@ pub fn make_dd(
         desc.format = dd_format(format).ok_or(D3DERR_INVALIDCALL)?;
     }
     let memory = match pool {
+        // DirectDraw makes compressed surfaces in system memory only,
+        // and the HAL copies one to the card as it does a managed
+        // texture: a texture of D3DPOOL_DEFAULT is there too.
+        POOL_DEFAULT if desc.format.flags & DDPF_FOURCC != 0 => 0,
         POOL_DEFAULT => DDSCAPS_VIDEOMEMORY,
         POOL_MANAGED => 0,
         _ => DDSCAPS_SYSTEMMEMORY,
@@ -258,11 +418,16 @@ pub fn make_dd(
         Role::Target => desc.caps[0] = DDSCAPS_3DDEVICE | DDSCAPS_OFFSCREENPLAIN | memory,
         Role::Depth => desc.caps[0] = DDSCAPS_ZBUFFER | memory,
         Role::Image => desc.caps[0] = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY,
-        Role::Texture(levels) => {
+        Role::Texture(levels) | Role::Cube(levels) => {
             desc.caps[0] = DDSCAPS_TEXTURE | memory;
             if pool == POOL_MANAGED {
                 // DDSCAPS2_TEXTUREMANAGE.
                 desc.caps[1] = 0x10;
+            }
+            if matches!(role, Role::Cube(_)) {
+                // A cube map is a complex surface whatever its levels.
+                desc.caps[0] |= DDSCAPS_COMPLEX;
+                desc.caps[1] |= DDSCAPS2_CUBEMAP | DDSCAPS2_CUBEMAP_ALLFACES;
             }
             if levels > 1 {
                 desc.caps[0] |= DDSCAPS_MIPMAP | DDSCAPS_COMPLEX;
@@ -430,24 +595,44 @@ pub fn create_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if !com::write_out(cpu, out, 0) {
         return Some(D3DERR_INVALIDCALL);
     }
-    if w == 0 || h == 0 || w > 4096 || h > 4096 || pool > POOL_SCRATCH {
+    if w == 0 || h == 0 || w > 4096 || h > 4096 {
         return Some(D3DERR_INVALIDCALL);
     }
-    if dd_format(format).is_none() || is_depth(format) {
-        return Some(D3DERR_INVALIDCALL);
+    let role = Role::Texture(level_count(w, h, levels));
+    let id = hr!(make_texture(cpu, device, role, (w, h), usage, format, pool));
+    let iface = super::iface(cpu, id);
+    com::write_out(cpu, out, iface);
+    Some(D3D_OK)
+}
+
+/// A texture of `role` (a texture's or a cube texture's) for the device
+/// `device`, with the DirectDraw surfaces it is and a surface of
+/// Direct3D 8's for each: its id, with a reference for the program.
+/// The pool, the format and the usage are checked here, for both kinds.
+fn make_texture(
+    cpu: &mut Cpu,
+    device: u32,
+    role: Role,
+    size: (u32, u32),
+    usage: u32,
+    format: u32,
+    pool: u32,
+) -> Result<u32, u32> {
+    let (cube, per_face) = match role {
+        Role::Cube(levels) => (true, levels),
+        Role::Texture(levels) => (false, levels),
+        _ => return Err(D3DERR_INVALIDCALL),
+    };
+    let (w, h) = size;
+    if pool > POOL_SCRATCH
+        || is_depth(format)
+        || !makes_texture(cpu, format)
+        || !whole_blocks(format, w, h)
+        || (usage & USAGE_RENDERTARGET != 0 && pool != POOL_DEFAULT)
+    {
+        return Err(D3DERR_INVALIDCALL);
     }
-    if usage & USAGE_RENDERTARGET != 0 && pool != POOL_DEFAULT {
-        return Some(D3DERR_INVALIDCALL);
-    }
-    let levels = level_count(w, h, levels);
-    let (ids, root) = hr!(make_dd(
-        cpu,
-        device,
-        Role::Texture(levels),
-        (w, h),
-        format,
-        pool
-    ));
+    let (ids, root) = make_dd(cpu, device, role, size, format, pool)?;
     if usage & USAGE_RENDERTARGET != 0 {
         // A texture the device can draw into.
         for &id in &ids {
@@ -462,6 +647,7 @@ pub fn create_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         format,
         usage,
         pool,
+        cube,
         ..Texture::default()
     };
     let o = Object {
@@ -469,10 +655,11 @@ pub fn create_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         texture: Some(t),
         ..Object::default()
     };
-    let id = add(cpu, o, V_TEXTURE8, 1);
+    let vtable = if cube { V_CUBETEXTURE8 } else { V_TEXTURE8 };
+    let id = add(cpu, o, vtable, 1);
     if id == 0 {
         ddraw::release(cpu, root);
-        return Some(com::E_OUTOFMEMORY);
+        return Err(com::E_OUTOFMEMORY);
     }
     let mut list = Vec::new();
     for (i, &dd) in ids.iter().enumerate() {
@@ -485,7 +672,9 @@ pub fn create_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 o.holds = false;
             }
             if let Some(s) = o.surface.as_mut() {
-                s.level = i as u32;
+                // DirectDraw lists a cube map's surfaces a face at a
+                // time, each face's levels in their order.
+                s.level = i as u32 % per_face.max(1);
             }
         }
         // `new_surface` took a reference on the device for it, unless it
@@ -498,9 +687,7 @@ pub fn create_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if let Some(t) = object(cpu, id).and_then(|o| o.texture.as_mut()) {
         t.levels = list;
     }
-    let iface = super::iface(cpu, id);
-    com::write_out(cpu, out, iface);
-    Some(D3D_OK)
+    Ok(id)
 }
 
 /// CreateVolumeTexture(this, width, height, depth, levels, usage,
@@ -511,12 +698,34 @@ pub fn create_volume_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(D3DERR_INVALIDCALL)
 }
 
-/// CreateCubeTexture(this, edge, levels, usage, format, pool, out): nor
-/// cube textures.
+/// Whether the display adapter's card samples cube textures.
+pub fn card_cube(cpu: &Cpu) -> bool {
+    use super::super::ddraw::d3d::hal;
+    super::caps::card(cpu)
+        .is_some_and(|kind| hal::description(kind).texture & hal::TEXTURECAPS_CUBEMAP != 0)
+}
+
+/// CreateCubeTexture(this, edge, levels, usage, format, pool, out): six
+/// square faces of `edge` pixels, a power of two, on a card that
+/// samples cube textures. They are a cube map of DirectDraw's, which
+/// the HAL hands the card as one texture.
 pub fn create_cube_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    hr!(device_of(cpu, args[0]));
-    com::write_out(cpu, args[6], 0);
-    Some(D3DERR_INVALIDCALL)
+    let [this, edge, levels, usage, format, pool, out] = args[..] else {
+        return Some(D3DERR_INVALIDCALL);
+    };
+    let device = hr!(device_of(cpu, this));
+    if !com::write_out(cpu, out, 0) {
+        return Some(D3DERR_INVALIDCALL);
+    }
+    if !card_cube(cpu) || !edge.is_power_of_two() || edge > 4096 {
+        return Some(D3DERR_INVALIDCALL);
+    }
+    let role = Role::Cube(level_count(edge, edge, levels));
+    let size = (edge, edge);
+    let id = hr!(make_texture(cpu, device, role, size, usage, format, pool));
+    let iface = super::iface(cpu, id);
+    com::write_out(cpu, out, iface);
+    Some(D3D_OK)
 }
 
 /// A buffer of `size` bytes.
@@ -614,6 +823,9 @@ fn create_surface(
     if !com::write_out(cpu, out, 0) || w == 0 || h == 0 || w > 4096 || h > 4096 {
         return D3DERR_INVALIDCALL;
     }
+    if !whole_blocks(format, w, h) {
+        return D3DERR_INVALIDCALL;
+    }
     let (ids, root) = match make_dd(cpu, device, role, (w, h), format, pool) {
         Ok(r) => r,
         Err(e) => return e,
@@ -658,12 +870,12 @@ pub fn create_render_target(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// CreateDepthStencilSurface(this, width, height, format, multisample,
-/// out): of the formats `direct3d::depth_format` has.
+/// out): of the formats the card has (`card_depth`).
 pub fn create_depth_stencil(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, w, h, format, ms, out] = args[..] else {
         return Some(D3DERR_INVALIDCALL);
     };
-    if !super::direct3d::depth_format(format) || ms > 1 {
+    if !card_depth(cpu, format) || ms > 1 {
         com::write_out(cpu, out, 0);
         return Some(D3DERR_INVALIDCALL);
     }
@@ -851,6 +1063,7 @@ pub fn get_type(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(match vtable {
         V_SURFACE8 => RTYPE_SURFACE,
         V_TEXTURE8 => RTYPE_TEXTURE,
+        V_CUBETEXTURE8 => RTYPE_CUBETEXTURE,
         V_VERTEXBUFFER8 => RTYPE_VERTEXBUFFER,
         V_INDEXBUFFER8 => RTYPE_INDEXBUFFER,
         _ => 0,
@@ -945,6 +1158,17 @@ fn lock_surface(cpu: &mut Cpu, id: u32, at: u32, rect: u32) -> u32 {
         if r[0] < 0 || r[1] < 0 || r[0] >= r[2] || r[1] >= r[3] || r[2] > w || r[3] > h {
             return D3DERR_INVALIDCALL;
         }
+        // A compressed surface of D3DPOOL_DEFAULT locks whole blocks
+        // only: a rectangle starts on a block and ends on one or at the
+        // edge. In the other pools Direct3D 8 takes any rectangle and
+        // gives the block it starts in (Wine's d3d8 test_surface_blocks).
+        let ends = |end: i32, edge: i32| end % 4 == 0 || end == edge;
+        if s.pool == POOL_DEFAULT
+            && dd_surface::dxt_format(&dd.format).is_some()
+            && (r[0] % 4 != 0 || r[1] % 4 != 0 || !ends(r[2], w) || !ends(r[3], h))
+        {
+            return D3DERR_INVALIDCALL;
+        }
         (x, y) = (r[0] as u32, r[1] as u32);
     }
     // What the card drew into a 32-bit target's shadow is there.
@@ -952,8 +1176,16 @@ fn lock_surface(cpu: &mut Cpu, id: u32, at: u32, rect: u32) -> u32 {
     let Some(base) = dd_surface::address(cpu, &dd) else {
         return D3DERR_INVALIDCALL;
     };
-    let bits = base + y * dd.pitch + x * dd.bytes_per_pixel();
-    cpu.bus.guest_write_32(at, dd.pitch);
+    // A compressed surface is its blocks, row after row of them: the
+    // pitch is a row's bytes, and a rectangle starts at a block.
+    let (pitch, bits) = match dd_surface::dxt_format(&dd.format) {
+        Some(f) => {
+            let (pitch, block) = (f.row_bytes(dd.width) as u32, f.block_bytes() as u32);
+            (pitch, base + y / 4 * pitch + x / 4 * block)
+        }
+        None => (dd.pitch, base + y * dd.pitch + x * dd.bytes_per_pixel()),
+    };
+    cpu.bus.guest_write_32(at, pitch);
     cpu.bus.guest_write_32(at + 4, bits);
     if let Some(s) = object(cpu, id).and_then(|o| o.surface.as_mut()) {
         s.locked = true;
@@ -1020,7 +1252,7 @@ pub fn set_lod(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if t.pool != POOL_MANAGED {
         return Some(0);
     }
-    let lod = args[1].min(t.levels.len().saturating_sub(1) as u32);
+    let lod = args[1].min(t.level_count().saturating_sub(1) as u32);
     let t = object(cpu, id)?.texture.as_mut()?;
     Some(std::mem::replace(&mut t.lod, lod))
 }
@@ -1032,19 +1264,23 @@ pub fn get_lod(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// GetLevelCount(this).
 pub fn get_level_count(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    Some(texture_of(cpu, args[0]).map_or(0, |(_, t)| t.levels.len() as u32))
+    Some(texture_of(cpu, args[0]).map_or(0, |(_, t)| t.level_count() as u32))
 }
 
-/// The level `level` of the texture `this`.
+/// The level `level` of the texture `this`: of its first face, for a
+/// cube texture.
 fn level_of(cpu: &mut Cpu, this: u32, level: u32) -> Result<u32, u32> {
-    let (_, t) = texture_of(cpu, this)?;
-    t.levels
-        .get(level as usize)
-        .copied()
-        .ok_or(D3DERR_INVALIDCALL)
+    face_level_of(cpu, this, 0, level)
 }
 
-/// GetLevelDesc(this, level, desc).
+/// The level `level` of the face `face` of the texture `this`.
+fn face_level_of(cpu: &mut Cpu, this: u32, face: u32, level: u32) -> Result<u32, u32> {
+    let (_, t) = texture_of(cpu, this)?;
+    t.level(face, level).ok_or(D3DERR_INVALIDCALL)
+}
+
+/// GetLevelDesc(this, level, desc): a cube texture's faces all have
+/// the description of the first.
 pub fn get_level_desc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, level, at] = args[..] else {
         return Some(D3DERR_INVALIDCALL);
@@ -1086,8 +1322,37 @@ pub fn texture_unlock_rect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(unlock_surface(cpu, id))
 }
 
-/// AddDirtyRect(this, rect): the whole texture is copied again when it
-/// changed.
+// IDirect3DCubeTexture8.
+
+/// GetCubeMapSurface(this, face, level, out).
+pub fn get_cube_map_surface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let [this, face, level, out] = args[..] else {
+        return Some(D3DERR_INVALIDCALL);
+    };
+    let id = hr!(face_level_of(cpu, this, face, level));
+    if !super::give(cpu, id, out) {
+        return Some(D3DERR_INVALIDCALL);
+    }
+    Some(D3D_OK)
+}
+
+/// LockRect(this, face, level, locked, rect, flags) of a cube texture.
+pub fn cube_lock_rect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let [this, face, level, at, rect, _] = args[..] else {
+        return Some(D3DERR_INVALIDCALL);
+    };
+    let id = hr!(face_level_of(cpu, this, face, level));
+    Some(lock_surface(cpu, id, at, rect))
+}
+
+/// UnlockRect(this, face, level) of a cube texture.
+pub fn cube_unlock_rect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let id = hr!(face_level_of(cpu, args[0], args[1], args[2]));
+    Some(unlock_surface(cpu, id))
+}
+
+/// AddDirtyRect(this, rect), and (this, face, rect) of a cube texture:
+/// the whole texture is copied again when it changed.
 pub fn add_dirty_rect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (_, t) = hr!(texture_of(cpu, args[0]));
     dd_surface::changed(cpu, t.dd);

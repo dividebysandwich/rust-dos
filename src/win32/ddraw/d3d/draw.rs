@@ -4,7 +4,7 @@
 //! the pipeline (`pipeline.rs`), and counts what was drawn in the
 //! device's statistics and clip status.
 //!
-//! The rasterizer is the card's (`hal.rs`). Without a card to draw on,
+//! The rasterizer is the card's (`hal`). Without a card to draw on,
 //! what comes out of the pipeline is only counted (`pipeline::Counter`).
 
 use super::super::DDERR_INVALIDPARAMS;
@@ -13,10 +13,12 @@ use super::device::{
     RS_COLORVERTEX, RS_CULLMODE, RS_DIFFUSEMATERIALSOURCE, RS_EMISSIVEMATERIALSOURCE, RS_FILLMODE,
     RS_FOGDENSITY, RS_FOGENABLE, RS_FOGEND, RS_FOGSTART, RS_FOGTABLEMODE, RS_FOGVERTEXMODE,
     RS_LIGHTING, RS_LOCALVIEWER, RS_NORMALIZENORMALS, RS_SHADEMODE, RS_SPECULARENABLE,
-    RS_SPECULARMATERIALSOURCE, TSS_TEXCOORDINDEX, device_of, get, version,
+    RS_SPECULARMATERIALSOURCE, TSS_TEXCOORDINDEX, TSS_TEXTURETRANSFORMFLAGS, device_of, get,
+    version,
 };
+use super::hal::Source;
 use super::pipeline::{
-    self, Fog, Layout, Light, Lighting, Material, Prim, Processed, Setup, Vertex, ViewMap,
+    self, Blend, Fog, Layout, Light, Lighting, Material, Prim, Processed, Setup, Vertex, ViewMap,
 };
 use super::vertexbuffer::Clipped;
 use super::{
@@ -24,7 +26,7 @@ use super::{
     D3DERR_NOTINBEGIN, D3DERR_VERTEXBUFFERLOCKED, probe, read_bytes, read_dwords,
 };
 use crate::cpu::Cpu;
-use std::sync::Arc;
+use crate::win32::trace3d::Pass;
 
 // DrawPrimitive's flags.
 pub const D3DDP_DONOTCLIP: u32 = 0x4;
@@ -55,6 +57,24 @@ fn check_kind(kind: u32) -> Result<(), u32> {
     }
 }
 
+/// Whether a draw may read `count` vertices of `layout` at `at`: not
+/// more than Direct3D takes, and all there.
+fn vertices_there(cpu: &mut Cpu, at: u32, layout: &Layout, count: u32) -> Result<(), u32> {
+    let len = (layout.size as u64) * count as u64;
+    if len > 0x100_0000 || count > 0 && !probe(cpu, at, len as u32, false) {
+        return Err(DDERR_INVALIDPARAMS);
+    }
+    Ok(())
+}
+
+/// Whether a draw may read `count` indices (WORDs) at `at`.
+fn indices_there(cpu: &mut Cpu, at: u32, count: u32) -> Result<(), u32> {
+    if count > 0x10_0000 || count > 0 && !probe(cpu, at, count * 2, false) {
+        return Err(DDERR_INVALIDPARAMS);
+    }
+    Ok(())
+}
+
 /// `count` vertices of `layout` at `at`.
 pub fn read_vertices(
     cpu: &mut Cpu,
@@ -62,29 +82,34 @@ pub fn read_vertices(
     layout: &Layout,
     count: u32,
 ) -> Result<Vec<Vertex>, u32> {
-    let len = (layout.size as u64) * count as u64;
-    if len > 0x100_0000 || count > 0 && !probe(cpu, at, len as u32, false) {
-        return Err(DDERR_INVALIDPARAMS);
-    }
-    let bytes = read_bytes(cpu, at, len as u32);
-    Ok(bytes
+    vertices_there(cpu, at, layout, count)?;
+    Ok(vertices_at(cpu, at, layout, count))
+}
+
+/// `read_vertices` of vertices `vertices_there` found there.
+fn vertices_at(cpu: &mut Cpu, at: u32, layout: &Layout, count: u32) -> Vec<Vertex> {
+    let bytes = read_bytes(cpu, at, layout.size * count);
+    bytes
         .chunks_exact(layout.size.max(1) as usize)
         .map(|v| layout.read(v))
-        .collect())
+        .collect()
 }
 
 /// `count` indices (WORDs) at `at`.
 fn read_indices(cpu: &mut Cpu, at: u32, count: u32) -> Result<Vec<u32>, u32> {
-    if count > 0x10_0000 || count > 0 && !probe(cpu, at, count * 2, false) {
-        return Err(DDERR_INVALIDPARAMS);
-    }
+    indices_there(cpu, at, count)?;
+    Ok(indices_at(cpu, at, count))
+}
+
+/// `read_indices` of indices `indices_there` found there.
+fn indices_at(cpu: &mut Cpu, at: u32, count: u32) -> Vec<u32> {
     let bytes = read_bytes(cpu, at, count * 2);
-    Ok(bytes
+    bytes
         .as_chunks::<2>()
         .0
         .iter()
         .map(|b| u16::from_le_bytes([b[0], b[1]]) as u32)
-        .collect())
+        .collect()
 }
 
 /// A D3DLIGHT7's words as the pipeline has a light.
@@ -144,17 +169,26 @@ fn view_map(cpu: &mut Cpu, d: &Device, version: u32, viewport: u32) -> ViewMap {
     ViewMap::dx7(v.x, v.y, w, h, v.min_z, v.max_z)
 }
 
-/// The pipeline's setup for vertices of `layout` drawn by the device
-/// `id` through an interface of `version`, with DrawPrimitive's `flags`.
-pub fn setup(cpu: &mut Cpu, id: u32, version: u32, layout: &Layout, flags: u32) -> Option<Setup> {
+/// The pipeline's setup for vertices of `layout` drawn (or processed,
+/// as `pass` says) by the device `id` through an interface of `version`,
+/// with DrawPrimitive's `flags`.
+pub fn setup(
+    cpu: &mut Cpu,
+    pass: Pass,
+    id: u32,
+    version: u32,
+    layout: &Layout,
+    flags: u32,
+) -> Option<Setup> {
     let viewport = get(cpu, id)?.current.0;
-    setup_in(cpu, id, version, layout, flags, viewport)
+    setup_in(cpu, pass, id, version, layout, flags, viewport)
 }
 
 /// The same, with the viewport `viewport` for one of Direct3D 3 to 6
 /// (an execute buffer's).
 pub fn setup_in(
     cpu: &mut Cpu,
+    pass: Pass,
     id: u32,
     version: u32,
     layout: &Layout,
@@ -162,6 +196,14 @@ pub fn setup_in(
     viewport: u32,
 ) -> Option<Setup> {
     super::device::lend(cpu, id, |cpu, d| {
+        if crate::win32::trace3d::on(cpu) {
+            let textures: Vec<bool> = d.textures.iter().map(|&t| t != 0).collect();
+            let lights = d.lights.iter().filter(|l| l.enabled).count();
+            let (render, stages) = (&d.render, &d.stages);
+            crate::win32::trace3d::draw(
+                cpu, pass, version, layout.fvf, render, stages, &textures, lights,
+            );
+        }
         setup_of(cpu, d, version, layout, flags, viewport)
     })
 }
@@ -176,6 +218,7 @@ fn setup_of(
     viewport: u32,
 ) -> Setup {
     let view_map = view_map(cpu, d, version, viewport);
+    let guard_band = super::hal::vertex_band(super::hal::kind_of(cpu, d));
     let s = |r: u32| d.state(r);
     let mut planes = Vec::new();
     if version >= 7 {
@@ -212,7 +255,6 @@ fn setup_of(
             ambient: [a[0], a[1], a[2], 0.0],
             specular: s(RS_SPECULARENABLE) != 0,
             local_viewer: s(RS_LOCALVIEWER) != 0,
-            normalize: s(RS_NORMALIZENORMALS) != 0,
             color_vertex: s(RS_COLORVERTEX) != 0,
             sources: [
                 s(RS_DIFFUSEMATERIALSOURCE),
@@ -235,7 +277,6 @@ fn setup_of(
             density: d.state_f(RS_FOGDENSITY),
             range: s(48) != 0,
         });
-    let tex = |stage: u32| (d.stage(stage, TSS_TEXCOORDINDEX) & 7) as usize;
     Setup {
         world: d.transforms[1],
         view: d.transforms[2],
@@ -245,12 +286,45 @@ fn setup_of(
         lighting,
         fog,
         clip: s(RS_CLIPPING) != 0 && flags & D3DDP_DONOTCLIP == 0,
-        guard_band: super::hal::VERTEX_BAND,
+        guard_band,
         cull: s(RS_CULLMODE),
         fill: s(RS_FILLMODE),
         shade: s(RS_SHADEMODE),
-        tex_index: [tex(0), tex(1)],
+        coords: std::array::from_fn(|stage| {
+            let stage = stage as u32;
+            pipeline::Coord::of(
+                d.stage(stage, TSS_TEXCOORDINDEX),
+                d.stage(stage, TSS_TEXTURETRANSFORMFLAGS),
+                &d.transforms[16 + stage as usize],
+            )
+        }),
+        normalize: s(RS_NORMALIZENORMALS) != 0,
+        screen_stages: (d.tmus as usize).min(pipeline::SCREEN_STAGES),
+        blend: vertex_blend(d, version, layout),
     }
+}
+
+/// D3DRENDERSTATE_VERTEXBLEND.
+const RS_VERTEXBLEND: u32 = 151;
+
+/// How Direct3D 7 blends vertices of `layout`, if the device `d` does:
+/// D3DRENDERSTATE_VERTEXBLEND of D3DVBLEND_1WEIGHT to 3WEIGHTS (1 to 3)
+/// weighs a vertex of D3DFVF_XYZB1 to XYZB5 through the world matrices
+/// D3DTRANSFORMSTATE_WORLD and WORLD1 to WORLD3, one more than the
+/// weights the state counts. Direct3D 8 says how its device blends
+/// after the setup is made (`draw_blended`).
+fn vertex_blend(d: &Device, version: u32, layout: &Layout) -> Option<Blend> {
+    let count = d.state(RS_VERTEXBLEND);
+    if version != 7 || layout.rhw || layout.weights == 0 || !(1..=3).contains(&count) {
+        return None;
+    }
+    // D3DTRANSFORMSTATE_WORLD is 1, and WORLD1 to WORLD3 are 4 to 6.
+    let matrices = [1, 4, 5, 6].map(|t| d.transforms[t]).to_vec();
+    Some(Blend::Weights {
+        count: count as usize,
+        indexed: false,
+        matrices,
+    })
 }
 
 /// Count what was drawn, and the vertices' clip codes and extents, in
@@ -304,8 +378,190 @@ pub fn draw(
     order: Option<&[u32]>,
     flags: u32,
 ) -> Result<(), u32> {
+    draw_blended(cpu, id, version, layout, kind, vertices, order, flags, None)
+}
+
+/// Draw as `draw` does, the vertices blended as `blend` says (Direct3D
+/// 8's geometry blending).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_blended(
+    cpu: &mut Cpu,
+    id: u32,
+    version: u32,
+    layout: &Layout,
+    kind: u32,
+    vertices: &[Vertex],
+    order: Option<&[u32]>,
+    flags: u32,
+    blend: Option<Blend>,
+) -> Result<(), u32> {
+    check_kind(kind)?;
+    // One setup for the card and the pipeline both: making it records
+    // the draw in a 3D trace.
+    let Some(mut setup) = setup(cpu, Pass::Draw, id, version, layout, flags) else {
+        return Err(DDERR_INVALIDPARAMS);
+    };
+    if blend.is_some() {
+        setup.blend = blend;
+    }
+    // A card that transforms blends between its world matrices too,
+    // and leaves the pipeline the blending it doesn't have.
+    if !layout.rhw && draw_on_card(cpu, id, &setup, layout, kind, vertices, order) {
+        return Ok(());
+    }
     let prims = primitives(kind, order, vertices.len())?;
-    draw_prims(cpu, id, version, layout, vertices, &prims, flags)
+    draw_set_up(cpu, id, &setup, layout, vertices, None, &prims, flags);
+    Ok(())
+}
+
+/// Draw `kind` primitives of the vertices of `layout` at `from` in the
+/// program's memory with the device `id`, as `draw` draws them once
+/// they are read.
+///
+/// Transformed vertices go from there to a card that takes them so
+/// (`hal::draw_screen`), which most draws of them do: the pipeline has
+/// nothing to work out for a triangle that needs no cutting. The
+/// others, and every draw of vertices to transform, are read and drawn
+/// by `draw`'s path.
+fn draw_from(
+    cpu: &mut Cpu,
+    id: u32,
+    version: u32,
+    layout: &Layout,
+    kind: u32,
+    from: &Source,
+    flags: u32,
+) -> Result<(), u32> {
+    vertices_there(cpu, from.at, layout, from.count)?;
+    if let Some((at, count)) = from.indices {
+        indices_there(cpu, at, count)?;
+    }
+    // Probed above, so read without probing again.
+    let read = |cpu: &mut Cpu| {
+        let vertices = vertices_at(cpu, from.at, layout, from.count);
+        let order = from.indices.map(|(at, count)| indices_at(cpu, at, count));
+        (vertices, order)
+    };
+    if !layout.rhw {
+        let (vertices, order) = read(cpu);
+        let order = order.as_deref();
+        return draw(cpu, id, version, layout, kind, &vertices, order, flags);
+    }
+    check_kind(kind)?;
+    let Some(setup) = setup(cpu, Pass::Draw, id, version, layout, flags) else {
+        return Err(DDERR_INVALIDPARAMS);
+    };
+    let drawn = {
+        let _profile = crate::profile::zone(crate::profile::Zone::D3dDraw);
+        super::device::lend(cpu, id, |cpu, d| {
+            super::hal::draw_screen(cpu, d, &setup, layout, kind, from)
+        })
+        .flatten()
+    };
+    if let Some(triangles) = drawn {
+        let Some(d) = get(cpu, id) else {
+            return Ok(());
+        };
+        d.stats[0] = d.stats[0].wrapping_add(triangles);
+        d.stats[4] = d.stats[4].wrapping_add(from.count);
+        // The target's pixels changed, for a texture made of it.
+        let target = d.target;
+        super::super::surface::changed(cpu, target);
+        return Ok(());
+    }
+    let (vertices, order) = read(cpu);
+    let prims = primitives(kind, order.as_deref(), vertices.len())?;
+    draw_set_up(cpu, id, &setup, layout, &vertices, None, &prims, flags);
+    Ok(())
+}
+
+/// Draw on a card that transforms and lights vertices itself, which
+/// gets them as the program gave them. False when the device's card
+/// doesn't, or can't for this draw (`hal::draw_geometry`).
+fn draw_on_card(
+    cpu: &mut Cpu,
+    id: u32,
+    setup: &Setup,
+    layout: &Layout,
+    kind: u32,
+    vertices: &[Vertex],
+    order: Option<&[u32]>,
+) -> bool {
+    let drawn = super::device::lend(cpu, id, |cpu, d| {
+        // A program that asks for the clip status or the extents gets
+        // them from the pipeline's vertices.
+        d.clip_status[0] & 3 == 0
+            && super::hal::draw_geometry(cpu, d, setup, layout, vertices, kind, order)
+    });
+    if drawn != Some(true) {
+        return false;
+    }
+    let n = order.map_or(vertices.len(), |o| o.len()) as u32;
+    let Some(d) = get(cpu, id) else {
+        return true;
+    };
+    let (stat, primitives) = match kind {
+        pipeline::POINTLIST => (2, n),
+        pipeline::LINELIST => (1, n / 2),
+        pipeline::LINESTRIP => (1, n.saturating_sub(1)),
+        pipeline::TRIANGLELIST => (0, n / 3),
+        _ => (0, n.saturating_sub(2)),
+    };
+    d.stats[stat] = d.stats[stat].wrapping_add(primitives);
+    d.stats[4] = d.stats[4].wrapping_add(vertices.len() as u32);
+    // The target's pixels changed, for a texture made of it.
+    let target = d.target;
+    super::super::surface::changed(cpu, target);
+    true
+}
+
+/// Draw OpenGL's primitives `lists` of the `count` vertices `packed`,
+/// which are in the card's layout for `layout`, with the device `id`
+/// on a card that transforms and lights vertices itself, with OpenGL's
+/// lights and materials `gl` (`hal::draw_gl`). False, with nothing
+/// drawn, when the device's card doesn't or can't.
+pub fn draw_gl(
+    cpu: &mut Cpu,
+    id: u32,
+    layout: &Layout,
+    packed: &[u32],
+    count: u32,
+    gl: &super::hal::Gl,
+    lists: &[(u32, Vec<u32>)],
+) -> bool {
+    let made = {
+        let _profile = crate::profile::zone(crate::profile::Zone::D3dSetup);
+        setup(cpu, Pass::Draw, id, 8, layout, 0)
+    };
+    let Some(setup) = made else {
+        return false;
+    };
+    let drawn = {
+        let _profile = crate::profile::zone(crate::profile::Zone::D3dDraw);
+        super::device::lend(cpu, id, |cpu, d| {
+            super::hal::draw_gl(cpu, d, &setup, gl, layout, packed, lists)
+        })
+    };
+    if drawn != Some(true) {
+        return false;
+    }
+    let Some(d) = get(cpu, id) else {
+        return true;
+    };
+    for (kind, order) in lists {
+        let n = order.len() as u32;
+        let (stat, primitives) = match kind {
+            1 => (2, n),
+            2 => (1, n / 2),
+            _ => (0, n / 3),
+        };
+        d.stats[stat] = d.stats[stat].wrapping_add(primitives);
+    }
+    d.stats[4] = d.stats[4].wrapping_add(count);
+    // The target's pixels changed, for a texture made of it.
+    let target = d.target;
+    super::super::surface::changed(cpu, target);
+    true
 }
 
 /// The `kind` primitives of `count` vertices, in the order `order` or
@@ -336,7 +592,7 @@ pub fn draw_prims(
     prims: &[Prim],
     flags: u32,
 ) -> Result<(), u32> {
-    draw_clipped(cpu, id, version, layout, vertices, None, prims, flags)
+    draw_clipped(cpu, id, version, layout, vertices, None, prims, flags, None)
 }
 
 /// Draw the primitives `prims` of `vertices`, and with `clip` what
@@ -345,7 +601,7 @@ pub fn draw_prims(
 /// puts them where the buffer has it; after a change of viewport, or
 /// once the program wrote over it, it is drawn where the buffer says,
 /// as before, and a primitive that mixes the two is clipped as
-/// `pipeline::one_kind` says.
+/// `pipeline::one_kind` says. The vertices are blended as `blend` says.
 #[allow(clippy::too_many_arguments)]
 fn draw_clipped(
     cpu: &mut Cpu,
@@ -356,21 +612,48 @@ fn draw_clipped(
     clip: Option<&[Option<Clipped>]>,
     prims: &[Prim],
     flags: u32,
+    blend: Option<Blend>,
 ) -> Result<(), u32> {
-    let Some(setup) = setup(cpu, id, version, layout, flags) else {
+    let made = {
+        let _profile = crate::profile::zone(crate::profile::Zone::D3dSetup);
+        setup(cpu, Pass::Draw, id, version, layout, flags)
+    };
+    let Some(mut setup) = made else {
         return Err(DDERR_INVALIDPARAMS);
     };
-    let mut processed = pipeline::process(&setup, vertices, layout);
+    if blend.is_some() {
+        setup.blend = blend;
+    }
+    draw_set_up(cpu, id, &setup, layout, vertices, clip, prims, flags);
+    Ok(())
+}
+
+/// `draw_clipped` with the pipeline's setup made already.
+#[allow(clippy::too_many_arguments)]
+fn draw_set_up(
+    cpu: &mut Cpu,
+    id: u32,
+    setup: &Setup,
+    layout: &Layout,
+    vertices: &[Vertex],
+    clip: Option<&[Option<Clipped>]>,
+    prims: &[Prim],
+    flags: u32,
+) {
+    let mut processed = {
+        let _profile = crate::profile::zone(crate::profile::Zone::D3dVertices);
+        pipeline::process(setup, vertices, layout)
+    };
     if let Some(clip) = clip {
         for ((p, v), c) in processed.iter_mut().zip(vertices).zip(clip) {
             if let Some(c) = c
                 && setup.view_map.screen(c.clip).map(f32::to_bits) == v.position.map(f32::to_bits)
             {
-                *p = pipeline::at_clip_coordinates(&setup, p, c.clip, c.planes);
+                *p = pipeline::at_clip_coordinates(setup, p, c.clip, c.planes);
             }
         }
     }
-    let drawn = rasterize(cpu, id, &setup, &processed, prims);
+    let drawn = rasterize(cpu, id, setup, &processed, prims);
     if clip.is_some() {
         // ProcessVertices put their clip codes in the clip status
         // already. Drawn, they are screen vertices, which add none:
@@ -380,8 +663,7 @@ fn draw_clipped(
             p.code = 0;
         }
     }
-    account(cpu, id, &setup, &processed, drawn, flags);
-    Ok(())
+    account(cpu, id, setup, &processed, drawn, flags);
 }
 
 /// Draw `prims` of `verts` on the card, if the device can draw there,
@@ -393,7 +675,11 @@ fn rasterize(
     verts: &[Processed],
     prims: &[Prim],
 ) -> pipeline::Drawn {
-    let card = super::device::lend(cpu, id, |cpu, d| super::hal::bind(cpu, d, setup)).flatten();
+    let card = {
+        let _profile = crate::profile::zone(crate::profile::Zone::D3dBind);
+        super::device::lend(cpu, id, |cpu, d| super::hal::bind(cpu, d, setup)).flatten()
+    };
+    let _profile = crate::profile::zone(crate::profile::Zone::D3dDraw);
     match card {
         Some(card) => {
             let mut raster = super::hal::Raster::new(cpu, card);
@@ -441,17 +727,13 @@ pub fn draw_primitive(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(D3DERR_INBEGIN);
     }
     let layout = hr!(vertex_format(vtable, vt));
-    let vertices = hr!(read_vertices(cpu, at, &layout, count));
-    hr!(draw(
-        cpu,
-        id,
-        version(vtable),
-        &layout,
-        kind,
-        &vertices,
-        None,
-        flags
-    ));
+    let from = Source {
+        at,
+        count,
+        indices: None,
+    };
+    let version = version(vtable);
+    hr!(draw_from(cpu, id, version, &layout, kind, &from, flags));
     Some(D3D_OK)
 }
 
@@ -466,18 +748,13 @@ pub fn draw_indexed_primitive(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(D3DERR_INBEGIN);
     }
     let layout = hr!(vertex_format(vtable, vt));
-    let vertices = hr!(read_vertices(cpu, at, &layout, count));
-    let order = hr!(read_indices(cpu, indices, icount));
-    hr!(draw(
-        cpu,
-        id,
-        version(vtable),
-        &layout,
-        kind,
-        &vertices,
-        Some(&order),
-        flags
-    ));
+    let from = Source {
+        at,
+        count,
+        indices: Some((indices, icount)),
+    };
+    let version = version(vtable);
+    hr!(draw_from(cpu, id, version, &layout, kind, &from, flags));
     Some(D3D_OK)
 }
 
@@ -532,8 +809,8 @@ pub fn read_strided_vertices(
         for t in 0..layout.textures {
             let dims = layout.tex[t].1;
             let b = read(cpu, part(4 + t), i, 4 * dims)?;
-            for k in 0..dims as usize {
-                v.tex[t][k] = f(&b, k);
+            for (k, n) in v.tex[t][..dims as usize].iter_mut().enumerate() {
+                *n = f(&b, k);
             }
         }
         out.push(v);
@@ -585,9 +862,20 @@ pub fn draw_indexed_primitive_strided(cpu: &mut Cpu, args: &[u32]) -> Option<u32
     Some(D3D_OK)
 }
 
-/// The vertices `start` to `start + count` of the vertex buffer `vb`,
-/// its layout, and what ProcessVertices kept of them.
-fn buffer_vertices(cpu: &mut Cpu, vb: u32, start: u32, count: u32) -> Result<BufferVertices, u32> {
+/// Draw `kind` primitives of the vertices `start` to `start + count`
+/// of the vertex buffer `vb`, in the order of the `indices` (where
+/// they are and how many) or as they are.
+#[allow(clippy::too_many_arguments)]
+fn draw_buffer(
+    cpu: &mut Cpu,
+    id: u32,
+    version: u32,
+    vb: u32,
+    (start, count): (u32, u32),
+    kind: u32,
+    indices: Option<(u32, u32)>,
+    flags: u32,
+) -> Result<(), u32> {
     let (_, bid) = super::vertexbuffer::buffer_of(cpu, vb)?;
     let b = super::object(cpu, bid)
         .and_then(|o| o.buffer.clone())
@@ -600,40 +888,29 @@ fn buffer_vertices(cpu: &mut Cpu, vb: u32, start: u32, count: u32) -> Result<Buf
         return Err(DDERR_INVALIDPARAMS);
     }
     let at = b.memory + start * layout.size;
+    // ProcessVertices keeps clip coordinates only in a buffer of
+    // transformed vertices, and a draw takes them only where it kept
+    // some: the others draw as any draw of the program's vertices
+    // does, from where they are.
+    let range = start as usize..(start + count) as usize;
+    let kept = layout.rhw
+        && b.clipped
+            .get(range.clone())
+            .is_some_and(|kept| kept.iter().any(Option::is_some));
+    if !kept {
+        let from = Source { at, count, indices };
+        return draw_from(cpu, id, version, &layout, kind, &from, flags);
+    }
+    // The transformed vertices, clipped at their clip coordinates
+    // where ProcessVertices kept them.
     let vertices = read_vertices(cpu, at, &layout, count)?;
-    Ok(BufferVertices {
-        layout,
-        vertices,
-        clipped: b.clipped,
-        start: start as usize,
-    })
-}
-
-/// A vertex buffer's layout, its vertices from `start` on, and what
-/// ProcessVertices kept of the buffer.
-struct BufferVertices {
-    layout: Layout,
-    vertices: Vec<Vertex>,
-    clipped: Arc<Vec<Option<Clipped>>>,
-    start: usize,
-}
-
-/// Draw `kind` primitives of a vertex buffer's `vertices` (in the order
-/// `order`, or as they are), clipped at their clip coordinates if
-/// ProcessVertices kept them.
-fn draw_buffer(
-    cpu: &mut Cpu,
-    id: u32,
-    version: u32,
-    b: &BufferVertices,
-    kind: u32,
-    order: Option<&[u32]>,
-    flags: u32,
-) -> Result<(), u32> {
-    let prims = primitives(kind, order, b.vertices.len())?;
-    let (layout, vertices) = (&b.layout, &b.vertices);
-    let clip = b.clipped.get(b.start..b.start + vertices.len());
-    draw_clipped(cpu, id, version, layout, vertices, clip, &prims, flags)
+    let order = match indices {
+        Some((at, count)) => Some(read_indices(cpu, at, count)?),
+        None => None,
+    };
+    let prims = primitives(kind, order.as_deref(), vertices.len())?;
+    let clip = b.clipped.get(range);
+    draw_clipped(cpu, id, version, &layout, &vertices, clip, &prims, flags, None)
 }
 
 /// DrawPrimitiveVB(this, type, buffer, start, count, flags).
@@ -642,16 +919,9 @@ pub fn draw_primitive_vb(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (vtable, id) = hr!(device_of(cpu, this));
-    let buffer = hr!(buffer_vertices(cpu, vb, start, count));
-    hr!(draw_buffer(
-        cpu,
-        id,
-        version(vtable),
-        &buffer,
-        kind,
-        None,
-        flags
-    ));
+    let version = version(vtable);
+    let range = (start, count);
+    hr!(draw_buffer(cpu, id, version, vb, range, kind, None, flags));
     Some(D3D_OK)
 }
 
@@ -666,17 +936,9 @@ pub fn draw_indexed_primitive_vb3(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let count = super::object(cpu, bid)
         .and_then(|o| o.buffer.as_ref().map(|b| b.count))
         .unwrap_or(0);
-    let buffer = hr!(buffer_vertices(cpu, vb, 0, count));
-    let order = hr!(read_indices(cpu, indices, icount));
-    hr!(draw_buffer(
-        cpu,
-        id,
-        version(vtable),
-        &buffer,
-        kind,
-        Some(&order),
-        flags
-    ));
+    let (version, order) = (version(vtable), Some((indices, icount)));
+    let range = (0, count);
+    hr!(draw_buffer(cpu, id, version, vb, range, kind, order, flags));
     Some(D3D_OK)
 }
 
@@ -687,17 +949,9 @@ pub fn draw_indexed_primitive_vb7(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (vtable, id) = hr!(device_of(cpu, this));
-    let buffer = hr!(buffer_vertices(cpu, vb, start, count));
-    let order = hr!(read_indices(cpu, indices, icount));
-    hr!(draw_buffer(
-        cpu,
-        id,
-        version(vtable),
-        &buffer,
-        kind,
-        Some(&order),
-        flags
-    ));
+    let (version, order) = (version(vtable), Some((indices, icount)));
+    let range = (start, count);
+    hr!(draw_buffer(cpu, id, version, vb, range, kind, order, flags));
     Some(D3D_OK)
 }
 
@@ -898,9 +1152,10 @@ pub fn device_setup(
 ) -> Result<(u32, Setup), u32> {
     let (vtable, id) = device_of(cpu, device_iface).map_err(|_| DDERR_INVALIDPARAMS)?;
     let flags = if lit { 0 } else { D3DDP_DONOTLIGHT };
-    let mut setup = setup(cpu, id, version(vtable), layout, flags).ok_or(DDERR_INVALIDPARAMS)?;
+    let mut setup = setup(cpu, Pass::Process, id, version(vtable), layout, flags)
+        .ok_or(DDERR_INVALIDPARAMS)?;
     if !lit {
         setup.lighting = None;
     }
-    Ok((id, setup))
+    Ok((id, setup.for_sets()))
 }

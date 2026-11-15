@@ -55,7 +55,11 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
   `RUST_DOS_GL_NO_BLIT=1` leaves out its program for 2D operations, as
   if it didn't compile: the card does them in software, the renderer
   still composes the picture, and stderr says
-  `2D operations stay on the CPU`.
+  `2D operations stay on the CPU`. With `voodoo_msaa`,
+  `RUST_DOS_GL_NO_PER_SAMPLE=1` leaves out the program that blends each
+  sample on its own, as on a driver without `GL_ARB_sample_shading`:
+  blended triangles blend with each pixel's samples averaged, and
+  stderr says `blending pixels, not samples`.
 - **C: drive:** `-d` sets it. `AUTOEXEC.BAT` in that directory runs at
   startup.
 - **`--no-config`:** without it, rust-dos reads `rust-dos.conf` from the
@@ -137,13 +141,17 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
 - **Check state with `/api/status`.** It reports `shell_idle` (true at the
   DOS prompt), `cs_ip`, the video mode and `video.adapter` (the display
   adapter `machine` gives programs), `paused`, `input_queue`, and
-  `cycles_per_ms`, the current CPU speed. `paused` (with `stop` and
-  `stop_seq`) says whether the debugger has stopped the machine, at a
-  breakpoint or otherwise. `cpu_state` is the processor's own state:
-  `Running`, or `Halted` after HLT until an interrupt. It stays `Running`
-  while the machine is paused, so wait for a stop with `paused` or the
-  journal's `paused` entry, not with `cpu_state`. `video.vga` shows the CRTC Start
-  Address the program set and the one on screen, which helps when a game
+  `cycles_per_ms`, the current CPU speed. `memory` has the RAM's size
+  (`mb`) and whether it is the default for the CPU and the display
+  adapter (`derived`: true while `memsize` isn't set; after a save state
+  is loaded, while the state's size is the default for its CPU and
+  adapter). `paused` (with `stop` and `stop_seq`) says whether the
+  debugger has stopped the machine, at a breakpoint or otherwise.
+  `cpu_state` is the processor's own state: `Running`, or `Halted` after
+  HLT until an interrupt. It stays `Running` while the machine is
+  paused, so wait for a stop with `paused` or the journal's `paused`
+  entry, not with `cpu_state`. `video.vga` shows the CRTC Start Address
+  the program set and the one on screen, which helps when a game
   that flips pages flickers or shows half-drawn frames. `video.crt` is the
   display timing the VGA registers describe (refresh rate, total and
   displayed scanlines): port 3DAh reports retrace and display enable from
@@ -457,9 +465,9 @@ curl -s -XPOST $H/api/control/resume
   pauses right after an instruction changes those 1, 2 or 4 bytes. The
   `paused` reply and event carry `"reason":"watchpoint"` and
   `"watch":{"addr","len","old","new"}`. `GET` lists them with their values;
-  `DELETE ?addr=` removes one, `DELETE` without it removes all. Like
-  breakpoints they are physical addresses, and they slow the machine down
-  to the interpreter while any is set.
+  `DELETE ?addr=` removes one, `DELETE` without it removes all. They are
+  kept as breakpoints are (see [Addresses](#5-addresses)), and they slow
+  the machine down to the interpreter while any is set.
 - **If a wait times out,** the breakpoint wasn't hit. Check
   `/api/breakpoints` and `/api/status`, and whether the program was loaded
   at a different segment.
@@ -591,7 +599,22 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
   - Write with `PUT /api/memory {"addr":"1000:0200","hex":"90 90"}`. Writes
     also invalidate the decoded-instruction cache, so patching code works.
     The reply has the bytes the write replaced (`old`) and what reads back
-    (`new`), which can differ from the data in VGA memory.
+    (`new`), which can differ from the data in VGA memory, the first
+    byte's physical address (`addr`) and, for an address that isn't
+    physical, its linear one (`linear`).
+  - A write is made whole or not at all: when a byte of it is on a page
+    that isn't mapped, or past the end of memory, the reply is HTTP 400
+    and nothing is written. Read-only pages and the ROMs are written.
+  - Reads, writes and the disassembly find every byte in the same place,
+    so what was written reads back. Under the built-in Windows that
+    includes the committed pages of a program that have no physical page:
+    those in its page file (see
+    [Win32 programs](#win32-programs-the-built-in-windows)), which are
+    read and written there, and pages made PAGE_NOACCESS. A page in the
+    page file stays there, with its protection, and comes in when the
+    program touches it: the debugger's reads and writes bring no page in
+    and send none out. A write that reached the page file has
+    `"page_file":true`, and `addr` is null when its first byte did.
   - Write only if the memory holds what you expect with `"expect"`:
     `PUT /api/memory {"addr":"DS:0200","hex":"21 43","expect":"CD AB"}`.
     When the bytes there differ, nothing is written and the reply is HTTP
@@ -605,8 +628,9 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
 - **Interrupt vectors:** `GET /api/ivt`. `hle:true` means the vector still
   points at the emulator's built-in handler, so a program has not hooked it.
 - **Disassembly as data:** `GET /api/disasm?format=json` has, next to the
-  text `lines`, `rows` of `{label, phys, bytes, asm, len, current,
-  breakpoint}`.
+  text `lines`, `rows` of `{label, phys, lin, bytes, asm, len, current,
+  breakpoint}`. `lin` is the row's linear address, null in a listing
+  asked for by a physical address.
 - **Disassembly's code size:** an address with a selector decodes as its
   segment's code, 16 or 32-bit. A `lin:` or `phys:` address has no
   segment, so it decodes like the code running now: 32-bit under the
@@ -1020,15 +1044,16 @@ curl -s $J -XPOST -d '{"until_ms":8000}' $H/api/control/resume
   next request is taken wherever the host's frame got to, so its journal
   entry (`icount`, `emu_ns`) differs from run to run.
 - **Input:** input, and requests that change the machine (`run`, memory
-  and register writes, mounts, `/api/speed`, loading a state, reboots),
-  are taken only while the machine is paused or the settings window is
-  open, which takes its input at once (HTTP 409 otherwise). Input is delivered at fixed points in emulated time, every 10
-  ms, from the time the machine resumes: one scan code per point, and
+  and register writes, mounts, `/api/speed`, `/api/fps_cap`, loading a
+  state, reboots), are taken only while the machine is paused or the
+  settings window is open, which takes its input at once (HTTP 409
+  otherwise). Input is delivered at fixed points in emulated time, every
+  10 ms, from the time the machine resumes: one scan code per point, and
   `wait` and `hold_ms` count emulated milliseconds. While the machine is
-  paused the reply comes at once, with `"held":true`, as if `?wait=false`
-  had been passed; `/api/ops/N` (N is the reply's `op`) is `done` once the
-  input was delivered. Two runs with the same input and stops give the
-  same journal, but for `t_ms`.
+  paused the reply comes at once, with `"held":true`, as if
+  `?wait=false` had been passed; `/api/ops/N` (N is the reply's `op`) is
+  `done` once the input was delivered. Two runs with the same input and
+  stops give the same journal, but for `t_ms`.
 - **Stopping at a time:** `resume {"until_ms":N}` pauses when emulated time
   reaches N ms since power-on, with `"reason":"time"`. Compare runs there:
   `/api/status` has `icount` and `activity.emulated_ns`, and
@@ -1112,6 +1137,136 @@ the mount names the delta file. `-inplace` writes the image itself.
   and 3F7h's disk change line (bit 7). E6h is READ DATA, C5h WRITE DATA,
   4Ah READ ID, 0Fh SEEK, 08h SENSE INTERRUPT STATUS. The log's `[FDC]`
   lines name commands it doesn't know.
+
+### The ToadForce card
+
+With `machine=svga_toadforce`, `/api/status` → `video.toadforce` shows
+the card: `mode` (the mode of its own on the screen, with its `start` in
+card memory, or null while the VGA's picture shows), `frame` and
+`scanline`, `status`, `irq_status` and `irq_enable` as the registers
+read, `irq` (the request line it has up), `error` and `error_at` (the
+first rejection, chapter 5 of `toadforce-spec.md`), the three `bars`,
+and `commands`: how many `nop`, `fill`, `blt` and `flip` commands and
+commands of `level1` it carried out since power-on, from the ring and
+from the built-in Windows' driver alike, and how many commands and
+register writes it `rejected`. A game whose DirectDraw blits stay on
+the CPU has `fill` and `blt` at 0. Of level 1's commands, `draws` are
+the draw commands, `transformed` those of them with vertices for the
+card to transform, and `primitives` the triangles, lines and points
+they queued. For a draw the card transforms, that is what is left
+after its cut at the planes and its culling. For a draw the OpenGL
+renderer's vertex shader transforms it is every triangle of the draw,
+since the GPU cuts and culls them. So one scene counts more
+`primitives` with the OpenGL renderer than with the software one.
+
+`renderer` is what draws the card's triangles: `software`, or `OpenGL`
+with `toadforce_renderer` `auto` or `opengl` in a window that has
+OpenGL 3.2 (`--hidden` has it, `SDL_VIDEO_DRIVER=dummy` hasn't). `host`
+counts what the OpenGL renderer costs and misses:
+
+- `read_backs`: surfaces copied from the GPU to card memory because
+  the program, a driver, the screen or a command on the processor
+  needed their bytes. Each stalls the GPU, so a game with several a
+  frame is one to look at. `read_backs_for` has them by what asked:
+  `program`, `lock`, `driver`, `show`, `blit`, `clear`, `sampled`,
+  `declined`, `buffers`, `ring` and `other` ("Between the card and
+  the host renderer" in `docs/toadforce.md`). A game in a window
+  nobody looks into has none: the window is drawn from the GPU's
+  surface. A screenshot, a recording, the debugger's picture and an
+  open settings window each read the picture back, so `show` counts
+  the frames one of them wanted.
+- `declined_draws`: draws the software renderer drew because OpenGL
+  doesn't draw their state as the card does. Each reads its target
+  back first. `declined_for` has them by reason, every reason listed
+  with its count (`Decline` in `src/toadforce/gpu.rs`):
+  - the rasteriser's: `serial state` (a draw that reads what it
+    writes);
+  - `no host`: draws after the window and its renderer are gone;
+  - the OpenGL renderer's (`declines` in `src/toadforce/gl.rs`):
+    `host broken` (no framebuffer the card's surfaces fit),
+    `program failed` (a shader that didn't compile), and the states
+    it doesn't draw as the card does: `target format`, `no texture`,
+    `bumped cube map`, `key on a block format`,
+    `texture sampled both ways`, `first level with two filters`,
+    `linear magnify, point minify, mipped`, `key with linear mip`,
+    `texture with two samplings` and `SRCALPHASAT destination`.
+- `writes`: the times pixels the processor wrote into a surface the
+  GPU had newer pixels of went to the GPU's copy as rectangles, with
+  nothing read back. A surface written in parts of pixels or in too
+  many rectangles is read back instead, and counts under `program`.
+  `lock` counts the times the program read such a surface and the
+  card fetched its pixels from the GPU to answer.
+- `counts`: the renderer's own, null with `software`: `batches` and
+  `runs` (draw calls), `transformed_runs` (those of them whose
+  vertices the GPU's vertex shader took to the screen, where the card
+  transforms the others on the processor) and `transforming_programs`
+  (the shader programs made for them), `surface_uploads` and
+  `texture_uploads` from card memory, `texture_converts` (images of
+  textures filled from a surface the GPU has, with nothing read
+  back), `clears` and `blits` done on the GPU, `presents` (frames the
+  window showed from the GPU's surface), the shader `programs`
+  compiled and `failed_programs`, the `surfaces` and `textures` it
+  holds, and `packed_565` (whether 16-bit targets are the GPU's 5-6-5
+  format).
+
+A run with `--deterministic` draws the card in software, so that its
+pictures are the same on every host. To compare the two renderers at
+equal emulated times, start the OpenGL run with the environment
+variable `RUST_DOS_TOADFORCE_GL_DETERMINISTIC=1` as well: OpenGL then
+draws in the deterministic run too. The program runs the same in both
+as long as it doesn't act on the pixels it reads, and the frames
+differ only where the renderers do. Check `renderer` before trusting
+identical pictures.
+
+To find the draws a difference between the renderers comes from,
+record what the card is given and draw the recording through both:
+
+```
+POST /api/toadforce/capture {"path": "D:/work/frame.tfcap", "flips": 2}
+POST /api/toadforce/capture {"path": "D:/work/frame.tfcap", "flips": 0}
+POST /api/toadforce/capture {}
+```
+
+The first records from the card's next run of commands until it has
+flipped twice (`flips` is 1 when left out). With `flips` 0 it records
+until a request without a `path` ends it, for a program that never
+flips (an OpenGL game, whose front end copies its frames). Send it
+while paused at the frame's emulated time. The file has the card's
+state, card memory, each run's commands and the bytes the program
+wrote between them (`src/toadforce/capture.rs`). The reply is 404
+without a ToadForce and 400 when the file can't be made. `recording`
+in the card's status is true until the recording is complete. A
+loaded state, or a write to the file that fails, ends it early.
+
+The ignored test `replay_a_capture` draws a recording, on a machine
+with a desktop OpenGL context:
+
+```
+TOADFORCE_CAPTURE=D:/work/frame.tfcap cargo test --release --lib \
+  toadforce::gl::tests::replay_a_capture -- --ignored --nocapture
+```
+
+It prints, for each target, how many pixels differ by 0, 1, 2, 3 to
+8, 9 to 32 and more with each renderer drawing the whole recording.
+Then it draws draw by draw, the host starting each draw from the
+software renderer's pixels, and lists the states by how many pixels
+differ by more than 17 after their draws: drawn by the software
+renderer alone, by the host alone or by both, with the state's steps
+and textures and its worst draw's vertices. Each draw of points or
+lines, or of triangles as their corners or edges, gets a line of its
+own with the pixels it changed and the rectangle they are in, which
+tells what on the screen the program draws that way.
+`TOADFORCE_REPLAY_OVER=N` counts the pixels over N instead.
+`TOADFORCE_REPLAY_SET=rs27=0,ts21=1` sets render states (`rs`) and
+stage states (`ts`, on every stage) by number on both sides before
+each draw, here the blend off and the anisotropy 1: what stops
+differing hangs on that state. `TOADFORCE_CAPTURE_WIDE=1` keeps the
+host's 16-bit targets in 8 bits a channel, as a host whose 5-6-5
+format fails the test does. `TOADFORCE_REPLAY_PIXEL='350,25;100,300'`
+follows those pixels through the whole recording on the software
+side: each draw that changes one is printed with the pixel before and
+after it and the draw's steps, which gives the layers a pixel is made
+of and what each adds.
 
 ### 3dfx (Glide) games
 
@@ -1319,7 +1474,9 @@ access rights.
 - **Tables:** `/api/gdt`, `/api/ldt` and `/api/idt` decode descriptors and
   gates; `/api/tss` shows the ring stacks and saved registers;
   `/api/pagewalk?addr=lin:00401000` shows the page directory and table
-  entries; `/api/xms` lists XMS handles (where extenders put their memory).
+  entries, with `page_file` true for a page in the built-in Windows's
+  page file and the entry's `slot` there (0 for a page of zeros);
+  `/api/xms` lists XMS handles (where extenders put their memory).
 - **Network:** `/api/net` shows the IPX driver (node, IRQ, open sockets,
   listening ECBs, events, completions waiting for its IRQ, held packets and
   counts of what became of packets) and the LAN (state, room, frames in and
@@ -1358,6 +1515,30 @@ With `win32` on, a Win32 console program runs on the built-in Windows
   mutex's `owner` and `count`, a thread's `exit_code`...), `name` and
   `refs` (handles of it and the system's holds). `std` lists the handles
   of standard input, output and error.
+- `page_file`, in pages: its `size` (twice the machine's memory), the
+  committed pages it holds (`used`), the physical pages of programs' own
+  memory and modules' images that may go out to it (`pageable`), and
+  since start the pages of zeros given a physical page (`zero_ins`, most
+  of them on a program's first touch of memory it committed), the pages
+  read back (`ins`) and those written out to make room (`outs`). For
+  views of mapped files: the pages read from their files (`view_reads`),
+  those given back to the pool to make room (`view_evicted`), and the
+  searches of the views for pages to give back (`view_sweeps`), counted
+  whether they found any or not; each gives back at most a batch, so
+  many more searches than pages given back means the views have little
+  left to give. Null until the built-in Windows has its memory.
+
+`GET /api/win32/page_file` lists the pages of the running address space
+(`cr3`) that are in the page file, as `ranges` of pages next to each
+other: `addr` (the first page's linear address), `pages`, and `zeros`,
+true for pages of zeros with no contents kept (committed and never
+written, or sent out holding zeros) and false for pages whose contents
+are there. `?limit=N` lists at most N ranges (1000 by default), and
+`truncated` says there are more. `ranges` is null until the built-in
+Windows has its memory. Pause first: the list is of the process that
+runs at that moment, and its pages come and go as it runs. The server's
+`features` has `page_file` when it has this list and reads, writes,
+breakpoints and watchpoints on pages in the page file.
 
 Ids, addresses and exit codes are 8-digit hex strings; handles and
 `last_error` are numbers. Pause the machine first for a view that
@@ -1376,15 +1557,34 @@ back to `collapsed` after; `off` writes none.
 `GET /api/win32/ddraw` lists DirectDraw's surfaces, with the display
 `mode` DirectDraw set (null on the desktop's) and the ids of the
 DirectDraw objects that set it (`mode_owner`) and have exclusive mode
-(`exclusive`). Each surface has its `id`, the `pid` of its process, its
-`interfaces` (the addresses the program passes as `this`, which the
-log's `[W32]` lines show), `width`, `height`, `pitch`, `format` (flags,
-FourCC, bits a pixel, red, green, blue and alpha masks), `caps`,
-`memory` (`system`, `video`, `card`, the 3dfx card's, or `none`) and
-`address`, `locked`, `lost`, its color `keys` (`src_blt`, `dest_blt`
-and the overlay ones, each a low and high value), the ids of its
-`palette`, `clipper`, `root` and `attached` surfaces, and the `version`
-of the interfaces it was made through (1, 4 or 7).
+(`exclusive`). `binds` counts the draws Direct3D's HAL on a ToadForce
+brought the card's state up to the device's for (`all`), and those of
+them that found the card's state right already and sent nothing
+(`kept`): a low share of kept ones in a scene that draws with few
+states says something writes a state before every draw.
+`screen_draws` counts the draws of screen vertices the HAL sent the
+card from the program's memory (`direct`, with their vertices in
+`direct_vertices`) and the batches the pipeline handed it (`pipeline`,
+`pipeline_vertices`): a scene with many pipeline batches draws
+vertices to transform that the card doesn't transform itself, execute
+buffers, or screen vertices the direct path declines (lines, points,
+wireframe, flat shading, a clip status the program reads, a vertex
+outside the guard band). `gl_draws` counts OpenGL's draws on a
+ToadForce by where they were transformed and lit: `card` (and their
+vertices in `card_vertices`), `refused` (batches the HAL turned down
+at the flush, which weren't drawn) and the processor's by reason
+(`no_card`, `asked` for `RUST_DOS_TOADFORCE_TNL=pipeline`, `numbers`,
+`modelview`, `light`, `shininess`, `material`, `flat`, `sides`,
+`edges`; `opengl32::tnl::Why` says what each is). Each surface has
+its `id`, the `pid` of its process, its `interfaces` (the addresses
+the program passes as `this`, which the log's `[W32]` lines show),
+`width`, `height`, `pitch`, `format` (flags, FourCC, bits a pixel,
+red, green, blue and alpha masks), `caps`, `memory` (`system`,
+`video`, `card`, the 3dfx card's, or `none`) and `address`, `locked`,
+`lost`, its color `keys` (`src_blt`, `dest_blt` and the overlay ones,
+each a low and high value), the ids of its `palette`, `clipper`,
+`root` and `attached` surfaces, and the `version` of the interfaces
+it was made through (1, 4 or 7).
 
 `GET /api/win32/ddraw/surface/{id}` shows a surface's pixels as a PNG
 (`?format=raw` for RGB24 rows). With `?keyed=true` the pixels its source
@@ -1394,6 +1594,84 @@ surface in system memory is read through its own process's page tables,
 whichever process runs, and the read changes nothing in the machine. A
 surface on the 3dfx card has no picture here; `/api/screenshot` shows
 the card's.
+
+### What a program asks of DirectDraw, Direct3D and OpenGL
+
+`--trace-3d FILE` writes what Win32 programs ask of the built-in
+DirectDraw, Direct3D 3 to 8 and OpenGL: each event the first time it
+comes, numbered in order, to `FILE`, and every event with the number of
+times it came to `FILE.counts`. It answers which states, formats and
+calls a game uses, and what a change made a game do differently.
+
+```sh
+rust-dos --config giants.conf --trace-3d giants.trace
+```
+
+Lines from Giants: Citizen Kabuto's menu:
+
+```
+    38 DDRAW.EnumZBufferFormats item Z16 -> OK
+    39 DDRAW.EnumZBufferFormats item Z16 -> CANCEL
+    40 DDRAW.IDirectDraw_CreateSurface [800x600 Z16 VIDEOMEMORY|ZBUFFER] made [800x600 Z16 VIDEOMEMORY|ZBUFFER|LOCALVIDMEM] = OK
+    41 DDRAW.Surface_AddAttachedSurface [800x600 R5G6B5 BACKBUFFER|COMPLEX|FLIP|3DDEVICE|VIDEOMEMORY|LOCALVIDMEM] gets [800x600 Z16 VIDEOMEMORY|ZBUFFER|LOCALVIDMEM] = OK
+   109 DDRAW.IDirect3DDevice7_SetRenderState(ZENABLE,USEW) = OK
+   211 draw v7 fvf=XYZRHW|DIFFUSE|TEX1 z=USEW,0,LESSEQUAL alphatest=0,GREATER blend=1,SRCALPHA,INVSRCALPHA,0 fog=0,LINEAR,NONE,0 specular=0 stencil=0 lighting=0/2 vertexblend=DISABLE,0 clipplanes=0 wrap0=0 pointsprite=0 zbias=0 | s0 tex=1 c=MODULATE(TEXTURE,TFACTOR) a=MODULATE(TEXTURE,TFACTOR) tci=0 ttf=DISABLE
+```
+
+`FILE.counts` has a line for each event, its count and a tab before it,
+in the same order. It is written every two seconds of the host's time
+while events come, and when the emulator stops, so quit with `POST
+/api/control/quit` or the window rather than by killing the process.
+
+```
+147756	draw v7 fvf=XYZRHW|DIFFUSE|TEX1 z=USEW,0,LESSEQUAL ...
+139469	DDRAW.IDirect3DDevice7_SetRenderState(FOGTABLEMODE,LINEAR) = OK
+```
+
+The events:
+
+- A call of DDRAW, D3D8, OPENGL32 or GLU32, as `MODULE.Function`, with
+  the arguments that say what was asked and the result: `OK`, an
+  HRESULT, or `-` for a function that calls the program back before it
+  returns. Render and texture stage states, their values, formats,
+  primitive types, vertex formats (`XYZ|NORMAL|TEX1`, or `TLVERTEX` for
+  IDirect3DDevice2's vertex types) and OpenGL's enums have their names
+  without the API's prefix. Other numbers are decimal, or hexadecimal
+  from 0x10000. CreateSurface has the description asked for and the
+  surface made; AddAttachedSurface, DeleteAttachedSurface,
+  SetRenderTarget and Clear name each surface involved by its size,
+  format and caps, and blits by format and caps. Calls polled every
+  frame (Lock, GetRenderState) have only their result.
+- What an enumeration offered the program's callback, and what the
+  callback returned: `DDRAW.EnumZBufferFormats item Z16 -> OK`. `CANCEL`
+  stopped the list there. These cover DirectDrawEnumerate,
+  EnumDisplayModes, EnumSurfaces, EnumAttachedSurfaces, and Direct3D's
+  EnumDevices, EnumTextureFormats and EnumZBufferFormats.
+- KERNEL32's LoadLibrary, GetModuleHandle and GetProcAddress of 3D DLLs
+  and functions, with whether they were found; GDI32's pixel format
+  calls with the PIXELFORMATDESCRIPTOR asked for.
+- `OPENGL32 not implemented: NAME`, a function OPENGL32 doesn't have.
+- `EXECUTE STATERENDER(...)`, `STATELIGHT` and `STATETRANSFORM`: the
+  states an execute buffer set (Direct3D 3 to 5).
+- `draw` and `process`: the states a draw, or a ProcessVertices, used:
+  the device's version (`v8` for OpenGL too, whose draws go to the same
+  pipeline as Direct3D 8's), the vertex format, `z=` (ZENABLE,
+  ZWRITEENABLE, ZFUNC), `alphatest=` (enable, function), `blend=`
+  (enable, source, destination, BLENDOP), `fog=` (enable, table mode,
+  vertex mode, range fog), `specular=`, `stencil=`, `lighting=` (LIGHTING
+  and the number of lights on), `vertexblend=` (VERTEXBLEND,
+  INDEXEDVERTEXBLENDENABLE), `clipplanes=`, `wrap0=`, `pointsprite=` and
+  `zbias=`, then each texture stage up to the first disabled one:
+  whether it has a texture, the color and alpha operations with their
+  arguments, the texture coordinate index and the transform flags. Each
+  different set of states is one line in `FILE`; its count is the number
+  of draws that used it.
+
+The trace only reads the machine: a run with it reaches the same
+emulated state at the same emulated time as one without. It takes host
+time for every call, so leave it off for timing measurements. To see
+what changed between two builds, run both with the same deterministic
+script and compare their counts files.
 
 ## 5. Addresses
 
@@ -1409,9 +1687,34 @@ Addresses are always hex, as in DEBUG.COM:
   paging is on.
 - `phys:ADDR`, or just `ADDR`: a physical address (`B8000`, `0x12345`).
 
-A decimal-looking number like `100` means 0x100. Breakpoints are kept by
-physical address, so a breakpoint on a paged address follows the page the
-address mapped to when it was set.
+A decimal-looking number like `100` means 0x100. Breakpoints and
+watchpoints are kept by physical address, so one on a paged address
+follows the physical page the address mapped to when it was set. The
+lists and stops name it by that address (`1F2A0`).
+
+The pages of a Win32 program's own memory (its heaps and what it commits
+with VirtualAlloc) are the exception: the built-in Windows sends them
+out to its page file and brings them back at another physical address.
+A breakpoint or a watchpoint on such a page is kept by its linear
+address in the address space it was set in, and is named so
+(`lin:00A30100`). It can be set while the page is in the page file, it
+stays on the page as the page goes out and comes back, and it stops only
+the process it was set in. Its name doesn't say which process that is:
+`DELETE ?addr=lin:00A30100` removes the one of the running process, or
+while another runs, one of the others set at that linear address. A
+watchpoint reads its process's memory whichever process runs, so a
+change the system makes there while another runs (a read that finishes
+later, for one) stops the machine at once; a page going out or coming
+back changes no bytes and stops nothing. When the process ends, its
+breakpoints and watchpoints go with it, and the journal has a
+`breakpoint_removed` or `watchpoint_removed` entry with `process_ended`
+for each: a process started later can get the same page tables and
+other code at the same addresses. A save state's load without
+`strict_match` keeps them, as it keeps the physical ones, when the
+loaded machine has their process, and drops those of an address space
+none of its processes has, with the same journal entries after
+`state_loaded`. The pages of images, stacks and views of files are kept
+by physical address.
 
 ## 6. Pitfalls
 
@@ -1434,24 +1737,47 @@ address mapped to when it was set.
   [Start the emulator](#1-start-the-emulator)). `SDL_VIDEO_DRIVER=dummy`
   and `--hidden` alone take the null output, so a timing run on a real
   device has to set `SDL_AUDIO_DRIVER` as well.
-- **Measuring speed.** `/api/stats` reports `mips` (host speed while
+- **Measuring speed.** A frame rate measured through a run is at most the
+  frame rate cap (`fps_cap`, `auto` by default: 60, and the display's rate
+  for a present that waits for the retrace; CONFIGURATION.md's "Frame rate
+  cap"), which holds the 3dfx card's swaps and the built-in Windows'
+  presents: start a run that measures how fast a game draws with
+  `--fps-cap off` (or `POST /api/fps_cap {"fps_cap":"off"}`), and check
+  `video.fps_cap` in `/api/status` ("auto", a rate, or null for off)
+  before quoting a frame rate. `fps_cap` in `/api/stats` (`features` has
+  `fps_cap_stats`) counts what the cap did to the frames since the machine
+  started: `shown` (the frames through it, without the presents it leaves
+  to the display's retrace), `held` (those that waited for their turn),
+  `late` (those that came after it), `reanchors` (those late enough for the
+  turns to start again from them) and `dropped_ms` (the time held frames
+  waited because of that). Take the difference of two readings:
+  `dropped_ms` over the emulated time between them is the most a game
+  whose logic steps once a frame ran slow for the cap, and `held` at 0
+  says the cap held nothing. `/api/stats` reports `mips` (host speed while
   executing guest code), `emulated_mips` (guest instructions per wall-clock
   second) and the decode-cache hit rate, averaged over about a second. Its
   `frame` object has the settings window's Stats page numbers and the
   emulated speed over the last quarter second: the game runs at full speed
   when `emulated_speed` (emulated seconds a wall second) stays near 1,
   `frame.fps` is the frames the program draws a second (the top-level `fps`
-  counts the window's frames), and `cpu_use` is the percent of the wall
-  time the emulator's main thread works (running the machine and drawing
-  the picture), so 100 minus it is that thread's time to spare, on one host
+  counts the window's frames), and `cpu_use` is the percent of the wall time
+  the emulator's main thread works (running the machine and drawing the
+  picture), so 100 minus it is that thread's time to spare, on one host
   core. `audio_driver` is what played the sound during the run. Its
-  `frame_times` object covers the host's last 1024 frames while the
-  machine runs (about 17 s at 60 frames a second), from one start of the
-  main loop to the next, waiting included: `frames` and `seconds` (how
-  many so far, and how long they took), `longest_ms`, and the
-  nearest-rank percentiles `p50_ms`, `p90_ms` and `p99_ms`. Use a release
-  build and a CPU-bound scene, such as the Stunts intro, when comparing
-  emulator changes.
+  `frame_times` object covers the host's last 1024 frames while the machine
+  runs (about 17 s at 60 frames a second), from one start of the main loop
+  to the next, waiting included: `frames` and `seconds` (how many so far,
+  and how long they took), `longest_ms`, and the nearest-rank percentiles
+  `p50_ms`, `p90_ms` and `p99_ms`. Use a release build and a CPU-bound
+  scene, such as the Stunts intro, when comparing emulator changes.
+- **Every frame's time with `/api/frames`.** For the frames of a whole
+  run, such as how many took over 50 ms, ask `/api/frames?after=N` at
+  least once every 1024 frames, each time with the `count` the answer
+  before gave as `N`. It gives the frames after the first `N` of them,
+  `ms` the wall time of each and `end_ms` the emulated time at its end;
+  `first` is the number of the first one given, more than `N` if the
+  ring dropped frames before they were asked for. Frames while the
+  machine waits (paused, or in the settings window) aren't counted.
 - **Coarse timestamps.** Trace times are sampled once per frame (about
   16 ms). Use `icount` for exact ordering.
 - **Ring buffer size.** The trace ring holds 1,000,000 instructions by

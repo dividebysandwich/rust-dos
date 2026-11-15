@@ -24,8 +24,8 @@ use super::gfx;
 use super::script::{self, Arg, Ctx, Op, Script};
 use super::{TOOLTIPS, invalidate, state};
 use crate::cpu::Cpu;
-use crate::win32::convert::CodePage;
 use crate::win32::gdi32::Rect;
+use crate::win32::nls;
 use crate::win32::user32::message::{
     WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_GETFONT, WM_GETTEXT, WM_GETTEXTLENGTH, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY,
@@ -303,22 +303,20 @@ pub fn read_wide(cpu: &mut Cpu, at: u32, max: u32) -> Vec<u8> {
         }
         units.push(c);
     }
-    wide_to_ansi(&units)
+    wide_to_ansi(cpu, &units)
 }
 
-/// Unicode characters in ANSI, '?' for those it lacks.
-pub fn wide_to_ansi(units: &[u16]) -> Vec<u8> {
-    units
-        .iter()
-        .map(|&c| CodePage::Ansi.byte(c).unwrap_or(b'?'))
-        .collect()
+/// Unicode characters in the system's ANSI code page, '?' for those it
+/// lacks.
+pub fn wide_to_ansi(cpu: &Cpu, units: &[u16]) -> Vec<u8> {
+    nls::ansi(cpu).encode(units)
 }
 
 /// The string resource `id` of `inst`, in ANSI.
 pub fn load_string(cpu: &mut Cpu, inst: u32, id: u32) -> Vec<u8> {
     match user32::resource::string_units(cpu, inst, id & 0xFFFF) {
         Some(Some(units)) => {
-            let mut b = wide_to_ansi(&units);
+            let mut b = wide_to_ansi(cpu, &units);
             b.truncate(INFOTIPSIZE as usize - 1);
             b
         }

@@ -7,6 +7,7 @@
 //! them in the ANSI code page.
 
 use crate::win32::com::Guid;
+pub use crate::win32::nls::CodePage;
 
 /// TYPEKIND.
 pub const TKIND_ENUM: u32 = 0;
@@ -305,9 +306,9 @@ impl TypeLib {
     }
 }
 
-/// The Unicode of the ANSI string `bytes`.
-pub fn ansi(bytes: &[u8]) -> String {
-    String::from_utf16_lossy(&crate::win32::kernel32::ansi_to_wide(bytes))
+/// The Unicode of the string `bytes` of the code page `page`.
+pub fn ansi(page: CodePage, bytes: &[u8]) -> String {
+    String::from_utf16_lossy(&page.decode(bytes))
 }
 
 /// The case-insensitive comparison names are found by, as

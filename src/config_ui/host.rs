@@ -171,6 +171,16 @@ pub trait Host {
     fn almanac_program(&mut self) -> Option<crate::almanac::Program> {
         None
     }
+    /// Keep `about`'s year, publisher and notes in the profile of the
+    /// game playing, which gets a UUID of its own if it has none: what
+    /// the profile says now. None while no game plays.
+    fn almanac_save_about(
+        &mut self,
+        about: &crate::almanac::About,
+    ) -> Result<Option<crate::almanac::About>, String> {
+        let _ = about;
+        Ok(None)
+    }
     /// Tell RetroAchievements which version the game playing is: the zip
     /// or .dosz `archive` it came in, whose hash its profile keeps.
     /// Returns what to tell the user.

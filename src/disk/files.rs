@@ -465,8 +465,10 @@ impl DiskController {
         if leaf.is_empty() || !hostfs::is_dir(&parent) {
             return Err(0x03);
         }
-        if self.find_existing_child(&parent, leaf).is_some() {
-            return Err(0x05); // Destination exists
+        // Destination exists, or is a name the host keeps for its own
+        // files (`host_private`).
+        if super::host_private(leaf) || self.find_existing_child(&parent, leaf).is_some() {
+            return Err(0x05);
         }
         let target = parent.join(super::new_entry_name(leaf));
         let renamed = hostfs::rename(&source, &target);

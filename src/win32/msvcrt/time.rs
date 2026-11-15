@@ -1,6 +1,7 @@
-//! Time: `time`, `clock`, the `struct tm` conversions, `strftime` and the
-//! date and time strings. There are no time zones, as in KERNEL32's
-//! time.rs: local time is the machine's clock, and UTC is the same.
+//! Time: `time`, `clock`, the `struct tm` conversions and the date and
+//! time strings; strftime is in strftime.rs. There are no time zones, as
+//! in KERNEL32's time.rs: local time is the machine's clock, and UTC is
+//! the same.
 
 use super::*;
 
@@ -40,7 +41,7 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 
 /// A `struct tm`: seconds, minutes, hours, day of the month, month (0 to
 /// 11), years since 1900, day of the week and of the year, DST flag.
-type Tm = [i32; 9];
+pub(super) type Tm = [i32; 9];
 
 /// The `struct tm` of `t` seconds since 1970.
 fn tm_of(t: i64) -> Tm {
@@ -73,7 +74,7 @@ fn normalize(tm: &Tm) -> (i64, Tm) {
     (t, tm_of(t))
 }
 
-fn read_tm(cpu: &mut Cpu, at: u32) -> Option<Tm> {
+pub(super) fn read_tm(cpu: &mut Cpu, at: u32) -> Option<Tm> {
     let mut tm = [0; 9];
     for (i, field) in tm.iter_mut().enumerate() {
         *field = read32(cpu, at + 4 * i as u32)? as i32;
@@ -141,8 +142,8 @@ pub fn difftime(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     ret_f64(cpu, args[0] as i32 as f64 - args[1] as i32 as f64)
 }
 
-const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const LONG_DAYS: [&str; 7] = [
+pub(super) const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+pub(super) const LONG_DAYS: [&str; 7] = [
     "Sunday",
     "Monday",
     "Tuesday",
@@ -151,10 +152,10 @@ const LONG_DAYS: [&str; 7] = [
     "Friday",
     "Saturday",
 ];
-const MONTHS: [&str; 12] = [
+pub(super) const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
-const LONG_MONTHS: [&str; 12] = [
+pub(super) const LONG_MONTHS: [&str; 12] = [
     "January",
     "February",
     "March",
@@ -215,121 +216,6 @@ pub fn wctime(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     }
     wasctime(cpu, &[tm])
-}
-
-/// `strftime`'s text for the format `format` and the time `tm`.
-fn strftime_text(format: &[u8], tm: &Tm) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    let wday = tm[6].rem_euclid(7) as usize;
-    let mon = tm[4].rem_euclid(12) as usize;
-    let year = tm[5] as i64 + 1900;
-    while i < format.len() {
-        if format[i] != b'%' || i + 1 == format.len() {
-            out.push(format[i]);
-            i += 1;
-            continue;
-        }
-        i += 1;
-        // '#' takes the zeros off numbers and makes %c and %x long.
-        let alt = format[i] == b'#';
-        if alt {
-            i += 1;
-            if i == format.len() {
-                break;
-            }
-        }
-        let num = |n: i64, width: usize| {
-            if alt {
-                n.to_string()
-            } else {
-                format!("{:0width$}", n, width = width)
-            }
-        };
-        let hour12 = if tm[2] % 12 == 0 { 12 } else { tm[2] % 12 } as i64;
-        let week = |first: i32| (tm[7] + 7 - ((tm[6] - first).rem_euclid(7))) / 7;
-        let text = match format[i] {
-            b'a' => DAYS[wday].to_string(),
-            b'A' => LONG_DAYS[wday].to_string(),
-            b'b' => MONTHS[mon].to_string(),
-            b'B' => LONG_MONTHS[mon].to_string(),
-            b'c' if alt => format!(
-                "{}, {} {}, {} {:02}:{:02}:{:02}",
-                LONG_DAYS[wday], LONG_MONTHS[mon], tm[3], year, tm[2], tm[1], tm[0]
-            ),
-            b'c' => format!(
-                "{:02}/{:02}/{:02} {:02}:{:02}:{:02}",
-                mon + 1,
-                tm[3],
-                year % 100,
-                tm[2],
-                tm[1],
-                tm[0]
-            ),
-            b'd' => num(tm[3] as i64, 2),
-            b'H' => num(tm[2] as i64, 2),
-            b'I' => num(hour12, 2),
-            b'j' => num(tm[7] as i64 + 1, 3),
-            b'm' => num(mon as i64 + 1, 2),
-            b'M' => num(tm[1] as i64, 2),
-            b'p' => if tm[2] < 12 { "AM" } else { "PM" }.to_string(),
-            b'S' => num(tm[0] as i64, 2),
-            b'U' => num(week(0) as i64, 2),
-            b'w' => wday.to_string(),
-            b'W' => num(week(1) as i64, 2),
-            b'x' if alt => format!(
-                "{}, {} {}, {}",
-                LONG_DAYS[wday], LONG_MONTHS[mon], tm[3], year
-            ),
-            b'x' => format!("{:02}/{:02}/{:02}", mon + 1, tm[3], year % 100),
-            b'X' => format!("{:02}:{:02}:{:02}", tm[2], tm[1], tm[0]),
-            b'y' => num(year % 100, 2),
-            b'Y' => num(year, 1),
-            b'z' | b'Z' => "GMT".to_string(),
-            b'%' => "%".to_string(),
-            _ => String::new(),
-        };
-        out.extend_from_slice(text.as_bytes());
-        i += 1;
-    }
-    out
-}
-
-/// strftime(buffer, size, format, tm): the length written, or 0 when it
-/// doesn't fit.
-pub fn strftime(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[buffer, size, format, at] = args else {
-        unreachable!()
-    };
-    let format = cstr(cpu, format)?;
-    let tm = read_tm(cpu, at)?;
-    let text = strftime_text(&format, &tm);
-    if text.len() as u32 >= size {
-        if size > 0 {
-            put(cpu, buffer, &[0])?;
-        }
-        return Some(0);
-    }
-    put_cstr(cpu, buffer, &text)?;
-    Some(text.len() as u32)
-}
-
-/// wcsftime(buffer, size, format, tm), with wide strings.
-pub fn wcsftime(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[buffer, size, format, at] = args else {
-        unreachable!()
-    };
-    let format: Vec<u8> = wstr(cpu, format)?
-        .into_iter()
-        .map(|c| narrow(c).unwrap_or(b'?'))
-        .collect();
-    let tm = read_tm(cpu, at)?;
-    let text: Vec<u16> = strftime_text(&format, &tm).into_iter().map(widen).collect();
-    if text.len() as u32 >= size {
-        return Some(0);
-    }
-    put_wstr(cpu, buffer, &text)?;
-    Some(text.len() as u32)
 }
 
 /// _ftime(timeb): the time, its milliseconds, and no time zone.

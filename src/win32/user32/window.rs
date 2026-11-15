@@ -1173,6 +1173,7 @@ pub fn write_min_max(cpu: &mut Cpu, hwnd: u32, at: u32) {
 /// activation leave it.
 pub fn free_window(cpu: &mut Cpu, hwnd: u32) {
     super::message::kill_window_timers(cpu, hwnd);
+    super::track::window_destroyed(user(cpu), hwnd);
     crate::win32::opengl32::wgl::window_destroyed(cpu, hwnd);
     let state = user(cpu);
     let Some(slot) = super::slot(hwnd) else {
@@ -1181,6 +1182,21 @@ pub fn free_window(cpu: &mut Cpu, hwnd: u32) {
     let Some(w) = state.windows.get(slot).and_then(|w| w.clone()) else {
         return;
     };
+    // A window still on the screen goes off it as a hide takes it, so
+    // what it showed is painted again as SetWindowPos's hide paints it.
+    // A child of a window hidden before it (DestroyWindow hides the
+    // window it destroys before it frees the children) keeps WS_VISIBLE
+    // but showed nothing, and uncovers nothing.
+    if state.is_visible(hwnd) {
+        let old = state.screen_rect(hwnd);
+        if let Some(w) = state.window_mut(hwnd) {
+            w.style &= !WS_VISIBLE;
+        }
+        super::paint::tree_changed(cpu);
+        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW;
+        super::paint::moved(cpu, hwnd, old, true, false, flags);
+    }
+    let state = user(cpu);
     for &child in &w.children {
         if let Some(c) = state.window_mut(child) {
             c.parent = DESKTOP;
@@ -1223,15 +1239,6 @@ pub fn free_window(cpu: &mut Cpu, hwnd: u32) {
     }
     crate::win32::gdi32::dc::window_gone(cpu, hwnd);
     super::paint::tree_changed(cpu);
-    if w.style & WS_VISIBLE != 0 {
-        super::paint::expose(cpu, &Region::from_rect(screen_rect_of(&w, cpu)));
-    }
-}
-
-/// The window's rectangle on the screen, from what it was before it went.
-fn screen_rect_of(w: &Window, cpu: &Cpu) -> Rect {
-    let (x, y) = cpu.bus.win32.user.client_origin(w.parent);
-    w.rect.offset(x, y)
 }
 
 /// The variables of DestroyWindow's task.
@@ -3569,6 +3576,54 @@ mod tests {
             (mm[2], mm[3], mm[4] as i32, mm[5] as i32),
             (374, 235, 0, 0)
         );
+    }
+
+    /// A child of a hidden window shows nothing, so freeing it leaves
+    /// nothing to paint. DestroyWindow hides the window it destroys and
+    /// then frees its children, which keep WS_VISIBLE: Shadow of the
+    /// Horned Rat's camp screen, drawn after its regiment book went, was
+    /// erased by its parents' WM_PAINT that the book's buttons asked for.
+    /// A visible child still uncovers its parent where it was, and
+    /// nothing of a window under the parent.
+    #[test]
+    fn a_child_of_a_hidden_window_uncovers_nothing() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        create_desktop(&mut cpu);
+        let state = user(&mut cpu);
+        let r = Rect::new(0, 0, 640, 480);
+        let top_level = || Window {
+            style: WS_VISIBLE,
+            parent: DESKTOP,
+            rect: r,
+            client: r,
+            ..Window::default()
+        };
+        let under = state.new_window(top_level()).expect("a window");
+        link(state, under, HWND_TOP);
+        let top = state.new_window(top_level()).expect("a window");
+        link(state, top, HWND_TOP);
+        let child = |parent, style| Window {
+            style: WS_CHILD | style,
+            parent,
+            rect: Rect::new(10, 10, 100, 40),
+            client: Rect::new(10, 10, 100, 40),
+            ..Window::default()
+        };
+        let page = state.new_window(child(top, 0)).expect("a page");
+        link(state, page, HWND_TOP);
+        let button = state.new_window(child(page, WS_VISIBLE)).expect("a button");
+        link(state, button, HWND_TOP);
+        let shown = state.new_window(child(top, WS_VISIBLE)).expect("a child");
+        link(state, shown, HWND_TOP);
+        free_window(&mut cpu, button);
+        let w = user(&mut cpu).window(top).expect("the window");
+        assert!(w.update.is_empty(), "a hidden button uncovered {:?}", w.update);
+        free_window(&mut cpu, shown);
+        let state = user(&mut cpu);
+        let w = state.window(top).expect("the window");
+        assert_eq!(w.update.bounds(), Rect::new(10, 10, 100, 40));
+        let w = state.window(under).expect("the window under");
+        assert!(w.update.is_empty(), "the window under uncovered {:?}", w.update);
     }
 
     /// SetWindowLong(GWL_HWNDPARENT) can make two top-level windows own

@@ -93,7 +93,7 @@ fn main() -> Result<ExitCode, String> {
                 command: run.command,
                 dir: run.dir.unwrap_or_else(|| std::path::PathBuf::from(".")),
                 cycles: run.cycles,
-                memory_mb: run.mem as usize,
+                memory_mb: run.mem.map(|mb| mb as usize),
                 screen: run.screen,
                 win32: run.win32,
             });
@@ -182,7 +182,7 @@ fn main() -> Result<ExitCode, String> {
             .then(rust_dos::version_check::Check::start);
     // A game to launch: its profile, read now so its memory size is the
     // machine's.
-    let (startup_game, memory_mb) = game_to_launch(&args, &config, &settings)?;
+    let (startup_game, memory) = game_to_launch(&args, &config, &settings)?;
 
     let mut cursor_visible = true;
     let mut last_blink = std::time::Instant::now();
@@ -263,7 +263,11 @@ fn main() -> Result<ExitCode, String> {
     let mut det = args
         .deterministic
         .then(|| rust_dos::deterministic::Deterministic::new(args.start_time.unwrap_or_else(rust_dos::deterministic::default_start)));
-    let mut cpu = create_cpu(&args, &config, memory_mb)?;
+    let mut cpu = create_cpu(&args, &config, &memory)?;
+    if let Some(path) = &args.trace_3d {
+        rust_dos::win32::trace3d::start(&mut cpu, path)
+            .map_err(|e| format!("The 3D trace can't be written to {}: {}", path.display(), e))?;
+    }
     apply_keyboard_layout(&mut cpu, settings.keyboard_layout);
     for warning in rust_dos::hardware::configure(&mut cpu, &settings, sdl_keys::detect_layout()) {
         config_warning(&mut cpu, &warning);
@@ -318,6 +322,10 @@ fn main() -> Result<ExitCode, String> {
     let mut last_screen_key = None;
     // Whether the OpenGL renderer drew the 3dfx card's picture last frame.
     let mut voodoo_gl_shown = false;
+    // Whether `cached_frame` is filled with one colour, under a
+    // ToadForce's picture that the window shows from the OpenGL
+    // renderer's copy.
+    let mut toadforce_blank = false;
     // The cached render with the cursors on top, as the screen shows it.
     let mut screen = cached_frame.clone();
     let mut composition = video::compose::Composition::default();
@@ -427,6 +435,17 @@ fn main() -> Result<ExitCode, String> {
             capture_mouse!(false);
             auto_capture.released();
         }};
+    }
+    // Whether the program uses the mouse, so that a click captures it:
+    // the INT 33h driver, the PS/2 mouse as Windows has it, a serial
+    // mouse, or the built-in Windows' program steering with it.
+    macro_rules! uses_mouse {
+        () => {
+            cpu.bus.mouse.installed
+                || cpu.bus.mouse.ps2.enabled
+                || cpu.bus.serial.mouse_in_use()
+                || cpu.bus.mouse.moves_by_motion(cpu.bus.clock.now_ns())
+        };
     }
     // Whether the program follows the mouse driver's cursor, which then
     // decides where the mouse leaves: not with the PS/2 or a serial mouse
@@ -548,6 +567,11 @@ fn main() -> Result<ExitCode, String> {
     let mut seen_power = (cpu.bus.power_ons, cpu.bus.vga.resyncs);
     cpu.bus.monitor_noise.enabled = settings.monitor_effects.sound();
     power_on(&mut power, &mut cpu.bus, settings.monitor_effects);
+    // Whether OpenGL draws a ToadForce in a deterministic run too, for
+    // comparing the two renderers' frames at equal emulated times ("The
+    // ToadForce card" in `docs/llm-debugging.md`).
+    let toadforce_gl_deterministic =
+        std::env::var_os("RUST_DOS_TOADFORCE_GL_DETERMINISTIC").is_some();
 
     // Main Loop
     'running: loop {
@@ -1163,7 +1187,7 @@ fn main() -> Result<ExitCode, String> {
                     if clipboard.finish(&cpu.bus, display.to_frame(x, y)) {
                         osd.show("Ctrl+Shift+C copies the selected text");
                     } else if !ui.is_open() && !paused {
-                        if cpu.bus.mouse.installed || cpu.bus.mouse.ps2.enabled || cpu.bus.serial.mouse_in_use() {
+                        if uses_mouse!() {
                             capture_mouse!(true);
                             capture_message!(CAPTURED);
                         } else {
@@ -1222,10 +1246,12 @@ fn main() -> Result<ExitCode, String> {
 
                 Event::MouseButtonDown { mouse_btn, x, y, .. } => {
                     clipboard.clear();
-                    // A program using the mouse (the INT 33h driver, or the
-                    // BIOS's PS/2 mouse as Windows does) gets it captured by
-                    // a click, which it doesn't see, as in DOSBox.
-                    if !mouse_captured && (cpu.bus.mouse.installed || cpu.bus.mouse.ps2.enabled || cpu.bus.serial.mouse_in_use()) {
+                    // A program using the mouse (`uses_mouse!`: the INT 33h
+                    // driver, the BIOS's PS/2 mouse as Windows does, or the
+                    // built-in Windows' program steering with it) gets it
+                    // captured by a click, which it doesn't see, as in
+                    // DOSBox.
+                    if !mouse_captured && uses_mouse!() {
                         capture_mouse!(true);
                         capturing_click = Some(mouse_btn);
                         capture_message!(CAPTURED);
@@ -1437,14 +1463,28 @@ fn main() -> Result<ExitCode, String> {
             dbg.state_done(&cpu, request, result);
         }
         while let Some(request) = dbg.next_speed_request() {
-            let result = CpuSpeed::parse(&request.cycles).and_then(|cycles| {
-                if det.is_some() && !matches!(cycles, CpuSpeed::Fixed(_)) {
-                    return Err("deterministic mode runs at a fixed speed: give a number of cycles".to_string());
+            let result = match &request.change {
+                debug::SettingChange::Cycles(cycles) => {
+                    CpuSpeed::parse(cycles).and_then(|cycles| {
+                        if det.is_some() && !matches!(cycles, CpuSpeed::Fixed(_)) {
+                            return Err(
+                                "deterministic mode runs at a fixed speed: give a number of cycles"
+                                    .to_string(),
+                            );
+                        }
+                        let new = Settings { cycles, ..settings.clone() };
+                        host!().apply(&new)?;
+                        Ok(serde_json::json!({"cycles": cycles.to_string()}))
+                    })
                 }
-                let new = Settings { cycles, ..settings.clone() };
-                host!().apply(&new)?;
-                Ok(serde_json::json!({"cycles": cycles.to_string()}))
-            });
+                // The server checked the value. A setting that fails to
+                // apply is the client's answer, and the machine runs on.
+                &debug::SettingChange::FpsCap(fps_cap) => {
+                    let new = Settings { fps_cap, ..settings.clone() };
+                    let name = rust_dos::frame_cap::name(fps_cap);
+                    host!().apply(&new).map(|_| serde_json::json!({ "fps_cap": name }))
+                }
+            };
             dbg.speed_done(&cpu, request, result);
             told_cycles = settings.cycles;
         }
@@ -1606,16 +1646,17 @@ fn main() -> Result<ExitCode, String> {
         // The VFX1 on the desk of the 3D scene, and the head wearing it.
         display.set_vfx1(settings.vfx1.enabled);
         vfx1_host.track(&mut cpu.bus, vfx1_worn, &settings.vfx1, waiting || det.is_some());
-        cpu.bus.set_voodoo_fps_cap(settings.voodoo.fps_cap);
+        cpu.bus.set_fps_cap(settings.fps_cap);
         cpu.bus.set_voodoo_texture_sampling(settings.voodoo.texture_sampling);
         cpu.bus.set_powervr_filter(settings.powervr_filter);
         // With a variable refresh rate, each frame runs to a vertical
         // retrace of the machine's display and is shown when it is due,
         // so the window refreshes at the machine's rate, where the host's
-        // display goes that fast; under the 3dfx frame rate cap, at the
-        // cap's frame times, which the card's swaps keep to.
+        // display goes that fast; while a program shows its frames
+        // through the frame rate cap, on any card, at the cap's frame
+        // times, which its presents keep to.
         let refresh = (settings.vrr && !waiting && det.is_none())
-            .then(|| cpu.bus.voodoo_cap_timing().unwrap_or_else(|| cpu.bus.refresh_timing()))
+            .then(|| cpu.bus.frame_cap_timing().unwrap_or_else(|| cpu.bus.refresh_timing()))
             .filter(|timing| display.shows_hz(timing.hz()));
         let batch_end = if waiting {
             cpu.bus.clock.icount
@@ -1974,6 +2015,24 @@ fn main() -> Result<ExitCode, String> {
         } else {
             Zone::FrameCompose
         });
+        // A deterministic run draws a ToadForce in software, so that its
+        // pictures don't depend on the host's GPU.
+        let toadforce_software = det.is_some() && !toadforce_gl_deterministic;
+        display.run_toadforce(&mut cpu.bus, settings.toadforce_renderer, toadforce_software);
+        // A ToadForce's picture from the OpenGL renderer's own copy of
+        // the surface shown, with nothing read back, unless something
+        // looks at the frame in memory: screenshots, recordings,
+        // overlays that mix with it, the debugger and a deterministic
+        // run.
+        let toadforce_memory = screenshot
+            || recorder.is_active()
+            || video_recording.is_some()
+            || ui.is_open()
+            || ui.overlay_shown()
+            || dbg.wants_frame()
+            || det.is_some()
+            || settings.monochrome.phosphor().is_some();
+        let toadforce_gl = display.show_toadforce(&mut cpu.bus, !toadforce_memory);
         cpu.bus.sync_display();
         let voodoo_gl = display.run_voodoo(&mut cpu.bus, &settings.voodoo, det.is_none());
         if !voodoo_gl
@@ -1985,14 +2044,35 @@ fn main() -> Result<ExitCode, String> {
         }
         voodoo_gl_shown = voodoo_gl;
         let (width, height) = video::frame_size(&cpu.bus);
-        if cached_frame.resize(width, height) {
+        let resized = cached_frame.resize(width, height);
+        if resized {
             cpu.bus.vga.mark_dirty_full();
             display.set_frame_size(width, height)?;
         }
         profile::set_host(Zone::VgaRender);
         let render_start = std::time::Instant::now();
+        // The first frame drawn from card memory again draws all of it.
+        if !toadforce_gl && std::mem::take(&mut toadforce_blank) {
+            cpu.bus.vga.mark_dirty_full();
+        }
         let rendered = cpu.bus.vga.dirty;
-        let changed = if cpu.bus.vga.dirty {
+        let changed = if toadforce_gl {
+            // Card memory isn't drawn, and what a ToadForce drew stays
+            // marked for the frame that is. The machine's picture is
+            // one colour meanwhile, filled once, so that the cursors
+            // and messages composed over it are all that differs from
+            // it: those are what the window draws over the renderer's
+            // picture. No cursor has the colour, so its black pixels
+            // differ too.
+            if resized || !std::mem::replace(&mut toadforce_blank, true) {
+                for pixel in cached_frame.rgba.as_chunks_mut::<4>().0 {
+                    *pixel = [1, 2, 3, 0];
+                }
+                0..cached_frame.height as usize
+            } else {
+                0..0
+            }
+        } else if cpu.bus.vga.dirty {
             let rows = video::render_screen_rows(&mut cached_frame, &cpu.bus);
             cpu.bus.vga.clear_dirty();
             rows
@@ -2034,6 +2114,7 @@ fn main() -> Result<ExitCode, String> {
             && power_look.is_none()
             && last_screen_key == Some(screen_key)
             && !voodoo_gl
+            && !toadforce_gl
             && !ui.is_open()
             && !ui.overlay_shown()
             && !ui.sound_viz_shown()
@@ -2232,7 +2313,7 @@ fn main() -> Result<ExitCode, String> {
         } else {
             display.present_rows(
                 &screen,
-                voodoo_gl.then_some(&cached_frame),
+                (voodoo_gl || toadforce_gl).then_some(&cached_frame),
                 ui.layer(),
                 composed_rows,
                 (settings.shader == video::shader::Shader::Xbrz).then_some(&cached_frame),
@@ -2348,6 +2429,7 @@ fn shut_down(
 
     // The loops of a program still running get their summaries.
     rust_dos::win32::trace::flush(cpu);
+    rust_dos::win32::trace3d::flush(cpu);
     cpu.bus.flush_log();
 
     // The journal ends, and the debug server's clients get what they

@@ -9,10 +9,14 @@ use super::super::{
     V_D3D2, V_D3D3, V_D3D7, V_DEVICE1, V_DEVICE2, V_DEVICE3, V_DEVICE7, V_LIGHT, V_MATERIAL1,
     V_MATERIAL2, V_MATERIAL3, V_VB1, V_VB7, V_VIEWPORT1, V_VIEWPORT2, V_VIEWPORT3, state,
 };
-use super::{D3D_OK, D3dObject, IID_HAL, caps, is_device_guid, probe};
+use super::hal::{self, Kind, Offer, software};
+use super::{
+    D3D_OK, D3dObject, IID_HAL, IID_RAMP, IID_RGB, IID_TNLHAL, caps, is_device_guid, probe,
+};
 use crate::cpu::Cpu;
 use crate::win32::com::{self, CLASS_E_NOAGGREGATION, Guid};
 use crate::win32::task::{self, Next, Task};
+use crate::win32::trace3d;
 
 /// The DirectDraw object of the IDirect3D interface `this`: the
 /// interface's vtable and the object's id.
@@ -62,6 +66,87 @@ const CONTEXT: usize = 2;
 const NEXT: usize = 3;
 const PARAM: usize = 4;
 const TMUS: usize = 5;
+/// The card whose HAL is enumerated (`hal::Kind::code`), `NO_CARD`
+/// when a list of devices has none.
+const CARD: usize = 6;
+/// The version of IDirect3D that lists the devices.
+const VERSION: usize = 7;
+
+const NO_CARD: u32 = u32::MAX;
+
+/// A device IDirect3D lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Listed {
+    Ramp,
+    Rgb,
+    Hal,
+    TnlHal,
+}
+
+impl Listed {
+    fn guid(self) -> Guid {
+        match self {
+            Listed::Ramp => IID_RAMP,
+            Listed::Rgb => IID_RGB,
+            Listed::Hal => IID_HAL,
+            Listed::TnlHal => IID_TNLHAL,
+        }
+    }
+
+    /// The color model of a software device, 0 for the card's.
+    fn model(self) -> u32 {
+        match self {
+            Listed::Ramp => software::MODEL_MONO,
+            Listed::Rgb => software::MODEL_RGB,
+            _ => 0,
+        }
+    }
+
+    /// The color model its description reports: the software device's,
+    /// or D3DCOLOR_RGB for the card's.
+    fn color_model(self) -> u32 {
+        match self.model() {
+            0 => software::MODEL_RGB,
+            model => model,
+        }
+    }
+
+    /// What it offers, with the card `card`.
+    fn offer(self, card: Option<Offer>) -> Option<Offer> {
+        match self {
+            Listed::Ramp | Listed::Rgb => Some(hal::software()),
+            _ => card,
+        }
+    }
+}
+
+/// The devices IDirect3D of `version` lists, in its order, with the
+/// card `card`, as Windows 98's DirectX 6.1 has them: the software
+/// devices first (the Ramp device up to Direct3D 5's IDirect3D2, then
+/// the RGB one) and the card's HAL device last, after which Direct3D 7
+/// lists the T&L HAL device on a card that transforms and lights.
+fn listed(card: Option<Kind>, version: u32) -> Vec<Listed> {
+    let mut list = Vec::new();
+    if version <= 2 {
+        list.push(Listed::Ramp);
+    }
+    list.push(Listed::Rgb);
+    if let Some(kind) = card {
+        list.push(Listed::Hal);
+        if version >= 7 && hal::transforms(kind) {
+            list.push(Listed::TnlHal);
+        }
+    }
+    list
+}
+
+/// The device of `guid` that IDirect3D of `version` has with the card
+/// `card`, if it lists one.
+fn device_of_guid(card: Option<Kind>, guid: &Guid, version: u32) -> Option<Listed> {
+    listed(card, version)
+        .into_iter()
+        .find(|l| l.guid() == *guid)
+}
 
 /// The scratch space: the GUID, the strings, and the two descriptions.
 const SCRATCH: u32 = 640;
@@ -76,39 +161,45 @@ fn start(
     callback: u32,
     context: u32,
     param: u32,
-    tmus: u32,
+    offer: Offer,
 ) -> Option<u32> {
+    let card = offer.kind.code();
+    start_with(cpu, [kind, callback, context, param, offer.units, card, 0])
+}
+
+/// Start a list with the variables kind, callback, context, parameter,
+/// texture units, card and version.
+fn start_with(cpu: &mut Cpu, vars: [u32; 7]) -> Option<u32> {
+    let [kind, callback, context, param, units, card, version] = vars;
     if !callable(cpu, callback) {
         return Some(DDERR_INVALIDPARAMS);
     }
-    task::start(
-        cpu,
-        task::D3D_ENUM,
-        vec![kind, callback, context, 0, param, tmus],
-        SCRATCH,
-    )
+    let vars = vec![kind, callback, context, 0, param, units, card, version];
+    task::start(cpu, task::D3D_ENUM, vars, SCRATCH)
 }
 
-/// EnumDevices(this, callback, context) of IDirect3D to 3: the HAL, if
-/// there is one, with D3DDEVICEDESC of the interface's version.
+/// Start listing the devices of IDirect3D of `version` (`listed`).
+fn start_devices(cpu: &mut Cpu, dd: u32, vars: [u32; 4], version: u32) -> Option<u32> {
+    let [kind, callback, context, param] = vars;
+    let card = super::hal::card(cpu, dd);
+    let (units, code) = card.map_or((0, NO_CARD), |c| (c.units, c.kind.code()));
+    start_with(cpu, [kind, callback, context, param, units, code, version])
+}
+
+/// EnumDevices(this, callback, context) of IDirect3D to 3: the devices
+/// it lists (`listed`), with D3DDEVICEDESC of the interface's version.
 pub fn enum_devices(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, callback, context] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (vtable, dd) = hr!(d3d_of(cpu, this));
-    let size = match d3d_version(vtable) {
+    let version = d3d_version(vtable);
+    let size = match version {
         1 => caps::DESC_V1,
         2 => caps::DESC_V2,
         _ => caps::DESC_V3,
     };
-    let Some(tmus) = super::hal(cpu, dd) else {
-        return Some(if callable(cpu, callback) {
-            D3D_OK
-        } else {
-            DDERR_INVALIDPARAMS
-        });
-    };
-    start(cpu, DEVICES, callback, context, size, tmus)
+    start_devices(cpu, dd, [DEVICES, callback, context, size], version)
 }
 
 /// EnumDevices(this, callback, context) of IDirect3D7.
@@ -117,27 +208,27 @@ pub fn enum_devices7(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (_, dd) = hr!(d3d_of(cpu, this));
-    let Some(tmus) = super::hal(cpu, dd) else {
-        return Some(if callable(cpu, callback) {
-            D3D_OK
-        } else {
-            DDERR_INVALIDPARAMS
-        });
-    };
-    start(cpu, DEVICES7, callback, context, 0, tmus)
+    start_devices(cpu, dd, [DEVICES7, callback, context, 0], 7)
 }
 
 /// EnumTextureFormats(this, callback, context) of a device: the texture
 /// formats, as DDSURFACEDESC for IDirect3DDevice and 2, as
-/// DDPIXELFORMAT from 3 on.
+/// DDPIXELFORMAT from 3 on. IDirect3DDevice and 2 list only the RGB
+/// and palettized formats, following what Direct3D 5's devices
+/// enumerate as Wine's `d3d_device2_EnumTextureFormats` has it: no
+/// FOURCC, alpha-only, luminance or bump formats (Wine's list for
+/// IDirect3DDevice3 and 7 adds DXT1 to DXT5 and the bump formats).
+/// Warhammer: Dark Omen takes every format it is given that isn't
+/// palettized as RGB and loops forever over DXT1's empty red mask.
 pub fn enum_texture_formats(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, callback, context] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (vtable, _) = hr!(super::device::device_of(cpu, this));
+    let (vtable, id) = hr!(super::device::device_of(cpu, this));
     let version = super::device::version(vtable);
     let kind = if version < 3 { TEXTURES_DESC } else { TEXTURES };
-    start(cpu, kind, callback, context, 0, 0)
+    let offer = super::device::offer_of(cpu, id);
+    start(cpu, kind, callback, context, 0, offer)
 }
 
 /// EnumZBufferFormats(this, device, callback, context).
@@ -145,19 +236,45 @@ pub fn enum_z_buffer_formats(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, device, callback, context] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (_, dd) = hr!(d3d_of(cpu, this));
+    let (vtable, dd) = hr!(d3d_of(cpu, this));
     let Some(guid) = Guid::read(cpu, device) else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    if guid != IID_HAL || super::hal(cpu, dd).is_none() {
+    let version = d3d_version(vtable);
+    let card = super::hal::card(cpu, dd);
+    let Some(offer) =
+        device_of_guid(card.map(|c| c.kind), &guid, version).and_then(|device| device.offer(card))
+    else {
         return Some(DDERR_INVALIDPARAMS);
-    }
-    start(cpu, Z_FORMATS, callback, context, 0, 0)
+    };
+    start(cpu, Z_FORMATS, callback, context, 0, offer)
 }
 
 /// The task's step: the next item to the callback, until the list ends
 /// or the callback returns D3DENUMRET_CANCEL (0).
 pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
+    let kind = t.var(KIND);
+    let (scratch, step) = (t.scratch, t.step);
+    let next = items(cpu, t, value);
+    if trace3d::on(cpu) {
+        let list = match kind {
+            DEVICES | DEVICES7 => "DDRAW.EnumDevices",
+            Z_FORMATS => "DDRAW.EnumZBufferFormats",
+            _ => "DDRAW.EnumTextureFormats",
+        };
+        trace3d::enumerated(cpu, list, scratch, step, value, &next, |cpu, args| {
+            match kind {
+                DEVICES => trace3d::d3d_device_item(cpu, args),
+                DEVICES7 => trace3d::d3d_device7_item(cpu, args),
+                TEXTURES_DESC => trace3d::surface_desc_item(cpu, args, 0),
+                _ => trace3d::pixel_format_item(cpu, args),
+            }
+        });
+    }
+    next
+}
+
+fn items(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     if t.step == 1 && value == 0 {
         return Next::Done(D3D_OK);
     }
@@ -167,20 +284,42 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let (callback, context) = (t.var(CALLBACK), t.var(CONTEXT));
     match t.var(KIND) {
         DEVICES | DEVICES7 => {
-            if next > 0 {
+            let card = (t.var(CARD) != NO_CARD).then(|| Offer {
+                kind: hal::Kind::from_code(t.var(CARD)),
+                units: t.var(TMUS),
+            });
+            let list = listed(card.map(|c| c.kind), t.var(VERSION));
+            let Some((device, offer)) = list
+                .get(next)
+                .and_then(|&device| Some((device, device.offer(card)?)))
+            else {
                 return Next::Done(D3D_OK);
-            }
-            cpu.bus.guest_write_bytes(s + STRINGS, caps::DESCRIPTION);
-            cpu.bus.guest_write_bytes(s + NAME, caps::NAME);
-            let tmus = t.var(TMUS);
+            };
+            let (description, name) = match device {
+                Listed::Ramp => (caps::RAMP_DESCRIPTION, caps::RAMP_NAME),
+                Listed::Rgb => (caps::RGB_DESCRIPTION, caps::RGB_NAME),
+                Listed::Hal => (caps::DESCRIPTION, caps::NAME),
+                Listed::TnlHal => (caps::TNL_DESCRIPTION, caps::TNL_NAME),
+            };
+            cpu.bus.guest_write_bytes(s + STRINGS, description);
+            cpu.bus.guest_write_bytes(s + NAME, name);
             if t.var(KIND) == DEVICES7 {
-                caps::write_desc7(cpu, s + HAL_DESC, tmus);
+                let tnl = device == Listed::TnlHal;
+                caps::write_desc7(cpu, s + HAL_DESC, offer, tnl);
                 return Next::call(callback, &[s + STRINGS, s + NAME, s + HAL_DESC, context], 1);
             }
-            IID_HAL.write(cpu, s);
+            device.guid().write(cpu, s);
             let size = t.var(PARAM);
-            caps::write_desc(cpu, s + HAL_DESC, size, true, tmus);
-            caps::write_desc(cpu, s + HEL_DESC, size, false, tmus);
+            match device.model() {
+                0 => {
+                    caps::write_desc(cpu, s + HAL_DESC, size, Some(offer));
+                    caps::write_desc(cpu, s + HEL_DESC, size, None);
+                }
+                model => {
+                    caps::write_empty_desc(cpu, s + HAL_DESC, size);
+                    caps::write_software_desc(cpu, s + HEL_DESC, size, model);
+                }
+            }
             let args = [
                 s,
                 s + STRINGS,
@@ -192,10 +331,15 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             Next::call(callback, &args, 1)
         }
         kind => {
-            let list = if kind == Z_FORMATS {
-                caps::z_formats()
-            } else {
-                caps::texture_formats()
+            let description = hal::description(hal::Kind::from_code(t.var(CARD)));
+            let list = match kind {
+                Z_FORMATS => description.z_formats,
+                TEXTURES_DESC => description
+                    .textures
+                    .into_iter()
+                    .filter(|f| f.flags & surface::DDPF_RGB != 0)
+                    .collect(),
+                _ => description.textures,
             };
             let Some(f) = list.get(next) else {
                 return Next::Done(D3D_OK);
@@ -294,17 +438,24 @@ fn create_object(
 }
 
 /// D3DFINDDEVICESEARCH's flags.
+const D3DFDS_COLORMODEL: u32 = 0x1;
 const D3DFDS_GUID: u32 = 0x2;
 const D3DFDS_HARDWARE: u32 = 0x4;
 
-/// FindDevice(this, search, result): the HAL, if the search asks for
-/// nothing else, with its descriptions of the size the result has room
-/// for. The color model is not looked at.
+/// FindDevice(this, search, result): the first device that matches the
+/// search, the HAL before the software devices, with its descriptions
+/// of the size the result has room for. The search may ask for a GUID,
+/// for hardware or software, and for color models: D3DCOLOR_MONO (1)
+/// and D3DCOLOR_RGB (2) are bits, and a device matches a search that
+/// has its model's bit. Wine's d3d.c finds a device on Windows for the
+/// model 0xDEADBEEF, which has both bits; a program that asks for RGB
+/// gets the HAL or the RGB device, and one that asks for MONO the Ramp
+/// device.
 pub fn find_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, search, result] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (_, dd) = hr!(d3d_of(cpu, this));
+    let (vtable, dd) = hr!(d3d_of(cpu, this));
     if !probe(cpu, search, 92, false) || !probe(cpu, result, 4, true) {
         return Some(DDERR_INVALIDPARAMS);
     }
@@ -319,24 +470,39 @@ pub fn find_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     }
     let flags = cpu.bus.guest_read_32(search + 4);
-    let Some(tmus) = super::hal(cpu, dd) else {
+    let hardware = cpu.bus.guest_read_32(search + 8) != 0;
+    let model = cpu.bus.guest_read_32(search + 12);
+    let guid = Guid::read(cpu, search + 16);
+    let card = super::hal::card(cpu, dd);
+    let mut list = listed(card.map(|c| c.kind), d3d_version(vtable));
+    list.retain(|&l| l != Listed::TnlHal);
+    list.sort_by_key(|l| l.model() != 0);
+    let found = list.into_iter().find(|&l| {
+        (flags & D3DFDS_GUID == 0 || guid == Some(l.guid()))
+            && (flags & D3DFDS_HARDWARE == 0 || hardware == (l.model() == 0))
+            && (flags & D3DFDS_COLORMODEL == 0 || model & l.color_model() != 0)
+    });
+    let Some(device) = found else {
         return Some(DDERR_NOTFOUND);
     };
-    if flags & D3DFDS_GUID != 0 && Guid::read(cpu, search + 16) != Some(IID_HAL) {
-        return Some(DDERR_NOTFOUND);
+    device.guid().write(cpu, result + 4);
+    match (device.model(), card) {
+        (0, Some(offer)) => {
+            caps::write_desc(cpu, result + 20, desc, Some(offer));
+            caps::write_desc(cpu, result + 20 + desc, desc, None);
+        }
+        (model, _) => {
+            caps::write_empty_desc(cpu, result + 20, desc);
+            caps::write_software_desc(cpu, result + 20 + desc, desc, model);
+        }
     }
-    if flags & D3DFDS_HARDWARE != 0 && cpu.bus.guest_read_32(search + 8) == 0 {
-        return Some(DDERR_NOTFOUND);
-    }
-    IID_HAL.write(cpu, result + 4);
-    caps::write_desc(cpu, result + 20, desc, true, tmus);
-    caps::write_desc(cpu, result + 20 + desc, desc, false, tmus);
     Some(D3D_OK)
 }
 
 /// CreateDevice(this, guid, surface, out[, outer]) of IDirect3D2, 3 and
-/// 7. A device GUID that isn't the HAL's, or the HAL's with no card to
-/// draw with, makes it fail as a device that can't be made.
+/// 7. A device GUID the interface doesn't list with this card
+/// (`listed`), the HAL's with no card among them, makes it fail as a
+/// device that can't be made.
 pub fn create_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (this, guid, target, out) = (args[0], args[1], args[2], args[3]);
     let (vtable, dd) = hr!(d3d_of(cpu, this));
@@ -353,27 +519,33 @@ pub fn create_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if !is_device_guid(&guid) {
         return Some(DDERR_INVALIDPARAMS);
     }
-    if guid != IID_HAL {
+    let card = super::hal::card(cpu, dd).map(|o| o.kind);
+    let Some(device) = device_of_guid(card, &guid, version) else {
         return Some(com::E_OUTOFMEMORY);
-    }
+    };
+    let tnl = device == Listed::TnlHal;
     let v = match version {
         2 => V_DEVICE2,
         3 => V_DEVICE3,
         _ => V_DEVICE7,
     };
-    Some(super::device::create(cpu, version, dd, target, v, out))
+    let model = device.model();
+    Some(super::device::create(
+        cpu, version, dd, target, v, out, tnl, model,
+    ))
 }
 
 /// A surface asked for a device by its GUID (QueryInterface): Direct3D
 /// 3 and 5's IDirect3DDevice, on the surface as its render target, given
 /// at `out`.
 pub fn surface_device(cpu: &mut Cpu, id: u32, vtable: usize, iid: &Guid, out: u32) -> u32 {
-    if *iid != IID_HAL {
-        return com::E_OUTOFMEMORY;
-    }
     let dd = state(cpu).object(id).map_or(0, |o| o.owner);
+    let card = super::hal::card(cpu, dd).map(|o| o.kind);
+    let Some(device) = device_of_guid(card, iid, 1) else {
+        return com::E_OUTOFMEMORY;
+    };
     let target = super::super::iface(cpu, id, vtable);
-    super::device::create(cpu, 1, dd, target, V_DEVICE1, out)
+    super::device::create(cpu, 1, dd, target, V_DEVICE1, out, false, device.model())
 }
 
 /// CreateVertexBuffer(this, desc, out, flags[, outer]) of IDirect3D3 and

@@ -37,8 +37,8 @@ impl Layout {
 }
 
 /// A program importing GLIDE2X.DLL's `GLIDE`, KERNEL32.DLL's ExitProcess
-/// and DDRAW.DLL's DirectDrawCreate, with `data` and the code `f` makes,
-/// and where its data is.
+/// and CreateThread and DDRAW.DLL's DirectDrawCreate, with `data` and the
+/// code `f` makes, and where its data is.
 fn program(
     data: &[u8],
     f: impl FnOnce(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
@@ -58,11 +58,13 @@ fn program_of(
     let glide: Vec<Imp> = names.iter().map(|n| Imp::Name(n)).collect();
     let kernel = [Imp::Name("ExitProcess")];
     let ddraw = [Imp::Name("DirectDrawCreate")];
+    let threads = [Imp::Name("CreateThread")];
     let iat = b
         .imports(&[
             (dll, &glide),
             ("KERNEL32.DLL", &kernel),
             ("DDRAW.DLL", &ddraw),
+            ("KERNEL32.DLL", &threads),
         ])
         .concat();
     let data_rva = b.section(
@@ -1575,4 +1577,77 @@ fn without_a_3dfx_card_there_is_no_glide3() {
     run_to_exit(&mut cpu);
     assert_eq!(cpu.errorlevel, 1);
     assert!(printed(&cpu).contains("GLIDE3X.DLL"), "{}", printed(&cpu));
+}
+
+/// Where `swapping_program` counts its swaps, and its second thread its
+/// passes.
+const FRAMES: u32 = 0xE00;
+const WORKER: u32 = 0xE04;
+
+/// A program that opens the card and swaps as fast as it can, without
+/// waiting for the retrace, counting its swaps in FRAMES, while a second
+/// thread counts in WORKER.
+fn swapping_program() -> (Vec<u8>, u32) {
+    let d = vec![0u8; DATA_SIZE];
+    program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        open_card(&mut c, a, l, GR_RESOLUTION_640X480)?;
+        // CreateThread's last three arguments, then its start address,
+        // which the call pushes: the code after it, the thread's.
+        let (mut thread, mut spin, mut frame) =
+            (a.create_label(), a.create_label(), a.create_label());
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(thread)?;
+        a.set_label(&mut spin)?;
+        a.inc(dword_ptr(l.at(WORKER)))?;
+        a.jmp(spin)?;
+        a.set_label(&mut thread)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(dword_ptr(l.iat[GLIDE.len() + 2] as u64))?;
+        a.set_label(&mut frame)?;
+        c.call(a, l, "_grBufferSwap@4", &[Arg::I(0)])?;
+        a.inc(dword_ptr(l.at(FRAMES)))?;
+        a.jmp(frame)
+    })
+}
+
+/// Swaps a second of `swapping_program` on `board` under the cap `fps`,
+/// once it runs, and its second thread's passes then.
+fn swap_rate(test: &str, board: Board, fps: Option<u32>) -> (f64, u32) {
+    let (program, data) = swapping_program();
+    let mut cpu = machine(test, Some(board), program);
+    cpu.bus.set_fps_cap(fps);
+    let run_until = |cpu: &mut Cpu, done: &dyn Fn(&Cpu) -> bool| {
+        for _ in 0..200_000 {
+            cpu.bus.start_batch(cpu.bus.clock.icount + 5_000);
+            run_batch(cpu, &mut NoHook, false);
+            if cpu.cr0 & 0x8000_0001 == 0x8000_0001 && done(cpu) {
+                return;
+            }
+        }
+        panic!("the program didn't get there: {:?}", printed(cpu));
+    };
+    run_until(&mut cpu, &|cpu| peek(cpu, data + FRAMES) >= 3);
+    let start = cpu.bus.clock.now_ns();
+    let (frames, worker) = (peek(&cpu, data + FRAMES), peek(&cpu, data + WORKER));
+    run_until(&mut cpu, &|cpu| cpu.bus.clock.now_ns() >= start + 1_000_000_000);
+    let seconds = (cpu.bus.clock.now_ns() - start) as f64 / 1e9;
+    let shown = f64::from(peek(&cpu, data + FRAMES) - frames) / seconds;
+    (shown, peek(&cpu, data + WORKER) - worker)
+}
+
+#[test]
+fn glide_swaps_come_at_the_frame_rate_caps_rate() {
+    for board in [Board::Voodoo2, Board::Voodoo3] {
+        let test = format!("swap_cap_{board:?}");
+        let (capped, worker) = swap_rate(&test, board, Some(30));
+        assert!((capped - 30.0).abs() < 1.5, "{board:?}: {capped} swaps a second");
+        // The swapping thread waits for its turns, and the other runs.
+        assert!(worker > 100_000, "{board:?}: the other thread ran {worker} passes");
+        let (uncapped, _) = swap_rate(&format!("{test}_off"), board, None);
+        assert!(uncapped > 60.0, "{board:?}: {uncapped} swaps a second without the cap");
+    }
 }

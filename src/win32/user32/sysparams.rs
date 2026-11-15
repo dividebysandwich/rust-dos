@@ -290,10 +290,12 @@ pub fn set_sys_colors(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-/// The LOGFONTA of the screen's 8-point MS Sans Serif, bold or not.
-pub fn sans_serif(bold: bool) -> Vec<u8> {
+/// The LOGFONTA of the screen's 8-point MS Sans Serif, bold or not, in
+/// the system locale's character set.
+pub fn sans_serif(cpu: &Cpu, bold: bool) -> Vec<u8> {
     let weight = if bold { 700 } else { 400 };
-    gdi32::font::logfont(-11, 0, weight, 0, 0x22, "MS Sans Serif")
+    let charset = crate::win32::nls::current(cpu).charset;
+    gdi32::font::logfont(-11, 0, weight, charset, 0x22, "MS Sans Serif")
 }
 
 /// Write `value` to `at` as a 32-bit number.
@@ -306,7 +308,7 @@ fn put(cpu: &mut Cpu, at: u32, value: u32) -> u32 {
 }
 
 /// The value SystemParametersInfoA set for `action`, or `default`.
-fn param(cpu: &mut Cpu, action: u32, default: u32) -> u32 {
+pub(super) fn param(cpu: &mut Cpu, action: u32, default: u32) -> u32 {
     user(cpu)
         .params
         .iter()
@@ -383,6 +385,22 @@ pub fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             set_param(cpu, action, ui);
             TRUE
         }
+        // SPI_GETMOUSEHOVERWIDTH, SPI_GETMOUSEHOVERHEIGHT and
+        // SPI_GETMOUSEHOVERTIME, and their SET actions: TrackMouseEvent's
+        // hover rectangle and time (track.rs), from Windows 98 on.
+        98 | 100 | 102 if crate::win32::version::is_98(cpu) => {
+            let (width, height, time) = super::track::hover_metrics(cpu);
+            let v = match action {
+                98 => width,
+                100 => height,
+                _ => time,
+            };
+            put(cpu, pv, v)
+        }
+        99 | 101 | 103 if crate::win32::version::is_98(cpu) => {
+            set_param(cpu, action, ui);
+            TRUE
+        }
         // SPI_GETMOUSE: the thresholds and speed.
         3 => {
             if pv == 0 {
@@ -414,7 +432,7 @@ pub fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             if pv == 0 {
                 FALSE
             } else {
-                cpu.bus.guest_write_bytes(pv, &sans_serif(false));
+                cpu.bus.guest_write_bytes(pv, &sans_serif(cpu, false));
                 TRUE
             }
         }
@@ -427,16 +445,16 @@ pub fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 for v in [340u32, 1, 16, 16, 18, 18] {
                     b.extend_from_slice(&v.to_le_bytes());
                 }
-                b.extend_from_slice(&sans_serif(true));
+                b.extend_from_slice(&sans_serif(cpu, true));
                 for v in [13u32, 15] {
                     b.extend_from_slice(&v.to_le_bytes());
                 }
-                b.extend_from_slice(&sans_serif(true));
+                b.extend_from_slice(&sans_serif(cpu, true));
                 for v in [18u32, 18] {
                     b.extend_from_slice(&v.to_le_bytes());
                 }
                 for _ in 0..3 {
-                    b.extend_from_slice(&sans_serif(false));
+                    b.extend_from_slice(&sans_serif(cpu, false));
                 }
                 cpu.bus.guest_write_bytes(pv, &b);
                 TRUE
@@ -457,7 +475,7 @@ pub fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 FALSE
             } else {
                 write_words(cpu, pv, &[76, 75, 75, 1]);
-                cpu.bus.guest_write_bytes(pv + 16, &sans_serif(false));
+                cpu.bus.guest_write_bytes(pv + 16, &sans_serif(cpu, false));
                 TRUE
             }
         }

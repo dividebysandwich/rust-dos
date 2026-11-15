@@ -1,11 +1,13 @@
 //! OPENGL32.DLL: OpenGL 1.1, as Windows 98 had it with 3dfx's OpenGL
 //! ICD for the Banshee and Voodoo3 installed: the WGL functions that
-//! make contexts and swap buffers, and OpenGL drawn by the card.
+//! make contexts and swap buffers, and OpenGL drawn by the card. A
+//! ToadForce has the same ICD, with its own vendor and renderer names.
 //!
 //! It is a layer over DirectDraw's Direct3D, as D3D8.DLL is. Each
 //! context has a DirectDraw object of its own and a Direct3D device of
 //! version 8 in DirectDraw's table, which draws with the HAL on the card
-//! (`ddraw::d3d::hal`, itself on Glide's layer, `glide::api`). Its color
+//! (`ddraw::d3d::hal`: on a 3dfx card through Glide's layer,
+//! `glide::api`, and on a ToadForce with its own commands). Its color
 //! buffer is a 16-bit render target and its depth buffer a 16-bit Z
 //! buffer, both in video memory and the size of the window's client
 //! area; SwapBuffers copies the color buffer into the client area where
@@ -19,34 +21,51 @@
 //! states and texture stages, the matrices its transforms, the viewport
 //! and depth range its viewport. What Direct3D 7 has no state for, the
 //! scissor box, polygon offset and the color mask, the inner device has
-//! as fields of its own that the HAL puts on the card. Textures are
-//! DirectDraw texture surfaces (`texture.rs`), 5-6-5 or 4-4-4-4 as
-//! 3dfx's ICD kept them, with the mipmap levels the program gives;
-//! vertices from glBegin and glEnd and from vertex arrays go through
-//! Direct3D's pipeline on the processor (`ddraw::d3d::pipeline`), with
-//! OpenGL's clip space z of -w to w taken to Direct3D's 0 to w.
+//! as fields of its own that the HAL puts on the card; the color mask
+//! is also Direct3D 8's write mask, for a card that writes some
+//! channels of a color and not others. Textures are DirectDraw texture
+//! surfaces (`texture.rs`), 5-6-5 or 4-4-4-4 as 3dfx's ICD kept them,
+//! with the mipmap levels the program gives; vertices from glBegin and
+//! glEnd and from vertex arrays go through Direct3D's pipeline on the
+//! processor (`ddraw::d3d::pipeline`), with OpenGL's clip space z of -w
+//! to w taken to Direct3D's 0 to w.
 //!
 //! Every OpenGL 1.1 function is exported, since programs ask for all of
 //! them with GetProcAddress (Quake III's QGL does). Those that aren't
-//! here, such as display lists, evaluators, selection, feedback,
-//! lighting and the accumulation buffer, do nothing and say so in the
-//! log. The extensions are GL_ARB_multitexture (on a Voodoo3, with its
-//! two texture units; a Banshee has one and not the extension),
-//! GL_EXT_bgra, GL_EXT_compiled_vertex_array, GL_EXT_texture_env_add
-//! and WGL_EXT_swap_control.
+//! here, such as evaluators, selection, feedback and the accumulation
+//! buffer, do nothing and say so in the log. Display lists record the
+//! calls the program makes and give them to the same handlers again
+//! (`lists.rs`), those of the functions that aren't here too. On a 3dfx
+//! card lighting is computed on the processor (`light.rs`,
+//! `shade.rs`), as a Voodoo3 driver had to with no transform and
+//! lighting hardware on the card, and the vertices reach Direct3D's
+//! pipeline lit. A ToadForce transforms and lights the vertices
+//! itself, with the matrices, lights and materials as its state, as a
+//! GeForce's driver had it do; `tnl.rs` says which draws go that way
+//! and which stay on the processor. The extensions are
+//! GL_ARB_multitexture (on a Voodoo3, with its two texture units; a
+//! Banshee has one and not the extension), GL_EXT_bgra,
+//! GL_EXT_compiled_vertex_array, GL_EXT_packed_pixels,
+//! GL_EXT_texture_env_add and WGL_EXT_swap_control. On a ToadForce,
+//! texels and pixels also come in OpenGL 1.2's other packed types
+//! (`wgl::PackedPixels`).
 //!
-//! On a machine with a Voodoo2 beside the display adapter, the DLL is
-//! 3dfx's Voodoo2 OpenGL driver (3DFXVGL.DLL), which games of the time
-//! loaded themselves or had in their own folder as OPENGL32.DLL: a
-//! context's DirectDraw object is the card's, full screen, and its
-//! color and depth buffers are the card's back (or front) buffer and
-//! auxiliary buffer, the screen's top left the window's client area
-//! (`wgl.rs`). SwapBuffers swaps the card's buffers.
+//! On a machine with a Voodoo2 beside a display adapter that has no
+//! ICD of its own (one that is neither a Banshee, a Voodoo3 nor a
+//! ToadForce), the DLL is 3dfx's Voodoo2 OpenGL driver (3DFXVGL.DLL),
+//! which games of the time loaded themselves or had in their own folder
+//! as OPENGL32.DLL: a context's DirectDraw object is the card's, full
+//! screen, and its color and depth buffers are the card's back (or
+//! front) buffer and auxiliary buffer, the screen's top left the
+//! window's client area (`wgl.rs`). SwapBuffers swaps the card's
+//! buffers. Beside one of those display adapters, OpenGL draws on the
+//! display adapter, as Windows' OPENGL32.DLL used the ICD of the
+//! display's driver.
 //!
-//! On a machine with neither card there is no ICD: the DLL loads, but
-//! there are no pixel formats and wglCreateContext fails, as on a
-//! machine with Windows' own OPENGL32.DLL and a card without an OpenGL
-//! driver of its own.
+//! On a machine with none of these cards there is no ICD: the DLL
+//! loads, but there are no pixel formats and wglCreateContext fails, as
+//! on a machine with Windows' own OPENGL32.DLL and a card without an
+//! OpenGL driver of its own.
 //!
 //! The pixel formats and wglChoosePixelFormat follow Mesa 6.2's 3dfx
 //! driver (src/mesa/drivers/glide/fxwgl.c), which is under the MIT
@@ -58,19 +77,26 @@
 //! License 2.1 or later: Copyright (c) 1999 Lionel Ulmer, Copyright (c)
 //! 2005 Raphael Junqueira.
 
+mod attrib;
 mod draw;
 mod exports;
 mod imm;
+mod light;
+mod lists;
 mod matrix;
+mod pname;
+mod shade;
 mod state;
 mod texture;
+pub mod tnl;
 pub mod wgl;
 
-pub use matrix::{mult as mult_matrix, ortho};
+pub use lists::{call, mult_matrix, ortho, tex_image_rgba};
 pub use state::get_string;
-pub use texture::{GL_TEXTURE_2D, rgba_of, tex_image_rgba};
+pub use texture::{GL_TEXTURE_2D, rgba_of};
 
 use super::ddraw::d3d::pipeline::{IDENTITY, Matrix};
+use super::ddraw::stamp::Stamped;
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
 
@@ -114,8 +140,18 @@ pub const UNITS: usize = 2;
 pub const MODELVIEW_DEPTH: usize = 32;
 pub const PROJECTION_DEPTH: usize = 2;
 pub const TEXTURE_DEPTH: usize = 2;
-/// The largest texture: the card's 256 by 256.
-pub const MAX_TEXTURE_SIZE: u32 = 256;
+/// The largest texture's width and height, as GL_MAX_TEXTURE_SIZE gives
+/// it: that of the card the current context draws on, as its Direct3D
+/// HAL describes it (`hal::texture_max`). That is 256 on a 3dfx card,
+/// the Voodoo2 included, and 2048 on a ToadForce.
+pub fn max_texture_size(cpu: &mut Cpu) -> u32 {
+    use super::ddraw::d3d::hal;
+    let offer = match ctx(cpu).map(|c| c.dd) {
+        Some(dd) => hal::card(cpu, dd),
+        None => hal::adapter(cpu),
+    };
+    offer.map_or(hal::voodoo::TEXTURE_MAX, |o| hal::texture_max(o.kind))
+}
 
 /// A vertex array: whether it is on, and glXxxPointer's size, type,
 /// stride and address.
@@ -128,12 +164,19 @@ pub struct Array {
     pub at: u32,
 }
 
-/// A vertex as glBegin and glEnd gather it: the position, the color
-/// (ARGB), and each unit's texture coordinates.
+/// A vertex as glBegin and glEnd or the arrays give it: the position,
+/// the normal, the color and each unit's texture coordinates, none of
+/// them through a matrix or the lights yet. The draw puts them through
+/// (`draw::draw`), on the card or on the processor.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ImmVertex {
     pub position: [f32; 4],
-    pub color: u32,
+    pub normal: [f32; 3],
+    pub color: [f32; 4],
+    /// The front and back colors (ARGB) of a vertex that was lit
+    /// before its draw: one given before a glMaterial between glBegin
+    /// and glEnd, which has the materials as they were.
+    pub lit: Option<[u32; 2]>,
     pub tex: [[f32; 4]; UNITS],
 }
 
@@ -160,9 +203,104 @@ pub struct Texture {
     pub wrap_t: u32,
 }
 
-/// A rendering context.
+/// A rendering context: what its draws are made with (`Settings`, whose
+/// fields are read and written as the context's own), and the rest.
+///
+/// The first is stamped (`ddraw::stamp::Stamped`): every change to it
+/// gives the context a new stamp, and the Direct3D state made from it
+/// for one draw (`draw::Applied`) is the next draw's while the stamp
+/// is the same. The fields here are those no such state is made from:
+/// what glVertex and its like set many times between two draws (the
+/// current color, the vertices under way), the lights and texture
+/// matrices, which the vertices go through here, and what only other
+/// functions read.
 #[derive(Clone, Debug, Default)]
 pub struct Context {
+    settings: Stamped<Settings>,
+    /// The Direct3D state of `settings`, with the stamp it was made
+    /// under (`draw::applied_of`). Not saved: it is made again.
+    pub(super) applied: Option<(u64, Option<draw::Applied>)>,
+    /// The card's state for `settings` and `lighting`, or why the
+    /// processor transforms and lights their draws, with the two
+    /// stamps it was made under (`tnl::state_of`). Not saved: it is
+    /// made again.
+    pub(super) card: Option<(u64, u64, tnl::State)>,
+    /// The strings glGetString gives, in the process's memory.
+    pub strings: u32,
+    pub error: u32,
+    pub matrix_mode: u32,
+    pub texture_matrix: Vec<Vec<Matrix>>,
+    pub clear_color: [f32; 4],
+    pub clear_depth: f32,
+    pub clear_stencil: u32,
+    /// The pixel store: unpack's and pack's alignment, row length, rows
+    /// and pixels skipped.
+    pub unpack: [u32; 4],
+    pub pack: [u32; 4],
+    pub active_unit: u32,
+    pub client_unit: u32,
+    /// The lights, the materials and the lighting model, stamped as
+    /// the settings are: the card's state is made from both.
+    pub lighting: Stamped<light::Lighting>,
+    /// glPushAttrib's stack.
+    pub attribs: Vec<attrib::Attrib>,
+    /// The current color, texture coordinates and normal.
+    pub color: [f32; 4],
+    pub tex_coord: [[f32; 4]; UNITS],
+    pub normal: [f32; 3],
+    /// The vertex, color, normal and texture coordinate arrays.
+    pub vertex_array: Array,
+    pub color_array: Array,
+    pub normal_array: Array,
+    pub tex_array: [Array; UNITS],
+    /// glBegin's primitive under way and its vertices.
+    pub begin: Option<u32>,
+    pub vertices: Vec<ImmVertex>,
+    /// Its display lists: their group, the list base and the list
+    /// being compiled.
+    pub lists: lists::Own,
+    pub swap_interval: u32,
+    /// The time (ns) a window's next swap waits for: the start of the
+    /// frame's picture the swap interval's frames after the last swap.
+    pub swap_at: u64,
+    /// Whether it drew since the buffers were last swapped or flushed.
+    pub drawn: bool,
+}
+
+impl std::ops::Deref for Context {
+    type Target = Settings;
+
+    fn deref(&self) -> &Settings {
+        &self.settings
+    }
+}
+
+/// Any change to what draws are made with: the context's stamp changes
+/// with it.
+impl std::ops::DerefMut for Context {
+    fn deref_mut(&mut self) -> &mut Settings {
+        &mut self.settings
+    }
+}
+
+impl Context {
+    /// The stamp of what the context's draws are made with: the same
+    /// for as long as none of it changed.
+    pub fn stamp(&self) -> u64 {
+        Stamped::stamp(&self.settings)
+    }
+
+    /// Something its draws are made with that isn't in its settings
+    /// changed: a texture of its group (`lists::textures_mut`).
+    pub fn restamp(&mut self) {
+        let _: &mut Settings = &mut self.settings;
+    }
+}
+
+/// What a context's draws are made with: its buffers, matrices,
+/// viewport, capabilities and textures.
+#[derive(Clone, Debug, Default)]
+pub struct Settings {
     pub pid: u32,
     /// The window it draws into, and its pixel format.
     pub window: u32,
@@ -188,13 +326,8 @@ pub struct Context {
     /// its top left that OpenGL draws in.
     pub width: u32,
     pub height: u32,
-    /// The strings glGetString gives, in the process's memory.
-    pub strings: u32,
-    pub error: u32,
-    pub matrix_mode: u32,
     pub modelview: Vec<Matrix>,
     pub projection: Vec<Matrix>,
-    pub texture_matrix: Vec<Vec<Matrix>>,
     /// x, y, width and height, from the bottom left.
     pub viewport: [i32; 4],
     pub depth_range: [f32; 2],
@@ -214,9 +347,6 @@ pub struct Context {
     pub polygon_mode: u32,
     pub shade_model: u32,
     pub color_mask: [bool; 4],
-    pub clear_color: [f32; 4],
-    pub clear_depth: f32,
-    pub clear_stencil: u32,
     pub fog_mode: u32,
     /// Fog's density, start and end.
     pub fog: [f32; 3],
@@ -225,36 +355,15 @@ pub struct Context {
     pub point_size: f32,
     pub draw_buffer: u32,
     pub read_buffer: u32,
-    /// The pixel store: unpack's and pack's alignment, row length, rows
-    /// and pixels skipped.
-    pub unpack: [u32; 4],
-    pub pack: [u32; 4],
-    pub active_unit: u32,
-    pub client_unit: u32,
     pub env_mode: [u32; UNITS],
     pub env_color: [[f32; 4]; UNITS],
     /// The texture bound to each unit, by its name (0 for the default
     /// texture).
     pub bound: [u32; UNITS],
-    pub textures: Vec<Texture>,
-    /// The current color, texture coordinates and normal.
-    pub color: [f32; 4],
-    pub tex_coord: [[f32; 4]; UNITS],
-    pub normal: [f32; 3],
-    /// The vertex, color, normal and texture coordinate arrays.
-    pub vertex_array: Array,
-    pub color_array: Array,
-    pub normal_array: Array,
-    pub tex_array: [Array; UNITS],
-    /// glBegin's primitive under way and its vertices.
-    pub begin: Option<u32>,
-    pub vertices: Vec<ImmVertex>,
-    pub swap_interval: u32,
-    /// The time (ns) a window's next swap waits for: the start of the
-    /// frame's picture the swap interval's frames after the last swap.
-    pub swap_at: u64,
-    /// Whether it drew since the buffers were last swapped or flushed.
-    pub drawn: bool,
+    /// The default texture, named 0, which is the context's own. The
+    /// named ones are its group's, which wglShareLists gives another
+    /// context too (`lists::Shared`).
+    pub default_texture: Texture,
 }
 
 /// OpenGL's state: the system's.
@@ -267,6 +376,10 @@ pub struct State {
     pub current: Vec<(u32, u32, u32)>,
     /// The pixel format of each window that has one (window, format).
     pub formats: Vec<(u32, u32)>,
+    /// The draws that wait to go to Direct3D as one (`draw::Waiting`).
+    pub waiting: Option<draw::Waiting>,
+    /// The contexts' display lists.
+    pub lists: lists::Shared,
     /// The functions that do nothing whose first call was logged.
     pub logged: Vec<u16>,
     /// The same for GLU32.DLL (glu32/), which works on OPENGL32's
@@ -331,6 +444,12 @@ pub fn d(args: &[u32], i: usize) -> f64 {
     f64::from_bits(hi << 32 | lo)
 }
 
+/// A signed integer `c` of `bits` bits as table 2.6 converts it to a
+/// float from -1 to 1: (2c + 1) / (2^bits - 1).
+pub fn signed_unit(c: f64, bits: u32) -> f32 {
+    ((2.0 * c + 1.0) / ((1u64 << bits) - 1) as f64) as f32
+}
+
 /// Read `n` floats at `at`.
 pub fn read_floats(cpu: &mut Cpu, at: u32, n: usize) -> Option<Vec<f32>> {
     if at == 0 || !cpu.bus.guest_probe(at, n * 4, false) {
@@ -362,14 +481,12 @@ pub fn read_doubles(cpu: &mut Cpu, at: u32, n: usize) -> Option<Vec<f64>> {
 /// A context's state as a new one has it, for the window `window` of
 /// the pixel format `format`.
 fn new_context(pid: u32, window: u32, format: u32) -> Context {
-    Context {
+    let settings = Settings {
         pid,
         window,
         format,
-        matrix_mode: matrix::GL_MODELVIEW,
         modelview: vec![IDENTITY],
         projection: vec![IDENTITY],
-        texture_matrix: vec![vec![IDENTITY]; UNITS],
         depth_range: [0.0, 1.0],
         texture_2d: [false; UNITS],
         blend: [state::GL_ONE, state::GL_ZERO],
@@ -381,22 +498,29 @@ fn new_context(pid: u32, window: u32, format: u32) -> Context {
         polygon_mode: state::GL_FILL,
         shade_model: state::GL_SMOOTH,
         color_mask: [true; 4],
-        clear_depth: 1.0,
         fog_mode: state::GL_EXP,
         fog: [1.0, 0.0, 1.0],
         line_width: 1.0,
         point_size: 1.0,
         draw_buffer: state::GL_BACK_BUFFER,
         read_buffer: state::GL_BACK_BUFFER,
+        env_mode: [texture::GL_MODULATE; UNITS],
+        default_texture: texture::new(0),
+        caps: CAP_DITHER,
+        ..Settings::default()
+    };
+    Context {
+        settings: Stamped::new(settings),
+        matrix_mode: matrix::GL_MODELVIEW,
+        texture_matrix: vec![vec![IDENTITY]; UNITS],
+        clear_depth: 1.0,
         unpack: [4, 0, 0, 0],
         pack: [4, 0, 0, 0],
         active_unit: 0,
         client_unit: 0,
-        env_mode: [texture::GL_MODULATE; UNITS],
         color: [1.0; 4],
         tex_coord: [[0.0, 0.0, 0.0, 1.0]; UNITS],
         normal: [0.0, 0.0, 1.0],
-        caps: CAP_DITHER,
         swap_interval: 1,
         ..Context::default()
     }
@@ -427,11 +551,19 @@ pub const CAP_POLYGON_STIPPLE: u32 = 0x10_0000;
 pub const CAP_LOGIC_OP: u32 = 0x20_0000;
 
 /// A function that isn't here: it does nothing, and its first call is
-/// logged. Its name is the stub's that called it.
+/// logged. Its name is the stub's that called it, or the recorded
+/// function's when a display list calls it.
 fn missing(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let base = DLL.base + 0x1000;
-    let stub = cpu.eip().wrapping_sub(4).wrapping_sub(base) / super::stubs::STUB;
+    let stub = match state(cpu).lists.replaying() {
+        Some(at) => at as u32,
+        None => cpu.eip().wrapping_sub(4).wrapping_sub(base) / super::stubs::STUB,
+    };
     let id = stub as u16;
+    if super::trace3d::on(cpu) {
+        let name = exports::APIS.get(stub as usize).map_or("?", |a| a.name);
+        super::trace3d::gl_missing(cpu, name);
+    }
     if !state(cpu).logged.contains(&id) {
         state(cpu).logged.push(id);
         let name = exports::APIS.get(stub as usize).map_or("?", |a| a.name);
@@ -447,6 +579,14 @@ fn missing(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// own `process_ended`, which takes the objects they had there.
 pub fn process_ended(cpu: &mut Cpu, pid: u32) {
     let s = state(cpu);
+    // The draws that wait for one of its contexts go with it: a process
+    // that ends by a fault made no call that drew them, and their device
+    // and context ids may be another process's next.
+    if let Some(w) = &s.waiting
+        && draw::waiting_pid(w, s).is_none_or(|p| p == pid)
+    {
+        s.waiting = None;
+    }
     for slot in s.contexts.iter_mut() {
         if slot.as_ref().is_some_and(|c| c.pid == pid) {
             *slot = None;
@@ -460,6 +600,9 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32) {
                 .is_some_and(Option::is_some)
     });
     s.contexts = contexts;
+    // The surfaces of the textures that go with them are DirectDraw's
+    // objects of the process, which its own `process_ended` takes.
+    lists::sweep(s);
 }
 
 crate::state_fields!(Array {
@@ -471,7 +614,9 @@ crate::state_fields!(Array {
 });
 crate::state_fields!(ImmVertex {
     position,
+    normal,
     color,
+    lit,
     tex
 });
 crate::state_fields!(Texture {
@@ -488,7 +633,7 @@ crate::state_fields!(Texture {
     wrap_s,
     wrap_t
 });
-crate::state_fields!(Context {
+crate::state_fields!(Settings {
     pid,
     window,
     format,
@@ -503,12 +648,8 @@ crate::state_fields!(Context {
     primary_iface,
     width,
     height,
-    strings,
-    error,
-    matrix_mode,
     modelview,
     projection,
-    texture_matrix,
     viewport,
     depth_range,
     scissor,
@@ -525,9 +666,6 @@ crate::state_fields!(Context {
     polygon_mode,
     shade_model,
     color_mask,
-    clear_color,
-    clear_depth,
-    clear_stencil,
     fog_mode,
     fog,
     fog_color,
@@ -535,14 +673,26 @@ crate::state_fields!(Context {
     point_size,
     draw_buffer,
     read_buffer,
+    env_mode,
+    env_color,
+    bound,
+    default_texture
+});
+crate::state_fields!(Context {
+    settings,
+    strings,
+    error,
+    matrix_mode,
+    texture_matrix,
+    clear_color,
+    clear_depth,
+    clear_stencil,
     unpack,
     pack,
     active_unit,
     client_unit,
-    env_mode,
-    env_color,
-    bound,
-    textures,
+    lighting,
+    attribs,
     color,
     tex_coord,
     normal,
@@ -552,12 +702,212 @@ crate::state_fields!(Context {
     tex_array,
     begin,
     vertices,
+    lists,
     swap_interval,
     swap_at,
     drawn
-});
+} skip { applied, card });
 crate::state_fields!(State {
     contexts,
     current,
-    formats
+    formats,
+    waiting,
+    lists
 } skip { logged, glu_logged });
+
+/// Whether the draws that wait (`draw::Waiting`) may go on waiting
+/// through a call of the built-in function `id`: the function reads
+/// neither the buffers nor a texture's image, changes neither, and
+/// frees nothing the draws name. Those are the functions that give
+/// vertices and draw them, which add to what waits or flush it
+/// themselves, and the ones that only set or read a context's state,
+/// which the draws hold by value. Every other function of any DLL
+/// flushes: one this list forgets costs a flush, and no picture.
+pub fn keeps_waiting(id: u16) -> bool {
+    /// The functions by the start of their names.
+    const STARTS: &[&str] = &[
+        "glVertex",
+        "glColor",
+        "glTexCoord",
+        "glMultiTexCoord",
+        "glNormal",
+        "glRect",
+        "glTexEnv",
+        "glTexParameter",
+        "glFog",
+        "glLight",
+        "glMaterial",
+        "glRotate",
+        "glScale",
+        "glTranslate",
+        "glLoadMatrix",
+        "glMultMatrix",
+        "glStencil",
+    ];
+    const NAMES: &[&str] = &[
+        "glBegin",
+        "glEnd",
+        "glArrayElement",
+        "glDrawArrays",
+        "glDrawElements",
+        "glInterleavedArrays",
+        "glVertexPointer",
+        "glNormalPointer",
+        "glEdgeFlagPointer",
+        "glIndexPointer",
+        "glLockArraysEXT",
+        "glUnlockArraysEXT",
+        "glEnableClientState",
+        "glDisableClientState",
+        "glBindTexture",
+        "glActiveTextureARB",
+        "glEnable",
+        "glDisable",
+        "glAlphaFunc",
+        "glBlendFunc",
+        "glDepthFunc",
+        "glDepthMask",
+        "glDepthRange",
+        "glCullFace",
+        "glFrontFace",
+        "glShadeModel",
+        "glPolygonMode",
+        "glPolygonOffset",
+        "glLineWidth",
+        "glPointSize",
+        "glHint",
+        "glMatrixMode",
+        "glLoadIdentity",
+        "glPushMatrix",
+        "glPopMatrix",
+        "glOrtho",
+        "glFrustum",
+        "glViewport",
+        "glScissor",
+        "glPushAttrib",
+        "glPopAttrib",
+        "glGetError",
+        // The lists free nothing the draws name, and a list's calls
+        // flush or wait each by its own function (`lists::issue`).
+        "glNewList",
+        "glEndList",
+        "glCallList",
+        "glCallLists",
+        "glListBase",
+        "glGenLists",
+        "glIsList",
+        "glDeleteLists",
+    ];
+    static BITS: std::sync::OnceLock<(u16, Vec<u64>)> = std::sync::OnceLock::new();
+    let (first, bits) = BITS.get_or_init(|| {
+        let dll = super::stubs::DLLS
+            .iter()
+            .position(|dll| std::ptr::eq(*dll, &DLL))
+            .expect("OPENGL32 is a built-in DLL");
+        let mut bits = vec![0u64; DLL.apis.len().div_ceil(64)];
+        for (at, api) in DLL.apis.iter().enumerate() {
+            let keeps = NAMES.contains(&api.name) || STARTS.iter().any(|s| api.name.starts_with(s));
+            // A function without a handler of its own does nothing,
+            // which is no reason to know what it would have done.
+            if keeps && !std::ptr::fn_addr_eq(api.handler, missing as super::stubs::Handler) {
+                bits[at / 64] |= 1 << (at % 64);
+            }
+        }
+        (super::stubs::id(dll, 0), bits)
+    });
+    let at = id.wrapping_sub(*first) as usize;
+    bits.get(at / 64).is_some_and(|word| word >> (at % 64) & 1 != 0)
+}
+
+pub use draw::flush_waiting;
+
+/// Draw what waits before the program calls the built-in function `id`,
+/// unless the draws may wait through it (`keeps_waiting`) or another
+/// process calls it. Another process can't name the draws' buffers or
+/// textures, and drawing them in its call would draw them as its own:
+/// the HAL would let go of the copies of textures the drawing process
+/// made (`hal::toadforce::bind`) each time the two take turns. The
+/// draws' own process draws them with its next call that flushes, or
+/// they go with it (`process_ended`).
+pub fn flush_before(cpu: &mut Cpu, id: u16) {
+    let s = state(cpu);
+    let Some(w) = &s.waiting else {
+        return;
+    };
+    let owner = draw::waiting_pid(w, s);
+    if keeps_waiting(id) || owner.is_some_and(|p| p != super::user32::current_pid(cpu)) {
+        return;
+    }
+    flush_waiting(cpu);
+}
+
+#[cfg(test)]
+mod waiting_tests {
+    use super::*;
+    use crate::win32::stubs;
+
+    fn id(name: &str) -> u16 {
+        let dll = stubs::DLLS
+            .iter()
+            .position(|dll| std::ptr::eq(*dll, &DLL))
+            .unwrap();
+        let api = DLL.apis.iter().position(|api| api.name == name).unwrap();
+        stubs::id(dll, api)
+    }
+
+    #[test]
+    fn the_draws_that_wait_do_through_vertices_and_states_only() {
+        for name in [
+            "glBegin",
+            "glVertex3f",
+            "glColor4ub",
+            "glTexCoord2f",
+            "glMultiTexCoord2fARB",
+            "glEnd",
+            "glDrawElements",
+            "glBindTexture",
+            "glEnable",
+            "glLoadMatrixf",
+            "glTexParameteri",
+            "glCallList",
+            "glCallLists",
+        ] {
+            assert!(keeps_waiting(id(name)), "{name}");
+        }
+        // What reads the buffers or a texture's image, changes them or
+        // frees them, and a function OpenGL here doesn't have.
+        for name in [
+            "glClear",
+            "glReadPixels",
+            "glFlush",
+            "glFinish",
+            "glTexImage2D",
+            "glTexSubImage2D",
+            "glCopyTexImage2D",
+            "glDeleteTextures",
+            "wglSwapBuffers",
+            "wglMakeCurrent",
+            "wglDeleteContext",
+            "glBitmap",
+        ] {
+            assert!(!keeps_waiting(id(name)), "{name}");
+        }
+        // No function of another DLL: KERNEL32's first.
+        assert!(!keeps_waiting(stubs::id(0, 0)));
+    }
+
+    #[test]
+    fn a_saved_state_has_the_draws_that_wait() {
+        use crate::savestate::{Reader, State as _, Writer};
+        let mut state = State::default();
+        state.contexts.push(Some(new_context(1, 2, 3)));
+        let before = draw::waiting_for_tests();
+        state.waiting = Some(before.clone());
+        let mut w = Writer::default();
+        state.save(&mut w);
+        let mut loaded = State::default();
+        loaded.load(&mut Reader::new(&w.buf)).unwrap();
+        let after = loaded.waiting.expect("the draws that waited");
+        assert!(draw::same_waiting(&before, &after));
+    }
+}

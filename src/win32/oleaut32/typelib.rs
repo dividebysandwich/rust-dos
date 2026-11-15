@@ -155,20 +155,22 @@ fn pid(cpu: &Cpu) -> u32 {
     crate::win32::user32::current_pid(cpu)
 }
 
-/// The library read from `data`, or the built-in STDOLE `builtin`.
-fn parse(builtin: u16, data: &[u8]) -> Option<TypeLib> {
+/// The library read from `data`, its strings in the code page `page`, or
+/// the built-in STDOLE `builtin`.
+fn parse(builtin: u16, data: &[u8], page: CodePage) -> Option<TypeLib> {
     if builtin != 0 {
         return Some(stdole::library(builtin));
     }
     match data.get(..4)? {
-        b"MSFT" => msft::read(data),
-        b"SLTG" => sltg::read(data),
+        b"MSFT" => msft::read(data, page),
+        b"SLTG" => sltg::read(data, page),
         _ => None,
     }
 }
 
 /// The model of the library `lib`.
 fn model(cpu: &mut Cpu, lib: u32) -> Arc<TypeLib> {
+    let page = crate::win32::nls::ansi(cpu);
     let s = state(cpu);
     if let Some(Some(m)) = s.parsed.0.get(lib as usize) {
         return m.clone();
@@ -176,7 +178,7 @@ fn model(cpu: &mut Cpu, lib: u32) -> Arc<TypeLib> {
     let l = s.libs[lib as usize]
         .as_ref()
         .expect("a library of the table");
-    let m = Arc::new(parse(l.builtin, &l.data).expect("a library that was read before"));
+    let m = Arc::new(parse(l.builtin, &l.data, page).expect("a library that was read before"));
     let cache = &mut s.parsed.0;
     if cache.len() <= lib as usize {
         cache.resize(lib as usize + 1, None);
@@ -221,7 +223,8 @@ fn new_lib(
     builtin: u16,
     data: Vec<u8>,
 ) -> Result<u32, u32> {
-    let parsed = Arc::new(parse(builtin, &data).ok_or(TYPE_E_CANTLOADLIBRARY)?);
+    let page = crate::win32::nls::ansi(cpu);
+    let parsed = Arc::new(parse(builtin, &data, page).ok_or(TYPE_E_CANTLOADLIBRARY)?);
     let lib = Lib {
         pid: pid(cpu),
         refs: 1,
@@ -293,7 +296,7 @@ fn library_bytes(file: Vec<u8>, resource: u32) -> Option<Vec<u8>> {
 /// built-in ones when there are no such files. The library and the
 /// file's full path.
 fn load(cpu: &mut Cpu, name: &str) -> Result<(u32, String), u32> {
-    let path = super::path_of(name);
+    let path = super::path_of(cpu, name);
     let mut found = crate::win32::kernel32::search_file(cpu, &path).map(|f| (f, 1));
     if found.is_none()
         && let Some((file, number)) = path.rsplit_once('\\')
@@ -805,6 +808,7 @@ fn query_path(
     minor: u16,
     lcid: u32,
 ) -> Result<String, u32> {
+    let page = crate::win32::nls::ansi(cpu);
     let reg = registry::get(cpu);
     let Open::Key(root) = reg.open(HKEY_CLASSES_ROOT, 0) else {
         return Err(TYPE_E_LIBNOTREGISTERED);
@@ -834,7 +838,7 @@ fn query_path(
             && let Some(v) = reg.value(key, "")
         {
             let end = v.data.iter().position(|&b| b == 0).unwrap_or(v.data.len());
-            return Ok(ansi(&v.data[..end]));
+            return Ok(ansi(page, &v.data[..end]));
         }
     }
     Err(TYPE_E_LIBNOTREGISTERED)
@@ -900,8 +904,10 @@ pub fn register_type_lib(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(register_lib(cpu, lib, &path, help.as_deref()))
 }
 
-fn set_string(reg: &mut registry::Registry, key: u32, name: &str, value: &str) {
-    let mut data = super::ansi(value);
+/// Set a string value of the registry, which keeps it in the system's
+/// ANSI code page `page`.
+fn set_string(reg: &mut registry::Registry, page: CodePage, key: u32, name: &str, value: &str) {
+    let mut data = super::ansi(page, value);
     data.push(0);
     reg.set_value(key, name, REG_SZ, data);
 }
@@ -913,6 +919,7 @@ fn register_lib(cpu: &mut Cpu, lib: u32, path: &str, help: Option<&str>) -> u32 
     let Some(platform) = platform(m.syskind) else {
         return E_FAIL;
     };
+    let page = crate::win32::nls::ansi(cpu);
     let reg = registry::get(cpu);
     let Open::Key(root) = reg.open(HKEY_CLASSES_ROOT, 0) else {
         return TYPE_E_REGISTRYACCESS;
@@ -920,15 +927,16 @@ fn register_lib(cpu: &mut Cpu, lib: u32, path: &str, help: Option<&str>) -> u32 
     let version = format!("{:x}.{:x}", m.major, m.minor);
     let (key, _) = reg.create(root, &format!("TypeLib\\{}\\{version}", m.guid));
     if let Some(title) = m.doc.as_ref().or(m.name.as_ref()) {
-        set_string(reg, key, "", title);
+        set_string(reg, page, key, "", title);
     }
     let (file, _) = reg.create(key, &format!("{:x}\\{platform}", m.lcid));
-    set_string(reg, file, "", path);
+    set_string(reg, page, file, "", path);
     // The flags without FHASDISKIMAGE, which says where it was loaded
     // from rather than what it is.
     let (flags, _) = reg.create(key, "FLAGS");
     set_string(
         reg,
+        page,
         flags,
         "",
         &(m.flags & !LIBFLAG_FHASDISKIMAGE).to_string(),
@@ -940,7 +948,7 @@ fn register_lib(cpu: &mut Cpu, lib: u32, path: &str, help: Option<&str>) -> u32 
         None => None,
     };
     if let Some(dir) = dir {
-        set_string(reg, help_key, "", &dir);
+        set_string(reg, page, help_key, "", &dir);
     }
     for t in &m.infos {
         let automation = match t.kind {
@@ -953,7 +961,7 @@ fn register_lib(cpu: &mut Cpu, lib: u32, path: &str, help: Option<&str>) -> u32 
         }
         let (iface, _) = reg.create(root, &format!("Interface\\{}", t.guid));
         if let Some(name) = &t.name {
-            set_string(reg, iface, "", name);
+            set_string(reg, page, iface, "", name);
         }
         let proxy = if t.kind == TKIND_INTERFACE || t.flags & TYPEFLAG_FDUAL != 0 {
             PSOAINTERFACE
@@ -962,11 +970,11 @@ fn register_lib(cpu: &mut Cpu, lib: u32, path: &str, help: Option<&str>) -> u32 
         };
         for name in ["ProxyStubClsid", "ProxyStubClsid32"] {
             let (k, _) = reg.create(iface, name);
-            set_string(reg, k, "", proxy);
+            set_string(reg, page, k, "", proxy);
         }
         let (k, _) = reg.create(iface, "TypeLib");
-        set_string(reg, k, "", &m.guid.to_string());
-        set_string(reg, k, "Version", &version);
+        set_string(reg, page, k, "", &m.guid.to_string());
+        set_string(reg, page, k, "Version", &version);
     }
     S_OK
 }

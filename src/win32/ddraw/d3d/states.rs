@@ -57,27 +57,34 @@ pub fn set(cpu: &mut Cpu, id: u32, c: Change) {
     apply(cpu, id, &c);
 }
 
-/// Make the change.
+/// Make the change. Programs set states to the values they have
+/// already, many times a frame: a state is written only when the
+/// value differs, since a write gives the device a new stamp and the
+/// next draw then binds the card's state anew (`device::Device`).
 fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
     let value = c.data.first().copied().unwrap_or(0);
     match c.kind {
         CHANGE_RENDER => render(cpu, id, c.a, value),
         CHANGE_STAGE => {
+            let at = (c.a * 32 + c.b) as usize;
             if let Some(d) = get(cpu, id)
-                && let Some(s) = d.stages.get_mut((c.a * 32 + c.b) as usize)
+                && d.stages.get(at).is_some_and(|s| *s != value)
             {
-                *s = value;
+                d.stages[at] = value;
             }
         }
         CHANGE_TRANSFORM => {
+            let at = c.a as usize;
             if let (Some(d), Ok(m)) = (get(cpu, id), <[u32; 16]>::try_from(&c.data[..]))
-                && let Some(t) = d.transforms.get_mut(c.a as usize)
+                && d.transforms.get(at).is_some_and(|t| t.map(f32::to_bits) != m)
             {
-                *t = m.map(f32::from_bits);
+                d.transforms[at] = m.map(f32::from_bits);
             }
         }
         CHANGE_VIEWPORT => {
-            if let (Some(d), Ok(v)) = (get(cpu, id), <[u32; 6]>::try_from(&c.data[..])) {
+            if let (Some(d), Ok(v)) = (get(cpu, id), <[u32; 6]>::try_from(&c.data[..]))
+                && viewport_words(&d.viewport) != v
+            {
                 d.viewport = Viewport7 {
                     x: v[0],
                     y: v[1],
@@ -89,26 +96,34 @@ fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
             }
         }
         CHANGE_MATERIAL => {
-            if let (Some(d), Ok(m)) = (get(cpu, id), <[u32; 17]>::try_from(&c.data[..])) {
+            if let (Some(d), Ok(m)) = (get(cpu, id), <[u32; 17]>::try_from(&c.data[..]))
+                && d.material != m
+            {
                 d.material = m;
             }
         }
         CHANGE_LIGHT => {
-            if let (Some(d), Ok(l)) = (get(cpu, id), <[u32; 26]>::try_from(&c.data[..])) {
+            if let (Some(d), Ok(l)) = (get(cpu, id), <[u32; 26]>::try_from(&c.data[..]))
+                && d.lights.iter().find(|s| s.index == c.a).is_none_or(|s| s.light != l)
+            {
                 light_slot(d, c.a).light = l;
             }
         }
         CHANGE_LIGHT_ENABLE => {
-            if let Some(d) = get(cpu, id) {
-                light_slot(d, c.a).enabled = c.b != 0;
+            let on = c.b != 0;
+            if let Some(d) = get(cpu, id)
+                && d.lights.iter().find(|s| s.index == c.a).is_none_or(|s| s.enabled != on)
+            {
+                light_slot(d, c.a).enabled = on;
             }
         }
         CHANGE_TEXTURE => set_stage_texture(cpu, id, c.a, value),
         CHANGE_PLANE => {
+            let at = c.a as usize;
             if let (Some(d), Ok(p)) = (get(cpu, id), <[u32; 4]>::try_from(&c.data[..]))
-                && let Some(plane) = d.planes.get_mut(c.a as usize)
+                && d.planes.get(at).is_some_and(|plane| plane.map(f32::to_bits) != p)
             {
-                *plane = p.map(f32::from_bits);
+                d.planes[at] = p.map(f32::from_bits);
             }
         }
         _ => {}
@@ -152,7 +167,9 @@ fn current(d: &Device, c: &Change) -> Change {
     change(c.kind, c.a, b, data)
 }
 
-fn viewport_words(v: &Viewport7) -> [u32; 6] {
+/// A viewport as the words a change has: the depths' to the last bit,
+/// so that two viewports are the same when their words are.
+pub fn viewport_words(v: &Viewport7) -> [u32; 6] {
     [
         v.x,
         v.y,
@@ -195,6 +212,11 @@ pub fn set_stage_texture(cpu: &mut Cpu, id: u32, stage: u32, iface: u32) {
     let Some(d) = get(cpu, id) else {
         return;
     };
+    // The texture the stage has already: nothing changes, the
+    // references neither.
+    if d.textures.get(stage as usize) == Some(&iface) {
+        return;
+    }
     let Some(slot) = d.textures.get_mut(stage as usize) else {
         return;
     };
@@ -212,15 +234,11 @@ fn render(cpu: &mut Cpu, id: u32, s: u32, value: u32) {
     let Some(d) = get(cpu, id) else {
         return;
     };
-    if let Some(r) = d.render.get_mut(s as usize) {
-        *r = value;
+    if d.render.get(s as usize).is_some_and(|r| *r != value) {
+        d.render[s as usize] = value;
     }
     let stage0: Vec<(u32, u32)> = match s {
-        RS_TEXTUREADDRESS => vec![
-            (TSS_ADDRESS, value),
-            (TSS_ADDRESSU, value),
-            (TSS_ADDRESSV, value),
-        ],
+        RS_TEXTUREADDRESS => ADDRESS_STATES.map(|t| (t, value)).to_vec(),
         RS_TEXTUREADDRESSU => vec![(TSS_ADDRESSU, value)],
         RS_TEXTUREADDRESSV => vec![(TSS_ADDRESSV, value)],
         // BORDERCOLOR, MIPMAPLODBIAS and ANISOTROPY.
@@ -271,7 +289,9 @@ fn render(cpu: &mut Cpu, id: u32, s: u32, value: u32) {
         _ => vec![],
     };
     for (kind, v) in stage0 {
-        d.stages[kind as usize] = v;
+        if d.stages[kind as usize] != v {
+            d.stages[kind as usize] = v;
+        }
     }
     if s == RS_TEXTUREHANDLE {
         let surface = d
@@ -674,9 +694,17 @@ pub fn get_texture_stage_state(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if stage >= STAGES || !(1..=TSS_LAST).contains(&t) || !probe(cpu, out, 4, true) {
         return Some(DDERR_INVALIDPARAMS);
     }
-    let value = get(cpu, id).map_or(0, |d| d.stage(stage, t));
+    let value = get(cpu, id).map_or(0, |d| stage_state(d, stage, t));
     cpu.bus.guest_write_32(out, value);
     Some(D3D_OK)
+}
+
+/// The state `t` of a stage as GetTextureStageState gives it.
+/// D3DTSS_ADDRESS reads back as ADDRESSU, as Wine's ddraw has it, so it
+/// follows ADDRESSU set on its own.
+fn stage_state(d: &Device, stage: u32, t: u32) -> u32 {
+    let t = if t == TSS_ADDRESS { TSS_ADDRESSU } else { t };
+    d.stage(stage, t)
 }
 
 /// SetTextureStageState(this, stage, type, value).
@@ -688,8 +716,27 @@ pub fn set_texture_stage_state(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if stage >= STAGES || !(1..=TSS_LAST).contains(&t) {
         return Some(DDERR_INVALIDPARAMS);
     }
-    set(cpu, id, change(CHANGE_STAGE, stage, t, vec![value]));
+    set_stage(cpu, id, stage, t, value);
     Some(D3D_OK)
+}
+
+/// D3DTSS_ADDRESS and the states it sets: ADDRESSU and ADDRESSV, the
+/// directions the samplers read.
+const ADDRESS_STATES: [u32; 3] = [TSS_ADDRESS, TSS_ADDRESSU, TSS_ADDRESSV];
+
+/// Set the state `t` of a stage, and for D3DTSS_ADDRESS both directions
+/// with it. Each is a change of its own, made or recorded, so a state
+/// block that has D3DTSS_ADDRESS captures and restores ADDRESSU and
+/// ADDRESSV as the device has them, which the program may since have
+/// set apart.
+fn set_stage(cpu: &mut Cpu, id: u32, stage: u32, t: u32, value: u32) {
+    let states = match t {
+        TSS_ADDRESS => &ADDRESS_STATES[..],
+        _ => std::slice::from_ref(&t),
+    };
+    for &s in states {
+        set(cpu, id, change(CHANGE_STAGE, stage, s, vec![value]));
+    }
 }
 
 // State blocks.
@@ -871,4 +918,75 @@ pub fn create_state_block(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let h = new_block(d, list);
     cpu.bus.guest_write_32(out, h);
     Some(D3D_OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::win32::ddraw::{Object, add_object};
+
+    const WRAP: u32 = 1;
+    const MIRROR: u32 = 2;
+    const CLAMP: u32 = 3;
+    const BORDER: u32 = 4;
+
+    /// A Direct3D 7 device: its id.
+    fn device(cpu: &mut Cpu) -> u32 {
+        let d3d = super::super::D3dObject {
+            device: Some(Device::new(7, 0, 0, 0, 2)),
+            ..Default::default()
+        };
+        add_object(
+            cpu,
+            Object {
+                d3d: Some(d3d),
+                ..Default::default()
+            },
+        )
+    }
+
+    fn address(cpu: &mut Cpu, id: u32) -> (u32, u32) {
+        let d = get(cpu, id).unwrap();
+        (d.stage(1, TSS_ADDRESSU), d.stage(1, TSS_ADDRESSV))
+    }
+
+    #[test]
+    fn a_block_with_the_address_state_keeps_each_direction() {
+        // A block recorded with D3DTSS_ADDRESS sets both directions, and
+        // when it captures the device's state it takes ADDRESSU and
+        // ADDRESSV as they are, though the program set them apart.
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let id = device(&mut cpu);
+        get(&mut cpu, id).unwrap().recording = Some(Vec::new());
+        set_stage(&mut cpu, id, 1, TSS_ADDRESS, CLAMP);
+        let block = get(&mut cpu, id).unwrap().recording.take().unwrap();
+        assert_eq!(address(&mut cpu, id), (WRAP, WRAP));
+        for c in &block {
+            apply(&mut cpu, id, c);
+        }
+        assert_eq!(address(&mut cpu, id), (CLAMP, CLAMP));
+
+        set_stage(&mut cpu, id, 1, TSS_ADDRESSU, MIRROR);
+        set_stage(&mut cpu, id, 1, TSS_ADDRESSV, BORDER);
+        let d = get(&mut cpu, id).unwrap();
+        let captured: Vec<Change> = block.iter().map(|c| current(d, c)).collect();
+        set_stage(&mut cpu, id, 1, TSS_ADDRESS, WRAP);
+        for c in &captured {
+            apply(&mut cpu, id, c);
+        }
+        assert_eq!(address(&mut cpu, id), (MIRROR, BORDER));
+    }
+
+    #[test]
+    fn the_address_state_reads_back_as_addressu() {
+        // GetTextureStageState(D3DTSS_ADDRESS) gives ADDRESSU, also after
+        // ADDRESSU is set on its own.
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let id = device(&mut cpu);
+        let read = |cpu: &mut Cpu| stage_state(get(cpu, id).unwrap(), 1, TSS_ADDRESS);
+        set_stage(&mut cpu, id, 1, TSS_ADDRESS, CLAMP);
+        assert_eq!(read(&mut cpu), CLAMP);
+        set_stage(&mut cpu, id, 1, TSS_ADDRESSU, MIRROR);
+        assert_eq!(read(&mut cpu), MIRROR);
+    }
 }

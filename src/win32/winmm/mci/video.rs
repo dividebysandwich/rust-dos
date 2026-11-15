@@ -12,7 +12,9 @@
 //! is stretched from the source rectangle to the destination one, the
 //! window's client area unless MCI_PUT sets it. MCI_WHERE and MCI_PUT
 //! give and take a rectangle's width and height where RECT has its
-//! right and bottom, as MCI does.
+//! right and bottom, as MCI does. A play with MCIAVI's "fullscreen"
+//! draws into a window that covers the screen while it plays
+//! (`full_screen`).
 //!
 //! A play shows the frame its emulated time is at on the process's
 //! multimedia thread (`poll`), drawn as StretchDIBits draws, and the
@@ -60,6 +62,12 @@ pub const MCI_DGV_OPEN_PARENT: u32 = 0x0002_0000;
 /// MCI_PLAY's.
 const MCI_DGV_PLAY_REPEAT: u32 = 0x0001_0000;
 const MCI_DGV_PLAY_REVERSE: u32 = 0x0002_0000;
+/// MCIAVI's (mciavi.h), which MCIQTZ takes too: the play shows in the
+/// device's window, or covers the screen (`full_screen`), the picture
+/// twice its size with FULLBY2.
+pub const MCI_MCIAVI_PLAY_WINDOW: u32 = 0x0100_0000;
+pub const MCI_MCIAVI_PLAY_FULLSCREEN: u32 = 0x0200_0000;
+pub const MCI_MCIAVI_PLAY_FULLBY2: u32 = 0x0400_0000;
 
 /// MCI_WINDOW's.
 pub const MCI_DGV_WINDOW_HWND: u32 = 0x0001_0000;
@@ -81,8 +89,12 @@ pub const MCI_DGV_PUT_WINDOW: u32 = 0x0020_0000;
 const MCI_DGV_WHERE_MAX: u32 = 0x0040_0000;
 pub const MCI_DGV_UPDATE_HDC: u32 = 0x0002_0000;
 
-/// MCI_STATUS's items.
+/// MCI_STATUS's items: the window; whether it shows, is minimized, is
+/// maximized.
 pub const MCI_DGV_STATUS_HWND: u32 = 0x4001;
+pub const MCI_DGV_STATUS_WINDOW_VISIBLE: u32 = 0x4021;
+pub const MCI_DGV_STATUS_WINDOW_MINIMIZED: u32 = 0x4022;
+pub const MCI_DGV_STATUS_WINDOW_MAXIMIZED: u32 = 0x4023;
 
 /// MCI_STEP's.
 const MCI_DGV_STEP_REVERSE: u32 = 0x0001_0000;
@@ -110,6 +122,7 @@ fn is_mpeg(cpu: &mut Cpu, i: usize) -> bool {
 
 const WM_CLOSE: u32 = 0x0010;
 const SRCCOPY: u32 = 0x00CC_0020;
+const BLACKNESS: u32 = 0x0000_0042;
 
 /// The device's state, in its `Device`.
 #[derive(Clone, Debug, Default)]
@@ -154,6 +167,11 @@ pub struct Video {
     /// Whether the palette is realized as a background palette: the
     /// last MCI_REALIZE had MCI_DGV_REALIZE_BKGD.
     pub background: bool,
+    /// While a full-screen play goes on, the window that covers the
+    /// screen (`full_screen`), or 0; whether the picture is twice its
+    /// size.
+    pub cover: u32,
+    pub by_two: bool,
 }
 
 /// A call into USER32: the function, its arguments, and the strings it
@@ -294,6 +312,7 @@ pub fn command(cpu: &mut Cpu, i: usize, msg: u32, flags: u32, p: &mut Parms) -> 
         MCI_OPEN => open(cpu, i, flags, p),
         MCI_CLOSE => {
             halt(cpu, i);
+            leave_full_screen(cpu, i);
             // The device's palette is the system's (`add_system`), so it
             // is still there when a process that ended closes its
             // devices. Only a palette is deleted: DeleteObject of another
@@ -313,12 +332,14 @@ pub fn command(cpu: &mut Cpu, i: usize, msg: u32, flags: u32, p: &mut Parms) -> 
         MCI_PLAY => play(cpu, i, flags, p),
         MCI_STOP => {
             halt(cpu, i);
+            leave_full_screen(cpu, i);
             video(cpu, i).paused = false;
             0
         }
         MCI_PAUSE => {
             if video(cpu, i).started.is_some() {
                 halt(cpu, i);
+                leave_full_screen(cpu, i);
                 video(cpu, i).paused = true;
             }
             0
@@ -539,6 +560,9 @@ pub fn poll(cpu: &mut Cpu, i: usize, now: u64) -> bool {
     }
     let repeat = video(cpu, i).repeat;
     halt(cpu, i);
+    if !repeat {
+        leave_full_screen(cpu, i);
+    }
     let v = video(cpu, i);
     if repeat {
         // The frames come again from the first, which `next_due` waits
@@ -632,14 +656,20 @@ pub fn attenuate(
 
 /// MCI_PLAY: from where the device is, or `from`, to its end, or `to`.
 /// A window of its own that is hidden shows, when it is the one the
-/// device paints.
+/// device paints. With MCI_MCIAVI_PLAY_FULLSCREEN or _FULLBY2 the
+/// pictures cover the screen instead (`full_screen`); a play without
+/// them, or with MCI_MCIAVI_PLAY_WINDOW, shows in the window.
 fn play(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
     if flags & MCI_DGV_PLAY_REVERSE != 0 {
         return MCIERR_UNSUPPORTED_FUNCTION;
     }
-    if media(cpu, i).is_none() {
-        return MCIERR_NONAPPLICABLE_FUNCTION;
+    let full = flags & (MCI_MCIAVI_PLAY_FULLSCREEN | MCI_MCIAVI_PLAY_FULLBY2) != 0;
+    if full && flags & MCI_MCIAVI_PLAY_WINDOW != 0 {
+        return MCIERR_FLAGS_NOT_COMPATIBLE;
     }
+    let Some(m) = media(cpu, i) else {
+        return MCIERR_NONAPPLICABLE_FUNCTION;
+    };
     let length = length(cpu, i);
     let from = if flags & MCI_FROM != 0 {
         to_ms(cpu, i, p.from)
@@ -654,15 +684,24 @@ fn play(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
     if from > length || to > length {
         return MCIERR_OUTOFRANGE;
     }
-    let (own, hwnd) = (video(cpu, i).own, video(cpu, i).hwnd);
-    let manual = video(cpu, i).manual_show;
-    let state = user32::user(cpu);
-    if own != 0 && hwnd == own && !manual && state.is_window(own) && !state.is_visible(own) {
-        let shown = window::SW_SHOWNA;
-        if made(cpu, "ShowWindow", &[own, shown], &[]).is_none() {
-            return NEEDS_CALL;
+    let cover = if full && m.frames > 0 {
+        match full_screen(cpu, i) {
+            Some(cover) => cover,
+            None => return NEEDS_CALL,
         }
-    }
+    } else {
+        leave_full_screen(cpu, i);
+        let (own, hwnd) = (video(cpu, i).own, video(cpu, i).hwnd);
+        let manual = video(cpu, i).manual_show;
+        let state = user32::user(cpu);
+        if own != 0 && hwnd == own && !manual && state.is_window(own) && !state.is_visible(own) {
+            let shown = window::SW_SHOWNA;
+            if made(cpu, "ShowWindow", &[own, shown], &[]).is_none() {
+                return NEEDS_CALL;
+            }
+        }
+        0
+    };
     halt(cpu, i);
     // A position at the end plays from the start.
     let from = if from >= to && flags & MCI_FROM == 0 {
@@ -676,8 +715,92 @@ fn play(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
     v.paused = false;
     v.repeat = flags & MCI_DGV_PLAY_REPEAT != 0;
     v.drawn = None;
+    v.cover = cover;
+    v.by_two = flags & MCI_MCIAVI_PLAY_FULLBY2 != 0;
     start(cpu, i);
     0
+}
+
+/// The window a full-screen play covers the screen with: the one it has,
+/// or a new one, which is made and shown. None while a call into USER32
+/// is to be made first (`made`).
+///
+/// MCIAVI shows a full-screen play in a display mode of its own, 320 by
+/// 240, and gives the screen back when the play stops. The device's
+/// window stays as it is: its handle, place and visibility don't change,
+/// and it shows the frame where the play stopped. Here the play draws
+/// into a window of the device's class that covers the screen, a
+/// topmost popup with nothing around the picture but black (`cover`).
+/// It isn't activated, so the program's window keeps the keyboard, as
+/// it does when MCIAVI's play takes the screen. The window goes when the
+/// play stops, whatever stops it (`leave_full_screen`), so a play that
+/// is paused, or resumed after a pause, shows in the device's window.
+fn full_screen(cpu: &mut Cpu, i: usize) -> Option<u32> {
+    let cover = video(cpu, i).cover;
+    if cover != 0 && user32::user(cpu).is_window(cover) {
+        return Some(cover);
+    }
+    let (w, h) = user32::sysparams::screen_size(cpu);
+    let args = [
+        window::WS_EX_TOPMOST,
+        0,
+        0,
+        window::WS_POPUP,
+        0,
+        0,
+        w as u32,
+        h as u32,
+        0,
+        0,
+        super::super::DLL.base,
+        0,
+    ];
+    let class = if is_mpeg(cpu, i) { CLASS } else { AVI_CLASS };
+    let cover = made(cpu, "CreateWindowExA", &args, &[(1, class), (2, "")])?;
+    if cover != 0 {
+        made(cpu, "ShowWindow", &[cover, window::SW_SHOWNA], &[])?;
+    }
+    Some(cover)
+}
+
+/// A full-screen play stopped: the window that covered the screen goes
+/// at once, and the windows under it are painted again.
+///
+/// It goes without messages (`free_window`), as the end of a play is
+/// found on the multimedia thread. MCIAVI's own thread puts its
+/// full-screen window away, so the program's message loop takes no part
+/// in it, and a WM_CLOSE posted to the window would wait for a thread
+/// that may never take it: one that only takes its own window's
+/// messages (PeekMessageA with a window), or has no message loop.
+fn leave_full_screen(cpu: &mut Cpu, i: usize) {
+    let cover = std::mem::take(&mut video(cpu, i).cover);
+    if cover == 0 {
+        return;
+    }
+    // The device's window has the frame drawn before the play took the
+    // screen: the next draw gives it the one the play got to.
+    video(cpu, i).drawn = None;
+    if user32::user(cpu).is_window(cover) {
+        window::free_window(cpu, cover);
+    }
+}
+
+/// Where a full-screen play shows the picture `w` by `h` in the window
+/// that covers the screen, as left, top, width and height: its place in
+/// MCIAVI's 320 by 240 mode, at the middle, at its size or twice it,
+/// made as big as the screen is to that mode. A picture bigger than the
+/// screen is made smaller to fit, keeping its shape.
+fn full_screen_rect(cpu: &mut Cpu, w: i32, h: i32, by_two: bool) -> [i32; 4] {
+    let (sw, sh) = user32::sysparams::screen_size(cpu);
+    let mode = (sw as f64 / 320.0).min(sh as f64 / 240.0);
+    let mut scale = mode * if by_two { 2.0 } else { 1.0 };
+    scale = scale.min(sw as f64 / w.max(1) as f64);
+    scale = scale.min(sh as f64 / h.max(1) as f64);
+    let (pw, ph) = (
+        (w as f64 * scale).round() as i32,
+        (h as f64 * scale).round() as i32,
+    );
+    [(sw - pw) / 2, (sh - ph) / 2, pw, ph]
 }
 
 /// The sound's volume and balance (`Video::volume`): a play goes on from
@@ -723,6 +846,7 @@ fn seek(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
         return MCIERR_MISSING_PARAMETER;
     };
     halt(cpu, i);
+    leave_full_screen(cpu, i);
     let v = video(cpu, i);
     v.pos = to;
     v.paused = false;
@@ -741,6 +865,7 @@ fn step(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
         1
     };
     halt(cpu, i);
+    leave_full_screen(cpu, i);
     let at = m.frame_at(video(cpu, i).pos as u64);
     let n = if flags & MCI_DGV_STEP_REVERSE != 0 {
         at.saturating_sub(frames)
@@ -784,6 +909,21 @@ fn status(cpu: &mut Cpu, i: usize, flags: u32, p: &mut Parms) -> u32 {
         MCI_STATUS_MEDIA_PRESENT | MCI_STATUS_READY => (TRUE, Ret::Bool),
         MCI_STATUS_TIME_FORMAT => (device(cpu, i).time_format, Ret::TimeFormat),
         MCI_DGV_STATUS_HWND => (video(cpu, i).hwnd, Ret::Int),
+        MCI_DGV_STATUS_WINDOW_VISIBLE
+        | MCI_DGV_STATUS_WINDOW_MINIMIZED
+        | MCI_DGV_STATUS_WINDOW_MAXIMIZED => {
+            let hwnd = video(cpu, i).hwnd;
+            let state = user32::user(cpu);
+            let Some(style) = state.window(hwnd).map(|w| w.style) else {
+                return MCIERR_NO_WINDOW;
+            };
+            let on = match p.item {
+                MCI_DGV_STATUS_WINDOW_VISIBLE => state.is_visible(hwnd),
+                MCI_DGV_STATUS_WINDOW_MINIMIZED => style & window::WS_MINIMIZE != 0,
+                _ => style & window::WS_MAXIMIZE != 0,
+            };
+            (on as u32, Ret::Bool)
+        }
         _ => return MCIERR_UNSUPPORTED_FUNCTION,
     };
     p.ret = ret;
@@ -945,9 +1085,9 @@ fn update(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
     0
 }
 
-/// Draws the frame the device is at: to the window it paints, or to the
-/// DC `to` (in the rectangle, or the destination one), unless it was
-/// drawn last.
+/// Draws the frame the device is at: to the window it paints, or the
+/// one a full-screen play covers the screen with, or to the DC `to` (in
+/// the rectangle, or the destination one), unless it was drawn last.
 fn draw(cpu: &mut Cpu, i: usize, to: Option<(u32, Option<[i32; 4]>)>) {
     let Some(m) = media(cpu, i) else {
         return;
@@ -956,7 +1096,16 @@ fn draw(cpu: &mut Cpu, i: usize, to: Option<(u32, Option<[i32; 4]>)>) {
         return;
     }
     let n = m.frame_at(position(cpu, i) as u64);
-    let hwnd = video(cpu, i).hwnd;
+    let cover = video(cpu, i).cover;
+    let hwnd = if cover != 0 {
+        cover
+    } else {
+        video(cpu, i).hwnd
+    };
+    // A window that covers the screen is black around the picture: all
+    // of it is drawn black when nothing was drawn in it yet, or when it
+    // is painted (`window_proc`).
+    let blacken = cover != 0 && video(cpu, i).drawn.is_none();
     if to.is_none() {
         if video(cpu, i).drawn == Some(n) {
             return;
@@ -990,7 +1139,12 @@ fn draw(cpu: &mut Cpu, i: usize, to: Option<(u32, Option<[i32; 4]>)>) {
     let (hdc, dest) = match to {
         Some((hdc, rect)) => (hdc, rect.or(video(cpu, i).dest).unwrap_or([0, 0, w, h])),
         None => {
-            let dest = video(cpu, i).dest.unwrap_or_else(|| client(cpu, i));
+            let dest = if cover != 0 {
+                let by_two = video(cpu, i).by_two;
+                full_screen_rect(cpu, w, h, by_two)
+            } else {
+                video(cpu, i).dest.unwrap_or_else(|| client(cpu, i))
+            };
             let flags = crate::win32::gdi32::dc::DCX_USESTYLE | crate::win32::gdi32::dc::DCX_CACHE;
             (user32::paint::window_dc(cpu, hwnd, flags, None), dest)
         }
@@ -1002,6 +1156,12 @@ fn draw(cpu: &mut Cpu, i: usize, to: Option<(u32, Option<[i32; 4]>)>) {
     let (x0, y0) = dc.to_device(dx, dy);
     let (x1, y1) = dc.to_device(dx + dw, dy + dh);
     let src = (sx, sy, sx + sw, sy + sh);
+    if blacken && to.is_none() {
+        let (cw, ch) = user32::user(cpu)
+            .window(hwnd)
+            .map_or((0, 0), |w| (w.client.width(), w.client.height()));
+        draw::blit_from(cpu, hdc, (0, 0, cw, ch), None, BLACKNESS);
+    }
     let old = select_movie_palette(cpu, i, &m, hdc);
     draw::blit_from(cpu, hdc, (x0, y0, x1, y1), Some((source, src)), SRCCOPY);
     if let Some(old) = old {
@@ -1063,19 +1223,31 @@ fn select_movie_palette(cpu: &mut Cpu, i: usize, m: &Media, hdc: u32) -> Option<
     }
     let background = video(cpu, i).background as u32;
     let old = palette::select_palette(cpu, &[hdc, hpal, background]).filter(|&o| o != 0)?;
+    // A full-screen play has the screen to itself, as in MCIAVI's display
+    // mode of its own: its palette is the foreground one, though the
+    // window that covers the screen is never the foreground window.
+    let cover = video(cpu, i).cover;
+    let gdi = crate::win32::gdi32::gdi(cpu);
+    if cover != 0 && gdi.dc(hdc).is_some_and(|d| d.hwnd == cover) && gdi.primary_palette != hpal {
+        gdi.primary_palette = hpal;
+        palette::unrealize(cpu, hpal);
+    }
     palette::realize_posted(cpu, hdc);
     Some(old)
 }
 
-/// The window procedure of the devices' windows (`CLASS`, `AVI_CLASS`):
-/// WM_PAINT draws the frame the device is at again, as MCIAVI's and
-/// MCIQTZ's windows do when they are uncovered or the play is stopped,
-/// and the rest goes to DefWindowProcA.
+/// The window procedure of the devices' windows (`CLASS`, `AVI_CLASS`),
+/// and of those that full-screen plays cover the screen with: WM_PAINT
+/// draws the frame the device is at again, as MCIAVI's and MCIQTZ's
+/// windows do when they are uncovered or the play is stopped, and the
+/// rest goes to DefWindowProcA.
 pub fn window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (hwnd, msg) = (args[0], args[1]);
     if msg == user32::message::WM_PAINT {
         let painted = mci(cpu).devices.iter().position(|d| {
-            matches!(d.kind, MCI_DEVTYPE_DIGITAL_VIDEO | AVI_VIDEO) && d.video.hwnd == hwnd
+            let v = &d.video;
+            let shows = if v.cover != 0 { v.cover } else { v.hwnd };
+            matches!(d.kind, MCI_DEVTYPE_DIGITAL_VIDEO | AVI_VIDEO) && shows == hwnd
         });
         if let Some(i) = painted {
             video(cpu, i).drawn = None;
@@ -1107,7 +1279,9 @@ crate::state_fields!(Video {
     manual_show,
     drawn,
     palette,
-    background
+    background,
+    cover,
+    by_two
 } skip {
     media,
     pictures

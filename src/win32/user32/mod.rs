@@ -28,6 +28,7 @@ pub mod resource;
 pub mod saver;
 pub mod session;
 pub mod sysparams;
+pub mod track;
 pub mod text;
 pub mod window;
 pub mod winhelp;
@@ -857,7 +858,7 @@ static APIS: &[Api] = &[
     stdcall("GetKeyboardLayoutNameW", 272, 1, not_implemented),
     stdcall("VkKeyScanW", 629, 1, not_implemented),
     stdcall("SendInput", 502, 3, input::send_input),
-    stdcall("TrackMouseEvent", 599, 1, monitor::track_mouse_event),
+    stdcall("TrackMouseEvent", 599, 1, track::track_mouse_event),
     stdcall("RegisterHotKey", 480, 4, succeed),
     stdcall("UnregisterHotKey", 617, 2, succeed),
     // Painting.

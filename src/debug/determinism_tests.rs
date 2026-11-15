@@ -830,6 +830,10 @@ fn main_code(a: &mut CodeAssembler, audio_start: u32) -> Asm {
     a.mov(es, ax)?;
     a.mov(dword_ptr(0x118).es(), 0x0000_0140u32)?;
     a.mov(dword_ptr(0x128).es(), 1u32)?;
+    // Two swaps without the retrace right after it: the frame rate cap
+    // holds each to its next turn, the program with it (`settings`).
+    a.mov(dword_ptr(0x128).es(), 0u32)?;
+    a.mov(dword_ptr(0x128).es(), 0u32)?;
     a.push(ds)?;
     a.pop(es)?;
     a.set_label(&mut no_voodoo)?;
@@ -1047,6 +1051,13 @@ fn settings(dir: &Path) -> rust_dos::config::Settings {
     s.network.ne2000 = true;
     s.network.ipx = rust_dos::net::IpxMode::On;
     s.voodoo.enabled = true;
+    // The frame rate cap at its default (`auto`). The program's first
+    // swap of the 3dfx card waits for the retrace, which `auto` doesn't
+    // hold; the two after it don't, and the cap holds each to its next
+    // turn, which must come at the same emulated time whatever the host
+    // does. The cap saves its last frame in the state (`PACE`), which
+    // the two runs compare.
+    s.fps_cap = rust_dos::frame_cap::DEFAULT;
     s.powervr = Some(rust_dos::powervr::Chip::Pcx2);
     s.capture_dir = dir.join("capture");
     s
@@ -1431,6 +1442,7 @@ const ABSENT_SECTIONS: &[(&str, &str)] = &[
     ("VRTE", "the Verite is a display adapter, as is the ViRGE the machine has"),
     ("ET4K", "the ET4000 is a display adapter, as is the ViRGE the machine has"),
     ("MC64", "the mach64 is a display adapter, as is the ViRGE the machine has"),
+    ("TOAD", "the ToadForce is a display adapter, as is the ViRGE the machine has"),
     ("IDE", "the IDE channels are a booted system's"),
     ("FDC", "the floppy disk controller is a booted system's"),
     ("SHRD", "shared disks are a booted system's"),
@@ -1475,6 +1487,8 @@ const SECTION_FIELDS: &[(&str, &str)] = &[
     ("virge", "VIRG"),
     ("verite", "VRTE"),
     ("mach64", "MC64"),
+    ("toadforce", "TOAD"),
+    ("toadforce_memory", "TOAD"),
     ("voodoo", "3DFX"),
     ("powervr", "PVR"),
     ("powervr_line", "PVR"),
@@ -1487,6 +1501,7 @@ const SECTION_FIELDS: &[(&str, &str)] = &[
     ("isapnp", "PNP"),
     ("vfx1", "VFX1"),
     ("win32", "W32"),
+    ("frame_cap", "PACE"),
 ];
 
 /// The tags of the sections the save state's code writes.

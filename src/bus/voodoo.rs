@@ -26,6 +26,9 @@ impl Bus {
         }
         self.lower_banshee_irq();
         self.voodoo = board.map(Voodoo::new);
+        if let Some(v) = &mut self.voodoo {
+            v.frame_cap = self.frame_cap.clone();
+        }
         if board.is_some_and(|b| b.banshee().is_some()) {
             self.banshee_settle();
         } else {
@@ -217,6 +220,7 @@ impl Bus {
             self.vbe.lfb_offset(at, 4).is_some()
                 || self.s3_mmio(at).is_some()
                 || self.mach64_mmio(at).is_some()
+                || self.toadforce_at(at).is_some()
         };
         let len32 = len as u32;
         if self.voodoo_at(last) != Some(first + len32 - 4) || other(dst) || other(last) {
@@ -261,9 +265,84 @@ impl Bus {
                 let dwords = data.as_chunks::<4>().0.iter();
                 v.lfb_write_run(index, dwords.map(|&d| u32::from_le_bytes(d)));
             }
-            MemoryRun::Linear(addr) => v.banshee_memory_write(addr, data),
+            MemoryRun::Linear(addr) => {
+                v.banshee_memory_write(addr, data);
+                self.note_banshee_memory_write(addr, len as u32);
+            }
             MemoryRun::Fifo => {}
         }
+        true
+    }
+
+    /// Where the `len` bytes of the bus from `addr` on are in a Banshee's
+    /// or Voodoo3's memory, all of them, through BAR1 below the tile base
+    /// and outside the command FIFOs' rings (`Voodoo::linear_run`): the
+    /// first byte's address in the card's memory. None where any of them
+    /// is somewhere else, such as a register or another card's window,
+    /// which reads and writes reach a byte at a time.
+    fn banshee_linear_at(&self, addr: usize, len: usize) -> Option<u32> {
+        let v = self.voodoo.as_ref().filter(|v| v.banshee.is_some())?;
+        let last = addr.checked_add(len.checked_sub(1)?)?;
+        let first = self.voodoo_at(addr)?;
+        // `read_8` and `write_8` give these their bytes before the card.
+        let other = |at: usize| {
+            self.vbe.lfb_offset(at, 1).is_some()
+                || self.s3_mmio(at).is_some()
+                || self.mach64_mmio(at).is_some()
+                || self.powervr_at(at).is_some()
+                || self.toadforce_at(at).is_some()
+        };
+        if self.voodoo_at(last) != Some(first + (len - 1) as u32) || other(addr) || other(last) {
+            return None;
+        }
+        v.linear_run(first, len as u32)
+    }
+
+    /// Fill `data` from a Banshee's or Voodoo3's memory at `src` in one
+    /// copy, as reads of its bytes one at a time would, the drawing
+    /// queued before done first (`Voodoo::banshee_memory_read`): a
+    /// service reading a surface in the card's memory, such as GDI
+    /// loading the rows it blits onto. False, having read nothing, where
+    /// the bytes aren't all the card's memory (`banshee_linear_at`).
+    pub(crate) fn read_from_voodoo(&self, src: usize, data: &mut [u8]) -> bool {
+        let Some(addr) = self.banshee_linear_at(src, data.len()) else {
+            return false;
+        };
+        // Counted as the dwords of a 32-bit program's copy.
+        let _profile = self
+            .profile
+            .as_deref()
+            .map(|p| p.mem_run(src, false, data.len().div_ceil(4) as u64));
+        if self.observe.on {
+            self.observe.mapped(src, self.ram.len());
+        }
+        if let Some(v) = &self.voodoo {
+            v.banshee_memory_read(addr, data);
+        }
+        true
+    }
+
+    /// Write `data` into a Banshee's or Voodoo3's memory at `dst` in one
+    /// copy, as writes of its bytes one at a time would, `cycles=auto`
+    /// hearing of what lands in the desktop shown. False, having written
+    /// nothing, where `read_from_voodoo` is false for them.
+    pub(crate) fn bytes_to_voodoo(&mut self, dst: usize, data: &[u8]) -> bool {
+        let Some(addr) = self.banshee_linear_at(dst, data.len()) else {
+            return false;
+        };
+        let _profile = self
+            .profile
+            .as_deref()
+            .map(|p| p.mem_run(dst, true, data.len().div_ceil(4) as u64));
+        if self.observe.on {
+            self.observe.mapped_write(dst, self.ram.len());
+        }
+        let _zone = crate::profile::zone(crate::profile::Zone::Voodoo);
+        self.voodoo_swap_wait();
+        if let Some(v) = &mut self.voodoo {
+            v.banshee_memory_write(addr, data);
+        }
+        self.note_banshee_memory_write(addr, data.len() as u32);
         true
     }
 
@@ -286,6 +365,16 @@ impl Bus {
         let Some(v) = &mut self.voodoo else { return };
         let effect = v.write(offset, value, mask, now);
         self.voodoo_effect(effect);
+        // A Banshee's desktop start, its init register in BAR0 (and in
+        // the I/O BAR, which comes here), while the video processor shows
+        // the desktop: a guest driver's page flip. A mode set writes it
+        // with the video processor off, which shows nothing new.
+        if offset < 0x8_0000
+            && offset & 0xFC == crate::voodoo::banshee::VID_DESKTOP_START_ADDR
+            && self.banshee().is_some_and(|b| b.extended())
+        {
+            self.note_display_start();
+        }
     }
 
     /// Texture data put into a Banshee's or Voodoo3's memory from byte
@@ -351,21 +440,6 @@ impl Bus {
         if let Some(v) = &mut self.voodoo {
             v.set_texture_sampling(sampling);
         }
-    }
-
-    /// The frame rate cap of the 3dfx card's swaps (`voodoo_fps_cap`).
-    pub fn set_voodoo_fps_cap(&mut self, fps: Option<u32>) {
-        if let Some(v) = &mut self.voodoo {
-            v.set_fps_cap(fps);
-        }
-    }
-
-    /// The timing the window shows the 3dfx card's frames at with a
-    /// variable refresh rate: the frame rate cap's, when the card drives
-    /// the monitor and the cap is below its refresh rate.
-    pub fn voodoo_cap_timing(&self) -> Option<crate::video::crt::CrtTiming> {
-        let v = self.voodoo.as_ref().filter(|v| v.output())?;
-        v.cap_timing().filter(|cap| cap.hz() < v.refresh_hz())
     }
 
     /// For the debugger's status: what the 3dfx card is doing.

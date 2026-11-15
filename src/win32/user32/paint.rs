@@ -2474,7 +2474,7 @@ pub fn caption(cpu: &mut Cpu, hwnd: u32, hdc: u32, r: Rect, flags: u32) {
         if !text.is_empty() {
             // The caption font SPI_GETNONCLIENTMETRICS gives: 8-point MS
             // Sans Serif, bold.
-            let log = sysparams::sans_serif(true);
+            let log = sysparams::sans_serif(cpu, true);
             let font = gdi32::add(cpu, gdi32::Kind::Font { font: gdi32::Font { log } });
             let rgb = user(cpu).color(text_color);
             let saved = gdi32::dc::with(cpu, hdc, |d| {

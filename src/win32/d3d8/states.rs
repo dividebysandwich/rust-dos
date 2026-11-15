@@ -8,17 +8,21 @@
 //! device as they are. The texture stages' states are kept by Direct3D
 //! 8's numbers and go to the inner device with its filters' numbers:
 //! D3DTEXF_NONE, POINT and LINEAR as D3DTFP_NONE, POINT and LINEAR for
-//! the mipmap filter. The world matrices past the fourth have no effect:
-//! vertex blending is left out.
+//! the mipmap filter. The first four world matrices are the inner
+//! device's world matrices, and the others the device's own; geometry
+//! blending (`draw.rs`) takes them from both.
 
 use super::super::ddraw::d3d::device::{Change, Viewport7};
-use super::super::ddraw::d3d::pipeline::{IDENTITY, multiply};
+use super::super::ddraw::d3d::pipeline::{IDENTITY, Matrix, multiply};
 use super::super::ddraw::d3d::states as inner_states;
 use super::device::{
     self, Device, PS_CONSTANTS, STAGES, STREAMS, VS_CONSTANTS, get, inner, this_device,
 };
 use super::resource::{FMT_INDEX16, FMT_INDEX32};
-use super::{D3D_OK, D3DERR_INVALIDCALL, V_INDEXBUFFER8, V_TEXTURE8, V_VERTEXBUFFER8, of, state};
+use super::{
+    D3D_OK, D3DERR_INVALIDCALL, V_CUBETEXTURE8, V_INDEXBUFFER8, V_TEXTURE8, V_VERTEXBUFFER8, of,
+    state,
+};
 use crate::cpu::Cpu;
 
 // What a change is.
@@ -96,16 +100,19 @@ fn is_kind(cpu: &mut Cpu, id: u32, vtable: usize) -> bool {
             .is_some_and(|o| o.vtable as usize == vtable)
 }
 
-/// Make the change.
+/// Make the change. The inner device's states are written only when
+/// the value differs: a write gives it a new stamp, and the next draw
+/// then binds the card's state anew (`ddraw::d3d::device::Device`).
 fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
     let value = c.data.first().copied().unwrap_or(0);
     let words = |n: usize| (c.data.len() == n).then_some(&c.data[..]);
     match c.kind {
         RENDER => {
+            let at = c.a as usize;
             if let Some(i) = inner(cpu, id)
-                && let Some(r) = i.render.get_mut(c.a as usize)
+                && i.render.get(at).is_some_and(|r| *r != value)
             {
-                *r = value;
+                i.render[at] = value;
             }
         }
         STAGE => {
@@ -115,10 +122,11 @@ fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
             {
                 *s = value;
             }
+            let value = inner_stage(c.b, value);
             if let Some(i) = inner(cpu, id)
-                && let Some(s) = i.stages.get_mut(at)
+                && i.stages.get(at).is_some_and(|s| *s != value)
             {
-                *s = inner_stage(c.b, value);
+                i.stages[at] = value;
             }
         }
         TRANSFORM => {
@@ -127,7 +135,9 @@ fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
             };
             let m: [u32; 16] = m.try_into().unwrap_or([0; 16]);
             if let Some(t) = inner_transform(c.a) {
-                if let Some(i) = inner(cpu, id) {
+                if let Some(i) = inner(cpu, id)
+                    && i.transforms[t].map(f32::to_bits) != m
+                {
                     i.transforms[t] = m.map(f32::from_bits);
                 }
             } else if let Some(d) = get(cpu, id) {
@@ -139,7 +149,9 @@ fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
             }
         }
         VIEWPORT => {
-            if let (Some(v), Some(i)) = (words(6).map(|v| v.to_vec()), inner(cpu, id)) {
+            if let (Some(v), Some(i)) = (words(6).map(|v| v.to_vec()), inner(cpu, id))
+                && inner_states::viewport_words(&i.viewport)[..] != v[..]
+            {
                 i.viewport = Viewport7 {
                     x: v[0],
                     y: v[1],
@@ -151,26 +163,34 @@ fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
             }
         }
         MATERIAL => {
-            if let (Some(m), Some(i)) = (words(17).map(|v| v.to_vec()), inner(cpu, id)) {
+            if let (Some(m), Some(i)) = (words(17).map(|v| v.to_vec()), inner(cpu, id))
+                && i.material[..] != m[..]
+            {
                 i.material.copy_from_slice(&m);
             }
         }
         LIGHT => {
-            if let (Some(l), Some(i)) = (words(26).map(|v| v.to_vec()), inner(cpu, id)) {
+            if let (Some(l), Some(i)) = (words(26).map(|v| v.to_vec()), inner(cpu, id))
+                && i.lights.iter().find(|s| s.index == c.a).is_none_or(|s| s.light[..] != l[..])
+            {
                 inner_states::light_slot(i, c.a).light.copy_from_slice(&l);
             }
         }
         LIGHT_ENABLE => {
-            if let Some(i) = inner(cpu, id) {
-                inner_states::light_slot(i, c.a).enabled = c.b != 0;
+            let on = c.b != 0;
+            if let Some(i) = inner(cpu, id)
+                && i.lights.iter().find(|s| s.index == c.a).is_none_or(|s| s.enabled != on)
+            {
+                inner_states::light_slot(i, c.a).enabled = on;
             }
         }
         TEXTURE => set_texture_now(cpu, id, c.a, value),
         PLANE => {
+            let at = c.a as usize;
             if let (Some(p), Some(i)) = (words(4).map(|v| v.to_vec()), inner(cpu, id))
-                && let Some(plane) = i.planes.get_mut(c.a as usize)
+                && i.planes.get(at).is_some_and(|plane| plane.map(f32::to_bits)[..] != p[..])
             {
-                *plane = std::array::from_fn(|k| f32::from_bits(p[k]));
+                i.planes[at] = std::array::from_fn(|k| f32::from_bits(p[k]));
             }
         }
         STREAM => {
@@ -237,7 +257,7 @@ fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
 
 /// Set the texture of a stage: the texture `tex` of Direct3D 8's, or 0.
 fn set_texture_now(cpu: &mut Cpu, id: u32, stage: u32, tex: u32) {
-    if !is_kind(cpu, tex, V_TEXTURE8) {
+    if !is_kind(cpu, tex, V_TEXTURE8) && !is_kind(cpu, tex, V_CUBETEXTURE8) {
         return;
     }
     let Some(d) = get(cpu, id) else {
@@ -349,6 +369,27 @@ fn transform_words(d: &Device, i: &super::super::ddraw::d3d::device::Device, t: 
         .iter()
         .find(|w| w.0 == t)
         .map_or(IDENTITY.map(f32::to_bits), |w| w.1)
+}
+
+/// The first `count` world matrices (D3DTS_WORLDMATRIX(0) and on) of
+/// the device `d`, whose inner device is `i`.
+pub fn world_matrices(
+    d: &Device,
+    i: &super::super::ddraw::d3d::device::Device,
+    count: usize,
+) -> Vec<Matrix> {
+    let mut out = vec![IDENTITY; count];
+    for (k, m) in out.iter_mut().enumerate().take(4) {
+        if let Some(at) = inner_transform(256 + k as u32) {
+            *m = i.transforms.get(at).copied().unwrap_or(IDENTITY);
+        }
+    }
+    for (t, m) in &d.worlds {
+        if let Some(slot) = t.checked_sub(256).and_then(|k| out.get_mut(k as usize)) {
+            *slot = m.map(f32::from_bits);
+        }
+    }
+    out
 }
 
 // The state a device starts with.
@@ -572,7 +613,7 @@ pub fn set_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let t = if tex != 0 {
         match of(cpu, tex) {
-            Some((V_TEXTURE8, t)) => t,
+            Some((V_TEXTURE8 | V_CUBETEXTURE8, t)) => t,
             _ => return Some(D3DERR_INVALIDCALL),
         }
     } else {
@@ -1027,7 +1068,7 @@ pub fn set_vertex_shader(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if super::shader::get_shader(&d, handle).is_none() {
             return Some(D3DERR_INVALIDCALL);
         }
-    } else if handle != 0 && super::super::ddraw::d3d::pipeline::Layout::of(handle).is_none() {
+    } else if handle != 0 && super::super::ddraw::d3d::pipeline::Layout::of_d3d8(handle).is_none() {
         return Some(D3DERR_INVALIDCALL);
     }
     set(cpu, id, change(VSHADER, 0, 0, vec![handle]));

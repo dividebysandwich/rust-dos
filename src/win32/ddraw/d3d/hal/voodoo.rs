@@ -34,18 +34,18 @@
 //! 1555 with the keyed texels' alpha 0, and the alpha test leaves them
 //! out.
 
-use super::super::surface::{self, DDPF_PALETTEINDEXED8, KEY_SRC_BLT, MEM_CARD, Surface};
-use super::super::{Format, current_pid, display, state, voodoo};
-use super::device::{
+use super::super::super::surface::{self, DDPF_PALETTEINDEXED8, KEY_SRC_BLT, MEM_CARD, Surface};
+use super::super::super::{Format, current_pid, display, state, voodoo};
+use super::super::device::{
     Device, RS_FOGENABLE, RS_FOGTABLEMODE, RS_SPECULARENABLE, RS_TEXTUREFACTOR, RS_TEXTUREMAPBLEND,
     RS_ZENABLE, RS_ZFUNC, RS_ZWRITEENABLE, TA_TEXTURE, TA_TFACTOR, TOP_ADD, TOP_BLENDCURRENTALPHA,
     TOP_BLENDDIFFUSEALPHA, TOP_BLENDTEXTUREALPHA, TOP_DISABLE, TOP_MODULATE, TOP_SELECTARG1,
     TOP_SELECTARG2, TOP_SUBTRACT, TSS_ADDRESSU, TSS_ADDRESSV, TSS_ALPHAARG1, TSS_ALPHAARG2,
     TSS_ALPHAOP, TSS_COLORARG1, TSS_COLORARG2, TSS_COLOROP, TSS_MAGFILTER, TSS_MINFILTER,
-    TSS_MIPFILTER,
+    TSS_MIPFILTER, TSS_TEXTURETRANSFORMFLAGS,
 };
-use super::pipeline::{self, Rasterizer, ScreenVertex, Setup};
-use super::shadow::Unplaced;
+use super::super::pipeline::{self, Rasterizer, ScreenVertex, Setup};
+use super::super::shadow::Unplaced;
 use crate::cpu::Cpu;
 use crate::win32::glide::api::{self, TexInfo, TmuVertex, Vertex};
 use crate::win32::glide::hw;
@@ -95,7 +95,7 @@ pub struct Hal {
     pub palettes: [u32; 2],
     /// The 16-bit shadows of 24- and 32-bit render targets and depth
     /// buffers (`shadow.rs`).
-    pub shadows: Vec<super::shadow::Shadow>,
+    pub shadows: Vec<super::super::shadow::Shadow>,
     /// The `Undrawn` reasons logged so far, one bit each.
     pub logged: u32,
 }
@@ -234,7 +234,7 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     };
     if banshee {
         // A 24- or 32-bit target is drawn in its 16-bit shadow.
-        let (target_at, target_pitch) = match super::shadow::place(cpu, d.target) {
+        let (target_at, target_pitch) = match super::super::shadow::place(cpu, d.target) {
             Ok(place) => place,
             Err(why) => {
                 let why = match why {
@@ -245,7 +245,7 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
                 return None;
             }
         };
-        super::shadow::drawn(cpu, d.target);
+        super::super::shadow::drawn(cpu, d.target);
         if !crate::win32::glide::state(cpu).gc.active {
             api::attach(cpu, width, height);
         }
@@ -326,8 +326,12 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         api::fog_mode(cpu, api::FOG_DISABLE);
     }
     api::fog_color_value(cpu, d.state(RS_FOGCOLOR) & 0xFF_FFFF);
-    // The texture units' W apart from the card's when that is the fog.
-    let hint = if fog_w {
+    // The texture units' W apart from the card's when that is the fog,
+    // and when a stage's coordinates are projected: its unit's W is
+    // then what they are divided by, times the card's.
+    let projected = (0..2)
+        .any(|stage| d.stage(stage, TSS_TEXTURETRANSFORMFLAGS) & pipeline::TTFF_PROJECTED != 0);
+    let hint = if fog_w || projected {
         api::STWHINT_W_DIFF_TMU0 | api::STWHINT_W_DIFF_TMU1
     } else {
         0
@@ -337,9 +341,9 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     // Depth: the render target's depth buffer, Z or W. On an add-on card
     // it is the auxiliary buffer. A shadow is ahead of its surface only
     // when the card writes depth into it.
-    let z = super::device::depth_buffer(cpu, d).and_then(|z| {
+    let z = super::super::device::depth_buffer(cpu, d).and_then(|z| {
         let place = if banshee {
-            super::shadow::place(cpu, z).map(Some)
+            super::super::shadow::place(cpu, z).map(Some)
         } else if voodoo::card_buffer(cpu, z) == Some(api::BUFFER_AUXBUFFER) {
             Ok(None)
         } else {
@@ -347,7 +351,7 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         };
         match place {
             Ok(_) if zenable != 0 && d.state(RS_ZWRITEENABLE) != 0 => {
-                super::shadow::drawn(cpu, z);
+                super::super::shadow::drawn(cpu, z);
             }
             Err(why) if zenable != 0 => {
                 let why = match why {
@@ -399,7 +403,7 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         if iface == 0 {
             return None;
         }
-        let (_, id) = super::super::this(cpu, iface)?;
+        let (_, id) = super::super::super::this(cpu, iface)?;
         state(cpu).surface(id)?;
         Some(id)
     };
@@ -872,6 +876,84 @@ pub fn can_do(op: u32) -> bool {
     OPS.contains(&op)
 }
 
+/// The largest width and height of a texture on a Voodoo: 256.
+pub const TEXTURE_MAX: u32 = 256;
+
+/// What the device description says of a Voodoo, as 3dfx's Direct3D
+/// driver described it: 16-bit render targets and depth buffers,
+/// textures from 1 to 256 pixels a side in powers of 2 with an aspect
+/// ratio of up to 8, as 565, 1555, 4444 and 8-bit palettized.
+pub fn description() -> super::Description {
+    use super::super::super::Format;
+    use surface::{DDPF_ALPHAPIXELS, DDPF_RGB, DDPF_ZBUFFER};
+    let rgb = |a: u32, r: u32, g: u32, b: u32| Format {
+        flags: DDPF_RGB | if a != 0 { DDPF_ALPHAPIXELS } else { 0 },
+        fourcc: 0,
+        bits: 16,
+        r,
+        g,
+        b,
+        a,
+    };
+    super::Description {
+        // DDBD_16, on every card. The 3D engine draws 16-bit color and
+        // depth only, and 3dfx's Voodoo3 driver for Direct3D 7 says
+        // so: a program that picks its depth from this makes a 16-bit
+        // target, which the card draws where it is. A Banshee or
+        // Voodoo3 draws a 24- or 32-bit one that a program makes all
+        // the same through a 16-bit shadow (`shadow.rs`).
+        target_depths: 0x400,
+        z_depths: 0x400,
+        texture_max: TEXTURE_MAX,
+        texture_aspect: 8,
+        // D3DPRASTERCAPS_: a w buffer, and fog by w.
+        raster: 0x4_0000 | 0x10_0000,
+        texture: 0,
+        filter: 0,
+        address: 0,
+        blend: 0,
+        guard_band: [-2048.0, -2048.0, 2048.0, 2048.0],
+        stencil: 0,
+        ops: OP_CAPS,
+        // A stage for each texture unit; the caller knows how many.
+        stages: 0,
+        anisotropy: 1,
+        textures: vec![
+            rgb(0, 0xF800, 0x07E0, 0x001F),
+            rgb(0x8000, 0x7C00, 0x03E0, 0x001F),
+            rgb(0xF000, 0x0F00, 0x00F0, 0x000F),
+            Format {
+                flags: DDPF_RGB | DDPF_PALETTEINDEXED8,
+                bits: 8,
+                ..Format::default()
+            },
+        ],
+        // The one the depth buffer depths list, 16 bits.
+        z_formats: vec![Format {
+            flags: DDPF_ZBUFFER,
+            bits: 16,
+            g: 0xFFFF,
+            ..Format::default()
+        }],
+    }
+}
+
+/// Whether a surface of `format` can be a render target: 5-6-5, or on
+/// a Banshee or Voodoo3 a 24- or 32-bit one in video memory, which is
+/// drawn through its shadow.
+pub fn takes_target(cpu: &mut Cpu, f: &super::super::super::Format, video: bool) -> bool {
+    let wide = video && hw::banshee(cpu);
+    let rgb565 = f.bits == 16 && (f.r, f.g, f.b) == (0xF800, 0x07E0, 0x001F);
+    let rgb = matches!(f.bits, 24 | 32) && wide;
+    f.flags & surface::DDPF_RGB != 0 && (rgb565 || rgb)
+}
+
+/// Whether a surface of `format` can be a depth buffer, the same way.
+pub fn takes_depth(cpu: &mut Cpu, f: &super::super::super::Format, video: bool) -> bool {
+    let wide = video && hw::banshee(cpu);
+    f.bits == 16 || (matches!(f.bits, 24 | 32) && wide)
+}
+
 /// The W of fog table entry `i`, as Glide's utility library has it.
 fn fog_table_index_to_w(i: i32) -> f32 {
     let e = 3.0 + (i >> 2) as f64;
@@ -892,7 +974,7 @@ fn load(
     key: bool,
 ) -> Option<([f32; 2], bool)> {
     // A texture the device drew into is read from its surface.
-    super::shadow::expose(cpu, id);
+    super::super::shadow::expose(cpu, id);
     let (start, info, keyed) = match in_place(cpu, id, key) {
         Some(p) => {
             if p.info.format == api::TEXFMT_P_8 {
@@ -1046,7 +1128,7 @@ fn in_place(cpu: &mut Cpu, id: u32, key: bool) -> Option<InPlace> {
         if lod == api::LOD_1 {
             break;
         }
-        match super::texture::next_level(cpu, level) {
+        match super::super::texture::next_level(cpu, level) {
             Some(n) => (level, lod) = (n, lod + 1),
             None => break,
         }
@@ -1103,10 +1185,13 @@ fn hash_words(words: &[u32]) -> u32 {
 }
 
 /// The surface `id`'s palette, 0RGB each, or black.
-fn palette(cpu: &mut Cpu, id: u32) -> [u32; 256] {
+pub(super) fn palette(cpu: &mut Cpu, id: u32) -> [u32; 256] {
     let mut out = [0; 256];
     let pal = state(cpu).surface(id).map_or(0, |s| s.palette);
-    let Some((_, pid)) = (pal != 0).then(|| super::super::this(cpu, pal)).flatten() else {
+    let Some((_, pid)) = (pal != 0)
+        .then(|| super::super::super::this(cpu, pal))
+        .flatten()
+    else {
         return out;
     };
     let Some(p) = state(cpu).object(pid).and_then(|o| o.palette.as_ref()) else {
@@ -1279,7 +1364,7 @@ pub fn release(cpu: &mut Cpu, gone: u32) {
     if devices.iter().any(|&id| id != gone) {
         return;
     }
-    super::shadow::forget_all(cpu);
+    super::super::shadow::forget_all(cpu);
     let h = hal(cpu).clone();
     if h.heap_len != 0 && h.pid == current_pid(cpu) {
         display::free(cpu, h.heap);
@@ -1351,7 +1436,7 @@ fn image(cpu: &mut Cpu, id: u32, keyed: bool) -> Option<Image> {
     let mut levels = vec![id];
     if exact {
         let mut at = id;
-        while let Some(next) = super::texture::next_level(cpu, at) {
+        while let Some(next) = super::super::texture::next_level(cpu, at) {
             let n = levels.len() as u32;
             let fits = state(cpu)
                 .surface(next)
@@ -1422,7 +1507,7 @@ fn texture_format(s: &Surface, keyed: bool) -> u32 {
 }
 
 /// A level's texels as raw values, row after row.
-fn level_texels(cpu: &mut Cpu, s: &Surface) -> Vec<u32> {
+pub(super) fn level_texels(cpu: &mut Cpu, s: &Surface) -> Vec<u32> {
     let bpp = s.bytes_per_pixel().max(1);
     let mut row = vec![0u8; (s.width * bpp) as usize];
     let mut out = Vec::with_capacity((s.width * s.height) as usize);
@@ -1439,7 +1524,7 @@ fn level_texels(cpu: &mut Cpu, s: &Surface) -> Vec<u32> {
 }
 
 /// A raw texel of `s` as ARGB, 8 bits each.
-fn argb(raw: u32, s: &Surface, pal: &[u32; 256]) -> u32 {
+pub(super) fn argb(raw: u32, s: &Surface, pal: &[u32; 256]) -> u32 {
     let f = &s.format;
     if f.flags & DDPF_PALETTEINDEXED8 != 0 {
         return 0xFF00_0000 | pal[(raw & 0xFF) as usize];
@@ -1529,11 +1614,13 @@ impl Raster<'_> {
         let mut tmu = [TmuVertex::default(); 2];
         for (t, slot) in tmu.iter_mut().zip(self.card.tmus) {
             if let Some((stage, [sw, sh])) = slot {
-                let [u, vv] = v.tex[stage];
+                // What the stage's coordinates are divided by goes
+                // into the unit's own 1/w.
+                let [u, vv, _, q] = v.tex[stage];
                 *t = TmuVertex {
                     sow: u * sw * rhw,
                     tow: vv * sh * rhw,
-                    oow: rhw,
+                    oow: q * rhw,
                 };
             } else {
                 t.oow = rhw;
@@ -1652,12 +1739,16 @@ impl Rasterizer for Raster<'_> {
 /// the device's drawing with the depth test on gives the card as well,
 /// but a game that clears it every frame and draws with the test off,
 /// as Oni's menus do, never gives the card it, or leaves the card one it
-/// had before (another device's, or a released one's). Pointing the
-/// card at the buffer for each fill and back would move it in the OpenGL
-/// renderer's layout, which reads the buffer back each time. False,
-/// with nothing done, while the card isn't set up for the HAL's drawing
-/// (Glide closed or another process's, or for a render target, none of
-/// the HAL's given to it yet) or the surface isn't in its memory.
+/// had before (another device's, or a released one's). A Blt's fill
+/// (`blt::depth_fill`) may be of a depth buffer that isn't the device's;
+/// `bind` points the card back at the device's at its next draw with the
+/// depth test on, and with the test off the card neither reads nor
+/// writes the depth. Pointing the card at the buffer for each fill and
+/// back would move it in the OpenGL renderer's layout, which reads the
+/// buffer back each time. False, with nothing done, while the card
+/// isn't set up for the HAL's drawing (Glide closed or another
+/// process's, or for a render target, none of the HAL's given to it
+/// yet) or the surface isn't in its memory.
 pub(in crate::win32::ddraw) fn card_fill(
     cpu: &mut Cpu,
     s: &Surface,
@@ -1729,7 +1820,11 @@ pub(in crate::win32::ddraw) fn card_fill(
 
 /// Fill rectangles (left, top, right, bottom) of the device `d`'s render
 /// target with `color` (ARGB) and of its depth buffer with `z`, as
-/// `target` and `depth` say, or the whole of them with no rectangles.
+/// `target` and `depth` say, or the whole target with no rectangles.
+/// The depth buffer is filled where it is under the target: a texture's
+/// depth buffer may be larger than the texture (see
+/// `surface::add_attached_surface`), and its pixels past the texture's
+/// stay as they are.
 pub fn clear(
     cpu: &mut Cpu,
     d: &Device,
@@ -1737,6 +1832,29 @@ pub fn clear(
     target: Option<u32>,
     depth: Option<f32>,
 ) {
+    // With no target surface to keep to, the depth buffer is filled as
+    // the rectangles say, or all of it.
+    let size = state(cpu).surface(d.target).map(|s| (s.width, s.height));
+    let rects: Vec<[i32; 4]> = match size {
+        Some((width, height)) => {
+            let (width, height) = (width.min(0x7FFF) as i32, height.min(0x7FFF) as i32);
+            let whole = [[0, 0, width, height]];
+            let rects = if rects.is_empty() { &whole[..] } else { rects };
+            let list: Vec<_> = rects
+                .iter()
+                .map(|r| [r[0].max(0), r[1].max(0), r[2].min(width), r[3].min(height)])
+                .filter(|r| r[0] < r[2] && r[1] < r[3])
+                .collect();
+            // Rectangles all past the target clear nothing; an empty
+            // list would be the whole of each buffer below.
+            if list.is_empty() {
+                return;
+            }
+            list
+        }
+        None => rects.to_vec(),
+    };
+    let rects = &rects[..];
     let fill = |cpu: &mut Cpu, id: u32, value: u16| {
         let Some(s) = state(cpu).surface(id).cloned() else {
             return;
@@ -1783,19 +1901,19 @@ pub fn clear(
     };
     // A 24- or 32-bit surface takes the exact value, its shadow the
     // 16-bit one.
-    let shadow = super::shadow::fill;
+    let shadow = super::super::shadow::fill;
     if let Some(c) = target
         && let Some(s) = state(cpu).surface(d.target).cloned()
     {
-        let (exact, v) = super::shadow::color_values(&s, c);
+        let (exact, v) = super::super::shadow::color_values(&s, c);
         if !shadow(cpu, d.target, rects, exact, v) {
             fill(cpu, d.target, v);
         }
     }
-    if let (Some(z), Some(zid)) = (depth, super::device::depth_buffer(cpu, d))
+    if let (Some(z), Some(zid)) = (depth, super::super::device::depth_buffer(cpu, d))
         && let Some(s) = state(cpu).surface(zid).cloned()
     {
-        let (exact, v) = super::shadow::depth_values(&s, z);
+        let (exact, v) = super::super::shadow::depth_values(&s, z);
         if !shadow(cpu, zid, rects, exact, v) {
             fill(cpu, zid, v);
         }

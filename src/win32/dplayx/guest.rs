@@ -9,7 +9,28 @@
 
 use super::session::{Entity, Info, Sys};
 use crate::cpu::Cpu;
-use crate::win32::kernel32::{ansi_to_wide, wide_to_ansi};
+use crate::win32::kernel32::ansi_to_wide;
+use crate::win32::nls::{self, CodePage};
+
+/// How the strings a call gives back are written: UTF-16 for the
+/// interfaces of the W functions, the system's ANSI code page for the
+/// others.
+#[derive(Clone, Copy)]
+pub enum Chars {
+    Wide,
+    Ansi(CodePage),
+}
+
+impl Chars {
+    /// UTF-16 when `wide`, else the system's ANSI code page.
+    pub fn of(cpu: &Cpu, wide: bool) -> Chars {
+        if wide {
+            Chars::Wide
+        } else {
+            Chars::Ansi(nls::ansi(cpu))
+        }
+    }
+}
 
 /// The longest string read.
 const LONGEST: u32 = 0x1_0000;
@@ -70,21 +91,24 @@ pub fn read_str(cpu: &mut Cpu, at: u32, wide: bool) -> Option<Option<Vec<u16>>> 
         if cpu.bus.guest_faulted() {
             return None;
         }
-        ansi_to_wide(&bytes)
+        ansi_to_wide(cpu, &bytes)
     };
     Some(Some(text))
 }
 
 /// A string as the interface has it, with its zero.
-pub fn str_bytes(text: &[u16], wide: bool) -> Vec<u8> {
-    if wide {
-        let mut out: Vec<u8> = text.iter().flat_map(|c| c.to_le_bytes()).collect();
-        out.extend_from_slice(&[0, 0]);
-        out
-    } else {
-        let mut out = wide_to_ansi(text);
-        out.push(0);
-        out
+pub fn str_bytes(text: &[u16], chars: Chars) -> Vec<u8> {
+    match chars {
+        Chars::Wide => {
+            let mut out: Vec<u8> = text.iter().flat_map(|c| c.to_le_bytes()).collect();
+            out.extend_from_slice(&[0, 0]);
+            out
+        }
+        Chars::Ansi(page) => {
+            let mut out = page.encode(text);
+            out.push(0);
+            out
+        }
     }
 }
 
@@ -152,9 +176,9 @@ impl Blob {
     }
 
     /// Point `pointer` at the string, unless there is none.
-    pub fn attach_str(&mut self, pointer: usize, text: &Option<Vec<u16>>, wide: bool) {
+    pub fn attach_str(&mut self, pointer: usize, text: &Option<Vec<u16>>, chars: Chars) {
         if let Some(t) = text {
-            self.attach(pointer, &str_bytes(t, wide));
+            self.attach(pointer, &str_bytes(t, chars));
         }
     }
 
@@ -209,18 +233,18 @@ impl NameAt {
         blob: &mut Blob,
         short: &Option<Vec<u16>>,
         long: &Option<Vec<u16>>,
-        wide: bool,
+        chars: Chars,
     ) {
-        blob.attach_str(self.short, short, wide);
-        blob.attach_str(self.long, long, wide);
+        blob.attach_str(self.short, short, chars);
+        blob.attach_str(self.long, long, chars);
     }
 }
 
 /// A DPNAME alone, with its strings.
-pub fn name_blob(short: &Option<Vec<u16>>, long: &Option<Vec<u16>>, wide: bool) -> Blob {
+pub fn name_blob(short: &Option<Vec<u16>>, long: &Option<Vec<u16>>, chars: Chars) -> Blob {
     let mut blob = Blob::default();
     let at = name(&mut blob);
-    at.finish(&mut blob, short, long, wide);
+    at.finish(&mut blob, short, long, chars);
     blob
 }
 
@@ -262,7 +286,7 @@ pub fn read_desc2(cpu: &mut Cpu, at: u32, wide: bool) -> Option<(Info, Vec<u16>)
 }
 
 /// A DPSESSIONDESC2 to hand out: the password goes only to members.
-pub fn desc2(blob: &mut Blob, info: &Info, password: &[u16], wide: bool) {
+pub fn desc2(blob: &mut Blob, info: &Info, password: &[u16], chars: Chars) {
     blob.u32(DESC2_SIZE)
         .u32(info.flags)
         .raw(&info.instance)
@@ -275,9 +299,9 @@ pub fn desc2(blob: &mut Blob, info: &Info, password: &[u16], wide: bool) {
     for u in info.user {
         blob.u32(u);
     }
-    blob.attach_str(name, &info.name, wide);
+    blob.attach_str(name, &info.name, chars);
     let password = (!password.is_empty()).then(|| password.to_vec());
-    blob.attach_str(pass, &password, wide);
+    blob.attach_str(pass, &password, chars);
 }
 
 /// IDirectPlay's DPSESSIONDESC read from the program: the description
@@ -294,7 +318,7 @@ pub fn read_desc1(cpu: &mut Cpu, at: u32) -> Option<(Info, u32, Vec<u16>)> {
         let mut bytes = vec![0; len];
         cpu.bus.guest_read_bytes(at, &mut bytes);
         let end = bytes.iter().position(|&b| b == 0).unwrap_or(len);
-        ansi_to_wide(&bytes[..end])
+        ansi_to_wide(cpu, &bytes[..end])
     };
     let name = fixed(cpu, at + 36, SESSION_NAME);
     let password = fixed(cpu, at + 88, PASSWORD);
@@ -330,11 +354,12 @@ fn session_guid(number: u32) -> [u8; 16] {
     guid
 }
 
-/// IDirectPlay's DPSESSIONDESC of a session.
-pub fn desc1(info: &Info) -> Vec<u8> {
+/// IDirectPlay's DPSESSIONDESC of a session, its strings in the code
+/// page `page`.
+pub fn desc1(info: &Info, page: CodePage) -> Vec<u8> {
     let mut out = Vec::with_capacity(DESC1_SIZE as usize);
     let fixed = |out: &mut Vec<u8>, text: &[u16], len: usize| {
-        let mut bytes = wide_to_ansi(text);
+        let mut bytes = page.encode(text);
         bytes.truncate(len - 1);
         bytes.resize(len, 0);
         out.extend_from_slice(&bytes);
@@ -365,7 +390,7 @@ fn player_type(e: &Entity) -> u32 {
 }
 
 /// A system message as IDirectPlay2 and later write it.
-pub fn system2(sys: &Sys, wide: bool) -> Blob {
+pub fn system2(sys: &Sys, chars: Chars) -> Blob {
     let mut b = Blob::default();
     match sys {
         Sys::Create { entity, current } => {
@@ -377,7 +402,7 @@ pub fn system2(sys: &Sys, wide: bool) -> Blob {
             b.u32(entity.data.len() as u32);
             let n = name(&mut b);
             b.u32(entity.parent).u32(entity.reported_flags());
-            n.finish(&mut b, &entity.short, &entity.long, wide);
+            n.finish(&mut b, &entity.short, &entity.long, chars);
             b.attach_data(data, &entity.data);
         }
         Sys::Destroy { entity } => {
@@ -390,7 +415,7 @@ pub fn system2(sys: &Sys, wide: bool) -> Blob {
             b.u32(entity.data.len() as u32);
             let n = name(&mut b);
             b.u32(entity.parent).u32(entity.reported_flags());
-            n.finish(&mut b, &entity.short, &entity.long, wide);
+            n.finish(&mut b, &entity.short, &entity.long, chars);
             b.attach_data(local, &entity.local_data);
             b.attach_data(remote, &entity.data);
         }
@@ -419,11 +444,11 @@ pub fn system2(sys: &Sys, wide: bool) -> Blob {
                 .u32(player_type(entity))
                 .u32(entity.id);
             let n = name(&mut b);
-            n.finish(&mut b, &entity.short, &entity.long, wide);
+            n.finish(&mut b, &entity.short, &entity.long, chars);
         }
         Sys::SetDesc { info, password } => {
             b.u32(DPSYS_SETSESSIONDESC);
-            desc2(&mut b, info, password, wide);
+            desc2(&mut b, info, password, chars);
         }
         Sys::Host {} => {
             b.u32(DPSYS_HOST);
@@ -451,7 +476,7 @@ pub fn system2(sys: &Sys, wide: bool) -> Blob {
             // whose pointer is fixed up by its place.
             let start = b.bytes.len();
             b.attach(chat, &inner.bytes);
-            b.attach_str(start + at, &Some(text.clone()), wide);
+            b.attach_str(start + at, &Some(text.clone()), chars);
         }
         Sys::SetGroupOwner { group, new, old } => {
             b.u32(DPSYS_SETGROUPOWNER).u32(*group).u32(*new).u32(*old);
@@ -482,8 +507,9 @@ pub fn system2(sys: &Sys, wide: bool) -> Blob {
 }
 
 /// A system message as IDirectPlay writes it, or None for one it
-/// doesn't have, which its programs never see.
-pub fn system1(sys: &Sys) -> Option<Vec<u8>> {
+/// doesn't have, which its programs never see. Its strings are in the code
+/// page `page`.
+pub fn system1(sys: &Sys, page: CodePage) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     let mut put = |v: u32| out.extend_from_slice(&v.to_le_bytes());
     match sys {
@@ -492,7 +518,7 @@ pub fn system1(sys: &Sys) -> Option<Vec<u8>> {
             put(player_type(entity));
             put(entity.id);
             let fixed = |text: &Option<Vec<u16>>, len: usize| {
-                let mut bytes = wide_to_ansi(text.as_deref().unwrap_or(&[]));
+                let mut bytes = page.encode(text.as_deref().unwrap_or(&[]));
                 bytes.truncate(len - 1);
                 bytes.resize(len, 0);
                 bytes
@@ -525,9 +551,10 @@ pub fn system1(sys: &Sys) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// IDirectPlay's player names: a fixed-size field's worth of ANSI.
-pub fn name1(text: &Option<Vec<u16>>) -> Vec<u8> {
-    let mut bytes = wide_to_ansi(text.as_deref().unwrap_or(&[]));
+/// IDirectPlay's player names: a fixed-size field's worth of the code
+/// page `page`.
+pub fn name1(text: &Option<Vec<u16>>, page: CodePage) -> Vec<u8> {
+    let mut bytes = page.encode(text.as_deref().unwrap_or(&[]));
     bytes.push(0);
     bytes
 }
@@ -544,7 +571,7 @@ mod tests {
             long: Some("player_long_name".encode_utf16().collect()),
             ..Entity::default()
         };
-        let size = |sys: Sys| system2(&sys, false).len();
+        let size = |sys: Sys| system2(&sys, Chars::Ansi(CodePage::WESTERN)).len();
         // The sizes Wine's tests recorded on Windows.
         assert_eq!(
             size(Sys::Create {
@@ -574,7 +601,7 @@ mod tests {
             short: Some(vec![65]),
             ..Entity::default()
         };
-        let blob = system2(&Sys::Create { entity, current: 1 }, true);
+        let blob = system2(&Sys::Create { entity, current: 1 }, Chars::Wide);
         let at = 0x1000;
         let bytes = blob.placed(at);
         let word = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
@@ -582,7 +609,8 @@ mod tests {
         assert_eq!(word(32), at + 48, "the short name after the message");
         assert_eq!(word(36), 0, "no long name");
         assert_eq!(&bytes[48..52], &[65, 0, 0, 0]);
-        assert_eq!(system1(&Sys::Host {}), None);
-        assert_eq!(desc1(&Info::default()).len(), DESC1_SIZE as usize);
+        assert_eq!(system1(&Sys::Host {}, CodePage::WESTERN), None);
+        let desc = desc1(&Info::default(), CodePage::WESTERN);
+        assert_eq!(desc.len(), DESC1_SIZE as usize);
     }
 }

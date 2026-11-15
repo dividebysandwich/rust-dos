@@ -5,6 +5,9 @@
 mod present_tests;
 mod xbrz;
 
+use rust_dos::toadforce::format::{Rect, Surface};
+use rust_dos::toadforce::gl::ToadForceGl;
+use rust_dos::toadforce::gpu::{self, Host};
 use rust_dos::voodoo::gl::{SharedGl, TextureBarrier, VoodooGl};
 use rust_dos::voodoo::gpu::GpuLink;
 use std::cell::RefCell;
@@ -57,6 +60,11 @@ pub struct GlScreen {
     // The 3dfx card shares the functions and its renderer (`voodoo_link`)
     // until this ends, which ends the renderer.
     gl: Rc<glow::Context>,
+    /// The ToadForce's host renderer, made the first time a card asks
+    /// for one (`toadforce_link`), and why there is none if it can't
+    /// be made. Before the context, which it needs to end.
+    toadforce: HostCell,
+    toadforce_failed: Option<String>,
     _context: GLContext,
     window: Window,
     glsl: Glsl,
@@ -116,6 +124,121 @@ pub struct GlScreen {
     /// The look drawn without the tube's curve: the scene's screen has
     /// its own shape.
     flat: bool,
+}
+
+/// The ToadForce's host renderer on the window's context. The window
+/// has it, and a card a link to it (`HostLink`): the renderer ends with
+/// the window, while the context is still there, whatever a card that
+/// lives longer still holds.
+#[derive(Default)]
+struct HostCell(Rc<RefCell<Option<ToadForceGl>>>);
+
+impl Drop for HostCell {
+    fn drop(&mut self) {
+        // The renderer's own `Drop` deletes what it made.
+        self.0.borrow_mut().take();
+    }
+}
+
+/// A card's link to the window's host renderer. Once the window is
+/// gone it takes nothing, so the card draws in software, and has
+/// nothing to read back: what the renderer had ahead of card memory
+/// went with the window.
+struct HostLink(Rc<RefCell<Option<ToadForceGl>>>);
+
+impl Host for HostLink {
+    fn name(&self) -> &str {
+        "OpenGL"
+    }
+
+    fn declines(
+        &self,
+        state: &rust_dos::toadforce::raster::pipeline::DrawState,
+    ) -> Option<rust_dos::toadforce::gpu::Decline> {
+        match &*self.0.borrow() {
+            Some(host) => host.declines(state),
+            None => Some(rust_dos::toadforce::gpu::Decline::NoHost),
+        }
+    }
+
+    fn transforms(&self, state: &rust_dos::toadforce::raster::pipeline::DrawState) -> bool {
+        let host = self.0.borrow();
+        host.as_ref().is_some_and(|host| host.transforms(state))
+    }
+
+    fn draw(&mut self, batch: &gpu::Batch, memory: &[u8], pages: &gpu::Pages) -> Vec<Surface> {
+        match &mut *self.0.borrow_mut() {
+            Some(host) => host.draw(batch, memory, pages),
+            None => Vec::new(),
+        }
+    }
+
+    fn clear(&mut self, clear: &gpu::Clear, memory: &[u8], pages: &gpu::Pages) -> Option<Surface> {
+        let mut host = self.0.borrow_mut();
+        host.as_mut()?.clear(clear, memory, pages)
+    }
+
+    fn fill(
+        &mut self,
+        dst: &Surface,
+        rect: &Rect,
+        value: u32,
+        memory: &[u8],
+        pages: &gpu::Pages,
+    ) -> Option<Surface> {
+        let mut host = self.0.borrow_mut();
+        host.as_mut()?.fill(dst, rect, value, memory, pages)
+    }
+
+    fn blt(
+        &mut self,
+        dst: &Surface,
+        dst_rect: &Rect,
+        src: &Surface,
+        src_rect: &Rect,
+        key: Option<u32>,
+        memory: &[u8],
+        pages: &gpu::Pages,
+    ) -> Option<Surface> {
+        let mut host = self.0.borrow_mut();
+        host.as_mut()?
+            .blt(dst, dst_rect, src, src_rect, key, memory, pages)
+    }
+
+    fn write(&mut self, surface: &Surface, rects: &[Rect], memory: &[u8]) -> bool {
+        let mut host = self.0.borrow_mut();
+        host.as_mut()
+            .is_some_and(|h| h.write(surface, rects, memory))
+    }
+
+    fn read_back(
+        &mut self,
+        surface: &Surface,
+        memory: &mut [u8],
+        pages: Option<&gpu::Pages>,
+    ) -> bool {
+        let mut host = self.0.borrow_mut();
+        host.as_mut()
+            .is_some_and(|h| h.read_back(surface, memory, pages))
+    }
+
+    fn shows(&mut self, surface: &Surface, pages: &gpu::Pages) -> bool {
+        let mut host = self.0.borrow_mut();
+        host.as_mut().is_some_and(|h| h.shows(surface, pages))
+    }
+
+    fn forget(&mut self) {
+        if let Some(host) = &mut *self.0.borrow_mut() {
+            host.forget();
+        }
+    }
+
+    fn status(&self) -> serde_json::Value {
+        match &*self.0.borrow() {
+            Some(host) => host.status(),
+            None => serde_json::Value::Null,
+        }
+    }
 }
 
 /// The scene goes first: the headset's thread draws with a context of the
@@ -258,6 +381,8 @@ impl GlScreen {
             scale_lines: true,
             filter: Filter::Nearest,
             renderer,
+            toadforce: HostCell::default(),
+            toadforce_failed: None,
             voodoo: Rc::new(RefCell::new(None)),
             voodoo_failed: (glsl == Glsl::Es300).then(|| "OpenGL ES can't draw it".to_string()),
             texture_barrier,
@@ -593,6 +718,28 @@ impl GlScreen {
         scale
     }
 
+    /// Whether a card has a link to this window's host renderer.
+    pub fn toadforce_linked(&self) -> bool {
+        Rc::strong_count(&self.toadforce.0) > 1
+    }
+
+    /// A link to this window's host renderer for a ToadForce
+    /// (`Bus::toadforce_set_host`, which has the renderer drop the
+    /// copies it has once the card's pixels are in card memory). The
+    /// error says why OpenGL can't draw the card here.
+    pub fn toadforce_link(&mut self) -> Result<Box<dyn Host>, &str> {
+        if self.toadforce_failed.is_none() && self.toadforce.0.borrow().is_none() {
+            match ToadForceGl::new(self.gl.clone(), self.glsl) {
+                Ok(made) => *self.toadforce.0.borrow_mut() = Some(made),
+                Err(e) => self.toadforce_failed = Some(e),
+            }
+        }
+        match &self.toadforce_failed {
+            Some(problem) => Err(problem),
+            None => Ok(Box::new(HostLink(self.toadforce.0.clone()))),
+        }
+    }
+
     /// Whether the 3dfx card can be drawn with OpenGL here, or why not.
     pub fn voodoo_problem(&self) -> Option<&str> {
         self.voodoo_failed.as_deref()
@@ -705,6 +852,37 @@ impl GlScreen {
             }
         }
         self.draw(texture, size, display, None, line);
+        true
+    }
+
+    /// Show the ToadForce's picture `surface` from the host renderer's
+    /// copy of it (`ToadForceGl::composite`), with what `screen` has
+    /// over `base` on it, letterboxed at `display` proportions. False
+    /// if the renderer has none to show.
+    pub fn present_toadforce(
+        &mut self,
+        surface: &Surface,
+        screen: &Frame,
+        base: &Frame,
+        display: (u32, u32),
+    ) -> bool {
+        let composed = match &mut *self.toadforce.0.borrow_mut() {
+            Some(host) => host.composite(surface, screen, base),
+            None => None,
+        };
+        let Some((texture, size)) = composed else {
+            return false;
+        };
+        self.xbrz_frame.invalidate();
+        // SAFETY: see `GlScreen`.
+        unsafe {
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.set_filter();
+            if shader::needs_mipmaps(self.active) {
+                self.gl.generate_mipmap(glow::TEXTURE_2D);
+            }
+        }
+        self.draw(texture, size, display, None, 1.0);
         true
     }
 

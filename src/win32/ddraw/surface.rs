@@ -27,12 +27,13 @@ use super::{
     DDERR_INVALIDPARAMS, DDERR_INVALIDPIXELFORMAT, DDERR_INVALIDRECT, DDERR_MOREDATA,
     DDERR_NOCLIPPERATTACHED, DDERR_NOCOLORKEY, DDERR_NOCOOPERATIVELEVELSET, DDERR_NODC,
     DDERR_NOEXCLUSIVEMODE, DDERR_NOOVERLAYHW, DDERR_NOPALETTEATTACHED, DDERR_NOTAOVERLAYSURFACE,
-    DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_NOTLOCKED, DDERR_OUTOFVIDEOMEMORY,
+    DDERR_NOTEXTUREHW, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_NOTLOCKED, DDERR_OUTOFVIDEOMEMORY,
     DDERR_PRIMARYSURFACEALREADYEXISTS, DDERR_SURFACEALREADYATTACHED, DDERR_SURFACEBUSY,
     DDERR_SURFACELOST, DDERR_WRONGMODE, Format, Object, V_SURFACE1, V_SURFACE4, V_SURFACE7,
     display, palette, state, voodoo,
 };
 use crate::cpu::Cpu;
+use crate::video::dxt;
 use crate::win32::gdi32;
 use crate::win32::screen;
 
@@ -68,7 +69,11 @@ pub const DDSCAPS_ZBUFFER: u32 = 0x2_0000;
 pub const DDSCAPS_MIPMAP: u32 = 0x40_0000;
 pub const DDSCAPS_LOCALVIDMEM: u32 = 0x1000_0000;
 const DDSCAPS2_TEXTUREMANAGE: u32 = 0x10;
-const DDSCAPS2_CUBEMAP: u32 = 0x200;
+pub const DDSCAPS2_CUBEMAP: u32 = 0x200;
+/// DDSCAPS2_CUBEMAP_POSITIVEX to NEGATIVEZ: the six faces, a bit each
+/// from POSITIVEX (0x400) up, in the order +x, -x, +y, -y, +z, -z.
+pub const DDSCAPS2_CUBEMAP_ALLFACES: u32 = 0xFC00;
+pub const DDSCAPS2_CUBEMAP_POSITIVEX: u32 = 0x400;
 pub const DDSCAPS2_MIPMAPSUBLEVEL: u32 = 0x1_0000;
 const DDSCAPS2_D3DTEXTUREMANAGE: u32 = 0x2_0000;
 const DDSCAPS2_VOLUME: u32 = 0x20_0000;
@@ -79,6 +84,7 @@ pub const DDPF_FOURCC: u32 = 0x4;
 pub const DDPF_PALETTEINDEXED8: u32 = 0x20;
 pub const DDPF_RGB: u32 = 0x40;
 pub const DDPF_ZBUFFER: u32 = 0x400;
+pub const DDPF_STENCILBUFFER: u32 = 0x4000;
 
 // The color keys' flags.
 pub const DDCKEY_COLORSPACE: u32 = 0x1;
@@ -99,9 +105,6 @@ pub const MEM_SYSTEM: u32 = 1;
 pub const MEM_VIDEO: u32 = 2;
 /// A buffer of the 3dfx device's card (`voodoo.rs`): `bits` is which.
 pub const MEM_CARD: u32 = 3;
-
-/// The compressed formats, which only system memory has.
-const DXT: [&[u8; 4]; 5] = [b"DXT1", b"DXT2", b"DXT3", b"DXT4", b"DXT5"];
 
 /// A DDSURFACEDESC or DDSURFACEDESC2, as its fields are.
 #[derive(Clone, Debug, Default)]
@@ -418,9 +421,7 @@ fn next_uniqueness(cpu: &mut Cpu) -> u32 {
 /// The surface `id` changed: its uniqueness value with it.
 pub fn changed(cpu: &mut Cpu, id: u32) {
     let value = next_uniqueness(cpu);
-    if let Some(s) = surface(cpu, id) {
-        s.uniqueness = value;
-    }
+    state(cpu).surface_drawn(id, value);
 }
 
 /// Count a frame at the next retrace if the surface `id` is the primary
@@ -439,7 +440,11 @@ pub fn shown(cpu: &mut Cpu, id: u32) {
 pub fn address(cpu: &mut Cpu, s: &Surface) -> Option<u32> {
     match s.memory {
         MEM_SYSTEM => Some(s.bits),
-        MEM_VIDEO => Some(display::view(cpu)? + s.bits),
+        MEM_VIDEO => {
+            // The program reads the pixels by itself from here on.
+            screen::expose(cpu);
+            Some(display::view(cpu)? + s.bits)
+        }
         _ => None,
     }
 }
@@ -583,7 +588,11 @@ fn level_bytes(s: &Surface) -> u32 {
 /// round the chain, levels too, and each needs a block it can free
 /// wherever its pixels end up.
 fn shares_block(s: &Surface) -> bool {
-    s.caps[0] & (DDSCAPS_MIPMAP | DDSCAPS_FLIP) == DDSCAPS_MIPMAP && !s.compressed()
+    // A cube map's surfaces each have their own block: a block is one
+    // chain of levels, and a cube map has a chain for each face.
+    s.caps[0] & (DDSCAPS_MIPMAP | DDSCAPS_FLIP) == DDSCAPS_MIPMAP
+        && s.caps[1] & DDSCAPS2_CUBEMAP == 0
+        && !s.compressed()
 }
 
 /// The bytes the surface takes in video memory: a texture's top level
@@ -654,7 +663,8 @@ fn free_memory(cpu: &mut Cpu, id: u32) {
 }
 
 /// The mode changed or went: video memory is the new mode's, and the
-/// surfaces that had pixels there are lost.
+/// surfaces that had pixels there are lost, as are the blocks Direct3D's
+/// HAL took for its copies of textures.
 pub fn video_memory_lost(cpu: &mut Cpu) {
     for id in state(cpu).ids(|o| o.surface.as_ref().is_some_and(|s| s.memory == MEM_VIDEO)) {
         if let Some(s) = surface(cpu, id) {
@@ -663,6 +673,7 @@ pub fn video_memory_lost(cpu: &mut Cpu) {
             s.lost = true;
         }
     }
+    super::d3d::hal::video_memory_lost(cpu);
 }
 
 /// The DirectDraw object of the surface `id` went: it has no pixels.
@@ -753,11 +764,19 @@ fn pitch_of(width: u32, bits: u32) -> u32 {
     (width * bits).div_ceil(8).next_multiple_of(PITCH_ALIGN)
 }
 
+/// The DXT format of a compressed pixel format.
+pub fn dxt_format(f: &Format) -> Option<dxt::Format> {
+    if f.flags & DDPF_FOURCC == 0 {
+        return None;
+    }
+    dxt::Format::from_fourcc(f.fourcc)
+}
+
 /// Check a pixel format a program gave: the ones surfaces can have.
 fn check_format(f: &Format, caps: &[u32; 4]) -> Result<Format, u32> {
     if f.flags & DDPF_FOURCC != 0 {
-        let code = f.fourcc.to_le_bytes();
-        if !DXT.iter().any(|d| **d == code) {
+        // The compressed formats, which only system memory has.
+        if dxt::Format::from_fourcc(f.fourcc).is_none() {
             return Err(DDERR_INVALIDPIXELFORMAT);
         }
         return Ok(Format {
@@ -769,6 +788,9 @@ fn check_format(f: &Format, caps: &[u32; 4]) -> Result<Format, u32> {
     if f.flags & DDPF_ZBUFFER != 0 {
         if caps[0] & DDSCAPS_ZBUFFER == 0 || ![16, 24, 32].contains(&f.bits) {
             return Err(DDERR_INVALIDPIXELFORMAT);
+        }
+        if f.flags & DDPF_STENCILBUFFER != 0 {
+            return stencil_format(f);
         }
         return Ok(z_format(f.bits));
     }
@@ -793,6 +815,52 @@ fn check_format(f: &Format, caps: &[u32; 4]) -> Result<Format, u32> {
         } else {
             0
         },
+        ..*f
+    })
+}
+
+/// A texture's pixel format of a kind `check_format` doesn't know
+/// (luminance, alpha only, or bump), where the card the DirectDraw
+/// object `dd` draws on samples it: its HAL lists it among the texture
+/// formats (EnumTextureFormats, CheckDeviceFormat). None for every
+/// other format and surface.
+fn card_texture_format(cpu: &mut Cpu, dd: u32, f: &Format, caps: &[u32; 4]) -> Option<Format> {
+    let known = DDPF_RGB | DDPF_PALETTEINDEXED8 | DDPF_ALPHAPIXELS | DDPF_FOURCC | DDPF_ZBUFFER;
+    if caps[0] & DDSCAPS_TEXTURE == 0 || f.flags & !known == 0 {
+        return None;
+    }
+    let f = Format { fourcc: 0, ..*f };
+    let offer = super::d3d::hal::card(cpu, dd)?;
+    super::d3d::hal::description(offer.kind)
+        .textures
+        .contains(&f)
+        .then_some(f)
+}
+
+/// A depth buffer's format with stencil bits, as EnumZBufferFormats
+/// gives it: the stencil's depth where a color format's red mask is,
+/// the depth mask where green is and the stencil mask where blue is.
+/// The two masks share no bit and hold as many stencil bits as the
+/// format says. Whether a card draws with it is its HAL's to say.
+fn stencil_format(f: &Format) -> Result<Format, u32> {
+    let all = if f.bits == 32 {
+        u32::MAX
+    } else {
+        (1 << f.bits) - 1
+    };
+    let (depth, stencil) = (f.g, f.b);
+    if f.r == 0
+        || stencil.count_ones() != f.r
+        || depth == 0
+        || depth & stencil != 0
+        || (depth | stencil) & !all != 0
+    {
+        return Err(DDERR_INVALIDPIXELFORMAT);
+    }
+    Ok(Format {
+        flags: DDPF_ZBUFFER | DDPF_STENCILBUFFER,
+        fourcc: 0,
+        a: 0,
         ..*f
     })
 }
@@ -875,9 +943,34 @@ pub fn make(
     if caps[0] & DDSCAPS_BACKBUFFER != 0
         && (version >= 7 || caps[0] & (DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP) != 0)
         || caps[0] & front_back == front_back
-        || caps[1] & (DDSCAPS2_CUBEMAP | DDSCAPS2_VOLUME) != 0
+        || caps[1] & DDSCAPS2_VOLUME != 0
         || caps[0] & DDSCAPS_FRONTBUFFER != 0 && version >= 7
     {
+        return Err(DDERR_INVALIDCAPS);
+    }
+    // A cube map is a complex texture of IDirectDraw7, on a card that
+    // samples cube maps. Its faces are the ones the caps name, at least
+    // one; face bits without DDSCAPS2_CUBEMAP name nothing.
+    let cube = caps[1] & DDSCAPS2_CUBEMAP != 0;
+    if cube {
+        let complex_texture = DDSCAPS_COMPLEX | DDSCAPS_TEXTURE;
+        let other = DDSCAPS_PRIMARYSURFACE | DDSCAPS_ZBUFFER;
+        if caps[0] & DDSCAPS_FLIP != 0 {
+            // A cube map that flips, as Wine's ddraw_surface_create
+            // turns it down.
+            return Err(DDERR_INVALIDPARAMS);
+        }
+        if version < 7
+            || caps[0] & complex_texture != complex_texture
+            || caps[0] & other != 0
+            || !super::d3d::hal::cube_maps(cpu, dd)
+        {
+            return Err(DDERR_INVALIDCAPS);
+        }
+        if caps[1] & DDSCAPS2_CUBEMAP_ALLFACES == 0 {
+            return Err(DDERR_INVALIDPARAMS);
+        }
+    } else if caps[1] & DDSCAPS2_CUBEMAP_ALLFACES != 0 {
         return Err(DDERR_INVALIDCAPS);
     }
     if caps[0] & DDSCAPS_OVERLAY != 0 {
@@ -942,7 +1035,10 @@ pub fn make(
             return Err(DDERR_INVALIDPARAMS);
         }
         let f = if desc.flags & DDSD_PIXELFORMAT != 0 {
-            check_format(&desc.format, &caps)?
+            match card_texture_format(cpu, dd, &desc.format, &caps) {
+                Some(f) => f,
+                None => check_format(&desc.format, &caps)?,
+            }
         } else if caps[0] & DDSCAPS_ZBUFFER != 0 {
             if desc.flags & DDSD_ZBUFFERBITDEPTH == 0 || ![16, 24, 32].contains(&desc.mipmaps) {
                 return Err(DDERR_INVALIDPIXELFORMAT);
@@ -958,19 +1054,31 @@ pub fn make(
             return Err(DDERR_INVALIDPIXELFORMAT);
         }
         if f.flags & DDPF_FOURCC != 0 {
-            // Compressed formats are in system memory, and managed.
-            if caps[0] & DDSCAPS_SYSTEMMEMORY == 0 && !managed {
+            // Compressed formats are in system memory, and managed. They
+            // are whole blocks of 4x4 pixels, as DirectX 7 on Windows 98
+            // SE makes them: a width or height that isn't a multiple of
+            // 4 fails. Mipmap levels below 4 pixels are made, of one
+            // block each. One asked for without a memory is put in system
+            // memory, as there; a texture asked for in video memory fails
+            // with DDERR_NOTEXTUREHW, as on a card without compressed
+            // textures there.
+            if caps[0] & DDSCAPS_VIDEOMEMORY != 0 {
+                return Err(if caps[0] & DDSCAPS_TEXTURE != 0 {
+                    DDERR_NOTEXTUREHW
+                } else {
+                    DDERR_INVALIDPARAMS
+                });
+            }
+            if !managed {
+                caps[0] |= DDSCAPS_SYSTEMMEMORY;
+            }
+            if !desc.width.is_multiple_of(4) || !desc.height.is_multiple_of(4) {
                 return Err(DDERR_INVALIDPARAMS);
             }
         }
         (width, height, format) = (desc.width, desc.height, f);
-        pitch = if f.flags & DDPF_FOURCC != 0 {
-            let block = if f.fourcc == u32::from_le_bytes(*b"DXT1") {
-                8
-            } else {
-                16
-            };
-            width.div_ceil(4).max(1) * height.div_ceil(4).max(1) * block
+        pitch = if let Some(dxt) = dxt_format(&f) {
+            dxt.size(width, height) as u32
         } else if card && voodoo::role(caps[0]).is_some() {
             // One of the card's buffers (a back buffer made on its own
             // and attached later, too): its rows are the linear frame
@@ -982,6 +1090,11 @@ pub fn make(
         if managed {
             caps[0] |= DDSCAPS_SYSTEMMEMORY;
         }
+    }
+    if cube && width != height {
+        // A cube map's faces are square, as Direct3D 7 has them and as
+        // the card samples them.
+        return Err(DDERR_INVALIDPARAMS);
     }
     // The mipmap levels.
     let mipmap = caps[0] & DDSCAPS_MIPMAP != 0;
@@ -1031,16 +1144,54 @@ pub fn make(
             list.push(back);
         }
     }
-    for level in 1..levels {
-        let mut sub = base.clone();
+    let sublevel = |top: &Surface, level: u32| {
+        let mut sub = top.clone();
         sub.width = (width >> level).max(1);
         sub.height = (height >> level).max(1);
-        sub.pitch = pitch_of(sub.width, format.bits);
+        sub.pitch = match dxt_format(&format) {
+            Some(dxt) => dxt.size(sub.width, sub.height) as u32,
+            None => pitch_of(sub.width, format.bits),
+        };
         sub.mipmaps = levels - level;
         if version >= 7 {
             sub.caps[1] |= DDSCAPS2_MIPMAPSUBLEVEL;
         }
-        list.push(sub);
+        sub
+    };
+    // What is attached to what, by place in the list, in the order
+    // GetAttachedSurface and EnumAttachedSurfaces find them.
+    let mut links = Vec::new();
+    if cube {
+        // The faces asked for, each with its own levels. The root is the
+        // first of them, and has the others attached, the last first as
+        // Wine's does, and then its own next level.
+        let faces: Vec<u32> = (0..6)
+            .map(|face| DDSCAPS2_CUBEMAP_POSITIVEX << face)
+            .filter(|bit| caps[1] & bit != 0)
+            .collect();
+        list.clear();
+        let mut tops = Vec::new();
+        let mut chains = Vec::new();
+        for bit in faces {
+            let mut top = base.clone();
+            top.caps[1] = top.caps[1] & !DDSCAPS2_CUBEMAP_ALLFACES | bit;
+            tops.push(list.len());
+            for level in 0..levels {
+                if level > 0 {
+                    chains.push((list.len() - 1, list.len()));
+                    list.push(sublevel(&top, level));
+                } else {
+                    list.push(top.clone());
+                }
+            }
+        }
+        links.extend(tops[1..].iter().rev().map(|&top| (0, top)));
+        links.extend(chains);
+    } else {
+        for level in 1..levels {
+            list.push(sublevel(&base, level));
+        }
+        links.extend((1..list.len()).map(|i| (i - 1, i)));
     }
     let pid = super::current_pid(cpu);
     let mut ids = Vec::new();
@@ -1063,14 +1214,12 @@ pub fn make(
         if let Some(o) = state(cpu).object_mut(id) {
             o.creator = creator;
         }
-        let next = ids.get(i + 1).copied();
         if let Some(s) = surface(cpu, id) {
             if i > 0 {
                 s.root = root;
             }
-            if let Some(next) = next {
-                s.attached.push((next, 0));
-            }
+            let attached = links.iter().filter(|link| link.0 == i);
+            s.attached.extend(attached.map(|link| (ids[link.1], 0)));
         }
     }
     if let Some(s) = surface(cpu, root) {
@@ -1100,16 +1249,30 @@ pub fn make(
             }
         }
     }
-    for (i, &id) in ids.iter().enumerate() {
+    let mut i = 0;
+    while let Some(&id) = ids.get(i) {
         let mut result = allocate(cpu, id);
         if result == Err(DDERR_OUTOFVIDEOMEMORY) && !wants_video && !primary {
             // The surfaces after it go with it: a mipmap whose block
             // doesn't fit keeps its levels with its top level, though
-            // the smaller ones would fit on their own.
-            for &id in &ids[i..] {
+            // the smaller ones would fit on their own. A cube map's
+            // surfaces each have a block, and all of them go, those
+            // before it too: a cube map is in one memory.
+            let from = if cube { 0 } else { i };
+            for &id in &ids[from..i] {
+                free_memory(cpu, id);
+                if let Some(s) = surface(cpu, id) {
+                    s.caps[0] &= !(DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM);
+                }
+            }
+            for &id in &ids[from..] {
                 if let Some(s) = surface(cpu, id) {
                     s.caps[0] |= DDSCAPS_SYSTEMMEMORY;
                 }
+            }
+            if from < i {
+                i = from;
+                continue;
             }
             result = allocate(cpu, id);
         }
@@ -1131,6 +1294,7 @@ pub fn make(
             }
         }
         changed(cpu, id);
+        i += 1;
     }
     Ok(ids)
 }
@@ -1453,6 +1617,17 @@ fn still_to_show(cpu: &mut Cpu, until: u64, wait: bool) -> Option<u32> {
     super::directdraw::wait_until(cpu, until, DD_OK)
 }
 
+/// A flip the frame rate cap holds back until `until`: the thread waits
+/// for it and Flip runs again then, with DDFLIP_DONOTWAIT too. The cap
+/// is the emulator's own and the program has no way to know of it, so it
+/// only takes time: an error would send a program that flips without
+/// waiting (Grom: DDFLIP_NOVSYNC | DDFLIP_DONOTWAIT) round its loop, to
+/// flip again or draw its frame again, the work the cap is there to
+/// spare.
+fn frame_held(cpu: &mut Cpu, until: u64) -> Option<u32> {
+    crate::win32::pace::wait(cpu, until, DD_OK)
+}
+
 // Attached surfaces.
 
 /// Whether `s` is a back buffer that AddAttachedSurface made part of a
@@ -1487,7 +1662,19 @@ pub fn add_attached_surface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if a.version >= 7 && !z {
         return Some(DDERR_CANNOTATTACHSURFACE);
     }
-    if a.width != b.width || a.height != b.height {
+    // A depth buffer goes on a texture in video memory whatever the two
+    // sizes, and the device then draws into the texture with the depth
+    // buffer's pixels at the texture's: RenderWare games such as
+    // Zanzarah give their texture targets the screen's depth buffer,
+    // still attached to the back buffer. Other surfaces, a texture in
+    // system memory among them, take only one of their own size, and a
+    // surface takes one depth buffer. DirectX 7 on Windows 98 SE does
+    // this with 3dfx's Voodoo3 drivers 4.11.01.1151 and 4.12.01.0666.
+    let texture = a.caps[0] & (DDSCAPS_TEXTURE | DDSCAPS_SYSTEMMEMORY) == DDSCAPS_TEXTURE;
+    if (a.width != b.width || a.height != b.height) && !(z && texture) {
+        return Some(DDERR_CANNOTATTACHSURFACE);
+    }
+    if z && !attached_matching(cpu, id, &[DDSCAPS_ZBUFFER, 0, 0, 0]).is_empty() {
         return Some(DDERR_CANNOTATTACHSURFACE);
     }
     if a.caps[0] & DDSCAPS_ZBUFFER != 0 {
@@ -1697,6 +1884,12 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         {
             return still_to_show(cpu, until, false);
         }
+        // The swap waits for its turn under the frame rate cap, the
+        // thread with it whatever the flags (`frame_held`).
+        let cmd = (flags & DDFLIP_NOVSYNC == 0) as u32;
+        if let Some(until) = crate::win32::pace::card_check(cpu, cmd) {
+            return frame_held(cpu, until);
+        }
         // The card swaps its buffers; the surfaces keep theirs.
         voodoo::swap(cpu, flags & DDFLIP_NOVSYNC == 0);
         state(cpu).display.flip_polls = Default::default();
@@ -1710,17 +1903,32 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     // A flip shown at a frame waits for the frame of the last.
     let primary = s.is_primary();
-    if primary && flags & DDFLIP_NOVSYNC == 0 {
-        if let Some(pending) = display::flip_pending(cpu) {
-            // Flip runs again when that frame begins: the call that ends
-            // the wait stands for the polls until the frame, the last of
-            // which flips.
-            return still_to_show(cpu, pending, flags & DDFLIP_WAIT != 0);
-        }
+    if primary
+        && flags & DDFLIP_NOVSYNC == 0
+        && let Some(pending) = display::flip_pending(cpu)
+    {
+        // Flip runs again when that frame begins: the call that ends the
+        // wait stands for the polls until the frame, the last of which
+        // flips.
+        return still_to_show(cpu, pending, flags & DDFLIP_WAIT != 0);
+    }
+    // A flip of the primary surface is a frame, which the frame rate cap
+    // may hold back (`frame_held`): one waiting for the retrace shows
+    // from the next frame of the display, one without it at once.
+    if primary {
         let (timing, now) = display::timing(cpu);
+        let vsync = flags & DDFLIP_NOVSYNC == 0;
+        let at = if vsync { timing.next_display(now) } else { now };
+        let at = match crate::win32::pace::check(cpu, at, vsync.then(|| timing.frame_ns())) {
+            Ok(at) => at,
+            Err(until) => return frame_held(cpu, until),
+        };
         let display = &mut state(cpu).display;
-        display.flip_at = timing.next_display(now);
-        display.flip_polls = Default::default();
+        if vsync {
+            display.flip_at = timing.next_display(now);
+            display.flip_polls = Default::default();
+        }
+        crate::win32::pace::shown(cpu, at);
     }
     shown(cpu, id);
     // The pixels go round.
@@ -2114,13 +2322,13 @@ pub fn get_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(DD_OK)
 }
 
-/// Let go of the surface `id`'s DC, if it has one.
-fn end_dc(cpu: &mut Cpu, id: u32) {
+/// Let go of the surface `id`'s DC, if it has one; false if it had none.
+fn end_dc(cpu: &mut Cpu, id: u32) -> bool {
     let Some(s) = state(cpu).surface(id).cloned() else {
-        return;
+        return false;
     };
     if s.dc == 0 {
-        return;
+        return false;
     }
     if s.dc_old != 0 {
         gdi32::dc::select_object(cpu, &[s.dc, s.dc_old]);
@@ -2135,19 +2343,21 @@ fn end_dc(cpu: &mut Cpu, id: u32) {
         s.dc_bitmap = 0;
         s.dc_old = 0;
     }
+    true
 }
 
 /// ReleaseDC(this, dc).
 pub fn release_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [this, dc] = args[..] else {
+    // Windows 98's DirectDraw releases the surface's DC whatever handle
+    // it is given: Adrenix passes the address of its HDC variable, and
+    // its cockpit surfaces would stay busy for good otherwise.
+    let [this, _dc] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (_, id) = hr!(surface_of(cpu, this));
-    let has = state(cpu).surface(id).map_or(0, |s| s.dc);
-    if has == 0 || has != dc {
+    if !end_dc(cpu, id) {
         return Some(DDERR_NODC);
     }
-    end_dc(cpu, id);
     shown(cpu, id);
     changed(cpu, id);
     Some(DD_OK)

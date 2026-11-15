@@ -21,6 +21,7 @@ mod sound;
 mod powervr;
 mod verite;
 mod mach64;
+pub(crate) mod toadforce;
 mod banshee;
 mod voodoo;
 
@@ -40,7 +41,9 @@ pub trait Device {
     fn step(&mut self) {}
 }
 
-/// RAM when the configuration doesn't say.
+/// RAM of a machine made without a size (`Bus::new`), and of one whose
+/// configuration doesn't set `memsize` with a CPU up to a Pentium
+/// (`config::default_memsize` has the rule).
 pub const DEFAULT_MEMORY_MB: usize = 16;
 
 /// log2 of the bytes of RAM each code generation counter covers: small
@@ -284,6 +287,10 @@ pub struct Bus {
     /// The ATI mach64's registers and engines, on `Adapter::AtiRage` and
     /// `AtiRage2`.
     pub mach64: crate::mach64::Mach64,
+    /// The ToadForce card, on `Adapter::ToadForce` (`fit_toadforce`).
+    pub toadforce: Option<Box<crate::toadforce::ToadForce>>,
+    /// The bytes of card memory a ToadForce has (`toadforce_memory`).
+    pub toadforce_memory: u32,
     /// A memory-mapped read of Input Status 1 (a ViRGE's 83DAh) happened,
     /// whose reset of the attribute flip-flop is done at the next port
     /// access, as memory reads can't change the machine.
@@ -300,6 +307,9 @@ pub struct Bus {
     /// The program waits for a swap the frame rate cap holds back
     /// (`exec::held`).
     pub hold: Option<Hold>,
+    /// The frame rate cap (`fps_cap`), which every card's and API's
+    /// present goes through, the 3dfx card's sharing it.
+    pub frame_cap: crate::frame_cap::Shared,
     /// What to tell the user on the screen, a title over details, for the
     /// frontend to show.
     pub notices: Vec<(String, String)>,
@@ -425,6 +435,12 @@ pub struct Bus {
     /// `WATCHED_BLOCK` makes the recompiler's writes bump every block's
     /// generation, for the debugger's heatmap (`set_write_tracking`).
     pub code_blocks: Vec<u8>,
+
+    /// Whether the size of the memory is the default for the machine's CPU
+    /// and display adapter, `memsize` not being set (`config::Memory`).
+    /// The front end sets it at start and after it loads a save state,
+    /// from the settings the load leaves (`slots::loaded_settings`).
+    pub memory_derived: bool,
 
     /// Optional observer for every `log_string` line. Installed by the debug
     /// server so log output can be streamed to remote clients.
@@ -569,26 +585,113 @@ impl Bus {
         len <= self.ram.len() && self.is_plain_ram(addr, len)
     }
 
-    /// Append the `len` bytes at `addr` to `out` as programs read them:
-    /// plain RAM as one slice, anything else (video memory, the ROMs,
-    /// upper memory) through `read_8`.
+    /// Append the `len` bytes at `addr` to `out` as programs read them
+    /// (`read_into`).
     pub(crate) fn read_run(&self, addr: usize, len: usize, out: &mut Vec<u8>) {
-        if self.is_plain_run(addr, len) {
-            out.extend_from_slice(&self.ram[addr..addr + len]);
+        let start = out.len();
+        out.resize(start + len, 0);
+        self.read_into(addr, &mut out[start..]);
+    }
+
+    /// Fill `data` from `addr` as programs read it: plain RAM as one
+    /// slice, anything else (video memory, the ROMs, upper memory, a
+    /// card's window) as a 32-bit program's copy reads it
+    /// (`read_mapped`).
+    pub(crate) fn read_into(&self, addr: usize, data: &mut [u8]) {
+        if self.is_plain_run(addr, data.len()) {
+            data.copy_from_slice(&self.ram[addr..addr + data.len()]);
         } else {
-            out.extend((0..len).map(|i| self.read_8(addr.wrapping_add(i))));
+            self.read_mapped(addr, data);
         }
     }
 
-    /// Write `data` at `addr` as programs write it, as `read_run` reads
-    /// it: plain RAM with one copy, anything else through `write_8`.
+    /// Write `data` at `addr` as programs write it, as `read_into` reads
+    /// it: plain RAM with one copy, anything else as a 32-bit program's
+    /// copy writes it (`write_mapped`).
     pub(crate) fn write_run(&mut self, addr: usize, data: &[u8]) {
         if self.is_plain_run(addr, data.len()) {
             self.load_bytes(addr, data);
         } else {
-            for (i, &b) in data.iter().enumerate() {
-                self.write_8(addr.wrapping_add(i), b);
+            self.write_mapped(addr, data);
+        }
+    }
+
+    /// The size of the access a 32-bit program's copy makes at `addr`
+    /// with `left` bytes to go: a dword where it is aligned to one, a
+    /// word where it is aligned to that, a byte otherwise.
+    fn access_size(addr: usize, left: usize) -> usize {
+        if addr.is_multiple_of(4) && left >= 4 {
+            4
+        } else if addr.is_multiple_of(2) && left >= 2 {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// Fill `data` from the memory at `addr` that isn't plain RAM in
+    /// aligned dwords and words, bytes only where they can't be, as a
+    /// 32-bit program's copy reads it. Memory that takes bytes (the VGA,
+    /// the VESA frame buffer, upper memory) reads the same bytes either
+    /// way; a Voodoo Graphics' or Voodoo2's window reads no bytes, so
+    /// GDI's DIB section on its linear frame buffer (a card surface's DC)
+    /// reads its pixels this way. A Banshee's or Voodoo3's memory through
+    /// BAR1 is read in one copy (`read_from_voodoo`).
+    fn read_mapped(&self, addr: usize, data: &mut [u8]) {
+        if self.read_from_voodoo(addr, data) {
+            return;
+        }
+        let mut i = 0;
+        while i < data.len() {
+            let at = addr.wrapping_add(i);
+            let size = Self::access_size(at, data.len() - i);
+            let value = match size {
+                4 => self.read_32(at),
+                2 => self.read_16(at) as u32,
+                _ => self.read_8(at) as u32,
+            };
+            data[i..i + size].copy_from_slice(&value.to_le_bytes()[..size]);
+            i += size;
+        }
+    }
+
+    /// Write `data` to the memory at `addr` that isn't plain RAM as
+    /// `read_mapped` reads it. A Voodoo Graphics or Voodoo2 ignores byte
+    /// writes to its window, so GDI's drawing on a card surface's DC has
+    /// to go in words and dwords. The aligned dwords between the head and
+    /// the tail go into the 3dfx card in one call where they can
+    /// (`write_to_voodoo`). A Banshee's or Voodoo3's memory through BAR1
+    /// takes all of it in one copy, head and tail too
+    /// (`bytes_to_voodoo`).
+    fn write_mapped(&mut self, addr: usize, data: &[u8]) {
+        if self.bytes_to_voodoo(addr, data) {
+            return;
+        }
+        let head = (addr.wrapping_neg() & 3).min(data.len());
+        let body = (data.len() - head) & !3;
+        self.write_accesses(addr, &data[..head]);
+        let mut done = head;
+        if body > 0 && self.write_to_voodoo(addr.wrapping_add(head), &data[head..head + body]) {
+            done += body;
+        }
+        self.write_accesses(addr.wrapping_add(done), &data[done..]);
+    }
+
+    /// `write_mapped` without the card's run: an access at a time.
+    fn write_accesses(&mut self, addr: usize, data: &[u8]) {
+        let mut i = 0;
+        while i < data.len() {
+            let at = addr.wrapping_add(i);
+            let size = Self::access_size(at, data.len() - i);
+            let mut bytes = [0u8; 4];
+            bytes[..size].copy_from_slice(&data[i..i + size]);
+            let value = u32::from_le_bytes(bytes);
+            match size {
+                4 => self.write_32(at, value),
+                2 => _ = self.write_16(at, value as u16),
+                _ => _ = self.write_8(at, value as u8),
             }
+            i += size;
         }
     }
 
@@ -687,6 +790,7 @@ impl Bus {
             return false;
         };
         let _profile = self.profile.as_deref().map(|p| p.mem_run(dst, true, (len / size) as u64));
+        self.toadforce_writing(offset, len);
         self.vbe.vram[offset..offset + len].copy_from_slice(&self.ram[src..src + len]);
         self.lfb_written(dst, offset, len);
         true
@@ -705,6 +809,7 @@ impl Bus {
             .profile
             .as_deref()
             .map(|p| p.mem_run(dst, true, (len / 4) as u64));
+        self.toadforce_writing(offset, len);
         self.vbe.vram[offset..offset + len].copy_from_slice(bytes);
         self.lfb_written(dst, offset, len);
         true
@@ -719,6 +824,7 @@ impl Bus {
             return false;
         };
         let _profile = self.profile.as_deref().map(|p| p.mem_run(dst, true, count as u64));
+        self.toadforce_writing(offset, len);
         fill_pattern(&mut self.vbe.vram[offset..offset + len], size, value);
         self.lfb_written(dst, offset, len);
         true
@@ -780,7 +886,7 @@ impl Bus {
     /// plainly.
     fn plain_vga_run(&self, dst: usize, len: usize) -> bool {
         (ADDR_VGA_GRAPHICS..=ADDR_VGA_GRAPHICS + SIZE_GRAPHICS - len).contains(&dst)
-            && self.video_mode != VideoMode::Vesa
+            && !self.vbe_window()
             && self.s3_mmio(dst).is_none()
             && self.mach64_mmio(dst).is_none()
             && self.vga.plain_writes()
@@ -830,9 +936,11 @@ impl Bus {
         if self.observe.on {
             self.observe.wrote(start, end);
         }
-        for page in (start >> GEN_SHIFT)..=((end - 1) >> GEN_SHIFT) {
-            let g = &mut self.page_gen[page];
-            *g = g.wrapping_add(1);
+        let (first, last) = (start >> GEN_SHIFT, (end - 1) >> GEN_SHIFT);
+        if first <= last {
+            for g in &mut self.page_gen[first..=last] {
+                *g = g.wrapping_add(1);
+            }
         }
     }
 
@@ -933,8 +1041,12 @@ impl Bus {
         }
         if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) {
             // VESA modes: the window onto the bank of video memory.
-            if self.video_mode == VideoMode::Vesa {
-                return self.vbe.vram[self.vesa_window(addr - ADDR_VGA_GRAPHICS, false)];
+            if self.vbe_window() {
+                let offset = self.vesa_window(addr - ADDR_VGA_GRAPHICS, false);
+                if let Some(value) = self.toadforce_reads(offset, 1) {
+                    return value as u8;
+                }
+                return self.vbe.vram[offset];
             }
             // Route through VGA so chain-4, odd/even, and Read Map Select
             // work correctly. read_graphics also latches planes, needed
@@ -952,10 +1064,16 @@ impl Bus {
             return self.ram[addr];
         }
         if let Some(offset) = self.vbe.lfb_offset(addr, 1) {
+            if let Some(value) = self.toadforce_reads(offset, 1) {
+                return value as u8;
+            }
             return self.vbe.vram[offset];
         }
         if let Some(at) = self.powervr_at(addr) {
             return self.powervr_read(at, 1) as u8;
+        }
+        if let Some(at) = self.toadforce_at(addr) {
+            return self.toadforce_read(at, 1) as u8;
         }
         if let Some(offset) = self.voodoo_at(addr) {
             return self.voodoo_read_8(offset);
@@ -984,7 +1102,7 @@ impl Bus {
         if addr >= self.ram.len() {
             return self.mapped_8(addr);
         }
-        if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) && self.video_mode != VideoMode::Vesa {
+        if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) && !self.vbe_window() {
             let saved = self.vga.latches.get();
             let v = self.vga.read_graphics(self.vga_window(addr, false));
             self.vga.latches.set(saved);
@@ -1005,7 +1123,7 @@ impl Bus {
     /// the VGA's planes as `write_planes_plainly` has them.
     #[cfg_attr(not(dynrec), allow(dead_code))]
     pub(crate) fn plain_planes(&mut self) -> Option<(u8, *mut u8, usize)> {
-        if self.video_mode == VideoMode::Vesa || self.et4000() || (self.s3() && self.vga.s3.mmio()) {
+        if self.vbe_window() || self.et4000() || (self.s3() && self.vga.s3.mmio()) {
             return None;
         }
         self.vga.plain_planes()
@@ -1013,7 +1131,7 @@ impl Bus {
 
     pub(crate) fn write_planes_plainly(&mut self, addr: usize, value: u32, size: usize) -> bool {
         if !(ADDR_VGA_GRAPHICS..=ADDR_VGA_GRAPHICS + SIZE_GRAPHICS - size).contains(&addr)
-            || self.video_mode == VideoMode::Vesa
+            || self.vbe_window()
             || self.et4000()
             || (self.s3() && self.vga.s3.mmio())
             || !self.vga.write_planes_plainly(addr - ADDR_VGA_GRAPHICS, value, size)
@@ -1056,7 +1174,7 @@ impl Bus {
             return true;
         }
         if (ADDR_VGA_GRAPHICS..ADDR_VGA_GRAPHICS + SIZE_GRAPHICS).contains(&addr) {
-            if self.video_mode == VideoMode::Vesa {
+            if self.vbe_window() {
                 let offset = self.vesa_window(addr - ADDR_VGA_GRAPHICS, true);
                 self.write_vram(offset, &[value]);
                 return true;
@@ -1134,6 +1252,10 @@ impl Bus {
             self.write_vram(offset, &[value]);
             return true;
         }
+        if let Some(at) = self.toadforce_at(addr) {
+            self.toadforce_write(at, value as u32, 1);
+            return true;
+        }
         if let Some(offset) = self.voodoo_at(addr) {
             self.voodoo_write_8(offset, value);
             return true;
@@ -1201,6 +1323,10 @@ impl Bus {
     /// in for repainting.
     #[inline]
     fn write_vram(&mut self, offset: usize, bytes: &[u8]) {
+        // What a ToadForce's driver queued to draw there comes first.
+        // Where its host renderer has newer pixels, the card notes
+        // these bytes as card memory's.
+        self.toadforce_writing(offset, bytes.len());
         self.vbe.vram[offset..offset + bytes.len()].copy_from_slice(bytes);
         self.vram_written(offset, bytes.len());
     }
@@ -1210,6 +1336,7 @@ impl Bus {
     #[inline]
     fn vram_written(&mut self, offset: usize, len: usize) {
         self.note_video_write(offset, len as u64);
+        self.toadforce_wrote(offset, len);
         if self.video_mode == VideoMode::Vesa
             && let Some((first, last)) = self.vbe.frame_rows(offset, len)
         {
@@ -1253,6 +1380,10 @@ impl Bus {
             self.mach64_mmio_write(at, value as u32, 2);
             return true;
         }
+        if let Some(at) = self.toadforce_at(addr) {
+            self.toadforce_write(at, value as u32, 2);
+            return true;
+        }
         if let Some(offset) = self.voodoo_at(addr) {
             self.voodoo_write_16(offset, value);
             return true;
@@ -1287,6 +1418,9 @@ impl Bus {
             self.observe.mapped(addr, self.ram.len());
         }
         if let Some(offset) = self.vbe.lfb_offset(addr, 2) {
+            if let Some(value) = self.toadforce_reads(offset, 2) {
+                return value as u16;
+            }
             return u16::from_le_bytes([self.vbe.vram[offset], self.vbe.vram[offset + 1]]);
         }
         if let Some(port) = self.s3_mmio(addr) {
@@ -1294,6 +1428,9 @@ impl Bus {
         }
         if let Some(at) = self.mach64_mmio(addr) {
             return self.mach64_mmio_read(at, 2) as u16;
+        }
+        if let Some(at) = self.toadforce_at(addr) {
+            return self.toadforce_read(at, 2) as u16;
         }
         if let Some(offset) = self.voodoo_at(addr) {
             return self.voodoo_read_16(offset);
@@ -1326,6 +1463,9 @@ impl Bus {
             self.observe.mapped(addr, self.ram.len());
         }
         if let Some(offset) = self.vbe.lfb_offset(addr, 4) {
+            if let Some(value) = self.toadforce_reads(offset, 4) {
+                return value;
+            }
             let v = &self.vbe.vram[offset..offset + 4];
             return u32::from_le_bytes([v[0], v[1], v[2], v[3]]);
         }
@@ -1334,6 +1474,9 @@ impl Bus {
         }
         if let Some(at) = self.mach64_mmio(addr) {
             return self.mach64_mmio_read(at, 4);
+        }
+        if let Some(at) = self.toadforce_at(addr) {
+            return self.toadforce_read(at, 4);
         }
         if let Some(offset) = self.voodoo_at(addr) {
             return self.voodoo_read_32(offset);
@@ -1374,6 +1517,10 @@ impl Bus {
         }
         if let Some(at) = self.mach64_mmio(addr) {
             self.mach64_mmio_write(at, value, 4);
+            return;
+        }
+        if let Some(at) = self.toadforce_at(addr) {
+            self.toadforce_write(at, value, 4);
             return;
         }
         if let Some(offset) = self.voodoo_at(addr) {
@@ -1481,6 +1628,7 @@ impl Bus {
             self.banshee_next_event(),
             self.powervr_next_event(),
             self.verite_next_event(),
+            self.toadforce_next_event(),
             self.ide_next_event(),
             self.fdc_next_event(),
             self.net_next_event(),
@@ -1524,6 +1672,9 @@ impl Bus {
         }
         if self.verite_next_event().is_some_and(|t| t <= now) {
             self.verite_service();
+        }
+        if self.toadforce_next_event().is_some_and(|t| t <= now) {
+            self.toadforce_service();
         }
         if self.ide_next_event().is_some_and(|t| t <= now) {
             self.ide_service();
@@ -2099,7 +2250,8 @@ impl Bus {
     /// line stays up while any of them holds it.
     fn pci_holds(&self, irq: u8) -> bool {
         let banshee = self.banshee().and_then(|b| b.irq_up);
-        [banshee, self.powervr_line, self.verite.line].contains(&Some(irq))
+        let toadforce = self.toadforce_irq_up();
+        [banshee, self.powervr_line, self.verite.line, toadforce].contains(&Some(irq))
     }
 
     /// A device's line `irq` dropped: withdraw its request, unless a PCI
@@ -2596,6 +2748,14 @@ impl Bus {
                         self.video_mode = new_mode;
                         self.vga.mark_dirty_full();
                     }
+                    // A ToadForce counts the VGA's retraces, with the
+                    // timing the registers give it from this write on.
+                    // Only the miscellaneous output, the sequencer and
+                    // the CRTC hold timing: palette and attribute
+                    // writes don't reach the card.
+                    if self.toadforce.is_some() && matches!(port, 0x3C2 | 0x3C5 | 0x3B5 | 0x3D5) {
+                        self.toadforce_retime();
+                    }
                 } else {
                     // Unhandled port write: log the first few to each port.
                     const LOGGED: u8 = 8;
@@ -2830,6 +2990,21 @@ impl Bus {
         }
     }
 
+    /// The frame rate cap (`fps_cap`): a `Cap`, or a rate with None for
+    /// none.
+    pub fn set_fps_cap(&mut self, cap: impl Into<crate::frame_cap::Cap>) {
+        self.frame_cap.set(cap);
+    }
+
+    /// The timing the window refreshes at with a variable refresh rate
+    /// while a program shows frames through the frame rate cap: the
+    /// cap's rate, when the cap is below the monitor's refresh rate
+    /// (`FrameCap::refresh_timing`).
+    pub fn frame_cap_timing(&mut self) -> Option<crate::video::crt::CrtTiming> {
+        let cap = self.frame_cap.get().refresh_timing(self.clock.now_ns())?;
+        (cap.hz() < self.refresh_timing().hz()).then_some(cap)
+    }
+
     /// The video timing of the picture the monitor shows: the 3dfx card's
     /// while it drives the monitor, the display's otherwise.
     pub fn refresh_timing(&mut self) -> crate::video::crt::CrtTiming {
@@ -2887,6 +3062,10 @@ impl Bus {
             }
             self.count_frame();
         }
+        // The screen is drawn from card memory next, from the start
+        // latched above: what a ToadForce's host renderer drew of the
+        // picture is read back into it.
+        self.toadforce_show();
     }
 
     /// After a switch between text and graphics made through the attribute
@@ -2898,6 +3077,12 @@ impl Bus {
         if !std::mem::take(&mut self.vga.mode_switched) || self.video_mode == VideoMode::Vesa {
             return;
         }
+        self.show_register_mode();
+    }
+
+    /// Show the mode the VGA's registers describe, where it is another
+    /// kind than the one shown: text or graphics, 256 colours or fewer.
+    pub(crate) fn show_register_mode(&mut self) {
         let colours256 = |mode: VideoMode| mode == VideoMode::Graphics320x200;
         if let Some(mode) = self.vga.register_mode()
             && (mode.is_text() != self.video_mode.is_text() || colours256(mode) != colours256(self.video_mode))
@@ -3036,8 +3221,11 @@ impl Bus {
     /// In a VESA mode the Start Address registers and CRTC 69h give the
     /// display start in doublewords.
     fn update_vbe_start(&mut self) {
-        // A Vérité's own CRTC has its start in its own register.
-        if self.video_mode == VideoMode::Vesa && !self.verite.native && !self.mach64.native {
+        // A Vérité's own CRTC has its start in its own register, and a
+        // ToadForce's own mode in `MODE_START`: the VGA's registers take
+        // the write and show nothing of it.
+        let native = self.verite.native || self.mach64.native || self.toadforce_shows();
+        if self.video_mode == VideoMode::Vesa && !native {
             let crtc = &self.vga.crtc_regs;
             let dwords = (self.vbe.start_high as u32) << 16 | (crtc[0x0C] as u32) << 8 | crtc[0x0D] as u32;
             self.vbe.start = dwords * 4;
@@ -3106,6 +3294,7 @@ impl Bus {
                 | video::adapter::Adapter::Et4000
                 | video::adapter::Adapter::AtiRage
                 | video::adapter::Adapter::AtiRage2
+                | video::adapter::Adapter::ToadForce
         );
         if !(vga && matches!(port, 0x3DA | 0x3BA) && self.vga.decodes(port)) {
             return None;

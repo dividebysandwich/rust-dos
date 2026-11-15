@@ -278,13 +278,15 @@ pub(super) fn wait_for_multiple_objects(cpu: &mut Cpu, args: &[u32]) -> Option<u
 
 /// Sleep(ms), and SleepEx(ms, alertable), which returns 0: other threads
 /// run meanwhile. Sleep(0) gives the rest of the turn to another thread
-/// that is ready.
+/// of the same priority or a higher one that is ready, and with none,
+/// returns at once (`thread::yield_turn`).
 pub(super) fn sleep(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let ms = args[0];
     cpu.set_eax(0);
     if ms == 0 {
-        thread::reschedule(cpu);
-        return None;
+        // A call that switched threads returns when the thread runs again.
+        let switched = thread::yield_turn(cpu);
+        return (!switched).then_some(0);
     }
     let deadline = (ms != INFINITE).then(|| cpu.bus.clock.now_micros() + ms as u64 * 1000);
     thread::block(

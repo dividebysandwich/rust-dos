@@ -64,7 +64,8 @@ aspect=4:3
 # ET4000 with HiColor), vga, ega, cga or hercules.
 #machine=svga
 # RAM in MB, 2 to 64 on a 386, 128 on a 486, 256 on a Pentium, 512 on a
-# Pentium MMX.
+# Pentium MMX. Without this line: 16 up to a Pentium, 32 to 128 with the
+# later processors.
 #memsize=16
 # Expanded memory (EMS 4.0) for the games that want it, and upper memory
 # blocks for LOADHIGH: true or false.

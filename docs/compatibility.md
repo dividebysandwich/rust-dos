@@ -25,7 +25,16 @@ settings of a game only when the checksums match. That works for DOS
 games and for games on the built-in Windows, which start from the same
 prompt. The almanac carries the machine's settings only: the graphics
 card, processor, speed, memory, DPMI, the DOS and Windows versions, the
-3D cards, the sound cards, the joystick and the disks' speeds.
+Windows desktop's colour depth (`win32_depth`) and system locale
+(`win32_locale`), the 3D cards, the sound cards, the joystick and the
+disks' speeds.
+
+A version a report adds is filed under its program's platform: DOS,
+Windows 3.1 (an NE file) or Windows 95/98 (a PE file). For a Windows
+version the almanac recommends `win32=true` even before anyone has
+reported on it, so with `almanac_auto` a Windows game started at the
+prompt runs on the built-in Windows rather than as its DOS stub, which
+only says it needs Windows. A report that sets `win32` itself wins.
 
 ## What this page adds
 
@@ -33,11 +42,14 @@ What the almanac can't carry:
 
 * files to copy or remove, drivers, command-line switches and install
   steps;
-* settings outside its list, such as `win32_depth`;
+* settings outside its list, such as `win32_dlls` and `win32_trace`;
 * limits that are known;
 * games on a Windows 95 or 98 disk image. There the game is started by
   the Windows inside the image, not at Rust-DOS's prompt, so Rust-DOS
-  never sees which program runs and can't look it up.
+  never sees which program runs and can't look it up;
+* the program a launcher on the built-in Windows starts. The almanac
+  knows a game by the program started at the prompt, so a game whose
+  launcher starts the real program is filed under the launcher.
 
 Where an entry also names settings the almanac takes, they can be
 fetched from it or reported to it like any other.
@@ -121,9 +133,15 @@ opcode, `win32_version=98se` when a message names the version, more
   installs it with its InstallShield 5 setup and runs it. For a CD
   copied to a folder, give the drive the label `EI` ([the CD's drive
   letter and label](../CONFIGURATION.md#the-cds-drive-letter-and-label)).
-* **Grom**: its Wise setup runs (tested with the minimum installation).
-  It is on two CDs; list both images on the drive line and press Ctrl+F4
-  when the setup asks for the second ([running the
+* **Grom**: `win32=true` and `machine=svga_toadforce`
+  ([ToadForce](../CONFIGURATION.md#toadforce)). It stops at start with
+  an assertion (`screen.Init`) when Direct3D lists no 32-bit texture
+  format. A Voodoo3 (`svga_voodoo3`) lists none, as the real card
+  didn't, so Grom doesn't run on it. On the ToadForce, at 800x600 in
+  16 bits, it reaches its main menu and the tutorial level. Its Wise
+  setup runs (tested with the minimum installation). It is on two CDs;
+  list both images on the drive line and press Ctrl+F4 when the setup
+  asks for the second ([running the
   setup](../CONFIGURATION.md#running-the-setup-on-first-start)).
 * **Iron Helix**: `win32_depth=8` (256 colours).
 * **Moto Racer**: `win32_depth=16`; it checks the desktop's depth before
@@ -134,6 +152,13 @@ opcode, `win32_version=98se` when a message names the version, more
   room](../CONFIGURATION.md#directplay-games-on-the-built-in-windows)
   over the IPX connection, the only one the game takes; it lists the
   TCP/IP one but ignores it, on Windows too.
+* **Test Drive 4**: update it to version 1.2 with its patch,
+  TD42UP.EXE, which runs on the built-in Windows. The game fix
+  `td4-intro-camera` then keeps the race camera behind the car at any
+  frame rate ([game fixes](../CONFIGURATION.md#game-fixes)). On 1.0,
+  which the fix doesn't patch, a fast machine starts each race with the
+  camera just above the car: press F4 five times to get the chase view
+  back, or set `voodoo_fps_cap=30`.
 * **Wages of War**: `win32_depth=8`; it says it must run with 256
   colours and stops on the default desktop, which has more. Its setup
   (InstallShield 3's 32-bit engine) runs, and its archives also unpack
@@ -142,11 +167,76 @@ opcode, `win32_version=98se` when a message names the version, more
   there only with a 3dfx card: `voodoo=true`, or
   `machine=svga_voodoo3` or `svga_banshee`
   ([the system folder](builtin-windows.md#the-system-folder)).
+* **Zanzarah: The Hidden Portal**: `win32=true` and
+  `machine=svga_toadforce` ([ToadForce](../CONFIGURATION.md#toadforce)).
+  It reads its DDS textures only when Direct3D lists a compressed (DXT)
+  texture format. Without one it reads BMP files, and its BMP reader
+  crashes when a level loads. A Voodoo3 (`svga_voodoo3`) lists no DXT
+  format, as the real card didn't, so Zanzarah doesn't run on it. On
+  the ToadForce, at 640x480 in 16 bits, it loads a save and plays in
+  the Fairy Garden.
 * **SafeDisc and SecuROM games**: use an image of the disc that keeps
   what the protection checks. An ISO fails SafeDisc's check, and an
   image without DPM data SecuROM 4.8's, as on Windows 98.
   [copy-protection.md](copy-protection.md) has the image each
   protection needs and the tools that make it.
+
+### Games in other languages
+
+A game translated for a Windows of another language may need that
+Windows' locale, `win32_locale` in
+[`[emulator]`](../CONFIGURATION.md#emulator). The built-in Windows is a
+US English one unless the setting says otherwise.
+
+Set it when a game's text shows as question marks, accented Latin
+letters where another alphabet belongs (any Cyrillic or Greek text
+comes out as a run like `Ñòàðò`), or the wrong letters with diacritics
+(Central European, Turkish and Baltic text). That happens in what
+Windows draws for the game: its launcher or setup, dialogs, message
+boxes, menus and window titles. Text a game draws with its own fonts
+usually shows right under any locale, so a game can have an unreadable
+launcher and readable menus.
+
+The locale of each language, by the group of languages that shares a
+code page:
+
+* **Baltic**: Estonian `et-EE`, Latvian `lv-LV`, Lithuanian `lt-LT`.
+* **Central European**: Croatian `hr-HR`, Czech `cs-CZ`, Hungarian
+  `hu-HU`, Polish `pl-PL`, Romanian `ro-RO`, Serbian in Latin script
+  `sr-Latn-YU`, Slovak `sk-SK`, Slovenian `sl-SI`.
+* **Cyrillic**: Belarusian `be-BY`, Bulgarian `bg-BG`, Russian
+  `ru-RU`, Serbian in Cyrillic script `sr-Cyrl-YU`, Ukrainian `uk-UA`.
+* **Greek**: `el-GR`.
+* **Turkish**: `tr-TR`.
+* **Western European**: Danish `da-DK`, Dutch `nl-NL`, English
+  `en-GB` and `en-US`, Finnish `fi-FI`, French `fr-FR`, German
+  `de-DE`, Italian `it-IT`, Norwegian `nb-NO`, Portuguese `pt-BR` and
+  `pt-PT`, Spanish `es-ES`, Swedish `sv-SE`. Their letters are in the
+  default locale's code page, so their games' text shows right under
+  `en-US` too; their own locale gives their dates, numbers and
+  language id.
+
+A locale of the wrong group shows the game's text as described above.
+One of the right group but another language shows the text right, with
+that language's month names and date and number formats, and a game
+that picks its language by the system's language id may pick the wrong
+one or English.
+
+Languages of these code pages without a locale of their own (Catalan,
+Icelandic, Macedonian, the regional forms of German, French and
+Spanish, and others) take the nearest one of their group: a Macedonian
+game's text shows right under any Cyrillic locale.
+
+Japanese, Chinese and Korean games
+([#1017](https://github.com/dividebysandwich/rust-dos/issues/1017)),
+and Hebrew and Arabic ones
+([#1018](https://github.com/dividebysandwich/rust-dos/issues/1018)),
+have no locale yet. Run those on a
+[Windows 95 or 98 image](#windows-games-on-a-windows-95-or-98-image) of
+that language.
+
+The almanac carries the setting, so a game with a report gets its
+locale with `almanac_auto`.
 
 ### Installer archives
 

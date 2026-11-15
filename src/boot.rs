@@ -254,6 +254,7 @@ fn reset_machine(cpu: &mut Cpu) {
     bus.reset_ne2000();
     bus.reset_serial();
     bus.reset_voodoo();
+    bus.reset_toadforce();
     bus.mouse.remove_callback();
     crate::mouse::clear_callback_busy(bus);
     bus.mouse.ps2 = crate::mouse::Ps2Mouse::default();

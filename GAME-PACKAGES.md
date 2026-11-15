@@ -213,6 +213,10 @@ START
   starts (see [Windows games](CONFIGURATION.md#windows-games)). The
   package can't hold the game's `.reg` file: it goes beside the profile
   the package makes in the `games` folder (`games/<profile>.reg`).
+  `year=`, `publisher=` and `notes=` go into the profile, for the
+  [almanac](CONFIGURATION.md#game-profiles). Leave `uuid=` out: each
+  profile made from the package gets one of its own, and the package's
+  is never copied.
 * **Settings sections** (`[emulator]`, `[sound]`, `[joystick]` and the
   rest) are the game's settings, applied over yours while it runs. List
   only what the game needs; [CONFIGURATION.md](CONFIGURATION.md) has every

@@ -1,6 +1,7 @@
 //! D3D8.DLL: Direct3D 8, as DirectX 8.1 had it on Windows 98 with a 3dfx
-//! Banshee or Voodoo3: IDirect3D8 and the device, swap chains, surfaces,
-//! textures and vertex and index buffers it makes.
+//! Banshee or Voodoo3, and on a ToadForce: IDirect3D8 and the device,
+//! swap chains, surfaces, textures and vertex and index buffers it
+//! makes.
 //!
 //! It is a layer over DirectDraw's Direct3D (`ddraw::d3d`). Each device
 //! has a DirectDraw object of its own and a Direct3D device of version 8
@@ -19,13 +20,15 @@
 //! device is drawing with; they go with the device (or when the device
 //! lets go of them). A texture's levels count on their texture.
 //!
-//! The only device type is the HAL, with software vertex processing:
-//! transform, lighting and vertex shaders (vs.1.0 and 1.1, `shader.rs`)
-//! run on the processor. There are no pixel shaders, cube or volume
-//! textures, or reference rasterizer. On a machine whose display adapter
-//! isn't a Banshee or Voodoo3 (one with a Voodoo Graphics or Voodoo2
-//! add-on card) there is no device: CreateDevice fails with
-//! D3DERR_NOTAVAILABLE.
+//! The only device type is the HAL. On a Voodoo it has software vertex
+//! processing: transform, lighting and vertex shaders (vs.1.0 and 1.1,
+//! `shader.rs`) run on the processor. A ToadForce transforms and lights
+//! itself, and its device takes hardware and mixed vertex processing
+//! too; shaders and indexed vertex blending stay on the processor
+//! (`caps.rs`). There are no pixel shaders, cube or volume textures, or
+//! reference rasterizer. On a machine whose display adapter is none of
+//! the three (one with a Voodoo Graphics or Voodoo2 add-on card) there
+//! is no device: CreateDevice fails with D3DERR_NOTAVAILABLE.
 //!
 //! Parts of this follow Wine 1.2.3's d3d8 (device.c, directx.c,
 //! vertexdeclaration.c and others), which is under the GNU Lesser General
@@ -383,6 +386,15 @@ static APIS: &[Api] = &[
     method("Texture8_LockRect", 5, resource::texture_lock_rect),
     method("Texture8_UnlockRect", 2, resource::texture_unlock_rect),
     method("Texture8_AddDirtyRect", 2, resource::add_dirty_rect),
+    method("CubeTexture8_GetLevelDesc", 3, resource::get_level_desc),
+    method(
+        "CubeTexture8_GetCubeMapSurface",
+        4,
+        resource::get_cube_map_surface,
+    ),
+    method("CubeTexture8_LockRect", 6, resource::cube_lock_rect),
+    method("CubeTexture8_UnlockRect", 3, resource::cube_unlock_rect),
+    method("CubeTexture8_AddDirtyRect", 3, resource::add_dirty_rect),
     method("Buffer8_Lock", 5, resource::buffer_lock),
     method("Buffer8_Unlock", 1, resource::buffer_unlock),
     method("VertexBuffer8_GetDesc", 2, resource::vertex_buffer_get_desc),
@@ -577,6 +589,17 @@ const TEXTURE8: [&str; 19] = concat(
     ],
 );
 
+const CUBETEXTURE8: [&str; 19] = concat(
+    BASETEXTURE8,
+    [
+        "CubeTexture8_GetLevelDesc",
+        "CubeTexture8_GetCubeMapSurface",
+        "CubeTexture8_LockRect",
+        "CubeTexture8_UnlockRect",
+        "CubeTexture8_AddDirtyRect",
+    ],
+);
+
 const VERTEXBUFFER8: [&str; 14] = concat(
     RESOURCE8,
     ["Buffer8_Lock", "Buffer8_Unlock", "VertexBuffer8_GetDesc"],
@@ -617,6 +640,10 @@ static VTABLES: &[Vtable] = &[
         name: "IDirect3DIndexBuffer8",
         methods: &INDEXBUFFER8,
     },
+    Vtable {
+        name: "IDirect3DCubeTexture8",
+        methods: &CUBETEXTURE8,
+    },
 ];
 
 pub const V_DIRECT3D8: usize = 0;
@@ -626,6 +653,7 @@ pub const V_SURFACE8: usize = 3;
 pub const V_TEXTURE8: usize = 4;
 pub const V_VERTEXBUFFER8: usize = 5;
 pub const V_INDEXBUFFER8: usize = 6;
+pub const V_CUBETEXTURE8: usize = 7;
 
 // HRESULTs.
 
@@ -700,6 +728,12 @@ pub const IID_TEXTURE8: Guid = guid(
     0x2866,
     0x4F01,
     [0xB1, 0x2E, 0x7E, 0xEC, 0xE1, 0xEC, 0x93, 0x58],
+);
+pub const IID_CUBETEXTURE8: Guid = guid(
+    0x3EE5_B968,
+    0x2ACA,
+    0x4C34,
+    [0x8B, 0xB5, 0x7E, 0x0C, 0x3D, 0x19, 0xB7, 0x50],
 );
 
 // The state.
@@ -1001,6 +1035,7 @@ fn has_interface(vtable: usize, iid: &Guid) -> bool {
         V_SWAPCHAIN8 => *iid == IID_SWAPCHAIN8,
         V_SURFACE8 => *iid == IID_SURFACE8 || *iid == IID_RESOURCE8,
         V_TEXTURE8 => [IID_RESOURCE8, IID_BASETEXTURE8, IID_TEXTURE8].contains(iid),
+        V_CUBETEXTURE8 => [IID_RESOURCE8, IID_BASETEXTURE8, IID_CUBETEXTURE8].contains(iid),
         V_VERTEXBUFFER8 => *iid == IID_RESOURCE8 || *iid == IID_VERTEXBUFFER8,
         V_INDEXBUFFER8 => *iid == IID_RESOURCE8 || *iid == IID_INDEXBUFFER8,
         _ => false,

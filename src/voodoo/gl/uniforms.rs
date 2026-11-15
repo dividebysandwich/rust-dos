@@ -5,7 +5,7 @@
 use glow::HasContext;
 use std::cell::Cell;
 
-pub(super) trait Locations {
+pub(crate) trait Locations {
     fn resolve(gl: &glow::Context, program: glow::Program) -> Self;
 }
 
@@ -136,7 +136,8 @@ locations!(Triangle {
     u_tdetail1: [i32; 3],
     u_constant_depth: i32,
     u_dither: i32,
-    u_card_blend: i32
+    u_card_blend: i32,
+    u_sample: i32
 });
 locations!(Quad {
     u_rect: [f32; 4],

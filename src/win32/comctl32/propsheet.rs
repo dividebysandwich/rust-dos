@@ -35,8 +35,8 @@ use super::misc::{heap_alloc, heap_free, process_heap};
 use super::script::{self, Arg, Ctx, Op, Script};
 use super::{PROPSHEET, kernel32, state, tab};
 use crate::cpu::Cpu;
-use crate::win32::convert::CodePage;
 use crate::win32::gdi32::Rect;
+use crate::win32::nls;
 use crate::win32::user32::message::{
     WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_GETDLGCODE, WM_INITDIALOG, WM_KEYDOWN, WM_NOTIFY,
 };
@@ -560,6 +560,7 @@ fn collect_page(cpu: &mut Cpu, sheet: &mut Sheet, hpage: u32, resize: bool) -> O
     }
     p = skip_name(cpu, p);
     p = skip_name(cpu, p);
+    let acp = nls::ansi(cpu);
     let mut text = Vec::new();
     for _ in 0..MAX_TEXT {
         let c = r16(cpu, p) as u16;
@@ -567,7 +568,7 @@ fn collect_page(cpu: &mut Cpu, sheet: &mut Sheet, hpage: u32, resize: bool) -> O
         if c == 0 || cpu.bus.guest_faulted() {
             break;
         }
-        text.push(CodePage::Ansi.byte(c).unwrap_or(b'?'));
+        text.push(acp.byte(c).unwrap_or(b'?'));
     }
     if flags & PSP_USETITLE != 0 {
         text = if title < 0x1_0000 {

@@ -20,9 +20,14 @@
 //! room for code like SafeDisc's (which clears five debug registers), so
 //! that it doesn't run into the next vectors' handlers while it is
 //! there: the timer's (vector 8) is a few after the exceptions'.
+//!
+//! The block is VMM's locked code object as well, and ends with VMM's
+//! code (vmm.rs): the services that a program's level 0 code calls
+//! through INT 20h run in Rust here (`vxd_service`) or as that code.
 
 use super::memory::{Memory, PAGE, SYSTEM, USER, WRITABLE};
-use super::{Context, EAX, ECX, EDX, ESP, ID_IDT, IDT_TRAPS, ROM_BASE, realmode};
+use super::{Context, EAX, ECX, EDI, EDX, ESP, ID_IDT, IDT_TRAPS, ROM_BASE, realmode, vmm};
+use crate::bus::Bus;
 use crate::cpu::{CR0_PE, CR0_PG, CR4_OSFXSR, Cpu, CpuFlags, DescTable, Seg, SegCache, alu};
 use crate::dpmi::descriptor;
 
@@ -40,21 +45,56 @@ pub const LDT_OFFSET: u32 = LDT;
 pub const LDT_ENTRIES: u32 = 0x2000;
 const RING0_STACK: u32 = LDT + 8 * LDT_ENTRIES;
 const RING0_STACK_TOP: u32 = RING0_STACK + 2 * PAGE;
+/// VMM's client register structure (VMM.INC's Client_Reg_Struc, 48h
+/// bytes), the program's state as VMM's services see it, at the top of
+/// the level 0 stack as on Windows 9x (`vmm`).
+const CLIENT_REGS: u32 = RING0_STACK_TOP - 0x48;
+/// The level 0 stack's top, the TSS's ESP0, at Client_ES: the frame of
+/// an interrupt or exception from level 3 fills Client_EIP to Client_SS,
+/// and an exception's error code Client_Error.
+const RING0_ESP: u32 = CLIENT_REGS + 0x38;
 /// The handlers the IDT's gates lead to, `HANDLER_SIZE` bytes each: a
 /// jump to the vector's trap in the ROM, and room for a program's own
 /// code in its place.
 const HANDLERS: u32 = RING0_STACK_TOP;
 const HANDLER_SIZE: u32 = 32;
 /// VMM's data for the services a program's level 0 code may call through
-/// INT 20h (`vxd_service`): VMM's DDB and the list of where the VxDs are
-/// in memory, which VMM_GetVxDLocationList returns.
+/// INT 20h (`vxd_service`): VMM's DDB, the list of where the VxDs are in
+/// memory, which VMM_GetVxDLocationList returns, and the VxDs loaded
+/// since the start (`DYNAMIC_VXDS`), which VXDLDR_GetDeviceList returns.
 const VMM_DATA: u32 = HANDLERS + 256 * HANDLER_SIZE;
 const VMM_DDB: u32 = VMM_DATA;
 const DDB_SIZE: u32 = 0x50;
 const VXD_LOCATIONS: u32 = VMM_DDB + DDB_SIZE;
 /// The VxD location list's length: VMM's record with one object.
 const VXD_LOCATIONS_LEN: u32 = 5 + 9;
-pub const SYSTEM_BLOCK_PAGES: u32 = (VXD_LOCATIONS + VXD_LOCATIONS_LEN).div_ceil(PAGE);
+/// VXDLDR's variable with the head of its list of DeviceInfo blocks,
+/// which VXDLDR_GetDeviceList returns: 0 while it has loaded none. The
+/// service reads it here, so the process of a state saved before the
+/// built-in Windows had these VxDs, whose block has 0 here, keeps the
+/// empty list it had.
+const DEVICE_LIST: u32 = (VXD_LOCATIONS + VXD_LOCATIONS_LEN).next_multiple_of(4);
+/// VMM's code (`vmm`): the routines of the services the built-in Windows
+/// runs as guest code, VMM's service table and the VM's control block.
+/// It ends VMM's locked code object. VMM's data before it stays where a
+/// state saved before VMM had code has it.
+const VMM_CODE: u32 = (DEVICE_LIST + 4).next_multiple_of(16);
+/// The dynamically loaded VxDs, `VXD_SIZE` bytes each, in load order:
+/// the VxD's locked code object (`VXD_OBJECT_SIZE` bytes: its control
+/// procedure and its DDB), then VXDLDR's DeviceInfo with its ObjectInfo
+/// array and the module's name.
+const VXDS: u32 = VMM_CODE + vmm::SIZE;
+const VXD_CONTROL: u32 = 0x00;
+const VXD_DDB: u32 = 0x10;
+const VXD_OBJECT_SIZE: u32 = VXD_DDB + DDB_SIZE;
+const VXD_INFO: u32 = VXD_OBJECT_SIZE;
+/// The DeviceInfo's parts, from its start. Windows 98 SE's VXDLDR puts
+/// the ObjectInfo array 30h bytes after the DeviceInfo, as here, for
+/// most of its VxDs.
+const INFO_OBJECTS: u32 = 0x30;
+const INFO_NAME: u32 = 0x40;
+const VXD_SIZE: u32 = VXD_INFO + INFO_NAME + 0x10;
+pub const SYSTEM_BLOCK_PAGES: u32 = (VXDS + VXD_SIZE * DYNAMIC_VXDS.len() as u32).div_ceil(PAGE);
 
 /// The GDT's selectors: the TSS, the LDT, and level 0 code and data
 /// covering everything at 28h and 30h, where Windows 98's VMM has its
@@ -94,7 +134,8 @@ fn write_descriptor(cpu: &mut Cpu, at: u32, desc: u64) {
 /// Make the system block (`pages` in a row at `phys`) and map it, open to
 /// level 3 as Windows 95's system arena is: the GDT, the IDT and the
 /// handlers its gates lead to, the TSS with the level 0 stack and the LDT
-/// with the program's selectors, the TIB's at `tib`.
+/// with the program's selectors, the TIB's at `tib`, and VMM's data and
+/// code.
 pub fn build_tables(cpu: &mut Cpu, memory: &mut Memory, phys: u32, tib: u32) -> Option<()> {
     for page in 0..SYSTEM_BLOCK_PAGES {
         memory.map(
@@ -136,7 +177,7 @@ pub fn build_tables(cpu: &mut Cpu, memory: &mut Memory, phys: u32, tib: u32) -> 
         write_descriptor(cpu, phys + IDT + 8 * vector, gate);
     }
     let tss = (phys + TSS) as usize;
-    cpu.bus.write_32(tss + 4, SYSTEM + RING0_STACK_TOP);
+    cpu.bus.write_32(tss + 4, SYSTEM + RING0_ESP);
     cpu.bus.write_32(tss + 8, DATA0 as u32);
     cpu.bus.write_16(tss + 0x66, (IOPB - TSS) as u16);
     cpu.bus.write_8((phys + IOPB_END) as usize, 0xFF);
@@ -161,37 +202,314 @@ pub fn build_tables(cpu: &mut Cpu, memory: &mut Memory, phys: u32, tib: u32) -> 
     Some(())
 }
 
-/// VMM's DDB and the VxD location list, in the system block at `phys`.
+/// A VxD's DDB (VMM.INC's VxD_Desc_Block), as offsets from its start.
+const DDB_NEXT: u32 = 0x00;
+const DDB_SDK_VERSION: u32 = 0x04;
+const DDB_DEVICE_ID: u32 = 0x06;
+const DDB_VERSION: u32 = 0x08;
+const DDB_FLAGS: u32 = 0x0A;
+const DDB_NAME: u32 = 0x0C;
+const DDB_INIT_ORDER: u32 = 0x14;
+const DDB_CONTROL_PROC: u32 = 0x18;
+const DDB_SERVICE_TABLE: u32 = 0x30;
+const DDB_SERVICE_TABLE_SIZE: u32 = 0x34;
+const DDB_PREV: u32 = 0x3C;
+const DDB_SIZE_FIELD: u32 = 0x40;
+const DDB_RESERVED: u32 = 0x44;
+
+/// A VxD that Windows 98 SE's VXDLDR loads after the start and that the
+/// built-in Windows stands for, with the fields its DDB and DeviceInfo
+/// have there.
+struct DynamicVxd {
+    /// The DDB's name, padded with spaces.
+    name: &'static [u8; 8],
+    /// The module's name in the DeviceInfo, shorter than 16 bytes.
+    module: &'static str,
+    id: u16,
+    /// The DDK version the VxD was built for.
+    sdk: u16,
+    version: (u8, u8),
+    init_order: u32,
+    /// Whether the machine has what the VxD serves, so that Windows 98
+    /// loads it.
+    present: fn(&Bus) -> bool,
+}
+
+/// `DynamicVxd::present` of a VxD that every machine has a use for.
+fn always(_: &Bus) -> bool {
+    true
+}
+
+/// The dynamically loaded VxDs of the parts of a Windows 98 machine that
+/// the built-in Windows provides, in the order Windows 98 SE loads them:
+/// the configuration manager's enumerators of the BIOS's devices, ISA
+/// Plug and Play and, on a machine with one, the PCI bus (a machine with
+/// no S3, 3dfx or other PCI card has none, its PnP BIOS lists none, and
+/// Windows 98 doesn't load PCI's VxD there); then IOS's drivers for the
+/// disks and the CD-ROM drive, which the built-in Windows serves through
+/// its files, INT 13h and ASPI (APIX, the ATAPI layer under ASPI, CDFS
+/// and the CD-ROM's type and volume drivers, the disks' type driver,
+/// voltrack, and ESDI_506, the IDE controller's port driver). Each has
+/// the DDB fields Windows 98 SE's has. VxDs of hardware a machine may
+/// lack (sound cards, displays, floppy drives) and NTKERN's WDM drivers,
+/// which the built-in Windows has no counterpart of, aren't listed.
+const DYNAMIC_VXDS: [DynamicVxd; 10] = [
+    DynamicVxd {
+        name: b"BIOS    ",
+        module: "BIOS",
+        id: 0x003D,
+        sdk: 0x040A,
+        version: (4, 10),
+        init_order: 0x1680_0001,
+        present: always,
+    },
+    DynamicVxd {
+        name: b"ISAPNP  ",
+        module: "ISAPNP",
+        id: 0x003C,
+        sdk: 0x040A,
+        version: (4, 10),
+        init_order: 0x1680_0000,
+        present: always,
+    },
+    DynamicVxd {
+        name: b"PCI     ",
+        module: "PCI",
+        id: 0x0043,
+        sdk: 0x040A,
+        version: (4, 10),
+        init_order: 0x1680_0000,
+        present: Bus::pci_present,
+    },
+    DynamicVxd {
+        name: b"APIX    ",
+        module: "APIX",
+        id: 0x0022,
+        sdk: 0x0400,
+        version: (3, 10),
+        init_order: UNDEFINED_INIT_ORDER,
+        present: always,
+    },
+    DynamicVxd {
+        name: b"CDFS    ",
+        module: "CDFS",
+        id: 0,
+        sdk: 0x040A,
+        version: (3, 0),
+        init_order: 0xA001_0100,
+        present: always,
+    },
+    DynamicVxd {
+        name: b"CDTSD   ",
+        module: "CDTSD",
+        id: 0,
+        sdk: 0x0400,
+        version: (3, 10),
+        init_order: UNDEFINED_INIT_ORDER,
+        present: always,
+    },
+    DynamicVxd {
+        name: b"CDVSD   ",
+        module: "CDVSD",
+        id: 0,
+        sdk: 0x040A,
+        version: (3, 10),
+        init_order: UNDEFINED_INIT_ORDER,
+        present: always,
+    },
+    DynamicVxd {
+        name: b"DiskTSD ",
+        module: "DiskTSD",
+        id: 0,
+        sdk: 0x040A,
+        version: (3, 10),
+        init_order: UNDEFINED_INIT_ORDER,
+        present: always,
+    },
+    DynamicVxd {
+        name: b"voltrack",
+        module: "voltrack",
+        id: 0x0090,
+        sdk: 0x0400,
+        version: (3, 10),
+        init_order: UNDEFINED_INIT_ORDER,
+        present: always,
+    },
+    DynamicVxd {
+        name: b"ESDI_506",
+        module: "ESDI_506",
+        id: 0x008D,
+        sdk: 0x0400,
+        version: (3, 10),
+        init_order: UNDEFINED_INIT_ORDER,
+        present: always,
+    },
+];
+
+/// The init order of a VxD that has no place of its own among the
+/// others: it comes after them.
+const UNDEFINED_INIT_ORDER: u32 = 0x8000_0000;
+/// The flags of a dynamically loaded VxD's DDB on Windows 98 SE, once it
+/// has started: bit 15, which VXDLDR sets on the VxDs it loads, and bits
+/// 1 and 2.
+const DYNAMIC_DDB_FLAGS: u16 = 0x8006;
+/// The signature of a DeviceInfo, "XVLD" read as a dword.
+const DEVICE_INFO_SIGNATURE: u32 = 0x444C_5658;
+
+/// The DDB's three reserved dwords, which VMM.INC's
+/// Declare_Virtual_Device fills with the signatures 'Rsv1' to 'Rsv3',
+/// as MASM stores a dword of four characters: the first character in
+/// the high byte, so that memory reads "1vsR" and so on, as on Windows
+/// 98 SE.
+const DDB_RESERVED_BYTES: &[u8; 12] = b"1vsR2vsR3vsR";
+
+/// VMM's DDB, the VxD location list and the dynamically loaded VxDs, in
+/// the system block at `phys`.
 ///
-/// The DDB has the fields of Windows 98 SE's VMM that say what it is:
+/// VMM's DDB has the fields of Windows 98 SE's VMM that say what it is:
 /// the name, the id 0001h, version 4.10 for both the DDK and VMM, its
-/// size and the three reserved signatures. It has no procedures and no
-/// service table: the built-in Windows runs VMM's services itself.
+/// size and the three reserved signatures, and VMM's service table
+/// (`vmm`), with an entry point in VMM's object for each service the
+/// built-in Windows has. It has no control procedure: the built-in
+/// Windows sends VMM no system control messages.
 ///
 /// The list is packed records, one for each VxD in load order: the DDB's
 /// address, a byte with the number of objects, and for each object its
 /// address, its size and a byte with its type (01h locked code, 03h
 /// pageable code, 04h pageable data and so on, VXDLDR's object types).
-/// Windows 98 SE lists some 50 VxDs there, VMM first. The built-in
-/// Windows has VMM alone, whose locked code is this block: the IDT's
-/// gates lead to its handlers, as Windows 98's lead into VMM's objects.
+/// Windows 98 SE lists some 50 VxDs there, VMM first: those loaded at
+/// the start, before VXDLDR's. The built-in Windows has VMM alone, whose
+/// locked code is this block up to the dynamically loaded VxDs: the
+/// IDT's gates lead to its handlers, as Windows 98's lead into VMM's
+/// objects, and VMM's code (`VMM_CODE`) ends it.
+///
+/// The VxDs loaded since the start are `write_dynamic_vxds`'s, each with
+/// an object of its own after VMM's, as no two VxDs' objects overlap on
+/// Windows 98. VMM's DDB heads the list of all DDBs (VMM_GetDDBList),
+/// theirs included.
 fn write_vmm_data(cpu: &mut Cpu, phys: u32) {
     let ddb = (phys + VMM_DDB) as usize;
-    cpu.bus.write_16(ddb + 0x04, 0x040A);
-    cpu.bus.write_16(ddb + 0x06, 0x0001);
-    cpu.bus.write_8(ddb + 0x08, 4);
-    cpu.bus.write_8(ddb + 0x09, 10);
-    cpu.bus.load_bytes(ddb + 0x0C, b"VMM     ");
-    cpu.bus.write_32(ddb + 0x40, DDB_SIZE);
-    cpu.bus.load_bytes(ddb + 0x44, b"Rsv1Rsv2Rsv3");
+    write_ddb(&mut cpu.bus, ddb, b"VMM     ", 0x0001, 0x040A, (4, 10));
+    let rust_services = RUST_VMM_SERVICES.map(|service| service as u16);
+    let code = vmm::build(SYSTEM + VMM_CODE, SYSTEM + CLIENT_REGS, &rust_services);
+    cpu.bus.load_bytes((phys + VMM_CODE) as usize, &code.bytes);
+    cpu.bus
+        .write_32(ddb + DDB_SERVICE_TABLE as usize, code.service_table);
+    cpu.bus
+        .write_32(ddb + DDB_SERVICE_TABLE_SIZE as usize, code.services);
+    write_dynamic_vxds(cpu, phys);
     let mut list = Vec::with_capacity(VXD_LOCATIONS_LEN as usize);
     list.extend_from_slice(&(SYSTEM + VMM_DDB).to_le_bytes());
     list.push(1);
     list.extend_from_slice(&SYSTEM.to_le_bytes());
-    list.extend_from_slice(&(SYSTEM_BLOCK_PAGES * PAGE).to_le_bytes());
+    list.extend_from_slice(&VXDS.to_le_bytes());
     list.push(OBJECT_LOCKED_CODE);
     debug_assert_eq!(list.len(), VXD_LOCATIONS_LEN as usize);
     cpu.bus.load_bytes((phys + VXD_LOCATIONS) as usize, &list);
+}
+
+/// The fields of the DDB at `ddb` (physical) that say what the VxD is:
+/// its name, id, DDK and VxD versions, the DDB's size and the reserved
+/// signatures.
+fn write_ddb(bus: &mut Bus, ddb: usize, name: &[u8; 8], id: u16, sdk: u16, version: (u8, u8)) {
+    bus.write_16(ddb + DDB_SDK_VERSION as usize, sdk);
+    bus.write_16(ddb + DDB_DEVICE_ID as usize, id);
+    bus.write_8(ddb + DDB_VERSION as usize, version.0);
+    bus.write_8(ddb + DDB_VERSION as usize + 1, version.1);
+    bus.load_bytes(ddb + DDB_NAME as usize, name);
+    bus.write_32(ddb + DDB_SIZE_FIELD as usize, DDB_SIZE);
+    bus.load_bytes(ddb + DDB_RESERVED as usize, DDB_RESERVED_BYTES);
+}
+
+/// The address of the `index`th of `DYNAMIC_VXDS` in the system arena.
+fn vxd_at(index: usize) -> u32 {
+    SYSTEM + VXDS + VXD_SIZE * index as u32
+}
+
+/// The dynamically loaded VxDs (`DYNAMIC_VXDS`) the machine has, in the
+/// system block at `phys`, VXDLDR's list of them, and the DDB list that
+/// starts at VMM's DDB. A VxD the machine has no use for keeps its place
+/// in the block, empty and in neither list.
+///
+/// Each VxD has one object, of locked code: a control procedure that
+/// answers every system control message with success (carry clear), as
+/// a VxD does for the messages it doesn't handle, and the DDB, which
+/// points at it. The built-in Windows does the VxD's work itself and
+/// sends it no messages, but the DDB has a working procedure as every
+/// VxD's does.
+///
+/// VXDLDR describes each VxD it loads with a DeviceInfo (VXDLDR.H, and
+/// Geoff Chappell's notes on VXDLDR), packed: the next DeviceInfo (+00h,
+/// the one of the VxD loaded before), the load count (+04h, a byte), the
+/// DDB (+05h), the device id (+09h, a word), the module's name (+0Bh),
+/// the signature "XVLD" (+0Fh), the number of objects (+13h), the
+/// ObjectInfo array (+17h) and the V86 and protected mode API entry
+/// points (+1Bh, +1Fh), 0 for these VxDs. An ObjectInfo is four dwords:
+/// the object's address, its size, its type and 0, the object being of
+/// this load.
+///
+/// On Windows 98 SE the DDBs of the VxDs VXDLDR loads are in VMM's DDB
+/// list too, each put in by its init order after those of the same or a
+/// lower one, and each DDB's DDB_Prev points at the one before it, VMM's
+/// at the last.
+fn write_dynamic_vxds(cpu: &mut Cpu, phys: u32) {
+    let bus = &mut cpu.bus;
+    let ddb_of = |index: usize| vxd_at(index) + VXD_DDB;
+    let loaded: Vec<usize> = (0..DYNAMIC_VXDS.len())
+        .filter(|&index| (DYNAMIC_VXDS[index].present)(bus))
+        .collect();
+    // Each DeviceInfo links to the one of the VxD loaded before.
+    let mut previous = 0;
+    for &index in &loaded {
+        let vxd = &DYNAMIC_VXDS[index];
+        debug_assert!(vxd.module.len() < 0x10);
+        let at = vxd_at(index);
+        let base = (phys + (at - SYSTEM)) as usize;
+        // clc ; ret
+        bus.load_bytes(base + VXD_CONTROL as usize, &[0xF8, 0xC3]);
+        let ddb = base + VXD_DDB as usize;
+        write_ddb(bus, ddb, vxd.name, vxd.id, vxd.sdk, vxd.version);
+        bus.write_16(ddb + DDB_FLAGS as usize, DYNAMIC_DDB_FLAGS);
+        bus.write_32(ddb + DDB_INIT_ORDER as usize, vxd.init_order);
+        bus.write_32(ddb + DDB_CONTROL_PROC as usize, at + VXD_CONTROL);
+
+        let info = base + VXD_INFO as usize;
+        let info_at = at + VXD_INFO;
+        bus.write_32(info, previous);
+        bus.write_8(info + 0x04, 1);
+        bus.write_32(info + 0x05, ddb_of(index));
+        bus.write_16(info + 0x09, vxd.id);
+        bus.write_32(info + 0x0B, info_at + INFO_NAME);
+        bus.write_32(info + 0x0F, DEVICE_INFO_SIGNATURE);
+        bus.write_32(info + 0x13, 1);
+        bus.write_32(info + 0x17, info_at + INFO_OBJECTS);
+        let object = info + INFO_OBJECTS as usize;
+        bus.write_32(object, at);
+        bus.write_32(object + 4, VXD_OBJECT_SIZE);
+        bus.write_32(object + 8, OBJECT_LOCKED_CODE as u32);
+        let mut name = vxd.module.as_bytes().to_vec();
+        name.push(0);
+        bus.load_bytes(info + INFO_NAME as usize, &name);
+        previous = info_at;
+    }
+    // The VxD loaded last heads VXDLDR's list.
+    bus.write_32((phys + DEVICE_LIST) as usize, previous);
+    // The DDB list: VMM's, then the others by init order, those of the
+    // same order in load order.
+    let mut order = loaded;
+    order.sort_by_key(|&index| DYNAMIC_VXDS[index].init_order);
+    let mut chain = vec![SYSTEM + VMM_DDB];
+    chain.extend(order.iter().map(|&index| ddb_of(index)));
+    let phys_of = |ddb: u32| (phys + (ddb - SYSTEM)) as usize;
+    for (k, &ddb) in chain.iter().enumerate() {
+        let next = chain.get(k + 1).copied().unwrap_or(0);
+        let prev = match k {
+            0 => chain[chain.len() - 1],
+            _ => chain[k - 1],
+        };
+        bus.write_32(phys_of(ddb) + DDB_NEXT as usize, next);
+        bus.write_32(phys_of(ddb) + DDB_PREV as usize, prev);
+    }
 }
 
 /// VXDLDR's object type of locked code (LCODE).
@@ -200,7 +518,18 @@ const OBJECT_LOCKED_CODE: u8 = 0x01;
 /// The VxD services that a program's level 0 code calls through INT 20h,
 /// the VxD's id in the high word and the service in the low one.
 const VMM_GET_VXD_LOCATION_LIST: u32 = 0x0001_013E;
+const VMM_GET_DDB_LIST: u32 = 0x0001_013F;
+const GET_DDB: u32 = 0x0001_0146;
 const VXDLDR_GET_DEVICE_LIST: u32 = 0x0027_0005;
+
+/// The VMM services of those `vxd_service` runs, which VMM's service
+/// table has a stub for in VMM's code (`vmm`). A VMM service added to
+/// `vxd_service` goes here too.
+const RUST_VMM_SERVICES: [u32; 3] = [VMM_GET_VXD_LOCATION_LIST, VMM_GET_DDB_LIST, GET_DDB];
+
+/// The most DDBs Get_DDB looks at, so that a list a program has made
+/// circular can't keep it going.
+const DDB_LIST_LIMIT: usize = 1024;
 
 /// Run the VxD service `service` for a program's level 0 code, in its
 /// context `ctx`, if the built-in Windows has it. SafeDisc 2.30
@@ -212,17 +541,34 @@ const VXDLDR_GET_DEVICE_LIST: u32 = 0x0027_0005;
 /// other registers. Windows 98 SE's VMM keeps the three from its start
 /// and loads them, and its flags are those of a test of EAX.
 ///
+/// VMM_GetDDBList returns in EAX the first DDB of the list of all VxDs,
+/// VMM's, which the others follow through DDB_Next.
+///
+/// Get_DDB finds a VxD's DDB in that list: by its id in EAX, or with EAX
+/// 0 (Undefined_Device_ID) by the 8 bytes of its name at EDI. It returns
+/// the DDB in ECX, or 0 if there is none, and leaves the other registers
+/// as they were. As Windows 98 SE's, it returns with CF clear when it
+/// finds the DDB and set when it doesn't, and the other arithmetic flags
+/// as its search leaves them: all clear for a DDB found by id, ZF and PF
+/// set for one found by name, and SF set when there is none.
+///
 /// VXDLDR_GetDeviceList returns in EAX the first of the DeviceInfo
 /// blocks of the VxDs loaded since the start (dynamically loaded), each
 /// linked to the next, and changes nothing else, flags included: Windows
-/// 98 SE's VXDLDR loads the head of the list. The built-in Windows has
-/// loaded none, so the list is empty and EAX 0.
+/// 98 SE's VXDLDR loads the head of the list, as this does from
+/// `DEVICE_LIST`. The built-in Windows has those of `DYNAMIC_VXDS` that
+/// the machine has.
+///
+/// The VMM services here (`RUST_VMM_SERVICES`) are reached through VMM's
+/// service table, whose entries for them are stubs in VMM's code that
+/// call here; the services VMM runs as guest code aren't here at all
+/// (`vmm_entry`).
 ///
 /// Windows 98's VMM also rewrites the INT 20h and its dword into a call
 /// through the VxD's service table, so that the next call goes there
-/// directly. The built-in Windows has no service tables and leaves the
-/// code as it is: each call comes back here.
-fn vxd_service(service: u32, ctx: &mut Context) -> bool {
+/// directly. The built-in Windows leaves the code as it is: each call
+/// comes back to `idt`, which looks the table up each time.
+fn vxd_service(cpu: &mut Cpu, service: u32, ctx: &mut Context) -> bool {
     match service {
         VMM_GET_VXD_LOCATION_LIST => {
             let list = SYSTEM + VXD_LOCATIONS;
@@ -234,12 +580,83 @@ fn vxd_service(service: u32, ctx: &mut Context) -> bool {
             ctx.eflags = (ctx.eflags & !alu::ARITH) | alu::logic(4, list);
             true
         }
+        VMM_GET_DDB_LIST => {
+            ctx.gpr[EAX] = SYSTEM + VMM_DDB;
+            true
+        }
+        GET_DDB => {
+            let by_name = ctx.gpr[EAX] == 0;
+            let ddb = find_ddb(cpu, ctx.gpr[EAX], ctx.gpr[EDI]);
+            ctx.gpr[ECX] = ddb;
+            let flags = match (ddb, by_name) {
+                (0, _) => alu::CF | alu::SF,
+                (_, true) => alu::ZF | alu::PF,
+                (_, false) => 0,
+            };
+            ctx.eflags = (ctx.eflags & !alu::ARITH) | flags;
+            true
+        }
         VXDLDR_GET_DEVICE_LIST => {
-            ctx.gpr[EAX] = 0;
+            ctx.gpr[EAX] = cpu.bus.guest_read_32(SYSTEM + DEVICE_LIST);
             true
         }
         _ => false,
     }
+}
+
+/// The entry point of VMM's service `service` (VxD id and service
+/// number, as INT 20h's dword has them without bit 15), from the service
+/// table of VMM's DDB as memory has it, a program's hook if it replaced
+/// the entry: the routines VMM runs as guest code (`vmm`) and the stubs
+/// of those run in Rust. None for another VxD's service, a service past
+/// the table's end or with no entry, and in the process of a state saved
+/// before VMM had code, whose DDB has no table.
+fn vmm_entry(cpu: &mut Cpu, service: u32) -> Option<u32> {
+    if service >> 16 != 1 {
+        return None;
+    }
+    let ddb = SYSTEM + VMM_DDB;
+    let table = cpu.bus.guest_read_32(ddb + DDB_SERVICE_TABLE);
+    let size = cpu.bus.guest_read_32(ddb + DDB_SERVICE_TABLE_SIZE);
+    let number = service & 0xFFFF;
+    if table == 0 || number >= size {
+        return None;
+    }
+    match cpu.bus.guest_read_32(table.wrapping_add(4 * number)) {
+        0 => None,
+        entry => Some(entry),
+    }
+}
+
+/// The DDB with the id `id` in VMM's DDB list, or with `id` 0 the one
+/// whose name is the 8 bytes at `name`; 0 if there is none. The list is
+/// read from memory, as a program may have changed it.
+fn find_ddb(cpu: &mut Cpu, id: u32, name: u32) -> u32 {
+    let read_name = |cpu: &mut Cpu, at: u32| {
+        let mut bytes = [0; 8];
+        cpu.bus.guest_read_bytes(at, &mut bytes);
+        bytes
+    };
+    // EDI is read only for a search by name: by id it may be anything.
+    let wanted = match id {
+        0 => read_name(cpu, name),
+        _ => [0; 8],
+    };
+    let mut ddb = SYSTEM + VMM_DDB;
+    for _ in 0..DDB_LIST_LIMIT {
+        if ddb == 0 {
+            break;
+        }
+        let found = match id {
+            0 => read_name(cpu, ddb + DDB_NAME) == wanted,
+            _ => cpu.bus.guest_read_16(ddb + DDB_DEVICE_ID) as u32 == id,
+        };
+        if found {
+            return ddb;
+        }
+        ddb = cpu.bus.guest_read_32(ddb + DDB_NEXT);
+    }
+    0
 }
 
 /// Let level 3 use INT n for the vectors from 10h on, in the IDT of the
@@ -286,6 +703,7 @@ pub fn enter_user(cpu: &mut Cpu, ctx: &Context) {
         cpu.cr4 |= CR4_OSFXSR;
     }
     cpu.tlb.flush();
+    cpu.bus.win32.tlb_stale = false;
     cpu.gdtr = DescTable {
         base: SYSTEM + GDT,
         limit: (GDT_ENTRIES * 8 - 1) as u16,
@@ -472,7 +890,10 @@ enum Entry {
 /// the third dword of a frame from level 0, its EFLAGS, reads as a CS with
 /// RPL 3 when CF is set.
 fn gate_entry(cpu: &mut Cpu) -> Option<Entry> {
-    let top = SYSTEM + RING0_STACK_TOP;
+    // The TSS's ESP0, where the processor put the frame from level 3:
+    // `RING0_ESP`, or the stack's end in a state saved before the client
+    // register structure was there.
+    let top = cpu.bus.guest_read_32(SYSTEM + TSS + 4);
     let sp = cpu.esp();
     let read = |cpu: &mut Cpu, at: u32| cpu.bus.guest_read_32(at);
     if read(cpu, sp + 4) == CODE0 as u32 && read(cpu, sp) > 0xFFFF {
@@ -523,15 +944,37 @@ pub fn idt(cpu: &mut Cpu, vector: u8) {
         // INT 20h at level 0 is a VxD's call of a VMM or VxD service, its
         // number in the dword after the INT, as SafeDisc 2.30's level 0
         // code makes it. The service's bit 15 marks a VxDJmp, which
-        // doesn't come back; the number is in bits 0-14. The services the
-        // built-in Windows has run (`vxd_service`), and the code goes on
-        // after the dword, or for a VxDJmp at the return address on the
-        // stack. For any other, there being no VxDs, it ends the program,
-        // naming the service, as for VxDCall from level 3, and the INT, 2
-        // bytes before the dword.
+        // doesn't come back; the number is in bits 0-14. A VMM service
+        // with an entry in VMM's service table is called there, as
+        // Windows 98's VMM calls it through the table once it has
+        // rewritten the INT 20h, so that an entry a program has replaced
+        // with a hook of its own is the one that runs: returning after
+        // the dword, or for a VxDJmp jumped to. The services the built-in
+        // Windows runs in Rust run (`vxd_service`) when VMM's code calls
+        // them, from the stubs that are their entries in the table, or
+        // when the table has no entry for them (a state saved before VMM
+        // had code), and the code goes on after the dword, or for a
+        // VxDJmp at the return address on the stack. For any other, there
+        // being no VxDs, it ends the program, naming the service, as for
+        // VxDCall from level 3, and the INT, 2 bytes before the dword.
         Some(Entry::System(mut ctx)) if vector == 0x20 => {
             let service = cpu.bus.guest_read_32(ctx.eip);
-            if vxd_service(service & !0x8000, &mut ctx) {
+            // A stub's call of its service skips the table, whose entry
+            // is the stub. Other calls from VMM's code go through it.
+            let stub = (SYSTEM + VMM_CODE..SYSTEM + VXDS).contains(&ctx.eip)
+                && RUST_VMM_SERVICES.contains(&(service & !0x8000));
+            let entry = vmm_entry(cpu, service & !0x8000).filter(|_| !stub);
+            if let Some(entry) = entry {
+                if service & 0x8000 == 0 {
+                    let esp = ctx.gpr[ESP].wrapping_sub(4);
+                    cpu.bus.guest_write_32(esp, ctx.eip.wrapping_add(4));
+                    ctx.gpr[ESP] = esp;
+                }
+                ctx.eip = entry;
+                enter_user(cpu, &ctx);
+                return;
+            }
+            if vxd_service(cpu, service & !0x8000, &mut ctx) {
                 if service & 0x8000 != 0 {
                     // VxDJmp: the service returns to the caller's caller,
                     // through the address at the top of the stack.
@@ -609,4 +1052,92 @@ fn reflect(cpu: &mut Cpu, vector: u8, ctx: Context) {
 /// The trap ids of the IDT's vectors.
 pub fn idt_id(vector: u8) -> u16 {
     ID_IDT | vector as u16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::memory::{Memory, Pool};
+    use super::super::vmm::compared;
+    use super::*;
+
+    /// The 32 bytes of a SHA-256 digest written as 64 hex digits, for the
+    /// strings VMM's object must not hold, which are known only by their
+    /// digests.
+    fn digest_bytes(hex: &str) -> [u8; 32] {
+        std::array::from_fn(|i| {
+            u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).expect("a hex digest")
+        })
+    }
+
+    /// VMM's locked code object, as the location list reports it, of a
+    /// system block built as a process's is.
+    fn vmm_object() -> Vec<u8> {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.win32.pool = Pool::take(&mut cpu.bus, 0x40_0000);
+        let mut memory = Memory::new(&mut cpu.bus).expect("a page directory");
+        let phys = memory
+            .pages(&mut cpu.bus, SYSTEM_BLOCK_PAGES)
+            .expect("the system block's pages");
+        build_tables(&mut cpu, &mut memory, phys, 0).expect("the system block");
+        let mut ctx = Context::default();
+        assert!(vxd_service(&mut cpu, VMM_GET_VXD_LOCATION_LIST, &mut ctx));
+        // The block's linear addresses, at its physical ones.
+        let at = |lin: u32| (phys + (lin - SYSTEM)) as usize;
+        let list = at(ctx.gpr[EAX]);
+        assert_eq!(
+            cpu.bus.read_32(list),
+            SYSTEM + VMM_DDB,
+            "VMM's record first"
+        );
+        assert!(cpu.bus.read_8(list + 4) >= 1, "VMM has an object");
+        let (address, size) = (cpu.bus.read_32(list + 5), cpu.bus.read_32(list + 9));
+        assert_eq!(cpu.bus.read_8(list + 13), OBJECT_LOCKED_CODE);
+        (0..size as usize)
+            .map(|i| cpu.bus.read_8(at(address) + i))
+            .collect()
+    }
+
+    /// The bytes of Windows 98 SE's VMM that programs compare exactly
+    /// (`vmm::compared`) are in VMM's locked code object, where programs
+    /// scan it: each wholly in the object's first (size - 128) bytes, so
+    /// that it starts more than 128 bytes before the end. The four
+    /// strings of Windows' debugger and debug builds that programs expect
+    /// not to find there, known here by their lengths and SHA-256
+    /// digests, are nowhere in the object.
+    #[test]
+    fn vmm_s_object_holds_what_programs_compare_and_not_what_they_reject() {
+        let object = vmm_object();
+        let window = &object[..object.len() - 128];
+        let found = |item: &[u8]| window.windows(item.len()).any(|w| w == item);
+        assert!(found(&compared::SIMULATE_IRET_PM16), "Simulate_Iret's code");
+        assert!(found(compared::DEBUGGER_WELCOME), "the debugger's greeting");
+        assert!(found(compared::DEBUGGER_PROMPT), "the debugger's prompt");
+        assert!(found(&compared::READY_QUEUE_SIGNATURE), "the ready queue");
+        let absent: [(usize, &str); 4] = [
+            (
+                17,
+                "8244268bddd3881d7e99bbbf245a510e83672d0b98c05245faeb209a0c90433f",
+            ),
+            (
+                20,
+                "8dbf0ddc1f1ba7b7f5c625e76b4e603674b65fc9915a856da860d9e78a9d83e0",
+            ),
+            (
+                26,
+                "7cf1d01d4a19410eb1d27b399c050cd224cb4b370cedb618a9f2a972fb871d75",
+            ),
+            (
+                27,
+                "d0d59e32a74b9d305962a1c69e4284388d31beefc4d302936d110d2ea327b707",
+            ),
+        ];
+        for (len, digest) in absent {
+            use sha2::{Digest, Sha256};
+            let digest = digest_bytes(digest);
+            let at = object
+                .windows(len)
+                .position(|bytes| Sha256::digest(bytes)[..] == digest);
+            assert_eq!(at, None, "a string of {len} bytes that must be absent");
+        }
+    }
 }

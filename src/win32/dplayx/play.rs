@@ -477,16 +477,12 @@ pub fn close(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// GetSessionDesc(this, data, size).
 pub fn get_session_desc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (id, vtable) = object!(cpu, args[0]);
+    let chars = guest::Chars::of(cpu, super::wide(vtable));
     let r = (|| {
         let p = connected(cpu, id)?;
         let s = p.session.as_ref().ok_or(DPERR_NOSESSIONS)?;
         let mut blob = Blob::default();
-        guest::desc2(
-            &mut blob,
-            &s.current_info(),
-            &s.password,
-            super::wide(vtable),
-        );
+        guest::desc2(&mut blob, &s.current_info(), &s.password, chars);
         give(cpu, &blob, args[1], args[2])
     })();
     answer(r)
@@ -671,7 +667,8 @@ fn get_name(cpu: &mut Cpu, args: &[u32], group: bool) -> Option<u32> {
     let (id, vtable) = object!(cpu, args[0]);
     let r = (|| {
         let e = entity(cpu, id, args[1], group)?;
-        let blob = guest::name_blob(&e.short, &e.long, super::wide(vtable));
+        let chars = guest::Chars::of(cpu, super::wide(vtable));
+        let blob = guest::name_blob(&e.short, &e.long, chars);
         give(cpu, &blob, args[2], args[3])
     })();
     answer(r)
@@ -1139,12 +1136,13 @@ pub fn receive(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let want_to = (flags & DPRECEIVE_TOPLAYER != 0).then(|| cpu.bus.guest_read_32(to_at));
     let want_from = (flags & DPRECEIVE_FROMPLAYER != 0).then(|| cpu.bus.guest_read_32(from_at));
     let v1 = vtable == super::PLAY;
-    let wide = super::wide(vtable);
+    let chars = guest::Chars::of(cpu, super::wide(vtable));
+    let page = crate::win32::nls::ansi(cpu);
     let p = play(cpu, id);
     if v1 {
         // IDirectPlay's programs never see the messages it doesn't have.
         p.queue.retain(|m| match &m.body {
-            Body::System { sys } => guest::system1(sys).is_some(),
+            Body::System { sys } => guest::system1(sys, page).is_some(),
             Body::Data { .. } => true,
         });
     }
@@ -1155,8 +1153,8 @@ pub fn receive(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let blob = match &message.body {
         Body::Data { data } => bytes_blob(data),
-        Body::System { sys } if v1 => bytes_blob(&guest::system1(sys).unwrap_or_default()),
-        Body::System { sys } => guest::system2(sys, wide),
+        Body::System { sys } if v1 => bytes_blob(&guest::system1(sys, page).unwrap_or_default()),
+        Body::System { sys } => guest::system2(sys, chars),
     };
     if let Err(e) = give(cpu, &blob, data, size_at) {
         return Some(e);
@@ -1207,13 +1205,14 @@ pub fn get_message_queue(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     net::poll(cpu);
     let (mut count, mut bytes) = (0u32, 0u32);
+    let chars = guest::Chars::of(cpu, false);
     if flags & DPMESSAGEQUEUE_SEND == 0 {
         for m in &play(cpu, id).queue {
             if (from == 0 || m.from == from) && (to == 0 || m.to == to) {
                 count += 1;
                 bytes += match &m.body {
                     Body::Data { data } => data.len() as u32,
-                    Body::System { sys } => guest::system2(sys, false).len(),
+                    Body::System { sys } => guest::system2(sys, chars).len(),
                 };
             }
         }

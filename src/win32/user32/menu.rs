@@ -43,10 +43,10 @@ use super::{
     write_words,
 };
 use crate::cpu::Cpu;
-use crate::win32::convert::CodePage;
 use crate::win32::gdi32::dc::{DCX_USESTYLE, DCX_WINDOW, TRANSPARENT};
 use crate::win32::gdi32::{self, Rect, Region, font};
 use crate::win32::kernel32;
+use crate::win32::nls;
 use crate::win32::task::{self, Next, Task};
 
 /// Menu flags (MF_) and the item types (MFT_) and states (MFS_) they
@@ -608,6 +608,7 @@ fn parse_template(cpu: &mut Cpu, at: u32) -> Option<u32> {
 
 /// The UTF-16 string at `p`, in the ANSI code page, and what follows it.
 fn read_wide(cpu: &mut Cpu, p: u32) -> (Vec<u8>, u32) {
+    let acp = nls::ansi(cpu);
     let mut text = Vec::new();
     let mut p = p;
     for _ in 0..0x1000 {
@@ -616,7 +617,7 @@ fn read_wide(cpu: &mut Cpu, p: u32) -> (Vec<u8>, u32) {
         if c == 0 || cpu.bus.guest_faulted() {
             break;
         }
-        text.push(CodePage::Ansi.byte(c).unwrap_or(b'?'));
+        text.push(acp.byte(c).unwrap_or(b'?'));
     }
     (text, p)
 }
@@ -1400,7 +1401,7 @@ fn init_sys_popup(cpu: &mut Cpu, h: u32, hwnd: u32) {
 /// background. The menu font is the one SPI_GETNONCLIENTMETRICS gives:
 /// 8-point MS Sans Serif, regular.
 fn with_font<T>(cpu: &mut Cpu, hdc: u32, f: impl FnOnce(&mut Cpu) -> T) -> T {
-    let log = super::sysparams::sans_serif(false);
+    let log = super::sysparams::sans_serif(cpu, false);
     let font = gdi32::add(
         cpu,
         gdi32::Kind::Font {

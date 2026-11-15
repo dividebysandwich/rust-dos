@@ -26,6 +26,12 @@ pub fn info(cpu: &Cpu) -> DirectDrawInfo {
         mode: s.display.mode,
         mode_owner: s.display.mode_owner,
         exclusive: s.display.exclusive,
+        binds: s.hal_toadforce.binds,
+        screen_draws: s.hal_toadforce.screen_draws,
+        gl_draws: crate::win32::opengl32::tnl::count_names()
+            .into_iter()
+            .zip(s.hal_toadforce.gl_draws)
+            .collect(),
         surfaces,
     }
 }
@@ -146,7 +152,7 @@ pub fn image(cpu: &Cpu, id: u32, keyed: bool) -> Result<(u32, u32, Vec<u8>), Str
 /// runs or not, and with the bus's side-effect-free reads.
 fn read_row(cpu: &Cpu, pid: u32, sf: &Surface, offset: u32, data: &mut [u8]) -> Result<(), String> {
     match sf.memory {
-        surface::MEM_VIDEO => crate::win32::screen::read(cpu, sf.bits + offset, data),
+        surface::MEM_VIDEO => crate::win32::screen::peek(cpu, sf.bits + offset, data),
         surface::MEM_SYSTEM => {
             let process = cpu
                 .bus
@@ -160,12 +166,18 @@ fn read_row(cpu: &Cpu, pid: u32, sf: &Surface, offset: u32, data: &mut [u8]) -> 
             while done < data.len() {
                 let lin = start.wrapping_add(done as u32);
                 let run = (0x1000 - (lin & 0xFFF) as usize).min(data.len() - done);
-                let phys = process
-                    .memory
-                    .translate(&cpu.bus, lin)
-                    .ok_or_else(|| format!("page at {:08X} isn't there", lin))?;
-                for (i, byte) in data[done..done + run].iter_mut().enumerate() {
-                    *byte = cpu.bus.peek_8(phys as usize + i);
+                let part = &mut data[done..done + run];
+                match process.memory.translate(&cpu.bus, lin) {
+                    Some(phys) => {
+                        for (i, byte) in part.iter_mut().enumerate() {
+                            *byte = cpu.bus.peek_8(phys as usize + i);
+                        }
+                    }
+                    // A page in the page file is read from there.
+                    None => process
+                        .memory
+                        .read(&cpu.bus, lin, part)
+                        .ok_or_else(|| format!("page at {:08X} isn't there", lin))?,
                 }
                 done += run;
             }

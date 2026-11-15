@@ -992,7 +992,7 @@ fn font_like(cpu: &mut Cpu, font: u32, bold: bool) -> u32 {
     let mut log = gdi32::gdi(cpu)
         .font(font)
         .map(|f| f.log.clone())
-        .unwrap_or_else(|| user32::sysparams::sans_serif(false));
+        .unwrap_or_else(|| user32::sysparams::sans_serif(cpu, false));
     if log.len() < 60 {
         log.resize(60, 0);
     }
@@ -3885,7 +3885,7 @@ fn create(cpu: &mut Cpu, hwnd: u32, cs: u32) -> Option<u32> {
     let parent = w[3];
     let style = super::style(cpu, hwnd);
     let rc = super::client(cpu, hwnd);
-    let log = user32::sysparams::sans_serif(false);
+    let log = user32::sysparams::sans_serif(cpu, false);
     let default_font = gdi32::add(
         cpu,
         gdi32::Kind::Font {

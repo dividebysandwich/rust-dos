@@ -11,8 +11,10 @@
 //! rendered and shown when the graph runs, unless AutoShow is off.
 //! IVideoWindow's owner makes it a child of the owner's window, as the
 //! renderer's put_Owner does, and its position and style are the
-//! window's own. The play's end (`play_ended`) queues EC_COMPLETE,
-//! which sets the graph's event and posts its notification message.
+//! window's own. Full-screen mode makes it a top-level window over the
+//! whole screen until the mode ends. The play's end (`play_ended`)
+//! queues EC_COMPLETE, which sets the graph's event and posts its
+//! notification message.
 //!
 //! The graph's own filters aren't seen by the program. A program adds
 //! filters of its own with AddFilter, and RenderFile connects the
@@ -81,6 +83,12 @@ const WS_CHILD: u32 = 0x4000_0000;
 const WS_POPUP: u32 = 0x8000_0000;
 const WS_MINIMIZE: u32 = 0x2000_0000;
 const WS_MAXIMIZE: u32 = 0x0100_0000;
+const WS_VISIBLE: u32 = 0x1000_0000;
+
+/// SetWindowPos' place on top, and its flags.
+const HWND_TOP: u32 = 0;
+const SWP_NOZORDER: u32 = 0x0004;
+const SWP_NOACTIVATE: u32 = 0x0010;
 
 /// ShowWindow's commands.
 const SW_HIDE: u32 = 0;
@@ -112,6 +120,8 @@ pub struct Graph {
     pub border_color: u32,
     pub background_palette: bool,
     pub cursor_hidden: bool,
+    /// While full-screen mode is on, what turning it off gives back.
+    pub full_screen: Option<FullScreen>,
     /// Whether a wait (GetEvent, WaitForCompletion) took the play's
     /// EC_COMPLETE before the play's end could queue it.
     pub complete_taken: bool,
@@ -148,6 +158,20 @@ pub struct Graph {
     /// the program's filter (GetEvent, WaitForCompletion), each with when
     /// its wait times out.
     pub waits: Vec<(u32, Option<u64>)>,
+}
+
+/// The renderer's window as it was before full-screen mode: its style,
+/// the window it was a child of (0 for none), its place in that
+/// window's client area (left, top, width, height), and the destination
+/// rectangle (None for the client area). `on` once the window covers
+/// the screen.
+#[derive(Clone, Debug, Default)]
+pub struct FullScreen {
+    pub on: bool,
+    pub style: u32,
+    pub owner: u32,
+    pub rect: [i32; 4],
+    pub dest: Option<[i32; 4]>,
 }
 
 /// CoCreateInstance's CLSID_FilterGraph: a graph with nothing in it.
@@ -328,6 +352,8 @@ fn render(cpu: &mut Cpu, this: u32, file: u32) -> Result<u32, u32> {
     if let Some(g) = graph(cpu, id) {
         g.file = path;
         g.complete_taken = false;
+        // The new renderer's window starts outside full-screen mode.
+        g.full_screen = None;
     }
     Ok(S_OK)
 }
@@ -1166,13 +1192,33 @@ pub fn set_window_position(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     put_window_rect(cpu, args[0], |_| r)
 }
 
-/// IVideoWindow::GetWindowPosition and GetRestorePosition(this, left,
-/// top, width, height).
+/// IVideoWindow::GetWindowPosition(this, left, top, width, height).
 pub fn get_window_position(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (_, i, _) = hr!(renderer(cpu, args[0]));
     let own = own(cpu, i);
     let r = window_rect(cpu, own);
-    for (at, v) in args[1..5].iter().zip(r) {
+    put_rect(cpu, &args[1..5], r)
+}
+
+/// IVideoWindow::GetRestorePosition(this, left, top, width, height):
+/// where the window goes back to when full-screen mode ends, and where
+/// it is outside that mode.
+pub fn get_restore_position(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (id, i, _) = hr!(renderer(cpu, args[0]));
+    let saved = full_screen(cpu, id).map(|s| s.rect);
+    let r = match saved {
+        Some(r) => r,
+        None => {
+            let own = own(cpu, i);
+            window_rect(cpu, own)
+        }
+    };
+    put_rect(cpu, &args[1..5], r)
+}
+
+/// Write the rectangle `r` to the four places `at`.
+fn put_rect(cpu: &mut Cpu, at: &[u32], r: [i32; 4]) -> Option<u32> {
+    for (at, v) in at.iter().zip(r) {
         hr!(put32(cpu, *at, v as u32));
     }
     Some(S_OK)
@@ -1382,17 +1428,92 @@ pub fn get_border_color(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(put32(cpu, args[1], color).map_or_else(|e| e, |_| S_OK))
 }
 
-/// IVideoWindow::get_FullScreenMode(this, out): never.
+/// IVideoWindow::get_FullScreenMode(this, out): OATRUE while the window
+/// covers the screen.
 pub fn get_full_screen_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    hr!(renderer(cpu, args[0]));
-    Some(put32(cpu, args[1], OAFALSE).map_or_else(|e| e, |_| S_OK))
+    let (id, _, _) = hr!(renderer(cpu, args[0]));
+    let on = full_screen(cpu, id).is_some();
+    Some(put32(cpu, args[1], if on { OATRUE } else { OAFALSE }).map_or_else(|e| e, |_| S_OK))
 }
 
-/// IVideoWindow::put_FullScreenMode(this, on): the full-screen renderer
-/// isn't there, so only off.
+/// What the graph `id` keeps while full-screen mode is on.
+fn full_screen(cpu: &mut Cpu, id: u32) -> Option<FullScreen> {
+    graph(cpu, id)?.full_screen.clone().filter(|s| s.on)
+}
+
+/// IVideoWindow::put_FullScreenMode(this, on): the renderer's window
+/// covers the screen, as Wine's video renderer makes it: a top-level
+/// WS_POPUP window at the screen's top left corner, the size of the
+/// display mode, with the picture stretched over its client area.
+/// Turning it off gives the window back its style, owner, place and
+/// destination rectangle. S_FALSE when the mode is already as asked.
+/// The window's visibility stays as it is, so a window still hidden
+/// shows when the graph runs, as AutoShow shows it. It isn't activated:
+/// the program's window keeps the keyboard, which the renderer's window
+/// would pass on to the message drain. SetParent activates a top-level
+/// window it moves, so the window leaves its owner while it is still a
+/// child, as Wine's order of calls has it, and comes back to it once it
+/// is a child again. A window without an owner keeps its parent, the
+/// desktop.
 pub fn put_full_screen_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    hr!(renderer(cpu, args[0]));
-    Some(if args[1] == OAFALSE { S_OK } else { E_NOTIMPL })
+    let (this, on) = (args[0], args[1] != OAFALSE);
+    with_calls(cpu, |cpu| {
+        let (id, i, _) = renderer(cpu, this)?;
+        let own = own(cpu, i);
+        // Kept by the first run of the method; it is `on` once the
+        // calls that make the window full-screen are made.
+        let saved = graph(cpu, id).and_then(|g| g.full_screen.clone());
+        let window = user32::user(cpu).window(own).map(|w| (w.style, w.parent));
+        let (style, parent) = window.unwrap_or_default();
+        let shown = style & WS_VISIBLE;
+        if on {
+            match saved {
+                Some(s) if s.on => return Ok(S_FALSE),
+                Some(_) => {}
+                None => {
+                    let s = FullScreen {
+                        on: false,
+                        style,
+                        owner: if style & WS_CHILD != 0 { parent } else { 0 },
+                        rect: window_rect(cpu, own),
+                        dest: mci::device(cpu, i).video.dest,
+                    };
+                    if let Some(g) = graph(cpu, id) {
+                        g.full_screen = Some(s);
+                    }
+                }
+            }
+            let (w, h) = user32::sysparams::screen_size(cpu);
+            if style & WS_CHILD != 0 {
+                call(cpu, "SetParent", &[own, 0], &[])?;
+            }
+            let style = WS_POPUP | shown;
+            call(cpu, "SetWindowLongA", &[own, GWL_STYLE, style], &[])?;
+            let args = [own, HWND_TOP, 0, 0, w as u32, h as u32, SWP_NOACTIVATE];
+            call(cpu, "SetWindowPos", &args, &[])?;
+            mci::device(cpu, i).video.dest = None;
+            if let Some(s) = graph(cpu, id).and_then(|g| g.full_screen.as_mut()) {
+                s.on = true;
+            }
+        } else {
+            let Some(s) = saved else {
+                return Ok(S_FALSE);
+            };
+            let style = (s.style & !WS_VISIBLE) | shown;
+            call(cpu, "SetWindowLongA", &[own, GWL_STYLE, style], &[])?;
+            if s.owner != 0 {
+                call(cpu, "SetParent", &[own, s.owner], &[])?;
+            }
+            let [x, y, w, h] = s.rect.map(|v| v as u32);
+            let flags = SWP_NOZORDER | SWP_NOACTIVATE;
+            call(cpu, "SetWindowPos", &[own, 0, x, y, w, h, flags], &[])?;
+            mci::device(cpu, i).video.dest = s.dest;
+            if let Some(g) = graph(cpu, id) {
+                g.full_screen = None;
+            }
+        }
+        Ok(S_OK)
+    })
 }
 
 /// IVideoWindow::SetWindowForeground(this, focus).
@@ -1830,6 +1951,7 @@ crate::state_fields!(Graph {
     border_color,
     background_palette,
     cursor_hidden,
+    full_screen,
     complete_taken,
     filters,
     joints,
@@ -1845,6 +1967,14 @@ crate::state_fields!(Graph {
     cancelled,
     completes,
     waits
+});
+
+crate::state_fields!(FullScreen {
+    on,
+    style,
+    owner,
+    rect,
+    dest
 });
 
 #[cfg(test)]

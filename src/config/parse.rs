@@ -3,7 +3,7 @@
 use super::types::parse_bool;
 use super::{
     AspectRatio, Config, DesktopDepth, DosVersion, Filter, RunLockSetting, Section, Settings,
-    Win32Trace, WindowsVersion, parse_mouse_sensitivity,
+    Win32Locale, Win32Trace, WindowsVersion, parse_mouse_sensitivity,
 };
 use crate::cpu::{CoreMode, CpuModel};
 use crate::disk::DRIVE_Z;
@@ -160,8 +160,8 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             None => warn(format!(
                                 "invalid machine '{}' (svga, svga_s3, svga_s3virge, \
                                  svga_s3virgevx, svga_verite, svga_voodoo3, svga_banshee, \
-                                 svga_ati_3drage, svga_ati_3drage2, svga_et4000, vga, ega, \
-                                 cga, tandy, pcjr or hercules)",
+                                 svga_ati_3drage, svga_ati_3drage2, svga_toadforce, svga_et4000, \
+                                 vga, ega, cga, tandy, pcjr or hercules)",
                                 value
                             )),
                         },
@@ -182,6 +182,28 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "verite_mhz" => match value.parse::<u32>() {
                             Ok(n) if (1..=1000).contains(&n) => config.verite_mhz = Some(n),
                             _ => warn(format!("invalid verite_mhz '{}' (1 to 1000)", value)),
+                        },
+                        "toadforce_memory" => match value.parse::<u32>() {
+                            // Megabytes are compared: a number shifted to
+                            // bytes would wrap round to a size.
+                            Ok(n)
+                                if crate::toadforce::regs::MEMORY_SIZES
+                                    .iter()
+                                    .any(|&bytes| bytes >> 20 == n) =>
+                            {
+                                config.toadforce_memory = Some(n)
+                            }
+                            _ => warn(format!(
+                                "invalid toadforce_memory '{}' (32, 64 or 128)",
+                                value
+                            )),
+                        },
+                        "toadforce_renderer" => match crate::toadforce::Renderer::parse(value) {
+                            Some(renderer) => config.toadforce_renderer = Some(renderer),
+                            None => warn(format!(
+                                "invalid toadforce_renderer '{}' (auto, opengl or software)",
+                                value
+                            )),
                         },
                         "verite_rom" => {
                             let value = value.trim_matches('"');
@@ -253,12 +275,15 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             "2" | "4" | "8" | "16" => config.voodoo_anisotropy = value.parse().ok(),
                             _ => warn(format!("invalid voodoo_anisotropy '{}' (off, 2, 4, 8 or 16)", value)),
                         },
-                        "voodoo_fps_cap" => match value.to_ascii_lowercase().as_str() {
-                            "off" | "0" => config.voodoo_fps_cap = Some(0),
-                            _ => match value.parse::<u32>() {
-                                Ok(n) if (10..=240).contains(&n) => config.voodoo_fps_cap = Some(n),
-                                _ => warn(format!("invalid voodoo_fps_cap '{}' (off, or 10 to 240)", value)),
-                            },
+                        // `voodoo_fps_cap` is the old name, from when only
+                        // the 3dfx card's swaps were capped (`OLD_NAMES`).
+                        "fps_cap" | "voodoo_fps_cap" => match crate::frame_cap::parse(value) {
+                            Some(cap) => config.fps_cap = Some(cap),
+                            None => warn(format!(
+                                "invalid {} '{}' (auto, off, or 10 to 240)",
+                                key.to_ascii_lowercase(),
+                                value
+                            )),
                         },
                         "voodoo_gamma" => match value.to_ascii_lowercase().as_str() {
                             "off" => config.voodoo_gamma = Some(None),
@@ -330,6 +355,14 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "win32_version" => match WindowsVersion::parse(value) {
                             Some(version) => config.win32_version = Some(version),
                             None => warn(format!("invalid win32_version '{}' (95, 98 or 98se)", value)),
+                        },
+                        "win32_locale" => match Win32Locale::parse(value) {
+                            Some(locale) => config.win32_locale = Some(locale),
+                            None => warn(format!(
+                                "invalid win32_locale '{}' (one of {})",
+                                value,
+                                Win32Locale::ALL.map(Win32Locale::name).join(", ")
+                            )),
                         },
                         "win32_depth" => match DesktopDepth::parse(value) {
                             Some(depth) => config.win32_depth = Some(depth),
@@ -542,6 +575,22 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                     match key.to_ascii_lowercase().as_str() {
                         "name" if !value.is_empty() => config.game_name = Some(value.to_string()),
                         "name" => warn("the game's name is empty".to_string()),
+                        "year" if value.is_empty() => {}
+                        "year" => match crate::games::parse_year(value) {
+                            Ok(year) => config.game_year = year,
+                            Err(_) => warn(format!("invalid year '{}' (such as 1993)", value)),
+                        },
+                        "publisher" if !value.is_empty() => {
+                            config.game_publisher = Some(value.to_string())
+                        }
+                        "publisher" => {}
+                        "notes" if !value.is_empty() => config.game_notes = Some(value.to_string()),
+                        "notes" => {}
+                        "uuid" if crate::games::valid_uuid(value) => {
+                            config.game_uuid = Some(value.to_ascii_lowercase())
+                        }
+                        "uuid" if value.is_empty() => {}
+                        "uuid" => warn(format!("invalid uuid '{}'", value)),
                         "achievements" if !value.is_empty() => config.game_achievements = Some(value.to_string()),
                         "achievements" => {}
                         "manual" if !value.is_empty() => config.game_manuals.push(value.to_string()),

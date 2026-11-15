@@ -38,7 +38,8 @@ const BLIT_FRAG: &str = include_str!("gl/blit.frag");
 const COPY_FRAG: &str = include_str!("gl/copy.frag");
 
 mod uniforms;
-use uniforms::{Banshee, Blit2d, CopyQuad, FillQuad, Locations, Quad, Triangle};
+pub(crate) use uniforms::Locations;
+use uniforms::{Banshee, Blit2d, CopyQuad, FillQuad, Quad, Triangle};
 
 /// Bytes a row of the textures of the card's memory (`CardMemory`) at
 /// most: a page (`tracker::PAGE`).
@@ -46,12 +47,16 @@ const MEMORY_ROW: u32 = 4096;
 
 /// Limits below what the host's OpenGL allows, to try the renderer as a
 /// smaller driver runs it: `RUST_DOS_GL_MAX_TEXTURE_SIZE=<texels>` lowers
-/// the largest texture it assumes, and `RUST_DOS_GL_NO_BLIT=1` leaves out
-/// the program of the 2D operations, as if it didn't compile.
+/// the largest texture it assumes, `RUST_DOS_GL_NO_BLIT=1` leaves out the
+/// program of the 2D operations, as if it didn't compile, and
+/// `RUST_DOS_GL_NO_PER_SAMPLE=1` the program that blends each sample on
+/// its own (`VoodooGl::per_sample`), as if the driver had no
+/// GL_ARB_sample_shading.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Limits {
     pub max_texture_size: Option<u32>,
     pub no_blit: bool,
+    pub no_per_sample: bool,
 }
 
 impl Limits {
@@ -61,6 +66,7 @@ impl Limits {
                 .ok()
                 .and_then(|v| v.trim().parse().ok()),
             no_blit: std::env::var("RUST_DOS_GL_NO_BLIT").is_ok_and(|v| v != "0"),
+            no_per_sample: std::env::var("RUST_DOS_GL_NO_PER_SAMPLE").is_ok_and(|v| v != "0"),
         }
     }
 }
@@ -72,9 +78,9 @@ const TEXTURE_MAX_ANISOTROPY: u32 = 0x84FE;
 const MAX_TEXTURE_MAX_ANISOTROPY: u32 = 0x84FF;
 
 /// A linked program and its uniforms.
-struct Program<U> {
-    program: glow::Program,
-    uniforms: U,
+pub(crate) struct Program<U> {
+    pub(crate) program: glow::Program,
+    pub(crate) uniforms: U,
 }
 
 /// glTextureBarrier, which glow doesn't offer: what draws wrote before it,
@@ -126,17 +132,17 @@ impl TextureBarrier {
 
 /// A colour buffer: its texture and the framebuffer object drawing into
 /// it, or with multisampling, the one with the samples that is resolved
-/// into it.
+/// into it, and how many samples a pixel OpenGL gave it.
 struct Target {
     fbo: glow::Framebuffer,
     color: glow::Texture,
-    samples: Option<(glow::Framebuffer, glow::Renderbuffer)>,
+    samples: Option<(glow::Framebuffer, glow::Renderbuffer, u32)>,
 }
 
 impl Target {
     /// The framebuffer to draw into.
     fn draw_fbo(&self) -> glow::Framebuffer {
-        self.samples.map_or(self.fbo, |(fbo, _)| fbo)
+        self.samples.map_or(self.fbo, |(fbo, _, _)| fbo)
     }
 
     /// Resolve the samples into the texture.
@@ -146,7 +152,7 @@ impl Target {
 
     /// Resolve rows `y0..y1` of the samples, `w` wide, into the texture.
     fn resolve_rows(&self, gl: &glow::Context, w: i32, (y0, y1): (i32, i32)) {
-        let Some((samples, _)) = self.samples else { return };
+        let Some((samples, _, _)) = self.samples else { return };
         // SAFETY: see `VoodooGl`.
         unsafe {
             gl.disable(glow::SCISSOR_TEST);
@@ -162,7 +168,7 @@ impl Target {
         unsafe {
             gl.delete_framebuffer(self.fbo);
             gl.delete_texture(self.color);
-            if let Some((fbo, buffer)) = self.samples {
+            if let Some((fbo, buffer, _)) = self.samples {
                 gl.delete_framebuffer(fbo);
                 gl.delete_renderbuffer(buffer);
             }
@@ -668,15 +674,27 @@ pub struct VoodooGl {
     /// The picture shown, and its size.
     composite: Option<(Target, (u32, u32))>,
     /// A copy of the pixels a blended draw goes over, which the shader
-    /// blends with as the card does (`card_blend`), and its size. None in
-    /// the pair where OpenGL couldn't make one of that size, which isn't
-    /// tried again until the size changes.
-    blend_copy: Option<(Option<Target>, (i32, i32))>,
+    /// blends with as the card does (`card_blend`), its size, and its
+    /// samples a pixel. With 1 it is a texture of pixels, resolved from
+    /// the samples where the buffer has them; with more it is a
+    /// multisample texture holding the buffer's samples, which
+    /// `per_sample` reads. None in the pair where OpenGL couldn't make one
+    /// of that size, which isn't tried again until the size changes.
+    blend_copy: BlendCopy,
     /// Where the driver has it, the barrier that lets the shader read the
     /// buffer it draws into, which `card_blend` then does instead of
     /// reading a copy.
     texture_barrier: Option<TextureBarrier>,
+    /// The pixels drawn since `card_blend`'s reads last saw the buffer.
+    unread: Unread,
     triangle: Program<Triangle>,
+    /// With samples, the triangle program that blends each sample with
+    /// what that sample holds (`PER_SAMPLE` in gl/triangle.frag), for the
+    /// draws that blend as the card does. None without samples, or where
+    /// the driver has no GL_ARB_sample_shading or no multisample texture
+    /// with the buffer's samples to copy them into: those draws then
+    /// blend every sample of a pixel with the pixel's resolved colour.
+    per_sample: Option<Program<Triangle>>,
     pixels: Program<Quad>,
     depth_program: Program<Quad>,
     clut_program: Program<Quad>,
@@ -778,20 +796,67 @@ impl VoodooGl {
         let depth_program: Program<Quad> = compile(gl, glsl, QUAD_VERT, DEPTH_FRAG, &[])?;
         let clut_program: Program<Quad> = compile(gl, glsl, QUAD_VERT, CLUT_FRAG, &[])?;
         let copy_program: Program<CopyQuad> = compile(gl, glsl, QUAD_VERT, COPY_FRAG, &[])?;
+        // SAFETY: see `VoodooGl`.
+        let most = unsafe { gl.get_parameter_i32(glow::MAX_SAMPLES) };
+        let samples = samples.clamp(1, most.max(1) as u32);
+        let per_sample = if samples > 1 && !limits.no_per_sample {
+            // The program reads the copy as a sampler2DMS (GLSL 1.50) and
+            // writes gl_SampleMask (GL_ARB_sample_shading). The copy is a
+            // multisample texture, which may allow fewer samples than a
+            // renderbuffer. Without one of them the draws blend with the
+            // pixels' resolved colours, as they do without the program.
+            // The limit is asked only of a context with GLSL 1.50 (OpenGL
+            // 3.2), as an older one has no such parameter and would queue
+            // an error.
+            let sample_shading = gl.supported_extensions().contains("GL_ARB_sample_shading");
+            let missing = if glsl != Glsl::Gl150 {
+                Some("needs GLSL 1.50".to_string())
+            } else if !sample_shading {
+                Some("no GL_ARB_sample_shading".to_string())
+            } else {
+                // SAFETY: see `VoodooGl`.
+                let most = unsafe { gl.get_parameter_i32(glow::MAX_COLOR_TEXTURE_SAMPLES) };
+                (most < samples as i32).then(|| format!("textures hold at most {most} samples"))
+            };
+            let program = match missing {
+                Some(reason) => Err(reason),
+                None => {
+                    let defines =
+                        "#extension GL_ARB_sample_shading : require\n#define PER_SAMPLE\n";
+                    let fragment = format!("{defines}{TRIANGLE_FRAG}");
+                    compile::<Triangle>(gl, glsl, TRIANGLE_VERT, &fragment, &attributes)
+                }
+            };
+            program
+                .inspect_err(|e| {
+                    eprintln!("[VOODOO] blending pixels, not samples, with voodoo_msaa: {e}")
+                })
+                .ok()
+        } else {
+            None
+        };
         let banshee = BansheeGl::new(gl, glsl, limits);
         // SAFETY: see `VoodooGl`.
         unsafe {
-            for (program, samplers) in [
-                (triangle.program, &[("u_tex0", 1), ("u_tex1", 2), ("u_dst", 3)][..]),
+            let triangle_samplers = &[("u_tex0", 1), ("u_tex1", 2), ("u_dst", 3)][..];
+            let programs = [
+                (triangle.program, triangle_samplers),
                 (pixels.program, &[("u_src", 0)][..]),
                 (depth_program.program, &[("u_src", 0)][..]),
                 (clut_program.program, &[("u_src", 0), ("u_lut", 1)][..]),
                 (copy_program.program, &[("u_src", 0)][..]),
-            ] {
+            ];
+            let per_sample_program = per_sample.as_ref().map(|p| (p.program, triangle_samplers));
+            for (program, samplers) in programs.into_iter().chain(per_sample_program) {
                 gl.use_program(Some(program));
                 for &(name, unit) in samplers {
                     gl.uniform_1_i32(gl.get_uniform_location(program, name).as_ref(), unit);
                 }
+            }
+            if let Some(p) = &per_sample {
+                gl.use_program(Some(p.program));
+                // Every sample, until a draw picks one.
+                p.uniforms.u_sample.set(gl, -1);
             }
             gl.use_program(None);
 
@@ -825,7 +890,6 @@ impl VoodooGl {
             let quad_vao = gl.create_vertex_array()?;
             let staging_texture = texture(gl, glow::NEAREST)?;
             let lut = texture(gl, glow::NEAREST)?;
-            let samples = samples.clamp(1, gl.get_parameter_i32(glow::MAX_SAMPLES).max(1) as u32);
             let extensions = gl.supported_extensions();
             let texture_anisotropy = (anisotropy > 1
                 && extensions
@@ -855,7 +919,9 @@ impl VoodooGl {
                 composite: None,
                 blend_copy: None,
                 texture_barrier: None,
+                unread: Unread::default(),
                 triangle,
+                per_sample,
                 pixels,
                 depth_program,
                 clut_program,
@@ -882,6 +948,12 @@ impl VoodooGl {
         self.samples
     }
 
+    /// Whether a draw that blends as the card does blends each sample with
+    /// its own value (`per_sample`), rather than with the pixel's.
+    pub fn blends_samples(&self) -> bool {
+        self.per_sample.is_some()
+    }
+
     pub fn anisotropy(&self) -> u32 {
         self.anisotropy
     }
@@ -897,6 +969,7 @@ impl VoodooGl {
     /// context's (`TextureBarrier::load`), or with None through a copy.
     pub fn set_texture_barrier(&mut self, barrier: Option<TextureBarrier>) {
         self.texture_barrier = barrier;
+        self.unread.forget();
     }
 
     /// Give everything back to OpenGL.
@@ -915,6 +988,9 @@ impl VoodooGl {
             }
             gl.delete_texture(self.staging_texture);
             gl.delete_texture(self.lut);
+            if let Some(p) = self.per_sample.take() {
+                gl.delete_program(p.program);
+            }
             for program in [
                 self.triangle.program,
                 self.pixels.program,
@@ -1137,7 +1213,7 @@ impl VoodooGl {
         unsafe {
             let resolved = match target.samples {
                 None => None,
-                Some((samples, _)) => {
+                Some((samples, _, _)) => {
                     let texture = texture(gl, glow::NEAREST).ok()?;
                     let none = glow::PixelUnpackData::Slice(None);
                     let format = glow::DEPTH24_STENCIL8 as i32;
@@ -1198,8 +1274,22 @@ impl VoodooGl {
     }
 
     fn run_commands(&mut self, gl: &glow::Context, commands: &[Command]) {
+        self.unread.forget();
         for command in commands {
             self.alpha.command(command);
+            // Only triangles draw what `unread` can follow; textures
+            // aren't drawn into, and staged pixels are drawn by
+            // `flush_staging`, which forgets then.
+            let drawn = matches!(
+                command,
+                Command::Draw(_)
+                    | Command::Texture(_)
+                    | Command::FreeTexture(_)
+                    | Command::Pixels(_)
+            );
+            if !drawn {
+                self.unread.forget();
+            }
             match command {
                 Command::Resync(snapshot) => self.resync(gl, snapshot),
                 Command::Draw(draw) => {
@@ -1508,6 +1598,10 @@ impl VoodooGl {
         let Some(staging) = self.staging.get_mut(&key) else { return };
         let Some([x0, x1, y0, y1]) = staging.dirty.take() else { return };
         let Some(fbo) = fbo else { return };
+        // Depth writes leave the colours as they were.
+        if key.is_some() {
+            self.unread.forget();
+        }
         let program = if key.is_some() { &self.pixels } else { &self.depth_program };
         let (sw, sh) = ((self.width * scale) as i32, (self.height * scale) as i32);
         // SAFETY: see `VoodooGl`.
@@ -1621,15 +1715,44 @@ impl VoodooGl {
         // Where the game dithers, the shader blends as the card does,
         // with the pixels underneath: read from the buffer itself behind a
         // texture barrier, or without one (or with samples, which the
-        // shader can't read) from a copy made first.
-        let card_blend = self.dither
+        // shader can't read) from a copy made first. With samples the copy
+        // keeps them where `per_sample` can read them, and each sample
+        // blends with its own value: a pixel on an edge has samples of the
+        // triangles on both sides, and blending them all with the pixel's
+        // average would blend a triangle's samples with the other's.
+        let mut card_blend = self.dither
             && s.alpha_mode & (1 << 4) != 0
             && s.fbz_mode & (1 << 8) != 0
             && s.fbz_mode & (1 << 9) != 0;
         let single = target.samples.is_none();
         let barrier = self.texture_barrier.filter(|_| card_blend && single);
-        let card_blend =
-            card_blend && (barrier.is_some() || blend_copy_ready(&mut self.blend_copy, gl, size));
+        let mut copy_samples = match target.samples {
+            Some((_, _, n)) if self.per_sample.is_some() => n,
+            _ => 1,
+        };
+        // A new copy has none of the buffer yet. Only a draw that reads
+        // the copy makes one: one that doesn't, or one behind the barrier
+        // (where there is no copy), leaves `unread` following.
+        if card_blend && barrier.is_none() {
+            let mut made = blend_copy_ready(&mut self.blend_copy, gl, size, copy_samples);
+            if made.is_none() && copy_samples > 1 {
+                // OpenGL has no copy of the samples (`blend_copy_ready`
+                // said why): blend pixels, as without the program, from
+                // now on.
+                eprintln!("[VOODOO] blending pixels, not samples, with voodoo_msaa");
+                if let Some(p) = self.per_sample.take() {
+                    // SAFETY: see `VoodooGl`.
+                    unsafe { gl.delete_program(p.program) };
+                }
+                copy_samples = 1;
+                made = blend_copy_ready(&mut self.blend_copy, gl, size, copy_samples);
+            }
+            if made == Some(true) {
+                self.unread.forget();
+            }
+            card_blend = made.is_some();
+        }
+        let per_sample = card_blend && barrier.is_none() && copy_samples > 1;
         let fbz = s.fbz_mode;
         let depth_test = fbz & (1 << 4) != 0;
         let func = ((fbz >> 5) & 7) as usize;
@@ -1646,7 +1769,10 @@ impl VoodooGl {
         let rgb = fbz & (1 << 9) != 0;
         let (w, h) = size;
         let scale = self.scale as f32;
-        let p = &self.triangle;
+        let p = match &self.per_sample {
+            Some(p) if per_sample => p,
+            _ => &self.triangle,
+        };
         // SAFETY: see `VoodooGl`.
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.draw_fbo()));
@@ -1774,23 +1900,52 @@ impl VoodooGl {
                 Some(_) => Some(target.color),
                 None => copy.map(|c| c.color),
             };
+            // The copy of the samples is a multisample texture.
+            let read_target =
+                if per_sample { glow::TEXTURE_2D_MULTISAMPLE } else { glow::TEXTURE_2D };
             if let Some(read) = read {
                 gl.active_texture(glow::TEXTURE3);
-                gl.bind_texture(glow::TEXTURE_2D, Some(read));
+                gl.bind_texture(read_target, Some(read));
             }
-            // Make the pixels triangles `first..first + count` (in vertices)
-            // go over readable for the shader to blend with: everything
-            // drawn before is seen past the barrier, or copied out.
-            let under = |first: usize, count: usize| {
+            // The runs of triangles to draw, and before each, what makes the
+            // pixels drawn since the last barrier or copy readable for the
+            // shader to blend with (`Unread`). A draw that doesn't read the
+            // buffer is one run, which `unread` notes.
+            let runs = if card_blend {
+                self.unread.blend(s.dest, &draw.vertices)
+            } else {
+                self.unread.draw(s.dest, &draw.vertices);
+                vec![(0, draw.vertices.len(), None)]
+            };
+            let under = |catch: Option<Catch>| {
+                let Some(catch) = catch else { return };
                 if let Some(barrier) = barrier {
                     barrier.apply();
                     return;
                 }
                 let Some(copy) = copy else { return };
-                let rect = buffer_rect(&draw.vertices[first..first + count], self.scale, (w, h));
+                let rect = match catch {
+                    Catch::All => [0, 0, w, h],
+                    Catch::Bounds(bounds) => buffer_rect(bounds, self.scale, (w, h)),
+                };
                 copy_rect(gl, target.draw_fbo(), copy.fbo, rect);
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.draw_fbo()));
                 self.clip(gl, s.clip);
+            };
+            // Draw triangles that read the buffer: per sample, once for
+            // each, each run writing that sample and reading it in the
+            // copy; the samples are apart, so the runs need no copy
+            // between them.
+            let blended = |first: i32, count: i32| {
+                if !per_sample {
+                    gl.draw_arrays(glow::TRIANGLES, first, count);
+                    return;
+                }
+                for sample in 0..copy_samples as i32 {
+                    p.uniforms.u_sample.set(gl, sample);
+                    gl.draw_arrays(glow::TRIANGLES, first, count);
+                }
+                p.uniforms.u_sample.set(gl, -1);
             };
 
             gl.bind_vertex_array(Some(self.vao));
@@ -1804,7 +1959,12 @@ impl VoodooGl {
                 // each gets its own reference, so the buffer is cleared only
                 // every 255 triangles.
                 gl.enable(glow::STENCIL_TEST);
-                for (n, first) in (0..draw.vertices.len() as i32).step_by(3).enumerate() {
+                let triangles = runs.iter().flat_map(|&(first, count, catch)| {
+                    (first..first + count)
+                        .step_by(3)
+                        .map(move |f| (f as i32, catch.filter(|_| f == first)))
+                });
+                for (n, (first, catch)) in triangles.enumerate() {
                     let reference = (n % 255) as i32 + 1;
                     gl.stencil_mask(0xFF);
                     if reference == 1 {
@@ -1817,8 +1977,8 @@ impl VoodooGl {
                     gl.depth_mask(false);
                     gl.color_mask(rgb, rgb, rgb, false);
                     p.uniforms.u_constant_depth.set(gl, 1);
-                    under(first as usize, 3);
-                    gl.draw_arrays(glow::TRIANGLES, first, 3);
+                    under(catch);
+                    blended(first, 3);
 
                     gl.stencil_mask(0);
                     gl.stencil_func(glow::EQUAL, reference, 0xFF);
@@ -1831,22 +1991,20 @@ impl VoodooGl {
                 }
                 gl.disable(glow::STENCIL_TEST);
                 gl.stencil_mask(0xFF);
-            } else if card_blend {
-                // Triangles that overlap blend with each other's pixels, so
-                // each group of them that don't is drawn on its own, after a
-                // barrier or over a copy of its own.
-                for (first, count) in separate_triangles(&draw.vertices) {
-                    under(first, count);
-                    gl.draw_arrays(glow::TRIANGLES, first as i32, count as i32);
-                }
             } else {
-                gl.draw_arrays(glow::TRIANGLES, 0, draw.vertices.len() as i32);
+                // Triangles that overlap blend with each other's pixels, so
+                // each run of them that don't is drawn on its own.
+                for (first, count, catch) in runs {
+                    under(catch);
+                    blended(first as i32, count as i32);
+                }
             }
-            if barrier.is_some() {
+            if barrier.is_some() || per_sample {
                 // The buffer is no texture of the next draws, which don't
-                // read it.
+                // read it, and the multisample copy is no texture of the
+                // program without samples, which reads unit 3 as 2D.
                 gl.active_texture(glow::TEXTURE3);
-                gl.bind_texture(glow::TEXTURE_2D, None);
+                gl.bind_texture(read_target, None);
             }
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
             gl.active_texture(glow::TEXTURE0);
@@ -2270,14 +2428,10 @@ fn source_factor(f: u32) -> u32 {
 }
 
 /// The rectangle of the buffer (`size` pixels at `scale` times the
-/// card's) that triangles of `vertices` cover: left, bottom, right and
-/// top rows in OpenGL's terms, the right and top ones outside.
-fn buffer_rect(vertices: &[Vertex], scale: u32, (w, h): (i32, i32)) -> [i32; 4] {
-    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-    for v in vertices {
-        (x0, x1) = (x0.min(v.pos[0]), x1.max(v.pos[0]));
-        (y0, y1) = (y0.min(v.pos[1]), y1.max(v.pos[1]));
-    }
+/// card's) that `bounds` (`Unread`'s, in the card's pixels) cover: left,
+/// bottom, right and top rows in OpenGL's terms, the right and top ones
+/// outside.
+fn buffer_rect([x0, y0, x1, y1]: [f32; 4], scale: u32, (w, h): (i32, i32)) -> [i32; 4] {
     let s = scale as f32;
     let at = |v: f32, max: i32| (v * s).clamp(0.0, max as f32) as i32;
     [
@@ -2304,39 +2458,112 @@ fn copy_rect(gl: &glow::Context, from: glow::Framebuffer, to: glow::Framebuffer,
     }
 }
 
-/// Whether `copy` (`VoodooGl::blend_copy`) has a copy of `size` for
-/// `card_blend`, made if it hadn't and OpenGL can make it.
+/// `VoodooGl::blend_copy`: the copy, if OpenGL could make it, its size
+/// and its samples a pixel.
+type BlendCopy = Option<(Option<Target>, ((i32, i32), u32))>;
+
+/// Whether `copy` (`VoodooGl::blend_copy`) has a copy of `size` with
+/// `samples` a pixel for `card_blend`, made if it hadn't and OpenGL can
+/// make it: None if it can't, else whether it was made now.
 fn blend_copy_ready(
-    copy: &mut Option<(Option<Target>, (i32, i32))>,
+    copy: &mut BlendCopy,
     gl: &glow::Context,
     size: (i32, i32),
-) -> bool {
-    if copy.as_ref().is_none_or(|&(_, s)| s != size) {
+    samples: u32,
+) -> Option<bool> {
+    let key = (size, samples);
+    let made = copy.as_ref().is_none_or(|&(_, k)| k != key);
+    if made {
         if let Some((Some(old), _)) = copy.take() {
             old.delete(gl);
         }
-        *copy = Some((target(gl, size, 1, None).ok(), size));
+        let new = if samples > 1 {
+            sample_copy(gl, size, samples)
+        } else {
+            target(gl, size, 1, None)
+        };
+        if let Err(e) = &new {
+            eprintln!("[VOODOO] no copy of the buffer to blend with: {e}");
+            // A failed allocation leaves its error queued, where the next
+            // check of the context's errors (xBRZ's allocation, for one)
+            // would take it for its own. A lost context may keep
+            // reporting, so the reads stop after a few.
+            // SAFETY: see `VoodooGl`.
+            for _ in 0..8 {
+                if unsafe { gl.get_error() } == glow::NO_ERROR {
+                    break;
+                }
+            }
+        }
+        *copy = Some((new.ok(), key));
     }
-    copy.as_ref().is_some_and(|(t, _)| t.is_some())
+    copy.as_ref().and_then(|(t, _)| t.as_ref()).map(|_| made)
 }
 
-/// The most triangles in one of `separate_triangles`' runs, which bounds
-/// the overlap tests a triangle takes to as many: a run of triangles that
-/// don't overlap is cut there, for one more barrier or copy.
+/// A framebuffer of `size` whose colour is a multisample texture of
+/// `samples` a pixel, exactly: a blit from a buffer's samples into it
+/// copies them one by one, which OpenGL does only between the same
+/// number. Its `samples` is None, as nothing is resolved into it.
+fn sample_copy(gl: &glow::Context, (w, h): (i32, i32), samples: u32) -> Result<Target, String> {
+    // SAFETY: see `VoodooGl`.
+    unsafe {
+        let color = gl.create_texture()?;
+        let kind = glow::TEXTURE_2D_MULTISAMPLE;
+        gl.bind_texture(kind, Some(color));
+        gl.tex_image_2d_multisample(kind, samples as i32, glow::RGBA8 as i32, w, h, true);
+        let given = gl.get_tex_level_parameter_i32(kind, 0, glow::TEXTURE_SAMPLES);
+        gl.bind_texture(kind, None);
+        let fbo = match gl.create_framebuffer() {
+            Ok(fbo) => fbo,
+            Err(e) => {
+                gl.delete_texture(color);
+                return Err(e);
+            }
+        };
+        let copy = Target { fbo, color, samples: None };
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+        gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, kind, Some(color), 0);
+        let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        if status != glow::FRAMEBUFFER_COMPLETE || given != samples as i32 {
+            copy.delete(gl);
+            return Err(format!("no copy of {samples} samples ({status:04X}h, {given} given)"));
+        }
+        Ok(copy)
+    }
+}
+
+/// The most triangles `Unread` keeps, which bounds the overlap tests a
+/// triangle takes to as many: a blended triangle after that many takes
+/// one more barrier or copy, overlapping or not.
 const RUN_TRIANGLES: usize = 64;
 
-/// The triangles of `vertices` in runs of ones that don't overlap, as
-/// (first vertex, vertices): a run's pixels are each drawn once, so what
-/// the barrier or the copy before it makes readable is what each of them
-/// blends with. Triangles that only share an edge don't overlap, as the
-/// edge's pixels go to one of them. A run has `RUN_TRIANGLES` at most.
-fn separate_triangles(vertices: &[Vertex]) -> Vec<(usize, usize)> {
-    type Tri = [[f32; 2]; 3];
+/// A triangle's corners in the card's pixels.
+type Corners = [[f32; 2]; 3];
+
+/// A triangle and its bounds: left, top, right, bottom.
+type Bounded = (Corners, [f32; 4]);
+
+/// The triangles of `vertices`, each with its bounds.
+fn bounded(vertices: &[Vertex]) -> impl Iterator<Item = Bounded> + '_ {
+    vertices.as_chunks::<3>().0.iter().map(|t| {
+        let tri = [t[0].pos, t[1].pos, t[2].pos];
+        let xs = tri.map(|v| v[0]);
+        let ys = tri.map(|v| v[1]);
+        let min = |v: [f32; 3]| v[0].min(v[1]).min(v[2]);
+        let max = |v: [f32; 3]| v[0].max(v[1]).max(v[2]);
+        (tri, [min(xs), min(ys), max(xs), max(ys)])
+    })
+}
+
+/// Whether triangles `a` and `b` draw a pixel in common. Triangles that
+/// only share an edge don't, as the edge's pixels go to one of them.
+fn overlap((a, ab): &Bounded, (b, bb): &Bounded) -> bool {
     // Whether the edges of `a` keep `b` out: for one edge, the vertices of
     // `b` are on the far side of it from `a`'s third vertex, or on it. The
     // card's coordinates have 4 bits of fraction, so in f64 the products
     // are exact, where f32 can round a vertex just inside an edge onto it.
-    let apart = |a: &Tri, b: &Tri| {
+    let apart = |a: &Corners, b: &Corners| {
         (0..3).any(|i| {
             let (p, q, r) = (a[i], a[(i + 1) % 3], a[(i + 2) % 3]);
             let d = |a: f32, b: f32| f64::from(a) - f64::from(b);
@@ -2345,38 +2572,103 @@ fn separate_triangles(vertices: &[Vertex]) -> Vec<(usize, usize)> {
             inner == 0.0 || b.iter().all(|&v| side(v) * inner.signum() <= 0.0)
         })
     };
-    let bounds = |t: &Tri| {
-        let xs = t.map(|v| v[0]);
-        let ys = t.map(|v| v[1]);
-        let min = |v: [f32; 3]| v[0].min(v[1]).min(v[2]);
-        let max = |v: [f32; 3]| v[0].max(v[1]).max(v[2]);
-        [min(xs), min(ys), max(xs), max(ys)]
-    };
-    let mut runs = Vec::new();
-    let mut run: Vec<(Tri, [f32; 4])> = Vec::new();
-    let mut first = 0;
-    for (i, t) in vertices.as_chunks::<3>().0.iter().enumerate() {
-        let tri = [t[0].pos, t[1].pos, t[2].pos];
-        let b = bounds(&tri);
-        let overlaps = run.iter().any(|(o, ob)| {
-            b[0] < ob[2]
-                && ob[0] < b[2]
-                && b[1] < ob[3]
-                && ob[1] < b[3]
-                && !apart(o, &tri)
-                && !apart(&tri, o)
-        });
-        if overlaps || run.len() == RUN_TRIANGLES {
-            runs.push((first, i * 3 - first));
-            first = i * 3;
-            run.clear();
+    ab[0] < bb[2]
+        && bb[0] < ab[2]
+        && ab[1] < bb[3]
+        && bb[1] < ab[3]
+        && !apart(a, b)
+        && !apart(b, a)
+}
+
+/// What a blended draw that reads the buffer it draws into (`card_blend`)
+/// does before a run of its triangles: make the pixels drawn since the
+/// last barrier or copy readable to the shader.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Catch {
+    /// The whole buffer: a barrier, or a copy of all of it.
+    All,
+    /// A barrier, or a copy of these bounds (`buffer_rect`), which hold
+    /// every pixel drawn since the last copy.
+    Bounds([f32; 4]),
+}
+
+/// The pixels of a colour buffer drawn since the shader's reads of it
+/// last saw them, through a texture barrier or a copy (`card_blend`).
+/// A blended triangle may read any other pixel without a new barrier or
+/// copy: OpenGL leaves a read of a pixel drawn since the last barrier
+/// undefined, and the copy doesn't have those pixels. Draws of all kinds
+/// go between barriers that way, so a game that blends every triangle,
+/// as Test Drive 4 does, takes a barrier or a copy only where one goes
+/// over another, rather than one for each draw.
+#[derive(Default)]
+struct Unread {
+    /// The buffer the reads saw, None for none: at the start of each
+    /// recording, and after anything other than a triangle drew.
+    seen: Option<u32>,
+    /// The triangles drawn into it since, `RUN_TRIANGLES` at most.
+    drawn: Vec<Bounded>,
+    /// Whether more was drawn into it since than `drawn` holds.
+    more: bool,
+}
+
+impl Unread {
+    /// Forget what the reads saw, after pixels were drawn that `drawn`
+    /// can't follow (fills, frame buffer writes, copies), or the copy
+    /// changed: the next blended triangle catches up with all of it.
+    fn forget(&mut self) {
+        self.seen = None;
+    }
+
+    /// Triangles `vertices` drawn into buffer `dest` without reading it.
+    fn draw(&mut self, dest: u32, vertices: &[Vertex]) {
+        if self.seen != Some(dest) || self.more {
+            return;
         }
-        run.push((tri, b));
+        for t in bounded(vertices) {
+            if self.drawn.len() == RUN_TRIANGLES {
+                self.more = true;
+                return;
+            }
+            self.drawn.push(t);
+        }
     }
-    if !run.is_empty() {
-        runs.push((first, run.len() * 3));
+
+    /// Blended triangles `vertices` drawn into buffer `dest`, which read
+    /// it, in runs that read only pixels the reads saw, as (first vertex,
+    /// vertices, and what goes before it, if anything): a run starts
+    /// where a triangle goes over one drawn since the last barrier or
+    /// copy (by this draw or an earlier one), or where `drawn` is full.
+    fn blend(&mut self, dest: u32, vertices: &[Vertex]) -> Vec<(usize, usize, Option<Catch>)> {
+        let mut runs: Vec<(usize, usize, Option<Catch>)> = Vec::new();
+        for (i, t) in bounded(vertices).enumerate() {
+            let catch = if self.seen != Some(dest) || self.more {
+                Some(Catch::All)
+            } else if self.drawn.len() == RUN_TRIANGLES
+                || self.drawn.iter().any(|d| overlap(d, &t))
+            {
+                let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+                for (_, d) in &self.drawn {
+                    b = [b[0].min(d[0]), b[1].min(d[1]), b[2].max(d[2]), b[3].max(d[3])];
+                }
+                Some(Catch::Bounds(b))
+            } else {
+                None
+            };
+            if catch.is_some() {
+                self.seen = Some(dest);
+                self.drawn.clear();
+                self.more = false;
+                runs.push((i * 3, 0, catch));
+            } else if runs.is_empty() {
+                runs.push((i * 3, 0, None));
+            }
+            if let Some(run) = runs.last_mut() {
+                run.1 += 3;
+            }
+            self.drawn.push(t);
+        }
+        runs
     }
-    runs
 }
 
 /// Blend factor `f` (`source_factor` if `source`, else `dest_factor`)
@@ -2563,9 +2855,11 @@ fn target(gl: &glow::Context, (w, h): (i32, i32), samples: u32, depth: Option<De
             let buffer = gl.create_renderbuffer()?;
             gl.bind_renderbuffer(glow::RENDERBUFFER, Some(buffer));
             gl.renderbuffer_storage_multisample(glow::RENDERBUFFER, samples as i32, glow::RGBA8, w, h);
+            let given =
+                gl.get_renderbuffer_parameter_i32(glow::RENDERBUFFER, glow::RENDERBUFFER_SAMPLES);
             gl.bind_renderbuffer(glow::RENDERBUFFER, None);
             let fbo = gl.create_framebuffer()?;
-            target.samples = Some((fbo, buffer));
+            target.samples = Some((fbo, buffer, given.max(1) as u32));
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
             gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::RENDERBUFFER, Some(buffer));
         }
@@ -2590,8 +2884,9 @@ fn target(gl: &glow::Context, (w, h): (i32, i32), samples: u32, depth: Option<De
 }
 
 /// Compile and link a program with its attributes at their locations, and
-/// find its uniforms.
-fn compile<U: Locations>(
+/// find its uniforms. The ToadForce's renderer makes its programs with it
+/// too (`toadforce::gl`).
+pub(crate) fn compile<U: Locations>(
     gl: &glow::Context,
     glsl: Glsl,
     vertex: &str,
@@ -2638,7 +2933,7 @@ fn compile<U: Locations>(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{RUN_TRIANGLES, Vertex, buffer_rect, sampling_filters, separate_triangles};
+    use super::{Catch, RUN_TRIANGLES, Unread, Vertex, buffer_rect, sampling_filters};
 
     #[test]
     #[ignore = "requires a desktop OpenGL context"]
@@ -2930,6 +3225,14 @@ pub(crate) mod tests {
     /// Replay a saved Glide scene without changing the running game.
     /// RUST_DOS_VOODOO_STATE selects the state; images go under target/tmp.
     /// RUST_DOS_VOODOO_DRIVE_C redirects its C: image to a scratch disk.
+    /// RUST_DOS_VOODOO_SAMPLES sets the samples a pixel, and with
+    /// RUST_DOS_VOODOO_BARRIER=1 blending as the card does reads the
+    /// buffer behind a texture barrier where the driver has one, rather
+    /// than a copy. RUST_DOS_VOODOO_FRAMES sets the frames (60) and
+    /// RUST_DOS_VOODOO_FRAME_INSNS the instructions between two of them
+    /// (1,600,000). After each frame it prints a hash of every colour
+    /// buffer and how many pixels of the picture differ from the software
+    /// rasterizer's.
     #[test]
     #[ignore = "requires a saved Glide scene and a desktop OpenGL context"]
     fn replay_saved_glide_scene() {
@@ -2937,6 +3240,7 @@ pub(crate) mod tests {
         use crate::cpu::Cpu;
         use crate::exec::{NoHook, run_batch};
         use crate::savestate::{machine, slots};
+        use std::hash::{Hash, Hasher};
         use std::{fs, path::PathBuf};
 
         let path = std::env::var_os("RUST_DOS_VOODOO_STATE").expect("RUST_DOS_VOODOO_STATE");
@@ -2964,6 +3268,12 @@ pub(crate) mod tests {
         let gl = unsafe { glow::Context::from_loader_function(|s| proc_address(&video, s)) };
         let samples = std::env::var("RUST_DOS_VOODOO_SAMPLES").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
         let mut renderer = VoodooGl::new(&gl, Glsl::Gl150, 1, samples, 1).unwrap();
+        if std::env::var("RUST_DOS_VOODOO_BARRIER").is_ok_and(|v| v == "1") {
+            // SAFETY: as above.
+            let barrier = unsafe { TextureBarrier::load(&gl, |s| proc_address(&video, s)) };
+            println!("texture barrier: {}", barrier.is_some());
+            renderer.set_texture_barrier(barrier);
+        }
         let save = |name: &str, rgb: &[u8], w, h| {
             let file = fs::File::create(format!("target/tmp/{name}.png")).unwrap();
             let mut encoder = png::Encoder::new(file, w, h);
@@ -2971,9 +3281,14 @@ pub(crate) mod tests {
             encoder.set_depth(png::BitDepth::Eight);
             encoder.write_header().unwrap().write_image_data(rgb).unwrap();
         };
-        for frame in 0..60 {
+        let number = |name: &str, default: u64| {
+            std::env::var(name).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+        };
+        let frames = number("RUST_DOS_VOODOO_FRAMES", 60);
+        let instructions = number("RUST_DOS_VOODOO_FRAME_INSNS", 1_600_000);
+        for frame in 0..frames {
             if frame != 0 {
-                cpu.bus.start_batch(cpu.bus.clock.icount + 1_600_000);
+                cpu.bus.start_batch(cpu.bus.clock.icount + instructions);
                 run_batch(&mut cpu, &mut NoHook, false);
             }
             let card = cpu.bus.voodoo.as_mut().unwrap();
@@ -2983,37 +3298,91 @@ pub(crate) mod tests {
             }).collect();
             println!("frame {frame}, front {:?}, commands {}, fills {:?}", recording.front, recording.commands.len(), fills);
             renderer.run(&gl, recording);
-            if frame % 10 == 0 || frame == 59 {
-                let (w, h) = (card.fbi.width, card.fbi.height);
-                card.frame_buffer();
-                card.prepare_display();
-                let mut rgba = vec![0; (w * h * 4) as usize];
-                card.render(&mut rgba, w as usize);
-                let reference: Vec<_> = rgba.as_chunks::<4>().0.iter()
-                    .flat_map(|&[r, g, b, _]| [r, g, b]).collect();
-                save(&format!("glide-{frame}-software"), &reference, w, h);
-                let target = &renderer.targets[&renderer.front.unwrap()];
-                target.resolve(&gl, (w as i32, h as i32));
-                let mut rendered = vec![0; reference.len()];
-                // GL's lower row is the card's top row (the shader's convention).
+
+            // A hash of each colour buffer, resolved, so that two builds can
+            // be compared byte for byte, buffers not shown included.
+            let (bw, bh) = renderer.scaled();
+            let mut offsets: Vec<u32> = renderer.targets.keys().copied().collect();
+            offsets.sort_unstable();
+            let mut hashes = String::new();
+            for offs in offsets {
+                let target = &renderer.targets[&offs];
+                target.resolve(&gl, (bw, bh));
+                let mut pixels = vec![0u8; (bw * bh * 4) as usize];
+                // SAFETY: the context and framebuffer belong to this thread.
                 unsafe {
                     gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.fbo));
                     gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
-                    gl.read_pixels(0, 0, w as i32, h as i32, glow::RGB, glow::UNSIGNED_BYTE,
-                        glow::PixelPackData::Slice(Some(&mut rendered)));
-                    assert_eq!(gl.get_error(), glow::NO_ERROR);
+                    let out = glow::PixelPackData::Slice(Some(&mut pixels));
+                    gl.read_pixels(0, 0, bw, bh, glow::RGBA, glow::UNSIGNED_BYTE, out);
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                 }
-                // The target holds the colours before the gamma table, which the
-                // presenting pass applies; the software picture has it applied.
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                pixels.hash(&mut hasher);
+                hashes += &format!(" {offs:x}={:016x}", hasher.finish());
+            }
+            println!("frame {frame} targets:{hashes}");
+
+            // The picture: a Voodoo3's or a Banshee's composed (as the window
+            // takes it, through `composite`), a Voodoo Graphics' or a
+            // Voodoo2's front buffer through the gamma table.
+            let banshee = renderer.scanout.is_some();
+            let (w, h) = if banshee { card.picture_size() } else { (card.fbi.width, card.fbi.height) };
+            card.frame_buffer();
+            card.prepare_display();
+            let mut rgba = vec![0; (w * h * 4) as usize];
+            card.render(&mut rgba, w as usize);
+            let reference: Vec<_> = rgba.as_chunks::<4>().0.iter()
+                .flat_map(|&[r, g, b, _]| [r, g, b]).collect();
+            let fbo = if banshee {
+                let base = Frame::new(w, h);
+                match renderer.composite(&gl, &base, &base) {
+                    Some((_, size)) => {
+                        assert_eq!(size, (w, h));
+                        renderer.composite.as_ref().map(|(c, _)| c.fbo)
+                    }
+                    None => None,
+                }
+            } else {
+                renderer.front.map(|front| {
+                    let target = &renderer.targets[&front];
+                    target.resolve(&gl, (w as i32, h as i32));
+                    target.fbo
+                })
+            };
+            let Some(fbo) = fbo else {
+                println!("frame {frame}: nothing shown");
+                continue;
+            };
+            let mut rendered = vec![0; reference.len()];
+            // GL's lower row is the card's top row (the shader's convention).
+            // SAFETY: the context and framebuffer belong to this thread.
+            unsafe {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+                gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+                gl.read_pixels(0, 0, w as i32, h as i32, glow::RGB, glow::UNSIGNED_BYTE,
+                    glow::PixelPackData::Slice(Some(&mut rendered)));
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                assert_eq!(gl.get_error(), glow::NO_ERROR);
+            }
+            if !banshee {
+                // The buffer holds the colours before the gamma table, which
+                // the presenting pass applies; the software picture has it
+                // applied. The composed picture has it too.
                 let table = super::super::gamma_table(&renderer.clut);
                 for rgb in rendered.as_chunks_mut::<3>().0 {
                     *rgb = [table[rgb[0] as usize][0], table[rgb[1] as usize][1], table[rgb[2] as usize][2]];
                 }
-                save(&format!("glide-{frame}-opengl"), &rendered, w, h);
-                let bad = reference.as_chunks::<3>().0.iter().zip(rendered.as_chunks::<3>().0)
-                    .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 32)).count();
-                println!("frame {frame}: {bad} pixels differ by more than 32");
             }
+            save(&format!("glide-{frame}-software"), &reference, w, h);
+            save(&format!("glide-{frame}-opengl"), &rendered, w, h);
+            let pairs = || reference.as_chunks::<3>().0.iter().zip(rendered.as_chunks::<3>().0);
+            let far = |(a, b): &(&[u8; 3], &[u8; 3])| {
+                a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 32)
+            };
+            let bad = pairs().filter(far).count();
+            let differ = pairs().filter(|(a, b)| a != b).count();
+            println!("frame {frame}: {differ} pixels differ, {bad} by more than 32");
         }
         renderer.destroy(&gl);
     }
@@ -3210,11 +3579,11 @@ pub(crate) mod tests {
                 Limits::default(),
                 Limits {
                     max_texture_size: Some(256),
-                    no_blit: false,
+                    ..Limits::default()
                 },
                 Limits {
-                    max_texture_size: None,
                     no_blit: true,
+                    ..Limits::default()
                 },
             ];
             let mut pictures = Vec::new();
@@ -3336,6 +3705,13 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// `Unread::blend`'s runs of `corners` drawn into buffer 0 as the
+    /// first draw after a barrier or copy of all of it.
+    fn runs(corners: &[[f32; 6]]) -> Vec<(usize, usize, Option<Catch>)> {
+        let mut unread = Unread { seen: Some(0), ..Default::default() };
+        unread.blend(0, &triangles(corners))
+    }
+
     #[test]
     fn blended_triangles_run_until_one_overlaps() {
         // A quad's two halves share an edge, whose pixels go to one of
@@ -3355,23 +3731,26 @@ pub(crate) mod tests {
                 [0.0, 8.0, 8.0, 0.0, 8.0, 8.0],
             ],
         ] {
-            assert_eq!(separate_triangles(&triangles(&pair)), [(0, 6)], "{pair:?}");
+            assert_eq!(runs(&pair), [(0, 6, None)], "{pair:?}");
         }
-        // The second goes over the first, so it starts a run; the third
-        // goes over the first only, which is in the run before.
+        // The second goes over the first, so it starts a run after a
+        // catch-up with the first's pixels; the third goes over the first
+        // only, which the reads have seen since.
         let over = [
             [0.0, 0.0, 8.0, 0.0, 0.0, 8.0],
             [1.0, 1.0, 6.0, 1.0, 1.0, 6.0],
             [0.0, 0.0, 2.0, 0.0, 0.0, 2.0],
         ];
-        assert_eq!(separate_triangles(&triangles(&over)), [(0, 3), (3, 6)]);
+        let first = Some(Catch::Bounds([0.0, 0.0, 8.0, 8.0]));
+        assert_eq!(runs(&over), [(0, 3, None), (3, 6, first)]);
         // The second's first vertex is inside the first, by less than f32
         // tells from its edge: they overlap.
         let tip = [
             [159.125, 220.25, 675.3125, 420.0625, 675.3125, 220.25],
             [671.4375, 418.5625, 600.0, 500.0, 700.0, 500.0],
         ];
-        assert_eq!(separate_triangles(&triangles(&tip)), [(0, 3), (3, 3)]);
+        let first = Some(Catch::Bounds([159.125, 220.25, 675.3125, 420.0625]));
+        assert_eq!(runs(&tip), [(0, 3, None), (3, 3, first)]);
     }
 
     #[test]
@@ -3384,16 +3763,50 @@ pub(crate) mod tests {
             })
             .collect();
         let (first, rest) = (3 * RUN_TRIANGLES, 3 * (100 - RUN_TRIANGLES));
-        assert_eq!(separate_triangles(&triangles(&row)), [(0, first), (first, rest)]);
+        let all = Catch::Bounds([0.0, 0.0, 2.0 * RUN_TRIANGLES as f32 - 1.0, 1.0]);
+        assert_eq!(runs(&row), [(0, first, None), (first, rest, Some(all))]);
+    }
+
+    #[test]
+    fn blended_draws_share_a_barrier_until_one_goes_over_another() {
+        let left = triangles(&[[0.0, 0.0, 8.0, 0.0, 0.0, 8.0]]);
+        let right = triangles(&[[20.0, 0.0, 28.0, 0.0, 20.0, 8.0]]);
+        let over_left = triangles(&[[1.0, 1.0, 6.0, 1.0, 1.0, 6.0]]);
+        let mut unread = Unread::default();
+        // The first draw of a recording catches up with the whole buffer;
+        // a later one that goes over none of the pixels drawn since
+        // doesn't, whether those were blended or not.
+        assert_eq!(unread.blend(0, &left), [(0, 3, Some(Catch::All))]);
+        unread.draw(0, &right);
+        let catch = Some(Catch::Bounds([0.0, 0.0, 28.0, 8.0]));
+        assert_eq!(unread.blend(0, &over_left), [(0, 3, catch)]);
+        // Another buffer's draws leave this one's reads as they are, but
+        // reads of another buffer catch up with all of it.
+        unread.draw(1, &over_left);
+        assert_eq!(unread.blend(0, &right), [(0, 3, None)]);
+        assert_eq!(unread.blend(1, &right), [(0, 3, Some(Catch::All))]);
+        // After pixels drawn otherwise (fills, frame buffer writes), the
+        // next blended draw catches up with all of the buffer.
+        unread.forget();
+        assert_eq!(unread.blend(1, &left), [(0, 3, Some(Catch::All))]);
+        // More unblended triangles than it follows: the same.
+        let many: Vec<[f32; 6]> = (0..=RUN_TRIANGLES)
+            .map(|i| {
+                let x = 100.0 + 2.0 * i as f32;
+                [x, 0.0, x + 1.0, 0.0, x, 1.0]
+            })
+            .collect();
+        unread.draw(1, &triangles(&many));
+        assert_eq!(unread.blend(1, &right), [(0, 3, Some(Catch::All))]);
     }
 
     #[test]
     fn blended_triangles_copy_the_pixels_they_cover() {
-        let tri = triangles(&[[1.5, 2.25, 10.2, 2.5, 4.0, 20.0]]);
-        assert_eq!(buffer_rect(&tri, 1, (30, 30)), [1, 2, 11, 20]);
-        assert_eq!(buffer_rect(&tri, 2, (30, 30)), [2, 4, 22, 30]);
-        let off = triangles(&[[-4.0, -2.0, -1.0, -2.0, -4.0, -1.0]]);
-        assert_eq!(buffer_rect(&off, 1, (30, 30)), [0, 0, 0, 0]);
+        let bounds = [1.5, 2.25, 10.2, 20.0];
+        assert_eq!(buffer_rect(bounds, 1, (30, 30)), [1, 2, 11, 20]);
+        assert_eq!(buffer_rect(bounds, 2, (30, 30)), [2, 4, 22, 30]);
+        let off = [-4.0, -2.0, -1.0, -1.0];
+        assert_eq!(buffer_rect(off, 1, (30, 30)), [0, 0, 0, 0]);
     }
 
     /// A hidden window's desktop OpenGL 3.3 context, current on this
@@ -3547,17 +3960,19 @@ pub(crate) mod tests {
         on: bool,
         scale: u32,
     ) -> (Vec<u16>, Vec<[u8; 3]>) {
-        both_pictures_with(gl, draw, on, scale, None)
+        both_pictures_with(gl, draw, on, scale, None, 1)
     }
 
     /// `both_pictures`, with OpenGL blending as the card does through
-    /// `barrier`, or with None through a copy.
+    /// `barrier`, or with None through a copy, and `samples` a pixel,
+    /// resolved before they are read.
     fn both_pictures_with(
         gl: &glow::Context,
         draw: impl FnOnce(&mut crate::bus::Bus),
         on: bool,
         scale: u32,
         barrier: Option<super::TextureBarrier>,
+        samples: u32,
     ) -> (Vec<u16>, Vec<[u8; 3]>) {
         use super::*;
         let mut bus = dither_card();
@@ -3567,12 +3982,13 @@ pub(crate) mod tests {
         let card = bus.voodoo.as_mut().unwrap();
         let recording = card.take_mirror().unwrap();
         let software = software_picture(&mut bus);
-        let mut renderer = VoodooGl::new(gl, Glsl::Gl150, scale, 1, 1).unwrap();
+        let mut renderer = VoodooGl::new(gl, Glsl::Gl150, scale, samples, 1).unwrap();
         renderer.set_dither(on);
         renderer.set_texture_barrier(barrier);
         renderer.run(gl, resync);
         renderer.run(gl, recording);
         let (w, h) = renderer.scaled();
+        renderer.targets[&0].resolve(gl, (w, h));
         let mut rgba = vec![0u8; (w * h * 4) as usize];
         // SAFETY: the context and framebuffer belong to this thread.
         unsafe {
@@ -3657,32 +4073,74 @@ pub(crate) mod tests {
     /// blend a rectangle of one colour with `alpha` (source alpha over its
     /// inverse) and fbzMode's `fbz` bits: two triangles of 128 by 32
     /// pixels at (96, 48), and two more over their right half, which blend
-    /// with them.
-    fn draw_blended(bus: &mut crate::bus::Bus, fbz: u32, alpha: i32, ramp: bool) {
+    /// with them. `between` says what goes between the two pairs.
+    fn draw_blended(
+        bus: &mut crate::bus::Bus,
+        fbz: u32,
+        alpha: i32,
+        ramp: bool,
+        between: Between,
+    ) {
         draw_scene(bus, 1 << 8, ramp);
         w(bus, 0x110, (1 << 9) | fbz);
-        w(bus, 0x10C, (1 << 4) | (1 << 8) | (5 << 12));
-        for (x0, x1) in [(96, 224), (160, 224)] {
-            let (y0, y1) = (48, 80);
-            for verts in [
-                [(x0, y0), (x1, y0), (x0, y1)],
-                [(x1, y0), (x1, y1), (x0, y1)],
-            ] {
-                let start = |v: i32| ((v << 12) | 0x800) as u32;
-                for (reg, v) in [(0x020, 201), (0x024, 37), (0x028, 90), (0x030, alpha)] {
-                    w(bus, reg, start(v));
-                }
-                for reg in [0x040, 0x044, 0x048, 0x050, 0x060, 0x064, 0x068, 0x070] {
-                    w(bus, reg, 0);
-                }
-                for (i, (x, y)) in verts.into_iter().enumerate() {
-                    w(bus, 0x008 + 8 * i as u32, (x * 16) as u32);
-                    w(bus, 0x00C + 8 * i as u32, (y * 16) as u32);
-                }
-                w(bus, 0x080, 0);
+        let blend = (1 << 4) | (1 << 8) | (5 << 12);
+        w(bus, 0x10C, blend);
+        let colour = [201, 37, 90, alpha];
+        match between {
+            Between::Nothing => rectangle(bus, (96, 224), colour),
+            Between::Color0 => {
+                rectangle(bus, (96, 224), colour);
+                w(bus, 0x144, 160);
+            }
+            Between::Opaque => {
+                rectangle(bus, (96, 160), colour);
+                w(bus, 0x10C, 0);
+                rectangle(bus, (160, 224), [30, 180, 60, 255]);
+                w(bus, 0x10C, blend);
             }
         }
+        rectangle(bus, (160, 224), colour);
         w(bus, 0x10C, 0);
+    }
+
+    /// What `draw_blended` does between its two pairs of triangles.
+    #[derive(Clone, Copy, Debug)]
+    enum Between {
+        /// Nothing: the four triangles are one draw.
+        Nothing,
+        /// Change color0, which they don't use, so each pair is a draw
+        /// of its own.
+        Color0,
+        /// Draw the first pair over the left half only, then the second
+        /// pair's rectangle in another colour without blending: the
+        /// second pair goes over none of the first pair's pixels, only
+        /// over those of a draw that didn't read the buffer.
+        Opaque,
+    }
+
+    /// Two triangles from `x0` to `x1` and from row 48 to 80, of one
+    /// colour (red, green, blue and alpha).
+    fn rectangle(bus: &mut crate::bus::Bus, (x0, x1): (i32, i32), colour: [i32; 4]) {
+        let (y0, y1) = (48, 80);
+        triangle(bus, [(x0, y0), (x1, y0), (x0, y1)], colour);
+        triangle(bus, [(x1, y0), (x1, y1), (x0, y1)], colour);
+    }
+
+    /// A triangle with corners `verts` of one colour (red, green, blue and
+    /// alpha).
+    fn triangle(bus: &mut crate::bus::Bus, verts: [(i32, i32); 3], [r, g, b, a]: [i32; 4]) {
+        let start = |v: i32| ((v << 12) | 0x800) as u32;
+        for (reg, v) in [(0x020, r), (0x024, g), (0x028, b), (0x030, a)] {
+            w(bus, reg, start(v));
+        }
+        for reg in [0x040, 0x044, 0x048, 0x050, 0x060, 0x064, 0x068, 0x070] {
+            w(bus, reg, 0);
+        }
+        for (i, (x, y)) in verts.into_iter().enumerate() {
+            w(bus, 0x008 + 8 * i as u32, (x * 16) as u32);
+            w(bus, 0x00C + 8 * i as u32, (y * 16) as u32);
+        }
+        w(bus, 0x080, 0);
     }
 
     #[test]
@@ -3696,7 +4154,8 @@ pub(crate) mod tests {
         // each pixel is the software rasterizer's, over the ramp at 1x and
         // over one colour at 2x (where the ramp between the card's pixels
         // isn't the card's), through the texture barrier where the driver
-        // has one and through a copy.
+        // has one and through a copy. Blended draws after other draws
+        // into the buffer, blended or not, read what those drew.
         let barriers = [None].into_iter().chain(t.barrier.map(Some));
         for (barrier, (fbz, what)) in barriers.flat_map(|b| {
             [
@@ -3706,14 +4165,91 @@ pub(crate) mod tests {
             ]
             .map(|f| (b, f))
         }) {
-            for (alpha, scale) in [(96, 1), (200, 1), (96, 2), (200, 2)] {
-                let draw = |bus: &mut crate::bus::Bus| draw_blended(bus, fbz, alpha, scale == 1);
-                let (software, opengl) = both_pictures_with(gl, draw, true, scale, barrier);
+            for (alpha, scale, between) in [
+                (96, 1, Between::Nothing),
+                (200, 1, Between::Nothing),
+                (96, 2, Between::Nothing),
+                (200, 2, Between::Nothing),
+                (96, 1, Between::Color0),
+                (200, 2, Between::Color0),
+                (96, 1, Between::Opaque),
+                (200, 2, Between::Opaque),
+            ] {
+                let draw = |bus: &mut crate::bus::Bus| {
+                    draw_blended(bus, fbz, alpha, scale == 1, between)
+                };
+                let (software, opengl) = both_pictures_with(gl, draw, true, scale, barrier, 1);
                 assert_eq!(
                     differences(&software, &opengl, scale as usize),
                     (0, vec![]),
-                    "{what}, alpha {alpha}, {scale}x, barrier {}",
+                    "{what}, alpha {alpha}, {scale}x, barrier {}, {between:?}",
                     barrier.is_some()
+                );
+            }
+        }
+    }
+
+    /// Over `draw_scene`'s dithered rectangle (with `ramp`, its ramp),
+    /// blend a rectangle of one colour with `alpha` and fbzMode's `fbz`
+    /// bits as `draw_blended` does, one triangle at a time: the upper left
+    /// one, a rectangle of another colour inside it, which goes over it,
+    /// and then the lower right one, which shares the first's diagonal.
+    /// The rectangle inside makes the renderer copy the buffer after the
+    /// first triangle, so the last one reads the diagonal's pixels with
+    /// the first triangle's samples in them.
+    fn draw_seam(bus: &mut crate::bus::Bus, fbz: u32, alpha: i32, ramp: bool) {
+        draw_scene(bus, 1 << 8, ramp);
+        w(bus, 0x110, (1 << 9) | fbz);
+        w(bus, 0x10C, (1 << 4) | (1 << 8) | (5 << 12));
+        let colour = [201, 37, 90, alpha];
+        let (x0, x1, y0, y1) = (96, 224, 48, 80);
+        triangle(bus, [(x0, y0), (x1, y0), (x0, y1)], colour);
+        // At row 60 the diagonal is at column 176.
+        let (l, r, t, b) = (100, 130, 50, 60);
+        let inside = [40, 200, 120, 160];
+        triangle(bus, [(l, t), (r, t), (l, b)], inside);
+        triangle(bus, [(r, t), (r, b), (l, b)], inside);
+        triangle(bus, [(x1, y0), (x1, y1), (x0, y1)], colour);
+        w(bus, 0x10C, 0);
+    }
+
+    /// With samples, each sample of a pixel on an edge two blended
+    /// triangles share blends with what that sample holds, as each pixel
+    /// does on the card: the resolved picture is the software
+    /// rasterizer's, where the edge's samples would otherwise blend with
+    /// the pixel's average, which holds the other triangle's blend. Where
+    /// the renderer can't blend samples on their own (a driver without
+    /// GL_ARB_sample_shading, or RUST_DOS_GL_NO_PER_SAMPLE=1), it says so
+    /// and skips the counts above 1, which it can't draw right.
+    #[test]
+    #[ignore = "requires a desktop OpenGL context"]
+    fn blended_edges_with_samples_match_the_software_rasterizer() {
+        use super::*;
+        let t = test_context("Seam");
+        let gl = &t.gl;
+        // SAFETY: the context is current on this thread.
+        let most = unsafe { gl.get_parameter_i32(glow::MAX_SAMPLES) } as u32;
+        let (dither, subtract) = (1 << 8, 1 << 19);
+        for samples in [1, 4, 8].into_iter().filter(|&n| n <= most) {
+            let renderer = VoodooGl::new(gl, Glsl::Gl150, 1, samples, 1).unwrap();
+            let blends_samples = renderer.blends_samples();
+            renderer.destroy(gl);
+            if samples > 1 && !blends_samples {
+                println!("{samples} samples skipped: this renderer blends pixels, not samples");
+                continue;
+            }
+            for (fbz, alpha, scale) in [
+                (dither | subtract, 96, 1),
+                (dither, 200, 1),
+                (dither | subtract, 96, 2),
+            ] {
+                let draw = |bus: &mut crate::bus::Bus| draw_seam(bus, fbz, alpha, scale == 1);
+                let (software, opengl) = both_pictures_with(gl, draw, true, scale, None, samples);
+                assert_eq!(
+                    differences(&software, &opengl, scale as usize),
+                    (0, vec![]),
+                    "{samples} samples, \
+                     fbzMode {fbz:X}h, alpha {alpha}, {scale}x"
                 );
             }
         }

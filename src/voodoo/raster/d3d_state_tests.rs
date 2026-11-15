@@ -1,25 +1,5 @@
-use super::tests::{same_as_generic, two_unit_state};
+use super::tests::{dynamic, same_as_generic, two_unit_state};
 use super::*;
-
-/// The bits of fbzMode a variant leaves to the triangle: the depth
-/// function (always, less, greater or equal, less or equal), the colour
-/// and depth writes, clipping and the Y origin; and alphaMode's reference
-/// value.
-fn dynamic(regs: [u32; 6]) -> impl Iterator<Item = [u32; 6]> {
-    [
-        (7 << 5 | 3 << 9, 0),
-        (1 << 5 | 3 << 9, 64),
-        (6 << 5 | 1 << 9 | 1, 128),
-        (3 << 5 | 3 << 9 | 1 << 17, 255),
-    ]
-    .into_iter()
-    .map(move |(fbz, reference)| {
-        let mut r = regs;
-        r[0] |= fbz;
-        r[2] |= reference << 24;
-        r
-    })
-}
 
 #[test]
 fn direct3d_full_variants_draw_as_the_generic_code() {

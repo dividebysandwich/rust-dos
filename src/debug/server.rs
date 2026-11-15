@@ -83,6 +83,7 @@ fn router(state: AppState) -> Router {
         .route("/api/status", get(status))
         .route("/api/stats", get(stats))
         .route("/api/underruns", get(underruns))
+        .route("/api/frames", get(frames))
         .route("/api/profile", get(profile_get).post(profile_post))
         .route("/api/screenshot", get(screenshot))
         .route("/api/screen/text", get(screen_text))
@@ -97,6 +98,7 @@ fn router(state: AppState) -> Router {
         .route("/api/drive/{letter}", put(mount).post(mount).delete(unmount))
         .route("/api/state/{action}", post(state_file))
         .route("/api/speed", post(speed))
+        .route("/api/fps_cap", post(fps_cap))
         .route("/api/control/{action}", post(control))
         .route("/api/control/wait", get(wait_pause))
         .route("/api/registers", get(regs_get).put(regs_put))
@@ -122,6 +124,8 @@ fn router(state: AppState) -> Router {
         .route("/api/exceptions", get(exceptions))
         .route("/api/win32", get(win32).post(win32_post))
         .route("/api/win32/ddraw", get(win32_ddraw))
+        .route("/api/win32/page_file", get(win32_page_file))
+        .route("/api/toadforce/capture", post(toadforce_capture))
         .route("/api/win32/ddraw/surface/{id}", get(win32_surface))
         .route("/ws/trace", get(ws_trace))
         .route("/ws/events", get(ws_events))
@@ -797,6 +801,18 @@ async fn underruns(State(s): State<AppState>) -> ApiResult {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct FramesQuery {
+    /// The count an earlier answer reached: only the frames after it.
+    after: Option<u64>,
+}
+
+async fn frames(State(s): State<AppState>, Query(q): Query<FramesQuery>) -> ApiResult {
+    let after = q.after.unwrap_or(0);
+    s.call_json(Cmd::Frames { after }, DEFAULT_TIMEOUT).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProfilePost {
     enabled: Option<bool>,
     hz: Option<u32>,
@@ -1301,6 +1317,30 @@ async fn speed(State(s): State<AppState>, body: Bytes) -> ApiResult {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct FpsCapBody {
+    /// As `fps_cap` in the configuration file: auto, off or a number,
+    /// in a string or not. Null is off, as `/api/status` gives it, so a
+    /// client can send back the `video.fps_cap` it read there.
+    fps_cap: Value,
+}
+
+async fn fps_cap(State(s): State<AppState>, body: Bytes) -> ApiResult {
+    let b: FpsCapBody = from_value(parse_body(&body)?)?;
+    let value = match &b.fps_cap {
+        Value::String(value) => rust_dos::frame_cap::parse(value),
+        Value::Number(n) => rust_dos::frame_cap::parse(&n.to_string()),
+        Value::Null => Some(rust_dos::frame_cap::Cap::Off),
+        _ => None,
+    };
+    let Some(cap) = value else {
+        let why = format!("invalid fps_cap {} (auto, off, or 10 to 240)", b.fps_cap);
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, why));
+    };
+    s.call_json(Cmd::FpsCap { cap }, DEFAULT_TIMEOUT).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ControlBody {
     count: Option<u64>,
     until: Option<String>,
@@ -1723,8 +1763,44 @@ async fn win32_post(State(s): State<AppState>, body: Bytes) -> ApiResult {
     s.call_json(Cmd::Win32Trace(level), DEFAULT_TIMEOUT).await
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToadForceCaptureBody {
+    /// The file to make. Left out, the recording being made ends.
+    path: Option<String>,
+    /// The page flips to record, 1 when left out, 0 to record until a
+    /// request without a path.
+    flips: Option<u32>,
+}
+
+async fn toadforce_capture(State(s): State<AppState>, body: Bytes) -> ApiResult {
+    let b: ToadForceCaptureBody = from_value(parse_body(&body)?)?;
+    let cmd = Cmd::ToadForceCapture {
+        path: b.path,
+        flips: b.flips.unwrap_or(1),
+    };
+    s.call_json(cmd, DEFAULT_TIMEOUT).await
+}
+
 async fn win32_ddraw(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::Win32Ddraw, DEFAULT_TIMEOUT).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PageFileQuery {
+    /// The most ranges to list (1000 by default).
+    limit: Option<usize>,
+}
+
+async fn win32_page_file(State(s): State<AppState>, Query(q): Query<PageFileQuery>) -> ApiResult {
+    s.call_json(
+        Cmd::Win32PageFile {
+            limit: q.limit.unwrap_or(1000),
+        },
+        DEFAULT_TIMEOUT,
+    )
+    .await
 }
 
 #[derive(Deserialize)]
@@ -2159,7 +2235,8 @@ REQUESTS AND THE JOURNAL
   registers_written, breakpoint_set, breakpoint_removed, watchpoint_set,
   watchpoint_removed, break_on, drive_mounted, drive_unmounted,
   images_swapped, shared_synced, state_saved, state_loaded, debugger_reset,
-  speed_changed, settings_window, host_input, shutdown (always last).
+  speed_changed, fps_cap_changed, settings_window, host_input, shutdown
+  (always last).
 
 STATUS / SCREEN
   GET  /api/status                         emulator state, CS:IP, video mode, trace fill, fps, speed,
@@ -2170,12 +2247,21 @@ STATUS / SCREEN
                                            (emulated s per wall s, full speed while near 1); fps the
                                            program draws; cpu_use is the percent of one host core the
                                            main thread is busy; audio_driver; frame_times: longest
-                                           frame and percentiles over the last 1024 frames, in ms
+                                           frame and percentiles over the last 1024 frames, in ms;
+                                           fps_cap: the frames through the frame rate cap (shown),
+                                           those it held, those late for their turn, the times its
+                                           turns started again from a late one (reanchors), and
+                                           dropped_ms, the time held frames waited for that
+                                           (features has "fps_cap_stats")
   GET  /api/underruns                      the sound device's underruns: audio_driver (what played:
                                            never measure on dummy), events (stretches of dry
                                            checks), dry_checks, and the last 32 with the time since
                                            the last pump, the queue then, the speed, and that time
                                            by cpu, video, present, wait and other
+  GET  /api/frames                         ?after=N: the host's frames after the first N, of the last
+                                           1024: count (the next N), first, ms (each one's wall time)
+                                           and end_ms (the emulated time at its end); frames while the
+                                           machine waits don't count
   POST /api/profile                        {"enabled":true,"hz":2000,"timer":"sleep"|"spin","duration_ms":N}
                                            starts a profile (again, if one runs): a thread samples where
                                            the emulation thread's host time goes, by zone and guest
@@ -2279,7 +2365,10 @@ EXECUTION CONTROL
                              (features has "memory_json" when json is there)
   PUT  /api/memory {"addr":"B800:0000","hex":"41 1F"}  (or "base64"); replies with
                              the bytes replaced ("old") and read back ("new");
-                             "expect":"20 07" writes only if those bytes are there (409)
+                             "expect":"20 07" writes only if those bytes are there (409);
+                             whole or not at all (400 when a byte is on an unmapped
+                             page); a page in the built-in Windows's page file is
+                             read and written there and stays there ("page_file")
   GET  /api/disasm?addr=CS:IP&count=20[&format=json]   json: "lines" and "rows"
                                            ({label, phys, bytes, asm, len, current, breakpoint})
                   a lin: or phys: address decodes as the running code does (32-bit
@@ -2293,6 +2382,9 @@ EXECUTION CONTROL
                   {"program_exit":true}: pause after each program ends ("exit":{name,code,resident,aborted})
   GET/POST/DELETE /api/watchpoints   {"addr":"DS:0100","len":2}  pause when the 1, 2 or
                   4 bytes there change (DELETE without addr = all)
+                  Both are kept by physical address ("1F2A0"), and on a page of a Win32
+                  program's own memory, which its page file moves, by linear address
+                  in that address space ("lin:00A30100")
   GET  /api/ivt              interrupt vector table (real mode)
   Addresses: SEG:OFF (in protected mode SEL:OFF32 through the GDT/LDT; register
   names like CS:EIP, DS:ESI), lin:ADDR (through the page tables), phys:ADDR or ADDR.
@@ -2301,7 +2393,8 @@ PROTECTED MODE
   GET  /api/gdt  /api/ldt    descriptors, decoded
   GET  /api/idt              interrupt, trap and task gates
   GET  /api/tss              the current TSS (stacks, CR3, registers, I/O map)
-  GET  /api/pagewalk?addr=lin:00401000   page directory/table entries and flags
+  GET  /api/pagewalk?addr=lin:00401000   page directory/table entries and flags;
+                             "page_file": in the built-in Windows's page file
   GET  /api/exceptions       the last 64 exceptions (vector, error code, CS:EIP, CR2)
   GET  /api/xms              XMS handles, A20 and the HMA
   GET  /api/net              The IPX driver's sockets, ECBs and packets, and the LAN
@@ -2319,7 +2412,12 @@ BUILT-IN WINDOWS
                              threads (state, wait objects and timeout, CS:EIP, ESP,
                              TIB, last error, priority, suspend count) and its handles
                              (object kind, state, name, reference count); "trace",
-                             the win32_trace level
+                             the win32_trace level; "page_file", its size and counts
+  GET  /api/win32/page_file[?limit=1000]
+                             the pages of the running address space that are in the
+                             page file, as ranges {"addr","pages","zeros"}; "zeros":
+                             pages of zeros with no contents kept there
+                             (features has "page_file" when this is there)
   POST /api/win32 {"trace":"all"}   set the win32_trace level (all, collapsed or off)
                              until the emulator stops; the reply is GET's
   GET  /api/win32/ddraw      DirectDraw's display mode and surfaces: interfaces (the
@@ -2370,13 +2468,13 @@ SAVE STATES
                    /api/speed), except with --deterministic. A booted
                    system's disk copy goes into the image this machine
                    has in the drive, not the one the state names.
-                   "differences" lists the hardware settings, drives,
-                   folders, images, files and deterministic start time
-                   that differed from this machine's, if any. A failed load
-                   (400) changes nothing ("loaded":false, "unchanged":true).
-                   Replies have "saved"/"loaded", the state's "header"
-                   (with its "media"), "format" and "emulator" (this
-                   version).
+                   "differences" lists the hardware settings, memory
+                   size, drives, folders, images, files and deterministic
+                   start time that differed from this machine's, if any.
+                   A failed load (400) changes nothing ("loaded":false,
+                   "unchanged":true). Replies have "saved"/"loaded", the
+                   state's "header" (with its "media"), "format" and
+                   "emulator" (this version).
                    "strict_match":true on either: only while paused with
                    no step or run pending, and for a save no queued input
                    left to type (409 {"error","paused"} otherwise). A load
@@ -2413,6 +2511,10 @@ SPEED
   POST   /api/speed {"cycles":"auto"}   the CPU speed, as `cycles` takes it
                    (auto, auto 5000, max or a number); /api/status has
                    cycles_per_ms, the speed it runs at now
+  POST   /api/fps_cap {"fps_cap":"off"}   the frame rate cap, as `fps_cap`
+                   takes it (auto, off or 10 to 240; a number or null
+                   for off too), for the rest of the run; /api/status
+                   has video.fps_cap. A change appends fps_cap_changed
 
 WEBSOCKETS
   /ws/events[?after=S&volatile=false&log_after=N]

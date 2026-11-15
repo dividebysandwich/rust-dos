@@ -153,7 +153,7 @@ impl DiskController {
         let mut clusters = 0u64;
         let mut dirs = Vec::new();
         for entry in hostfs::read_dir(dir).unwrap_or_default() {
-            if entry.name.to_string_lossy().starts_with('.') {
+            if host_private(&entry.name.to_string_lossy()) {
                 continue;
             }
             if entry.is_dir {
@@ -293,6 +293,10 @@ impl DiskController {
         let leaf = Self::dos_component(leaf);
         if leaf.is_empty() {
             return Err(0x03); // Path not found / invalid
+        }
+        // A name the host keeps for its own files (`host_private`).
+        if super::host_private(leaf) {
+            return Err(0x05);
         }
         let parent_path = self.resolve_on(drive, parent_dos).ok_or(0x03)?;
         if !hostfs::is_dir(&parent_path) {

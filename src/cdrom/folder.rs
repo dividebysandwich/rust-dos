@@ -195,7 +195,7 @@ fn read_folder(dirs: &mut Vec<Dir>, d: usize, path: &Path, depth: usize, seen: &
             let meta = e.metadata().ok()?;
             Some((name, e.path, meta))
         })
-        .filter(|(name, _, _)| name != "." && name != "..")
+        .filter(|(name, _, _)| name != "." && name != ".." && !crate::disk::host_private(name))
         .collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     entries.retain(|(_, path, meta)| {
@@ -693,6 +693,19 @@ mod tests {
         let cut = format!("{}~1.document", "x".repeat(64 - 2 - 9));
         assert!(names.contains(&cut), "{:?}", names);
         assert!(iso9660::file_identifiers(&image).is_ok());
+    }
+
+    /// A name that starts with a dot is a file of the disc, as on a host
+    /// drive; what the host's desktop leaves in the folder isn't
+    /// (`disk::host_private`).
+    #[test]
+    fn the_hosts_own_files_stay_off_the_disc() {
+        let root = scratch("private");
+        fs::write(root.join(".256"), b"1").unwrap();
+        fs::write(root.join(".DS_Store"), b"2").unwrap();
+        fs::write(root.join("._a.txt"), b"3").unwrap();
+        let image = CdImage::from_folder(build(&root, "x").unwrap(), &root).unwrap();
+        assert_eq!(joliet_listing(&image), [".256"]);
     }
 
     #[test]

@@ -131,9 +131,8 @@ pub struct Input {
     /// The key that last went down with Alt held, VK_MENU for Alt itself:
     /// Alt's release is WM_SYSKEYUP only after Alt alone.
     pub sys_key: usize,
-    /// TrackMouseEvent's window, its TME_HOVER and TME_LEAVE flags and
-    /// its hover time (monitor.rs).
-    pub tracking: [u32; 3],
+    /// TrackMouseEvent's request, one for the desktop (track.rs).
+    pub tracking: Option<super::track::Tracking>,
     /// The screen saver (saver.rs): whether it is on and its timeout in
     /// seconds, from WIN.INI or SystemParametersInfo; and in microseconds
     /// of the emulated clock, when the last key or mouse input came and
@@ -371,8 +370,9 @@ fn char_of(vk: usize, keys: &dyn Fn(usize) -> u8) -> Option<u8> {
 /// it next asks, not only after the next interrupt.
 pub fn poll(cpu: &mut Cpu) {
     let desktop = cpu.bus.win32.user.desktop;
-    let taken = crate::win32::dinput::mouse_taken(cpu);
-    if steers_with_mouse(cpu, taken) {
+    let acquired = crate::win32::dinput::mouse_acquired(cpu);
+    let taken = acquired == Some(true);
+    if steers_with_mouse(cpu, acquired) {
         let now = cpu.bus.clock.now_ns();
         cpu.bus.mouse.note_steering(now);
     }
@@ -390,9 +390,14 @@ pub fn poll(cpu: &mut Cpu) {
 
 /// What reading the devices (`poll`) may change, compared before and
 /// after a look at the queue that is to have changed nothing, as an idle
-/// proof's PeekMessage (message.rs). None when a key went down or the
-/// program steers with the mouse, which a read changes whatever comes of
-/// it.
+/// proof's PeekMessage (message.rs). None when a key went down, which a
+/// read takes from the keyboard whatever comes of it.
+///
+/// A program steering with the mouse doesn't count: the read notes it
+/// (`MouseState::note_steering`), but only for the host's capture of the
+/// mouse, which the program never sees, and the reads at every interrupt
+/// (`thread::wake`) note it again after the passes skipped, which end by
+/// the next timer event, long before the note's second runs out.
 #[derive(PartialEq)]
 pub struct Seen {
     cursor: (i32, i32),
@@ -404,8 +409,7 @@ pub struct Seen {
 }
 
 pub fn seen(cpu: &mut Cpu) -> Option<Seen> {
-    let taken = crate::win32::dinput::mouse_taken(cpu);
-    if cpu.bus.kbd.has_pressed() || steers_with_mouse(cpu, taken) {
+    if cpu.bus.kbd.has_pressed() {
         return None;
     }
     let input = &user(cpu).input;
@@ -420,18 +424,21 @@ pub fn seen(cpu: &mut Cpu) -> Option<Seen> {
 }
 
 /// Whether the program steers with the mouse's motion: DirectInput has
-/// the mouse exclusively (`taken`), or it hid the cursor and has the
-/// capture, as games do that put the cursor back in the middle after
-/// each move (Unreal). The host's mouse then moves the emulated one by
-/// its motion (`MouseState::note_steering`); where the host's pointer is
-/// on the picture means nothing to such a program.
-fn steers_with_mouse(cpu: &mut Cpu, taken: bool) -> bool {
-    if taken {
-        return true;
-    }
+/// the mouse exclusively (`acquired` is Some(true)), or it hid the cursor
+/// and has the capture, as games do that put the cursor back in the
+/// middle after each move (Unreal), or it hid the cursor and reads the
+/// mouse through DirectInput without taking it (Adrenix). The host's
+/// mouse then moves the emulated one by its motion
+/// (`MouseState::note_steering`); where the host's pointer is on the
+/// picture means nothing to such a program.
+fn steers_with_mouse(cpu: &mut Cpu, acquired: Option<bool>) -> bool {
     let state = user(cpu);
     let input = &state.input;
-    input.cursor_count < 0 && input.capture != 0 && state.is_window(input.capture)
+    match acquired {
+        Some(true) => true,
+        Some(false) => input.cursor_count < 0,
+        None => input.cursor_count < 0 && input.capture != 0 && state.is_window(input.capture),
+    }
 }
 
 /// Read the keyboard: whether a key went down since the last read.
@@ -704,7 +711,7 @@ fn button_event(cpu: &mut Cpu, b: usize, down: bool) {
 }
 
 /// The MK_ flags of the buttons and keys as the devices have them.
-fn mk_flags(input: &Input) -> u32 {
+pub(super) fn mk_flags(input: &Input) -> u32 {
     let mut flags = 0;
     for (vk, mk) in [
         (VK_LBUTTON, MK_LBUTTON),
@@ -763,7 +770,7 @@ pub fn window_moved(cpu: &mut Cpu, hwnd: u32, before: u32, changed: bool) {
 /// the capture or the one under the cursor.
 fn mouse_event_at(cpu: &mut Cpu, message: u32, _button: u32) {
     if message == WM_MOUSEMOVE {
-        super::monitor::mouse_moved(cpu);
+        super::track::mouse_moved(cpu);
     }
     let time = message::now_ms(cpu);
     let state = user(cpu);
@@ -2270,7 +2277,8 @@ pub fn translate_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// GetKeyboardLayout(tid), ActivateKeyboardLayout and
-/// LoadKeyboardLayoutA: US English.
+/// LoadKeyboardLayoutA: US English, whatever the system locale, as the
+/// keys type the US layout's characters.
 pub fn get_keyboard_layout(_cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0x0409_0409)
 }
@@ -2299,9 +2307,9 @@ pub fn get_keyboard_type(_cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     })
 }
 
-/// GetKBCodePage.
-pub fn get_kb_code_page(_cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(437)
+/// GetKBCodePage: the system's OEM code page.
+pub fn get_kb_code_page(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(crate::win32::nls::oem(cpu).number())
 }
 
 /// keybd_event(vk, scan, flags, extra): a key as if it was typed.
@@ -2910,6 +2918,46 @@ mod tests {
         user(&mut other).input.cursor_count = -1;
         poll(&mut other);
         assert!(!other.bus.mouse.in_use(now), "no capture");
+    }
+
+    /// A program that hides the cursor and reads the mouse through
+    /// DirectInput steers with it, whether it took the mouse or not
+    /// (Adrenix acquires it non-exclusively, issue 917); with the cursor
+    /// showing, only a mouse taken exclusively steers.
+    #[test]
+    fn a_hidden_cursor_with_a_directinput_mouse_steers_with_the_mouse() {
+        use crate::win32::dinput;
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let now = cpu.bus.clock.now_ns();
+        dinput::acquired_mouse(&mut cpu, false);
+        poll(&mut cpu);
+        assert!(!cpu.bus.mouse.in_use(now), "the cursor shows");
+        user(&mut cpu).input.cursor_count = -1;
+        poll(&mut cpu);
+        assert!(cpu.bus.mouse.in_use(now) && cpu.bus.mouse.moves_by_motion(now));
+        let mut other = Cpu::new(std::path::PathBuf::from("."));
+        user(&mut other).input.cursor_count = -1;
+        poll(&mut other);
+        assert!(!other.bus.mouse.in_use(now), "no DirectInput mouse");
+        let mut taken = Cpu::new(std::path::PathBuf::from("."));
+        dinput::acquired_mouse(&mut taken, true);
+        poll(&mut taken);
+        assert!(taken.bus.mouse.moves_by_motion(now), "taken exclusively");
+    }
+
+    /// Reading the devices while a program steers with the mouse changes
+    /// nothing the program sees, so an idle proof's PeekMessage can still
+    /// find that it changed nothing.
+    #[test]
+    fn steering_leaves_what_a_read_sees_as_it_was() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        crate::win32::dinput::acquired_mouse(&mut cpu, false);
+        user(&mut cpu).input.cursor_count = -1;
+        poll(&mut cpu);
+        let before = seen(&mut cpu);
+        poll(&mut cpu);
+        assert!(cpu.bus.mouse.moves_by_motion(cpu.bus.clock.now_ns()));
+        assert!(before.is_some() && seen(&mut cpu) == before);
     }
 
     /// A window shown under the cursor gets a WM_MOUSEMOVE where the

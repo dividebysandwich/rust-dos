@@ -10,7 +10,10 @@
 //! puts the user's settings back once it has ended.
 //!
 //! Only the settings of the emulated machine go back and forth (`KEYS`):
-//! never drives, commands or paths.
+//! never drives, commands or paths. With them goes what the game's
+//! profile says of the game (`About`): its year, publisher and the
+//! player's notes, and its UUID, with which the almanac replaces the
+//! report the profile sent before instead of adding another.
 
 use crate::config::{self, Settings};
 use crate::cpu::Cpu;
@@ -26,8 +29,9 @@ pub const API: &str = "https://almanac.rust-dos.com/api/v1";
 pub const API_VARIABLE: &str = "RUST_DOS_ALMANAC_API";
 
 /// The settings the almanac knows, by section and key: those of the
-/// machine a game runs on.
-pub const KEYS: [(&str, &str); 37] = [
+/// machine a game runs on, and the frame rate cap, which some games need
+/// (Test Drive 4 misbehaves above 60) and a benchmark's entry turns off.
+pub const KEYS: [(&str, &str); 40] = [
     ("emulator", "machine"),
     ("emulator", "cpu"),
     ("emulator", "core"),
@@ -41,6 +45,8 @@ pub const KEYS: [(&str, &str); 37] = [
     ("emulator", "dos_version"),
     ("emulator", "win32"),
     ("emulator", "win32_version"),
+    ("emulator", "win32_depth"),
+    ("emulator", "win32_locale"),
     ("emulator", "voodoo"),
     ("emulator", "voodoo_model"),
     ("emulator", "voodoo_memory"),
@@ -49,6 +55,7 @@ pub const KEYS: [(&str, &str); 37] = [
     ("emulator", "monochrome"),
     ("emulator", "hard_disk_speed"),
     ("emulator", "floppy_disk_speed"),
+    ("emulator", "fps_cap"),
     ("sound", "sbtype"),
     ("sound", "sbbase"),
     ("sound", "irq"),
@@ -67,7 +74,11 @@ pub const KEYS: [(&str, &str); 37] = [
     ("joystick", "joysticktype"),
 ];
 
+/// Whether the almanac's setting `key` of `section` is one of `KEYS`,
+/// under its current name or an old one (`config::OLD_NAMES`), which a
+/// recommendation may still carry and the configuration still reads.
 fn known(section: &str, key: &str) -> bool {
+    let key = config::renamed(section, key);
     KEYS.iter()
         .any(|&(s, k)| s.eq_ignore_ascii_case(section) && k.eq_ignore_ascii_case(key))
 }
@@ -101,14 +112,81 @@ pub fn file_info(name: &str, bytes: &[u8]) -> FileInfo {
     }
 }
 
+/// What the program `bytes` are, as the almanac files a version under:
+/// `win32` for a Windows 95/98 program (PE), `win16` for a Windows 3.1
+/// one (NE, not OS/2's), `dos` for anything else. The Windows ones run on
+/// the built-in Windows (`win32`).
+pub fn platform_of(bytes: &[u8]) -> &'static str {
+    if rust_dos_pe::is_pe(bytes) {
+        "win32"
+    } else if crate::win32::is_win16(bytes) {
+        "win16"
+    } else {
+        "dos"
+    }
+}
+
 /// The program a game starts with, as the settings window asks about it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Program {
     /// Its file, a DOS path.
     pub path: String,
     pub files: Vec<FileInfo>,
+    /// [`platform_of`] its file, when there is one.
+    pub platform: Option<String>,
     /// The name to look the game up by: its profile's, or the program's.
     pub name: String,
+    /// What the profile of the game playing says of it, if one plays.
+    pub about: Option<About>,
+}
+
+/// What a game profile tells the almanac of its game (`[game]`'s `year`,
+/// `publisher`, `notes` and `uuid`, games.rs).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct About {
+    pub year: Option<i32>,
+    pub publisher: Option<String>,
+    pub notes: Option<String>,
+    /// The profile's UUID, the report's key: a report sent with it
+    /// replaces the one sent with it on the same game before.
+    pub key: Option<String>,
+}
+
+impl About {
+    /// What the profile `text` says.
+    pub fn of_profile(text: &str) -> About {
+        let config = config::parse(text, Path::new("/"), None);
+        About {
+            year: config.game_year,
+            publisher: config.game_publisher,
+            notes: config.game_notes,
+            key: config.game_uuid,
+        }
+    }
+
+    /// The profile `text` saying `self`'s year, publisher and notes (the
+    /// ones that are None taken out), and with a UUID of its own.
+    pub fn into_profile(&self, text: &str) -> String {
+        let year = self.year.map(|y| y.to_string());
+        let mut text = text.to_string();
+        for (key, value) in [
+            ("year", year.as_deref()),
+            ("publisher", self.publisher.as_deref()),
+            ("notes", self.notes.as_deref()),
+        ] {
+            text = crate::games::set_game_value(&text, key, value);
+        }
+        crate::games::with_uuid(&text)
+    }
+}
+
+/// A report the almanac took: its number, and whether it replaced the one
+/// the profile sent before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub struct Reported {
+    pub id: i64,
+    #[serde(default)]
+    pub replaced: bool,
 }
 
 /// The program at the DOS path `path`, read from the machine's drives.
@@ -123,7 +201,9 @@ pub fn program(cpu: &mut Cpu, path: &str) -> Option<Program> {
     Some(Program {
         path: path.to_string(),
         files: vec![file],
+        platform: Some(platform_of(&bytes).to_string()),
         name,
+        about: None,
     })
 }
 
@@ -302,12 +382,19 @@ pub fn best(candidates: &[Candidate]) -> Option<&Candidate> {
 }
 
 /// The settings a report sends: `settings`' values of `KEYS`, by section.
+/// The memory is `memory_mb`, the size the machine runs with, also where
+/// `memsize` isn't set: the default for its CPU and display adapter is
+/// what the game ran with, and whoever takes the report's settings may
+/// have another. (A CPU chosen in the settings window changes the
+/// settings' default at once, the machine's memory at the next start.)
 pub fn report_settings(
     settings: &Settings,
+    memory_mb: usize,
     home: Option<&Path>,
 ) -> BTreeMap<String, BTreeMap<String, String>> {
     let mut map: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    for (section, key, value) in config::values(settings, home) {
+    let memory = Settings { memsize: Some(memory_mb), ..settings.clone() };
+    for (section, key, value) in config::values(&memory, home) {
         if let Some(value) = value
             && known(section, key)
         {
@@ -320,7 +407,17 @@ pub fn report_settings(
 }
 
 /// `base` with `settings` over it, those of `KEYS` only, as a profile's
-/// are layered over the configuration's (games.rs's `prepare`).
+/// are layered over the configuration's (games.rs's `prepare`). Each
+/// value goes through the configuration's parser, which ignores one it
+/// doesn't take (`fps_cap=500`), leaving `base`'s.
+///
+/// Reports send the memory the game ran with, set or not, so a
+/// recommendation always has a `memsize`. Where `base` doesn't set it and
+/// the recommended size is the default for the recommended CPU and display
+/// adapter, it stays unset: the machine gets the same size, and saving
+/// the settings writes no `memsize` line that would stop it following a
+/// later change of the CPU or the adapter. Any other recommended size is
+/// set, below the default too, as the game is known to run with it.
 pub fn layer(base: &Settings, settings: &[&Setting], home: Option<&Path>) -> Settings {
     let mut sections: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for s in settings {
@@ -336,7 +433,13 @@ pub fn layer(base: &Settings, settings: &[&Setting], home: Option<&Path>) -> Set
     for (section, lines) in sections {
         text.push_str(&format!("\n[{}]\n{}\n", section, lines.join("\n")));
     }
-    Settings::from_config(&config::parse(&text, Path::new("/"), home))
+    let mut layered = Settings::from_config(&config::parse(&text, Path::new("/"), home));
+    if base.memsize.is_none()
+        && layered.memsize == Some(config::default_memsize(layered.cpu, layered.machine))
+    {
+        layered.memsize = None;
+    }
+    layered
 }
 
 /// How long a program waits for the almanac at most, in the host's time:
@@ -470,14 +573,16 @@ pub fn candidates(
 pub fn report(
     subject: &Subject,
     files: &[FileInfo],
+    platform: Option<&str>,
     rating: Rating,
     settings: &BTreeMap<String, BTreeMap<String, String>>,
-) -> Result<i64, String> {
+    about: &About,
+) -> Result<Reported, String> {
     #[cfg(all(feature = "sdl", not(target_arch = "wasm32")))]
-    return client::report(subject, files, rating, settings);
+    return client::report(subject, files, platform, rating, settings, about);
     #[cfg(not(all(feature = "sdl", not(target_arch = "wasm32"))))]
     {
-        let _ = (subject, files, rating, settings);
+        let _ = (subject, files, platform, rating, settings, about);
         Err(format!("This Rust-DOS doesn't ask {}", SITE))
     }
 }
@@ -646,11 +751,6 @@ pub mod client {
         versions: Vec<Version>,
     }
 
-    #[derive(Deserialize)]
-    struct Report {
-        id: i64,
-    }
-
     /// The label of the version a report adds for the program's file.
     fn version_label(files: &[FileInfo]) -> String {
         match files.first() {
@@ -663,19 +763,27 @@ pub mod client {
         }
     }
 
-    /// Report that the game played `rating` with `settings`: to its
-    /// version of the program's `files`, which is added if the game
-    /// doesn't have it yet, and the game too if it is new. Returns the
-    /// report's number.
+    /// Report that the game played `rating` with `settings`, and what its
+    /// profile says of it (`about`): to its version of the program's
+    /// `files`, which is added, with the program's `platform`, if the game
+    /// doesn't have it yet, and the game too if it is new. The almanac
+    /// replaces the report sent with `about`'s key on the game before.
     pub fn report(
         subject: &Subject,
         files: &[FileInfo],
+        platform: Option<&str>,
         rating: Rating,
         settings: &BTreeMap<String, BTreeMap<String, String>>,
-    ) -> Result<i64, String> {
+        about: &About,
+    ) -> Result<Reported, String> {
         let new_version = || {
-            (!files.is_empty())
-                .then(|| serde_json::json!({ "label": version_label(files), "files": files }))
+            (!files.is_empty()).then(|| {
+                serde_json::json!({
+                    "label": version_label(files),
+                    "platform": platform,
+                    "files": files,
+                })
+            })
         };
         let (slug, version) = match subject {
             Subject::Game {
@@ -704,7 +812,13 @@ pub mod client {
                 (game.slug, version)
             }
             Subject::New(name) => {
-                let body = serde_json::json!({ "name": name.trim(), "version": new_version() });
+                let body = serde_json::json!({
+                    "name": name.trim(),
+                    "year": about.year,
+                    "publisher": about.publisher,
+                    "key": about.key,
+                    "version": new_version(),
+                });
                 let game: Game = post("/games", &body)?;
                 let version = game.versions.first().map(|v| v.id);
                 (game.slug, version)
@@ -716,14 +830,65 @@ pub mod client {
             "rating": rating,
             "settings": settings,
             "rust_dos_version": env!("CARGO_PKG_VERSION"),
+            "notes": about.notes,
+            "key": about.key,
+            "year": about.year,
+            "publisher": about.publisher,
         });
-        post::<Report>("/reports", &body).map(|r| r.id)
+        post("/reports", &body)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame_cap::Cap;
+
+    #[test]
+    fn a_profile_keeps_what_the_report_says_of_its_game() {
+        let old = "[game]\nname=Keen\nnotes=Old notes\noverlay=true\n\n[autoexec]\nKEEN4E\n";
+        let about = About {
+            year: Some(1991),
+            publisher: Some("Apogee".into()),
+            notes: None,
+            key: None,
+        };
+        let text = about.into_profile(old);
+        let kept = About::of_profile(&text);
+        assert_eq!(
+            (kept.year, kept.publisher.as_deref()),
+            (Some(1991), Some("Apogee"))
+        );
+        // Notes taken out of the report are taken out of the profile.
+        assert_eq!(kept.notes, None);
+        assert!(!text.contains("notes="), "{}", text);
+        // It gets a UUID, which stays as it is the next time.
+        let key = kept.key.clone().expect("the profile gets a UUID");
+        assert!(crate::games::valid_uuid(&key));
+        let again = About {
+            notes: Some("Needs EMS".into()),
+            ..kept
+        }
+        .into_profile(&text);
+        assert_eq!(About::of_profile(&again).key, Some(key));
+        assert_eq!(About::of_profile(&again).notes.as_deref(), Some("Needs EMS"));
+        assert!(again.ends_with("\n[autoexec]\nKEEN4E\n"), "{}", again);
+    }
+
+    #[test]
+    fn programs_are_filed_by_platform() {
+        let mut pe = vec![0u8; 0x48];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3C] = 0x40;
+        pe[0x40..0x44].copy_from_slice(b"PE\0\0");
+        assert_eq!(platform_of(&pe), "win32");
+        // An NE header that doesn't parse runs as DOS, as its stub would.
+        let mut ne = pe.clone();
+        ne[0x40..0x44].copy_from_slice(b"NE\0\0");
+        assert_eq!(platform_of(&ne), "dos");
+        assert_eq!(platform_of(b"MZ\x90\0"), "dos");
+        assert_eq!(platform_of(&[0xB4, 0x4C, 0xCD, 0x21]), "dos");
+    }
 
     #[test]
     fn a_file_is_known_by_its_name_size_and_checksums() {
@@ -736,12 +901,91 @@ mod tests {
 
     #[test]
     fn reports_send_only_the_machines_settings() {
-        let settings = report_settings(&Settings::default(), None);
+        let default = Settings::default();
+        let settings = report_settings(&default, default.memory_mb(), None);
         let count: usize = settings.values().map(BTreeMap::len).sum();
         assert_eq!(count, KEYS.len(), "every key has a value: {:?}", settings);
-        assert!(settings["emulator"].contains_key("memsize"));
+        assert_eq!(settings["emulator"]["memsize"], "16", "the default, though memsize isn't set");
+        assert_eq!(settings["emulator"]["fps_cap"], "auto");
+        assert!(!settings["emulator"].contains_key("voodoo_fps_cap"));
         assert!(!settings["emulator"].contains_key("scale"));
+        let off = Settings {
+            fps_cap: Cap::Off,
+            ..Settings::default()
+        };
+        assert_eq!(report_settings(&off, 16, None)["emulator"]["fps_cap"], "off");
+        let thirty = Settings {
+            fps_cap: Cap::Fps(30),
+            ..Settings::default()
+        };
+        assert_eq!(report_settings(&thirty, 16, None)["emulator"]["fps_cap"], "30");
         assert!(!settings.contains_key("drives"));
+        // The size the machine runs with, whatever the settings give now:
+        // a Pentium II chosen after a start with the 486's 16 MB.
+        let pentium_ii = Settings { cpu: crate::cpu::CpuModel::PentiumII, ..Settings::default() };
+        assert_eq!(pentium_ii.memory_mb(), 64);
+        assert_eq!(report_settings(&pentium_ii, 16, None)["emulator"]["memsize"], "16");
+        assert_eq!(report_settings(&pentium_ii, 64, None)["emulator"]["memsize"], "64");
+    }
+
+    /// A recommendation that sets the CPU or the display adapter and no
+    /// memsize gets the memory that is their default, unless the
+    /// configuration sets memsize.
+    #[test]
+    fn a_recommended_cpu_brings_its_default_memory() {
+        use crate::cpu::CpuModel;
+        let setting = |key: &str, value: &str| Setting {
+            section: "emulator".into(),
+            key: key.into(),
+            value: value.into(),
+        };
+        let cpu = setting("cpu", "pentium_ii");
+        let layered = layer(&Settings::default(), &[&cpu], None);
+        assert_eq!(layered.cpu, CpuModel::PentiumII);
+        assert_eq!((layered.memsize, layered.memory_mb()), (None, 64));
+        let card = setting("machine", "svga_toadforce");
+        assert_eq!(layer(&Settings::default(), &[&card], None).memory_mb(), 128);
+
+        // The configuration's memsize stays, and so does the
+        // recommendation's own.
+        let base = Settings { memsize: Some(16), ..Settings::default() };
+        assert_eq!(layer(&base, &[&cpu], None).memory_mb(), 16);
+        let memsize = setting("memsize", "32");
+        let layered = layer(&Settings::default(), &[&cpu, &memsize], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (Some(32), 32));
+    }
+
+    /// A recommended memsize that is the default of the recommended CPU
+    /// and display adapter leaves memsize unset; any other is set, below
+    /// the default too; and over a memsize the user set, the
+    /// recommendation's is set as before.
+    #[test]
+    fn a_recommended_default_memory_stays_unset() {
+        let setting = |key: &str, value: &str| Setting {
+            section: "emulator".into(),
+            key: key.into(),
+            value: value.into(),
+        };
+        let cpu = setting("cpu", "pentium_ii");
+        let unset = Settings::default();
+        let layered = layer(&unset, &[&cpu, &setting("memsize", "64")], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (None, 64));
+        let card = setting("machine", "svga_toadforce");
+        let layered = layer(&unset, &[&card, &setting("memsize", "128")], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (None, 128));
+        // The old reports' 16 MB beside a Pentium II: what the game ran with.
+        let layered = layer(&unset, &[&cpu, &setting("memsize", "16")], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (Some(16), 16));
+        let layered = layer(&unset, &[&cpu, &setting("memsize", "128")], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (Some(128), 128));
+
+        // The user's own memsize is replaced by the recommendation's, which
+        // is then set even where it is the default.
+        let own = Settings { memsize: Some(32), ..Settings::default() };
+        let layered = layer(&own, &[&cpu, &setting("memsize", "64")], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (Some(64), 64));
+        let layered = layer(&own, &[&cpu], None);
+        assert_eq!((layered.memsize, layered.memory_mb()), (Some(32), 32));
     }
 
     #[test]
@@ -763,10 +1007,69 @@ mod tests {
             ..Settings::default()
         };
         let layered = layer(&base, &given.iter().collect::<Vec<_>>(), None);
-        assert_eq!(layered.memsize, 8);
+        assert_eq!(layered.memsize, Some(8));
         assert!(!layered.ems);
         assert_eq!(layered.scale, base.scale);
         assert_eq!(layered.cycles, base.cycles);
+    }
+
+    #[test]
+    fn a_recommendation_sets_the_frame_rate_cap_under_either_name() {
+        let setting = |key: &str, value: &str| Setting {
+            section: "emulator".into(),
+            key: key.into(),
+            value: value.into(),
+        };
+        let base = Settings {
+            fps_cap: Cap::Fps(45),
+            ..Settings::default()
+        };
+        let layered = |given: &[Setting]| layer(&base, &given.iter().collect::<Vec<_>>(), None).fps_cap;
+        assert_eq!(layered(&[setting("fps_cap", "60")]), Cap::Fps(60));
+        assert_eq!(layered(&[setting("fps_cap", "auto")]), Cap::Auto);
+        assert_eq!(layered(&[setting("fps_cap", "off")]), Cap::Off);
+        assert_eq!(layered(&[setting("fps_cap", "0")]), Cap::Off);
+        assert_eq!(layered(&[setting("voodoo_fps_cap", "30")]), Cap::Fps(30));
+        assert_eq!(layered(&[setting("Voodoo_FPS_Cap", "off")]), Cap::Off);
+        // What the parser doesn't take leaves the user's own value.
+        for bad in ["5", "241", "fast", "-60", "60 fps"] {
+            assert_eq!(layered(&[setting("fps_cap", bad)]), Cap::Fps(45), "{}", bad);
+        }
+        let r = Recommendation {
+            source: Source::Consensus { reports: 2 },
+            rating: Ratings::default(),
+            settings: vec![setting("voodoo_fps_cap", "60")],
+        };
+        assert_eq!(r.usable().len(), 1, "the old name is the setting's");
+    }
+
+    #[test]
+    fn layering_takes_the_system_locale_and_drops_an_unknown_one() {
+        use crate::config::Win32Locale;
+        let locale = |value: &str| Setting {
+            section: "emulator".into(),
+            key: "win32_locale".into(),
+            value: value.into(),
+        };
+        let base = Settings {
+            win32_locale: Win32Locale::PlPl,
+            ..Settings::default()
+        };
+        let russian = locale("ru-RU");
+        assert_eq!(layer(&base, &[&russian], None).win32_locale, Win32Locale::RuRu);
+        // A locale the built-in Windows doesn't have leaves the base's, as
+        // the configuration file's parser warns and keeps it.
+        let japanese = locale("ja-JP");
+        assert_eq!(layer(&base, &[&japanese], None).win32_locale, Win32Locale::PlPl);
+        let reported = report_settings(&base, base.memory_mb(), None);
+        assert_eq!(reported["emulator"]["win32_locale"], "pl-PL");
+        // Every locale goes through by its name and is reported by it.
+        for l in Win32Locale::ALL {
+            let layered = layer(&base, &[&locale(l.name())], None);
+            assert_eq!(layered.win32_locale, l);
+            let reported = report_settings(&layered, layered.memory_mb(), None);
+            assert_eq!(reported["emulator"]["win32_locale"], l.name());
+        }
     }
 
     #[test]

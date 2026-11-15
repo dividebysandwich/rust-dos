@@ -44,6 +44,11 @@ pub const FEATURES: &[&str] = &[
     "build",
     "memory_json",
     "screen_attrs",
+    // Memory reads, writes, breakpoints and watchpoints on pages in the
+    // built-in Windows's page file (`lin:` spots), and /api/win32/page_file.
+    "page_file",
+    // `fps_cap` in /api/stats: what the frame rate cap did to the frames.
+    "fps_cap_stats",
 ];
 
 macro_rules! kinds {
@@ -100,6 +105,7 @@ kinds! {
     StateLoaded = "state_loaded", true;
     DebuggerReset = "debugger_reset", true;
     SpeedChanged = "speed_changed", true;
+    FpsCapChanged = "fps_cap_changed", true;
     SettingsWindow = "settings_window", true;
     HostInput = "host_input", true;
     Shutdown = "shutdown", true;

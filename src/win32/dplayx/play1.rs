@@ -108,6 +108,7 @@ pub fn get_player_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DPERR_INVALIDPLAYER);
     };
     let mut result = DP_OK;
+    let page = crate::win32::nls::ansi(cpu);
     for (text, at, size_at) in [
         (&e.short, short_at, short_size),
         (&e.long, long_at, long_size),
@@ -115,7 +116,7 @@ pub fn get_player_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if size_at == 0 || !cpu.bus.guest_probe(size_at, 4, true) {
             return Some(DPERR_INVALIDPARAMS);
         }
-        let bytes = guest::name1(text);
+        let bytes = guest::name1(text, page);
         let room = cpu.bus.guest_read_32(size_at);
         cpu.bus.guest_write_32(size_at, bytes.len() as u32);
         if at == 0 || room < bytes.len() as u32 {

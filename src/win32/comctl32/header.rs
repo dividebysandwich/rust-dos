@@ -322,22 +322,13 @@ pub fn read_text(cpu: &mut Cpu, at: u32, wide: bool) -> Option<Vec<u8>> {
         }
         units.push(u);
     }
-    Some(wide_to_ansi(&units))
+    Some(wide_to_ansi(cpu, &units))
 }
 
-/// Unicode text as ANSI, by the ANSI code page; '?' for what it lacks.
-pub fn wide_to_ansi(units: &[u16]) -> Vec<u8> {
-    units
-        .iter()
-        .map(|&u| {
-            if u < 0x80 {
-                return u as u8;
-            }
-            (0x80..=0xFFu8)
-                .find(|&b| crate::win32::kernel32::ansi_to_wide(&[b]).first() == Some(&u))
-                .unwrap_or(b'?')
-        })
-        .collect()
+/// Unicode text as ANSI, by the system's ANSI code page; '?' for what it
+/// lacks.
+pub fn wide_to_ansi(cpu: &Cpu, units: &[u16]) -> Vec<u8> {
+    crate::win32::kernel32::wide_to_ansi(cpu, units)
 }
 
 /// Write `text` at `at` with its zero, as ANSI or Unicode, cut to fit
@@ -349,7 +340,7 @@ pub fn write_text(cpu: &mut Cpu, at: u32, max: u32, text: &[u8], wide: bool) -> 
     if !wide {
         return user32::copy_out(cpu, at, max, text);
     }
-    let units = crate::win32::kernel32::ansi_to_wide(text);
+    let units = crate::win32::kernel32::ansi_to_wide(cpu, text);
     let n = units.len().min(max as usize - 1);
     let mut bytes: Vec<u8> = units[..n].iter().flat_map(|u| u.to_le_bytes()).collect();
     bytes.extend([0, 0]);

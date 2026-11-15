@@ -440,6 +440,155 @@ fn fprem_quotient_bits_are_the_magnitudes_and_fprem1_ties_to_even() {
     }
 }
 
+/// FPREM and FPREM1 on operands they don't reduce, and a few they do,
+/// with C0 to C3 all set or all clear before and IE masked: the status
+/// word and ST(0) after, as the host's x87 (a Ryzen 7 7700X) gave them
+/// for the same operands and stack. An invalid or NaN operand clears C1
+/// and C2 and keeps C0 and C3; C2 left set would make a loop that repeats
+/// FPREM while C2 is set (fmod's) run forever. `empty`: 1 ST(1) empty,
+/// 2 both, 3 ST(0) (FFREE'd).
+#[test]
+fn fprem_on_operands_it_does_not_reduce_as_the_x87() {
+    const FPREM: [u8; 2] = [0xD9, 0xF8];
+    const FPREM1: [u8; 2] = [0xD9, 0xF5];
+    const ZERO: u128 = 0;
+    const FIVE: u128 = 0x4001_A000_0000_0000_0000;
+    const THREE: u128 = 0x4000_C000_0000_0000_0000;
+    const INF: u128 = 0x7FFF_8000_0000_0000_0000;
+    const NINF: u128 = 0xFFFF_8000_0000_0000_0000;
+    const QNAN: u128 = 0x7FFF_C000_0000_0000_0000;
+    const SNAN: u128 = 0x7FFF_A000_0000_0000_0000;
+    const UNNORMAL: u128 = 0x4001_4000_0000_0000_0000;
+    const PSEUDONAN: u128 = 0x7FFF_4000_0000_0000_0000;
+    const PSEUDOINF: u128 = 0x7FFF_0000_0000_0000_0000;
+    // (instruction, ST(0), ST(1), empty, C3-C0 before, status word after,
+    // ST(0) after)
+    type Case = ([u8; 2], u128, u128, u32, u16, u16, u128);
+    let cases: [Case; 96] = [
+        (FPREM, FIVE, ZERO, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // 5/0
+        (FPREM, FIVE, ZERO, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // 5/0
+        (FPREM, INF, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // inf/3
+        (FPREM, INF, THREE, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // inf/3
+        (FPREM, NINF, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // -inf/3
+        (FPREM, NINF, THREE, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // -inf/3
+        (FPREM, ZERO, ZERO, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // 0/0
+        (FPREM, ZERO, ZERO, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // 0/0
+        (FPREM, INF, ZERO, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // inf/0
+        (FPREM, INF, ZERO, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // inf/0
+        (FPREM, INF, INF, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // inf/inf
+        (FPREM, INF, INF, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // inf/inf
+        (FPREM, QNAN, THREE, 0, 0x4700, 0x7100, 0x7fff_c000_0000_0000_0000), // qnan/3
+        (FPREM, QNAN, THREE, 0, 0x0000, 0x3000, 0x7fff_c000_0000_0000_0000), // qnan/3
+        (FPREM, FIVE, QNAN, 0, 0x4700, 0x7100, 0x7fff_c000_0000_0000_0000), // 5/qnan
+        (FPREM, FIVE, QNAN, 0, 0x0000, 0x3000, 0x7fff_c000_0000_0000_0000), // 5/qnan
+        (FPREM, SNAN, THREE, 0, 0x4700, 0x7101, 0x7fff_e000_0000_0000_0000), // snan/3
+        (FPREM, SNAN, THREE, 0, 0x0000, 0x3001, 0x7fff_e000_0000_0000_0000), // snan/3
+        (FPREM, FIVE, SNAN, 0, 0x4700, 0x7101, 0x7fff_e000_0000_0000_0000), // 5/snan
+        (FPREM, FIVE, SNAN, 0, 0x0000, 0x3001, 0x7fff_e000_0000_0000_0000), // 5/snan
+        (FPREM, QNAN, ZERO, 0, 0x4700, 0x7100, 0x7fff_c000_0000_0000_0000), // qnan/0
+        (FPREM, QNAN, ZERO, 0, 0x0000, 0x3000, 0x7fff_c000_0000_0000_0000), // qnan/0
+        (FPREM, INF, QNAN, 0, 0x4700, 0x7100, 0x7fff_c000_0000_0000_0000), // inf/qnan
+        (FPREM, INF, QNAN, 0, 0x0000, 0x3000, 0x7fff_c000_0000_0000_0000), // inf/qnan
+        (FPREM, UNNORMAL, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // unnormal/3
+        (FPREM, UNNORMAL, THREE, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // unnormal/3
+        (FPREM, FIVE, UNNORMAL, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // 5/unnormal
+        (FPREM, FIVE, UNNORMAL, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // 5/unnormal
+        (FPREM, PSEUDONAN, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // pseudonan/3
+        (FPREM, PSEUDONAN, THREE, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // pseudonan/3
+        (FPREM, PSEUDOINF, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // pseudoinf/3
+        (FPREM, PSEUDOINF, THREE, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // pseudoinf/3
+        (FPREM, FIVE, PSEUDOINF, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // 5/pseudoinf
+        (FPREM, FIVE, PSEUDOINF, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // 5/pseudoinf
+        (FPREM, FIVE, THREE, 1, 0x4700, 0x7941, 0xffff_c000_0000_0000_0000), // 5/empty
+        (FPREM, FIVE, THREE, 1, 0x0000, 0x3841, 0xffff_c000_0000_0000_0000), // 5/empty
+        (FPREM, FIVE, THREE, 2, 0x4700, 0x4141, 0xffff_c000_0000_0000_0000), // empty/empty
+        (FPREM, FIVE, THREE, 2, 0x0000, 0x0041, 0xffff_c000_0000_0000_0000), // empty/empty
+        (FPREM, FIVE, THREE, 3, 0x4700, 0x7141, 0xffff_c000_0000_0000_0000), // empty/3
+        (FPREM, FIVE, THREE, 3, 0x0000, 0x3041, 0xffff_c000_0000_0000_0000), // empty/3
+        (FPREM, FIVE, THREE, 0, 0x4700, 0x3200, 0x4000_8000_0000_0000_0000), // 5/3
+        (FPREM, FIVE, THREE, 0, 0x0000, 0x3200, 0x4000_8000_0000_0000_0000), // 5/3
+        (FPREM, FIVE, INF, 0, 0x4700, 0x3000, 0x4001_a000_0000_0000_0000), // 5/inf
+        (FPREM, FIVE, INF, 0, 0x0000, 0x3000, 0x4001_a000_0000_0000_0000), // 5/inf
+        (FPREM, ZERO, INF, 0, 0x4700, 0x3000, 0x0000_0000_0000_0000_0000), // 0/inf
+        (FPREM, ZERO, INF, 0, 0x0000, 0x3000, 0x0000_0000_0000_0000_0000), // 0/inf
+        (FPREM, ZERO, THREE, 0, 0x4700, 0x3000, 0x0000_0000_0000_0000_0000), // 0/3
+        (FPREM, ZERO, THREE, 0, 0x0000, 0x3000, 0x0000_0000_0000_0000_0000), // 0/3
+        (FPREM1, FIVE, ZERO, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // 5/0
+        (FPREM1, FIVE, ZERO, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // 5/0
+        (FPREM1, INF, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // inf/3
+        (FPREM1, INF, THREE, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // inf/3
+        (FPREM1, NINF, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // -inf/3
+        (FPREM1, NINF, THREE, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // -inf/3
+        (FPREM1, ZERO, ZERO, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // 0/0
+        (FPREM1, ZERO, ZERO, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // 0/0
+        (FPREM1, INF, ZERO, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // inf/0
+        (FPREM1, INF, ZERO, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // inf/0
+        (FPREM1, INF, INF, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // inf/inf
+        (FPREM1, INF, INF, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // inf/inf
+        (FPREM1, QNAN, THREE, 0, 0x4700, 0x7100, 0x7fff_c000_0000_0000_0000), // qnan/3
+        (FPREM1, QNAN, THREE, 0, 0x0000, 0x3000, 0x7fff_c000_0000_0000_0000), // qnan/3
+        (FPREM1, FIVE, QNAN, 0, 0x4700, 0x7100, 0x7fff_c000_0000_0000_0000), // 5/qnan
+        (FPREM1, FIVE, QNAN, 0, 0x0000, 0x3000, 0x7fff_c000_0000_0000_0000), // 5/qnan
+        (FPREM1, SNAN, THREE, 0, 0x4700, 0x7101, 0x7fff_e000_0000_0000_0000), // snan/3
+        (FPREM1, SNAN, THREE, 0, 0x0000, 0x3001, 0x7fff_e000_0000_0000_0000), // snan/3
+        (FPREM1, FIVE, SNAN, 0, 0x4700, 0x7101, 0x7fff_e000_0000_0000_0000), // 5/snan
+        (FPREM1, FIVE, SNAN, 0, 0x0000, 0x3001, 0x7fff_e000_0000_0000_0000), // 5/snan
+        (FPREM1, QNAN, ZERO, 0, 0x4700, 0x7100, 0x7fff_c000_0000_0000_0000), // qnan/0
+        (FPREM1, QNAN, ZERO, 0, 0x0000, 0x3000, 0x7fff_c000_0000_0000_0000), // qnan/0
+        (FPREM1, INF, QNAN, 0, 0x4700, 0x7100, 0x7fff_c000_0000_0000_0000), // inf/qnan
+        (FPREM1, INF, QNAN, 0, 0x0000, 0x3000, 0x7fff_c000_0000_0000_0000), // inf/qnan
+        (FPREM1, UNNORMAL, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // unnormal/3
+        (FPREM1, UNNORMAL, THREE, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // unnormal/3
+        (FPREM1, FIVE, UNNORMAL, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // 5/unnormal
+        (FPREM1, FIVE, UNNORMAL, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // 5/unnormal
+        (FPREM1, PSEUDONAN, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // pseudonan/3
+        (FPREM1, PSEUDONAN, THREE, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // pseudonan/3
+        (FPREM1, PSEUDOINF, THREE, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // pseudoinf/3
+        (FPREM1, PSEUDOINF, THREE, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // pseudoinf/3
+        (FPREM1, FIVE, PSEUDOINF, 0, 0x4700, 0x7101, 0xffff_c000_0000_0000_0000), // 5/pseudoinf
+        (FPREM1, FIVE, PSEUDOINF, 0, 0x0000, 0x3001, 0xffff_c000_0000_0000_0000), // 5/pseudoinf
+        (FPREM1, FIVE, THREE, 1, 0x4700, 0x7941, 0xffff_c000_0000_0000_0000), // 5/empty
+        (FPREM1, FIVE, THREE, 1, 0x0000, 0x3841, 0xffff_c000_0000_0000_0000), // 5/empty
+        (FPREM1, FIVE, THREE, 2, 0x4700, 0x4141, 0xffff_c000_0000_0000_0000), // empty/empty
+        (FPREM1, FIVE, THREE, 2, 0x0000, 0x0041, 0xffff_c000_0000_0000_0000), // empty/empty
+        (FPREM1, FIVE, THREE, 3, 0x4700, 0x7141, 0xffff_c000_0000_0000_0000), // empty/3
+        (FPREM1, FIVE, THREE, 3, 0x0000, 0x3041, 0xffff_c000_0000_0000_0000), // empty/3
+        (FPREM1, FIVE, THREE, 0, 0x4700, 0x7000, 0xbfff_8000_0000_0000_0000), // 5/3
+        (FPREM1, FIVE, THREE, 0, 0x0000, 0x7000, 0xbfff_8000_0000_0000_0000), // 5/3
+        (FPREM1, FIVE, INF, 0, 0x4700, 0x3000, 0x4001_a000_0000_0000_0000), // 5/inf
+        (FPREM1, FIVE, INF, 0, 0x0000, 0x3000, 0x4001_a000_0000_0000_0000), // 5/inf
+        (FPREM1, ZERO, INF, 0, 0x4700, 0x3000, 0x0000_0000_0000_0000_0000), // 0/inf
+        (FPREM1, ZERO, INF, 0, 0x0000, 0x3000, 0x0000_0000_0000_0000_0000), // 0/inf
+        (FPREM1, ZERO, THREE, 0, 0x4700, 0x3000, 0x0000_0000_0000_0000_0000), // 0/3
+        (FPREM1, ZERO, THREE, 0, 0x0000, 0x3000, 0x0000_0000_0000_0000_0000), // 0/3
+    ];
+    let c = [FpuFlags::C0, FpuFlags::C1, FpuFlags::C2, FpuFlags::C3];
+    for (code, st0, st1, empty, before, sw, result) in cases {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let pushed: &[u128] = match empty {
+            1 => &[st0],
+            2 => &[],
+            _ => &[st1, st0],
+        };
+        for &v in pushed {
+            let mut f = F80::new();
+            f.set(v);
+            cpu.fpu_push(f);
+        }
+        for flag in c {
+            cpu.set_fpu_flag(flag, before & flag.bits() != 0);
+        }
+        if empty == 3 {
+            testrunners::run_fpu_code(&mut cpu, &[0xDD, 0xC0]); // FFREE ST(0)
+        }
+        testrunners::run_fpu_code(&mut cpu, &code);
+        let what = format!("{code:02X?} {st0:020X} {st1:020X} empty {empty} before {before:04X}");
+        assert_eq!(cpu.fpu_status_word(), sw, "{what}: status word");
+        assert_eq!(cpu.fpu_get(0).get(), result, "{what}: ST(0)");
+        assert!(!cpu.fpu_is_empty(0), "{what}: ST(0) valid");
+    }
+}
+
 #[test]
 fn fyl2x_of_zero_and_negative_values() {
     // (y, x, the result's 80 bits, ZE, IE)
@@ -529,4 +678,198 @@ fn fscale_fxtract_fchs_and_trigonometry_edges() {
     testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xFE]);
     assert_eq!(cpu.fpu_get(0).get(), 0xFFFF_C000_0000_0000_0000);
     assert!(cpu.get_fpu_flag(FpuFlags::IE));
+}
+
+#[test]
+fn fscale_of_zeros_infinities_and_results_past_the_range() {
+    let bits = |v: f64| {
+        let mut f = F80::new();
+        f.set_f64(v);
+        f.get()
+    };
+    // FSCALE (D9 FD) of ST(0) by ST(1): the result's bits and the
+    // exceptions it raises (IE, OE, UE).
+    let scale = |value: u128, power: u128| {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        for v in [power, value] {
+            let mut f = F80::new();
+            f.set(v);
+            cpu.fpu_push(f);
+        }
+        testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xFD]);
+        let flags = [FpuFlags::IE, FpuFlags::OE, FpuFlags::UE].map(|f| cpu.get_fpu_flag(f));
+        (cpu.fpu_get(0).get(), flags)
+    };
+    let indefinite = 0xFFFF_C000_0000_0000_0000u128;
+    let none = [false; 3];
+    let cases = [
+        // A zero stays a zero, however far it is scaled: MSVC's pow
+        // scales an underflowed 0 by 2^1536 to tell how far it fell.
+        (bits(0.0), bits(1536.0), bits(0.0), none),
+        (bits(-0.0), bits(1e6), bits(-0.0), none),
+        (bits(0.0), bits(f64::NEG_INFINITY), bits(0.0), none),
+        (bits(0.0), bits(f64::INFINITY), indefinite, [true, false, false]),
+        // An infinity stays one, but scaled down without end.
+        (bits(f64::INFINITY), bits(-5.0), bits(f64::INFINITY), none),
+        (bits(f64::INFINITY), bits(f64::NEG_INFINITY), indefinite, [true, false, false]),
+        // A finite number by an infinite power.
+        (bits(-3.0), bits(f64::NEG_INFINITY), bits(-0.0), none),
+        (bits(3.0), bits(f64::INFINITY), bits(f64::INFINITY), none),
+        // Past the 80 bits' range: an infinity, and a zero.
+        (bits(1.0), bits(20000.0), bits(f64::INFINITY), [false, true, false]),
+        (bits(0.75), bits(-17175.0), bits(0.0), [false, false, true]),
+        // Below the normal numbers, a denormal that keeps its bits.
+        (bits(1.0), bits(-16400.0), 1 << 45, none),
+        // The smallest denormal, rounded to nearest from three quarters
+        // of it.
+        (bits(1.5), bits(-16446.0), 1, [false, false, true]),
+    ];
+    for (value, power, result, flags) in cases {
+        let r = scale(value, power);
+        assert_eq!(r, (result, flags), "{value:020X} * 2^{power:020X}");
+    }
+}
+
+#[test]
+fn fscale_truncates_all_64_bits_and_flags_denormals_and_empty_registers() {
+    let bits = |v: f64| {
+        let mut f = F80::new();
+        f.set_f64(v);
+        f.get()
+    };
+    // FSCALE (D9 FD) of ST(0) by ST(1) as the control word `control`
+    // says: the result's bits, and DE, IE, SF, OE and C1.
+    let scale = |stack: &[u128], control: u16| {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.fpu_control = control;
+        for &v in stack {
+            let mut f = F80::new();
+            f.set(v);
+            cpu.fpu_push(f);
+        }
+        testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xFD]);
+        let flags = [FpuFlags::DE, FpuFlags::IE, FpuFlags::SF, FpuFlags::OE, FpuFlags::C1];
+        (cpu.fpu_get(0).get(), flags.map(|f| cpu.get_fpu_flag(f)))
+    };
+    let nearest = 0x037F;
+    let none = [false; 5];
+    // 4 - 2^-62 truncates to 3; as a double it would round to 4 first.
+    let below_four = 0x4000_FFFF_FFFF_FFFF_FFFFu128;
+    assert_eq!(scale(&[below_four, bits(1.0)], nearest), (bits(8.0), none));
+    // A power of 0 or -0 isn't a denormal operand.
+    assert_eq!(scale(&[bits(0.0), bits(1.5)], nearest), (bits(1.5), none));
+    assert_eq!(scale(&[bits(-0.0), bits(1.5)], nearest), (bits(1.5), none));
+    // A denormal power is 0, with DE.
+    let de = [true, false, false, false, false];
+    assert_eq!(scale(&[1, bits(1.5)], nearest), (bits(1.5), de));
+    // DE also where the result is a zero's or an infinity's.
+    assert_eq!(scale(&[1, bits(0.0)], nearest), (bits(0.0), de));
+    assert_eq!(scale(&[bits(f64::INFINITY), 1], nearest), (bits(f64::INFINITY), de));
+    // Overflow rounded toward 0: the largest finite number, C1 clear.
+    let overflow = scale(&[bits(20000.0), bits(1.0)], nearest | 0x0C00);
+    assert_eq!(overflow, (0x7FFE_FFFF_FFFF_FFFF_FFFF, [false, false, false, true, false]));
+    // An empty ST(1): a stack underflow, the real indefinite in ST(0).
+    let indefinite = 0xFFFF_C000_0000_0000_0000u128;
+    let underflow = [false, true, true, false, false];
+    assert_eq!(scale(&[bits(1.0)], nearest), (indefinite, underflow));
+}
+
+/// The sum of the doubles `a` and `b` rounded once to `bits` bits of
+/// significand, to nearest and ties to even, worked out on integers.
+/// The operands' exponents are within 60 of each other.
+fn sum_rounded_to(a: f64, b: f64, bits: u32) -> f64 {
+    let parts = |v: f64| {
+        let w = v.to_bits();
+        let man = (w & ((1 << 52) - 1) | 1 << 52) as i128;
+        ((w >> 52 & 0x7FF) as i32, if v < 0.0 { -man } else { man })
+    };
+    let ((ea, ma), (eb, mb)) = (parts(a), parts(b));
+    let low = ea.min(eb);
+    let total = (ma << (ea - low)) + (mb << (eb - low));
+    if total == 0 {
+        return 0.0;
+    }
+    let (negative, mut man) = (total < 0, total.unsigned_abs());
+    // The value is man * 2^(low - 1075).
+    let mut exp = low - 1075;
+    let len = 128 - man.leading_zeros();
+    if len > bits {
+        let cut = len - bits;
+        let (half, rest) = (1u128 << (cut - 1), man & ((1u128 << cut) - 1));
+        man >>= cut;
+        exp += cut as i32;
+        if rest > half || (rest == half && man & 1 == 1) {
+            man += 1;
+        }
+    }
+    let value = man as f64 * 2f64.powi(exp);
+    if negative { -value } else { value }
+}
+
+#[test]
+fn narrow_sums_are_the_exact_sum_rounded_once() {
+    use rust_dos::instructions::fpu::arithmetic::narrow_sum;
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut halfway = 0;
+    for round in 0..400_000 {
+        // Two doubles with exponents up to 60 apart; every other pair
+        // made of few bits, whose sums land halfway between two singles
+        // far more often.
+        let coarse = round % 2 == 0;
+        let mut double = |exp: u64| {
+            let man = if coarse { next() & 0xF_FF00_0010_0000 } else { next() & ((1 << 52) - 1) };
+            f64::from_bits(next() & 1 << 63 | exp << 52 | man)
+        };
+        let base = 1023 - 30 + round % 60;
+        let (a, b) = (double(base), double(base - 30 + round / 60 % 60));
+        for (control, bits) in [(0x027F, 53), (0x007F, 24)] {
+            let expected = sum_rounded_to(a, b, bits);
+            assert_eq!(
+                narrow_sum(control, a, b).map(f64::to_bits),
+                Some(expected.to_bits()),
+                "{a:e} + {b:e} at {bits} bits"
+            );
+        }
+        if (a + b).to_bits() & 0x1FFF_FFFF == 0x1000_0000 {
+            halfway += 1;
+        }
+    }
+    assert!(halfway > 100, "only {halfway} sums halfway between two singles");
+}
+
+#[test]
+fn narrow_sums_leave_the_rest_to_the_80_bits() {
+    use rust_dos::instructions::fpu::arithmetic::narrow_sum;
+    // 64 bits of precision, another rounding, the unused precision.
+    for control in [0x037F, 0x067F, 0x0A7F, 0x0E7F, 0x017F, 0x0C7F] {
+        assert_eq!(narrow_sum(control, 1.0, 2.0), None, "{control:04X}");
+    }
+    for control in [0x027F, 0x007F] {
+        assert_eq!(narrow_sum(control, 1.0, 2.0), Some(3.0));
+        // An exact zero keeps the sign the doubles give it.
+        assert_eq!(narrow_sum(control, 1.5, -1.5).map(f64::to_bits), Some(0));
+        assert_eq!(narrow_sum(control, -0.0, -0.0).map(f64::to_bits), Some((-0.0f64).to_bits()));
+        assert_eq!(narrow_sum(control, f64::INFINITY, 1.0), None);
+        assert_eq!(narrow_sum(control, f64::INFINITY, f64::NEG_INFINITY), None);
+        assert_eq!(narrow_sum(control, f64::NAN, 1.0), None);
+        assert_eq!(narrow_sum(control, f64::MAX, f64::MAX), None);
+        // A sum below the normal doubles, which a 387 keeps whole.
+        assert_eq!(narrow_sum(control, 3.0 * f64::MIN_POSITIVE, -2.5 * f64::MIN_POSITIVE), None);
+    }
+    // Sums a double holds and a single's exponent doesn't.
+    assert_eq!(narrow_sum(0x007F, 1e300, 1e300), None);
+    assert_eq!(narrow_sum(0x007F, 1e-300, 1e-300), None);
+    // A sum just below the smallest normal single, which a single's
+    // denormals would round up to it and a 387 keeps; just above it, a
+    // tie that goes down to it.
+    let min_single = f32::MIN_POSITIVE as f64;
+    assert_eq!(narrow_sum(0x007F, min_single, -(2f64.powi(-150))), None);
+    assert_eq!(narrow_sum(0x007F, min_single, 2f64.powi(-150)), Some(min_single));
+    assert_eq!(narrow_sum(0x027F, 1e300, 1e300), Some(2e300));
 }

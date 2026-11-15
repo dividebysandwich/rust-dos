@@ -3,7 +3,7 @@
 //! palette of 8-bit modes. The desktop (USER32), GDI's drawing on the
 //! screen and DirectDraw all go through here.
 //!
-//! There are two kinds of adapter:
+//! There are three kinds of adapter:
 //!
 //! - Most cards: the VESA BIOS's 4 MB of video memory and its modes, set
 //!   as the BIOS sets them, and the VGA's DAC.
@@ -15,6 +15,15 @@
 //!   start; 8-bit modes go through its colour lookup table. Programs reach
 //!   the memory through BAR1, linear below the tile base, which a mode
 //!   set puts at the end of the memory.
+//! - The ToadForce (`toadforce`): the card's own memory, 64 MB unless
+//!   the settings say otherwise, in the card's own modes, which its
+//!   `MODE` registers set and its `PALETTE` registers colour. What the
+//!   driver here asks of the card beyond registers (showing another
+//!   surface, filling one) are the card's commands, the words a guest's
+//!   driver would put in the command ring, handed to it directly
+//!   (`Bus::toadforce_submit`). The memory is the Super VGA's, grown,
+//!   and BAR 1 its linear frame buffer, so reading and writing it is
+//!   the first kind's.
 //!
 //! The desktop is 640x480 at 32 bits a pixel on the first kind, and at
 //! 16 (5-6-5) on the second, as Windows 95 with a Voodoo3 was usually
@@ -28,7 +37,11 @@
 
 use crate::cpu::Cpu;
 use crate::video::crt::CrtTiming;
-use crate::video::vbe::{self, LFB_BASE, VRAM_SIZE, VbeMode};
+use crate::toadforce::command::encode;
+use crate::toadforce::format::{Format, Rect as CardRect, Surface};
+use crate::toadforce::gpu::Cause;
+use crate::toadforce::{caps, regs};
+use crate::video::vbe::{self, LFB_BASE, VbeMode};
 use crate::voodoo::banshee as card;
 use crate::win32::gdi32::Rect;
 
@@ -59,10 +72,19 @@ pub const SIZES: [(u32, u32); 6] = [
     (1024, 768),
 ];
 
+/// The sizes DirectDraw offers on a ToadForce beyond `SIZES`.
+pub const TOADFORCE_SIZES: [(u32, u32); 3] = [(1152, 864), (1280, 1024), (1600, 1200)];
+
 /// Whether the display adapter is a Banshee or Voodoo3, whose own memory
 /// and modes the screen is in.
 pub fn is_card(cpu: &Cpu) -> bool {
     cpu.bus.banshee().is_some()
+}
+
+/// Whether the display adapter is a ToadForce, whose own modes the
+/// screen is in.
+pub fn is_toadforce(cpu: &Cpu) -> bool {
+    cpu.bus.toadforce()
 }
 
 /// The bytes of video memory.
@@ -70,12 +92,13 @@ pub fn memory_size(cpu: &Cpu) -> u32 {
     if is_card(cpu) {
         card::MEMORY as u32
     } else {
-        VRAM_SIZE as u32
+        // The VESA BIOS's 4 MB, or a ToadForce's own.
+        cpu.bus.vbe.vram.len() as u32
     }
 }
 
 /// The physical address of video memory's first byte: the VESA linear
-/// frame buffer, or the card's BAR1.
+/// frame buffer (a ToadForce's BAR 1), or the card's BAR1.
 pub fn physical_base(cpu: &Cpu) -> u32 {
     match cpu.bus.banshee() {
         Some(b) => b.pci.bar1,
@@ -162,6 +185,8 @@ pub fn set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32) -> Option<Mode
         card_set_mode(cpu, width, height, bpp)?;
         let len = width * bpp / 8 * height;
         write(cpu, 0, &vec![0; len as usize]);
+    } else if is_toadforce(cpu) {
+        toadforce_set_mode(cpu, width, height, bpp)?;
     } else {
         let mode = vbe_mode(cpu, width, height, bpp)?;
         crate::interrupts::vbe::enter_mode(&mut cpu.bus, &mode, true, false);
@@ -196,6 +221,67 @@ pub fn desktop_size_owner(cpu: &Cpu) -> Option<u32> {
 pub fn set_text_mode(cpu: &mut Cpu) {
     // The BIOS's data it writes is reached by its physical address.
     super::dos(cpu, |cpu| crate::interrupts::int10::set_mode(cpu, 3));
+}
+
+/// The format of a ToadForce's surfaces at `bpp` bits a pixel.
+pub fn toadforce_format(bpp: u32) -> Option<Format> {
+    match bpp {
+        8 => Some(Format::P8),
+        16 => Some(Format::R5G6B5),
+        32 => Some(Format::X8R8G8B8),
+        _ => None,
+    }
+}
+
+/// The refresh rate of the modes the built-in Windows sets on a
+/// ToadForce.
+pub const TOADFORCE_REFRESH: u32 = 60;
+
+/// Set a ToadForce's own mode through its `MODE` registers, its picture
+/// at the start of card memory and black: any size up to the card's
+/// largest at 8, 16 and 32 bits a pixel. None if the card has no such
+/// mode.
+fn toadforce_set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32) -> Option<()> {
+    let format = toadforce_format(bpp)?;
+    let sizes = 1..=caps::SURFACE_MAX;
+    let pitch = width * format.bytes();
+    let fits = pitch as u64 * height as u64 <= memory_size(cpu) as u64;
+    if !sizes.contains(&width) || !sizes.contains(&height) || !fits {
+        return None;
+    }
+    let bus = &mut cpu.bus;
+    for (register, value) in [
+        (regs::MODE_ENABLE, 0),
+        (regs::MODE_WIDTH, width),
+        (regs::MODE_HEIGHT, height),
+        (regs::MODE_FORMAT, format.code()),
+        (regs::MODE_PITCH, pitch),
+        (regs::MODE_START, 0),
+        (regs::MODE_REFRESH, TOADFORCE_REFRESH),
+        (regs::MODE_ENABLE, 1),
+    ] {
+        bus.toadforce_register_write(register, value);
+    }
+    let surface = Surface {
+        offset: 0,
+        pitch,
+        width,
+        height,
+        format,
+    };
+    let whole = CardRect {
+        left: 0,
+        top: 0,
+        width,
+        height,
+    };
+    let mut words = Vec::new();
+    encode::fill(&mut words, &surface, &whole, 0);
+    bus.toadforce_submit(&words);
+    // The mode is shown from the next frame: black, and not what card
+    // memory held before.
+    settle(cpu);
+    Some(())
 }
 
 /// The VBE mode of a size and depth, the list's or one of DirectDraw's
@@ -236,7 +322,17 @@ fn vbe_mode(cpu: &Cpu, w: u32, h: u32, bpp: u32) -> Option<VbeMode> {
 
 /// Read video memory from byte `offset` into `data`; what is past its end
 /// reads as 0.
-pub fn read(cpu: &Cpu, offset: u32, data: &mut [u8]) {
+pub fn read(cpu: &mut Cpu, offset: u32, data: &mut [u8]) {
+    cpu.bus
+        .toadforce_touch_for(offset as usize, data.len(), Cause::Driver);
+    peek(cpu, offset, data);
+}
+
+/// `read` of video memory as it is, without what a ToadForce still has
+/// queued to draw or its host renderer has drawn and not read back:
+/// for a debugger's look, which changes nothing, and so can't have
+/// the card bring its memory up to date.
+pub fn peek(cpu: &Cpu, offset: u32, data: &mut [u8]) {
     let size = memory_size(cpu) as usize;
     let start = (offset as usize).min(size);
     let end = (start + data.len()).min(size);
@@ -251,6 +347,90 @@ pub fn read(cpu: &Cpu, offset: u32, data: &mut [u8]) {
     }
 }
 
+/// Have the display adapter finish what its driver gave it to draw: a
+/// ToadForce runs the commands the built-in drivers queued
+/// (`Bus::toadforce_submit`). `read` and `write` do it, and so do the
+/// program's own writes to video memory (in the bus). What is left is
+/// the program reading video memory by itself, which `api_settles`
+/// sees to.
+#[inline]
+pub fn settle(cpu: &mut Cpu) {
+    cpu.bus.toadforce_flush();
+}
+
+/// `settle`, before the program is given the address of a surface in
+/// video memory (a locked surface, a DC's pixels). Nothing is read back
+/// from a ToadForce's host renderer: the card answers the program's
+/// reads of pixels the host has from the host's, and notes what the
+/// program writes (`toadforce::gpu`). So a program that locks a surface
+/// to write all of it costs no read-back.
+#[inline]
+pub fn expose(cpu: &mut Cpu) {
+    settle(cpu);
+}
+
+/// Whether a call of the function `name` of the DLL `dll` (its file
+/// name) is preceded by `settle`: whether it lets the program read
+/// video memory, or is where a program expects the drawing done.
+/// `stubs::call` settles before those.
+///
+/// A program reads video memory through DirectDraw and Direct3D 8 (a
+/// locked surface, which stays readable after the call), so every call
+/// of theirs settles but those of the Direct3D devices and of what they
+/// draw from, which fill the queue, and a scene's end and Direct3D 8's
+/// present. GDI and USER show windows and what is in them, and OpenGL's
+/// WGL presents. Everything else leaves a ToadForce's queue to grow:
+/// the devices' and OpenGL's drawing and state calls, and the rest of
+/// Windows, which a program calls between its draws. A device's call
+/// that reads video memory itself reads it through `read`, which
+/// settles.
+pub fn api_settles(dll: &str, name: &str) -> bool {
+    // A scene's end and a present are where a program has the card
+    // catch up.
+    let frame_end = name.ends_with("_EndScene") || name.ends_with("_Present");
+    match dll {
+        "GDI32.DLL" | "USER32.DLL" => true,
+        "DDRAW.DLL" => {
+            // The Direct3D device and what it draws from, which hold no
+            // video memory but through the HAL.
+            const DRAWING: [&str; 6] = [
+                "IDirect3DDevice",
+                "IDirect3DVertexBuffer",
+                "IDirect3DViewport",
+                "IDirect3DMaterial",
+                "IDirect3DLight",
+                "IDirect3DExecuteBuffer",
+            ];
+            !DRAWING.iter().any(|prefix| name.starts_with(prefix)) || frame_end
+        }
+        "D3D8.DLL" => {
+            // The device, and the vertex and index buffers, whose memory
+            // is the process's.
+            const DRAWING: [&str; 4] = ["Device8_", "Buffer8_", "VertexBuffer8_", "IndexBuffer8_"];
+            !DRAWING.iter().any(|prefix| name.starts_with(prefix)) || frame_end
+        }
+        "OPENGL32.DLL" => {
+            // The pixel transfers to and from the frame buffer, and the
+            // two calls that ask for the drawing to be done.
+            const SETTLING: [&str; 11] = [
+                "glReadPixels",
+                "glCopyPixels",
+                "glDrawPixels",
+                "glBitmap",
+                "glAccum",
+                "glCopyTexImage1D",
+                "glCopyTexImage2D",
+                "glCopyTexSubImage1D",
+                "glCopyTexSubImage2D",
+                "glFinish",
+                "glFlush",
+            ];
+            !name.starts_with("gl") || SETTLING.contains(&name)
+        }
+        _ => false,
+    }
+}
+
 /// Write `data` into video memory at byte `offset`: what is past its end
 /// goes nowhere. The picture shows it.
 pub fn write(cpu: &mut Cpu, offset: u32, data: &[u8]) {
@@ -261,6 +441,10 @@ pub fn write(cpu: &mut Cpu, offset: u32, data: &[u8]) {
         return;
     }
     let data = &data[..end - start];
+    // Every byte of the range is written, so a ToadForce reads nothing
+    // back for it.
+    cpu.bus.toadforce_writing(start, end - start);
+    cpu.bus.toadforce_wrote(start, end - start);
     drew(cpu, start as u32, end as u32, data.len() as u64);
     if let Some(v) = &mut cpu.bus.voodoo
         && v.banshee().is_some()
@@ -324,12 +508,21 @@ pub fn drew_rects(cpu: &mut Cpu, at: u32, pitch: u32, bytes: u32, rects: &[Rect]
 // What the picture is.
 
 /// Show the picture at byte `offset` of video memory, from the next
-/// frame: VBE's display start, or the card's vidDesktopStartAddr.
+/// frame: VBE's display start, the card's vidDesktopStartAddr, or a
+/// ToadForce's `FLIP`.
 pub fn show(cpu: &mut Cpu, offset: u32) {
+    if is_toadforce(cpu) {
+        let mut words = Vec::new();
+        encode::flip(&mut words, offset, false);
+        cpu.bus.toadforce_submit(&words);
+        // The frame is done: the card draws it and shows it now.
+        settle(cpu);
+        return;
+    }
     if is_card(cpu) {
+        // The write is a flip for `cycles=auto` (`Bus::voodoo_write`).
         cpu.bus
             .voodoo_write_32(card::VID_DESKTOP_START_ADDR, offset);
-        cpu.bus.note_display_start();
         return;
     }
     cpu.bus.vbe.start = offset;
@@ -352,9 +545,15 @@ pub fn timing(cpu: &mut Cpu) -> CrtTiming {
     cpu.bus.vga.timing()
 }
 
-/// The colors of the 8-bit modes' 256, as COLORREFs: the DAC's, or the
-/// card's colour lookup table's first.
+/// The colors of the 8-bit modes' 256, as COLORREFs: the DAC's, the
+/// card's colour lookup table's first, or a ToadForce's `PALETTE`.
 pub fn colors(cpu: &Cpu) -> Vec<u32> {
+    if is_toadforce(cpu) {
+        return (0..256)
+            .map(|i| cpu.bus.toadforce_register(regs::PALETTE + 4 * i))
+            .map(|c| (c >> 16) & 0xFF | c & 0xFF00 | (c & 0xFF) << 16)
+            .collect();
+    }
     if let Some(b) = cpu.bus.banshee() {
         return b.clut[..256]
             .iter()
@@ -372,9 +571,18 @@ pub fn colors(cpu: &Cpu) -> Vec<u32> {
 }
 
 /// Set the colors from `first` on to `colors` (COLORREFs): in the DAC,
-/// or through the card's dacAddr and dacData into its lookup table.
+/// through the card's dacAddr and dacData into its lookup table, or in
+/// a ToadForce's `PALETTE`.
 pub fn set_colors(cpu: &mut Cpu, first: usize, colors: &[u32]) {
     let colors = &colors[..colors.len().min(256usize.saturating_sub(first))];
+    if is_toadforce(cpu) {
+        for (i, &c) in colors.iter().enumerate() {
+            let rgb = (c & 0xFF) << 16 | c & 0xFF00 | (c >> 16) & 0xFF;
+            let register = regs::PALETTE + 4 * (first + i) as u32;
+            cpu.bus.toadforce_register_write(register, rgb);
+        }
+        return;
+    }
     if is_card(cpu) {
         for (i, &c) in colors.iter().enumerate() {
             let rgb = (c & 0xFF) << 16 | c & 0xFF00 | (c >> 16) & 0xFF;
@@ -419,20 +627,21 @@ pub fn gdi_mode(cpu: &Cpu) -> Option<Mode> {
 }
 
 /// The desktop's rows `top..top + rows`, as `load_rows` gives them.
-pub fn load_desktop(cpu: &Cpu, top: u32, rows: u32) -> Vec<u8> {
-    load_rows(cpu, &desktop(cpu), top, rows)
+pub fn load_desktop(cpu: &mut Cpu, top: u32, rows: u32) -> Vec<u8> {
+    let desktop = desktop(cpu);
+    load_rows(cpu, &desktop, top, rows)
 }
 
 /// The rows `top..top + rows` of the picture in `mode` at the start of
 /// video memory, as 32-bit pixels (0x00RRGGBB), `width * 4` bytes a
 /// row, or at 8 bits a pixel as they are, `width` bytes a row.
-pub fn load_rows(cpu: &Cpu, mode: &Mode, top: u32, rows: u32) -> Vec<u8> {
+pub fn load_rows(cpu: &mut Cpu, mode: &Mode, top: u32, rows: u32) -> Vec<u8> {
     load_area(cpu, mode, top, rows, 0, mode.width)
 }
 
 /// The pixels `left..left + cols` of the rows `top..top + rows` of the
 /// picture in `mode`, as `load_rows` gives them: `cols` pixels a row.
-pub fn load_area(cpu: &Cpu, mode: &Mode, top: u32, rows: u32, left: u32, cols: u32) -> Vec<u8> {
+pub fn load_area(cpu: &mut Cpu, mode: &Mode, top: u32, rows: u32, left: u32, cols: u32) -> Vec<u8> {
     let bytes = mode.bpp / 8;
     let mut raw = vec![0u8; (cols * bytes) as usize];
     let mut out = Vec::with_capacity(cols as usize * 4 * rows as usize);
@@ -724,6 +933,76 @@ mod tests {
     }
 
     #[test]
+    fn a_toadforce_sets_any_size_its_memory_holds() {
+        use crate::video::adapter::{Adapter, VideoSetup};
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let setup = VideoSetup {
+            adapter: Adapter::ToadForce,
+            ..Default::default()
+        };
+        crate::video::bios::install(&mut cpu.bus, setup);
+        assert!(is_toadforce(&cpu) && !is_card(&cpu));
+        assert_eq!(memory_size(&cpu), 64 << 20);
+        let big = set_mode(&mut cpu, 1600, 1200, 32).unwrap();
+        assert_eq!((big.width, big.height, big.bpp, big.pitch), (1600, 1200, 32, 6400));
+        assert_eq!(mode(&cpu), Some(big));
+        // The mode is black at once: its fill doesn't wait in the queue.
+        assert!(!cpu.bus.toadforce_queued());
+        // What the card has no mode for leaves the one it shows, and
+        // latches no error: the driver asks for nothing it can't have.
+        for (w, h, bpp) in [(4097, 16, 8), (640, 480, 24), (640, 480, 15), (16, 0, 8)] {
+            assert_eq!(set_mode(&mut cpu, w, h, bpp), None, "{w}x{h}x{bpp}");
+        }
+        assert_eq!(mode(&cpu), Some(big));
+        assert_eq!(cpu.bus.toadforce_register(regs::ERROR), 0);
+        let modes = crate::win32::ddraw::display::modes(&cpu);
+        assert!(modes.contains(&(1600, 1200, 32)) && modes.contains(&(320, 200, 8)));
+        // Colours go to the card's palette and come back.
+        set_colors(&mut cpu, 254, &[0x0012_3456, 0x00AB_CDEF, 0x0011_1111]);
+        assert_eq!(cpu.bus.toadforce_register(regs::PALETTE + 4 * 254), 0x56_3412);
+        assert_eq!(colors(&cpu)[254..], [0x0012_3456, 0x00AB_CDEF]);
+        // Text mode ends the card's mode.
+        crate::interrupts::int10::set_mode(&mut cpu, 3);
+        assert_eq!(mode(&cpu), None);
+        assert_eq!(cpu.bus.toadforce_register(regs::MODE_ENABLE), 0);
+    }
+
+    #[test]
+    fn the_direct3d_devices_draws_queue_and_what_reads_video_memory_settles() {
+        // The names are the DLLs' own, so a renamed method can't drop
+        // out of the lists unseen.
+        let listed = |dll: &str, name: &str| {
+            let d = crate::win32::stubs::DLLS
+                .iter()
+                .find(|d| d.name == dll)
+                .unwrap();
+            assert!(d.apis.iter().any(|a| a.name == name), "{dll} {name}");
+            api_settles(dll, name)
+        };
+        for (dll, name, settles) in [
+            ("DDRAW.DLL", "IDirect3DDevice7_DrawPrimitive", false),
+            ("DDRAW.DLL", "IDirect3DDevice7_EndScene", true),
+            ("DDRAW.DLL", "Surface_Lock", true),
+            ("D3D8.DLL", "Device8_DrawPrimitive", false),
+            ("D3D8.DLL", "Device8_SetRenderState", false),
+            ("D3D8.DLL", "Buffer8_Lock", false),
+            ("D3D8.DLL", "Device8_EndScene", true),
+            ("D3D8.DLL", "Device8_Present", true),
+            ("D3D8.DLL", "SwapChain8_Present", true),
+            ("D3D8.DLL", "Surface8_LockRect", true),
+            ("D3D8.DLL", "Texture8_LockRect", true),
+            ("OPENGL32.DLL", "glVertex3f", false),
+            ("OPENGL32.DLL", "glReadPixels", true),
+            ("OPENGL32.DLL", "glFlush", true),
+            ("OPENGL32.DLL", "wglSwapBuffers", true),
+            ("GDI32.DLL", "SwapBuffers", true),
+            ("KERNEL32.DLL", "GetTickCount", false),
+        ] {
+            assert_eq!(listed(dll, name), settles, "{dll} {name}");
+        }
+    }
+
+    #[test]
     fn the_pll_comes_near() {
         for hz in [25_175_000u64, 40_000_000, 65_000_000, 12_587_500] {
             let v = pll(hz) as u64;
@@ -731,5 +1010,44 @@ mod tests {
             let f = (n + 2) * 14_318_180 / ((m + 2) << k);
             assert!(f.abs_diff(hz) * 200 < hz, "{hz}: {f}");
         }
+    }
+
+    #[test]
+    fn frames_copied_into_the_desktop_count_for_cycles_auto() {
+        // Delta Force locks the primary surface on a Voodoo3 and copies
+        // each frame into it itself, with MMX stores (the recompiler's
+        // runs) or a dword at a time (the interpreter's writes).
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus
+            .configure_voodoo(Some(crate::voodoo::Board::Voodoo3));
+        card_set_mode(&mut cpu, 640, 480, 32).unwrap();
+        let bus = &mut cpu.bus;
+        let screen = crate::autospeed::screen_bytes(bus);
+        bus.activity
+            .set_screen(screen, crate::autospeed::linear_screen(bus));
+        let bar1 = card::INITIAL_BAR1 as usize;
+        let screen = screen as usize;
+        let gap = 100_000;
+        // A frame copied with MMX stores, one a dword at a time, and one
+        // into the memory after the desktop, out of sight.
+        for at in (0..screen).step_by(8) {
+            bus.clock.icount += 1;
+            assert!(bus.write_to_voodoo(bar1 + at, &[0x55; 8]));
+        }
+        bus.clock.icount += gap;
+        for at in (0..screen).step_by(4) {
+            bus.clock.icount += 1;
+            bus.write_32(bar1 + at, 0x00AA_AAAA);
+        }
+        bus.clock.icount += gap;
+        for at in (screen..2 * screen).step_by(8) {
+            bus.clock.icount += 1;
+            assert!(bus.write_to_voodoo(bar1 + at, &[0x55; 8]));
+        }
+        // A write after them ends the last burst.
+        bus.clock.icount += gap;
+        bus.write_32(bar1, 0);
+        assert_eq!(bus.activity.bursts, 2);
+        assert_eq!(bus.activity.copies, 0);
     }
 }

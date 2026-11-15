@@ -8,6 +8,8 @@
 //!   its memory (the VESA linear frame buffer), BAR1 its ports;
 //! * device 1 instead: the ATI mach64 GT of `svga_ati_3drage` and
 //!   `svga_ati_3drage2`, BAR0 its 16 MB aperture, BAR1 its ports;
+//! * device 1 instead: the ToadForce of `svga_toadforce` (`toadforce`),
+//!   BAR0 its registers, BAR1 its memory, BAR2 its command ring;
 //! * device 2: the PowerVR PCX1 or PCX2 (`powervr`), when there is one;
 //! * device 1: the S3 Trio64 of `machine=svga_s3` (PCI\VEN_5333&DEV_8811),
 //!   or the ViRGE (DEV_5631) or ViRGE/VX (DEV_883D) of `svga_s3virge` and
@@ -50,6 +52,7 @@ enum Target {
     S3,
     Verite,
     Mach64,
+    ToadForce,
     PowerVr,
 }
 
@@ -60,6 +63,7 @@ impl Bus {
         self.s3()
             || self.verite()
             || self.mach64()
+            || self.toadforce()
             || self.voodoo.is_some()
             || self.powervr.is_some()
     }
@@ -81,6 +85,7 @@ impl Bus {
             S3_DEVICE if self.s3() => Target::S3,
             S3_DEVICE if self.verite() => Target::Verite,
             S3_DEVICE if self.mach64() => Target::Mach64,
+            S3_DEVICE if self.toadforce() => Target::ToadForce,
             POWERVR_DEVICE if self.powervr.is_some() => Target::PowerVr,
             _ => return None,
         };
@@ -124,6 +129,9 @@ impl Bus {
             Some((Target::PowerVr, reg)) => self.powervr.as_ref().map_or(0xFF, |p| p.config_read(reg + (port & 3) as u8)),
             Some((Target::Verite, reg)) => self.verite.config_read(reg + (port & 3) as u8),
             Some((Target::Mach64, reg)) => self.mach64.config_read(reg + (port & 3) as u8),
+            Some((Target::ToadForce, reg)) => {
+                self.toadforce.as_ref().map_or(0xFF, |c| c.pci.read(reg + (port & 3) as u8))
+            }
             None => 0xFF,
         }
     }
@@ -151,6 +159,14 @@ impl Bus {
         if target == Target::Mach64 {
             if self.mach64.config_write(reg, value) {
                 self.mach64_moved();
+            }
+            return;
+        }
+        if target == Target::ToadForce {
+            if let Some(card) = &mut self.toadforce
+                && card.pci.write(reg, value)
+            {
+                self.toadforce_moved();
             }
             return;
         }

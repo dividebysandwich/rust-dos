@@ -290,9 +290,23 @@ pub fn set_cooperative_level(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         d.hwnd = hwnd;
         d.level_v1 |= v1;
     }
-    // The window of exclusive mode becomes the active one, and gets the
-    // focus, as with SetActiveWindow.
+    // The window of exclusive mode covers the screen and, while it is the
+    // foreground window, is shown and topmost, as after a mode change
+    // (`cover_screen`); then it becomes the active one, and gets the
+    // focus, as with SetActiveWindow. Wine's ddraw tests
+    // (test_window_style) find the rectangle and the style on Windows
+    // after SetCooperativeLevel alone, also when the level is set again.
+    // A 3dfx card's object doesn't move, show or raise the window, and
+    // only activates it.
     if exclusive && flags & DDSCL_NOWINDOWCHANGES == 0 {
+        let place = if card {
+            None
+        } else {
+            fullscreen_vars(cpu, id, WINDOW_EXCLUSIVE)
+        };
+        if let Some(vars) = place {
+            return task::start(cpu, task::DD_ACTIVATE, vars, 0);
+        }
         let user = &cpu.bus.win32.user;
         let top = user.top_level(hwnd);
         if !user.is_active(top) {
@@ -311,6 +325,9 @@ pub fn set_cooperative_level(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 const WINDOW_ACTIVATE: u32 = 0;
 const WINDOW_FULLSCREEN: u32 = 1;
 const WINDOW_NOTOPMOST: u32 = 2;
+const WINDOW_EXCLUSIVE: u32 = 3;
+/// The step of `WINDOW_EXCLUSIVE` after SetActiveWindow.
+const ACTIVATED: u16 = 20;
 
 /// DirectDraw's task on the window of exclusive mode, which returns
 /// DD_OK: SetCooperativeLevel makes it the active one
@@ -319,6 +336,9 @@ const WINDOW_NOTOPMOST: u32 = 2;
 /// height, the focus window), as DirectDraw's MakeFullscreen does on
 /// Windows 98 when the mode changes, and leaving exclusive mode takes it
 /// out of the topmost windows (`WINDOW_NOTOPMOST`, the window).
+/// SetCooperativeLevel's exclusive mode does what a mode change does and
+/// then activates the window (`WINDOW_EXCLUSIVE`, with the variables of
+/// `WINDOW_FULLSCREEN`).
 ///
 /// After the resize, Windows 98 SE's MakeFullscreen goes on only if the
 /// focus window is the foreground one: it shows the window if it is
@@ -340,16 +360,25 @@ pub fn activate_step(cpu: &mut Cpu, t: &mut Task, _: u32) -> Next {
         let args = [hwnd, after, 0, 0, 0, 0, flags];
         Next::call(user32::address_of("SetWindowPos"), &args, next)
     };
+    // The window placed: SetCooperativeLevel's task goes on to activate
+    // it.
+    let placed = |cpu: &Cpu| {
+        if t.var(0) == WINDOW_EXCLUSIVE && !cpu.bus.win32.user.is_active(hwnd) {
+            Next::call(user32::address_of("SetActiveWindow"), &[hwnd], ACTIVATED)
+        } else {
+            Next::Done(DD_OK)
+        }
+    };
     match (t.step, t.var(0)) {
         (0, WINDOW_ACTIVATE) => Next::call(user32::address_of("SetActiveWindow"), &[hwnd], 1),
         (0, WINDOW_NOTOPMOST) => z_order(HWND_NOTOPMOST, 1),
-        (_, WINDOW_ACTIVATE | WINDOW_NOTOPMOST) => Next::Done(DD_OK),
+        (_, WINDOW_ACTIVATE | WINDOW_NOTOPMOST) | (ACTIVATED, _) => Next::Done(DD_OK),
         (0, _) => {
             let flags = SWP_NOZORDER | SWP_NOACTIVATE;
             let args = [hwnd, 0, 0, 0, t.var(2), t.var(3), flags];
             Next::call(user32::address_of("SetWindowPos"), &args, 1)
         }
-        (1, _) if cpu.bus.win32.user.foreground_window() != t.var(4) => Next::Done(DD_OK),
+        (1, _) if cpu.bus.win32.user.foreground_window() != t.var(4) => placed(cpu),
         (1, _) if style & WS_VISIBLE == 0 => {
             Next::call(user32::address_of("ShowWindow"), &[hwnd, SW_SHOW], 2)
         }
@@ -357,7 +386,7 @@ pub fn activate_step(cpu: &mut Cpu, t: &mut Task, _: u32) -> Next {
         (3, _) if style & WS_MAXIMIZE != 0 => {
             Next::call(user32::address_of("ShowWindow"), &[hwnd, SW_RESTORE], 9)
         }
-        _ => Next::Done(DD_OK),
+        _ => placed(cpu),
     }
 }
 
@@ -497,10 +526,19 @@ pub fn set_display_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// (`activate_step`), unless it was set with DDSCL_NOWINDOWCHANGES.
 /// DD_OK.
 fn cover_screen(cpu: &mut Cpu, id: u32) -> Option<u32> {
+    match fullscreen_vars(cpu, id, WINDOW_FULLSCREEN) {
+        Some(vars) => task::start(cpu, task::DD_ACTIVATE, vars, 0),
+        None => Some(DD_OK),
+    }
+}
+
+/// The variables of the task `kind` (`WINDOW_FULLSCREEN` or
+/// `WINDOW_EXCLUSIVE`) that makes the window of the object `id` cover the
+/// screen, or None when it would change nothing, the level doesn't ask
+/// for it, or there is no such object.
+fn fullscreen_vars(cpu: &mut Cpu, id: u32, kind: u32) -> Option<Vec<u32>> {
     use user32::window::{WS_EX_TOPMOST, WS_MAXIMIZE, WS_VISIBLE};
-    let Some(d) = ddraw(cpu, id) else {
-        return Some(DD_OK);
-    };
+    let d = ddraw(cpu, id)?;
     // MakeFullscreen asks whether the focus window is the foreground
     // one. A level without a device window makes the window of exclusive
     // mode the focus window as well.
@@ -522,10 +560,9 @@ fn cover_screen(cpu: &mut Cpu, id: u32) -> Option<u32> {
         win.rect == screen && (placed || user.foreground_window() != focus)
     });
     if level & DDSCL_EXCLUSIVE == 0 || level & DDSCL_NOWINDOWCHANGES != 0 || done {
-        return Some(DD_OK);
+        return None;
     }
-    let vars = vec![WINDOW_FULLSCREEN, top, w as u32, h as u32, focus];
-    task::start(cpu, task::DD_ACTIVATE, vars, 0)
+    Some(vec![kind, top, w as u32, h as u32, focus])
 }
 
 /// RestoreDisplayMode(this).
@@ -642,12 +679,21 @@ const CAPS_DX6: u32 = 380;
 
 const DDCAPS_3D: u32 = 0x1;
 const DDCAPS_ZBLTS: u32 = 0x8_0000;
+const DDCAPS_BLTDEPTHFILL: u32 = 0x1000_0000;
 const DDSCAPS_3DDEVICE: u32 = 0x2000;
 
 /// Write a DDCAPS at `at`, of the size its dwSize says: the hardware's
 /// (`hal`) or the emulation's, of the display or of the 3dfx device's
-/// card (`card`), which has no palettes or GDI, but 3D and Z buffers.
-fn write_caps(cpu: &mut Cpu, at: u32, hal: bool, card: bool) -> Result<(), u32> {
+/// card (`card`), which has no palettes or GDI. `d3d` is the card
+/// Direct3D's HAL draws with on the object, if it has one there: the
+/// hardware's caps then say 3D, textures and Z buffers.
+fn write_caps(
+    cpu: &mut Cpu,
+    at: u32,
+    hal: bool,
+    card: bool,
+    d3d: Option<super::d3d::hal::Kind>,
+) -> Result<(), u32> {
     if !cpu.bus.guest_probe(at, 4, false) {
         return Err(DDERR_INVALIDPARAMS);
     }
@@ -696,11 +742,19 @@ fn write_caps(cpu: &mut Cpu, at: u32, hal: bool, card: bool) -> Result<(), u32> 
         surface_caps &= !surface::DDSCAPS_PALETTE;
         palette_caps = 0;
     }
-    // Direct3D's HAL draws on the add-on card and on a Banshee or
-    // Voodoo3 display.
-    if hal && (card || crate::win32::screen::is_card(cpu)) {
-        caps |= DDCAPS_3D | DDCAPS_ZBLTS;
-        surface_caps |= DDSCAPS_3DDEVICE | surface::DDSCAPS_ZBUFFER;
+    // A driver with a Direct3D HAL sets DDCAPS_3D, and a program that
+    // looks for 3D hardware by that bit (Nocturne's renderers do) finds
+    // none without it. Its surface caps have textures with mipmaps, 3D
+    // devices and Z buffers, and dwZBufferBitDepths the depths of the Z
+    // buffers it makes, as its device description gives them.
+    let mut z_depths = 0;
+    if hal && let Some(kind) = d3d {
+        caps |= DDCAPS_3D | DDCAPS_ZBLTS | DDCAPS_BLTDEPTHFILL;
+        surface_caps |= DDSCAPS_3DDEVICE
+            | surface::DDSCAPS_ZBUFFER
+            | surface::DDSCAPS_TEXTURE
+            | surface::DDSCAPS_MIPMAP;
+        z_depths = super::d3d::hal::description(kind).z_depths;
     }
     let w = |cpu: &mut Cpu, offset: u32, value: u32| cpu.bus.guest_write_32(at + offset, value);
     w(cpu, 0x04, caps);
@@ -708,6 +762,7 @@ fn write_caps(cpu: &mut Cpu, at: u32, hal: bool, card: bool) -> Result<(), u32> 
     w(cpu, 0x0C, ckey);
     w(cpu, 0x10, DDFXCAPS);
     w(cpu, 0x18, palette_caps);
+    w(cpu, 0x38, z_depths);
     w(cpu, 0x3C, total);
     w(cpu, 0x40, free);
     w(cpu, 0x60, 4);
@@ -746,11 +801,13 @@ pub fn get_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     }
     let card = is_card(cpu, id);
+    // The card EnumDevices lists Direct3D's HAL device for.
+    let d3d = super::d3d::hal::card(cpu, id).map(|offer| offer.kind);
     if hal != 0 {
-        hr!(write_caps(cpu, hal, true, card));
+        hr!(write_caps(cpu, hal, true, card, d3d));
     }
     if hel != 0 {
-        hr!(write_caps(cpu, hel, false, card));
+        hr!(write_caps(cpu, hel, false, card, d3d));
     }
     Some(DD_OK)
 }
@@ -844,6 +901,10 @@ pub fn get_device_identifier(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 _ => 0x8811,
             };
             Some(device << 16 | 0x5333)
+        }
+        _ if adapter.is_toadforce() => {
+            use crate::toadforce::pci::{DEVICE_ID, VENDOR_ID};
+            Some((DEVICE_ID as u32) << 16 | VENDOR_ID as u32)
         }
         _ => None,
     };

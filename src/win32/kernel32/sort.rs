@@ -3,12 +3,16 @@
 //! before letters, letters by their base letter, then by their accents,
 //! then lower case before upper case. Hyphens and apostrophes count only
 //! when the strings are otherwise the same ("word sort"), unless
-//! SORT_STRINGSORT makes them symbols. All locales sort alike here.
+//! SORT_STRINGSORT makes them symbols. All locales sort alike here, Greek
+//! and Cyrillic letters after the Latin ones, an accented letter with its
+//! base letter. The A functions read their strings in the code page of
+//! the locale they are given, or the system's (LOCALE_USE_CP_ACP).
 
-use super::text::{ERROR_INVALID_FLAGS, ansi_to_wide, put_units, read_units};
+use super::text::{ERROR_INVALID_FLAGS, put_units, read_units};
 use super::{ERROR_INVALID_PARAMETER, FALSE, TRUE, set_error};
 use crate::cpu::Cpu;
-use crate::win32::convert::{self, CodePage};
+use crate::win32::convert;
+use crate::win32::nls::{self, CodePage};
 use std::cmp::Ordering;
 
 /// CompareString's and LCMapString's flags.
@@ -166,6 +170,11 @@ const fn accent(mark: u16) -> u8 {
         convert::RING => 8,
         convert::CEDILLA => 9,
         convert::CARON => 10,
+        convert::OGONEK => 14,
+        convert::MACRON => 15,
+        convert::BREVE => 16,
+        convert::DOT_ABOVE => 17,
+        convert::DOUBLE_ACUTE => 18,
         _ => 11,
     }
 }
@@ -244,7 +253,14 @@ fn sorts(c: u16, string_sort: bool) -> Sorts {
         0x0192 => letters(b"f", STROKE),
         _ => {
             if let Some((base, mark)) = convert::decompose(c) {
-                return letters(&[base as u8], accent(mark));
+                if base < 0x80 {
+                    return letters(&[base as u8], accent(mark));
+                }
+                // A Greek or Cyrillic letter sorts with its base letter.
+                let ch = char::from_u32(base as u32).unwrap_or('\0');
+                let lower = ch.to_lowercase().next().unwrap_or(ch) as u32;
+                let upper = ctype1(c) & C1_UPPER != 0;
+                return Sorts::Elements(vec![element(LETTER, lower, accent(mark), upper)]);
             }
             if convert::is_combining(c) {
                 return Sorts::Ignored;
@@ -327,9 +343,9 @@ pub(super) fn compare(flags: u32, a: &[u16], b: &[u16]) -> Ordering {
     sort_key(flags, a).cmp(&sort_key(flags, b))
 }
 
-/// The ANSI string at `at`, `len` bytes or with -1 up to its zero (which
-/// it leaves out), as UTF-16.
-fn read_ansi(cpu: &mut Cpu, at: u32, len: u32) -> Option<Vec<u16>> {
+/// The string at `at` in the code page `page`, `len` bytes or with -1 up
+/// to its zero (which it leaves out), as UTF-16.
+fn read_ansi(cpu: &mut Cpu, page: CodePage, at: u32, len: u32) -> Option<Vec<u16>> {
     let mut bytes = read_units(cpu, at, len, 1)?;
     if (len as i32) < 0 {
         bytes.pop();
@@ -337,7 +353,7 @@ fn read_ansi(cpu: &mut Cpu, at: u32, len: u32) -> Option<Vec<u16>> {
     Some(
         bytes
             .iter()
-            .map(|&b| CodePage::Ansi.char(b as u8))
+            .map(|&b| page.char(b as u8))
             .collect(),
     )
 }
@@ -346,7 +362,7 @@ fn read_ansi(cpu: &mut Cpu, at: u32, len: u32) -> Option<Vec<u16>> {
 /// `args[4]` (`args[5]`): 1 when it sorts first, 2 when they are equal, 3
 /// when it sorts last, 0 on an error.
 pub(super) fn compare_string_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[_, flags, a, a_len, b, b_len] = args else {
+    let &[lcid, flags, a, a_len, b, b_len] = args else {
         unreachable!()
     };
     if flags & !COMPARE_FLAGS != 0 {
@@ -357,15 +373,16 @@ pub(super) fn compare_string_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(0);
     }
-    let a = read_ansi(cpu, a, a_len)?;
-    let b = read_ansi(cpu, b, b_len)?;
+    let page = nls::locale_code_page(cpu, lcid, flags);
+    let a = read_ansi(cpu, page, a, a_len)?;
+    let b = read_ansi(cpu, page, b, b_len)?;
     Some((compare(flags, &a, &b) as i32 + 2) as u32)
 }
 
-/// Upper or lower case of the ANSI character `b`, where the code page has
-/// the other case of it.
-fn change_case(b: u8, upper: bool) -> u8 {
-    let c = char::from_u32(CodePage::Ansi.char(b) as u32).unwrap_or('\0');
+/// Upper or lower case of the character `b` of the code page `page`,
+/// where the code page has the other case of it.
+fn change_case(page: CodePage, b: u8, upper: bool) -> u8 {
+    let c = char::from_u32(page.char(b) as u32).unwrap_or('\0');
     let mut changed: Vec<char> = if upper {
         c.to_uppercase().collect()
     } else {
@@ -373,7 +390,7 @@ fn change_case(b: u8, upper: bool) -> u8 {
     };
     match (changed.pop(), changed.is_empty()) {
         (Some(one), true) if (one as u32) < 0x1_0000 => {
-            CodePage::Ansi.byte(one as u16).unwrap_or(b)
+            page.byte(one as u16).unwrap_or(b)
         }
         _ => b,
     }
@@ -383,7 +400,7 @@ fn change_case(b: u8, upper: bool) -> u8 {
 /// `args[1]` says (to upper or lower case, without symbols, or to its sort
 /// key) into `args[4]` (`args[5]` bytes, 0 for the size).
 pub(super) fn lc_map_string_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[_, flags, from, len, to, size] = args else {
+    let &[lcid, flags, from, len, to, size] = args else {
         unreachable!()
     };
     if from == 0 || len == 0 || (size as i32) < 0 {
@@ -418,7 +435,8 @@ pub(super) fn lc_map_string_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             set_error(cpu, ERROR_INVALID_FLAGS);
             return Some(0);
         }
-        let text = read_ansi(cpu, from, len)?;
+        let page = nls::locale_code_page(cpu, lcid, flags);
+        let text = read_ansi(cpu, page, from, len)?;
         let mut key = sort_key(flags, &text);
         key.push(0);
         let key: Vec<u16> = key.into_iter().map(u16::from).collect();
@@ -428,16 +446,17 @@ pub(super) fn lc_map_string_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_FLAGS);
         return Some(0);
     }
+    let page = nls::locale_code_page(cpu, lcid, flags);
     let bytes = read_units(cpu, from, len, 1)?;
     let mapped: Vec<u16> = bytes
         .into_iter()
         .filter(|&b| {
             flags & NORM_IGNORESYMBOLS == 0
-                || ctype1(CodePage::Ansi.char(b as u8)) & (C1_PUNCT | C1_SPACE) == 0
+                || ctype1(page.char(b as u8)) & (C1_PUNCT | C1_SPACE) == 0
         })
         .map(|b| match flags & (LCMAP_UPPERCASE | LCMAP_LOWERCASE) {
-            LCMAP_UPPERCASE => change_case(b as u8, true) as u16,
-            LCMAP_LOWERCASE => change_case(b as u8, false) as u16,
+            LCMAP_UPPERCASE => change_case(page, b as u8, true) as u16,
+            LCMAP_LOWERCASE => change_case(page, b as u8, false) as u16,
             _ => b,
         })
         .collect();
@@ -448,7 +467,7 @@ pub(super) fn lc_map_string_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// or 3) of each character of the string `args[2]` (`args[3]` bytes, or
 /// -1 with its zero), into the WORDs at `args[4]`.
 pub(super) fn get_string_type_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[_, kind, from, len, to] = args else {
+    let &[lcid, kind, from, len, to] = args else {
         unreachable!()
     };
     let classify: fn(u16) -> u16 = match kind {
@@ -464,7 +483,8 @@ pub(super) fn get_string_type_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
     }
-    let text = ansi_to_wide(
+    let page = nls::locale_code_page(cpu, lcid, 0);
+    let text = page.decode(
         &read_units(cpu, from, len, 1)?
             .into_iter()
             .map(|b| b as u8)

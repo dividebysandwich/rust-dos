@@ -15,6 +15,8 @@ use super::{msft, sltg, stdole};
 use std::fmt::Write;
 use std::sync::Arc;
 
+const WESTERN: CodePage = CodePage::WESTERN;
+
 /// The type an HREFTYPE leads to, as the test finds it: the libraries
 /// the fixtures import are STDOLE's.
 type Found = (Arc<TypeLib>, usize, bool);
@@ -286,7 +288,8 @@ fn expected(text: &str) -> String {
 
 #[test]
 fn an_msft_library_reads_as_windows_reads_it() {
-    let lib = msft::read(include_bytes!("testdata/rdtest-msft.tlb")).expect("an MSFT library");
+    let lib = msft::read(include_bytes!("testdata/rdtest-msft.tlb"), WESTERN)
+        .expect("an MSFT library");
     assert_eq!(lib.format, Format::Msft);
     let want = expected(include_str!("testdata/rdtest-msft.txt"));
     assert_eq!(dump_lib(lib), want);
@@ -294,7 +297,8 @@ fn an_msft_library_reads_as_windows_reads_it() {
 
 #[test]
 fn an_sltg_library_reads_as_windows_reads_it() {
-    let lib = sltg::read(include_bytes!("testdata/rdtest-sltg.tlb")).expect("an SLTG library");
+    let lib = sltg::read(include_bytes!("testdata/rdtest-sltg.tlb"), WESTERN)
+        .expect("an SLTG library");
     assert_eq!(lib.format, Format::Sltg);
     let want = expected(include_str!("testdata/rdtest-sltg.txt"));
     assert_eq!(dump_lib(lib), want);
@@ -302,10 +306,10 @@ fn an_sltg_library_reads_as_windows_reads_it() {
 
 #[test]
 fn neither_reader_takes_the_other_format() {
-    assert!(msft::read(include_bytes!("testdata/rdtest-sltg.tlb")).is_none());
-    assert!(sltg::read(include_bytes!("testdata/rdtest-msft.tlb")).is_none());
-    assert!(msft::read(b"MSFT").is_none());
-    assert!(sltg::read(b"SLTG").is_none());
+    assert!(msft::read(include_bytes!("testdata/rdtest-sltg.tlb"), WESTERN).is_none());
+    assert!(sltg::read(include_bytes!("testdata/rdtest-msft.tlb"), WESTERN).is_none());
+    assert!(msft::read(b"MSFT", WESTERN).is_none());
+    assert!(sltg::read(b"SLTG", WESTERN).is_none());
 }
 
 #[test]
@@ -315,8 +319,8 @@ fn a_truncated_library_is_refused_without_a_panic() {
         &include_bytes!("testdata/rdtest-sltg.tlb")[..],
     ] {
         for len in (0..data.len()).step_by(7) {
-            let _ = msft::read(&data[..len]);
-            let _ = sltg::read(&data[..len]);
+            let _ = msft::read(&data[..len], WESTERN);
+            let _ = sltg::read(&data[..len], WESTERN);
         }
     }
 }

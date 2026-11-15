@@ -5,8 +5,9 @@
 //!
 //! D3DVIEWPORT (Direct3D 3's) scales x/w and y/w from the rectangle's
 //! middle; D3DVIEWPORT2 maps a clip volume onto the rectangle. Whichever
-//! was set last is the one used; the other reads back with what the two
-//! have in common, as Wine's ddraw has it.
+//! was set last is the one used. D3DVIEWPORT reads back with scales
+//! worked out from the clip volume, D3DVIEWPORT2 with the rectangle and
+//! depths alone after a D3DVIEWPORT.
 
 use super::super::{
     DDERR_ALREADYINITIALIZED, DDERR_INVALIDOBJECT, DDERR_INVALIDPARAMS, DDERR_UNSUPPORTED, V_LIGHT,
@@ -114,7 +115,11 @@ fn check_out(cpu: &mut Cpu, at: u32) -> Result<(), u32> {
     Ok(())
 }
 
-/// GetViewport(this, viewport): D3DVIEWPORT.
+/// GetViewport(this, viewport): D3DVIEWPORT. Windows keeps a viewport
+/// as its clip volume and gives the scales back worked out from it, the
+/// rectangle's size over the volume's, rather than the scales set: Wine's
+/// d3d.c finds infinite scales for a volume of no size, whichever
+/// structure set it. The depths are 0 and 1.
 pub fn get_viewport(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, at] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
@@ -123,9 +128,21 @@ pub fn get_viewport(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     hr!(check_out(cpu, at));
     let v = get(cpu, id).cloned().unwrap_or_default();
     let mut d = v.data;
-    if v.v2 {
-        // The rectangle and depths; no scale or maximum.
-        d[4..8].fill(0);
+    let f = |i: usize| f32::from_bits(d[i]);
+    // The volume's width and height: twice the maximum of a
+    // D3DVIEWPORT, the clip size of a D3DVIEWPORT2.
+    let (w, h) = if v.v2 {
+        (f(6), f(7))
+    } else {
+        (2.0 * f(6), 2.0 * f(7))
+    };
+    if v.set {
+        d[4] = (d[2] as f32 / w).to_bits();
+        d[5] = (d[3] as f32 / h).to_bits();
+        d[6] = (w / 2.0).to_bits();
+        d[7] = (h / 2.0).to_bits();
+        d[8] = 0.0f32.to_bits();
+        d[9] = 1.0f32.to_bits();
     }
     write_dwords(cpu, at + 4, &d);
     Some(D3D_OK)
@@ -376,32 +393,27 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// buffer the target doesn't have fails, and clears nothing, as
 /// IDirect3DDevice7's Clear does (`device::missing_buffer`).
 pub fn clear2(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [this, count, rects, flags, color, z, _] = args[..] else {
+    let [this, count, rects, flags, color, z, stencil] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    clear_with(
-        cpu,
-        this,
-        count,
-        rects,
-        flags,
-        Some(color),
-        f32::from_bits(z),
-    )
+    let given = Some((color, stencil));
+    clear_with(cpu, this, count, rects, flags, given, f32::from_bits(z))
 }
 
 /// Clear the rectangles of the viewport's device's render target
-/// (D3DCLEAR_TARGET) with `color`, or the background material's
-/// diffuse color, and of its depth buffer (D3DCLEAR_ZBUFFER) with `z`.
-/// A `color` is Clear2's, which fails on a buffer the target doesn't
-/// have; Clear skips the missing depth buffer.
+/// (D3DCLEAR_TARGET) with a color, the given one or the background
+/// material's diffuse color, of its depth buffer (D3DCLEAR_ZBUFFER)
+/// with `z`, and of its stencil buffer (D3DCLEAR_STENCIL) with the
+/// given value. `given` is Clear2's color and stencil value; Clear2
+/// fails on a buffer the target doesn't have, and Clear skips the
+/// missing depth buffer.
 fn clear_with(
     cpu: &mut Cpu,
     this: u32,
     count: u32,
     rects: u32,
     flags: u32,
-    color: Option<u32>,
+    given: Option<(u32, u32)>,
     z: f32,
 ) -> Option<u32> {
     let id = hr!(viewport_of(cpu, this));
@@ -414,12 +426,13 @@ fn clear_with(
     let Some(d) = super::device::get(cpu, v.device).cloned() else {
         return Some(D3D_OK);
     };
-    if color.is_some()
+    if given.is_some()
         && let Some(hr) = super::device::missing_buffer(cpu, &d, flags)
     {
         return Some(hr);
     }
-    let color = color.unwrap_or_else(|| {
+    let stencil = given.map(|(_, stencil)| stencil);
+    let color = given.map(|(color, _)| color).unwrap_or_else(|| {
         super::material::of_handle(cpu, &d, v.background)
             .map_or(0, |m| super::pipeline::color(m.diffuse))
     });
@@ -429,9 +442,12 @@ fn clear_with(
     if count != 0 && list.is_empty() {
         return Some(D3D_OK);
     }
-    let target = (flags & super::device::CLEAR_TARGET != 0).then_some(color);
-    let depth = (flags & super::device::CLEAR_ZBUFFER != 0).then_some(z);
-    super::hal::clear(cpu, &d, &list, target, depth);
+    let fill = super::hal::Fill {
+        target: (flags & super::device::CLEAR_TARGET != 0).then_some(color),
+        depth: (flags & super::device::CLEAR_ZBUFFER != 0).then_some(z),
+        stencil: stencil.filter(|_| flags & super::device::CLEAR_STENCIL != 0),
+    };
+    super::hal::clear(cpu, &d, &list, fill);
     Some(D3D_OK)
 }
 

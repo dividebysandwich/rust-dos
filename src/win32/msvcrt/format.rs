@@ -307,6 +307,7 @@ fn float(out: &mut Vec<u16>, spec: &Spec, v: f64, conv: u8) {
 /// function (`wide` false: strings are bytes unless 'l', 'w' or %S say
 /// they are wide) or a wide one. None if a page wasn't there.
 pub fn printf(cpu: &mut Cpu, format: &[u16], args: &mut Args, wide: bool) -> Option<Vec<u16>> {
+    let cv = conv(cpu);
     let mut out: Vec<u16> = Vec::new();
     let mut i = 0;
     let at = |i: usize| {
@@ -446,11 +447,11 @@ pub fn printf(cpu: &mut Cpu, format: &[u16], args: &mut Args, wide: bool) -> Opt
                     if wide {
                         c
                     } else {
-                        narrow(c).unwrap_or(b'?') as u16
+                        cv.narrow(c).unwrap_or(b'?') as u16
                     }
                 } else {
                     let b = v as u8;
-                    if wide { widen(b) } else { b as u16 }
+                    if wide { cv.widen(b) } else { b as u16 }
                 };
                 let zeros = spec.zero && !spec.left;
                 spec.pad(&mut out, &[], &[c], zeros);
@@ -498,9 +499,9 @@ pub fn printf(cpu: &mut Cpu, format: &[u16], args: &mut Args, wide: bool) -> Opt
                 let text: Vec<u16> = match (wide, wide_str) {
                     (false, true) => text
                         .into_iter()
-                        .map(|c| narrow(c).unwrap_or(b'?') as u16)
+                        .map(|c| cv.narrow(c).unwrap_or(b'?') as u16)
                         .collect(),
-                    (true, false) => text.into_iter().map(|b| widen(b as u8)).collect(),
+                    (true, false) => text.into_iter().map(|b| cv.widen(b as u8)).collect(),
                     _ => text,
                 };
                 let zeros = spec.zero && !spec.left;
@@ -934,14 +935,15 @@ fn store_text(
     wide_out: bool,
     terminate: bool,
 ) -> Option<()> {
+    let cv = conv(cpu);
     let mut out: Vec<u8> = Vec::new();
     for &c in text {
         if wide_out {
-            let c = if wide { c } else { widen(c as u8) };
+            let c = if wide { c } else { cv.widen(c as u8) };
             out.extend(c.to_le_bytes());
         } else {
             out.push(if wide {
-                narrow(c).unwrap_or(b'?')
+                cv.narrow(c).unwrap_or(b'?')
             } else {
                 c as u8
             });

@@ -1,8 +1,8 @@
 //! The settings in effect, and every setting as the file writes it.
 
 use super::{
-    AspectRatio, Config, DesktopDepth, DosVersion, Filter, Section, SoundConfig, Win32Trace,
-    WindowsVersion,
+    AspectRatio, Config, DesktopDepth, DosVersion, Filter, Section, SoundConfig, Win32Locale,
+    Win32Trace, WindowsVersion,
 };
 use crate::cpu::{CoreMode, CpuModel};
 use crate::diskio::DiskSettings;
@@ -25,6 +25,9 @@ pub struct Settings {
     pub fullscreen: bool,
     pub aspect: AspectRatio,
     pub vrr: bool,
+    /// The most frames a second a program may show, on any card
+    /// (`fps_cap`).
+    pub fps_cap: crate::frame_cap::Cap,
     pub filter: Filter,
     pub shader: Shader,
     /// The CRT look's own settings.
@@ -42,6 +45,10 @@ pub struct Settings {
     pub powervr_filter: crate::powervr::tsp::Filter,
     /// The Rendition Vérité's RISC, its speed, board ROM and interrupt.
     pub verite: crate::verite::VeriteSettings,
+    /// The megabytes of memory a ToadForce has.
+    pub toadforce_memory: u32,
+    /// What draws a ToadForce's triangles.
+    pub toadforce_renderer: crate::toadforce::Renderer,
     /// Where screenshots and recordings go; relative to the working
     /// directory.
     pub capture_dir: PathBuf,
@@ -63,8 +70,10 @@ pub struct Settings {
     /// The FPU adds and subtracts as the host does (`fpu=fast`): faster,
     /// not exact (`Cpu::fpu_fast`).
     pub fpu_fast: bool,
-    /// RAM in MB.
-    pub memsize: usize,
+    /// RAM in MB as `memsize` sets it, or None while it isn't set: the
+    /// machine then has what `default_memsize` gives its CPU and display
+    /// adapter. `memory_mb` is the size either way.
+    pub memsize: Option<usize>,
     /// Expanded memory (EMS).
     pub ems: bool,
     /// Upper memory blocks.
@@ -84,6 +93,8 @@ pub struct Settings {
     pub win32_version: WindowsVersion,
     /// The depth of the built-in Windows' desktop.
     pub win32_depth: DesktopDepth,
+    /// The built-in Windows' system locale.
+    pub win32_locale: Win32Locale,
     /// Which calls of its functions the log gets a line for.
     pub win32_trace: Win32Trace,
     /// DOS's tables packed below the first MCB, as DOS=HIGH leaves
@@ -161,6 +172,7 @@ impl Default for Settings {
             fullscreen: false,
             aspect: AspectRatio::None,
             vrr: false,
+            fps_cap: crate::frame_cap::DEFAULT,
             filter: Filter::Nearest,
             shader: Shader::None,
             crt: CrtSettings::default(),
@@ -173,6 +185,8 @@ impl Default for Settings {
             powervr: None,
             powervr_filter: Default::default(),
             verite: Default::default(),
+            toadforce_memory: crate::toadforce::regs::DEFAULT_MEMORY >> 20,
+            toadforce_renderer: Default::default(),
             capture_dir: PathBuf::from("capture"),
             record_ui: false,
             record_shader: false,
@@ -182,7 +196,7 @@ impl Default for Settings {
             cpu: CpuModel::I486,
             core: CoreMode::Auto,
             fpu_fast: false,
-            memsize: crate::bus::DEFAULT_MEMORY_MB,
+            memsize: None,
             ems: true,
             umb: true,
             dpmi: true,
@@ -191,6 +205,7 @@ impl Default for Settings {
             win32_dlls_replace: Vec::new(),
             win32_version: WindowsVersion::Win95,
             win32_depth: DesktopDepth::Adapter,
+            win32_locale: Win32Locale::EnUs,
             win32_trace: Win32Trace::Collapsed,
             dos_high: true,
             dos_version: DosVersion::default(),
@@ -276,6 +291,7 @@ impl Settings {
             fullscreen: config.fullscreen.unwrap_or(default.fullscreen),
             aspect: config.aspect.unwrap_or(default.aspect),
             vrr: config.vrr.unwrap_or(default.vrr),
+            fps_cap: config.fps_cap.unwrap_or(default.fps_cap),
             filter: config.filter.unwrap_or(default.filter),
             shader: config.shader.unwrap_or(default.shader),
             crt: CrtSettings {
@@ -305,7 +321,6 @@ impl Settings {
                 scale_shader: config.voodoo_scale_shader.unwrap_or(default.voodoo.scale_shader),
                 msaa: config.voodoo_msaa.unwrap_or(default.voodoo.msaa),
                 anisotropy: config.voodoo_anisotropy.unwrap_or(default.voodoo.anisotropy),
-                fps_cap: config.voodoo_fps_cap.map_or(default.voodoo.fps_cap, |n| (n > 0).then_some(n)),
                 gamma: config.voodoo_gamma.unwrap_or(default.voodoo.gamma),
                 dither: config.voodoo_dither.unwrap_or(default.voodoo.dither),
                 gpu_reads: config
@@ -320,6 +335,10 @@ impl Settings {
                 rom: config.verite_rom.clone().or(default.verite.rom),
                 irq: config.verite_irq.unwrap_or(default.verite.irq),
             },
+            toadforce_memory: config.toadforce_memory.unwrap_or(default.toadforce_memory),
+            toadforce_renderer: config
+                .toadforce_renderer
+                .unwrap_or(default.toadforce_renderer),
             capture_dir: config.capture_dir.clone().unwrap_or(default.capture_dir),
             record_ui: config.record_ui.unwrap_or(default.record_ui),
             record_shader: config.record_shader.unwrap_or(default.record_shader),
@@ -329,7 +348,9 @@ impl Settings {
             cpu: config.cpu.unwrap_or(default.cpu),
             core: config.core.unwrap_or(default.core),
             fpu_fast: config.fpu_fast.unwrap_or(default.fpu_fast),
-            memsize: config.memsize.unwrap_or(default.memsize).min(config.cpu.unwrap_or(default.cpu).max_memsize()),
+            memsize: config
+                .memsize
+                .map(|mb| mb.min(config.cpu.unwrap_or(default.cpu).max_memsize())),
             ems: config.ems.unwrap_or(default.ems),
             umb: config.umb.unwrap_or(default.umb),
             dpmi: config.dpmi.unwrap_or(default.dpmi),
@@ -341,6 +362,7 @@ impl Settings {
                 .unwrap_or(default.win32_dlls_replace),
             win32_version: config.win32_version.unwrap_or(default.win32_version),
             win32_depth: config.win32_depth.unwrap_or(default.win32_depth),
+            win32_locale: config.win32_locale.unwrap_or(default.win32_locale),
             win32_trace: config.win32_trace.unwrap_or(default.win32_trace),
             dos_high: config.dos_high.unwrap_or(default.dos_high),
             dos_version: config.dos_version.unwrap_or(default.dos_version),
@@ -378,6 +400,68 @@ impl Settings {
     }
 }
 
+/// The RAM in MB of a machine whose `memsize` isn't set, from its CPU and
+/// its display adapter: what a machine of the CPU's years came with. Up to
+/// a Pentium that is `DEFAULT_MEMORY_MB` (16), which runs DOS programs,
+/// some of which fail with more. A Pentium MMX, K6-2 or Pentium Pro has
+/// 32, a Pentium II 64 and a Pentium III 128. A ToadForce, whose games
+/// (2000 to 2002) recommend 128 MB, brings any CPU to 128, or to the most
+/// the CPU takes (`CpuModel::max_memsize`: 64 with a 386).
+pub fn default_memsize(cpu: CpuModel, machine: Adapter) -> usize {
+    let by_cpu = match cpu {
+        CpuModel::I386 | CpuModel::I486 | CpuModel::Pentium => crate::bus::DEFAULT_MEMORY_MB,
+        CpuModel::PentiumMmx | CpuModel::K6_2 | CpuModel::PentiumPro => 32,
+        CpuModel::PentiumII => 64,
+        CpuModel::PentiumIII => 128,
+    };
+    let by_card = if machine.is_toadforce() { 128 } else { 0 };
+    by_cpu.max(by_card).min(cpu.max_memsize())
+}
+
+impl Settings {
+    /// The machine's RAM in MB: `memsize` where it is set, else
+    /// `default_memsize` of the CPU and the display adapter; no more than
+    /// the CPU takes.
+    pub fn memory_mb(&self) -> usize {
+        self.memsize
+            .unwrap_or_else(|| default_memsize(self.cpu, self.machine))
+            .min(self.cpu.max_memsize())
+    }
+
+    /// The RAM a machine with these settings starts with.
+    pub fn memory(&self) -> Memory {
+        let cpu = self.cpu.describe();
+        let source = match self.memsize {
+            Some(_) => "memsize".to_string(),
+            None if self.machine.is_toadforce() => {
+                format!("the default for a {} with a ToadForce", cpu)
+            }
+            None => format!("the default for a {}", cpu),
+        };
+        Memory { mb: self.memory_mb(), derived: self.memsize.is_none(), source }
+    }
+}
+
+/// The RAM a machine starts with, and where its size comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Memory {
+    /// The size in MB.
+    pub mb: usize,
+    /// Whether `memsize` isn't set, so the size is `default_memsize`'s.
+    pub derived: bool,
+    /// "memsize", or "the default for a Pentium II".
+    pub source: String,
+}
+
+impl Memory {
+    /// Tell the machine made with this memory where its size comes from:
+    /// a line in the log, and `Bus::memory_derived` for the debug server.
+    pub fn tell(&self, bus: &mut crate::bus::Bus) {
+        bus.memory_derived = self.derived;
+        bus.log_string(&format!("[CONFIG] {} MB of memory ({})", self.mb, self.source));
+    }
+}
+
 /// Every setting as the file writes it: section, key and value, or None
 /// for a setting that is not set.
 pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static str, Option<String>)> {
@@ -392,6 +476,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "fullscreen", yes_no(settings.fullscreen)),
         (Emulator, "aspect", Some(settings.aspect.name().to_string())),
         (Emulator, "vrr", yes_no(settings.vrr)),
+        (Emulator, "fps_cap", Some(crate::frame_cap::name(settings.fps_cap))),
         (Emulator, "filter", Some(settings.filter.name().to_string())),
         (Emulator, "shader", Some(settings.shader.name().to_string())),
         (Emulator, "crt_curvature", Some(settings.crt.curvature.to_string())),
@@ -423,7 +508,6 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
             1 => "off".to_string(),
             n => n.to_string(),
         })),
-        (Emulator, "voodoo_fps_cap", Some(settings.voodoo.fps_cap.map_or("off".to_string(), |n| n.to_string()))),
         (Emulator, "voodoo_gamma", Some(settings.voodoo.gamma.map_or("off".to_string(), |g| g.to_string()))),
         (Emulator, "powervr", Some(settings.powervr.map_or("off", |chip| chip.name()).to_string())),
         (Emulator, "powervr_filter", Some(settings.powervr_filter.name().to_string())),
@@ -431,6 +515,12 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "verite_mhz", Some(settings.verite.mhz.to_string())),
         (Emulator, "verite_rom", settings.verite.rom.as_deref().map(|p| contract_home(p, home))),
         (Emulator, "verite_irq", Some(settings.verite.irq.to_string())),
+        (Emulator, "toadforce_memory", Some(settings.toadforce_memory.to_string())),
+        (
+            Emulator,
+            "toadforce_renderer",
+            Some(settings.toadforce_renderer.name().to_string()),
+        ),
         (Emulator, "capture_dir", Some(contract_home(&settings.capture_dir, home))),
         (Emulator, "record_ui", yes_no(settings.record_ui)),
         (Emulator, "record_shader", yes_no(settings.record_shader)),
@@ -458,7 +548,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         ),
         (Emulator, "core", Some(settings.core.name().to_string())),
         (Emulator, "fpu", Some(if settings.fpu_fast { "fast" } else { "exact" }.to_string())),
-        (Emulator, "memsize", Some(settings.memsize.to_string())),
+        (Emulator, "memsize", settings.memsize.map(|mb| mb.to_string())),
         (Emulator, "ems", yes_no(settings.ems)),
         (Emulator, "umb", yes_no(settings.umb)),
         (Emulator, "dpmi", yes_no(settings.dpmi)),
@@ -471,6 +561,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         ),
         (Emulator, "win32_version", Some(settings.win32_version.name().to_string())),
         (Emulator, "win32_depth", Some(settings.win32_depth.name().to_string())),
+        (Emulator, "win32_locale", Some(settings.win32_locale.name().to_string())),
         (Emulator, "win32_trace", Some(settings.win32_trace.name().to_string())),
         (Emulator, "dos_high", yes_no(settings.dos_high)),
         (Emulator, "dos_version", Some(settings.dos_version.name())),

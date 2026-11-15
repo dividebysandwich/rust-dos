@@ -14,8 +14,10 @@
 //! filled, copied and flipped, and the VGA's picture back after.
 
 use iced_x86::code_asm::*;
+use rust_dos::config::WindowsVersion;
 use rust_dos::cpu::{Cpu, HostConsole};
 use rust_dos::exec::{NoHook, run_batch};
+use rust_dos::toadforce::{pci as toad_pci, regs as toad_regs};
 use rust_dos::video::adapter::{Adapter, VideoSetup};
 use rust_dos::video::{self, Frame, bios};
 use rust_dos::voodoo::Board;
@@ -2817,31 +2819,85 @@ fn the_lobby_builds_addresses_and_is_not_lobbied() {
     assert_eq!(word(DP_APPS), 0, "applications");
 }
 
-/// On a Voodoo3, DirectDraw made with GUID_NULL, as programs that keep
-/// the display's NULL GUID in a structure pass it, and its caps.
-#[test]
-fn the_voodoo3_display_has_3d_and_takes_guid_null() {
+/// Where `caps_program` has GetCaps put the emulation's caps.
+const HEL_CAPS: u32 = ENTRIES;
+/// DDBD_16 and DDBD_32, depths in dwZBufferBitDepths.
+const DDBD_16: u32 = 0x400;
+const DDBD_32: u32 = 0x100;
+
+/// A program that makes DirectDraw with GUID_NULL, as programs that keep
+/// the display's NULL GUID in a structure pass it, and asks for its
+/// caps: the driver's at CAPS, the emulation's at HEL_CAPS, both
+/// DDCAPS of DirectX 6's size.
+fn caps_program() -> (Vec<u8>, u32) {
     const DD_GET_CAPS: u32 = 11;
     let mut d = data();
-    // DESC: GUID_NULL. CAPS: a DDCAPS of DirectX 6's size.
     put32(&mut d, CAPS, 380);
-    let (program, data) = program(&[DDRAW], &d, |a, l| {
+    put32(&mut d, HEL_CAPS, 380);
+    program(&[DDRAW], &d, |a, l| {
         let mut c = Calls { next: 0 };
         c.api(a, l, 0, &[Arg::At(DESC), Arg::At(DD), Arg::I(0)])?;
-        c.com(a, l, DD, DD_GET_CAPS, &[Arg::At(CAPS), Arg::I(0)])?;
+        let caps = [Arg::At(CAPS), Arg::At(HEL_CAPS)];
+        c.com(a, l, DD, DD_GET_CAPS, &caps)?;
         finish(a, l, 1)
-    });
+    })
+}
+
+/// The 3D the caps `caps_program` got say: DDCAPS_3D in the driver's
+/// and the emulation's dwCaps, the driver's surface caps of a 3D
+/// device (textures, mipmaps, 3D devices, Z buffers), and the driver's
+/// dwZBufferBitDepths.
+fn caps_3d(cpu: &Cpu, data: u32) -> (bool, bool, bool, u32) {
+    const DDSCAPS_MIPMAP: u32 = 0x40_0000;
+    assert_eq!(results(cpu, data, 2), [0, 0]);
+    let three_d = |at| peek(cpu, data + at + 4) & 1 != 0;
+    let surface = DDSCAPS_TEXTURE | DDSCAPS_MIPMAP | DDSCAPS_3DDEVICE | DDSCAPS_ZBUFFER;
+    let surface_caps = peek(cpu, data + CAPS + 0x84);
+    assert_eq!(
+        surface_caps & surface,
+        peek(cpu, data + CAPS + 0x16C) & surface,
+        "ddsOldCaps and ddsCaps"
+    );
+    let all = surface_caps & surface == surface;
+    assert!(all || surface_caps & surface == 0, "{surface_caps:X}");
+    (
+        three_d(CAPS),
+        three_d(HEL_CAPS),
+        all,
+        peek(cpu, data + CAPS + 0x38),
+    )
+}
+
+/// On a Voodoo3, DirectDraw made with GUID_NULL, and its caps: the
+/// driver's say 3D with 16-bit Z buffers, as 3dfx's driver does.
+#[test]
+fn the_voodoo3_display_has_3d_and_takes_guid_null() {
+    let (program, data) = caps_program();
     let mut cpu = machine("voodoo3_caps", program);
     run_until(&mut cpu, data, 1);
-    assert_eq!(results(&cpu, data, 2), [0, 0]);
-    let caps = peek(&cpu, data + CAPS + 4);
-    assert_eq!(caps & 1, 1, "DDCAPS_3D: {caps:X}");
-    let surface_caps = peek(&cpu, data + CAPS + 0x84);
-    let zbuffer = 0x2_0000;
-    assert_eq!(
-        surface_caps & (DDSCAPS_3DDEVICE | zbuffer),
-        DDSCAPS_3DDEVICE | zbuffer
-    );
+    assert_eq!(caps_3d(&cpu, data), (true, false, true, DDBD_16));
+}
+
+/// A ToadForce's driver has a Direct3D HAL, so its caps say 3D, with
+/// 16- and 32-bit Z buffers, as its device description does.
+/// Nocturne's renderers look for 3D hardware by DDCAPS_3D alone and
+/// say there is none without it.
+#[test]
+fn a_toadforce_display_has_3d_in_its_caps() {
+    let (program, data) = caps_program();
+    let mut cpu = vesa_machine("toadforce_caps", Adapter::ToadForce, program);
+    run_until(&mut cpu, data, 1);
+    assert_eq!(caps_3d(&cpu, data), (true, false, true, DDBD_16 | DDBD_32));
+}
+
+/// A display with no Direct3D HAL, an S3 Trio64, has no 3D in its
+/// caps.
+#[test]
+fn a_display_without_3d_has_none_in_its_caps() {
+    let (program, data) = caps_program();
+    let mut cpu = vesa_machine("trio64_caps", Adapter::S3, program);
+    run_until(&mut cpu, data, 1);
+    assert_eq!(caps_3d(&cpu, data), (false, false, false, 0));
 }
 
 // IDirectDraw4: its ID, and the DirectDraw object's memory and
@@ -3864,6 +3920,494 @@ fn set_window_pos_gives_a_mouse_move_only_when_the_window_moves() {
     assert_eq!(peek(&cpu, data + CURSOR_MSG), r[0], "for the window");
 }
 
+/// `card_machine` under Windows 98 SE, whose USER32 has TrackMouseEvent.
+fn machine_98(test: &str, program: Vec<u8>) -> Cpu {
+    let base = PathBuf::from("target/test_win32_screen").join(test);
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    fs::write(base.join("T.EXE"), program).unwrap();
+    let mut cpu = Cpu::new(base);
+    cpu.bus.configure_voodoo(None);
+    cpu.bus.win32.enabled = true;
+    cpu.bus.win32.version = WindowsVersion::Win98Se;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    cpu
+}
+
+const USER32_TRACK: (&str, &[&str]) = (
+    "USER32.DLL",
+    &[
+        "CreateWindowExA",
+        "SetCursorPos",
+        "TrackMouseEvent",
+        "GetMessageA",
+        "PeekMessageA",
+        "SystemParametersInfoA",
+        "DispatchMessageA",
+    ],
+);
+const KERNEL32_TRACK: (&str, &[&str]) = (
+    "KERNEL32.DLL",
+    &[
+        "GetTickCount",
+        "Sleep",
+        "LoadLibraryA",
+        "GetProcAddress",
+        "GetLastError",
+    ],
+);
+const TRACK_SET_CURSOR_POS: usize = 1;
+const TRACK_MOUSE_EVENT: usize = 2;
+const TRACK_GET_MESSAGE: usize = 3;
+const TRACK_PEEK_MESSAGE: usize = 4;
+const TRACK_SPI: usize = 5;
+const TRACK_DISPATCH_MESSAGE: usize = 6;
+const TRACK_GET_TICK_COUNT: usize = 7;
+const TRACK_SLEEP: usize = 8;
+const TRACK_LOAD_LIBRARY: usize = 9;
+const TRACK_GET_PROC_ADDRESS: usize = 10;
+const TRACK_GET_LAST_ERROR: usize = 11;
+/// The TRACKMOUSEEVENT of the requests, the one of TME_QUERY, the MSG
+/// GetMessageA fills and what it returned, what SystemParametersInfoA
+/// writes, and names.
+const TME: u32 = 0xE00;
+const TME_QUERIED: u32 = 0xE20;
+const TRACK_MSG: u32 = 0xE40;
+const TRACK_GOT: u32 = 0xE5C;
+const SPI_VALUE: u32 = 0xE60;
+const COMCTL32_NAME: u32 = 0xE80;
+const TRACK_NAME: u32 = 0xEA0;
+const TME_HOVER: u32 = 1;
+const TME_LEAVE: u32 = 2;
+const TME_NONCLIENT: u32 = 0x10;
+const TME_QUERY: u32 = 0x4000_0000;
+const TME_CANCEL: u32 = 0x8000_0000;
+const HOVER_DEFAULT: u32 = 0xFFFF_FFFF;
+const WM_NCMOUSEHOVER: u32 = 0x2A0;
+const WM_MOUSEHOVER: u32 = 0x2A1;
+const WM_NCMOUSELEAVE: u32 = 0x2A2;
+const WM_MOUSELEAVE: u32 = 0x2A3;
+const SPI_GETMOUSEHOVERWIDTH: u32 = 0x62;
+const SPI_GETMOUSEHOVERTIME: u32 = 0x66;
+const SPI_SETMOUSEHOVERTIME: u32 = 0x67;
+const WS_OVERLAPPEDWINDOW: u32 = 0x00CF_0000;
+const HTCAPTION: u32 = 2;
+
+/// The data of the tracking programs: TME a request of `flags` with the
+/// hover time `hover`, its window set by `request`.
+fn track_data(flags: u32, hover: u32) -> Vec<u8> {
+    let mut d = data();
+    for (i, v) in [16, flags, 0, hover].into_iter().enumerate() {
+        put32(&mut d, TME + 4 * i as u32, v);
+    }
+    put32(&mut d, TME_QUERIED, 16);
+    put(&mut d, COMCTL32_NAME, b"COMCTL32.DLL\0");
+    put(&mut d, TRACK_NAME, b"_TrackMouseEvent\0");
+    d
+}
+
+/// TrackMouseEvent with TME, for the window CreateWindowExA made, with
+/// `flags`.
+fn request(c: &mut Calls, a: &mut CodeAssembler, l: &Layout, flags: u32) -> Result<(), IcedError> {
+    request_for(c, a, l, 0, flags)
+}
+
+/// TrackMouseEvent with TME, for the window in the result `slot`, with
+/// `flags`.
+fn request_for(
+    c: &mut Calls,
+    a: &mut CodeAssembler,
+    l: &Layout,
+    slot: u32,
+    flags: u32,
+) -> Result<(), IcedError> {
+    a.mov(eax, dword_ptr(l.at(RESULTS + 4 * slot)))?;
+    a.mov(dword_ptr(l.at(TME + 8)), eax)?;
+    a.mov(dword_ptr(l.at(TME + 4)), flags)?;
+    c.api(a, l, TRACK_MOUSE_EVENT, &[Arg::At(TME)])
+}
+
+/// TrackMouseEvent with TME_QUERY; the flags, window and hover time it
+/// gives go to SEEN's slots from `slot` on.
+fn query(c: &mut Calls, a: &mut CodeAssembler, l: &Layout, slot: u32) -> Result<(), IcedError> {
+    a.mov(dword_ptr(l.at(TME_QUERIED + 4)), TME_QUERY)?;
+    c.api(a, l, TRACK_MOUSE_EVENT, &[Arg::At(TME_QUERIED)])?;
+    for i in 0..3 {
+        see(a, l, TME_QUERIED + 4 + 4 * i, slot + i)?;
+    }
+    Ok(())
+}
+
+/// GetMessageA and DispatchMessageA until `message` comes, as a
+/// program's message loop takes and dispatches them: the hover comes
+/// from a WM_SYSTIMER that DispatchMessageA runs. GetMessageA's result
+/// for `message` goes to the next result.
+fn wait_for(
+    c: &mut Calls,
+    a: &mut CodeAssembler,
+    l: &Layout,
+    message: u32,
+) -> Result<(), IcedError> {
+    let mut next = a.create_label();
+    a.set_label(&mut next)?;
+    push(a, l, &[Arg::At(TRACK_MSG), Arg::I(0), Arg::I(0), Arg::I(0)])?;
+    a.call(l.import(TRACK_GET_MESSAGE))?;
+    a.mov(dword_ptr(l.at(TRACK_GOT)), eax)?;
+    push(a, l, &[Arg::At(TRACK_MSG)])?;
+    a.call(l.import(TRACK_DISPATCH_MESSAGE))?;
+    a.cmp(dword_ptr(l.at(TRACK_MSG + 4)), message as i32)?;
+    a.jne(next)?;
+    a.mov(eax, dword_ptr(l.at(TRACK_GOT)))?;
+    c.keep(a, l)
+}
+
+/// PeekMessageA for `message` alone, taking it.
+fn peek_for(
+    c: &mut Calls,
+    a: &mut CodeAssembler,
+    l: &Layout,
+    message: u32,
+) -> Result<(), IcedError> {
+    let m = Arg::I(message);
+    let args = [Arg::At(TRACK_MSG), Arg::I(0), m, m, Arg::I(PM_REMOVE)];
+    c.api(a, l, TRACK_PEEK_MESSAGE, &args)
+}
+
+fn cursor_to(
+    c: &mut Calls,
+    a: &mut CodeAssembler,
+    l: &Layout,
+    x: u32,
+    y: u32,
+) -> Result<(), IcedError> {
+    c.api(a, l, TRACK_SET_CURSOR_POS, &[Arg::I(x), Arg::I(y)])
+}
+
+/// TrackMouseEvent, as Windows 98's USER32 has it. With the cursor
+/// still in the window's client area for the hover time (400 ms by
+/// default), the window gets WM_MOUSEHOVER with the keys and the place
+/// in the client area, and the hover request ends while the leave one
+/// goes on; TME_QUERY gives what is tracked. When the cursor leaves, the
+/// window gets WM_MOUSELEAVE and nothing is tracked. A request to track
+/// the leaving of a window the cursor isn't on posts WM_MOUSELEAVE at
+/// once, and TME_CANCEL ends a request.
+#[test]
+fn track_mouse_event_posts_hover_and_leave() {
+    let d = track_data(0, HOVER_DEFAULT);
+    let (program, data) = program(&[USER32_TRACK, KERNEL32_TRACK], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        popup_window(&mut c, a, l)?;
+        cursor_to(&mut c, a, l, 20, 20)?;
+        c.api(a, l, TRACK_GET_TICK_COUNT, &[])?;
+        request(&mut c, a, l, TME_HOVER | TME_LEAVE)?;
+        query(&mut c, a, l, 0)?;
+        wait_for(&mut c, a, l, WM_MOUSEHOVER)?;
+        for (i, field) in [8, 12, 16].into_iter().enumerate() {
+            see(a, l, TRACK_MSG + field, 3 + i as u32)?;
+        }
+        query(&mut c, a, l, 6)?;
+        cursor_to(&mut c, a, l, 200, 200)?;
+        wait_for(&mut c, a, l, WM_MOUSELEAVE)?;
+        see(a, l, TRACK_MSG, 9)?;
+        query(&mut c, a, l, 10)?;
+        // The cursor is off the window.
+        request(&mut c, a, l, TME_LEAVE)?;
+        peek_for(&mut c, a, l, WM_MOUSELEAVE)?;
+        // Back on it: tracked, then canceled.
+        cursor_to(&mut c, a, l, 30, 30)?;
+        request(&mut c, a, l, TME_LEAVE)?;
+        request(&mut c, a, l, TME_CANCEL | TME_LEAVE)?;
+        cursor_to(&mut c, a, l, 300, 300)?;
+        peek_for(&mut c, a, l, WM_MOUSELEAVE)?;
+        finish(a, l, 1)
+    });
+    let mut cpu = machine_98("track_hover_leave", program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 17);
+    let s: Vec<u32> = (0..12).map(|i| seen(&cpu, data, i)).collect();
+    let hwnd = r[0];
+    assert_ne!(hwnd, 0, "CreateWindowExA");
+    assert_eq!(r[3], 1, "TrackMouseEvent");
+    assert_eq!(r[4], 1, "TME_QUERY");
+    assert_eq!(
+        s[0..3],
+        [TME_HOVER | TME_LEAVE, hwnd, 400],
+        "what is tracked"
+    );
+    assert_eq!(r[5], 1, "WM_MOUSEHOVER");
+    assert_eq!(s[3], 0, "no keys or buttons down");
+    assert_eq!(
+        s[4],
+        20 << 16 | 20,
+        "where the cursor is in the client area"
+    );
+    assert!(
+        s[5].wrapping_sub(r[2]) >= 400,
+        "after the hover time: {s:?} {r:?}"
+    );
+    // The hover time only with TME_HOVER, as ReactOS's
+    // IntQueryTrackMouseEvent fills it.
+    assert_eq!(
+        s[6..9],
+        [TME_LEAVE, hwnd, 0],
+        "the leave tracked after the hover"
+    );
+    assert_eq!(r[7], 1, "SetCursorPos");
+    assert_eq!(r[8], 1, "WM_MOUSELEAVE");
+    assert_eq!(s[9], hwnd, "for the window");
+    assert_eq!(s[10..12], [0, 0], "nothing tracked after the leave");
+    assert_eq!(r[10], 1, "TrackMouseEvent off the window");
+    assert_eq!(r[11], 1, "WM_MOUSELEAVE at once");
+    assert_eq!(r[13..15], [1, 1], "tracked and canceled");
+    assert_eq!(r[16], 0, "no WM_MOUSELEAVE after TME_CANCEL");
+}
+
+/// The hover rectangle and time: SPI_SETMOUSEHOVERTIME sets the time
+/// HOVER_DEFAULT stands for, and SPI_GETMOUSEHOVERWIDTH gives the 4
+/// pixels of the rectangle. A move of a pixel stays in the rectangle and
+/// the hover comes at its time; a move out of it starts the time again
+/// at the new place.
+#[test]
+fn the_hover_time_starts_again_when_the_cursor_leaves_its_rectangle() {
+    let d = track_data(TME_HOVER, HOVER_DEFAULT);
+    let (program, data) = program(&[USER32_TRACK, KERNEL32_TRACK], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        popup_window(&mut c, a, l)?;
+        let set = [
+            Arg::I(SPI_SETMOUSEHOVERTIME),
+            Arg::I(100),
+            Arg::I(0),
+            Arg::I(0),
+        ];
+        c.api(a, l, TRACK_SPI, &set)?;
+        let get = |action| [Arg::I(action), Arg::I(0), Arg::At(SPI_VALUE), Arg::I(0)];
+        c.api(a, l, TRACK_SPI, &get(SPI_GETMOUSEHOVERTIME))?;
+        see(a, l, SPI_VALUE, 0)?;
+        c.api(a, l, TRACK_SPI, &get(SPI_GETMOUSEHOVERWIDTH))?;
+        see(a, l, SPI_VALUE, 1)?;
+        cursor_to(&mut c, a, l, 20, 20)?;
+        c.api(a, l, TRACK_GET_TICK_COUNT, &[])?;
+        request(&mut c, a, l, TME_HOVER)?;
+        c.api(a, l, TRACK_SLEEP, &[Arg::I(60)])?;
+        cursor_to(&mut c, a, l, 21, 21)?;
+        wait_for(&mut c, a, l, WM_MOUSEHOVER)?;
+        see(a, l, TRACK_MSG + 16, 2)?;
+        see(a, l, TRACK_MSG + 12, 3)?;
+        c.api(a, l, TRACK_GET_TICK_COUNT, &[])?;
+        request(&mut c, a, l, TME_HOVER)?;
+        c.api(a, l, TRACK_SLEEP, &[Arg::I(60)])?;
+        cursor_to(&mut c, a, l, 30, 30)?;
+        wait_for(&mut c, a, l, WM_MOUSEHOVER)?;
+        see(a, l, TRACK_MSG + 16, 4)?;
+        see(a, l, TRACK_MSG + 12, 5)?;
+        finish(a, l, 1)
+    });
+    let mut cpu = machine_98("track_hover_rectangle", program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 16);
+    let s: Vec<u32> = (0..6).map(|i| seen(&cpu, data, i)).collect();
+    assert_eq!(r[1..4], [1, 1, 1], "SystemParametersInfoA");
+    assert_eq!(s[0..2], [100, 4], "the hover time and width");
+    let first = s[2].wrapping_sub(r[5]);
+    assert!(
+        (100..160).contains(&first),
+        "a pixel's move keeps the time: {first}"
+    );
+    assert_eq!(s[3], 21 << 16 | 21);
+    let second = s[4].wrapping_sub(r[10]);
+    assert!(second >= 160, "a move out starts it again: {second}");
+    assert_eq!(s[5], 30 << 16 | 30);
+}
+
+/// TME_NONCLIENT tracks the window's frame and caption: the cursor on
+/// the caption hovers with WM_NCMOUSEHOVER, its hit test value and the
+/// place on the screen, and the move into the client area gives
+/// WM_NCMOUSELEAVE. A request for the client area while the cursor is
+/// on the caption gives WM_MOUSELEAVE at once.
+#[test]
+fn track_mouse_event_tracks_the_non_client_area() {
+    let d = track_data(0, 50);
+    let (program, data) = program(&[USER32_TRACK, KERNEL32_TRACK], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_OVERLAPPEDWINDOW | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(200),
+                Arg::I(200),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        cursor_to(&mut c, a, l, 100, 10)?;
+        request(&mut c, a, l, TME_LEAVE)?;
+        peek_for(&mut c, a, l, WM_MOUSELEAVE)?;
+        request(&mut c, a, l, TME_NONCLIENT | TME_HOVER | TME_LEAVE)?;
+        wait_for(&mut c, a, l, WM_NCMOUSEHOVER)?;
+        see(a, l, TRACK_MSG + 8, 0)?;
+        see(a, l, TRACK_MSG + 12, 1)?;
+        cursor_to(&mut c, a, l, 100, 100)?;
+        wait_for(&mut c, a, l, WM_NCMOUSELEAVE)?;
+        see(a, l, TRACK_MSG, 2)?;
+        finish(a, l, 1)
+    });
+    let mut cpu = machine_98("track_non_client", program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 8);
+    let s: Vec<u32> = (0..3).map(|i| seen(&cpu, data, i)).collect();
+    assert_ne!(r[0], 0, "CreateWindowExA");
+    assert_eq!(r[2..4], [1, 1], "WM_MOUSELEAVE at once off the client area");
+    assert_eq!(r[4..6], [1, 1], "WM_NCMOUSEHOVER");
+    assert_eq!(s[0], HTCAPTION, "on the caption");
+    assert_eq!(s[1], 10 << 16 | 100, "where the cursor is on the screen");
+    assert_eq!(r[7], 1, "WM_NCMOUSELEAVE");
+    assert_eq!(s[2], r[0], "for the window");
+}
+
+/// The desktop has one request, for the window under the cursor, as
+/// ReactOS's IntTrackMouseEvent keeps it with the desktop's spwndTrack: a
+/// request for the parent of the child the cursor is on gets the
+/// parent's WM_MOUSELEAVE at once and leaves the child's request as it
+/// was, and the child gets its WM_MOUSELEAVE when the cursor leaves it.
+#[test]
+fn a_request_for_a_window_under_another_leaves_the_request_alone() {
+    const WS_CHILD: u32 = 0x4000_0000;
+    // An edit control for the child: a static one is HTTRANSPARENT, and
+    // the cursor would be on the parent.
+    const EDIT: u32 = 0xEC0;
+    let mut d = track_data(0, 0);
+    put(&mut d, EDIT, b"Edit\0");
+    let (program, data) = program(&[USER32_TRACK, KERNEL32_TRACK], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        popup_window(&mut c, a, l)?;
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(EDIT),
+                Arg::At(EDIT),
+                Arg::I(WS_CHILD | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(32),
+                Arg::I(32),
+                Arg::Val(RESULTS),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        cursor_to(&mut c, a, l, 10, 10)?;
+        request_for(&mut c, a, l, 1, TME_LEAVE)?;
+        request_for(&mut c, a, l, 0, TME_LEAVE)?;
+        peek_for(&mut c, a, l, WM_MOUSELEAVE)?;
+        see(a, l, TRACK_MSG, 0)?;
+        query(&mut c, a, l, 1)?;
+        cursor_to(&mut c, a, l, 300, 300)?;
+        wait_for(&mut c, a, l, WM_MOUSELEAVE)?;
+        see(a, l, TRACK_MSG, 4)?;
+        peek_for(&mut c, a, l, WM_MOUSELEAVE)?;
+        finish(a, l, 1)
+    });
+    let mut cpu = machine_98("track_parent_child", program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 10);
+    let s: Vec<u32> = (0..5).map(|i| seen(&cpu, data, i)).collect();
+    let (parent, child) = (r[0], r[1]);
+    assert_ne!(parent, 0, "the parent");
+    assert_ne!(child, 0, "the child");
+    assert_eq!(r[3..6], [1, 1, 1], "the requests and the parent's leave");
+    assert_eq!(s[0], parent, "the parent's leave at once");
+    assert_eq!(
+        s[1..4],
+        [TME_LEAVE, child, 0],
+        "the child's request goes on"
+    );
+    assert_eq!(r[8], 1, "the child's leave");
+    assert_eq!(s[4], child, "for the child");
+    assert_eq!(r[9], 0, "one leave each");
+}
+
+/// TrackMouseEvent fails for a size other than TRACKMOUSEEVENT's with
+/// ERROR_INVALID_PARAMETER, and for a flag it doesn't know with
+/// ERROR_INVALID_FLAGS, as NT's NtUserTrackMouseEvent does (ReactOS's
+/// has the same checks).
+#[test]
+fn track_mouse_event_checks_its_size_and_flags() {
+    const ERROR_INVALID_FLAGS: u32 = 1004;
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    let d = track_data(0, 0);
+    let (program, data) = program(&[USER32_TRACK, KERNEL32_TRACK], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        popup_window(&mut c, a, l)?;
+        cursor_to(&mut c, a, l, 10, 10)?;
+        request(&mut c, a, l, TME_LEAVE | 0x100)?;
+        c.api(a, l, TRACK_GET_LAST_ERROR, &[])?;
+        a.mov(dword_ptr(l.at(TME)), 12)?;
+        request(&mut c, a, l, TME_LEAVE)?;
+        c.api(a, l, TRACK_GET_LAST_ERROR, &[])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = machine_98("track_checks", program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 6);
+    assert_eq!(r[2..4], [0, ERROR_INVALID_FLAGS], "an unknown flag");
+    assert_eq!(r[4..6], [0, ERROR_INVALID_PARAMETER], "a wrong size");
+}
+
+/// COMCTL32's _TrackMouseEvent, which a program finds with
+/// GetProcAddress as Black & White does, is USER32's TrackMouseEvent: a
+/// request to track the leaving gives WM_MOUSELEAVE when the cursor
+/// leaves the window.
+#[test]
+fn comctl32_track_mouse_event_is_user32s() {
+    let d = track_data(TME_LEAVE, 0);
+    let (program, data) = program(&[USER32_TRACK, KERNEL32_TRACK], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        popup_window(&mut c, a, l)?;
+        c.api(a, l, TRACK_LOAD_LIBRARY, &[Arg::At(COMCTL32_NAME)])?;
+        let find = [Arg::Val(RESULTS + 4), Arg::At(TRACK_NAME)];
+        c.api(a, l, TRACK_GET_PROC_ADDRESS, &find)?;
+        cursor_to(&mut c, a, l, 20, 20)?;
+        a.mov(eax, dword_ptr(l.at(RESULTS)))?;
+        a.mov(dword_ptr(l.at(TME + 8)), eax)?;
+        let mut missing = a.create_label();
+        a.mov(eax, dword_ptr(l.at(RESULTS + 8)))?;
+        a.test(eax, eax)?;
+        a.je(missing)?;
+        a.push(l.at(TME) as i32)?;
+        a.call(eax)?;
+        c.keep(a, l)?;
+        cursor_to(&mut c, a, l, 300, 300)?;
+        wait_for(&mut c, a, l, WM_MOUSELEAVE)?;
+        see(a, l, TRACK_MSG, 0)?;
+        finish(a, l, 1)?;
+        a.set_label(&mut missing)?;
+        finish(a, l, 2)
+    });
+    let mut cpu = machine_98("track_comctl32", program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 7);
+    assert_ne!(r[1], 0, "LoadLibraryA");
+    assert_ne!(r[2], 0, "GetProcAddress");
+    assert_eq!(r[4], 1, "_TrackMouseEvent");
+    assert_eq!(r[6], 1, "WM_MOUSELEAVE");
+    assert_eq!(seen(&cpu, data, 0), r[0], "for the window");
+}
+
 /// A full-screen DirectDraw mode of `w` x `h` at 8 bits, the arrow set
 /// as the cursor and the cursor put at (100, 100) (step 1).
 fn mode_cursor_program(w: u32, h: u32) -> (Vec<u8>, u32) {
@@ -4041,4 +4585,381 @@ fn the_desktop_starts_the_cursor_where_user_had_it() {
 fn under_directdraw_the_desktop_keeps_the_host_pointer() {
     let (_, after) = desktop_cursor_before_and_after("cursor-directdraw", true);
     assert_eq!(after, (50, 40));
+}
+
+// The ToadForce (`rust_dos::toadforce`): the screen in the card's own
+// modes, set through its registers, and DirectDraw's fills and copies
+// in its memory done by its commands.
+
+/// A ToadForce's register.
+fn toad(cpu: &Cpu, register: u32) -> u32 {
+    cpu.bus.toadforce_register(register)
+}
+
+/// The mode a ToadForce shows: whether it shows one, its width, height,
+/// format, bytes a row and refresh rate.
+fn toad_mode(cpu: &Cpu) -> (u32, u32, u32, u32, u32, u32) {
+    (
+        toad(cpu, toad_regs::MODE_ENABLE),
+        toad(cpu, toad_regs::MODE_WIDTH),
+        toad(cpu, toad_regs::MODE_HEIGHT),
+        toad(cpu, toad_regs::MODE_FORMAT),
+        toad(cpu, toad_regs::MODE_PITCH),
+        toad(cpu, toad_regs::MODE_REFRESH),
+    )
+}
+
+/// The word of video memory at byte `at`.
+fn vram_word(cpu: &Cpu, at: u32) -> u16 {
+    let v = &cpu.bus.vbe.vram[at as usize..];
+    u16::from_le_bytes([v[0], v[1]])
+}
+
+#[test]
+fn the_desktop_is_32_bits_in_a_toadforce_mode() {
+    let (program, data) = desktop_program();
+    let mut cpu = vesa_machine("desktop_toadforce", Adapter::ToadForce, program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 8);
+    assert_eq!(r[1], 0, "DirectDrawCreate");
+    assert_eq!(r[3], 32, "GetDeviceCaps(BITSPIXEL)");
+    assert_eq!(r[6], 0x0012_3456, "GetPixel");
+    assert_eq!(r[7], 0, "GetDisplayMode");
+    // The card's own mode, X8R8G8B8 at 60 Hz, from the start of its
+    // 64 MB.
+    assert_eq!(toad_mode(&cpu), (1, 640, 480, 3, 2560, 60));
+    assert_eq!(toad(&cpu, toad_regs::MODE_START), 0);
+    assert_eq!(toad(&cpu, toad_regs::MEMORY), 64 << 20);
+    assert_eq!(cpu.bus.vbe.vram.len(), 64 << 20);
+    assert_eq!(toad(&cpu, toad_regs::ERROR), 0);
+    let at = 200 * 2560 + 300 * 4;
+    assert_eq!(
+        cpu.bus.vbe.vram[at..at + 8],
+        [0, 0, 0xFF, 0, 0x12, 0x34, 0x56, 0]
+    );
+    assert_eq!(shown(&mut cpu, 300, 200), [0xFF, 0, 0]);
+    let mode = |o: u32| peek(&cpu, data + MODE + o);
+    assert_eq!((mode(0x0C), mode(0x08), mode(0x10)), (640, 480, 2560));
+    assert_eq!(mode(0x48 + 12), 32);
+}
+
+#[test]
+fn a_full_screen_mode_flips_in_a_toadforces_memory_and_the_desktop_comes_back() {
+    let (program, data) = fullscreen_program();
+    let mut cpu = vesa_machine("fullscreen_toadforce", Adapter::ToadForce, program);
+    run_until(&mut cpu, data, 1);
+    assert_eq!(toad_mode(&cpu), (1, 640, 480, 3, 2560, 60));
+    let before = cpu.bus.vbe.vram[..640 * 480 * 4].to_vec();
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 2);
+    assert_eq!(results(&cpu, data, 9)[1..], [0; 8]);
+    // R5G6B5, and the flip showed the back buffer, which was after the
+    // screen's 614400 bytes.
+    assert_eq!(toad_mode(&cpu), (1, 640, 480, 2, 1280, 60));
+    let start = toad(&cpu, toad_regs::MODE_START);
+    assert_eq!(start, 640 * 480 * 2);
+    assert_eq!(seen(&cpu, data, 1), 1280);
+    assert_eq!(vram_word(&cpu, start), 0xF800);
+    assert_eq!(vram_word(&cpu, start + 2), 0x07E0);
+    assert_eq!(vram_word(&cpu, start + 1280), 0x001F);
+    // The display takes the new start at its next retrace.
+    next_retrace(&mut cpu);
+    assert_eq!(shown(&mut cpu, 0, 0), [0xFF, 0, 0]);
+    assert_eq!(shown(&mut cpu, 1, 0), [0, 0xFF, 0]);
+    assert_eq!(shown(&mut cpu, 0, 1), [0, 0, 0xFF]);
+    // The pointer Lock gave is in the program's view of card memory,
+    // which is the card's BAR 1.
+    let pointer = seen(&cpu, data, 0);
+    let card = cpu.bus.toadforce.as_ref().unwrap();
+    let bar1 = card.pci.window(toad_pci::Bar::Memory).unwrap().0;
+    assert_eq!(physical(&cpu, pointer) as u32, bar1 + start);
+    assert_eq!(toad(&cpu, toad_regs::ERROR), 0);
+
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 3);
+    assert_eq!(results(&cpu, data, 11)[9..], [0; 2]);
+    // The desktop's mode again, from the start of memory, repainted,
+    // the window over all of it (as on the other adapters).
+    assert_eq!(toad_mode(&cpu), (1, 640, 480, 3, 2560, 60));
+    assert_eq!(toad(&cpu, toad_regs::MODE_START), 0);
+    let after = &cpu.bus.vbe.vram[..640 * 480 * 4];
+    let at = |x: usize, y: usize| (y * 640 + x) * 4;
+    assert!(after[..at(320, 0)] == before[..at(320, 0)], "its top");
+    assert_eq!(toad(&cpu, toad_regs::ERROR), 0);
+}
+
+/// Blits from system memory, which the card has no part in, come out as
+/// on the other adapters.
+#[test]
+fn keyed_blits_into_a_toadforces_memory_keep_what_the_keys_say() {
+    let (program, data) = keyed_blit_program(false);
+    let mut cpu = vesa_machine("keyed_blit_toadforce", Adapter::ToadForce, program);
+    keyed_blits_keep_what_the_keys_say(&mut cpu, data, 19);
+    assert_eq!(toad(&cpu, toad_regs::ERROR), 0);
+    // The card copied the three blits of the source's own size from the
+    // surface in system memory, out of a block of its memory the
+    // driver wrote them to: through the key, as it is, and the middle
+    // columns through the key. The stretched ones and the one through
+    // a destination key are the processor's.
+    let card = cpu.bus.toadforce.as_ref().unwrap();
+    assert_eq!(card.counts().blt, 3);
+}
+
+// The data of the program that blits inside video memory.
+const VID_FX_FILL: u32 = 0xE00;
+const VID_FX_GREEN: u32 = 0xE70;
+const VID_FX_MAGENTA: u32 = 0xEE0;
+const VID_RECTS: u32 = 0xF50;
+const GREEN: u16 = 0x07E0;
+const DDBLTFAST_SRCCOLORKEY: u32 = 1;
+const DDBLTFAST_WAIT: u32 = 0x10;
+
+/// Full screen at 640x480x16 with a flip chain and a surface of 64x32
+/// in video memory (step 1). Then fills and copies between them, none
+/// stretched: the back buffer filled, the small surface magenta with a
+/// green box, copied to the back buffer whole, through its key twice,
+/// and a part of the back buffer copied over itself; then a flip
+/// (step 2).
+fn vidmem_blit_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    desc(
+        &mut d,
+        DESC,
+        DDSD_CAPS | DDSD_BACKBUFFERCOUNT,
+        DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX,
+        0,
+        0,
+        1,
+    );
+    put32(&mut d, CAPS, DDSCAPS_BACKBUFFER);
+    desc(
+        &mut d,
+        SYSDESC,
+        DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
+        DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY,
+        64,
+        32,
+        0,
+    );
+    for (fx, colour) in [
+        (VID_FX_FILL, FILL),
+        (VID_FX_GREEN, GREEN),
+        (VID_FX_MAGENTA, MAGENTA),
+    ] {
+        put32(&mut d, fx, 100);
+        put32(&mut d, fx + 0x50, colour as u32);
+    }
+    put32(&mut d, KEY, MAGENTA as u32);
+    put32(&mut d, KEY + 4, MAGENTA as u32);
+    let rects = [
+        [8, 8, 24, 16],        // the green box in the small surface
+        [400, 100, 464, 132],  // where Blt puts it through its key
+        [110, 60, 174, 92],    // the back buffer's copy over itself: to
+        [100, 50, 164, 82],    // and from
+    ];
+    for (i, r) in rects.iter().enumerate() {
+        for (j, v) in r.iter().enumerate() {
+            put32(&mut d, VID_RECTS + 16 * i as u32 + 4 * j as u32, *v);
+        }
+    }
+    program(&[USER32, GDI32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_DISPLAY_MODE,
+            &[Arg::I(640), Arg::I(480), Arg::I(16)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            S_GET_ATTACHED_SURFACE,
+            &[Arg::At(CAPS), Arg::At(BACK)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(SYSDESC), Arg::At(SYS), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            SYS,
+            S_SET_COLOR_KEY,
+            &[Arg::I(DDCKEY_SRCBLT), Arg::At(KEY)],
+        )?;
+        wait(a, l, 1)?;
+        let fill = |c: &mut Calls, a: &mut CodeAssembler, to: u32, rect: Arg, fx: u32| {
+            let flags = Arg::I(DDBLT_COLORFILL | DDBLT_WAIT);
+            c.com(
+                a,
+                l,
+                to,
+                S_BLT,
+                &[rect, Arg::I(0), Arg::I(0), flags, Arg::At(fx)],
+            )
+        };
+        fill(&mut c, a, BACK, Arg::I(0), VID_FX_FILL)?;
+        fill(&mut c, a, SYS, Arg::I(0), VID_FX_MAGENTA)?;
+        fill(&mut c, a, SYS, Arg::At(VID_RECTS), VID_FX_GREEN)?;
+        for (x, y, flags) in [(100, 50, 0), (300, 200, DDBLTFAST_SRCCOLORKEY)] {
+            c.com(
+                a,
+                l,
+                BACK,
+                S_BLT_FAST,
+                &[
+                    Arg::I(x),
+                    Arg::I(y),
+                    Arg::Val(SYS),
+                    Arg::I(0),
+                    Arg::I(flags | DDBLTFAST_WAIT),
+                ],
+            )?;
+        }
+        c.com(
+            a,
+            l,
+            BACK,
+            S_BLT,
+            &[
+                Arg::At(VID_RECTS + 16),
+                Arg::Val(SYS),
+                Arg::I(0),
+                Arg::I(DDBLT_KEYSRC | DDBLT_WAIT),
+                Arg::I(0),
+            ],
+        )?;
+        c.com(
+            a,
+            l,
+            BACK,
+            S_BLT,
+            &[
+                Arg::At(VID_RECTS + 32),
+                Arg::Val(BACK),
+                Arg::At(VID_RECTS + 48),
+                Arg::I(DDBLT_WAIT),
+                Arg::I(0),
+            ],
+        )?;
+        c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
+        finish(a, l, 2)
+    })
+}
+
+/// The program's picture on `adapter`: the bytes of the surface shown
+/// after its flip, and how many `FILL` and `BLT` commands a ToadForce
+/// carried out for its blits.
+fn vidmem_blits(test: &str, adapter: Adapter) -> (Vec<u8>, u64) {
+    let (program, data) = vidmem_blit_program();
+    let mut cpu = vesa_machine(test, adapter, program);
+    let drawn = |cpu: &Cpu| cpu.bus.toadforce.as_ref().map_or(0, |c| c.drawn());
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 8);
+    assert!(r[1..].iter().all(|&v| v == 0), "{r:X?}");
+    let before = drawn(&cpu);
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 2);
+    let r = results(&cpu, data, 16);
+    assert!(r[8..].iter().all(|&v| v == 0), "{r:X?}");
+    let start = cpu.bus.vbe.start as usize;
+    assert_eq!(start, 640 * 480 * 2, "the back buffer shows");
+    let picture = cpu.bus.vbe.vram[start..start + 640 * 480 * 2].to_vec();
+    if adapter == Adapter::ToadForce {
+        assert_eq!(toad(&cpu, toad_regs::ERROR), 0);
+        assert_eq!(toad(&cpu, toad_regs::MODE_START), start as u32);
+    }
+    (picture, drawn(&cpu) - before)
+}
+
+#[test]
+fn a_toadforce_fills_and_copies_in_its_memory_as_directdraw_does() {
+    let (picture, drawn) = vidmem_blits("vidmem_blit_toadforce", Adapter::ToadForce);
+    // Three fills and four copies, each one command of the card's.
+    assert_eq!(drawn, 7);
+    let pixel = |x: usize, y: usize| {
+        let at = (y * 640 + x) * 2;
+        u16::from_le_bytes([picture[at], picture[at + 1]])
+    };
+    assert_eq!(pixel(0, 0), FILL);
+    assert_eq!(pixel(639, 479), FILL);
+    // Copied whole at (100, 50), then (100, 50)-(164, 82) of that over
+    // itself 10 across and down.
+    assert_eq!(pixel(100, 50), MAGENTA);
+    assert_eq!(pixel(108, 58), GREEN);
+    assert_eq!(pixel(109, 59), GREEN);
+    assert_eq!(pixel(110, 60), MAGENTA);
+    assert_eq!(pixel(118, 68), GREEN);
+    assert_eq!(pixel(133, 75), GREEN);
+    assert_eq!(pixel(134, 76), MAGENTA);
+    assert_eq!(pixel(173, 91), MAGENTA);
+    assert_eq!(pixel(174, 92), FILL);
+    // Through the key, only the green box came.
+    for (x, y) in [(300, 200), (400, 100)] {
+        assert_eq!(pixel(x, y), FILL);
+        assert_eq!(pixel(x + 7, y + 8), FILL);
+        assert_eq!(pixel(x + 8, y + 8), GREEN);
+        assert_eq!(pixel(x + 23, y + 15), GREEN);
+        assert_eq!(pixel(x + 24, y + 15), FILL);
+        assert_eq!(pixel(x + 23, y + 16), FILL);
+    }
+    // The Super VGA, where DirectDraw's own code drew it all, has the
+    // same picture.
+    let (svga, none) = vidmem_blits("vidmem_blit_svga", Adapter::Svga);
+    assert_eq!(none, 0);
+    assert!(picture == svga, "the pictures differ");
+}
+
+/// Other modes on a ToadForce: 320x200 at 8 bits, its colours in the
+/// card's palette, then 800x600 at 32.
+#[test]
+fn eight_and_32_bit_modes_are_a_toadforces() {
+    let (program, data) = modes_program();
+    let mut cpu = vesa_machine("modes_toadforce", Adapter::ToadForce, program);
+    run_until(&mut cpu, data, 1);
+    assert_eq!(results(&cpu, data, 9)[1..], [0; 8]);
+    assert_eq!(toad_mode(&cpu), (1, 320, 200, 1, 320, 60));
+    assert_eq!(toad(&cpu, toad_regs::PALETTE + 4 * 7), 0x07_40F8);
+    assert_eq!(toad(&cpu, toad_regs::PALETTE + 4 * 200), 0xC8_4037);
+    // The display shows a mode this narrow with each pixel doubled.
+    assert_eq!(video::frame_size(&cpu.bus), (640, 400));
+    for (x, y) in [(10, 0), (11, 0), (10, 1), (11, 1)] {
+        assert_eq!(shown(&mut cpu, x, y), [7, 0x40, 0xF8], "({x}, {y})");
+    }
+    assert_eq!(shown(&mut cpu, 9, 0), [0, 0x40, 0xFF]);
+    assert_eq!(shown(&mut cpu, 12, 0), [0, 0x40, 0xFF]);
+    // The card's timing is the machine's: 200 lines and 13 of blank,
+    // 60 times a second.
+    let timing = cpu.bus.vga.timing();
+    assert_eq!((timing.display, timing.total), (200, 213));
+    assert!((timing.hz() - 60.0).abs() < 0.1, "{}", timing.hz());
+
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 2);
+    assert_eq!(results(&cpu, data, 10)[9], 0);
+    assert_eq!(toad_mode(&cpu), (1, 800, 600, 3, 3200, 60));
+    let timing = cpu.bus.vga.timing();
+    assert_eq!(timing.display, 600);
+    assert!((timing.hz() - 60.0).abs() < 0.1, "{}", timing.hz());
+    assert_eq!(toad(&cpu, toad_regs::ERROR), 0);
 }

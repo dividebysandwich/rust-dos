@@ -1361,7 +1361,7 @@ fn create_dialog(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// its address, which is the stack's top for the call.
 fn template32(cpu: &mut Cpu, at: u32, max: u32) -> u32 {
     let bytes = super::peek_upto(cpu, at, max as usize);
-    let converted = super::resource::dialog32(&bytes);
+    let converted = super::resource::dialog32(crate::win32::nls::ansi(cpu), &bytes);
     let to = thunk::scratch32(cpu, converted.len() as u32 + 4);
     let at = (to + 3) & !3;
     for (i, b) in converted.into_iter().enumerate() {
@@ -1926,15 +1926,16 @@ fn change_case(cpu: &mut Cpu, at: u32, len: usize, upper: bool) {
     if let Some(n) = s.iter().position(|&b| b == 0) {
         s.truncate(n);
     }
+    let acp = crate::win32::nls::ansi(cpu);
     for b in s.iter_mut() {
-        *b = ansi_case(*b, upper);
+        *b = ansi_case(acp, *b, upper);
     }
     super::poke(cpu, at, &s);
 }
 
 fn ansi_upper(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if args[0] >> 16 == 0 {
-        return Some(ansi_case(args[0] as u8, true) as u32);
+        return Some(ansi_case(crate::win32::nls::ansi(cpu), args[0] as u8, true) as u32);
     }
     let at = super::linear(cpu, args[0]);
     let len = super::string_bytes(cpu, at, 0x1_0000).len();
@@ -1944,7 +1945,7 @@ fn ansi_upper(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 fn ansi_lower(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if args[0] >> 16 == 0 {
-        return Some(ansi_case(args[0] as u8, false) as u32);
+        return Some(ansi_case(crate::win32::nls::ansi(cpu), args[0] as u8, false) as u32);
     }
     let at = super::linear(cpu, args[0]);
     let len = super::string_bytes(cpu, at, 0x1_0000).len();
@@ -1959,7 +1960,8 @@ fn ansi_upper_buff(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         args[1] as usize
     };
     let mut s = super::peek(cpu, args[0], len).unwrap_or_default();
-    s.iter_mut().for_each(|b| *b = ansi_case(*b, true));
+    let acp = crate::win32::nls::ansi(cpu);
+    s.iter_mut().for_each(|b| *b = ansi_case(acp, *b, true));
     super::poke(cpu, args[0], &s);
     Some(args[1])
 }
@@ -1971,7 +1973,8 @@ fn ansi_lower_buff(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         args[1] as usize
     };
     let mut s = super::peek(cpu, args[0], len).unwrap_or_default();
-    s.iter_mut().for_each(|b| *b = ansi_case(*b, false));
+    let acp = crate::win32::nls::ansi(cpu);
+    s.iter_mut().for_each(|b| *b = ansi_case(acp, *b, false));
     super::poke(cpu, args[0], &s);
     Some(args[1])
 }

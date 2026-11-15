@@ -373,15 +373,16 @@ fn wide_string(cpu: &mut Cpu, at: u32) -> Option<String> {
     Some(String::from_utf16_lossy(&units))
 }
 
-/// `s` in the ANSI code page.
-fn ansi(s: &str) -> Vec<u8> {
+/// `s` in the code page `page`.
+fn ansi(page: super::nls::CodePage, s: &str) -> Vec<u8> {
     let units: Vec<u16> = s.encode_utf16().collect();
-    super::kernel32::wide_to_ansi(&units)
+    page.encode(&units)
 }
 
-/// The Unicode path `s` as KERNEL32's functions take a path.
-fn path_of(s: &str) -> String {
-    crate::dosstr::from_bytes(&ansi(s))
+/// The Unicode path `s` as KERNEL32's functions take a path: in the
+/// system's ANSI code page.
+fn path_of(cpu: &Cpu, s: &str) -> String {
+    crate::dosstr::from_bytes(&ansi(super::nls::ansi(cpu), s))
 }
 
 /// DispGetIDsOfNames(type, names, count, ids): the type's GetIDsOfNames.

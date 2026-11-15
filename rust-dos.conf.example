@@ -24,6 +24,13 @@
 # when the machine draws it, at its own rate (70 Hz for VGA) rather than
 # a steady 60 Hz. VRR must be on in the graphics driver or desktop too.
 #vrr=false
+# The most frames a second a program may show, on any card: off, or 10 to
+# 240. A game that draws faster waits for each frame's turn; one that
+# draws slower keeps its own rate. It covers 3dfx swaps, DirectDraw
+# flips and blits to the screen, Direct3D 8's Present and SwapBuffers;
+# DOS games on a VGA keep the pace of the retraces they wait for. Turn it
+# off for benchmarks and timedemos. voodoo_fps_cap is its old name.
+#fps_cap=60
 # How the picture is scaled up: nearest (sharp pixels) or linear (smooth).
 # Only without a CRT shader, which does its own scaling.
 #filter=nearest
@@ -117,6 +124,9 @@
 #   svga_ati_3drage, svga_ati_3drage2  an ATI 3D RAGE or 3D RAGE II on
 #         the PCI bus, with its 2D and 3D engines, for ATI's drivers in a
 #         booted Windows (Direct3D and ATI3DCIF games)
+#   svga_toadforce  Rust-DOS's own card, with 64 MB for the Windows
+#         programs it runs without Windows: DirectDraw modes up to
+#         1600x1200. The svga adapter to DOS programs
 #   svga_et4000  a Tseng ET4000AX with 1 MB and a Sierra HiColor DAC:
 #         Tseng's modes, 32K and 64K colours, VBE 1.2 without a linear
 #         frame buffer
@@ -187,6 +197,9 @@
 #verite_mhz=25
 #verite_rom=
 #verite_irq=10
+# The megabytes of video memory machine=svga_toadforce's card has: 32, 64
+# or 128. A change takes effect at the DOS prompt.
+#toadforce_memory=64
 # Where screenshots (Ctrl+F5) and sound (Ctrl+F6), video (Ctrl+F7) and
 # animation (PrintScreen) recordings go: a folder, relative to the
 # directory rust-dos started in.
@@ -202,8 +215,12 @@
 #record_shader=false
 # RAM in MB, from 2 to as much as the CPU's machines took: 64 on a 386,
 # 128 on a 486, 256 on a Pentium, 512 on a Pentium MMX, K6-2, Pentium
-# Pro, Pentium II or Pentium III. Memory above the
-# first megabyte is extended memory for DOS extenders and XMS.
+# Pro, Pentium II or Pentium III. Memory above the first megabyte is
+# extended memory for DOS extenders and XMS. Without this line the
+# machine has what one with its CPU came with: 16 MB up to a Pentium,
+# 32 MB with a Pentium MMX, K6-2 or Pentium Pro, 64 MB with a Pentium II
+# and 128 MB with a Pentium III, or with a ToadForce (machine) and any
+# CPU.
 #memsize=16
 # Expanded memory (EMS 4.0), which many games of the early 1990s need: 16 KB
 # pages of extended memory, shown through a page frame at E000h, as
@@ -235,6 +252,14 @@
 # 98se. Programs are told it, and under 98 the DLLs have Windows 98's
 # functions.
 #win32_version=95
+# The system locale of the built-in Windows, the language edition of
+# Windows 98 it is: en-US (the default), or by code page: 1250 cs-CZ,
+# hr-HR, hu-HU, pl-PL, ro-RO, sk-SK, sl-SI, sr-Latn-YU; 1251 be-BY, bg-BG,
+# ru-RU, sr-Cyrl-YU, uk-UA; 1252 da-DK, de-DE, en-GB, es-ES, fi-FI, fr-FR,
+# it-IT, nb-NO, nl-NL, pt-BR, pt-PT, sv-SE; 1253 el-GR; 1254 tr-TR; 1257
+# et-EE, lt-LT, lv-LV. Programs made for that language's Windows need it
+# to show their text.
+#win32_locale=en-US
 # The depth of the built-in Windows' desktop: auto (the default), the
 # display adapter's own (32 bits a pixel, 24 on an S3 ViRGE, 16 on a 3dfx
 # Banshee or Voodoo3), or 8, 256 colours from a palette, for programs that

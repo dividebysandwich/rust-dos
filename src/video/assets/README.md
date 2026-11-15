@@ -11,6 +11,7 @@ and INT 43h).
 | `IBM_VGA_8x16.bin` | 8x16, 256 glyphs of 16 bytes: the VGA's text font and the 480-line graphics modes' font |
 | `IBM_EGA_9x14_alt.bin` | The glyphs that differ in 9-dot wide 14-line cells (the monochrome text mode): a character code and 14 bytes each, then a 0 |
 | `IBM_VGA_9x16_alt.bin` | The same for 9-dot wide 16-line cells: a character code and 16 bytes each, then a 0 |
+| `CPIDOS_glyphs.bin` | The built-in Windows' glyphs of the characters of its code pages that code page 437 lacks: each a Unicode character (16 bits, little-endian) and its 8x8, 8x14 and 8x16 glyphs, sorted by character |
 
 Each glyph row is a byte with the leftmost pixel in bit 7.
 
@@ -19,3 +20,11 @@ Staging's `src/ints/int10_memory.cpp` (`int10_font_14`,
 `int10_font_14_alternate` and `int10_font_16_alternate`), which is licensed
 GPL-2.0-or-later like rust-dos. That file's 8x8 and 8x16 tables are
 identical to `IBM_VGA_8x8.bin` and `IBM_VGA_8x16.bin`.
+
+`CPIDOS_glyphs.bin` holds glyphs of the DISPLAY fonts of FreeDOS's
+CPIDOS 3.0a by Henrique Peron (https://gitlab.com/FreeDOS/base/cpidos,
+files `EGA.CPX`, `EGA2.CPX`, `EGA3.CPX` and `EGA5.CPX`), distributed
+under the GNU GPL version 2.0 or later like rust-dos. Its 8x14 and 8x16
+glyphs are moved up a row, where their top row is empty, to sit on the
+ROM fonts' baseline. `tools/gen_cpi_glyphs.py` makes the file from those
+fonts and the Unicode Consortium's code page mapping files.

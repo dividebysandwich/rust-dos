@@ -334,7 +334,10 @@ impl File {
         self.next = self.buffer;
         self.end_read = self.buffer;
         self.end_write = self.buffer.wrapping_add(self.cch);
-        self.loaded = true;
+        // A buffer taken for writing holds what it held before, none of
+        // the file's bytes: a seek in it reloads it before it moves on
+        // over them, or the next flush would write the old bytes there.
+        self.loaded = for_read;
         if !for_read {
             return self.cch as i32;
         }
@@ -431,8 +434,13 @@ impl File {
                 self.buf_offset as i64 + self.next.wrapping_sub(self.buffer) as i64 + offset as i64
             }
             2 => {
+                // The end counts what the buffer holds for the file and
+                // hasn't written yet, which the flush writes.
                 let end = if self.fcc == FOURCC_MEM {
                     self.cch
+                } else if self.flags & MMIO_DIRTY != 0 {
+                    let buffered = self.buf_offset + self.next.wrapping_sub(self.buffer);
+                    self.size.max(buffered)
                 } else {
                     self.size
                 };
@@ -463,7 +471,16 @@ impl File {
             if self.proc_seek(cpu, base as i32, 0) == -1 {
                 return -1;
             }
-            self.grab_next(cpu, true);
+            let read = self.grab_next(cpu, true);
+            if read < (to - base) as i32 {
+                // The file can't be read up to `to` (it is open for
+                // writing only): the buffer starts at `to`, so a flush
+                // writes only what the program writes from there, and
+                // nothing the buffer held before over what lies between.
+                self.buf_offset = to;
+                self.end_read = self.buffer;
+                self.loaded = false;
+            }
         }
         self.next = self.buffer.wrapping_add(to - self.buf_offset);
         to as i32
@@ -499,8 +516,8 @@ impl File {
     /// MMIOINFO block.
     fn read_info(&mut self, cpu: &mut Cpu, at: u32) {
         self.disk_offset = cpu.bus.guest_read_32(at + I_DISK_OFFSET);
-        for k in 0..3 {
-            self.adw_info[k] = cpu.bus.guest_read_32(at + I_ADW_INFO + 4 * k as u32);
+        for (k, info) in self.adw_info.iter_mut().enumerate() {
+            *info = cpu.bus.guest_read_32(at + I_ADW_INFO + 4 * k as u32);
         }
     }
 }

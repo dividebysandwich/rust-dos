@@ -3,6 +3,7 @@
 
 pub(super) mod atom;
 pub(super) mod change;
+pub(crate) mod comm;
 mod console;
 mod disk;
 mod env;
@@ -691,6 +692,26 @@ static APIS: &[Api] = &[
     stdcall("FindFirstChangeNotificationA", 282, 3, change::find_first),
     stdcall("FindNextChangeNotification", 288, 1, change::find_next),
     stdcall("FindCloseChangeNotification", 281, 1, change::find_close),
+    // Test Drive 4's 1.2 patch (RTPatch's PATCHW32.DLL) asks the first,
+    // switches to OEM names while it works and back after, and ends with
+    // exit code FFh without them.
+    stdcall("AreFileApisANSI", 126, 0, are_file_apis_ansi),
+    stdcall("SetFileApisToOEM", 716, 0, set_file_apis_to_oem),
+    stdcall("SetFileApisToANSI", 715, 0, set_file_apis_to_ansi),
+    stdcall("SetupComm", 754, 3, comm::setup_comm),
+    stdcall("PurgeComm", 619, 2, comm::purge_comm),
+    stdcall("GetCommState", 327, 2, comm::get_comm_state),
+    stdcall("SetCommState", 688, 2, comm::set_comm_state),
+    stdcall("ClearCommError", 159, 3, comm::clear_comm_error),
+    stdcall("SetCommMask", 687, 2, comm::set_comm_mask),
+    stdcall("GetCommMask", 324, 2, comm::get_comm_mask),
+    stdcall("GetCommModemStatus", 325, 2, comm::get_comm_modem_status),
+    stdcall("EscapeCommFunction", 247, 2, comm::escape_comm_function),
+    stdcall("SetCommBreak", 685, 1, comm::set_comm_break),
+    stdcall("ClearCommBreak", 158, 1, comm::clear_comm_break),
+    stdcall("TransmitCommChar", 778, 2, comm::transmit_comm_char),
+    stdcall("GetCommTimeouts", 328, 2, comm::get_comm_timeouts),
+    stdcall("SetCommTimeouts", 689, 2, comm::set_comm_timeouts),
 ];
 
 /// The places in `APIS` of the system's own stubs.
@@ -806,6 +827,14 @@ pub fn dos_path(name: &str) -> String {
 /// or "..\", or else in each of those SearchPathA looks in.
 pub fn search_file(cpu: &mut Cpu, name: &str) -> Option<String> {
     path::search(cpu, None, name)
+}
+
+/// `search_file` for `name` with `extension` added if its file name has
+/// none, as SearchPathA(NULL, name, extension, ...) looks for it.
+pub fn search_file_with_extension(cpu: &mut Cpu, name: &str, extension: &str) -> Option<String> {
+    let mut name = name.to_string();
+    path::add_extension(&mut name, extension);
+    path::search(cpu, None, &name)
 }
 
 /// The program the command line `line` names first, as CreateProcessA
@@ -1049,19 +1078,24 @@ pub fn global_free(cpu: &mut Cpu, handle: u32) {
     global::global_free(cpu, &[handle]);
 }
 
-/// ANSI text in Unicode, by the ANSI code page.
-pub fn ansi_to_wide(bytes: &[u8]) -> Vec<u16> {
-    text::ansi_to_wide(bytes)
+/// ANSI text in Unicode, by the system's ANSI code page.
+pub fn ansi_to_wide(cpu: &Cpu, bytes: &[u8]) -> Vec<u16> {
+    text::ansi_to_wide(cpu, bytes)
 }
 
-/// Unicode text in the ANSI code page, '?' for what it lacks.
-pub fn wide_to_ansi(units: &[u16]) -> Vec<u8> {
-    text::wide_to_ansi(units)
+/// Unicode text in the system's ANSI code page, '?' for what it lacks.
+pub fn wide_to_ansi(cpu: &Cpu, units: &[u16]) -> Vec<u8> {
+    text::wide_to_ansi(cpu, units)
 }
 
-/// lstrcmpiA's comparison of two ANSI strings, without their zeros.
-pub fn compare_nocase(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
-    let (a, b) = (text::ansi_to_wide(a), text::ansi_to_wide(b));
+/// lstrcmpiA's comparison of two strings of the code page `page`,
+/// without their zeros.
+pub fn compare_nocase(
+    page: crate::win32::nls::CodePage,
+    a: &[u8],
+    b: &[u8],
+) -> std::cmp::Ordering {
+    let (a, b) = (page.decode(a), page.decode(b));
     sort::compare(sort::NORM_IGNORECASE, &a, &b)
 }
 
@@ -1256,6 +1290,26 @@ fn get_last_error(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 fn set_last_error(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     super::process(cpu).last_error = args[0];
+    Some(0)
+}
+
+/// Whether the file functions take their names in the ANSI code page:
+/// TRUE until the process calls SetFileApisToOEM. The built-in Windows
+/// takes every name as ANSI either way, which differs only for names
+/// with characters from 80h up.
+fn are_file_apis_ansi(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(u32::from(!super::process(cpu).file_apis_oem))
+}
+
+/// SetFileApisToOEM: the file functions are to take OEM names.
+fn set_file_apis_to_oem(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    super::process(cpu).file_apis_oem = true;
+    Some(0)
+}
+
+/// SetFileApisToANSI: the file functions are to take ANSI names again.
+fn set_file_apis_to_ansi(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    super::process(cpu).file_apis_oem = false;
     Some(0)
 }
 

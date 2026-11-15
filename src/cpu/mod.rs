@@ -677,6 +677,10 @@ pub struct ProgramEvents {
     /// Programs started and not yet ended: the ones a shell reload ends
     /// without an exit of their own (`Cpu::note_abort`).
     pub running: u32,
+    /// Processes of the built-in Windows that ended, its sessions'
+    /// last ones among them: the debugger drops the breakpoints and
+    /// watchpoints it keeps in their address spaces.
+    pub processes_ended: u64,
 }
 
 /// How a program ended.
@@ -1116,6 +1120,7 @@ impl Cpu {
         // A program closed in the middle may have left the Voodoo card
         // driving the monitor, or the PowerVR one rendering.
         self.bus.reset_voodoo();
+        self.bus.reset_toadforce();
         self.bus.reset_powervr();
         self.state = CpuState::RebootShell;
     }
@@ -1476,6 +1481,16 @@ impl Cpu {
             return FPU_INDEFINITE_F64;
         }
         self.fpu_stack.get_f64(actual_idx)
+    }
+
+    /// ST(i)'s double where the register holds no more than it
+    /// (`FpuRegs::only_double`), and isn't empty.
+    pub fn fpu_only_double(&self, index: usize) -> Option<f64> {
+        let actual_idx = (self.fpu_top.wrapping_add(index)) & 7;
+        if self.fpu_tags[actual_idx] == crate::cpu::FPU_TAG_EMPTY {
+            return None;
+        }
+        self.fpu_stack.only_double(actual_idx)
     }
 
     // Set ST(i) relative to Top

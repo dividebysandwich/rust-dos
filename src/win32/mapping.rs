@@ -8,20 +8,26 @@
 //! A mapping of a file takes no memory when it is made. As on Windows 95,
 //! its pages are read from the file when they are first touched: a page
 //! fault in a view (`fault_in`), or a system call reading or writing the
-//! view (`page_in`, from the bus's accessors). The pages of a read-only
-//! mapping are the file's, so when the pool runs low the ones not used
-//! lately go back to it (`evict`), to be read again when they are needed.
-//! Pages read from files leave the last part of the pool (`RESERVE`) to
-//! the rest of the system, which can't make room by evicting them: once
-//! the pool is down to it, a page fault on a view evicts before it reads.
-//! A mapping of the swap file has all its pages from the start, or with
+//! view (`page_in`, from the bus's accessors). When the pool runs low,
+//! the pages not used lately leave it (`evict`), as Windows 98 pages
+//! out a mapped file: one no view wrote is read from the file again when
+//! it is needed, a written one of a mapping that may write its file is
+//! written to the file first, and a written one of a copy-on-write
+//! mapping (PAGE_WRITECOPY), whose file keeps what it had, goes to the
+//! page file and comes back from there. Pages read from files leave the
+//! last part of the pool (`RESERVE`) to the rest of the system: once the
+//! pool is down to it, a page fault on a view evicts before it reads. A
+//! mapping of the swap file has all its pages from the start, or with
 //! SEC_RESERVE those VirtualAlloc commits: nothing else holds their
 //! contents.
+
+use std::collections::BTreeMap;
 
 use crate::bus::Bus;
 use crate::cpu::Cpu;
 use crate::win32::memory::{
-    self, PAGE, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, protection, protection_bits,
+    self, PAGE, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY, protection,
+    protection_bits,
 };
 
 /// Where mappings are put in the shared arena: above what the processes
@@ -43,9 +49,8 @@ const EVICTED: usize = 16;
 const EVICTED_SHARE: usize = 16;
 
 /// The share of the pool pages read from files leave free: one in this
-/// many of its pages. Other allocations (VirtualAlloc, heaps, stacks,
-/// page tables) take pages from the pool with no way to evict, so pages
-/// read from files that filled it would make them fail.
+/// many of its pages, for other allocations (VirtualAlloc, heaps, stacks,
+/// page tables), which get one at once while it lasts.
 const RESERVE: u32 = 8;
 
 #[derive(Clone, Debug, Default)]
@@ -61,8 +66,16 @@ pub struct Section {
     pub protect: u32,
     pub reserve: bool,
     /// Each page's physical page, or 0 where none is committed, or for a
-    /// mapping of a file where the page wasn't read from it yet.
+    /// mapping of a file where the page wasn't read from it yet or is in
+    /// the page file.
     pub pages: Vec<u32>,
+    /// The pages of a copy-on-write mapping of a file that a view wrote
+    /// and that left the pool, by their index in `pages`: they hold the
+    /// program's copy, not the file's bytes, and go to the page file
+    /// whenever they leave the pool again, written since or not
+    /// (`evict`). Each has its place in the page file while it is there
+    /// (`PageFile::keep`), and None while it is in the pool.
+    pub copies: BTreeMap<u32, Option<u32>>,
     /// The file it maps, as the object of the program's handle of it,
     /// which the mapping holds, and its entry in DOS's file table; or
     /// None for a mapping of the swap file.
@@ -194,6 +207,37 @@ fn reserve(bus: &Bus) -> u32 {
         .map_or(0, |p| p.len / PAGE / RESERVE)
 }
 
+/// Make room in the pool before a page fault takes a page from it, when
+/// it is down to its last few (`EVICTED`): a `sweep`. Whether any page
+/// went; the TLB is then stale. Every process must be in the list.
+pub fn make_room(bus: &mut Bus) -> bool {
+    let left = bus
+        .win32
+        .pool
+        .as_ref()
+        .map_or(u32::MAX, |p| p.available() / PAGE);
+    left < EVICTED as u32 && sweep(bus)
+}
+
+/// Give back to the pool a batch of the pages that no program touched
+/// since the last sweep, of both kinds: those of views of files
+/// (`evict`) and those of programs' own memory and modules' images,
+/// which go out to the page file (`memory::page_out_unused`); and clear
+/// the accessed bits of the others. A page untouched from one sweep to
+/// the next goes, whichever kind it is, so neither kind keeps pages the
+/// other needs. Whether any went; the TLB is then stale. Every process
+/// must be in the list.
+pub fn sweep(bus: &mut Bus) -> bool {
+    let views = evict(bus, false);
+    let pageable = bus
+        .win32
+        .pool
+        .as_ref()
+        .map_or(0, |p| p.page_file.pageable_len());
+    let own = memory::page_out_unused(bus, (pageable / EVICTED_SHARE).max(EVICTED));
+    views || own > 0
+}
+
 /// Put the page at `lin` of a view of a file mapping in the page tables of
 /// the running process, whose page directory is at `cr3`, reading it from
 /// the file if no process has read it yet. With only the bus, for the
@@ -245,11 +289,23 @@ fn read_in(bus: &mut Bus, index: usize, lin: u32, keep: u32) -> PageIn {
         let Some(new) = memory::pool_page(bus) else {
             return PageIn::Full;
         };
-        let offset = i as u32 * PAGE;
-        let len = (size - offset).min(PAGE) as usize;
-        // A file that can't be read any more leaves the page zeroed.
-        if let Some(data) = crate::interrupts::int21::read_file_at(bus, sft, offset, len) {
-            bus.load_bytes(new as usize, &data);
+        let section = bus.win32.sections[s].as_mut().expect("found");
+        if let Some(slot) = section.copies.get_mut(&(i as u32)).and_then(Option::take) {
+            // A written page of a copy-on-write view, back from the page
+            // file.
+            let pool = bus.win32.pool.as_mut().expect("a page came from it");
+            if let Some(data) = pool.page_file.give_back(slot) {
+                bus.load_bytes(new as usize, &data);
+            }
+            bus.win32.paging.ins += 1;
+        } else {
+            let offset = i as u32 * PAGE;
+            let len = (size - offset).min(PAGE) as usize;
+            // A file that can't be read any more leaves the page zeroed.
+            if let Some(data) = crate::interrupts::int21::read_file_at(bus, sft, offset, len) {
+                bus.load_bytes(new as usize, &data);
+            }
+            bus.win32.paging.reads += 1;
         }
         bus.win32.sections[s].as_mut().expect("found").pages[i] = new;
         phys = new;
@@ -257,7 +313,7 @@ fn read_in(bus: &mut Bus, index: usize, lin: u32, keep: u32) -> PageIn {
     let mut process = std::mem::take(&mut bus.win32.processes[index]);
     let mapped = process
         .memory
-        .set_entry(bus, page, phys | protection_bits(protect));
+        .set_entry(bus, page, phys | protection_bits(protect) | ACCESSED);
     bus.win32.processes[index] = process;
     match mapped {
         Some(()) => PageIn::Done,
@@ -284,24 +340,66 @@ pub fn fault_in(cpu: &mut Cpu, lin: u32) -> bool {
 /// (VirtualProtect, ReadProcessMemory). Every process must be in the
 /// list.
 pub fn fault_in_process(cpu: &mut Cpu, index: usize, lin: u32) -> bool {
-    let mut keep = reserve(&cpu.bus);
+    let done = read_making_room(&mut cpu.bus, index, lin);
+    // Reading it, or making room for it, may have sent pages out or
+    // cleared accessed bits, whether or not it came in.
+    if std::mem::take(&mut cpu.bus.win32.tlb_stale) {
+        cpu.tlb.flush();
+    } else if done && index == cpu.bus.win32.running {
+        cpu.tlb.flush_page(lin);
+    }
+    done
+}
+
+/// Write `data` at `lin` in the memory of the process `pid`, through its
+/// own page tables, whichever process runs and whether or not a service
+/// is running: for work the system finishes later, outside the call that
+/// asked for it (a wave block's flags, an ASPI command's results). A page
+/// of a view of a file that isn't in memory, not read yet or given back
+/// to the pool, is read in first, as the program's own write would read
+/// it. Bytes on pages the process hasn't mapped are left out.
+pub fn write_process_bytes(cpu: &mut Cpu, pid: u32, lin: u32, data: &[u8]) {
+    let Some(p) = cpu.bus.win32.processes.iter().position(|p| p.id == pid) else {
+        return;
+    };
+    let memory = memory::Memory::tables(cpu.bus.win32.processes[p].memory.cr3);
+    for (offset, run) in Bus::page_runs(lin, data.len()) {
+        let at = lin.wrapping_add(offset as u32);
+        let part = &data[offset..offset + run];
+        if memory.write(&mut cpu.bus, at, part).is_none() && fault_in_process(cpu, p, at) {
+            let _ = memory.write(&mut cpu.bus, at, part);
+        }
+    }
+}
+
+/// `fault_in_process` without the TLB, which may be stale after it
+/// (`Win32::tlb_stale`).
+fn read_making_room(bus: &mut Bus, index: usize, lin: u32) -> bool {
+    let mut keep = reserve(bus);
     // A page and its page table may each need room; a few rounds are
     // plenty, and stop a page evicted again before it is mapped from
     // going round for ever.
+    let mut swept = false;
     for _ in 0..4 {
-        match read_in(&mut cpu.bus, index, lin, keep) {
-            PageIn::Done => {
-                if index == cpu.bus.win32.running {
-                    cpu.tlb.flush_page(lin);
-                }
-                return true;
-            }
+        match read_in(bus, index, lin, keep) {
+            PageIn::Done => return true,
             PageIn::No => return false,
             PageIn::Full => {
-                if evict(&mut cpu.bus) {
-                    cpu.tlb.flush();
-                } else if keep == 0 {
-                    return false;
+                // Pages not used since the last sweep go first, a batch of
+                // them (`sweep`), but one sweep a fault: a second would find
+                // the pages the first left unused. After that, and once the
+                // reserve is used up, a page of a program's own memory goes
+                // out, and only with none of those, any view's page that
+                // isn't held for the instruction (`memory::hold`).
+                let left = bus.win32.pool.as_ref().map_or(0, |p| p.available() / PAGE);
+                if !std::mem::replace(&mut swept, true) && sweep(bus) {
+                    bus.win32.tlb_stale = true;
+                } else if keep == 0 || left == 0 {
+                    if !memory::page_out(bus) && !evict(bus, true) {
+                        memory::out_of_memory(bus, lin);
+                        return false;
+                    }
+                    bus.win32.tlb_stale = true;
                 }
                 // With what room evicting made, or with nothing left to
                 // evict, the page may take from the reserve.
@@ -312,81 +410,166 @@ pub fn fault_in_process(cpu: &mut Cpu, index: usize, lin: u32) -> bool {
     false
 }
 
-/// Give back to the pool pages of read-only mappings of files, which can
-/// be read from the file again, choosing those no process has touched
-/// since the last time (their entries' accessed bits, which it clears),
-/// then the first of those touched. Pages stay that a process gave
-/// another protection (VirtualProtect) or wrote, which reading them again
-/// would undo, and pages a wave device of a process with a view plays
-/// from, which the device reads without a page fault. Whether it gave any
-/// back. Every process must be in the list, and the TLB is the caller's
-/// to flush.
-pub fn evict(bus: &mut Bus) -> bool {
-    // The candidates: a page, and where the processes that have it map it.
+/// Give back to the pool pages of mappings of files that no process has
+/// touched since the last call (their entries' accessed bits, which it
+/// clears): the pages no view wrote first, which are read from the file
+/// again when they are needed, then the written ones, each kind in
+/// address order from where the last call stopped
+/// (`PageFile::view_hand`). As the `last_resort`, once no page of a
+/// program's own memory can go to the page file, touched pages may go
+/// too, after the others. A written page is written to the file first
+/// when the mapping may write it (PAGE_READWRITE), and stays if that
+/// fails; one of a copy-on-write mapping (PAGE_WRITECOPY) goes to the
+/// page file, as it does every time it leaves after that
+/// (`Section::copies`), and stays while the page file is full. A call
+/// gives back a batch (`EVICTED`, or a share of the pages, `EVICTED_SHARE`)
+/// so that the scan it makes of the mappings' pages serves many faults.
+/// Pages stay that a process gave another protection (VirtualProtect),
+/// which reading them again would undo, pages a wave device of a process
+/// with a view plays from, which the device reads without a page fault,
+/// and pages held for the instruction that faults (`memory::hold`).
+/// Whether it gave any back. Every process must be in the list, and the
+/// TLB is the caller's to flush.
+pub fn evict(bus: &mut Bus, last_resort: bool) -> bool {
+    // The candidates: a page, where the processes that have it map it, and
+    // whether one of them wrote it.
     let mut unused = Vec::new();
     let mut used = Vec::new();
     for (s, section) in bus.win32.sections.iter().enumerate() {
         let Some(section) = section else {
             continue;
         };
-        if section.file.is_none() || section.protect != PAGE_READONLY {
+        if section.file.is_none() || section.protect == PAGE_NOACCESS {
             continue;
         }
-        let viewers: Vec<(u32, &memory::Memory)> = bus
+        let viewers: Vec<(u32, &memory::Memory, Option<u32>)> = bus
             .win32
             .processes
             .iter()
             .filter(|p| section.viewed_by(p.id))
-            .map(|p| (p.id, &p.memory))
+            .map(|p| (p.id, &p.memory, section.protection_in(p.id)))
             .collect();
         for (i, &phys) in section.pages.iter().enumerate() {
             if phys == 0 {
                 continue;
             }
             let lin = section.base + i as u32 * PAGE;
-            let entries: Vec<usize> = viewers
+            let entries: Vec<(usize, Option<u32>)> = viewers
                 .iter()
-                .filter_map(|(_, m)| m.entry_at(bus, lin))
-                .filter(|&at| bus.read_32(at) & !0xFFF == phys)
+                .filter_map(|&(_, m, protect)| Some((m.entry_at(bus, lin)?, protect)))
+                .filter(|&(at, _)| bus.read_32(at) & !0xFFF == phys)
                 .collect();
-            let changed = entries.iter().any(|&at| {
-                let entry = bus.read_32(at);
-                entry & DIRTY != 0 || protection(entry) != Some(PAGE_READONLY)
-            });
+            let changed = entries
+                .iter()
+                .any(|&(at, protect)| protection(bus.read_32(at)) != protect);
             let playing = viewers
                 .iter()
-                .any(|&(pid, _)| crate::win32::winmm::wave::plays_from(bus, pid, lin, PAGE));
-            if changed || playing {
+                .any(|&(pid, _, _)| crate::win32::winmm::wave::plays_from(bus, pid, lin, PAGE));
+            if changed || playing || memory::held(bus, phys) {
                 continue;
             }
+            let entries: Vec<usize> = entries.into_iter().map(|(at, _)| at).collect();
+            let wrote = section.copies.contains_key(&(i as u32))
+                || entries.iter().any(|&at| bus.read_32(at) & DIRTY != 0);
             let list = if entries.iter().any(|&at| bus.read_32(at) & ACCESSED != 0) {
                 &mut used
             } else {
                 &mut unused
             };
-            list.push((s, i, entries));
+            list.push((lin, s, i, entries, wrote));
         }
     }
-    for (_, _, entries) in &used {
+    // With the bits cleared the TLB is stale (`memory::page_out_unused`).
+    for (_, _, _, entries, _) in &used {
         for &at in entries {
             let entry = bus.read_32(at);
             bus.write_32(at, entry & !ACCESSED);
         }
     }
-    let count = ((unused.len() + used.len()) / EVICTED_SHARE).max(EVICTED);
-    let mut victims = unused.into_iter().chain(used).take(count).peekable();
-    if victims.peek().is_none() {
-        return false;
+    if !used.is_empty() {
+        bus.win32.tlb_stale = true;
     }
-    for (s, i, entries) in victims {
+    let count = ((unused.len() + used.len()) / EVICTED_SHARE).max(EVICTED);
+    if !last_resort {
+        used.clear();
+    }
+    // Each list's pages no view wrote first, then the written ones, each
+    // from the hand on, then from the start up to the hand.
+    let hand = bus.win32.pool.as_ref().map_or(0, |p| p.page_file.view_hand);
+    unused.sort_by_key(|&(lin, _, _, _, wrote)| (wrote, lin <= hand, lin));
+    used.sort_by_key(|&(lin, _, _, _, wrote)| (wrote, lin <= hand, lin));
+    bus.win32.paging.sweeps += 1;
+    let mut evicted = 0;
+    for (lin, s, i, entries, wrote) in unused.into_iter().chain(used) {
+        if evicted == count {
+            break;
+        }
+        if wrote && !save_written(bus, s, i) {
+            continue;
+        }
         for at in entries {
             bus.write_32(at, 0);
         }
         let pages = &mut bus.win32.sections[s].as_mut().expect("found").pages;
         let phys = std::mem::take(&mut pages[i]);
         memory::free_page(bus, phys);
+        if let Some(pool) = bus.win32.pool.as_mut() {
+            pool.page_file.view_hand = lin;
+        }
+        bus.win32.paging.evicted += 1;
+        evicted += 1;
     }
-    true
+    evicted > 0
+}
+
+/// Keep what a view wrote to the page at index `i` of the section `s`,
+/// which is leaving the pool: in the file for a mapping that may write
+/// it, in the page file for a copy-on-write one. Whether it was kept.
+fn save_written(bus: &mut Bus, s: usize, i: usize) -> bool {
+    let section = bus.win32.sections[s].as_ref().expect("found");
+    let (Some((_, sft)), protect, size) = (section.file, section.protect, section.size) else {
+        return false;
+    };
+    let phys = section.pages[i];
+    let offset = i as u32 * PAGE;
+    match protect {
+        PAGE_READWRITE => {
+            let len = (size - offset).min(PAGE) as usize;
+            let mut data = vec![0; len];
+            bus.read_into(phys as usize, &mut data);
+            write_file_at(bus, sft, offset, &data)
+        }
+        PAGE_WRITECOPY => {
+            let mut data = vec![0; PAGE as usize];
+            bus.read_into(phys as usize, &mut data);
+            let Some(pool) = bus.win32.pool.as_mut() else {
+                return false;
+            };
+            let Some(slot) = pool.page_file.keep(data) else {
+                return false;
+            };
+            let section = bus.win32.sections[s].as_mut().expect("found");
+            section.copies.insert(i as u32, Some(slot));
+            bus.win32.paging.outs += 1;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Write `data` at `offset` of DOS's open file `sft`, leaving its position
+/// as it was. Whether all of it was written.
+pub(crate) fn write_file_at(bus: &mut Bus, sft: u16, offset: u32, data: &[u8]) -> bool {
+    let disk = &mut bus.disk;
+    let Ok(position) = disk.seek_file(sft, 0, 1) else {
+        return false;
+    };
+    let written = disk.seek_file(sft, offset as i64, 0).is_ok()
+        && disk
+            .write_file(sft, data)
+            .is_ok_and(|n| n as usize == data.len());
+    let _ = disk.seek_file(sft, position as i64, 0);
+    written
 }
 
 crate::state_fields!(Section {
@@ -396,6 +579,7 @@ crate::state_fields!(Section {
     protect,
     reserve,
     pages,
+    copies,
     file,
     views
 });

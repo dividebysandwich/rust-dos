@@ -88,6 +88,14 @@ impl GlScreen {
         match *self {}
     }
 
+    pub fn toadforce_linked(&self) -> bool {
+        match *self {}
+    }
+
+    pub fn toadforce_link(&mut self) -> Result<Box<dyn rust_dos::toadforce::gpu::Host>, &str> {
+        match *self {}
+    }
+
     pub fn voodoo_link(&self) -> Box<dyn rust_dos::voodoo::gpu::GpuLink> {
         match *self {}
     }
@@ -108,6 +116,16 @@ impl GlScreen {
     }
 
     pub fn present_voodoo(&mut self, _screen: &Frame, _base: &Frame, _display: (u32, u32)) -> bool {
+        match *self {}
+    }
+
+    pub fn present_toadforce(
+        &mut self,
+        _surface: &rust_dos::toadforce::format::Surface,
+        _screen: &Frame,
+        _base: &Frame,
+        _display: (u32, u32),
+    ) -> bool {
         match *self {}
     }
 

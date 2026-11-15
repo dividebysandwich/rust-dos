@@ -251,30 +251,10 @@ impl F80 {
     /// infinities of opposite signs make the real indefinite.
     #[cold]
     fn add_special(&mut self, b: F80, b_sign: bool) -> bool {
-        const QUIET: u128 = 1 << 62;
         let mut b = b;
         b.set_sign(b_sign);
-        let (a_nan, b_nan) = (self.is_nan(), b.is_nan());
-        if a_nan || b_nan {
-            let signalling = |x: &F80| x.is_nan() && x.st & QUIET == 0;
-            let invalid = signalling(self) || signalling(&b);
-            if a_nan && b_nan {
-                let (a_quiet, b_quiet) = (!signalling(self), !signalling(&b));
-                let (a_man, b_man) = (self.st as u64 & !(1 << 62), b.st as u64 & !(1 << 62));
-                let take_b = if a_quiet != b_quiet {
-                    b_quiet
-                } else if a_man != b_man {
-                    b_man > a_man
-                } else {
-                    !b.get_sign()
-                };
-                if take_b {
-                    *self = b;
-                }
-            } else if b_nan {
-                *self = b;
-            }
-            self.st |= QUIET | INT_BIT_MASK;
+        if let Some((nan, invalid)) = self.nan_result(b) {
+            *self = nan;
             return invalid;
         }
         if self.is_infinite() && b.is_infinite() {
@@ -286,6 +266,47 @@ impl F80 {
             *self = b;
         }
         false
+    }
+
+    /// The NaN an operation on `self` and `b` gives when either is a NaN,
+    /// as the FPU with its exceptions masked, and whether it is invalid
+    /// (IE): a NaN goes through quieted (of two, the quiet one, else the
+    /// larger significand, else the positive one), and a signalling one
+    /// is invalid. None when neither is a NaN.
+    pub fn nan_result(&self, b: F80) -> Option<(F80, bool)> {
+        const QUIET: u128 = 1 << 62;
+        let (a_nan, b_nan) = (self.is_nan(), b.is_nan());
+        if !a_nan && !b_nan {
+            return None;
+        }
+        let signalling = |x: &F80| x.is_nan() && x.st & QUIET == 0;
+        let invalid = signalling(self) || signalling(&b);
+        let mut nan = *self;
+        if a_nan && b_nan {
+            let (a_quiet, b_quiet) = (!signalling(self), !signalling(&b));
+            let (a_man, b_man) = (self.st as u64 & !(1 << 62), b.st as u64 & !(1 << 62));
+            let take_b = if a_quiet != b_quiet {
+                b_quiet
+            } else if a_man != b_man {
+                b_man > a_man
+            } else {
+                !b.get_sign()
+            };
+            if take_b {
+                nan = b;
+            }
+        } else if b_nan {
+            nan = b;
+        }
+        nan.st |= QUIET | INT_BIT_MASK;
+        Some((nan, invalid))
+    }
+
+    /// A value the FPU since the 387 doesn't take as an operand: a nonzero
+    /// exponent with the integer bit clear (an unnormal, a pseudo-NaN or
+    /// a pseudo-infinity). Arithmetic on one is invalid.
+    pub fn is_unsupported(&self) -> bool {
+        self.get_exponent() != 0 && self.st & INT_BIT_MASK == 0
     }
 
     #[allow(dead_code)]
@@ -744,6 +765,26 @@ impl FpuRegs {
     #[inline]
     pub fn beyond_double(&self, i: usize) -> bool {
         self.stale[i] == 0 && self.x80[i].st & 0x7FF != 0
+    }
+
+    /// Register `i`'s double where its 80 bits are that double and no
+    /// more: a register that is stale, or one whose significand ends at a
+    /// double's 53 bits and has the integer bit set where the double isn't
+    /// 0 and no bits where it is. That leaves out a number below a
+    /// double's range, which the double has as 0, and the formats a 387
+    /// doesn't take (an unnormal, a pseudo-zero or a pseudo-infinity),
+    /// whose double `F80::get_f64` makes as if the integer bit were set.
+    #[inline]
+    pub fn only_double(&self, i: usize) -> Option<f64> {
+        let value = self.f64s[i];
+        if self.stale[i] == 0 {
+            let significand = self.x80[i].st as u64;
+            let whole = if value == 0.0 { significand == 0 } else { significand >> 63 == 1 };
+            if significand & 0x7FF != 0 || !whole {
+                return None;
+            }
+        }
+        Some(value)
     }
 
     /// Give register `i` a double: what `set` of an `F80` set to it

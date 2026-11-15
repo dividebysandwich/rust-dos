@@ -17,7 +17,47 @@ fn hex(v: u32) -> String {
 pub fn win32_json(cpu: &Cpu) -> Value {
     let mut json = snapshot_json(&rust_dos::win32::snapshot(cpu));
     json["trace"] = json!(rust_dos::win32::trace::level(cpu).name());
+    json["page_file"] = page_file_json(cpu);
     json
+}
+
+/// The page file, in pages: its size, the committed pages in it, the
+/// physical pages that may go out to it, and since start the pages of
+/// zeros given a physical page, those read back and those written out;
+/// and the pages of views of files read from their files, those given
+/// back to the pool, and the searches that gave them back. Null before
+/// the built-in Windows has its memory.
+fn page_file_json(cpu: &Cpu) -> Value {
+    rust_dos::win32::page_file_status(&cpu.bus).map_or(Value::Null, |p| {
+        json!({
+            "size": p.size,
+            "used": p.used,
+            "pageable": p.pageable,
+            "zero_ins": p.counts.zero_ins,
+            "ins": p.counts.ins,
+            "outs": p.counts.outs,
+            "view_reads": p.counts.reads,
+            "view_evicted": p.counts.evicted,
+            "view_sweeps": p.counts.sweeps,
+        })
+    })
+}
+
+/// The pages of the address space the processor runs in (CR3) that are
+/// in the page file: runs of pages next to each other, each with its
+/// first page's linear address, its length in pages, and whether they
+/// are pages of zeros with no contents kept there. `truncated` when
+/// there are more than `limit` runs. `ranges` is null before the
+/// built-in Windows has its memory.
+pub fn paged_json(cpu: &Cpu, limit: usize) -> Value {
+    let Some((ranges, truncated)) = rust_dos::win32::paged_ranges(cpu, limit) else {
+        return json!({"cr3": hex(cpu.cr3), "ranges": Value::Null, "truncated": false});
+    };
+    let ranges: Vec<Value> = ranges
+        .iter()
+        .map(|r| json!({"addr": hex(r.start), "pages": r.pages, "zeros": r.zeros}))
+        .collect();
+    json!({"cr3": hex(cpu.cr3), "ranges": ranges, "truncated": truncated})
 }
 
 pub fn snapshot_json(s: &Snapshot) -> Value {
@@ -136,6 +176,18 @@ pub fn ddraw_json(cpu: &Cpu) -> Value {
         "mode": (d.mode.0 != 0).then(|| json!({"width": d.mode.0, "height": d.mode.1, "bits": d.mode.2})),
         "mode_owner": d.mode_owner,
         "exclusive": d.exclusive,
+        "binds": json!({"all": d.binds[0], "kept": d.binds[1]}),
+        "screen_draws": json!({
+            "direct": d.screen_draws[0],
+            "direct_vertices": d.screen_draws[1],
+            "pipeline": d.screen_draws[2],
+            "pipeline_vertices": d.screen_draws[3],
+        }),
+        "gl_draws": d
+            .gl_draws
+            .iter()
+            .map(|&(name, n)| (name.to_string(), json!(n)))
+            .collect::<Map<String, Value>>(),
         "surfaces": d.surfaces.iter().map(surface_json).collect::<Vec<_>>(),
     })
 }

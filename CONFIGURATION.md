@@ -119,6 +119,11 @@ limit, so without a connection it goes on as it would with one:
   desktop (sway's `adaptive_sync on`, for example). Where the display
   is slower than the machine's rate, frames come at 60 Hz as without
   it. `--vrr` turns it on.
+* `fps_cap` is the most frames a second a program may show, on any card:
+  `auto` (the default: 60, and a frame that waits for the retrace at the
+  display's rate), `off`, or 10 to 240. See [Frame rate
+  cap](#frame-rate-cap). `--fps-cap` sets it for a run.
+  `voodoo_fps_cap` is its old name, still read.
 * `filter` is how the picture is scaled up: `nearest` (the default, sharp
   pixels) or `linear` (smooth). It applies without a CRT shader.
 * `shader` gives the picture a look: `none` (the default), one of the
@@ -179,23 +184,24 @@ limit, so without a connection it goes on as it would with one:
   then tries lower speeds, down to where they cost more than 3% of the
   frame rate. A speed the host falls behind at is left for a lower one,
   and the limit that sets rises again while the host keeps up. A real-mode
-  program with no frames to go by (most games of the 1980s, which update
-  the screen piecemeal) runs at 3000, about a 286, as in DOSBox's
-  `cycles=auto`, and at max while it reads or writes its drives
-  (loading). A protected-mode one runs at max while it reads and writes
-  (loading, computing), and otherwise goes down to 20000, a 486's speed,
-  or a quarter of a faster `cpu` model's clock (50000 on a Pentium,
-  112500 on a Pentium II), no more than the host has. Either goes back to
-  its speed 100 ms after the work stops. Resetting the Sound Blaster, as a
-  sound driver does before it times the card with delay loops, ends the
-  loading speed at once. `auto 10000` makes that real-mode speed, and the
-  least `auto` goes down to, 10000. `max` runs everything as fast as the
-  host keeps up with in real time. Use a number such as `3000` for a fixed
-  speed. `--cycles` overrides it. Loading a [save
+  program with no frames to go by (most games of the 1980s, which update the
+  screen piecemeal) runs at 3000, about a 286, as in DOSBox's `cycles=auto`,
+  and at max while it reads or writes its drives (loading), unless it would
+  sit halted for 30% of the time or more at the real-mode speed, as a game
+  playing speech from its CD does. A protected-mode one runs at max while it
+  reads and writes (loading, computing), and otherwise goes down to 20000, a
+  486's speed, or a quarter of a faster `cpu` model's clock (50000 on a
+  Pentium, 112500 on a Pentium II), no more than the host has. Either goes
+  back to its speed 100 ms after the work stops. Resetting the Sound
+  Blaster, as a sound driver does before it times the card with delay loops,
+  ends the loading speed at once. `auto 10000` makes that real-mode speed,
+  and the least `auto` goes down to, 10000. `max` runs everything as fast as
+  the host keeps up with in real time. Use a number such as `3000` for a
+  fixed speed. `--cycles` overrides it. Loading a [save
   state](README.md#save-states) keeps the speed the machine runs at (this
   setting, `--cycles`, or the last one the window, the speed keys or
-  `/api/speed` set): a fixed speed and `max` go on at the rate they had,
-  and `auto` starts its search from the rate the state was saved at. Only
+  `/api/speed` set): a fixed speed and `max` go on at the rate they had, and
+  `auto` starts its search from the rate the state was saved at. Only
   `--deterministic` runs at the state's speed.
 * `auto_fps` is the frame rate `cycles=auto` aims for: `auto`, the
   default, is the display's refresh rate (the 3dfx card's while it
@@ -203,6 +209,8 @@ limit, so without a connection it goes on as it would with one:
   as `30`, gives a game that would draw faster only the speed for that
   many frames a second; a higher one lets a game go past the display's
   rate. It applies at once, and the search for the speed starts over.
+  While a program shows its frames through the frame rate cap
+  (`fps_cap`), `auto` aims for no more than the cap.
 * `auto_busy_os` (`true`, the default, or `false`): whether
   `cycles=auto` gives a program all the host has while it keeps a
   system that idles busy. Windows 95 and 98 halt the processor while
@@ -255,7 +263,9 @@ limit, so without a connection it goes on as it would with one:
   DOSBox configuration's `cputype` of a Pentium imports as `pentium`, of
   a Pentium MMX as `pentium_mmx`, of a Pentium Pro as `pentium_pro`, of
   a Pentium II as `pentium_ii`, and of a Pentium III or DOSBox-X's
-  `experimental` as `pentium_iii`.
+  `experimental` as `pentium_iii`. The `cpu` also gives the memory of a
+  machine without a `memsize` line: 16 MB up to a Pentium and 32 to
+  128 MB with the later ones (see `memsize`).
 * `core` is what runs the programs' instructions: `auto` (the default)
   runs the interpreter, and the dynamic recompiler for a program from the
   moment it switches to protected mode until it ends, as DOSBox's
@@ -267,21 +277,28 @@ limit, so without a connection it goes on as it would with one:
   recompiler needs an x86-64 or ARM64 host; on others and in the browser
   the interpreter runs everything. `--core` overrides it. See
   [docs/dynrec.md](docs/dynrec.md).
-* `fpu` is how the FPU adds and subtracts: `exact` (the default) on 80
-  bits, as a real 387 does, or `fast` on the host's 64-bit doubles, as
-  it multiplies and divides anyway. `fast` saves host CPU in programs that
-  compute a lot with the FPU (Quake), on both cores, but isn't exact:
-  sums can differ from a real machine's in the last bits, they are always
-  rounded to nearest whatever the control word says, and FXCH keeps only
-  the doubles of the registers it exchanges (a value loaded as 80 bits
-  loses its last bits there). Saved states load in either mode. In both,
-  products, quotients, square roots and the transcendental functions are
-  the doubles', so they keep 53 bits of significand where a 387 keeps 64,
-  rounded to nearest whatever the control word says, and the control
-  word's precision field isn't used (a program that sets it to 53 bits,
-  as Win32 programs built with MSVC do, gets close to what a 387
-  gives). Loads, stores, integer conversions, compares and FRNDINT use
-  all 80 bits.
+* `fpu` is how the FPU adds and subtracts: `exact` (the default) close to
+  what a real 387 does, or `fast` on the host's 64-bit doubles, as it
+  multiplies and divides anyway. `exact` adds on 80 bits where the control
+  word asks for 64 bits of precision, which DOS programs run with, and
+  rounds a sum of two doubles to 53 or 24 bits where the control word asks
+  for those and rounds to nearest, which Win32 programs run with (the C
+  runtime sets 53 bits, Direct3D 24). Under the other roundings, and with an
+  operand that has more bits than a double, a sum is the 80 bits' at any
+  precision, and the 80 bits drop the bits shifted out of the significand
+  whatever the rounding control says. `fast` saves host CPU in programs that
+  compute a lot with the FPU at 64 bits of precision (Quake), on both cores,
+  but isn't exact: sums can differ from a real machine's in the last bits,
+  they are always rounded to nearest at 53 bits whatever the control word
+  says, and FXCH keeps only the doubles of the registers it exchanges (a
+  value loaded as 80 bits loses its last bits there). Saved states load in
+  either mode. In both, products, quotients, square roots and the
+  transcendental functions are the doubles', so they keep 53 bits of
+  significand where a 387 keeps 64, rounded to nearest whatever the control
+  word says, and the control word's precision field isn't used for them (a
+  program that sets it to 53 bits, as Win32 programs built with MSVC do,
+  gets close to what a 387 gives). Loads, stores, integer conversions,
+  compares and FRNDINT use all 80 bits.
 * `machine` is the display adapter programs find when they look for one, and
   so the graphics they choose: `svga` (the default, a VGA with VESA modes up
   to 1024x768, and 640x400 in truecolour as mode 213h, an OEM mode of S3
@@ -299,8 +316,10 @@ limit, so without a connection it goes on as it would with one:
   RAGE](#ati-3d-rage)), `svga_voodoo3` and `svga_banshee` (a 3dfx Voodoo3
   3000 or Voodoo Banshee with 16 MB on the PCI bus, which 3dfx's Windows
   drivers use for the desktop, Direct3D and OpenGL; see [3dfx
-  Voodoo3](#3dfx-voodoo3-and-banshee)), `svga_et4000` (a Tseng Labs ET4000AX
-  with 1 MB and a Sierra HiColor DAC, see below), `vga` (an IBM VGA, without
+  Voodoo3](#3dfx-voodoo3-and-banshee)), `svga_toadforce` (Rust-DOS's own
+  card, for Windows programs run without Windows; see
+  [ToadForce](#toadforce)), `svga_et4000` (a Tseng Labs ET4000AX with 1 MB
+  and a Sierra HiColor DAC, see below), `vga` (an IBM VGA, without
   VESA modes), `ega` (an IBM EGA with an Enhanced Color Display: 16 of 64
   colours at 640x350, 60 Hz), `cga` (an IBM CGA: 4 colours at 320x200, 2 at
   640x200, 60 Hz), `tandy` (a Tandy 1000), `pcjr` (an IBM PCjr) or
@@ -375,12 +394,12 @@ limit, so without a connection it goes on as it would with one:
   renderer](#the-3dfx-opengl-renderer)), with `voodoo_msaa` (`off`, the
   default, `2`, `4` or `8`) samples a pixel of multisampled antialiasing and
   `voodoo_anisotropy` (`off`, the default, `2`, `4`, `8` or `16`) filters
-  textures at oblique angles; `voodoo_fps_cap` (`off`, the default, or 10 to
-  240) is the most frames a second games may show on the card (see [3dfx
-  frame rate cap](#3dfx-frame-rate-cap)); `voodoo_gamma` (`off`, the
-  default, or 0.1 to 2) is the gamma Glide gives the card's picture (see
-  [3dfx gamma](#3dfx-gamma)); without OpenGL 3 (in the browser, or with
-  SDL's dummy video driver) the software rasterizer's picture shows. The
+  textures at oblique angles; `voodoo_gamma` (`off`, the default, or 0.1
+  to 2) is the gamma Glide gives the card's picture (see [3dfx
+  gamma](#3dfx-gamma)); without OpenGL 3 (in the browser, or with SDL's
+  dummy video driver) the software rasterizer's picture shows. The card's
+  frames are held to `fps_cap` with every other card's (see [Frame rate
+  cap](#frame-rate-cap)). The
   settings from `voodoo_texture_sampling` on change at once, `voodoo_gamma`
   at the DOS prompt. All of them but `voodoo_gamma` also work on a Voodoo3
   or Banshee display adapter (`machine=svga_voodoo3` or `svga_banshee`; see
@@ -413,16 +432,37 @@ limit, so without a connection it goes on as it would with one:
   ffmpeg, VLC and mpv play, at 60 frames a second of the machine's time
   with its sound, so they keep in step through pauses and fast forward;
   a recording stops at 1 GB.
-* `memsize` is the RAM in MB (default 16), from 2 to as much as
-  motherboards took for the `cpu`: 64 MB for a 386, 128 MB for a 486,
-  256 MB for a Pentium and 512 MB for a Pentium MMX, K6-2, Pentium Pro,
-  Pentium II or Pentium III. More than the CPU
-  takes is warned about and cut to its most. Memory above the first
-  megabyte is extended memory for DOS extenders and XMS; XMS 3.0's 32-bit
-  functions and INT 15h E801h/E820h report all of it, HIMEM's older calls
-  and the CMOS at most 64 MB, as on a real machine. Save states and rewind
-  hold all of it, so they grow with it. Windows 95 with 512 MB may need
-  its file cache limited (`MaxFileCache` in SYSTEM.INI's `[vcache]`).
+* `memsize` is the RAM in MB, from 2 to as much as motherboards took
+  for the `cpu`: 64 MB for a 386, 128 MB for a 486, 256 MB for a Pentium
+  and 512 MB for a Pentium MMX, K6-2, Pentium Pro, Pentium II or Pentium
+  III. More than the CPU takes is warned about and cut to its most.
+  Without the setting, the machine has what one with its `cpu` came
+  with:
+
+  | `cpu` | Memory without `memsize` |
+  |---|---|
+  | `386`, `486`, `pentium` | 16 MB |
+  | `pentium_mmx`, `k6_2`, `pentium_pro` | 32 MB |
+  | `pentium_ii` | 64 MB |
+  | `pentium_iii` | 128 MB |
+
+  With `machine=svga_toadforce` it has 128 MB with any `cpu` (64 MB
+  with a 386, which takes no more), as the games that card is for ask
+  for it. A `memsize` line sets the memory whatever the `cpu` and the
+  card are, below these sizes too, for a program that runs only with
+  less. The settings window shows `(auto)` beside a size that isn't
+  set, and saving keeps it out of the file, so it follows a later
+  change of `cpu` or `machine`. A file that an earlier version's
+  settings window saved with F2 has a `memsize` line (16, unless it was
+  changed), and that line sets the memory: delete it, or press Delete on
+  the memory's row and then F2, for the default. The log's `MB of
+  memory` line says which of the two the machine started with. Memory
+  above the first megabyte is extended memory for DOS extenders and XMS;
+  XMS 3.0's 32-bit functions and INT 15h E801h/E820h report all of it,
+  HIMEM's older calls and the CMOS at most 64 MB, as on a real machine.
+  Save states and rewind hold all of it, so they grow with it. Windows 95
+  with 512 MB may need its file cache limited (`MaxFileCache` in
+  SYSTEM.INI's `[vcache]`).
 * `ems` gives programs expanded memory (LIM EMS 4.0, INT 67h), which
   many games of the early 1990s want: `true` (the default) or `false`.
   As with EMM386, 16 KB pages of extended memory show through a page
@@ -517,20 +557,58 @@ limit, so without a connection it goes on as it would with one:
   `95` (the default), `98` or `98se` (Windows 98 Second Edition). It is
   what GetVersion and GetVersionEx say (4.00.950, 4.10.1998 or 4.10.2222
   with " A " as its service pack), and what the registry's version
-  values and DirectX's version say. Under `98` and `98se` the built-in
-  DLLs have the functions Windows 98 added, such as MonitorFromWindow
-  and GetFileAttributesExA, and there is MSIMG32.DLL, with AlphaBlend,
-  GradientFill and TransparentBlt; under `95` a program that imports
-  one of those doesn't start, as on Windows 95, and its message names
-  the setting. These include USER32's GetAncestor, SendInput,
-  TrackMouseEvent and GetWindowInfo, which earlier releases of rust-dos
-  had under Windows 95 too, so a program that imports them needs `98`. Of
-  DirectX, the setting changes only the version the registry gives. The
-  built-in DirectX stays that of a machine with a later DirectX installed
-  (DirectDraw 7, D3D8), so it answers QueryInterface for IDirectDrawSurface7
-  and IDirectDraw7 even under `98se`, where a Windows 98 SE with only its
-  own DirectX 6.1 refuses them. A change takes effect for the next program
-  that starts when none runs.
+  values say. Under `98` and `98se` the built-in DLLs have the functions
+  Windows 98 added, such as MonitorFromWindow and GetFileAttributesExA,
+  and there is MSIMG32.DLL, with AlphaBlend, GradientFill and
+  TransparentBlt; under `95` a program that imports one of those
+  doesn't start, as on Windows 95, and its message names the setting.
+  These include USER32's GetAncestor, SendInput, TrackMouseEvent and
+  GetWindowInfo, which earlier releases of rust-dos had under Windows 95
+  too, so a program that imports them needs `98`. COMCTL32's
+  _TrackMouseEvent is there under every setting. The built-in DirectX
+  is the same under every setting (DirectDraw 7, D3D8 and DINPUT8), so
+  it answers QueryInterface for IDirectDrawSurface7 and IDirectDraw7.
+  What a program reads of its version is that of DirectX 8 as each
+  Windows could have it: 8.0a under `95`, which 8.1 doesn't support, and
+  8.1 under `98` and `98se`. The registry's
+  `HKLM\Software\Microsoft\DirectX` gives `Version` 4.08.00.0400 or
+  4.08.01.0881 and `InstalledVersion` 8.0 or 8.1, and the version
+  resources of DDRAW, DSOUND, DINPUT, DPLAYX, D3D8, DINPUT8 and the
+  DirectMusic DLLs, which GetFileVersionInfo reads, say the same. A
+  change takes effect for the next program that starts when none runs.
+* `win32_locale` is the system locale of the built-in Windows, the
+  language edition of Windows 98 it is. `en-US` is the default. The
+  values, by the ANSI code page they read text in:
+  * 1250 (Central European): `cs-CZ` Czech, `hr-HR` Croatian, `hu-HU`
+    Hungarian, `pl-PL` Polish, `ro-RO` Romanian, `sk-SK` Slovak,
+    `sl-SI` Slovenian, `sr-Latn-YU` Serbian in Latin script.
+  * 1251 (Cyrillic): `be-BY` Belarusian, `bg-BG` Bulgarian, `ru-RU`
+    Russian, `sr-Cyrl-YU` Serbian in Cyrillic script, `uk-UA`
+    Ukrainian.
+  * 1252 (Western European): `da-DK` Danish, `de-DE` German, `en-GB`
+    and `en-US` English, `es-ES` Spanish, `fi-FI` Finnish, `fr-FR`
+    French, `it-IT` Italian, `nb-NO` Norwegian, `nl-NL` Dutch, `pt-BR`
+    and `pt-PT` Portuguese, `sv-SE` Swedish.
+  * 1253 (Greek): `el-GR`.
+  * 1254 (Turkish): `tr-TR`.
+  * 1257 (Baltic): `et-EE` Estonian, `lt-LT` Lithuanian, `lv-LV`
+    Latvian.
+
+  A program made for that language's Windows needs it to show its
+  text: its ANSI bytes are read in the locale's code page, and the
+  system's fonts and DEFAULT_CHARSET draw that code page's letters. The
+  locale sets GetACP and GetOEMCP, the conversions of
+  MultiByteToWideChar, WideCharToMultiByte and the C runtime, the case
+  and sorting of text, GetLocaleInfo's names and formats of dates,
+  numbers and money (with the currencies of 1998, before the euro),
+  GetSystemDefaultLCID and GetUserDefaultLCID, and the registry's `Nls`
+  values. Every one of these code pages is installed under every
+  locale, as on a Windows 98 with multilanguage support, so a program
+  that converts or draws text of another one explicitly gets it. The
+  keyboard types the US layout's characters under every locale. Like
+  `win32_version`, a change takes effect for the next program that
+  starts when none runs, and a saved state goes on under the locale it
+  was saved with.
 * `win32_trace` picks which calls of the built-in Windows' functions
   get a `[W32]` line in the [log file](README.md#log-file) (and `[W16]`
   for the 16-bit modules), with the caller's address, the arguments and
@@ -616,8 +694,9 @@ limit, so without a connection it goes on as it would with one:
   back once it has ended. A moderator's blessed settings win over the
   ones most reports chose. The program waits ten seconds at most for the
   answer, and Esc ends the wait. Only the machine's settings (CPU,
-  memory, sound cards and the like) come from it, never drives,
-  commands or paths. A game launched from its profile and
+  memory, sound cards and the like) and the [frame rate
+  cap](#frame-rate-cap) come from it, never drives, commands or
+  paths. A game launched from its profile and
   deterministic mode never ask. `true` or `false` (the default).
 * `mouse_autocapture` captures the mouse as it moves over the focused
   window while a program uses the mouse driver (INT 33h), and lets it go
@@ -1384,6 +1463,29 @@ game plays, F2 saves the settings window's changes to its profile.
 `--game NAME` launches a game at startup, by its file name (`keen4`) or
 its name, and so does `?game=NAME` in the browser.
 
+`year`, `publisher` and `notes` in `[game]` describe the game for
+[almanac.rust-dos.com](#emulator): its reports carry them, the year
+and publisher filling in what the almanac doesn't know of the game, and
+the notes (one line, how it plays and what it needs) showing with the
+report. **Ins** asks for them, and the report dialog keeps what you type
+there in the profile of the game playing. `uuid` is the profile's own,
+which new and imported profiles get and an older one gets with its
+first report: a report sent with it replaces the one sent with it on
+the same game before, instead of adding another, and a profile that runs
+several games (a Windows 98 image, say) keeps a report on each. Keep it
+to yourself, as anyone with it can replace your reports; a package's own
+`uuid` is never copied into the profiles made from it, each of which
+gets its own.
+
+```ini
+[game]
+name=Commander Keen 4
+year=1991
+publisher=Apogee
+notes=Smooth at cycles=10000; the Sound Blaster needs EMS off
+uuid=0f8fad5b-d9cb-469f-a165-70867728950e
+```
+
 A profile with `overlay=true` in `[game]` keeps the game's files as they
 were installed. New and imported profiles, and those of archives, have it. What the game
 writes on its own drives (the host directories and disk images in its
@@ -1437,7 +1539,6 @@ windows=builtin
 [emulator]
 machine=svga_voodoo3
 cpu=pentium_ii
-memsize=64
 win32_version=98se
 
 [drives]
@@ -1457,9 +1558,9 @@ profile:
 
 | Setting | Set it to | Why |
 |---|---|---|
-| `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too. With the Banshee it is the only card Direct3D 8 runs on, and the only one OpenGL draws on in a window: on a Voodoo2 add-on card OpenGL draws full screen, and a Voodoo Graphics has none. [docs/3dfx.md](docs/3dfx.md) has the other cards. `GLIDE2X.DLL` and `GLIDE3X.DLL` are there only with a 3dfx card. GDI and DirectDraw games run on it too |
+| `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too. Of the 3dfx cards, it and the Banshee are the ones Direct3D 8 runs on and OpenGL draws on in a window: on a Voodoo2 add-on card OpenGL draws full screen, and a Voodoo Graphics has none. [docs/3dfx.md](docs/3dfx.md) has the other cards. `GLIDE2X.DLL` and `GLIDE3X.DLL` are there only with a 3dfx card. GDI and DirectDraw games run on it too. A game from 2000 on that asks for more than a Voodoo3 has (32-bit color, large textures, hardware transform and lighting) takes `svga_toadforce` ([ToadForce](#toadforce)) |
 | `cpu` | `pentium_ii` | The default 486 has no time stamp counter (RDTSC) or MMX, which many games of the time use: such a game stops with an invalid opcode. The Pentium II has both |
-| `memsize` | `64`, or `128` for a 3D game from 1998 on | The default 16 MB is less than most Windows 98 games asked for. The game's heaps and its DirectDraw surfaces come out of it, and it is what the game is told the machine has |
+| `memsize` | leave it out, or `128` for a 3D game from 1998 on | Without it a Pentium II has 64 MB, which most Windows 98 games asked for (the default 486 has 16 MB). The game's heaps and its DirectDraw surfaces come out of it, and it is what the game is told the machine has |
 | `win32_version` | `98se` | The setups and games tested with the built-in Windows were tested under Windows 98 SE. Under the default, `95`, a program that imports a function Windows 98 added doesn't start, and its message names this setting |
 | `win32_depth` | `8` only for a game that says it needs 256 colours, `16` for one that says it needs 16 bits | The default desktop has the card's own depth (16 bits on a Voodoo3, 32 on an S3 Trio, 24 on a ViRGE). A GDI game that draws with a palette needs `8`. A game that checks the desktop's depth before it sets its own mode, such as Moto Racer, needs `16` on a card whose desktop is deeper. Other DirectDraw games set their own mode and don't need it |
 | `cycles` | leave it at `auto` | The game's timers follow the emulated clock, and `auto` finds the speed its frames need |
@@ -1497,7 +1598,6 @@ windows=builtin
 [emulator]
 machine=svga_voodoo3
 cpu=pentium_ii
-memsize=64
 win32_version=98se
 
 [drives]
@@ -1759,9 +1859,11 @@ sets up, such as the mixing fixes, also waits for a driver that hasn't
 set itself up yet. The patch is part of the game's memory, so a save
 state keeps it, and a state saved without it stays unpatched until the
 game starts again. Some patch a program's file as DOS loads it, from
-the shell or by EXEC, when every piece the fix checks is as the game
-shipped it; the file on the disk doesn't change. Others skip a program
-the game starts, with the exit code it would have given.
+the shell or by EXEC, or as the built-in Windows loads a Win32 program,
+when every piece the fix checks is as the game shipped it; the file on
+the disk doesn't change. A Windows booted from a disk image loads its
+programs itself, so the Win32 fixes don't reach it. Others skip a
+program the game starts, with the exit code it would have given.
 
 | Name | Game | What goes wrong | What the fix does |
 |------|------|-----------------|-------------------|
@@ -1771,6 +1873,7 @@ the game starts, with the exit code it would have given.
 | `lol2-virtual-size` | Lands of Lore: Guardians of Destiny | In Huline's cantina, after Baccata speaks, the game stops with "Memory allocation of 1309694 bytes failed!!" | Patches its launchers, LOLG.EXE and SETUPG.EXE, when LOLG.DAT is beside them, to give DOS/4GW 32 MB of virtual memory instead of 24 MB |
 | `microprose-dswap` | F-117A, F-19, Gunship 2000, Covert Action | DSWAP.EXE wants the original install disk and waits for it | Skips DSWAP.EXE with exit code 1, as if the disk was there |
 | `microprose-player` | The same games | Their PLAYER.EXE, the title and cutscene player, loops forever without the copy protection's data | Skips PLAYER.EXE, when DSWAP.EXE is beside it, with exit code 0 |
+| `td4-intro-camera` | Test Drive 4 (version 1.2 only, on the built-in Windows) | At 60 frames a second the race is seen from just above the car, or at lower rates from too close or too far, for the whole race | Patches 3.EXE as it loads to move the intro's last camera shot by the game's ticks instead of its frames |
 
 The two Titus games share a sound engine that turns each signed sample
 into an unsigned 0 to 63 and scales it by the note's volume without
@@ -1799,20 +1902,41 @@ it needs it. The cantina scene needs more than the 24 MB allow, so
 DOS/4GW refuses the block (DPMI error 8016h) and the game exits. GOG's
 copy does the same in DOSBox, and the game's `-LOWMEM` switch avoids
 it. The fix changes the 24 to 32 in the launcher as it loads, which the
-20 MB swap file the same setting asks for covers with `memsize`'s
-default 16 MB. The fix was made for GOG's copy, version 1.30: LOLG.EXE
-of 2847 bytes, MD5 `1036beaf32bf4d25de4109d4a245d1a0`, and SETUPG.EXE
-of 2262 bytes, MD5 `6f4b513ea0dcd4af601446bfab178b38`.
+20 MB swap file the same setting asks for covers with 16 MB of memory,
+the default up to a Pentium, or more. The fix was made for GOG's copy,
+version 1.30: LOLG.EXE of 2847 bytes, MD5
+`1036beaf32bf4d25de4109d4a245d1a0`, and SETUPG.EXE of 2262 bytes, MD5
+`6f4b513ea0dcd4af601446bfab178b38`.
 
 MicroProse's DSWAP.EXE checks the install disk with sector reads, and
 PLAYER.EXE checks a buffer the copy protection fills. Neither is needed
 for play. PLAYER.EXE is a common name (Millennia's intro player has it
 too), so only the one with DSWAP.EXE beside it is skipped.
 
+Test Drive 4 shows four camera shots of the cars before a race, each
+40 of the game's ticks long (35 a second). The last one starts the
+camera far behind the car and moves it closer by the same step in every
+frame drawn, and the race keeps the camera where the shot left it. The
+shot was made for 35 frames a second, where it ends at the distance of
+the race's chase view. At 60, the rate a Voodoo 2 synchronised to a 60
+Hz display gives on a fast PC, the camera ends just above the car; at
+30 it stops a little farther out, and below that far behind. A real PC
+does the same. The fix moves the step from the frame to the tick, so
+the shot ends at the chase view's distance at any frame rate. It is
+for version 1.2, which the game's patch TD42UP.EXE makes: 3.EXE of
+451072 bytes, SHA-256
+`cce7cb8904a9e9d9976504dbe7989629f766f08dd9f0b0ad24cbcb08c7062601`.
+Without the fix, on version 1.0 or on a Windows image, F4 in the race
+steps through the camera views, each at its own distance; the fifth
+press reaches the chase view. `voodoo_fps_cap=30` ([3dfx frame rate
+cap](#3dfx-frame-rate-cap)) holds the intro to 30 frames a second, where
+the shot ends a little behind the chase view's distance.
+
 To add a fix: an entry in `FIXES` in `src/game_fixes.rs` with a name of its
 own, the game, the reason, and how to recognise it; a test that runs it
-(`tests/program/game_fixes_tests.rs`, or `tests/dos/exec_tests.rs` for a
-program skipped as it starts); and a row in the table above.
+(`tests/program/game_fixes_tests.rs`, `tests/dos/exec_tests.rs` for a
+program skipped as it starts, or `tests/win32/win32_tests.rs` for a Win32
+program); and a row in the table above.
 
 ## RetroAchievements
 
@@ -2011,30 +2135,36 @@ Q at the head (where audio plays, or else the last sector read or sought)
 and the disc's catalog number. A BlindWrite or Alcohol 120% image read with
 subchannel (2448-byte sectors) keeps what the disc had, deliberately bad Q
 included, and so does a subchannel file beside a CUE sheet, CloneCD
-descriptor or bare image: a file named as the sheet or one of its data
-files, with the extension `.sub` (CloneCD's and DiscImageCreator's, each
-channel's 12 bytes after the one before, from sector 0) or `.subcode`
-(redumper's, raw and interleaved, from the lead-in on), 96 bytes a sector.
-Which of the two layouts a file has, and where it starts, is found from the
-Q positions in it, whatever its extension; a file whose size isn't whole
-sectors, or whose Qs agree on neither layout, is left alone, and the next
-one named so is looked for. A dump made with redumper or DiscImageCreator
-writes its subchannel to such a file: keep it beside the CUE sheet, under
-the sheet's name. A CUE sheet with only its BIN files has no subchannel of
-the disc's own. For other images and sectors the drive makes P and Q from
-the disc's layout, with R-W empty. A Q whose CRC is bad reads back as it is
-through READ CD, and READ SUB-CHANNEL reports the layout's position in its
-place, as a drive keeps the last good one. MSCDEX's Q channel reports the
-same position. The catalog number and the tracks' copy and pre-emphasis
-flags come from a BlindWrite descriptor, a CloneCD descriptor's CATALOG and
-control bits, or from a CUE sheet's CATALOG and FLAGS, and both the IDE
-drive and MSCDEX report them; the flags also come from an Alcohol 120%
-descriptor. The data position measurement (DPM) that BlindWrite keeps in its
-descriptor or a `.bwa` file, and Alcohol 120% in its descriptor, says where
-the pressed disc had its sectors, and the drive takes the time to reach them
-there when it times a read. Reads on the IDE drive, and ASPI requests with
-an event on the built-in Windows, take the time a 40x drive takes to move
-its head, wait for the sector to come round and read it
+descriptor, Alcohol 120% descriptor or bare image: a file in the same
+folder, named as the sheet, the descriptor or one of its data files, with
+the extension `.sub` (CloneCD's and DiscImageCreator's, each channel's 12
+bytes after the one before, from sector 0) or `.subcode` (redumper's, raw
+and interleaved, from the lead-in on), 96 bytes a sector. Which of the two
+layouts a file has, and where it starts, is found from the Q positions in
+it, whatever its extension. A file whose size isn't whole sectors, or whose
+Qs don't put the disc's sectors where its tracks have them, is left alone,
+and the next one named so is looked for. A file that stops before the disc
+ends, or starts after sector 0, gives the sectors it has, and the others get
+P and Q made from the layout. Where an Alcohol 120% image keeps subchannel
+of its own, that is read, and the file only for the sectors it keeps none
+of. The log file says which file is read, or why one found isn't. A dump
+made with redumper or DiscImageCreator writes its subchannel to such a file:
+keep it beside the CUE sheet, under the sheet's name, or beside
+disc-archiver's `.mds`, under its name. A CUE sheet with only its BIN files
+has no subchannel of the disc's own. For other images and sectors the drive
+makes P and Q from the disc's layout, with R-W empty. A Q whose CRC is bad
+reads back as it is through READ CD, and READ SUB-CHANNEL reports the
+layout's position in its place, as a drive keeps the last good one. MSCDEX's
+Q channel reports the same position. The catalog number and the tracks' copy
+and pre-emphasis flags come from a BlindWrite descriptor, a CloneCD
+descriptor's CATALOG and control bits, or from a CUE sheet's CATALOG and
+FLAGS, and both the IDE drive and MSCDEX report them; the flags also come
+from an Alcohol 120% descriptor. The data position measurement (DPM) that
+BlindWrite keeps in its descriptor or a `.bwa` file, and Alcohol 120% in its
+descriptor, says where the pressed disc had its sectors, and the drive takes
+the time to reach them there when it times a read. Reads on the IDE drive,
+and ASPI requests with an event on the built-in Windows, take the time a 40x
+drive takes to move its head, wait for the sector to come round and read it
 ([#630](https://github.com/dividebysandwich/rust-dos/pull/630)); without DPM
 data the sectors lie on a pressed disc's usual spiral. Copy protections such
 as SecuROM 4.8 time reads to check where sectors are.
@@ -2722,19 +2852,6 @@ folders under `Program Files`). The copy runs at every start and
 overwrites the one the last start made, so the setup needs nothing else,
 and the image under it can stay the base of other games' setups.
 
-### 3dfx frame rate cap
-
-`voodoo_fps_cap` caps the frames a second games show on the card, for an
-even pace without lowering `cycles`: a swap waits for the first multiple
-of the cap's frame time (1/30 s at 30) at least a frame after the last
-one, and the program waits with it, as at a HLT, while interrupts and
-their handlers go on, so its clock, music and sound keep time. A frame
-that comes later than its turn waits for the next one, so pick a rate the
-game keeps up everywhere. With `vrr=true`, while the card shows its
-picture and the cap is below its 60 Hz, the window refreshes at the cap's
-frame times. It doesn't apply to VGA games, whose frames come at the
-display's retraces they wait for.
-
 ### 3dfx gamma
 
 `voodoo_gamma` sets Glide's gamma through the environment variables
@@ -2849,16 +2966,24 @@ barrier (OpenGL 4.5, `GL_ARB_texture_barrier` or
 `GL_NV_texture_barrier`) the shader reads them from the buffer it draws
 into, behind a barrier. Otherwise, and with `voodoo_msaa`, they are
 copied out of the buffer before the triangle is drawn, and the shader
-reads them from the copy, which with `voodoo_msaa` holds each pixel's
-samples averaged. At `voodoo_scale=1` such a triangle comes out as the
-software rasterizer draws it too. Triangles of one draw that overlap go
-after a barrier or over a copy each, so each blends with what the one
-before drew. The texture units' dithered level of detail
-(textureMode bit 4) follows the setting as well. Frame buffer writes and
-the Voodoo2's blitter show what the card's memory holds, dithered or not,
-whatever the setting. The Voodoo2's and Voodoo3's video output filter,
-which partly smooths the pattern on the card's own output, isn't
-modelled: with the setting on, the pattern shows as the card writes it.
+reads them from the copy. With `voodoo_msaa` the copy keeps every
+sample, and the triangle is drawn once for each sample, which blends
+with what that sample holds, so two blended triangles that share an
+edge each blend with their own samples along it. That needs
+`GL_ARB_sample_shading` and multisample textures with as many samples
+as `voodoo_msaa`; without them each sample blends with its pixel's
+samples averaged, which leaves a dark line along such edges, and
+stderr says `blending pixels, not samples`. Drawing a blended triangle
+once a sample takes more of the GPU's time the more samples there are.
+At `voodoo_scale=1` such a triangle comes out as the software
+rasterizer draws it too. Triangles of one draw that overlap go after a
+barrier or over a copy each, so each blends with what the one before
+drew. The texture units' dithered level of detail (textureMode bit 4)
+follows the setting as well. Frame buffer writes and the Voodoo2's
+blitter show what the card's memory holds, dithered or not, whatever
+the setting. The Voodoo2's and Voodoo3's video output filter, which
+partly smooths the pattern on the card's own output, isn't modelled:
+with the setting on, the pattern shows as the card writes it.
 
 The dithering costs a few more instructions a pixel in the shader, and
 nothing on the host's CPU. On an Intel UHD Graphics 770 at the default
@@ -2888,7 +3013,6 @@ with 16 MB, and `machine=svga_banshee` a Voodoo Banshee:
 [emulator]
 machine=svga_voodoo3
 cpu=pentium_iii
-memsize=128
 ```
 
 The Voodoo Graphics and the Voodoo2 are add-on cards next to the display
@@ -3122,6 +3246,80 @@ a switch from the 3D RAGE, as it would after changing the card.
 
 `RUST_DOS_MACH64_TRACE=<dir>` writes every register access and BIOS
 call to `<dir>/trace.txt`.
+
+## ToadForce
+
+`machine=svga_toadforce` makes the display adapter a ToadForce, a card
+Rust-DOS defines itself: no such hardware existed. To DOS programs it is
+the `svga` adapter, with the same VESA modes. Windows programs that
+Rust-DOS runs without Windows get its video memory (`toadforce_memory`,
+64 MB by default) for the desktop and for DirectDraw's surfaces, and
+DirectDraw modes up to 1600x1200 at 8, 16 and 32 bits a pixel;
+DirectDraw's colour fills and its copies between surfaces in video
+memory are the card's own commands. Direct3D up to version 8 draws on
+it, in 16- and 32-bit modes, with textures up to 2048 pixels a side in
+16- and 32-bit, compressed (DXT1 to DXT5) and bump-map formats, four
+textures at once, cube maps, and a 24-bit depth buffer with stencil. The
+card transforms and lights vertices itself: Direct3D 7 lists its T&L HAL
+device, and Direct3D 8 offers hardware vertex processing. Games that
+need those, which a Voodoo3 lacks, run on this card
+([docs/compatibility.md](docs/compatibility.md) names them). OpenGL 1.1
+draws on it too, in a window or full screen, in the desktop's 16 or 32
+bits of color with a 16-bit depth buffer. Your graphics card draws its
+3D through OpenGL where the window has OpenGL 3.2, and the processor
+draws it elsewhere.
+
+What the card doesn't do, and what to choose instead:
+
+* Games that need pixel shaders: the card has none, and neither has
+  any other `machine`. Vertex shaders run on the processor, for a game
+  that asks Direct3D 8 for software or mixed vertex processing.
+* OpenGL games that need more than the built-in OpenGL 1.1 has: a
+  stencil buffer, more than two textures at once, compressed textures
+  or cube maps. Where the game also has a Direct3D renderer, pick that
+  in its options.
+* Glide games: `voodoo=true`, or `machine=svga_voodoo3` or
+  `svga_banshee` ([3dfx Voodoo Graphics](#3dfx-voodoo-graphics)).
+* Games on a Windows 95 or 98 disk image. No booted system has a driver
+  for the card, and Windows uses it as a plain VGA there: give the
+  image a card it has a driver for, such as `svga_voodoo3`
+  ([docs/win9x-howto.md](docs/win9x-howto.md)).
+* A game's brightness or gamma slider: the card has no gamma ramp, and
+  the picture stays as it is.
+* Sharper pictures than the game's own: the card draws at the
+  resolution the game sets, without anti-aliasing. Set a higher
+  resolution in the game.
+
+```ini
+[emulator]
+machine=svga_toadforce
+```
+
+The machine has 128 MB of memory with this card unless `memsize` says
+otherwise, which is what the games it is for recommend. The `cpu` stays
+the default 486 unless it is set; most of those games want
+`cpu=pentium_iii`.
+
+| Setting | Values | What it does |
+|---|---|---|
+| `toadforce_memory` | 32, 64 (default), 128 | The megabytes of video memory the card has |
+| `toadforce_renderer` | `auto` (default), `opengl`, `software` | What draws the card's 3D: your graphics card through OpenGL, or Rust-DOS on the processor |
+
+A change of `toadforce_memory` takes effect at the DOS prompt, and one
+of `toadforce_renderer` at once. The card's registers and commands are
+specified in [docs/toadforce-spec.md](docs/toadforce-spec.md).
+
+With `auto` and `opengl`, OpenGL draws the triangles and the card's
+memory gets the pixels when the program or the screen reads them. The
+pictures are those of `software` to within a step or two of a color
+channel where textures are filtered or a 16-bit screen is blended.
+`software` draws every pixel on the processor, the same on every
+computer: use it when a picture looks wrong with OpenGL, and report
+the game. The two differ only where OpenGL isn't there: `auto` then
+draws on the processor without a word, and `opengl` says so in the
+log first. A run with `--deterministic` draws on the processor whatever
+the setting. Drawing on the processor is too slow for some games at
+their usual resolutions: choose a lower one in the game there.
 
 ## PowerVR PCX1 and PCX2
 
@@ -3550,6 +3748,148 @@ each other's frames, as cards on one Ethernet would.
 rust-dos's LAN is its own protocol: it doesn't reach DOSBox's IPX servers,
 and `IPXNET` lines in imported DOSBox configurations are left out.
 
+## Frame rate cap
+
+`fps_cap` (`auto` by default, `off`, or 10 to 240) is the most frames
+a second a program may show, whichever card shows them, for an even
+pace without lowering `cycles`, and so the host doesn't draw frames
+nobody sees. Some games misbehave above 60 (Test Drive 4).
+`voodoo_fps_cap` is its old name: a file with that line still sets it,
+and the settings window writes the line back as `fps_cap`. `--fps-cap`
+sets it for one run, the settings window has it on its Display page,
+and the libretro core among its Video options.
+
+- `auto` holds a frame that doesn't wait for the display's retrace to
+  60 a second, and holds none that does: those show at the display's
+  rate, as on the real machine. A program that waits for the retrace
+  of a 72, 75 or 85 Hz mode shows a frame at each, and one that counts
+  its frames for its timing keeps its speed. A program synced to a 100
+  or 120 Hz mode shows 100 or 120 frames a second, and the host draws
+  each of them. A DOS Glide game can set such a mode, and so can a
+  game under a Windows booted from a disk image with the card's own
+  driver; the built-in Windows' Glide opens the display at 60 Hz
+  whatever rate a game asks for.
+- A number holds every frame to that rate, also one that waits for the
+  retrace of a faster display: on a host too slow for a game's 100 or
+  120 Hz mode, `fps_cap=60` holds it to 60.
+- `off` holds none.
+
+A cap below the rate a game draws at by itself slows a game whose
+logic is tied to its frames: Glover's logo screens, drawn at 20 frames
+a second, last longer under `fps_cap=10`.
+
+Each frame has a turn, a frame time (1/60 s at 60) after the last
+one's, in emulated time:
+
+- A program faster than the cap waits for the turn, so its frames come
+  at the cap's rate, a frame time apart.
+- A program slower than the cap shows each frame as soon as it is
+  done, and keeps its own rate. The cap holds none of its frames,
+  uneven as they may be.
+- A frame that comes after its turn shows at once. If it is no more
+  than three frame times late (50 ms at 60), the turns keep their
+  schedule: the frames after it show sooner than a frame time apart
+  until they are back on it. The program gets the time back and shows
+  the cap's rate, and a game whose logic steps once a frame keeps its
+  speed.
+- From a frame later than that (a load, a menu that steps its
+  simulation for a tenth of a second between frames) the schedule
+  starts again: the next frame shows as soon as it is done, and the
+  ones after it wait a frame time each. A game that draws in bursts
+  between such steps therefore counts fewer frames under a cap than
+  the cap's number. Grom's menu at 150,000 cycles spends 114 to 190 ms
+  on each step of its simulation and draws frames 3 ms apart between
+  them, 71 a second without a cap, of which a 60 Hz display shows
+  about 20. Under a cap of 60 the frames of a burst after the first
+  two wait a frame time each, and the next step comes due sooner, so
+  it shows 25 a second, more than a game synced to a 60 Hz display
+  shows. That is the rate of a simulation that runs on the clock,
+  which keeps its speed under the cap; with more cycles the menu shows
+  60.
+- A present that waits for the display's retrace (a flip, or a swap
+  with a swap interval) is already held to the display's rate. Under
+  `auto`, or with the cap at that rate or above it, the cap holds none
+  of its frames. With a number below it, the frame waits for its turn
+  and then for a retrace, and shows at the retrace nearest its turn,
+  which may be up to half a retrace before it, and counts at its turn:
+  a cap of 30 on a 60 Hz display shows every other retrace, though the
+  display's rate is never exactly 60.
+
+The cap counts in the machine's emulated time only: its turns, the time
+a frame comes and the time a held frame waits for. While a frame waits,
+emulated time runs on as it does for any wait, and with nothing else to
+run the machine idles to the turn. How fast the host runs the machine
+changes only how long that takes on the wall clock. So a run with
+`--deterministic` holds the same frames until the same emulated times
+each time, and a fixed `cycles` that runs slower than real time holds
+no frame that is late in emulated time.
+
+While a frame waits, the program waits with it, and nothing else does:
+
+- On a 3dfx card, the swap waits, and the program waits with it as at a
+  HLT, while interrupts and their handlers go on, so its clock, music
+  and sound keep time.
+- Under the built-in Windows, the thread that presents blocks as it
+  does for a retrace and calls again at its turn; the program's other
+  threads, its timers and its sound go on.
+
+What counts as a frame:
+
+- the 3dfx card's swaps (Glide under DOS and under the built-in
+  Windows, the Voodoo2's OpenGL and DirectDraw, and a Banshee's or
+  Voodoo3's);
+- DirectDraw's flips of the primary surface, and Direct3D 8's full
+  screen `Present`, which flips, on every display adapter (a ToadForce,
+  a Banshee or Voodoo3, the software SVGA);
+- `SwapBuffers` of an OpenGL context in a window, and of a
+  double-buffered one full screen, and Direct3D 8's `Present` in a
+  window, which copy the back buffer to the screen (on a ToadForce,
+  with the card's own copy).
+
+It doesn't apply to DOS programs on a VGA, an EGA or a VESA screen:
+they have no call that hands over a frame, and their frames come at the
+display's retraces, which they wait for themselves. Nor does it apply
+to blits to the primary surface, to GDI drawing, to locks and device
+contexts of the primary surface, or to a single-buffered OpenGL
+context's `glFlush`. A program may blit one frame in many parts (a
+sprite and what it covered, each changed rectangle), and the time
+between blits can't tell those parts from whole frames: holding each to
+the cap's rate would hold a game that blits ten parts a frame to 6
+frames a second.
+
+With `vrr=true`, while a program shows its frames through the cap (one
+in the last second) and the cap is below the display's rate, the window
+refreshes at the cap's rate, as it does at the display's otherwise.
+
+The debug server's `/api/stats` counts what the cap did since the
+machine started, in `fps_cap`:
+
+- `shown`: the frames that went through the cap. A present the cap
+  leaves to the display's retrace isn't among them.
+- `held`: those that waited for their turn.
+- `late`: those that came after it.
+- `reanchors`: those late enough for the schedule to start again.
+- `dropped_ms`: the time held frames waited because the schedule had
+  started again, which they wouldn't have waited on the turns before.
+
+A game whose logic is tied to its frames ran slow for the cap by at
+most `dropped_ms` out of the emulated time. Near zero, the cap cost it
+no time. If it grows by seconds a minute in a game that plays slow,
+raise the cap or turn it off. The settings window's Stats page shows
+the same counters a second (with `dropped_ms` as the share of the time
+lost) while a program shows its frames through the cap, and the
+performance overlay (Ctrl+Shift+F12) the frames held and the time lost
+under its graphs.
+
+Benchmarks and timedemos report at most the cap: turn it off
+(`fps_cap=off`, `--fps-cap off`) to measure how fast a game can draw.
+A display faster than 60 Hz with `vrr` shows more frames with a higher
+cap. `/api/status` has the cap in force as `video.fps_cap` (`"auto"`,
+a rate, or null for off), for a script to check before it quotes a
+frame rate, and the debug server's `POST /api/fps_cap` changes it for
+the rest of a run. The almanac may set the cap for a game, as it sets
+the machine's settings (`almanac_auto`), to `auto`, a rate or `off`.
+
 ## CRT shaders
 
 `shader` in `[emulator]`, or the settings window's Display page, shows the
@@ -3839,6 +4179,7 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `--no-boot` | Start at the DOS prompt, without booting the disk image marked `-boot` in `[drives]` |
 | `-s, --scale N` | The window scale factor, 1 to 16 |
 | `--vrr` | Show frames at the machine's refresh rate, for a VRR display (`vrr`) |
+| `--fps-cap FPS` | The most frames a second a program may show, `auto`, `off` or 10 to 240 (`fps_cap`, see [Frame rate cap](#frame-rate-cap)) |
 | `--hidden` | Keep the window hidden; the picture is still drawn with OpenGL, `voodoo_renderer=opengl` included, for runs driven through the debug server (on a host without OpenGL 3, SDL's renderer and the software rasterizer draw it, as with a visible window) |
 | `--audio-output OUTPUT` | What plays the sound: `auto`, `sdl` or `null` (`audio_output` in [`[mixer]`](#mixer)) |
 | `--mute` | Start with the sound off, as Ctrl+F8 does: the sound device plays silence, and the debug server's stream and recordings keep the sound |

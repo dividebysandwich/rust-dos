@@ -7,6 +7,7 @@ use crate::config::{AspectRatio, MidiSynth, Settings};
 use crate::cpu::{CoreMode, CpuModel};
 use crate::disk::{DriveInfo, DriveKind};
 use crate::diskio::{DiskSpeed, NoiseMode};
+use crate::frame_cap::Cap;
 use crate::joystick::{JoystickType, MAX_DEADZONE};
 use crate::mixer::{ChorusPreset, DEFAULT_MIX, MAX_LEVEL, MAX_MIX, ReverbPreset};
 use crate::mount::expand_host_path;
@@ -25,11 +26,28 @@ pub(super) fn cycle<T: PartialEq + Clone>(values: &[T], current: &T, dir: isize)
     values[(at + dir).rem_euclid(values.len() as isize) as usize].clone()
 }
 
-/// `s` with each of `values` put in by `set`, in turn.
-/// The 3dfx frame rate caps to pick from: none, and the rates games ran
-/// at and that divide common refresh rates evenly.
-const FPS_CAPS: [Option<u32>; 13] =
-    [None, Some(20), Some(24), Some(25), Some(30), Some(35), Some(40), Some(45), Some(48), Some(50), Some(60), Some(72), Some(120)];
+/// The frame rate caps to pick from: auto, none, the rates games ran at
+/// and that divide common refresh rates evenly, and the rates of faster
+/// displays.
+const FPS_CAPS: [Cap; 17] = [
+    Cap::Auto,
+    Cap::Off,
+    Cap::Fps(20),
+    Cap::Fps(24),
+    Cap::Fps(25),
+    Cap::Fps(30),
+    Cap::Fps(35),
+    Cap::Fps(40),
+    Cap::Fps(45),
+    Cap::Fps(48),
+    Cap::Fps(50),
+    Cap::Fps(60),
+    Cap::Fps(72),
+    Cap::Fps(75),
+    Cap::Fps(120),
+    Cap::Fps(144),
+    Cap::Fps(240),
+];
 
 /// The 3dfx gammas to pick from: none, then 0.1 to 2.0 in steps of 0.1.
 fn gammas() -> impl Iterator<Item = Option<f32>> {
@@ -43,6 +61,7 @@ pub(super) fn describe_blocksize(frames: u16) -> String {
     format!("{} frames ({:.1} ms{})", frames, ms, default)
 }
 
+/// `s` with each of `values` put in by `set`, in turn.
 fn each<T>(s: &Settings, values: impl IntoIterator<Item = T>, set: impl Fn(&mut Settings, T)) -> Vec<Settings> {
     values
         .into_iter()
@@ -87,11 +106,16 @@ fn memsizes(cpu: CpuModel) -> impl DoubleEndedIterator<Item = usize> + Clone {
     MEMSIZES.into_iter().filter(move |&mb| mb <= cpu.max_memsize())
 }
 
-/// The memory's slider: a square for every step above the least.
-pub(super) fn memsize_bar(mb: usize, cpu: CpuModel) -> String {
-    let steps = memsizes(cpu);
+/// The memory's slider: a square for every step above the least, and
+/// "(auto)" while `memsize` isn't set and the size is the default for
+/// the CPU and the display adapter.
+pub(super) fn memsize_bar(s: &Settings) -> String {
+    let (mb, steps) = (s.memory_mb(), memsizes(s.cpu));
     let (full, cells) = (steps.clone().filter(|&m| m <= mb).count().saturating_sub(1), steps.count() - 1);
-    format!("{:>3} MB {}{}", mb, "■".repeat(full), "·".repeat(cells - full))
+    // Short enough for the row with the 15 squares of a CPU that takes
+    // 512 MB: a longer value is shortened in the middle of the squares.
+    let default = if s.memsize.is_none() { " (auto)" } else { "" };
+    format!("{:>3} MB {}{}{}", mb, "■".repeat(full), "·".repeat(cells - full), default)
 }
 
 /// A value of up to `max` as `text` and a bar of small squares, one for
@@ -196,6 +220,7 @@ impl Item {
             Fullscreen => on_off(|s, on| s.fullscreen = on),
             Aspect => each(s, AspectRatio::ALL, |s, aspect| s.aspect = aspect),
             Vrr => on_off(|s, on| s.vrr = on),
+            FpsCap => each(s, FPS_CAPS, |s, fps| s.fps_cap = fps),
             VrMode => each(s, crate::vr::VrMode::ALL, |s, mode| s.vr.mode = mode),
             VrControllers => each(s, crate::vr::VrControllers::ALL, |s, c| s.vr.controllers = c),
             VrSpatialAudio => on_off(|s, on| s.vr.spatial_audio = on),
@@ -231,7 +256,7 @@ impl Item {
             Fpu => on_off(|s, on| s.fpu_fast = on),
             Cpu => each(s, CpuModel::ALL, |s, cpu| {
                 s.cpu = cpu;
-                s.memsize = s.memsize.min(cpu.max_memsize());
+                s.memsize = s.memsize.map(|mb| mb.min(cpu.max_memsize()));
             }),
             Machine => each(s, crate::video::adapter::Adapter::ALL, |s, machine| s.machine = machine),
             Voodoo => on_off(|s, on| s.voodoo.enabled = on),
@@ -252,7 +277,6 @@ impl Item {
             VoodooDither => on_off(|s, on| s.voodoo.dither = on),
             VoodooMsaa => each(s, [1, 2, 4, 8], |s, samples| s.voodoo.msaa = samples),
             VoodooAnisotropy => each(s, [1, 2, 4, 8, 16], |s, n| s.voodoo.anisotropy = n),
-            VoodooFpsCap => each(s, FPS_CAPS, |s, fps| s.voodoo.fps_cap = fps),
             VoodooGamma => each(s, gammas(), |s, gamma| s.voodoo.gamma = gamma),
             PowerVr => {
                 use crate::powervr::Chip;
@@ -264,6 +288,13 @@ impl Item {
             }
             VeriteMhz => each(s, [25, 50, 100, 200], |s, mhz| s.verite.mhz = mhz),
             VeriteIrq => each(s, crate::verite::IRQS, |s, irq| s.verite.irq = irq),
+            ToadForceMemory => {
+                let sizes = crate::toadforce::regs::MEMORY_SIZES.map(|bytes| bytes >> 20);
+                each(s, sizes, |s, megabytes| s.toadforce_memory = megabytes)
+            }
+            ToadForceRenderer => each(s, crate::toadforce::Renderer::ALL, |s, renderer| {
+                s.toadforce_renderer = renderer
+            }),
             PowerVrFilter => {
                 use crate::powervr::tsp::Filter;
                 each(s, [Filter::Auto, Filter::Point, Filter::Bilinear], |s, filter| s.powervr_filter = filter)
@@ -480,7 +511,7 @@ impl Item {
             }
             Memsize => {
                 let steps: Vec<usize> = memsizes(s.cpu).collect();
-                s.memsize = step_number(&steps, s.memsize, dir);
+                s.memsize = Some(step_number(&steps, s.memory_mb(), dir));
             }
             Volume(channel) => s.mixer.set_level(channel, step_units(s.mixer.level(channel), dir, 10, MAX_LEVEL)),
             ReverbMix => s.mixer.reverb_mix = step_units(s.mixer.reverb_mix, dir, 10, MAX_MIX),
@@ -527,7 +558,7 @@ impl Item {
             Item::UltraDir => s.sound.gus.ultradir.clone().unwrap_or_default(),
             Item::Volume(channel) => s.mixer.level(channel).to_string(),
             Item::CaptureDir => s.capture_dir.display().to_string(),
-            Item::Memsize => s.memsize.to_string(),
+            Item::Memsize => s.memory_mb().to_string(),
             Item::Deadzone => s.joystick.deadzone.to_string(),
             Item::MouseSensitivity => s.mouse_sensitivity.to_string(),
             Item::CrtCurvature => s.crt.curvature.to_string(),
@@ -568,7 +599,7 @@ impl Item {
                 if mb > s.cpu.max_memsize() {
                     return Err(format!("A {} takes up to {} MB", s.cpu.describe(), s.cpu.max_memsize()));
                 }
-                s.memsize = mb;
+                s.memsize = Some(mb);
             }
             Item::Deadzone => s.joystick.deadzone = crate::joystick::parse_deadzone(text)?,
             Item::MouseSensitivity => s.mouse_sensitivity = crate::config::parse_mouse_sensitivity(text)?,
@@ -619,10 +650,8 @@ impl Item {
                 s.mixer.set_level(channel, 100);
                 changed
             }
-            Item::Memsize => {
-                let default = Settings::default().memsize.min(s.cpu.max_memsize());
-                std::mem::replace(&mut s.memsize, default) != default
-            }
+            // Not set: the default for the CPU and the display adapter.
+            Item::Memsize => s.memsize.take().is_some(),
             Item::Deadzone => {
                 let default = crate::joystick::JoystickSettings::default().deadzone;
                 std::mem::replace(&mut s.joystick.deadzone, default) != default

@@ -329,8 +329,8 @@ impl Chip {
     pub(crate) fn reset(&mut self, sample_rate: u32) {
         *self = Self::default();
 
-        for slotnum in 0..36 {
-            self.slots[slotnum] = Slot {
+        for (slotnum, slot) in self.slots.iter_mut().enumerate() {
+            *slot = Slot {
                 eg_rout: 0x1ff,
                 eg_out: 0x1ff,
                 eg_gen: ENV_RELEASE,
@@ -1107,8 +1107,8 @@ impl Chip {
                 self.channels[8].slotz[1] * 2,
                 self.channels[8].slotz[1] * 2,
             ];
-            for channel in 6..9 {
-                self.channels[channel].chtype = CH_DRUM;
+            for channel in &mut self.channels[6..9] {
+                channel.chtype = CH_DRUM;
             }
             for channel in 6..9 {
                 self.channel_setup_alg(channel);

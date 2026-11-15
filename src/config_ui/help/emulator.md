@@ -200,17 +200,6 @@ nearest-neighbour magnification.
 Works with both **Rust-DOS** and **OpenGL** and takes effect immediately.
 Mip levels, texture wrapping and clamping still follow the game.
 
-# 3dfx frame rate cap {#voodoo-fps-cap}
-
-The most frames a second a game may show on the 3dfx card. A game that
-could draw faster waits for each frame's turn, so its frames come at an
-even pace: smoother than slowing the whole PC down with the CPU speed.
-Interrupts, sound and the game's clock go on while it waits.
-
-Pick a rate the game reaches everywhere: a frame that comes late waits
-for the next turn. **30** or **60** suit a 60 Hz display; with
-*Variable refresh rate* on, the window refreshes at the cap.
-
 # 3dfx gamma {#voodoo-gamma}
 
 The gamma Glide gives the game's 3dfx picture, as the environment
@@ -286,10 +275,33 @@ Enter picks the file, Del goes back to the built-in loader.
 The interrupt line of the Vérité. **10** suits most games. Battle Race
 needs one below 8 (**5** or **7**).
 
+# ToadForce memory {#toadforce-memory}
+
+The video memory of the ToadForce, the card Rust-DOS defines for the
+Windows programs it runs without Windows. **64 MB** holds the screen and
+the surfaces of any game of the time. **128 MB** leaves more room at the
+largest modes; **32 MB** is what the cards of 1999 had.
+
+# ToadForce drawn by {#toadforce-renderer}
+
+What draws the ToadForce's 3D:
+
+- **Automatic**: your graphics card, through OpenGL, where the window
+  has it, and Rust-DOS itself elsewhere.
+- **OpenGL**: your graphics card. Faster in most games.
+- **Rust-DOS**: the processor, with the card's exact pixels.
+
 # Memory {#memsize}
 
 The PC's RAM. **16 MB** runs nearly every DOS game. Windows 95 and a few
-late games want **32** or **64 MB**.
+late games want **32** or **64 MB**, and Windows games from 1998 on **64**
+or **128 MB**.
+
+While it says **(auto)**, the memory follows the processor and the
+display adapter: **16 MB** up to a Pentium, **32 MB** with a Pentium MMX,
+K6-2 or Pentium Pro, **64 MB** with a Pentium II, and **128 MB** with a
+Pentium III or with a ToadForce. A size you set stays whatever they are;
+**Delete** goes back to the default.
 
 How much there can be depends on the processor, as with the motherboards
 of its day: up to **64 MB** with a 386, **128 MB** with a 486, **256 MB**
@@ -554,8 +566,15 @@ moderator blessed, or else the ones most reports chose. **F2** saves
 them, into the game's profile while one plays.
 
 *Report settings to Almanac* sends the settings as they are now, with
-how the game played: pick the rating with the arrow keys, then press
-**Enter** on the game. A game the almanac doesn't have yet is added by
-the name typed. The program's name and checksums go with the report, so
-others with the same version find it. Report as often as you like, with
-other settings or after a new version of Rust-DOS.
+how the game played: pick the rating with the arrow keys, fill in the
+game's year, publisher and your notes if you like, then press **Enter**
+on the game. A game the almanac doesn't have yet is added by the name
+typed. The program's name and checksums go with the report, so others
+with the same version find it. The year and publisher fill in what the
+almanac doesn't know of the game, and the notes show with your report.
+
+While a game launched from its profile plays, the year, publisher and
+notes come from the profile and are kept in it, and the profile's UUID
+goes with the report: reporting the game again replaces your report
+on it instead of adding another, so it can follow your settings as
+they change. Without a profile, each report is a new one.

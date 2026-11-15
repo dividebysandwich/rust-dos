@@ -101,12 +101,15 @@ impl Bus {
             virge: Default::default(),
             verite: Default::default(),
             mach64: Default::default(),
+            toadforce: None,
+            toadforce_memory: crate::toadforce::regs::DEFAULT_MEMORY,
             attribute_reset: Default::default(),
             pci: crate::pci::Pci::default(),
             voodoo: None,
             powervr: None,
             powervr_line: None,
             hold: None,
+            frame_cap: Default::default(),
             notices: Vec::new(),
             glide_hint: None,
             ide: [None, None],
@@ -154,6 +157,7 @@ impl Bus {
             page_gen: vec![0; ram_len >> GEN_SHIFT],
             observe: crate::idle::Observe::default(),
             code_blocks: vec![0; ram_len >> GEN_SHIFT],
+            memory_derived: false,
             log_hook: None,
             log_backlog: None,
             audio_hook: None,
@@ -242,6 +246,7 @@ impl Bus {
         self.fill_ram(0..0x500, 0);
         self.pic = crate::pic::Pic::new();
         self.reset_voodoo();
+        self.reset_toadforce();
         self.reset_powervr();
         self.detach_ide();
         self.detach_fdc();

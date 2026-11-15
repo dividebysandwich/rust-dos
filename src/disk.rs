@@ -201,6 +201,50 @@ pub(crate) fn new_entry_name(name: &str) -> String {
     }
 }
 
+/// Whether a host folder's entry `name` is the host's or Rust-DOS's own
+/// and no file of the drive: an overlay's list of deleted names, a file
+/// still being copied in, and what macOS and Linux desktops leave in the
+/// folders they show and on the disks they mount. Programs don't see
+/// these, in a listing or by name. Any other name that starts with a dot
+/// is a file like the rest, as on Windows 95, where ".256" is a long name
+/// with the short name 256~1: Myth keeps its 256-color collections in a
+/// folder of that name, and its 1.3 patch copies one.
+///
+/// Case doesn't count: on a host that folds case, ".RUST-DOS-DELETED"
+/// is the overlay's file, so a program that could create it would
+/// replace the list. Every file Rust-DOS keeps in a host folder has a
+/// name that starts with ".rust-dos" (`overlay::DELETED`) or ends with
+/// `shared_disk::PARTIAL`.
+pub(crate) fn host_private(name: &str) -> bool {
+    let starts = |prefix: &str| {
+        name.get(..prefix.len())
+            .is_some_and(|s| s.eq_ignore_ascii_case(prefix))
+    };
+    let ends = |suffix: &str| {
+        let at = name.len().wrapping_sub(suffix.len());
+        name.get(at..)
+            .is_some_and(|s| s.eq_ignore_ascii_case(suffix))
+    };
+    const DESKTOP: [&str; 11] = [
+        ".DS_Store",
+        ".localized",
+        ".Spotlight-V100",
+        ".Trashes",
+        ".fseventsd",
+        ".TemporaryItems",
+        ".DocumentRevisions-V100",
+        ".VolumeIcon.icns",
+        ".apdisk",
+        ".com.apple.timemachine.donotpresent",
+        ".directory",
+    ];
+    starts(".rust-dos")
+        || (name.starts_with('.') && ends(crate::shared_disk::PARTIAL))
+        || starts("._")
+        || starts(".Trash-")
+        || DESKTOP.iter().any(|d| d.eq_ignore_ascii_case(name))
+}
+
 /// The DOS names of the entries of a directory, given in the order that
 /// numbers them, as DOSBox and Windows make them: names that are 8.3
 /// already are only uppercased; the others lose their spaces and other
@@ -220,12 +264,20 @@ pub fn short_names<S: AsRef<str>>(names: &[S]) -> Vec<String> {
             long.push(i);
         }
     }
+    // Names that start with a dot are numbered last: host drives showed
+    // none of them before, and the names the others had stay theirs.
+    // Windows numbers by when each file was made, which a host folder
+    // doesn't keep.
+    long.sort_by_key(|&i| names[i].as_ref().starts_with('.'));
     let mut counters: HashMap<String, u32> = HashMap::new();
     for i in long {
+        // Windows drops the dots a name starts with: "..foo" is FOO~1,
+        // ".a.b" A~1.B.
         let upper = names[i].as_ref().to_ascii_uppercase();
+        let upper = upper.trim_start_matches('.');
         let (stem, ext) = match upper.rsplit_once('.') {
             Some((stem, ext)) if !stem.is_empty() => (stem, ext),
-            _ => (upper.as_str(), ""),
+            _ => (upper, ""),
         };
         let mut stem: String = stem.chars().filter(|&c| dos_name_char(c)).collect();
         if stem.is_empty() {

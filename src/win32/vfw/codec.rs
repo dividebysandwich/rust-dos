@@ -9,8 +9,8 @@
 //! is empty, as one after a restore is, and its owner starts it again.
 
 use crate::win32::gdi32::surface::dib_stride;
-use oxideav_indeo::indeo3::{DecodedPicture, FrameHeader, Indeo3PictureDecoder};
-use oxideav_indeo::indeo5::{HostBuffer, Indeo5Decoder, pack_yuy2};
+use oxideav_indeo::indeo3::{FrameHeader, Indeo3PictureDecoder};
+use oxideav_indeo::indeo5::{Iv50Decoder, MAX_PICTURE_PIXELS};
 
 const IV31: u32 = u32::from_le_bytes(*b"IV31");
 const IV32: u32 = u32::from_le_bytes(*b"IV32");
@@ -50,7 +50,8 @@ pub fn upper(compression: u32) -> u32 {
 pub fn supported(compression: u32, width: u32, height: u32) -> bool {
     match upper(compression) {
         IV31 | IV32 => (1..=INDEO3_MAX.0).contains(&width) && (1..=INDEO3_MAX.1).contains(&height),
-        IV50 => width >= 1 && height >= 1,
+        // The decoder refuses a frame of a larger area.
+        IV50 => width >= 1 && height >= 1 && width as u64 * height as u64 <= MAX_PICTURE_PIXELS,
         IV41 => (1..=4096).contains(&width) && (1..=4096).contains(&height),
         CVID => (1..=CINEPAK_MAX).contains(&width) && (1..=CINEPAK_MAX).contains(&height),
         _ => false,
@@ -59,9 +60,10 @@ pub fn supported(compression: u32, width: u32, height: u32) -> bool {
 
 enum Decoder {
     Indeo3(Box<Indeo3PictureDecoder>),
-    /// With the last frame's output and size, which a frame that fails
-    /// to decode leaves as it is.
-    Indeo5(Box<Indeo5Decoder>, Option<(HostBuffer, (u32, u32))>),
+    /// It keeps its picture when a frame fails to decode, but for a
+    /// key frame that changes the picture's size or bands: that one
+    /// clears it until the next key frame decodes.
+    Indeo5(Box<Iv50Decoder>),
     Indeo4(Box<super::indeo4::Decoder>),
     Cinepak(Box<super::cinepak::Decoder>),
 }
@@ -80,7 +82,7 @@ impl std::fmt::Debug for Codec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self.0 {
             Some(Decoder::Indeo3(_)) => "Codec(Indeo 3)",
-            Some(Decoder::Indeo5(..)) => "Codec(Indeo 5)",
+            Some(Decoder::Indeo5(_)) => "Codec(Indeo 5)",
             Some(Decoder::Indeo4(_)) => "Codec(Indeo 4)",
             Some(Decoder::Cinepak(_)) => "Codec(Cinepak)",
             None => "Codec(None)",
@@ -93,7 +95,7 @@ impl Codec {
     pub fn new(compression: u32) -> Codec {
         Codec(match upper(compression) {
             IV31 | IV32 => Some(Decoder::Indeo3(Box::default())),
-            IV50 => Some(Decoder::Indeo5(Box::default(), None)),
+            IV50 => Some(Decoder::Indeo5(Box::default())),
             IV41 => Some(Decoder::Indeo4(Box::new(super::indeo4::Decoder::new()))),
             CVID => Some(Decoder::Cinepak(Box::default())),
             _ => None,
@@ -105,8 +107,10 @@ impl Codec {
     }
 
     /// Decompress one frame. After an error the picture stays the one
-    /// before, but for Cinepak's: a Cinepak frame that fails partway
-    /// keeps the blocks it drew, as FFmpeg's decoder does.
+    /// before, but for Cinepak's and one case of Indeo 5's: a Cinepak
+    /// frame that fails partway keeps the blocks it drew, as FFmpeg's
+    /// decoder does, and an Indeo 5 key frame that changes the size or
+    /// the bands and fails leaves no picture.
     pub fn decode(&mut self, frame: &[u8]) -> Result<(), String> {
         match &mut self.0 {
             Some(Decoder::Indeo3(d)) => {
@@ -120,11 +124,7 @@ impl Codec {
                 }
                 d.decode(frame).map(|_| ()).map_err(|e| format!("{e:?}"))
             }
-            Some(Decoder::Indeo5(d, last)) => {
-                let out = d.decode(frame).map_err(|e| e.to_string())?;
-                *last = Some((out.output, out.dimensions));
-                Ok(())
-            }
+            Some(Decoder::Indeo5(d)) => d.decode(frame).map(|_| ()).map_err(|e| e.to_string()),
             Some(Decoder::Indeo4(d)) => d.decode(frame),
             Some(Decoder::Cinepak(d)) => d.decode(frame, CINEPAK_MAX as usize),
             None => Err("no decoder".to_string()),
@@ -134,24 +134,31 @@ impl Codec {
     /// The last picture as a bottom-up 24-bit DIB, if it is `width` by
     /// `height`.
     pub fn picture(&self, width: u32, height: u32) -> Option<Vec<u8>> {
+        let size = (width as usize, height as usize);
         match self.0.as_ref()? {
             Decoder::Indeo3(d) => {
-                let picture = d.previous()?;
-                (picture.width == width && picture.height == height).then(|| indeo3_dib(picture))
-            }
-            Decoder::Indeo5(_, last) => {
-                let (output, size) = last.as_ref()?;
-                if *size != (width, height) {
+                let p = d.previous()?;
+                if (p.width, p.height) != (width, height) {
                     return None;
                 }
-                let yuy2 = pack_yuy2(output, width as usize, height as usize)?;
-                Some(yuy2_dib(&yuy2, width as usize, height as usize))
+                let (w, cw) = (width as usize, p.chroma_width as usize);
+                yvu9_dib([(&p.luma, w), (&p.chroma_u, cw), (&p.chroma_v, cw)], size)
+            }
+            Decoder::Indeo5(d) => {
+                let (y, u, v) = (d.y()?, d.u()?, d.v()?);
+                if (y.width, y.height) != size {
+                    return None;
+                }
+                let planes = [(y.data, y.stride), (u.data, u.stride), (v.data, v.stride)];
+                yvu9_dib(planes, size)
             }
             Decoder::Indeo4(d) => {
                 let p = d.picture()?;
-                (p.width == width as usize && p.height == height as usize).then(|| {
-                    yvu9_dib(&p.y, &p.u, &p.v, (p.width, p.height), p.chroma_width())
-                })
+                if (p.width, p.height) != size {
+                    return None;
+                }
+                let cw = p.chroma_width();
+                yvu9_dib([(&p.y, p.width), (&p.u, cw), (&p.v, cw)], size)
             }
             Decoder::Cinepak(d) => {
                 // A frame is coded in blocks of 4 by 4 pixels, so a movie
@@ -204,51 +211,31 @@ pub fn bgr(y: u8, u: u8, v: u8) -> [u8; 3] {
     [b, g, r].map(|c| c.clamp(0, 255) as u8)
 }
 
-/// An Indeo 3 picture as a DIB.
-fn indeo3_dib(picture: &DecodedPicture) -> Vec<u8> {
-    yvu9_dib(
-        &picture.luma,
-        &picture.chroma_u,
-        &picture.chroma_v,
-        (picture.width as usize, picture.height as usize),
-        picture.chroma_width as usize,
-    )
-}
-
-/// A YVU9 picture (Indeo 3's and 4's) as a DIB: each chroma sample, of
-/// rows `cw` wide, colours its 4x4 block.
-fn yvu9_dib(luma: &[u8], u: &[u8], v: &[u8], (w, h): (usize, usize), cw: usize) -> Vec<u8> {
+/// A YVU9 picture (Indeo 3's, 4's and 5's) as a DIB, from its luma, U
+/// and V planes: each is its bytes and the distance between its rows.
+/// Each chroma sample colours its 4x4 block. None if a plane is smaller
+/// than a picture of `w` by `h` needs.
+fn yvu9_dib(planes: [(&[u8], usize); 3], (w, h): (usize, usize)) -> Option<Vec<u8>> {
+    let (cw, ch) = (w.div_ceil(4), h.div_ceil(4));
+    let fits = |(data, stride): (&[u8], usize), w: usize, h: usize| {
+        h == 0 || (stride >= w && data.len() >= (h - 1) * stride + w)
+    };
+    let [luma, u, v] = planes;
+    if !fits(luma, w, h) || !fits(u, cw, ch) || !fits(v, cw, ch) {
+        return None;
+    }
     let stride = dib_stride(w as i32, 24);
     let mut out = vec![0; stride * h];
     for y in 0..h {
-        let crow = y / 4 * cw;
-        let ys = &luma[y * w..y * w + w];
+        let ys = &luma.0[y * luma.1..][..w];
+        let us = &u.0[y / 4 * u.1..][..cw];
+        let vs = &v.0[y / 4 * v.1..][..cw];
         let row = &mut out[(h - 1 - y) * stride..][..w * 3];
         for (x, (&yv, d)) in ys.iter().zip(row.as_chunks_mut::<3>().0).enumerate() {
-            *d = bgr(yv, u[crow + x / 4], v[crow + x / 4]);
+            *d = bgr(yv, us[x / 4], vs[x / 4]);
         }
     }
-    out
-}
-
-/// A picture in YUY2, whose chroma is what Indeo 5's codec gives that
-/// format, as a DIB. `width` is even, as YUY2's are.
-fn yuy2_dib(yuy2: &[u8], width: usize, height: usize) -> Vec<u8> {
-    let stride = dib_stride(width as i32, 24);
-    let mut out = vec![0; stride * height];
-    for (y, line) in yuy2.chunks_exact(width * 2).enumerate() {
-        let row = &mut out[(height - 1 - y) * stride..][..width * 3];
-        for (&[y0, u, y1, v], d) in line
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .zip(row.as_chunks_mut::<6>().0)
-        {
-            d[..3].copy_from_slice(&bgr(y0, u, v));
-            d[3..].copy_from_slice(&bgr(y1, u, v));
-        }
-    }
-    out
+    Some(out)
 }
 
 #[cfg(test)]
@@ -256,13 +243,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn yuy2_rows_go_bottom_up_with_padding() {
-        // Two rows of 2 pixels: white, then black. Black chroma is 128.
-        let yuy2 = [235, 128, 235, 128, 16, 128, 16, 128];
-        let dib = yuy2_dib(&yuy2, 2, 2);
+    fn yvu9_rows_go_bottom_up_with_padding() {
+        // Two rows of 2 pixels, white then black, in a plane whose rows
+        // are 3 apart. Chroma of 128 is grey.
+        let luma: (&[u8], usize) = (&[235, 235, 99, 16, 16, 99], 3);
+        let chroma: (&[u8], usize) = (&[128], 1);
+        let dib = yvu9_dib([luma, chroma, chroma], (2, 2)).unwrap();
         assert_eq!(
             dib,
             [0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 0, 0]
+        );
+        // A picture larger than its planes has no DIB.
+        assert!(yvu9_dib([luma, chroma, chroma], (4, 2)).is_none());
+        assert!(yvu9_dib([luma, chroma, chroma], (2, 8)).is_none());
+    }
+
+    /// Prints a hash of every picture of the first video stream of the
+    /// AVI file that RUST_DOS_AVI names, and how many of its chunks gave
+    /// one. Two builds that print the same line decode the movie to the
+    /// same pictures, which checks a change of a decoder:
+    /// `RUST_DOS_AVI=movie.avi cargo test --lib vfw::codec -- --ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore = "needs a movie: set RUST_DOS_AVI"]
+    fn hash_of_a_movies_pictures() {
+        let path = std::env::var("RUST_DOS_AVI").expect("RUST_DOS_AVI names an AVI file");
+        let file = std::fs::read(path).unwrap();
+        let bytes = |at: u32, len: u32| file.get(at as usize..)?.get(..len as usize);
+        let mut read = |at: u32, len: u32| bytes(at, len).map(<[u8]>::to_vec);
+        let avi = crate::win32::vfw::avi::parse(file.len() as u32, &mut read).unwrap();
+        let vids = u32::from_le_bytes(*b"vids");
+        let video = avi.streams.iter().find(|s| s.kind() == vids).unwrap();
+        // BITMAPINFOHEADER's biWidth, biHeight and biCompression.
+        let field = |at: usize| u32::from_le_bytes(video.format[at..at + 4].try_into().unwrap());
+        let (width, height) = (field(4), (field(8) as i32).unsigned_abs());
+        let mut codec = Codec::new(field(16));
+        assert!(!codec.is_empty(), "no decoder for the stream");
+        // FNV-1a over the DIBs.
+        let (mut hash, mut pictures) = (0xcbf2_9ce4_8422_2325u64, 0);
+        for chunk in &video.chunks {
+            let _ = codec.decode(bytes(chunk.offset, chunk.size).unwrap());
+            if let Some(dib) = codec.picture(width, height) {
+                pictures += 1;
+                for b in dib {
+                    hash = (hash ^ b as u64).wrapping_mul(0x100_0000_01b3);
+                }
+            }
+        }
+        println!(
+            "pictures of {} chunks: {pictures}, hash {hash:016x}",
+            video.chunks.len()
         );
     }
 
@@ -420,6 +450,8 @@ mod tests {
         assert!(supported(u32::from_le_bytes(*b"cvid"), 320, 240));
         assert!(!supported(u32::from_le_bytes(*b"MSVC"), 320, 240));
         assert!(!supported(IV32, 800, 600));
+        assert!(supported(iv50, 4096, 4096));
+        assert!(!supported(iv50, 4097, 4096));
         assert!(!Codec::new(iv50).is_empty());
         assert!(Codec::new(0).is_empty());
     }

@@ -567,7 +567,8 @@ fn title(cpu: &mut Cpu) -> String {
 }
 
 fn write_str(cpu: &mut Cpu, at: u32, s: &str, max: usize) {
-    let mut b: Vec<u8> = s.bytes().take(max - 1).collect();
+    let mut b = crate::dosstr::to_bytes(s);
+    b.truncate(max - 1);
     b.push(0);
     cpu.bus.guest_write_bytes(at, &b);
 }

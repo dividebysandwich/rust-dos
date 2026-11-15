@@ -40,10 +40,11 @@ pub use edit::{
     DriveChange, Saving, autoexec_lines, complete_text, load_autoexec, save, save_autoexec, update_text, with_autoexec,
 };
 pub use parse::{MAX_MEMSIZE, MIN_MEMSIZE, parse, parse_memsize};
+pub use settings::{Memory, default_memsize};
 pub use settings::{Settings, parse_mouse_sensitivity};
 pub use types::{
-    AspectRatio, DesktopDepth, DosVersion, Filter, MidiSynth, Mt32Model, SoundConfig, Win32Trace,
-    WindowsVersion,
+    AspectRatio, DesktopDepth, DosVersion, Filter, MidiSynth, Mt32Model, SoundConfig, Win32Locale,
+    Win32Trace, WindowsVersion,
 };
 
 /// Written to the default location on first start.
@@ -148,8 +149,7 @@ pub struct Config {
     /// (`voodoo_memory`), what draws
     /// for it (`voodoo_renderer`), at what size (`voodoo_scale`) and with
     /// how many samples a pixel (`voodoo_msaa`), texture anisotropy
-    /// (`voodoo_anisotropy`), and the most frames a second programs may show
-    /// on it (`voodoo_fps_cap`, 0 for no cap).
+    /// (`voodoo_anisotropy`).
     pub voodoo: Option<bool>,
     pub voodoo_model: Option<crate::voodoo::Model>,
     pub voodoo_memory: Option<crate::voodoo::Board>,
@@ -166,9 +166,11 @@ pub struct Config {
     pub voodoo_readback_gpu: Option<bool>,
     pub voodoo_msaa: Option<u32>,
     pub voodoo_anisotropy: Option<u32>,
-    pub voodoo_fps_cap: Option<u32>,
     /// The gamma Glide applies to the guest, or off.
     pub voodoo_gamma: Option<Option<f32>>,
+    /// The most frames a second a program may show, on any card
+    /// (`fps_cap`, or its old name `voodoo_fps_cap`).
+    pub fps_cap: Option<crate::frame_cap::Cap>,
     /// The PowerVR card (`powervr`): its chip, or None for no card; and
     /// its texture filtering (`powervr_filter`).
     pub powervr: Option<Option<crate::powervr::Chip>>,
@@ -180,6 +182,10 @@ pub struct Config {
     pub verite_mhz: Option<u32>,
     pub verite_rom: Option<PathBuf>,
     pub verite_irq: Option<u8>,
+    /// The megabytes of memory a ToadForce has (`toadforce_memory`).
+    pub toadforce_memory: Option<u32>,
+    /// What draws a ToadForce's triangles (`toadforce_renderer`).
+    pub toadforce_renderer: Option<crate::toadforce::Renderer>,
     /// Where screenshots and recordings go (`capture_dir`), and whether
     /// they show the settings window and the performance overlay
     /// (`record_ui`) and the CRT shader (`record_shader`).
@@ -219,6 +225,8 @@ pub struct Config {
     pub win32_version: Option<WindowsVersion>,
     /// The depth of its desktop (`win32_depth`).
     pub win32_depth: Option<DesktopDepth>,
+    /// Its system locale (`win32_locale`).
+    pub win32_locale: Option<Win32Locale>,
     /// Which of its functions' calls the log gets (`win32_trace`).
     pub win32_trace: Option<Win32Trace>,
     /// DOS's tables packed low, as DOS=HIGH has them (`dos_high`).
@@ -300,6 +308,17 @@ pub struct Config {
     pub autoexec: Vec<String>,
     /// A game profile's name (`[game]`, see games.rs).
     pub game_name: Option<String>,
+    /// The year a game profile's game came out (`[game]`'s `year`), told
+    /// to the almanac with its reports.
+    pub game_year: Option<i32>,
+    /// Who published it (`[game]`'s `publisher`), for the almanac too.
+    pub game_publisher: Option<String>,
+    /// The player's notes on how it plays (`[game]`'s `notes`), sent
+    /// with the almanac reports.
+    pub game_notes: Option<String>,
+    /// The profile's own UUID (`[game]`'s `uuid`): the almanac replaces
+    /// the report sent with it before rather than adding one.
+    pub game_uuid: Option<String>,
     /// The version of the game RetroAchievements knows (`[game]`'s
     /// `achievements`): its hash, or its zip or DOSZ archive.
     pub game_achievements: Option<String>,
@@ -338,6 +357,28 @@ impl Config {
     pub fn drive(&self, drive: u8) -> Option<&MountSpec> {
         self.drives.iter().find(|spec| spec.drive == drive)
     }
+}
+
+/// Settings that were renamed: section, old name and current name. A
+/// file's line under the old name still sets the setting, and the line
+/// takes the current name when the settings window writes it.
+pub const OLD_NAMES: [(&str, &str, &str); 1] = [("emulator", "voodoo_fps_cap", "fps_cap")];
+
+/// The current name of the setting `key` (in lower case) of `section`.
+fn current_name(section: Section, key: &str) -> &str {
+    OLD_NAMES
+        .iter()
+        .find(|&&(s, old, _)| s == section.name() && old == key)
+        .map_or(key, |&(_, _, new)| new)
+}
+
+/// The current name of the setting `key` of the section named `section`,
+/// in any case, as a report or a recommendation may name it.
+pub fn renamed<'a>(section: &str, key: &'a str) -> &'a str {
+    OLD_NAMES
+        .iter()
+        .find(|&&(s, old, _)| s.eq_ignore_ascii_case(section) && old.eq_ignore_ascii_case(key))
+        .map_or(key, |&(_, _, new)| new)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

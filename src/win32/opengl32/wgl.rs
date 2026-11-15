@@ -37,7 +37,7 @@ use super::super::ddraw::surface::{
 };
 use super::super::ddraw::{self, Format, V_DD7, V_DEVICE7, V_SURFACE7, voodoo};
 use super::super::glide::hw::Card;
-use super::{Context, DLL, context_index, current, hglrc, new_context, state};
+use super::{DLL, context_index, current, hglrc, new_context, state};
 use crate::cpu::Cpu;
 
 const TRUE: u32 = 1;
@@ -65,7 +65,8 @@ const PFD_SIZE: u32 = 40;
 
 /// The ICD's pixel formats, from 1: their flags. Both are 5-6-5 with a
 /// 16-bit depth buffer, as Mesa's fxwgl.c has the first two of its
-/// table for cards before the Voodoo4.
+/// table for cards before the Voodoo4. A ToadForce's are of the
+/// desktop's colours (`color_bits`).
 const FORMATS: [u32; 2] = [
     PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL,
     PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER | PFD_SWAP_COPY,
@@ -84,18 +85,19 @@ const VOODOO2_FORMATS: [u32; 2] = [
 pub enum Icd {
     /// None: no pixel formats.
     None,
-    /// 3dfx's for the Banshee and Voodoo3, the display adapter: a
-    /// context draws in a window.
+    /// The display adapter's: 3dfx's for the Banshee and Voodoo3, or
+    /// the ToadForce's. A context draws in a window.
     Windowed,
     /// 3dfx's for the Voodoo2, an add-on card: a context draws full
     /// screen on the card.
     FullScreen,
 }
 
-/// The ICD the machine has: the Banshee's or Voodoo3's when it is the
-/// display adapter, the Voodoo2's when the machine has one.
+/// The ICD the machine has: the display adapter's when that is a
+/// Banshee, a Voodoo3 or a ToadForce with Direct3D's HAL, the
+/// Voodoo2's when the machine has one.
 pub fn icd(cpu: &Cpu) -> Icd {
-    if cpu.bus.vga.adapter.voodoo_board().is_some() {
+    if cpu.bus.vga.adapter.voodoo_board().is_some() || hal::toadforce::there(cpu) {
         Icd::Windowed
     } else if super::super::glide::hw::board(cpu).is_some_and(|b| b.card == Card::Voodoo2) {
         Icd::FullScreen
@@ -140,6 +142,17 @@ fn format_of(cpu: &mut Cpu, hwnd: u32) -> u32 {
         .map_or(0, |f| f.1)
 }
 
+/// The bits of a pixel of a window's color buffer: 16, 5-6-5, or on a
+/// ToadForce with a 32-bit desktop 32, 8 bits a channel. A window's
+/// buffers are of the desktop's format on a real driver, whose
+/// SwapBuffers copies the back buffer to the screen as it is; the card
+/// then copies it with one `BLT` (`d3d8::copy::present_window`). The
+/// 3dfx cards draw 16 bits only.
+pub fn color_bits(cpu: &mut Cpu) -> u32 {
+    let wide = crate::win32::screen::is_toadforce(cpu) && ddraw::display::current(cpu).2 == 32;
+    if wide { 32 } else { 16 }
+}
+
 /// Write the descriptor of the pixel format `format` (from 1) at `at`.
 fn write_descriptor(cpu: &mut Cpu, at: u32, format: u32) {
     let flags = formats(cpu)[format as usize - 1];
@@ -152,6 +165,11 @@ fn write_descriptor(cpu: &mut Cpu, at: u32, format: u32) {
     b[8] = 0;
     b[9] = 16;
     b[10..18].copy_from_slice(&[5, 11, 6, 5, 5, 0, 0, 0]);
+    if color_bits(cpu) == 32 {
+        // 24 bits of color: red 8 at 16, green 8 at 8, blue 8 at 0.
+        b[9] = 24;
+        b[10..18].copy_from_slice(&[8, 16, 8, 8, 8, 0, 0, 0]);
+    }
     // No accumulation buffer, depth 16, no stencil or aux buffers, the
     // main plane. The Voodoo2's ICD has a 64-bit accumulation buffer,
     // 16 bits each, and an 8-bit stencil buffer.
@@ -180,7 +198,9 @@ fn choose(cpu: &mut Cpu, at: u32) -> u32 {
     }
     let flags = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
     let (kind, color, alpha) = (b[8], b[9], b[16]);
-    // 24 and 32 bits are taken as the 16 the card has.
+    // 24 and 32 bits are taken as 16: whichever of the three is asked
+    // for, the formats have the window's colour bits, 16 or on a
+    // ToadForce the desktop's 24 (`color_bits`).
     let color = if color == 24 || color == 32 {
         16
     } else {
@@ -295,9 +315,13 @@ pub const WGL_EXTENSIONS_AT: u32 = 0x300;
 /// 3dfx's Banshee and Voodoo3 ICD (3DFXOGL.DLL) that are here. Its own
 /// list has more (paletted textures, texture compression, point
 /// parameters and others), which aren't. GL_EXT_bgra is in it, and
-/// Myth II 1.8.3 takes an OpenGL 1.1 device only with it.
+/// Myth II 1.8.3 takes an OpenGL 1.1 device only with it. So is
+/// GL_EXT_packed_pixels, in the ICD of driver 1.1.51 and in later ones,
+/// whose type checks take its five types and none of OpenGL 1.2's
+/// others (`PackedPixels`).
 pub const EXTENSIONS: &str = "GL_ARB_multitexture GL_EXT_bgra \
-    GL_EXT_compiled_vertex_array GL_EXT_texture_env_add WGL_EXT_swap_control";
+    GL_EXT_compiled_vertex_array GL_EXT_packed_pixels GL_EXT_texture_env_add \
+    WGL_EXT_swap_control";
 /// The WGL extensions, as wglGetExtensionsStringEXT gives them.
 pub const WGL_EXTENSIONS: &str = "WGL_EXT_extensions_string WGL_EXT_swap_control";
 
@@ -306,6 +330,48 @@ pub const WGL_EXTENSIONS: &str = "WGL_EXT_extensions_string WGL_EXT_swap_control
 /// aren't.
 pub const VOODOO2_EXTENSIONS: &str = "GL_ARB_multitexture GL_EXT_bgra \
     GL_EXT_compiled_vertex_array WGL_EXT_swap_control";
+
+/// The packed pixel types a driver takes for texels and pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackedPixels {
+    /// None: the Voodoo2's ICD, whose extensions here don't have
+    /// GL_EXT_packed_pixels.
+    None,
+    /// GL_EXT_packed_pixels' five, GL_UNSIGNED_BYTE_3_3_2 to
+    /// GL_UNSIGNED_INT_10_10_10_2: 3dfx's Banshee and Voodoo3 ICD,
+    /// whose type checks have these and no other.
+    Extension,
+    /// OpenGL 1.2's twelve, the _REV types and 5-6-5 besides: the
+    /// ToadForce's driver. Its version is still 1.1 (1.2 also has 3D
+    /// textures and glDrawRangeElements, which aren't here), and its
+    /// extensions list GL_EXT_packed_pixels; Myth and Myth II give their
+    /// textures in the _REV types whatever the version says.
+    Core12,
+}
+
+impl PackedPixels {
+    /// Whether the driver takes the packed type `kind`.
+    pub fn takes(self, kind: u32) -> bool {
+        let extension = (0x8032..=0x8036).contains(&kind);
+        match self {
+            PackedPixels::None => false,
+            PackedPixels::Extension => extension,
+            PackedPixels::Core12 => extension || (0x8362..=0x8368).contains(&kind),
+        }
+    }
+}
+
+/// The packed pixel types of the driver, by the card as `write_strings`
+/// names it.
+pub fn packed_pixels(cpu: &Cpu) -> PackedPixels {
+    if hal::toadforce::there(cpu) {
+        PackedPixels::Core12
+    } else if super::super::glide::hw::board(cpu).is_some_and(|b| b.card == Card::Voodoo2) {
+        PackedPixels::None
+    } else {
+        PackedPixels::Extension
+    }
+}
 
 /// The extensions of a Banshee or Voodoo3 with `tmus` texture units. A
 /// Banshee's one unit has no multitexture, as Mesa's driver leaves it
@@ -322,8 +388,21 @@ fn icd_extensions(tmus: u32) -> &'static str {
 
 /// Write the strings into a new page of the process: its address.
 fn write_strings(cpu: &mut Cpu) -> Option<u32> {
+    if hal::toadforce::there(cpu) {
+        // The card's own names. The version and the extensions are
+        // what the driver does on the Direct3D device today.
+        let memory = cpu.bus.toadforce.as_ref().map_or(0, |card| card.memory());
+        let renderer = format!("ToadForce/{} MB", memory >> 20);
+        let strings = [
+            (VENDOR_AT, "Rust-DOS"),
+            (RENDERER_AT, renderer.as_str()),
+            (VERSION_AT, "1.1.0"),
+            (EXTENSIONS_AT, EXTENSIONS),
+            (WGL_EXTENSIONS_AT, WGL_EXTENSIONS),
+        ];
+        return place_strings(cpu, &strings);
+    }
     let board = super::super::glide::hw::board(cpu)?;
-    let at = super::super::kernel32::alloc_pages(cpu, 0x1000)?;
     let (renderer, version, extensions) = if board.card == Card::Voodoo2 {
         // As 3DFXVGL.DLL gives them, which a program loads itself or
         // finds as the OPENGL32.DLL of its own folder ("stand-alone").
@@ -357,7 +436,13 @@ fn write_strings(cpu: &mut Cpu) -> Option<u32> {
         (EXTENSIONS_AT, extensions),
         (WGL_EXTENSIONS_AT, WGL_EXTENSIONS),
     ];
-    for (offset, s) in strings {
+    place_strings(cpu, &strings)
+}
+
+/// The strings in a new page of the process, each at its offset.
+fn place_strings(cpu: &mut Cpu, strings: &[(u32, &str)]) -> Option<u32> {
+    let at = super::super::kernel32::alloc_pages(cpu, 0x1000)?;
+    for &(offset, s) in strings {
         let mut bytes = s.as_bytes().to_vec();
         bytes.push(0);
         cpu.bus.guest_write_bytes(at + offset, &bytes);
@@ -365,16 +450,26 @@ fn write_strings(cpu: &mut Cpu) -> Option<u32> {
     Some(at)
 }
 
-/// A surface of the DirectDraw object `dd` in video memory, 16 bits:
-/// the render target or the depth buffer. Its id and the interface of
-/// it that is held.
+/// A surface of the DirectDraw object `dd` in video memory: the render
+/// target, of `color_bits`, or the depth buffer, 16 bits. Its id and
+/// the interface of it that is held.
 fn make_buffer(cpu: &mut Cpu, dd: u32, size: (u32, u32), depth: bool) -> Option<(u32, u32)> {
     let level = directdraw::ddraw(cpu, dd).map_or(0, |d| d.level);
+    let wide = color_bits(cpu) == 32;
     let format = if depth {
         Format {
             flags: DDPF_ZBUFFER,
             bits: 16,
             g: 0xFFFF,
+            ..Format::default()
+        }
+    } else if wide {
+        Format {
+            flags: DDPF_RGB,
+            bits: 32,
+            r: 0xFF_0000,
+            g: 0xFF00,
+            b: 0xFF,
             ..Format::default()
         }
     } else {
@@ -660,7 +755,7 @@ pub fn create_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     );
     let inner_iface = ddraw::iface(cpu, inner_id, V_DEVICE7);
     ddraw::add_ref(cpu, inner_iface);
-    hal::created(cpu);
+    hal::created(cpu, dd);
 
     let pid = super::super::user32::current_pid(cpu);
     let mut c = new_context(pid, hwnd, format);
@@ -690,15 +785,25 @@ pub fn create_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// The context at `index` goes, with what it holds.
 fn destroy(cpu: &mut Cpu, index: usize) {
-    super::texture::release_all(cpu, index);
+    super::texture::release_default(cpu, index);
     drop_buffers(cpu, index);
     let Some(c) = state(cpu).contexts.get_mut(index).and_then(Option::take) else {
         return;
     };
     let h = hglrc(index);
     state(cpu).current.retain(|x| x.1 != h);
+    // Its lists and textures go unless another context shares them,
+    // the textures before the device that may still hold one.
+    super::lists::context_gone(cpu, &c);
     if c.inner_iface != 0 {
         ddraw::release(cpu, c.inner_iface);
+    }
+    // A texture another context shares keeps the DirectDraw object
+    // (`texture::make_surface`). On the Voodoo2 the object leaves the
+    // card's exclusive mode here, which closes the card, as it did when
+    // it went with the context: another context can open it.
+    if c.dd_iface != 0 && directdraw::is_card(cpu, c.dd) {
+        directdraw::set_cooperative_level(cpu, &[c.dd_iface, 0, DDSCL_NORMAL]);
     }
     if c.dd_iface != 0 {
         ddraw::release(cpu, c.dd_iface);
@@ -814,11 +919,16 @@ pub fn copy_context(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(FALSE)
 }
 
-/// wglShareLists(a, b): the contexts' textures aren't shared, which
-/// programs with one context don't miss.
+/// wglShareLists(a, b): `b` has the display lists and the texture
+/// objects of `a` from here on, those there and those either makes
+/// later, which is all that contexts of OpenGL 1.1 share. It fails
+/// when `b` has lists or textures of its own, as Windows has it.
 pub fn share_lists(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let ok = context_index(cpu, args[0]).is_some() && context_index(cpu, args[1]).is_some();
-    Some(ok as u32)
+    let (Some(a), Some(b)) = (context_index(cpu, args[0]), context_index(cpu, args[1])) else {
+        super::super::gdi32::set_error(cpu, ERROR_INVALID_HANDLE);
+        return Some(FALSE);
+    };
+    Some(super::lists::share(cpu, a, b) as u32)
 }
 
 /// SwapBuffers(hdc): show what the context drawing to the DC's window
@@ -833,7 +943,8 @@ pub fn share_lists(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// (`swap_card`). Without it a game that draws a frame in less than a
 /// frame's time, as Oni's menus do, swapped hundreds of times a second
 /// of emulated time, and each swap's drawing cost the host as much as
-/// one at the display's rate.
+/// one at the display's rate. The frame rate cap may hold a swap back
+/// further (`win32::pace`), the call coming back at its turn.
 fn swap_paced(cpu: &mut Cpu, hdc: u32) -> Option<u32> {
     let Some(index) = dc_context(cpu, hdc) else {
         return Some(FALSE);
@@ -850,7 +961,14 @@ fn swap_paced(cpu: &mut Cpu, hdc: u32) -> Option<u32> {
         cpu.set_eip(cpu.eip().wrapping_sub(4));
         return directdraw::wait_until(cpu, at, TRUE);
     }
+    let frame = match pace(cpu, index) {
+        Ok(frame) => frame,
+        Err(wait) => return wait,
+    };
     present(cpu, index);
+    if let Some(at) = frame {
+        crate::win32::pace::shown(cpu, at);
+    }
     if let Some((interval, _)) = paced {
         let (timing, now) = ddraw::display::timing(cpu);
         let at = timing.next_display(now) + u64::from(interval - 1) * timing.frame_ns();
@@ -859,6 +977,31 @@ fn swap_paced(cpu: &mut Cpu, hdc: u32) -> Option<u32> {
         }
     }
     Some(TRUE)
+}
+
+/// A swap of the context at `index` under the frame rate cap: Ok to go
+/// ahead, with the time a window's frame counts as shown at; the card's
+/// swaps count their own frames. Err with what the call returns while
+/// the thread waits for the cap's turn and the call runs again. A window
+/// shows the frame at once; its swap interval (`swap_paced`) already
+/// keeps it to that many of the display's frames, which the cap doesn't
+/// hold when its frame time is no longer.
+fn pace(cpu: &mut Cpu, index: usize) -> Result<Option<u64>, Option<u32>> {
+    let Some(c) = state(cpu).contexts[index].as_ref() else {
+        return Ok(None);
+    };
+    let (interval, double) = (c.swap_interval, double_buffered(c.format));
+    if full_screen(cpu, index) {
+        if double {
+            let cmd = (interval > 0) as u32;
+            crate::win32::pace::card_turn(cpu, cmd, TRUE)?;
+        }
+        return Ok(None);
+    }
+    let (timing, now) = ddraw::display::timing(cpu);
+    let paced = interval > 0 && double;
+    let refresh = paced.then(|| u64::from(interval) * timing.frame_ns());
+    crate::win32::pace::turn(cpu, now, refresh, TRUE).map(Some)
 }
 
 /// The context whose drawing the DC `hdc`'s window shows: the running
@@ -986,7 +1129,7 @@ pub fn get_extensions_string(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// vertices where OpenGL's whole viewport puts them, for one that goes
 /// past the buffers' edges (the identity for one inside them). None if
 /// none of it is on the buffers.
-pub fn inner_viewport(c: &Context) -> Option<(Viewport7, Matrix)> {
+pub fn inner_viewport(c: &super::Settings) -> Option<(Viewport7, Matrix)> {
     let [x, y, w, h] = c.viewport.map(i64::from);
     let (width, height) = (i64::from(c.width), i64::from(c.height));
     let (left, right) = (x.max(0), (x + w).min(width));
@@ -1026,5 +1169,26 @@ mod tests {
         assert!(voodoo3.contains(&"GL_EXT_bgra"));
         assert!(banshee.contains(&"GL_EXT_bgra"));
         assert_eq!(banshee.len() + 1, voodoo3.len());
+        // As the 3DFXOGL.DLL of driver 1.1.51 lists it.
+        assert!(voodoo3.contains(&"GL_EXT_packed_pixels"));
+        assert!(banshee.contains(&"GL_EXT_packed_pixels"));
+    }
+
+    /// 3dfx's ICD takes GL_EXT_packed_pixels' five types and none of the
+    /// _REV ones; the ToadForce's driver takes OpenGL 1.2's twelve.
+    #[test]
+    fn each_driver_takes_the_packed_types_it_says() {
+        for kind in 0x8032..=0x8036 {
+            assert!(PackedPixels::Extension.takes(kind));
+            assert!(PackedPixels::Core12.takes(kind));
+            assert!(!PackedPixels::None.takes(kind));
+        }
+        for kind in 0x8362..=0x8368 {
+            assert!(!PackedPixels::Extension.takes(kind));
+            assert!(PackedPixels::Core12.takes(kind));
+        }
+        assert!(!PackedPixels::Core12.takes(0x8369));
+        assert!(EXTENSIONS.split(' ').any(|e| e == "GL_EXT_packed_pixels"));
+        assert!(!VOODOO2_EXTENSIONS.contains("GL_EXT_packed_pixels"));
     }
 }

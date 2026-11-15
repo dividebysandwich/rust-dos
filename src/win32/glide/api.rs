@@ -2087,12 +2087,7 @@ pub fn buffer_swap(cpu: &mut Cpu, interval: u32) {
     if !active(cpu) {
         return;
     }
-    let interval = interval.min(255);
-    let cmd = if interval > 0 {
-        (interval - 1) << 1 | 1
-    } else {
-        0
-    };
+    let cmd = swap_cmd(interval);
     if !hw::banshee(cpu) {
         hw::write(cpu, ALL, SWAPBUFFER_CMD, cmd);
         return;
@@ -2111,6 +2106,17 @@ pub fn buffer_swap(cpu: &mut Cpu, interval: u32) {
     s.back = (s.back + 1) % n;
     let render = gc(cpu).render;
     render_buffer(cpu, render);
+}
+
+/// The swapbufferCMD of grBufferSwap(`interval`): at once with 0, or
+/// after `interval` vertical retraces.
+pub fn swap_cmd(interval: u32) -> u32 {
+    let interval = interval.min(255);
+    if interval > 0 {
+        (interval - 1) << 1 | 1
+    } else {
+        0
+    }
 }
 
 /// Swaps waiting for their retrace (grBufferNumPending).
@@ -2593,9 +2599,8 @@ pub fn set_state(cpu: &mut Cpu, bytes: &[u8; STATE_SIZE]) {
     g.render = w(19).min(1);
     g.constant = std::array::from_fn(|i| f32::from_bits(w(20 + i)));
     g.clip = std::array::from_fn(|i| w(24 + i));
-    for t in 0..2 {
+    for (t, s) in g.tmu.iter_mut().enumerate() {
         let at = 28 + 12 * t;
-        let s = &mut g.tmu[t];
         s.texture_mode = w(at);
         s.t_lod = w(at + 1);
         s.t_detail = w(at + 2);

@@ -244,14 +244,14 @@ fn mmx(instr: &Instruction, u: &mut Vec<Uop>) -> Option<()> {
         Pandn => VOp::Pandn,
         Por => VOp::Por,
         Pxor => VOp::Pxor,
-        Psllw => shift(instr, VOp::Psllw, VShift::Psllw),
-        Pslld => shift(instr, VOp::Pslld, VShift::Pslld),
-        Psllq => shift(instr, VOp::Psllq, VShift::Psllq),
-        Psrlw => shift(instr, VOp::Psrlw, VShift::Psrlw),
-        Psrld => shift(instr, VOp::Psrld, VShift::Psrld),
-        Psrlq => shift(instr, VOp::Psrlq, VShift::Psrlq),
-        Psraw => shift(instr, VOp::Psraw, VShift::Psraw),
-        Psrad => shift(instr, VOp::Psrad, VShift::Psrad),
+        Psllw => shift(instr, VShift::Psllw),
+        Pslld => shift(instr, VShift::Pslld),
+        Psllq => shift(instr, VShift::Psllq),
+        Psrlw => shift(instr, VShift::Psrlw),
+        Psrld => shift(instr, VShift::Psrld),
+        Psrlq => shift(instr, VShift::Psrlq),
+        Psraw => shift(instr, VShift::Psraw),
+        Psrad => shift(instr, VShift::Psrad),
         Packsswb => VOp::Packsswb,
         Packssdw => VOp::Packssdw,
         Packuswb => VOp::Packuswb,
@@ -267,11 +267,11 @@ fn mmx(instr: &Instruction, u: &mut Vec<Uop>) -> Option<()> {
 }
 
 /// A shift's operation: by a constant, or by operand 1's quadword.
-fn shift(instr: &Instruction, by_reg: VOp, by_imm: VShift) -> VOp {
+fn shift(instr: &Instruction, shift: VShift) -> VOp {
     if instr.op1_kind() == OpKind::Immediate8 {
-        VOp::ShiftImm(by_imm, instr.immediate8())
+        VOp::ShiftImm(shift, instr.immediate8())
     } else {
-        by_reg
+        shift.by_quadword()
     }
 }
 

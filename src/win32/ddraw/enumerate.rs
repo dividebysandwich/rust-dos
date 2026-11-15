@@ -15,6 +15,7 @@ use super::surface::{self, Desc};
 use super::{DD_OK, DDERR_INVALIDPARAMS, DDERR_UNSUPPORTED, display, state, voodoo};
 use crate::cpu::Cpu;
 use crate::win32::task::{self, Next, Task};
+use crate::win32::trace3d;
 
 /// The kinds of lists (the task's variable 0).
 const DEVICES: u32 = 0;
@@ -22,6 +23,9 @@ const DEVICES_EX: u32 = 1;
 const MODES: u32 = 2;
 const SURFACES: u32 = 3;
 const CREATABLE: u32 = 4;
+/// EnumAttachedSurfaces's: a list as SURFACES is, which the 3D trace
+/// names apart.
+const ATTACHED: u32 = 5;
 
 /// The task's variables: the kind, the callback, its context, the size
 /// of the descriptions it gets, where the list is at, and the items.
@@ -273,7 +277,7 @@ pub fn enum_attached_surfaces(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         108
     };
-    let mut vars = vec![SURFACES, callback, context, size, 0];
+    let mut vars = vec![ATTACHED, callback, context, size, 0];
     let attached = state(cpu)
         .surface(id)
         .map(|s| s.attached.clone())
@@ -289,11 +293,30 @@ pub fn enum_attached_surfaces(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// The task's step.
 pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
-    match t.var(KIND) {
+    let kind = t.var(KIND);
+    let (scratch, step) = (t.scratch, t.step);
+    let next = match kind {
         DEVICES | DEVICES_EX => devices(cpu, t, value),
         CREATABLE => creatable(cpu, t),
         _ => list(cpu, t, value),
+    };
+    if trace3d::on(cpu) {
+        let list = match kind {
+            DEVICES => "DDRAW.DirectDrawEnumerateA",
+            DEVICES_EX => "DDRAW.DirectDrawEnumerateExA",
+            MODES => "DDRAW.EnumDisplayModes",
+            ATTACHED => "DDRAW.EnumAttachedSurfaces",
+            _ => "DDRAW.EnumSurfaces",
+        };
+        trace3d::enumerated(cpu, list, scratch, step, value, &next, |cpu, args| {
+            match kind {
+                DEVICES | DEVICES_EX => trace3d::ddraw_device_item(cpu, args),
+                MODES => trace3d::surface_desc_item(cpu, args, 0),
+                _ => trace3d::surface_desc_item(cpu, args, 1),
+            }
+        });
     }
+    next
 }
 
 /// The devices to the callback: the display, whose GUID is NULL, then

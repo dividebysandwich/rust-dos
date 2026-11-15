@@ -45,6 +45,7 @@ mod mpr;
 mod msacm32;
 mod msimg32;
 mod msvcrt;
+pub mod nls;
 mod ntdll;
 pub(crate) mod object;
 #[cfg(test)]
@@ -54,6 +55,7 @@ mod oleaut32;
 mod oledlg;
 mod olepro32;
 mod opengl32;
+mod pace;
 mod advpack;
 pub(crate) mod realmode;
 mod registry;
@@ -67,10 +69,13 @@ mod tapi32;
 mod task;
 pub(crate) mod thread;
 pub mod trace;
+pub mod trace3d;
 pub mod user32;
 pub mod version;
 mod verdll;
+mod vmm;
 mod vfw;
+mod wing32;
 pub(crate) mod winmm;
 mod winspool;
 mod wnaspi32;
@@ -78,6 +83,9 @@ mod wow32;
 mod ws2_32;
 mod wsock32;
 
+pub use memory::{
+    Kept, PageFileStatus, PagedRange, PagingCounts, page_file_status, paging_counts,
+};
 pub use snapshot::snapshot;
 pub use stubs::function_name;
 
@@ -177,6 +185,7 @@ const ECX: usize = 1;
 const EDX: usize = 2;
 const EBX: usize = 3;
 const ESP: usize = 4;
+const EDI: usize = 7;
 
 /// What a call of a function the built-in DLLs lack fails with.
 const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
@@ -261,6 +270,10 @@ pub struct Process {
     /// error mode, which only SetErrorMode does.
     priority_class: u32,
     error_mode: u32,
+    /// Whether SetFileApisToOEM was called (and SetFileApisToANSI not
+    /// since), which only AreFileApisANSI reads: the file functions take
+    /// every name as ANSI. A save state doesn't keep it.
+    pub(crate) file_apis_oem: bool,
     /// The version of Windows its header says it was made for, as
     /// major << 16 | minor.
     subsystem_version: u32,
@@ -338,6 +351,11 @@ pub struct Win32 {
     /// of them started.
     pub depth: crate::config::DesktopDepth,
     desktop_depth: crate::config::DesktopDepth,
+    /// The system locale (the `win32_locale` setting), and the locale
+    /// the running processes see, the setting's when the first of them
+    /// started (nls.rs).
+    pub locale: nls::Win32Locale,
+    pub(crate) os_locale: nls::Win32Locale,
     /// The desktop's size as ChangeDisplaySettings set it, and the
     /// process that set it: None while it is its own (screen.rs).
     desktop_size: Option<(u32, u32, u32)>,
@@ -347,6 +365,8 @@ pub struct Win32 {
     /// The log's trace of the calls of the built-in functions (the
     /// `win32_trace` setting), which outlives the programs.
     pub(crate) trace: trace::Trace,
+    /// The 3D trace (`--trace-3d`), which outlives the programs too.
+    trace3d: Option<Box<trace3d::Trace3d>>,
     /// The program that starts at `START`: the one DOS loaded, or a
     /// RunOnce command's (`boot`).
     pending: Option<boot::Program>,
@@ -359,6 +379,13 @@ pub struct Win32 {
     pub(crate) running: usize,
     /// Where the processes' pages come from.
     pool: Option<memory::Pool>,
+    /// Whether a page went out to the page file (`memory::page_out`)
+    /// since the processor's TLB was last flushed: whoever has the
+    /// processor flushes it before the program runs on.
+    pub(crate) tlb_stale: bool,
+    /// What the page file did since the emulator started, for the
+    /// debugger's status.
+    pub(crate) paging: memory::PagingCounts,
     /// The kernel objects, which the processes' handles are of.
     pub(crate) objects: object::Objects,
     /// The DOS process the programs run in, and the stack its DOS stub
@@ -419,6 +446,8 @@ pub struct Win32 {
     /// The Win16 tasks' state (src/win16), whose process is one of
     /// `processes`.
     pub win16: crate::win16::State,
+    /// The serial ports Win32 programs have open (kernel32/comm.rs).
+    pub comm: Vec<kernel32::comm::Port>,
 
     /// COM's and the DirectX and multimedia DLLs' state, the system's,
     /// and how many GUIDs CoCreateGuid made.
@@ -465,8 +494,10 @@ impl Win32 {
             guest_replace: std::mem::take(&mut self.guest_replace),
             version: self.version,
             depth: self.depth,
+            locale: self.locale,
             dll_files: self.dll_files.take(),
             trace: trace::Trace::new(self.trace.level()),
+            trace3d: self.trace3d.take(),
             ..Win32::default()
         };
     }
@@ -648,6 +679,12 @@ pub fn install_rom(bus: &mut crate::bus::Bus) {
 /// it is a PE file and the built-in Windows is on, make it start as a
 /// Win32 program, or the engine it unpacks if it is InstallShield's setup
 /// launcher (`launcher`). Returns whether it does.
+/// Whether `bytes` are a Windows 3.1 program the Win16 layer runs (an NE
+/// file not marked for OS/2).
+pub fn is_win16(bytes: &[u8]) -> bool {
+    launcher::is_win16(bytes)
+}
+
 pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
     if !cpu.bus.win32.enabled {
         return false;
@@ -728,6 +765,11 @@ pub fn service(cpu: &mut Cpu, id: u16) {
         // built-in Windows doesn't have.
         _ => {
             cpu.bus.win32.calls = cpu.bus.win32.calls.wrapping_add(1);
+            // OpenGL's draws that wait are drawn before a function
+            // that may read what they draw or change what they name.
+            if cpu.bus.win32.opengl32.waiting.is_some() {
+                opengl32::flush_before(cpu, id);
+            }
             if id >= FIRST_MISSING {
                 missing(cpu, id - FIRST_MISSING);
             } else if crate::win16::in_16bit_code(cpu) {
@@ -755,6 +797,7 @@ fn start(cpu: &mut Cpu) {
     win32.a20 = a20;
     win32.cr4 = cr4;
     version::start(win32);
+    nls::start(win32);
     dll_files::sync(&mut cpu.bus);
     boot::session_starts(cpu);
     loop {
@@ -857,6 +900,22 @@ fn create_process(
     create_process_from(cpu, path, line, &file, environment, inherited, std, startup, suspended)
 }
 
+/// The program file `file`, read from `path`, as a game fix patches it
+/// before it loads, or None when no fix applies.
+fn patch_at_load(cpu: &mut Cpu, path: &str, file: &[u8]) -> Option<Vec<u8>> {
+    if !cpu.bus.game_fixes {
+        return None;
+    }
+    let bus = &cpu.bus;
+    let (fix, patched) =
+        crate::game_fixes::patch_win32(path, file, |fix| bus.game_fix_enabled(fix))?;
+    cpu.bus.log_string(&format!(
+        "[game fix] {}: {} ({}): {} patched as it loads",
+        fix.name, fix.game, fix.reason, path
+    ));
+    Some(patched)
+}
+
 /// `create_process` with the program's file `file`, read already (or
 /// made, as the Win16 process's is).
 #[allow(clippy::too_many_arguments)]
@@ -874,6 +933,10 @@ pub(crate) fn create_process_from(
     if cpu.bus.win32.pool.is_none() {
         cpu.bus.win32.pool = memory::Pool::take(&mut cpu.bus, loader::MIN_MEMORY);
     }
+    // A program whose file a game fix patches as it loads (`game_fixes`:
+    // Test Drive 4's race camera).
+    let patched = patch_at_load(cpu, path, file);
+    let file = patched.as_deref().unwrap_or(file);
     let loaded = loader::load(cpu, path, line, file, environment)?;
     let mut process = loaded.process;
     process.priority_class = 0x20;
@@ -1175,6 +1238,7 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     crate::win16::flat::process_ending(cpu, pid);
     let process = cpu.bus.win32.processes.remove(index);
     process.memory.release(&mut cpu.bus);
+    cpu.programs.processes_ended += 1;
     registry::process_ended(cpu, process.id);
     user32::process_ended(cpu, process.id, &tids);
     gdi32::process_ended(cpu, process.id);
@@ -1242,8 +1306,88 @@ pub(crate) fn fatal_with(cpu: &mut Cpu, what: &str, ctx: Option<&Context>, code:
 /// there. For what a message or a log line says, which mustn't fault a
 /// function that has already ended the process.
 fn peek_32(cpu: &Cpu, lin: u32) -> Option<u32> {
-    let phys = running(cpu)?.memory.translate(&cpu.bus, lin)?;
-    Some(cpu.bus.read_32(phys as usize))
+    running(cpu)?.memory.read_32(&cpu.bus, lin)
+}
+
+/// The page tables the processor has (CR3), for the debugger, whose reads
+/// and writes walk them as the processor would and find a page that isn't
+/// present missing. None unless paging is on and the built-in Windows has
+/// its memory: only then are the tables its own, with its entries for
+/// pages that aren't present.
+fn debugger_tables(cpu: &Cpu) -> Option<memory::Memory> {
+    (cpu.cr0 & crate::cpu::CR0_PG != 0 && cpu.bus.win32.pool.is_some())
+        .then(|| memory::Memory::tables(cpu.cr3))
+}
+
+/// Whether the processor's tables are the built-in Windows's, where a
+/// page of a program's own memory can be in the page file.
+pub fn has_page_file(cpu: &Cpu) -> bool {
+    debugger_tables(cpu).is_some()
+}
+
+/// Where the debugger finds the page at `lin` when the processor's tables
+/// don't have it present: in the page file, or in the physical page a
+/// PAGE_NOACCESS page keeps. None where the page is present or isn't
+/// committed.
+pub fn kept_page(cpu: &Cpu, lin: u32) -> Option<Kept> {
+    debugger_tables(cpu)?.kept(&cpu.bus, lin)
+}
+
+/// Fill `data` from `lin`, whose pages are in the page file, from their
+/// contents there: no page fault, and the pages stay where they are.
+/// None where a page isn't in the page file or present.
+pub fn peek_paged(cpu: &Cpu, lin: u32, data: &mut [u8]) -> Option<()> {
+    debugger_tables(cpu)?.read(&cpu.bus, lin, data)
+}
+
+/// Write `data` at `lin`, whose pages are in the page file, into their
+/// contents there, as the system's own writes do (`Memory::write`): no
+/// page fault, the pages stay where they are, and a page of zeros gets a
+/// place for its contents, which takes no more of the page file's room
+/// than the page had as it was committed. None, with pages before it
+/// written, where a page isn't in the page file or present: check with
+/// `kept_page` first.
+pub fn poke_paged(cpu: &mut Cpu, lin: u32, data: &[u8]) -> Option<()> {
+    debugger_tables(cpu)?.write(&mut cpu.bus, lin, data)
+}
+
+/// Whether the page at `lin` is one of a program's own memory, which goes
+/// out to the page file and comes back at another physical address: what
+/// the debugger keeps by its linear address.
+pub fn page_moves(cpu: &Cpu, lin: u32) -> bool {
+    debugger_tables(cpu).is_some_and(|m| m.moves(&cpu.bus, lin))
+}
+
+/// Whether a process of the built-in Windows has the page tables at
+/// `cr3`: the debugger keeps breakpoints and watchpoints by linear address
+/// in them while it does.
+pub fn tables_live(cpu: &Cpu, cr3: u32) -> bool {
+    cr3 != 0 && has_memory(cpu) && cpu.bus.win32.processes.iter().any(|p| p.memory.cr3 == cr3)
+}
+
+/// Whether the built-in Windows has its memory: from its session's start
+/// to its end.
+pub fn has_memory(cpu: &Cpu) -> bool {
+    cpu.bus.win32.pool.is_some()
+}
+
+/// Fill `data` from `lin` in the page tables at `cr3`, whichever the
+/// processor has, for the debugger's watchpoints: from the physical page
+/// mapped there or kept by a PAGE_NOACCESS entry, or from the page file.
+/// The tables are walked once for each page. The bytes of a page that
+/// isn't committed stay as they were, and so do all of them before the
+/// built-in Windows has its memory.
+pub fn read_in(cpu: &Cpu, cr3: u32, lin: u32, data: &mut [u8]) {
+    if has_memory(cpu) {
+        memory::Memory::tables(cr3).peek(&cpu.bus, lin, data);
+    }
+}
+
+/// The pages of the page tables the processor has that are in the page
+/// file, as at most `limit` runs, and whether there are more. None before
+/// the built-in Windows has its memory, or with paging off.
+pub fn paged_ranges(cpu: &Cpu, limit: usize) -> Option<(Vec<PagedRange>, bool)> {
+    Some(debugger_tables(cpu)?.paged_ranges(&cpu.bus, limit))
 }
 
 /// Whether the running function of a built-in DLL was called from guest
@@ -1367,6 +1511,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         let a20 = win32.a20;
         for process in std::mem::take(&mut win32.processes) {
             process.memory.release(&mut cpu.bus);
+            cpu.programs.processes_ended += 1;
             registry::process_ended(cpu, process.id);
         }
         // DirectPlay's objects leave their sessions, which the room would
@@ -1472,6 +1617,8 @@ crate::state_fields!(Process {
     imagehlp,
     parent,
     vfw,
+} skip {
+    file_apis_oem,
 });
 crate::state_fields!(Win32 {
     pending,
@@ -1519,19 +1666,25 @@ crate::state_fields!(Win32 {
     boot,
     win16,
     desktop_depth,
+    os_locale,
     atoms,
     desktop_size,
     wnaspi32,
     oleaut32,
     msacm32,
+    comm,
 } skip {
     enabled,
     guest_dlls,
     guest_replace,
     version,
     depth,
+    locale,
     dll_files,
     trace,
+    trace3d,
     wait_due,
     system_clock,
+    tlb_stale,
+    paging,
 });

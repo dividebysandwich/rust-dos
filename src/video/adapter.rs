@@ -39,6 +39,10 @@ pub enum Adapter {
     /// An ATI 3D RAGE II (mach64 GT-B): the 3D RAGE's registers, and a
     /// texture palette of its own.
     AtiRage2,
+    /// ToadForce (`toadforce`), a card rust-dos defines: the Super VGA's
+    /// modes, and its own registers, 64 MB of memory and command ring,
+    /// which the built-in Windows drives.
+    ToadForce,
     /// IBM's VGA, without VESA modes.
     Vga,
     /// IBM's Enhanced Graphics Adapter with an Enhanced Color Display: 16
@@ -59,7 +63,7 @@ pub enum Adapter {
 }
 
 impl Adapter {
-    pub const ALL: [Adapter; 16] = [
+    pub const ALL: [Adapter; 17] = [
         Adapter::Svga,
         Adapter::S3,
         Adapter::S3Virge,
@@ -70,6 +74,7 @@ impl Adapter {
         Adapter::Banshee,
         Adapter::AtiRage,
         Adapter::AtiRage2,
+        Adapter::ToadForce,
         Adapter::Vga,
         Adapter::Ega,
         Adapter::Cga,
@@ -93,6 +98,7 @@ impl Adapter {
             "svga_banshee" | "banshee" => Some(Adapter::Banshee),
             "svga_ati_3drage" | "rage" | "3drage" | "mach64" => Some(Adapter::AtiRage),
             "svga_ati_3drage2" | "rage2" | "3drage2" => Some(Adapter::AtiRage2),
+            "svga_toadforce" | "toadforce" => Some(Adapter::ToadForce),
             "vga" | "vgaonly" => Some(Adapter::Vga),
             "ega" => Some(Adapter::Ega),
             "cga" => Some(Adapter::Cga),
@@ -115,6 +121,7 @@ impl Adapter {
             Adapter::Banshee => "svga_banshee",
             Adapter::AtiRage => "svga_ati_3drage",
             Adapter::AtiRage2 => "svga_ati_3drage2",
+            Adapter::ToadForce => "svga_toadforce",
             Adapter::Vga => "vga",
             Adapter::Ega => "ega",
             Adapter::Cga => "cga",
@@ -137,6 +144,7 @@ impl Adapter {
             Adapter::Banshee => "3dfx Voodoo Banshee (3D)",
             Adapter::AtiRage => "ATI 3D RAGE (3D)",
             Adapter::AtiRage2 => "ATI 3D RAGE II (3D)",
+            Adapter::ToadForce => "ToadForce",
             Adapter::Vga => "VGA",
             Adapter::Ega => "EGA",
             Adapter::Cga => "CGA",
@@ -152,6 +160,12 @@ impl Adapter {
             || self.is_s3()
             || self.is_banshee()
             || self.is_mach64()
+            || self.is_toadforce()
+    }
+
+    /// Whether the adapter is the ToadForce, the card in `toadforce`.
+    pub fn is_toadforce(self) -> bool {
+        self == Adapter::ToadForce
     }
 
     /// Whether the adapter is one of ATI's mach64 GTs, the card in
@@ -203,6 +217,7 @@ impl Adapter {
             || self.is_s3()
             || self.is_banshee()
             || self.is_mach64()
+            || self.is_toadforce()
     }
 
     /// Whether the BIOS has the EGA's functions: the palette registers

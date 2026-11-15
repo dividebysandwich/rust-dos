@@ -185,13 +185,13 @@ impl Page {
                 VrResolution, VrFoveation, VrRefresh, VrGraphics,
             ],
             Page::Display => {
-                &[Scale, Fullscreen, Aspect, Vrr, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, MonitorEffects, Composite, CompositeEra]
+                &[Scale, Fullscreen, Aspect, Vrr, FpsCap, Filter, Shader, CrtCurvature, CrtGlow, Monochrome, MonitorEffects, Composite, CompositeEra]
             }
             Page::Emulator => &[
                 Cycles, AutoFps, AutoBusyOs, Core, Fpu, Cpu, Post, Machine, Voodoo, VoodooMemory, VoodooRenderer, VoodooScale, VoodooScaleShader, VoodooMsaa,
                 VoodooDither,
-                VoodooAnisotropy, VoodooTextureSampling, VoodooFpsCap, VoodooGamma, VoodooOverlay, PowerVr, PowerVrFilter,
-                VeriteRisc, VeriteMhz, VeriteRom, VeriteIrq,
+                VoodooAnisotropy, VoodooTextureSampling, VoodooGamma, VoodooOverlay, PowerVr, PowerVrFilter,
+                VeriteRisc, VeriteMhz, VeriteRom, VeriteIrq, ToadForceMemory, ToadForceRenderer,
                 Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, FloppyController, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseSensitivity, MouseAutocapture, MouseCaptureMessages, MouseMenuHold, PauseInSettings, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
@@ -371,6 +371,10 @@ pub struct ConfigUi {
     /// The field of a row of several that Left and Right change.
     field: usize,
     settings: Settings,
+    /// The memory the settings gave when they last changed
+    /// (`Settings::memory_mb`), to tell when another CPU or display
+    /// adapter changes its default.
+    memory_mb: usize,
     drives: Vec<DriveInfo>,
     /// What a booted system has of them, while one runs.
     booted: Option<BootView>,
@@ -500,6 +504,7 @@ impl ConfigUi {
             scroll: 0,
             field: 0,
             settings: Settings::default(),
+            memory_mb: Settings::default().memory_mb(),
             drives: Vec::new(),
             booted: None,
             config_file: None,
@@ -674,6 +679,7 @@ impl ConfigUi {
     pub fn open(&mut self, settings: &Settings, config_file: Option<PathBuf>, host: &dyn Host) {
         self.open = true;
         self.settings = settings.clone();
+        self.memory_mb = settings.memory_mb();
         self.drives = host.drives();
         self.booted = host.booted();
         self.config_file = config_file;

@@ -18,6 +18,13 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) vrr: bool,
 
+    /// The most frames a second a program may show, on any card: auto
+    /// (60, and a present that waits for the retrace at the display's
+    /// rate), off, or 10 to 240 [default: auto, or the config file's
+    /// fps_cap]
+    #[arg(long, value_name = "FPS", value_parser = parse_fps_cap)]
+    pub(crate) fps_cap: Option<FpsCap>,
+
     /// Keep the window hidden, for runs driven through the debug server:
     /// the 3dfx card is still drawn with OpenGL (voodoo_renderer=opengl),
     /// on the host's GPU, where SDL_VIDEO_DRIVER=dummy has no OpenGL. A
@@ -119,6 +126,12 @@ pub(crate) struct Args {
     /// stacks for flame graphs (FILE.folded) beside it (docs/profiling.md)
     #[arg(long, value_name = "FILE")]
     pub(crate) profile: Option<std::path::PathBuf>,
+
+    /// Write what Windows programs ask of DirectDraw, Direct3D and OpenGL
+    /// to FILE, each call or state the first time it comes, and all of
+    /// them with their counts to FILE.counts (docs/llm-debugging.md)
+    #[arg(long, value_name = "FILE")]
+    pub(crate) trace_3d: Option<std::path::PathBuf>,
 
     /// Samples a second for --profile (10 to 20000)
     #[arg(long, value_name = "HZ", default_value_t = rust_dos::profile::session::DEFAULT_HZ,
@@ -269,9 +282,9 @@ pub(crate) struct RunArgs {
     #[arg(long, default_value_t = 100_000)]
     pub(crate) cycles: u32,
 
-    /// The machine's memory in MB
-    #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u32).range(1..=256))]
-    pub(crate) mem: u32,
+    /// The machine's memory in MB [default: 16, the 486's]
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=256))]
+    pub(crate) mem: Option<u32>,
 
     /// Print the text screen at the end when nothing was printed through
     /// DOS, for programs that write to the screen's memory
@@ -291,6 +304,16 @@ pub(crate) struct RunArgs {
 /// `--audio-output`'s value.
 fn parse_audio_output(value: &str) -> Result<rust_dos::audio::OutputChoice, String> {
     rust_dos::audio::OutputChoice::parse(value).ok_or_else(|| "auto, sdl or null".to_string())
+}
+
+/// `--fps-cap`'s value.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FpsCap(pub(crate) rust_dos::frame_cap::Cap);
+
+fn parse_fps_cap(value: &str) -> Result<FpsCap, String> {
+    rust_dos::frame_cap::parse(value)
+        .map(FpsCap)
+        .ok_or_else(|| "auto, off, or 10 to 240".to_string())
 }
 
 /// `--vr-graphics`'s value.

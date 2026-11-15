@@ -278,6 +278,11 @@ The results that aren't clean, and why:
   ERROR_BAD_FORMAT; Windows 9x's loader can't open it, and says
   ERROR_FILE_NOT_FOUND. `374`: a second FreeLibrary of COMCTL32.DLL
   succeeds, as the built-in DLLs are never unloaded.
+- kernel32 `locale.c:562`: GetDateFormatA of the Russian locale with
+  "ddMMMM" should give the month's genitive form ("ноября" after a day),
+  as Windows XP writes it. The built-in Windows has the nominative
+  names only; whether a Russian Windows 98 wrote the genitive isn't
+  known (#1024). Without the Russian locale the test skipped at `553`.
 - msvcrt `environ.c:51`: `system` can't start a command interpreter,
   which is a DOS program. `system(NULL)` still returns 1, as Windows
   95's does, since there is one there.

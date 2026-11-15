@@ -239,8 +239,10 @@ impl Voodoo {
     }
 
     /// bit 31 of bltCommand, bltDstXY or bltSize: run the blit, or for a
-    /// CPU-to-screen one get ready for its data.
+    /// CPU-to-screen one get ready for its data. A Voodoo2's only: the
+    /// Banshee's 3D space has no blitter registers (`render3d::absent`).
     pub(crate) fn blit_start(&mut self) {
+        debug_assert!(self.banshee.is_none(), "a Banshee has no Voodoo2 blitter");
         let command = self.blt_command();
         if command & COMMAND == SGRAM_FILL && self.sgram_fill_rows() {
             self.display_dirty = true;
@@ -351,7 +353,7 @@ impl Voodoo {
     /// the memory, where the workers' rows of one buffer aren't those of
     /// another.
     fn sgram_fill_rows(&mut self) -> bool {
-        if self.banshee.is_some() || !self.backlog.borrow().layout.prunable {
+        if !self.backlog.borrow().layout.prunable {
             return false;
         }
         let rows = match self.sgram_tiles() {
@@ -446,7 +448,7 @@ impl Voodoo {
         let fbi = &self.fbi;
         let rowpixels = fbi.rowpixels;
         let pages = (self.reg[FBI_INIT2] >> 11) & 0x1FF;
-        if self.banshee.is_some() || rowpixels == 0 || !rowpixels.is_multiple_of(64) || pages == 0 {
+        if rowpixels == 0 || !rowpixels.is_multiple_of(64) || pages == 0 {
             return None;
         }
         let mut buffers = [None; 4];

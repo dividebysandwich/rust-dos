@@ -900,6 +900,195 @@ fn mmio_reads_and_writes_riff_chunks() {
     }
 }
 
+const MMIO_WRITE: i32 = 1;
+const MMIO_READWRITE: i32 = 2;
+const MMIO_CREATE: i32 = 0x1000;
+const MMIO_ALLOCBUF: i32 = 0x10000;
+
+/// The mmio functions `mmio_calls_program` imports, by their place in
+/// its list of imports.
+const MMIO_OPEN: usize = 1;
+const MMIO_ASCEND: usize = 2;
+const MMIO_CREATE_CHUNK: usize = 3;
+const MMIO_WRITE_FN: usize = 4;
+const MMIO_CLOSE: usize = 5;
+const MMIO_SEEK: usize = 6;
+
+/// A call of `mmio_calls_program`: the import, its arguments after the
+/// file's handle, and what it returns.
+type MmioCall = (usize, Vec<i32>, i32);
+
+/// A program that opens the file named at the start of `data` with
+/// `flags` and makes `calls` on it, which get the address of an offset
+/// in `data`. Exit code 1 if every call returned what it should.
+fn mmio_calls_program(
+    data: &[u8],
+    flags: i32,
+    calls: impl FnOnce(&dyn Fn(u32) -> i32) -> Vec<MmioCall>,
+) -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        (
+            "WINMM.dll",
+            &[
+                "mmioOpenA",
+                "mmioAscend",
+                "mmioCreateChunk",
+                "mmioWrite",
+                "mmioClose",
+                "mmioSeek",
+            ],
+        ),
+    ];
+    program(imports, data, |a, l| {
+        let at = |offset: u32| l.at(offset) as i32;
+        a.xor(ebx, ebx)?;
+        let mut failed = a.create_label();
+        call(a, l.import(MMIO_OPEN), &[at(0), 0, flags])?;
+        a.mov(esi, eax)?;
+        a.test(eax, eax)?;
+        a.jz(failed)?;
+        for (import, args, ok) in calls(&at) {
+            for &arg in args.iter().rev() {
+                a.push(arg)?;
+            }
+            a.push(esi)?;
+            a.call(l.import(import))?;
+            a.cmp(eax, ok)?;
+            a.jne(failed)?;
+        }
+        a.mov(ebx, 1)?;
+        a.set_label(&mut failed)?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    })
+}
+
+/// The bytes the mmio tests write: byte `k` is `k * 7 + 1`.
+fn pattern(k: usize) -> u8 {
+    (k * 7 + 1) as u8
+}
+
+/// BIG.DAT made through mmio's own buffer, open for writing only, as
+/// Shadow of the Horned Rat writes its saves: a RIFF chunk holding a
+/// 'big ' chunk of 9000 bytes, more than the 8 KB buffer, then a 'tail'
+/// chunk of 3. Each mmioAscend goes back to write a size before the
+/// buffer's place.
+fn mmio_big_program() -> Vec<u8> {
+    const MMIO_CREATERIFF: i32 = 0x20;
+    const RIFF: u32 = 0x20;
+    const BIG: u32 = 0x40;
+    const TAIL: u32 = 0x60;
+    const BYTES: u32 = 0x100;
+    let mut data = vec![0u8; BYTES as usize + 9000];
+    put(&mut data, 0, b"BIG.DAT");
+    put(&mut data, (RIFF + 8) as usize, b"SAVE");
+    put(&mut data, BIG as usize, b"big ");
+    put(&mut data, TAIL as usize, b"tail");
+    for k in 0..9000 {
+        data[BYTES as usize + k] = pattern(k);
+    }
+    let flags = MMIO_CREATE | MMIO_WRITE | MMIO_ALLOCBUF;
+    mmio_calls_program(&data, flags, |at| {
+        vec![
+            (MMIO_CREATE_CHUNK, vec![at(RIFF), MMIO_CREATERIFF], 0),
+            (MMIO_CREATE_CHUNK, vec![at(BIG), 0], 0),
+            (MMIO_WRITE_FN, vec![at(BYTES), 5000], 5000),
+            (MMIO_WRITE_FN, vec![at(BYTES + 5000), 4000], 4000),
+            (MMIO_ASCEND, vec![at(BIG), 0], 0),
+            (MMIO_CREATE_CHUNK, vec![at(TAIL), 0], 0),
+            (MMIO_WRITE_FN, vec![at(BYTES), 3], 3),
+            (MMIO_ASCEND, vec![at(TAIL), 0], 0),
+            (MMIO_ASCEND, vec![at(RIFF), 0], 0),
+            (MMIO_CLOSE, vec![0], 0),
+        ]
+    })
+}
+
+/// SEEK.DAT made through mmio's own buffer with `mode`: 12000 bytes of
+/// the pattern, which the end is after while the buffer still holds the
+/// last 3808, then from 0 the 8202 bytes from the pattern's byte 1 on,
+/// which fill the buffer and go on into the next 8 KB, then a seek on
+/// to 8300, in that buffer, and the pattern's first 4 bytes there. The
+/// buffer still holds bytes it took before it went on.
+fn mmio_seek_on_program(mode: i32) -> Vec<u8> {
+    const BYTES: u32 = 0x100;
+    let mut data = vec![0u8; BYTES as usize + 12000];
+    put(&mut data, 0, b"SEEK.DAT");
+    for k in 0..12000 {
+        data[BYTES as usize + k] = pattern(k);
+    }
+    let flags = MMIO_CREATE | mode | MMIO_ALLOCBUF;
+    mmio_calls_program(&data, flags, |at| {
+        vec![
+            (MMIO_WRITE_FN, vec![at(BYTES), 12000], 12000),
+            (MMIO_SEEK, vec![0, 2], 12000),
+            (MMIO_SEEK, vec![0, 0], 0),
+            (MMIO_WRITE_FN, vec![at(BYTES + 1), 8202], 8202),
+            (MMIO_SEEK, vec![8300, 0], 8300),
+            (MMIO_WRITE_FN, vec![at(BYTES), 4], 4),
+            (MMIO_CLOSE, vec![0], 0),
+        ]
+    })
+}
+
+/// A size written back before the buffer's place leaves the rest of the
+/// file as it was. Without the fix the buffer, which can't be read from
+/// a file open for writing only, went out from the start of its 8 KB
+/// with the end of the 'big ' chunk's data still in it, over the RIFF
+/// header and the start of the data.
+#[test]
+fn mmio_writes_chunks_larger_than_its_buffer_to_a_write_only_file() {
+    for core in CORES {
+        let files = [("T.EXE", mmio_big_program())];
+        let mut cpu = machine("mmio-big", core, &files, |_| {});
+        run_to_exit(&mut cpu, 20_000, |_| {});
+        assert_eq!(cpu.errorlevel, 1, "{core:?}: {:?}", printed(&cpu));
+        let out = fs::read(scratch_path("mmio-big").join("BIG.DAT")).unwrap();
+        let mut expected = b"RIFF".to_vec();
+        expected.extend((4 + 8 + 9000 + 8 + 4u32).to_le_bytes());
+        expected.extend(b"SAVEbig ");
+        expected.extend(9000u32.to_le_bytes());
+        expected.extend((0..9000).map(pattern));
+        expected.extend(b"tail");
+        expected.extend(3u32.to_le_bytes());
+        expected.extend([1, 8, 15, 0]);
+        assert_eq!(out.len(), expected.len(), "{core:?}");
+        assert!(out == expected, "{core:?}: {:02X?}", &out[..24]);
+    }
+}
+
+/// A seek on inside the buffer that writes went on into, over bytes the
+/// file has, leaves those bytes as they were, open for writing only or
+/// for reading and writing. A seek to the end counts the bytes still in
+/// the buffer. Without the fix the buffer counted as holding the file
+/// there, and the flush at the close wrote what it still held from the
+/// first 8 KB over the bytes from 8202 to 8300; the seek to the end
+/// gave 8192.
+#[test]
+fn mmio_seeks_on_in_a_buffer_writes_went_on_into() {
+    let mut expected: Vec<u8> = (0..12000).map(pattern).collect();
+    for (k, byte) in expected[..8202].iter_mut().enumerate() {
+        *byte = pattern(k + 1);
+    }
+    for (k, byte) in expected[8300..8304].iter_mut().enumerate() {
+        *byte = pattern(k);
+    }
+    for mode in [MMIO_WRITE, MMIO_READWRITE] {
+        for core in CORES {
+            let files = [("T.EXE", mmio_seek_on_program(mode))];
+            let mut cpu = machine("mmio-seek-on", core, &files, |_| {});
+            run_to_exit(&mut cpu, 20_000, |_| {});
+            assert_eq!(cpu.errorlevel, 1, "{mode} {core:?}: {:?}", printed(&cpu));
+            let out = fs::read(scratch_path("mmio-seek-on").join("SEEK.DAT")).unwrap();
+            assert_eq!(out.len(), expected.len(), "{mode} {core:?}");
+            let wrong = (0..out.len()).find(|&k| out[k] != expected[k]);
+            assert_eq!(wrong, None, "{mode} {core:?}");
+        }
+    }
+}
+
 // The sequencer test's data: its two MCI strings, the alias, an
 // MCI_SEQ_SET_PARMS (dwCallback, dwTimeFormat, dwAudio, dwTempo, dwPort,
 // dwSlave, dwMaster, dwOffset) and an MCI_STATUS_PARMS (dwCallback,
@@ -1376,13 +1565,20 @@ fn avivideo_realizes_the_movies_palette_on_a_256_colour_desktop() {
 /// foreground one, which takes them back, so the system palette's entry
 /// 10 is the movie's first color. MCI_DGV_REALIZE_BKGD realizes it in
 /// the background, where no entry is free, and the entry keeps the
-/// program's color. The program then ends without MCI_CLOSE, and its
-/// device closes after its GDI objects went.
+/// program's color. A full-screen play (MCI_PLAY with
+/// MCI_MCIAVI_PLAY_FULLSCREEN, waited for) takes them back as the normal
+/// MCI_REALIZE does: it has the screen to itself, though the window it
+/// covers the screen with isn't the foreground window. The program then
+/// ends without MCI_CLOSE, and its device closes after its GDI objects
+/// went.
 #[test]
 fn avivideo_realize_takes_the_foreground_or_the_background() {
     const WS_POPUP_VISIBLE: i32 = 0x9000_0000_u32 as i32;
     const MCI_OPEN: i32 = 0x803;
+    const MCI_PLAY: i32 = 0x806;
     const MCI_REALIZE: i32 = 0x840;
+    const MCI_WAIT: i32 = 0x2;
+    const MCI_MCIAVI_PLAY_FULLSCREEN: i32 = 0x0200_0000;
     const OPEN_FLAGS: i32 = 0x0200 | 0x1_0000 | 0x2_0000;
     const GENERIC_PARMS: u32 = 0xC0;
     const ENTRY: u32 = 0xD0;
@@ -1421,11 +1617,14 @@ fn avivideo_realize_takes_the_foreground_or_the_background() {
             ],
         ),
     ];
+    let movie = 200 | 100 << 8 | 50 << 16;
+    let full_screen = MCI_MCIAVI_PLAY_FULLSCREEN | MCI_WAIT;
     let cases = [
-        ("realize_normal", 0x1_0000, 200 | 100 << 8 | 50 << 16),
-        ("realize_background", 0x2_0000, 0x0201),
+        ("realize_normal", MCI_REALIZE, 0x1_0000, movie),
+        ("realize_background", MCI_REALIZE, 0x2_0000, 0x0201),
+        ("full_screen_play", MCI_PLAY, full_screen, movie),
     ];
-    for (test, flags, entry) in cases {
+    for (test, msg, flags, entry) in cases {
         let exe = program(imports, &data, |a, l| {
             a.xor(ebx, ebx)?;
             a.mov(dword_ptr(l.at(OPEN_PARMS + 12)), l.at(CLIP_NAME) as i32)?;
@@ -1460,7 +1659,7 @@ fn avivideo_realize_takes_the_foreground_or_the_background() {
             check_eax(a, 0, 0)?;
             a.push(l.at(GENERIC_PARMS) as i32)?;
             a.push(flags)?;
-            a.push(MCI_REALIZE)?;
+            a.push(msg)?;
             a.push(dword_ptr(l.at(OPEN_PARMS + 4)))?;
             a.call(l.import(1))?;
             check_eax(a, 0, 1)?;
@@ -1484,6 +1683,290 @@ fn avivideo_realize_takes_the_foreground_or_the_background() {
         });
         run_to_exit(&mut cpu, 20_000, |_| {});
         assert_eq!(cpu.errorlevel, 0b111, "{test}: {:?}", printed(&cpu));
+    }
+}
+
+/// The program of `video_plays_in_its_window_or_over_the_screen`: the
+/// command strings Nocturne sends for its opening movie, then plays
+/// that cover the screen, through mciSendStringA and mciSendCommandA. It
+/// exits with 0, or with the number of the first check that failed.
+fn full_screen_program(name: &str) -> Vec<u8> {
+    const WS_POPUP_VISIBLE: i32 = 0x9000_0000_u32 as i32;
+    const MCI_PLAY: i32 = 0x806;
+    const MCI_STATUS: i32 = 0x814;
+    const MCI_FROM: i32 = 0x4;
+    const MCI_STATUS_ITEM: i32 = 0x100;
+    const MCI_MCIAVI_PLAY_FULLSCREEN: i32 = 0x0200_0000;
+    // The variables: half the screen's width and height, the program's
+    // window, the device's id and window, the window that covers the
+    // screen, MCI_STATUS_PARMS, MCI_PLAY_PARMS (from 0), the answer of a
+    // command string, and the open command.
+    const CX: u32 = 0x00;
+    const CY: u32 = 0x04;
+    const POPUP: u32 = 0x08;
+    const ID: u32 = 0x0C;
+    const CHILD: u32 = 0x10;
+    const COVER: u32 = 0x14;
+    const STATUS_PARMS: u32 = 0x40;
+    const PLAY_PARMS: u32 = 0x60;
+    const ANSWER: u32 = 0x80;
+    const OPEN: u32 = 0xC0;
+    let mut data = vec![0u8; 0x140];
+    put(
+        &mut data,
+        STATUS_PARMS as usize + 8,
+        &0x4001u32.to_le_bytes(),
+    );
+    let mut text = |s: &str| {
+        let at = data.len() as u32;
+        data.extend_from_slice(s.as_bytes());
+        data.push(0);
+        at
+    };
+    let open = text(&format!("open C:\\{name} alias mov style child parent %d"));
+    let static_class = text("Static");
+    let alias = text("mov");
+    let commands = [
+        "play mov window",
+        "play mov from 0 fullscreen",
+        "stop mov",
+        "play mov from 0 fullscreen by 2",
+        "play mov window fullscreen",
+        "status mov window visible",
+        "close mov",
+        "open C:\\S.WAV alias snd",
+        "play snd window",
+        "close snd",
+    ]
+    .map(&mut text);
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["Sleep", "ExitProcess"]),
+        (
+            "WINMM.dll",
+            &["mciSendStringA", "mciSendCommandA", "mciGetDeviceIDA"],
+        ),
+        (
+            "USER32.dll",
+            &[
+                "CreateWindowExA",
+                "GetDC",
+                "GetSystemMetrics",
+                "wsprintfA",
+                "WindowFromPoint",
+                "IsWindow",
+            ],
+        ),
+        ("GDI32.dll", &["GetPixel"]),
+    ];
+    let (sleep, exit) = (0, 1);
+    let (send_string, send_command, device_id) = (2, 3, 4);
+    let (create, get_dc, metrics, wsprintf) = (5, 6, 7, 8);
+    let (from_point, is_window, get_pixel) = (9, 10, 11);
+    program(imports, &data, |a, l| {
+        // Exit with `code` unless EAX is `value`.
+        let check = |a: &mut CodeAssembler, value: i32, code: i32| {
+            let mut ok = a.create_label();
+            a.cmp(eax, value)?;
+            a.je(ok)?;
+            call(a, l.import(exit), &[code])?;
+            a.set_label(&mut ok)?;
+            a.nop()
+        };
+        // mciSendStringA(the command `k`, the answer, its size, 0).
+        let send = |a: &mut CodeAssembler, k: usize| {
+            let at = l.at(commands[k]) as i32;
+            call(a, l.import(send_string), &[at, l.at(ANSWER) as i32, 64, 0])
+        };
+        // GetPixel(the screen's DC, x, y), where each is a number or
+        // a variable with an offset.
+        let pixel = |a: &mut CodeAssembler, x: (Option<u32>, i32), y: (Option<u32>, i32)| {
+            for (var, n) in [y, x] {
+                match var {
+                    Some(v) => {
+                        a.mov(eax, dword_ptr(l.at(v)))?;
+                        a.add(eax, n)?;
+                        a.push(eax)?;
+                    }
+                    None => a.push(n)?,
+                }
+            }
+            call(a, l.import(get_dc), &[0])?;
+            a.push(eax)?;
+            a.call(l.import(get_pixel))
+        };
+        // Exit with `code` unless EAX is a red.
+        let red = |a: &mut CodeAssembler, code: i32| {
+            let mut fail = a.create_label();
+            let mut ok = a.create_label();
+            a.mov(ecx, eax)?;
+            a.and(ecx, 0xFF)?;
+            a.cmp(ecx, 0xC0)?;
+            a.jb(fail)?;
+            a.mov(ecx, eax)?;
+            a.shr(ecx, 16)?;
+            a.and(ecx, 0xFF)?;
+            a.cmp(ecx, 0x40)?;
+            a.jb(ok)?;
+            a.set_label(&mut fail)?;
+            call(a, l.import(exit), &[code])?;
+            a.set_label(&mut ok)?;
+            a.nop()
+        };
+        // The window at the screen's top left corner, kept in COVER.
+        let corner = |a: &mut CodeAssembler| {
+            call(a, l.import(from_point), &[2, 2])?;
+            a.mov(dword_ptr(l.at(COVER)), eax)
+        };
+        // Exit with `code` unless COVER is a window no more: it goes
+        // with the play, though the program takes no messages.
+        let gone = |a: &mut CodeAssembler, code: i32| {
+            a.push(dword_ptr(l.at(COVER)))?;
+            a.call(l.import(is_window))?;
+            check(a, 0, code)
+        };
+        for (k, var) in [(0, CX), (1, CY)] {
+            call(a, l.import(metrics), &[k])?;
+            a.shr(eax, 1)?;
+            a.mov(dword_ptr(l.at(var)), eax)?;
+        }
+        let args = [
+            0,
+            l.at(static_class) as i32,
+            0,
+            WS_POPUP_VISIBLE,
+            0,
+            0,
+            64,
+            64,
+            0,
+            0,
+            0,
+            0,
+        ];
+        call(a, l.import(create), &args)?;
+        a.mov(dword_ptr(l.at(POPUP)), eax)?;
+        // Nocturne's open, with its window's handle in decimal.
+        a.push(eax)?;
+        a.push(l.at(open) as i32)?;
+        a.push(l.at(OPEN) as i32)?;
+        a.call(l.import(wsprintf))?;
+        a.add(esp, 12)?;
+        call(a, l.import(send_string), &[l.at(OPEN) as i32, 0, 0, 0])?;
+        check(a, 0, 1)?;
+        call(a, l.import(device_id), &[l.at(alias) as i32])?;
+        a.mov(dword_ptr(l.at(ID)), eax)?;
+        let status = [l.at(STATUS_PARMS) as i32, MCI_STATUS_ITEM, MCI_STATUS];
+        for arg in status {
+            a.push(arg)?;
+        }
+        a.push(dword_ptr(l.at(ID)))?;
+        a.call(l.import(send_command))?;
+        check(a, 0, 2)?;
+        a.mov(eax, dword_ptr(l.at(STATUS_PARMS + 4)))?;
+        a.mov(dword_ptr(l.at(CHILD)), eax)?;
+        // "play mov window": the frames show in the device's window, a
+        // child of the program's at the screen's top left corner.
+        send(a, 0)?;
+        check(a, 0, 3)?;
+        call(a, l.import(sleep), &[100])?;
+        pixel(a, (None, 16), (None, 16))?;
+        red(a, 4)?;
+        // "fullscreen": the picture at the middle of the screen, at its
+        // size in a 320 by 240 mode, black around it, in a window that
+        // isn't the device's.
+        send(a, 1)?;
+        check(a, 0, 5)?;
+        call(a, l.import(sleep), &[100])?;
+        pixel(a, (Some(CX), 0), (Some(CY), 0))?;
+        red(a, 6)?;
+        pixel(a, (None, 2), (None, 2))?;
+        check(a, 0, 7)?;
+        pixel(a, (Some(CX), -60), (Some(CY), -60))?;
+        check(a, 0, 8)?;
+        corner(a)?;
+        a.cmp(eax, dword_ptr(l.at(CHILD)))?;
+        let mut covered = a.create_label();
+        a.jne(covered)?;
+        call(a, l.import(exit), &[9])?;
+        a.set_label(&mut covered)?;
+        // A stop gives the screen back.
+        send(a, 2)?;
+        check(a, 0, 10)?;
+        gone(a, 11)?;
+        // "fullscreen by 2": the picture twice that size; the screen
+        // comes back when the play ends.
+        send(a, 3)?;
+        check(a, 0, 12)?;
+        call(a, l.import(sleep), &[100])?;
+        pixel(a, (Some(CX), -60), (Some(CY), -60))?;
+        red(a, 13)?;
+        corner(a)?;
+        call(a, l.import(sleep), &[600])?;
+        gone(a, 14)?;
+        // Not both.
+        send(a, 4)?;
+        check(a, 284, 15)?;
+        send(a, 5)?;
+        check(a, 0, 16)?;
+        a.movzx(eax, byte_ptr(l.at(ANSWER)))?;
+        check(a, b't' as i32, 17)?;
+        // MCI_PLAY with MCI_MCIAVI_PLAY_FULLSCREEN; a close gives the
+        // screen back.
+        let play = [
+            l.at(PLAY_PARMS) as i32,
+            MCI_FROM | MCI_MCIAVI_PLAY_FULLSCREEN,
+            MCI_PLAY,
+        ];
+        for arg in play {
+            a.push(arg)?;
+        }
+        a.push(dword_ptr(l.at(ID)))?;
+        a.call(l.import(send_command))?;
+        check(a, 0, 18)?;
+        corner(a)?;
+        a.cmp(eax, dword_ptr(l.at(CHILD)))?;
+        let mut covered = a.create_label();
+        a.jne(covered)?;
+        call(a, l.import(exit), &[19])?;
+        a.set_label(&mut covered)?;
+        send(a, 6)?;
+        check(a, 0, 20)?;
+        gone(a, 21)?;
+        // waveaudio's play has no "window".
+        send(a, 7)?;
+        check(a, 0, 22)?;
+        send(a, 8)?;
+        check(a, 259, 23)?;
+        send(a, 9)?;
+        call(a, l.import(exit), &[0])?;
+        a.int3()
+    })
+}
+
+/// A digitalvideo device's play takes MCIAVI's "window" and "fullscreen"
+/// (Nocturne's "play mov window notify"). "window" plays in the device's
+/// window. "fullscreen" covers the screen while it plays, the picture as
+/// MCIAVI shows it in a 320 by 240 mode, twice its size with "fullscreen
+/// by 2", and the screen comes back when the play stops or ends, or the
+/// device closes. "window" and "fullscreen" together are refused
+/// (MCIERR_FLAGS_NOT_COMPATIBLE), as is "window" for waveaudio
+/// (MCIERR_UNRECOGNIZED_KEYWORD). Both MPEGVideo and AVIVideo.
+#[test]
+fn video_plays_in_its_window_or_over_the_screen() {
+    let movies = [
+        ("CLIP.AVI", avi_clip(), CoreMode::Normal),
+        ("CLIP.AVI", avi_clip(), CoreMode::Dynamic),
+        ("CLIP.MPG", clip(), CoreMode::Normal),
+    ];
+    for (name, movie, core) in movies {
+        let files = [
+            ("T.EXE", full_screen_program(name)),
+            (name, movie),
+            ("S.WAV", short_wav()),
+        ];
+        let mut cpu = machine("full_screen", core, &files, |_| {});
+        run_to_exit(&mut cpu, 40_000, |_| {});
+        assert_eq!(cpu.errorlevel, 0, "{name} {core:?}: {:?}", printed(&cpu));
     }
 }
 /// A WAV file of 100 ms of 8-bit mono silence at 11025 Hz.

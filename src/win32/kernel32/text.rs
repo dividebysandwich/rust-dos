@@ -4,7 +4,8 @@
 
 use super::{ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, FALSE, TRUE, set_error};
 use crate::cpu::Cpu;
-use crate::win32::convert::{self, ANSI_CODE_PAGE, CodePage, OEM_CODE_PAGE};
+use crate::win32::convert;
+use crate::win32::nls::{self, CodePage};
 
 /// Error codes of the text and locale functions.
 pub(super) const ERROR_INVALID_FLAGS: u32 = 1004;
@@ -70,17 +71,14 @@ pub(super) fn read_wide_string(cpu: &mut Cpu, at: u32) -> Option<Vec<u16>> {
     Some(units)
 }
 
-/// ANSI text (code page 1252) as UTF-16, and back, a character the code
-/// page lacks becoming '?'.
-pub(super) fn ansi_to_wide(bytes: &[u8]) -> Vec<u16> {
-    bytes.iter().map(|&b| CodePage::Ansi.char(b)).collect()
+/// Text in the system's ANSI code page as UTF-16, and back, a character
+/// the code page lacks becoming '?'.
+pub(super) fn ansi_to_wide(cpu: &Cpu, bytes: &[u8]) -> Vec<u16> {
+    nls::ansi(cpu).decode(bytes)
 }
 
-pub(super) fn wide_to_ansi(units: &[u16]) -> Vec<u8> {
-    units
-        .iter()
-        .map(|&c| CodePage::Ansi.byte(c).unwrap_or(b'?'))
-        .collect()
+pub(super) fn wide_to_ansi(cpu: &Cpu, units: &[u16]) -> Vec<u8> {
+    nls::ansi(cpu).encode(units)
 }
 
 /// Write `items` (bytes or UTF-16 units, `unit` bytes each) to the buffer
@@ -125,11 +123,13 @@ fn bad_arguments(from: u32, len: u32, to: u32, size: u32) -> bool {
 /// points to, or '?', and sets the BOOL `args[7]` points to. With
 /// WC_COMPOSITECHECK a letter and a combining mark become the accented
 /// letter, if the code page has it; the mark is dropped with WC_DISCARDNS.
+/// An accented letter the code page lacks becomes its bare letter unless
+/// WC_NO_BEST_FIT_CHARS asks for the default character.
 pub(super) fn wide_char_to_multi_byte(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[code_page, flags, from, len, to, size, default, used_default] = args else {
         unreachable!()
     };
-    let Some(page) = CodePage::of(code_page) else {
+    let Some(page) = nls::code_page(cpu, code_page) else {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(0);
     };
@@ -173,12 +173,17 @@ pub(super) fn wide_char_to_multi_byte(cpu: &mut Cpu, args: &[u32]) -> Option<u32
         0 => units.len(),
         _ => units.len().min(size as usize),
     };
+    let best_fit = flags & WC_NO_BEST_FIT_CHARS == 0;
     let mut used = false;
     let bytes: Vec<u16> = units
         .iter()
         .enumerate()
         .map(|(i, &c)| {
-            page.byte(c).unwrap_or_else(|| {
+            let byte = match best_fit {
+                true => page.best_fit(c),
+                false => page.byte(c),
+            };
+            byte.unwrap_or_else(|| {
                 used |= i < written;
                 default
             }) as u16
@@ -198,7 +203,7 @@ pub(super) fn multi_byte_to_wide_char(cpu: &mut Cpu, args: &[u32]) -> Option<u32
     let &[code_page, flags, from, len, to, size] = args else {
         unreachable!()
     };
-    let Some(page) = CodePage::of(code_page) else {
+    let Some(page) = nls::code_page(cpu, code_page) else {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(0);
     };
@@ -226,25 +231,27 @@ pub(super) fn multi_byte_to_wide_char(cpu: &mut Cpu, args: &[u32]) -> Option<u32
     put_units(cpu, to, size, &units, 2)
 }
 
-/// The ANSI code page, as on a US Windows 95.
-pub(super) fn get_acp(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(ANSI_CODE_PAGE)
+/// The system locale's ANSI code page (1252 for English, 1251 for
+/// Russian).
+pub(super) fn get_acp(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(nls::ansi(cpu).number())
 }
 
-/// The OEM code page, DOS's.
-pub(super) fn get_oem_cp(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(OEM_CODE_PAGE)
+/// The system locale's OEM code page, DOS's (437 for English, 866 for
+/// Russian).
+pub(super) fn get_oem_cp(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(nls::oem(cpu).number())
 }
 
-/// Code pages 437, 850 and 1252, the ones there are.
+/// The code pages there are (nls.rs), under every locale.
 pub(super) fn is_valid_code_page(_: &mut Cpu, args: &[u32]) -> Option<u32> {
-    Some((args[0] > 1 && CodePage::of(args[0]).is_some()) as u32)
+    Some(CodePage::by_number(args[0]).is_some() as u32)
 }
 
 /// CPINFO: characters of one byte, '?' for those the code page lacks, and
 /// no lead bytes.
 pub(super) fn get_cp_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    if CodePage::of(args[0]).is_none() || args[1] == 0 {
+    if nls::code_page(cpu, args[0]).is_none() || args[1] == 0 {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
     }
@@ -261,7 +268,7 @@ pub(super) fn is_dbcs_lead_byte(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 pub(super) fn is_dbcs_lead_byte_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    if CodePage::of(args[0]).is_none() {
+    if nls::code_page(cpu, args[0]).is_none() {
         set_error(cpu, ERROR_INVALID_PARAMETER);
     }
     Some(FALSE)
@@ -334,8 +341,9 @@ fn lstrcmp(cpu: &mut Cpu, args: &[u32], flags: u32) -> Option<u32> {
     if args[0] == 0 || args[1] == 0 {
         return Some(-2i32 as u32);
     }
-    let a = ansi_to_wide(&read_string(cpu, args[0])?);
-    let b = ansi_to_wide(&read_string(cpu, args[1])?);
+    let a = read_string(cpu, args[0])?;
+    let b = read_string(cpu, args[1])?;
+    let (a, b) = (ansi_to_wide(cpu, &a), ansi_to_wide(cpu, &b));
     Some(super::sort::compare(flags, &a, &b) as i32 as u32)
 }
 
