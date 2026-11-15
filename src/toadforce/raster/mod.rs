@@ -418,13 +418,16 @@ impl Renderer {
         let hosted = attached && declined.is_none();
         // A host that transforms takes the vertices of filled,
         // smooth triangles as the program gave them: the card neither
-        // transforms them nor puts the triangles together.
+        // transforms them nor puts the triangles together. The host is
+        // asked last, since it compiles a program for a state it hasn't
+        // seen.
         let shape = &state.shape;
         let plain = (4..=6).contains(&draw.primitive) && !matches!(shape.fill, 1 | 2);
         if let Some(setup) = &geometry
             && hosted
             && plain
             && !shape.flat
+            && setup.hostable()
             && gpu.transforms(&state)
             && let Some(transform) = setup.hosted()
         {

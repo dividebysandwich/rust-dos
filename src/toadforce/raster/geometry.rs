@@ -416,18 +416,29 @@ impl Setup {
         self.two_sided != 0
     }
 
-    /// The transform as a host takes vertices through it, or None
-    /// for one a host doesn't do: blended matrices, a back lit by
-    /// itself, coordinates the card makes or puts through a matrix,
-    /// point sizes and clip planes of the program's.
-    pub fn hosted(&self) -> Option<gpu::Transform> {
-        let plain = self.two_sided == 0
+    /// Whether a host can take vertices through this transform: none
+    /// of blended matrices, a back lit by itself, coordinates the card
+    /// makes or puts through a matrix, point sizes and clip planes of
+    /// the program's. It allocates nothing, so a draw asks it before
+    /// it asks the host (`Host::transforms`, which may compile a
+    /// program) and before `hosted` builds the transform.
+    pub fn hostable(&self) -> bool {
+        self.two_sided == 0
             && self.blend == 0
             && self.point_size.is_none()
             && self.user.is_empty()
             && self.slots.len() <= SLOTS
-            && self.slots.iter().all(|s| s.generate == 0 && s.matrix.is_none());
-        if !plain || self.fvf.words > u8::MAX as usize {
+            && self
+                .slots
+                .iter()
+                .all(|s| s.generate == 0 && s.matrix.is_none())
+            && self.fvf.words <= u8::MAX as usize
+    }
+
+    /// The transform as a host takes vertices through it, or None
+    /// for one a host doesn't do (`hostable`).
+    pub fn hosted(&self) -> Option<gpu::Transform> {
+        if !self.hostable() {
             return None;
         }
         let mut sets = [(0, 0); SLOTS];
