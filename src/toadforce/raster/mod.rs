@@ -627,33 +627,41 @@ impl Renderer {
             false => Queue::Software(prims),
         };
         let (shape, sets) = (&state.shape, &state.sets[..]);
-        let wraps = state.wrap != [0; pipeline::SLOTS];
-        let set = |slot: usize| sets[slot] as usize;
         let v = |i: usize| &vertices[order[i] as usize];
-        pieces(primitive, order.len(), |piece| match piece {
-            Piece::Point(a) => queue.point(v(a), state, sets),
-            Piece::Line(a, b) => {
-                let provoking = if shape.flat_last { v(b) } else { v(a) };
-                if wraps {
+        // A state that wraps coordinates, which few draws have, copies
+        // each primitive's vertices to move them. The others go as
+        // they are.
+        if state.wrap != [0; pipeline::SLOTS] {
+            let set = |slot: usize| sets[slot] as usize;
+            pieces(primitive, order.len(), |piece| match piece {
+                Piece::Point(a) => queue.point(v(a), state, sets),
+                Piece::Line(a, b) => {
+                    let provoking = if shape.flat_last { v(b) } else { v(a) };
                     let (mut a, mut b) = (*v(a), *v(b));
                     let base = wrap_base(&[Some((a.x, a.y)), Some((b.x, b.y))]);
                     wrap(state, base, set, &mut [&mut a.tex[..], &mut b.tex[..]]);
                     queue.line(&a, &b, provoking, state, sets);
-                    return;
                 }
-                queue.line(v(a), v(b), provoking, state, sets);
-            }
-            Piece::Triangle(t, ends) => {
-                let provoking = v(t[if shape.flat_last { ends.1 } else { ends.0 }]);
-                if wraps {
+                Piece::Triangle(t, ends) => {
+                    let provoking = v(t[if shape.flat_last { ends.1 } else { ends.0 }]);
                     let mut corners = t.map(|i| *v(i));
                     let base = wrap_base(&corners.map(|c| Some((c.x, c.y))));
                     let [a, b, c] = &mut corners;
                     let tex = &mut [&mut a.tex[..], &mut b.tex[..], &mut c.tex[..]];
                     wrap(state, base, set, tex);
                     polygon(&mut queue, &corners, (7, 7), provoking, state, sets);
-                    return;
                 }
+            });
+            return;
+        }
+        pieces(primitive, order.len(), |piece| match piece {
+            Piece::Point(a) => queue.point(v(a), state, sets),
+            Piece::Line(a, b) => {
+                let provoking = if shape.flat_last { v(b) } else { v(a) };
+                queue.line(v(a), v(b), provoking, state, sets);
+            }
+            Piece::Triangle(t, ends) => {
+                let provoking = v(t[if shape.flat_last { ends.1 } else { ends.0 }]);
                 polygon(&mut queue, &t.map(v), (7, 7), provoking, state, sets);
             }
         });
