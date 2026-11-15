@@ -564,6 +564,36 @@ fn returning_from_the_entry_point_ends_with_its_value() {
 }
 
 #[test]
+fn are_file_apis_ansi_follows_set_file_apis_to_oem_and_ansi() {
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["AreFileApisANSI", "SetFileApisToOEM", "SetFileApisToANSI"],
+    )];
+    // Bit 0: ANSI at the start; bit 1: OEM after SetFileApisToOEM; bit
+    // 2: ANSI again after SetFileApisToANSI.
+    let (code, _) = run(
+        "file_apis",
+        program(BASE, false, imports, &[0], |a, l| {
+            a.call(l.import(0))?;
+            a.mov(ebx, eax)?;
+            a.call(l.import(1))?;
+            a.call(l.import(0))?;
+            a.test(eax, eax)?;
+            a.sete(al)?;
+            a.movzx(eax, al)?;
+            a.shl(eax, 1)?;
+            a.or(ebx, eax)?;
+            a.call(l.import(2))?;
+            a.call(l.import(0))?;
+            a.shl(eax, 2)?;
+            a.or(eax, ebx)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(code, 7);
+}
+
+#[test]
 fn a_function_the_built_in_windows_lacks_ends_the_program() {
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetVersion", "VirtualAllocEx"])];
     let (code, text) = run(

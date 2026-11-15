@@ -266,6 +266,10 @@ pub struct Process {
     /// error mode, which only SetErrorMode does.
     priority_class: u32,
     error_mode: u32,
+    /// Whether SetFileApisToOEM was called (and SetFileApisToANSI not
+    /// since), which only AreFileApisANSI reads: the file functions take
+    /// every name as ANSI. A save state doesn't keep it.
+    pub(crate) file_apis_oem: bool,
     /// The version of Windows its header says it was made for, as
     /// major << 16 | minor.
     subsystem_version: u32,
@@ -1587,6 +1591,8 @@ crate::state_fields!(Process {
     imagehlp,
     parent,
     vfw,
+} skip {
+    file_apis_oem,
 });
 crate::state_fields!(Win32 {
     pending,
