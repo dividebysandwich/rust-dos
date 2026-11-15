@@ -11,11 +11,14 @@
 //! vertex flat shading takes the colors of where OpenGL has it, which
 //! is not where Direct3D has it.
 //!
-//! With GL_LIGHTING on, each vertex is lit here as it is given
-//! (`shade.rs`), and reaches the pipeline with its lit color and
-//! Direct3D's lighting off. With two-sided lighting a vertex has a
-//! front and a back color, and each polygon takes the ones of the side
-//! it shows (`back_faces`).
+//! The vertices wait as the program gave them until their draw, which
+//! knows what they make (`draw`). A card that transforms and lights
+//! vertices itself then gets them so, with OpenGL's lights and
+//! materials as its state (`tnl.rs`). Otherwise, with GL_LIGHTING on,
+//! each vertex is lit here (`shade.rs`) and reaches the pipeline with
+//! its lit color and Direct3D's lighting off. With two-sided lighting
+//! a vertex has a front and a back color, and each polygon takes the
+//! ones of the side it shows (`back_faces`).
 
 use super::super::ddraw::d3d::device::{
     self as inner_device, RS_ALPHAFUNC, RS_BLENDOP, RS_CLIPPING, RS_COLORWRITEENABLE, RS_CULLMODE,
@@ -31,7 +34,8 @@ use super::super::ddraw::d3d::hal::{
     RS_FOGCOLOR,
 };
 use super::super::ddraw::d3d::pipeline::{
-    self, CULL_CCW, CULL_CW, FVF_DIFFUSE, FVF_XYZ, IDENTITY, Layout, Matrix, Prim, Vertex,
+    self, CULL_CCW, CULL_CW, FVF_DIFFUSE, FVF_NORMAL, FVF_XYZ, IDENTITY, Layout, Matrix, Prim,
+    Vertex,
 };
 use super::super::ddraw::d3d::{draw as d3d_draw, hal, states};
 use super::light::Lighting;
@@ -41,6 +45,7 @@ use super::state::{
     GL_BACK, GL_CW, GL_EXP, GL_EXP2, GL_FLAT, GL_FRONT_AND_BACK, GL_LINE, GL_POINT,
 };
 use super::texture::{self, GL_ADD, GL_CLAMP, GL_DECAL, GL_LINEAR, GL_REPLACE};
+use super::tnl::{self, Why};
 use super::{
     Array, CAP_ALPHA_TEST, CAP_BLEND, CAP_COLOR_MATERIAL, CAP_CULL_FACE, CAP_DEPTH_TEST,
     CAP_DITHER, CAP_FOG, CAP_LIGHTING, CAP_NORMALIZE, CAP_POLYGON_OFFSET_FILL, CAP_SCISSOR_TEST,
@@ -87,6 +92,11 @@ const GL_DEPTH_COMPONENT: u32 = 0x1902;
 /// and two sets of two texture coordinates.
 fn layout() -> Layout {
     Layout::of(FVF_XYZ | FVF_DIFFUSE | 2 << 8).expect("a valid FVF")
+}
+
+/// Each vertex as a card that lights it takes it: with its normal.
+fn lit_layout() -> Layout {
+    Layout::of(FVF_XYZ | FVF_NORMAL | FVF_DIFFUSE | 2 << 8).expect("a valid FVF")
 }
 
 /// OpenGL's depth from -1 to 1 as Direct3D's from 0 to 1: z' = (z +
@@ -137,8 +147,7 @@ fn argb(c: [f32; 4]) -> u32 {
 
 /// What lighting the vertices of one draw take from their context. The
 /// modelview matrix and the lights can't change between glBegin and
-/// glEnd. It borrows the lights and materials: glVertex makes one for
-/// each vertex.
+/// glEnd. It borrows the lights and materials.
 struct Lit<'a> {
     lighting: &'a Lighting,
     modelview: Matrix,
@@ -194,6 +203,65 @@ fn vertex_colors(
         Some(l) => l.colors(position, normal, color),
         None => [argb(color); 2],
     }
+}
+
+/// The vertex `v` as the pipeline and the card take it, with the color
+/// `color` and its texture coordinates through `matrices`.
+fn pipeline_vertex(v: &ImmVertex, color: u32, matrices: &[Option<Matrix>; UNITS]) -> Vertex {
+    let mut out = Vertex {
+        position: homogeneous(v.position),
+        normal: v.normal,
+        diffuse: Some(color),
+        ..Vertex::default()
+    };
+    for (u, m) in matrices.iter().enumerate() {
+        out.tex[u] = texture_coords(m, v.tex[u]);
+    }
+    out
+}
+
+/// The vertices `raw` of the context `c` as the pipeline takes them,
+/// lit here with GL_LIGHTING on, and their back colors with two-sided
+/// lighting. With `used`, only the vertices it marks are lit: the
+/// others are drawn by no primitive.
+fn shaded(
+    c: &Context,
+    raw: &[ImmVertex],
+    used: Option<&[bool]>,
+) -> (Vec<Vertex>, Option<Vec<u32>>) {
+    let lit = Lit::of(c);
+    let matrices = texture_matrices(c);
+    let mut backs = two_sided(c).then(|| Vec::with_capacity(raw.len()));
+    let mut out = Vec::with_capacity(raw.len());
+    for (i, v) in raw.iter().enumerate() {
+        let [color, back] = match v.lit {
+            Some(colors) => colors,
+            None => {
+                let lit = lit.as_ref().filter(|_| used.is_none_or(|u| u[i]));
+                vertex_colors(lit, v.position, v.normal, v.color)
+            }
+        };
+        if let Some(backs) = &mut backs {
+            backs.push(back);
+        }
+        out.push(pipeline_vertex(v, color, &matrices));
+    }
+    (out, backs)
+}
+
+/// Light the vertices the context `c` has gathered since glBegin, with
+/// its lights and materials as they are now: before a glMaterial
+/// between glBegin and glEnd changes them for the vertices after it.
+pub(super) fn light_gathered(c: &mut Context) {
+    if c.caps & CAP_LIGHTING == 0 {
+        return;
+    }
+    let mut vertices = std::mem::take(&mut c.vertices);
+    let lit = Lit::of(c);
+    for v in vertices.iter_mut().filter(|v| v.lit.is_none()) {
+        v.lit = Some(vertex_colors(lit.as_ref(), v.position, v.normal, v.color));
+    }
+    c.vertices = vertices;
 }
 
 /// The scissor box as the target's rectangle (left, top, right,
@@ -448,8 +516,10 @@ fn applied(c: &Settings, shared: &[Texture]) -> Option<Applied> {
     })
 }
 
-/// Put the state `a` on its device. False if the device is gone.
-fn put(cpu: &mut Cpu, a: &Applied) -> bool {
+/// Put the state `a` on its device, for vertices the card transforms
+/// with `card`: the view matrix then turns OpenGL's eye coordinates
+/// into the card's (`tnl::VIEW`). False if the device is gone.
+fn put(cpu: &mut Cpu, a: &Applied, card: bool) -> bool {
     let Some(d) = inner_device::get(cpu, a.inner) else {
         return false;
     };
@@ -467,7 +537,12 @@ fn put(cpu: &mut Cpu, a: &Applied) -> bool {
             d.stages[at] = v;
         }
     }
-    for (which, matrix) in [(1, a.world), (2, IDENTITY), (3, a.projection)] {
+    let (view, projection) = if card {
+        (tnl::VIEW, tnl::projection(&a.projection))
+    } else {
+        (IDENTITY, a.projection)
+    };
+    for (which, matrix) in [(1, a.world), (2, view), (3, projection)] {
         if d.transforms[which].map(f32::to_bits) != matrix.map(f32::to_bits) {
             d.transforms[which] = matrix;
         }
@@ -508,7 +583,7 @@ fn same_viewport(a: &inner_device::Viewport7, b: &inner_device::Viewport7) -> bo
 /// third of each triangle of a strip or fan, and the first of a
 /// polygon. Direct3D takes the first vertex of a line or triangle and
 /// the second of a fan's triangle.
-fn primitives(kind: u32, order: &[u32]) -> Vec<Prim> {
+pub(super) fn primitives(kind: u32, order: &[u32]) -> Vec<Prim> {
     let n = order.len();
     let mut out = Vec::new();
     match kind {
@@ -589,7 +664,7 @@ fn primitives(kind: u32, order: &[u32]) -> Vec<Prim> {
 
 /// How many of the triangles `primitives` makes of `kind` make one
 /// OpenGL polygon: two for a quad, all of them for a polygon.
-fn polygon_triangles(kind: u32) -> usize {
+pub(super) fn polygon_triangles(kind: u32) -> usize {
     match kind {
         GL_QUADS | GL_QUAD_STRIP => 2,
         GL_POLYGON => usize::MAX,
@@ -683,7 +758,9 @@ fn back_faces(
 ///
 /// They hold everything they are drawn with by value: the device's
 /// state (`Applied`), and vertices that the texture matrices and the
-/// lights were applied to as they were given. So the program may set
+/// lights were applied to at their draw, or OpenGL's lights and
+/// materials as the card has them (`card`) with vertices the card
+/// lights. So the program may set
 /// states after them and they are still drawn as they were. What they
 /// hold by name is the textures and the buffers, and what they change
 /// is the buffers: `flush_waiting` draws them before any function
@@ -695,32 +772,134 @@ pub struct Waiting {
     /// state.
     context: u32,
     stamp: u64,
+    /// The stamp of the context's lighting then. Not saved: a draw
+    /// after a load compares the card's state itself.
+    lit_stamp: u64,
     applied: Applied,
+    /// OpenGL's part of the card's state, when the card transforms and
+    /// lights them (`tnl::state_of`): draws join only with the same.
+    card: Option<hal::Gl>,
+    /// The vertices the processor transforms.
     vertices: Vec<Vertex>,
+    /// The vertices the card transforms, in the words the card takes
+    /// them in (`pack`): the draw's command is made of them as they
+    /// are.
+    packed: Vec<u32>,
     prims: Vec<Prim>,
 }
+
+impl Waiting {
+    /// Whether the card lights the vertices, and so takes their
+    /// normals.
+    fn lit(&self) -> bool {
+        self.card.as_ref().is_some_and(|gl| gl.lighting.is_some())
+    }
+
+    /// How many vertices wait.
+    fn count(&self) -> usize {
+        match &self.card {
+            Some(_) => self.packed.len() / packed_words(self.lit()),
+            None => self.vertices.len(),
+        }
+    }
+}
+
+/// The words of a vertex the card transforms: its position, its
+/// normal if the card lights it (`lit`), its color and two numbers
+/// for each unit, which is the card's layout of `layout` and of
+/// `lit_layout` (`hal::toadforce::card_layout`).
+const fn packed_words(lit: bool) -> usize {
+    if lit { 7 + 2 * UNITS } else { 4 + 2 * UNITS }
+}
+
+/// Add the vertex `v` to `out` as the card takes it, with the color
+/// `color` and its texture coordinates through `matrices`: the words
+/// `hal::toadforce::card_vertex` makes of `pipeline_vertex`'s.
+fn pack(
+    out: &mut Vec<u32>,
+    v: &ImmVertex,
+    color: u32,
+    matrices: &[Option<Matrix>; UNITS],
+    lit: bool,
+) {
+    let [x, y, z, _] = homogeneous(v.position).map(f32::to_bits);
+    let tex: [[u32; 4]; UNITS] =
+        std::array::from_fn(|u| texture_coords(&matrices[u], v.tex[u]).map(f32::to_bits));
+    const { assert!(UNITS == 2) };
+    let [s, t] = [tex[0], tex[1]];
+    if lit {
+        let [nx, ny, nz] = v.normal.map(f32::to_bits);
+        out.extend_from_slice(&[x, y, z, nx, ny, nz, color, s[0], s[1], t[0], t[1]]);
+    } else {
+        out.extend_from_slice(&[x, y, z, color, s[0], s[1], t[0], t[1]]);
+    }
+}
+
+/// A packed vertex as a saved state has it.
+fn unpacked(words: &[u32], lit: bool) -> SavedVertex {
+    let number = |i: usize| f32::from_bits(words[i]);
+    let rest = if lit { 6 } else { 3 };
+    SavedVertex {
+        position: [number(0), number(1), number(2), 1.0],
+        normal: if lit {
+            [number(3), number(4), number(5)]
+        } else {
+            [0.0; 3]
+        },
+        color: words[rest],
+        tex: std::array::from_fn(|u| {
+            [number(rest + 1 + 2 * u), number(rest + 2 + 2 * u), 0.0, 1.0]
+        }),
+    }
+}
+
+/// A waiting vertex in a saved state.
+#[derive(Clone, Copy, Debug, Default)]
+struct SavedVertex {
+    position: [f32; 4],
+    normal: [f32; 3],
+    color: u32,
+    tex: [[f32; 4]; UNITS],
+}
+
+crate::state_fields!(SavedVertex {
+    position,
+    normal,
+    color,
+    tex
+});
 
 /// The vertices that wait at most: a draw that would take them past
 /// this goes after a flush.
 const WAITING_VERTICES: usize = 8192;
 
-// A saved state has the vertices as OpenGL's are (position, color and
-// a set of coordinates for each unit) and each primitive as six words.
+// A saved state has the vertices as OpenGL's are (position, normal,
+// color and a set of coordinates for each unit) and each primitive as
+// six words.
 // The stamp isn't saved: a loaded context has another.
 impl crate::savestate::State for Waiting {
     fn save(&self, w: &mut crate::savestate::Writer) {
         self.context.save(w);
         self.applied.save(w);
-        let vertices: Vec<ImmVertex> = self
-            .vertices
-            .iter()
-            .map(|v| ImmVertex {
-                position: v.position,
-                color: v.diffuse.unwrap_or(0),
-                back: 0,
-                tex: std::array::from_fn(|u| v.tex[u]),
-            })
-            .collect();
+        self.card.save(w);
+        let lit = self.lit();
+        let vertices: Vec<SavedVertex> = match &self.card {
+            Some(_) => self
+                .packed
+                .chunks_exact(packed_words(lit))
+                .map(|words| unpacked(words, lit))
+                .collect(),
+            None => self
+                .vertices
+                .iter()
+                .map(|v| SavedVertex {
+                    position: v.position,
+                    normal: v.normal,
+                    color: v.diffuse.unwrap_or(0),
+                    tex: std::array::from_fn(|u| v.tex[u]),
+                })
+                .collect(),
+        };
         vertices.save(w);
         let prims: Vec<[u32; 6]> = self
             .prims
@@ -737,9 +916,26 @@ impl crate::savestate::State for Waiting {
     fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
         self.context.load(r)?;
         self.applied.load(r)?;
-        let mut vertices: Vec<ImmVertex> = Vec::new();
+        self.card.load(r)?;
+        let mut vertices: Vec<SavedVertex> = Vec::new();
         vertices.load(r)?;
-        self.vertices = vertices.iter().map(waiting_vertex).collect();
+        self.vertices.clear();
+        self.packed.clear();
+        match &self.card {
+            Some(_) => {
+                let lit = self.lit();
+                for saved in &vertices {
+                    let v = ImmVertex {
+                        position: saved.position,
+                        normal: saved.normal,
+                        tex: saved.tex,
+                        ..ImmVertex::default()
+                    };
+                    pack(&mut self.packed, &v, saved.color, &[None; UNITS], lit);
+                }
+            }
+            None => self.vertices = vertices.iter().map(waiting_vertex).collect(),
+        }
         let mut prims: Vec<[u32; 6]> = Vec::new();
         prims.load(r)?;
         self.prims = prims
@@ -759,18 +955,22 @@ impl crate::savestate::State for Waiting {
 /// the same but for the stamp: for the test of their saved state.
 #[cfg(test)]
 pub fn waiting_for_tests() -> Waiting {
+    // The card lights them, so they have their normals.
     let vertex = |x: f32| {
-        let mut v = Vertex {
+        let mut v = ImmVertex {
             position: [x, 2.0, 3.0, 1.0],
-            diffuse: Some(0x8040_2010),
-            ..Vertex::default()
+            normal: [0.0, x, 1.0],
+            ..ImmVertex::default()
         };
         v.tex[1] = [0.25, 0.5, 0.0, 1.0];
-        v
+        let mut words = Vec::new();
+        pack(&mut words, &v, 0x8040_2010, &[None; UNITS], true);
+        words
     };
     Waiting {
         context: 0,
         stamp: 77,
+        lit_stamp: 0,
         applied: Applied {
             inner: 5,
             render: vec![(7, 1)],
@@ -783,7 +983,17 @@ pub fn waiting_for_tests() -> Waiting {
             color_off: true,
             ..Applied::default()
         },
-        vertices: (0..4).map(|i| vertex(i as f32)).collect(),
+        card: Some(hal::Gl {
+            states: vec![(3, 1)],
+            lighting: Some(hal::toadforce::GlLighting {
+                ambient: [0.25, 0.5, 1.0],
+                back: Some(Default::default()),
+                lights: vec![Default::default(); 2],
+                ..Default::default()
+            }),
+        }),
+        vertices: Vec::new(),
+        packed: (0..4).flat_map(|i| vertex(i as f32)).collect(),
         prims: vec![
             Prim::Point(3),
             Prim::Line(0, 1, 1),
@@ -796,14 +1006,17 @@ pub fn waiting_for_tests() -> Waiting {
 pub fn same_waiting(a: &Waiting, b: &Waiting) -> bool {
     a.context == b.context
         && a.applied.same(&b.applied)
+        && a.card == b.card
         && a.vertices == b.vertices
+        && a.packed == b.packed
         && a.prims == b.prims
 }
 
 /// A saved waiting vertex as the pipeline takes it.
-fn waiting_vertex(v: &ImmVertex) -> Vertex {
+fn waiting_vertex(v: &SavedVertex) -> Vertex {
     let mut out = Vertex {
         position: v.position,
+        normal: v.normal,
         diffuse: Some(v.color),
         ..Vertex::default()
     };
@@ -818,6 +1031,30 @@ pub fn waiting_pid(w: &Waiting, s: &super::State) -> Option<u32> {
     Some(c.pid)
 }
 
+/// The primitives `prims` as the card's lists: runs of points (1),
+/// lines (2) and triangles (4) in their order, with the places of
+/// their vertices. The card takes a flat primitive's color from its
+/// last vertex (`FLAT_VERTEX`), so with `flat` a triangle starts after
+/// the vertex that gives its color, wound as it was.
+fn card_lists(prims: &[Prim], flat: bool) -> Vec<(u32, Vec<u32>)> {
+    let mut out: Vec<(u32, Vec<u32>)> = Vec::new();
+    for p in prims {
+        let (kind, places): (u32, [u32; 3]) = match *p {
+            Prim::Point(a) => (1, [a; 3]),
+            Prim::Line(a, b, _) => (2, [a, b, b]),
+            Prim::Triangle([a, b, c], provoking, _) if flat && provoking == a => (4, [b, c, a]),
+            Prim::Triangle([a, b, c], provoking, _) if flat && provoking == b => (4, [c, a, b]),
+            Prim::Triangle(t, ..) => (4, t),
+        };
+        let places = &places[..(kind as usize).min(3)];
+        match out.last_mut() {
+            Some((last, list)) if *last == kind => list.extend_from_slice(places),
+            _ => out.push((kind, places.to_vec())),
+        }
+    }
+    out
+}
+
 /// Draw what waits (`Waiting`), if anything does.
 pub fn flush_waiting(cpu: &mut Cpu) {
     let Some(w) = state(cpu).waiting.take() else {
@@ -825,47 +1062,78 @@ pub fn flush_waiting(cpu: &mut Cpu) {
     };
     let put = {
         let _profile = crate::profile::zone(crate::profile::Zone::OpenGlApply);
-        put(cpu, &w.applied)
+        put(cpu, &w.applied, w.card.is_some())
     };
-    if put {
-        let inner = w.applied.inner;
+    if !put {
+        return;
+    }
+    let inner = w.applied.inner;
+    let Some(gl) = &w.card else {
         let _ = d3d_draw::draw_prims(cpu, inner, 8, &layout(), &w.vertices, &w.prims, 0);
+        return;
+    };
+    let flat = w.applied.render.contains(&(RS_SHADEMODE, 1));
+    let lists = card_lists(&w.prims, flat);
+    let layout = if gl.lighting.is_some() {
+        lit_layout()
+    } else {
+        layout()
+    };
+    let count = w.count() as u32;
+    if !d3d_draw::draw_gl(cpu, inner, &layout, &w.packed, count, gl, &lists) {
+        // `tnl::checks` gave the card a draw it doesn't take, or the
+        // target isn't in card memory, where Direct3D's pipeline draws
+        // nothing either (`d3d::draw::rasterize`). The count shows it.
+        static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        hal::toadforce::count_gl(cpu, tnl::COUNT_REFUSED, 1);
+        if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            cpu.bus
+                .log_string("[W32] OPENGL32: the card refused draws it was to transform");
+        }
     }
 }
 
-/// Draw `kind` primitives (OpenGL's) of `vertices`, in the order
-/// `order` or as they are. `backs` are the vertices' back colors when
-/// they have their own, with two-sided lighting.
+/// Draw `kind` primitives (OpenGL's) of the vertices `raw`, as the
+/// program gave them, in the order `order` or as they are. With
+/// `used`, only the vertices it marks are named by a primitive.
 ///
-/// They join the draws that wait if those have the context's state,
-/// and wait themselves otherwise, after those are drawn.
+/// The card transforms and lights them where `tnl::checks` says it
+/// does as the processor would; otherwise they are lit here and go
+/// through Direct3D's pipeline. Either way they join the draws that
+/// wait if those have the context's state and go the same way, and
+/// wait themselves otherwise, after those are drawn.
 fn draw(
     cpu: &mut Cpu,
     kind: u32,
-    vertices: &[Vertex],
-    backs: Option<&[u32]>,
+    raw: &[ImmVertex],
     order: Option<&[u32]>,
+    used: Option<&[bool]>,
 ) {
-    if vertices.is_empty() {
+    if raw.is_empty() {
         return;
     }
     let _profile = crate::profile::zone(crate::profile::Zone::OpenGl);
     let Some((index, _)) = current(cpu) else {
         return;
     };
-    let st = state(cpu);
-    let Some(Some(c)) = st.contexts.get_mut(index) else {
+    let Some(Some(c)) = state(cpu).contexts.get(index) else {
         return;
     };
     if c.target == 0 {
         return;
     }
+    let dd = c.dd;
+    let transforms = hal::transforms_gl(cpu, dd);
+    let st = state(cpu);
+    let Some(Some(c)) = st.contexts.get_mut(index) else {
+        return;
+    };
     let faces = !(c.caps & CAP_CULL_FACE != 0 && c.cull_face == GL_FRONT_AND_BACK);
     let all: Vec<u32>;
     let order = match order {
         Some(o) => o,
         None => {
-            all = (0..vertices.len() as u32).collect();
+            all = (0..raw.len() as u32).collect();
             &all
         }
     };
@@ -877,32 +1145,70 @@ fn draw(
         return;
     }
     let mut prims = primitives(kind, order);
-    if prims.is_empty() {
+    // Nothing is drawn with a viewport off the buffers.
+    if prims.is_empty() || applied_of(c, &st.lists).is_none() {
         return;
     }
-    // Points and lines take the front colors.
-    let sided = match backs {
-        Some(backs) if triangles => Some(back_faces(
-            c,
-            vertices,
-            backs,
-            &mut prims,
-            polygon_triangles(kind),
-        )),
-        _ => None,
+    let per = polygon_triangles(kind);
+    let path = match transforms {
+        Ok(()) => match tnl::state_of(c) {
+            Ok(_) => tnl::checks(c, per, prims.len(), raw),
+            Err(why) => Err(*why),
+        },
+        Err(true) => Err(Why::Asked),
+        Err(false) => Err(Why::NoCard),
     };
-    let vertices = sided.as_deref().unwrap_or(vertices);
     let stamp = c.stamp();
-    // The draws that wait take this one if they are the context's and
-    // have its state: its stamp, or the state made anew and equal.
-    if let Some(w) = &mut st.waiting
-        && w.context == index as u32
-        && w.vertices.len() + vertices.len() <= WAITING_VERTICES
-        && (w.stamp == stamp || applied_of(c, &st.lists).is_some_and(|a| a.same(&w.applied)))
-    {
-        let first = w.vertices.len() as u32;
+    let lit_stamp = super::Stamped::stamp(&c.lighting);
+    let (vertices, on_card, count) = match path {
+        // The card's vertices go to those that wait as they are
+        // packed, below.
+        Ok(()) => (Vec::new(), true, tnl::COUNT_CARD),
+        Err(why) => {
+            let (vertices, backs) = shaded(c, raw, used);
+            // Points and lines take the front colors.
+            let vertices = match backs {
+                Some(backs) if triangles => back_faces(c, &vertices, &backs, &mut prims, per),
+                _ => vertices,
+            };
+            (vertices, false, tnl::count_of(why))
+        }
+    };
+    c.drawn = true;
+    // The draws that wait take this one if they are the context's, go
+    // the same way and have its state: its stamp, or the state made
+    // anew and equal.
+    // The card's state is the context's copy (`tnl::state_of`), which
+    // the two stamps stand for.
+    let joins = st.waiting.as_ref().is_some_and(|w| {
+        w.context == index as u32
+            && w.card.is_some() == on_card
+            && w.count() + raw.len() <= WAITING_VERTICES
+            && ((w.stamp == stamp && w.lit_stamp == lit_stamp)
+                || (applied_of(c, &st.lists).is_some_and(|a| a.same(&w.applied))
+                    && (!on_card || w.card.as_ref() == card_of(c))))
+    });
+    let n = raw.len() as u64;
+    // The card's vertices as it takes them, added to `packed`.
+    let matrices = texture_matrices(c);
+    let lit = on_card && card_of(c).is_some_and(|gl| gl.lighting.is_some());
+    let pack_all = |packed: &mut Vec<u32>| {
+        packed.reserve(raw.len() * packed_words(lit));
+        for v in raw {
+            // A vertex lit before its draw has that color, with the
+            // lights off since.
+            let color = v.lit.map_or(argb(v.color), |lit| lit[0]);
+            pack(packed, v, color, &matrices, lit);
+        }
+    };
+    if let Some(w) = st.waiting.as_mut().filter(|_| joins) {
+        let first = w.count() as u32;
         w.stamp = stamp;
-        w.vertices.extend_from_slice(vertices);
+        w.lit_stamp = lit_stamp;
+        match on_card {
+            true => pack_all(&mut w.packed),
+            false => w.vertices.extend_from_slice(&vertices),
+        }
         w.prims.extend(prims.iter().map(|p| match *p {
             Prim::Point(a) => Prim::Point(a + first),
             Prim::Line(a, b, flat) => Prim::Line(a + first, b + first, flat + first),
@@ -910,22 +1216,42 @@ fn draw(
                 Prim::Triangle(t.map(|i| i + first), flat + first, edges)
             }
         }));
-        c.drawn = true;
-        return;
+    } else {
+        let Some(applied) = applied_of(c, &st.lists).cloned() else {
+            return;
+        };
+        let card = if on_card { card_of(c).cloned() } else { None };
+        let mut packed = Vec::new();
+        if on_card {
+            pack_all(&mut packed);
+        }
+        let waiting = Waiting {
+            context: index as u32,
+            stamp,
+            lit_stamp,
+            applied,
+            card,
+            vertices,
+            packed,
+            prims,
+        };
+        flush_waiting(cpu);
+        state(cpu).waiting = Some(waiting);
     }
-    let Some(applied) = applied_of(c, &st.lists).cloned() else {
-        return;
-    };
-    c.drawn = true;
-    let waiting = Waiting {
-        context: index as u32,
-        stamp,
-        applied,
-        vertices: vertices.to_vec(),
-        prims,
-    };
-    flush_waiting(cpu);
-    state(cpu).waiting = Some(waiting);
+    hal::toadforce::count_gl(cpu, count, 1);
+    if on_card {
+        hal::toadforce::count_gl(cpu, tnl::COUNT_VERTICES, n);
+    }
+}
+
+/// The card's state of the context `c`, when it has one that is made
+/// for its stamps.
+fn card_of(c: &Context) -> Option<&hal::Gl> {
+    let stamps = (c.stamp(), super::Stamped::stamp(&c.lighting));
+    match &c.card {
+        Some((a, b, Ok(gl))) if (*a, *b) == stamps => Some(gl),
+        _ => None,
+    }
 }
 
 /// Whether a primitive is one there is.
@@ -964,25 +1290,8 @@ pub fn end(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         return Some(0);
     };
     let gathered = std::mem::take(&mut c.vertices);
-    let matrices = texture_matrices(c);
-    let sided = two_sided(c);
-    let vertices: Vec<Vertex> = gathered
-        .iter()
-        .map(|v| {
-            let mut out = Vertex {
-                position: v.position,
-                diffuse: Some(v.color),
-                ..Vertex::default()
-            };
-            for (u, m) in matrices.iter().enumerate() {
-                out.tex[u] = texture_coords(m, v.tex[u]);
-            }
-            out
-        })
-        .collect();
-    let backs: Option<Vec<u32>> = sided.then(|| gathered.iter().map(|v| v.back).collect());
     drop(profile);
-    draw(cpu, kind, &vertices, backs.as_deref(), None);
+    draw(cpu, kind, &gathered, None, None);
     Some(0)
 }
 
@@ -1020,11 +1329,11 @@ pub fn vertex(cpu: &mut Cpu, position: [f32; 4]) {
     if c.begin.is_none() {
         return;
     }
-    let [color, back] = vertex_colors(Lit::of(c).as_ref(), position, c.normal, c.color);
     let v = ImmVertex {
-        position: homogeneous(position),
-        color,
-        back,
+        position,
+        normal: c.normal,
+        color: c.color,
+        lit: None,
         tex: c.tex_coord,
     };
     c.vertices.push(v);
@@ -1273,21 +1582,10 @@ fn normal_values(b: &[u8], kind: u32) -> [f32; 3] {
     [v[0], v[1], v[2]].map(|x| signed_unit(x as f64, bits))
 }
 
-/// The vertices `first` to `last` of the current context's arrays,
-/// with the current color, normal and texture coordinates where an
-/// array is off, lit with GL_LIGHTING on; and their back colors with
-/// two-sided lighting. The texture coordinates go through the texture
-/// matrices when `transform` is set; glArrayElement's don't, as glEnd
-/// puts them through. With `used`, only the vertices it marks (counted
-/// from `first`) are lit: the others are drawn by no primitive. None
-/// without a vertex array.
-fn gather(
-    cpu: &mut Cpu,
-    first: u32,
-    last: u32,
-    transform: bool,
-    used: Option<&[bool]>,
-) -> Option<(Vec<Vertex>, Option<Vec<u32>>)> {
+/// The vertices `first` to `last` of the current context's arrays, as
+/// they are there, with the current color, normal and texture
+/// coordinates where an array is off. None without a vertex array.
+fn gather(cpu: &mut Cpu, first: u32, last: u32) -> Option<Vec<ImmVertex>> {
     let c = ctx(cpu)?;
     let (va, ca, na, ta) = (c.vertex_array, c.color_array, c.normal_array, c.tex_array);
     let lighting = c.caps & CAP_LIGHTING != 0;
@@ -1315,15 +1613,8 @@ fn gather(
     });
     let c = ctx(cpu)?;
     let (color, normal, tex) = (c.color, c.normal, c.tex_coord);
-    let matrices = if transform {
-        texture_matrices(c)
-    } else {
-        [None; UNITS]
-    };
-    let lit = Lit::of(c);
     let n = (last - first + 1) as usize;
     let mut out = Vec::with_capacity(n);
-    let mut backs = two_sided(c).then(|| Vec::with_capacity(n));
     for i in 0..n {
         let mut p = values(&vb[i * vs..], va.kind, va.size, false);
         if va.size < 4 {
@@ -1346,18 +1637,15 @@ fn gather(
             Some((b, s)) => normal_values(&b[i * s..], na.kind),
             None => normal,
         };
-        let lit = lit.as_ref().filter(|_| used.is_none_or(|u| u[i]));
-        let [diffuse, back] = vertex_colors(lit, p, normal, rgba);
-        if let Some(backs) = &mut backs {
-            backs.push(back);
-        }
-        let mut v = Vertex {
-            position: homogeneous(p),
-            diffuse: Some(diffuse),
-            ..Vertex::default()
+        let mut v = ImmVertex {
+            position: p,
+            normal,
+            color: rgba,
+            lit: None,
+            tex: [[0.0; 4]; UNITS],
         };
         for u in 0..UNITS {
-            let t = match &texs[u] {
+            v.tex[u] = match &texs[u] {
                 Some((b, s)) => {
                     let mut t = values(&b[i * s..], ta[u].kind, ta[u].size, false);
                     t[3] = if ta[u].size == 4 { t[3] } else { 1.0 };
@@ -1365,35 +1653,27 @@ fn gather(
                 }
                 None => tex[u],
             };
-            v.tex[u] = texture_coords(&matrices[u], t);
         }
         out.push(v);
     }
-    Some((out, backs))
+    Some(out)
 }
 
 /// glArrayElement(i): a vertex of the arrays, between glBegin and
 /// glEnd.
 pub fn array_element(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let i = args[0];
-    let Some((vertices, backs)) = gather(cpu, i, i, false, None) else {
+    let Some(vertices) = gather(cpu, i, i) else {
         return Some(0);
     };
     let Some(&v) = vertices.first() else {
         return Some(0);
     };
-    let color = v.diffuse.unwrap_or(0xFFFF_FFFF);
-    let back = backs.and_then(|b| b.first().copied()).unwrap_or(color);
     let Some(c) = ctx(cpu) else {
         return Some(0);
     };
     if c.begin.is_some() {
-        c.vertices.push(ImmVertex {
-            position: v.position,
-            color,
-            back,
-            tex: [v.tex[0], v.tex[1]],
-        });
+        c.vertices.push(v);
     }
     Some(0)
 }
@@ -1416,8 +1696,8 @@ pub fn draw_arrays(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(last) = first.checked_add(count - 1) else {
         return Some(0);
     };
-    if let Some((v, backs)) = gather(cpu, first, last, true, None) {
-        draw(cpu, kind, &v, backs.as_deref(), None);
+    if let Some(v) = gather(cpu, first, last) {
+        draw(cpu, kind, &v, None, None);
     }
     Some(0)
 }
@@ -1476,11 +1756,11 @@ pub fn draw_elements(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     for &i in &indices {
         used[(i - first) as usize] = true;
     }
-    let Some((v, backs)) = gather(cpu, first, last, true, Some(&used)) else {
+    let Some(v) = gather(cpu, first, last) else {
         return Some(0);
     };
     let order: Vec<u32> = indices.iter().map(|i| i - first).collect();
-    draw(cpu, kind, &v, backs.as_deref(), Some(&order));
+    draw(cpu, kind, &v, Some(&order), Some(&used));
     Some(0)
 }
 
@@ -1507,11 +1787,12 @@ pub(super) struct Inherit {
 }
 
 /// Draw `kind` primitives of `vertices`, a glBegin to glEnd run that
-/// a display list kept as its vertices, as glDrawArrays draws those
-/// of the arrays: lit and with their texture coordinates through the
-/// texture matrices here, each as glVertex and glEnd would have made
-/// it. False, with nothing drawn, without a context or between a
-/// glBegin and its glEnd, where the run's own glBegin is an error.
+/// a display list kept as its vertices, as glEnd draws those it
+/// gathered: each is the vertex glVertex would have made, with the
+/// current values where the run set none before it, and `draw`
+/// transforms and lights them on the card or here. False, with
+/// nothing drawn, without a context or between a glBegin and its
+/// glEnd, where the run's own glBegin is an error.
 pub(super) fn draw_run(cpu: &mut Cpu, kind: u32, vertices: &[Whole], inherit: &Inherit) -> bool {
     let Some(c) = ctx(cpu) else {
         return false;
@@ -1523,31 +1804,22 @@ pub(super) fn draw_run(cpu: &mut Cpu, kind: u32, vertices: &[Whole], inherit: &I
     // As glBegin leaves them.
     c.vertices.clear();
     let (color, normal, tex) = (c.color, c.normal, c.tex_coord);
-    let matrices = texture_matrices(c);
-    let lit = Lit::of(c);
-    let mut out = Vec::with_capacity(vertices.len());
-    let mut backs = two_sided(c).then(|| Vec::with_capacity(vertices.len()));
-    for (i, v) in vertices.iter().enumerate() {
-        let i = i as u32;
-        let rgba = if i < inherit.color { color } else { v.color };
-        let normal = if i < inherit.normal { normal } else { v.normal };
-        let [diffuse, back] = vertex_colors(lit.as_ref(), v.position, normal, rgba);
-        if let Some(backs) = &mut backs {
-            backs.push(back);
-        }
-        let mut made = Vertex {
-            position: homogeneous(v.position),
-            diffuse: Some(diffuse),
-            ..Vertex::default()
-        };
-        for u in 0..UNITS {
-            let t = if i < inherit.tex[u] { tex[u] } else { v.tex[u] };
-            made.tex[u] = texture_coords(&matrices[u], t);
-        }
-        out.push(made);
-    }
+    let out: Vec<ImmVertex> = vertices
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let i = i as u32;
+            ImmVertex {
+                position: v.position,
+                normal: if i < inherit.normal { normal } else { v.normal },
+                color: if i < inherit.color { color } else { v.color },
+                lit: None,
+                tex: std::array::from_fn(|u| if i < inherit.tex[u] { tex[u] } else { v.tex[u] }),
+            }
+        })
+        .collect();
     drop(profile);
-    draw(cpu, kind, &out, backs.as_deref(), None);
+    draw(cpu, kind, &out, None, None);
     true
 }
 
@@ -1566,33 +1838,16 @@ fn rect(cpu: &mut Cpu, r: [f32; 4]) {
         error(cpu, GL_INVALID_OPERATION);
         return;
     }
-    let matrices = texture_matrices(c);
-    let tex: [[f32; 4]; UNITS] =
-        std::array::from_fn(|u| texture_coords(&matrices[u], c.tex_coord[u]));
     // A rectangle is a polygon of four vertices, lit as glVertex's are.
-    let lit = Lit::of(c);
     let corners = [[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]];
-    let mut backs = Vec::with_capacity(4);
-    let vertices = corners.map(|[x, y]| {
-        let position = [x, y, 0.0, 1.0];
-        let [color, back] = vertex_colors(lit.as_ref(), position, c.normal, c.color);
-        backs.push(back);
-        let mut v = Vertex {
-            position,
-            diffuse: Some(color),
-            ..Vertex::default()
-        };
-        v.tex[..UNITS].copy_from_slice(&tex);
-        v
+    let vertices = corners.map(|[x, y]| ImmVertex {
+        position: [x, y, 0.0, 1.0],
+        normal: c.normal,
+        color: c.color,
+        lit: None,
+        tex: c.tex_coord,
     });
-    let sided = two_sided(c);
-    draw(
-        cpu,
-        GL_POLYGON,
-        &vertices,
-        sided.then_some(&backs[..]),
-        None,
-    );
+    draw(cpu, GL_POLYGON, &vertices, None, None);
 }
 
 /// glRectf(x1, y1, x2, y2).
@@ -1939,6 +2194,42 @@ mod tests {
         assert_eq!(showing(GL_POLYGON), [false, false]);
         // As separate triangles each shows its own side.
         assert_eq!(showing(GL_TRIANGLE_FAN), [false, true]);
+    }
+
+    /// A packed vertex is the words the card's layout has for the
+    /// vertex Direct3D's pipeline takes, with and without its normal,
+    /// and comes back from a saved state as it went.
+    #[test]
+    fn a_packed_vertex_is_the_cards_layout_of_the_pipelines() {
+        let v = ImmVertex {
+            position: [2.0, -4.0, 6.0, 2.0],
+            normal: [0.0, 0.6, 0.8],
+            tex: [[0.25, 0.5, 0.0, 1.0], [3.0, 1.0, 0.0, 2.0]],
+            ..ImmVertex::default()
+        };
+        let mut turned = IDENTITY;
+        turned[12] = 0.5;
+        let matrices = [Some(turned), None];
+        for (lit, layout) in [(false, layout()), (true, lit_layout())] {
+            let mut packed = Vec::new();
+            pack(&mut packed, &v, 0x8040_2010, &matrices, lit);
+            let (_, size) = hal::toadforce::card_layout(&layout, 0);
+            assert_eq!(packed_words(lit), size);
+            let mut words = Vec::new();
+            let vertex = pipeline_vertex(&v, 0x8040_2010, &matrices);
+            hal::toadforce::card_vertex(&mut words, &layout, 0, &vertex);
+            assert_eq!(packed, words, "lit {lit}");
+            let saved = unpacked(&packed, lit);
+            let again = ImmVertex {
+                position: saved.position,
+                normal: saved.normal,
+                tex: saved.tex,
+                ..ImmVertex::default()
+            };
+            let mut loaded = Vec::new();
+            pack(&mut loaded, &again, saved.color, &[None; UNITS], lit);
+            assert_eq!(loaded, packed, "lit {lit}");
+        }
     }
 
     #[test]
