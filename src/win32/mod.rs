@@ -55,6 +55,7 @@ mod oleaut32;
 mod oledlg;
 mod olepro32;
 mod opengl32;
+mod pace;
 mod advpack;
 pub(crate) mod realmode;
 mod registry;
@@ -444,6 +445,8 @@ pub struct Win32 {
     /// The Win16 tasks' state (src/win16), whose process is one of
     /// `processes`.
     pub win16: crate::win16::State,
+    /// The serial ports Win32 programs have open (kernel32/comm.rs).
+    pub comm: Vec<kernel32::comm::Port>,
 
     /// COM's and the DirectX and multimedia DLLs' state, the system's,
     /// and how many GUIDs CoCreateGuid made.
@@ -1668,6 +1671,7 @@ crate::state_fields!(Win32 {
     wnaspi32,
     oleaut32,
     msacm32,
+    comm,
 } skip {
     enabled,
     guest_dlls,
