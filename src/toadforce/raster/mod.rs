@@ -73,7 +73,9 @@ struct Run {
 
 /// What a draw command queued.
 pub struct Drawn {
-    /// The triangles, lines and points.
+    /// The triangles, lines and points: those left after the card's
+    /// cut and culling, or all of the draw's triangles when a host
+    /// transforms them and cuts and culls by itself.
     pub primitives: u64,
     /// The bytes of card memory they may write: from the first to
     /// after the last.

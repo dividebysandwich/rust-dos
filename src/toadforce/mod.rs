@@ -178,7 +178,8 @@ pub struct Counts {
     /// The commands level 1 adds.
     pub level1: u64,
     /// The draw commands among them, and the triangles, lines and
-    /// points they drew.
+    /// points they queued (`raster::Drawn::primitives`: a draw a host
+    /// transforms counts its triangles before the cut and culling).
     pub draws: u64,
     pub primitives: u64,
     /// The draws whose vertices the card transformed and lit.

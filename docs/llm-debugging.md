@@ -1149,7 +1149,14 @@ and `commands`: how many `nop`, `fill`, `blt` and `flip` commands and
 commands of `level1` it carried out since power-on, from the ring and
 from the built-in Windows' driver alike, and how many commands and
 register writes it `rejected`. A game whose DirectDraw blits stay on
-the CPU has `fill` and `blt` at 0.
+the CPU has `fill` and `blt` at 0. Of level 1's commands, `draws` are
+the draw commands, `transformed` those of them with vertices for the
+card to transform, and `primitives` the triangles, lines and points
+they queued. For a draw the card transforms, that is what is left
+after its cut at the planes and its culling. For a draw the OpenGL
+renderer's vertex shader transforms it is every triangle of the draw,
+since the GPU cuts and culls them. So one scene counts more
+`primitives` with the OpenGL renderer than with the software one.
 
 `renderer` is what draws the card's triangles: `software`, or `OpenGL`
 with `toadforce_renderer` `auto` or `opengl` in a window that has
