@@ -886,6 +886,7 @@ mod tests {
         (59, 0xCDE1_505E_0044_1486), // the page file behind programs' own memory
         (61, 0x9267_6BA0_CE58_B06F), // OpenGL's display lists
         (62, 0x9F78_ACB5_CCD2_8975), // OpenGL's textures in their contexts' group
+        (66, 0x9F78_ACB5_CCD2_8975), // the fonts of files AddFontResource added
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
