@@ -13,8 +13,9 @@
 //! out to the page file (`page_out`), and comes back on its next touch.
 //! So a program can commit as much as the pool and the page file hold
 //! together, and touch it all, which is what GlobalMemoryStatus reports.
-//! The system's own pages (images, stacks, page tables, file mappings)
-//! stay in the pool.
+//! The pages of a module's image go out and come back the same way
+//! (`map_pageable`). The system's own pages (stacks, page tables, file
+//! mappings) stay in the pool.
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -169,8 +170,9 @@ pub struct PageFile {
     /// a free place, which `free_slots` lists.
     slots: Vec<Vec<u8>>,
     free_slots: Vec<u32>,
-    /// The physical pages of programs' own memory, which can go out to
-    /// it, with the address of the page table entry that maps each.
+    /// The physical pages of programs' own memory and of modules' images,
+    /// which can go out to it, with the address of the page table entry
+    /// that maps each.
     pageable: BTreeMap<u32, u32>,
     /// Pages of programs' own memory that the system maps a second time
     /// (`pin`), which stay in the pool until the last of those mappings
@@ -463,13 +465,16 @@ impl Memory {
 
     /// Map the physical page `phys`, which `page` gave, at `lin` with the
     /// entry bits `flags`, as a page of a module's image: it can go out
-    /// to the page file as the program's own memory does. Windows pages
-    /// an image out too (its code and the data not written back to its
-    /// file, written data to the swap file), so a program can load
-    /// images larger than the memory left beside them, as a game's DLL
-    /// of 10 MB of bitmaps on a machine of 16 MB. A page that stayed in
-    /// the pool would leave none for the program's own pages to come
-    /// back in.
+    /// to the page file as the program's own memory does, with its
+    /// protection. Windows 95 pages images out too, so a program can load
+    /// images larger than the memory left beside them, as a game's DLL of
+    /// 10 MB of bitmaps on a machine of 16 MB; a page that stayed in the
+    /// pool would leave none for the program's own pages to come back
+    /// in. Windows reads a page of code or read-only data from the image
+    /// file again, and sends only written pages to the swap file. Here
+    /// every page goes to the page file, which keeps what the loader
+    /// wrote to it (relocations, bound imports) and needs the file no
+    /// more.
     pub fn map_pageable(&mut self, bus: &mut Bus, lin: u32, phys: u32, flags: u32) -> Option<()> {
         self.map(bus, lin, phys, flags)?;
         self.make_pageable(bus, lin, phys);
@@ -1290,6 +1295,7 @@ mod tests {
     /// the loader maps one and then written whole: its pages go out to
     /// the page file to make room for the next, every byte reads back,
     /// and a page of the program's own memory still comes in after it.
+    /// Each page that went out comes back read-only, as it was mapped.
     #[test]
     fn an_image_larger_than_the_pool_is_paged() {
         let (mut cpu, mut memory) = machine(4, 32);
@@ -1307,17 +1313,21 @@ mod tests {
             .expect("room");
         touch(&mut cpu, &memory, page(0), 0x5A);
         assert_eq!(bytes(&cpu, &memory, image, data.len()), data);
-        for n in 0..8 {
-            if memory.translate(&cpu.bus, image + n * PAGE).is_none() {
-                assert_eq!(
-                    page_in(&mut cpu.bus, memory.cr3, image + n * PAGE),
-                    PageIn::Done
-                );
-            }
+        let out: Vec<u32> = (0..8)
+            .map(|n| image + n * PAGE)
+            .filter(|&lin| memory.translate(&cpu.bus, lin).is_none())
+            .collect();
+        assert!(out.len() >= 4, "only {} pages of the image went out", out.len());
+        for lin in out {
+            let entry = memory.entry(&cpu.bus, lin).expect("an entry");
+            assert!(is_paged(entry), "{lin:08X}: {entry:08X}");
+            assert_eq!(page_in(&mut cpu.bus, memory.cr3, lin), PageIn::Done);
+            let entry = memory.entry(&cpu.bus, lin).expect("an entry");
+            assert_eq!(entry & (PRESENT | WRITABLE), PRESENT, "{lin:08X}: {entry:08X}");
+            assert_eq!(protection(entry), Some(PAGE_READONLY), "{lin:08X}: {entry:08X}");
         }
         assert_eq!(bytes(&cpu, &memory, page(0), 4), [0x5A; 4]);
-        let entry = memory.entry(&cpu.bus, image).expect("an entry");
-        assert_eq!(protection(entry), Some(PAGE_READONLY), "{entry:08X}");
+        assert_eq!(bytes(&cpu, &memory, image, data.len()), data);
     }
 
     /// Pages decommitted, or of a process that ended, give their places in
