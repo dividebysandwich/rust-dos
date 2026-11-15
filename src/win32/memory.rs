@@ -1036,7 +1036,9 @@ pub fn page_out(bus: &mut Bus) -> bool {
             continue;
         }
         if entry & ACCESSED != 0 {
+            // The TLB is stale: see `page_out_unused`.
             bus.write_32(at as usize, entry & !ACCESSED);
+            bus.win32.tlb_stale = true;
             continue;
         }
         break (phys, at, entry);
@@ -1049,20 +1051,27 @@ pub fn page_out(bus: &mut Bus) -> bool {
 
 /// Write up to `most` pages of programs' own memory that no program has
 /// touched since the last search (their entries' accessed bits, which it
-/// clears on the others) out to the page file, in one pass over them:
-/// with `mapping::evict`, a batch of the pages not used lately, of both
-/// kinds. How many went; the TLB is stale after any.
+/// clears on the others) out to the page file, in one pass over them
+/// that starts where the last search stopped (`hand`, which it moves to
+/// the last page it sent): with `mapping::evict`, a batch of the pages
+/// not used lately, of both kinds. How many went. The TLB is stale after
+/// it when it sent a page or cleared an accessed bit: the processor sets
+/// the bit only when it walks the tables, so a page whose translation
+/// stayed in the TLB would look unused at the next search however often
+/// the program touched it.
 pub fn page_out_unused(bus: &mut Bus, most: usize) -> usize {
     let Some(pool) = bus.win32.pool.as_ref() else {
         return 0;
     };
-    let pages: Vec<(u32, u32)> = pool
-        .page_file
+    let file = &pool.page_file;
+    let after = file
         .pageable
-        .iter()
+        .range((Bound::Excluded(file.hand), Bound::Unbounded));
+    let pages: Vec<(u32, u32)> = after
+        .chain(file.pageable.range(..=file.hand))
         .map(|(&p, &a)| (p, a))
         .collect();
-    let mut room = pool.page_file.room() as usize;
+    let mut room = file.room() as usize;
     let mut sent = 0;
     for (phys, at) in pages {
         let entry = bus.read_32(at as usize);
@@ -1073,8 +1082,10 @@ pub fn page_out_unused(bus: &mut Bus, most: usize) -> usize {
         }
         if entry & ACCESSED != 0 {
             bus.write_32(at as usize, entry & !ACCESSED);
+            bus.win32.tlb_stale = true;
         } else if sent < most && room > 0 {
             send_out(bus, phys, at, entry);
+            bus.win32.pool.as_mut().expect("checked").page_file.hand = phys;
             sent += 1;
             room -= 1;
         }
@@ -1219,13 +1230,30 @@ pub fn retry(bus: &mut Bus, key: u64) {
     }
     file.retry_key = key;
     for (phys, at) in std::mem::take(&mut file.held) {
-        if let Some((count, pinned_at)) = file.pinned.get_mut(&phys)
+        file.let_go(phys, at);
+    }
+}
+
+/// The most pages `hold` keeps for one context. An instruction needs at
+/// most six at once (its bytes, two memory operands or one and the
+/// stack, each across a page boundary), and these are more. A service
+/// can fault more often with the same registers, since its arguments
+/// are in memory, and two calls of it, each needing other pages, may
+/// have the same context: the pages beyond these let the oldest go, so
+/// that a run of such calls doesn't hold the pool's pages one by one
+/// until none can go.
+const HOLDS: usize = 16;
+
+impl PageFile {
+    /// `hold` lets go of the page `phys`, whose entry is at `at`.
+    fn let_go(&mut self, phys: u32, at: u32) {
+        if let Some((count, pinned_at)) = self.pinned.get_mut(&phys)
             && *pinned_at == at
         {
             *count -= 1;
             if *count == 0 {
-                file.pinned.remove(&phys);
-                file.pageable.insert(phys, at);
+                self.pinned.remove(&phys);
+                self.pageable.insert(phys, at);
             }
         }
     }
@@ -1234,7 +1262,8 @@ pub fn retry(bus: &mut Bus, key: u64) {
 /// Keep the present page at `lin` of the page tables at `cr3`, which a
 /// page fault of the instruction `retry` was told of brought in, in the
 /// pool until that instruction's faults end: out of `page_out`'s reach,
-/// and of `mapping::evict`'s for a page of a view of a file.
+/// and of `mapping::evict`'s for a page of a view of a file. The last
+/// `HOLDS` pages are kept.
 pub fn hold(bus: &mut Bus, cr3: u32, lin: u32) {
     let table = bus.read_32((cr3 + 4 * (lin >> 22)) as usize);
     if table & PRESENT == 0 {
@@ -1260,6 +1289,10 @@ pub fn hold(bus: &mut Bus, cr3: u32, lin: u32) {
         *count += 1;
     }
     file.held.push((phys, at));
+    if file.held.len() > HOLDS {
+        let (phys, at) = file.held.remove(0);
+        file.let_go(phys, at);
+    }
 }
 
 /// Whether the physical page `phys` is held for the instruction that
@@ -1587,6 +1620,87 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The physical page of the present page at `lin`.
+    fn phys_of(cpu: &Cpu, memory: &Memory, lin: u32) -> u32 {
+        memory.translate(&cpu.bus, lin).expect("present") & !0xFFF
+    }
+
+    /// A search that clears accessed bits makes the TLB stale, though it
+    /// sends no page out: the processor sets a bit again only when it
+    /// walks the tables, and a translation left in the TLB would let the
+    /// program use the page without the next search seeing it.
+    #[test]
+    fn a_search_that_clears_accessed_bits_makes_the_tlb_stale() {
+        let (mut cpu, mut memory) = machine(8, 32);
+        memory
+            .commit_paged(&mut cpu.bus, page(0), 4 * PAGE, PAGE_READWRITE)
+            .expect("room");
+        for n in 0..4 {
+            touch(&mut cpu, &memory, page(n), n as u8);
+        }
+        cpu.bus.win32.tlb_stale = false;
+        assert_eq!(page_out_unused(&mut cpu.bus, 4), 0);
+        assert!(cpu.bus.win32.tlb_stale);
+        for n in 0..4 {
+            let entry = memory.entry(&cpu.bus, page(n)).expect("an entry");
+            assert_eq!(entry & ACCESSED, 0, "page {n}: {entry:08X}");
+        }
+    }
+
+    /// The search for pages not used lately goes on after the last page
+    /// it sent out: a page that came back in since, touched after the
+    /// others, isn't the next to go just because its physical page is
+    /// the lowest.
+    #[test]
+    fn the_search_for_unused_pages_goes_on_from_where_it_stopped() {
+        let (mut cpu, mut memory) = machine(8, 32);
+        memory
+            .commit_paged(&mut cpu.bus, page(0), 4 * PAGE, PAGE_READWRITE)
+            .expect("room");
+        for n in 0..4 {
+            touch(&mut cpu, &memory, page(n), n as u8);
+        }
+        let mut by_phys: Vec<u32> = (0..4).collect();
+        by_phys.sort_by_key(|&n| phys_of(&cpu, &memory, page(n)));
+        let (first, second) = (page(by_phys[0]), page(by_phys[1]));
+        page_out_unused(&mut cpu.bus, 0);
+        assert_eq!(page_out_unused(&mut cpu.bus, 1), 1);
+        assert!(memory.translate(&cpu.bus, first).is_none(), "the first went");
+        // Back in, at the physical page it had, and then untouched as the
+        // others are until the next search.
+        assert_eq!(page_in(&mut cpu.bus, memory.cr3, first), PageIn::Done);
+        page_out_unused(&mut cpu.bus, 0);
+        assert_eq!(page_out_unused(&mut cpu.bus, 1), 1);
+        assert!(memory.translate(&cpu.bus, first).is_some(), "it went again");
+        assert!(memory.translate(&cpu.bus, second).is_none(), "the next stayed");
+    }
+
+    /// The pages held for one context stay at `HOLDS`: the oldest may go
+    /// to the page file again once more are held, the latest may not.
+    #[test]
+    fn the_pages_held_for_one_context_are_bounded() {
+        let pages = HOLDS as u32 + 8;
+        let (mut cpu, mut memory) = machine(64, 64);
+        memory
+            .commit_paged(&mut cpu.bus, page(0), pages * PAGE, PAGE_READWRITE)
+            .expect("room");
+        retry(&mut cpu.bus, 0x1115);
+        for n in 0..pages {
+            assert_eq!(page_in(&mut cpu.bus, memory.cr3, page(n)), PageIn::Done);
+            hold(&mut cpu.bus, memory.cr3, page(n));
+        }
+        assert_eq!(file(&cpu).held.len(), HOLDS);
+        for n in 0..pages {
+            let phys = phys_of(&cpu, &memory, page(n));
+            let kept = n >= pages - HOLDS as u32;
+            assert_eq!(held(&cpu.bus, phys), kept, "page {n}");
+            assert_eq!(file(&cpu).pageable.contains_key(&phys), !kept, "page {n}");
+        }
+        retry(&mut cpu.bus, 0x1116);
+        assert!(file(&cpu).held.is_empty() && file(&cpu).pinned.is_empty());
+        assert_eq!(file(&cpu).pageable.len(), pages as usize);
     }
 
     /// A page pinned twice stays in the pool while pages go out around

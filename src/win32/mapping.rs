@@ -339,22 +339,28 @@ pub fn fault_in(cpu: &mut Cpu, lin: u32) -> bool {
 /// (VirtualProtect, ReadProcessMemory). Every process must be in the
 /// list.
 pub fn fault_in_process(cpu: &mut Cpu, index: usize, lin: u32) -> bool {
-    let mut keep = reserve(&cpu.bus);
+    let done = read_making_room(&mut cpu.bus, index, lin);
+    // Reading it, or making room for it, may have sent pages out or
+    // cleared accessed bits, whether or not it came in.
+    if std::mem::take(&mut cpu.bus.win32.tlb_stale) {
+        cpu.tlb.flush();
+    } else if done && index == cpu.bus.win32.running {
+        cpu.tlb.flush_page(lin);
+    }
+    done
+}
+
+/// `fault_in_process` without the TLB, which may be stale after it
+/// (`Win32::tlb_stale`).
+fn read_making_room(bus: &mut Bus, index: usize, lin: u32) -> bool {
+    let mut keep = reserve(bus);
     // A page and its page table may each need room; a few rounds are
     // plenty, and stop a page evicted again before it is mapped from
     // going round for ever.
     let mut swept = false;
     for _ in 0..4 {
-        match read_in(&mut cpu.bus, index, lin, keep) {
-            PageIn::Done => {
-                // Reading it may have sent a page to the page file.
-                if std::mem::take(&mut cpu.bus.win32.tlb_stale) {
-                    cpu.tlb.flush();
-                } else if index == cpu.bus.win32.running {
-                    cpu.tlb.flush_page(lin);
-                }
-                return true;
-            }
+        match read_in(bus, index, lin, keep) {
+            PageIn::Done => return true,
             PageIn::No => return false,
             PageIn::Full => {
                 // Pages not used since the last sweep go first, a batch of
@@ -363,21 +369,15 @@ pub fn fault_in_process(cpu: &mut Cpu, index: usize, lin: u32) -> bool {
                 // reserve is used up, a page of a program's own memory goes
                 // out, and only with none of those, any view's page that
                 // isn't held for the instruction (`memory::hold`).
-                let left = cpu
-                    .bus
-                    .win32
-                    .pool
-                    .as_ref()
-                    .map_or(0, |p| p.available() / PAGE);
-                if !std::mem::replace(&mut swept, true) && sweep(&mut cpu.bus) {
-                    cpu.tlb.flush();
+                let left = bus.win32.pool.as_ref().map_or(0, |p| p.available() / PAGE);
+                if !std::mem::replace(&mut swept, true) && sweep(bus) {
+                    bus.win32.tlb_stale = true;
                 } else if keep == 0 || left == 0 {
-                    if !memory::page_out(&mut cpu.bus) && !evict(&mut cpu.bus, true) {
-                        memory::out_of_memory(&mut cpu.bus, lin);
+                    if !memory::page_out(bus) && !evict(bus, true) {
+                        memory::out_of_memory(bus, lin);
                         return false;
                     }
-                    cpu.tlb.flush();
-                    cpu.bus.win32.tlb_stale = false;
+                    bus.win32.tlb_stale = true;
                 }
                 // With what room evicting made, or with nothing left to
                 // evict, the page may take from the reserve.
@@ -457,11 +457,15 @@ pub fn evict(bus: &mut Bus, last_resort: bool) -> bool {
             list.push((lin, s, i, entries, wrote));
         }
     }
+    // With the bits cleared the TLB is stale (`memory::page_out_unused`).
     for (_, _, _, entries, _) in &used {
         for &at in entries {
             let entry = bus.read_32(at);
             bus.write_32(at, entry & !ACCESSED);
         }
+    }
+    if !used.is_empty() {
+        bus.win32.tlb_stale = true;
     }
     let count = ((unused.len() + used.len()) / EVICTED_SHARE).max(EVICTED);
     if !last_resort {
