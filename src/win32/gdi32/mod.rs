@@ -15,6 +15,7 @@ pub mod dc;
 pub mod draw;
 #[cfg(test)]
 mod draw_tests;
+pub mod fnt;
 pub mod font;
 mod gamma;
 pub mod metafile;
@@ -269,8 +270,8 @@ pub struct State {
     /// and the one realized last.
     pub primary_palette: u32,
     pub last_realized: u32,
-    /// The fonts AddFontResourceA added, by file name.
-    pub font_files: Vec<String>,
+    /// The files AddFontResourceA added and their fonts.
+    pub font_files: Vec<fnt::AddedFile>,
     /// The last blit's translation table from a color table onto a
     /// palette device (`draw::Translate::kept`). Not saved: a blit
     /// uses it only when it is of the same colors through the same map.

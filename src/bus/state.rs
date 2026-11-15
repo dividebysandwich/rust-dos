@@ -17,7 +17,11 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 62;
+const WIN32_VERSION: u16 = 66;
+/// The W32 versions an older rust-dos saved that this one still loads:
+/// 62's keeps only the names of the font files a program added
+/// (`gdi32::fnt::AddedFile`).
+const WIN32_OLDER: [u16; 1] = [62];
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -682,7 +686,8 @@ impl Bus {
         }
         win32.reset();
         if r.next_is(b"W32 ") {
-            win32.load(&mut r.section(b"W32 ", WIN32_VERSION)?)?;
+            let versions = [WIN32_OLDER[0], WIN32_VERSION];
+            win32.load(&mut r.section_of(b"W32 ", &versions)?)?;
         }
         // The extended memory they hold.
         xms.dpmi = dpmi.reservations();

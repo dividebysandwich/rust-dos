@@ -26,11 +26,13 @@
 //! (GdiGetCharDimensions), so a dialog's size and the way its text wraps
 //! come out as on Windows.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::dc::{self, Dc, OPAQUE};
+use super::fnt::{AddedFile, Fnt};
 use super::draw::{Canvas, Fill, value_for};
 use super::{CB_AT, CB_LIST, CB_PARAM, CB_PROC};
 use super::{
@@ -461,20 +463,32 @@ const RASTERS: &[Raster] = &[
 /// else the lowest, and it is drawn a whole number of times higher when
 /// the height asked for is near enough to a multiple of it.
 fn raster_of(fi: usize, device_height: i32) -> Option<(usize, i32)> {
-    let sizes = || (0..RASTERS.len()).filter(move |&i| RASTERS[i].face == fi);
+    let sizes: Vec<usize> = (0..RASTERS.len()).filter(|&i| RASTERS[i].face == fi).collect();
     if device_height == 0 {
-        let i = sizes().find(|&i| RASTERS[i].height == FACES[fi].cell);
-        return i.or_else(|| sizes().next()).map(|i| (i, 1));
+        let i = sizes.iter().find(|&&i| RASTERS[i].height == FACES[fi].cell);
+        return i.or(sizes.first()).map(|&i| (i, 1));
     }
+    let heights: Vec<(i32, i32)> = sizes
+        .iter()
+        .map(|&i| (RASTERS[i].height, RASTERS[i].internal))
+        .collect();
+    size_of(&heights, device_height).map(|(k, scale)| (sizes[k], scale))
+}
+
+/// Which of a raster face's sizes, each its height and internal leading
+/// in pixels, a font `device_height` (not 0) high gets by `raster_of`'s
+/// rule, and how many times higher it is drawn.
+fn size_of(sizes: &[(i32, i32)], device_height: i32) -> Option<(usize, i32)> {
     let measure = |i: usize| {
-        let r = &RASTERS[i];
-        if device_height < 0 { r.height - r.internal } else { r.height }
+        let (height, internal) = sizes[i];
+        let h = if device_height < 0 { height - internal } else { height };
+        h.max(1)
     };
     let want = device_height.saturating_abs();
-    let i = sizes()
+    let i = (0..sizes.len())
         .filter(|&i| measure(i) <= want)
         .max_by_key(|&i| measure(i))
-        .or_else(|| sizes().min_by_key(|&i| measure(i)))?;
+        .or_else(|| (0..sizes.len()).min_by_key(|&i| measure(i)))?;
     let h = measure(i);
     let mut scale = want / h + (want % h != 0) as i32;
     // The next multiple only once the height asked for is within a
@@ -485,7 +499,7 @@ fn raster_of(fi: usize, device_height: i32) -> Option<(usize, i32)> {
         scale -= 1;
     }
     // Cells are at most 128 pixels high, as for the other faces.
-    Some((i, scale.clamp(1, 128 / RASTERS[i].height)))
+    Some((i, scale.clamp(1, (128 / sizes[i].0.max(1)).max(1))))
 }
 
 /// How far the byte `b` of the code page `page` moves on in the raster
@@ -690,14 +704,14 @@ struct Key {
 
 /// A glyph: its rows' lit pixels as bit masks (bit 0 the leftmost), how
 /// far it moves on and where its pixels start.
-struct Glyph {
+pub(super) struct Glyph {
     rows: Vec<u64>,
     advance: i32,
     offset: i32,
 }
 
 /// A font's glyphs, one for each byte of its code page.
-struct Glyphs {
+pub(super) struct Glyphs {
     glyphs: Vec<Glyph>,
 }
 
@@ -926,11 +940,12 @@ fn glyphs_of(key: Key) -> Rc<Glyphs> {
 /// A font as GDI realizes it on the screen.
 #[derive(Clone)]
 pub struct Realized {
-    pub face: &'static str,
+    pub face: Cow<'static, str>,
     pub height: i32,
     pub ascent: i32,
     pub descent: i32,
     pub internal_leading: i32,
+    pub external_leading: i32,
     pub weight: i32,
     pub italic: bool,
     pub underline: bool,
@@ -942,14 +957,12 @@ pub struct Realized {
     /// The face's character sets as a FONTSIGNATURE's code page bits.
     csb: u32,
     average: i32,
+    /// TEXTMETRIC's first, last, default and break characters.
+    chars: [u8; 4],
     glyphs: Rc<Glyphs>,
 }
 
 impl Realized {
-    fn oem(&self) -> bool {
-        self.charset == OEM_CHARSET
-    }
-
     /// The glyph of the byte `b` of the font's character set.
     fn glyph(&self, b: u8) -> &Glyph {
         &self.glyphs.glyphs[b as usize]
@@ -1045,12 +1058,18 @@ fn realize(log: &Log, sys: &System, device_height: i32, device_width: i32) -> Re
         Some(a) => cell - a,
         None => ((cell * 4 + 8) / 16).max(1),
     };
+    let chars = if charset == OEM_CHARSET {
+        [1, 0xFF, 0xFE, 0x20]
+    } else {
+        [0x20, 0xFF, 0x80, 0x20]
+    };
     Realized {
-        face: face.name,
+        face: Cow::Borrowed(face.name),
         height: cell,
         ascent: cell - descent,
         descent,
         internal_leading: internal,
+        external_leading: 0,
         weight,
         italic: log.italic,
         underline: log.underline,
@@ -1064,8 +1083,120 @@ fn realize(log: &Log, sys: &System, device_height: i32, device_width: i32) -> Re
             .filter_map(|&c| nls::charset(c))
             .fold(0, |a, c| a | c.csb),
         average,
+        chars,
         glyphs,
     }
+}
+
+/// The sizes of the face a logical font names among the fonts
+/// AddFontResourceA added, in the character set it asks for.
+fn file_sizes(cpu: &mut Cpu, log: &Log) -> Vec<Rc<Fnt>> {
+    if log.face.is_empty() {
+        return Vec::new();
+    }
+    gdi(cpu)
+        .font_files
+        .iter()
+        .flat_map(|file| file.fonts.iter())
+        .filter(|f| f.face.eq_ignore_ascii_case(&log.face))
+        .filter(|f| log.charset == DEFAULT_CHARSET || log.charset == f.charset)
+        .cloned()
+        .collect()
+}
+
+/// Realize the logical font `log` as one of `sizes`, the sizes of a face
+/// a file added, picked and stretched as Windows does its own raster
+/// fonts (`raster_of`). A font asked for bold of a face that isn't is
+/// made bold, a column wider.
+fn realize_file(
+    log: &Log,
+    sys: &System,
+    sizes: &[Rc<Fnt>],
+    device_height: i32,
+    device_width: i32,
+) -> Option<Realized> {
+    let heights: Vec<(i32, i32)> = sizes.iter().map(|f| (f.height, f.internal)).collect();
+    let (i, y_scale) = match device_height {
+        0 => (0, 1),
+        h => size_of(&heights, h)?,
+    };
+    let f = sizes.get(i)?;
+    let x_scale = if device_width > 0 {
+        (device_width / f.average.max(1)).clamp(1, 8)
+    } else {
+        y_scale
+    };
+    let made_bold = log.weight >= 600 && f.weight < 600;
+    let glyphs = file_glyphs(f, x_scale, y_scale, made_bold);
+    let height = f.height * y_scale;
+    let ascent = f.ascent * y_scale;
+    // dfPitchAndFamily's bit 0 says the pitch is variable.
+    let pitch = if f.pitch_family & 1 != 0 {
+        VARIABLE_PITCH
+    } else {
+        FIXED_PITCH
+    };
+    Some(Realized {
+        face: Cow::Owned(f.face.clone()),
+        height,
+        ascent,
+        descent: height - ascent,
+        internal_leading: f.internal * y_scale,
+        external_leading: f.external * y_scale,
+        weight: if made_bold { 700 } else { f.weight },
+        italic: log.italic,
+        underline: log.underline || f.underline,
+        strike: log.strike || f.strike,
+        charset: f.charset,
+        pitch_family: f.pitch_family & FF_FAMILY | pitch,
+        page: sys.code_page(f.charset),
+        csb: nls::charset(f.charset).map_or(0, |c| c.csb),
+        average: f.average * x_scale + made_bold as i32,
+        chars: [f.first, f.last, f.default, f.break_char],
+        glyphs,
+    })
+}
+
+/// The glyphs of the file's font `f` drawn `x_scale` times wider and
+/// `y_scale` times higher, and made bold: each pixel ORed with the one to
+/// its left, moving on a column more.
+fn file_glyphs(f: &Fnt, x_scale: i32, y_scale: i32, bold: bool) -> Rc<Glyphs> {
+    let make = || {
+        let glyphs = (0..=255u8)
+            .map(|b| {
+                let g = f.glyph(b);
+                let rows = g
+                    .rows
+                    .iter()
+                    .flat_map(|&row| {
+                        let mut out = 0u64;
+                        for x in (0..64).filter(|x| row >> x & 1 != 0) {
+                            for k in 0..x_scale {
+                                if let Some(bit) = 1u64.checked_shl((x * x_scale + k) as u32) {
+                                    out |= bit;
+                                }
+                            }
+                        }
+                        if bold {
+                            out |= out << 1;
+                        }
+                        std::iter::repeat_n(out, y_scale as usize)
+                    })
+                    .collect();
+                Glyph {
+                    rows,
+                    advance: g.width * x_scale + bold as i32,
+                    offset: 0,
+                }
+            })
+            .collect();
+        Rc::new(Glyphs { glyphs })
+    };
+    f.drawn
+        .borrow_mut()
+        .entry((x_scale, y_scale, bold))
+        .or_insert_with(make)
+        .clone()
 }
 
 /// The font selected into the DC `dc`, realized.
@@ -1081,7 +1212,12 @@ pub fn realized_of(cpu: &mut Cpu, dc: &Dc) -> Realized {
         (y1 - y0).abs() * log.height.signum()
     };
     let width = dc.width_to_device(log.width.abs());
-    realize(&log, &System::of(cpu), height, width)
+    let sys = System::of(cpu);
+    let sizes = file_sizes(cpu, &log);
+    if let Some(f) = realize_file(&log, &sys, &sizes, height, width) {
+        return f;
+    }
+    realize(&log, &sys, height, width)
 }
 
 /// The font of the DC `hdc`, or None with the error set.
@@ -1167,7 +1303,7 @@ fn text_metric(dc: &Dc, f: &Realized) -> Vec<u8> {
         lh(f.ascent),
         lh(f.descent),
         lh(f.internal_leading),
-        0,
+        lh(f.external_leading),
         lw(f.average_width()),
         lw(f.max_width()),
         f.weight,
@@ -1177,14 +1313,14 @@ fn text_metric(dc: &Dc, f: &Realized) -> Vec<u8> {
     ] {
         b.extend_from_slice(&v.to_le_bytes());
     }
-    let first = if f.oem() { 1 } else { 0x20 };
     // TMPF_FIXED_PITCH says the pitch is variable.
     let pitch = (f.pitch_family & FF_FAMILY) | (f.pitch_family & 3 == VARIABLE_PITCH) as u8;
+    let [first, last, default, break_char] = f.chars;
     b.extend_from_slice(&[
         first,
-        0xFF,
-        if f.oem() { 0xFE } else { 0x80 },
-        0x20,
+        last,
+        default,
+        break_char,
         f.italic as u8,
         f.underline as u8,
         f.strike as u8,
@@ -1726,15 +1862,26 @@ pub fn get_rasterizer_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-/// AddFontResourceA(file): the fonts it added. The file's fonts aren't
-/// drawn; a font that asks for their face gets one GDI has.
+/// AddFontResourceA(file): how many fonts it added, 0 if the file can't
+/// be read. The raster fonts of a .FON or .FNT file are drawn, listed
+/// with the system's faces and chosen by their face's name. A file of
+/// other fonts (TrueType) counts as one font none of whose faces is
+/// drawn: a font that asks for its face gets one GDI has.
 pub fn add_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(name) = crate::win32::user32::string_at(cpu, args[0]) else {
         return Some(0);
     };
+    let Some(bytes) = crate::win32::winmm::mci::media::read_file(cpu, &name) else {
+        return Some(0);
+    };
+    let fonts: Vec<Rc<Fnt>> = super::fnt::fonts_of_file(&bytes)
+        .into_iter()
+        .map(Rc::new)
+        .collect();
+    let count = fonts.len().max(1) as u32;
     init(cpu);
-    gdi(cpu).font_files.push(name);
-    Some(1)
+    gdi(cpu).font_files.push(AddedFile { name, fonts });
+    Some(count)
 }
 
 /// RemoveFontResourceA(file).
@@ -1743,13 +1890,55 @@ pub fn remove_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(FALSE);
     };
     let files = &mut gdi(cpu).font_files;
-    match files.iter().position(|f| f.eq_ignore_ascii_case(&name)) {
+    match files.iter().position(|f| f.name.eq_ignore_ascii_case(&name)) {
         Some(i) => {
             files.remove(i);
             Some(TRUE)
         }
         None => Some(FALSE),
     }
+}
+
+/// An enumeration's item for the font `i` of those files added, counting
+/// through every file's (`added_font`).
+const ADDED_ITEM: u32 = 1 << 16;
+
+/// The `i`th font of those files added.
+fn added_font(cpu: &mut Cpu, i: usize) -> Option<Rc<Fnt>> {
+    gdi(cpu)
+        .font_files
+        .iter()
+        .flat_map(|file| file.fonts.iter())
+        .nth(i)
+        .cloned()
+}
+
+/// The enumeration's items of the fonts files added: with no `family`
+/// each face once, its first size, and with one every size of that face,
+/// as Windows lists raster fonts. `charset` keeps those of one character
+/// set (DEFAULT_CHARSET any).
+fn added_items(cpu: &mut Cpu, family: Option<&str>, charset: u8) -> Vec<u32> {
+    let fonts: Vec<Rc<Fnt>> = gdi(cpu)
+        .font_files
+        .iter()
+        .flat_map(|file| file.fonts.iter().cloned())
+        .collect();
+    let mut seen: Vec<&str> = Vec::new();
+    let mut items = Vec::new();
+    for (i, f) in fonts.iter().enumerate() {
+        if charset != DEFAULT_CHARSET && f.charset != charset {
+            continue;
+        }
+        let pick = match family {
+            Some(name) => f.face.eq_ignore_ascii_case(name),
+            None => !seen.iter().any(|s| s.eq_ignore_ascii_case(&f.face)),
+        };
+        if pick {
+            seen.push(&f.face);
+            items.push(ADDED_ITEM | i as u32);
+        }
+    }
+    items
 }
 
 /// Scratch space a font enumeration's callback gets: ENUMLOGFONTEXA
@@ -1793,10 +1982,11 @@ pub fn enum_font_families(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // Each face once, in its first character set: the system's where it
     // has it.
     let sys = System::of(cpu);
-    let items = faces_named(family.as_deref())
+    let mut items: Vec<u32> = faces_named(family.as_deref())
         .into_iter()
         .map(|i| enum_item(i, sys.sets(i)[0]))
         .collect();
+    items.extend(added_items(cpu, family.as_deref(), DEFAULT_CHARSET));
     start_enum(cpu, items, args[2], args[3])
 }
 
@@ -1816,12 +2006,13 @@ pub fn enum_font_families_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let family = (!log.face.is_empty()).then_some(log.face.as_str());
     // A face in each of its character sets, or in the one asked for.
     let sys = System::of(cpu);
-    let items = faces_named(family)
+    let mut items: Vec<u32> = faces_named(family)
         .into_iter()
         .flat_map(|i| sys.sets(i).into_iter().map(move |c| (i, c)))
         .filter(|&(_, c)| log.charset == DEFAULT_CHARSET || c == log.charset)
         .map(|(i, c)| enum_item(i, c))
         .collect();
+    items.extend(added_items(cpu, family, log.charset));
     start_enum(cpu, items, args[2], args[3])
 }
 
@@ -1832,26 +2023,45 @@ pub fn enum_callback(cpu: &mut Cpu, t: &mut Task, at: usize) -> Next {
         return Next::Done(1);
     };
     t.set(CB_AT, at as u32 + 1);
-    let face = &FACES[(item & 0xFF) as usize % FACES.len()];
-    let charset = (item >> 8) as u8;
-    let mut log_bytes = logfont(
-        face.cell,
-        0,
-        face.weight,
-        charset,
-        face.pitch_family,
-        face.name,
-    );
+    let sys = System::of(cpu);
+    let (mut log_bytes, f) = if item & ADDED_ITEM != 0 {
+        let Some(font) = added_font(cpu, (item & 0xFFFF) as usize) else {
+            return Next::Done(1);
+        };
+        let mut b = logfont(font.height, 0, font.weight, font.charset, 0, &font.face);
+        b[20] = font.italic as u8;
+        b[21] = font.underline as u8;
+        b[22] = font.strike as u8;
+        let log = Log::of(&b);
+        let Some(f) = realize_file(&log, &sys, &[font], log.height, 0) else {
+            return Next::Done(1);
+        };
+        b[27] = f.pitch_family;
+        (b, f)
+    } else {
+        let face = &FACES[(item & 0xFF) as usize % FACES.len()];
+        let charset = (item >> 8) as u8;
+        let b = logfont(
+            face.cell,
+            0,
+            face.weight,
+            charset,
+            face.pitch_family,
+            face.name,
+        );
+        let f = realize(&Log::of(&b), &sys, face.cell, 0);
+        (b, f)
+    };
+    let charset = f.charset;
     log_bytes[24] = 1; // OUT_STRING_PRECIS
     log_bytes[25] = 2; // CLIP_STROKE_PRECIS
     log_bytes[26] = 2; // PROOF_QUALITY
-    let f = realize(&Log::of(&log_bytes), &System::of(cpu), face.cell, 0);
     log_bytes[4..8].copy_from_slice(&f.average_width().to_le_bytes());
     let mut elf = log_bytes;
-    let mut full = face.name.as_bytes().to_vec();
+    let mut full = f.face.as_bytes().to_vec();
     full.resize(64, 0);
     elf.extend_from_slice(&full);
-    let mut style = if face.weight >= 600 {
+    let mut style = if f.weight >= 600 {
         b"Bold".to_vec()
     } else {
         b"Regular".to_vec()
@@ -1872,7 +2082,7 @@ pub fn enum_callback(cpu: &mut Cpu, t: &mut Task, at: usize) -> Next {
     ntm.resize(TEXTMETRICA_SIZE, 0);
     // ntmFlags (NTM_REGULAR or NTM_BOLD), ntmSizeEM, ntmCellHeight,
     // ntmAvgWidth, then the FONTSIGNATURE.
-    let flags: u32 = if face.weight >= 600 { 0x20 } else { 0x40 };
+    let flags: u32 = if f.weight >= 600 { 0x20 } else { 0x40 };
     for v in [
         flags,
         (f.height - f.internal_leading) as u32,

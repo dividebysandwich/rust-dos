@@ -130,7 +130,9 @@ asking whether to make it.
 The fonts are the VGA's ROM glyphs, scaled, with each character of the
 dialog fonts as wide as in Windows 98's. Text still looks different, so
 some lines wrap or are cut where Windows 98's aren't, and characters the
-built-in fonts lack, such as `®`, show as `?`.
+built-in fonts lack, such as `®`, show as `?`. Raster fonts a program
+adds from its own .FON or .FNT files with `AddFontResource` are drawn
+with their own glyphs; its TrueType fonts get a built-in face.
 
 ### Painting
 
