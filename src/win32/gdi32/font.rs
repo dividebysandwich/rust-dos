@@ -1088,16 +1088,28 @@ fn realize(log: &Log, sys: &System, device_height: i32, device_width: i32) -> Re
     }
 }
 
+/// The fonts of the files AddFontResourceA added, those of a file added
+/// more than once once: Windows loads such a file once and counts the
+/// times it was added, which RemoveFontResourceA counts down.
+fn added_fonts(files: &[AddedFile]) -> impl Iterator<Item = &Rc<Fnt>> {
+    files
+        .iter()
+        .enumerate()
+        .filter(|&(i, file)| {
+            !files[..i]
+                .iter()
+                .any(|f| f.name.eq_ignore_ascii_case(&file.name))
+        })
+        .flat_map(|(_, file)| file.fonts.iter())
+}
+
 /// The sizes of the face a logical font names among the fonts
 /// AddFontResourceA added, in the character set it asks for.
 fn file_sizes(cpu: &mut Cpu, log: &Log) -> Vec<Rc<Fnt>> {
     if log.face.is_empty() {
         return Vec::new();
     }
-    gdi(cpu)
-        .font_files
-        .iter()
-        .flat_map(|file| file.fonts.iter())
+    added_fonts(&gdi(cpu).font_files)
         .filter(|f| f.face.eq_ignore_ascii_case(&log.face))
         .filter(|f| log.charset == DEFAULT_CHARSET || log.charset == f.charset)
         .cloned()
@@ -1116,10 +1128,22 @@ fn realize_file(
     device_width: i32,
 ) -> Option<Realized> {
     let heights: Vec<(i32, i32)> = sizes.iter().map(|f| (f.height, f.internal)).collect();
-    let (i, y_scale) = match device_height {
+    let (picked, y_scale) = match device_height {
         0 => (0, 1),
         h => size_of(&heights, h)?,
     };
+    // Of the fonts as high as the one picked, the one nearest the weight
+    // asked for, then upright or italic as asked: Windows' mapper weighs
+    // the height first, then the weight, then the slant.
+    let weight = if log.weight == 0 { 400 } else { log.weight };
+    let i = (0..sizes.len())
+        .filter(|&j| heights.get(j) == heights.get(picked))
+        .min_by_key(|&j| {
+            (
+                (sizes[j].weight - weight).abs(),
+                sizes[j].italic != log.italic,
+            )
+        })?;
     let f = sizes.get(i)?;
     let x_scale = if device_width > 0 {
         (device_width / f.average.max(1)).clamp(1, 8)
@@ -1905,12 +1929,7 @@ const ADDED_ITEM: u32 = 1 << 16;
 
 /// The `i`th font of those files added.
 fn added_font(cpu: &mut Cpu, i: usize) -> Option<Rc<Fnt>> {
-    gdi(cpu)
-        .font_files
-        .iter()
-        .flat_map(|file| file.fonts.iter())
-        .nth(i)
-        .cloned()
+    added_fonts(&gdi(cpu).font_files).nth(i).cloned()
 }
 
 /// The enumeration's items of the fonts files added: with no `family`
@@ -1918,11 +1937,7 @@ fn added_font(cpu: &mut Cpu, i: usize) -> Option<Rc<Fnt>> {
 /// as Windows lists raster fonts. `charset` keeps those of one character
 /// set (DEFAULT_CHARSET any).
 fn added_items(cpu: &mut Cpu, family: Option<&str>, charset: u8) -> Vec<u32> {
-    let fonts: Vec<Rc<Fnt>> = gdi(cpu)
-        .font_files
-        .iter()
-        .flat_map(|file| file.fonts.iter().cloned())
-        .collect();
+    let fonts: Vec<Rc<Fnt>> = added_fonts(&gdi(cpu).font_files).cloned().collect();
     let mut seen: Vec<&str> = Vec::new();
     let mut items = Vec::new();
     for (i, f) in fonts.iter().enumerate() {
@@ -2239,5 +2254,43 @@ mod tests {
         let log = Log::of(&logfont(0, 0, 0, 0, 0, "Courier"));
         let f = realize(&log, 0, 0);
         assert_eq!(f.advance(b'i'), f.advance(b'W'));
+    }
+
+    /// A font of an added face, 12 pixels high, of the weight `weight`.
+    fn added(face: &str, weight: u16) -> Rc<Fnt> {
+        let mut bytes = super::super::fnt::tests::fnt(face, 12);
+        bytes[0x53..0x55].copy_from_slice(&weight.to_le_bytes());
+        Rc::new(Fnt::parse(bytes).unwrap())
+    }
+
+    /// Of an added face's fonts of the height asked for, a bold font
+    /// gets the bold one and a regular font the regular one, whatever
+    /// their order; with one of them alone, bold is made of the regular.
+    #[test]
+    fn an_added_face_gives_the_font_of_the_weight_asked_for() {
+        let sizes = [added("Two", 400), added("Two", 700)];
+        for order in [[0, 1], [1, 0]] {
+            let sizes = order.map(|i| sizes[i].clone());
+            for (asked, got) in [(700, 700), (400, 400), (0, 400)] {
+                let log = Log::of(&logfont(12, 0, asked, 0, 0, "Two"));
+                let f = realize_file(&log, &System::WESTERN, &sizes, 12, 0).unwrap();
+                assert_eq!(f.weight, got, "{asked} of {order:?}");
+                assert_eq!(f.advance(b'!'), 2, "{asked} of {order:?}");
+            }
+        }
+        let log = Log::of(&logfont(12, 0, 700, 0, 0, "Two"));
+        let f = realize_file(&log, &System::WESTERN, &[added("Two", 400)], 12, 0).unwrap();
+        assert_eq!((f.weight, f.advance(b'!')), (700, 3));
+    }
+
+    /// A file added twice lists its fonts once.
+    #[test]
+    fn a_file_added_twice_has_its_fonts_once() {
+        let file = |name: &str| AddedFile {
+            name: name.into(),
+            fonts: vec![added("Twice", 400)],
+        };
+        let files = [file("A.FON"), file("a.fon"), file("B.FON")];
+        assert_eq!(added_fonts(&files).count(), 2);
     }
 }
