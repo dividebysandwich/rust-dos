@@ -166,7 +166,7 @@ impl Fnt {
 /// added. An older state has the files' names only: their fonts load as
 /// none, so a program that added them draws in GDI's own faces after the
 /// state is loaded, as it did when it was saved.
-pub const FONTS_SAVED: u16 = 69;
+pub const FONTS_SAVED: u16 = 70;
 
 /// A file AddFontResourceA added: its name as the program gave it, and
 /// its raster fonts (none for a TrueType file).

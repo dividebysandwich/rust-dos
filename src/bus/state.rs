@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 69;
+const WIN32_VERSION: u16 = 70;
 /// The W32 versions an older rust-dos saved that this one still loads:
 /// 67's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`).
@@ -888,7 +888,7 @@ mod tests {
         (62, 0x9F78_ACB5_CCD2_8975), // OpenGL's textures in their contexts' group
         (63, 0xD1E3_14A4_31DE_2AAA), // OpenGL's vertices as given, and the card's lights
         (67, 0xD1E3_14A4_31DE_2AAA), // a Direct3D device made as a software device
-        (69, 0xD1E3_14A4_31DE_2AAA), // the fonts of files AddFontResource added
+        (70, 0xD1E3_14A4_31DE_2AAA), // the fonts of files AddFontResource added
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
