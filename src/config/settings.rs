@@ -62,7 +62,10 @@ pub struct Settings {
     /// `cycles=auto` gives a program that keeps an idling system busy all
     /// the host has (`autospeed`).
     pub auto_busy_os: bool,
-    pub cpu: CpuModel,
+    /// The processor as `cpu` sets it, or None while it isn't set: the
+    /// machine then has `default_cpu`'s for its display adapter.
+    /// `cpu_model` is the model either way.
+    pub cpu: Option<CpuModel>,
     pub core: CoreMode,
     /// The FPU adds and subtracts as the host does (`fpu=fast`): faster,
     /// not exact (`Cpu::fpu_fast`).
@@ -189,7 +192,7 @@ impl Default for Settings {
             cycles: CpuSpeed::default(),
             auto_fps: None,
             auto_busy_os: true,
-            cpu: CpuModel::I486,
+            cpu: None,
             core: CoreMode::Auto,
             fpu_fast: false,
             memsize: None,
@@ -341,12 +344,12 @@ impl Settings {
             cycles: config.cycles.unwrap_or(default.cycles),
             auto_fps: config.auto_fps.unwrap_or(default.auto_fps),
             auto_busy_os: config.auto_busy_os.unwrap_or(default.auto_busy_os),
-            cpu: config.cpu.unwrap_or(default.cpu),
+            cpu: config.cpu,
             core: config.core.unwrap_or(default.core),
             fpu_fast: config.fpu_fast.unwrap_or(default.fpu_fast),
             memsize: config
                 .memsize
-                .map(|mb| mb.min(config.cpu.unwrap_or(default.cpu).max_memsize())),
+                .map(|mb| mb.min(config.cpu_model().max_memsize())),
             ems: config.ems.unwrap_or(default.ems),
             umb: config.umb.unwrap_or(default.umb),
             dpmi: config.dpmi.unwrap_or(default.dpmi),
@@ -396,6 +399,44 @@ impl Settings {
     }
 }
 
+/// The processor of a machine whose `cpu` isn't set, from its display
+/// adapter: a 486, or with a ToadForce a Pentium III. The ToadForce's games
+/// (2000 to 2002) were written for a Pentium II or better, and a card of
+/// its class was never sold for a 486; `cycles=auto` takes its least speed
+/// from the model (`CpuModel::auto_least`).
+pub fn default_cpu(machine: Adapter) -> CpuModel {
+    if machine.is_toadforce() { CpuModel::PentiumIII } else { CpuModel::I486 }
+}
+
+impl Settings {
+    /// The machine's processor: `cpu` where it is set, else `default_cpu`
+    /// of the display adapter.
+    pub fn cpu_model(&self) -> CpuModel {
+        self.cpu.unwrap_or_else(|| default_cpu(self.machine))
+    }
+
+    /// A line for the log on the processor a machine with these settings
+    /// starts with, and where it comes from, and a second where `cpu` sets
+    /// a model older than the Pentium II beside a ToadForce.
+    pub fn cpu_lines(&self) -> Vec<String> {
+        let cpu = self.cpu_model();
+        let mut lines = vec![match self.cpu {
+            Some(_) => format!("[CONFIG] A {} (cpu)", cpu.describe()),
+            None if self.machine.is_toadforce() => {
+                format!("[CONFIG] A {} (the default with a ToadForce)", cpu.describe())
+            }
+            None => format!("[CONFIG] A {} (the default)", cpu.describe()),
+        }];
+        if self.cpu.is_some() && self.machine.is_toadforce() && cpu < CpuModel::PentiumII {
+            lines.push(format!(
+                "[CONFIG] cpu={} with a ToadForce: its games expect a Pentium II or better",
+                cpu.describe()
+            ));
+        }
+        lines
+    }
+}
+
 /// The RAM in MB of a machine whose `memsize` isn't set, from its CPU and
 /// its display adapter: what a machine of the CPU's years came with. Up to
 /// a Pentium that is `DEFAULT_MEMORY_MB` (16), which runs DOS programs,
@@ -420,13 +461,13 @@ impl Settings {
     /// the CPU takes.
     pub fn memory_mb(&self) -> usize {
         self.memsize
-            .unwrap_or_else(|| default_memsize(self.cpu, self.machine))
-            .min(self.cpu.max_memsize())
+            .unwrap_or_else(|| default_memsize(self.cpu_model(), self.machine))
+            .min(self.cpu_model().max_memsize())
     }
 
     /// The RAM a machine with these settings starts with.
     pub fn memory(&self) -> Memory {
-        let cpu = self.cpu.describe();
+        let cpu = self.cpu_model().describe();
         let source = match self.memsize {
             Some(_) => "memsize".to_string(),
             None if self.machine.is_toadforce() => {
@@ -530,17 +571,19 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (
             Emulator,
             "cpu",
-            Some(match settings.cpu {
-                CpuModel::I386 => "386",
-                CpuModel::I486 => "486",
-                CpuModel::Pentium => "pentium",
-                CpuModel::PentiumMmx => "pentium_mmx",
-                CpuModel::K6_2 => "k6_2",
-                CpuModel::PentiumPro => "pentium_pro",
-                CpuModel::PentiumII => "pentium_ii",
-                CpuModel::PentiumIII => "pentium_iii",
-            }
-            .to_string()),
+            settings.cpu.map(|cpu| {
+                match cpu {
+                    CpuModel::I386 => "386",
+                    CpuModel::I486 => "486",
+                    CpuModel::Pentium => "pentium",
+                    CpuModel::PentiumMmx => "pentium_mmx",
+                    CpuModel::K6_2 => "k6_2",
+                    CpuModel::PentiumPro => "pentium_pro",
+                    CpuModel::PentiumII => "pentium_ii",
+                    CpuModel::PentiumIII => "pentium_iii",
+                }
+                .to_string()
+            }),
         ),
         (Emulator, "core", Some(settings.core.name().to_string())),
         (Emulator, "fpu", Some(if settings.fpu_fast { "fast" } else { "exact" }.to_string())),

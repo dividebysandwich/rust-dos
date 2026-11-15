@@ -816,7 +816,11 @@ impl Item {
             }
             .to_string(),
             Fpu => if s.fpu_fast { "fast (not exact)" } else { "exact" }.to_string(),
-            Cpu => s.cpu.describe().to_string(),
+            // "(auto)" while `cpu` isn't set, as for the memory.
+            Cpu => match s.cpu {
+                Some(cpu) => cpu.describe().to_string(),
+                None => format!("{} (auto)", s.cpu_model().describe()),
+            },
             Machine => s.machine.describe().to_string(),
             Memsize => memsize_bar(s),
             Voodoo => on_off(s.voodoo.enabled),

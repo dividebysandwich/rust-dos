@@ -43,7 +43,11 @@ pub struct Hardware {
 /// expanded and upper memory, DPMI, DOS version, sound cards, network and
 /// serial ports. Returns the problems with the settings.
 pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate::keylayout::Layout) -> Vec<String> {
-    cpu.model = settings.cpu;
+    cpu.model = settings.cpu_model();
+    cpu.bus.cpu_derived = settings.cpu.is_none();
+    for line in settings.cpu_lines() {
+        cpu.bus.log_string(&line);
+    }
     cpu.set_tsc_speed(settings.cycles);
     cpu.core = settings.core;
     cpu.post_mode = settings.post;
@@ -93,7 +97,7 @@ impl Hardware {
     /// it.
     pub fn of(settings: &Settings) -> Self {
         Self {
-            cpu: settings.cpu,
+            cpu: settings.cpu_model(),
             sound: settings.sound.clone(),
             video: settings.video_setup(),
             memory: (settings.ems, settings.umb, settings.dos_high),
@@ -117,8 +121,14 @@ impl Hardware {
         if settings.video_setup().mono_monitor != self.video.mono_monitor {
             monochrome = if self.video.mono_monitor { crate::video::mono::Monochrome::White } else { Default::default() };
         }
+        // `cpu` stays unset while the model the machine has is the
+        // default for its display adapter.
+        let cpu = match settings.cpu {
+            None if crate::config::default_cpu(self.video.adapter) == self.cpu => None,
+            _ => Some(self.cpu),
+        };
         Settings {
-            cpu: self.cpu,
+            cpu,
             sound: self.sound.clone(),
             machine: self.video.adapter,
             monochrome,
@@ -152,7 +162,13 @@ impl Hardware {
 
     /// Put the settings' hardware in place. Returns the problems with it.
     pub fn apply(&mut self, cpu: &mut Cpu, settings: &Settings) -> Vec<String> {
-        cpu.model = settings.cpu;
+        if settings.cpu_model() != self.cpu {
+            for line in settings.cpu_lines() {
+                cpu.bus.log_string(&line);
+            }
+        }
+        cpu.model = settings.cpu_model();
+        cpu.bus.cpu_derived = settings.cpu.is_none();
         cpu.set_tsc_speed(settings.cycles);
         let mut warnings = if settings.sound != self.sound {
             cpu.bus.log_string("[CONFIG] The sound settings changed");

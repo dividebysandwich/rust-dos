@@ -438,6 +438,10 @@ pub struct Bus {
     /// The front end sets it at start and after it loads a save state,
     /// from the settings the load leaves (`slots::loaded_settings`).
     pub memory_derived: bool,
+    /// Whether the machine's processor is the default for its display
+    /// adapter, `cpu` not being set (`config::default_cpu`). Set as
+    /// `memory_derived` is, when the hardware is configured or applied.
+    pub cpu_derived: bool,
 
     /// Optional observer for every `log_string` line. Installed by the debug
     /// server so log output can be streamed to remote clients.

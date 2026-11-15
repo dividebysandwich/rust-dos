@@ -96,6 +96,11 @@ need SSE. **K6-2** is AMD's Pentium MMX with 3DNow!, for the games with
 code of their own for it. **Pentium Pro** is the Pentium II without MMX.
 Takes effect at the DOS prompt.
 
+While it says **(auto)**, the processor follows the video card: a
+**486**, or a **Pentium III** with a ToadForce, whose games were written
+for a Pentium II or better. A processor you pick stays whatever the card
+is; **Delete** goes back to the default.
+
 # BIOS POST screen {#post}
 
 A BIOS's power-on self test before DOS starts, and at each reboot: the

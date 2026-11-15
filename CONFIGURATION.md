@@ -218,47 +218,53 @@ limit, so without a connection it goes on as it would with one:
   What `auto` has seen goes into save states, and is forgotten when the
   machine goes back to real mode (a reboot, a DOS program's end). It
   applies at once.
-* `cpu` is the emulated processor: `486` (the default, a 486DX with FPU),
-  `386`, or `pentium`, a Pentium as DOSBox-X has one: CPUID (a
-  GenuineIntel family 5), the time stamp counter, which counts the
-  instructions and so runs at a fixed `cycles` speed (at `max` and
-  `auto`, whose speed changes as they run, it runs at a clock rate of the
-  model's own: 200 MHz on a Pentium or Pentium Pro, 233 on a Pentium MMX,
-  450 on a Pentium II, 550 on a K6-2 and 600 on a Pentium III, so that
-  programs which time with it, such as 3DMark 2000, measure right), its
-  MSRs, CMPXCHG8B and 4 MB pages, without the virtual-8086 mode extensions; `pentium_mmx`,
-  that Pentium with MMX (CPUID family 5, model 4), whose eight MM
-  registers are the FPU's; `k6_2`, an AMD K6-2 (CPUID AuthenticAMD
-  family 5, model 8, with AMD's extended leaves): the Pentium MMX's with
-  3DNow!, SYSCALL/SYSRET and the K6's MSRs (EFER, STAR, the write
-  handling control and test register 12), without the P6 instructions.
-  Its 3DNow! arithmetic follows AMD's manual: it rounds to nearest, gives
-  a zero below 2^-126 and the largest normal from 2^128, and has no
-  exceptions; PFRCP and PFRSQRT give the exact results rounded to a
-  single where the real one's tables give 14 and 15 bits.
-  `pentium_pro`, a Pentium Pro as DOSBox-X's
-  `ppro_slow` (CPUID family 6, model 1): the Pentium's with CMOVcc,
-  FCMOVcc, FCOMI and FUCOMI, the P6 hinting NOPs and the local APIC base
-  and microcode revision MSRs Windows 98 and ME read, without MMX;
-  `pentium_ii`, a Pentium II as DOSBox-X's (family 6, model 3): the
-  Pentium Pro's with MMX and SYSENTER/SYSEXIT; or `pentium_iii`, a
+* `cpu` is the emulated processor: `486` (a 486DX with FPU), `386`, or
+  `pentium`, a Pentium as DOSBox-X has one: CPUID (a GenuineIntel family 5),
+  the time stamp counter, which counts the instructions and so runs at a
+  fixed `cycles` speed (at `max` and `auto`, whose speed changes as they
+  run, it runs at a clock rate of the model's own: 200 MHz on a Pentium or
+  Pentium Pro, 233 on a Pentium MMX, 450 on a Pentium II, 550 on a K6-2 and
+  600 on a Pentium III, so that programs which time with it, such as 3DMark
+  2000, measure right), its MSRs, CMPXCHG8B and 4 MB pages, without the
+  virtual-8086 mode extensions; `pentium_mmx`, that Pentium with MMX (CPUID
+  family 5, model 4), whose eight MM registers are the FPU's; `k6_2`, an AMD
+  K6-2 (CPUID AuthenticAMD family 5, model 8, with AMD's extended leaves):
+  the Pentium MMX's with 3DNow!, SYSCALL/SYSRET and the K6's MSRs (EFER,
+  STAR, the write handling control and test register 12), without the P6
+  instructions. Its 3DNow! arithmetic follows AMD's manual: it rounds to
+  nearest, gives a zero below 2^-126 and the largest normal from 2^128, and
+  has no exceptions; PFRCP and PFRSQRT give the exact results rounded to a
+  single where the real one's tables give 14 and 15 bits. `pentium_pro`, a
+  Pentium Pro as DOSBox-X's `ppro_slow` (CPUID family 6, model 1): the
+  Pentium's with CMOVcc, FCMOVcc, FCOMI and FUCOMI, the P6 hinting NOPs and
+  the local APIC base and microcode revision MSRs Windows 98 and ME read,
+  without MMX; `pentium_ii`, a Pentium II as DOSBox-X's (family 6, model 3):
+  the Pentium Pro's with MMX and SYSENTER/SYSEXIT; or `pentium_iii`, a
   Pentium III (Katmai, family 6, model 7): the Pentium II's with SSE,
-  FXSAVE/FXRSTOR, CR4's OSFXSR and OSXMMEXCPT, the processor serial
-  number (CPUID leaf 3, until MSR 119h switches it off) and the cache
-  descriptors of CPUID leaf 2. Its SSE arithmetic rounds as MXCSR says,
-  flushes to zero, and sets and masks the six exception flags as a
-  Pentium III does: an unmasked one raises #XM, or #UD without
-  OSXMMEXCPT. RCPPS and RSQRTPS give the exact reciprocal rounded to a
-  single, within the precision Intel specifies for them. SSE needs
-  CR4.OSFXSR, which a system that saves the SSE state sets; rust-dos's
-  DPMI host sets it for its clients on a Pentium III. None of them has
-  RDPMC, a local APIC or memory type range registers, as in DOSBox-X. A
-  DOSBox configuration's `cputype` of a Pentium imports as `pentium`, of
-  a Pentium MMX as `pentium_mmx`, of a Pentium Pro as `pentium_pro`, of
-  a Pentium II as `pentium_ii`, and of a Pentium III or DOSBox-X's
-  `experimental` as `pentium_iii`. The `cpu` also gives the memory of a
-  machine without a `memsize` line: 16 MB up to a Pentium and 32 to
-  128 MB with the later ones (see `memsize`).
+  FXSAVE/FXRSTOR, CR4's OSFXSR and OSXMMEXCPT, the processor serial number
+  (CPUID leaf 3, until MSR 119h switches it off) and the cache descriptors
+  of CPUID leaf 2. Its SSE arithmetic rounds as MXCSR says, flushes to zero,
+  and sets and masks the six exception flags as a Pentium III does: an
+  unmasked one raises #XM, or #UD without OSXMMEXCPT. RCPPS and RSQRTPS give
+  the exact reciprocal rounded to a single, within the precision Intel
+  specifies for them. SSE needs CR4.OSFXSR, which a system that saves the
+  SSE state sets; rust-dos's DPMI host sets it for its clients on a Pentium
+  III. None of them has RDPMC, a local APIC or memory type range registers,
+  as in DOSBox-X. A DOSBox configuration's `cputype` of a Pentium imports as
+  `pentium`, of a Pentium MMX as `pentium_mmx`, of a Pentium Pro as
+  `pentium_pro`, of a Pentium II as `pentium_ii`, and of a Pentium III or
+  DOSBox-X's `experimental` as `pentium_iii`. The `cpu` also gives the
+  memory of a machine without a `memsize` line: 16 MB up to a Pentium and 32
+  to 128 MB with the later ones (see `memsize`). Without a `cpu` line the
+  processor follows the display adapter: a `486`, or a `pentium_iii` with
+  `machine=svga_toadforce`, as the ToadForce's games were written for a
+  Pentium II or better and a card of its class was never sold for a 486.
+  That model isn't written to the configuration; the settings window shows
+  it with **(auto)**, `cycles=auto` takes its least speed from it, and save
+  states, `/api/status` and almanac reports carry the model the machine has.
+  A `cpu` line wins: with a ToadForce, a model older than the Pentium II
+  runs as set, with a line in the log that the card's games expect a Pentium
+  II or better.
 * `core` is what runs the programs' instructions: `auto` (the default)
   runs the interpreter, and the dynamic recompiler for a program from the
   moment it switches to protected mode until it ends, as DOSBox's

@@ -40,7 +40,7 @@ pub use edit::{
     DriveChange, Saving, autoexec_lines, complete_text, load_autoexec, save, save_autoexec, update_text, with_autoexec,
 };
 pub use parse::{MAX_MEMSIZE, MIN_MEMSIZE, parse, parse_memsize};
-pub use settings::{Memory, default_memsize};
+pub use settings::{Memory, default_cpu, default_memsize};
 pub use settings::{Settings, parse_mouse_sensitivity};
 pub use types::{
     AspectRatio, DesktopDepth, DosVersion, Filter, MidiSynth, Mt32Model, SoundConfig, Win32Locale,
@@ -355,6 +355,13 @@ pub struct Config {
 impl Config {
     pub fn drive(&self, drive: u8) -> Option<&MountSpec> {
         self.drives.iter().find(|spec| spec.drive == drive)
+    }
+
+    /// The processor: `cpu`, or the default for the display adapter
+    /// (`default_cpu`).
+    pub fn cpu_model(&self) -> crate::cpu::CpuModel {
+        let machine = self.machine.unwrap_or(Settings::default().machine);
+        self.cpu.unwrap_or_else(|| default_cpu(machine))
     }
 }
 

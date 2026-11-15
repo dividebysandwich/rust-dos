@@ -394,6 +394,31 @@ fn status(ui: &ConfigUi) -> (&str, bool) {
 }
 
 #[test]
+fn the_cpu_follows_the_card_until_one_is_picked() {
+    use crate::cpu::CpuModel;
+    use crate::video::adapter::Adapter;
+    let mut host = FakeHost::new();
+    let mut ui = opened(&host);
+    ui.show_page(Page::Emulator);
+    use UiKey::*;
+    ui.row = ui.items().iter().position(|&i| i == Item::Cpu).unwrap();
+    assert_eq!(Item::Cpu.value(&ui.settings, None), "486 (auto)");
+    ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
+    pick(&mut ui, &mut host, Adapter::ToadForce.describe());
+    assert_eq!(host.applied.last().unwrap().cpu, None);
+    assert_eq!(Item::Cpu.value(&ui.settings, None), "Pentium III (auto)");
+    // Left steps from the model the machine has, and sets it.
+    ui.row = ui.items().iter().position(|&i| i == Item::Cpu).unwrap();
+    keys(&mut ui, &mut host, &[Left]);
+    assert_eq!(host.applied.last().unwrap().cpu, Some(CpuModel::PentiumII));
+    assert_eq!(Item::Cpu.value(&ui.settings, None), "Pentium II");
+    // Delete goes back to the card's.
+    keys(&mut ui, &mut host, &[Delete]);
+    assert_eq!(host.applied.last().unwrap().cpu, None);
+    assert_eq!(host.applied.last().unwrap().cpu_model(), CpuModel::PentiumIII);
+}
+
+#[test]
 fn auto_speed_target_steps_and_is_typed() {
     let mut host = FakeHost::new();
     let mut ui = opened(&host);
