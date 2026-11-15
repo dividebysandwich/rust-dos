@@ -85,7 +85,10 @@ impl Fnt {
         }
         let height = u16_at(d, 0x58)? as i32;
         let (first, last) = (*d.get(0x5F)?, *d.get(0x60)?);
-        if height == 0 || last < first {
+        // A glyph's column holds a byte a row, so a font higher than its
+        // file is malformed: that also bounds the rows made for its
+        // glyphs, each `height` long, by the file's size.
+        if height == 0 || height as usize > d.len() || last < first {
             return None;
         }
         let face_at = u32_at(d, 0x69)? as usize;
@@ -393,4 +396,13 @@ pub(super) mod tests {
         assert_eq!(bare[0].fonts[0].face, "Kept");
     }
 
+    /// A font higher than its file can't hold its glyphs: it is refused
+    /// before rows of that height are made for each of its characters.
+    #[test]
+    fn a_font_higher_than_its_file_is_refused() {
+        let mut d = fnt("Tall", 12);
+        assert!(Fnt::parse(d.clone()).is_some());
+        d[0x58..0x5A].copy_from_slice(&60000u16.to_le_bytes());
+        assert!(Fnt::parse(d).is_none());
+    }
 }
