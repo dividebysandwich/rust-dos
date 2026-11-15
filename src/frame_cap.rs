@@ -361,8 +361,12 @@ impl FrameCap {
         self.slot = Some(if at <= turn + LATE_FRAMES * frame {
             turn
         } else {
+            // What the frames after the fresh start before didn't wait
+            // out isn't owed any more: a program that came this late
+            // again had no use for those turns, as one slower than the
+            // cap that speeds up (a load, then a menu) had none.
             self.counters.reanchors += 1;
-            self.owed = (self.owed + (at - turn)).min(OWED_MOST_NS);
+            self.owed = (at - turn).min(OWED_MOST_NS);
             at
         });
     }
@@ -455,7 +459,9 @@ impl Shared {
     /// Forget the frames shown, as a new machine or a loaded state that
     /// has none.
     pub fn forget(&self) {
-        self.update(|cap| (cap.last, cap.slot, cap.held_from) = (None, None, None));
+        self.update(|cap| {
+            (cap.last, cap.slot, cap.held_from, cap.owed) = (None, None, None, 0);
+        });
     }
 
     fn update(&self, f: impl FnOnce(&mut FrameCap)) {
@@ -477,7 +483,8 @@ impl State for Shared {
         let (mut last, mut slot) = (None, None);
         last.load(r)?;
         slot.load(r)?;
-        self.update(|cap| (cap.last, cap.slot, cap.held_from) = (last, slot, None));
+        // The turns owed were of the run before.
+        self.update(|cap| (cap.last, cap.slot, cap.held_from, cap.owed) = (last, slot, None, 0));
         Ok(())
     }
 }
@@ -576,6 +583,29 @@ mod tests {
         assert_eq!((counted.shown, counted.held, counted.late), (100, 0, 99));
         assert!(counted.reanchors > 0);
         assert_eq!(counted.dropped_ns, 0);
+    }
+
+    #[test]
+    fn a_program_slower_than_the_cap_that_speeds_up_is_owed_one_fresh_start() {
+        // 20 frames a second for 10 s, its turns started again every
+        // other frame, 66.7 ms late, then frames of 5 ms. Only the last
+        // fresh start's lateness counts: the ones before it added up to
+        // a second, which the first second of fast frames counted as
+        // dropped.
+        let mut cap = cap(60);
+        let mut now = 0;
+        for _ in 0..200 {
+            now += 50 * MS;
+            assert_eq!(cap.wait(now, None), None);
+            cap.shown(now);
+        }
+        assert_eq!(cap.counters().reanchors, 99);
+        for _ in 0..600 {
+            now = cap.wait(now + 5 * MS, None).unwrap_or(now + 5 * MS);
+            cap.shown(now);
+        }
+        let dropped = cap.counters().dropped_ns;
+        assert_eq!(dropped, 66_666_668);
     }
 
     #[test]
