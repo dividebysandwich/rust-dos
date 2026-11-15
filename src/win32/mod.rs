@@ -266,6 +266,10 @@ pub struct Process {
     /// error mode, which only SetErrorMode does.
     priority_class: u32,
     error_mode: u32,
+    /// Whether SetFileApisToOEM was called (and SetFileApisToANSI not
+    /// since), which only AreFileApisANSI reads: the file functions take
+    /// every name as ANSI. A save state doesn't keep it.
+    pub(crate) file_apis_oem: bool,
     /// The version of Windows its header says it was made for, as
     /// major << 16 | minor.
     subsystem_version: u32,
@@ -892,6 +896,22 @@ fn create_process(
     create_process_from(cpu, path, line, &file, environment, inherited, std, startup, suspended)
 }
 
+/// The program file `file`, read from `path`, as a game fix patches it
+/// before it loads, or None when no fix applies.
+fn patch_at_load(cpu: &mut Cpu, path: &str, file: &[u8]) -> Option<Vec<u8>> {
+    if !cpu.bus.game_fixes {
+        return None;
+    }
+    let bus = &cpu.bus;
+    let (fix, patched) =
+        crate::game_fixes::patch_win32(path, file, |fix| bus.game_fix_enabled(fix))?;
+    cpu.bus.log_string(&format!(
+        "[game fix] {}: {} ({}): {} patched as it loads",
+        fix.name, fix.game, fix.reason, path
+    ));
+    Some(patched)
+}
+
 /// `create_process` with the program's file `file`, read already (or
 /// made, as the Win16 process's is).
 #[allow(clippy::too_many_arguments)]
@@ -909,6 +929,10 @@ pub(crate) fn create_process_from(
     if cpu.bus.win32.pool.is_none() {
         cpu.bus.win32.pool = memory::Pool::take(&mut cpu.bus, loader::MIN_MEMORY);
     }
+    // A program whose file a game fix patches as it loads (`game_fixes`:
+    // Test Drive 4's race camera).
+    let patched = patch_at_load(cpu, path, file);
+    let file = patched.as_deref().unwrap_or(file);
     let loaded = loader::load(cpu, path, line, file, environment)?;
     let mut process = loaded.process;
     process.priority_class = 0x20;
@@ -1589,6 +1613,8 @@ crate::state_fields!(Process {
     imagehlp,
     parent,
     vfw,
+} skip {
+    file_apis_oem,
 });
 crate::state_fields!(Win32 {
     pending,

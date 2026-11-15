@@ -189,9 +189,17 @@ pub const RS_TWO_SIDED_LIGHTING: u32 = 258;
 /// The card's own: table fog goes by a fragment's w, 1, or by its
 /// depth, 0.
 pub const RS_FOG_BY_W: u32 = 259;
+/// The card's own: 1 adds the lights' specular light to the diffuse
+/// colour before that is limited, and leaves the specular colour black
+/// (OpenGL 1.1's lighting, whose highlight the texture multiplies too).
+pub const RS_SINGLE_COLOUR: u32 = 260;
+/// The card's own: the sides of a triangle whose material takes the
+/// vertex's colours where a material source names one: 1 the front, 2
+/// the back, 3 both (OpenGL's glColorMaterial).
+pub const RS_COLORVERTEX_FACES: u32 = 261;
 
 /// The render states' numbers are below this.
-pub const RENDER_STATES: usize = 260;
+pub const RENDER_STATES: usize = 262;
 
 /// The render states of level 1.
 pub const RENDER: &[Def] = &[
@@ -288,6 +296,13 @@ pub const RENDER: &[Def] = &[
         0,
     ),
     def(RS_FOG_BY_W, "FOG_BY_W", Kind::Bool, 0),
+    def(RS_SINGLE_COLOUR, "SINGLE_COLOUR", Kind::Bool, 0),
+    def(
+        RS_COLORVERTEX_FACES,
+        "COLORVERTEX_FACES",
+        Kind::Range(1, 3),
+        3,
+    ),
 ];
 
 // Stage states.

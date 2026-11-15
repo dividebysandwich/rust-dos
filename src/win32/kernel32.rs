@@ -692,6 +692,12 @@ static APIS: &[Api] = &[
     stdcall("FindFirstChangeNotificationA", 282, 3, change::find_first),
     stdcall("FindNextChangeNotification", 288, 1, change::find_next),
     stdcall("FindCloseChangeNotification", 281, 1, change::find_close),
+    // Test Drive 4's 1.2 patch (RTPatch's PATCHW32.DLL) asks the first,
+    // switches to OEM names while it works and back after, and ends with
+    // exit code FFh without them.
+    stdcall("AreFileApisANSI", 126, 0, are_file_apis_ansi),
+    stdcall("SetFileApisToOEM", 716, 0, set_file_apis_to_oem),
+    stdcall("SetFileApisToANSI", 715, 0, set_file_apis_to_ansi),
     stdcall("SetupComm", 754, 3, comm::setup_comm),
     stdcall("PurgeComm", 619, 2, comm::purge_comm),
     stdcall("GetCommState", 327, 2, comm::get_comm_state),
@@ -1284,6 +1290,26 @@ fn get_last_error(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 fn set_last_error(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     super::process(cpu).last_error = args[0];
+    Some(0)
+}
+
+/// Whether the file functions take their names in the ANSI code page:
+/// TRUE until the process calls SetFileApisToOEM. The built-in Windows
+/// takes every name as ANSI either way, which differs only for names
+/// with characters from 80h up.
+fn are_file_apis_ansi(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(u32::from(!super::process(cpu).file_apis_oem))
+}
+
+/// SetFileApisToOEM: the file functions are to take OEM names.
+fn set_file_apis_to_oem(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    super::process(cpu).file_apis_oem = true;
+    Some(0)
+}
+
+/// SetFileApisToANSI: the file functions are to take ANSI names again.
+fn set_file_apis_to_ansi(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    super::process(cpu).file_apis_oem = false;
     Some(0)
 }
 
