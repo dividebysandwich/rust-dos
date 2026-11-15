@@ -112,6 +112,12 @@ Windows has. `GLIDE2X.DLL` and `GLIDE3X.DLL` are among them only with a
 so a game that checks for Glide by its file sees none without one. A DLL
 of the same name that a game copies to C: wins over the built-in one.
 
+`MSVCRT20.DLL` and `MSVCRT40.DLL`, the C runtimes of Visual C++ 2 and
+4 that Windows 95 and 98 have beside `MSVCRT.DLL`, are there too, for
+programs and DLLs built with those compilers. Their functions are
+`MSVCRT.DLL`'s, as Windows 98's `MSVCRT40.DLL` forwards to it, so the
+three share one heap and one set of open files.
+
 ### Notepad
 
 `C:\WINDOWS\NOTEPAD.EXE` is there, read-only, as on Windows 98, and the

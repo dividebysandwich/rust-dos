@@ -25,6 +25,7 @@ mod dciman32;
 mod ddraw;
 mod dinput;
 pub mod dll_files;
+mod forwarders;
 mod dmusic;
 mod dplayx;
 mod dshow;

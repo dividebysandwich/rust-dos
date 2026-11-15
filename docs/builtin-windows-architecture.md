@@ -333,7 +333,11 @@ against that DLL's results in `undname_vc6.txt`).
   the loader's rules: `GLIDE2X.DLL` and `GLIDE3X.DLL` with a 3dfx card
   alone (`voodoo=true`, or a Banshee or Voodoo3 as the display adapter),
   `MSIMG32.DLL` from Windows 98 on, and a DLL that `win32_dlls_replace`
-  replaces with one of the folder's not at all.
+  replaces with one of the folder's not at all. `MSVCRT20.DLL` and
+  `MSVCRT40.DLL` are files of another kind (`forwarders.rs`): no stubs,
+  only an export directory whose every entry forwards to `MSVCRT.DLL`'s
+  function of the same name. The loader loads them as DLL files and
+  follows the forwarders, so they are modules of their own names.
 
   The files are read-only: they open for reading alone, show as
   read-only (FILE_ATTRIBUTE_READONLY and ARCHIVE), and opening one for

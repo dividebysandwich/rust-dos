@@ -704,3 +704,68 @@ fn a_file_of_the_same_name_on_the_drive_wins() {
     let files: &[(&str, &[u8])] = &[("WINDOWS/SYSTEM/DDRAW.DLL", b"HOSTFILE")];
     assert_eq!(run("host", None, files, reads_host_ddraw()), 0xFF);
 }
+
+/// A program that imports malloc from MSVCRT20.DLL and free from
+/// MSVCRT40.DLL, as programs built with Visual C++ 2 and 4 do: it
+/// loads, malloc gives a block, both DLLs are loaded under their own
+/// names beside MSVCRT.DLL, the import resolved to MSVCRT's malloc, and
+/// C:\WINDOWS\SYSTEM\MSVCRT20.DLL is a file. A bit of the exit code for
+/// each.
+fn imports_old_c_runtimes() -> Vec<u8> {
+    let mut data = vec![0; 0x100];
+    put(&mut data, 0, b"MSVCRT20.DLL\0");
+    put(&mut data, 0x10, b"MSVCRT40.DLL\0");
+    put(&mut data, 0x20, b"MSVCRT.DLL\0");
+    put(&mut data, 0x30, b"malloc\0");
+    put(&mut data, 0x40, b"C:\\WINDOWS\\SYSTEM\\MSVCRT20.DLL\0");
+    let imports: &[(&str, &[&'static str])] = &[
+        (
+            "KERNEL32.DLL",
+            &[
+                "GetModuleHandleA",
+                "GetProcAddress",
+                "GetFileAttributesA",
+                "ExitProcess",
+            ],
+        ),
+        ("MSVCRT20.DLL", &["malloc"]),
+        ("MSVCRT40.DLL", &["free"]),
+    ];
+    program(imports, &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        a.push(16)?;
+        a.call(l.import("malloc"))?;
+        a.add(esp, 4)?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        a.push(eax)?;
+        a.call(l.import("free"))?;
+        a.add(esp, 4)?;
+        call(a, l.import("GetModuleHandleA"), &[l.at(0x20)])?;
+        a.mov(esi, eax)?;
+        call(a, l.import("GetModuleHandleA"), &[l.at(0)])?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        a.cmp(eax, esi)?;
+        check(a, true, 2)?;
+        call(a, l.import("GetModuleHandleA"), &[l.at(0x10)])?;
+        a.test(eax, eax)?;
+        check(a, true, 3)?;
+        a.push(l.at(0x30) as i32)?;
+        a.push(esi)?;
+        a.call(l.import("GetProcAddress"))?;
+        a.cmp(eax, l.import("malloc"))?;
+        check(a, false, 4)?;
+        call(a, l.import("GetFileAttributesA"), &[l.at(0x40)])?;
+        a.cmp(eax, -1)?;
+        check(a, true, 5)?;
+        a.push(ebx)?;
+        a.call(l.import("ExitProcess"))
+    })
+}
+
+#[test]
+fn msvcrt20_and_msvcrt40_forward_to_msvcrt() {
+    let code = run("old_c_runtimes", None, &[], imports_old_c_runtimes());
+    assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
+}
