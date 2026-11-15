@@ -97,7 +97,7 @@ rust-dos-installshield = { path = "crates/installshield" }
 # deterministic runs and the game suite's golden hashes, so a new
 # version comes in only by changing this line, once its pictures are
 # checked.
-oxideav-indeo = { git = "https://github.com/kibertoad/oxideav-indeo", rev = "aff03bd12945e38445ae494446aebdafe3fd6a0f" }
+oxideav-indeo = { git = "https://github.com/kibertoad/oxideav-indeo", rev = "43ddce6df54a010501e34732fc2ca06c01648de7" }
 # MPEG-1 video and its Layer II audio, which MCI's MPEGVideo device
 # plays, and the framework's packet and frame types the audio decoder
 # takes. Pinned as oxideav-indeo is. oxideav-indeo's commit above needs
