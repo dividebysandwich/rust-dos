@@ -1701,6 +1701,10 @@ fn gr_sst_win_open_runs_the_card_at_the_rate_asked_for() {
             assert!(near(got, hz), "{board:?} at {hz} Hz runs at {got}");
         }
     }
+    // VESA's 640x480 at 75 Hz is 75 Hz to the hundredth: 840 by 500 at
+    // 31.5 MHz.
+    let (_, v2) = open_at("refresh_v2_exact", Board::Voodoo2, GR_RESOLUTION_640X480, 3, &[]);
+    assert!((v2 - 75.0).abs() < 0.01, "a Voodoo2 at 75 Hz runs at {v2}");
     // Other sizes: a Voodoo2's 800x600 at 120 Hz, a Voodoo3's 1024x768 at
     // 100 Hz, and its 320x240, shown as 640x480, at 85.
     for (board, resolution, hz) in [

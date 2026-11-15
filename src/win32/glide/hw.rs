@@ -587,7 +587,8 @@ fn voodoo_timing(cpu: &mut Cpu, width: u32, height: u32, refresh: u32) {
     let [_, hss, hse, htotal] = t.h;
     let [_, vss, vse, vtotal] = t.v;
     let (hsync, vsync) = (hse - hss, vse - vss);
-    write(cpu, FBI, H_SYNC, (htotal - hsync - 2) << 16 | (hsync - 1));
+    // The card counts hSync's two fields one longer each.
+    write(cpu, FBI, H_SYNC, (htotal - hsync - 1) << 16 | (hsync - 1));
     write(cpu, FBI, V_SYNC, (vtotal - vsync) << 16 | vsync);
     write(cpu, FBI, BACK_PORCH, (vtotal - vse) << 16 | (htotal - hse));
     let (m, n, p) = ics_pll(t.clock);
