@@ -1,23 +1,30 @@
-//! DLLs of Windows whose every export forwards to another DLL. Windows
-//! 95 and 98 ship the C runtimes of older Visual C++ versions in the
-//! system directory beside MSVCRT.DLL: MSVCRT20.DLL (Visual C++ 2), which
-//! Windows 95's own MFC30.DLL uses, and MSVCRT40.DLL (Visual C++ 4),
-//! which on Windows 98 forwards each of its functions to MSVCRT.DLL.
-//! Programs and DLLs built with those compilers import them: Microsoft's
-//! Reality Lab DLLs, which Warhammer: Shadow of the Horned Rat brings,
-//! import MSVCRT20.DLL.
+//! DLLs of the built-in Windows whose every export forwards to another
+//! DLL. Windows 95 and 98 ship the C runtimes of older Visual C++
+//! versions in the system directory beside MSVCRT.DLL: MSVCRT20.DLL
+//! (Visual C++ 2), which Windows 95's own MFC30.DLL uses, and
+//! MSVCRT40.DLL (Visual C++ 4). Programs and DLLs built with those
+//! compilers import them: Microsoft's Reality Lab DLLs, which Warhammer:
+//! Shadow of the Horned Rat brings, import MSVCRT20.DLL.
 //!
 //! Each is a file in the system directory (dll_files.rs) whose exports
-//! are forwarders to the built-in MSVCRT.DLL's, as Windows 98's
-//! MSVCRT40.DLL is. The loader loads it as any DLL file, follows its
-//! forwarders and loads MSVCRT.DLL for them, so GetModuleHandle and
-//! GetModuleFileName know the DLL by its own name. Its functions share
-//! MSVCRT's state, its heap and its files; Visual C++ 2's own
-//! MSVCRT20.DLL keeps its own, which a program only notices when it
-//! hands a FILE or a block from one runtime to the other.
+//! are forwarders to the built-in MSVCRT.DLL's. Windows' own two are C
+//! runtimes of their own, with their own heap and file table. The loader
+//! loads these as any DLL file, follows their forwarders and loads
+//! MSVCRT.DLL for them, so GetModuleHandle and GetModuleFileName know
+//! each DLL by its own name. Their functions share MSVCRT's state, its
+//! heap and its files, which a program only notices when it hands a FILE
+//! or a block from one runtime to the other and expects it refused.
+//!
+//! They export what MSVCRT.DLL exports by name. A program that imports a
+//! function MSVCRT.DLL doesn't have, such as the iostream classes Visual
+//! C++ 2 and 4 put in these DLLs, gets a stub for it that ends the
+//! program when called and names the function, as an import of a
+//! built-in DLL's missing function does (`loader::bind_imports`).
 
+use super::loader::SYSTEM_DIR;
 use super::stubs::{DLLS, find_dll};
 use super::version::WindowsVersion;
+use crate::bus::Bus;
 use rust_dos_pe as pe;
 
 /// A DLL that forwards every export to the built-in DLL `to`.
@@ -42,6 +49,18 @@ pub static FORWARDERS: &[Forwarder] = &[
         to: "MSVCRT.DLL",
     },
 ];
+
+/// Whether the module file at `path` is one of these files as the
+/// system directory shows it, rather than a DLL of the same name that a
+/// program put on the drive.
+pub(super) fn is_shown(bus: &Bus, path: &str) -> bool {
+    let Some((dir, name)) = path.rsplit_once('\\') else {
+        return false;
+    };
+    dir.eq_ignore_ascii_case(SYSTEM_DIR)
+        && FORWARDERS.iter().any(|f| f.name.eq_ignore_ascii_case(name))
+        && bus.disk.is_system_entry(path)
+}
 
 /// RT_VERSION, the version resource's name, and the language it is in.
 const RT_VERSION: u16 = 16;

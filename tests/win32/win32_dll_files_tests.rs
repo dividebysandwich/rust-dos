@@ -769,3 +769,20 @@ fn msvcrt20_and_msvcrt40_forward_to_msvcrt() {
     let code = run("old_c_runtimes", None, &[], imports_old_c_runtimes());
     assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
 }
+
+/// A program that imports from MSVCRT20.DLL a function the built-in
+/// MSVCRT.DLL doesn't have, one of Visual C++ 2's iostream classes,
+/// loads as with a built-in DLL's missing function: the import gets a
+/// stub that only a call stops at, and the program runs to its end.
+#[test]
+fn an_import_msvcrt_lacks_from_msvcrt20_loads() {
+    let imports: &[(&str, &[&'static str])] = &[
+        ("KERNEL32.DLL", &["ExitProcess"]),
+        ("MSVCRT20.DLL", &["malloc", "??0filebuf@@QAE@XZ"]),
+    ];
+    let exe = program(imports, &[0; 0x10], |a, l| {
+        a.push(0x5A)?;
+        a.call(l.import("ExitProcess"))
+    });
+    assert_eq!(run("old_c_runtime_missing", None, &[], exe), 0x5A);
+}
