@@ -154,9 +154,9 @@ const ACTIVE_NS: u64 = 1_000_000_000;
 /// after a stall.
 const LATE_FRAMES: u64 = 3;
 
-/// The most time the schedule's fresh starts count as owed to a program
-/// (`Counters::dropped_ns`), in ns: a longer stretch without frames is a
-/// load or a pause, which no schedule would make up for.
+/// The most time a fresh start of the schedule counts as owed to a
+/// program (`Counters::dropped_ns`), in ns: a longer stretch without
+/// frames is a load or a pause, which no schedule would make up for.
 const OWED_MOST_NS: u64 = 1_000_000_000;
 
 /// What the cap did to the frames that came to it, counted up since the
@@ -172,22 +172,53 @@ pub struct Counters {
     pub held: u64,
     /// Those that came after their turn, and showed at once.
     pub late: u64,
-    /// Those of them more than a frame time late, from which the
-    /// schedule started again.
+    /// Those of them more than `LATE_FRAMES` frame times late, from
+    /// which the schedule started again.
     pub reanchors: u64,
     /// The time held frames waited that the schedule would not have made
-    /// them wait had it never started again, in ns: each fresh start
-    /// moves the turns back by how late its frame was, and the frames
-    /// held after it wait up to that much longer than under the turns
-    /// before. Over the emulated time, the most a program that steps its
-    /// logic once a frame ran slow for the cap's turns starting again.
+    /// them wait had it not started again, in ns: a fresh start moves the
+    /// turns back by how late its frame was, and the frames held after it
+    /// wait up to that much longer than under the turns before, until the
+    /// next fresh start. Over the emulated time, the most a program that
+    /// steps its logic once a frame ran slow for the cap's turns starting
+    /// again.
     pub dropped_ns: u64,
 }
 
-/// The least time a program is taken to draw a frame in, in ns, where
-/// the frames it would have drawn while it was held are reckoned
-/// (`FrameCap::held_frames`): Max Payne's menu in a window presents
-/// every 0.74 ms uncapped.
+/// The time the frames the cap held took to draw and the time it held
+/// them, in ns, and how many there were, counted up since the machine
+/// started (`FrameCap::held`). A present that comes sooner than
+/// `LEAST_WORK_NS` after the frame before showed counts in none: it
+/// shows a frame drawn already, and the time it was held kept the
+/// program from no drawing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Held {
+    pub frames: u64,
+    pub work_ns: u64,
+    pub hold_ns: u64,
+}
+
+impl Held {
+    /// The frames the program would have drawn in the time the cap held
+    /// it since `before`, an earlier reading: that time over the time its
+    /// held frames took to draw on average. A program held to 60 that
+    /// draws a frame in 4 ms would have drawn 3.2 more in each hold of
+    /// 12.7 ms. One whose frames take 1 and 9 ms by turns is held 15.7
+    /// and 7.7 ms, and would have drawn 4.7 frames of 5 ms on average in
+    /// the two holds: 200 a second, as it draws without the cap.
+    pub fn frames_since(&self, before: &Held) -> f64 {
+        let work = self.work_ns.saturating_sub(before.work_ns);
+        if work == 0 {
+            return 0.0;
+        }
+        let frames = self.frames.saturating_sub(before.frames) as f64;
+        self.hold_ns.saturating_sub(before.hold_ns) as f64 * frames / work as f64
+    }
+}
+
+/// The least time after the frame before showed for a present to count
+/// as a frame drawn (`Held`), in ns: Max Payne's menu in a window
+/// presents every 0.74 ms uncapped.
 const LEAST_WORK_NS: u64 = 100_000;
 
 /// The cap and the frames it let through.
@@ -207,12 +238,11 @@ pub struct FrameCap {
     /// The last frame's turn (`shown`), in emulated ns: the next frame
     /// may show a frame time after it.
     slot: Option<u64>,
-    /// When the frame now held came (`wait`), in emulated ns, and the
-    /// frames the program would have drawn in the time the cap held it
-    /// so far, in thousandths (`held_frames`). Only `cycles=auto` reads
-    /// them, never the machine, and a save state doesn't keep them.
+    /// When the frame now held came (`wait`), in emulated ns, and what
+    /// the cap held so far (`held`). Only `cycles=auto` reads them, never
+    /// the machine, and a save state doesn't keep them.
     held_from: Option<u64>,
-    would_draw: u64,
+    held: Held,
     /// What the cap did (`counters`), and how far the schedule's fresh
     /// starts moved the turns back that held frames haven't waited out
     /// yet, in ns (`Counters::dropped_ns`). The machine reads neither.
@@ -289,11 +319,12 @@ impl FrameCap {
     /// frame that waited for its turn, and a late one, which the next
     /// ones make up for. From a frame later than that the schedule
     /// starts again, the next turn a frame time after it showed, so that
-    /// no more frames than that make up for it at once. A present that waits for the retrace shows at the
-    /// retrace nearest its turn (`wait`), up to half a retrace before or
-    /// after it, which isn't late: the retraces it shows at keep the
-    /// cap's rate (60 a second on a display of 70 Hz, a frame every
-    /// retrace with one in seven left out).
+    /// no more frames than that make up for it at once. A present that
+    /// waits for the retrace shows at the retrace nearest its turn
+    /// (`wait`), up to half a retrace before or after it, which isn't
+    /// late: the retraces it shows at keep the cap's rate (60 a second on
+    /// a display of 70 Hz, a frame every retrace with one in seven left
+    /// out).
     pub fn shown(&mut self, at: u64) {
         let held = self.held_from.take();
         let last = self.last.replace(at);
@@ -310,9 +341,11 @@ impl FrameCap {
             let waited_out = hold.min(self.owed);
             self.owed -= waited_out;
             self.counters.dropped_ns += waited_out;
-            if let Some(last) = last {
-                let work = from.saturating_sub(last).max(LEAST_WORK_NS);
-                self.would_draw += hold * 1000 / work;
+            let work = last.map_or(0, |last| from.saturating_sub(last));
+            if work >= LEAST_WORK_NS {
+                self.held.frames += 1;
+                self.held.work_ns += work;
+                self.held.hold_ns += hold;
             }
         }
         let Some(turn) = self.slot.map(|slot| slot + frame) else {
@@ -339,21 +372,22 @@ impl FrameCap {
         self.counters
     }
 
-    /// The frames the program would have drawn in the time the cap held
-    /// its presents, in thousandths, counted up since the machine
-    /// started: a frame that came `work` after the last one showed and
-    /// was held for `hold` stands for `hold / work` more, drawn like it.
-    /// `cycles=auto` adds them to the frames it counts, so that it reads
-    /// a held program's frame rate as it reads the same program's
-    /// without the cap, and settles at the same speed: a program held
-    /// to 60 that would draw 120 has speed to spare, and one that draws
-    /// its frames in bursts between long steps (Grom's menu shows 18 a
-    /// second under a cap of 60 and 71 without, at one speed) isn't
-    /// short of the cap's rate for the frames the cap spread out. A
-    /// present that waits for the retrace under a cap below the
-    /// display's rate counts from the retrace it would have shown at.
-    pub fn held_frames(&self) -> u64 {
-        self.would_draw
+    /// What the cap held so far, from which `cycles=auto` reckons the
+    /// frames the program would have drawn while it was held
+    /// (`Held::frames_since`) and adds them to the frames it counts, so
+    /// that it reads a held program's frame rate as it reads the same
+    /// program's without the cap, and settles at the same speed: a
+    /// program held to 60 that would draw 120 has speed to spare, and one
+    /// that draws its frames in bursts between long steps (Grom's menu
+    /// shows 18 a second under a cap of 60 and 71 without, at one speed)
+    /// isn't short of the cap's rate for the frames the cap spread out.
+    /// The frames are reckoned at the held frames' average time, so that
+    /// the short frames of a program whose frames take long and short
+    /// times by turns don't stand for many more than it draws. A present
+    /// that waits for the retrace under a cap below the display's rate
+    /// counts from the retrace it would have shown at.
+    pub fn held(&self) -> Held {
+        self.held
     }
 
     /// A steady timing at the cap's rate, a retrace at every multiple
@@ -587,7 +621,7 @@ mod tests {
                 cap.shown(i * refresh);
             }
             assert_eq!(cap.counters(), Counters::default(), "{:?}", under);
-            assert_eq!(cap.held_frames(), 0);
+            assert_eq!(cap.held(), Held::default());
         }
     }
 
@@ -597,7 +631,35 @@ mod tests {
         // the program would have drawn four more, 250 a second in all.
         let shown = presented_by(cap(50), &[4 * MS], 101).1;
         assert_eq!(shown.counters().held, 100);
-        assert_eq!(shown.held_frames(), 100 * 4000);
+        let would = shown.held().frames_since(&Held::default());
+        assert!((would - 100.0 * 4.0).abs() < 1e-6, "{would}");
+    }
+
+    #[test]
+    fn frames_of_uneven_length_are_reckoned_at_their_average() {
+        // 1 and 9 ms by turns, 200 frames a second without a cap. Under
+        // 60 each pair takes two frame times and is held for the rest,
+        // in which the program would have drawn as many more pairs as
+        // fit: 200 a second in all. Reckoned at each frame's own time,
+        // the 1 ms frames' holds made it 556.
+        let ms = 1_000_000;
+        let (shown, cap) = presented_by(cap(60), &[ms, 9 * ms], 601);
+        let seconds = (shown[600] - shown[0]) as f64 / 1e9;
+        let would = cap.held().frames_since(&Held::default());
+        let rate = (600.0 + would) / seconds;
+        assert!((rate - 200.0).abs() < 2.0, "{rate}");
+    }
+
+    #[test]
+    fn a_present_right_after_the_last_adds_no_frames_drawn() {
+        // A frame of 33 ms shown twice, the second present at once: held
+        // until its turn, in which the program drew nothing. Reckoned at
+        // the least time a frame takes, a hold of a frame time stood for
+        // 167 frames, and `cycles=auto` took the speed down to its least
+        // at any speed.
+        let (_, cap) = presented_by(cap(60), &[33 * MS, 0], 200);
+        assert_eq!(cap.counters().held, 100);
+        assert_eq!(cap.held(), Held::default());
     }
 
     #[test]
@@ -713,6 +775,73 @@ mod tests {
                 assert!(shown[i + 1] - t >= frame);
             }
         }
+    }
+
+    /// A program that steps its simulation on the clock, as Grom's menu
+    /// does: a step of 150 ms of game time takes 120 ms to run, and it
+    /// draws frames of 2.8 ms until the next step is due. `present`
+    /// gives the time a frame drawn by then shows at. The frames' times,
+    /// and the steps run a second.
+    fn stepping_on_the_clock(mut present: impl FnMut(u64) -> u64) -> (Vec<u64>, f64) {
+        let (step, step_takes, frame_takes) = (150 * MS, 120 * MS, 2_800_000);
+        let (mut now, mut steps, mut shown) = (0, 0, Vec::new());
+        while now < 60_000 * MS {
+            while (steps + 1) * step <= now {
+                now += step_takes;
+                steps += 1;
+            }
+            now = present(now + frame_takes);
+            shown.push(now);
+        }
+        (shown, steps as f64 / 60.0)
+    }
+
+    /// Of the frames `shown`, how many a second a display of 60 Hz shows:
+    /// the last one done at each of its retraces.
+    fn seen_at_60(shown: &[u64]) -> f64 {
+        let refresh = 1_000_000_000 / 60;
+        let last = *shown.last().unwrap();
+        let mut seen: Vec<_> = (1..last / refresh)
+            .filter_map(|k| shown.iter().rposition(|&t| t <= k * refresh))
+            .collect();
+        seen.dedup();
+        seen.len() as f64 * 1e9 / last as f64
+    }
+
+    #[test]
+    fn a_program_stepping_on_the_clock_loses_no_time_and_shows_what_a_retrace_wait_would() {
+        // Uncapped, the program draws 72 frames a second, in bursts of
+        // ten 2.8 ms apart after each step, of which a 60 Hz display
+        // shows 20. Under a cap of 60 the frames of a burst wait a frame
+        // time each, and the time they wait the program spends on steps
+        // that came due meanwhile: it shows 18 a second, a display 18 of
+        // them, and its simulation keeps its speed. A present that waits
+        // for a 60 Hz retrace, as on a machine with the display synced,
+        // shows 13.5. So the cap shows no fewer frames than a display of
+        // its rate would, nor much fewer than the display shows of the
+        // uncapped frames, and costs the program no time. The frames it
+        // would have drawn meanwhile make up its uncapped rate for
+        // `cycles=auto`.
+        let (free, free_steps) = stepping_on_the_clock(|at| at);
+        let mut cap = cap(60);
+        let (held, held_steps) = stepping_on_the_clock(|at| {
+            let at = cap.wait(at, None).unwrap_or(at);
+            cap.shown(at);
+            at
+        });
+        let refresh = 1_000_000_000 / 60;
+        let (synced, synced_steps) = stepping_on_the_clock(|at| at.div_ceil(refresh) * refresh);
+        assert!((free_steps - held_steps).abs() < 0.05 && (free_steps - synced_steps).abs() < 0.05);
+        let free_rate = rate(&free);
+        let held_rate = rate(&held);
+        assert!((free_rate - 72.0).abs() < 1.0, "{free_rate}");
+        assert!((held_rate - 18.0).abs() < 1.0, "{held_rate}");
+        assert!(held_rate > rate(&synced), "{}", rate(&synced));
+        let (seen_held, seen_free) = (seen_at_60(&held), seen_at_60(&free));
+        assert!(seen_held > 0.8 * seen_free, "{seen_held} of {seen_free}");
+        let would = cap.held().frames_since(&Held::default());
+        let read = (held.len() as f64 + would) / 60.0;
+        assert!((read / free_rate - 1.0).abs() < 0.05, "{read}");
     }
 
     #[test]

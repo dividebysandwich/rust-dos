@@ -11,7 +11,7 @@
 //! the frame rate the user asks for instead (`auto_fps`), or the frame
 //! rate cap while the program presents through it (`fps_cap`). A program
 //! the cap holds counts with the frames it would have drawn meanwhile
-//! (`FrameCap::held_frames`), so the cap changes the rate the speed aims
+//! (`FrameCap::held`), so the cap changes the rate the speed aims
 //! for and not what the program is read to draw at a speed.
 //!
 //! The frames are counted on the bus (`Activity`): page flips, or where a
@@ -628,9 +628,8 @@ struct Mark {
     copies: u64,
     flips: u64,
     presents: u64,
-    /// The frames the program would have drawn while the frame rate cap
-    /// held it, in thousandths (`FrameCap::held_frames`).
-    held: u64,
+    /// What the frame rate cap held so far (`FrameCap::held`).
+    held: crate::frame_cap::Held,
     polls: u64,
     status_reads: u64,
     output: u64,
@@ -657,7 +656,7 @@ impl Mark {
             copies: a.copies,
             flips: a.flips,
             presents: a.presents,
-            held: bus.frame_cap.get().held_frames(),
+            held: bus.frame_cap.get().held(),
             polls: a.polls,
             status_reads: a.status_reads,
             output: a.video_bytes + a.io_bytes,
@@ -1323,9 +1322,9 @@ impl AutoSpeed {
 
     /// The frames a program drew between two marks, of which it showed
     /// `frames`: those, and the ones it would have drawn while the frame
-    /// rate cap held it (`FrameCap::held_frames`).
+    /// rate cap held it (`FrameCap::held`).
     fn drawn(mark: &Mark, now: &Mark, frames: u64) -> f64 {
-        frames as f64 + now.held.saturating_sub(mark.held) as f64 / 1000.0
+        frames as f64 + now.held.frames_since(&mark.held)
     }
 
     /// Watch the frames of a step up from `from`, counting none of those
@@ -4280,14 +4279,26 @@ mod tests {
     /// `frame` instructions and shows it with a present that doesn't wait
     /// for the retrace.
     fn run_presenting(cap: crate::frame_cap::Cap, target: u32, frame: u64, seconds: u64) -> Vec<u32> {
+        run_presenting_by(cap, target, &[frame], seconds)
+    }
+
+    /// `run_presenting` with each frame taking the next of `frames`
+    /// instructions, in turn.
+    fn run_presenting_by(
+        cap: crate::frame_cap::Cap,
+        target: u32,
+        frames: &[u64],
+        seconds: u64,
+    ) -> Vec<u32> {
         let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
         let bus = &mut cpu.bus;
         bus.set_cycles_per_ms(200_000);
         bus.frame_cap.set(cap);
         let mut auto = AutoSpeed::new(3000, Some(target));
         let mut speeds = Vec::new();
+        let mut next = frames.iter().cycle();
         while bus.clock.now_ns() < seconds * 1_000_000_000 {
-            bus.clock.icount += frame;
+            bus.clock.icount += next.next().unwrap();
             // A held present's thread blocks, and the machine idles.
             while let Some(until) = bus.frame_cap.wait(bus.clock.now_ns(), None) {
                 let ns = until - bus.clock.now_ns();
@@ -4303,6 +4314,30 @@ mod tests {
             }
         }
         speeds
+    }
+
+    #[test]
+    fn uneven_frames_under_the_frame_rate_cap_dont_take_the_speed_down() {
+        use crate::frame_cap::Cap;
+        // Frames of 150,000 and 1,350,000 instructions by turns, 267 a
+        // second at 200,000 as with 750,000 each. Reckoned at each held
+        // frame's own time, the short frames' holds read as 556, and the
+        // first step went down to 20,000 where without the cap it went to
+        // 45,000.
+        let works = [150_000, 1_350_000];
+        let free = run_presenting_by(Cap::Off, 60, &works, 60);
+        let held = run_presenting_by(Cap::Auto, 60, &works, 60);
+        assert!(
+            held[0].abs_diff(free[0]) <= free[0] / 20,
+            "{held:?}, without {free:?}"
+        );
+        // A frame presented twice, the second present at once: the hold
+        // before it kept the program from drawing nothing. Reckoned at the
+        // least time a frame takes, each such hold read as up to 167
+        // frames, and the speed went down to the least there is.
+        let works = [1_500_000, 0];
+        let held = run_presenting_by(Cap::Auto, 60, &works, 60);
+        assert!(held.iter().all(|&speed| speed > 40_000), "{held:?}");
     }
 
     #[test]

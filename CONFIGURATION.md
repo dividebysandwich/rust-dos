@@ -3771,11 +3771,15 @@ one's, in emulated time:
   simulation for a tenth of a second between frames) the schedule
   starts again: the frames after it wait a frame time each and don't
   make up for it. A game that draws in bursts between such steps
-  therefore counts fewer frames under a cap than the cap's number,
-  because frames closer together than the cap's frame time aren't
-  shown: Grom's menu, whose simulation takes up to 190 ms in one frame
-  with frames of 3 ms between, counts 71 a second without a cap, of
-  which a 60 Hz display shows 18.
+  therefore counts fewer frames under a cap than the cap's number.
+  Grom's menu at 150,000 cycles spends 114 to 190 ms on each step of
+  its simulation and draws frames 3 ms apart between them, 71 a second
+  without a cap, of which a 60 Hz display shows about 20. Under a cap
+  of 60 each frame of a burst waits a frame time, and the next step
+  comes due sooner, so it shows 18 a second, about what a game synced
+  to a 60 Hz display shows. That is the rate of a simulation that runs
+  on the clock, which keeps its speed under the cap; with more cycles
+  the menu shows 60.
 - A present that waits for the display's retrace (a flip, or a swap
   with a swap interval) is already held to the display's rate. Under
   `auto`, or with the cap at that rate or above it, the cap holds none
@@ -3845,7 +3849,11 @@ machine started, in `fps_cap`:
 A game whose logic is tied to its frames ran slow for the cap by at
 most `dropped_ms` out of the emulated time. Near zero, the cap cost it
 no time. If it grows by seconds a minute in a game that plays slow,
-raise the cap or turn it off.
+raise the cap or turn it off. The settings window's Stats page shows
+the same counters a second (with `dropped_ms` as the share of the time
+lost) while a program shows its frames through the cap, and the
+performance overlay (Ctrl+Shift+F12) the frames held and the time lost
+under its graphs.
 
 Benchmarks and timedemos report at most the cap: turn it off
 (`fps_cap=off`, `--fps-cap off`) to measure how fast a game can draw.
