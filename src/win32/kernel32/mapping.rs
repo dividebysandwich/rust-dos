@@ -71,16 +71,9 @@ fn write_back(cpu: &mut Cpu, index: usize) {
             _ => runs.push((offset, bytes.collect())),
         }
     }
-    let disk = &mut cpu.bus.disk;
-    let Ok(position) = disk.seek_file(sft, 0, 1) else {
-        return;
-    };
     for (offset, data) in runs {
-        if disk.seek_file(sft, offset as i64, 0).is_ok() {
-            let _ = disk.write_file(sft, &data);
-        }
+        crate::win32::mapping::write_file_at(&mut cpu.bus, sft, offset, &data);
     }
-    let _ = disk.seek_file(sft, position as i64, 0);
 }
 
 /// Let go of the mappings whose objects are gone and that no running
@@ -113,6 +106,11 @@ pub(super) fn sweep(cpu: &mut Cpu) -> bool {
         let section = cpu.bus.win32.sections[index].take().expect("checked");
         for phys in section.pages.into_iter().filter(|&p| p != 0) {
             memory::free_page(&mut cpu.bus, phys);
+        }
+        if let Some(pool) = cpu.bus.win32.pool.as_mut() {
+            for slot in section.copies.into_values().flatten() {
+                pool.page_file.give_back(slot);
+            }
         }
         if let Some((file, _)) = section.file {
             cpu.bus.win32.objects.release(file);
@@ -325,6 +323,7 @@ pub(super) fn create_file_mapping_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> 
         protect: access,
         reserve,
         pages,
+        copies: Default::default(),
         file,
         views: Vec::new(),
     });
@@ -386,8 +385,16 @@ fn map_into(cpu: &mut Cpu, index: usize, protect: u32) -> bool {
             if phys == 0 || (entry != 0 && protect != PAGE_READWRITE) {
                 continue;
             }
+            // A page the process has keeps its accessed and dirty bits,
+            // which say whether the file's bytes are still its own
+            // (`mapping::evict`).
+            let used = if entry & !0xFFF == phys {
+                entry & 0x60
+            } else {
+                0
+            };
             p.memory
-                .set_entry(bus, lin, phys | protection_bits(protect));
+                .set_entry(bus, lin, phys | used | protection_bits(protect));
         }
         true
     })
@@ -595,9 +602,14 @@ pub(super) fn commit(cpu: &mut Cpu, first: u32, end: u32, protect: u32) -> Resul
             let entry = process.memory.entry(&cpu.bus, page).unwrap_or(0);
             let phys = section.pages[i];
             if phys != 0 && (entry == 0 || p == running) {
-                process
-                    .memory
-                    .set_entry(&mut cpu.bus, page, phys | protection_bits(protect));
+                // Accessed and dirty bits stay, as in `map_into`.
+                let used = if entry & !0xFFF == phys {
+                    entry & 0x60
+                } else {
+                    0
+                };
+                let entry = phys | used | protection_bits(protect);
+                process.memory.set_entry(&mut cpu.bus, page, entry);
             }
         }
         cpu.bus.win32.processes[p] = process;
