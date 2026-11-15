@@ -26,7 +26,7 @@
 //! The ordinals are the same under every `win32_version`. Programs import
 //! by ordinal only what has no name, and that is the same on Windows 95.
 //! The built-in DLLs Windows 98 SE doesn't have (GLIDE2X, GLIDE3X, D3D8,
-//! DINPUT8) number their functions as the DLLs they stand for do.
+//! DINPUT8, WING32) number their functions as the DLLs they stand for do.
 
 use super::stubs::{DLLS, Dll};
 use std::collections::HashMap;

@@ -36,20 +36,21 @@ const fn stdcall(name: &'static str, ordinal: u16, args: u8, handler: Handler) -
     }
 }
 
-/// The functions, with the names WinG's header gives them. Programs
-/// import them by name; their ordinals are WING.DLL's, less 1000.
-/// Append only (see `stubs`).
+/// The functions, with the names WinG's header gives them. Their
+/// ordinals are those of WinG's own WING32.DLL, which numbers its ten
+/// exports 1 to 10 in the alphabetical order of their names; they differ
+/// from the 16-bit WING.DLL's 1001 to 1010. Append only (see `stubs`).
 static APIS: &[Api] = &[
-    stdcall("WinGCreateDC", 1, 0, create_dc),
-    stdcall("WinGRecommendDIBFormat", 2, 1, recommend_dib_format),
-    stdcall("WinGCreateBitmap", 3, 3, create_bitmap),
-    stdcall("WinGGetDIBPointer", 4, 2, get_dib_pointer),
-    stdcall("WinGGetDIBColorTable", 5, 4, bitmap::get_dib_color_table),
-    stdcall("WinGSetDIBColorTable", 6, 4, bitmap::set_dib_color_table),
-    stdcall("WinGCreateHalftonePalette", 7, 0, create_halftone_palette),
-    stdcall("WinGCreateHalftoneBrush", 8, 3, create_halftone_brush),
-    stdcall("WinGStretchBlt", 9, 10, stretch_blt),
-    stdcall("WinGBitBlt", 10, 8, bit_blt),
+    stdcall("WinGCreateDC", 3, 0, create_dc),
+    stdcall("WinGRecommendDIBFormat", 8, 1, recommend_dib_format),
+    stdcall("WinGCreateBitmap", 2, 3, create_bitmap),
+    stdcall("WinGGetDIBPointer", 7, 2, get_dib_pointer),
+    stdcall("WinGGetDIBColorTable", 6, 4, bitmap::get_dib_color_table),
+    stdcall("WinGSetDIBColorTable", 9, 4, bitmap::set_dib_color_table),
+    stdcall("WinGCreateHalftonePalette", 5, 0, create_halftone_palette),
+    stdcall("WinGCreateHalftoneBrush", 4, 3, create_halftone_brush),
+    stdcall("WinGStretchBlt", 10, 10, stretch_blt),
+    stdcall("WinGBitBlt", 1, 8, bit_blt),
 ];
 
 const SRCCOPY: u32 = 0x00CC_0020;
@@ -157,4 +158,22 @@ fn bit_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let mut all = args[..8].to_vec();
     all.push(SRCCOPY);
     draw::bit_blt(cpu, &all)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::APIS;
+
+    /// WinG's WING32.DLL numbers its exports 1 to 10 by the alphabetical
+    /// order of their names, and a program that imports one by ordinal
+    /// gets that function.
+    #[test]
+    fn ordinals_follow_the_names_alphabetical_order() {
+        let mut names: Vec<&str> = APIS.iter().map(|a| a.name).collect();
+        names.sort_unstable();
+        for api in APIS {
+            let place = names.iter().position(|&n| n == api.name).unwrap();
+            assert_eq!(api.ordinal as usize, place + 1, "{}", api.name);
+        }
+    }
 }
