@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// A machine that runs a COM program (RET) from `dir`, with DATA.TXT
 /// holding "0123456789" there.
-fn machine(name: &str) -> Cpu {
+fn machine(name: &str) -> Box<Cpu> {
     let dir = PathBuf::from("target/test_file_tables").join(name);
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();

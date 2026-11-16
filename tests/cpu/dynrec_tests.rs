@@ -1188,7 +1188,7 @@ fn com_in_lockstep(test: &str, code: &[u8]) -> (Box<Cpu>, Box<Cpu>) {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("T.COM"), code).unwrap();
-        let mut cpu = Box::new(Cpu::new(dir));
+        let mut cpu = Cpu::new(dir);
         cpu.core = core;
         cpu.load_shell();
         cpu.pending_command = Some("T".to_string());

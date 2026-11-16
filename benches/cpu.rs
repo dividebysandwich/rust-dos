@@ -20,7 +20,7 @@ use std::hint::black_box;
 const SLICE: u64 = 200_000;
 
 /// A machine running the loop on `core`, past its start-up.
-fn running(name: &str, core: CoreMode) -> Cpu {
+fn running(name: &str, core: CoreMode) -> Box<Cpu> {
     let dir = scratch(name);
     std::fs::write(dir.join("T.COM"), loop_program()).unwrap();
     let mut cpu = machine(&dir);

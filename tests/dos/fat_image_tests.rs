@@ -19,7 +19,7 @@ const DRIVE_D: u8 = 3;
 const DTA: usize = 0x40000;
 const BUFFER: usize = 0x50000;
 
-fn cpu(dir: &Path) -> Cpu {
+fn cpu(dir: &Path) -> Box<Cpu> {
     fs::create_dir_all(dir.join("c")).unwrap();
     Cpu::new(dir.join("c"))
 }

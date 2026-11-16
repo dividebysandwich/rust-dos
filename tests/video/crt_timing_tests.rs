@@ -10,7 +10,7 @@ use std::path::PathBuf;
 /// 100 instructions per microsecond, so one port read (1 µs) is 100.
 const CYCLES_PER_MS: u32 = 100_000;
 
-fn machine(mode: u8) -> Cpu {
+fn machine(mode: u8) -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     cpu.bus.set_cycles_per_ms(CYCLES_PER_MS);
     cpu.set_ax(mode as u16);

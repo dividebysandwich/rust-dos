@@ -8,7 +8,7 @@ use rust_dos::interrupts::int10;
 use rust_dos::video::{self, SCREEN_HEIGHT, SCREEN_WIDTH};
 use std::path::PathBuf;
 
-fn mode_13h() -> Cpu {
+fn mode_13h() -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     cpu.set_ax(0x0013);
     cpu.set_reg8(Register::AH, 0x00);

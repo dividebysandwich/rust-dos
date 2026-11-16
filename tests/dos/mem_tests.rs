@@ -20,7 +20,7 @@ fn scratch(name: &str, files: &[(&str, &[u8])]) -> PathBuf {
 
 /// A machine at its prompt, with upper memory and EMS if asked, and DOS's
 /// tables spread up to 64 KB (`dos_high=false`), where these numbers are.
-fn machine(name: &str, ems: bool, umb: bool) -> Cpu {
+fn machine(name: &str, ems: bool, umb: bool) -> Box<Cpu> {
     // TSR.COM just loops; the tests make the DOS calls.
     let mut cpu = Cpu::new(scratch(name, &[("TSR.COM", &[0xEB, 0xFE])]));
     cpu.set_dos_high(false).unwrap();

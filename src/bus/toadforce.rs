@@ -831,7 +831,7 @@ mod tests {
 
     /// A machine showing the card's 640x480 mode of 32-bit pixels, its
     /// surface at 0 white, with a frame begun after the last retrace.
-    fn machine() -> Cpu {
+    fn machine() -> Box<Cpu> {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
         let setup = VideoSetup {
             adapter: Adapter::ToadForce,

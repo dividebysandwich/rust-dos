@@ -42,7 +42,7 @@ fn floppy(fill: u8) -> DiskImage {
 }
 
 /// A machine booted from the floppy in A:.
-fn booted(name: &str, controller: bool) -> Cpu {
+fn booted(name: &str, controller: bool) -> Box<Cpu> {
     let base = PathBuf::from("target/test_fdc").join(name);
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();

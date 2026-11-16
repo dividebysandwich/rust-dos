@@ -151,7 +151,7 @@ fn describe_state(header: &slots::Header) -> String {
 /// The emulated PC, as the page sees it.
 #[wasm_bindgen]
 pub struct Machine {
-    cpu: Cpu,
+    cpu: Box<Cpu>,
     /// The settings in effect (or waiting, see `Hardware`).
     settings: Settings,
     hardware: Hardware,

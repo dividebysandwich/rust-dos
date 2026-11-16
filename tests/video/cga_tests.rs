@@ -18,7 +18,7 @@ fn int10(cpu: &mut Cpu, ax: u16, bx: u16, cx: u16, dx: u16) {
 }
 
 /// A machine with a CGA in `mode`, at 1000 instructions an emulated ms.
-fn cga(mode: u8) -> Cpu {
+fn cga(mode: u8) -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     cpu.bus.set_cycles_per_ms(1000);
     bios::install(&mut cpu.bus, VideoSetup { adapter: Adapter::Cga, ..Default::default() });

@@ -21,7 +21,7 @@ fn scratch(name: &str, files: &[(&str, &[u8])]) -> PathBuf {
     base
 }
 
-fn machine(dir: &Path) -> Cpu {
+fn machine(dir: &Path) -> Box<Cpu> {
     let mut cpu = Cpu::new(dir.to_path_buf());
     cpu.bus.set_cycles_per_ms(1000);
     cpu.load_shell();

@@ -13,7 +13,7 @@ use std::path::Path;
 
 /// A machine at 1000 instructions per ms with C: in `dir/c`, holding
 /// DATA.BIN of 61440 bytes.
-fn machine(dir: &Path, settings: DiskSettings) -> Cpu {
+fn machine(dir: &Path, settings: DiskSettings) -> Box<Cpu> {
     fs::create_dir_all(dir.join("c")).unwrap();
     fs::write(dir.join("c/DATA.BIN"), vec![0x42u8; 61440]).unwrap();
     let mut cpu = Cpu::new(dir.join("c"));

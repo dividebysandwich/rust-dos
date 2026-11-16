@@ -114,7 +114,7 @@ fn device_requests_answer_ioctl_queries() {
 /// A disc with a data track (sectors 0-24) and a 10-sector audio track
 /// after a two-second pregap (sectors 175-184), mounted as D:. The mixer
 /// plays only the CD, at full volume.
-fn disc(name: &str) -> (Cpu, u32) {
+fn disc(name: &str) -> (Box<Cpu>, u32) {
     let dir = cdimage::scratch(&format!("mscdex_{}", name));
     fs::create_dir_all(dir.join("c")).unwrap();
     let mut cpu = Cpu::new(dir.join("c"));

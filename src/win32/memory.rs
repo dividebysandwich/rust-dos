@@ -1416,7 +1416,7 @@ mod tests {
 
     /// A process's page tables on a machine whose pool has `pages` pages
     /// left, with a page file of `file` pages.
-    fn machine(pages: u32, file: u32) -> (Cpu, Memory) {
+    fn machine(pages: u32, file: u32) -> (Box<Cpu>, Memory) {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
         cpu.bus.win32.pool = Pool::take(&mut cpu.bus, 0x40_0000);
         let memory = Memory::new(&mut cpu.bus).expect("a page directory");

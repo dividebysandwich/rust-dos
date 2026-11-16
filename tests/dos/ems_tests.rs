@@ -12,7 +12,7 @@ use std::path::PathBuf;
 const FRAME: usize = 0xE0000;
 const PAGE: usize = 0x4000;
 
-fn machine() -> Cpu {
+fn machine() -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     ems::set_enabled(&mut cpu.bus, true);
     cpu

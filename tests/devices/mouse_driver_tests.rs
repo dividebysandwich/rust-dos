@@ -118,7 +118,7 @@ const CALLBACK_IP: u16 = 0x0200;
 const CALLBACK_COUNT: usize = 0x20400;
 const CALLBACK_ARGS: usize = CALLBACK_COUNT + 2;
 
-fn polling_cpu() -> Cpu {
+fn polling_cpu() -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     cpu.set_cs(POLL_SEG);
     cpu.set_ip(0x100);

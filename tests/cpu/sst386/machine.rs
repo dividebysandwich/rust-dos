@@ -42,7 +42,7 @@ pub enum RunEnd {
 }
 
 pub struct Machine {
-    pub cpu: Cpu,
+    pub cpu: Box<Cpu>,
     /// Emulator log lines of the current test.
     pub log: Rc<RefCell<Vec<String>>>,
     /// `bus.page_gen` before the test: pages whose generation moved were

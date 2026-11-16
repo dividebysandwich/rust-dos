@@ -147,13 +147,13 @@ fn scratch(name: &str, files: &[(&str, Vec<u8>)]) -> PathBuf {
 
 /// A machine with the built-in Windows on, `program` loaded from the
 /// shell as T.EXE, and what it prints kept.
-fn machine(test: &str, program: Vec<u8>) -> Cpu {
+fn machine(test: &str, program: Vec<u8>) -> Box<Cpu> {
     machine_with(test, &[("T.EXE", program)])
 }
 
 /// A machine with the built-in Windows on, T.EXE of `files` loaded from
 /// the shell, and what it prints kept.
-fn machine_with(test: &str, files: &[(&str, Vec<u8>)]) -> Cpu {
+fn machine_with(test: &str, files: &[(&str, Vec<u8>)]) -> Box<Cpu> {
     let mut cpu = Cpu::new(scratch(test, files));
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
