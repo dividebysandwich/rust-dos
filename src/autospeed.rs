@@ -1092,7 +1092,14 @@ pub struct AutoSpeed {
     /// and the probes missed in this scene, up to `MOST_PROBE_BACKOFFS`.
     probe_wait: u32,
     probe_misses: u32,
-    /// Where the search stopped is in doubt, and a probe may try more.
+    /// Where the search stopped is in doubt, and a probe may try more
+    /// (`PROBE_STEP`). Set where the step up that stopped it drew fewer
+    /// frames than the speed below it by more than `SAME`: in one scene
+    /// more speed draws as many frames or more, so the scene changed under
+    /// the step, and the knee reckoned from the two says nothing. Set too
+    /// where the limits from a host that fell behind end (`far_more`): the
+    /// search held under them, short of what the host has now. Cleared by
+    /// a new search and by a heavier scene, which searches again.
     unsure: bool,
     /// The last measurement moved `LOADS` on its drives.
     loaded: bool,
@@ -1902,10 +1909,9 @@ impl AutoSpeed {
         let lighter = |(speed, rate): (u32, f64)| fps / rate > c / speed as f64 * (1.0 + AGREE);
         match self.step {
             Step::Start => up(self, FIRST_STEP, here),
-            Step::Raised { from, fps: before, .. }
-                if current > from
-                    && (lighter((from, before)) || (was_loaded && m.io < LOADS)) =>
-            {
+            Step::Raised {
+                from, fps: before, ..
+            } if current > from && (lighter((from, before)) || (was_loaded && m.io < LOADS)) => {
                 up(self, FIRST_STEP, here)
             }
             Step::Raised { from, fps: before, below } if current > from => {
@@ -2200,9 +2206,7 @@ impl AutoSpeed {
             Step::Raised { .. }
             | Step::Overshot { .. }
             | Step::Lowered { .. }
-            | Step::Probed { .. } => {
-                up(self, FIRST_STEP, here)
-            }
+            | Step::Probed { .. } => up(self, FIRST_STEP, here),
         }
     }
 }
@@ -4790,7 +4794,10 @@ mod tests {
             ..Machine::default()
         };
         let ran = machine.run(seconds, frame);
-        (ran.speeds[1..].iter().map(|&(_, speed)| speed).collect(), ran.shown)
+        (
+            ran.speeds[1..].iter().map(|&(_, speed)| speed).collect(),
+            ran.shown,
+        )
     }
 
     /// What `run_program` runs a program on: the frame rate cap, the frame
@@ -5046,14 +5053,31 @@ mod tests {
     }
 
     #[test]
-    fn a_probe_finds_the_speed_scenes_of_another_weight_hid() {
-        // No loading screen: the first steps land in scenes of different
-        // weight, and the search stops short.
-        for least in [5_000_000, 7_000_000] {
-            let ran = from_20000().run(150, timedemo(0, least));
-            let (mean, _, _) = ran.from(90);
-            assert!(mean >= 280_000, "{least}: {:?}", ran.speeds);
+    fn a_probe_finds_the_speed_a_heavier_scene_hid() {
+        // The step up from 20,000 lands in a heavier scene: 40 frames a
+        // second there, 32 at 80,000, and the knee reckoned from the two
+        // is under 20,000. The scene's frames follow the speed, a frame for
+        // each 2500 instructions per ms, a quarter more or less from one
+        // measurement to the next as Quake's timedemo does, which the
+        // small steps up a hold tries can't tell from noise but now and
+        // then. Probes take it up to the refresh rate, 70 frames a second
+        // at 175,000.
+        let mut auto = AutoSpeed::new(3000, None);
+        let mut speed = 20_000;
+        let mut speeds = Vec::new();
+        let mut seed = 1;
+        for i in 0..120 {
+            let per = if i == 0 { 500.0 } else { 2500.0 };
+            let m = Measurement {
+                fps: Some(speed as f64 / per * noise(&mut seed, 0.25)),
+                ..STILL
+            };
+            speed = auto.decide(speed, &m, true, HOST);
+            speeds.push(speed);
         }
+        // Within 20 measurements, ten seconds, about as long as Quake's
+        // timedemo runs: the small steps a hold tries take minutes.
+        assert!(speeds[20..].iter().all(|&s| s >= 120_000), "{speeds:?}");
     }
 
     #[test]
@@ -5065,7 +5089,10 @@ mod tests {
         let ran = from_20000().run(600, timedemo(2_100_000_000, 12_000_000));
         let (mean, least, most) = ran.from(300);
         let tail = &ran.speeds[ran.speeds.len().saturating_sub(20)..];
-        assert!(mean >= 300_000 && least * 2 >= most, "{least} to {most}: {tail:?}");
+        assert!(
+            mean >= 300_000 && least * 2 >= most,
+            "{least} to {most}: {tail:?}"
+        );
         assert!(ran.probes <= 12, "{} probes: {tail:?}", ran.probes);
     }
 
