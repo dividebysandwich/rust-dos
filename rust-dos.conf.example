@@ -266,6 +266,10 @@
 # Banshee or Voodoo3), or 8, 256 colours from a palette, for programs that
 # need them.
 #win32_depth=auto
+# The size of the built-in Windows' desktop, as Display Properties set it
+# on Windows: 640x480 (the default), 800x600 or 1024x768. Programs that
+# say they need 800x600 or more, such as Fields of Fire, need 800x600.
+#win32_desktop=640x480
 # Which calls of the built-in Windows' functions the log gets a line for:
 # all, every call; collapsed (the default), the first few calls from each
 # place in a program a second and a count of the rest; or off.

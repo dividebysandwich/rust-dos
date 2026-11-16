@@ -352,6 +352,11 @@ pub struct Win32 {
     /// of them started.
     pub depth: crate::config::DesktopDepth,
     desktop_depth: crate::config::DesktopDepth,
+    /// The desktop's own size (the `win32_desktop` setting), and the
+    /// size the running processes have, the setting's when the first of
+    /// them started.
+    pub desktop: crate::config::DesktopSize,
+    own_size: version::OwnSize,
     /// The system locale (the `win32_locale` setting), and the locale
     /// the running processes see, the setting's when the first of them
     /// started (nls.rs).
@@ -495,6 +500,7 @@ impl Win32 {
             guest_replace: std::mem::take(&mut self.guest_replace),
             version: self.version,
             depth: self.depth,
+            desktop: self.desktop,
             locale: self.locale,
             dll_files: self.dll_files.take(),
             trace: trace::Trace::new(self.trace.level()),
@@ -1667,6 +1673,7 @@ crate::state_fields!(Win32 {
     boot,
     win16,
     desktop_depth,
+    own_size,
     os_locale,
     atoms,
     desktop_size,
@@ -1680,6 +1687,7 @@ crate::state_fields!(Win32 {
     guest_replace,
     version,
     depth,
+    desktop,
     locale,
     dll_files,
     trace,
