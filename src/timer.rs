@@ -944,13 +944,25 @@ impl Pacer {
             budget_ns / ns_per_instr / (frame_ns / 1_000_000.0)
         };
         // At auto, a frame of a stall stays out of the samples
-        // (`HostEstimate::outlier`).
+        // (`HostEstimate::outlier`), fewer of them in a row while the
+        // program gets all the host has.
+        let most = if self.auto.flat_out() {
+            crate::autospeed::TRY_BEHIND_FRAMES - 1
+        } else {
+            crate::autospeed::STALL_FRAMES
+        };
         let outlier = matches!(self.speed, CpuSpeed::Auto(_))
             && executed >= SAMPLE_INSTRUCTIONS
-            && self.host.outlier(ideal_of(
-                exec.as_nanos() as f64 / executed as f64,
-                overhead.as_nanos() as f64,
-            ));
+            && self.host.outlier(
+                ideal_of(
+                    exec.as_nanos() as f64 / executed as f64,
+                    overhead.as_nanos() as f64,
+                ),
+                current,
+                most,
+            );
+        // The first frame of a run too long for a stall, which counts.
+        let admitted = !outlier && self.host.outliers == most + 1;
         let ideal = if outlier {
             None
         } else {
@@ -985,6 +997,15 @@ impl Pacer {
             CpuSpeed::Auto(_) => {
                 if let Some(ideal) = ideal {
                     self.host.add(ideal, current);
+                }
+                if admitted && crate::autospeed::trace() {
+                    eprintln!(
+                        "[auto] host: {} slow frames in a row at {}{}, estimate now {:.0}",
+                        most + 1,
+                        current,
+                        if self.auto.flat_out() { " flat out" } else { "" },
+                        self.host.max.unwrap_or(0.0)
+                    );
                 }
                 // No lower than frames can be timed at, or a busy host could
                 // cap the speed where nothing measures it again (with a base
@@ -1171,8 +1192,26 @@ impl HostEstimate {
     /// third frame said 24,000 to 28,000 against an estimate of 230,000:
     /// two such samples in a row move it half the way down each
     /// (`HOST_FALL`), and a few of them took it to 4,500. More such frames
-    /// in a row than a stall takes (`STALL_FRAMES`) are the host's speed at
-    /// the program's work now, and count.
+    /// in a row than `most` are the host's speed at the program's work
+    /// now, and count, from the first of them past `most`. That one moves
+    /// the estimate as the second short sample in a row does, if it is
+    /// short of `current` (`HOST_SHORT`): the frames left out before it
+    /// were.
+    ///
+    /// `most` is what a stall takes (`STALL_FRAMES`), and while the program
+    /// gets all the host has (`AutoSpeed::flat_out`), one less than the
+    /// frames behind in a row that end a step up (`TRY_BEHIND_FRAMES`).
+    /// There the speed is the estimate, and it follows the estimate down: a
+    /// program whose work turns from what the estimate was taken on to
+    /// work that costs the host six times as much an instruction or more
+    /// runs each frame left out that many times as slow as real time.
+    /// Zanzarah's intro movie starts right after a load the estimate was
+    /// taken on, at 1,074,449, with frames of 250 ms; the eight left out
+    /// were two seconds of a frozen movie (#1223). A stall of three frames
+    /// or more in a row during a load costs the load the speed it takes
+    /// off, until the estimate climbs back or the next measurement goes
+    /// back to the estimate; a stall of one or two frames, as Grom's are,
+    /// still stays out.
     ///
     /// A program whose own work makes every few frames that slow reads high
     /// the same way: 2.7 times what the host runs with every third frame
@@ -1187,7 +1226,7 @@ impl HostEstimate {
     /// than that drop time under half the estimate too, which the
     /// measurements leave out as stalls: those can't be told from a load
     /// read cold.
-    fn outlier(&mut self, ideal: f64) -> bool {
+    fn outlier(&mut self, ideal: f64, current: u32, most: u32) -> bool {
         let far = self
             .max
             .is_some_and(|max| ideal * crate::autospeed::STALL_COST as f64 <= max);
@@ -1196,7 +1235,11 @@ impl HostEstimate {
             return false;
         }
         self.outliers = self.outliers.saturating_add(1);
-        self.outliers <= crate::autospeed::STALL_FRAMES
+        if self.outliers <= most {
+            return true;
+        }
+        self.short = ideal < current as f64 * HOST_SHORT;
+        false
     }
 
     /// Add a sample that says `ideal`, taken at the speed `current`. The
@@ -1726,6 +1769,101 @@ mod tests {
             let max = host.max.unwrap();
             assert!((max / 400_000.0 - 1.0).abs() < 0.02, "{max}");
         }
+    }
+
+    /// The host's nanoseconds an instruction of a load takes: the host
+    /// keeps up with 1,075,000 instructions a ms of it (`MAX_BUSY_SHARE`).
+    const LOAD_NS: f64 = 0.85e6 / 1_075_000.0;
+
+    /// A protected-mode program at `Auto` that loads without frames, given
+    /// all the host has, then runs `then`: the host's time each frame of
+    /// that takes, in nanoseconds an instruction, frame by frame. Returns
+    /// the speed and the host's time of each of those frames.
+    fn boosted_then(then: &[f64]) -> Vec<(u32, Duration)> {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        cpu.pm_latched = true;
+        let mut pacer = Pacer::new(CpuSpeed::Auto(3000), None, Instant::now());
+        let run = |cpu: &mut crate::cpu::Cpu, pacer: &mut Pacer, ns: f64| {
+            let speed = cpu.bus.clock.cycles_per_ms();
+            let executed = (speed as f64 * FRAME.as_secs_f64() * 1000.0) as u64;
+            let exec = Duration::from_nanos((executed as f64 * ns) as u64);
+            cpu.bus.clock.icount += executed;
+            // It reads its data all along.
+            cpu.bus.activity.io_bytes += 250_000;
+            if let Some(next) = pacer.end_cpu_frame(cpu, executed, exec, Duration::ZERO) {
+                cpu.bus.clock.set_cycles_per_ms(next);
+            }
+            (speed, exec)
+        };
+        // The load at its speed before the boost, which seeds the estimate,
+        // then the measurement that finds it at work without frames.
+        cpu.bus.clock.set_cycles_per_ms(433_332);
+        for _ in 0..6 {
+            run(&mut cpu, &mut pacer, LOAD_NS);
+        }
+        let loading = crate::autospeed::Measurement {
+            fps: None,
+            polling: 0.0,
+            halted: 0.0,
+            output: 14_800_000.0,
+            io: 14_800_000.0,
+            refresh: 60.0,
+            pace: 1.0,
+        };
+        let host_max = pacer.host.max.unwrap() as u32;
+        let boost = pacer.auto.decide(433_332, &loading, true, host_max);
+        assert!(pacer.auto.flat_out());
+        assert!(boost > 1_000_000, "{boost}");
+        cpu.bus.clock.set_cycles_per_ms(boost);
+        for _ in 0..6 {
+            run(&mut cpu, &mut pacer, LOAD_NS);
+        }
+        then.iter()
+            .map(|&ns| run(&mut cpu, &mut pacer, ns))
+            .collect()
+    }
+
+    /// Zanzarah's intro movie starts right after a load that `Auto` gave
+    /// all the host has, at 1,074,449, and its frames cost the host about
+    /// fifteen times as much an instruction as the load's (#1223). The
+    /// speed follows the estimate down, and the frames left out of it as a
+    /// stall's each run at a fifteenth of real time: eight of them, as
+    /// many as a stall may take, were two seconds of a frozen movie. Given
+    /// all the host has, the third frame that slow in a row counts.
+    #[test]
+    fn a_boost_into_work_the_host_runs_far_slower_comes_down_within_a_few_frames() {
+        let movie = LOAD_NS * 15.0;
+        // What the host keeps up with of the movie.
+        let keeps_up = 0.85e6 / movie;
+        let frames = boosted_then(&[movie; 40]);
+        // The host's time until the speed is within twice that.
+        let slow: Duration = frames
+            .iter()
+            .take_while(|&&(speed, _)| speed as f64 > keeps_up * 2.0)
+            .map(|&(_, exec)| exec)
+            .sum();
+        assert!(slow < Duration::from_millis(1000), "{slow:?}: {frames:?}");
+        // Three of them at the boost, then a frame of each speed down.
+        let at_boost = frames.iter().filter(|f| f.0 == frames[0].0).count();
+        assert_eq!(at_boost, crate::autospeed::TRY_BEHIND_FRAMES as usize);
+        // It comes down to what the host keeps up with, no lower than half.
+        let last = frames.last().unwrap().0 as f64;
+        assert!(last > keeps_up * 0.5 && last < keeps_up * 1.5, "{last}");
+    }
+
+    /// A stall of one or two frames in a row during a boosted load, as
+    /// Grom's cold reads are, leaves the speed: the frames after it run
+    /// at the load's cost again.
+    #[test]
+    fn a_short_stall_during_a_boost_leaves_the_speed() {
+        let stall = LOAD_NS * 15.0;
+        let frames = boosted_then(&[stall, LOAD_NS, LOAD_NS, stall, stall, LOAD_NS, LOAD_NS]);
+        let speeds: Vec<u32> = frames.iter().map(|f| f.0).collect();
+        // The estimate moves no more than its drift with the light frames.
+        assert!(
+            speeds.iter().all(|&s| s as f64 > speeds[0] as f64 * 0.9),
+            "{speeds:?}"
+        );
     }
 
     #[test]
