@@ -523,11 +523,16 @@ pub(crate) mod tests {
     /// FIFO behind the swap, and A stays on the screen as it was. Here
     /// they go ahead, and the picture holds until the swap shows B.
     fn drawn_behind_a_waiting_swap() -> Voodoo {
-        use super::super::{VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT, VID_PROC_CFG, VIDPROC_ENABLE};
+        use super::super::VIDPROC_ENABLE;
+        drawn_behind_a_waiting_swap_in(VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE)
+    }
+
+    /// The same, with the video processor configured as `cfg` says.
+    fn drawn_behind_a_waiting_swap_in(cfg: u32) -> Voodoo {
+        use super::super::{VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT, VID_PROC_CFG};
 
         let (a, b) = (0x10_0000u32, 0x20_0000u32);
         let mut v = Voodoo::with_workers(Board::Voodoo3, 0);
-        let cfg = VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE;
         v.write(
             VGA_INIT0,
             VGAINIT0_EXTENDED_SHIFT_OUT,
@@ -611,8 +616,10 @@ pub(crate) mod tests {
     /// for the retrace, as Test Drive 4 does, step by step, with a host
     /// frame (`prepare_display`, then `render` into the frame the last one
     /// drew, as the main loop does) after each step in `frames`: the colour
-    /// of the first pixel of each host frame's picture, by step.
-    fn host_frames_over_double_buffering(frames: &[usize]) -> Vec<(usize, [u8; 3])> {
+    /// of the first pixel of each host frame's picture, by step. Without
+    /// the `overlay`, the desktop shows A all along, and the swaps, which
+    /// move only the overlay, just wait for their retraces.
+    fn host_frames_over_double_buffering(overlay: bool, frames: &[usize]) -> Vec<(usize, [u8; 3])> {
         use super::super::{
             VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT, VID_DESKTOP_OVERLAY_STRIDE,
             VID_OVERLAY_END_SCREEN_COORDS, VIDPROC_DESKTOP_CLUT_BYPASS, VIDPROC_ENABLE,
@@ -625,7 +632,8 @@ pub(crate) mod tests {
             v.write(reg, value, u32::MAX, Now::default());
         };
         write(&mut v, VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT);
-        write(&mut v, VID_DESKTOP_START_ADDR, 0x30_0000);
+        let desktop = if overlay { 0x30_0000 } else { a };
+        write(&mut v, VID_DESKTOP_START_ADDR, desktop);
         write(&mut v, VID_DESKTOP_OVERLAY_STRIDE, 1280 << 16 | 1280);
         let (w, h) = v.picture_size();
         write(
@@ -635,11 +643,15 @@ pub(crate) mod tests {
         );
         // The desktop and the overlay in 5-6-5, the overlay over all of it.
         let cfg = VIDPROC_ENABLE
-            | VIDPROC_OVERLAY_ENABLE
             | VIDPROC_DESKTOP_CLUT_BYPASS
             | VIDPROC_OVERLAY_CLUT_BYPASS
             | 1 << 18
             | 1 << 21;
+        let cfg = if overlay {
+            cfg | VIDPROC_OVERLAY_ENABLE
+        } else {
+            cfg
+        };
         write(&mut v, VID_PROC_CFG, cfg);
         reg3d(&mut v, COL_BUFFER_STRIDE, 1280);
         reg3d(&mut v, CLIP_LEFT_RIGHT, 4);
@@ -679,7 +691,7 @@ pub(crate) mod tests {
                 // Again the other way round.
                 4 => {
                     swap(&mut v, a, 1);
-                    fill(&mut v, b, 0xFF_FFFF);
+                    fill(&mut v, if overlay { b } else { a }, 0xFF_FFFF);
                 }
                 _ => retrace(&mut v),
             }
@@ -696,17 +708,53 @@ pub(crate) mod tests {
     /// The card shows the last frame complete, however the host's frames
     /// fall between the program's steps: the frame a swap showed even if
     /// no host frame drew it before the next frame's drawing into it
-    /// began, and never the start of that drawing.
+    /// began, and never the start of that drawing. Through the overlay
+    /// and on the desktop alone.
     #[test]
     fn the_held_picture_is_the_same_whenever_the_host_draws() {
         let (red, green, blue) = ([255, 0, 0], [0, 255, 0], [0, 0, 255]);
-        let shown = [red, red, red, green, green, blue];
-        for schedule in 1u32..64 {
-            let frames: Vec<usize> = (0..6).filter(|&s| schedule & 1 << s != 0).collect();
-            for (step, seen) in host_frames_over_double_buffering(&frames) {
-                assert_eq!(seen, shown[step], "step {step}, host frames {frames:?}");
+        let white = [255, 255, 255];
+        for (overlay, shown) in [
+            (true, [red, red, red, green, green, blue]),
+            (false, [red, red, red, blue, blue, white]),
+        ] {
+            for schedule in 1u32..64 {
+                let frames: Vec<usize> = (0..6).filter(|&s| schedule & 1 << s != 0).collect();
+                for (step, seen) in host_frames_over_double_buffering(overlay, &frames) {
+                    assert_eq!(
+                        seen, shown[step],
+                        "overlay {overlay}, step {step}, host frames {frames:?}"
+                    );
+                }
             }
         }
+    }
+
+    /// A hold keeps the memory's words where the picture is in 16-bit
+    /// formats, and draws a picture from them only when one is asked for;
+    /// in 8 bits it draws the picture at once.
+    #[test]
+    fn a_held_picture_is_drawn_only_when_asked_for() {
+        use super::super::VIDPROC_ENABLE;
+
+        let held = |v: &Voodoo, key: &str| v.describe(Now::default())[key].as_u64().unwrap();
+        let v = drawn_behind_a_waiting_swap();
+        assert_eq!(held(&v, "held_keeps"), 0);
+        assert_eq!(held(&v, "held_copies"), 1);
+        let cfg = VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE | 1 << 18 | 1 << 21;
+        let mut v = drawn_behind_a_waiting_swap_in(cfg);
+        assert_eq!(held(&v, "held_keeps"), 1);
+        assert_eq!(held(&v, "held_copies"), 0);
+        // The host frame the hold began with (`prepare_display` above).
+        let asked = held(&v, "held_conversions");
+        let (w, h) = v.picture_size();
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        v.render(&mut rgba, w as usize);
+        assert_eq!(held(&v, "held_conversions"), asked + 1);
+        let due = v.next_event().expect("the swap waits for a retrace");
+        v.service(Now { ns: 0, ticks: due });
+        v.render(&mut rgba, w as usize);
+        assert_eq!(held(&v, "held_conversions"), asked + 1, "the hold is over");
     }
 
     /// The hold ends whenever the picture no longer is what the swap
