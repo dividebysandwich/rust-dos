@@ -2096,9 +2096,11 @@ impl Voodoo {
             self.gpu.get_mut().tracker.mark(start, end);
         }
         // The software renderer draws the buffers into the memory from
-        // now on, where the GPU may have done a 2D operation.
+        // now on, where the GPU may have done a 2D operation. The
+        // program reads none of it here: the hot bytes there don't stay
+        // hot for it.
         for (start, end) in key.spans().map(clamp) {
-            self.gpu_sync(start, end);
+            self.gpu_sync_cooling(start, end);
         }
         let snapshot = self.snapshot(&key);
         if let Some(mirror) = self.mirror.get_mut() {

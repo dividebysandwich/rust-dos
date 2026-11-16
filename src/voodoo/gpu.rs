@@ -1011,7 +1011,8 @@ impl Voodoo {
     /// GPU has is read back and turns hot, and what was hot already cools
     /// at the end of the period unless the program reads it. For a 2D
     /// command the GPU may draw once the bytes cool
-    /// (`banshee_2d_keeps_hot`).
+    /// (`banshee_2d_keeps_hot`), and for the recording taking the
+    /// buffers again (`mirror_sync`).
     #[inline]
     pub(crate) fn gpu_sync_cooling(&self, start: u32, end: u32) {
         self.gpu_sync_buffers(start, end);
