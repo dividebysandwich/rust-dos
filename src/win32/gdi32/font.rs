@@ -24,7 +24,9 @@
 //! has the width it has in VGASYS.FON or SSERIFE.FON, and its ROM glyph is
 //! squeezed or stretched to fit. Dialogs size themselves from these widths
 //! (GdiGetCharDimensions), so a dialog's size and the way its text wraps
-//! come out as on Windows.
+//! come out as on Windows. MS Sans Serif's 8-point size, too narrow for
+//! a squeezed ROM glyph to stay legible, has glyphs drawn for it in
+//! `sans8`.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -34,6 +36,7 @@ use std::rc::Rc;
 use super::dc::{self, Dc, OPAQUE};
 use super::fnt::{AddedFile, Fnt};
 use super::draw::{Canvas, Fill, value_for};
+use super::sans8;
 use super::{CB_AT, CB_LIST, CB_PARAM, CB_PROC};
 use super::{
     ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, Font, GDI_ERROR, Kind, Rect, TRUE, add,
@@ -513,7 +516,13 @@ fn raster_width(r: &Raster, page: CodePage, b: u8, x_scale: i32) -> i32 {
         return w(r.default);
     }
     let c = page.char(b);
+    // The US fonts give every character from 81h to 9Fh the same width,
+    // that of a character they lack, Š, Ž and Ÿ among them. Under
+    // another locale these letters get a width of their own, as the
+    // letters code page 1252 lacks do.
+    let localized = page.number() != CodePage::WESTERN.number();
     match CodePage::WESTERN.byte(c) {
+        Some(0x80..0xA0) if localized && decompose(c).is_some() => derived_width(r, c) * x_scale,
         Some(western) if western >= 0x20 => w(western),
         _ => derived_width(r, c) * x_scale,
     }
@@ -523,8 +532,15 @@ fn raster_width(r: &Raster, page: CodePage, b: u8, x_scale: i32) -> i32 {
 /// that of the ASCII character whose glyph it is drawn with, or whose
 /// 8x16 glyph is the same (Cyrillic and Greek letters that look like Latin
 /// ones), or else the most common width of the ASCII letters with as many
-/// lit columns, or the size's average.
+/// lit columns, or the size's average. In MS Sans Serif's 8-point size, a
+/// letter `sans8` draws (one with an accent, or with a stroke) is as wide
+/// as its glyph.
 fn derived_width(r: &Raster, c: u16) -> i32 {
+    if is_sans8(r)
+        && let Some(w) = sans8::width(c)
+    {
+        return w;
+    }
     let ascii = |b: u8| r.widths[(b - 0x20) as usize] as i32;
     let src = source(c);
     if let Src::Rom(g) = src
@@ -848,10 +864,49 @@ fn rom_rows(key: &Key, src: Src, gw: i32) -> Vec<u64> {
     rows
 }
 
+/// Whether the raster size `r` is MS Sans Serif's 8-point one, whose
+/// glyphs `sans8` draws.
+fn is_sans8(r: &Raster) -> bool {
+    r.face == SANS_FACE && r.height == sans8::HEIGHT as i32
+}
+
+/// The glyph `sans8` draws for the byte `b` of the code page `page` in
+/// the raster size `r`, `w` wide, if `r` is MS Sans Serif's 8-point size
+/// and the character has one: its rows stretched to the key's cell and
+/// width by whole numbers, and made bold as `raster_glyphs` does. A
+/// character stretched past the 60 columns `raster_glyphs` gives a glyph
+/// has none: its ROM glyph squeezed into them keeps all its strokes,
+/// where the drawn one would lose its right side.
+fn drawn_rows(key: &Key, r: &Raster, page: CodePage, b: u8, w: i32) -> Option<Vec<u64>> {
+    if !is_sans8(r) || b < 0x20 || w - 1 > 60 {
+        return None;
+    }
+    let x_scale = key.glyph_width.max(1);
+    let y_scale = (key.cell / r.height).max(1) as usize;
+    let rows = sans8::glyph(page.char(b), w / x_scale - 1)?;
+    let wide = |row: u64| {
+        (0..64 / x_scale)
+            .filter(|x| row >> x & 1 != 0)
+            .fold(0u64, |a, x| a | ((1u64 << x_scale) - 1) << (x * x_scale))
+    };
+    Some(
+        rows.iter()
+            .flat_map(|&row| {
+                let mut out = wide(row);
+                if key.bold {
+                    out |= out << 1;
+                }
+                std::iter::repeat_n(out, y_scale)
+            })
+            .collect(),
+    )
+}
+
 /// The glyphs of a raster size: each byte's ROM glyph, its lit columns
 /// squeezed or stretched to the character's width less the column
-/// between characters. A bold face's widths have its extra column in
-/// them; a font made bold moves on a column more.
+/// between characters, or the glyph `sans8` draws. A bold face's widths
+/// have its extra column in them; a font made bold moves on a column
+/// more.
 fn raster_glyphs(key: Key, r: &Raster) -> Glyphs {
     let native_bold = FACES[r.face].weight >= 600;
     let made_bold = key.bold && !native_bold;
@@ -859,6 +914,13 @@ fn raster_glyphs(key: Key, r: &Raster) -> Glyphs {
     let glyphs = (0..256usize)
         .map(|b| {
             let w = raster_width(r, page, b as u8, key.glyph_width);
+            if let Some(rows) = drawn_rows(&key, r, page, b as u8, w) {
+                return Glyph {
+                    rows,
+                    advance: w + made_bold as i32,
+                    offset: 0,
+                };
+            }
             let mut rows = rom_rows(&key, byte_source(page, b as u8), 8);
             let all = rows.iter().fold(0u64, |a, &r| a | r);
             if all != 0 {
@@ -2234,6 +2296,163 @@ mod tests {
         let f = realize(&log, -11, 0);
         assert_eq!(f.height, 13);
         assert_eq!(f.internal_leading, 2);
+    }
+
+    #[test]
+    fn ms_sans_serif_8_glyphs_fit_its_widths() {
+        let r = &RASTERS[1];
+        assert_eq!((r.face, r.height), (SANS_FACE, sans8::HEIGHT as i32));
+        for &(ch, top, rows) in sans8::GLYPHS {
+            assert!(top + rows.len() <= sans8::HEIGHT, "{ch}");
+            let len = rows[0].chars().count();
+            assert!(rows.iter().all(|row| row.chars().count() == len), "{ch}");
+            // A character of code page 1252 fills its Windows 98 width
+            // less a column; one 1252 lacks takes its glyph's width.
+            if let Some(b) = CodePage::WESTERN.byte(ch as u16) {
+                assert_eq!(len, r.widths[b as usize - 0x20] as usize - 1, "{ch}");
+            } else {
+                assert_eq!(sans8::width(ch as u16), Some(len as i32 + 1), "{ch}");
+            }
+        }
+        let drawn: Vec<char> = sans8::GLYPHS.iter().map(|g| g.0).collect();
+        assert!(('!'..='~').all(|c| drawn.contains(&c)));
+    }
+
+    #[test]
+    fn ms_sans_serif_8_glyphs_keep_off_their_neighbours() {
+        // In every system locale's code page, each glyph of the 8-point
+        // size, drawn or squeezed, regular or bold, leaves the last
+        // column of its advance blank.
+        for charset in [
+            nls::ANSI_CHARSET,
+            nls::EASTEUROPE_CHARSET,
+            nls::RUSSIAN_CHARSET,
+            nls::GREEK_CHARSET,
+            nls::TURKISH_CHARSET,
+            nls::BALTIC_CHARSET,
+        ] {
+            let sys = System {
+                charset,
+                oem: CodePage::US_OEM,
+            };
+            for weight in [400, 700] {
+                let log = Log::of(&logfont(-11, 0, weight, 1, 0, "MS Sans Serif"));
+                let f = super::realize(&log, &sys, -11, 0);
+                assert_eq!(f.face, "MS Sans Serif");
+                for b in 0x20..=0xFF {
+                    let g = f.glyph(b);
+                    let all = g.rows.iter().fold(0, |a, &r| a | r);
+                    let c = f.page.char(b);
+                    assert!(
+                        64 - all.leading_zeros() < g.advance as u32,
+                        "{charset} {weight} U+{c:04X}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ms_sans_serif_8_accents_fit_narrow_letters() {
+        let e = System {
+            charset: nls::EASTEUROPE_CHARSET,
+            oem: CodePage::US_OEM,
+        };
+        let log = Log::of(&logfont(-11, 0, 400, 1, 0, "MS Sans Serif"));
+        let f = super::realize(&log, &e, -11, 0);
+        let width = |c: u16| f.advance(f.page.byte(c).unwrap());
+        // A letter with an accent is as wide as its letter, as in code
+        // page 1252: N acute as N, s caron as s.
+        assert_eq!(width(0x0143), width(u16::from(b'N')));
+        assert_eq!(width(0x0161), width(u16::from(b's')));
+        // The caron of d, l, t and L is written beside the ascender,
+        // which widens d, l and t.
+        assert_eq!(width(0x013D), width(u16::from(b'L')));
+        assert!(width(0x010F) > width(u16::from(b'd')));
+        // Polish l with stroke has a glyph drawn for it.
+        let l = f.glyph(f.page.byte(0x0142).unwrap());
+        assert!(l.rows.iter().any(|&r| r.count_ones() == 2));
+        // Western i grave is i's width, 2: its mark is squeezed into the
+        // one column above the dotless stem.
+        let w = realize(&log, -11, 0);
+        let i_grave = &w.glyph(0xEC).rows;
+        assert_eq!(w.advance(0xEC), 2);
+        assert_eq!(&i_grave[2..5], &[1, 1, 0]);
+    }
+
+    #[test]
+    fn ms_sans_serif_8_stretched_past_its_rows_keeps_whole_glyphs() {
+        // Eight times wider, W's 10 drawn columns would need 80; it takes
+        // its ROM glyph squeezed into 60, as the other faces do.
+        let log = Log::of(&logfont(-11, 40, 400, 0, 0, "MS Sans Serif"));
+        let f = realize(&log, -11, 40);
+        assert_eq!(f.advance(b'W'), 88);
+        let all = f.glyph(b'W').rows.iter().fold(0, |a, &r| a | r);
+        assert!(all >> 60 == 0, "no lit column past 60");
+        // n fits, and is drawn: its 5 columns are 40.
+        let n = f.glyph(b'n').rows.iter().fold(0, |a, &r| a | r);
+        assert_eq!(n, (1 << 40) - 1);
+    }
+
+    #[test]
+    fn ms_sans_serif_8_keeps_thin_strokes() {
+        let log = Log::of(&logfont(-11, 0, 400, 0, 0, "MS Sans Serif"));
+        let f = realize(&log, -11, 0);
+        let rows = |b: u8| f.glyph(b).rows.clone();
+        // Every printable character has a glyph of its own: t and r keep
+        // their crossbar and arm, 0 and 8 differ. I and l are the same
+        // line, I a column wider.
+        let look = |b: u8| (rows(b), f.advance(b));
+        for a in 0x21..0x7F {
+            for b in a + 1..0x7F {
+                assert_ne!(look(a), look(b), "{} {}", a as char, b as char);
+            }
+        }
+        // Strokes are a pixel wide: l is one column, o two of them.
+        assert!(rows(b'l').iter().all(|&r| r == 0 || r == 1));
+        assert!(
+            rows(b'o')
+                .iter()
+                .all(|&r| r.count_ones() != 2 || r == 0b10001)
+        );
+        // The glyphs stay inside the advance less a column.
+        for b in 0x21..0x7F {
+            let all = rows(b).iter().fold(0, |a, &r| a | r);
+            assert!(
+                64 - all.leading_zeros() < f.advance(b) as u32,
+                "{}",
+                b as char
+            );
+        }
+    }
+
+    #[test]
+    fn ms_sans_serif_8_bold_and_wide() {
+        let regular = realize(
+            &Log::of(&logfont(-11, 0, 400, 0, 0, "MS Sans Serif")),
+            -11,
+            0,
+        );
+        let bold = realize(
+            &Log::of(&logfont(-11, 0, 700, 0, 0, "MS Sans Serif")),
+            -11,
+            0,
+        );
+        // Bold is the glyph smeared a pixel to the right, a column wider.
+        let (r, b) = (regular.glyph(b'H'), bold.glyph(b'H'));
+        let smeared: Vec<u64> = r.rows.iter().map(|&x| x | x << 1).collect();
+        assert_eq!(b.rows, smeared);
+        assert_eq!(b.advance, r.advance + 1);
+        // Twice as wide, each pixel is drawn as two.
+        let wide = realize(
+            &Log::of(&logfont(-11, 10, 400, 0, 0, "MS Sans Serif")),
+            -11,
+            10,
+        );
+        let (l, w) = (regular.glyph(b'l'), wide.glyph(b'l'));
+        let doubled: Vec<u64> = l.rows.iter().map(|&x| x * 0b11).collect();
+        assert_eq!(w.rows, doubled);
+        assert_eq!(w.advance, 2 * l.advance);
     }
 
     #[test]

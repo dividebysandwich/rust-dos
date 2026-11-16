@@ -264,7 +264,7 @@ pub fn playing(win32: &Win32) -> bool {
 /// The device's sound for the host's frames `first` to `first + frames`
 /// (frames at `RATE` since the machine started), on the scale of 16-bit
 /// samples, at the mixer's wave volume: None if nothing plays then.
-pub fn render(bus: &Bus, first: u64, frames: usize) -> Option<Vec<(f32, f32)>> {
+pub fn render(bus: &mut Bus, first: u64, frames: usize) -> Option<Vec<(f32, f32)>> {
     if !playing(&bus.win32) {
         return None;
     }

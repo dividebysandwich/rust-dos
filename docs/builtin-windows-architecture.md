@@ -390,27 +390,32 @@ against that DLL's results in `undname_vc6.txt`).
 
 All output goes through the emulated video hardware (`screen.rs`):
 
-- **GDI and windows**: one desktop in a mode of the display adapter:
-  640x480 at 32 bits a pixel on a VESA card, and at 16 on a Banshee or
-  Voodoo3, which use the card's own modes, set through its registers as
-  3dfx's driver set them. Windows are drawn into it. The fonts are
-  raster fonts drawn from the VGA's ROM glyphs, scaled, with the dialog
-  faces' character widths taken from Windows 98's own raster fonts
-  (`gdi32/font.rs`). The characters code page 437 lacks (Central
-  European, Cyrillic, Greek, Turkish and Baltic letters) are drawn from
-  FreeDOS's CPIDOS fonts in the same three sizes, which
-  `tools/gen_cpi_glyphs.py` extracts into
-  `video/assets/CPIDOS_glyphs.bin`. A font's bytes are those of its
-  character set's code page; the raster faces have the system locale's
-  character set, Arial, Times New Roman and Courier New the six of WGL4,
-  and the font mapper weighs the character set over the face as Windows
-  does. `AddFontResourceA` reads the FNT resources of a program's .FON
-  file, or a bare .FNT (`gdi32/fnt.rs`): their faces are listed with the
-  built-in ones, a font that names one is drawn with its glyphs at the
-  nearest size, and a save state keeps their bytes. With `win32_depth=8`
-  the desktop has 8 bits a pixel, and GDI keeps a system palette in the
-  DAC as Windows does on a 256-colour display: palettes realized in the
-  foreground or the background, `PC_RESERVED` entries for
+- **GDI and windows**: one desktop in a mode of the display adapter: 640x480
+  at 32 bits a pixel on a VESA card, and at 16 on a Banshee or Voodoo3,
+  which use the card's own modes, set through its registers as 3dfx's driver
+  set them. Windows are drawn into it. The fonts are raster fonts drawn from
+  the VGA's ROM glyphs, scaled, with the dialog faces' character widths
+  taken from Windows 98's own raster fonts (`gdi32/font.rs`). MS Sans
+  Serif's 8-point size, the font of menus, dialogs and buttons, is too
+  narrow for a squeezed ROM glyph to stay legible, and has glyphs drawn for
+  it with one-pixel strokes (`gdi32/sans8.rs`): the printable ASCII
+  characters, code page 1252's other letters and its Spanish and French
+  punctuation, the Central European and Baltic letters with a stroke, and
+  the Latin letters with accents built from them. A letter that code page
+  1252 lacks is as wide as its glyph there. The characters code page 437
+  lacks (Central European, Cyrillic, Greek, Turkish and Baltic letters) are
+  drawn from FreeDOS's CPIDOS fonts in the same three sizes, which
+  `tools/gen_cpi_glyphs.py` extracts into `video/assets/CPIDOS_glyphs.bin`.
+  A font's bytes are those of its character set's code page; the raster
+  faces have the system locale's character set, Arial, Times New Roman and
+  Courier New the six of WGL4, and the font mapper weighs the character set
+  over the face as Windows does. `AddFontResourceA` reads the FNT resources
+  of a program's .FON file, or a bare .FNT (`gdi32/fnt.rs`): their faces are
+  listed with the built-in ones, a font that names one is drawn with its
+  glyphs at the nearest size, and a save state keeps their bytes. With
+  `win32_depth=8` the desktop has 8 bits a pixel, and GDI keeps a system
+  palette in the DAC as Windows does on a 256-colour display: palettes
+  realized in the foreground or the background, `PC_RESERVED` entries for
   `AnimatePalette`, `SetSystemPaletteUse`, and `WM_PALETTECHANGED` and
   `WM_QUERYNEWPALETTE` for the windows (`gdi32/palette.rs`).
 - **DirectDraw** (`ddraw/`) in exclusive full-screen mode sets the mode

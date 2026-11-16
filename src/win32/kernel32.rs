@@ -967,6 +967,16 @@ pub mod files {
         path::find_entries(cpu, &full, pattern)
     }
 
+    /// What FindFirstFileA and FindNextFileA find for `spec`, a path
+    /// with a file name or a pattern, all at once; or the error
+    /// FindFirstFileA sets.
+    pub fn find_spec(cpu: &Cpu, spec: &str) -> Result<Vec<FindEntry>, u32> {
+        if spec.is_empty() {
+            return Err(super::ERROR_PATH_NOT_FOUND);
+        }
+        path::find_path(cpu, &path::dos_path(spec))
+    }
+
     /// Write `data` as the whole file `name`, made anew.
     pub fn write_whole(cpu: &mut Cpu, name: &str, data: &[u8]) -> Result<(), u32> {
         let full = full_path(cpu, name);

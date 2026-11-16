@@ -93,9 +93,10 @@ pub fn set_display_mode(cpu: &mut Cpu, mode: Option<(u32, u32, u32)>) -> u32 {
 
 /// The display's mode may have changed from `old` (`display_mode`). If
 /// it has, the desktop window takes the new size, the cursor stays on
-/// the screen (`input::screen_changed`), and each top-level window gets
-/// WM_DISPLAYCHANGE with the bits a pixel and the size. Windows sends
-/// it with SendNotifyMessage, which to the broadcast address posts it.
+/// the screen and ClipCursor's rectangle goes (`input::screen_changed`),
+/// and each top-level window gets WM_DISPLAYCHANGE with the bits a pixel
+/// and the size. Windows sends it with SendNotifyMessage, which to the
+/// broadcast address posts it.
 pub fn display_changed(cpu: &mut Cpu, old: (u32, u32, u32)) {
     let mode = display_mode(cpu);
     if mode == old {

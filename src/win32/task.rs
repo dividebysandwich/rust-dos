@@ -147,6 +147,7 @@ pub static TASKS: &[Step] = &[
     super::dplayx::call_step,
     super::dshow::filter::step,
     super::user32::notepad::step,
+    super::user32::dlgdir::step,
     super::user32::ddeml::xact_step,
 ];
 
@@ -174,7 +175,8 @@ pub const MCI_CALL: u16 = 40;
 pub const DPLAY_CALL: u16 = 41;
 pub const DSHOW: u16 = 42;
 pub const NOTEPAD: u16 = 43;
-pub const DDEML_XACT: u16 = 44;
+pub const DLG_DIR: u16 = 44;
+pub const DDEML_XACT: u16 = 45;
 
 /// Start the task `kind` with the variables `vars` and, if `scratch` is
 /// more than 0, that many bytes of scratch space: for a function's
