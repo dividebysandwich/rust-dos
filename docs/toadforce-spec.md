@@ -570,6 +570,12 @@ offset:
   shows the new surface, bit 1 of `STATUS` clears and bit 1 of
   `IRQ_STATUS` is set.
 
+An allowance of the emulator's: after a flip that waits, the picture
+moves to the new surface when the card's timer event after the blank
+is served, up to a tick of the clock after `MODE_START` reads the new
+offset. Bringing the card up to date for the screen instead would set
+its interrupt bits at moments the host's frames choose.
+
 The command itself never waits: the write to `RING_PUT` returns with
 the flip pending, and the commands after it in the ring run at once.
 A driver that has to wait reads `STATUS`, or takes the interrupt,
