@@ -675,9 +675,16 @@ fn clipped(input: &Input, (w, h): (i32, i32), x: i32, y: i32) -> (i32, i32) {
     )
 }
 
-/// The screen's size changed (`sysparams::display_changed`): the cursor
-/// and ClipCursor's rectangle stay on it, and on the desktop the mouse
-/// moves over all of it.
+/// The display's mode changed (`sysparams::display_changed`): the cursor
+/// stays on the new screen, ClipCursor's rectangle goes, and on the
+/// desktop the mouse moves over all of the screen. Windows frees the
+/// cursor on every mode change, whether ChangeDisplaySettings or
+/// DirectDraw's SetDisplayMode made it (ReactOS's
+/// UserChangeDisplaySettings calls UserClipCursor(NULL), Wine's
+/// NtUserChangeDisplaySettings NtUserClipCursor(NULL)), so a program
+/// that confined the cursor to its window at the desktop's size and then
+/// took a larger mode can move it over the whole new screen (Zanzarah
+/// clips to its 640x480 window before it sets 1024x768).
 pub fn screen_changed(cpu: &mut Cpu) {
     let (w, h) = screen_size(cpu);
     if user(cpu).desktop {
@@ -691,7 +698,7 @@ pub fn screen_changed(cpu: &mut Cpu) {
         }
     }
     let input = &mut user(cpu).input;
-    input.clip = input.clip.map(|r| r.intersect(&Rect::new(0, 0, w, h)));
+    input.clip = None;
     input.cursor = clipped(input, (w, h), input.cursor.0, input.cursor.1);
 }
 
@@ -3121,5 +3128,29 @@ mod tests {
             .map(|m| (m.message, m.lparam))
             .collect();
         assert_eq!(keys, [(WM_KEYDOWN, 0x0148_0001)]);
+    }
+
+    /// A mode change frees the cursor that ClipCursor confined: a program
+    /// that clipped it to its window at the desktop's 640x480 and then
+    /// set 1024x768 moves it over the whole new screen (Zanzarah), as
+    /// Windows does. DirectDraw's SetDisplayMode changes the mode through
+    /// the same `display_changed`.
+    #[test]
+    fn a_mode_change_frees_the_clipped_cursor() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        super::super::init(&mut cpu);
+        user(&mut cpu).desktop = true;
+        assert_eq!(screen_size(&cpu), (640, 480));
+        user(&mut cpu).input.clip = Some(Rect::new(0, 0, 640, 480));
+        let mode = Some((1024, 768, 32));
+        let changed = super::super::sysparams::set_display_mode(&mut cpu, mode);
+        assert_eq!(changed, 0, "DISP_CHANGE_SUCCESSFUL");
+        assert_eq!(screen_size(&cpu), (1024, 768));
+        assert_eq!(user(&mut cpu).input.clip, None);
+        set_cursor_pos(&mut cpu, &[1023, 767]);
+        assert_eq!(user(&mut cpu).input.cursor, (1023, 767));
+        cpu.bus.mouse.move_by(40.0, 40.0);
+        poll(&mut cpu);
+        assert_eq!(user(&mut cpu).input.cursor, (1023, 767));
     }
 }
