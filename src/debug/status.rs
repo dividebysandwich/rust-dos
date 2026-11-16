@@ -59,6 +59,12 @@ impl DebugHub {
                 "mb": cpu.bus.ram().len() >> 20,
                 "derived": cpu.bus.memory_derived,
             },
+            // The processor, and whether it is the default for the display
+            // adapter (`cpu` isn't set).
+            "cpu": {
+                "model": cpu.model.describe(),
+                "derived": cpu.bus.cpu_derived,
+            },
             // Deterministic mode: the clock's start, the machine's clock
             // now, emulated time, and every how many emulated ms input is
             // delivered. Null when off.
