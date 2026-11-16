@@ -792,7 +792,7 @@ impl Item {
             Vfx1Steer => on_off(s.vfx1.steer),
             Vfx1StereoBios => on_off(s.vfx1.stereo_bios),
             Filter => match s.filter {
-                crate::config::Filter::Nearest => "nearest (sharp)",
+                crate::config::Filter::Sharp => "sharp",
                 crate::config::Filter::Linear => "linear (smooth)",
             }
             .to_string(),

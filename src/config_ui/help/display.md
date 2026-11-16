@@ -67,11 +67,13 @@ the cap; a display faster than 60 Hz shows more with a higher cap.
 
 How the picture is blown up to the window's size:
 
-- **nearest**: sharp, blocky pixels.
+- **sharp**: sharp pixels, all of the same size. Where the window
+  isn't a whole number of times the picture's size, as with a fixed
+  aspect ratio or in fullscreen, the edge between two pixels is blended
+  over less than one screen pixel.
 - **linear**: smooth, slightly soft pixels.
 
-With a fixed aspect ratio, or at an odd window size, **linear**
-avoids uneven pixel sizes. It has no effect while a CRT shader is on.
+It has no effect while a CRT shader is on.
 
 # CRT shader {#shader}
 

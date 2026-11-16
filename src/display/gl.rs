@@ -50,6 +50,7 @@ struct Program {
     line: Option<glow::UniformLocation>,
     overlay_enabled: Option<glow::UniformLocation>,
     unflipped: Option<glow::UniformLocation>,
+    sharp: Option<glow::UniformLocation>,
 }
 
 // Every `unsafe` below is a call into OpenGL, whose context `open` makes
@@ -385,7 +386,7 @@ impl GlScreen {
             mask: 1.0,
             crt: CrtSettings::default(),
             scale_lines: true,
-            filter: Filter::Nearest,
+            filter: Filter::Sharp,
             renderer,
             toadforce: HostCell::default(),
             toadforce_failed: None,
@@ -455,12 +456,18 @@ impl GlScreen {
         result
     }
 
-    /// Scale the bound texture as the look and the filter want.
+    /// Scale the bound texture as the look and the filter want. The plain
+    /// look reads it linearly for both filters: `filter=sharp` moves where
+    /// it samples (`u_sharp`), so that a texel's edge is blended only
+    /// where a screen pixel crosses it. xBRZ keeps nearest sampling for
+    /// `sharp`, as it had for `nearest`.
     fn set_filter(&self) {
-        let (min, mag) = match (shader::needs_mipmaps(self.active), self.filter) {
-            (true, _) => (glow::LINEAR_MIPMAP_LINEAR, glow::LINEAR),
-            (false, Filter::Nearest) => (glow::NEAREST, glow::NEAREST),
-            (false, Filter::Linear) => (glow::LINEAR, glow::LINEAR),
+        let (min, mag) = match (self.active, self.filter) {
+            (look, _) if shader::needs_mipmaps(look) => {
+                (glow::LINEAR_MIPMAP_LINEAR, glow::LINEAR)
+            }
+            (Shader::Xbrz, Filter::Sharp) => (glow::NEAREST, glow::NEAREST),
+            _ => (glow::LINEAR, glow::LINEAR),
         };
         // SAFETY: see `GlScreen`.
         unsafe {
@@ -665,12 +672,14 @@ impl GlScreen {
         layer: Option<&Layer>,
     ) -> u32 {
         let gl = &self.gl;
-        // Nearest scaling preserves the picture with a quarter of the
-        // upload bytes. xBRZ recovers native pixels during preparation.
+        // Sharp scaling draws a doubled picture from its native pixels
+        // as it would the doubled ones, with a quarter of the upload
+        // bytes: each native pixel covers twice the screen pixels. xBRZ
+        // recovers native pixels during preparation.
         let half = frame.doubled
             && layer.is_none()
             && self.active == Shader::None
-            && self.filter == Filter::Nearest;
+            && self.filter == Filter::Sharp;
         let (scale, rows) = if half { (2, rows.start / 2..rows.end.div_ceil(2)) } else { (1, rows) };
         let size = (frame.width / scale, frame.height / scale);
         let (width, height) = (size.0 as i32, size.1 as i32);
@@ -989,6 +998,8 @@ impl GlScreen {
             gl.use_program(Some(plain.program));
             gl.uniform_2_f32(plain.source.as_ref(), picture.width as f32, picture.height as f32);
             gl.uniform_2_f32(plain.output.as_ref(), w as f32, h as f32);
+            // The layer (a manual's page) is smooth at any scale.
+            gl.uniform_1_i32(plain.sharp.as_ref(), 0);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_vertex_array(Some(self.vao));
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
@@ -1049,6 +1060,7 @@ impl GlScreen {
             gl.uniform_1_f32(program.glow.as_ref(), self.active.glow(self.crt));
             gl.uniform_1_f32(program.line.as_ref(), line);
             gl.uniform_1_i32(program.overlay_enabled.as_ref(), self.xbrz_overlay_visible as i32);
+            gl.uniform_1_i32(program.sharp.as_ref(), (self.filter == Filter::Sharp) as i32);
             if self.xbrz_overlay_visible {
                 gl.active_texture(glow::TEXTURE1);
                 gl.bind_texture(glow::TEXTURE_2D, self.xbrz_overlay);
@@ -1125,25 +1137,29 @@ impl GlScreen {
     }
 
     /// The size the window shows a picture of `display` proportions at,
-    /// without the black bars around it, if it shows it through a look.
-    pub fn capture_size(&self, display: (u32, u32)) -> Option<(u32, u32)> {
+    /// without the black bars around it, if it shows it through a look,
+    /// or with `plain` also without one.
+    pub fn capture_size(&self, display: (u32, u32), plain: bool) -> Option<(u32, u32)> {
         let (_, _, w, h) = super::letterbox(self.window.size_in_pixels(), display);
-        (self.active != Shader::None && w > 0 && h > 0).then_some((w, h))
+        ((plain || self.active != Shader::None) && w > 0 && h > 0).then_some((w, h))
     }
 
     /// `frame` drawn with the look as the window shows a picture of
     /// `display` proportions, at the size it shows it (`capture_size`),
-    /// for a screenshot or a recording. None without a look, or if OpenGL
-    /// can't draw it away from the window. It costs drawing the picture
-    /// again and reading it back, so only captures ask for it.
+    /// for a screenshot or a recording. None without a look, unless
+    /// `plain` asks for the picture scaled as the window scales it
+    /// (`filter`), or if OpenGL can't draw it away from the window. It
+    /// costs drawing the picture again and reading it back, so only
+    /// captures ask for it.
     pub fn capture(
         &mut self,
         frame: &Frame,
         base: &Frame,
         mono: Monochrome,
         display: (u32, u32),
+        plain: bool,
     ) -> Option<Frame> {
-        let (w, h) = self.capture_size(display)?;
+        let (w, h) = self.capture_size(display, plain)?;
         if self.capture.is_none() {
             match self.make_capture() {
                 Ok(capture) => self.capture = Some(capture),
@@ -1321,6 +1337,7 @@ fn compile_sources(
             line: gl.get_uniform_location(program, "u_line"),
             overlay_enabled: gl.get_uniform_location(program, "u_overlay_enabled"),
             unflipped: gl.get_uniform_location(program, "u_unflipped"),
+            sharp: gl.get_uniform_location(program, "u_sharp"),
         })
     }
 }

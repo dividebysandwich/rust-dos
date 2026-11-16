@@ -657,6 +657,13 @@ fn display_settings() {
         let config = parse(&format!("[emulator]\naspect={}\n", name), Path::new("/cfg"), None);
         assert_eq!(config.aspect, Some(ratio));
     }
+    // `nearest`, which every file saved before `sharp` has, reads as it.
+    for (name, filter) in [("sharp", Filter::Sharp), ("Nearest", Filter::Sharp), ("linear", Filter::Linear)] {
+        let config = parse(&format!("[emulator]\nfilter={}\n", name), Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(config.filter, Some(filter));
+    }
+    assert_eq!((Settings::default().filter, Filter::Sharp.name()), (Filter::Sharp, "sharp"));
     let text = "[emulator]\nfullscreen=maybe\nvrr=sometimes\nfilter=blur\nshader=bent\nmonochrome=blue\ncrt_curvature=200\ncrt_glow=lots\n";
     let config = parse(text, Path::new("/cfg"), None);
     assert_eq!(config.warnings.len(), 7, "{:?}", config.warnings);

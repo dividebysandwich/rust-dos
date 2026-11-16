@@ -132,7 +132,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         },
                         "filter" => match Filter::parse(value) {
                             Some(filter) => config.filter = Some(filter),
-                            None => warn(format!("invalid filter '{}' (nearest or linear)", value)),
+                            None => warn(format!("invalid filter '{}' (sharp or linear)", value)),
                         },
                         "shader" => match Shader::parse(value) {
                             Some(shader) => config.shader = Some(shader),

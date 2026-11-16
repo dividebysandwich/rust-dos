@@ -44,9 +44,9 @@ const DEFAULT_CONFIG = `# Rust-DOS settings, in the format of rust-dos.conf. Rem
 [emulator]
 # Display ratio: none, 4:3, 5:4, 16:10 or 16:9.
 aspect=4:3
-# How the picture is scaled up: nearest (sharp pixels) or linear (smooth),
-# without a CRT shader.
-#filter=nearest
+# How the picture is scaled up: sharp (pixels of equal size) or linear
+# (smooth), without a CRT shader.
+#filter=sharp
 # A look: none, scanlines, aperture, crt or xbrz (xBRZ 2x). It needs WebGL 2.
 #shader=none
 # How far the crt look's tube bends, in percent (0 flat to 100), and how
@@ -526,6 +526,7 @@ function makeGlScreen() {
       line: gl.getUniformLocation(program, 'u_line'),
       overlay: gl.getUniformLocation(program, 'u_overlay_enabled'),
       unflipped: gl.getUniformLocation(program, 'u_unflipped'),
+      sharp: gl.getUniformLocation(program, 'u_sharp'),
     };
   }
 
@@ -539,14 +540,14 @@ function makeGlScreen() {
     return programs.get(name);
   }
 
-  /// Set the texture's filter: the CRT looks read its mipmap, and the
-  /// picture without one is sharp or smooth.
+  /// Set the texture's filter: the CRT looks read its mipmap. The
+  /// picture without one is read linearly whether it is sharp or smooth:
+  /// the plain look moves where it samples for a sharp one (`u_sharp`).
   function filter() {
     const mipmaps = look !== 'none' && look !== 'xbrz';
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    const magnify = mipmaps || smooth ? gl.LINEAR : gl.NEAREST;
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, mipmaps ? gl.LINEAR_MIPMAP_LINEAR : magnify);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, magnify);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, mipmaps ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     if (mipmaps && frame) {
       gl.generateMipmap(gl.TEXTURE_2D);
     }
@@ -841,6 +842,7 @@ function makeGlScreen() {
       gl.uniform1f(entry.line, 1);
       gl.uniform1i(entry.overlay, look === 'xbrz' && overlayVisible ? 1 : 0);
       gl.uniform1i(entry.unflipped, 0);
+      gl.uniform1i(entry.sharp, smooth ? 0 : 1);
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, overlayTexture);
       gl.bindVertexArray(vao);

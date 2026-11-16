@@ -63,17 +63,23 @@ impl AspectRatio {
 /// How the picture is scaled up to the window (`filter`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Filter {
-    /// Sharp pixels.
+    /// Sharp pixels of equal size: each pixel of the picture covers the
+    /// same width and height on the screen, with a blended edge less than
+    /// one screen pixel wide where the scale isn't a whole number. At a
+    /// whole-number scale it is nearest-neighbour sampling.
     #[default]
-    Nearest,
+    Sharp,
     /// Smooth, interpolated pixels.
     Linear,
 }
 
 impl Filter {
+    /// `nearest` is the old name of `sharp`, still read: every saved
+    /// configuration file has it, and the two draw the same at
+    /// whole-number scales.
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
-            "nearest" => Some(Filter::Nearest),
+            "sharp" | "nearest" => Some(Filter::Sharp),
             "linear" => Some(Filter::Linear),
             _ => None,
         }
@@ -81,7 +87,7 @@ impl Filter {
 
     pub fn name(self) -> &'static str {
         match self {
-            Filter::Nearest => "nearest",
+            Filter::Sharp => "sharp",
             Filter::Linear => "linear",
         }
     }
