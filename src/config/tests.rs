@@ -837,6 +837,7 @@ fn changed_settings() -> Settings {
         win32_dlls_replace: Vec::new(),
         win32_version: WindowsVersion::Win98Se,
         win32_depth: DesktopDepth::Palette,
+        win32_desktop: DesktopSize::Svga,
         win32_locale: Win32Locale::RuRu,
         win32_trace: Win32Trace::Off,
         dos_high: false,
@@ -1261,6 +1262,26 @@ fn the_desktop_depth_is_read() {
         assert_eq!(depth.name(), value);
     }
     let config = parse("[emulator]\nwin32_depth=24\n", Path::new("/cfg"), None);
+    assert_eq!(config.warnings.len(), 1);
+}
+
+#[test]
+fn the_desktop_size_is_read() {
+    for size in DesktopSize::ALL {
+        let text = format!("[emulator]
+win32_desktop={}
+", size.name());
+        let config = parse(&text, Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(Settings::from_config(&config).win32_desktop, size);
+        assert_eq!(DesktopSize::parse(&size.name().to_uppercase()), Some(size));
+    }
+    let config = parse("[emulator]
+", Path::new("/cfg"), None);
+    assert_eq!(Settings::from_config(&config).win32_desktop, DesktopSize::Vga);
+    let config = parse("[emulator]
+win32_desktop=1280x1024
+", Path::new("/cfg"), None);
     assert_eq!(config.warnings.len(), 1);
 }
 

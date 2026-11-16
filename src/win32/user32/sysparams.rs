@@ -546,7 +546,7 @@ pub fn enum_display_settings(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let mode = match mode {
         0xFFFF_FFFF => display_mode(cpu),
         0xFFFF_FFFE => {
-            let (w, h) = screen::DESKTOP;
+            let (w, h) = crate::win32::version::own_size(&cpu.bus.win32);
             (w, h, screen::desktop(cpu).bpp)
         }
         i => match display_modes().get(i as usize) {

@@ -634,6 +634,15 @@ limit, so without a connection it goes on as it would with one:
   bit screen mode, such as Moto Racer, need when the adapter's own is
   deeper. Like `win32_version`, a change takes effect for the next
   program that starts when none runs.
+* `win32_desktop` is the size of the built-in Windows' desktop:
+  `640x480` (the default), `800x600` or `1024x768`, as Display
+  Properties set it on Windows. GetSystemMetrics and
+  EnumDisplaySettings report it, and the desktop shows at that size.
+  Programs that say they need 800x600 or more, such as Fields of Fire,
+  need `800x600`. A program can still change the size with
+  ChangeDisplaySettings while it runs; its end gives this size back.
+  Like `win32_depth`, a change takes effect for the next program that
+  starts when none runs.
 * `dos_version` is the DOS version programs are told (INT 21h AH=30h,
   AX=3306h and the PSP's), such as `5.00` (the default), `6.22` or `7.10`;
   `7.1` is 7.10, as DOSBox's `ver` has it. From 7.00 on, DOS has the FAT32
@@ -1564,6 +1573,7 @@ profile:
 | `memsize` | leave it out, or `128` for a 3D game from 1998 on | Without it a Pentium II has 64 MB, which most Windows 98 games asked for (the default 486 has 16 MB). The game's heaps and its DirectDraw surfaces come out of it, and it is what the game is told the machine has |
 | `win32_version` | `98se` | The setups and games tested with the built-in Windows were tested under Windows 98 SE. Under the default, `95`, a program that imports a function Windows 98 added doesn't start, and its message names this setting |
 | `win32_depth` | `8` only for a game that says it needs 256 colours, `16` for one that says it needs 16 bits | The default desktop has the card's own depth (16 bits on a Voodoo3, 32 on an S3 Trio, 24 on a ViRGE). A GDI game that draws with a palette needs `8`. A game that checks the desktop's depth before it sets its own mode, such as Moto Racer, needs `16` on a card whose desktop is deeper. Other DirectDraw games set their own mode and don't need it |
+| `win32_desktop` | `800x600` only for a game that says it needs that screen resolution | The desktop is 640x480 by default. A game that checks the desktop's size before it starts, such as Fields of Fire, needs `800x600` (or `1024x768`, if it asks for that). Games that set their own mode with DirectDraw don't need it |
 | `cycles` | leave it at `auto` | The game's timers follow the emulated clock, and `auto` finds the speed its frames need |
 
 The `[autoexec]` lines run in the built-in DOS, so they use 8.3 names
@@ -1742,7 +1752,9 @@ last. Go through these in order:
 1. **It stops at once with an invalid opcode:** set `cpu=pentium_ii`.
 2. **Its message names `win32_version`:** set `win32_version=98se`.
 3. **It says it needs 256 colours or a 16 bit screen mode:** set
-   `win32_depth=8` for 256 colours, `win32_depth=16` for 16 bits.
+   `win32_depth=8` for 256 colours, `win32_depth=16` for 16 bits. If
+   it says it needs a screen resolution of 800x600, set
+   `win32_desktop=800x600`.
 4. **It says there isn't enough memory:** raise `memsize`.
 5. **It can't find its CD or its files:** check its
    [registry keys](#registry-keys) and

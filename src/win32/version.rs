@@ -16,7 +16,8 @@
 //!
 //! The desktop's depth, the `win32_depth` setting, is read at the same
 //! time and kept the same way: the adapter's own, 8 bits a pixel with a
-//! system palette (`palette_desktop`), or 16 bits a pixel.
+//! system palette (`palette_desktop`), or 16 bits a pixel. So is its
+//! size, the `win32_desktop` setting (`own_size`).
 
 use crate::cpu::Cpu;
 
@@ -54,13 +55,49 @@ crate::state_enum!(crate::config::DesktopDepth {
     crate::config::DesktopDepth::HighColor,
 });
 
+crate::state_enum!(crate::config::DesktopSize {
+    crate::config::DesktopSize::Vga,
+    crate::config::DesktopSize::Svga,
+    crate::config::DesktopSize::Xga,
+});
+
+/// The W32 section's version that first keeps the desktop's own size:
+/// the desktop of an older one was 640x480.
+pub const SIZE_SAVED: u16 = 73;
+
+/// The desktop's own size the running processes have.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OwnSize(pub crate::config::DesktopSize);
+
+impl crate::savestate::State for OwnSize {
+    fn save(&self, w: &mut crate::savestate::Writer) {
+        crate::savestate::State::save(&self.0, w);
+    }
+
+    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        // Bytes outside a section are in this rust-dos's own layout.
+        if r.version().is_some_and(|v| v < SIZE_SAVED) {
+            *self = OwnSize::default();
+            return Ok(());
+        }
+        crate::savestate::State::load(&mut self.0, r)
+    }
+}
+
 /// The first program starts: the settings become the version the
-/// processes see and the depth of their desktop.
+/// processes see and the depth and size of their desktop.
 pub fn start(win32: &mut super::Win32) {
     if win32.processes.is_empty() {
         win32.os = win32.version;
         win32.desktop_depth = win32.depth;
+        win32.own_size = OwnSize(win32.desktop);
     }
+}
+
+/// The desktop's own size, in pixels: the `win32_desktop` setting's when
+/// the first running program started.
+pub fn own_size(win32: &super::Win32) -> (u32, u32) {
+    win32.own_size.0.size()
 }
 
 /// Whether the desktop has 256 colours from a palette (`win32_depth=8`).

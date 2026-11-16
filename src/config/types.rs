@@ -201,6 +201,44 @@ impl DesktopDepth {
     }
 }
 
+/// The size of the built-in Windows' desktop (`win32_desktop`), as the
+/// Display Properties of Windows set it: 640x480 (the default), 800x600
+/// or 1024x768.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum DesktopSize {
+    #[default]
+    Vga,
+    Svga,
+    Xga,
+}
+
+impl DesktopSize {
+    pub const ALL: [Self; 3] = [Self::Vga, Self::Svga, Self::Xga];
+
+    /// "640x480", "800x600" or "1024x768".
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim().to_ascii_lowercase();
+        Self::ALL.into_iter().find(|d| d.name() == s)
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Vga => "640x480",
+            Self::Svga => "800x600",
+            Self::Xga => "1024x768",
+        }
+    }
+
+    /// Its width and height in pixels.
+    pub fn size(self) -> (u32, u32) {
+        match self {
+            Self::Vga => (640, 480),
+            Self::Svga => (800, 600),
+            Self::Xga => (1024, 768),
+        }
+    }
+}
+
 pub use crate::win32::nls::Win32Locale;
 
 impl Win32Locale {

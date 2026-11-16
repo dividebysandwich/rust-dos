@@ -43,7 +43,7 @@ pub use parse::{MAX_MEMSIZE, MIN_MEMSIZE, parse, parse_memsize};
 pub use settings::{Memory, default_memsize};
 pub use settings::{Settings, parse_mouse_sensitivity};
 pub use types::{
-    AspectRatio, DesktopDepth, DosVersion, Filter, MidiSynth, Mt32Model, SoundConfig, Win32Locale,
+    AspectRatio, DesktopDepth, DesktopSize, DosVersion, Filter, MidiSynth, Mt32Model, SoundConfig, Win32Locale,
     Win32Trace, WindowsVersion,
 };
 
@@ -225,6 +225,8 @@ pub struct Config {
     pub win32_version: Option<WindowsVersion>,
     /// The depth of its desktop (`win32_depth`).
     pub win32_depth: Option<DesktopDepth>,
+    /// The size of its desktop (`win32_desktop`).
+    pub win32_desktop: Option<DesktopSize>,
     /// Its system locale (`win32_locale`).
     pub win32_locale: Option<Win32Locale>,
     /// Which of its functions' calls the log gets (`win32_trace`).

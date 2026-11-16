@@ -7,6 +7,7 @@
 
 use iced_x86::code_asm::*;
 use rust_dos::cpu::{Cpu, HostConsole};
+use rust_dos::config::DesktopSize;
 use rust_dos::exec::{NoHook, run_batch};
 use rust_dos_pe::{self as pe, Builder, Imp};
 use std::fs;
@@ -1855,6 +1856,56 @@ fn change_display_settings_without_a_mode_gives_the_desktops_back() {
     assert_eq!(r[9..12], [0, 640, 480]);
     let mode = cpu.bus.vbe.mode.expect("a VBE mode");
     assert_eq!((mode.width, mode.height), (640, 480));
+}
+
+/// A window on the desktop, the screen's size, the desktop's own mode
+/// (EnumDisplaySettingsA's ENUM_REGISTRY_SETTINGS), then ChangeDisplaySettingsA to 1024x768 and
+/// the screen's size, then the desktop's own mode again and its size.
+fn own_size_program() -> (Vec<u8>, u32) {
+    // DM_PELSWIDTH and DM_PELSHEIGHT.
+    const SIZE: u32 = 0x18_0000;
+    const ENUM_REGISTRY_SETTINGS: u32 = 0xFFFF_FFFE;
+    let mut d = screen_data();
+    devmode(&mut d, MODE2, SIZE, (1024, 768, 0));
+    program(&[SCREEN_USER32], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        screen_window(a, l, &mut c, (200, 100))?;
+        screen_metrics(a, l, &mut c)?;
+        let own = [Arg::I(0), Arg::I(ENUM_REGISTRY_SETTINGS), Arg::At(MODE)];
+        c.api(a, l, S_ENUM_DISPLAY_SETTINGS, &own)?;
+        c.api(a, l, S_CHANGE_DISPLAY_SETTINGS, &[Arg::At(MODE2), Arg::I(0)])?;
+        screen_metrics(a, l, &mut c)?;
+        c.api(a, l, S_CHANGE_DISPLAY_SETTINGS, &[Arg::I(0), Arg::I(0)])?;
+        screen_metrics(a, l, &mut c)?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn the_desktop_has_the_size_the_setting_gives_it() {
+    let (program, data) = own_size_program();
+    let base = PathBuf::from("target/test_win32_ddraw/own_size");
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    fs::write(base.join("T.EXE"), program).unwrap();
+    let mut cpu = Cpu::new(base);
+    cpu.bus.win32.enabled = true;
+    // win32_desktop=800x600, as Display Properties set it on Windows.
+    cpu.bus.win32.desktop = DesktopSize::Svga;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 10);
+    assert_eq!(r[1..3], [800, 600]);
+    assert_eq!(r[3], 1);
+    let own = (peek(&cpu, data + MODE + 108), peek(&cpu, data + MODE + 112));
+    assert_eq!(own, (800, 600));
+    assert_eq!(r[4..7], [0, 1024, 768]);
+    // ChangeDisplaySettings without a mode gives the setting's size back.
+    assert_eq!(r[7..10], [0, 800, 600]);
+    let mode = cpu.bus.vbe.mode.expect("a VBE mode");
+    assert_eq!((mode.width, mode.height), (800, 600));
 }
 
 // GDI on the screen in a mode DirectDraw set.

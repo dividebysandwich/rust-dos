@@ -25,8 +25,8 @@ Explorer, a game's launcher or its autorun. `almanac_auto` takes the
 settings of a game only when the checksums match, and asks only for programs
 started at the prompt. The almanac carries the machine's settings only: the
 graphics card, processor, speed, memory, DPMI, the DOS and Windows versions,
-the Windows desktop's colour depth (`win32_depth`) and system locale
-(`win32_locale`), the 3D cards, the sound cards, the joystick and the disks'
+the Windows desktop's colour depth (`win32_depth`), size
+(`win32_desktop`) and system locale (`win32_locale`), the 3D cards, the sound cards, the joystick and the disks'
 speeds.
 
 A version a report adds is filed under its program's platform: DOS, Windows
@@ -132,7 +132,7 @@ that names the game, its settings and what happened.
 [when a game doesn't run](../CONFIGURATION.md#when-a-game-doesnt-run)
 cover the settings most games need: `cpu=pentium_ii` for an invalid
 opcode, `win32_version=98se` when a message names the version, more
-`memsize` when it runs out. `win32_depth` is in
+`memsize` when it runs out. `win32_depth` and `win32_desktop` are in
 [`[emulator]`](../CONFIGURATION.md#emulator).
 
 * **Enemy Infestation**: the profile in

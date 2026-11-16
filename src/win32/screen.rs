@@ -25,15 +25,16 @@
 //!   and BAR 1 its linear frame buffer, so reading and writing it is
 //!   the first kind's.
 //!
-//! The desktop is 640x480 at 32 bits a pixel on the first kind, and at
-//! 16 (5-6-5) on the second, as Windows 95 with a Voodoo3 was usually
-//! set up; it is at the start of video memory. With `win32_depth=8` it
-//! is 640x480 at 8 bits a pixel on both, its colours GDI's system
-//! palette, which the DAC (or the card's lookup table) holds, and with
-//! `win32_depth=16` at 16 bits a pixel (5-6-5) on both.
-//! ChangeDisplaySettings can make it one of the other `DESKTOP_SIZES`
-//! at the same depth, until it gives the desktop's own size back or the
-//! process that set it ends.
+//! The desktop is 32 bits a pixel on the first kind, and 16 (5-6-5) on
+//! the second, as Windows 95 with a Voodoo3 was usually set up; it is at
+//! the start of video memory. With `win32_depth=8` it is 8 bits a pixel
+//! on both, its colours GDI's system palette, which the DAC (or the
+//! card's lookup table) holds, and with `win32_depth=16` 16 bits a pixel
+//! (5-6-5) on both. Its own size is 640x480, or the one of
+//! `DESKTOP_SIZES` the `win32_desktop` setting names, as Display
+//! Properties set it on Windows. ChangeDisplaySettings can make it one
+//! of the other `DESKTOP_SIZES` at the same depth, until it gives the
+//! desktop's own size back or the process that set it ends.
 
 use crate::cpu::Cpu;
 use crate::video::crt::CrtTiming;
@@ -53,9 +54,6 @@ pub struct Mode {
     pub bpp: u32,
     pub pitch: u32,
 }
-
-/// The desktop's own size.
-pub const DESKTOP: (u32, u32) = (640, 480);
 
 /// The sizes the desktop can have: the ones EnumDisplaySettings lists
 /// and ChangeDisplaySettings sets.
@@ -120,8 +118,8 @@ pub fn linear_memory(cpu: &mut Cpu) {
     }
 }
 
-/// The desktop's mode: its size, 640x480 unless ChangeDisplaySettings
-/// set another (`set_desktop_size`), at 8 bits a pixel with
+/// The desktop's mode: its size, its own (`win32_desktop`) unless
+/// ChangeDisplaySettings set another (`set_desktop_size`), at 8 bits a pixel with
 /// `win32_depth=8` and 16 with `win32_depth=16`, else 16 on the card, 24
 /// (packed) on an S3 ViRGE, whose VESA BIOS has that instead of 32, and
 /// 32 on the others.
@@ -134,11 +132,7 @@ pub fn desktop(cpu: &Cpu) -> Mode {
         DesktopDepth::Adapter if cpu.bus.vga.adapter.is_virge() => 24,
         DesktopDepth::Adapter => 32,
     };
-    let (width, height) = cpu
-        .bus
-        .win32
-        .desktop_size
-        .map_or(DESKTOP, |(w, h, _)| (w, h));
+    let (width, height) = desktop_size(&cpu.bus.win32);
     Mode {
         width,
         height,
@@ -214,7 +208,15 @@ pub fn set_desktop_mode(cpu: &mut Cpu) {
 /// `pid`, or with None its own size again. Only the setting changes:
 /// the caller sets the mode on the adapter if the desktop shows.
 pub fn set_desktop_size(cpu: &mut Cpu, size: Option<(u32, u32)>, pid: u32) {
-    cpu.bus.win32.desktop_size = size.filter(|&s| s != DESKTOP).map(|(w, h)| (w, h, pid));
+    let own = super::version::own_size(&cpu.bus.win32);
+    cpu.bus.win32.desktop_size = size.filter(|&s| s != own).map(|(w, h)| (w, h, pid));
+}
+
+/// The desktop's size: the one ChangeDisplaySettings set, else its own.
+pub fn desktop_size(win32: &super::Win32) -> (u32, u32) {
+    win32
+        .desktop_size
+        .map_or_else(|| super::version::own_size(win32), |(w, h, _)| (w, h))
 }
 
 /// The process that set the desktop's size, if it isn't its own.
