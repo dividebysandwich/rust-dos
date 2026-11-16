@@ -112,30 +112,32 @@ const LOADS: f64 = 8.0 * WORKING;
 /// aimed for, tries a probe up: the search stops on what scenes of
 /// different weight make of its few measurements, and Quake's timedemo,
 /// which draws 24 to 64 frames a second at one speed as its scenes go by,
-/// held at 98,000 to 130,000 where the host kept real time at 250,000.
-/// It probes only where the search had reason to doubt where it stopped:
-/// the step up that ended it drew fewer frames than the speed below it by
-/// more than `SAME`, which more speed doesn't do in one scene, and it could
-/// go no further then (at what the host had, or behind); or the limits
-/// from a host that fell behind ended (`far_more`). A program that
-/// draws as many frames at both speeds caps them itself (Doom's 35), and a
-/// step that gained a little shows how little more speed gives (Myth).
-/// The probe goes up by the frames short of the target, from `TWO_STEPS`
-/// (a smaller step gains less than the noise of a mean of `JUDGED`) to
-/// `PROBE_STEP`, and never past the speed where frames that follow the
-/// speed reach the target, which is as far as a step up from the start of
-/// the search goes in the same scene. It needs the host's estimate at
-/// `STALLED` times the probe's speed, and no limit from a host that fell
-/// behind. A program that sits halted for `SPARE` of a measurement waits
-/// with time to spare (a game on the clock, a movie) and has no use for
-/// it. The probe is judged on the mean of `JUDGED` measurements: it stays
-/// where the frame rate grew by `FOLLOWS` of the speed's growth, and
-/// otherwise goes back, and the next one waits `HOLD_WINDOWS` measurements
-/// of holding, twice that after each further miss, up to
-/// `MOST_PROBE_BACKOFFS` times. A game that caps its own frames and spins
-/// (Doom's 35) misses each one, and spends 4 or 5 measurements of every
-/// 485 above its speed once the back-off is at its longest. A measurement
-/// behind ends a probe without a miss: the host's limits take over.
+/// held at 98,000 to 130,000 where the host kept real time at 250,000. It
+/// probes only where the search had reason to doubt where it stopped: the
+/// step up that ended it drew fewer frames than the speed below it by more
+/// than `SAME`, which more speed doesn't do in one scene, and it could go
+/// no further then (at what the host had, or behind); or the limits from a
+/// host that fell behind ended (`far_more`). A program that draws as many
+/// frames at both speeds caps them itself (Doom's 35), and a step that
+/// gained a little shows how little more speed gives (Myth). The probe goes
+/// up by the frames short of the target, from `TWO_STEPS` (a smaller step
+/// gains less than the noise of a mean of `JUDGED`) to `PROBE_STEP`, and
+/// never past the speed where frames that follow the speed reach the
+/// target, which is as far as a step up from the start of the search goes
+/// in the same scene. It goes no higher than the host's estimate over
+/// `STALLED`, so that a host that struggles probes as far as it has room
+/// for, and where that is less than `TWO_STEPS` there is no probe. It needs
+/// no limit from a host that fell behind. A program that sits halted for
+/// `SPARE` of a measurement waits with time to spare (a game on the clock,
+/// a movie) and has no use for it. The probe is judged on the mean of
+/// `JUDGED` measurements: it stays where the frame rate grew by `FOLLOWS`
+/// of the speed's growth, and otherwise goes back, and the next one waits
+/// `HOLD_WINDOWS` measurements of holding, twice that after each further
+/// miss, up to `MOST_PROBE_BACKOFFS` times. A game that caps its own frames
+/// and spins (Doom's 35) misses each one, and spends 4 or 5 measurements of
+/// every 485 above its speed once the back-off is at its longest. A
+/// measurement behind ends a probe without a miss: the host's limits take
+/// over.
 const PROBE_STEP: f64 = 2.0;
 const SAME: f64 = 0.05;
 const SPARE: f64 = 0.1;
@@ -2176,21 +2178,21 @@ impl AutoSpeed {
                     self.least_held = Some(least);
                 }
                 // A probe up (`PROBE_STEP`), to no more than the frames short
-                // of the target ask for.
+                // of the target ask for, or the host has room for.
                 self.probe_wait = self.probe_wait.saturating_sub(1);
                 let short = m.refresh / recent;
-                let to = c * short.min(PROBE_STEP);
+                let to = (c * short.min(PROBE_STEP))
+                    .min(host_max as f64 / STALLED)
+                    .min(top as f64);
                 let probe = self.unsure
                     && self.probe_wait == 0
                     && seen >= JUDGED
-                    && short >= TWO_STEPS
+                    && to >= c * TWO_STEPS
                     && m.halted < SPARE
                     && !lagged
                     && m.pace >= KEPT_UP
                     && self.lagged.is_none()
-                    && self.fell_at.is_none()
-                    && to * STALLED <= host_max as f64
-                    && to <= top as f64;
+                    && self.fell_at.is_none();
                 if probe {
                     self.step = Step::Probed {
                         from: current,
@@ -5326,6 +5328,25 @@ mod tests {
             let speed = auto.decide(60_000, &program(60_000), true, HOST);
             assert!(!matches!(auto.step, Step::Probed { .. }), "{speed}");
         }
+    }
+
+    #[test]
+    fn a_host_that_struggles_probes_as_far_as_it_has_room_for() {
+        // A hold at 60,000 drawing 15 frames a second, a quarter of the 70
+        // aimed for, on a host whose estimate reads 200,000: the probe goes
+        // to half of that, 100,000, short of the 120,000 it would go to
+        // with room.
+        let program = game(1.0 / 4000.0, 1000.0);
+        let mut auto = holding(15.0);
+        let up = auto.decide(60_000, &program(60_000), true, 200_000);
+        assert!(matches!(auto.step, Step::Probed { .. }), "{:?}", auto.step);
+        assert_eq!(up, 100_000);
+        // At 80,000, half the estimate is less than `TWO_STEPS` up: no
+        // probe.
+        let mut auto = holding(20.0);
+        let speed = auto.decide(80_000, &program(80_000), true, 200_000);
+        assert!(matches!(auto.step, Step::Hold { .. }), "{:?}", auto.step);
+        assert_eq!(speed, 80_000);
     }
 
     #[test]
