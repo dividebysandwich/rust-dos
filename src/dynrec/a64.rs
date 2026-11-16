@@ -1287,9 +1287,9 @@ impl Gen<'_> {
         );
     }
 
-    /// `Uop::FToInt64`, as x86-64's. AArch64's conversions saturate and
-    /// make a NaN 0: a NaN and the limits go through `jit_fpu_to_int64`
-    /// too.
+    /// `Uop::FToInt64`, as x86-64's (see `x64::Gen::fpu_to_int64`).
+    /// AArch64's conversions saturate and make a NaN 0: a NaN and the
+    /// limits go through `jit_fpu_to_int64` too.
     fn fpu_to_int64(&mut self, lo: T, hi: T, x: X) {
         let (l, h, x_) = (r(lo), r(hi), d(x));
         self.fpu_phys(1, 0);
@@ -1310,17 +1310,33 @@ impl Gen<'_> {
             ; movz w0, 16383 + 53
             ; sub w5, w5, w0
             ; cmp w5, 9
-            ; b.hi >toint64_slow
-            ; tbz x3, 63, >toint64_slow
+            ; b.hi >toint64_frac
+            ; tbz x3, 63, >toint64_frac
             ; movz w0, 10
             ; sub w5, w0, w5
             ; lsr X(l), x3, x5
             ; lsl x0, X(l), x5
             ; cmp x0, x3
-            ; b.ne >toint64_slow
+            ; b.ne >toint64_frac
             ; tbz w4, 15, >toint64_split
             ; neg X(l), X(l)
             ; b >toint64_split
+            // The double, as `fpu_bail_precise` checks it for
+            // `Precise::Int`.
+            ; toint64_frac:
+            ; fmov x0, D(x_)
+            ; ubfx x2, x0, 52, 11
+            ; cmp w2, 1023 + 52
+            ; b.hs >toint64_slow
+            ; cmp w2, 1023 - 1
+            ; b.lo >toint64_double
+            ; mov w3, 1023 + 51
+            ; sub w3, w3, w2
+            ; mov x2, 1
+            ; lsl x2, x2, x3
+            ; sub x2, x2, 1
+            ; tst x0, x2
+            ; b.eq >toint64_slow
             ; toint64_double:
         );
         self.field(Access::Ldr16, 0, layout::fpu::CONTROL);

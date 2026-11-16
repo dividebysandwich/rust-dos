@@ -317,11 +317,13 @@ compute what the handlers' own doubles do there), as their handlers do:
   the handler's own `fpu::data::to_int`);
 - FILD and FISTP of a qword, so the 8-byte copies MSVC makes with the
   pair stay in translated code: FILD pushes the qword's exact 80 bits
-  and the double they round to, as its handler does; FISTP converts the
-  register's double inline where that is all the register holds and the
-  control word rounds to nearest or chops, stores its 80 bits as they
-  are where they hold an integer from 2^53 to 2^63, and leaves the rest
-  to the handler's own `fpu::data::st0_int_bits`;
+  and the double they round to, as its handler does; FISTP stores the
+  integer the 80 bits hold where it is from 2^53 to 2^63, converts the
+  register's double inline where the control word rounds to nearest or
+  chops and the 80 bits round to the same integer (they hold no more
+  than the double, or the double is under 2^52 and neither an integer
+  nor halfway between two), and leaves the rest to the handler's own
+  `fpu::data::st0_int_bits`;
 - FMUL, FDIV, FDIVR and their popping forms, with a single or ST(i) (a
   division by 0 through `fpu::arithmetic::divided_by_zero`);
 - FADD, FSUB, FSUBR and their popping forms, and FIADD, FISUB and

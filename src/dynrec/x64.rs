@@ -3562,9 +3562,12 @@ impl Gen<'_> {
     /// `Uop::FToInt64`. A register that holds no more than its double
     /// converts the double where the control word rounds to nearest or
     /// chops; one whose 80 bits hold more converts them where they are an
-    /// integer of 2^53 to 2^63, which every rounding leaves as it is. A
-    /// value that doesn't fit, a NaN, other roundings and 80 bits with a
-    /// fraction go through `jit_fpu_to_int64`.
+    /// integer of 2^53 to 2^63, which every rounding leaves as it is, and
+    /// converts the double as well where that is under 2^52 and neither an
+    /// integer nor halfway between two (`Precise::Int`): the 80 bits then
+    /// round to nearest or chop to the same integer. A value that doesn't
+    /// fit, a NaN, other roundings and the rest go through
+    /// `jit_fpu_to_int64`.
     fn fpu_to_int64(&mut self, lo: T, hi: T, x: X) {
         let (l, h) = (r(lo), r(hi));
         dynasm!(self.ops
@@ -3584,9 +3587,9 @@ impl Gen<'_> {
             ; and ecx, 0x7FFF
             ; sub ecx, 16383 + 53
             ; cmp ecx, 9
-            ; ja >toint64_slow
+            ; ja >toint64_frac
             ; test rdx, rdx
-            ; jns >toint64_slow
+            ; jns >toint64_frac
             ; neg ecx
             ; add ecx, 10
             ; mov Rq(l), rdx
@@ -3594,11 +3597,30 @@ impl Gen<'_> {
             ; mov Rq(h), Rq(l)
             ; shl Rq(h), cl
             ; cmp Rq(h), rdx
-            ; jne >toint64_slow
+            ; jne >toint64_frac
             ; test eax, 0x8000
             ; jz >toint64_split
             ; neg Rq(l)
             ; jmp >toint64_split
+            // The double, as `fpu_bail_precise` checks it for
+            // `Precise::Int`: from 2^52 on, or a multiple of 1/2 from 1/2
+            // on, the handlers' code has it.
+            ; toint64_frac:
+            ; movq rax, Rx(x.0)
+            ; mov rdx, rax
+            ; shr rdx, 52
+            ; and edx, 0x7FF
+            ; cmp edx, 1023 + 52
+            ; jae >toint64_slow
+            ; cmp edx, 1023 - 1
+            ; jb >toint64_double
+            ; mov ecx, 1023 + 51
+            ; sub ecx, edx
+            ; mov edx, 1
+            ; shl rdx, cl
+            ; dec rdx
+            ; test rax, rdx
+            ; jz >toint64_slow
             ; toint64_double:
             ; movzx eax, WORD [rbx + FPU_CONTROL]
             ; and eax, 0xC00

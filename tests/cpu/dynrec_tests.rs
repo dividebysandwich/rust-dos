@@ -4363,7 +4363,7 @@ fn fild_and_fistp_of_qwords_copy_them_in_translated_code() {
 
 /// 80-bit values for FISTP of a qword: (sign << 15 | exponent,
 /// significand).
-const EXTENDED_TO_INT: [(u16, u64); 18] = [
+const EXTENDED_TO_INT: [(u16, u64); 20] = [
     (0x4034, 0x8000_0000_0000_0401), // 2^53 + 1 and 1/1024
     (0x4034, 0x8000_0000_0000_0600), // 2^53 + 1.5
     (0x4034, 0x8000_0000_0000_0200), // 2^53 + 0.5
@@ -4382,6 +4382,8 @@ const EXTENDED_TO_INT: [(u16, u64); 18] = [
     (0xFFFF, 0x8000_0000_0000_0000), // -infinity
     (0x0000, 0x0000_0000_0000_0401), // a denormal
     (0x3FFF, 0x4000_0000_0000_0001), // an unnormal
+    (0x3FFF, 0xA000_0000_0000_0001), // 1.25 and a bit
+    (0xC000, 0xB000_0000_0000_0001), // -(2.75 and a bit)
 ];
 
 #[test]
@@ -4449,6 +4451,72 @@ fn fistp_of_a_qword_rounds_80_bits_as_the_handler_in_translated_code() {
     );
     if AVAILABLE {
         assert_eq!(handled(&b, iced_x86::Mnemonic::Fistp), 0, "{:?}", stats);
+    }
+}
+
+#[test]
+fn fistp_of_a_qword_of_a_fraction_converts_the_double_in_translated_code() {
+    // MSVC's `_ftol` (FISTP of a qword) of 80 bits with a fraction a
+    // double hasn't, 1.25 and -2.75 and a bit, to nearest and chopped: the
+    // doubles round as the 80 bits do, so the handlers' code doesn't run
+    // but for the two FLDs of 80 bits before the loop.
+    let (input, output) = (DATA, DATA + 0x8000);
+    let (mut a, mut b) = twins(|rig| {
+        let values: [(u32, u64); 2] = [
+            (0x3FFF, 0xA000_0000_0000_0001),
+            (0xC000, 0xB000_0000_0000_0001),
+        ];
+        for (k, (se, man)) in values.into_iter().enumerate() {
+            let at = input + 16 * k as u32;
+            rig.write32(at, man as u32);
+            rig.write32(at + 4, (man >> 32) as u32);
+            rig.write32(at + 8, se);
+        }
+        rig.write32(input + 32, 0x037F | 0x0F7F << 16);
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                let mut again = a.create_label();
+                a.fninit()?;
+                a.mov(esi, input)?;
+                a.mov(edi, output)?;
+                a.fld(tword_ptr(esi))?;
+                a.fld(tword_ptr(esi + 16))?;
+                a.mov(ecx, 1000)?;
+                a.set_label(&mut again)?;
+                a.fldcw(word_ptr(esi + 32))?;
+                a.fld(st0)?;
+                a.fistp(qword_ptr(edi))?;
+                a.fld(st1)?;
+                a.fistp(qword_ptr(edi + 8))?;
+                a.fldcw(word_ptr(esi + 34))?;
+                a.fld(st0)?;
+                a.fistp(qword_ptr(edi + 16))?;
+                a.fld(st1)?;
+                a.fistp(qword_ptr(edi + 24))?;
+                a.dec(ecx)?;
+                a.jnz(again)?;
+                a.hlt()
+            }),
+        );
+    });
+    let stats = run_both(&mut a, &mut b);
+    let read64 = |at: u32| b.read32(at) as u64 | (b.read32(at + 4) as u64) << 32;
+    let got = [
+        read64(output),
+        read64(output + 8),
+        read64(output + 16),
+        read64(output + 24),
+    ];
+    assert_eq!(got, [-3i64 as u64, 1, -2i64 as u64, 1]);
+    if AVAILABLE {
+        let calls = b.cpu.dynrec.calls().unwrap().fpu;
+        assert!(
+            calls <= 2,
+            "the handlers' code ran {} times: {:?}",
+            calls,
+            stats
+        );
     }
 }
 

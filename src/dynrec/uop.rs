@@ -543,8 +543,11 @@ pub enum Uop {
     /// lo and hi = the low and high dwords of the qword FISTP stores of
     /// ST(0), whose double x holds (`data::st0_int_bits`): x converted
     /// where the register holds no more than it, the control word rounds
-    /// to nearest or chops and the value fits; the 80 bits as they are
-    /// where they hold an integer from 2^53 to 2^63; else through the
+    /// to nearest or chops and the value fits; the integer the 80 bits
+    /// hold where it is from 2^53 to 2^63; x converted, under the same
+    /// roundings, where the 80 bits hold more but x is under 2^52 and
+    /// neither an integer nor halfway between two (`Precise::Int`), as
+    /// the 80 bits then round to the same integer; else through the
     /// handlers' code, which sets IE for the integer indefinite. The block
     /// goes on after it either way.
     FToInt64 { lo: T, hi: T, x: X },
