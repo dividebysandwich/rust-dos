@@ -250,7 +250,9 @@ fn ms_video_1_formats(
         return Ok((source, None));
     }
     let out = read_info(cpu, output).ok_or(ICERR_BADPARAM)?;
-    let masks = output.wrapping_add(out.size);
+    // BI_BITFIELDS's masks follow a BITMAPINFOHEADER, and are the same
+    // place in a BITMAPV4HEADER or V5 one: at 40 either way.
+    let masks = output.wrapping_add(HEADER);
     let masks = allows(cpu, masks, 12, false).then(|| {
         let mut mask = |n: u32| cpu.bus.guest_read_32(masks + 4 * n);
         [mask(0), mask(1), mask(2)]
@@ -404,8 +406,8 @@ fn decompress_get_format(cpu: &mut Cpu, input: u32, output: u32) -> u32 {
     out[14..16].copy_from_slice(&source.bits.to_le_bytes());
     out[20..24].copy_from_slice(&image.to_le_bytes());
     out[32..36].copy_from_slice(&colours.to_le_bytes());
-    let palette = out[HEADER as usize..].chunks_exact_mut(4);
-    for (q, c) in palette.zip(&source.palette) {
+    let palette = out[HEADER as usize..].as_chunks_mut::<4>().0;
+    for (q, c) in palette.iter_mut().zip(&source.palette) {
         q[..3].copy_from_slice(c);
     }
     cpu.bus.guest_write_bytes(output, &out);
@@ -432,9 +434,15 @@ fn decompress(cpu: &mut Cpu, input: u32, data: u32, output: u32, bits: u32) -> u
     if bits == 0 || !allows(cpu, bits, size, true) {
         return ICERR_BADPARAM;
     }
-    // The most a frame can be: a code and eight 16-bit colours a block.
-    // A frame ends where its last block does.
+    // The frame's size is the input's biSizeImage, as for DrawDibDraw's
+    // frames, and is at most a code and eight 16-bit colours a block. A
+    // biSizeImage of 0 says nothing: the frame ends where its last block
+    // does.
     let most = (width / 4) * (height / 4) * 18;
+    let most = match read_info(cpu, input).map_or(0, |i| i.size_image) {
+        0 => most,
+        size => size.min(most),
+    };
     let mut frame = vec![0; readable(cpu, data, most) as usize];
     cpu.bus.guest_read_bytes(data, &mut frame);
     let mut pixels = vec![0; size as usize];
@@ -628,6 +636,13 @@ fn begin(cpu: &mut Cpu, slot: usize, hdc: u32, at: u32) -> bool {
     let same = d.compression == info.compression && d.width == width && d.height == height;
     d.hdc = hdc;
     if same && (d.buffer != 0 || info.compression == BI_RGB) {
+        // The same codec and size can be another stream, with colours
+        // of its own.
+        if d.buffer != 0
+            && let Some(format) = read_format(cpu, at)
+        {
+            dd(cpu, slot).codec.follow(&format);
+        }
         return true;
     }
     end(cpu, slot);

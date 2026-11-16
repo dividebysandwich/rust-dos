@@ -72,9 +72,11 @@ impl Format {
         let palette = info
             .get(colours_at(header)..)
             .unwrap_or_default()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .take(colours(header))
-            .map(|q| [q[0], q[1], q[2]])
+            .map(|&[b, g, r, _]| [b, g, r])
             .collect();
         Some(Format {
             compression: le32(16),
@@ -213,11 +215,28 @@ impl Codec {
         self.0.is_none()
     }
 
+    /// Takes the colours and depth of `format`, a stream of the same
+    /// codec and size as the decoder's, for the frames that follow. Only
+    /// Microsoft Video 1 reads them: an 8-bit stream's frames are
+    /// palette indexes, so another film of the same size drawn through
+    /// one DrawDib handle needs its own colours.
+    pub fn follow(&mut self, format: &Format) {
+        if let Some(Decoder::MsVideo1(d)) = &mut self.0
+            && let Some(depth) = msvideo1::Depth::of(format.bits)
+        {
+            d.depth = depth;
+            if d.palette != format.palette {
+                d.palette.clone_from(&format.palette);
+            }
+        }
+    }
+
     /// Decompress one frame. After an error the picture stays the one
-    /// before, but for Cinepak's and one case of Indeo 5's: a Cinepak
-    /// frame that fails partway keeps the blocks it drew, as FFmpeg's
-    /// decoder does, and an Indeo 5 key frame that changes the size or
-    /// the bands and fails leaves no picture.
+    /// before, but for Cinepak's, Microsoft Video 1's and one case of
+    /// Indeo 5's: a Cinepak or Video 1 frame that fails partway keeps
+    /// the blocks it drew, as FFmpeg's decoders do, and an Indeo 5 key
+    /// frame that changes the size or the bands and fails leaves no
+    /// picture.
     pub fn decode(&mut self, frame: &[u8]) -> Result<(), String> {
         match &mut self.0 {
             Some(Decoder::Indeo3(d)) => {
@@ -656,5 +675,14 @@ mod tests {
         // A frame that skips both blocks keeps the picture.
         codec.decode(&[2, 0x84]).unwrap();
         assert_eq!(codec.picture(8, 4).unwrap(), dib);
+        // Another film's colours: colour 1 is now green.
+        codec.follow(&Format {
+            palette: vec![[0, 0, 0], [0, 0xFF, 0]],
+            ..format.clone()
+        });
+        codec.decode(&[1, 0x80, 1, 0x84]).unwrap();
+        let dib = codec.picture(8, 4).unwrap();
+        assert_eq!(dib[..3], [0, 0xFF, 0]);
+        assert_eq!(dib[12..15], [0, 0, 0xFF]);
     }
 }

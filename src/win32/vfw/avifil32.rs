@@ -996,8 +996,16 @@ fn set_format(cpu: &mut Cpu, slot: usize, wanted: u32) -> bool {
         let top_down = (cpu.bus.guest_read_32(wanted + 8) as i32) < 0;
         let kind = cpu.bus.guest_read_32(wanted + 16);
         let bits = cpu.bus.guest_read_16(wanted + 14);
-        let decoded = compression != BI_RGB && matches!(bits, 16 | 24 | 32);
-        if top_down || kind != BI_RGB || !(decoded || bits == source_bits) {
+        // A decoder's picture converts to 16, 24 or 32 bits, and an
+        // uncompressed source goes out in its own. A compressed 8-bit
+        // stream's palette indexes aren't kept, so it has no 8-bit
+        // output (#1234).
+        let fits = if compression == BI_RGB {
+            bits == source_bits
+        } else {
+            matches!(bits, 16 | 24 | 32)
+        };
+        if top_down || kind != BI_RGB || !fits {
             cpu.bus.log_string(&format!(
                 "[W32] AVIStreamGetFrameOpen: no {bits}-bit format {kind:#X}"
             ));

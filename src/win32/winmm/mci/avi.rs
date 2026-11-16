@@ -91,10 +91,11 @@ pub fn parse(d: &[u8]) -> Option<Media> {
         let bits = le16(f, 14)?;
         let compression = le32(f, 16)?;
         let (w, h) = (width.unsigned_abs(), height.unsigned_abs());
+        let format = codec::Format::parse(f).unwrap_or_default();
         let plays = match compression {
             BI_RGB => matches!(bits, 8 | 16 | 24 | 32),
             BI_RLE8 => bits == 8,
-            _ => codec::Format::parse(f).is_some_and(|f| codec::supported(&f)),
+            _ => codec::supported(&format),
         };
         if plays && (1..=MAX_SIZE).contains(&w) && (1..=MAX_SIZE).contains(&h) {
             let mut palette = Vec::new();
@@ -118,7 +119,7 @@ pub fn parse(d: &[u8]) -> Option<Media> {
                 chunks: s.chunks.clone(),
                 compression,
                 bits,
-                format: codec::Format::parse(f).unwrap_or_default(),
+                format,
                 top_down: height < 0 && compression == BI_RGB,
                 palette,
             });
