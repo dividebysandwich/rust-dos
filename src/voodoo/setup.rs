@@ -212,7 +212,13 @@ impl Voodoo {
             None => self.color_buffer(0) == Some(dest),
         };
         if shown {
-            self.display_dirty = true;
+            // On a Banshee, while a swap waits for its retrace, the next
+            // frame's drawing doesn't reach the picture (`picture_held`).
+            if self.banshee.is_some() && !self.swaps.is_empty() {
+                self.held = self.shown_regs();
+            } else {
+                self.display_dirty = true;
+            }
         }
         self.note_drawn(super::Place::Buffer(dest));
         if !self.drawn_to.contains(&dest) {

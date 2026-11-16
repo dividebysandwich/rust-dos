@@ -632,6 +632,10 @@ pub struct Voodoo {
     /// The same for each Banshee swap waiting for its retrace, beside
     /// its `overlay_queue`.
     swap_marks: VecDeque<Option<u64>>,
+    /// A Banshee's picture held while a swap waits for its retrace
+    /// (`picture_held`): the video processor's registers it showed
+    /// (`shown_regs`) when the program drew into the buffer it shows.
+    held: Option<[u32; 6]>,
     /// Where the jobs given out or waiting since the workers last
     /// finished draw (`note_drawn`), each with the batch of the latest
     /// job there: one after `front_jobs` if it is a later batch.
@@ -766,6 +770,7 @@ impl Voodoo {
             drawn_to: Vec::new(),
             front_jobs: None,
             swap_marks: VecDeque::new(),
+            held: None,
             drawn: RefCell::new(Drawn::default()),
             outstanding: Cell::new(false),
             tmu_in_use: Cell::new(0),
@@ -841,6 +846,7 @@ impl Voodoo {
         self.clut = default_clut();
         self.swaps.clear();
         self.swap_marks.clear();
+        self.held = None;
         self.front_jobs = None;
         self.last_swap = 0;
         self.fifo_writes = 0;
@@ -1584,6 +1590,12 @@ impl Voodoo {
             self.display_dirty |= changed;
             return switched;
         }
+        // The picture shown stays as it was until the swap shows the next
+        // (`picture_held`): what changed is drawn then.
+        if self.picture_held() {
+            self.display_dirty |= changed;
+            return switched;
+        }
         if let Some(b) = &mut self.banshee {
             let dirty = std::mem::take(&mut b.dirty);
             let draw = changed || switched || dirty;
@@ -1609,6 +1621,41 @@ impl Voodoo {
             self.build_palette();
         }
         changed || switched
+    }
+
+    /// Whether a Banshee's picture is the one it showed last, rather than
+    /// what its memory holds: the program drew into the buffer the video
+    /// processor shows while a swap waited for its retrace, and the video
+    /// processor shows the same memory since. On the card the drawing
+    /// commands after a swapbufferCMD that waits for the retrace wait in
+    /// the FIFO behind it, and the buffer shown isn't drawn into until
+    /// the swap shows the next one. Here they go ahead beside the program,
+    /// into the memory, and the picture holds the frame the card shows
+    /// instead. A read of the buffer shown in the meantime (the linear
+    /// frame buffer, a 2D blit from it) still gets the next frame's
+    /// drawing where the card would give the frame shown (#1179). The
+    /// hold ends when the swap shows (`banshee_show`), when the card is
+    /// reset or loaded, and when the program changes what the video
+    /// processor shows.
+    pub(crate) fn picture_held(&self) -> bool {
+        self.held.is_some() && !self.swaps.is_empty() && self.held == self.shown_regs()
+    }
+
+    /// What a Banshee shows: whether the video processor drives the
+    /// monitor, its mode and size, and the desktop's and the overlay's
+    /// memory.
+    fn shown_regs(&self) -> Option<[u32; 6]> {
+        use banshee::{VGA_INIT0, VID_DESKTOP_OVERLAY_STRIDE, VID_DESKTOP_START_ADDR};
+        use banshee::{VID_PROC_CFG, VID_SCREEN_SIZE};
+        let b = self.banshee.as_ref()?;
+        Some([
+            b.reg(VGA_INIT0),
+            b.reg(VID_PROC_CFG),
+            b.reg(VID_SCREEN_SIZE),
+            b.reg(VID_DESKTOP_START_ADDR),
+            b.reg(VID_DESKTOP_OVERLAY_STRIDE),
+            b.overlay_addr,
+        ])
     }
 
     /// Wait for the jobs the picture shown needs: those given out before
@@ -1700,8 +1747,18 @@ impl Voodoo {
 
     /// Draw the front buffer into `rgba` (RGBA8, `width` pixels a row,
     /// `picture_size` big), through the gamma table (see
-    /// `prepare_display`).
+    /// `prepare_display`). A picture held (`picture_held`) leaves `rgba`
+    /// as it is: it holds the picture the card shows.
     pub fn render(&self, rgba: &mut [u8], width: usize) {
+        if !self.picture_held() {
+            self.render_memory(rgba, width);
+        }
+    }
+
+    /// Draw the picture the card's memory holds into `rgba`, as `render`
+    /// does, held or not: a save state's thumbnail shows what a load of
+    /// it shows, since a load lets the hold go.
+    pub fn render_memory(&self, rgba: &mut [u8], width: usize) {
         if let Some(b) = &self.banshee {
             // The picture is drawn from the memory, which needs the
             // GPU's 2D operations.
@@ -2102,6 +2159,8 @@ impl Voodoo {
         self.update_timing();
         self.palette_dirty = true;
         self.display_dirty = true;
+        // The picture is drawn from the memory loaded, as it is.
+        self.held = None;
         // The swaps' batches were the workers' before the load: each swap
         // still pending waits for all, and those queued later keep their
         // place beside `overlay_queue`.

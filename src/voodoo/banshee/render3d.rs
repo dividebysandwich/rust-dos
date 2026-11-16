@@ -275,6 +275,7 @@ impl Voodoo {
     /// A swap happened: the overlay shows `addr`, which needs the jobs up
     /// to batch `mark` drawn (`swap_mark`).
     fn banshee_show(&mut self, addr: u32, mark: Option<u64>) {
+        self.held = None;
         if let Some(b) = &mut self.banshee {
             b.overlay_addr = addr;
             b.swap_count = b.swap_count.saturating_sub(1);
@@ -514,6 +515,84 @@ pub(crate) mod tests {
         picture_comes_before(&mut v, &gate, "double buffering");
         open(&gate);
         v.flush();
+    }
+
+    /// A card double buffering as Test Drive 4 does: a swap to B waits for
+    /// the retrace, and the program clears and draws its next frame into
+    /// A, which is still shown. On the card those commands wait in the
+    /// FIFO behind the swap, and A stays on the screen as it was. Here
+    /// they go ahead, and the picture holds until the swap shows B.
+    fn drawn_behind_a_waiting_swap() -> Voodoo {
+        use super::super::{VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT, VID_PROC_CFG, VIDPROC_ENABLE};
+
+        let (a, b) = (0x10_0000u32, 0x20_0000u32);
+        let mut v = Voodoo::with_workers(Board::Voodoo3, 0);
+        let cfg = VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE;
+        v.write(
+            VGA_INIT0,
+            VGAINIT0_EXTENDED_SHIFT_OUT,
+            u32::MAX,
+            Now::default(),
+        );
+        v.write(VID_PROC_CFG, cfg, u32::MAX, Now::default());
+        reg3d(&mut v, LEFT_OVERLAY_BUF, a);
+        reg3d(&mut v, SWAPBUFFER_CMD, 0);
+        assert!(v.prepare_display(), "the card shows A");
+        v.mark_drawn(b as usize / 2);
+        reg3d(&mut v, LEFT_OVERLAY_BUF, b);
+        reg3d(&mut v, SWAPBUFFER_CMD, 1);
+        assert!(!v.picture_held(), "nothing drawn into A yet");
+        v.mark_drawn(a as usize / 2);
+        assert!(v.picture_held(), "drawn into A");
+        assert!(!v.prepare_display(), "the picture shown stays");
+        v
+    }
+
+    #[test]
+    fn drawing_into_the_buffer_shown_behind_a_waiting_swap_holds_the_picture() {
+        let mut v = drawn_behind_a_waiting_swap();
+        let due = v.next_event().expect("the swap waits for a retrace");
+        v.service(Now {
+            ns: 1_000_000_000,
+            ticks: due,
+        });
+        assert_eq!(v.banshee.as_ref().unwrap().overlay_addr, 0x20_0000);
+        assert!(!v.picture_held());
+        assert!(v.prepare_display(), "the swap shows B");
+    }
+
+    /// The hold ends whenever the picture no longer is what the swap
+    /// would replace: a swap shown at once, the video processor showing
+    /// something else (another mode, the display off, the desktop
+    /// without the overlay), a reset and a load.
+    #[test]
+    fn the_held_picture_lets_go_when_the_card_shows_something_else() {
+        use super::super::{VID_PROC_CFG, VIDPROC_ENABLE};
+
+        let cfg = VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE;
+        for case in [
+            "swap at once",
+            "mode",
+            "display off",
+            "desktop",
+            "reset",
+            "load",
+        ] {
+            let mut v = drawn_behind_a_waiting_swap();
+            let write = |v: &mut Voodoo, value| {
+                v.write(VID_PROC_CFG, value, u32::MAX, Now::default());
+            };
+            match case {
+                "swap at once" => reg3d(&mut v, SWAPBUFFER_CMD, 0),
+                "mode" => write(&mut v, cfg | 1 << 18),
+                "display off" => write(&mut v, 0),
+                "desktop" => write(&mut v, VIDPROC_ENABLE),
+                "reset" => v.reset(),
+                "load" => v.after_load(),
+                _ => unreachable!(),
+            }
+            assert!(!v.picture_held(), "{case}");
+        }
     }
 
     /// Frame buffer writes into the buffer shown, queued right after the
