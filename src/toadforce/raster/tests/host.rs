@@ -1402,7 +1402,7 @@ fn a_cursor_reading_a_few_bands_a_frame_keeps_the_target_on_the_host() {
     let (mut rig, log) = hosted(takes_all);
     triangles(&mut rig);
     for frame in 0..10 {
-        let colour = 0xFF00_0000 | frame * 0x10;
+        let colour = 0xFF00_0000 | (frame * 0x10);
         let quad = corner(2.0 + frame as f32, 2.0, 40.0, 0.0, colour);
         assert_eq!(rig.draw(4, &quad), 0);
         for first in [8 * (frame % 4), 40, 50] {
