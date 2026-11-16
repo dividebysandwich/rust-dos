@@ -1804,6 +1804,19 @@ pub fn get_attached_surface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 pub const DDFLIP_WAIT: u32 = 0x1;
 pub const DDFLIP_NOVSYNC: u32 = 0x8;
+pub const DDFLIP_DONOTWAIT: u32 = 0x20;
+
+/// Whether Flip through the interface `vtable` with `flags` waits for a
+/// flip still to show. Through IDirectDrawSurface7 it does unless the
+/// flags have DDFLIP_DONOTWAIT, as DirectX 7's ddraw.h says at that
+/// flag; through the older interfaces only with DDFLIP_WAIT.
+fn flip_waits(vtable: usize, flags: u32) -> bool {
+    if vtable == V_SURFACE7 {
+        flags & DDFLIP_DONOTWAIT == 0
+    } else {
+        flags & DDFLIP_WAIT != 0
+    }
+}
 
 /// The surfaces of the flip chain whose front buffer is `front`, the
 /// front first.
@@ -1838,15 +1851,17 @@ fn chain(cpu: &mut Cpu, front: u32) -> Vec<u32> {
 /// back buffer (or of `target`), the back buffers the next ones', and
 /// the last the front buffer's. A primary front buffer is shown from
 /// the next frame. With a flip still to show, it waits for that frame
-/// with DDFLIP_WAIT, and fails without it; a thread that calls it again
-/// and again with nothing else in between waits too (`display::Polls`).
-/// On the 3D-only card the card swaps its buffers at a retrace, and
-/// without DDFLIP_WAIT a flip fails the same way while a swap waits.
+/// when it waits (`flip_waits`), and fails otherwise; a thread that
+/// calls it again and again with nothing else in between waits too
+/// (`display::Polls`). On the 3D-only card the card swaps its buffers at
+/// a retrace, and a flip that doesn't wait fails the same way while a
+/// swap waits.
 pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, target, flags] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (_, id) = hr!(usable(cpu, this));
+    let (vtable, id) = hr!(usable(cpu, this));
+    let wait = flip_waits(vtable, flags);
     let Some(s) = state(cpu).surface(id).cloned() else {
         return Some(DDERR_INVALIDOBJECT);
     };
@@ -1875,11 +1890,11 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_SURFACEBUSY);
     }
     if s.memory == MEM_CARD {
-        // With swaps still waiting for their retraces, it fails without
-        // DDFLIP_WAIT, or waits for them if the thread only polls. With
-        // DDFLIP_WAIT the swap goes behind them, and the card's FIFO
-        // holds the program up when it fills.
-        if flags & DDFLIP_WAIT == 0
+        // With swaps still waiting for their retraces, a flip that doesn't
+        // wait fails, or waits for them if the thread only polls. One
+        // that waits goes behind them, and the card's FIFO holds the
+        // program up when it fills.
+        if !wait
             && let Some(until) = voodoo::swaps_pending_until(cpu)
         {
             return still_to_show(cpu, until, false);
@@ -1910,7 +1925,7 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         // Flip runs again when that frame begins: the call that ends the
         // wait stands for the polls until the frame, the last of which
         // flips.
-        return still_to_show(cpu, pending, flags & DDFLIP_WAIT != 0);
+        return still_to_show(cpu, pending, wait);
     }
     // A flip of the primary surface is a frame, which the frame rate cap
     // may hold back (`frame_held`): one waiting for the retrace shows

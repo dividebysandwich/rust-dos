@@ -1192,6 +1192,7 @@ const DDPF_STENCILBUFFER: u32 = 0x4000;
 const DDLOCK_WAIT: u32 = 1;
 const DDFLIP_WAIT: u32 = 1;
 const DDFLIP_NOVSYNC: u32 = 8;
+const DDFLIP_DONOTWAIT: u32 = 0x20;
 const D3DCLEAR_TARGET: u32 = 1;
 const D3DCLEAR_ZBUFFER: u32 = 2;
 const D3DCLEAR_STENCIL: u32 = 4;
@@ -3031,7 +3032,8 @@ const DDGFS_ISFLIPDONE: u32 = 2;
 
 /// A flip chain on the Voodoo2's 3dfx device and a flip, whose swap
 /// waits for the card's next retrace; then, again and again with
-/// nothing in between until it succeeds, Flip without DDFLIP_WAIT, or
+/// nothing in between until it succeeds, Flip with DDFLIP_DONOTWAIT
+/// (through IDirectDrawSurface7 Flip waits without it), or
 /// GetFlipStatus of the back buffer when `status`.
 fn card_polling_program(status: bool) -> (Vec<u8>, u32) {
     let mut d = data();
@@ -3074,7 +3076,7 @@ fn card_polling_program(status: bool) -> (Vec<u8>, u32) {
             push(a, l, &[Arg::I(DDGFS_ISFLIPDONE)])?;
             (TARGET, SURF_GET_FLIP_STATUS)
         } else {
-            push(a, l, &[Arg::I(0), Arg::I(0)])?;
+            push(a, l, &[Arg::I(0), Arg::I(DDFLIP_DONOTWAIT)])?;
             (FRONT, SURF_FLIP)
         };
         a.mov(eax, dword_ptr(l.at(object)))?;
