@@ -1709,18 +1709,21 @@ has the state. 256 to 261 are the card's own.
 - `SHADEMODE` is 1 flat or 2 Gouraud.
 - `COLORKEYENABLE` (Direct3D 7's) drops a fragment where the texel nearest
   its coordinate in a stage's texture, in the level the sample reads first,
-  has the texture's colour key. The texels around it are filtered with their
-  own colours, the key's included, so a linear filter mixes the key's colour
-  into the texels beside a keyed one. Under the nearest filter this is what
-  Direct3D does. Under a linear filter Direct3D has no one rule: its
-  software rasteriser filters the key's colour in, as the card does, and
-  removes pixels in a dither pattern as dense as the keyed texels' weight in
-  the filter; its documented reference pipeline gives a keyed texel an alpha
-  of 0 before the filter and leaves the dropping to the alpha test; and a
-  GPU measured through its driver removes every pixel a keyed texel has any
-  weight in. The card drops by the nearest texel, the one with the largest
-  weight in the filter: the edge of what it drops is within a texel of where
-  each of the three puts it, and it needs no dither and no alpha test.
+  has the texture's colour key. The bits the format defines are compared:
+  in `X8R8G8B8` the top byte doesn't count, as a GPU measured through its
+  driver has it, where Direct3D's software rasteriser compares that byte
+  too. The texels around it are filtered with their own colours, the key's
+  included, so a linear filter mixes the key's colour into the texels
+  beside a keyed one. Under the nearest filter this is what Direct3D does.
+  Under a linear filter Direct3D has no one rule: its software rasteriser
+  filters the key's colour in, as the card does, and removes pixels in a
+  dither pattern as dense as the keyed texels' weight in the filter; its
+  documented reference pipeline gives a keyed texel an alpha of 0 before
+  the filter and leaves the dropping to the alpha test; and a GPU measured
+  through its driver removes every pixel a keyed texel has any weight in.
+  The card drops by the nearest texel, the one with the largest weight in
+  the filter: the edge of what it drops is within a texel of where each of
+  the three puts it, and it needs no dither and no alpha test.
 - `SRCBLEND` and `DESTBLEND` take Direct3D's factors 1 to 13, and
   "Blending" says what each is.
 - `ZBIAS` is in steps of the depth buffer: a fragment with a bias of n is n
