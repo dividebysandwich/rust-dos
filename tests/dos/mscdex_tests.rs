@@ -307,6 +307,15 @@ fn head(cpu: &mut Cpu, mode: u8) -> u32 {
     cpu.bus.read_32(BUFFER + 2)
 }
 
+/// Read Long (80h) of `count` raw sectors from sector `lba`, in HSG
+/// addressing, into 3100:0000.
+fn read_raw(cpu: &mut Cpu, lba: u32, count: u8) -> u16 {
+    let mut params = vec![0, 0x00, 0x00, 0x00, 0x31, count, 0];
+    params.extend(le(lba));
+    params.push(1);
+    request(cpu, 0x80, &params)
+}
+
 #[test]
 fn the_head_is_where_the_subchannel_of_the_sector_sought_says() {
     // The test disc with a CloneCD subchannel file beside its sheet: Q
@@ -324,7 +333,8 @@ fn the_head_is_where_the_subchannel_of_the_sector_sought_says() {
     let mut sub = Vec::new();
     for lba in 0..sectors + 10 {
         let at = if lba == ahead { lba + 1 } else { lba } + 150;
-        let mut q = [0x41, 0x01, 0x01, 0, 0, 0, 0, bcd(at / 75 / 60), bcd(at / 75 % 60), bcd(at % 75), 0, 0];
+        let msf = [bcd(at / 75 / 60), bcd(at / 75 % 60), bcd(at % 75)];
+        let mut q = [0x41, 0x01, 0x01, 0, 0, 0, 0, msf[0], msf[1], msf[2], 0, 0];
         let crc = cdimage::q_crc(&q) ^ if lba == bad { 0x0101 } else { 0 };
         q[10..12].copy_from_slice(&crc.to_be_bytes());
         sub.extend([0u8; 12]);
@@ -347,14 +357,62 @@ fn the_head_is_where_the_subchannel_of_the_sector_sought_says() {
     // The Q channel query agrees.
     seek(&mut cpu, ahead);
     assert_eq!(ioctl(&mut cpu, 0x03, &[0x0C]), 0x0100);
-    let (m, s, f) = (cpu.bus.read_8(BUFFER + 8), cpu.bus.read_8(BUFFER + 9), cpu.bus.read_8(BUFFER + 10));
-    assert_eq!((m as u32 * 60 + s as u32) * 75 + f as u32, ahead + 1 + 150);
+    let msf = [8, 9, 10].map(|i| cpu.bus.read_8(BUFFER + i) as u32);
+    assert_eq!((msf[0] * 60 + msf[1]) * 75 + msf[2], ahead + 1 + 150);
     // A read leaves the head on the last sector read.
-    let mut params = vec![0, 0x00, 0x00, 0x00, 0x31, 2, 0];
-    params.extend(le(7));
-    params.push(0);
-    assert_eq!(request(&mut cpu, 0x80, &params), 0x0100);
+    assert_eq!(read_raw(&mut cpu, 7, 2), 0x0100);
     assert_eq!(head(&mut cpu, 0), 8);
+}
+
+/// The head stays on the disc, and after a play that ended it is where
+/// the play ended until a read moves it. A save state keeps it, and one
+/// saved before states kept it loads with it at sector 0.
+#[test]
+fn the_head_after_a_failed_read_a_play_a_disc_change_and_a_state() {
+    use rust_dos::savestate::machine;
+    let (mut cpu, audio_start) = disc("head_moves");
+    let leadout = audio_start + 10;
+
+    // A read that runs into the lead-out stops the head on the last
+    // sector of the disc, and sector numbers past the disc don't move it.
+    assert_eq!(read_raw(&mut cpu, leadout - 1, 3), 0x8108);
+    assert_eq!(head(&mut cpu, 0), leadout - 1);
+    assert_eq!(read_raw(&mut cpu, u32::MAX, 2), 0x8108);
+    assert_eq!(seek(&mut cpu, u32::MAX), 0x0100);
+    assert_eq!(head(&mut cpu, 1), redbook(leadout - 1));
+
+    // A play that ended leaves the head at its end; a read then moves it.
+    seek(&mut cpu, 3);
+    let mut play = vec![0];
+    play.extend(le(audio_start));
+    play.extend(le(2));
+    assert_eq!(request(&mut cpu, 0x84, &play), 0x0300);
+    play_for(&mut cpu, 3 * 588);
+    assert_eq!(head(&mut cpu, 0), audio_start + 2);
+    assert_eq!(read_raw(&mut cpu, 5, 1), 0x0100);
+    assert_eq!(head(&mut cpu, 0), 5);
+    // The audio status still has the range of the last play.
+    assert_eq!(ioctl(&mut cpu, 0x03, &[0x0F]), 0x0100);
+    assert_eq!(cpu.bus.read_32(BUFFER + 3), redbook(audio_start));
+
+    // A state keeps the head.
+    seek(&mut cpu, 7);
+    let (state, parts) = machine::save_parts(&cpu);
+    seek(&mut cpu, 2);
+    machine::load(&mut cpu, &state).unwrap();
+    assert_eq!(head(&mut cpu, 0), 7);
+    // One saved before it kept the heads, without their section.
+    let heads = parts.iter().find(|(name, _)| name == "CDHD").expect("the section").1.clone();
+    let mut old = state[..heads.start].to_vec();
+    old.extend_from_slice(&state[heads.end..]);
+    seek(&mut cpu, 2);
+    machine::load(&mut cpu, &old).unwrap();
+    assert_eq!(head(&mut cpu, 0), 0);
+
+    // Another disc: the head is at its start.
+    seek(&mut cpu, 7);
+    cpu.bus.mscdex.disc_changed(3);
+    assert_eq!(head(&mut cpu, 0), 0);
 }
 
 #[test]

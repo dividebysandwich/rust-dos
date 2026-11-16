@@ -13,6 +13,7 @@ use crate::cdrom::image::{CdImage, is_unreadable};
 use crate::cdrom::{self, DATA_SECTOR, RAW_SECTOR};
 use crate::cpu::{Cpu, CpuFlags};
 use crate::disk::DriveKind;
+use crate::savestate::{Reader, State, Writer};
 use iced_x86::Register;
 use std::rc::Rc;
 
@@ -59,17 +60,37 @@ pub struct MscdexState {
     changed: [bool; 26],
     locked: [bool; 26],
     /// The sector each drive's head is on while it isn't playing: the
-    /// last one sought or read. The position queries report where the
-    /// subchannel there says the head is. Not saved: after a state loads,
-    /// the head is at sector 0 until the next seek or read.
+    /// last one sought or read, or 0 on a disc just put in. The position
+    /// queries report where the subchannel there says the head is. A
+    /// state keeps the heads in a section of their own (`save_heads`).
     head: [u32; 26],
 }
 
 impl MscdexState {
-    /// A new disc is in `drive`: the next media check reports it.
+    /// A new disc is in `drive`: the next media check reports it, and the
+    /// head is at the disc's start.
     pub fn disc_changed(&mut self, drive: u8) {
         if let Some(changed) = self.changed.get_mut(drive as usize) {
             *changed = true;
+        }
+        if let Some(head) = self.head.get_mut(drive as usize) {
+            *head = 0;
+        }
+    }
+
+    /// Save the drives' heads, which a state keeps in a section of their
+    /// own so that states saved before they were kept still load.
+    pub(crate) fn save_heads(&self, w: &mut Writer) {
+        self.head.save(w);
+    }
+
+    /// Load the heads `save_heads` saved, or with `None` (a state saved
+    /// before they were kept) put every head at sector 0.
+    pub(crate) fn load_heads(&mut self, r: Option<&mut Reader>) -> crate::savestate::Result<()> {
+        self.head = [0; 26];
+        match r {
+            Some(r) => self.head.load(r),
+            None => Ok(()),
         }
     }
 }
@@ -356,19 +377,23 @@ fn image_request(cpu: &mut Cpu, drive: u8, image: &Rc<CdImage>, req: usize) -> u
             let count = cpu.bus.guest_read_16((req + 0x12) as u32) as u32;
             let start = sector(mode, cpu.bus.guest_read_32((req + 0x14) as u32));
             let raw = cpu.bus.guest_read_8((req + 0x18) as u32) != 0;
-            let status = read_long(cpu, image, buffer, start, count, raw);
-            // The head stays on the last sector read, as a drive's does.
-            if count > 0 {
-                cpu.bus.mscdex.head[drive as usize] = start + count - 1;
+            // A play that has ended leaves the head where it ended, until
+            // the head moves to the sectors read. One playing or paused
+            // goes on, and the position queries report it.
+            let player = &mut cpu.bus.cdaudio;
+            if player.drive() == Some(drive) && player.state() == PlayState::Stopped {
+                player.reset();
             }
-            status
+            read_long(cpu, drive, image, buffer, start, count, raw)
         }
         // Read Long Prefetch: a hint.
         0x82 => DONE,
-        // Seek: the drive stops playing, and the head goes to the sector.
+        // Seek: the drive stops playing, and the head goes to the sector,
+        // if the disc has it (`move_head`).
         0x83 => {
             cpu.bus.cdaudio.stop_drive(drive);
-            cpu.bus.mscdex.head[drive as usize] = sector(mode, cpu.bus.guest_read_32((req + 0x14) as u32));
+            let to = sector(mode, cpu.bus.guest_read_32((req + 0x14) as u32));
+            move_head(cpu, drive, image, to);
             DONE
         }
         // Play Audio: from a sector, for a number of sectors.
@@ -408,10 +433,31 @@ fn image_request(cpu: &mut Cpu, drive: u8, image: &Rc<CdImage>, req: usize) -> u
     }
 }
 
-fn read_long(cpu: &mut Cpu, image: &CdImage, buffer: usize, start: u32, count: u32, raw: bool) -> u16 {
+/// Put the head of `drive` on sector `lba`, if it is on the disc: before
+/// the lead-out. A drive's head doesn't go past it, and the position
+/// queries' sector numbers then stay in range of their addresses.
+fn move_head(cpu: &mut Cpu, drive: u8, image: &CdImage, lba: u32) {
+    if lba < image.leadout() {
+        cpu.bus.mscdex.head[drive as usize] = lba;
+    }
+}
+
+/// Read `count` sectors from `start` into `buffer`. The head of `drive`
+/// stays on the last sector it reached, as a drive's does: the last one
+/// read, or the one it failed on.
+fn read_long(
+    cpu: &mut Cpu,
+    drive: u8,
+    image: &CdImage,
+    buffer: usize,
+    start: u32,
+    count: u32,
+    raw: bool,
+) -> u16 {
     let mut data = [0u8; RAW_SECTOR];
     let size = if raw { RAW_SECTOR } else { DATA_SECTOR };
     for i in 0..count {
+        move_head(cpu, drive, image, start + i);
         let read = if raw {
             image.read_raw(start + i, &mut data)
         } else {
@@ -441,9 +487,9 @@ fn duration_msf(sectors: u32) -> [u8; 3] {
 
 /// IOCTL input: the control block at `buf` starts with its code.
 fn ioctl_input(cpu: &mut Cpu, drive: u8, image: &CdImage, buf: usize) -> u16 {
-    // The sector under the head: the one playing, or else the last one
-    // sought or read. The position queries report what its Q subchannel
-    // says, as a drive does.
+    // The sector under the head: the one playing (or paused at, or where
+    // a play ended), or else the last one sought or read. The position
+    // queries report what its Q subchannel says, as a drive does.
     let player = &cpu.bus.cdaudio;
     let position = match player.drive() {
         Some(d) if d == drive => player.position(),
@@ -462,7 +508,8 @@ fn ioctl_input(cpu: &mut Cpu, drive: u8, image: &CdImage, buf: usize) -> u16 {
         // the disc's layout has the sector.
         0x01 => {
             let at = image.q_position(position).map_or(position, |q| q.absolute);
-            let address = if bus.guest_read_8((buf + 1) as u32) == 1 { cdrom::redbook(at) } else { at };
+            let red_book = bus.guest_read_8((buf + 1) as u32) == 1;
+            let address = if red_book { cdrom::redbook(at) } else { at };
             bus.guest_write_32((buf + 2) as u32, address);
         }
         // Audio channel info: input channel and volume per output.
@@ -604,4 +651,5 @@ pub fn install_device(bus: &mut Bus, nul: usize) {
     }
 }
 
+// The heads are saved in a section of their own: `save_heads`.
 crate::state_fields!(MscdexState { request, changed, locked } skip { head });

@@ -1470,6 +1470,7 @@ const STILL: &[(&str, &str)] = &[
     ("SOUN.gus_line", "the Ultrasound's interrupt line, up only until the handler reads the card"),
     ("DOS.dos_high", "the settings' DOS=HIGH"),
     ("DOS.disk_io", "the disk's speed settings, and the time charged until the next instruction takes it"),
+    ("CDHD", "MSCDEX's heads: the run's CD drive is a folder, which has no sectors to seek"),
     ("ENV", "the settings' environment variables"),
     ("SEP", "the SYSENTER MSRs, which only a Pentium II's WRMSR sets"),
     ("SSE", "the SSE registers and MXCSR, which only a Pentium III's instructions set"),
