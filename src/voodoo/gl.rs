@@ -2259,6 +2259,14 @@ impl VoodooGl {
         let across = if s.wide { 2 } else { 1 };
         let (w, h) = (s.width.max(1) * across, s.height.max(1));
         let size = (w * self.scale, h * self.scale);
+        // The picture the card shows is the one composed last, while the
+        // buffer it shows holds the next frame's drawing.
+        if s.held
+            && let Some((composite, old)) = &self.composite
+            && *old == size
+        {
+            return Some((composite.color, size));
+        }
         let buffer = |surface: &Surface| surface.buffer.and_then(|b| self.targets.get(&b));
         let desktop = buffer(&s.desktop);
         let overlay = s.overlay.as_ref().and_then(|o| buffer(&o.surface));
@@ -3103,6 +3111,7 @@ pub(crate) mod tests {
                 overlay: None,
                 cursor: None,
                 clut: Vec::new(),
+                held: false,
             }))
         };
         let (red, green) = ([255, 0, 0], [0, 255, 0]);
