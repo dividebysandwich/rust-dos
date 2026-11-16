@@ -95,7 +95,7 @@ impl Polls {
     /// no other built-in function called in between by any thread. A
     /// loop like that does the same until the frame the display waits
     /// for, so the caller can make the thread wait for that frame instead
-    /// of running each poll (a game calling Flip without DDFLIP_WAIT until
+    /// of running each poll (a game calling Flip without waiting until
     /// it succeeds makes hundreds of calls a millisecond). A loop that
     /// does more while it waits, such as filling its sound buffer or
     /// reading its messages, keeps every poll.

@@ -1545,9 +1545,9 @@ const DDGFS_ISFLIPDONE: u32 = 0x2;
 /// DDGFS_ISFLIPDONE alike. That is a flip of the primary surface's chain
 /// that waits for its frame, or a swap of the 3D-only card's that waits
 /// for its retrace; the flips of other chains show at once. (On the card,
-/// Flip with DDFLIP_WAIT still goes ahead then: its swap goes behind the
-/// pending one.) A thread that does nothing but call it again waits for
-/// the flip (`still_to_show`). DDGFS_CANFLIP also fails with
+/// a Flip that waits (`flip_waits`) still goes ahead then: its swap goes
+/// behind the pending one.) A thread that does nothing but call it again
+/// waits for the flip (`still_to_show`). DDGFS_CANFLIP also fails with
 /// DDERR_SURFACEBUSY while a surface of the chain is locked or has a DC,
 /// as Flip does, and a lost surface gives DDERR_SURFACELOST.
 pub fn get_flip_status(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
