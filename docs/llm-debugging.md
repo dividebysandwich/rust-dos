@@ -145,13 +145,16 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   (`mb`) and whether it is the default for the CPU and the display
   adapter (`derived`: true while `memsize` isn't set; after a save state
   is loaded, while the state's size is the default for its CPU and
-  adapter). `paused` (with `stop` and `stop_seq`) says whether the
-  debugger has stopped the machine, at a breakpoint or otherwise.
-  `cpu_state` is the processor's own state: `Running`, or `Halted` after
-  HLT until an interrupt. It stays `Running` while the machine is
-  paused, so wait for a stop with `paused` or the journal's `paused`
-  entry, not with `cpu_state`. `video.vga` shows the CRTC Start Address
-  the program set and the one on screen, which helps when a game
+  adapter). `cpu` has the processor's `model` and whether it is the
+  default for the display adapter (`derived`: true while `cpu` isn't
+  set; after a save state is loaded, while the state's model is the
+  default for its adapter). `paused` (with `stop` and `stop_seq`) says
+  whether the debugger has stopped the machine, at a breakpoint or
+  otherwise. `cpu_state` is the processor's own state: `Running`, or
+  `Halted` after HLT until an interrupt. It stays `Running` while the
+  machine is paused, so wait for a stop with `paused` or the journal's
+  `paused` entry, not with `cpu_state`. `video.vga` shows the CRTC Start
+  Address the program set and the one on screen, which helps when a game
   that flips pages flickers or shows half-drawn frames. `video.crt` is the
   display timing the VGA registers describe (refresh rate, total and
   displayed scanlines): port 3DAh reports retrace and display enable from

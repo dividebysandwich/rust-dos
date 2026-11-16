@@ -404,8 +404,10 @@ impl MainHost<'_, '_> {
             return Err(e);
         }
         // `loaded_settings` leaves `memsize` unset only where the state's
-        // size is the default for its hardware.
+        // size is the default for its hardware, and `cpu` unset where the
+        // state's processor is the default for its display adapter.
         self.cpu.bus.memory_derived = hardware.memsize.is_none();
+        self.cpu.bus.cpu_derived = hardware.cpu.is_none();
         // Deterministic mode runs at the speed the machine's state brought
         // (a state saved at auto or max brings the speed it had then), so
         // the run from the state is the same whatever this machine ran at.
