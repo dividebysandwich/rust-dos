@@ -158,9 +158,9 @@ pub struct JitCtx {
     /// a subtraction's carry is set where nothing was borrowed.
     pub szco: [[u16; 16]; 2],
     /// `jit_fpu_reg_op`, `jit_fpu_addsub_value`, `jit_fpu_to_int` and
-    /// `jit_fpu_div_zero`; and the trampoline's own exact 80-bit sum
-    /// (AArch64's `fpu_addsub`).
-    pub fpu: [usize; 5],
+    /// `jit_fpu_div_zero`; the trampoline's own exact 80-bit sum
+    /// (AArch64's `fpu_addsub`); and `jit_fpu_to_int64`.
+    pub fpu: [usize; 6],
     /// `jit_dev_read`, `jit_dev_write` and `jit_dev_write_run` (x86-64).
     pub dev: [usize; 3],
     /// `jit_fetch`.
@@ -341,6 +341,7 @@ impl JitCtx {
                 jit_fpu_to_int as *const () as usize,
                 jit_fpu_div_zero as *const () as usize,
                 0,
+                jit_fpu_to_int64 as *const () as usize,
             ],
             dev: [
                 jit_dev_read as *const () as usize,
@@ -1016,6 +1017,14 @@ jit_fn! {
     /// rounding up or down, and values that don't fit.
     fn jit_fpu_to_int(cpu: *mut Cpu, ctx: *mut JitCtx, size: u32, value: f64) -> u32 {
         fpu_helper(cpu, ctx, |cpu| crate::instructions::fpu::data::to_int(cpu, value, size as u8))
+    }
+}
+
+jit_fn! {
+    /// `Uop::FToInt64`, for what the code's own conversion doesn't cover:
+    /// the qword FISTP stores of ST(0).
+    fn jit_fpu_to_int64(cpu: *mut Cpu, ctx: *mut JitCtx) -> u64 {
+        fpu_helper(cpu, ctx, |cpu| crate::instructions::fpu::data::st0_int_bits(cpu, 8))
     }
 }
 
