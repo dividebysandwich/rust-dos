@@ -3101,6 +3101,54 @@ fn dxt_surfaces_are_whole_blocks_in_system_memory() {
     assert_eq!(peek(&cpu, data + DESC3 + 0x10), 32);
 }
 
+const IID_IDIRECT3DTEXTURE2: [u8; 16] = [
+    0x02, 0x15, 0x28, 0x93, 0xF8, 0x8C, 0xD0, 0x11, 0x89, 0xAB, 0x00, 0xA0, 0xC9, 0x05, 0x41, 0x29,
+];
+/// IDirect3DTexture2::Load.
+const TEX2_LOAD: u32 = 5;
+/// The IDirect3DTexture2 interfaces of SOURCE and FRONT.
+const TEX_SOURCE: u32 = 0x24;
+const TEX_FRONT: u32 = 0x28;
+
+/// FOUR_BLOCKS in an 8x8 DXT1 texture, loaded (IDirect3DTexture2's
+/// Load) into another DXT1 texture.
+fn dxt_load_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    d.resize(DXT_DATA_SIZE, 0);
+    dxt_desc(&mut d, DESC, b"DXT1", 8, 8);
+    dxt_desc(&mut d, DESC3, b"DXT1", 8, 8);
+    put(&mut d, BLOCKS, &FOUR_BLOCKS);
+    put(&mut d, IID, &IID_IDIRECT3DTEXTURE2);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        dxt_start(a, l, &mut c, 32, &[(DESC3, FRONT)])?;
+        for (surface, texture) in [(SOURCE, TEX_SOURCE), (FRONT, TEX_FRONT)] {
+            let args = [Arg::At(IID), Arg::At(texture)];
+            c.com(a, l, surface, S_QUERY_INTERFACE, &args)?;
+        }
+        c.com(a, l, TEX_FRONT, TEX2_LOAD, &[Arg::Val(TEX_SOURCE)])?;
+        find_pixels(a, l, &mut c, FRONT, DESC3)?;
+        finish(a, l)
+    })
+}
+
+/// Load copies a DXT texture's blocks into a texture of its format, as
+/// DirectX 7 does: games fill a DXT texture in system memory and load
+/// it into a managed or video memory one, which they draw with.
+#[test]
+fn load_copies_the_blocks_of_a_dxt_texture() {
+    let (program, data) = dxt_load_program();
+    let mut cpu = machine("dxt_load", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 16);
+    assert_eq!(r[1..16], [0; 15], "{r:X?}");
+    let blocks: Vec<u8> = locked_pixels(&cpu, data, DESC3, (8, 1), 4)
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    assert_eq!(blocks, FOUR_BLOCKS);
+}
+
 // The frame rate cap (`fps_cap`).
 
 /// Where the capped programs count their frames, and their second

@@ -7,6 +7,7 @@
 //! level by level of their mipmaps, and between cube maps face by
 //! face. IDirect3DDevice7's Load is ported from Wine's device.c.
 
+use super::super::dxt_blt;
 use super::super::surface::{
     self, DDSCAPS_MIPMAP, DDSCAPS2_CUBEMAP as CUBEMAP,
     DDSCAPS2_CUBEMAP_ALLFACES as CUBEMAP_ALLFACES, DDSCAPS2_CUBEMAP_POSITIVEX as CUBEMAP_POSITIVEX,
@@ -19,6 +20,7 @@ use super::super::{
 use super::device::{self, HANDLE_TEXTURE};
 use super::{D3D_OK, D3DERR_TEXTURE_LOAD_FAILED, probe, read_dwords};
 use crate::cpu::Cpu;
+use crate::win32::gdi32::Rect;
 
 /// The surface of the texture interface `this`.
 fn texture_of(cpu: &mut Cpu, this: u32) -> Result<u32, u32> {
@@ -121,7 +123,8 @@ fn copy_palette(cpu: &mut Cpu, dest: u32, src: u32) {
 }
 
 /// Copy the rectangle `rect` (left, top, right, bottom) of the surface
-/// `src` to `point` in `dest`, which has as many bits a pixel.
+/// `src` to `point` in `dest`, which has as many bits a pixel, or the
+/// same DXT format.
 fn copy_rect(cpu: &mut Cpu, dest: u32, src: u32, point: (u32, u32), rect: [u32; 4]) {
     let (Some(d), Some(s)) = (
         state(cpu).surface(dest).cloned(),
@@ -129,10 +132,9 @@ fn copy_rect(cpu: &mut Cpu, dest: u32, src: u32, point: (u32, u32), rect: [u32; 
     ) else {
         return;
     };
-    if d.format.bits != s.format.bits || d.compressed() || s.compressed() {
+    if d.format.bits != s.format.bits {
         return;
     }
-    let bpp = s.bytes_per_pixel();
     let [left, top, right, bottom] = rect;
     let right = right.min(s.width);
     let bottom = bottom.min(s.height);
@@ -141,12 +143,47 @@ fn copy_rect(cpu: &mut Cpu, dest: u32, src: u32, point: (u32, u32), rect: [u32; 
     }
     let w = (right - left).min(d.width - point.0);
     let h = (bottom - top).min(d.height - point.1);
+    if d.compressed() || s.compressed() {
+        let to = (point.0, point.1, point.0 + w, point.1 + h);
+        copy_blocks(cpu, dest, &d, &s, to, (left, top, left + w, top + h));
+        return;
+    }
+    let bpp = s.bytes_per_pixel();
     let mut row = vec![0; (w * bpp) as usize];
     for y in 0..h {
         surface::read_bytes(cpu, &s, (top + y) * s.pitch + left * bpp, &mut row);
         surface::write_bytes(cpu, &d, (point.1 + y) * d.pitch + point.0 * bpp, &row);
     }
     surface::changed(cpu, dest);
+}
+
+/// Copy the blocks of the rectangle `from` of the DXT surface `s` to the
+/// rectangle `to` of `d`, of its size, as a blit between two surfaces
+/// of one DXT format does: nothing unless both have that format and the
+/// rectangles lie on whole blocks. A game that fills a DXT texture in
+/// system memory and loads it into a managed one samples the blocks.
+fn copy_blocks(
+    cpu: &mut Cpu,
+    dest: u32,
+    d: &surface::Surface,
+    s: &surface::Surface,
+    to: (u32, u32, u32, u32),
+    from: (u32, u32, u32, u32),
+) {
+    let (Some(df), Some(sf)) = (
+        surface::dxt_format(&d.format),
+        surface::dxt_format(&s.format),
+    ) else {
+        return;
+    };
+    if df != sf {
+        return;
+    }
+    let rect =
+        |(l, t, r, b): (u32, u32, u32, u32)| Rect::new(l as i32, t as i32, r as i32, b as i32);
+    if dxt_blt::copy(cpu, s, &rect(from), d, &rect(to)).is_ok() {
+        surface::changed(cpu, dest);
+    }
 }
 
 /// Load(this, source) of IDirect3DTexture and 2: the source's pixels,
