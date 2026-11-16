@@ -1255,7 +1255,11 @@ const HOST_DRIFT: f64 = 0.1;
 /// The share it moves down when two samples in a row say the host can't
 /// run the speed it runs at.
 const HOST_FALL: f64 = 0.5;
-/// The first samples, the most of which is the estimate.
+/// The first samples, the most of which is the estimate. Chosen: a sample
+/// is a frame, and in Doom's run the first said 1,200 to 2,500 where the
+/// host ran 15,000, so the most of three passes over one or two stalled
+/// frames. A run whose first three all stall starts low and climbs by
+/// `HOST_DRIFT`, as it did without the seed.
 const HOST_SEED: u32 = 3;
 /// The share of the speed below which a sample says the host can't run
 /// it: too far under the speed to be the scatter of samples taken at the

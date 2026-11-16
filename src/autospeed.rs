@@ -142,9 +142,28 @@ const LOADS: f64 = 8.0 * WORKING;
 /// every few frames would fall behind at each probe, a few measurements
 /// apart. A load (`LOADS`) ends a probe without a miss: its frames are
 /// another scene's.
+///
+/// `PROBE_STEP` is chosen. Quake's timedemo held at 88,000 where it draws
+/// 70 frames a second at 190,000, 2.2 times as much; a probe that misses
+/// costs `JUDGED` measurements at its speed, so a longer one costs more
+/// than it can find.
 const PROBE_STEP: f64 = 2.0;
+/// Chosen, between the noise and the falls it has to tell apart. In the
+/// traces of Quake, Oni and Rage of Mages 2, the mean of `JUDGED` readings
+/// at one speed moved 0.6% from the mean before it at the median, 7% at
+/// the 90th percentile (a timedemo's scenes come and go within a hold) and
+/// 11% at most; Quake's step up from 80,000 drew 7% to 16% fewer frames in
+/// eleven runs. One called through noise costs a step up, judged as any
+/// other.
 const SAME: f64 = 0.05;
+/// Chosen. Of 556 readings short of 55 frames a second in the holds of
+/// Quake, Oni and Rage of Mages 2, 3 sat halted for more than a tenth of
+/// the measurement.
 const SPARE: f64 = 0.1;
+/// Chosen: the longest wait is `HOLD_WINDOWS` << 4, 480 measurements of
+/// `WINDOW_NS`, four minutes, which keeps a game that misses every probe
+/// (Doom's 35) above its speed for 1% of the time, and still probes again
+/// within a level.
 const MOST_PROBE_BACKOFFS: u32 = 4;
 /// Steps down that kept this share of the frames the speed held at lost
 /// nothing. Each step is measured against the held frame rate: a game
