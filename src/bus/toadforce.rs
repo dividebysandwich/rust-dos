@@ -449,12 +449,11 @@ impl Bus {
     /// `toadforce_show` then reads nothing back, and the caller draws
     /// the window from the host's copy instead of from card memory.
     ///
-    /// The surface is the one the card shows as of the commands it has
-    /// run (`vbe.start`), and the queued ones stay queued. A program
-    /// that flipped draws its next frame into the surface the screen
-    /// had until then, which is still the one latched until the next
-    /// retrace: running the queue here and showing the latched surface
-    /// would show that frame half drawn.
+    /// The surface is the picture's, at `vbe.latched_start`, which is
+    /// the one card memory is drawn from too (`Vbe::picture`), so both
+    /// renderers show the same frame. In the card's own mode that is
+    /// the surface the card shows as of the commands it has run
+    /// (`toadforce_picture`); the queued ones stay queued.
     pub fn toadforce_host_picture(&mut self) -> Option<crate::toadforce::format::Surface> {
         use crate::toadforce::format::{Format, Surface};
         if self.video_mode != VideoMode::Vesa || !self.toadforce_hosted() {
@@ -470,7 +469,7 @@ impl Bus {
             _ => return None,
         };
         let surface = Surface {
-            offset: self.vbe.start,
+            offset: self.vbe.latched_start,
             pitch: self.vbe.pitch,
             width: mode.width as u32,
             height: mode.height as u32,
@@ -572,7 +571,18 @@ impl Bus {
     }
 
     /// The surface the card shows moved, or a colour of its palette
-    /// changed: the screen shows it from the next frame.
+    /// changed.
+    ///
+    /// The screen shows the surface at `MODE_START` from the moment it
+    /// changes ("Flips" in `docs/toadforce-spec.md`): the window,
+    /// screenshots, recordings and the debugger's frames, with either
+    /// renderer (`toadforce_host_picture`). That surface is the frame
+    /// the program finished. The one latched at the last retrace is the
+    /// one a program that flipped at once draws its next frame into, as
+    /// the built-in Windows' DirectDraw does after every Flip: shown
+    /// until the next retrace, it would be that frame half drawn, and a
+    /// screenshot at a fixed emulated time can land there (No One Lives
+    /// Forever clears it to black right after the flip).
     fn toadforce_picture(&mut self) {
         let Some(card) = self.toadforce.as_deref() else {
             return;
@@ -584,6 +594,12 @@ impl Bus {
         if self.vbe.start != start {
             self.vbe.start = start;
             self.note_display_start();
+        }
+        if self.vbe.latched_start != start {
+            self.vbe.latched_start = start;
+            // The flip counts for the frame rate at the next retrace,
+            // which finds nothing left to latch.
+            self.vga.flipped = true;
         }
         self.vga.mark_dirty_full();
     }
@@ -691,6 +707,12 @@ impl Bus {
         if let Some(shown) = shown {
             self.vbe.mode = Some(scanout(&shown));
             self.vga.set_fixed_timing(Some(shown.timing()));
+            // The picture is the surface the card shows, also in a
+            // state saved by a build that kept the one latched at the
+            // retrace (`toadforce_picture`).
+            let start = self.toadforce.as_deref().map_or(0, |c| c.display.start());
+            self.vbe.start = start;
+            self.vbe.latched_start = start;
         }
     }
 
