@@ -1070,11 +1070,18 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   every row, and the card's own work on the processor (its `FILL`, `BLT`
   and `CLEAR`, a declined draw), which writes card memory with no note
   of what it writes, read the surface back whole, and it is no longer
-  ahead. Evil Islands' software cursor saves the 32x32 pixels under it
-  out of the 800x600 back buffer and the screen every frame: that reads
-  about three bands of 32 rows a frame, some 170,000 bytes, where each
-  frame read the whole 960,000-byte back buffer, and the surfaces stay
-  on the GPU.
+  ahead. So does a read of rows that would make more than eight reads
+  of rows of one surface (`ROW_READS`), or more than half its rows
+  (`ROW_SHARE`), since the host last changed its copy: a loop that
+  reads a row at a time without asking first then costs eight small
+  reads and a whole one, and a read of most of the rows costs about
+  what the whole surface does. The reads are of whole rows rather than
+  of the rectangle asked for: a smaller `glReadPixels` waits for the GPU
+  as long, and the bytes are few either way. Evil Islands' software
+  cursor saves the 32x32 pixels under it out of the 800x600 back buffer
+  and the screen every frame: that reads about three bands of 32 rows a
+  frame, some 170,000 bytes, where each frame read the whole
+  960,000-byte back buffer, and the surfaces stay on the GPU.
 - **What the program and the drivers write.** A write into a surface
   that is ahead reads nothing back. The card notes each byte written
   (`Gpu::writing`, a bit for each byte of the surface), and card

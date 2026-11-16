@@ -53,10 +53,11 @@
 //!   there afterwards is noted as any other. The card keeps the rows
 //!   read (`Ahead::back`) until the host changes its copy, so a read of
 //!   them again reads nothing, and one of other rows reads those. A
-//!   read of every row, a host without the surface, and the card's own
+//!   read of every row, a host without the surface, the card's own
 //!   work on the processor (`settle`), which writes card memory without
-//!   noting what it writes, read the surface back whole, after which it
-//!   isn't ahead.
+//!   noting what it writes, and a read past `ROW_READS` reads of rows
+//!   or `ROW_SHARE` of the rows since the host last changed the copy
+//!   read the surface back whole, after which it isn't ahead.
 //! - **What the processor wrote.** `Pages` counts the writes to each
 //!   page of card memory. A host keeps a `Stamp` of the bytes a copy
 //!   was made from and makes the copy again when the stamp is stale.
@@ -880,7 +881,29 @@ struct Ahead {
     /// host's pixels of them, and the processor's where it wrote since.
     /// A read of these rows reads nothing back.
     back: Ranges,
+    /// The reads of rows (`Host::read_back_rows`) since the host last
+    /// changed it, each band read on its own counted.
+    row_reads: u32,
 }
+
+/// The most reads of rows of one surface between two changes of the
+/// host's copy: the read after them reads the rest of the surface back
+/// whole. Code that reads a rectangle a row at a time without asking
+/// for its rows first (`win32::screen::will_read`) then costs eight
+/// small reads and one whole one, where it would cost one read a row.
+/// Chosen on Evil Islands, the case the reads of rows are for: its
+/// cursor reads about 3.4 bands of 32 rows a frame, out of the back
+/// buffer and the screen, and the host draws into each between, so a
+/// surface sees three reads at most, with room left.
+const ROW_READS: u32 = 8;
+
+/// The rows of a surface read back between two changes of the host's
+/// copy past which the read reads the rest back whole: more than its
+/// height divided by this. A read of most of the rows costs about what
+/// the whole read-back does, and reading the rest as well takes the
+/// surface off the host. Evil Islands' cursor reads about 109 rows of
+/// 600 a frame over both surfaces, far below half of either.
+const ROW_SHARE: u32 = 2;
 
 /// The rows of `surface` that the bytes `bytes`, which share one with
 /// it, lie in: first to after last. None when they are all its rows.
@@ -1167,8 +1190,9 @@ impl Gpu {
     /// Read back the rows `rows` of `a` that card memory doesn't have
     /// the host's pixels of yet, around what the processor wrote of
     /// them, which goes to the host's copy before the host next uses
-    /// it (`push`). False when the host hasn't the surface: the caller
-    /// reads the surface back whole.
+    /// it (`push`). False when the host hasn't the surface, or when the
+    /// reads of rows of it would pass `ROW_READS` or `ROW_SHARE`: the
+    /// caller reads the surface back whole.
     fn read_rows(
         host: &mut dyn Host,
         a: &mut Ahead,
@@ -1190,11 +1214,28 @@ impl Gpu {
         if at < rows.1 {
             missing.push((at, rows.1));
         }
+        if missing.is_empty() {
+            return true;
+        }
         let s = a.surface;
+        let rows_of = |bands: &mut dyn Iterator<Item = (u32, u32)>| -> u32 {
+            bands.map(|(first, end)| end - first).sum()
+        };
+        let held = rows_of(&mut a.back.iter());
+        let wanted = rows_of(&mut missing.iter().copied());
+        let reads = a.row_reads + missing.len() as u32;
+        if reads > ROW_READS || (held + wanted) * ROW_SHARE > s.height {
+            return false;
+        }
         let len = range(&s).1 - s.offset;
         for (first, end) in missing {
             let span = (first * s.pitch, (end * s.pitch).min(len));
             let kept = written_runs(a, span, memory);
+            // Whole rows rather than the rectangle asked for: a read of
+            // a rectangle waits for the GPU as long as one of its rows,
+            // the bytes are few either way, and `back` stays a list of
+            // bands of rows.
+            a.row_reads += 1;
             if !host.read_back_rows(&s, (first, end), memory) {
                 return false;
             }
@@ -1239,6 +1280,7 @@ impl Gpu {
     fn mark(&mut self, surface: Surface) {
         if let Some(a) = self.ahead.iter_mut().find(|a| within(&surface, &a.surface)) {
             a.back.clear();
+            a.row_reads = 0;
             return;
         }
         self.ahead.retain(|a| !within(&a.surface, &surface));
@@ -1246,6 +1288,7 @@ impl Gpu {
             surface,
             written: Written::default(),
             back: Ranges::default(),
+            row_reads: 0,
         });
     }
 
