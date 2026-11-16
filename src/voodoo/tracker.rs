@@ -111,11 +111,12 @@ pub struct Tracker {
     /// Banshee's texture units last looked (`take_changed`): read back
     /// from the renderer, or drawn into in software.
     changed: Ranges,
-    /// Bytes read back for the program, since the `cool` before the
-    /// last if the program read them since the last one.
+    /// Bytes read back for the program since the last `cool`, and those
+    /// hot before it that the program read again in the period before.
     hot: Ranges,
     /// The hot bytes the program read since the last `cool`, which stay
-    /// hot through the next.
+    /// hot through the next. The read that turns bytes hot isn't one of
+    /// them: bytes read back once cool at the next `cool`, however soon.
     read: Ranges,
 }
 
@@ -263,7 +264,6 @@ impl Tracker {
         if hot {
             for &(a, b) in &runs {
                 self.hot.add(a, b);
-                self.read.add(a, b);
             }
         }
         runs
@@ -298,7 +298,6 @@ impl Tracker {
             self.changed.add(a, b);
             if hot {
                 self.hot.add(a, b);
-                self.read.add(a, b);
             }
         }
         taken
@@ -468,12 +467,10 @@ mod tests {
         // Read back for the emulator (a save state), a page stays cool.
         p.take_gpu(PAGE, 2 * PAGE, false);
         assert!(!p.hot_in(PAGE, 2 * PAGE));
-        // Read in the period it turned hot, it stays hot through the
-        // next cool, and a period without reads cools it.
+        // Read back once and not read again, it cools at the next cool,
+        // however soon that comes.
         p.cool();
-        assert!(p.hot_in(2 * PAGE, 3 * PAGE));
-        p.cool();
-        assert!(!p.hot_in(0, 8 * PAGE));
+        assert!(!p.any_hot());
     }
 
     #[test]
@@ -488,17 +485,15 @@ mod tests {
         p.drawn_on_gpu(PAGE, 3 * PAGE);
         p.take_gpu(2 * PAGE, 3 * PAGE, true);
         for _ in 0..4 {
-            p.cool();
             p.touch(2 * PAGE + 10, 2 * PAGE + 20);
+            p.cool();
             assert!(p.hot_in(2 * PAGE + 10, 2 * PAGE + 20));
+            // Only the bytes read stay: the rest of the page cooled.
+            assert!(!p.hot_in(2 * PAGE + 20, 3 * PAGE));
         }
-        // Only the bytes read stay: the rest of the page cooled.
-        p.cool();
-        assert!(p.hot_in(2 * PAGE + 10, 2 * PAGE + 20));
-        assert!(!p.hot_in(2 * PAGE + 20, 3 * PAGE));
-        // A read of bytes that aren't hot leaves them cool.
+        // A read of bytes that aren't hot leaves them cool, and a period
+        // without reads cools the rest.
         p.touch(5 * PAGE, 6 * PAGE);
-        p.cool();
         p.cool();
         assert!(!p.any_hot());
     }

@@ -179,9 +179,10 @@ pub(crate) struct EngineCounts {
     pub left: std::collections::BTreeMap<&'static str, u64>,
 }
 
-/// Frames of a period of the hot pages (`Tracker::cool`): a page read
-/// back from the GPU stays hot while the program reads it at least once
-/// a period, about a second, and cools after one without.
+/// Frames of a period of the hot pages (`Tracker::cool`), about a
+/// second: a page read back from the GPU stays hot to the period's end,
+/// and through each period after one in which the program read it
+/// again. One read back once cools within a period.
 pub(crate) const HOT_FRAMES: u32 = 60;
 
 impl Gpu {
