@@ -142,14 +142,36 @@ fn spread_wide(out: &mut [u8], pitch: usize, f: &Frame) {
 /// rectangle and the colour lookup table). Drawn later (`render`), they
 /// make the picture `Banshee::render` drew when they were taken, for a
 /// fraction of the work of drawing it.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ShownWords {
     frame: Frame,
-    /// The desktop's half of the colour lookup table, or None with the
-    /// table bypassed.
-    clut: Option<[u32; 256]>,
+    /// The halves of the colour lookup table the desktop ([0]) and the
+    /// overlay ([1]) go through, as taken. Boxed: the words live in the
+    /// card, which moves by value while the machine is built, saved and
+    /// loaded, and 2 KB more of it in those moves overflowed a 2 MB
+    /// test thread's stack. Allocated once, with the card, and reused
+    /// by every keep.
+    cluts: Box<[[u32; 256]; 2]>,
+    /// Whether the desktop goes through `cluts[0]`.
+    desktop_clut: bool,
     words: Vec<u16>,
     overlay: Option<ShownOverlay>,
+}
+
+// The words sit by value in the card (`Voodoo::held_words`), so what is
+// added here is added to every move of the machine: keep big parts boxed.
+const _: () = assert!(std::mem::size_of::<ShownWords>() <= 256);
+
+impl Default for ShownWords {
+    fn default() -> Self {
+        Self {
+            frame: Frame::default(),
+            cluts: Box::new([[0; 256]; 2]),
+            desktop_clut: false,
+            words: Vec::new(),
+            overlay: None,
+        }
+    }
 }
 
 /// The overlay's pixels on the screen (`ShownWords`): `cols` of them a
@@ -159,7 +181,8 @@ struct ShownOverlay {
     x: usize,
     y: usize,
     cols: usize,
-    clut: Option<[u32; 256]>,
+    /// Whether the overlay goes through `ShownWords::cluts[1]`.
+    clut: bool,
     words: Vec<u16>,
 }
 
@@ -167,7 +190,7 @@ impl ShownWords {
     /// Draw the picture into `out` as `Banshee::render` does.
     pub fn render(&self, out: &mut [u8], pitch: usize) {
         let f = &self.frame;
-        let clut = self.clut.as_ref().map(|c| &c[..]);
+        let clut = self.desktop_clut.then_some(&self.cluts[0][..]);
         for (y, words) in self.words.chunks(f.width.max(1)).enumerate().take(f.height) {
             let Some(row) = out.get_mut(y * pitch * 4..(y * pitch + f.width.min(pitch)) * 4) else {
                 break;
@@ -178,7 +201,7 @@ impl ShownWords {
             }
         }
         if let Some(o) = self.overlay.as_ref().filter(|o| o.cols > 0 && o.x < pitch) {
-            let clut = o.clut.as_ref().map(|c| &c[..]);
+            let clut = o.clut.then_some(&self.cluts[1][..]);
             // The columns left of the output's right edge.
             let cols = o.cols.min(pitch - o.x);
             for (y, words) in (o.y..).zip(o.words.chunks(o.cols)) {
@@ -300,16 +323,23 @@ impl Banshee {
         {
             return false;
         }
-        let clut = |bypass: u32, select: u32| {
-            (f.cfg & bypass == 0).then(|| {
+        // Copy the half of the table `select` picks into `to`, unless
+        // `bypass` is set: whether the pixels go through it.
+        let clut = |bypass: u32, select: u32, to: &mut [u32; 256]| {
+            let through = f.cfg & bypass == 0;
+            if through {
                 let half = if f.cfg & select != 0 { 256 } else { 0 };
-                let mut clut = [0; 256];
-                clut.copy_from_slice(&self.clut[half..half + 256]);
-                clut
-            })
+                to.copy_from_slice(&self.clut[half..half + 256]);
+            }
+            through
         };
         into.frame = f;
-        into.clut = clut(VIDPROC_DESKTOP_CLUT_BYPASS, VIDPROC_DESKTOP_CLUT_SEL);
+        let [desktop_clut, overlay_clut] = &mut *into.cluts;
+        into.desktop_clut = clut(
+            VIDPROC_DESKTOP_CLUT_BYPASS,
+            VIDPROC_DESKTOP_CLUT_SEL,
+            desktop_clut,
+        );
         let mut shown = into.overlay.take().unwrap_or_default();
         into.overlay = overlay.then(|| {
             let (stride, tiled) = self.overlay_surface(&f);
@@ -339,7 +369,11 @@ impl Banshee {
                 }
             });
             (shown.x, shown.y) = first.unwrap_or_default();
-            shown.clut = clut(VIDPROC_OVERLAY_CLUT_BYPASS, VIDPROC_OVERLAY_CLUT_SEL);
+            shown.clut = clut(
+                VIDPROC_OVERLAY_CLUT_BYPASS,
+                VIDPROC_OVERLAY_CLUT_SEL,
+                overlay_clut,
+            );
             shown
         });
         into.words.clear();
