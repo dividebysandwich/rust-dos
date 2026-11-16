@@ -751,11 +751,11 @@ fn flip_polled_with_other_calls_in_between_runs_every_call() {
 
 /// A flip chain, a flip at the start of a frame, so that it shows a
 /// whole frame later, then a second Flip right after it, with `flags`,
-/// through the front buffer's IDirectDrawSurface7 with `surface7`, else
-/// through its IDirectDrawSurface.
-fn second_flip_program(surface7: bool, flags: u32) -> (Vec<u8>, u32) {
+/// through the front buffer's interface `via` (queried), else through
+/// the IDirectDrawSurface it was made with.
+fn second_flip_program(via: Option<&[u8; 16]>, flags: u32) -> (Vec<u8>, u32) {
     let mut d = flip_chain_data();
-    put(&mut d, IID, &IID_IDIRECTDRAWSURFACE7);
+    put(&mut d, IID, via.unwrap_or(&IID_IDIRECTDRAWSURFACE7));
     program(&[USER32, DDRAW], &d, |a, l| {
         let mut c = Calls { next: 0 };
         start_flip_chain(a, l, &mut c)?;
@@ -774,7 +774,7 @@ fn second_flip_program(surface7: bool, flags: u32) -> (Vec<u8>, u32) {
             &[Arg::I(DDWAITVB_BLOCKEND), Arg::I(0)],
         )?;
         c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
-        let object = if surface7 { QUERIED } else { FRONT };
+        let object = if via.is_some() { QUERIED } else { FRONT };
         c.com(a, l, object, S_FLIP, &[Arg::I(0), Arg::I(flags)])?;
         finish(a, l)
     })
@@ -782,8 +782,8 @@ fn second_flip_program(surface7: bool, flags: u32) -> (Vec<u8>, u32) {
 
 /// The result of second_flip_program's second flip, the calls before it
 /// having succeeded.
-fn second_flip(test: &str, surface7: bool, flags: u32) -> u32 {
-    let (program, data) = second_flip_program(surface7, flags);
+fn second_flip(test: &str, via: Option<&[u8; 16]>, flags: u32) -> u32 {
+    let (program, data) = second_flip_program(via, flags);
     let mut cpu = machine(test, program);
     run_until_done(&mut cpu, data);
     let results = results(&mut cpu, data, 9);
@@ -797,12 +797,19 @@ fn second_flip(test: &str, surface7: bool, flags: u32) -> u32 {
 /// interfaces it waits only with DDFLIP_WAIT.
 #[test]
 fn surface7_flip_waits_for_the_last_flip_unless_told_not_to() {
-    assert_eq!(second_flip("flip7_default", true, 0), 0);
-    assert_eq!(
-        second_flip("flip7_donotwait", true, DDFLIP_DONOTWAIT),
-        DDERR_WASSTILLDRAWING
-    );
-    assert_eq!(second_flip("flip1_default", false, 0), DDERR_WASSTILLDRAWING);
+    let (v4, v7) = (Some(&IID_IDIRECTDRAWSURFACE4), Some(&IID_IDIRECTDRAWSURFACE7));
+    let cases = [
+        ("flip7_default", v7, 0, 0),
+        ("flip7_wait", v7, DDFLIP_WAIT, 0),
+        ("flip7_donotwait", v7, DDFLIP_DONOTWAIT, DDERR_WASSTILLDRAWING),
+        ("flip4_default", v4, 0, DDERR_WASSTILLDRAWING),
+        ("flip4_wait", v4, DDFLIP_WAIT, 0),
+        ("flip1_default", None, 0, DDERR_WASSTILLDRAWING),
+        ("flip1_wait", None, DDFLIP_WAIT, 0),
+    ];
+    for (test, via, flags, result) in cases {
+        assert_eq!(second_flip(test, via, flags), result, "{test}");
+    }
 }
 
 #[test]

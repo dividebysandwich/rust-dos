@@ -3032,10 +3032,9 @@ const DDGFS_ISFLIPDONE: u32 = 2;
 
 /// A flip chain on the Voodoo2's 3dfx device and a flip, whose swap
 /// waits for the card's next retrace; then, again and again with
-/// nothing in between until it succeeds, Flip with DDFLIP_DONOTWAIT
-/// (through IDirectDrawSurface7 Flip waits without it), or
+/// nothing in between until it succeeds, Flip with `flags`, or
 /// GetFlipStatus of the back buffer when `status`.
-fn card_polling_program(status: bool) -> (Vec<u8>, u32) {
+fn card_polling_program(status: bool, flags: u32) -> (Vec<u8>, u32) {
     let mut d = data();
     guid(
         &mut d,
@@ -3076,7 +3075,7 @@ fn card_polling_program(status: bool) -> (Vec<u8>, u32) {
             push(a, l, &[Arg::I(DDGFS_ISFLIPDONE)])?;
             (TARGET, SURF_GET_FLIP_STATUS)
         } else {
-            push(a, l, &[Arg::I(0), Arg::I(DDFLIP_DONOTWAIT)])?;
+            push(a, l, &[Arg::I(0), Arg::I(flags)])?;
             (FRONT, SURF_FLIP)
         };
         a.mov(eax, dword_ptr(l.at(object)))?;
@@ -3100,8 +3099,9 @@ fn flip_polled_on_a_voodoo2_waits_for_the_swap() {
     // The swap is pending until the card's next retrace, and each call
     // of Flip fails until then. A loop that only polls waits for that
     // retrace at its 16th call, which flips, instead of making a call
-    // for each pass until then.
-    let (exe, data) = card_polling_program(false);
+    // for each pass until then. Through IDirectDrawSurface7, Flip fails
+    // only with DDFLIP_DONOTWAIT.
+    let (exe, data) = card_polling_program(false, DDFLIP_DONOTWAIT);
     let mut cpu = machine_with("card_flip_polling", Some(Board::Voodoo2), exe);
     run_until_done(&mut cpu, data);
     assert_eq!(results(&cpu, data, 7)[1..], [0; 6]);
@@ -3111,10 +3111,23 @@ fn flip_polled_on_a_voodoo2_waits_for_the_swap() {
 }
 
 #[test]
+fn flip7_on_a_voodoo2_goes_behind_the_swap_by_default() {
+    // Through IDirectDrawSurface7 Flip waits by default (DirectX 7's
+    // ddraw.h, at DDFLIP_DONOTWAIT): its swap goes behind the one waiting
+    // for the retrace, and the first call succeeds.
+    let (exe, data) = card_polling_program(false, 0);
+    let mut cpu = machine_with("card_flip7_default", Some(Board::Voodoo2), exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&cpu, data, 7)[1..], [0; 6]);
+    assert_eq!(peek(&cpu, data + FIRST_POLL), 0);
+    assert_eq!(peek(&cpu, data + POLLS), 1, "calls of Flip");
+}
+
+#[test]
 fn flip_status_on_a_voodoo2_follows_the_swap() {
     // GetFlipStatus says the flip is still to show while the card's swap
     // waits for its retrace, and a loop that only asks waits for it.
-    let (exe, data) = card_polling_program(true);
+    let (exe, data) = card_polling_program(true, 0);
     let mut cpu = machine_with("card_flip_status", Some(Board::Voodoo2), exe);
     run_until_done(&mut cpu, data);
     assert_eq!(results(&cpu, data, 7)[1..], [0; 6]);
