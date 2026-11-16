@@ -112,6 +112,18 @@ Windows has. `GLIDE2X.DLL` and `GLIDE3X.DLL` are among them only with a
 so a game that checks for Glide by its file sees none without one. A DLL
 of the same name that a game copies to C: wins over the built-in one.
 
+`WING32.DLL`, WinG, is among them too. Games of 1995 that draw through
+WinG installed it from their CDs; on the built-in Windows they find it
+there without that, and a WinG that a game brings in its own folder
+isn't loaded in its place. WinG's halftone brushes are solid brushes of
+their colour, without WinG's dithering.
+
+`MSVCRT20.DLL` and `MSVCRT40.DLL`, the C runtimes of Visual C++ 2 and
+4 that Windows 95 and 98 have beside `MSVCRT.DLL`, are there too, for
+programs and DLLs built with those compilers. Their functions are
+`MSVCRT.DLL`'s, so the three share one heap and one set of open files,
+where Windows' own keep one each.
+
 ### Notepad
 
 `C:\WINDOWS\NOTEPAD.EXE` is there, read-only, as on Windows 98, and the
@@ -130,7 +142,9 @@ asking whether to make it.
 The fonts are the VGA's ROM glyphs, scaled, with each character of the
 dialog fonts as wide as in Windows 98's. Text still looks different, so
 some lines wrap or are cut where Windows 98's aren't, and characters the
-built-in fonts lack, such as `®`, show as `?`.
+built-in fonts lack, such as `®`, show as `?`. Raster fonts a program
+adds from its own .FON or .FNT files with `AddFontResource` are drawn
+with their own glyphs; its TrueType fonts get a built-in face.
 
 ### Painting
 

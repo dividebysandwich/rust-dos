@@ -333,7 +333,11 @@ against that DLL's results in `undname_vc6.txt`).
   the loader's rules: `GLIDE2X.DLL` and `GLIDE3X.DLL` with a 3dfx card
   alone (`voodoo=true`, or a Banshee or Voodoo3 as the display adapter),
   `MSIMG32.DLL` from Windows 98 on, and a DLL that `win32_dlls_replace`
-  replaces with one of the folder's not at all.
+  replaces with one of the folder's not at all. `MSVCRT20.DLL` and
+  `MSVCRT40.DLL` are files of another kind (`forwarders.rs`): no stubs,
+  only an export directory whose every entry forwards to `MSVCRT.DLL`'s
+  function of the same name. The loader loads them as DLL files and
+  follows the forwarders, so they are modules of their own names.
 
   The files are read-only: they open for reading alone, show as
   read-only (FILE_ATTRIBUTE_READONLY and ARCHIVE), and opening one for
@@ -398,13 +402,16 @@ All output goes through the emulated video hardware (`screen.rs`):
   `tools/gen_cpi_glyphs.py` extracts into
   `video/assets/CPIDOS_glyphs.bin`. A font's bytes are those of its
   character set's code page; the raster faces have the system locale's
-  character set, Arial, Times New Roman and Courier New the six of
-  WGL4, and the font mapper weighs the character set over the face as
-  Windows does. With `win32_depth=8` the desktop has 8 bits a
-  pixel, and GDI keeps a system palette in the DAC as Windows does on a
-  256-colour display: palettes realized in the foreground or the
-  background, `PC_RESERVED` entries for `AnimatePalette`,
-  `SetSystemPaletteUse`, and `WM_PALETTECHANGED` and
+  character set, Arial, Times New Roman and Courier New the six of WGL4,
+  and the font mapper weighs the character set over the face as Windows
+  does. `AddFontResourceA` reads the FNT resources of a program's .FON
+  file, or a bare .FNT (`gdi32/fnt.rs`): their faces are listed with the
+  built-in ones, a font that names one is drawn with its glyphs at the
+  nearest size, and a save state keeps their bytes. With `win32_depth=8`
+  the desktop has 8 bits a pixel, and GDI keeps a system palette in the
+  DAC as Windows does on a 256-colour display: palettes realized in the
+  foreground or the background, `PC_RESERVED` entries for
+  `AnimatePalette`, `SetSystemPaletteUse`, and `WM_PALETTECHANGED` and
   `WM_QUERYNEWPALETTE` for the windows (`gdi32/palette.rs`).
 - **DirectDraw** (`ddraw/`) in exclusive full-screen mode sets the mode
   the game asks for. Surfaces in video memory are in the card's memory,

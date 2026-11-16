@@ -225,7 +225,7 @@ fn out_of(cpu: &mut Cpu, handle: u32) -> Option<usize> {
 /// Write the double word `value` at `lin` in the memory of the process
 /// `pid`, whichever runs.
 fn write_32(cpu: &mut Cpu, pid: u32, lin: u32, value: u32) {
-    crate::win32::memory::write_process_bytes(&mut cpu.bus, pid, lin, &value.to_le_bytes());
+    crate::win32::mapping::write_process_bytes(cpu, pid, lin, &value.to_le_bytes());
 }
 
 /// The double word at `lin` in the memory of the process `pid`.

@@ -275,12 +275,15 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             "2" | "4" | "8" | "16" => config.voodoo_anisotropy = value.parse().ok(),
                             _ => warn(format!("invalid voodoo_anisotropy '{}' (off, 2, 4, 8 or 16)", value)),
                         },
-                        "voodoo_fps_cap" => match value.to_ascii_lowercase().as_str() {
-                            "off" | "0" => config.voodoo_fps_cap = Some(0),
-                            _ => match value.parse::<u32>() {
-                                Ok(n) if (10..=240).contains(&n) => config.voodoo_fps_cap = Some(n),
-                                _ => warn(format!("invalid voodoo_fps_cap '{}' (off, or 10 to 240)", value)),
-                            },
+                        // `voodoo_fps_cap` is the old name, from when only
+                        // the 3dfx card's swaps were capped (`OLD_NAMES`).
+                        "fps_cap" | "voodoo_fps_cap" => match crate::frame_cap::parse(value) {
+                            Some(cap) => config.fps_cap = Some(cap),
+                            None => warn(format!(
+                                "invalid {} '{}' (auto, off, or 10 to 240)",
+                                key.to_ascii_lowercase(),
+                                value
+                            )),
                         },
                         "voodoo_gamma" => match value.to_ascii_lowercase().as_str() {
                             "off" => config.voodoo_gamma = Some(None),

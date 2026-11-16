@@ -163,6 +163,7 @@ pub static DLLS: &[&Dll] = &[
     &super::glu32::DLL,
     &super::oledlg::DLL,
     &super::olepro32::DLL,
+    &super::wing32::DLL,
 ];
 
 /// Bytes each function's stub takes.
@@ -646,6 +647,7 @@ mod tests {
         "GLU32.DLL",
         "OLEDLG.DLL",
         "OLEPRO32.DLL",
+        "WING32.DLL",
     ];
 
     #[test]
