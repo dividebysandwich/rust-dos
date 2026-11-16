@@ -193,7 +193,7 @@ fn screen_len(cpu: &mut Cpu) -> u32 {
 /// Set the mode `w` x `h` x `bpp` for the DirectDraw object `owner`.
 /// The surfaces in video memory are lost.
 pub fn set_mode(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32) -> u32 {
-    if !modes(cpu).contains(&(w, h, bpp)) || set(cpu, owner, w, h, bpp).is_none() {
+    if !modes(cpu).contains(&(w, h, bpp)) || set(cpu, owner, w, h, bpp, 60).is_none() {
         return DDERR_INVALIDMODE;
     }
     DD_OK
@@ -202,9 +202,9 @@ pub fn set_mode(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32) -> u32 {
 /// Set the mode for `owner`, any the adapter has: the surfaces in video
 /// memory are lost, and the mouse moves over the picture. Unless it is
 /// Glide's, the screen takes the mode's size (`display_changed`).
-fn set(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32) -> Option<Mode> {
+fn set(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32, hz: u32) -> Option<Mode> {
     let old = display_mode(cpu);
-    let mode = screen::set_mode(cpu, w, h, bpp)?;
+    let mode = screen::set_mode_at(cpu, w, h, bpp, hz)?;
     super::surface::video_memory_lost(cpu);
     let display = &mut state(cpu).display;
     display.blocks.clear();
@@ -230,13 +230,13 @@ pub fn desktop_changed(cpu: &mut Cpu) {
 }
 
 /// Take the display for Glide on a Banshee or Voodoo3: the mode `w` x
-/// `h` x `bpp` (any the adapter has) is set and its picture is at the
-/// start of video memory, which is Glide's until `give_back`. A mode
-/// DirectDraw set ends, and its surfaces in video memory are lost; GDI
-/// draws nowhere. None if the adapter has no such mode, and nothing
+/// `h` x `bpp` (any the adapter has) at `hz` is set and its picture is
+/// at the start of video memory, which is Glide's until `give_back`. A
+/// mode DirectDraw set ends, and its surfaces in video memory are lost;
+/// GDI draws nowhere. None if the adapter has no such mode, and nothing
 /// changes then.
-pub fn take(cpu: &mut Cpu, w: u32, h: u32, bpp: u32) -> Option<Mode> {
-    let mode = set(cpu, GLIDE, w, h, bpp)?;
+pub fn take(cpu: &mut Cpu, w: u32, h: u32, bpp: u32, hz: u32) -> Option<Mode> {
+    let mode = set(cpu, GLIDE, w, h, bpp, hz)?;
     state(cpu).display.exclusive = 0;
     Some(mode)
 }
