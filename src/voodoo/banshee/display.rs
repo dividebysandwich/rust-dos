@@ -139,8 +139,9 @@ fn spread_wide(out: &mut [u8], pitch: usize, f: &Frame) {
 /// row, unless the overlay covers all of it, those of the overlay over it
 /// in its 16-bit formats, as many as it has on the screen, and what turns
 /// them into colours then (the desktop's geometry, the overlay's
-/// rectangle and the colour lookup table). Drawn later (`render`), they make the picture `Banshee::render`
-/// drew when they were taken, for a fraction of the work of drawing it.
+/// rectangle and the colour lookup table). Drawn later (`render`), they
+/// make the picture `Banshee::render` drew when they were taken, for a
+/// fraction of the work of drawing it.
 #[derive(Clone, Debug, Default)]
 pub struct ShownWords {
     frame: Frame,
@@ -176,17 +177,19 @@ impl ShownWords {
                 *px = [r, g, b, 255];
             }
         }
-        if let Some(o) = self.overlay.as_ref().filter(|o| o.cols > 0) {
+        if let Some(o) = self.overlay.as_ref().filter(|o| o.cols > 0 && o.x < pitch) {
             let clut = o.clut.as_deref();
-            for (i, &p) in o.words.iter().enumerate() {
-                let (x, y) = (o.x + i % o.cols, o.y + i / o.cols);
-                if x >= pitch {
-                    continue;
-                }
-                // Over a pixel of the desktop, which is opaque.
-                if let Some(px) = out.get_mut((y * pitch + x) * 4..(y * pitch + x) * 4 + 4) {
+            // The columns left of the output's right edge.
+            let cols = o.cols.min(pitch - o.x);
+            for (y, words) in (o.y..).zip(o.words.chunks(o.cols)) {
+                let at = (y * pitch + o.x) * 4;
+                // Over pixels of the desktop, which are opaque.
+                let Some(row) = out.get_mut(at..(at + cols * 4).min(out.len())) else {
+                    break;
+                };
+                for (px, &p) in row.as_chunks_mut::<4>().0.iter_mut().zip(words) {
                     let [r, g, b] = rgb565(p, clut);
-                    px.copy_from_slice(&[r, g, b, 255]);
+                    *px = [r, g, b, 255];
                 }
             }
         }
@@ -342,14 +345,10 @@ impl Banshee {
             (o.x, o.y, o.cols) == (0, 0, f.width) && o.words.len() == f.width * f.height
         });
         if !covered {
-            into.words.resize(f.width * f.height, 0);
-            for (y, row) in into
-                .words
-                .chunks_mut(f.width.max(1))
-                .enumerate()
-                .take(f.height)
-            {
-                desktop_words(ram, &f, y, f.width, |x, p| row[x] = p);
+            // `desktop_words` gives each row's pixels from left to right.
+            into.words.reserve(f.width * f.height);
+            for y in 0..f.height {
+                desktop_words(ram, &f, y, f.width, |_, p| into.words.push(p));
             }
         }
         true
@@ -871,6 +870,19 @@ mod tests {
                 2048,
             ),
             (narrow(1 << 18 | 3 << 21 | VIDPROC_OVERLAY_ENABLE), 640),
+            // Test Drive 4's: the overlay tiled and unscaled over all of
+            // the desktop, its rows copied in runs of a tile's pixels.
+            (
+                card_1024x768(
+                    1 << 18
+                        | 1 << 21
+                        | VIDPROC_OVERLAY_ENABLE
+                        | VIDPROC_OVERLAY_TILED
+                        | VIDPROC_DESKTOP_CLUT_BYPASS
+                        | VIDPROC_OVERLAY_CLUT_SEL,
+                ),
+                2048,
+            ),
         ];
         let ram = Vram::new(MEMORY);
         for (i, (mut b, stride)) in cards.into_iter().enumerate() {

@@ -1693,10 +1693,9 @@ impl Voodoo {
     /// is the same however the host's frames fall. Most holds end with no
     /// host frame in them, so the copy keeps the memory's words where it
     /// can (`Banshee::take_shown`), which `render` draws only if asked. A
-    /// read of the buffer
-    /// shown in the meantime (the linear frame buffer, a 2D blit from it)
-    /// still gets the next frame's drawing where the card would give the
-    /// frame shown (#1179).
+    /// read of the buffer shown in the meantime (the linear frame buffer,
+    /// a 2D blit from it) still gets the next frame's drawing where the
+    /// card would give the frame shown (#1179).
     fn hold_shown(&mut self, dest: usize) {
         if self.swaps.is_empty() || self.picture_held() {
             return;
