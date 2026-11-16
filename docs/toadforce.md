@@ -1064,16 +1064,14 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   its copy (a draw, `CLEAR`, `FILL` or `BLT` into it), so another read
   of them reads nothing back, and one of other rows brings those. What
   the processor wrote of them stays, and goes to the host's copy as
-  below. A read of every row, a host that reads only whole surfaces,
-  and the card's own work on the processor (its `FILL`, `BLT` and
-  `CLEAR`, a declined draw), which writes card memory with no note of
-  what it writes, read the surface back whole, and it is no longer
-  ahead. A game's software cursor that saves the 32x32 pixels under it
-  out of an 800x600 back buffer every frame so costs 32 rows, 51,200
-  bytes, where it cost the 960,000 bytes of the whole surface, and the
-  surface stays on the GPU: the save put back is a `BLT` the host does
-  in its copy, where before it was a processor's copy into card memory
-  that had the host copy the whole surface to the GPU again.
+  below. A read of every row, and the card's own work on the processor
+  (its `FILL`, `BLT` and `CLEAR`, a declined draw), which writes card
+  memory with no note of what it writes, read the surface back whole,
+  and it is no longer ahead. Evil Islands' software cursor saves the
+  32x32 pixels under it out of the 800x600 back buffer and the screen
+  every frame: that reads about three bands of 32 rows a frame, some
+  170,000 bytes, where each frame read the whole 960,000-byte back
+  buffer, and the surfaces stay on the GPU.
 - **What the program and the drivers write.** A write into a surface
   that is ahead reads nothing back. The card notes each byte written
   (`Gpu::writing`, a bit for each byte of the surface), and card

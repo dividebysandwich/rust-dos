@@ -53,10 +53,10 @@
 //!   there afterwards is noted as any other. The card keeps the rows
 //!   read (`Ahead::back`) until the host changes its copy, so a read of
 //!   them again reads nothing, and one of other rows reads those. A
-//!   read of every row, a host that reads only whole surfaces, and the
-//!   card's own work on the processor (`settle`), which writes card
-//!   memory without noting what it writes, read the surface back whole,
-//!   after which it isn't ahead.
+//!   read of every row, a host without the surface, and the card's own
+//!   work on the processor (`settle`), which writes card memory without
+//!   noting what it writes, read the surface back whole, after which it
+//!   isn't ahead.
 //! - **What the processor wrote.** `Pages` counts the writes to each
 //!   page of card memory. A host keeps a `Stamp` of the bytes a copy
 //!   was made from and makes the copy again when the stamp is stale.
@@ -1173,8 +1173,8 @@ impl Gpu {
     /// Read back the rows `rows` of `a` that card memory doesn't have
     /// the host's pixels of yet, around what the processor wrote of
     /// them, which goes to the host's copy before the host next uses
-    /// it (`push`). False when the host reads only whole surfaces: the
-    /// caller reads the surface back whole.
+    /// it (`push`). False when the host hasn't the surface: the caller
+    /// reads the surface back whole.
     fn read_rows(
         host: &mut dyn Host,
         a: &mut Ahead,
