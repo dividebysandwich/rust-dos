@@ -43,8 +43,8 @@ pub use parse::{MAX_MEMSIZE, MIN_MEMSIZE, parse, parse_memsize};
 pub use settings::{Memory, default_memsize};
 pub use settings::{Settings, parse_mouse_sensitivity};
 pub use types::{
-    AspectRatio, DesktopDepth, DesktopSize, DosVersion, Filter, MidiSynth, Mt32Model, SoundConfig, Win32Locale,
-    Win32Trace, WindowsVersion,
+    AspectRatio, DesktopDepth, DesktopSize, DosVersion, Filter, MidiSynth, Mt32Model, SoundConfig,
+    Win32Locale, Win32Trace, WindowsVersion,
 };
 
 /// Written to the default location on first start.

@@ -2,8 +2,8 @@
 
 use super::types::parse_bool;
 use super::{
-    AspectRatio, Config, DesktopDepth, DesktopSize, DosVersion, Filter, RunLockSetting, Section, Settings,
-    Win32Locale, Win32Trace, WindowsVersion, parse_mouse_sensitivity,
+    AspectRatio, Config, DesktopDepth, DesktopSize, DosVersion, Filter, RunLockSetting, Section,
+    Settings, Win32Locale, Win32Trace, WindowsVersion, parse_mouse_sensitivity,
 };
 use crate::cpu::{CoreMode, CpuModel};
 use crate::disk::DRIVE_Z;

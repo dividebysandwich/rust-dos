@@ -1,8 +1,8 @@
 //! The settings in effect, and every setting as the file writes it.
 
 use super::{
-    AspectRatio, Config, DesktopDepth, DesktopSize, DosVersion, Filter, Section, SoundConfig, Win32Locale,
-    Win32Trace, WindowsVersion,
+    AspectRatio, Config, DesktopDepth, DesktopSize, DosVersion, Filter, Section, SoundConfig,
+    Win32Locale, Win32Trace, WindowsVersion,
 };
 use crate::cpu::{CoreMode, CpuModel};
 use crate::diskio::DiskSettings;
