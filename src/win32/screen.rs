@@ -513,9 +513,9 @@ pub fn drew_rects(cpu: &mut Cpu, at: u32, pitch: u32, bytes: u32, rects: &[Rect]
 
 // What the picture is.
 
-/// Show the picture at byte `offset` of video memory, from the next
-/// frame: VBE's display start, the card's vidDesktopStartAddr, or a
-/// ToadForce's `FLIP`.
+/// Show the picture at byte `offset` of video memory: a ToadForce's
+/// `FLIP` without the wait or the card's vidDesktopStartAddr, which
+/// show at once, or VBE's display start, latched at the next retrace.
 pub fn show(cpu: &mut Cpu, offset: u32) {
     if is_toadforce(cpu) {
         let mut words = Vec::new();

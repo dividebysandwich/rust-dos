@@ -438,7 +438,7 @@ While the card's mode is shown:
   pending flip. A value whose surface, with the height, pitch and
   format of the mode shown, reaches outside card memory is rejected
   with `BAD_RANGE`.
-- A colour written to `PALETTE` shows from the next frame.
+- A colour written to `PALETTE` shows at once.
 - The VGA registers keep their contents and take writes, and none of it
   is shown.
 - The window at A0000h stays what the VGA's side has it as: the VGA's

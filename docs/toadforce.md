@@ -1183,12 +1183,13 @@ The picture comes from card memory, read back once a frame
 - a mode with a palette, or one shown doubled.
 
 Both draw the same surface, the one at `MODE_START` as of the
-commands the card has run, with the queued ones left queued
-(`Bus::toadforce_picture` makes it the Super VGA's display start,
-which `Vbe::picture` gives both). A flip without the wait shows at
-once ("Flips" in `docs/toadforce-spec.md`): the surface the screen
-had until then is the one a program that flipped draws its next
-frame into.
+commands the card has run, with the queued ones left queued:
+`Bus::toadforce_picture` makes it the Super VGA's display start,
+`vbe.latched_start`, which `video::render_vbe`, the read-back's
+`Vbe::picture` and `Bus::toadforce_host_picture` all take. A flip
+without the wait shows at once ("Flips" in `docs/toadforce-spec.md`):
+the surface the screen had until then is the one a program that
+flipped draws its next frame into.
 
 `/api/status` has the renderer's name and what it costs under
 `video.toadforce` (`docs/llm-debugging.md`): the read-backs by what
