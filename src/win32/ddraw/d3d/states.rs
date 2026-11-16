@@ -23,7 +23,7 @@ use super::device::{
 use super::pipeline::multiply;
 use super::{
     D3D_OK, D3DERR_INBEGINSTATEBLOCK, D3DERR_INVALIDSTATEBLOCK, D3DERR_NOTINBEGINSTATEBLOCK, probe,
-    read_dwords, read_f32, read_matrix, write_dwords, write_matrix,
+    read_dwords, read_matrix, write_dwords, write_matrix,
 };
 use crate::cpu::Cpu;
 use crate::win32::com;
@@ -504,8 +504,7 @@ pub fn get_material(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// SetLight(this, index, light) of IDirect3DDevice7: a point, spot or
-/// directional light; one with a position takes no negative
-/// attenuation.
+/// directional light that `light_is_valid` takes.
 pub fn set_light(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, index, at] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
@@ -517,12 +516,6 @@ pub fn set_light(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let l = read_dwords::<26>(cpu, at);
     if !(1..=3).contains(&l[0]) {
         return Some(DDERR_INVALIDPARAMS);
-    }
-    if l[0] != super::pipeline::LIGHT_DIRECTIONAL {
-        let negative = (0..3).any(|i| read_f32(cpu, at + 4 * (21 + i)) < 0.0);
-        if negative {
-            return Some(DDERR_INVALIDPARAMS);
-        }
     }
     if !light_is_valid(&l) {
         return Some(DDERR_INVALIDPARAMS);
@@ -536,7 +529,9 @@ pub fn set_light(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// of the largest float, a spot's angles are 0 to pi with theta no
 /// more than phi, and a spot or a directional light points somewhere
 /// (a direction whose length a float takes for 0, such as 1e-25,
-/// doesn't). Direct3D 8 takes them all.
+/// doesn't). The attenuation isn't looked at: one below 0 is taken, and
+/// a light whose attenuation sum is 0 or below at a vertex adds nothing
+/// there. Direct3D 8 takes them all.
 fn light_is_valid(l: &[u32; 26]) -> bool {
     let f = |i: usize| f32::from_bits(l[i]);
     let (kind, range, theta, phi) = (l[0], f(19), f(24), f(25));
@@ -1046,6 +1041,10 @@ mod tests {
         assert!(!light(LIGHT_SPOT, z, -1.0, 0.25, 0.75));
         assert!(!light(LIGHT_SPOT, [0.0; 3], 40.0, 0.25, 0.75));
         assert!(!light(LIGHT_SPOT, [0.0, 2e-25, 0.0], 40.0, 0.25, 0.75));
+        // A negative attenuation is taken.
+        let mut l = [0u32; 26];
+        (l[0], l[19], l[21]) = (point, 10f32.to_bits(), (-1f32).to_bits());
+        assert!(light_is_valid(&l));
         // A directional light: its direction alone.
         assert!(light(LIGHT_DIRECTIONAL, z, -3.0, 5.0, 1.0));
         assert!(!light(LIGHT_DIRECTIONAL, [0.0; 3], 10.0, 0.0, 0.0));
