@@ -140,6 +140,26 @@ fn a_forwarded_export_names_its_target() {
 }
 
 #[test]
+fn a_built_forwarder_names_its_target() {
+    let mut b = Builder::dll(0x1000_0000, "FWD.DLL");
+    let code = b.section(".text", &[0x90; 4], SCN_CODE | SCN_EXECUTE | SCN_READ);
+    b.export(Some("Here"), 1, code)
+        .export_forward(Some("Sleep"), 2, "KERNEL32.Sleep")
+        .export_forward(None, 3, "KERNEL32.#35");
+    let image = Image::load(&b.build()).unwrap();
+    let exports = image.exports().unwrap().unwrap();
+    assert_eq!(exports.by_name("Here").unwrap().target, ExportTarget::Rva(code));
+    assert_eq!(
+        exports.by_name("Sleep").unwrap().target,
+        ExportTarget::Forwarder("KERNEL32.Sleep".into())
+    );
+    assert_eq!(
+        exports.by_ordinal(3).unwrap().target,
+        ExportTarget::Forwarder("KERNEL32.#35".into())
+    );
+}
+
+#[test]
 fn relocations_move_the_image() {
     let mut b = Builder::exe(0x40_0000);
     let data = b.next_rva();

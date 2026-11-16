@@ -160,6 +160,13 @@ opcode, `win32_version=98se` when a message names the version, more
   colours and stops on the default desktop, which has more. Its setup
   (InstallShield 3's 32-bit engine) runs, and its archives also unpack
   ([installer archives](#installer-archives)).
+* **Warhammer: Shadow of the Horned Rat** (the Windows 95 version):
+  its battles load Reality Lab's renderers (`RLFRM256.DLL` and the
+  rest of the game's `RL\SOFT` folder) from `RL\SOFT` in the system
+  folder. For a [copied
+  installation](../CONFIGURATION.md#copying-an-installed-game), copy
+  the game's `RL\SOFT` to `C:\WINDOWS\SYSTEM\RL\SOFT`. Without them the
+  game crashes when a battle starts.
 * **Xenocracy**: its hardware check looks for `GLIDE2X.DLL`, which is
   there only with a 3dfx card: `voodoo=true`, or
   `machine=svga_voodoo3` or `svga_banshee`

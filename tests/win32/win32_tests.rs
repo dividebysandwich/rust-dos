@@ -15308,6 +15308,138 @@ fn an_olepro32_function_not_written_fails_guest_code_with_e_notimpl() {
     assert_eq!(code, 3, "the checks that failed: {:02b} {out}", !code & 3);
 }
 
+/// A version 3.0 FNT raster font of the face `face`, `height` pixels
+/// high, with the characters 20h to 22h: a blank 3 pixels wide, a bar 2
+/// wide and a glyph 9 wide, as a .FON file's RT_FONT resource holds it.
+fn fnt(face: &str, height: u16) -> Vec<u8> {
+    let mut d = vec![0u8; 0x94];
+    d[0..2].copy_from_slice(&0x300u16.to_le_bytes());
+    d[0x4A..0x4C].copy_from_slice(&(height - 2).to_le_bytes());
+    d[0x4C..0x4E].copy_from_slice(&1u16.to_le_bytes());
+    d[0x53..0x55].copy_from_slice(&700u16.to_le_bytes());
+    d[0x58..0x5A].copy_from_slice(&height.to_le_bytes());
+    d[0x5A] = 0x21; // FF_SWISS, variable pitch
+    d[0x5B..0x5D].copy_from_slice(&4u16.to_le_bytes());
+    d[0x5F] = 0x20;
+    d[0x60] = 0x22;
+    // Each character's width and where its bits are, and the sentinel.
+    let widths = [3u16, 2, 9, 0];
+    let columns = [1usize, 1, 2, 1];
+    let start = d.len() + 6 * widths.len();
+    let mut bits = Vec::new();
+    for (&w, &c) in widths.iter().zip(&columns) {
+        d.extend(w.to_le_bytes());
+        d.extend(((start + bits.len()) as u32).to_le_bytes());
+        bits.extend(vec![0xC0u8; c * height as usize]);
+    }
+    d.extend(bits);
+    let face_at = d.len() as u32;
+    d[0x69..0x6D].copy_from_slice(&face_at.to_le_bytes());
+    d.extend(face.as_bytes());
+    d.push(0);
+    let size = d.len() as u32;
+    d[2..6].copy_from_slice(&size.to_le_bytes());
+    d
+}
+
+/// A .FON file: a 16-bit NE module whose RT_FONT resources are `fonts`.
+fn fon(fonts: &[Vec<u8>]) -> Vec<u8> {
+    let ne = 0x40;
+    let mut d = vec![0u8; ne + 0x40];
+    d[0..2].copy_from_slice(b"MZ");
+    d[0x3C..0x40].copy_from_slice(&(ne as u32).to_le_bytes());
+    d[ne..ne + 2].copy_from_slice(b"NE");
+    d[ne + 0x24..ne + 0x26].copy_from_slice(&0x40u16.to_le_bytes());
+    // The resource table: an alignment shift of 4, one type (RT_FONT)
+    // with an entry for each font, and the zero type that ends it.
+    d.extend(4u16.to_le_bytes());
+    d.extend(0x8008u16.to_le_bytes());
+    d.extend((fonts.len() as u16).to_le_bytes());
+    d.extend([0; 4]);
+    let entries = d.len();
+    d.resize(entries + 12 * fonts.len() + 2, 0);
+    for (i, f) in fonts.iter().enumerate() {
+        let at = d.len().next_multiple_of(16);
+        let e = entries + 12 * i;
+        d[e..e + 2].copy_from_slice(&((at >> 4) as u16).to_le_bytes());
+        d[e + 2..e + 4].copy_from_slice(&(f.len().div_ceil(16) as u16).to_le_bytes());
+        d.resize(at, 0);
+        d.extend(f);
+    }
+    d
+}
+
+/// A program adds F.FON, a file of two sizes of the face "Test Face",
+/// with AddFontResourceA, measures two characters in a font of the face
+/// 12 pixels high and counts the sizes EnumFontsA lists of the face. Its
+/// exit code: the width in the low 4 bits, the sizes listed in the next
+/// 2, and the fonts AddFontResourceA added in the 2 above them.
+#[test]
+fn a_font_file_a_program_adds_is_listed_and_drawn() {
+    let names: &[&str] = &[
+        "AddFontResourceA",
+        "CreateCompatibleDC",
+        "CreateFontIndirectA",
+        "SelectObject",
+        "GetTextExtentPoint32A",
+        "EnumFontsA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("GDI32.DLL", names)];
+    // The file's name at 0, a LOGFONTA at 0x10, the text at 0x50, a SIZE
+    // at 0x58, the count of sizes listed at 0x60 and the face at 0x64.
+    let mut data = b"F.FON\0".to_vec();
+    data.resize(0x10, 0);
+    data.extend(12i32.to_le_bytes());
+    data.resize(0x10 + 28, 0);
+    data.extend(b"Test Face");
+    data.resize(0x50, 0);
+    data.extend(b"!\"");
+    data.resize(0x64, 0);
+    data.extend(b"Test Face\0");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut proc = a.create_label();
+        a.xor(ebx, ebx)?;
+        a.push(l.at(0) as i32)?;
+        a.call(f("AddFontResourceA"))?;
+        a.shl(eax, 6)?;
+        a.or(ebx, eax)?;
+        a.push(0)?;
+        a.call(f("CreateCompatibleDC"))?;
+        a.mov(esi, eax)?;
+        a.push(l.at(0x10) as i32)?;
+        a.call(f("CreateFontIndirectA"))?;
+        a.push(eax)?;
+        a.push(esi)?;
+        a.call(f("SelectObject"))?;
+        a.push(l.at(0x58) as i32)?;
+        a.push(2)?;
+        a.push(l.at(0x50) as i32)?;
+        a.push(esi)?;
+        a.call(f("GetTextExtentPoint32A"))?;
+        a.or(ebx, dword_ptr(l.at(0x58)))?;
+        a.push(0)?;
+        push_label(a, proc)?;
+        a.push(l.at(0x64) as i32)?;
+        a.push(esi)?;
+        a.call(f("EnumFontsA"))?;
+        a.mov(eax, dword_ptr(l.at(0x60)))?;
+        a.shl(eax, 4)?;
+        a.or(eax, ebx)?;
+        a.ret()?;
+        // The callback: count the font, go on.
+        a.set_label(&mut proc)?;
+        a.inc(dword_ptr(l.at(0x60)))?;
+        a.mov(eax, 1)?;
+        a.ret_1(16)
+    });
+    let file = fon(&[fnt("Test Face", 12), fnt("Test Face", 24)]);
+    let mut cpu = machine_with("font_file", &[("T.EXE", exe), ("F.FON", file)]);
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    // Two fonts added, both sizes listed, and "!\"" 2 + 9 pixels wide.
+    assert_eq!(cpu.errorlevel, 2 << 6 | 2 << 4 | 11);
+}
+
 /// An argument for `call_pushing`: a number or a register's value.
 #[derive(Clone, Copy)]
 enum Pushed {
