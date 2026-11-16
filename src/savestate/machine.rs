@@ -216,12 +216,11 @@ mod tests {
             .stack_size(SMALL_STACK)
             .spawn(|| {
                 use crate::savestate::disks;
-                let dir = std::env::temp_dir()
-                    .join(format!("rust-dos-small-stack-{}", std::process::id()));
+                let dir = crate::test_dir::path("small-stack");
                 let file = dir.join("booted.state");
                 // A state of a booted system, with its disk beside it, loaded
-                // into another machine and from that into a third, as a
-                // front end does.
+                // into two other booted machines, as a front end loads a
+                // slot.
                 let first = booted();
                 let state = save(&first);
                 disks::save_copies(&first, &file).unwrap();
