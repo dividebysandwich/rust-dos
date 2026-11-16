@@ -529,9 +529,11 @@ pub fn set_light(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// of the largest float, a spot's angles are 0 to pi with theta no
 /// more than phi, and a spot or a directional light points somewhere
 /// (a direction whose length a float takes for 0, such as 1e-25,
-/// doesn't). The attenuation isn't looked at: one below 0 is taken, and
-/// a light whose attenuation sum is 0 or below at a vertex adds nothing
-/// there. Direct3D 8 takes them all.
+/// doesn't). A point light takes an attenuation below 0, as measured,
+/// and adds nothing at a vertex where its attenuation sum is 0 or
+/// below. A spot light with one isn't taken, which Wine's test of
+/// SetLight asserts of Windows (`d3d.c`, the light of index 103).
+/// Direct3D 8 takes them all.
 fn light_is_valid(l: &[u32; 26]) -> bool {
     let f = |i: usize| f32::from_bits(l[i]);
     let (kind, range, theta, phi) = (l[0], f(19), f(24), f(25));
@@ -540,7 +542,9 @@ fn light_is_valid(l: &[u32; 26]) -> bool {
     match kind {
         super::pipeline::LIGHT_DIRECTIONAL => pointing,
         super::pipeline::LIGHT_SPOT => {
-            ranged && pointing && theta >= 0.0 && theta <= phi && phi <= std::f32::consts::PI
+            let attenuated = (21..24).all(|i| f(i) >= 0.0);
+            let cone = theta >= 0.0 && theta <= phi && phi <= std::f32::consts::PI;
+            ranged && pointing && cone && attenuated
         }
         _ => ranged,
     }
@@ -1041,10 +1045,21 @@ mod tests {
         assert!(!light(LIGHT_SPOT, z, -1.0, 0.25, 0.75));
         assert!(!light(LIGHT_SPOT, [0.0; 3], 40.0, 0.25, 0.75));
         assert!(!light(LIGHT_SPOT, [0.0, 2e-25, 0.0], 40.0, 0.25, 0.75));
-        // A negative attenuation is taken.
+        // A point light's negative attenuation is taken.
         let mut l = [0u32; 26];
         (l[0], l[19], l[21]) = (point, 10f32.to_bits(), (-1f32).to_bits());
         assert!(light_is_valid(&l));
+        // A spot light's isn't: Wine's light 103, with a range and
+        // angles of 0, is taken with an attenuation of 0 and refused
+        // with -1 or minus infinity.
+        let spot = |attenuation: f32| {
+            let mut l = [0u32; 26];
+            (l[0], l[18], l[21]) = (LIGHT_SPOT, 1f32.to_bits(), attenuation.to_bits());
+            light_is_valid(&l)
+        };
+        assert!(spot(0.0));
+        assert!(!spot(-1.0));
+        assert!(!spot(f32::NEG_INFINITY));
         // A directional light: its direction alone.
         assert!(light(LIGHT_DIRECTIONAL, z, -3.0, 5.0, 1.0));
         assert!(!light(LIGHT_DIRECTIONAL, [0.0; 3], 10.0, 0.0, 0.0));
