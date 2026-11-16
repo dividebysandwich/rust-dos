@@ -431,7 +431,7 @@ fn run_to_exit(cpu: &mut Cpu, batches: usize) -> bool {
 }
 
 /// A machine with the program `name` in `files` loaded from the shell.
-fn machine(test: &str, files: &[(&str, Vec<u8>)], name: &str) -> (Cpu, u16) {
+fn machine(test: &str, files: &[(&str, Vec<u8>)], name: &str) -> (Box<Cpu>, u16) {
     let mut cpu = Cpu::new(scratch(test, files));
     cpu.load_shell();
     assert!(cpu.load_executable(name, None));

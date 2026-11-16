@@ -84,13 +84,13 @@ pub(super) fn program(
 
 /// A machine with a Voodoo3 as its display adapter, the built-in
 /// Windows on and `program` loaded from the shell as T.EXE.
-pub(super) fn machine(test: &str, program: Vec<u8>) -> Cpu {
+pub(super) fn machine(test: &str, program: Vec<u8>) -> Box<Cpu> {
     machine_with(test, None, program)
 }
 
 /// A machine with a Voodoo3 as its display adapter or, given a `card`
 /// other than the Voodoo3, its usual adapter and that add-on card.
-fn machine_with(test: &str, card: Option<Board>, program: Vec<u8>) -> Cpu {
+fn machine_with(test: &str, card: Option<Board>, program: Vec<u8>) -> Box<Cpu> {
     let base = PathBuf::from("target/test_win32_d3d").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -114,7 +114,7 @@ fn machine_with(test: &str, card: Option<Board>, program: Vec<u8>) -> Cpu {
 
 /// A machine with a ToadForce as its display adapter, the built-in
 /// Windows on and `program` loaded from the shell as T.EXE.
-pub(super) fn machine_toadforce(test: &str, program: Vec<u8>) -> Cpu {
+pub(super) fn machine_toadforce(test: &str, program: Vec<u8>) -> Box<Cpu> {
     let base = PathBuf::from("target/test_win32_d3d").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -3500,7 +3500,7 @@ fn rt_z_program(calls: &mut RtZCalls) -> (Vec<u8>, u32) {
 
 /// `rt_z_program` run to its end: the machine, where its data is, its
 /// calls' results and where some of them are.
-fn run_rt_z(test: &str) -> (Cpu, u32, Vec<u32>, RtZCalls) {
+fn run_rt_z(test: &str) -> (Box<Cpu>, u32, Vec<u32>, RtZCalls) {
     let mut calls = RtZCalls::default();
     let (exe, data) = rt_z_program(&mut calls);
     let mut cpu = machine(test, exe);
@@ -3619,7 +3619,7 @@ fn traced_scene() -> Scene {
 
 /// `exe` run to its end in the folder of `test`, with the 3D trace into
 /// `t.trace` there when `trace`: the machine, and the trace's path.
-fn run_traced(test: &str, exe: Vec<u8>, data: u32, trace: bool) -> (Cpu, PathBuf) {
+fn run_traced(test: &str, exe: Vec<u8>, data: u32, trace: bool) -> (Box<Cpu>, PathBuf) {
     let mut cpu = machine(test, exe);
     let path = PathBuf::from("target/test_win32_d3d")
         .join(test)
@@ -4594,7 +4594,7 @@ const CAPS7: u32 = 0x600;
 /// A program that lists Direct3D 7's devices, makes the T&L HAL
 /// device and reads its description: its results, with the machine
 /// and the lines of the 3D trace.
-fn tnl_device_program(test: &str, toadforce: bool) -> (Cpu, u32, Vec<String>) {
+fn tnl_device_program(test: &str, toadforce: bool) -> (Box<Cpu>, u32, Vec<String>) {
     let mut d = data();
     target_desc(&mut d, DESC, 124, 64, 64);
     tnl_guid(&mut d, IID_HAL);
@@ -5084,7 +5084,7 @@ const SEEN_HEL: u32 = 0x84;
 
 /// A machine with a Super VGA and no 3D card, the built-in Windows on
 /// and `program` loaded from the shell as T.EXE.
-fn machine_without_3d(test: &str, program: Vec<u8>) -> Cpu {
+fn machine_without_3d(test: &str, program: Vec<u8>) -> Box<Cpu> {
     let base = PathBuf::from("target/test_win32_d3d").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -5101,7 +5101,7 @@ fn machine_without_3d(test: &str, program: Vec<u8>) -> Cpu {
 /// device on a 64x64 target in video memory with a 16-bit depth buffer
 /// in system memory, as Warhammer: Dark Omen does: the machine after
 /// it, and its data.
-fn ramp_device_program(test: &str, machine: fn(&str, Vec<u8>) -> Cpu) -> (Cpu, u32) {
+fn ramp_device_program(test: &str, machine: fn(&str, Vec<u8>) -> Box<Cpu>) -> (Box<Cpu>, u32) {
     let mut d = data();
     target_desc(&mut d, DESC, 108, 64, 64);
     ramp_guid(&mut d, IID_HAL);

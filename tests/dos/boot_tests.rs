@@ -56,7 +56,7 @@ fn boot_sector() -> [u8; SECTOR_SIZE] {
 
 /// A machine with a hard disk image on C: whose master boot record is
 /// `boot_sector` and whose sector 1 holds the bytes 0 to 255 twice.
-fn machine(name: &str) -> Cpu {
+fn machine(name: &str) -> Box<Cpu> {
     let base = PathBuf::from("target/test_boot").join(name);
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();

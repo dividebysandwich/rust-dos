@@ -74,7 +74,7 @@ fn program(
 
 /// A machine with the built-in Windows on, on `core`, and `program`
 /// loaded from the shell as T.EXE, with `files` beside it.
-fn machine(test: &str, program: Vec<u8>, core: CoreMode, files: &[(&str, Vec<u8>)]) -> Cpu {
+fn machine(test: &str, program: Vec<u8>, core: CoreMode, files: &[(&str, Vec<u8>)]) -> Box<Cpu> {
     // Each core its own directory, as the tests run at once.
     let base = PathBuf::from("target/test_win32_audio").join(format!("{test}_{core:?}"));
     let _ = fs::remove_dir_all(&base);

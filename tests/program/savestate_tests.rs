@@ -32,7 +32,7 @@ fn scratch(name: &str, files: &[(&str, &[u8])]) -> PathBuf {
     base
 }
 
-fn machine_in(dir: &Path) -> Cpu {
+fn machine_in(dir: &Path) -> Box<Cpu> {
     let mut cpu = Cpu::new(dir.to_path_buf());
     cpu.bus.set_cycles_per_ms(1000);
     cpu.load_shell();
@@ -219,7 +219,7 @@ fn a_state_brings_its_memory_size() {
 }
 
 /// A machine with `adapter`, at the prompt.
-fn video_machine(adapter: Adapter) -> Cpu {
+fn video_machine(adapter: Adapter) -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     cpu.bus.set_cycles_per_ms(1000);
     bios::install(&mut cpu.bus, VideoSetup { adapter, ..Default::default() });
@@ -333,11 +333,11 @@ fn a_loaded_machine_shows_the_same_picture() {
 
 /// A machine at the prompt with the default Sound Blaster 16 and
 /// Ultrasound, and the Tandy's sound chip.
-fn sound_machine() -> Cpu {
+fn sound_machine() -> Box<Cpu> {
     sound_machine_in(Path::new("."))
 }
 
-fn sound_machine_in(dir: &Path) -> Cpu {
+fn sound_machine_in(dir: &Path) -> Box<Cpu> {
     let mut cpu = Cpu::new(dir.to_path_buf());
     cpu.bus.set_cycles_per_ms(1000);
     cpu.bus.configure_sound(Some(rust_dos::sb::SbConfig::default()), true);
@@ -518,7 +518,7 @@ fn a_loaded_machine_has_its_drives_files_and_memory() {
 }
 
 /// A machine as rust-dos starts one with `settings`' hardware.
-fn configured_machine(dir: &Path, settings: &rust_dos::config::Settings) -> (Cpu, rust_dos::hardware::Hardware) {
+fn configured_machine(dir: &Path, settings: &rust_dos::config::Settings) -> (Box<Cpu>, rust_dos::hardware::Hardware) {
     let mut cpu = machine_in(dir);
     let defaults = rust_dos::config::Settings::default();
     rust_dos::sound::apply_config(&mut cpu, &defaults.sound, None);

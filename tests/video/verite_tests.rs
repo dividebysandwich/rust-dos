@@ -8,7 +8,7 @@ use rust_dos::video::adapter::{Adapter, VideoSetup};
 use rust_dos::video::bios;
 use std::path::PathBuf;
 
-fn machine() -> Cpu {
+fn machine() -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     bios::install(&mut cpu.bus, VideoSetup { adapter: Adapter::Verite, ..Default::default() });
     cpu
@@ -20,7 +20,7 @@ fn int10(cpu: &mut Cpu, ax: u16) {
 }
 
 /// The processor started, its version read, as the library does.
-fn started() -> Cpu {
+fn started() -> Box<Cpu> {
     let mut cpu = machine();
     int10(&mut cpu, 0x1582);
     cpu.set_cx(0x1000);
@@ -260,7 +260,7 @@ fn force(cpu: &mut Cpu, instruction: u32) {
 
 /// The 2D microcode started as the Windows driver starts it: the RISC held,
 /// sent to the loader with a jump, let go, and the loader's four words.
-fn windows_2d() -> Cpu {
+fn windows_2d() -> Box<Cpu> {
     let mut cpu = machine();
     cpu.bus.io_write_wide(port(regs::DEBUGREG), regs::HOLDRISC as u32, 1);
     force(&mut cpu, 0x6C00_0000 | 0x800 >> 2);
@@ -320,7 +320,7 @@ fn the_2d_microcode_fills_and_answers() {
 }
 
 /// A Vérité whose RISC runs at a low level (`verite_risc=lle`).
-fn low_level() -> Cpu {
+fn low_level() -> Box<Cpu> {
     let mut cpu = machine();
     let warnings = cpu.bus.configure_verite(&rust_dos::verite::VeriteSettings::default());
     assert!(warnings.is_empty(), "{:?}", warnings);

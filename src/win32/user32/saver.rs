@@ -172,7 +172,7 @@ mod tests {
 
     /// A desktop with a saver that waits one second after the last input,
     /// and the clock `idle` microseconds after that input.
-    fn idle_machine(idle: u64) -> Cpu {
+    fn idle_machine(idle: u64) -> Box<Cpu> {
         let mut cpu = Cpu::new(PathBuf::from("."));
         cpu.bus.clock.icount = 1 << 40;
         let now = cpu.bus.clock.now_micros();

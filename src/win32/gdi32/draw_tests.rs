@@ -16,7 +16,7 @@ const BITS: u32 = 0x0010_0000;
 
 /// A machine with a desktop of `depth` on a Voodoo3, as the game runs,
 /// and the screen's DC with a palette of `colors` realized.
-fn machine(depth: DesktopDepth, colors: &[u32]) -> (Cpu, u32) {
+fn machine(depth: DesktopDepth, colors: &[u32]) -> (Box<Cpu>, u32) {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.bus.win32.desktop_depth = depth;
     cpu.bus

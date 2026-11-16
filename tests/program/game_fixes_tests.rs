@@ -87,7 +87,7 @@ fn load(cpu: &mut Cpu, code: &CodePatch) {
 
 /// A machine with the driver's pieces at CS:0000, and the code around the
 /// patches that the tests run.
-fn machine(layout: &Layout) -> Cpu {
+fn machine(layout: &Layout) -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     load(&mut cpu, code(layout.name));
     for &(at, bytes) in layout.around {
@@ -225,7 +225,7 @@ fn nothing_changes_with_the_fix_off() {
 
 /// Jukebox Adventure with both its fixes' code at CS:0000, and DS:0355h's
 /// table pointing effect B at its handler, 47D7h.
-fn jukebox() -> Cpu {
+fn jukebox() -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     load(&mut cpu, code("jukebox-sb-mix"));
     load(&mut cpu, code("jukebox-mod-hang"));

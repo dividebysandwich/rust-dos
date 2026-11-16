@@ -400,7 +400,7 @@ mod tests {
     /// A 32-bit render target of 640 by 64, `pitch` bytes a row, whose
     /// shadow at `A` only the renderer drew, in 0x1234; and the log of
     /// the renderer's reads.
-    fn renderer_drawn(pitch: u32) -> (Cpu, Surface, Rc<RefCell<Vec<String>>>) {
+    fn renderer_drawn(pitch: u32) -> (Box<Cpu>, Surface, Rc<RefCell<Vec<String>>>) {
         use crate::win32::ddraw::Format;
         let log = Rc::default();
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));

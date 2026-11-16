@@ -19,7 +19,7 @@ const REGISTERS: usize = INITIAL_REGISTERS as usize;
 const MEMORY: usize = INITIAL_MEMORY as usize;
 const RING: usize = INITIAL_RING as usize;
 
-fn machine_with(adapter: Adapter) -> Cpu {
+fn machine_with(adapter: Adapter) -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     let setup = VideoSetup {
         adapter,
@@ -30,7 +30,7 @@ fn machine_with(adapter: Adapter) -> Cpu {
     cpu
 }
 
-fn machine() -> Cpu {
+fn machine() -> Box<Cpu> {
     machine_with(Adapter::ToadForce)
 }
 
@@ -460,6 +460,66 @@ fn a_waiting_flip_shows_at_the_blank() {
     assert_eq!(reg(&cpu, regs::IRQ_STATUS) & regs::IRQ_FLIP, regs::IRQ_FLIP);
     assert_eq!(cpu.bus.vbe.start, 2 << 20);
     assert_eq!(pixel(&mut cpu, 0, 0), (0xFF, 0xFF, 0xFF));
+}
+
+#[test]
+fn the_picture_is_the_last_frame_flipped_while_the_next_is_drawn() {
+    // Two buffers, as DirectDraw's Flip on the built-in Windows uses
+    // them: it flips at once, and the program clears and draws its next
+    // frame into the buffer the screen had until then.
+    let mut cpu = machine();
+    show(&mut cpu, 640, 480, Format::X8R8G8B8, 60);
+    let timing = cpu.bus.vga.timing();
+    let line = timing.line_ns as u64;
+    let buffer = |offset: u32| Surface {
+        offset,
+        pitch: 640 * 4,
+        width: 640,
+        height: 480,
+        format: Format::X8R8G8B8,
+    };
+    let (front, back) = (buffer(0), buffer(2 << 20));
+    let whole = Rect {
+        left: 0,
+        top: 0,
+        width: 640,
+        height: 480,
+    };
+    let mut words = Vec::new();
+    encode::fill(&mut words, &front, &whole, 0x00FF_FFFF);
+    run(&mut cpu, &words);
+    // Line 100 of a frame, with the last retrace's picture drawn.
+    let into = cpu.bus.clock.now_ns() % timing.frame_ns();
+    pass(&mut cpu, timing.frame_ns() - into + 100 * line);
+    assert_eq!(pixel(&mut cpu, 0, 0), (0xFF, 0xFF, 0xFF));
+
+    // The next frame, green, finished and flipped to at once.
+    let mut words = Vec::new();
+    encode::fill(&mut words, &back, &whole, 0x0000_FF00);
+    encode::flip(&mut words, back.offset, false);
+    run(&mut cpu, &words);
+    assert_eq!(reg(&cpu, regs::MODE_START), back.offset);
+    // The frame after it begins in the other buffer: its top half
+    // cleared to black, and the rest still the old frame's.
+    pass(&mut cpu, 100 * line);
+    let half = Rect {
+        height: 240,
+        ..whole
+    };
+    let mut words = Vec::new();
+    encode::fill(&mut words, &front, &half, 0);
+    run(&mut cpu, &words);
+    pass(&mut cpu, 100 * line);
+
+    // Captured there, before the retrace: the green frame, whole.
+    assert_eq!(reg(&cpu, regs::SCANLINE), 300);
+    for (x, y) in [(0, 0), (320, 239), (320, 240), (639, 479)] {
+        assert_eq!(pixel(&mut cpu, x, y), (0, 0xFF, 0), "({x}, {y})");
+    }
+    // And after the retrace.
+    pass(&mut cpu, 200 * line);
+    assert_eq!(pixel(&mut cpu, 0, 0), (0, 0xFF, 0));
+    assert_eq!(pixel(&mut cpu, 639, 479), (0, 0xFF, 0));
 }
 
 #[test]
