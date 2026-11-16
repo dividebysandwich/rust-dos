@@ -1495,42 +1495,40 @@ type Listing = (Vec<Vec<u8>>, Vec<Vec<u8>>);
 /// `spec` (Wine's LISTBOX_Directory): the files and folders `spec`
 /// matches, a folder as "[name]", in the order the search finds them,
 /// and then each drive there is as "[-c-]" if `attrib` has DDL_DRIVES.
-/// Names are long ones, as they are on disk. Folders come only with
-/// DDL_DIRECTORY, and hidden or system entries only with DDL_HIDDEN or
-/// DDL_SYSTEM. With DDL_EXCLUSIVE a file comes only if its read-only,
-/// hidden, system and archive attributes are the ones `attrib` asks for,
-/// and with DDL_DRIVES | DDL_EXCLUSIVE alone the folder isn't searched.
-/// None when the search fails other than by finding nothing.
-fn directory(cpu: &Cpu, attrib: u32, spec: Option<&[u8]>) -> Option<Listing> {
+/// The search is FindFirstFileA's for `spec`. Names are long ones, as
+/// they are on disk, or with `short` (a 16-bit program's list, Wine's
+/// LB_DIR16) 8.3 ones in small letters, as Windows 3.1 lists them.
+/// Folders come only with DDL_DIRECTORY, and hidden or system entries
+/// only with DDL_HIDDEN or DDL_SYSTEM. With DDL_EXCLUSIVE a file comes
+/// only if its read-only, hidden, system and archive attributes are the
+/// ones `attrib` asks for, and with DDL_DRIVES | DDL_EXCLUSIVE alone the
+/// folder isn't searched. None when the search fails other than by
+/// finding nothing.
+fn directory(cpu: &Cpu, attrib: u32, spec: Option<&[u8]>, short: bool) -> Option<Listing> {
     const ATTRIBS: u32 = DDL_READONLY | DDL_HIDDEN | DDL_SYSTEM | DDL_ARCHIVE;
     let mut files = Vec::new();
     if attrib != DDL_DRIVES | DDL_EXCLUSIVE {
         let spec = crate::dosstr::from_bytes(spec?);
-        let cut = spec
-            .rfind(['\\', '/'])
-            .or_else(|| spec.find(':'))
-            .map_or(0, |i| i + 1);
-        let (dir, pattern) = spec.split_at(cut);
-        let dir = if dir.is_empty() || dir.ends_with(':') {
-            format!("{dir}.")
-        } else {
-            dir.to_string()
-        };
-        if pattern.is_empty() {
-            return None;
-        }
-        let entries = match crate::win32::kernel32::files::find(cpu, &dir, pattern) {
+        let entries = match crate::win32::kernel32::files::find_spec(cpu, &spec) {
             Ok(entries) => entries,
             // ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES: nothing matches.
             Err(2 | 18) => Vec::new(),
             Err(_) => return None,
         };
+        let acp = crate::win32::nls::ansi(cpu);
         for e in entries {
             let a = e.attributes;
             if a & 0x08 != 0 || a & (DDL_HIDDEN | DDL_SYSTEM) & !attrib != 0 {
                 continue;
             }
-            let name = crate::dosstr::to_bytes(&e.name);
+            let mut name = if short && !e.short.is_empty() {
+                crate::dosstr::to_bytes(&e.short)
+            } else {
+                crate::dosstr::to_bytes(&e.name)
+            };
+            if short {
+                name = name.iter().map(|&b| text::ansi_case(acp, b, false)).collect();
+            }
             if a & 0x10 != 0 {
                 if attrib & DDL_DIRECTORY == 0 || e.name == "." {
                     continue;
@@ -1765,7 +1763,9 @@ pub fn listbox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         LB_DIR => {
             let spec = string_arg(cpu, lp);
-            match directory(cpu, wp, spec.as_deref()) {
+            let tid = user(cpu).window(hwnd).map_or(0, |w| w.tid);
+            let short = crate::win16::is_task(&cpu.bus.win32, tid);
+            match directory(cpu, wp, spec.as_deref(), short) {
                 Some((files, drives)) => c.add_directory(files, drives),
                 None => LB_ERR,
             }

@@ -99,11 +99,12 @@ fn list(cpu: &mut Cpu, args: &[u32], combo: bool) -> Option<u32> {
     } else {
         None
     };
-    let is_folder = |cpu: &mut Cpu, s: &[u8]| {
+    // A spec that names a folder becomes the current one here.
+    let enter = |cpu: &mut Cpu, s: &[u8]| {
         kernel32::change_directory(cpu, &crate::dosstr::from_bytes(s)).is_ok()
     };
     let mask: Vec<u8> = match &spec {
-        Some(s) if !s.is_empty() && !is_folder(cpu, s) => {
+        Some(s) if !s.is_empty() && !enter(cpu, s) => {
             if !s.contains(&b'*') && !s.contains(&b'?') {
                 set_error(cpu, ERROR_NO_WILDCARD_CHARACTERS);
                 return Some(FALSE);
@@ -148,7 +149,12 @@ fn list(cpu: &mut Cpu, args: &[u32], combo: bool) -> Option<u32> {
         // spec, and "*.*" a block of its own, which stays.
         let post = attrib & DDL_POSTMSGS != 0;
         let (mask_at, any_at, in_scratch) = if post {
-            let any = posted_any(cpu);
+            // The block only where an LB_DIR reads "*.*".
+            let any = if attrib & DDL_DIRECTORY != 0 || spec_at == 0 {
+                posted_any(cpu)
+            } else {
+                0
+            };
             (if spec_at != 0 { spec_at } else { any }, any, 0)
         } else {
             (MASK_AT, ANY_AT, 1)
@@ -166,11 +172,16 @@ fn list(cpu: &mut Cpu, args: &[u32], combo: bool) -> Option<u32> {
             calls.push([target, list, dir, attrib, mask_at, in_scratch]);
         }
     }
+    // The current folder in small letters, as CharLowerA makes them.
     let path = item(cpu, dlg, id_static);
-    let folder = files::current_directory(cpu).to_ascii_lowercase();
+    let mut folder = Vec::new();
     if path != 0 {
         let at = address_of("SendMessageA");
         calls.push([at, path, WM_SETTEXT, 0, PATH_AT, 1]);
+        folder = crate::dosstr::to_bytes(&files::current_directory(cpu))
+            .iter()
+            .map(|&b| ansi_case(acp, b, false))
+            .collect();
     }
 
     // The scratch space as it starts, which the first step writes.
@@ -181,7 +192,7 @@ fn list(cpu: &mut Cpu, args: &[u32], combo: bool) -> Option<u32> {
     };
     place(MASK_AT, ANY_AT - MASK_AT, &mask);
     place(ANY_AT, PATH_AT - ANY_AT, b"*.*");
-    place(PATH_AT, PATH_SIZE, &crate::dosstr::to_bytes(&folder));
+    place(PATH_AT, PATH_SIZE, &folder);
     let mut vars = vec![K_LIST, calls.len() as u32];
     vars.extend(calls.iter().flatten());
     vars.extend(
@@ -192,9 +203,10 @@ fn list(cpu: &mut Cpu, args: &[u32], combo: bool) -> Option<u32> {
     task::start(cpu, task::DLG_DIR, vars, LIST_SCRATCH)
 }
 
-/// A block holding "*.*" for DlgDirList's posted LB_DIR, made once for
-/// each call that posts, as the program may post again before the list
-/// reads it.
+/// A block holding "*.*" for DlgDirList's posted LB_DIR, which the list
+/// reads after the function has returned. Each call that needs one
+/// makes its own, which stays: the list may read it at any time, and
+/// USER32 has no place in the program's memory for one they share.
 fn posted_any(cpu: &mut Cpu) -> u32 {
     let handle = kernel32::global_alloc(cpu, 0, 4);
     let at = kernel32::global_address(cpu, handle);
