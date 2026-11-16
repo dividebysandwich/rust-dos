@@ -490,17 +490,18 @@ registers.
 
 While the card's mode is shown:
 
-- The picture is the surface at `MODE_START`. A `P8` pixel shows the
-  colour `PALETTE` has for it.
+- The picture is the surface at `MODE_START`, from the moment
+  `MODE_START` reads its offset ("Flips" below). A `P8` pixel shows
+  the colour `PALETTE` has for it.
 - Writes to `MODE_WIDTH`, `MODE_HEIGHT`, `MODE_FORMAT`, `MODE_PITCH` and
   `MODE_REFRESH` are kept and read back, and change nothing until the
   next write of 1 to `MODE_ENABLE`. "The mode shown" is the values those
   registers had at that write, which the card keeps apart from them.
-- A write to `MODE_START` reads back at once, shows from the next
-  frame, and cancels a pending flip. A value whose surface, with the
-  height, pitch and format of the mode shown, reaches outside card
-  memory is rejected with `BAD_RANGE`.
-- A colour written to `PALETTE` shows from the next frame.
+- A write to `MODE_START` reads back and shows at once, and cancels a
+  pending flip. A value whose surface, with the height, pitch and
+  format of the mode shown, reaches outside card memory is rejected
+  with `BAD_RANGE`.
+- A colour written to `PALETTE` shows at once.
 - The VGA registers keep their contents and take writes, and none of it
   is shown.
 - The window at A0000h stays what the VGA's side has it as: the VGA's
@@ -555,18 +556,46 @@ vertical blank and for the last fifth of every line.
 
 ### Flips
 
-`FLIP` (chapter 9) changes `MODE_START` by command. Without its wait
-flag the change is made at once and bit 1 of `IRQ_STATUS` is set. With
-the flag, bit 1 of `STATUS` is set and `MODE_START` keeps reading the
-old offset until the next vertical blank begins; then `MODE_START`
-changes, bit 1 of `STATUS` clears and bit 1 of `IRQ_STATUS` is set.
-Either way the screen shows the surface from the frame after the
-change.
+`FLIP` (chapter 9) changes `MODE_START` by command, and the screen
+shows the surface at `MODE_START` from the moment it reads the new
+offset:
+
+- Without its wait flag the change is made at once: `MODE_START`
+  reads the new offset, the screen shows the new surface, and bit 1
+  of `IRQ_STATUS` is set. `STATUS` and `FRAME` are as they were.
+- With the flag, bit 1 of `STATUS` is set, and until the next
+  vertical blank begins `MODE_START` keeps reading the old offset and
+  the screen keeps showing the old surface. When the blank begins,
+  `FRAME` goes up as at every blank, `MODE_START` changes, the screen
+  shows the new surface, bit 1 of `STATUS` clears and bit 1 of
+  `IRQ_STATUS` is set.
+
+An allowance of the emulator's: after a flip that waits, the picture
+moves to the new surface when the card's timer event after the blank
+is served, up to a tick of the clock after `MODE_START` reads the new
+offset. Bringing the card up to date for the screen instead would set
+its interrupt bits at moments the host's frames choose.
 
 The command itself never waits: the write to `RING_PUT` returns with
-the flip pending. A driver that has to wait reads `STATUS`, or takes the
-interrupt. A second `FLIP` while one is pending replaces it, and the
-first one's surface is never shown.
+the flip pending, and the commands after it in the ring run at once.
+A driver that has to wait reads `STATUS`, or takes the interrupt,
+before it draws into the surface still shown. A second `FLIP` while
+one is pending replaces it, and the first one's surface is never
+shown.
+
+A monitor scans its picture out line by line, and a card that changed
+its start address in the middle of a frame would show the new surface
+from the next frame, or from the line the beam was at. The emulator
+shows whole frames, and a flip without the wait shows the frame the
+program finished at once. The built-in Windows' DirectDraw flips that
+way, and games draw their next frame into the old front buffer
+straight after Flip: No One Lives Forever clears it to black first.
+Shown until the next blank, that buffer would be a frame half drawn,
+which a machine running Windows doesn't show either: there the display
+driver answers a blit to the surface still shown, or a lock of it,
+with DDERR_WASSTILLDRAWING until the flip has shown, and DirectDraw
+waits with DDBLT_WAIT. Nothing a guest reads depends on which surface
+the screen shows.
 
 ## 7. Interrupt
 

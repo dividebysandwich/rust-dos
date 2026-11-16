@@ -1218,6 +1218,15 @@ as long as it doesn't act on the pixels it reads, and the frames
 differ only where the renderers do. Check `renderer` before trusting
 identical pictures.
 
+Screenshots, `/ws/screen` and recordings show the surface at the
+card's `MODE_START` (in `mode.start`), with either renderer. After a
+flip without the wait, the built-in Windows' DirectDraw Flip, that is
+the frame just flipped to, from that moment on: a shot at a fixed
+emulated time shows the last frame the program finished, never the
+buffer it goes on to draw its next frame into. A flip that waits
+shows at the next vertical blank ("Flips" in
+`docs/toadforce-spec.md`).
+
 To find the draws a difference between the renderers comes from,
 record what the card is given and draw the recording through both:
 
