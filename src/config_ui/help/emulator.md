@@ -98,8 +98,10 @@ Takes effect at the DOS prompt.
 
 While it says **(auto)**, the processor follows the video card: a
 **486**, or a **Pentium III** with a ToadForce, whose games were written
-for a Pentium II or better. A processor you pick stays whatever the card
-is; **Delete** goes back to the default.
+for a Pentium II or better. Picking the ToadForce as the video card puts
+a processor older than the Pentium II back to **(auto)**. A processor
+you pick stays whatever the card is; **Delete** goes back to the
+default.
 
 # BIOS POST screen {#post}
 

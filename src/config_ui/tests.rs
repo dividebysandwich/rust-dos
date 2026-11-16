@@ -435,6 +435,65 @@ fn the_cpu_follows_the_card_until_one_is_picked() {
     assert_eq!((applied.cpu_model(), applied.memsize), (CpuModel::I486, Some(128)));
 }
 
+/// The settings window opened on `cpu` set to `cpu`, on the emulator
+/// page, at the video card's row.
+fn at_the_card_with_cpu(host: &FakeHost, cpu: crate::cpu::CpuModel) -> ConfigUi {
+    let mut ui = ConfigUi::new();
+    let settings = Settings { cpu: Some(cpu), ..Settings::default() };
+    ui.open(&settings, Some("/cfg/rust-dos.conf".into()), host);
+    ui.show_page(Page::Emulator);
+    ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
+    ui
+}
+
+#[test]
+fn a_toadforce_picked_unsets_a_cpu_its_games_dont_run_on() {
+    use crate::cpu::CpuModel;
+    use crate::video::adapter::Adapter;
+    // The cpu=486 the settings window of an earlier rust-dos saved gives
+    // way to the card's default, and the processor row shows it at once.
+    let mut host = FakeHost::new();
+    let mut ui = at_the_card_with_cpu(&host, CpuModel::I486);
+    pick(&mut ui, &mut host, Adapter::ToadForce.describe());
+    let applied = host.applied.last().unwrap();
+    assert_eq!((applied.cpu, applied.cpu_model()), (None, CpuModel::PentiumIII));
+    assert_eq!(Item::Cpu.value(&ui.settings, None), "Pentium III (auto)");
+
+    // A 486 picked afterwards stays a 486, and so does the card.
+    ui.row = ui.items().iter().position(|&i| i == Item::Cpu).unwrap();
+    pick(&mut ui, &mut host, CpuModel::I486.describe());
+    let applied = host.applied.last().unwrap();
+    assert_eq!((applied.cpu, applied.machine), (Some(CpuModel::I486), Adapter::ToadForce));
+    assert!(applied.cpu_below_card());
+    // The card's list opens on the ToadForce, and picking it again keeps
+    // the 486.
+    ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
+    keys(&mut ui, &mut host, &[UiKey::Enter]);
+    let popup = ui.popup.as_ref().unwrap();
+    assert_eq!(popup.choices[popup.selected].machine, Adapter::ToadForce);
+    keys(&mut ui, &mut host, &[UiKey::Enter]);
+    assert_eq!(ui.settings.cpu, Some(CpuModel::I486));
+
+    // Away from the ToadForce a set processor stays as it is.
+    pick(&mut ui, &mut host, Adapter::Vga.describe());
+    let applied = host.applied.last().unwrap();
+    assert_eq!((applied.cpu, applied.machine), (Some(CpuModel::I486), Adapter::Vga));
+}
+
+#[test]
+fn a_toadforce_picked_keeps_a_cpu_its_games_run_on() {
+    use crate::cpu::CpuModel;
+    use crate::video::adapter::Adapter;
+    for cpu in [CpuModel::PentiumII, CpuModel::PentiumIII] {
+        let mut host = FakeHost::new();
+        let mut ui = at_the_card_with_cpu(&host, cpu);
+        pick(&mut ui, &mut host, Adapter::ToadForce.describe());
+        let applied = host.applied.last().unwrap();
+        assert_eq!((applied.cpu, applied.machine), (Some(cpu), Adapter::ToadForce));
+        assert_eq!(Item::Cpu.value(&ui.settings, None), cpu.describe());
+    }
+}
+
 #[test]
 fn auto_speed_target_steps_and_is_typed() {
     let mut host = FakeHost::new();

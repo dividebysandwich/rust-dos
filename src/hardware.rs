@@ -260,3 +260,49 @@ impl Hardware {
         warnings
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::video::adapter::Adapter;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// The processor lines `apply` logs on a machine set up with `from`
+    /// when the settings become `to`.
+    fn cpu_lines_logged(from: &Settings, to: &Settings) -> Vec<String> {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let mut hardware = Hardware::of(from);
+        let lines = Rc::new(RefCell::new(Vec::new()));
+        let sink = lines.clone();
+        cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+            sink.borrow_mut().push(line.to_string());
+        }));
+        hardware.apply(&mut cpu, to);
+        let is_cpu = |line: &String| {
+            ["(cpu)", "(the default", "cpu sets"].iter().any(|s| line.contains(s))
+        };
+        lines.take().into_iter().filter(is_cpu).collect()
+    }
+
+    #[test]
+    fn a_toadforce_coming_or_going_logs_the_processor() {
+        let cpu_486 = |machine| Settings {
+            cpu: Some(CpuModel::I486),
+            machine,
+            ..Settings::default()
+        };
+        // The card changed to a ToadForce with cpu=486 kept: the model is
+        // the same, and the warning is logged.
+        let lines = cpu_lines_logged(&cpu_486(Adapter::Vga), &cpu_486(Adapter::ToadForce));
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[0], "[CONFIG] A 486 (cpu)");
+        assert!(lines[1].contains("expect a Pentium II or better"), "{lines:?}");
+        // And back: the 486 again, with no warning.
+        let lines = cpu_lines_logged(&cpu_486(Adapter::ToadForce), &cpu_486(Adapter::Vga));
+        assert_eq!(lines, ["[CONFIG] A 486 (cpu)"]);
+        // Nothing for the processor where neither it nor the card changes.
+        let lines = cpu_lines_logged(&cpu_486(Adapter::Vga), &cpu_486(Adapter::Vga));
+        assert!(lines.is_empty(), "{lines:?}");
+    }
+}

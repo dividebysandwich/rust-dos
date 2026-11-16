@@ -106,6 +106,25 @@ fn a_toadforce_without_cpu_has_a_pentium_iii() {
 }
 
 #[test]
+fn a_cpu_unset_for_a_toadforce_leaves_the_saved_file() {
+    use crate::cpu::CpuModel;
+    let settings = |text: &str| Settings::from_config(&parse(text, Path::new("/cfg"), None));
+    // A file the settings window of an earlier rust-dos saved has
+    // cpu=486. When the window unsets it on a change to a ToadForce, the
+    // saved file's line is commented out and the file gives the card's
+    // default.
+    let original = "[emulator]\nmachine=svga\ncpu=486\n";
+    let file = settings(original);
+    assert!(!file.cpu_below_card());
+    let changed = Settings { machine: Adapter::ToadForce, ..file.clone() };
+    assert!(changed.cpu_below_card());
+    let changed = Settings { cpu: None, ..changed };
+    let text = complete_text(original, Path::new("/cfg"), &file, &changed, &[], None);
+    assert!(text.contains("#cpu=486") && !text.contains("\ncpu="), "{text}");
+    assert_eq!(settings(&text).cpu_model(), CpuModel::PentiumIII);
+}
+
+#[test]
 fn xbrz_config_parses_and_invalid_shader_help_lists_it() {
     let config = parse("[emulator]\nshader=xbrz\n", Path::new("/cfg"), None);
     assert_eq!(config.shader, Some(crate::video::shader::Shader::Xbrz));

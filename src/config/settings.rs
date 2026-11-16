@@ -415,11 +415,19 @@ impl Settings {
         self.cpu.unwrap_or_else(|| default_cpu(self.machine))
     }
 
+    /// Whether `cpu` sets a model the display adapter's games don't run on:
+    /// one older than the Pentium II beside a ToadForce. The log warns of
+    /// it (`cpu_lines`), and the settings window unsets it when the card is
+    /// changed to one it doesn't suit.
+    pub fn cpu_below_card(&self) -> bool {
+        self.cpu.is_some_and(|cpu| self.machine.is_toadforce() && cpu < CpuModel::PentiumII)
+    }
+
     /// A line for the log on the processor a machine with these settings
     /// starts with, and where it comes from, and a second where `cpu` sets
-    /// a model older than the Pentium II beside a ToadForce. That line says
-    /// how to get the card's default: a configuration file saved from the
-    /// settings window before the model followed the card has `cpu=486`.
+    /// a model the card's games don't run on (`cpu_below_card`). That line
+    /// says how to get the card's default: a configuration file saved from
+    /// the settings window before the model followed the card has `cpu=486`.
     pub fn cpu_lines(&self) -> Vec<String> {
         let cpu = self.cpu_model();
         let mut lines = vec![match self.cpu {
@@ -429,7 +437,7 @@ impl Settings {
             }
             None => format!("[CONFIG] A {} (the default)", cpu.describe()),
         }];
-        if self.cpu.is_some() && self.machine.is_toadforce() && cpu < CpuModel::PentiumII {
+        if self.cpu_below_card() {
             lines.push(format!(
                 "[CONFIG] cpu sets a {} with a ToadForce: its games expect a Pentium II \
                  or better, and without the cpu line the machine has a {}",

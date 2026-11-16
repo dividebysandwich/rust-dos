@@ -238,10 +238,18 @@ impl Item {
                 s.cpu = Some(cpu);
                 s.memsize = s.memsize.map(|mb| mb.min(cpu.max_memsize()));
             }),
-            // The card brings its processor where `cpu` isn't set, and the
-            // memory is cut to what that one takes, as for a picked one.
+            // The card brings its processor where `cpu` isn't set. A set
+            // one that the new card's games don't run on is unset, so the
+            // card's default replaces it: the settings window of an earlier
+            // rust-dos saved `cpu=486` into every configuration file. One
+            // picked with the card in place stays. The memory is cut to
+            // what the processor takes, as for a picked one.
             Machine => each(s, crate::video::adapter::Adapter::ALL, |s, machine| {
+                let suited = !s.cpu_below_card();
                 s.machine = machine;
+                if suited && s.cpu_below_card() {
+                    s.cpu = None;
+                }
                 s.memsize = s.memsize.map(|mb| mb.min(s.cpu_model().max_memsize()));
             }),
             Voodoo => on_off(|s, on| s.voodoo.enabled = on),

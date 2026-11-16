@@ -265,10 +265,14 @@ limit, so without a connection it goes on as it would with one:
   A `cpu` line wins: with a ToadForce, a model older than the Pentium II
   runs as set, with a line in the log that the card's games expect a Pentium
   II or better. The settings window of an earlier rust-dos wrote `cpu=486`
-  into the configuration file it saved: remove that line, or press Delete
-  on the processor in the settings window, to have the card's default. A
-  save state keeps the processor it was saved with, so one saved with a
-  ToadForce by an earlier rust-dos loads as a 486.
+  into the configuration file it saved. When the video card is changed to
+  the ToadForce in the settings window, a processor older than the Pentium
+  II goes back to **(auto)**, and saving comments out the `cpu` line; a
+  processor picked after that stays. In a file edited by hand, remove the
+  `cpu` line, or press Delete on the processor in the settings window, to
+  have the card's default. A save state keeps the processor it was saved
+  with, so one saved with a ToadForce by an earlier rust-dos loads as a
+  486.
 * `core` is what runs the programs' instructions: `auto` (the default)
   runs the interpreter, and the dynamic recompiler for a program from the
   moment it switches to protected mode until it ends, as DOSBox's
