@@ -657,8 +657,10 @@ impl Voodoo {
 
     /// The same for the rows of the buffers bytes `start..end` of the
     /// memory hold, which the program reads or writes: they are hot from
-    /// then on (`gpu_takes`).
+    /// then on (`gpu_takes`), and those hot already stay hot (`touch`),
+    /// whether anything there is behind or not.
     pub(crate) fn gpu_catch_up_hot(&self, start: u32, end: u32) {
+        self.gpu.borrow_mut().tracker.touch(start, end);
         self.gpu_catch_up_rows(Some((start, end)), true);
     }
 
@@ -674,14 +676,8 @@ impl Voodoo {
         self.gpu_catch_up_rows(range, false);
     }
 
-    /// `gpu_catch_up_in`, the rows read back hot if `hot`. With `hot`,
-    /// the rows of the range that are hot already stay hot (`touch`),
-    /// whether anything there is behind or not: the program goes on
-    /// reading them.
+    /// `gpu_catch_up_in`, the rows read back hot if `hot`.
     fn gpu_catch_up_rows(&self, range: Option<(u32, u32)>, hot: bool) {
-        if hot && let Some((start, end)) = range {
-            self.gpu.borrow_mut().tracker.touch(start, end);
-        }
         if !self.gpu_behind.get() {
             return;
         }
@@ -1007,6 +1003,16 @@ impl Voodoo {
     #[inline]
     pub(crate) fn gpu_sync(&self, start: u32, end: u32) {
         self.gpu.borrow_mut().tracker.touch(start, end);
+        self.gpu_sync_cooling(start, end);
+    }
+
+    /// `gpu_sync` without keeping the hot bytes there hot: what only the
+    /// GPU has is read back and turns hot, and what was hot already cools
+    /// at the end of the period unless the program reads it. For a 2D
+    /// command the GPU may draw once the bytes cool
+    /// (`banshee_2d_keeps_hot`).
+    #[inline]
+    pub(crate) fn gpu_sync_cooling(&self, start: u32, end: u32) {
         self.gpu_sync_buffers(start, end);
         if self.gpu.borrow().tracker.any_gpu() {
             self.read_back(start, end, true);
@@ -1014,11 +1020,11 @@ impl Voodoo {
     }
 
     /// The rows of the 3D buffers within bytes `start..end` that are
-    /// behind the renderer, read back for the program (`gpu_sync`).
+    /// behind the renderer, read back hot (`gpu_sync`).
     #[inline]
     fn gpu_sync_buffers(&self, start: u32, end: u32) {
         if self.gpu_behind.get() && self.gpu.borrow().tracker.buffers_in(start, end) {
-            self.gpu_catch_up_hot(start, end);
+            self.gpu_catch_up_rows(Some((start, end)), true);
         }
     }
 

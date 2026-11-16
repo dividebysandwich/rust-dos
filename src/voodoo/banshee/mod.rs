@@ -922,8 +922,8 @@ impl Voodoo {
     /// whose bytes can't be bounded reads back all of the memory without
     /// it turning hot: the engine reads little of it, and every 3D buffer
     /// hot would send all the drawing to software for a second. A command
-    /// over hot bytes keeps them hot (`Tracker::touch`), with nothing to
-    /// read back.
+    /// over hot bytes that the GPU can't draw keeps them hot
+    /// (`banshee_2d_keeps_hot`).
     pub(crate) fn banshee_2d_write(&mut self, reg: u32, data: u32) {
         let Some(b) = &self.banshee else { return };
         let (any_gpu, any_hot) = {
@@ -946,13 +946,18 @@ impl Voodoo {
             match footprint {
                 Footprint::Nothing => {}
                 Footprint::Spans(spans) => {
+                    let keeps = any_hot && self.banshee_2d_keeps_hot(reg, data);
                     for (start, end) in spans.into_iter().flatten() {
-                        self.gpu_sync(start, end);
+                        if keeps {
+                            self.gpu_sync(start, end);
+                        } else {
+                            self.gpu_sync_cooling(start, end);
+                        }
                     }
                 }
                 Footprint::All => self.gpu_sync_all(),
             }
-        } else if any_hot {
+        } else if any_hot && self.banshee_2d_keeps_hot(reg, data) {
             // Nothing to read back or wait for: the command runs on the
             // CPU as before, and the hot bytes it uses stay hot.
             let size = self.fbi.ram.bytes() as u32;
@@ -979,6 +984,22 @@ impl Voodoo {
         if let Some(b) = &mut self.banshee {
             b.engine.touched = runs;
         }
+    }
+
+    /// Whether the command that writing `data` to 2D register `reg` runs
+    /// keeps the hot bytes it reads and draws into hot (`Tracker::touch`).
+    /// One the GPU can't draw does: once they cooled it would read them
+    /// back. One the GPU may draw (a fill or a plain copy, with the
+    /// renderer able to take 2D commands, `banshee_2d_gpu`) leaves them
+    /// to cool: kept hot by the command, a buffer the program read once
+    /// and cleared or copied every frame would stay in software and its
+    /// commands on the CPU for good, where once it cools the GPU draws
+    /// both with nothing read back.
+    fn banshee_2d_keeps_hot(&self, reg: u32, data: u32) -> bool {
+        let size = self.fbi.ram.bytes() as u32;
+        let planned = (self.banshee.as_ref())
+            .is_some_and(|b| b.engine.plan(reg, data, size).is_ok());
+        !(planned && self.gpu_ready() && !self.software_picture)
     }
 
     /// A write through BAR1: into the memory, through the tiles, and into

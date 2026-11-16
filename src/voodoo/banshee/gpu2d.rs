@@ -392,6 +392,34 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_buffer_read_once_and_filled_every_frame_goes_back_to_the_gpu() {
+        // A game that clears its buffers with the 2D engine reads a pixel
+        // of one once: the buffer turns hot, its frames are drawn in
+        // software and its fills on the CPU. The fills, which the GPU
+        // could draw, don't keep it hot: once it cools, the frames and
+        // the fills go back to the GPU.
+        use crate::voodoo::gpu::HOT_FRAMES;
+        let model = Rc::default();
+        let mut v = model_card(&model, false);
+        let a = surface(A, 2, false);
+        frame(&mut v, &model, A);
+        v.gpu_sync(A, A + 4);
+        for _ in 0..2 * HOT_FRAMES + 1 {
+            command_2d(&mut v, FILL, a, a, (0, 0), (0, 0), (640, 64), 0x1234);
+            frame(&mut v, &model, A);
+        }
+        let (jobs, commands) = (gpu_only(&v), status(&v)["gpu_2d"]["engine_commands"].clone());
+        command_2d(&mut v, FILL, a, a, (0, 0), (0, 0), (640, 64), 0x1234);
+        frame(&mut v, &model, A);
+        assert_eq!(gpu_only(&v), jobs + 3, "the frame on the GPU");
+        assert_eq!(
+            status(&v)["gpu_2d"]["engine_commands"],
+            commands.as_u64().unwrap() + 1,
+            "the fill on the GPU"
+        );
+    }
+
+    #[test]
     fn a_depth_buffer_cleared_by_the_2d_engine_stays_on_the_gpu() {
         let model = Rc::default();
         let mut v = model_card(&model, true);
