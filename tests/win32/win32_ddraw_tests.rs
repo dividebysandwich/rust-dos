@@ -3149,6 +3149,87 @@ fn load_copies_the_blocks_of_a_dxt_texture() {
     assert_eq!(blocks, FOUR_BLOCKS);
 }
 
+/// The levels below the top of the DXT mipmaps of
+/// `dxt_mipmap_load_program`: the source's, then the destination's.
+const SOURCE_LEVELS: [u32; 2] = [BACK, PALETTE];
+const FRONT_LEVELS: [u32; 2] = [CLIPPER, OFFSCREEN];
+/// The descriptions those levels are locked with.
+const LEVEL_DESCS: [u32; 2] = [0xB00, 0xB80];
+
+/// A DDSURFACEDESC at `offset` for a 4x4 DXT1 mipmap of 4x4, 2x2 and
+/// 1x1 levels in system memory.
+fn dxt_mipmap_desc(d: &mut [u8], offset: u32) {
+    dxt_desc(d, offset, b"DXT1", 4, 4);
+    let flags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT | DDSD_MIPMAPCOUNT;
+    put32(d, offset + 0x04, flags);
+    put32(d, offset + 0x18, 3);
+    let caps = DDSCAPS_TEXTURE | DDSCAPS_SYSTEMMEMORY | DDSCAPS_MIPMAP | DDSCAPS_COMPLEX;
+    put32(d, offset + 0x68, caps);
+}
+
+/// Two DXT1 mipmaps of three levels, each level of the source a block
+/// of FOUR_BLOCKS of its own, loaded (IDirect3DTexture2's Load) into
+/// the other, whose levels are then locked.
+fn dxt_mipmap_load_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    d.resize(0xC00, 0);
+    dxt_mipmap_desc(&mut d, DESC);
+    dxt_mipmap_desc(&mut d, DESC3);
+    put(&mut d, BLOCKS, &FOUR_BLOCKS);
+    put(&mut d, IID, &IID_IDIRECT3DTEXTURE2);
+    put32(&mut d, LEVEL_CAPS, DDSCAPS_TEXTURE | DDSCAPS_MIPMAP);
+    for desc in LEVEL_DESCS {
+        put32(&mut d, desc, 108);
+    }
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        dxt_start(a, l, &mut c, 8, &[(DESC3, FRONT)])?;
+        for (top, levels) in [(SOURCE, SOURCE_LEVELS), (FRONT, FRONT_LEVELS)] {
+            let mut from = top;
+            for to in levels {
+                let args = [Arg::At(LEVEL_CAPS), Arg::At(to)];
+                c.com(a, l, from, S_GET_ATTACHED_SURFACE, &args)?;
+                from = to;
+            }
+        }
+        for ((level, desc), i) in SOURCE_LEVELS.into_iter().zip(LEVEL_DESCS).zip(1..) {
+            let args = [Arg::I(0), Arg::At(desc), Arg::I(1), Arg::I(0)];
+            c.com(a, l, level, S_LOCK, &args)?;
+            copy_in(a, l, BLOCKS + 8 * i, desc, 2)?;
+            c.com(a, l, level, S_UNLOCK, &[Arg::I(0)])?;
+        }
+        for (surface, texture) in [(SOURCE, TEX_SOURCE), (FRONT, TEX_FRONT)] {
+            let args = [Arg::At(IID), Arg::At(texture)];
+            c.com(a, l, surface, S_QUERY_INTERFACE, &args)?;
+        }
+        c.com(a, l, TEX_FRONT, TEX2_LOAD, &[Arg::Val(TEX_SOURCE)])?;
+        find_pixels(a, l, &mut c, FRONT, DESC3)?;
+        for (level, desc) in FRONT_LEVELS.into_iter().zip(LEVEL_DESCS) {
+            find_pixels(a, l, &mut c, level, desc)?;
+        }
+        finish(a, l)
+    })
+}
+
+/// Load copies every level of a DXT mipmap, the 2x2 and 1x1 ones too:
+/// a level smaller than a block is one block, which the copy takes
+/// whole.
+#[test]
+fn load_copies_every_level_of_a_dxt_mipmap() {
+    let (program, data) = dxt_mipmap_load_program();
+    let mut cpu = machine("dxt_mipmap_load", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 24);
+    assert_eq!(r[1..24], [0; 23], "{r:X?}");
+    for (desc, i) in [DESC3].into_iter().chain(LEVEL_DESCS).zip(0..) {
+        let block: Vec<u8> = locked_pixels(&cpu, data, desc, (2, 1), 4)
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        assert_eq!(block, FOUR_BLOCKS[8 * i..][..8], "level {i}");
+    }
+}
+
 // The frame rate cap (`fps_cap`).
 
 /// Where the capped programs count their frames, and their second
