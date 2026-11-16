@@ -647,6 +647,9 @@ pub struct Voodoo {
     /// meanwhile, kept from hold to hold.
     held: Option<Held>,
     held_rgba: Vec<u8>,
+    /// Copies of the picture made for a hold (`hold_shown`), from the
+    /// card's creation: for the debugger.
+    held_copies: u64,
     /// Where the jobs given out or waiting since the workers last
     /// finished draw (`note_drawn`), each with the batch of the latest
     /// job there: one after `front_jobs` if it is a later batch.
@@ -783,6 +786,7 @@ impl Voodoo {
             swap_marks: VecDeque::new(),
             held: None,
             held_rgba: Vec::new(),
+            held_copies: 0,
             drawn: RefCell::new(Drawn::default()),
             outstanding: Cell::new(false),
             tmu_in_use: Cell::new(0),
@@ -1691,6 +1695,7 @@ impl Voodoo {
             rgba.resize(w * h * 4, 0);
             self.render_memory(&mut rgba, w);
             self.held_rgba = rgba;
+            self.held_copies += 1;
             // The host may not have drawn this picture yet.
             self.display_dirty = true;
             w
@@ -2516,7 +2521,7 @@ impl Voodoo {
     pub fn describe(&self, now: Now) -> serde_json::Value {
         let init: Vec<String> =
             [FBI_INIT0, FBI_INIT1, FBI_INIT2, FBI_INIT3, FBI_INIT4].iter().map(|&r| format!("{:08X}", self.reg[r])).collect();
-        serde_json::json!({
+        let mut v = serde_json::json!({
             "model": self.board.model().name(),
             "board_mb": self.board.megabytes(),
             "base": format!("{:08X}", self.pci.bar),
@@ -2558,7 +2563,9 @@ impl Voodoo {
                 "depth": self.cmdfifo.depth,
                 "holes": self.cmdfifo.holes,
             })),
-        })
+        });
+        v["held_copies"] = self.held_copies.into();
+        v
     }
 }
 
