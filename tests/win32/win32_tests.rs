@@ -1796,16 +1796,20 @@ fn win_exec_starts_a_program_or_says_why_not() {
 /// LoadModule, which Windows 95 and 98 export and Smacker's UPX-packed
 /// SMACKW32.DLL imports: a name without an extension is a program's
 /// (C, for C.EXE), the child's command line is its path, a space and
-/// the LOADPARMS32's Pascal string, and its environment is the block's.
-/// A path with a space in it is quoted. Over 31 for a program started,
-/// 2 for one not found.
+/// the LOADPARMS32's Pascal string, unquoted when the path has a space
+/// in it, its environment is the block's and its STARTUPINFOA has the
+/// show command at lpCmdShow. Over 31 for a program started, 2 for one
+/// not found.
 #[test]
 fn load_module_starts_a_program_or_says_why_not() {
     let child = {
         let names: &[&str] = &["GetStdHandle", "GetCommandLineA", "lstrlenA", "WriteFile"];
-        let names = [names, &["ExitProcess", "GetEnvironmentStringsA"]].concat();
+        let more: &[&str] = &["ExitProcess", "GetEnvironmentStringsA", "GetStartupInfoA"];
+        let names = [names, more].concat();
         let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &names)];
-        program(BASE, false, imports, &[0; 4], |a, l| {
+        // The count WriteFile writes at 0, the STARTUPINFOA at 4 and the
+        // text that shows its flags and show command at 0x48.
+        program(BASE, false, imports, &[0; 0x50], |a, l| {
             a.push(STD_OUTPUT_HANDLE)?;
             a.call(l.import(0))?;
             a.mov(ebx, eax)?;
@@ -1822,6 +1826,21 @@ fn load_module_starts_a_program_or_says_why_not() {
                 a.push(ebx)?;
                 a.call(l.import(3))?;
             }
+            // "S", then dwFlags' low byte and wShowWindow as digits.
+            a.push(l.at(4) as i32)?;
+            a.call(l.import(6))?;
+            a.mov(byte_ptr(l.at(0x48)), b'S' as i32)?;
+            for (field, at) in [(44, 0x49), (48, 0x4A)] {
+                a.mov(al, byte_ptr(l.at(4 + field)))?;
+                a.add(al, b'0' as i32)?;
+                a.mov(byte_ptr(l.at(at)), al)?;
+            }
+            a.push(0)?;
+            a.push(l.at(0) as i32)?;
+            a.push(3)?;
+            a.push(l.at(0x48) as i32)?;
+            a.push(ebx)?;
+            a.call(l.import(3))?;
             a.push(0)?;
             a.call(l.import(4))?;
             a.int3()
@@ -1837,7 +1856,8 @@ fn load_module_starts_a_program_or_says_why_not() {
     data.resize(0x40, 0);
     data[0x30] = 11;
     data[0x31..0x3C].copy_from_slice(b"an argument");
-    data.extend_from_slice(&[2, 0, 1, 0]);
+    // SW_SHOWMINNOACTIVE, 7.
+    data.extend_from_slice(&[2, 0, 7, 0]);
     data.resize(0x48, 0);
     data.extend_from_slice(b"SUB DIR\\D");
     data.resize(0x58, 0);
@@ -1884,9 +1904,12 @@ fn load_module_starts_a_program_or_says_why_not() {
     let text = printed(&cpu);
     assert_eq!(cpu.errorlevel, 7, "{text}");
     assert!(text.contains("C:\\C.EXE an argument"), "{text}");
-    let quoted = "\"C:\\SUB DIR\\D.EXE\" an argument";
-    assert!(text.contains(quoted), "{text}");
+    // Given as is, as Wine gives it with the program named.
+    assert!(text.contains("C:\\SUB DIR\\D.EXE an argument"), "{text}");
+    assert!(!text.contains('"'), "{text}");
     assert_eq!(text.matches("LM=1").count(), 2, "{text}");
+    // STARTF_USESHOWWINDOW and the show command from lpCmdShow.
+    assert_eq!(text.matches("S17").count(), 2, "{text}");
 }
 
 /// A command line naming its program without quotes, in a folder with
