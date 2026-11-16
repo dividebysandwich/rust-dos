@@ -14,6 +14,17 @@
 //! DdeNameService registers a program's services, but conversations
 //! with servers that are programs aren't made: DdeConnect fails for
 //! them with DMLERR_NO_CONV_ESTABLISHED.
+//!
+//! A transaction with TIMEOUT_ASYNC is done at once too, but the client
+//! hears of it as Windows tells it: DdeClientTransaction gives TRUE and
+//! the transaction's id, and the instance's callback gets
+//! XTYP_XACT_COMPLETE later, from the client's message loop. A hidden
+//! window of the client's thread gets a message for it, which its
+//! procedure (`wnd_proc`) turns into the call.
+//!
+//! The 16-bit DDEML (win16/ddeml.rs) goes on to these functions, so a
+//! 16-bit program's instances, handles and conversations are kept here
+//! with the 32-bit ones'.
 
 use super::{current_tid, string_at};
 use crate::cpu::Cpu;
@@ -24,15 +35,25 @@ const DMLERR_DLL_NOT_INITIALIZED: u32 = 0x4003;
 const DMLERR_INVALIDPARAMETER: u32 = 0x4006;
 const DMLERR_NOTPROCESSED: u32 = 0x4009;
 const DMLERR_NO_CONV_ESTABLISHED: u32 = 0x400A;
+const DMLERR_UNFOUND_QUEUE_ID: u32 = 0x4011;
 
 const XTYP_EXECUTE: u32 = 0x4050;
 const XTYP_REQUEST: u32 = 0x20B0;
+pub const XTYP_XACT_COMPLETE: u32 = 0x8080;
+/// The timeout of an asynchronous transaction.
+const TIMEOUT_ASYNC: u32 = 0xFFFF_FFFF;
+/// DdeSetUserHandle's and DdeQueryConvInfo's id for the conversation
+/// itself, not one of its transactions.
+const QID_SYNC: u32 = 0xFFFF_FFFF;
 /// The flags of a transaction type (XTYPF_NOBLOCK and the rest).
 const XTYPF_MASK: u32 = 0x000F;
 
 const HDATA_APPOWNED: u32 = 0x0001;
 pub(super) const DDE_FACK: u32 = 0x8000;
 const CP_WINUNICODE: u32 = 1200;
+const CP_WINANSI: u32 = 1004;
+/// The size of Win32's CONVCONTEXT.
+const CONVCONTEXT_SIZE: u32 = 36;
 pub(super) const CF_TEXT: u32 = 1;
 
 pub(super) const WM_DDE_ACK: u32 = 0x3E4;
@@ -76,6 +97,8 @@ pub struct Data {
     pub app_owned: bool,
     /// The copy DdeAccessData gave: its process, block and address.
     pub access: Option<(u32, u32, u32)>,
+    /// The 16-bit global block the 16-bit DdeAccessData gave, or 0.
+    pub access16: u32,
 }
 
 /// A conversation, with the shell's Program Manager.
@@ -84,6 +107,27 @@ pub struct Conv {
     pub instance: u32,
     pub service: u32,
     pub topic: u32,
+    /// DdeSetUserHandle's value for QID_SYNC.
+    pub user: u32,
+}
+
+/// An asynchronous transaction whose XTYP_XACT_COMPLETE hasn't been
+/// given yet.
+#[derive(Clone, Debug, Default)]
+pub struct Xact {
+    pub instance: u32,
+    pub conv: u32,
+    pub id: u32,
+    pub kind: u32,
+    pub format: u32,
+    pub item: u32,
+    /// What the callback gets: the data, TRUE for a transaction that
+    /// gives none, 0 for one that failed.
+    pub data: u32,
+    /// The DDE_ status flags.
+    pub status: u32,
+    /// DdeSetUserHandle's value for the transaction.
+    pub user: u32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -92,6 +136,9 @@ pub struct State {
     strings: Vec<Option<Str>>,
     data: Vec<Option<Data>>,
     convs: Vec<Option<Conv>>,
+    xacts: Vec<Option<Xact>>,
+    /// The id the last asynchronous transaction got.
+    last_xact: u32,
 }
 
 crate::state_fields!(Instance {
@@ -109,18 +156,33 @@ crate::state_fields!(Data {
     format,
     item,
     app_owned,
-    access
+    access,
+    access16
 });
 crate::state_fields!(Conv {
     instance,
     service,
-    topic
+    topic,
+    user
+});
+crate::state_fields!(Xact {
+    instance,
+    conv,
+    id,
+    kind,
+    format,
+    item,
+    data,
+    status,
+    user
 });
 crate::state_fields!(State {
     instances,
     strings,
     data,
-    convs
+    convs,
+    xacts,
+    last_xact
 });
 
 fn state(cpu: &mut Cpu) -> &mut State {
@@ -166,6 +228,21 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32) {
     }
 }
 
+/// The thread `tid` ended, a 16-bit task's, whose instances are its own
+/// as a process's are on Windows 3.1: they go.
+pub fn thread_ended(cpu: &mut Cpu, tid: u32) {
+    let ids: Vec<u32> = state(cpu)
+        .instances
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| i.as_ref().is_some_and(|i| i.tid == tid))
+        .map(|(n, _)| n as u32 + 1)
+        .collect();
+    for id in ids {
+        uninitialize(cpu, id);
+    }
+}
+
 fn uninitialize(cpu: &mut Cpu, id: u32) {
     let s = state(cpu);
     if let Some(slot) = (id as usize)
@@ -182,6 +259,11 @@ fn uninitialize(cpu: &mut Cpu, id: u32) {
     for d in s.data.iter_mut() {
         if d.as_ref().is_some_and(|d| d.instance == id) {
             *d = None;
+        }
+    }
+    for x in s.xacts.iter_mut() {
+        if x.as_ref().is_some_and(|x| x.instance == id) {
+            *x = None;
         }
     }
 }
@@ -391,6 +473,11 @@ pub fn dde_cmp_string_handles(_: &mut Cpu, args: &[u32]) -> Option<u32> {
     })
 }
 
+/// The data handle `h`.
+pub fn data_mut(cpu: &mut Cpu, h: u32) -> Option<&mut Data> {
+    data(cpu, h)
+}
+
 fn data(cpu: &mut Cpu, h: u32) -> Option<&mut Data> {
     let off = h.checked_sub(FIRST_DATA)?;
     if !off.is_multiple_of(4) {
@@ -408,6 +495,7 @@ fn new_data(cpu: &mut Cpu, id: u32, bytes: Vec<u8>, item: u32, format: u32, owne
         item,
         app_owned: owned,
         access: None,
+        access16: 0,
     };
     let i = insert(&mut state(cpu).data, d);
     FIRST_DATA + 4 * i as u32
@@ -607,6 +695,7 @@ pub fn dde_connect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         instance: id,
         service,
         topic,
+        user: 0,
     };
     let i = insert(&mut state(cpu).convs, conv);
     Some(FIRST_CONV + 4 * i as u32)
@@ -626,16 +715,26 @@ pub fn dde_disconnect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     }
     let i = (args[0] - FIRST_CONV) as usize / 4;
-    state(cpu).convs[i] = None;
+    let s = state(cpu);
+    s.convs[i] = None;
+    for x in s.xacts.iter_mut() {
+        if x.as_ref().is_some_and(|x| x.conv == args[0]) {
+            *x = None;
+        }
+    }
     Some(1)
 }
 
 /// DdeClientTransaction(data, size, conversation, item, format, type,
 /// timeout, result): an execute or a request to Program Manager. Group
 /// windows a command opens are made in the calling thread, as the
-/// client waits for Explorer's reply on Windows.
+/// client waits for Explorer's reply on Windows. A data handle given
+/// for the data is the system's afterwards, freed unless the program
+/// made it HDATA_APPOWNED. With TIMEOUT_ASYNC the result is the
+/// transaction's id and the function gives TRUE: the outcome goes to
+/// the callback (see the top).
 pub fn dde_client_transaction(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [source, size, hconv, item, format, kind, _, result] = args[..] else {
+    let [source, size, hconv, item, format, kind, timeout, result] = args[..] else {
         return Some(0);
     };
     let Some(id) = conv(cpu, hconv).map(|c| c.instance) else {
@@ -644,14 +743,19 @@ pub fn dde_client_transaction(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if result != 0 && cpu.bus.guest_probe(result, 4, true) {
         cpu.bus.guest_write_32(result, 0);
     }
-    match kind & !XTYPF_MASK {
+    let asynchronous = timeout == TIMEOUT_ASYNC;
+    let (reply, windows) = match kind & !XTYPF_MASK {
         XTYP_EXECUTE => {
             let bytes = if size == u32::MAX {
                 let Some(d) = data(cpu, source) else {
                     set_dde_error(cpu, id, DMLERR_INVALIDPARAMETER);
                     return Some(0);
                 };
-                d.bytes.clone()
+                let (bytes, owned) = (d.bytes.clone(), d.app_owned);
+                if !owned {
+                    dde_free_data_handle(cpu, &[source]);
+                }
+                bytes
             } else {
                 match read_bytes(cpu, source, size.min(0x10_0000)) {
                     Some(b) => b,
@@ -664,16 +768,8 @@ pub fn dde_client_transaction(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
             let command = crate::dosstr::from_bytes(&bytes[..end]);
             match crate::win32::shell32::progman_execute(cpu, &command) {
-                Some(windows) => {
-                    if result != 0 && cpu.bus.guest_probe(result, 4, true) {
-                        cpu.bus.guest_write_32(result, DDE_FACK);
-                    }
-                    open_windows(cpu, windows)
-                }
-                None => {
-                    set_dde_error(cpu, id, DMLERR_NOTPROCESSED);
-                    Some(0)
-                }
+                Some(windows) => (1, windows),
+                None => (0, Vec::new()),
             }
         }
         XTYP_REQUEST => {
@@ -682,22 +778,380 @@ pub fn dde_client_transaction(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 Some(text) if format == CF_TEXT => {
                     let mut bytes = crate::dosstr::to_bytes(&text);
                     bytes.push(0);
-                    if result != 0 && cpu.bus.guest_probe(result, 4, true) {
-                        cpu.bus.guest_write_32(result, DDE_FACK);
-                    }
-                    Some(new_data(cpu, id, bytes, item, format, false))
+                    (new_data(cpu, id, bytes, item, format, false), Vec::new())
                 }
-                _ => {
-                    set_dde_error(cpu, id, DMLERR_NOTPROCESSED);
-                    Some(0)
-                }
+                _ => (0, Vec::new()),
             }
         }
         _ => {
             set_dde_error(cpu, id, DMLERR_NOTPROCESSED);
+            return Some(0);
+        }
+    };
+    let status = if reply != 0 { DDE_FACK } else { 0 };
+    if asynchronous {
+        let xact = begin_async(cpu, hconv, kind, format, item, reply, status);
+        if result != 0 && cpu.bus.guest_probe(result, 4, true) {
+            cpu.bus.guest_write_32(result, xact);
+        }
+        if xact == 0 {
+            return Some(0);
+        }
+        return open_windows(cpu, windows);
+    }
+    if reply == 0 {
+        set_dde_error(cpu, id, DMLERR_NOTPROCESSED);
+        return Some(0);
+    }
+    if result != 0 && cpu.bus.guest_probe(result, 4, true) {
+        cpu.bus.guest_write_32(result, status);
+    }
+    match kind & !XTYPF_MASK {
+        XTYP_EXECUTE => open_windows(cpu, windows),
+        _ => Some(reply),
+    }
+}
+
+/// The message the hidden window of a client's thread gets for a
+/// finished asynchronous transaction: wParam its place in the list,
+/// lParam its id.
+const WM_XACT_DONE: u32 = 0x0400;
+
+/// The class of the hidden windows that tell clients of their
+/// transactions, as Windows 98's DDEML has a hidden window of its own.
+pub const EVENT_CLASS: &str = "DDEMLEvent";
+
+/// Keep the asynchronous transaction on the conversation `hconv` that
+/// had the outcome `data` and `status` for XTYP_XACT_COMPLETE, and post
+/// the message that gives it to the callback: its id, or 0 when there
+/// is no window to post it to.
+fn begin_async(
+    cpu: &mut Cpu,
+    hconv: u32,
+    kind: u32,
+    format: u32,
+    item: u32,
+    data: u32,
+    status: u32,
+) -> u32 {
+    let Some(c) = conv(cpu, hconv).cloned() else {
+        return 0;
+    };
+    let Some(inst) = instance(cpu, c.instance).cloned() else {
+        return 0;
+    };
+    let hwnd = event_window(cpu, inst.pid, inst.tid);
+    if hwnd == 0 {
+        return 0;
+    }
+    let s = state(cpu);
+    s.last_xact = s.last_xact.wrapping_add(1).max(1);
+    let id = s.last_xact;
+    let xact = Xact {
+        instance: c.instance,
+        conv: hconv,
+        id,
+        kind: kind & !XTYPF_MASK,
+        format,
+        item,
+        data,
+        status,
+        user: 0,
+    };
+    let slot = insert(&mut s.xacts, xact) as u32;
+    let msg = super::message::Msg {
+        hwnd,
+        message: WM_XACT_DONE,
+        wparam: slot,
+        lparam: id,
+        ..Default::default()
+    };
+    let msg = super::message::stamp(cpu, msg);
+    super::message::post(cpu, inst.tid, msg);
+    id
+}
+
+/// The hidden window of the thread `tid` of the process `pid`, made if
+/// it isn't there yet: its handle, or 0 when there is no room for it.
+fn event_window(cpu: &mut Cpu, pid: u32, tid: u32) -> u32 {
+    use super::class::{self, CS_GLOBALCLASS, Class};
+    use super::window::{self, HWND_BOTTOM, LINKED, WS_POPUP, Window};
+    super::init(cpu);
+    let proc = super::address_of("DdemlWndProc");
+    let state = super::user(cpu);
+    let found = state.top_levels().into_iter().find(|&h| {
+        state
+            .window(h)
+            .is_some_and(|w| w.tid == tid && w.proc == proc)
+    });
+    if let Some(hwnd) = found {
+        return hwnd;
+    }
+    let class = match class::find_system(state, EVENT_CLASS) {
+        Some(c) => c,
+        None => {
+            let atom = class::atom(state, EVENT_CLASS);
+            state.classes.push(Some(Class {
+                atom,
+                name: EVENT_CLASS.to_string(),
+                style: CS_GLOBALCLASS,
+                proc,
+                instance: super::DLL.base,
+                global: true,
+                system: true,
+                ..Class::default()
+            }));
+            state.classes.len() as u32 - 1
+        }
+    };
+    let window = Window {
+        class,
+        style: WS_POPUP,
+        parent: super::DESKTOP,
+        instance: super::DLL.base,
+        proc,
+        tid,
+        pid,
+        flags: LINKED,
+        icon_pos: (-1, -1),
+        ..Window::default()
+    };
+    let Some(hwnd) = state.new_window(window) else {
+        return 0;
+    };
+    if let Some(c) = state.classes[class as usize].as_mut() {
+        c.windows += 1;
+    }
+    window::link(state, hwnd, HWND_BOTTOM);
+    hwnd
+}
+
+/// DdemlWndProc(hwnd, message, wParam, lParam): the procedure of the
+/// hidden windows, which calls a client's callback with
+/// XTYP_XACT_COMPLETE for the transaction a message names.
+pub fn wnd_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[_, msg, wp, lp] = args else {
+        return Some(0);
+    };
+    if msg != WM_XACT_DONE {
+        return super::defwnd::def_window_proc(cpu, args);
+    }
+    // A transaction abandoned, or of a conversation ended, is gone. One
+    // that isn't stays while the callback runs, which may ask
+    // DdeQueryConvInfo of it.
+    let Some(x) = state(cpu)
+        .xacts
+        .get(wp as usize)
+        .and_then(Option::as_ref)
+        .filter(|x| x.id == lp)
+        .cloned()
+    else {
+        return Some(0);
+    };
+    let topic = conv(cpu, x.conv).map_or(0, |c| c.topic);
+    let Some(callback) = instance(cpu, x.instance).map(|i| i.callback) else {
+        return Some(0);
+    };
+    // The data is the client's while the callback runs, and goes after
+    // it.
+    let free = if x.kind == XTYP_REQUEST { x.data } else { 0 };
+    let vars = vec![
+        callback,
+        XTYP_XACT_COMPLETE,
+        x.format,
+        x.conv,
+        topic,
+        x.item,
+        x.data,
+        x.id,
+        x.status,
+        free,
+        wp,
+    ];
+    task::start(cpu, task::DDEML_XACT, vars, 0)
+}
+
+/// The task of `wnd_proc`: variable 0 the callback, 1 to 8 its
+/// arguments (7 the transaction's id), 9 a data handle to free when it
+/// returns and 10 the transaction's place.
+pub fn xact_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
+    if t.step == 0 {
+        return Next::call(t.var(0), &t.vars[1..9], 1);
+    }
+    let (id, slot) = (t.var(7), t.var(10) as usize);
+    if let Some(x) = state(cpu).xacts.get_mut(slot)
+        && x.as_ref().is_some_and(|x| x.id == id)
+    {
+        *x = None;
+    }
+    let free = t.var(9);
+    if free != 0 && data(cpu, free).is_some_and(|d| !d.app_owned) {
+        dde_free_data_handle(cpu, &[free]);
+    }
+    Next::Done(0)
+}
+
+/// DdeAbandonTransaction(id, conversation, transaction): the
+/// transaction's XTYP_XACT_COMPLETE isn't given, nor any of the
+/// conversation's for a transaction of 0, nor any of the instance's for
+/// a conversation of 0.
+pub fn dde_abandon_transaction(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let [id, hconv, xact] = args[..] else {
+        return Some(0);
+    };
+    if instance(cpu, id).is_none() {
+        return Some(0);
+    }
+    if hconv != 0 && conv(cpu, hconv).is_none() {
+        set_dde_error(cpu, id, DMLERR_INVALIDPARAMETER);
+        return Some(0);
+    }
+    let mut found = false;
+    for x in state(cpu).xacts.iter_mut() {
+        let goes = x.as_ref().is_some_and(|x| {
+            x.instance == id && (hconv == 0 || x.conv == hconv) && (xact == 0 || x.id == xact)
+        });
+        if goes {
+            *x = None;
+            found = true;
+        }
+    }
+    if xact != 0 && !found {
+        set_dde_error(cpu, id, DMLERR_UNFOUND_QUEUE_ID);
+        return Some(0);
+    }
+    Some(1)
+}
+
+/// The asynchronous transaction `xact` of the conversation `hconv`.
+fn xact(cpu: &mut Cpu, hconv: u32, xact: u32) -> Option<&mut Xact> {
+    state(cpu)
+        .xacts
+        .iter_mut()
+        .flatten()
+        .find(|x| x.conv == hconv && x.id == xact)
+}
+
+/// DdeSetUserHandle(conversation, id, value): the value DdeQueryConvInfo
+/// gives for the conversation (id QID_SYNC) or one of its asynchronous
+/// transactions.
+pub fn dde_set_user_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let [hconv, id, user] = args[..] else {
+        return Some(0);
+    };
+    let Some(c) = conv(cpu, hconv) else {
+        return Some(0);
+    };
+    if id == QID_SYNC {
+        c.user = user;
+        return Some(1);
+    }
+    let instance = c.instance;
+    match xact(cpu, hconv, id) {
+        Some(x) => {
+            x.user = user;
+            Some(1)
+        }
+        None => {
+            set_dde_error(cpu, instance, DMLERR_UNFOUND_QUEUE_ID);
             Some(0)
         }
     }
+}
+
+/// What DdeQueryConvInfo tells of a conversation, the 32-bit and the
+/// 16-bit CONVINFO alike.
+#[derive(Clone, Debug, Default)]
+pub struct ConvInfo {
+    pub user: u32,
+    pub service: u32,
+    pub topic: u32,
+    pub item: u32,
+    pub format: u32,
+    pub kind: u32,
+    pub status: u16,
+    pub state: u16,
+}
+
+/// The CONVINFO of the conversation `hconv`, for the transaction `id`
+/// or QID_SYNC.
+pub fn conv_info(cpu: &mut Cpu, hconv: u32, id: u32) -> Option<ConvInfo> {
+    /// ST_CONNECTED and ST_CLIENT, XST_CONNECTED and XST_EXECSENT.
+    const ST_CLIENT_CONNECTED: u16 = 0x0011;
+    const XST_CONNECTED: u16 = 2;
+    const XST_EXECSENT: u16 = 9;
+    const XST_REQSENT: u16 = 5;
+    let c = conv(cpu, hconv)?.clone();
+    let mut info = ConvInfo {
+        user: c.user,
+        service: c.service,
+        topic: c.topic,
+        status: ST_CLIENT_CONNECTED,
+        state: XST_CONNECTED,
+        ..ConvInfo::default()
+    };
+    if id != QID_SYNC {
+        let x = xact(cpu, hconv, id)?.clone();
+        info.user = x.user;
+        info.item = x.item;
+        info.format = x.format;
+        info.kind = x.kind;
+        info.state = if x.kind == XTYP_EXECUTE {
+            XST_EXECSENT
+        } else {
+            XST_REQSENT
+        };
+    }
+    Some(info)
+}
+
+/// DdeQueryConvInfo(conversation, id, info): the CONVINFO, as much of
+/// it as its cb asks for; the bytes written.
+pub fn dde_query_conv_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let [hconv, id, out] = args[..] else {
+        return Some(0);
+    };
+    if out == 0 || !cpu.bus.guest_probe(out, 4, false) {
+        return Some(0);
+    }
+    let Some(info) = conv_info(cpu, hconv, id) else {
+        if let Some(i) = conv(cpu, hconv).map(|c| c.instance) {
+            set_dde_error(cpu, i, DMLERR_UNFOUND_QUEUE_ID);
+        }
+        return Some(0);
+    };
+    // cb, hUser, hConvPartner, hszSvcPartner, hszServiceReq, hszTopic,
+    // hszItem, wFmt, wType, wStatus, wConvst, wLastError, hConvList,
+    // ConvCtxt (cb, wFlags, wCountryID, iCodePage, dwLangID,
+    // dwSecurity, then SECURITY_QUALITY_OF_SERVICE's 12 bytes), hwnd and
+    // hwndPartner.
+    let fields = [
+        0,
+        info.user,
+        0,
+        info.service,
+        info.service,
+        info.topic,
+        info.item,
+        info.format,
+        info.kind,
+        info.status as u32,
+        info.state as u32,
+        0,
+        0,
+    ];
+    let mut bytes: Vec<u8> = fields.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let context = [CONVCONTEXT_SIZE, 0, 0, CP_WINANSI, 0, 0, 0, 0, 0];
+    bytes.extend(context.iter().flat_map(|v| v.to_le_bytes()));
+    bytes.extend([0u8; 8]);
+    let cb = cpu.bus.guest_read_32(out) as usize;
+    let n = cb.min(bytes.len());
+    if n < 4 || !cpu.bus.guest_probe(out, n, true) {
+        return Some(0);
+    }
+    // cb stays as the program set it.
+    cpu.bus.guest_write_bytes(out + 4, &bytes[4..n]);
+    Some(n as u32)
 }
 
 /// The class of Explorer's folder windows, which group windows are.

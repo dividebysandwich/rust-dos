@@ -1,6 +1,6 @@
 //! The smaller system modules: KEYBOARD, SOUND, SYSTEM, WIN87EM,
-//! TOOLHELP, SHELL, COMMDLG, MMSYSTEM, LZEXPAND, VER, WING, DDEML and
-//! DISPLAY. Most of their functions go on to the built-in DLL that has
+//! TOOLHELP, SHELL, COMMDLG, MMSYSTEM, LZEXPAND, VER, WING and DISPLAY
+//! (DDEML has a file of its own, ddeml.rs). Most of their functions go on to the built-in DLL that has
 //! them in Win32 (USER32, WINMM, COMDLG32, VERSION); the rest are done
 //! here, or answer as Windows 3.1 does when there is no such device.
 
@@ -350,19 +350,6 @@ pub static WING: Def = Def {
     library: true,
 };
 
-/// DDEML: there are no DDE servers to talk to; DdeInitialize fails as it
-/// does when DDEML can't start.
-pub static DDEML: Def = Def {
-    name: "DDEML",
-    file: "DDEML.DLL",
-    apis: &[
-        rust("DdeInitialize", 2, "pSll", dde_initialize),
-        rust("DdeUninitialize", 3, "l", one),
-        rust("DdeGetLastError", 20, "l", dde_error),
-    ],
-    library: true,
-};
-
 /// DISPLAY: the display driver, which programs import for its resources
 /// (the system's cursors and icons) more than its functions.
 pub static DISPLAY: Def = Def {
@@ -436,7 +423,13 @@ fn go_at(
     None
 }
 
-fn go(cpu: &mut Cpu, dll: &str, name: &str, args: &[u32], data: Vec<u32>) -> Option<u32> {
+pub(super) fn go(
+    cpu: &mut Cpu,
+    dll: &str,
+    name: &str,
+    args: &[u32],
+    data: Vec<u32>,
+) -> Option<u32> {
     let top = thunk::scratch32(cpu, 0);
     go_at(cpu, top, dll, name, args, data)
 }
@@ -1494,15 +1487,4 @@ fn wing_bit_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let mut all = args[..8].to_vec();
     all.push(SRCCOPY);
     go(cpu, G, "BitBlt", &all, Vec::new())
-}
-
-// DDEML.
-
-/// DMLERR_DLL_USAGE.
-fn dde_initialize(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(0x4004)
-}
-
-fn dde_error(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(0x4004)
 }

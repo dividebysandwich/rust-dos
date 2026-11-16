@@ -158,7 +158,7 @@ pub static MODULES: &[&Def] = &[
     &super::misc::LZEXPAND,
     &super::misc::VER,
     &super::misc::WING,
-    &super::misc::DDEML,
+    &super::ddeml::MODULE,
     &super::misc::DISPLAY,
     &super::misc::SETUPX,
 ];

@@ -16,6 +16,7 @@
 //! processes' threads go on around them.
 
 mod builtin;
+mod ddeml;
 pub(crate) mod comm;
 pub mod dos;
 pub(crate) mod dpmi;

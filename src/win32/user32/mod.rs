@@ -1342,10 +1342,19 @@ static APIS: &[Api] = &[
         8,
         ddeml::dde_client_transaction,
     ),
-    stdcall("DdeAbandonTransaction", 95, 3, succeed),
+    stdcall(
+        "DdeAbandonTransaction",
+        95,
+        3,
+        ddeml::dde_abandon_transaction,
+    ),
     stdcall("DdeEnableCallback", 107, 3, succeed),
     stdcall("DdePostAdvise", 117, 3, succeed),
-    stdcall("DdeSetUserHandle", 124, 3, succeed),
+    stdcall("DdeSetUserHandle", 124, 3, ddeml::dde_set_user_handle),
+    stdcall("DdeQueryConvInfo", 118, 3, ddeml::dde_query_conv_info),
+    // The hidden windows that give DDEML's clients their asynchronous
+    // transactions' outcomes.
+    stdcall("DdemlWndProc", 0, 4, ddeml::wnd_proc),
     // The help viewer's window procedures (winhelp).
     stdcall("WinHelpWndProc", 0, 4, winhelp::frame_proc),
     stdcall("WinHelpTopicWndProc", 0, 4, winhelp::topic_proc),

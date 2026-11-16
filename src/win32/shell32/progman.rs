@@ -250,11 +250,13 @@ pub fn request(cpu: &mut Cpu, item: &str) -> Option<String> {
         if entry.name == "." || entry.name == ".." {
             continue;
         }
-        let name = entry
-            .name
-            .strip_suffix(".lnk")
-            .unwrap_or(&entry.name)
-            .to_string();
+        // A link's name without its extension, whatever its case.
+        let n = entry.name.len();
+        let name = if n > 4 && entry.name[n - 4..].eq_ignore_ascii_case(".lnk") {
+            entry.name[..n - 4].to_string()
+        } else {
+            entry.name.clone()
+        };
         text.push_str(&name);
         text.push_str("\r\n");
     }
