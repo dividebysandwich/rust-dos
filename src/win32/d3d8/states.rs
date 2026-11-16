@@ -108,11 +108,8 @@ fn apply(cpu: &mut Cpu, id: u32, c: &Change) {
     let words = |n: usize| (c.data.len() == n).then_some(&c.data[..]);
     match c.kind {
         RENDER => {
-            let at = c.a as usize;
-            if let Some(i) = inner(cpu, id)
-                && i.render.get(at).is_some_and(|r| *r != value)
-            {
-                i.render[at] = value;
+            if let Some(i) = inner(cpu, id) {
+                i.set_state(c.a, value);
             }
         }
         STAGE => {
@@ -527,10 +524,7 @@ pub fn defaults(cpu: &mut Cpu, id: u32) {
     let Some(i) = inner(cpu, id) else {
         return;
     };
-    i.render.iter_mut().for_each(|r| *r = 0);
-    for (s, v) in render_defaults(depth) {
-        i.render[s as usize] = v;
-    }
+    i.reset_states(render_defaults(depth));
     for (at, v) in stages.iter().enumerate() {
         i.stages[at] = inner_stage(at as u32 % 32, *v);
     }

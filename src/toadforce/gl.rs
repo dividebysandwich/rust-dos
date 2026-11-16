@@ -650,6 +650,7 @@ impl ToadForceGl {
                 tex: Default::default(),
                 sets: Vec::new(),
                 coords: Vec::new(),
+                wrap: [0; pipeline::SLOTS],
                 shape: Shape {
                     half_centre: false,
                     cull: 1,
@@ -689,7 +690,7 @@ impl ToadForceGl {
                 // A new copy of the target each time, from memory.
                 self.forget();
                 fill(&mut memory);
-                let vertices = triangle(c).map(|v| gpu::Vertex::of(&v, &v, &[]));
+                let vertices = triangle(c).map(|v| gpu::Vertex::of(&v, &[]));
                 let runs = [gpu::Run {
                     state: state(blend),
                     vertices: 0..3,
@@ -740,7 +741,7 @@ impl ToadForceGl {
         // A target read back unchanged.
         self.forget();
         fill(&mut memory);
-        let vertices = triangle([0; 4]).map(|v| gpu::Vertex::of(&v, &v, &[]));
+        let vertices = triangle([0; 4]).map(|v| gpu::Vertex::of(&v, &[]));
         let mut hidden = (*state(None)).clone();
         hidden.clip = [0, 0, 0, 0];
         let runs = [gpu::Run {
@@ -807,8 +808,10 @@ impl ToadForceGl {
             // The card's dither is the shader's.
             gl.disable(glow::DITHER);
             gl.disable(glow::TEXTURE_CUBE_MAP_SEAMLESS);
-            // Depth outside 0 to 1 is clamped, as `span.rs` clamps it,
-            // and cuts nothing off.
+            // Depth outside 0 to 1 cuts no triangle. Without the
+            // depth test it is clamped, as `span.rs` clamps it, and
+            // with the test the shader drops the fragment (`draw`
+            // gives a run that has such a depth that shader).
             gl.enable(glow::DEPTH_CLAMP);
         }
     }
@@ -1908,6 +1911,7 @@ impl ToadForceGl {
                 func,
                 write,
                 stencil,
+                ..
             } => Some((func, write, stencil)),
             _ => None,
         });
@@ -2194,7 +2198,7 @@ impl Host for ToadForceGl {
             }
         }
         // SAFETY: the context is current (see the module comment).
-        if unsafe { self.compiled(&shader::key(state, self.anisotropy > 0.0)) } {
+        if unsafe { self.compiled(&shader::key(state, self.anisotropy > 0.0, false)) } {
             None
         } else {
             Some(Decline::ProgramFailed)
@@ -2207,7 +2211,7 @@ impl Host for ToadForceGl {
             return false;
         }
         // SAFETY: the context is current (see the module comment).
-        unsafe { self.compiled_tnl(&shader::key(state, self.anisotropy > 0.0)) }
+        unsafe { self.compiled_tnl(&shader::key(state, self.anisotropy > 0.0, false)) }
     }
 
     fn status(&self) -> serde_json::Value {
@@ -2278,7 +2282,18 @@ impl Host for ToadForceGl {
             for run in batch.runs {
                 let from = &batch.vertices[run.vertices.clone()];
                 let count = vertices(&run.state.shape, from, &mut bytes);
-                firsts.push((first as i32, count as i32));
+                // Whether the shader leaves out a depth outside 0 to 1
+                // (`shader::key`): only a vertex outside it makes one.
+                // A pixel's depth goes linearly between those of the
+                // vertices, which the host clamps to the range.
+                let ranged = run
+                    .state
+                    .steps
+                    .iter()
+                    .any(|step| matches!(step, Step::Depth { ranged: true, .. }));
+                let outside =
+                    ranged && from.iter().any(|v| v.place[2] < 0.0 || v.place[2] > 1.0);
+                firsts.push((first as i32, count as i32, outside));
                 first += count;
             }
             gl.bind_vertex_array(Some(self.array));
@@ -2297,14 +2312,24 @@ impl Host for ToadForceGl {
                 gl.bind_vertex_array(Some(self.array));
                 gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.buffer));
             }
-            for (run, (first, count)) in batch.runs.iter().zip(firsts) {
+            for (run, (first, count, outside)) in batch.runs.iter().zip(firsts) {
                 let state = &*run.state;
                 let geometry = run.geometry.as_ref().filter(|g| !g.indices.is_empty());
                 if (count == 0 && geometry.is_none()) || !self.fixed(state) {
                     continue;
                 }
-                // `declines` compiled it.
-                let key = shader::key(state, self.anisotropy > 0.0);
+                // `declines` compiled the program without the range's
+                // `discard`. The one with it is compiled when a run
+                // first needs it; were it to fail, the run is drawn
+                // without, with its pixels outside the range.
+                let anisotropic = self.anisotropy > 0.0;
+                let base = shader::key(state, anisotropic, false);
+                let key = match outside {
+                    true => Some(shader::key(state, anisotropic, true))
+                        .filter(|key| self.compiled(key))
+                        .unwrap_or(base),
+                    false => base,
+                };
                 for (stage, tex) in state.tex.iter().enumerate() {
                     if let Some(tex) = tex {
                         self.bind(stage, tex, key.native(stage));

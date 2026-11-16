@@ -104,7 +104,7 @@
 use super::format::{Format, Rect, Surface};
 use super::level1::{Target, Texture};
 use super::raster::pipeline::{DrawState, SLOTS};
-use super::raster::texel::Rgba;
+use super::raster::texel::{A, Rgba};
 use super::raster::vertex::ScreenVertex;
 // The Voodoo tracker's set of ranges, here of rows.
 use crate::voodoo::tracker::Ranges;
@@ -133,19 +133,31 @@ impl Vertex {
     /// The bytes of one.
     pub const BYTES: usize = 24 + 16 * SLOTS;
 
-    /// `v` with the colours of `colours` (the vertex itself, or the
-    /// one that gives a flat-shaded triangle its colours), each slot
-    /// taking the coordinate set `sets` names for it.
-    pub fn of(v: &ScreenVertex, colours: &ScreenVertex, sets: &[u8]) -> Self {
+    /// `v`, each slot taking the coordinate set `sets` names for it.
+    pub fn of(v: &ScreenVertex, sets: &[u8]) -> Self {
         let mut tex = [[0.0; 4]; SLOTS];
         for (slot, to) in tex.iter_mut().enumerate() {
             *to = v.tex[sets.get(slot).map_or(slot, |&set| set as usize)];
         }
         Vertex {
             place: [v.x, v.y, v.z, v.rhw],
-            diffuse: colours.diffuse,
-            specular: colours.specular,
+            diffuse: v.diffuse,
+            specular: v.specular,
             tex,
+        }
+    }
+
+    /// `v` as a vertex of a flat-shaded primitive, with the colours of
+    /// `colours`, the vertex that gives the primitive them. The
+    /// specular colour's alpha, the fog factor, stays `v`'s own: fog
+    /// isn't flat (`setup::planes`).
+    pub fn flat(v: &ScreenVertex, colours: &ScreenVertex, sets: &[u8]) -> Self {
+        let mut specular = colours.specular;
+        specular[A] = v.specular[A];
+        Vertex {
+            diffuse: colours.diffuse,
+            specular,
+            ..Vertex::of(v, sets)
         }
     }
 
@@ -289,8 +301,9 @@ pub struct Run {
     pub state: Arc<DrawState>,
     /// Their vertices in `Batch::vertices`, three a triangle. Those of
     /// a flat-shaded triangle (`Shape::flat`) all have the colours of
-    /// the vertex that gives it them. Empty for a run with
-    /// `geometry`.
+    /// the vertex that gives it them, but for the specular colour's
+    /// alpha, which is each vertex's own fog factor. Empty for a run
+    /// with `geometry`.
     pub vertices: Range<usize>,
     /// The vertices the host transforms, for a run the card didn't
     /// take to the screen (`Host::transforms`). The host cuts its
