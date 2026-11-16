@@ -13,7 +13,7 @@
 
 use super::Thunk;
 use super::handles::{icon16, icon32, menu16, menu32};
-use super::thunk::{self, ESP, KIND_DLGPROC};
+use super::thunk::{self, EAX, ESP, KIND_DLGPROC};
 use crate::cpu::{Cpu, Seg};
 use crate::dpmi::Context;
 
@@ -1007,8 +1007,15 @@ pub fn call_wndproc16(cpu: &mut Cpu, thunk: &Thunk) {
     let mut stack = Stack16::new(cpu, at);
     let mut data = vec![thunk.kind as u32];
     let (msg16, wp16, lp16) = to16(cpu, hwnd, msg, wp, lp, &mut stack, &mut data);
-    let ds = window_ds(cpu, hwnd, thunk);
-    thunk::call16_at(
+    // As Windows' USER calls a window procedure: DS and ES the task's
+    // stack, which lasts as long as the task, and AX the instance's data
+    // segment for the prologue to load. DS can't be the instance's own:
+    // a procedure may free its window's instance block while it runs
+    // (Delphi's TMemo frees its edit control's in WM_NCDESTROY) and then
+    // restore a DS that is gone.
+    let mut regs = Context::default();
+    regs.gpr[EAX] = window_ds(cpu, hwnd, thunk) as u32;
+    thunk::call16_regs(
         cpu,
         thunk.target,
         &[
@@ -1018,7 +1025,7 @@ pub fn call_wndproc16(cpu: &mut Cpu, thunk: &Thunk) {
             (lp16 >> 16) as u16,
             lp16 as u16,
         ],
-        ds,
+        regs,
         resume,
         thunk::THEN_MESSAGE,
         data,
@@ -1026,8 +1033,8 @@ pub fn call_wndproc16(cpu: &mut Cpu, thunk: &Thunk) {
     );
 }
 
-/// The data segment a 16-bit window procedure of `hwnd` gets in AX and
-/// DS: its window's instance's, else its thunk's.
+/// The data segment a 16-bit window procedure of `hwnd` gets in AX:
+/// its window's instance's, else its thunk's.
 fn window_ds(cpu: &Cpu, hwnd: u32, thunk: &Thunk) -> u16 {
     let instance = cpu
         .bus

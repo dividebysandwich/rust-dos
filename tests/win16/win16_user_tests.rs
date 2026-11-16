@@ -23,6 +23,11 @@ const GET_CLASS_LONG: u16 = 131;
 const SET_WINDOW_LONG: u16 = 136;
 const REGISTER_CLASS: u16 = 57;
 const GET_CLASS_INFO: u16 = 404;
+const DEF_WINDOW_PROC: u16 = 107;
+
+/// KERNEL's ordinals.
+const GLOBAL_ALLOC: u16 = 15;
+const GLOBAL_LOCK: u16 = 18;
 
 /// Window styles.
 const POPUP: u32 = 0x9000_0000; // WS_POPUP | WS_VISIBLE
@@ -379,6 +384,99 @@ fn a_superclass_of_listbox_takes_windows_3_1s_list_box_messages() {
     p.code.emit(b"TLIST\0");
     p.code.patch(name_at, name);
     let (exit, log) = run("listbox_superclass", p.build());
+    assert_eq!(exit, 1, "{log}");
+}
+
+#[test]
+fn a_window_procedure_gets_the_stack_in_ds_and_its_instance_in_ax() {
+    // A window whose instance is a global block of its own, as Delphi
+    // makes a TMemo's edit control. USER calls its procedure with DS the
+    // task's stack and AX the instance's data segment, so a procedure
+    // that frees the block while it runs restores a DS that is still
+    // there. The procedure notes a call with DS other than SS at 60h and
+    // the last AX at 62h. Exit code 1, or which check failed.
+    const CS_GLOBALCLASS: u16 = 0x4000;
+    // GMEM_MOVEABLE | GMEM_ZEROINIT | GMEM_DDESHARE, Delphi's flags.
+    const BLOCK_FLAGS: u16 = 0x2042;
+    const WC: u8 = 0x20;
+    const BAD_DS: u8 = 0x60;
+    const LAST_AX: u8 = 0x62;
+    const BLOCK: u8 = 0x64;
+    let mut p = Program::default();
+    p.code
+        .push(BLOCK_FLAGS)
+        .push(0)
+        .push(0x100)
+        .call("KERNEL", GLOBAL_ALLOC)
+        .emit(&[0xA3, BLOCK, 0x00]) // mov [BLOCK],ax
+        .emit(&[0x0B, 0xC0, 0x75, 0x06]) // or ax,ax; jnz over the next
+        .emit(&[0xB0, 2, 0xB4, 0x4C, 0xCD, 0x21])
+        .emit(&[0xC7, 0x06, WC, 0x00])
+        .emit(&CS_GLOBALCLASS.to_le_bytes())
+        .emit(&[0x89, 0x3E, WC + 10, 0x00]); // mov [WC+10],di: the instance
+    let proc_at = p.code.here() + 4;
+    p.code
+        .emit(&[0xC7, 0x06, WC + 2, 0x00, 0x00, 0x00]) // its procedure
+        .emit(&[0x8C, 0x0E, WC + 4, 0x00]); // mov [WC+4],cs
+    let name_at = p.code.here() + 4;
+    p.code
+        .emit(&[0xC7, 0x06, WC + 22, 0x00, 0x00, 0x00]) // its name
+        .emit(&[0x8C, 0x0E, WC + 24, 0x00])
+        .emit(&[0x1E])
+        .push(WC as u16)
+        .call("USER", REGISTER_CLASS)
+        .emit(&[0x0B, 0xC0, 0x75, 0x06])
+        .emit(&[0xB0, 3, 0xB4, 0x4C, 0xCD, 0x21]);
+    // CreateWindow(class, "", WS_POPUP, rect, no parent, no menu, the
+    // block, no parameter).
+    p.push_string(b"DSCHK\0");
+    p.push_string(b"\0");
+    p.code.push((POPUP >> 16) as u16).push(POPUP as u16);
+    for v in [0, 0, 100, 60] {
+        p.code.push(v);
+    }
+    p.code
+        .push(0)
+        .push(0)
+        .emit(&[0xFF, 0x36, BLOCK, 0x00]) // push word [BLOCK]
+        .push(0)
+        .push(0)
+        .call("USER", CREATE_WINDOW)
+        .emit(&[0x0B, 0xC0, 0x75, 0x06])
+        .emit(&[0xB0, 4, 0xB4, 0x4C, 0xCD, 0x21])
+        .emit(&[0x80, 0x3E, BAD_DS, 0x00, 0x00]) // cmp byte [BAD_DS],0
+        .emit(&[0x74, 0x06]) // je over the next
+        .emit(&[0xB0, 5, 0xB4, 0x4C, 0xCD, 0x21])
+        .emit(&[0xFF, 0x36, BLOCK, 0x00])
+        .call("KERNEL", GLOBAL_LOCK)
+        .emit(&[0x3B, 0x16, LAST_AX, 0x00]) // cmp dx,[LAST_AX]
+        .emit(&[0x74, 0x06])
+        .emit(&[0xB0, 6, 0xB4, 0x4C, 0xCD, 0x21])
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    // The window procedure: DS and SS compared, AX kept, both through
+    // SS (the program's data segment), then DefWindowProc.
+    let proc = p.code.here();
+    p.code
+        .emit(&[0x8C, 0xDB, 0x8C, 0xD1]) // mov bx,ds; mov cx,ss
+        .emit(&[0x39, 0xCB, 0x74, 0x06]) // cmp bx,cx; je over the next
+        .emit(&[0x36, 0xC6, 0x06, BAD_DS, 0x00, 0x01]) // mov ss:[BAD_DS],1
+        .emit(&[0x36, 0xA3, LAST_AX, 0x00]) // mov ss:[LAST_AX],ax
+        .emit(&[0x55, 0x8B, 0xEC]) // push bp; mov bp,sp
+        .emit(&[
+            0xFF, 0x76, 0x0E, // push [bp+0Eh] (hwnd)
+            0xFF, 0x76, 0x0C, // push [bp+0Ch] (msg)
+            0xFF, 0x76, 0x0A, // push [bp+0Ah] (wParam)
+            0xFF, 0x76, 0x08, // push [bp+8] (lParam)
+            0xFF, 0x76, 0x06, // push [bp+6]
+        ])
+        .call("USER", DEF_WINDOW_PROC)
+        .emit(&[0x5D, 0xCA, 0x0A, 0x00]); // pop bp; retf 0Ah
+    p.code.patch(proc_at, proc);
+    let name = p.code.here();
+    p.code.emit(b"DSCHK\0");
+    p.code.patch(name_at, name);
+    let (exit, log) = run("wndproc_ds", p.build());
     assert_eq!(exit, 1, "{log}");
 }
 
