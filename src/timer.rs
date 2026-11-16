@@ -1173,6 +1173,20 @@ impl HostEstimate {
     /// (`HOST_FALL`), and a few of them took it to 4,500. More such frames
     /// in a row than a stall takes (`STALL_FRAMES`) are the host's speed at
     /// the program's work now, and count.
+    ///
+    /// A program whose own work makes every few frames that slow reads high
+    /// the same way: 2.7 times what the host runs with every third frame
+    /// six times as slow, 1.5 times with every tenth. The pace bounds its
+    /// speed. A heavy frame drops time only where it ends `MAX_LAG` behind,
+    /// and at six times the light frames' cost and 50 frames a second or
+    /// more, that takes light frames filling 0.58 of a frame or more. At
+    /// half the estimate they fill 0.43 (`MAX_BUSY_SHARE` at all of it), so
+    /// the drops come above half the estimate, where a measurement counts
+    /// all its lag (`STALLED` in `AutoSpeed::update`), and the limits from
+    /// a host that fell behind hold the speed. Frames many times heavier
+    /// than that drop time under half the estimate too, which the
+    /// measurements leave out as stalls: those can't be told from a load
+    /// read cold.
     fn outlier(&mut self, ideal: f64) -> bool {
         let far = self
             .max
@@ -1664,6 +1678,31 @@ mod tests {
         frames.extend([200; 14]);
         let slow = estimate_after(&frames);
         assert!(slow < steady / 4.0, "{slow} against {steady}");
+    }
+
+    #[test]
+    fn a_heavy_frame_every_few_frames_stays_out_of_the_host_estimate() {
+        // A program whose every Nth frame costs the host a little over six
+        // times what the others do: each such frame is alone between frames
+        // at the host's speed, so all of them stay out, and the estimate
+        // reads what the light frames ran at. Averaged over all frames the
+        // host runs 2.7 times fewer instructions a ms than that with every
+        // third frame heavy, and 1.51 times with every tenth
+        // (`HostEstimate::outlier` says what bounds the speed then).
+        let steady = estimate_after(&[10; 30]);
+        for (every, high) in [(3, 2.7), (10, 1.51)] {
+            let mut frames = vec![10; 20];
+            for i in 1..=60 {
+                frames.push(if i % every == 0 { 61 } else { 10 });
+            }
+            let mixed = estimate_after(&frames);
+            assert!(
+                (mixed / steady - 1.0).abs() < 0.01,
+                "{mixed} against {steady}"
+            );
+            let mean_ms = (61.0 + 10.0 * (every - 1) as f64) / every as f64;
+            assert!((mean_ms / 10.0 - high).abs() < 0.01, "{mean_ms}");
+        }
     }
 
     #[test]
