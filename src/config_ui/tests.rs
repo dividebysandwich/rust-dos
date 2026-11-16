@@ -416,6 +416,23 @@ fn the_cpu_follows_the_card_until_one_is_picked() {
     keys(&mut ui, &mut host, &[Delete]);
     assert_eq!(host.applied.last().unwrap().cpu, None);
     assert_eq!(host.applied.last().unwrap().cpu_model(), CpuModel::PentiumIII);
+
+    // The list opens on the model the machine has, and Enter there sets
+    // it.
+    keys(&mut ui, &mut host, &[Enter]);
+    let popup = ui.popup.as_ref().unwrap();
+    assert_eq!(popup.choices[popup.selected].cpu, Some(CpuModel::PentiumIII));
+    keys(&mut ui, &mut host, &[Enter]);
+    assert_eq!(host.applied.last().unwrap().cpu, Some(CpuModel::PentiumIII));
+    keys(&mut ui, &mut host, &[Delete]);
+
+    // Another card brings its processor, and the memory is cut to what
+    // that one takes.
+    ui.settings.memsize = Some(256);
+    ui.row = ui.items().iter().position(|&i| i == Item::Machine).unwrap();
+    pick(&mut ui, &mut host, Adapter::Vga.describe());
+    let applied = host.applied.last().unwrap();
+    assert_eq!((applied.cpu_model(), applied.memsize), (CpuModel::I486, Some(128)));
 }
 
 #[test]

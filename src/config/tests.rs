@@ -98,6 +98,7 @@ fn a_toadforce_without_cpu_has_a_pentium_iii() {
     let lines = set.cpu_lines();
     assert_eq!(lines.len(), 2, "{lines:?}");
     assert!(lines[1].contains("expect a Pentium II or better"), "{lines:?}");
+    assert!(lines[1].ends_with("without the cpu line the machine has a Pentium III"), "{lines:?}");
     let set = settings("[emulator]\nmachine=svga_toadforce\ncpu=pentium_ii\n");
     assert_eq!(set.cpu_model(), CpuModel::PentiumII);
     assert_eq!(set.cpu_lines(), ["[CONFIG] A Pentium II (cpu)"]);

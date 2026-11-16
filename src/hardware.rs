@@ -162,7 +162,11 @@ impl Hardware {
 
     /// Put the settings' hardware in place. Returns the problems with it.
     pub fn apply(&mut self, cpu: &mut Cpu, settings: &Settings) -> Vec<String> {
-        if settings.cpu_model() != self.cpu {
+        // Another model, or a set one that a ToadForce coming or going
+        // makes a match for the card or not (`Settings::cpu_lines`).
+        if settings.cpu_model() != self.cpu
+            || settings.machine.is_toadforce() != self.video.adapter.is_toadforce()
+        {
             for line in settings.cpu_lines() {
                 cpu.bus.log_string(&line);
             }

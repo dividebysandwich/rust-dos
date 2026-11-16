@@ -417,7 +417,9 @@ impl Settings {
 
     /// A line for the log on the processor a machine with these settings
     /// starts with, and where it comes from, and a second where `cpu` sets
-    /// a model older than the Pentium II beside a ToadForce.
+    /// a model older than the Pentium II beside a ToadForce. That line says
+    /// how to get the card's default: a configuration file saved from the
+    /// settings window before the model followed the card has `cpu=486`.
     pub fn cpu_lines(&self) -> Vec<String> {
         let cpu = self.cpu_model();
         let mut lines = vec![match self.cpu {
@@ -429,8 +431,10 @@ impl Settings {
         }];
         if self.cpu.is_some() && self.machine.is_toadforce() && cpu < CpuModel::PentiumII {
             lines.push(format!(
-                "[CONFIG] cpu={} with a ToadForce: its games expect a Pentium II or better",
-                cpu.describe()
+                "[CONFIG] cpu sets a {} with a ToadForce: its games expect a Pentium II \
+                 or better, and without the cpu line the machine has a {}",
+                cpu.describe(),
+                default_cpu(self.machine).describe()
             ));
         }
         lines

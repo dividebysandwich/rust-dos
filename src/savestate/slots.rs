@@ -113,7 +113,8 @@ pub fn decode(data: &[u8]) -> Result<(Header, Vec<u8>), String> {
 /// (`Settings::cpu_model`), as the default depends on the display adapter
 /// and on the rust-dos that saved the state.
 pub fn machine_text(settings: &Settings) -> String {
-    let hardware = Settings { cpu: Some(settings.cpu_model()), ..with_machine(&Settings::default(), settings) };
+    let hardware =
+        Settings { cpu: Some(settings.cpu_model()), ..with_machine(&Settings::default(), settings) };
     let mut baseline = Settings::default();
     baseline.network.ne2000 = !hardware.network.ne2000;
     crate::config::update_text("", &baseline, &hardware, &[], None)

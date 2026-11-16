@@ -238,7 +238,12 @@ impl Item {
                 s.cpu = Some(cpu);
                 s.memsize = s.memsize.map(|mb| mb.min(cpu.max_memsize()));
             }),
-            Machine => each(s, crate::video::adapter::Adapter::ALL, |s, machine| s.machine = machine),
+            // The card brings its processor where `cpu` isn't set, and the
+            // memory is cut to what that one takes, as for a picked one.
+            Machine => each(s, crate::video::adapter::Adapter::ALL, |s, machine| {
+                s.machine = machine;
+                s.memsize = s.memsize.map(|mb| mb.min(s.cpu_model().max_memsize()));
+            }),
             Voodoo => on_off(|s, on| s.voodoo.enabled = on),
             VoodooMemory => {
                 each(s, crate::voodoo::Board::ALL, |s, board| s.voodoo.board = board)

@@ -910,7 +910,8 @@ mod tests {
         assert!(!settings.contains_key("drives"));
         // The size the machine runs with, whatever the settings give now:
         // a Pentium II chosen after a start with the 486's 16 MB.
-        let pentium_ii = Settings { cpu: Some(crate::cpu::CpuModel::PentiumII), ..Settings::default() };
+        let pentium_ii =
+            Settings { cpu: Some(crate::cpu::CpuModel::PentiumII), ..Settings::default() };
         assert_eq!(pentium_ii.memory_mb(), 64);
         assert_eq!(report_settings(&pentium_ii, 16, None)["emulator"]["memsize"], "16");
         assert_eq!(report_settings(&pentium_ii, 64, None)["emulator"]["memsize"], "64");

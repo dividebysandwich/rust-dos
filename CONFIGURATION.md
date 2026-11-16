@@ -264,7 +264,11 @@ limit, so without a connection it goes on as it would with one:
   states, `/api/status` and almanac reports carry the model the machine has.
   A `cpu` line wins: with a ToadForce, a model older than the Pentium II
   runs as set, with a line in the log that the card's games expect a Pentium
-  II or better.
+  II or better. The settings window of an earlier rust-dos wrote `cpu=486`
+  into the configuration file it saved: remove that line, or press Delete
+  on the processor in the settings window, to have the card's default. A
+  save state keeps the processor it was saved with, so one saved with a
+  ToadForce by an earlier rust-dos loads as a 486.
 * `core` is what runs the programs' instructions: `auto` (the default)
   runs the interpreter, and the dynamic recompiler for a program from the
   moment it switches to protected mode until it ends, as DOSBox's
@@ -1557,7 +1561,7 @@ profile:
 | Setting | Set it to | Why |
 |---|---|---|
 | `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too. Of the 3dfx cards, it and the Banshee are the ones Direct3D 8 runs on and OpenGL draws on in a window: on a Voodoo2 add-on card OpenGL draws full screen, and a Voodoo Graphics has none. [docs/3dfx.md](docs/3dfx.md) has the other cards. `GLIDE2X.DLL` and `GLIDE3X.DLL` are there only with a 3dfx card. GDI and DirectDraw games run on it too. A game from 2000 on that asks for more than a Voodoo3 has (32-bit color, large textures, hardware transform and lighting) takes `svga_toadforce` ([ToadForce](#toadforce)) |
-| `cpu` | `pentium_ii` | The default 486 has no time stamp counter (RDTSC) or MMX, which many games of the time use: such a game stops with an invalid opcode. The Pentium II has both |
+| `cpu` | `pentium_ii` | The default 486 has no time stamp counter (RDTSC) or MMX, which many games of the time use: such a game stops with an invalid opcode. The Pentium II has both. With `svga_toadforce` the machine has a Pentium III without the line |
 | `memsize` | leave it out, or `128` for a 3D game from 1998 on | Without it a Pentium II has 64 MB, which most Windows 98 games asked for (the default 486 has 16 MB). The game's heaps and its DirectDraw surfaces come out of it, and it is what the game is told the machine has |
 | `win32_version` | `98se` | The setups and games tested with the built-in Windows were tested under Windows 98 SE. Under the default, `95`, a program that imports a function Windows 98 added doesn't start, and its message names this setting |
 | `win32_depth` | `8` only for a game that says it needs 256 colours, `16` for one that says it needs 16 bits | The default desktop has the card's own depth (16 bits on a Voodoo3, 32 on an S3 Trio, 24 on a ViRGE). A GDI game that draws with a palette needs `8`. A game that checks the desktop's depth before it sets its own mode, such as Moto Racer, needs `16` on a card whose desktop is deeper. Other DirectDraw games set their own mode and don't need it |
@@ -3306,9 +3310,9 @@ machine=svga_toadforce
 ```
 
 The machine has 128 MB of memory with this card unless `memsize` says
-otherwise, which is what the games it is for recommend. The `cpu` stays
-the default 486 unless it is set; most of those games want
-`cpu=pentium_iii`.
+otherwise, which is what the games it is for recommend, and a Pentium
+III unless `cpu` says otherwise (see `cpu` in
+[`[emulator]`](#emulator)).
 
 | Setting | Values | What it does |
 |---|---|---|
