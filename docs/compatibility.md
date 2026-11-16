@@ -149,9 +149,10 @@ opcode, `win32_version=98se` when a message names the version, more
   room](../CONFIGURATION.md#directplay-games-on-the-built-in-windows)
   over the IPX connection, the only one the game takes; it lists the
   TCP/IP one but ignores it, on Windows too (tested with the demo).
-* **Rage of Mages** (GOG): copy the game's folder into a folder of
-  drive C:, such as `C:\ALLODS`; at the drive's root it stops at start
-  with an error. Leave out GOG's DirectDraw wrapper (`ddraw.dll` and
+* **Rage of Mages** (GOG): `cpu=pentium_ii`. The game needs a Pentium;
+  on the default 486 the map's unexplored areas show dark blue instead
+  of black. Copy the game's folder into a folder of drive C:, such as
+  `C:\ALLODS`; at the drive's root it stops at start with an error. Leave out GOG's DirectDraw wrapper (`ddraw.dll` and
   `aqrit.cfg`). Move the `Allods` folder, which holds the disc's
   `MUSIC.RES` and video files, into a folder mounted as a CD drive
   ([`[drives]`](../CONFIGURATION.md#drives)), so that it is
