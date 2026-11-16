@@ -135,9 +135,13 @@ const LOADS: f64 = 8.0 * WORKING;
 /// `HOLD_WINDOWS` measurements of holding, twice that after each further
 /// miss, up to `MOST_PROBE_BACKOFFS` times. A game that caps its own frames
 /// and spins (Doom's 35) misses each one, and spends 4 or 5 measurements of
-/// every 485 above its speed once the back-off is at its longest. A
-/// measurement behind ends a probe without a miss: the host's limits take
-/// over. So does a load (`LOADS`), whose frames are another scene's.
+/// every 485 above its speed once the back-off is at its longest. A probe
+/// that falls behind, by its measurements or by a step up's watch, is a
+/// miss too: the limits it sets end once the host shows far more
+/// (`far_more`), which puts the hold in doubt again, and a host that stalls
+/// every few frames would fall behind at each probe, a few measurements
+/// apart. A load (`LOADS`) ends a probe without a miss: its frames are
+/// another scene's.
 const PROBE_STEP: f64 = 2.0;
 const SAME: f64 = 0.05;
 const SPARE: f64 = 0.1;
@@ -1574,6 +1578,14 @@ impl AutoSpeed {
         self.try_fresh = true;
     }
 
+    /// A probe up (`PROBE_STEP`) gained too little, or fell behind: the
+    /// next waits twice as long as this one did, up to
+    /// `MOST_PROBE_BACKOFFS` times.
+    fn probe_missed(&mut self) {
+        self.probe_wait = HOLD_WINDOWS << self.probe_misses;
+        self.probe_misses = (self.probe_misses + 1).min(MOST_PROBE_BACKOFFS);
+    }
+
     /// The host fell behind at `speed` (`fell_at`).
     fn fell_behind_at(&mut self, speed: u32) {
         self.fell_at = Some(self.fell_at.map_or(speed, |at| at.min(speed)));
@@ -1619,6 +1631,9 @@ impl AutoSpeed {
             self.watch(from);
             fine
         } else {
+            if matches!(self.step, Step::Probed { .. }) {
+                self.probe_missed();
+            }
             self.trying = None;
             self.lagged = Some((from, LAGGED_WINDOWS));
             self.step = Step::Hold {
@@ -2224,16 +2239,15 @@ impl AutoSpeed {
                 sum,
                 seen,
             } if current > from => {
-                // Behind: the host's limits take over, and the program
-                // missed nothing.
-                if m.pace < KEPT_UP {
-                    self.probe_wait = HOLD_WINDOWS << self.probe_misses;
-                    return hold_drawing(self, before, clamp(from as f64), HOLD_WINDOWS, false);
-                }
                 // A load (`LOADS`): its frames are another scene's, and say
                 // nothing of the speed. The probe waits, and missed nothing.
                 if m.io >= LOADS || was_loaded {
                     self.probe_wait = HOLD_WINDOWS << self.probe_misses;
+                    return hold_drawing(self, before, clamp(from as f64), HOLD_WINDOWS, false);
+                }
+                // Behind: the host can't run the probe now.
+                if m.pace < KEPT_UP {
+                    self.probe_missed();
                     return hold_drawing(self, before, clamp(from as f64), HOLD_WINDOWS, false);
                 }
                 let (sum, seen) = (sum + fps, seen + 1);
@@ -2257,8 +2271,7 @@ impl AutoSpeed {
                     }
                     return hold_drawing(self, fps, current, HOLD_WINDOWS, false);
                 }
-                self.probe_wait = HOLD_WINDOWS << self.probe_misses;
-                self.probe_misses = (self.probe_misses + 1).min(MOST_PROBE_BACKOFFS);
+                self.probe_missed();
                 hold_drawing(self, before, clamp(from as f64), HOLD_WINDOWS, false)
             }
             // The speed changed from elsewhere: measure from here.
@@ -4575,6 +4588,38 @@ mod tests {
     }
 
     #[test]
+    fn stalls_every_few_frames_are_left_out_of_the_pace() {
+        // Grom's loads with its files not in the host's cache (#783): every
+        // third frame stalls the host for 90 ms, between frames on time.
+        // Too close together for the frame watch's run on time
+        // (`STALL_RUN`), they are lag to it, and the measurements leave them
+        // out of the pace (`Frames`): the speed keeps the Pentium II's
+        // least.
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        let least = crate::cpu::CpuModel::PentiumII.auto_least();
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_protected_least(least);
+        bus.set_cycles_per_ms(least);
+        let mut paced = Paced::default();
+        let mut probes = 0;
+        for i in 0..1800 {
+            let stall = if i % 3 == 2 { 0.090 } else { 0.0 };
+            let was = matches!(auto.step, Step::Probed { .. });
+            paced.frame(&mut auto, bus, 800_000.0, stall, 800_000);
+            assert!(bus.clock.cycles_per_ms() >= least, "frame {i}");
+            probes += u32::from(!was && matches!(auto.step, Step::Probed { .. }));
+        }
+        assert!(paced.sorted.lag_ns() > 0, "{:?}", paced.sorted);
+        // No limits from the measurements, which would have a slow host.
+        // A step up's watch still sees the drops, and limits the probes
+        // that fall behind, which back off.
+        assert!(auto.pace >= KEPT_UP, "{}", auto.pace);
+        assert_eq!(auto.slow_host, None);
+        assert!(probes <= 3, "{probes} probes");
+    }
+
+    #[test]
     fn a_step_ups_watch_while_starting_ends_once_the_host_shows_more() {
         // Grom's first seconds (#783): while the emulator starts, the host's
         // estimate reads 38,800, and a step up to it falls behind for three
@@ -5378,7 +5423,7 @@ mod tests {
     }
 
     #[test]
-    fn a_measurement_behind_ends_a_probe_without_a_miss() {
+    fn a_probe_that_falls_behind_is_a_miss() {
         let program = game(1.0 / 4000.0, 1000.0);
         let mut auto = holding(15.0);
         let up = auto.decide(60_000, &program(60_000), true, HOST);
@@ -5392,7 +5437,7 @@ mod tests {
         };
         let back = auto.decide(up, &behind, true, HOST);
         assert!(back <= 60_000, "{back}");
-        assert_eq!(auto.probe_misses, 0);
+        assert_eq!(auto.probe_misses, 1);
         assert!(auto.probe_wait > 0);
     }
 
