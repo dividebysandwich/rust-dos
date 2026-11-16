@@ -405,6 +405,20 @@ impl DiskController {
                 })
                 .cloned()
         };
+        self.find_host_where(dir, name, find)
+    }
+
+    /// The entries of the host folder `dir`, and what `find` finds among
+    /// them when it looks for the name `name`: in the kept entries, then in
+    /// a fresh read, unless a recent read lacked `name` too
+    /// (`HostDirCache`).
+    pub(super) fn find_host_where<T>(
+        &self,
+        dir: &Path,
+        name: &str,
+        find: impl Fn(&[(String, String)]) -> Option<T>,
+    ) -> (HostEntries, Option<T>) {
+        let upper = name.to_ascii_uppercase();
         let (mut entries, kept) = self.host_entries(dir);
         if let Some(found) = find(&entries) {
             return (entries, Some(found));

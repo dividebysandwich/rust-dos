@@ -1763,6 +1763,50 @@ fn free_space_counts_again_only_the_file_written() {
     assert_eq!(free(&disk), before - 3);
 }
 
+/// FindFirstFileA and GetFileAttributesExA ask for one name, which a
+/// listing filtered by it (`list_directory_where`) looks up as a path is:
+/// the folder isn't read again for a name a recent read lacked.
+#[test]
+fn a_search_for_one_name_looks_it_up_as_a_path_does() {
+    let (root, waves) = waves_folder("search_one_name", 50);
+    fs::write(waves.join("Long Name.wav"), b"long").unwrap();
+    let disk = DiskController::new(root.clone());
+    let find = |name: &str| -> Vec<String> {
+        let keep = |long: &str, short: &str| {
+            long.eq_ignore_ascii_case(name) || short.eq_ignore_ascii_case(name)
+        };
+        let wanted = NameFilter {
+            keep: &keep,
+            name: Some(name),
+        };
+        let listed = disk
+            .list_directory_where(r"C:\WAVES\*.*", 0x16, &wanted)
+            .unwrap();
+        listed
+            .into_iter()
+            .filter(|e| e.filename != "." && e.filename != "..")
+            .map(|e| e.filename)
+            .collect()
+    };
+    assert_eq!(find("long name.WAV"), ["LONGNA~1.WAV"]);
+    assert_eq!(find("LONGNA~1.WAV"), ["LONGNA~1.WAV"]);
+    assert_eq!(find("7B.WAV"), ["7B.WAV"]);
+    assert!(find("37C.WAV").is_empty());
+    let reads = disk.host_dirs.reads.get();
+    for _ in 0..20 {
+        assert!(find("37C.WAV").is_empty());
+    }
+    assert_eq!(
+        disk.host_dirs.reads.get(),
+        reads,
+        "the folder isn't read again"
+    );
+
+    // A name no search missed, that another program made, shows at once.
+    fs::write(waves.join("Added Later.wav"), b"x").unwrap();
+    assert_eq!(find("Added Later.wav"), ["ADDEDL~1.WAV"]);
+}
+
 #[test]
 fn a_state_whose_cd_image_moved_says_the_image_is_gone() {
     let base = scratch("moved_cue_state");

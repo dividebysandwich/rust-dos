@@ -656,15 +656,32 @@ impl DiskController {
         search_spec: &str,
         search_attr: u16,
     ) -> Result<Vec<DosDirEntry>, u8> {
-        let listed = self.list_drive_directory(search_spec, search_attr);
+        let listed = self.list_drive_directory(search_spec, search_attr, None);
         self.with_system_entries(search_spec, search_attr, listed)
     }
 
-    /// The entries of the drive's own matching a search spec.
+    /// `list_directory`, where the caller wants only the entries `wanted`
+    /// takes and drops the others itself. On a host drive the others are
+    /// left out before the stat each entry listed costs, and a search for
+    /// one name looks it up as a path does (`NameFilter::name`). Other
+    /// drives list as `list_directory` does.
+    pub fn list_directory_where(
+        &self,
+        search_spec: &str,
+        search_attr: u16,
+        wanted: &NameFilter,
+    ) -> Result<Vec<DosDirEntry>, u8> {
+        let listed = self.list_drive_directory(search_spec, search_attr, Some(wanted));
+        self.with_system_entries(search_spec, search_attr, listed)
+    }
+
+    /// The entries of the drive's own matching a search spec, on a host
+    /// drive only those `wanted` takes.
     fn list_drive_directory(
         &self,
         search_spec: &str,
         search_attr: u16,
+        wanted: Option<&NameFilter>,
     ) -> Result<Vec<DosDirEntry>, u8> {
         let normalized = search_spec.replace('/', "\\");
         let (drive_num, rest) = self.split_drive(&normalized).ok_or(0x03)?;
@@ -769,7 +786,13 @@ impl DiskController {
         // stats every match anyway, so the read adds little. A search for
         // one name looks it up as a path does: the folder is read again
         // when nothing kept has it, unless a recent read hadn't it either.
-        let entries = if pattern.contains(['*', '?']) {
+        let keep = |long: &str, dos: &str| wanted.is_none_or(|w| (w.keep)(long, dos));
+        let entries = if let Some(name) = wanted.and_then(|w| w.name) {
+            let find = |entries: &[(String, String)]| {
+                entries.iter().any(|(l, d)| keep(l, d)).then_some(())
+            };
+            self.find_host_where(&host_dir, name, find).0
+        } else if pattern.contains(['*', '?']) {
             let (entries, kept) = self.host_entries(&host_dir);
             if kept {
                 self.host_dirs.reread(&host_dir, || Self::read_host_entries(&host_dir))
@@ -784,7 +807,7 @@ impl DiskController {
         for (original_name, final_name) in entries.iter() {
             // The name decides first: a stat per entry is what a listing
             // costs, and a search for one name needs only its own.
-            if !Self::matches_pattern(final_name, pattern) {
+            if !Self::matches_pattern(final_name, pattern) || !keep(original_name, final_name) {
                 continue;
             }
             let Ok(metadata) = hostfs::metadata(host_dir.join(original_name)) else {
@@ -817,6 +840,21 @@ impl DiskController {
 
         Ok(valid_entries)
     }
+}
+
+/// The entries a caller of `DiskController::list_directory_where` wants.
+pub struct NameFilter<'a> {
+    /// Takes an entry by its long name and its DOS name, which are the
+    /// same where it has no long name.
+    pub keep: &'a dyn Fn(&str, &str) -> bool,
+    /// The one name `keep` takes, by its long or its DOS name, where it
+    /// takes one alone (no wildcards). The folder's kept entries are then
+    /// used and read again only when none has the name, unless a read less
+    /// than `HostDirCache::TRUST` ago hadn't it either (`find_host_where`),
+    /// as for a path. Without it a host folder is read afresh: a wildcard
+    /// may match a file another program added without the folder's time
+    /// moving.
+    pub name: Option<&'a str>,
 }
 
 /// The free clusters of a hard disk made of a host folder, `used` of them
