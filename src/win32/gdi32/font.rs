@@ -24,7 +24,9 @@
 //! has the width it has in VGASYS.FON or SSERIFE.FON, and its ROM glyph is
 //! squeezed or stretched to fit. Dialogs size themselves from these widths
 //! (GdiGetCharDimensions), so a dialog's size and the way its text wraps
-//! come out as on Windows.
+//! come out as on Windows. MS Sans Serif's 8-point size, too narrow for
+//! a squeezed ROM glyph to stay legible, has glyphs drawn for it in
+//! `sans8`.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -34,6 +36,7 @@ use std::rc::Rc;
 use super::dc::{self, Dc, OPAQUE};
 use super::fnt::{AddedFile, Fnt};
 use super::draw::{Canvas, Fill, value_for};
+use super::sans8;
 use super::{CB_AT, CB_LIST, CB_PARAM, CB_PROC};
 use super::{
     ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, Font, GDI_ERROR, Kind, Rect, TRUE, add,
@@ -848,10 +851,40 @@ fn rom_rows(key: &Key, src: Src, gw: i32) -> Vec<u64> {
     rows
 }
 
+/// The glyph `sans8` draws for the byte `b` of the code page `page` in
+/// the raster size `r`, `w` wide, if `r` is MS Sans Serif's 8-point size
+/// and the character has one: its rows stretched to the key's cell and
+/// width by whole numbers, and made bold as `raster_glyphs` does.
+fn drawn_rows(key: &Key, r: &Raster, page: CodePage, b: u8, w: i32) -> Option<Vec<u64>> {
+    if r.face != SANS_FACE || r.height != sans8::HEIGHT as i32 || b < 0x20 {
+        return None;
+    }
+    let x_scale = key.glyph_width.max(1);
+    let y_scale = (key.cell / r.height).max(1) as usize;
+    let rows = sans8::glyph(page.char(b), w / x_scale - 1)?;
+    let wide = |row: u64| {
+        (0..64 / x_scale)
+            .filter(|x| row >> x & 1 != 0)
+            .fold(0u64, |a, x| a | ((1u64 << x_scale) - 1) << (x * x_scale))
+    };
+    Some(
+        rows.iter()
+            .flat_map(|&row| {
+                let mut out = wide(row);
+                if key.bold {
+                    out |= out << 1;
+                }
+                std::iter::repeat_n(out, y_scale)
+            })
+            .collect(),
+    )
+}
+
 /// The glyphs of a raster size: each byte's ROM glyph, its lit columns
 /// squeezed or stretched to the character's width less the column
-/// between characters. A bold face's widths have its extra column in
-/// them; a font made bold moves on a column more.
+/// between characters, or the glyph `sans8` draws. A bold face's widths
+/// have its extra column in them; a font made bold moves on a column
+/// more.
 fn raster_glyphs(key: Key, r: &Raster) -> Glyphs {
     let native_bold = FACES[r.face].weight >= 600;
     let made_bold = key.bold && !native_bold;
@@ -859,6 +892,13 @@ fn raster_glyphs(key: Key, r: &Raster) -> Glyphs {
     let glyphs = (0..256usize)
         .map(|b| {
             let w = raster_width(r, page, b as u8, key.glyph_width);
+            if let Some(rows) = drawn_rows(&key, r, page, b as u8, w) {
+                return Glyph {
+                    rows,
+                    advance: w + made_bold as i32,
+                    offset: 0,
+                };
+            }
             let mut rows = rom_rows(&key, byte_source(page, b as u8), 8);
             let all = rows.iter().fold(0u64, |a, &r| a | r);
             if all != 0 {
@@ -2234,6 +2274,80 @@ mod tests {
         let f = realize(&log, -11, 0);
         assert_eq!(f.height, 13);
         assert_eq!(f.internal_leading, 2);
+    }
+
+    #[test]
+    fn ms_sans_serif_8_glyphs_fit_its_widths() {
+        let r = &RASTERS[1];
+        assert_eq!((r.face, r.height), (SANS_FACE, sans8::HEIGHT as i32));
+        for &(ch, top, rows) in sans8::GLYPHS {
+            let w = r.widths[ch as usize - 0x20] as usize;
+            assert!(top + rows.len() <= sans8::HEIGHT, "{ch}");
+            assert!(rows.iter().all(|row| row.len() == w - 1), "{ch}");
+        }
+        let drawn: Vec<char> = sans8::GLYPHS.iter().map(|g| g.0).collect();
+        assert_eq!(drawn, ('!'..='~').collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn ms_sans_serif_8_keeps_thin_strokes() {
+        let log = Log::of(&logfont(-11, 0, 400, 0, 0, "MS Sans Serif"));
+        let f = realize(&log, -11, 0);
+        let rows = |b: u8| f.glyph(b).rows.clone();
+        // Every printable character has a glyph of its own: t and r keep
+        // their crossbar and arm, 0 and 8 differ. I and l are the same
+        // line, I a column wider.
+        let look = |b: u8| (rows(b), f.advance(b));
+        for a in 0x21..0x7F {
+            for b in a + 1..0x7F {
+                assert_ne!(look(a), look(b), "{} {}", a as char, b as char);
+            }
+        }
+        // Strokes are a pixel wide: l is one column, o two of them.
+        assert!(rows(b'l').iter().all(|&r| r == 0 || r == 1));
+        assert!(
+            rows(b'o')
+                .iter()
+                .all(|&r| r.count_ones() != 2 || r == 0b10001)
+        );
+        // The glyphs stay inside the advance less a column.
+        for b in 0x21..0x7F {
+            let all = rows(b).iter().fold(0, |a, &r| a | r);
+            assert!(
+                64 - all.leading_zeros() < f.advance(b) as u32,
+                "{}",
+                b as char
+            );
+        }
+    }
+
+    #[test]
+    fn ms_sans_serif_8_bold_and_wide() {
+        let regular = realize(
+            &Log::of(&logfont(-11, 0, 400, 0, 0, "MS Sans Serif")),
+            -11,
+            0,
+        );
+        let bold = realize(
+            &Log::of(&logfont(-11, 0, 700, 0, 0, "MS Sans Serif")),
+            -11,
+            0,
+        );
+        // Bold is the glyph smeared a pixel to the right, a column wider.
+        let (r, b) = (regular.glyph(b'H'), bold.glyph(b'H'));
+        let smeared: Vec<u64> = r.rows.iter().map(|&x| x | x << 1).collect();
+        assert_eq!(b.rows, smeared);
+        assert_eq!(b.advance, r.advance + 1);
+        // Twice as wide, each pixel is drawn as two.
+        let wide = realize(
+            &Log::of(&logfont(-11, 10, 400, 0, 0, "MS Sans Serif")),
+            -11,
+            10,
+        );
+        let (l, w) = (regular.glyph(b'l'), wide.glyph(b'l'));
+        let doubled: Vec<u64> = l.rows.iter().map(|&x| x * 0b11).collect();
+        assert_eq!(w.rows, doubled);
+        assert_eq!(w.advance, 2 * l.advance);
     }
 
     #[test]
