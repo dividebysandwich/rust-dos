@@ -148,24 +148,37 @@ impl DiskController {
     }
 
     /// The clusters the files in the host folder `dir` take, up to `cap`,
-    /// and the folders in it.
-    fn dir_usage(dir: &Path, cluster_bytes: u64, cap: u64) -> Usage {
+    /// and the folders in it. A file's size comes with the listing where
+    /// the host gives it (`hostfs::DirEntry::len`), or from a stat.
+    fn dir_usage(dir: &Path, cluster_bytes: u64, cap: u64) -> DirCount {
         let mut clusters = 0u64;
         let mut dirs = Vec::new();
+        let mut files = HashMap::new();
+        let mut complete = true;
         for entry in hostfs::read_dir(dir).unwrap_or_default() {
             if host_private(&entry.name.to_string_lossy()) {
                 continue;
             }
             if entry.is_dir {
                 dirs.push(entry.path);
-            } else if let Some(meta) = entry.metadata().ok().filter(|m| m.is_file()) {
-                clusters += meta.len.div_ceil(cluster_bytes);
+            } else if let Some(len) = entry
+                .len
+                .or_else(|| entry.metadata().ok().filter(|m| m.is_file()).map(|m| m.len))
+            {
+                let taken = len.div_ceil(cluster_bytes);
+                clusters += taken;
+                files.insert(entry.name, taken);
             }
             if clusters + dirs.len() as u64 >= cap {
+                complete = false;
                 break;
             }
         }
-        (clusters, dirs.into())
+        DirCount {
+            clusters,
+            dirs: dirs.into(),
+            files: complete.then_some(files),
+        }
     }
 
     // INT 21h, AH=43h: Get File Attributes

@@ -773,7 +773,10 @@ fn floppy_free_space_tracks_usage() {
 
     let (_, empty_free, _, total) = disk.get_disk_free_space(1).unwrap();
     assert_eq!(empty_free, total);
+    // Another program's file in the folder, which changed just now, shows
+    // within `TRUST`.
     fs::write(base.join("a/SAVE.DAT"), vec![0u8; 1024]).unwrap();
+    disk.host_dirs.expire();
     let (spc, free, bps, _) = disk.get_disk_free_space(1).unwrap();
     assert_eq!((spc, bps), (1, 512));
     assert_eq!(free, total - 2);
@@ -791,6 +794,7 @@ fn windows_sees_a_larger_hard_disk() {
     assert_eq!(disk.windows_free_space(3), Ok((8, 0xF_0000, 512, 0xF_0000)));
 
     fs::write(base.join("c/SETUP.DAT"), vec![0u8; 16 * 1024]).unwrap();
+    disk.host_dirs.expire();
     assert_eq!(
         disk.windows_free_space(3),
         Ok((8, 0xF_0000 - 4, 512, 0xF_0000))
@@ -1374,6 +1378,7 @@ fn host_folder_entries_are_kept_until_the_folder_changes() {
     fs::create_dir(root.join("DATA")).unwrap();
     fs::write(root.join("DATA").join("RGN001.GFF"), b"x").unwrap();
     age(&root.join("DATA"));
+    age(&root);
     let disk = DiskController::new(root.clone());
     let data = disk.resolve_path(r"C:\DATA").unwrap();
     assert!(disk.is_file(r"C:\DATA\RGN001.GFF"));
@@ -1384,9 +1389,23 @@ fn host_folder_entries_are_kept_until_the_folder_changes() {
     fs::write(data.join("Long Name.txt"), b"x").unwrap();
     assert!(disk.is_file(r"C:\DATA\LONGNA~1.TXT"));
 
-    // The folder changed within the last two seconds: not kept, as a
-    // change in the same tick of the clock wouldn't show.
-    assert!(!disk.host_dirs.dirs.borrow().contains_key(&data), "a recent folder isn't kept");
+    // The folder changed within the last two seconds: kept for `TRUST`
+    // alone, as a change in the same tick of the clock wouldn't move its
+    // time. Then it is read again, though its time stays.
+    let reads = disk.host_dirs.reads.get();
+    assert!(disk.is_file(r"C:\DATA\RGN001.GFF"));
+    assert_eq!(
+        disk.host_dirs.reads.get(),
+        reads,
+        "a recent folder is kept for a while"
+    );
+    disk.host_dirs.expire();
+    assert!(disk.is_file(r"C:\DATA\RGN001.GFF"));
+    assert_eq!(
+        disk.host_dirs.reads.get(),
+        reads + 1,
+        "and read again after it"
+    );
 }
 
 #[test]
@@ -1544,14 +1563,14 @@ fn a_kept_folder_is_checked_again_after_a_while() {
     // Another program adds a file and the folder's time moves. The time
     // isn't checked again within `TRUST`.
     fs::write(root.join("SAVE.DAT"), b"x").unwrap();
+    let reads = disk.host_dirs.reads.get();
     assert!(disk.is_file(r"C:\GAME.EXE"));
-    assert!(disk.host_dirs.dirs.borrow().contains_key(&host_root));
+    assert_eq!(disk.host_dirs.reads.get(), reads);
 
-    // Then it is: the folder changed within the last two seconds, and
-    // isn't kept.
+    // Then it is: the time moved, and the folder is read again.
     disk.host_dirs.expire();
     assert!(disk.is_file(r"C:\GAME.EXE"));
-    assert!(!disk.host_dirs.dirs.borrow().contains_key(&host_root));
+    assert_eq!(disk.host_dirs.reads.get(), reads + 1);
 }
 
 #[test]
@@ -1650,6 +1669,98 @@ fn a_create_over_an_existing_file_keeps_the_folders() {
     let handle = disk.create_file(r"C:\NEW.DAT", PSP).unwrap();
     disk.close_file(handle);
     assert_ne!(disk.host_dirs.changes.get(), changes);
+}
+
+/// A folder of `files` one-byte files named 0B.WAV, 1B.WAV, ... in a new
+/// scratch folder `name`, which is C:, and C:'s root set back. WAVES's own
+/// time is recent, as an installer copying into it keeps it.
+fn waves_folder(name: &str, files: usize) -> (PathBuf, PathBuf) {
+    let root = scratch(name);
+    let waves = root.join("WAVES");
+    fs::create_dir(&waves).unwrap();
+    for i in 0..files {
+        fs::write(waves.join(format!("{i}B.WAV")), b"x").unwrap();
+    }
+    age(&root);
+    (root, waves)
+}
+
+/// An installer asks for each file before it copies it (Fields of Fire's
+/// setup 2,000 times a second): a name a recent folder lacks is looked up
+/// without reading the folder again, until `TRUST` has passed or the guest
+/// has changed something.
+#[test]
+fn a_name_polled_in_a_recent_folder_reads_it_once() {
+    let (root, waves) = waves_folder("recent_folder_polled", 50);
+    let mut disk = DiskController::new(root.clone());
+    let wanted = r"C:\WAVES\37C.WAV";
+    assert!(!disk.is_file(wanted));
+    let reads = disk.host_dirs.reads.get();
+    for _ in 0..20 {
+        assert!(!disk.is_file(wanted) && !disk.is_directory(wanted));
+        assert_eq!(disk.open_file(wanted, 0, PSP), Err(0x02));
+    }
+    assert_eq!(
+        disk.host_dirs.reads.get(),
+        reads,
+        "the folder isn't read again"
+    );
+
+    // The guest's own file shows at once.
+    let handle = disk.create_file(wanted, PSP).unwrap();
+    disk.close_file(handle);
+    assert!(disk.is_file(wanted));
+
+    // So does a name no lookup missed, that another program made.
+    fs::write(waves.join("Other Name.wav"), b"x").unwrap();
+    assert!(disk.is_file(r"C:\WAVES\OTHERN~1.WAV"));
+
+    // A name looked up in vain shows within `TRUST`, as in a folder whose
+    // time is old.
+    assert!(!disk.is_file(r"C:\WAVES\38C.WAV"));
+    fs::write(waves.join("38C.WAV"), b"x").unwrap();
+    assert!(!disk.is_file(r"C:\WAVES\38C.WAV"));
+    disk.host_dirs.expire();
+    assert!(disk.is_file(r"C:\WAVES\38C.WAV"));
+}
+
+/// The free space of a folder drive drops as a file is written (Sierra's
+/// installer depends on it), counting the file written again but not its
+/// folder, which an installer asks after each block it writes.
+#[test]
+fn free_space_counts_again_only_the_file_written() {
+    let (root, waves) = waves_folder("free_space_written", 50);
+    let mut disk = DiskController::new(root.clone());
+    let free = |disk: &DiskController| disk.windows_free_space(3).unwrap().1;
+    let before = free(&disk);
+    let counts = disk.host_dirs.counts.get();
+    let handle = disk.create_file(r"C:\WAVES\NEW.WAV", PSP).unwrap();
+    assert_eq!(free(&disk), before, "an empty file takes no cluster");
+    for written in 1..=3 {
+        disk.write_file(handle, &[0; 4096]).unwrap();
+        assert_eq!(free(&disk), before - written, "a 4 KB cluster each");
+    }
+    disk.close_file(handle);
+    disk.rename_file(r"C:\WAVES\NEW.WAV", r"C:\WAVES\RENAMED.WAV")
+        .unwrap();
+    assert_eq!(free(&disk), before - 3);
+    disk.delete_file(r"C:\WAVES\RENAMED.WAV").unwrap();
+    assert_eq!(free(&disk), before);
+    assert_eq!(
+        disk.host_dirs.counts.get(),
+        counts,
+        "no folder was counted again"
+    );
+
+    // A folder the guest makes is counted, with a cluster for itself.
+    disk.create_directory(r"C:\WAVES\SUB").unwrap();
+    assert_eq!(free(&disk), before - 1);
+
+    // A file another program writes in the recent folder shows within
+    // `TRUST`, when the folder is counted again.
+    fs::write(waves.join("HOST.WAV"), [0; 8192]).unwrap();
+    disk.host_dirs.expire();
+    assert_eq!(free(&disk), before - 3);
 }
 
 #[test]

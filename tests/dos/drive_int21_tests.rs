@@ -150,7 +150,10 @@ fn free_space_allocation_info_and_dpb() {
     int21(&mut cpu, 0x36);
     assert_eq!((cpu.ax(), cpu.cx(), cpu.dx(), cpu.bx()), (1, 512, 2847, 2847));
 
+    // Another program's file in a folder changed just now shows within a
+    // second (`HostDirCache::TRUST`).
     fs::write(base.join("a/SAVE.DAT"), vec![0u8; 1024]).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     cpu.set_reg8(Register::DL, 1);
     int21(&mut cpu, 0x36);
     assert_eq!(cpu.bx(), 2845);
