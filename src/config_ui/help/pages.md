@@ -191,4 +191,14 @@ When **CPU** is near 100% (red), your computer can't keep up: set a
 lower *CPU speed (cycles)* on the Emulator page, or use a simpler CRT
 shader.
 
-**Ctrl+Shift+F12** shows these two numbers over the game while it runs.
+While the game shows its frames through the *Frame rate cap* (Display
+page), the **Cap** lines say what the cap does each second: the frames
+it let through (*shown*), those that waited for their turn (*held*),
+those that came after it (*late*), those from which it started its
+schedule again (*resets*), and the share of the time those fresh starts
+made frames wait (*lost*). A game whose logic steps once a frame runs
+slow by at most *lost*: if it stays above a few percent, raise the cap
+or turn it off.
+
+**Ctrl+Shift+F12** shows these two numbers over the game while it runs,
+with a line of the frames the cap held and the time lost under them.

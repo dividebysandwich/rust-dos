@@ -237,6 +237,16 @@ impl DebugHub {
         // What draws the window on the host (the `[DISPLAY]` line). Set
         // apart from the rest, which is at json!'s recursion limit.
         status["display"] = self.display.clone().into();
+        // The frame rate cap in force (`fps_cap`: "auto", a rate, or null
+        // for off), which a frame rate measured through the run can't
+        // pass, and when the last frame it let through showed. Set apart
+        // for the same reason.
+        let cap = cpu.bus.frame_cap.get();
+        status["video"]["fps_cap"] = match cap.cap() {
+            rust_dos::frame_cap::Cap::Auto => json!("auto"),
+            cap => json!(cap.rate()),
+        };
+        status["video"]["last_capped_frame_ms"] = json!(cap.last().map(|ns| ns as f64 / 1e6));
         // The journal: its last and oldest entries, the last that changed
         // the machine, the stop it is in, the control operation under way,
         // and whether a strict-match save could be done now.

@@ -1117,7 +1117,9 @@ pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
     }
     // A page that isn't there (error code bit 0 clear) of memory in the
     // page file, given its physical page now.
-    if vector == 14 && error.is_some_and(|e| e & 1 == 0) && crate::win32::seh::page_in(cpu, cpu.cr2)
+    if vector == 14
+        && error.is_some_and(|e| e & 1 == 0)
+        && crate::win32::seh::page_in(cpu, cpu.cr2, &ctx)
     {
         crate::win32::system::load_context(cpu, &ctx);
         return;

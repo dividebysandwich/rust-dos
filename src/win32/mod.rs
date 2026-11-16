@@ -25,6 +25,7 @@ mod dciman32;
 mod ddraw;
 mod dinput;
 pub mod dll_files;
+mod forwarders;
 mod dmusic;
 mod dplayx;
 mod dshow;
@@ -55,6 +56,7 @@ mod oleaut32;
 mod oledlg;
 mod olepro32;
 mod opengl32;
+mod pace;
 mod advpack;
 pub(crate) mod realmode;
 mod registry;
@@ -74,6 +76,7 @@ pub mod version;
 mod verdll;
 mod vmm;
 mod vfw;
+mod wing32;
 pub(crate) mod winmm;
 mod winspool;
 mod wnaspi32;
@@ -81,7 +84,9 @@ mod wow32;
 mod ws2_32;
 mod wsock32;
 
-pub use memory::{Kept, PageFileStatus, PagedRange, PagingCounts, page_file_status};
+pub use memory::{
+    Kept, PageFileStatus, PagedRange, PagingCounts, page_file_status, paging_counts,
+};
 pub use snapshot::snapshot;
 pub use stubs::function_name;
 
@@ -442,6 +447,8 @@ pub struct Win32 {
     /// The Win16 tasks' state (src/win16), whose process is one of
     /// `processes`.
     pub win16: crate::win16::State,
+    /// The serial ports Win32 programs have open (kernel32/comm.rs).
+    pub comm: Vec<kernel32::comm::Port>,
 
     /// COM's and the DirectX and multimedia DLLs' state, the system's,
     /// and how many GUIDs CoCreateGuid made.
@@ -1666,6 +1673,7 @@ crate::state_fields!(Win32 {
     wnaspi32,
     oleaut32,
     msacm32,
+    comm,
 } skip {
     enabled,
     guest_dlls,

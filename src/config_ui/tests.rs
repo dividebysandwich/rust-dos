@@ -1492,6 +1492,7 @@ fn the_stats_page_draws_its_numbers_and_graphs() {
         code_bytes: 2 << 20,
         fps_history: vec![30.0, 35.0, 70.0],
         cpu_history: vec![40.0; 120],
+        cap: None,
     });
     let has = |frame: &Frame, c: Rgb| {
         frame.rgba.as_chunks::<4>().0.iter().any(|px| px[..3] == [c.0, c.1, c.2])
@@ -1754,7 +1755,7 @@ fn a_browser_gets_what_it_has() {
     ui.show_page(Page::Display);
     assert_eq!(
         ui.items(),
-        [Item::Aspect, Item::Filter, Item::Shader, Item::Monochrome, Item::Composite, Item::CompositeEra]
+        [Item::Aspect, Item::FpsCap, Item::Filter, Item::Shader, Item::Monochrome, Item::Composite, Item::CompositeEra]
     );
     pick(&mut ui, &mut host, "16:9");
     assert_eq!(host.applied.last().unwrap().aspect, crate::config::AspectRatio::SixteenNine);

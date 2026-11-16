@@ -17,7 +17,11 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 67;
+const WIN32_VERSION: u16 = 72;
+/// The W32 versions an older rust-dos saved that this one still loads:
+/// 71's keeps only the names of the font files a program added
+/// (`gdi32::fnt::AddedFile`).
+const WIN32_OLDER: [u16; 1] = [71];
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -33,6 +37,7 @@ const ISAPNP_VERSION: u16 = 1;
 const PIT2_VERSION: u16 = 1;
 const TSC_VERSION: u16 = 1;
 const KEY_QUEUE_VERSION: u16 = 1;
+const FRAME_CAP_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 /// Each field is labelled with its name, for comparing states part by
@@ -55,6 +60,7 @@ impl Bus {
             powervr,
             powervr_line,
             hold: _,
+            frame_cap,
             notices: _,
             glide_hint: _,
             ide,
@@ -316,6 +322,11 @@ impl Bus {
         if let Some(voodoo) = voodoo {
             w.section(b"3DFX", VOODOO_VERSION, |w| voodoo.save(w));
         }
+        // The frame rate cap's last frame, which a 3dfx card's section
+        // held before every card's present went through the cap: in a
+        // section of its own, on every machine, so states saved before it
+        // load (with the 3dfx card's, if they have one).
+        w.section(b"PACE", FRAME_CAP_VERSION, |w| frame_cap.save(w));
         // A PowerVR card, likewise.
         if let Some(powervr) = powervr {
             w.section(b"PVR ", POWERVR_VERSION, |w| {
@@ -381,6 +392,7 @@ impl Bus {
             powervr,
             powervr_line,
             hold: _,
+            frame_cap,
             notices: _,
             glide_hint: _,
             ide,
@@ -649,11 +661,17 @@ impl Bus {
             (true, None) => return Err(StateError::Mismatch("it has a ViBRA16C and this machine hasn't".into())),
             (false, Some(_)) => return Err(StateError::Mismatch("this machine has a ViBRA16C and it hasn't".into())),
         }
+        // A state saved before the cap had its section has the 3dfx
+        // card's last capped frame, which the card's load puts in.
+        frame_cap.forget();
         match (r.next_is(b"3DFX"), voodoo) {
             (true, Some(voodoo)) => voodoo.load(&mut r.section(b"3DFX", VOODOO_VERSION)?)?,
             (false, None) => {}
             (true, None) => return Err(StateError::Mismatch("it has a 3dfx card and this machine hasn't".into())),
             (false, Some(_)) => return Err(StateError::Mismatch("this machine has a 3dfx card and it hasn't".into())),
+        }
+        if r.next_is(b"PACE") {
+            frame_cap.load(&mut r.section(b"PACE", FRAME_CAP_VERSION)?)?;
         }
         match (r.next_is(b"PVR "), powervr) {
             (true, Some(powervr)) => {
@@ -684,7 +702,8 @@ impl Bus {
         }
         win32.reset();
         if r.next_is(b"W32 ") {
-            win32.load(&mut r.section(b"W32 ", WIN32_VERSION)?)?;
+            let versions = [WIN32_OLDER[0], WIN32_VERSION];
+            win32.load(&mut r.section_of(b"W32 ", &versions)?)?;
         }
         // The extended memory they hold.
         xms.dpmi = dpmi.reservations();
@@ -884,7 +903,11 @@ mod tests {
         (61, 0x9267_6BA0_CE58_B06F), // OpenGL's display lists
         (62, 0x9F78_ACB5_CCD2_8975), // OpenGL's textures in their contexts' group
         (63, 0xD1E3_14A4_31DE_2AAA), // OpenGL's vertices as given, and the card's lights
+        (65, 0x0208_3289_86A2_082E), // Win32's serial ports
         (67, 0xD1E3_14A4_31DE_2AAA), // a Direct3D device made as a software device
+        (69, 0x0328_CB26_D841_A2ED), // Win32's serial ports, merged with 63's and 67's
+        (71, 0x0DD2_950E_C2FB_1628), // copy-on-write views paged, pages held for a fault
+        (72, 0x0DD2_950E_C2FB_1628), // the fonts of files AddFontResource added
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

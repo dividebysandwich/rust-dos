@@ -8,6 +8,7 @@
 //! own imports loaded and bound in turn. Calling their entry points is
 //! kernel32's (module.rs), once the loader is done.
 
+use super::forwarders;
 use super::heap::Heap;
 use super::memory::{
     GRANULARITY, Memory, PAGE, PAGE_READWRITE, PRIVATE, SHARED, SYSTEM, USER, WRITABLE,
@@ -342,7 +343,7 @@ fn map_image(
                 .iter()
                 .any(|s| s.writable() && page < s.rva + s.mapped_size() && s.rva < page + PAGE);
         let phys = memory.page(bus)?;
-        memory.map(
+        memory.map_pageable(
             bus,
             base + page,
             phys,
@@ -947,9 +948,10 @@ pub(super) fn tls_blocks(bus: &mut Bus, process: &mut Process, tib: u32) -> Opti
 /// Load the DLLs `imports` names for the module at `base` (`importer`),
 /// and write the addresses of the functions it imports to its import
 /// address table. The functions of the built-in DLLs that they don't have
-/// yet get stubs that say so; a DLL file without a function fails the
-/// load, as does a built-in DLL's function of Windows 98 under 95. The
-/// modules it took a reference on.
+/// yet get stubs that say so, as do those of the system directory's
+/// forwarder files (`forwarders`); a DLL file without a function fails
+/// the load, as does a built-in DLL's function of Windows 98 under 95.
+/// The modules it took a reference on.
 fn bind_imports(
     l: &mut Loader,
     base: u32,
@@ -965,11 +967,15 @@ fn bind_imports(
     for dll in imports {
         let dep = load_module(l, &dll.name, 0, importer)?;
         deps.push(dep);
+        // A built-in DLL, or a forwarder file of the system directory,
+        // whose functions the built-in DLL behind it lacks are as missing
+        // as the built-in DLL's own.
         let builtin = l
             .process
             .modules
             .iter()
-            .find(|m| m.base == dep && m.flags & BUILTIN != 0)
+            .find(|m| m.base == dep)
+            .filter(|m| m.flags & BUILTIN != 0 || forwarders::is_shown(l.bus, &m.path))
             .map(|m| m.name.clone());
         // The import library that says how many bytes of arguments the
         // stdcall functions guest code imports take.
