@@ -1857,6 +1857,94 @@ fn change_display_settings_without_a_mode_gives_the_desktops_back() {
     assert_eq!((mode.width, mode.height), (640, 480));
 }
 
+// An MDI client's scroll bars.
+
+const M_CREATE_WINDOW: usize = 0;
+const M_SEND_MESSAGE: usize = 1;
+const M_GET_CLIENT_RECT: usize = 2;
+const MDI_CLIENT_CLASS: u32 = 0x340;
+const MDI_CREATE: u32 = 0x350;
+const MDI_CLIENT: u32 = 0x04;
+const WM_MDIICONARRANGE: u32 = 0x228;
+const WS_CHILD: u32 = 0x4000_0000;
+const WS_HSCROLL: u32 = 0x0010_0000;
+const WS_VSCROLL: u32 = 0x0020_0000;
+
+/// A 640x480 popup holding an MDI client of `style` that fills it, and
+/// in the client a 700x500 child at its corner, past its right and
+/// bottom edges. WM_MDIICONARRANGE has the client set its scroll bars
+/// (CalcChildScroll), then the client's client rectangle is in RECT.
+fn mdi_scroll_program(style: u32) -> (Vec<u8>, u32) {
+    let mut d = data();
+    put(&mut d, MDI_CLIENT_CLASS, b"MDICLIENT\0");
+    // CLIENTCREATESTRUCT: no window menu, the first child's id 1.
+    put32(&mut d, MDI_CREATE + 4, 1);
+    let user32 = (
+        "USER32.DLL",
+        &["CreateWindowExA", "SendMessageA", "GetClientRect"][..],
+    );
+    program(&[user32], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        let window = |class: u32, style: u32, (w, h): (u32, u32), parent: Arg, param: Arg| {
+            [
+                Arg::I(0),
+                Arg::At(class),
+                Arg::I(0),
+                Arg::I(style),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(w),
+                Arg::I(h),
+                parent,
+                Arg::I(0),
+                Arg::I(BASE),
+                param,
+            ]
+        };
+        let frame = window(CLASS, WS_POPUP | WS_VISIBLE, (640, 480), Arg::I(0), Arg::I(0));
+        c.api(a, l, M_CREATE_WINDOW, &frame)?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        let client_style = WS_CHILD | WS_VISIBLE | style;
+        let at = Arg::At(MDI_CREATE);
+        let client = window(MDI_CLIENT_CLASS, client_style, (640, 480), Arg::Val(HWND), at);
+        c.api(a, l, M_CREATE_WINDOW, &client)?;
+        a.mov(dword_ptr(l.at(MDI_CLIENT)), eax)?;
+        let child_style = WS_CHILD | WS_VISIBLE;
+        let child = window(CLASS, child_style, (700, 500), Arg::Val(MDI_CLIENT), Arg::I(0));
+        c.api(a, l, M_CREATE_WINDOW, &child)?;
+        let arrange = [Arg::Val(MDI_CLIENT), Arg::I(WM_MDIICONARRANGE), Arg::I(0), Arg::I(0)];
+        c.api(a, l, M_SEND_MESSAGE, &arrange)?;
+        c.api(a, l, M_GET_CLIENT_RECT, &[Arg::Val(MDI_CLIENT), Arg::At(RECT)])?;
+        finish(a, l)
+    })
+}
+
+/// The MDI client's client rectangle, with a client of `style`.
+fn mdi_client_area(test: &str, style: u32) -> [u32; 4] {
+    let (program, data) = mdi_scroll_program(style);
+    let mut cpu = machine(test, program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 5);
+    assert!(r[..3].iter().all(|&h| h != 0), "{r:X?}");
+    assert_eq!(r[4], 1);
+    std::array::from_fn(|i| peek(&cpu, data + RECT + 4 * i as u32))
+}
+
+#[test]
+fn an_mdi_client_without_scroll_styles_shows_no_scroll_bars() {
+    // Windows sets the bars of a client only if it has WS_HSCROLL or
+    // WS_VSCROLL (Wine's CalcChildScroll): Fields of Fire's child is two
+    // pixels past its client, which has neither.
+    assert_eq!(mdi_client_area("mdi_no_scroll", 0), [0, 0, 640, 480]);
+}
+
+#[test]
+fn an_mdi_client_with_scroll_styles_shows_its_scroll_bars() {
+    let area = mdi_client_area("mdi_scroll", WS_HSCROLL | WS_VSCROLL);
+    // Both bars take their room out of the client area.
+    assert!(area[2] < 640 && area[3] < 480, "{area:?}");
+}
+
 // GDI on the screen in a mode DirectDraw set.
 
 const GDI_USER32: (&str, &[&str]) = ("USER32.DLL", &["CreateWindowExA", "GetDC", "FillRect"]);

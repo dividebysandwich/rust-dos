@@ -26,8 +26,9 @@ use crate::win32::user32::sysparams::{self, COLOR_MENU};
 use crate::win32::user32::window::{
     self, CW_USEDEFAULT, HWND_TOP, SW_HIDE, SW_MAXIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE,
     SW_SHOWNORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS, WS_DISABLED, WS_EX_MDICHILD, WS_MAXIMIZE,
+    WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS, WS_DISABLED, WS_EX_MDICHILD, WS_HSCROLL, WS_MAXIMIZE,
     WS_MAXIMIZEBOX, WS_MINIMIZE, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WS_VISIBLE,
+    WS_VSCROLL,
 };
 use crate::win32::user32::{address_of, class, defwnd, read_words, resource, user, write_words};
 
@@ -1077,7 +1078,10 @@ fn tile(cpu: &mut Cpu, client: u32, how: u32) -> Ops {
 }
 
 /// CalcChildScroll: the client's scroll bars cover its children and its
-/// client area; none with a maximized child.
+/// client area; none with a maximized child. A client without
+/// WS_HSCROLL or WS_VSCROLL has no scroll bars to set, as on Windows
+/// (Wine's CalcChildScroll checks the style too): its children may reach
+/// past its edges without any showing.
 fn calc_scroll(cpu: &mut Cpu, client: u32, bar: u32) -> Ops {
     let mut ops = Ops::default();
     let state = user(cpu);
@@ -1101,6 +1105,9 @@ fn calc_scroll(cpu: &mut Cpu, client: u32, bar: u32) -> Ops {
                 children.union(&c.rect)
             };
         }
+    }
+    if w.style & (WS_HSCROLL | WS_VSCROLL) == 0 {
+        return ops;
     }
     let all = if children.is_empty() {
         area
