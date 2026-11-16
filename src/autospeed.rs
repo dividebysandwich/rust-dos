@@ -4550,54 +4550,37 @@ mod tests {
         frames: &[u64],
         seconds: u64,
     ) -> Vec<u32> {
-        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
-        let bus = &mut cpu.bus;
-        bus.set_cycles_per_ms(200_000);
-        bus.frame_cap.set(cap);
-        let mut auto = AutoSpeed::new(3000, Some(target));
-        let mut speeds = Vec::new();
         let mut next = frames.iter().cycle();
-        while bus.clock.now_ns() < seconds * 1_000_000_000 {
+        let frame = move |bus: &mut Bus| {
             bus.clock.icount += next.next().unwrap();
-            // A held present's thread blocks, and the machine idles.
-            while let Some(until) = bus.frame_cap.wait(bus.clock.now_ns(), None) {
-                let ns = until - bus.clock.now_ns();
-                let idle = (ns * bus.clock.cycles_per_ms() as u64).div_ceil(1_000_000);
-                bus.clock.icount += idle;
-                bus.clock.idle += idle;
-            }
-            bus.frame_cap.shown(bus.clock.now_ns());
-            bus.activity.swapped(1);
-            if let Some(speed) = auto.update(bus, true, HOST, 0) {
-                bus.set_cycles_per_ms(speed);
-                speeds.push(speed);
-            }
-        }
-        speeds
+            1
+        };
+        run_program(cap, target, seconds, frame).0
+    }
+
+    /// Whether the last three speeds of `held` are within 10% of the
+    /// least and the most of the last three of `free`.
+    fn ends_within(held: &[u32], free: &[u32]) -> bool {
+        let free = &free[free.len() - 3..];
+        let low = free.iter().min().unwrap() * 9 / 10;
+        let high = free.iter().max().unwrap() * 11 / 10;
+        held[held.len() - 3..].iter().all(|speed| (low..=high).contains(speed))
     }
 
     #[test]
     fn uneven_frames_under_the_frame_rate_cap_dont_take_the_speed_down() {
         use crate::frame_cap::Cap;
         // Frames of 150,000 and 1,350,000 instructions by turns, 267 a
-        // second at 200,000 as with 750,000 each. Reckoned at each held
-        // frame's own time, the short frames' holds read as 556, and the
-        // first step went down to 20,000 where without the cap it went to
-        // 45,000. Counted as shown, they come down as a synced game's do,
-        // to where they do without the cap.
+        // second at 200,000 as with 750,000 each (#1137). Under the cap
+        // they show 60 at any speed above 45,000, and the speed comes
+        // down as a synced game's does, to where it goes without the cap.
         let works = [150_000, 1_350_000];
         let free = run_presenting_by(Cap::Off, 60, &works, 150);
         let held = run_presenting_by(Cap::Auto, 60, &works, 150);
         assert!(held.iter().all(|&speed| speed > 35_000), "{held:?}");
-        let settled = *held.last().unwrap();
-        assert!(
-            (35_000..=60_000).contains(&settled),
-            "{held:?}, without {free:?}"
-        );
-        // A frame presented twice, the second present at once. Reckoned
-        // at the least time a frame takes, each hold of the second read
-        // as up to 167 frames, and the speed went down to the least there
-        // is.
+        assert!(ends_within(&held, &free), "{held:?}, without {free:?}");
+        // A frame presented twice, the second present at once: the hold of
+        // the second is no reason to take the speed down.
         let works = [1_500_000, 0];
         let held = run_presenting_by(Cap::Auto, 60, &works, 60);
         assert!(held.iter().all(|&speed| speed > 40_000), "{held:?}");
@@ -4615,39 +4598,33 @@ mod tests {
         // Held to 60, the program shows 60 at any speed above that, as
         // a game synced to a 60 Hz display does. The speed comes down as
         // that game's does, by steps that try less, to the same speed.
-        let (synced, _) = run_program(Cap::Off, 150, synced(750_000));
+        let (synced_speeds, _) = run_program(Cap::Off, 60, 150, synced(750_000));
         let near = |a: u32, b: u32| a.abs_diff(b) <= b / 20;
-        let ends_near =
-            |held: &[u32], other: &[u32]| near(held[held.len() - 1], other[other.len() - 1]);
         for cap in [Cap::Auto, Cap::Fps(60)] {
             let held = run_presenting(cap, 60, 750_000, 150);
-            assert!(
-                ends_near(&held, &synced),
-                "{cap:?}: {held:?}, synced {synced:?}"
-            );
-            assert!((40_000..=60_000).contains(held.last().unwrap()), "{held:?}");
+            let (end, synced_end) = (*held.last().unwrap(), *synced_speeds.last().unwrap());
+            assert!(near(end, synced_end), "{cap:?}: {held:?}, synced {synced_speeds:?}");
+            assert!((40_000..=60_000).contains(&end), "{held:?}");
         }
         // A cap of 30 is the rate the speed aims for (the cap shows no
         // more), and the speed ends where aiming for 30 without a cap
         // takes it.
         let free = run_presenting(Cap::Off, 30, 750_000, 150);
         let held = run_presenting(Cap::Fps(30), 60, 750_000, 150);
-        let low = free[free.len() - 3..].iter().min().unwrap() * 9 / 10;
-        let high = free[free.len() - 3..].iter().max().unwrap() * 11 / 10;
-        assert!(
-            (low..=high).contains(held.last().unwrap()),
-            "{held:?}, without {free:?}"
-        );
+        assert!(ends_within(&held, &free), "{held:?}, without {free:?}");
     }
 
     /// The speeds `auto` runs a program at under the frame rate cap `cap`,
-    /// aiming for 60 frames a second, from 200,000 instructions per ms on
-    /// for `seconds` of emulated time, and the frames it showed a second
-    /// over the last ten. `frame` runs the program up to its next present
-    /// (instructions, and waits on the clock through `idle_until`) and
-    /// gives the number of presents it makes then, one after the other.
+    /// aiming for `target` frames a second, from 200,000 instructions per
+    /// ms on for `seconds` of emulated time (at least ten), and the frames
+    /// it showed a second over the last ten. `frame` runs the program up
+    /// to its next present (instructions, and waits on the clock through
+    /// `idle_until`) and gives the number of presents it makes then, one
+    /// after the other. A held present's thread blocks, and the machine
+    /// idles.
     fn run_program(
         cap: crate::frame_cap::Cap,
+        target: u32,
         seconds: u64,
         mut frame: impl FnMut(&mut Bus) -> u32,
     ) -> (Vec<u32>, f64) {
@@ -4655,9 +4632,9 @@ mod tests {
         let bus = &mut cpu.bus;
         bus.set_cycles_per_ms(200_000);
         bus.frame_cap.set(cap);
-        let mut auto = AutoSpeed::new(3000, Some(60));
+        let mut auto = AutoSpeed::new(3000, Some(target));
         let mut speeds = Vec::new();
-        let last_from = (seconds - 10) * 1_000_000_000;
+        let last_from = seconds.saturating_sub(10) * 1_000_000_000;
         let mut shown = 0;
         while bus.clock.now_ns() < seconds * 1_000_000_000 {
             for _ in 0..frame(bus) {
@@ -4733,8 +4710,8 @@ mod tests {
         // the frames it shows count, and the speed goes up until the
         // steps are short enough to show the cap's rate, short of all
         // the host has.
-        let (free, _) = run_program(Cap::Off, 180, stepping(20_000_000, 420_000));
-        let (held, shown) = run_program(Cap::Auto, 180, stepping(20_000_000, 420_000));
+        let (free, _) = run_program(Cap::Off, 60, 180, stepping(20_000_000, 420_000));
+        let (held, shown) = run_program(Cap::Auto, 60, 180, stepping(20_000_000, 420_000));
         let settled = &held[held.len() - 4..];
         assert!(shown >= 57.0, "{shown}: {held:?}");
         assert!(settled.iter().all(|&speed| speed < HOST / 2), "{held:?}");
@@ -4753,28 +4730,14 @@ mod tests {
         // is presented twice, the second present held a frame time. None
         // shows more with more speed, and each settles where it does
         // without the cap.
-        let frame_driven = || {
-            let mut i = 0;
-            move |bus: &mut Bus| {
-                bus.clock.icount += [1_400_000, 50_000, 50_000][i % 3];
-                i += 1;
-                1
-            }
-        };
-        let within = |held: &[u32], free: &[u32]| {
-            let free = &free[free.len() - 3..];
-            let (low, high) = (*free.iter().min().unwrap(), *free.iter().max().unwrap());
-            held[held.len() - 3..]
-                .iter()
-                .all(|&speed| speed >= low - low / 10 && speed <= high + high / 10)
-        };
-        let (free, _) = run_program(Cap::Off, 240, frame_driven());
-        let (held, _) = run_program(Cap::Auto, 240, frame_driven());
-        assert!(within(&held, &free), "{held:?}, without {free:?}");
+        let works = [1_400_000, 50_000, 50_000];
+        let free = run_presenting_by(Cap::Off, 60, &works, 240);
+        let held = run_presenting_by(Cap::Auto, 60, &works, 240);
+        assert!(ends_within(&held, &free), "{held:?}, without {free:?}");
         for (fps, work, presents) in [(30, 1_000_000, 1), (15, 2_000_000, 2)] {
-            let (free, _) = run_program(Cap::Off, 120, on_the_clock(fps, work, presents));
-            let (held, _) = run_program(Cap::Auto, 120, on_the_clock(fps, work, presents));
-            assert!(within(&held, &free), "{fps}: {held:?}, without {free:?}");
+            let (free, _) = run_program(Cap::Off, 60, 120, on_the_clock(fps, work, presents));
+            let (held, _) = run_program(Cap::Auto, 60, 120, on_the_clock(fps, work, presents));
+            assert!(ends_within(&held, &free), "{fps}: {held:?}, without {free:?}");
         }
     }
 
