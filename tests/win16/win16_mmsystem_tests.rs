@@ -475,10 +475,15 @@ fn a_wave_callback_function_is_called_with_the_programs_header() {
     // A device opened with CALLBACK_FUNCTION calls the function with
     // MM_WOM_OPEN and then MM_WOM_DONE, whose dwParam1 is the program's
     // 16:16 pointer to the header waveOutReset returned, as Windows 3.1
-    // calls Miles' WAIL16.DLL. The task makes the calls when it next asks
-    // for a message, here a PeekMessage that finds none. Exit code 1; 2
-    // for no calls or another number, 3 and 4 for other messages, 5 and
-    // 6 for another header; 10 to 13 are calls that failed before.
+    // calls Miles' WAIL16.DLL. Windows makes those calls, and
+    // MM_WOM_CLOSE's, before waveOutOpen, waveOutReset and waveOutClose
+    // return, since the program may free the header and the function
+    // then. A block that plays to its end is done later: the task makes
+    // that call when it asks for a message, here PeekMessage in a loop.
+    // Exit code 1; 2 for no calls or another number, 3 and 4 for other
+    // messages, 5 and 6 for another header, 8 for no call while the task
+    // asks for messages and 9 for none in waveOutClose; 7, 14 and 10 to
+    // 13 are calls that failed.
     let mut code = Code::new();
     for at in [CALLS, FIRST, SECOND, DONE_P1, DONE_P1 + 2] {
         set(&mut code, at, 0);
@@ -500,18 +505,32 @@ fn a_wave_callback_function_is_called_with_the_programs_header() {
         .call("MMSYSTEM", WAVE_OUT_OPEN);
     expect_ax(&mut code, 0, 13);
     play_and_reset(&mut code);
+    expect(&mut code, CALLS, 2, true, 2);
+    expect(&mut code, FIRST, MM_WOM_OPEN, true, 3);
+    expect(&mut code, SECOND, MM_WOM_DONE, true, 4);
+    expect(&mut code, DONE_P1, HEADER, true, 5);
+    expect_ds(&mut code, DONE_P1 + 2, 6);
+    // The block again, played to its end this time.
+    header_call(&mut code, WAVE_OUT_WRITE, 7);
+    code.emit(&[0xBE, 0xFF, 0xFF]); // mov si,0FFFFh
+    let ask = code.here();
     code.emit(&[0x1E]) // push ds
         .push(MSG)
         .push(0) // any window
         .push(0)
         .push(0)
         .push(1) // PM_REMOVE
-        .call("USER", PEEK_MESSAGE);
-    expect(&mut code, CALLS, 2, true, 2);
-    expect(&mut code, FIRST, MM_WOM_OPEN, true, 3);
-    expect(&mut code, SECOND, MM_WOM_DONE, true, 4);
-    expect(&mut code, DONE_P1, HEADER, true, 5);
-    expect_ds(&mut code, DONE_P1 + 2, 6);
+        .call("USER", PEEK_MESSAGE)
+        .emit(&[0x83, 0x3E, lo(CALLS), hi(CALLS), 0x03]) // cmp word [CALLS],3
+        .emit(&[0x74, 0x09]) // je over the rest
+        .emit(&[0x4E]); // dec si
+    let back = ask as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x75, back as i8 as u8]) // jnz ask
+        .emit(&[0xB0, 0x08, 0xB4, 0x4C, 0xCD, 0x21]); // mov al,8; exit
+    push_word(&mut code, HANDLE);
+    code.call("MMSYSTEM", WAVE_OUT_CLOSE);
+    expect_ax(&mut code, 0, 14);
+    expect(&mut code, CALLS, 4, true, 9);
     code.emit(&[0xB0, 0x01]).exit_al();
     let callback = wave_callback(&mut code);
     code.patch(callback_at, callback);

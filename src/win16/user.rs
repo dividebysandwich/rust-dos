@@ -606,7 +606,7 @@ const PM_NOYIELD: u32 = 0x0002;
 pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
     let d = |i: usize| data.get(i).copied().unwrap_or(0);
     if d(0) >= P_MISC {
-        return super::misc::post(cpu, value, data);
+        return super::misc::post(cpu, value, data, ctx);
     }
     if d(0) >= P_GDI {
         return super::gdi::post(cpu, value, data);

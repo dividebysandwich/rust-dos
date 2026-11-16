@@ -99,10 +99,10 @@ pub static THENS: &[Then] = &[
     super::hook::then,
     super::dpmi::then_callback,
     super::module::then_boot,
+    super::misc::then_calls16,
 ];
 
-/// The context the call was made with goes on as it was.
-pub const THEN_KEEP: u16 = 0;
+// Place 0 is then_keep, which no call names now.
 pub const THEN_PROC: u16 = 1;
 pub const THEN_TASK: u16 = 2;
 pub const THEN_MESSAGE: u16 = 3;
@@ -113,6 +113,7 @@ pub const THEN_FLAT_INITS: u16 = 7;
 pub const THEN_HOOK: u16 = 8;
 pub const THEN_CALLBACK: u16 = 9;
 pub const THEN_BOOT: u16 = 10;
+pub const THEN_CALLS16: u16 = 11;
 
 fn post_plain(_: &mut Cpu, value: u32, _: &[u32], _: &mut Context) -> Option<u32> {
     Some(value)

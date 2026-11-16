@@ -207,7 +207,7 @@ pub static MMSYSTEM: Def = Def {
             b'w',
         ),
         rust("waveOutOpen", 404, "pwplll", wave_out_open),
-        win32("waveOutClose", 405, "w", MM, "waveOutClose", b'w'),
+        rust("waveOutClose", 405, "w", wave_out_close),
         rust("waveOutPrepareHeader", 406, "wSw", wave_out_prepare_header),
         rust(
             "waveOutUnprepareHeader",
@@ -218,7 +218,7 @@ pub static MMSYSTEM: Def = Def {
         rust("waveOutWrite", 408, "wSw", wave_out_write),
         win32("waveOutPause", 409, "w", MM, "waveOutPause", b'w'),
         win32("waveOutRestart", 410, "w", MM, "waveOutRestart", b'w'),
-        win32("waveOutReset", 411, "w", MM, "waveOutReset", b'w'),
+        rust("waveOutReset", 411, "w", wave_out_reset),
         rust("waveOutGetPosition", 412, "wpw", wave_out_get_position),
         win32("waveOutGetVolume", 415, "wp", MM, "waveOutGetVolume", b'w'),
         win32("waveOutSetVolume", 416, "wl", MM, "waveOutSetVolume", b'w'),
@@ -452,6 +452,7 @@ const P_MMTIME: u32 = P_MISC + 6;
 const P_WING_BITMAP: u32 = P_MISC + 7;
 const P_SEGPTR: u32 = P_MISC + 8;
 const P_MCI: u32 = P_MISC + 9;
+const P_WAVE_CALLS: u32 = P_MISC + 10;
 
 /// The size of Windows 3.1's MMTIME: wType and a union of 6 bytes, its
 /// SMPTE time being hour, minute, second, frame, fps and a pad byte
@@ -464,8 +465,9 @@ const TIME_SMPTE: u32 = 8;
 const MMSYSERR_INVALPARAM: u32 = 11;
 const TIMERR_NOCANDO: u32 = 97;
 
-/// A 32-bit function returned `value`: what 16-bit code gets.
-pub fn post(cpu: &mut Cpu, value: u32, data: &[u32]) -> Option<u32> {
+/// A 32-bit function returned `value`: what 16-bit code gets, None
+/// when 16-bit code is called before the function returns (`ctx`).
+pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
     let d = |i: usize| data.get(i).copied().unwrap_or(0);
     match d(0) {
         P_OFN => {
@@ -506,8 +508,9 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32]) -> Option<u32> {
                     crate::win32::winmm::wave::call16_on(cpu, handle, tid, d(3));
                 }
             }
-            Some(value)
+            return_after_calls(cpu, value, ctx)
         }
+        P_WAVE_CALLS => return_after_calls(cpu, value, ctx),
         P_WAVE_UNPREPARE => {
             if value == 0 {
                 unprepared(cpu, d(1));
@@ -841,29 +844,37 @@ pub type MmCall = [u32; 7];
 /// Queue the call of the 16-bit function `function` with `args` (the
 /// device's handle, the message, the instance and two parameters) for
 /// the task whose thread is `tid`. Windows 3.1 calls such a function at
-/// interrupt time, which tasks taking turns have no room for; the task
-/// makes the call when it next asks for a message (`call_queued16`).
-/// A task that waits for one is given WM_NULL, so that it does.
+/// interrupt time, which tasks taking turns have no room for: the task
+/// makes the call when it next asks for a message (`call_queued16`), or
+/// before the MMSYSTEM function it is in returns (`return_after_calls`).
+/// A task that waits is given WM_NULL, so that it asks; one that has
+/// ended makes no calls.
 pub fn queue_call16(cpu: &mut Cpu, tid: u32, function: u32, args: [u32; 5]) {
-    let calls = &mut cpu.bus.win32.win16.mmsystem.calls;
-    let first = !calls.iter().any(|c| c[0] == tid);
+    let Some((p, t)) = crate::win32::thread::find(&cpu.bus.win32, tid) else {
+        return;
+    };
+    let waits = cpu.bus.win32.processes[p].threads[t].wait.is_some();
     let [a, b, c, d, e] = args;
+    let calls = &mut cpu.bus.win32.win16.mmsystem.calls;
     calls.push([tid, function, a, b, c, d, e]);
-    let waits = crate::win32::thread::find(&cpu.bus.win32, tid)
-        .is_some_and(|(p, t)| cpu.bus.win32.processes[p].threads[t].wait.is_some());
-    if first && waits {
+    // Each call, not only the first: a task that went on to wait in
+    // WaitMessage with a call queued would otherwise never be woken.
+    if waits {
         crate::win32::user32::message::post_thread_message(cpu, &[tid, 0, 0, 0]);
     }
 }
 
-/// The running task, as it asks for a message, makes the first call
-/// queued for it (`queue_call16`), and asks again when it returns. False
-/// when there is none.
-pub fn call_queued16(cpu: &mut Cpu) -> bool {
+/// Make the first call queued for the running task (`queue_call16`);
+/// the ones after it follow when it returns (`then_calls16`), and then
+/// the task goes on with `resume`. False when there is none.
+fn make_call16(cpu: &mut Cpu, resume: Context) -> bool {
     if cpu.bus.win32.win16.mmsystem.calls.is_empty() {
         return false;
     }
-    let tid = super::task(cpu).tid;
+    let Some(t) = super::current_task(cpu) else {
+        return false;
+    };
+    let tid = cpu.bus.win32.win16.tasks[t].tid;
     let calls = &mut cpu.bus.win32.win16.mmsystem.calls;
     let Some(i) = calls.iter().position(|c| c[0] == tid) else {
         return false;
@@ -880,19 +891,52 @@ pub fn call_queued16(cpu: &mut Cpu) -> bool {
         (p2 >> 16) as u16,
         p2 as u16,
     ];
-    // When the function returns, the task makes its own call again.
-    let mut resume = Context::of(cpu);
-    resume.eip = resume.eip.wrapping_sub(4);
     thunk::call16(
         cpu,
         function,
         &words,
         0,
         resume,
-        thunk::THEN_KEEP,
+        thunk::THEN_CALLS16,
         Vec::new(),
     );
     true
+}
+
+/// A function `make_call16` called returned: the task's next call, or
+/// the context it was to go on with.
+pub(super) fn then_calls16(cpu: &mut Cpu, _: u32, _: &[u32], ctx: &mut Context) -> Option<u32> {
+    if make_call16(cpu, *ctx) {
+        None
+    } else {
+        Some(ctx.gpr[thunk::EAX])
+    }
+}
+
+/// The running task, as it asks for a message, makes the calls queued
+/// for it (`queue_call16`), and asks again when they are made. False
+/// when there are none.
+pub fn call_queued16(cpu: &mut Cpu) -> bool {
+    let mut resume = Context::of(cpu);
+    resume.eip = resume.eip.wrapping_sub(4);
+    make_call16(cpu, resume)
+}
+
+/// An MMSYSTEM function that returns `value` to the 16-bit context
+/// `ctx` makes the calls its WINMM function queued for the task before
+/// it returns, as Windows 3.1 calls the function within waveOutOpen
+/// (MM_WOM_OPEN), waveOutReset (MM_WOM_DONE) and waveOutClose
+/// (MM_WOM_CLOSE). A program may free the headers and the function's
+/// library once they return.
+fn return_after_calls(cpu: &mut Cpu, value: u32, ctx: &Context) -> Option<u32> {
+    let mut resume = *ctx;
+    resume.gpr[thunk::EAX] = resume.gpr[thunk::EAX] & 0xFFFF_0000 | value & 0xFFFF;
+    resume.gpr[thunk::EDX] = resume.gpr[thunk::EDX] & 0xFFFF_0000 | value >> 16;
+    if make_call16(cpu, resume) {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 /// A task ended: the calls queued for it go.
@@ -1017,6 +1061,14 @@ fn wave_out_unprepare_header(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn wave_out_write(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let at = wave_header(cpu, args[1]);
     go(cpu, MM, "waveOutWrite", &[args[0], at, 32], Vec::new())
+}
+
+fn wave_out_reset(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    go(cpu, MM, "waveOutReset", &[args[0]], vec![P_WAVE_CALLS])
+}
+
+fn wave_out_close(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    go(cpu, MM, "waveOutClose", &[args[0]], vec![P_WAVE_CALLS])
 }
 
 fn wave_out_get_position(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
