@@ -557,6 +557,7 @@ pub(super) fn end_client_task(cpu: &mut Cpu, tid: u32) {
     }
     crate::win32::user32::destroy_thread_windows(cpu, tid);
     super::comm::task_ended(cpu, task.handle);
+    super::misc::task_ended(cpu, task.tid);
     global::free_owned(cpu, task.handle);
     cpu.bus.win32.win16.ldt.free(task.psp, 1);
     global::free(cpu, task.handle);
@@ -1066,6 +1067,7 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
     // The serial ports it left open close, the last task's too, so that
     // their lines drop.
     super::comm::task_ended(cpu, task.handle);
+    super::misc::task_ended(cpu, task.tid);
     // The process object its starters wait on.
     let objects = &mut cpu.bus.win32.objects;
     if let Some(object) = objects.get_mut(task.process_object)

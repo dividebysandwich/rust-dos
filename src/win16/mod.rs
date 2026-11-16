@@ -48,7 +48,7 @@ use std::collections::BTreeMap;
 
 pub use global::Arena;
 pub use ldt::Ldt;
-pub use misc::wave_header16;
+pub use misc::{Mmsystem, call_queued16, queue_call16, wave_data, wave_header16};
 
 /// The Win16 tasks' state: the system's.
 #[derive(Clone, Debug, Default)]
@@ -98,10 +98,8 @@ pub struct State {
     /// WinG's bitmaps (misc.rs): each one's handle and the 16:16 pointer
     /// to its bits.
     pub wing_bitmaps: Vec<(u32, u32)>,
-    /// The wave headers given to waveOut (misc.rs): each one's linear
-    /// address, its own 16:16 address, and its data's 16:16 and linear
-    /// addresses.
-    pub wave_headers: Vec<[u32; 4]>,
+    /// MMSYSTEM's wave headers and callback calls (misc.rs).
+    pub mmsystem: Mmsystem,
     /// The blocks of linear memory DPMI function 0501h gave, by their
     /// addresses (their handles).
     pub dpmi_blocks: Vec<u32>,
@@ -616,7 +614,7 @@ crate::state_fields!(State {
     atoms,
     tb,
     wing_bitmaps,
-    wave_headers,
+    mmsystem,
     dpmi_blocks,
     callbacks,
     missing,
