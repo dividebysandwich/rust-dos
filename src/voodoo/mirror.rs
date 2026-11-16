@@ -602,6 +602,8 @@ pub struct Scanout {
     pub overlay: Option<Overlay>,
     pub cursor: Option<Cursor>,
     pub clut: Vec<u32>,
+    /// The picture composed last stays shown (`Voodoo::picture_held`).
+    pub held: bool,
 }
 
 /// Frames a texture stays decoded without being drawn with.

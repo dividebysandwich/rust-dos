@@ -972,11 +972,12 @@ fn present_buffer(
     if p[PP_WINDOWED] == 0 {
         // Full screen: the flip chain goes round, at the next frame but
         // for D3DPRESENT_INTERVAL_IMMEDIATE. Flip waits for the frame
-        // rate cap's turn whatever the flags (`surface::frame_held`).
+        // rate cap's turn whatever the flags (`surface::frame_held`). An
+        // immediate one doesn't wait for a swap still waiting on the card.
         let flags = if p[PP_INTERVAL] == PRESENT_INTERVAL_IMMEDIATE {
-            8
+            dd_surface::DDFLIP_NOVSYNC | dd_surface::DDFLIP_DONOTWAIT
         } else {
-            1
+            dd_surface::DDFLIP_WAIT
         };
         let copy = matches!(p[PP_SWAPEFFECT], SWAPEFFECT_COPY | SWAPEFFECT_COPY_VSYNC);
         let hr = dd_surface::flip(cpu, &[d.front_iface, 0, flags])?;

@@ -1505,8 +1505,11 @@ mod tests {
         // to see whether the sun shows. The rows read turn hot: what is
         // drawn into that buffer after is drawn in software, and the
         // next read finds it in the memory without waiting for the GPU.
-        // After `HOT_FRAMES` frames of the picture the buffer goes back
-        // to the renderer.
+        // The buffer stays with software while the game goes on reading
+        // it, though nothing is behind the GPU there to read back: it
+        // would otherwise go back to the renderer once a period
+        // (`HOT_FRAMES`) and wait for the GPU at the next read. A period
+        // without reads gives it back to the renderer.
         use crate::voodoo::gpu::HOT_FRAMES;
         let mut v = glide_card(2);
         v.set_mirror(true);
@@ -1540,7 +1543,13 @@ mod tests {
             .filter(|l| l.starts_with("read"))
             .count();
         assert_eq!(reads, 0, "{:?}", log.borrow());
-        for _ in 0..HOT_FRAMES {
+        for _ in 0..3 * HOT_FRAMES {
+            v.take_mirror();
+            fill(&mut v, 0x00F8_0000);
+            assert_eq!(v.lfb_read(100 << 9 | 5) & 0xFFFF, 0xF800);
+        }
+        assert_eq!(gpu_only(&v), before, "still drawn in software");
+        for _ in 0..2 * HOT_FRAMES {
             v.take_mirror();
         }
         fill(&mut v, 0x0000_00F8);

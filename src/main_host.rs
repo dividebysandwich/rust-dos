@@ -206,7 +206,7 @@ impl MainHost<'_, '_> {
         {
             v.set_software_picture(true);
             v.prepare_display();
-            v.render(&mut picture.rgba, picture.width as usize);
+            v.render_memory(&mut picture.rgba, picture.width as usize);
             v.set_software_picture(false);
         }
         let mut header = slots::header(self.cpu, &hardware, game);

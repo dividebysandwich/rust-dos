@@ -7,6 +7,7 @@
 //! level by level of their mipmaps, and between cube maps face by
 //! face. IDirect3DDevice7's Load is ported from Wine's device.c.
 
+use super::super::dxt_blt::{self, Plan};
 use super::super::surface::{
     self, DDSCAPS_MIPMAP, DDSCAPS2_CUBEMAP as CUBEMAP,
     DDSCAPS2_CUBEMAP_ALLFACES as CUBEMAP_ALLFACES, DDSCAPS2_CUBEMAP_POSITIVEX as CUBEMAP_POSITIVEX,
@@ -19,6 +20,7 @@ use super::super::{
 use super::device::{self, HANDLE_TEXTURE};
 use super::{D3D_OK, D3DERR_TEXTURE_LOAD_FAILED, probe, read_dwords};
 use crate::cpu::Cpu;
+use crate::win32::gdi32::Rect;
 
 /// The surface of the texture interface `this`.
 fn texture_of(cpu: &mut Cpu, this: u32) -> Result<u32, u32> {
@@ -120,8 +122,58 @@ fn copy_palette(cpu: &mut Cpu, dest: u32, src: u32) {
     }
 }
 
+/// Why Load left a level of a texture as it was.
+#[derive(Clone, Copy)]
+enum Unloaded {
+    /// The source's format isn't the destination's: different bits a
+    /// pixel, or DXT and another format.
+    Formats,
+    /// The rectangle of a DXT level doesn't lie on whole blocks.
+    Blocks,
+}
+
+/// The format of a surface, for the log.
+fn format_name(s: &surface::Surface) -> String {
+    match surface::dxt_format(&s.format) {
+        Some(f) => format!("{f:?}").to_uppercase(),
+        None => format!("{}-bit", s.format.bits),
+    }
+}
+
+/// Log, the first time for each reason, that Load left the level `d`
+/// as it was instead of copying the rectangle `r` of `s` into it. The
+/// call still succeeds, as Wine's Load does: a game that goes on draws
+/// the level with what it held before, and the log says why.
+fn unloaded(cpu: &mut Cpu, why: Unloaded, d: &surface::Surface, s: &surface::Surface, r: Rect) {
+    let bit = 1 << why as u32;
+    if state(cpu).load_logged & bit != 0 {
+        return;
+    }
+    state(cpu).load_logged |= bit;
+    let (from, to) = (format_name(s), format_name(d));
+    let what = match why {
+        Unloaded::Formats => format!(
+            "from a {from} {}x{} level into a {to} one: their formats differ",
+            s.width, s.height
+        ),
+        Unloaded::Blocks => format!(
+            "of ({}, {})-({}, {}) of a {}x{} {from} level: only whole blocks are \
+             copied between DXT levels",
+            r.left, r.top, r.right, r.bottom, s.width, s.height
+        ),
+    };
+    cpu.bus.log_string(&format!(
+        "[W32] DDRAW: texture Load {what}; the level is left as it was"
+    ));
+}
+
 /// Copy the rectangle `rect` (left, top, right, bottom) of the surface
-/// `src` to `point` in `dest`, which has as many bits a pixel.
+/// `src` to `point` in `dest`: the bytes of its pixels when both have as
+/// many bits a pixel, its blocks when both have one DXT format, as a
+/// blit between two such surfaces does (`dxt_blt::copy`). A game that
+/// fills a DXT texture in system memory and loads it into a managed one
+/// samples those blocks. Anything else leaves `dest` as it was and is
+/// logged.
 fn copy_rect(cpu: &mut Cpu, dest: u32, src: u32, point: (u32, u32), rect: [u32; 4]) {
     let (Some(d), Some(s)) = (
         state(cpu).surface(dest).cloned(),
@@ -129,10 +181,6 @@ fn copy_rect(cpu: &mut Cpu, dest: u32, src: u32, point: (u32, u32), rect: [u32; 
     ) else {
         return;
     };
-    if d.format.bits != s.format.bits || d.compressed() || s.compressed() {
-        return;
-    }
-    let bpp = s.bytes_per_pixel();
     let [left, top, right, bottom] = rect;
     let right = right.min(s.width);
     let bottom = bottom.min(s.height);
@@ -141,6 +189,23 @@ fn copy_rect(cpu: &mut Cpu, dest: u32, src: u32, point: (u32, u32), rect: [u32; 
     }
     let w = (right - left).min(d.width - point.0);
     let h = (bottom - top).min(d.height - point.1);
+    let at = |l: u32, t: u32| Rect::new(l as i32, t as i32, (l + w) as i32, (t + h) as i32);
+    let (from, to) = (at(left, top), at(point.0, point.1));
+    if d.compressed() || s.compressed() {
+        if dxt_blt::plan(&s, &d) != Ok(Plan::Copy) {
+            unloaded(cpu, Unloaded::Formats, &d, &s, from);
+        } else if dxt_blt::copy(cpu, &s, &from, &d, &to).is_err() {
+            unloaded(cpu, Unloaded::Blocks, &d, &s, from);
+        } else {
+            surface::changed(cpu, dest);
+        }
+        return;
+    }
+    if d.format.bits != s.format.bits {
+        unloaded(cpu, Unloaded::Formats, &d, &s, from);
+        return;
+    }
+    let bpp = s.bytes_per_pixel();
     let mut row = vec![0; (w * bpp) as usize];
     for y in 0..h {
         surface::read_bytes(cpu, &s, (top + y) * s.pitch + left * bpp, &mut row);

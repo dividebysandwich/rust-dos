@@ -534,7 +534,15 @@ fn gr_sst_win_open(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let Some((w, h)) = resolution_size(a[1]) else {
         return Some(0);
     };
-    if !api::open(cpu, w, h, api::refresh_hz(a[2]), a[3], a[4], a[5], a[6]) {
+    let mut refresh = api::refresh_hz(a[2]);
+    // On a Banshee or Voodoo3, Glide 3 takes the rate in Hz from
+    // FX_GLIDE_REFRESH instead (hwcInitVideo in 3dfx's minihwc).
+    if hw::banshee(cpu)
+        && let Some(hz) = hw::env_number(cpu, "FX_GLIDE_REFRESH")
+    {
+        refresh = Some(hz);
+    }
+    if !api::open(cpu, w, h, refresh, a[3], a[4], a[5], a[6]) {
         return Some(0);
     }
     let (w, h) = api::screen_size(cpu);
@@ -560,11 +568,20 @@ fn gr_select_context(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
 /// GrResolution's GR_QUERY_ANY.
 const QUERY_ANY: u32 = u32::MAX;
 
+/// GrScreenRefresh_t's GR_REFRESH_NONE, and the number of its rates.
+const REFRESH_NONE: u32 = 0xFF;
+const REFRESH_RATES: u32 = 9;
+
 /// grQueryResolutions: the resolutions, refresh rates and numbers of
-/// buffers grSstWinOpen can open that match the template's, written to
-/// `output` unless it is null, and their bytes. Every refresh rate is
-/// listed as 60 Hz unless the template names one: the emulated monitor
-/// shows them all.
+/// buffers that match the template's, written to `output` unless it is
+/// null, and their bytes, as 3dfx's Glide 3 lists them: by resolution,
+/// then rate, then buffers. A Voodoo Graphics' or Voodoo2's lists the
+/// rates each size has (`hw::has_rate`), and takes a template's rate
+/// that is no GrScreenRefresh_t for any. A Banshee's or Voodoo3's lists
+/// every rate at every size, since grSstWinOpen leaves the rate to the
+/// display driver, which opens a rate it hasn't at its default
+/// (`hw::open_rate`); it takes GR_REFRESH_NONE for any, and lists
+/// nothing for another value that is no rate.
 fn gr_query_resolutions(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let mut t = [0u32; 4];
     for (i, v) in t.iter_mut().enumerate() {
@@ -573,24 +590,39 @@ fn gr_query_resolutions(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     if cpu.bus.guest_faulted() {
         return None;
     }
-    let refresh = if t[1] == QUERY_ANY { 0 } else { t[1] };
-    if refresh > 8 {
-        return Some(0);
-    }
+    let card = hw::board(cpu).map(|b| b.card);
+    let banshee = card == Some(hw::Card::Banshee);
+    let rates = match t[1] {
+        r if r < REFRESH_RATES => r..=r,
+        QUERY_ANY | REFRESH_NONE => 0..=REFRESH_RATES - 1,
+        _ if banshee => return Some(0),
+        _ => 0..=REFRESH_RATES - 1,
+    };
+    let wanted = |field: u32, v: u32| field == QUERY_ANY || field == v;
     let mut found = Vec::new();
     for res in 0..RESOLUTIONS {
         let Some((w, h)) = resolution_size(res) else {
             continue;
         };
-        for colors in 2..=3 {
-            for auxes in 0..=1 {
-                let wanted = |field: u32, v: u32| field == QUERY_ANY || field == v;
-                if wanted(t[0], res)
-                    && wanted(t[2], colors)
-                    && wanted(t[3], auxes)
-                    && hw::fits(cpu, w, h, colors, auxes)
-                {
-                    found.push([res, refresh, colors, auxes]);
+        if !wanted(t[0], res) {
+            continue;
+        }
+        for refresh in rates.clone() {
+            let has = match (card, api::refresh_hz(refresh)) {
+                (Some(card), Some(hz)) => banshee || hw::has_rate(card, w, h, hz),
+                _ => false,
+            };
+            if !has {
+                continue;
+            }
+            for colors in 2..=3 {
+                for auxes in 0..=1 {
+                    if wanted(t[2], colors)
+                        && wanted(t[3], auxes)
+                        && hw::fits(cpu, w, h, colors, auxes)
+                    {
+                        found.push([res, refresh, colors, auxes]);
+                    }
                 }
             }
         }
