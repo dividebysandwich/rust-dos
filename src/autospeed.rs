@@ -5215,6 +5215,36 @@ mod tests {
     }
 
     #[test]
+    fn a_step_up_into_a_lighter_scene_is_judged_from_there() {
+        // Quake (#1160): its loading screen drew 8 frames a second at
+        // 20,000, and the timedemo 41 at 80,000 right after, 5.1 times the
+        // frames for 4 times the speed: another scene. The search goes on
+        // from 80,000 as from its first measurement, and when the next step
+        // draws fewer frames, that tells it the scene changed again, and it
+        // goes on. Judged from the loading screen's 8, the timedemo's 36 at
+        // the next step put the knee at 90,000.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Raised {
+            from: 20_000,
+            fps: 8.0,
+            below: (5_000, 2.0),
+        };
+        let at = |fps| Measurement {
+            fps: Some(fps),
+            ..STILL
+        };
+        let mut speed = auto.decide(80_000, &at(41.0), true, HOST);
+        let Step::Raised { below, .. } = auto.step else {
+            panic!("{:?}", auto.step)
+        };
+        assert_eq!(below.0, 80_000);
+        for _ in 0..JUDGED - 1 {
+            speed = auto.decide(speed, &at(36.0), true, HOST);
+        }
+        assert!(speed > 136_000, "{speed}: {:?}", auto.step);
+    }
+
+    #[test]
     fn a_heavier_scene_under_a_step_up_does_not_stop_the_search() {
         // The step up from 20,000 lands in a heavier scene: 40 frames a
         // second there, 32 at 80,000, and the knee reckoned from the two
@@ -5398,6 +5428,20 @@ mod tests {
     }
 
     #[test]
+    fn a_hold_not_in_doubt_gets_no_probe() {
+        // As short of the target as a probe asks for, with room on the
+        // host, but the step that stopped the search gained a little, which
+        // tells where the program's frames stop following the speed.
+        let program = game(1.0 / 4000.0, 1000.0);
+        let mut auto = holding(15.0);
+        auto.unsure = false;
+        for _ in 0..2 * HOLD_WINDOWS {
+            let speed = auto.decide(60_000, &program(60_000), true, HOST);
+            assert!(!matches!(auto.step, Step::Probed { .. }), "{speed}");
+        }
+    }
+
+    #[test]
     fn a_load_during_a_probe_ends_it_without_a_miss() {
         // A load in a probe's measurements (`LOADS`) draws frames of
         // another scene, which say nothing of the speed: the probe goes
@@ -5417,6 +5461,66 @@ mod tests {
         assert_eq!(back, 60_000);
         assert_eq!(auto.probe_misses, 0);
         assert!(auto.probe_wait > 0);
+    }
+
+    /// A step up from 80,000, which drew 40 frames a second, to 140,000,
+    /// judged on `JUDGED` measurements of 30 there.
+    fn overshot_by_fewer_frames(host: u32) -> (AutoSpeed, u32) {
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Overshot {
+            below: (80_000, 40.0),
+            sum: 30.0 * (JUDGED - 1) as f64,
+            seen: JUDGED - 1,
+        };
+        let m = Measurement {
+            fps: Some(30.0),
+            ..STILL
+        };
+        let speed = auto.decide(140_000, &m, true, host);
+        (auto, speed)
+    }
+
+    #[test]
+    fn a_step_up_that_draws_fewer_frames_searches_on_below_the_host() {
+        // Fewer frames at more speed: another scene under the step. With
+        // room on the host, the search goes on from the step's speed.
+        let (auto, speed) = overshot_by_fewer_frames(HOST);
+        assert!(
+            matches!(auto.step, Step::Raised { from: 140_000, .. }),
+            "{:?}",
+            auto.step
+        );
+        assert!(speed > 140_000, "{speed}");
+        assert!(!auto.unsure);
+    }
+
+    #[test]
+    fn a_step_up_that_draws_fewer_frames_at_the_host_holds_in_doubt() {
+        // At what the host has, the search can't go on: it holds a step's
+        // headroom above the speed below, in doubt, which a probe may try.
+        let (auto, speed) = overshot_by_fewer_frames(140_000);
+        assert!(matches!(auto.step, Step::Hold { .. }), "{:?}", auto.step);
+        assert_eq!(speed, 88_000);
+        assert!(auto.unsure);
+    }
+
+    #[test]
+    fn a_hold_under_limits_that_end_probes() {
+        // A hold short of the target under limits from a host that fell
+        // behind: once the host shows far more (`far_more`) the limits end,
+        // and the hold under them is in doubt, which a probe tries.
+        let program = game(1.0 / 4000.0, 1000.0);
+        let mut auto = holding(15.0);
+        auto.unsure = false;
+        auto.lagged = Some((70_000, LAGGED_WINDOWS));
+        auto.slow_host = Some(60_000);
+        let mut probed = false;
+        for _ in 0..2 * JUDGED {
+            auto.decide(60_000, &program(60_000), true, HOST);
+            probed |= matches!(auto.step, Step::Probed { .. });
+        }
+        assert_eq!(auto.lagged, None);
+        assert!(probed, "{:?}", auto.step);
     }
 
     #[test]
