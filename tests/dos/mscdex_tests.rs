@@ -294,6 +294,69 @@ fn read_long_cooked_and_raw() {
     assert_eq!(request(&mut cpu, 0x80, &params), 0x8108);
 }
 
+/// Seek (83h) to sector `lba` in HSG addressing.
+fn seek(cpu: &mut Cpu, lba: u32) -> u16 {
+    let mut params = vec![0, 0, 0, 0, 0, 0, 0];
+    params.extend(le(lba));
+    request(cpu, 0x83, &params)
+}
+
+/// Location of the head (IOCTL input 01h) in addressing mode `mode`.
+fn head(cpu: &mut Cpu, mode: u8) -> u32 {
+    assert_eq!(ioctl(cpu, 0x03, &[0x01, mode]), 0x0100);
+    cpu.bus.read_32(BUFFER + 2)
+}
+
+#[test]
+fn the_head_is_where_the_subchannel_of_the_sector_sought_says() {
+    // The test disc with a CloneCD subchannel file beside its sheet: Q
+    // names each sector's own place, apart from two sectors copy
+    // protections master: one whose good Q names the next sector, and the
+    // next one, whose Q has a bad CRC.
+    let dir = cdimage::scratch("mscdex_head");
+    fs::create_dir_all(dir.join("c")).unwrap();
+    let mut cpu = Cpu::new(dir.join("c"));
+    let image = iso("TESTDISC", &[file("HELLO.COM", &[0xB4, 0x4C, 0xCD, 0x21])]);
+    let sectors = (image.len() / 2048) as u32 + 150;
+    let cue = mixed_disc(&dir, &image, 10);
+    let (ahead, bad) = (10u32, 11u32);
+    let bcd = |v: u32| (((v / 10) << 4) | (v % 10)) as u8;
+    let mut sub = Vec::new();
+    for lba in 0..sectors + 10 {
+        let at = if lba == ahead { lba + 1 } else { lba } + 150;
+        let mut q = [0x41, 0x01, 0x01, 0, 0, 0, 0, bcd(at / 75 / 60), bcd(at / 75 % 60), bcd(at % 75), 0, 0];
+        let crc = cdimage::q_crc(&q) ^ if lba == bad { 0x0101 } else { 0 };
+        q[10..12].copy_from_slice(&crc.to_be_bytes());
+        sub.extend([0u8; 12]);
+        sub.extend(q);
+        sub.extend([0u8; 72]);
+    }
+    fs::write(dir.join("GAME.SUB"), sub).unwrap();
+    cpu.bus.mount_drive(3, &cue, MountOptions::default(), false).unwrap();
+    assert!(cpu.bus.disk.cd_image(3).is_some());
+
+    assert_eq!(seek(&mut cpu, 5), 0x0100);
+    assert_eq!(head(&mut cpu, 0), 5);
+    assert_eq!(head(&mut cpu, 1), redbook(5));
+    // The drive reports the place the sector's Q names.
+    seek(&mut cpu, ahead);
+    assert_eq!(head(&mut cpu, 0), ahead + 1);
+    // A Q it can't use: the place the disc's layout has.
+    seek(&mut cpu, bad);
+    assert_eq!(head(&mut cpu, 0), bad);
+    // The Q channel query agrees.
+    seek(&mut cpu, ahead);
+    assert_eq!(ioctl(&mut cpu, 0x03, &[0x0C]), 0x0100);
+    let (m, s, f) = (cpu.bus.read_8(BUFFER + 8), cpu.bus.read_8(BUFFER + 9), cpu.bus.read_8(BUFFER + 10));
+    assert_eq!((m as u32 * 60 + s as u32) * 75 + f as u32, ahead + 1 + 150);
+    // A read leaves the head on the last sector read.
+    let mut params = vec![0, 0x00, 0x00, 0x00, 0x31, 2, 0];
+    params.extend(le(7));
+    params.push(0);
+    assert_eq!(request(&mut cpu, 0x80, &params), 0x0100);
+    assert_eq!(head(&mut cpu, 0), 8);
+}
+
 #[test]
 fn catalog_number_and_track_flags_from_the_sheet() {
     let dir = cdimage::scratch("mscdex_catalog");

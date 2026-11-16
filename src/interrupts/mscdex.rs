@@ -58,6 +58,11 @@ pub struct MscdexState {
     /// A disc was mounted that programs haven't asked about yet.
     changed: [bool; 26],
     locked: [bool; 26],
+    /// The sector each drive's head is on while it isn't playing: the
+    /// last one sought or read. The position queries report where the
+    /// subchannel there says the head is. Not saved: after a state loads,
+    /// the head is at sector 0 until the next seek or read.
+    head: [u32; 26],
 }
 
 impl MscdexState {
@@ -351,13 +356,19 @@ fn image_request(cpu: &mut Cpu, drive: u8, image: &Rc<CdImage>, req: usize) -> u
             let count = cpu.bus.guest_read_16((req + 0x12) as u32) as u32;
             let start = sector(mode, cpu.bus.guest_read_32((req + 0x14) as u32));
             let raw = cpu.bus.guest_read_8((req + 0x18) as u32) != 0;
-            read_long(cpu, image, buffer, start, count, raw)
+            let status = read_long(cpu, image, buffer, start, count, raw);
+            // The head stays on the last sector read, as a drive's does.
+            if count > 0 {
+                cpu.bus.mscdex.head[drive as usize] = start + count - 1;
+            }
+            status
         }
         // Read Long Prefetch: a hint.
         0x82 => DONE,
-        // Seek: the drive stops playing.
+        // Seek: the drive stops playing, and the head goes to the sector.
         0x83 => {
             cpu.bus.cdaudio.stop_drive(drive);
+            cpu.bus.mscdex.head[drive as usize] = sector(mode, cpu.bus.guest_read_32((req + 0x14) as u32));
             DONE
         }
         // Play Audio: from a sector, for a number of sectors.
@@ -430,10 +441,13 @@ fn duration_msf(sectors: u32) -> [u8; 3] {
 
 /// IOCTL input: the control block at `buf` starts with its code.
 fn ioctl_input(cpu: &mut Cpu, drive: u8, image: &CdImage, buf: usize) -> u16 {
+    // The sector under the head: the one playing, or else the last one
+    // sought or read. The position queries report what its Q subchannel
+    // says, as a drive does.
     let player = &cpu.bus.cdaudio;
     let position = match player.drive() {
         Some(d) if d == drive => player.position(),
-        _ => 0,
+        _ => cpu.bus.mscdex.head[drive as usize],
     };
     let bus = &mut cpu.bus;
     match bus.guest_read_8(buf as u32) {
@@ -442,9 +456,13 @@ fn ioctl_input(cpu: &mut Cpu, drive: u8, image: &CdImage, buf: usize) -> u16 {
             bus.guest_write_16((buf + 1) as u32, DEVICE_HEADER);
             bus.guest_write_16((buf + 3) as u32, 0xF000);
         }
-        // Location of the head, in the addressing mode asked for.
+        // Location of the head, in the addressing mode asked for: the
+        // absolute time of the Q subchannel there. Where that Q can't be
+        // used (a bad CRC, as copy protections master on purpose), where
+        // the disc's layout has the sector.
         0x01 => {
-            let address = if bus.guest_read_8((buf + 1) as u32) == 1 { cdrom::redbook(position) } else { position };
+            let at = image.q_position(position).map_or(position, |q| q.absolute);
+            let address = if bus.guest_read_8((buf + 1) as u32) == 1 { cdrom::redbook(at) } else { at };
             bus.guest_write_32((buf + 2) as u32, address);
         }
         // Audio channel info: input channel and volume per output.
@@ -586,4 +604,4 @@ pub fn install_device(bus: &mut Bus, nul: usize) {
     }
 }
 
-crate::state_fields!(MscdexState { request, changed, locked });
+crate::state_fields!(MscdexState { request, changed, locked } skip { head });
