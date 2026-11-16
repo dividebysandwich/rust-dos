@@ -213,6 +213,7 @@ const GLIDE: &[&str] = &[
     "_grTexFilterMode@12",
     "_grDitherMode@4",
     "_grSstControl@4",
+    "_grSstWinClose@0",
 ];
 
 /// The functions' values the programs use.
@@ -1651,6 +1652,37 @@ fn refresh_program(resolution: u32, refresh: u32) -> (Vec<u8>, u32) {
     })
 }
 
+/// A program that opens the card at 640x480 and `first` (a
+/// GrScreenRefresh_t), closes it, and opens it again at `second`.
+fn reopen_program(first: u32, second: u32) -> (Vec<u8>, u32) {
+    let d = vec![0u8; DATA_SIZE];
+    program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        c.call(a, l, "_grGlideInit@0", &[])?;
+        c.call(a, l, "_grSstQueryHardware@4", &[Arg::At(HWCONFIG)])?;
+        for (at, refresh) in [first, second].into_iter().enumerate() {
+            if at > 0 {
+                c.call(a, l, "_grSstWinClose@0", &[])?;
+            }
+            c.call(
+                a,
+                l,
+                "_grSstWinOpen@28",
+                &[
+                    Arg::I(0),
+                    Arg::I(GR_RESOLUTION_640X480),
+                    Arg::I(refresh),
+                    Arg::I(GR_COLORFORMAT_ARGB),
+                    Arg::I(GR_ORIGIN_UPPER_LEFT),
+                    Arg::I(2),
+                    Arg::I(1),
+                ],
+            )?;
+        }
+        stay(a, l)
+    })
+}
+
 /// Open `board` at `resolution` and `refresh` with the variables `env`
 /// set: whether grSstWinOpen succeeded, and the card's refresh rate then.
 fn open_at(
@@ -1836,6 +1868,23 @@ fn sixty_hz_runs_vesas_640x480_on_every_card() {
         &[],
     );
     assert!(opened && (got - 59.94).abs() < 0.02, "{got}");
+}
+
+#[test]
+fn a_second_open_runs_at_its_own_rate() {
+    // Closing and opening the card again sets the rate anew: 75 Hz after
+    // 60, 60 after 75, and 75 again after 75.
+    let r = |hz| refresh_of(hz);
+    for board in [Board::Standard, Board::Voodoo2, Board::Voodoo3] {
+        for (first, second, want) in [(60, 75, 75.0), (75, 60, 59.94), (75, 75, 75.0)] {
+            let test = format!("reopen_{board:?}_{first}_{second}");
+            let (cpu, data) = run_with(&test, board, reopen_program(r(first), r(second)), &[]);
+            // Results 2 and 4: the two opens.
+            assert!(result(&cpu, data, 2) != 0 && result(&cpu, data, 4) != 0, "{test}");
+            let hz = cpu.bus.voodoo.as_ref().unwrap().timing().hz();
+            assert!((hz - want).abs() < 0.02, "{test}: {hz}");
+        }
+    }
 }
 
 #[test]
