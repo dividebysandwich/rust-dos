@@ -343,22 +343,18 @@ impl Bus {
     }
 
     /// Before the emulator itself reads `len` bytes of card memory at
-    /// `offset`, or writes them where it needs the others around them:
-    /// the queued commands run, and what the host renderer drew into
-    /// surfaces with those bytes is read back.
+    /// `offset` with no note of a write after it, or writes them where
+    /// it needs the others around them: the queued commands run, and
+    /// what the host renderer drew into surfaces with those bytes is
+    /// read back whole. A read that only reads takes
+    /// `toadforce_reading`.
     #[inline]
     pub fn toadforce_touch(&mut self, offset: usize, len: usize) {
-        self.toadforce_touch_for(offset, len, Cause::Program);
-    }
-
-    /// `toadforce_touch`, with what the bytes are wanted for, for the
-    /// status's counts of read-backs.
-    #[inline]
-    pub fn toadforce_touch_for(&mut self, offset: usize, len: usize, why: Cause) {
         self.toadforce_flush();
         if self.toadforce_ahead() {
             let end = (offset + len).min(u32::MAX as usize);
-            self.toadforce_read_back(Some((offset as u32, end as u32)), why);
+            let range = Some((offset as u32, end as u32));
+            self.toadforce_read_back(range, Cause::Program);
         }
     }
 

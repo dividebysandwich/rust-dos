@@ -207,6 +207,8 @@ fn copy_rect(cpu: &mut Cpu, dest: u32, src: u32, point: (u32, u32), rect: [u32; 
     }
     let bpp = s.bytes_per_pixel();
     let mut row = vec![0; (w * bpp) as usize];
+    let first = top * s.pitch + left * bpp;
+    surface::will_read_rows(cpu, &s, first, s.pitch, h, row.len());
     for y in 0..h {
         surface::read_bytes(cpu, &s, (top + y) * s.pitch + left * bpp, &mut row);
         surface::write_bytes(cpu, &d, (point.1 + y) * d.pitch + point.0 * bpp, &row);

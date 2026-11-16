@@ -1280,7 +1280,8 @@ fn the_cards_own_work_on_some_rows_reads_the_surface_back_whole() {
     // and isn't ahead after it, whatever rows they need.
     let colour = rig.colour();
     let read = band(&rig, 2, 10, 30, 38);
-    rig.card.settle_for(&mut rig.memory, Some(read), Cause::Blit);
+    rig.card
+        .settle_for(&mut rig.memory, Some(read), Cause::Blit);
     assert_eq!((log.borrow().read_backs, log.borrow().row_reads), (1, 0));
     let host = rig.card.describe(Rig::live());
     assert_eq!(host["host"]["read_backs_for"]["blit"], 1);

@@ -1117,13 +1117,7 @@ impl Gpu {
     }
 
     #[cold]
-    fn read_back(
-        &mut self,
-        memory: &mut [u8],
-        range: Option<(u32, u32)>,
-        rows: bool,
-        why: Cause,
-    ) {
+    fn read_back(&mut self, memory: &mut [u8], range: Option<(u32, u32)>, rows: bool, why: Cause) {
         let _profile = crate::profile::zone(crate::profile::Zone::ToadForceReadBack);
         let Gpu {
             host,
@@ -1243,11 +1237,7 @@ impl Gpu {
     /// written: `push` came first. The host changed the copy, so card
     /// memory has none of its rows any more.
     fn mark(&mut self, surface: Surface) {
-        if let Some(a) = self
-            .ahead
-            .iter_mut()
-            .find(|a| within(&surface, &a.surface))
-        {
+        if let Some(a) = self.ahead.iter_mut().find(|a| within(&surface, &a.surface)) {
             a.back.clear();
             return;
         }

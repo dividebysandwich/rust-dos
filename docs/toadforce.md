@@ -1053,25 +1053,28 @@ has an OpenGL 3.2 context and the run isn't deterministic.
   are separate: the queue is run at every such point as before, and a
   surface is read back only when its own bytes are asked for.
 - **A read of some rows.** A driver's read of bytes in some of a
-  surface's rows (`win32::screen::read`, `Gpu::settle_rows`) brings
-  back only those rows (`Host::read_back_rows`, `glReadPixels` of the
-  rows of the host's copy, which is at the card's size with row 0 at
-  the top), and the surface stays ahead. A DirectDraw blit out of a
-  surface on the processor asks for its rectangle's rows at once
-  (`win32::screen::will_read`) and then reads them one by one. The
-  card keeps the rows read back for each surface that is ahead
-  (`Ahead::back`, the Voodoo tracker's `Ranges`) until the host changes
-  its copy (a draw, `CLEAR`, `FILL` or `BLT` into it), so another read
-  of them reads nothing back, and one of other rows brings those. What
-  the processor wrote of them stays, and goes to the host's copy as
-  below. A read of every row, and the card's own work on the processor
-  (its `FILL`, `BLT` and `CLEAR`, a declined draw), which writes card
-  memory with no note of what it writes, read the surface back whole,
-  and it is no longer ahead. Evil Islands' software cursor saves the
-  32x32 pixels under it out of the 800x600 back buffer and the screen
-  every frame: that reads about three bands of 32 rows a frame, some
-  170,000 bytes, where each frame read the whole 960,000-byte back
-  buffer, and the surfaces stay on the GPU.
+  surface's rows (`win32::screen::read`, `Gpu::settle_rows`) brings back
+  only those rows (`Host::read_back_rows`, `glReadPixels` of the rows of
+  the host's copy, which is at the card's size with row 0 at the top),
+  and the surface stays ahead. Each read brings its own rows, so a
+  driver that copies a rectangle a row at a time (a DirectDraw blit on
+  the processor, Direct3D 8's `CopyRects`, a texture's `Load`, OpenGL's
+  `glReadPixels`) asks for the rectangle's rows at once first
+  (`ddraw::surface::will_read_rows`, `win32::screen::will_read`), and
+  the reads of single rows after it read nothing back. The card keeps
+  the rows read back for each surface that is ahead (`Ahead::back`, the
+  Voodoo tracker's `Ranges`) until the host changes its copy (a draw,
+  `CLEAR`, `FILL` or `BLT` into it), so another read of them reads
+  nothing back, and one of other rows brings those. What the processor
+  wrote of them stays, and goes to the host's copy as below. A read of
+  every row, and the card's own work on the processor (its `FILL`, `BLT`
+  and `CLEAR`, a declined draw), which writes card memory with no note
+  of what it writes, read the surface back whole, and it is no longer
+  ahead. Evil Islands' software cursor saves the 32x32 pixels under it
+  out of the 800x600 back buffer and the screen every frame: that reads
+  about three bands of 32 rows a frame, some 170,000 bytes, where each
+  frame read the whole 960,000-byte back buffer, and the surfaces stay
+  on the GPU.
 - **What the program and the drivers write.** A write into a surface
   that is ahead reads nothing back. The card notes each byte written
   (`Gpu::writing`, a bit for each byte of the surface), and card

@@ -1624,6 +1624,7 @@ fn image(cpu: &mut Cpu, id: u32, keyed: bool) -> Option<Image> {
                 let step = if l.compressed() { line } else { l.pitch };
                 images.push((data.len() as u32, line));
                 let mut row = vec![0u8; line as usize];
+                surface::will_read_rows(cpu, &l, 0, step, lines, row.len());
                 for y in 0..lines {
                     surface::read_bytes(cpu, &l, y * step, &mut row);
                     data.extend_from_slice(&row);

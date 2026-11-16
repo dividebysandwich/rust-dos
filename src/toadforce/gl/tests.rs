@@ -1614,7 +1614,8 @@ fn a_read_of_some_rows_brings_them_as_a_whole_read_back_does() {
             let status = rig.card.describe(Rig::live());
             let rows = &status["host"]["read_back_rows"];
             assert_eq!(status["host"]["read_backs"], 0, "{name}: {status}");
-            assert_eq!((&rows["reads"], &rows["rows"]), (&3.into(), &20.into()));
+            let counts = (&rows["reads"], &rows["rows"]);
+            assert_eq!(counts, (&3.into(), &20.into()), "{name}");
             let bytes = 12 * SIZE * format.bytes() + 8 * SIZE * 2;
             assert_eq!(rows["bytes"], bytes, "{name}");
             // The rest comes back whole, the same.

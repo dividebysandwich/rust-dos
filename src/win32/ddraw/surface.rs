@@ -482,6 +482,18 @@ pub fn write_bytes(cpu: &mut Cpu, s: &Surface, offset: u32, data: &[u8]) {
     }
 }
 
+/// Before `read_bytes` of `rows` rows of `len` bytes of a surface's
+/// pixels, the first from byte `offset` and each of the others `step`
+/// after the one before: a ToadForce reads back the rows of its host
+/// renderer's copy they lie in at once (`screen::will_read`), where
+/// each `read_bytes` of a row would read its row back by itself.
+pub fn will_read_rows(cpu: &mut Cpu, s: &Surface, offset: u32, step: u32, rows: u32, len: usize) {
+    if s.memory == MEM_VIDEO && rows > 1 {
+        let span = (rows - 1) as usize * step as usize + len;
+        screen::will_read(cpu, s.bits + offset, span);
+    }
+}
+
 /// Read rows of `len` bytes of a surface's pixels into `data`, one after
 /// another: the first from byte `offset`, each of the others a pitch
 /// after the one before. Rows as long as the pitch are read at once,
@@ -497,12 +509,7 @@ pub fn read_rows(cpu: &mut Cpu, s: &Surface, offset: u32, len: usize, data: &mut
         return voodoo::read(cpu, s, offset, len, data);
     }
     let rows = data.len().div_ceil(len) as u32;
-    if s.memory == MEM_VIDEO && rows > 1 {
-        // The rows' bytes as one range, read back from a ToadForce's
-        // host renderer once rather than a row at a time.
-        let span = (rows - 1) as usize * s.pitch as usize + len;
-        screen::will_read(cpu, s.bits + offset, span);
-    }
+    will_read_rows(cpu, s, offset, s.pitch, rows, len);
     for (row, y) in data.chunks_mut(len).zip(0u32..) {
         read_bytes(cpu, s, offset + y * s.pitch, row);
     }
