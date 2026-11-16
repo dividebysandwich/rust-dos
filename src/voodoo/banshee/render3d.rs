@@ -619,7 +619,10 @@ pub(crate) mod tests {
     /// of the first pixel of each host frame's picture, by step. Without
     /// the `overlay`, the desktop shows A all along, and the swaps, which
     /// move only the overlay, just wait for their retraces.
-    fn host_frames_over_double_buffering(overlay: bool, frames: &[usize]) -> Vec<(usize, [u8; 3])> {
+    fn host_frames_over_double_buffering(
+        overlay: bool,
+        frames: &[usize],
+    ) -> Vec<(usize, [u8; 3])> {
         use super::super::{
             VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT, VID_DESKTOP_OVERLAY_STRIDE,
             VID_OVERLAY_END_SCREEN_COORDS, VIDPROC_DESKTOP_CLUT_BYPASS, VIDPROC_ENABLE,
@@ -755,6 +758,38 @@ pub(crate) mod tests {
         v.service(Now { ns: 0, ticks: due });
         v.render(&mut rgba, w as usize);
         assert_eq!(held(&v, "held_conversions"), asked + 1, "the hold is over");
+    }
+
+    /// A new size from the CRTC ends the hold, as a new mode does: the
+    /// card never shows the frame held at another size, and the picture
+    /// is drawn from the memory again, kept as words or copied.
+    #[test]
+    fn a_new_screen_size_lets_the_held_picture_go() {
+        use super::super::VIDPROC_ENABLE;
+
+        let words = VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE | 1 << 18 | 1 << 21;
+        for cfg in [VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE, words] {
+            let mut v = drawn_behind_a_waiting_swap_in(cfg);
+            // The next frame's drawing, into the desktop and into A.
+            for at in (0..4096).chain(0x8_0000..0x8_1000) {
+                v.fbi.ram.set(at, 0xFFFF);
+            }
+            let picture = |v: &Voodoo, memory: bool| {
+                let (w, h) = v.picture_size();
+                let mut rgba = vec![1u8; (w * h * 4) as usize];
+                if memory {
+                    v.render_memory(&mut rgba, w as usize);
+                } else {
+                    v.render(&mut rgba, w as usize);
+                }
+                rgba
+            };
+            assert!(picture(&v, false) != picture(&v, true), "held, {cfg:08X}");
+            let b = v.banshee.as_mut().unwrap();
+            b.crtc[0x01] = b.crtc[0x01].wrapping_add(10);
+            assert!(!v.picture_held(), "{cfg:08X}");
+            assert!(picture(&v, false) == picture(&v, true), "{cfg:08X}");
+        }
     }
 
     /// The hold ends whenever the picture no longer is what the swap

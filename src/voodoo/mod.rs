@@ -417,7 +417,7 @@ crate::state_fields!(PendingSwap { retrace, due });
 /// shows, and the copy of the picture taken then (None where the OpenGL
 /// renderer drew it and none was taken).
 struct Held {
-    regs: [u32; 6],
+    regs: [u32; 7],
     copy: Option<HeldCopy>,
 }
 
@@ -1734,12 +1734,15 @@ impl Voodoo {
     }
 
     /// What a Banshee shows: whether the video processor drives the
-    /// monitor, its mode and size, and the desktop's and the overlay's
-    /// memory.
-    fn shown_regs(&self) -> Option<[u32; 6]> {
+    /// monitor, its mode and size, the desktop's and the overlay's memory,
+    /// and the desktop's size from the CRTC, which sizes the picture
+    /// (`picture_size`): a new size ends a hold as a new mode does, since
+    /// the card never shows the frame held at another size.
+    fn shown_regs(&self) -> Option<[u32; 7]> {
         use banshee::{VGA_INIT0, VID_DESKTOP_OVERLAY_STRIDE, VID_DESKTOP_START_ADDR};
         use banshee::{VID_PROC_CFG, VID_SCREEN_SIZE};
         let b = self.banshee.as_ref()?;
+        let (width, height) = b.desktop_size();
         Some([
             b.reg(VGA_INIT0),
             b.reg(VID_PROC_CFG),
@@ -1747,6 +1750,7 @@ impl Voodoo {
             b.reg(VID_DESKTOP_START_ADDR),
             b.reg(VID_DESKTOP_OVERLAY_STRIDE),
             b.overlay_addr,
+            width << 16 | height,
         ])
     }
 

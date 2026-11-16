@@ -147,7 +147,7 @@ pub struct ShownWords {
     frame: Frame,
     /// The desktop's half of the colour lookup table, or None with the
     /// table bypassed.
-    clut: Option<Vec<u32>>,
+    clut: Option<[u32; 256]>,
     words: Vec<u16>,
     overlay: Option<ShownOverlay>,
 }
@@ -159,7 +159,7 @@ struct ShownOverlay {
     x: usize,
     y: usize,
     cols: usize,
-    clut: Option<Vec<u32>>,
+    clut: Option<[u32; 256]>,
     words: Vec<u16>,
 }
 
@@ -167,7 +167,7 @@ impl ShownWords {
     /// Draw the picture into `out` as `Banshee::render` does.
     pub fn render(&self, out: &mut [u8], pitch: usize) {
         let f = &self.frame;
-        let clut = self.clut.as_deref();
+        let clut = self.clut.as_ref().map(|c| &c[..]);
         for (y, words) in self.words.chunks(f.width.max(1)).enumerate().take(f.height) {
             let Some(row) = out.get_mut(y * pitch * 4..(y * pitch + f.width.min(pitch)) * 4) else {
                 break;
@@ -178,7 +178,7 @@ impl ShownWords {
             }
         }
         if let Some(o) = self.overlay.as_ref().filter(|o| o.cols > 0 && o.x < pitch) {
-            let clut = o.clut.as_deref();
+            let clut = o.clut.as_ref().map(|c| &c[..]);
             // The columns left of the output's right edge.
             let cols = o.cols.min(pitch - o.x);
             for (y, words) in (o.y..).zip(o.words.chunks(o.cols)) {
@@ -303,7 +303,9 @@ impl Banshee {
         let clut = |bypass: u32, select: u32| {
             (f.cfg & bypass == 0).then(|| {
                 let half = if f.cfg & select != 0 { 256 } else { 0 };
-                self.clut[half..half + 256].to_vec()
+                let mut clut = [0; 256];
+                clut.copy_from_slice(&self.clut[half..half + 256]);
+                clut
             })
         };
         into.frame = f;
@@ -824,10 +826,12 @@ mod tests {
         assert_eq!(&out[at..at + 3], &[0x11, 0x22, 0x33]);
     }
 
-    /// Random words over the first 4 MB of `ram`, from `seed`.
+    /// Random words over the first 4 MB of `ram` and its last 128 KB, from
+    /// `seed`.
     fn fill(ram: &Vram, seed: u32) {
         let mut x = seed | 1;
-        for i in 0..2 << 20 {
+        let words = ram.bytes() / 2;
+        for i in (0..2 << 20).chain(words - (64 << 10)..words) {
             x ^= x << 13;
             x ^= x >> 17;
             x ^= x << 5;
@@ -844,60 +848,106 @@ mod tests {
             b.crtc[0x07] = 0x02;
             b
         };
+        let overlay = 1 << 18 | 1 << 21 | VIDPROC_OVERLAY_ENABLE;
+        // The overlay's rectangle: over all of the desktop and past its
+        // edges, over part of it, a single pixel, off the desktop, and
+        // with its ends before its starts.
+        let (all, part) = ((0, 0xFFF | 0xFFF << 12), (100 | 50 << 12, 899 | 649 << 12));
+        let dot = (10 | 10 << 12, 10 | 10 << 12);
+        let off = (1100 | 800 << 12, 0xFFF | 0xFFF << 12);
+        let inverted = (500 | 500 << 12, 100 | 100 << 12);
+        // The desktop's and the overlay's start: low in the memory, or
+        // close enough to its end that their rows run past it.
+        let low = (0x1_0002, 0x20_0006);
+        let end = (MEMORY as u32 - 0x1000 + 2, MEMORY as u32 - 0x800 + 6);
         let cards = [
-            (card_1024x768(1 << 18), 2048),
-            (card_1024x768(1 << 18 | VIDPROC_DESKTOP_CLUT_BYPASS), 2048),
-            (card_1024x768(1 << 18 | VIDPROC_DESKTOP_CLUT_SEL), 2050),
-            (card_1024x768(1 << 18 | VIDPROC_DESKTOP_TILED), 16),
-            (card_1024x768(1 << 18 | VIDPROC_HALF_MODE), 2048),
-            (narrow(1 << 18), 640),
-            // The overlay over part of the desktop, and over all of it,
-            // tiled and scaled, past its right and bottom edges.
+            (card_1024x768(1 << 18), 2048, all, low),
             (
-                card_1024x768(1 << 18 | 1 << 21 | VIDPROC_OVERLAY_ENABLE),
+                card_1024x768(1 << 18 | VIDPROC_DESKTOP_CLUT_BYPASS),
                 2048,
+                all,
+                low,
             ),
             (
+                card_1024x768(1 << 18 | VIDPROC_DESKTOP_CLUT_SEL),
+                2050,
+                all,
+                low,
+            ),
+            (card_1024x768(1 << 18 | VIDPROC_DESKTOP_TILED), 16, all, low),
+            (card_1024x768(1 << 18 | VIDPROC_HALF_MODE), 2048, all, low),
+            (narrow(1 << 18), 640, all, low),
+            // The overlay over part of the desktop, and over all of it,
+            // tiled and scaled, past its right and bottom edges.
+            (card_1024x768(overlay), 2048, part, low),
+            (
                 card_1024x768(
-                    1 << 18
-                        | 1 << 21
-                        | VIDPROC_OVERLAY_ENABLE
+                    overlay
                         | VIDPROC_OVERLAY_TILED
                         | VIDPROC_OVERLAY_CLUT_SEL
                         | VIDPROC_H_SCALE
                         | VIDPROC_V_SCALE,
                 ),
                 2048,
+                all,
+                low,
             ),
-            (narrow(1 << 18 | 3 << 21 | VIDPROC_OVERLAY_ENABLE), 640),
+            (
+                narrow(1 << 18 | 3 << 21 | VIDPROC_OVERLAY_ENABLE),
+                640,
+                all,
+                low,
+            ),
             // Test Drive 4's: the overlay tiled and unscaled over all of
             // the desktop, its rows copied in runs of a tile's pixels.
             (
                 card_1024x768(
-                    1 << 18
-                        | 1 << 21
-                        | VIDPROC_OVERLAY_ENABLE
+                    overlay
                         | VIDPROC_OVERLAY_TILED
                         | VIDPROC_DESKTOP_CLUT_BYPASS
                         | VIDPROC_OVERLAY_CLUT_SEL,
                 ),
                 2048,
+                all,
+                low,
             ),
+            // One of the two through the table, the other bypassing it.
+            (
+                card_1024x768(overlay | VIDPROC_OVERLAY_CLUT_BYPASS),
+                2048,
+                part,
+                low,
+            ),
+            (
+                card_1024x768(overlay | VIDPROC_DESKTOP_CLUT_BYPASS),
+                2048,
+                part,
+                low,
+            ),
+            // Rows that run past the end of the memory, linear and tiled,
+            // the overlay unscaled and scaled across.
+            (card_1024x768(overlay), 2048, part, end),
+            (
+                card_1024x768(overlay | VIDPROC_DESKTOP_TILED | VIDPROC_OVERLAY_TILED),
+                16,
+                part,
+                end,
+            ),
+            (card_1024x768(overlay | VIDPROC_H_SCALE), 2048, part, end),
+            // Overlays with no pixel, or one, on the desktop.
+            (card_1024x768(overlay), 2048, dot, low),
+            (card_1024x768(overlay), 2048, off, low),
+            (card_1024x768(overlay), 2048, inverted, low),
         ];
         let ram = Vram::new(MEMORY);
-        for (i, (mut b, stride)) in cards.into_iter().enumerate() {
-            b.ext_write(VID_DESKTOP_START_ADDR, 0x1_0002);
+        for (i, (mut b, stride, (from, to), (desktop, at))) in cards.into_iter().enumerate() {
+            b.ext_write(VID_DESKTOP_START_ADDR, desktop);
             let tiled = b.reg(VID_PROC_CFG) & VIDPROC_OVERLAY_TILED != 0;
             let overlay_stride = if tiled { 16 } else { 1400 };
             b.ext_write(VID_DESKTOP_OVERLAY_STRIDE, overlay_stride << 16 | stride);
-            b.overlay_addr = 0x20_0006;
-            if i == 6 {
-                b.ext_write(VID_OVERLAY_START_COORDS, 100 | 50 << 12);
-                b.ext_write(VID_OVERLAY_END_SCREEN_COORDS, 899 | 649 << 12);
-            } else {
-                b.ext_write(VID_OVERLAY_START_COORDS, 0);
-                b.ext_write(VID_OVERLAY_END_SCREEN_COORDS, 0xFFF | 0xFFF << 12);
-            }
+            b.overlay_addr = at;
+            b.ext_write(VID_OVERLAY_START_COORDS, from);
+            b.ext_write(VID_OVERLAY_END_SCREEN_COORDS, to);
             b.ext_write(VID_OVERLAY_DUDX, 0x8_0000);
             b.ext_write(VID_OVERLAY_DVDY, 0xA_0000);
             b.ext_write(VID_OVERLAY_DVDY_OFFSET, 0x4_0000);
@@ -919,8 +969,13 @@ mod tests {
                 b.clut[300] ^= 0xFF_FFFF;
                 b.clut[30] ^= 0xFF_FFFF;
                 b.overlay_addr += 0x1000;
+                b.ext_write(VID_DESKTOP_START_ADDR, desktop + 0x2000);
+                b.ext_write(VID_DESKTOP_OVERLAY_STRIDE, 300 << 16 | 1200);
                 b.ext_write(VID_OVERLAY_START_COORDS, 7 | 9 << 12);
+                b.ext_write(VID_OVERLAY_END_SCREEN_COORDS, 300 | 200 << 12);
                 b.ext_write(VID_OVERLAY_DUDX, 0x3_0000);
+                b.ext_write(VID_OVERLAY_DVDY, 0x5_0000);
+                b.ext_write(VID_OVERLAY_DVDY_OFFSET, 0x7_0000);
                 b.ext_write(VID_PROC_CFG, VIDPROC_ENABLE | 3 << 18);
                 b.crtc[0x01] = 79;
                 let mut later = [1, 2, 3, 4].repeat(pitch * h as usize);

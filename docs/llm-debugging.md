@@ -1298,6 +1298,14 @@ usually left `fbiInit` at their power-on values (`00000410 00201102
   have: alpha written with another colour buffer, by the CPU or by the
   blitter, or a depth test against them. From then on every job is drawn
   in software too, and `released_jobs` grows with `triangles`.
+- **Held pictures:** on a Banshee or Voodoo3, a program that draws into
+  the buffer shown while a swap waits for its retrace holds the picture
+  until the swap shows. With the software picture, `held_keeps` counts
+  the holds that kept the memory's 16-bit words (a 16-bit desktop, the
+  overlay off or in a 16-bit format, the cursor off), `held_conversions`
+  the pictures drawn from those words because a host frame or a capture
+  asked for one during the hold, and `held_copies` the holds of other
+  modes, which draw the picture at once. OpenGL counts none of them.
 - **2D on the GPU:** on a Banshee or Voodoo3, `gpu_2d` counts the 2D
   operations done in OpenGL's copy of the memory (`blits`), the pages
   read back for the CPU (`pages_read_back`), and the operations left to
