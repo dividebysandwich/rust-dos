@@ -137,7 +137,7 @@ const LOADS: f64 = 8.0 * WORKING;
 /// and spins (Doom's 35) misses each one, and spends 4 or 5 measurements of
 /// every 485 above its speed once the back-off is at its longest. A
 /// measurement behind ends a probe without a miss: the host's limits take
-/// over.
+/// over. So does a load (`LOADS`), whose frames are another scene's.
 const PROBE_STEP: f64 = 2.0;
 const SAME: f64 = 0.05;
 const SPARE: f64 = 0.1;
@@ -2227,6 +2227,12 @@ impl AutoSpeed {
                 // Behind: the host's limits take over, and the program
                 // missed nothing.
                 if m.pace < KEPT_UP {
+                    self.probe_wait = HOLD_WINDOWS << self.probe_misses;
+                    return hold_drawing(self, before, clamp(from as f64), HOLD_WINDOWS, false);
+                }
+                // A load (`LOADS`): its frames are another scene's, and say
+                // nothing of the speed. The probe waits, and missed nothing.
+                if m.io >= LOADS || was_loaded {
                     self.probe_wait = HOLD_WINDOWS << self.probe_misses;
                     return hold_drawing(self, before, clamp(from as f64), HOLD_WINDOWS, false);
                 }
@@ -5347,6 +5353,28 @@ mod tests {
         let speed = auto.decide(80_000, &program(80_000), true, 200_000);
         assert!(matches!(auto.step, Step::Hold { .. }), "{:?}", auto.step);
         assert_eq!(speed, 80_000);
+    }
+
+    #[test]
+    fn a_load_during_a_probe_ends_it_without_a_miss() {
+        // A load in a probe's measurements (`LOADS`) draws frames of
+        // another scene, which say nothing of the speed: the probe goes
+        // back and waits, as for a measurement behind, and counts no miss.
+        let program = game(1.0 / 4000.0, 1000.0);
+        let mut auto = holding(15.0);
+        let up = auto.decide(60_000, &program(60_000), true, HOST);
+        assert!(
+            matches!(auto.step, Step::Probed { .. }) && up > 60_000,
+            "{up}"
+        );
+        let loading = Measurement {
+            io: LOADS,
+            ..program(up)
+        };
+        let back = auto.decide(up, &loading, true, HOST);
+        assert_eq!(back, 60_000);
+        assert_eq!(auto.probe_misses, 0);
+        assert!(auto.probe_wait > 0);
     }
 
     #[test]
