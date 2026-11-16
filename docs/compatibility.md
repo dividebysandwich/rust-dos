@@ -161,6 +161,17 @@ opcode, `win32_version=98se` when a message names the version, more
   without a backslash at the end, and `"CD"="D:\\"`. Start it with
   `ROM.EXE -1024` (or `-800`) for 1024x768 (800x600); with neither it
   runs at 640x480.
+* **Rage of Mages II: Necromancer** (GOG): copy the game's folder into
+  a folder of drive C:, such as `C:\ROM2`, and copy into it the files
+  of `gog-support\1459856152\app` and `famehall.dat` from
+  `gog-support\1459856152\save`, which GOG's installer puts there. The
+  game reads its folders from `HKEY_LOCAL_MACHINE\Software\Rage of
+  Mages 2` in a [`.reg` file](../CONFIGURATION.md#registry-keys):
+  `"INSTALLDIR"="C:\\ROM2"`, without a backslash at the end, and
+  `"CD"="C:\\ROM2"`. GOG's folder holds the disc's files, so no CD drive
+  is needed; without `CD` the game stops with "Incorrect CD or no CD
+  detected". Start it with `ALLODS2.EXE -1024` (or `-800`) for 1024x768
+  (800x600); with neither it runs at 640x480.
 * **Test Drive 4**: update it to version 1.2 with its patch,
   TD42UP.EXE, which runs on the built-in Windows. The game fix
   `td4-intro-camera` then keeps the race camera behind the car at any
