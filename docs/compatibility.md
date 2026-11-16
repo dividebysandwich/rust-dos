@@ -133,9 +133,10 @@ opcode, `win32_version=98se` when a message names the version, more
   installs it with its InstallShield 5 setup and runs it. For a CD
   copied to a folder, give the drive the label `EI` ([the CD's drive
   letter and label](../CONFIGURATION.md#the-cds-drive-letter-and-label)).
-* **Evil Islands: Curse of the Lost Soul** (GOG): `win32=true` and
-  `machine=svga_toadforce` ([ToadForce](../CONFIGURATION.md#toadforce)).
-  GOG's installer keeps eight of the game's settings files
+* **Evil Islands: Curse of the Lost Soul** (GOG): `win32=true`,
+  `machine=svga_toadforce` ([ToadForce](../CONFIGURATION.md#toadforce))
+  and a processor with MMX, `cpu=pentium_mmx` or later; on the default
+  486 it stops with "MMX required in this version". GOG's installer keeps eight of the game's settings files
   (`keyboard.ini`, `movie.ini` and the `lights*.ini` files) in
   `gog-support\1457950224\app\config`; copy them into the game's
   `config` folder. Without them the islands and the menu have no
