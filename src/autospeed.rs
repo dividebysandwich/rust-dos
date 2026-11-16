@@ -2051,8 +2051,10 @@ impl AutoSpeed {
                 // A frame rate that fell by a fifth is no noise to average
                 // out: the program shouldn't wait out the rest of them.
                 let dropped = fps < before * DROPPED;
-                // Fell by a fifth more than the speed did: less speed
-                // doesn't do that in one scene.
+                // Fell by a fifth more than the speed did. In one scene,
+                // less speed does that only to frames that wait for the
+                // retrace, which fall to a fraction of the refresh rate
+                // (60 to 30), and `from` gets them back.
                 let heavier = fps < before * (c / from as f64) * DROPPED;
                 if seen < JUDGED && !dropped {
                     self.step = Step::Lowered {
@@ -2079,12 +2081,15 @@ impl AutoSpeed {
                     // a step's, and is no loss to back off from. Its frame
                     // rate gives the knee, as for a step that lost frames.
                     // Frames that fell by a fifth more than the speed did
-                    // (`heavier`) are a heavier scene's or a wipe's, and go
-                    // on below with the frame rate held: Oni went from 60
-                    // frames a second, mostly halted, to 7 when its level
-                    // started, during a step from 56,895 to 48,952, and the
-                    // hold measured afresh took the 7 for its own and
-                    // climbed a step at a time from 112,500.
+                    // (`heavier`) go on below instead, to hold at `from`
+                    // with the frame rate it drew, so that a heavier scene
+                    // reads as one. A knee reckoned from such a reading is
+                    // past `from` anyway. Oni went from 60 frames a second,
+                    // mostly halted, to 7 when its level started, during a
+                    // step from 56,895 to 48,952, and the hold measured
+                    // afresh took the 21 it drew at 112,500, the CPU
+                    // model's least speed, for its own, and climbed a step
+                    // at a time from there.
                     let knee = (c * before / fps).clamp(c, from as f64);
                     hold(self, knee * HEADROOM, HOLD_WINDOWS, true)
                 } else {
@@ -5550,6 +5555,43 @@ mod tests {
             speed = auto.decide(speed, &heavy(speed), true, HOST);
         }
         assert!(speed > 200_000, "{speed}");
+    }
+
+    #[test]
+    fn a_frame_rate_halved_by_the_retrace_under_a_long_step_down_holds() {
+        // A game that waits for a 60 Hz retrace, with work for 70 frames a
+        // second at 100,000: a step down that the host's estimate took to
+        // 84,000 leaves it work for 58.8, and it shows 30. That falls by a
+        // fifth more than the speed did, as a heavier scene's frames do,
+        // but back at 100,000 it shows its 60 again, and the hold there
+        // keeps them without searching again.
+        let retrace = |speed: u32| {
+            let work = 70.0 * speed as f64 / 100_000.0;
+            Measurement {
+                fps: Some(60.0 / (60.0 / work).ceil()),
+                refresh: 60.0,
+                ..STILL
+            }
+        };
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Lowered {
+            from: 100_000,
+            fps: 60.0,
+            sum: 0.0,
+            seen: 0,
+            short: 0,
+        };
+        let mut speed = auto.decide(84_000, &retrace(84_000), true, HOST);
+        assert!(
+            matches!(auto.step, Step::Hold { fps, .. } if fps == 60.0),
+            "{:?}",
+            auto.step
+        );
+        for _ in 0..HOLD_WINDOWS {
+            assert_eq!(speed, 100_000);
+            assert!(matches!(auto.step, Step::Hold { .. }), "{:?}", auto.step);
+            speed = auto.decide(speed, &retrace(speed), true, HOST);
+        }
     }
 
     #[test]
