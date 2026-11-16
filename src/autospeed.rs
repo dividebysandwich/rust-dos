@@ -1025,7 +1025,10 @@ impl Frames {
 
     fn late_frame(&mut self, behind_ns: u64) {
         self.late += 1;
-        self.run_least = Some(self.run_least.map_or(behind_ns, |least| least.min(behind_ns)));
+        self.run_least = Some(
+            self.run_least
+                .map_or(behind_ns, |least| least.min(behind_ns)),
+        );
     }
 
     /// How far behind the frames on time so far left the host on average:
@@ -1486,7 +1489,11 @@ impl AutoSpeed {
         // at a speed the host keeps up with only just, has a frame of 80 ms
         // among frames on time in one measurement in eight, which is lag.
         let far_under = bus.clock.cycles_per_ms() as f64 * STALLED < host_max as f64;
-        let stall = if far_under { window.stall_ns().min(lost) } else { 0 };
+        let stall = if far_under {
+            window.stall_ns().min(lost)
+        } else {
+            0
+        };
         if trace() && stall > 0 {
             eprintln!(
                 "[auto] stall in the measurement: {:.1}ms of {:.1}ms dropped, {} late of {} frames",
@@ -1758,7 +1765,9 @@ impl AutoSpeed {
         // The limits end once the host has shown far more (`far_more`).
         if let Some((most, _)) = self.lagged {
             let far = host_max as f64 >= most as f64 * FIRST_STEP
-                && self.slow_host.is_none_or(|h| host_max as f64 >= h as f64 * STALLED);
+                && self
+                    .slow_host
+                    .is_none_or(|h| host_max as f64 >= h as f64 * STALLED);
             let more = !lagged && m.pace >= KEPT_UP && far;
             self.far_more = if more { self.far_more + 1 } else { 0 };
             if self.far_more >= JUDGED {
@@ -4574,10 +4583,7 @@ mod tests {
         for _ in 1..TRY_BEHIND_FRAMES {
             assert_eq!(auto.falling_behind(bus, unsorted(behind, 0)), None);
         }
-        assert_eq!(
-            auto.falling_behind(bus, unsorted(behind, 0)),
-            Some(37_090)
-        );
+        assert_eq!(auto.falling_behind(bus, unsorted(behind, 0)), Some(37_090));
         assert_eq!(auto.lagged, Some((37_090, LAGGED_WINDOWS)));
         // The limits end after `JUDGED` measurements with the estimate at
         // four times the cap or more, and the load gets all the host has.
@@ -5216,8 +5222,14 @@ mod tests {
         };
         let none = |ran: Ran, what: &str| assert_eq!(ran.probes, 0, "{what}: {:?}", ran.speeds);
         none(Machine::default().run(240, synced(750_000)), "synced");
-        none(Machine::default().run(240, on_the_clock(30, 1_000_000, 1)), "30");
-        none(Machine::default().run(240, on_the_clock(15, 2_000_000, 2)), "movie");
+        none(
+            Machine::default().run(240, on_the_clock(30, 1_000_000, 1)),
+            "30",
+        );
+        none(
+            Machine::default().run(240, on_the_clock(15, 2_000_000, 2)),
+            "movie",
+        );
         none(Machine::default().run(240, frame_driven()), "frame-driven");
     }
 
@@ -5274,7 +5286,10 @@ mod tests {
             most = most.max(speed);
         }
         assert!(most <= start + start / 20, "{most}, from the start {start}");
-        assert!(speed >= start - start / 5, "{speed}, from the start {start}");
+        assert!(
+            speed >= start - start / 5,
+            "{speed}, from the start {start}"
+        );
     }
 
     #[test]
@@ -5292,7 +5307,10 @@ mod tests {
             probing += usize::from(now);
             probes += usize::from(now && !was);
         }
-        assert!(probes >= 3 && probing <= 1200 * 3 / 100, "{probes} probes, {probing}");
+        assert!(
+            probes >= 3 && probing <= 1200 * 3 / 100,
+            "{probes} probes, {probing}"
+        );
         assert_eq!(auto.probe_misses, MOST_PROBE_BACKOFFS);
     }
 
@@ -5315,7 +5333,10 @@ mod tests {
         let program = game(1.0 / 4000.0, 1000.0);
         let mut auto = holding(15.0);
         let up = auto.decide(60_000, &program(60_000), true, HOST);
-        assert!(matches!(auto.step, Step::Probed { .. }) && up > 60_000, "{up}");
+        assert!(
+            matches!(auto.step, Step::Probed { .. }) && up > 60_000,
+            "{up}"
+        );
         let behind = Measurement {
             pace: 0.6,
             ..program(up)
