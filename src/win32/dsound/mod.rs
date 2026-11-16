@@ -612,7 +612,7 @@ pub struct State {
     /// Whether `tick` runs, so that what it does doesn't run it again.
     ticking: bool,
     /// The last two frames the mixer made at the primary format's rate.
-    pub mixed: Mixed,
+    mixed: Mixed,
 }
 
 /// The mixer's last two frames at the primary format's rate, which the
@@ -622,13 +622,14 @@ pub struct State {
 /// and the first frame of a mix can lie before the time the mix starts at.
 /// Not in save states: a load starts with none, and its first mix makes
 /// them again.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Mixed {
+#[derive(Clone, Copy, Debug, Default)]
+struct Mixed {
     /// The rate they were mixed at, 0 for none.
-    pub rate: u32,
-    /// The later one's index at that rate since the machine started.
-    pub last: u64,
-    pub frames: [(f32, f32); 2],
+    rate: u32,
+    /// The host's frame after the last one that mix was for: the next mix
+    /// takes them only when it starts there.
+    end: u64,
+    frames: [(f32, f32); 2],
 }
 
 /// The primary buffer's format when none is set: 22050 Hz, 8 bits,

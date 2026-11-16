@@ -1029,18 +1029,24 @@ fn mix(
     let rate = primary.rate as u64;
     let k0 = first * rate / device::RATE;
     let k1 = (first + frames as u64 - 1) * rate / device::RATE + 1;
-    // The frames from k0 that the mix before this one made.
+    // The frames from k0 on that the mix before this one made, when this
+    // one starts at the host's frame after that one's last. That mix
+    // ended at frame `last`, which is k0 or k0 + 1 (or k0 - 1 when the
+    // primary's rate is above the host's, and it made none of these).
     let kept = ds.mixed;
-    let reuse = if kept.rate == primary.rate && (k0..k0 + 2).contains(&kept.last) {
-        (kept.last - k0 + 1) as usize
+    let reuse = if kept.rate == primary.rate && kept.end == first {
+        let last = (first - 1) * rate / device::RATE + 1;
+        (last + 1).saturating_sub(k0) as usize
     } else {
         0
     };
     let from = k0 + reuse as u64;
-    let mut mix = vec![(0.0f32, 0.0f32); (k1 + 1 - from) as usize];
+    let mut mix = Vec::with_capacity((k1 - k0 + 1) as usize);
+    mix.extend_from_slice(&kept.frames[2 - reuse..]);
+    mix.resize((k1 - k0 + 1) as usize, (0.0f32, 0.0f32));
     for v in &voices {
         let mut reader = Reader::new(bus, v.pid);
-        for (n, out) in mix.iter_mut().enumerate() {
+        for (n, out) in mix[reuse..].iter_mut().enumerate() {
             let pos = device::position(v.tick, v.pos, v.rate, from + n as u64, rate);
             if !v.looping && pos >= (v.frames as u64) << 32 {
                 break;
@@ -1051,7 +1057,7 @@ fn mix(
             out.1 += r * v.gains.1;
         }
     }
-    for frame in mix.iter_mut() {
+    for frame in mix[reuse..].iter_mut() {
         let mut l = frame.0.clamp(-32768.0, 32767.0);
         let mut r = frame.1.clamp(-32768.0, 32767.0);
         if primary.channels == 1 {
@@ -1064,11 +1070,10 @@ fn mix(
         }
         *frame = (l, r);
     }
-    mix.splice(0..0, kept.frames[2 - reuse..].iter().copied());
     let n = mix.len();
     let mixed = super::Mixed {
         rate: primary.rate,
-        last: k1,
+        end: first + frames as u64,
         frames: [mix[n - 2], mix[n - 1]],
     };
     let (gl, gr) = device::gains(ds.volume, ds.pan);
