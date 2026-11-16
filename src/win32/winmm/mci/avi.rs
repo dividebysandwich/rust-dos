@@ -3,9 +3,10 @@
 //! that the Video for Windows code (`vfw::avi`) reads. Its pictures are
 //! uncompressed DIBs of 8, 16, 24 or 32 bits, 8-bit Microsoft RLE
 //! (BI_RLE8), which MCIAVI decodes itself, or what a Video for Windows
-//! codec decompresses (`vfw::codec`: Indeo 3, 4 and 5). Its sound is
-//! PCM, or MS or IMA ADPCM, which ACM's codecs give MCIAVI as PCM. A
-//! file of other sound plays without it.
+//! codec decompresses (`vfw::codec`: Indeo 3, 4 and 5, Cinepak and
+//! Microsoft Video 1). Its sound is PCM, or MS or IMA ADPCM, which
+//! ACM's codecs give MCIAVI as PCM. A file of other sound plays without
+//! it.
 //!
 //! The sound is read whole when the file opens, to be played as one
 //! sound. The pictures are decoded as they are shown: a decoder goes on
@@ -37,6 +38,8 @@ pub struct Video {
     chunks: Vec<Chunk>,
     compression: u32,
     bits: u16,
+    /// The stream's format, which a codec decodes.
+    format: codec::Format,
     /// Whether the rows run from the top (a negative biHeight).
     top_down: bool,
     /// An 8-bit picture's colours, as blue, green and red.
@@ -91,7 +94,7 @@ pub fn parse(d: &[u8]) -> Option<Media> {
         let plays = match compression {
             BI_RGB => matches!(bits, 8 | 16 | 24 | 32),
             BI_RLE8 => bits == 8,
-            c => codec::supported(c, w, h),
+            _ => codec::Format::parse(f).is_some_and(|f| codec::supported(&f)),
         };
         if plays && (1..=MAX_SIZE).contains(&w) && (1..=MAX_SIZE).contains(&h) {
             let mut palette = Vec::new();
@@ -115,6 +118,7 @@ pub fn parse(d: &[u8]) -> Option<Media> {
                 chunks: s.chunks.clone(),
                 compression,
                 bits,
+                format: codec::Format::parse(f).unwrap_or_default(),
                 top_down: height < 0 && compression == BI_RGB,
                 palette,
             });
@@ -211,7 +215,7 @@ impl Pictures {
         let from = match self.at {
             Some(at) if goes_on(at, key, n) && !self.codec.is_empty() => at + 1,
             _ => {
-                self.codec = Codec::new(video.compression);
+                self.codec = Codec::new(&video.format);
                 key
             }
         };

@@ -1005,7 +1005,8 @@ fn set_format(cpu: &mut Cpu, slot: usize, wanted: u32) -> bool {
         }
         bits
     };
-    if compression != BI_RGB && !codec::supported(compression, width, height) {
+    let source = codec::Format::parse(&format).unwrap_or_default();
+    if compression != BI_RGB && !codec::supported(&source) {
         let fourcc = String::from_utf8_lossy(&compression.to_le_bytes()).into_owned();
         cpu.bus.log_string(&format!(
             "[W32] AVIStreamGetFrameOpen: no codec for {fourcc:?}"
@@ -1049,7 +1050,7 @@ fn set_format(cpu: &mut Cpu, slot: usize, wanted: u32) -> bool {
     f.header = header.len() as u32;
     f.image = image;
     f.last = -1;
-    f.codec = Codec::new(compression);
+    f.codec = Codec::new(&source);
     if old != 0 {
         crate::win32::with_process(cpu, |p, _| p.heap.free(old));
     }
@@ -1164,6 +1165,11 @@ fn get_frame_get(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     };
     let stream_index = frame(cpu, slot).stream;
+    // A copy's codec (after a restore) starts again.
+    let restart = {
+        let f = frame(cpu, slot);
+        f.compression != BI_RGB && f.codec.is_empty()
+    };
     let f = file(cpu, file_slot);
     let handle = f.handle;
     let s = &f.avi.streams[stream_index];
@@ -1176,10 +1182,10 @@ fn get_frame_get(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         .rev()
         .find(|&i| s.chunks[i as usize].flags & avi::AVIIF_KEYFRAME != 0)
         .unwrap_or(0);
+    let source = restart.then(|| codec::Format::parse(&s.format).unwrap_or_default());
     let f = frame(cpu, slot);
-    // A copy's codec (after a restore) starts again.
-    if f.compression != BI_RGB && f.codec.is_empty() {
-        f.codec = Codec::new(f.compression);
+    if let Some(source) = source {
+        f.codec = Codec::new(&source);
         f.last = -1;
     }
     let (compression, width, height, bits, header, image, buffer, last) = (
