@@ -61,7 +61,14 @@ pub static MODULE: Def = Def {
         win32("DdeGetData", 16, "lpll", U, "DdeGetData", b'w'),
         rust("DdeAccessData", 17, "lp", dde_access_data),
         rust("DdeUnaccessData", 18, "l", dde_unaccess_data),
-        rust("DdeFreeDataHandle", 19, "l", dde_free_data_handle),
+        win32(
+            "DdeFreeDataHandle",
+            19,
+            "l",
+            U,
+            "DdeFreeDataHandle",
+            b'b',
+        ),
         win32("DdeGetLastError", 20, "l", U, "DdeGetLastError", b'w'),
         win32(
             "DdeCreateStringHandle",
@@ -152,7 +159,8 @@ fn dde_query_conv_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // cb, hUser, hConvPartner, hszSvcPartner, hszServiceReq, hszTopic,
     // hszItem; wFmt, wType, wStatus, wConvst, wLastError; hConvList;
     // ConvCtxt (cb, wFlags, wCountryID, iCodePage, dwLangID,
-    // dwSecurity).
+    // dwSecurity); hwnd and hwndPartner, two HWNDs of 16 bits: 62 bytes
+    // in all.
     let mut bytes = Vec::new();
     for v in [
         0,
@@ -178,7 +186,9 @@ fn dde_query_conv_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     for v in [CONVCONTEXT_SIZE, 0, 0, CP_WINANSI] {
         bytes.extend(v.to_le_bytes());
     }
+    // dwLangID and dwSecurity, then the two windows.
     bytes.extend([0u8; 8]);
+    bytes.extend([0u8; 4]);
     let cb = super::read_32(cpu, out) as usize;
     let n = cb.min(bytes.len());
     if n < 4 || !super::poke(cpu, out + 4, &bytes[4..n]) {
@@ -219,17 +229,18 @@ fn dde_access_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some((global::handle_to_sel(block) as u32) << 16)
 }
 
-/// The 16-bit copy of the data `h` DdeAccessData made, if there is one:
-/// its bytes put back into the data if `keep`, and the block freed.
-fn end_access(cpu: &mut Cpu, h: u32, keep: bool) {
+/// DdeUnaccessData(data): the bytes of the copy DdeAccessData made put
+/// back into the data, and its block freed.
+fn dde_unaccess_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let h = args[0];
     let Some(d) = dde::data_mut(cpu, h) else {
-        return;
+        return Some(0);
     };
     let (block, len) = (std::mem::take(&mut d.access16) as u16, d.bytes.len());
     if block == 0 {
-        return;
+        return Some(1);
     }
-    if keep && let Some(mut bytes) = super::global_bytes(cpu, block) {
+    if let Some(mut bytes) = super::global_bytes(cpu, block) {
         bytes.truncate(len);
         if bytes.len() == len
             && let Some(d) = dde::data_mut(cpu, h)
@@ -237,21 +248,15 @@ fn end_access(cpu: &mut Cpu, h: u32, keep: bool) {
             d.bytes = bytes;
         }
     }
-    global::unlock(cpu, block);
-    global::free(cpu, block);
-}
-
-/// DdeUnaccessData(data).
-fn dde_unaccess_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    if dde::data_mut(cpu, args[0]).is_none() {
-        return Some(0);
-    }
-    end_access(cpu, args[0], true);
+    free_dde_copy(cpu, block);
     Some(1)
 }
 
-/// DdeFreeDataHandle(data).
-fn dde_free_data_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    end_access(cpu, args[0], false);
-    dde::dde_free_data_handle(cpu, args)
+/// Free the global block of the copy DdeAccessData made, which it
+/// locked. USER32's DDEML calls this when a data handle with such a copy
+/// goes (DdeFreeDataHandle, or the system freeing the data of a
+/// transaction), so the block goes with it whoever frees it.
+pub fn free_dde_copy(cpu: &mut Cpu, block: u16) {
+    global::unlock(cpu, block);
+    global::free(cpu, block);
 }

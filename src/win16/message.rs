@@ -251,24 +251,33 @@ fn class_name(cpu: &Cpu, hwnd: u32) -> String {
 }
 
 /// The system's control whose window procedure `proc` is, by the name
-/// of its class, lower case.
-fn control_of_proc(proc: u32) -> Option<&'static str> {
-    const PROCS: [(&str, &str); 7] = [
-        ("EditWndProc", "edit"),
-        ("ListBoxWndProc", "listbox"),
-        ("ComboLBoxWndProc", "combolbox"),
-        ("ComboBoxWndProc", "combobox"),
-        ("ButtonWndProc", "button"),
-        ("StaticWndProc", "static"),
-        ("ScrollBarWndProc", "scrollbar"),
+/// of its class, lower case: the system class with that procedure, if
+/// it is one of the controls whose messages Win32 numbers differently.
+/// The classes' procedures are looked at, not USER32's exports by name,
+/// as this runs for every WM_USER message 16-bit code sends.
+fn control_of_proc(cpu: &Cpu, proc: u32) -> Option<String> {
+    const CONTROLS: [&str; 7] = [
+        "edit",
+        "listbox",
+        "combolbox",
+        "combobox",
+        "button",
+        "static",
+        "scrollbar",
     ];
     if proc == 0 {
         return None;
     }
-    PROCS
+    let class = cpu
+        .bus
+        .win32
+        .user
+        .classes
         .iter()
-        .find(|(name, _)| user32(name) == proc)
-        .map(|&(_, class)| class)
+        .flatten()
+        .find(|c| c.system && c.proc == proc)?;
+    let name = class.name.to_ascii_lowercase();
+    CONTROLS.contains(&name.as_str()).then_some(name)
 }
 
 /// A 16-bit program's message to the window `hwnd` as Win32 numbers it:
@@ -285,10 +294,7 @@ fn control_msg32(cpu: &Cpu, hwnd: u32, msg: u32, target: u32) -> u32 {
         return msg;
     }
     let n = msg - WM_USER;
-    let class = match control_of_proc(target) {
-        Some(c) => c.to_string(),
-        None => class_name(cpu, hwnd),
-    };
+    let class = control_of_proc(cpu, target).unwrap_or_else(|| class_name(cpu, hwnd));
     match class.as_str() {
         "edit" if n <= 0x29 => EM_GETSEL + n,
         "listbox" | "combolbox" if (1..=0x2A).contains(&n) => LB_ADDSTRING + n - 1,
@@ -556,7 +562,7 @@ fn to32(
                     | CB_FINDSTRING
                     | CB_FINDSTRINGEXACT
                     | CB_SELECTSTRING
-            ) || has_strings(cpu, hwnd);
+            ) || has_strings(cpu, hwnd, msg);
             (
                 msg,
                 sx_wparam(msg, wp),
@@ -632,11 +638,13 @@ fn sx_wparam(msg: u32, wp: u32) -> u32 {
     }
 }
 
-/// Whether the list box or combo box `hwnd` keeps strings.
-fn has_strings(cpu: &Cpu, hwnd: u32) -> bool {
+/// Whether the list box or combo box `hwnd`, which gets the message
+/// `msg`, keeps strings. A CB_ message says it is a combo box, whose
+/// CBS_HASSTRINGS is another bit than LBS_HASSTRINGS, whatever its class
+/// is called: a superclass's (Delphi's TComboBox) is too.
+fn has_strings(cpu: &Cpu, hwnd: u32, msg: u32) -> bool {
     let style = cpu.bus.win32.user.window(hwnd).map_or(0, |w| w.style);
-    let class = class_name(cpu, hwnd);
-    let (owner_draw, strings) = if class == "combobox" {
+    let (owner_draw, strings) = if (CB_GETEDITSEL..LB_ADDSTRING).contains(&msg) {
         (0x0030, 0x0200)
     } else {
         (0x0030, 0x0040)

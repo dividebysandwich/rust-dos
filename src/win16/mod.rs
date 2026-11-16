@@ -357,6 +357,7 @@ pub fn is_task(win32: &crate::win32::Win32, tid: u32) -> bool {
     win32.win16.pid != 0 && win32.win16.tasks.iter().any(|t| t.tid == tid)
 }
 
+pub use ddeml::free_dde_copy;
 pub use kernel::{atom_name, atom_of};
 
 /// The bytes of the global block `handle`, as a 16-bit program passes

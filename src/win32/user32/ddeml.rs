@@ -33,6 +33,7 @@ use crate::win32::task::{self, Next, Task};
 const DMLERR_NO_ERROR: u32 = 0;
 const DMLERR_DLL_NOT_INITIALIZED: u32 = 0x4003;
 const DMLERR_INVALIDPARAMETER: u32 = 0x4006;
+const DMLERR_MEMORY_ERROR: u32 = 0x4008;
 const DMLERR_NOTPROCESSED: u32 = 0x4009;
 const DMLERR_NO_CONV_ESTABLISHED: u32 = 0x400A;
 const DMLERR_UNFOUND_QUEUE_ID: u32 = 0x4011;
@@ -641,8 +642,14 @@ pub fn dde_free_data_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(d) = data(cpu, args[0]) else {
         return Some(0);
     };
+    let block16 = std::mem::take(&mut d.access16);
     if let Some((_, block, _)) = d.access.take() {
         crate::win32::kernel32::global_free(cpu, block);
+    }
+    // The copy a 16-bit program's DdeAccessData made goes with the data,
+    // whoever frees it: the program, or the system after a transaction.
+    if block16 != 0 {
+        crate::win16::free_dde_copy(cpu, block16 as u16);
     }
     let i = (args[0] - FIRST_DATA) as usize / 4;
     state(cpu).data[i] = None;
@@ -715,14 +722,36 @@ pub fn dde_disconnect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     }
     let i = (args[0] - FIRST_CONV) as usize / 4;
-    let s = state(cpu);
-    s.convs[i] = None;
-    for x in s.xacts.iter_mut() {
-        if x.as_ref().is_some_and(|x| x.conv == args[0]) {
-            *x = None;
+    state(cpu).convs[i] = None;
+    drop_xacts(cpu, |x| x.conv == args[0]);
+    Some(1)
+}
+
+/// Forget the asynchronous transactions `goes` picks, whose
+/// XTYP_XACT_COMPLETE then isn't given, and free the data of the
+/// requests among them, which the system would have freed after the
+/// callback: whether there was one.
+fn drop_xacts(cpu: &mut Cpu, goes: impl Fn(&Xact) -> bool) -> bool {
+    let mut found = false;
+    let mut freed = Vec::new();
+    for x in state(cpu).xacts.iter_mut() {
+        if !x.as_ref().is_some_and(&goes) {
+            continue;
+        }
+        if let Some(t) = x.take()
+            && t.kind == XTYP_REQUEST
+            && t.data != 0
+        {
+            freed.push(t.data);
+        }
+        found = true;
+    }
+    for h in freed {
+        if data(cpu, h).is_some_and(|d| !d.app_owned) {
+            dde_free_data_handle(cpu, &[h]);
         }
     }
-    Some(1)
+    found
 }
 
 /// DdeClientTransaction(data, size, conversation, item, format, type,
@@ -795,6 +824,12 @@ pub fn dde_client_transaction(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             cpu.bus.guest_write_32(result, xact);
         }
         if xact == 0 {
+            // No window to give the outcome by: the transaction fails,
+            // and a request's data, which no one gets, goes.
+            if kind & !XTYPF_MASK == XTYP_REQUEST && reply != 0 {
+                dde_free_data_handle(cpu, &[reply]);
+            }
+            set_dde_error(cpu, id, DMLERR_MEMORY_ERROR);
             return Some(0);
         }
         return open_windows(cpu, windows);
@@ -874,8 +909,6 @@ fn begin_async(
 /// The hidden window of the thread `tid` of the process `pid`, made if
 /// it isn't there yet: its handle, or 0 when there is no room for it.
 fn event_window(cpu: &mut Cpu, pid: u32, tid: u32) -> u32 {
-    use super::class::{self, CS_GLOBALCLASS, Class};
-    use super::window::{self, HWND_BOTTOM, LINKED, WS_POPUP, Window};
     super::init(cpu);
     let proc = super::address_of("DdemlWndProc");
     let state = super::user(cpu);
@@ -887,43 +920,12 @@ fn event_window(cpu: &mut Cpu, pid: u32, tid: u32) -> u32 {
     if let Some(hwnd) = found {
         return hwnd;
     }
-    let class = match class::find_system(state, EVENT_CLASS) {
-        Some(c) => c,
-        None => {
-            let atom = class::atom(state, EVENT_CLASS);
-            state.classes.push(Some(Class {
-                atom,
-                name: EVENT_CLASS.to_string(),
-                style: CS_GLOBALCLASS,
-                proc,
-                instance: super::DLL.base,
-                global: true,
-                system: true,
-                ..Class::default()
-            }));
-            state.classes.len() as u32 - 1
-        }
-    };
-    let window = Window {
-        class,
-        style: WS_POPUP,
-        parent: super::DESKTOP,
-        instance: super::DLL.base,
-        proc,
+    let window = super::window::Window {
         tid,
         pid,
-        flags: LINKED,
-        icon_pos: (-1, -1),
-        ..Window::default()
+        ..Default::default()
     };
-    let Some(hwnd) = state.new_window(window) else {
-        return 0;
-    };
-    if let Some(c) = state.classes[class as usize].as_mut() {
-        c.windows += 1;
-    }
-    window::link(state, hwnd, HWND_BOTTOM);
-    hwnd
+    super::window::new_hidden(state, EVENT_CLASS, proc, window)
 }
 
 /// DdemlWndProc(hwnd, message, wParam, lParam): the procedure of the
@@ -1006,16 +1008,9 @@ pub fn dde_abandon_transaction(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_dde_error(cpu, id, DMLERR_INVALIDPARAMETER);
         return Some(0);
     }
-    let mut found = false;
-    for x in state(cpu).xacts.iter_mut() {
-        let goes = x.as_ref().is_some_and(|x| {
-            x.instance == id && (hconv == 0 || x.conv == hconv) && (xact == 0 || x.id == xact)
-        });
-        if goes {
-            *x = None;
-            found = true;
-        }
-    }
+    let found = drop_xacts(cpu, |x| {
+        x.instance == id && (hconv == 0 || x.conv == hconv) && (xact == 0 || x.id == xact)
+    });
     if xact != 0 && !found {
         set_dde_error(cpu, id, DMLERR_UNFOUND_QUEUE_ID);
         return Some(0);
@@ -1074,13 +1069,16 @@ pub struct ConvInfo {
 }
 
 /// The CONVINFO of the conversation `hconv`, for the transaction `id`
-/// or QID_SYNC.
+/// or QID_SYNC. A transaction that isn't there sets the instance's
+/// DMLERR_UNFOUND_QUEUE_ID, for the 32-bit and the 16-bit DDEML alike.
 pub fn conv_info(cpu: &mut Cpu, hconv: u32, id: u32) -> Option<ConvInfo> {
-    /// ST_CONNECTED and ST_CLIENT, XST_CONNECTED and XST_EXECSENT.
+    /// ST_CONNECTED and ST_CLIENT.
     const ST_CLIENT_CONNECTED: u16 = 0x0011;
+    /// The conversation's states: XST_CONNECTED, XST_REQSENT and
+    /// XST_EXECSENT.
     const XST_CONNECTED: u16 = 2;
-    const XST_EXECSENT: u16 = 9;
     const XST_REQSENT: u16 = 5;
+    const XST_EXECSENT: u16 = 9;
     let c = conv(cpu, hconv)?.clone();
     let mut info = ConvInfo {
         user: c.user,
@@ -1091,7 +1089,10 @@ pub fn conv_info(cpu: &mut Cpu, hconv: u32, id: u32) -> Option<ConvInfo> {
         ..ConvInfo::default()
     };
     if id != QID_SYNC {
-        let x = xact(cpu, hconv, id)?.clone();
+        let Some(x) = xact(cpu, hconv, id).cloned() else {
+            set_dde_error(cpu, c.instance, DMLERR_UNFOUND_QUEUE_ID);
+            return None;
+        };
         info.user = x.user;
         info.item = x.item;
         info.format = x.format;
@@ -1115,9 +1116,6 @@ pub fn dde_query_conv_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     }
     let Some(info) = conv_info(cpu, hconv, id) else {
-        if let Some(i) = conv(cpu, hconv).map(|c| c.instance) {
-            set_dde_error(cpu, i, DMLERR_UNFOUND_QUEUE_ID);
-        }
         return Some(0);
     };
     // cb, hUser, hConvPartner, hszSvcPartner, hszServiceReq, hszTopic,

@@ -33,8 +33,8 @@ const XTYP_EXECUTE: u16 = 0x4050;
 const XTYP_REQUEST: u16 = 0x20B0;
 const XTYP_XACT_COMPLETE: u16 = 0x8080;
 const DDE_FACK: u16 = 0x8000;
-/// Windows 3.1's CONVINFO's size.
-const CONVINFO_SIZE: u16 = 58;
+/// Windows 3.1's CONVINFO's size, hwnd and hwndPartner included.
+const CONVINFO_SIZE: u16 = 62;
 
 /// Where the program keeps things in its data segment: the instance,
 /// string handle, conversation, data handle and transaction result (a

@@ -1,8 +1,9 @@
 //! The smaller system modules: KEYBOARD, SOUND, SYSTEM, WIN87EM,
 //! TOOLHELP, SHELL, COMMDLG, MMSYSTEM, LZEXPAND, VER, WING and DISPLAY
-//! (DDEML has a file of its own, ddeml.rs). Most of their functions go on to the built-in DLL that has
-//! them in Win32 (USER32, WINMM, COMDLG32, VERSION); the rest are done
-//! here, or answer as Windows 3.1 does when there is no such device.
+//! (DDEML has a file of its own, ddeml.rs). Most of their functions go
+//! on to the built-in DLL that has them in Win32 (USER32, WINMM,
+//! COMDLG32, VERSION); the rest are done here, or answer as Windows 3.1
+//! does when there is no such device.
 
 use super::builtin::{Def, register, rust, win32};
 use super::lz;
