@@ -501,6 +501,10 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32]) -> Option<u32> {
             if value == 0 && d(2) != 0 {
                 let handle = r32(cpu, d(1));
                 super::write_16(cpu, d(2), handle as u16);
+                if d(3) != 0 {
+                    let tid = super::task(cpu).tid;
+                    crate::win32::winmm::wave::call16_on(cpu, handle, tid, d(3));
+                }
             }
             Some(value)
         }
@@ -786,16 +790,22 @@ fn wave_out_get_dev_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 const CALLBACK_TYPEMASK: u32 = 0x0007_0000;
 const CALLBACK_WINDOW: u32 = 0x0001_0000;
 const CALLBACK_TASK: u32 = 0x0002_0000;
+const CALLBACK_FUNCTION: u32 = 0x0003_0000;
 
 /// waveOutOpen(handle *, device, format, callback, instance, flags): a
-/// window or a task is told about the buffers played, as in Win32; a
-/// 16-bit function isn't called (programs that ask for one poll the
-/// headers' WHDR_DONE as well).
+/// window or a task is told about the buffers played, as in Win32, and a
+/// 16-bit function is called in its task (`queue_call16`).
 fn wave_out_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let out = thunk::scratch32(cpu, 4);
     w32(cpu, out, 0);
     let device = if args[1] == 0xFFFF { u32::MAX } else { args[1] };
     let mut flags = args[5];
+    // WINMM opens the device without a callback, and is given the
+    // function once it is open (P_WAVE_OPEN).
+    let function = match flags & CALLBACK_TYPEMASK {
+        CALLBACK_FUNCTION if args[0] != 0 => args[3],
+        _ => 0,
+    };
     let callback = match flags & CALLBACK_TYPEMASK {
         CALLBACK_WINDOW => args[3] & 0xFFFF,
         CALLBACK_TASK => {
@@ -820,59 +830,166 @@ fn wave_out_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         MM,
         "waveOutOpen",
         &[target, device, args[2], callback, args[4], flags],
-        vec![P_WAVE_OPEN, out, args[0]],
+        vec![P_WAVE_OPEN, out, args[0], function],
     )
 }
 
-/// The WAVEHDR at 16:16 `segptr` made one WINMM can use where it is: the
-/// two have the same layout but for the data's pointer, which is made
-/// flat while WINMM has the header. Its linear address.
+/// What `Mmsystem` keeps of a call: the task's thread, the function and
+/// its five arguments.
+pub type MmCall = [u32; 7];
+
+/// Queue the call of the 16-bit function `function` with `args` (the
+/// device's handle, the message, the instance and two parameters) for
+/// the task whose thread is `tid`. Windows 3.1 calls such a function at
+/// interrupt time, which tasks taking turns have no room for; the task
+/// makes the call when it next asks for a message (`call_queued16`).
+/// A task that waits for one is given WM_NULL, so that it does.
+pub fn queue_call16(cpu: &mut Cpu, tid: u32, function: u32, args: [u32; 5]) {
+    let calls = &mut cpu.bus.win32.win16.mmsystem.calls;
+    let first = !calls.iter().any(|c| c[0] == tid);
+    let [a, b, c, d, e] = args;
+    calls.push([tid, function, a, b, c, d, e]);
+    let waits = crate::win32::thread::find(&cpu.bus.win32, tid)
+        .is_some_and(|(p, t)| cpu.bus.win32.processes[p].threads[t].wait.is_some());
+    if first && waits {
+        crate::win32::user32::message::post_thread_message(cpu, &[tid, 0, 0, 0]);
+    }
+}
+
+/// The running task, as it asks for a message, makes the first call
+/// queued for it (`queue_call16`), and asks again when it returns. False
+/// when there is none.
+pub fn call_queued16(cpu: &mut Cpu) -> bool {
+    if cpu.bus.win32.win16.mmsystem.calls.is_empty() {
+        return false;
+    }
+    let tid = super::task(cpu).tid;
+    let calls = &mut cpu.bus.win32.win16.mmsystem.calls;
+    let Some(i) = calls.iter().position(|c| c[0] == tid) else {
+        return false;
+    };
+    let [_, function, handle, msg, instance, p1, p2] = calls.remove(i);
+    // void CALLBACK f(HANDLE, UINT, DWORD, DWORD, DWORD), Pascal's.
+    let words = [
+        handle as u16,
+        msg as u16,
+        (instance >> 16) as u16,
+        instance as u16,
+        (p1 >> 16) as u16,
+        p1 as u16,
+        (p2 >> 16) as u16,
+        p2 as u16,
+    ];
+    // When the function returns, the task makes its own call again.
+    let mut resume = Context::of(cpu);
+    resume.eip = resume.eip.wrapping_sub(4);
+    thunk::call16(
+        cpu,
+        function,
+        &words,
+        0,
+        resume,
+        thunk::THEN_KEEP,
+        Vec::new(),
+    );
+    true
+}
+
+/// A task ended: the calls queued for it go.
+pub fn task_ended(cpu: &mut Cpu, tid: u32) {
+    cpu.bus.win32.win16.mmsystem.calls.retain(|c| c[0] != tid);
+}
+
+/// What MMSYSTEM keeps for the 16-bit programs: the wave headers WINMM
+/// has (`wave_header`), each one's process, linear address and 16:16
+/// address, and the calls of callback functions that wait for their
+/// tasks (`queue_call16`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Mmsystem {
+    pub headers: Vec<[u32; 3]>,
+    pub calls: Vec<MmCall>,
+}
+
+/// The W32 section's version that first keeps `Mmsystem`. An older
+/// rust-dos kept the wave headers alone, and put the data's flat address
+/// in the program's own header while WINMM had it. Their headers are
+/// forgotten on loading: WINMM then tells the program about them by
+/// their linear addresses.
+const MMSYSTEM_SAVED: u16 = 74;
+
+impl crate::savestate::State for Mmsystem {
+    fn save(&self, w: &mut crate::savestate::Writer) {
+        crate::savestate::State::save(&self.headers, w);
+        crate::savestate::State::save(&self.calls, w);
+    }
+
+    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        // Bytes outside a section are in this rust-dos's own layout.
+        if r.version().is_some_and(|v| v < MMSYSTEM_SAVED) {
+            let mut old: Vec<[u32; 4]> = Vec::new();
+            crate::savestate::State::load(&mut old, r)?;
+            *self = Mmsystem::default();
+            return Ok(());
+        }
+        crate::savestate::State::load(&mut self.headers, r)?;
+        crate::savestate::State::load(&mut self.calls, r)
+    }
+}
+
+/// The WAVEHDR at 16:16 `segptr`, given to WINMM where it is, as
+/// Windows 98's MMSYSTEM gives a 16-bit program's own header to the
+/// driver: its linear address. The two layouts are the same, and the
+/// header keeps what the program wrote, its data's 16:16 pointer too;
+/// WINMM changes only dwFlags. The header's process and addresses are
+/// kept, so that WINMM reads the data's pointer as a 16:16 one
+/// (`wave_data`) and gives the program its own pointer to the header in
+/// MM_WOM_DONE (`wave_header16`).
 fn wave_header(cpu: &mut Cpu, segptr: u32) -> u32 {
     let at = super::linear(cpu, segptr);
     if at == 0 {
         return 0;
     }
-    let data = r32(cpu, at);
-    let headers = &mut cpu.bus.win32.win16.wave_headers;
-    let known = headers.iter().position(|h| h[0] == at);
-    // The pointer is the flat one put there before: the program didn't
-    // change it.
-    if let Some(i) = known
-        && headers[i][3] == data
-    {
-        return at;
+    let pid = crate::win32::user32::current_pid(cpu);
+    let headers = &mut cpu.bus.win32.win16.mmsystem.headers;
+    match headers.iter_mut().find(|h| h[0] == pid && h[1] == at) {
+        Some(h) => h[2] = segptr,
+        None => headers.push([pid, at, segptr]),
     }
-    let flat = super::linear(cpu, data);
-    let entry = [at, segptr, data, flat];
-    let headers = &mut cpu.bus.win32.win16.wave_headers;
-    match known {
-        Some(i) => headers[i] = entry,
-        None => headers.push(entry),
-    }
-    w32(cpu, at, flat);
     at
 }
 
-/// WINMM let go of the header at `at`: its data's 16:16 pointer back.
+/// WINMM let go of the header at `at`.
 fn unprepared(cpu: &mut Cpu, at: u32) {
-    let headers = &mut cpu.bus.win32.win16.wave_headers;
-    if let Some(i) = headers.iter().position(|h| h[0] == at) {
-        let h = headers.remove(i);
-        w32(cpu, at, h[2]);
-    }
+    let pid = crate::win32::user32::current_pid(cpu);
+    let headers = &mut cpu.bus.win32.win16.mmsystem.headers;
+    headers.retain(|h| h[0] != pid || h[1] != at);
 }
 
-/// The 16:16 address of the wave header at the linear `at`, which WINMM
-/// puts in MM_WOM_DONE for a 16-bit program; `at` for a header that
-/// isn't a 16-bit program's.
-pub fn wave_header16(cpu: &Cpu, at: u32) -> u32 {
-    cpu.bus
-        .win32
-        .win16
-        .wave_headers
+/// The 16:16 address of the 16-bit program's wave header at the linear
+/// `at` in the process `pid`, if it is one.
+fn wave_header_of(cpu: &Cpu, pid: u32, at: u32) -> Option<u32> {
+    let headers = &cpu.bus.win32.win16.mmsystem.headers;
+    headers
         .iter()
-        .find(|h| h[0] == at)
-        .map_or(at, |h| h[1])
+        .find(|h| h[0] == pid && h[1] == at)
+        .map(|h| h[2])
+}
+
+/// The 16:16 address of the wave header at the linear `at` in the
+/// process `pid`, which WINMM puts in MM_WOM_DONE for a 16-bit program;
+/// `at` for a header that isn't a 16-bit program's.
+pub fn wave_header16(cpu: &Cpu, pid: u32, at: u32) -> u32 {
+    wave_header_of(cpu, pid, at).unwrap_or(at)
+}
+
+/// The linear address of the data `data` that the wave header at the
+/// linear `at` in the process `pid` points to: a 16-bit program's header
+/// has a 16:16 pointer there, the others a flat one.
+pub fn wave_data(cpu: &Cpu, pid: u32, at: u32, data: u32) -> u32 {
+    match wave_header_of(cpu, pid, at) {
+        Some(_) => super::linear(cpu, data),
+        None => data,
+    }
 }
 
 fn wave_out_prepare_header(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {

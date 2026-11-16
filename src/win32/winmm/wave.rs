@@ -285,7 +285,7 @@ fn done(cpu: &mut Cpu, i: usize, header: u32) {
         header + HDR_FLAGS,
         flags & !WHDR_INQUEUE | WHDR_DONE,
     );
-    let header = crate::win16::wave_header16(cpu, header);
+    let header = crate::win16::wave_header16(cpu, pid, header);
     callback::notify(cpu, &cb, handle, WOM_DONE, instance, header, 0);
 }
 
@@ -504,6 +504,22 @@ pub fn wave_out_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(MMSYSERR_NOERROR)
 }
 
+/// The device `handle` tells the 16-bit function at the 16:16 `address`
+/// about its blocks from now on, which the task whose thread is `tid`
+/// calls; it is told first that the device is open, as waveOutOpen
+/// tells it. For MMSYSTEM's waveOutOpen, which opens the device without
+/// a callback.
+pub fn call16_on(cpu: &mut Cpu, handle: u32, tid: u32, address: u32) {
+    let Some(i) = out_of(cpu, handle) else {
+        return;
+    };
+    let callback = Callback::Function16 { tid, address };
+    let o = &mut wave(cpu).outs[i];
+    o.callback = callback.clone();
+    let instance = o.instance;
+    callback::notify(cpu, &callback, handle, WOM_OPEN, instance, 0, 0);
+}
+
 /// waveOutClose(handle): only once its blocks are done.
 pub fn wave_out_close(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(i) = out_of(cpu, args[0]) else {
@@ -581,7 +597,10 @@ pub fn wave_out_write(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if flags & WHDR_INQUEUE != 0 {
         return Some(WAVERR_STILLPLAYING);
     }
+    // A 16-bit program's header keeps its 16:16 pointer to the data.
+    let pid = wave(cpu).outs[i].pid;
     let data = cpu.bus.guest_read_32(header + HDR_DATA);
+    let data = crate::win16::wave_data(cpu, pid, header, data);
     let length = cpu.bus.guest_read_32(header + HDR_LENGTH);
     let loops = cpu.bus.guest_read_32(header + HDR_LOOPS);
     // The device reads the block as it plays, without a page fault, as

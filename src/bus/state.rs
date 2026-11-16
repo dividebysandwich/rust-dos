@@ -18,12 +18,13 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 73;
+const WIN32_VERSION: u16 = 74;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
-/// (`gdi32::fnt::AddedFile`), and 71's and 72's not the desktop's own
-/// size (`version::OwnSize`).
-const WIN32_LOADS: [u16; 3] = [71, 72, WIN32_VERSION];
+/// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
+/// (`version::OwnSize`), and 71's to 73's MMSYSTEM's wave headers in an
+/// older form and no callback calls (`win16::Mmsystem`).
+const WIN32_LOADS: [u16; 4] = [71, 72, 73, WIN32_VERSION];
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -918,6 +919,7 @@ mod tests {
         (71, 0x0DD2_950E_C2FB_1628), // copy-on-write views paged, pages held for a fault
         (72, 0x0DD2_950E_C2FB_1628), // the fonts of files AddFontResource added
         (73, 0x2412_6CA7_250D_4193), // the desktop's own size, `win32_desktop`
+        (74, 0x6C70_EAD3_11EB_EDB6), // MMSYSTEM's headers keep lpData, callbacks
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

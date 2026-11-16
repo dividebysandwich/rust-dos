@@ -1556,6 +1556,9 @@ fn post_app_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 // The message loop: MSG16s.
 
 fn get_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if super::call_queued16(cpu) {
+        return None;
+    }
     let m = thunk::scratch32(cpu, 28);
     go_at(
         cpu,
@@ -1567,6 +1570,9 @@ fn get_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 fn peek_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if super::call_queued16(cpu) {
+        return None;
+    }
     let m = thunk::scratch32(cpu, 28);
     go_at(
         cpu,

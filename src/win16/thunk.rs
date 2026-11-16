@@ -101,7 +101,8 @@ pub static THENS: &[Then] = &[
     super::module::then_boot,
 ];
 
-// Place 0 is then_keep, which no call names now.
+/// The context the call was made with goes on as it was.
+pub const THEN_KEEP: u16 = 0;
 pub const THEN_PROC: u16 = 1;
 pub const THEN_TASK: u16 = 2;
 pub const THEN_MESSAGE: u16 = 3;

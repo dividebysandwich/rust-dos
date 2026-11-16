@@ -357,6 +357,168 @@ fn mm_wom_done_keeps_the_programs_header_after_it_is_unprepared() {
     assert_eq!(exit, 1, "{log}");
 }
 
+/// End with `fail` unless the word at `at` is DS.
+fn expect_ds(code: &mut Code, at: u16, fail: u8) {
+    code.emit(&[0x8C, 0xD8]) // mov ax,ds
+        .emit(&[0x3B, 0x06, lo(at), hi(at)]) // cmp ax,[at]
+        .emit(&[0x74, 0x06]) // je over the next
+        .emit(&[0xB0, fail, 0xB4, 0x4C, 0xCD, 0x21]); // mov al,fail; exit
+}
+
+/// End with `fail` unless the header at HEADER still has the program's
+/// 16:16 pointer to SAMPLES in lpData, and with `fail` + 1 unless its
+/// dwFlags are `flags`.
+fn expect_header(code: &mut Code, flags: u16, fail: u8) {
+    expect(code, HEADER, SAMPLES, true, fail);
+    expect_ds(code, HEADER + 2, fail);
+    expect(code, HEADER + 16, flags, true, fail + 1);
+}
+
+#[test]
+fn a_wave_header_keeps_the_16_16_data_pointer_the_program_wrote() {
+    // Windows 98's MMSYSTEM leaves a 16-bit program's WAVEHDR as the
+    // program wrote it, lpData too, and changes only dwFlags:
+    // WHDR_PREPARED after waveOutPrepareHeader, WHDR_PREPARED and
+    // WHDR_INQUEUE after waveOutWrite, WHDR_PREPARED and WHDR_DONE once
+    // waveOutReset returns it, and WHDR_DONE after
+    // waveOutUnprepareHeader. MM_WOM_DONE's header is then read as
+    // Miles' WAIL16.DLL reads it: lpData loaded with LES and the first
+    // samples read through it. Exit code 1; 20 to 27 for a header that
+    // changed, 28 for other samples; 3, 4 and 10 to 14 are calls that
+    // failed.
+    let mut code = Code::new();
+    code.call("KERNEL", GET_CURRENT_TASK)
+        .emit(&[0xA3, lo(HWND), hi(HWND)]); // mov [HWND],ax: the task
+    open_wave(&mut code, |code| push_word(code, HWND), CALLBACK_TASK, 4);
+    for i in 0..16 {
+        set(&mut code, HEADER + 2 * i, 0);
+    }
+    for i in 0..8 {
+        set(&mut code, SAMPLES + 2 * i, 0x8080);
+    }
+    set(&mut code, SAMPLES, 0x5A81);
+    set(&mut code, HEADER, SAMPLES);
+    set_seg(&mut code, HEADER + 2, true);
+    set(&mut code, HEADER + 4, 16);
+    header_call(&mut code, WAVE_OUT_PREPARE_HEADER, 10);
+    expect_header(&mut code, 0x02, 20);
+    header_call(&mut code, WAVE_OUT_WRITE, 11);
+    expect_header(&mut code, 0x12, 22);
+    push_word(&mut code, HANDLE);
+    code.call("MMSYSTEM", WAVE_OUT_RESET);
+    expect_ax(&mut code, 0, 12);
+    expect_header(&mut code, 0x03, 24);
+    code.emit(&[0x1E]) // push ds
+        .push(MSG)
+        .push(0) // any window
+        .push(MM_WOM_DONE)
+        .push(MM_WOM_DONE)
+        .push(1) // PM_REMOVE
+        .call("USER", PEEK_MESSAGE);
+    expect_nonzero(&mut code, 3);
+    code.emit(&[0xC4, 0x3E, lo(MSG + 6), hi(MSG + 6)]) // les di,[MSG+6]
+        .emit(&[0x26, 0xC4, 0x3D]) // les di,es:[di]: lpData
+        .emit(&[0x26, 0x8B, 0x05]); // mov ax,es:[di]
+    expect_ax(&mut code, 0x5A81, 28);
+    header_call(&mut code, WAVE_OUT_UNPREPARE_HEADER, 14);
+    expect_header(&mut code, 0x01, 26);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let (exit, log) = run("wave_header_kept", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}
+
+/// waveOutOpen's flags for a function to be called, their high word.
+const CALLBACK_FUNCTION: u16 = 3;
+/// MM_WOM_OPEN.
+const MM_WOM_OPEN: u16 = 0x3BB;
+/// Where the callback function keeps the calls' count, the messages of
+/// the first two and the last MM_WOM_DONE's dwParam1.
+const CALLS: u16 = 0x20;
+const FIRST: u16 = 0x22;
+const SECOND: u16 = 0x24;
+const DONE_P1: u16 = 0x26;
+
+/// A wave callback function, `void CALLBACK f(HWAVEOUT, UINT, DWORD,
+/// DWORD, DWORD)`, which counts its calls in SS:CALLS, keeps the
+/// messages of the first two in SS:FIRST and SS:SECOND, and MM_WOM_DONE's
+/// dwParam1 in SS:DONE_P1.
+fn wave_callback(code: &mut Code) -> u16 {
+    let at = code.here();
+    #[rustfmt::skip]
+    let bytes = [
+        0x55, 0x8B, 0xEC, // push bp; mov bp,sp
+        0x8B, 0x46, 0x12, // mov ax,[bp+12h]: the message
+        0x36, 0x83, 0x3E, lo(CALLS), hi(CALLS), 0x00, // cmp word ss:[CALLS],0
+        0x75, 0x04, // jne not_first
+        0x36, 0xA3, lo(FIRST), hi(FIRST), // mov ss:[FIRST],ax
+        // not_first:
+        0x36, 0x83, 0x3E, lo(CALLS), hi(CALLS), 0x01, // cmp word ss:[CALLS],1
+        0x75, 0x04, // jne not_second
+        0x36, 0xA3, lo(SECOND), hi(SECOND), // mov ss:[SECOND],ax
+        // not_second:
+        0x36, 0xFF, 0x06, lo(CALLS), hi(CALLS), // inc word ss:[CALLS]
+        0x3D, lo(MM_WOM_DONE), hi(MM_WOM_DONE), // cmp ax,MM_WOM_DONE
+        0x75, 0x0E, // jne end
+        0x8B, 0x46, 0x0A, // mov ax,[bp+0Ah]: dwParam1's low word
+        0x36, 0xA3, lo(DONE_P1), hi(DONE_P1), // mov ss:[DONE_P1],ax
+        0x8B, 0x46, 0x0C, // mov ax,[bp+0Ch]
+        0x36, 0xA3, lo(DONE_P1 + 2), hi(DONE_P1 + 2), // mov ss:[DONE_P1+2],ax
+        // end:
+        0x5D, 0xCA, 0x10, 0x00, // pop bp; retf 10h
+    ];
+    code.emit(&bytes);
+    at
+}
+
+#[test]
+fn a_wave_callback_function_is_called_with_the_programs_header() {
+    // A device opened with CALLBACK_FUNCTION calls the function with
+    // MM_WOM_OPEN and then MM_WOM_DONE, whose dwParam1 is the program's
+    // 16:16 pointer to the header waveOutReset returned, as Windows 3.1
+    // calls Miles' WAIL16.DLL. The task makes the calls when it next asks
+    // for a message, here a PeekMessage that finds none. Exit code 1; 2
+    // for no calls or another number, 3 and 4 for other messages, 5 and
+    // 6 for another header; 10 to 13 are calls that failed before.
+    let mut code = Code::new();
+    for at in [CALLS, FIRST, SECOND, DONE_P1, DONE_P1 + 2] {
+        set(&mut code, at, 0);
+    }
+    for (i, word) in [1u16, 1, 11025, 0, 11025, 0, 1, 8].into_iter().enumerate() {
+        set(&mut code, FORMAT + 2 * i as u16, word);
+    }
+    code.emit(&[0x1E]) // push ds
+        .push(HANDLE)
+        .push(0xFFFF) // WAVE_MAPPER
+        .emit(&[0x1E])
+        .push(FORMAT);
+    let callback_at = code.here() + 2;
+    code.push_far(0)
+        .push(0)
+        .push(0) // instance
+        .push(CALLBACK_FUNCTION)
+        .push(0)
+        .call("MMSYSTEM", WAVE_OUT_OPEN);
+    expect_ax(&mut code, 0, 13);
+    play_and_reset(&mut code);
+    code.emit(&[0x1E]) // push ds
+        .push(MSG)
+        .push(0) // any window
+        .push(0)
+        .push(0)
+        .push(1) // PM_REMOVE
+        .call("USER", PEEK_MESSAGE);
+    expect(&mut code, CALLS, 2, true, 2);
+    expect(&mut code, FIRST, MM_WOM_OPEN, true, 3);
+    expect(&mut code, SECOND, MM_WOM_DONE, true, 4);
+    expect(&mut code, DONE_P1, HEADER, true, 5);
+    expect_ds(&mut code, DONE_P1 + 2, 6);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let callback = wave_callback(&mut code);
+    code.patch(callback_at, callback);
+    let (exit, log) = run("wave_callback", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}
+
 const MCI_SEND_COMMAND: u16 = 701;
 
 /// The commands and flags the MCI tests send, and what they get.
