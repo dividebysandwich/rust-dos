@@ -19,11 +19,11 @@ const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
 const WIN32_VERSION: u16 = 73;
-/// The W32 versions an older rust-dos saved that this one still loads:
-/// 71's keeps only the names of the font files a program added
+/// The W32 versions this rust-dos loads: its own, and those an older one
+/// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), and 71's and 72's not the desktop's own
 /// size (`version::OwnSize`).
-const WIN32_OLDER: [u16; 2] = [71, 72];
+const WIN32_LOADS: [u16; 3] = [71, 72, WIN32_VERSION];
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -710,8 +710,7 @@ impl Bus {
         }
         win32.reset();
         if r.next_is(b"W32 ") {
-            let versions = [WIN32_OLDER[0], WIN32_OLDER[1], WIN32_VERSION];
-            win32.load(&mut r.section_of(b"W32 ", &versions)?)?;
+            win32.load(&mut r.section_of(b"W32 ", &WIN32_LOADS)?)?;
         }
         // The extended memory they hold.
         xms.dpmi = dpmi.reservations();

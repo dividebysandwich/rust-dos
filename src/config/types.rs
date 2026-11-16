@@ -217,8 +217,8 @@ impl DesktopSize {
 
     /// "640x480", "800x600" or "1024x768".
     pub fn parse(s: &str) -> Option<Self> {
-        let s = s.trim().to_ascii_lowercase();
-        Self::ALL.into_iter().find(|d| d.name() == s)
+        let s = s.trim();
+        Self::ALL.into_iter().find(|d| d.name().eq_ignore_ascii_case(s))
     }
 
     pub fn name(self) -> &'static str {
@@ -229,8 +229,9 @@ impl DesktopSize {
         }
     }
 
-    /// Its width and height in pixels.
-    pub fn size(self) -> (u32, u32) {
+    /// Its width and height in pixels. The sizes of `ALL` are the ones
+    /// ChangeDisplaySettings sets too (`screen::DESKTOP_SIZES`).
+    pub const fn size(self) -> (u32, u32) {
         match self {
             Self::Vga => (640, 480),
             Self::Svga => (800, 600),

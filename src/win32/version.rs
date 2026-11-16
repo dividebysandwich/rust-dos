@@ -100,6 +100,19 @@ pub fn own_size(win32: &super::Win32) -> (u32, u32) {
     win32.own_size.0.size()
 }
 
+/// The registry's value of the desktop's own size (`own_size`), as a
+/// .reg file to put over the seed and the registry file: the Resolution
+/// of HKLM\Config\0001\Display\Settings, which Display Properties
+/// writes on Windows, so it says what GetSystemMetrics does.
+pub fn display_registry_values(win32: &super::Win32) -> String {
+    let (w, h) = own_size(win32);
+    format!(
+        "REGEDIT4\r\n\r\n\
+         [HKEY_LOCAL_MACHINE\\Config\\0001\\Display\\Settings]\r\n\
+         \"Resolution\"=\"{w},{h}\"\r\n"
+    )
+}
+
 /// Whether the desktop has 256 colours from a palette (`win32_depth=8`).
 pub fn palette_desktop(cpu: &Cpu) -> bool {
     cpu.bus.win32.desktop_depth == crate::config::DesktopDepth::Palette
@@ -309,5 +322,38 @@ mod tests {
         for version in [Win95, Win98, Win98Se] {
             assert!(exports(version, "COMCTL32.DLL", "_TrackMouseEvent"));
         }
+    }
+
+    /// A state keeps the desktop's own size; one of a W32 section older
+    /// than `SIZE_SAVED` has none, and its desktop was 640x480.
+    #[test]
+    fn a_state_keeps_the_desktops_own_size_and_an_older_one_is_640x480() {
+        use crate::config::DesktopSize;
+        use crate::savestate::{Reader, State, Writer};
+        let size = OwnSize(DesktopSize::Xga);
+        let mut w = Writer::new();
+        w.section(b"TEST", SIZE_SAVED, |w| size.save(w));
+        let mut back = OwnSize::default();
+        let mut r = Reader::new(&w.buf);
+        back.load(&mut r.section(b"TEST", SIZE_SAVED).unwrap())
+            .unwrap();
+        assert_eq!(back, size);
+        // Version 72 saved nothing of it: nothing is read.
+        let mut w = Writer::new();
+        w.section(b"TEST", 72, |_| {});
+        let mut r = Reader::new(&w.buf);
+        let mut section = r.section_of(b"TEST", &[72, SIZE_SAVED]).unwrap();
+        let mut old = OwnSize(DesktopSize::Svga);
+        old.load(&mut section).unwrap();
+        assert!(section.is_empty());
+        assert_eq!(old, OwnSize(DesktopSize::Vga));
+        // Bytes read outside a section are this build's layout.
+        let mut w = Writer::new();
+        size.save(&mut w);
+        let mut r = Reader::new(&w.buf);
+        let mut bare = OwnSize::default();
+        bare.load(&mut r).unwrap();
+        assert!(r.is_empty());
+        assert_eq!(bare, size);
     }
 }

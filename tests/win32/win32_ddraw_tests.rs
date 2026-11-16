@@ -6,8 +6,8 @@
 //! and at the display while the program is still there.
 
 use iced_x86::code_asm::*;
-use rust_dos::cpu::{Cpu, HostConsole};
 use rust_dos::config::DesktopSize;
+use rust_dos::cpu::{Cpu, HostConsole};
 use rust_dos::exec::{NoHook, run_batch};
 use rust_dos_pe::{self as pe, Builder, Imp};
 use std::fs;
@@ -1859,8 +1859,9 @@ fn change_display_settings_without_a_mode_gives_the_desktops_back() {
 }
 
 /// A window on the desktop, the screen's size, the desktop's own mode
-/// (EnumDisplaySettingsA's ENUM_REGISTRY_SETTINGS), then ChangeDisplaySettingsA to 1024x768 and
-/// the screen's size, then the desktop's own mode again and its size.
+/// (EnumDisplaySettingsA's ENUM_REGISTRY_SETTINGS), then
+/// ChangeDisplaySettingsA to 1024x768 and the screen's size, then the
+/// desktop's own mode again and its size.
 fn own_size_program() -> (Vec<u8>, u32) {
     // DM_PELSWIDTH and DM_PELSHEIGHT.
     const SIZE: u32 = 0x18_0000;

@@ -36,6 +36,7 @@
 //! of the other `DESKTOP_SIZES` at the same depth, until it gives the
 //! desktop's own size back or the process that set it ends.
 
+use crate::config::DesktopSize;
 use crate::cpu::Cpu;
 use crate::video::crt::CrtTiming;
 use crate::toadforce::command::encode;
@@ -56,8 +57,16 @@ pub struct Mode {
 }
 
 /// The sizes the desktop can have: the ones EnumDisplaySettings lists
-/// and ChangeDisplaySettings sets.
-pub const DESKTOP_SIZES: [(u32, u32); 3] = [(640, 480), (800, 600), (1024, 768)];
+/// and ChangeDisplaySettings sets, those `win32_desktop` gives its own.
+pub const DESKTOP_SIZES: [(u32, u32); DesktopSize::ALL.len()] = {
+    let mut sizes = [(0, 0); DesktopSize::ALL.len()];
+    let mut i = 0;
+    while i < sizes.len() {
+        sizes[i] = DesktopSize::ALL[i].size();
+        i += 1;
+    }
+    sizes
+};
 
 /// The sizes of the modes DirectDraw offers, which have numbers of the
 /// VESA kind's own where the BIOS's list hasn't them.
@@ -119,10 +128,10 @@ pub fn linear_memory(cpu: &mut Cpu) {
 }
 
 /// The desktop's mode: its size, its own (`win32_desktop`) unless
-/// ChangeDisplaySettings set another (`set_desktop_size`), at 8 bits a pixel with
-/// `win32_depth=8` and 16 with `win32_depth=16`, else 16 on the card, 24
-/// (packed) on an S3 ViRGE, whose VESA BIOS has that instead of 32, and
-/// 32 on the others.
+/// ChangeDisplaySettings set another (`set_desktop_size`), at 8 bits a
+/// pixel with `win32_depth=8` and 16 with `win32_depth=16`, else 16 on
+/// the card, 24 (packed) on an S3 ViRGE, whose VESA BIOS has that
+/// instead of 32, and 32 on the others.
 pub fn desktop(cpu: &Cpu) -> Mode {
     use crate::config::DesktopDepth;
     let bpp = match cpu.bus.win32.desktop_depth {

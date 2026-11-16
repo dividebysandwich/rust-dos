@@ -2,15 +2,15 @@
 //! with its standard color scheme, and the display's mode, which the
 //! screen's size follows.
 //!
-//! The screen is as large as the display mode: the desktop's, 640x480
-//! unless ChangeDisplaySettings set another, or the one DirectDraw set
-//! while it has the display. GetSystemMetrics, the desktop window, the
-//! monitor, the cursor's range and the rest take their size from
-//! `screen_size`. A change of the mode (`set_display_mode`, DirectDraw's
-//! SetDisplayMode and RestoreDisplayMode, the end of the process that
-//! set it) resizes the desktop window, keeps the cursor on the screen
-//! and tells the top-level windows with WM_DISPLAYCHANGE
-//! (`display_changed`).
+//! The screen is as large as the display mode: the desktop's, its own
+//! size (`win32_desktop`, 640x480 by default) unless
+//! ChangeDisplaySettings set another, or the one DirectDraw set while it
+//! has the display. GetSystemMetrics, the desktop window, the monitor,
+//! the cursor's range and the rest take their size from `screen_size`.
+//! A change of the mode (`set_display_mode`, DirectDraw's SetDisplayMode
+//! and RestoreDisplayMode, the end of the process that set it) resizes
+//! the desktop window, keeps the cursor on the screen and tells the
+//! top-level windows with WM_DISPLAYCHANGE (`display_changed`).
 
 use super::{FALSE, TRUE, read_words, user, write_words};
 use crate::cpu::Cpu;

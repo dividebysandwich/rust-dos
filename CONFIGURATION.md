@@ -636,13 +636,13 @@ limit, so without a connection it goes on as it would with one:
   program that starts when none runs.
 * `win32_desktop` is the size of the built-in Windows' desktop:
   `640x480` (the default), `800x600` or `1024x768`, as Display
-  Properties set it on Windows. GetSystemMetrics and
-  EnumDisplaySettings report it, and the desktop shows at that size.
-  Programs that say they need 800x600 or more, such as Fields of Fire,
-  need `800x600`. A program can still change the size with
-  ChangeDisplaySettings while it runs; its end gives this size back.
-  Like `win32_depth`, a change takes effect for the next program that
-  starts when none runs.
+  Properties set it on Windows. GetSystemMetrics, EnumDisplaySettings
+  and the `Resolution` of `HKLM\Config\0001\Display\Settings` report
+  it, and the desktop shows at that size. Programs that say they need
+  800x600 or more, such as Fields of Fire, need `800x600`. A program can
+  still change the size with ChangeDisplaySettings while it runs; its
+  end gives this size back. Like `win32_depth`, a change takes effect
+  for the next program that starts when none runs.
 * `dos_version` is the DOS version programs are told (INT 21h AH=30h,
   AX=3306h and the PSP's), such as `5.00` (the default), `6.22` or `7.10`;
   `7.1` is 7.10, as DOSBox's `ver` has it. From 7.00 on, DOS has the FAT32
