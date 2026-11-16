@@ -160,7 +160,10 @@ pub struct ShownWords {
 
 // The words sit by value in the card (`Voodoo::held_words`), so what is
 // added here is added to every move of the machine: keep big parts boxed.
-const _: () = assert!(std::mem::size_of::<ShownWords>() <= 256);
+const _: () = assert!(
+    std::mem::size_of::<ShownWords>() <= 256,
+    "ShownWords moves with the card: box the part that grew it"
+);
 
 impl Default for ShownWords {
     fn default() -> Self {
