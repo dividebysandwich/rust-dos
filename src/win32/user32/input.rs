@@ -680,11 +680,12 @@ fn clipped(input: &Input, (w, h): (i32, i32), x: i32, y: i32) -> (i32, i32) {
 /// desktop the mouse moves over all of the screen. Windows frees the
 /// cursor on every mode change, whether ChangeDisplaySettings or
 /// DirectDraw's SetDisplayMode made it (ReactOS's
-/// UserChangeDisplaySettings calls UserClipCursor(NULL), Wine's
-/// NtUserChangeDisplaySettings NtUserClipCursor(NULL)), so a program
-/// that confined the cursor to its window at the desktop's size and then
-/// took a larger mode can move it over the whole new screen (Zanzarah
-/// clips to its 640x480 window before it sets 1024x768).
+/// UserChangeDisplaySettings calls UserClipCursor(NULL), and Wine's
+/// display_mode_changed, which NtUserChangeDisplaySettings calls,
+/// NtUserClipCursor(NULL)), so a program that confined the cursor to its
+/// window at the desktop's size and then took a larger mode can move it
+/// over the whole new screen (Zanzarah clips to its 640x480 window
+/// before it sets 1024x768).
 pub fn screen_changed(cpu: &mut Cpu) {
     let (w, h) = screen_size(cpu);
     if user(cpu).desktop {
@@ -3130,27 +3131,54 @@ mod tests {
         assert_eq!(keys, [(WM_KEYDOWN, 0x0148_0001)]);
     }
 
-    /// A mode change frees the cursor that ClipCursor confined: a program
-    /// that clipped it to its window at the desktop's 640x480 and then
-    /// set 1024x768 moves it over the whole new screen (Zanzarah), as
-    /// Windows does. DirectDraw's SetDisplayMode changes the mode through
-    /// the same `display_changed`.
-    #[test]
-    fn a_mode_change_frees_the_clipped_cursor() {
+    /// A program clips the cursor to its window at the desktop's 640x480,
+    /// `set_mode` changes the display to 1024x768, and the program puts
+    /// the cursor in the middle of the new screen: the clip is gone and
+    /// the mouse takes the cursor to the new screen's far corner.
+    fn check_mode_change_frees_clip(set_mode: impl FnOnce(&mut Cpu)) {
+        use crate::video::adapter::{Adapter, VideoSetup};
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let setup = VideoSetup {
+            adapter: Adapter::ToadForce,
+            ..Default::default()
+        };
+        crate::video::bios::install(&mut cpu.bus, setup);
         super::super::init(&mut cpu);
         user(&mut cpu).desktop = true;
         assert_eq!(screen_size(&cpu), (640, 480));
-        user(&mut cpu).input.clip = Some(Rect::new(0, 0, 640, 480));
-        let mode = Some((1024, 768, 32));
-        let changed = super::super::sysparams::set_display_mode(&mut cpu, mode);
-        assert_eq!(changed, 0, "DISP_CHANGE_SUCCESSFUL");
+        let rect = 0x1_0000;
+        write_words(&mut cpu, rect, &[0, 0, 640, 480]);
+        clip_cursor(&mut cpu, &[rect]);
+        assert_eq!(user(&mut cpu).input.clip, Some(Rect::new(0, 0, 640, 480)));
+        set_mode(&mut cpu);
         assert_eq!(screen_size(&cpu), (1024, 768));
         assert_eq!(user(&mut cpu).input.clip, None);
-        set_cursor_pos(&mut cpu, &[1023, 767]);
-        assert_eq!(user(&mut cpu).input.cursor, (1023, 767));
-        cpu.bus.mouse.move_by(40.0, 40.0);
+        set_cursor_pos(&mut cpu, &[512, 384]);
+        assert_eq!(user(&mut cpu).input.cursor, (512, 384));
+        cpu.bus.mouse.move_by(1000.0, 1000.0);
         poll(&mut cpu);
         assert_eq!(user(&mut cpu).input.cursor, (1023, 767));
+    }
+
+    /// ChangeDisplaySettings frees the cursor that ClipCursor confined,
+    /// as Windows does.
+    #[test]
+    fn change_display_settings_frees_the_clipped_cursor() {
+        check_mode_change_frees_clip(|cpu| {
+            let mode = Some((1024, 768, 32));
+            let changed = super::super::sysparams::set_display_mode(cpu, mode);
+            assert_eq!(changed, 0, "DISP_CHANGE_SUCCESSFUL");
+        });
+    }
+
+    /// DirectDraw's SetDisplayMode frees it too: Zanzarah clips the
+    /// cursor to its 640x480 window and then sets 1024x768 this way.
+    #[test]
+    fn set_display_mode_frees_the_clipped_cursor() {
+        check_mode_change_frees_clip(|cpu| {
+            let owner = 0x1000;
+            let hr = crate::win32::ddraw::display::set_mode(cpu, owner, 1024, 768, 32);
+            assert_eq!(hr, 0, "DD_OK");
+        });
     }
 }
