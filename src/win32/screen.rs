@@ -181,8 +181,14 @@ pub fn mode(cpu: &Cpu) -> Option<Mode> {
 /// clears all of video memory, as the BIOS does, the card the picture's
 /// bytes. None if the adapter has no such mode.
 pub fn set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32) -> Option<Mode> {
+    set_mode_at(cpu, width, height, bpp, 60)
+}
+
+/// `set_mode`, the card's modes at `hz` (`card_timing`), as Glide sets
+/// them; the other adapters' at their own rate.
+pub fn set_mode_at(cpu: &mut Cpu, width: u32, height: u32, bpp: u32, hz: u32) -> Option<Mode> {
     if is_card(cpu) {
-        card_set_mode(cpu, width, height, bpp)?;
+        card_set_mode(cpu, width, height, bpp, hz)?;
         let len = width * bpp / 8 * height;
         write(cpu, 0, &vec![0; len as usize]);
     } else if is_toadforce(cpu) {
@@ -709,50 +715,75 @@ pub fn to_565(v: u32) -> u16 {
 /// A mode's timing: the pixel clock in Hz, the horizontal display end,
 /// sync start, sync end and total in pixels, the same for lines, and
 /// whether the syncs are negative.
-struct Timing {
-    clock: u64,
-    h: [u32; 4],
-    v: [u32; 4],
-    negative: bool,
+pub struct Timing {
+    pub clock: u64,
+    pub h: [u32; 4],
+    pub v: [u32; 4],
+    pub negative: bool,
 }
 
-/// The timing of a picture `width` x `lines`: VESA's for its standard
-/// sizes, and for others one at about 60 Hz with blanking of their
-/// proportions.
-fn card_timing(width: u32, lines: u32) -> Timing {
+/// The timing of a picture `width` x `lines` at `hz`, for a 3dfx card's
+/// modes: VESA's (DMT) for the standard sizes at the rates it has them,
+/// and for others the clock that gives `hz` with blanking of the
+/// picture's proportions. 640x400 at 60 Hz is VGA's 70 Hz mode, as it
+/// always was here.
+pub fn card_timing(width: u32, lines: u32, hz: u32) -> Timing {
     let t = |clock, h, v, negative| Timing {
         clock,
         h,
         v,
         negative,
     };
-    match (width, lines) {
-        (640, 400) => t(25_175_000, [640, 656, 752, 800], [400, 412, 414, 449], true),
-        (640, 480) => t(25_175_000, [640, 656, 752, 800], [480, 490, 492, 525], true),
-        (800, 600) => t(
+    const H640: [u32; 4] = [640, 656, 752, 800];
+    const H1600: [u32; 4] = [1600, 1664, 1856, 2160];
+    const V1200: [u32; 4] = [1200, 1201, 1204, 1250];
+    match (width, lines, hz) {
+        (640, 400, 60 | 70) => t(25_175_000, H640, [400, 412, 414, 449], true),
+        (640, 400, 85) => t(31_500_000, [640, 672, 736, 832], [400, 401, 404, 445], false),
+        (640, 480, 60) => t(25_175_000, H640, [480, 490, 492, 525], true),
+        (640, 480, 72) => t(31_500_000, [640, 664, 704, 832], [480, 489, 492, 520], true),
+        (640, 480, 75) => t(31_500_000, [640, 656, 720, 840], [480, 481, 484, 500], true),
+        (640, 480, 85) => t(36_000_000, [640, 696, 752, 832], [480, 481, 484, 509], true),
+        (800, 600, 72) => t(50_000_000, [800, 856, 976, 1040], [600, 637, 643, 666], false),
+        (800, 600, 75) => t(49_500_000, [800, 816, 896, 1056], [600, 601, 604, 625], false),
+        (800, 600, 85) => t(56_250_000, [800, 832, 896, 1048], [600, 601, 604, 631], false),
+        (1024, 768, 70) => t(75_000_000, [1024, 1048, 1184, 1328], [768, 771, 777, 806], true),
+        (1024, 768, 75) => t(78_750_000, [1024, 1040, 1136, 1312], [768, 769, 772, 800], false),
+        (1024, 768, 85) => t(94_500_000, [1024, 1072, 1168, 1376], [768, 769, 772, 808], false),
+        (1280, 1024, 75) => t(
+            135_000_000,
+            [1280, 1296, 1440, 1688],
+            [1024, 1025, 1028, 1066],
+            false,
+        ),
+        (1280, 1024, 85) => t(
+            157_500_000,
+            [1280, 1344, 1504, 1728],
+            [1024, 1025, 1028, 1072],
+            false,
+        ),
+        (1600, 1200, 70) => t(189_000_000, H1600, V1200, false),
+        (1600, 1200, 75) => t(202_500_000, H1600, V1200, false),
+        (1600, 1200, 85) => t(229_500_000, H1600, V1200, false),
+        (800, 600, 60) => t(
             40_000_000,
             [800, 840, 968, 1056],
             [600, 601, 605, 628],
             false,
         ),
-        (1024, 768) => t(
+        (1024, 768, 60) => t(
             65_000_000,
             [1024, 1048, 1184, 1344],
             [768, 771, 777, 806],
             true,
         ),
-        (1280, 1024) => t(
+        (1280, 1024, 60) => t(
             108_000_000,
             [1280, 1328, 1440, 1688],
             [1024, 1025, 1028, 1066],
             false,
         ),
-        (1600, 1200) => t(
-            162_000_000,
-            [1600, 1664, 1856, 2160],
-            [1200, 1201, 1204, 1250],
-            false,
-        ),
+        (1600, 1200, 60) => t(162_000_000, H1600, V1200, false),
         _ => {
             let blank = (width / 4).next_multiple_of(8).max(64);
             let h = [
@@ -763,7 +794,7 @@ fn card_timing(width: u32, lines: u32) -> Timing {
             ];
             let vblank = (lines / 20).max(12);
             let v = [lines, lines + 3, lines + 7, lines + vblank];
-            let clock = h[3] as u64 * v[3] as u64 * 60;
+            let clock = h[3] as u64 * v[3] as u64 * hz as u64;
             t(clock, h, v, false)
         }
     }
@@ -793,7 +824,7 @@ fn pll(hz: u64) -> u32 {
 /// the PLL, and the video processor. Modes less than 400 pixels wide run
 /// at half the clock, and those less than 300 lines high show each line
 /// twice (half mode).
-fn card_set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32) -> Option<()> {
+fn card_set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32, hz: u32) -> Option<()> {
     let format = match bpp {
         8 => 0,
         16 => 1,
@@ -811,14 +842,14 @@ fn card_set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32) -> Option<()>
     let lines = if half { height * 2 } else { height };
     let narrow = width < card::NARROW_WIDTH;
     let t = if narrow {
-        let t = card_timing(width * 2, lines);
+        let t = card_timing(width * 2, lines, hz);
         Timing {
             clock: t.clock / 2,
             h: t.h.map(|x| x / 2),
             ..t
         }
     } else {
-        card_timing(width, lines)
+        card_timing(width, lines, hz)
     };
     let chars = t.h.map(|x| x / 8);
     let [hde, hss, hse, htotal] = chars;
@@ -1003,6 +1034,33 @@ mod tests {
     }
 
     #[test]
+    fn the_cards_modes_run_at_the_rate_set() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        crate::video::bios::install(
+            &mut cpu.bus,
+            crate::video::adapter::VideoSetup {
+                adapter: crate::video::adapter::Adapter::Voodoo3,
+                ..Default::default()
+            },
+        );
+        cpu.bus
+            .configure_voodoo(Some(crate::voodoo::Board::Voodoo3));
+        for (w, h, hz) in [
+            (640, 480, 60),
+            (640, 480, 72),
+            (640, 480, 75),
+            (800, 600, 60),
+            (1024, 768, 100),
+        ] {
+            card_set_mode(&mut cpu, w, h, 16, hz).unwrap();
+            let t = card_timing(w, h, hz);
+            let want = t.clock as f64 / (t.h[3] as f64 * t.v[3] as f64);
+            let got = cpu.bus.voodoo.as_ref().unwrap().refresh_hz();
+            assert!((got - want).abs() < 0.1, "{w}x{h} at {hz}: {got}");
+        }
+    }
+
+    #[test]
     fn the_pll_comes_near() {
         for hz in [25_175_000u64, 40_000_000, 65_000_000, 12_587_500] {
             let v = pll(hz) as u64;
@@ -1020,7 +1078,7 @@ mod tests {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
         cpu.bus
             .configure_voodoo(Some(crate::voodoo::Board::Voodoo3));
-        card_set_mode(&mut cpu, 640, 480, 32).unwrap();
+        card_set_mode(&mut cpu, 640, 480, 32, 60).unwrap();
         let bus = &mut cpu.bus;
         let screen = crate::autospeed::screen_bytes(bus);
         bus.activity
