@@ -81,7 +81,9 @@ pub fn lights_of(cpu: &mut Cpu, viewport: u32) -> Vec<Light> {
             ambient: [0.0; 4],
             position: [f(5), f(6), f(7)],
             direction: [f(8), f(9), f(10)],
-            range: f(11),
+            // A light of before Direct3D 7 with a range of 0 has no
+            // limit.
+            range: if f(11) > 0.0 { f(11) } else { f32::MAX },
             falloff: f(12),
             attenuation: [f(13), f(14), f(15)],
             theta: f(16),

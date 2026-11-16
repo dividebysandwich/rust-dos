@@ -86,15 +86,16 @@ pub fn words(cpu: &Cpu, whose: Whose) -> [u32; 53] {
     // counterclockwise.
     w[8] = 0x2 | 0x10 | 0x20 | 0x40;
     // D3DPRASTERCAPS_: dither, z test, vertex and table fog, mipmap LOD
-    // bias, z bias, range fog, w buffer, w fog, and what the card adds.
-    w[9] = 0x1 | 0x10 | 0x80 | 0x100 | 0x2000 | 0x4000 | 0x1_0000 | 0x4_0000 | 0x10_0000;
-    w[9] |= card.raster;
+    // bias, z bias, range fog, and what the card adds: fog by w on
+    // both cards, and a w buffer on a Voodoo.
+    w[9] = 0x1 | 0x10 | 0x80 | 0x100 | 0x2000 | 0x4000 | 0x1_0000;
+    w[9] |= card.raster | card.raster8;
     // D3DPCMPCAPS_: all eight, for depth and alpha.
     w[10] = 0xFF;
     w[13] = 0xFF;
     // D3DPBLENDCAPS_: as Direct3D 7's HAL has them.
     w[11] = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x100 | 0x200 | 0x400 | card.blend;
-    w[12] = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | card.blend & 0x3FF;
+    w[12] = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | card.blend & 0x7FF;
     // D3DPSHADECAPS_: Gouraud color, specular, alpha blending, fog.
     w[14] = 0x8 | 0x200 | 0x4000 | 0x8_0000;
     // D3DPTEXTURECAPS_: perspective, powers of 2, alpha, alpha in
@@ -134,7 +135,7 @@ pub fn words(cpu: &Cpu, whose: Whose) -> [u32; 53] {
     w[35] = 8;
     // D3DTEXOPCAPS_: the operations the HAL draws, which ValidateDevice
     // accepts (hal::can_do).
-    w[36] = card.ops;
+    w[36] = card.ops | card.ops8;
     w[37] = if card.stages == 0 { tmus } else { card.stages };
     w[38] = tmus;
     // D3DVTXPCAPS_: texture generation, material sources, directional
