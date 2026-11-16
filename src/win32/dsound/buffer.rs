@@ -1002,7 +1002,24 @@ fn voices(bus: &crate::bus::Bus) -> Vec<Voice> {
 /// The buffers that play, mixed at the primary buffer's format (its rate,
 /// its bits' steps, mono or stereo) for the host's frames `first` to
 /// `first + frames`, through the primary buffer's volume and pan.
-pub fn render(bus: &crate::bus::Bus, first: u64, frames: usize) -> Option<Vec<(f32, f32)>> {
+///
+/// The host's frames lie between the primary format's, and the first of
+/// those can come before `first`: it was mixed for the frames before, and
+/// is taken from then (`State::mixed`). Mixed again now, it would read
+/// what a program wrote behind the play cursor since, which the device
+/// played before the program wrote it (Omikron's speech clicked every
+/// 60 ms).
+pub fn render(bus: &mut crate::bus::Bus, first: u64, frames: usize) -> Option<Vec<(f32, f32)>> {
+    let (out, mixed) = mix(bus, first, frames)?;
+    bus.win32.dsound.mixed = mixed;
+    Some(out)
+}
+
+fn mix(
+    bus: &crate::bus::Bus,
+    first: u64,
+    frames: usize,
+) -> Option<(Vec<(f32, f32)>, super::Mixed)> {
     let ds = &bus.win32.dsound;
     let voices = voices(bus);
     if voices.is_empty() || frames == 0 {
@@ -1012,11 +1029,19 @@ pub fn render(bus: &crate::bus::Bus, first: u64, frames: usize) -> Option<Vec<(f
     let rate = primary.rate as u64;
     let k0 = first * rate / device::RATE;
     let k1 = (first + frames as u64 - 1) * rate / device::RATE + 1;
-    let mut mix = vec![(0.0f32, 0.0f32); (k1 - k0 + 1) as usize];
+    // The frames from k0 that the mix before this one made.
+    let kept = ds.mixed;
+    let reuse = if kept.rate == primary.rate && (k0..k0 + 2).contains(&kept.last) {
+        (kept.last - k0 + 1) as usize
+    } else {
+        0
+    };
+    let from = k0 + reuse as u64;
+    let mut mix = vec![(0.0f32, 0.0f32); (k1 + 1 - from) as usize];
     for v in &voices {
         let mut reader = Reader::new(bus, v.pid);
         for (n, out) in mix.iter_mut().enumerate() {
-            let pos = device::position(v.tick, v.pos, v.rate, k0 + n as u64, rate);
+            let pos = device::position(v.tick, v.pos, v.rate, from + n as u64, rate);
             if !v.looping && pos >= (v.frames as u64) << 32 {
                 break;
             }
@@ -1039,6 +1064,13 @@ pub fn render(bus: &crate::bus::Bus, first: u64, frames: usize) -> Option<Vec<(f
         }
         *frame = (l, r);
     }
+    mix.splice(0..0, kept.frames[2 - reuse..].iter().copied());
+    let n = mix.len();
+    let mixed = super::Mixed {
+        rate: primary.rate,
+        last: k1,
+        frames: [mix[n - 2], mix[n - 1]],
+    };
     let (gl, gr) = device::gains(ds.volume, ds.pan);
     let out = (0..frames as u64)
         .map(|n| {
@@ -1052,5 +1084,5 @@ pub fn render(bus: &crate::bus::Bus, first: u64, frames: usize) -> Option<Vec<(f
             )
         })
         .collect();
-    Some(out)
+    Some((out, mixed))
 }

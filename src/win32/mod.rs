@@ -1491,7 +1491,7 @@ pub fn audio_playing(win32: &Win32) -> bool {
 /// The sound device's samples for the host's frames `first` to `first +
 /// frames`, if it plays (dsound/device.rs).
 pub fn audio_render(
-    bus: &crate::bus::Bus,
+    bus: &mut crate::bus::Bus,
     first: u64,
     frames: usize,
 ) -> Option<Vec<(f32, f32)>> {

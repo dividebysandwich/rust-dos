@@ -184,6 +184,7 @@ const SAMPLES: u32 = 0x1000;
 const DS_CREATE_SOUND_BUFFER: i32 = 12;
 const DS_SET_COOPERATIVE_LEVEL: i32 = 24;
 const DSB_QUERY_INTERFACE: i32 = 0;
+const DSB_GET_CURRENT_POSITION: i32 = 16;
 const DSB_LOCK: i32 = 44;
 const DSB_PLAY: i32 = 48;
 const DSB_UNLOCK: i32 = 76;
@@ -314,6 +315,104 @@ fn a_looping_directsound_buffer_is_heard_at_its_pitch() {
 #[test]
 fn a_looping_directsound_buffer_is_heard_on_the_dynamic_recompiler() {
     looping_buffer(CoreMode::Dynamic);
+}
+
+// The streaming program's play cursor, write cursor and where it wrote
+// up to.
+const PLAY: u32 = 0xA0;
+const WRITE: u32 = 0xA4;
+const LAST: u32 = 0xA8;
+
+/// A looping buffer of a second of one level, at 22080 Hz as Omikron's
+/// speech has it, played on the default 22050 Hz device. Every 15 ms, as
+/// a streaming program refills what was played, the program asks for the
+/// play cursor and writes the opposite level from where it got to up to
+/// the cursor. That is what the buffer plays when it comes round again,
+/// a second later: until then, only the first level is heard.
+fn refill_behind_the_play_cursor(core: CoreMode) {
+    let frames = 22080;
+    let samples: Vec<u8> = (0..frames).flat_map(|_| 8000i16.to_le_bytes()).collect();
+    let len = samples.len() as u32;
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.dll", KERNEL32), ("DSOUND.dll", DSOUND)];
+    let exe = program(imports, &ds_data(&samples, frames, 0), |a, l| {
+        let mut fail = a.create_label();
+        ds_setup(a, l, fail, len)?;
+        ds_play(a, l, fail)?;
+        // 40 refills, 600 ms, inside the first time round.
+        a.mov(dword_ptr(l.at(T0)), 40)?;
+        let mut again = a.create_label();
+        let mut skip = a.create_label();
+        a.set_label(&mut again)?;
+        a.push(15)?;
+        a.call(l.import(SLEEP))?;
+        // GetCurrentPosition(buf, &play, &write).
+        a.push(l.at(WRITE) as i32)?;
+        a.push(l.at(PLAY) as i32)?;
+        method(a, l.at(BUF), DSB_GET_CURRENT_POSITION)?;
+        check(a, fail, 7)?;
+        a.mov(eax, dword_ptr(l.at(PLAY)))?;
+        a.sub(eax, dword_ptr(l.at(LAST)))?;
+        a.jbe(skip)?;
+        // Lock(buf, last, play - last, &p1, &n1, &p2, &n2, 0).
+        a.push(0)?;
+        a.push(l.at(N2) as i32)?;
+        a.push(l.at(P2) as i32)?;
+        a.push(l.at(N1) as i32)?;
+        a.push(l.at(P1) as i32)?;
+        a.push(eax)?;
+        a.push(dword_ptr(l.at(LAST)))?;
+        method(a, l.at(BUF), DSB_LOCK)?;
+        check(a, fail, 8)?;
+        a.mov(edi, dword_ptr(l.at(P1)))?;
+        a.mov(ecx, dword_ptr(l.at(N1)))?;
+        a.shr(ecx, 1)?;
+        a.mov(eax, -8000i32)?;
+        a.cld()?;
+        a.rep().stosw()?;
+        a.push(dword_ptr(l.at(N2)))?;
+        a.push(dword_ptr(l.at(P2)))?;
+        a.push(dword_ptr(l.at(N1)))?;
+        a.push(dword_ptr(l.at(P1)))?;
+        method(a, l.at(BUF), DSB_UNLOCK)?;
+        check(a, fail, 9)?;
+        a.mov(eax, dword_ptr(l.at(PLAY)))?;
+        a.mov(dword_ptr(l.at(LAST)), eax)?;
+        a.set_label(&mut skip)?;
+        a.dec(dword_ptr(l.at(T0)))?;
+        a.jnz(again)?;
+        exit(a, l, &mut fail)
+    });
+    let mut cpu = machine("refill", exe, core, &[]);
+    let (code, left) = run(&mut cpu, 4000);
+    assert_eq!(code, 0, "the program failed at step {code}");
+    let start = left
+        .iter()
+        .position(|&s| s != 0)
+        .expect("the buffer was heard");
+    let end = left.iter().rposition(|&s| s != 0).unwrap() + 1;
+    let heard = &left[start..end];
+    assert!(
+        heard.len() as f64 / HOST_RATE > 0.5,
+        "heard {} frames",
+        heard.len()
+    );
+    // The device's 8 bits take the level down to 7936; the refills, heard
+    // early, would take it below that.
+    let low: Vec<usize> = (0..heard.len()).filter(|&i| heard[i] < 7900).collect();
+    assert!(
+        low.is_empty(),
+        "{} of {} frames heard the refills a second early, the first at {:?}: {:?}",
+        low.len(),
+        heard.len(),
+        low.first(),
+        low.first()
+            .map(|&i| &heard[i.saturating_sub(2)..(i + 3).min(heard.len())])
+    );
+}
+
+#[test]
+fn a_refill_behind_the_play_cursor_isnt_heard_before_the_loop() {
+    refill_behind_the_play_cursor(CoreMode::Normal);
 }
 
 /// A second of 22050 Hz samples, looping, with a notification half way:
