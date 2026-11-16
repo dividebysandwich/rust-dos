@@ -7,16 +7,13 @@
 //! fails with DPNERR_INVALIDHANDLE.
 
 use super::{
-    DPN_OK, DPNERR_ALREADYINITIALIZED, DPNERR_DOESNOTEXIST, DPNERR_INVALIDFLAGS,
-    DPNERR_INVALIDHANDLE, DPNERR_INVALIDPARAM, DPNERR_INVALIDPOINTER, DPNERR_UNINITIALIZED, object,
-    object_id, read_u32, read_wide,
+    DPN_OK, DPNERR_DOESNOTEXIST, DPNERR_INVALIDFLAGS, DPNERR_INVALIDHANDLE, DPNERR_INVALIDPARAM,
+    DPNERR_INVALIDPOINTER, initialized, object, read_u32, read_wide,
 };
 use crate::cpu::Cpu;
 use crate::win32::com::Guid;
 use crate::win32::registry::{self, HKEY_LOCAL_MACHINE, Open, REG_SZ, Registry};
 
-/// Initialize's one flag.
-const DPLINITIALIZE_DISABLEPARAMVAL: u32 = 1;
 /// SetAppAvailable's one flag.
 const DPLAVAILABLE_ALLOWMULTIPLECONNECT: u32 = 1;
 
@@ -40,18 +37,6 @@ const STRINGS: [(u32, &str); 8] = [
     (0x34, "LauncherPath"),
 ];
 
-/// The lobbied application `this` is, or the method returns
-/// DPNERR_INVALIDOBJECT; and DPNERR_UNINITIALIZED until its Initialize.
-macro_rules! initialized {
-    ($cpu:expr, $this:expr) => {{
-        let id = object_id!($cpu, $this);
-        if !object($cpu, id).initialized {
-            return Some(DPNERR_UNINITIALIZED);
-        }
-        id
-    }};
-}
-
 /// Initialize(this, context, handler, connection out, flags): no lobby
 /// launched the program, so there is no connection to give it, and its
 /// handle is left as it was.
@@ -59,19 +44,7 @@ pub(super) fn initialize(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, _, handler, _, flags] = args[..] else {
         return Some(DPNERR_INVALIDPARAM);
     };
-    let id = object_id!(cpu, this);
-    if handler == 0 {
-        return Some(DPNERR_INVALIDPOINTER);
-    }
-    if flags & !DPLINITIALIZE_DISABLEPARAMVAL != 0 {
-        return Some(DPNERR_INVALIDFLAGS);
-    }
-    let o = object(cpu, id);
-    if o.initialized {
-        return Some(DPNERR_ALREADYINITIALIZED);
-    }
-    o.initialized = true;
-    Some(DPN_OK)
+    Some(super::initialize(cpu, this, handler, flags))
 }
 
 /// Close(this, flags).

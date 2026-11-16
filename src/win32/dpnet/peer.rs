@@ -6,17 +6,14 @@
 
 use super::address::{self, DPNA_DATATYPE_GUID};
 use super::{
-    Class, DPN_OK, DPNERR_ALREADYINITIALIZED, DPNERR_BUFFERTOOSMALL, DPNERR_DOESNOTEXIST,
-    DPNERR_INVALIDDEVICEADDRESS, DPNERR_INVALIDFLAGS, DPNERR_INVALIDHANDLE,
-    DPNERR_INVALIDHOSTADDRESS, DPNERR_INVALIDPARAM, DPNERR_INVALIDPOINTER, DPNERR_NOCONNECTION,
-    DPNERR_NOTREGISTERED, DPNERR_UNINITIALIZED, DPNERR_UNSUPPORTED, object, object_id, object_of,
-    read_u32, writable,
+    Class, DPN_OK, DPNERR_BUFFERTOOSMALL, DPNERR_DOESNOTEXIST, DPNERR_INVALIDDEVICEADDRESS,
+    DPNERR_INVALIDFLAGS, DPNERR_INVALIDHANDLE, DPNERR_INVALIDHOSTADDRESS, DPNERR_INVALIDPARAM,
+    DPNERR_INVALIDPOINTER, DPNERR_NOCONNECTION, DPNERR_NOTREGISTERED, DPNERR_UNSUPPORTED,
+    initialized, object, object_of, read_u32, writable,
 };
 use crate::cpu::Cpu;
 use crate::win32::com::Guid;
 
-/// Initialize's one flag in DirectX 8.
-const DPNINITIALIZE_DISABLEPARAMVAL: u32 = 1;
 /// EnumServiceProviders' one flag: every registered provider, whether
 /// it can start or not.
 const DPNENUMSERVICEPROVIDERS_ALL: u32 = 1;
@@ -70,37 +67,12 @@ fn provider_error(guid: &Guid) -> u32 {
     }
 }
 
-/// The peer `this` is, or the method returns DPNERR_INVALIDOBJECT; and
-/// DPNERR_UNINITIALIZED until its Initialize.
-macro_rules! initialized {
-    ($cpu:expr, $this:expr) => {{
-        let id = object_id!($cpu, $this);
-        if !object($cpu, id).initialized {
-            return Some(DPNERR_UNINITIALIZED);
-        }
-        id
-    }};
-}
-
-/// Initialize(this, context, handler, flags): the handler is kept for
-/// the messages a session sends, which there are none of yet.
+/// Initialize(this, context, handler, flags).
 pub(super) fn initialize(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, _, handler, flags] = args[..] else {
         return Some(DPNERR_INVALIDPARAM);
     };
-    let id = object_id!(cpu, this);
-    if handler == 0 {
-        return Some(DPNERR_INVALIDPOINTER);
-    }
-    if flags & !DPNINITIALIZE_DISABLEPARAMVAL != 0 {
-        return Some(DPNERR_INVALIDFLAGS);
-    }
-    let o = object(cpu, id);
-    if o.initialized {
-        return Some(DPNERR_ALREADYINITIALIZED);
-    }
-    o.initialized = true;
-    Some(DPN_OK)
+    Some(super::initialize(cpu, this, handler, flags))
 }
 
 /// Close(this, flags): the peer is as before its Initialize.
@@ -153,8 +125,11 @@ pub(super) fn enum_service_providers(cpu: &mut Cpu, args: &[u32]) -> Option<u32>
         SP_INFO_SIZE * listed.len() as u32 + names.iter().map(|n| n.len() as u32).sum::<u32>();
     cpu.bus.guest_write_32(size_at, needed);
     cpu.bus.guest_write_32(count_at, listed.len() as u32);
-    if room < needed || (needed > 0 && !writable(cpu, buffer, needed)) {
+    if room < needed {
         return Some(DPNERR_BUFFERTOOSMALL);
+    }
+    if needed > 0 && !writable(cpu, buffer, needed) {
+        return Some(DPNERR_INVALIDPOINTER);
     }
     let mut name_at = buffer + SP_INFO_SIZE * listed.len() as u32;
     for (i, ((guid, _), name)) in listed.iter().zip(&names).enumerate() {

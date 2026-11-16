@@ -433,9 +433,9 @@ fn dll_index() -> usize {
         .expect("DPNET is a built-in DLL")
 }
 
-/// A new object of `class` with one reference: its interface's block,
-/// or None when the heap is full.
-fn new_object(cpu: &mut Cpu, class: Class) -> Option<u32> {
+/// A new object of `class` with one reference: its id and its
+/// interface's block, or None when the heap is full.
+fn new_object(cpu: &mut Cpu, class: Class) -> Option<(usize, u32)> {
     let list = objects(cpu);
     let id = list.iter().position(Option::is_none).unwrap_or(list.len());
     let this = com::new_interface(cpu, dll_index(), class as usize, id as u32, 0)?;
@@ -453,7 +453,7 @@ fn new_object(cpu: &mut Cpu, class: Class) -> Option<u32> {
     } else {
         list[id] = Some(object);
     }
-    Some(this)
+    Some((id, this))
 }
 
 /// The object `this` is the interface of, and its class, or
@@ -482,6 +482,45 @@ macro_rules! object_id {
 }
 use object_id;
 
+/// The id of the peer or lobbied application `this` is, or the method
+/// returns DPNERR_INVALIDOBJECT; and DPNERR_UNINITIALIZED until its
+/// Initialize.
+macro_rules! initialized {
+    ($cpu:expr, $this:expr) => {{
+        let id = super::object_id!($cpu, $this);
+        if !super::object($cpu, id).initialized {
+            return Some(super::DPNERR_UNINITIALIZED);
+        }
+        id
+    }};
+}
+use initialized;
+
+/// The Initialize of a peer and of a lobbied application, whose one
+/// flag is the same: the object `this` takes the handler `handler`,
+/// which the messages of a session or a lobby would go to. There are
+/// none, so it isn't kept.
+fn initialize(cpu: &mut Cpu, this: u32, handler: u32, flags: u32) -> u32 {
+    /// DPNINITIALIZE_DISABLEPARAMVAL and DPLINITIALIZE_DISABLEPARAMVAL.
+    const DISABLEPARAMVAL: u32 = 1;
+    let id = match object_of(cpu, this) {
+        Ok((id, _)) => id,
+        Err(e) => return e,
+    };
+    if handler == 0 {
+        return DPNERR_INVALIDPOINTER;
+    }
+    if flags & !DISABLEPARAMVAL != 0 {
+        return DPNERR_INVALIDFLAGS;
+    }
+    let o = object(cpu, id);
+    if o.initialized {
+        return DPNERR_ALREADYINITIALIZED;
+    }
+    o.initialized = true;
+    DPN_OK
+}
+
 /// The process `pid` ended: its objects go with its heap.
 pub fn process_ended(cpu: &mut Cpu, pid: u32) {
     for slot in objects(cpu).iter_mut() {
@@ -502,7 +541,7 @@ fn create(cpu: &mut Cpu, class: Class, iid: &Guid, out: u32) -> u32 {
         com::write_out(cpu, out, 0);
         return E_NOINTERFACE;
     }
-    let this = new_object(cpu, class);
+    let this = new_object(cpu, class).map(|(_, this)| this);
     com::write_out(cpu, out, this.unwrap_or(0));
     if this.is_some() {
         DPN_OK
@@ -525,7 +564,8 @@ fn create_address(cpu: &mut Cpu, iid: &Guid, out: u32) -> u32 {
 
 /// DirectPlay8Create(iid, out, outer): an object of the class whose
 /// interface `iid` is, as DirectX 8.1's DPNET.DLL exports it besides
-/// its classes.
+/// its classes. An IID of no class of DPNET's fails with
+/// DPNERR_INVALIDPARAM, as in Wine's.
 fn direct_play8_create(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [iid, out, outer] = args[..] else {
         return Some(DPNERR_INVALIDPARAM);
@@ -541,7 +581,7 @@ fn direct_play8_create(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     match Class::ALL.into_iter().find(|c| c.iid() == iid) {
         Some(class) => Some(create(cpu, class, &iid, out)),
-        None => Some(E_NOINTERFACE),
+        None => Some(DPNERR_INVALIDPARAM),
     }
 }
 

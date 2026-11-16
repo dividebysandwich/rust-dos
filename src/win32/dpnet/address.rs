@@ -182,7 +182,14 @@ fn unescape(text: &[u16]) -> Option<Vec<u16>> {
     let mut i = 0;
     while i < text.len() {
         if text[i] == b'%' as u16 {
-            let hex = String::from_utf16(text.get(i + 1..i + 3)?).ok()?;
+            let digits = text.get(i + 1..i + 3)?;
+            if !digits
+                .iter()
+                .all(|&d| d < 0x80 && (d as u8).is_ascii_hexdigit())
+            {
+                return None;
+            }
+            let hex = String::from_utf16_lossy(digits);
             out.push(u16::from_str_radix(&hex, 16).ok()?);
             i += 3;
         } else {
@@ -234,13 +241,6 @@ pub fn parse(text: &[u16]) -> Option<(Vec<Component>, Vec<u8>)> {
     Some((components, user_data))
 }
 
-/// The address `this` is, or the method returns DPNERR_INVALIDOBJECT.
-macro_rules! address {
-    ($cpu:expr, $this:expr) => {
-        object_id!($cpu, $this)
-    };
-}
-
 /// The id of the address `other` is, if it is one.
 fn other_address(cpu: &mut Cpu, other: u32) -> Option<usize> {
     match object_of(cpu, other) {
@@ -258,7 +258,7 @@ fn set(cpu: &mut Cpu, id: usize, components: Vec<Component>, user_data: Vec<u8>)
 /// BuildFromURLW(this, url): the address the URL is, in place of the
 /// one there was.
 pub(super) fn build_from_url_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let id = address!(cpu, args[0]);
+    let id = object_id!(cpu, args[0]);
     let Some(text) = read_wide(cpu, args[1]) else {
         return Some(DPNERR_INVALIDPOINTER);
     };
@@ -267,7 +267,7 @@ pub(super) fn build_from_url_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// BuildFromURLA(this, url).
 pub(super) fn build_from_url_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let id = address!(cpu, args[0]);
+    let id = object_id!(cpu, args[0]);
     if args[1] == 0 {
         return Some(DPNERR_INVALIDPOINTER);
     }
@@ -291,7 +291,7 @@ fn build(cpu: &mut Cpu, id: usize, text: &[u16]) -> Option<u32> {
 
 /// Duplicate(this, out): a new address the same as this one.
 pub(super) fn duplicate(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let id = address!(cpu, args[0]);
+    let id = object_id!(cpu, args[0]);
     if !com::write_out(cpu, args[1], 0) {
         return Some(DPNERR_INVALIDPOINTER);
     }
@@ -299,10 +299,9 @@ pub(super) fn duplicate(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let o = object(cpu, id);
         (o.components.clone(), o.user_data.clone())
     };
-    let Some(copy) = new_object(cpu, Class::Address) else {
+    let Some((copy_id, copy)) = new_object(cpu, Class::Address) else {
         return Some(E_OUTOFMEMORY);
     };
-    let (copy_id, _) = object_of(cpu, copy).ok()?;
     set(cpu, copy_id, components, user_data);
     com::write_out(cpu, args[1], copy);
     Some(DPN_OK)
@@ -310,7 +309,7 @@ pub(super) fn duplicate(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// SetEqual(this, other): this address made the same as `other`.
 pub(super) fn set_equal(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let id = address!(cpu, args[0]);
+    let id = object_id!(cpu, args[0]);
     let Some(other) = other_address(cpu, args[1]) else {
         return Some(DPNERR_INVALIDPOINTER);
     };
@@ -323,7 +322,7 @@ pub(super) fn set_equal(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// IsEqual(this, other): DPNSUCCESS_EQUAL when their URLs are the same
 /// but for case, DPNSUCCESS_NOTEQUAL when they aren't.
 pub(super) fn is_equal(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let id = address!(cpu, args[0]);
+    let id = object_id!(cpu, args[0]);
     let Some(other) = other_address(cpu, args[1]) else {
         return Some(DPNERR_INVALIDPOINTER);
     };
@@ -341,7 +340,7 @@ pub(super) fn is_equal(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// Clear(this): no components and no user data.
 pub(super) fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let id = address!(cpu, args[0]);
+    let id = object_id!(cpu, args[0]);
     set(cpu, id, Vec::new(), Vec::new());
     Some(DPN_OK)
 }
@@ -362,7 +361,7 @@ fn get_url(cpu: &mut Cpu, args: &[u32], wide: bool) -> Option<u32> {
     let [this, buffer, chars_at] = args[..] else {
         return Some(DPNERR_INVALIDPARAM);
     };
-    let id = address!(cpu, this);
+    let id = object_id!(cpu, this);
     let Some(room) = read_u32(cpu, chars_at) else {
         return Some(DPNERR_INVALIDPOINTER);
     };
@@ -400,7 +399,7 @@ pub(super) fn get_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 fn get_guid(cpu: &mut Cpu, args: &[u32], name: &str) -> Option<u32> {
-    let id = address!(cpu, args[0]);
+    let id = object_id!(cpu, args[0]);
     if !writable(cpu, args[1], 16) {
         return Some(DPNERR_INVALIDPOINTER);
     }
@@ -426,7 +425,7 @@ pub(super) fn set_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 fn set_guid(cpu: &mut Cpu, args: &[u32], name: &str) -> Option<u32> {
-    let id = address!(cpu, args[0]);
+    let id = object_id!(cpu, args[0]);
     let Some(g) = Guid::read(cpu, args[1]) else {
         return Some(DPNERR_INVALIDPOINTER);
     };
@@ -439,7 +438,7 @@ pub(super) fn get_user_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, buffer, size_at] = args[..] else {
         return Some(DPNERR_INVALIDPARAM);
     };
-    let id = address!(cpu, this);
+    let id = object_id!(cpu, this);
     let Some(room) = read_u32(cpu, size_at) else {
         return Some(DPNERR_INVALIDPOINTER);
     };
@@ -472,7 +471,7 @@ pub(super) fn set_user_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, data, size] = args[..] else {
         return Some(DPNERR_INVALIDPARAM);
     };
-    let id = address!(cpu, this);
+    let id = object_id!(cpu, this);
     let bytes = if size == 0 {
         Vec::new()
     } else {
@@ -489,7 +488,7 @@ pub(super) fn set_user_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// GetNumComponents(this, out).
 pub(super) fn get_num_components(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let id = address!(cpu, args[0]);
+    let id = object_id!(cpu, args[0]);
     let count = object(cpu, id).components.len() as u32;
     if !com::write_out(cpu, args[1], count) {
         return Some(DPNERR_INVALIDPOINTER);
@@ -502,7 +501,7 @@ pub(super) fn get_component_by_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> 
     let [this, name, buffer, size_at, type_at] = args[..] else {
         return Some(DPNERR_INVALIDPARAM);
     };
-    let id = address!(cpu, this);
+    let id = object_id!(cpu, this);
     let Some(name) = read_wide(cpu, name) else {
         return Some(DPNERR_INVALIDPOINTER);
     };
@@ -527,7 +526,7 @@ pub(super) fn get_component_by_index(cpu: &mut Cpu, args: &[u32]) -> Option<u32>
     let [this, index, name, chars_at, buffer, size_at, type_at] = args[..] else {
         return Some(DPNERR_INVALIDPARAM);
     };
-    let id = address!(cpu, this);
+    let id = object_id!(cpu, this);
     let (Some(name_room), Some(room)) = (read_u32(cpu, chars_at), read_u32(cpu, size_at)) else {
         return Some(DPNERR_INVALIDPOINTER);
     };
@@ -563,7 +562,7 @@ pub(super) fn add_component(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, name, data, size, kind] = args[..] else {
         return Some(DPNERR_INVALIDPARAM);
     };
-    let id = address!(cpu, this);
+    let id = object_id!(cpu, this);
     let Some(name) = read_wide(cpu, name) else {
         return Some(DPNERR_INVALIDPOINTER);
     };
@@ -624,7 +623,7 @@ pub(super) fn build_from_dpaddress(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, at, size] = args[..] else {
         return Some(DPNERR_INVALIDPARAM);
     };
-    let id = address!(cpu, this);
+    let id = object_id!(cpu, this);
     if at == 0 || size == 0 || !cpu.bus.guest_probe(at, size as usize, false) {
         return Some(DPNERR_INVALIDPOINTER);
     }
@@ -726,5 +725,6 @@ mod tests {
         assert_eq!(parse(&wide("http://x")), None);
         assert_eq!(parse(&wide("x-directplay:/port")), None);
         assert_eq!(parse(&wide("x-directplay:/port=%4")), None);
+        assert_eq!(parse(&wide("x-directplay:/port=%+4")), None);
     }
 }
