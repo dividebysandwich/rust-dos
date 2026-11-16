@@ -1105,7 +1105,7 @@ pub fn test_stall(now_ns: u64) -> Option<Duration> {
     });
     let mut stalls = stalls.as_ref()?.lock().ok()?;
     let &(at_ms, length_ms) = stalls.last()?;
-    if now_ns < at_ms * 1_000_000 {
+    if now_ns < at_ms.saturating_mul(1_000_000) {
         return None;
     }
     stalls.pop();
@@ -1195,7 +1195,7 @@ impl HostEstimate {
             self.outliers = 0;
             return false;
         }
-        self.outliers += 1;
+        self.outliers = self.outliers.saturating_add(1);
         self.outliers <= crate::autospeed::STALL_FRAMES
     }
 
