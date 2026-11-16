@@ -998,6 +998,10 @@ struct Frames {
     /// frames in a row up to it left the host: what the pacer drops at the
     /// next frame is their backlog.
     run_least: Option<u64>,
+    /// How far behind the frames on time of the measurement before left
+    /// the host on average, which judges late frames until this one has
+    /// frames on time of its own (`Frames::start`).
+    usual_before: Option<u64>,
     /// What the pacer had dropped for lag at the last frame (`Lag`).
     lost_ns: u64,
 }
@@ -1024,13 +1028,22 @@ impl Frames {
         self.run_least = Some(self.run_least.map_or(behind_ns, |least| least.min(behind_ns)));
     }
 
+    /// How far behind the frames on time so far left the host on average:
+    /// this measurement's, or before it has any, the one's before.
+    fn usual(&self) -> Option<u64> {
+        match self.count - self.late {
+            0 => self.usual_before,
+            on_time => Some(self.on_time_ns / on_time as u64),
+        }
+    }
+
     /// Whether late frames that left the host `least_ns` behind at the
     /// least are a stall: `STALL_COST` times as far behind as the frames
-    /// on time so far are on average, and at least `MAX_LAG`.
+    /// on time before them are on average (`Frames::usual`), and at least
+    /// `MAX_LAG`.
     fn stalled(&self, least_ns: u64) -> bool {
-        let on_time = self.count - self.late;
-        let usual = (self.on_time_ns / on_time.max(1) as u64).max(STALL_LEAST_NS);
-        on_time > 0 && least_ns >= usual * STALL_COST
+        self.usual()
+            .is_some_and(|usual| least_ns >= usual.max(STALL_LEAST_NS) * STALL_COST)
     }
 
     /// The lag of the stalls in the measurement, which its pace leaves
@@ -1043,11 +1056,16 @@ impl Frames {
     }
 
     /// A new measurement starts. The last frames' backlog, if they were
-    /// late, is dropped in it, and counts there.
+    /// late, is dropped in it, and counts there, judged by the frames on
+    /// time before them: the new measurement has none yet. Grom's loads
+    /// (#783) stall every third frame, so a measurement ends on one about
+    /// as often, and judged by the new measurement alone that stall would
+    /// count as lag.
     fn start(&mut self) {
         let run = self.run_least;
         *self = Frames {
             lost_ns: self.lost_ns,
+            usual_before: self.usual(),
             ..Frames::default()
         };
         if let Some(least) = run {
@@ -4495,6 +4513,37 @@ mod tests {
         }
         assert!(paced.sorted.lag_ns() > 0, "{:?}", paced.sorted);
         assert_eq!((auto.lagged, auto.fell_at), (None, None));
+    }
+
+    #[test]
+    fn a_stall_that_ends_a_measurement_is_one_in_the_next() {
+        // Grom's loads (#783) stall every third frame, so a measurement ends
+        // on one about as often. The pacer drops its backlog at the next
+        // frame, in the next measurement, which judges it by the frames on
+        // time before it, and counts it once.
+        let mut frames = Frames::default();
+        for _ in 0..10 {
+            frames.frame(unsorted(5_000_000, 0));
+        }
+        frames.frame(unsorted(90_000_000, 0));
+        assert_eq!(frames.stall_ns(), 0);
+        frames.start();
+        for _ in 0..10 {
+            frames.frame(unsorted(5_000_000, 40_000_000));
+        }
+        assert_eq!(frames.stall_ns(), 40_000_000);
+        // Late frames a few times as long as those on time before them
+        // stay lag across the start too.
+        let mut frames = Frames::default();
+        for _ in 0..10 {
+            frames.frame(unsorted(10_000_000, 0));
+        }
+        frames.frame(unsorted(30_000_000, 0));
+        frames.start();
+        for _ in 0..10 {
+            frames.frame(unsorted(5_000_000, 20_000_000));
+        }
+        assert_eq!(frames.stall_ns(), 0);
     }
 
     #[test]
