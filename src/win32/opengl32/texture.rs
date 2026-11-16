@@ -902,6 +902,14 @@ pub fn read_frame(cpu: &mut Cpu, x: i32, y: i32, w: u32, h: u32) -> Option<Vec<[
     let mut row = vec![0u8; s.pitch as usize];
     // 5-6-5, or X8R8G8B8 (`wgl::color_bits`).
     let bytes = s.bytes_per_pixel() as usize;
+    // The surface's rows the frame's lie in, read at once.
+    let top = i64::from(height) - 1 - i64::from(y);
+    let first = (top - i64::from(h) + 1).max(0);
+    let last = top.min(i64::from(s.height) - 1);
+    if first <= last {
+        let rows = (last - first + 1) as u32;
+        dd_surface::will_read_rows(cpu, &s, first as u32 * s.pitch, s.pitch, rows, row.len());
+    }
     for r in 0..i64::from(h) {
         let sy = i64::from(height) - 1 - (i64::from(y) + r);
         if sy < 0 || sy >= i64::from(s.height) {

@@ -243,12 +243,12 @@ fn alias_of<'a>(copies: &'a [Copy], s: &Surface) -> Option<&'a Copy> {
     of.clone().find(|c| c.ahead).or_else(|| of.next())
 }
 
-/// `pixels`, the rows of `s` with nothing between them, put where `s`
-/// is in `memory`.
-fn put_rows(s: &Surface, pixels: &[u8], memory: &mut [u8]) {
+/// `pixels`, rows of `s` from its row `first` with nothing between
+/// them, put where they are in `memory`.
+fn put_rows(s: &Surface, first: u32, pixels: &[u8], memory: &mut [u8]) {
     let len = (s.width * s.format.bytes()) as usize;
-    for (y, row) in pixels.chunks_exact(len).enumerate() {
-        let at = s.at(0, y as u32);
+    for (y, row) in (first..).zip(pixels.chunks_exact(len)) {
+        let at = s.at(0, y);
         memory[at..at + len].copy_from_slice(row);
     }
 }
@@ -909,6 +909,65 @@ impl ToadForceGl {
         let copy = &mut self.copies[at];
         copy.ahead = true;
         copy.version = self.changes;
+    }
+
+    /// The pixels of rows `rows` (first to after last) of `surface`,
+    /// whose copy is `texture`, as card memory has them, row after row
+    /// with nothing between them. The copy is at the card's own size,
+    /// one sample a pixel, with its rows the surface's from the top, as
+    /// `upload` fills it. None when the copy can't be read.
+    fn read_rows(
+        &mut self,
+        texture: glow::Texture,
+        surface: &Surface,
+        rows: (u32, u32),
+    ) -> Option<Vec<u8>> {
+        let (_, format, kind) = self.formats(surface.format);
+        let depth_format = surface.format.in_mask(super::caps::DEPTH_FORMATS);
+        let wide = !depth_format && self.colour(surface.format) == Colour::Wide;
+        let (w, h) = (surface.width as i32, (rows.1 - rows.0) as i32);
+        let bytes = if wide { 4 } else { surface.format.bytes() };
+        let mut pixels = vec![0u8; (surface.width * (rows.1 - rows.0) * bytes) as usize];
+        // SAFETY: the context is current (see the module comment), and
+        // every object used is this host's.
+        unsafe {
+            self.enter();
+            if depth_format {
+                let gl = &*self.gl;
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.depth_only));
+                let d16 = surface.format == Format::D16;
+                let (point, other) = if d16 {
+                    (glow::DEPTH_ATTACHMENT, glow::DEPTH_STENCIL_ATTACHMENT)
+                } else {
+                    (glow::DEPTH_STENCIL_ATTACHMENT, glow::DEPTH_ATTACHMENT)
+                };
+                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, other, glow::TEXTURE_2D, None, 0);
+                gl.framebuffer_texture_2d(
+                    glow::FRAMEBUFFER,
+                    point,
+                    glow::TEXTURE_2D,
+                    Some(texture),
+                    0,
+                );
+            } else if !self.attach(texture, None) {
+                self.leave();
+                return None;
+            } else {
+                self.gl.read_buffer(glow::COLOR_ATTACHMENT0);
+            }
+            let data = glow::PixelPackData::Slice(Some(&mut pixels));
+            self.gl.read_pixels(0, rows.0 as i32, w, h, format, kind, data);
+            self.leave();
+        }
+        if wide {
+            pixels = pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|c| (span::pack(Format::R5G6B5, *c) as u16).to_le_bytes())
+                .collect();
+        }
+        Some(pixels)
     }
 
     /// The pixels of `rect` of `surface` in `memory`, as the host's
@@ -2673,52 +2732,29 @@ impl Host for ToadForceGl {
             copy.stamp = pages.stamp(gpu::range(&copy.surface));
         }
         let texture = copy.texture;
-        let (_, format, kind) = self.formats(surface.format);
-        let depth_format = surface.format.in_mask(super::caps::DEPTH_FORMATS);
-        let wide = !depth_format && self.colour(surface.format) == Colour::Wide;
-        let (w, h) = (surface.width as i32, surface.height as i32);
-        let bytes = if wide { 4 } else { surface.format.bytes() };
-        let mut pixels = vec![0u8; (surface.width * surface.height * bytes) as usize];
-        // SAFETY: the context is current (see the module comment), and
-        // every object used is this host's.
-        unsafe {
-            self.enter();
-            if depth_format {
-                let gl = &*self.gl;
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.depth_only));
-                let d16 = surface.format == Format::D16;
-                let (point, other) = if d16 {
-                    (glow::DEPTH_ATTACHMENT, glow::DEPTH_STENCIL_ATTACHMENT)
-                } else {
-                    (glow::DEPTH_STENCIL_ATTACHMENT, glow::DEPTH_ATTACHMENT)
-                };
-                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, other, glow::TEXTURE_2D, None, 0);
-                gl.framebuffer_texture_2d(
-                    glow::FRAMEBUFFER,
-                    point,
-                    glow::TEXTURE_2D,
-                    Some(texture),
-                    0,
-                );
-            } else if !self.attach(texture, None) {
-                self.leave();
-                return false;
-            } else {
-                self.gl.read_buffer(glow::COLOR_ATTACHMENT0);
-            }
-            let data = glow::PixelPackData::Slice(Some(&mut pixels));
-            self.gl.read_pixels(0, 0, w, h, format, kind, data);
-            self.leave();
+        let Some(pixels) = self.read_rows(texture, surface, (0, surface.height)) else {
+            return false;
+        };
+        put_rows(surface, 0, &pixels, memory);
+        true
+    }
+
+    fn read_back_rows(&mut self, surface: &Surface, rows: (u32, u32), memory: &mut [u8]) -> bool {
+        let found = self
+            .copies
+            .iter()
+            .find(|c| gpu::within(surface, &c.surface));
+        let Some(texture) = found.map(|c| c.texture) else {
+            return false;
+        };
+        let rows = (rows.0, rows.1.min(surface.height));
+        if rows.0 >= rows.1 {
+            return true;
         }
-        if wide {
-            pixels = pixels
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .flat_map(|c| (span::pack(Format::R5G6B5, *c) as u16).to_le_bytes())
-                .collect();
-        }
-        put_rows(surface, &pixels, memory);
+        let Some(pixels) = self.read_rows(texture, surface, rows) else {
+            return false;
+        };
+        put_rows(surface, rows.0, &pixels, memory);
         true
     }
 

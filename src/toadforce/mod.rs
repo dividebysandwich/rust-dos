@@ -304,6 +304,13 @@ impl ToadForce {
         self.gpu.settle(memory, range, why);
     }
 
+    /// `settle_for` of bytes the emulator only reads: the rows they lie
+    /// in come back, and the surfaces stay with the host renderer
+    /// (`Gpu::settle_rows`).
+    pub fn settle_rows(&mut self, memory: &mut [u8], range: (u32, u32), why: gpu::Cause) {
+        self.gpu.settle_rows(memory, range, why);
+    }
+
     /// The processor wrote `len` bytes of card memory at `offset`: the
     /// host renderer's copies of them are stale.
     #[inline]
@@ -402,6 +409,7 @@ impl ToadForce {
             "host": {
                 "read_backs": self.gpu.read_backs(),
                 "read_backs_for": self.gpu.causes(),
+                "read_back_rows": self.gpu.read_back_rows(),
                 "declined_draws": self.gpu.declined(),
                 "declined_for": self.gpu.declined_for(),
                 "writes": self.gpu.writes(),

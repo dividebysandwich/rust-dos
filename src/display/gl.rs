@@ -222,6 +222,12 @@ impl Host for HostLink {
             .is_some_and(|h| h.read_back(surface, memory, pages))
     }
 
+    fn read_back_rows(&mut self, surface: &Surface, rows: (u32, u32), memory: &mut [u8]) -> bool {
+        let mut host = self.0.borrow_mut();
+        host.as_mut()
+            .is_some_and(|h| h.read_back_rows(surface, rows, memory))
+    }
+
     fn shows(&mut self, surface: &Surface, pages: &gpu::Pages) -> bool {
         let mut host = self.0.borrow_mut();
         host.as_mut().is_some_and(|h| h.shows(surface, pages))

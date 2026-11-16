@@ -343,22 +343,34 @@ impl Bus {
     }
 
     /// Before the emulator itself reads `len` bytes of card memory at
-    /// `offset`, or writes them where it needs the others around them:
-    /// the queued commands run, and what the host renderer drew into
-    /// surfaces with those bytes is read back.
+    /// `offset` with no note of a write after it, or writes them where
+    /// it needs the others around them: the queued commands run, and
+    /// what the host renderer drew into surfaces with those bytes is
+    /// read back whole. A read that only reads takes
+    /// `toadforce_reading`.
     #[inline]
     pub fn toadforce_touch(&mut self, offset: usize, len: usize) {
-        self.toadforce_touch_for(offset, len, Cause::Program);
-    }
-
-    /// `toadforce_touch`, with what the bytes are wanted for, for the
-    /// status's counts of read-backs.
-    #[inline]
-    pub fn toadforce_touch_for(&mut self, offset: usize, len: usize, why: Cause) {
         self.toadforce_flush();
         if self.toadforce_ahead() {
             let end = (offset + len).min(u32::MAX as usize);
-            self.toadforce_read_back(Some((offset as u32, end as u32)), why);
+            let range = Some((offset as u32, end as u32));
+            self.toadforce_read_back(range, Cause::Program);
+        }
+    }
+
+    /// Before the emulator itself only reads `len` bytes of card memory
+    /// at `offset`, for `why`: the queued commands run, and of the
+    /// surfaces the host renderer drew into, the rows those bytes lie
+    /// in are read back, the rest staying with the renderer. A write
+    /// there afterwards goes through `toadforce_writing`.
+    #[inline]
+    pub fn toadforce_reading(&mut self, offset: usize, len: usize, why: Cause) {
+        self.toadforce_flush();
+        if self.toadforce_ahead()
+            && let Some(card) = &mut self.toadforce
+        {
+            let end = (offset + len).min(u32::MAX as usize);
+            card.settle_rows(&mut self.vbe.vram, (offset as u32, end as u32), why);
         }
     }
 
