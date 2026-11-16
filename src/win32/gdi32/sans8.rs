@@ -8,15 +8,21 @@
 //! EGA font into blobs: "t" and "r" lose their crossbar and arm and read
 //! as "l", "0" reads as "8", and a greyed item's embossed copy runs into
 //! its grey one. Windows draws this size with 1-pixel strokes. The
-//! glyphs here are drawn for it, one per printable ASCII character, each
+//! glyphs here were drawn for this project, pixel by pixel: the printable
+//! ASCII characters, the Latin letters and punctuation of code page 1252
+//! that aren't an ASCII letter with an accent (ß, æ, ø, ð, þ, ¡, ¿, «,
+//! », ° and ·), and the letters with a stroke of the Central European
+//! and Baltic code pages (ł, Ł, đ, Đ). A character of code page 1252 is
 //! as wide as its character's width less the column between characters,
 //! with the size's metrics: 11 rows above the baseline, the capitals and
 //! ascenders 8 high (rows 3 to 10), the small letters 6 (rows 5 to 10),
 //! and descenders in rows 11 and 12.
 //!
 //! A letter with an accent is its letter's glyph with the mark drawn
-//! above or below it. Characters neither covers (Greek, Cyrillic, most
-//! symbols) keep the squeezed ROM glyph.
+//! above or below it, or beside the ascender for the caron of ď, ľ, ť
+//! and Ľ. Characters these don't cover (Greek, Cyrillic, most symbols),
+//! and letters too wide for the width Windows 98 gives them (Š and Ž
+//! have 3 columns in code page 1252), keep the squeezed ROM glyph.
 
 use crate::win32::convert::{
     ACUTE, BREVE, CARON, CEDILLA, CIRCUMFLEX, DIAERESIS, DOT_ABOVE, DOUBLE_ACUTE, GRAVE, MACRON,
@@ -891,6 +897,166 @@ pub(super) const GLYPHS: &[(char, usize, &[&str])] = &[
         ".##..#",
         "#..##.",
     ]),
+    ('¡', 5, &[
+        "#.",
+        "..",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+        "#.",
+    ]),
+    ('«', 5, &[
+        "..#.#",
+        ".#.#.",
+        "#.#..",
+        ".#.#.",
+        "..#.#",
+    ]),
+    ('°', 3, &[
+        ".#.",
+        "#.#",
+        ".#.",
+    ]),
+    ('·', 7, &[
+        "#.",
+    ]),
+    ('»', 5, &[
+        "#.#..",
+        ".#.#.",
+        "..#.#",
+        ".#.#.",
+        "#.#..",
+    ]),
+    ('¿', 5, &[
+        "..#..",
+        ".....",
+        "..#..",
+        "..#..",
+        ".#...",
+        "#....",
+        "#...#",
+        ".###.",
+    ]),
+    ('Æ', 3, &[
+        "...######",
+        "..#..#...",
+        "..#..#...",
+        ".#...####",
+        ".#####...",
+        "#....#...",
+        "#....#...",
+        "#....####",
+    ]),
+    ('Ð', 3, &[
+        ".####..",
+        ".#...#.",
+        ".#....#",
+        "###...#",
+        ".#....#",
+        ".#....#",
+        ".#...#.",
+        ".####..",
+    ]),
+    ('Ø', 3, &[
+        "..###.#",
+        ".#...#.",
+        "#...#.#",
+        "#..#..#",
+        "#.#...#",
+        "##....#",
+        ".#...#.",
+        "#.###..",
+    ]),
+    ('Þ', 3, &[
+        "#.....",
+        "#.....",
+        "#####.",
+        "#....#",
+        "#....#",
+        "#####.",
+        "#.....",
+        "#.....",
+    ]),
+    ('ß', 3, &[
+        ".##..",
+        "#..#.",
+        "#..#.",
+        "#.#..",
+        "#..#.",
+        "#...#",
+        "#...#",
+        "#.##.",
+    ]),
+    ('æ', 5, &[
+        ".###.###.",
+        "....#...#",
+        ".########",
+        "#...#....",
+        "#...#...#",
+        ".###.###.",
+    ]),
+    ('ð', 3, &[
+        ".#.#.",
+        "..#..",
+        ".#.#.",
+        "....#",
+        ".####",
+        "#...#",
+        "#...#",
+        ".###.",
+    ]),
+    ('ø', 5, &[
+        ".####",
+        "#..##",
+        "#.#.#",
+        "##..#",
+        "#...#",
+        "####.",
+    ]),
+    ('þ', 3, &[
+        "#....",
+        "#....",
+        "####.",
+        "#...#",
+        "#...#",
+        "#...#",
+        "#...#",
+        "####.",
+        "#....",
+        "#....",
+    ]),
+    ('đ', 3, &[
+        "....#.",
+        "...###",
+        ".####.",
+        "#...#.",
+        "#...#.",
+        "#...#.",
+        "#...#.",
+        ".####.",
+    ]),
+    ('Ł', 3, &[
+        ".#....",
+        ".#....",
+        ".#....",
+        ".##...",
+        "##....",
+        ".#....",
+        ".#....",
+        ".#####",
+    ]),
+    ('ł', 3, &[
+        ".#.",
+        ".#.",
+        ".#.",
+        ".##",
+        "##.",
+        ".#.",
+        ".#.",
+        ".#.",
+    ]),
 ];
 
 /// Where a mark goes on its letter.
@@ -900,15 +1066,20 @@ enum Place {
     Below,
     /// Below, at the letter's right end.
     BelowRight,
+    /// Right of the letter's ascender, two columns on, as the caron of
+    /// ď, ľ, ť and Ľ is written.
+    Beside,
 }
 
-/// The rows of a combining mark and where it goes.
-fn mark(m: u16) -> Option<(&'static [&'static str], Place)> {
+/// The rows of the combining mark `m` on the letter `base` and where it
+/// goes.
+fn mark(m: u16, base: u16) -> Option<(&'static [&'static str], Place)> {
     use Place::*;
     Some(match m {
         GRAVE => (&["#.", ".#"], Above),
         ACUTE => (&[".#", "#."], Above),
         CIRCUMFLEX => (&[".#.", "#.#"], Above),
+        CARON if matches!(base, 0x64 | 0x6C | 0x74 | 0x4C) => (&["#", "#"], Beside),
         CARON => (&["#.#", ".#."], Above),
         TILDE => (&[".#.#", "#.#."], Above),
         DIAERESIS => (&["#.#"], Above),
@@ -936,10 +1107,32 @@ fn span(rows: &[u64]) -> i32 {
     64 - rows.iter().fold(0, |a, &r| a | r).leading_zeros() as i32
 }
 
+/// The rows `rows`, `from` columns wide, in `to` columns: a column is lit
+/// where any of those it covers is.
+fn squeeze(rows: &[u64], from: i32, to: i32) -> Vec<u64> {
+    rows.iter()
+        .map(|&row| {
+            (0..to).fold(0, |out, x| {
+                let a = x * from / to;
+                let b = ((x + 1) * from / to).max(a + 1);
+                let covered = (row >> a) & ((1 << (b - a)) - 1);
+                out | ((covered != 0) as u64) << x
+            })
+        })
+        .collect()
+}
+
+/// The entry of `GLYPHS` that draws the character `c`, if there is one.
+fn entry(c: u16) -> Option<&'static (char, usize, &'static [&'static str])> {
+    // Croatian's capital D with stroke looks like Icelandic's eth.
+    let c = if c == 0x0110 { 0xD0 } else { c };
+    let ch = char::from_u32(c as u32)?;
+    GLYPHS.iter().find(|g| g.0 == ch)
+}
+
 /// The drawn glyph of the character `c`, if it has one.
 fn drawn(c: u16) -> Option<[u64; HEIGHT]> {
-    let ch = char::from_u32(c as u32)?;
-    let &(_, top, rows) = GLYPHS.iter().find(|g| g.0 == ch)?;
+    let &(_, top, rows) = entry(c)?;
     let mut out = [0; HEIGHT];
     for (i, row) in rows.iter().enumerate() {
         out[top + i] = bits(row);
@@ -947,46 +1140,96 @@ fn drawn(c: u16) -> Option<[u64; HEIGHT]> {
     Some(out)
 }
 
-/// The glyph of the character `c` in a cell `body` columns wide, its
-/// rows' lit pixels as bit masks (bit 0 the leftmost), if this size has
-/// one drawn: the character's own, or its letter's with the accent's
-/// mark. The letter is centred under a mark when the character is wider
-/// than the letter, as "í" is.
-pub fn glyph(c: u16, body: i32) -> Option<[u64; HEIGHT]> {
-    if let Some(g) = drawn(c) {
-        return Some(g);
+/// The glyph of the character `c` built from its letter's: dotless i,
+/// or the letter with an accent's mark, in `body` columns. The letter is
+/// centred in them, and the mark on the letter. A mark wider than `body`
+/// is squeezed into it if `squeeze`, else there is no glyph; so is one
+/// whose letter is wider.
+fn composed(c: u16, body: i32, squeeze_mark: bool) -> Option<[u64; HEIGHT]> {
+    if c == 0x0131 {
+        let mut g = drawn(u16::from(b'i'))?;
+        g[..X_TOP].fill(0);
+        return Some(g).filter(|g| span(g) <= body);
     }
     let (base, m) = decompose(c)?;
-    let (pattern, place) = mark(m)?;
+    let (pattern, place) = mark(m, base)?;
     let mut g = drawn(base)?;
     // An accent takes the place of the dot of i and j.
     if place == Place::Above && matches!(base, 0x69 | 0x6A) {
         g[..X_TOP].fill(0);
     }
     let letter = span(&g);
-    let shift = ((body - letter) / 2).max(0);
+    if letter > body {
+        return None;
+    }
+    // A mark beside the letter goes right of it, the others over its
+    // middle.
+    let shift = if place == Place::Beside {
+        0
+    } else {
+        (body - letter) / 2
+    };
     for row in &mut g {
         *row <<= shift;
     }
-    let mark: Vec<u64> = pattern.iter().map(|r| bits(r)).collect();
-    let width = span(&mark);
-    let x = match place {
-        Place::BelowRight => shift + letter - width,
-        _ => shift + (letter - width) / 2,
+    let mut mark: Vec<u64> = pattern.iter().map(|r| bits(r)).collect();
+    let mut width = span(&mark);
+    if width > body && place != Place::Beside {
+        if !squeeze_mark {
+            return None;
+        }
+        mark = squeeze(&mark, width, body);
+        width = body;
     }
-    .max(0);
+    let x = match place {
+        Place::BelowRight => (shift + letter - width).max(0),
+        // Two columns right of the ascender's top.
+        Place::Beside => (g[3] | g[4]).checked_ilog2()? as i32 + 2,
+        _ => (shift + (letter - width) / 2).clamp(0, body - width),
+    };
+    if x + width > body {
+        return None;
+    }
     let top = match place {
         // A blank row between mark and letter where the cell has room.
         Place::Above => {
             let letter_top = g.iter().position(|&r| r != 0).unwrap_or(X_TOP);
             letter_top.saturating_sub(mark.len() + 1)
         }
+        Place::Beside => 3,
         _ => HEIGHT - mark.len(),
     };
     for (i, row) in mark.iter().enumerate() {
         g[top + i] |= row << x;
     }
     Some(g)
+}
+
+/// The glyph of the character `c` in a cell `body` columns wide, its
+/// rows' lit pixels as bit masks (bit 0 the leftmost), if this size has
+/// one drawn and it fits: the character's own, or one `composed` from its
+/// letter's.
+pub fn glyph(c: u16, body: i32) -> Option<[u64; HEIGHT]> {
+    match drawn(c) {
+        Some(g) => Some(g).filter(|g| span(g) <= body),
+        None => composed(c, body, true),
+    }
+}
+
+/// How far the character `c` moves on, for one code page 1252 lacks: its
+/// glyph's width and the column between characters. An accented letter
+/// is as wide as its letter, or wider where the mark needs it, as Windows
+/// 98 widens í, î and ï; the letter is then centred under the mark.
+pub fn width(c: u16) -> Option<i32> {
+    // A drawn glyph's columns, its blank ones on the right included.
+    let columns = |c: u16| entry(c).map(|g| g.2[0].len() as i32);
+    if let Some(n) = columns(c) {
+        return Some(n + 1);
+    }
+    let base = if c == 0x0131 { 0x69 } else { decompose(c)?.0 };
+    (columns(base)?..=16)
+        .find(|&body| composed(c, body, false).is_some())
+        .map(|body| body + 1)
 }
 
 #[cfg(test)]
