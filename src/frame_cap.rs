@@ -304,8 +304,8 @@ impl FrameCap {
             return;
         };
         self.counters.shown += 1;
-        // No hold is longer than a frame time and half a retrace: a
-        // longer one is of a present that never showed.
+        // No hold is longer than a frame time and half a retrace, so one
+        // of more than two frame times is of a present that never showed.
         let hold = held.map(|from| at.saturating_sub(from));
         if let Some(hold) = hold.filter(|&hold| hold <= 2 * frame) {
             self.counters.held += 1;
