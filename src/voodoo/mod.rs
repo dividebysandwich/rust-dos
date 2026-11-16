@@ -414,11 +414,20 @@ crate::state_fields!(PendingSwap { retrace, due });
 /// A Banshee's picture held while a swap waits for its retrace
 /// (`Voodoo::hold_shown`): the video processor's registers it showed
 /// (`Voodoo::shown_regs`) when the program first drew into the buffer it
-/// shows, and how wide the copy of the picture made then is (None where
-/// the OpenGL renderer drew it and none was made).
+/// shows, and the copy of the picture taken then (None where the OpenGL
+/// renderer drew it and none was taken).
 struct Held {
-    regs: [u32; 6],
-    copy: Option<usize>,
+    regs: [u32; 7],
+    copy: Option<HeldCopy>,
+}
+
+/// Where the copy of a held picture is.
+#[derive(Clone, Copy)]
+enum HeldCopy {
+    /// In `held_words`, drawn when a picture is asked for.
+    Words,
+    /// In `held_rgba`, drawn as wide as this.
+    Picture(usize),
 }
 
 /// The frame buffer interface chip (FBI): the frame buffer and what is
@@ -644,11 +653,18 @@ pub struct Voodoo {
     swap_marks: VecDeque<Option<u64>>,
     /// A Banshee's picture held while a swap waits for its retrace
     /// (`hold_shown`), and the copy of it the software picture shows
-    /// meanwhile, kept from hold to hold.
+    /// meanwhile, kept from hold to hold: the memory's words where the
+    /// video processor shows nothing but a 16-bit desktop, which is drawn
+    /// only if a picture is asked for during the hold, else the picture.
     held: Option<Held>,
+    held_words: banshee::display::ShownWords,
     held_rgba: Vec<u8>,
-    /// Copies of the picture made for a hold (`hold_shown`), from the
-    /// card's creation: for the debugger.
+    /// From the card's creation, for the debugger: the holds that kept
+    /// the memory's words (`hold_shown`), the pictures drawn from them
+    /// because one was asked for during the hold (`render`), and the
+    /// holds that drew the picture at once.
+    held_keeps: u64,
+    held_conversions: std::cell::Cell<u64>,
     held_copies: u64,
     /// Where the jobs given out or waiting since the workers last
     /// finished draw (`note_drawn`), each with the batch of the latest
@@ -785,7 +801,10 @@ impl Voodoo {
             front_jobs: None,
             swap_marks: VecDeque::new(),
             held: None,
+            held_words: Default::default(),
             held_rgba: Vec::new(),
+            held_keeps: 0,
+            held_conversions: Default::default(),
             held_copies: 0,
             drawn: RefCell::new(Drawn::default()),
             outstanding: Cell::new(false),
@@ -1608,7 +1627,7 @@ impl Voodoo {
         }
         // The copy of the picture shown stands in for the memory until the
         // swap shows the next (`hold_shown`).
-        if self.held_picture().is_some() {
+        if self.held_copy().is_some() {
             let dirty = self.banshee.as_mut().is_some_and(|b| std::mem::take(&mut b.dirty));
             let draw = changed || switched || dirty;
             if self.recording() {
@@ -1654,13 +1673,13 @@ impl Voodoo {
         !self.swaps.is_empty() && Some(held.regs) == self.shown_regs()
     }
 
-    /// The copy of the picture held (`hold_shown`), and how wide it is:
-    /// None if the picture isn't held, or the hold began while the OpenGL
-    /// renderer drew it, which keeps its own (`Scanout::held`). The
-    /// software picture is then drawn from the memory.
-    fn held_picture(&self) -> Option<(&[u8], usize)> {
-        let width = self.held.as_ref()?.copy?;
-        self.picture_held().then_some((&self.held_rgba[..], width))
+    /// The copy of the picture held (`hold_shown`): None if the picture
+    /// isn't held, or the hold began while the OpenGL renderer drew it,
+    /// which keeps its own (`Scanout::held`). The software picture is then
+    /// drawn from the memory.
+    fn held_copy(&self) -> Option<HeldCopy> {
+        let copy = self.held.as_ref()?.copy?;
+        self.picture_held().then_some(copy)
     }
 
     /// The program is about to draw into colour buffer `dest`. On the
@@ -1671,10 +1690,12 @@ impl Voodoo {
     /// while a swap waits holds its picture (`picture_held`): the software
     /// picture as a copy made now, before the drawing, from the frame the
     /// swap that showed it needs (`catch_up_shown`), so that what it shows
-    /// is the same however the host's frames fall. A read of the buffer
-    /// shown in the meantime (the linear frame buffer, a 2D blit from it)
-    /// still gets the next frame's drawing where the card would give the
-    /// frame shown (#1179).
+    /// is the same however the host's frames fall. Most holds end with no
+    /// host frame in them, so the copy keeps the memory's words where it
+    /// can (`Banshee::take_shown`), which `render` draws only if asked. A
+    /// read of the buffer shown in the meantime (the linear frame buffer,
+    /// a 2D blit from it) still gets the next frame's drawing where the
+    /// card would give the frame shown (#1179).
     fn hold_shown(&mut self, dest: usize) {
         if self.swaps.is_empty() || self.picture_held() {
             return;
@@ -1688,6 +1709,17 @@ impl Voodoo {
             if self.writes_queue() {
                 self.catch_up_shown();
             }
+            // The host may not have drawn this picture yet.
+            self.display_dirty = true;
+            // The picture is drawn from the memory, which needs the GPU's
+            // 2D operations.
+            self.gpu_sync_all();
+            if let Some(b) = &self.banshee
+                && b.take_shown(&self.fbi.ram, &mut self.held_words)
+            {
+                self.held_keeps += 1;
+                return HeldCopy::Words;
+            }
             let (w, h) = self.picture_size();
             let (w, h) = (w as usize, h as usize);
             let mut rgba = std::mem::take(&mut self.held_rgba);
@@ -1696,20 +1728,21 @@ impl Voodoo {
             self.render_memory(&mut rgba, w);
             self.held_rgba = rgba;
             self.held_copies += 1;
-            // The host may not have drawn this picture yet.
-            self.display_dirty = true;
-            w
+            HeldCopy::Picture(w)
         });
         self.held = Some(Held { regs, copy });
     }
 
     /// What a Banshee shows: whether the video processor drives the
-    /// monitor, its mode and size, and the desktop's and the overlay's
-    /// memory.
-    fn shown_regs(&self) -> Option<[u32; 6]> {
+    /// monitor, its mode and size, the desktop's and the overlay's memory,
+    /// and the desktop's size from the CRTC, which sizes the picture
+    /// (`picture_size`): a new size ends a hold as a new mode does, since
+    /// the card never shows the frame held at another size.
+    fn shown_regs(&self) -> Option<[u32; 7]> {
         use banshee::{VGA_INIT0, VID_DESKTOP_OVERLAY_STRIDE, VID_DESKTOP_START_ADDR};
         use banshee::{VID_PROC_CFG, VID_SCREEN_SIZE};
         let b = self.banshee.as_ref()?;
+        let (width, height) = b.desktop_size();
         Some([
             b.reg(VGA_INIT0),
             b.reg(VID_PROC_CFG),
@@ -1717,6 +1750,7 @@ impl Voodoo {
             b.reg(VID_DESKTOP_START_ADDR),
             b.reg(VID_DESKTOP_OVERLAY_STRIDE),
             b.overlay_addr,
+            width << 16 | height,
         ])
     }
 
@@ -1812,16 +1846,22 @@ impl Voodoo {
     /// `prepare_display`). A picture held is drawn from its copy
     /// (`hold_shown`).
     pub fn render(&self, rgba: &mut [u8], width: usize) {
-        let Some((held, from)) = self.held_picture() else {
-            self.render_memory(rgba, width);
-            return;
-        };
-        if width == 0 || from == 0 {
-            return;
-        }
-        for (out, row) in rgba.chunks_mut(width * 4).zip(held.chunks(from * 4)) {
-            let n = out.len().min(row.len());
-            out[..n].copy_from_slice(&row[..n]);
+        match self.held_copy() {
+            None => self.render_memory(rgba, width),
+            Some(HeldCopy::Words) => {
+                self.held_conversions.set(self.held_conversions.get() + 1);
+                self.held_words.render(rgba, width);
+            }
+            Some(HeldCopy::Picture(from)) => {
+                if width == 0 || from == 0 {
+                    return;
+                }
+                let held = self.held_rgba.chunks(from * 4);
+                for (out, row) in rgba.chunks_mut(width * 4).zip(held) {
+                    let n = out.len().min(row.len());
+                    out[..n].copy_from_slice(&row[..n]);
+                }
+            }
         }
     }
 
@@ -2567,6 +2607,8 @@ impl Voodoo {
             })),
         });
         v["held_copies"] = self.held_copies.into();
+        v["held_keeps"] = self.held_keeps.into();
+        v["held_conversions"] = self.held_conversions.get().into();
         v
     }
 }

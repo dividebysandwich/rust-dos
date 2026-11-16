@@ -520,11 +520,10 @@ pub enum Uop {
     /// x = the double at handle m, which is RAM's (`BailUnlessRam`); with
     /// `canon` as `FSet` makes one (the handlers' `canon_f64` of an operand).
     FLoad64 { x: X, m: T, canon: bool },
-    /// x = the signed qword at handle m, which is RAM's (`BailUnlessRam`),
-    /// where the double holds it exactly (below 2^53 either way); else the
-    /// instruction's handler runs it instead of the operations after this
-    /// one, as `Bail`.
-    FLoadInt64 { x: X, m: T },
+    /// Push the signed qword at handle m, which is RAM's (`BailUnlessRam`),
+    /// as FILD's handler does: its exact 80 bits, which every qword has,
+    /// and the double they round to.
+    FPushInt64 { m: T },
     /// t = the low dword of x's bits, or the high one with `high`.
     FToHalf { t: T, x: X, high: bool },
     /// t = the single FST stores of ST(0), whose double x holds
@@ -541,10 +540,16 @@ pub enum Uop {
     /// t = x as a word or dword (`size` 2 or 4), rounded as the control
     /// word says (`fpu::data::to_int`).
     FToInt { t: T, x: X, size: u8 },
-    /// lo and hi = the low and high dwords of x as a qword, where the
-    /// control word rounds to nearest or chops and the value fits; else
-    /// the instruction's handler runs it instead of the operations after
-    /// this one, as `Bail` (nothing before it may change anything).
+    /// lo and hi = the low and high dwords of the qword FISTP stores of
+    /// ST(0), whose double x holds (`data::st0_int_bits`): x converted
+    /// where the register holds no more than it, the control word rounds
+    /// to nearest or chops and the value fits; the integer the 80 bits
+    /// hold where it is from 2^53 to 2^63; x converted, under the same
+    /// roundings, where the 80 bits hold more but x is under 2^52 and
+    /// neither an integer nor halfway between two (`Precise::Int`), as
+    /// the 80 bits then round to the same integer; else through the
+    /// handlers' code, which sets IE for the integer indefinite. The block
+    /// goes on after it either way.
     FToInt64 { lo: T, hi: T, x: X },
     /// a *= b.
     FMul { a: X, b: X },

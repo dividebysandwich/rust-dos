@@ -2639,22 +2639,42 @@ impl Gen<'_> {
                     self.fpu_canon(x.0);
                 }
             }
-            Uop::FLoadInt64 { x, m } => {
-                let at = self.ops.new_dynamic_label();
-                // Within 2^53 either way, the qword shifted right by 53 is
-                // 0 or -1.
+            Uop::FPushInt64 { m } => {
+                self.fpu_known = self.fpu_known << 1 | 1;
                 dynasm!(self.ops
                     ; .arch x64
                     ; mov rax, QWORD [r13 + Rq(r(m))]
-                    ; mov rcx, rax
-                    ; sar rcx, 53
-                    ; add rcx, 1
-                    ; cmp rcx, 1
-                    ; ja =>at
-                    ; pxor Rx(x.0), Rx(x.0)
-                    ; cvtsi2sd Rx(x.0), rax
+                    // The double, rounded to nearest as `F80::get_f64`
+                    // rounds the 80 bits.
+                    ; pxor xmm2, xmm2
+                    ; cvtsi2sd xmm2, rax
+                    // EDX the sign as the 80 bits' bit 15 of their top
+                    // word, RAX the magnitude (i64::MIN's is 2^63).
+                    ; mov rdx, rax
+                    ; sar rdx, 63
+                    ; xor rax, rdx
+                    ; sub rax, rdx
+                    ; and edx, 0x8000
+                    // 0 is all zeros. Else the exponent is 16383 plus the
+                    // top bit's place, and the significand the magnitude
+                    // shifted up to bit 63.
+                    ; bsr rcx, rax
+                    ; jz >fild64_zero
+                    ; lea edx, [rdx + rcx + 16383]
+                    ; xor ecx, 63
+                    ; shl rax, cl
+                    ; fild64_zero:
+                    ; mov ecx, DWORD [rbx + FPU_TOP]
+                    ; dec ecx
+                    ; and ecx, 7
+                    ; mov QWORD [rbx + FPU_TOP], rcx
+                    ; movsd QWORD [rbx + rcx * 8 + FPU_F64], xmm2
+                    ; mov BYTE [rbx + rcx + FPU_STALE], 0
+                    ; mov BYTE [rbx + rcx + FPU_TAGS], FPU_VALID
+                    ; shl ecx, 4
+                    ; mov QWORD [rbx + rcx + FPU_X80], rax
+                    ; mov QWORD [rbx + rcx + FPU_X80 + 8], rdx
                 );
-                self.bail(at, false);
             }
             Uop::FToHalf { t, x, high } => {
                 dynasm!(self.ops ; .arch x64 ; movq rax, Rx(x.0));
@@ -3539,34 +3559,102 @@ impl Gen<'_> {
         dynasm!(self.ops ; .arch x64 ; mov Rd(t_), eax ; toint_done:);
     }
 
-    /// `Uop::FToInt64`: the conversion where the control word rounds to
-    /// nearest or chops, else the handler's. A value that doesn't fit, or a
-    /// NaN, converts to the integer indefinite (i64::MIN), which goes to
-    /// the handler too.
+    /// `Uop::FToInt64`. A register that holds no more than its double
+    /// converts the double where the control word rounds to nearest or
+    /// chops; one whose 80 bits hold more converts them where they are an
+    /// integer of 2^53 to 2^63, which every rounding leaves as it is, and
+    /// converts the double as well where that is under 2^52 and neither an
+    /// integer nor halfway between two (`Precise::Int`): the 80 bits then
+    /// round to nearest or chop to the same integer. A value that doesn't
+    /// fit, a NaN, other roundings and the rest go through
+    /// `jit_fpu_to_int64`.
     fn fpu_to_int64(&mut self, lo: T, hi: T, x: X) {
-        let at = self.ops.new_dynamic_label();
+        let (l, h) = (r(lo), r(hi));
         dynasm!(self.ops
             ; .arch x64
+            ; mov eax, DWORD [rbx + FPU_TOP]
+            ; cmp BYTE [rbx + rax + FPU_STALE], 0
+            ; jne >toint64_double
+            ; shl eax, 4
+            ; mov rdx, QWORD [rbx + rax + FPU_X80]
+            ; test edx, 0x7FF
+            ; jz >toint64_double
+            // The 80 bits: exponent e from 53 to 62 (ECX e - 53), the
+            // integer bit set, and the significand's 63 - e bits below
+            // the point 0.
+            ; movzx eax, WORD [rbx + rax + FPU_X80 + 8]
+            ; mov ecx, eax
+            ; and ecx, 0x7FFF
+            ; sub ecx, 16383 + 53
+            ; cmp ecx, 9
+            ; ja >toint64_frac
+            ; test rdx, rdx
+            ; jns >toint64_frac
+            ; neg ecx
+            ; add ecx, 10
+            ; mov Rq(l), rdx
+            ; shr Rq(l), cl
+            ; mov Rq(h), Rq(l)
+            ; shl Rq(h), cl
+            ; cmp Rq(h), rdx
+            ; jne >toint64_frac
+            ; test eax, 0x8000
+            ; jz >toint64_split
+            ; neg Rq(l)
+            ; jmp >toint64_split
+            // The double, as `fpu_bail_precise` checks it for
+            // `Precise::Int`: from 2^52 on, or a multiple of 1/2 from 1/2
+            // on, the handlers' code has it.
+            ; toint64_frac:
+            ; movq rax, Rx(x.0)
+            ; mov rdx, rax
+            ; shr rdx, 52
+            ; and edx, 0x7FF
+            ; cmp edx, 1023 + 52
+            ; jae >toint64_slow
+            ; cmp edx, 1023 - 1
+            ; jb >toint64_double
+            ; mov ecx, 1023 + 51
+            ; sub ecx, edx
+            ; mov edx, 1
+            ; shl rdx, cl
+            ; dec rdx
+            ; test rax, rdx
+            ; jz >toint64_slow
+            ; toint64_double:
             ; movzx eax, WORD [rbx + FPU_CONTROL]
             ; and eax, 0xC00
             ; jnz >toint64_other
-            ; cvtsd2si rcx, Rx(x.0)
+            ; cvtsd2si Rq(l), Rx(x.0)
             ; jmp >toint64_check
             ; toint64_other:
             ; cmp eax, 0xC00
-            ; jne =>at
-            ; cvttsd2si rcx, Rx(x.0)
+            ; jne >toint64_slow
+            ; cvttsd2si Rq(l), Rx(x.0)
             ; toint64_check:
-            // (Only i64::MIN overflows when 1 is taken from it.)
-            ; cmp rcx, 1
-            ; jo =>at
-            ; mov Rd(r(lo)), ecx
-            ; shr rcx, 32
-            ; mov Rd(r(hi)), ecx
+            // A value that doesn't fit, or a NaN, converts to i64::MIN,
+            // the only one that overflows when 1 is taken from it: the
+            // helper tells -2^63 from the integer indefinite (and IE).
+            ; cmp Rq(l), 1
+            ; jno >toint64_split
+            ; toint64_slow:
         );
-        let end = self.end();
-        let (wb, reload) = (self.cache.dirty, self.cache.loaded);
-        self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: false });
+        self.save_for_call();
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov rsi, r12
+            ; mov rdi, rbx
+            ; call QWORD [r12 + CTX_FPU + 40]
+        );
+        self.restore_after_call();
+        dynasm!(self.ops
+            ; .arch x64
+            ; mov Rq(l), rax
+            ; toint64_split:
+            ; mov Rq(h), Rq(l)
+            ; shr Rq(h), 32
+            ; mov Rd(l), Rd(l)
+        );
     }
 
     /// Keep the temporaries and the cached guest registers around a call

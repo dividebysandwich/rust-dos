@@ -73,8 +73,6 @@ impl Uop {
             | Uop::Forward
             | Uop::FpuGuard { .. }
             | Uop::FBailPrecise { .. }
-            | Uop::FToInt64 { .. }
-            | Uop::FLoadInt64 { .. }
             | Uop::SimdGuard { .. }
             | Uop::BailMisaligned { .. }
             | Uop::BailUnlessStorable { .. }

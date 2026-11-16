@@ -5,11 +5,13 @@
 //! except in fast mode (`Cpu::fpu_fast`), where they are the doubles' too.
 //! Every instruction starts with a `FpuGuard`, which leaves the rare cases
 //! (no coprocessor, an empty register) to the handler. Double stores,
-//! integer conversions and compares also leave a register whose 80 bits
-//! hold more than its double to the handler (`FBailPrecise`); a single
-//! store rounds those 80 bits through the handlers' code and goes on
-//! (`Uop::FToSingle`), as games that round down store singles all the
-//! time.
+//! word and dword integer conversions and compares also leave a register
+//! whose 80 bits hold more than its double to the handler
+//! (`FBailPrecise`); a single store rounds those 80 bits through the
+//! handlers' code and goes on (`Uop::FToSingle`), as games that round
+//! down store singles all the time. FILD of a qword pushes its exact 80
+//! bits and FISTP of a qword converts them (`Uop::FToInt64`), so the
+//! 8-byte copies MSVC makes with the pair stay in translated code.
 
 use iced_x86::{Code, Instruction, OpKind, Register};
 
@@ -291,8 +293,7 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
             if !qword(u) {
                 return false;
             }
-            u.push(Uop::FLoadInt64 { x: X0, m: T1 });
-            u.push(Uop::FPush { x: X0, canon: false });
+            u.push(Uop::FPushInt64 { m: T1 });
         }
         Fist_m16int | Fist_m32int | Fistp_m16int | Fistp_m32int => {
             let size = if matches!(instr.code(), Fist_m16int | Fistp_m16int) { 2 } else { 4 };
@@ -315,7 +316,7 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
             }
             u.push(Uop::BailUnlessRam { t: T1 });
             u.push(Uop::FGet { x: X0, i: 0 });
-            precise(u, 1, Precise::Int(X0));
+            // (From the 80 bits where they hold more than the double.)
             u.push(Uop::FToInt64 { lo: T0, hi: T2, x: X0 });
             u.push(Uop::FPop { n: 1 });
             // As the handler writes it: the low dword, then the high one.
