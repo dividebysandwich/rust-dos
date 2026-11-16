@@ -467,12 +467,11 @@ pub trait Host {
     /// last), a colour or a depth buffer the host drew into, to
     /// `memory`, card memory. The copy stays ahead: card memory has
     /// those rows of it, and the host the others. False when the host
-    /// has no such surface or reads only whole ones, and `memory` is as
-    /// it was.
-    fn read_back_rows(&mut self, surface: &Surface, rows: (u32, u32), memory: &mut [u8]) -> bool {
-        let _ = (surface, rows, memory);
-        false
-    }
+    /// has no such surface, and `memory` is as it was: the card then
+    /// reads the surface back whole. It has no default, so a host that
+    /// passes the calls on to another (the window's link to its
+    /// renderer) passes this one on too.
+    fn read_back_rows(&mut self, surface: &Surface, rows: (u32, u32), memory: &mut [u8]) -> bool;
 
     /// Whether the host's copy has every pixel of `surface` as it is
     /// now: it is ahead, or what card memory holds (by `pages`). The
