@@ -544,8 +544,54 @@ pub(crate) mod tests {
         assert!(!v.picture_held(), "nothing drawn into A yet");
         v.mark_drawn(a as usize / 2);
         assert!(v.picture_held(), "drawn into A");
+        assert!(v.prepare_display(), "the copy of A is drawn");
         assert!(!v.prepare_display(), "the picture shown stays");
         v
+    }
+
+    /// The picture held is a copy made before the drawing: the next
+    /// frame's clear of the buffer shown doesn't reach it, however the
+    /// host's frames fall.
+    #[test]
+    fn the_held_picture_is_the_frame_shown_before_the_drawing() {
+        use super::super::{
+            VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT, VID_DESKTOP_OVERLAY_STRIDE,
+            VID_DESKTOP_START_ADDR, VID_PROC_CFG, VIDPROC_DESKTOP_CLUT_BYPASS, VIDPROC_ENABLE,
+        };
+
+        let (a, b) = (0x10_0000u32, 0x20_0000u32);
+        let mut v = Voodoo::with_workers(Board::Voodoo3, 0);
+        let write = |v: &mut Voodoo, reg, value| {
+            v.write(reg, value, u32::MAX, Now::default());
+        };
+        write(&mut v, VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT);
+        // The desktop shows A, in 5-6-5.
+        write(&mut v, VID_DESKTOP_START_ADDR, a);
+        write(&mut v, VID_DESKTOP_OVERLAY_STRIDE, 1280);
+        let cfg = VIDPROC_ENABLE | VIDPROC_DESKTOP_CLUT_BYPASS | 1 << 18;
+        write(&mut v, VID_PROC_CFG, cfg);
+        v.fbi.ram.set(a as usize / 2, 0xF800);
+        let (w, h) = v.picture_size();
+        let picture = |v: &Voodoo, memory: bool| {
+            let mut rgba = vec![0u8; (w * h * 4) as usize];
+            if memory {
+                v.render_memory(&mut rgba, w as usize);
+            } else {
+                v.render(&mut rgba, w as usize);
+            }
+            rgba
+        };
+        let shown = picture(&v, true);
+        reg3d(&mut v, LEFT_OVERLAY_BUF, b);
+        reg3d(&mut v, SWAPBUFFER_CMD, 1);
+        // The next frame's clear of A, behind the swap.
+        v.hold_shown(a as usize / 2);
+        v.fbi.ram.set(a as usize / 2, 0);
+        v.mark_drawn(a as usize / 2);
+        assert!(v.picture_held());
+        assert!(v.prepare_display());
+        assert_eq!(picture(&v, false), shown, "the frame shown");
+        assert_ne!(picture(&v, true), shown, "the memory has the clear");
     }
 
     #[test]
