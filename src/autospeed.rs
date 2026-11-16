@@ -115,8 +115,9 @@ const LOADS: f64 = 8.0 * WORKING;
 /// held at 98,000 to 130,000 where the host kept real time at 250,000.
 /// It probes only where the search had reason to doubt where it stopped:
 /// the step up that ended it drew fewer frames than the speed below it by
-/// more than `SAME`, which more speed doesn't do in one scene, or the
-/// limits from a host that fell behind ended (`far_more`). A program that
+/// more than `SAME`, which more speed doesn't do in one scene, and it could
+/// go no further then (at what the host had, or behind); or the limits
+/// from a host that fell behind ended (`far_more`). A program that
 /// draws as many frames at both speeds caps them itself (Doom's 35), and a
 /// step that gained a little shows how little more speed gives (Myth).
 /// The probe goes up by the frames short of the target, from `TWO_STEPS`
@@ -1094,9 +1095,10 @@ pub struct AutoSpeed {
     probe_misses: u32,
     /// Where the search stopped is in doubt, and a probe may try more
     /// (`PROBE_STEP`). Set where the step up that stopped it drew fewer
-    /// frames than the speed below it by more than `SAME`: in one scene
-    /// more speed draws as many frames or more, so the scene changed under
-    /// the step, and the knee reckoned from the two says nothing. Set too
+    /// frames than the speed below it by more than `SAME` and the search
+    /// couldn't go on at once: in one scene more speed draws as many frames
+    /// or more, so the scene changed under the step, and the knee reckoned
+    /// from the two says nothing. Set too
     /// where the limits from a host that fell behind end (`far_more`): the
     /// search held under them, short of what the host has now. Cleared by
     /// a new search and by a heavier scene, which searches again.
@@ -1893,9 +1895,20 @@ impl AutoSpeed {
                 });
             }
             let (low, low_fps) = (below.0 as f64, below.1);
+            // Fewer frames at more speed (`SAME`): the scene changed under
+            // the step, and the two say nothing of a knee. The search goes
+            // on from here as from its first measurement, or where it can't
+            // (at what the host has, or behind), holds in doubt. Quake's
+            // timedemo drew 40 frames a second at 80,000 and 36 at 139,000,
+            // and the knee reckoned from the two held it at 88,000 for the
+            // rest of the demo, where it draws 70 at 190,000 (#1160).
+            let fell = fps < low_fps * (1.0 - SAME);
+            if fell && m.pace >= KEPT_UP && current < top {
+                return up(this, FIRST_STEP, (current, fps));
+            }
+            this.unsure = fell;
             // Of another scene (`LOADS`), it says nothing of this one's
             // knee: the step's own speed drew what this one does.
-            this.unsure = fps < low_fps * (1.0 - SAME);
             let knee = if fps / low_fps > c / low * (1.0 + AGREE) {
                 c
             } else {
@@ -5053,15 +5066,15 @@ mod tests {
     }
 
     #[test]
-    fn a_probe_finds_the_speed_a_heavier_scene_hid() {
+    fn a_heavier_scene_under_a_step_up_does_not_stop_the_search() {
         // The step up from 20,000 lands in a heavier scene: 40 frames a
         // second there, 32 at 80,000, and the knee reckoned from the two
         // is under 20,000. The scene's frames follow the speed, a frame for
         // each 2500 instructions per ms, a quarter more or less from one
         // measurement to the next as Quake's timedemo does, which the
         // small steps up a hold tries can't tell from noise but now and
-        // then. Probes take it up to the refresh rate, 70 frames a second
-        // at 175,000.
+        // then. The search goes on from 80,000 to the refresh rate, 70
+        // frames a second at 175,000.
         let mut auto = AutoSpeed::new(3000, None);
         let mut speed = 20_000;
         let mut speeds = Vec::new();
