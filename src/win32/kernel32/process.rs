@@ -404,13 +404,23 @@ const WIN_EXEC_IDLE_MS: u32 = 30_000;
 /// may read the file it writes. As in Wine, it waits with USER32's
 /// WaitForInputIdle, and only when the caller has USER32.
 pub(super) fn win_exec(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    const ERROR_BAD_FORMAT: u32 = 11;
     let [line_at, show] = args[..] else {
         unreachable!()
     };
     let line = string_at(cpu, line_at)?;
     let startup = startup_showing(show as u16);
-    match spawn(cpu, None, Some(&line), None, false, 0, startup) {
+    let spawned = spawn(cpu, None, Some(&line), None, false, 0, startup);
+    exec_result(cpu, spawned)
+}
+
+/// What WinExec and LoadModule return for `spawned`, CreateProcessA's
+/// result: 33 once the program started, after it waits for input when
+/// the caller has USER32 (`win_exec_step`); else the error, 2 for a
+/// program not found, 11 for one that isn't a program and 0 for out of
+/// memory.
+fn exec_result(cpu: &mut Cpu, spawned: Result<[u32; 4], u32>) -> Option<u32> {
+    const ERROR_BAD_FORMAT: u32 = 11;
+    match spawned {
         Ok([process, thread, _, _]) => {
             if self::process(cpu).module("USER32.DLL").is_some() {
                 return task::start(cpu, task::WIN_EXEC, vec![process, thread], 0);
@@ -424,6 +434,61 @@ pub(super) fn win_exec(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         Err(ERROR_NOT_ENOUGH_MEMORY) => Some(0),
         Err(_) => Some(ERROR_BAD_FORMAT),
     }
+}
+
+/// LoadModule(name, parameters): the program `name` (with ".EXE" when it
+/// has no extension), started as WinExec starts one. The LOADPARMS32 at
+/// `parameters` has the environment (or 0 for the caller's), the
+/// arguments as a Pascal string (a length byte, then the text) and a
+/// pointer to two WORDs, 2 and the show command for the first window
+/// (or 0 for none). The command line is the program's path, a space and
+/// the arguments, as in Wine. Over 31 once it started; else the error:
+/// 2 for a program not found, 11 for one that isn't a program, 0 for
+/// out of memory.
+pub(super) fn load_module(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let [name_at, parameters] = args[..] else {
+        unreachable!()
+    };
+    if name_at == 0 {
+        return Some(ERROR_FILE_NOT_FOUND);
+    }
+    let name = string_at(cpu, name_at)?;
+    let env_at = cpu.bus.guest_read_32(parameters);
+    let arguments_at = cpu.bus.guest_read_32(parameters + 4);
+    let show_at = cpu.bus.guest_read_32(parameters + 8);
+    let mut arguments = Vec::new();
+    if arguments_at != 0 {
+        let len = cpu.bus.guest_read_8(arguments_at);
+        arguments.resize(len as usize, 0);
+        cpu.bus.guest_read_bytes(arguments_at + 1, &mut arguments);
+    }
+    let show = (show_at != 0).then(|| cpu.bus.guest_read_16(show_at + 2));
+    if cpu.bus.guest_faulted() {
+        return None;
+    }
+    let environment = match env_at {
+        0 => None,
+        at => Some(environment_at(cpu, at)?),
+    };
+    let Some(path) = find_program(cpu, &name) else {
+        return Some(ERROR_FILE_NOT_FOUND);
+    };
+    // Wine gives CreateProcessA the path it found as the program and this
+    // line, unquoted even when the path has a blank in it. With the
+    // program given, the child gets the line as it is.
+    let line = format!("{} {}", path, crate::dosstr::from_bytes(&arguments));
+    // `spawn` fills in the STARTUPINFOA's size.
+    let startup = show.map_or_else(|| vec![0u8; STARTUPINFO_SIZE as usize], startup_showing);
+    let spawned = spawn(
+        cpu,
+        Some(&path),
+        Some(&line),
+        environment,
+        false,
+        0,
+        startup,
+    );
+    exec_result(cpu, spawned)
 }
 
 /// WinExec's steps: WaitForInputIdle for the program it started, then

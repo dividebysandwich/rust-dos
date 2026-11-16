@@ -539,6 +539,7 @@ static APIS: &[Api] = &[
     stdcall("GlobalAddAtomW", 485, 1, not_implemented),
     stdcall("CreateProcessW", 199, 10, not_implemented),
     stdcall("WinExec", 812, 2, process::win_exec),
+    stdcall("LoadModule", 557, 2, process::load_module),
     stdcall("GetDiskFreeSpaceExA", 357, 4, win98::get_disk_free_space_ex),
     stdcall("IsDebuggerPresent", 539, 0, win98::is_debugger_present),
     stdcall("InterlockedCompareExchange", 524, 3, win98::interlocked_compare_exchange),

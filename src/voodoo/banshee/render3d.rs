@@ -2204,12 +2204,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn gpu_reads_a_buffer_blitted_from_every_frame_goes_back_to_the_gpu_once_cool() {
-        // The rows a copy reads back stay hot for `HOT_FRAMES` frames of
-        // the picture. Then one frame into the buffer goes to the GPU,
-        // its copy reads it back, and the buffer is hot again: the
-        // desktop gets the renderer's pixels in that frame and the
-        // software rasterizer's in the others.
+    fn gpu_reads_a_buffer_blitted_from_every_frame_stays_with_software_until_the_blits_stop() {
+        // The rows a copy reads back turn hot, and stay hot while a copy
+        // reads them at least once a period of `HOT_FRAMES` frames: the
+        // frames into the buffer after the first are drawn in software,
+        // and the desktop gets the software rasterizer's pixels. Once the
+        // copies stop for a period, the rows cool and the next frame goes
+        // to the GPU again.
         use super::super::super::gpu::HOT_FRAMES;
         let log = Rc::default();
         let mut v = gpu_frame_in_linear_buffer(&log);
@@ -2221,21 +2222,28 @@ pub(crate) mod tests {
         blit_2d(&mut sw, false, (0, 0), (640, 64));
         let software = desktop(&sw, 320, 30);
         assert_ne!(software, 0x1234);
-        let mut on_gpu = Vec::new();
-        for frame in 1..=2 * HOT_FRAMES + 2 {
+        for frame in 1..=3 * HOT_FRAMES {
             let before = gpu_only(&v);
             draw_frame(&mut v, A);
             blit_2d(&mut v, false, (0, 0), (640, 64));
+            assert_eq!(gpu_only(&v), before, "frame {frame}");
+            assert_eq!(desktop(&v, 320, 30), software, "frame {frame}");
+        }
+        // Without copies the frames stay in software until the rows cool,
+        // within two periods.
+        let mut on_gpu = None;
+        for frame in 1..=2 * HOT_FRAMES + 1 {
+            let before = gpu_only(&v);
+            draw_frame(&mut v, A);
             if gpu_only(&v) > before {
-                on_gpu.push(frame);
-                assert_eq!(desktop(&v, 320, 30), 0x1234, "frame {frame}");
-            } else {
-                assert_eq!(desktop(&v, 320, 30), software, "frame {frame}");
+                on_gpu = Some(frame);
+                break;
             }
         }
-        // One frame in each period of `HOT_FRAMES` frames goes to the GPU.
-        assert_eq!(on_gpu.len(), 2, "{on_gpu:?}");
-        assert_eq!(on_gpu[1] - on_gpu[0], HOT_FRAMES, "{on_gpu:?}");
+        let frame = on_gpu.expect("back on the GPU");
+        assert!(frame > 1, "{frame}");
+        blit_2d(&mut v, false, (0, 0), (640, 64));
+        assert_eq!(desktop(&v, 320, 30), 0x1234);
     }
 
     #[test]
