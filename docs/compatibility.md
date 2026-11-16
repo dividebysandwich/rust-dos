@@ -138,7 +138,7 @@ opcode, `win32_version=98se` when a message names the version, more
   and a processor with MMX, `cpu=pentium_mmx` or later; on the default
   486 it stops with "MMX required in this version". GOG's installer
   keeps eight of the game's settings files (`keyboard.ini`, `movie.ini`
-  and the `lights*.ini` files) in `gog-supporte7950224pp\config`;
+  and the `lights*.ini` files) in `gog-support\1457950224\app\config`;
   copy them into the game's `config` folder. Without them the islands
   and the menu have no daylight, only the light of fires, and the intro
   videos don't play. The game needs no registry keys: it starts at
