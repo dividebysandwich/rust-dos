@@ -1738,9 +1738,13 @@ impl AutoSpeed {
             // Not the CPU model's least speed: the cap keeps that under it.
             let least = self.least(protected, 0);
             self.fell_behind_at(current);
+            // Limits that hold on keep the least estimate of those that set
+            // them, and new ones start from this one's: a heavier scene can
+            // end limits after the check below has cleared `slow_host`.
+            let slow = self.slow_host.filter(|_| self.lagged.is_some());
             self.lagged = (most > least).then_some((most, LAGGED_WINDOWS));
             self.far_more = 0;
-            self.slow_host = Some(self.slow_host.map_or(host_max, |h| h.min(host_max)));
+            self.slow_host = Some(slow.map_or(host_max, |h| h.min(host_max)));
         } else if let (false, Some((most, left))) = (lagged, self.lagged) {
             // The estimate dipping to the limit doesn't end it: only rising
             // past what the host has does.
@@ -1760,10 +1764,17 @@ impl AutoSpeed {
             if self.far_more >= JUDGED {
                 self.lagged = None;
                 self.fell_at = None;
-                self.far_more = 0;
-                self.slow_host = None;
                 self.unsure = true;
             }
+        }
+        // Limits that ended, here or as they rose past what the host has,
+        // take their slow host with them, and the next limits set their
+        // own. Kept, the estimate of a slow start would end the limits of a
+        // program that falls behind where the estimate reads far more all
+        // along (see `far_more`).
+        if self.lagged.is_none() {
+            self.far_more = 0;
+            self.slow_host = None;
         }
         // A faster CPU model's least speed is only up to what the host has,
         // the cap included: an estimate that reads high where the host keeps
@@ -4628,6 +4639,39 @@ mod tests {
         assert_eq!((auto.lagged, auto.fell_at), (None, None));
         assert!(back.is_some_and(|i| i <= JUDGED as usize), "{back:?}");
         assert!(speed >= least, "{speed}");
+    }
+
+    #[test]
+    fn limits_that_ended_leave_no_slow_host_behind() {
+        // Limits from a slow start, with the estimate at 7,500, rose past
+        // what the host has and ended. A program that falls behind later,
+        // while the estimate reads far more all along, keeps the limits it
+        // sets: the host is no faster than when it fell behind.
+        let program = game(1.0 / 4000.0, 1000.0);
+        let behind = |speed| Measurement {
+            pace: 0.6,
+            ..program(speed)
+        };
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.slow_host = Some(7_500);
+        let mut speed = 100_000;
+        auto.decide(speed, &program(speed), true, HOST);
+        assert_eq!(auto.slow_host, None);
+        auto.decide(speed, &behind(speed), true, HOST);
+        speed = auto.decide(speed, &behind(speed), true, HOST);
+        assert!(auto.lagged.is_some());
+        for _ in 0..2 * JUDGED {
+            speed = auto.decide(speed, &program(speed), true, HOST);
+        }
+        assert!(auto.lagged.is_some(), "{speed}");
+        // Limits a heavier scene ended after that measurement's check: the
+        // next fall behind starts its own slow host.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.slow_host = Some(7_500);
+        auto.pace = 0.9;
+        auto.decide(100_000, &behind(100_000), true, HOST);
+        assert!(auto.lagged.is_some());
+        assert_eq!(auto.slow_host, Some(HOST));
     }
 
     #[test]
