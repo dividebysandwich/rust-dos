@@ -250,15 +250,46 @@ fn class_name(cpu: &Cpu, hwnd: u32) -> String {
         .map_or(String::new(), |c| c.name.to_ascii_lowercase())
 }
 
+/// The system's control whose window procedure `proc` is, by the name
+/// of its class, lower case.
+fn control_of_proc(proc: u32) -> Option<&'static str> {
+    const PROCS: [(&str, &str); 7] = [
+        ("EditWndProc", "edit"),
+        ("ListBoxWndProc", "listbox"),
+        ("ComboLBoxWndProc", "combolbox"),
+        ("ComboBoxWndProc", "combobox"),
+        ("ButtonWndProc", "button"),
+        ("StaticWndProc", "static"),
+        ("ScrollBarWndProc", "scrollbar"),
+    ];
+    if proc == 0 {
+        return None;
+    }
+    PROCS
+        .iter()
+        .find(|(name, _)| user32(name) == proc)
+        .map(|&(_, class)| class)
+}
+
 /// A 16-bit program's message to the window `hwnd` as Win32 numbers it:
 /// the controls' messages of the system's classes moved down from
-/// WM_USER.
-fn control_msg32(cpu: &Cpu, hwnd: u32, msg: u32) -> u32 {
+/// WM_USER. `target` is the 32-bit procedure that gets it, when it is
+/// known: a control's procedure takes them as its own control's
+/// messages whatever the window's class is called. A superclass of a
+/// control (Delphi's TListBox, whose procedure passes what it doesn't
+/// handle on to LISTBOX's with CallWindowProc) gets the message as the
+/// control's procedure would get it on Windows 3.1, and it is the call
+/// of that procedure that translates it.
+fn control_msg32(cpu: &Cpu, hwnd: u32, msg: u32, target: u32) -> u32 {
     if !(WM_USER..WM_USER + 0x40).contains(&msg) {
         return msg;
     }
     let n = msg - WM_USER;
-    match class_name(cpu, hwnd).as_str() {
+    let class = match control_of_proc(target) {
+        Some(c) => c.to_string(),
+        None => class_name(cpu, hwnd),
+    };
+    match class.as_str() {
         "edit" if n <= 0x29 => EM_GETSEL + n,
         "listbox" | "combolbox" if (1..=0x2A).contains(&n) => LB_ADDSTRING + n - 1,
         "combobox" if n <= 0x1C => CB_GETEDITSEL + n,
@@ -294,16 +325,18 @@ fn control_msg16(cpu: &Cpu, hwnd: u32, msg: u32) -> u32 {
 /// A message 16-bit code sends or passes on, as 32-bit code gets it:
 /// (msg, wParam, lParam), the structures it points to copied to `stack`,
 /// and what to write back when it returns (`data` grows).
+#[allow(clippy::too_many_arguments)]
 fn to32(
     cpu: &mut Cpu,
     hwnd: u32,
     msg16: u32,
     wp: u32,
     lp: u32,
+    target: u32,
     stack: &mut Stack32,
     data: &mut Vec<u32>,
 ) -> (u32, u32, u32) {
-    let msg = control_msg32(cpu, hwnd, msg16);
+    let msg = control_msg32(cpu, hwnd, msg16, target);
     let flat = |cpu: &Cpu, lp: u32| super::linear(cpu, lp);
     data.push(msg);
 
@@ -1059,7 +1092,7 @@ pub fn send32_with(
         top: thunk::scratch32(cpu, 0x400),
     };
     let mut data = Vec::new();
-    let (msg32, wp32, lp32) = to32(cpu, hwnd, msg, wp, lp, &mut stack, &mut data);
+    let (msg32, wp32, lp32) = to32(cpu, hwnd, msg, wp, lp, target, &mut stack, &mut data);
     let top = stack.top;
     let mut args = vec![hwnd];
     args.extend_from_slice(extra);
@@ -1099,7 +1132,7 @@ pub fn post_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         top: thunk::scratch32(cpu, 0x400),
     };
     let (msg, wp, lp) = to32(
-        cpu, args[0], args[1], args[2], args[3], &mut stack, &mut data,
+        cpu, args[0], args[1], args[2], args[3], 0, &mut stack, &mut data,
     );
     let target = user32("PostMessageA");
     let ctx = Context::of(cpu);
@@ -1166,7 +1199,7 @@ pub fn msg32(cpu: &mut Cpu, m16: u32, m: u32) -> u32 {
     let lp = r32(cpu, m16 + 6);
     let mut data = Vec::new();
     let mut stack = Stack32 { top: m };
-    let (msg, wp, lp) = to32(cpu, hwnd, msg, wp, lp, &mut stack, &mut data);
+    let (msg, wp, lp) = to32(cpu, hwnd, msg, wp, lp, 0, &mut stack, &mut data);
     let time = r32(cpu, m16 + 10);
     let x = sx(r16(cpu, m16 + 14));
     let y = sx(r16(cpu, m16 + 16));
