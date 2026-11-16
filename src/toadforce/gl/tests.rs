@@ -435,8 +435,13 @@ impl Bench {
         if let Some((x, y, a, b)) = first {
             println!("  first over the bound at ({x}, {y}): software {a:08X}, host {b:08X}");
         }
+        // A scene compared by its mean has `channel` for the most a
+        // pixel may differ by.
         match bound.mean {
-            Some(most) => assert!(mean <= most, "{name}: colour"),
+            Some(most) => {
+                assert!(mean <= most, "{name}: colour, mean");
+                assert_eq!(outliers, 0, "{name}: colour, largest");
+            }
             None => assert!(outliers <= bound.outliers, "{name}: colour"),
         }
         assert!(depth_largest <= bound.depth, "{name}: depth");
@@ -474,7 +479,6 @@ impl Bench {
     fn sampled(&self, name: &str, filter: u32, cube: bool, scene: impl Fn(&mut Rig)) {
         let channel = match (filter, cube) {
             (2, true) => 3,
-            (2, false) => 2,
             _ => 1,
         };
         self.within(name, channel, scene);
@@ -634,6 +638,10 @@ fn blends_and_write_masks_agree() {
         (12, 1),
         (13, 1),
         (2, 6),
+        // The two that set both factors, as the pixel's: none of it.
+        (2, 12),
+        (5, 13),
+        (12, 13),
     ];
     let layers = |rig: &mut Rig| {
         rig.clear(CLEAR_COLOUR, 0x6020_4060, 1.0, 0, &[]);
@@ -1052,12 +1060,13 @@ fn cube_maps_projection_and_colour_keys_agree() {
         }
     }
     // Coordinates divided by their fourth number, which differs from
-    // corner to corner.
+    // corner to corner. The host's quotient is a step of the weights
+    // off in places, which is 2 between texels that differ by all of a
+    // channel's range.
     for linear in [1, 2] {
-        bench.sampled(
+        bench.within(
             &format!("projected filter {linear}"),
             linear,
-            false,
             |rig| {
                 let t = rig.texels(TEXTURE, Format::A8R8G8B8, 8, 1, false, pattern);
                 rig.texture(0, 1, &t);
@@ -2000,8 +2009,8 @@ fn anisotropy_and_a_linearly_filtered_bump_texture_agree() {
     for anisotropy in [1, 4, 8] {
         let name = format!("anisotropy {anisotropy}");
         let bound = Bound {
-            channel: 255,
-            mean: Some(2.0),
+            channel: 29,
+            mean: Some(1.6),
             ..CLOSE
         };
         let scene = |rig: &mut Rig| {
@@ -2601,6 +2610,137 @@ fn triangles_as_lines_and_as_points_agree() {
     }
 }
 
+/// The rules each renderer has code of its own for, which a scene of
+/// ordinary numbers doesn't reach: flat shading beside interpolated
+/// fog, wrapped coordinates, fog that starts where it ends, and
+/// coordinates past the end of the card's whole numbers or no number
+/// at all.
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn flat_fog_wrapping_and_the_ends_of_the_ranges_agree() {
+    bench!(bench, "toadforce conformance");
+    // A flat triangle has one vertex's colours and every vertex's fog.
+    for last in [0, 1] {
+        bench.close(&format!("flat shading with fog, vertex {last}"), |rig| {
+            let mut q = quad(2.0, 2.0, 60.0, WHITE, 1.0);
+            let colours = [
+                0xFFFF_0000,
+                0xFF00_FF00,
+                0xFF00_00FF,
+                0xFFFF_FF00,
+                0xFF00_FFFF,
+                0xFFFF_00FF,
+            ];
+            for (v, colour) in q.iter_mut().zip(colours) {
+                v.diffuse = colour;
+                let fog = 0x20 + 0xD0 * v.t[0] as u32;
+                v.specular = (fog << 24) | (0x0030_2010 * (1 + v.t[1] as u32));
+            }
+            rig.states(&[
+                (RS_SHADEMODE, 1),
+                (RS_FLAT_VERTEX, last),
+                (RS_FOGENABLE, 1),
+                (RS_FOGCOLOR, 0x00A0_2060),
+                (RS_SPECULARENABLE, 1),
+            ]);
+            rig.draw(&q);
+        });
+    }
+    // Coordinates that go the shorter way round, over the texture's
+    // seam, in u, in v and in both.
+    for wrap in [1, 2, 3] {
+        for linear in [1, 2] {
+            let name = format!("wrap {wrap}, filter {linear}");
+            bench.sampled(&name, linear, false, |rig| {
+                let t = rig.texels(TEXTURE, Format::A8R8G8B8, 8, 1, false, pattern);
+                rig.texture(0, 1, &t);
+                filter(rig, 0, linear, linear, 0);
+                rig.states(&[(RS_WRAP0, wrap)]);
+                let mut q = quad(4.0, 4.0, 48.0, WHITE, 1.0);
+                for v in &mut q {
+                    v.t[0] = if v.t[0] == 0.0 { 0.9 } else { 0.35 };
+                    v.t[1] = if v.t[1] == 0.0 { 0.2 } else { 0.85 };
+                }
+                rig.draw(&q);
+            });
+        }
+    }
+    // Linear table fog that starts where it ends: nothing nearer than
+    // the end is fogged, and everything from there on is. By depth,
+    // and by w, which is 2 here.
+    for (by_w, ends) in [(0, [0.25f32, 0.375, 0.75]), (1, [1.0, 2.0, 3.0])] {
+        for end in ends {
+            bench.close(&format!("fog from {end} to {end}, by w {by_w}"), |rig| {
+                rig.states(&[
+                    (RS_FOGENABLE, 1),
+                    (RS_FOGCOLOR, 0x00A0_2060),
+                    (RS_FOGTABLEMODE, 3),
+                    (RS_FOG_BY_W, by_w),
+                    (RS_FOGSTART, end.to_bits()),
+                    (RS_FOGEND, end.to_bits()),
+                ]);
+                let mut q = quad(2.0, 2.0, 60.0, 0xFF40_C080, 1.0);
+                for v in &mut q {
+                    v.rhw = 0.5;
+                }
+                rig.draw(&q);
+            });
+        }
+    }
+    // A coordinate past what the card's whole numbers hold stops at
+    // their end, and one that is no number is the first texel.
+    for (name, u) in [
+        ("far right", 3.0e9f32),
+        ("far left", -3.0e9),
+        ("no number", f32::NAN),
+    ] {
+        for linear in [1, 2] {
+            let name = format!("a coordinate {name}, filter {linear}");
+            bench.sampled(&name, linear, false, |rig| {
+                let t = rig.texels(TEXTURE, Format::A8R8G8B8, 8, 1, false, pattern);
+                rig.texture(0, 1, &t);
+                filter(rig, 0, linear, linear, 0);
+                let mut q = quad(4.0, 4.0, 48.0, WHITE, 1.0);
+                for v in &mut q {
+                    v.t[0] = u;
+                }
+                rig.draw(&q);
+            });
+        }
+    }
+    // Linear table fog asks the start first: ending before it starts,
+    // it fogs from its start on. The square is at a depth of 0.375.
+    for (start, end) in [(0.5f32, 0.25f32), (0.375, 0.25), (0.25, 0.125), (0.25, 0.5)] {
+        bench.close(&format!("fog from {start} to {end}"), |rig| {
+            rig.states(&[
+                (RS_FOGENABLE, 1),
+                (RS_FOGCOLOR, 0x00A0_2060),
+                (RS_FOGTABLEMODE, 3),
+                (RS_FOGSTART, start.to_bits()),
+                (RS_FOGEND, end.to_bits()),
+            ]);
+            rig.draw(&quad_z(2.0, 2.0, 60.0, 0xFF40_C080, 0.375));
+        });
+    }
+    // Depth outside the buffer's range: with the depth test nothing
+    // of a square nearer than 0 or past 1 is drawn, and of one that
+    // tilts through both ends the part between them. Without the test
+    // all of each is.
+    for test in [1, 0] {
+        bench.close(&format!("depth outside 0 to 1, test {test}"), |rig| {
+            rig.states(&[(RS_ZENABLE, test), (RS_ZFUNC, 4)]);
+            rig.draw(&quad_z(2.0, 2.0, 40.0, 0xFF40_C080, 0.25));
+            rig.draw(&quad_z(20.0, 20.0, 40.0, 0xFFC0_4020, -0.5));
+            rig.draw(&quad_z(8.0, 30.0, 30.0, 0xFF20_40C0, 1.5));
+            let mut tilted = quad_z(4.0, 44.0, 16.0, 0xFFE0_E040, 0.0);
+            for v in &mut tilted {
+                v.z = (v.x - 4.0) / 4.0 - 1.5;
+            }
+            rig.draw(&tilted);
+        });
+    }
+}
+
 /// Level 0's `FILL` and `BLT` alone, on a surface the host has ahead
 /// and between it and card memory: values and pixels with bits their
 /// format doesn't define, which a fill writes and a copy keeps
@@ -3017,4 +3157,98 @@ fn the_vertices_the_host_lights_agree() {
     rig.card.settle(&mut rig.memory, None);
     let counts = &rig.card.describe(Rig::live())["host"]["counts"];
     assert_eq!(counts["transformed_runs"], 1, "{counts}");
+}
+
+/// The host's vertex shader has the card's rules at the ends: a light
+/// with an attenuation sum of 0 adds nothing, a power below 0 (the
+/// material's, a spot's falloff) is 1 over the power above it, and
+/// linear fog that starts after it ends leaves what is nearer than
+/// its start and fogs the rest. The card keeps a draw whose
+/// coordinates wrap.
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn the_host_lights_and_fogs_by_the_cards_rules_at_the_ends() {
+    bench!(bench, "toadforce lighting rules");
+    let bound = Bound {
+        channel: 2,
+        outliers: 4,
+        ..CLOSE
+    };
+    let light = |kind: u32| Light {
+        kind,
+        diffuse: [0.9, 0.8, 0.7, 1.0],
+        specular: [0.6, 0.7, 0.9, 1.0],
+        ambient: [0.3, 0.2, 0.1, 1.0],
+        position: [-3.0, 3.0, -2.0],
+        direction: [0.5, -0.6, 0.7],
+        range: 30.0,
+        falloff: 2.0,
+        attenuation: [0.4, 0.05, 0.01],
+        theta: 0.5,
+        phi: 1.3,
+        spot_model: 0,
+    };
+    let mut dark = light(LIGHT_POINT);
+    dark.attenuation = [0.0; 3];
+    let mut wide = light(LIGHT_SPOT);
+    wide.falloff = -1.5;
+    // A range that ends inside the sphere.
+    let mut short = light(LIGHT_POINT);
+    short.range = 4.5;
+    let scenes = [
+        ("an attenuation sum of 0", dark, 12.0f32, (2.0f32, 9.0f32)),
+        ("a power below 0", light(LIGHT_DIRECTIONAL), -2.0, (2.0, 9.0)),
+        ("a falloff below 0", wide, 12.0, (2.0, 9.0)),
+        ("a range inside the sphere", short, 12.0, (2.0, 9.0)),
+        ("fog that starts after it ends", light(LIGHT_POINT), 12.0, (4.2, 2.0)),
+    ];
+    for (name, lamp, power, (start, end)) in &scenes {
+        let material = Material {
+            diffuse: [0.8, 0.7, 0.6, 1.0],
+            ambient: [0.3, 0.3, 0.4, 1.0],
+            specular: [0.9, 0.9, 0.9, 1.0],
+            emissive: [0.05, 0.0, 0.1, 1.0],
+            power: *power,
+        };
+        let scene = |rig: &mut Rig| {
+            rig.clear(3, 0xFF10_2030, 1.0, 0, &[]);
+            rig.states(&[
+                (RS_LIGHTING, 1),
+                (RS_ZENABLE, 1),
+                (RS_SPECULARENABLE, 1),
+                (RS_NORMALIZENORMALS, 1),
+                (RS_FOGENABLE, 1),
+                (RS_FOGCOLOR, 0x00C0_40FF),
+                (RS_FOGVERTEXMODE, 3),
+                (RS_FOGSTART, start.to_bits()),
+                (RS_FOGEND, end.to_bits()),
+            ]);
+            rig.run(|w| {
+                encode::material(w, &material);
+                encode::ambient(w, &[0.1, 0.1, 0.1]);
+                encode::light(w, 0, lamp);
+                encode::enable_light(w, 0, true);
+            });
+            perspective(rig, 0.25, 0.3, 4.0);
+            let words = sphere([0.0, 0.0, 0.0], 1.6, 0xFFC0_E0A0);
+            let count = (words.len() / 9) as u32;
+            rig.run(|w| encode::draw(w, 4, FVF_LIT, count, &words));
+        };
+        let declined = bench.compare(name, Format::A8R8G8B8, Some(Format::D16), bound, scene);
+        assert_eq!(declined, 0, "{name}");
+    }
+    // The host lit those, and the card a textured sphere that wraps.
+    for (wrap, runs) in [(0, 1), (1, 0)] {
+        let mut rig = Rig::new(Format::A8R8G8B8, Some(Format::D16));
+        rig.card.set_host(Some(bench.host()), &mut rig.memory);
+        let t = rig.texels(TEXTURE, Format::A8R8G8B8, 8, 1, false, pattern);
+        rig.texture(0, 1, &t);
+        rig.states(&[(RS_WRAP0, wrap)]);
+        perspective(&mut rig, 0.25, 0.3, 4.0);
+        let words = sphere([0.0, 0.0, 0.0], 1.6, 0xFFC0_E0A0);
+        rig.run(|w| encode::draw(w, 4, FVF_LIT, (words.len() / 9) as u32, &words));
+        rig.card.settle(&mut rig.memory, None);
+        let counts = &rig.card.describe(Rig::live())["host"]["counts"];
+        assert_eq!(counts["transformed_runs"], runs, "wrap {wrap}: {counts}");
+    }
 }
