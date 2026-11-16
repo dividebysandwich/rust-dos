@@ -3796,15 +3796,24 @@ one's, in emulated time:
   starts again: the next frame shows as soon as it is done, and the
   ones after it wait a frame time each. A game that draws in bursts
   between such steps therefore counts fewer frames under a cap than
-  the cap's number. Grom's menu at 150,000 cycles spends 114 to 190 ms
-  on each step of its simulation and draws frames 3 ms apart between
-  them, 71 a second without a cap, of which a 60 Hz display shows
-  about 20. Under a cap of 60 the frames of a burst after the first
-  two wait a frame time each, and the next step comes due sooner, so
-  it shows 25 a second, more than a game synced to a 60 Hz display
-  shows. That is the rate of a simulation that runs on the clock,
-  which keeps its speed under the cap; with more cycles the menu shows
-  60.
+  the cap's number. Grom's menu at 150,000 cycles runs a step of its
+  menu script, 110 to 200 ms, once 33 ms have passed since the last
+  one ended, and draws frames in those 33 ms: twelve, 2.8 ms apart,
+  without a cap, 71 a second, of which a 60 Hz display shows two or
+  three a step. Under a cap of 60 four of them show, 25 a second, and
+  the steps come as often as without it. No rule of the cap shows
+  more of them a refresh apart: the cap's rate needs steps short
+  enough to leave room for it, which `cycles=max` gives the menu (60 a
+  second).
+- `cycles=auto` counts the frames a program shows through the cap, as
+  it counts those a display shows of a game that waits for its
+  retrace. A program held to the cap's rate settles where that game
+  does, coming down by steps that try less instead of at once. One
+  that shows fewer, as Grom's menu does between its steps, gets the
+  speed that shows the cap's rate. One that shows fewer because it
+  draws fewer, such as a game that draws 30 frames a second on the
+  clock or a movie, shows no more with more speed and settles where it
+  does without the cap.
 - A present that waits for the display's retrace (a flip, or a swap
   with a swap interval) is already held to the display's rate. Under
   `auto`, or with the cap at that rate or above it, the cap holds none
