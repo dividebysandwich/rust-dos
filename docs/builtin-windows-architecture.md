@@ -562,6 +562,15 @@ DPLAY.DLL, DirectX 3's, which some games import by ordinal, makes and
 lists DPLAYX's objects and providers, as Wine's does. WS2_32 and WSOCK32
 have no network yet.
 
+DirectPlay 8 (`dpnet/`, DPNET.DLL) has the peer, the lobbied application
+and the address of DirectX 8, on a machine whose service providers can't
+start, as WinSock opens no sockets: the four providers DirectX 8.1
+registers are listed only when a program asks for every registered one,
+and hosting, joining and looking for a session fail on the device
+address. The lobbied application registers programs under
+`HKLM\Software\Microsoft\DirectPlay8\Applications`. It has no
+sessions over the LAN room yet.
+
 ## Setup programs
 
 A game on CD is installed in one of three ways, which the player page
