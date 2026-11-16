@@ -749,6 +749,69 @@ fn flip_polled_with_other_calls_in_between_runs_every_call() {
     assert!(polls > 50, "{polls} calls of Flip");
 }
 
+/// A flip chain, a flip at the start of a frame, so that it shows a
+/// whole frame later, then a second Flip right after it, with `flags`,
+/// through the front buffer's interface `via` (queried), else through
+/// the IDirectDrawSurface it was made with.
+fn second_flip_program(via: Option<&[u8; 16]>, flags: u32) -> (Vec<u8>, u32) {
+    let mut d = flip_chain_data();
+    put(&mut d, IID, via.unwrap_or(&IID_IDIRECTDRAWSURFACE7));
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start_flip_chain(a, l, &mut c)?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            S_QUERY_INTERFACE,
+            &[Arg::At(IID), Arg::At(QUERIED)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_WAIT_FOR_VERTICAL_BLANK,
+            &[Arg::I(DDWAITVB_BLOCKEND), Arg::I(0)],
+        )?;
+        c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
+        let object = if via.is_some() { QUERIED } else { FRONT };
+        c.com(a, l, object, S_FLIP, &[Arg::I(0), Arg::I(flags)])?;
+        finish(a, l)
+    })
+}
+
+/// The result of second_flip_program's second flip, the calls before it
+/// having succeeded.
+fn second_flip(test: &str, via: Option<&[u8; 16]>, flags: u32) -> u32 {
+    let (program, data) = second_flip_program(via, flags);
+    let mut cpu = machine(test, program);
+    run_until_done(&mut cpu, data);
+    let results = results(&mut cpu, data, 9);
+    assert_eq!(results[1..8], [0; 7]);
+    results[8]
+}
+
+/// DirectX 7's ddraw.h, at DDFLIP_DONOTWAIT: through IDirectDrawSurface7
+/// and later interfaces Flip waits by default, and DDFLIP_DONOTWAIT
+/// makes it fail with DDERR_WASSTILLDRAWING instead. Through the older
+/// interfaces it waits only with DDFLIP_WAIT.
+#[test]
+fn surface7_flip_waits_for_the_last_flip_unless_told_not_to() {
+    let (v4, v7) = (Some(&IID_IDIRECTDRAWSURFACE4), Some(&IID_IDIRECTDRAWSURFACE7));
+    let cases = [
+        ("flip7_default", v7, 0, 0),
+        ("flip7_wait", v7, DDFLIP_WAIT, 0),
+        ("flip7_donotwait", v7, DDFLIP_DONOTWAIT, DDERR_WASSTILLDRAWING),
+        ("flip4_default", v4, 0, DDERR_WASSTILLDRAWING),
+        ("flip4_wait", v4, DDFLIP_WAIT, 0),
+        ("flip1_default", None, 0, DDERR_WASSTILLDRAWING),
+        ("flip1_wait", None, DDFLIP_WAIT, 0),
+    ];
+    for (test, via, flags, result) in cases {
+        assert_eq!(second_flip(test, via, flags), result, "{test}");
+    }
+}
+
 #[test]
 fn flip_status_polled_with_nothing_in_between_waits_for_the_frame() {
     // GetFlipStatus of the back buffer right after a flip: the flip is
