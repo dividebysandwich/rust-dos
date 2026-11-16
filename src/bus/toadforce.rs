@@ -910,6 +910,19 @@ mod tests {
     }
 
     #[test]
+    fn a_state_from_a_build_that_lagged_shows_the_card_surface() {
+        let mut cpu = machine();
+        let bus = &mut cpu.bus;
+        draw(bus, BACK, 0x0000_FF00);
+        flip(bus, BACK, false);
+        // An older build kept the start latched at the last retrace
+        // until the next one.
+        bus.vbe.latched_start = 0;
+        bus.toadforce_after_load();
+        assert_eq!(shown(bus), (BACK as u64, 0x0000_FF00));
+    }
+
+    #[test]
     fn a_flip_that_waits_shows_at_the_blank() {
         let mut cpu = machine();
         let bus = &mut cpu.bus;
