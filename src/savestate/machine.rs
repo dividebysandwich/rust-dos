@@ -179,6 +179,70 @@ mod tests {
         assert!(!cpu.os_idles);
     }
 
+    /// The stack the machines below get, a quarter of a test thread's.
+    const SMALL_STACK: usize = 512 << 10;
+
+    /// A machine booted from a hard disk image whose boot sector waits
+    /// for a key, with nothing else on it.
+    fn booted() -> Box<Cpu> {
+        use crate::diskimage::{DiskImage, SECTOR_SIZE};
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.set_cycles_per_ms(1000);
+        cpu.load_shell();
+        let disk = DiskImage::blank_hard_disk("boot.img", 8 << 20, None).unwrap();
+        let mut mbr = [0u8; SECTOR_SIZE];
+        disk.read(0, &mut mbr).unwrap();
+        // STI; XOR AH, AH; INT 16h; JMP $
+        mbr[..7].copy_from_slice(&[0xFB, 0x30, 0xE4, 0xCD, 0x16, 0xEB, 0xFE]);
+        disk.write(0, &mbr).unwrap();
+        cpu.bus.mount_disk_image(2, disk, Default::default()).unwrap();
+        crate::exec::run_command_line(&mut cpu, "BOOT -l C");
+        for _ in 0..50 {
+            let end = cpu.bus.clock.icount + 1000;
+            cpu.bus.start_batch(end);
+            crate::exec::run_batch(&mut cpu, &mut crate::exec::NoHook, false);
+        }
+        assert!(cpu.bus.boot.is_some(), "the image booted");
+        cpu
+    }
+
+    /// Machines are made, booted, saved and loaded on a quarter of the
+    /// stack a test thread has: with the machine moved by value (160 KB
+    /// with its bus) a few kilobytes more in a device overflowed a
+    /// 2 MB test thread doing this (#1196).
+    #[test]
+    fn machines_are_made_saved_and_loaded_on_a_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(SMALL_STACK)
+            .spawn(|| {
+                use crate::savestate::disks;
+                let dir = std::env::temp_dir()
+                    .join(format!("rust-dos-small-stack-{}", std::process::id()));
+                let file = dir.join("booted.state");
+                // A state of a booted system, with its disk beside it, loaded
+                // into another machine and from that into a third, as a
+                // front end does.
+                let first = booted();
+                let state = save(&first);
+                disks::save_copies(&first, &file).unwrap();
+                let mut second = booted();
+                let mut third = booted();
+                for cpu in [&mut second, &mut third] {
+                    disks::offer_copies(cpu, &file);
+                    let loaded = load(cpu, &state);
+                    disks::withdraw(cpu);
+                    loaded.unwrap();
+                    assert!(cpu.bus.boot.is_some());
+                }
+                drop((first, second, third));
+                let _ = std::fs::remove_dir_all(&dir);
+            })
+            .unwrap()
+            .join()
+            // An overflow aborts the test binary instead of failing here.
+            .expect("the machines ran");
+    }
+
     #[test]
     fn a_state_without_rc_has_none_to_come_back() {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));

@@ -29,7 +29,7 @@ const JMP_RESET: &[u8] = &[0xEA, 0x00, 0x00, 0xFF, 0xFF];
 /// Counts the boots in BOOTED, one x each, and shows the count.
 const AUTOEXEC: &[u8] = b"@echo off\r\nset BOOTED=%BOOTED%x\r\necho booted %BOOTED%\r\n";
 
-fn machine(dir: &Path) -> Cpu {
+fn machine(dir: &Path) -> Box<Cpu> {
     let mut cpu = Cpu::new(dir.to_path_buf());
     cpu.bus.set_cycles_per_ms(1000);
     cpu.startup = Startup {

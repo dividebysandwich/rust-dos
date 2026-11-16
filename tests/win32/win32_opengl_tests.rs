@@ -246,14 +246,14 @@ fn program(
 
 /// A machine with the built-in Windows on, `program` loaded from the
 /// shell as T.EXE, and a Voodoo3 as its display adapter when `voodoo3`.
-fn machine(test: &str, voodoo3: bool, program: Vec<u8>) -> Cpu {
+fn machine(test: &str, voodoo3: bool, program: Vec<u8>) -> Box<Cpu> {
     machine_with(test, voodoo3.then_some(Board::Voodoo3), program)
 }
 
 /// A machine with the built-in Windows on, `program` loaded from the
 /// shell as T.EXE, and the 3dfx card `card`: a Voodoo3 is the display
 /// adapter, a Voodoo2 a card beside the VGA.
-fn machine_with(test: &str, card: Option<Board>, program: Vec<u8>) -> Cpu {
+fn machine_with(test: &str, card: Option<Board>, program: Vec<u8>) -> Box<Cpu> {
     let adapter = (card == Some(Board::Voodoo3)).then_some(Adapter::Voodoo3);
     boot(test, adapter, card, program)
 }
@@ -261,7 +261,7 @@ fn machine_with(test: &str, card: Option<Board>, program: Vec<u8>) -> Cpu {
 /// A machine with the built-in Windows on, `program` loaded from the
 /// shell as T.EXE, `adapter` as its display adapter (the VGA when
 /// None), and the 3dfx card `voodoo`.
-fn boot(test: &str, adapter: Option<Adapter>, voodoo: Option<Board>, program: Vec<u8>) -> Cpu {
+fn boot(test: &str, adapter: Option<Adapter>, voodoo: Option<Board>, program: Vec<u8>) -> Box<Cpu> {
     let base = PathBuf::from("target/test_win32_opengl").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -293,7 +293,7 @@ enum Draws {
 
 /// A machine with the built-in Windows on, `program` loaded from the
 /// shell as T.EXE, and `card` as its display adapter.
-fn machine_on(test: &str, card: Draws, program: Vec<u8>) -> Cpu {
+fn machine_on(test: &str, card: Draws, program: Vec<u8>) -> Box<Cpu> {
     match card {
         Draws::Voodoo3 => machine(test, true, program),
         Draws::ToadForce => boot(
@@ -809,7 +809,7 @@ const TOP_RIGHT: [[f32; 2]; 3] = [[1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
 /// green triangle over the top right half. The depth test is on for the
 /// triangles with `depth_test`; without it the frames are drawn as Oni's
 /// menus draw theirs.
-fn two_triangles(clear: bool, depth_test: bool) -> (Cpu, u32) {
+fn two_triangles(clear: bool, depth_test: bool) -> (Box<Cpu>, u32) {
     let (exe, data) = program(&data(), |a, l| {
         let mut c = Calls { next: 0 };
         start(a, l, &mut c)?;
@@ -866,7 +866,7 @@ fn a_depth_clear_without_the_depth_test_gives_the_card_the_depth_buffer() {
 /// window and then, with `second`, makes a context in another window,
 /// clears its color and depth buffers and draws a green triangle in it,
 /// with the depth test on if `second` is true.
-fn two_contexts(second: Option<bool>) -> (Cpu, u32) {
+fn two_contexts(second: Option<bool>) -> (Box<Cpu>, u32) {
     let (exe, data) = program(&data(), |a, l| {
         let mut c = Calls { next: 0 };
         let both = [Arg::I(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)];
@@ -1816,7 +1816,7 @@ fn lit_by_normals(card: Draws) {
 /// counter-clockwise, so its front shows, and the top right one
 /// clockwise, so its back shows. With `two_side`, lighting is
 /// two-sided.
-fn two_sided(two_side: bool, card: Draws) -> (Cpu, u32) {
+fn two_sided(two_side: bool, card: Draws) -> (Box<Cpu>, u32) {
     let mut d = data();
     put_f32s(&mut d, VECTORS, &[0.0, 0.0, -1.0, 0.0]);
     put_f32s(&mut d, VECTORS + 16, &[1.0, 0.0, 0.0, 1.0]);

@@ -100,7 +100,7 @@ pub(crate) fn create_cpu(
         _ => std::path::PathBuf::from("."),
     };
 
-    let mut cpu = Box::new(Cpu::with_memory(root_path.clone(), memory.mb));
+    let mut cpu = Cpu::with_memory(root_path.clone(), memory.mb);
     cpu.bus.log_file = open_log_file(args.log.as_deref())?;
     // The debug server's log takes the lines logged before it starts.
     if args.debug_server.is_some() {

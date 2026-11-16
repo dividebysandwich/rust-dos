@@ -274,7 +274,7 @@ fn test_fbld_fbstp_round_trip() {
 
 /// FLD TBYTE of (sign << 15 | exponent, significand), then `store`, an
 /// instruction that stores ST(0) at [1010]; whether it set IE.
-fn store_extended(se: u16, man: u64, store: &[u8]) -> (Cpu, bool) {
+fn store_extended(se: u16, man: u64, store: &[u8]) -> (Box<Cpu>, bool) {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.bus.write_64(0x1000, man);
     cpu.bus.write_16(0x1008, se);

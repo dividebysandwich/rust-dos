@@ -19,7 +19,7 @@ const REGISTERS: usize = INITIAL_REGISTERS as usize;
 const MEMORY: usize = INITIAL_MEMORY as usize;
 const RING: usize = INITIAL_RING as usize;
 
-fn machine_with(adapter: Adapter) -> Cpu {
+fn machine_with(adapter: Adapter) -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     let setup = VideoSetup {
         adapter,
@@ -30,7 +30,7 @@ fn machine_with(adapter: Adapter) -> Cpu {
     cpu
 }
 
-fn machine() -> Cpu {
+fn machine() -> Box<Cpu> {
     machine_with(Adapter::ToadForce)
 }
 

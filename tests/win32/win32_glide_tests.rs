@@ -98,7 +98,7 @@ fn program_of(
 
 /// A machine with the built-in Windows on, the 3dfx card `board` and
 /// `program` loaded from the shell as T.EXE.
-fn machine(test: &str, board: Option<Board>, program: Vec<u8>) -> Cpu {
+fn machine(test: &str, board: Option<Board>, program: Vec<u8>) -> Box<Cpu> {
     let base = PathBuf::from("target/test_win32_glide").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -1704,7 +1704,7 @@ fn run_with(
     board: Board,
     (program, data): (Vec<u8>, u32),
     env: &[(&str, &str)],
-) -> (Cpu, u32) {
+) -> (Box<Cpu>, u32) {
     let base = PathBuf::from("target/test_win32_glide").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();

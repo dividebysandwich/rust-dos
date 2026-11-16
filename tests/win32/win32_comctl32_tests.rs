@@ -269,7 +269,7 @@ fn drive_c(test: &str) -> PathBuf {
 
 /// A machine with the built-in Windows on and `program` loaded from the
 /// shell as T.EXE.
-fn machine(test: &str, program: Vec<u8>) -> Cpu {
+fn machine(test: &str, program: Vec<u8>) -> Box<Cpu> {
     let base = drive_c(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -315,18 +315,18 @@ fn peek_str(cpu: &Cpu, lin: u32) -> String {
 
 /// Run `calls` with `data`: the machine, still running the program,
 /// and where its data is.
-fn run(test: &str, data: &[u8], calls: &[Call]) -> (Cpu, u32) {
+fn run(test: &str, data: &[u8], calls: &[Call]) -> (Box<Cpu>, u32) {
     run_program(test, program(data, calls))
 }
 
 /// Run the program `exe`, whose data is at `at`, as `run` does.
-fn run_program(test: &str, (exe, at): (Vec<u8>, u32)) -> (Cpu, u32) {
+fn run_program(test: &str, (exe, at): (Vec<u8>, u32)) -> (Box<Cpu>, u32) {
     run_machine(machine(test, exe), at)
 }
 
 /// Run the program `machine` has loaded, whose data is at `at`, as `run`
 /// does.
-fn run_machine(mut cpu: Cpu, at: u32) -> (Cpu, u32) {
+fn run_machine(mut cpu: Box<Cpu>, at: u32) -> (Box<Cpu>, u32) {
     for _ in 0..2000 {
         cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
         run_batch(&mut cpu, &mut NoHook, false);

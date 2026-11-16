@@ -237,7 +237,7 @@ fn dir_switches_follow_the_path_or_each_other() {
 }
 
 /// D: with MANY, which holds SUB and 30 files.
-fn many_files(name: &str) -> Cpu {
+fn many_files(name: &str) -> Box<Cpu> {
     let base = scratch(name, &["c", "d/MANY/SUB"]);
     for i in 1..=30 {
         fs::write(base.join(format!("d/MANY/file{:02}.txt", i)), b"x").unwrap();

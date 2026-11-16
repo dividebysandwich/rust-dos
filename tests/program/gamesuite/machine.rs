@@ -17,7 +17,7 @@ use std::rc::Rc;
 const AUDIO_EVERY_MS: u64 = 10;
 
 pub struct Machine {
-    pub cpu: Cpu,
+    pub cpu: Box<Cpu>,
     /// Emulated milliseconds since the start.
     pub ms: u64,
     /// Its clock's lead over the start time.

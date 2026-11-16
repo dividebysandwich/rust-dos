@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 const BUF: usize = 0x30000; // 3000:0000
 
-fn machine() -> Cpu {
+fn machine() -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     cpu.set_es(0x3000);
     cpu.set_di(0);
