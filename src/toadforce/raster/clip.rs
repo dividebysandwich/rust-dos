@@ -1,7 +1,7 @@
 //! Cutting primitives at planes, before the division by w
 //! ("Clipping" in chapter 9 of `docs/toadforce-spec.md`).
 
-use super::geometry::{PLANES, Vertex};
+use super::geometry::{PLANE_FAR, PLANE_NEAR, PLANES, Vertex};
 
 /// The corners a triangle cut at every plane can have: each plane adds
 /// one at most.
@@ -89,10 +89,23 @@ impl Polygon {
 
 /// Where the edge from `a`, inside `plane`, to `b`, outside it, meets
 /// the plane.
+///
+/// The corner is on the plane exactly. At the near plane its z is 0
+/// and at the far one its z is its w, whatever the rounding of the
+/// way along the edge made of them, so its depth is the end of the
+/// depth range and no further: a pixel with a depth past the range is
+/// left out where the depth test is on ("Values at a pixel" in chapter
+/// 9), and a corner a rounding past it would lose the pixels beside the
+/// cut.
 fn crossing(a: &Vertex, b: &Vertex, plane: usize) -> Vertex {
     let t = a.dist[plane] / (a.dist[plane] - b.dist[plane]);
     let mut v = a.lerp(b, t);
     v.dist[plane] = 0.0;
+    match plane {
+        PLANE_NEAR => v.clip[2] = 0.0,
+        PLANE_FAR => v.clip[2] = v.clip[3],
+        _ => {}
+    }
     v
 }
 
@@ -107,4 +120,45 @@ pub fn line(mut a: Vertex, mut b: Vertex, planes: u16) -> Option<(Vertex, Vertex
         }
     }
     Some((a, b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A vertex at `clip` with its distances to the near and far
+    /// planes.
+    fn vertex(clip: [f32; 4]) -> Vertex {
+        let mut v = Vertex {
+            clip,
+            ..Vertex::default()
+        };
+        v.dist[PLANE_NEAR] = clip[2];
+        v.dist[PLANE_FAR] = clip[3] - clip[2];
+        v
+    }
+
+    /// The corner an edge gets at the near plane has a z of 0, and at
+    /// the far plane a z that is its w: its depth is the range's end,
+    /// where the way along the edge alone rounds a share of them past
+    /// it.
+    #[test]
+    fn a_corner_at_the_near_or_far_plane_is_on_it_exactly() {
+        let mut rounded = [0, 0];
+        for i in 0..200u32 {
+            let f = |n: u32| (i * n % 97) as f32 / 97.0;
+            let inside = vertex([f(3), f(5), 0.1 + f(7), 1.3 + f(11)]);
+            let near = vertex([f(13), f(17), -0.1 - f(19), 0.7 + f(23)]);
+            let far = vertex([f(29), f(31), 2.1 + f(37), 1.1 + f(41)]);
+            for (n, (plane, outside)) in [(PLANE_NEAR, near), (PLANE_FAR, far)].iter().enumerate() {
+                let t = inside.dist[*plane] / (inside.dist[*plane] - outside.dist[*plane]);
+                let [_, _, z, w] = inside.lerp(outside, t).clip;
+                let end = [0.0, w][n];
+                rounded[n] += (z != end) as u32;
+                let [_, _, z, w] = crossing(&inside, outside, *plane).clip;
+                assert_eq!(z, [0.0, w][n], "{i} {plane}");
+            }
+        }
+        assert!(rounded[0] > 0 && rounded[1] > 0, "{rounded:?}");
+    }
 }

@@ -527,9 +527,7 @@ fn put(cpu: &mut Cpu, a: &Applied, card: bool) -> bool {
     // written: a write gives the device a new stamp, and the HAL then
     // binds the card's state anew (`inner_device::Device`).
     for &(s, v) in &a.render {
-        if d.render[s as usize] != v {
-            d.render[s as usize] = v;
-        }
+        d.set_state(s, v);
     }
     for &(stage, s, v) in &a.stages {
         let at = (stage * 32 + s) as usize;
