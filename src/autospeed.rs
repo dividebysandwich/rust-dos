@@ -1962,13 +1962,10 @@ impl AutoSpeed {
                 return up(this, FIRST_STEP, (current, fps));
             }
             this.unsure = fell;
-            // Of another scene (`LOADS`), it says nothing of this one's
-            // knee: the step's own speed drew what this one does.
-            let knee = if fps / low_fps > c / low * (1.0 + AGREE) {
-                c
-            } else {
-                (low * fps / low_fps).clamp(low, c)
-            };
+            // A step that drew more frames per instruction than the speed
+            // below (another scene, `LOADS`) puts the knee at its own speed,
+            // which the clamp does.
+            let knee = (low * fps / low_fps).clamp(low, c);
             hold(this, knee * HEADROOM, JUDGED, true)
         };
         let here = (current, fps);
