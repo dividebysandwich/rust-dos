@@ -1795,29 +1795,33 @@ fn win_exec_starts_a_program_or_says_why_not() {
 
 /// LoadModule, which Windows 95 and 98 export and Smacker's UPX-packed
 /// SMACKW32.DLL imports: a name without an extension is a program's
-/// (C, for C.EXE), and the child's command line is its path, a space
-/// and the LOADPARMS32's Pascal string. Over 31 for the program
-/// started, 2 for one not found.
+/// (C, for C.EXE), the child's command line is its path, a space and
+/// the LOADPARMS32's Pascal string, and its environment is the block's.
+/// A path with a space in it is quoted. Over 31 for a program started,
+/// 2 for one not found.
 #[test]
 fn load_module_starts_a_program_or_says_why_not() {
     let child = {
         let names: &[&str] = &["GetStdHandle", "GetCommandLineA", "lstrlenA", "WriteFile"];
-        let names = [names, &["ExitProcess"]].concat();
+        let names = [names, &["ExitProcess", "GetEnvironmentStringsA"]].concat();
         let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &names)];
         program(BASE, false, imports, &[0; 4], |a, l| {
-            a.call(l.import(1))?;
-            a.mov(esi, eax)?;
-            a.push(eax)?;
-            a.call(l.import(2))?;
-            a.mov(edi, eax)?;
             a.push(STD_OUTPUT_HANDLE)?;
             a.call(l.import(0))?;
-            a.push(0)?;
-            a.push(l.at(0) as i32)?;
-            a.push(edi)?;
-            a.push(esi)?;
-            a.push(eax)?;
-            a.call(l.import(3))?;
+            a.mov(ebx, eax)?;
+            // The command line, then the environment's first string.
+            for get in [1, 5] {
+                a.call(l.import(get))?;
+                a.mov(esi, eax)?;
+                a.push(eax)?;
+                a.call(l.import(2))?;
+                a.push(0)?;
+                a.push(l.at(0) as i32)?;
+                a.push(eax)?;
+                a.push(esi)?;
+                a.push(ebx)?;
+                a.call(l.import(3))?;
+            }
             a.push(0)?;
             a.call(l.import(4))?;
             a.int3()
@@ -1825,8 +1829,8 @@ fn load_module_starts_a_program_or_says_why_not() {
     };
     let names: &[&str] = &["LoadModule", "Sleep", "ExitProcess"];
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
-    // The names at 0 and 0x10, LOADPARMS32 at 0x20, the arguments at 0x30
-    // and the show command at 0x40.
+    // The names at 0, 0x10 and 0x48, LOADPARMS32 at 0x20, the arguments
+    // at 0x30, the show command at 0x40 and the environment at 0x58.
     let mut data = b"C".to_vec();
     data.resize(0x10, 0);
     data.extend_from_slice(b"NONE");
@@ -1835,41 +1839,54 @@ fn load_module_starts_a_program_or_says_why_not() {
     data[0x31..0x3C].copy_from_slice(b"an argument");
     data.extend_from_slice(&[2, 0, 1, 0]);
     data.resize(0x48, 0);
+    data.extend_from_slice(b"SUB DIR\\D");
+    data.resize(0x58, 0);
+    data.extend_from_slice(b"LM=1\0\0");
+    data.resize(0x60, 0);
     let parent = program(BASE, false, imports, &data, |a, l| {
         let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
-        for (field, value) in [(0x24, 0x30), (0x28, 0x40)] {
+        for (field, value) in [(0x20, 0x58), (0x24, 0x30), (0x28, 0x40)] {
             a.mov(dword_ptr(l.at(field)), l.at(value) as i32)?;
         }
-        a.push(l.at(0x20) as i32)?;
-        a.push(l.at(0) as i32)?;
-        a.call(f("LoadModule"))?;
-        a.cmp(eax, 31)?;
-        a.seta(bl)?;
-        a.push(l.at(0x20) as i32)?;
-        a.push(l.at(0x10) as i32)?;
-        a.call(f("LoadModule"))?;
-        a.cmp(eax, 2)?;
-        a.sete(al)?;
-        a.shl(al, 1)?;
-        a.or(bl, al)?;
-        // The child ends before the parent.
+        a.xor(ebx, ebx)?;
+        // Bit 0 and 1 for C and SUB DIR\D started, 2 for NONE not found.
+        for (name, bit) in [(0, 0), (0x48, 1), (0x10, 2)] {
+            a.push(l.at(0x20) as i32)?;
+            a.push(l.at(name) as i32)?;
+            a.call(f("LoadModule"))?;
+            if bit < 2 {
+                a.cmp(eax, 31)?;
+                a.seta(al)?;
+            } else {
+                a.cmp(eax, 2)?;
+                a.sete(al)?;
+            }
+            a.shl(al, bit)?;
+            a.or(bl, al)?;
+        }
+        // The children end before the parent.
         a.push(100)?;
         a.call(f("Sleep"))?;
-        a.movzx(eax, bl)?;
-        a.push(eax)?;
+        a.push(ebx)?;
         a.call(f("ExitProcess"))?;
         a.int3()
     });
-    let files = &[("T.EXE", parent), ("C.EXE", child)];
-    let mut cpu = Cpu::new(scratch("load_module", files));
+    let files = &[("T.EXE", parent), ("C.EXE", child.clone())];
+    let base = scratch("load_module", files);
+    fs::create_dir_all(base.join("SUB DIR")).unwrap();
+    fs::write(base.join("SUB DIR/D.EXE"), child).unwrap();
+    let mut cpu = Cpu::new(base);
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
     assert!(cpu.load_executable("T.EXE", None));
     assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
-    assert_eq!(cpu.errorlevel, 3, "{}", printed(&cpu));
     let text = printed(&cpu);
-    assert!(text.contains("C.EXE an argument"), "{text}");
+    assert_eq!(cpu.errorlevel, 7, "{text}");
+    assert!(text.contains("C:\\C.EXE an argument"), "{text}");
+    let quoted = "\"C:\\SUB DIR\\D.EXE\" an argument";
+    assert!(text.contains(quoted), "{text}");
+    assert_eq!(text.matches("LM=1").count(), 2, "{text}");
 }
 
 /// A command line naming its program without quotes, in a folder with

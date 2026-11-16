@@ -442,9 +442,9 @@ fn exec_result(cpu: &mut Cpu, spawned: Result<[u32; 4], u32>) -> Option<u32> {
 /// arguments as a Pascal string (a length byte, then the text) and a
 /// pointer to two WORDs, 2 and the show command for the first window
 /// (or 0 for none). The command line is the program's path, a space and
-/// the arguments, as in Wine. Over 31 once it started; else the error:
-/// 2 for a program not found, 11 for one that isn't a program, 0 for
-/// out of memory.
+/// the arguments, as in Wine, with the path in quotes when it has a
+/// blank. Over 31 once it started; else the error: 2 for a program not
+/// found, 11 for one that isn't a program, 0 for out of memory.
 pub(super) fn load_module(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [name_at, parameters] = args[..] else {
         unreachable!()
@@ -473,15 +473,19 @@ pub(super) fn load_module(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(path) = find_program(cpu, &name) else {
         return Some(ERROR_FILE_NOT_FOUND);
     };
-    let line = format!("{} {}", path, crate::dosstr::from_bytes(&arguments));
-    let startup = match show {
-        Some(show) => startup_showing(show),
-        None => {
-            let mut startup = vec![0u8; STARTUPINFO_SIZE as usize];
-            startup[..4].copy_from_slice(&STARTUPINFO_SIZE.to_le_bytes());
-            startup
-        }
+    // A path with a blank in it is quoted, as `ProgramInLine` quotes one
+    // for WinExec on Windows 98 SE. The C runtime takes an unquoted
+    // program name to its first blank, and so does `spawn` for a Windows
+    // 3.1 program's command tail, so "C:\Program Files\Game\Game.exe"
+    // unquoted would give both "Files\Game\Game.exe" as arguments.
+    let arguments = crate::dosstr::from_bytes(&arguments);
+    let line = if path.contains([' ', '\t']) {
+        format!("\"{}\" {}", path, arguments)
+    } else {
+        format!("{} {}", path, arguments)
     };
+    // `spawn` fills in the STARTUPINFOA's size.
+    let startup = show.map_or_else(|| vec![0u8; STARTUPINFO_SIZE as usize], startup_showing);
     let spawned = spawn(
         cpu,
         Some(&path),
