@@ -125,6 +125,7 @@ impl Voodoo {
         }
 
         let Some(dest) = self.color_buffer((self.reg[FBZ_MODE] >> 14) & 3) else { return };
+        self.hold_shown(dest);
 
         let f = &self.fbi;
         let mut p = TriParams {
@@ -212,7 +213,13 @@ impl Voodoo {
             None => self.color_buffer(0) == Some(dest),
         };
         if shown {
-            self.display_dirty = true;
+            // On a Banshee, while a swap waits for its retrace, the next
+            // frame's drawing doesn't reach the picture (`hold_shown`,
+            // which the drawing calls first).
+            self.hold_shown(dest);
+            if !self.picture_held() {
+                self.display_dirty = true;
+            }
         }
         self.note_drawn(super::Place::Buffer(dest));
         if !self.drawn_to.contains(&dest) {
@@ -238,6 +245,9 @@ impl Voodoo {
             _ => Some(0),
         };
         let Some(dest) = dest else { return };
+        if rgb {
+            self.hold_shown(dest);
+        }
         self.fastfills += 1;
         let st = self.raster_state(dest, 0);
         let (sx, ex, sy, ey) = st.clip();

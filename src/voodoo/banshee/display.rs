@@ -391,6 +391,7 @@ impl Voodoo {
     /// memory, which gets the pages shown that were written since it last
     /// had them (`tracker`), first in the recording.
     pub(crate) fn banshee_scanout(&mut self, key: &LayoutKey) -> Option<Box<Scanout>> {
+        let held = self.picture_held();
         let b = self.banshee.as_deref_mut()?;
         let dirty = std::mem::take(&mut b.dirty)
             | std::mem::take(&mut self.display_dirty)
@@ -543,6 +544,7 @@ impl Voodoo {
             overlay,
             cursor,
             clut: b.clut.to_vec(),
+            held,
         }))
     }
 }

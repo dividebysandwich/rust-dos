@@ -255,7 +255,7 @@ pub fn set_mode(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32, refresh: u3
         cpu,
         w,
         h,
-        hz,
+        Some(hz),
         api::COLORFORMAT_ARGB,
         api::ORIGIN_UPPER_LEFT,
         2,

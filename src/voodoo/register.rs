@@ -207,7 +207,7 @@ impl Voodoo {
                 if fbi {
                     let reg = ((data >> 8) & 7) as usize;
                     if data & 0x800 == 0 {
-                        self.dac[reg] = data as u8;
+                        self.dac_write(reg, data as u8, now);
                     } else {
                         self.dac_read = self.dac_register(reg);
                     }
@@ -227,7 +227,7 @@ impl Voodoo {
                         if regnum == VIDEO_DIMENSIONS {
                             self.recompute_video_memory();
                         }
-                        self.update_timing();
+                        self.retime(now);
                     }
                 }
             }
@@ -353,13 +353,17 @@ impl Voodoo {
 
     /// A DAC register read through dacData bit 11: the value written,
     /// except the ID a Glide probing for the DAC type looks for
-    /// (`dacdata_r`).
+    /// (`dacdata_r`), and the PLL's control register (0Eh) as it was
+    /// written. 3dfx's libraries read that one and write it back with a
+    /// bit changed when they set the graphics clock, so it must keep
+    /// clock 0's source (`video_clock`).
     fn dac_register(&self, reg: usize) -> u8 {
         if reg == 5 {
             match self.dac[7] {
                 0x01 => 0x55,
                 0x07 => 0x71,
                 0x0B => 0x79,
+                0x0E => self.pll[0x0E] as u8,
                 _ => 0xFF,
             }
         } else {
@@ -562,5 +566,118 @@ mod tests {
         let row = 256;
         let texels = [0, 1, 2, 3].map(|at| ram.byte(row + at));
         assert_eq!(texels, [0x55, 0x66, 0x77, 0x88]);
+    }
+
+    #[test]
+    fn the_dacs_video_clock_sets_the_refresh_rate() {
+        // 3dfx's Voodoo2 library at 640x480 and 75 Hz: VESA's frame of
+        // 840x500, its DAC in 24-bit output (two clocks a pixel) and
+        // clock 0 at 63 MHz, M, N and P from sst1InitComputeClkParams.
+        let mut v = Voodoo::with_workers(Board::Voodoo2, 0);
+        reg(&mut v, H_SYNC, 775 << 16 | 63);
+        reg(&mut v, V_SYNC, 497 << 16 | 3);
+        reg(&mut v, VIDEO_DIMENSIONS, 479 << 16 | 639);
+        // Without a clock from the PLL: the 60 Hz frame.
+        assert_eq!(v.refresh_hz().round(), 60.0);
+        let dac = |v: &mut Voodoo, r: u32, value: u32| reg(v, DAC_DATA, r << 8 | value);
+        dac(&mut v, 6, 0x70);
+        dac(&mut v, 4, 0);
+        dac(&mut v, 5, 42);
+        dac(&mut v, 5, 1 << 5 | 3);
+        // Clock 0 from the pins still.
+        assert_eq!(v.refresh_hz().round(), 60.0);
+        dac(&mut v, 4, 0x0E);
+        dac(&mut v, 5, 0x20);
+        // 14.318 MHz x 44 / (5 x 2) = 63 MHz, 31.5 MHz a pixel.
+        assert!((v.refresh_hz() - 75.0).abs() < 0.01, "{}", v.refresh_hz());
+        // A state saved at 75 Hz loads at 75 Hz.
+        use crate::savestate::{Reader, State, Writer};
+        let mut w = Writer::new();
+        v.save(&mut w);
+        let mut loaded = Voodoo::with_workers(Board::Voodoo2, 0);
+        loaded.load(&mut Reader::new(&w.buf)).unwrap();
+        assert!((loaded.refresh_hz() - 75.0).abs() < 0.01, "{}", loaded.refresh_hz());
+        // Back to the pins: 60 Hz again.
+        dac(&mut v, 4, 0x0E);
+        dac(&mut v, 5, 0);
+        assert_eq!(v.refresh_hz().round(), 60.0);
+    }
+
+    /// Write `value` to DAC register `r` through dacData.
+    fn dac(v: &mut Voodoo, r: u32, value: u32) {
+        reg(v, DAC_DATA, r << 8 | value);
+    }
+
+    /// A Voodoo2 with the frame and clock 3dfx's library sets for
+    /// 640x480 at 75 Hz (`the_dacs_video_clock_sets_the_refresh_rate`).
+    fn at_75_hz() -> Voodoo {
+        let mut v = Voodoo::with_workers(Board::Voodoo2, 0);
+        reg(&mut v, H_SYNC, 775 << 16 | 63);
+        reg(&mut v, V_SYNC, 497 << 16 | 3);
+        reg(&mut v, VIDEO_DIMENSIONS, 480 << 16 | 639);
+        dac(&mut v, 6, 0x70);
+        dac(&mut v, 4, 0);
+        dac(&mut v, 5, 42);
+        dac(&mut v, 5, 1 << 5 | 3);
+        dac(&mut v, 4, 0x0E);
+        dac(&mut v, 5, 0x20);
+        v
+    }
+
+    #[test]
+    fn setting_the_graphics_clock_keeps_the_video_clock() {
+        // 3dfx's libraries set the graphics clock by reading the PLL's
+        // control register, writing GCLK0 and writing the control back
+        // with bit 4 cleared (sst1InitSetGrxClkICS), which they also do
+        // after the video clock, when Glide closes (sst1InitShutdown).
+        let mut v = at_75_hz();
+        assert!((v.refresh_hz() - 75.0).abs() < 0.01, "{}", v.refresh_hz());
+        dac(&mut v, 7, 0x0E);
+        reg(&mut v, DAC_DATA, 5 << 8 | 0x800);
+        let ctrl = v.dac_read as u32;
+        assert_eq!(ctrl & 0x27, 0x20, "clock 0 from PLL register 0");
+        dac(&mut v, 4, 0x0A);
+        dac(&mut v, 5, 0x2A);
+        dac(&mut v, 5, 0x41);
+        dac(&mut v, 4, 0x0E);
+        dac(&mut v, 5, ctrl & !0x10);
+        assert!((v.refresh_hz() - 75.0).abs() < 0.01, "{}", v.refresh_hz());
+    }
+
+    #[test]
+    fn dos_glides_640x480_at_60_hz_runs_at_its_clock() {
+        // 3dfx's Voodoo2 library at 640x480 and 60 Hz: an hSync of 96 and
+        // 704 (a line of 802 pixels), a frame of 525 lines, and 24-bit
+        // output at 50.35 MHz, for which sst1InitComputeClkParams picks
+        // M 125, N 7 and P 2: 50.51 MHz, 25.26 MHz a pixel, 59.98 Hz.
+        let mut v = Voodoo::with_workers(Board::Voodoo2, 0);
+        reg(&mut v, H_SYNC, 704 << 16 | 96);
+        reg(&mut v, V_SYNC, 523 << 16 | 2);
+        reg(&mut v, VIDEO_DIMENSIONS, 480 << 16 | 639);
+        dac(&mut v, 6, 0x70);
+        dac(&mut v, 4, 0);
+        dac(&mut v, 5, 125);
+        dac(&mut v, 5, 2 << 5 | 7);
+        dac(&mut v, 4, 0x0E);
+        dac(&mut v, 5, 0x20);
+        assert!((v.refresh_hz() - 59.98).abs() < 0.01, "{}", v.refresh_hz());
+    }
+
+    #[test]
+    fn a_state_from_before_the_pll_loads_at_60_hz() {
+        // A state saved before the PLL's registers were kept ends where
+        // they would begin: the select pins chose the clock then.
+        use crate::savestate::{Reader, State, Writer};
+        let v = at_75_hz();
+        let mut w = Writer::new();
+        v.save(&mut w);
+        let mut pll = Writer::new();
+        v.pll.save(&mut pll);
+        v.pll_high.save(&mut pll);
+        let old = &w.buf[..w.buf.len() - pll.buf.len()];
+        let mut loaded = Voodoo::with_workers(Board::Voodoo2, 0);
+        loaded.load(&mut Reader::new(old)).unwrap();
+        assert_eq!(loaded.refresh_hz().round(), 60.0);
+        assert_eq!(loaded.timing().total, 500);
     }
 }
