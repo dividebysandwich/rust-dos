@@ -130,8 +130,9 @@ pub(super) fn open_semaphore(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// The object of `handle`'s kind, changed by `f`, which says whether it
-/// may be; then the waits it may end, end. False, with the last error
-/// set, if `handle` isn't a handle of the kind `f` takes.
+/// may be; then the waits it may end, end (`thread::object_changed`).
+/// False, with the last error set, if `handle` isn't a handle of the kind
+/// `f` takes.
 fn change(cpu: &mut Cpu, handle: u32, f: impl FnOnce(&mut Kind, u32) -> Result<(), u32>) -> u32 {
     let Some(id) = object::resolve(cpu, handle) else {
         set_error(cpu, ERROR_INVALID_HANDLE);
@@ -146,7 +147,7 @@ fn change(cpu: &mut Cpu, handle: u32, f: impl FnOnce(&mut Kind, u32) -> Result<(
         set_error(cpu, error);
         return FALSE;
     }
-    thread::wake(cpu);
+    thread::object_changed(&mut cpu.bus.win32, id);
     TRUE
 }
 
@@ -221,41 +222,90 @@ pub(super) fn release_semaphore(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(done)
 }
 
-/// Wait for the objects of `handles` (all, or one), for at most `ms`.
-fn wait(cpu: &mut Cpu, handles: &[u32], all: bool, ms: u32) -> Option<u32> {
-    let mut objects = Vec::new();
-    for &handle in handles {
+/// Wait for the objects of `handles` (all, or one), for at most `ms`. A
+/// wait that ends at once, and one with no time to wait that times out at
+/// once, as the polls of a loop that waits do, allocate nothing.
+/// `arguments`: the call read no RAM but its arguments (`found_none`).
+fn wait(cpu: &mut Cpu, handles: &[u32], all: bool, ms: u32, arguments: bool) -> Option<u32> {
+    debug_assert!(handles.len() <= MAXIMUM_WAIT_OBJECTS as usize);
+    let mut ids = [0; MAXIMUM_WAIT_OBJECTS as usize];
+    for (id, &handle) in ids.iter_mut().zip(handles) {
         match object::resolve(cpu, handle) {
-            Some(id) => objects.push(id),
+            Some(found) => *id = found,
             None => {
                 set_error(cpu, ERROR_INVALID_HANDLE);
                 return Some(WAIT_FAILED);
             }
         }
     }
+    let objects = &ids[..handles.len()];
+    if let Some(result) = thread::poll_objects(cpu, objects, all) {
+        return Some(result);
+    }
+    if ms == 0 {
+        found_none(cpu, objects, arguments);
+        return Some(WAIT_TIMEOUT);
+    }
     let deadline = (ms != INFINITE).then(|| cpu.bus.clock.now_micros() + ms as u64 * 1000);
     let wait = Wait {
-        objects,
+        objects: objects.to_vec(),
         all,
         deadline,
         timeout_result: WAIT_TIMEOUT,
         section: 0,
         queue: None,
     };
-    if let Some(result) = thread::wait_now(cpu, &wait) {
-        return Some(result);
-    }
-    if ms == 0 {
-        return Some(WAIT_TIMEOUT);
-    }
     thread::block(cpu, wait);
     None
+}
+
+/// A wait with no time to wait found none of `objects` signaled, and
+/// returns WAIT_TIMEOUT: it changed nothing, not even the last error, and
+/// the program polls them in a loop. For an idle proof (`idle::pure_call`)
+/// the call is the same in every pass until one of them is signaled, and
+/// nothing in a proof's passes can do that:
+///
+/// - another thread runs only after a switch, which comes at a timer
+///   event or an interrupt, where a proof ends and up to which the passes
+///   it proved are skipped, or at a call of the running thread that blocks
+///   or yields, which isn't one an idle proof follows;
+/// - what the system signals of its own (a sound buffer's notification, a
+///   multimedia timer's event, input) it signals at those events and
+///   interrupts too;
+/// - the running thread changes objects only through calls (SetEvent,
+///   ReleaseMutex, CloseHandle), none of which an idle proof follows;
+/// - a mutex the running thread holds is signaled for it, and a wait for
+///   it doesn't come here.
+///
+/// A change notification is the exception: the wait looks at its
+/// directory on the host, which another program may change, and notes
+/// when it looked. `arguments`: the call read no RAM but its arguments,
+/// which a pass that counts needs (`idle::reads_arguments`). The polls
+/// arm the loop (`idle::service_polled`), as Sleep(0)'s do: a worker
+/// thread that polls a mutex another thread holds, with nothing else to
+/// do, spins for the rest of its turn (#1222).
+fn found_none(cpu: &mut Cpu, objects: &[u32], arguments: bool) {
+    let objects_of = &cpu.bus.win32.objects;
+    let looks = objects.iter().any(|&id| {
+        matches!(
+            objects_of.get(id).map(|o| &o.kind),
+            Some(Kind::Change { .. })
+        )
+    });
+    if looks {
+        return;
+    }
+    crate::idle::pure_call(cpu, None);
+    if arguments {
+        crate::idle::reads_arguments(cpu);
+    }
+    cpu.bus.observe.polled = true;
 }
 
 /// WaitForSingleObject(handle, ms), and WaitForSingleObjectEx with its
 /// alertable flag, which nothing alerts yet.
 pub(super) fn wait_for_single_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    wait(cpu, &[args[0]], false, args[1])
+    wait(cpu, &[args[0]], false, args[1], true)
 }
 
 /// WaitForMultipleObjects(count, handles, all, ms), and the Ex one.
@@ -267,13 +317,21 @@ pub(super) fn wait_for_multiple_objects(cpu: &mut Cpu, args: &[u32]) -> Option<u
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(WAIT_FAILED);
     }
-    let handles: Vec<u32> = (0..count)
-        .map(|i| cpu.bus.guest_read_32(at.wrapping_add(4 * i)))
-        .collect();
+    let mut handles = [0; MAXIMUM_WAIT_OBJECTS as usize];
+    let handles = &mut handles[..count as usize];
+    for (i, handle) in (0..).zip(handles.iter_mut()) {
+        *handle = cpu.bus.guest_read_32(at.wrapping_add(4 * i));
+    }
     if cpu.bus.guest_faulted() {
         return None;
     }
-    wait(cpu, &handles, all != 0, ms)
+    // The handles are arguments too where they are in the 64 bytes above
+    // the stack's top that a pass that counts takes a call to read, as an
+    // array on the caller's stack often is.
+    let top = cpu.esp() as u64;
+    let (start, end) = (at as u64, at as u64 + 4 * count as u64);
+    let arguments = start >= top && end <= top + 64;
+    wait(cpu, handles, all != 0, ms, arguments)
 }
 
 /// Sleep(ms), and SleepEx(ms, alertable), which returns 0: other threads
