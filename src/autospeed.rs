@@ -140,8 +140,9 @@ const LOADS: f64 = 8.0 * WORKING;
 /// miss too: the limits it sets end once the host shows far more
 /// (`far_more`), which puts the hold in doubt again, and a host that stalls
 /// every few frames would fall behind at each probe, a few measurements
-/// apart. A load (`LOADS`) ends a probe without a miss: its frames are
-/// another scene's.
+/// apart. A measurement of a load (`LOADS`), and the one after it, stay out
+/// of a probe's mean: their frames are another scene's. A load that lasts
+/// `JUDGED` measurements ends the probe without a miss.
 ///
 /// `PROBE_STEP` is chosen. Quake's timedemo held at 88,000 where it draws
 /// 70 frames a second at 190,000, 2.2 times as much; a probe that misses
@@ -847,12 +848,13 @@ enum Step {
     },
     /// A probe up from a hold at `from`, which drew `fps` (`PROBE_STEP`).
     /// The frame rates measured here so far add up to `sum`, `seen` of
-    /// them.
+    /// them, and `loaded` measurements were left out for a load (`LOADS`).
     Probed {
         from: u32,
         fps: f64,
         sum: f64,
         seen: u32,
+        loaded: u32,
     },
 }
 
@@ -2230,6 +2232,7 @@ impl AutoSpeed {
                         fps: recent,
                         sum: 0.0,
                         seen: 0,
+                        loaded: 0,
                     };
                     return clamp(to);
                 }
@@ -2254,12 +2257,29 @@ impl AutoSpeed {
                 fps: before,
                 sum,
                 seen,
+                loaded,
             } if current > from => {
-                // A load (`LOADS`): its frames are another scene's, and say
-                // nothing of the speed. The probe waits, and missed nothing.
+                // A load (`LOADS`), or the measurement after one: its frames
+                // are another scene's, and say nothing of the speed, so the
+                // mean leaves it out. Rage of Mages 2 streams 130 to 470 KB a
+                // second in play, and a probe that one such measurement
+                // ended went back from 25 frames a second at 215,000 to 13
+                // at 112,500. A load that lasts `JUDGED` measurements ends
+                // the probe, which waits, and missed nothing.
                 if m.io >= LOADS || was_loaded {
-                    self.probe_wait = HOLD_WINDOWS << self.probe_misses;
-                    return hold_drawing(self, before, clamp(from as f64), HOLD_WINDOWS, false);
+                    let loaded = loaded + 1;
+                    if loaded >= JUDGED {
+                        self.probe_wait = HOLD_WINDOWS << self.probe_misses;
+                        return hold_drawing(self, before, clamp(from as f64), HOLD_WINDOWS, false);
+                    }
+                    self.step = Step::Probed {
+                        from,
+                        fps: before,
+                        sum,
+                        seen,
+                        loaded,
+                    };
+                    return current;
                 }
                 // Behind: the host can't run the probe now.
                 if m.pace < KEPT_UP {
@@ -2273,6 +2293,7 @@ impl AutoSpeed {
                         fps: before,
                         sum,
                         seen,
+                        loaded,
                     };
                     return current;
                 }
@@ -5461,10 +5482,11 @@ mod tests {
     }
 
     #[test]
-    fn a_load_during_a_probe_ends_it_without_a_miss() {
+    fn a_load_during_a_probe_is_left_out_of_its_mean() {
         // A load in a probe's measurements (`LOADS`) draws frames of
-        // another scene, which say nothing of the speed: the probe goes
-        // back and waits, as for a measurement behind, and counts no miss.
+        // another scene, which say nothing of the speed: the mean leaves
+        // it out and the one after it, and the probe goes on. Rage of
+        // Mages 2 streams its data in play, a measurement of it at a time.
         let program = game(1.0 / 4000.0, 1000.0);
         let mut auto = holding(15.0);
         let up = auto.decide(60_000, &program(60_000), true, HOST);
@@ -5474,9 +5496,26 @@ mod tests {
         );
         let loading = Measurement {
             io: LOADS,
+            fps: Some(1.0),
             ..program(up)
         };
-        let back = auto.decide(up, &loading, true, HOST);
+        let mut speed = up;
+        for i in 0..JUDGED + 2 {
+            let m = if i == 1 { &loading } else { &program(up) };
+            speed = auto.decide(speed, m, true, HOST);
+        }
+        assert_eq!(speed, up);
+        assert!(matches!(auto.step, Step::Hold { .. }), "{:?}", auto.step);
+        assert_eq!(auto.probe_misses, 0);
+
+        // A load that lasts `JUDGED` measurements ends the probe: it goes
+        // back and waits, and counts no miss.
+        let mut auto = holding(15.0);
+        let up = auto.decide(60_000, &program(60_000), true, HOST);
+        let mut back = up;
+        for _ in 0..JUDGED {
+            back = auto.decide(back, &loading, true, HOST);
+        }
         assert_eq!(back, 60_000);
         assert_eq!(auto.probe_misses, 0);
         assert!(auto.probe_wait > 0);
