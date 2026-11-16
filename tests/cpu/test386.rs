@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 /// The ROM's directory, and a 386 that starts running it from reset with
 /// every interrupt masked.
-fn machine() -> (PathBuf, Cpu) {
+fn machine() -> (PathBuf, Box<Cpu>) {
     let dir = PathBuf::from(std::env::var("TEST386_DIR").expect("TEST386_DIR not set"));
     let rom = std::fs::read(dir.join("test386.bin")).expect("test386.bin");
     assert!(rom.len() == 0x10000 || rom.len() == 0x20000);

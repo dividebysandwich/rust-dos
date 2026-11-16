@@ -128,7 +128,7 @@ fn program(data: &[u8], calls: &[Call]) -> (Vec<u8>, u32) {
 
 /// Run `calls` with `data` under the system locale `locale`: the
 /// machine, still running the program, and where its data is.
-fn run(test: &str, locale: Win32Locale, data: &[u8], calls: &[Call]) -> (Cpu, u32) {
+fn run(test: &str, locale: Win32Locale, data: &[u8], calls: &[Call]) -> (Box<Cpu>, u32) {
     let (exe, at) = program(data, calls);
     let base = PathBuf::from("target/test_win32_locale").join(test);
     let _ = fs::remove_dir_all(&base);

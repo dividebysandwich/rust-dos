@@ -8,7 +8,7 @@ use rust_dos::video::adapter::{Adapter, VideoSetup};
 use rust_dos::video::{self, bios, Frame};
 use std::path::PathBuf;
 
-fn machine() -> Cpu {
+fn machine() -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     bios::install(&mut cpu.bus, VideoSetup { adapter: Adapter::Et4000, ..Default::default() });
     int10::set_mode(&mut cpu, 0x03);

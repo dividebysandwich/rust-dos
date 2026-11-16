@@ -89,7 +89,7 @@ fn scratch(name: &str, files: &[(&str, Vec<u8>)]) -> PathBuf {
 
 /// A machine on `core` with the built-in Windows on and `program`
 /// loaded from the shell as T.EXE, with `files` on drive C:.
-fn machine(test: &str, core: CoreMode, files: &[(&str, Vec<u8>)]) -> Cpu {
+fn machine(test: &str, core: CoreMode, files: &[(&str, Vec<u8>)]) -> Box<Cpu> {
     let mut cpu = Cpu::new(scratch(test, files));
     cpu.core = core;
     cpu.bus.win32.enabled = true;

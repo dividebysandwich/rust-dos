@@ -177,7 +177,21 @@ impl ConfigUi {
             Answer::Candidates(Err(e)) => view.note = Some((e, true)),
             Answer::Reported(result, name, unkept) => {
                 let (text, failed) = match result {
-                    Ok(Reported { id, replaced: true }) => (
+                    Ok(Reported {
+                        id,
+                        replaced,
+                        existing: true,
+                    }) => {
+                        let done = if replaced { "updated" } else { "added" };
+                        let text = format!(
+                            "{} was in the almanac already: thank you, report #{} on it is {}",
+                            name, id, done
+                        );
+                        (text, false)
+                    }
+                    Ok(Reported {
+                        id, replaced: true, ..
+                    }) => (
                         format!("Thank you! Your report #{} on {} is updated", id, name),
                         false,
                     ),
@@ -438,14 +452,14 @@ impl ConfigUi {
         };
         g.text_to(2, top, title, draw::BRIGHT, cols - 2);
 
-        // What the line selected is, at the bottom.
-        let about_rows = 4;
-        let about_top = content.end.saturating_sub(about_rows);
+        // What the line selected is, at the bottom: four rows, more for a
+        // game's notes, up to half the window.
         let about = about(view, &lines[view.selected]);
-        for (line, row) in wrap(about.trim(), cols - 4, about_rows)
-            .into_iter()
-            .zip(about_top..content.end)
-        {
+        let most = (content.len() / 2).max(4);
+        let wrapped = wrap(about.trim(), cols - 4, most);
+        let about_rows = wrapped.len().clamp(4, most);
+        let about_top = content.end.saturating_sub(about_rows);
+        for (line, row) in wrapped.into_iter().zip(about_top..content.end) {
             g.text_to(2, row, &line, draw::DIM, cols - 2);
         }
 
@@ -688,10 +702,17 @@ fn about(view: &AlmanacView, line: &Line) -> String {
                 Some(_) => "No settings reported yet.".to_string(),
                 None => "Its settings couldn't be had.".to_string(),
             };
-            format!("{} {}", found, what)
+            let notes = match &c.recommendation {
+                Some(r) if !view.report && !r.notes_text().is_empty() => {
+                    format!(" Players' notes: {}", r.notes_text())
+                }
+                _ => String::new(),
+            };
+            format!("{} {}{}", found, what, notes)
         }
         Line::NewGame => "Adds the game to the almanac by this name, with the program's name and \
-                          checksums, and your report."
+                          checksums, and your report. If the almanac has a game of this name \
+                          already, the report goes to it."
             .to_string(),
         _ => String::new(),
     }

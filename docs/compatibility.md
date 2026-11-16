@@ -19,22 +19,29 @@ ways:
   started from it runs with the profile's settings, and Rust-DOS doesn't
   ask the almanac for it.
 
-Rust-DOS finds a game in the almanac by the name, size and checksums of
-the program file started at its prompt; `almanac_auto` takes the
-settings of a game only when the checksums match. That works for DOS
-games and for games on the built-in Windows, which start from the same
-prompt. The almanac carries the machine's settings only: the graphics
-card, processor, speed, memory, DPMI, the DOS and Windows versions, the
-Windows desktop's colour depth (`win32_depth`) and system locale
-(`win32_locale`), the 3D cards, the sound cards, the joystick and the
-disks' speeds.
+Rust-DOS finds a game in the almanac by the name, size and checksums of the
+program file started last: at its prompt, or on the built-in Windows from
+Explorer, a game's launcher or its autorun. `almanac_auto` takes the
+settings of a game only when the checksums match, and asks only for programs
+started at the prompt. The almanac carries the machine's settings only: the
+graphics card, processor, speed, memory, DPMI, the DOS and Windows versions,
+the Windows desktop's colour depth (`win32_depth`) and system locale
+(`win32_locale`), the 3D cards, the sound cards, the joystick and the disks'
+speeds.
 
-A version a report adds is filed under its program's platform: DOS,
-Windows 3.1 (an NE file) or Windows 95/98 (a PE file). For a Windows
-version the almanac recommends `win32=true` even before anyone has
-reported on it, so with `almanac_auto` a Windows game started at the
-prompt runs on the built-in Windows rather than as its DOS stub, which
-only says it needs Windows. A report that sets `win32` itself wins.
+A version a report adds is filed under its program's platform: DOS, Windows
+3.1 (an NE file) or Windows 95/98 (a PE file). An installer (`SETUP.EXE`,
+`INSTALL.EXE`) leaves the platform open, as a Windows 95 game often comes
+with a Windows 3.1 setup. For a Windows version the almanac recommends
+`win32=true` even before anyone has reported on it, so with `almanac_auto` a
+Windows game started at the prompt runs on the built-in Windows rather than
+as its DOS stub, which only says it needs Windows. A report that sets
+`win32` itself wins.
+
+Reporting a game as new by a name the almanac has already sends the report
+to that game, with a version for the program if the game hasn't one with its
+file. Fetching, the notes of the reports the settings come from show under
+the game picked: what players wrote, red reports' too, newest first.
 
 ## What this page adds
 

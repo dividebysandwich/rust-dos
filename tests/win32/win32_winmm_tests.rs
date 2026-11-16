@@ -109,7 +109,7 @@ fn machine(
     core: CoreMode,
     files: &[(&str, Vec<u8>)],
     prepare: impl FnOnce(&mut Cpu),
-) -> Cpu {
+) -> Box<Cpu> {
     let mut cpu = Cpu::new(scratch(test, files));
     cpu.core = core;
     cpu.bus.win32.enabled = true;

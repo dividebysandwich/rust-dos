@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 
 mod paging;
 
-fn mouse_machine(mode: u16, max_x: u16, max_y: u16) -> (Cpu, DebugHub) {
+fn mouse_machine(mode: u16, max_x: u16, max_y: u16) -> (Box<Cpu>, DebugHub) {
     let mut cpu = Cpu::new(".".into());
     cpu.set_ax(mode);
     rust_dos::interrupts::int10::handle(&mut cpu);
@@ -306,7 +306,7 @@ const CRASH: [u8; 4] = [0x31, 0xC0, 0xF6, 0xF0];
 
 /// A machine at the prompt with PROBE.COM on C:, and a hub with no
 /// server, which takes its commands from `send`.
-fn machine(name: &str) -> (Cpu, DebugHub) {
+fn machine(name: &str) -> (Box<Cpu>, DebugHub) {
     let dir = crate::test_dir::path(&format!("debug-{name}"));
     std::fs::create_dir_all(&dir).unwrap();
     let code: Vec<u8> = (0..PROBE.len()).step_by(2).map(|i| u8::from_str_radix(&PROBE[i..i + 2], 16).unwrap()).collect();
@@ -820,7 +820,7 @@ fn other_instructions_just_step() {
 
 /// A machine at the prompt in deterministic mode, paused at the start
 /// as the front end has it, with PROBE.COM on C:.
-fn deterministic_machine(name: &str) -> (Cpu, DebugHub, Deterministic) {
+fn deterministic_machine(name: &str) -> (Box<Cpu>, DebugHub, Deterministic) {
     let mode = Deterministic::new(rust_dos::deterministic::default_start());
     let dir = crate::test_dir::path(&format!("det-{name}"));
     std::fs::create_dir_all(&dir).unwrap();

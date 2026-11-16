@@ -19,7 +19,7 @@ fn int10(cpu: &mut Cpu, ax: u16, bx: u16, cx: u16, dx: u16) {
 }
 
 /// A machine with `adapter`, in its text mode as at the prompt.
-fn machine(adapter: Adapter) -> Cpu {
+fn machine(adapter: Adapter) -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     bios::install(&mut cpu.bus, VideoSetup { adapter, ..Default::default() });
     int10::set_mode(&mut cpu, 0x03);

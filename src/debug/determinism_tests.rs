@@ -1067,7 +1067,7 @@ fn settings(dir: &Path) -> rust_dos::config::Settings {
 /// it, paused at the start, with the program as W.COM on C:, a CD image
 /// with a data track and an audio track as D:, and a CD made of a folder
 /// as E:.
-fn machine(name: &str) -> (Cpu, DebugHub, Deterministic) {
+fn machine(name: &str) -> (Box<Cpu>, DebugHub, Deterministic) {
     let mode = Deterministic::new(rust_dos::deterministic::default_start());
     let dir = crate::test_dir::path("determinism").join(name);
     let _ = std::fs::remove_dir_all(&dir);
@@ -1470,6 +1470,7 @@ const STILL: &[(&str, &str)] = &[
     ("SOUN.gus_line", "the Ultrasound's interrupt line, up only until the handler reads the card"),
     ("DOS.dos_high", "the settings' DOS=HIGH"),
     ("DOS.disk_io", "the disk's speed settings, and the time charged until the next instruction takes it"),
+    ("CDHD", "MSCDEX's heads: the run's CD drive is a folder, which has no sectors to seek"),
     ("ENV", "the settings' environment variables"),
     ("SEP", "the SYSENTER MSRs, which only a Pentium II's WRMSR sets"),
     ("SSE", "the SSE registers and MXCSR, which only a Pentium III's instructions set"),

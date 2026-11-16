@@ -15,7 +15,7 @@ use std::path::PathBuf;
 /// A buffer for the BIOS's answers, at 3000:0000.
 const BUF: u32 = 0x30000;
 
-fn machine_with(adapter: Adapter) -> Cpu {
+fn machine_with(adapter: Adapter) -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     bios::install(
         &mut cpu.bus,
@@ -28,7 +28,7 @@ fn machine_with(adapter: Adapter) -> Cpu {
     cpu
 }
 
-fn machine() -> Cpu {
+fn machine() -> Box<Cpu> {
     machine_with(Adapter::AtiRage)
 }
 

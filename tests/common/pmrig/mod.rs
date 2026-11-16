@@ -98,7 +98,7 @@ pub struct Rig {
 impl Rig {
     /// A machine in real mode with the tables in memory.
     pub fn new() -> Self {
-        let mut cpu = Box::new(Cpu::new(PathBuf::from(".")));
+        let mut cpu = Cpu::new(PathBuf::from("."));
         cpu.bus.set_a20(true);
         // Nothing may interrupt the tests unless they ask for it.
         cpu.bus.io_write(0x21, 0xFF);

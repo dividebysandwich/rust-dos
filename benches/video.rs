@@ -26,7 +26,7 @@ use std::hint::black_box;
 /// A machine in video mode `mode`, its 64 KB of each plane filled with
 /// noise in all 16 colours (so no two rows are alike, the hardest picture
 /// to spare work on), and a frame rendered from it.
-fn planar_machine(name: &str, mode: u8) -> (Cpu, Frame) {
+fn planar_machine(name: &str, mode: u8) -> (Box<Cpu>, Frame) {
     let mut cpu = machine(&scratch(name));
     int10::set_mode(&mut cpu, mode);
     let mut seed = 0x2545_F491u32;

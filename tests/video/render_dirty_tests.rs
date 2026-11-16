@@ -19,7 +19,7 @@ fn scratch(name: &str) -> PathBuf {
 
 /// A shell-ready CPU whose frame has been rendered once, so later renders
 /// only repaint what gets marked dirty (like the main loop).
-fn rendered_shell(name: &str) -> (Cpu, Frame) {
+fn rendered_shell(name: &str) -> (Box<Cpu>, Frame) {
     let mut cpu = Cpu::new(scratch(name));
     cpu.load_shell();
     let mut frame = Frame::new(SCREEN_WIDTH, SCREEN_HEIGHT);

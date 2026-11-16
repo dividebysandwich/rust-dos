@@ -1188,7 +1188,7 @@ fn com_in_lockstep(test: &str, code: &[u8]) -> (Box<Cpu>, Box<Cpu>) {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("T.COM"), code).unwrap();
-        let mut cpu = Box::new(Cpu::new(dir));
+        let mut cpu = Cpu::new(dir);
         cpu.core = core;
         cpu.load_shell();
         cpu.pending_command = Some("T".to_string());
@@ -4206,7 +4206,7 @@ fn fpu_square_roots_run_as_their_handlers() {
 /// float compare, with OF set or clear before the SAHF (it stays), and a
 /// FILD of a qword: of `fpu_loop`'s second single and integer, or with
 /// `small` of the integer's top 21 bits, within 2^53 either way.
-fn sahf_and_fild_qword(small: bool) -> DynStats {
+fn sahf_and_fild_qword(small: bool) -> (Rig, DynStats) {
     let (_, b, stats) = fpu_loop(|a| {
         let mut skip = a.create_label();
         if small {
@@ -4241,20 +4241,343 @@ fn sahf_and_fild_qword(small: bool) -> DynStats {
         a.mov(dword_ptr(edi + 16), ebx)
     });
     assert_ne!(b.cpu.ebx(), 0);
-    stats
+    (b, stats)
 }
 
 #[test]
 fn sahf_and_fild_of_a_qword_run_in_translated_code() {
-    let stats = sahf_and_fild_qword(true);
+    let (_, stats) = sahf_and_fild_qword(true);
     if AVAILABLE && cfg!(target_arch = "x86_64") {
         assert!(stats.native + 20 > stats.instructions, "handlers ran them: {:?}", stats);
     }
 }
 
 #[test]
-fn fild_of_a_qword_past_2_to_the_53_is_the_handlers() {
-    sahf_and_fild_qword(false);
+fn fild_of_a_qword_past_2_to_the_53_runs_in_translated_code() {
+    let (b, stats) = sahf_and_fild_qword(false);
+    if AVAILABLE {
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Fild), 0, "{:?}", stats);
+    }
+}
+
+/// Qwords for FILD and FISTP: around 2^53, where a double stops holding
+/// every integer (their 80 bits then hold more than their doubles), and
+/// 2^63, of both signs, i64's limits, and singles and doubles as MSVC
+/// copies them through the FPU.
+const QWORDS: [i64; 24] = [
+    0,
+    1,
+    -1,
+    1 << 52,
+    (1 << 53) - 1,
+    1 << 53,
+    (1 << 53) + 1,
+    -(1 << 53) - 1,
+    (1 << 54) + 3,
+    -(1 << 54) - 3,
+    (1 << 62) + 1,
+    i64::MAX,
+    -i64::MAX,
+    i64::MIN,
+    i64::MIN + 1,
+    0x3F80_0000_4040_0000,           // the singles 3 and 1
+    0x4049_0FDB_BF80_0000,           // the singles -1 and pi
+    0x4009_21FB_5444_2D18,           // the double pi
+    0xC009_21FB_5444_2D18u64 as i64, // and -pi
+    0x7FF8_0000_0000_0001,           // a NaN's bits
+    0xFFFF_FFFF_0000_0001u64 as i64,
+    0x0000_0001_0000_0000,
+    0x1234_5678_9ABC_DEF1,
+    0x8000_0000_0000_0001u64 as i64,
+];
+
+#[test]
+fn fild_and_fistp_of_qwords_copy_them_in_translated_code() {
+    // MSVC's 8-byte copy (FILD, then FISTP of the qword), the value
+    // through a sum with 0 and past an exchange, under all four
+    // roundings: each comes back as it was, the status word summed in
+    // EBX, and neither instruction goes to its handler.
+    let (input, output) = (DATA, DATA + 0x8000);
+    let n = QWORDS.len() as u32;
+    let count = n * 4;
+    let other = |i: u32| QWORDS[((i * 7 + 3) % n) as usize] as u64;
+    let (mut a, mut b) = twins(|rig| {
+        for k in 0..count {
+            let (i, rc) = (k % n, k / n);
+            let at = input + 32 * k;
+            let (v, w) = (QWORDS[i as usize] as u64, other(i));
+            rig.write32(at, v as u32);
+            rig.write32(at + 4, (v >> 32) as u32);
+            rig.write32(at + 8, w as u32);
+            rig.write32(at + 12, (w >> 32) as u32);
+            rig.write32(at + 16, 0x037F | rc << 10);
+        }
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                let mut again = a.create_label();
+                a.fninit()?;
+                a.mov(esi, input)?;
+                a.mov(edi, output)?;
+                a.xor(ebx, ebx)?;
+                a.mov(ecx, count)?;
+                a.set_label(&mut again)?;
+                a.fldcw(word_ptr(esi + 16))?;
+                a.fild(qword_ptr(esi))?;
+                a.fistp(qword_ptr(edi))?;
+                a.fild(qword_ptr(esi))?;
+                a.fldz()?;
+                a.faddp(st1, st0)?;
+                a.fistp(qword_ptr(edi + 8))?;
+                a.fild(qword_ptr(esi))?;
+                a.fild(qword_ptr(esi + 8))?;
+                a.fxch(st0, st1)?;
+                a.fistp(qword_ptr(edi + 16))?;
+                a.fistp(qword_ptr(edi + 24))?;
+                a.fnstsw(ax)?;
+                a.add(ebx, eax)?;
+                a.add(esi, 32)?;
+                a.add(edi, 32)?;
+                a.dec(ecx)?;
+                a.jnz(again)?;
+                a.hlt()
+            }),
+        );
+    });
+    let stats = run_both(&mut a, &mut b);
+    let read64 = |at: u32| b.read32(at) as u64 | (b.read32(at + 4) as u64) << 32;
+    for k in 0..count {
+        let (v, w) = (QWORDS[(k % n) as usize] as u64, other(k % n));
+        let at = output + 32 * k;
+        let got = [read64(at), read64(at + 8), read64(at + 16), read64(at + 24)];
+        assert_eq!(got, [v, v, v, w], "{:016X} under rounding {}", v, k / n);
+    }
+    if AVAILABLE {
+        let handlers = (
+            handled(&b, iced_x86::Mnemonic::Fild),
+            handled(&b, iced_x86::Mnemonic::Fistp),
+        );
+        assert_eq!(handlers, (0, 0), "{:?}", stats);
+    }
+}
+
+/// 80-bit values for FISTP of a qword: (sign << 15 | exponent,
+/// significand).
+const EXTENDED_TO_INT: [(u16, u64); 20] = [
+    (0x4034, 0x8000_0000_0000_0401), // 2^53 + 1 and 1/1024
+    (0x4034, 0x8000_0000_0000_0600), // 2^53 + 1.5
+    (0x4034, 0x8000_0000_0000_0200), // 2^53 + 0.5
+    (0xC034, 0x8000_0000_0000_0600), // -(2^53 + 1.5)
+    (0x403D, 0xFFFF_FFFF_FFFF_FFFF), // 2^63 - 0.5
+    (0xC03D, 0xFFFF_FFFF_FFFF_FFFF), // -(2^63 - 0.5)
+    (0xC03E, 0x8000_0000_0000_0000), // -2^63
+    (0x403E, 0x8000_0000_0000_0000), // 2^63
+    (0x403E, 0x8000_0000_0000_0001), // past 2^63
+    (0x403C, 0x8000_0000_0000_0004), // 2^61 + 1
+    (0x4035, 0xFFFF_FFFF_FFFF_FE00), // 2^55 - 1
+    (0xC035, 0xFFFF_FFFF_FFFF_FE00), // -(2^55 - 1)
+    (0x3FFE, 0xC000_0000_0000_0001), // 0.75 and a bit a double hasn't
+    (0xBFFF, 0xC000_0000_0000_0001), // -1.5 and a bit
+    (0x7FFF, 0xC000_0000_0000_0001), // a NaN
+    (0xFFFF, 0x8000_0000_0000_0000), // -infinity
+    (0x0000, 0x0000_0000_0000_0401), // a denormal
+    (0x3FFF, 0x4000_0000_0000_0001), // an unnormal
+    (0x3FFF, 0xA000_0000_0000_0001), // 1.25 and a bit
+    (0xC000, 0xB000_0000_0000_0001), // -(2.75 and a bit)
+];
+
+#[test]
+fn fistp_of_a_qword_rounds_80_bits_as_the_handler_in_translated_code() {
+    // FISTP of a qword of 80-bit values that hold more than their
+    // doubles, and of singles (registers that are their doubles), under
+    // all four roundings and with precision control at 64, 53 and 24
+    // bits, which neither FLD nor FISTP reads: the status word of each
+    // stored too. None goes to the handler.
+    let (input, output) = (DATA, DATA + 0x8000);
+    let n = EXTENDED_TO_INT.len() as u32;
+    let count = n * 4;
+    let (mut a, mut b) = twins(|rig| {
+        for k in 0..count {
+            let (i, rc) = (k % n, k / n);
+            let pc = [3, 2, 0][((k + rc) % 3) as usize];
+            let at = input + 32 * k;
+            let (se, man) = EXTENDED_TO_INT[i as usize];
+            rig.write32(at, man as u32);
+            rig.write32(at + 4, (man >> 32) as u32);
+            rig.write32(at + 8, se as u32);
+            rig.write32(at + 12, SINGLES[(k % SINGLES.len() as u32) as usize]);
+            rig.write32(at + 16, 0x007F | pc << 8 | rc << 10);
+        }
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                let mut again = a.create_label();
+                a.fninit()?;
+                a.mov(esi, input)?;
+                a.mov(edi, output)?;
+                a.mov(ecx, count)?;
+                a.set_label(&mut again)?;
+                a.fldcw(word_ptr(esi + 16))?;
+                a.fnclex()?;
+                a.fld(tword_ptr(esi))?;
+                a.fistp(qword_ptr(edi))?;
+                a.fnstsw(ax)?;
+                a.mov(dword_ptr(edi + 8), eax)?;
+                a.fnclex()?;
+                a.fld(dword_ptr(esi + 12))?;
+                a.fistp(qword_ptr(edi + 12))?;
+                a.fnstsw(ax)?;
+                a.mov(dword_ptr(edi + 20), eax)?;
+                a.add(esi, 32)?;
+                a.add(edi, 32)?;
+                a.dec(ecx)?;
+                a.jnz(again)?;
+                a.hlt()
+            }),
+        );
+    });
+    let stats = run_both(&mut a, &mut b);
+    let read64 = |at: u32| b.read32(at) as u64 | (b.read32(at + 4) as u64) << 32;
+    // 2^53 + 1.5 to nearest (even) and down; -2^63 exactly, without IE;
+    // 2^63 the integer indefinite, with it.
+    let at = |i: u32, rc: u32| output + 32 * (rc * n + i);
+    assert_eq!(read64(at(1, 0)), (1 << 53) + 2);
+    assert_eq!(read64(at(1, 1)), (1 << 53) + 1);
+    assert_eq!(
+        (read64(at(6, 0)), b.read32(at(6, 0) + 8) & 1),
+        (i64::MIN as u64, 0)
+    );
+    assert_eq!(
+        (read64(at(7, 3)), b.read32(at(7, 3) + 8) & 1),
+        (i64::MIN as u64, 1)
+    );
+    if AVAILABLE {
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Fistp), 0, "{:?}", stats);
+    }
+}
+
+#[test]
+fn fistp_of_a_qword_of_a_fraction_converts_the_double_in_translated_code() {
+    // MSVC's `_ftol` (FISTP of a qword) of 80 bits with a fraction a
+    // double hasn't, 1.25 and -2.75 and a bit, to nearest and chopped: the
+    // doubles round as the 80 bits do, so the handlers' code doesn't run
+    // but for the two FLDs of 80 bits before the loop.
+    let (input, output) = (DATA, DATA + 0x8000);
+    let (mut a, mut b) = twins(|rig| {
+        let values: [(u32, u64); 2] = [
+            (0x3FFF, 0xA000_0000_0000_0001),
+            (0xC000, 0xB000_0000_0000_0001),
+        ];
+        for (k, (se, man)) in values.into_iter().enumerate() {
+            let at = input + 16 * k as u32;
+            rig.write32(at, man as u32);
+            rig.write32(at + 4, (man >> 32) as u32);
+            rig.write32(at + 8, se);
+        }
+        rig.write32(input + 32, 0x037F | 0x0F7F << 16);
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                let mut again = a.create_label();
+                a.fninit()?;
+                a.mov(esi, input)?;
+                a.mov(edi, output)?;
+                a.fld(tword_ptr(esi))?;
+                a.fld(tword_ptr(esi + 16))?;
+                a.mov(ecx, 1000)?;
+                a.set_label(&mut again)?;
+                a.fldcw(word_ptr(esi + 32))?;
+                a.fld(st0)?;
+                a.fistp(qword_ptr(edi))?;
+                a.fld(st1)?;
+                a.fistp(qword_ptr(edi + 8))?;
+                a.fldcw(word_ptr(esi + 34))?;
+                a.fld(st0)?;
+                a.fistp(qword_ptr(edi + 16))?;
+                a.fld(st1)?;
+                a.fistp(qword_ptr(edi + 24))?;
+                a.dec(ecx)?;
+                a.jnz(again)?;
+                a.hlt()
+            }),
+        );
+    });
+    let stats = run_both(&mut a, &mut b);
+    let read64 = |at: u32| b.read32(at) as u64 | (b.read32(at + 4) as u64) << 32;
+    let got = [
+        read64(output),
+        read64(output + 8),
+        read64(output + 16),
+        read64(output + 24),
+    ];
+    assert_eq!(got, [-3i64 as u64, 1, -2i64 as u64, 1]);
+    if AVAILABLE {
+        let calls = b.cpu.dynrec.calls().unwrap().fpu;
+        assert!(
+            calls <= 2,
+            "the handlers' code ran {} times: {:?}",
+            calls,
+            stats
+        );
+    }
+}
+
+#[test]
+fn fild_of_a_qword_onto_a_full_stack_runs_as_the_handler() {
+    // Nine FILDs of a qword in a row, the ninth onto a full stack, then
+    // eight FISTPs of a qword, with precision control at 24 bits to
+    // nearest and at 53 bits chopped (FILD and FISTP read neither). The
+    // interpreter doesn't model the stack overflow: its push overwrites
+    // the register, and the recompiler's code must do the same, with
+    // the same tags, TOP and status word. The seven values the overflow
+    // doesn't touch come back as they were.
+    let (input, output) = (DATA, DATA + 0x8000);
+    let values: Vec<u64> = QWORDS[5..14].iter().map(|&v| v as u64).collect();
+    let (mut a, mut b) = twins(|rig| {
+        for (j, &v) in values.iter().enumerate() {
+            rig.write32(input + 8 * j as u32, v as u32);
+            rig.write32(input + 8 * j as u32 + 4, (v >> 32) as u32);
+        }
+        rig.write32(input + 72, 0x007F | 0x0E7F << 16);
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                let mut again = a.create_label();
+                a.mov(esi, input)?;
+                a.mov(edi, output)?;
+                a.xor(ebx, ebx)?;
+                a.mov(ecx, 100)?;
+                a.set_label(&mut again)?;
+                a.fninit()?;
+                a.mov(eax, ecx)?;
+                a.and(eax, 1)?;
+                a.fldcw(word_ptr(esi + eax * 2 + 72))?;
+                for j in 0..9 {
+                    a.fild(qword_ptr(esi + 8 * j))?;
+                }
+                for j in 0..8 {
+                    a.fistp(qword_ptr(edi + 8 * j))?;
+                }
+                a.fnstsw(ax)?;
+                a.add(ebx, eax)?;
+                a.dec(ecx)?;
+                a.jnz(again)?;
+                a.hlt()
+            }),
+        );
+    });
+    let stats = run_both(&mut a, &mut b);
+    let read64 = |at: u32| b.read32(at) as u64 | (b.read32(at + 4) as u64) << 32;
+    for j in 1..8 {
+        assert_eq!(read64(output + 8 * j), values[8 - j as usize], "store {}", j);
+    }
+    if AVAILABLE {
+        let handlers = (
+            handled(&b, iced_x86::Mnemonic::Fild),
+            handled(&b, iced_x86::Mnemonic::Fistp),
+        );
+        assert_eq!(handlers, (0, 0), "{:?}", stats);
+    }
 }
 
 /// 80-bit values for the sums: (sign << 15 | exponent, mantissa).

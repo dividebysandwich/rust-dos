@@ -1218,6 +1218,15 @@ as long as it doesn't act on the pixels it reads, and the frames
 differ only where the renderers do. Check `renderer` before trusting
 identical pictures.
 
+Screenshots, `/ws/screen` and recordings show the surface at the
+card's `MODE_START` (in `mode.start`), with either renderer. After a
+flip without the wait, the built-in Windows' DirectDraw Flip, that is
+the frame just flipped to, from that moment on: a shot at a fixed
+emulated time shows the last frame the program finished, never the
+buffer it goes on to draw its next frame into. A flip that waits
+shows at the next vertical blank ("Flips" in
+`docs/toadforce-spec.md`).
+
 To find the draws a difference between the renderers comes from,
 record what the card is given and draw the recording through both:
 
@@ -1298,6 +1307,14 @@ usually left `fbiInit` at their power-on values (`00000410 00201102
   have: alpha written with another colour buffer, by the CPU or by the
   blitter, or a depth test against them. From then on every job is drawn
   in software too, and `released_jobs` grows with `triangles`.
+- **Held pictures:** on a Banshee or Voodoo3, a program that draws into
+  the buffer shown while a swap waits for its retrace holds the picture
+  until the swap shows. With the software picture, `held_keeps` counts
+  the holds that kept the memory's 16-bit words (a 16-bit desktop, the
+  overlay off or in a 16-bit format, the cursor off), `held_conversions`
+  the pictures drawn from those words because a host frame or a capture
+  asked for one during the hold, and `held_copies` the holds of other
+  modes, which draw the picture at once. OpenGL counts none of them.
 - **2D on the GPU:** on a Banshee or Voodoo3, `gpu_2d` counts the 2D
   operations done in OpenGL's copy of the memory (`blits`), the pages
   read back for the CPU (`pages_read_back`), and the operations left to
