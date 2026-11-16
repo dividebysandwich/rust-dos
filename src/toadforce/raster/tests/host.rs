@@ -1289,6 +1289,161 @@ fn the_cards_own_work_on_some_rows_reads_the_surface_back_whole() {
     assert_eq!(ahead, None);
 }
 
+/// The reads of whole surfaces and of rows the host made: `read_back`
+/// and `read_back_rows`.
+fn host_reads(log: &Rc<RefCell<Log>>) -> (u32, u32) {
+    let log = log.borrow();
+    (log.read_backs, log.row_reads)
+}
+
+/// Whether the rig's target is ahead on the host. Its depth buffer may
+/// be ahead as well, so `Gpu::ahead` doesn't tell. The look fetches
+/// the host's pixels of the target, which leaves card memory as it is
+/// and isn't one of the reads the tests count, so the log forgets it.
+fn colour_ahead(rig: &Rig, log: &Rc<RefCell<Log>>) -> bool {
+    let reads = log.borrow().read_backs;
+    let at = rig.colour().at(4, 4) as u32;
+    let ahead = rig.card.read_ahead(at, 4, &rig.memory).is_some();
+    log.borrow_mut().read_backs = reads;
+    ahead
+}
+
+#[test]
+fn rows_read_back_are_read_again_after_the_host_changes_its_copy() {
+    // A FILL, a BLT within the target and a CLEAR of a part of it, each
+    // over rows read back before it. The host does each on its copy,
+    // so card memory's rows are stale and the next read brings them
+    // again, as the software renderer drew them.
+    for change in ["fill", "blt", "clear"] {
+        let colour = rig_colour();
+        let part = rect(4, 12, 8, 4);
+        let work = |rig: &mut Rig| {
+            let error = rig.run(|w| match change {
+                "fill" => command::encode::fill(w, &colour, &part, 0x12_3456),
+                "blt" => {
+                    let from = rect(40, 40, 8, 4);
+                    command::encode::blt(w, &colour, &part, &colour, &from, None)
+                }
+                _ => encode::clear(w, CLEAR_COLOUR, 0x65_4321, 0.0, 0, &[part]),
+            });
+            assert_eq!(error, 0, "{change}");
+        };
+        let mut software = Rig::new(FORMAT, Some(DEPTH_FORMAT));
+        triangles(&mut software);
+        work(&mut software);
+        let (mut rig, log) = hosted(takes_all);
+        triangles(&mut rig);
+        let read = band(&rig, 0, SIZE, 10, 18);
+        rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+        assert_eq!(host_reads(&log), (0, 1), "{change}");
+        let done = |log: &Rc<RefCell<Log>>| {
+            let log = log.borrow();
+            log.fills + log.blits + log.clears
+        };
+        let before = done(&log);
+        work(&mut rig);
+        assert_eq!(done(&log), before + 1, "{change}: the host did it");
+        assert!(colour_ahead(&rig, &log), "{change}");
+        rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+        assert_eq!(host_reads(&log), (0, 2), "{change}");
+        let (now, drawn) = (rows_in(&rig, 10, 18), rows_in(&software, 10, 18));
+        assert_eq!(now, drawn, "{change}");
+    }
+}
+
+/// The rig's target, as `Rig::colour` gives it.
+fn rig_colour() -> Surface {
+    Rig::new(FORMAT, Some(DEPTH_FORMAT)).colour()
+}
+
+#[test]
+fn bands_that_share_rows_read_each_row_once_and_most_rows_read_it_whole() {
+    let mut software = Rig::new(FORMAT, Some(DEPTH_FORMAT));
+    triangles(&mut software);
+    let (mut rig, log) = hosted(takes_all);
+    triangles(&mut rig);
+    let rows_read = |log: &Rc<RefCell<Log>>| log.borrow().rows_read;
+    // Rows 10 to 20, then 15 to 25 (the five not read yet), then 5 to
+    // 30 (the five above and the five below what was read), the same
+    // band again (nothing), and a single row inside (nothing).
+    let reads = [
+        (10, 20, 1, 10),
+        (15, 25, 2, 15),
+        (5, 30, 4, 25),
+        (5, 30, 4, 25),
+    ];
+    for (first, end, reads, rows) in reads {
+        let read = band(&rig, 0, SIZE, first, end);
+        rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+        assert_eq!(host_reads(&log), (0, reads), "{first}..{end}");
+        assert_eq!(rows_read(&log), rows, "{first}..{end}");
+    }
+    let read = band(&rig, 3, 4, 17, 18);
+    rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+    assert_eq!(host_reads(&log), (0, 4));
+    assert_eq!(rows_in(&rig, 5, 30), rows_in(&software, 5, 30));
+    assert!(colour_ahead(&rig, &log));
+    // Ten more rows would make 35 of the 64 read in pieces, past half
+    // (`ROW_SHARE`): the surface comes back whole instead, the same,
+    // and isn't ahead after it. A whole surface read band by band ends
+    // so too.
+    let read = band(&rig, 0, SIZE, 30, 40);
+    rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+    assert_eq!(host_reads(&log), (1, 4));
+    assert!(!colour_ahead(&rig, &log));
+    assert_eq!(rows_in(&rig, 0, SIZE), rows_in(&software, 0, SIZE));
+}
+
+#[test]
+fn a_cursor_reading_a_few_bands_a_frame_keeps_the_target_on_the_host() {
+    // Evil Islands' cursor: each frame the host draws, and a driver's
+    // blit reads a 32x32 rectangle out of the target, here three bands
+    // of eight rows of the rig's 64. Ten frames read rows alone.
+    let (mut rig, log) = hosted(takes_all);
+    triangles(&mut rig);
+    for frame in 0..10 {
+        let colour = 0xFF00_0000 | frame * 0x10;
+        let quad = corner(2.0 + frame as f32, 2.0, 40.0, 0.0, colour);
+        assert_eq!(rig.draw(4, &quad), 0);
+        for first in [8 * (frame % 4), 40, 50] {
+            let read = band(&rig, 2, 34, first, first + 8);
+            rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+        }
+    }
+    assert_eq!(host_reads(&log), (0, 30));
+    assert!(colour_ahead(&rig, &log));
+}
+
+#[test]
+fn a_read_of_a_rectangle_a_row_at_a_time_reads_the_surface_back_once() {
+    let mut software = Rig::new(FORMAT, Some(DEPTH_FORMAT));
+    triangles(&mut software);
+    // A driver that asks for the rectangle's rows first
+    // (`ddraw::surface::will_read_rows`) and then reads them one by one
+    // reads them back with one read.
+    let (mut rig, log) = hosted(takes_all);
+    triangles(&mut rig);
+    let read = band(&rig, 2, 34, 10, 40);
+    rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+    for y in 10..40 {
+        let row = band(&rig, 2, 34, y, y + 1);
+        rig.card.settle_rows(&mut rig.memory, row, Cause::Driver);
+    }
+    assert_eq!(host_reads(&log), (0, 1));
+    assert_eq!(rows_in(&rig, 10, 40), rows_in(&software, 10, 40));
+    // One that doesn't reads eight rows on their own (`ROW_READS`), and
+    // then the surface whole: every row of it, the same.
+    let (mut rig, log) = hosted(takes_all);
+    triangles(&mut rig);
+    for y in 0..SIZE {
+        let row = band(&rig, 0, SIZE, y, y + 1);
+        rig.card.settle_rows(&mut rig.memory, row, Cause::Driver);
+    }
+    assert_eq!(host_reads(&log), (1, 8));
+    assert!(!colour_ahead(&rig, &log));
+    assert_eq!(rows_in(&rig, 0, SIZE), rows_in(&software, 0, SIZE));
+}
+
 /// A scene's depth kept in a second depth buffer the processor wrote,
 /// and put back with a `BLT` that names both as colour, as DirectDraw
 /// blits between two z-buffers: the triangle drawn after it is cut by
