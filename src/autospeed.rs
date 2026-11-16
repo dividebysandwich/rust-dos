@@ -2005,7 +2005,14 @@ impl AutoSpeed {
                     up(self, FIRST_STEP, (from, before))
                 } else if c <= from as f64 * FINE_STEP * 1.01 {
                     // A small step that gained nothing: where it came
-                    // from was enough.
+                    // from was enough. One that drew a fifth fewer frames
+                    // (`DROPPED`), which more speed doesn't do, landed in a
+                    // heavier scene: the hold keeps what `from` drew to
+                    // judge by, and a heavier scene that lasts searches
+                    // again from it, as for a step down.
+                    if fps < before * DROPPED {
+                        return hold_drawing(self, before, clamp(from as f64), HOLD_WINDOWS, false);
+                    }
                     hold(self, from as f64, HOLD_WINDOWS, false)
                 } else if current > top || m.pace < KEPT_UP {
                     overshot(self, below, fps)
@@ -2044,6 +2051,9 @@ impl AutoSpeed {
                 // A frame rate that fell by a fifth is no noise to average
                 // out: the program shouldn't wait out the rest of them.
                 let dropped = fps < before * DROPPED;
+                // Fell by a fifth more than the speed did: less speed
+                // doesn't do that in one scene.
+                let heavier = fps < before * (c / from as f64) * DROPPED;
                 if seen < JUDGED && !dropped {
                     self.step = Step::Lowered {
                         from,
@@ -2062,12 +2072,19 @@ impl AutoSpeed {
                         ..r
                     });
                     down(self, fps)
-                } else if (current as f64) * FINE_STEP * 1.01 < from as f64 {
+                } else if !heavier && (current as f64) * FINE_STEP * 1.01 < from as f64 {
                     // The host's estimate took the step further than a step
                     // (`clamp`), as it can while the program waits for the
                     // display: what so much less speed lost says nothing of
                     // a step's, and is no loss to back off from. Its frame
                     // rate gives the knee, as for a step that lost frames.
+                    // Frames that fell by a fifth more than the speed did
+                    // (`heavier`) are a heavier scene's or a wipe's, and go
+                    // on below with the frame rate held: Oni went from 60
+                    // frames a second, mostly halted, to 7 when its level
+                    // started, during a step from 56,895 to 48,952, and the
+                    // hold measured afresh took the 7 for its own and
+                    // climbed a step at a time from 112,500.
                     let knee = (c * before / fps).clamp(c, from as f64);
                     hold(self, knee * HEADROOM, HOLD_WINDOWS, true)
                 } else {
@@ -5479,6 +5496,60 @@ mod tests {
             let speed = auto.decide(60_000, &program(60_000), true, HOST);
             assert!(!matches!(auto.step, Step::Probed { .. }), "{speed}");
         }
+    }
+
+    #[test]
+    fn a_heavier_scene_under_a_long_step_down_searches_again() {
+        // Oni (#783): a step down that the host's estimate took a little
+        // further than a step, from 56,895 to 48,952, while the game
+        // started its level and went from 60 frames a second to 7. The
+        // hold keeps the 60 to judge by, and the heavier scene starts the
+        // search again.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Lowered {
+            from: 56_895,
+            fps: 60.0,
+            sum: 0.0,
+            seen: 0,
+            short: 0,
+        };
+        let heavy = game(7.0 / 48_952.0, 1000.0);
+        let mut speed = auto.decide(48_952, &heavy(48_952), true, HOST);
+        assert!(
+            matches!(auto.step, Step::Hold { fps, .. } if fps == 60.0),
+            "{:?}",
+            auto.step
+        );
+        for _ in 0..3 {
+            speed = auto.decide(speed, &heavy(speed), true, HOST);
+        }
+        assert!(speed > 200_000, "{speed}");
+    }
+
+    #[test]
+    fn a_heavier_scene_under_a_small_step_up_searches_again() {
+        // A step up of `FINE_STEP` that draws half the frames landed in a
+        // heavier scene: the hold back at 100,000 keeps the 40 frames a
+        // second it drew there, and the heavier scene starts the search
+        // again.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Raised {
+            from: 100_000,
+            fps: 40.0,
+            below: (100_000, 40.0),
+        };
+        let heavy = game(20.0 / 115_000.0, 1000.0);
+        let mut speed = auto.decide(115_000, &heavy(115_000), true, HOST);
+        assert_eq!(speed, 100_000);
+        assert!(
+            matches!(auto.step, Step::Hold { fps, .. } if fps == 40.0),
+            "{:?}",
+            auto.step
+        );
+        for _ in 0..3 {
+            speed = auto.decide(speed, &heavy(speed), true, HOST);
+        }
+        assert!(speed > 200_000, "{speed}");
     }
 
     #[test]
