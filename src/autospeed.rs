@@ -9,10 +9,12 @@
 //! the speed goes up in steps while the frame rate follows, back to where
 //! it stopped following, and never past the display's refresh rate, or
 //! the frame rate the user asks for instead (`auto_fps`), or the frame
-//! rate cap while the program presents through it (`fps_cap`). A program
-//! the cap holds counts with the frames it would have drawn meanwhile
-//! (`FrameCap::held`), so the cap changes the rate the speed aims
-//! for and not what the program is read to draw at a speed.
+//! rate cap while the program presents through it (`fps_cap`). Under the
+//! cap a program counts the frames it shows, as one that waits for the
+//! display's retrace counts those the display shows: one held to the
+//! cap's rate settles as a game synced to the retrace does, and one that
+//! shows fewer, as Grom's menu does between the long steps of its
+//! simulation, gets the speed that shows more.
 //!
 //! The frames are counted on the bus (`Activity`): page flips, or where a
 //! program draws out of sight and copies the finished picture to video
@@ -628,8 +630,6 @@ struct Mark {
     copies: u64,
     flips: u64,
     presents: u64,
-    /// What the frame rate cap held so far (`FrameCap::held`).
-    held: crate::frame_cap::Held,
     polls: u64,
     status_reads: u64,
     output: u64,
@@ -656,7 +656,6 @@ impl Mark {
             copies: a.copies,
             flips: a.flips,
             presents: a.presents,
-            held: bus.frame_cap.get().held(),
             polls: a.polls,
             status_reads: a.status_reads,
             output: a.video_bytes + a.io_bytes,
@@ -1242,7 +1241,7 @@ impl AutoSpeed {
             Some(cap) => refresh.min(cap.hz()),
             None => refresh,
         };
-        let mut fps = (frames > 0).then(|| Self::drawn(&mark, &now, frames) / seconds);
+        let mut fps = (frames > 0).then(|| frames as f64 / seconds);
         if let (Some(rate), Some((before, tries))) = (fps, self.unsettled) {
             let settled = (rate / before - 1.0).abs() <= AGREE || tries + 1 >= TRIES;
             if !settled {
@@ -1318,13 +1317,6 @@ impl AutoSpeed {
             self.watch(current);
         }
         Some(next)
-    }
-
-    /// The frames a program drew between two marks, of which it showed
-    /// `frames`: those, and the ones it would have drawn while the frame
-    /// rate cap held it (`FrameCap::held`).
-    fn drawn(mark: &Mark, now: &Mark, frames: u64) -> f64 {
-        frames as f64 + now.held.frames_since(&mark.held)
     }
 
     /// Watch the frames of a step up from `from`, counting none of those
@@ -4290,51 +4282,37 @@ mod tests {
         frames: &[u64],
         seconds: u64,
     ) -> Vec<u32> {
-        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
-        let bus = &mut cpu.bus;
-        bus.set_cycles_per_ms(200_000);
-        bus.frame_cap.set(cap);
-        let mut auto = AutoSpeed::new(3000, Some(target));
-        let mut speeds = Vec::new();
         let mut next = frames.iter().cycle();
-        while bus.clock.now_ns() < seconds * 1_000_000_000 {
+        let frame = move |bus: &mut Bus| {
             bus.clock.icount += next.next().unwrap();
-            // A held present's thread blocks, and the machine idles.
-            while let Some(until) = bus.frame_cap.wait(bus.clock.now_ns(), None) {
-                let ns = until - bus.clock.now_ns();
-                let idle = (ns * bus.clock.cycles_per_ms() as u64).div_ceil(1_000_000);
-                bus.clock.icount += idle;
-                bus.clock.idle += idle;
-            }
-            bus.frame_cap.shown(bus.clock.now_ns());
-            bus.activity.swapped(1);
-            if let Some(speed) = auto.update(bus, true, HOST, 0) {
-                bus.set_cycles_per_ms(speed);
-                speeds.push(speed);
-            }
-        }
-        speeds
+            1
+        };
+        run_program(cap, target, seconds, frame).0
+    }
+
+    /// Whether the last three speeds of `held` are within 10% of the
+    /// least and the most of the last three of `free`.
+    fn ends_within(held: &[u32], free: &[u32]) -> bool {
+        let free = &free[free.len() - 3..];
+        let low = free.iter().min().unwrap() * 9 / 10;
+        let high = free.iter().max().unwrap() * 11 / 10;
+        held[held.len() - 3..].iter().all(|speed| (low..=high).contains(speed))
     }
 
     #[test]
     fn uneven_frames_under_the_frame_rate_cap_dont_take_the_speed_down() {
         use crate::frame_cap::Cap;
         // Frames of 150,000 and 1,350,000 instructions by turns, 267 a
-        // second at 200,000 as with 750,000 each. Reckoned at each held
-        // frame's own time, the short frames' holds read as 556, and the
-        // first step went down to 20,000 where without the cap it went to
-        // 45,000.
+        // second at 200,000 as with 750,000 each (#1137). Under the cap
+        // they show 60 at any speed above 45,000, and the speed comes
+        // down as a synced game's does, to where it goes without the cap.
         let works = [150_000, 1_350_000];
-        let free = run_presenting_by(Cap::Off, 60, &works, 60);
-        let held = run_presenting_by(Cap::Auto, 60, &works, 60);
-        assert!(
-            held[0].abs_diff(free[0]) <= free[0] / 20,
-            "{held:?}, without {free:?}"
-        );
-        // A frame presented twice, the second present at once: the hold
-        // before it kept the program from drawing nothing. Reckoned at the
-        // least time a frame takes, each such hold read as up to 167
-        // frames, and the speed went down to the least there is.
+        let free = run_presenting_by(Cap::Off, 60, &works, 150);
+        let held = run_presenting_by(Cap::Auto, 60, &works, 150);
+        assert!(held.iter().all(|&speed| speed > 35_000), "{held:?}");
+        assert!(ends_within(&held, &free), "{held:?}, without {free:?}");
+        // A frame presented twice, the second present at once: the hold of
+        // the second is no reason to take the speed down.
         let works = [1_500_000, 0];
         let held = run_presenting_by(Cap::Auto, 60, &works, 60);
         assert!(held.iter().all(|&speed| speed > 40_000), "{held:?}");
@@ -4349,21 +4327,150 @@ mod tests {
         let free = run_presenting(Cap::Off, 60, 750_000, 60);
         let settled = *free.last().unwrap();
         assert!((40_000..=60_000).contains(&settled), "{:?}", free);
-        // Held to 60, the program shows 60 at any speed above that. It
-        // still counts as drawing 267 at 200,000, with the frames it
-        // would have drawn while it was held, and the speed comes down
-        // the same way.
+        // Held to 60, the program shows 60 at any speed above that, as
+        // a game synced to a 60 Hz display does. The speed comes down as
+        // that game's does, by steps that try less, to the same speed.
+        let (synced_speeds, _) = run_program(Cap::Off, 60, 150, synced(750_000));
         let near = |a: u32, b: u32| a.abs_diff(b) <= b / 20;
-        let same = |held: &[u32], free: &[u32]| near(held[0], free[0]) && near(held[held.len() - 1], free[free.len() - 1]);
         for cap in [Cap::Auto, Cap::Fps(60)] {
-            let held = run_presenting(cap, 60, 750_000, 60);
-            assert!(same(&held, &free), "{:?}: {:?}, without {:?}", cap, held, free);
+            let held = run_presenting(cap, 60, 750_000, 150);
+            let (end, synced_end) = (*held.last().unwrap(), *synced_speeds.last().unwrap());
+            assert!(near(end, synced_end), "{cap:?}: {held:?}, synced {synced_speeds:?}");
+            assert!((40_000..=60_000).contains(&end), "{held:?}");
         }
         // A cap of 30 is the rate the speed aims for (the cap shows no
-        // more), and the speed is that of aiming for 30 without a cap.
-        let free = run_presenting(Cap::Off, 30, 750_000, 60);
-        let held = run_presenting(Cap::Fps(30), 60, 750_000, 60);
-        assert!(same(&held, &free), "{:?}, without {:?}", held, free);
+        // more), and the speed ends where aiming for 30 without a cap
+        // takes it.
+        let free = run_presenting(Cap::Off, 30, 750_000, 150);
+        let held = run_presenting(Cap::Fps(30), 60, 750_000, 150);
+        assert!(ends_within(&held, &free), "{held:?}, without {free:?}");
+    }
+
+    /// The speeds `auto` runs a program at under the frame rate cap `cap`,
+    /// aiming for `target` frames a second, from 200,000 instructions per
+    /// ms on for `seconds` of emulated time (at least ten), and the frames
+    /// it showed a second over the last ten. `frame` runs the program up
+    /// to its next present (instructions, and waits on the clock through
+    /// `idle_until`) and gives the number of presents it makes then, one
+    /// after the other. A held present's thread blocks, and the machine
+    /// idles.
+    fn run_program(
+        cap: crate::frame_cap::Cap,
+        target: u32,
+        seconds: u64,
+        mut frame: impl FnMut(&mut Bus) -> u32,
+    ) -> (Vec<u32>, f64) {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(200_000);
+        bus.frame_cap.set(cap);
+        let mut auto = AutoSpeed::new(3000, Some(target));
+        let mut speeds = Vec::new();
+        let last_from = seconds.saturating_sub(10) * 1_000_000_000;
+        let mut shown = 0;
+        while bus.clock.now_ns() < seconds * 1_000_000_000 {
+            for _ in 0..frame(bus) {
+                while let Some(until) = bus.frame_cap.wait(bus.clock.now_ns(), None) {
+                    idle_until(bus, until);
+                }
+                bus.frame_cap.shown(bus.clock.now_ns());
+                bus.activity.swapped(1);
+                shown += u64::from(bus.clock.now_ns() >= last_from);
+            }
+            if let Some(speed) = auto.update(bus, true, HOST, 0) {
+                bus.set_cycles_per_ms(speed);
+                speeds.push(speed);
+            }
+        }
+        (speeds, shown as f64 / 10.0)
+    }
+
+    /// The machine idles until `ns`, as a thread that waits does.
+    fn idle_until(bus: &mut Bus, ns: u64) {
+        let left = ns.saturating_sub(bus.clock.now_ns());
+        let idle = (left * bus.clock.cycles_per_ms() as u64).div_ceil(1_000_000);
+        bus.clock.icount += idle;
+        bus.clock.idle += idle;
+    }
+
+    /// A program that runs a step of its simulation on the clock, as
+    /// Grom's menu does: once 33 ms have passed since the last step
+    /// ended, a step of `step` instructions, then frames of `frame`
+    /// instructions until the next is due.
+    fn stepping(step: u64, frame: u64) -> impl FnMut(&mut Bus) -> u32 {
+        let mut due = 0;
+        move |bus| {
+            if bus.clock.now_ns() >= due {
+                bus.clock.icount += step;
+                due = bus.clock.now_ns() + 33_000_000;
+            }
+            bus.clock.icount += frame;
+            1
+        }
+    }
+
+    /// A program that draws a frame of `work` instructions `fps` times a
+    /// second on the clock, and presents it `presents` times.
+    fn on_the_clock(fps: u64, work: u64, presents: u32) -> impl FnMut(&mut Bus) -> u32 {
+        let mut next = 0;
+        move |bus| {
+            idle_until(bus, next);
+            next = bus.clock.now_ns().max(next) + 1_000_000_000 / fps;
+            bus.clock.icount += work;
+            presents
+        }
+    }
+
+    /// A program that draws frames of `work` instructions and waits for
+    /// the next retrace of a 60 Hz display to show each.
+    fn synced(work: u64) -> impl FnMut(&mut Bus) -> u32 {
+        move |bus| {
+            bus.clock.icount += work;
+            let refresh = 1_000_000_000 / 60;
+            idle_until(bus, bus.clock.now_ns().div_ceil(refresh) * refresh);
+            1
+        }
+    }
+
+    #[test]
+    fn a_program_held_in_bursts_between_steps_gets_the_speed_to_show_the_cap() {
+        use crate::frame_cap::Cap;
+        // Steps of 20 million instructions (133 ms at 150,000), frames of
+        // 420,000 (2.8 ms). Without the cap it draws twelve frames in the
+        // 33 ms after each step, of which a display of 60 Hz shows two or
+        // three, and counts as drawing 60 at a low speed. Under the cap
+        // the frames it shows count, and the speed goes up until the
+        // steps are short enough to show the cap's rate, short of all
+        // the host has.
+        let (free, _) = run_program(Cap::Off, 60, 180, stepping(20_000_000, 420_000));
+        let (held, shown) = run_program(Cap::Auto, 60, 180, stepping(20_000_000, 420_000));
+        let settled = &held[held.len() - 4..];
+        assert!(shown >= 57.0, "{shown}: {held:?}");
+        assert!(settled.iter().all(|&speed| speed < HOST / 2), "{held:?}");
+        assert!(
+            settled.iter().all(|&speed| speed > *free.last().unwrap()),
+            "{held:?}, without {free:?}"
+        );
+    }
+
+    #[test]
+    fn programs_held_short_of_the_cap_for_other_reasons_get_no_more_speed() {
+        use crate::frame_cap::Cap;
+        // Frame-driven, one long frame and two short ones (#1137); a game
+        // that draws 30 frames a second on the clock, as Myth: The Fallen
+        // Lords does; and a movie of 15 frames a second whose every frame
+        // is presented twice, the second present held a frame time. None
+        // shows more with more speed, and each settles where it does
+        // without the cap.
+        let works = [1_400_000, 50_000, 50_000];
+        let free = run_presenting_by(Cap::Off, 60, &works, 240);
+        let held = run_presenting_by(Cap::Auto, 60, &works, 240);
+        assert!(ends_within(&held, &free), "{held:?}, without {free:?}");
+        for (fps, work, presents) in [(30, 1_000_000, 1), (15, 2_000_000, 2)] {
+            let (free, _) = run_program(Cap::Off, 60, 120, on_the_clock(fps, work, presents));
+            let (held, _) = run_program(Cap::Auto, 60, 120, on_the_clock(fps, work, presents));
+            assert!(ends_within(&held, &free), "{fps}: {held:?}, without {free:?}");
+        }
     }
 
     #[test]

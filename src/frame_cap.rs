@@ -191,42 +191,6 @@ pub struct Counters {
     pub dropped_ns: u64,
 }
 
-/// The time the frames the cap held took to draw and the time it held
-/// them, in ns, and how many there were, counted up since the machine
-/// started (`FrameCap::held`). A present that comes sooner than
-/// `LEAST_WORK_NS` after the frame before showed counts in none: it
-/// shows a frame drawn already, and the time it was held kept the
-/// program from no drawing.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Held {
-    pub frames: u64,
-    pub work_ns: u64,
-    pub hold_ns: u64,
-}
-
-impl Held {
-    /// The frames the program would have drawn in the time the cap held
-    /// it since `before`, an earlier reading: that time over the time its
-    /// held frames took to draw on average. A program held to 60 that
-    /// draws a frame in 4 ms would have drawn 3.2 more in each hold of
-    /// 12.7 ms. One whose frames take 1 and 9 ms by turns is held 15.7
-    /// and 7.7 ms, and would have drawn 4.7 frames of 5 ms on average in
-    /// the two holds: 200 a second, as it draws without the cap.
-    pub fn frames_since(&self, before: &Held) -> f64 {
-        let work = self.work_ns.saturating_sub(before.work_ns);
-        if work == 0 {
-            return 0.0;
-        }
-        let frames = self.frames.saturating_sub(before.frames) as f64;
-        self.hold_ns.saturating_sub(before.hold_ns) as f64 * frames / work as f64
-    }
-}
-
-/// The least time after the frame before showed for a present to count
-/// as a frame drawn (`Held`), in ns: Max Payne's menu in a window
-/// presents every 0.74 ms uncapped.
-const LEAST_WORK_NS: u64 = 100_000;
-
 /// The cap and the frames it let through.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FrameCap {
@@ -244,11 +208,9 @@ pub struct FrameCap {
     /// The last frame's turn (`shown`), in emulated ns: the next frame
     /// may show a frame time after it.
     slot: Option<u64>,
-    /// When the frame now held came (`wait`), in emulated ns, and what
-    /// the cap held so far (`held`). Only `cycles=auto` reads them, never
-    /// the machine, and a save state doesn't keep them.
+    /// When the frame now held came (`wait`), in emulated ns. A save
+    /// state doesn't keep it.
     held_from: Option<u64>,
-    held: Held,
     /// What the cap did (`counters`), and how far the schedule's fresh
     /// starts moved the turns back that held frames haven't waited out
     /// yet, in ns (`Counters::dropped_ns`). The machine reads neither.
@@ -336,26 +298,20 @@ impl FrameCap {
     /// out).
     pub fn shown(&mut self, at: u64) {
         let held = self.held_from.take();
-        let last = self.last.replace(at);
+        self.last = Some(at);
         let (Some(frame), false) = (self.frame_ns(), self.leaves_to_retrace()) else {
             self.slot = Some(at);
             return;
         };
         self.counters.shown += 1;
-        // No hold is longer than a frame time and half a retrace: a
-        // longer one is of a present that never showed.
-        let hold = held.map(|from| (from, at.saturating_sub(from)));
-        if let Some((from, hold)) = hold.filter(|&(_, hold)| hold <= 2 * frame) {
+        // No hold is longer than a frame time and half a retrace, so one
+        // of more than two frame times is of a present that never showed.
+        let hold = held.map(|from| at.saturating_sub(from));
+        if let Some(hold) = hold.filter(|&hold| hold <= 2 * frame) {
             self.counters.held += 1;
             let waited_out = hold.min(self.owed);
             self.owed -= waited_out;
             self.counters.dropped_ns += waited_out;
-            let work = last.map_or(0, |last| from.saturating_sub(last));
-            if work >= LEAST_WORK_NS {
-                self.held.frames += 1;
-                self.held.work_ns += work;
-                self.held.hold_ns += hold;
-            }
         }
         let Some(turn) = self.slot.map(|slot| slot + frame) else {
             self.slot = Some(at);
@@ -383,24 +339,6 @@ impl FrameCap {
     /// What the cap did to the frames so far.
     pub fn counters(&self) -> Counters {
         self.counters
-    }
-
-    /// What the cap held so far, from which `cycles=auto` reckons the
-    /// frames the program would have drawn while it was held
-    /// (`Held::frames_since`) and adds them to the frames it counts, so
-    /// that it reads a held program's frame rate as it reads the same
-    /// program's without the cap, and settles at the same speed: a
-    /// program held to 60 that would draw 120 has speed to spare, and one
-    /// that draws its frames in bursts between long steps (Grom's menu
-    /// shows 25 a second under a cap of 60 and 71 without, at one speed)
-    /// isn't short of the cap's rate for the frames the cap spread out.
-    /// The frames are reckoned at the held frames' average time, so that
-    /// the short frames of a program whose frames take long and short
-    /// times by turns don't stand for many more than it draws. A present
-    /// that waits for the retrace under a cap below the display's rate
-    /// counts from the retrace it would have shown at.
-    pub fn held(&self) -> Held {
-        self.held
     }
 
     /// A steady timing at the cap's rate, a retrace at every multiple
@@ -665,45 +603,7 @@ mod tests {
                 cap.shown(i * refresh);
             }
             assert_eq!(cap.counters(), Counters::default(), "{:?}", under);
-            assert_eq!(cap.held(), Held::default());
         }
-    }
-
-    #[test]
-    fn the_frames_a_held_program_would_have_drawn_make_up_its_rate() {
-        // Frames of 4 ms under a cap of 50: each waits 16 ms, in which
-        // the program would have drawn four more, 250 a second in all.
-        let shown = presented_by(cap(50), &[4 * MS], 101).1;
-        assert_eq!(shown.counters().held, 100);
-        let would = shown.held().frames_since(&Held::default());
-        assert!((would - 100.0 * 4.0).abs() < 1e-6, "{would}");
-    }
-
-    #[test]
-    fn frames_of_uneven_length_are_reckoned_at_their_average() {
-        // 1 and 9 ms by turns, 200 frames a second without a cap. Under
-        // 60 each pair takes two frame times and is held for the rest,
-        // in which the program would have drawn as many more pairs as
-        // fit: 200 a second in all. Reckoned at each frame's own time,
-        // the 1 ms frames' holds made it 556.
-        let ms = 1_000_000;
-        let (shown, cap) = presented_by(cap(60), &[ms, 9 * ms], 601);
-        let seconds = (shown[600] - shown[0]) as f64 / 1e9;
-        let would = cap.held().frames_since(&Held::default());
-        let rate = (600.0 + would) / seconds;
-        assert!((rate - 200.0).abs() < 2.0, "{rate}");
-    }
-
-    #[test]
-    fn a_present_right_after_the_last_adds_no_frames_drawn() {
-        // A frame of 33 ms shown twice, the second present at once: held
-        // until its turn, in which the program drew nothing. Reckoned at
-        // the least time a frame takes, a hold of a frame time stood for
-        // 167 frames, and `cycles=auto` took the speed down to its least
-        // at any speed.
-        let (_, cap) = presented_by(cap(60), &[33 * MS, 0], 200);
-        assert_eq!(cap.counters().held, 100);
-        assert_eq!(cap.held(), Held::default());
     }
 
     #[test]
@@ -890,9 +790,7 @@ mod tests {
         // for a 60 Hz retrace, as on a machine with the display synced,
         // shows 13.5. So the cap shows no fewer frames than a display of
         // its rate would, nor much fewer than the display shows of the
-        // uncapped frames, and costs the program no time. The frames it
-        // would have drawn meanwhile make up its uncapped rate for
-        // `cycles=auto`.
+        // uncapped frames, and costs the program no time.
         let (free, free_steps) = stepping_on_the_clock(|at| at);
         let mut cap = cap(60);
         let (held, held_steps) = stepping_on_the_clock(|at| {
@@ -910,9 +808,6 @@ mod tests {
         assert!(held_rate > rate(&synced), "{}", rate(&synced));
         let (seen_held, seen_free) = (seen_at_60(&held), seen_at_60(&free));
         assert!(seen_held > 0.8 * seen_free, "{seen_held} of {seen_free}");
-        let would = cap.held().frames_since(&Held::default());
-        let read = (held.len() as f64 + would) / 60.0;
-        assert!((read / free_rate - 1.0).abs() < 0.05, "{read}");
     }
 
     #[test]
