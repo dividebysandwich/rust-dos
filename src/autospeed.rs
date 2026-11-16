@@ -307,7 +307,7 @@ const STALLED: f64 = 2.0;
 /// with, a run of long frames comes now and then, and its measurements say
 /// what they cost.
 const TRY_BEHIND_NS: u64 = 25_000_000;
-const TRY_BEHIND_FRAMES: u32 = 3;
+pub(crate) const TRY_BEHIND_FRAMES: u32 = 3;
 const TRY_DROPS: u32 = 2;
 /// A host that stops for a moment, or a program that waits for the host's
 /// disk, leaves a few long frames among frames that run on time, and the
@@ -718,7 +718,7 @@ pub fn screen_bytes(bus: &Bus) -> u64 {
 
 /// Whether `RUST_DOS_AUTO_TRACE` is set: then each measurement and the
 /// speed it chose go to stderr.
-fn trace() -> bool {
+pub(crate) fn trace() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("RUST_DOS_AUTO_TRACE").is_some())
 }
@@ -1238,7 +1238,10 @@ pub struct AutoSpeed {
     /// then, so a frame takes it down with the estimate: a measurement at
     /// an estimate that ran high would leave it behind for half a second
     /// (Expendable's sound runs dry). A speed found by the frame rate has
-    /// the pace to go by, and waits for that.
+    /// the pace to go by, and waits for that. The estimate leaves fewer
+    /// slow frames in a row out as a stall's meanwhile
+    /// (`HostEstimate::outlier` in `timer.rs`): the speed has no room
+    /// above what the host runs, and each frame left out runs that slow.
     flat_out: bool,
     /// The bytes it had read and written, and when that last changed; and
     /// the same of the bytes moved on drives.
@@ -1324,6 +1327,12 @@ impl AutoSpeed {
             dpmi_client: self.dpmi_client,
             ..Self::new(base, target_fps)
         }
+    }
+
+    /// Whether the program gets all the host has, its speed following the
+    /// host's estimate down (`flat_out`).
+    pub fn flat_out(&self) -> bool {
+        self.flat_out
     }
 
     /// Whether the protected-mode system was seen idling.
