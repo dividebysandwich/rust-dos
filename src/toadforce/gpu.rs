@@ -45,6 +45,18 @@
 //!   locks its back buffer and writes all of it, as one with drawn
 //!   backgrounds does every frame, costs one upload, and one that only
 //!   reads costs the read-back a lock used to.
+//! - **A read of some rows.** A driver's read of bytes in some of a
+//!   surface's rows (a DirectDraw blit out of it on the processor,
+//!   which a game's cursor makes every frame to keep what is under it,
+//!   `Gpu::settle_rows`) reads back only those rows
+//!   (`Host::read_back_rows`), and the surface stays ahead: a write
+//!   there afterwards is noted as any other. The card keeps the rows
+//!   read (`Ahead::back`) until the host changes its copy, so a read of
+//!   them again reads nothing, and one of other rows reads those. A
+//!   read of every row, a host that reads only whole surfaces, and the
+//!   card's own work on the processor (`settle`), which writes card
+//!   memory without noting what it writes, read the surface back whole,
+//!   after which it isn't ahead.
 //! - **What the processor wrote.** `Pages` counts the writes to each
 //!   page of card memory. A host keeps a `Stamp` of the bytes a copy
 //!   was made from and makes the copy again when the stamp is stale.
@@ -93,6 +105,8 @@ use super::level1::{Target, Texture};
 use super::raster::pipeline::{DrawState, SLOTS};
 use super::raster::texel::Rgba;
 use super::raster::vertex::ScreenVertex;
+// The Voodoo tracker's set of ranges, here of rows.
+use crate::voodoo::tracker::Ranges;
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::sync::Arc;
@@ -448,6 +462,17 @@ pub trait Host {
     /// no longer ahead. Without, it is a copy of card memory for a
     /// saved state, and the host's copy stays ahead.
     fn read_back(&mut self, surface: &Surface, memory: &mut [u8], pages: Option<&Pages>) -> bool;
+
+    /// Write the pixels of rows `rows` of `surface` (first to after
+    /// last), a colour or a depth buffer the host drew into, to
+    /// `memory`, card memory. The copy stays ahead: card memory has
+    /// those rows of it, and the host the others. False when the host
+    /// has no such surface or reads only whole ones, and `memory` is as
+    /// it was.
+    fn read_back_rows(&mut self, surface: &Surface, rows: (u32, u32), memory: &mut [u8]) -> bool {
+        let _ = (surface, rows, memory);
+        false
+    }
 
     /// Whether the host's copy has every pixel of `surface` as it is
     /// now: it is ahead, or what card memory holds (by `pages`). The
@@ -851,6 +876,50 @@ struct Ahead {
     /// What the processor wrote of it since: card memory has those
     /// bytes, and the host the others.
     written: Written,
+    /// The rows read back since the host last changed it (`Host::
+    /// read_back_rows`), first to after last: card memory has the
+    /// host's pixels of them, and the processor's where it wrote since.
+    /// A read of these rows reads nothing back.
+    back: Ranges,
+}
+
+/// The rows of `surface` that the bytes `bytes`, which share one with
+/// it, lie in: first to after last. None when they are all its rows.
+fn rows_of(surface: &Surface, bytes: (u32, u32)) -> Option<(u32, u32)> {
+    let own = range(surface);
+    let pitch = surface.pitch.max(1);
+    let first = (bytes.0.max(own.0) - own.0) / pitch;
+    let end = ((bytes.1.min(own.1) - own.0 - 1) / pitch + 1).min(surface.height);
+    (first > 0 || end < surface.height).then_some((first, end))
+}
+
+/// What the processor wrote of `a` from byte `span.0` to before
+/// `span.1` of it, the runs as card memory has them, each with the
+/// offset it is at in card memory: a read-back puts them back over the
+/// host's pixels.
+fn written_runs(a: &Ahead, span: (u32, u32), memory: &[u8]) -> Vec<(u32, Vec<u8>)> {
+    let mut kept = Vec::new();
+    if a.written.any {
+        let start = a.surface.offset;
+        a.written.runs(span.0, span.1, |from, to| {
+            let (from, to) = ((start + from) as usize, (start + to) as usize);
+            kept.push((from as u32, memory[from..to].to_vec()));
+        });
+    }
+    kept
+}
+
+/// The counts of what was read back, for the status.
+#[derive(Clone, Copy, Debug, Default)]
+struct ReadBacks {
+    /// Whole surfaces.
+    surfaces: u64,
+    /// Reads of some rows of a surface, which stayed ahead.
+    partial: u64,
+    /// The rows those read.
+    rows: u64,
+    /// The bytes of pixels read, whole surfaces and rows.
+    bytes: u64,
 }
 
 /// The host's pixels of surfaces that are ahead, fetched for the
@@ -879,8 +948,8 @@ pub struct Gpu {
     /// The screen shows the picture from the host's copy this frame
     /// (`shows`): the next `shown` reads nothing back.
     presents: bool,
-    /// How many surfaces were read back.
-    read_backs: u64,
+    /// What was read back.
+    read_backs: ReadBacks,
     /// The draws that went to the software renderer with a host
     /// attached, by reason: the rasteriser's (`Renderer::draw`) and the
     /// host's (`Host::declines`).
@@ -890,6 +959,8 @@ pub struct Gpu {
     /// The surfaces fetched for the program's reads (`read`), which
     /// are read-backs for `Cause::Lock`.
     fetches: Cell<u64>,
+    /// The bytes of pixels those fetched.
+    fetched_bytes: Cell<u64>,
     /// The times written pixels went to the host's copy (`Host::
     /// write`).
     writes: u64,
@@ -955,9 +1026,18 @@ impl Gpu {
         !self.ahead.is_empty()
     }
 
-    /// How many surfaces were read back.
+    /// How many surfaces were read back whole.
     pub fn read_backs(&self) -> u64 {
-        self.read_backs + self.fetches.get()
+        self.read_backs.surfaces + self.fetches.get()
+    }
+
+    /// The reads of some rows of a surface, which stayed ahead: how
+    /// many, of how many rows, and the bytes of pixels read back in
+    /// all, whole surfaces' and rows'.
+    pub fn read_back_rows(&self) -> serde_json::Value {
+        let r = self.read_backs;
+        let bytes = r.bytes + self.fetched_bytes.get();
+        serde_json::json!({ "reads": r.partial, "rows": r.rows, "bytes": bytes })
     }
 
     /// How many times written pixels went to the host's copy of a
@@ -1005,10 +1085,24 @@ impl Gpu {
 
     /// Read back the surfaces that are ahead on the host and share a
     /// byte with `range` (all of them for None), counted for `why`.
+    /// They aren't ahead after it: card memory has all of them, and
+    /// the caller may change it with no note of what it changed.
     #[inline]
     pub fn settle(&mut self, memory: &mut [u8], range: Option<(u32, u32)>, why: Cause) {
         if !self.ahead.is_empty() {
-            self.read_back(memory, range, why);
+            self.read_back(memory, range, false, why);
+        }
+    }
+
+    /// `settle` for bytes that are only read, by the emulator's own
+    /// code (a driver's copy of a rectangle out of a surface): of a
+    /// surface they lie in some rows of, only those rows are read
+    /// back, when the host can, and the surface stays ahead. What the
+    /// processor writes there afterwards goes through `writing`.
+    #[inline]
+    pub fn settle_rows(&mut self, memory: &mut [u8], range: (u32, u32), why: Cause) {
+        if !self.ahead.is_empty() {
+            self.read_back(memory, Some(range), true, why);
         }
     }
 
@@ -1024,7 +1118,13 @@ impl Gpu {
     }
 
     #[cold]
-    fn read_back(&mut self, memory: &mut [u8], range: Option<(u32, u32)>, why: Cause) {
+    fn read_back(
+        &mut self,
+        memory: &mut [u8],
+        range: Option<(u32, u32)>,
+        rows: bool,
+        why: Cause,
+    ) {
         let _profile = crate::profile::zone(crate::profile::Zone::ToadForceReadBack);
         let Gpu {
             host,
@@ -1040,20 +1140,21 @@ impl Gpu {
             ahead.clear();
             return;
         };
-        ahead.retain(|a| {
+        ahead.retain_mut(|a| {
             let bytes = self::range(&a.surface);
             if range.is_some_and(|r| !overlap(r, bytes)) {
                 return true;
             }
+            // Bytes only read, in some of its rows (a driver's copy of a
+            // rectangle, a row at a time), need only those rows, and the
+            // surface stays ahead.
+            let rows = range.filter(|_| rows).and_then(|r| rows_of(&a.surface, r));
+            if rows.is_some_and(|rows| Self::read_rows(&mut **host, a, rows, memory, read_backs)) {
+                return true;
+            }
             // What the processor wrote of it stays: the host's pixels
             // go around it.
-            let mut kept: Vec<(u32, Vec<u8>)> = Vec::new();
-            if a.written.any {
-                a.written.runs(0, bytes.1 - bytes.0, |from, to| {
-                    let (from, to) = ((bytes.0 + from) as usize, (bytes.0 + to) as usize);
-                    kept.push((from as u32, memory[from..to].to_vec()));
-                });
-            }
+            let kept = written_runs(a, (0, bytes.1 - bytes.0), memory);
             host.read_back(&a.surface, memory, Some(pages));
             for (at, run) in &kept {
                 memory[*at as usize..*at as usize + run.len()].copy_from_slice(run);
@@ -1062,10 +1163,57 @@ impl Gpu {
                 // The host's copy isn't what card memory holds.
                 pages.wrote(bytes.0, bytes.1 - bytes.0);
             }
-            *read_backs += 1;
+            let s = &a.surface;
+            read_backs.surfaces += 1;
+            read_backs.bytes += u64::from(s.width * s.height * s.format.bytes());
             by_cause[why as usize] += 1;
             false
         });
+    }
+
+    /// Read back the rows `rows` of `a` that card memory doesn't have
+    /// the host's pixels of yet, around what the processor wrote of
+    /// them, which goes to the host's copy before the host next uses
+    /// it (`push`). False when the host reads only whole surfaces: the
+    /// caller reads the surface back whole.
+    fn read_rows(
+        host: &mut dyn Host,
+        a: &mut Ahead,
+        rows: (u32, u32),
+        memory: &mut [u8],
+        counts: &mut ReadBacks,
+    ) -> bool {
+        let mut missing = Vec::new();
+        let mut at = rows.0;
+        for (first, end) in a.back.iter() {
+            if end <= at || first >= rows.1 {
+                continue;
+            }
+            if first > at {
+                missing.push((at, first));
+            }
+            at = at.max(end);
+        }
+        if at < rows.1 {
+            missing.push((at, rows.1));
+        }
+        let s = a.surface;
+        let len = range(&s).1 - s.offset;
+        for (first, end) in missing {
+            let span = (first * s.pitch, (end * s.pitch).min(len));
+            let kept = written_runs(a, span, memory);
+            if !host.read_back_rows(&s, (first, end), memory) {
+                return false;
+            }
+            for (at, run) in &kept {
+                memory[*at as usize..*at as usize + run.len()].copy_from_slice(run);
+            }
+            a.back.add(first, end);
+            counts.partial += 1;
+            counts.rows += u64::from(end - first);
+            counts.bytes += u64::from((end - first) * s.width * s.format.bytes());
+        }
+        true
     }
 
     /// Card memory as it is with every surface read back, when some
@@ -1093,15 +1241,22 @@ impl Gpu {
 
     /// `surface` is ahead on the host, which has one copy for it and
     /// its views: the list keeps the largest. Nothing of them is
-    /// written: `push` came first.
+    /// written: `push` came first. The host changed the copy, so card
+    /// memory has none of its rows any more.
     fn mark(&mut self, surface: Surface) {
-        if self.ahead.iter().any(|a| within(&surface, &a.surface)) {
+        if let Some(a) = self
+            .ahead
+            .iter_mut()
+            .find(|a| within(&surface, &a.surface))
+        {
+            a.back.clear();
             return;
         }
         self.ahead.retain(|a| !within(&a.surface, &surface));
         self.ahead.push(Ahead {
             surface,
             written: Written::default(),
+            back: Ranges::default(),
         });
     }
 
@@ -1164,6 +1319,9 @@ impl Gpu {
             }
             fetched.of.push(a.surface);
             self.fetches.set(self.fetches.get() + 1);
+            let pixels = a.surface.width * a.surface.height * a.surface.format.bytes();
+            self.fetched_bytes
+                .set(self.fetched_bytes.get() + u64::from(pixels));
         }
         let mut value = [0u8; 4];
         for (i, at) in (offset..end).enumerate().take(4) {

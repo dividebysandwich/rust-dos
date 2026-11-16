@@ -1175,6 +1175,10 @@ counts what the OpenGL renderer costs and misses:
   surface. A screenshot, a recording, the debugger's picture and an
   open settings window each read the picture back, so `show` counts
   the frames one of them wanted.
+- `read_back_rows`: reads of some rows of a surface, which stays on the
+  GPU (a driver's blit of a rectangle out of it): `reads`, the `rows`
+  they read, and `bytes`, the bytes of pixels read back in all, whole
+  surfaces' (`read_backs`) and rows'.
 - `declined_draws`: draws the software renderer drew because OpenGL
   doesn't draw their state as the card does. Each reads its target
   back first. `declined_for` has them by reason, every reason listed

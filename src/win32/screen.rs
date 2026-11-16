@@ -329,9 +329,15 @@ fn vbe_mode(cpu: &Cpu, w: u32, h: u32, bpp: u32) -> Option<VbeMode> {
 /// Read video memory from byte `offset` into `data`; what is past its end
 /// reads as 0.
 pub fn read(cpu: &mut Cpu, offset: u32, data: &mut [u8]) {
-    cpu.bus
-        .toadforce_touch_for(offset as usize, data.len(), Cause::Driver);
+    cpu.bus.toadforce_reading(offset as usize, data.len(), Cause::Driver);
     peek(cpu, offset, data);
+}
+
+/// Before `read`s of the `len` bytes of video memory at `offset`, a few
+/// at a time (the rows of a rectangle): a ToadForce reads back what its
+/// host renderer has of them at once, the rows they are in and no more.
+pub fn will_read(cpu: &mut Cpu, offset: u32, len: usize) {
+    cpu.bus.toadforce_reading(offset as usize, len, Cause::Driver);
 }
 
 /// `read` of video memory as it is, without what a ToadForce still has

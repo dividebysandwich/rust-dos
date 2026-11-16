@@ -496,6 +496,13 @@ pub fn read_rows(cpu: &mut Cpu, s: &Surface, offset: u32, len: usize, data: &mut
     if s.memory == MEM_CARD {
         return voodoo::read(cpu, s, offset, len, data);
     }
+    let rows = data.len().div_ceil(len) as u32;
+    if s.memory == MEM_VIDEO && rows > 1 {
+        // The rows' bytes as one range, read back from a ToadForce's
+        // host renderer once rather than a row at a time.
+        let span = (rows - 1) as usize * s.pitch as usize + len;
+        screen::will_read(cpu, s.bits + offset, span);
+    }
     for (row, y) in data.chunks_mut(len).zip(0u32..) {
         read_bytes(cpu, s, offset + y * s.pitch, row);
     }

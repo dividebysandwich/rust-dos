@@ -10,6 +10,7 @@
 
 use super::ToadForceGl;
 use crate::toadforce::format::{Format, Rect, Surface};
+use crate::toadforce::gpu::Cause;
 use crate::toadforce::level1::encode;
 use crate::toadforce::level1::states::*;
 use crate::toadforce::level1::*;
@@ -1555,6 +1556,70 @@ fn what_the_program_writes_into_a_target_goes_to_the_hosts_copy() {
             hosted.card.settle(&mut hosted.memory, None);
             let after = places.map(|(x, y)| read(&hosted, x, y));
             assert_eq!(before, after, "{name}");
+        }
+    }
+}
+
+/// The bytes of rows `first` to before `end` of `s`, from its first
+/// pixel's to its last's.
+fn band(s: &Surface, first: u32, end: u32) -> (u32, u32) {
+    let last = s.at(s.width - 1, end - 1) + s.format.bytes() as usize;
+    (s.at(0, first) as u32, last as u32)
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn a_read_of_some_rows_brings_them_as_a_whole_read_back_does() {
+    bench!(bench, "toadforce rows");
+    for format in [Format::A8R8G8B8, Format::X8R8G8B8, Format::R5G6B5] {
+        for wide in [false, true] {
+            if format == Format::R5G6B5 && !wide && !bench.host().packed() {
+                println!("the host's 5-6-5 format doesn't pass: only 8 bits a channel compared");
+                continue;
+            }
+            bench.wide.set(wide);
+            let name = format!("rows {format:?} wide {wide}");
+            let hosted = || {
+                let mut rig = Rig::new(format, Some(Format::D16));
+                rig.card.set_host(Some(bench.host()), &mut rig.memory);
+                written_between_draws(&mut rig);
+                rig
+            };
+            let mut whole = hosted();
+            whole.card.settle(&mut whole.memory, None);
+            let mut rig = hosted();
+            let colour = rig.surface(COLOUR);
+            let depth = Surface {
+                offset: DEPTH,
+                pitch: SIZE * 2,
+                width: SIZE,
+                height: SIZE,
+                format: Format::D16,
+            };
+            // Bands of the colour buffer, over what the program wrote
+            // and beside it, and one of the depth buffer: each brings
+            // its rows as the whole read-back does, the bytes between
+            // the rows left as they were, and nothing else comes back.
+            let bands = [(colour, 5, 13), (colour, 40, 44), (depth, 30, 38)];
+            for (s, first, end) in bands {
+                let bytes = band(&s, first, end);
+                rig.card.settle_rows(&mut rig.memory, bytes, Cause::Driver);
+                let span = bytes.0 as usize..bytes.1 as usize;
+                assert!(rig.memory[span.clone()] == whole.memory[span], "{name}");
+            }
+            assert!(rig.card.ahead(), "{name}");
+            let before = band(&colour, 0, 5);
+            let span = before.0 as usize..before.1 as usize;
+            assert!(rig.memory[span.clone()] != whole.memory[span], "{name}");
+            let status = rig.card.describe(Rig::live());
+            let rows = &status["host"]["read_back_rows"];
+            assert_eq!(status["host"]["read_backs"], 0, "{name}: {status}");
+            assert_eq!((&rows["reads"], &rows["rows"]), (&3.into(), &20.into()));
+            let bytes = 12 * SIZE * format.bytes() + 8 * SIZE * 2;
+            assert_eq!(rows["bytes"], bytes, "{name}");
+            // The rest comes back whole, the same.
+            rig.card.settle(&mut rig.memory, None);
+            assert!(rig.memory == whole.memory, "{name}");
         }
     }
 }

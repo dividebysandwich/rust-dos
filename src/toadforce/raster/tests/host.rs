@@ -15,7 +15,7 @@ use super::*;
 use crate::toadforce::blit;
 use crate::toadforce::command;
 use crate::toadforce::format::Rect;
-use crate::toadforce::gpu::{self, Batch, Decline, Host, Pages, Stamp};
+use crate::toadforce::gpu::{self, Batch, Cause, Decline, Host, Pages, Stamp};
 use crate::toadforce::raster::mem::Mem;
 use crate::toadforce::raster::pipeline::{self, DrawState};
 use crate::toadforce::raster::setup::Prim;
@@ -33,6 +33,10 @@ struct Log {
     batches: u32,
     triangles: u32,
     read_backs: u32,
+    /// Reads of some rows of a surface (`read_back_rows`), and of how
+    /// many rows in all.
+    row_reads: u32,
+    rows_read: u32,
     forgets: u32,
     /// Buffers a `CLEAR` wrote in the host's copy.
     clears: u32,
@@ -502,6 +506,27 @@ impl Host for TestHost {
             }
             None => false,
         }
+    }
+
+    fn read_back_rows(&mut self, surface: &Surface, rows: (u32, u32), memory: &mut [u8]) -> bool {
+        let found = self
+            .copies
+            .iter()
+            .find(|c| gpu::within(surface, &c.surface));
+        let Some(copy) = found else {
+            return false;
+        };
+        let mut log = self.log.borrow_mut();
+        log.row_reads += 1;
+        log.rows_read += rows.1 - rows.0;
+        let view = pixels(&packed_view(surface, &copy.surface), &copy.pixels);
+        let len = (surface.width * surface.format.bytes()) as usize;
+        for y in rows.0..rows.1.min(surface.height) {
+            let at = surface.at(0, y);
+            let from = y as usize * len;
+            memory[at..at + len].copy_from_slice(&view[from..from + len]);
+        }
+        true
     }
 
     fn shows(&mut self, surface: &Surface, pages: &Pages) -> bool {
@@ -1157,6 +1182,110 @@ fn a_surface_written_in_parts_of_pixels_is_read_back_around_them() {
     assert_eq!(rig.memory[at..at + 3], [0, 0xAB, 0xCD]);
     assert_eq!(rig.px(41, 41), 0x00_00FF);
     assert_eq!(rig.px(5, 34), 0xFF_0000);
+}
+
+/// The bytes of rows `first` to before `end` of the rig's target, the
+/// pixels of columns `left` to before `right`: what a driver's copy of
+/// that rectangle reads.
+fn band(rig: &Rig, left: u32, right: u32, first: u32, end: u32) -> (u32, u32) {
+    let colour = rig.colour();
+    let bytes = colour.format.bytes();
+    let start = colour.at(left, first) as u32;
+    (start, colour.at(right - 1, end - 1) as u32 + bytes)
+}
+
+/// The rows `first` to before `end` of the rig's target as card memory
+/// has them.
+fn rows_in(rig: &Rig, first: u32, end: u32) -> Vec<u8> {
+    let colour = rig.colour();
+    let len = (colour.pitch * (end - first)) as usize;
+    rig.memory[colour.at(0, first)..][..len].to_vec()
+}
+
+#[test]
+fn a_driver_read_of_some_rows_reads_back_those_rows_alone() {
+    let mut software = Rig::new(FORMAT, Some(DEPTH_FORMAT));
+    triangles(&mut software);
+    let (mut rig, log) = hosted(takes_all);
+    triangles(&mut rig);
+    // A copy of an 8x8 rectangle out of the target, as DirectDraw's
+    // blit into system memory does it: the eight rows it is in come
+    // back, as the software renderer drew them, and nothing else does.
+    // The target stays ahead.
+    let read = band(&rig, 2, 10, 30, 38);
+    rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+    assert!(rig.card.ahead());
+    assert_eq!(rows_in(&rig, 30, 38), rows_in(&software, 30, 38));
+    assert_ne!(rows_in(&rig, 29, 30), rows_in(&software, 29, 30));
+    assert_ne!(rows_in(&rig, 38, 39), rows_in(&software, 38, 39));
+    let counts = |log: &Rc<RefCell<Log>>| {
+        let log = log.borrow();
+        (log.read_backs, log.row_reads, log.rows_read)
+    };
+    assert_eq!(counts(&log), (0, 1, 8));
+    let host = rig.card.describe(Rig::live());
+    assert_eq!(host["host"]["read_backs"], 0);
+    assert_eq!(host["host"]["read_back_rows"]["reads"], 1);
+    assert_eq!(host["host"]["read_back_rows"]["rows"], 8);
+    assert_eq!(host["host"]["read_back_rows"]["bytes"], 8 * SIZE * 4);
+    // A row of them again, as the copy reads them one by one, reads
+    // nothing; a band over them and the four rows below reads those
+    // four.
+    let read = band(&rig, 2, 10, 31, 32);
+    rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+    assert_eq!(counts(&log), (0, 1, 8));
+    let read = band(&rig, 0, 4, 34, 42);
+    rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+    assert_eq!(counts(&log), (0, 2, 12));
+    assert_eq!(rows_in(&rig, 30, 42), rows_in(&software, 30, 42));
+    // The processor writes into rows read back (the copy put back) and
+    // into rows that weren't: a read of the second keeps the write, and
+    // nothing reads the first again.
+    let colour = rig.colour();
+    poke(&mut rig, colour.at(4, 33), &[1, 2, 3, 4]);
+    poke(&mut rig, colour.at(4, 50), &[5, 6, 7, 8]);
+    let read = band(&rig, 0, 64, 48, 52);
+    rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+    assert_eq!(counts(&log), (0, 3, 16));
+    assert_eq!((rig.px(4, 33), rig.px(4, 50)), (0x0403_0201, 0x0807_0605));
+    assert_eq!(rig.px(5, 50), software.px(5, 50));
+    // The next draw takes the two pixels into the host's copy, which
+    // reads nothing back and copies nothing of the surface again. The
+    // copy changed, so the rows are read anew, with the pixels.
+    let uploads = log.borrow().uploads;
+    assert_eq!(rig.draw(4, &corner(40.0, 40.0, 8.0, 0.0, 0xFF00_00FF)), 0);
+    assert_eq!((log.borrow().writes, log.borrow().uploads), (1, uploads));
+    let read = band(&rig, 2, 10, 30, 38);
+    rig.card.settle_rows(&mut rig.memory, read, Cause::Driver);
+    assert_eq!(counts(&log), (0, 4, 24));
+    assert_eq!(rig.px(4, 33), 0x0403_0201);
+    // A read of every row reads the surface back whole, after which
+    // it isn't ahead.
+    let all = band(&rig, 0, SIZE, 0, SIZE);
+    rig.card.settle_rows(&mut rig.memory, all, Cause::Driver);
+    assert_eq!(counts(&log).0, 1);
+    assert_eq!(rig.px(4, 33), 0x0403_0201);
+    assert_eq!(rig.px(4, 50), 0x0807_0605);
+    assert_eq!(rig.px(41, 41), 0x00_00FF);
+    rig.card.settle(&mut rig.memory, None);
+    assert!(!rig.card.ahead());
+}
+
+#[test]
+fn the_cards_own_work_on_some_rows_reads_the_surface_back_whole() {
+    let (mut rig, log) = hosted(takes_all);
+    triangles(&mut rig);
+    // The card's processor copies and fills write card memory with no
+    // note of what they write: the surface they touch comes back whole
+    // and isn't ahead after it, whatever rows they need.
+    let colour = rig.colour();
+    let read = band(&rig, 2, 10, 30, 38);
+    rig.card.settle_for(&mut rig.memory, Some(read), Cause::Blit);
+    assert_eq!((log.borrow().read_backs, log.borrow().row_reads), (1, 0));
+    let host = rig.card.describe(Rig::live());
+    assert_eq!(host["host"]["read_backs_for"]["blit"], 1);
+    let ahead = rig.card.read_ahead(colour.at(4, 4) as u32, 4, &rig.memory);
+    assert_eq!(ahead, None);
 }
 
 /// A scene's depth kept in a second depth buffer the processor wrote,

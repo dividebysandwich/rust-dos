@@ -362,6 +362,22 @@ impl Bus {
         }
     }
 
+    /// Before the emulator itself only reads `len` bytes of card memory
+    /// at `offset`, for `why`: the queued commands run, and of the
+    /// surfaces the host renderer drew into, the rows those bytes lie
+    /// in are read back, the rest staying with the renderer. A write
+    /// there afterwards goes through `toadforce_writing`.
+    #[inline]
+    pub fn toadforce_reading(&mut self, offset: usize, len: usize, why: Cause) {
+        self.toadforce_flush();
+        if self.toadforce_ahead()
+            && let Some(card) = &mut self.toadforce
+        {
+            let end = (offset + len).min(u32::MAX as usize);
+            card.settle_rows(&mut self.vbe.vram, (offset as u32, end as u32), why);
+        }
+    }
+
     /// Read back what the host renderer drew into the surfaces that
     /// share a byte with `range` of card memory (all for None).
     #[cold]
