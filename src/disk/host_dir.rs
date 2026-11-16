@@ -247,12 +247,13 @@ impl HostDirCache {
     /// Searches of other folders are kept, so a program copying the files
     /// it finds into another folder doesn't list its source each time.
     /// `path` is counted again in its folder's count on the next look, and
-    /// its own count, as a folder, is dropped.
+    /// the counts of `path` and the folders under it, as folders, are
+    /// dropped, so a folder renamed or removed leaves no counts behind.
     pub(super) fn touched(&self, path: &Path) {
         let parent = path.parent();
         let name = path.file_name();
         self.usage.borrow_mut().retain(|(dir, ..), kept| {
-            if dir == path {
+            if dir.starts_with(path) {
                 return false;
             }
             if Some(dir.as_path()) != parent {

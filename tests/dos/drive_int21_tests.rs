@@ -150,10 +150,21 @@ fn free_space_allocation_info_and_dpb() {
     int21(&mut cpu, 0x36);
     assert_eq!((cpu.ax(), cpu.cx(), cpu.dx(), cpu.bx()), (1, 512, 2847, 2847));
 
-    // Another program's file in a folder changed just now shows within a
-    // second (`HostDirCache::TRUST`).
-    fs::write(base.join("a/SAVE.DAT"), vec![0u8; 1024]).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    // A file the guest writes shows at once. (One another program writes
+    // shows within `HostDirCache::TRUST`, which the unit tests check on
+    // their own clock.)
+    set_dsdx_string(&mut cpu, "A:\\SAVE.DAT");
+    cpu.set_cx(0);
+    int21(&mut cpu, 0x3C);
+    assert!(!cf(&cpu));
+    let handle = cpu.ax();
+    cpu.set_bx(handle);
+    cpu.set_cx(1024);
+    int21(&mut cpu, 0x40);
+    assert_eq!((cf(&cpu), cpu.ax()), (false, 1024));
+    cpu.set_bx(handle);
+    int21(&mut cpu, 0x3E);
+    assert!(!cf(&cpu));
     cpu.set_reg8(Register::DL, 1);
     int21(&mut cpu, 0x36);
     assert_eq!(cpu.bx(), 2845);

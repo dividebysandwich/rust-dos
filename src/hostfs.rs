@@ -55,7 +55,9 @@ pub struct DirEntry {
     pub is_dir: bool,
     /// Its size, where it is a file (not a link) and the listing gave the
     /// size without another call: on Windows, which lists names with
-    /// their sizes. None elsewhere, where `metadata` tells it.
+    /// their sizes. None elsewhere, where `metadata` tells it. NTFS may
+    /// leave out what a handle still open wrote, so for a file open for
+    /// writing `metadata` is the one to ask.
     pub len: Option<u64>,
 }
 

@@ -1323,7 +1323,7 @@ fn a_joliet_cd_has_long_names() {
         long
     );
     let inside = disk.long_names("D:\\Program Files").unwrap();
-    assert_eq!(inside, [pair("setup.ini", "SETUP.INI")]);
+    assert_eq!(*inside, [pair("setup.ini", "SETUP.INI")]);
     assert!(disk.is_file("D:\\nsenglishres.dll"));
     assert!(disk.is_file("d:\\program files\\Setup.ini"));
     assert!(disk.is_directory("D:\\Program Files"));
@@ -1760,6 +1760,31 @@ fn free_space_counts_again_only_the_file_written() {
     // `TRUST`, when the folder is counted again.
     fs::write(waves.join("HOST.WAV"), [0; 8192]).unwrap();
     disk.host_dirs.expire();
+    assert_eq!(free(&disk), before - 3);
+}
+
+/// A folder counted again while the guest still writes a file in it
+/// counts what was written: NTFS's listing may give the size the file
+/// had before, so the file is statted (`DiskController::dir_usage`).
+#[test]
+fn free_space_counts_a_file_still_open_when_its_folder_is_counted_again() {
+    let (root, _) = waves_folder("free_space_open_file", 50);
+    let mut disk = DiskController::new(root.clone());
+    let free = |disk: &DiskController| disk.windows_free_space(3).unwrap().1;
+    let before = free(&disk);
+    let handle = disk.create_file(r"C:\WAVES\NEW.WAV", PSP).unwrap();
+    for _ in 0..3 {
+        disk.write_file(handle, &[0; 4096]).unwrap();
+    }
+    assert_eq!(free(&disk), before - 3);
+    let counts = disk.host_dirs.counts.get();
+    disk.host_dirs.expire();
+    assert_eq!(free(&disk), before - 3, "the open file keeps its size");
+    assert!(
+        disk.host_dirs.counts.get() > counts,
+        "the recent folder was counted again"
+    );
+    disk.close_file(handle);
     assert_eq!(free(&disk), before - 3);
 }
 

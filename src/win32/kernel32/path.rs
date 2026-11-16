@@ -865,16 +865,16 @@ pub(crate) fn find_entries(cpu: &Cpu, dir: &str, pattern: &str) -> Result<Vec<Fi
         .list_directory_where(&spec, 0x16, &wanted)
         .map_err(|e| e as u32)?;
     // The long name of each short one, the first where two had one.
+    let names = disk.long_names(dir).unwrap_or_default();
     let mut long = HashMap::new();
-    for (name, short) in disk.long_names(dir).unwrap_or_default() {
-        long.entry(short).or_insert(name);
+    for (name, short) in names.iter() {
+        long.entry(short.as_str()).or_insert(name.as_str());
     }
     let mut entries = Vec::new();
     for entry in listed {
         let name = long
-            .get(&entry.filename)
-            .cloned()
-            .unwrap_or_else(|| entry.filename.clone());
+            .get(entry.filename.as_str())
+            .map_or_else(|| entry.filename.clone(), |name| name.to_string());
         if !matches(&name, pattern) && !matches(&entry.filename, pattern) {
             continue;
         }
