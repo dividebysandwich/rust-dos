@@ -225,47 +225,61 @@ limit, so without a connection it goes on as it would with one:
   What `auto` has seen goes into save states, and is forgotten when the
   machine goes back to real mode (a reboot, a DOS program's end). It
   applies at once.
-* `cpu` is the emulated processor: `486` (the default, a 486DX with FPU),
-  `386`, or `pentium`, a Pentium as DOSBox-X has one: CPUID (a
-  GenuineIntel family 5), the time stamp counter, which counts the
-  instructions and so runs at a fixed `cycles` speed (at `max` and
-  `auto`, whose speed changes as they run, it runs at a clock rate of the
-  model's own: 200 MHz on a Pentium or Pentium Pro, 233 on a Pentium MMX,
-  450 on a Pentium II, 550 on a K6-2 and 600 on a Pentium III, so that
-  programs which time with it, such as 3DMark 2000, measure right), its
-  MSRs, CMPXCHG8B and 4 MB pages, without the virtual-8086 mode extensions; `pentium_mmx`,
-  that Pentium with MMX (CPUID family 5, model 4), whose eight MM
-  registers are the FPU's; `k6_2`, an AMD K6-2 (CPUID AuthenticAMD
-  family 5, model 8, with AMD's extended leaves): the Pentium MMX's with
-  3DNow!, SYSCALL/SYSRET and the K6's MSRs (EFER, STAR, the write
-  handling control and test register 12), without the P6 instructions.
-  Its 3DNow! arithmetic follows AMD's manual: it rounds to nearest, gives
-  a zero below 2^-126 and the largest normal from 2^128, and has no
-  exceptions; PFRCP and PFRSQRT give the exact results rounded to a
-  single where the real one's tables give 14 and 15 bits.
-  `pentium_pro`, a Pentium Pro as DOSBox-X's
-  `ppro_slow` (CPUID family 6, model 1): the Pentium's with CMOVcc,
-  FCMOVcc, FCOMI and FUCOMI, the P6 hinting NOPs and the local APIC base
-  and microcode revision MSRs Windows 98 and ME read, without MMX;
-  `pentium_ii`, a Pentium II as DOSBox-X's (family 6, model 3): the
-  Pentium Pro's with MMX and SYSENTER/SYSEXIT; or `pentium_iii`, a
+* `cpu` is the emulated processor: `486` (a 486DX with FPU), `386`, or
+  `pentium`, a Pentium as DOSBox-X has one: CPUID (a GenuineIntel family 5),
+  the time stamp counter, which counts the instructions and so runs at a
+  fixed `cycles` speed (at `max` and `auto`, whose speed changes as they
+  run, it runs at a clock rate of the model's own: 200 MHz on a Pentium or
+  Pentium Pro, 233 on a Pentium MMX, 450 on a Pentium II, 550 on a K6-2 and
+  600 on a Pentium III, so that programs which time with it, such as 3DMark
+  2000, measure right), its MSRs, CMPXCHG8B and 4 MB pages, without the
+  virtual-8086 mode extensions; `pentium_mmx`, that Pentium with MMX (CPUID
+  family 5, model 4), whose eight MM registers are the FPU's; `k6_2`, an AMD
+  K6-2 (CPUID AuthenticAMD family 5, model 8, with AMD's extended leaves):
+  the Pentium MMX's with 3DNow!, SYSCALL/SYSRET and the K6's MSRs (EFER,
+  STAR, the write handling control and test register 12), without the P6
+  instructions. Its 3DNow! arithmetic follows AMD's manual: it rounds to
+  nearest, gives a zero below 2^-126 and the largest normal from 2^128, and
+  has no exceptions; PFRCP and PFRSQRT give the exact results rounded to a
+  single where the real one's tables give 14 and 15 bits. `pentium_pro`, a
+  Pentium Pro as DOSBox-X's `ppro_slow` (CPUID family 6, model 1): the
+  Pentium's with CMOVcc, FCMOVcc, FCOMI and FUCOMI, the P6 hinting NOPs and
+  the local APIC base and microcode revision MSRs Windows 98 and ME read,
+  without MMX; `pentium_ii`, a Pentium II as DOSBox-X's (family 6, model 3):
+  the Pentium Pro's with MMX and SYSENTER/SYSEXIT; or `pentium_iii`, a
   Pentium III (Katmai, family 6, model 7): the Pentium II's with SSE,
-  FXSAVE/FXRSTOR, CR4's OSFXSR and OSXMMEXCPT, the processor serial
-  number (CPUID leaf 3, until MSR 119h switches it off) and the cache
-  descriptors of CPUID leaf 2. Its SSE arithmetic rounds as MXCSR says,
-  flushes to zero, and sets and masks the six exception flags as a
-  Pentium III does: an unmasked one raises #XM, or #UD without
-  OSXMMEXCPT. RCPPS and RSQRTPS give the exact reciprocal rounded to a
-  single, within the precision Intel specifies for them. SSE needs
-  CR4.OSFXSR, which a system that saves the SSE state sets; rust-dos's
-  DPMI host sets it for its clients on a Pentium III. None of them has
-  RDPMC, a local APIC or memory type range registers, as in DOSBox-X. A
-  DOSBox configuration's `cputype` of a Pentium imports as `pentium`, of
-  a Pentium MMX as `pentium_mmx`, of a Pentium Pro as `pentium_pro`, of
-  a Pentium II as `pentium_ii`, and of a Pentium III or DOSBox-X's
-  `experimental` as `pentium_iii`. The `cpu` also gives the memory of a
-  machine without a `memsize` line: 16 MB up to a Pentium and 32 to
-  128 MB with the later ones (see `memsize`).
+  FXSAVE/FXRSTOR, CR4's OSFXSR and OSXMMEXCPT, the processor serial number
+  (CPUID leaf 3, until MSR 119h switches it off) and the cache descriptors
+  of CPUID leaf 2. Its SSE arithmetic rounds as MXCSR says, flushes to zero,
+  and sets and masks the six exception flags as a Pentium III does: an
+  unmasked one raises #XM, or #UD without OSXMMEXCPT. RCPPS and RSQRTPS give
+  the exact reciprocal rounded to a single, within the precision Intel
+  specifies for them. SSE needs CR4.OSFXSR, which a system that saves the
+  SSE state sets; rust-dos's DPMI host sets it for its clients on a Pentium
+  III. None of them has RDPMC, a local APIC or memory type range registers,
+  as in DOSBox-X. A DOSBox configuration's `cputype` of a Pentium imports as
+  `pentium`, of a Pentium MMX as `pentium_mmx`, of a Pentium Pro as
+  `pentium_pro`, of a Pentium II as `pentium_ii`, and of a Pentium III or
+  DOSBox-X's `experimental` as `pentium_iii`. The `cpu` also gives the
+  memory of a machine without a `memsize` line: 16 MB up to a Pentium and 32
+  to 128 MB with the later ones (see `memsize`). Without a `cpu` line the
+  processor follows the display adapter: a `486`, or a `pentium_iii` with
+  `machine=svga_toadforce`, as the ToadForce's games were written for a
+  Pentium II or better and a card of its class was never sold for a 486.
+  That model isn't written to the configuration; the settings window shows
+  it with **(auto)**, `cycles=auto` takes its least speed from it, and save
+  states, `/api/status` and almanac reports carry the model the machine has.
+  A `cpu` line wins: with a ToadForce, a model older than the Pentium II
+  runs as set, with a line in the log that the card's games expect a Pentium
+  II or better. The settings window of an earlier rust-dos wrote `cpu=486`
+  into the configuration file it saved. When the video card is changed to
+  the ToadForce in the settings window, a processor older than the Pentium
+  II goes back to **(auto)**, and saving comments out the `cpu` line; a
+  processor picked after that stays. In a file edited by hand, remove the
+  `cpu` line, or press Delete on the processor in the settings window, to
+  have the card's default. A save state keeps the processor it was saved
+  with, so one saved with a ToadForce by an earlier rust-dos loads as a
+  486.
 * `core` is what runs the programs' instructions: `auto` (the default)
   runs the interpreter, and the dynamic recompiler for a program from the
   moment it switches to protected mode until it ends, as DOSBox's
@@ -634,6 +648,15 @@ limit, so without a connection it goes on as it would with one:
   bit screen mode, such as Moto Racer, need when the adapter's own is
   deeper. Like `win32_version`, a change takes effect for the next
   program that starts when none runs.
+* `win32_desktop` is the size of the built-in Windows' desktop:
+  `640x480` (the default), `800x600` or `1024x768`, as Display
+  Properties set it on Windows. GetSystemMetrics, EnumDisplaySettings
+  and the `Resolution` of `HKLM\Config\0001\Display\Settings` report
+  it, and the desktop shows at that size. Programs that say they need
+  800x600 or more, such as Fields of Fire, need `800x600`. A program can
+  still change the size with ChangeDisplaySettings while it runs; its
+  end gives this size back. Like `win32_depth`, a change takes effect
+  for the next program that starts when none runs.
 * `dos_version` is the DOS version programs are told (INT 21h AH=30h,
   AX=3306h and the PSP's), such as `5.00` (the default), `6.22` or `7.10`;
   `7.1` is 7.10, as DOSBox's `ver` has it. From 7.00 on, DOS has the FAT32
@@ -1560,10 +1583,11 @@ profile:
 | Setting | Set it to | Why |
 |---|---|---|
 | `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too. Of the 3dfx cards, it and the Banshee are the ones Direct3D 8 runs on and OpenGL draws on in a window: on a Voodoo2 add-on card OpenGL draws full screen, and a Voodoo Graphics has none. [docs/3dfx.md](docs/3dfx.md) has the other cards. `GLIDE2X.DLL` and `GLIDE3X.DLL` are there only with a 3dfx card. GDI and DirectDraw games run on it too. A game from 2000 on that asks for more than a Voodoo3 has (32-bit color, large textures, hardware transform and lighting) takes `svga_toadforce` ([ToadForce](#toadforce)) |
-| `cpu` | `pentium_ii` | The default 486 has no time stamp counter (RDTSC) or MMX, which many games of the time use: such a game stops with an invalid opcode. The Pentium II has both |
+| `cpu` | `pentium_ii` | The default 486 has no time stamp counter (RDTSC) or MMX, which many games of the time use: such a game stops with an invalid opcode. The Pentium II has both. With `svga_toadforce` the machine has a Pentium III without the line |
 | `memsize` | leave it out, or `128` for a 3D game from 1998 on | Without it a Pentium II has 64 MB, which most Windows 98 games asked for (the default 486 has 16 MB). The game's heaps and its DirectDraw surfaces come out of it, and it is what the game is told the machine has |
 | `win32_version` | `98se` | The setups and games tested with the built-in Windows were tested under Windows 98 SE. Under the default, `95`, a program that imports a function Windows 98 added doesn't start, and its message names this setting |
 | `win32_depth` | `8` only for a game that says it needs 256 colours, `16` for one that says it needs 16 bits | The default desktop has the card's own depth (16 bits on a Voodoo3, 32 on an S3 Trio, 24 on a ViRGE). A GDI game that draws with a palette needs `8`. A game that checks the desktop's depth before it sets its own mode, such as Moto Racer, needs `16` on a card whose desktop is deeper. Other DirectDraw games set their own mode and don't need it |
+| `win32_desktop` | `800x600` only for a game that says it needs that screen resolution | The desktop is 640x480 by default. A game that checks the desktop's size before it starts, such as Fields of Fire, needs `800x600` (or `1024x768`, if it asks for that). Games that set their own mode with DirectDraw don't need it |
 | `cycles` | leave it at `auto` | The game's timers follow the emulated clock, and `auto` finds the speed its frames need |
 
 The `[autoexec]` lines run in the built-in DOS, so they use 8.3 names
@@ -1742,7 +1766,9 @@ last. Go through these in order:
 1. **It stops at once with an invalid opcode:** set `cpu=pentium_ii`.
 2. **Its message names `win32_version`:** set `win32_version=98se`.
 3. **It says it needs 256 colours or a 16 bit screen mode:** set
-   `win32_depth=8` for 256 colours, `win32_depth=16` for 16 bits.
+   `win32_depth=8` for 256 colours, `win32_depth=16` for 16 bits. If
+   it says it needs a screen resolution of 800x600, set
+   `win32_desktop=800x600`.
 4. **It says there isn't enough memory:** raise `memsize`.
 5. **It can't find its CD or its files:** check its
    [registry keys](#registry-keys) and
@@ -3307,9 +3333,9 @@ machine=svga_toadforce
 ```
 
 The machine has 128 MB of memory with this card unless `memsize` says
-otherwise, which is what the games it is for recommend. The `cpu` stays
-the default 486 unless it is set; most of those games want
-`cpu=pentium_iii`.
+otherwise, which is what the games it is for recommend, and a Pentium
+III unless `cpu` says otherwise (see `cpu` in
+[`[emulator]`](#emulator)).
 
 | Setting | Values | What it does |
 |---|---|---|

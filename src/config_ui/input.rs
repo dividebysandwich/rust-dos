@@ -361,7 +361,13 @@ impl ConfigUi {
         if choices.is_empty() {
             return;
         }
-        let selected = choices.iter().position(|c| *c == self.settings).unwrap_or(0);
+        // A processor that follows the card is none of the models listed,
+        // which set `cpu`: the model the machine has is selected.
+        let current = |c: &crate::config::Settings| match item {
+            Item::Cpu => c.cpu_model() == self.settings.cpu_model(),
+            _ => *c == self.settings,
+        };
+        let selected = choices.iter().position(current).unwrap_or(0);
         self.popup = Some(Popup { item, choices, selected, scroll: 0, visible: self.visible });
     }
 

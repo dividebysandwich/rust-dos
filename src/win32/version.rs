@@ -16,7 +16,8 @@
 //!
 //! The desktop's depth, the `win32_depth` setting, is read at the same
 //! time and kept the same way: the adapter's own, 8 bits a pixel with a
-//! system palette (`palette_desktop`), or 16 bits a pixel.
+//! system palette (`palette_desktop`), or 16 bits a pixel. So is its
+//! size, the `win32_desktop` setting (`own_size`).
 
 use crate::cpu::Cpu;
 
@@ -54,13 +55,62 @@ crate::state_enum!(crate::config::DesktopDepth {
     crate::config::DesktopDepth::HighColor,
 });
 
+crate::state_enum!(crate::config::DesktopSize {
+    crate::config::DesktopSize::Vga,
+    crate::config::DesktopSize::Svga,
+    crate::config::DesktopSize::Xga,
+});
+
+/// The W32 section's version that first keeps the desktop's own size:
+/// the desktop of an older one was 640x480.
+pub const SIZE_SAVED: u16 = 73;
+
+/// The desktop's own size the running processes have.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OwnSize(pub crate::config::DesktopSize);
+
+impl crate::savestate::State for OwnSize {
+    fn save(&self, w: &mut crate::savestate::Writer) {
+        crate::savestate::State::save(&self.0, w);
+    }
+
+    fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        // Bytes outside a section are in this rust-dos's own layout.
+        if r.version().is_some_and(|v| v < SIZE_SAVED) {
+            *self = OwnSize::default();
+            return Ok(());
+        }
+        crate::savestate::State::load(&mut self.0, r)
+    }
+}
+
 /// The first program starts: the settings become the version the
-/// processes see and the depth of their desktop.
+/// processes see and the depth and size of their desktop.
 pub fn start(win32: &mut super::Win32) {
     if win32.processes.is_empty() {
         win32.os = win32.version;
         win32.desktop_depth = win32.depth;
+        win32.own_size = OwnSize(win32.desktop);
     }
+}
+
+/// The desktop's own size, in pixels: the `win32_desktop` setting's when
+/// the first running program started.
+pub fn own_size(win32: &super::Win32) -> (u32, u32) {
+    win32.own_size.0.size()
+}
+
+/// The registry's value of the desktop's own size (`own_size`), as a
+/// .reg file to put over the seed and the registry file: the Resolution
+/// of HKLM\Config\0001\Display\Settings, which Display Properties
+/// writes on Windows, so it says what GetSystemMetrics does.
+pub fn display_registry_values(win32: &super::Win32) -> String {
+    let (w, h) = own_size(win32);
+    format!(
+        "REGEDIT4\r\n\r\n\
+         [HKEY_LOCAL_MACHINE\\Config\\0001\\Display\\Settings]\r\n\
+         \"Resolution\"=\"{w},{h}\"\r\n"
+    )
 }
 
 /// Whether the desktop has 256 colours from a palette (`win32_depth=8`).
@@ -272,5 +322,38 @@ mod tests {
         for version in [Win95, Win98, Win98Se] {
             assert!(exports(version, "COMCTL32.DLL", "_TrackMouseEvent"));
         }
+    }
+
+    /// A state keeps the desktop's own size; one of a W32 section older
+    /// than `SIZE_SAVED` has none, and its desktop was 640x480.
+    #[test]
+    fn a_state_keeps_the_desktops_own_size_and_an_older_one_is_640x480() {
+        use crate::config::DesktopSize;
+        use crate::savestate::{Reader, State, Writer};
+        let size = OwnSize(DesktopSize::Xga);
+        let mut w = Writer::new();
+        w.section(b"TEST", SIZE_SAVED, |w| size.save(w));
+        let mut back = OwnSize::default();
+        let mut r = Reader::new(&w.buf);
+        back.load(&mut r.section(b"TEST", SIZE_SAVED).unwrap())
+            .unwrap();
+        assert_eq!(back, size);
+        // Version 72 saved nothing of it: nothing is read.
+        let mut w = Writer::new();
+        w.section(b"TEST", 72, |_| {});
+        let mut r = Reader::new(&w.buf);
+        let mut section = r.section_of(b"TEST", &[72, SIZE_SAVED]).unwrap();
+        let mut old = OwnSize(DesktopSize::Svga);
+        old.load(&mut section).unwrap();
+        assert!(section.is_empty());
+        assert_eq!(old, OwnSize(DesktopSize::Vga));
+        // Bytes read outside a section are this build's layout.
+        let mut w = Writer::new();
+        size.save(&mut w);
+        let mut r = Reader::new(&w.buf);
+        let mut bare = OwnSize::default();
+        bare.load(&mut r).unwrap();
+        assert!(r.is_empty());
+        assert_eq!(bare, size);
     }
 }

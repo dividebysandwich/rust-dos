@@ -43,7 +43,11 @@ pub struct Hardware {
 /// expanded and upper memory, DPMI, DOS version, sound cards, network and
 /// serial ports. Returns the problems with the settings.
 pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate::keylayout::Layout) -> Vec<String> {
-    cpu.model = settings.cpu;
+    cpu.model = settings.cpu_model();
+    cpu.bus.cpu_derived = settings.cpu.is_none();
+    for line in settings.cpu_lines() {
+        cpu.bus.log_string(&line);
+    }
     cpu.set_tsc_speed(settings.cycles);
     cpu.core = settings.core;
     cpu.post_mode = settings.post;
@@ -74,6 +78,7 @@ pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate
     cpu.bus.win32.guest_replace = settings.win32_dlls_replace.clone();
     cpu.bus.win32.version = settings.win32_version;
     cpu.bus.win32.depth = settings.win32_depth;
+    cpu.bus.win32.desktop = settings.win32_desktop;
     cpu.bus.win32.locale = settings.win32_locale;
     crate::win32::trace::set_level(cpu, settings.win32_trace);
     crate::win32::dll_files::sync(&mut cpu.bus);
@@ -94,7 +99,7 @@ impl Hardware {
     /// it.
     pub fn of(settings: &Settings) -> Self {
         Self {
-            cpu: settings.cpu,
+            cpu: settings.cpu_model(),
             sound: settings.sound.clone(),
             video: settings.video_setup(),
             memory: (settings.ems, settings.umb, settings.dos_high),
@@ -118,8 +123,14 @@ impl Hardware {
         if settings.video_setup().mono_monitor != self.video.mono_monitor {
             monochrome = if self.video.mono_monitor { crate::video::mono::Monochrome::White } else { Default::default() };
         }
+        // `cpu` stays unset while the model the machine has is the
+        // default for its display adapter.
+        let cpu = match settings.cpu {
+            None if crate::config::default_cpu(self.video.adapter) == self.cpu => None,
+            _ => Some(self.cpu),
+        };
         Settings {
-            cpu: self.cpu,
+            cpu,
             sound: self.sound.clone(),
             machine: self.video.adapter,
             monochrome,
@@ -153,7 +164,17 @@ impl Hardware {
 
     /// Put the settings' hardware in place. Returns the problems with it.
     pub fn apply(&mut self, cpu: &mut Cpu, settings: &Settings) -> Vec<String> {
-        cpu.model = settings.cpu;
+        // Another model, or a set one that a ToadForce coming or going
+        // makes a match for the card or not (`Settings::cpu_lines`).
+        if settings.cpu_model() != self.cpu
+            || settings.machine.is_toadforce() != self.video.adapter.is_toadforce()
+        {
+            for line in settings.cpu_lines() {
+                cpu.bus.log_string(&line);
+            }
+        }
+        cpu.model = settings.cpu_model();
+        cpu.bus.cpu_derived = settings.cpu.is_none();
         cpu.set_tsc_speed(settings.cycles);
         let mut warnings = if settings.sound != self.sound {
             cpu.bus.log_string("[CONFIG] The sound settings changed");
@@ -240,5 +261,51 @@ impl Hardware {
         }
         *self = Self::of(settings);
         warnings
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::video::adapter::Adapter;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// The processor lines `apply` logs on a machine set up with `from`
+    /// when the settings become `to`.
+    fn cpu_lines_logged(from: &Settings, to: &Settings) -> Vec<String> {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let mut hardware = Hardware::of(from);
+        let lines = Rc::new(RefCell::new(Vec::new()));
+        let sink = lines.clone();
+        cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+            sink.borrow_mut().push(line.to_string());
+        }));
+        hardware.apply(&mut cpu, to);
+        let is_cpu = |line: &String| {
+            ["(cpu)", "(the default", "cpu sets"].iter().any(|s| line.contains(s))
+        };
+        lines.take().into_iter().filter(is_cpu).collect()
+    }
+
+    #[test]
+    fn a_toadforce_coming_or_going_logs_the_processor() {
+        let cpu_486 = |machine| Settings {
+            cpu: Some(CpuModel::I486),
+            machine,
+            ..Settings::default()
+        };
+        // The card changed to a ToadForce with cpu=486 kept: the model is
+        // the same, and the warning is logged.
+        let lines = cpu_lines_logged(&cpu_486(Adapter::Vga), &cpu_486(Adapter::ToadForce));
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[0], "[CONFIG] A 486 (cpu)");
+        assert!(lines[1].contains("expect a Pentium II or better"), "{lines:?}");
+        // And back: the 486 again, with no warning.
+        let lines = cpu_lines_logged(&cpu_486(Adapter::ToadForce), &cpu_486(Adapter::Vga));
+        assert_eq!(lines, ["[CONFIG] A 486 (cpu)"]);
+        // Nothing for the processor where neither it nor the card changes.
+        let lines = cpu_lines_logged(&cpu_486(Adapter::Vga), &cpu_486(Adapter::Vga));
+        assert!(lines.is_empty(), "{lines:?}");
     }
 }

@@ -12511,6 +12511,124 @@ fn a_dialog_selects_the_edit_text_it_gives_the_focus_as_windows_98_does() {
     assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
 }
 
+const WS_HSCROLL: i32 = 0x0010_0000;
+const WS_VSCROLL: i32 = 0x0020_0000;
+/// SM_CXVSCROLL and SM_CYHSCROLL.
+const SCROLL_BAR: i32 = 16;
+
+/// Run a 640x480 popup holding an MDI client of `style` that fills it,
+/// with a child of size `first` at the client's corner.
+/// WM_MDIICONARRANGE has the client set its scroll bars
+/// (CalcChildScroll); then the child takes the size `then` and the
+/// client sets them again. Checks that the three windows were made and
+/// that the client's client area is `areas[0]` and then `areas[1]`.
+fn check_mdi_scroll_bars(
+    test: &str,
+    style: i32,
+    first: (i32, i32),
+    then: (i32, i32),
+    areas: [(i32, i32); 2],
+) {
+    const WS_CHILD: i32 = 0x4000_0000;
+    const WM_MDIICONARRANGE: i32 = 0x0228;
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "SendMessageA",
+        "GetClientRect",
+        "MoveWindow",
+    ];
+    // The frame, the client and the child at 0, 4 and 8, the classes'
+    // names at 0x10 and 0x20, a CLIENTCREATESTRUCT at 0x30 (no window
+    // menu, the first child's id 1), and the client's client rectangle
+    // at 0x40 and then at 0x50.
+    let mut data = vec![0; 0x60];
+    put(&mut data, 0x10, b"Static");
+    put(&mut data, 0x20, b"MDICLIENT");
+    put(&mut data, 0x34, &1u32.to_le_bytes());
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let at = |offset: u32| l.at(offset) as i32;
+        a.xor(ebx, ebx)?;
+        let client = WS_CHILD | WS_VISIBLE | style;
+        let windows = [
+            (0x10, WS_POPUP | WS_VISIBLE, (640, 480), None, 0),
+            (0x20, client, (640, 480), Some(0), at(0x30)),
+            (0x10, WS_CHILD | WS_VISIBLE, first, Some(4), 0),
+        ];
+        for (slot, (class, style, (w, h), parent, param)) in (0..).step_by(4).zip(windows) {
+            let instance = BASE as i32;
+            push_args(
+                a,
+                &[0, at(class), 0, style, 0, 0, w, h, 0, 0, instance, param],
+            )?;
+            if let Some(parent) = parent {
+                a.mov(eax, dword_ptr(l.at(parent)))?;
+                a.mov(dword_ptr(esp + 32), eax)?;
+            }
+            a.call(f("CreateWindowExA"))?;
+            a.mov(dword_ptr(l.at(slot)), eax)?;
+        }
+        let mut missing = a.create_label();
+        for slot in [0, 4, 8] {
+            a.cmp(dword_ptr(l.at(slot)), 0)?;
+            a.je(missing)?;
+        }
+        a.or(ebx, 1)?;
+        a.set_label(&mut missing)?;
+        // The client sets its bars, and its client rectangle goes to
+        // `rect`.
+        let arrange = |a: &mut CodeAssembler, rect: u32| -> Result<(), IcedError> {
+            push_args(a, &[WM_MDIICONARRANGE, 0, 0])?;
+            a.push(dword_ptr(l.at(4)))?;
+            a.call(f("SendMessageA"))?;
+            a.push(at(rect))?;
+            a.push(dword_ptr(l.at(4)))?;
+            a.call(f("GetClientRect"))
+        };
+        arrange(a, 0x40)?;
+        let (w, h) = then;
+        push_args(a, &[0, 0, w, h, 1])?;
+        a.push(dword_ptr(l.at(8)))?;
+        a.call(f("MoveWindow"))?;
+        arrange(a, 0x50)?;
+        for (bit, (rect, (w, h))) in (1..).zip([0x40, 0x50].into_iter().zip(areas)) {
+            let checks = [(rect, 0), (rect + 4, 0), (rect + 8, w), (rect + 12, h)];
+            all_equal(a, l, &checks, bit)?;
+        }
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let (code, _) = run(test, program);
+    assert_eq!(code, 7, "the checks that failed: {:03b}", !code & 7);
+}
+
+#[test]
+fn an_mdi_client_without_scroll_styles_shows_no_scroll_bars() {
+    // Windows sets only the bars a client was made with: Fields of
+    // Fire's child is two pixels past its client, which has neither.
+    let areas = [(640, 480), (640, 480)];
+    check_mdi_scroll_bars("mdi_no_scroll", 0, (700, 500), (800, 600), areas);
+}
+
+#[test]
+fn an_mdi_clients_scroll_bars_come_back_after_the_children_fit() {
+    // The child fits at first, so both bars go, and their style bits
+    // with them; the child past the edges brings them back.
+    let style = WS_HSCROLL | WS_VSCROLL;
+    let areas = [(640, 480), (640 - SCROLL_BAR, 480 - SCROLL_BAR)];
+    check_mdi_scroll_bars("mdi_scroll", style, (100, 100), (700, 500), areas);
+}
+
+#[test]
+fn an_mdi_client_with_only_a_vertical_bar_gets_no_horizontal_one() {
+    // Windows keeps a flag for each bar the client was made with (Wine
+    // sets both bars if the client has either style): the child past the
+    // right edge brings no horizontal bar.
+    let areas = [(640, 480), (640 - SCROLL_BAR, 480)];
+    check_mdi_scroll_bars("mdi_vscroll", WS_VSCROLL, (100, 100), (700, 500), areas);
+}
+
 #[test]
 fn a_state_saved_while_win_exec_waits_resumes_the_wait() {
     // C.EXE writes C0.DAT, works for 300 ms, writes C.DAT and only then

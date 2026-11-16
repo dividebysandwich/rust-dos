@@ -90,13 +90,14 @@
 # idles (Windows 95 and 98) from halting the processor, as a 3D
 # benchmark building its next scene does: true (the default) or false.
 #auto_busy_os=true
-# Processor: 486 (the default, a 486DX with FPU), 386, pentium (with
-# CPUID, the time stamp counter, MSRs, CMPXCHG8B and 4 MB pages),
-# pentium_mmx (that Pentium with MMX), k6_2 (an AMD K6-2: the Pentium
-# MMX's with 3DNow! and SYSCALL/SYSRET), pentium_pro (the Pentium's with
-# CMOVcc, FCMOVcc and FCOMI, without MMX), pentium_ii (the Pentium
-# Pro's with MMX and SYSENTER/SYSEXIT) or pentium_iii (the Pentium II's
-# with SSE and FXSAVE/FXRSTOR).
+# Processor: 486 (a 486DX with FPU), 386, pentium (with CPUID, the time
+# stamp counter, MSRs, CMPXCHG8B and 4 MB pages), pentium_mmx (that
+# Pentium with MMX), k6_2 (an AMD K6-2: the Pentium MMX's with 3DNow! and
+# SYSCALL/SYSRET), pentium_pro (the Pentium's with CMOVcc, FCMOVcc and
+# FCOMI, without MMX), pentium_ii (the Pentium Pro's with MMX and
+# SYSENTER/SYSEXIT) or pentium_iii (the Pentium II's with SSE and
+# FXSAVE/FXRSTOR). Without the line the machine has a 486, or a
+# pentium_iii with machine=svga_toadforce.
 #cpu=486
 # What runs the programs' instructions:
 #   auto     the interpreter, and the dynamic recompiler for a program
@@ -265,6 +266,10 @@
 # Banshee or Voodoo3), or 8, 256 colours from a palette, for programs that
 # need them.
 #win32_depth=auto
+# The size of the built-in Windows' desktop, as Display Properties set it
+# on Windows: 640x480 (the default), 800x600 or 1024x768. Programs that
+# say they need 800x600 or more, such as Fields of Fire, need 800x600.
+#win32_desktop=640x480
 # Which calls of the built-in Windows' functions the log gets a line for:
 # all, every call; collapsed (the default), the first few calls from each
 # place in a program a second and a count of the rest; or off.

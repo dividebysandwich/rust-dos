@@ -31,7 +31,7 @@ pub const API_VARIABLE: &str = "RUST_DOS_ALMANAC_API";
 /// The settings the almanac knows, by section and key: those of the
 /// machine a game runs on, and the frame rate cap, which some games need
 /// (Test Drive 4 misbehaves above 60) and a benchmark's entry turns off.
-pub const KEYS: [(&str, &str); 40] = [
+pub const KEYS: [(&str, &str); 41] = [
     ("emulator", "machine"),
     ("emulator", "cpu"),
     ("emulator", "core"),
@@ -46,6 +46,7 @@ pub const KEYS: [(&str, &str); 40] = [
     ("emulator", "win32"),
     ("emulator", "win32_version"),
     ("emulator", "win32_depth"),
+    ("emulator", "win32_desktop"),
     ("emulator", "win32_locale"),
     ("emulator", "voodoo"),
     ("emulator", "voodoo_model"),
@@ -451,13 +452,16 @@ pub fn best(candidates: &[Candidate]) -> Option<&Candidate> {
 /// what the game ran with, and whoever takes the report's settings may
 /// have another. (A CPU chosen in the settings window changes the
 /// settings' default at once, the machine's memory at the next start.)
+/// The CPU is the model the machine has, also where `cpu` isn't set and
+/// the model follows the display adapter (`Settings::cpu_model`).
 pub fn report_settings(
     settings: &Settings,
     memory_mb: usize,
     home: Option<&Path>,
 ) -> BTreeMap<String, BTreeMap<String, String>> {
     let mut map: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    let memory = Settings { memsize: Some(memory_mb), ..settings.clone() };
+    let memory =
+        Settings { memsize: Some(memory_mb), cpu: Some(settings.cpu_model()), ..settings.clone() };
     for (section, key, value) in config::values(&memory, home) {
         if let Some(value) = value
             && known(section, key)
@@ -481,7 +485,10 @@ pub fn report_settings(
 /// adapter, it stays unset: the machine gets the same size, and saving
 /// the settings writes no `memsize` line that would stop it following a
 /// later change of the CPU or the adapter. Any other recommended size is
-/// set, below the default too, as the game is known to run with it.
+/// set, below the default too, as the game is known to run with it. The
+/// CPU, which reports always send too, stays unset the same way where
+/// `base` doesn't set it and the recommended model is the default for the
+/// recommended display adapter (`default_cpu`).
 pub fn layer(base: &Settings, settings: &[&Setting], home: Option<&Path>) -> Settings {
     let mut sections: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for s in settings {
@@ -498,8 +505,11 @@ pub fn layer(base: &Settings, settings: &[&Setting], home: Option<&Path>) -> Set
         text.push_str(&format!("\n[{}]\n{}\n", section, lines.join("\n")));
     }
     let mut layered = Settings::from_config(&config::parse(&text, Path::new("/"), home));
+    if base.cpu.is_none() && layered.cpu == Some(config::default_cpu(layered.machine)) {
+        layered.cpu = None;
+    }
     if base.memsize.is_none()
-        && layered.memsize == Some(config::default_memsize(layered.cpu, layered.machine))
+        && layered.memsize == Some(config::default_memsize(layered.cpu_model(), layered.machine))
     {
         layered.memsize = None;
     }
@@ -1091,7 +1101,8 @@ mod tests {
         assert!(!settings.contains_key("drives"));
         // The size the machine runs with, whatever the settings give now:
         // a Pentium II chosen after a start with the 486's 16 MB.
-        let pentium_ii = Settings { cpu: crate::cpu::CpuModel::PentiumII, ..Settings::default() };
+        let pentium_ii =
+            Settings { cpu: Some(crate::cpu::CpuModel::PentiumII), ..Settings::default() };
         assert_eq!(pentium_ii.memory_mb(), 64);
         assert_eq!(report_settings(&pentium_ii, 16, None)["emulator"]["memsize"], "16");
         assert_eq!(report_settings(&pentium_ii, 64, None)["emulator"]["memsize"], "64");
@@ -1103,6 +1114,7 @@ mod tests {
     #[test]
     fn a_recommended_cpu_brings_its_default_memory() {
         use crate::cpu::CpuModel;
+        use crate::video::adapter::Adapter;
         let setting = |key: &str, value: &str| Setting {
             section: "emulator".into(),
             key: key.into(),
@@ -1110,10 +1122,36 @@ mod tests {
         };
         let cpu = setting("cpu", "pentium_ii");
         let layered = layer(&Settings::default(), &[&cpu], None);
-        assert_eq!(layered.cpu, CpuModel::PentiumII);
+        assert_eq!(layered.cpu, Some(CpuModel::PentiumII));
         assert_eq!((layered.memsize, layered.memory_mb()), (None, 64));
         let card = setting("machine", "svga_toadforce");
         assert_eq!(layer(&Settings::default(), &[&card], None).memory_mb(), 128);
+
+        // A report of a ToadForce machine whose CPU follows the card sends
+        // the Pentium III, which stays unset when it comes back.
+        let toadforce = Settings { machine: Adapter::ToadForce, ..Settings::default() };
+        let reported = report_settings(&toadforce, toadforce.memory_mb(), None);
+        assert_eq!(reported["emulator"]["cpu"], "pentium_iii");
+        let sent: Vec<Setting> = reported
+            .iter()
+            .flat_map(|(section, keys)| {
+                keys.iter().map(|(key, value)| Setting {
+                    section: section.clone(),
+                    key: key.clone(),
+                    value: value.clone(),
+                })
+            })
+            .collect();
+        let sent: Vec<&Setting> = sent.iter().collect();
+        let layered = layer(&Settings::default(), &sent, None);
+        assert_eq!((layered.machine, layered.cpu), (Adapter::ToadForce, None));
+        assert_eq!(layered.cpu_model(), CpuModel::PentiumIII);
+        // A configuration that sets the CPU keeps it set, and a Pentium II
+        // recommended for the card is set.
+        let base = Settings { cpu: Some(CpuModel::PentiumIII), ..Settings::default() };
+        assert_eq!(layer(&base, &sent, None).cpu, Some(CpuModel::PentiumIII));
+        let layered = layer(&Settings::default(), &[&card, &cpu], None);
+        assert_eq!(layered.cpu, Some(CpuModel::PentiumII));
 
         // The configuration's memsize stays, and so does the
         // recommendation's own.

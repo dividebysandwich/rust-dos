@@ -2,7 +2,7 @@
 
 use super::types::parse_bool;
 use super::{
-    AspectRatio, Config, DesktopDepth, DosVersion, Filter, RunLockSetting, Section, Settings,
+    AspectRatio, Config, DesktopDepth, DesktopSize, DosVersion, Filter, RunLockSetting, Section,
     Win32Locale, Win32Trace, WindowsVersion, parse_mouse_sensitivity,
 };
 use crate::cpu::{CoreMode, CpuModel};
@@ -368,6 +368,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(depth) => config.win32_depth = Some(depth),
                             None => warn(format!(
                                 "invalid win32_depth '{}' (auto, 8 or 16)",
+                                value
+                            )),
+                        },
+                        "win32_desktop" => match DesktopSize::parse(value) {
+                            Some(size) => config.win32_desktop = Some(size),
+                            None => warn(format!(
+                                "invalid win32_desktop '{}' (640x480, 800x600 or 1024x768)",
                                 value
                             )),
                         },
@@ -748,7 +755,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
         config.sound.gus.drive = None;
     }
     // More memory than the CPU's machines took is as much as they did.
-    let cpu = config.cpu.unwrap_or(Settings::default().cpu);
+    let cpu = config.cpu_model();
     if let Some(mb) = config.memsize.filter(|&mb| mb > cpu.max_memsize()) {
         warnings.push(format!("memsize {} MB is more than a {} takes: {} MB", mb, cpu.describe(), cpu.max_memsize()));
     }

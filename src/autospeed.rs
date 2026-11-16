@@ -92,6 +92,80 @@ const FINE_STEP: f64 = 1.15;
 /// growth (in the logarithm) found the program still wanting more: frame
 /// rates grow in jumps where a game paces its frames by timer ticks.
 const FOLLOWS: f64 = 0.5;
+/// A step up is judged against a frame rate measured before it, in the
+/// same scene. Two marks say a measurement was of another one, and the
+/// search then goes on from the step's own measurement as from its first:
+/// - It drew more frames per instruction than the other by more than
+///   `AGREE`. One scene can't: below the speed where its frame rate stops
+///   following, its frames per instruction stay, and above it they fall.
+///   Quake's loading screen drew 8 frames a second at 20,000, and its
+///   timedemo 41 at 80,000 right after, 5.2 times the frames for 4 times
+///   the speed. Judged as one scene, the timedemo's next readings, 34 to
+///   39 at 135,000, put the knee at 98,000 from the loading screen's,
+///   where the host keeps up with 250,000 (#1160).
+/// - It moved `LOADS` bytes a second or more on its drives, and the one
+///   judged didn't: a loading screen's frames come as the data does.
+///   Quake's loading moved 1.7 MB a second, and its timedemo 0 to 33 KB,
+///   the demo file and the sound.
+const LOADS: f64 = 8.0 * WORKING;
+/// A hold far under what the host has, with a frame rate short of the one
+/// aimed for, tries a probe up: the search stops on what scenes of
+/// different weight make of its few measurements, and Quake's timedemo,
+/// which draws 24 to 64 frames a second at one speed as its scenes go by,
+/// held at 98,000 to 130,000 where the host kept real time at 250,000. It
+/// probes only where the search had reason to doubt where it stopped: the
+/// step up that ended it drew fewer frames than the speed below it by more
+/// than `SAME`, which more speed doesn't do in one scene, and it could go
+/// no further then (at what the host had, or behind); or the limits from a
+/// host that fell behind ended (`far_more`). A program that draws as many
+/// frames at both speeds caps them itself (Doom's 35), and a step that
+/// gained a little shows how little more speed gives (Myth). The probe goes
+/// up by the frames short of the target, from `TWO_STEPS` (a smaller step
+/// gains less than the noise of a mean of `JUDGED`) to `PROBE_STEP`, and
+/// never past the speed where frames that follow the speed reach the
+/// target, which is as far as a step up from the start of the search goes
+/// in the same scene. It goes no higher than the host's estimate over
+/// `STALLED`, so that a host that struggles probes as far as it has room
+/// for, and where that is less than `TWO_STEPS` there is no probe. It needs
+/// no limit from a host that fell behind. A program that sits halted for
+/// `SPARE` of a measurement waits with time to spare (a game on the clock,
+/// a movie) and has no use for it. The probe is judged on the mean of
+/// `JUDGED` measurements: it stays where the frame rate grew by `FOLLOWS`
+/// of the speed's growth, and otherwise goes back, and the next one waits
+/// `HOLD_WINDOWS` measurements of holding, twice that after each further
+/// miss, up to `MOST_PROBE_BACKOFFS` times. A game that caps its own frames
+/// and spins (Doom's 35) misses each one, and spends 4 or 5 measurements of
+/// every 485 above its speed once the back-off is at its longest. A probe
+/// that falls behind, by its measurements or by a step up's watch, is a
+/// miss too: the limits it sets end once the host shows far more
+/// (`far_more`), which puts the hold in doubt again, and a host that stalls
+/// every few frames would fall behind at each probe, a few measurements
+/// apart. A measurement of a load (`LOADS`), and the one after it, stay out
+/// of a probe's mean: their frames are another scene's. A load that lasts
+/// `JUDGED` measurements ends the probe without a miss.
+///
+/// `PROBE_STEP` is chosen. Quake's timedemo held at 88,000 where it draws
+/// 70 frames a second at 190,000, 2.2 times as much; a probe that misses
+/// costs `JUDGED` measurements at its speed, so a longer one costs more
+/// than it can find.
+const PROBE_STEP: f64 = 2.0;
+/// Chosen, between the noise and the falls it has to tell apart. In the
+/// traces of Quake, Oni and Rage of Mages 2, the mean of `JUDGED` readings
+/// at one speed moved 0.6% from the mean before it at the median, 7% at
+/// the 90th percentile (a timedemo's scenes come and go within a hold) and
+/// 11% at most; Quake's step up from 80,000 drew 7% to 16% fewer frames in
+/// eleven runs. One called through noise costs a step up, judged as any
+/// other.
+const SAME: f64 = 0.05;
+/// Chosen. Of 556 readings short of 55 frames a second in the holds of
+/// Quake, Oni and Rage of Mages 2, 3 sat halted for more than a tenth of
+/// the measurement.
+const SPARE: f64 = 0.1;
+/// Chosen: the longest wait is `HOLD_WINDOWS` << 4, 480 measurements of
+/// `WINDOW_NS`, four minutes, which keeps a game that misses every probe
+/// (Doom's 35) above its speed for 1% of the time, and still probes again
+/// within a level.
+const MOST_PROBE_BACKOFFS: u32 = 4;
 /// Steps down that kept this share of the frames the speed held at lost
 /// nothing. Each step is measured against the held frame rate: a game
 /// whose frame rate falls a little with each step (Myth's 3Dfx renderer
@@ -264,9 +338,24 @@ const TRY_DROPS: u32 = 2;
 /// step up's first frames is still a stall, and late frames that began as
 /// one stay one across a change of speed: the validation of this saw Magic
 /// & Mayhem's loads end tries with frames of 125 to 431 ms.
+///
+/// A measurement sorts its frames too (`Frames`), with no run on time
+/// needed before a stall: where fewer of its frames are late than on time,
+/// late frames `STALL_COST` times as far behind as those on time before
+/// them are on average, or more, are the host stopping, and its pace leaves
+/// out the lag dropped after them, where the speed is well under what the
+/// host has (`STALLED`). Late frames shorter than that stay lag, and so do
+/// all at a speed near the host's estimate. Grom's loads (#783) read their
+/// files a piece at a time, and with the files not in the host's cache
+/// every third frame took 90 to 110 ms among frames of 1 to 7, at whatever
+/// speed. Taken for lag, they set caps that held the game's menu at 31,000
+/// to 55,000, under the Pentium II's least speed, for minutes. A host
+/// behind at a speed is late in most frames, the backlog growing from one
+/// frame to the next until the pacer drops it, or its late frames are a few
+/// times as long as the others (Omikron's above), and that stays lag.
 const STALL_RUN: u32 = 10;
-const STALL_FRAMES: u32 = 8;
-const STALL_COST: u64 = 6;
+pub(crate) const STALL_FRAMES: u32 = 8;
+pub(crate) const STALL_COST: u64 = 6;
 const STALL_LEAST_NS: u64 = MAX_LAG_NS.div_ceil(STALL_COST);
 const MAX_LAG_NS: u64 = crate::timer::MAX_LAG.as_nanos() as u64;
 /// A measurement behind at a speed that another fell behind at, at that
@@ -757,6 +846,16 @@ enum Step {
         seen: u32,
         dipped: u32,
     },
+    /// A probe up from a hold at `from`, which drew `fps` (`PROBE_STEP`).
+    /// The frame rates measured here so far add up to `sum`, `seen` of
+    /// them, and `loaded` measurements were left out for a load (`LOADS`).
+    Probed {
+        from: u32,
+        fps: f64,
+        sum: f64,
+        seen: u32,
+        loaded: u32,
+    },
 }
 
 /// What the pacer dropped behind the wall clock, sorted into lag and
@@ -910,6 +1009,102 @@ impl Backlog {
     }
 }
 
+/// The frames of the measurement going on, as `AutoSpeed::falling_behind`
+/// sees them, which tell a stall in it from lag (`STALL_RUN`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Frames {
+    /// The frames, and of them those late (`TRY_BEHIND_NS`).
+    count: u32,
+    late: u32,
+    /// The lag the pacer dropped after late frames far longer than those
+    /// on time before them (`Frames::stalled`).
+    late_lag_ns: u64,
+    /// How far behind the frames on time left the host, in all.
+    on_time_ns: u64,
+    /// While the last frame was late, how far behind the least of the late
+    /// frames in a row up to it left the host: what the pacer drops at the
+    /// next frame is their backlog.
+    run_least: Option<u64>,
+    /// How far behind the frames on time of the measurement before left
+    /// the host on average, which judges late frames until this one has
+    /// frames on time of its own (`Frames::start`).
+    usual_before: Option<u64>,
+    /// What the pacer had dropped for lag at the last frame (`Lag`).
+    lost_ns: u64,
+}
+
+impl Frames {
+    /// A frame that showed `lag`.
+    fn frame(&mut self, lag: Lag) {
+        let dropped = lag.lost_ns.saturating_sub(self.lost_ns);
+        self.lost_ns = lag.lost_ns;
+        if self.run_least.is_some_and(|least| self.stalled(least)) {
+            self.late_lag_ns += dropped;
+        }
+        self.count += 1;
+        if lag.behind_ns >= TRY_BEHIND_NS {
+            self.late_frame(lag.behind_ns);
+        } else {
+            self.on_time_ns += lag.behind_ns;
+            self.run_least = None;
+        }
+    }
+
+    fn late_frame(&mut self, behind_ns: u64) {
+        self.late += 1;
+        self.run_least = Some(
+            self.run_least
+                .map_or(behind_ns, |least| least.min(behind_ns)),
+        );
+    }
+
+    /// How far behind the frames on time so far left the host on average:
+    /// this measurement's, or before it has any, the one's before.
+    fn usual(&self) -> Option<u64> {
+        match self.count - self.late {
+            0 => self.usual_before,
+            on_time => Some(self.on_time_ns / on_time as u64),
+        }
+    }
+
+    /// Whether late frames that left the host `least_ns` behind at the
+    /// least are a stall: `STALL_COST` times as far behind as the frames
+    /// on time before them are on average (`Frames::usual`), and at least
+    /// `MAX_LAG`.
+    fn stalled(&self, least_ns: u64) -> bool {
+        self.usual()
+            .is_some_and(|usual| least_ns >= usual.max(STALL_LEAST_NS) * STALL_COST)
+    }
+
+    /// The lag of the stalls in the measurement, which its pace leaves
+    /// out (`STALL_RUN`): none where as many frames are late as on time.
+    fn stall_ns(&self) -> u64 {
+        if self.late >= self.count - self.late {
+            return 0;
+        }
+        self.late_lag_ns
+    }
+
+    /// A new measurement starts. The last frames' backlog, if they were
+    /// late, is dropped in it, and counts there, judged by the frames on
+    /// time before them: the new measurement has none yet. Grom's loads
+    /// (#783) stall every third frame, so a measurement ends on one about
+    /// as often, and judged by the new measurement alone that stall would
+    /// count as lag.
+    fn start(&mut self) {
+        let run = self.run_least;
+        *self = Frames {
+            lost_ns: self.lost_ns,
+            usual_before: self.usual(),
+            ..Frames::default()
+        };
+        if let Some(least) = run {
+            self.count = 1;
+            self.late_frame(least);
+        }
+    }
+}
+
 /// Finds the speed for `CpuSpeed::Auto`.
 #[derive(Clone, Debug)]
 pub struct AutoSpeed {
@@ -942,6 +1137,22 @@ pub struct AutoSpeed {
     fell: Option<(u32, u32)>,
     /// The least speed that drew the record in this scene.
     least_held: Option<u32>,
+    /// Measurements of holding before the next probe up (`PROBE_STEP`),
+    /// and the probes missed in this scene, up to `MOST_PROBE_BACKOFFS`.
+    probe_wait: u32,
+    probe_misses: u32,
+    /// Where the search stopped is in doubt, and a probe may try more
+    /// (`PROBE_STEP`). Set where the step up that stopped it drew fewer
+    /// frames than the speed below it by more than `SAME` and the search
+    /// couldn't go on at once: in one scene more speed draws as many frames
+    /// or more, so the scene changed under the step, and the knee reckoned
+    /// from the two says nothing. Set too
+    /// where the limits from a host that fell behind end (`far_more`): the
+    /// search held under them, short of what the host has now. Cleared by
+    /// a new search and by a heavier scene, which searches again.
+    unsure: bool,
+    /// The last measurement moved `LOADS` on its drives.
+    loaded: bool,
     /// Since the host last fell behind (`KEPT_UP`): the most the speed
     /// goes to, and the measurements left before that rises; the pace,
     /// smoothed; and whether the last measurement fell behind.
@@ -971,6 +1182,29 @@ pub struct AutoSpeed {
     /// that reads far more than the host runs (Omikron's dialogue, see
     /// `decide`), both went there at once: 45,700 where the host ran 27,000.
     fell_at: Option<u32>,
+    /// The measurements in a row since `lagged` and `fell_at` were last set
+    /// that kept up while the host's estimate read `FIRST_STEP` times the
+    /// cap or more, and where measurements set them, `STALLED` times
+    /// `slow_host` or more too. The limits end after `JUDGED` of them: the
+    /// host that fell behind was slow for a while, and is no more. A step
+    /// up's watch goes by a few frames in a row, which the emulator's own
+    /// start makes too: Grom's first seconds had three frames of 27 to 62
+    /// ms at 38,500, where a minute later the host runs 250,000, and the
+    /// limits held its loading and its menu at 37,000 for minutes, under
+    /// the Pentium II's least speed (#783). Seconds of host stalls while
+    /// Grom loads set them from its measurements, with the estimate down
+    /// to 200,000, and held it at 42,000 where the host ran 500,000 once
+    /// they ended. Omikron's dialogue falls behind at a speed the host
+    /// keeps up with only just, with its estimate under twice the cap (see
+    /// `decide`), and keeps them, and so does a program whose frames fall
+    /// behind where the estimate reads far more all along: the host isn't
+    /// any faster than when they fell behind.
+    far_more: u32,
+    /// The least host estimate of the measurements that set `lagged` and
+    /// `fell_at`, or None where a step up's watch alone set them.
+    slow_host: Option<u32>,
+    /// The frames of the measurement going on.
+    frames: Frames,
     /// While a program gets all the host has for its reads and writes, the
     /// speed it had before.
     working: Option<u32>,
@@ -1020,6 +1254,10 @@ impl AutoSpeed {
             floor: None,
             fell: None,
             least_held: None,
+            probe_wait: 0,
+            probe_misses: 0,
+            unsure: false,
+            loaded: false,
             lagged: None,
             pace: 1.0,
             behind: false,
@@ -1030,6 +1268,9 @@ impl AutoSpeed {
             try_lost_ns: 0,
             try_fresh: false,
             fell_at: None,
+            far_more: 0,
+            slow_host: None,
+            frames: Frames::default(),
             working: None,
             work_cuts: 0,
             flat_out: false,
@@ -1100,6 +1341,8 @@ impl AutoSpeed {
         self.behind = false;
         self.slipped = None;
         self.fell_at = None;
+        self.far_more = 0;
+        self.slow_host = None;
     }
 
     /// While a program gets all the host has for its reads and writes, the
@@ -1132,6 +1375,9 @@ impl AutoSpeed {
         self.floor = None;
         self.fell = None;
         self.least_held = None;
+        self.probe_wait = 0;
+        self.probe_misses = 0;
+        self.unsure = false;
     }
 
     /// `speed` lost frames: raises the floor to `over` times it, no higher
@@ -1199,6 +1445,7 @@ impl AutoSpeed {
         let Some(mark) = self.mark else {
             if now.ns >= self.settle_until {
                 self.mark = Some(now);
+                self.frames.start();
             }
             return cut;
         };
@@ -1224,6 +1471,10 @@ impl AutoSpeed {
             return cut;
         }
         self.mark = Some(now);
+        // Frames counted from here are the next measurement's, unless this
+        // one isn't settled: then both go together.
+        let window = self.frames;
+        self.frames.start();
         let seconds = ns as f64 / 1e9;
         let ran = now.icount.saturating_sub(mark.icount).max(1) as f64;
         let polls = (now.polls - mark.polls) as f64 / seconds;
@@ -1253,12 +1504,32 @@ impl AutoSpeed {
                     lost_at: mark.lost_at,
                     ..now
                 });
+                self.frames = window;
                 return cut;
             }
             fps = Some((rate + before) / 2.0);
         }
         self.unsettled = None;
         let paced = now.ns.saturating_sub(mark.lost_at);
+        let lost = now.lost_ns.saturating_sub(mark.lost_ns);
+        // Only well under what the host has (`STALLED`): Omikron's dialogue,
+        // at a speed the host keeps up with only just, has a frame of 80 ms
+        // among frames on time in one measurement in eight, which is lag.
+        let far_under = bus.clock.cycles_per_ms() as f64 * STALLED < host_max as f64;
+        let stall = if far_under {
+            window.stall_ns().min(lost)
+        } else {
+            0
+        };
+        if trace() && stall > 0 {
+            eprintln!(
+                "[auto] stall in the measurement: {:.1}ms of {:.1}ms dropped, {} late of {} frames",
+                stall as f64 / 1e6,
+                lost as f64 / 1e6,
+                window.late,
+                window.count
+            );
+        }
         let waited = now.disk_wait.saturating_sub(mark.disk_wait);
         let halted = now.idle.saturating_sub(mark.idle).saturating_sub(waited);
         let measured = Measurement {
@@ -1268,7 +1539,7 @@ impl AutoSpeed {
             output: (now.output - mark.output) as f64 / seconds,
             io: (now.io - mark.io) as f64 / seconds,
             refresh,
-            pace: paced as f64 / (paced + now.lost_ns.saturating_sub(mark.lost_ns)) as f64,
+            pace: paced as f64 / (paced + lost - stall) as f64,
         };
         // The step up's first measurement is in: the frames kept up with it.
         self.trying = None;
@@ -1328,6 +1599,14 @@ impl AutoSpeed {
         self.try_fresh = true;
     }
 
+    /// A probe up (`PROBE_STEP`) gained too little, or fell behind: the
+    /// next waits twice as long as this one did, up to
+    /// `MOST_PROBE_BACKOFFS` times.
+    fn probe_missed(&mut self) {
+        self.probe_wait = HOLD_WINDOWS << self.probe_misses;
+        self.probe_misses = (self.probe_misses + 1).min(MOST_PROBE_BACKOFFS);
+    }
+
     /// The host fell behind at `speed` (`fell_at`).
     fn fell_behind_at(&mut self, speed: u32) {
         self.fell_at = Some(self.fell_at.map_or(speed, |at| at.min(speed)));
@@ -1338,6 +1617,7 @@ impl AutoSpeed {
     /// keep up with (`TRY_BEHIND_NS`) ends, and this is the speed it asks
     /// for instead.
     pub fn falling_behind(&mut self, bus: &Bus, lag: Lag) -> Option<u32> {
+        self.frames.frame(lag);
         let fresh = std::mem::take(&mut self.try_fresh);
         let dropped = lag.lost_ns > self.try_lost_ns && !fresh;
         self.try_lost_ns = lag.lost_ns;
@@ -1358,6 +1638,7 @@ impl AutoSpeed {
             return None;
         }
         let current = bus.clock.cycles_per_ms();
+        self.far_more = 0;
         self.fell_behind_at(current);
         let fine = (from as f64 * FINE_STEP).round() as u32;
         let next = if current as f64 > fine as f64 * 1.01 {
@@ -1371,6 +1652,9 @@ impl AutoSpeed {
             self.watch(from);
             fine
         } else {
+            if matches!(self.step, Step::Probed { .. }) {
+                self.probe_missed();
+            }
             self.trying = None;
             self.lagged = Some((from, LAGGED_WINDOWS));
             self.step = Step::Hold {
@@ -1434,6 +1718,7 @@ impl AutoSpeed {
         let c = current as f64;
         self.flat_out = false;
         let loading = std::mem::take(&mut self.loading);
+        let was_loaded = std::mem::replace(&mut self.loaded, m.io >= LOADS);
         if protected && m.halted >= IDLES {
             self.idles = true;
         }
@@ -1498,7 +1783,13 @@ impl AutoSpeed {
             // Not the CPU model's least speed: the cap keeps that under it.
             let least = self.least(protected, 0);
             self.fell_behind_at(current);
+            // Limits that hold on keep the least estimate of those that set
+            // them, and new ones start from this one's: a heavier scene can
+            // end limits after the check below has cleared `slow_host`.
+            let slow = self.slow_host.filter(|_| self.lagged.is_some());
             self.lagged = (most > least).then_some((most, LAGGED_WINDOWS));
+            self.far_more = 0;
+            self.slow_host = Some(slow.map_or(host_max, |h| h.min(host_max)));
         } else if let (false, Some((most, left))) = (lagged, self.lagged) {
             // The estimate dipping to the limit doesn't end it: only rising
             // past what the host has does.
@@ -1508,6 +1799,29 @@ impl AutoSpeed {
                 let most = (most as f64 * FINE_STEP) as u32;
                 (most < top).then_some((most, LAGGED_WINDOWS))
             };
+        }
+        // The limits end once the host has shown far more (`far_more`).
+        if let Some((most, _)) = self.lagged {
+            let far = host_max as f64 >= most as f64 * FIRST_STEP
+                && self
+                    .slow_host
+                    .is_none_or(|h| host_max as f64 >= h as f64 * STALLED);
+            let more = !lagged && m.pace >= KEPT_UP && far;
+            self.far_more = if more { self.far_more + 1 } else { 0 };
+            if self.far_more >= JUDGED {
+                self.lagged = None;
+                self.fell_at = None;
+                self.unsure = true;
+            }
+        }
+        // Limits that ended, here or as they rose past what the host has,
+        // take their slow host with them, and the next limits set their
+        // own. Kept, the estimate of a slow start would end the limits of a
+        // program that falls behind where the estimate reads far more all
+        // along (see `far_more`).
+        if self.lagged.is_none() {
+            self.far_more = 0;
+            self.slow_host = None;
         }
         // A faster CPU model's least speed is only up to what the host has,
         // the cap included: an estimate that reads high where the host keeps
@@ -1657,18 +1971,48 @@ impl AutoSpeed {
                 });
             }
             let (low, low_fps) = (below.0 as f64, below.1);
+            // Fewer frames at more speed (`SAME`): the scene changed under
+            // the step, and the two say nothing of a knee. The search goes
+            // on from here as from its first measurement, or where it can't
+            // (at what the host has, or behind), holds in doubt. Quake's
+            // timedemo drew 40 frames a second at 80,000 and 36 at 139,000,
+            // and the knee reckoned from the two held it at 88,000 for the
+            // rest of the demo, where it draws 70 at 190,000 (#1160).
+            let fell = fps < low_fps * (1.0 - SAME);
+            if fell && m.pace >= KEPT_UP && current < top {
+                return up(this, FIRST_STEP, (current, fps));
+            }
+            this.unsure = fell;
+            // A step that drew more frames per instruction than the speed
+            // below (another scene, `LOADS`) puts the knee at its own speed,
+            // which the clamp does.
             let knee = (low * fps / low_fps).clamp(low, c);
             hold(this, knee * HEADROOM, JUDGED, true)
         };
         let here = (current, fps);
+        // More frames per instruction than at `(speed, fps)`: another scene
+        // (`LOADS`).
+        let lighter = |(speed, rate): (u32, f64)| fps / rate > c / speed as f64 * (1.0 + AGREE);
         match self.step {
             Step::Start => up(self, FIRST_STEP, here),
+            Step::Raised {
+                from, fps: before, ..
+            } if current > from && (lighter((from, before)) || (was_loaded && m.io < LOADS)) => {
+                up(self, FIRST_STEP, here)
+            }
             Step::Raised { from, fps: before, below } if current > from => {
                 if fps / before >= (c / from as f64).powf(FOLLOWS) {
                     up(self, FIRST_STEP, (from, before))
                 } else if c <= from as f64 * FINE_STEP * 1.01 {
                     // A small step that gained nothing: where it came
-                    // from was enough.
+                    // from was enough. One that drew a fifth fewer frames
+                    // (`DROPPED`), which more speed doesn't do, landed in a
+                    // heavier scene: the hold keeps what `from` drew to
+                    // judge by, and a heavier scene that lasts searches
+                    // again from it, as for a step down.
+                    if fps < before * DROPPED {
+                        return hold_drawing(self, before, clamp(from as f64), HOLD_WINDOWS, false);
+                    }
                     hold(self, from as f64, HOLD_WINDOWS, false)
                 } else if current > top || m.pace < KEPT_UP {
                     overshot(self, below, fps)
@@ -1707,6 +2051,11 @@ impl AutoSpeed {
                 // A frame rate that fell by a fifth is no noise to average
                 // out: the program shouldn't wait out the rest of them.
                 let dropped = fps < before * DROPPED;
+                // Fell by a fifth more than the speed did. In one scene,
+                // less speed does that only to frames that wait for the
+                // retrace, which fall to a fraction of the refresh rate
+                // (60 to 30), and `from` gets them back.
+                let heavier = fps < before * (c / from as f64) * DROPPED;
                 if seen < JUDGED && !dropped {
                     self.step = Step::Lowered {
                         from,
@@ -1725,12 +2074,22 @@ impl AutoSpeed {
                         ..r
                     });
                     down(self, fps)
-                } else if (current as f64) * FINE_STEP * 1.01 < from as f64 {
+                } else if !heavier && (current as f64) * FINE_STEP * 1.01 < from as f64 {
                     // The host's estimate took the step further than a step
                     // (`clamp`), as it can while the program waits for the
                     // display: what so much less speed lost says nothing of
                     // a step's, and is no loss to back off from. Its frame
                     // rate gives the knee, as for a step that lost frames.
+                    // Frames that fell by a fifth more than the speed did
+                    // (`heavier`) go on below instead, to hold at `from`
+                    // with the frame rate it drew, so that a heavier scene
+                    // reads as one. A knee reckoned from such a reading is
+                    // past `from` anyway. Oni went from 60 frames a second,
+                    // mostly halted, to 7 when its level started, during a
+                    // step from 56,895 to 48,952, and the hold measured
+                    // afresh took the 21 it drew at 112,500, the CPU
+                    // model's least speed, for its own, and climbed a step
+                    // at a time from there.
                     let knee = (c * before / fps).clamp(c, from as f64);
                     hold(self, knee * HEADROOM, HOLD_WINDOWS, true)
                 } else {
@@ -1810,6 +2169,8 @@ impl AutoSpeed {
                     self.backoffs = 0;
                     self.fell = None;
                     self.least_held = None;
+                    self.probe_misses = 0;
+                    self.unsure = false;
                     if !lagged && self.lagged.is_some() && current >= top && top < host_top {
                         let most = (top as f64 * HEAVIER) as u32;
                         self.lagged = (most < host_top).then_some((most, LAGGED_WINDOWS));
@@ -1871,6 +2232,32 @@ impl AutoSpeed {
                     let least = self.least_held.map_or(r.at, |least| least.min(r.at));
                     self.least_held = Some(least);
                 }
+                // A probe up (`PROBE_STEP`), to no more than the frames short
+                // of the target ask for, or the host has room for.
+                self.probe_wait = self.probe_wait.saturating_sub(1);
+                let short = m.refresh / recent;
+                let to = (c * short.min(PROBE_STEP))
+                    .min(host_max as f64 / STALLED)
+                    .min(top as f64);
+                let probe = self.unsure
+                    && self.probe_wait == 0
+                    && seen >= JUDGED
+                    && to >= c * TWO_STEPS
+                    && m.halted < SPARE
+                    && !lagged
+                    && m.pace >= KEPT_UP
+                    && self.lagged.is_none()
+                    && self.fell_at.is_none();
+                if probe {
+                    self.step = Step::Probed {
+                        from: current,
+                        fps: recent,
+                        sum: 0.0,
+                        seen: 0,
+                        loaded: 0,
+                    };
+                    return clamp(to);
+                }
                 if left > 1 {
                     self.step = Step::Hold {
                         fps: held,
@@ -1887,10 +2274,70 @@ impl AutoSpeed {
                     down(self, recent)
                 }
             }
-            // The speed changed from elsewhere: measure from here.
-            Step::Raised { .. } | Step::Overshot { .. } | Step::Lowered { .. } => {
-                up(self, FIRST_STEP, here)
+            Step::Probed {
+                from,
+                fps: before,
+                sum,
+                seen,
+                loaded,
+            } if current > from => {
+                // A load (`LOADS`), or the measurement after one: its frames
+                // are another scene's, and say nothing of the speed, so the
+                // mean leaves it out. Rage of Mages 2 streams 130 to 470 KB a
+                // second in play, and a probe that one such measurement
+                // ended went back from 25 frames a second at 215,000 to 13
+                // at 112,500. A load that lasts `JUDGED` measurements ends
+                // the probe, which waits, and missed nothing.
+                if m.io >= LOADS || was_loaded {
+                    let loaded = loaded + 1;
+                    if loaded >= JUDGED {
+                        self.probe_wait = HOLD_WINDOWS << self.probe_misses;
+                        return hold_drawing(self, before, clamp(from as f64), HOLD_WINDOWS, false);
+                    }
+                    self.step = Step::Probed {
+                        from,
+                        fps: before,
+                        sum,
+                        seen,
+                        loaded,
+                    };
+                    return current;
+                }
+                // Behind: the host can't run the probe now.
+                if m.pace < KEPT_UP {
+                    self.probe_missed();
+                    return hold_drawing(self, before, clamp(from as f64), HOLD_WINDOWS, false);
+                }
+                let (sum, seen) = (sum + fps, seen + 1);
+                if seen < JUDGED {
+                    self.step = Step::Probed {
+                        from,
+                        fps: before,
+                        sum,
+                        seen,
+                        loaded,
+                    };
+                    return current;
+                }
+                let fps = sum / seen as f64;
+                if fps >= before * (c / from as f64).powf(FOLLOWS) {
+                    if self.held.is_none_or(|r| fps >= r.fps) {
+                        self.held = Some(Record {
+                            fps,
+                            at: current,
+                            climbed: 0,
+                        });
+                    }
+                    return hold_drawing(self, fps, current, HOLD_WINDOWS, false);
+                }
+                self.probe_missed();
+                hold_drawing(self, before, clamp(from as f64), HOLD_WINDOWS, false)
             }
+            // The speed changed from elsewhere: measure from here.
+            Step::Raised { .. }
+            | Step::Overshot { .. }
+            | Step::Lowered { .. }
+            | Step::Probed { .. } => up(self, FIRST_STEP, here),
         }
     }
 }
@@ -4141,6 +4588,211 @@ mod tests {
     }
 
     #[test]
+    fn a_stall_without_a_run_on_time_before_it_is_one_in_its_measurement() {
+        // Grom's loads (#783), on a host that runs 800,000 of the program's
+        // instructions a ms: a frame of 70 ms of the host's own, which the
+        // frames on time around it make a stall, and four frames later one
+        // of 260 ms, which has no run on time before it, and which the frame
+        // watch takes for lag. Its measurement is a stall: its other frames
+        // ran on time.
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        let least = crate::cpu::CpuModel::PentiumII.auto_least();
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_protected_least(least);
+        bus.set_cycles_per_ms(least);
+        let mut paced = Paced::default();
+        for i in 0..2400 {
+            let stall = match i % 240 {
+                120 => 0.070,
+                124 => 0.260,
+                _ => 0.0,
+            };
+            paced.frame(&mut auto, bus, 800_000.0, stall, 800_000);
+            assert!(bus.clock.cycles_per_ms() >= least, "frame {i}");
+        }
+        assert!(paced.sorted.lag_ns() > 0, "{:?}", paced.sorted);
+        assert_eq!((auto.lagged, auto.fell_at), (None, None));
+    }
+
+    #[test]
+    fn a_stall_that_ends_a_measurement_is_one_in_the_next() {
+        // Grom's loads (#783) stall every third frame, so a measurement ends
+        // on one about as often. The pacer drops its backlog at the next
+        // frame, in the next measurement, which judges it by the frames on
+        // time before it, and counts it once.
+        let mut frames = Frames::default();
+        for _ in 0..10 {
+            frames.frame(unsorted(5_000_000, 0));
+        }
+        frames.frame(unsorted(90_000_000, 0));
+        assert_eq!(frames.stall_ns(), 0);
+        frames.start();
+        for _ in 0..10 {
+            frames.frame(unsorted(5_000_000, 40_000_000));
+        }
+        assert_eq!(frames.stall_ns(), 40_000_000);
+        // Late frames a few times as long as those on time before them
+        // stay lag across the start too.
+        let mut frames = Frames::default();
+        for _ in 0..10 {
+            frames.frame(unsorted(10_000_000, 0));
+        }
+        frames.frame(unsorted(30_000_000, 0));
+        frames.start();
+        for _ in 0..10 {
+            frames.frame(unsorted(5_000_000, 20_000_000));
+        }
+        assert_eq!(frames.stall_ns(), 0);
+    }
+
+    #[test]
+    fn stalls_every_few_frames_are_left_out_of_the_pace() {
+        // Grom's loads with its files not in the host's cache (#783): every
+        // third frame stalls the host for 90 ms, between frames on time.
+        // Too close together for the frame watch's run on time
+        // (`STALL_RUN`), they are lag to it, and the measurements leave them
+        // out of the pace (`Frames`): the speed keeps the Pentium II's
+        // least.
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        let least = crate::cpu::CpuModel::PentiumII.auto_least();
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_protected_least(least);
+        bus.set_cycles_per_ms(least);
+        let mut paced = Paced::default();
+        let mut probes = 0;
+        for i in 0..1800 {
+            let stall = if i % 3 == 2 { 0.090 } else { 0.0 };
+            let was = matches!(auto.step, Step::Probed { .. });
+            paced.frame(&mut auto, bus, 800_000.0, stall, 800_000);
+            assert!(bus.clock.cycles_per_ms() >= least, "frame {i}");
+            probes += u32::from(!was && matches!(auto.step, Step::Probed { .. }));
+        }
+        assert!(paced.sorted.lag_ns() > 0, "{:?}", paced.sorted);
+        // No limits from the measurements, which would have a slow host.
+        // A step up's watch still sees the drops, and limits the probes
+        // that fall behind, which back off.
+        assert!(auto.pace >= KEPT_UP, "{}", auto.pace);
+        assert_eq!(auto.slow_host, None);
+        assert!(probes <= 3, "{probes} probes");
+    }
+
+    #[test]
+    fn a_step_ups_watch_while_starting_ends_once_the_host_shows_more() {
+        // Grom's first seconds (#783): while the emulator starts, the host's
+        // estimate reads 38,800, and a step up to it falls behind for three
+        // frames. Then the game loads with the estimate at 500,000, and its
+        // menu draws a frame a second for each 2000 instructions per ms.
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        let least = crate::cpu::CpuModel::PentiumII.auto_least();
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_protected_least(least);
+        bus.set_cycles_per_ms(38_794);
+        auto.watch(37_090);
+        let behind = 29_300_000;
+        for _ in 1..TRY_BEHIND_FRAMES {
+            assert_eq!(auto.falling_behind(bus, unsorted(behind, 0)), None);
+        }
+        assert_eq!(auto.falling_behind(bus, unsorted(behind, 0)), Some(37_090));
+        assert_eq!(auto.lagged, Some((37_090, LAGGED_WINDOWS)));
+        // The limits end after `JUDGED` measurements with the estimate at
+        // four times the cap or more, and the load gets all the host has.
+        let work = Measurement {
+            output: 2e6,
+            ..STILL
+        };
+        let mut speed = 37_090;
+        for _ in 0..JUDGED {
+            speed = auto.decide(speed, &work, true, 500_000);
+        }
+        assert_eq!((auto.lagged, auto.fell_at), (None, None));
+        assert_eq!(speed, 500_000);
+        // The menu keeps the Pentium II's least speed.
+        let menu = game(1.0 / 2000.0, 60.0);
+        for _ in 0..200 {
+            speed = auto.decide(speed, &menu(speed), true, 500_000);
+            assert!(speed >= least, "{speed}");
+        }
+        // A measurement behind without a stall still takes it down.
+        let behind = Measurement {
+            pace: 0.6,
+            ..menu(speed)
+        };
+        let down = auto.decide(speed, &behind, true, 60_000);
+        assert!(down < least, "{down}");
+    }
+
+    #[test]
+    fn limits_from_seconds_of_stalls_end_once_the_host_shows_more() {
+        // Grom's load with seconds of host stalls (#783): its frames come at
+        // 500 a second, two measurements are mostly stalls, the host's
+        // estimate falls to about the speed, and the measurements behind
+        // set the limits, which take the speed to under the Pentium II's
+        // least. Then the stalls end, the estimate reads 500,000, and the
+        // menu draws a frame a second for each 8000 instructions per ms.
+        let least = crate::cpu::CpuModel::PentiumII.auto_least();
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_protected_least(least);
+        let load = game(1.0 / 400.0, 1000.0);
+        let mut speed = 199_249;
+        for _ in 0..2 {
+            let stalled = Measurement {
+                pace: 0.3,
+                ..load(speed)
+            };
+            speed = auto.decide(speed, &stalled, true, speed + speed / 25);
+        }
+        assert!(auto.lagged.is_some());
+        assert!(speed < least, "{speed}");
+        let menu = game(1.0 / 8000.0, 60.0);
+        let mut back = None;
+        for i in 0..20 {
+            speed = auto.decide(speed, &menu(speed), true, 500_000);
+            if speed >= least {
+                back = back.or(Some(i));
+            }
+        }
+        assert_eq!((auto.lagged, auto.fell_at), (None, None));
+        assert!(back.is_some_and(|i| i <= JUDGED as usize), "{back:?}");
+        assert!(speed >= least, "{speed}");
+    }
+
+    #[test]
+    fn limits_that_ended_leave_no_slow_host_behind() {
+        // Limits from a slow start, with the estimate at 7,500, rose past
+        // what the host has and ended. A program that falls behind later,
+        // while the estimate reads far more all along, keeps the limits it
+        // sets: the host is no faster than when it fell behind.
+        let program = game(1.0 / 4000.0, 1000.0);
+        let behind = |speed| Measurement {
+            pace: 0.6,
+            ..program(speed)
+        };
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.slow_host = Some(7_500);
+        let mut speed = 100_000;
+        auto.decide(speed, &program(speed), true, HOST);
+        assert_eq!(auto.slow_host, None);
+        auto.decide(speed, &behind(speed), true, HOST);
+        speed = auto.decide(speed, &behind(speed), true, HOST);
+        assert!(auto.lagged.is_some());
+        for _ in 0..2 * JUDGED {
+            speed = auto.decide(speed, &program(speed), true, HOST);
+        }
+        assert!(auto.lagged.is_some(), "{speed}");
+        // Limits a heavier scene ended after that measurement's check: the
+        // next fall behind starts its own slow host.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.slow_host = Some(7_500);
+        auto.pace = 0.9;
+        auto.decide(100_000, &behind(100_000), true, HOST);
+        assert!(auto.lagged.is_some());
+        assert_eq!(auto.slow_host, Some(HOST));
+    }
+
+    #[test]
     fn a_first_measurement_behind_goes_to_what_the_host_ran() {
         // Omikron's dialogue where frames cost the host less (#849): a step
         // up from 20,000 runs at 0.88 of real time, not enough for the
@@ -4358,31 +5010,123 @@ mod tests {
         cap: crate::frame_cap::Cap,
         target: u32,
         seconds: u64,
-        mut frame: impl FnMut(&mut Bus) -> u32,
+        frame: impl FnMut(&mut Bus) -> u32,
     ) -> (Vec<u32>, f64) {
-        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
-        let bus = &mut cpu.bus;
-        bus.set_cycles_per_ms(200_000);
-        bus.frame_cap.set(cap);
-        let mut auto = AutoSpeed::new(3000, Some(target));
-        let mut speeds = Vec::new();
-        let last_from = seconds.saturating_sub(10) * 1_000_000_000;
-        let mut shown = 0;
-        while bus.clock.now_ns() < seconds * 1_000_000_000 {
-            for _ in 0..frame(bus) {
-                while let Some(until) = bus.frame_cap.wait(bus.clock.now_ns(), None) {
-                    idle_until(bus, until);
-                }
-                bus.frame_cap.shown(bus.clock.now_ns());
-                bus.activity.swapped(1);
-                shown += u64::from(bus.clock.now_ns() >= last_from);
-            }
-            if let Some(speed) = auto.update(bus, true, HOST, 0) {
-                bus.set_cycles_per_ms(speed);
-                speeds.push(speed);
+        let machine = Machine {
+            cap,
+            target,
+            ..Machine::default()
+        };
+        let ran = machine.run(seconds, frame);
+        (
+            ran.speeds[1..].iter().map(|&(_, speed)| speed).collect(),
+            ran.shown,
+        )
+    }
+
+    /// What `run_program` runs a program on: the frame rate cap, the frame
+    /// rate aimed for, the speed it starts at, the host's estimate at an
+    /// emulated time, and the emulated time dropped behind the wall clock
+    /// for lag up to then.
+    struct Machine {
+        cap: crate::frame_cap::Cap,
+        target: u32,
+        start: u32,
+        host: fn(u64) -> u32,
+        lost: fn(u64) -> u64,
+    }
+
+    impl Default for Machine {
+        fn default() -> Self {
+            Self {
+                cap: crate::frame_cap::Cap::Off,
+                target: 60,
+                start: 200_000,
+                host: |_| HOST,
+                lost: |_| 0,
             }
         }
-        (speeds, shown as f64 / 10.0)
+    }
+
+    /// A run on a `Machine`.
+    struct Ran {
+        /// Each speed `auto` ran at, and from when.
+        speeds: Vec<(u64, u32)>,
+        /// The frames shown a second over the last ten seconds.
+        shown: f64,
+        /// The probes up (`PROBE_STEP`) begun.
+        probes: u32,
+        /// The emulated time run, and of it above the speed each probe
+        /// came from.
+        ns: u64,
+        probing_ns: u64,
+    }
+
+    impl Ran {
+        /// The speed from `from_s` seconds on, weighed by the emulated time
+        /// each held, and the least and most of it.
+        fn from(&self, from_s: u64) -> (u32, u32, u32) {
+            let from = from_s * 1_000_000_000;
+            let (mut sum, mut least, mut most) = (0.0, u32::MAX, 0);
+            for (i, &(at, speed)) in self.speeds.iter().enumerate() {
+                let end = self.speeds.get(i + 1).map_or(self.ns, |&(next, _)| next);
+                if end <= from {
+                    continue;
+                }
+                sum += (end - at.max(from)) as f64 * speed as f64;
+                (least, most) = (least.min(speed), most.max(speed));
+            }
+            ((sum / (self.ns - from) as f64) as u32, least, most)
+        }
+    }
+
+    impl Machine {
+        fn run(&self, seconds: u64, mut frame: impl FnMut(&mut Bus) -> u32) -> Ran {
+            let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+            let bus = &mut cpu.bus;
+            bus.set_cycles_per_ms(self.start);
+            bus.frame_cap.set(self.cap);
+            let mut auto = AutoSpeed::new(3000, Some(self.target));
+            let mut ran = Ran {
+                speeds: vec![(0, self.start)],
+                shown: 0.0,
+                probes: 0,
+                ns: 0,
+                probing_ns: 0,
+            };
+            let last_from = seconds.saturating_sub(10) * 1_000_000_000;
+            let mut shown = 0;
+            let mut probing = None;
+            while bus.clock.now_ns() < seconds * 1_000_000_000 {
+                let before = bus.clock.now_ns();
+                for _ in 0..frame(bus) {
+                    while let Some(until) = bus.frame_cap.wait(bus.clock.now_ns(), None) {
+                        idle_until(bus, until);
+                    }
+                    bus.frame_cap.shown(bus.clock.now_ns());
+                    bus.activity.swapped(1);
+                    shown += u64::from(bus.clock.now_ns() >= last_from);
+                }
+                let now = bus.clock.now_ns();
+                if probing.is_some_and(|from| bus.clock.cycles_per_ms() > from) {
+                    ran.probing_ns += now - before;
+                }
+                if let Some(speed) = auto.update(bus, true, (self.host)(now), (self.lost)(now)) {
+                    bus.set_cycles_per_ms(speed);
+                    ran.speeds.push((now, speed));
+                }
+                match auto.step {
+                    Step::Probed { from, .. } => {
+                        ran.probes += u32::from(probing.is_none());
+                        probing = Some(from);
+                    }
+                    _ => probing = None,
+                }
+            }
+            ran.ns = bus.clock.now_ns();
+            ran.shown = shown as f64 / 10.0;
+            ran
+        }
     }
 
     /// The machine idles until `ns`, as a thread that waits does.
@@ -4471,6 +5215,502 @@ mod tests {
             let (held, _) = run_program(Cap::Auto, 60, 120, on_the_clock(fps, work, presents));
             assert!(ends_within(&held, &free), "{fps}: {held:?}, without {free:?}");
         }
+    }
+
+    /// A machine that starts at 20,000.
+    fn from_20000() -> Machine {
+        Machine {
+            start: 20_000,
+            ..Machine::default()
+        }
+    }
+
+    /// The machine runs until `ns` without halting, as a program that
+    /// waits in a loop does.
+    fn busy_until(bus: &mut Bus, ns: u64) {
+        let left = ns.saturating_sub(bus.clock.now_ns());
+        bus.clock.icount += (left * bus.clock.cycles_per_ms() as u64).div_ceil(1_000_000);
+    }
+
+    /// Quake's timedemo after its loading screen: for `loading_ns`, a
+    /// frame each 125 ms with 212 KB from the drive (1.7 MB a second), and
+    /// then scenes of 1.5 s whose frames take `least` to twice that many
+    /// instructions, each frame 10% more or less.
+    fn timedemo(loading_ns: u64, least: u64) -> impl FnMut(&mut Bus) -> u32 {
+        let mut i = 0u64;
+        move |bus| {
+            let now = bus.clock.now_ns();
+            if now < loading_ns {
+                busy_until(bus, (now / 125_000_000 + 1) * 125_000_000);
+                bus.activity.io_bytes += 212_500;
+                return 1;
+            }
+            i += 1;
+            let scene = now / 1_500_000_000;
+            let weight = (scene.wrapping_mul(2_654_435_761) >> 7) % 1000;
+            let jitter = (i.wrapping_mul(40_503) >> 3) % 200;
+            bus.clock.icount += least * (1000 + weight) / 1000 * (900 + jitter) / 1000;
+            1
+        }
+    }
+
+    #[test]
+    fn a_timedemo_after_its_loading_screen_gets_the_speed_the_host_has() {
+        // Frames of 7 to 14 million instructions: 57 to 28 frames a second
+        // at 400,000, half of what the host has, as far as a probe goes.
+        // The loading screen draws 8 a second at 20,000; judged as one
+        // scene with the timedemo, the knee came out near 20,000 (#1160).
+        let from_20000 = from_20000();
+        let ran = from_20000.run(150, timedemo(2_100_000_000, 7_000_000));
+        let (mean, least, _) = ran.from(90);
+        assert!(mean >= 300_000 && least >= 200_000, "{:?}", ran.speeds);
+        // A cluster of stalls while it loads (#783): the host's estimate
+        // reads 75,000, and 60% of the time dropped counts as lag.
+        let stalls = Machine {
+            host: |ns| if ns < 2_100_000_000 { 75_000 } else { HOST },
+            lost: |ns| ns.min(2_100_000_000) * 6 / 10,
+            ..from_20000
+        };
+        let ran = stalls.run(150, timedemo(2_100_000_000, 7_000_000));
+        let (mean, least, _) = ran.from(90);
+        assert!(mean >= 300_000 && least >= 200_000, "{:?}", ran.speeds);
+    }
+
+    #[test]
+    fn a_step_up_into_a_lighter_scene_is_judged_from_there() {
+        // Quake (#1160): its loading screen drew 8 frames a second at
+        // 20,000, and the timedemo 41 at 80,000 right after, 5.1 times the
+        // frames for 4 times the speed: another scene. The search goes on
+        // from 80,000 as from its first measurement, and when the next step
+        // draws fewer frames, that tells it the scene changed again, and it
+        // goes on. Judged from the loading screen's 8, the timedemo's 36 at
+        // the next step put the knee at 90,000.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Raised {
+            from: 20_000,
+            fps: 8.0,
+            below: (5_000, 2.0),
+        };
+        let at = |fps| Measurement {
+            fps: Some(fps),
+            ..STILL
+        };
+        let mut speed = auto.decide(80_000, &at(41.0), true, HOST);
+        let Step::Raised { below, .. } = auto.step else {
+            panic!("{:?}", auto.step)
+        };
+        assert_eq!(below.0, 80_000);
+        for _ in 0..JUDGED - 1 {
+            speed = auto.decide(speed, &at(36.0), true, HOST);
+        }
+        assert!(speed > 136_000, "{speed}: {:?}", auto.step);
+    }
+
+    #[test]
+    fn a_heavier_scene_under_a_step_up_does_not_stop_the_search() {
+        // The step up from 20,000 lands in a heavier scene: 40 frames a
+        // second there, 32 at 80,000, and the knee reckoned from the two
+        // is under 20,000. The scene's frames follow the speed, a frame for
+        // each 2500 instructions per ms, a quarter more or less from one
+        // measurement to the next as Quake's timedemo does, which the
+        // small steps up a hold tries can't tell from noise but now and
+        // then. The search goes on from 80,000 to the refresh rate, 70
+        // frames a second at 175,000.
+        let mut auto = AutoSpeed::new(3000, None);
+        let mut speed = 20_000;
+        let mut speeds = Vec::new();
+        let mut seed = 1;
+        for i in 0..120 {
+            let per = if i == 0 { 500.0 } else { 2500.0 };
+            let m = Measurement {
+                fps: Some(speed as f64 / per * noise(&mut seed, 0.25)),
+                ..STILL
+            };
+            speed = auto.decide(speed, &m, true, HOST);
+            speeds.push(speed);
+        }
+        // Within 20 measurements, ten seconds, about as long as Quake's
+        // timedemo runs: the small steps a hold tries take minutes.
+        assert!(speeds[20..].iter().all(|&s| s >= 120_000), "{speeds:?}");
+    }
+
+    #[test]
+    fn a_long_run_of_scenes_does_not_swing() {
+        // Ten minutes of scenes whose frames take 12 to 24 million
+        // instructions, short of 60 frames a second at any speed the host
+        // has: the speed goes up to what the host has, and probes don't
+        // keep coming, or swing it up and down.
+        let ran = from_20000().run(600, timedemo(2_100_000_000, 12_000_000));
+        let (mean, least, most) = ran.from(300);
+        let tail = &ran.speeds[ran.speeds.len().saturating_sub(20)..];
+        assert!(
+            mean >= 300_000 && least * 2 >= most,
+            "{least} to {most}: {tail:?}"
+        );
+        assert!(ran.probes <= 12, "{} probes: {tail:?}", ran.probes);
+    }
+
+    #[test]
+    fn programs_with_nothing_to_gain_get_no_probes() {
+        // Synced to the display, on the clock at 30, a movie, frame-driven:
+        // none is short of the target and busy at once.
+        let frame_driven = || {
+            let mut i = 0;
+            move |bus: &mut Bus| {
+                bus.clock.icount += [1_400_000, 50_000, 50_000][i % 3];
+                i += 1;
+                1
+            }
+        };
+        let none = |ran: Ran, what: &str| assert_eq!(ran.probes, 0, "{what}: {:?}", ran.speeds);
+        none(Machine::default().run(240, synced(750_000)), "synced");
+        none(
+            Machine::default().run(240, on_the_clock(30, 1_000_000, 1)),
+            "30",
+        );
+        none(
+            Machine::default().run(240, on_the_clock(15, 2_000_000, 2)),
+            "movie",
+        );
+        none(Machine::default().run(240, frame_driven()), "frame-driven");
+    }
+
+    #[test]
+    fn a_game_that_spins_to_its_own_rate_pays_little_for_probes() {
+        // Doom's 35 frames a second, waiting for the timer in a loop: the
+        // step that found it drew as many frames at more speed, and over ten
+        // minutes probes take a few percent of the time at most. The speed
+        // it holds stays.
+        let doom = || {
+            let mut next = 0;
+            move |bus: &mut Bus| {
+                busy_until(bus, next);
+                next = bus.clock.now_ns().max(next) + 1_000_000_000 / 35;
+                bus.clock.icount += 1_000_000;
+                1
+            }
+        };
+        let ran = from_20000().run(600, doom());
+        let share = ran.probing_ns as f64 / ran.ns as f64;
+        assert!(share <= 0.03, "{share}, {} probes", ran.probes);
+        let (mean, least, _) = ran.from(60);
+        assert!(least as f64 >= mean as f64 * 0.8, "{:?}", ran.speeds);
+    }
+
+    /// A hold at `speed` drawing `fps`, judged.
+    fn holding(fps: f64) -> AutoSpeed {
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.unsure = true;
+        auto.step = Step::Hold {
+            fps,
+            left: HOLD_WINDOWS,
+            more: false,
+            recent: fps,
+            seen: JUDGED,
+            dipped: 0,
+        };
+        auto
+    }
+
+    #[test]
+    fn a_probe_goes_no_further_than_the_search_from_the_start() {
+        // A game paced by its delay loops: its frames follow the speed, a
+        // frame for each 4000 instructions per ms. From the start the search
+        // takes it to the refresh rate, 70 frames a second at 280,000; a
+        // probe from a hold at 60,000 goes no further.
+        let program = game(1.0 / 4000.0, 1000.0);
+        let start = *run(&program, true, 60).iter().max().unwrap();
+        let mut auto = holding(15.0);
+        let mut speed = 60_000;
+        let mut most = 0;
+        for _ in 0..200 {
+            speed = auto.decide(speed, &program(speed), true, HOST);
+            most = most.max(speed);
+        }
+        assert!(most <= start + start / 20, "{most}, from the start {start}");
+        assert!(
+            speed >= start - start / 5,
+            "{speed}, from the start {start}"
+        );
+    }
+
+    #[test]
+    fn probes_that_miss_back_off() {
+        // Doom's 35 frames a second held in doubt, as after a step whose
+        // scene got heavier: each probe misses, and over ten minutes of
+        // measurements the probes take under 3% of them.
+        let mut auto = holding(35.0);
+        let mut speed = 60_000;
+        let (mut probing, mut probes) = (0, 0);
+        for i in 0..1200 {
+            let was = matches!(auto.step, Step::Probed { .. });
+            speed = auto.decide(speed, &doom(speed, i), true, HOST);
+            let now = matches!(auto.step, Step::Probed { .. });
+            probing += usize::from(now);
+            probes += usize::from(now && !was);
+        }
+        assert!(
+            probes >= 3 && probing <= 1200 * 3 / 100,
+            "{probes} probes, {probing}"
+        );
+        assert_eq!(auto.probe_misses, MOST_PROBE_BACKOFFS);
+    }
+
+    #[test]
+    fn no_probe_while_a_host_limit_holds() {
+        // A hold far under the host, short of the refresh rate, with the
+        // cap a cluster of stalls set: no probe until the limits end.
+        let program = game(1.0 / 4000.0, 1000.0);
+        let mut auto = holding(15.0);
+        auto.lagged = Some((70_000, LAGGED_WINDOWS));
+        auto.slow_host = Some(60_000);
+        for _ in 0..JUDGED - 1 {
+            let speed = auto.decide(60_000, &program(60_000), true, HOST);
+            assert!(!matches!(auto.step, Step::Probed { .. }), "{speed}");
+        }
+    }
+
+    #[test]
+    fn a_host_that_struggles_probes_as_far_as_it_has_room_for() {
+        // A hold at 60,000 drawing 15 frames a second, a quarter of the 70
+        // aimed for, on a host whose estimate reads 200,000: the probe goes
+        // to half of that, 100,000, short of the 120,000 it would go to
+        // with room.
+        let program = game(1.0 / 4000.0, 1000.0);
+        let mut auto = holding(15.0);
+        let up = auto.decide(60_000, &program(60_000), true, 200_000);
+        assert!(matches!(auto.step, Step::Probed { .. }), "{:?}", auto.step);
+        assert_eq!(up, 100_000);
+        // At 80,000, half the estimate is less than `TWO_STEPS` up: no
+        // probe.
+        let mut auto = holding(20.0);
+        let speed = auto.decide(80_000, &program(80_000), true, 200_000);
+        assert!(matches!(auto.step, Step::Hold { .. }), "{:?}", auto.step);
+        assert_eq!(speed, 80_000);
+    }
+
+    #[test]
+    fn a_hold_not_in_doubt_gets_no_probe() {
+        // As short of the target as a probe asks for, with room on the
+        // host, but the step that stopped the search gained a little, which
+        // tells where the program's frames stop following the speed.
+        let program = game(1.0 / 4000.0, 1000.0);
+        let mut auto = holding(15.0);
+        auto.unsure = false;
+        for _ in 0..2 * HOLD_WINDOWS {
+            let speed = auto.decide(60_000, &program(60_000), true, HOST);
+            assert!(!matches!(auto.step, Step::Probed { .. }), "{speed}");
+        }
+    }
+
+    #[test]
+    fn a_heavier_scene_under_a_long_step_down_searches_again() {
+        // Oni (#783): a step down that the host's estimate took a little
+        // further than a step, from 56,895 to 48,952, while the game
+        // started its level and went from 60 frames a second to 7. The
+        // hold keeps the 60 to judge by, and the heavier scene starts the
+        // search again.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Lowered {
+            from: 56_895,
+            fps: 60.0,
+            sum: 0.0,
+            seen: 0,
+            short: 0,
+        };
+        let heavy = game(7.0 / 48_952.0, 1000.0);
+        let mut speed = auto.decide(48_952, &heavy(48_952), true, HOST);
+        assert!(
+            matches!(auto.step, Step::Hold { fps, .. } if fps == 60.0),
+            "{:?}",
+            auto.step
+        );
+        for _ in 0..3 {
+            speed = auto.decide(speed, &heavy(speed), true, HOST);
+        }
+        assert!(speed > 200_000, "{speed}");
+    }
+
+    #[test]
+    fn a_heavier_scene_under_a_small_step_up_searches_again() {
+        // A step up of `FINE_STEP` that draws half the frames landed in a
+        // heavier scene: the hold back at 100,000 keeps the 40 frames a
+        // second it drew there, and the heavier scene starts the search
+        // again.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Raised {
+            from: 100_000,
+            fps: 40.0,
+            below: (100_000, 40.0),
+        };
+        let heavy = game(20.0 / 115_000.0, 1000.0);
+        let mut speed = auto.decide(115_000, &heavy(115_000), true, HOST);
+        assert_eq!(speed, 100_000);
+        assert!(
+            matches!(auto.step, Step::Hold { fps, .. } if fps == 40.0),
+            "{:?}",
+            auto.step
+        );
+        for _ in 0..3 {
+            speed = auto.decide(speed, &heavy(speed), true, HOST);
+        }
+        assert!(speed > 200_000, "{speed}");
+    }
+
+    #[test]
+    fn a_frame_rate_halved_by_the_retrace_under_a_long_step_down_holds() {
+        // A game that waits for a 60 Hz retrace, with work for 70 frames a
+        // second at 100,000: a step down that the host's estimate took to
+        // 84,000 leaves it work for 58.8, and it shows 30. That falls by a
+        // fifth more than the speed did, as a heavier scene's frames do,
+        // but back at 100,000 it shows its 60 again, and the hold there
+        // keeps them without searching again.
+        let retrace = |speed: u32| {
+            let work = 70.0 * speed as f64 / 100_000.0;
+            Measurement {
+                fps: Some(60.0 / (60.0 / work).ceil()),
+                refresh: 60.0,
+                ..STILL
+            }
+        };
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Lowered {
+            from: 100_000,
+            fps: 60.0,
+            sum: 0.0,
+            seen: 0,
+            short: 0,
+        };
+        let mut speed = auto.decide(84_000, &retrace(84_000), true, HOST);
+        assert!(
+            matches!(auto.step, Step::Hold { fps, .. } if fps == 60.0),
+            "{:?}",
+            auto.step
+        );
+        for _ in 0..HOLD_WINDOWS {
+            assert_eq!(speed, 100_000);
+            assert!(matches!(auto.step, Step::Hold { .. }), "{:?}", auto.step);
+            speed = auto.decide(speed, &retrace(speed), true, HOST);
+        }
+    }
+
+    #[test]
+    fn a_load_during_a_probe_is_left_out_of_its_mean() {
+        // A load in a probe's measurements (`LOADS`) draws frames of
+        // another scene, which say nothing of the speed: the mean leaves
+        // it out and the one after it, and the probe goes on. Rage of
+        // Mages 2 streams its data in play, a measurement of it at a time.
+        let program = game(1.0 / 4000.0, 1000.0);
+        let mut auto = holding(15.0);
+        let up = auto.decide(60_000, &program(60_000), true, HOST);
+        assert!(
+            matches!(auto.step, Step::Probed { .. }) && up > 60_000,
+            "{up}"
+        );
+        let loading = Measurement {
+            io: LOADS,
+            fps: Some(1.0),
+            ..program(up)
+        };
+        let mut speed = up;
+        for i in 0..JUDGED + 2 {
+            let m = if i == 1 { &loading } else { &program(up) };
+            speed = auto.decide(speed, m, true, HOST);
+        }
+        assert_eq!(speed, up);
+        assert!(matches!(auto.step, Step::Hold { .. }), "{:?}", auto.step);
+        assert_eq!(auto.probe_misses, 0);
+
+        // A load that lasts `JUDGED` measurements ends the probe: it goes
+        // back and waits, and counts no miss.
+        let mut auto = holding(15.0);
+        let up = auto.decide(60_000, &program(60_000), true, HOST);
+        let mut back = up;
+        for _ in 0..JUDGED {
+            back = auto.decide(back, &loading, true, HOST);
+        }
+        assert_eq!(back, 60_000);
+        assert_eq!(auto.probe_misses, 0);
+        assert!(auto.probe_wait > 0);
+    }
+
+    /// A step up from 80,000, which drew 40 frames a second, to 140,000,
+    /// judged on `JUDGED` measurements of 30 there.
+    fn overshot_by_fewer_frames(host: u32) -> (AutoSpeed, u32) {
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Overshot {
+            below: (80_000, 40.0),
+            sum: 30.0 * (JUDGED - 1) as f64,
+            seen: JUDGED - 1,
+        };
+        let m = Measurement {
+            fps: Some(30.0),
+            ..STILL
+        };
+        let speed = auto.decide(140_000, &m, true, host);
+        (auto, speed)
+    }
+
+    #[test]
+    fn a_step_up_that_draws_fewer_frames_searches_on_below_the_host() {
+        // Fewer frames at more speed: another scene under the step. With
+        // room on the host, the search goes on from the step's speed.
+        let (auto, speed) = overshot_by_fewer_frames(HOST);
+        assert!(
+            matches!(auto.step, Step::Raised { from: 140_000, .. }),
+            "{:?}",
+            auto.step
+        );
+        assert!(speed > 140_000, "{speed}");
+        assert!(!auto.unsure);
+    }
+
+    #[test]
+    fn a_step_up_that_draws_fewer_frames_at_the_host_holds_in_doubt() {
+        // At what the host has, the search can't go on: it holds a step's
+        // headroom above the speed below, in doubt, which a probe may try.
+        let (auto, speed) = overshot_by_fewer_frames(140_000);
+        assert!(matches!(auto.step, Step::Hold { .. }), "{:?}", auto.step);
+        assert_eq!(speed, 88_000);
+        assert!(auto.unsure);
+    }
+
+    #[test]
+    fn a_hold_under_limits_that_end_probes() {
+        // A hold short of the target under limits from a host that fell
+        // behind: once the host shows far more (`far_more`) the limits end,
+        // and the hold under them is in doubt, which a probe tries.
+        let program = game(1.0 / 4000.0, 1000.0);
+        let mut auto = holding(15.0);
+        auto.unsure = false;
+        auto.lagged = Some((70_000, LAGGED_WINDOWS));
+        auto.slow_host = Some(60_000);
+        let mut probed = false;
+        for _ in 0..2 * JUDGED {
+            auto.decide(60_000, &program(60_000), true, HOST);
+            probed |= matches!(auto.step, Step::Probed { .. });
+        }
+        assert_eq!(auto.lagged, None);
+        assert!(probed, "{:?}", auto.step);
+    }
+
+    #[test]
+    fn a_probe_that_falls_behind_is_a_miss() {
+        let program = game(1.0 / 4000.0, 1000.0);
+        let mut auto = holding(15.0);
+        let up = auto.decide(60_000, &program(60_000), true, HOST);
+        assert!(
+            matches!(auto.step, Step::Probed { .. }) && up > 60_000,
+            "{up}"
+        );
+        let behind = Measurement {
+            pace: 0.6,
+            ..program(up)
+        };
+        let back = auto.decide(up, &behind, true, HOST);
+        assert!(back <= 60_000, "{back}");
+        assert_eq!(auto.probe_misses, 1);
+        assert!(auto.probe_wait > 0);
     }
 
     #[test]
