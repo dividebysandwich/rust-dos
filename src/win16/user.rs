@@ -300,6 +300,7 @@ static APIS: &[Api16] = &[
         "DlgDirListComboBoxA",
         b'w',
     ),
+    rust("DlgDirSelectComboBox", 194, "wpw", dlg_dir_select_combo_box),
     rust("TabbedTextOut", 196, "wsspssps", tabbed_text_out),
     rust("GetTabbedTextExtent", 197, "wpwwp", get_tabbed_text_extent),
     rust("OpenComm", 200, "pww", comm::open_comm),
@@ -1456,6 +1457,14 @@ fn dlg_int(text: &[u8], signed: bool) -> Option<u16> {
 
 fn dlg_dir_select(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     go(cpu, "DlgDirSelectExA", &[args[0], args[1], 128, args[2]])
+}
+
+fn dlg_dir_select_combo_box(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    go(
+        cpu,
+        "DlgDirSelectComboBoxExA",
+        &[args[0], args[1], 128, args[2]],
+    )
 }
 
 /// The child of `dialog` whose id is `id`.
