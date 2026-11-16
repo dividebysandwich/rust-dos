@@ -232,7 +232,7 @@ pub(crate) fn spawn(
         if let Some((engine, engine_arguments)) = launcher::engine(cpu, &path, &file) {
             let line = format!("{} {}", engine, engine_arguments);
             let environment = Some(environment);
-            return spawn(
+            let spawned = spawn(
                 cpu,
                 Some(&engine),
                 Some(&line),
@@ -241,8 +241,18 @@ pub(crate) fn spawn(
                 flags,
                 startup,
             );
+            // The almanac knows the setup by its launcher, which stays on
+            // the disc, not by the engine it unpacks to a temporary folder.
+            if spawned.is_ok() {
+                cpu.almanac.last_program = Some(path);
+            }
+            return spawned;
         }
-        return spawn_win16(cpu, &path, &file, arguments, environment, &startup);
+        let spawned = spawn_win16(cpu, &path, &file, arguments, environment, &startup);
+        if spawned.is_ok() {
+            cpu.almanac.last_program = Some(path);
+        }
+        return spawned;
     }
     let fields = startup.clone();
     let field = |i: u32| u32::from_le_bytes(fields[i as usize..][..4].try_into().unwrap());
@@ -295,6 +305,10 @@ pub(crate) fn spawn(
         cpu.bus.log_string(&format!("[W32] {}", message));
         ERROR_BAD_EXE_FORMAT
     })?;
+    // The program Explorer, a game's launcher or its autorun started is
+    // the one the settings window asks the almanac about, as one started
+    // from the DOS prompt is (exec.rs's `load_program`).
+    cpu.almanac.last_program = Some(path);
     let parent = process(cpu).id;
     set_parent(cpu, created.process.1, parent);
     Ok(handles(cpu, created.process, created.thread))
