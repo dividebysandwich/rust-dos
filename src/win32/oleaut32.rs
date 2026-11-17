@@ -9,6 +9,7 @@
 
 mod desc;
 mod errorinfo;
+mod invoke;
 mod model;
 mod msft;
 pub(crate) mod safearray;
@@ -117,7 +118,7 @@ static APIS: &[Api] = &[
     ),
     stdcall("ITypeInfo_GetImplTypeFlags", 0, 3, typelib::get_impl_type_flags),
     stdcall("ITypeInfo_GetIDsOfNames", 0, 4, typelib::get_ids_of_names),
-    stdcall("ITypeInfo_Invoke", 0, 8, typelib::invoke),
+    stdcall("ITypeInfo_Invoke", 0, 8, invoke::invoke),
     stdcall(
         "ITypeInfo_GetDocumentation",
         0,
@@ -230,6 +231,7 @@ static APIS: &[Api] = &[
     stdcall("SafeArrayPtrOfIndex", 148, 3, safearray::safe_array_ptr_of_index),
     stdcall("SafeArrayCreateVector", 411, 3, safearray::safe_array_create_vector),
     stdcall("VariantCopyInd", 11, 2, safearray::variant_copy_ind),
+    stdcall("DispGetParam", 28, 5, invoke::disp_get_param),
 ];
 
 /// The vtables, by their places in this list. ITypeLib's and ITypeInfo's
@@ -443,6 +445,11 @@ pub fn step(_: &mut Cpu, t: &mut Task, value: u32) -> Next {
         0 => Next::call(t.var(0), &[t.var(1), t.var(2), t.var(3), t.var(4)], 1),
         _ => Next::Done(value),
     }
+}
+
+/// ITypeInfo::Invoke's task (invoke.rs).
+pub fn invoke_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
+    invoke::step(cpu, t, value)
 }
 
 const S_OK: u32 = 0;

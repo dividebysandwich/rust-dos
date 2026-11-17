@@ -447,13 +447,13 @@ fn co_treat_as_class_writes_the_registrys_treat_as_key() {
             l.import(4),
             &[HKEY_CLASSES_ROOT, l.at(0x60), REG_SZ, l.at(0xA0), 1],
         )?;
-        call(a, treat_as.clone(), &[l.at(0), l.at(0x10)])?;
+        call(a, treat_as, &[l.at(0), l.at(0x10)])?;
         check_eax(a, 0, 0)?;
-        call(a, get_treat_as.clone(), &[l.at(0), l.at(0x40)])?;
+        call(a, get_treat_as, &[l.at(0), l.at(0x40)])?;
         check_eax(a, 0, 1)?;
         check_var(a, l.var(0x40), 0x7E57_0002, 2)?;
         // GUID_NULL takes the key away: the class is itself again.
-        call(a, treat_as.clone(), &[l.at(0), l.at(0x30)])?;
+        call(a, treat_as, &[l.at(0), l.at(0x30)])?;
         check_eax(a, 0, 3)?;
         call(a, get_treat_as, &[l.at(0), l.at(0x40)])?;
         check_eax(a, 1, 4)?;
@@ -522,7 +522,7 @@ fn a_safearray_of_bstrs_keeps_copies_of_its_elements() {
         a.push(l.var(0x10))?;
         a.push(l.at(0x0C))?;
         a.push(l.var(0x08))?;
-        a.call(put_element.clone())?;
+        a.call(put_element)?;
         check_eax(a, 0, 2)?;
         a.mov(l.var(0x0C), 4)?;
         a.push(l.var(0x10))?;
@@ -532,7 +532,7 @@ fn a_safearray_of_bstrs_keeps_copies_of_its_elements() {
         check_eax(a, 0x8002_000B_u32 as i32, 3)?;
         // The array holds its own copy: the program's may go.
         a.push(l.var(0x10))?;
-        a.call(free.clone())?;
+        a.call(free)?;
         a.mov(l.var(0x0C), 3)?;
         a.push(l.at(0x14))?;
         a.push(l.at(0x0C))?;
@@ -559,7 +559,7 @@ fn a_safearray_of_bstrs_keeps_copies_of_its_elements() {
         a.call(copy)?;
         check_eax(a, 0, 8)?;
         a.push(l.var(0x1C))?;
-        a.call(destroy.clone())?;
+        a.call(destroy)?;
         a.push(l.var(0x08))?;
         a.call(destroy)?;
         check_eax(a, 0, 9)?;
@@ -664,5 +664,297 @@ fn a_docfile_keeps_its_streams_and_classes() {
             file.is_ok_and(|f| f.starts_with(&[0xD0, 0xCF, 0x11, 0xE0])),
             "{core:?}: the file is a compound file"
         );
+    }
+}
+
+/// ITypeInfo::Invoke of the IShape object at 0x50 with the DISPPARAMS at
+/// 0x90: `count` arguments at 0xB0, the first `named` of them named by
+/// the DISPIDs at 0xA0; the result at 0xE0, the EXCEPINFO at 0xF0.
+fn invoke_shape(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    memid: i32,
+    flags: i32,
+    count: i32,
+    named: i32,
+) -> Result<(), IcedError> {
+    a.mov(l.var(0x90), l.at(0xB0))?;
+    a.mov(l.var(0x94), l.at(0xA0))?;
+    a.mov(l.var(0x98), count)?;
+    a.mov(l.var(0x9C), named)?;
+    call_method(
+        a,
+        l.at(0x44),
+        11,
+        &[
+            l.at(0x50),
+            memid,
+            flags,
+            l.at(0x90),
+            l.at(0xE0),
+            l.at(0xF0),
+            l.at(0x110),
+        ],
+    )
+}
+
+#[test]
+fn type_info_invoke_calls_a_method_by_its_description() {
+    const DISPATCH_METHOD: i32 = 1;
+    const DISPATCH_PROPERTYGET: i32 = 2;
+    const DISPATCH_PROPERTYPUT: i32 = 4;
+    const E_FAIL: i32 = 0x8000_4005_u32 as i32;
+    const DISP_E_EXCEPTION: i32 = 0x8002_0009_u32 as i32;
+    const DISP_E_BADPARAMCOUNT: i32 = 0x8002_000E_u32 as i32;
+    const DISP_E_MEMBERNOTFOUND: i32 = 0x8002_0003_u32 as i32;
+    // 0x00: IShape's IID, a dual interface of the test library, 0x10:
+    // the library's file, 0x40: the library, 0x44: IShape's ITypeInfo.
+    // 0x50: the object (its vtable, then its width and where Move puts
+    // dx * 100 + dy), 0x60: its vtable, 0xA0: DISPID_PROPERTYPUT for a
+    // put's named argument, 0x120: the name.
+    let mut data = vec![0u8; 0x140];
+    let mut iid = 0x1111_1111_u32.to_le_bytes().to_vec();
+    iid.extend([0x22, 0x22, 0x33, 0x33, 0x44, 0x44, 0, 0, 0, 0, 0, 1]);
+    put(&mut data, 0x00, &iid);
+    put(&mut data, 0x10, &wide("C:\\RDMSFT.TLB"));
+    put(&mut data, 0xA0, &(-3i32).to_le_bytes());
+    put(&mut data, 0x120, &wide("Zed"));
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        ("OLEAUT32.dll", &["LoadTypeLib", "SysAllocString"]),
+    ];
+    let code = program(imports, &data.clone(), |a, l| {
+        // The vtable needs the methods' addresses: the code is assembled
+        // once to learn them, then again with them.
+        let code = |a: &mut CodeAssembler, at: [u32; 6]| -> Result<[CodeLabel; 6], IcedError> {
+            let mut query = a.create_label();
+            let mut add_ref = a.create_label();
+            let mut get_width = a.create_label();
+            let mut put_width = a.create_label();
+            let mut move_by = a.create_label();
+            let mut name = a.create_label();
+
+            a.xor(ebx, ebx)?;
+            call(a, l.import(1), &[l.at(0x10), l.at(0x40)])?;
+            a.mov(esi, eax)?;
+            // GetTypeInfoOfGuid: the dispinterface side.
+            call_method(a, l.at(0x40), 6, &[l.at(0), l.at(0x44)])?;
+            a.or(eax, esi)?;
+            check_eax(a, 0, 0)?;
+            // IUnknown's, IDispatch's (never called), then IShape's.
+            for (i, m) in [0, 1, 1, 1, 1, 1, 1, 2, 3, 4, 5].into_iter().enumerate() {
+                a.mov(l.var(0x60 + 4 * i as u32), at[m] as i32)?;
+            }
+            a.mov(l.var(0x50), l.at(0x60))?;
+
+            // Width = 42, from a VT_I2 named DISPID_PROPERTYPUT.
+            a.mov(l.var(0xB0), 2)?;
+            a.mov(l.var(0xB8), 42)?;
+            invoke_shape(a, l, 1, DISPATCH_PROPERTYPUT, 1, 1)?;
+            a.mov(esi, eax)?;
+            a.mov(eax, l.var(0x54))?;
+            a.sub(eax, 42)?;
+            a.or(eax, esi)?;
+            check_eax(a, 0, 1)?;
+            // Width's get: its [retval] as a VT_I4.
+            invoke_shape(a, l, 1, DISPATCH_PROPERTYGET, 0, 0)?;
+            a.mov(esi, eax)?;
+            a.mov(eax, l.var(0xE0))?;
+            a.sub(eax, 3)?;
+            a.or(esi, eax)?;
+            a.mov(eax, l.var(0xE8))?;
+            a.sub(eax, 42)?;
+            a.or(eax, esi)?;
+            check_eax(a, 0, 2)?;
+            // Move(5): dy is its default, 3.
+            a.mov(l.var(0xB0), 3)?;
+            a.mov(l.var(0xB8), 5)?;
+            invoke_shape(a, l, 2, DISPATCH_METHOD, 1, 0)?;
+            a.mov(esi, eax)?;
+            a.mov(eax, l.var(0x58))?;
+            a.sub(eax, 503)?;
+            a.or(eax, esi)?;
+            check_eax(a, 0, 3)?;
+            // Name: a BSTR [retval].
+            invoke_shape(a, l, 3, DISPATCH_METHOD, 0, 0)?;
+            let mut no_name = a.create_label();
+            a.test(eax, eax)?;
+            a.jne(no_name)?;
+            a.mov(eax, l.var(0xE0))?;
+            a.sub(eax, 8)?;
+            a.mov(esi, eax)?;
+            a.mov(eax, l.var(0xE8))?;
+            a.movzx(eax, word_ptr(eax))?;
+            a.sub(eax, b'Z' as i32)?;
+            a.or(eax, esi)?;
+            check_eax(a, 0, 4)?;
+            a.set_label(&mut no_name)?;
+            // Move(0, 1) fails: DISP_E_EXCEPTION, with its HRESULT.
+            a.mov(l.var(0xB0), 3)?;
+            a.mov(l.var(0xB8), 1)?;
+            a.mov(l.var(0xC0), 3)?;
+            a.mov(l.var(0xC8), 0)?;
+            invoke_shape(a, l, 2, DISPATCH_METHOD, 2, 0)?;
+            a.sub(eax, DISP_E_EXCEPTION)?;
+            a.mov(esi, eax)?;
+            a.mov(eax, l.var(0xF0 + 28))?;
+            a.sub(eax, E_FAIL)?;
+            a.or(eax, esi)?;
+            check_eax(a, 0, 5)?;
+            // Three arguments for two parameters.
+            a.mov(l.var(0xD0), 3)?;
+            invoke_shape(a, l, 2, DISPATCH_METHOD, 3, 0)?;
+            check_eax(a, DISP_E_BADPARAMCOUNT, 6)?;
+            invoke_shape(a, l, 99, DISPATCH_METHOD, 0, 0)?;
+            check_eax(a, DISP_E_MEMBERNOTFOUND, 7)?;
+            exit(a, l.import(0))?;
+
+            // QueryInterface(this, iid, out).
+            a.set_label(&mut query)?;
+            a.mov(eax, dword_ptr(esp + 12))?;
+            a.mov(ecx, dword_ptr(esp + 4))?;
+            a.mov(dword_ptr(eax), ecx)?;
+            method_returning(a, 0, 12)?;
+            // AddRef(this) and Release(this).
+            a.set_label(&mut add_ref)?;
+            method_returning(a, 1, 4)?;
+            // get_Width(this, out).
+            a.set_label(&mut get_width)?;
+            a.mov(ecx, dword_ptr(esp + 4))?;
+            a.mov(eax, dword_ptr(ecx + 4))?;
+            a.mov(ecx, dword_ptr(esp + 8))?;
+            a.mov(dword_ptr(ecx), eax)?;
+            method_returning(a, 0, 8)?;
+            // put_Width(this, value).
+            a.set_label(&mut put_width)?;
+            a.mov(ecx, dword_ptr(esp + 4))?;
+            a.mov(eax, dword_ptr(esp + 8))?;
+            a.mov(dword_ptr(ecx + 4), eax)?;
+            method_returning(a, 0, 8)?;
+            // Move(this, dx, dy): E_FAIL for dx 0.
+            a.set_label(&mut move_by)?;
+            let mut moves = a.create_label();
+            a.mov(eax, dword_ptr(esp + 8))?;
+            a.test(eax, eax)?;
+            a.jne(moves)?;
+            method_returning(a, E_FAIL, 12)?;
+            a.set_label(&mut moves)?;
+            a.imul_3(eax, eax, 100)?;
+            a.add(eax, dword_ptr(esp + 12))?;
+            a.mov(ecx, dword_ptr(esp + 4))?;
+            a.mov(dword_ptr(ecx + 8), eax)?;
+            method_returning(a, 0, 12)?;
+            // Name(this, out).
+            a.set_label(&mut name)?;
+            call(a, l.import(2), &[l.at(0x120)])?;
+            a.mov(ecx, dword_ptr(esp + 8))?;
+            a.mov(dword_ptr(ecx), eax)?;
+            method_returning(a, 0, 8)?;
+            Ok([query, add_ref, get_width, put_width, move_by, name])
+        };
+        let labels = code(a, [0; 6])?;
+        let ip = (l.data + data.len() as u32).next_multiple_of(0x1000) as u64;
+        let options = iced_x86::BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS;
+        let result = a.assemble_options(ip, options)?;
+        let mut at = [0; 6];
+        for (i, label) in labels.iter().enumerate() {
+            at[i] = result.label_ip(label)? as u32;
+        }
+        a.reset();
+        code(a, at)?;
+        Ok(())
+    });
+    for core in CORES {
+        let mut cpu = machine("invoke", core, &code);
+        fs::write(
+            "target/test_win32_com_server/invoke/RDMSFT.TLB",
+            include_bytes!("../../src/win32/oleaut32/testdata/rdtest-msft.tlb"),
+        )
+        .unwrap();
+        run_to_exit(&mut cpu);
+        assert_eq!(cpu.errorlevel, 0xFF, "{core:?}: {}", printed(&cpu));
+    }
+}
+
+#[test]
+fn an_empty_safearray_grown_by_redim_holds_its_elements() {
+    const VT_VARIANT: i32 = 12;
+    // 0x00: the bounds (none from 0), 0x08: the new bounds (3 from 0),
+    // 0x10: the array, 0x14: the index, 0x18: the bound, 0x20: the
+    // VARIANT put, 0x30: the one got back, 0x40: the elements, 0x44:
+    // the task allocator.
+    let mut data = vec![0u8; 0x50];
+    put(&mut data, 0x08, &[3, 0, 0, 0, 0, 0, 0, 0]);
+    put(&mut data, 0x20, &[3, 0, 0, 0, 0, 0, 0, 0, 77, 0, 0, 0]);
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        (
+            "OLEAUT32.dll",
+            &[
+                "SafeArrayCreate",
+                "SafeArrayRedim",
+                "SafeArrayPutElement",
+                "SafeArrayGetElement",
+                "SafeArrayGetUBound",
+                "SafeArrayDestroy",
+                "SafeArrayAccessData",
+                "SafeArrayUnaccessData",
+            ],
+        ),
+        ("OLE32.dll", &["CoGetMalloc"]),
+    ];
+    let code = program(imports, &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        call(a, l.import(1), &[VT_VARIANT, 1, l.at(0)])?;
+        a.mov(l.var(0x10), eax)?;
+        a.push(l.at(0x08))?;
+        a.push(eax)?;
+        a.call(l.import(2))?;
+        check_eax(a, 0, 0)?;
+        a.push(l.at(0x18))?;
+        a.push(1)?;
+        a.push(l.var(0x10))?;
+        a.call(l.import(5))?;
+        // The elements' block, from the task allocator, has room for 3.
+        a.push(l.at(0x40))?;
+        a.push(l.var(0x10))?;
+        a.call(l.import(7))?;
+        a.push(l.var(0x10))?;
+        a.call(l.import(8))?;
+        call(a, l.import(9), &[1, l.at(0x44)])?;
+        // IMalloc::GetSize(elements).
+        a.push(l.var(0x40))?;
+        a.mov(eax, l.var(0x44))?;
+        a.push(eax)?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.call(dword_ptr(eax + 4 * 6))?;
+        a.cmp(eax, 48)?;
+        let mut small = a.create_label();
+        a.jb(small)?;
+        check_var(a, l.var(0x18), 2, 1)?;
+        a.set_label(&mut small)?;
+        a.mov(l.var(0x14), 2)?;
+        a.push(l.at(0x20))?;
+        a.push(l.at(0x14))?;
+        a.push(l.var(0x10))?;
+        a.call(l.import(3))?;
+        check_eax(a, 0, 2)?;
+        a.push(l.at(0x30))?;
+        a.push(l.at(0x14))?;
+        a.push(l.var(0x10))?;
+        a.call(l.import(4))?;
+        check_eax(a, 0, 3)?;
+        check_var(a, l.var(0x30), 3, 4)?;
+        check_var(a, l.var(0x38), 77, 5)?;
+        a.push(l.var(0x10))?;
+        a.call(l.import(6))?;
+        check_eax(a, 0, 6)?;
+        a.or(ebx, 1 << 7)?;
+        exit(a, l.import(0))
+    });
+    for core in CORES {
+        let mut cpu = machine("safearray_redim", core, &code);
+        run_to_exit(&mut cpu);
+        assert_eq!(cpu.errorlevel, 0xFF, "{core:?}: {}", printed(&cpu));
     }
 }

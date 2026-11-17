@@ -716,7 +716,12 @@ pub fn safe_array_redim(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let n = cpu.bus.guest_read_32(bound);
     let low = cpu.bus.guest_read_32(bound + 4);
     let old = a.count();
-    let inner = old / a.bounds[0].0.max(1);
+    // The elements of each step of the dimension that changes: the
+    // other dimensions' counts, which an empty array has too.
+    let inner = a.bounds[1..]
+        .iter()
+        .fold(1u64, |n, &(c, _)| n.saturating_mul(c as u64))
+        .min(u32::MAX as u64) as u32;
     let new = (inner as u64 * n as u64).min(u32::MAX as u64) as u32;
     if new as u64 * a.element as u64 > MAX_BYTES {
         return Some(E_OUTOFMEMORY);

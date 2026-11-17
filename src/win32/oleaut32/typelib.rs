@@ -1677,10 +1677,52 @@ fn ids_at(cpu: &mut Cpu, ctx: &Ctx, names: u32, count: u32, ids: u32) -> u32 {
     hr
 }
 
-/// Invoke: calling a method of the program's object by the description
-/// of its vtable isn't done yet.
-pub fn invoke(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(E_NOTIMPL)
+/// The context of the ITypeInfo `this`, if it is one of these.
+pub(super) fn this_ctx(cpu: &mut Cpu, this: u32) -> Option<Ctx> {
+    this_info(cpu, this).map(|(_, ctx)| ctx)
+}
+
+/// The function `memid` that a call of the kinds `flags` (INVOKE_*)
+/// calls, in the type of `ctx` or one it inherits from, as the vtable
+/// has it: on the interface side of a dual interface. With it the
+/// library and the type it is in, a reference to the library held.
+pub(super) fn invokable(
+    cpu: &mut Cpu,
+    ctx: &Ctx,
+    memid: i32,
+    flags: u32,
+) -> Option<(Func, u32, u32)> {
+    add_ref_lib(cpu, ctx.lib);
+    let mut at = make_ctx(cpu, ctx.lib, ctx.index, ctx.interface);
+    for _ in 0..=MAX_BASES {
+        // A dual interface's dispinterface side, which a base can be as
+        // well: its interface side has the vtable's functions.
+        let m = model(cpu, at.lib);
+        if m.infos[at.index as usize].is_dual() && !at.interface {
+            let other = resolve(cpu, &at, 0xFFFF_FFFF);
+            release_ctx(cpu, &at);
+            at = other.ok()?;
+        }
+        let v = view(cpu, &at);
+        let found = v
+            .funcs
+            .iter()
+            .find(|f| f.memid == memid && f.invkind & flags != 0);
+        if let Some(f) = found {
+            let found = (f.clone(), at.lib, at.index);
+            add_ref_lib(cpu, at.lib);
+            release_ctx(cpu, &at);
+            return Some(found);
+        }
+        let Some(first) = v.impls.first() else {
+            break;
+        };
+        let next = resolve(cpu, &at, first.href);
+        release_ctx(cpu, &at);
+        at = next.ok()?;
+    }
+    release_ctx(cpu, &at);
+    None
 }
 
 /// GetDocumentation(memid, name, doc, help context, help file): of the

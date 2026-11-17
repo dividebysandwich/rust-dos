@@ -276,7 +276,7 @@ fn currency_text(c: i64) -> String {
 }
 
 /// What the destination gets.
-enum Out {
+pub(super) enum Out {
     Bits(u16, u64),
     Str(Vec<u16>),
     Iface(u16, u32),
@@ -377,7 +377,7 @@ fn change(v: &Val, vt: u16, flags: u32) -> Result<Out, u32> {
 }
 
 /// A VT_R4's text is "%.7G" of the single value.
-fn change_from(cpu: &mut Cpu, src: u32, vt: u16, flags: u32) -> Result<Out, u32> {
+pub(super) fn change_from(cpu: &mut Cpu, src: u32, vt: u16, flags: u32) -> Result<Out, u32> {
     let v = read(cpu, src, 0)?;
     if vt == VT_BSTR
         && let Val::Real(f) = v
@@ -447,7 +447,7 @@ pub fn variant_change_type_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     change_type(cpu, dest, src, flags & 0xFFFF, vt as u16)
 }
 
-fn change_type(cpu: &mut Cpu, dest: u32, src: u32, flags: u32, vt: u16) -> Option<u32> {
+pub(super) fn change_type(cpu: &mut Cpu, dest: u32, src: u32, flags: u32, vt: u16) -> Option<u32> {
     if !cpu.bus.guest_probe(dest, 16, true) || !cpu.bus.guest_probe(src, 16, false) {
         return Some(E_INVALIDARG);
     }
