@@ -82,6 +82,7 @@ pub fn translate(
         Movzx => movx(instr, false, &mut u),
         Movsx => movx(instr, true, &mut u),
         Xchg => xchg(instr, &mut u),
+        Xlatb => xlat(instr, &mut u),
         Bswap if i486 => bswap(instr, &mut u),
         Cbw => extend_acc(1, false, &mut u),
         Cwde => extend_acc(2, false, &mut u),
@@ -405,6 +406,29 @@ fn movx(instr: &Instruction, signed: bool, u: &mut Vec<Uop>) -> bool {
     }
     u.push(Uop::Extend { t: T0, from, signed });
     u.push(Uop::Set { r: dest, t: T0 });
+    true
+}
+
+/// XLAT: AL = the byte at seg:(E)BX + AL. iced gives the operand as a
+/// memory reference with base (E)BX and index AL, which `Uop::Ea` adds
+/// zero-extended, and wraps to 16 bits with a 16-bit address size.
+fn xlat(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+    if mem(instr, T1, 1, false, u).is_none() {
+        return false;
+    }
+    u.push(Uop::Load {
+        dst: T0,
+        m: T1,
+        size: 1,
+    });
+    u.push(Uop::Set {
+        r: Gpr {
+            index: 0,
+            high: false,
+            size: 1,
+        },
+        t: T0,
+    });
     true
 }
 
