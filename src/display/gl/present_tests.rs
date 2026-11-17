@@ -52,7 +52,7 @@ fn reference_capture(
         compile_sources(&screen.gl, screen.glsl, "reference", (vertex, fragment)).unwrap();
     let program = screen.programs.insert(Shader::Xbrz, Ok(reference)).unwrap();
     let gpu = screen.xbrz_gpu.replace(Err("reference draw".into()));
-    let result = screen.capture(frame, base, mono, display).unwrap();
+    let result = screen.capture(frame, base, mono, display, false).unwrap();
     let reference = screen
         .programs
         .insert(Shader::Xbrz, program)
@@ -71,7 +71,7 @@ fn xbrz_overlay_uploads_preserve_other_rows_and_recover_missed_revisions() {
     let video = sdl.video().unwrap();
     let mut screen = GlScreen::open(&video, "xBRZ overlay bands", (4, 6), true)
         .unwrap_or_else(|error| panic!("{}", error.reason));
-    screen.select(Shader::Xbrz, Filter::Nearest).unwrap();
+    screen.select(Shader::Xbrz, Filter::Sharp).unwrap();
     let base = Frame::from_rgb(4, 6, vec![80; 4 * 6 * 3]);
     let mut composed = base.clone();
     composed.track_overlays(true);
@@ -136,12 +136,12 @@ fn xbrz_overlay_uploads_preserve_other_rows_and_recover_missed_revisions() {
         .unwrap();
     assert_eq!(read(&screen), screen.xbrz_frame.overlay.rgba);
     let source = screen.xbrz_frame.source_revision();
-    screen.select(Shader::None, Filter::Nearest).unwrap();
+    screen.select(Shader::None, Filter::Sharp).unwrap();
     composed.rgba[(4 + 1) * 4] ^= 32;
     screen
         .present(&composed, None, 0..6, (4, 6), None, Monochrome::Off)
         .unwrap();
-    screen.select(Shader::Xbrz, Filter::Nearest).unwrap();
+    screen.select(Shader::Xbrz, Filter::Sharp).unwrap();
     screen
         .present(&composed, Some(&base), 0..0, (4, 6), None, Monochrome::Off)
         .unwrap();
@@ -206,7 +206,7 @@ fn xbrz_clean_and_flattened_presentations_share_preparation() {
     let video = sdl.video().unwrap();
     let mut screen = GlScreen::open(&video, "xBRZ input regression", (16, 12), true)
         .unwrap_or_else(|error| panic!("{}", error.reason));
-    screen.select(Shader::Xbrz, Filter::Nearest).unwrap();
+    screen.select(Shader::Xbrz, Filter::Sharp).unwrap();
     let native = Frame::from_rgb(8, 6, (0..144).map(|i| (i * 37) as u8).collect());
     let base = double(&native);
     let mut composed = base.clone();
@@ -320,14 +320,14 @@ fn xbrz_cached_passes_match_reference_and_reuse_source_work() {
             unsafe { screen.gl.delete_program(program.program) };
         }
     }
-    screen.select(Shader::Xbrz, Filter::Nearest).unwrap();
+    screen.select(Shader::Xbrz, Filter::Sharp).unwrap();
     let native = Frame::from_rgb(5, 3, (0..45).map(|i| (i * 37) as u8).collect());
     let mut base = double(&native);
     let mut composed = base.clone();
     composed.track_overlays(true);
     let draws = |screen: &GlScreen| screen.xbrz_gpu.as_ref().unwrap().as_ref().unwrap().draws;
     let compare = |screen: &mut GlScreen, frame: &Frame, base: &Frame, mono, size| {
-        let actual = screen.capture(frame, base, mono, size).unwrap();
+        let actual = screen.capture(frame, base, mono, size, false).unwrap();
         let expected = reference_capture(screen, frame, base, mono, size);
         assert_eq!(actual, expected);
         // SAFETY: the test owns this context and checks all pass errors.
@@ -553,7 +553,7 @@ fn xbrz_overlays_preserve_native_input_and_filtered_background() {
     let base = double(&native);
     let mut screen = GlScreen::open(&video, "xBRZ overlay regression", (16, 12), true)
         .unwrap_or_else(|e| panic!("{}", e.reason));
-    screen.select(Shader::Xbrz, Filter::Nearest).unwrap();
+    screen.select(Shader::Xbrz, Filter::Sharp).unwrap();
     let layer = Layer {
         rect: (4.0, 4.0, 2.0, 2.0),
         picture: Frame::from_rgb(1, 1, vec![20, 220, 80]),
@@ -575,7 +575,7 @@ fn xbrz_overlays_preserve_native_input_and_filtered_background() {
         mono::apply(&mut composed, mono);
         let mut tinted = native.clone();
         mono::apply(&mut tinted, mono);
-        let mut expected = screen.capture(&composed, &base, mono, (16, 12)).unwrap().rgba;
+        let mut expected = screen.capture(&composed, &base, mono, (16, 12), false).unwrap().rgba;
         assert_ne!(expected, composed.rgba, "xBRZ must smooth the diagonal edges");
         if overlay {
             composed.doubled = false;
@@ -646,22 +646,22 @@ fn xbrz_overlays_preserve_native_input_and_filtered_background() {
                 }
             }
         }
-        let captured = screen.capture(&composed, &base, mono, (16, 12)).unwrap();
+        let captured = screen.capture(&composed, &base, mono, (16, 12), false).unwrap();
         assert_eq!(captured.rgba, expected, "capture, mono: {mono:?}");
     }
-    let doubled = screen.capture(&base, &base, Monochrome::Off, (16, 12)).unwrap();
-    let undoubled = screen.capture(&native, &native, Monochrome::Off, (8, 6)).unwrap();
+    let doubled = screen.capture(&base, &base, Monochrome::Off, (16, 12), false).unwrap();
+    let undoubled = screen.capture(&native, &native, Monochrome::Off, (8, 6), false).unwrap();
     assert_eq!(doubled.rgba, undoubled.rgba);
     screen
         .present(&native, Some(&native), 0..6, (8, 6), None, Monochrome::Off)
         .unwrap();
     assert_eq!(texture(&screen), native.rgba);
-    screen.select(Shader::Scanlines, Filter::Nearest).unwrap();
-    let captured = screen.capture(&base, &base, Monochrome::Off, (16, 12)).unwrap();
+    screen.select(Shader::Scanlines, Filter::Sharp).unwrap();
+    let captured = screen.capture(&base, &base, Monochrome::Off, (16, 12), false).unwrap();
     assert_eq!((captured.width, captured.height), (16, 12));
     assert!(captured.rgba.as_chunks::<4>().0.iter().any(|p| p[..3] != [0; 3]));
-    screen.select(Shader::None, Filter::Nearest).unwrap();
-    assert!(screen.capture(&base, &base, Monochrome::Off, (16, 12)).is_none());
+    screen.select(Shader::None, Filter::Sharp).unwrap();
+    assert!(screen.capture(&base, &base, Monochrome::Off, (16, 12), false).is_none());
 }
 
 #[test]
@@ -678,8 +678,8 @@ fn xbrz_near_colour_edges_use_exact_colour_inequality() {
     let base = double(&native);
     let mut screen = GlScreen::open(&video, "xBRZ near colour regression", (10, 10), true)
         .unwrap_or_else(|e| panic!("{}", e.reason));
-    screen.select(Shader::Xbrz, Filter::Nearest).unwrap();
-    let output = screen.capture(&base, &base, Monochrome::Off, (10, 10)).unwrap();
+    screen.select(Shader::Xbrz, Filter::Sharp).unwrap();
+    let output = screen.capture(&base, &base, Monochrome::Off, (10, 10), false).unwrap();
     assert_eq!(&output.rgba[(2 * 10 + 7) * 4..][..3], &[40, 40, 40]);
 }
 
@@ -747,7 +747,7 @@ fn persistent_compositions_keep_their_pixels_after_partial_presentation() {
         mono::apply(&mut tinted, settings.monochrome);
         let Output::Gl(gl) = &display.out else { panic!("OpenGL is required") };
         assert_eq!(texture(gl), tinted.rgba);
-        assert!(display.shaded(&composed, &base).is_some());
+        assert!(display.shaded(&composed, &base, false).is_some());
     }
     let base = double(&frame);
     let mut composed = base.clone();
@@ -789,7 +789,7 @@ fn xbrz_incremental_regions_match_full_kernels_after_deferred_updates() {
     let video = sdl.video().unwrap();
     let mut screen = GlScreen::open(&video, "xBRZ damage regression", (96, 64), true)
         .unwrap_or_else(|error| panic!("{}", error.reason));
-    screen.select(Shader::Xbrz, Filter::Nearest).unwrap();
+    screen.select(Shader::Xbrz, Filter::Sharp).unwrap();
     let mut native = Frame::from_rgba(
         24,
         16,
@@ -847,7 +847,7 @@ fn xbrz_incremental_regions_match_full_kernels_after_deferred_updates() {
         if step % 13 == 0 {
             screen.xbrz_uploaded_revision = Some(u32::MAX);
         }
-        let actual = screen.capture(&frame, &base, mono, size).unwrap();
+        let actual = screen.capture(&frame, &base, mono, size, false).unwrap();
         assert_eq!(
             texture(&screen)
                 .iter()
@@ -1157,5 +1157,181 @@ fn a_toadforce_surface_is_shown_from_the_hosts_copy() {
         // The copy is what card memory holds now, and still shown.
         assert!(shows(&mut cpu, &colour), "{format:?}");
         cpu.bus.toadforce_set_host(None);
+    }
+}
+
+/// What the plain look draws of the screen's texture into a `w` by `h`
+/// framebuffer, as the window draws it into its letterbox, rows from the
+/// top, four bytes a pixel.
+fn drawn(screen: &mut GlScreen, (w, h): (u32, u32)) -> Vec<u8> {
+    let gl = screen.gl.clone();
+    let mut pixels = vec![0; (w * h * 4) as usize];
+    // SAFETY: the test owns the current context and what it makes in it.
+    unsafe {
+        let target = gl.create_texture().unwrap();
+        gl.bind_texture(glow::TEXTURE_2D, Some(target));
+        let none = glow::PixelUnpackData::Slice(None);
+        let rgba8 = glow::RGBA8 as i32;
+        let (tw, th) = (w as i32, h as i32);
+        gl.tex_image_2d(glow::TEXTURE_2D, 0, rgba8, tw, th, 0, glow::RGBA, glow::UNSIGNED_BYTE, none);
+        let framebuffer = gl.create_framebuffer().unwrap();
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+        let attach = glow::COLOR_ATTACHMENT0;
+        gl.framebuffer_texture_2d(glow::FRAMEBUFFER, attach, glow::TEXTURE_2D, Some(target), 0);
+        screen.draw_look(screen.texture, screen.texture_size, (0, 0, w, h), 1.0);
+        gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+        let out = glow::PixelPackData::Slice(Some(&mut pixels));
+        gl.read_pixels(0, 0, tw, th, glow::RGBA, glow::UNSIGNED_BYTE, out);
+        assert_eq!(gl.get_error(), glow::NO_ERROR);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        gl.delete_framebuffer(framebuffer);
+        gl.delete_texture(target);
+    }
+    pixels.chunks_exact(w as usize * 4).rev().flatten().copied().collect()
+}
+
+/// `frame` scaled `sx` by `sy` times with nearest sampling.
+fn nearest(frame: &Frame, (sx, sy): (u32, u32)) -> Vec<u8> {
+    let (w, h) = (frame.width * sx, frame.height * sy);
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let at = (((y / sy) * frame.width + x / sx) * 4) as usize;
+            out.extend_from_slice(&frame.rgba[at..at + 4]);
+        }
+    }
+    out
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn sharp_and_hard_scaling_are_nearest_sampling_at_whole_number_scales() {
+    let sdl = sdl3::init().unwrap();
+    let video = sdl.video().unwrap();
+    let mut screen = GlScreen::open(&video, "Sharp scaling", (64, 48), true)
+        .unwrap_or_else(|e| panic!("{}", e.reason));
+    let frame = Frame::from_rgb(16, 12, (0..16 * 12 * 3).map(|i| (i * 89 % 251) as u8).collect());
+    for filter in [Filter::Sharp, Filter::Hard] {
+        screen.select(Shader::None, filter).unwrap();
+        screen
+            .present(&frame, None, 0..12, (16, 12), None, Monochrome::Off)
+            .unwrap();
+        // 1x, 2x, 3x, and the two axes apart, as with a fixed aspect ratio.
+        for scale in [(1, 1), (2, 2), (3, 3), (2, 3), (5, 4)] {
+            let size = (16 * scale.0, 12 * scale.1);
+            assert_eq!(drawn(&mut screen, size), nearest(&frame, scale), "{filter:?} {scale:?}");
+        }
+        // A doubled picture is uploaded at its native size, and drawn as
+        // the doubled one would be.
+        let doubled = double(&frame);
+        screen
+            .present(&doubled, None, 0..24, (32, 24), None, Monochrome::Off)
+            .unwrap();
+        assert_eq!(screen.texture_size, (16, 12));
+        for scale in [(1, 1), (2, 2), (3, 3)] {
+            let size = (32 * scale.0, 24 * scale.1);
+            assert_eq!(drawn(&mut screen, size), nearest(&doubled, scale), "{filter:?} {scale:?}");
+        }
+    }
+}
+
+/// `filter=hard` is nearest sampling at any scale: each screen pixel is
+/// the texel under its centre. 12 texels over 28 or 20 screen pixels put
+/// no centre on a texel's edge, so the texel is never in doubt.
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn hard_scaling_is_nearest_sampling_at_any_scale() {
+    let sdl = sdl3::init().unwrap();
+    let video = sdl.video().unwrap();
+    let mut screen = GlScreen::open(&video, "Hard scaling", (64, 48), true)
+        .unwrap_or_else(|e| panic!("{}", e.reason));
+    screen.select(Shader::None, Filter::Hard).unwrap();
+    let frame = Frame::from_rgb(12, 12, (0..12 * 12 * 3).map(|i| (i * 89 % 251) as u8).collect());
+    screen
+        .present(&frame, None, 0..12, (12, 12), None, Monochrome::Off)
+        .unwrap();
+    for (w, h) in [(28u32, 28u32), (20, 28)] {
+        let texel = |at: u32, size: u32| (2 * at + 1) * 12 / (2 * size);
+        let expected: Vec<u8> = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .flat_map(|(x, y)| {
+                let at = ((texel(y, h) * 12 + texel(x, w)) * 4) as usize;
+                frame.rgba[at..at + 4].to_vec()
+            })
+            .collect();
+        assert_eq!(drawn(&mut screen, (w, h)), expected, "{w}x{h}");
+    }
+}
+
+/// How much of the screen each texel of one-pixel stripes covers along
+/// one axis: `values` are the screen pixels' whiteness (0 to 1) across
+/// the stripes, `texels` many, white first. A pixel's white goes to the
+/// white texel it overlaps and its black to the black one.
+fn stripe_coverage(values: &[f64], texels: usize) -> Vec<f64> {
+    let scale = values.len() as f64 / texels as f64;
+    let mut cover = vec![0.0; texels];
+    for (i, &white) in values.iter().enumerate() {
+        let (from, to) = (i as f64 / scale, (i + 1) as f64 / scale);
+        let first = from.floor() as usize;
+        let last = ((to - 1e-9).floor() as usize).min(texels - 1);
+        for (texel, share) in cover.iter_mut().enumerate().take(last + 1).skip(first) {
+            *share += if texel % 2 == 0 { white } else { 1.0 - white };
+        }
+    }
+    cover
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn sharp_scaling_gives_every_texel_the_same_width_at_two_and_a_half_times() {
+    let sdl = sdl3::init().unwrap();
+    let video = sdl.video().unwrap();
+    let mut screen = GlScreen::open(&video, "Sharp scaling", (64, 48), true)
+        .unwrap_or_else(|e| panic!("{}", e.reason));
+    screen.select(Shader::None, Filter::Sharp).unwrap();
+    // White and black columns one texel wide, and rows the same.
+    let (w, h) = (16u32, 12u32);
+    let stripes = |across: bool| {
+        let rgb = (0..w * h)
+            .flat_map(|i| {
+                let on = if across { i % w } else { i / w } % 2 == 0;
+                [if on { 255 } else { 0 }; 3]
+            })
+            .collect();
+        Frame::from_rgb(w, h, rgb)
+    };
+    // 2.5 times, and 320x200 at 4:3 in a 800x600 window: 2.5 across,
+    // 3 down.
+    for (scale, size) in [(2.5, (40, 30)), (2.5, (40, 36))] {
+        for across in [true, false] {
+            let frame = stripes(across);
+            screen
+                .present(&frame, None, 0..h as usize, (w, h), None, Monochrome::Off)
+                .unwrap();
+            let pixels = drawn(&mut screen, size);
+            let at = |x: u32, y: u32| pixels[((y * size.0 + x) * 4) as usize] as f64 / 255.0;
+            // Along the middle row or column.
+            let (values, texels, scale): (Vec<f64>, usize, f64) = if across {
+                ((0..size.0).map(|x| at(x, size.1 / 2)).collect(), w as usize, scale)
+            } else {
+                let down = size.1 as f64 / h as f64;
+                ((0..size.1).map(|y| at(size.0 / 2, y)).collect(), h as usize, down)
+            };
+            let cover = stripe_coverage(&values, texels);
+            for (texel, &width) in cover.iter().enumerate() {
+                // An 8-bit pixel's rounding on each of the two edges.
+                assert!(
+                    (width - scale).abs() <= 2.0 / 255.0,
+                    "across={across} {size:?}: texel {texel} covers {width}, not {scale}: {cover:?}"
+                );
+            }
+            // A blend is less than one screen pixel wide: no two pixels
+            // in a row are between black and white.
+            let blended: Vec<bool> = values.iter().map(|&v| v > 0.01 && v < 0.99).collect();
+            assert!(
+                !blended.windows(2).any(|pair| pair[0] && pair[1]),
+                "across={across} {size:?}: {values:?}"
+            );
+        }
     }
 }

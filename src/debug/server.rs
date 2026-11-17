@@ -2272,9 +2272,9 @@ STATUS / SCREEN
                                            bucket=16 (EIP rounded down), disasm=4 (lines a place),
                                            timeline=true (zones a second), wait_ms=N (wait for a
                                            profile with a duration to end); docs/profiling.md
-  GET  /api/screenshot[?shader=true]      screen with cursors; shader=true returns
-                                           filtered output size; format=png|raw works
-                                           with either (raw = RGB24 with x-width/x-height)
+  GET  /api/screenshot[?shader=true]      screen with cursors; shader=true returns the
+                                           window's output (shader or filter) at its size;
+                                           format=png|raw works with either (raw = RGB24 with x-width/x-height)
   GET  /api/screen/text[?format=text]      text-mode screen contents (CP437 -> Unicode);
                                            JSON has attrs: each row's attribute runs {col,len,attr},
                                            blink (bit 7 blinks, else bright background),

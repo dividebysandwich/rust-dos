@@ -129,7 +129,7 @@ impl GlScreen {
         match *self {}
     }
 
-    pub fn capture_size(&self, _display: (u32, u32)) -> Option<(u32, u32)> {
+    pub fn capture_size(&self, _display: (u32, u32), _plain: bool) -> Option<(u32, u32)> {
         match *self {}
     }
 
@@ -139,6 +139,7 @@ impl GlScreen {
         _base: &Frame,
         _mono: crate::video::mono::Monochrome,
         _display: (u32, u32),
+        _plain: bool,
     ) -> Option<Frame> {
         match *self {}
     }

@@ -156,7 +156,7 @@ jobs:
           # SDL3.dll for the program the tests start.
           echo "${{ github.workspace }}/SDL3/lib/x64" >> "$GITHUB_PATH"
 
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: stable
       # Saved only from main: every PR restores main's entries, while a
@@ -199,6 +199,10 @@ jobs:
             video::shader::tests::sources_compile
           xvfb-run -a cargo test --locked --bin rust-dos \
             display::gl:: -- --ignored --test-threads=1
+          # SDL's renderer (OpenGL on Mesa here) in its pixel-art mode.
+          xvfb-run -a cargo test --locked --bin rust-dos \
+            display::tests::sdl_sharp_scaling_gives_texels_one_width -- \
+            --ignored --test-threads=1
           xvfb-run -a cargo test --locked --test program \
             debug_journal_tests::xbrz_window_screenshots_use_the_selected_shader -- \
             --ignored --test-threads=1
@@ -417,7 +421,7 @@ jobs:
           strip openxr/libopenxr_loader.so.1
           cp "OpenXR-SDK-release-$OPENXR_VERSION/LICENSE" openxr/openxr-LICENSE.txt
 
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         if: ${{ !matrix.win7 }}
         with:
           toolchain: stable
@@ -426,7 +430,7 @@ jobs:
       # (is_console was missing), nightly-2026-10-31's does. Move it on now
       # and then, after checking with `cargo +nightly-<date> check
       # -Zbuild-std --target x86_64-win7-windows-msvc`.
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         if: matrix.win7
         with:
           toolchain: nightly-2026-10-31
@@ -605,7 +609,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
@@ -768,7 +772,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: stable
           components: clippy
@@ -845,7 +849,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: stable
           components: clippy
@@ -924,7 +928,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: stable
           targets: ${{ matrix.target }}

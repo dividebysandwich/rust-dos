@@ -2200,7 +2200,7 @@ fn main() -> Result<ExitCode, String> {
                     let paged = if record_ui { ui.with_layer(&screen, (1.0, 1.0)) } else { None };
                     let base = paged.as_ref().unwrap_or(&screen);
                     let shaded = (settings.record_shader && (screenshot || video_recording.is_some()))
-                        .then(|| display.shaded(base, &cached_frame))
+                        .then(|| display.shaded(base, &cached_frame, false))
                         .flatten();
                     let picture = shaded.as_ref().unwrap_or(base);
                     recorder.capture(base);
@@ -2275,7 +2275,7 @@ fn main() -> Result<ExitCode, String> {
                     let paged = ui.with_layer(&screen, (1.0, 1.0));
                     let frame = paged.as_ref().unwrap_or(&screen);
                     if dbg.wants_shader_frame() {
-                        let shaded = display.shaded(frame, &cached_frame);
+                        let shaded = display.shaded(frame, &cached_frame, true);
                         dbg.capture_frame_with_shader(frame, shaded.as_ref());
                     } else {
                         dbg.capture_frame(frame);
