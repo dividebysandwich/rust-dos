@@ -354,6 +354,8 @@ user32/input: skipped input.c:1154
 user32/input: skipped input.c:1263
 user32/input: skipped input.c:1529
 user32/input: skipped input.c:1597
+user32/listbox: listbox: 550 tests executed (0 marked as todo, 4 failures), 0 skipped.
+user32/listbox: failed listbox.c:257 (x4)
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
