@@ -612,11 +612,10 @@ pub struct Pacer {
     protected: bool,
     /// As fast as the host keeps up with, estimated from its frames.
     host: HostEstimate,
-    /// While the program gets all the host has (`AutoSpeed::flat_out`), a
-    /// run of `TRY_BEHIND_FRAMES` or more slow frames in a row has put the
-    /// boost's speed this low (`boost_cap`). The estimate itself is left
-    /// alone.
-    boost_cap: Option<f64>,
+    /// While the program gets all the host has, the boost
+    /// (`AutoSpeed::boost`) whose slow frames put its speed this low
+    /// (`cap_boost`). The estimate itself is left alone.
+    boost_cap: Option<(u32, f64)>,
     /// The frames measured for the host's speed so far: the instructions
     /// they ran, the time those took and the rest of their work.
     sample: HostSample,
@@ -1002,7 +1001,7 @@ impl Pacer {
                 let host_max = self
                     .host
                     .max
-                    .map(|max| self.boost_cap.map_or(max, |cap| cap.min(max)))
+                    .map(|max| self.boost_cap.map_or(max, |(_, cap)| cap.min(max)))
                     .map_or(MAX_CYCLES, |max| (max as u32).clamp(least, MAX_CYCLES));
                 if protected != self.protected {
                     self.protected = protected;
@@ -1079,27 +1078,36 @@ impl Pacer {
     /// of them were two seconds of a frozen movie (#1223).
     ///
     /// So from the `TRY_BEHIND_FRAMES`th such frame in a row, as many late
-    /// frames as end a step up (`AutoSpeed::falling_behind`), the speed
-    /// comes down half the way to each frame's (`HOST_FALL`). The cap goes
-    /// with the run's end or the boost's; the speed it took the boost to
-    /// stays until the next measurement. The estimate stays as the stall
-    /// rule keeps it: a load's stall of three frames or more (a disc read,
-    /// a shader compiled) says nothing of the host's speed at what the
-    /// program does after the load, and an estimate taken down by it
-    /// would start that from too low a speed.
+    /// frames as end a step up (`AutoSpeed::falling_behind`), a cap brings
+    /// the speed half the way down to each frame's (`HOST_FALL`), and from
+    /// then on to each frame short of the speed (`HOST_SHORT`), as the
+    /// estimate does after two short samples in a row. The cap lasts as
+    /// long as the boost: the next measurement starts without it.
+    ///
+    /// The estimate stays as the stall rule keeps it: a load's stall of
+    /// three frames or more (a disc read, a shader compiled) says nothing
+    /// of the host's speed at what the program does after the load, and an
+    /// estimate taken down by it would start that from too low a speed.
     fn cap_boost(&mut self, frame_ideal: Option<f64>, current: u32) {
-        let run = self.host.outliers;
-        if !self.auto.flat_out() || run == 0 {
+        let Some(boost) = self.auto.boost() else {
             self.boost_cap = None;
             return;
+        };
+        if self.boost_cap.is_some_and(|(of, _)| of != boost) {
+            self.boost_cap = None;
         }
-        let Some(ideal) = frame_ideal.filter(|_| run >= crate::autospeed::TRY_BEHIND_FRAMES) else {
+        let Some(ideal) = frame_ideal else {
             return;
         };
-        let from = self.boost_cap.unwrap_or(current as f64);
+        let run = self.host.outliers;
+        let from = match self.boost_cap {
+            Some((_, cap)) if ideal < current as f64 * HOST_SHORT => cap,
+            None if run >= crate::autospeed::TRY_BEHIND_FRAMES => current as f64,
+            _ => return,
+        };
         if ideal < from {
             let cap = from + (ideal - from) * HOST_FALL;
-            self.boost_cap = Some(cap);
+            self.boost_cap = Some((boost, cap));
             if crate::autospeed::trace() {
                 eprintln!(
                     "[auto] boost: {run} slow frames in a row, down to {cap:.0} (estimate {:.0})",
