@@ -396,7 +396,10 @@ python3 -m http.server -d web/www
 
 Then open http://localhost:8000/. `web/www` is the whole site, for any web
 server that serves `.wasm` as `application/wasm`; releases include it as
-`rust-dos-<version>-web.zip`.
+`rust-dos-<version>-web.zip`. The build also writes gzipped copies of the
+module, `pkg/rust_dos_web_bg.wasm.gz` and `pkg/rust_dos_web.js.gz`. The page
+downloads the `.wasm.gz`, about half the size, and unpacks it itself, with
+the plain `.wasm` as the fallback, so a server needs no compression set up.
 
 * C: is a 250 MB hard disk image kept in the browser's storage. Drop files,
   folders or `.zip` archives on the page (or use *Add files* and *Add

@@ -2396,10 +2396,30 @@ window.addEventListener('pagehide', () => saveC());
 // Start
 // ---------------------------------------------------------------------
 
+/// Start the WebAssembly module from pkg/rust_dos_web_bg.wasm.gz, which
+/// build.sh makes at about half the plain module's size, and from the plain
+/// one where there's no .gz or the browser can't unpack it. A server that
+/// sends the .gz with Content-Encoding: gzip has the browser unpack it
+/// already: only what starts with gzip's magic bytes is unpacked here.
+async function loadEmulator() {
+  if (typeof DecompressionStream === 'function') {
+    const response = await fetch(new URL('./pkg/rust_dos_web_bg.wasm.gz', import.meta.url)).catch(() => null);
+    if (response?.ok) {
+      let bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+        const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+        bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+      }
+      return init({ module_or_path: bytes });
+    }
+  }
+  return init();
+}
+
 async function start() {
   showSound();
   try {
-    wasm = await init();
+    wasm = await loadEmulator();
   } catch (error) {
     $('loading').querySelector('p').textContent = `Rust-DOS didn't load: ${error.message ?? error}`;
     return;
