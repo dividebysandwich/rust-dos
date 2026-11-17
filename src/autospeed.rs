@@ -1238,10 +1238,9 @@ pub struct AutoSpeed {
     /// then, so a frame takes it down with the estimate: a measurement at
     /// an estimate that ran high would leave it behind for half a second
     /// (Expendable's sound runs dry). A speed found by the frame rate has
-    /// the pace to go by, and waits for that. The estimate leaves fewer
-    /// slow frames in a row out as a stall's meanwhile
-    /// (`HostEstimate::outlier` in `timer.rs`): the speed has no room
-    /// above what the host runs, and each frame left out runs that slow.
+    /// the pace to go by, and waits for that. Slow frames in a row bring
+    /// it down sooner than the estimate does (`Pacer::cap_boost` in
+    /// `timer.rs`): the speed has no room above what the host runs.
     flat_out: bool,
     /// The bytes it had read and written, and when that last changed; and
     /// the same of the bytes moved on drives.
