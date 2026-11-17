@@ -459,6 +459,23 @@ impl Observe {
         std::mem::take(&mut self.watched)
     }
 
+    /// A state was loaded: nothing armed or proven before it goes on, as
+    /// in a machine that starts from the state. What the prover keeps
+    /// counts instructions of the run before the load (a proof's limit,
+    /// the last timer event, the last read of the clock), and after a
+    /// load that moves the count back, an armed head would keep the
+    /// execution loop watching, one instruction at a time on the
+    /// interpreter, until the count caught up. Whether skipping is on,
+    /// the statistics and the time spent watching stay.
+    pub fn after_load(&mut self) {
+        *self = Observe {
+            enabled: self.enabled,
+            stats: self.stats,
+            watched: self.watched,
+            ..Observe::default()
+        };
+    }
+
     /// The bytes of RAM `start..end` were written.
     #[cold]
     pub fn wrote(&mut self, start: usize, end: usize) {

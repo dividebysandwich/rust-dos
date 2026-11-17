@@ -770,9 +770,11 @@ impl Bus {
     /// the interrupt lines follow the devices, the picture is drawn anew,
     /// the FM chip and the MIDI synthesizer are told their registers and
     /// setup again, and the sound rendered before the load is dropped with
-    /// what rang on of it in the mixer.
+    /// what rang on of it in the mixer, and the idle skipper forgets the
+    /// loops of the run before the load.
     pub(crate) fn after_load(&mut self) {
         self.after_reload();
+        self.observe.after_load();
         self.opl.after_load();
         self.mpu.after_load();
         if let Some(gus) = &mut self.gus {
