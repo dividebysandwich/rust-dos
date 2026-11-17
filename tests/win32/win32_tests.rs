@@ -2456,12 +2456,15 @@ fn slept_ms(test: &str, spin: bool) -> u8 {
     code
 }
 
-/// A Sleep ends when its time is up, to the millisecond, as on Windows
-/// 98: with no other thread to run, and with another of the program's
-/// threads spinning, which the sleeping thread takes the processor from
-/// when it wakes (the boost Windows gives a thread whose wait ends). It
-/// used to end at the timer's next interrupt, up to 55 ms later, and the
-/// spinning thread kept the processor until its turn was over.
+/// A Sleep ends when its time is up, to the millisecond: with no other
+/// thread to run, and with another of the program's threads spinning,
+/// which the sleeping thread takes the processor from when it wakes (the
+/// boost Windows gives a thread whose wait ends). It used to end at the
+/// timer's next interrupt, up to 55 ms later, and the spinning thread
+/// kept the processor until its turn was over. Windows 98 SE, measured,
+/// is slower to hand over to a thread of the spinning one's priority: a
+/// 30 ms Sleep there ended a median 9 ms late, at one of its 5 ms ticks,
+/// which the built-in Windows' scheduler doesn't follow yet (#1239).
 #[test]
 fn a_sleep_ends_on_time_also_while_another_thread_spins() {
     let slept = [slept_ms("sleep_alone", false), slept_ms("sleep_spinning", true)];
