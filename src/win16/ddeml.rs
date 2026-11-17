@@ -206,7 +206,7 @@ fn dde_access_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(d) = dde::data_mut(cpu, h) else {
         return Some(0);
     };
-    let (bytes, block) = (d.bytes.clone(), d.access16);
+    let (bytes, block) = (d.bytes.clone(), *d.access16);
     let block = if block != 0 {
         block as u16
     } else {
@@ -220,7 +220,7 @@ fn dde_access_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             return Some(0);
         }
         global::lock(cpu, block);
-        dde::data_mut(cpu, h)?.access16 = block as u32;
+        *dde::data_mut(cpu, h)?.access16 = block as u32;
         block
     };
     if size_out != 0 {
@@ -236,7 +236,7 @@ fn dde_unaccess_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(d) = dde::data_mut(cpu, h) else {
         return Some(0);
     };
-    let (block, len) = (std::mem::take(&mut d.access16) as u16, d.bytes.len());
+    let (block, len) = (std::mem::take(&mut *d.access16) as u16, d.bytes.len());
     if block == 0 {
         return Some(1);
     }

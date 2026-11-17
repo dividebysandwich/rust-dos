@@ -28,6 +28,7 @@
 
 use super::{current_tid, string_at};
 use crate::cpu::Cpu;
+use crate::savestate::Since;
 use crate::win32::task::{self, Next, Task};
 
 const DMLERR_NO_ERROR: u32 = 0;
@@ -99,7 +100,7 @@ pub struct Data {
     /// The copy DdeAccessData gave: its process, block and address.
     pub access: Option<(u32, u32, u32)>,
     /// The 16-bit global block the 16-bit DdeAccessData gave, or 0.
-    pub access16: u32,
+    pub access16: Since<DDE_SAVED, u32>,
 }
 
 /// A conversation, with the shell's Program Manager.
@@ -109,7 +110,7 @@ pub struct Conv {
     pub service: u32,
     pub topic: u32,
     /// DdeSetUserHandle's value for QID_SYNC.
-    pub user: u32,
+    pub user: Since<DDE_SAVED, u32>,
 }
 
 /// An asynchronous transaction whose XTYP_XACT_COMPLETE hasn't been
@@ -131,15 +132,19 @@ pub struct Xact {
     pub user: u32,
 }
 
+/// The W32 section's version that first keeps the 16-bit DdeAccessData
+/// copies, the user handles and the asynchronous transactions.
+const DDE_SAVED: u16 = 75;
+
 #[derive(Clone, Debug, Default)]
 pub struct State {
     instances: Vec<Option<Instance>>,
     strings: Vec<Option<Str>>,
     data: Vec<Option<Data>>,
     convs: Vec<Option<Conv>>,
-    xacts: Vec<Option<Xact>>,
+    xacts: Since<DDE_SAVED, Vec<Option<Xact>>>,
     /// The id the last asynchronous transaction got.
-    last_xact: u32,
+    last_xact: Since<DDE_SAVED, u32>,
 }
 
 crate::state_fields!(Instance {
@@ -496,7 +501,7 @@ fn new_data(cpu: &mut Cpu, id: u32, bytes: Vec<u8>, item: u32, format: u32, owne
         item,
         app_owned: owned,
         access: None,
-        access16: 0,
+        access16: Since(0),
     };
     let i = insert(&mut state(cpu).data, d);
     FIRST_DATA + 4 * i as u32
@@ -642,7 +647,7 @@ pub fn dde_free_data_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(d) = data(cpu, args[0]) else {
         return Some(0);
     };
-    let block16 = std::mem::take(&mut d.access16);
+    let block16 = std::mem::take(&mut *d.access16);
     if let Some((_, block, _)) = d.access.take() {
         crate::win32::kernel32::global_free(cpu, block);
     }
@@ -702,7 +707,7 @@ pub fn dde_connect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         instance: id,
         service,
         topic,
-        user: 0,
+        user: Since(0),
     };
     let i = insert(&mut state(cpu).convs, conv);
     Some(FIRST_CONV + 4 * i as u32)
@@ -880,8 +885,8 @@ fn begin_async(
         return 0;
     }
     let s = state(cpu);
-    s.last_xact = s.last_xact.wrapping_add(1).max(1);
-    let id = s.last_xact;
+    *s.last_xact = s.last_xact.wrapping_add(1).max(1);
+    let id = *s.last_xact;
     let xact = Xact {
         instance: c.instance,
         conv: hconv,
@@ -1038,7 +1043,7 @@ pub fn dde_set_user_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     };
     if id == QID_SYNC {
-        c.user = user;
+        *c.user = user;
         return Some(1);
     }
     let instance = c.instance;
@@ -1081,7 +1086,7 @@ pub fn conv_info(cpu: &mut Cpu, hconv: u32, id: u32) -> Option<ConvInfo> {
     const XST_EXECSENT: u16 = 9;
     let c = conv(cpu, hconv)?.clone();
     let mut info = ConvInfo {
-        user: c.user,
+        user: *c.user,
         service: c.service,
         topic: c.topic,
         status: ST_CLIENT_CONNECTED,
