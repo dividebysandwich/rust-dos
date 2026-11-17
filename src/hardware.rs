@@ -213,6 +213,8 @@ impl Hardware {
         }
         cpu.bus.set_voodoo_texture_sampling(settings.voodoo.texture_sampling);
         cpu.bus.set_fps_cap(settings.fps_cap);
+        // A ToadForce made again above starts without the screen's gamma.
+        cpu.bus.set_toadforce_gamma(settings.toadforce_gamma);
         let env = settings.environment();
         if env != self.env {
             cpu.set_env_rules(env);

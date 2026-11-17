@@ -153,9 +153,11 @@ pub struct ToadForce {
     /// an access compares its address with them and nothing else.
     pub decoded: [Option<(u32, u32)>; 2],
     /// The screen's own gamma (`toadforce_gamma`), which the picture
-    /// goes through after the card's ramp. The host's setting, no part
+    /// goes through after the card's ramp, and the 8-bit value each
+    /// value shows as through it, worked out when it is set: the
+    /// picture asks for it at every frame. The host's setting, no part
     /// of the card's state.
-    screen_gamma: Option<f32>,
+    screen_gamma: Option<(f32, [u32; 256])>,
 }
 
 /// The version of the card's saved state, which a saved state's `TOAD`
@@ -251,7 +253,17 @@ impl ToadForce {
     /// None for none. True if it changed.
     pub fn set_screen_gamma(&mut self, gamma: Option<f32>) -> bool {
         let gamma = gamma.filter(|g| g.is_finite() && *g > 0.0 && *g != 1.0);
-        std::mem::replace(&mut self.screen_gamma, gamma) != gamma
+        if self.screen_gamma.map(|(g, _)| g) == gamma {
+            return false;
+        }
+        self.screen_gamma = gamma.map(|gamma| {
+            let curve = std::array::from_fn(|v| {
+                let v = (v as f64 / 255.0).powf(1.0 / gamma as f64);
+                (v * 255.0).round().clamp(0.0, 255.0) as u32
+            });
+            (gamma, curve)
+        });
+        true
     }
 
     /// The colours the picture's 8-bit components show as, in the
@@ -264,13 +276,9 @@ impl ToadForce {
             return None;
         }
         let ramp = self.display.gamma();
-        let Some(gamma) = self.screen_gamma else {
+        let Some((_, curve)) = &self.screen_gamma else {
             return (*ramp != display::IDENTITY).then_some(*ramp);
         };
-        let curve: [u32; 256] = std::array::from_fn(|v| {
-            let v = (v as f64 / 255.0).powf(1.0 / gamma as f64);
-            (v * 255.0).round().clamp(0.0, 255.0) as u32
-        });
         Some(ramp.map(|rgb| {
             let [r, g, b] = [rgb >> 16, rgb >> 8 & 0xFF, rgb & 0xFF].map(|c| curve[c as usize]);
             r << 16 | g << 8 | b

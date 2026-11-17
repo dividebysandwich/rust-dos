@@ -1103,7 +1103,11 @@ pub fn set_gamma_ramp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-/// GetGammaRamp(this, ramp).
+/// GetGammaRamp(this, ramp): a full-screen device's is the display's
+/// where the display has one (`screen::gamma_ramp`), so that after a
+/// `Reset`, whose mode set brings the identity back, it is the one the
+/// screen shows, as on Windows, where it is the display driver's. Other
+/// devices give back the ramp they were given.
 pub fn get_gamma_ramp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, at] = args[..] else {
         return Some(0);
@@ -1114,10 +1118,11 @@ pub fn get_gamma_ramp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if at == 0 || !cpu.bus.guest_probe(at, 1536, true) {
         return Some(0);
     }
-    let ramp = if d.gamma.len() == 768 {
-        d.gamma
-    } else {
-        identity_gamma()
+    let full_screen = d.params.get(PP_WINDOWED) == Some(&0);
+    let ramp = match full_screen.then(|| screen::gamma_ramp(cpu)).flatten() {
+        Some(display) => display.to_vec(),
+        None if d.gamma.len() == 768 => d.gamma,
+        None => identity_gamma(),
     };
     for (i, v) in ramp.iter().enumerate() {
         cpu.bus.guest_write_16(at + 2 * i as u32, *v);

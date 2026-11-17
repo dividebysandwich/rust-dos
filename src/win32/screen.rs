@@ -267,12 +267,10 @@ fn toadforce_set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32) -> Optio
     if !sizes.contains(&width) || !sizes.contains(&height) || !fits {
         return None;
     }
-    let bus = &mut cpu.bus;
     // A mode set brings the identity ramp back, as on the Banshee
     // (`card_set_mode`): a game's brightness lasts until its mode ends.
-    for (i, rgb) in IDENTITY.iter().enumerate() {
-        bus.toadforce_register_write(regs::GAMMA + 4 * i as u32, *rgb);
-    }
+    toadforce_load_gamma(cpu, &IDENTITY);
+    let bus = &mut cpu.bus;
     for (register, value) in [
         (regs::MODE_ENABLE, 0),
         (regs::MODE_WIDTH, width),
@@ -360,10 +358,7 @@ pub fn set_gamma_ramp(cpu: &mut Cpu, ramp: &GammaRamp) -> bool {
         r << 16 | g << 8 | b
     });
     if cpu.bus.toadforce_direct_colour() {
-        for (i, rgb) in table.iter().enumerate() {
-            cpu.bus
-                .toadforce_register_write(regs::GAMMA + 4 * i as u32, *rgb);
-        }
+        toadforce_load_gamma(cpu, &table);
         return true;
     }
     let Some(cfg) = banshee_ramp_config(cpu) else {
@@ -382,6 +377,19 @@ pub fn set_gamma_ramp(cpu: &mut Cpu, ramp: &GammaRamp) -> bool {
     cpu.bus.voodoo_write_32(card::VID_PROC_CFG, cfg);
     cpu.bus.vga.mark_dirty_full();
     true
+}
+
+/// Load `table` into a ToadForce's `GAMMA` registers. Only the entries
+/// that differ are written: each is a register write of its own, which
+/// runs the queued commands and redraws the screen, and a mode set or a
+/// game's fade gives the whole ramp where few entries, or none, change.
+fn toadforce_load_gamma(cpu: &mut Cpu, table: &[u32; 256]) {
+    for (i, rgb) in table.iter().enumerate() {
+        let register = regs::GAMMA + 4 * i as u32;
+        if cpu.bus.toadforce_register(register) != *rgb {
+            cpu.bus.toadforce_register_write(register, *rgb);
+        }
+    }
 }
 
 /// A Banshee's desktop video processor configuration, if its pixels go
