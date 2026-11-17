@@ -210,8 +210,9 @@ fn same_name(a: &[u16], b: &[u16]) -> bool {
 /// FILETIME's count at the Unix epoch.
 const UNIX_EPOCH_TICKS: u64 = 116_444_736_000_000_000;
 
-fn system_time(ticks: u64) -> std::time::SystemTime {
-    let epoch = std::time::UNIX_EPOCH;
+// cfb's times are web_time's, which are std's except in the browser.
+fn system_time(ticks: u64) -> web_time::SystemTime {
+    let epoch = web_time::UNIX_EPOCH;
     if ticks >= UNIX_EPOCH_TICKS {
         epoch + std::time::Duration::from_nanos((ticks - UNIX_EPOCH_TICKS) * 100)
     } else {
@@ -219,8 +220,8 @@ fn system_time(ticks: u64) -> std::time::SystemTime {
     }
 }
 
-fn ticks_of(time: std::time::SystemTime) -> u64 {
-    match time.duration_since(std::time::UNIX_EPOCH) {
+fn ticks_of(time: web_time::SystemTime) -> u64 {
+    match time.duration_since(web_time::UNIX_EPOCH) {
         Ok(d) => UNIX_EPOCH_TICKS.saturating_add((d.as_nanos() / 100) as u64),
         Err(e) => UNIX_EPOCH_TICKS.saturating_sub((e.duration().as_nanos() / 100) as u64),
     }
