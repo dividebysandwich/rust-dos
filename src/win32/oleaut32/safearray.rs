@@ -23,6 +23,9 @@ const DISP_E_BADINDEX: u32 = 0x8002_000B;
 const E_UNEXPECTED: u32 = 0x8000_FFFF;
 
 /// fFeatures.
+const FADF_AUTO: u16 = 0x1;
+const FADF_STATIC: u16 = 0x2;
+const FADF_EMBEDDED: u16 = 0x4;
 const FADF_HAVEIID: u16 = 0x40;
 const FADF_HAVEVARTYPE: u16 = 0x80;
 const FADF_BSTR: u16 = 0x100;
@@ -243,8 +246,28 @@ pub fn free(cpu: &mut Cpu, at: u32) {
     let Some(a) = describe(cpu, at) else {
         return;
     };
-    crate::win32::ole32::task_free(cpu, a.data);
+    free_data(cpu, &a);
     free_descriptor(cpu, at);
+}
+
+/// Free the elements' block of the array `a`, when it is the array's
+/// own: the program's block of a FADF_STATIC array is zeroed instead,
+/// and that of a FADF_AUTO or FADF_EMBEDDED one is left as it is, as
+/// OLEAUT32 does. Whether the block was freed.
+fn free_data(cpu: &mut Cpu, a: &Array) -> bool {
+    let features = cpu.bus.guest_read_16(a.at + FEATURES);
+    if features & FADF_STATIC != 0 {
+        let bytes = a.count() as u64 * a.element as u64;
+        if cpu.bus.guest_probe(a.data, bytes as usize, true) {
+            cpu.bus.guest_fill(a.data, bytes as usize, 0);
+        }
+        return false;
+    }
+    if features & (FADF_AUTO | FADF_EMBEDDED) != 0 {
+        return false;
+    }
+    crate::win32::ole32::task_free(cpu, a.data);
+    true
 }
 
 /// Let go of what the element at `at` of the type `vt` holds: the
@@ -674,7 +697,7 @@ pub fn safe_array_alloc_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// SafeArrayDestroyData(array): the elements let go of and their block
-/// freed.
+/// freed, if it is the array's own.
 pub fn safe_array_destroy_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let at = args[0];
     let Some(a) = describe(cpu, at) else {
@@ -687,8 +710,9 @@ pub fn safe_array_destroy_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     for i in 0..a.count() {
         clear_element(cpu, a.vt, a.data + i * a.element, &mut calls);
     }
-    crate::win32::ole32::task_free(cpu, a.data);
-    cpu.bus.guest_write_32(at + DATA, 0);
+    if free_data(cpu, &a) {
+        cpu.bus.guest_write_32(at + DATA, 0);
+    }
     run(cpu, S_OK, calls)
 }
 

@@ -958,3 +958,54 @@ fn an_empty_safearray_grown_by_redim_holds_its_elements() {
         assert_eq!(cpu.errorlevel, 0xFF, "{core:?}: {}", printed(&cpu));
     }
 }
+
+/// SafeArrayDestroyData of a FADF_STATIC array zeroes the program's own
+/// block and keeps it, as OLEAUT32 does, rather than freeing it.
+#[test]
+fn destroying_a_static_safearray_zeroes_its_data_in_place() {
+    const FADF_STATIC: i32 = 2;
+    // 0x00: the array, 0x10: its 2 elements, the program's own.
+    let mut data = vec![0u8; 0x20];
+    put(&mut data, 0x10, &[0x55; 8]);
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        (
+            "OLEAUT32.dll",
+            &[
+                "SafeArrayAllocDescriptor",
+                "SafeArrayDestroyData",
+                "SafeArrayDestroyDescriptor",
+            ],
+        ),
+    ];
+    let code = program(imports, &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        call(a, l.import(1), &[1, l.at(0)])?;
+        check_eax(a, 0, 0)?;
+        a.mov(eax, l.var(0))?;
+        a.mov(word_ptr(eax + 2), FADF_STATIC)?;
+        a.mov(dword_ptr(eax + 4), 4)?;
+        a.mov(dword_ptr(eax + 12), l.at(0x10))?;
+        a.mov(dword_ptr(eax + 16), 2)?;
+        a.mov(dword_ptr(eax + 20), 0)?;
+        a.push(eax)?;
+        a.call(l.import(2))?;
+        check_eax(a, 0, 1)?;
+        check_var(a, l.var(0x10), 0, 2)?;
+        check_var(a, l.var(0x14), 0, 3)?;
+        // The block stays the array's.
+        a.mov(eax, l.var(0))?;
+        a.mov(eax, dword_ptr(eax + 12))?;
+        check_eax(a, l.at(0x10), 4)?;
+        a.push(l.var(0))?;
+        a.call(l.import(3))?;
+        check_eax(a, 0, 5)?;
+        a.or(ebx, 0xC0)?;
+        exit(a, l.import(0))
+    });
+    for core in CORES {
+        let mut cpu = machine("safearray_static", core, &code);
+        run_to_exit(&mut cpu);
+        assert_eq!(cpu.errorlevel, 0xFF, "{core:?}: {}", printed(&cpu));
+    }
+}
