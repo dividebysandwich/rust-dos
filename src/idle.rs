@@ -427,6 +427,23 @@ impl Observe {
         !matches!(self.phase, Phase::Off)
     }
 
+    /// A save state was loaded. What was armed, learned, proven or backed
+    /// off belongs to the machine before it: its places are another
+    /// program's, and its limits (`Phase`'s `until`) are instruction
+    /// counts of that machine's clock. One the state's clock is far behind
+    /// would keep the execution loop watching, one instruction at a time
+    /// on the interpreter, until the state's clock got there. The prover
+    /// starts afresh, with the setting and the host's counts kept.
+    pub fn forget_machine(&mut self) {
+        *self = Observe {
+            enabled: self.enabled,
+            stats: self.stats,
+            watch_since: self.watch_since,
+            watched: self.watched,
+            ..Observe::default()
+        };
+    }
+
     /// The execution loop watches from here, with the clock's run count
     /// `run`.
     #[cold]
@@ -1880,4 +1897,35 @@ fn skip(cpu: &mut Cpu, period: u64, executed: u64, limit: u64, most: u64) -> u64
     cpu.bus.observe.stats.proofs += 1;
     cpu.bus.observe.stats.skipped += passes * period;
     passes * period
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::savestate::machine;
+
+    #[test]
+    fn a_load_watches_nothing_the_machine_before_it_watched() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let state = machine::save(&cpu);
+        // The machine runs on far past the state, and a busy-wait loop is
+        // armed there, until its clock gets ARM_LIMIT further.
+        cpu.bus.clock.icount += 1_000_000_000;
+        cpu.bus.observe.enabled = true;
+        let head = Head {
+            cs: 0x1234,
+            eip: 0x10,
+            pe: false,
+        };
+        cpu.bus.observe.arm(head, cpu.bus.clock.icount);
+        assert!(cpu.bus.observe.watching());
+        cpu.bus.observe.stats.arms = 7;
+        machine::load(&mut cpu, &state).unwrap();
+        // The state's clock is 10^9 instructions behind that limit: the
+        // loop would run one instruction at a time on the interpreter until
+        // it got there.
+        assert!(!cpu.bus.observe.watching());
+        assert!(cpu.bus.observe.enabled);
+        assert_eq!(cpu.bus.observe.stats.arms, 7);
+    }
 }

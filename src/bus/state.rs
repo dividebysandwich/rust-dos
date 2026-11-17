@@ -795,6 +795,9 @@ impl Bus {
         // SDA holds: until the next DOS call writes it, nothing in it
         // counts as the program's.
         self.sda_written = None;
+        // The busy-wait prover's places and limits are the machine's from
+        // before the load, counted on its clock.
+        self.observe.forget_machine();
     }
 
     /// `after_load` for a state loaded into the machine that saved it,
