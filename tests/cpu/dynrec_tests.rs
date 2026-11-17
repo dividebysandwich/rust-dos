@@ -869,6 +869,82 @@ fn lar_runs_in_translated_code() {
 }
 
 #[test]
+fn xlat_runs_in_translated_code() {
+    // XLAT through a table of 256 bytes at DATA with 32-bit addresses, and
+    // with a 16-bit address size (67 D7), where BX + AL wraps at 64K and
+    // EBX's top half doesn't count, with the timer interrupting: the bytes
+    // add up in ESI, and AL's neighbours in EAX must stay as they were.
+    let (mut a, mut b) = twins(|rig| {
+        let table: Vec<u8> = (0..=255u8).map(|i| i.wrapping_mul(37) ^ 0x5A).collect();
+        rig.load(DATA, &table);
+        with_timer(rig, |a| {
+            a.mov(eax, ecx)?;
+            a.mov(ebx, DATA)?;
+            a.xlatb()?;
+            a.add(esi, eax)?;
+            a.rol(esi, 3)?;
+            a.lea(eax, ecx * 8 + 0x5600)?;
+            a.mov(ebx, 0x1234_FFC0u32)?;
+            a.db(&[0x67, 0xD7])?;
+            a.add(esi, eax)
+        });
+    });
+    run_both(&mut a, &mut b);
+    assert!(b.cpu.edi() > 10, "IRQ 0 came {} times", b.cpu.edi());
+    if AVAILABLE {
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Xlatb), 0);
+    }
+}
+
+#[test]
+fn xlat_reads_through_its_segment_override_and_faults_past_the_limit() {
+    // FS XLAT (64 D7) in a loop over a data segment of 256 bytes at 48000h
+    // (DS's bytes at the same offsets are others), then one whose BX + AL
+    // is past the limit: #GP, with EBX as the XLAT left it. The sum goes
+    // in EDX, as the #GP handler uses ESI.
+    let (mut a, mut b) = twins(|rig| {
+        rig.record(GP);
+        rig.set_gdt(FREE, seg_desc(0x48000, 0xFF, DATA_R0, 0x4));
+        let table: Vec<u8> = (0..=255u8).map(|i| i.wrapping_mul(37) ^ 0x5A).collect();
+        rig.load(0x48000, &table);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(ax, FREE as u32)?;
+            a.mov(fs, ax)?;
+            a.jmp(CODE as u64 + 0x100)
+        }));
+        rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| {
+            let mut top = a.create_label();
+            a.xor(edx, edx)?;
+            a.mov(ecx, 300u32)?;
+            a.set_label(&mut top)?;
+            a.mov(eax, ecx)?;
+            a.mov(ebx, 0x10u32)?;
+            a.and(eax, 0xEFu32)?;
+            a.db(&[0x64, 0xD7])?;
+            a.add(edx, eax)?;
+            a.rol(edx, 3)?;
+            a.dec(ecx)?;
+            a.jnz(top)?;
+            a.mov(ebx, 0xF0u32)?;
+            a.mov(eax, 0x10u32)?;
+            a.db(&[0x64, 0xD7])?;
+            a.mov(ebx, 2u32)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!((b.recorded().0, b.cpu.ebx(), b.cpu.eax()), (GP as u32, 0xF0, 0x10));
+    let expected = (1..=300u32).rev().fold(0u32, |s, c| {
+        let byte = ((c & 0xEF) as u8 + 0x10).wrapping_mul(37) ^ 0x5A;
+        s.wrapping_add(byte as u32).rotate_left(3)
+    });
+    assert_eq!(b.cpu.edx(), expected);
+    if AVAILABLE {
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Xlatb), 0);
+    }
+}
+
+#[test]
 fn stack_switches_run_in_translated_code() {
     // As DOS/4GW's thunks into 16-bit code: MOV SS to a 16-bit stack and
     // back (the block stops after each, as the stack's width changes), and
