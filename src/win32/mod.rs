@@ -61,6 +61,7 @@ mod pace;
 mod advpack;
 pub(crate) mod realmode;
 mod registry;
+mod rpcrt4;
 mod screen;
 pub(crate) mod seh;
 mod shell32;
