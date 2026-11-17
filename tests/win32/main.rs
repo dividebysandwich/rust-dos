@@ -15,6 +15,7 @@ mod win16;
 mod conformance_tests;
 mod win32_audio_tests;
 mod win32_comctl32_tests;
+mod win32_com_server_tests;
 mod win32_comm_tests;
 mod win32_d3d8_tests;
 mod win32_d3d_tests;

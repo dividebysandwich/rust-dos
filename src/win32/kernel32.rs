@@ -713,6 +713,13 @@ static APIS: &[Api] = &[
     stdcall("TransmitCommChar", 778, 2, comm::transmit_comm_char),
     stdcall("GetCommTimeouts", 328, 2, comm::get_comm_timeouts),
     stdcall("SetCommTimeouts", 689, 2, comm::set_comm_timeouts),
+    // Windows 9x has no MoveFileEx: both are stubs that fail with
+    // ERROR_CALL_NOT_IMPLEMENTED, and programs move a file in use at the
+    // next start through WININIT.INI instead. InstallShield 6's engine
+    // calls MoveFileExA(NULL, NULL, 4) and edits WININIT.INI when
+    // GetLastError is then 120.
+    stdcall("MoveFileExA", 590, 3, not_implemented),
+    stdcall("MoveFileExW", 591, 3, not_implemented),
 ];
 
 /// The places in `APIS` of the system's own stubs.
@@ -975,6 +982,18 @@ pub mod files {
             return Err(super::ERROR_PATH_NOT_FOUND);
         }
         path::find_path(cpu, &path::dos_path(spec))
+    }
+
+    /// The bytes of the file `name`, read as ReadFile reads them.
+    pub fn read_whole(cpu: &mut Cpu, name: &str) -> Result<Vec<u8>, u32> {
+        let full = full_path(cpu, name);
+        path::read_whole(cpu, &full).map(|(data, _, _)| data)
+    }
+
+    /// Whether `name` is a file.
+    pub fn is_file(cpu: &mut Cpu, name: &str) -> bool {
+        let full = full_path(cpu, name);
+        cpu.bus.disk.is_file(&full)
     }
 
     /// Write `data` as the whole file `name`, made anew.

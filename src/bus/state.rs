@@ -18,16 +18,17 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 76;
+const WIN32_VERSION: u16 = 77;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
 /// (`version::OwnSize`), 71's to 73's MMSYSTEM's wave headers in an
 /// older form and no callback calls (`win16::Mmsystem`), 71's to 74's
 /// not DDEML's 16-bit copies, user handles and asynchronous transactions
-/// (`ddeml::DDE_SAVED`), and 71's to 75's no DirectPlay 8 objects
-/// (`dpnet::State`).
-const WIN32_LOADS: [u16; 6] = [71, 72, 73, 74, 75, WIN32_VERSION];
+/// (`ddeml::DDE_SAVED`), 71's to 75's no DirectPlay 8 objects
+/// (`dpnet::State`), and 71's to 76's not OLE32's local servers and
+/// proxies (`ole32::LOCAL_SERVERS`).
+const WIN32_LOADS: [u16; 7] = [71, 72, 73, 74, 75, 76, WIN32_VERSION];
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -925,6 +926,7 @@ mod tests {
         (74, 0x6C70_EAD3_11EB_EDB6), // MMSYSTEM's headers keep lpData, callbacks
         (75, 0x9B62_A189_49CB_DB03), // DDEML's 16-bit copies, user handles and transactions
         (76, 0xF698_DBEB_B887_D533), // DirectPlay 8's objects
+        (77, 0xFDE6_8C09_004A_F36E), // OLE32's local servers, proxies and stubs
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

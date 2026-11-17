@@ -1,7 +1,8 @@
 //! OLE32's functions that call into the program: methods of other
 //! objects the program gave them (a stream's CopyTo writes to the
 //! target's Write; PropVariantClear releases the objects it holds,
-//! PropVariantCopy adds a reference to them). They are one task
+//! PropVariantCopy adds a reference to them), and the calls between
+//! processes (rpc.rs). They are one task
 //! (task.rs), whose first variable says which function it is.
 
 use crate::cpu::Cpu;
@@ -13,6 +14,11 @@ pub const CALL_ALL: u32 = 1;
 pub const CLASS: u32 = 2;
 pub const MARSHAL: u32 = 3;
 pub const UNMARSHAL: u32 = 4;
+pub const PROXY: u32 = 5;
+pub const STUB: u32 = 6;
+pub const ACTIVATE: u32 = 7;
+pub const STORAGE_COPY: u32 = 8;
+pub const PERSIST: u32 = 9;
 
 /// Start the task with `vars` (the function first) and `scratch` bytes of
 /// scratch space.
@@ -28,6 +34,11 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         CLASS => super::compobj::class_step(cpu, t, value),
         MARSHAL => super::compobj::marshal_step(cpu, t, value),
         UNMARSHAL => super::compobj::unmarshal_step(cpu, t, value),
+        PROXY => super::rpc::proxy_step(cpu, t, value),
+        STUB => super::rpc::stub_step(cpu, t, value),
+        ACTIVATE => super::rpc::activate_step(cpu, t, value),
+        STORAGE_COPY => super::storage::copy_step(cpu, t, value),
+        PERSIST => super::persist::step(cpu, t, value),
         _ => Next::Done(crate::win32::com::E_INVALIDARG),
     }
 }

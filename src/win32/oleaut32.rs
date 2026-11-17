@@ -11,6 +11,8 @@ mod desc;
 mod errorinfo;
 mod model;
 mod msft;
+pub(crate) mod safearray;
+pub(crate) mod signature;
 mod sltg;
 mod stdole;
 #[cfg(test)]
@@ -196,6 +198,38 @@ static APIS: &[Api] = &[
     stdcall("IErrorInfo_GetHelpContext", 0, 2, errorinfo::get_help_context),
     stdcall("VarUI4FromStr", 277, 4, variant::var_ui4_from_str),
     stdcall("OleTranslateColor", 421, 3, super::olepro32::translate_color),
+    stdcall("SafeArrayCreate", 15, 3, safearray::safe_array_create),
+    stdcall("SafeArrayDestroy", 16, 1, safearray::safe_array_destroy),
+    stdcall("SafeArrayGetDim", 17, 1, safearray::safe_array_get_dim),
+    stdcall("SafeArrayGetElemsize", 18, 1, safearray::safe_array_get_elemsize),
+    stdcall("SafeArrayGetUBound", 19, 3, safearray::safe_array_get_ubound),
+    stdcall("SafeArrayGetLBound", 20, 3, safearray::safe_array_get_lbound),
+    stdcall("SafeArrayLock", 21, 1, safearray::safe_array_lock),
+    stdcall("SafeArrayUnlock", 22, 1, safearray::safe_array_unlock),
+    stdcall("SafeArrayAccessData", 23, 2, safearray::safe_array_access_data),
+    stdcall("SafeArrayUnaccessData", 24, 1, safearray::safe_array_unaccess_data),
+    stdcall("SafeArrayGetElement", 25, 3, safearray::safe_array_get_element),
+    stdcall("SafeArrayPutElement", 26, 3, safearray::safe_array_put_element),
+    stdcall("SafeArrayCopy", 27, 2, safearray::safe_array_copy),
+    stdcall(
+        "SafeArrayAllocDescriptor",
+        36,
+        2,
+        safearray::safe_array_alloc_descriptor,
+    ),
+    stdcall("SafeArrayAllocData", 37, 1, safearray::safe_array_alloc_data),
+    stdcall(
+        "SafeArrayDestroyDescriptor",
+        38,
+        1,
+        safearray::safe_array_destroy_descriptor,
+    ),
+    stdcall("SafeArrayDestroyData", 39, 1, safearray::safe_array_destroy_data),
+    stdcall("SafeArrayRedim", 40, 2, safearray::safe_array_redim),
+    stdcall("SafeArrayGetVartype", 77, 2, safearray::safe_array_get_vartype),
+    stdcall("SafeArrayPtrOfIndex", 148, 3, safearray::safe_array_ptr_of_index),
+    stdcall("SafeArrayCreateVector", 411, 3, safearray::safe_array_create_vector),
+    stdcall("VariantCopyInd", 11, 2, safearray::variant_copy_ind),
 ];
 
 /// The vtables, by their places in this list. ITypeLib's and ITypeInfo's
@@ -412,7 +446,6 @@ pub fn step(_: &mut Cpu, t: &mut Task, value: u32) -> Next {
 }
 
 const S_OK: u32 = 0;
-const DISP_E_BADVARTYPE: u32 = 0x8002_0008;
 
 /// A new BSTR of `len` bytes, copied from `from` if it isn't 0: its
 /// address, or 0 when memory is out.
@@ -528,6 +561,30 @@ fn free(cpu: &mut Cpu, s: u32) {
     }
 }
 
+/// SysFreeString's work, for the other DLLs.
+pub(crate) fn free_bstr(cpu: &mut Cpu, s: u32) {
+    free(cpu, s);
+}
+
+/// A new BSTR holding `bytes`, its length in bytes theirs: its address,
+/// or 0 when memory is out.
+pub(crate) fn bstr_of_bytes(cpu: &mut Cpu, bytes: &[u8]) -> u32 {
+    let at = alloc(cpu, 0, bytes.len() as u32);
+    if at != 0 {
+        cpu.bus.guest_write_bytes(at, bytes);
+    }
+    at
+}
+
+/// A copy of the BSTR `s` (0 for 0), or 0 when memory is out.
+pub(crate) fn copy_bstr(cpu: &mut Cpu, s: u32) -> u32 {
+    if s == 0 {
+        return 0;
+    }
+    let n = byte_len(cpu, s);
+    alloc(cpu, s, n)
+}
+
 fn sys_free_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     free(cpu, args[0]);
     Some(0)
@@ -549,29 +606,14 @@ fn variant_init(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-/// VariantClear(variant): a BSTR is freed, an interface released.
-/// Arrays (VT_ARRAY) aren't taken yet.
+/// VariantClear(variant): a BSTR is freed, an interface released, an
+/// array (VT_ARRAY) destroyed with what its elements hold.
 fn variant_clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let at = args[0];
     if !cpu.bus.guest_probe(at, 16, true) {
         return Some(S_OK);
     }
-    let vt = cpu.bus.guest_read_16(at);
-    let value = cpu.bus.guest_read_32(at + 8);
-    let mut release = None;
-    if vt & 0x4000 == 0 {
-        match vt {
-            // VT_BSTR.
-            8 => free(cpu, value),
-            // VT_DISPATCH, VT_UNKNOWN.
-            9 | 13 => release = super::ole32::method(cpu, value, 2).map(|m| (m, value)),
-            _ if vt & 0x2000 != 0 => return Some(DISP_E_BADVARTYPE),
-            _ => {}
-        }
-    }
-    cpu.bus.guest_write_16(at, 0);
-    match release {
-        Some(call) => super::ole32::call_all(cpu, S_OK, &[call]),
-        None => Some(S_OK),
-    }
+    let mut calls = Vec::new();
+    safearray::clear_variant(cpu, at, &mut calls);
+    super::ole32::call_all(cpu, S_OK, &calls)
 }

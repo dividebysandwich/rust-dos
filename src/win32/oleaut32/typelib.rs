@@ -169,7 +169,7 @@ fn parse(builtin: u16, data: &[u8], page: CodePage) -> Option<TypeLib> {
 }
 
 /// The model of the library `lib`.
-fn model(cpu: &mut Cpu, lib: u32) -> Arc<TypeLib> {
+pub(super) fn model(cpu: &mut Cpu, lib: u32) -> Arc<TypeLib> {
     let page = crate::win32::nls::ansi(cpu);
     let s = state(cpu);
     if let Some(Some(m)) = s.parsed.0.get(lib as usize) {
@@ -198,7 +198,7 @@ fn add_ref_lib(cpu: &mut Cpu, lib: u32) {
     l.refs = l.refs.saturating_add(1);
 }
 
-fn release_lib(cpu: &mut Cpu, lib: u32) -> u32 {
+pub(super) fn release_lib(cpu: &mut Cpu, lib: u32) -> u32 {
     let l = lib_mut(cpu, lib);
     l.refs = l.refs.saturating_sub(1);
     let refs = l.refs;
@@ -295,7 +295,7 @@ fn library_bytes(file: Vec<u8>, resource: u32) -> Option<Vec<u8>> {
 /// number in the file before it. STDOLE2.TLB and STDOLE32.TLB are the
 /// built-in ones when there are no such files. The library and the
 /// file's full path.
-fn load(cpu: &mut Cpu, name: &str) -> Result<(u32, String), u32> {
+pub(super) fn load(cpu: &mut Cpu, name: &str) -> Result<(u32, String), u32> {
     let path = super::path_of(cpu, name);
     let mut found = crate::win32::kernel32::search_file(cpu, &path).map(|f| (f, 1));
     if found.is_none()
@@ -350,7 +350,12 @@ fn load_import(cpu: &mut Cpu, import: &ImportLib) -> Result<u32, u32> {
 /// The type the HREFTYPE `href` of the type at `index` of `lib` refers
 /// to: its library, with a reference added, its place, and whether it is
 /// the interface side of a dual interface.
-fn resolve_in(cpu: &mut Cpu, lib: u32, index: u32, href: u32) -> Result<(u32, u32, bool), u32> {
+pub(super) fn resolve_in(
+    cpu: &mut Cpu,
+    lib: u32,
+    index: u32,
+    href: u32,
+) -> Result<(u32, u32, bool), u32> {
     let m = model(cpu, lib);
     let interface_bit = m.format != Format::Sltg && href & HREF_INTERFACE != 0;
     match m
@@ -801,7 +806,7 @@ fn log(cpu: &mut Cpu, message: &str) {
 
 /// The registry's path of the library `guid` of the version `major`.`minor`
 /// or a later minor version, for `lcid` or its language or no language.
-fn query_path(
+pub(super) fn query_path(
     cpu: &mut Cpu,
     guid: &Guid,
     major: u16,
