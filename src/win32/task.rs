@@ -148,6 +148,7 @@ pub static TASKS: &[Step] = &[
     super::dshow::filter::step,
     super::user32::notepad::step,
     super::user32::dlgdir::step,
+    super::user32::ddeml::xact_step,
 ];
 
 /// The `TASKS` places of the tasks other DLLs than USER32 start.
@@ -175,6 +176,7 @@ pub const DPLAY_CALL: u16 = 41;
 pub const DSHOW: u16 = 42;
 pub const NOTEPAD: u16 = 43;
 pub const DLG_DIR: u16 = 44;
+pub const DDEML_XACT: u16 = 45;
 
 /// Start the task `kind` with the variables `vars` and, if `scratch` is
 /// more than 0, that many bytes of scratch space: for a function's
