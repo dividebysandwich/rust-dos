@@ -1046,12 +1046,13 @@ fn popf_at_ring_3_runs_in_translated_code() {
     // restores the flags (Aliens: A Comic Book Adventure's video player):
     // IF loads, IOPL stays 3 whatever the value has.
     let (mut a, mut b) = twins(|rig| {
-        rig.load(CODE, &asm32(CODE, |a| {
+        let code = asm32(CODE, |a| {
             a.pushfd()?;
             a.or(dword_ptr(esp), 0x3000)?;
             a.popfd()?;
             to_ring3(a)
-        }));
+        });
+        rig.load(CODE, &code);
         rig.ring3(|a| {
             a.xor(ebx, ebx)?;
             a.mov(ecx, 100u32)?;
@@ -1097,13 +1098,14 @@ fn popfd_where_it_cant_load_if_or_iopl_keeps_them() {
     // At ring 3 with IOPL 0, IF and IOPL stay as they were, in translated
     // code.
     let (mut a, mut b) = twins(|rig| {
-        rig.load(CODE, &asm32(CODE, |a| {
+        let code = asm32(CODE, |a| {
             a.pushfd()?;
             a.and(dword_ptr(esp), !0x3000)?;
             a.or(dword_ptr(esp), 0x200)?;
             a.popfd()?;
             to_ring3(a)
-        }));
+        });
+        rig.load(CODE, &code);
         rig.ring3(|a| {
             a.mov(ecx, 50u32)?;
             let mut top = a.create_label();
