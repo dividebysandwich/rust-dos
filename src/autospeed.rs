@@ -1242,6 +1242,9 @@ pub struct AutoSpeed {
     /// it down sooner than the estimate does (`Pacer::cap_boost` in
     /// `timer.rs`): the speed has no room above what the host runs.
     flat_out: bool,
+    /// The measurements decided so far, which tells one boost from the
+    /// next (`boost`).
+    decided: u32,
     /// The bytes it had read and written, and when that last changed; and
     /// the same of the bytes moved on drives.
     output: (u64, u64),
@@ -1305,6 +1308,7 @@ impl AutoSpeed {
             working: None,
             work_cuts: 0,
             flat_out: false,
+            decided: 0,
             output: (0, 0),
             io: (0, 0),
             loading: false,
@@ -1332,6 +1336,12 @@ impl AutoSpeed {
     /// host's estimate down (`flat_out`).
     pub fn flat_out(&self) -> bool {
         self.flat_out
+    }
+
+    /// While the program gets all the host has, a number that the next
+    /// measurement's boost, if there is one, doesn't share.
+    pub fn boost(&self) -> Option<u32> {
+        self.flat_out.then_some(self.decided)
     }
 
     /// Whether the protected-mode system was seen idling.
@@ -1783,6 +1793,7 @@ impl AutoSpeed {
         let top = host_max.max(self.least(protected, host_max));
         let c = current as f64;
         self.flat_out = false;
+        self.decided = self.decided.wrapping_add(1);
         let loading = std::mem::take(&mut self.loading);
         let was_loaded = std::mem::replace(&mut self.loaded, m.io >= LOADS);
         if protected && !self.dpmi_client && m.halted >= IDLES {
