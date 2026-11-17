@@ -1242,9 +1242,13 @@ pub struct AutoSpeed {
     /// it down sooner than the estimate does (`Pacer::cap_boost` in
     /// `timer.rs`): the speed has no room above what the host runs.
     flat_out: bool,
-    /// The measurements decided so far, which tells one boost from the
-    /// next (`boost`).
-    decided: u32,
+    /// While `flat_out`, a speed under the host's estimate that slow
+    /// frames in a row put on it (`Pacer::cap_boost` in `timer.rs`), and
+    /// the speed goes no higher until the next measurement. That one
+    /// decides from the estimate and drops the cap, as it drops
+    /// `flat_out`: a stall of the host during one boost leaves nothing
+    /// behind for the speed it chooses next.
+    boost_cap: Option<f64>,
     /// The bytes it had read and written, and when that last changed; and
     /// the same of the bytes moved on drives.
     output: (u64, u64),
@@ -1308,7 +1312,7 @@ impl AutoSpeed {
             working: None,
             work_cuts: 0,
             flat_out: false,
-            decided: 0,
+            boost_cap: None,
             output: (0, 0),
             io: (0, 0),
             loading: false,
@@ -1338,10 +1342,18 @@ impl AutoSpeed {
         self.flat_out
     }
 
-    /// While the program gets all the host has, a number that the next
-    /// measurement's boost, if there is one, doesn't share.
-    pub fn boost(&self) -> Option<u32> {
-        self.flat_out.then_some(self.decided)
+    /// The cap slow frames put on the speed of the program getting all
+    /// the host has (`boost_cap`), if they did.
+    pub fn boost_cap(&self) -> Option<f64> {
+        self.boost_cap.filter(|_| self.flat_out)
+    }
+
+    /// Cap the speed of the program getting all the host has at `cap`
+    /// until the next measurement; nothing if it doesn't get that.
+    pub fn cap_boost(&mut self, cap: f64) {
+        if self.flat_out {
+            self.boost_cap = Some(cap);
+        }
     }
 
     /// Whether the protected-mode system was seen idling.
@@ -1417,6 +1429,7 @@ impl AutoSpeed {
         self.restart_search();
         self.working = None;
         self.flat_out = false;
+        self.boost_cap = None;
         self.loading = false;
     }
 
@@ -1493,8 +1506,13 @@ impl AutoSpeed {
         if let Some(before) = self.work_return().filter(|_| done) {
             return self.work_done(before, now.ns, current);
         }
-        let cut = (self.flat_out && current > host_max)
-            .then(|| host_max.max(self.least(protected, host_max)))
+        // Flat out, the speed follows the estimate down, and slow frames in
+        // a row may cap it lower (`boost_cap`).
+        let most = self
+            .boost_cap()
+            .map_or(host_max, |cap| host_max.min(cap as u32));
+        let cut = (self.flat_out && current > most)
+            .then(|| most.max(self.least(protected, most)))
             .filter(|&speed| speed < current);
         let Some(mark) = self.mark else {
             if now.ns >= self.settle_until {
@@ -1793,7 +1811,7 @@ impl AutoSpeed {
         let top = host_max.max(self.least(protected, host_max));
         let c = current as f64;
         self.flat_out = false;
-        self.decided = self.decided.wrapping_add(1);
+        self.boost_cap = None;
         let loading = std::mem::take(&mut self.loading);
         let was_loaded = std::mem::replace(&mut self.loaded, m.io >= LOADS);
         if protected && !self.dpmi_client && m.halted >= IDLES {

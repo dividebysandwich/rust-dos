@@ -612,10 +612,9 @@ pub struct Pacer {
     protected: bool,
     /// As fast as the host keeps up with, estimated from its frames.
     host: HostEstimate,
-    /// While the program gets all the host has, the boost
-    /// (`AutoSpeed::boost`) whose slow frames put its speed this low
-    /// (`cap_boost`). The estimate itself is left alone.
-    boost_cap: Option<(u32, f64)>,
+    /// While the program gets all the host has, whether the last frame
+    /// timed said the host can't run the speed it ran at (`cap_boost`).
+    boost_short: bool,
     /// The frames measured for the host's speed so far: the instructions
     /// they ran, the time those took and the rest of their work.
     sample: HostSample,
@@ -665,7 +664,7 @@ impl Pacer {
             auto: AutoSpeed::new(speed.initial_cycles(), auto_fps),
             protected: false,
             host: HostEstimate::default(),
-            boost_cap: None,
+            boost_short: false,
             sample: HostSample::default(),
             offloaded: 0,
             idle: 0,
@@ -1003,7 +1002,6 @@ impl Pacer {
                 let host_max = self
                     .host
                     .max
-                    .map(|max| self.boost_cap.map_or(max, |(_, cap)| cap.min(max)))
                     .map_or(MAX_CYCLES, |max| (max as u32).clamp(least, MAX_CYCLES));
                 if protected != self.protected {
                     self.protected = protected;
@@ -1081,35 +1079,41 @@ impl Pacer {
     ///
     /// So from the `TRY_BEHIND_FRAMES`th such frame in a row, as many late
     /// frames as end a step up (`AutoSpeed::falling_behind`), a cap brings
-    /// the speed half the way down to each frame's (`HOST_FALL`), and from
-    /// then on to each frame short of the speed (`HOST_SHORT`), as the
-    /// estimate does after two short samples in a row. The cap lasts as
-    /// long as the boost: the next measurement starts without it.
+    /// the speed half the way down to that frame's (`HOST_FALL`). From then
+    /// on, two frames in a row short of the speed (`HOST_SHORT`) move it
+    /// half the way down to the second, as two such samples move the
+    /// estimate: one alone may be a present or a shader compiled, which
+    /// says nothing of the program's work (`HostEstimate::add`). The
+    /// frames are the emulator's, which run whether the program presents
+    /// or not, so a load without frames of its own is watched the same way.
     ///
-    /// The estimate stays as the stall rule keeps it: a load's stall of
-    /// three frames or more (a disc read, a shader compiled) says nothing
-    /// of the host's speed at what the program does after the load, and an
-    /// estimate taken down by it would start that from too low a speed.
+    /// The cap is the boost's (`AutoSpeed::boost_cap`): the next
+    /// measurement decides from the estimate and drops it. The estimate
+    /// stays as the stall rule keeps it: a load's stall of three frames or
+    /// more (a disc read, a shader compiled) says nothing of the host's
+    /// speed at what the program does after the load, and an estimate, or
+    /// a measurement, taken down by it would start that from too low a
+    /// speed.
     fn cap_boost(&mut self, frame_ideal: Option<f64>, current: u32) {
-        let Some(boost) = self.auto.boost() else {
-            self.boost_cap = None;
+        if !self.auto.flat_out() {
+            self.boost_short = false;
             return;
-        };
-        if self.boost_cap.is_some_and(|(of, _)| of != boost) {
-            self.boost_cap = None;
         }
         let Some(ideal) = frame_ideal else {
             return;
         };
+        let short = ideal < current as f64 * HOST_SHORT;
+        let was_short = std::mem::replace(&mut self.boost_short, short);
         let run = self.host.outliers;
-        let from = match self.boost_cap {
-            Some((_, cap)) if ideal < current as f64 * HOST_SHORT => cap,
+        let from = match self.auto.boost_cap() {
+            Some(cap) if short && was_short => cap,
             None if run >= crate::autospeed::TRY_BEHIND_FRAMES => current as f64,
             _ => return,
         };
         if ideal < from {
-            let cap = from + (ideal - from) * HOST_FALL;
-            self.boost_cap = Some((boost, cap));
+            // No lower than frames can be timed at (see `end_frame`).
+            let cap = (from + (ideal - from) * HOST_FALL).max(self.least_timed() as f64);
+            self.auto.cap_boost(cap);
             if crate::autospeed::trace() {
                 eprintln!(
                     "[auto] boost: {run} slow frames in a row, down to {cap:.0} (estimate {:.0})",
@@ -1802,6 +1806,18 @@ mod tests {
         ns: f64,
         reads: bool,
     ) -> (u32, Duration) {
+        boosted_frame_with(cpu, pacer, ns, reads, Duration::ZERO)
+    }
+
+    /// `boosted_frame`, with `overhead` of the frame's other work (a
+    /// present).
+    fn boosted_frame_with(
+        cpu: &mut crate::cpu::Cpu,
+        pacer: &mut Pacer,
+        ns: f64,
+        reads: bool,
+        overhead: Duration,
+    ) -> (u32, Duration) {
         let speed = cpu.bus.clock.cycles_per_ms();
         let executed = (speed as f64 * FRAME.as_secs_f64() * 1000.0) as u64;
         let exec = Duration::from_nanos((executed as f64 * ns) as u64);
@@ -1809,7 +1825,7 @@ mod tests {
         if reads {
             cpu.bus.activity.io_bytes += 250_000;
         }
-        if let Some(next) = pacer.end_cpu_frame(cpu, executed, exec, Duration::ZERO) {
+        if let Some(next) = pacer.end_cpu_frame(cpu, executed, exec, overhead) {
             cpu.bus.clock.set_cycles_per_ms(next);
         }
         (speed, exec)
@@ -1928,7 +1944,56 @@ mod tests {
         assert!(!pacer.auto.flat_out());
         assert_eq!(cpu.bus.clock.cycles_per_ms(), 433_332);
         assert!(same(&pacer), "{:?} against {before}", pacer.host.max);
-        assert_eq!(pacer.boost_cap, None);
+        assert_eq!(pacer.auto.boost_cap(), None);
+    }
+
+    /// The same stall during a load that goes on past the next
+    /// measurement: that measurement decides from the estimate, as the
+    /// boost before the stall did, and boosts the load to it again rather
+    /// than to the speed the stall's frames left.
+    #[test]
+    fn a_long_stall_during_a_load_that_goes_on_ends_with_the_boost() {
+        let (mut cpu, mut pacer) = boosted();
+        let boost = cpu.bus.clock.cycles_per_ms();
+        let stall = LOAD_NS * 15.0;
+        let speeds: Vec<u32> = [stall; 4]
+            .into_iter()
+            .chain([LOAD_NS; 40])
+            .map(|ns| boosted_frame(&mut cpu, &mut pacer, ns, true).0)
+            .collect();
+        assert!(speeds.iter().any(|&s| s < boost / 2), "{speeds:?}");
+        // The measurement comes within 30 frames (`WINDOW_NS`).
+        let last = *speeds.last().unwrap();
+        assert!(last as f64 > boost as f64 * 0.9, "{boost}: {speeds:?}");
+        assert!(pacer.auto.flat_out());
+    }
+
+    /// Once slow frames cap a boost, a frame now and then whose other work
+    /// takes long (a loading screen's present) leaves the cap: one such
+    /// frame says nothing of the program's work, as it says nothing to the
+    /// estimate (`HostEstimate::add`).
+    #[test]
+    fn a_present_now_and_then_leaves_a_capped_boost() {
+        let (mut cpu, mut pacer) = boosted();
+        let stall = LOAD_NS * 15.0;
+        for _ in 0..4 {
+            boosted_frame(&mut cpu, &mut pacer, stall, true);
+        }
+        let capped = cpu.bus.clock.cycles_per_ms();
+        let present = Duration::from_millis(13);
+        let mut speeds = Vec::new();
+        // Short of the next measurement (`WINDOW_NS`).
+        for frame in 0..9 {
+            let overhead = if frame % 3 == 2 {
+                present
+            } else {
+                Duration::ZERO
+            };
+            let (speed, _) = boosted_frame_with(&mut cpu, &mut pacer, LOAD_NS, true, overhead);
+            speeds.push(speed);
+        }
+        assert!(pacer.auto.flat_out());
+        assert!(speeds.iter().all(|&s| s == capped), "{capped}: {speeds:?}");
     }
 
     #[test]
