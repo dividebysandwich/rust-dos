@@ -576,6 +576,41 @@ fn a_full_screen_program_draws_on_its_back_buffer_and_flips() {
     assert_eq!(pointer & 0x3F_FFFF, 64000);
 }
 
+const S_RELEASE: u32 = 2;
+
+/// As Adrenix's software build opens its menu in a mission: a flip chain
+/// flipped an odd number of times, so that the back buffer's memory is
+/// on the screen, released, and a primary surface of its own made in
+/// its place.
+#[test]
+fn a_released_flip_chain_gives_the_screen_back_to_the_primary_surface() {
+    let mut d = flip_chain_data();
+    // The new primary surface's description, where LOCKED is unused.
+    desc(&mut d, LOCKED, DDSD_CAPS, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
+    let (program, data) = program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start_flip_chain(a, l, &mut c)?;
+        c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
+        c.com(a, l, FRONT, S_RELEASE, &[])?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(LOCKED), Arg::At(OFFSCREEN), Arg::I(0)],
+        )?;
+        finish(a, l)
+    });
+    let mut cpu = machine("released_flip_chain", program);
+    run_until_done(&mut cpu, data);
+    let results = results(&mut cpu, data, 8);
+    // The flip and the new surface succeed (Release gives the count left).
+    assert_eq!((results[5], results[7]), (0, 0), "{results:X?}");
+    // The new primary surface is at the start of video memory, and the
+    // screen shows it there.
+    assert_eq!(cpu.bus.vbe.start, 0);
+}
+
 const DDERR_WASSTILLDRAWING: u32 = 0x8876_021C;
 
 /// What the polling program does between two calls of Flip.
