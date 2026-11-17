@@ -350,6 +350,15 @@ pub fn has_gamma_ramp(cpu: &Cpu) -> bool {
     cpu.bus.toadforce_direct_colour() || banshee_ramp_config(cpu).is_some()
 }
 
+/// Whether the display adapter has a gamma ramp in its modes of direct
+/// colour: a ToadForce, a Banshee or a Voodoo3. Their drivers' caps say
+/// so whatever the mode is (DirectDraw's DDCAPS2_PRIMARYGAMMA, Direct3D
+/// 8's D3DCAPS2_FULLSCREENGAMMA), and games read those caps before they
+/// set a ramp: Max Payne's Direct3D 8 driver sets none without them.
+pub fn adapter_has_gamma_ramp(cpu: &Cpu) -> bool {
+    cpu.bus.toadforce() || cpu.bus.banshee().is_some()
+}
+
 /// Set the display's gamma ramp (`gamma_ramp`), from the high byte of
 /// each word. False where the display has none.
 pub fn set_gamma_ramp(cpu: &mut Cpu, ramp: &GammaRamp) -> bool {

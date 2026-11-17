@@ -511,14 +511,16 @@ section covers names that section.
   `GAMMA` registers. `SetDeviceGammaRamp`, DirectDraw's gamma control
   on the primary surface and Direct3D 8's `SetGammaRamp` on a
   full-screen device set them, and a brightness slider or a fade that
-  a game makes with the ramp shows. The card keeps 8 bits of each of
-  the ramp's 16-bit words, the top ones, as cards of the time did. A
-  mode set brings the identity back, so a ramp lasts until the game's
-  mode ends. The `GetGammaRamp` of the primary surface and of a
-  full-screen device read the registers, so after a mode set, a
-  Direct3D 8 `Reset`'s too, they give the identity back. In 256
-  colours there is no ramp: `SetDeviceGammaRamp` fails, and the others
-  keep the ramp and give it back.
+  a game makes with the ramp shows. DirectDraw's caps have
+  `DDCAPS2_PRIMARYGAMMA` and Direct3D 8's `D3DCAPS2_FULLSCREENGAMMA`,
+  which games such as Max Payne read before they set a ramp. The card
+  keeps 8 bits of each of the ramp's 16-bit words, the top ones, as
+  cards of the time did. A mode set brings the identity back, so a
+  ramp lasts until the game's mode ends. The `GetGammaRamp` of the
+  primary surface and of a full-screen device read the registers, so
+  after a mode set, a Direct3D 8 `Reset`'s too, they give the identity
+  back. In 256 colours there is no ramp: `SetDeviceGammaRamp` fails,
+  and the others keep the ramp and give it back.
 - **Render targets and depth buffers.** Direct3D draws into 5-6-5 and
   32-bit surfaces in video memory, and so not in a 256-colour mode or
   into a 5-5-5 surface. A depth buffer has 16 bits, or 24 in a 32-bit

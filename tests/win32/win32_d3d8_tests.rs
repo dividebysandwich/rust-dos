@@ -964,6 +964,9 @@ fn a_toadforce_makes_cube_textures_in_direct3d_8() {
     assert_eq!(peek(&cpu, data + ODD_TEXTURE), 0);
     // D3DPTEXTURECAPS_CUBEMAP, MIPCUBEMAP and CUBEMAP_POW2.
     assert_eq!(peek(&cpu, data + DEVICE_CAPS + 4 * 15) & 0x3_0800, 0x3_0800);
+    // D3DCAPS2_FULLSCREENGAMMA: the card has a gamma ramp, and games
+    // such as Max Payne set none without the bit.
+    assert_eq!(peek(&cpu, data + DEVICE_CAPS + 4 * 3) & 0x2_0000, 0x2_0000);
     // CubeTextureFilterCaps are the TextureFilterCaps: the card filters
     // a cube texture's faces as it does a texture.
     let filters = peek(&cpu, data + DEVICE_CAPS + 4 * 16);

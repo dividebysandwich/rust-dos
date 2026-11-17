@@ -663,6 +663,7 @@ const DDCAPS_CANBLTSYSMEM: u32 = 0x8000_0000;
 const DDCAPS2_NOPAGELOCKREQUIRED: u32 = 0x800;
 const DDCAPS2_WIDESURFACES: u32 = 0x1000;
 const DDCAPS2_CANRENDERWINDOWED: u32 = 0x8_0000;
+const DDCAPS2_PRIMARYGAMMA: u32 = 0x2_0000;
 const DDCKEYCAPS_DESTBLT: u32 = 0x1;
 const DDCKEYCAPS_SRCBLT: u32 = 0x200;
 /// Stretching and shrinking in both directions, by whole and other
@@ -715,6 +716,12 @@ fn write_caps(
         | DDCAPS_CANBLTSYSMEM
         | if hal { DDCAPS_READSCANLINE } else { 0 };
     let mut caps2 = DDCAPS2_NOPAGELOCKREQUIRED | DDCAPS2_WIDESURFACES | DDCAPS2_CANRENDERWINDOWED;
+    // The primary surface's gamma control sets the display's ramp
+    // (`gamma::set_gamma_ramp`), which the 3dfx device's card has no
+    // part in.
+    if hal && !card && crate::win32::screen::adapter_has_gamma_ramp(cpu) {
+        caps2 |= DDCAPS2_PRIMARYGAMMA;
+    }
     let ckey = DDCKEYCAPS_SRCBLT | DDCKEYCAPS_DESTBLT;
     let (total, free) = match (hal, card) {
         (false, _) => (0, 0),
