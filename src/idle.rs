@@ -1898,3 +1898,34 @@ fn skip(cpu: &mut Cpu, period: u64, executed: u64, limit: u64, most: u64) -> u64
     cpu.bus.observe.stats.skipped += passes * period;
     passes * period
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::savestate::machine;
+
+    #[test]
+    fn a_load_watches_nothing_the_machine_before_it_watched() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let state = machine::save(&cpu);
+        // The machine runs on far past the state, and a busy-wait loop is
+        // armed there, until its clock gets ARM_LIMIT further.
+        cpu.bus.clock.icount += 1_000_000_000;
+        cpu.bus.observe.enabled = true;
+        let head = Head {
+            cs: 0x1234,
+            eip: 0x10,
+            pe: false,
+        };
+        cpu.bus.observe.arm(head, cpu.bus.clock.icount);
+        assert!(cpu.bus.observe.watching());
+        cpu.bus.observe.stats.arms = 7;
+        machine::load(&mut cpu, &state).unwrap();
+        // The state's clock is 10^9 instructions behind that limit: the
+        // loop would run one instruction at a time on the interpreter until
+        // it got there.
+        assert!(!cpu.bus.observe.watching());
+        assert!(cpu.bus.observe.enabled);
+        assert_eq!(cpu.bus.observe.stats.arms, 7);
+    }
+}
