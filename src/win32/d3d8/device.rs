@@ -31,6 +31,7 @@ use super::{
 use crate::cpu::Cpu;
 use crate::win32::com;
 use crate::win32::gdi32::Rect;
+use crate::win32::screen;
 
 /// D3DPRESENT_PARAMETERS' fields, by their places.
 pub const PP_WIDTH: usize = 0;
@@ -1077,7 +1078,10 @@ pub fn identity_gamma() -> Vec<u16> {
     (0..768).map(|i| ((i % 256) * 257) as u16).collect()
 }
 
-/// SetGammaRamp(this, flags, ramp): kept, not applied.
+/// SetGammaRamp(this, flags, ramp): kept, and the display's on a
+/// full-screen device where the display has a ramp
+/// (`screen::set_gamma_ramp`). On Windows it changes nothing on a
+/// windowed device.
 pub fn set_gamma_ramp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, _, at] = args[..] else {
         return Some(0);
@@ -1088,11 +1092,13 @@ pub fn set_gamma_ramp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if at == 0 || !cpu.bus.guest_probe(at, 1536, false) {
         return Some(0);
     }
-    let ramp: Vec<u16> = (0..768)
-        .map(|i| cpu.bus.guest_read_16(at + 2 * i))
-        .collect();
-    if let Some(d) = get(cpu, id) {
-        d.gamma = ramp;
+    let ramp: screen::GammaRamp = std::array::from_fn(|i| cpu.bus.guest_read_16(at + 2 * i as u32));
+    let Some(d) = get(cpu, id) else {
+        return Some(0);
+    };
+    d.gamma = ramp.to_vec();
+    if d.params.get(PP_WINDOWED) == Some(&0) {
+        screen::set_gamma_ramp(cpu, &ramp);
     }
     Some(0)
 }

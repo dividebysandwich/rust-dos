@@ -1,9 +1,11 @@
 //! IDirectDrawGammaControl: a surface's gamma ramp, which Direct3D
 //! programs set on the primary surface for brightness. The ramp is kept
-//! and given back; the display doesn't apply it.
+//! and given back, and the primary surface's is the display's where it
+//! has one (`screen::set_gamma_ramp`).
 
 use super::{DD_OK, DDERR_INVALIDOBJECT, DDERR_INVALIDPARAMS, state};
 use crate::cpu::Cpu;
+use crate::win32::screen;
 
 /// DDGAMMARAMP's size: 256 red, green and blue words.
 const SIZE: u32 = 3 * 256 * 2;
@@ -53,14 +55,14 @@ pub fn set_gamma_ramp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let mut bytes = vec![0; SIZE as usize];
     cpu.bus.guest_read_bytes(ramp, &mut bytes);
-    let gamma = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|b| u16::from_le_bytes([b[0], b[1]]))
-        .collect();
-    if let Some(s) = state(cpu).surface_mut(id) {
-        s.gamma = gamma;
+    let gamma: screen::GammaRamp =
+        std::array::from_fn(|i| u16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]]));
+    let Some(s) = state(cpu).surface_mut(id) else {
+        return Some(DDERR_INVALIDOBJECT);
+    };
+    s.gamma = gamma.to_vec();
+    if s.is_primary() {
+        screen::set_gamma_ramp(cpu, &gamma);
     }
     Some(DD_OK)
 }

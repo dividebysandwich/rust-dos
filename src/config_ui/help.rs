@@ -348,6 +348,7 @@ impl Item {
             VeriteIrq => "verite-irq",
             ToadForceMemory => "toadforce-memory",
             ToadForceRenderer => "toadforce-renderer",
+            ToadForceGamma => "toadforce-gamma",
             Memsize => "memsize",
             Ems => "ems",
             Umb => "umb",

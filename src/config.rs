@@ -186,6 +186,9 @@ pub struct Config {
     pub toadforce_memory: Option<u32>,
     /// What draws a ToadForce's triangles (`toadforce_renderer`).
     pub toadforce_renderer: Option<crate::toadforce::Renderer>,
+    /// The gamma a ToadForce's picture is shown with (`toadforce_gamma`):
+    /// Some(None) for off.
+    pub toadforce_gamma: Option<Option<f32>>,
     /// Where screenshots and recordings go (`capture_dir`), and whether
     /// they show the settings window and the performance overlay
     /// (`record_ui`) and the CRT shader (`record_shader`).

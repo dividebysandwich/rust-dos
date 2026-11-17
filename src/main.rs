@@ -1649,6 +1649,7 @@ fn main() -> Result<ExitCode, String> {
         cpu.bus.set_fps_cap(settings.fps_cap);
         cpu.bus.set_voodoo_texture_sampling(settings.voodoo.texture_sampling);
         cpu.bus.set_powervr_filter(settings.powervr_filter);
+        cpu.bus.set_toadforce_gamma(settings.toadforce_gamma);
         // With a variable refresh rate, each frame runs to a vertical
         // retrace of the machine's display and is shown when it is due,
         // so the window refreshes at the machine's rate, where the host's

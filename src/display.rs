@@ -104,6 +104,10 @@ pub struct Display<'a> {
     /// The ToadForce's picture the host renderer shows from its own
     /// copy at the next `present` (`show_toadforce`).
     toadforce_picture: Option<rust_dos::toadforce::format::Surface>,
+    /// The colours the picture's components show as, if not their own:
+    /// the card's gamma ramp and the screen's gamma
+    /// (`Bus::toadforce_gamma`).
+    toadforce_ramp: Option<[u32; 256]>,
     /// Whether the log said why OpenGL doesn't draw the ToadForce.
     toadforce_said: bool,
     /// The layer over the picture last shown (a manual's page), by its
@@ -230,6 +234,7 @@ impl<'a> Display<'a> {
             voodoo_said: false,
             voodoo_shown: false,
             toadforce_picture: None,
+            toadforce_ramp: None,
             toadforce_said: false,
             layer_shown: None,
             refresh_hz: None,
@@ -505,6 +510,7 @@ impl<'a> Display<'a> {
             return false;
         }
         self.toadforce_picture = bus.toadforce_host_picture();
+        self.toadforce_ramp = bus.toadforce_gamma();
         // The frame `present` gets doesn't change with the card's
         // picture.
         self.redraw |= self.toadforce_picture.is_some();
@@ -576,7 +582,10 @@ impl<'a> Display<'a> {
                 };
                 let toadforce = self.toadforce_picture.take();
                 self.voodoo_shown = voodoo.is_some_and(|base| match toadforce {
-                    Some(surface) => gl.present_toadforce(&surface, frame, base, display),
+                    Some(surface) => {
+                        let ramp = self.toadforce_ramp.as_ref();
+                        gl.present_toadforce(&surface, ramp, frame, base, display)
+                    }
                     None => gl.present_voodoo(frame, base, display),
                 });
                 if !self.voodoo_shown

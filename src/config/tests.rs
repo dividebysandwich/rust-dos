@@ -56,6 +56,26 @@ fn toadforce_renderer_is_auto_opengl_or_software() {
 }
 
 #[test]
+fn toadforce_gamma_is_off_or_a_glide_gamma() {
+    let get = |value: &str| {
+        let text = format!("[emulator]\ntoadforce_gamma={}\n", value);
+        parse(&text, Path::new("/cfg"), None)
+    };
+    assert_eq!(get("off").toadforce_gamma, Some(None));
+    assert_eq!(get("OFF").toadforce_gamma, Some(None));
+    assert_eq!(get("1.3").toadforce_gamma, Some(Some(1.3)));
+    assert_eq!(get("2").toadforce_gamma, Some(Some(2.0)));
+    for value in ["", "0", "2.5", "on", "-1"] {
+        let config = get(value);
+        assert_eq!(config.toadforce_gamma, None, "{value}");
+        let warned = |w: &String| w.contains("invalid toadforce_gamma");
+        assert!(config.warnings.iter().any(warned), "{value}");
+    }
+    let settings = Settings::from_config(&parse("", Path::new("/cfg"), None));
+    assert_eq!(settings.toadforce_gamma, None);
+}
+
+#[test]
 fn toadforce_memory_is_one_of_the_cards_sizes() {
     let get = |value: &str| {
         let text = format!("[emulator]\ntoadforce_memory={}\n", value);
@@ -868,6 +888,7 @@ fn changed_settings() -> Settings {
         },
         toadforce_memory: 128,
         toadforce_renderer: crate::toadforce::Renderer::Software,
+        toadforce_gamma: Some(1.5),
         capture_dir: PathBuf::from("/home/u/dos captures"),
         record_ui: true,
         record_shader: true,

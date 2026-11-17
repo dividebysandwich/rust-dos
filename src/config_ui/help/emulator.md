@@ -298,6 +298,15 @@ What draws the ToadForce's 3D:
 - **OpenGL**: your graphics card. Faster in most games.
 - **Rust-DOS**: the processor, with the card's exact pixels.
 
+# ToadForce gamma {#toadforce-gamma}
+
+Brightens or darkens what the ToadForce shows in its 16- and 32-bit
+modes, after the brightness the game sets itself. Above **1** the dark
+colours come up, which helps a game that looks too dark on today's
+screens; below **1** they go down. **Off** shows the game's colours as
+they are. The game's own pictures and saved states don't change, but
+screenshots and recordings show the setting. Takes effect immediately.
+
 # Memory {#memsize}
 
 The PC's RAM. **16 MB** runs nearly every DOS game. Windows 95 and a few

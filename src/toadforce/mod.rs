@@ -152,12 +152,16 @@ pub struct ToadForce {
     /// or the machine's RAM changes (`Bus::toadforce_moved`), so that
     /// an access compares its address with them and nothing else.
     pub decoded: [Option<(u32, u32)>; 2],
+    /// The screen's own gamma (`toadforce_gamma`), which the picture
+    /// goes through after the card's ramp. The host's setting, no part
+    /// of the card's state.
+    screen_gamma: Option<f32>,
 }
 
 /// The version of the card's saved state, which a saved state's `TOAD`
 /// section and a recording (`capture`) carry. A change to what
 /// `state_fields!` below saves takes a new one.
-pub const STATE_VERSION: u16 = 4;
+pub const STATE_VERSION: u16 = 5;
 
 /// How long a queued command waits at most, in nanoseconds of the
 /// emulated clock: well under a frame, so that a picture drawn straight
@@ -206,7 +210,7 @@ crate::state_fields!(ToadForce {
     level1,
     queue,
     queue_since,
-} skip { counts, raster, gpu, capture, decoded });
+} skip { counts, raster, gpu, capture, decoded, screen_gamma });
 
 impl ToadForce {
     /// A card with `memory` bytes of card memory (one of
@@ -238,7 +242,39 @@ impl ToadForce {
             counts: Counts::default(),
             capture: capture::Slot::default(),
             decoded: [None; 2],
+            screen_gamma: None,
         }
+    }
+
+    /// Set the screen's own gamma (`toadforce_gamma`): Glide's
+    /// exponent, which takes a value v of 0 to 1 to v^(1 / gamma), or
+    /// None for none. True if it changed.
+    pub fn set_screen_gamma(&mut self, gamma: Option<f32>) -> bool {
+        let gamma = gamma.filter(|g| g.is_finite() && *g > 0.0 && *g != 1.0);
+        std::mem::replace(&mut self.screen_gamma, gamma) != gamma
+    }
+
+    /// The colours the picture's 8-bit components show as, in the
+    /// palette's layout: the card's gamma ramp (`GAMMA`), then the
+    /// screen's own gamma. None where the picture shows its pixels as
+    /// they are: while the card shows no mode of direct colour, or both
+    /// are the identity.
+    pub fn picture_ramp(&self) -> Option<[u32; 256]> {
+        if !self.display.direct_colour() {
+            return None;
+        }
+        let ramp = self.display.gamma();
+        let Some(gamma) = self.screen_gamma else {
+            return (*ramp != display::IDENTITY).then_some(*ramp);
+        };
+        let curve: [u32; 256] = std::array::from_fn(|v| {
+            let v = (v as f64 / 255.0).powf(1.0 / gamma as f64);
+            (v * 255.0).round().clamp(0.0, 255.0) as u32
+        });
+        Some(ramp.map(|rgb| {
+            let [r, g, b] = [rgb >> 16, rgb >> 8 & 0xFF, rgb & 0xFF].map(|c| curve[c as usize]);
+            r << 16 | g << 8 | b
+        }))
     }
 
     /// Record what the card is given to draw from its next run of
@@ -550,9 +586,9 @@ impl ToadForce {
             regs::ERROR => self.error,
             regs::ERROR_AT => self.error_at,
             regs::MEMORY => self.memory,
-            regs::MODE_ENABLE..=regs::SCANLINE | regs::PALETTE..regs::PALETTE_END => {
-                self.display.read(offset, live)
-            }
+            regs::MODE_ENABLE..=regs::SCANLINE
+            | regs::PALETTE..regs::PALETTE_END
+            | regs::GAMMA..regs::GAMMA_END => self.display.read(offset, live),
             regs::CAPS..regs::CAPS_END => {
                 caps::read(self.level, ((offset - regs::CAPS) / 4) as usize)
             }
@@ -591,7 +627,9 @@ impl ToadForce {
                 self.error_at = 0;
             }
             regs::RESET if value & 1 != 0 => self.reset(live, &mut fx),
-            regs::MODE_ENABLE..=regs::MODE_REFRESH | regs::PALETTE..regs::PALETTE_END => {
+            regs::MODE_ENABLE..=regs::MODE_REFRESH
+            | regs::PALETTE..regs::PALETTE_END
+            | regs::GAMMA..regs::GAMMA_END => {
                 match self.display.write(offset, value, self.memory, live) {
                     Ok(change) => fx.display = fx.display.max(change),
                     Err(error) => self.latch(error, regs::AT_REGISTER),
