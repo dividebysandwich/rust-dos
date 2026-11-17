@@ -1,6 +1,6 @@
 //! The card's display: the mode registers, the mode shown, flips, the
-//! palette of `P8` modes, and the frame's timing (chapter 6 of
-//! `docs/toadforce-spec.md`).
+//! palette of `P8` modes, the gamma ramp of the others, and the frame's
+//! timing (chapter 6 of `docs/toadforce-spec.md`).
 //!
 //! The card has no clock of its own. Whoever reaches it says what time
 //! it is and what timing the VGA has (`Live`), and `sync` then counts
@@ -94,7 +94,8 @@ pub struct Legacy {
 pub enum Change {
     #[default]
     None,
-    /// The picture: the surface shown, or a colour of a `P8` mode's.
+    /// The picture: the surface shown, a colour of a `P8` mode's, or the
+    /// gamma ramp of another mode.
     Picture,
     /// The mode shown, or whether the card shows one.
     Mode,
@@ -171,6 +172,9 @@ pub struct Display {
     shown: Option<Shown>,
     beam: Beam,
     palette: [u32; 256],
+    /// `GAMMA`: what each of the 256 values of a component shows as,
+    /// red in bits 16 to 23, green in 8 to 15, blue in 0 to 7.
+    gamma: [u32; 256],
     /// Set while the card's mode has the screen (the bus keeps it).
     pub legacy: Option<Legacy>,
 }
@@ -186,6 +190,7 @@ impl Default for Display {
             shown: None,
             beam: Beam::default(),
             palette: [0; 256],
+            gamma: IDENTITY,
             legacy: None,
         }
     }
@@ -249,8 +254,20 @@ crate::state_fields!(Display {
     shown,
     beam,
     palette,
+    gamma,
     legacy,
 });
+
+/// The gamma ramp at reset: every value shows as itself.
+pub const IDENTITY: [u32; 256] = {
+    let mut ramp = [0; 256];
+    let mut i = 0;
+    while i < 256 {
+        ramp[i] = i as u32 * 0x01_0101;
+        i += 1;
+    }
+    ramp
+};
 
 impl Display {
     /// The mode the card shows, if it shows one.
@@ -267,6 +284,17 @@ impl Display {
     /// 15, blue in 0 to 7.
     pub fn palette(&self) -> &[u32; 256] {
         &self.palette
+    }
+
+    /// The gamma ramp (`GAMMA`), in the palette's layout.
+    pub fn gamma(&self) -> &[u32; 256] {
+        &self.gamma
+    }
+
+    /// Whether the card shows a mode of direct colour, whose picture
+    /// goes through the gamma ramp.
+    pub fn direct_colour(&self) -> bool {
+        self.shown.is_some_and(|s| s.format != Format::P8)
     }
 
     /// The display's timing at `live`: the mode shown's, or the VGA's.
@@ -350,6 +378,7 @@ impl Display {
             regs::PALETTE..regs::PALETTE_END => {
                 self.palette[((offset - regs::PALETTE) / 4) as usize]
             }
+            regs::GAMMA..regs::GAMMA_END => self.gamma[((offset - regs::GAMMA) / 4) as usize],
             _ => 0,
         }
     }
@@ -418,6 +447,14 @@ impl Display {
             regs::PALETTE..regs::PALETTE_END => {
                 self.palette[((offset - regs::PALETTE) / 4) as usize] = value & 0x00FF_FFFF;
                 return Ok(if self.shown.is_some_and(|s| s.format == Format::P8) {
+                    Change::Picture
+                } else {
+                    Change::None
+                });
+            }
+            regs::GAMMA..regs::GAMMA_END => {
+                self.gamma[((offset - regs::GAMMA) / 4) as usize] = value & 0x00FF_FFFF;
+                return Ok(if self.direct_colour() {
                     Change::Picture
                 } else {
                     Change::None
@@ -715,5 +752,33 @@ mod tests {
             .unwrap();
         assert_eq!(d.read(regs::PALETTE + 4 * 255, at(0)), 0x12_3456);
         assert_eq!(d.palette()[255], 0x12_3456);
+    }
+
+    #[test]
+    fn the_gamma_ramp_starts_as_the_identity_and_shows_in_direct_colour() {
+        let mut d = Display::default();
+        for i in [0, 1, 0x80, 255] {
+            let value = d.read(regs::GAMMA + 4 * i, at(0));
+            assert_eq!(value, i * 0x01_0101);
+        }
+        assert!(!d.direct_colour());
+        // Kept with 24 bits, and not shown while the VGA has the screen.
+        let change = d.write(regs::GAMMA + 4 * 255, 0xFF80_4020, MEMORY, at(0));
+        assert_eq!(change, Ok(Change::None));
+        assert_eq!(d.read(regs::GAMMA + 4 * 255, at(0)), 0x80_4020);
+        // A mode of direct colour shows it, and a write changes the
+        // picture.
+        mode(&mut d, 640, 480, Format::R5G6B5.code(), 60).unwrap();
+        assert!(d.direct_colour());
+        assert_eq!(d.gamma()[255], 0x80_4020);
+        let change = d.write(regs::GAMMA, 0x10_1010, MEMORY, at(0));
+        assert_eq!(change, Ok(Change::Picture));
+        // A `P8` mode's colours are its palette's alone.
+        mode(&mut d, 640, 480, Format::P8.code(), 60).unwrap();
+        assert!(!d.direct_colour());
+        assert_eq!(d.write(regs::GAMMA, 0, MEMORY, at(0)), Ok(Change::None));
+        // A reset brings the identity back.
+        d.reset(at(0));
+        assert_eq!(d.gamma(), &IDENTITY);
     }
 }

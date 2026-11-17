@@ -75,6 +75,11 @@ pub fn words(cpu: &Cpu, whose: Whose) -> [u32; 53] {
     // D3DCAPS_READ_SCANLINE; D3DCAPS2_CANRENDERWINDOWED.
     w[2] = 0x2_0000;
     w[3] = 0x8_0000;
+    // D3DCAPS2_FULLSCREENGAMMA: a full-screen device's SetGammaRamp sets
+    // the display's ramp (`screen::set_gamma_ramp`).
+    if crate::win32::screen::adapter_has_gamma_ramp(cpu) {
+        w[3] |= 0x2_0000;
+    }
     // D3DPRESENT_INTERVAL_IMMEDIATE and ONE.
     w[5] = 0x8000_0000 | 1;
     // D3DDEVCAPS_: floating point TL vertices, execute buffers, TL

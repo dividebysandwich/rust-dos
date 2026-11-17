@@ -58,6 +58,7 @@ pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate
     cpu.bus.game_fixes_off = settings.game_fixes_off.clone();
     cpu.bus.toadforce_memory = settings.toadforce_memory << 20;
     crate::video::bios::install(&mut cpu.bus, settings.video_setup());
+    cpu.bus.set_toadforce_gamma(settings.toadforce_gamma);
     cpu.bus.configure_voodoo(settings.voodoo_board());
     cpu.bus.set_voodoo_texture_sampling(settings.voodoo.texture_sampling);
     cpu.bus.set_fps_cap(settings.fps_cap);
@@ -212,6 +213,8 @@ impl Hardware {
         }
         cpu.bus.set_voodoo_texture_sampling(settings.voodoo.texture_sampling);
         cpu.bus.set_fps_cap(settings.fps_cap);
+        // A ToadForce made again above starts without the screen's gamma.
+        cpu.bus.set_toadforce_gamma(settings.toadforce_gamma);
         let env = settings.environment();
         if env != self.env {
             cpu.set_env_rules(env);

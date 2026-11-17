@@ -11,6 +11,7 @@
 
 use super::Bus;
 use crate::toadforce::display::{Legacy, Shown};
+use crate::toadforce::format::Format;
 use crate::toadforce::gpu::Cause;
 use crate::toadforce::pci::Bar;
 use crate::toadforce::{Change, Effects, Live, ToadForce, caps, command, regs};
@@ -467,7 +468,7 @@ impl Bus {
     /// the surface the card shows as of the commands it has run
     /// (`toadforce_picture`); the queued ones stay queued.
     pub fn toadforce_host_picture(&mut self) -> Option<crate::toadforce::format::Surface> {
-        use crate::toadforce::format::{Format, Surface};
+        use crate::toadforce::format::Surface;
         if self.video_mode != VideoMode::Vesa || !self.toadforce_hosted() {
             return None;
         }
@@ -582,8 +583,8 @@ impl Bus {
         self.toadforce_effects(fx);
     }
 
-    /// The surface the card shows moved, or a colour of its palette
-    /// changed.
+    /// The surface the card shows moved, or a colour of its palette or
+    /// its gamma ramp changed.
     ///
     /// The screen shows the surface at `MODE_START` from the moment it
     /// changes ("Flips" in `docs/toadforce-spec.md`): the window,
@@ -701,6 +702,32 @@ impl Bus {
     pub fn toadforce_palette(&self) -> Option<&[u32; 256]> {
         let display = &self.toadforce.as_deref()?.display;
         display.shown().map(|_| display.palette())
+    }
+
+    /// Whether the card shows a mode of its own in direct colour, whose
+    /// picture goes through its gamma ramp (`GAMMA`).
+    pub fn toadforce_direct_colour(&self) -> bool {
+        self.toadforce
+            .as_deref()
+            .is_some_and(|c| c.display.direct_colour())
+    }
+
+    /// The colours the components of the card's picture show as, while
+    /// they aren't their own (`ToadForce::picture_ramp`): its gamma ramp,
+    /// then the screen's own gamma.
+    pub fn toadforce_gamma(&self) -> Option<[u32; 256]> {
+        self.toadforce.as_deref()?.picture_ramp()
+    }
+
+    /// The screen's own gamma for the card's picture (`toadforce_gamma`),
+    /// or None. Its picture is drawn again when it changes.
+    pub fn set_toadforce_gamma(&mut self, gamma: Option<f32>) {
+        let Some(card) = self.toadforce.as_deref_mut() else {
+            return;
+        };
+        if card.set_screen_gamma(gamma) && card.display.direct_colour() {
+            self.vga.mark_dirty_full();
+        }
     }
 
     /// A state was loaded: the linear frame buffer is where its card has

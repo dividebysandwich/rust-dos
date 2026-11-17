@@ -207,6 +207,18 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                                 value
                             )),
                         },
+                        "toadforce_gamma" => match value.to_ascii_lowercase().as_str() {
+                            "off" => config.toadforce_gamma = Some(None),
+                            _ => match value.parse::<f32>() {
+                                Ok(g) if (0.1..=2.0).contains(&g) => {
+                                    config.toadforce_gamma = Some(Some(g))
+                                }
+                                _ => warn(format!(
+                                    "invalid toadforce_gamma '{}' (off, or 0.1 to 2)",
+                                    value
+                                )),
+                            },
+                        },
                         "verite_rom" => {
                             let value = value.trim_matches('"');
                             let path = match (value.strip_prefix("~/"), home) {

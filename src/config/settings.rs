@@ -49,6 +49,9 @@ pub struct Settings {
     pub toadforce_memory: u32,
     /// What draws a ToadForce's triangles.
     pub toadforce_renderer: crate::toadforce::Renderer,
+    /// The gamma a ToadForce's picture is shown with, after the card's
+    /// own ramp, or None for none.
+    pub toadforce_gamma: Option<f32>,
     /// Where screenshots and recordings go; relative to the working
     /// directory.
     pub capture_dir: PathBuf,
@@ -192,6 +195,7 @@ impl Default for Settings {
             verite: Default::default(),
             toadforce_memory: crate::toadforce::regs::DEFAULT_MEMORY >> 20,
             toadforce_renderer: Default::default(),
+            toadforce_gamma: None,
             capture_dir: PathBuf::from("capture"),
             record_ui: false,
             record_shader: false,
@@ -345,6 +349,7 @@ impl Settings {
             toadforce_renderer: config
                 .toadforce_renderer
                 .unwrap_or(default.toadforce_renderer),
+            toadforce_gamma: config.toadforce_gamma.unwrap_or(default.toadforce_gamma),
             capture_dir: config.capture_dir.clone().unwrap_or(default.capture_dir),
             record_ui: config.record_ui.unwrap_or(default.record_ui),
             record_shader: config.record_shader.unwrap_or(default.record_shader),
@@ -577,6 +582,15 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
             Emulator,
             "toadforce_renderer",
             Some(settings.toadforce_renderer.name().to_string()),
+        ),
+        (
+            Emulator,
+            "toadforce_gamma",
+            Some(
+                settings
+                    .toadforce_gamma
+                    .map_or("off".to_string(), |g| g.to_string()),
+            ),
         ),
         (Emulator, "capture_dir", Some(contract_home(&settings.capture_dir, home))),
         (Emulator, "record_ui", yes_no(settings.record_ui)),

@@ -3352,10 +3352,21 @@ III unless `cpu` says otherwise (see `cpu` in
 |---|---|---|
 | `toadforce_memory` | 32, 64 (default), 128 | The megabytes of video memory the card has |
 | `toadforce_renderer` | `auto` (default), `opengl`, `software` | What draws the card's 3D: your graphics card through OpenGL, or Rust-DOS on the processor |
+| `toadforce_gamma` | `off` (default), 0.1 to 2 | A gamma the card's 16- and 32-bit pictures are shown with, after the game's own |
 
 A change of `toadforce_memory` takes effect at the DOS prompt, and one
-of `toadforce_renderer` at once. The card's registers and commands are
-specified in [docs/toadforce-spec.md](docs/toadforce-spec.md).
+of `toadforce_renderer` or `toadforce_gamma` at once. The card's
+registers and commands are specified in
+[docs/toadforce-spec.md](docs/toadforce-spec.md).
+
+The card's 16- and 32-bit modes go through its gamma ramp, which games
+set for their brightness controls and fades through
+`SetDeviceGammaRamp`, DirectDraw's gamma control and Direct3D 8's
+`SetGammaRamp`. `toadforce_gamma` adds a gamma of your own after it, as
+Glide's gamma does on a 3dfx card: a value v from 0 to 1 is shown as
+v^(1 / gamma), so above 1 the dark colours come up. It changes the
+screen, screenshots and recordings, not what the program reads or a
+saved state.
 
 With `auto` and `opengl`, OpenGL draws the triangles and the card's
 memory gets the pixels when the program or the screen reads them. The

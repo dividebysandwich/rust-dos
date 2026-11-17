@@ -603,6 +603,15 @@ fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bu
         Some(palette) => palette.map(|c| ((c >> 16) as u8, (c >> 8) as u8, c as u8)),
         None => std::array::from_fn(|i| bus.vga.get_rgb(i as u8 & bus.vga.dac_mask)),
     };
+    // A ToadForce's gamma ramp and the screen's own gamma
+    // (`toadforce_gamma`), which its modes of direct colour go through.
+    let ramp = bus.toadforce_gamma().map(|ramp| {
+        let [mut r, mut g, mut b] = [[0u8; 256]; 3];
+        for (i, &c) in ramp.iter().enumerate() {
+            [r[i], g[i], b[i]] = [(c >> 16) as u8, (c >> 8) as u8, c as u8];
+        }
+        [r, g, b]
+    });
     let vram = &vbe.vram;
     let wrap = vram.len() - 1;
     // A Vérité's pixels are in its RISC's byte order.
@@ -729,6 +738,14 @@ fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bu
                     canvas[i + 1] = rgb.1;
                     canvas[i + 2] = rgb.2;
                 }
+            }
+        }
+        if let Some([r, g, b]) = &ramp {
+            let end = (dst + mode.width as usize * scale * 4).min(canvas.len());
+            for pixel in canvas[dst..end].as_chunks_mut::<4>().0 {
+                pixel[0] = r[pixel[0] as usize];
+                pixel[1] = g[pixel[1] as usize];
+                pixel[2] = b[pixel[2] as usize];
             }
         }
         // A Vérité's RAMDAC's cursor over the row.

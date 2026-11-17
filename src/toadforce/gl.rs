@@ -333,7 +333,13 @@ void main() {
 const CONVERT: &str = "
 uniform sampler2D u_source;
 uniform int u_mode;
+uniform bool u_ramp_on;
+uniform uvec4 u_ramp[64];
 out vec4 o_color;
+// The card's gamma ramp for an 8-bit value, as the palette has it.
+uint ramp(int v) {
+    return u_ramp[v >> 2][v & 3];
+}
 void main() {
     vec4 c = texelFetch(u_source, ivec2(gl_FragCoord.xy), 0);
     if (u_mode == 1) {
@@ -347,6 +353,11 @@ void main() {
         v = ivec3((v.r << 3) | (v.r >> 2), (v.g << 2) | (v.g >> 4), (v.b << 3) | (v.b >> 2));
         c = vec4(vec3(v) / 255.0, 1.0);
     }
+    if (u_ramp_on) {
+        ivec3 v = ivec3(c.rgb * 255.0 + 0.5);
+        uvec3 r = uvec3(ramp(v.r) >> 16, ramp(v.g) >> 8, ramp(v.b)) & 255u;
+        c.rgb = vec3(r) / 255.0;
+    }
     o_color = c;
 }
 ";
@@ -354,6 +365,11 @@ void main() {
 /// Where `CONVERT`'s uniforms are.
 struct Convert {
     mode: Option<glow::UniformLocation>,
+    /// Whether the colours go through `ramp`: only those of the
+    /// picture the window shows (`composite`).
+    ramp_on: Option<glow::UniformLocation>,
+    /// The card's gamma ramp, four entries a vector.
+    ramp: Option<glow::UniformLocation>,
 }
 
 impl Locations for Convert {
@@ -366,6 +382,8 @@ impl Locations for Convert {
             gl.uniform_1_i32(source.as_ref(), SCRATCH_UNIT as i32);
             Convert {
                 mode: gl.get_uniform_location(program, "u_mode"),
+                ramp_on: gl.get_uniform_location(program, "u_ramp_on"),
+                ramp: gl.get_uniform_location(program, "u_ramp"),
             }
         }
     }
@@ -437,6 +455,9 @@ pub struct ToadForceGl {
     /// it.
     picture: Option<(glow::Framebuffer, glow::Texture, glow::Texture, (u32, u32))>,
     convert: Program<Convert>,
+    /// The gamma ramp `convert` has in `u_ramp`, set when the picture
+    /// shown first needed another.
+    ramp: Option<[u32; 256]>,
     copies: Vec<Copy>,
     /// Counted up with every change of a copy's pixels: the version of
     /// the copy changed last.
@@ -552,6 +573,7 @@ impl ToadForceGl {
                 plain,
                 picture: None,
                 convert,
+                ramp: None,
                 copies: Vec::new(),
                 changes: 0,
                 textures: HashMap::new(),
@@ -1770,11 +1792,14 @@ impl ToadForceGl {
     /// The picture of `surface`, which the screen shows, from the
     /// host's copy of it, with `screen`'s pixels over it where they
     /// differ from `base` (a cursor, messages): a texture of 8 bits a
-    /// channel with the picture's first row first, and its size. None
-    /// without a copy of the surface.
+    /// channel with the picture's first row first, and its size. The
+    /// picture goes through the card's gamma `ramp`, if it has one,
+    /// and what is drawn over it doesn't. None without a copy of the
+    /// surface.
     pub fn composite(
         &mut self,
         surface: &Surface,
+        ramp: Option<&[u32; 256]>,
         screen: &Frame,
         base: &Frame,
     ) -> Option<(glow::Texture, (u32, u32))> {
@@ -1865,8 +1890,19 @@ impl ToadForceGl {
             gl.use_program(Some(self.convert.program));
             gl.bind_vertex_array(Some(self.plain));
             gl.uniform_1_i32(self.convert.uniforms.mode.as_ref(), mode);
+            let uniforms = &self.convert.uniforms;
+            if let Some(ramp) = ramp
+                && self.ramp.as_ref() != Some(ramp)
+            {
+                gl.uniform_4_u32_slice(uniforms.ramp.as_ref(), ramp);
+                self.ramp = Some(*ramp);
+            }
+            gl.uniform_1_i32(uniforms.ramp_on.as_ref(), ramp.is_some() as i32);
             gl.bind_texture(glow::TEXTURE_2D, Some(source));
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            // The textures `CONVERT` fills, and what is drawn over the
+            // picture, keep their colours.
+            gl.uniform_1_i32(uniforms.ramp_on.as_ref(), 0);
             if let Some((first, rows, pixels)) = over {
                 gl.bind_texture(glow::TEXTURE_2D, Some(staging));
                 let data = glow::PixelUnpackData::Slice(Some(&pixels));

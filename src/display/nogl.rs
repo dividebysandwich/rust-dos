@@ -122,6 +122,7 @@ impl GlScreen {
     pub fn present_toadforce(
         &mut self,
         _surface: &rust_dos::toadforce::format::Surface,
+        _ramp: Option<&[u32; 256]>,
         _screen: &Frame,
         _base: &Frame,
         _display: (u32, u32),

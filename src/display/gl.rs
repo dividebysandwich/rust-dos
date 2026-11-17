@@ -870,18 +870,20 @@ impl GlScreen {
     }
 
     /// Show the ToadForce's picture `surface` from the host renderer's
-    /// copy of it (`ToadForceGl::composite`), with what `screen` has
-    /// over `base` on it, letterboxed at `display` proportions. False
-    /// if the renderer has none to show.
+    /// copy of it (`ToadForceGl::composite`), through the card's gamma
+    /// `ramp` if it has one, with what `screen` has over `base` on it,
+    /// letterboxed at `display` proportions. False if the renderer has
+    /// none to show.
     pub fn present_toadforce(
         &mut self,
         surface: &Surface,
+        ramp: Option<&[u32; 256]>,
         screen: &Frame,
         base: &Frame,
         display: (u32, u32),
     ) -> bool {
         let composed = match &mut *self.toadforce.0.borrow_mut() {
-            Some(host) => host.composite(surface, screen, base),
+            Some(host) => host.composite(surface, ramp, screen, base),
             None => None,
         };
         let Some((texture, size)) = composed else {

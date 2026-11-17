@@ -40,6 +40,7 @@ use crate::config::DesktopSize;
 use crate::cpu::Cpu;
 use crate::video::crt::CrtTiming;
 use crate::toadforce::command::encode;
+use crate::toadforce::display::IDENTITY;
 use crate::toadforce::format::{Format, Rect as CardRect, Surface};
 use crate::toadforce::gpu::Cause;
 use crate::toadforce::{caps, regs};
@@ -266,6 +267,9 @@ fn toadforce_set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32) -> Optio
     if !sizes.contains(&width) || !sizes.contains(&height) || !fits {
         return None;
     }
+    // A mode set brings the identity ramp back, as on the Banshee
+    // (`card_set_mode`): a game's brightness lasts until its mode ends.
+    toadforce_load_gamma(cpu, &IDENTITY);
     let bus = &mut cpu.bus;
     for (register, value) in [
         (regs::MODE_ENABLE, 0),
@@ -299,6 +303,110 @@ fn toadforce_set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32) -> Optio
     // memory held before.
     settle(cpu);
     Some(())
+}
+
+/// A gamma ramp as Windows has it: 256 words of red, then green, then
+/// blue, each value's 8 bits in the high byte.
+pub type GammaRamp = [u16; 3 * 256];
+
+/// The display's gamma ramp, which SetDeviceGammaRamp, DirectDraw's
+/// gamma control and Direct3D 8's SetGammaRamp set. None where the
+/// display has none: on adapters without one, and in 8-bit modes, whose
+/// table is the palette.
+///
+/// - A ToadForce's is its `GAMMA` registers, in the card's own modes of
+///   direct colour.
+/// - A Banshee's or Voodoo3's is the desktop lookup table, which the
+///   video processor runs 16- and 32-bit pixels through when its bypass
+///   is off, as 3dfx's driver had it.
+///
+/// A mode set brings the identity back on both, so a ramp lasts until
+/// the mode changes.
+pub fn gamma_ramp(cpu: &mut Cpu) -> Option<GammaRamp> {
+    let table: [u32; 256] = if cpu.bus.toadforce_direct_colour() {
+        std::array::from_fn(|i| cpu.bus.toadforce_register(regs::GAMMA + 4 * i as u32))
+    } else {
+        let cfg = banshee_ramp_config(cpu)?;
+        if cfg & card::VIDPROC_DESKTOP_CLUT_BYPASS != 0 {
+            IDENTITY
+        } else {
+            std::array::from_fn(|i| {
+                cpu.bus.voodoo_write_32(card::DAC_ADDR, i as u32);
+                cpu.bus.voodoo_read_32(card::DAC_DATA)
+            })
+        }
+    };
+    let mut ramp = [0; 3 * 256];
+    for (i, rgb) in table.iter().enumerate() {
+        for (c, shift) in [16, 8, 0].into_iter().enumerate() {
+            ramp[256 * c + i] = (rgb >> shift & 0xFF) as u16 * 0x101;
+        }
+    }
+    Some(ramp)
+}
+
+/// Whether the display has a gamma ramp (`gamma_ramp`).
+pub fn has_gamma_ramp(cpu: &Cpu) -> bool {
+    cpu.bus.toadforce_direct_colour() || banshee_ramp_config(cpu).is_some()
+}
+
+/// Whether the display adapter has a gamma ramp in its modes of direct
+/// colour: a ToadForce, a Banshee or a Voodoo3. Their drivers' caps say
+/// so whatever the mode is (DirectDraw's DDCAPS2_PRIMARYGAMMA, Direct3D
+/// 8's D3DCAPS2_FULLSCREENGAMMA), and games read those caps before they
+/// set a ramp: Max Payne's Direct3D 8 driver sets none without them.
+pub fn adapter_has_gamma_ramp(cpu: &Cpu) -> bool {
+    cpu.bus.toadforce() || cpu.bus.banshee().is_some()
+}
+
+/// Set the display's gamma ramp (`gamma_ramp`), from the high byte of
+/// each word. False where the display has none.
+pub fn set_gamma_ramp(cpu: &mut Cpu, ramp: &GammaRamp) -> bool {
+    let table: [u32; 256] = std::array::from_fn(|i| {
+        let [r, g, b] = [ramp[i], ramp[256 + i], ramp[512 + i]].map(|v| (v >> 8) as u32);
+        r << 16 | g << 8 | b
+    });
+    if cpu.bus.toadforce_direct_colour() {
+        toadforce_load_gamma(cpu, &table);
+        return true;
+    }
+    let Some(cfg) = banshee_ramp_config(cpu) else {
+        return false;
+    };
+    for (i, rgb) in table.iter().enumerate() {
+        cpu.bus.voodoo_write_32(card::DAC_ADDR, i as u32);
+        cpu.bus.voodoo_write_32(card::DAC_DATA, *rgb);
+    }
+    // The identity ramp is the table bypassed, as after a mode set.
+    let cfg = if table == IDENTITY {
+        cfg | card::VIDPROC_DESKTOP_CLUT_BYPASS
+    } else {
+        cfg & !card::VIDPROC_DESKTOP_CLUT_BYPASS
+    };
+    cpu.bus.voodoo_write_32(card::VID_PROC_CFG, cfg);
+    cpu.bus.vga.mark_dirty_full();
+    true
+}
+
+/// Load `table` into a ToadForce's `GAMMA` registers. Only the entries
+/// that differ are written: each is a register write of its own, which
+/// runs the queued commands and redraws the screen, and a mode set or a
+/// game's fade gives the whole ramp where few entries, or none, change.
+fn toadforce_load_gamma(cpu: &mut Cpu, table: &[u32; 256]) {
+    for (i, rgb) in table.iter().enumerate() {
+        let register = regs::GAMMA + 4 * i as u32;
+        if cpu.bus.toadforce_register(register) != *rgb {
+            cpu.bus.toadforce_register_write(register, *rgb);
+        }
+    }
+}
+
+/// A Banshee's desktop video processor configuration, if its pixels go
+/// through the lookup table that has the ramp (16 bits or more).
+fn banshee_ramp_config(cpu: &Cpu) -> Option<u32> {
+    let cfg = cpu.bus.banshee()?.reg(card::VID_PROC_CFG);
+    let format = cfg >> 18 & 7;
+    (format != 0 && cfg & card::VIDPROC_DESKTOP_CLUT_SEL == 0).then_some(cfg)
 }
 
 /// The VBE mode of a size and depth, the list's or one of DirectDraw's
@@ -982,6 +1090,69 @@ mod tests {
         }
         assert_eq!(from_565(0xF800), 0xFF_0000);
         assert_eq!(to_565(0x12_3456), 0x11AA);
+    }
+
+    #[test]
+    fn a_toadforces_gamma_ramp_and_the_screens_gamma_show_in_direct_colour() {
+        use crate::video::adapter::{Adapter, VideoSetup};
+        use crate::video::{Frame, frame_size, render_screen};
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let setup = VideoSetup {
+            adapter: Adapter::ToadForce,
+            ..Default::default()
+        };
+        crate::video::bios::install(&mut cpu.bus, setup);
+        let first_pixel = |cpu: &Cpu| {
+            let (width, height) = frame_size(&cpu.bus);
+            let mut frame = Frame::new(width, height);
+            render_screen(&mut frame, &cpu.bus);
+            [frame.rgba[0], frame.rgba[1], frame.rgba[2]]
+        };
+        // A ramp that halves red, keeps green and inverts blue.
+        let mut ramp = [0u16; 3 * 256];
+        for i in 0..256 {
+            ramp[i] = (i as u16 / 2) * 0x101;
+            ramp[256 + i] = i as u16 * 0x101;
+            ramp[512 + i] = (255 - i as u16) * 0x101;
+        }
+        for (bpp, pixel) in [(32, &[0x10, 0x80, 0xFF, 0][..]), (16, &[0x00, 0xF8][..])] {
+            set_mode(&mut cpu, 640, 480, bpp).unwrap();
+            write(&mut cpu, 0, pixel);
+            let shown = first_pixel(&cpu);
+            assert!(has_gamma_ramp(&cpu));
+            assert_eq!(gamma_ramp(&mut cpu).map(|r| r[255]), Some(0xFFFF));
+            assert!(set_gamma_ramp(&mut cpu, &ramp));
+            assert_eq!(gamma_ramp(&mut cpu), Some(ramp));
+            assert_eq!(cpu.bus.toadforce_register(regs::GAMMA + 4 * 255), 0x7F_FF00);
+            // The screen's colours change, and card memory's don't.
+            let [r, g, b] = shown;
+            let expected = [r / 2, g, 255 - b];
+            assert_eq!(first_pixel(&cpu), expected, "{bpp} bits");
+            let mut back = vec![0; pixel.len()];
+            read(&mut cpu, 0, &mut back);
+            assert_eq!(back, pixel, "{bpp} bits");
+        }
+        // A mode set brings the identity back.
+        set_mode(&mut cpu, 640, 480, 32).unwrap();
+        assert_eq!(cpu.bus.toadforce_register(regs::GAMMA + 4 * 255), 0xFF_FFFF);
+        // The screen's own gamma goes after the card's ramp, and changes
+        // nothing a program reads.
+        write(&mut cpu, 0, &[0x40, 0x40, 0x40, 0]);
+        assert_eq!(first_pixel(&cpu), [0x40; 3]);
+        cpu.bus.set_toadforce_gamma(Some(2.0));
+        // (64 / 255)^(1 / 2) of 255 is 127.75.
+        assert_eq!(first_pixel(&cpu), [0x80; 3]);
+        assert!(set_gamma_ramp(&mut cpu, &ramp));
+        // Red halved to 32 first, then (32 / 255)^(1 / 2) of 255 is 90.33.
+        assert_eq!(first_pixel(&cpu)[0], 90);
+        assert_eq!(gamma_ramp(&mut cpu), Some(ramp));
+        cpu.bus.set_toadforce_gamma(None);
+        set_mode(&mut cpu, 640, 480, 32).unwrap();
+        // 256 colours have the palette and no ramp.
+        set_mode(&mut cpu, 640, 480, 8).unwrap();
+        assert!(!has_gamma_ramp(&cpu));
+        assert_eq!(gamma_ramp(&mut cpu), None);
+        assert!(!set_gamma_ramp(&mut cpu, &ramp));
     }
 
     #[test]

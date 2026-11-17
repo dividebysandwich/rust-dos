@@ -1114,31 +1114,51 @@ fn a_toadforce_surface_is_shown_from_the_hosts_copy() {
             .borrow_mut()
             .as_mut()
             .expect("the host renderer")
-            .composite(&colour, &over, &base);
+            .composite(&colour, None, &over, &base);
         let (texture, size) = composed.expect("a picture");
         assert_eq!(size, (16, 16));
-        let mut pixels = vec![0; 16 * 16 * 4];
-        // SAFETY: the test owns the current context and the texture.
-        unsafe {
-            screen.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-            screen.gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
-            screen.gl.get_tex_image(
-                glow::TEXTURE_2D,
-                0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelPackData::Slice(Some(&mut pixels)),
-            );
-            assert_eq!(screen.gl.get_error(), glow::NO_ERROR);
-        }
-        let pixel = |x: usize, y: usize| {
-            let at = (y * 16 + x) * 4;
-            [pixels[at], pixels[at + 1], pixels[at + 2]]
+        let read = |texture: glow::Texture| {
+            let mut pixels = vec![0; 16 * 16 * 4];
+            // SAFETY: the test owns the current context and the texture.
+            unsafe {
+                screen.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                screen.gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+                screen.gl.get_tex_image(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelPackData::Slice(Some(&mut pixels)),
+                );
+                assert_eq!(screen.gl.get_error(), glow::NO_ERROR);
+            }
+            move |x: usize, y: usize| {
+                let at = (y * 16 + x) * 4;
+                [pixels[at], pixels[at + 1], pixels[at + 2]]
+            }
         };
+        let pixel = read(texture);
         assert_eq!(pixel(8, 1), [0, 255, 0], "{format:?}");
         assert_eq!(pixel(8, 12), [255, 0, 0], "{format:?}");
         assert_eq!(pixel(3, 9), [255, 255, 255], "{format:?}");
         assert_eq!(pixel(4, 9), [255, 0, 0], "{format:?}");
+
+        // Through a gamma ramp, the picture's colours change, and what
+        // the window drew over it doesn't.
+        let mut ramp = rust_dos::toadforce::display::IDENTITY;
+        ramp[0] = 0x01_0203;
+        ramp[255] = 0x80_C040;
+        let composed = screen
+            .toadforce
+            .0
+            .borrow_mut()
+            .as_mut()
+            .expect("the host renderer")
+            .composite(&colour, Some(&ramp), &over, &base);
+        let pixel = read(composed.expect("a picture").0);
+        assert_eq!(pixel(8, 1), [0x01, 0xC0, 0x03], "{format:?}");
+        assert_eq!(pixel(8, 12), [0x80, 0x02, 0x03], "{format:?}");
+        assert_eq!(pixel(3, 9), [255, 255, 255], "{format:?}");
 
         // Nothing came back to card memory, which a screenshot still
         // gets when it asks.

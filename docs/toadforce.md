@@ -222,6 +222,7 @@ All are 32 bits, little-endian.
 | 064h | `SCANLINE` | R | current scan line |
 | 100h- | `CAPS[n]` | R | capability table of `LEVEL` (see "Feature levels") |
 | 400h- | `PALETTE[n]` | R/W | the 256 colours of a P8 mode |
+| 800h- | `GAMMA[n]` | R/W | the gamma ramp of the 16- and 32-bit modes; the identity after reset |
 
 `STATUS`, `IRQ_STATUS`, `MODE_START`, `FRAME` and `SCANLINE` follow the
 emulated clock, so they read the same in two deterministic runs. There
@@ -506,10 +507,20 @@ section covers names that section.
   processing.
 - **W buffer.** The card has none. A program that turns one on
   (`D3DZB_USEW`) draws with the z-buffer.
-- **Gamma ramp.** The card has none. DirectDraw's gamma control and
-  Direct3D 8's `SetGammaRamp` keep the ramp and give it back, and the
-  picture stays as it was: a brightness slider or a fade that a game
-  makes with the ramp shows nothing.
+- **Gamma ramp.** The card's 16- and 32-bit modes go through its
+  `GAMMA` registers. `SetDeviceGammaRamp`, DirectDraw's gamma control
+  on the primary surface and Direct3D 8's `SetGammaRamp` on a
+  full-screen device set them, and a brightness slider or a fade that
+  a game makes with the ramp shows. DirectDraw's caps have
+  `DDCAPS2_PRIMARYGAMMA` and Direct3D 8's `D3DCAPS2_FULLSCREENGAMMA`,
+  which games such as Max Payne read before they set a ramp. The card
+  keeps 8 bits of each of the ramp's 16-bit words, the top ones, as
+  cards of the time did. A mode set brings the identity back, so a
+  ramp lasts until the game's mode ends. The `GetGammaRamp` of the
+  primary surface and of a full-screen device read the registers, so
+  after a mode set, a Direct3D 8 `Reset`'s too, they give the identity
+  back. In 256 colours there is no ramp: `SetDeviceGammaRamp` fails,
+  and the others keep the ramp and give it back.
 - **Render targets and depth buffers.** Direct3D draws into 5-6-5 and
   32-bit surfaces in video memory, and so not in a 256-colour mode or
   into a 5-5-5 surface. A depth buffer has 16 bits, or 24 in a 32-bit
@@ -1458,6 +1469,7 @@ users.
 | `machine` | `svga_toadforce` | |
 | `toadforce_memory` | `32`, `64`, `128` | `64` |
 | `toadforce_renderer` | `auto`, `opengl`, `software` | `auto`: OpenGL where the window has a desktop OpenGL 3.2 context |
+| `toadforce_gamma` | `off`, 0.1 to 2 | `off`: the picture through the card's ramp alone |
 
 The card has one level of 3D, so no key chooses one.
 

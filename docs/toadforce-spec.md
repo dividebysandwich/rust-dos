@@ -26,6 +26,14 @@ A frozen chapter changes only by adding what an earlier reader can't
 have relied on: a new register at a reserved offset, a new command, a
 new level.
 
+One register has been added that way: `GAMMA` (chapters 3 and 6), at
+offsets that were reserved. Its reset value is the identity, so a
+driver that never writes it shows the same picture as before. Games of
+the time set the display's gamma ramp for their brightness controls and
+fades, through `SetDeviceGammaRamp`, DirectDraw's gamma control and
+Direct3D 8's `SetGammaRamp`, and without the register those showed
+nothing.
+
 Two frozen rules were amended to say what the card does, where making
 it do what the text said would have cost the emulator time and no
 program or driver written for the card depends on the difference:
@@ -224,6 +232,7 @@ chapter doesn't list read as 0 and ignore writes.
 | 064h | `SCANLINE` | R | | line being shown |
 | 100h to 3FCh | `CAPS[0]` to `CAPS[191]` | R | | capability table of `LEVEL` |
 | 400h to 7FCh | `PALETTE[0]` to `PALETTE[255]` | R/W | 0 | colours of a `P8` mode |
+| 800h to BFCh | `GAMMA[0]` to `GAMMA[255]` | R/W | n x 010101h | gamma ramp of the other modes |
 
 "R/W1C": a 1 written to a bit clears it, a 0 leaves it. "R/WC": a write
 of any value clears the register.
@@ -233,7 +242,7 @@ commands the card accepts, the table `CAPS` shows, and every state a
 command of level 1 or above can set goes back to its default, a write
 of the level already in use included. A write of a larger value is
 ignored, so a driver reads `LEVEL` back. Display state (the `MODE`
-registers, `PALETTE`, a pending flip) is untouched.
+registers, `PALETTE`, `GAMMA`, a pending flip) is untouched.
 
 `STATUS`, `IRQ_STATUS`, `MODE_START`, `FRAME` and `SCANLINE` follow the
 emulated clock (chapter 6): a read gives their value at the moment of
@@ -245,6 +254,12 @@ card has finished every command when the write to `RING_PUT` returns.
 `PALETTE[n]` holds red in bits 16 to 23, green in bits 8 to 15 and blue
 in bits 0 to 7. It is used only while the card shows a `P8` mode, and
 it is separate from the VGA's colour registers.
+
+`GAMMA[n]` holds, in the same layout, the colour each component's
+value n is shown as: red n as its bits 16 to 23, green n as bits 8 to
+15, blue n as bits 0 to 7. It is used only while the card shows an
+`R5G6B5` or `X8R8G8B8` mode (chapter 6). Its reset value, n in each
+component, shows every value as itself.
 
 ### Capability table
 
@@ -452,7 +467,8 @@ wrong.
 ## 6. Display
 
 The card has two sources for the picture, and `MODE_ENABLE` picks one.
-It has no gamma ramp.
+The card's own modes of direct colour go through its gamma ramp
+(`GAMMA`); the VGA's picture and a `P8` mode don't.
 
 ### `MODE_ENABLE` = 0: the VGA
 
@@ -491,8 +507,13 @@ registers.
 While the card's mode is shown:
 
 - The picture is the surface at `MODE_START`, from the moment
-  `MODE_START` reads its offset ("Flips" below). A `P8` pixel shows
-  the colour `PALETTE` has for it.
+  `MODE_START` reads its offset ("Flips" below). A `P8` pixel shows the
+  colour `PALETTE` has for it. An `R5G6B5` pixel's components are
+  widened to 8 bits by repeating its top bits below them, and each 8-bit
+  component of an `R5G6B5` or `X8R8G8B8` pixel shows as its value in
+  `GAMMA`: red r as bits 16 to 23 of `GAMMA[r]`, green g as bits 8 to 15
+  of `GAMMA[g]`, blue b as bits 0 to 7 of `GAMMA[b]`. Card memory keeps
+  the pixels as they are: only the screen's colours change.
 - Writes to `MODE_WIDTH`, `MODE_HEIGHT`, `MODE_FORMAT`, `MODE_PITCH` and
   `MODE_REFRESH` are kept and read back, and change nothing until the
   next write of 1 to `MODE_ENABLE`. "The mode shown" is the values those
@@ -501,7 +522,7 @@ While the card's mode is shown:
   pending flip. A value whose surface, with the height, pitch and
   format of the mode shown, reaches outside card memory is rejected
   with `BAD_RANGE`.
-- A colour written to `PALETTE` shows at once.
+- A colour written to `PALETTE` or `GAMMA` shows at once.
 - The VGA registers keep their contents and take writes, and none of it
   is shown.
 - The window at A0000h stays what the VGA's side has it as: the VGA's
@@ -631,12 +652,12 @@ Power-on: every register has its reset value, card memory and the ring
 are zero, and the VGA is in the BIOS's start-up mode.
 
 A reset of the machine, and a write of 1 to `RESET`, put every register
-of chapter 3 at its reset value, `PALETTE` and `FRAME` included, drop a
-pending flip and return every command state to its default. With
-`MODE_ENABLE` back at 0, the screen is the VGA's again, as after a write
-of 0 to it. Card memory, the ring's contents and PCI configuration
-space keep what they had. `RESET` leaves the VGA registers alone; a
-machine reset resets them as on any VGA.
+of chapter 3 at its reset value, `PALETTE`, `GAMMA` and `FRAME`
+included, drop a pending flip and return every command state to its
+default. With `MODE_ENABLE` back at 0, the screen is the VGA's again,
+as after a write of 0 to it. Card memory, the ring's contents and PCI
+configuration space keep what they had. `RESET` leaves the VGA
+registers alone; a machine reset resets them as on any VGA.
 
 After `RESET`, a driver that left commands in the ring starts again at
 offset 0, since `RING_PUT` and `RING_GET` are 0.

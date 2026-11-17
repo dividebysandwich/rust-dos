@@ -311,6 +311,7 @@ impl Item {
             ToadForceRenderer => each(s, crate::toadforce::Renderer::ALL, |s, renderer| {
                 s.toadforce_renderer = renderer
             }),
+            ToadForceGamma => each(s, gammas(), |s, gamma| s.toadforce_gamma = gamma),
             PowerVrFilter => {
                 use crate::powervr::tsp::Filter;
                 each(s, [Filter::Auto, Filter::Point, Filter::Bilinear], |s, filter| s.powervr_filter = filter)
