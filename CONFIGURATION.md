@@ -587,8 +587,8 @@ limit, so without a connection it goes on as it would with one:
   8.1 under `98` and `98se`. The registry's
   `HKLM\Software\Microsoft\DirectX` gives `Version` 4.08.00.0400 or
   4.08.01.0881 and `InstalledVersion` 8.0 or 8.1, and the version
-  resources of DDRAW, DSOUND, DINPUT, DPLAYX, D3D8, DINPUT8 and the
-  DirectMusic DLLs, which GetFileVersionInfo reads, say the same. A
+  resources of DDRAW, DSOUND, DINPUT, DPLAYX, DPNET, D3D8, DINPUT8 and
+  the DirectMusic DLLs, which GetFileVersionInfo reads, say the same. A
   change takes effect for the next program that starts when none runs.
 * `win32_locale` is the system locale of the built-in Windows, the
   language edition of Windows 98 it is. `en-US` is the default. The
@@ -3638,6 +3638,8 @@ Join a room, start the game on each computer, and pick its network play:
   98 image in another instance doesn't see these sessions, nor these
   games its. The lobby (games started by a lobby program such as the
   Zone) isn't there.
+* Games that play through DirectPlay 8, DirectX 8's, find no connection
+  for network play yet, and play alone.
 
 ### Serial and modem games
 

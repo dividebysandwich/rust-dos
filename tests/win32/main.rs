@@ -22,6 +22,7 @@ mod win32_ddraw_tests;
 mod win32_dinput_tests;
 mod win32_dll_files_tests;
 mod win32_dmusic_tests;
+mod win32_dpnet_tests;
 mod win32_dshow_tests;
 mod win32_glide_tests;
 mod win32_imagehlp_tests;
