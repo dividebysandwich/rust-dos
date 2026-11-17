@@ -564,12 +564,15 @@ have no network yet.
 
 DirectPlay 8 (`dpnet/`, DPNET.DLL) has the peer, the lobbied application
 and the address of DirectX 8, on a machine whose service providers can't
-start, as WinSock opens no sockets: the four providers DirectX 8.1
-registers are listed only when a program asks for every registered one,
-and hosting, joining and looking for a session fail on the device
+start, as WinSock opens no sockets (#1248): the four providers DirectX
+8.1 registers are listed only when a program asks for every registered
+one, and hosting, joining and looking for a session fail on the device
 address. The lobbied application registers programs under
-`HKLM\Software\Microsoft\DirectPlay8\Applications`. It has no
-sessions over the LAN room yet.
+`HKLM\Software\Microsoft\DirectPlay8\Applications`. It has no sessions
+over the LAN room yet. DirectX 8.x keeps the address in DPNADDR.DLL and
+the lobby classes in DPNLOBBY.DLL; the built-in Windows has all three in
+DPNET.DLL, as DirectX 9 does, and has no client, server or lobby client
+yet (#1251).
 
 ## Setup programs
 
