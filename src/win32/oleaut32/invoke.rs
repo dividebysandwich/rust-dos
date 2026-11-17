@@ -42,6 +42,7 @@ const VT_R4: u16 = 4;
 const VT_R8: u16 = 5;
 const VT_CY: u16 = 6;
 const VT_DATE: u16 = 7;
+const VT_DECIMAL: u16 = 14;
 const VT_I8: u16 = 20;
 const VT_UI8: u16 = 21;
 const CC_CDECL: u32 = 1;
@@ -145,7 +146,7 @@ fn param_vt(
 /// The dwords a value of the type `vt` takes on the stack.
 fn dwords(vt: u16) -> u32 {
     match vt {
-        VT_VARIANT => 4,
+        VT_VARIANT | VT_DECIMAL => 4,
         VT_R8 | VT_CY | VT_DATE | VT_I8 | VT_UI8 => 2,
         _ => 1,
     }
@@ -168,6 +169,18 @@ impl Call {
                 if !cpu.bus.guest_probe(src, 16, false) {
                     return Err(E_INVALIDARG);
                 }
+            }
+            for i in 0..4 {
+                let dword = read32(cpu, src + 4 * i);
+                self.stack.push(dword);
+            }
+            return Ok(());
+        }
+        // A DECIMAL fills the whole VARIANT, its first field where the
+        // VARIANT's type is.
+        if vt == VT_DECIMAL {
+            if read16(cpu, src) != VT_DECIMAL {
+                return Err(DISP_E_TYPEMISMATCH);
             }
             for i in 0..4 {
                 let dword = read32(cpu, src + 4 * i);
@@ -220,7 +233,8 @@ impl Call {
         // A value of the type: a pointer to the argument's own, which the
         // method may change. An array passed by value goes so too.
         if src_vt == vt & !VT_BYREF {
-            self.stack.push(src + 8);
+            let value = if src_vt == VT_DECIMAL { src } else { src + 8 };
+            self.stack.push(value);
             return Ok(());
         }
         // A value for a pointer: a copy of it changed to the type.
@@ -518,6 +532,9 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 if retval != 0 {
                     if retval_vt == VT_VARIANT {
                         cpu.bus.guest_read_bytes(retval, &mut out);
+                    } else if retval_vt == VT_DECIMAL {
+                        cpu.bus.guest_read_bytes(retval, &mut out);
+                        out[..2].copy_from_slice(&VT_DECIMAL.to_le_bytes());
                     } else {
                         out[..2].copy_from_slice(&retval_vt.to_le_bytes());
                         cpu.bus.guest_read_bytes(retval, &mut out[8..]);

@@ -88,6 +88,12 @@ fn element_size(vt: u16) -> Option<u32> {
     })
 }
 
+/// Whether `create` makes arrays of elements of the type `vt`, each
+/// `element` bytes.
+pub fn creatable(vt: u16, element: u32) -> bool {
+    element_size(vt) == Some(element)
+}
+
 fn features_of(vt: u16) -> u16 {
     match vt {
         VT_BSTR => FADF_BSTR | FADF_HAVEVARTYPE,

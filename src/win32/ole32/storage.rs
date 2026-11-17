@@ -40,7 +40,12 @@ pub const STG_E_FILEALREADYEXISTS: u32 = 0x8003_0050;
 pub const STG_E_INVALIDNAME: u32 = 0x8003_00FC;
 pub const STG_E_INVALIDFLAG: u32 = 0x8003_00FF;
 pub const STG_E_REVERTED: u32 = 0x8003_0102;
+pub const STG_E_MEDIUMFULL: u32 = 0x8003_0070;
 const S_FALSE: u32 = 1;
+
+/// The most bytes a stream of a docfile holds here: a write or SetSize
+/// past it fails, rather than the emulator taking that much memory.
+const MAX_STREAM: u64 = 0x4000_0000;
 
 pub const IID_ISTORAGE: Guid = Guid::new(0xB, 0, 0, [0xC0, 0, 0, 0, 0, 0, 0, 0x46]);
 const IID_IENUMSTATSTG: Guid = Guid::new(0xD, 0, 0, [0xC0, 0, 0, 0, 0, 0, 0, 0x46]);
@@ -458,6 +463,23 @@ fn is_open(cpu: &mut Cpu, doc_id: u32, index: u32) -> bool {
         .iter()
         .flatten()
         .any(|o| o.doc == doc_id && o.element == index && o.kind != ENUM)
+}
+
+/// Whether the element `index` is `ancestor` or in it, at any depth.
+fn within(cpu: &mut Cpu, doc_id: u32, index: u32, ancestor: u32) -> bool {
+    let elements = &doc(cpu, doc_id).elements;
+    let mut i = index;
+    // No more steps than there are elements, whatever the parents say.
+    for _ in 0..=elements.len() {
+        if i == ancestor {
+            return true;
+        }
+        if i == 0 {
+            return false;
+        }
+        i = elements[i as usize].parent;
+    }
+    false
 }
 
 /// Destroy the element `index` and what is in it.
@@ -985,6 +1007,11 @@ pub fn copy_to(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if !writable(obj(cpu, to).mode) {
         return Some(STG_E_ACCESSDENIED);
     }
+    // A storage copied into itself or a storage in it would copy its
+    // own copies without end.
+    if src == dst && within(cpu, dst, parent, from) {
+        return Some(STG_E_ACCESSDENIED);
+    }
     let e = doc(cpu, src).elements[from as usize].clone();
     let t = &mut doc(cpu, dst).elements[parent as usize];
     t.clsid = e.clsid;
@@ -1037,6 +1064,11 @@ pub fn move_element_to(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if is_open(cpu, src, from) {
         return Some(STG_E_ACCESSDENIED);
     }
+    // An element moved or copied into itself or a storage in it would
+    // copy its own copies without end.
+    if src == dst && within(cpu, dst, into, from) {
+        return Some(STG_E_ACCESSDENIED);
+    }
     copy_into(cpu, src, from, dst, into, new_name);
     touched(cpu, dst, into);
     if flags == 0 {
@@ -1063,7 +1095,11 @@ pub fn commit(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// IStorage::Revert(this): a transacted root storage goes back to the
-/// file as it was last written; others have nothing to undo.
+/// file as it was last written; others have nothing to undo. The
+/// elements of the docfile's other objects are gone from then on, so
+/// those objects answer STG_E_REVERTED, as on Windows: the file's
+/// elements come after them, and the root takes the file's root's
+/// class, bits and times.
 pub fn revert(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let id = match live(cpu, args[0], STORAGE) {
         Ok(id) => id,
@@ -1075,12 +1111,29 @@ pub fn revert(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(S_OK);
     }
     let path = d.path.clone();
-    if let Some(elements) = files::read_whole(cpu, &path)
+    if let Some(mut read) = files::read_whole(cpu, &path)
         .ok()
         .and_then(|data| decode(&data))
     {
         let d = doc(cpu, doc_id);
-        d.elements = elements;
+        for e in d.elements.iter_mut().skip(1) {
+            e.gone = true;
+            e.data = Vec::new();
+        }
+        // The file's elements after the old ones: their parents move
+        // with them, but the root stays at 0.
+        let offset = d.elements.len() as u32 - 1;
+        for e in read.iter_mut().skip(1) {
+            if e.parent != 0 {
+                e.parent += offset;
+            }
+        }
+        let mut read = read.into_iter();
+        if let Some(root) = read.next() {
+            let name = std::mem::take(&mut d.elements[0].name);
+            d.elements[0] = Element { name, ..root };
+        }
+        d.elements.extend(read);
         d.dirty = false;
     }
     Some(S_OK)
@@ -1322,6 +1375,11 @@ pub fn stream_write(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if count > 0 && !cpu.bus.guest_probe(buffer, count as usize, false) {
         return Some(STG_E_INVALIDPOINTER);
     }
+    // Seek takes any position; a write that would make the stream larger
+    // than a docfile's stream is here fails.
+    if obj(cpu, id).position.saturating_add(count as u64) > MAX_STREAM {
+        return Some(STG_E_MEDIUMFULL);
+    }
     let mut bytes = vec![0; count as usize];
     cpu.bus.guest_read_bytes(buffer, &mut bytes);
     let position = obj(cpu, id).position as usize;
@@ -1378,7 +1436,7 @@ pub fn stream_set_size(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if !writable(obj(cpu, id).mode) {
         return Some(STG_E_ACCESSDENIED);
     }
-    if high != 0 || low > 0x4000_0000 {
+    if high != 0 || low as u64 > MAX_STREAM {
         return Some(STG_E_INVALIDFUNCTION);
     }
     element(cpu, doc_id, index).data.resize(low as usize, 0);
@@ -1423,6 +1481,9 @@ pub fn stream_copy_to(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if let Ok((to, to_doc, to_index)) = stream_parts(cpu, target) {
         if !writable(obj(cpu, to).mode) {
             return Some(STG_E_ACCESSDENIED);
+        }
+        if obj(cpu, to).position.saturating_add(n as u64) > MAX_STREAM {
+            return Some(STG_E_MEDIUMFULL);
         }
         let at = obj(cpu, to).position as usize;
         let data = &mut element(cpu, to_doc, to_index).data;

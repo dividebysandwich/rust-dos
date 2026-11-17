@@ -1,9 +1,10 @@
 //! OLE32's functions that call into the program: methods of other
 //! objects the program gave them (a stream's CopyTo writes to the
 //! target's Write; PropVariantClear releases the objects it holds,
-//! PropVariantCopy adds a reference to them), and the calls between
-//! processes (rpc.rs). They are one task
-//! (task.rs), whose first variable says which function it is.
+//! PropVariantCopy adds a reference to them), the calls between
+//! processes (rpc.rs, rpc/ndr.rs) and structured storage's helpers
+//! (storage.rs, persist.rs). They are one task (task.rs), whose first
+//! variable says which function it is.
 
 use crate::cpu::Cpu;
 use crate::win32::task::{self, Next, Task};

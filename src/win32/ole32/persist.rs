@@ -201,7 +201,12 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         }
         (LOAD_FROM_STREAM, 3) => {
             if failed(value) {
-                return Next::Done(value);
+                // The object has no IPersistStream: it is released, as
+                // Wine's ole2.c does, and the caller gets NULL for it.
+                t.set(A, value);
+                let object = cpu.bus.guest_read_32(c);
+                cpu.bus.guest_write_32(c, 0);
+                return method(cpu, object, RELEASE, &[], 5);
             }
             let persist = cpu.bus.guest_read_32(s + S_IFACE);
             method(cpu, persist, LOAD, &[a], 4)

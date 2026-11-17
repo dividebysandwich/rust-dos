@@ -50,6 +50,7 @@ const CO_E_SERVER_EXEC_FAILURE: u32 = 0x8008_0005;
 const RPC_E_DISCONNECTED: u32 = 0x8001_0108;
 const RPC_E_SERVER_DIED: u32 = 0x8001_0007;
 const CLASS_E_NOAGGREGATION: u32 = 0x8004_0110;
+const DISP_E_BADVARTYPE: u32 = 0x8002_0008;
 
 /// The messages the apartment window gets: a call (wParam its id) and a
 /// reference to let go of (wParam the pointer).
@@ -889,7 +890,16 @@ fn drop_variant(cpu: &mut Cpu, at: u32, side: &mut Side) {
 
 fn put_array(cpu: &mut Cpu, p: u32, w: &mut Wire, side: &mut Side, take: bool) {
     use crate::win32::oleaut32::safearray;
-    let Some(a) = safearray::describe(cpu, p) else {
+    // An array the other side can't make again (of records, or of
+    // elements whose size isn't their type's) goes as NULL.
+    let Some(a) = safearray::describe(cpu, p).filter(|a| safearray::creatable(a.vt, a.element))
+    else {
+        if p != 0 {
+            cpu.bus.log_string(&format!(
+                "[W32] OLE32: the SAFEARRAY at {:08X} can't be copied to another process",
+                p
+            ));
+        }
         w.u8(0);
         return;
     };
@@ -928,6 +938,23 @@ fn get_array(cpu: &mut Cpu, r: &mut Reader, side: &mut Side) -> u32 {
     let dims = r.u32().min(64);
     let bounds: Vec<(u32, i32)> = (0..dims).map(|_| (r.u32(), r.u32() as i32)).collect();
     let Some(a) = safearray::create(cpu, vt, element, &bounds) else {
+        // Memory is out: the elements are read all the same, so that
+        // the values after the array are read where they are.
+        let count = bounds
+            .iter()
+            .fold(1u64, |n, &(c, _)| n.saturating_mul(c as u64));
+        let temp = side.block(cpu, 16);
+        for _ in 0..count {
+            match vt {
+                VT_BSTR | VT_VARIANT | VT_DISPATCH | VT_UNKNOWN => {
+                    get_typed(cpu, vt, temp, r, side);
+                    drop_typed(cpu, vt, temp, side);
+                }
+                _ => {
+                    r.bytes();
+                }
+            }
+        }
         return 0;
     };
     for i in 0..a.count() {
@@ -1299,6 +1326,22 @@ fn proxy_call(cpu: &mut Cpu, this: u32, index: u32, args: u32) -> Option<u32> {
         return Some(RPC_E_DISCONNECTED);
     };
     let places = places(m, args);
+    // A parameter of a type the marshaler doesn't copy (a structure with
+    // pointers, a void*) fails the call when it holds anything: a
+    // pointer of this process means nothing in the object's, as Windows'
+    // marshaler fails on a type it can't copy.
+    let uncopied = m
+        .params
+        .iter()
+        .zip(&places)
+        .position(|(p, &at)| p.kind == Kind::Unsupported && read32(cpu, at) != 0);
+    if let Some(i) = uncopied {
+        cpu.bus.log_string(&format!(
+            "[W32] OLE32: method {} of {}: its parameter {} is of a type that isn't copied",
+            index, iid, i
+        ));
+        return Some(DISP_E_BADVARTYPE);
+    }
     // The proxy/stub DLLs of the interfaces that come back are loaded
     // before the call, which runs again.
     let iids = out_iids(cpu, m, &places);
