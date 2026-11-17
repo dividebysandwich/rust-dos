@@ -113,6 +113,28 @@ fn drive_image(cpu: &Cpu, drive: u16) -> Result<Rc<CdImage>, u16> {
     cpu.bus.disk.cd_image(drive).ok_or(NOT_READY)
 }
 
+/// INT 2Fh AX=1100h, the network redirector's installation check, which
+/// MSCDEX hooks for an installation check of its own: a caller that
+/// pushed the word DADAh before the INT gets AL=FFh, and the word on its
+/// stack changed to ADADh. MSCDEX tells itself from a network redirector
+/// by that word: a redirector answers AL=FFh and leaves it DADAh.
+///
+/// A call without DADAh comes back unchanged, as every call does with no
+/// CD-ROM drive (MSCDEX doesn't load then). MSCDEX is a redirector itself
+/// and may answer that call with AL=FFh too, as DOSBox does: #1303 is to
+/// settle it with a trace of the real one.
+pub fn redirector_check(cpu: &mut Cpu) {
+    if cpu.bus.disk.drives_of_kind(DriveKind::CdRom).is_empty() {
+        return;
+    }
+    // The caller's word is above the INT's frame: IP, CS and FLAGS.
+    let word = cpu.get_physical_addr(cpu.ss(), cpu.sp().wrapping_add(6)) as u32;
+    if cpu.bus.guest_read_16(word) == 0xDADA {
+        cpu.bus.guest_write_16(word, 0xADAD);
+        cpu.set_reg8(Register::AL, 0xFF);
+    }
+}
+
 /// INT 2Fh AH=15h.
 pub fn handle(cpu: &mut Cpu, function: u8) {
     let cd_drives = cpu.bus.disk.drives_of_kind(DriveKind::CdRom);
