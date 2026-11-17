@@ -74,6 +74,15 @@ use crate::video::VideoMode;
 const WINDOW_NS: u64 = 500_000_000;
 const LONG_WINDOW_NS: u64 = 2_000_000_000;
 const ENOUGH_FRAMES: u64 = 20;
+/// A measurement that runs at less than this share of real time ends once
+/// it has dropped `WINDOW_NS` (`AutoSpeed::update`). It is also the
+/// deepest cut one measurement behind makes (`AutoSpeed::decide`): under
+/// it, the cut is the same whatever the pace, so a longer measurement
+/// can't change how far the speed goes down, and only keeps the program
+/// that far behind for longer. Above it, the pace sets the cut, and the
+/// measurement takes its whole window: the stalls Quake's loading screen
+/// counts as lag (#783) run at 0.6 of real time.
+const FAR_BEHIND: f64 = 0.5;
 /// Emulated time after a change of speed before a measurement starts.
 /// A game that paces its frames by the clock catches up on the frames the
 /// slower speed owed it for a second or more, so after a change the
@@ -1483,7 +1492,23 @@ impl AutoSpeed {
             (0, presents, _) => presents,
             (flips, _, _) => flips,
         };
-        if ns < WINDOW_NS || (frames > 0 && frames < ENOUGH_FRAMES && ns < LONG_WINDOW_NS) {
+        // The window counts emulated time, which a host far behind runs at
+        // a fraction of the wall clock's pace: at a tenth, a window of
+        // `LONG_WINDOW_NS` takes 20 wall seconds, all of them at that
+        // speed. Once the lag dropped since the mark adds up to
+        // `WINDOW_NS` at under `FAR_BEHIND` of real time, the host has
+        // been behind for at least that long on the wall clock, and the
+        // measurement ends there, settled or not. Shadow of the Horned
+        // Rat goes from a debriefing raised to about 500,000, as it halts
+        // nearly all the time, to a wait loop of service calls the host
+        // runs at 45,000, and ran at a ninth of real time for the 15 s
+        // the window took. A host less far behind, as with stalls counted
+        // as lag while a game loads (#783), keeps the whole window.
+        let dropped = now.lost_ns.saturating_sub(mark.lost_ns);
+        let behind = dropped >= WINDOW_NS && (ns as f64) < (ns + dropped) as f64 * FAR_BEHIND;
+        if !behind
+            && (ns < WINDOW_NS || (frames > 0 && frames < ENOUGH_FRAMES && ns < LONG_WINDOW_NS))
+        {
             return cut;
         }
         self.mark = Some(now);
@@ -1510,7 +1535,7 @@ impl AutoSpeed {
         };
         let mut fps = (frames > 0).then(|| frames as f64 / seconds);
         if let (Some(rate), Some((before, tries))) = (fps, self.unsettled) {
-            let settled = (rate / before - 1.0).abs() <= AGREE || tries + 1 >= TRIES;
+            let settled = behind || (rate / before - 1.0).abs() <= AGREE || tries + 1 >= TRIES;
             if !settled {
                 self.unsettled = Some((rate, tries + 1));
                 // What this measurement dropped counts in the next, over
@@ -1523,7 +1548,13 @@ impl AutoSpeed {
                 self.frames = window;
                 return cut;
             }
-            fps = Some((rate + before) / 2.0);
+            // The first measurement after a change has nothing before it
+            // (NaN) and settles alone only when it ended far behind.
+            fps = Some(if before.is_nan() {
+                rate
+            } else {
+                (rate + before) / 2.0
+            });
         }
         self.unsettled = None;
         let paced = now.ns.saturating_sub(mark.lost_at);
@@ -1784,7 +1815,7 @@ impl AutoSpeed {
         };
         if lagged && !stalled {
             let cut = if again {
-                (m.pace * KEPT_UP).clamp(0.5, 1.0 / FINE_STEP)
+                (m.pace * KEPT_UP).clamp(FAR_BEHIND, 1.0 / FINE_STEP)
             } else {
                 1.0 / FINE_STEP
             };
@@ -3912,6 +3943,51 @@ mod tests {
             "{}",
             auto.pace
         );
+    }
+
+    #[test]
+    fn a_host_far_behind_ends_the_measurement_on_the_wall_clock() {
+        // 400,000 a millisecond on a host that runs 35,000: a tenth of a
+        // second of emulated time with one frame takes more than a second
+        // on the wall clock, and the pacer drops the rest.
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(400_000);
+        let mut auto = AutoSpeed::new(3000, None);
+        assert_eq!(auto.update(bus, true, 35_000, 0), None);
+        bus.clock.icount += 400_000 * 100;
+        bus.activity.swapped(1);
+        let next = auto.update(bus, true, 35_000, WINDOW_NS);
+        assert!(next.is_some_and(|s| s < 400_000), "{next:?}");
+    }
+
+    #[test]
+    fn a_host_far_behind_right_after_a_change_judges_its_own_frames() {
+        // The first measurement after a change of speed has no frame rate
+        // before it to agree with, and one that ends far behind counts
+        // its own frames. Far under what the host has, after keeping up,
+        // it is a stall, and the hold goes on with what it drew.
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(100_000);
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Hold {
+            fps: 60.0,
+            left: HOLD_WINDOWS,
+            more: true,
+            recent: 60.0,
+            seen: 0,
+            dipped: 0,
+        };
+        auto.unsettled = Some((f64::NAN, 0));
+        assert_eq!(auto.update(bus, true, HOST, 0), None);
+        bus.clock.icount += 100_000 * 100;
+        bus.activity.swapped(6);
+        auto.update(bus, true, HOST, WINDOW_NS);
+        let Step::Hold { recent, .. } = auto.step else {
+            panic!("{:?}", auto.step)
+        };
+        assert!(recent.is_finite(), "{:?}", auto.step);
     }
 
     #[test]
