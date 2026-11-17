@@ -1349,6 +1349,334 @@ fn failed_by(stats: &rust_dos::idle::IdleStats, why: &str) -> u64 {
         .map_or(0, |&(_, n)| n)
 }
 
+/// A thread that polls an event with WaitForSingleObject and no time to
+/// wait, while the main thread sleeps and then sets it: the waits that
+/// find it unset change nothing, so the loop's passes are skipped to the
+/// end of the main thread's Sleep, and come out the same as when they all
+/// run (#1222).
+#[test]
+fn a_loop_that_polls_an_event_with_no_time_to_wait_is_skipped() {
+    let names: &[&str] = &[
+        "CreateThread",
+        "CreateEventA",
+        "SetEvent",
+        "Sleep",
+        "WaitForSingleObject",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The event's handle at 0.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        let mut spin = a.create_label();
+        a.push(0)?;
+        a.push(0)?;
+        a.push(1)?;
+        a.push(0)?;
+        a.call(f("CreateEventA"))?;
+        a.mov(dword_ptr(l.data), eax)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(over)?;
+        // The thread: poll the event until it is set.
+        a.set_label(&mut spin)?;
+        a.push(0)?;
+        a.push(dword_ptr(l.data))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.test(eax, eax)?;
+        a.jnz(spin)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        a.mov(esi, eax)?;
+        a.push(30)?;
+        a.call(f("Sleep"))?;
+        a.push(dword_ptr(l.data))?;
+        a.call(f("SetEvent"))?;
+        a.push(-1)?;
+        a.push(esi)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let stats = idle_lockstep("poll_event", image);
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
+/// A thread that polls a mutex with WaitForMultipleObjects and no time to
+/// wait while the main thread holds it and sleeps, counting its passes in
+/// memory, with the handles in an array on its stack: the waits read only
+/// their arguments and that array, and the passes are skipped with the
+/// count moved on as they would have. The main thread then releases the
+/// mutex, and the thread takes it.
+fn mutex_poll(handles_on_stack: bool) -> rust_dos::idle::IdleStats {
+    let names: &[&str] = &[
+        "CreateThread",
+        "CreateMutexA",
+        "ReleaseMutex",
+        "Sleep",
+        "WaitForSingleObject",
+        "WaitForMultipleObjects",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The mutex's handle at 0, the count at 4, the array elsewhere at 8.
+    let image = program(BASE, false, imports, &[0; 0x10], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut over = a.create_label();
+        let mut spin = a.create_label();
+        // The mutex, taken by the main thread.
+        a.push(0)?;
+        a.push(1)?;
+        a.push(0)?;
+        a.call(f("CreateMutexA"))?;
+        a.mov(dword_ptr(l.data), eax)?;
+        a.mov(dword_ptr(l.at(8)), eax)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(over)?;
+        // The thread: poll the mutex, counting, until it has it.
+        a.sub(esp, 8)?;
+        a.mov(eax, dword_ptr(l.data))?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.set_label(&mut spin)?;
+        if handles_on_stack {
+            a.lea(eax, dword_ptr(esp))?;
+        } else {
+            a.mov(eax, l.at(8) as i32)?;
+        }
+        a.push(0)?;
+        a.push(0)?;
+        a.push(eax)?;
+        a.push(1)?;
+        a.call(f("WaitForMultipleObjects"))?;
+        // Counted after the call, so that the flags the call is reached
+        // with are the compare's, the same in every pass.
+        a.add(dword_ptr(l.at(4)), 1)?;
+        a.cmp(eax, 0x102)?;
+        a.je(spin)?;
+        a.add(esp, 8)?;
+        a.push(dword_ptr(l.data))?;
+        a.call(f("ReleaseMutex"))?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        a.mov(esi, eax)?;
+        a.push(30)?;
+        a.call(f("Sleep"))?;
+        a.push(dword_ptr(l.data))?;
+        a.call(f("ReleaseMutex"))?;
+        a.push(-1)?;
+        a.push(esi)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let test = if handles_on_stack {
+        "poll_mutex_stack"
+    } else {
+        "poll_mutex_data"
+    };
+    idle_lockstep(test, image)
+}
+
+#[test]
+fn a_loop_that_polls_a_mutex_and_counts_is_skipped() {
+    let stats = mutex_poll(true);
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
+/// The same loop with the handles' array away from the stack: the wait
+/// reads RAM a count might be in, and a pass that counts isn't skipped.
+#[test]
+fn a_loop_that_polls_handles_elsewhere_and_counts_is_not_skipped() {
+    let stats = mutex_poll(false);
+    assert_eq!(stats.skipped, 0, "{stats:?}");
+    assert!(failed_by(&stats, "count service") > 0, "{stats:?}");
+}
+
+/// Waits with no time to wait, which return at once, and SetEvent from
+/// another thread ending a wait: what they return, the last error they
+/// leave, and what they take (#1222). A failed check exits with its
+/// number; all passing, with 0x2A.
+#[test]
+fn waits_with_no_time_to_wait_return_what_windows_returns() {
+    let names: &[&str] = &[
+        "CreateThread",
+        "CreateEventA",
+        "CreateMutexA",
+        "SetEvent",
+        "ReleaseMutex",
+        "Sleep",
+        "WaitForSingleObject",
+        "WaitForMultipleObjects",
+        "SetLastError",
+        "GetLastError",
+        "GetExitCodeThread",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // An unset event at 0 and again at 8, a set one at 4, a mutex at
+    // 0xC, the event a thread waits for at 0x10, that
+    // thread's exit code at 0x14.
+    let data = vec![0; 0x20];
+    let (code, out) = run(
+        "wait_results",
+        program(BASE, false, imports, &data, |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let mut fail = a.create_label();
+            let mut main_start = a.create_label();
+            a.jmp(main_start)?;
+            a.set_label(&mut fail)?;
+            a.push(ebx)?;
+            a.call(f("ExitProcess"))?;
+            a.set_label(&mut main_start)?;
+            for (at, initial) in [(0, 0), (4, 1), (0x10, 0)] {
+                a.push(0)?;
+                a.push(initial)?;
+                a.push(0)?;
+                a.push(0)?;
+                a.call(f("CreateEventA"))?;
+                a.mov(dword_ptr(l.at(at)), eax)?;
+            }
+            a.mov(eax, dword_ptr(l.at(0)))?;
+            a.mov(dword_ptr(l.at(8)), eax)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.call(f("CreateMutexA"))?;
+            a.mov(dword_ptr(l.at(0xC)), eax)?;
+            let check = |a: &mut CodeAssembler, n: u32, want: u32| {
+                a.mov(ebx, n)?;
+                a.cmp(eax, want)?;
+                a.jne(fail)
+            };
+            // An unset event: WAIT_TIMEOUT, the last error as it was.
+            a.push(0x1234)?;
+            a.call(f("SetLastError"))?;
+            a.push(0)?;
+            a.push(dword_ptr(l.at(0)))?;
+            a.call(f("WaitForSingleObject"))?;
+            check(a, 1, 0x102)?;
+            a.call(f("GetLastError"))?;
+            check(a, 2, 0x1234)?;
+            // One of an unset and a set auto-reset event: the second,
+            // which the wait resets.
+            a.push(0)?;
+            a.push(0)?;
+            a.push(l.at(0) as i32)?;
+            a.push(2)?;
+            a.call(f("WaitForMultipleObjects"))?;
+            check(a, 3, 1)?;
+            a.push(0)?;
+            a.push(dword_ptr(l.at(4)))?;
+            a.call(f("WaitForSingleObject"))?;
+            check(a, 4, 0x102)?;
+            // Both, with one unset: WAIT_TIMEOUT, and the set one stays
+            // set.
+            a.push(dword_ptr(l.at(4)))?;
+            a.call(f("SetEvent"))?;
+            a.push(0)?;
+            a.push(1)?;
+            a.push(l.at(0) as i32)?;
+            a.push(2)?;
+            a.call(f("WaitForMultipleObjects"))?;
+            check(a, 5, 0x102)?;
+            a.push(0)?;
+            a.push(dword_ptr(l.at(4)))?;
+            a.call(f("WaitForSingleObject"))?;
+            check(a, 6, 0)?;
+            // Not a handle: WAIT_FAILED, ERROR_INVALID_HANDLE.
+            a.push(0)?;
+            a.push(0xDEAD)?;
+            a.call(f("WaitForSingleObject"))?;
+            check(a, 7, 0xFFFF_FFFF)?;
+            a.call(f("GetLastError"))?;
+            check(a, 8, 6)?;
+            // A mutex whose owner ended holding it: WAIT_ABANDONED_0 and
+            // its index, and the waiter owns it.
+            let mut over = a.create_label();
+            a.push(0)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.call(over)?;
+            a.push(-1)?;
+            a.push(dword_ptr(l.at(0xC)))?;
+            a.call(f("WaitForSingleObject"))?;
+            a.ret_1(4)?;
+            a.set_label(&mut over)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.call(f("CreateThread"))?;
+            a.push(-1)?;
+            a.push(eax)?;
+            a.call(f("WaitForSingleObject"))?;
+            check(a, 9, 0)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(l.at(8) as i32)?;
+            a.push(2)?;
+            a.call(f("WaitForMultipleObjects"))?;
+            check(a, 10, 0x81)?;
+            a.push(dword_ptr(l.at(0xC)))?;
+            a.call(f("ReleaseMutex"))?;
+            check(a, 11, 1)?;
+            // Released again: not the owner.
+            a.push(dword_ptr(l.at(0xC)))?;
+            a.call(f("ReleaseMutex"))?;
+            check(a, 12, 0)?;
+            a.call(f("GetLastError"))?;
+            check(a, 13, 288)?;
+            // SetEvent ends another thread's wait for the event, which
+            // returns WAIT_OBJECT_0 as the thread's exit code.
+            let mut over = a.create_label();
+            a.push(0)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.call(over)?;
+            a.push(-1)?;
+            a.push(dword_ptr(l.at(0x10)))?;
+            a.call(f("WaitForSingleObject"))?;
+            a.ret_1(4)?;
+            a.set_label(&mut over)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.call(f("CreateThread"))?;
+            a.mov(esi, eax)?;
+            a.push(10)?;
+            a.call(f("Sleep"))?;
+            a.push(dword_ptr(l.at(0x10)))?;
+            a.call(f("SetEvent"))?;
+            a.push(-1)?;
+            a.push(esi)?;
+            a.call(f("WaitForSingleObject"))?;
+            check(a, 14, 0)?;
+            a.push(l.at(0x14) as i32)?;
+            a.push(esi)?;
+            a.call(f("GetExitCodeThread"))?;
+            a.mov(eax, dword_ptr(l.at(0x14)))?;
+            check(a, 16, 0)?;
+            // The thread's wait took the auto-reset event.
+            a.push(0)?;
+            a.push(dword_ptr(l.at(0x10)))?;
+            a.call(f("WaitForSingleObject"))?;
+            check(a, 15, 0x102)?;
+            a.push(0x2A)?;
+            a.call(f("ExitProcess"))?;
+            a.int3()
+        }),
+    );
+    assert_eq!(code, 0x2A, "{}", out);
+}
+
 /// A wait on the clock that counts its passes in memory, as a frame
 /// limiter counts the passes it waited: with paging on, as the built-in
 /// Windows runs, the passes are skipped as long as the counts let them
@@ -2128,12 +2456,15 @@ fn slept_ms(test: &str, spin: bool) -> u8 {
     code
 }
 
-/// A Sleep ends when its time is up, to the millisecond, as on Windows
-/// 98: with no other thread to run, and with another of the program's
-/// threads spinning, which the sleeping thread takes the processor from
-/// when it wakes (the boost Windows gives a thread whose wait ends). It
-/// used to end at the timer's next interrupt, up to 55 ms later, and the
-/// spinning thread kept the processor until its turn was over.
+/// A Sleep ends when its time is up, to the millisecond: with no other
+/// thread to run, and with another of the program's threads spinning,
+/// which the sleeping thread takes the processor from when it wakes (the
+/// boost Windows gives a thread whose wait ends). It used to end at the
+/// timer's next interrupt, up to 55 ms later, and the spinning thread
+/// kept the processor until its turn was over. Windows 98 SE, measured,
+/// is slower to hand over to a thread of the spinning one's priority: a
+/// 30 ms Sleep there ended a median 9 ms late, at one of its 5 ms ticks,
+/// which the built-in Windows' scheduler doesn't follow yet (#1239).
 #[test]
 fn a_sleep_ends_on_time_also_while_another_thread_spins() {
     let slept = [slept_ms("sleep_alone", false), slept_ms("sleep_spinning", true)];
