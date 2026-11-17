@@ -112,6 +112,16 @@ pub const LBN_SELCANCEL: u32 = 3;
 pub const LBN_SETFOCUS: u32 = 4;
 pub const LBN_KILLFOCUS: u32 = 5;
 
+// LB_DIR's and DlgDirList's attributes (wParam).
+pub const DDL_READONLY: u32 = 0x0001;
+pub const DDL_HIDDEN: u32 = 0x0002;
+pub const DDL_SYSTEM: u32 = 0x0004;
+pub const DDL_DIRECTORY: u32 = 0x0010;
+pub const DDL_ARCHIVE: u32 = 0x0020;
+pub const DDL_POSTMSGS: u32 = 0x2000;
+pub const DDL_DRIVES: u32 = 0x4000;
+pub const DDL_EXCLUSIVE: u32 = 0x8000;
+
 const LB_OKAY: i32 = 0;
 const LB_ERR: i32 = -1;
 
@@ -1038,6 +1048,29 @@ impl Ctx {
         if r != 0 { r } else { index }
     }
 
+    /// LB_DIR's additions (Wine's LISTBOX_Directory): each of `files`
+    /// where LB_ADDFILE puts it, then each of `drives` at the end. The
+    /// answer is the index of the last one added, or LB_ERR for none.
+    fn add_directory(&mut self, files: Vec<Vec<u8>>, drives: Vec<Vec<u8>>) -> i32 {
+        let mut last = LB_ERR;
+        for name in files {
+            let pos = self.l.find_file_str_pos(&name).unwrap_or(-1);
+            let index = self.insert_string(pos, Some(name), 0);
+            if index < 0 {
+                return index;
+            }
+            // A file put above the last one moves that one down.
+            last = if index <= last { last + 1 } else { index };
+        }
+        for name in drives {
+            last = self.insert_string(-1, Some(name), 0);
+            if last < 0 {
+                break;
+            }
+        }
+        last
+    }
+
     /// WM_DELETEITEM for an item that goes, if the owner needs it.
     fn delete_item(&mut self, index: i32, data: u32) {
         if self.l.owner_draw() || data != 0 {
@@ -1455,6 +1488,68 @@ fn string_arg(cpu: &mut Cpu, at: u32) -> Option<Vec<u8>> {
     }
 }
 
+/// LB_DIR's entries: the files and folders, then the drives.
+type Listing = (Vec<Vec<u8>>, Vec<Vec<u8>>);
+
+/// What LB_DIR adds for the DDL_ attributes `attrib` and the file spec
+/// `spec` (Wine's LISTBOX_Directory): the files and folders `spec`
+/// matches, a folder as "[name]", in the order the search finds them,
+/// and then each drive there is as "[-c-]" if `attrib` has DDL_DRIVES.
+/// The search is FindFirstFileA's for `spec`. Names are long ones, as
+/// they are on disk, or with `short` (a 16-bit program's list, Wine's
+/// LB_DIR16) 8.3 ones in small letters, as Windows 3.1 lists them.
+/// Folders come only with DDL_DIRECTORY, and hidden or system entries
+/// only with DDL_HIDDEN or DDL_SYSTEM. With DDL_EXCLUSIVE a file comes
+/// only if its read-only, hidden, system and archive attributes are the
+/// ones `attrib` asks for, and with DDL_DRIVES | DDL_EXCLUSIVE alone the
+/// folder isn't searched. None when the search fails other than by
+/// finding nothing.
+fn directory(cpu: &Cpu, attrib: u32, spec: Option<&[u8]>, short: bool) -> Option<Listing> {
+    const ATTRIBS: u32 = DDL_READONLY | DDL_HIDDEN | DDL_SYSTEM | DDL_ARCHIVE;
+    let mut files = Vec::new();
+    if attrib != DDL_DRIVES | DDL_EXCLUSIVE {
+        let spec = crate::dosstr::from_bytes(spec?);
+        let entries = match crate::win32::kernel32::files::find_spec(cpu, &spec) {
+            Ok(entries) => entries,
+            // ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES: nothing matches.
+            Err(2 | 18) => Vec::new(),
+            Err(_) => return None,
+        };
+        let acp = crate::win32::nls::ansi(cpu);
+        for e in entries {
+            let a = e.attributes;
+            if a & 0x08 != 0 || a & (DDL_HIDDEN | DDL_SYSTEM) & !attrib != 0 {
+                continue;
+            }
+            let mut name = if short && !e.short.is_empty() {
+                crate::dosstr::to_bytes(&e.short)
+            } else {
+                crate::dosstr::to_bytes(&e.name)
+            };
+            if short {
+                name = name.iter().map(|&b| text::ansi_case(acp, b, false)).collect();
+            }
+            if a & 0x10 != 0 {
+                if attrib & DDL_DIRECTORY == 0 || e.name == "." {
+                    continue;
+                }
+                files.push([b"[", &name[..], b"]"].concat());
+            } else if attrib & DDL_EXCLUSIVE == 0 || attrib & ATTRIBS == a & ATTRIBS {
+                files.push(name);
+            }
+        }
+    }
+    let drives = if attrib & DDL_DRIVES != 0 {
+        (0..26u8)
+            .filter(|&d| cpu.bus.disk.is_mounted(d))
+            .map(|d| vec![b'[', b'-', b'a' + d, b'-', b']'])
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Some((files, drives))
+}
+
 pub fn listbox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (hwnd, msg, wp, lp) = (args[0], args[1], args[2], args[3]);
     let created = user(cpu)
@@ -1666,8 +1761,15 @@ pub fn listbox_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 LB_OKAY
             }
         }
-        // Listing a directory isn't done.
-        LB_DIR => LB_ERR,
+        LB_DIR => {
+            let spec = string_arg(cpu, lp);
+            let tid = user(cpu).window(hwnd).map_or(0, |w| w.tid);
+            let short = crate::win16::is_task(&cpu.bus.win32, tid);
+            match directory(cpu, wp, spec.as_deref(), short) {
+                Some((files, drives)) => c.add_directory(files, drives),
+                None => LB_ERR,
+            }
+        }
         LB_GETLOCALE => c.l.locale as i32,
         // A locale that isn't installed is refused, as IsValidLocale
         // refuses it, and the list keeps its own.

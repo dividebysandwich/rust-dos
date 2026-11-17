@@ -329,7 +329,7 @@ impl<'a> Display<'a> {
                     }
                 }
                 Output::Sdl { texture, .. } => {
-                    texture.set_scale_mode(scale_mode(self.filter));
+                    set_scale_mode(texture, self.filter);
                     if new_shader && self.shader != Shader::None {
                         problem = Some("CRT shaders need OpenGL 3, which isn't available here".to_string());
                     }
@@ -648,7 +648,7 @@ impl<'a> Display<'a> {
     /// where the window shows it without a shader.
     pub fn shaded_size(&self, width: u32, height: u32) -> Option<(u32, u32)> {
         match &self.out {
-            Output::Gl(gl) => gl.capture_size(display_size(width, height, self.aspect)),
+            Output::Gl(gl) => gl.capture_size(display_size(width, height, self.aspect), false),
             Output::Sdl { .. } => None,
         }
     }
@@ -665,15 +665,18 @@ impl<'a> Display<'a> {
 
     /// `frame` through the CRT shader, as the window shows it, for a
     /// screenshot or a recording; None where the window shows it without
-    /// one. Drawing it again and reading it back takes time, so only
-    /// captures that show the shader ask for it.
-    pub fn shaded(&mut self, frame: &Frame, base: &Frame) -> Option<Frame> {
+    /// one, unless `plain` asks for the picture as the window scales it
+    /// (the debug server's `shader=true`). Drawing it again and reading
+    /// it back takes time, so only captures that show the shader ask for
+    /// it.
+    pub fn shaded(&mut self, frame: &Frame, base: &Frame, plain: bool) -> Option<Frame> {
         match &mut self.out {
             Output::Gl(gl) => gl.capture(
                 frame,
                 base,
                 self.monochrome,
                 display_size(frame.width, frame.height, self.aspect),
+                plain,
             ),
             Output::Sdl { .. } => None,
         }
@@ -1203,10 +1206,24 @@ fn set_icon(window: &mut Window) -> Result<(), String> {
     Ok(())
 }
 
-fn scale_mode(filter: Filter) -> ScaleMode {
+/// Scale `texture` as `filter` says. `filter=sharp` is SDL's pixel-art
+/// mode (SDL 3.4), which gives every texel the same size on the screen
+/// with a blended edge, as the OpenGL plain look does. The sdl3 crate has
+/// no name for it, and its `Texture::scale_mode` panics on reading it
+/// back, so nothing here calls that. An SDL older than 3.4 (a Linux
+/// distribution's own) refuses the mode as an invalid parameter, and the
+/// texture then samples the nearest texel, as `hard` does.
+fn set_scale_mode(texture: &mut Texture, filter: Filter) {
     match filter {
-        Filter::Nearest => ScaleMode::Nearest,
-        Filter::Linear => ScaleMode::Linear,
+        Filter::Sharp => {
+            let pixel_art = sdl3::sys::surface::SDL_ScaleMode::PIXELART;
+            // SAFETY: the texture is alive, and SDL only sets its mode.
+            if !unsafe { sdl3::sys::render::SDL_SetTextureScaleMode(texture.raw(), pixel_art) } {
+                texture.set_scale_mode(ScaleMode::Nearest);
+            }
+        }
+        Filter::Hard => texture.set_scale_mode(ScaleMode::Nearest),
+        Filter::Linear => texture.set_scale_mode(ScaleMode::Linear),
     }
 }
 
@@ -1218,7 +1235,7 @@ fn create_texture<'a>(
     let mut texture = creator
         .create_texture_streaming(PixelFormat::RGBA32, width, height)
         .map_err(|e| e.to_string())?;
-    texture.set_scale_mode(scale_mode(filter));
+    set_scale_mode(&mut texture, filter);
     Ok(texture)
 }
 
@@ -1382,6 +1399,57 @@ mod tests {
                 let pos = frame_to_window(point, window, drawable, display, frame);
                 let back = window_to_frame(pos, window, drawable, display, frame, (Shader::None, CrtSettings::default()));
                 assert_eq!(back, (point.0 as i32, point.1 as i32), "{:?} in {:?}", point, (window, frame));
+            }
+        }
+    }
+
+    /// SDL's renderer, which draws where there is no OpenGL 3, gives the
+    /// sharp picture's pixels one width too: one-pixel stripes cover 2.5
+    /// screen pixels each at 2.5 times, and 2 at twice, unblended. This
+    /// is the window's renderer (Direct3D on Windows, OpenGL on Mesa in
+    /// CI); SDL's software renderer samples the nearest texel in its
+    /// pixel-art mode (#1250).
+    #[test]
+    #[ignore = "requires a desktop with a GPU renderer"]
+    fn sdl_sharp_scaling_gives_texels_one_width() {
+        let sdl = sdl3::init().unwrap();
+        let video = sdl.video().unwrap();
+        let window = video.window("Sharp scaling", 64, 16).hidden().build().unwrap();
+        let mut canvas = window.into_canvas();
+        let creator = canvas.texture_creator();
+        let stripes: Vec<u8> =
+            (0..16).flat_map(|x| if x % 2 == 0 { [255; 4] } else { [0, 0, 0, 255] }).collect();
+        for (out, scale) in [(32u32, 2.0), (40, 2.5)] {
+            let mut texture = creator.create_texture_streaming(PixelFormat::RGBA32, 16, 1).unwrap();
+            set_scale_mode(&mut texture, Filter::Sharp);
+            texture.update(None, &stripes, 64).unwrap();
+            let mut target = creator.create_texture_target(PixelFormat::RGBA32, out, 1).unwrap();
+            let mut row = Vec::new();
+            canvas
+                .with_texture_canvas(&mut target, |c| {
+                    c.copy(&texture, None, None).unwrap();
+                    let read = c.read_pixels(None).unwrap();
+                    let read = read.convert_format(PixelFormat::RGBA32).unwrap();
+                    row = read.with_lock(|p| p[..out as usize * 4].to_vec());
+                })
+                .unwrap();
+            // Each screen pixel's white goes to the white stripe it
+            // overlaps and its black to the black one.
+            let mut cover = [0.0f64; 16];
+            for (x, pixel) in row.as_chunks::<4>().0.iter().enumerate() {
+                let white = pixel[0] as f64 / 255.0;
+                let (from, to) = (x as f64 / scale, (x + 1) as f64 / scale);
+                for (texel, share) in cover.iter_mut().enumerate() {
+                    if (texel as f64) < to && from < (texel + 1) as f64 {
+                        *share += if texel % 2 == 0 { white } else { 1.0 - white };
+                    }
+                }
+            }
+            for (texel, width) in cover.iter().enumerate() {
+                assert!((width - scale).abs() <= 2.0 / 255.0, "{out}: texel {texel}: {cover:?} {row:?}");
+            }
+            if scale == 2.0 {
+                assert!(row.iter().all(|&b| b == 0 || b == 255), "{row:?}");
             }
         }
     }

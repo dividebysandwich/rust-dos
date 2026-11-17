@@ -609,6 +609,49 @@ pub fn link(state: &mut State, hwnd: u32, after: u32) {
     }
 }
 
+/// A hidden top-level window of the system's own, of the class
+/// `class_name` whose procedure is `proc` (registered the first time):
+/// `w` with its class, style, parent, instance, procedure and flags set
+/// here, put at the bottom. Its handle, or 0 when there is no room.
+pub fn new_hidden(state: &mut State, class_name: &str, proc: u32, w: Window) -> u32 {
+    use super::class::{self, CS_GLOBALCLASS, Class};
+    let class = match class::find_system(state, class_name) {
+        Some(c) => c,
+        None => {
+            let atom = class::atom(state, class_name);
+            state.classes.push(Some(Class {
+                atom,
+                name: class_name.to_string(),
+                style: CS_GLOBALCLASS,
+                proc,
+                instance: super::DLL.base,
+                global: true,
+                system: true,
+                ..Class::default()
+            }));
+            state.classes.len() as u32 - 1
+        }
+    };
+    let window = Window {
+        class,
+        style: WS_POPUP,
+        parent: DESKTOP,
+        instance: super::DLL.base,
+        proc,
+        flags: LINKED,
+        icon_pos: (-1, -1),
+        ..w
+    };
+    let Some(hwnd) = state.new_window(window) else {
+        return 0;
+    };
+    if let Some(c) = state.classes[class as usize].as_mut() {
+        c.windows += 1;
+    }
+    link(state, hwnd, HWND_BOTTOM);
+    hwnd
+}
+
 /// Take `hwnd` out of its parent's list.
 pub fn unlink(state: &mut State, hwnd: u32) {
     let parent = state.parent(hwnd);

@@ -15,6 +15,7 @@ pub mod cursor;
 pub mod ddeml;
 pub mod defwnd;
 pub mod dialog;
+pub mod dlgdir;
 pub mod hook;
 pub mod input;
 pub mod menu;
@@ -1294,10 +1295,19 @@ static APIS: &[Api] = &[
     stdcall("PackDDElParam", 458, 3, ddeml::pack_dde_lparam),
     stdcall("FreeDDElParam", 218, 2, ddeml::free_dde_lparam),
     stdcall("ImpersonateDdeClientWindow", 358, 2, not_implemented),
-    stdcall("DlgDirListA", 149, 5, nothing),
-    stdcall("DlgDirSelectExA", 155, 4, nothing),
-    stdcall("DlgDirListComboBoxA", 150, 5, nothing),
-    stdcall("DlgDirSelectComboBoxExA", 153, 4, nothing),
+    stdcall("DlgDirListA", 149, 5, dlgdir::dlg_dir_list),
+    stdcall("DlgDirSelectExA", 155, 4, dlgdir::dlg_dir_select_ex),
+    stdcall("DlgDirListComboBoxA", 150, 5, dlgdir::dlg_dir_list_combo_box),
+    stdcall(
+        "DlgDirSelectComboBoxExA",
+        153,
+        4,
+        dlgdir::dlg_dir_select_combo_box_ex,
+    ),
+    stdcall("DlgDirListW", 152, 5, not_implemented),
+    stdcall("DlgDirSelectExW", 156, 4, not_implemented),
+    stdcall("DlgDirListComboBoxW", 151, 5, not_implemented),
+    stdcall("DlgDirSelectComboBoxExW", 154, 4, not_implemented),
     stdcall("MonitorFromWindow", 440, 2, monitor::monitor_from_window),
     stdcall("MonitorFromPoint", 438, 3, monitor::monitor_from_point),
     stdcall("MonitorFromRect", 439, 2, monitor::monitor_from_rect),
@@ -1342,10 +1352,19 @@ static APIS: &[Api] = &[
         8,
         ddeml::dde_client_transaction,
     ),
-    stdcall("DdeAbandonTransaction", 95, 3, succeed),
+    stdcall(
+        "DdeAbandonTransaction",
+        95,
+        3,
+        ddeml::dde_abandon_transaction,
+    ),
     stdcall("DdeEnableCallback", 107, 3, succeed),
     stdcall("DdePostAdvise", 117, 3, succeed),
-    stdcall("DdeSetUserHandle", 124, 3, succeed),
+    stdcall("DdeSetUserHandle", 124, 3, ddeml::dde_set_user_handle),
+    stdcall("DdeQueryConvInfo", 118, 3, ddeml::dde_query_conv_info),
+    // The hidden windows that give DDEML's clients their asynchronous
+    // transactions' outcomes.
+    stdcall("DdemlWndProc", 0, 4, ddeml::wnd_proc),
     // The help viewer's window procedures (winhelp).
     stdcall("WinHelpWndProc", 0, 4, winhelp::frame_proc),
     stdcall("WinHelpTopicWndProc", 0, 4, winhelp::topic_proc),

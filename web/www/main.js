@@ -44,9 +44,9 @@ const DEFAULT_CONFIG = `# Rust-DOS settings, in the format of rust-dos.conf. Rem
 [emulator]
 # Display ratio: none, 4:3, 5:4, 16:10 or 16:9.
 aspect=4:3
-# How the picture is scaled up: nearest (sharp pixels) or linear (smooth),
-# without a CRT shader.
-#filter=nearest
+# How the picture is scaled up: sharp (pixels of equal size), hard
+# (nearest neighbour) or linear (smooth), without a CRT shader.
+#filter=sharp
 # A look: none, scanlines, aperture, crt or xbrz (xBRZ 2x). It needs WebGL 2.
 #shader=none
 # How far the crt look's tube bends, in percent (0 flat to 100), and how
@@ -460,7 +460,8 @@ function makeGlScreen() {
   let overlayFrame;
   let xbrzCache;
   let look = 'none';
-  let smooth = false;
+  /// The `filter` setting: sharp, hard or linear.
+  let scaling = 'sharp';
   /// A monochrome tube, whose phosphor is one colour: no colour mask.
   let mono = false;
   /// How far the CRT look's tube bends, across and down, and how much
@@ -526,6 +527,7 @@ function makeGlScreen() {
       line: gl.getUniformLocation(program, 'u_line'),
       overlay: gl.getUniformLocation(program, 'u_overlay_enabled'),
       unflipped: gl.getUniformLocation(program, 'u_unflipped'),
+      sharp: gl.getUniformLocation(program, 'u_sharp'),
     };
   }
 
@@ -539,12 +541,14 @@ function makeGlScreen() {
     return programs.get(name);
   }
 
-  /// Set the texture's filter: the CRT looks read its mipmap, and the
-  /// picture without one is sharp or smooth.
+  /// Set the texture's filter: the CRT looks read its mipmap. The
+  /// picture without one is read linearly when it is sharp or smooth (the
+  /// plain look moves where it samples for a sharp one, `u_sharp`), and
+  /// from the nearest texel when it is hard.
   function filter() {
     const mipmaps = look !== 'none' && look !== 'xbrz';
+    const magnify = mipmaps || scaling !== 'hard' ? gl.LINEAR : gl.NEAREST;
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    const magnify = mipmaps || smooth ? gl.LINEAR : gl.NEAREST;
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, mipmaps ? gl.LINEAR_MIPMAP_LINEAR : magnify);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, magnify);
     if (mipmaps && frame) {
@@ -716,13 +720,13 @@ function makeGlScreen() {
       return look === 'xbrz';
     },
 
-    /// Draw through the look `name`, or the plain picture, `smooth` or
-    /// sharp, on a colour or a monochrome (`isMono`) tube that bends and
-    /// glows as `bend` and `shine` say. A look that doesn't compile leaves
-    /// the picture plain.
-    select(name, isSmooth, isMono, bend, shine) {
+    /// Draw through the look `name`, or the plain picture scaled as
+    /// `filterName` says (sharp, hard or linear), on a colour or a
+    /// monochrome (`isMono`) tube that bends and glows as `bend` and
+    /// `shine` say. A look that doesn't compile leaves the picture plain.
+    select(name, filterName, isMono, bend, shine) {
       look = program(name) ? name : 'none';
-      smooth = isSmooth;
+      scaling = filterName;
       mono = isMono;
       curvature = bend;
       glow = shine;
@@ -841,6 +845,7 @@ function makeGlScreen() {
       gl.uniform1f(entry.line, 1);
       gl.uniform1i(entry.overlay, look === 'xbrz' && overlayVisible ? 1 : 0);
       gl.uniform1i(entry.unflipped, 0);
+      gl.uniform1i(entry.sharp, scaling === 'sharp' ? 1 : 0);
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, overlayTexture);
       gl.bindVertexArray(vao);
@@ -2271,21 +2276,21 @@ async function restoreStates() {
 }
 
 /// Show the picture as the settings have it: stretched to 4:3 or not,
-/// sharp or smooth, through a CRT shader or not, on a colour or a
+/// sharp, hard or smooth, through a CRT shader or not, on a colour or a
 /// monochrome tube, bent and glowing as the CRT look's settings say.
 function showPicture() {
   if (screenGl) {
     const look = {
       name: machine.shader(),
-      smooth: machine.smooth(),
+      filter: machine.filter(),
       mono: machine.mono(),
       curvature: Array.from(machine.shader_curvature()),
       glow: machine.shader_glow(),
     };
-    const same = ['name', 'smooth', 'mono', 'glow'].every((key) => look[key] === shownLook?.[key]);
+    const same = ['name', 'filter', 'mono', 'glow'].every((key) => look[key] === shownLook?.[key]);
     if (!same || look.curvature.join() !== shownLook.curvature.join()) {
       shownLook = look;
-      screenGl.select(look.name, look.smooth, look.mono, look.curvature, look.glow);
+      screenGl.select(look.name, look.filter, look.mono, look.curvature, look.glow);
       machine.refresh_picture();
       if (machine.screen_width() && machine.screen_height()
         && (!screenGl.xbrz() || (machine.shader_width() && machine.shader_height()))) {

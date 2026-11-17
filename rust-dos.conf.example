@@ -31,9 +31,12 @@
 # DOS games on a VGA keep the pace of the retraces they wait for. Turn it
 # off for benchmarks and timedemos. voodoo_fps_cap is its old name.
 #fps_cap=60
-# How the picture is scaled up: nearest (sharp pixels) or linear (smooth).
-# Only without a CRT shader, which does its own scaling.
-#filter=nearest
+# How the picture is scaled up: sharp (pixels of equal size, blended at
+# their edges where the scale isn't a whole number), hard (nearest
+# neighbour: unblended, in two widths at such a scale) or linear
+# (smooth). Only without a CRT shader, which does its own scaling.
+# nearest is the old name of sharp.
+#filter=sharp
 # A CRT look for the picture:
 #   none       the pixels as they are (the default)
 #   scanlines  a flat screen with the scanlines of a VGA monitor

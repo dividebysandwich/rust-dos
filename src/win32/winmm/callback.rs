@@ -4,7 +4,8 @@
 //! midiOutOpen and the others say. timeSetEvent's timers call functions
 //! too.
 //!
-//! Functions are called on the process's multimedia thread, as on
+//! A 16-bit program's function is called by its task (`Function16`).
+//! Other functions are called on the process's multimedia thread, as on
 //! Windows 95, where they ran at interrupt time outside the program's
 //! threads: a thread of the process that WinMM makes the first time a
 //! device or timer may call one (`ensure_thread`). Its code is a stub of
@@ -57,6 +58,12 @@ pub enum Callback {
     /// An event, by its object, which the callback holds.
     Event {
         id: u32,
+    },
+    /// A 16-bit program's function, at its 16:16 address, which its task
+    /// calls (`win16::queue_call16`): the task by its thread's id.
+    Function16 {
+        tid: u32,
+        address: u32,
     },
 }
 
@@ -134,6 +141,9 @@ pub fn notify(
             queue_call(cpu, pid, address, [handle, msg, instance, p1, p2]);
         }
         Callback::Event { id } => set_event(cpu, id),
+        Callback::Function16 { tid, address } => {
+            crate::win16::queue_call16(cpu, tid, address, [handle, msg, instance, p1, p2]);
+        }
     }
 }
 
@@ -322,4 +332,5 @@ crate::win32::state_variants!(Callback {
     Thread { tid },
     Function { pid, address },
     Event { id },
+    Function16 { tid, address },
 });

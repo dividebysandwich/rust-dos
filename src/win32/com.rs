@@ -183,6 +183,7 @@ pub static CLASSES: &[&[Class]] = &[
     super::shell32::CLASSES,
     super::dinput::CLASSES8,
     super::dshow::CLASSES,
+    super::dpnet::CLASSES,
 ];
 
 /// The class with CLSID `clsid`, and its place in the list of all.

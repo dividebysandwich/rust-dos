@@ -178,7 +178,7 @@ impl Default for Settings {
             aspect: AspectRatio::None,
             vrr: false,
             fps_cap: crate::frame_cap::DEFAULT,
-            filter: Filter::Nearest,
+            filter: Filter::Sharp,
             shader: Shader::None,
             crt: CrtSettings::default(),
             monochrome: Monochrome::Off,

@@ -35,7 +35,7 @@
 //! goes when no interface of it has a reference left, or when its
 //! process ends; in a session, it leaves it first.
 
-mod address;
+pub(crate) mod address;
 mod calls;
 mod guest;
 mod link;
@@ -637,20 +637,20 @@ const DPERR_INVALIDPARAMS: u32 = com::E_INVALIDARG;
 const DPCONNECTION_DIRECTPLAY: u32 = 1;
 const DPCONNECTION_DIRECTPLAYLOBBY: u32 = 2;
 /// A DPADDRESS chunk's header: its data's GUID and size.
-const CHUNK_HEADER: u32 = 20;
+pub(crate) const CHUNK_HEADER: u32 = 20;
 /// The most data a message, a player's or a group's carries.
 const MAX_DATA: u32 = 0x10_0000;
 
 /// The service providers, as `Play::provider` numbers them.
 const IPX: u8 = 1;
 const TCPIP: u8 = 2;
-const DPSPGUID_IPX: Guid = Guid::new(
+pub(crate) const DPSPGUID_IPX: Guid = Guid::new(
     0x685B_C400,
     0x9D2C,
     0x11CF,
     [0xA9, 0xCD, 0x00, 0xAA, 0x00, 0x68, 0x86, 0xE3],
 );
-const DPSPGUID_TCPIP: Guid = Guid::new(
+pub(crate) const DPSPGUID_TCPIP: Guid = Guid::new(
     0x36E9_5EE0,
     0x8577,
     0x11CF,

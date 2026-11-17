@@ -124,8 +124,19 @@ limit, so without a connection it goes on as it would with one:
   display's rate), `off`, or 10 to 240. See [Frame rate
   cap](#frame-rate-cap). `--fps-cap` sets it for a run.
   `voodoo_fps_cap` is its old name, still read.
-* `filter` is how the picture is scaled up: `nearest` (the default, sharp
-  pixels) or `linear` (smooth). It applies without a CRT shader.
+* `filter` is how the picture is scaled up: `sharp` (the default),
+  `hard` or `linear` (smooth). It applies without a CRT shader. `sharp`
+  gives every pixel of the picture the same size on the screen. At a
+  whole-number scale that is nearest-neighbour sampling; at others, such
+  as 640x480 in fullscreen on a 1920x1200 display (2.5 times) or a
+  320x200 picture shown at `aspect=4:3`, the edge between two pixels is
+  blended over less than one screen pixel, so one-pixel lines and text
+  strokes keep one width. `nearest`, its old name, is still read. `hard`
+  is nearest-neighbour sampling at every scale: nothing is blended, and
+  at a scale that isn't a whole number pixels come out in two widths.
+  Below twice the size, as with 1024x768 on a 1280x1024 display,
+  `sharp` often draws a one-pixel stroke as two half-tone screen pixels,
+  and `hard` keeps it crisp at the cost of the uneven widths.
 * `shader` gives the picture a look: `none` (the default), one of the
   CRT looks `scanlines`, `aperture` or `crt`, or `xbrz`, which scales the
   picture 2x with xBRZ, a pixel-art upscaler, without a CRT look. See
@@ -587,8 +598,8 @@ limit, so without a connection it goes on as it would with one:
   8.1 under `98` and `98se`. The registry's
   `HKLM\Software\Microsoft\DirectX` gives `Version` 4.08.00.0400 or
   4.08.01.0881 and `InstalledVersion` 8.0 or 8.1, and the version
-  resources of DDRAW, DSOUND, DINPUT, DPLAYX, D3D8, DINPUT8 and the
-  DirectMusic DLLs, which GetFileVersionInfo reads, say the same. A
+  resources of DDRAW, DSOUND, DINPUT, DPLAYX, DPNET, D3D8, DINPUT8 and
+  the DirectMusic DLLs, which GetFileVersionInfo reads, say the same. A
   change takes effect for the next program that starts when none runs.
 * `win32_locale` is the system locale of the built-in Windows, the
   language edition of Windows 98 it is. `en-US` is the default. The
@@ -3638,6 +3649,8 @@ Join a room, start the game on each computer, and pick its network play:
   98 image in another instance doesn't see these sessions, nor these
   games its. The lobby (games started by a lobby program such as the
   Zone) isn't there.
+* Games that play through DirectPlay 8, DirectX 8's, find no connection
+  for network play yet, and play alone.
 
 ### Serial and modem games
 

@@ -28,6 +28,7 @@ pub mod dll_files;
 mod forwarders;
 mod dmusic;
 mod dplayx;
+mod dpnet;
 mod dshow;
 mod dsound;
 pub mod gdi32;
@@ -489,6 +490,8 @@ pub struct Win32 {
     oleaut32: oleaut32::State,
     /// MSACM32's streams.
     msacm32: msacm32::State,
+    /// DPNET's DirectPlay 8 objects.
+    dpnet: dpnet::State,
 }
 
 impl Win32 {
@@ -1266,6 +1269,7 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     dshow::process_ended(cpu, process.id);
     shell32::process_ended(cpu, process.id);
     dplayx::process_ended(cpu, process.id);
+    dpnet::process_ended(cpu, process.id);
     user32::ddeml::process_ended(cpu, process.id);
     if process.id == cpu.bus.win32.win16.pid {
         crate::win16::dos::release(cpu);
@@ -1491,7 +1495,7 @@ pub fn audio_playing(win32: &Win32) -> bool {
 /// The sound device's samples for the host's frames `first` to `first +
 /// frames`, if it plays (dsound/device.rs).
 pub fn audio_render(
-    bus: &crate::bus::Bus,
+    bus: &mut crate::bus::Bus,
     first: u64,
     frames: usize,
 ) -> Option<Vec<(f32, f32)>> {
@@ -1525,6 +1529,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         // otherwise go on finding, before the objects their players'
         // events are go.
         dplayx::session_ended(cpu);
+        dpnet::session_ended(cpu);
         if let Some(pool) = cpu.bus.win32.pool.take() {
             pool.release(&mut cpu.bus);
         }
@@ -1681,6 +1686,7 @@ crate::state_fields!(Win32 {
     oleaut32,
     msacm32,
     comm,
+    dpnet,
 } skip {
     enabled,
     guest_dlls,

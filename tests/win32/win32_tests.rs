@@ -15686,8 +15686,10 @@ fn icinfo_lists_the_installed_codecs() {
     let upper = u32::from_le_bytes(*b"CVID");
     assert_eq!(info("icinfo_cvid", vidc, upper, None), 1);
     assert_eq!(info("icinfo_index", vidc, 0, Some(8)), b'c');
-    assert_eq!(info("icinfo_past", vidc, 5, None), 0);
-    assert_eq!(info("icinfo_msvc", vidc, u32::from_le_bytes(*b"msvc"), None), 0);
+    assert_eq!(info("icinfo_last", vidc, 5, Some(8)), b'm');
+    assert_eq!(info("icinfo_past", vidc, 6, None), 0);
+    assert_eq!(info("icinfo_msvc", vidc, u32::from_le_bytes(*b"MSVC"), None), 1);
+    assert_eq!(info("icinfo_mrle", vidc, u32::from_le_bytes(*b"mrle"), None), 0);
     assert_eq!(info("icinfo_vids", u32::from_le_bytes(*b"vids"), iv41, None), 0);
 }
 
@@ -15735,10 +15737,179 @@ fn icopen_opens_installed_decompressors() {
     assert_eq!(ic_open("icopen_iv50", vidc, b"IV50", ICMODE_DECOMPRESS), 0xF8);
     assert_eq!(ic_open("icopen_cvid", vidc, b"cvid", ICMODE_QUERY), 0xF8);
     assert_eq!(ic_open("icopen_vidc_upper", b"VIDC", b"iv41", ICMODE_FASTDECOMPRESS), 0xF8);
-    assert_eq!(ic_open("icopen_msvc", vidc, b"MSVC", ICMODE_DECOMPRESS), 0xEE);
+    assert_eq!(ic_open("icopen_msvc", vidc, b"MSVC", ICMODE_DECOMPRESS), 0xF8);
+    assert_eq!(ic_open("icopen_mrle", vidc, b"MRLE", ICMODE_DECOMPRESS), 0xEE);
     assert_eq!(ic_open("icopen_vids", b"vids", b"IV50", ICMODE_DECOMPRESS), 0xEE);
     assert_eq!(ic_open("icopen_compress", vidc, b"IV50", ICMODE_COMPRESS), 0xEE);
     assert_eq!(ic_open("icopen_draw", vidc, b"IV50", ICMODE_DRAW), 0xEE);
+}
+
+/// A BITMAPINFOHEADER of a Microsoft Video 1 stream of 8 by 4 pixels and
+/// `bits` bits, with an 8-bit one's two colours: blue and red.
+fn cram_info(bits: u16) -> Vec<u8> {
+    let mut info = bitmap_info(8, 4, bits, b"CRAM");
+    if bits == 8 {
+        info[32] = 2;
+        info.extend_from_slice(&[0xFF, 0, 0, 0, 0, 0, 0xFF, 0]);
+    }
+    info
+}
+
+/// What `ICLocate(kind, handler, input, output, mode)` gives for a
+/// stream of `input` and an output of `output` (none for None): 1 for a
+/// handle, which ICClose then closes with ICERR_OK, 0 for none.
+fn ic_locate(
+    test: &str,
+    kind: &[u8; 4],
+    handler: u32,
+    input: &[u8],
+    output: Option<&[u8]>,
+    mode: i32,
+) -> u8 {
+    let imports: &[(&str, &[&str])] = &[("MSVFW32.DLL", &["ICLocate", "ICClose"])];
+    let mut data = input.to_vec();
+    data.resize(0x100, 0);
+    data.extend_from_slice(output.unwrap_or_default());
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut none = a.create_label();
+        a.push(mode)?;
+        a.push(if output.is_some() { l.at(0x100) as i32 } else { 0 })?;
+        a.push(l.at(0) as i32)?;
+        a.push(handler as i32)?;
+        a.push(i32::from_le_bytes(*kind))?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        a.jz(none)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.cmp(eax, 0)?;
+        a.mov(eax, 1)?;
+        a.jz(none)?;
+        a.mov(eax, 0xEE)?;
+        a.set_label(&mut none)?;
+        a.ret()
+    });
+    run(test, exe).0
+}
+
+/// ICLocate finds Microsoft Video 1 for a CRAM stream as Windows 98
+/// SE's MSVFW32 finds msvidc32.dll, as Biosys looks for the decoder of
+/// its films: by the stream's handler, or by its biCompression when the
+/// handler names no codec that takes it, with or without an output
+/// format. It finds none for an output the codec doesn't give (a 16-bit
+/// stream as 8 bits, another size), for a mode that compresses, and for
+/// a type other than `vidc`.
+#[test]
+fn iclocate_finds_microsoft_video_1_for_cram_streams() {
+    const ICMODE_COMPRESS: i32 = 1;
+    const ICMODE_DECOMPRESS: i32 = 2;
+    let (vidc, msvc) = (b"vidc", u32::from_le_bytes(*b"msvc"));
+    let (cram8, cram16) = (cram_info(8), cram_info(16));
+    let rgb = |w, h, bits| bitmap_info(w, h, bits, &[0; 4]);
+    let locate = |test, handler, input: &[u8], output: Option<&[u8]>, mode| {
+        ic_locate(test, vidc, handler, input, output, mode)
+    };
+    let out8 = rgb(8, 4, 8);
+    assert_eq!(locate("iclocate_msvc", msvc, &cram8, Some(&out8), ICMODE_DECOMPRESS), 1);
+    let cvid = u32::from_le_bytes(*b"cvid");
+    assert_eq!(locate("iclocate_by_bi", cvid, &cram8, Some(&out8), ICMODE_DECOMPRESS), 1);
+    assert_eq!(locate("iclocate_any", 0, &cram16, None, ICMODE_DECOMPRESS), 1);
+    let out24 = rgb(8, 4, 24);
+    assert_eq!(locate("iclocate_24", msvc, &cram8, Some(&out24), ICMODE_DECOMPRESS), 1);
+    let top_down16 = bitmap_info(8, -4i32 as u32, 16, &[0; 4]);
+    let to16 = Some(&top_down16[..]);
+    assert_eq!(locate("iclocate_16", msvc, &cram16, to16, ICMODE_DECOMPRESS), 1);
+    assert_eq!(locate("iclocate_16_to_8", msvc, &cram16, Some(&out8), ICMODE_DECOMPRESS), 0);
+    let large = rgb(16, 4, 8);
+    assert_eq!(locate("iclocate_size", msvc, &cram8, Some(&large), ICMODE_DECOMPRESS), 0);
+    assert_eq!(locate("iclocate_compress", msvc, &cram8, None, ICMODE_COMPRESS), 0);
+    let vids = ic_locate("iclocate_vids", b"vids", msvc, &cram8, None, ICMODE_DECOMPRESS);
+    assert_eq!(vids, 0);
+}
+
+/// ICDecompress decodes Microsoft Video 1 frames onto the program's
+/// buffer, as Biosys plays its films: the codec ICLocate found draws an
+/// 8-bit frame's palette indexes as they are, and the blocks a frame
+/// skips keep the pixels the buffer had. Through ICSendMessage,
+/// ICM_DECOMPRESS_QUERY takes the pair and ICM_DECOMPRESS_GET_FORMAT
+/// gives the 8-bit format with the stream's colours. The program ends
+/// with a bit set for each check that held.
+#[test]
+fn icdecompress_draws_microsoft_video_1_frames_in_place() {
+    let kernel32: &[&str] = &["ExitProcess"];
+    let msvfw32: &[&str] = &["ICLocate", "ICDecompress", "ICSendMessage", "ICClose"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", kernel32), ("MSVFW32.DLL", msvfw32)];
+    const OUT: usize = 0x100;
+    const FRAMES: usize = 0x200;
+    const BITS: usize = 0x300;
+    const FORMAT: usize = 0x400;
+    let mut data = cram_info(8);
+    data.resize(OUT, 0);
+    data.extend(bitmap_info(8, 4, 8, &[0; 4]));
+    data.resize(FRAMES, 0);
+    // A key frame: the left block colour 1, the right one two colours,
+    // 7 for the set bits of 0x0F21 and 9 for the others.
+    data.extend_from_slice(&[1, 0x80, 0x21, 0x0F, 7, 9]);
+    data.resize(FRAMES + 0x10, 0);
+    // The next: the left block skipped, the right one colour 0x33.
+    data.extend_from_slice(&[1, 0x84, 0x33, 0x80]);
+    data.resize(BITS, 0);
+    data.extend_from_slice(&[0xCC; 32]);
+    data.resize(FORMAT + 0x500, 0);
+    const ICM_DECOMPRESS_GET_FORMAT: i32 = 0x400A;
+    const ICM_DECOMPRESS_QUERY: i32 = 0x400B;
+    let program = program_with(Builder::exe(BASE), false, imports, &data, |a, l| {
+        let f = |name: &str| {
+            let index = msvfw32.iter().position(|n| *n == name).unwrap();
+            l.import(kernel32.len() + index)
+        };
+        let at = |offset: usize| l.at(offset as u32) as i32;
+        a.xor(ebx, ebx)?;
+        push_args(a, &[i32::from_le_bytes(*b"vidc"), 0, at(0), at(OUT), 2])?;
+        a.call(f("ICLocate"))?;
+        a.mov(esi, eax)?;
+        a.test(eax, eax)?;
+        a.setnz(bl)?;
+        let decompress = |a: &mut CodeAssembler, frame: usize| {
+            push_args(a, &[0, 0, at(0), at(frame), at(OUT), at(BITS)])?;
+            a.mov(dword_ptr(esp), esi)?;
+            a.call(f("ICDecompress"))?;
+            a.add(esp, 24)?;
+            a.cmp(eax, 0)
+        };
+        let row = |y: u32, x: u32| dword_ptr(l.at(BITS as u32 + 8 * y + x));
+        decompress(a, FRAMES)?;
+        bit_if_equal(a, 1)?;
+        // The bottom row: 1 four times, then 7, 9, 9, 9.
+        a.cmp(row(0, 0), 0x0101_0101)?;
+        bit_if_equal(a, 2)?;
+        a.cmp(row(0, 4), 0x0909_0907)?;
+        bit_if_equal(a, 3)?;
+        // The top row after the next frame: 1s kept, then 0x33s.
+        decompress(a, FRAMES + 0x10)?;
+        a.cmp(row(3, 0), 0x0101_0101)?;
+        bit_if_equal(a, 4)?;
+        a.cmp(row(3, 4), 0x3333_3333)?;
+        bit_if_equal(a, 5)?;
+        push_args(a, &[0, ICM_DECOMPRESS_QUERY, at(0), at(OUT)])?;
+        a.mov(dword_ptr(esp), esi)?;
+        a.call(f("ICSendMessage"))?;
+        a.cmp(eax, 0)?;
+        bit_if_equal(a, 6)?;
+        // The format with the stream's colours: the second is red.
+        push_args(a, &[0, ICM_DECOMPRESS_GET_FORMAT, at(0), at(FORMAT)])?;
+        a.mov(dword_ptr(esp), esi)?;
+        a.call(f("ICSendMessage"))?;
+        a.cmp(dword_ptr(l.at(FORMAT as u32 + 44)), 0xFF_0000)?;
+        bit_if_equal(a, 7)?;
+        a.push(esi)?;
+        a.call(f("ICClose"))?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    let code = run_family("icdecompress_cram", &[("T.EXE", program)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
 }
 
 /// A program linked with MFC's OLE support imports OLEDLG.DLL's
