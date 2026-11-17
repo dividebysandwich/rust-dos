@@ -2525,6 +2525,63 @@ fn pushad_and_popad_are_translated() {
     }
 }
 
+/// A loop on a 16-bit stack (ESP 1_9000h, so SP is 9000h) of PUSHAD,
+/// a change to EAX's slot and POPAD, 100 times, on a CPU of `model`.
+fn popad_on_a_16_bit_stack(model: rust_dos::cpu::CpuModel) -> (Rig, Rig) {
+    twins(|rig| {
+        rig.cpu.model = model;
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                a.mov(ax, DATA16 as u32)?;
+                a.mov(ss, ax)?;
+                a.mov(esp, 0x1_9000u32)?;
+                a.xor(eax, eax)?;
+                a.mov(ecx, 100u32)?;
+                a.jmp(CODE as u64 + 0x100)
+            }),
+        );
+        rig.load(
+            CODE + 0x100,
+            &asm32(CODE + 0x100, |a| {
+                a.pushad()?;
+                // The slots at SS:SP, through EBP (ESP is past the limit).
+                a.movzx(ebp, sp)?;
+                a.add(dword_ptr(ebp + 28), 1)?; // EAX's slot
+                a.mov(dword_ptr(ebp + 12), 0x0002_1234u32)?; // ESP's image
+                a.xor(ebx, ebx)?;
+                a.popad()?;
+                a.dec(ecx)?;
+                a.jnz(CODE as u64 + 0x100)?;
+                a.hlt()
+            }),
+        );
+    })
+}
+
+#[test]
+fn popad_on_a_16_bit_stack_is_translated_on_a_486() {
+    // A 486 moves SP alone: the upper half of ESP stays.
+    let (mut a, mut b) = popad_on_a_16_bit_stack(rust_dos::cpu::CpuModel::I486);
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!((b.cpu.eax(), b.cpu.esp()), (100, 0x1_9000));
+    if AVAILABLE {
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Popad), 0, "{:?}", stats);
+    }
+}
+
+#[test]
+fn popad_on_a_16_bit_stack_of_a_386_loads_the_upper_half_of_esp() {
+    // A 386 takes the upper half of ESP from the image POPAD skips: its
+    // handler runs it.
+    let (mut a, mut b) = popad_on_a_16_bit_stack(rust_dos::cpu::CpuModel::I386);
+    run_both(&mut a, &mut b);
+    assert_eq!((b.cpu.eax(), b.cpu.esp()), (100, 0x2_9000));
+    if AVAILABLE {
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Popad), 100);
+    }
+}
+
 /// Ring 3 code on a stack of `limit` + 1 bytes at 50000h from ESP
 /// `stack_top`, which runs `body` with the registers set to 11h, 22h, ...,
 /// and the #SS it raises recorded.

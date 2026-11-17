@@ -121,7 +121,7 @@ pub fn translate(
         Push => push(instr, stack32, &mut u),
         Pop => pop(instr, stack32, &mut u),
         Pusha | Pushad => pusha(instr, stack32, &mut u),
-        Popa | Popad => popa(instr, stack32, &mut u),
+        Popa | Popad => popa(instr, stack32, i486, &mut u),
         Pushf | Pushfd => pushf(instr, stack32, &mut u),
         Popf | Popfd if system && !real => popf(instr, stack32, &mut u),
         Bt => bit_op(instr, BitKind::Test, &mut u),
@@ -916,10 +916,12 @@ fn pusha(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
 /// POPA and POPAD, as `transfer::popa`: the registers loaded one by one
 /// from EDI's slot up, skipping the stack pointer's (which is still read),
 /// then the stack pointer moved. POPAD on a 16-bit stack loads the upper
-/// half of ESP on a 386 only: its handler runs it.
-fn popa(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
+/// half of ESP on a 386 only: its handler runs it there. On a 486 and
+/// later it moves SP alone, as here (DOS/4GW's 16-bit code that calls
+/// real mode runs one for each call).
+fn popa(instr: &Instruction, stack32: bool, i486: bool, u: &mut Vec<Uop>) -> bool {
     let size = if instr.code() == Code::Popad { 4 } else { 2 };
-    if size == 4 && !stack32 {
+    if size == 4 && !stack32 && !i486 {
         return false;
     }
     let sp = sp(stack32);
