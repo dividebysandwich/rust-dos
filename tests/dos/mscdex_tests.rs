@@ -107,7 +107,8 @@ fn the_redirector_check_finds_mscdex_with_a_cd_drive() {
     assert_eq!(redirector_check(&mut cpu, 0xDADA), 0xADAD);
     assert_eq!((cpu.ax(), cpu.bx(), cpu.cx()), (0x11FF, 0x1234, 0x5678));
 
-    // Without DADAh it is the redirector's own check, and DOS has none.
+    // Without DADAh it is the redirector's own check, which stays
+    // unanswered (#1303).
     assert_eq!(redirector_check(&mut cpu, 0x0000), 0x0000);
     assert_eq!(cpu.ax(), 0x1100);
 }
