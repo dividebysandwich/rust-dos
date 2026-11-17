@@ -1154,9 +1154,12 @@ pub fn begin_paint(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// otherwise draw over it afterwards: a parent shown with a child that
 /// UpdateWindow paints at once keeps the child's picture. Wine's server
 /// does the same as it hands a window its update region for painting
-/// (`validate_parents`). Shadow of the Horned Rat creates the panel with
-/// the Defend button over a map shown a moment before, paints it, and
-/// then gets the map's WM_PAINT, which covered it.
+/// (`validate_parents`), and Wine's `test_paint_messages` checks it on
+/// real Windows: RDW_UPDATENOW of a child validates the parent's area
+/// under it, with WS_CLIPCHILDREN it doesn't, and RDW_VALIDATE of the
+/// child never does. Shadow of the Horned Rat creates the panel with the
+/// Defend button over a map shown a moment before, paints it, and then
+/// gets the map's WM_PAINT, which covered it.
 fn validate_parents(state: &mut State, hwnd: u32) {
     let Some(w) = state.window(hwnd) else {
         return;
@@ -1164,8 +1167,11 @@ fn validate_parents(state: &mut State, hwnd: u32) {
     if w.update.is_empty() {
         return;
     }
+    // Only what lies on the child itself: a CS_PARENTDC child's region
+    // may reach over the parent's client area (see `redraw_in`), which
+    // the child needn't paint. Wine's regions never leave the window.
     let wr = state.screen_rect(hwnd);
-    let painted = w.update.offset_by(wr.left, wr.top);
+    let painted = w.update.offset_by(wr.left, wr.top).and_rect(&wr);
     let mut h = hwnd;
     while state.is_child_window(h) {
         h = state.parent(h);
@@ -2627,6 +2633,53 @@ mod tests {
             assert_eq!(left.bounds(), all);
             assert_eq!(left.and_rect(&at).is_empty(), clip == 0, "clip {clip:#x}");
         }
+    }
+
+    /// A CS_PARENTDC child given all of its parent's invalid area (its
+    /// region reaches past it) validates only what lies on it.
+    #[test]
+    fn a_parent_dc_child_that_paints_validates_only_its_own_area() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        super::super::init(&mut cpu);
+        let state = user(&mut cpu);
+        let class = state
+            .classes
+            .iter()
+            .position(|c| {
+                c.as_ref()
+                    .is_some_and(|c| c.style & super::super::class::CS_PARENTDC != 0)
+            })
+            .expect("a CS_PARENTDC class") as u32;
+        let all = Rect::new(0, 0, 200, 200);
+        let parent = state
+            .new_window(Window {
+                style: WS_VISIBLE,
+                rect: all,
+                client: all,
+                ..Window::default()
+            })
+            .expect("a window");
+        let at = Rect::new(20, 30, 80, 70);
+        let size = Rect::new(0, 0, 60, 40);
+        let child = state
+            .new_window(Window {
+                style: WS_VISIBLE | super::super::window::WS_CHILD,
+                parent,
+                class,
+                rect: at,
+                client: size,
+                ..Window::default()
+            })
+            .expect("a window");
+        state.window_mut(parent).unwrap().children.push(child);
+        redraw_tree(state, parent, &Region::from_rect(all), RDW_INVALIDATE);
+        let reach = state.window(child).unwrap().update.bounds();
+        assert!(reach.width() > size.width(), "child's region {reach:?}");
+        begin_paint(&mut cpu, &[child, 0x1000]);
+        let state = user(&mut cpu);
+        let left = &state.window(parent).unwrap().update;
+        assert!(left.and_rect(&at).is_empty());
+        assert_eq!(left.or(&Region::from_rect(at)), Region::from_rect(all));
     }
 
     /// The glyph `glyph` on a 16 by 14 caption button, a line a row.
