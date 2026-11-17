@@ -71,7 +71,13 @@ const WINDOW_NS: u64 = 500_000_000;
 const LONG_WINDOW_NS: u64 = 2_000_000_000;
 const ENOUGH_FRAMES: u64 = 20;
 /// A measurement that runs at less than this share of real time ends once
-/// it has dropped `WINDOW_NS` (`AutoSpeed::update`).
+/// it has dropped `WINDOW_NS` (`AutoSpeed::update`). It is also the
+/// deepest cut one measurement behind makes (`AutoSpeed::decide`): under
+/// it, the cut is the same whatever the pace, so a longer measurement
+/// can't change how far the speed goes down, and only keeps the program
+/// that far behind for longer. Above it, the pace sets the cut, and the
+/// measurement takes its whole window: the stalls Quake's loading screen
+/// counts as lag (#783) run at 0.6 of real time.
 const FAR_BEHIND: f64 = 0.5;
 /// Emulated time after a change of speed before a measurement starts.
 /// A game that paces its frames by the clock catches up on the frames the
@@ -1526,7 +1532,13 @@ impl AutoSpeed {
                 self.frames = window;
                 return cut;
             }
-            fps = Some((rate + before) / 2.0);
+            // The first measurement after a change has nothing before it
+            // (NaN) and settles alone only when it ended far behind.
+            fps = Some(if before.is_nan() {
+                rate
+            } else {
+                (rate + before) / 2.0
+            });
         }
         self.unsettled = None;
         let paced = now.ns.saturating_sub(mark.lost_at);
@@ -1787,7 +1799,7 @@ impl AutoSpeed {
         };
         if lagged && !stalled {
             let cut = if again {
-                (m.pace * KEPT_UP).clamp(0.5, 1.0 / FINE_STEP)
+                (m.pace * KEPT_UP).clamp(FAR_BEHIND, 1.0 / FINE_STEP)
             } else {
                 1.0 / FINE_STEP
             };
@@ -3931,6 +3943,35 @@ mod tests {
         bus.activity.swapped(1);
         let next = auto.update(bus, true, 35_000, WINDOW_NS);
         assert!(next.is_some_and(|s| s < 400_000), "{next:?}");
+    }
+
+    #[test]
+    fn a_host_far_behind_right_after_a_change_judges_its_own_frames() {
+        // The first measurement after a change of speed has no frame rate
+        // before it to agree with, and one that ends far behind counts
+        // its own frames. Far under what the host has, after keeping up,
+        // it is a stall, and the hold goes on with what it drew.
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(100_000);
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Hold {
+            fps: 60.0,
+            left: HOLD_WINDOWS,
+            more: true,
+            recent: 60.0,
+            seen: 0,
+            dipped: 0,
+        };
+        auto.unsettled = Some((f64::NAN, 0));
+        assert_eq!(auto.update(bus, true, HOST, 0), None);
+        bus.clock.icount += 100_000 * 100;
+        bus.activity.swapped(6);
+        auto.update(bus, true, HOST, WINDOW_NS);
+        let Step::Hold { recent, .. } = auto.step else {
+            panic!("{:?}", auto.step)
+        };
+        assert!(recent.is_finite(), "{:?}", auto.step);
     }
 
     #[test]
