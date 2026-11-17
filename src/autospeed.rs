@@ -43,24 +43,28 @@
 //! loading screens unpack its data for 25 seconds at 3000 and for 6 at a
 //! 486's speed. It does from the second measurement that finds it doing so,
 //! as the first may have found DOS loading the program itself, which times
-//! its delay loops right after, and not while it waits for the timer most of
-//! the time, as a game playing speech from its CD does. Its writes to video
-//! memory don't count for that, as those games draw piecemeal all the time.
-//! A protected-mode program gets all the host has while it reads and writes
-//! (loading, compiling, Windows), and otherwise goes down to a 486's speed,
-//! or a quarter of a faster CPU model's clock: it spins in a loop, as game
-//! menus do. (It was written for a 386 or better, and paces itself.) Under
-//! an operating system that halts the processor when it has nothing to run
-//! (Windows, OS/2, Linux, and the built-in Windows, which is known to from
-//! the start), a program that keeps it from halting is at work and gets all
-//! the host has as well. Once a program stops reading and writing (a
-//! real-mode one, its drives), it goes back to the speed it had at once, not
-//! a measurement later: programs time their delay loops right after loading,
-//! and a loop timed at all the host has waits for ever (Sam & Max's General
-//! MIDI driver counts to a million in a timer tick, and hangs if it gets
-//! there first). A driver set up in the middle of the loading can't wait for
-//! that: a reset of the Sound Blaster, which comes before a driver times the
-//! card, goes back at once (`Bus::end_work_boost`).
+//! its delay loops right after, and not while it waits for the timer most
+//! of the time, as a game playing speech from its CD does. Its writes to
+//! video memory don't count for that, as those games draw piecemeal all the
+//! time. A protected-mode program gets all the host has while it reads and
+//! writes (loading, compiling, Windows), and otherwise goes down to a 486's
+//! speed, or a quarter of a faster CPU model's clock: it spins in a loop,
+//! as game menus do. (It was written for a 386 or better, and paces
+//! itself.) Under an operating system that halts the processor when it has
+//! nothing to run (Windows, OS/2, Linux, and the built-in Windows, which is
+//! known to from the start), a program that keeps it from halting is at
+//! work and gets all the host has as well. A DOS program that the
+//! emulator's own DPMI host runs has no such system under it: what halts it
+//! is its own wait for the timer (Alien Odyssey's intro, whose waits the
+//! idle skip skips), and the menu it spins in after that is still a menu.
+//! Once a program stops reading and writing (a real-mode one, its drives),
+//! it goes back to the speed it had at once, not a measurement later:
+//! programs time their delay loops right after loading, and a loop timed at
+//! all the host has waits for ever (Sam & Max's General MIDI driver counts
+//! to a million in a timer tick, and hangs if it gets there first). A
+//! driver set up in the middle of the loading can't wait for that: a reset
+//! of the Sound Blaster, which comes before a driver times the card, goes
+//! back at once (`Bus::end_work_boost`).
 
 use crate::bus::Bus;
 use crate::video::VideoMode;
@@ -1238,6 +1242,11 @@ pub struct AutoSpeed {
     /// Whether a program that keeps such a system busy gets all the host
     /// has (`auto_busy_os`).
     busy_os: bool,
+    /// A client of the emulator's own DPMI host runs: a DOS program, with
+    /// no operating system under it. What halts it is its own waiting (a
+    /// game's wait for the timer, which the idle skip skips), not a
+    /// system's idle loop, so it neither shows one nor keeps one busy.
+    dpmi_client: bool,
 }
 
 impl AutoSpeed {
@@ -1280,6 +1289,7 @@ impl AutoSpeed {
             protected_least: PROTECTED_LEAST,
             idles: false,
             busy_os: true,
+            dpmi_client: false,
         }
     }
 
@@ -1291,6 +1301,7 @@ impl AutoSpeed {
             protected_least: self.protected_least,
             idles: self.idles,
             busy_os: self.busy_os,
+            dpmi_client: self.dpmi_client,
             ..Self::new(base, target_fps)
         }
     }
@@ -1310,6 +1321,11 @@ impl AutoSpeed {
     /// (`auto_busy_os`), or treat it as any other.
     pub fn set_busy_os(&mut self, on: bool) {
         self.busy_os = on;
+    }
+
+    /// Whether a client of the emulator's own DPMI host runs (`dpmi_client`).
+    pub fn set_dpmi_client(&mut self, on: bool) {
+        self.dpmi_client = on;
     }
 
     /// The least speed of a protected-mode program on this CPU model.
@@ -1719,7 +1735,7 @@ impl AutoSpeed {
         self.flat_out = false;
         let loading = std::mem::take(&mut self.loading);
         let was_loaded = std::mem::replace(&mut self.loaded, m.io >= LOADS);
-        if protected && m.halted >= IDLES {
+        if protected && !self.dpmi_client && m.halted >= IDLES {
             self.idles = true;
         }
         // The host fell behind at this speed: a step less, and no more than
@@ -1866,7 +1882,7 @@ impl AutoSpeed {
                 base
             } else if m.halted >= IDLES {
                 clamp(c)
-            } else if self.busy_os && self.idles && m.halted < BUSY {
+            } else if self.busy_os && self.idles && !self.dpmi_client && m.halted < BUSY {
                 self.flat_out = true;
                 top
             } else {
@@ -4037,6 +4053,33 @@ mod tests {
         let mut dos = AutoSpeed::new(3000, None);
         dos.decide(3000, &measure(0.95), false, HOST);
         assert_eq!(dos.decide(100_000, &measure(0.0), true, HOST), 80_000);
+    }
+
+    #[test]
+    fn a_dos_extender_program_that_waited_is_not_a_system_that_idles() {
+        let measure = |halted| Measurement {
+            halted,
+            refresh: 60.0,
+            ..STILL
+        };
+        // Alien Odyssey under the built-in DPMI host: its intro waits for
+        // the timer most of the time, then its menu spins without frames.
+        // The menu is a game's menu, at a 486's speed, not a program
+        // keeping an idling system busy.
+        let mut game = AutoSpeed::new(3000, None);
+        game.set_dpmi_client(true);
+        assert_eq!(game.decide(100_000, &measure(0.95), true, HOST), 100_000);
+        assert!(!game.idles());
+        assert_eq!(game.decide(100_000, &measure(0.0), true, HOST), 80_000);
+        // A state saved while it was taken for one (`Cpu::os_idles`)
+        // changes nothing.
+        game.set_idles(true);
+        assert_eq!(game.decide(80_000, &measure(0.0), true, HOST), 64_000);
+        // The same waits without the host's client: a system's idle loop.
+        let mut system = AutoSpeed::new(3000, None);
+        system.decide(100_000, &measure(0.95), true, HOST);
+        assert!(system.idles());
+        assert_eq!(system.decide(100_000, &measure(0.0), true, HOST), HOST);
     }
 
     #[test]
