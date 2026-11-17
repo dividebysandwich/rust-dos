@@ -325,12 +325,11 @@ pub(super) fn wait_for_multiple_objects(cpu: &mut Cpu, args: &[u32]) -> Option<u
     if cpu.bus.guest_faulted() {
         return None;
     }
-    // The handles are arguments too where they are in the 64 bytes above
-    // the stack's top that a pass that counts takes a call to read, as an
-    // array on the caller's stack often is.
-    let top = cpu.esp() as u64;
-    let (start, end) = (at as u64, at as u64 + 4 * count as u64);
-    let arguments = start >= top && end <= top + 64;
+    // The handles are arguments too where they are in the bytes above the
+    // stack's top that a pass that counts takes a call to read, as an
+    // array on the caller's stack often is. Elsewhere a counter may be
+    // among them, and the loop isn't skipped.
+    let arguments = crate::idle::above_stack_top(cpu, at, 4 * count);
     wait(cpu, handles, all != 0, ms, arguments)
 }
 

@@ -87,6 +87,10 @@ const STATUS_POLLS: u32 = 64;
 const COUNTER_BYTES: usize = 16;
 /// Instructions of a pass `Phase::Count` records.
 const PASS_LIMIT: usize = 20_000;
+/// Bytes either side of the stack's top that a pass `Phase::Count`
+/// records takes a service, or an instruction that pushes the flags or
+/// goes through the interrupt table, to reach (`record`).
+const STACK_REACH: u32 = 64;
 /// Bytes a REP string instruction with 32-bit addresses may reach in a
 /// pass `Phase::Count` records.
 const REP_SPAN: u64 = 1 << 20;
@@ -862,6 +866,24 @@ pub fn reads_arguments(cpu: &mut Cpu) {
     cpu.bus.observe.arguments = true;
 }
 
+/// Whether the `len` bytes at the linear address `start` are among the
+/// `STACK_REACH` bytes above the stack's top that a pass `Phase::Count`
+/// records takes a service to read (`record`), as an array on the
+/// caller's stack is: a service that reads them and no other RAM but its
+/// arguments may say it read only its arguments (`reads_arguments`). The
+/// window is the one `record` notes, so a counter in it is seen. False on
+/// a 16-bit stack, whose window wraps in its segment, and where the
+/// window wraps at 4 GB.
+pub fn above_stack_top(cpu: &Cpu, start: u32, len: u32) -> bool {
+    let ss = cpu.seg_cache(crate::cpu::Seg::SS);
+    if ss.attr & crate::cpu::ATTR_DB == 0 {
+        return false;
+    }
+    let top = ss.base.wrapping_add(cpu.esp()) as u64;
+    let start = start as u64;
+    start >= top && start + len as u64 <= top + STACK_REACH as u64
+}
+
 /// Run `f`, a built-in function the service running calls from Rust (as
 /// a tree view calls GetTickCount). The service stays pure only if what
 /// it said before the call holds and `f` says it changed nothing but RAM
@@ -1406,12 +1428,15 @@ fn record(cpu: &mut Cpu) {
         let ss = cpu.seg_cache(crate::cpu::Seg::SS);
         let runs = if ss.attr & crate::cpu::ATTR_DB != 0 {
             [
-                (ss.base.wrapping_add(cpu.esp().wrapping_sub(64)), 128),
+                (
+                    ss.base.wrapping_add(cpu.esp().wrapping_sub(STACK_REACH)),
+                    2 * STACK_REACH as u64,
+                ),
                 (0, 0),
             ]
         } else {
-            let off = (cpu.sp() as u32).wrapping_sub(64) & 0xFFFF;
-            segment_runs(ss.base, off, 128)
+            let off = (cpu.sp() as u32).wrapping_sub(STACK_REACH) & 0xFFFF;
+            segment_runs(ss.base, off, 2 * STACK_REACH)
         };
         for (lin, len) in runs {
             let pieces = present(cpu, lin, len, true);
