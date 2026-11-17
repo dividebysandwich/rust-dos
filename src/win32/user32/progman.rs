@@ -19,10 +19,9 @@
 //! has besides Program Manager's (the "Shell" and "AppProperties"
 //! topics, the "Folders" application) get no answer.
 
-use super::class::{self, CS_GLOBALCLASS, Class};
 use super::message::{self, Msg};
-use super::window::{self, HWND_BOTTOM, LINKED, WS_POPUP, Window};
-use super::{DESKTOP, address_of, current_tid, user};
+use super::window::{self, Window};
+use super::{address_of, current_tid, user};
 use crate::cpu::Cpu;
 use crate::win32::task::{self, Next, Task};
 
@@ -72,43 +71,11 @@ pub fn server(cpu: &mut Cpu) -> u32 {
     if let Some(hwnd) = found {
         return hwnd;
     }
-    let proc = proc_address();
-    let class = match class::find_system(state, CLASS) {
-        Some(c) => c,
-        None => {
-            let atom = class::atom(state, CLASS);
-            state.classes.push(Some(Class {
-                atom,
-                name: CLASS.to_string(),
-                style: CS_GLOBALCLASS,
-                proc,
-                instance: super::DLL.base,
-                global: true,
-                system: true,
-                ..Class::default()
-            }));
-            state.classes.len() as u32 - 1
-        }
-    };
     let window = Window {
-        class,
-        style: WS_POPUP,
-        parent: DESKTOP,
         text: TITLE.to_vec(),
-        instance: super::DLL.base,
-        proc,
-        flags: LINKED,
-        icon_pos: (-1, -1),
         ..Window::default()
     };
-    let Some(hwnd) = state.new_window(window) else {
-        return 0;
-    };
-    if let Some(c) = state.classes[class as usize].as_mut() {
-        c.windows += 1;
-    }
-    window::link(state, hwnd, HWND_BOTTOM);
-    hwnd
+    window::new_hidden(state, CLASS, proc_address(), window)
 }
 
 /// ProgmanWndProc(hwnd, message, wParam, lParam): the window's

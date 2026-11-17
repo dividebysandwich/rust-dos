@@ -401,7 +401,7 @@ pub struct State {
 
 /// The W32 section's version that first keeps DPNET's objects: an older
 /// one had none.
-pub const OBJECTS_SAVED: u16 = 75;
+pub const OBJECTS_SAVED: u16 = 76;
 
 impl crate::savestate::State for State {
     fn save(&self, w: &mut crate::savestate::Writer) {
