@@ -274,6 +274,81 @@ fn moves_and_stores_into_the_linear_frame_buffer_are_the_iterations_one_at_a_tim
     assert!(shown(&b).0);
 }
 
+#[test]
+fn moves_and_stores_into_a_banked_vesa_window_are_the_iterations_one_at_a_time() {
+    // A full-screen blit of a 640x480 256-colour VESA mode without a
+    // linear frame buffer, through the 64 KB window at A0000h on bank 3
+    // (Ascendancy's): up and down, stores of each size, a range that
+    // runs off the window's end at AFFFFh, and the window read back.
+    let (mut a, mut b) = pair(|rig| {
+        rig.cpu.set_ax(0x4F02);
+        rig.cpu.set_reg16(iced_x86::Register::BX, 0x101);
+        rust_dos::interrupts::int10::handle(&mut rig.cpu);
+        assert_eq!(rig.cpu.ax(), 0x004F, "no VESA mode");
+        rig.cpu.set_ax(0x4F05);
+        rig.cpu.set_reg16(iced_x86::Register::BX, 0);
+        rig.cpu.set_reg16(iced_x86::Register::DX, 3);
+        rust_dos::interrupts::int10::handle(&mut rig.cpu);
+        assert_eq!(rig.cpu.ax(), 0x004F, "no bank");
+        rig.cpu.bus.vga.dirty = false;
+        rig.cpu.bus.vga.dirty_y_min = u32::MAX;
+        rig.cpu.bus.vga.dirty_y_max = 0;
+        pattern(rig, 0x100000, 0x8000);
+        let code = asm32(CODE, |a| {
+            a.cld()?;
+            for (src, dst, count) in [
+                (0x100000u32, 0xA0000u32, 0x1000u32),
+                (0x100010, 0xA4FF0, 700),
+                (0x100403, 0xA8FFE, 0x300),
+            ] {
+                a.mov(esi, src)?;
+                a.mov(edi, dst)?;
+                a.mov(ecx, count)?;
+                a.rep().movsd()?;
+            }
+            a.mov(esi, 0x101001u32)?;
+            a.mov(edi, 0xAC003u32)?;
+            a.mov(ecx, 3001u32)?;
+            a.rep().movsb()?;
+            a.std()?;
+            a.mov(esi, 0x107FFCu32)?;
+            a.mov(edi, 0xAEFFCu32)?;
+            a.mov(ecx, 2000u32)?;
+            a.rep().movsd()?;
+            a.mov(edi, 0xA6FFEu32)?;
+            a.mov(eax, 0x1234_5678u32)?;
+            a.mov(ecx, 3000u32)?;
+            a.rep().stosw()?;
+            a.cld()?;
+            a.mov(edi, 0xAF801u32)?;
+            a.mov(ecx, 0x205u32)?;
+            a.rep().stosd()?;
+            a.mov(ecx, 777u32)?;
+            a.rep().stosb()?;
+            // Out of the window again, into RAM.
+            a.mov(esi, 0xA0FF0u32)?;
+            a.mov(edi, 0x200000u32)?;
+            a.mov(ecx, 0x400u32)?;
+            a.rep().movsd()?;
+            a.hlt()
+        });
+        rig.load(CODE, &code);
+    });
+    run(&mut a, &mut b);
+    assert!(b.cpu.bus.vbe.vram[0x30000..0x30010].iter().any(|&x| x != 0));
+    let shown = |rig: &Rig| {
+        let v = &rig.cpu.bus.vga;
+        (
+            v.dirty,
+            v.dirty_y_min,
+            v.dirty_y_max,
+            rig.cpu.bus.activity.video_bytes,
+        )
+    };
+    assert_eq!(shown(&a), shown(&b));
+    assert!(shown(&b).0);
+}
+
 /// Wait in the program until the primary IDE channel's disk isn't busy
 /// and has data (DRQ).
 fn wait_drq(a: &mut CodeAssembler) -> Result<(), IcedError> {

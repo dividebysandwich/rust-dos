@@ -843,6 +843,80 @@ impl Bus {
         self.vbe.lfb_offset(dst, len)
     }
 
+    /// Where `len` bytes written at `dst` go in the video memory, if all
+    /// of them go through a VESA mode's window at A0000h (`write_8`'s
+    /// `vbe_window` branch) to one contiguous range of it. They do when
+    /// the run stays in the bank or page the window shows, which a run in
+    /// one 4 KB page of the window does on the VBE's 64 KB banks and the
+    /// mach64's 32 KB pages. None where a byte would go elsewhere (memory
+    /// mapped registers) or the bank wraps around the end of the memory.
+    fn vesa_window_run(&self, dst: usize, len: usize) -> Option<usize> {
+        let last = dst + len - 1;
+        if dst < ADDR_VGA_GRAPHICS
+            || last >= ADDR_VGA_GRAPHICS + SIZE_GRAPHICS
+            || !self.vbe_window()
+            || [dst, last]
+                .iter()
+                .any(|&a| self.s3_mmio(a).is_some() || self.mach64_mmio(a).is_some())
+        {
+            return None;
+        }
+        let first = self.vesa_window(dst - ADDR_VGA_GRAPHICS, true);
+        let end = self.vesa_window(last - ADDR_VGA_GRAPHICS, true);
+        // The Vérité's byte swapping (`host_xor`) scatters a run's bytes.
+        let swapped = !self.mach64() && self.vbe.host_xor != 0;
+        (!swapped && end == first + len - 1 && end < self.vbe.vram.len()).then_some(first)
+    }
+
+    /// Write the `len` bytes of plain RAM at `src` into a VESA mode's
+    /// window at A0000h at `dst`, as a string move's writes through
+    /// `write_8` do (see `vesa_window_run`). Returns false, having written
+    /// nothing, where they don't all go to one range of video memory.
+    /// `size` is the element's, for the profile's count of writes.
+    pub(crate) fn move_to_vesa_window(
+        &mut self,
+        src: usize,
+        dst: usize,
+        len: usize,
+        size: usize,
+    ) -> bool {
+        let Some(offset) = self.vesa_window_run(dst, len) else {
+            return false;
+        };
+        let _profile = self
+            .profile
+            .as_deref()
+            .map(|p| p.mem_run(dst, true, (len / size) as u64));
+        self.toadforce_writing(offset, len);
+        self.vbe.vram[offset..offset + len].copy_from_slice(&self.ram[src..src + len]);
+        self.lfb_written(dst, offset, len);
+        true
+    }
+
+    /// Fill a VESA mode's window at A0000h at `dst` with `count` elements
+    /// of `size` bytes of `value`, as a string store's writes do (see
+    /// `move_to_vesa_window`).
+    pub(crate) fn fill_vesa_window(
+        &mut self,
+        dst: usize,
+        count: usize,
+        size: usize,
+        value: u32,
+    ) -> bool {
+        let len = count * size;
+        let Some(offset) = self.vesa_window_run(dst, len) else {
+            return false;
+        };
+        let _profile = self
+            .profile
+            .as_deref()
+            .map(|p| p.mem_run(dst, true, count as u64));
+        self.toadforce_writing(offset, len);
+        fill_pattern(&mut self.vbe.vram[offset..offset + len], size, value);
+        self.lfb_written(dst, offset, len);
+        true
+    }
+
     /// The rest of `write_vram` for `len` bytes written at `offset` (at
     /// `dst`) at once, and the hooks of the writes one by one.
     fn lfb_written(&mut self, dst: usize, offset: usize, len: usize) {
@@ -1398,6 +1472,12 @@ impl Bus {
             self.powervr_write(at, value as u32, 2);
             return false;
         }
+        // Both bytes into one place of a VESA mode's window, as the two
+        // `write_8` calls would put them.
+        if let Some(offset) = self.vesa_window_run(addr, 2) {
+            self.write_vram(offset, &value.to_le_bytes());
+            return true;
+        }
         // Low byte
         let d1 = self.write_8(addr, (value & 0xFF) as u8);
         // High byte
@@ -1535,6 +1615,12 @@ impl Bus {
             && let Some(at) = self.powervr_at(addr)
         {
             self.powervr_write(at, value, 4);
+            return;
+        }
+        // All four bytes into one place of a VESA mode's window, as the
+        // `write_8` calls would put them.
+        if let Some(offset) = self.vesa_window_run(addr, 4) {
+            self.write_vram(offset, &value.to_le_bytes());
             return;
         }
         self.write_16(addr, (value & 0xFFFF) as u16);

@@ -226,6 +226,50 @@ fn banked_and_linear_video_memory() {
 }
 
 #[test]
+fn word_and_dword_writes_into_the_bank_window_are_their_bytes() {
+    // Each write lands where its bytes written one at a time would, on a
+    // bank in the middle, at the window's end and with the Vérité's byte
+    // swapping (`host_xor`), which scatters a dword's bytes.
+    for host_xor in [0, 2] {
+        let mut whole = machine();
+        let mut bytes = machine();
+        for cpu in [&mut whole, &mut bytes] {
+            set_mode(cpu, 0x101);
+            assert_eq!(int10(cpu, 0x4F05, 0x0000, 0, 2), 0x004F);
+            cpu.bus.vbe.host_xor = host_xor;
+            cpu.bus.vga.dirty = false;
+            cpu.bus.vga.dirty_y_min = u32::MAX;
+            cpu.bus.vga.dirty_y_max = 0;
+        }
+        let writes: [(usize, u32, usize); 6] = [
+            (0xA0010, 0x8877_6655, 4),
+            (0xA7FFE, 0x4433_2211, 4),
+            (0xA9001, 0xBBAA, 2),
+            (0xAFFFD, 0xDDCC_BBAA, 4),
+            (0xAFFFF, 0x1122, 2),
+            // With `host_xor` 2, its first and last bytes are 3 apart.
+            (0xA3001, 0x0102_0304, 4),
+        ];
+        for (addr, value, size) in writes {
+            if size == 4 {
+                whole.bus.write_32(addr, value);
+            } else {
+                whole.bus.write_16(addr, value as u16);
+            }
+            for (i, byte) in value.to_le_bytes()[..size].iter().enumerate() {
+                bytes.bus.write_8(addr + i, *byte);
+            }
+        }
+        let (p, q) = (&whole.bus.vbe.vram, &bytes.bus.vbe.vram);
+        let differs = p.iter().zip(q.iter()).position(|(x, y)| x != y);
+        assert_eq!(differs, None, "host_xor {host_xor}: first differing byte");
+        let rows = |cpu: &Cpu| (cpu.bus.vga.dirty_y_min, cpu.bus.vga.dirty_y_max);
+        assert_eq!(rows(&whole), rows(&bytes), "host_xor {host_xor}");
+        assert_eq!(whole.bus.vbe.vram[0x20010 ^ host_xor], 0x55);
+    }
+}
+
+#[test]
 fn the_window_function_switches_banks_with_a_far_call() {
     let mut cpu = machine();
     set_mode(&mut cpu, 0x103);
