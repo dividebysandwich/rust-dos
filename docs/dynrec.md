@@ -94,11 +94,11 @@ IN, OUT, STI, POPF, MOV SS, POP SS and LSS can change the same, but
 programs run them so often (a timer read, a sound driver's status, a CLI
 and STI or a PUSHF and POPF around each, a switch to a stack of its own)
 that the block goes on after them where they changed none of it. They run
-in the block (IN, OUT and STI translated on x86-64 hosts, with IN and OUT
-through `jit_port`, MOV SS and POP SS outside real mode through
-`jit_load_seg`; the others, and all of them elsewhere, through their
-handlers and `jit_fallback`), which stops after the instruction
-(`EXIT_AFTER`) only if:
+in the block (IN, OUT, STI and POPF translated, POPF outside real mode,
+with IN and OUT through `jit_port`, MOV SS and POP SS outside real mode
+through `jit_load_seg`; the others through their handlers and
+`jit_fallback`), which stops after the instruction (`EXIT_AFTER`) only
+if:
 
 - after IN or OUT, an interrupt can be delivered (a device raised one, or
   the PIC let one through, with IF set), the timer deadline or the A20
@@ -108,7 +108,7 @@ handlers and `jit_fallback`), which stops after the instruction
 - after STI, an interrupt waits: the execution loop runs the next
   instruction, in the interrupt shadow, and delivers it. Where none waits
   the shadow ends in the block, at the next instruction;
-- after POPF (through its handler), TF is set, or IF is set with an
+- after POPF, TF is set, or IF is set with an
   interrupt waiting;
 - after a load of SS, the stack's width changed, which the block was
   translated for (its key's stack bit; `Uop::SsLoaded` checks it where

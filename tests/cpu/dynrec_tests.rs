@@ -1041,10 +1041,96 @@ fn popfd_that_sets_if_lets_a_waiting_interrupt_in_after_it() {
 }
 
 #[test]
+fn popf_at_ring_3_runs_in_translated_code() {
+    // As a DOS extender's program under a DPMI host with IOPL 3 saves and
+    // restores the flags (Aliens: A Comic Book Adventure's video player):
+    // IF loads, IOPL stays 3 whatever the value has.
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.pushfd()?;
+            a.or(dword_ptr(esp), 0x3000)?;
+            a.popfd()?;
+            to_ring3(a)
+        }));
+        rig.ring3(|a| {
+            a.xor(ebx, ebx)?;
+            a.mov(ecx, 100u32)?;
+            let mut top = a.create_label();
+            a.set_label(&mut top)?;
+            a.stc()?;
+            a.pushfd()?;
+            a.clc()?;
+            a.popfd()?;
+            a.adc(ebx, 0)?;
+            a.pushfd()?;
+            a.and(dword_ptr(esp), !0x3200)?;
+            a.popfd()?;
+            a.pushfd()?;
+            a.pop(eax)?;
+            a.add(esi, eax)?;
+            a.pushfd()?;
+            a.or(dword_ptr(esp), 0x200)?;
+            a.popfd()?;
+            a.pushf()?;
+            a.xor(word_ptr(esp), 0x8C5)?;
+            a.popf()?;
+            a.setb(dl)?;
+            a.add(edi, edx)?;
+            a.dec(ecx)?;
+            a.jnz(top)?;
+            a.pushfd()?;
+            a.pop(ebp)?;
+            a.hlt()
+        });
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.ebx(), 100);
+    assert_eq!(b.cpu.ebp() & 0x3200, 0x3200, "IOPL 3 and IF set at the end");
+    if AVAILABLE {
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Popfd), 0);
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Popf), 0);
+    }
+}
+
+#[test]
+fn popfd_where_it_cant_load_if_or_iopl_keeps_them() {
+    // At ring 3 with IOPL 0, IF and IOPL stay as they were, in translated
+    // code.
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.pushfd()?;
+            a.and(dword_ptr(esp), !0x3000)?;
+            a.or(dword_ptr(esp), 0x200)?;
+            a.popfd()?;
+            to_ring3(a)
+        }));
+        rig.ring3(|a| {
+            a.mov(ecx, 50u32)?;
+            let mut top = a.create_label();
+            a.set_label(&mut top)?;
+            a.pushfd()?;
+            a.xor(dword_ptr(esp), 0x3201)?;
+            a.popfd()?;
+            a.pushfd()?;
+            a.pop(eax)?;
+            a.or(edi, eax)?;
+            a.dec(ecx)?;
+            a.jnz(top)?;
+            a.hlt()
+        });
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.edi() & 0x3201, 0x0201, "IF and IOPL kept, CF loaded");
+    if AVAILABLE {
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Popfd), 0);
+    }
+}
+
+#[test]
 fn popfd_where_it_cant_load_if_or_loads_id_runs_as_its_handler() {
     // At ring 3 with IOPL 0, IF and IOPL stay as they were; at ring 0, a
     // POPFD that flips ID (CPUID's detection, on a Pentium) goes to the
-    // handler too.
+    // handler.
     let (mut a, mut b) = twins(|rig| {
         rig.cpu.model = rust_dos::cpu::CpuModel::Pentium;
         rig.load(CODE, &asm32(CODE, |a| {
