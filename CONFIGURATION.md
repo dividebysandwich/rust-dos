@@ -232,10 +232,13 @@ limit, so without a connection it goes on as it would with one:
   building its next scene) runs at max instead of slowing down as a
   spinning menu would. The built-in Windows (`win32`) idles so too,
   and `auto` knows it from the start: a Win32 program that computes
-  without drawing, such as a game unpacking its level, runs at max.
-  What `auto` has seen goes into save states, and is forgotten when the
-  machine goes back to real mode (a reboot, a DOS program's end). It
-  applies at once.
+  without drawing, such as a game unpacking its level, runs at max. A
+  DOS program that the emulator's own DPMI host runs (DOS/4GW and the
+  other extenders that use it) has no such system under it: its waits
+  don't count, and its menus slow down as any other's. What `auto` has
+  seen goes into save states, and is forgotten when the machine goes
+  back to real mode (a reboot, a DOS program's end). It applies at
+  once.
 * `cpu` is the emulated processor: `486` (a 486DX with FPU), `386`, or
   `pentium`, a Pentium as DOSBox-X has one: CPUID (a GenuineIntel family 5),
   the time stamp counter, which counts the instructions and so runs at a
