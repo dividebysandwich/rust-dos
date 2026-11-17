@@ -134,6 +134,8 @@ const IMPORTS: &[(&str, &[&str])] = &[
             "SetWindowPos",
             "GetDC",
             "UpdateWindow",
+            "WindowFromPoint",
+            "ChildWindowFromPointEx",
         ],
     ),
     ("GDI32.DLL", &["PatBlt", "GetPixel"]),
@@ -420,6 +422,74 @@ fn child(class: u32, style: u32, w: u32, h: u32, parent: usize, id: u32) -> Call
 
 fn send(hwnd: usize, msg: u32, wp: Arg, lp: Arg) -> Call {
     call("SendMessageA", &[Arg::Res(hwnd), Arg::I(msg), wp, lp])
+}
+
+#[test]
+fn a_child_with_ws_ex_transparent_takes_the_point() {
+    use Arg::*;
+    const WS_POPUP: u32 = 0x8000_0000;
+    const WS_EX_TRANSPARENT: u32 = 0x20;
+    const CWP_SKIPTRANSPARENT: u32 = 4;
+    // A popup without a frame at the screen's corner, so its client
+    // area is at the screen's, with a push button at 10,10 that has
+    // WS_EX_TRANSPARENT, as CyberStorm 2's dialogs give their controls.
+    // Windows 98 gives the point on the button to the button: the style
+    // passes the mouse through layered windows only, which it has none
+    // of. ChildWindowFromPointEx passes over it when asked to.
+    let mut d = data();
+    strings(&mut d);
+    put(&mut d, FREE, b"Button\0");
+    let button = |ex: u32| {
+        call(
+            "CreateWindowExA",
+            &[
+                I(ex),
+                At(FREE),
+                I(0),
+                I(WS_CHILD | WS_VISIBLE),
+                I(10),
+                I(10),
+                I(80),
+                I(24),
+                Res(0),
+                I(1),
+                I(0),
+                I(0),
+            ],
+        )
+    };
+    let calls = [
+        call(
+            "CreateWindowExA",
+            &[
+                I(0),
+                At(S_STATIC),
+                I(0),
+                I(WS_POPUP | WS_VISIBLE),
+                I(0),
+                I(0),
+                I(200),
+                I(100),
+                I(0),
+                I(0),
+                I(0),
+                I(0),
+            ],
+        ),
+        button(WS_EX_TRANSPARENT),
+        call("WindowFromPoint", &[I(20), I(20)]),
+        call("ChildWindowFromPointEx", &[Res(0), I(20), I(20), I(0)]),
+        call(
+            "ChildWindowFromPointEx",
+            &[Res(0), I(20), I(20), I(CWP_SKIPTRANSPARENT)],
+        ),
+    ];
+    let (cpu, at) = run("transparent_hit", &d, &calls);
+    let r = results(&cpu, at, calls.len());
+    assert_ne!(r[1], 0, "the button is made");
+    assert_eq!(r[2], r[1], "WindowFromPoint gives the button");
+    assert_eq!(r[3], r[1], "ChildWindowFromPointEx gives the button");
+    assert_eq!(r[4], r[0], "CWP_SKIPTRANSPARENT passes over it");
 }
 
 #[test]
