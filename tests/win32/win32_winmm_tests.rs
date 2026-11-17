@@ -463,6 +463,106 @@ fn a_thread_preempted_while_it_preempts_another_goes_on_first() {
     }
 }
 
+const SET_EVENT: u32 = 0x00;
+const SET_FLAG: u32 = 0x04;
+const SET_START: u32 = 0x08;
+
+/// A thread that gives up its turn with Sleep(0) until a flag is set, and
+/// the main thread, five times over, waiting for an event that a one-shot
+/// timer of 10 ms sets (TIME_CALLBACK_EVENT_SET). The exit code is the
+/// longest of the five waits by timeGetTime, in milliseconds.
+fn timer_event_wait_program() -> Vec<u8> {
+    const TIME_CALLBACK_EVENT_SET: i32 = 0x10;
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.dll",
+            &[
+                "CreateThread",
+                "ExitProcess",
+                "Sleep",
+                "CreateEventA",
+                "WaitForSingleObject",
+            ],
+        ),
+        ("WINMM.dll", &["timeSetEvent", "timeGetTime"]),
+    ];
+    program(imports, &[0; 0x10], |a, l| {
+        // CreateThread's last three arguments, then its start address,
+        // which the call pushes: the code after it, the thread's.
+        let mut create = a.create_label();
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(create)?;
+        let mut spin = a.create_label();
+        a.set_label(&mut spin)?;
+        a.push(0)?;
+        a.call(l.import(2))?;
+        a.cmp(dword_ptr(l.at(SET_FLAG)), 0)?;
+        a.je(spin)?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut create)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(l.import(0))?;
+        // An auto-reset event, not set.
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(l.import(3))?;
+        a.mov(dword_ptr(l.at(SET_EVENT)), eax)?;
+        a.xor(edi, edi)?;
+        a.mov(esi, 5)?;
+        let mut round = a.create_label();
+        a.set_label(&mut round)?;
+        a.call(l.import(6))?;
+        a.mov(dword_ptr(l.at(SET_START)), eax)?;
+        a.push(TIME_CALLBACK_EVENT_SET)?;
+        a.push(0)?;
+        a.push(dword_ptr(l.at(SET_EVENT)))?;
+        a.push(1)?;
+        a.push(10)?;
+        a.call(l.import(5))?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(SET_EVENT)))?;
+        a.call(l.import(4))?;
+        a.call(l.import(6))?;
+        a.sub(eax, dword_ptr(l.at(SET_START)))?;
+        let mut shorter = a.create_label();
+        a.cmp(eax, edi)?;
+        a.jbe(shorter)?;
+        a.mov(edi, eax)?;
+        a.set_label(&mut shorter)?;
+        a.dec(esi)?;
+        a.jnz(round)?;
+        a.mov(dword_ptr(l.at(SET_FLAG)), 1)?;
+        a.push(edi)?;
+        a.call(l.import(1))?;
+        a.int3()
+    })
+}
+
+/// A wait for an event a multimedia timer sets ends when the timer sets
+/// it, as SetEvent ends it on Windows, while another thread of the
+/// program gives up its turns with Sleep(0). The timer's thread used to
+/// set the event and leave the wait for the next look at all the waits
+/// (`thread::wake`), and Sleep(0), which doesn't look, found no other
+/// thread ready: the wait ended at a later timer event, up to the BIOS
+/// timer's next interrupt.
+#[test]
+fn a_wait_for_an_event_a_timer_sets_ends_when_it_is_set() {
+    for core in CORES {
+        let files = [("T.EXE", timer_event_wait_program())];
+        let mut cpu = machine("timer_event_wait", core, &files, |_| {});
+        run_to_exit(&mut cpu, 20_000, |_| {});
+        let code = cpu.errorlevel;
+        assert!((10..=11).contains(&code), "{core:?}: waited {code} ms");
+        assert!(printed(&cpu).is_empty(), "{:?}", printed(&cpu));
+    }
+}
+
 /// MIDI out device 0 opened, a note played on channel 1 for 100 ms and
 /// stopped, a second one on channel 2 left for midiOutReset, and the
 /// device closed. A bit in the exit code for each call that worked.

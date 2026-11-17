@@ -14,10 +14,14 @@
 //! When no thread can run, the processor runs the idle loop, a trap in
 //! KERNEL32 that lets time pass to the next interrupt or timeout.
 //!
-//! Waits are kept with the threads (`Wait`). Whatever may end one (an
-//! object signaled, a thread ended, time passing) calls `wake`, which
-//! ends the waits it can, in the threads' order, taking what they waited
-//! for (an auto-reset event's signal, a semaphore's count, a mutex).
+//! Waits are kept with the threads (`Wait`). An object signaled ends the
+//! waits for it at once (`object_changed`): SetEvent, ReleaseMutex and
+//! ReleaseSemaphore, and the events the system sets
+//! (`winmm::callback::set_event`). Whatever else may end one (a thread
+//! ended, time passing, input, a device's work) calls `wake`, which reads
+//! the devices and ends every wait that can end. Both end waits in the
+//! threads' order, taking what they waited for (an auto-reset event's
+//! signal, a semaphore's count, a mutex).
 
 use super::call::{self, THREAD_ATTACHED};
 use super::memory::{GRANULARITY, Memory, PRIVATE, SHARED, USER, WRITABLE};
@@ -646,16 +650,18 @@ pub fn end_wait(win32: &mut Win32, (p, t): At, result: u32) {
     }
 }
 
-/// The running thread changed the object `id`: set an event, released a
-/// mutex or a semaphore. The waits of the other threads that it may end,
-/// end, in the threads' order, as `wake` ends them. Only a wait for the
-/// object can. What else ends waits (time passing, input, the devices'
-/// notifications) `wake` looks at where it comes: at the timer's events
-/// (`preempt`), after interrupts, in the idle loop, and at the calls that
-/// post messages or play sound. Calling `wake` here as well polled the
-/// devices and copied every thread's wait at each SetEvent and
-/// ReleaseMutex, which made ReleaseMutex cost the host as much as two
-/// other calls (#1222).
+/// The object `id` changed: the running thread set an event or released a
+/// mutex or a semaphore, or the system set an event
+/// (`winmm::callback::set_event`). The waits of the other threads that it
+/// may end, end, in the threads' order, as `wake` ends them. Only a wait
+/// for the object can. Whatever signals an object calls this or `wake`
+/// then, so a wait for it doesn't wait for a later `wake`. What else ends
+/// waits (time passing, input, the devices' notifications) `wake` looks
+/// at where it comes: at the timer's events (`preempt`), after
+/// interrupts, in the idle loop, and at the calls that post messages or
+/// play sound. Calling `wake` here as well polled the devices and copied
+/// every thread's wait at each SetEvent and ReleaseMutex, which made
+/// ReleaseMutex cost the host as much as two other calls (#1222).
 pub fn object_changed(win32: &mut Win32, id: u32) {
     let running = current(win32);
     for p in 0..win32.processes.len() {

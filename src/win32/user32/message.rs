@@ -1702,14 +1702,7 @@ fn input_idle(cpu: &mut Cpu) {
         _ => return,
     }
     // A thread that waits for it goes on now, not at the next tick.
-    let waited = win32
-        .processes
-        .iter()
-        .flat_map(|p| &p.threads)
-        .any(|t| t.wait.as_ref().is_some_and(|w| w.objects.contains(&id)));
-    if waited {
-        thread::wake(cpu);
-    }
+    thread::object_changed(win32, id);
 }
 
 const WAIT_FAILED: u32 = 0xFFFF_FFFF;

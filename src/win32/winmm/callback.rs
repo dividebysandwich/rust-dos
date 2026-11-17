@@ -137,12 +137,17 @@ pub fn notify(
     }
 }
 
-/// Set the event `id`, by its object.
+/// Set the event `id`, by its object, as SetEvent does: the waits of the
+/// threads it may end, end now (`thread::object_changed`). The system
+/// sets events in a multimedia thread's turn (a timer's), in a call of
+/// the program (a buffer's Stop) and when time passes; a thread waiting
+/// for one goes on from the moment it is set, as on Windows.
 pub fn set_event(cpu: &mut Cpu, id: u32) {
     if let Some(o) = object::objects(cpu).get_mut(id)
         && let Kind::Event { signaled, .. } = &mut o.kind
     {
         *signaled = true;
+        thread::object_changed(&mut cpu.bus.win32, id);
     }
 }
 
