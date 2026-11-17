@@ -1702,6 +1702,199 @@ fn a_wait_on_the_clock_that_counts_its_passes_is_skipped() {
     assert!(stats.skipped > 0, "{stats:?}");
 }
 
+/// A program that runs `setup`, then waits `ms` on the clock calling
+/// `poll` in every pass, as Biosys waits in its menus (#1306), and then
+/// runs `after`. GetTickCount is its first import. A failed step returns
+/// its number in `ebx` instead of 2Ah.
+fn poll_wait(
+    imports: &[(&str, &[&str])],
+    data: &[u8],
+    ms: i32,
+    setup: impl FnOnce(&mut CodeAssembler, &Layout, CodeLabel) -> Result<(), IcedError>,
+    poll: impl FnOnce(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
+    after: impl FnOnce(&mut CodeAssembler, &Layout, CodeLabel) -> Result<(), IcedError>,
+) -> Vec<u8> {
+    program(BASE, false, imports, data, |a, l| {
+        let mut fail = a.create_label();
+        let mut wait = a.create_label();
+        a.push(ebx)?;
+        a.push(esi)?;
+        setup(a, l, fail)?;
+        a.call(l.import(0))?;
+        a.lea(esi, dword_ptr(eax + ms))?;
+        a.set_label(&mut wait)?;
+        poll(a, l)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, esi)?;
+        a.jb(wait)?;
+        after(a, l, fail)?;
+        a.mov(ebx, 0x2A)?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, ebx)?;
+        a.pop(esi)?;
+        a.pop(ebx)?;
+        a.ret()
+    })
+}
+
+/// Set `ebx` to `step` and go to `fail` if the call before returned
+/// other than 0.
+fn fail_unless_ok(a: &mut CodeAssembler, fail: CodeLabel, step: i32) -> Result<(), IcedError> {
+    a.mov(ebx, step)?;
+    a.test(eax, eax)?;
+    a.jnz(fail)
+}
+
+/// A wait on the clock that asks IsIconic in every pass, as Biosys's
+/// menus do (#1306): IsIconic changes nothing, so the passes are skipped
+/// and come out as when they all run.
+#[test]
+fn a_wait_that_asks_is_iconic_is_skipped() {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetTickCount"]),
+        ("USER32.DLL", &["IsIconic"]),
+    ];
+    let image = poll_wait(
+        imports,
+        &[0; 8],
+        20,
+        |_, _, _| Ok(()),
+        |a, l| {
+            a.push(0)?;
+            a.call(l.import(1))
+        },
+        |_, _, _| Ok(()),
+    );
+    let stats = idle_lockstep("is_iconic_wait", image);
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
+/// A wait on the clock that asks IDirectDrawSurface::IsLost of the
+/// primary surface in every pass, as Biosys's menus do (#1306): IsLost
+/// changes nothing, so the passes are skipped and come out as when they
+/// all run.
+#[test]
+fn a_wait_that_asks_is_lost_is_skipped() {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetTickCount"]),
+        ("DDRAW.DLL", &["DirectDrawCreate"]),
+    ];
+    // DirectDraw at 0, the surface at 4, its DDSURFACEDESC at 0x10:
+    // DDSD_CAPS and DDSCAPS_PRIMARYSURFACE.
+    let mut data = vec![0u8; 0x80];
+    data[0x10..0x14].copy_from_slice(&108u32.to_le_bytes());
+    data[0x14..0x18].copy_from_slice(&1u32.to_le_bytes());
+    data[0x78..0x7C].copy_from_slice(&0x200u32.to_le_bytes());
+    let image = poll_wait(
+        imports,
+        &data,
+        20,
+        |a, l, fail| {
+            // DirectDrawCreate(NULL, &dd, NULL).
+            a.push(0)?;
+            a.push(l.at(0) as i32)?;
+            a.push(0)?;
+            a.call(l.import(1))?;
+            fail_unless_ok(a, fail, 1)?;
+            // SetCooperativeLevel(dd, NULL, DDSCL_NORMAL).
+            com_call(a, l, 0, 20, &[0, 8])?;
+            fail_unless_ok(a, fail, 2)?;
+            // CreateSurface(dd, &desc, &surface, NULL).
+            com_call(a, l, 0, 6, &[l.at(0x10) as i32, l.at(4) as i32, 0])?;
+            fail_unless_ok(a, fail, 3)
+        },
+        |a, l| com_call(a, l, 4, 24, &[]),
+        |a, l, fail| {
+            com_call(a, l, 4, 24, &[])?;
+            fail_unless_ok(a, fail, 4)
+        },
+    );
+    let stats = idle_lockstep("is_lost_wait", image);
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
+/// A DirectSound program's data: DirectSound at 0, the buffer at 4, the
+/// status at 8, a DSBUFFERDESC at 0x10 for `bytes` of 16-bit mono at
+/// 22050 Hz with DSBCAPS_GLOBALFOCUS, its WAVEFORMATEX at 0x30 (the
+/// program points the description at it).
+fn status_wait_data(bytes: u32) -> Vec<u8> {
+    let mut data = vec![0u8; 0x80];
+    let mut put = |at: usize, value: u32| data[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    put(0x10, 20);
+    put(0x14, 0x8000);
+    put(0x18, bytes);
+    put(0x30, 1 | (1 << 16));
+    put(0x34, 22050);
+    put(0x38, 44100);
+    put(0x3C, 2 | (16 << 16));
+    data
+}
+
+/// A wait on the clock that asks IDirectSoundBuffer::GetStatus of a
+/// buffer in every pass, as Biosys's close-ups do (#1306), the buffer
+/// played once first if `play`: a stopped buffer's status changes only
+/// with a call, a playing one's when it ends, so the passes are skipped,
+/// up to the end of the sound if it plays, and come out as when they all
+/// run. The buffer is stopped at the end either way.
+fn status_wait(test: &str, play: bool) -> rust_dos::idle::IdleStats {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetTickCount"]),
+        ("DSOUND.DLL", &["DirectSoundCreate"]),
+    ];
+    // 10 ms of sound, inside a wait of 20 ms.
+    let image = poll_wait(
+        imports,
+        &status_wait_data(442),
+        20,
+        |a, l, fail| {
+            a.mov(dword_ptr(l.at(0x20)), l.at(0x30) as u32)?;
+            // DirectSoundCreate(NULL, &ds, NULL).
+            a.push(0)?;
+            a.push(l.at(0) as i32)?;
+            a.push(0)?;
+            a.call(l.import(1))?;
+            fail_unless_ok(a, fail, 1)?;
+            // SetCooperativeLevel(ds, NULL, DSSCL_NORMAL).
+            com_call(a, l, 0, 6, &[0, 1])?;
+            fail_unless_ok(a, fail, 2)?;
+            // CreateSoundBuffer(ds, &desc, &buffer, NULL).
+            com_call(a, l, 0, 3, &[l.at(0x10) as i32, l.at(4) as i32, 0])?;
+            fail_unless_ok(a, fail, 3)?;
+            if play {
+                // Play(buffer, 0, 0, 0): once, no loop.
+                com_call(a, l, 4, 12, &[0, 0, 0])?;
+                fail_unless_ok(a, fail, 4)?;
+            }
+            Ok(())
+        },
+        |a, l| {
+            // GetStatus(buffer, &status).
+            com_call(a, l, 4, 9, &[l.at(8) as i32])
+        },
+        |a, l, fail| {
+            a.mov(eax, dword_ptr(l.at(8)))?;
+            fail_unless_ok(a, fail, 5)
+        },
+    );
+    idle_lockstep(test, image)
+}
+
+#[test]
+fn a_wait_that_asks_a_stopped_buffers_status_is_skipped() {
+    let stats = status_wait("stopped_status_wait", false);
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
+#[test]
+fn a_wait_that_asks_a_playing_buffers_status_is_skipped_to_its_end() {
+    let stats = status_wait("playing_status_wait", true);
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
 /// The program, waiting on the clock, asks where a file is and seeks to
 /// there with SetFilePointer, and asks for an accelerator table it doesn't
 /// have, as Railroad Tycoon II's main loop does, and with `count` counts

@@ -1405,8 +1405,11 @@ pub fn get_pixel_format(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(DD_OK)
 }
 
-/// IsLost(this).
+/// IsLost(this). Only a call, here or in another program, loses or
+/// restores a surface, so an idle proof goes through it (#1306), lost or
+/// not: Biosys asks it in every pass of the loop it waits in.
 pub fn is_lost(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    crate::idle::pure_call(cpu, None);
     hr!(usable(cpu, args[0]));
     Some(DD_OK)
 }

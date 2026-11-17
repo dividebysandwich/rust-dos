@@ -457,7 +457,20 @@ pub fn get_status(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DSERR_INVALIDPARAM);
     }
     let id = state(cpu).buffers[i].id;
-    settle_now(cpu, id);
+    if settle(cpu, id) {
+        crate::win32::thread::wake(cpu);
+    } else {
+        // Nothing fired: the status stays as it is until the buffer's next
+        // notification or its end, and a stopped buffer, or a looping one
+        // without notifications, keeps it until a call changes it. An idle
+        // proof goes through it (#1306): Biosys asks it of each of its
+        // stopped buffers in the loop it waits in.
+        let next = state(cpu)
+            .buffer(id)
+            .and_then(|i| next_event(&state(cpu).buffers[i]));
+        let until = next.map(|tick| cpu.bus.clock.icount_at(tick));
+        crate::idle::pure_call(cpu, until);
+    }
     let status = state(cpu).buffer(id).map_or(0, |i| {
         let b = &state(cpu).buffers[i];
         match (b.playing, b.looping) {

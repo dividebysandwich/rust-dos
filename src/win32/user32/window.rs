@@ -2355,7 +2355,12 @@ pub fn is_child(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(user(cpu).is_descendant(args[0], args[1]) as u32)
 }
 
+/// IsIconic(hwnd). It reads the window's style, which only a call or a
+/// message changes, so an idle proof goes through it (#1306): Biosys
+/// asks it in every pass of the loop it waits in.
 pub fn is_iconic(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
     Some(
         user(cpu)
             .window(args[0])
