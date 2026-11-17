@@ -124,14 +124,19 @@ limit, so without a connection it goes on as it would with one:
   display's rate), `off`, or 10 to 240. See [Frame rate
   cap](#frame-rate-cap). `--fps-cap` sets it for a run.
   `voodoo_fps_cap` is its old name, still read.
-* `filter` is how the picture is scaled up: `sharp` (the default) or
-  `linear` (smooth). It applies without a CRT shader. `sharp` gives every
-  pixel of the picture the same size on the screen. At a whole-number
-  scale that is nearest-neighbour sampling; at others, such as 640x480
-  in fullscreen on a 1920x1200 display (2.5 times) or a 320x200 picture
-  shown at `aspect=4:3`, the edge between two pixels is blended over
-  less than one screen pixel, so one-pixel lines and text strokes keep
-  one width. `nearest`, its old name, is still read.
+* `filter` is how the picture is scaled up: `sharp` (the default),
+  `hard` or `linear` (smooth). It applies without a CRT shader. `sharp`
+  gives every pixel of the picture the same size on the screen. At a
+  whole-number scale that is nearest-neighbour sampling; at others, such
+  as 640x480 in fullscreen on a 1920x1200 display (2.5 times) or a
+  320x200 picture shown at `aspect=4:3`, the edge between two pixels is
+  blended over less than one screen pixel, so one-pixel lines and text
+  strokes keep one width. `nearest`, its old name, is still read. `hard`
+  is nearest-neighbour sampling at every scale: nothing is blended, and
+  at a scale that isn't a whole number pixels come out in two widths.
+  Below twice the size, as with 1024x768 on a 1280x1024 display,
+  `sharp` often draws a one-pixel stroke as two half-tone screen pixels,
+  and `hard` keeps it crisp at the cost of the uneven widths.
 * `shader` gives the picture a look: `none` (the default), one of the
   CRT looks `scanlines`, `aperture` or `crt`, or `xbrz`, which scales the
   picture 2x with xBRZ, a pixel-art upscaler, without a CRT look. See

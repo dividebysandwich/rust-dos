@@ -1205,31 +1205,61 @@ fn nearest(frame: &Frame, (sx, sy): (u32, u32)) -> Vec<u8> {
 
 #[test]
 #[ignore = "requires a desktop OpenGL context"]
-fn sharp_scaling_is_nearest_sampling_at_whole_number_scales() {
+fn sharp_and_hard_scaling_are_nearest_sampling_at_whole_number_scales() {
     let sdl = sdl3::init().unwrap();
     let video = sdl.video().unwrap();
     let mut screen = GlScreen::open(&video, "Sharp scaling", (64, 48), true)
         .unwrap_or_else(|e| panic!("{}", e.reason));
-    screen.select(Shader::None, Filter::Sharp).unwrap();
     let frame = Frame::from_rgb(16, 12, (0..16 * 12 * 3).map(|i| (i * 89 % 251) as u8).collect());
-    screen
-        .present(&frame, None, 0..12, (16, 12), None, Monochrome::Off)
-        .unwrap();
-    // 1x, 2x, 3x, and the two axes apart, as with a fixed aspect ratio.
-    for scale in [(1, 1), (2, 2), (3, 3), (2, 3), (5, 4)] {
-        let size = (16 * scale.0, 12 * scale.1);
-        assert_eq!(drawn(&mut screen, size), nearest(&frame, scale), "{scale:?}");
+    for filter in [Filter::Sharp, Filter::Hard] {
+        screen.select(Shader::None, filter).unwrap();
+        screen
+            .present(&frame, None, 0..12, (16, 12), None, Monochrome::Off)
+            .unwrap();
+        // 1x, 2x, 3x, and the two axes apart, as with a fixed aspect ratio.
+        for scale in [(1, 1), (2, 2), (3, 3), (2, 3), (5, 4)] {
+            let size = (16 * scale.0, 12 * scale.1);
+            assert_eq!(drawn(&mut screen, size), nearest(&frame, scale), "{filter:?} {scale:?}");
+        }
+        // A doubled picture is uploaded at its native size, and drawn as
+        // the doubled one would be.
+        let doubled = double(&frame);
+        screen
+            .present(&doubled, None, 0..24, (32, 24), None, Monochrome::Off)
+            .unwrap();
+        assert_eq!(screen.texture_size, (16, 12));
+        for scale in [(1, 1), (2, 2), (3, 3)] {
+            let size = (32 * scale.0, 24 * scale.1);
+            assert_eq!(drawn(&mut screen, size), nearest(&doubled, scale), "{filter:?} {scale:?}");
+        }
     }
-    // A doubled picture is uploaded at its native size, and drawn as the
-    // doubled one would be.
-    let doubled = double(&frame);
+}
+
+/// `filter=hard` is nearest sampling at any scale: each screen pixel is
+/// the texel under its centre. 12 texels over 28 or 20 screen pixels put
+/// no centre on a texel's edge, so the texel is never in doubt.
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn hard_scaling_is_nearest_sampling_at_any_scale() {
+    let sdl = sdl3::init().unwrap();
+    let video = sdl.video().unwrap();
+    let mut screen = GlScreen::open(&video, "Hard scaling", (64, 48), true)
+        .unwrap_or_else(|e| panic!("{}", e.reason));
+    screen.select(Shader::None, Filter::Hard).unwrap();
+    let frame = Frame::from_rgb(12, 12, (0..12 * 12 * 3).map(|i| (i * 89 % 251) as u8).collect());
     screen
-        .present(&doubled, None, 0..24, (32, 24), None, Monochrome::Off)
+        .present(&frame, None, 0..12, (12, 12), None, Monochrome::Off)
         .unwrap();
-    assert_eq!(screen.texture_size, (16, 12));
-    for scale in [(1, 1), (2, 2), (3, 3)] {
-        let size = (32 * scale.0, 24 * scale.1);
-        assert_eq!(drawn(&mut screen, size), nearest(&doubled, scale), "{scale:?}");
+    for (w, h) in [(28u32, 28u32), (20, 28)] {
+        let texel = |at: u32, size: u32| (2 * at + 1) * 12 / (2 * size);
+        let expected: Vec<u8> = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .flat_map(|(x, y)| {
+                let at = ((texel(y, h) * 12 + texel(x, w)) * 4) as usize;
+                frame.rgba[at..at + 4].to_vec()
+            })
+            .collect();
+        assert_eq!(drawn(&mut screen, (w, h)), expected, "{w}x{h}");
     }
 }
 

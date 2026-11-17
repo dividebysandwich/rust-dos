@@ -1,6 +1,7 @@
 // No CRT look: the frame as it is, scaled as `filter` says. The window
-// and the web page filter the texture linearly for both values; the
-// libretro core draws it at its own size with `u_sharp` 0.
+// and the web page filter the texture linearly for `sharp` and `linear`
+// and take the nearest texel for `hard` (`u_sharp` 0); the libretro core
+// draws it at its own size with `u_sharp` 0.
 //
 // With `u_sharp` 1 (`filter=sharp`) each texel covers the same number of
 // screen pixels, whole or not. A screen pixel inside a texel samples the
@@ -9,7 +10,8 @@
 // width each covers. That blend is less than one screen pixel wide, and
 // at a whole-number scale no screen pixel crosses an edge, so the picture
 // is what nearest sampling gives. With `u_sharp` 0 the texture is
-// sampled where the pixel is (`filter=linear`, and the layer).
+// sampled where the pixel is (`filter=linear` and `hard`, and the
+// layer).
 
 uniform sampler2D u_frame;
 uniform vec2 u_source;

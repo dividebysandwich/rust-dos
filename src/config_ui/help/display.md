@@ -71,6 +71,9 @@ How the picture is blown up to the window's size:
   isn't a whole number of times the picture's size, as with a fixed
   aspect ratio or in fullscreen, the edge between two pixels is blended
   over less than one screen pixel.
+- **hard**: nearest neighbour, nothing blended. Where the scale isn't a
+  whole number, pixels come out in two widths. Below twice the
+  picture's size it keeps one-pixel strokes crisper than **sharp**.
 - **linear**: smooth, slightly soft pixels.
 
 It has no effect while a CRT shader is on.

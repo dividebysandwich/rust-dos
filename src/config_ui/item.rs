@@ -793,6 +793,7 @@ impl Item {
             Vfx1StereoBios => on_off(s.vfx1.stereo_bios),
             Filter => match s.filter {
                 crate::config::Filter::Sharp => "sharp",
+                crate::config::Filter::Hard => "hard (nearest)",
                 crate::config::Filter::Linear => "linear (smooth)",
             }
             .to_string(),

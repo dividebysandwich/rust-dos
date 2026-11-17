@@ -199,6 +199,10 @@ jobs:
             video::shader::tests::sources_compile
           xvfb-run -a cargo test --locked --bin rust-dos \
             display::gl:: -- --ignored --test-threads=1
+          # SDL's renderer (OpenGL on Mesa here) in its pixel-art mode.
+          xvfb-run -a cargo test --locked --bin rust-dos \
+            display::tests::sdl_sharp_scaling_gives_texels_one_width -- \
+            --ignored --test-threads=1
           xvfb-run -a cargo test --locked --test program \
             debug_journal_tests::xbrz_window_screenshots_use_the_selected_shader -- \
             --ignored --test-threads=1

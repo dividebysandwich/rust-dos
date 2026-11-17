@@ -283,6 +283,12 @@ impl Machine {
         self.settings.filter == Filter::Linear
     }
 
+    /// How to scale the picture up: `sharp`, `hard` or `linear`
+    /// (`filter`).
+    pub fn filter(&self) -> String {
+        self.settings.filter.name().to_string()
+    }
+
     /// The CRT look to draw the picture with (`shader`, see
     /// `shader_program`): its name, or "none" where the page can't.
     pub fn shader(&self) -> String {

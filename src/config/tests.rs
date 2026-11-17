@@ -658,7 +658,13 @@ fn display_settings() {
         assert_eq!(config.aspect, Some(ratio));
     }
     // `nearest`, which every file saved before `sharp` has, reads as it.
-    for (name, filter) in [("sharp", Filter::Sharp), ("Nearest", Filter::Sharp), ("linear", Filter::Linear)] {
+    let filters = [
+        ("sharp", Filter::Sharp),
+        ("Nearest", Filter::Sharp),
+        ("hard", Filter::Hard),
+        ("linear", Filter::Linear),
+    ];
+    for (name, filter) in filters {
         let config = parse(&format!("[emulator]\nfilter={}\n", name), Path::new("/cfg"), None);
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
         assert_eq!(config.filter, Some(filter));

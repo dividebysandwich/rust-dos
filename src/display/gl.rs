@@ -457,17 +457,16 @@ impl GlScreen {
     }
 
     /// Scale the bound texture as the look and the filter want. The plain
-    /// look reads it linearly for both filters: `filter=sharp` moves where
-    /// it samples (`u_sharp`), so that a texel's edge is blended only
-    /// where a screen pixel crosses it. xBRZ keeps nearest sampling for
-    /// `sharp`, as it had for `nearest`.
+    /// look reads it linearly for `sharp` and `linear`: `filter=sharp`
+    /// moves where it samples (`u_sharp`), so that a texel's edge is
+    /// blended only where a screen pixel crosses it. `hard` reads the
+    /// nearest texel. xBRZ reads texels with `texelFetch`, which no filter
+    /// changes.
     fn set_filter(&self) {
-        let (min, mag) = match (self.active, self.filter) {
-            (look, _) if shader::needs_mipmaps(look) => {
-                (glow::LINEAR_MIPMAP_LINEAR, glow::LINEAR)
-            }
-            (Shader::Xbrz, Filter::Sharp) => (glow::NEAREST, glow::NEAREST),
-            _ => (glow::LINEAR, glow::LINEAR),
+        let (min, mag) = match self.filter {
+            _ if shader::needs_mipmaps(self.active) => (glow::LINEAR_MIPMAP_LINEAR, glow::LINEAR),
+            Filter::Hard => (glow::NEAREST, glow::NEAREST),
+            Filter::Sharp | Filter::Linear => (glow::LINEAR, glow::LINEAR),
         };
         // SAFETY: see `GlScreen`.
         unsafe {
@@ -672,14 +671,14 @@ impl GlScreen {
         layer: Option<&Layer>,
     ) -> u32 {
         let gl = &self.gl;
-        // Sharp scaling draws a doubled picture from its native pixels
-        // as it would the doubled ones, with a quarter of the upload
-        // bytes: each native pixel covers twice the screen pixels. xBRZ
-        // recovers native pixels during preparation.
+        // Sharp and hard scaling draw a doubled picture from its native
+        // pixels as they would the doubled ones, with a quarter of the
+        // upload bytes: each native pixel covers twice the screen pixels.
+        // xBRZ recovers native pixels during preparation.
         let half = frame.doubled
             && layer.is_none()
             && self.active == Shader::None
-            && self.filter == Filter::Sharp;
+            && matches!(self.filter, Filter::Sharp | Filter::Hard);
         let (scale, rows) = if half { (2, rows.start / 2..rows.end.div_ceil(2)) } else { (1, rows) };
         let size = (frame.width / scale, frame.height / scale);
         let (width, height) = (size.0 as i32, size.1 as i32);

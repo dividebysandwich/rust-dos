@@ -69,6 +69,11 @@ pub enum Filter {
     /// whole-number scale it is nearest-neighbour sampling.
     #[default]
     Sharp,
+    /// Nearest-neighbour sampling: every screen pixel shows the one pixel
+    /// of the picture under its centre, unblended. Where the scale isn't
+    /// a whole number, pixels come out one screen pixel wider or taller
+    /// than their neighbours in turn.
+    Hard,
     /// Smooth, interpolated pixels.
     Linear,
 }
@@ -76,10 +81,11 @@ pub enum Filter {
 impl Filter {
     /// `nearest` is the old name of `sharp`, still read: every saved
     /// configuration file has it, and the two draw the same at
-    /// whole-number scales.
+    /// whole-number scales. Nearest-neighbour sampling is `hard`.
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "sharp" | "nearest" => Some(Filter::Sharp),
+            "hard" => Some(Filter::Hard),
             "linear" => Some(Filter::Linear),
             _ => None,
         }
@@ -88,6 +94,7 @@ impl Filter {
     pub fn name(self) -> &'static str {
         match self {
             Filter::Sharp => "sharp",
+            Filter::Hard => "hard",
             Filter::Linear => "linear",
         }
     }

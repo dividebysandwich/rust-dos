@@ -1209,7 +1209,10 @@ fn set_icon(window: &mut Window) -> Result<(), String> {
 /// Scale `texture` as `filter` says. `filter=sharp` is SDL's pixel-art
 /// mode (SDL 3.4), which gives every texel the same size on the screen
 /// with a blended edge, as the OpenGL plain look does. The sdl3 crate has
-/// no name for it; a renderer that refuses it samples the nearest texel.
+/// no name for it, and its `Texture::scale_mode` panics on reading it
+/// back, so nothing here calls that. An SDL older than 3.4 (a Linux
+/// distribution's own) refuses the mode as an invalid parameter, and the
+/// texture then samples the nearest texel, as `hard` does.
 fn set_scale_mode(texture: &mut Texture, filter: Filter) {
     match filter {
         Filter::Sharp => {
@@ -1219,6 +1222,7 @@ fn set_scale_mode(texture: &mut Texture, filter: Filter) {
                 texture.set_scale_mode(ScaleMode::Nearest);
             }
         }
+        Filter::Hard => texture.set_scale_mode(ScaleMode::Nearest),
         Filter::Linear => texture.set_scale_mode(ScaleMode::Linear),
     }
 }
@@ -1402,8 +1406,9 @@ mod tests {
     /// SDL's renderer, which draws where there is no OpenGL 3, gives the
     /// sharp picture's pixels one width too: one-pixel stripes cover 2.5
     /// screen pixels each at 2.5 times, and 2 at twice, unblended. This
-    /// is the window's renderer (Direct3D on Windows); SDL's software
-    /// renderer samples the nearest texel in its pixel-art mode.
+    /// is the window's renderer (Direct3D on Windows, OpenGL on Mesa in
+    /// CI); SDL's software renderer samples the nearest texel in its
+    /// pixel-art mode (#1250).
     #[test]
     #[ignore = "requires a desktop with a GPU renderer"]
     fn sdl_sharp_scaling_gives_texels_one_width() {
