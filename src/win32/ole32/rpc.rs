@@ -43,6 +43,8 @@ use crate::win32::user32::{self, current_pid, current_tid};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub mod ndr;
+
 pub const E_NOTIMPL: u32 = 0x8000_4001;
 const CO_E_SERVER_EXEC_FAILURE: u32 = 0x8008_0005;
 const RPC_E_DISCONNECTED: u32 = 0x8001_0108;
@@ -151,6 +153,10 @@ pub struct Rpc {
     windows: Vec<Window>,
     calls: Vec<Pending>,
     next_id: u32,
+    /// The proxy/stub DLLs' class objects each process got.
+    ps: Vec<ndr::PsFactory>,
+    /// The buffers of the NDR calls the processes' stubs are running.
+    stub_buffers: Vec<ndr::StubBuffer>,
     /// The methods of the interfaces met, by IID: not saved, as they are
     /// read again from the type libraries.
     methods: Methods,
@@ -193,6 +199,47 @@ fn methods(cpu: &mut Cpu, iid: &Guid) -> Option<Arc<Vec<Option<Method>>>> {
     Some(m)
 }
 
+/// The method at `index` of the interface `iid`: IUnknown's for the
+/// first three, which every interface has, whatever marshals it.
+fn method_of(cpu: &mut Cpu, iid: &Guid, index: u32) -> Option<Method> {
+    if index < 3 {
+        return signature::unknown().swap_remove(index as usize);
+    }
+    methods(cpu, iid)?.get(index as usize).cloned().flatten()
+}
+
+/// The IIDs of the interfaces the method `m` gives back, its arguments
+/// at `places`.
+fn out_iids(cpu: &mut Cpu, m: &Method, places: &[u32]) -> Vec<Guid> {
+    let mut iids = Vec::new();
+    for param in m.params.iter().filter(|p| p.is_out()) {
+        if let Kind::Ptr(inner) = &param.kind {
+            match **inner {
+                Kind::Iface(iid) => iids.push(iid),
+                Kind::IidIs(i) => iids.push(iid_at(cpu, places, i)),
+                _ => {}
+            }
+        }
+    }
+    iids
+}
+
+/// The IIDs of the interfaces the method `m` gets from its caller.
+fn in_iids(m: &Method) -> Vec<Guid> {
+    m.params
+        .iter()
+        .filter(|p| p.is_in())
+        .filter_map(|p| match &p.kind {
+            Kind::Iface(iid) => Some(*iid),
+            Kind::Ptr(inner) => match **inner {
+                Kind::Iface(iid) => Some(iid),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
 /// A process ended: its proxies let go of their exports, and its
 /// exports, windows and vtables go with its memory.
 pub fn process_ended(cpu: &mut Cpu, pid: u32) {
@@ -207,6 +254,7 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32) {
     r.exports.retain(|e| e.pid != pid);
     r.windows.retain(|w| w.pid != pid);
     r.vtables.retain(|v| v.pid != pid);
+    ndr::process_ended(cpu, pid);
     for export in gone {
         release_export(cpu, export, 1);
     }
@@ -339,7 +387,7 @@ fn proxy_of(cpu: &mut Cpu, id: u32) -> u32 {
         Some(v) => v,
         None => {
             cpu.bus.log_string(&format!(
-                "[W32] OLE32: no proxy for the interface {} (no type library registered for it)",
+                "[W32] OLE32: no proxy for the interface {} (no type library or proxy/stub DLL)",
                 iid
             ));
             release_export(cpu, id, 1);
@@ -373,6 +421,10 @@ fn proxy_of(cpu: &mut Cpu, id: u32) -> u32 {
 /// ret <bytes of the arguments>
 /// ```
 fn proxy_vtable(cpu: &mut Cpu, iid: &Guid) -> Option<u32> {
+    // A proxy/stub DLL's interface has the DLL's proxies.
+    if let Some(interface) = ndr::interface(cpu, iid) {
+        return Some(interface.proxy_vtable);
+    }
     let pid = current_pid(cpu);
     if let Some(v) = rpc(cpu)
         .vtables
@@ -497,6 +549,9 @@ impl<'a> Reader<'a> {
 struct Side {
     guest: Vec<u32>,
     blocks: Vec<u32>,
+    /// An interface came that this process can't have: its export is
+    /// gone, or nothing marshals its interface here.
+    lost: bool,
 }
 
 impl Side {
@@ -624,10 +679,13 @@ fn get_iface(cpu: &mut Cpu, r: &mut Reader, side: &mut Side) -> u32 {
     let id = r.u32();
     let pid = current_pid(cpu);
     let Some(e) = export(cpu, id) else {
+        side.lost = true;
         return 0;
     };
     if e.pid != pid {
-        return proxy_of(cpu, id);
+        let proxy = proxy_of(cpu, id);
+        side.lost |= proxy == 0;
+        return proxy;
     }
     // The object is of this process: the pointer itself.
     let object = e.object;
@@ -1186,7 +1244,13 @@ pub fn proxy_method(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let esp = cpu.esp();
     let index = read32(cpu, esp + 4);
     let this = read32(cpu, esp + 12);
-    let args = esp + 16;
+    proxy_call(cpu, this, index, esp + 16)
+}
+
+/// The method at `index` of the proxy `this`, its arguments after
+/// `this` at `args`. A proxy/stub DLL's proxies come here for
+/// IUnknown's methods (ndr.rs).
+fn proxy_call(cpu: &mut Cpu, this: u32, index: u32, args: u32) -> Option<u32> {
     let Some(i) = proxy_at(cpu, this) else {
         return Some(RPC_E_DISCONNECTED);
     };
@@ -1218,12 +1282,10 @@ pub fn proxy_method(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         }
         _ => {}
     }
-    let Some(methods) = methods(cpu, &iid) else {
+    let Some(m) = method_of(cpu, &iid, index) else {
         return Some(E_NOTIMPL);
     };
-    let Some(Some(m)) = methods.get(index as usize) else {
-        return Some(E_NOTIMPL);
-    };
+    let m = &m;
     // The type information isn't copied: the caller reads the type
     // library itself.
     if index == GET_TYPE_INFO && m.params.last().map(|p| &p.kind) == Some(&unsupported_out()) {
@@ -1237,6 +1299,12 @@ pub fn proxy_method(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         return Some(RPC_E_DISCONNECTED);
     };
     let places = places(m, args);
+    // The proxy/stub DLLs of the interfaces that come back are loaded
+    // before the call, which runs again.
+    let iids = out_iids(cpu, m, &places);
+    if let Some(loading) = ndr::load(cpu, &iids) {
+        return loading;
+    }
     let mut w = Wire::default();
     let mut side = Side::default();
     w.u32(e.id);
@@ -1377,13 +1445,17 @@ pub fn proxy_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     index, iid, result
                 ));
                 let mut side = Side::default();
-                if let Some(methods) = methods(cpu, &iid)
-                    && let Some(Some(m)) = methods.get(index as usize)
-                {
-                    let places = places(m, t.var(P_ARGS));
+                if let Some(m) = method_of(cpu, &iid, index) {
+                    let places = places(&m, t.var(P_ARGS));
                     for (param, &at) in m.params.iter().zip(&places) {
                         get_out(cpu, param, at, &mut r, &mut side);
                     }
+                }
+                // An interface that came back and can't be had here
+                // fails the call, as its unmarshalling fails it on
+                // Windows; the caller gets NULL for it.
+                if side.lost && result & 0x8000_0000 == 0 {
+                    t.set(P_RESULT, E_NOINTERFACE);
                 }
                 if let Some(c) = rpc(cpu).calls.iter_mut().find(|c| c.id == id) {
                     c.guest = side.guest;
@@ -1432,6 +1504,26 @@ pub fn wnd_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     match msg {
         WM_OLE_CALL => {
+            let request = rpc(cpu)
+                .calls
+                .iter()
+                .find(|c| c.id == wp)
+                .map(|c| c.request.clone())
+                .unwrap_or_default();
+            let ndr = ndr::is_ndr_call(&request);
+            // The proxy/stub DLLs of the interface called and of those
+            // passed in are loaded first, and the call comes again.
+            let iids = if ndr {
+                ndr::request_iid(cpu, &request).into_iter().collect()
+            } else {
+                call_method(cpu, &request).map_or(Vec::new(), |(_, _, m)| in_iids(&m))
+            };
+            if let Some(loading) = ndr::load(cpu, &iids) {
+                return loading;
+            }
+            if ndr {
+                return ndr::start_stub(cpu, wp);
+            }
             let vars = vec![calls::STUB, wp];
             calls::start(cpu, vars, 0)
         }
@@ -1475,9 +1567,7 @@ pub fn stub_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     return Next::Done(0);
                 };
                 let iid = guid_of(&e.iid);
-                let stack = methods(cpu, &iid)
-                    .and_then(|m| m.get(index as usize).cloned().flatten())
-                    .map_or(4, |m| m.stack());
+                let stack = method_of(cpu, &iid, index).map_or(4, |m| m.stack());
                 let mut args = vec![e.object];
                 for i in 0..(stack - 4) / 4 {
                     args.push(read32(cpu, image + 4 * i));
@@ -1520,13 +1610,11 @@ fn call_method(cpu: &mut Cpu, request: &[u8]) -> Result<(Export, u32, Method), u
         return Err(RPC_E_DISCONNECTED);
     }
     let iid = guid_of(&e.iid);
-    let methods = methods(cpu, &iid).ok_or(E_NOINTERFACE)?;
-    let m = methods
-        .get(index as usize)
-        .cloned()
-        .flatten()
-        .ok_or(E_NOTIMPL)?;
-    Ok((e, index, m))
+    match method_of(cpu, &iid, index) {
+        Some(m) => Ok((e, index, m)),
+        None if methods(cpu, &iid).is_none() => Err(E_NOINTERFACE),
+        None => Err(E_NOTIMPL),
+    }
 }
 
 /// Make the arguments of the call `id` in this process's memory.
@@ -1753,6 +1841,13 @@ pub fn activate(
     if create && outer != 0 {
         return Some(CLASS_E_NOAGGREGATION);
     }
+    // The proxy/stub DLL of the interface asked for is loaded first, and
+    // the function runs again.
+    if let Some(wanted) = Guid::read(cpu, iid)
+        && let Some(loading) = ndr::load(cpu, &[wanted])
+    {
+        return loading;
+    }
     let vars = vec![calls::ACTIVATE, create as u32, clsid, iid, out];
     calls::start(cpu, vars, ACTIVATE_SCRATCH)
 }
@@ -1957,5 +2052,7 @@ crate::state_fields!(Rpc {
     windows,
     calls,
     next_id,
+    ps,
+    stub_buffers,
     methods
 });

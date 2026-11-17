@@ -30,6 +30,7 @@ pub mod stream;
 
 pub use calls::step;
 pub(super) use propvariant::call_all;
+pub(super) use rpc::ndr;
 pub(super) use stream::method;
 
 pub static DLL: Dll = Dll {

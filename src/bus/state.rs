@@ -926,7 +926,7 @@ mod tests {
         (74, 0x6C70_EAD3_11EB_EDB6), // MMSYSTEM's headers keep lpData, callbacks
         (75, 0x9B62_A189_49CB_DB03), // DDEML's 16-bit copies, user handles and transactions
         (76, 0xF698_DBEB_B887_D533), // DirectPlay 8's objects
-        (77, 0xFDE6_8C09_004A_F36E), // OLE32's local servers, proxies and stubs
+        (77, 0xA5E9_A942_6FF9_9965), // OLE32's local servers, proxies and stubs
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

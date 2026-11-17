@@ -19,6 +19,10 @@ pub const STUB: u32 = 6;
 pub const ACTIVATE: u32 = 7;
 pub const STORAGE_COPY: u32 = 8;
 pub const PERSIST: u32 = 9;
+pub const NDR_LOAD: u32 = 10;
+pub const NDR_SEND: u32 = 11;
+pub const NDR_STUB: u32 = 12;
+pub const NDR_INVOKE: u32 = 13;
 
 /// Start the task with `vars` (the function first) and `scratch` bytes of
 /// scratch space.
@@ -39,6 +43,10 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         ACTIVATE => super::rpc::activate_step(cpu, t, value),
         STORAGE_COPY => super::storage::copy_step(cpu, t, value),
         PERSIST => super::persist::step(cpu, t, value),
+        NDR_LOAD => super::rpc::ndr::load_step(cpu, t, value),
+        NDR_SEND => super::rpc::ndr::proxy_step(cpu, t, value),
+        NDR_STUB => super::rpc::ndr::stub_step(cpu, t, value),
+        NDR_INVOKE => super::rpc::ndr::call_step(cpu, t, value),
         _ => Next::Done(crate::win32::com::E_INVALIDARG),
     }
 }

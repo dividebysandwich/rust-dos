@@ -415,24 +415,30 @@ pub fn co_get_ps_clsid(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if out == 0 || !cpu.bus.guest_probe(out, 16, true) {
         return Some(E_INVALIDARG);
     }
+    let Some(clsid) = ps_clsid(cpu, &iid) else {
+        return Some(REGDB_E_IIDNOTREG);
+    };
+    clsid.write(cpu, out);
+    Some(S_OK)
+}
+
+/// The proxy/stub class of `iid` for the running thread: the one
+/// CoRegisterPSClsid set, or the registry's
+/// Interface\{iid}\ProxyStubClsid32.
+pub fn ps_clsid(cpu: &mut Cpu, iid: &Guid) -> Option<Guid> {
     let tid = current_tid(cpu);
     let set = com_state(cpu)
         .ps_classes
         .iter()
         .find(|p| p.tid == tid && p.iid == iid.0)
         .and_then(|p| <[u8; 16]>::try_from(p.clsid.as_slice()).ok());
-    let clsid = match set {
-        Some(bytes) => Guid(bytes),
+    match set {
+        Some(bytes) => Some(Guid(bytes)),
         None => {
             let path = format!("Interface\\{}\\ProxyStubClsid32", iid);
-            match class_value(cpu, &path).as_deref().and_then(Guid::parse) {
-                Some(clsid) => clsid,
-                None => return Some(REGDB_E_IIDNOTREG),
-            }
+            class_value(cpu, &path).as_deref().and_then(Guid::parse)
         }
-    };
-    clsid.write(cpu, out);
-    Some(S_OK)
+    }
 }
 
 /// CoRegisterMessageFilter(filter, previous): a single-threaded
@@ -787,7 +793,7 @@ const S_STUB: u32 = RECORD + 8;
 const S_PS_IID: u32 = RECORD + 12;
 pub const MARSHAL_SCRATCH: u32 = RECORD + 28;
 
-const IID_IPSFACTORYBUFFER: Guid = Guid::new(
+pub const IID_IPSFACTORYBUFFER: Guid = Guid::new(
     0xD5F5_69D0,
     0x593B,
     0x101A,

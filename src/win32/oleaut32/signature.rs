@@ -119,7 +119,7 @@ fn guid_in() -> (Kind, u16) {
 }
 
 /// IUnknown's methods.
-fn unknown() -> Vec<Option<Method>> {
+pub fn unknown() -> Vec<Option<Method>> {
     vec![
         method(vec![
             guid_in(),
