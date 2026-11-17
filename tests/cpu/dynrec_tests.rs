@@ -2530,26 +2530,32 @@ fn pushad_and_popad_are_translated() {
 fn popad_on_a_16_bit_stack(model: rust_dos::cpu::CpuModel) -> (Rig, Rig) {
     twins(|rig| {
         rig.cpu.model = model;
-        rig.load(CODE, &asm32(CODE, |a| {
-            a.mov(ax, DATA16 as u32)?;
-            a.mov(ss, ax)?;
-            a.mov(esp, 0x1_9000u32)?;
-            a.xor(eax, eax)?;
-            a.mov(ecx, 100u32)?;
-            a.jmp(CODE as u64 + 0x100)
-        }));
-        rig.load(CODE + 0x100, &asm32(CODE + 0x100, |a| {
-            a.pushad()?;
-            // The slots at SS:SP, through EBP (ESP is past the limit).
-            a.movzx(ebp, sp)?;
-            a.add(dword_ptr(ebp + 28), 1)?; // EAX's slot
-            a.mov(dword_ptr(ebp + 12), 0x0002_1234u32)?; // ESP's image
-            a.xor(ebx, ebx)?;
-            a.popad()?;
-            a.dec(ecx)?;
-            a.jnz(CODE as u64 + 0x100)?;
-            a.hlt()
-        }));
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                a.mov(ax, DATA16 as u32)?;
+                a.mov(ss, ax)?;
+                a.mov(esp, 0x1_9000u32)?;
+                a.xor(eax, eax)?;
+                a.mov(ecx, 100u32)?;
+                a.jmp(CODE as u64 + 0x100)
+            }),
+        );
+        rig.load(
+            CODE + 0x100,
+            &asm32(CODE + 0x100, |a| {
+                a.pushad()?;
+                // The slots at SS:SP, through EBP (ESP is past the limit).
+                a.movzx(ebp, sp)?;
+                a.add(dword_ptr(ebp + 28), 1)?; // EAX's slot
+                a.mov(dword_ptr(ebp + 12), 0x0002_1234u32)?; // ESP's image
+                a.xor(ebx, ebx)?;
+                a.popad()?;
+                a.dec(ecx)?;
+                a.jnz(CODE as u64 + 0x100)?;
+                a.hlt()
+            }),
+        );
     })
 }
 
