@@ -574,6 +574,11 @@ pub enum Uop {
     /// FSQRT: `fpu::arithmetic::fsqrt`, which takes the root of ST(0)'s
     /// double.
     FSqrt,
+    /// FRNDINT: `fpu::arithmetic::frndint`, which rounds ST(0) by the
+    /// control word's rounding mode.
+    FRndint,
+    /// FABS: `fpu::arithmetic::fabs`.
+    FAbs,
     /// Push the 80 bits at handle m, which is RAM's (`BailUnlessRam`), as
     /// FLD's handler does.
     FLoad80 { m: T },

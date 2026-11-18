@@ -4482,6 +4482,43 @@ fn fpu_square_roots_run_as_their_handlers() {
     }
 }
 
+#[test]
+fn fpu_rounding_to_integers_and_absolute_values_run_as_their_handlers() {
+    let (_, b, stats) = fpu_loop(|a| {
+        // FRNDINT of every kind of single and its negation, in each of
+        // `fpu_loop`'s rounding modes: C1 says whether the magnitude went
+        // up, and PE whether the value wasn't an integer already.
+        a.fld(dword_ptr(esi))?;
+        a.frndint()?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.fst(dword_ptr(edi))?;
+        a.fld(dword_ptr(esi + 4))?;
+        a.fchs()?;
+        a.frndint()?;
+        // FRNDINT sets C1 where it rounded up, FABS clears it.
+        a.fabs()?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.fstp(qword_ptr(edi + 8))?;
+        // A sum whose 80 bits hold more than its double, which the handler
+        // rounds from the 80 bits.
+        a.fild(dword_ptr(esi + 8))?;
+        a.fld(dword_ptr(esi + 4))?;
+        a.fadd_2(st0, st1)?;
+        a.frndint()?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.fstp(qword_ptr(edi + 16))?;
+        a.fstp(dword_ptr(edi + 24))?;
+        a.fstp(dword_ptr(edi + 28))
+    });
+    assert_ne!(b.cpu.ebx(), 0);
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        assert!(stats.native + 20 > stats.instructions, "handlers ran them: {:?}", stats);
+    }
+}
+
 /// FCOM, FNSTSW AX, SAHF and a branch on the flags, as MSVC compiles a
 /// float compare, with OF set or clear before the SAHF (it stays), and a
 /// FILD of a qword: of `fpu_loop`'s second single and integer, or with

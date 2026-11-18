@@ -2949,6 +2949,8 @@ impl Gen<'_> {
                 dynasm!(self.ops ; .arch x64 ; addsub_done:);
             }
             Uop::FChs => self.fpu_op(1 << 13, None),
+            Uop::FRndint => self.fpu_op(6 << 13, None),
+            Uop::FAbs => self.fpu_op(7 << 13, None),
             Uop::FSqrt => {
                 const C1: i16 = 0x200;
                 // The root inline where the double is above 0, else (a
