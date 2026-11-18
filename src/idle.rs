@@ -97,12 +97,13 @@ const STACK_REACH: u32 = 64;
 const REP_SPAN: u64 = 1 << 20;
 /// Passes skipped at most over counters at once.
 const COUNTED_PASSES: u64 = 1 << 20;
-/// Instructions a proof's skip must reach for each instruction the proof
-/// ran, or the head backs off as after a failure. A proof steps the
-/// interpreter and looks at every instruction: in Biosys's idle loop that
-/// took the host about 250 ns an instruction, where translated code takes
-/// one or two. A loop that holds only until the clock's next millisecond
-/// and takes a tenth of it to prove costs more than it saves.
+/// Instructions a proof over counts (`Phase::Count`) must skip for each
+/// instruction the proof ran, or the head backs off as after a failure.
+/// Such a proof steps the interpreter and records every instruction: in
+/// Biosys's idle loop that took the host about 250 ns an instruction,
+/// where translated code takes one or two. A loop that holds only until
+/// the clock's next millisecond and takes a tenth of it to prove costs
+/// more than it saves.
 const PAYOFF: u64 = 256;
 
 /// An instruction's place: its CS selector and EIP, and the mode.
@@ -1382,9 +1383,9 @@ fn finish(
     let o = &mut cpu.bus.observe;
     let head = o.head();
     o.stop();
-    o.succeed(head);
     if period > 0 && limit > visit.icount {
         let mut passes = u64::MAX;
+        let counting = counted_run.is_some();
         if let Some((same, values)) = counted_run {
             for (cell, value) in values {
                 count::set_cell(cpu, cell, value);
@@ -1393,14 +1394,17 @@ fn finish(
         }
         let skipped = skip(cpu, period, executed, limit, passes);
         let cost = visit.icount.saturating_sub(cpu.bus.observe.started);
-        if skipped < cost.saturating_mul(PAYOFF) {
+        let o = &mut cpu.bus.observe;
+        if counting && skipped < cost.saturating_mul(PAYOFF) {
             // The skip is real, but proving it again at the next chance
-            // would cost the host more than running the loop.
-            let o = &mut cpu.bus.observe;
+            // would cost the host more than running the loop: the head
+            // backs off further each time in a row.
             o.stats.costly += 1;
             if let Some(head) = head {
                 o.back_off(head);
             }
+        } else {
+            o.succeed(head);
         }
         if skipped > 0 {
             cpu.bus.observe.proved(head);
