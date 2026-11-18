@@ -168,16 +168,18 @@ enum Thunk {
     /// handle, or negative for a fault.
     MemRef,
     /// EAX = the bytes (ECX of them) at handle RDX, which isn't RAM's,
-    /// through `jit_dev_read` or `jit_read`.
+    /// through `jit_dev_read` or `jit_read`, or from a Banshee's or
+    /// Voodoo3's memory itself where `card_state` found it may.
     Load,
     /// Store the byte, word or dword in ECX at handle RDX. RAX holds the
     /// block's bytes after the instruction, `smc_lo | smc_hi << 32`. A
-    /// handle that isn't RAM's goes into the VGA's planes inline where
-    /// `vga_ok` says so, else through `jit_dev_write` or `jit_write`. A RAM
-    /// handle is one in a block with code (the inline path writes the
-    /// rest): the store, the code generations of the first and last byte's
-    /// blocks bumped, as the bus's writes bump them, and a store into the
-    /// block's later bytes noted.
+    /// handle that isn't RAM's goes into a Banshee's or Voodoo3's memory
+    /// inline on a page `card_state` marked, into the VGA's planes inline
+    /// where `vga_ok` says so, else through `jit_dev_write` or `jit_write`.
+    /// A RAM handle is one in a block with code (the inline path writes
+    /// the rest): the store, the code generations of the first and last
+    /// byte's blocks bumped, as the bus's writes bump them, and a store
+    /// into the block's later bytes noted.
     Store1,
     Store2,
     Store4,
@@ -297,6 +299,32 @@ fn memref_thunk(ops: &mut Asm) {
 }
 
 fn load_thunk(ops: &mut Asm) {
+    // A Banshee's or Voodoo3's memory where the code reads it by itself
+    // (`helpers::card_state`): the bytes at the handle's address less
+    // BAR1's, from the memory on the host.
+    dynasm!(ops
+        ; .arch x64
+        ; bt rdx, DEV_BIT as i8
+        ; jnc >helper
+        ; mov eax, edx
+        ; sub eax, DWORD [r12 + CTX_CARD_LO]
+        ; cmp eax, DWORD [r12 + CTX_CARD_LEN]
+        ; jae >helper
+        ; add rax, QWORD [r12 + CTX_CARD_BASE]
+        ; inc QWORD [r12 + CTX_CARD_READS]
+        ; cmp ecx, 2
+        ; je >two
+        ; ja >four
+        ; movzx eax, BYTE [rax]
+        ; ret
+        ; two:
+        ; movzx eax, WORD [rax]
+        ; ret
+        ; four:
+        ; mov eax, DWORD [rax]
+        ; ret
+        ; helper:
+    );
     thunk_save(ops);
     dynasm!(ops
         ; .arch x64
@@ -336,10 +364,38 @@ fn store_thunk(ops: &mut Asm, size: u8, code: DynamicLabel) {
         ; mov QWORD [r12 + CTX_SMC_LO], rax
         ; push r8
         ; push r9
-        // Pixels into the VGA's planes, which mode X programs write one or
-        // two at a time (see `helpers::vga_state`).
         ; bt rdx, DEV_BIT as i8
         ; jnc >slow
+        // Pixels into a Banshee's or Voodoo3's memory, which a software
+        // renderer writes into a locked surface one at a time (see
+        // `helpers::card_state`): on a page whose writes are only the
+        // bytes, into the memory on the host.
+        ; mov r8d, edx
+        ; sub r8d, DWORD [r12 + CTX_CARD_LO]
+        ; cmp r8d, DWORD [r12 + CTX_CARD_LEN]
+        ; jae >vga
+        ; mov r9, QWORD [r12 + CTX_CARD_PAGES]
+        ; mov eax, r8d
+        ; shr eax, 12
+        ; cmp BYTE [r9 + rax], 0
+        ; je >slow
+        ; add r8, QWORD [r12 + CTX_CARD_BASE]
+    );
+    match size {
+        1 => dynasm!(ops ; .arch x64 ; mov BYTE [r8], cl),
+        2 => dynasm!(ops ; .arch x64 ; mov WORD [r8], cx),
+        _ => dynasm!(ops ; .arch x64 ; mov DWORD [r8], ecx),
+    }
+    dynasm!(ops
+        ; .arch x64
+        ; mov BYTE [r12 + CTX_CARD_WROTE], 1
+        ; inc QWORD [r12 + CTX_CARD_WRITES]
+        ; pop r9
+        ; pop r8
+        ; ret
+        // Pixels into the VGA's planes, which mode X programs write one or
+        // two at a time (see `helpers::vga_state`).
+        ; vga:
         ; cmp BYTE [r12 + CTX_VGA_OK], 0
         ; je >slow
         ; mov eax, edx

@@ -6258,6 +6258,184 @@ fn an_mmx_store_into_a_voodoo3s_memory_is_one_call() {
     assert!((480..=512).contains(&(more - fewer)), "{} calls", more - fewer);
 }
 
+/// A software renderer's loops on a locked surface in a Voodoo3's memory
+/// through BAR1 (Enemy Infestation's sprites, Biosys's distortion): bytes,
+/// words and dwords stored and read back at every alignment, out of
+/// sight, into the desktop shown (from 8000h, its rows 16 bytes apart,
+/// whose writes count for `cycles=auto`), across a page's end, and above
+/// the tile base, where BAR1 is tiled. Both rigs as they halted, and the
+/// recompiler's counts.
+fn voodoo3_software_renderer() -> (Rig, Rig, DynStats) {
+    use rust_dos::voodoo::banshee::{
+        LFB_MEMORY_CONFIG, VGA_INIT0, VID_DESKTOP_OVERLAY_STRIDE, VID_DESKTOP_START_ADDR,
+        VID_PROC_CFG,
+    };
+    const BAR0: usize = 0xD000_0000;
+    const BAR1: u32 = 0xD200_0000;
+    const TILED: u32 = BAR1 + 0x40_0000;
+    let (mut a, mut b) = twins(|rig| {
+        rig.cpu.bus.configure_voodoo(Some(rust_dos::voodoo::Board::Voodoo3));
+        let bus = &mut rig.cpu.bus;
+        bus.write_32(BAR0 + LFB_MEMORY_CONFIG as usize, 0x400);
+        bus.write_32(BAR0 + VGA_INIT0 as usize, 0x0000_1140);
+        bus.write_32(BAR0 + VID_PROC_CFG as usize, 0x0004_0081);
+        bus.write_32(BAR0 + VID_DESKTOP_OVERLAY_STRIDE as usize, 0x10);
+        bus.write_32(BAR0 + VID_DESKTOP_START_ADDR as usize, 0x8000);
+        for i in 0..0x1000u32 {
+            rig.write32(DATA + 4 * i, i.wrapping_mul(0x0103_0507) | 0x0100_0001);
+        }
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                let mut bytes = a.create_label();
+                let mut words = a.create_label();
+                let mut dwords = a.create_label();
+                let mut sums = a.create_label();
+                // Bytes from 7E00h to A200h: the desktop is in the middle.
+                a.mov(esi, DATA)?;
+                a.mov(edi, BAR1 + 0x7E00)?;
+                a.mov(ecx, 0x2400u32)?;
+                a.set_label(&mut bytes)?;
+                a.mov(al, byte_ptr(esi))?;
+                a.mov(byte_ptr(edi), al)?;
+                a.inc(esi)?;
+                a.inc(edi)?;
+                a.dec(ecx)?;
+                a.jnz(bytes)?;
+                // Words three bytes apart, so at every alignment.
+                a.mov(esi, DATA)?;
+                a.mov(edi, BAR1 + 0x1_0001)?;
+                a.mov(ecx, 0x800u32)?;
+                a.set_label(&mut words)?;
+                a.mov(ax, word_ptr(esi))?;
+                a.mov(word_ptr(edi), ax)?;
+                a.xor(byte_ptr(edi + 1), 0x5A)?;
+                a.add(esi, 2)?;
+                a.add(edi, 3)?;
+                a.dec(ecx)?;
+                a.jnz(words)?;
+                // Dwords five bytes apart, the last ones across pages.
+                a.mov(esi, DATA)?;
+                a.mov(edi, BAR1 + 0x2_0001)?;
+                a.mov(ecx, 0x800u32)?;
+                a.set_label(&mut dwords)?;
+                a.mov(eax, dword_ptr(esi))?;
+                a.mov(dword_ptr(edi), eax)?;
+                a.add(dword_ptr(edi), ecx)?;
+                a.add(esi, 4)?;
+                a.add(edi, 5)?;
+                a.dec(ecx)?;
+                a.jnz(dwords)?;
+                // All of it read back, a byte, a word and a dword at each
+                // address, into EBX and EDX.
+                a.xor(ebx, ebx)?;
+                a.xor(edx, edx)?;
+                a.mov(edi, BAR1 + 0x7E00)?;
+                a.mov(ecx, 0x2400u32)?;
+                a.set_label(&mut sums)?;
+                a.movzx(eax, byte_ptr(edi))?;
+                a.add(ebx, eax)?;
+                a.movzx(eax, word_ptr(edi + 0x8201))?;
+                a.add(edx, eax)?;
+                a.add(ebx, dword_ptr(edi + 0x1_8201))?;
+                a.rol(ebx, 1)?;
+                a.inc(edi)?;
+                a.dec(ecx)?;
+                a.jnz(sums)?;
+                // The tiles, and the last byte below them.
+                a.mov(byte_ptr(TILED + 0x11), bl)?;
+                a.mov(word_ptr(TILED + 0x21), dx)?;
+                a.mov(dword_ptr(TILED - 4), ebx)?;
+                a.mov(byte_ptr(TILED - 1), dl)?;
+                a.add(ebx, dword_ptr(TILED - 3))?;
+                a.add(dx, word_ptr(TILED + 0x11))?;
+                a.hlt()
+            }),
+        );
+    });
+    let stats = run_both(&mut a, &mut b);
+    (a, b, stats)
+}
+
+#[test]
+fn a_software_renderers_loops_on_a_voodoo3s_memory_are_the_interpreters() {
+    const BAR1: usize = 0xD200_0000;
+    let (mut a, mut b, stats) = voodoo3_software_renderer();
+    let memory = |rig: &Rig| -> Vec<u32> {
+        let bus = &rig.cpu.bus;
+        let below = (0..0x2_4000).step_by(4).map(|i| bus.read_32(BAR1 + i));
+        let top = (0x3F_F000..0x40_1000).step_by(4).map(|i| bus.read_32(BAR1 + i));
+        below.chain(top).collect()
+    };
+    assert!(memory(&a) == memory(&b), "the card's memory differs");
+    assert_eq!((a.cpu.ebx(), a.cpu.edx()), (b.cpu.ebx(), b.cpu.edx()));
+    assert_ne!(b.cpu.ebx(), 0);
+    assert_eq!(b.cpu.bus.read_8(BAR1 + 0x7E00), 0x01);
+    assert_eq!(b.cpu.bus.read_32(BAR1 + 0x8004) & 0xFFFF, 0x8887);
+    // The desktop, which ends in the page after its first.
+    let card = b.cpu.bus.voodoo.as_ref().unwrap().banshee().unwrap();
+    let (start, span) = card.desktop_memory();
+    assert_eq!(start, 0x8000);
+    assert!((0x1010..0x2000).contains(&span), "{span:#x} bytes");
+    // The bytes written into it count the same, and the picture changed
+    // for both.
+    assert_eq!(a.cpu.bus.activity.video_bytes, span);
+    assert_eq!(b.cpu.bus.activity.video_bytes, span);
+    for rig in [&mut a, &mut b] {
+        assert!(rig.cpu.bus.voodoo.as_mut().unwrap().prepare_display());
+    }
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        assert_eq!(untranslated(&stats), 0, "{:?}", stats);
+        // The code makes the stores and loads out of sight itself: of
+        // some 36,000, those left to the bus are the 2000h bytes stored
+        // into the desktop's two pages, the tiles and the words and
+        // dwords across two pages.
+        // (A few run in the interpreter where the lockstep's batches
+        // stop in a loop.)
+        let calls = b.cpu.dynrec.calls().map_or(0, |c| c.dev + c.slow);
+        assert!((0x2000 - 128..0x2000 + 64).contains(&calls), "{calls} calls");
+    }
+}
+
+/// Stores the code makes itself still mark the picture changed.
+#[test]
+fn stores_the_code_makes_into_a_voodoo3s_memory_change_the_picture() {
+    if !(AVAILABLE && cfg!(target_arch = "x86_64")) {
+        return;
+    }
+    const BAR0: usize = 0xD000_0000;
+    const BAR1: u32 = 0xD200_0000;
+    let mut rig = Rig::new();
+    rig.cpu.core = CoreMode::Dynamic;
+    rig.cpu.bus.configure_voodoo(Some(rust_dos::voodoo::Board::Voodoo3));
+    rig.cpu.bus.write_32(BAR0 + 0x0C, 0x400);
+    rig.cpu.bus.write_32(BAR0 + 0x28, 0x0000_1140);
+    rig.cpu.bus.write_32(BAR0 + 0x5C, 0x0004_0081);
+    let code = asm32(CODE, |a| {
+        let mut fill = a.create_label();
+        a.mov(edi, BAR1 + 0x10_0000)?;
+        a.mov(ecx, 0x4000u32)?;
+        a.mov(eax, 0x55u32)?;
+        a.set_label(&mut fill)?;
+        a.mov(byte_ptr(edi), al)?;
+        a.inc(edi)?;
+        a.dec(ecx)?;
+        a.jnz(fill)?;
+        a.hlt()
+    });
+    rig.load(CODE, &code);
+    rig.enter_pm();
+    // Nothing is left to show from setting the card up.
+    assert!(rig.cpu.bus.voodoo.as_mut().unwrap().prepare_display());
+    assert!(!rig.cpu.bus.voodoo.as_mut().unwrap().prepare_display());
+    rig.run_batched_to_halt();
+    assert_eq!(rig.cpu.bus.read_32(BAR1 as usize + 0x10_3FFC), 0x5555_5555);
+    let calls = rig.cpu.dynrec.calls().map_or(0, |c| c.dev + c.slow);
+    assert_eq!(calls, 0, "the bus made some of the stores");
+    assert!(rig.cpu.dynrec.stats().runs > 0);
+    assert!(rig.cpu.bus.voodoo.as_mut().unwrap().prepare_display());
+}
+
 #[test]
 fn video_memory_is_written_and_read_by_its_physical_address() {
     let (_, b) = video_memory_program(false);

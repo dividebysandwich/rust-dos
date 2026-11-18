@@ -31,6 +31,7 @@
 
 pub mod blit2d;
 pub mod ddc;
+pub mod direct;
 pub mod display;
 pub mod fifo;
 mod gpu2d;
@@ -400,6 +401,11 @@ impl Banshee {
         } else {
             None
         }
+    }
+
+    /// Where BAR1 is, while the card answers at its memory BARs.
+    pub fn bar1(&self) -> Option<u32> {
+        (self.pci.command & 0x02 != 0 && self.pci.bar1 != 0).then_some(self.pci.bar1)
     }
 
     /// The register of the I/O BAR at `port`, if it is one.
