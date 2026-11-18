@@ -1001,11 +1001,11 @@ fn mmio_reads_and_writes_riff_chunks() {
 }
 
 /// A program that installs an I/O procedure of its own for 'DOS ', as
-/// Stratosphere does to read its files from its archives, and reads
-/// two files that aren't on the disk through it: NONE.WAV, and
-/// PACK.ZZZ+NONE.WAV, whose extension has no procedure of its own. The
-/// procedure reads "PROC" for every file. Bits 0 and 2 of the exit
-/// code are set if the files opened, bits 1 and 3 if they read "PROC".
+/// Stratosphere does to read its files from its archives, and opens
+/// two files that aren't on the disk: NONE.WAV, and PACK.ZZZ+NONE.WAV,
+/// whose extension has no procedure of its own. The procedure reads
+/// "PROC" for every file. Bits 0 and 2 of the exit code are set if the
+/// files opened, bits 1 and 3 if they read "PROC".
 fn mmio_dos_proc_program() -> Vec<u8> {
     const MMIO_INSTALLPROC: i32 = 0x10000;
     const MMIOM_READ: i32 = 0;
@@ -1101,7 +1101,11 @@ fn mmio_uses_the_dos_procedure_the_program_installed() {
         let files = [("T.EXE", mmio_dos_proc_program())];
         let mut cpu = machine("mmio_dos_proc", core, &files, |_| {});
         run_to_exit(&mut cpu, 20_000, |_| {});
-        assert_eq!(cpu.errorlevel, 0x0F, "{core:?}: {:?}", printed(&cpu));
+        // NONE.WAV is read through the program's procedure. The packed
+        // name goes to the built-in DOS procedure, which finds no such
+        // file: Wine's test_mmioOpen_fourcc gets MMIOERR_FILENOTFOUND
+        // on Windows for a name like it.
+        assert_eq!(cpu.errorlevel, 0x03, "{core:?}: {:?}", printed(&cpu));
     }
 }
 

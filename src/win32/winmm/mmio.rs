@@ -606,7 +606,8 @@ pub fn mmio_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         // A procedure the program installed comes first, also for DOS
         // and MEM: Windows searches the installed ones before its own,
         // so a program can replace the DOS procedure, as Stratosphere
-        // does to read its files from its archives.
+        // does to read its files from its archives. A name with no '+'
+        // asks for 'DOS ' and gets that search too.
         let named = fcc == 0;
         if named {
             fcc = name
@@ -617,11 +618,12 @@ pub fn mmio_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         match installed(cpu, pid, fcc) {
             Some(p) => io_proc = p,
             None if fcc == FOURCC_DOS || fcc == FOURCC_MEM => {}
-            // An extension with no procedure is a DOS file.
-            None if named => {
-                fcc = FOURCC_DOS;
-                io_proc = installed(cpu, pid, FOURCC_DOS).unwrap_or(0);
-            }
+            // An extension with no procedure goes to the built-in DOS
+            // procedure, also when the program installed a 'DOS ' one:
+            // Wine's test_mmioOpen_fourcc, which passes on Windows, gets
+            // MMIOERR_FILENOTFOUND for such a name with a 'DOS '
+            // procedure installed that opens anything.
+            None if named => fcc = FOURCC_DOS,
             None => {
                 set_error_ret(cpu, info, MMIOERR_CANNOTOPEN);
                 return Some(0);
