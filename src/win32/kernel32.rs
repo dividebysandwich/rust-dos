@@ -26,6 +26,7 @@ mod sync;
 mod text;
 mod threads;
 pub(crate) mod time;
+mod toolhelp;
 mod win98;
 pub use win98::is_directory;
 pub(crate) mod virtual_memory;
@@ -794,6 +795,28 @@ static APIS: &[Api] = &[
     stdcall("CriticalSectionDelete", 0, 1, sync::critical_section_delete),
     stdcall("CriticalSectionWait", 0, 1, sync::critical_section_wait),
     stdcall("CriticalSectionWake", 0, 1, sync::critical_section_wake),
+    stdcall(
+        "CreateToolhelp32Snapshot",
+        206,
+        2,
+        toolhelp::create_toolhelp32_snapshot,
+    ),
+    stdcall("Heap32ListFirst", 506, 2, toolhelp::heap32_list_first),
+    stdcall("Heap32ListNext", 507, 2, toolhelp::heap32_list_next),
+    stdcall("Heap32First", 505, 3, toolhelp::heap32_first),
+    stdcall("Heap32Next", 508, 1, toolhelp::heap32_next),
+    stdcall("Process32First", 617, 2, toolhelp::process32_first),
+    stdcall("Process32Next", 618, 2, toolhelp::process32_next),
+    stdcall("Thread32First", 767, 2, toolhelp::thread32_first),
+    stdcall("Thread32Next", 768, 2, toolhelp::thread32_next),
+    stdcall("Module32First", 587, 2, toolhelp::module32_first),
+    stdcall("Module32Next", 588, 2, toolhelp::module32_next),
+    stdcall(
+        "Toolhelp32ReadProcessMemory",
+        776,
+        5,
+        toolhelp::toolhelp32_read_process_memory,
+    ),
 ];
 
 /// The places in `APIS` of the system's own stubs.
