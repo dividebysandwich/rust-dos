@@ -299,9 +299,9 @@ fn memref_thunk(ops: &mut Asm) {
 }
 
 fn load_thunk(ops: &mut Asm) {
-    // A Banshee's or Voodoo3's memory where the code reads it by itself
-    // (`helpers::card_state`): the bytes at the handle's address less
-    // BAR1's, from the memory on the host.
+    // A display card's memory where the code reads it by itself
+    // (`helpers::card_state`): on a page that allows it, the bytes at the
+    // handle's address less the memory's, from the memory on the host.
     dynasm!(ops
         ; .arch x64
         ; bt rdx, DEV_BIT as i8
@@ -310,6 +310,14 @@ fn load_thunk(ops: &mut Asm) {
         ; sub eax, DWORD [r12 + CTX_CARD_LO]
         ; cmp eax, DWORD [r12 + CTX_CARD_LEN]
         ; jae >helper
+        ; push rdx
+        ; push rax
+        ; mov rdx, QWORD [r12 + CTX_CARD_PAGES]
+        ; shr eax, 12
+        ; test BYTE [rdx + rax], PAGE_READ as i8
+        ; pop rax
+        ; pop rdx
+        ; jz >helper
         ; add rax, QWORD [r12 + CTX_CARD_BASE]
         ; inc QWORD [r12 + CTX_CARD_READS]
         ; cmp ecx, 2
@@ -341,8 +349,158 @@ fn load_thunk(ops: &mut Asm) {
     dynasm!(ops ; .arch x64 ; ret);
 }
 
-/// `Thunk::StoreRun8` and `Thunk::StoreRun16`.
+/// What the bus does for a write of `s` bytes into the VESA frame
+/// buffer out of the picture shown (`Bus::write_lfb`, `write_to_lfb`),
+/// where it only counts: the bytes of a burst for `cycles=auto`, as the
+/// VGA's in `store_thunk` (a write that starts a burst goes to the bus),
+/// on a page of the picture `cycles=auto` knows also as that picture's,
+/// the page's count for a ToadForce's host renderer
+/// (`gpu::Pages::wrote`), and the bytes of the surface ahead on the host
+/// that has the page (`gpu::Written::note`). AL has the page's flags
+/// (`helpers::PAGE_WRITE` and on), R8D the bytes' offset in video
+/// memory; R8, R9 and RCX are pushed. It goes on at the `plain` label
+/// before it to store the bytes, or at the `slow` label after it to
+/// leave them to the bus. Everything is checked before anything is
+/// done, so a write that goes to the bus is counted once.
+fn card_count(ops: &mut Asm, s: i32) {
+    let mask = ((1u64 << s) - 1) as i32;
+    let slots = CTX_CARD_NOTES - 32;
+    dynasm!(ops
+        ; .arch x64
+        ; push r10
+        ; push r11
+        ; mov r10, QWORD [rbx + layout::ICOUNT as i32]
+        ; sub r10, QWORD [rbx + layout::LAST_WRITE as i32]
+        ; cmp r10, layout::BURST_GAP as i32
+        ; ja >unwind
+        ; movzx r11d, al
+        ; shr r11d, PAGE_NOTE_SHIFT as i8
+        ; and r11d, 7
+        ; jz >noted
+        // The slot (from 1) and the bytes' place in its surface, which
+        // has them all in one word of its bits.
+        ; shl r11d, 5
+        ; lea r11, [r12 + r11 + slots]
+        ; mov r9d, r8d
+        ; sub r9d, DWORD [r11]
+        ; cmp r9d, DWORD [r11 + 4]
+        ; jae >unwind
+        ; lea eax, [r9 + s]
+        ; cmp eax, DWORD [r11 + 4]
+        ; ja >unwind
+        ; mov eax, r9d
+        ; and eax, 63
+        ; cmp eax, 64 - s
+        ; ja >unwind
+        ; push rcx
+        ; mov ecx, eax
+        ; mov r10d, mask
+        ; shl r10, cl
+        ; pop rcx
+        ; shr r9d, 6
+        ; mov rax, QWORD [r11 + 8]
+        ; or QWORD [rax + r9 * 8], r10
+        ; mov rax, QWORD [r11 + 16]
+        ; mov BYTE [rax], 1
+        ; noted:
+        // Bytes of the picture `cycles=auto` knows: their count, and the
+        // lowest offset and the one past the highest of the burst's.
+        ; mov r9, QWORD [r12 + CTX_CARD_PAGES]
+        ; mov eax, r8d
+        ; shr eax, 12
+        ; test BYTE [r9 + rax], PAGE_SHOWN as i8
+        ; jz >unshown
+        ; add QWORD [rbx + layout::SHOWN_BYTES as i32], s
+        ; mov r9d, r8d
+        ; cmp r9, QWORD [rbx + layout::LOW as i32]
+        ; jae >low
+        ; mov QWORD [rbx + layout::LOW as i32], r9
+        ; low:
+        ; add r9, s
+        ; cmp r9, QWORD [rbx + layout::HIGH as i32]
+        ; jbe >unshown
+        ; mov QWORD [rbx + layout::HIGH as i32], r9
+        ; unshown:
+        ; mov r10, QWORD [rbx + layout::ICOUNT as i32]
+        ; add QWORD [rbx + layout::VIDEO_BYTES as i32], s
+        ; add QWORD [rbx + layout::BURST as i32], s
+        ; mov QWORD [rbx + layout::LAST_WRITE as i32], r10
+        ; mov rax, QWORD [r12 + CTX_CARD_GENERATION]
+        ; test rax, rax
+        ; jz >counted
+        ; inc QWORD [rax]
+        ; mov rax, QWORD [r12 + CTX_CARD_COUNTS]
+        ; mov r9d, r8d
+        ; shr r9d, 12
+        ; inc QWORD [rax + r9 * 8]
+        ; counted:
+        ; pop r11
+        ; pop r10
+        ; jmp <plain
+        ; unwind:
+        ; pop r11
+        ; pop r10
+        ; jmp >slow
+    );
+}
+
+/// `Thunk::StoreRun8` and `Thunk::StoreRun16`. Into a display card's
+/// memory on a page the code may write (`helpers::card_state`), the
+/// bytes go in by themselves, as `store_thunk` puts a dword: DirectDraw's
+/// and a software renderer's MMX stores into a locked surface.
 fn store_run_thunk(ops: &mut Asm, size: i32) {
+    dynasm!(ops
+        ; .arch x64
+        ; bt rdx, DEV_BIT as i8
+        ; jnc >helper
+        ; push r8
+        ; push r9
+        ; mov r8d, edx
+        ; sub r8d, DWORD [r12 + CTX_CARD_LO]
+        ; cmp r8d, DWORD [r12 + CTX_CARD_LEN]
+        ; jae >slow
+        // (All in one page, which the frame buffer has all of.)
+        ; mov eax, r8d
+        ; and eax, 0xFFF
+        ; cmp eax, 0x1000 - size
+        ; ja >slow
+        ; mov r9, QWORD [r12 + CTX_CARD_PAGES]
+        ; mov eax, r8d
+        ; shr eax, 12
+        ; movzx eax, BYTE [r9 + rax]
+        ; test al, PAGE_WRITE as i8
+        ; jz >slow
+        ; test al, PAGE_COUNT as i8
+        ; jnz >count
+        ; plain:
+        ; add r8, QWORD [r12 + CTX_CARD_BASE]
+    );
+    for at in (0..size).step_by(8) {
+        dynasm!(ops
+            ; .arch x64
+            ; mov r9, QWORD [rcx + at]
+            ; mov QWORD [r8 + at], r9
+        );
+    }
+    dynasm!(ops
+        ; .arch x64
+        ; mov BYTE [r12 + CTX_CARD_WROTE], 1
+        // Counted as the bus counts the run: as its dwords.
+        ; add QWORD [r12 + CTX_CARD_WRITES], size / 4
+        ; pop r9
+        ; pop r8
+        ; mov eax, 1
+        ; ret
+        ; count:
+    );
+    card_count(ops, size);
+    dynasm!(ops
+        ; .arch x64
+        ; slow:
+        ; pop r9
+        ; pop r8
+        ; helper:
+    );
     thunk_save(ops);
     dynasm!(ops
         ; .arch x64
@@ -366,10 +524,10 @@ fn store_thunk(ops: &mut Asm, size: u8, code: DynamicLabel) {
         ; push r9
         ; bt rdx, DEV_BIT as i8
         ; jnc >slow
-        // Pixels into a Banshee's or Voodoo3's memory, which a software
-        // renderer writes into a locked surface one at a time (see
-        // `helpers::card_state`): on a page whose writes are only the
-        // bytes, into the memory on the host.
+        // Pixels into a display card's memory, which a software renderer
+        // writes into a locked surface one at a time (see
+        // `helpers::card_state`): on a page the code may write, into the
+        // memory on the host.
         ; mov r8d, edx
         ; sub r8d, DWORD [r12 + CTX_CARD_LO]
         ; cmp r8d, DWORD [r12 + CTX_CARD_LEN]
@@ -377,8 +535,12 @@ fn store_thunk(ops: &mut Asm, size: u8, code: DynamicLabel) {
         ; mov r9, QWORD [r12 + CTX_CARD_PAGES]
         ; mov eax, r8d
         ; shr eax, 12
-        ; cmp BYTE [r9 + rax], 0
-        ; je >slow
+        ; movzx eax, BYTE [r9 + rax]
+        ; test al, PAGE_WRITE as i8
+        ; jz >slow
+        ; test al, PAGE_COUNT as i8
+        ; jnz >count
+        ; plain:
         ; add r8, QWORD [r12 + CTX_CARD_BASE]
     );
     match size {
@@ -393,6 +555,11 @@ fn store_thunk(ops: &mut Asm, size: u8, code: DynamicLabel) {
         ; pop r9
         ; pop r8
         ; ret
+        ; count:
+    );
+    card_count(ops, s);
+    dynasm!(ops
+        ; .arch x64
         // Pixels into the VGA's planes, which mode X programs write one or
         // two at a time (see `helpers::vga_state`).
         ; vga:

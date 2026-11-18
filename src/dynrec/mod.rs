@@ -956,10 +956,8 @@ mod engine {
                     // The code wrote the VGA's planes itself.
                     cpu.bus.vga.mark_dirty_full();
                 }
-                if std::mem::take(&mut self.ctx.card_wrote) != 0 {
-                    // And a Banshee's or Voodoo3's memory.
-                    cpu.bus.banshee_wrote_directly();
-                }
+                // And a Banshee's or Voodoo3's memory.
+                card_wrote(cpu, &mut self.ctx);
                 let card = (
                     std::mem::take(&mut self.ctx.card_reads),
                     std::mem::take(&mut self.ctx.card_writes),

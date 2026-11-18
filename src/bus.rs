@@ -23,6 +23,7 @@ mod verite;
 mod mach64;
 pub(crate) mod toadforce;
 mod banshee;
+pub(crate) mod lfb;
 mod voodoo;
 
 pub use verite::bios as verite_bios;
@@ -1402,7 +1403,9 @@ impl Bus {
     }
 
     /// Write VESA video memory, marking the rows of the picture it shows
-    /// in for repainting.
+    /// in for repainting. Translated code does the same by itself on the
+    /// pages `lfb_direct` gives it (`dynrec::x64::card_count`): what
+    /// changes here changes there too.
     #[inline]
     fn write_vram(&mut self, offset: usize, bytes: &[u8]) {
         // What a ToadForce's driver queued to draw there comes first.

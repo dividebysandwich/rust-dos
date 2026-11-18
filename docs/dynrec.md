@@ -489,6 +489,24 @@ first instruction in a block that changes them:
   execution loop marks the card's picture changed after code that wrote
   there (`JitCtx::card_wrote`), and adds the accesses to a profile's
   count of device memory accesses.
+- The VESA linear frame buffer (a ToadForce's, an S3's, a mach64's or
+  the VBE's own BAR), where a game draws into a locked surface a pixel
+  at a time, is handled the same way where the code doesn't write a
+  Banshee's memory itself (`Bus::lfb_direct`): no ToadForce commands
+  queued, no observer, no Vérité byte swapping, no card registers
+  inside the window, and a picture `cycles=auto` knows the bytes of. A
+  write there through the bus counts in `Activity`, counts the page
+  for the ToadForce host renderer's copies (`gpu::Pages::wrote`) and,
+  in a surface the host drew into, notes the bytes as card memory's
+  (`gpu::Written`). The store routines do all of that themselves for
+  bytes, words, dwords and the 8 and 16 bytes of an MMX or SSE store,
+  on pages out of the picture shown: each page's byte says whether the
+  code writes it, whether it reads it (the pages of a surface the host
+  has newer pixels of stay `jit_dev_read`'s), whether the bytes count
+  as those of the picture `cycles=auto` knows, and which of up to four
+  surfaces ahead on the host notes them. A write that starts a burst,
+  one that spans two words of a surface's bits, and the first into a
+  surface without its bits yet go to the bus.
 
 On x86-64, the four guest registers a block's operations use most (twice
 or more) stay in host registers within it (`x64::Cache`). An instruction

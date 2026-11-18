@@ -333,6 +333,21 @@ impl ToadForce {
         self.gpu.ahead()
     }
 
+    /// What translated code needs to write card memory by itself as
+    /// `writing` and `wrote` see the writes (`Bus::lfb_direct`): where
+    /// the host's copies count the writes to each page
+    /// (`gpu::Pages::counters`), and the surfaces ahead on the host
+    /// (`gpu::Gpu::notes`).
+    pub fn direct(
+        &mut self,
+    ) -> (
+        Option<(*mut u64, *mut u64)>,
+        impl Iterator<Item = gpu::Note> + '_,
+    ) {
+        let gpu = &mut self.gpu;
+        (gpu.pages.counters(), gpu.notes())
+    }
+
     /// Before the processor reads or writes the bytes `range` of
     /// `memory`, card memory (all of it for None): read back the
     /// surfaces the host renderer drew into that share a byte with

@@ -6391,18 +6391,17 @@ fn stores_into_a_voodoo3s_memory_are_the_interpreters() {
 }
 
 #[test]
-fn an_mmx_store_into_a_voodoo3s_memory_is_one_call() {
+fn an_mmx_store_into_a_voodoo3s_memory_calls_nothing() {
     // (ARM64's code generator doesn't translate MMX.)
     if !(AVAILABLE && cfg!(target_arch = "x86_64")) {
         return;
     }
-    // 16 more rows are 512 more stores of 8 bytes: a call each, where a
-    // dword at a time would take three (one that finds them not all in
-    // the card's memory, then one a dword). A few run in the interpreter
-    // where the lockstep's batches stop in the loop.
+    // 16 more rows are 512 more stores of 8 bytes, which the code puts
+    // into the card's memory itself (`Thunk::StoreRun8`): no more calls
+    // of the device helpers.
     let (_, _, fewer) = voodoo3_stores(16);
     let (_, _, more) = voodoo3_stores(32);
-    assert!((480..=512).contains(&(more - fewer)), "{} calls", more - fewer);
+    assert_eq!(more, fewer);
 }
 
 /// A software renderer's loops on a locked surface in a Voodoo3's memory

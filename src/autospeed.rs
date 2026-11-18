@@ -521,6 +521,9 @@ impl Default for Burst {
 pub(crate) const VIDEO_BYTES_AT: usize = std::mem::offset_of!(Activity, video_bytes);
 pub(crate) const BURST_AT: usize = std::mem::offset_of!(Activity, burst);
 pub(crate) const LAST_WRITE_AT: usize = std::mem::offset_of!(Activity, last_write);
+pub(crate) const SHOWN_BYTES_AT: usize = std::mem::offset_of!(Activity, shown_bytes);
+pub(crate) const LOW_AT: usize = std::mem::offset_of!(Activity, low);
+pub(crate) const HIGH_AT: usize = std::mem::offset_of!(Activity, high);
 
 impl Activity {
     pub fn new() -> Self {
@@ -537,7 +540,9 @@ impl Activity {
     /// The program wrote `bytes` bytes to video memory at `offset`, at
     /// instruction `at`. (The recompiler counts a block's instructions as
     /// it enters it and gives back those it didn't run, so `at` may go back
-    /// a little.)
+    /// a little.) Translated code counts its own writes to the VGA's
+    /// planes and the VESA frame buffer the same way (`dynrec::x64`'s
+    /// `store_thunk` and `card_count`): what changes here changes there.
     #[inline]
     pub fn video_write(&mut self, at: u64, offset: u64, bytes: u64) {
         self.video_bytes += bytes;
@@ -642,6 +647,12 @@ impl Activity {
     pub fn set_picture(&mut self, picture: Option<(u64, u64)>) {
         self.picture = picture.unwrap_or((0, u64::MAX));
         self.picture_known = picture.is_some();
+    }
+
+    /// What `set_picture` was last given: the picture among the offsets
+    /// `video_write` gets, where it is known.
+    pub fn picture(&self) -> Option<(u64, u64)> {
+        self.picture_known.then_some(self.picture)
     }
 }
 

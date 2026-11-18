@@ -552,6 +552,15 @@ impl Pages {
         }
     }
 
+    /// Where `wrote` counts, for translated code that writes card memory
+    /// by itself and counts its writes as `wrote` does, one page at a
+    /// time (`Bus::lfb_direct`): the generation and the first page's
+    /// count, each a u64 on the host. None while no host is attached,
+    /// where `wrote` counts nothing.
+    pub fn counters(&mut self) -> Option<(*mut u64, *mut u64)> {
+        (!self.counts.is_empty()).then_some((&raw mut self.generation, self.counts.as_mut_ptr()))
+    }
+
     /// The stamp of the bytes `range` as they are now.
     pub fn stamp(&self, range: (u32, u32)) -> Stamp {
         Stamp {
@@ -762,6 +771,19 @@ impl Decline {
 /// surface (`Host::write`). A surface written in more is read back
 /// around them.
 const WRITTEN_RECTS: usize = 1024;
+
+/// A surface that is ahead on the host, for translated code that writes
+/// card memory by itself (`Gpu::notes`): its bytes, `start` to before
+/// `end`, and where its `Written` keeps them. A write of bytes all in
+/// it sets their bits from the surface's first byte on and `any`, as
+/// `Written::note` does. `bits` is null before the first write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Note {
+    pub start: u32,
+    pub end: u32,
+    pub bits: *mut u64,
+    pub any: *mut bool,
+}
 
 /// The bytes of a surface the processor wrote while the surface was
 /// ahead on the host: a bit for each byte, from the surface's first.
@@ -1059,6 +1081,28 @@ impl Gpu {
     #[inline]
     pub fn ahead(&self) -> bool {
         !self.ahead.is_empty()
+    }
+
+    /// The surfaces that are ahead, as translated code notes its writes
+    /// into them itself (`Bus::lfb_direct`), in the order `writing`
+    /// goes through them.
+    pub fn notes(&mut self) -> impl Iterator<Item = Note> + '_ {
+        self.ahead.iter_mut().map(|a| {
+            let (start, end) = range(&a.surface);
+            let written = &mut a.written;
+            Note {
+                start,
+                end,
+                // Before the first write `Written` has no bits for the
+                // code to set: `writing` makes them.
+                bits: if written.bits.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    written.bits.as_mut_ptr()
+                },
+                any: &raw mut written.any,
+            }
+        })
     }
 
     /// How many surfaces were read back whole.
