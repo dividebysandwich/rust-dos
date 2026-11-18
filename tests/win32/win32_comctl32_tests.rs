@@ -44,6 +44,10 @@ const FOLDER_SIZE: u32 = 0x40;
 /// The folder list's id, and the message that gives an item's text.
 const LST2: u32 = 0x0461;
 const LB_GETTEXT: u32 = 0x0189;
+/// Where the timer procedure keeps what EM_GETSEL of the control with
+/// the focus returned (`Arg::Press`).
+const SELECTION: u32 = 0x1BF0;
+const EM_GETSEL: u32 = 0x00B0;
 
 /// The imports every program has: the functions `Call::api` names.
 const IMPORTS: &[(&str, &[&str])] = &[
@@ -102,6 +106,7 @@ const IMPORTS: &[(&str, &[&str])] = &[
             "GetActiveWindow",
             "PostMessageA",
             "SendDlgItemMessageA",
+            "GetFocus",
         ],
     ),
     ("KERNEL32.DLL", &["GetModuleHandleA"]),
@@ -162,7 +167,8 @@ enum Arg {
     /// The program's timer procedure, which presses OK in the active
     /// window: what ends a modal dialog. Before that it keeps the first
     /// items of the file dialog's folder list, if the window has one, at
-    /// FOLDERS.
+    /// FOLDERS, and the selection of the control with the focus at
+    /// SELECTION.
     Press,
 }
 
@@ -222,6 +228,13 @@ fn program_with(
         a.push(ebx).unwrap();
         a.call(import(&l, "SendDlgItemMessageA")).unwrap();
     }
+    a.call(import(&l, "GetFocus")).unwrap();
+    a.push(0).unwrap();
+    a.push(0).unwrap();
+    a.push(EM_GETSEL as i32).unwrap();
+    a.push(eax).unwrap();
+    a.call(import(&l, "SendMessageA")).unwrap();
+    a.mov(dword_ptr(l.at(SELECTION)), eax).unwrap();
     a.mov(eax, ebx).unwrap();
     a.pop(ebx).unwrap();
     a.push(0).unwrap();
@@ -490,6 +503,7 @@ fn a_program_without_comctl32_makes_a_progress_bar() {
                 "GetActiveWindow",
                 "PostMessageA",
                 "SendDlgItemMessageA",
+                "GetFocus",
             ],
         ),
         ("KERNEL32.DLL", &["GetModuleHandleA"]),
@@ -651,9 +665,10 @@ const OFN_ALLOWMULTISELECT: u32 = 0x0200;
 const OFN_EXPLORER: u32 = 0x0008_0000;
 
 /// A program opening a file with `flags`: a timer presses OK in the
-/// dialog, whose file name is T.EXE. What GetOpenFileNameA returned, and
-/// the path it gave.
-fn open_dialog(test: &str, flags: u32) -> (u32, String, u32) {
+/// dialog, whose file name is T.EXE. What GetOpenFileNameA returned, the
+/// path it gave, nFileOffset, and the selection (EM_GETSEL) of the
+/// control with the focus before OK.
+fn open_dialog(test: &str, flags: u32) -> (u32, String, u32, u32) {
     use Arg::*;
     let ofn = FREE;
     let file = FREE + 0x100;
@@ -674,20 +689,34 @@ fn open_dialog(test: &str, flags: u32) -> (u32, String, u32) {
     let r = results(&cpu, at, calls.len());
     assert_eq!(r[2], 0, "no error");
     let offset = peek(&cpu, at + ofn + 56) & 0xFFFF;
-    (r[1], peek_str(&cpu, at + file), offset)
+    let selection = peek(&cpu, at + SELECTION);
+    (r[1], peek_str(&cpu, at + file), offset, selection)
 }
 
 #[test]
 fn the_explorer_style_open_dialog_gives_the_file_chosen() {
-    let (ok, path, offset) = open_dialog("open_explorer", OFN_EXPLORER);
+    let (ok, path, offset, _) = open_dialog("open_explorer", OFN_EXPLORER);
     assert_eq!(ok, 1);
     assert_eq!(path, r"C:\T.EXE");
     assert_eq!(offset, 3, "nFileOffset");
 }
 
+/// The File name box has the focus with the name the program gave
+/// selected, so a name typed replaces it, as on Windows 98 SE.
+#[test]
+fn the_file_dialogs_select_the_file_name_they_open_with() {
+    for (test, flags) in [
+        ("select_explorer", OFN_EXPLORER),
+        ("select_old", OFN_ALLOWMULTISELECT),
+    ] {
+        let (_, _, _, selection) = open_dialog(test, flags);
+        assert_eq!(selection, 5 << 16, "{test}: T.EXE from 0 to 5");
+    }
+}
+
 #[test]
 fn the_old_style_open_dialog_gives_the_file_chosen() {
-    let (ok, path, _) = open_dialog("open_old", OFN_ALLOWMULTISELECT);
+    let (ok, path, _, _) = open_dialog("open_old", OFN_ALLOWMULTISELECT);
     assert_eq!(ok, 1);
     assert_eq!(path.to_ascii_uppercase(), r"C:\T.EXE");
 }

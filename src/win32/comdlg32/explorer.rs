@@ -455,8 +455,12 @@ fn init(cpu: &mut Cpu, dlg: u32, id: u32) -> Option<u32> {
     if file != 0 {
         o.set_item_text(dlg, EDT1, &name);
     }
+    // The File name box gets the focus with its text selected, so a
+    // name typed replaces the one the program gave (Windows 98 SE;
+    // Wine's FILEDLG95_InitControls calls SetFocus alone).
     let edit = item(cpu, dlg, EDT1);
     o.user("SetFocus", &[edit]);
+    o.send(edit, EM_SETSEL, 0, u32::MAX);
     if d.flags & OFN_READONLY != 0 {
         o.user("SendDlgItemMessageA", &[dlg, CHX1, BM_SETCHECK, 1, 0]);
     }
