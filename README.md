@@ -507,6 +507,12 @@ lines. `--log FILE` writes it to `FILE` instead, so instances running
 at the same time keep separate logs. Rust-DOS stops with an error if it
 cannot create `FILE`.
 
+If Rust-DOS crashes, the log's last line starts with `[CRASH]` and says
+why: the error and where it happened, such as the graphics driver's
+file. A run in a window also shows the error in a dialog, with the text
+to report and the link to report it at; on Windows, Ctrl+C copies the
+dialog's text. Runs with `--hidden` or `--debug-server` only log it.
+
 ## Acknowledgements
 
 Rust-DOS is standing on the shoulders of giants. This would not have been possible 

@@ -22,6 +22,7 @@ use crate::timer::CpuSpeed;
 mod args;
 mod clipboard;
 mod config_file;
+mod crash_dialog;
 mod debug;
 mod display;
 mod input;
@@ -225,6 +226,11 @@ fn main() -> Result<ExitCode, String> {
         || video_subsystem
             .current_video_driver()
             .eq_ignore_ascii_case("dummy");
+    // A crash from here on shows a dialog too, in a run a user watches.
+    let driver = video_subsystem.current_video_driver();
+    if crash_dialog::wanted(args.hidden, driver, args.debug_server.is_some()) {
+        crash_dialog::enable();
+    }
     let audio_output = sdl_audio::open_output(&sdl_context, &settings, headless);
     // Game controllers for the game port; the emulator does without them.
     let controller_subsystem = match sdl_context.gamepad() {

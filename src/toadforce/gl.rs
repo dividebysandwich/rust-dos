@@ -497,6 +497,9 @@ pub struct ToadForceGl {
     /// The host has no framebuffer the card's surfaces fit: nothing is
     /// taken.
     broken: bool,
+    /// What the renderer has to say for the log (`take_notes`): a
+    /// format or a program the host doesn't have.
+    notes: RefCell<Vec<String>>,
 }
 
 impl ToadForceGl {
@@ -593,19 +596,31 @@ impl ToadForceGl {
                 writes: 0,
                 presents: 0,
                 broken: false,
+                notes: RefCell::default(),
             }
         };
         if host.packed
             && let Some(fault) = host.packed_fault()
         {
-            eprintln!(
+            host.note(format!(
                 "[TOADFORCE] the host's 5-6-5 targets don't hold what the card's do ({fault}): \
                  16-bit targets are drawn with 8 bits a channel"
-            );
+            ));
             host.packed = false;
         }
         host.forget();
         Ok(host)
+    }
+
+    /// Print `line` and keep it for the log.
+    fn note(&self, line: String) {
+        eprintln!("{line}");
+        self.notes.borrow_mut().push(line);
+    }
+
+    /// The lines for the log since the last call.
+    pub fn take_notes(&self) -> Vec<String> {
+        self.notes.take()
     }
 
     /// Whether `R5G6B5` targets are in the host's 5-6-5 format.
@@ -1223,10 +1238,13 @@ impl ToadForceGl {
                 None => {}
             }
             if gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
-                eprintln!(
-                    "[TOADFORCE] the host has no framebuffer for the card's target: \
-                     the software renderer draws"
-                );
+                if !self.broken {
+                    self.note(
+                        "[TOADFORCE] the host has no framebuffer for the card's target: \
+                         the software renderer draws"
+                            .to_string(),
+                    );
+                }
                 self.broken = true;
             }
         }
@@ -1266,7 +1284,9 @@ impl ToadForceGl {
             }
             Err(e) => {
                 let e = e.replacen("a 3dfx shader", "a ToadForce shader", 1);
-                eprintln!("[TOADFORCE] {e}: the software renderer draws this state");
+                self.note(format!(
+                    "[TOADFORCE] {e}: the software renderer draws this state"
+                ));
                 self.failed.borrow_mut().insert(key.clone());
                 false
             }
@@ -1304,7 +1324,9 @@ impl ToadForceGl {
             }
             Err(e) => {
                 let e = e.replacen("a 3dfx shader", "a ToadForce shader", 1);
-                eprintln!("[TOADFORCE] {e}: the card transforms the vertices of this state");
+                self.note(format!(
+                    "[TOADFORCE] {e}: the card transforms the vertices of this state"
+                ));
                 self.tnl_failed.borrow_mut().insert(key.clone());
                 false
             }

@@ -1207,6 +1207,13 @@ commands and reads everything back before the renderer changes.
   SDL's renderer, a card that has a link loses it, and its memory
   holds every pixel from then on. `opengl` says once in the log why
   OpenGL doesn't draw; `auto` says nothing.
+- Setting the renderer up compiles shaders and draws a test on the
+  driver, and a driver that crashes there ends the program. The setup
+  leaves the file `toadforce-opengl-setup` in rust-dos's directory,
+  holding the version and the OpenGL driver's description, until the
+  frame after it (`display/setup_guard.rs`). A start that finds it with
+  the same key draws in software with `auto` and logs why; `opengl`
+  tries again.
 - The renderer ends with the window, before the context does. A card
   that lives longer keeps a link that takes no draw, so it draws in
   software. The emulator's own order ends the machine first.

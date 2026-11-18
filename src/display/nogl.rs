@@ -96,6 +96,18 @@ impl GlScreen {
         match *self {}
     }
 
+    pub fn toadforce_unmade(&self) -> bool {
+        match *self {}
+    }
+
+    pub fn toadforce_notes(&self) -> Vec<String> {
+        match *self {}
+    }
+
+    pub fn toadforce_refuse(&mut self, _reason: String) {
+        match *self {}
+    }
+
     pub fn voodoo_link(&self) -> Box<dyn rust_dos::voodoo::gpu::GpuLink> {
         match *self {}
     }
