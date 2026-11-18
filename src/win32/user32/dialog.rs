@@ -660,7 +660,7 @@ fn char_dimensions(cpu: &mut Cpu, font: u32) -> (i32, i32) {
 }
 
 /// GetDialogBaseUnits: the system font's dimensions.
-pub(super) fn base_units(cpu: &mut Cpu) -> (i32, i32) {
+fn base_units(cpu: &mut Cpu) -> (i32, i32) {
     char_dimensions(cpu, 0)
 }
 

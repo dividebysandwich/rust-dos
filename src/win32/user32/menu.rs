@@ -16,9 +16,10 @@
 //! messages for itself and dispatches the others, and posts the command
 //! picked to the owner, or returns it with TPM_RETURNCMD. The owner
 //! sizes the owner-drawn items of a popup in WM_MEASUREITEM before it
-//! shows, and draws them in WM_DRAWITEM each time the popup is drawn;
-//! the loop sends both. Owner-drawn items of a menu bar are laid out at
-//! a fixed size and not drawn.
+//! shows, and draws them in WM_DRAWITEM: all of them each time the
+//! popup is drawn, and the two whose selection changed; the loop sends
+//! both. Owner-drawn items of a menu bar are laid out at a fixed size
+//! and not drawn (#1333).
 
 use super::message::{
     Msg, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_MOVE, SC_RESTORE, SC_SIZE, WM_CANCELMODE, WM_CHAR,
@@ -45,6 +46,7 @@ use super::{
     write_words,
 };
 use crate::cpu::Cpu;
+use crate::savestate::Since;
 use crate::win32::gdi32::dc::{DCX_USESTYLE, DCX_WINDOW, TRANSPARENT};
 use crate::win32::gdi32::{self, Rect, Region, font};
 use crate::win32::kernel32;
@@ -166,7 +168,7 @@ pub struct Item {
     pub tab: i32,
     /// An owner-drawn item's size, as the owner's WM_MEASUREITEM gave
     /// it before its popup showed.
-    pub measured: (i32, i32),
+    pub measured: Since<OWNER_DRAWN, (i32, i32)>,
 }
 
 /// A menu.
@@ -185,11 +187,17 @@ pub struct Menu {
     /// The selected item while it is tracked, or NONE.
     pub focus: u32,
     pub help_id: u32,
-    /// Its owner-drawn items wait for WM_DRAWITEM from this one on: the
-    /// item's place plus 1, 0 when none waits. Drawing the popup sets
-    /// it to 1, and tracking sends the messages.
-    pub od_draw: u32,
+    /// The owner-drawn items waiting for WM_DRAWITEM, in order: each
+    /// item's place and the DRAWITEMSTRUCT's itemAction. Drawing the
+    /// whole popup queues all of them with ODA_DRAWENTIRE, a change of
+    /// the selection the two items it changed with ODA_SELECT, and
+    /// tracking sends the messages.
+    pub od_queue: Since<OWNER_DRAWN, Vec<(u32, u32)>>,
 }
+
+/// The W32 section's version that saves owner-drawn items' sizes and
+/// their WM_DRAWITEM queue; an older state loads them empty.
+pub const OWNER_DRAWN: u16 = 78;
 
 // The menus.
 
@@ -1491,20 +1499,26 @@ const BAR_ITEM_SPACE: i32 = 12;
 /// 18 and 17 on Windows 98.
 fn measure(cpu: &mut Cpu, hdc: u32, it: &Item, bar: bool) -> (i32, i32, i32) {
     let fm = font::metrics(cpu, hdc).unwrap_or_default();
-    let (th, avg) = (fm.height, fm.average_width.max(1));
+    let th = fm.height;
     let line = (th + 4).max(metric(55));
     let bar_h = th.max(metric(15) - 1);
     if it.kind & MF_SEPARATOR != 0 {
         return (0, 0, if bar { 0 } else { metric(55) / 2 });
     }
     if it.kind & MF_OWNERDRAW != 0 {
-        // Windows adds two of the menu font's average characters to the
-        // width the owner asked for, and leaves room for the check mark
-        // and the submenu arrow as for any item.
+        // Windows 98 adds two of the menu font's average characters to
+        // the width the owner asked for, and nothing else: a popup of
+        // owner-drawn items asked for 50 and 0 is 62 and 12 wide with
+        // MS Sans Serif's 6, checked or with a submenu as well. The
+        // average is GdiGetCharDimensions', of the letters, where
+        // tmAveCharWidth is 5.
+        let letters = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        let w = font::text_extent(cpu, hdc, letters).map_or(0, |(w, _)| w);
+        let chars = (w / 26 + 1) / 2;
         return if bar {
-            (2 * avg, 0, bar_h)
+            (2 * chars, 0, bar_h)
         } else {
-            (it.measured.0 + 2 * avg, 0, it.measured.1)
+            (it.measured.0.0 + 2 * chars, 0, it.measured.0.1)
         };
     }
     if let Some(text) = &it.text {
@@ -1606,10 +1620,21 @@ fn layout_popup(cpu: &mut Cpu, h: u32) -> (i32, i32) {
             while i < n && items[i].kind & (MF_MENUBREAK | MF_MENUBARBREAK) == 0 {
                 i += 1;
             }
-            let left = sizes[start..i].iter().map(|s| s.0).max().unwrap_or(0);
-            let right = sizes[start..i].iter().map(|s| s.1).max().unwrap_or(0);
+            // An owner-drawn item takes the width it measured, without
+            // the room the other items have for a check mark and an
+            // arrow; the column is as wide as its widest item.
+            let drawn = |j: &usize| items[*j].kind & MF_OWNERDRAW != 0;
+            let (od, other): (Vec<usize>, Vec<usize>) = (start..i).partition(drawn);
+            let left = other.iter().map(|&j| sizes[j].0).max().unwrap_or(0);
+            let right = other.iter().map(|&j| sizes[j].1).max().unwrap_or(0);
             let gap = if right > 0 { TAB_SPACE + right } else { 0 };
-            let width = text_x() + left + gap + arrow_space();
+            let texts = if other.is_empty() {
+                0
+            } else {
+                text_x() + left + gap + arrow_space()
+            };
+            let owner = od.iter().map(|&j| sizes[j].0).max().unwrap_or(0);
+            let width = texts.max(owner);
             let mut y = POPUP_BORDER;
             for j in start..i {
                 rects[j] = Rect::new(x, y, x + width, y + sizes[j].2);
@@ -1805,10 +1830,49 @@ fn draw_popup(cpu: &mut Cpu, h: u32, hwnd: u32) {
         }
     });
     paint::release_dc(cpu, &[hwnd, hdc]);
-    if items.iter().any(|it| it.kind & MF_OWNERDRAW != 0)
-        && let Some(m) = get_mut(user(cpu), h)
-    {
-        m.od_draw = 1;
+    let queue = items
+        .iter()
+        .enumerate()
+        .filter(|(_, it)| it.kind & MF_OWNERDRAW != 0 && !it.rect.is_empty())
+        .map(|(i, _)| (i as u32, ODA_DRAWENTIRE))
+        .collect();
+    if let Some(m) = get_mut(user(cpu), h) {
+        *m.od_queue = queue;
+    }
+}
+
+/// Draw the items `which` of the popup menu `h` in `hwnd` again, as
+/// their selection changed: Windows draws only those, and has the owner
+/// draw an owner-drawn one with ODA_SELECT.
+fn redraw_popup_items(cpu: &mut Cpu, h: u32, hwnd: u32, which: &[u32]) {
+    let Some(items) = get(user(cpu), h).map(|m| m.items.clone()) else {
+        return;
+    };
+    let hdc = paint::window_dc(cpu, hwnd, DCX_USESTYLE | DCX_WINDOW, None);
+    if hdc == 0 {
+        return;
+    }
+    let mut queue = Vec::new();
+    with_font(cpu, hdc, |cpu| {
+        for &i in which {
+            let Some(it) = items.get(i as usize) else {
+                continue;
+            };
+            if it.kind & MF_OWNERDRAW != 0 {
+                queue.push((i, ODA_SELECT));
+            } else {
+                draw_item(cpu, hdc, it, false);
+            }
+        }
+    });
+    paint::release_dc(cpu, &[hwnd, hdc]);
+    if let Some(m) = get_mut(user(cpu), h) {
+        for q in queue {
+            // A whole draw still waiting draws the item as it is now.
+            if !m.od_queue.iter().any(|&(i, _)| i == q.0) {
+                m.od_queue.push(q);
+            }
+        }
     }
 }
 
@@ -1895,6 +1959,7 @@ const ITEM_SCRATCH: u32 = 48;
 /// Owner-drawn items: ODT_MENU, and DRAWITEMSTRUCT's action and states.
 const ODT_MENU: u32 = 1;
 const ODA_DRAWENTIRE: u32 = 1;
+const ODA_SELECT: u32 = 2;
 const ODS_SELECTED: u32 = 0x0001;
 const ODS_GRAYED: u32 = 0x0002;
 const ODS_DISABLED: u32 = 0x0004;
@@ -2222,6 +2287,7 @@ fn select(cpu: &mut Cpu, tr: &mut Track, lv: usize, index: u32, send: bool, pare
     if index != NONE && index as usize >= m.items.len() {
         return;
     }
+    let before = m.focus;
     clear_focus(m);
     m.focus = index;
     let sys = m.flags & MF_SYSMENU;
@@ -2245,7 +2311,13 @@ fn select(cpu: &mut Cpu, tr: &mut Track, lv: usize, index: u32, send: bool, pare
             note = Some((make_wp(pm.focus, hi), p));
         }
     }
-    redraw_level(cpu, tr, lv);
+    let hwnd = tr.levels[lv].hwnd;
+    if hwnd != 0 {
+        let which: Vec<u32> = [before, index].into_iter().filter(|&i| i != NONE).collect();
+        redraw_popup_items(cpu, h, hwnd, &which);
+    } else {
+        redraw_level(cpu, tr, lv);
+    }
     if send && let Some((wp, lp)) = note {
         tr.queue(WM_MENUSELECT, wp, lp);
     }
@@ -2860,8 +2932,9 @@ fn measure_next(cpu: &mut Cpu, tr: &mut Track, lv: usize, scratch: u32) -> Optio
     let l = tr.levels[lv];
     let i = owner_drawn_from(user(cpu), l.menu, l.state - L_MEASURE)?;
     let (id, data) = item(user(cpu), (l.menu, i as usize)).map(|it| (it.id, it.data))?;
-    // As Windows does, the height starts as the dialog base unit's.
-    let height = super::dialog::base_units(cpu).1 as u32;
+    // Windows 98 starts the height as the menu font's (13 for 8-point
+    // MS Sans Serif), where NT starts it as the dialog base unit's.
+    let height = menu_font_height(cpu) as u32;
     let at = scratch + MSG_SCRATCH;
     for (k, v) in [ODT_MENU, 0, id, 0, height, data].into_iter().enumerate() {
         cpu.bus.guest_write_32(at + 4 * k as u32, v);
@@ -2876,6 +2949,16 @@ fn measure_next(cpu: &mut Cpu, tr: &mut Track, lv: usize, scratch: u32) -> Optio
     ))
 }
 
+/// The height of the menu font, tmHeight.
+fn menu_font_height(cpu: &mut Cpu) -> i32 {
+    let Some(mem) = gdi32::dc::create_compatible_dc(cpu, &[0]).filter(|&d| d != 0) else {
+        return 0;
+    };
+    let height = with_font(cpu, mem, |cpu| font::metrics(cpu, mem).unwrap_or_default().height);
+    gdi32::dc::delete_dc(cpu, &[mem]);
+    height
+}
+
 /// The owner answered WM_MEASUREITEM: the item keeps the size.
 fn measured(cpu: &mut Cpu, tr: &Track, scratch: u32) {
     let Some(l) = tr.levels.iter().find(|l| l.state > L_MEASURE) else {
@@ -2886,33 +2969,32 @@ fn measured(cpu: &mut Cpu, tr: &Track, scratch: u32) {
     let height = cpu.bus.guest_read_32(at + 16) as i32;
     let pos = (l.menu, (l.state - L_MEASURE - 1) as usize);
     if let Some(it) = item_mut(user(cpu), pos) {
-        it.measured = (width.max(0), height.max(0));
+        *it.measured = (width.max(0), height.max(0));
     }
 }
 
-/// Have the owner draw the next owner-drawn item of an open popup that
-/// was drawn since (`Menu::od_draw`): WM_DRAWITEM with a DRAWITEMSTRUCT
-/// in the scratch space, on a DC of the popup's window with the menu
-/// font. None when no item waits.
+/// Have the owner draw the next owner-drawn item waiting in an open
+/// popup (`Menu::od_queue`): WM_DRAWITEM with a DRAWITEMSTRUCT in the
+/// scratch space. As on Windows 98, the DC has the menu font, the menu's
+/// text and background colours, and its origin at the popup's client
+/// area, inside the 3-pixel edge, where rcItem is. None when no item
+/// waits.
 fn next_owner_draw(cpu: &mut Cpu, tr: &mut Track, scratch: u32) -> Option<Next> {
     for l in tr.levels.clone() {
         if l.hwnd == 0 || l.state != L_SHOWN {
             continue;
         }
-        let from = match get(user(cpu), l.menu) {
-            Some(m) if m.od_draw != 0 => m.od_draw - 1,
-            _ => continue,
-        };
-        let Some(i) = owner_drawn_from(user(cpu), l.menu, from) else {
-            if let Some(m) = get_mut(user(cpu), l.menu) {
-                m.od_draw = 0;
-            }
+        let Some((i, action)) = get_mut(user(cpu), l.menu).and_then(|m| {
+            (!m.od_queue.is_empty()).then(|| m.od_queue.remove(0))
+        }) else {
             continue;
         };
-        if let Some(m) = get_mut(user(cpu), l.menu) {
-            m.od_draw = i + 2;
+        let Some(it) = item(user(cpu), (l.menu, i as usize)).cloned() else {
+            continue;
+        };
+        if it.kind & MF_OWNERDRAW == 0 {
+            continue;
         }
-        let it = item(user(cpu), (l.menu, i as usize))?.clone();
         let hdc = paint::window_dc(cpu, l.hwnd, DCX_USESTYLE | DCX_WINDOW, None);
         if hdc == 0 {
             continue;
@@ -2924,7 +3006,13 @@ fn next_owner_draw(cpu: &mut Cpu, tr: &mut Track, scratch: u32) -> Option<Next> 
                 font: gdi32::Font { log },
             },
         );
-        gdi32::dc::with(cpu, hdc, |d| d.attrs.font = font);
+        let (fore, back) = (user(cpu).color(COLOR_MENUTEXT), user(cpu).color(COLOR_MENU));
+        gdi32::dc::with(cpu, hdc, |d| {
+            d.attrs.font = font;
+            d.attrs.text_color = fore;
+            d.attrs.bk_color = back;
+            d.attrs.window_org = (-POPUP_BORDER, -POPUP_BORDER);
+        });
         let mut state = 0;
         if it.state & MF_CHECKED != 0 {
             state |= ODS_CHECKED;
@@ -2941,12 +3029,12 @@ fn next_owner_draw(cpu: &mut Cpu, tr: &mut Track, scratch: u32) -> Option<Next> 
         if it.state & MFS_DEFAULT != 0 {
             state |= ODS_DEFAULT;
         }
-        let r = it.rect;
+        let r = it.rect.offset(-POPUP_BORDER, -POPUP_BORDER);
         let words = [
             ODT_MENU,
             0,
             it.id,
-            ODA_DRAWENTIRE,
+            action,
             state,
             l.menu,
             hdc,
@@ -2974,6 +3062,12 @@ fn drawn(cpu: &mut Cpu, tr: &mut Track) {
         return;
     }
     let hwnd = get(user(cpu), h).map_or(0, |m| m.hwnd);
+    // The arrow goes where the item is in the window, whatever origin
+    // the owner left the DC with.
+    gdi32::dc::with(cpu, hdc, |d| {
+        d.attrs.window_org = (0, 0);
+        d.attrs.viewport_org = (0, 0);
+    });
     if let Some(it) = item(user(cpu), (h, i as usize)).cloned()
         && it.kind & MF_POPUP != 0
     {
@@ -3067,8 +3161,7 @@ crate::state_fields!(Item {
     text,
     bitmap,
     rect,
-    tab
-} skip {
+    tab,
     measured
 });
 
@@ -3080,9 +3173,8 @@ crate::state_fields!(Menu {
     height,
     hwnd,
     focus,
-    help_id
-} skip {
-    od_draw
+    help_id,
+    od_queue
 });
 
 #[cfg(test)]
