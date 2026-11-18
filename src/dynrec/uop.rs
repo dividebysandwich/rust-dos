@@ -254,6 +254,11 @@ pub const ESP: u8 = 4;
 /// The flags POPF and POPFD load at CPL 0 (`Uop::LoadFlags`): CF, PF, AF,
 /// ZF, SF, TF, IF, DF, OF, IOPL and NT, as `Cpu::load_flags_pm` has them.
 pub const POPF_RING0: u32 = 0x7FD5;
+/// The flags they load at a CPL above 0 that allows I/O (CPL <= IOPL):
+/// those of ring 0 but IOPL.
+pub const POPF_IOPL: u32 = 0x4FD5;
+/// The flags they load at a CPL above IOPL: those but IF as well.
+pub const POPF_USER: u32 = 0x4DD5;
 /// The flags a translated POPFD leaves as they were: AC and ID.
 pub const POPF_KEPT: u32 = 0x24_0000;
 
@@ -459,11 +464,12 @@ pub enum Uop {
     In { size: u8, port: Src, t: T },
     Out { size: u8, port: Src, t: T },
     /// POPF or POPFD's flags from t, a `size` byte value, as
-    /// `Cpu::load_flags_pm` loads them at CPL 0: the arithmetic flags, TF,
-    /// DF, NT, IF and IOPL. The instruction's handler runs it instead of the
-    /// operations after this one where CPL isn't 0 (or the CPU is in
-    /// virtual-8086 mode), or a POPFD would change AC or ID (as CPUID's
-    /// detection does). Nothing before it may change anything.
+    /// `Cpu::load_flags_pm` loads them: the arithmetic flags, TF, DF and
+    /// NT, IF where CPL <= IOPL, and IOPL at CPL 0 (`POPF_RING0`,
+    /// `POPF_IOPL`, `POPF_USER`). Virtual-8086 mode runs at CPL 3, so the
+    /// same rule holds there. The instruction's handler runs it instead of
+    /// the operations after this one where a POPFD would change AC or ID
+    /// (as CPUID's detection does). Nothing before it may change anything.
     LoadFlags { t: T, size: u8 },
     /// After `LoadFlags` and the stack pointer: the block stops after the
     /// instruction where TF is set (its trap comes from the execution loop)
