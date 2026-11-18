@@ -459,6 +459,8 @@ fn build_into(cpu: &mut Cpu, id: u32, p: &[u32], chain: &mut Chain) -> Result<()
         // Windows, making and releasing a full-screen device sends the
         // focus window's procedure no message of DirectDraw's window
         // changes (Wine's d3d8 test_wndproc checks that none comes).
+        // CreateDevice and Reset make the device window cover the
+        // screen once the buffers are made (`cover_screen`).
         let flags = DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN | DDSCL_NOWINDOWCHANGES;
         ok(directdraw::set_cooperative_level(
             cpu,
@@ -946,7 +948,20 @@ pub fn reset(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     use_chain(cpu, id, chain, p.clone());
     super::states::defaults(cpu, id);
     write_params(cpu, at, &p);
-    Some(D3D_OK)
+    cover_screen(cpu, id)
+}
+
+/// CreateDevice or Reset made the device `id`'s buffers: in full screen
+/// its device window covers the screen of the mode it took
+/// (`directdraw::cover_screen_with`). D3D_OK.
+pub fn cover_screen(cpu: &mut Cpu, id: u32) -> Option<u32> {
+    match get(cpu, id) {
+        Some(d) if d.params.get(PP_WINDOWED) == Some(&0) => {
+            let (window, focus) = (d.window, d.focus);
+            directdraw::cover_screen_with(cpu, window, focus)
+        }
+        _ => Some(D3D_OK),
+    }
 }
 
 /// The rectangle (left, top, right, bottom) at `at`, if there is one.
