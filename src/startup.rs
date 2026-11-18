@@ -102,6 +102,9 @@ pub(crate) fn create_cpu(
 
     let mut cpu = Cpu::with_memory(root_path.clone(), memory.mb);
     cpu.bus.log_file = open_log_file(args.log.as_deref())?;
+    if let Some(log) = &cpu.bus.log_file {
+        log.report_crashes();
+    }
     // The debug server's log takes the lines logged before it starts.
     if args.debug_server.is_some() {
         cpu.bus.log_backlog = Some(Vec::new());

@@ -737,12 +737,35 @@ impl GlScreen {
         Rc::strong_count(&self.toadforce.0) > 1
     }
 
+    /// Whether `toadforce_link` has yet to make the host renderer, or
+    /// to find that it can't.
+    pub fn toadforce_unmade(&self) -> bool {
+        self.toadforce_failed.is_none() && self.toadforce.0.borrow().is_none()
+    }
+
+    /// Don't make the host renderer: `toadforce_link` gives `reason`.
+    pub fn toadforce_refuse(&mut self, reason: String) {
+        self.toadforce_failed = Some(reason);
+    }
+
+    /// What the host renderer has had to say for the log since the
+    /// last call (`ToadForceGl::take_notes`).
+    pub fn toadforce_notes(&self) -> Vec<String> {
+        match self.toadforce.0.try_borrow() {
+            Ok(host) => host
+                .as_ref()
+                .map(ToadForceGl::take_notes)
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// A link to this window's host renderer for a ToadForce
     /// (`Bus::toadforce_set_host`, which has the renderer drop the
     /// copies it has once the card's pixels are in card memory). The
     /// error says why OpenGL can't draw the card here.
     pub fn toadforce_link(&mut self) -> Result<Box<dyn Host>, &str> {
-        if self.toadforce_failed.is_none() && self.toadforce.0.borrow().is_none() {
+        if self.toadforce_unmade() {
             match ToadForceGl::new(self.gl.clone(), self.glsl) {
                 Ok(made) => *self.toadforce.0.borrow_mut() = Some(made),
                 Err(e) => self.toadforce_failed = Some(e),

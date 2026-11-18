@@ -13,6 +13,9 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+mod crash;
 
 pub const FILE_NAME: &str = "rust-dos.log";
 /// Size limit of the log file.
@@ -26,7 +29,15 @@ pub fn default_path() -> Option<PathBuf> {
     crate::config::user_dir().map(|d| d.join(FILE_NAME))
 }
 
+/// The log file. Its lines are behind a lock that a crash can take too
+/// (`report_crashes`), to write out the lines buffered before it and
+/// then its reason.
 pub struct LogFile {
+    lines: Arc<Mutex<Lines>>,
+}
+
+/// The file and what has been written to it.
+struct Lines {
     writer: BufWriter<File>,
     written: u64,
     limit: u64,
@@ -54,15 +65,45 @@ impl LogFile {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let mut log = Self::new(open(path)?, limit);
-        log.write_line(&format!(
+        let mut lines = Lines::new(open(path)?, limit);
+        lines.write_line(&format!(
             "rust-dos {} started {}",
             env!("CARGO_PKG_VERSION"),
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
         ));
-        Ok(log)
+        Ok(LogFile {
+            lines: Arc::new(Mutex::new(lines)),
+        })
     }
 
+    pub fn write_line(&mut self, line: &str) {
+        lock(&self.lines).write_line(line);
+    }
+
+    pub fn flush(&mut self) {
+        lock(&self.lines).flush();
+    }
+
+    /// Have a crash write its reason to this log: a panic's message and
+    /// where it happened, and on Windows an exception's code and the
+    /// module it happened in, such as a graphics driver's. Without this
+    /// the log of a run that crashed ends at the last line it flushed,
+    /// and the reason, if any was printed, went to a console window that
+    /// closed with the program.
+    pub fn report_crashes(&self) {
+        crash::report_to(Arc::downgrade(&self.lines));
+    }
+}
+
+/// The lines, also after a panic while they were locked: a log line is
+/// worth more than what the panic left half written.
+fn lock(lines: &Mutex<Lines>) -> std::sync::MutexGuard<'_, Lines> {
+    lines
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+impl Lines {
     fn new(file: File, limit: u64) -> Self {
         Self {
             writer: BufWriter::new(file),
@@ -181,7 +222,7 @@ mod tests {
     }
 
     /// What `log` wrote to `path`, which goes.
-    fn text(mut log: LogFile, path: &Path) -> String {
+    fn text(mut log: Lines, path: &Path) -> String {
         log.flush();
         drop(log);
         let text = fs::read_to_string(path).unwrap();
@@ -195,7 +236,10 @@ mod tests {
         fs::write(&path, "old run\n").unwrap();
         let mut log = LogFile::create(&path).unwrap();
         log.write_line("[DOS] new run");
-        let text = text(log, &path);
+        log.flush();
+        drop(log);
+        let text = fs::read_to_string(&path).unwrap();
+        fs::remove_file(&path).unwrap();
         assert!(text.starts_with("rust-dos "), "{text}");
         assert!(text.ends_with("[DOS] new run\n"), "{text}");
         assert!(!text.contains("old run"), "{text}");
@@ -205,7 +249,7 @@ mod tests {
     fn a_full_log_keeps_its_head_and_its_latest_lines() {
         let path = temp_path("rolling");
         let limit = 4000;
-        let mut log = LogFile::new(open(&path).unwrap(), limit);
+        let mut log = Lines::new(open(&path).unwrap(), limit);
         let lines: Vec<String> = (0..2000).map(|i| format!("line {i:04}")).collect();
         for line in &lines {
             log.write_line(line);
@@ -233,7 +277,7 @@ mod tests {
     #[test]
     fn a_line_longer_than_a_cut_makes_room_for_is_left_out() {
         let path = temp_path("long");
-        let mut log = LogFile::new(open(&path).unwrap(), 1000);
+        let mut log = Lines::new(open(&path).unwrap(), 1000);
         for i in 0..30 {
             log.write_line(&format!("line {i:04}"));
         }
@@ -247,7 +291,7 @@ mod tests {
     #[test]
     fn a_log_too_small_to_cut_leaves_out_what_does_not_fit() {
         let path = temp_path("small");
-        let mut log = LogFile::new(open(&path).unwrap(), 10);
+        let mut log = Lines::new(open(&path).unwrap(), 10);
         log.write_line("12345");
         log.write_line("67890");
         log.write_line("abc");

@@ -12,6 +12,7 @@ mod gl;
 mod gl;
 pub mod audio_mix;
 pub mod room_sound;
+mod setup_guard;
 #[cfg(feature = "vr")]
 mod stage;
 
@@ -110,6 +111,9 @@ pub struct Display<'a> {
     toadforce_ramp: Option<[u32; 256]>,
     /// Whether the log said why OpenGL doesn't draw the ToadForce.
     toadforce_said: bool,
+    /// The mark that the ToadForce's renderer is being set up, kept to
+    /// the frame after (`setup_guard`).
+    toadforce_guard: Option<setup_guard::SetupGuard>,
     /// The layer over the picture last shown (a manual's page), by its
     /// generation.
     layer_shown: Option<u64>,
@@ -121,6 +125,16 @@ pub struct Display<'a> {
     #[cfg(feature = "vr")]
     picked: std::cell::Cell<(i32, i32)>,
 }
+
+/// The file in rust-dos's directory that marks a setup of the
+/// ToadForce's OpenGL renderer (`setup_guard`).
+const SETUP_MARK: &str = "toadforce-opengl-setup";
+
+/// Why OpenGL doesn't draw the ToadForce after the last run on this
+/// graphics driver crashed while it set the renderer up.
+const SETUP_CRASHED: &str = "rust-dos ended while it set up the OpenGL renderer on this \
+    graphics driver last time, so the software renderer draws. A new graphics driver or a \
+    new rust-dos tries OpenGL again, as does toadforce_renderer=opengl";
 
 /// What draws the picture.
 enum Output<'a> {
@@ -236,6 +250,7 @@ impl<'a> Display<'a> {
             toadforce_picture: None,
             toadforce_ramp: None,
             toadforce_said: false,
+            toadforce_guard: None,
             layer_shown: None,
             refresh_hz: None,
             #[cfg(feature = "vr")]
@@ -465,21 +480,54 @@ impl<'a> Display<'a> {
         let want = renderer != Renderer3d::Software && !deterministic;
         let problem = match &mut self.out {
             Output::Gl(gl) if want => {
+                for note in gl.toadforce_notes() {
+                    bus.log_string(&note);
+                }
+                // A frame went by with the renderer made.
+                self.toadforce_guard = None;
                 // The card has no renderer yet, or the link of a
                 // window that is gone.
                 if bus.toadforce_hosted() && gl.toadforce_linked() {
                     return;
                 }
-                match gl.toadforce_link() {
+                // Making the renderer runs the graphics driver's
+                // compiler and draws a test, and a driver that crashes
+                // there ends rust-dos. The log says where it was, and
+                // the next run on that driver draws in software.
+                if gl.toadforce_unmade() {
+                    let key = format!("{} {}", env!("CARGO_PKG_VERSION"), self.renderer);
+                    let dir = rust_dos::config::user_dir();
+                    let force = renderer == Renderer3d::OpenGl;
+                    match setup_guard::begin(dir.as_deref(), SETUP_MARK, &key, force) {
+                        setup_guard::Begin::Go(guard) => self.toadforce_guard = guard,
+                        setup_guard::Begin::Crashed => {
+                            bus.log_string(&format!("[TOADFORCE] {SETUP_CRASHED}"));
+                            gl.toadforce_refuse(SETUP_CRASHED.to_string());
+                        }
+                    }
+                    if gl.toadforce_unmade() {
+                        bus.log_string("[TOADFORCE] Setting up the OpenGL renderer");
+                        bus.flush_log();
+                    }
+                }
+                let linked = gl.toadforce_link().map_err(str::to_string);
+                for note in gl.toadforce_notes() {
+                    bus.log_string(&note);
+                }
+                match linked {
                     Ok(link) => {
                         bus.toadforce_set_host(Some(link));
                         bus.log_string("[TOADFORCE] OpenGL draws the card's triangles");
+                        bus.flush_log();
                         return;
                     }
-                    Err(e) => Some(e),
+                    Err(e) => {
+                        self.toadforce_guard = None;
+                        Some(e)
+                    }
                 }
             }
-            Output::Sdl { .. } if want => Some("there is no OpenGL 3 here"),
+            Output::Sdl { .. } if want => Some("there is no OpenGL 3 here".to_string()),
             _ => None,
         };
         if bus.toadforce_hosted() {
