@@ -63,6 +63,7 @@ impl Bus {
             activity: crate::autospeed::Activity::new(),
             retraces: 0,
             last_flip: None,
+            last_present: None,
             gate_array_shadow: Vec::new(),
             gate_array_shadow_at: usize::MAX,
             refresh_toggle: false,

@@ -206,6 +206,10 @@ pub struct Bus {
     /// Retraces counted, and the one of the last page flip.
     retraces: u64,
     last_flip: Option<u64>,
+    /// The retrace of the last frame DirectDraw showed or the 3dfx card
+    /// swapped in, while the card drives the monitor. Not saved: a loaded
+    /// state starts without one.
+    last_present: Option<u64>,
     /// The Tandy's or PCjr's picture memory as it was at the last retrace,
     /// and where it was: programs (and the recompiler) write it as plain
     /// RAM, which marks nothing for repainting.
@@ -3238,17 +3242,33 @@ impl Bus {
     /// flips (a flip within the last second or so) only the flips count.
     /// The 3dfx card only ever flips. A frame the built-in Windows'
     /// DirectDraw showed counts once, however many blits made it.
+    ///
+    /// GDI's drawing that changed the picture counts as a frame too. On
+    /// the VGA and the VESA modes it marks the rows it changed, as the
+    /// program's own writes do. A Banshee or Voodoo3 shows the desktop
+    /// from its own memory, which marks nothing, so there a retrace
+    /// after GDI changed the picture counts, unless DirectDraw showed a
+    /// frame or the card swapped in the last second or so: then those
+    /// are the frames, as flips are on the VGA.
     fn count_frame(&mut self) {
         self.retraces += 1;
         let flipped = std::mem::take(&mut self.vga.flipped);
         let drawn = std::mem::take(&mut self.vga.drawn);
         let presented = std::mem::take(&mut self.vga.presented);
+        let gdi = std::mem::take(&mut self.vga.gdi_changed);
         // While the 3dfx card shows, its buffer swaps are the frames, or
         // on a Banshee or Voodoo3, what DirectDraw shows in its memory.
         if let Some(v) = &mut self.voodoo {
             let swapped = std::mem::take(&mut v.swapped);
             if v.output() {
-                self.frames_drawn += swapped.max(u64::from(presented));
+                if presented || swapped > 0 {
+                    self.last_present = Some(self.retraces);
+                }
+                let presenting = self
+                    .last_present
+                    .is_some_and(|at| self.retraces - at < 70);
+                let shown = presented || (gdi && !presenting);
+                self.frames_drawn += swapped.max(u64::from(shown));
                 self.activity.swapped(swapped);
                 return;
             }
@@ -3332,6 +3352,41 @@ impl Bus {
             return (w as usize, h as usize);
         }
         self.adapter_display_size()
+    }
+
+    /// The picture on the monitor: which device scans it out, its name
+    /// and the bits a pixel of a card's own mode (the debugger's
+    /// `video.scanout` and `video.name`). It is the 3dfx card's while
+    /// it drives the monitor (a Banshee's or Voodoo3's desktop, or a
+    /// Voodoo Graphics' or Voodoo2's 3D picture), else the VGA's mode.
+    /// The VGA keeps the mode the BIOS last set while the card shows its
+    /// own, often text mode 3 under Windows, so `video_mode` says nothing
+    /// of the picture then.
+    pub fn scanout(&self) -> Scanout {
+        if let Some(v) = &self.voodoo
+            && v.output()
+        {
+            let (width, height) = v.size();
+            let (device, title, bpp) = match (v.banshee(), v.board.model()) {
+                (Some(b), _) => ("banshee", "Banshee", b.desktop_bytes_per_pixel() * 8),
+                (None, crate::voodoo::Model::Voodoo2) => ("voodoo2", "Voodoo2", 16),
+                (None, _) => ("voodoo1", "Voodoo1", 16),
+            };
+            return Scanout {
+                device,
+                name: format!("{title} {width}x{height}x{bpp}"),
+                bpp: Some(bpp),
+            };
+        }
+        let bpp = match self.video_mode {
+            VideoMode::Vesa => self.vbe.mode.map(|m| u32::from(m.bpp)),
+            _ => None,
+        };
+        Scanout {
+            device: "vga",
+            name: format!("{:?}", self.video_mode),
+            bpp,
+        }
     }
 
     /// The size of the screen of the mode the display adapter is in:
@@ -3454,4 +3509,15 @@ impl Bus {
             log.flush();
         }
     }
+}
+
+/// The picture on the monitor (`Bus::scanout`): the device that scans
+/// it out (`vga`, `banshee`, `voodoo1` or `voodoo2`), its name (the VGA
+/// mode's, or the card's like `Banshee 640x480x16`), and the bits a
+/// pixel of a VESA mode or the card's own (None in the VGA's standard
+/// modes, which the name tells).
+pub struct Scanout {
+    pub device: &'static str,
+    pub name: String,
+    pub bpp: Option<u32>,
 }
