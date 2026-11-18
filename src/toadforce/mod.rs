@@ -338,7 +338,12 @@ impl ToadForce {
     /// the host's copies count the writes to each page
     /// (`gpu::Pages::counters`), and the surfaces ahead on the host
     /// (`gpu::Gpu::notes`).
-    pub fn direct(&mut self) -> (Option<(*mut u64, *mut u64)>, impl Iterator<Item = gpu::Note> + '_) {
+    pub fn direct(
+        &mut self,
+    ) -> (
+        Option<(*mut u64, *mut u64)>,
+        impl Iterator<Item = gpu::Note> + '_,
+    ) {
         let gpu = &mut self.gpu;
         (gpu.pages.counters(), gpu.notes())
     }
