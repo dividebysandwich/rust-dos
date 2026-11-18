@@ -624,7 +624,7 @@ impl Memory {
     /// Take the reservation that starts at `start` away. Its length, if
     /// there was one.
     pub fn unreserve(&mut self, start: u32) -> Option<u32> {
-        let i = self.regions.iter().position(|r| r.start == start)?;
+        let i = self.regions.binary_search_by_key(&start, |r| r.start).ok()?;
         Some(self.regions.remove(i).len)
     }
 
@@ -723,9 +723,14 @@ impl Memory {
                 // 64 KB after a region, where the gap up to the next
                 // region is long enough. A program that makes thousands
                 // of regions (a texture's every mipmap level is one)
-                // takes one pass over them for each.
+                // takes one pass over them for each. The pass starts at
+                // the first region that ends after `lo`, so the shared
+                // arena's search doesn't go over every private region.
+                // A region can still end before the candidate: one that
+                // fits in the rest of the 64 KB the one before it ends in.
                 let mut start = lo as u64;
-                for r in &self.regions {
+                let first = self.regions.partition_point(|r| r.end() <= lo);
+                for r in &self.regions[first..] {
                     if r.end() as u64 <= start {
                         continue;
                     }
@@ -1985,9 +1990,9 @@ mod tests {
     }
 
     /// Regions reserved and released in a mixed order, of sizes that
-    /// leave gaps of every kind, some with the place asked for: each goes
-    /// where the search over every pair of a candidate and a region put
-    /// it, and none overlaps another.
+    /// leave gaps of every kind, some with the place asked for and some in
+    /// the arenas below and above: each goes where the search over every
+    /// pair of a candidate and a region put it, and none overlaps another.
     #[test]
     fn regions_go_to_the_lowest_free_place() {
         let mut memory = Memory::default();
@@ -2022,6 +2027,13 @@ mod tests {
                 held.extend(got);
                 continue;
             }
+            // Some go to the arenas below and above, so that each search
+            // has regions of another arena on either side of its own.
+            let (lo, hi) = match next() % 8 {
+                0 => (GRANULARITY, lo),
+                1 => (hi, hi + 0x100_0000),
+                _ => (lo, hi),
+            };
             let want = lowest_free_reference(&memory.regions, rounded, lo, hi);
             let got = memory.reserve_region(None, len, lo, hi, PAGE_READWRITE, MEM_PRIVATE);
             assert_eq!(got, want, "step {step}: {len:#x} bytes");
