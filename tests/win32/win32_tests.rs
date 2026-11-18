@@ -1409,10 +1409,10 @@ fn a_loop_that_polls_an_event_with_no_time_to_wait_is_skipped() {
 
 /// A thread that polls a mutex with WaitForMultipleObjects and no time to
 /// wait while the main thread holds it and sleeps, counting its passes in
-/// memory, with the handles in an array on its stack: the waits read only
-/// their arguments and that array, and the passes are skipped with the
-/// count moved on as they would have. The main thread then releases the
-/// mutex, and the thread takes it.
+/// memory, with the handles in an array on its stack or elsewhere: the
+/// waits read only their arguments and that array, and the passes are
+/// skipped with the count moved on as they would have. The main thread
+/// then releases the mutex, and the thread takes it.
 fn mutex_poll(handles_on_stack: bool) -> rust_dos::idle::IdleStats {
     let names: &[&str] = &[
         "CreateThread",
@@ -1490,17 +1490,22 @@ fn mutex_poll(handles_on_stack: bool) -> rust_dos::idle::IdleStats {
 #[test]
 fn a_loop_that_polls_a_mutex_and_counts_is_skipped() {
     let stats = mutex_poll(true);
+    // A proof here skips about ten thousand instructions, too few for a
+    // proof over counts to pay for itself again and again (`costly`), so
+    // the head backs off after the first proofs.
     assert!(stats.proofs > 0, "{stats:?}");
-    assert!(stats.skipped > 100_000, "{stats:?}");
+    assert!(stats.skipped > 0, "{stats:?}");
 }
 
 /// The same loop with the handles' array away from the stack: the wait
-/// reads RAM a count might be in, and a pass that counts isn't skipped.
+/// names the array it reads (`idle::reads_also`), which holds no count,
+/// so the passes are skipped as with the array on the stack.
 #[test]
-fn a_loop_that_polls_handles_elsewhere_and_counts_is_not_skipped() {
+fn a_loop_that_polls_handles_elsewhere_and_counts_is_skipped() {
     let stats = mutex_poll(false);
-    assert_eq!(stats.skipped, 0, "{stats:?}");
-    assert!(failed_by(&stats, "count service") > 0, "{stats:?}");
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 0, "{stats:?}");
+    assert_eq!(failed_by(&stats, "count service"), 0, "{stats:?}");
 }
 
 /// Waits with no time to wait, which return at once, and SetEvent from
