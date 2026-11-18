@@ -285,13 +285,5 @@ pub fn create_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(D3DERR_INVALIDCALL);
     };
     let id = hr!(d3d_of(cpu, this));
-    let hr = device::create(cpu, id, adapter, devtype, focus, flags, params, out);
-    if hr != D3D_OK {
-        return Some(hr);
-    }
-    let iface = cpu.bus.guest_read_32(out);
-    match of(cpu, iface) {
-        Some((_, device)) => device::cover_screen(cpu, device),
-        None => Some(hr),
-    }
+    device::create(cpu, id, adapter, devtype, focus, flags, params, out)
 }
