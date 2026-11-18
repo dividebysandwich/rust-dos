@@ -398,6 +398,11 @@ fn generic_ioctl_describes_floppies_and_hard_disks() {
     assert_eq!((cpu.bus.read_8(block + 1), cpu.bus.read_16(block + 2)), (0x05, 1));
     assert_eq!((cpu.bus.read_16(block + 0x0F), cpu.bus.read_8(block + 0x11)), (0, 0xF8));
     assert!(cpu.bus.read_32(block + 0x1C) > 0xFFFF);
+    // MS-DOS copies the BPB through its 32-bit sector count and no
+    // further: the 6 reserved bytes after it and the track layout are
+    // the caller's. Sierra's setup passes a block of 36 bytes, with its
+    // saved BP right after it.
+    assert_eq!(bytes(&cpu, 0x20, 0x20), [0xAA; 0x20]);
 
     // Get Media ID: the volume label and a FAT12 file system
     assert_eq!(ioctl(&mut cpu, 1, 0x0866), (false, 0));
