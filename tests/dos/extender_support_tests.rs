@@ -712,6 +712,27 @@ fn console_input_returns_extended_keys_as_zero_then_scan_code() {
     assert_eq!(cpu.get_al(), 0x00, "flushed with the pending scan code");
 }
 
+#[test]
+fn console_status_checks_that_find_no_key_are_keyboard_polls() {
+    // DOS asks the BIOS's keyboard status for them, so `cycles=auto`
+    // counts them as it counts INT 16h AH=01h finding no key: a program
+    // that calls them in a loop waits.
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    let polls = |cpu: &Cpu| cpu.bus.activity.polls;
+    int21(&mut cpu, 0x0B00);
+    assert_eq!((cpu.get_al(), polls(&cpu)), (0x00, 1), "AH=0Bh, no key");
+    cpu.set_dx(0xFF);
+    int21(&mut cpu, 0x0600);
+    assert_eq!((zf(&cpu), polls(&cpu)), (true, 2), "AH=06h DL=FFh, no key");
+    // A key waiting is no poll.
+    cpu.bus.keyboard_buffer.push_back(0x1C0D); // Enter
+    int21(&mut cpu, 0x0B00);
+    assert_eq!((cpu.get_al(), polls(&cpu)), (0xFF, 2), "AH=0Bh, a key");
+    cpu.set_dx(0xFF);
+    int21(&mut cpu, 0x0600);
+    assert_eq!((cpu.get_al(), polls(&cpu)), (0x0D, 2), "AH=06h DL=FFh, a key");
+}
+
 fn zf(cpu: &Cpu) -> bool {
     cpu.get_cpu_flag(CpuFlags::ZF)
 }

@@ -707,9 +707,11 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     cpu.set_reg8(Register::AL, ascii);
                     cpu.set_zflag(false);
                 } else {
-                    // No Key: Return 0 and Set Zero Flag
+                    // No Key: Return 0 and Set Zero Flag. A keyboard poll,
+                    // as AH=0Bh's.
                     cpu.set_reg8(Register::AL, 0x00);
                     cpu.set_zflag(true);
+                    cpu.bus.activity.poll();
                 }
             } else {
                 // --- OUTPUT ---
@@ -780,6 +782,10 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         0x0B => {
             if crate::keyboard::peek_keystroke(&mut cpu.bus).is_none() && cpu.con_pending_scan.is_none() {
                 cpu.set_reg8(Register::AL, 0x00);
+                // DOS's CON driver asks the BIOS (INT 16h AH=01h) for this,
+                // so a program that calls it in a loop polls the keyboard
+                // as one calling the BIOS does: it waits (`cycles=auto`).
+                cpu.bus.activity.poll();
             } else {
                 cpu.set_reg8(Register::AL, 0xFF);
             }
