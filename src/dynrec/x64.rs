@@ -2957,8 +2957,10 @@ impl Gen<'_> {
                 // host's MXCSR does) and ST(0) is its double (stale) below
                 // 2^52 in magnitude: CVTSD2SI rounds it, and the sign is
                 // the value's, which keeps a -0 from a value in (-0.5, 0).
-                // Else (another rounding, 80 bits that hold more, a value
-                // that is an integer already or a NaN) the handler's.
+                // (FRNDINT doesn't use the precision control.) Else
+                // (another rounding, 80 bits that hold more, a magnitude
+                // of 2^52 or more, which is an integer already, an
+                // infinity or a NaN) the handler's.
                 self.fpu_phys(RAX, 0);
                 dynasm!(self.ops
                     ; .arch x64
