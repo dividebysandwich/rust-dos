@@ -942,6 +942,7 @@ mod engine {
             self.ctx.far_block = std::ptr::null();
             self.ctx.stack32 = mode & 4 != 0;
             vga_state(cpu, &mut self.ctx);
+            card_state(cpu, &mut self.ctx);
             loop {
                 stats.runs += 1;
                 // SAFETY: the code was generated for this trampoline, and
@@ -954,6 +955,18 @@ mod engine {
                 if std::mem::take(&mut self.ctx.vga_wrote) != 0 {
                     // The code wrote the VGA's planes itself.
                     cpu.bus.vga.mark_dirty_full();
+                }
+                if std::mem::take(&mut self.ctx.card_wrote) != 0 {
+                    // And a Banshee's or Voodoo3's memory.
+                    cpu.bus.banshee_wrote_directly();
+                }
+                let card = (
+                    std::mem::take(&mut self.ctx.card_reads),
+                    std::mem::take(&mut self.ctx.card_writes),
+                );
+                if let (true, Some(p)) = (card != (0, 0), cpu.bus.profile.as_deref()) {
+                    // Counted as the bus counts those it makes.
+                    p.mem_direct(card.0, card.1);
                 }
                 if let Some(payload) = self.ctx.panic.take() {
                     // Rust code the block called panicked (it went on with
