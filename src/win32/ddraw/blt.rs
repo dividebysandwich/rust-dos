@@ -822,7 +822,8 @@ mod tests {
             });
             assert_eq!(run(&mut cpu, dst, &copy(Rect::new(2, 1, 6, 3))), Ok(()));
             assert_eq!(run(&mut cpu, dst, &copy(Rect::new(8, 0, 16, 4))), Ok(()));
-            done.send(()).unwrap();
+            // Gone if the watchdog gave up waiting.
+            let _ = done.send(());
             watchdog.join().unwrap()
         });
         assert!(!late, "the blits waited for the 3D drawing");
