@@ -575,7 +575,8 @@ pub enum Uop {
     /// double.
     FSqrt,
     /// FRNDINT: `fpu::arithmetic::frndint`, which rounds ST(0) by the
-    /// control word's rounding mode.
+    /// control word's rounding mode. (The x86-64 code rounds to nearest a
+    /// double below 2^52 itself.)
     FRndint,
     /// FABS: `fpu::arithmetic::fabs`.
     FAbs,
