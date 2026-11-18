@@ -25,27 +25,37 @@ use rust_dos::games::GameEntry;
 /// the standard handles, and Windows gives a closed handle's number to
 /// the next file opened. Output to stderr then went into that file: into
 /// the run lock's file, whose shared lock refuses every write (error 33),
-/// so the first `eprintln!` panicked (#1347). The standard handles are
-/// set to none, which std's output skips, as in a program started
-/// without a console.
+/// so the first `eprintln!` panicked (#1347). The standard handles that
+/// were the console's are set to none, which std's output skips, as in a
+/// program started without a console. A launcher that started rust-dos
+/// in a console of its own but gave it pipes or files for its output
+/// keeps getting the output there: FreeConsole leaves those open.
 #[cfg(windows)]
 pub(crate) fn leave_explorer_console() {
     use windows_sys::Win32::System::Console::{
-        FreeConsole, GetConsoleProcessList, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
-        STD_OUTPUT_HANDLE, SetStdHandle,
+        FreeConsole, GetConsoleMode, GetConsoleProcessList, GetStdHandle, STD_ERROR_HANDLE,
+        STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
     };
     let mut pids = [0u32; 2];
     // SAFETY: the list has room for the two entries it is given.
-    if unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) } == 1 {
-        // SAFETY: nothing holds on to the console's handles. The only
-        // other thread that may run yet, --exit-with-parent's, waits on a
-        // process handle opened before and reads no standard handle.
-        unsafe {
-            FreeConsole();
-            for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
-                SetStdHandle(which, std::ptr::null_mut());
-            }
-        }
+    if unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) } != 1 {
+        return;
+    }
+    // The standard handles that are the console's, which FreeConsole
+    // closes.
+    let console = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE].map(|which| {
+        let mut mode = 0;
+        // SAFETY: GetConsoleMode fails on a handle that isn't a console's.
+        let on_console = unsafe { GetConsoleMode(GetStdHandle(which), &mut mode) } != 0;
+        on_console.then_some(which)
+    });
+    // SAFETY: nothing holds on to the console's handles.
+    unsafe { FreeConsole() };
+    for which in console.into_iter().flatten() {
+        // SAFETY: the only other thread that may run yet,
+        // --exit-with-parent's, waits on a process handle opened before
+        // and reads no standard handle.
+        unsafe { SetStdHandle(which, std::ptr::null_mut()) };
     }
 }
 
