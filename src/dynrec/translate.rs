@@ -1360,11 +1360,11 @@ fn popf(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
     true
 }
 
-/// BT, BTS, BTR or BTC of a register, or of memory with an immediate bit
-/// offset, as `logic::bit_test`: the offset first, then the operand's
-/// access checked (for writing but for BT), read, and written back. (With
-/// a register offset, a memory operand is found from the offset too: its
-/// handler runs it.)
+/// BT, BTS, BTR or BTC of a register or of memory, as `logic::bit_test`:
+/// the offset first, then the operand's access checked (for writing but
+/// for BT), read, and written back. With a register offset, the memory
+/// operand is the word or dword the offset picks, which the access check
+/// is for, so a fault reports that address.
 fn bit_op(instr: &Instruction, op: BitKind, u: &mut Vec<Uop>) -> bool {
     let size = match instr.op0_kind() {
         OpKind::Register => match gpr(instr.op0_register()) {
