@@ -551,6 +551,42 @@ fn without_the_built_in_windows_the_dos_stub_runs() {
     assert_eq!(cpu.errorlevel, 1);
 }
 
+/// 1000 calls of QueryPerformanceCounter in a row take the time Windows
+/// 98's VTD takes for its port accesses, about 2.75 us each, at a speed
+/// where the loop's own instructions take a fraction of that: the count
+/// moves on by 1000 calls' worth of PIT ticks, at 1.193182 MHz.
+#[test]
+fn query_performance_counter_takes_the_time_of_its_port_accesses() {
+    let names: &[&str] = &["QueryPerformanceCounter"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let image = program(BASE, false, imports, &[0; 16], |a, l| {
+        let mut again = a.create_label();
+        a.push(l.data)?;
+        a.call(l.import(0))?;
+        a.mov(esi, 1000)?;
+        a.set_label(&mut again)?;
+        a.push(l.data + 8)?;
+        a.call(l.import(0))?;
+        a.dec(esi)?;
+        a.jnz(again)?;
+        // The ticks between the first call and the last, by 64.
+        a.mov(eax, dword_ptr(l.data + 8))?;
+        a.sub(eax, dword_ptr(l.data))?;
+        a.shr(eax, 6)?;
+        a.ret()
+    });
+    let mut cpu = machine("qpc_cost", image);
+    cpu.bus.clock.set_cycles_per_ms(200_000);
+    assert!(
+        run_to_exit(&mut cpu, 200),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    // 1000 * 2.75 us is 3281 ticks, 51 by 64; the instructions add a few.
+    let ticks_by_64 = cpu.errorlevel as u32;
+    assert!((51..=53).contains(&ticks_by_64), "{ticks_by_64} * 64 ticks");
+}
+
 #[test]
 fn returning_from_the_entry_point_ends_with_its_value() {
     let (code, _) = run(
