@@ -1341,9 +1341,9 @@ fn pushf(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
     true
 }
 
-/// POPF or POPFD in protected mode, as `transfer::popf` at CPL 0 (the
-/// handler's elsewhere, see `Uop::LoadFlags`): the value off the stack
-/// (its access checked), the flags, then the stack pointer.
+/// POPF or POPFD in protected or virtual-8086 mode, as `transfer::popf`
+/// (see `Uop::LoadFlags`): the value off the stack (its access checked),
+/// the flags, then the stack pointer.
 fn popf(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
     let size = match instr.stack_pointer_increment() {
         2 => 2,
