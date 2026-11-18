@@ -1981,11 +1981,7 @@ pub fn read_pixels(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let components = match format {
         GL_RGB | GL_BGR_EXT => 3,
         GL_RGBA | GL_BGRA_EXT => 4,
-        GL_DEPTH_COMPONENT => {
-            // No depth is read back: the program's buffer is left as it
-            // is.
-            return Some(0);
-        }
+        GL_DEPTH_COMPONENT => return read_depth(cpu, [x, y, width, height], kind, at),
         _ => {
             error(cpu, GL_INVALID_ENUM);
             return Some(0);
@@ -2015,27 +2011,9 @@ pub fn read_pixels(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if w == 0 || h == 0 || at == 0 {
         return Some(0);
     }
-    let pack = ctx(cpu).map_or([4, 0, 0, 0], |c| c.pack);
-    let row_pixels = if pack[1] > 0 { pack[1] } else { width };
-    // The program's buffer first: sizes it can't hold aren't read.
-    let place = || {
-        let stride = row_pixels
-            .checked_mul(components)?
-            .checked_next_multiple_of(pack[0].max(1))?;
-        let skip = pack[2]
-            .checked_mul(stride)?
-            .checked_add(pack[3].checked_mul(components)?)?;
-        let len = stride
-            .checked_mul(height - 1)?
-            .checked_add(width.checked_mul(components)?)?;
-        Some((stride, at.checked_add(skip)?, len))
-    };
-    let Some((stride, start, len)) = place() else {
+    let Some((stride, start)) = pack_place(cpu, width, height, components, at) else {
         return Some(0);
     };
-    if !cpu.bus.guest_probe(start, len as usize, true) {
-        return Some(0);
-    }
     let Some(pixels) = texture::read_frame(cpu, x as i32, y as i32, width, height) else {
         return Some(0);
     };
@@ -2057,6 +2035,78 @@ pub fn read_pixels(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             }
         }
         cpu.bus.guest_write_bytes(start + r * stride, &row);
+    }
+    Some(0)
+}
+
+/// Where glReadPixels writes a `width` by `height` rectangle of pixels
+/// of `bytes` bytes into the program's buffer at `at`, as the pack
+/// settings (glPixelStorei) lay it out: the distance from one row to the
+/// next and the first pixel's address. None if the buffer can't hold
+/// it, or isn't all writable memory: nothing is read then.
+fn pack_place(cpu: &mut Cpu, width: u32, height: u32, bytes: u32, at: u32) -> Option<(u32, u32)> {
+    let pack = ctx(cpu).map_or([4, 0, 0, 0], |c| c.pack);
+    let row_pixels = if pack[1] > 0 { pack[1] } else { width };
+    let stride = row_pixels
+        .checked_mul(bytes)?
+        .checked_next_multiple_of(pack[0].max(1))?;
+    let skip = pack[2]
+        .checked_mul(stride)?
+        .checked_add(pack[3].checked_mul(bytes)?)?;
+    let len = stride
+        .checked_mul(height - 1)?
+        .checked_add(width.checked_mul(bytes)?)?;
+    let start = at.checked_add(skip)?;
+    cpu.bus
+        .guest_probe(start, len as usize, true)
+        .then_some((stride, start))
+}
+
+/// glReadPixels of GL_DEPTH_COMPONENT: the depth buffer's values in
+/// `kind`. The buffer holds 16 bits, `z`, for a depth of z / 65535, which
+/// a float gets as it is and an integer as OpenGL 1.1 converts a
+/// component for the program (section 4.3.2, the inverse of table 2.6):
+/// (2^b - 1) * depth for an unsigned type of b bits, ((2^b - 1) * depth -
+/// 1) / 2 for a signed one, cut toward zero. GL_DEPTH_SCALE and
+/// GL_DEPTH_BIAS are 1 and 0, as glPixelTransfer doesn't set them.
+fn read_depth(cpu: &mut Cpu, [x, y, width, height]: [u32; 4], kind: u32, at: u32) -> Option<u32> {
+    let bytes = match kind {
+        GL_BYTE | GL_UNSIGNED_BYTE => 1,
+        GL_SHORT | GL_UNSIGNED_SHORT => 2,
+        GL_INT | GL_UNSIGNED_INT | GL_FLOAT => 4,
+        _ => {
+            error(cpu, GL_INVALID_ENUM);
+            return Some(0);
+        }
+    };
+    if width == 0 || height == 0 || at == 0 {
+        return Some(0);
+    }
+    let Some((stride, start)) = pack_place(cpu, width, height, bytes, at) else {
+        return Some(0);
+    };
+    let Some(depths) = texture::read_depth(cpu, x as i32, y as i32, width, height) else {
+        return Some(0);
+    };
+    let mut row = Vec::with_capacity((width * bytes) as usize);
+    for (r, line) in depths.chunks(width as usize).enumerate() {
+        row.clear();
+        for &z in line {
+            let z = u32::from(z);
+            match kind {
+                GL_UNSIGNED_BYTE => row.push((z / 257) as u8),
+                GL_BYTE => row.push((((z / 257) as i32 - 1) / 2) as i8 as u8),
+                GL_UNSIGNED_SHORT => row.extend_from_slice(&(z as u16).to_le_bytes()),
+                GL_SHORT => row.extend_from_slice(&(((z as i32 - 1) / 2) as i16).to_le_bytes()),
+                GL_UNSIGNED_INT => row.extend_from_slice(&(z * 65537).to_le_bytes()),
+                GL_INT => {
+                    let v = ((i64::from(z) * 65537 - 1) / 2) as i32;
+                    row.extend_from_slice(&v.to_le_bytes());
+                }
+                _ => row.extend_from_slice(&(z as f32 / 65535.0).to_le_bytes()),
+            }
+        }
+        cpu.bus.guest_write_bytes(start + r as u32 * stride, &row);
     }
     Some(0)
 }
