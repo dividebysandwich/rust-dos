@@ -23,6 +23,7 @@ mod verite;
 mod mach64;
 pub(crate) mod toadforce;
 mod banshee;
+pub(crate) mod lfb;
 mod voodoo;
 
 pub use verite::bios as verite_bios;

@@ -521,6 +521,9 @@ impl Default for Burst {
 pub(crate) const VIDEO_BYTES_AT: usize = std::mem::offset_of!(Activity, video_bytes);
 pub(crate) const BURST_AT: usize = std::mem::offset_of!(Activity, burst);
 pub(crate) const LAST_WRITE_AT: usize = std::mem::offset_of!(Activity, last_write);
+pub(crate) const SHOWN_BYTES_AT: usize = std::mem::offset_of!(Activity, shown_bytes);
+pub(crate) const LOW_AT: usize = std::mem::offset_of!(Activity, low);
+pub(crate) const HIGH_AT: usize = std::mem::offset_of!(Activity, high);
 
 impl Activity {
     pub fn new() -> Self {
@@ -642,6 +645,12 @@ impl Activity {
     pub fn set_picture(&mut self, picture: Option<(u64, u64)>) {
         self.picture = picture.unwrap_or((0, u64::MAX));
         self.picture_known = picture.is_some();
+    }
+
+    /// What `set_picture` was last given: the picture among the offsets
+    /// `video_write` gets, where it is known.
+    pub fn picture(&self) -> Option<(u64, u64)> {
+        self.picture_known.then_some(self.picture)
     }
 }
 

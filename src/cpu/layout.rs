@@ -54,6 +54,14 @@ pub const BURST: usize = offset_of!(Cpu, bus.activity) + crate::autospeed::BURST
 pub const LAST_WRITE: usize = offset_of!(Cpu, bus.activity) + crate::autospeed::LAST_WRITE_AT;
 #[cfg_attr(not(dynrec), allow(dead_code))]
 pub const BURST_GAP: u64 = crate::autospeed::BURST_GAP;
+/// What `Activity::video_write` keeps of a burst's bytes in the picture:
+/// how many, and the lowest offset and the one past the highest.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const SHOWN_BYTES: usize = offset_of!(Cpu, bus.activity) + crate::autospeed::SHOWN_BYTES_AT;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const LOW: usize = offset_of!(Cpu, bus.activity) + crate::autospeed::LOW_AT;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub const HIGH: usize = offset_of!(Cpu, bus.activity) + crate::autospeed::HIGH_AT;
 /// A TLB entry (`Tlb::entries_ptr`): its tags and physical page, its size,
 /// and the entries of each set (supervisor, then user), which a page
 /// number modulo it indexes.
