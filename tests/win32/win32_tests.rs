@@ -1763,6 +1763,59 @@ fn a_wait_that_asks_where_a_file_is_and_counts_its_passes_is_skipped() {
     assert!(stats.skipped > 0, "{stats:?}");
 }
 
+/// The program, waiting on the clock, reads 128 bytes of T.EXE from its
+/// end in every pass, as Smacker's read-ahead does once a movie's file is
+/// all read, and with `count` counts its passes in memory. It returns 2Ah
+/// if every read read nothing.
+fn end_of_file_wait(count: bool) -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["GetTickCount", "CreateFileA", "SetFilePointer", "ReadFile"],
+    )];
+    let mut data = vec![0; 0x200];
+    put(&mut data, 0x10, b"T.EXE\0");
+    program(BASE, false, imports, &data, |a, l| {
+        use Arg::{Esi, I};
+        let mut wait = a.create_label();
+        let mut fail = a.create_label();
+        let at = |offset: u32| I(l.at(offset) as u32);
+        let open = [at(0x10), I(0x8000_0000), I(1), I(0), I(3), I(0x80), I(0)];
+        call_with(a, l.import(1), &open)?;
+        a.mov(esi, eax)?;
+        call_with(a, l.import(2), &[Esi, I(0), I(0), I(2)])?;
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 20))?;
+        a.set_label(&mut wait)?;
+        a.call(l.import(0))?;
+        a.mov(edi, eax)?;
+        call_with(a, l.import(3), &[Esi, at(0x100), I(0x80), at(0x20), I(0)])?;
+        a.cmp(dword_ptr(l.at(0x20)), 0)?;
+        a.jne(fail)?;
+        if count {
+            a.inc(dword_ptr(l.data))?;
+        }
+        a.cmp(edi, ebx)?;
+        a.jb(wait)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, 1)?;
+        a.ret()
+    })
+}
+
+/// A read at the end of a file reads nothing and changes nothing: a wait
+/// that makes one in every pass is skipped, also when it counts its
+/// passes, as ReadFile reads nothing but its arguments.
+#[test]
+fn a_wait_that_reads_at_the_end_of_a_file_is_skipped() {
+    for (test, count) in [("eof_wait", false), ("eof_count_wait", true)] {
+        let stats = idle_lockstep(test, end_of_file_wait(count));
+        assert!(stats.proofs >= 10, "{test}: {stats:?}");
+        assert!(stats.skipped > 0, "{test}: {stats:?}");
+    }
+}
+
 /// LoadAcceleratorsA reads the table's name and the program's resources,
 /// which a count could be in: a wait that calls it and counts its passes
 /// isn't skipped.
@@ -12045,6 +12098,251 @@ fn restarts_windows() -> Vec<u8> {
         a.call(f("ExitProcess"))?;
         a.int3()
     })
+}
+
+#[test]
+fn a_popup_menu_has_its_owner_measure_and_draw_its_owner_drawn_items() {
+    // A popup menu of two owner-drawn items, made with AppendMenuA as
+    // CyberStorm 2 makes its in-game menu, tracked by TrackPopupMenu.
+    // Before the popup shows, its owner gets WM_MEASUREITEM for each
+    // item, and its answer (100 by 30) sizes the item; as the popup is
+    // drawn, the owner gets WM_DRAWITEM for each, with ODT_MENU, the
+    // item's id and data, the menu as hwndItem and the item's rectangle.
+    // An Escape posted before the call closes the menu.
+    const WM_KEYDOWN: i32 = 0x0100;
+    const WM_DRAWITEM: i32 = 0x002B;
+    const WM_MEASUREITEM: i32 = 0x002C;
+    const VK_ESCAPE: i32 = 0x1B;
+    const MF_OWNERDRAW: i32 = 0x0100;
+    const TPM_RETURNCMD: i32 = 0x0100;
+    fn ae(a: &mut CodeAssembler, r: AsmRegister8) -> Result<(), IcedError> {
+        a.setae(r)
+    }
+    fn ge(a: &mut CodeAssembler, r: AsmRegister8) -> Result<(), IcedError> {
+        a.setge(r)
+    }
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "CreatePopupMenu",
+        "AppendMenuA",
+        "PostMessageA",
+        "TrackPopupMenu",
+    ];
+    // What the window procedure saw: WM_MEASUREITEM's count at 0xA0,
+    // WM_DRAWITEM's at 0xA4, and from the last DRAWITEMSTRUCT its
+    // CtlType at 0xB0, itemID at 0xB4, hwndItem at 0xB8, itemData at
+    // 0xBC and rcItem at 0xC0.
+    let data = session_data(&[(0x10, "Owner")]);
+    let exe = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        session_class(a, l, f, |a| {
+            let mut other = a.create_label();
+            a.cmp(dword_ptr(esp + 8), WM_MEASUREITEM)?;
+            a.jne(other)?;
+            a.inc(dword_ptr(l.at(0xA0)))?;
+            a.mov(ecx, dword_ptr(esp + 16))?;
+            a.mov(dword_ptr(ecx + 12), 100)?;
+            a.mov(dword_ptr(ecx + 16), 30)?;
+            a.mov(eax, 1)?;
+            a.ret_1(16)?;
+            a.set_label(&mut other)?;
+            let mut other = a.create_label();
+            a.cmp(dword_ptr(esp + 8), WM_DRAWITEM)?;
+            a.jne(other)?;
+            a.inc(dword_ptr(l.at(0xA4)))?;
+            a.mov(ecx, dword_ptr(esp + 16))?;
+            for (from, to) in [(0, 0xB0), (8, 0xB4), (20, 0xB8), (44, 0xBC)] {
+                a.mov(eax, dword_ptr(ecx + from))?;
+                a.mov(dword_ptr(l.at(to)), eax)?;
+            }
+            for k in 0..4 {
+                a.mov(eax, dword_ptr(ecx + 28 + 4 * k))?;
+                a.mov(dword_ptr(l.at(0xC0 + 4 * k as u32)), eax)?;
+            }
+            a.mov(eax, 1)?;
+            a.ret_1(16)?;
+            a.set_label(&mut other)?;
+            a.nop()
+        })?;
+        session_window(a, l, f)?;
+        a.mov(esi, eax)?;
+        a.call(f("CreatePopupMenu"))?;
+        a.mov(edi, eax)?;
+        for (id, item) in [(0x1234, 0xCAFE), (0x1235, 0xBEEF)] {
+            push_args(a, &[MF_OWNERDRAW, id, item])?;
+            a.push(edi)?;
+            a.call(f("AppendMenuA"))?;
+        }
+        push_args(a, &[WM_KEYDOWN, VK_ESCAPE, 0])?;
+        a.push(esi)?;
+        a.call(f("PostMessageA"))?;
+        a.push(0)?;
+        a.push(esi)?;
+        push_args(a, &[TPM_RETURNCMD, 10, 10, 0])?;
+        a.push(edi)?;
+        a.call(f("TrackPopupMenu"))?;
+        a.xor(ebx, ebx)?;
+        a.cmp(dword_ptr(l.at(0xA0)), 2)?;
+        bit_if(a, eq, 0)?;
+        a.cmp(dword_ptr(l.at(0xA4)), 2)?;
+        bit_if(a, ae, 1)?;
+        a.cmp(dword_ptr(l.at(0xB0)), 1)?;
+        bit_if(a, eq, 2)?;
+        a.cmp(dword_ptr(l.at(0xB4)), 0x1235)?;
+        bit_if(a, eq, 3)?;
+        a.cmp(dword_ptr(l.at(0xB8)), edi)?;
+        bit_if(a, eq, 4)?;
+        a.cmp(dword_ptr(l.at(0xBC)), 0xBEEF)?;
+        bit_if(a, eq, 5)?;
+        // rcItem: 30 high, and at least the 100 asked for wide.
+        a.mov(eax, dword_ptr(l.at(0xCC)))?;
+        a.sub(eax, dword_ptr(l.at(0xC4)))?;
+        a.cmp(eax, 30)?;
+        bit_if(a, eq, 6)?;
+        a.mov(eax, dword_ptr(l.at(0xC8)))?;
+        a.sub(eax, dword_ptr(l.at(0xC0)))?;
+        a.cmp(eax, 100)?;
+        bit_if(a, ge, 7)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("owner_drawn_menu", &[("T.EXE", exe)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+#[test]
+fn owner_drawn_popup_items_are_measured_drawn_and_selected_as_on_windows_98() {
+    // As Windows 98 SE does with a popup of owner-drawn items: the
+    // MEASUREITEMSTRUCT's height starts as the menu font's (13), the item
+    // is as wide as the owner asked plus two of the font's average
+    // characters (6), and rcItem is in the popup's client area, inside
+    // its 3-pixel edge, so the first item's starts at 0,0. A Down key
+    // selects the first item: the owner draws that item alone again,
+    // with ODA_SELECT and ODS_SELECTED.
+    const WM_KEYDOWN: i32 = 0x0100;
+    const WM_DRAWITEM: i32 = 0x002B;
+    const WM_MEASUREITEM: i32 = 0x002C;
+    const VK_DOWN: i32 = 0x28;
+    const VK_ESCAPE: i32 = 0x1B;
+    const MF_OWNERDRAW: i32 = 0x0100;
+    const TPM_RETURNCMD: i32 = 0x0100;
+    const ODA_SELECT: i32 = 2;
+    fn ae(a: &mut CodeAssembler, r: AsmRegister8) -> Result<(), IcedError> {
+        a.setae(r)
+    }
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "CreatePopupMenu",
+        "AppendMenuA",
+        "PostMessageA",
+        "TrackPopupMenu",
+    ];
+    // What the window procedure saw: WM_MEASUREITEM's count at 0xA0 and
+    // the first one's itemHeight at 0xA8, WM_DRAWITEM's count at 0xA4
+    // and the first one's rcItem left and right at 0xB0 and 0xB4, the
+    // count of ODA_SELECT at 0xB8 and the first one's itemID and
+    // itemState at 0xBC and 0xC0.
+    let data = session_data(&[(0x10, "Owner")]);
+    let exe = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        session_class(a, l, f, |a| {
+            let mut other = a.create_label();
+            a.cmp(dword_ptr(esp + 8), WM_MEASUREITEM)?;
+            a.jne(other)?;
+            a.inc(dword_ptr(l.at(0xA0)))?;
+            a.mov(ecx, dword_ptr(esp + 16))?;
+            let mut later = a.create_label();
+            a.cmp(dword_ptr(l.at(0xA0)), 1)?;
+            a.jne(later)?;
+            a.mov(eax, dword_ptr(ecx + 16))?;
+            a.mov(dword_ptr(l.at(0xA8)), eax)?;
+            a.set_label(&mut later)?;
+            a.mov(dword_ptr(ecx + 12), 100)?;
+            a.mov(dword_ptr(ecx + 16), 30)?;
+            a.mov(eax, 1)?;
+            a.ret_1(16)?;
+            a.set_label(&mut other)?;
+            let mut other = a.create_label();
+            a.cmp(dword_ptr(esp + 8), WM_DRAWITEM)?;
+            a.jne(other)?;
+            a.inc(dword_ptr(l.at(0xA4)))?;
+            a.mov(ecx, dword_ptr(esp + 16))?;
+            let mut later = a.create_label();
+            a.cmp(dword_ptr(l.at(0xA4)), 1)?;
+            a.jne(later)?;
+            a.mov(eax, dword_ptr(ecx + 28))?;
+            a.mov(dword_ptr(l.at(0xB0)), eax)?;
+            a.mov(eax, dword_ptr(ecx + 36))?;
+            a.mov(dword_ptr(l.at(0xB4)), eax)?;
+            a.set_label(&mut later)?;
+            let mut done = a.create_label();
+            a.cmp(dword_ptr(ecx + 12), ODA_SELECT)?;
+            a.jne(done)?;
+            a.inc(dword_ptr(l.at(0xB8)))?;
+            a.cmp(dword_ptr(l.at(0xB8)), 1)?;
+            a.jne(done)?;
+            a.mov(eax, dword_ptr(ecx + 8))?;
+            a.mov(dword_ptr(l.at(0xBC)), eax)?;
+            a.mov(eax, dword_ptr(ecx + 16))?;
+            a.mov(dword_ptr(l.at(0xC0)), eax)?;
+            a.set_label(&mut done)?;
+            a.mov(eax, 1)?;
+            a.ret_1(16)?;
+            a.set_label(&mut other)?;
+            a.nop()
+        })?;
+        session_window(a, l, f)?;
+        a.mov(esi, eax)?;
+        a.call(f("CreatePopupMenu"))?;
+        a.mov(edi, eax)?;
+        for (id, item) in [(0x1234, 0xCAFE), (0x1235, 0xBEEF)] {
+            push_args(a, &[MF_OWNERDRAW, id, item])?;
+            a.push(edi)?;
+            a.call(f("AppendMenuA"))?;
+        }
+        for key in [VK_DOWN, VK_ESCAPE] {
+            push_args(a, &[WM_KEYDOWN, key, 0])?;
+            a.push(esi)?;
+            a.call(f("PostMessageA"))?;
+        }
+        a.push(0)?;
+        a.push(esi)?;
+        push_args(a, &[TPM_RETURNCMD, 10, 10, 0])?;
+        a.push(edi)?;
+        a.call(f("TrackPopupMenu"))?;
+        a.xor(ebx, ebx)?;
+        a.cmp(dword_ptr(l.at(0xA8)), 13)?;
+        bit_if(a, eq, 0)?;
+        a.cmp(dword_ptr(l.at(0xB0)), 0)?;
+        bit_if(a, eq, 1)?;
+        a.mov(eax, dword_ptr(l.at(0xB4)))?;
+        a.sub(eax, dword_ptr(l.at(0xB0)))?;
+        a.cmp(eax, 112)?;
+        bit_if(a, eq, 2)?;
+        a.cmp(dword_ptr(l.at(0xB8)), 1)?;
+        bit_if(a, ae, 3)?;
+        a.cmp(dword_ptr(l.at(0xBC)), 0x1234)?;
+        bit_if(a, eq, 4)?;
+        a.cmp(dword_ptr(l.at(0xC0)), 1)?;
+        bit_if(a, eq, 5)?;
+        // Two whole draws when the popup shows, and the selection's
+        // draws after them, never a whole draw again.
+        a.mov(eax, dword_ptr(l.at(0xA4)))?;
+        a.sub(eax, dword_ptr(l.at(0xB8)))?;
+        a.cmp(eax, 2)?;
+        bit_if(a, eq, 6)?;
+        a.or(ebx, 0x80)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("owner_drawn_select", &[("T.EXE", exe)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
 }
 
 #[test]

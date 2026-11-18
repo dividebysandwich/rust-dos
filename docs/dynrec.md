@@ -469,6 +469,26 @@ first instruction in a block that changes them:
   `video_write` does (leaving a write that starts a burst of its own to
   `jit_dev_write`). The execution loop marks the picture changed after
   code that wrote there (`JitCtx::vga_wrote`).
+- A Banshee's or Voodoo3's memory through BAR1 below the tile base, where
+  a software renderer reads and writes the pixels of a locked DirectDraw
+  surface one at a time, is the card's memory in order. An access there
+  is its bytes and what the card does around them: the drawing queued
+  before is done first, what only the OpenGL renderer has is read back,
+  and a write marks the picture changed and tells the recording.
+  `jit_dev_read` and `jit_dev_write` do that without the bus's way
+  through every window and the card's registers
+  (`Bus::read_banshee_linear`, `write_banshee_linear`). On x86-64 hosts,
+  while there is nothing of it to do (`Voodoo::banshee_direct`: nothing
+  queued for the render workers, no swap held back by the frame rate cap,
+  the software rasterizer drawing the picture), the load and store
+  routines move the bytes from and into the card's memory on the host
+  themselves (`helpers::card_state`, found at the same points as
+  `vga_state`). A byte for each 4 KB page of the BAR says where the code
+  may write: the pages of the desktop shown, whose writes count in
+  `Activity`, and of a command FIFO's ring stay `jit_dev_write`'s. The
+  execution loop marks the card's picture changed after code that wrote
+  there (`JitCtx::card_wrote`), and adds the accesses to a profile's
+  count of device memory accesses.
 
 On x86-64, the four guest registers a block's operations use most (twice
 or more) stay in host registers within it (`x64::Cache`). An instruction

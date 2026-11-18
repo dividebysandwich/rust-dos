@@ -22,7 +22,7 @@ const HINTS: usize = 16;
 
 /// The W32 section's version that added the processes' system heaps: a
 /// state saved by an older rust-dos has none.
-pub const SYSTEM_HEAP_SAVED: u16 = 78;
+pub const SYSTEM_HEAP_SAVED: u16 = 79;
 
 /// A process's system heap, once it has one (`Heap::create_shared`).
 pub type SystemHeap = crate::savestate::Since<SYSTEM_HEAP_SAVED, Option<Heap>>;

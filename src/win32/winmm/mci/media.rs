@@ -68,10 +68,32 @@ impl Media {
         }
     }
 
-    /// When the frame `n` starts, in milliseconds.
+    /// When the frame `n` starts, in milliseconds, rounded down. Windows
+    /// 98's MCIAVI reports a frame's time and the length rounded up
+    /// (#1332).
     pub fn frame_ms(&self, n: u32) -> u32 {
         let (num, den) = self.rate;
         (n as u64 * den as u64 * 1000 / num.max(1) as u64) as u32
+    }
+
+    /// The first whole millisecond `frame_at` gives the frame `n` for:
+    /// where a position kept in milliseconds has to be for the frame to
+    /// show. At 15 frames a second, frame 1 starts 66.67 ms in, so at 66
+    /// ms frame 0 still shows and frame 1 shows from 67.
+    pub fn frame_shown_ms(&self, n: u32) -> u32 {
+        let (num, den) = self.rate;
+        (n as u64 * den as u64 * 1000).div_ceil(num.max(1) as u64) as u32
+    }
+
+    /// A position given in frames, in milliseconds: where the frame `n`
+    /// shows (`frame_shown_ms`), and for the end, the frame after the
+    /// last, the length, which a seek or a play may go to.
+    pub fn frames_to_ms(&self, n: u32) -> u32 {
+        if n >= self.frames {
+            self.frame_ms(n)
+        } else {
+            self.frame_shown_ms(n)
+        }
     }
 
     /// The bytes of the video stream: the frames' of an AVI file, the
@@ -131,6 +153,52 @@ impl std::fmt::Debug for Pictures {
             Pictures::Mpeg(p) => p.fmt(f),
             Pictures::Avi(p) => p.fmt(f),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn media(rate: (u32, u32), frames: u32) -> Media {
+        Media {
+            frames,
+            rate,
+            ..Media::default()
+        }
+    }
+
+    #[test]
+    fn a_frame_shows_from_the_millisecond_it_starts_in() {
+        // 15 a second (Fields of Fire's films), NTSC's 29.97 and a whole
+        // 25: each frame shows at its own millisecond and not before.
+        for rate in [(15, 1), (30000, 1001), (25, 1)] {
+            let m = media(rate, 400);
+            for n in 1..400 {
+                let at = m.frame_shown_ms(n);
+                assert_eq!(m.frame_at(at as u64), n, "{rate:?} frame {n}");
+                assert_eq!(m.frame_at(at as u64 - 1), n - 1, "{rate:?} frame {n}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_frame_starts_rounded_down_and_shows_rounded_up() {
+        let m = media((15, 1), 136);
+        assert_eq!((m.frame_ms(1), m.frame_shown_ms(1)), (66, 67));
+        assert_eq!((m.frame_ms(3), m.frame_shown_ms(3)), (200, 200));
+        assert_eq!(m.length_ms(), 9066);
+    }
+
+    #[test]
+    fn the_end_in_frames_is_the_length() {
+        // 136 frames at 15 a second end at 9066.67 ms: a seek to frame
+        // 136 is the length, 9066, which is in range, and frame 137 is
+        // past it.
+        let m = media((15, 1), 136);
+        assert_eq!(m.frames_to_ms(135), m.frame_shown_ms(135));
+        assert_eq!(m.frames_to_ms(136), m.length_ms());
+        assert!(m.frames_to_ms(137) > m.length_ms());
     }
 }
 

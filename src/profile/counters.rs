@@ -173,6 +173,16 @@ impl Counters {
         super::zone(kind.zone())
     }
 
+    /// Reads and writes of a device's memory above RAM that translated
+    /// code made by itself (`dynrec`'s `card_state`), which `mem` didn't
+    /// see: counted as it counts them, in no zone of their own.
+    #[cfg_attr(not(dynrec), allow(dead_code))]
+    pub fn mem_direct(&self, reads: u64, writes: u64) {
+        let kind = MemKind::Device as usize;
+        self.mem_reads[kind].set(self.mem_reads[kind].get() + reads);
+        self.mem_writes[kind].set(self.mem_writes[kind].get() + writes);
+    }
+
     /// The page of physical address `phys`, if RAM has it.
     pub fn code_page(&mut self, phys: u32) -> Option<&mut CodePage> {
         self.code_pages.get_mut(phys as usize >> 12)

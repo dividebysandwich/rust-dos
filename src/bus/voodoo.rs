@@ -280,7 +280,7 @@ impl Bus {
     /// first byte's address in the card's memory. None where any of them
     /// is somewhere else, such as a register or another card's window,
     /// which reads and writes reach a byte at a time.
-    fn banshee_linear_at(&self, addr: usize, len: usize) -> Option<u32> {
+    pub(super) fn banshee_linear_at(&self, addr: usize, len: usize) -> Option<u32> {
         let v = self.voodoo.as_ref().filter(|v| v.banshee.is_some())?;
         let last = addr.checked_add(len.checked_sub(1)?)?;
         let first = self.voodoo_at(addr)?;
@@ -348,7 +348,7 @@ impl Bus {
 
     /// A write behind a swap the frame rate cap holds back (the rest of
     /// the code the program ran before it was held) waits for the swap.
-    fn voodoo_swap_wait(&mut self) {
+    pub(super) fn voodoo_swap_wait(&mut self) {
         if let Some(due) = self.voodoo.as_ref().and_then(|v| v.deferred_swap()) {
             self.clock.stall_to(due);
             let now = self.voodoo_now();
