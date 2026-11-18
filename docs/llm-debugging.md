@@ -145,41 +145,47 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
 - **Check state with `/api/status`.** It reports `shell_idle` (true at the
   DOS prompt), `cs_ip`, the video mode and `video.adapter` (the display
   adapter `machine` gives programs), `paused`, `input_queue`, and
-  `cycles_per_ms`, the current CPU speed. `memory` has the RAM's size
-  (`mb`) and whether it is the default for the CPU and the display
-  adapter (`derived`: true while `memsize` isn't set; after a save state
-  is loaded, while the state's size is the default for its CPU and
-  adapter). `cpu` has the processor's `model` and whether it is the
-  default for the display adapter (`derived`: true while `cpu` isn't
-  set; after a save state is loaded, while the state's model is the
-  default for its adapter). `paused` (with `stop` and `stop_seq`) says
-  whether the debugger has stopped the machine, at a breakpoint or
-  otherwise. `cpu_state` is the processor's own state: `Running`, or
-  `Halted` after HLT until an interrupt. It stays `Running` while the
-  machine is paused, so wait for a stop with `paused` or the journal's
-  `paused` entry, not with `cpu_state`. `video.vga` shows the CRTC Start
-  Address the program set and the one on screen, which helps when a game
-  that flips pages flickers or shows half-drawn frames. `video.crt` is the
-  display timing the VGA registers describe (refresh rate, total and
-  displayed scanlines): port 3DAh reports retrace and display enable from
-  it in emulated time, and the Start Address is latched at each retrace. In
-  a VESA mode (`video.name` is `Vesa`), `video.vbe` shows the VBE mode
-  number, size and bits per pixel, the bank of the window at A0000h, the
-  bytes per scan line, the displayed start offset and the DAC width; the
-  log has a `Switch to VESA mode` line for each mode set. With
-  `machine=svga_et4000`, `video.et4000` has the chip's CR30-3Fh, whether
-  the KEY is set, Segment Select (write bank low, read bank high), the
-  Sierra DAC's command register and HiColor bits, and the VESA mode set;
-  its Super VGA modes are VGA modes (`Graphics320x200` for 256 colours or
-  HiColor, `Vga640x480` for 16) at the size `video.width`/`height` give,
-  and the log has a `Switch to Tseng mode` line for each. `pic` shows both
-  interrupt controllers' vector bases and their request (`irr`), mask
-  (`imr`) and in-service (`isr`) registers, master first: a request that
-  stays set under a mask bit is an IRQ the program has turned off. With
-  `[vfx1]`, `vfx1` has the VFX1's port, the driver's video mode (0 mono,
-  1 pages, 2 lines), the page select register, how often it was written
-  and how often the game read the head tracker (`polls`), and whether the
-  shutter glasses' 3D BIOS has its glasses on.
+  `cycles_per_ms`, the current CPU speed. `memory` has the RAM's size (`mb`)
+  and whether it is the default for the CPU and the display adapter
+  (`derived`: true while `memsize` isn't set; after a save state is loaded,
+  while the state's size is the default for its CPU and adapter). `cpu` has
+  the processor's `model` and whether it is the default for the display
+  adapter (`derived`: true while `cpu` isn't set; after a save state is
+  loaded, while the state's model is the default for its adapter). `paused`
+  (with `stop` and `stop_seq`) says whether the debugger has stopped the
+  machine, at a breakpoint or otherwise. `cpu_state` is the processor's own
+  state: `Running`, or `Halted` after HLT until an interrupt. It stays
+  `Running` while the machine is paused, so wait for a stop with `paused` or
+  the journal's `paused` entry, not with `cpu_state`. `video.name` names the
+  picture on the monitor, `video.width`/`height` give its size, and
+  `video.scanout` says which device scans it out (`device`: `vga` for the
+  adapter's VGA and VESA modes, or the 3dfx card's `banshee`, `voodoo1` or
+  `voodoo2`) and the bits of its pixels (`bpp`, in a VESA mode or the card's
+  own; null in the VGA's standard modes, which the name tells). While a
+  Banshee's or Voodoo3's desktop shows, as under Windows, `name` is like
+  `Banshee 640x480x16`, and `video.mode` is still the mode the BIOS last
+  set, often text mode 3. `video.vga` shows the CRTC Start Address the
+  program set and the one on screen, which helps when a game that flips
+  pages flickers or shows half-drawn frames. `video.crt` is the display
+  timing the VGA registers describe (refresh rate, total and displayed
+  scanlines): port 3DAh reports retrace and display enable from it in
+  emulated time, and the Start Address is latched at each retrace. In a VESA
+  mode (`video.name` is `Vesa`), `video.vbe` shows the VBE mode number, size
+  and bits per pixel, the bank of the window at A0000h, the bytes per scan
+  line, the displayed start offset and the DAC width; the log has a `Switch
+  to VESA mode` line for each mode set. With `machine=svga_et4000`,
+  `video.et4000` has the chip's CR30-3Fh, whether the KEY is set, Segment
+  Select (write bank low, read bank high), the Sierra DAC's command register
+  and HiColor bits, and the VESA mode set; its Super VGA modes are VGA modes
+  (`Graphics320x200` for 256 colours or HiColor, `Vga640x480` for 16) at the
+  size `video.width`/`height` give, and the log has a `Switch to Tseng mode`
+  line for each. `pic` shows both interrupt controllers' vector bases and
+  their request (`irr`), mask (`imr`) and in-service (`isr`) registers,
+  master first: a request that stays set under a mask bit is an IRQ the
+  program has turned off. With `[vfx1]`, `vfx1` has the VFX1's port, the
+  driver's video mode (0 mono, 1 pages, 2 lines), the page select register,
+  how often it was written and how often the game read the head tracker
+  (`polls`), and whether the shutter glasses' 3D BIOS has its glasses on.
 - **Check which host GPU draws with `/api/status` → `display`.** It is
   the log's `[DISPLAY]` line: with OpenGL, its version, the graphics chip
   (GL_RENDERER) and its vendor (GL_VENDOR), which on a laptop with two

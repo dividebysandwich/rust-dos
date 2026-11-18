@@ -994,7 +994,8 @@ async function refreshStatus() {
     }
     $("#st-csip").textContent = s.cs_ip;
     $("#st-mode").textContent = s.cpu_mode + (s.shell_idle ? " (prompt)" : "");
-    $("#st-video").textContent = `${hex(s.video.mode, 2)}h ${s.video.width}×${s.video.height}`;
+    $("#st-video").textContent = s.video.scanout.device === "vga"
+      ? `${hex(s.video.mode, 2)}h ${s.video.width}×${s.video.height}` : s.video.name;
     $("#st-fps").textContent = s.fps;
     $("#st-mips").textContent = stats.mips.toFixed(1);
     if ($("#pane-status").classList.contains("active")) $("#status-json").textContent = JSON.stringify(s, null, 2);

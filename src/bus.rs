@@ -3354,6 +3354,41 @@ impl Bus {
         self.adapter_display_size()
     }
 
+    /// The picture on the monitor: which device scans it out, its name
+    /// and the bits a pixel of a card's own mode (the debugger's
+    /// `video.scanout` and `video.name`). It is the 3dfx card's while
+    /// it drives the monitor (a Banshee's or Voodoo3's desktop, or a
+    /// Voodoo Graphics' or Voodoo2's 3D picture), else the VGA's mode.
+    /// The VGA keeps the mode the BIOS last set while the card shows its
+    /// own, often text mode 3 under Windows, so `video_mode` says nothing
+    /// of the picture then.
+    pub fn scanout(&self) -> Scanout {
+        if let Some(v) = &self.voodoo
+            && v.output()
+        {
+            let (width, height) = v.size();
+            let (device, title, bpp) = match (v.banshee(), v.board.model()) {
+                (Some(b), _) => ("banshee", "Banshee", b.desktop_bytes_per_pixel() * 8),
+                (None, crate::voodoo::Model::Voodoo2) => ("voodoo2", "Voodoo2", 16),
+                (None, _) => ("voodoo1", "Voodoo1", 16),
+            };
+            return Scanout {
+                device,
+                name: format!("{title} {width}x{height}x{bpp}"),
+                bpp: Some(bpp),
+            };
+        }
+        let bpp = match self.video_mode {
+            VideoMode::Vesa => self.vbe.mode.map(|m| u32::from(m.bpp)),
+            _ => None,
+        };
+        Scanout {
+            device: "vga",
+            name: format!("{:?}", self.video_mode),
+            bpp,
+        }
+    }
+
     /// The size of the screen of the mode the display adapter is in:
     /// `display_size`, but a Voodoo Graphics or Voodoo2 showing its
     /// picture instead of the VGA's doesn't count. That card is a second
@@ -3474,4 +3509,15 @@ impl Bus {
             log.flush();
         }
     }
+}
+
+/// The picture on the monitor (`Bus::scanout`): the device that scans
+/// it out (`vga`, `banshee`, `voodoo1` or `voodoo2`), its name (the VGA
+/// mode's, or the card's like `Banshee 640x480x16`), and the bits a
+/// pixel of a VESA mode or the card's own (None in the VGA's standard
+/// modes, which the name tells).
+pub struct Scanout {
+    pub device: &'static str,
+    pub name: String,
+    pub bpp: Option<u32>,
 }

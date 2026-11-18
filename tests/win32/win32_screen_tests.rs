@@ -723,6 +723,25 @@ fn gdi_drawing_that_changes_the_cards_desktop_counts_as_a_frame() {
     assert_eq!(frames_over_retraces(&mut cpu), 0);
 }
 
+#[test]
+fn the_status_names_the_cards_desktop_not_the_vgas_mode() {
+    let (program, data) = desktop_program();
+    let mut cpu = machine("scanout", program);
+    let vga = cpu.bus.scanout();
+    assert_eq!(
+        (vga.device, vga.name.as_str(), vga.bpp),
+        ("vga", "Text80x25Color", None)
+    );
+    run_until(&mut cpu, data, 1);
+    // The VGA keeps the BIOS's text mode under the card's desktop.
+    assert!(cpu.bus.video_mode.is_text());
+    let shown = cpu.bus.scanout();
+    assert_eq!(
+        (shown.device, shown.name.as_str(), shown.bpp),
+        ("banshee", "Banshee 640x480x16", Some(16))
+    );
+}
+
 /// Other modes: 320x200 at 8 bits with a palette, then 800x600 at 32.
 fn modes_program() -> (Vec<u8>, u32) {
     let mut d = data();
