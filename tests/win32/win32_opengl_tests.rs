@@ -117,6 +117,8 @@ const GLU32: &[&str] = &[
     "gluGetString",
 ];
 const KERNEL32: &[&str] = &["CreateThread"];
+/// USER32's imports after the others', so that the places above stay.
+const USER32_MORE: &[&str] = &["ChangeDisplaySettingsA"];
 const CREATE_WINDOW: usize = 0;
 const GET_DC: usize = 1;
 const CHOOSE_PIXEL_FORMAT: usize = 2;
@@ -198,6 +200,7 @@ const ORTHO_2D: usize = GLU + 1;
 const ERROR_STRING: usize = GLU + 2;
 const GLU_GET_STRING: usize = GLU + 3;
 const CREATE_THREAD: usize = GLU + GLU32.len();
+const CHANGE_DISPLAY_SETTINGS: usize = CREATE_THREAD + KERNEL32.len();
 
 /// A program importing the functions above, with `data` and the code
 /// `f` makes, and where its data is.
@@ -209,7 +212,7 @@ fn program(
     let list =
         |names: &[&'static str]| -> Vec<Imp> { names.iter().map(|n| Imp::Name(n)).collect() };
     let (user, gdi, gl, glu) = (list(USER32), list(GDI32), list(OPENGL32), list(GLU32));
-    let kernel = list(KERNEL32);
+    let (kernel, user_more) = (list(KERNEL32), list(USER32_MORE));
     let iat = b
         .imports(&[
             ("USER32.DLL", &user),
@@ -217,6 +220,7 @@ fn program(
             ("OPENGL32.DLL", &gl),
             ("GLU32.DLL", &glu),
             ("KERNEL32.DLL", &kernel),
+            ("USER32.DLL", &user_more),
         ])
         .concat();
     let data_rva = b.section(
@@ -2207,6 +2211,108 @@ fn pixels_read_back_in_the_packed_types_texels_come_in() {
                 assert_eq!(pixel, 0, "{kind:#x} on {name}");
             }
         }
+    }
+}
+
+/// A texture keeps its texels when the display's mode changes: the
+/// driver keeps OpenGL's textures, where DirectDraw's surfaces in video
+/// memory are lost. Oni draws its menus and play from textures it made
+/// before the player picks another resolution in its options.
+#[test]
+fn textures_survive_a_change_of_the_display_mode() {
+    const DEVMODE: u32 = 0x160;
+    // DM_BITSPERPEL, DM_PELSWIDTH and DM_PELSHEIGHT.
+    const DM_FIELDS: u32 = 0x1C_0000;
+    let mut d = data();
+    for i in 0..4 {
+        put(&mut d, TEXELS + 4 * i, &[0, 255, 0, 255]);
+    }
+    put(&mut d, DEVMODE + 36, &124u16.to_le_bytes());
+    put32(&mut d, DEVMODE + 40, DM_FIELDS);
+    put32(&mut d, DEVMODE + 104, 32);
+    put32(&mut d, DEVMODE + 108, 800);
+    put32(&mut d, DEVMODE + 112, 600);
+    let quad = |a: &mut CodeAssembler, l: &Layout, c: &mut Calls| -> Result<(), IcedError> {
+        c.api(a, l, CLEAR, &[Arg::I(GL_COLOR_BUFFER_BIT)])?;
+        c.api(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+        for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            let st = [Arg::F((x + 1.0) / 2.0), Arg::F((y + 1.0) / 2.0)];
+            c.api(a, l, TEX_COORD2F, &st)?;
+            c.api(a, l, VERTEX2F, &[Arg::F(x), Arg::F(y)])?;
+        }
+        c.api(a, l, END, &[])
+    };
+    let read = |a: &mut CodeAssembler, l: &Layout, c: &mut Calls, at| -> Result<(), IcedError> {
+        let one = [
+            Arg::I(32),
+            Arg::I(32),
+            Arg::I(1),
+            Arg::I(1),
+            Arg::I(GL_RGBA),
+            Arg::I(GL_UNSIGNED_BYTE),
+            Arg::At(at),
+        ];
+        c.api(a, l, READ_PIXELS, &one)
+    };
+    for (card, name) in [
+        (Draws::Voodoo3, "a Voodoo3"),
+        (Draws::ToadForce, "a ToadForce"),
+    ] {
+        let mut changed = 0;
+        let (exe, data) = program(&d, |a, l| {
+            let mut c = Calls { next: 0 };
+            start(a, l, &mut c)?;
+            c.api(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(TEXTURE)])?;
+            let texture_2d = Arg::I(GL_TEXTURE_2D);
+            c.api(a, l, BIND_TEXTURE, &[texture_2d, Arg::Val(TEXTURE)])?;
+            let image = [
+                texture_2d,
+                Arg::I(0),
+                Arg::I(GL_RGB),
+                Arg::I(2),
+                Arg::I(2),
+                Arg::I(0),
+                Arg::I(GL_RGBA),
+                Arg::I(GL_UNSIGNED_BYTE),
+                Arg::At(TEXELS),
+            ];
+            c.api(a, l, TEX_IMAGE_2D, &image)?;
+            let nearest = [
+                texture_2d,
+                Arg::I(GL_TEXTURE_MIN_FILTER),
+                Arg::I(GL_NEAREST),
+            ];
+            c.api(a, l, TEX_PARAMETERI, &nearest)?;
+            let replace = [
+                Arg::I(GL_TEXTURE_ENV),
+                Arg::I(GL_TEXTURE_ENV_MODE),
+                Arg::I(GL_REPLACE),
+            ];
+            c.api(a, l, TEX_ENVI, &replace)?;
+            c.api(a, l, ENABLE, &[texture_2d])?;
+            quad(a, l, &mut c)?;
+            read(a, l, &mut c, PIXELS)?;
+            c.api(a, l, SWAP_BUFFERS, &[Arg::Val(HDC)])?;
+            changed = c.next;
+            c.api(
+                a,
+                l,
+                CHANGE_DISPLAY_SETTINGS,
+                &[Arg::At(DEVMODE), Arg::I(0)],
+            )?;
+            // The swap after the change makes the buffers again.
+            c.api(a, l, SWAP_BUFFERS, &[Arg::Val(HDC)])?;
+            quad(a, l, &mut c)?;
+            read(a, l, &mut c, PIXELS + 4)?;
+            finish(a, l)
+        });
+        let mut cpu = machine_on("textures_mode_change", card, exe);
+        run_until_done(&mut cpu, data);
+        let r = |i: u32| peek(&cpu, data + RESULTS + 4 * i);
+        assert_eq!(r(changed), 0, "DISP_CHANGE_SUCCESSFUL on {name}");
+        let green = |at: u32| peek(&cpu, data + PIXELS + at) & 0xFF_FFFF;
+        assert_eq!(green(0), 0x00_FF00, "before the change on {name}");
+        assert_eq!(green(4), 0x00_FF00, "after the change on {name}");
     }
 }
 
