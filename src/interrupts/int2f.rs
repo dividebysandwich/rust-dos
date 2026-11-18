@@ -1,10 +1,12 @@
 //! INT 2Fh — DOS multiplex interrupt.
 //!
 //! Only the XMS driver (AX=43xxh), the DPMI host (AX=1687h, see dpmi.rs),
-//! the MSCDEX CD-ROM extensions (AH=15h, see `mscdex.rs`), the DOS internal
-//! calls that find DOS's data segment and file tables (AX=1203h, 1216h,
-//! 1220h), DOS's interface for Windows' DOSMGR (AX=1607h BX=0015h) and the
-//! expanded memory manager's part of Windows' exit (AX=1606h) are there.
+//! the MSCDEX CD-ROM extensions (AH=15h, and MSCDEX's installation check
+//! through the network redirector's, AX=1100h, see `mscdex.rs`), the DOS
+//! internal calls that find DOS's data segment and file tables (AX=1203h,
+//! 1216h, 1220h), DOS's interface for Windows' DOSMGR (AX=1607h BX=0015h)
+//! and the expanded memory manager's part of Windows' exit (AX=1606h) are
+//! there.
 //! Every other function leaves the registers untouched, which callers read
 //! as "not installed" (AL stays 00h for the usual install checks, AX stays
 //! 1687h for the DPMI check with the host off, ...).
@@ -92,6 +94,7 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.bus.activity.poll();
             cpu.bus.release_time_slice();
         }
+        0x1100 => super::mscdex::redirector_check(cpu),
         _ if cpu.get_ah() == 0x15 => super::mscdex::handle(cpu, cpu.get_al()),
         // Everything else (Windows 16xxh, ...) is not installed: the
         // registers come back unchanged.

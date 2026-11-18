@@ -727,6 +727,18 @@ pub fn destroyed(cpu: &mut Cpu, id: u32) {
     end_lock(cpu, id);
     super::d3d::shadow::forget(cpu, id);
     free_memory(cpu, id);
+    // The front buffer of a flip chain in video memory goes: the screen
+    // shows the start of video memory again, GDI's surface, as after
+    // FlipToGDISurface. A flip may have left it on a back buffer's
+    // memory, which no surface has now, and the next primary surface the
+    // program makes is at the start.
+    if s.is_primary()
+        && s.caps[0] & DDSCAPS_FLIP != 0
+        && s.memory == MEM_VIDEO
+        && display::screen_mode(cpu).is_some()
+    {
+        display::show(cpu, 0);
+    }
     for &(other, held) in &s.attached {
         // A back buffer it flipped with no longer does.
         if s.caps[0] & DDSCAPS_FLIP != 0

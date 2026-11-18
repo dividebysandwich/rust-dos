@@ -82,6 +82,7 @@ pub fn translate(
         Movzx => movx(instr, false, &mut u),
         Movsx => movx(instr, true, &mut u),
         Xchg => xchg(instr, &mut u),
+        Xlatb => xlat(instr, &mut u),
         Bswap if i486 => bswap(instr, &mut u),
         Cbw => extend_acc(1, false, &mut u),
         Cwde => extend_acc(2, false, &mut u),
@@ -121,7 +122,7 @@ pub fn translate(
         Push => push(instr, stack32, &mut u),
         Pop => pop(instr, stack32, &mut u),
         Pusha | Pushad => pusha(instr, stack32, &mut u),
-        Popa | Popad => popa(instr, stack32, &mut u),
+        Popa | Popad => popa(instr, stack32, i486, &mut u),
         Pushf | Pushfd => pushf(instr, stack32, &mut u),
         Popf | Popfd if system && !real => popf(instr, stack32, &mut u),
         Bt => bit_op(instr, BitKind::Test, &mut u),
@@ -405,6 +406,29 @@ fn movx(instr: &Instruction, signed: bool, u: &mut Vec<Uop>) -> bool {
     }
     u.push(Uop::Extend { t: T0, from, signed });
     u.push(Uop::Set { r: dest, t: T0 });
+    true
+}
+
+/// XLAT: AL = the byte at seg:(E)BX + AL. iced gives the operand as a
+/// memory reference with base (E)BX and index AL, which `Uop::Ea` adds
+/// zero-extended, and wraps to 16 bits with a 16-bit address size.
+fn xlat(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+    if mem(instr, T1, 1, false, u).is_none() {
+        return false;
+    }
+    u.push(Uop::Load {
+        dst: T0,
+        m: T1,
+        size: 1,
+    });
+    u.push(Uop::Set {
+        r: Gpr {
+            index: 0,
+            high: false,
+            size: 1,
+        },
+        t: T0,
+    });
     true
 }
 
@@ -916,10 +940,12 @@ fn pusha(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
 /// POPA and POPAD, as `transfer::popa`: the registers loaded one by one
 /// from EDI's slot up, skipping the stack pointer's (which is still read),
 /// then the stack pointer moved. POPAD on a 16-bit stack loads the upper
-/// half of ESP on a 386 only: its handler runs it.
-fn popa(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
+/// half of ESP on a 386 only: its handler runs it there. On a 486 and
+/// later it moves SP alone, as here (DOS/4GW's 16-bit code that calls
+/// real mode runs one for each call).
+fn popa(instr: &Instruction, stack32: bool, i486: bool, u: &mut Vec<Uop>) -> bool {
     let size = if instr.code() == Code::Popad { 4 } else { 2 };
-    if size == 4 && !stack32 {
+    if size == 4 && !stack32 && !i486 {
         return false;
     }
     let sp = sp(stack32);

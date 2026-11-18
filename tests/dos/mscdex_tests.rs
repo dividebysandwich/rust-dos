@@ -81,6 +81,38 @@ fn mscdex_reports_mounted_cd_drives() {
     assert_eq!(cpu.bus.read_8(0x30001), 6);
 }
 
+/// MSCDEX's check through the redirector's (INT 2Fh AX=1100h): the word
+/// the caller pushed before the INT, above the INT's IP, CS and FLAGS.
+fn redirector_check(cpu: &mut Cpu, pushed: u16) -> u16 {
+    let frame = 0x30000; // 3000:0000
+    cpu.set_ss(0x3000);
+    cpu.set_sp(0x0000);
+    cpu.bus.write_16(frame + 6, pushed);
+    int2f(cpu, 0x1100, 0x1234, 0x5678);
+    cpu.bus.read_16(frame + 6)
+}
+
+#[test]
+fn the_redirector_check_finds_mscdex_with_a_cd_drive() {
+    let base = scratch("redirector", &["c", "cd"]);
+    let mut cpu = Cpu::new(base.join("c"));
+
+    // Without a CD-ROM drive MSCDEX isn't there to answer.
+    assert_eq!(redirector_check(&mut cpu, 0xDADA), 0xDADA);
+    assert_eq!(cpu.ax(), 0x1100);
+
+    cpu.bus
+        .mount_drive(3, &base.join("cd"), cdrom(), false)
+        .unwrap();
+    assert_eq!(redirector_check(&mut cpu, 0xDADA), 0xADAD);
+    assert_eq!((cpu.ax(), cpu.bx(), cpu.cx()), (0x11FF, 0x1234, 0x5678));
+
+    // Without DADAh it is the redirector's own check, which stays
+    // unanswered (#1303).
+    assert_eq!(redirector_check(&mut cpu, 0x0000), 0x0000);
+    assert_eq!(cpu.ax(), 0x1100);
+}
+
 #[test]
 fn device_requests_answer_ioctl_queries() {
     let base = scratch("ioctl", &["c", "cd"]);
