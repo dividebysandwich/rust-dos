@@ -282,6 +282,16 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
             if d.flags & OFN_EXPLORER != 0 {
                 notify(&d, &mut o, CDN_SELCHANGE);
             }
+            // The File name box gets the focus with its text selected, so
+            // a name typed replaces the one the program gave. Windows 98
+            // SE does this once the hook has had WM_INITDIALOG and
+            // CDN_INITDONE: a hook that moves the focus in either loses it
+            // to the box, and only one that moves it later (from a message
+            // it posts itself) keeps it. Wine's FILEDLG95_InitControls
+            // calls SetFocus alone, before the hook's dialog is made.
+            let edit = item(cpu, dlg, EDT1);
+            o.user("SetFocus", &[edit]);
+            o.send(edit, EM_SETSEL, 0, u32::MAX);
         }
         T_TEXT => {
             d.text = scratch_text(cpu, c, B_TEXT, TEXT_SIZE);
@@ -455,12 +465,6 @@ fn init(cpu: &mut Cpu, dlg: u32, id: u32) -> Option<u32> {
     if file != 0 {
         o.set_item_text(dlg, EDT1, &name);
     }
-    // The File name box gets the focus with its text selected, so a
-    // name typed replaces the one the program gave (Windows 98 SE;
-    // Wine's FILEDLG95_InitControls calls SetFocus alone).
-    let edit = item(cpu, dlg, EDT1);
-    o.user("SetFocus", &[edit]);
-    o.send(edit, EM_SETSEL, 0, u32::MAX);
     if d.flags & OFN_READONLY != 0 {
         o.user("SendDlgItemMessageA", &[dlg, CHX1, BM_SETCHECK, 1, 0]);
     }
