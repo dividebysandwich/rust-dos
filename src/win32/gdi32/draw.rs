@@ -40,22 +40,40 @@ pub struct Canvas {
     drawn: Rect,
 }
 
+/// What of its surface a canvas loads.
+#[derive(Clone, Copy)]
+enum Load {
+    /// The rows it draws on, whole.
+    Rows,
+    /// The columns of those rows it draws on.
+    Columns,
+    /// Those columns, unread where reading waits (`Canvas::open_to_write`).
+    Unread,
+}
+
 impl Canvas {
     /// Load what the DC `hdc` draws on within `bounds`, a rectangle in
     /// device coordinates. None if it can't draw or nothing of `bounds`
     /// may be drawn on.
     pub fn open(cpu: &mut Cpu, hdc: u32, bounds: Rect) -> Option<Canvas> {
-        Canvas::open_area(cpu, hdc, bounds, false)
+        Canvas::open_area(cpu, hdc, bounds, Load::Rows)
     }
 
     /// `open` for a function that reads and draws only the pixels the
     /// clip region lets it within `bounds`: on a surface of 8 bits a
     /// pixel or more it loads only their columns.
     pub fn open_columns(cpu: &mut Cpu, hdc: u32, bounds: Rect) -> Option<Canvas> {
-        Canvas::open_area(cpu, hdc, bounds, true)
+        Canvas::open_area(cpu, hdc, bounds, Load::Columns)
     }
 
-    fn open_area(cpu: &mut Cpu, hdc: u32, bounds: Rect, columns: bool) -> Option<Canvas> {
+    /// `open_columns` for a function that puts the pixels it draws
+    /// without reading them first: where reading them would wait for the
+    /// card, they aren't read (`Surface::area_to_write`).
+    pub fn open_to_write(cpu: &mut Cpu, hdc: u32, bounds: Rect) -> Option<Canvas> {
+        Canvas::open_area(cpu, hdc, bounds, Load::Unread)
+    }
+
+    fn open_area(cpu: &mut Cpu, hdc: u32, bounds: Rect, load: Load) -> Option<Canvas> {
         let dc = gdi(cpu).dc(hdc)?.clone();
         let place = dc::place(cpu, hdc)?;
         let (ox, oy) = place.origin;
@@ -73,10 +91,10 @@ impl Canvas {
             dc::accumulate(cpu, hdc, bounds);
             return None;
         }
-        let surface = if columns {
-            Surface::load_area(cpu, place.target, area)?
-        } else {
-            Surface::load(cpu, place.target, area.top, area.bottom)?
+        let surface = match load {
+            Load::Rows => Surface::load(cpu, place.target, area.top, area.bottom)?,
+            Load::Columns => Surface::load_area(cpu, place.target, area)?,
+            Load::Unread => Surface::area_to_write(cpu, place.target, area)?,
         };
         let rects = rects
             .into_iter()
@@ -261,6 +279,11 @@ pub fn uses_pattern(rop: u8) -> bool {
 
 pub fn uses_source(rop: u8) -> bool {
     ((rop >> 2) ^ rop) & 0x33 != 0
+}
+
+/// Whether a raster operation's result depends on the destination.
+pub fn uses_destination(rop: u8) -> bool {
+    ((rop >> 1) ^ rop) & 0x55 != 0
 }
 
 /// How a brush fills, as a surface's values.
@@ -1566,7 +1589,16 @@ pub fn blit_from(
         take_call_time(cpu, &ddc);
         return true;
     }
-    let Some(mut c) = Canvas::open_columns(cpu, hdst, r) else {
+    // A raster operation that leaves out the destination (SRCCOPY,
+    // PATCOPY and their inverses, BLACKNESS) doesn't read it, and where
+    // reading it would wait for the card's 3D drawing, the blit doesn't
+    // (`Canvas::open_to_write`).
+    let open = if uses_destination(rop3) {
+        Canvas::open_columns
+    } else {
+        Canvas::open_to_write
+    };
+    let Some(mut c) = open(cpu, hdst, r) else {
         take_call_time(cpu, &ddc);
         return true;
     };
