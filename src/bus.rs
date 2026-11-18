@@ -206,6 +206,10 @@ pub struct Bus {
     /// Retraces counted, and the one of the last page flip.
     retraces: u64,
     last_flip: Option<u64>,
+    /// The retrace of the last frame DirectDraw showed or the 3dfx card
+    /// swapped in, while the card drives the monitor. Not saved: a loaded
+    /// state starts without one.
+    last_present: Option<u64>,
     /// The Tandy's or PCjr's picture memory as it was at the last retrace,
     /// and where it was: programs (and the recompiler) write it as plain
     /// RAM, which marks nothing for repainting.
@@ -3238,17 +3242,33 @@ impl Bus {
     /// flips (a flip within the last second or so) only the flips count.
     /// The 3dfx card only ever flips. A frame the built-in Windows'
     /// DirectDraw showed counts once, however many blits made it.
+    ///
+    /// GDI's drawing that changed the picture counts as a frame too. On
+    /// the VGA and the VESA modes it marks the rows it changed, as the
+    /// program's own writes do. A Banshee or Voodoo3 shows the desktop
+    /// from its own memory, which marks nothing, so there a retrace
+    /// after GDI changed the picture counts, unless DirectDraw showed a
+    /// frame or the card swapped in the last second or so: then those
+    /// are the frames, as flips are on the VGA.
     fn count_frame(&mut self) {
         self.retraces += 1;
         let flipped = std::mem::take(&mut self.vga.flipped);
         let drawn = std::mem::take(&mut self.vga.drawn);
         let presented = std::mem::take(&mut self.vga.presented);
+        let gdi = std::mem::take(&mut self.vga.gdi_changed);
         // While the 3dfx card shows, its buffer swaps are the frames, or
         // on a Banshee or Voodoo3, what DirectDraw shows in its memory.
         if let Some(v) = &mut self.voodoo {
             let swapped = std::mem::take(&mut v.swapped);
             if v.output() {
-                self.frames_drawn += swapped.max(u64::from(presented));
+                if presented || swapped > 0 {
+                    self.last_present = Some(self.retraces);
+                }
+                let presenting = self
+                    .last_present
+                    .is_some_and(|at| self.retraces - at < 70);
+                let shown = presented || (gdi && !presenting);
+                self.frames_drawn += swapped.max(u64::from(shown));
                 self.activity.swapped(swapped);
                 return;
             }

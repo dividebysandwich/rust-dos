@@ -98,6 +98,10 @@ pub struct VgaCard {
     /// writes through a lock or a device context of it
     /// (`Bus::frames_drawn`).
     pub presented: bool,
+    /// Whether the built-in Windows' GDI changed the picture on the
+    /// screen since the last retrace: drew pixels other than those there
+    /// (`Bus::frames_drawn`).
+    pub gdi_changed: bool,
 
     /// Whether blinking characters show (the blink's phase, which the
     /// front end sets).
@@ -200,6 +204,7 @@ impl VgaCard {
             drawn: false,
             flipped: false,
             presented: false,
+            gdi_changed: false,
             blink_on: true,
             cga_mode: 0x29,
             cga_color: 0x30,
@@ -1380,7 +1385,7 @@ crate::state_fields!(VgaCard {
     // The front end's.
     blink_on,
     // Counted at the next retrace, as the frame counter isn't saved.
-    presented,
+    presented, gdi_changed,
 });
 
 impl VgaCard {

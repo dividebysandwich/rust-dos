@@ -126,6 +126,7 @@ impl Bus {
             toadforce_memory,
             retraces,
             last_flip,
+            last_present: _,
             gate_array_shadow,
             gate_array_shadow_at,
             opl,
@@ -461,6 +462,7 @@ impl Bus {
             toadforce_memory,
             retraces,
             last_flip,
+            last_present,
             gate_array_shadow,
             gate_array_shadow_at,
             opl,
@@ -597,6 +599,7 @@ impl Bus {
         }
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
+        *last_present = None;
         *virge = Default::default();
         if r.next_is(b"VIRG") {
             virge.load(&mut r.section(b"VIRG", VIRGE_VERSION)?)?;

@@ -1769,27 +1769,30 @@ by physical address.
   frame rate cap (`fps_cap`, `auto` by default: 60, and the display's rate
   for a present that waits for the retrace; CONFIGURATION.md's "Frame rate
   cap"), which holds the 3dfx card's swaps and the built-in Windows'
-  presents: start a run that measures how fast a game draws with
-  `--fps-cap off` (or `POST /api/fps_cap {"fps_cap":"off"}`), and check
-  `video.fps_cap` in `/api/status` ("auto", a rate, or null for off)
-  before quoting a frame rate. `fps_cap` in `/api/stats` (`features` has
-  `fps_cap_stats`) counts what the cap did to the frames since the machine
-  started: `shown` (the frames through it, without the presents it leaves
-  to the display's retrace), `held` (those that waited for their turn),
-  `late` (those that came after it), `reanchors` (those late enough for the
-  turns to start again from them) and `dropped_ms` (the time held frames
-  waited because of that). Take the difference of two readings:
-  `dropped_ms` over the emulated time between them is the most a game
-  whose logic steps once a frame ran slow for the cap, and `held` at 0
-  says the cap held nothing. `/api/stats` reports `mips` (host speed while
-  executing guest code), `emulated_mips` (guest instructions per wall-clock
-  second) and the decode-cache hit rate, averaged over about a second. Its
-  `frame` object has the settings window's Stats page numbers and the
-  emulated speed over the last quarter second: the game runs at full speed
-  when `emulated_speed` (emulated seconds a wall second) stays near 1,
-  `frame.fps` is the frames the program draws a second (the top-level `fps`
-  counts the window's frames), and `cpu_use` is the percent of the wall time
-  the emulator's main thread works (running the machine and drawing the
+  presents: start a run that measures how fast a game draws with `--fps-cap
+  off` (or `POST /api/fps_cap {"fps_cap":"off"}`), and check `video.fps_cap`
+  in `/api/status` ("auto", a rate, or null for off) before quoting a frame
+  rate. `fps_cap` in `/api/stats` (`features` has `fps_cap_stats`) counts
+  what the cap did to the frames since the machine started: `shown` (the
+  frames through it, without the presents it leaves to the display's
+  retrace), `held` (those that waited for their turn), `late` (those that
+  came after it), `reanchors` (those late enough for the turns to start
+  again from them) and `dropped_ms` (the time held frames waited because of
+  that). Take the difference of two readings: `dropped_ms` over the emulated
+  time between them is the most a game whose logic steps once a frame ran
+  slow for the cap, and `held` at 0 says the cap held nothing. `/api/stats`
+  reports `mips` (host speed while executing guest code), `emulated_mips`
+  (guest instructions per wall-clock second) and the decode-cache hit rate,
+  averaged over about a second. Its `frame` object has the settings window's
+  Stats page numbers and the emulated speed over the last quarter second:
+  the game runs at full speed when `emulated_speed` (emulated seconds a wall
+  second) stays near 1, `frame.fps` is the frames the program draws a second
+  (the top-level `fps` counts the window's frames; a frame is a retrace
+  after which the picture changed: the program's own drawing, a page flip, a
+  3dfx buffer swap, a blit or flip of DirectDraw's primary surface, or GDI's
+  drawing that changed pixels on the screen, so a repaint of the same pixels
+  counts as none), and `cpu_use` is the percent of the wall time the
+  emulator's main thread works (running the machine and drawing the
   picture), so 100 minus it is that thread's time to spare, on one host
   core. `audio_driver` is what played the sound during the run. Its
   `frame_times` object covers the host's last 1024 frames while the machine

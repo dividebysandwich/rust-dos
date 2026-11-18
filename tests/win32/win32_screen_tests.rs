@@ -667,6 +667,62 @@ fn a_flip_on_the_card_counts_as_a_frame() {
     assert_eq!(cpu.bus.frames_drawn - before, 1);
 }
 
+/// On the desktop, through GDI: a pixel drawn red (step 1), the same
+/// pixel blue (step 2), and blue again (step 3).
+fn gdi_frames_program() -> (Vec<u8>, u32) {
+    program(&[USER32, GDI32, DDRAW], &data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        c.api(a, l, GET_DC, &[Arg::I(0)])?;
+        a.mov(dword_ptr(l.at(HDC)), eax)?;
+        for (step, color) in [(1, 0x0000_00FF), (2, 0x00FF_0000)] {
+            c.api(
+                a,
+                l,
+                SET_PIXEL,
+                &[Arg::Val(HDC), Arg::I(300), Arg::I(200), Arg::I(color)],
+            )?;
+            wait(a, l, step)?;
+        }
+        c.api(
+            a,
+            l,
+            SET_PIXEL,
+            &[Arg::Val(HDC), Arg::I(300), Arg::I(200), Arg::I(0x00FF_0000)],
+        )?;
+        finish(a, l, 3)
+    })
+}
+
+/// The frames counted over the next few retraces.
+fn frames_over_retraces(cpu: &mut Cpu) -> u64 {
+    let before = cpu.bus.frames_drawn;
+    for _ in 0..3 {
+        next_retrace(cpu);
+    }
+    cpu.bus.frames_drawn - before
+}
+
+#[test]
+fn gdi_drawing_that_changes_the_cards_desktop_counts_as_a_frame() {
+    let (program, data) = gdi_frames_program();
+    let mut cpu = machine("gdi_frames", program);
+    run_until(&mut cpu, data, 1);
+    frames_over_retraces(&mut cpu);
+    // The card shows the desktop from its own memory, which the VGA's
+    // rows know nothing of.
+    assert!(cpu.bus.voodoo_output());
+    // The pixel changes: one frame.
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 2);
+    assert_eq!(shown(&mut cpu, 300, 200), [0, 0, 0xFF]);
+    assert_eq!(frames_over_retraces(&mut cpu), 1);
+    // Drawn again the same: nothing changed, no frame.
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 3);
+    assert_eq!(frames_over_retraces(&mut cpu), 0);
+}
+
 /// Other modes: 320x200 at 8 bits with a palette, then 800x600 at 32.
 fn modes_program() -> (Vec<u8>, u32) {
     let mut d = data();
