@@ -20,14 +20,31 @@ use rust_dos::games::GameEntry;
 /// terminal, it shares the terminal's and keeps it for its output. Windows
 /// 11 24H2 and later don't open one at all (the manifest's
 /// consoleAllocationPolicy, packaging/windows/rust-dos.manifest).
+///
+/// FreeConsole closes the console's handles but leaves their numbers as
+/// the standard handles, and Windows gives a closed handle's number to
+/// the next file opened. Output to stderr then went into that file: into
+/// the run lock's file, whose shared lock refuses every write (error 33),
+/// so the first `eprintln!` panicked (#1347). The standard handles are
+/// set to none, which std's output skips, as in a program started
+/// without a console.
 #[cfg(windows)]
 pub(crate) fn leave_explorer_console() {
-    use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+    use windows_sys::Win32::System::Console::{
+        FreeConsole, GetConsoleProcessList, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
+        STD_OUTPUT_HANDLE, SetStdHandle,
+    };
     let mut pids = [0u32; 2];
     // SAFETY: the list has room for the two entries it is given.
     if unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) } == 1 {
-        // SAFETY: nothing holds on to the console's handles.
-        unsafe { FreeConsole() };
+        // SAFETY: nothing holds on to the console's handles, and no other
+        // thread runs yet to read the standard handles meanwhile.
+        unsafe {
+            FreeConsole();
+            for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+                SetStdHandle(which, std::ptr::null_mut());
+            }
+        }
     }
 }
 
