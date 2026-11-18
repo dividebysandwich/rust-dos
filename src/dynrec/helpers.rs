@@ -286,6 +286,11 @@ pub fn card_state(cpu: &mut Cpu, ctx: &mut JitCtx) {
         None => cpu.bus.lfb_direct().map(CardKey::Lfb),
     };
     if key == ctx.card_key {
+        // Commands queued or run since leave the answer as it was, but
+        // not whether a write through the bus may change it.
+        if key.is_none() {
+            ctx.card_retry = cpu.bus.toadforce_queued();
+        }
         return;
     }
     // A Banshee's memory the code wrote before what it may do changes:
