@@ -225,8 +225,7 @@ pub(super) fn release_semaphore(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// Wait for the objects of `handles` (all, or one), for at most `ms`. A
 /// wait that ends at once, and one with no time to wait that times out at
 /// once, as the polls of a loop that waits do, allocate nothing.
-/// `arguments`: the call read no RAM but its arguments (`found_none`).
-fn wait(cpu: &mut Cpu, handles: &[u32], all: bool, ms: u32, arguments: bool) -> Option<u32> {
+fn wait(cpu: &mut Cpu, handles: &[u32], all: bool, ms: u32) -> Option<u32> {
     debug_assert!(handles.len() <= MAXIMUM_WAIT_OBJECTS as usize);
     let mut ids = [0; MAXIMUM_WAIT_OBJECTS as usize];
     for (id, &handle) in ids.iter_mut().zip(handles) {
@@ -243,7 +242,7 @@ fn wait(cpu: &mut Cpu, handles: &[u32], all: bool, ms: u32, arguments: bool) -> 
         return Some(result);
     }
     if ms == 0 {
-        found_none(cpu, objects, arguments);
+        found_none(cpu, objects);
         return Some(WAIT_TIMEOUT);
     }
     let deadline = (ms != INFINITE).then(|| cpu.bus.clock.now_micros() + ms as u64 * 1000);
@@ -279,12 +278,13 @@ fn wait(cpu: &mut Cpu, handles: &[u32], all: bool, ms: u32, arguments: bool) -> 
 ///
 /// A change notification is the exception: the wait looks at its
 /// directory on the host, which another program may change, and notes
-/// when it looked. `arguments`: the call read no RAM but its arguments,
-/// which a pass that counts needs (`idle::reads_arguments`). The polls
+/// when it looked. The call read no RAM but its arguments and the array
+/// of handles WaitForMultipleObjects names (`idle::reads_arguments`),
+/// which a pass that counts needs. The polls
 /// arm the loop (`idle::service_polled`), as Sleep(0)'s do: a worker
 /// thread that polls a mutex another thread holds, with nothing else to
 /// do, spins for the rest of its turn (#1222).
-fn found_none(cpu: &mut Cpu, objects: &[u32], arguments: bool) {
+fn found_none(cpu: &mut Cpu, objects: &[u32]) {
     let objects_of = &cpu.bus.win32.objects;
     let looks = objects.iter().any(|&id| {
         matches!(
@@ -296,16 +296,14 @@ fn found_none(cpu: &mut Cpu, objects: &[u32], arguments: bool) {
         return;
     }
     crate::idle::pure_call(cpu, None);
-    if arguments {
-        crate::idle::reads_arguments(cpu);
-    }
+    crate::idle::reads_arguments(cpu);
     cpu.bus.observe.polled = true;
 }
 
 /// WaitForSingleObject(handle, ms), and WaitForSingleObjectEx with its
 /// alertable flag, which nothing alerts yet.
 pub(super) fn wait_for_single_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    wait(cpu, &[args[0]], false, args[1], true)
+    wait(cpu, &[args[0]], false, args[1])
 }
 
 /// WaitForMultipleObjects(count, handles, all, ms), and the Ex one.
@@ -325,12 +323,9 @@ pub(super) fn wait_for_multiple_objects(cpu: &mut Cpu, args: &[u32]) -> Option<u
     if cpu.bus.guest_faulted() {
         return None;
     }
-    // The handles are arguments too where they are in the bytes above the
-    // stack's top that a pass that counts takes a call to read, as an
-    // array on the caller's stack often is. Elsewhere a counter may be
-    // among them, and the loop isn't skipped.
-    let arguments = crate::idle::above_stack_top(cpu, at, 4 * count);
-    wait(cpu, handles, all != 0, ms, arguments)
+    // A pass that counts sees whether a count is among the handles.
+    crate::idle::reads_also(cpu, at, 4 * count);
+    wait(cpu, handles, all != 0, ms)
 }
 
 /// Sleep(ms), and SleepEx(ms, alertable), which returns 0: other threads
