@@ -540,7 +540,9 @@ impl Activity {
     /// The program wrote `bytes` bytes to video memory at `offset`, at
     /// instruction `at`. (The recompiler counts a block's instructions as
     /// it enters it and gives back those it didn't run, so `at` may go back
-    /// a little.)
+    /// a little.) Translated code counts its own writes to the VGA's
+    /// planes and the VESA frame buffer the same way (`dynrec::x64`'s
+    /// `store_thunk` and `card_count`): what changes here changes there.
     #[inline]
     pub fn video_write(&mut self, at: u64, offset: u64, bytes: u64) {
         self.video_bytes += bytes;
