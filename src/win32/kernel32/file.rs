@@ -393,9 +393,20 @@ pub(super) fn read_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if read != 0 && !cpu.bus.guest_probe(read, 4, true) {
         return None;
     }
+    // A read of a file at its end reads no bytes and changes nothing but
+    // the count it writes, which an idle proof can follow
+    // (`idle::pure_call`), as it follows Smacker's read-ahead calling it
+    // at the end of a movie until the last frame's time. Not a read that
+    // empties a file a create call left for its first use, nor one of a
+    // device. It reads nothing but its arguments (`idle::reads_arguments`).
+    let follow = cpu.bus.observe.on && device.is_none() && !cpu.bus.disk.settles(open.sft);
     let (count, error) = read_open(cpu, open, buffer, n)?;
     if read != 0 {
         cpu.bus.guest_write_32(read, count);
+    }
+    if follow && count == 0 && error.is_none() {
+        crate::idle::pure_call(cpu, None);
+        crate::idle::reads_arguments(cpu);
     }
     Some(result(cpu, error))
 }
