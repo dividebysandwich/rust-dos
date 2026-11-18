@@ -2956,8 +2956,6 @@ impl Gen<'_> {
                 let at = self.ops.new_dynamic_label();
                 dynasm!(self.ops
                     ; .arch x64
-                    ; cmp BYTE [rbx + CPL], 0
-                    ; jne =>at
                     ; mov eax, DWORD [rbx + FLAGS]
                 );
                 if size == 4 {
@@ -2969,11 +2967,26 @@ impl Gen<'_> {
                         ; jnz =>at
                     );
                 }
+                // EDX: the flags it loads at this CPL and IOPL (CPL and
+                // IOPL compared as bits 12-13).
                 dynasm!(self.ops
                     ; .arch x64
+                    ; movzx ecx, BYTE [rbx + CPL]
+                    ; mov edx, POPF_RING0 as i32
+                    ; test ecx, ecx
+                    ; jz >mask
+                    ; shl ecx, 12
+                    ; mov edx, eax
+                    ; and edx, 0x3000
+                    ; cmp ecx, edx
+                    ; mov edx, POPF_IOPL as i32
+                    ; jbe >mask
+                    ; mov edx, POPF_USER as i32
+                    ; mask:
                     ; mov ecx, Rd(r(t))
-                    ; and ecx, POPF_RING0 as i32
-                    ; and eax, !POPF_RING0 as i32
+                    ; and ecx, edx
+                    ; not edx
+                    ; and eax, edx
                     ; or eax, ecx
                     ; or eax, 2
                     ; mov DWORD [rbx + FLAGS], eax

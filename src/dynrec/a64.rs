@@ -2277,8 +2277,7 @@ impl Gen<'_> {
                 // As x86-64's.
                 let t_ = r(t);
                 let at = self.ops.new_dynamic_label();
-                self.field(Access::Ldr8, 1, layout::CPL);
-                dynasm!(self.ops ; .arch aarch64 ; cbnz w1, =>at);
+                let mask = self.ops.new_dynamic_label();
                 self.field(Access::Ldr32, 0, layout::FLAGS);
                 if size == 4 {
                     self.mov32(2, POPF_KEPT);
@@ -2289,9 +2288,25 @@ impl Gen<'_> {
                         ; b.ne =>at
                     );
                 }
+                // W2: the flags it loads at this CPL and IOPL.
+                self.field(Access::Ldr8, 1, layout::CPL);
                 self.mov32(2, POPF_RING0);
+                dynasm!(self.ops ; .arch aarch64 ; cbz w1, =>mask);
                 dynasm!(self.ops
                     ; .arch aarch64
+                    ; lsl w1, w1, 12
+                    ; and w3, w0, 0x3000
+                );
+                self.mov32(2, POPF_IOPL);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; cmp w1, w3
+                    ; b.ls =>mask
+                );
+                self.mov32(2, POPF_USER);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; =>mask
                     ; and w1, W(t_), w2
                     ; bic w0, w0, w2
                     ; orr w0, w0, w1
