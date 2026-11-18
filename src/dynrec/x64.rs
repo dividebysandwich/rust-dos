@@ -2949,6 +2949,58 @@ impl Gen<'_> {
                 dynasm!(self.ops ; .arch x64 ; addsub_done:);
             }
             Uop::FChs => self.fpu_op(1 << 13, None),
+            Uop::FRndint => {
+                const C1: i16 = 0x200;
+                const C1_C2: i16 = 0x600;
+                const PE: i16 = 0x20;
+                // Inline where the control word rounds to nearest (as the
+                // host's MXCSR does) and ST(0) is its double (stale) below
+                // 2^52 in magnitude: CVTSD2SI rounds it, and the sign is
+                // the value's, which keeps a -0 from a value in (-0.5, 0).
+                // (FRNDINT doesn't use the precision control.) Else
+                // (another rounding, 80 bits that hold more, a magnitude
+                // of 2^52 or more, which is an integer already, an
+                // infinity or a NaN) the handler's.
+                self.fpu_phys(RAX, 0);
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; test WORD [rbx + FPU_CONTROL], 0xC00
+                    ; jnz >frndint_other
+                    ; cmp BYTE [rbx + rax + FPU_STALE], 0
+                    ; je >frndint_other
+                    ; movsd xmm2, QWORD [rbx + rax * 8 + FPU_F64]
+                    ; movq rdx, xmm2
+                    ; mov rcx, rdx
+                    ; shl rcx, 1
+                    ; shr rcx, 53
+                    ; cmp ecx, 0x433
+                    ; jae >frndint_other
+                    ; cvtsd2si rcx, xmm2
+                    ; cvtsi2sd xmm3, rcx
+                    ; movq rcx, xmm3
+                    ; btr rdx, 63
+                    ; jnc >frndint_positive
+                    ; bts rcx, 63
+                    ; frndint_positive:
+                    ; movq xmm3, rcx
+                    ; movsd QWORD [rbx + rax * 8 + FPU_F64], xmm3
+                    ; mov BYTE [rbx + rax + FPU_STALE], 1
+                    ; and WORD [rbx + FPU_FLAGS], !C1_C2
+                    // Inexact: PE, and C1 where the magnitude went up.
+                    ; btr rcx, 63
+                    ; cmp rcx, rdx
+                    ; je >frndint_done
+                    ; jb >frndint_down
+                    ; or WORD [rbx + FPU_FLAGS], C1
+                    ; frndint_down:
+                    ; or WORD [rbx + FPU_FLAGS], PE
+                    ; jmp >frndint_done
+                    ; frndint_other:
+                );
+                self.fpu_op(6 << 13, None);
+                dynasm!(self.ops ; .arch x64 ; frndint_done:);
+            }
+            Uop::FAbs => self.fpu_op(7 << 13, None),
             Uop::FSqrt => {
                 const C1: i16 = 0x200;
                 // The root inline where the double is above 0, else (a
