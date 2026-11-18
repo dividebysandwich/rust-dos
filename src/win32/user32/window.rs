@@ -2355,7 +2355,12 @@ pub fn is_child(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(user(cpu).is_descendant(args[0], args[1]) as u32)
 }
 
+/// IsIconic(hwnd). It reads the window's style, which only a call or a
+/// message changes, so an idle proof goes through it (#1306): Biosys
+/// asks it in every pass of the loop it waits in.
 pub fn is_iconic(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
     Some(
         user(cpu)
             .window(args[0])
@@ -3070,7 +3075,12 @@ pub fn get_window_thread_process_id(cpu: &mut Cpu, args: &[u32]) -> Option<u32> 
 /// deepest child there. As WindowFromPoint and the mouse's messages do,
 /// a child that answers WM_NCHITTEST with HTTRANSPARENT (a group box, a
 /// static control) is passed over for the windows below it, so the
-/// check boxes inside a group box get their clicks.
+/// check boxes inside a group box get their clicks. WS_EX_TRANSPARENT
+/// changes only the order windows paint in: Windows passes the mouse
+/// through a window with it only when the window is layered too
+/// (Windows 2000's WS_EX_LAYERED), and Windows 98 has no layered
+/// windows. CyberStorm 2 sets it on every control of its dialogs, and
+/// they take clicks.
 pub fn window_at(state: &State, x: i32, y: i32) -> u32 {
     let mut hwnd = DESKTOP;
     'down: loop {
@@ -3085,9 +3095,6 @@ pub fn window_at(state: &State, x: i32, y: i32) -> u32 {
                 continue;
             }
             if !state.screen_rect(child).contains(x, y) {
-                continue;
-            }
-            if c.ex_style & WS_EX_TRANSPARENT != 0 && c.style & WS_CHILD != 0 {
                 continue;
             }
             if c.style & WS_CHILD != 0 && super::controls::hit_transparent(state, child) {

@@ -293,6 +293,7 @@ pub static ONLY_98: &[(&str, &[&str])] = &[
             "IsDebuggerPresent",
             "InterlockedCompareExchange",
             "InterlockedExchangeAdd",
+            "TryEnterCriticalSection",
             "GetFileAttributesExA",
             "GetLongPathNameA",
         ],

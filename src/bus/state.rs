@@ -18,7 +18,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 77;
+const WIN32_VERSION: u16 = 79;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -26,9 +26,11 @@ const WIN32_VERSION: u16 = 77;
 /// older form and no callback calls (`win16::Mmsystem`), 71's to 74's
 /// not DDEML's 16-bit copies, user handles and asynchronous transactions
 /// (`ddeml::DDE_SAVED`), 71's to 75's no DirectPlay 8 objects
-/// (`dpnet::State`), and 71's to 76's not OLE32's local servers and
-/// proxies (`ole32::LOCAL_SERVERS`).
-const WIN32_LOADS: [u16; 7] = [71, 72, 73, 74, 75, 76, WIN32_VERSION];
+/// (`dpnet::State`), 71's to 76's not OLE32's local servers and proxies
+/// (`ole32::LOCAL_SERVERS`), 71's to 77's not owner-drawn menu items'
+/// sizes and drawing (`user32::menu::OWNER_DRAWN`), and 71's to 78's no
+/// system heaps (`heap::SYSTEM_HEAP_SAVED`).
+const WIN32_LOADS: [u16; 9] = [71, 72, 73, 74, 75, 76, 77, 78, WIN32_VERSION];
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -126,6 +128,7 @@ impl Bus {
             toadforce_memory,
             retraces,
             last_flip,
+            last_present: _,
             gate_array_shadow,
             gate_array_shadow_at,
             opl,
@@ -461,6 +464,7 @@ impl Bus {
             toadforce_memory,
             retraces,
             last_flip,
+            last_present,
             gate_array_shadow,
             gate_array_shadow_at,
             opl,
@@ -597,6 +601,7 @@ impl Bus {
         }
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
+        *last_present = None;
         *virge = Default::default();
         if r.next_is(b"VIRG") {
             virge.load(&mut r.section(b"VIRG", VIRGE_VERSION)?)?;
@@ -929,6 +934,8 @@ mod tests {
         (75, 0x9B62_A189_49CB_DB03), // DDEML's 16-bit copies, user handles and transactions
         (76, 0xF698_DBEB_B887_D533), // DirectPlay 8's objects
         (77, 0xA5E9_A942_6FF9_9965), // OLE32's local servers, proxies and stubs
+        (78, 0x9A03_DEE6_921B_EE10), // owner-drawn menu items' sizes and drawing
+        (79, 0x3960_B363_99FF_D384), // each process's system heap
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

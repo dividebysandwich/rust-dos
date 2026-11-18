@@ -848,13 +848,20 @@ pub fn load_area(cpu: &mut Cpu, mode: &Mode, top: u32, rows: u32, left: u32, col
 
 /// Store pixels as `load_area` gives them, `cols` a row, as the pixels
 /// `left..left + cols` of the rows from `top` on of the picture in
-/// `mode`.
+/// `mode`: GDI's drawing on the screen.
+///
+/// A row that is already there isn't written again, so a repaint that
+/// changes nothing marks nothing for the display to draw anew and
+/// counts as no frame (`Bus::frames_drawn`). `cycles=auto` still sees
+/// its bytes (`drew`), as it did before rows were compared: a program
+/// that repaints its window at its frame rate is at work.
 pub fn store_area(cpu: &mut Cpu, mode: &Mode, top: u32, left: u32, cols: u32, data: &[u8]) {
     let bytes = if mode.bpp == 8 { 1 } else { 4 };
     let row_len = (cols * bytes) as usize;
     if row_len == 0 {
         return;
     }
+    let mut there = Vec::new();
     for (i, row) in data.chunks_exact(row_len).enumerate() {
         let at = (top + i as u32) * mode.pitch + left * mode.bpp / 8;
         let pixels = row.as_chunks::<4>().0.iter();
@@ -865,7 +872,25 @@ pub fn store_area(cpu: &mut Cpu, mode: &Mode, top: u32, left: u32, cols: u32, da
                 .flat_map(|p| to_565(u32::from_le_bytes(*p)).to_le_bytes())
                 .collect(),
         };
+        there.resize(raw.len(), 0);
+        read(cpu, at, &mut there);
+        if there[..] == raw[..] {
+            rewrote(cpu, at, raw.len());
+            continue;
+        }
+        cpu.bus.vga.gdi_changed = true;
         write(cpu, at, &raw);
+    }
+}
+
+/// `write` of `len` bytes at `offset` that are there already: only
+/// `drew`, for `cycles=auto`.
+fn rewrote(cpu: &mut Cpu, offset: u32, len: usize) {
+    let size = memory_size(cpu) as usize;
+    let start = (offset as usize).min(size);
+    let end = (start + len).min(size);
+    if start < end {
+        drew(cpu, start as u32, end as u32, (end - start) as u64);
     }
 }
 

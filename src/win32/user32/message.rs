@@ -1086,7 +1086,9 @@ pub fn peek_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         0,
     );
     // Found nothing and changed nothing: an idle proof goes through it,
-    // up to when the thread's next timer is due.
+    // up to when the thread's next timer is due. It read no RAM but its
+    // arguments: the queue it looked in is the system's, and the message
+    // is written only where one is found.
     if let Some(before) = before
         && result == Some(FALSE)
         && quiet(cpu).is_some_and(|after| after == before)
@@ -1101,6 +1103,7 @@ pub fn peek_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             .min();
         let until = due.map(|due| cpu.bus.clock.icount_at_micros(due));
         crate::idle::pure_call(cpu, until);
+        crate::idle::reads_arguments(cpu);
     }
     result
 }

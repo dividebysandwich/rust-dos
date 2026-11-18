@@ -44,6 +44,13 @@ const FOLDER_SIZE: u32 = 0x40;
 /// The folder list's id, and the message that gives an item's text.
 const LST2: u32 = 0x0461;
 const LB_GETTEXT: u32 = 0x0189;
+/// Where the timer procedure keeps what EM_GETSEL of the control with
+/// the focus returned (`Arg::Press`).
+const SELECTION: u32 = 0x1BF0;
+const EM_GETSEL: u32 = 0x00B0;
+/// The file dialog's file type box, and the message a hook gets first.
+const CMB1: u32 = 0x0470;
+const WM_INITDIALOG: u32 = 0x0110;
 
 /// The imports every program has: the functions `Call::api` names.
 const IMPORTS: &[(&str, &[&str])] = &[
@@ -102,9 +109,13 @@ const IMPORTS: &[(&str, &[&str])] = &[
             "GetActiveWindow",
             "PostMessageA",
             "SendDlgItemMessageA",
+            "GetFocus",
+            "GetParent",
+            "GetDlgItem",
+            "SetFocus",
         ],
     ),
-    ("KERNEL32.DLL", &["GetModuleHandleA"]),
+    ("KERNEL32.DLL", &["GetModuleHandleA", "InterlockedExchange"]),
     (
         "USER32.DLL",
         &[
@@ -134,6 +145,8 @@ const IMPORTS: &[(&str, &[&str])] = &[
             "SetWindowPos",
             "GetDC",
             "UpdateWindow",
+            "WindowFromPoint",
+            "ChildWindowFromPointEx",
         ],
     ),
     ("GDI32.DLL", &["PatBlt", "GetPixel"]),
@@ -162,8 +175,13 @@ enum Arg {
     /// The program's timer procedure, which presses OK in the active
     /// window: what ends a modal dialog. Before that it keeps the first
     /// items of the file dialog's folder list, if the window has one, at
-    /// FOLDERS.
+    /// FOLDERS, and the selection of the control with the focus at
+    /// SELECTION.
     Press,
+    /// The program's file dialog hook procedure, which in WM_INITDIALOG
+    /// gives the focus to the file type box (cmb1) of the dialog it is
+    /// in, and returns 0 for every message.
+    Hook,
 }
 
 /// A call a program makes: the function's name and its arguments.
@@ -222,6 +240,13 @@ fn program_with(
         a.push(ebx).unwrap();
         a.call(import(&l, "SendDlgItemMessageA")).unwrap();
     }
+    a.call(import(&l, "GetFocus")).unwrap();
+    a.push(0).unwrap();
+    a.push(0).unwrap();
+    a.push(EM_GETSEL as i32).unwrap();
+    a.push(eax).unwrap();
+    a.call(import(&l, "SendMessageA")).unwrap();
+    a.mov(dword_ptr(l.at(SELECTION)), eax).unwrap();
     a.mov(eax, ebx).unwrap();
     a.pop(ebx).unwrap();
     a.push(0).unwrap();
@@ -231,6 +256,22 @@ fn program_with(
     a.call(import(&l, "PostMessageA")).unwrap();
     a.ret_1(16).unwrap();
     let mut code = a.assemble(ok as u64).unwrap();
+    let hook = ok + code.len() as u32;
+    let mut a = CodeAssembler::new(32).unwrap();
+    let mut done = a.create_label();
+    a.cmp(dword_ptr(esp + 8), WM_INITDIALOG).unwrap();
+    a.jne(done).unwrap();
+    a.push(dword_ptr(esp + 4)).unwrap();
+    a.call(import(&l, "GetParent")).unwrap();
+    a.push(CMB1 as i32).unwrap();
+    a.push(eax).unwrap();
+    a.call(import(&l, "GetDlgItem")).unwrap();
+    a.push(eax).unwrap();
+    a.call(import(&l, "SetFocus")).unwrap();
+    a.set_label(&mut done).unwrap();
+    a.xor(eax, eax).unwrap();
+    a.ret_1(16).unwrap();
+    code.extend(a.assemble(hook as u64).unwrap());
     let main_rva = code_rva + code.len() as u32;
     let mut a = CodeAssembler::new(32).unwrap();
     for (i, Call(name, args)) in calls.iter().enumerate() {
@@ -240,6 +281,7 @@ fn program_with(
                 Arg::At(o) => a.push(l.at(o) as i32).unwrap(),
                 Arg::Res(r) => a.push(dword_ptr(l.at(RESULTS + 4 * r as u32))).unwrap(),
                 Arg::Press => a.push(ok as i32).unwrap(),
+                Arg::Hook => a.push(hook as i32).unwrap(),
             }
         }
         a.call(import(&l, name)).unwrap();
@@ -423,6 +465,74 @@ fn send(hwnd: usize, msg: u32, wp: Arg, lp: Arg) -> Call {
 }
 
 #[test]
+fn a_child_with_ws_ex_transparent_takes_the_point() {
+    use Arg::*;
+    const WS_POPUP: u32 = 0x8000_0000;
+    const WS_EX_TRANSPARENT: u32 = 0x20;
+    const CWP_SKIPTRANSPARENT: u32 = 4;
+    // A popup without a frame at the screen's corner, so its client
+    // area is at the screen's, with a push button at 10,10 that has
+    // WS_EX_TRANSPARENT, as CyberStorm 2's dialogs give their controls.
+    // Windows 98 gives the point on the button to the button: the style
+    // passes the mouse through layered windows only, which it has none
+    // of. ChildWindowFromPointEx passes over it when asked to.
+    let mut d = data();
+    strings(&mut d);
+    put(&mut d, FREE, b"Button\0");
+    let button = |ex: u32| {
+        call(
+            "CreateWindowExA",
+            &[
+                I(ex),
+                At(FREE),
+                I(0),
+                I(WS_CHILD | WS_VISIBLE),
+                I(10),
+                I(10),
+                I(80),
+                I(24),
+                Res(0),
+                I(1),
+                I(0),
+                I(0),
+            ],
+        )
+    };
+    let calls = [
+        call(
+            "CreateWindowExA",
+            &[
+                I(0),
+                At(S_STATIC),
+                I(0),
+                I(WS_POPUP | WS_VISIBLE),
+                I(0),
+                I(0),
+                I(200),
+                I(100),
+                I(0),
+                I(0),
+                I(0),
+                I(0),
+            ],
+        ),
+        button(WS_EX_TRANSPARENT),
+        call("WindowFromPoint", &[I(20), I(20)]),
+        call("ChildWindowFromPointEx", &[Res(0), I(20), I(20), I(0)]),
+        call(
+            "ChildWindowFromPointEx",
+            &[Res(0), I(20), I(20), I(CWP_SKIPTRANSPARENT)],
+        ),
+    ];
+    let (cpu, at) = run("transparent_hit", &d, &calls);
+    let r = results(&cpu, at, calls.len());
+    assert_ne!(r[1], 0, "the button is made");
+    assert_eq!(r[2], r[1], "WindowFromPoint gives the button");
+    assert_eq!(r[3], r[1], "ChildWindowFromPointEx gives the button");
+    assert_eq!(r[4], r[0], "CWP_SKIPTRANSPARENT passes over it");
+}
+
+#[test]
 fn dll_get_version_says_4_70() {
     use Arg::*;
     let mut d = data();
@@ -490,6 +600,10 @@ fn a_program_without_comctl32_makes_a_progress_bar() {
                 "GetActiveWindow",
                 "PostMessageA",
                 "SendDlgItemMessageA",
+                "GetFocus",
+                "GetParent",
+                "GetDlgItem",
+                "SetFocus",
             ],
         ),
         ("KERNEL32.DLL", &["GetModuleHandleA"]),
@@ -647,13 +761,16 @@ fn comdlg32_says_what_went_wrong() {
     assert_eq!(r[10], 9, "the size the title needs");
 }
 
+const OFN_ENABLEHOOK: u32 = 0x0020;
 const OFN_ALLOWMULTISELECT: u32 = 0x0200;
 const OFN_EXPLORER: u32 = 0x0008_0000;
 
 /// A program opening a file with `flags`: a timer presses OK in the
-/// dialog, whose file name is T.EXE. What GetOpenFileNameA returned, and
-/// the path it gave.
-fn open_dialog(test: &str, flags: u32) -> (u32, String, u32) {
+/// dialog, whose file name is T.EXE. With OFN_ENABLEHOOK the hook is
+/// `Arg::Hook`. What GetOpenFileNameA returned, the path it gave,
+/// nFileOffset, and the selection (EM_GETSEL) of the control with the
+/// focus before OK.
+fn open_dialog(test: &str, flags: u32) -> (u32, String, u32, u32) {
     use Arg::*;
     let ofn = FREE;
     let file = FREE + 0x100;
@@ -663,6 +780,8 @@ fn open_dialog(test: &str, flags: u32) -> (u32, String, u32) {
     put32(&mut d, ofn + 32, 260);
     put32(&mut d, ofn + 52, flags);
     let calls = [
+        // lpfnHook, which only the code knows.
+        call("InterlockedExchange", &[At(ofn + 68), Hook]),
         call("SetTimer", &[I(0), I(0), I(100), Press]),
         call("GetOpenFileNameA", &[At(ofn)]),
         call("CommDlgExtendedError", &[]),
@@ -672,22 +791,40 @@ fn open_dialog(test: &str, flags: u32) -> (u32, String, u32) {
     put32(&mut d, ofn + 28, at + file);
     let (cpu, at) = run(test, &d, &calls);
     let r = results(&cpu, at, calls.len());
-    assert_eq!(r[2], 0, "no error");
+    assert_eq!(r[3], 0, "no error");
     let offset = peek(&cpu, at + ofn + 56) & 0xFFFF;
-    (r[1], peek_str(&cpu, at + file), offset)
+    let selection = peek(&cpu, at + SELECTION);
+    (r[2], peek_str(&cpu, at + file), offset, selection)
 }
 
 #[test]
 fn the_explorer_style_open_dialog_gives_the_file_chosen() {
-    let (ok, path, offset) = open_dialog("open_explorer", OFN_EXPLORER);
+    let (ok, path, offset, _) = open_dialog("open_explorer", OFN_EXPLORER);
     assert_eq!(ok, 1);
     assert_eq!(path, r"C:\T.EXE");
     assert_eq!(offset, 3, "nFileOffset");
 }
 
+/// The File name box has the focus with the name the program gave
+/// selected, so a name typed replaces it, as on Windows 98 SE. The
+/// Explorer-style dialog gives it the focus after its hook's
+/// WM_INITDIALOG, also when the hook gave the focus to another control
+/// there, as Windows 98 SE's does.
+#[test]
+fn the_file_dialogs_select_the_file_name_they_open_with() {
+    for (test, flags) in [
+        ("select_explorer", OFN_EXPLORER),
+        ("select_explorer_hook", OFN_EXPLORER | OFN_ENABLEHOOK),
+        ("select_old", OFN_ALLOWMULTISELECT),
+    ] {
+        let (_, _, _, selection) = open_dialog(test, flags);
+        assert_eq!(selection, 5 << 16, "{test}: T.EXE from 0 to 5");
+    }
+}
+
 #[test]
 fn the_old_style_open_dialog_gives_the_file_chosen() {
-    let (ok, path, _) = open_dialog("open_old", OFN_ALLOWMULTISELECT);
+    let (ok, path, _, _) = open_dialog("open_old", OFN_ALLOWMULTISELECT);
     assert_eq!(ok, 1);
     assert_eq!(path.to_ascii_uppercase(), r"C:\T.EXE");
 }

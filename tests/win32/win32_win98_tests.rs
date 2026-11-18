@@ -1242,3 +1242,307 @@ fn ntdll_dll_is_there_under_windows_95_and_98() {
     assert_eq!(run(Win98, "ntdll", finds()).0, 7);
     assert_eq!(run(Win98Se, "ntdll", finds()).0, 7);
 }
+
+/// The critical section functions and the interlocked ones of Windows 98
+/// SE's KERNEL32, from its code: the program's CRITICAL_SECTION has the
+/// type byte 4 and a pointer to the section's object in the shared arena,
+/// and InitializeCriticalSection leaves its other bytes as they were. The
+/// object has the recursion count at 4, the owner at 8 (its TIB here),
+/// the lock count at 10h (1 when free) and the CRITICAL_SECTION at 1Ch.
+/// TryEnterCriticalSection is one of the stubs that fail with
+/// ERROR_CALL_NOT_IMPLEMENTED. EnterCriticalSection raises an access
+/// violation for a CRITICAL_SECTION that wasn't initialized, and goes on
+/// when the handler continues. The program ends with the number of the
+/// first check that failed, or 0.
+#[test]
+fn critical_sections_are_windows_98s() {
+    let names: &[&str] = &[
+        "InitializeCriticalSection",
+        "EnterCriticalSection",
+        "LeaveCriticalSection",
+        "TryEnterCriticalSection",
+        "GetLastError",
+        "InterlockedIncrement",
+        "InterlockedDecrement",
+        "InterlockedExchange",
+        "InterlockedCompareExchange",
+        "InterlockedExchangeAdd",
+        "DeleteCriticalSection",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // A CRITICAL_SECTION of AAh bytes at 0, a variable at 20h, a
+    // CRITICAL_SECTION of zeros at 40h, the exception's code at 60h.
+    let mut data = vec![0xAA; 0x18];
+    data.resize(0x20, 0);
+    data.extend_from_slice(&5u32.to_le_bytes());
+    data.resize(0x80, 0);
+    let exe = program(imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let section = l.at(0) as i32;
+        let var = l.at(0x20) as i32;
+        let zeros = l.at(0x40) as i32;
+        let mut fail = a.create_label();
+        a.push(section)?;
+        a.call(f("InitializeCriticalSection"))?;
+        a.mov(ebx, 1)?;
+        a.cmp(byte_ptr(l.at(0)), 4)?;
+        a.jne(fail)?;
+        a.mov(ebx, 2)?;
+        a.cmp(byte_ptr(l.at(1)), 0xAA)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(8)), 0xAAAA_AAAAu32 as i32)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x14)), 0xAAAA_AAAAu32 as i32)?;
+        a.jne(fail)?;
+        a.mov(esi, dword_ptr(l.at(4)))?;
+        a.mov(ebx, 3)?;
+        a.cmp(esi, 0x8000_0000u32 as i32)?;
+        a.jb(fail)?;
+        a.cmp(esi, 0xC000_0000u32 as i32)?;
+        a.jae(fail)?;
+        a.mov(ebx, 4)?;
+        a.cmp(byte_ptr(esi), 4)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 4), 0)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 8), 0)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 0x10), 1)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 0x1C), section)?;
+        a.jne(fail)?;
+        // In twice: the count at 2, the thread the owner.
+        a.push(section)?;
+        a.call(f("EnterCriticalSection"))?;
+        a.push(section)?;
+        a.call(f("EnterCriticalSection"))?;
+        a.mov(ebx, 5)?;
+        a.cmp(dword_ptr(esi + 4), 2)?;
+        a.jne(fail)?;
+        a.mov(eax, dword_ptr(0x18u64).fs())?;
+        a.cmp(dword_ptr(esi + 8), eax)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 0x10), -1)?;
+        a.jne(fail)?;
+        a.push(section)?;
+        a.call(f("LeaveCriticalSection"))?;
+        a.mov(ebx, 6)?;
+        a.cmp(dword_ptr(esi + 4), 1)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 0x10), 0)?;
+        a.jne(fail)?;
+        a.push(section)?;
+        a.call(f("LeaveCriticalSection"))?;
+        a.mov(ebx, 7)?;
+        a.cmp(dword_ptr(esi + 4), 0)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 8), 0)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 0x10), 1)?;
+        a.jne(fail)?;
+        a.push(section)?;
+        a.call(f("TryEnterCriticalSection"))?;
+        a.mov(ebx, 8)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        a.call(f("GetLastError"))?;
+        a.cmp(eax, 120)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 0x10), 1)?;
+        a.jne(fail)?;
+        // The interlocked functions, from 5.
+        a.push(var)?;
+        a.call(f("InterlockedIncrement"))?;
+        a.mov(ebx, 9)?;
+        a.cmp(eax, 6)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x20)), 6)?;
+        a.jne(fail)?;
+        a.push(var)?;
+        a.call(f("InterlockedDecrement"))?;
+        a.mov(ebx, 10)?;
+        a.cmp(eax, 5)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x20)), 5)?;
+        a.jne(fail)?;
+        a.push(3)?;
+        a.push(var)?;
+        a.call(f("InterlockedExchangeAdd"))?;
+        a.mov(ebx, 11)?;
+        a.cmp(eax, 5)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x20)), 8)?;
+        a.jne(fail)?;
+        a.push(8)?;
+        a.push(1)?;
+        a.push(var)?;
+        a.call(f("InterlockedCompareExchange"))?;
+        a.mov(ebx, 12)?;
+        a.cmp(eax, 8)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x20)), 1)?;
+        a.jne(fail)?;
+        a.push(8)?;
+        a.push(9)?;
+        a.push(var)?;
+        a.call(f("InterlockedCompareExchange"))?;
+        a.mov(ebx, 13)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x20)), 1)?;
+        a.jne(fail)?;
+        a.push(7)?;
+        a.push(var)?;
+        a.call(f("InterlockedExchange"))?;
+        a.mov(ebx, 14)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x20)), 7)?;
+        a.jne(fail)?;
+        // Deleted, the CRITICAL_SECTION stays as it was.
+        a.push(section)?;
+        a.call(f("DeleteCriticalSection"))?;
+        a.mov(ebx, 15)?;
+        a.cmp(byte_ptr(l.at(0)), 4)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(4)), esi)?;
+        a.jne(fail)?;
+        // A handler that keeps the exception's code, initializes the
+        // section and continues, whose address the CALL over it pushes.
+        let mut over = a.create_label();
+        a.call(over)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.mov(dword_ptr(l.at(0x60)), eax)?;
+        a.push(zeros)?;
+        a.call(f("InitializeCriticalSection"))?;
+        a.xor(eax, eax)?;
+        a.ret()?;
+        a.set_label(&mut over)?;
+        a.push(dword_ptr(0).fs())?;
+        a.mov(dword_ptr(0).fs(), esp)?;
+        a.push(zeros)?;
+        a.call(f("EnterCriticalSection"))?;
+        a.pop(dword_ptr(0).fs())?;
+        a.add(esp, 4)?;
+        a.mov(ebx, 16)?;
+        a.cmp(dword_ptr(l.at(0x60)), 0xC000_0005u32 as i32)?;
+        a.jne(fail)?;
+        a.mov(ebx, 17)?;
+        a.mov(eax, dword_ptr(l.at(0x44)))?;
+        a.mov(ecx, dword_ptr(0x18u64).fs())?;
+        a.cmp(dword_ptr(eax + 8), ecx)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(eax + 4), 1)?;
+        a.jne(fail)?;
+        a.xor(eax, eax)?;
+        a.ret()?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run(Win98Se, "critical_sections", exe);
+    assert_eq!(code, 0, "check {} failed: {}", code, text);
+}
+
+/// A thread that enters a section another is in waits, counted in the
+/// section's lock count, and gets the section when the other leaves it:
+/// its owner then, with the count at 1. The program ends with the number
+/// of the first check that failed, or 0.
+#[test]
+fn a_section_left_goes_to_the_thread_waiting_for_it() {
+    let names: &[&str] = &[
+        "InitializeCriticalSection",
+        "EnterCriticalSection",
+        "LeaveCriticalSection",
+        "CreateThread",
+        "Sleep",
+        "WaitForSingleObject",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The CRITICAL_SECTION at 0, a flag the thread sets in the section at
+    // 20h, the thread's TIB at 24h.
+    let exe = program(imports, &[0; 0x40], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let section = l.at(0) as i32;
+        let mut fail = a.create_label();
+        let mut over = a.create_label();
+        a.push(section)?;
+        a.call(f("InitializeCriticalSection"))?;
+        a.push(section)?;
+        a.call(f("EnterCriticalSection"))?;
+        a.mov(esi, dword_ptr(l.at(4)))?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(over)?;
+        // The thread: in, the flag and its TIB, out.
+        a.push(section)?;
+        a.call(f("EnterCriticalSection"))?;
+        a.mov(dword_ptr(l.at(0x20)), 1)?;
+        a.mov(eax, dword_ptr(0x18u64).fs())?;
+        a.mov(dword_ptr(l.at(0x24)), eax)?;
+        a.push(section)?;
+        a.call(f("LeaveCriticalSection"))?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        a.mov(edi, eax)?;
+        // The thread runs meanwhile and waits.
+        a.push(50)?;
+        a.call(f("Sleep"))?;
+        a.mov(ebx, 1)?;
+        a.cmp(dword_ptr(esi + 0x10), -1)?;
+        a.jne(fail)?;
+        a.mov(ebx, 2)?;
+        a.cmp(dword_ptr(l.at(0x20)), 0)?;
+        a.jne(fail)?;
+        a.push(section)?;
+        a.call(f("LeaveCriticalSection"))?;
+        // The thread's now, which hasn't run yet.
+        a.mov(ebx, 3)?;
+        a.mov(ebp, dword_ptr(esi + 8))?;
+        a.test(ebp, ebp)?;
+        a.je(fail)?;
+        a.cmp(ebp, dword_ptr(0x18u64).fs())?;
+        a.je(fail)?;
+        a.cmp(dword_ptr(esi + 4), 1)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 0x10), 0)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x20)), 0)?;
+        a.jne(fail)?;
+        a.push(-1)?;
+        a.push(edi)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.mov(ebx, 4)?;
+        a.cmp(dword_ptr(l.at(0x20)), 1)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x24)), ebp)?;
+        a.jne(fail)?;
+        a.mov(ebx, 5)?;
+        a.cmp(dword_ptr(esi + 0x10), 1)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 8), 0)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(esi + 4), 0)?;
+        a.jne(fail)?;
+        a.xor(eax, eax)?;
+        a.ret()?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run(Win98Se, "section_handed_over", exe);
+    assert_eq!(code, 0, "check {} failed: {}", code, text);
+}
+
+#[test]
+fn try_enter_critical_section_is_exported_from_windows_98_on() {
+    let finds = || finds_system_dll("KERNEL32.DLL", "TryEnterCriticalSection");
+    assert_eq!(run(Win95, "try_enter", finds()).0, 3);
+    assert_eq!(run(Win98Se, "try_enter", finds()).0, 7);
+}
