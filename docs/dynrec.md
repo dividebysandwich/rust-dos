@@ -108,8 +108,7 @@ if:
 - after STI, an interrupt waits: the execution loop runs the next
   instruction, in the interrupt shadow, and delivers it. Where none waits
   the shadow ends in the block, at the next instruction;
-- after POPF, TF is set, or IF is set with an
-  interrupt waiting;
+- after POPF, TF is set, or IF is set with an interrupt waiting;
 - after a load of SS, the stack's width changed, which the block was
   translated for (its key's stack bit; `Uop::SsLoaded` checks it where
   the load is translated). Otherwise the interrupt shadow ends in the

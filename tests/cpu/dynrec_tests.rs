@@ -1095,13 +1095,19 @@ fn popf_at_ring_3_runs_in_translated_code() {
 
 #[test]
 fn popfd_where_it_cant_load_if_or_iopl_keeps_them() {
-    // At ring 3 with IOPL 0, IF and IOPL stay as they were, in translated
-    // code.
+    // At ring 3 with IOPL 0 or 2 (CPL > IOPL), IF and IOPL stay as they
+    // were, in translated code.
+    for iopl in [0, 2] {
+        popfd_above_iopl(iopl);
+    }
+}
+
+fn popfd_above_iopl(iopl: u32) {
     let (mut a, mut b) = twins(|rig| {
         let code = asm32(CODE, |a| {
             a.pushfd()?;
             a.and(dword_ptr(esp), !0x3000)?;
-            a.or(dword_ptr(esp), 0x200)?;
+            a.or(dword_ptr(esp), 0x200 | iopl << 12)?;
             a.popfd()?;
             to_ring3(a)
         });
@@ -1122,17 +1128,17 @@ fn popfd_where_it_cant_load_if_or_iopl_keeps_them() {
         });
     });
     run_both(&mut a, &mut b);
-    assert_eq!(b.cpu.edi() & 0x3201, 0x0201, "IF and IOPL kept, CF loaded");
+    let kept = 0x0201 | iopl << 12;
+    assert_eq!(b.cpu.edi() & 0x3201, kept, "IOPL {iopl}: IF and IOPL kept, CF loaded");
     if AVAILABLE {
         assert_eq!(handled(&b, iced_x86::Mnemonic::Popfd), 0);
     }
 }
 
 #[test]
-fn popfd_where_it_cant_load_if_or_loads_id_runs_as_its_handler() {
-    // At ring 3 with IOPL 0, IF and IOPL stay as they were; at ring 0, a
-    // POPFD that flips ID (CPUID's detection, on a Pentium) goes to the
-    // handler.
+fn popfd_that_flips_id_runs_as_its_handler() {
+    // A POPFD that flips ID (CPUID's detection, on a Pentium) goes to the
+    // handler, at ring 0 and at ring 3.
     let (mut a, mut b) = twins(|rig| {
         rig.cpu.model = rust_dos::cpu::CpuModel::Pentium;
         rig.load(CODE, &asm32(CODE, |a| {
@@ -1141,14 +1147,11 @@ fn popfd_where_it_cant_load_if_or_loads_id_runs_as_its_handler() {
             a.popfd()?;
             a.pushfd()?;
             a.pop(esi)?;
-            a.pushfd()?;
-            a.or(dword_ptr(esp), 0x200)?;
-            a.popfd()?;
             to_ring3(a)
         }));
         rig.ring3(|a| {
             a.pushfd()?;
-            a.xor(dword_ptr(esp), 0x3201)?;
+            a.xor(dword_ptr(esp), 0x20_0000)?;
             a.popfd()?;
             a.pushfd()?;
             a.pop(edi)?;
@@ -1156,8 +1159,11 @@ fn popfd_where_it_cant_load_if_or_loads_id_runs_as_its_handler() {
         });
     });
     run_both(&mut a, &mut b);
-    assert_eq!(b.cpu.esi() & 0x20_0000, 0x20_0000, "ID flipped");
-    assert_eq!(b.cpu.edi() & 0x3201, 0x0201, "IF and IOPL kept, CF loaded");
+    assert_eq!(b.cpu.esi() & 0x20_0000, 0x20_0000, "ID flipped at ring 0");
+    assert_eq!(b.cpu.edi() & 0x20_0000, 0, "ID flipped back at ring 3");
+    if AVAILABLE {
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Popfd), 2);
+    }
 }
 
 #[test]
@@ -1735,6 +1741,59 @@ fn pushf_in_virtual_8086_mode_faults_below_iopl_3() {
     let b = pushf_in_v86(0);
     let (vector, stack) = b.recorded();
     assert_eq!((vector, stack[2]), (GP as u32, 0x3000));
+}
+
+#[test]
+fn popf_in_virtual_8086_mode_at_iopl_3_runs_in_translated_code() {
+    // POPF and POPFD in virtual-8086 code with IOPL 3, 300 times, then
+    // INT 40h into ring 0. They load IF and the arithmetic flags; IOPL
+    // stays 3 and VM stays set (POPFD never loads it), so the code goes on
+    // in virtual-8086 mode. SI and EBP gather what each kept.
+    let (mut a, mut b) = twins(|rig| {
+        rig.handler(0x40, 3, |a| record_code(a, 0x40));
+        rig.load(0x30000, &asm16(0x30000, |a| {
+            let mut top = a.create_label();
+            a.mov(cx, 300)?;
+            a.mov(si, 0xFFFF)?;
+            a.mov(ebp, 0xFFFF_FFFFu32)?;
+            a.set_label(&mut top)?;
+            a.pushf()?;
+            a.pop(dx)?;
+            a.xor(dx, 0x3201)?;
+            a.push(dx)?;
+            a.popf()?;
+            a.pushf()?;
+            a.pop(ax)?;
+            a.and(si, ax)?;
+            a.pushfd()?;
+            a.pop(edx)?;
+            a.xor(edx, 0x0002_3001)?;
+            a.push(edx)?;
+            a.popfd()?;
+            a.pushfd()?;
+            a.pop(eax)?;
+            a.and(ebp, eax)?;
+            a.loop_(top)?;
+            a.int(0x40)
+        }));
+        rig.load(CODE, &asm32(CODE, |a| {
+            for v in [0u32, 0, 0, 0, 0x2000, 0xFFFE, 0x0002_3002, 0x3000, 0] {
+                a.push(v)?;
+            }
+            a.iretd()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    // PUSHFD stores VM as 0; the INT 40h frame has the flags as they are.
+    let (vector, stack) = b.recorded();
+    assert_eq!(vector, 0x40);
+    assert_eq!(stack[2] & 0x2_0000, 0x2_0000, "VM stays");
+    assert_eq!(b.cpu.esi() & 0x3000, 0x3000, "IOPL stays 3 after POPF");
+    assert_eq!(b.cpu.ebp() & 0x3000, 0x3000, "IOPL stays 3 after POPFD");
+    if AVAILABLE {
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Popf), 0);
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Popfd), 0);
+    }
 }
 
 #[test]
