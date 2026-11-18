@@ -489,7 +489,7 @@ fn to_ms(cpu: &mut Cpu, i: usize, value: u32) -> u32 {
     if device(cpu, i).time_format != MCI_FORMAT_FRAMES {
         return value;
     }
-    media(cpu, i).map_or(0, |m| m.frame_shown_ms(value))
+    media(cpu, i).map_or(0, |m| m.frames_to_ms(value))
 }
 
 /// A position in milliseconds, in the device's time format.

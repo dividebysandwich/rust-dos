@@ -68,8 +68,9 @@ impl Media {
         }
     }
 
-    /// When the frame `n` starts, in milliseconds, rounded down, as MCI
-    /// reports a length or a frame's time.
+    /// When the frame `n` starts, in milliseconds, rounded down. Windows
+    /// 98's MCIAVI reports a frame's time and the length rounded up
+    /// (#1332).
     pub fn frame_ms(&self, n: u32) -> u32 {
         let (num, den) = self.rate;
         (n as u64 * den as u64 * 1000 / num.max(1) as u64) as u32
@@ -82,6 +83,17 @@ impl Media {
     pub fn frame_shown_ms(&self, n: u32) -> u32 {
         let (num, den) = self.rate;
         (n as u64 * den as u64 * 1000).div_ceil(num.max(1) as u64) as u32
+    }
+
+    /// A position given in frames, in milliseconds: where the frame `n`
+    /// shows (`frame_shown_ms`), and for the end, the frame after the
+    /// last, the length, which a seek or a play may go to.
+    pub fn frames_to_ms(&self, n: u32) -> u32 {
+        if n >= self.frames {
+            self.frame_ms(n)
+        } else {
+            self.frame_shown_ms(n)
+        }
     }
 
     /// The bytes of the video stream: the frames' of an AVI file, the
@@ -171,11 +183,22 @@ mod tests {
     }
 
     #[test]
-    fn times_reported_stay_rounded_down() {
+    fn a_frame_starts_rounded_down_and_shows_rounded_up() {
         let m = media((15, 1), 136);
         assert_eq!((m.frame_ms(1), m.frame_shown_ms(1)), (66, 67));
         assert_eq!((m.frame_ms(3), m.frame_shown_ms(3)), (200, 200));
         assert_eq!(m.length_ms(), 9066);
+    }
+
+    #[test]
+    fn the_end_in_frames_is_the_length() {
+        // 136 frames at 15 a second end at 9066.67 ms: a seek to frame
+        // 136 is the length, 9066, which is in range, and frame 137 is
+        // past it.
+        let m = media((15, 1), 136);
+        assert_eq!(m.frames_to_ms(135), m.frame_shown_ms(135));
+        assert_eq!(m.frames_to_ms(136), m.length_ms());
+        assert!(m.frames_to_ms(137) > m.length_ms());
     }
 }
 
