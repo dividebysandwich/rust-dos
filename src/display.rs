@@ -134,7 +134,7 @@ const SETUP_MARK: &str = "toadforce-opengl-setup";
 /// graphics driver crashed while it set the renderer up.
 const SETUP_CRASHED: &str = "rust-dos ended while it set up the OpenGL renderer on this \
     graphics driver last time, so the software renderer draws. A new graphics driver or a \
-    new rust-dos tries OpenGL again, as does toadforce_renderer=opengl";
+    new rust-dos tries OpenGL again, as does a start with toadforce_renderer=opengl";
 
 /// What draws the picture.
 enum Output<'a> {
@@ -474,6 +474,9 @@ impl<'a> Display<'a> {
     /// depend on the host's GPU. Called every frame: a new machine's
     /// card gets the renderer, and a changed setting takes effect.
     pub fn run_toadforce(&mut self, bus: &mut Bus, renderer: Renderer3d, deterministic: bool) {
+        // A frame went by since the renderer was set up, whatever the
+        // card and the setting are now.
+        self.toadforce_guard = None;
         if !bus.toadforce() {
             return;
         }
@@ -483,8 +486,6 @@ impl<'a> Display<'a> {
                 for note in gl.toadforce_notes() {
                     bus.log_string(&note);
                 }
-                // A frame went by with the renderer made.
-                self.toadforce_guard = None;
                 // The card has no renderer yet, or the link of a
                 // window that is gone.
                 if bus.toadforce_hosted() && gl.toadforce_linked() {

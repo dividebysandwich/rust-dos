@@ -178,16 +178,19 @@ mod windows {
         fn an_access_violation_is_written_to_the_log() {
             if let Some(path) = std::env::var_os(CHILD) {
                 use windows_sys::Win32::System::Diagnostics::Debug::{
-                    SEM_NOGPFAULTERRORBOX, SetErrorMode,
+                    RaiseException, SEM_NOGPFAULTERRORBOX, SetErrorMode,
                 };
                 let mut log = crate::log::LogFile::create(std::path::Path::new(&path)).unwrap();
                 log.write_line("[TOADFORCE] Setting up the OpenGL renderer");
                 log.report_crashes();
                 // SAFETY: no Windows Error Reporting window for the crash.
                 unsafe { SetErrorMode(SEM_NOGPFAULTERRORBOX) };
-                // SAFETY: none: the crash is the test.
-                let value = unsafe { std::ptr::without_provenance::<u32>(8).read_volatile() };
-                unreachable!("read {value} at 8");
+                // An access violation reading address 8, as Windows
+                // raises it, without the undefined behaviour of a read.
+                let arguments = [0usize, 8];
+                // SAFETY: the arguments are the two numbers given.
+                unsafe { RaiseException(0xC000_0005, 0, 2, arguments.as_ptr()) };
+                unreachable!("the exception came back");
             }
             let path = crate::test_dir::path("log-access-violation");
             let name = "log::crash::windows::tests::an_access_violation_is_written_to_the_log";
@@ -209,7 +212,8 @@ mod windows {
                 crash.starts_with("[CRASH] Exception C0000005h (access violation) at "),
                 "{crash}"
             );
-            assert!(crash.contains(".exe+0x"), "{crash}");
+            // RaiseException's own module raises it.
+            assert!(crash.to_ascii_lowercase().contains(".dll+0x"), "{crash}");
             assert!(crash.ends_with(", reading 0x8"), "{crash}");
         }
     }
@@ -217,8 +221,6 @@ mod windows {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn a_panic_is_written_to_the_log_after_the_lines_before_it() {
         let path = crate::test_dir::path("log-crash");

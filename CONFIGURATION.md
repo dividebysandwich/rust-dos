@@ -3362,6 +3362,13 @@ of `toadforce_renderer` or `toadforce_gamma` at once. The card's
 registers and commands are specified in
 [docs/toadforce-spec.md](docs/toadforce-spec.md).
 
+If Rust-DOS crashes while it sets up the OpenGL renderer, which happens
+inside your graphics driver, the next start with `auto` on the same
+driver and Rust-DOS version uses the software renderer and says so in
+the log. Updating the driver, or starting with
+`toadforce_renderer=opengl`, tries OpenGL again. The mark it keeps for
+that is the file `toadforce-opengl-setup` next to `rust-dos.log`.
+
 The card's 16- and 32-bit modes go through its gamma ramp, which games
 set for their brightness controls and fades through
 `SetDeviceGammaRamp`, DirectDraw's gamma control and Direct3D 8's
