@@ -30,7 +30,9 @@ TROUBLE='Unhandled|Unsupported|Unknown|Invalid opcode|Triple fault|shutdown|pani
 # when the server hasn't answered for MISSES samples in a row. The
 # emulator it first answers for is the one watched (/api/version's
 # instance): one started later on the same port ends the watcher, so its
-# samples and log lines don't go into this one's files.
+# samples and log lines don't go into this one's files. /api/status,
+# asked last, carries the instance too: where it is still the watched
+# one, the log and stats asked before it came from that emulator.
 MISSES=6
 get() { curl -sf --max-time 10 "$H$1"; }
 
@@ -49,10 +51,13 @@ while :; do
     [ -z "$watched" ] && watched=$instance
     [ "$instance" != "$watched" ] && break
     now=$(date +%s)
+    log=$(get "/api/log?after_n=$after_n&limit=1000") || log=
     if ! stats=$(get /api/stats) || ! status=$(get /api/status); then
         sleep "$INTERVAL"
         continue
     fi
+    instance=$(jq -r '.instance // empty' <<<"$status" 2>/dev/null)
+    [ -n "$instance" ] && [ "$instance" != "$watched" ] && break
     # A reply that isn't JSON (cut short) skips the sample too.
     if ! sample=$(jq -cn --argjson s "$stats" --argjson st "$status" --arg t "$now" '{
         t: ($t | tonumber),
@@ -81,7 +86,7 @@ while :; do
         "\($t) slow: speed=\(.speed) fps=\(.fps) cpu_use=\(.cpu_use) mode=\(.mode)"' \
         <<<"$sample" >>"$OUT/alerts.log"
 
-    if log=$(get "/api/log?after_n=$after_n&limit=1000"); then
+    if [ -n "$log" ]; then
         last=$(jq -r '[.lines[].n] | max // empty' <<<"$log")
         [ -n "$last" ] && after_n=$last
         jq -r --arg re "$TROUBLE" '.lines[] | select(.line | test($re)) |
