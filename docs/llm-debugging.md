@@ -96,7 +96,10 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
   `rust-dos.log` in the per-user config directory, replaced on every start.
   Read it through `/api/log` instead, which can filter it. When running
   several instances, give each its own file with `--log FILE`, or they
-  replace each other's log.
+  replace each other's log. A crash ends the log with a `[CRASH]` line:
+  a panic's message and place, or on Windows an exception's code and
+  module. A run with `--hidden` or the debug server shows no dialog for
+  it, so nothing waits for a click.
 
 All examples below use `H=localhost:8086` and `J='-H content-type:application/json'`.
 

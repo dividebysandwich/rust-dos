@@ -141,6 +141,9 @@ mod windows {
         GetModuleFileNameW, GetModuleHandleExW,
     };
 
+    /// The code of a stack overflow.
+    const STACK_OVERFLOW: u32 = 0xC000_00FD;
+
     /// What the filter returns to have Windows go on as without it.
     const CONTINUE_SEARCH: i32 = 0;
 
@@ -179,7 +182,10 @@ mod windows {
                 line += &format!(", {access} {:#x}", record.ExceptionInformation[1]);
             }
             super::write(&line);
-            super::show(&line);
+            // A dialog needs stack the overflow has used up.
+            if code != STACK_OVERFLOW {
+                super::show(&line);
+            }
         }
         match PREVIOUS.get().copied().flatten() {
             // SAFETY: the filter installed before, given the pointers

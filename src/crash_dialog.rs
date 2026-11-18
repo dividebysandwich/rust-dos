@@ -23,10 +23,18 @@ pub fn wanted(hidden: bool, video_driver: &str, debug_server: bool) -> bool {
     !hidden && !windowless && !debug_server
 }
 
-/// Show crashes in the dialog from now on.
+/// Show crashes in the dialog from now on. Called on the main thread.
 pub fn enable() {
+    #[cfg(target_os = "macos")]
+    let _ = MAIN.set(std::thread::current().id());
     rust_dos::log::set_crash_dialog(Some(show));
 }
+
+/// The main thread, which alone may show the dialog on macOS: SDL hands
+/// a message box from another thread to it and waits, and the main
+/// thread may be waiting for the thread that crashed.
+#[cfg(target_os = "macos")]
+static MAIN: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
 
 #[cfg(windows)]
 fn show(report: &str) {
@@ -43,6 +51,10 @@ fn show(report: &str) {
 
 #[cfg(not(windows))]
 fn show(report: &str) {
+    #[cfg(target_os = "macos")]
+    if MAIN.get() != Some(&std::thread::current().id()) {
+        return;
+    }
     use sdl3::messagebox::{
         ButtonData, ClickedButton, MessageBoxButtonFlag, MessageBoxFlag, show_message_box,
     };
