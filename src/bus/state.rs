@@ -18,7 +18,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 77;
+const WIN32_VERSION: u16 = 78;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -26,9 +26,10 @@ const WIN32_VERSION: u16 = 77;
 /// older form and no callback calls (`win16::Mmsystem`), 71's to 74's
 /// not DDEML's 16-bit copies, user handles and asynchronous transactions
 /// (`ddeml::DDE_SAVED`), 71's to 75's no DirectPlay 8 objects
-/// (`dpnet::State`), and 71's to 76's not OLE32's local servers and
-/// proxies (`ole32::LOCAL_SERVERS`).
-const WIN32_LOADS: [u16; 7] = [71, 72, 73, 74, 75, 76, WIN32_VERSION];
+/// (`dpnet::State`), 71's to 76's not OLE32's local servers and proxies
+/// (`ole32::LOCAL_SERVERS`), and 71's to 77's not owner-drawn menu
+/// items' sizes and drawing (`user32::menu::OWNER_DRAWN`).
+const WIN32_LOADS: [u16; 8] = [71, 72, 73, 74, 75, 76, 77, WIN32_VERSION];
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -929,6 +930,7 @@ mod tests {
         (75, 0x9B62_A189_49CB_DB03), // DDEML's 16-bit copies, user handles and transactions
         (76, 0xF698_DBEB_B887_D533), // DirectPlay 8's objects
         (77, 0xA5E9_A942_6FF9_9965), // OLE32's local servers, proxies and stubs
+        (78, 0x9A03_DEE6_921B_EE10), // owner-drawn menu items' sizes and drawing
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
