@@ -78,6 +78,7 @@ pub struct Word {
 
 impl Job {
     /// `bytes` put into the memory from byte `at` on (`Job::Bytes`).
+    #[cfg(test)]
     pub fn bytes(fb: Vram, at: usize, bytes: Vec<u8>) -> Job {
         let runs = vec![(at, bytes.len())];
         Job::Bytes { fb, runs, bytes }
