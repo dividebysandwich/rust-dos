@@ -299,6 +299,9 @@ pub struct Process {
     /// The process that started it with CreateProcessA or WinExec, or 0
     /// for the one DOS started.
     pub(crate) parent: u32,
+    /// The system's heap in the shared arena (`Heap::create_shared`),
+    /// once a critical section needs it.
+    system_heap: heap::SystemHeap,
 }
 
 impl Process {
@@ -1630,6 +1633,7 @@ crate::state_fields!(Process {
     imagehlp,
     parent,
     vfw,
+    system_heap,
 } skip {
     file_apis_oem,
 });

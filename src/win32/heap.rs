@@ -8,7 +8,9 @@
 //! block's end spoils its neighbour's contents only, as with Windows 95's
 //! heaps.
 
-use super::memory::{GRANULARITY, MEM_PRIVATE, Memory, PAGE, PAGE_READWRITE, PRIVATE, SHARED};
+use super::memory::{
+    GRANULARITY, MEM_PRIVATE, Memory, PAGE, PAGE_READWRITE, PRIVATE, SHARED, SYSTEM,
+};
 use crate::bus::Bus;
 
 /// Blocks start at multiples of this, as on Windows.
@@ -17,6 +19,13 @@ const ALIGN: u32 = 8;
 const GROWTH: u32 = 0x10_0000;
 /// How many block lengths a heap keeps a first-fit hint for.
 const HINTS: usize = 16;
+
+/// The W32 section's version that added the processes' system heaps: a
+/// state saved by an older rust-dos has none.
+pub const SYSTEM_HEAP_SAVED: u16 = 79;
+
+/// A process's system heap, once it has one (`Heap::create_shared`).
+pub type SystemHeap = crate::savestate::Since<SYSTEM_HEAP_SAVED, Option<Heap>>;
 
 /// A range of address space a heap has its blocks in.
 #[derive(Clone, Debug, Default)]
@@ -97,6 +106,17 @@ impl Heap {
             heap.segments[0].committed = initial;
         }
         Some(heap)
+    }
+
+    /// A heap of `max` bytes in the shared arena that doesn't grow, its
+    /// pages committed as its blocks need them: the system's own, for what
+    /// Windows 98 keeps in KERNEL32's heap there, such as the objects of
+    /// critical sections (`Process::system_heap`). None when there is no
+    /// room.
+    pub fn create_shared(memory: &mut Memory, max: u32) -> Option<Heap> {
+        let len = max.checked_add(PAGE - 1)? & !(PAGE - 1);
+        let base = memory.reserve_region(None, len, SHARED, SYSTEM, PAGE_READWRITE, MEM_PRIVATE)?;
+        Some(Heap::new(base, len, false))
     }
 
     /// Give its ranges and their pages back.
