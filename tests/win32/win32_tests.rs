@@ -1895,6 +1895,105 @@ fn a_wait_that_asks_a_playing_buffers_status_is_skipped_to_its_end() {
     assert!(stats.skipped > 100_000, "{stats:?}");
 }
 
+/// A wait on the clock as MFC's CWinThread::Run waits for a message
+/// (#1308): it counts its passes in EDI and hands the count to its
+/// OnIdle, which keeps it in ESI and compares it with 0 and 1, runs
+/// `body` with it there, and returns TRUE. GetTickCount and IsIconic are
+/// its imports.
+fn idle_count_wait(
+    body: impl FnOnce(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
+) -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["GetTickCount"]),
+        ("USER32.DLL", &["IsIconic"]),
+    ];
+    program(BASE, false, imports, &[0; 16], |a, l| {
+        let mut wait = a.create_label();
+        let mut on_idle = a.create_label();
+        let mut later = a.create_label();
+        a.push(ebx)?;
+        a.push(esi)?;
+        a.push(edi)?;
+        a.xor(edi, edi)?;
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 20))?;
+        a.set_label(&mut wait)?;
+        a.push(edi)?;
+        a.mov(eax, edi)?;
+        a.inc(edi)?;
+        a.call(on_idle)?;
+        // (As MFC asks what OnIdle returned.)
+        a.test(eax, eax)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, ebx)?;
+        a.jb(wait)?;
+        a.mov(dword_ptr(l.data), edi)?;
+        a.mov(eax, 0x2A)?;
+        a.pop(edi)?;
+        a.pop(esi)?;
+        a.pop(ebx)?;
+        a.ret()?;
+        // OnIdle(count), as CWinApp's: the first passes differ.
+        a.set_label(&mut on_idle)?;
+        a.push(esi)?;
+        a.mov(esi, dword_ptr(esp + 8))?;
+        a.test(esi, esi)?;
+        a.jg(later)?;
+        a.inc(dword_ptr(l.at(4)))?;
+        a.set_label(&mut later)?;
+        a.cmp(esi, 1)?;
+        body(a, l)?;
+        a.mov(eax, 1)?;
+        a.pop(esi)?;
+        a.ret_1(4)
+    })
+}
+
+/// MFC's idle loop with an OnIdle that asks IsIconic: the count in EDI
+/// and its copies on the stack and in ESI change from pass to pass, but
+/// only compares with 0 and 1 look at them, so the passes are skipped,
+/// with the count moved on as the passes would have.
+#[test]
+fn a_wait_that_counts_its_passes_in_a_register_is_skipped() {
+    let image = idle_count_wait(|a, l| {
+        a.push(0)?;
+        a.call(l.import(1))
+    });
+    let stats = idle_lockstep("register_count_wait", image);
+    assert!(stats.proofs > 0, "{stats:?}");
+    assert!(stats.skipped > 100_000, "{stats:?}");
+}
+
+/// The count handed to a built-in function as its argument: what it does
+/// may depend on it, and the passes aren't skipped.
+#[test]
+fn a_wait_whose_count_is_a_calls_argument_is_not_skipped() {
+    let image = idle_count_wait(|a, l| {
+        a.push(esi)?;
+        a.call(l.import(1))
+    });
+    let stats = idle_lockstep("register_count_argument_wait", image);
+    assert_eq!(stats.skipped, 0, "{stats:?}");
+}
+
+/// The count's lowest bit chooses what a pass does, as an animation that
+/// runs from OnIdle would: no two passes in a row run the same, and none
+/// are skipped.
+#[test]
+fn a_wait_whose_count_chooses_what_it_does_is_not_skipped() {
+    let image = idle_count_wait(|a, l| {
+        let mut even = a.create_label();
+        a.test(esi, 1)?;
+        a.jz(even)?;
+        a.inc(dword_ptr(l.at(8)))?;
+        a.set_label(&mut even)?;
+        a.push(0)?;
+        a.call(l.import(1))
+    });
+    let stats = idle_lockstep("register_count_parity_wait", image);
+    assert_eq!(stats.skipped, 0, "{stats:?}");
+}
+
 /// The program, waiting on the clock, asks where a file is and seeks to
 /// there with SetFilePointer, and asks for an accelerator table it doesn't
 /// have, as Railroad Tycoon II's main loop does, and with `count` counts
