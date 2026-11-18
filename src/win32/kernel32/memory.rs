@@ -309,59 +309,59 @@ pub(super) fn get_process_heaps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(heaps.len() as u32)
 }
 
-// The interlocked functions are Windows 98's instructions (KERNEL32
-// 4.10.2222's for a 486 and later, which it jumps to through a table it
-// fills at boot), so that the recompiler runs them with the program's
-// code. A thread is switched only between instructions, and each changes
-// the variable in one. Windows 98 runs on one processor and has no LOCK
-// prefixes; XADD and CMPXCHG need a 486, as Windows 98 does. Windows 95
-// has only the first three, and its InterlockedIncrement and Decrement
-// return only the new value's sign, which agrees with Windows 98's
-// value. The handlers below are for states saved when the functions
-// were traps, whose memory still has those stubs.
+// The interlocked functions are x86 code, so that the recompiler runs
+// them with the program's code instead of trapping on every call. A
+// thread is switched only between instructions, and each function
+// changes the variable in one (XADD, XCHG or CMPXCHG), so none needs a
+// LOCK prefix on the one emulated processor. XADD and CMPXCHG need a 486,
+// as Windows 98 does. Windows 95 has only the first three, and its
+// InterlockedIncrement and Decrement return only the new value's sign,
+// which the new value agrees with. The handlers below are for states
+// saved when the functions were traps, whose memory still has those
+// stubs.
 
 /// InterlockedIncrement(at): the variable's new value.
 pub(super) const INTERLOCKED_INCREMENT: &[u8] = &[
-    0x8B, 0x4C, 0x24, 0x04, //       mov ecx, [esp+4]
+    0x8B, 0x54, 0x24, 0x04, //       mov edx, [esp+4]
     0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1
-    0x0F, 0xC1, 0x01, //             xadd [ecx], eax
+    0x0F, 0xC1, 0x02, //             xadd [edx], eax
     0x40, //                         inc eax
     0xC2, 0x04, 0x00, //             ret 4
 ];
 
 /// InterlockedDecrement(at): the variable's new value.
 pub(super) const INTERLOCKED_DECREMENT: &[u8] = &[
-    0x8B, 0x4C, 0x24, 0x04, // mov ecx, [esp+4]
-    0x83, 0xC8, 0xFF, //       or eax, -1
-    0x0F, 0xC1, 0x01, //       xadd [ecx], eax
-    0x48, //                   dec eax
-    0xC2, 0x04, 0x00, //       ret 4
+    0x8B, 0x54, 0x24, 0x04, //       mov edx, [esp+4]
+    0xB8, 0xFF, 0xFF, 0xFF, 0xFF, // mov eax, -1
+    0x0F, 0xC1, 0x02, //             xadd [edx], eax
+    0x48, //                         dec eax
+    0xC2, 0x04, 0x00, //             ret 4
 ];
 
 /// InterlockedExchange(at, value): the variable's old value.
 pub(super) const INTERLOCKED_EXCHANGE: &[u8] = &[
-    0x8B, 0x4C, 0x24, 0x04, // mov ecx, [esp+4]
+    0x8B, 0x54, 0x24, 0x04, // mov edx, [esp+4]
     0x8B, 0x44, 0x24, 0x08, // mov eax, [esp+8]
-    0x87, 0x01, //             xchg [ecx], eax
+    0x87, 0x02, //             xchg [edx], eax
     0xC2, 0x08, 0x00, //       ret 8
 ];
 
 /// InterlockedCompareExchange(at, exchange, comperand): the variable's
 /// old value, `exchange` stored where it was `comperand`.
 pub(super) const INTERLOCKED_COMPARE_EXCHANGE: &[u8] = &[
-    0x8B, 0x4C, 0x24, 0x04, // mov ecx, [esp+4]
-    0x8B, 0x54, 0x24, 0x08, // mov edx, [esp+8]
+    0x8B, 0x54, 0x24, 0x04, // mov edx, [esp+4]
+    0x8B, 0x4C, 0x24, 0x08, // mov ecx, [esp+8]
     0x8B, 0x44, 0x24, 0x0C, // mov eax, [esp+0Ch]
-    0x0F, 0xB1, 0x11, //       cmpxchg [ecx], edx
+    0x0F, 0xB1, 0x0A, //       cmpxchg [edx], ecx
     0xC2, 0x0C, 0x00, //       ret 0Ch
 ];
 
 /// InterlockedExchangeAdd(at, value): the variable's old value, `value`
 /// added.
 pub(super) const INTERLOCKED_EXCHANGE_ADD: &[u8] = &[
-    0x8B, 0x4C, 0x24, 0x04, // mov ecx, [esp+4]
+    0x8B, 0x54, 0x24, 0x04, // mov edx, [esp+4]
     0x8B, 0x44, 0x24, 0x08, // mov eax, [esp+8]
-    0x0F, 0xC1, 0x01, //       xadd [ecx], eax
+    0x0F, 0xC1, 0x02, //       xadd [edx], eax
     0xC2, 0x08, 0x00, //       ret 8
 ];
 
@@ -402,42 +402,40 @@ mod tests {
             a.assemble(0).unwrap()
         };
         let increment = assemble(&|a| {
-            a.mov(ecx, dword_ptr(esp + 4))?;
+            a.mov(edx, dword_ptr(esp + 4))?;
             a.mov(eax, 1)?;
-            a.xadd(dword_ptr(ecx), eax)?;
+            a.xadd(dword_ptr(edx), eax)?;
             a.inc(eax)?;
             a.ret_1(4)
         });
         assert_eq!(increment, INTERLOCKED_INCREMENT);
         let decrement = assemble(&|a| {
-            a.mov(ecx, dword_ptr(esp + 4))?;
-            // or eax, -1, in the byte form Windows 98 has, where iced
-            // takes the dword one.
-            a.db(&[0x83, 0xC8, 0xFF])?;
-            a.xadd(dword_ptr(ecx), eax)?;
+            a.mov(edx, dword_ptr(esp + 4))?;
+            a.mov(eax, -1)?;
+            a.xadd(dword_ptr(edx), eax)?;
             a.dec(eax)?;
             a.ret_1(4)
         });
         assert_eq!(decrement, INTERLOCKED_DECREMENT);
         let exchange = assemble(&|a| {
-            a.mov(ecx, dword_ptr(esp + 4))?;
+            a.mov(edx, dword_ptr(esp + 4))?;
             a.mov(eax, dword_ptr(esp + 8))?;
-            a.xchg(dword_ptr(ecx), eax)?;
+            a.xchg(dword_ptr(edx), eax)?;
             a.ret_1(8)
         });
         assert_eq!(exchange, INTERLOCKED_EXCHANGE);
         let compare_exchange = assemble(&|a| {
-            a.mov(ecx, dword_ptr(esp + 4))?;
-            a.mov(edx, dword_ptr(esp + 8))?;
+            a.mov(edx, dword_ptr(esp + 4))?;
+            a.mov(ecx, dword_ptr(esp + 8))?;
             a.mov(eax, dword_ptr(esp + 0xC))?;
-            a.cmpxchg(dword_ptr(ecx), edx)?;
+            a.cmpxchg(dword_ptr(edx), ecx)?;
             a.ret_1(0xC)
         });
         assert_eq!(compare_exchange, INTERLOCKED_COMPARE_EXCHANGE);
         let exchange_add = assemble(&|a| {
-            a.mov(ecx, dword_ptr(esp + 4))?;
+            a.mov(edx, dword_ptr(esp + 4))?;
             a.mov(eax, dword_ptr(esp + 8))?;
-            a.xadd(dword_ptr(ecx), eax)?;
+            a.xadd(dword_ptr(edx), eax)?;
             a.ret_1(8)
         });
         assert_eq!(exchange_add, INTERLOCKED_EXCHANGE_ADD);

@@ -377,13 +377,15 @@ pub(super) fn sleep(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 // 0Ch instead; the built-in Windows has Windows 98's for both. Programs
 // can't read NT's LockCount, RecursionCount or OwningThread on either.
 //
-// EnterCriticalSection and LeaveCriticalSection are Windows 98's
-// instructions (KERNEL32 4.10.2222's at BFF742C1h and BFF742EEh), which the
+// EnterCriticalSection and LeaveCriticalSection are x86 code, which the
 // recompiler runs with the program's code. They trap only to wait for a
 // section another thread is in and to hand a section that was left to a
-// thread waiting for it, where Windows 98 calls VWIN32. A thread can be
-// switched between any two of their instructions, so a hand-over can
-// come before the thread it is for waits (`critical_section_wake`).
+// thread waiting for it. A thread can be switched between any two of
+// their instructions, so each claims or frees the section with one
+// instruction on the counter at 10h: Enter decrements it before it writes
+// the owner, and Leave clears the owner before it increments it. A
+// hand-over can then come before the thread it is for waits
+// (`critical_section_wake`).
 
 /// The type byte of a CRITICAL_SECTION and of its object.
 const SECTION_TYPE: u8 = 4;
@@ -435,37 +437,44 @@ pub(super) const DELETE_CRITICAL_SECTION: &[u8] = &[
 
 /// EnterCriticalSection(section): in at once when the section is free or
 /// the thread's own, else wait. A CRITICAL_SECTION that wasn't
-/// initialized raises an access violation, which a handler may continue
-/// from, as on Windows 98.
+/// initialized raises an access violation; a handler that continues
+/// from it goes on as if it was, as on Windows 98.
 #[rustfmt::skip]
 pub(super) const ENTER_CRITICAL_SECTION: &[u8] = &[
-    0x8B, 0x54, 0x24, 0x04, //                   00: mov edx, [esp+4]
-    0x80, 0x3A, SECTION_TYPE, //                 04: cmp byte [edx], 4
-    0x75, 0x26, //                               07: jne 2Fh
-    0x8B, 0x42, 0x04, //                         09: mov eax, [edx+4]
-    0x64, 0x8B, 0x0D, 0x18, 0x00, 0x00, 0x00, // 0C: mov ecx, fs:[18h]
-    0xFF, 0x48, 0x10, //                         13: dec dword [eax+10h]
-    0x75, 0x09, //                               16: jne 21h
-    0x89, 0x48, 0x08, //                         18: mov [eax+8], ecx
-    0xFF, 0x40, 0x04, //                         1B: inc dword [eax+4]
-    0xC2, 0x04, 0x00, //                         1E: ret 4
-    0x39, 0x48, 0x08, //                         21: cmp [eax+8], ecx
-    0x74, 0xF5, //                               24: je 1Bh
-    0x50, //                                     26: push eax
-    0xE8, 0x17, 0x00, 0x00, 0x00, //             27: call 43h
-    0xC2, 0x04, 0x00, //                         2C: ret 4
-    0x52, //                                     2F: push edx
-    0x6A, 0x00, //                               30: push 0
-    0x6A, 0x00, //                               32: push 0
-    0x6A, 0x00, //                               34: push 0
-    0x68, 0x05, 0x00, 0x00, 0xC0, //             36: push C0000005h
-    0xE8, 0x0A, 0x00, 0x00, 0x00, //             3B: call 4Ah
-    0x5A, //                                     40: pop edx
-    0xEB, 0xC6, //                               41: jmp 09h
-    0xFE, TRAP, lo(WAIT_ID), hi(WAIT_ID), //     43: trap CriticalSectionWait
-    0xC2, 0x04, 0x00, //                         47: ret 4
-    0xFE, TRAP, lo(RAISE_EXCEPTION_ID), hi(RAISE_EXCEPTION_ID), // 4A: trap RaiseException
-    0xC2, 0x10, 0x00, //                         4E: ret 10h
+    // The section in ECX, its object in EDX, the thread's TIB in EAX.
+    0x8B, 0x4C, 0x24, 0x04, //       00: mov ecx, [esp+4]
+    0x80, 0x39, SECTION_TYPE, //     04: cmp byte [ecx], 4
+    0x75, 0x2B, //                   07: jne 34h (uninitialized)
+    0x8B, 0x51, 0x04, //             09: mov edx, [ecx+4]
+    0x64, 0xA1, 0x18, 0x00, 0x00, 0x00, // 0C: mov eax, fs:[18h]
+    0xFF, 0x4A, 0x10, //             12: dec dword [edx+10h]
+    0x75, 0x09, //                   15: jne 20h (taken)
+    // Free: the thread owns it now.
+    0x89, 0x42, 0x08, //             17: mov [edx+8], eax
+    0xFF, 0x42, 0x04, //             1A: inc dword [edx+4]
+    0xC2, 0x04, 0x00, //             1D: ret 4
+    // Taken: by this thread, or wait.
+    0x39, 0x42, 0x08, //             20: cmp [edx+8], eax
+    0x75, 0x06, //                   23: jne 2Bh
+    0xFF, 0x42, 0x04, //             25: inc dword [edx+4]
+    0xC2, 0x04, 0x00, //             28: ret 4
+    0x52, //                         2B: push edx
+    0xE8, 0x17, 0x00, 0x00, 0x00, // 2C: call 48h
+    0xC2, 0x04, 0x00, //             31: ret 4
+    // Uninitialized: RaiseException(STATUS_ACCESS_VIOLATION, 0, 0, NULL),
+    // then on from 09h if a handler continues.
+    0x51, //                         34: push ecx
+    0x6A, 0x00, //                   35: push 0
+    0x6A, 0x00, //                   37: push 0
+    0x6A, 0x00, //                   39: push 0
+    0x68, 0x05, 0x00, 0x00, 0xC0, // 3B: push C0000005h
+    0xE8, 0x0A, 0x00, 0x00, 0x00, // 40: call 4Fh
+    0x59, //                         45: pop ecx
+    0xEB, 0xC1, //                   46: jmp 09h
+    0xFE, TRAP, lo(WAIT_ID), hi(WAIT_ID), // 48: trap CriticalSectionWait
+    0xC2, 0x04, 0x00, //             4C: ret 4
+    0xFE, TRAP, lo(RAISE_EXCEPTION_ID), hi(RAISE_EXCEPTION_ID), // 4F: trap RaiseException
+    0xC2, 0x10, 0x00, //             53: ret 10h
 ];
 
 /// LeaveCriticalSection(section): out once, and when the thread is out
@@ -474,23 +483,23 @@ pub(super) const ENTER_CRITICAL_SECTION: &[u8] = &[
 /// initialized is left alone, as on Windows 98.
 #[rustfmt::skip]
 pub(super) const LEAVE_CRITICAL_SECTION: &[u8] = &[
-    0x8B, 0x54, 0x24, 0x04, //                   00: mov edx, [esp+4]
-    0x80, 0x3A, SECTION_TYPE, //                 04: cmp byte [edx], 4
-    0x75, 0x14, //                               07: jne 1Dh
-    0x8B, 0x42, 0x04, //                         09: mov eax, [edx+4]
-    0xFF, 0x48, 0x04, //                         0C: dec dword [eax+4]
-    0x75, 0x0F, //                               0F: jne 20h
-    0xC7, 0x40, 0x08, 0x00, 0x00, 0x00, 0x00, // 11: mov dword [eax+8], 0
-    0xFF, 0x40, 0x10, //                         18: inc dword [eax+10h]
-    0x7E, 0x09, //                               1B: jle 26h
-    0xC2, 0x04, 0x00, //                         1D: ret 4
-    0xFF, 0x40, 0x10, //                         20: inc dword [eax+10h]
-    0xC2, 0x04, 0x00, //                         23: ret 4
-    0x50, //                                     26: push eax
-    0xE8, 0x03, 0x00, 0x00, 0x00, //             27: call 2Fh
-    0xC2, 0x04, 0x00, //                         2C: ret 4
-    0xFE, TRAP, lo(WAKE_ID), hi(WAKE_ID), //     2F: trap CriticalSectionWake
-    0xC2, 0x04, 0x00, //                         33: ret 4
+    // The section in ECX, its object in EDX.
+    0x8B, 0x4C, 0x24, 0x04, //       00: mov ecx, [esp+4]
+    0x80, 0x39, SECTION_TYPE, //     04: cmp byte [ecx], 4
+    0x75, 0x0B, //                   07: jne 14h
+    0x8B, 0x51, 0x04, //             09: mov edx, [ecx+4]
+    0xFF, 0x4A, 0x04, //             0C: dec dword [edx+4]
+    0x74, 0x06, //                   0F: je 17h (out for good)
+    0xFF, 0x42, 0x10, //             11: inc dword [edx+10h]
+    0xC2, 0x04, 0x00, //             14: ret 4
+    0xC7, 0x42, 0x08, 0x00, 0x00, 0x00, 0x00, // 17: mov dword [edx+8], 0
+    0xFF, 0x42, 0x10, //             1E: inc dword [edx+10h]
+    0x7F, 0xF1, //                   21: jg 14h (nobody else counted in)
+    0x52, //                         23: push edx
+    0xE8, 0x03, 0x00, 0x00, 0x00, // 24: call 2Ch
+    0xC2, 0x04, 0x00, //             29: ret 4
+    0xFE, TRAP, lo(WAKE_ID), hi(WAKE_ID), // 2C: trap CriticalSectionWake
+    0xC2, 0x04, 0x00, //             30: ret 4
 ];
 
 /// The running thread's TIB, which a section's object names its owner by
@@ -740,71 +749,70 @@ mod tests {
     #[test]
     fn the_critical_sections_code_is_its_listing() {
         let mut a = CodeAssembler::new(32).unwrap();
-        let mut bad = a.create_label();
-        let mut again = a.create_label();
-        let mut busy = a.create_label();
-        let mut nested = a.create_label();
+        let mut uninitialized = a.create_label();
+        let mut initialized = a.create_label();
+        let mut taken = a.create_label();
         let mut wait = a.create_label();
-        let mut raise = a.create_label();
-        a.mov(edx, dword_ptr(esp + 4)).unwrap();
-        a.cmp(byte_ptr(edx), 4).unwrap();
-        a.jne(bad).unwrap();
-        a.set_label(&mut again).unwrap();
-        a.mov(eax, dword_ptr(edx + 4)).unwrap();
-        a.mov(ecx, dword_ptr(0x18u64).fs()).unwrap();
-        a.dec(dword_ptr(eax + 0x10)).unwrap();
-        a.jne(busy).unwrap();
-        a.mov(dword_ptr(eax + 8), ecx).unwrap();
-        a.set_label(&mut nested).unwrap();
-        a.inc(dword_ptr(eax + 4)).unwrap();
+        let mut wait_trap = a.create_label();
+        let mut raise_trap = a.create_label();
+        a.mov(ecx, dword_ptr(esp + 4)).unwrap();
+        a.cmp(byte_ptr(ecx), 4).unwrap();
+        a.jne(uninitialized).unwrap();
+        a.set_label(&mut initialized).unwrap();
+        a.mov(edx, dword_ptr(ecx + 4)).unwrap();
+        a.mov(eax, dword_ptr(0x18u64).fs()).unwrap();
+        a.dec(dword_ptr(edx + 0x10)).unwrap();
+        a.jne(taken).unwrap();
+        a.mov(dword_ptr(edx + 8), eax).unwrap();
+        a.inc(dword_ptr(edx + 4)).unwrap();
         a.ret_1(4).unwrap();
-        a.set_label(&mut busy).unwrap();
-        a.cmp(dword_ptr(eax + 8), ecx).unwrap();
-        a.je(nested).unwrap();
-        a.push(eax).unwrap();
-        a.call(wait).unwrap();
+        a.set_label(&mut taken).unwrap();
+        a.cmp(dword_ptr(edx + 8), eax).unwrap();
+        a.jne(wait).unwrap();
+        a.inc(dword_ptr(edx + 4)).unwrap();
         a.ret_1(4).unwrap();
-        a.set_label(&mut bad).unwrap();
-        a.push(edx).unwrap();
-        a.push(0).unwrap();
-        a.push(0).unwrap();
-        a.push(0).unwrap();
-        a.push(0xC000_0005u32 as i32).unwrap();
-        a.call(raise).unwrap();
-        a.pop(edx).unwrap();
-        a.jmp(again).unwrap();
         a.set_label(&mut wait).unwrap();
+        a.push(edx).unwrap();
+        a.call(wait_trap).unwrap();
+        a.ret_1(4).unwrap();
+        a.set_label(&mut uninitialized).unwrap();
+        a.push(ecx).unwrap();
+        a.push(0).unwrap();
+        a.push(0).unwrap();
+        a.push(0).unwrap();
+        a.push(STATUS_ACCESS_VIOLATION as i32).unwrap();
+        a.call(raise_trap).unwrap();
+        a.pop(ecx).unwrap();
+        a.jmp(initialized).unwrap();
+        a.set_label(&mut wait_trap).unwrap();
         trap(&mut a, WAIT_ID);
         a.ret_1(4).unwrap();
-        a.set_label(&mut raise).unwrap();
+        a.set_label(&mut raise_trap).unwrap();
         trap(&mut a, RAISE_EXCEPTION_ID);
         a.ret_1(0x10).unwrap();
         assert_eq!(a.assemble(0).unwrap(), ENTER_CRITICAL_SECTION);
 
         let mut a = CodeAssembler::new(32).unwrap();
-        let mut out = a.create_label();
-        let mut nested = a.create_label();
-        let mut wake = a.create_label();
-        let mut thunk = a.create_label();
-        a.mov(edx, dword_ptr(esp + 4)).unwrap();
-        a.cmp(byte_ptr(edx), 4).unwrap();
-        a.jne(out).unwrap();
-        a.mov(eax, dword_ptr(edx + 4)).unwrap();
-        a.dec(dword_ptr(eax + 4)).unwrap();
-        a.jne(nested).unwrap();
-        a.mov(dword_ptr(eax + 8), 0).unwrap();
-        a.inc(dword_ptr(eax + 0x10)).unwrap();
-        a.jle(wake).unwrap();
-        a.set_label(&mut out).unwrap();
+        let mut done = a.create_label();
+        let mut released = a.create_label();
+        let mut wake_trap = a.create_label();
+        a.mov(ecx, dword_ptr(esp + 4)).unwrap();
+        a.cmp(byte_ptr(ecx), 4).unwrap();
+        a.jne(done).unwrap();
+        a.mov(edx, dword_ptr(ecx + 4)).unwrap();
+        a.dec(dword_ptr(edx + 4)).unwrap();
+        a.je(released).unwrap();
+        a.inc(dword_ptr(edx + 0x10)).unwrap();
+        a.set_label(&mut done).unwrap();
         a.ret_1(4).unwrap();
-        a.set_label(&mut nested).unwrap();
-        a.inc(dword_ptr(eax + 0x10)).unwrap();
+        a.set_label(&mut released).unwrap();
+        a.mov(dword_ptr(edx + 8), 0).unwrap();
+        a.inc(dword_ptr(edx + 0x10)).unwrap();
+        a.jg(done).unwrap();
+        a.push(edx).unwrap();
+        a.call(wake_trap).unwrap();
         a.ret_1(4).unwrap();
-        a.set_label(&mut wake).unwrap();
-        a.push(eax).unwrap();
-        a.call(thunk).unwrap();
-        a.ret_1(4).unwrap();
-        a.set_label(&mut thunk).unwrap();
+        a.set_label(&mut wake_trap).unwrap();
         trap(&mut a, WAKE_ID);
         a.ret_1(4).unwrap();
         assert_eq!(a.assemble(0).unwrap(), LEAVE_CRITICAL_SECTION);

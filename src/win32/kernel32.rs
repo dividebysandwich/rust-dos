@@ -236,9 +236,9 @@ static APIS: &[Api] = &[
     ),
     stdcall("Sleep", 758, 1, sync::sleep),
     stdcall("SleepEx", 759, 2, sync::sleep),
-    // Critical sections are Windows 98's code (sync.rs), which traps
-    // only to make or free a section's object and to wait or wake a
-    // waiter. The handlers are for states saved before, whose stubs trap.
+    // Critical sections are x86 code (sync.rs), which traps only to make
+    // or free a section's object and to wait or wake a waiter. The
+    // handlers are for states saved before, whose stubs trap.
     code(
         "InitializeCriticalSection",
         522,
