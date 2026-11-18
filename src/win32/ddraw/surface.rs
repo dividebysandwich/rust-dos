@@ -527,7 +527,8 @@ pub fn write_rows(cpu: &mut Cpu, s: &Surface, offset: u32, len: usize, data: &[u
             vec![(offset, data.len())]
         } else {
             let rows = data.chunks(len).zip(0u32..);
-            rows.map(|(row, y)| (offset + y * s.pitch, row.len())).collect()
+            rows.map(|(row, y)| (offset + y * s.pitch, row.len()))
+                .collect()
         };
         return write_runs(cpu, s, &runs, data);
     }

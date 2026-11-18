@@ -53,7 +53,11 @@ pub enum Job {
     /// from byte `at` on. Rows are no use here, as every worker's
     /// triangles read the textures (see `worker`). The worker that owns
     /// row 0 writes them.
-    Bytes { fb: Vram, runs: Vec<(usize, usize)>, bytes: Vec<u8> },
+    Bytes {
+        fb: Vram,
+        runs: Vec<(usize, usize)>,
+        bytes: Vec<u8>,
+    },
     /// A job that fails, for the tests.
     #[cfg(test)]
     Panic,
@@ -529,7 +533,11 @@ impl Voodoo {
         let Some(first) = runs.iter().map(|&(at, _)| at).min() else {
             return true;
         };
-        let end = runs.iter().map(|&(at, len)| at + len).max().unwrap_or(first);
+        let end = runs
+            .iter()
+            .map(|&(at, len)| at + len)
+            .max()
+            .unwrap_or(first);
         let job = Job::Bytes {
             fb: self.fbi.ram.clone(),
             runs: runs.to_vec(),
