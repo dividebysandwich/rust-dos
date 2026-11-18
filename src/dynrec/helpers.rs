@@ -293,11 +293,9 @@ pub fn card_state(cpu: &mut Cpu, ctx: &mut JitCtx) {
         }
         return;
     }
-    // A Banshee's memory the code wrote before what it may do changes:
-    // its picture changed (as the execution loop says after it).
-    if matches!(ctx.card_key, Some(CardKey::Banshee(..))) && std::mem::take(&mut ctx.card_wrote) != 0 {
-        cpu.bus.banshee_wrote_directly();
-    }
+    // What the code wrote under the old answer, as the execution loop
+    // takes it after the code.
+    card_wrote(cpu, ctx);
     ctx.card_key = key;
     match key {
         None => {
@@ -410,8 +408,8 @@ fn make_card_map(ctx: &mut JitCtx, len: u32, extra: u8, kept: &[(u32, u32)]) {
 /// code: a Banshee's memory it wrote by itself means its picture
 /// changed. (Writes into the VESA frame buffer's picture are the bus's.)
 pub fn card_wrote(cpu: &mut Cpu, ctx: &mut JitCtx) {
-    if std::mem::take(&mut ctx.card_wrote) != 0 && matches!(ctx.card_key, Some(CardKey::Banshee(..)))
-    {
+    let banshee = matches!(ctx.card_key, Some(CardKey::Banshee(..)));
+    if std::mem::take(&mut ctx.card_wrote) != 0 && banshee {
         cpu.bus.banshee_wrote_directly();
     }
 }
