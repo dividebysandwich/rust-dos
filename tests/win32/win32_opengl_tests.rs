@@ -2210,6 +2210,81 @@ fn pixels_read_back_in_the_packed_types_texels_come_in() {
     }
 }
 
+/// glReadPixels of GL_DEPTH_COMPONENT reads the depth buffer: 1.0 where
+/// it was cleared, and 0.5 where a quad at z 0 was drawn with the
+/// identity matrices, which the 16-bit buffer holds as 0x7FFF or 0x8000.
+/// A float gets the depth, an unsigned integer of b bits the depth times
+/// 2^b - 1. Oni reads one pixel's depth so each frame.
+#[test]
+fn depth_reads_back_as_float_and_unsigned_integers() {
+    // (type, the cleared depth, the quad's, a value's bytes).
+    let reads = [
+        (GL_FLOAT, 1.0f32.to_bits(), 0.5f32.to_bits(), 4),
+        (GL_UNSIGNED_SHORT, 0xFFFF, 0x8000, 2),
+        (GL_UNSIGNED_INT, 0xFFFF_FFFF, 0x8000_0000, 4),
+    ];
+    // Outside the quad, then inside it.
+    let places = [(4, 4), (32, 32)];
+    for (card, name) in [
+        (Draws::Voodoo3, "a Voodoo3"),
+        (Draws::ToadForce, "a ToadForce"),
+    ] {
+        let mut at = 0;
+        let (exe, data) = program(&data(), |a, l| {
+            let mut c = Calls { next: 0 };
+            start(a, l, &mut c)?;
+            let both = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT;
+            c.api(a, l, CLEAR, &[Arg::I(both)])?;
+            c.api(a, l, ENABLE, &[Arg::I(GL_DEPTH_TEST)])?;
+            c.api(a, l, DEPTH_FUNC, &[Arg::I(GL_LESS)])?;
+            c.api(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+            c.api(a, l, COLOR3F, &[Arg::F(1.0), Arg::F(0.0), Arg::F(0.0)])?;
+            for (x, y) in [(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)] {
+                c.api(a, l, VERTEX3F, &[Arg::F(x), Arg::F(y), Arg::F(0.0)])?;
+            }
+            c.api(a, l, END, &[])?;
+            at = c.next;
+            for (i, (kind, ..)) in reads.iter().enumerate() {
+                for (j, (x, y)) in places.iter().enumerate() {
+                    let one = [
+                        Arg::I(*x),
+                        Arg::I(*y),
+                        Arg::I(1),
+                        Arg::I(1),
+                        Arg::I(GL_DEPTH_COMPONENT),
+                        Arg::I(*kind),
+                        Arg::At(PIXELS + 8 * (2 * i + j) as u32),
+                    ];
+                    c.api(a, l, READ_PIXELS, &one)?;
+                    c.api(a, l, GET_ERROR, &[])?;
+                }
+            }
+            finish(a, l)
+        });
+        let mut cpu = machine_on("depth_read_back", card, exe);
+        run_until_done(&mut cpu, data);
+        for (i, (kind, cleared, drawn, bytes)) in reads.iter().enumerate() {
+            for (j, want) in [cleared, drawn].iter().enumerate() {
+                let n = (2 * i + j) as u32;
+                let error = peek(&cpu, data + RESULTS + 4 * (at + 2 * n + 1));
+                assert_eq!(error, 0, "{kind:#x} on {name}");
+                // A value is its bytes alone: the ones after it stay 0.
+                let got = peek(&cpu, data + PIXELS + 8 * n);
+                assert_eq!(peek(&cpu, data + PIXELS + 8 * n + 4), 0, "{name}");
+                assert!(*bytes == 4 || got >> 16 == 0, "{kind:#x} on {name}");
+                // The quad's depth is a half, whichever way it rounds to
+                // 16 bits.
+                let near = match *kind {
+                    GL_FLOAT => (f32::from_bits(got) - f32::from_bits(**want)).abs() < 1e-4,
+                    GL_UNSIGNED_SHORT => got.abs_diff(**want) <= 1,
+                    _ => got.abs_diff(**want) <= 0x1_0001,
+                };
+                assert!(near, "{kind:#x} at {:?} on {name}: {got:#x}", places[j]);
+            }
+        }
+    }
+}
+
 // Display lists.
 
 const GL_COMPILE: u32 = 0x1300;
