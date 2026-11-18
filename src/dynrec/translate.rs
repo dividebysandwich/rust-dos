@@ -129,6 +129,8 @@ pub fn translate(
         Bts => bit_op(instr, BitKind::Set, &mut u),
         Btr => bit_op(instr, BitKind::Reset, &mut u),
         Btc => bit_op(instr, BitKind::Complement, &mut u),
+        Bsf => bit_scan(instr, true, &mut u),
+        Bsr => bit_scan(instr, false, &mut u),
         Jmp if instr.is_jmp_far() || instr.is_jmp_far_indirect() => real && far_jump(instr, next, stack32, false, &mut u),
         Call if (instr.is_call_far() || instr.is_call_far_indirect()) && real => far_jump(instr, next, stack32, true, &mut u),
         Call if instr.is_call_far() || instr.is_call_far_indirect() => system && far_call_pm(instr, next, stack32, &mut u),
@@ -1369,7 +1371,7 @@ fn bit_op(instr: &Instruction, op: BitKind, u: &mut Vec<Uop>) -> bool {
             Some(r) if r.size > 1 => r.size,
             _ => return false,
         },
-        OpKind::Memory if instr.op1_kind() == OpKind::Immediate8 => instr.memory_size().size() as u8,
+        OpKind::Memory => instr.memory_size().size() as u8,
         _ => return false,
     };
     if size != 2 && size != 4 {
@@ -1392,7 +1394,41 @@ fn bit_op(instr: &Instruction, op: BitKind, u: &mut Vec<Uop>) -> bool {
             u.push(Uop::Set { r, t: T0 });
         }
     } else {
-        if mem(instr, T2, size, op != BitKind::Test, u).is_none() {
+        let write = op != BitKind::Test;
+        if let Src::T(b) = bit {
+            // A register's offset is signed, and picks the word or dword
+            // it is in, before or after the operand's (`logic::bit_test`).
+            let Some(seg) = ea(instr, T2, u) else {
+                return false;
+            };
+            u.push(Uop::Copy { dst: T0, src: b });
+            if size == 2 {
+                u.push(Uop::Extend {
+                    t: T0,
+                    from: 2,
+                    signed: true,
+                });
+            }
+            let shift = size.trailing_zeros() as u8;
+            u.push(Uop::SarConst {
+                t: T0,
+                count: shift + 3,
+            });
+            let width = addr_size(instr);
+            u.push(Uop::AddShifted {
+                t: T2,
+                src: T0,
+                shift,
+                size: width,
+            });
+            u.push(Uop::MemRef {
+                t: T2,
+                seg,
+                size,
+                write,
+                slot: 0,
+            });
+        } else if mem(instr, T2, size, write, u).is_none() {
             return false;
         }
         u.push(Uop::Load { dst: T0, m: T2, size });
@@ -1401,6 +1437,41 @@ fn bit_op(instr: &Instruction, op: BitKind, u: &mut Vec<Uop>) -> bool {
             u.push(Uop::Store { m: T2, src: T0, size });
         }
     }
+    true
+}
+
+/// BSF (`forward`) or BSR of a register or memory into a register, as
+/// `logic::bit_scan`.
+fn bit_scan(instr: &Instruction, forward: bool, u: &mut Vec<Uop>) -> bool {
+    let Some(dst) = gpr(instr.op0_register()).filter(|r| r.size > 1) else {
+        return false;
+    };
+    match instr.op1_kind() {
+        OpKind::Register => {
+            let Some(src) = gpr(instr.op1_register()).filter(|r| r.size == dst.size) else {
+                return false;
+            };
+            u.push(Uop::Get { t: T1, r: src });
+        }
+        OpKind::Memory => {
+            if mem(instr, T2, dst.size, false, u).is_none() {
+                return false;
+            }
+            u.push(Uop::Load {
+                dst: T1,
+                m: T2,
+                size: dst.size,
+            });
+        }
+        _ => return false,
+    }
+    u.push(Uop::Get { t: T0, r: dst });
+    u.push(Uop::BitScan {
+        forward,
+        dst: T0,
+        src: T1,
+    });
+    u.push(Uop::Set { r: dst, t: T0 });
     true
 }
 

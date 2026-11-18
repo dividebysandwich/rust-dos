@@ -2167,6 +2167,25 @@ impl Gen<'_> {
                 }
             }
             Uop::SarConst { t, count } => dynasm!(self.ops ; .arch x64 ; sar Rd(r(t)), count as i8),
+            Uop::AddShifted {
+                t,
+                src,
+                shift,
+                size,
+            } => {
+                let (t, src) = (r(t), r(src));
+                // (LEA changes no flags; the 64-bit sum's low dword is
+                // the 32-bit one.)
+                match shift {
+                    0 => dynasm!(self.ops ; .arch x64 ; lea Rd(t), [Rq(t) + Rq(src)]),
+                    1 => dynasm!(self.ops ; .arch x64 ; lea Rd(t), [Rq(t) + Rq(src) * 2]),
+                    2 => dynasm!(self.ops ; .arch x64 ; lea Rd(t), [Rq(t) + Rq(src) * 4]),
+                    _ => dynasm!(self.ops ; .arch x64 ; lea Rd(t), [Rq(t) + Rq(src) * 8]),
+                }
+                if size == 2 {
+                    dynasm!(self.ops ; .arch x64 ; movzx Rd(t), Rw(t));
+                }
+            }
             Uop::Extend { t, from, signed } => {
                 let t = r(t);
                 match (from, signed) {
@@ -2329,6 +2348,19 @@ impl Gen<'_> {
                     (BitKind::Reset, _) => dynasm!(self.ops ; .arch x64 ; btr Rd(t), ecx),
                     (BitKind::Complement, 2) => dynasm!(self.ops ; .arch x64 ; btc Rw(t), cx),
                     (BitKind::Complement, _) => dynasm!(self.ops ; .arch x64 ; btc Rd(t), ecx),
+                }
+            }
+            Uop::BitScan { forward, dst, src } => {
+                let (dst, src) = (r(dst), r(src));
+                dynasm!(self.ops ; .arch x64 ; mov eax, ZF as i32 ; test Rd(src), Rd(src) ; jz >zero);
+                if forward {
+                    dynasm!(self.ops ; .arch x64 ; bsf Rd(dst), Rd(src));
+                } else {
+                    dynasm!(self.ops ; .arch x64 ; bsr Rd(dst), Rd(src));
+                }
+                dynasm!(self.ops ; .arch x64 ; xor eax, eax ; zero:);
+                if self.wanted(ZF) {
+                    self.merge(ZF, ZF);
                 }
             }
             Uop::SetCond { t, cc } => {
