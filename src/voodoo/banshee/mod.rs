@@ -919,6 +919,54 @@ impl Voodoo {
         self.mirror_memory(start, end);
     }
 
+    /// Runs of bytes written into the card's memory, each as
+    /// `banshee_memory_write` writes it: run `(addr, len)` takes the next
+    /// `len` bytes of `data`. For the built-in DirectDraw's blits, which on
+    /// the card are its 2D engine's: they run in their turn in the command
+    /// FIFO, after the 3D drawing queued before them and before what is
+    /// queued after, and the CPU goes on. So while the render threads
+    /// still draw, the runs are a job of their own in that order
+    /// (`banshee_bytes_queue`) instead of a wait for all of the frame's
+    /// triangles. What reads the bytes later waits for them, and the
+    /// picture does where it shows them. Past the end of the memory a
+    /// run wraps round.
+    pub fn banshee_memory_write_runs(&mut self, runs: &[(u32, usize)], data: &[u8]) {
+        let size = self.fbi.mask as usize + 1;
+        let mut split = Vec::with_capacity(runs.len());
+        for &(addr, len) in runs {
+            let start = (addr & self.fbi.mask) as usize;
+            let here = len.min(size - start);
+            split.push((start, here));
+            let mut rest = len - here;
+            while rest > 0 {
+                split.push((0, rest.min(size)));
+                rest -= rest.min(size);
+            }
+        }
+        split.retain(|&(_, len)| len > 0);
+        if split.is_empty() {
+            return;
+        }
+        if self.workers_queue() {
+            // Behind the OpenGL renderer, the rows read back from the GPU
+            // land in the memory as the emulator asks for them, which a
+            // write queued here would then come before.
+            if !self.gpu_behind.get() && self.banshee_bytes_queue(&split, data) {
+                self.display_dirty = true;
+                return;
+            }
+            self.catch_up_workers();
+        }
+        let mut from = 0;
+        for &(start, len) in &split {
+            self.gpu_sync_bytes(start as u32, len);
+            self.fbi.ram.write_bytes(start, &data[from..from + len]);
+            from += len;
+            self.mirror_memory(start as u32, (start + len) as u32);
+        }
+        self.display_dirty = true;
+    }
+
     /// A 2D register written: the engine runs commands into the memory.
     /// The bytes a command reads and draws into are brought up to date
     /// first, as for a program's read: the drawing queued before is done,

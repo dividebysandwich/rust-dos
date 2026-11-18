@@ -7,16 +7,16 @@
 //! rewind and tests stay deterministic.
 //!
 //! Frame buffer writes that come while jobs are queued are jobs too, so
-//! they land in their turn without waiting, and so does texture data
-//! Glide downloads over a texture queued triangles read: its bytes are a
-//! batch of their own, which one worker writes once every worker has
+//! they land in their turn without waiting, and so do texture data Glide
+//! downloads over a texture queued triangles read and the built-in
+//! DirectDraw's blits into a Banshee's or Voodoo3's memory: their bytes are
+//! a batch of their own, which one worker writes once every worker has
 //! finished what came before and before any draws what comes after. The
-//! emulator waits for the workers (`flush`) before anything that reads
-//! what they draw: frame buffer reads, other texture writes the queued
-//! triangles may read, the pixel counters, and a save state. The queue
-//! has limits (`MAX_JOBS`, `MAX_BATCHES`, `MAX_BYTES`): past one the
-//! emulator waits for a batch to finish, so what such a read waits for
-//! has a bound.
+//! emulator waits for the workers (`flush`) before anything that reads what
+//! they draw: frame buffer reads, other texture writes the queued triangles
+//! may read, the pixel counters, and a save state. The queue has limits
+//! (`MAX_JOBS`, `MAX_BATCHES`, `MAX_BYTES`): past one the emulator waits
+//! for a batch to finish, so what such a read waits for has a bound.
 //! With no workers (the browser, a single core) jobs run at once.
 
 use super::Voodoo;
@@ -48,11 +48,16 @@ pub enum Job {
         columns: (usize, usize),
         value: u16,
     },
-    /// Bytes put into the memory from byte `at`, between the jobs before
-    /// them and those after: rows are no use here, as every worker's
+    /// Bytes put into the memory between the jobs before them and those
+    /// after, in runs: run `(at, len)` puts the next `len` of `bytes`
+    /// from byte `at` on. Rows are no use here, as every worker's
     /// triangles read the textures (see `worker`). The worker that owns
     /// row 0 writes them.
-    Bytes { fb: Vram, at: usize, bytes: Vec<u8> },
+    Bytes {
+        fb: Vram,
+        runs: Vec<(usize, usize)>,
+        bytes: Vec<u8>,
+    },
     /// A job that fails, for the tests.
     #[cfg(test)]
     Panic,
@@ -72,6 +77,13 @@ pub struct Word {
 }
 
 impl Job {
+    /// `bytes` put into the memory from byte `at` on (`Job::Bytes`).
+    #[cfg(test)]
+    pub fn bytes(fb: Vram, at: usize, bytes: Vec<u8>) -> Job {
+        let runs = vec![(at, bytes.len())];
+        Job::Bytes { fb, runs, bytes }
+    }
+
     /// Draw all of it, here.
     pub fn run_all(&self, stipple: &mut u32, stats: &mut Stats) {
         self.run(|_| true, stipple, stats);
@@ -123,9 +135,13 @@ impl Job {
                     }
                 }
             }
-            Job::Bytes { fb, at, bytes } => {
+            Job::Bytes { fb, runs, bytes } => {
                 if owns(0) {
-                    fb.write_bytes(*at, bytes);
+                    let mut from = 0;
+                    for &(at, len) in runs {
+                        fb.write_bytes(at, &bytes[from..from + len]);
+                        from += len;
+                    }
                 }
             }
             #[cfg(test)]
@@ -503,18 +519,35 @@ impl Voodoo {
     /// `flush` then finds out at no cost, there are none, or the OpenGL
     /// renderer is recording the memory.
     pub(crate) fn banshee_texture_queue(&self, at: usize, data: &[u8]) -> bool {
+        self.banshee_bytes_queue(&[(at, data.len())], data)
+    }
+
+    /// Put runs of bytes into a Banshee's or Voodoo3's memory in their
+    /// turn among the jobs queued, as `banshee_texture_queue` does: run
+    /// `(at, len)` takes the next `len` bytes of `data`, and each lies
+    /// within the memory. False, having queued nothing, where the
+    /// emulator has to write them itself.
+    pub(crate) fn banshee_bytes_queue(&self, runs: &[(usize, usize)], data: &[u8]) -> bool {
         if self.recording() || !self.pool.busy() {
             return false;
         }
+        let Some(first) = runs.iter().map(|&(at, _)| at).min() else {
+            return true;
+        };
+        let end = runs
+            .iter()
+            .map(|&(at, len)| at + len)
+            .max()
+            .unwrap_or(first);
         let job = Job::Bytes {
             fb: self.fbi.ram.clone(),
-            at,
+            runs: runs.to_vec(),
             bytes: data.to_vec(),
         };
         self.submit_outside(job, None);
         // The bytes may land in what the card shows when the picture is
         // made, which then waits for them.
-        self.note_drawn(super::Place::Bytes(at as u32, data.len() as u64));
+        self.note_drawn(super::Place::Bytes(first as u32, (end - first) as u64));
         true
     }
 }
@@ -606,11 +639,7 @@ mod tests {
                 pool.submit(word(row, i));
             }
             let bytes = [i as u8 ^ 0x5A, (i >> 8) as u8].repeat(16);
-            pool.submit(Job::Bytes {
-                fb: fb.clone(),
-                at: 0,
-                bytes,
-            });
+            pool.submit(Job::bytes(fb.clone(), 0, bytes));
             for row in 8..16 {
                 pool.submit(word(row, !i));
             }
@@ -629,11 +658,7 @@ mod tests {
         let pool = Pool::new(3);
         let fb = Vram::new(16);
         for _ in 0..100 {
-            pool.submit(Job::Bytes {
-                fb: fb.clone(),
-                at: 0,
-                bytes: vec![1; 16],
-            });
+            pool.submit(Job::bytes(fb.clone(), 0, vec![1; 16]));
         }
         drop(pool);
     }
@@ -643,11 +668,7 @@ mod tests {
         let pool = Pool::new(3);
         let fb = Vram::new(16);
         pool.submit(Job::Panic);
-        pool.submit(Job::Bytes {
-            fb: fb.clone(),
-            at: 0,
-            bytes: vec![7; 16],
-        });
+        pool.submit(Job::bytes(fb.clone(), 0, vec![7; 16]));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pool.flush()));
         assert!(result.is_err(), "the panic reaches flush");
         assert_eq!(fb.get(0), 0x0707);
@@ -671,7 +692,7 @@ mod tests {
 
     fn queue_bytes(v: &Voodoo, at: usize, bytes: Vec<u8>) {
         let fb = v.fbi.ram.clone();
-        v.submit_outside(Job::Bytes { fb, at, bytes }, None);
+        v.submit_outside(Job::bytes(fb, at, bytes), None);
     }
 
     #[test]
@@ -718,11 +739,7 @@ mod tests {
         let fb = Vram::new(MAX_BYTES / 2);
         let bytes = |size: usize| {
             let fb = fb.clone();
-            move || Job::Bytes {
-                fb: fb.clone(),
-                at: 0,
-                bytes: vec![1; size],
-            }
+            move || Job::bytes(fb.clone(), 0, vec![1; size])
         };
         let row = || Job::Rows {
             fb: fb.clone(),
@@ -826,11 +843,7 @@ mod tests {
         let pool = Pool::new(2);
         let fb = Vram::new(0x100);
         let mut pending = Vec::with_capacity(BATCH);
-        pending.push(Job::Bytes {
-            fb,
-            at: 0,
-            bytes: vec![1],
-        });
+        pending.push(Job::bytes(fb, 0, vec![1]));
         let batch = pool.take_pending(&mut pending);
         assert_eq!((batch.len(), batch.capacity()), (1, 1));
         assert!(pending.is_empty() && pending.capacity() >= BATCH);

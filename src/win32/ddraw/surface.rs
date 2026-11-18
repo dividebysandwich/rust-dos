@@ -521,6 +521,17 @@ pub fn write_rows(cpu: &mut Cpu, s: &Surface, offset: u32, len: usize, data: &[u
     if len == 0 {
         return;
     }
+    if s.memory == MEM_VIDEO {
+        // Rows as long as the pitch are one run.
+        let runs: Vec<_> = if len == s.pitch as usize {
+            vec![(offset, data.len())]
+        } else {
+            let rows = data.chunks(len).zip(0u32..);
+            rows.map(|(row, y)| (offset + y * s.pitch, row.len()))
+                .collect()
+        };
+        return write_runs(cpu, s, &runs, data);
+    }
     if len == s.pitch as usize {
         return write_bytes(cpu, s, offset, data);
     }
@@ -529,6 +540,21 @@ pub fn write_rows(cpu: &mut Cpu, s: &Surface, offset: u32, len: usize, data: &[u
     }
     for (row, y) in data.chunks(len).zip(0u32..) {
         write_bytes(cpu, s, offset + y * s.pitch, row);
+    }
+}
+
+/// Write runs of bytes into a surface's pixels: run `(offset, len)`
+/// puts the next `len` bytes of `data` at byte `offset`. In video memory
+/// they go to the display adapter together (`screen::write_runs`).
+pub fn write_runs(cpu: &mut Cpu, s: &Surface, runs: &[(u32, usize)], data: &[u8]) {
+    if s.memory == MEM_VIDEO {
+        let runs: Vec<_> = runs.iter().map(|&(at, len)| (s.bits + at, len)).collect();
+        return screen::write_runs(cpu, &runs, data);
+    }
+    let mut from = 0;
+    for &(at, len) in runs {
+        write_bytes(cpu, s, at, &data[from..from + len]);
+        from += len;
     }
 }
 
