@@ -3081,6 +3081,12 @@ pub fn get_window_thread_process_id(cpu: &mut Cpu, args: &[u32]) -> Option<u32> 
 /// (Windows 2000's WS_EX_LAYERED), and Windows 98 has no layered
 /// windows. CyberStorm 2 sets it on every control of its dialogs, and
 /// they take clicks.
+///
+/// A disabled child is passed over too, with its children, as Wine's
+/// server and ReactOS search for the window at a point: a click on it
+/// goes to the window it is in, which can tell which child was under it
+/// with ChildWindowFromPoint. A disabled top-level window is the window
+/// there, and gets nothing.
 pub fn window_at(state: &State, x: i32, y: i32) -> u32 {
     let mut hwnd = DESKTOP;
     'down: loop {
@@ -3097,7 +3103,9 @@ pub fn window_at(state: &State, x: i32, y: i32) -> u32 {
             if !state.screen_rect(child).contains(x, y) {
                 continue;
             }
-            if c.style & WS_CHILD != 0 && super::controls::hit_transparent(state, child) {
+            if c.style & WS_CHILD != 0
+                && (c.style & WS_DISABLED != 0 || super::controls::hit_transparent(state, child))
+            {
                 continue;
             }
             hwnd = child;
@@ -3674,6 +3682,41 @@ mod tests {
         assert_eq!(w.update.bounds(), Rect::new(10, 10, 100, 40));
         let w = state.window(under).expect("the window under");
         assert!(w.update.is_empty(), "the window under uncovered {:?}", w.update);
+    }
+
+    /// A disabled child isn't the window at a point: the window it is in
+    /// is, as Wine's server and ReactOS find it, so a click on a disabled
+    /// button goes to its dialog. A disabled top-level window is still
+    /// the window there.
+    #[test]
+    fn a_disabled_child_leaves_the_point_to_its_parent() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        create_desktop(&mut cpu);
+        let state = user(&mut cpu);
+        let r = Rect::new(0, 0, 640, 480);
+        let dialog = Window {
+            style: WS_VISIBLE,
+            parent: DESKTOP,
+            rect: r,
+            client: r,
+            ..Window::default()
+        };
+        let dialog = state.new_window(dialog).expect("a window");
+        link(state, dialog, HWND_TOP);
+        let button = Window {
+            style: WS_CHILD | WS_VISIBLE | WS_DISABLED,
+            parent: dialog,
+            rect: Rect::new(10, 10, 100, 40),
+            client: Rect::new(10, 10, 100, 40),
+            ..Window::default()
+        };
+        let button = state.new_window(button).expect("a button");
+        link(state, button, HWND_TOP);
+        assert_eq!(window_at(state, 20, 20), dialog);
+        state.window_mut(button).expect("the button").style &= !WS_DISABLED;
+        assert_eq!(window_at(state, 20, 20), button);
+        state.window_mut(dialog).expect("the dialog").style |= WS_DISABLED;
+        assert_eq!(window_at(state, 20, 20), dialog);
     }
 
     /// SetWindowLong(GWL_HWNDPARENT) can make two top-level windows own
