@@ -11,6 +11,7 @@ use win16::{CODE, Code, program, run_command, run_with};
 
 /// KERNEL's ordinals.
 const GET_MODULE_FILE_NAME: u16 = 49;
+const LOAD_LIBRARY: u16 = 95;
 const WIN_EXEC: u16 = 166;
 
 /// A program named `name` that imports the DLL `dll` (calling nothing in
@@ -196,4 +197,66 @@ fn a_command_with_non_ascii_bytes_is_looked_up() {
         cpu.bus.win32.enabled = enabled;
         assert_eq!(rust_dos::exec::find_program(&cpu, "\u{e9}a12"), None);
     }
+}
+
+#[test]
+fn a_program_with_a_loaded_module_name_runs_its_own_code() {
+    // The program, module T, runs C:\SUB\CHILD.EXE, another program whose
+    // module is named T too, as Sierra's setup runs its copy _SETUP.EXE.
+    // That file loads as a module of its own and ends with 7. Taken for
+    // a second instance of the program, it would run the program's code
+    // again instead.
+    let mut code = Code::new();
+    let path_at = code.here() + 2;
+    code.push_far(0)
+        .push(1) // SW_SHOWNORMAL
+        .call("KERNEL", WIN_EXEC)
+        .emit(&[
+            0x3D, 0x20, 0x00, // cmp ax,20h
+            0xB0, 0x01, // mov al,1
+            0x73, 0x02, // jae over the next
+            0xB0, 0x10, // mov al,10h
+        ])
+        .exit_al();
+    let path = code.here();
+    code.emit(b"C:\\SUB\\CHILD.EXE\0");
+    code.patch(path_at, path);
+    let mut child = Code::new();
+    child.emit(&[0xB0, 0x07]).exit_al(); // mov al,7
+    let child = program(&child, CODE);
+    let (exit, log) = run_with("same_module_name", program(&code, CODE), |_, base| {
+        let sub = base.join("SUB");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("CHILD.EXE"), child).unwrap();
+    });
+    assert_eq!(exit, 7, "{log}");
+}
+
+#[test]
+fn a_library_with_a_loaded_module_name_loads_from_its_file() {
+    // The program, module T, loads C:\RES.DLL, a library whose module is
+    // named T too, as Sierra's setup loads its resources from SETUPL.DLL,
+    // module SETUP. LoadLibrary gives the library's own instance, not the
+    // program's (DI at the start): the program ends with 1, or 10h if
+    // LoadLibrary gave its own instance or an error.
+    let mut code = Code::new();
+    code.emit(&[0x8B, 0xDF]); // mov bx,di
+    let path_at = code.here() + 2;
+    code.push_far(0).call("KERNEL", LOAD_LIBRARY).emit(&[
+        0x3B, 0xC3, // cmp ax,bx
+        0x74, 0x09, // je bad
+        0x3D, 0x20, 0x00, // cmp ax,20h
+        0x72, 0x04, // jb bad
+        0xB0, 0x01, // mov al,1
+        0xEB, 0x02, // jmp end
+        0xB0, 0x10, // bad: mov al,10h
+    ]);
+    code.exit_al();
+    let path = code.here();
+    code.emit(b"C:\\RES.DLL\0");
+    code.patch(path_at, path);
+    let (exit, log) = run_with("same_library_name", program(&code, CODE), |_, base| {
+        fs::write(base.join("RES.DLL"), library("T")).unwrap();
+    });
+    assert_eq!(exit, 1, "{log}");
 }

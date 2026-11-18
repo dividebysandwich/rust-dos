@@ -117,20 +117,26 @@ pub fn load(
             format!("{} can't be found.", file_name),
         ));
     };
-    // A module of that name may be loaded already from another path.
-    if let Ok(parsed) = ne::Module::parse(&file) {
-        let loaded_name = parsed.name().to_ascii_uppercase();
-        if let Some(i) = cpu
-            .bus
-            .win32
-            .win16
-            .modules
-            .iter()
-            .position(|m| m.name == loaded_name)
-        {
-            cpu.bus.win32.win16.modules[i].refs += 1;
-            return Ok(i);
-        }
+    // The file may be loaded already, found by another form of its path.
+    // Another file whose module has the name of a loaded one loads as a
+    // module of its own: Windows finds a loaded module by the name of the
+    // file asked for, as above, never by the name inside the file. Sierra's
+    // setup copies itself to _SETUP.EXE and its resources to SETUPL.DLL,
+    // whose modules are all named SETUP, and starts the copy while it
+    // waits for it to end.
+    let disk = &cpu.bus.disk;
+    let full = |p: &str| disk.qualify_path(p).unwrap_or_else(|| p.to_string());
+    let wanted = full(&path);
+    if let Some(i) = cpu
+        .bus
+        .win32
+        .win16
+        .modules
+        .iter()
+        .position(|m| full(&m.path).eq_ignore_ascii_case(&wanted))
+    {
+        cpu.bus.win32.win16.modules[i].refs += 1;
+        return Ok(i);
     }
     load_file(cpu, file, &path, None, inits)
 }
