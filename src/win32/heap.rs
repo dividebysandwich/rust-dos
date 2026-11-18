@@ -388,13 +388,22 @@ mod tests {
 
     /// Allocations, frees and resizes picked by a fixed generator give
     /// the blocks first fit without the hints gives, in ranges that lie
-    /// in and out of the order they were made in.
+    /// in and out of the order they were made in: with a few lengths, and
+    /// with more lengths than the heap keeps hints for.
     #[test]
     fn hints_keep_first_fit() {
+        for seed in [0x1234_5678, 0x9E37_79B9, 0x0BAD_F00D] {
+            first_fit_matches(seed, |r| [1, 8, 13, 24, 48, 48, 100, 300][r as usize % 8]);
+            first_fit_matches(seed, |r| 1 + r % 400);
+        }
+    }
+
+    /// 20,000 operations from the generator seeded with `seed`, the sizes
+    /// allocated picked by `size` from a random number.
+    fn first_fit_matches(mut seed: u32, size: fn(u32) -> u32) {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
         let mut memory = Memory::default();
         let mut heap = heap(&[0x20_0000, 0x10_0000, 0x30_0000], 0x2000);
-        let mut seed = 0x1234_5678u32;
         let mut next = move || {
             seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
             seed >> 8
@@ -404,7 +413,7 @@ mod tests {
             let roll = next();
             match roll % 8 {
                 0..=3 => {
-                    let size = [1, 8, 13, 24, 48, 48, 100, 300][next() as usize % 8];
+                    let size = size(next());
                     let expected = plain_alloc(&heap, &mut cpu, size);
                     let got = heap.alloc(&mut memory, &mut cpu.bus, size);
                     assert_eq!(got, expected, "alloc of {size}");
