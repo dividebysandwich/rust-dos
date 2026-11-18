@@ -612,9 +612,10 @@ impl ToadForceGl {
         Ok(host)
     }
 
-    /// Print `line` and keep it for the log.
+    /// Keep `line` for the log. What the renderer notes is what it chose
+    /// for this host (as the 5-6-5 targets drawn with 8 bits a channel
+    /// on most NVIDIA cards), which the log is enough for.
     fn note(&self, line: String) {
-        eprintln!("{line}");
         self.notes.borrow_mut().push(line);
     }
 
