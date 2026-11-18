@@ -1000,6 +1000,111 @@ fn mmio_reads_and_writes_riff_chunks() {
     }
 }
 
+/// A program that installs an I/O procedure of its own for 'DOS ', as
+/// Stratosphere does to read its files from its archives, and reads
+/// two files that aren't on the disk through it: NONE.WAV, and
+/// PACK.ZZZ+NONE.WAV, whose extension has no procedure of its own. The
+/// procedure reads "PROC" for every file. Bits 0 and 2 of the exit
+/// code are set if the files opened, bits 1 and 3 if they read "PROC".
+fn mmio_dos_proc_program() -> Vec<u8> {
+    const MMIO_INSTALLPROC: i32 = 0x10000;
+    const MMIOM_READ: i32 = 0;
+    const MMIOM_SEEK: i32 = 2;
+    // MMIOINFO's lDiskOffset, where the procedure keeps its place.
+    const DISK_OFFSET: i32 = 44;
+    const NAME: u32 = 0x00;
+    const PACKED: u32 = 0x10;
+    const BUF: u32 = 0x30;
+    let fourcc = |s: &[u8; 4]| u32::from_le_bytes(*s) as i32;
+    let mut data = vec![0u8; 0x40];
+    put(&mut data, NAME as usize, b"NONE.WAV");
+    put(&mut data, PACKED as usize, b"PACK.ZZZ+NONE.WAV");
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        (
+            "WINMM.dll",
+            &["mmioInstallIOProcA", "mmioOpenA", "mmioRead", "mmioClose"],
+        ),
+    ];
+    program(imports, &data, |a, l| {
+        let at = |offset: u32| l.at(offset) as i32;
+        // The procedure's address in EBP, which the CALL over it
+        // pushes.
+        let mut start = a.create_label();
+        a.call(start)?;
+        // LRESULT CALLBACK IOProc(LPSTR info, UINT msg, LPARAM l1,
+        // LPARAM l2)
+        let mut read = a.create_label();
+        let mut seek = a.create_label();
+        let mut done = a.create_label();
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.cmp(eax, MMIOM_READ)?;
+        a.je(read)?;
+        a.cmp(eax, MMIOM_SEEK)?;
+        a.je(seek)?;
+        a.xor(eax, eax)?;
+        a.ret_1(16)?;
+        // Four bytes the first time, then the end of the file.
+        a.set_label(&mut read)?;
+        a.mov(ecx, dword_ptr(esp + 4))?;
+        a.xor(eax, eax)?;
+        a.cmp(dword_ptr(ecx + DISK_OFFSET), 0)?;
+        a.jne(done)?;
+        a.mov(edx, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(edx), fourcc(b"PROC"))?;
+        a.mov(dword_ptr(ecx + DISK_OFFSET), 4)?;
+        a.mov(eax, 4)?;
+        a.set_label(&mut done)?;
+        a.ret_1(16)?;
+        a.set_label(&mut seek)?;
+        a.mov(ecx, dword_ptr(esp + 4))?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(ecx + DISK_OFFSET), eax)?;
+        a.ret_1(16)?;
+
+        a.set_label(&mut start)?;
+        a.pop(ebp)?;
+        a.xor(ebx, ebx)?;
+        a.push(MMIO_INSTALLPROC)?;
+        a.push(ebp)?;
+        a.push(fourcc(b"DOS "))?;
+        a.call(l.import(1))?;
+        for (name, bit) in [(NAME, 0), (PACKED, 2)] {
+            let mut next = a.create_label();
+            a.mov(dword_ptr(l.at(BUF)), 0)?;
+            call(a, l.import(2), &[at(name), 0, 0])?;
+            a.mov(esi, eax)?;
+            a.test(eax, eax)?;
+            a.jz(next)?;
+            a.or(ebx, 1 << bit)?;
+            a.push(4)?;
+            a.push(at(BUF))?;
+            a.push(esi)?;
+            a.call(l.import(3))?;
+            a.mov(eax, dword_ptr(l.at(BUF)))?;
+            check_eax(a, fourcc(b"PROC"), bit + 1)?;
+            a.push(0)?;
+            a.push(esi)?;
+            a.call(l.import(4))?;
+            a.set_label(&mut next)?;
+            a.nop()?;
+        }
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    })
+}
+
+#[test]
+fn mmio_uses_the_dos_procedure_the_program_installed() {
+    for core in CORES {
+        let files = [("T.EXE", mmio_dos_proc_program())];
+        let mut cpu = machine("mmio_dos_proc", core, &files, |_| {});
+        run_to_exit(&mut cpu, 20_000, |_| {});
+        assert_eq!(cpu.errorlevel, 0x0F, "{core:?}: {:?}", printed(&cpu));
+    }
+}
+
 const MMIO_WRITE: i32 = 1;
 const MMIO_READWRITE: i32 = 2;
 const MMIO_CREATE: i32 = 0x1000;

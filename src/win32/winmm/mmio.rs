@@ -602,20 +602,26 @@ pub fn mmio_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (mut fcc, mut io_proc) = (read(cpu, I_FCC), read(cpu, I_PROC));
     let (cch, buffer, info0) = (read(cpu, I_CCH), read(cpu, I_BUFFER), read(cpu, I_ADW_INFO));
     let pid = crate::win32::user32::current_pid(cpu);
-    if fcc == 0 && io_proc == 0 {
-        fcc = name
-            .as_deref()
-            .and_then(parse_extension)
-            .unwrap_or(FOURCC_DOS);
-        if fcc != FOURCC_DOS && fcc != FOURCC_MEM {
-            match installed(cpu, pid, fcc) {
-                Some(p) => io_proc = p,
-                None => fcc = FOURCC_DOS,
-            }
+    if io_proc == 0 {
+        // A procedure the program installed comes first, also for DOS
+        // and MEM: Windows searches the installed ones before its own,
+        // so a program can replace the DOS procedure, as Stratosphere
+        // does to read its files from its archives.
+        let named = fcc == 0;
+        if named {
+            fcc = name
+                .as_deref()
+                .and_then(parse_extension)
+                .unwrap_or(FOURCC_DOS);
         }
-    } else if io_proc == 0 && fcc != FOURCC_DOS && fcc != FOURCC_MEM {
         match installed(cpu, pid, fcc) {
             Some(p) => io_proc = p,
+            None if fcc == FOURCC_DOS || fcc == FOURCC_MEM => {}
+            // An extension with no procedure is a DOS file.
+            None if named => {
+                fcc = FOURCC_DOS;
+                io_proc = installed(cpu, pid, FOURCC_DOS).unwrap_or(0);
+            }
             None => {
                 set_error_ret(cpu, info, MMIOERR_CANNOTOPEN);
                 return Some(0);
@@ -1329,7 +1335,8 @@ pub fn mmio_rename(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let pid = crate::win32::user32::current_pid(cpu);
         let proc = if proc != 0 {
             Some(proc)
-        } else if fcc != 0 && fcc != FOURCC_DOS && fcc != FOURCC_MEM {
+        } else if fcc != 0 {
+            // An installed DOS procedure too, as in mmioOpenA.
             installed(cpu, pid, fcc)
         } else {
             None
