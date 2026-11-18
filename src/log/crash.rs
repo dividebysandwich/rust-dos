@@ -7,23 +7,64 @@
 //! in a graphics driver's DLL, and lets Windows go on to end the
 //! program. Both write the lines the log still buffers first, so the
 //! reason comes after the last thing the emulator did.
+//!
+//! A run in a window also shows the first crash in a dialog
+//! (`set_dialog`), with the text to report and where to: the program
+//! installs the dialog, which uses nothing of what may have crashed.
 
 use super::Lines;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, Once, TryLockError, Weak};
 
-/// The log that crashes are written to, while it is open: the log file
-/// that owns it writes out what it buffers when it closes.
-static TARGET: Mutex<Weak<Mutex<Lines>>> = Mutex::new(Weak::new());
+/// Where users report a crash.
+pub const REPORT_URL: &str = "https://github.com/dividebysandwich/rust-dos/issues/new";
 
-/// Write crashes to `lines` from now on.
-pub(super) fn report_to(lines: Weak<Mutex<Lines>>) {
-    *TARGET.lock().unwrap_or_else(|p| p.into_inner()) = lines;
+/// The log that crashes are written to, while it is open: the log file
+/// that owns it writes out what it buffers when it closes. And the
+/// log's path, for the report.
+static TARGET: Mutex<(Weak<Mutex<Lines>>, Option<PathBuf>)> = Mutex::new((Weak::new(), None));
+
+/// What shows the user a crash's report, if anything does.
+static DIALOG: Mutex<Option<fn(&str)>> = Mutex::new(None);
+
+/// Whether a crash was shown: the dialog shows the first one only.
+static SHOWN: AtomicBool = AtomicBool::new(false);
+
+/// Show the report of a crash with `show` from now on, or with None
+/// show nothing. `show` gets the text of `report_text` and runs on the
+/// thread that crashed.
+pub fn set_dialog(show: Option<fn(&str)>) {
+    *DIALOG.lock().unwrap_or_else(|p| p.into_inner()) = show;
+}
+
+/// The text the dialog shows for the crash `line` (a log line), with
+/// the log file at `log`.
+pub fn report_text(line: &str, log: Option<&Path>) -> String {
+    let error = line.strip_prefix("[CRASH] ").unwrap_or(line);
+    let log = match log {
+        Some(path) => path.display().to_string(),
+        None => "(there is no log file)".to_string(),
+    };
+    format!(
+        "rust-dos {} stopped because of an error:\n\n{error}\n\n\
+         Please report it at {REPORT_URL} with this text, what you were doing \
+         when it happened, and the log file:\n{log}",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// Write crashes to `lines`, the log file at `path`, from now on.
+pub(super) fn report_to(lines: Weak<Mutex<Lines>>, path: PathBuf) {
+    *TARGET.lock().unwrap_or_else(|p| p.into_inner()) = (lines, Some(path));
     static HOOKS: Once = Once::new();
     HOOKS.call_once(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            write(&panic_line(info));
+            let line = panic_line(info);
+            write(&line);
             previous(info);
+            show(&line);
         }));
         #[cfg(windows)]
         windows::install();
@@ -35,8 +76,8 @@ pub(super) fn report_to(lines: Weak<Mutex<Lines>>) {
 /// left as it is: waiting for it could hang the crash.
 fn write(line: &str) {
     let target = match TARGET.try_lock() {
-        Ok(target) => target.clone(),
-        Err(TryLockError::Poisoned(p)) => p.into_inner().clone(),
+        Ok(target) => target.0.clone(),
+        Err(TryLockError::Poisoned(p)) => p.into_inner().0.clone(),
         Err(TryLockError::WouldBlock) => return,
     };
     let Some(lines) = target.upgrade() else {
@@ -49,6 +90,28 @@ fn write(line: &str) {
     };
     lines.write_line(line);
     lines.flush();
+}
+
+/// Show the report of the crash `line` in the dialog, if there is one
+/// and no crash was shown before.
+fn show(line: &str) {
+    let dialog = match DIALOG.try_lock() {
+        Ok(dialog) => *dialog,
+        Err(TryLockError::Poisoned(p)) => *p.into_inner(),
+        Err(TryLockError::WouldBlock) => return,
+    };
+    let Some(dialog) = dialog else {
+        return;
+    };
+    if SHOWN.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let log = match TARGET.try_lock() {
+        Ok(target) => target.1.clone(),
+        Err(TryLockError::Poisoned(p)) => p.into_inner().1.clone(),
+        Err(TryLockError::WouldBlock) => None,
+    };
+    dialog(&report_text(line, log.as_deref()));
 }
 
 /// The log line of a panic: its message and where it happened.
@@ -116,6 +179,7 @@ mod windows {
                 line += &format!(", {access} {:#x}", record.ExceptionInformation[1]);
             }
             super::write(&line);
+            super::show(&line);
         }
         match PREVIOUS.get().copied().flatten() {
             // SAFETY: the filter installed before, given the pointers
@@ -221,8 +285,13 @@ mod windows {
 
 #[cfg(test)]
 mod tests {
+    /// Taken by the tests that set the log crashes go to, which is the
+    /// process's.
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn a_panic_is_written_to_the_log_after_the_lines_before_it() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
         let path = crate::test_dir::path("log-crash");
         let mut log = super::super::LogFile::create(&path).unwrap();
         log.write_line("[TOADFORCE] before");
@@ -246,5 +315,50 @@ mod tests {
         assert!(before < crash, "{text}");
         assert!(text[crash..].contains("crash.rs:"), "{text}");
         assert!(text[crash..].contains(": the renderer failed\n"), "{text}");
+    }
+
+    #[test]
+    fn the_report_names_the_version_the_error_the_log_and_where_to_report() {
+        let line = "[CRASH] Panic in thread 'main' at src/display.rs:12: no texture";
+        let log = std::path::Path::new("C:/x/rust-dos.log");
+        let text = super::report_text(line, Some(log));
+        let version = env!("CARGO_PKG_VERSION");
+        assert!(
+            text.starts_with(&format!("rust-dos {version} stopped")),
+            "{text}"
+        );
+        let error = "\n\nPanic in thread 'main' at src/display.rs:12: no texture\n\n";
+        assert!(text.contains(error), "{text}");
+        assert!(text.contains(super::REPORT_URL), "{text}");
+        assert!(text.ends_with("the log file:\nC:/x/rust-dos.log"), "{text}");
+        let text = super::report_text(line, None);
+        assert!(text.ends_with("(there is no log file)"), "{text}");
+    }
+
+    /// The reports the test's dialog was given.
+    static SHOWN_REPORTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    #[test]
+    fn the_dialog_shows_the_first_crash_only() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
+        let path = crate::test_dir::path("log-crash-dialog");
+        let log = super::super::LogFile::create(&path).unwrap();
+        log.report_crashes();
+        super::set_dialog(Some(|text| {
+            SHOWN_REPORTS.lock().unwrap().push(text.to_string())
+        }));
+        for message in ["first", "second"] {
+            let crasher = std::thread::spawn(move || panic!("{message}"));
+            assert!(crasher.join().is_err());
+        }
+        super::set_dialog(None);
+        drop(log);
+        std::fs::remove_file(&path).unwrap();
+        // Another test's panic may be the one shown: that the dialog
+        // showed one report, and only one, is what is checked.
+        let shown = SHOWN_REPORTS.lock().unwrap();
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert!(shown[0].contains(super::REPORT_URL), "{shown:?}");
+        assert!(shown[0].contains("log-crash-dialog"), "{shown:?}");
     }
 }

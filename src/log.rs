@@ -17,6 +17,8 @@ use std::sync::{Arc, Mutex};
 
 mod crash;
 
+pub use crash::{REPORT_URL, report_text, set_dialog as set_crash_dialog};
+
 pub const FILE_NAME: &str = "rust-dos.log";
 /// Size limit of the log file.
 pub const MAX_BYTES: u64 = 64 << 20;
@@ -34,6 +36,7 @@ pub fn default_path() -> Option<PathBuf> {
 /// then its reason.
 pub struct LogFile {
     lines: Arc<Mutex<Lines>>,
+    path: PathBuf,
 }
 
 /// The file and what has been written to it.
@@ -73,6 +76,7 @@ impl LogFile {
         ));
         Ok(LogFile {
             lines: Arc::new(Mutex::new(lines)),
+            path: path.to_path_buf(),
         })
     }
 
@@ -91,7 +95,7 @@ impl LogFile {
     /// and the reason, if any was printed, went to a console window that
     /// closed with the program.
     pub fn report_crashes(&self) {
-        crash::report_to(Arc::downgrade(&self.lines));
+        crash::report_to(Arc::downgrade(&self.lines), self.path.clone());
     }
 }
 
