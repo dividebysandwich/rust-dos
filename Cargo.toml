@@ -208,9 +208,11 @@ dynasmrt = "5"
 libc = "0.2"
 
 # The dynamic recompiler's executable memory, the console the program
-# leaves when Explorer opened one for it (src/main.rs), and the process
-# --exit-with-parent watches (src/parent_watch.rs).
+# leaves when Explorer opened one for it (src/startup.rs), and the process
+# --exit-with-parent watches (src/parent_watch.rs). libc: the C runtime's
+# descriptors 0 to 2, moved off that console's closed handles.
 [target.'cfg(windows)'.dependencies]
+libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Kernel", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_Console"] }
 
 [features]

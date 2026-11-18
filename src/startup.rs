@@ -20,14 +20,100 @@ use rust_dos::games::GameEntry;
 /// terminal, it shares the terminal's and keeps it for its output. Windows
 /// 11 24H2 and later don't open one at all (the manifest's
 /// consoleAllocationPolicy, packaging/windows/rust-dos.manifest).
+///
+/// FreeConsole closes the console's handles but leaves their numbers as
+/// the standard handles, and Windows gives a closed handle's number to
+/// the next file opened. Output to stderr then went into that file: into
+/// the run lock's file, whose shared lock refuses every write (error 33),
+/// so the first `eprintln!` panicked (#1347). The C runtime's descriptors
+/// 0 to 2 keep copies of the same numbers, and C and C++ code in the
+/// process (SDL, OpenGL drivers, the OpenXR loader) writes through them.
+///
+/// So the standard handles and descriptors that were the console's are
+/// moved to the null device, as in a program started with its output
+/// sent to NUL. A launcher that started rust-dos in a console of its own
+/// but gave it pipes or files for its output keeps getting the output
+/// there: FreeConsole leaves those open.
 #[cfg(windows)]
 pub(crate) fn leave_explorer_console() {
-    use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::Console::{
+        FreeConsole, GetConsoleMode, GetConsoleProcessList, GetStdHandle, STD_ERROR_HANDLE,
+        STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+    };
     let mut pids = [0u32; 2];
     // SAFETY: the list has room for the two entries it is given.
-    if unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) } == 1 {
-        // SAFETY: nothing holds on to the console's handles.
-        unsafe { FreeConsole() };
+    if unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) } != 1 {
+        return;
+    }
+    // The standard handles that are the console's, which FreeConsole
+    // closes.
+    let console = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE].map(|which| {
+        // SAFETY: GetStdHandle takes no pointers, and GetConsoleMode fails
+        // on a handle that isn't a console's.
+        let handle = unsafe { GetStdHandle(which) };
+        let mut mode = 0;
+        (unsafe { GetConsoleMode(handle, &mut mode) } != 0).then_some((which, handle))
+    });
+    // The C runtime's descriptors that hold those handles.
+    let fds: Vec<i32> = (0..3)
+        .filter(|&fd| {
+            console[fd as usize].is_some_and(|(_, handle)| {
+                // SAFETY: descriptors 0 to 2 are open from the start, and
+                // nothing has closed them.
+                unsafe { libc::get_osfhandle(fd) == handle as isize }
+            })
+        })
+        .collect();
+    // The null device for them, opened while the console's handles still
+    // hold their numbers, so that it gets another one.
+    let nul = match fds.is_empty() {
+        true => -1,
+        false => std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("NUL")
+            // SAFETY: the C runtime takes the handle over.
+            .map_or(-1, |nul| unsafe {
+                libc::open_osfhandle(nul.into_raw_handle() as isize, 0)
+            }),
+    };
+    // SAFETY: nothing holds on to the console's handles.
+    unsafe { FreeConsole() };
+    let mut on_nul = [false; 3];
+    if nul >= 0 {
+        // SAFETY: no file has been opened since FreeConsole, and no other
+        // thread opens one: the only one that may run yet,
+        // --exit-with-parent's, waits on a process handle opened before.
+        // So the numbers the descriptors still hold are free, and closing
+        // them closes nothing. All are closed before any gets the null
+        // device, whose copies may take those numbers. Without the null
+        // device the descriptors stay as they are: C code writing to a
+        // closed descriptor ends the process.
+        unsafe {
+            for &fd in &fds {
+                libc::close(fd);
+            }
+            for &fd in &fds {
+                on_nul[fd as usize] = libc::dup2(nul, fd) == 0;
+            }
+            libc::close(nul);
+        }
+    }
+    // Rust's output goes to the same null device, or nowhere: std skips a
+    // missing standard handle.
+    for (fd, stream) in console.into_iter().enumerate() {
+        if let Some((which, _)) = stream {
+            let handle = match on_nul[fd] {
+                // SAFETY: the descriptor is open on the null device.
+                true => unsafe { libc::get_osfhandle(fd as i32) as HANDLE },
+                false => std::ptr::null_mut(),
+            };
+            // SAFETY: the other thread that may run reads no standard
+            // handle.
+            unsafe { SetStdHandle(which, handle) };
+        }
     }
 }
 
