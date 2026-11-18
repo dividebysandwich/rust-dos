@@ -1763,6 +1763,59 @@ fn a_wait_that_asks_where_a_file_is_and_counts_its_passes_is_skipped() {
     assert!(stats.skipped > 0, "{stats:?}");
 }
 
+/// The program, waiting on the clock, reads 128 bytes of T.EXE from its
+/// end in every pass, as Smacker's read-ahead does once a movie's file is
+/// all read, and with `count` counts its passes in memory. It returns 2Ah
+/// if every read read nothing.
+fn end_of_file_wait(count: bool) -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["GetTickCount", "CreateFileA", "SetFilePointer", "ReadFile"],
+    )];
+    let mut data = vec![0; 0x200];
+    put(&mut data, 0x10, b"T.EXE\0");
+    program(BASE, false, imports, &data, |a, l| {
+        use Arg::{Esi, I};
+        let mut wait = a.create_label();
+        let mut fail = a.create_label();
+        let at = |offset: u32| I(l.at(offset) as u32);
+        let open = [at(0x10), I(0x8000_0000), I(1), I(0), I(3), I(0x80), I(0)];
+        call_with(a, l.import(1), &open)?;
+        a.mov(esi, eax)?;
+        call_with(a, l.import(2), &[Esi, I(0), I(0), I(2)])?;
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 20))?;
+        a.set_label(&mut wait)?;
+        a.call(l.import(0))?;
+        a.mov(edi, eax)?;
+        call_with(a, l.import(3), &[Esi, at(0x100), I(0x80), at(0x20), I(0)])?;
+        a.cmp(dword_ptr(l.at(0x20)), 0)?;
+        a.jne(fail)?;
+        if count {
+            a.inc(dword_ptr(l.data))?;
+        }
+        a.cmp(edi, ebx)?;
+        a.jb(wait)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, 1)?;
+        a.ret()
+    })
+}
+
+/// A read at the end of a file reads nothing and changes nothing: a wait
+/// that makes one in every pass is skipped, also when it counts its
+/// passes, as ReadFile reads nothing but its arguments.
+#[test]
+fn a_wait_that_reads_at_the_end_of_a_file_is_skipped() {
+    for (test, count) in [("eof_wait", false), ("eof_count_wait", true)] {
+        let stats = idle_lockstep(test, end_of_file_wait(count));
+        assert!(stats.proofs >= 10, "{test}: {stats:?}");
+        assert!(stats.skipped > 0, "{test}: {stats:?}");
+    }
+}
+
 /// LoadAcceleratorsA reads the table's name and the program's resources,
 /// which a count could be in: a wait that calls it and counts its passes
 /// isn't skipped.
