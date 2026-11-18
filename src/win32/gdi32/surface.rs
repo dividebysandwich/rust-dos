@@ -581,8 +581,8 @@ impl Surface {
         }
     }
 
-    /// Count `n` pixels of row `y` as put, from the `x`th of the row's
-    /// loaded on, where the surface keeps track of them (`written`).
+    /// Count `n` pixels of row `y` as put, the first at index `x` of the
+    /// columns loaded, where the surface keeps track of them (`written`).
     #[inline]
     fn mark_written(&mut self, y: i32, x: usize, n: usize) {
         if let Some(w) = &mut self.written {

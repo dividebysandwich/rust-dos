@@ -1590,9 +1590,9 @@ pub fn blit_from(
         return true;
     }
     // A raster operation that leaves out the destination (SRCCOPY,
-    // PATCOPY and their inverses, BLACKNESS) doesn't read it, and where
-    // reading it would wait for the card's 3D drawing, the blit doesn't
-    // (`Canvas::open_to_write`).
+    // NOTSRCCOPY, PATCOPY, BLACKNESS, WHITENESS) doesn't need it, and
+    // where reading it would wait for the card's 3D drawing, the blit
+    // doesn't read it (`Canvas::open_to_write`).
     let open = if uses_destination(rop3) {
         Canvas::open_columns
     } else {
