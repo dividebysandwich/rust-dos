@@ -263,6 +263,11 @@ pub const PAGE_COUNT: u8 = 4;
 pub const PAGE_SHOWN: u8 = 8;
 pub const PAGE_NOTE_SHIFT: u8 = 4;
 pub const PAGE_RETRY: u8 = 0x80;
+// The code counts a write in the ToadForce's count of the 4 KB page its
+// byte of `card_pages` is for (`x64::card_count`, `gpu::Pages::wrote`).
+const _: () = assert!(crate::toadforce::gpu::PAGE == 0x1000);
+// A slot's number fits in bits 4 to 6.
+const _: () = assert!(NOTES < 8);
 
 /// Find out where the code may read and write a display card's memory
 /// by itself, for its loads and stores that aren't of plain RAM
