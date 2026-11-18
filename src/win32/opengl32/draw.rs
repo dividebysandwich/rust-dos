@@ -2065,8 +2065,10 @@ fn pack_place(cpu: &mut Cpu, width: u32, height: u32, bytes: u32, at: u32) -> Op
 /// glReadPixels of GL_DEPTH_COMPONENT: the depth buffer's values in
 /// `kind`. The buffer holds 16 bits, `z`, for a depth of z / 65535, which
 /// a float gets as it is and an integer as OpenGL 1.1 converts a
-/// component (its table 2.6): (2^b - 1) * depth for an unsigned type of b
-/// bits, ((2^b - 1) * depth - 1) / 2 for a signed one, cut toward zero.
+/// component for the program (section 4.3.2, the inverse of table 2.6):
+/// (2^b - 1) * depth for an unsigned type of b bits, ((2^b - 1) * depth -
+/// 1) / 2 for a signed one, cut toward zero. GL_DEPTH_SCALE and
+/// GL_DEPTH_BIAS are 1 and 0, as glPixelTransfer doesn't set them.
 fn read_depth(cpu: &mut Cpu, [x, y, width, height]: [u32; 4], kind: u32, at: u32) -> Option<u32> {
     let bytes = match kind {
         GL_BYTE | GL_UNSIGNED_BYTE => 1,
