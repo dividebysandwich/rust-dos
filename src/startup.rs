@@ -37,8 +37,9 @@ pub(crate) fn leave_explorer_console() {
     let mut pids = [0u32; 2];
     // SAFETY: the list has room for the two entries it is given.
     if unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) } == 1 {
-        // SAFETY: nothing holds on to the console's handles, and no other
-        // thread runs yet to read the standard handles meanwhile.
+        // SAFETY: nothing holds on to the console's handles. The only
+        // other thread that may run yet, --exit-with-parent's, waits on a
+        // process handle opened before and reads no standard handle.
         unsafe {
             FreeConsole();
             for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
