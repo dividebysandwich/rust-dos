@@ -119,6 +119,7 @@ const GLU32: &[&str] = &[
 const KERNEL32: &[&str] = &["CreateThread"];
 /// USER32's imports after the others', so that the places above stay.
 const USER32_MORE: &[&str] = &["ChangeDisplaySettingsA"];
+const DDRAW: &[&str] = &["DirectDrawCreate"];
 const CREATE_WINDOW: usize = 0;
 const GET_DC: usize = 1;
 const CHOOSE_PIXEL_FORMAT: usize = 2;
@@ -201,6 +202,7 @@ const ERROR_STRING: usize = GLU + 2;
 const GLU_GET_STRING: usize = GLU + 3;
 const CREATE_THREAD: usize = GLU + GLU32.len();
 const CHANGE_DISPLAY_SETTINGS: usize = CREATE_THREAD + KERNEL32.len();
+const DIRECT_DRAW_CREATE: usize = CHANGE_DISPLAY_SETTINGS + USER32_MORE.len();
 
 /// A program importing the functions above, with `data` and the code
 /// `f` makes, and where its data is.
@@ -212,7 +214,7 @@ fn program(
     let list =
         |names: &[&'static str]| -> Vec<Imp> { names.iter().map(|n| Imp::Name(n)).collect() };
     let (user, gdi, gl, glu) = (list(USER32), list(GDI32), list(OPENGL32), list(GLU32));
-    let (kernel, user_more) = (list(KERNEL32), list(USER32_MORE));
+    let (kernel, user_more, ddraw) = (list(KERNEL32), list(USER32_MORE), list(DDRAW));
     let iat = b
         .imports(&[
             ("USER32.DLL", &user),
@@ -221,6 +223,7 @@ fn program(
             ("GLU32.DLL", &glu),
             ("KERNEL32.DLL", &kernel),
             ("USER32.DLL", &user_more),
+            ("DDRAW.DLL", &ddraw),
         ])
         .concat();
     let data_rva = b.section(
@@ -2224,14 +2227,70 @@ fn textures_survive_a_change_of_the_display_mode() {
     // DM_BITSPERPEL, DM_PELSWIDTH and DM_PELSHEIGHT.
     const DM_FIELDS: u32 = 0x1C_0000;
     let mut d = data();
-    for i in 0..4 {
-        put(&mut d, TEXELS + 4 * i, &[0, 255, 0, 255]);
-    }
     put(&mut d, DEVMODE + 36, &124u16.to_le_bytes());
     put32(&mut d, DEVMODE + 40, DM_FIELDS);
     put32(&mut d, DEVMODE + 104, 32);
     put32(&mut d, DEVMODE + 108, 800);
     put32(&mut d, DEVMODE + 112, 600);
+    textures_kept_through("textures_mode_change", d, |a, l, c| {
+        let changed = c.next;
+        let mode = [Arg::At(DEVMODE), Arg::I(0)];
+        c.api(a, l, CHANGE_DISPLAY_SETTINGS, &mode)?;
+        Ok(vec![changed])
+    });
+}
+
+/// The same through DirectDraw's SetDisplayMode, whose mode set clears
+/// the new picture's part of video memory before the surfaces there are
+/// lost: the textures leave it before that.
+#[test]
+fn textures_survive_a_display_mode_directdraw_sets() {
+    const DIRECT_DRAW: u32 = 0xE0;
+    // DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN.
+    const EXCLUSIVE: i32 = 0x11;
+    textures_kept_through("textures_ddraw_mode", data(), |a, l, c| {
+        let created = c.next;
+        let create = [Arg::I(0), Arg::At(DIRECT_DRAW), Arg::I(0)];
+        c.api(a, l, DIRECT_DRAW_CREATE, &create)?;
+        // IDirectDraw's SetCooperativeLevel (20) and SetDisplayMode (21).
+        let method = |a: &mut CodeAssembler, slot: i32| -> Result<(), IcedError> {
+            a.mov(eax, dword_ptr(l.at(DIRECT_DRAW)))?;
+            a.push(eax)?;
+            a.mov(ecx, dword_ptr(eax))?;
+            a.call(dword_ptr(ecx + 4 * slot))
+        };
+        let record = |a: &mut CodeAssembler, c: &mut Calls| -> Result<u32, IcedError> {
+            a.mov(dword_ptr(l.at(RESULTS + 4 * c.next)), eax)?;
+            c.next += 1;
+            Ok(c.next - 1)
+        };
+        a.push(EXCLUSIVE)?;
+        a.push(dword_ptr(l.at(HWND)))?;
+        method(a, 20)?;
+        let level = record(a, c)?;
+        a.push(32)?;
+        a.push(600)?;
+        a.push(800)?;
+        method(a, 21)?;
+        let mode = record(a, c)?;
+        Ok(vec![created, level, mode])
+    });
+}
+
+/// Draw with a green texture, change the mode with the code `change`
+/// makes (the places of the results it gives must be 0), and draw with
+/// it again, then with a red texture made after the change, on a
+/// Voodoo3 and on a ToadForce.
+fn textures_kept_through(
+    test: &str,
+    mut d: Vec<u8>,
+    change: impl Fn(&mut CodeAssembler, &Layout, &mut Calls) -> Result<Vec<u32>, IcedError>,
+) {
+    const SECOND: u32 = 0xE4;
+    for i in 0..4 {
+        put(&mut d, TEXELS + 4 * i, &[0, 255, 0, 255]);
+        put(&mut d, TEXELS + 16 + 4 * i, &[255, 0, 0, 255]);
+    }
     let quad = |a: &mut CodeAssembler, l: &Layout, c: &mut Calls| -> Result<(), IcedError> {
         c.api(a, l, CLEAR, &[Arg::I(GL_COLOR_BUFFER_BIT)])?;
         c.api(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
@@ -2254,65 +2313,79 @@ fn textures_survive_a_change_of_the_display_mode() {
         ];
         c.api(a, l, READ_PIXELS, &one)
     };
+    // Make the texture named at `name` from the 2x2 texels at `texels`,
+    // bound.
+    let texture = |a: &mut CodeAssembler,
+                   l: &Layout,
+                   c: &mut Calls,
+                   name: u32,
+                   texels: u32|
+     -> Result<(), IcedError> {
+        let texture_2d = Arg::I(GL_TEXTURE_2D);
+        c.api(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(name)])?;
+        c.api(a, l, BIND_TEXTURE, &[texture_2d, Arg::Val(name)])?;
+        let image = [
+            texture_2d,
+            Arg::I(0),
+            Arg::I(GL_RGB),
+            Arg::I(2),
+            Arg::I(2),
+            Arg::I(0),
+            Arg::I(GL_RGBA),
+            Arg::I(GL_UNSIGNED_BYTE),
+            Arg::At(texels),
+        ];
+        c.api(a, l, TEX_IMAGE_2D, &image)?;
+        let nearest = [
+            texture_2d,
+            Arg::I(GL_TEXTURE_MIN_FILTER),
+            Arg::I(GL_NEAREST),
+        ];
+        c.api(a, l, TEX_PARAMETERI, &nearest)
+    };
     for (card, name) in [
         (Draws::Voodoo3, "a Voodoo3"),
         (Draws::ToadForce, "a ToadForce"),
     ] {
-        let mut changed = 0;
+        let mut zeros = Vec::new();
         let (exe, data) = program(&d, |a, l| {
             let mut c = Calls { next: 0 };
             start(a, l, &mut c)?;
-            c.api(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(TEXTURE)])?;
-            let texture_2d = Arg::I(GL_TEXTURE_2D);
-            c.api(a, l, BIND_TEXTURE, &[texture_2d, Arg::Val(TEXTURE)])?;
-            let image = [
-                texture_2d,
-                Arg::I(0),
-                Arg::I(GL_RGB),
-                Arg::I(2),
-                Arg::I(2),
-                Arg::I(0),
-                Arg::I(GL_RGBA),
-                Arg::I(GL_UNSIGNED_BYTE),
-                Arg::At(TEXELS),
-            ];
-            c.api(a, l, TEX_IMAGE_2D, &image)?;
-            let nearest = [
-                texture_2d,
-                Arg::I(GL_TEXTURE_MIN_FILTER),
-                Arg::I(GL_NEAREST),
-            ];
-            c.api(a, l, TEX_PARAMETERI, &nearest)?;
+            texture(a, l, &mut c, TEXTURE, TEXELS)?;
             let replace = [
                 Arg::I(GL_TEXTURE_ENV),
                 Arg::I(GL_TEXTURE_ENV_MODE),
                 Arg::I(GL_REPLACE),
             ];
             c.api(a, l, TEX_ENVI, &replace)?;
-            c.api(a, l, ENABLE, &[texture_2d])?;
+            c.api(a, l, ENABLE, &[Arg::I(GL_TEXTURE_2D)])?;
             quad(a, l, &mut c)?;
             read(a, l, &mut c, PIXELS)?;
             c.api(a, l, SWAP_BUFFERS, &[Arg::Val(HDC)])?;
-            changed = c.next;
-            c.api(
-                a,
-                l,
-                CHANGE_DISPLAY_SETTINGS,
-                &[Arg::At(DEVMODE), Arg::I(0)],
-            )?;
+            zeros = change(a, l, &mut c)?;
             // The swap after the change makes the buffers again.
             c.api(a, l, SWAP_BUFFERS, &[Arg::Val(HDC)])?;
             quad(a, l, &mut c)?;
             read(a, l, &mut c, PIXELS + 4)?;
+            texture(a, l, &mut c, SECOND, TEXELS + 16)?;
+            quad(a, l, &mut c)?;
+            read(a, l, &mut c, PIXELS + 8)?;
             finish(a, l)
         });
-        let mut cpu = machine_on("textures_mode_change", card, exe);
+        let mut cpu = machine_on(test, card, exe);
         run_until_done(&mut cpu, data);
-        let r = |i: u32| peek(&cpu, data + RESULTS + 4 * i);
-        assert_eq!(r(changed), 0, "DISP_CHANGE_SUCCESSFUL on {name}");
-        let green = |at: u32| peek(&cpu, data + PIXELS + at) & 0xFF_FFFF;
-        assert_eq!(green(0), 0x00_FF00, "before the change on {name}");
-        assert_eq!(green(4), 0x00_FF00, "after the change on {name}");
+        for i in zeros {
+            let r = peek(&cpu, data + RESULTS + 4 * i);
+            assert_eq!(r, 0, "result {i} of the change on {name}");
+        }
+        let pixel = |at: u32| peek(&cpu, data + PIXELS + at) & 0xFF_FFFF;
+        assert_eq!(pixel(0), 0x00_FF00, "before the change on {name}");
+        assert_eq!(
+            pixel(8),
+            0x00_00FF,
+            "a texture made after the change on {name}"
+        );
+        assert_eq!(pixel(4), 0x00_FF00, "after the change on {name}");
     }
 }
 

@@ -702,16 +702,23 @@ fn free_memory(cpu: &mut Cpu, id: u32) {
     }
 }
 
+/// The mode is about to change or go, and video memory to be the new
+/// mode's: the surfaces OpenGL's driver keeps move out of it while their
+/// pixels are still there (a mode set clears the new picture's part).
+/// OpenGL's textures are its driver's, which keeps them through the
+/// change, as a card's OpenGL driver does: the program never hears of a
+/// loss, and has no way to restore them. Called before the mode is set,
+/// and before `video_memory_lost`.
+pub fn video_memory_to_change(cpu: &mut Cpu) {
+    for id in crate::win32::opengl32::texture_surfaces(cpu) {
+        to_system_memory(cpu, id);
+    }
+}
+
 /// The mode changed or went: video memory is the new mode's, and the
 /// surfaces that had pixels there are lost, as are the blocks Direct3D's
 /// HAL took for its copies of textures.
 pub fn video_memory_lost(cpu: &mut Cpu) {
-    // OpenGL's textures are its driver's, which keeps them through the
-    // change, as a card's OpenGL driver does: the program never hears
-    // of a loss, and has no way to restore them.
-    for id in crate::win32::opengl32::texture_surfaces(cpu) {
-        to_system_memory(cpu, id);
-    }
     for id in state(cpu).ids(|o| o.surface.as_ref().is_some_and(|s| s.memory == MEM_VIDEO)) {
         if let Some(s) = surface(cpu, id) {
             s.memory = MEM_NONE;
