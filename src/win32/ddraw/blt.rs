@@ -180,6 +180,37 @@ fn merge(bytes: usize, dst: &mut [u8], src: &[u8], src_key: Option<Key>, dst_key
     }
 }
 
+/// The runs of the pixels of `N` bytes of the row `row` that aren't in
+/// the key, each given to `run` as the byte it starts at and the byte
+/// after its end.
+fn unkeyed_runs_of<const N: usize>(row: &[u8], key: Key, mut run: impl FnMut(usize, usize)) {
+    let pixels = row.as_chunks::<N>().0;
+    let mut start = None;
+    for (i, p) in pixels.iter().enumerate() {
+        match (key.holds(pixel(p)), start) {
+            (false, None) => start = Some(i),
+            (true, Some(first)) => {
+                run(first * N, i * N);
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(first) = start {
+        run(first * N, pixels.len() * N);
+    }
+}
+
+/// `unkeyed_runs_of` for pixels of `bytes` bytes.
+fn unkeyed_runs(bytes: usize, row: &[u8], key: Key, run: impl FnMut(usize, usize)) {
+    match bytes {
+        1 => unkeyed_runs_of::<1>(row, key, run),
+        2 => unkeyed_runs_of::<2>(row, key, run),
+        3 => unkeyed_runs_of::<3>(row, key, run),
+        _ => unkeyed_runs_of::<4>(row, key, run),
+    }
+}
+
 /// Where the pixel at (`x`, `y`) of a surface is in its memory.
 fn offset(s: &Surface, x: i32, y: i32) -> u32 {
     y as u32 * s.pitch + x as u32 * s.bytes_per_pixel()
@@ -365,7 +396,55 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
     let keyless = dst_key.is_none() && src_key.is_none();
     let overwrite = keyless && (source.is_none() || unscaled);
     let unscaled_source = source.as_ref().filter(|_| unscaled).map(|(data, ..)| data);
+    // The source's pixel under the destination's (`x`, `y`), of a copy
+    // that isn't unscaled.
+    let sample = |data: &[u8], sr: &Rect, x: i32, y: i32| {
+        let (sw, sh) = (sr.width() as i64, sr.height() as i64);
+        let mut u = (x - op.dst.left) as i64;
+        let mut v = (y - op.dst.top) as i64;
+        if op.mirror_x {
+            u = dw - 1 - u;
+        }
+        if op.mirror_y {
+            v = dh - 1 - v;
+        }
+        let (sx, sy) = (u * sw / dw, v * sh / dh);
+        get(data, (sy * sw + sx) as usize * bytes, bytes)
+    };
+    // A copy through a source key alone puts the source's pixels outside
+    // the key over those of the destination, which it doesn't read: the
+    // runs of them are written, and the pixels between are left as they
+    // are. On a card the destination then needn't be brought up to date
+    // first: the runs take their turn behind the drawing queued before
+    // (`screen::write_runs`), as the card's 2D engine's blit does. The
+    // 3dfx device's buffers (`MEM_CARD`) keep the rows written whole:
+    // each write there sets up the card's frame buffer access first.
+    let key_only = src_key.filter(|_| dst_key.is_none() && d.memory != surface::MEM_CARD);
     for r in &rects {
+        if let (Some(key), Some((data, _, sr))) = (key_only, &source) {
+            let len = r.width() as usize * bytes;
+            let mut row = vec![0; len];
+            let mut runs = Vec::new();
+            let mut out = Vec::new();
+            for y in r.top..r.bottom {
+                let source_row: &[u8] = if unscaled {
+                    let from = src_at(r.left, y);
+                    &data[from..from + len]
+                } else {
+                    for (i, x) in (r.left..r.right).enumerate() {
+                        put(&mut row, i * bytes, bytes, sample(data, sr, x, y));
+                    }
+                    &row
+                };
+                let at = offset(&d, r.left, y);
+                unkeyed_runs(bytes, source_row, key, |start, end| {
+                    runs.push((at + start as u32, end - start));
+                    out.extend_from_slice(&source_row[start..end]);
+                });
+            }
+            surface::write_runs(cpu, &d, &runs, &out);
+            continue;
+        }
         let len = r.width() as usize * bytes;
         let rows = r.height() as usize;
         if overwrite {
@@ -401,18 +480,7 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
                 let at = i * bytes;
                 let value = match &source {
                     Some((data, _, sr)) => {
-                        let (sw, sh) = (sr.width() as i64, sr.height() as i64);
-                        let mut u = (x - op.dst.left) as i64;
-                        let mut v = (y - op.dst.top) as i64;
-                        if op.mirror_x {
-                            u = dw - 1 - u;
-                        }
-                        if op.mirror_y {
-                            v = dh - 1 - v;
-                        }
-                        let (sx, sy) = (u * sw / dw, v * sh / dh);
-                        let from = (sy * sw + sx) as usize * bytes;
-                        let value = get(data, from, bytes);
+                        let value = sample(data, sr, x, y);
                         if src_key.is_some_and(|k| k.holds(value)) {
                             continue;
                         }
@@ -659,4 +727,123 @@ pub fn blt_fast(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         Ok(()) => DD_OK,
         Err(e) => e,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::voodoo::workers::Job;
+    use crate::voodoo::{Board, Voodoo};
+    use std::sync::{Arc, Condvar, Mutex};
+
+    const KEY: u32 = 0xE01C;
+
+    /// A 16-bit surface of `width` by `height` pixels in `memory` at
+    /// `bits`.
+    fn surface(memory: u32, bits: u32, width: u32, height: u32) -> Surface {
+        let format = super::super::Format {
+            flags: surface::DDPF_RGB,
+            bits: 16,
+            r: 0xF800,
+            g: 0x07E0,
+            b: 0x001F,
+            ..Default::default()
+        };
+        Surface {
+            width,
+            height,
+            pitch: width * 2,
+            format,
+            memory,
+            bits,
+            ..Default::default()
+        }
+    }
+
+    fn add(cpu: &mut Cpu, s: Surface) -> u32 {
+        let object = super::super::Object {
+            surface: Some(s),
+            ..Default::default()
+        };
+        state(cpu).add(object)
+    }
+
+    /// A source-keyed blit from system memory onto a Voodoo3's back
+    /// buffer comes after the 3D drawing queued before it, as the card's
+    /// 2D engine draws it in its turn, without waiting for that drawing:
+    /// the render threads are held at a gate while the blits run. If a
+    /// blit waits for them after all, a watchdog opens the gate after a
+    /// while and the test fails, instead of waiting for ever.
+    #[test]
+    fn a_keyed_blit_onto_the_card_takes_its_turn_behind_the_3d_drawing() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.configure_voodoo(Some(Board::Voodoo3));
+        cpu.bus.voodoo = Some(Voodoo::with_workers(Board::Voodoo3, 2));
+        const BACK: u32 = 0x1_0000;
+        let (width, height) = (16, 4);
+        let dst = add(&mut cpu, surface(surface::MEM_VIDEO, BACK, width, height));
+        // A 4x2 source with the key in four of its pixels.
+        const SYS: u32 = 0x2_0000;
+        let pixels = [KEY, 1, 2, KEY, 3, KEY, KEY, 4];
+        for (i, &p) in pixels.iter().enumerate() {
+            cpu.bus.guest_write_16(SYS + 2 * i as u32, p as u16);
+        }
+        let src = add(&mut cpu, surface(surface::MEM_SYSTEM, SYS, 4, 2));
+        // The drawing queued before: the render threads wait at the gate,
+        // then fill the back buffer with 1111h.
+        let gate: Arc<(Mutex<bool>, Condvar)> = Arc::default();
+        let v = cpu.bus.voodoo.as_ref().unwrap();
+        let fb = v.fbi.ram.clone();
+        let filled = vec![0x11; (width * height * 2) as usize];
+        v.submit_outside(Job::Hold(gate.clone()), None);
+        v.submit_outside(Job::bytes(fb, BACK as usize, filled), None);
+        // One copy as it is, and one stretched to twice its size.
+        let copy = |dst: Rect| Op {
+            dst,
+            src: Some((src, Rect::new(0, 0, 4, 2))),
+            src_key: Some((KEY, KEY)),
+            ..Default::default()
+        };
+        let open = |gate: &Arc<(Mutex<bool>, Condvar)>| {
+            *gate.0.lock().unwrap() = true;
+            gate.1.notify_all();
+        };
+        let (done, wait) = std::sync::mpsc::channel::<()>();
+        let late = std::thread::scope(|s| {
+            let (gate, open) = (&gate, &open);
+            let watchdog = s.spawn(move || {
+                let late = wait
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .is_err();
+                if late {
+                    open(gate);
+                }
+                late
+            });
+            assert_eq!(run(&mut cpu, dst, &copy(Rect::new(2, 1, 6, 3))), Ok(()));
+            assert_eq!(run(&mut cpu, dst, &copy(Rect::new(8, 0, 16, 4))), Ok(()));
+            done.send(()).unwrap();
+            watchdog.join().unwrap()
+        });
+        assert!(!late, "the blits waited for the 3D drawing");
+        open(&gate);
+        let mut memory = vec![0; (width * height * 2) as usize];
+        crate::win32::screen::read(&mut cpu, BACK, &mut memory);
+        let at = |x: u32, y: u32| {
+            let i = ((y * width + x) * 2) as usize;
+            u16::from_le_bytes([memory[i], memory[i + 1]]) as u32
+        };
+        // The pixels of the source in the key show the drawing.
+        let shown = |p: u32| if p == KEY { 0x1111 } else { p };
+        for y in 0..height {
+            for x in 0..width {
+                let want = match (x, y) {
+                    (2..6, 1..3) => shown(pixels[((y - 1) * 4 + x - 2) as usize]),
+                    (8..16, _) => shown(pixels[(y / 2 * 4 + (x - 8) / 2) as usize]),
+                    _ => 0x1111,
+                };
+                assert_eq!(at(x, y), want, "pixel ({x}, {y})");
+            }
+        }
+    }
 }

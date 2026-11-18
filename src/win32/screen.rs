@@ -595,6 +595,51 @@ pub fn write(cpu: &mut Cpu, offset: u32, data: &[u8]) {
     }
 }
 
+/// Runs of bytes written into video memory, each as `write` writes it:
+/// run `(offset, len)` takes the next `len` bytes of `data`. The
+/// built-in DirectDraw's blits write their rows this way. A Banshee or
+/// Voodoo3 gets them all at once (`Voodoo::banshee_memory_write_runs`)
+/// and queues them behind its 3D drawing, as its 2D engine would, where
+/// a `write` of each would wait for that drawing to be done.
+pub fn write_runs(cpu: &mut Cpu, runs: &[(u32, usize)], data: &[u8]) {
+    if cpu.bus.banshee().is_none() {
+        let mut from = 0;
+        for &(offset, len) in runs {
+            write(cpu, offset, &data[from..from + len]);
+            from += len;
+        }
+        return;
+    }
+    // What is past the end of the memory goes nowhere, as with `write`.
+    let size = memory_size(cpu) as usize;
+    let mut kept = Vec::with_capacity(runs.len());
+    // The bytes of the runs kept, once one was cut short.
+    let mut cut: Option<Vec<u8>> = None;
+    let mut from = 0;
+    for &(offset, len) in runs {
+        let start = (offset as usize).min(size);
+        let end = (start + len).min(size);
+        if end - start < len && cut.is_none() {
+            cut = Some(data[..from].to_vec());
+        }
+        if let Some(bytes) = &mut cut {
+            bytes.extend_from_slice(&data[from..from + (end - start)]);
+        }
+        from += len;
+        if start == end {
+            continue;
+        }
+        cpu.bus.toadforce_writing(start, end - start);
+        cpu.bus.toadforce_wrote(start, end - start);
+        drew(cpu, start as u32, end as u32, (end - start) as u64);
+        kept.push((start as u32, end - start));
+    }
+    let data = cut.as_deref().unwrap_or(data);
+    if let Some(v) = &mut cpu.bus.voodoo {
+        v.banshee_memory_write_runs(&kept, data);
+    }
+}
+
 /// The bytes of video memory the picture the display shows takes: from
 /// the display start, the mode's rows. None while the adapter shows
 /// none of its own modes.
