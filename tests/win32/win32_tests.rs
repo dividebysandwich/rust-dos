@@ -1960,8 +1960,8 @@ fn a_wait_that_counts_its_passes_in_a_register_is_skipped() {
         a.call(l.import(1))
     });
     let stats = idle_lockstep("register_count_wait", image);
-    assert!(stats.proofs > 0, "{stats:?}");
-    assert!(stats.skipped > 100_000, "{stats:?}");
+    assert!(stats.proofs >= 10, "{stats:?}");
+    assert!(stats.skipped > 0, "{stats:?}");
 }
 
 /// The count handed to a built-in function as its argument: what it does

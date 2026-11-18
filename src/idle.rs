@@ -97,6 +97,13 @@ const STACK_REACH: u32 = 64;
 const REP_SPAN: u64 = 1 << 20;
 /// Passes skipped at most over counters at once.
 const COUNTED_PASSES: u64 = 1 << 20;
+/// Instructions a proof's skip must reach for each instruction the proof
+/// ran, or the head backs off as after a failure. A proof steps the
+/// interpreter and looks at every instruction: in Biosys's idle loop that
+/// took the host about 250 ns an instruction, where translated code takes
+/// one or two. A loop that holds only until the clock's next millisecond
+/// and takes a tenth of it to prove costs more than it saves.
+const PAYOFF: u64 = 256;
 
 /// An instruction's place: its CS selector and EIP, and the mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -205,6 +212,9 @@ pub struct IdleStats {
     pub backed_off: u64,
     pub starts: u64,
     pub cut: u64,
+    /// Proofs whose skip fell short of `PAYOFF` times the instructions
+    /// they ran, which back off as failures do.
+    pub costly: u64,
     /// The failures by why, in the order the reasons first came up (an
     /// empty one is a free slot).
     pub failed_by: [(&'static str, u64); 16],
@@ -258,6 +268,8 @@ pub struct Observe {
     /// Whether `proven` latches the PIT's count: a time proof starts
     /// there again at once (`time`).
     proven_time: bool,
+    /// The instruction count when the proof running started.
+    started: u64,
     /// The last `KNOWN_HEADS` heads whose passes were skipped, oldest
     /// first.
     known: Vec<Head>,
@@ -354,6 +366,7 @@ impl Default for Observe {
             last_event: None,
             proven: None,
             proven_time: false,
+            started: 0,
             known: Vec::new(),
             port_ok: None,
             ports: Vec::new(),
@@ -699,9 +712,15 @@ impl Observe {
         {
             *slot = (why, slot.1 + 1);
         }
-        // (A loop that changes something every pass, as DOS 7's keyboard
-        // poll counts down, is looked at about once in 64K arms.)
-        let Some(head) = head else { return };
+        if let Some(head) = head {
+            self.back_off(head);
+        }
+    }
+
+    /// Arm `head` less often: twice as seldom as the last time in a row.
+    /// (A loop that changes something every pass, as DOS 7's keyboard
+    /// poll counts down, is looked at about once in 64K arms.)
+    fn back_off(&mut self, head: Head) {
         let at = match self.backoffs.iter().position(|b| b.head == head) {
             Some(at) => at,
             None => {
@@ -1192,6 +1211,7 @@ fn visit(cpu: &mut Cpu, now: u64) {
             o.stats.starts += 1;
             o.tally(Some(head), |h| h.starts += 1);
             o.on = true;
+            o.started = now;
             o.failed.set(None);
             o.chunks.clear();
             o.forget_ports();
@@ -1372,6 +1392,16 @@ fn finish(
             passes = same;
         }
         let skipped = skip(cpu, period, executed, limit, passes);
+        let cost = visit.icount.saturating_sub(cpu.bus.observe.started);
+        if skipped < cost.saturating_mul(PAYOFF) {
+            // The skip is real, but proving it again at the next chance
+            // would cost the host more than running the loop.
+            let o = &mut cpu.bus.observe;
+            o.stats.costly += 1;
+            if let Some(head) = head {
+                o.back_off(head);
+            }
+        }
         if skipped > 0 {
             cpu.bus.observe.proved(head);
             // The calls the passes skipped would have made, and the turn
