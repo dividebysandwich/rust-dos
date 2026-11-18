@@ -1780,6 +1780,130 @@ fn bit_tests_set_cf_and_of_as_the_interpreter_does() {
     assert_eq!(a.cpu.edi(), b.cpu.edi());
 }
 
+#[test]
+fn bit_tests_of_memory_by_registers_and_bit_scans_run_in_translated_code() {
+    // BT, BTS, BTR and BTC of memory by a register, whose signed offset
+    // picks a dword or word before or after the operand, 32 and 16 bits
+    // wide, and BT of [BX] with a 16-bit address size (67 0F A3 17),
+    // where BX and the offset wrap at 64K; then BSF and BSR of registers
+    // and memory, with sources of 0 among them, which leave the
+    // destination as it was. The flags and results go into a checksum.
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                let mut top = a.create_label();
+                let flags = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+                    a.pushfd()?;
+                    a.pop(edx)?;
+                    a.and(edx, 0x8D5)?;
+                    a.add(edi, edx)?;
+                    a.rol(edi, 5)
+                };
+                a.mov(ecx, 300u32)?;
+                a.mov(esi, 0x8001_7F35u32)?;
+                a.mov(ebx, DATA + 0x40)?;
+                a.set_label(&mut top)?;
+                // Offsets from -150 to 149.
+                a.lea(edx, ecx - 150)?;
+                a.bt(dword_ptr(ebx), edx)?;
+                flags(a)?;
+                a.bts(dword_ptr(ebx), edx)?;
+                flags(a)?;
+                a.btc(dword_ptr(ebx + 4), edx)?;
+                flags(a)?;
+                a.btr(dword_ptr(ebx + ecx), edx)?;
+                flags(a)?;
+                a.bts(word_ptr(ebx + 2), dx)?;
+                flags(a)?;
+                a.btc(word_ptr(ebx), dx)?;
+                flags(a)?;
+                a.push(ebx)?;
+                a.mov(ebx, 0x1234_0010u32)?;
+                a.db(&[0x67, 0x0F, 0xA3, 0x17])?;
+                flags(a)?;
+                a.pop(ebx)?;
+                a.mov(eax, ecx)?;
+                a.bsf(eax, esi)?;
+                flags(a)?;
+                a.add(edi, eax)?;
+                a.bsr(ax, si)?;
+                flags(a)?;
+                a.add(edi, eax)?;
+                a.bsf(eax, dword_ptr(ebx + ecx))?;
+                flags(a)?;
+                a.add(edi, eax)?;
+                a.bsr(eax, dword_ptr(ebx - 8))?;
+                flags(a)?;
+                a.add(edi, eax)?;
+                a.mov(edx, esi)?;
+                a.and(edx, 0x0F00_0000u32)?;
+                a.bsr(eax, edx)?;
+                flags(a)?;
+                a.add(edi, eax)?;
+                a.bsf(dx, dx)?;
+                flags(a)?;
+                a.add(edi, edx)?;
+                a.add(esi, ecx)?;
+                a.ror(esi, 3)?;
+                a.add(dword_ptr(ebx), esi)?;
+                a.dec(ecx)?;
+                a.jnz(top)?;
+                a.hlt()
+            }),
+        );
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(a.cpu.edi(), b.cpu.edi());
+    if AVAILABLE {
+        use iced_x86::Mnemonic::{Bsf, Bsr, Bt, Btc, Btr, Bts};
+        for m in [Bt, Bts, Btr, Btc, Bsf, Bsr] {
+            assert_eq!(handled(&b, m), 0, "{m:?}");
+        }
+    }
+}
+
+#[test]
+fn a_bit_test_of_memory_by_a_register_faults_at_the_dword_its_offset_picks() {
+    // BTS [EBX],EDX with EBX 10h below the missing page 55000h and EDX
+    // 160: the dword the offset picks is 20 bytes on, at 55004h, which is
+    // where the page fault is reported, as a write. The dword at EBX stays.
+    let (mut a, mut b) = twins(|rig| {
+        let (dir, table) = (0x80000u32, 0x81000u32);
+        rig.write32(dir, table | 3);
+        for i in 0..1024u32 {
+            rig.write32(table + 4 * i, (i << 12) | 3);
+        }
+        rig.write32(table + 0x55 * 4, 0);
+        rig.write32(0x54FF0, 0x1234_5678);
+        rig.record(PF);
+        let code = asm32(CODE, |a| {
+            a.mov(eax, dir)?;
+            a.mov(cr3, eax)?;
+            a.mov(eax, cr0)?;
+            a.or(eax, 0x8000_0000u32)?;
+            a.mov(cr0, eax)?;
+            a.jmp(CODE as u64 + 0x100)
+        });
+        rig.load(CODE, &code);
+        let body = asm32(CODE + 0x100, |a| {
+            a.mov(ebx, 0x54FF0u32)?;
+            a.mov(edx, 160u32)?;
+            a.bts(dword_ptr(ebx), edx)?;
+            a.mov(esi, 9u32)?;
+            a.hlt()
+        });
+        rig.load(CODE + 0x100, &body);
+    });
+    run_both(&mut a, &mut b);
+    let (vector, stack) = b.recorded();
+    assert_eq!((vector, stack[0]), (PF as u32, 2), "a write to a page not present");
+    assert_eq!(stack[1], CODE + 0x100 + 10, "EIP of the BTS");
+    assert_eq!(b.cpu.cr2, 0x55004);
+    assert_ne!(b.cpu.esi(), 9);
+    assert_eq!(b.read32(0x54FF0), 0x1234_5678);
+}
+
 /// Virtual-8086 code at 3000:0000 that pushes the flags after an ADD,
 /// 500 times, then enters ring 0 through INT 40h; entered with IOPL
 /// `iopl`. Returns the recompiler's machine.
@@ -4479,6 +4603,43 @@ fn fpu_square_roots_run_as_their_handlers() {
             a.fstp(st0)
         });
         assert_eq!(untranslated(&stats), untranslated(&fxam), "handlers ran them: {:?}", stats);
+    }
+}
+
+#[test]
+fn fpu_rounding_to_integers_and_absolute_values_run_as_their_handlers() {
+    let (_, b, stats) = fpu_loop(|a| {
+        // FRNDINT of every kind of single and its negation, in each of
+        // `fpu_loop`'s rounding modes: C1 says whether the magnitude went
+        // up, and PE whether the value wasn't an integer already.
+        a.fld(dword_ptr(esi))?;
+        a.frndint()?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.fst(dword_ptr(edi))?;
+        a.fld(dword_ptr(esi + 4))?;
+        a.fchs()?;
+        a.frndint()?;
+        // FRNDINT sets C1 where it rounded up, FABS clears it.
+        a.fabs()?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.fstp(qword_ptr(edi + 8))?;
+        // A sum whose 80 bits hold more than its double, which the handler
+        // rounds from the 80 bits.
+        a.fild(dword_ptr(esi + 8))?;
+        a.fld(dword_ptr(esi + 4))?;
+        a.fadd_2(st0, st1)?;
+        a.frndint()?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.fstp(qword_ptr(edi + 16))?;
+        a.fstp(dword_ptr(edi + 24))?;
+        a.fstp(dword_ptr(edi + 28))
+    });
+    assert_ne!(b.cpu.ebx(), 0);
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        assert!(stats.native + 20 > stats.instructions, "handlers ran them: {:?}", stats);
     }
 }
 
