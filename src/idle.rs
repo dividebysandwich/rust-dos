@@ -239,12 +239,12 @@ struct Ledger {
 }
 
 /// A head whose pass used the time the clock read in a way a count proof
-/// doesn't follow, as Tribal Rage's does with FILD in the pass that
-/// draws a frame once the time comes. Its next `left` proofs that skip
-/// hold what the clock read to its next millisecond (`tick_count`), as
-/// for any other loop; then they follow the clock again. `run` doubles
-/// with each such failure in a row, up to 64, and a proof that follows
-/// the clock and skips ends it.
+/// doesn't follow, as one of Tribal Rage's does by loading it into the
+/// FPU with FILD. Its next `left` proofs that skip hold what the clock
+/// read to its next millisecond (`tick_count`), as for any other loop;
+/// then they follow the clock again. `run` doubles with each such
+/// failure in a row, up to 64, and a proof that follows the clock and
+/// skips ends it.
 struct PlainClock {
     head: Head,
     left: u32,
