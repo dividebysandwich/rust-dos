@@ -47,6 +47,7 @@ impl Uop {
             Uop::Shift { op, .. } | Uop::ShiftVar { op, .. } => shift_flags(op),
             Uop::DoubleShift { .. } | Uop::DoubleShiftVar { .. } => CF | OF | SZP,
             Uop::Imul { .. } | Uop::MulWide { .. } | Uop::BitOp { .. } => CF | OF,
+            Uop::BitScan { .. } => ZF,
             // As a 486 leaves them (instructions/arith.rs `division_flags`).
             Uop::DivWide { .. } => ARITH,
             Uop::Flag { mask, .. } | Uop::FlagsFrom { mask, .. } => mask & ARITH,

@@ -466,26 +466,30 @@ fn hle_json(c: &rust_dos::profile::Counters, top: usize, per_s: &dyn Fn(u64) -> 
         .flat_map(|(k, &kind)| c.services[k].iter().enumerate().filter(|&(_, &n)| n > 0).map(move |(v, &n)| (kind, v, n)))
         .collect();
     services.sort_by_key(|&(kind, v, n)| (std::cmp::Reverse(n), kind, v));
-    let mut win32: Vec<(usize, u64)> = c
-        .win32
-        .iter()
-        .copied()
-        .enumerate()
-        .filter(|&(_, n)| n > 0)
-        .collect();
-    win32.sort_by_key(|&(id, n)| (std::cmp::Reverse(n), id));
-    let win32: Vec<Value> = win32
-        .iter()
-        .take(top)
-        .map(|&(id, n)| {
-            json!({
-                "id": format!("{:04X}", id),
-                "name": rust_dos::win32::trap_name(id as u16),
-                "calls": n,
-                "per_s": per_s(n),
+    // The built-in Windows' calls, most first: its DLLs' functions and
+    // the Win16 system modules', whose ids are numbered apart.
+    let calls_of = |counts: &[u64], code16: bool| -> Vec<Value> {
+        let mut ids: Vec<(usize, u64)> = counts
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|&(_, n)| n > 0)
+            .collect();
+        ids.sort_by_key(|&(id, n)| (std::cmp::Reverse(n), id));
+        ids.iter()
+            .take(top)
+            .map(|&(id, n)| {
+                json!({
+                    "id": format!("{:04X}", id),
+                    "name": rust_dos::win32::trap_name(id as u16, code16),
+                    "calls": n,
+                    "per_s": per_s(n),
+                })
             })
-        })
-        .collect();
+            .collect()
+    };
+    let win32 = calls_of(&c.win32, false);
+    let win16 = calls_of(&c.win16, true);
     let services: Vec<Value> = services
         .iter()
         .take(top)
@@ -508,6 +512,7 @@ fn hle_json(c: &rust_dos::profile::Counters, top: usize, per_s: &dyn Fn(u64) -> 
             .collect::<Vec<_>>(),
         "services": services,
         "win32": win32,
+        "win16": win16,
     })
 }
 
@@ -707,6 +712,15 @@ Charged to callers ({:.2}% of busy; ring 0 is {:.2}% of busy, {:.2}% of it charg
     for c in r["hle"]["services"].as_array().into_iter().flatten() {
         let what = format!("{} service {}", c["kind"].as_str().unwrap_or(""), c["service"].as_str().unwrap_or(""));
         lines.push((c["calls"].as_u64().unwrap_or(0), format!("  {:<42} {:>10} {:>10}/s", what, c["calls"], c["per_s"])));
+    }
+    for key in ["win32", "win16"] {
+        for c in r["hle"][key].as_array().into_iter().flatten() {
+            let what = c["name"].as_str().unwrap_or("");
+            lines.push((
+                c["calls"].as_u64().unwrap_or(0),
+                format!("  {:<42} {:>10} {:>10}/s", what, c["calls"], c["per_s"]),
+            ));
+        }
     }
     if !lines.is_empty() {
         lines.sort_by_key(|(n, _)| std::cmp::Reverse(*n));

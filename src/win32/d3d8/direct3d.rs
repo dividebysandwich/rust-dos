@@ -285,7 +285,5 @@ pub fn create_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(D3DERR_INVALIDCALL);
     };
     let id = hr!(d3d_of(cpu, this));
-    Some(device::create(
-        cpu, id, adapter, devtype, focus, flags, params, out,
-    ))
+    device::create(cpu, id, adapter, devtype, focus, flags, params, out)
 }
