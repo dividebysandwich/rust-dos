@@ -524,9 +524,9 @@ pub fn expose(cpu: &mut Cpu) {
 /// driver's buffer to the card and returns without waiting for it, and
 /// the program sees what was drawn only through a call above, which
 /// settles (a Lock, a Blt, a Flip, a DC). Some programs make a scene of
-/// every object: Phoenix ends 25,000 scenes a second in play, and
-/// settling at each had the host renderer draw a batch of one or two
-/// draws each time.
+/// every object: Phoenix ends 3,600 scenes a second in its menu and
+/// up to 48,000 in a fight, and settling at each had the host renderer
+/// draw a batch of one or two draws each time.
 pub fn api_settles(dll: &str, name: &str) -> bool {
     // A present is where a program has the card catch up.
     let frame_end = name.ends_with("_Present");
@@ -1324,6 +1324,9 @@ mod tests {
             ("USER32.DLL", "GetDC", true),
         ] {
             assert_eq!(listed(dll, name), settles, "{dll} {name}");
+        }
+        for name in RECTANGLE_ARITHMETIC {
+            assert!(!listed("USER32.DLL", name), "USER32.DLL {name}");
         }
     }
 
