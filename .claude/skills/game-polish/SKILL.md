@@ -51,19 +51,38 @@ session the build's folder instead of letting it build its own.
    - A package: unpack it into `$W/c`, and read its `rust-dos.conf` (or
      DOSBox configuration) for the machine it wants: pass those settings
      on the command line or with `--config $W/game.conf`.
-3. **Build** a release build of the default branch's latest commit
-   (`cargo build --release`; on Linux it needs SDL3's and ALSA's
-   development files), unless a shared build of that commit is already
-   there; then use that one. Copy the program into a folder named after
-   the commit, outside every worktree and target directory, such as
-   `<shared>/main-<short hash>/`, with its debug symbols (the `.pdb` on
-   Windows) and, on Windows, `SDL3.dll`. Call the program `$BIN`. Every
-   session that plays this commit runs it, and every comparison of a fix
-   with the default branch runs it as the default branch's side, so
-   several sessions build it once. Never write into a folder that holds
-   a build: a newer commit gets a folder of its own, since the default
-   branch moves during a long run and Windows can't replace a program
-   that is running. Record the commit: every finding is against it.
+3. **Build** a release build of the default branch's latest commit,
+   unless a shared build of that commit is already there; then use that
+   one. The build goes into a folder named after the commit, outside
+   every worktree and target directory (`$S` below, such as
+   `~/rust-dos-builds`), with its debug symbols and, on Windows,
+   `SDL3.dll` from the `lib\x64` folder the build links against (see
+   the README's build section; on Linux the build needs SDL3's and
+   ALSA's development files):
+
+   ```sh
+   git fetch origin <default>
+   C=$(git rev-parse --short origin/<default>)
+   D=$S/main-$C
+   if [ ! -e "$D" ]; then
+     git worktree add --detach ../rust-dos-wt/main-$C origin/<default>
+     (cd ../rust-dos-wt/main-$C && cargo build --release)
+     mkdir -p "$D.part"
+     # Windows: rust-dos.exe, rust_dos.pdb (an underscore) and SDL3.dll.
+     cp ../rust-dos-wt/main-$C/target/release/rust-dos "$D.part"/
+     mv "$D.part" "$D"   # appears whole, never half-copied
+     git worktree remove --force ../rust-dos-wt/main-$C
+   fi
+   BIN=$D/rust-dos
+   ```
+
+   Every session that plays this commit runs `$BIN`, and every
+   comparison of a fix with the default branch runs it as the default
+   branch's side, so several sessions build it once. Never write into a
+   folder that holds a build: a newer commit gets a folder of its own,
+   since the default branch moves during a long run and Windows can't
+   replace a program that is running. Record the commit (`$C`): every
+   finding is against it.
 4. **Launch** headless on a free port, with the log in `$W`:
 
    ```sh
