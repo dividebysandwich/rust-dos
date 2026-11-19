@@ -17,6 +17,7 @@ pub mod draw;
 mod draw_tests;
 pub mod fnt;
 pub mod font;
+mod fot;
 mod gamma;
 pub mod metafile;
 pub mod palette;
@@ -1533,6 +1534,12 @@ static APIS: &[Api] = &[
     stdcall("GetTextCharset", 303, 1, font::get_text_charset),
     stdcall("GetTextCharsetInfo", 304, 3, font::get_text_charset_info),
     stdcall("AddFontResourceA", 107, 1, font::add_font_resource),
+    stdcall(
+        "CreateScalableFontResourceA",
+        168,
+        4,
+        font::create_scalable_font_resource,
+    ),
     stdcall("RemoveFontResourceA", 359, 1, font::remove_font_resource),
     stdcall("GetOutlineTextMetricsA", 285, 3, nothing),
     stdcall("GetKerningPairsA", 269, 3, nothing),

@@ -673,6 +673,10 @@ impl HostFile {
     fn modified(&self) -> Option<std::time::SystemTime> {
         self.file.modified()
     }
+
+    fn set_modified(&self, time: std::time::SystemTime) -> std::io::Result<()> {
+        self.file.set_modified(time)
+    }
 }
 
 impl Read for HostFile {

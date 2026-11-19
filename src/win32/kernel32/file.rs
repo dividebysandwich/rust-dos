@@ -729,9 +729,16 @@ pub(super) fn get_file_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// SetFileTime(handle, created, accessed, written): the time of the last
-/// write is the DOS time, which files on disk images keep; host files
-/// keep the host's, as with DOS. The others aren't kept.
+/// write becomes the file's DOS time (`DiskController::set_file_time`),
+/// which a file on a disk image keeps in its directory entry and a host
+/// file as its modification time. The others aren't kept. As on Windows
+/// 98 SE, a handle opened without GENERIC_WRITE fails with
+/// ERROR_ACCESS_DENIED, the time is rounded up to an even second, as
+/// its FAT driver stores it (19:20:01.5 becomes 19:20:02), and a time
+/// before 1980 or after 2107 fails with ERROR_INVALID_DATA.
 pub(super) fn set_file_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    const ERROR_INVALID_DATA: u32 = 13;
+    const TWO_SECONDS: u64 = 20_000_000;
     let Some(open) = open_or_fail(cpu, args[0]) else {
         return Some(FALSE);
     };
@@ -747,8 +754,11 @@ pub(super) fn set_file_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if cpu.bus.guest_faulted() {
         return None;
     }
-    let Some((date, time)) = crate::win32::convert::ticks_to_dos(high << 32 | low) else {
-        set_error(cpu, ERROR_INVALID_PARAMETER);
+    let rounded = (high << 32 | low)
+        .div_ceil(TWO_SECONDS)
+        .checked_mul(TWO_SECONDS);
+    let Some((date, time)) = rounded.and_then(crate::win32::convert::ticks_to_dos) else {
+        set_error(cpu, ERROR_INVALID_DATA);
         return Some(FALSE);
     };
     match cpu.bus.disk.set_file_time(open.sft, time, date) {
