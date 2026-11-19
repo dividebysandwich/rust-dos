@@ -27,6 +27,14 @@ skill covers what to do on top of that.
 - **`--no-issues`**: don't file issues; write the findings to the report
   only, and fix them only if asked.
 
+## Several games at once
+
+Given several games, polish each in a session of its own (a subagent per
+game), at most about three at once, and start the next game when one
+finishes. Every session plays the same commit, so build it once before
+the first session starts, as step 3 of Phase 0 describes, and give each
+session the build's folder instead of letting it build its own.
+
 ## Phase 0: set up
 
 1. **Work directory.** Put everything from the session in one directory
@@ -43,15 +51,44 @@ skill covers what to do on top of that.
    - A package: unpack it into `$W/c`, and read its `rust-dos.conf` (or
      DOSBox configuration) for the machine it wants: pass those settings
      on the command line or with `--config $W/game.conf`.
-3. **Build** a release build of the current `HEAD` (`cargo build
-   --release`; on Linux it needs SDL3's and ALSA's development files).
-   Record `git rev-parse HEAD`: every finding is against this commit.
+3. **Build** a release build of the default branch's latest commit,
+   unless a shared build of that commit is already there; then use that
+   one. The build goes into a folder named after the commit, outside
+   every worktree and target directory (`$S` below, such as
+   `~/rust-dos-builds`), with its debug symbols and, on Windows,
+   `SDL3.dll` from the `lib\x64` folder the build links against (see
+   the README's build section; on Linux the build needs SDL3's and
+   ALSA's development files):
+
+   ```sh
+   git fetch origin <default>
+   C=$(git rev-parse --short origin/<default>)
+   D=$S/main-$C
+   if [ ! -e "$D" ]; then
+     git worktree add --detach ../rust-dos-wt/main-$C origin/<default>
+     (cd ../rust-dos-wt/main-$C && cargo build --release)
+     mkdir -p "$D.part"
+     # Windows: rust-dos.exe, rust_dos.pdb (an underscore) and SDL3.dll.
+     cp ../rust-dos-wt/main-$C/target/release/rust-dos "$D.part"/
+     mv "$D.part" "$D"   # appears whole, never half-copied
+     git worktree remove --force ../rust-dos-wt/main-$C
+   fi
+   BIN=$D/rust-dos
+   ```
+
+   Every session that plays this commit runs `$BIN`, and every
+   comparison of a fix with the default branch runs it as the default
+   branch's side, so several sessions build it once. Never write into a
+   folder that holds a build: a newer commit gets a folder of its own,
+   since the default branch moves during a long run and Windows can't
+   replace a program that is running. Record the commit (`$C`): every
+   finding is against it.
 4. **Launch** headless on a free port, with the log in `$W`:
 
    ```sh
    : > $W/rust-dos.out
    SDL_VIDEO_DRIVER=dummy \
-     ./target/release/rust-dos --no-config -d $W/c \
+     "$BIN" --no-config -d $W/c \
      --debug-server 127.0.0.1:0 > $W/rust-dos.out 2> $W/rust-dos.err &
    echo $! > $W/emu.pid
    until H=$(grep -om1 '127\.0\.0\.1:[0-9][0-9]*' $W/rust-dos.out); do
@@ -235,9 +272,10 @@ Fix the issues in rank order. For each one:
 
    Independent issues can be fixed in parallel, by subagents that each
    get one worktree, the issue, and the paths in `$W` that belong to it.
-   Run at most about three at once: each needs its own release build, and
-   so its own `target/` directory of several GB. Delete a worktree's
-   `target/` when its fix is done.
+   Run at most about three at once: each fix needs its own release build,
+   and so its own `target/` directory of several GB. Delete a worktree's
+   `target/` when its fix is done. The default branch's side of every
+   comparison is the shared build from Phase 0, not a build of its own.
 2. **Find the cause** in the emulator, with the save state and the
    `debug-emulator` skill. Fix the cause, not the one game: a fix keyed to
    a game's name or a program's bytes isn't one, unless the emulator
@@ -275,7 +313,10 @@ Fix the issues in rank order. For each one:
    changes, push them, and run the review again on what changed.
 7. **Validate against the game.** Build the worktree's release binary
    from the pushed head, then run the game as in Phase 0 with that
-   binary:
+   binary, and with the shared build of the commit the branch starts
+   from for the default branch's side (if the branch starts from a newer
+   commit than the shared builds, build that commit once into a folder of
+   its own, as in Phase 0):
    - Load the finding's save state and repeat the steps. A state may not
      load into a build whose machine changed; then replay from the
      prompt with the steps in the issue.

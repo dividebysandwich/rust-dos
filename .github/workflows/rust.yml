@@ -11,13 +11,22 @@ on:
   # ready_for_review too, as drafts skip the release builds (see `scope`).
   # A pull request that changes only the documentation outside `src`
   # doesn't run this workflow: nothing reads it but the packages, which
-  # copy it as it is. `src/config_ui/help/*.md` is compiled into the
-  # program, so `*.md` stops at the top folder.
+  # copy it as it is, and two tests, which check that the debugging guide
+  # and the ToadForce specification list every name the code has (so
+  # those two files run it). `src/config_ui/help/*.md` is compiled into
+  # the program, so `*.md` stops at the top folder. `.claude/` holds the
+  # coding agents' skills and scripts, which no build or test reads.
+  # GitHub documents `!` patterns for `paths` alone, where a later
+  # pattern that matches a file overrides an earlier one.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    paths-ignore:
-      - "*.md"
-      - "docs/**"
+    paths:
+      - "**"
+      - "!*.md"
+      - "!docs/**"
+      - "docs/llm-debugging.md"
+      - "docs/toadforce-spec.md"
+      - "!.claude/**"
   # Manual runs build every artifact (downloadable from the run page)
   # without creating a release.
   workflow_dispatch:
