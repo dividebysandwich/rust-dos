@@ -151,14 +151,20 @@ fn write_rom(bus: &mut Bus, offset: u16, code: &[u8]) {
 }
 
 /// The vector table the BIOS sets up: service traps, the timer and IRQ
-/// handlers, and an IRET for everything else except unused user vectors.
-/// Entries are segment:offset.
+/// handlers, and an IRET for everything else up to 77h except unused user
+/// vectors. Entries are segment:offset.
 pub fn default_ivt() -> [u32; 256] {
     let mut ivt = [far(IRET_HANDLER); 256];
     // DOS/4GW allocates an unused vector for its real-mode mouse callback
     // translator. It requires a null vector, not a pointer to an IRET.
     // Leave the same user-vector range available as DOSBox Staging.
     ivt[0x60..=0x65].fill(0);
+    // An AT BIOS sets up the vectors up to 77h and leaves the rest of the
+    // table zero, and DOSBox does too. Drivers look there for a free
+    // vector to install on: Creative's SBFMDRV takes the first null one
+    // from INT 80h, and without one it exits with "No interrupt vector
+    // available".
+    ivt[0x78..].fill(0);
     ivt[0x0A..=0x0F].fill(far(MASTER_EOI_HANDLER));
     ivt[0x70..=0x77].fill(far(SLAVE_EOI_HANDLER));
     ivt[0x71] = far(IRQ9_HANDLER);
