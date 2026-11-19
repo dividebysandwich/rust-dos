@@ -307,7 +307,7 @@ const STALLED: f64 = 2.0;
 /// with, a run of long frames comes now and then, and its measurements say
 /// what they cost.
 const TRY_BEHIND_NS: u64 = 25_000_000;
-const TRY_BEHIND_FRAMES: u32 = 3;
+pub(crate) const TRY_BEHIND_FRAMES: u32 = 3;
 const TRY_DROPS: u32 = 2;
 /// A host that stops for a moment, or a program that waits for the host's
 /// disk, leaves a few long frames among frames that run on time, and the
@@ -718,7 +718,7 @@ pub fn screen_bytes(bus: &Bus) -> u64 {
 
 /// Whether `RUST_DOS_AUTO_TRACE` is set: then each measurement and the
 /// speed it chose go to stderr.
-fn trace() -> bool {
+pub(crate) fn trace() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("RUST_DOS_AUTO_TRACE").is_some())
 }
@@ -1238,8 +1238,17 @@ pub struct AutoSpeed {
     /// then, so a frame takes it down with the estimate: a measurement at
     /// an estimate that ran high would leave it behind for half a second
     /// (Expendable's sound runs dry). A speed found by the frame rate has
-    /// the pace to go by, and waits for that.
+    /// the pace to go by, and waits for that. Slow frames in a row bring
+    /// it down sooner than the estimate does (`Pacer::cap_boost` in
+    /// `timer.rs`): the speed has no room above what the host runs.
     flat_out: bool,
+    /// While `flat_out`, a speed under the host's estimate that slow
+    /// frames in a row put on it (`Pacer::cap_boost` in `timer.rs`), and
+    /// the speed goes no higher until the next measurement. That one
+    /// decides from the estimate and drops the cap, as it drops
+    /// `flat_out`: a stall of the host during one boost leaves nothing
+    /// behind for the speed it chooses next.
+    boost_cap: Option<f64>,
     /// The bytes it had read and written, and when that last changed; and
     /// the same of the bytes moved on drives.
     output: (u64, u64),
@@ -1303,6 +1312,7 @@ impl AutoSpeed {
             working: None,
             work_cuts: 0,
             flat_out: false,
+            boost_cap: None,
             output: (0, 0),
             io: (0, 0),
             loading: false,
@@ -1323,6 +1333,26 @@ impl AutoSpeed {
             busy_os: self.busy_os,
             dpmi_client: self.dpmi_client,
             ..Self::new(base, target_fps)
+        }
+    }
+
+    /// Whether the program gets all the host has, its speed following the
+    /// host's estimate down (`flat_out`).
+    pub fn flat_out(&self) -> bool {
+        self.flat_out
+    }
+
+    /// The cap slow frames put on the speed of the program getting all
+    /// the host has (`boost_cap`), if they did.
+    pub fn boost_cap(&self) -> Option<f64> {
+        self.boost_cap.filter(|_| self.flat_out)
+    }
+
+    /// Cap the speed of the program getting all the host has at `cap`
+    /// until the next measurement; nothing if it doesn't get that.
+    pub fn cap_boost(&mut self, cap: f64) {
+        if self.flat_out {
+            self.boost_cap = Some(cap);
         }
     }
 
@@ -1399,6 +1429,7 @@ impl AutoSpeed {
         self.restart_search();
         self.working = None;
         self.flat_out = false;
+        self.boost_cap = None;
         self.loading = false;
     }
 
@@ -1475,8 +1506,13 @@ impl AutoSpeed {
         if let Some(before) = self.work_return().filter(|_| done) {
             return self.work_done(before, now.ns, current);
         }
-        let cut = (self.flat_out && current > host_max)
-            .then(|| host_max.max(self.least(protected, host_max)))
+        // Flat out, the speed follows the estimate down, and slow frames in
+        // a row may cap it lower (`boost_cap`).
+        let most = self
+            .boost_cap()
+            .map_or(host_max, |cap| host_max.min(cap as u32));
+        let cut = (self.flat_out && current > most)
+            .then(|| most.max(self.least(protected, most)))
             .filter(|&speed| speed < current);
         let Some(mark) = self.mark else {
             if now.ns >= self.settle_until {
@@ -1603,7 +1639,19 @@ impl AutoSpeed {
         self.trying = None;
         let working = self.working.take();
         let next = self.decide(current, &measured, protected, host_max);
-        if self.working.is_some() {
+        // A measurement without frames that `decide` didn't find at work
+        // ends the work, though the program still writes a little to video
+        // memory, which keeps `done` from coming: Millennia's intro player
+        // reads the next stretch of its video from the CD every 6 seconds
+        // and writes a few hundred bytes a second in between. Going on
+        // from all the host has, it took 11 measurements to step down. One
+        // that keeps an idling system busy (`flat_out` without `working`)
+        // is at work too, and keeps all the host has.
+        let over = working.is_some()
+            && self.working.is_none()
+            && !self.flat_out
+            && measured.fps.is_none();
+        if self.working.is_some() || over {
             self.working = working.or(self.working);
         }
         if trace() {
@@ -1629,7 +1677,7 @@ impl AutoSpeed {
         // going to all the host has for them would only last until the
         // next frame, and time a delay loop that starts after loading at
         // that speed.
-        if let Some(before) = self.work_return().filter(|_| done) {
+        if let Some(before) = self.work_return().filter(|_| done || over) {
             return self.work_done(before, now.ns, current);
         }
         if next == current {
@@ -1775,6 +1823,7 @@ impl AutoSpeed {
         let top = host_max.max(self.least(protected, host_max));
         let c = current as f64;
         self.flat_out = false;
+        self.boost_cap = None;
         let loading = std::mem::take(&mut self.loading);
         let was_loaded = std::mem::replace(&mut self.loaded, m.io >= LOADS);
         if protected && !self.dpmi_client && m.halted >= IDLES {
@@ -3838,6 +3887,53 @@ mod tests {
         bus.activity.video_bytes += 64_000;
         assert_eq!(auto.update(bus, false, HOST, 0), Some(3000));
         assert_eq!(protected.update(bus, true, HOST, 0), None);
+    }
+
+    #[test]
+    fn a_measurement_without_work_or_frames_goes_back_at_once() {
+        // Millennia's intro player after reading a stretch of its video:
+        // a few hundred bytes a second to video memory keep the work from
+        // being done by the clock, but the measurement finds none.
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(HOST);
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.working = Some(PROTECTED_LEAST);
+        assert_eq!(auto.update(bus, true, HOST, 0), None);
+        for _ in 0..10 {
+            bus.clock.icount += HOST as u64 * 50;
+            bus.activity.video_bytes += 20;
+            if let Some(speed) = auto.update(bus, true, HOST, 0) {
+                assert_eq!(speed, PROTECTED_LEAST);
+                assert_eq!(auto.work_return(), None);
+                return;
+            }
+        }
+        panic!("no measurement");
+    }
+
+    #[test]
+    fn a_load_that_ends_in_a_busy_system_keeps_all_the_host_has() {
+        // Under a system seen idling, a program that loaded and then keeps
+        // it busy without frames or output (3DMark 2000 building a scene)
+        // is at work: it stays at all the host has.
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(HOST);
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_idles(true);
+        auto.working = Some(PROTECTED_LEAST);
+        assert_eq!(auto.update(bus, true, HOST, 0), None);
+        for _ in 0..10 {
+            bus.clock.icount += HOST as u64 * 50;
+            bus.activity.video_bytes += 20;
+            assert_eq!(auto.update(bus, true, HOST, 0), None);
+            if auto.flat_out() {
+                assert_eq!(auto.work_return(), None);
+                return;
+            }
+        }
+        panic!("no measurement");
     }
 
     #[test]
