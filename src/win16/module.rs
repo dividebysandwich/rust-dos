@@ -926,7 +926,7 @@ fn write_tables(cpu: &mut Cpu, db: u16, parsed: &ne::Module, segments: &[Segment
 /// The selector of segment `n` (from 1) of the module `m`, if it has a
 /// block. A self-loading module's loader keeps them in the module
 /// database while it runs.
-fn segment_selector(cpu: &Cpu, m: &Module16, n: u8) -> Option<u16> {
+pub(super) fn segment_selector(cpu: &Cpu, m: &Module16, n: u8) -> Option<u16> {
     let i = (n as usize).checked_sub(1)?;
     let sel = if m.unbooted && i < m.segments.len() {
         global::handle_to_sel(db_segment(cpu, m.handle, n as u16).1)

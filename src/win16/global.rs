@@ -11,6 +11,7 @@
 use super::ldt::{self, ACCESS_CODE, ACCESS_DATA};
 use super::{State, win16};
 use crate::cpu::Cpu;
+use rust_dos_ne as ne;
 
 /// GlobalAlloc's flags.
 pub const GMEM_FIXED: u16 = 0x0000;
@@ -407,6 +408,156 @@ pub fn free_owned(cpu: &mut Cpu, owner: u16) {
         .collect();
     for h in handles {
         free(cpu, h);
+    }
+}
+
+// TOOLHELP's walk of the heap.
+
+/// GLOBALENTRY's wType: what a block holds.
+pub const GT_UNKNOWN: u16 = 0;
+pub const GT_DGROUP: u16 = 1;
+pub const GT_DATA: u16 = 2;
+pub const GT_CODE: u16 = 3;
+pub const GT_TASK: u16 = 4;
+pub const GT_RESOURCE: u16 = 5;
+pub const GT_MODULE: u16 = 6;
+pub const GT_FREE: u16 = 7;
+
+/// A block or a free piece of the heap as TOOLHELP describes it in a
+/// GLOBALENTRY.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HeapItem {
+    /// Its linear address and size: 0 and 0 for a discarded block.
+    pub address: u32,
+    pub size: u32,
+    /// Its handle, 0 for a free piece.
+    pub handle: u16,
+    pub lock: u16,
+    pub page_lock: u16,
+    /// Its owner: a task's PDB for the blocks a task allocated, else the
+    /// module that owns it.
+    pub owner: u16,
+    /// Whether `owner` is a PDB (GF_PDB_OWNER).
+    pub pdb_owner: bool,
+    /// Whether the block has a local heap.
+    pub heap_present: bool,
+    /// Its wType and wData: the segment's number for a module's segment,
+    /// the resource's type (its GD_ value) for a resource.
+    pub kind: u16,
+    pub data: u16,
+    /// Whether it is on the LRU list: present and discardable.
+    pub lru: bool,
+}
+
+/// What TOOLHELP tells of the block whose handle or selector is
+/// `handle`, or None when it isn't one.
+pub fn heap_item(cpu: &Cpu, handle: u16) -> Option<HeapItem> {
+    arena(&cpu.bus.win32.win16, handle).map(|a| describe(cpu, a))
+}
+
+/// The heap as GlobalFirst and GlobalNext walk it: its blocks and the
+/// free pieces between them, in address order. Discarded blocks have no
+/// memory, so they aren't in it.
+pub fn heap_items(cpu: &Cpu) -> Vec<HeapItem> {
+    let state = &cpu.bus.win32.win16;
+    let mut items: Vec<HeapItem> = state
+        .arena
+        .values()
+        .filter(|a| a.size != 0 && a.base != 0)
+        .map(|a| describe(cpu, a))
+        .collect();
+    let mut after = None;
+    while let Some((at, len, free)) = state.heap.piece_after(after) {
+        after = Some(at);
+        if free {
+            items.push(HeapItem {
+                address: at,
+                size: len,
+                kind: GT_FREE,
+                ..HeapItem::default()
+            });
+        }
+    }
+    items.sort_by_key(|i| i.address);
+    items
+}
+
+fn describe(cpu: &Cpu, a: &Arena) -> HeapItem {
+    let state = &cpu.bus.win32.win16;
+    let sel = handle_to_sel(a.handle);
+    let task = state.tasks.iter().find(|t| t.handle == a.owner);
+    let (kind, data) = kind_of(cpu, a);
+    HeapItem {
+        address: a.base,
+        size: if a.base == 0 { 0 } else { a.size },
+        handle: a.handle,
+        lock: a.lock as u16,
+        page_lock: a.page_lock as u16,
+        owner: task.map_or(a.owner, |t| t.psp),
+        pdb_owner: task.is_some(),
+        heap_present: state.local_heaps.iter().any(|h| h.sel | 3 == sel | 3),
+        kind,
+        data,
+        lru: a.base != 0 && a.flags & GA_DISCARDABLE != 0,
+    }
+}
+
+/// A block's wType and wData, from what has it: a task's database, a
+/// module's database, one of a module's segments or an instance's copy
+/// of its automatic data segment, or a resource LoadResource loaded.
+/// The blocks programs allocate are GT_UNKNOWN, as Windows 3.1 has them.
+fn kind_of(cpu: &Cpu, a: &Arena) -> (u16, u16) {
+    let state = &cpu.bus.win32.win16;
+    if state.tasks.iter().any(|t| t.handle == a.handle) {
+        return (GT_TASK, 0);
+    }
+    if state.modules.iter().any(|m| m.handle == a.handle) {
+        return (GT_MODULE, 0);
+    }
+    let Some(m) = state.modules.iter().find(|m| m.handle == a.owner) else {
+        return (GT_UNKNOWN, 0);
+    };
+    let sel = handle_to_sel(a.handle);
+    let dgroup = m
+        .segments
+        .iter()
+        .position(|s| s.handle == m.dgroup && s.handle != 0);
+    let count = m.segments.len().min(u8::MAX as usize) as u8;
+    let number = (1..=count).find(|&n| super::module::segment_selector(cpu, m, n) == Some(sel));
+    if let Some(n) = number {
+        let kind = if dgroup == Some(n as usize - 1) {
+            GT_DGROUP
+        } else if m.segments[n as usize - 1].flags & ne::SEG_DATA != 0 {
+            GT_DATA
+        } else {
+            GT_CODE
+        };
+        return (kind, n as u16);
+    }
+    if let Some(i) = dgroup
+        && state.tasks.iter().any(|t| t.instance == a.handle)
+    {
+        return (GT_DGROUP, i as u16 + 1);
+    }
+    if let Some(&(hrsrc, _)) = m.loaded.iter().find(|&&(_, h)| h == a.handle) {
+        return (GT_RESOURCE, resource_type(m, hrsrc));
+    }
+    (GT_UNKNOWN, 0)
+}
+
+/// The GD_ value of the resource `hrsrc` of `m`: its type's number for
+/// the types Windows numbers (1 to 15), else GD_USERDEFINED, 0.
+fn resource_type(m: &super::Module16, hrsrc: u16) -> u16 {
+    let Ok(parsed) = ne::Module::parse(&m.file) else {
+        return 0;
+    };
+    let t = (hrsrc >> 10) as usize;
+    match t.checked_sub(1).and_then(|t| parsed.resources.get(t)) {
+        Some(ne::ResourceType {
+            type_id: ne::ResId::Int(n),
+            ..
+        }) if *n <= 15 => *n,
+        _ => 0,
     }
 }
 
