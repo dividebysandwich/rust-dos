@@ -356,7 +356,8 @@ pub struct Observe {
     /// The ledgers of the last `KNOWN_HEADS` heads proven over counts or
     /// failed, oldest first.
     ledgers: Vec<Ledger>,
-    /// The instruction count at the last visit of a head.
+    /// The instruction count at the last instruction looked at while
+    /// watching (`visit`).
     seen: u64,
     /// The shape the proof over counts running found, kept once it skips.
     found: Option<Shape>,
@@ -824,19 +825,15 @@ impl Observe {
         if self.shaped {
             self.shapes.retain(|s| Some(s.head) != head);
         }
-        // What the failed proof ran counts against the proofs that skip
-        // there: a loop that fails every other proof pays for two. A pass
-        // that fails before it comes back to the head ran what it
-        // recorded. Only heads proven over counts keep a ledger.
+        // What the failed proof ran, from its start to the instruction it
+        // failed at (`seen`), counts against the proofs that skip there: a
+        // loop that fails every other proof pays for two. Only heads
+        // proven over counts keep a ledger.
         let counting = matches!(self.phase, Phase::Count { .. });
         if let Some(head) = head
             && (counting || self.ledgers.iter().any(|l| l.head == head))
         {
-            let recorded = match &self.phase {
-                Phase::Count { pass, .. } => pass.recorded(),
-                _ => 0,
-            };
-            let ran = self.seen.saturating_sub(self.started) + recorded;
+            let ran = self.seen.saturating_sub(self.started);
             self.charge(head, 0, ran);
         }
         // A pass that used the time the clock read in a way the model

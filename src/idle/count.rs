@@ -391,11 +391,6 @@ impl Pass {
         }
     }
 
-    /// The instructions recorded so far.
-    pub(super) fn recorded(&self) -> u64 {
-        self.flags.len() as u64
-    }
-
     /// Whether the pass follows a read of the clock (`Step::Clock`).
     pub(super) fn reads_clock(&self) -> bool {
         self.steps.iter().any(|s| matches!(s, Step::Clock { .. }))
