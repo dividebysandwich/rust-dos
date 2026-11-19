@@ -555,12 +555,8 @@ fn resource_type(m: &super::Module16, hrsrc: u16) -> u16 {
     let Ok(parsed) = ne::Module::parse(&m.file) else {
         return 0;
     };
-    let t = (hrsrc >> 10) as usize;
-    match t.checked_sub(1).and_then(|t| parsed.resources.get(t)) {
-        Some(ne::ResourceType {
-            type_id: ne::ResId::Int(n),
-            ..
-        }) if *n <= 15 => *n,
+    match super::resource::type_of(&parsed, hrsrc).map(|t| &t.type_id) {
+        Some(ne::ResId::Int(n)) if *n <= 15 => *n,
         _ => 0,
     }
 }
