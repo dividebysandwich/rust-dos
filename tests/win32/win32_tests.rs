@@ -17115,6 +17115,37 @@ fn a_font_file_a_program_adds_is_listed_and_drawn() {
     assert_eq!(cpu.errorlevel, 2 << 6 | 2 << 4 | 11);
 }
 
+/// A program asks CreateScalableFontResourceA for a .FOT of a file that
+/// isn't TrueType (a .FON): Windows 98 fails with
+/// ERROR_INVALID_PARAMETER and writes no file. Its exit code: the result
+/// in bit 8 and the error below it.
+#[test]
+fn create_scalable_font_resource_takes_only_truetype() {
+    let imports: &[(&str, &[&str])] = &[
+        ("GDI32.DLL", &["CreateScalableFontResourceA"]),
+        ("KERNEL32.DLL", &["GetLastError"]),
+    ];
+    let mut data = b"Q.FOT ".to_vec();
+    data.resize(0x10, 0);
+    data.extend(b"F.FON ");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        a.push(0)?;
+        a.push(l.at(0x10) as i32)?;
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.shl(eax, 8)?;
+        a.mov(ebx, eax)?;
+        a.call(l.import(1))?;
+        a.or(eax, ebx)?;
+        a.ret()
+    });
+    let file = fon(&[fnt("Test Face", 12)]);
+    let mut cpu = machine_with("scalable_font", &[("T.EXE", exe), ("F.FON", file)]);
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 87);
+}
+
 /// An argument for `call_pushing`: a number or a register's value.
 #[derive(Clone, Copy)]
 enum Pushed {

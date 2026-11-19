@@ -2298,16 +2298,23 @@ pub fn get_rasterizer_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// be read. The raster fonts of a .FON or .FNT file are drawn, listed
 /// with the system's faces and chosen by their face's name, and so are
 /// the TrueType fonts of a .TTF or .TTC file (`ttf`), by their family's
-/// name. A file of other fonts counts as one
-/// font none of whose faces is drawn: a font that asks for its face
-/// gets one GDI has.
+/// name, and those of the TrueType file a .FOT names (`fot`). A file of
+/// other fonts counts as one font none of whose faces is drawn: a font
+/// that asks for its face gets one GDI has.
 pub fn add_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    use crate::win32::winmm::mci::media::read_file;
     let Some(name) = crate::win32::user32::string_at(cpu, args[0]) else {
         return Some(0);
     };
-    let Some(bytes) = crate::win32::winmm::mci::media::read_file(cpu, &name) else {
+    let Some(mut bytes) = read_file(cpu, &name) else {
         return Some(0);
     };
+    if let Some(target) = super::fot::target(&bytes) {
+        let Some(ttf) = read_file(cpu, &target) else {
+            return Some(0);
+        };
+        bytes = ttf;
+    }
     let fonts: Vec<Rc<Fnt>> = super::fnt::fonts_of_file(&bytes)
         .into_iter()
         .map(Rc::new)
@@ -2328,6 +2335,59 @@ pub fn add_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         truetype,
     });
     Some(count)
+}
+
+/// CreateScalableFontResourceA(hidden, fot, ttf, path): write the .FOT
+/// file `fot` for the TrueType file `ttf` (in the folder `path`, when
+/// it is given), which AddFontResourceA then takes. The .FOT names the
+/// file with its folder, where Windows keeps `ttf` as given and looks
+/// for it in the fonts folder. It fails for a file
+/// that isn't TrueType, and for a `fot` that is there already
+/// (ERROR_FILE_EXISTS, as CREATE_NEW gives). QuickTime 5 installs its
+/// font this way each time it starts.
+pub fn create_scalable_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    use crate::win32::kernel32;
+    use crate::win32::user32::string_at;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const CREATE_NEW: u32 = 1;
+    let &[hidden, fot, ttf, path] = args else {
+        unreachable!()
+    };
+    let (Some(fot), Some(ttf)) = (string_at(cpu, fot), string_at(cpu, ttf)) else {
+        set_error(cpu, ERROR_INVALID_PARAMETER);
+        return Some(FALSE);
+    };
+    let full = if path == 0 {
+        ttf
+    } else {
+        let Some(path) = string_at(cpu, path) else {
+            set_error(cpu, ERROR_INVALID_PARAMETER);
+            return Some(FALSE);
+        };
+        format!("{}\\{}", path.trim_end_matches('\\'), ttf)
+    };
+    let data = crate::win32::winmm::mci::media::read_file(cpu, &full)
+        .and_then(|ttf| super::fot::for_truetype(&fot, &full, &ttf, hidden != 0));
+    let Some(data) = data else {
+        set_error(cpu, ERROR_INVALID_PARAMETER);
+        return Some(FALSE);
+    };
+    let handle = match kernel32::open_handle(cpu, &fot, GENERIC_WRITE, 0, CREATE_NEW) {
+        Ok(handle) => handle,
+        Err(code) => {
+            set_error(cpu, code);
+            return Some(FALSE);
+        }
+    };
+    let written = kernel32::write_file(cpu, handle, &data);
+    crate::win32::object::close(cpu, handle);
+    match written {
+        Ok(_) => Some(TRUE),
+        Err(code) => {
+            set_error(cpu, code);
+            Some(FALSE)
+        }
+    }
 }
 
 /// RemoveFontResourceA(file).
