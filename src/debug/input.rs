@@ -148,6 +148,13 @@ impl DebugHub {
                     self.tell_programs(cpu);
                 }
                 at_ms(cpu, self, boundary);
+                // The frontend applies what CONFIG -SET asks for after the
+                // frame, so the frame ends at the millisecond after it
+                // asked: the settings come in, and the batch file goes on,
+                // at the same emulated time whatever the host's frames.
+                if rust_dos::shell::settings_asked(cpu) {
+                    break;
+                }
             }
             if matches!(reason, crate::exec::StopReason::Paused | crate::exec::StopReason::Exit | crate::exec::StopReason::Hook) {
                 break;

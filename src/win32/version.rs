@@ -270,6 +270,7 @@ pub static ONLY_98: &[(&str, &[&str])] = &[
             "SendInput",
             "TrackMouseEvent",
             "EnumDisplayDevicesA",
+            "ChangeDisplaySettingsExA",
             "GetMenuInfo",
             "SetMenuInfo",
             "GetAltTabInfo",
