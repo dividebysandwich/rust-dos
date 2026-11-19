@@ -228,6 +228,20 @@ pub fn handle(cpu: &mut Cpu) {
             cpu.set_reg8(Register::CL, 0x00);
         }
 
+        0x0031 => {
+            // Get the virtual coordinates' range, which Microsoft's driver
+            // has from 7.05 on: AX = minimum x, BX = minimum y, CX =
+            // maximum x, DX = maximum y. It is the range AX=0007h and
+            // AX=0008h set, or the one a reset or a mode set gave.
+            // Waterworld asks for it after each mode set.
+            let m = &cpu.bus.mouse;
+            let (min_x, min_y, max_x, max_y) = (m.min_x, m.min_y, m.max_x, m.max_y);
+            cpu.set_ax(min_x as u16);
+            cpu.set_bx(min_y as u16);
+            cpu.set_cx(max_x as u16);
+            cpu.set_dx(max_y as u16);
+        }
+
         _ => {
             cpu.bus.log_string(&format!(
                 "[MOUSE] Unhandled INT 33h AX={:04X} BX={:04X} CX={:04X} DX={:04X}",

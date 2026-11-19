@@ -357,6 +357,31 @@ fn a_video_mode_set_gives_the_cursor_the_new_screens_range() {
 }
 
 #[test]
+fn get_range_returns_the_virtual_coordinates_range() {
+    // AX=0031h, Microsoft's driver from 7.05 on: AX, BX = minimum x and
+    // y, CX, DX = maximum x and y. Waterworld asks after its mode sets.
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x4F02, 0x0101);
+    call(&mut cpu, 0x0000);
+    cpu.set_bx(0x0003);
+    cpu.set_cx(0x49D0);
+    cpu.set_dx(0x1BC4);
+    call(&mut cpu, 0x0031);
+    assert_eq!((cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()), (0, 0, 639, 479));
+
+    // A range the program set, with the bounds given in either order.
+    range(&mut cpu, 0x0007, 600, 16);
+    range(&mut cpu, 0x0008, 8, 399);
+    call(&mut cpu, 0x0031);
+    assert_eq!((cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()), (16, 8, 600, 399));
+
+    // A standard mode set gives the new screen's.
+    int10(&mut cpu, 0x0013, 0);
+    call(&mut cpu, 0x0031);
+    assert_eq!((cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()), (0, 0, 639, 199));
+}
+
+#[test]
 fn setting_the_same_mode_again_keeps_the_programs_range() {
     // Dark Sun 2: x 0-319 and y 0-199 in mode 13h, then mode 13h again,
     // with its own cursor drawn at the driver's x as a 320-pixel position.
