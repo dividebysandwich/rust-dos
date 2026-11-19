@@ -619,8 +619,9 @@ pub(super) struct Decoded {
     eip: u32,
     bitness: u32,
     /// The bytes it was decoded from, and how many of them it depends on:
-    /// its length, or all that could be read where it doesn't decode (a
-    /// trap).
+    /// its length, or all 15 where it doesn't decode (a trap) or runs past
+    /// the bytes that could be read. A place read again uses it only where
+    /// that many could be read and they are the same.
     bytes: [u8; 15],
     known: usize,
     instr: Instruction,
@@ -656,10 +657,13 @@ fn decode(
         let info = f.info(&instr);
         (info.used_memory().to_vec(), info.used_registers().to_vec())
     });
-    let known = if instr.is_invalid() {
-        mapped
+    // An instruction decoded from fewer bytes than it needs (or that
+    // doesn't decode) depends on all 15, the zeros past `mapped` too:
+    // with more of them there later, it may decode as another.
+    let known = if instr.is_invalid() || instr.len() > mapped {
+        bytes.len()
     } else {
-        instr.len().min(mapped)
+        instr.len()
     };
     let d = std::sync::Arc::new(Decoded {
         lin: ip,
