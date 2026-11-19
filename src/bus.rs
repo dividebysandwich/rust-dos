@@ -2984,8 +2984,6 @@ impl Bus {
         }
     }
 
-    // Read from an I/O Port
-    /// Read from an I/O port.
     /// The 8254's read-back command (control word bits 7-6 = 11): for each
     /// counter selected by bits 1 to 3, latch its count unless bit 5 is set
     /// and its status byte unless bit 4 is set. A latch already waiting to
@@ -3025,6 +3023,7 @@ impl Bus {
         }
     }
 
+    /// Read from an I/O port.
     pub fn io_read(&mut self, port: u16) -> u8 {
         let _profile = self.profile.as_mut().map(|p| p.port(port, false));
         self.observe.port_read(port);
@@ -3133,15 +3132,16 @@ impl Bus {
                 }
             }
 
-            // Port 0x42 — PIT channel 2 (PC speaker tone) data. Programs
-            // read it as a free-running counter for timing loops, or time a
-            // delay loop by gating it through port 61h bit 0.
+            // PIT channel 1, the DRAM refresh request.
             0x41 => {
                 let now = self.clock.now_ticks();
                 self.pit1.advance(now);
                 self.pit1_port.read(self.pit1.count(now))
             }
 
+            // Port 0x42 — PIT channel 2 (PC speaker tone) data. Programs
+            // read it as a free-running counter for timing loops, or time a
+            // delay loop by gating it through port 61h bit 0.
             0x42 => {
                 if let Some(status) = self.pit2.status.take() {
                     return status;

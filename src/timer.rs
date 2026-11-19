@@ -462,14 +462,19 @@ impl Pit0 {
     }
 
     /// Time of the next IRQ 0 edge, or of the end of the half-cycle a new
-    /// mode 3 count loads at, if one is coming.
+    /// mode 3 count loads at, if one is coming. The count programs write
+    /// again on every tick, the one already loaded, gets no event of its
+    /// own: loading it at the half-cycle changes no edge, and `advance`
+    /// or the next count write makes the load.
     pub fn next_event(&self) -> Option<u64> {
         if !(self.counting && self.armed) {
             return None;
         }
         Some(match self.pending_reload {
-            Some(_) => self.pending_at.min(self.next_tc),
-            None => self.next_tc,
+            Some(reload) if self.pending_at < self.next_tc && reload != self.reload => {
+                self.pending_at
+            }
+            _ => self.next_tc,
         })
     }
 
@@ -490,6 +495,7 @@ impl Pit0 {
     /// A complete count was written (0 means 65536).
     pub fn write_count(&mut self, count: u16, now: u64) {
         let reload = if count == 0 { 0x10000 } else { count as u32 };
+        self.load_at_half_cycle(now);
         if self.counting && self.periodic() {
             let current = self.reload as u64;
             let into = (now.saturating_sub(self.period_start) + self.phase) % current;
@@ -512,6 +518,23 @@ impl Pit0 {
         self.next_tc = now + reload as u64;
     }
 
+    /// Load a mode 3 count written in a high half-cycle if that half has
+    /// ended by `now`: it loads where the output goes low, and runs the
+    /// low half of its own period first. No event comes at the load, so
+    /// whatever changes the counter makes it first.
+    fn load_at_half_cycle(&mut self, now: u64) {
+        if let Some(reload) = self.pending_reload
+            && self.pending_at < self.next_tc
+            && self.pending_at <= now
+        {
+            self.pending_reload = None;
+            self.reload = reload;
+            self.period_start = self.pending_at;
+            self.phase = (reload as u64).div_ceil(2);
+            self.next_tc = self.pending_at + reload as u64 - self.phase;
+        }
+    }
+
     /// Advance to `now`. Returns true if at least one IRQ 0 edge happened.
     pub fn advance(&mut self, now: u64) -> bool {
         if !(self.counting && self.armed) {
@@ -519,19 +542,7 @@ impl Pit0 {
         }
         let mut edge = false;
         loop {
-            if let Some(reload) = self.pending_reload
-                && self.pending_at < self.next_tc
-                && self.pending_at <= now
-            {
-                // A mode 3 count written in a high half-cycle: it loads
-                // where the output goes low, and runs the low half first.
-                self.pending_reload = None;
-                self.reload = reload;
-                self.period_start = self.pending_at;
-                self.phase = (reload as u64).div_ceil(2);
-                self.next_tc = self.pending_at + reload as u64 - self.phase;
-                continue;
-            }
+            self.load_at_half_cycle(now);
             if self.next_tc > now {
                 return edge;
             }

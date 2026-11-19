@@ -256,19 +256,24 @@ impl Bus {
         w.section(b"PIT2", PIT2_VERSION, |w| {
             save_all!(w; pit2, speaker_data, pit2_count_due, ppi_checks);
         });
-        // The time stamp counter's clock, in a section of its own so states
-        // saved before it load (counting instructions, as it did then).
         // The 8254's read-back state, channel 1 and the half-cycle loads,
         // in a section of their own so states saved before it load.
+        // Channel 1's phase, load tick and control word go with it, which
+        // `Pit0`'s own fields leave out as channel 0's CORE layout does.
         let (pit0_phase, pit0_pending_at, pit0_control) =
             (&pit0.phase, &pit0.pending_at, &pit0.control);
+        let (pit1_phase, pit1_pending_at, pit1_control) =
+            (&pit1.phase, &pit1.pending_at, &pit1.control);
         let (pit2_phase, pit2_control, pit2_status) = (&pit2.phase, &pit2.control, &pit2.status);
         w.section(b"8254", PIT_8254_VERSION, |w| {
             save_all!(w;
                 pit0_phase, pit0_pending_at, pit0_control, pit0_status, pit1, pit1_port,
+                pit1_phase, pit1_pending_at, pit1_control,
                 pit2_phase, pit2_control, pit2_status,
             );
         });
+        // The time stamp counter's clock, in a section of its own so states
+        // saved before it load (counting instructions, as it did then).
         w.section(b"TSC ", TSC_VERSION, |w| clock.tsc.save(w));
         // Which queued keystrokes the BIOS never saw, in a section of its
         // own so states saved before it load.
@@ -634,6 +639,7 @@ impl Bus {
             let mut section = r.section(b"8254", PIT_8254_VERSION)?;
             load_all!(&mut section;
                 &mut pit0.phase, &mut pit0.pending_at, &mut pit0.control, pit0_status, pit1, pit1_port,
+                &mut pit1.phase, &mut pit1.pending_at, &mut pit1.control,
                 &mut pit2.phase, &mut pit2.control, &mut pit2.status,
             );
         } else {

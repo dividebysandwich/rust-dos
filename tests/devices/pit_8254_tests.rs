@@ -86,6 +86,22 @@ fn a_mode_3_count_written_in_the_low_half_loads_at_the_period_end() {
     assert_eq!(edges, [at(1000), at(1600), at(2200)]);
 }
 
+/// A count written in the low half that a count loaded at the half-cycle
+/// runs: it loads at the end of the new count's period, not the old one's.
+#[test]
+fn a_count_written_after_a_half_cycle_load_waits_for_the_new_period() {
+    let mut bus = bus();
+    let start = program(&mut bus, 0x36, 1000);
+    wait_until(&mut bus, start + 100);
+    write_count(&mut bus, 0x40, 600);
+    wait_until(&mut bus, start + 600);
+    write_count(&mut bus, 0x40, 400);
+    let edges = irq0_edges(&mut bus, start + 2000);
+    // 600's low half ends at 800, then whole periods of 400.
+    let at = |tick: u64| bus.clock.icount_at(start + tick);
+    assert_eq!(edges, [at(800), at(1200), at(1600)]);
+}
+
 /// Channel 0's count in mode 3 while a count written in the high half
 /// loads: the old count's high half, then the new count from the top of
 /// its low half.
@@ -299,6 +315,12 @@ fn the_8254_state_survives_a_save_state() {
             "status of {port:02X}h"
         );
     }
+    // A read-back after the load gives channel 1's mode and access as
+    // the program wrote them.
+    for bus in [&mut a.bus, &mut b.bus] {
+        bus.io_write(0x43, 0xE4);
+    }
+    assert_eq!(b.bus.io_read(0x41), a.bus.io_read(0x41), "status of 41h");
     let tick = start + 790;
     assert_eq!(b.bus.pit0.count(tick), a.bus.pit0.count(tick));
     assert_eq!(b.bus.pit0.count(tick), 20, "the new count's low half");
