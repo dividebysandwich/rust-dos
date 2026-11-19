@@ -17204,6 +17204,48 @@ fn a_font_file_a_program_adds_is_listed_and_drawn() {
     assert_eq!(cpu.errorlevel, 2 << 6 | 2 << 4 | 11);
 }
 
+/// A program asks CreateScalableFontResourceA for a .FOT of `ttf`, with
+/// the last error set to 55h before, and ends with the result in bit 7
+/// and the last error after it below that.
+fn scalable_font_resource(test: &str, ttf: &[u8]) -> u8 {
+    let imports: &[(&str, &[&str])] = &[
+        ("GDI32.DLL", &["CreateScalableFontResourceA"]),
+        ("KERNEL32.DLL", &["GetLastError", "SetLastError"]),
+    ];
+    let mut data = b"Q.FOT\0".to_vec();
+    data.resize(0x10, 0);
+    data.extend(ttf);
+    data.push(0);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        a.push(0x55)?;
+        a.call(l.import(2))?;
+        a.push(0)?;
+        a.push(l.at(0x10) as i32)?;
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.shl(eax, 7)?;
+        a.mov(ebx, eax)?;
+        a.call(l.import(1))?;
+        a.or(eax, ebx)?;
+        a.ret()
+    });
+    let file = fon(&[fnt("Test Face", 12)]);
+    let mut cpu = machine_with(test, &[("T.EXE", exe), ("F.FON", file)]);
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    cpu.errorlevel
+}
+
+/// Windows 98 SE's CreateScalableFontResourceA fails for a file that
+/// isn't TrueType (a .FON here) without setting an error, and for a file
+/// that isn't there with ERROR_FILE_NOT_FOUND (2). It writes no .FOT
+/// either way.
+#[test]
+fn create_scalable_font_resource_takes_only_truetype() {
+    assert_eq!(scalable_font_resource("scalable_font", b"F.FON"), 0x55);
+    assert_eq!(scalable_font_resource("scalable_missing", b"NONE.TTF"), 2);
+}
+
 /// An argument for `call_pushing`: a number or a register's value.
 #[derive(Clone, Copy)]
 enum Pushed {
