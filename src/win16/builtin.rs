@@ -420,6 +420,8 @@ pub fn call(cpu: &mut Cpu, id: u16) {
         return;
     };
     cpu.set_eip(cpu.eip().wrapping_add(4));
+    let bytes = api.args.bytes().map(arg_bytes_of).sum();
+    crate::idle::arguments16(cpu, bytes);
     let raw = read_args(cpu, api.args, api.conv);
     if cpu.bus.guest_faulted() {
         return;
@@ -446,8 +448,11 @@ pub fn call(cpu: &mut Cpu, id: u16) {
                     // proof follows it, and the function says for itself
                     // whether it can go on (`idle::pure_call`), as
                     // GetTickCount does for GetCurrentTime.
+                    // It reads its arguments and the structures it
+                    // copies (`auto_thunk`).
                     if !api.args.bytes().any(converts_handle) {
                         crate::idle::pure_call(cpu, None);
+                        crate::idle::reads_arguments(cpu);
                     }
                 }
                 None => {
@@ -552,6 +557,7 @@ fn auto_thunk(cpu: &mut Cpu, target: u32, args: &str, raw: &[u32], ret: u8) {
                     0
                 } else {
                     let words = if c == b'R' { 4 } else { 2 };
+                    crate::idle::reads_also(cpu, lin, 2 * words);
                     for k in 0..words {
                         let w = cpu.bus.guest_read_16(lin + 2 * k) as i16 as i32 as u32;
                         cpu.bus.guest_write_32(scratch + 4 * k, w);
@@ -580,6 +586,7 @@ pub fn post_auto(cpu: &mut Cpu, value: u32, data: &[u32], _: &mut Context) -> Op
     // is an input too, the result is what stays.
     for copy in data[1..].as_chunks::<3>().0.iter().rev() {
         let words = if copy[0] == COPY_RECT { 4 } else { 2 };
+        crate::idle::reads_also(cpu, copy[2], 4 * words);
         for k in 0..words {
             let v = cpu.bus.guest_read_32(copy[2] + 4 * k);
             cpu.bus.guest_write_16(copy[1] + 2 * k, v as u16);

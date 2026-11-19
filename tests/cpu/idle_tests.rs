@@ -838,6 +838,64 @@ fn a_windows_3_1_timegettime_loop_is_skipped() {
     assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
 }
 
+#[test]
+fn an_mfc_idle_loop_of_window_queries_is_skipped() {
+    // Metal Marines' MFC message loop, which waits for 300 ms here: in
+    // every pass Catch, PeekMessage finding nothing, GetActiveWindow,
+    // GetParent of it, GetWindowWord(GWW_HINSTANCE) of that, IsIconic
+    // and timeGetTime. They only read the windows and the clock (Catch
+    // writes the same frame to its buffer in every pass), so the passes
+    // are skipped as the plain PeekMessage loop's are.
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.call("MMSYSTEM", 607).emit(&[0x8B, 0xF0]); // timeGetTime; mov si,ax
+    let top = code.here();
+    code.emit(&[0x1E]) // push ds
+        .push(0x20) // the CATCHBUF at DS:20h
+        .call("KERNEL", 55) // Catch
+        .emit(&[0x1E]) // push ds
+        .push(0x10) // the MSG at DS:10h
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0) // PM_NOREMOVE
+        .call("USER", 109) // PeekMessage
+        .call("USER", 60) // GetActiveWindow
+        .emit(&[0x50]) // push ax
+        .call("USER", 46) // GetParent
+        .emit(&[0x50]) // push ax
+        .push(0xFFFA) // GWW_HINSTANCE
+        .call("USER", 133) // GetWindowWord
+        .push(0)
+        .call("USER", 31) // IsIconic
+        .call("MMSYSTEM", 607)
+        .emit(&[0x2B, 0xC6]) // sub ax,si
+        .emit(&[0x3D, 0x2C, 0x01]); // cmp ax,300
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_mfc_idle";
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    let host = |cpu: &Cpu| (cpu.bus.win32.calls, cpu.bus.win32.slice_start);
+    let mut first = None;
+    let each = |n: usize, cpu: &mut Cpu| match first.take() {
+        None => first = Some(host(cpu)),
+        Some(a) => assert_eq!(a, host(cpu), "{test}: calls, turn before batch {n}"),
+    };
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
+        panic!("{}: {}
+  {:?}", test, e, b.bus.observe.stats);
+    }
+    assert_eq!(host(&a), host(&b), "{test}: calls, turn at the end");
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
+    assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
+}
+
 /// Reads of the built-in Windows's clock in a row arm their place, but not
 /// when so much runs between them that the head armed would give up.
 #[test]

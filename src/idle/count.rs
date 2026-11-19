@@ -1037,6 +1037,19 @@ pub(super) fn counted_passes(cpu: &Cpu, model: &Model, most: u64) -> (u64, Vec<(
     (passes, values)
 }
 
+/// The service running read the general registers (`reads_registers`):
+/// a count in one of them would go into what it wrote, which the pass
+/// doesn't model, so it ends the proof.
+pub(super) fn registers_read(cpu: &mut Cpu) {
+    let o = &cpu.bus.observe;
+    let Phase::Count { pass, .. } = &o.phase else {
+        return;
+    };
+    if pass.any(&(reg_cell(0)..reg_cell(8))) {
+        o.opaque_because("count service");
+    }
+}
+
 /// After a service the pass followed (`after_service`): it kept the
 /// registers that hold counts, and read no RAM that does. A service that
 /// read no RAM but its arguments (`reads_arguments`) names what it read

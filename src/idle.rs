@@ -880,6 +880,18 @@ pub fn pure_call(cpu: &mut Cpu, until: Option<u64>) {
     }
 }
 
+/// The service running that called `pure_call` read the general
+/// registers too, which the services `pure_call` describes don't: a
+/// Win16 function of the register convention, as KERNEL's Catch, which
+/// writes them into the program's buffer. A proof whose passes differ in
+/// a count kept in one of them can't follow it (`count`); one whose
+/// passes leave everything as it was can.
+pub fn reads_registers(cpu: &mut Cpu) {
+    if cpu.bus.observe.on {
+        count::registers_read(cpu);
+    }
+}
+
 /// The service running changed more after all: what it called it
 /// `pure_call` for did, but not what came after.
 pub fn not_pure(cpu: &mut Cpu) {
@@ -903,6 +915,17 @@ pub fn arguments_at(cpu: &mut Cpu, esp: u32, count: u32) {
     if cpu.bus.observe.on {
         let lin = cpu.seg_cache(crate::cpu::Seg::SS).base.wrapping_add(esp);
         cpu.bus.observe.service_args = Some((lin, 4 + 4 * count));
+    }
+}
+
+/// The Win16 function running takes `bytes` bytes of arguments above its
+/// far return address on the 16-bit stack (`builtin::call` read them).
+#[inline(always)]
+pub fn arguments16(cpu: &mut Cpu, bytes: u32) {
+    if cpu.bus.observe.on {
+        let ss = cpu.seg_cache(crate::cpu::Seg::SS).base;
+        let lin = ss.wrapping_add(cpu.sp() as u32);
+        cpu.bus.observe.service_args = Some((lin, 4 + bytes));
     }
 }
 

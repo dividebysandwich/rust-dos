@@ -2376,14 +2376,19 @@ pub fn is_zoomed(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     )
 }
 
-/// GetParent: a child's parent, a popup's owner, or 0.
+/// GetParent: a child's parent, a popup's owner, or 0. It reads the
+/// window list, which only a call or a message changes, so an idle proof
+/// goes through it: Metal Marines asks it three times in every pass of
+/// the PeekMessage loop it waits in.
 pub fn get_parent(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
     Some(parent_of(user(cpu), args[0]))
 }
 
 /// GetParent's answer: a popup's owner (even if it is a child too), a
 /// child's parent, nothing for an overlapped window.
-fn parent_of(state: &State, hwnd: u32) -> u32 {
+pub fn parent_of(state: &State, hwnd: u32) -> u32 {
     let Some(w) = state.window(hwnd) else {
         return 0;
     };
@@ -2564,6 +2569,11 @@ pub const DWL_USER: i32 = 8;
 
 /// GetWindowLongA(hwnd, index).
 pub fn get_window_long(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // It only reads the window (an index it doesn't know sets the last
+    // error, which a proof allows), so an idle proof goes through it, as
+    // through IsIconic.
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
     let (hwnd, index) = (args[0], args[1] as i32);
     let Some(w) = get(cpu, hwnd) else {
         return Some(0);
@@ -2591,6 +2601,9 @@ pub fn get_window_long(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// GetWindowWord(hwnd, index): the extra bytes, or GWL_ID and
 /// GWL_HINSTANCE as words.
 pub fn get_window_word(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // Only a read of the window, as GetWindowLongA.
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
     let (hwnd, index) = (args[0], args[1] as i32);
     let Some(w) = get(cpu, hwnd) else {
         return Some(0);
