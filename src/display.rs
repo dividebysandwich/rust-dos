@@ -12,6 +12,7 @@ mod gl;
 mod gl;
 pub mod audio_mix;
 pub mod room_sound;
+mod setup_guard;
 #[cfg(feature = "vr")]
 mod stage;
 
@@ -104,8 +105,15 @@ pub struct Display<'a> {
     /// The ToadForce's picture the host renderer shows from its own
     /// copy at the next `present` (`show_toadforce`).
     toadforce_picture: Option<rust_dos::toadforce::format::Surface>,
+    /// The colours the picture's components show as, if not their own:
+    /// the card's gamma ramp and the screen's gamma
+    /// (`Bus::toadforce_gamma`).
+    toadforce_ramp: Option<[u32; 256]>,
     /// Whether the log said why OpenGL doesn't draw the ToadForce.
     toadforce_said: bool,
+    /// The mark that the ToadForce's renderer is being set up, kept to
+    /// the frame after (`setup_guard`).
+    toadforce_guard: Option<setup_guard::SetupGuard>,
     /// The layer over the picture last shown (a manual's page), by its
     /// generation.
     layer_shown: Option<u64>,
@@ -117,6 +125,16 @@ pub struct Display<'a> {
     #[cfg(feature = "vr")]
     picked: std::cell::Cell<(i32, i32)>,
 }
+
+/// The file in rust-dos's directory that marks a setup of the
+/// ToadForce's OpenGL renderer (`setup_guard`).
+const SETUP_MARK: &str = "toadforce-opengl-setup";
+
+/// Why OpenGL doesn't draw the ToadForce after the last run on this
+/// graphics driver crashed while it set the renderer up.
+const SETUP_CRASHED: &str = "rust-dos ended while it set up the OpenGL renderer on this \
+    graphics driver last time, so the software renderer draws. A new graphics driver or a \
+    new rust-dos tries OpenGL again, as does a start with toadforce_renderer=opengl";
 
 /// What draws the picture.
 enum Output<'a> {
@@ -230,7 +248,9 @@ impl<'a> Display<'a> {
             voodoo_said: false,
             voodoo_shown: false,
             toadforce_picture: None,
+            toadforce_ramp: None,
             toadforce_said: false,
+            toadforce_guard: None,
             layer_shown: None,
             refresh_hz: None,
             #[cfg(feature = "vr")]
@@ -329,7 +349,7 @@ impl<'a> Display<'a> {
                     }
                 }
                 Output::Sdl { texture, .. } => {
-                    texture.set_scale_mode(scale_mode(self.filter));
+                    set_scale_mode(texture, self.filter);
                     if new_shader && self.shader != Shader::None {
                         problem = Some("CRT shaders need OpenGL 3, which isn't available here".to_string());
                     }
@@ -454,27 +474,61 @@ impl<'a> Display<'a> {
     /// depend on the host's GPU. Called every frame: a new machine's
     /// card gets the renderer, and a changed setting takes effect.
     pub fn run_toadforce(&mut self, bus: &mut Bus, renderer: Renderer3d, deterministic: bool) {
+        // A frame went by since the renderer was set up, whatever the
+        // card and the setting are now.
+        self.toadforce_guard = None;
         if !bus.toadforce() {
             return;
         }
         let want = renderer != Renderer3d::Software && !deterministic;
         let problem = match &mut self.out {
             Output::Gl(gl) if want => {
+                for note in gl.toadforce_notes() {
+                    bus.log_string(&note);
+                }
                 // The card has no renderer yet, or the link of a
                 // window that is gone.
                 if bus.toadforce_hosted() && gl.toadforce_linked() {
                     return;
                 }
-                match gl.toadforce_link() {
+                // Making the renderer runs the graphics driver's
+                // compiler and draws a test, and a driver that crashes
+                // there ends rust-dos. The log says where it was, and
+                // the next run on that driver draws in software.
+                if gl.toadforce_unmade() {
+                    let key = format!("{} {}", env!("CARGO_PKG_VERSION"), self.renderer);
+                    let dir = rust_dos::config::user_dir();
+                    let force = renderer == Renderer3d::OpenGl;
+                    match setup_guard::begin(dir.as_deref(), SETUP_MARK, &key, force) {
+                        setup_guard::Begin::Go(guard) => self.toadforce_guard = guard,
+                        setup_guard::Begin::Crashed => {
+                            bus.log_string(&format!("[TOADFORCE] {SETUP_CRASHED}"));
+                            gl.toadforce_refuse(SETUP_CRASHED.to_string());
+                        }
+                    }
+                    if gl.toadforce_unmade() {
+                        bus.log_string("[TOADFORCE] Setting up the OpenGL renderer");
+                        bus.flush_log();
+                    }
+                }
+                let linked = gl.toadforce_link().map_err(str::to_string);
+                for note in gl.toadforce_notes() {
+                    bus.log_string(&note);
+                }
+                match linked {
                     Ok(link) => {
                         bus.toadforce_set_host(Some(link));
                         bus.log_string("[TOADFORCE] OpenGL draws the card's triangles");
+                        bus.flush_log();
                         return;
                     }
-                    Err(e) => Some(e),
+                    Err(e) => {
+                        self.toadforce_guard = None;
+                        Some(e)
+                    }
                 }
             }
-            Output::Sdl { .. } if want => Some("there is no OpenGL 3 here"),
+            Output::Sdl { .. } if want => Some("there is no OpenGL 3 here".to_string()),
             _ => None,
         };
         if bus.toadforce_hosted() {
@@ -505,6 +559,7 @@ impl<'a> Display<'a> {
             return false;
         }
         self.toadforce_picture = bus.toadforce_host_picture();
+        self.toadforce_ramp = bus.toadforce_gamma();
         // The frame `present` gets doesn't change with the card's
         // picture.
         self.redraw |= self.toadforce_picture.is_some();
@@ -576,7 +631,10 @@ impl<'a> Display<'a> {
                 };
                 let toadforce = self.toadforce_picture.take();
                 self.voodoo_shown = voodoo.is_some_and(|base| match toadforce {
-                    Some(surface) => gl.present_toadforce(&surface, frame, base, display),
+                    Some(surface) => {
+                        let ramp = self.toadforce_ramp.as_ref();
+                        gl.present_toadforce(&surface, ramp, frame, base, display)
+                    }
                     None => gl.present_voodoo(frame, base, display),
                 });
                 if !self.voodoo_shown
@@ -648,7 +706,7 @@ impl<'a> Display<'a> {
     /// where the window shows it without a shader.
     pub fn shaded_size(&self, width: u32, height: u32) -> Option<(u32, u32)> {
         match &self.out {
-            Output::Gl(gl) => gl.capture_size(display_size(width, height, self.aspect)),
+            Output::Gl(gl) => gl.capture_size(display_size(width, height, self.aspect), false),
             Output::Sdl { .. } => None,
         }
     }
@@ -665,15 +723,18 @@ impl<'a> Display<'a> {
 
     /// `frame` through the CRT shader, as the window shows it, for a
     /// screenshot or a recording; None where the window shows it without
-    /// one. Drawing it again and reading it back takes time, so only
-    /// captures that show the shader ask for it.
-    pub fn shaded(&mut self, frame: &Frame, base: &Frame) -> Option<Frame> {
+    /// one, unless `plain` asks for the picture as the window scales it
+    /// (the debug server's `shader=true`). Drawing it again and reading
+    /// it back takes time, so only captures that show the shader ask for
+    /// it.
+    pub fn shaded(&mut self, frame: &Frame, base: &Frame, plain: bool) -> Option<Frame> {
         match &mut self.out {
             Output::Gl(gl) => gl.capture(
                 frame,
                 base,
                 self.monochrome,
                 display_size(frame.width, frame.height, self.aspect),
+                plain,
             ),
             Output::Sdl { .. } => None,
         }
@@ -1203,10 +1264,24 @@ fn set_icon(window: &mut Window) -> Result<(), String> {
     Ok(())
 }
 
-fn scale_mode(filter: Filter) -> ScaleMode {
+/// Scale `texture` as `filter` says. `filter=sharp` is SDL's pixel-art
+/// mode (SDL 3.4), which gives every texel the same size on the screen
+/// with a blended edge, as the OpenGL plain look does. The sdl3 crate has
+/// no name for it, and its `Texture::scale_mode` panics on reading it
+/// back, so nothing here calls that. An SDL older than 3.4 (a Linux
+/// distribution's own) refuses the mode as an invalid parameter, and the
+/// texture then samples the nearest texel, as `hard` does.
+fn set_scale_mode(texture: &mut Texture, filter: Filter) {
     match filter {
-        Filter::Nearest => ScaleMode::Nearest,
-        Filter::Linear => ScaleMode::Linear,
+        Filter::Sharp => {
+            let pixel_art = sdl3::sys::surface::SDL_ScaleMode::PIXELART;
+            // SAFETY: the texture is alive, and SDL only sets its mode.
+            if !unsafe { sdl3::sys::render::SDL_SetTextureScaleMode(texture.raw(), pixel_art) } {
+                texture.set_scale_mode(ScaleMode::Nearest);
+            }
+        }
+        Filter::Hard => texture.set_scale_mode(ScaleMode::Nearest),
+        Filter::Linear => texture.set_scale_mode(ScaleMode::Linear),
     }
 }
 
@@ -1218,7 +1293,7 @@ fn create_texture<'a>(
     let mut texture = creator
         .create_texture_streaming(PixelFormat::RGBA32, width, height)
         .map_err(|e| e.to_string())?;
-    texture.set_scale_mode(scale_mode(filter));
+    set_scale_mode(&mut texture, filter);
     Ok(texture)
 }
 
@@ -1382,6 +1457,57 @@ mod tests {
                 let pos = frame_to_window(point, window, drawable, display, frame);
                 let back = window_to_frame(pos, window, drawable, display, frame, (Shader::None, CrtSettings::default()));
                 assert_eq!(back, (point.0 as i32, point.1 as i32), "{:?} in {:?}", point, (window, frame));
+            }
+        }
+    }
+
+    /// SDL's renderer, which draws where there is no OpenGL 3, gives the
+    /// sharp picture's pixels one width too: one-pixel stripes cover 2.5
+    /// screen pixels each at 2.5 times, and 2 at twice, unblended. This
+    /// is the window's renderer (Direct3D on Windows, OpenGL on Mesa in
+    /// CI); SDL's software renderer samples the nearest texel in its
+    /// pixel-art mode (#1250).
+    #[test]
+    #[ignore = "requires a desktop with a GPU renderer"]
+    fn sdl_sharp_scaling_gives_texels_one_width() {
+        let sdl = sdl3::init().unwrap();
+        let video = sdl.video().unwrap();
+        let window = video.window("Sharp scaling", 64, 16).hidden().build().unwrap();
+        let mut canvas = window.into_canvas();
+        let creator = canvas.texture_creator();
+        let stripes: Vec<u8> =
+            (0..16).flat_map(|x| if x % 2 == 0 { [255; 4] } else { [0, 0, 0, 255] }).collect();
+        for (out, scale) in [(32u32, 2.0), (40, 2.5)] {
+            let mut texture = creator.create_texture_streaming(PixelFormat::RGBA32, 16, 1).unwrap();
+            set_scale_mode(&mut texture, Filter::Sharp);
+            texture.update(None, &stripes, 64).unwrap();
+            let mut target = creator.create_texture_target(PixelFormat::RGBA32, out, 1).unwrap();
+            let mut row = Vec::new();
+            canvas
+                .with_texture_canvas(&mut target, |c| {
+                    c.copy(&texture, None, None).unwrap();
+                    let read = c.read_pixels(None).unwrap();
+                    let read = read.convert_format(PixelFormat::RGBA32).unwrap();
+                    row = read.with_lock(|p| p[..out as usize * 4].to_vec());
+                })
+                .unwrap();
+            // Each screen pixel's white goes to the white stripe it
+            // overlaps and its black to the black one.
+            let mut cover = [0.0f64; 16];
+            for (x, pixel) in row.as_chunks::<4>().0.iter().enumerate() {
+                let white = pixel[0] as f64 / 255.0;
+                let (from, to) = (x as f64 / scale, (x + 1) as f64 / scale);
+                for (texel, share) in cover.iter_mut().enumerate() {
+                    if (texel as f64) < to && from < (texel + 1) as f64 {
+                        *share += if texel % 2 == 0 { white } else { 1.0 - white };
+                    }
+                }
+            }
+            for (texel, width) in cover.iter().enumerate() {
+                assert!((width - scale).abs() <= 2.0 / 255.0, "{out}: texel {texel}: {cover:?} {row:?}");
+            }
+            if scale == 2.0 {
+                assert!(row.iter().all(|&b| b == 0 || b == 255), "{row:?}");
             }
         }
     }

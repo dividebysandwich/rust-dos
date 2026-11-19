@@ -64,6 +64,10 @@ pub struct Surface {
     /// down.
     dib: Option<(u32, bool)>,
     changed: bool,
+    /// Of a surface whose pixels weren't read (`area_to_write`): which of
+    /// those loaded were put, a row of `cols` after another, the only
+    /// ones `store` writes back.
+    written: Option<Vec<bool>>,
 }
 
 /// The size of the screen GDI draws on (`screen::gdi_mode`), and the
@@ -151,6 +155,7 @@ impl Surface {
             pal_indices: None,
             dib: None,
             changed: false,
+            written: None,
         }
     }
 
@@ -165,6 +170,23 @@ impl Surface {
     /// needs, but whole rows at fewer than 8 bits a pixel, where columns
     /// share bytes. None as `load` gives.
     pub fn load_area(cpu: &mut Cpu, target: Target, area: Rect) -> Option<Surface> {
+        Surface::load_area_as(cpu, target, area, true)
+    }
+
+    /// `load_area` for a function that puts pixels without reading the
+    /// ones there first (a blit whose raster operation leaves out the
+    /// destination). Where reading them would wait, they aren't read,
+    /// and `store` writes back only the pixels put: a DIB section in a
+    /// Banshee's or Voodoo3's memory (a DirectDraw surface's DC), whose
+    /// reads wait for the 3D drawing queued before them, and whose
+    /// writes then take their turn behind it (`Bus::guest_write_runs`),
+    /// as the card's do. Elsewhere reading costs less than keeping track
+    /// of the pixels put, and the pixels are read.
+    pub fn area_to_write(cpu: &mut Cpu, target: Target, area: Rect) -> Option<Surface> {
+        Surface::load_area_as(cpu, target, area, false)
+    }
+
+    fn load_area_as(cpu: &mut Cpu, target: Target, area: Rect, read: bool) -> Option<Surface> {
         let (width, height, bpp) = dimensions(cpu, target)?;
         let y0 = area.top.clamp(0, height);
         let y1 = area.bottom.clamp(y0, height);
@@ -222,6 +244,7 @@ impl Surface {
                     pal_indices: None,
                     dib: None,
                     changed: false,
+                    written: None,
                 })
             }
             Target::Bitmap(handle) => {
@@ -245,7 +268,23 @@ impl Surface {
                 let device = dib.is_none() && bpp == 8;
                 let stride = if cols == width { pitch } else { span };
                 let mut data = vec![0u8; stride * rows as usize];
+                let unread = match dib {
+                    Some((bits, top_down)) if !read && bpp >= 8 && rows > 0 => {
+                        // The rows' bytes, from the first in memory.
+                        let (first, last) = if top_down {
+                            (y0, y1 - 1)
+                        } else {
+                            (height - y1, height - 1 - y0)
+                        };
+                        let at = bits.wrapping_add((first as usize * pitch + skip) as u32);
+                        let len = (last - first) as usize * pitch + span;
+                        cpu.bus.guest_in_card_memory(at, len)
+                    }
+                    _ => false,
+                };
+                let written = unread.then(|| vec![false; cols as usize * rows as usize]);
                 match dib {
+                    Some(_) if unread => {}
                     Some((bits, top_down)) => {
                         for r in 0..rows {
                             let y = y0 + r;
@@ -289,6 +328,7 @@ impl Surface {
                     pal_indices: None,
                     dib,
                     changed: false,
+                    written,
                 })
             }
         }
@@ -323,14 +363,39 @@ impl Surface {
             }
             Target::Bitmap(handle) => match self.dib {
                 Some((bits, top_down)) => {
-                    for r in 0..self.rows {
+                    let row_at = |r: i32| {
                         let y = self.top + r;
                         let row = if top_down { y } else { self.height - 1 - y };
-                        let at = bits.wrapping_add((row as usize * self.pitch + skip) as u32);
-                        let start = r as usize * self.stride;
-                        cpu.bus
-                            .guest_write_bytes(at, &self.data[start..start + self.stride]);
+                        bits.wrapping_add((row as usize * self.pitch + skip) as u32)
+                    };
+                    let Some(written) = &self.written else {
+                        let runs: Vec<_> =
+                            (0..self.rows).map(|r| (row_at(r), self.stride)).collect();
+                        cpu.bus.guest_write_runs(&runs, &self.data);
+                        return;
+                    };
+                    // The runs of pixels put, and their bytes.
+                    let size = self.bpp as usize / 8;
+                    let cols = self.cols as usize;
+                    let (mut runs, mut data) = (Vec::new(), Vec::new());
+                    for (r, row) in (0..self.rows).zip(written.chunks(cols.max(1))) {
+                        let mut x = 0;
+                        while x < cols {
+                            if !row[x] {
+                                x += 1;
+                                continue;
+                            }
+                            let end = row[x..].iter().position(|&w| !w).map_or(cols, |n| x + n);
+                            let start = r as usize * self.stride + x * size;
+                            runs.push((
+                                row_at(r).wrapping_add((x * size) as u32),
+                                (end - x) * size,
+                            ));
+                            data.extend_from_slice(&self.data[start..start + (end - x) * size]);
+                            x = end;
+                        }
                     }
+                    cpu.bus.guest_write_runs(&runs, &data);
                 }
                 None => {
                     if let Some(b) = gdi(cpu).bitmap_mut(handle) {
@@ -406,6 +471,7 @@ impl Surface {
         let row = self.row_offset(y);
         let x = (x - self.left) as usize;
         self.changed = true;
+        self.mark_written(y, x, 1);
         let d = &mut self.data;
         match self.bpp {
             1 => {
@@ -487,6 +553,7 @@ impl Surface {
             return;
         };
         self.changed = true;
+        self.mark_written(y, (x - self.left) as usize, values.len());
         let d = &mut self.data[at];
         match self.bpp {
             8 => d.iter_mut().zip(values).for_each(|(b, &v)| *b = v as u8),
@@ -511,6 +578,16 @@ impl Surface {
                 .iter_mut()
                 .zip(values)
                 .for_each(|(p, &v)| *p = v.to_le_bytes()),
+        }
+    }
+
+    /// Count `n` pixels of row `y` as put, the first at index `x` of the
+    /// columns loaded, where the surface keeps track of them (`written`).
+    #[inline]
+    fn mark_written(&mut self, y: i32, x: usize, n: usize) {
+        if let Some(w) = &mut self.written {
+            let at = (y - self.top) as usize * self.cols as usize + x;
+            w[at..at + n].fill(true);
         }
     }
 

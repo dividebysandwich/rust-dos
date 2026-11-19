@@ -19,22 +19,29 @@ ways:
   started from it runs with the profile's settings, and Rust-DOS doesn't
   ask the almanac for it.
 
-Rust-DOS finds a game in the almanac by the name, size and checksums of
-the program file started at its prompt; `almanac_auto` takes the
-settings of a game only when the checksums match. That works for DOS
-games and for games on the built-in Windows, which start from the same
-prompt. The almanac carries the machine's settings only: the graphics
-card, processor, speed, memory, DPMI, the DOS and Windows versions, the
-Windows desktop's colour depth (`win32_depth`) and system locale
-(`win32_locale`), the 3D cards, the sound cards, the joystick and the
-disks' speeds.
+Rust-DOS finds a game in the almanac by the name, size and checksums of the
+program file started last: at its prompt, or on the built-in Windows from
+Explorer, a game's launcher or its autorun. `almanac_auto` takes the
+settings of a game only when the checksums match, and asks only for programs
+started at the prompt. The almanac carries the machine's settings only: the
+graphics card, processor, speed, memory, DPMI, the DOS and Windows versions,
+the Windows desktop's colour depth (`win32_depth`), size (`win32_desktop`)
+and system locale (`win32_locale`), the 3D cards, the sound cards, the
+joystick and the disks' speeds.
 
-A version a report adds is filed under its program's platform: DOS,
-Windows 3.1 (an NE file) or Windows 95/98 (a PE file). For a Windows
-version the almanac recommends `win32=true` even before anyone has
-reported on it, so with `almanac_auto` a Windows game started at the
-prompt runs on the built-in Windows rather than as its DOS stub, which
-only says it needs Windows. A report that sets `win32` itself wins.
+A version a report adds is filed under its program's platform: DOS, Windows
+3.1 (an NE file) or Windows 95/98 (a PE file). An installer (`SETUP.EXE`,
+`INSTALL.EXE`) leaves the platform open, as a Windows 95 game often comes
+with a Windows 3.1 setup. For a Windows version the almanac recommends
+`win32=true` even before anyone has reported on it, so with `almanac_auto` a
+Windows game started at the prompt runs on the built-in Windows rather than
+as its DOS stub, which only says it needs Windows. A report that sets
+`win32` itself wins.
+
+Reporting a game as new by a name the almanac has already sends the report
+to that game, with a version for the program if the game hasn't one with its
+file. Fetching, the notes of the reports the settings come from show under
+the game picked: what players wrote, red reports' too, newest first.
 
 ## What this page adds
 
@@ -125,7 +132,7 @@ that names the game, its settings and what happened.
 [when a game doesn't run](../CONFIGURATION.md#when-a-game-doesnt-run)
 cover the settings most games need: `cpu=pentium_ii` for an invalid
 opcode, `win32_version=98se` when a message names the version, more
-`memsize` when it runs out. `win32_depth` is in
+`memsize` when it runs out. `win32_depth` and `win32_desktop` are in
 [`[emulator]`](../CONFIGURATION.md#emulator).
 
 * **Enemy Infestation**: the profile in
@@ -133,6 +140,17 @@ opcode, `win32_version=98se` when a message names the version, more
   installs it with its InstallShield 5 setup and runs it. For a CD
   copied to a folder, give the drive the label `EI` ([the CD's drive
   letter and label](../CONFIGURATION.md#the-cds-drive-letter-and-label)).
+* **Evil Islands: Curse of the Lost Soul** (GOG): `win32=true`,
+  `machine=svga_toadforce` ([ToadForce](../CONFIGURATION.md#toadforce))
+  and a processor with MMX, `cpu=pentium_mmx` or later; on the default
+  486 it stops with "MMX required in this version". GOG's installer
+  keeps eight of the game's settings files (`keyboard.ini`, `movie.ini`
+  and the `lights*.ini` files) in `gog-support\1457950224\app\config`;
+  copy them into the game's `config` folder. Without them the islands
+  and the menu have no daylight, only the light of fires, and the intro
+  videos don't play. The game needs no registry keys: it starts at
+  800x600 in 16 bits without them, and its Options set the rest. On the
+  ToadForce it plays the first island, and saves and loads.
 * **Grom**: `win32=true` and `machine=svga_toadforce`
   ([ToadForce](../CONFIGURATION.md#toadforce)). It stops at start with
   an assertion (`screen.Init`) when Direct3D lists no 32-bit texture
@@ -163,6 +181,13 @@ opcode, `win32_version=98se` when a message names the version, more
   colours and stops on the default desktop, which has more. Its setup
   (InstallShield 3's 32-bit engine) runs, and its archives also unpack
   ([installer archives](#installer-archives)).
+* **Warhammer: Shadow of the Horned Rat** (the Windows 95 version):
+  its battles load Reality Lab's renderers (`RLFRM256.DLL` and the
+  rest of the game's `RL\SOFT` folder) from `RL\SOFT` in the system
+  folder. For a [copied
+  installation](../CONFIGURATION.md#copying-an-installed-game), copy
+  the game's `RL\SOFT` to `C:\WINDOWS\SYSTEM\RL\SOFT`. Without them the
+  game crashes when a battle starts.
 * **Xenocracy**: its hardware check looks for `GLIDE2X.DLL`, which is
   there only with a 3dfx card: `voodoo=true`, or
   `machine=svga_voodoo3` or `svga_banshee`

@@ -146,7 +146,7 @@ fn keep_time(src: &Path, dest: &Path) {
     }
 }
 
-fn program_machine(dir: &str, machine: &str, command: &str, core: CoreMode) -> Cpu {
+fn program_machine(dir: &str, machine: &str, command: &str, core: CoreMode) -> Box<Cpu> {
     let mut cpu = Cpu::new(program_copy(dir, machine));
     if std::env::var("DYNDIFF_EMS").is_ok_and(|v| v == "1") {
         cpu.set_upper_memory(true, true).unwrap();

@@ -411,6 +411,25 @@ pub struct PendingSwap {
 
 crate::state_fields!(PendingSwap { retrace, due });
 
+/// A Banshee's picture held while a swap waits for its retrace
+/// (`Voodoo::hold_shown`): the video processor's registers it showed
+/// (`Voodoo::shown_regs`) when the program first drew into the buffer it
+/// shows, and the copy of the picture taken then (None where the OpenGL
+/// renderer drew it and none was taken).
+struct Held {
+    regs: [u32; 7],
+    copy: Option<HeldCopy>,
+}
+
+/// Where the copy of a held picture is.
+#[derive(Clone, Copy)]
+enum HeldCopy {
+    /// In `held_words`, drawn when a picture is asked for.
+    Words,
+    /// In `held_rgba`, drawn as wide as this.
+    Picture(usize),
+}
+
 /// The frame buffer interface chip (FBI): the frame buffer and what is
 /// drawn into it.
 #[derive(Clone, Debug)]
@@ -578,6 +597,12 @@ pub struct Voodoo {
     pub pci: PciConfig,
     dac: [u8; 8],
     dac_read: u8,
+    /// The DAC's PLL registers, an ICS5342's, which Glide finds it is
+    /// (`dac_register`): each M in its low byte, N and P in its high one,
+    /// written a byte at a time from the PLL write address (dacData's
+    /// register 4); and whether the next byte is a register's second.
+    pll: [u16; 16],
+    pll_high: bool,
     pub fbi: Fbi,
     pub tmu: Vec<Tmu>,
     send_config: bool,
@@ -606,8 +631,10 @@ pub struct Voodoo {
     /// Nothing in the emulator reads them; tests tell from them whether
     /// a fill was the card's (`blt::depth_fill`).
     pub fastfills: u64,
-    /// The video timing the card's registers describe.
+    /// The video timing the card's registers describe, and whether the
+    /// DAC's video clock gave its rate (`retime`).
     timing: CrtTiming,
+    timing_clocked: bool,
     /// RGB of each 5-6-5 pixel through the gamma table, rebuilt when it
     /// changes.
     palette: Vec<[u8; 3]>,
@@ -624,6 +651,21 @@ pub struct Voodoo {
     /// The same for each Banshee swap waiting for its retrace, beside
     /// its `overlay_queue`.
     swap_marks: VecDeque<Option<u64>>,
+    /// A Banshee's picture held while a swap waits for its retrace
+    /// (`hold_shown`), and the copy of it the software picture shows
+    /// meanwhile, kept from hold to hold: the memory's words where the
+    /// video processor shows nothing but a 16-bit desktop, which is drawn
+    /// only if a picture is asked for during the hold, else the picture.
+    held: Option<Held>,
+    held_words: banshee::display::ShownWords,
+    held_rgba: Vec<u8>,
+    /// From the card's creation, for the debugger: the holds that kept
+    /// the memory's words (`hold_shown`), the pictures drawn from them
+    /// because one was asked for during the hold (`render`), and the
+    /// holds that drew the picture at once.
+    held_keeps: u64,
+    held_conversions: std::cell::Cell<u64>,
+    held_copies: u64,
     /// Where the jobs given out or waiting since the workers last
     /// finished draw (`note_drawn`), each with the batch of the latest
     /// job there: one after `front_jobs` if it is a later batch.
@@ -734,6 +776,8 @@ impl Voodoo {
             pci: PciConfig::default(),
             dac: [0; 8],
             dac_read: 0,
+            pll: [0; 16],
+            pll_high: false,
             fbi: Fbi::new(board.frame_buffer()),
             tmu: Vec::new(),
             send_config: false,
@@ -749,12 +793,19 @@ impl Voodoo {
             swapped: 0,
             fastfills: 0,
             timing: CrtTiming::VESA_480,
+            timing_clocked: false,
             palette: vec![[0; 3]; 65536],
             palette_dirty: true,
             pool: workers::Pool::new(workers),
             drawn_to: Vec::new(),
             front_jobs: None,
             swap_marks: VecDeque::new(),
+            held: None,
+            held_words: Default::default(),
+            held_rgba: Vec::new(),
+            held_keeps: 0,
+            held_conversions: Default::default(),
+            held_copies: 0,
             drawn: RefCell::new(Drawn::default()),
             outstanding: Cell::new(false),
             tmu_in_use: Cell::new(0),
@@ -823,11 +874,14 @@ impl Voodoo {
         self.pci = PciConfig::default();
         self.dac = [0; 8];
         self.dac_read = 0;
+        self.pll = [0; 16];
+        self.pll_high = false;
         self.send_config = false;
         self.stats = Stats::default();
         self.clut = default_clut();
         self.swaps.clear();
         self.swap_marks.clear();
+        self.held = None;
         self.front_jobs = None;
         self.last_swap = 0;
         self.fifo_writes = 0;
@@ -855,6 +909,7 @@ impl Voodoo {
         self.fbi.yorigin = 0;
         self.recompute_video_memory();
         self.timing = CrtTiming::VESA_480;
+        self.timing_clocked = false;
         self.palette_dirty = true;
         self.display_dirty = true;
         if let Some(mirror) = self.mirror.get_mut() {
@@ -1570,6 +1625,16 @@ impl Voodoo {
             self.display_dirty |= changed;
             return switched;
         }
+        // The copy of the picture shown stands in for the memory until the
+        // swap shows the next (`hold_shown`).
+        if self.held_copy().is_some() {
+            let dirty = self.banshee.as_mut().is_some_and(|b| std::mem::take(&mut b.dirty));
+            let draw = changed || switched || dirty;
+            if self.recording() {
+                self.scanout_dirty |= draw;
+            }
+            return draw;
+        }
         if let Some(b) = &mut self.banshee {
             let dirty = std::mem::take(&mut b.dirty);
             let draw = changed || switched || dirty;
@@ -1595,6 +1660,98 @@ impl Voodoo {
             self.build_palette();
         }
         changed || switched
+    }
+
+    /// Whether a Banshee's picture is the one it showed before the program
+    /// drew into the buffer the video processor shows while a swap waited
+    /// for its retrace (`hold_shown`), the video processor showing the
+    /// same memory since. The hold ends when the swap shows
+    /// (`banshee_show`), when the card is reset or loaded, and when the
+    /// program changes what the video processor shows.
+    pub(crate) fn picture_held(&self) -> bool {
+        let Some(held) = &self.held else { return false };
+        !self.swaps.is_empty() && Some(held.regs) == self.shown_regs()
+    }
+
+    /// The copy of the picture held (`hold_shown`): None if the picture
+    /// isn't held, or the hold began while the OpenGL renderer drew it,
+    /// which keeps its own (`Scanout::held`). The software picture is then
+    /// drawn from the memory.
+    fn held_copy(&self) -> Option<HeldCopy> {
+        let copy = self.held.as_ref()?.copy?;
+        self.picture_held().then_some(copy)
+    }
+
+    /// The program is about to draw into colour buffer `dest`. On the
+    /// card, the drawing commands after a swapbufferCMD that waits for the
+    /// retrace wait in the FIFO behind it, and the buffer shown isn't
+    /// drawn into until the swap shows the next one. Here they go ahead
+    /// beside the program, into the memory, so a Banshee that shows `dest`
+    /// while a swap waits holds its picture (`picture_held`): the software
+    /// picture as a copy made now, before the drawing, from the frame the
+    /// swap that showed it needs (`catch_up_shown`), so that what it shows
+    /// is the same however the host's frames fall. Most holds end with no
+    /// host frame in them, so the copy keeps the memory's words where it
+    /// can (`Banshee::take_shown`), which `render` draws only if asked. A
+    /// read of the buffer shown in the meantime (the linear frame buffer,
+    /// a 2D blit from it) still gets the next frame's drawing where the
+    /// card would give the frame shown (#1179).
+    fn hold_shown(&mut self, dest: usize) {
+        if self.swaps.is_empty() || self.picture_held() {
+            return;
+        }
+        let Some(b) = &self.banshee else { return };
+        if !b.shows(dest as u32 * 2) {
+            return;
+        }
+        let Some(regs) = self.shown_regs() else { return };
+        let copy = self.picture_wanted().then(|| {
+            if self.writes_queue() {
+                self.catch_up_shown();
+            }
+            // The host may not have drawn this picture yet.
+            self.display_dirty = true;
+            // The picture is drawn from the memory, which needs the GPU's
+            // 2D operations.
+            self.gpu_sync_all();
+            if let Some(b) = &self.banshee
+                && b.take_shown(&self.fbi.ram, &mut self.held_words)
+            {
+                self.held_keeps += 1;
+                return HeldCopy::Words;
+            }
+            let (w, h) = self.picture_size();
+            let (w, h) = (w as usize, h as usize);
+            let mut rgba = std::mem::take(&mut self.held_rgba);
+            rgba.clear();
+            rgba.resize(w * h * 4, 0);
+            self.render_memory(&mut rgba, w);
+            self.held_rgba = rgba;
+            self.held_copies += 1;
+            HeldCopy::Picture(w)
+        });
+        self.held = Some(Held { regs, copy });
+    }
+
+    /// What a Banshee shows: whether the video processor drives the
+    /// monitor, its mode and size, the desktop's and the overlay's memory,
+    /// and the desktop's size from the CRTC, which sizes the picture
+    /// (`picture_size`): a new size ends a hold as a new mode does, since
+    /// the card never shows the frame held at another size.
+    fn shown_regs(&self) -> Option<[u32; 7]> {
+        use banshee::{VGA_INIT0, VID_DESKTOP_OVERLAY_STRIDE, VID_DESKTOP_START_ADDR};
+        use banshee::{VID_PROC_CFG, VID_SCREEN_SIZE};
+        let b = self.banshee.as_ref()?;
+        let (width, height) = b.desktop_size();
+        Some([
+            b.reg(VGA_INIT0),
+            b.reg(VID_PROC_CFG),
+            b.reg(VID_SCREEN_SIZE),
+            b.reg(VID_DESKTOP_START_ADDR),
+            b.reg(VID_DESKTOP_OVERLAY_STRIDE),
+            b.overlay_addr,
+            width << 16 | height,
+        ])
     }
 
     /// Wait for the jobs the picture shown needs: those given out before
@@ -1686,8 +1843,32 @@ impl Voodoo {
 
     /// Draw the front buffer into `rgba` (RGBA8, `width` pixels a row,
     /// `picture_size` big), through the gamma table (see
-    /// `prepare_display`).
+    /// `prepare_display`). A picture held is drawn from its copy
+    /// (`hold_shown`).
     pub fn render(&self, rgba: &mut [u8], width: usize) {
+        match self.held_copy() {
+            None => self.render_memory(rgba, width),
+            Some(HeldCopy::Words) => {
+                self.held_conversions.set(self.held_conversions.get() + 1);
+                self.held_words.render(rgba, width);
+            }
+            Some(HeldCopy::Picture(from)) => {
+                if width == 0 || from == 0 {
+                    return;
+                }
+                let held = self.held_rgba.chunks(from * 4);
+                for (out, row) in rgba.chunks_mut(width * 4).zip(held) {
+                    let n = out.len().min(row.len());
+                    out[..n].copy_from_slice(&row[..n]);
+                }
+            }
+        }
+    }
+
+    /// Draw the picture the card's memory holds into `rgba`, as `render`
+    /// does, held or not: a save state's thumbnail shows what a load of
+    /// it shows, since a load lets the hold go.
+    pub fn render_memory(&self, rgba: &mut [u8], width: usize) {
         if let Some(b) = &self.banshee {
             // The picture is drawn from the memory, which needs the
             // GPU's 2D operations.
@@ -1738,29 +1919,109 @@ impl Voodoo {
 
     // --- Timing, swaps and the FIFO ---
 
-    /// The video timing: the card's registers' frame at 60 Hz, which is
-    /// what DOSBox-X always runs the card at.
+    /// The video timing the registers give (`register_timing`), as after
+    /// a load, whose swaps were saved counted at it.
     fn update_timing(&mut self) {
+        if let Some(timing) = self.register_timing() {
+            self.timing = timing;
+            self.timing_clocked = self.video_clock().is_some();
+        }
+    }
+
+    /// The video timing after a write to the video or DAC registers at
+    /// `now`. Where the DAC's video clock gives the rate, before or
+    /// after, a change counts the swaps' retraces again at the new rate
+    /// (`set_timing`); the frame of 60 Hz is taken as it was before the
+    /// clock was modelled.
+    fn retime(&mut self, now: Now) {
+        let Some(timing) = self.register_timing() else {
+            return;
+        };
+        let clocked = self.video_clock().is_some();
+        if clocked || self.timing_clocked {
+            self.set_timing(timing, now);
+        } else {
+            self.timing = timing;
+        }
+        self.timing_clocked = clocked;
+    }
+
+    /// The video timing the registers give: hSync, vSync and
+    /// videoDimensions' frame at the DAC's video clock (`video_clock`),
+    /// or at 60 Hz while the DAC's clock 0 comes from its select pins,
+    /// which the emulator doesn't model: a program that never programs
+    /// the PLL runs the card at 60 Hz, as DOSBox-X does. None while the
+    /// registers describe no frame.
+    fn register_timing(&self) -> Option<CrtTiming> {
         let (h, v, dims) = (self.reg[H_SYNC], self.reg[V_SYNC], self.reg[VIDEO_DIMENSIONS]);
         let video = self.chip.video;
         let (vsync_on, vsync_off) = chip::fields(v, video.vsync);
         let (xwidth, vvis) = chip::fields(dims, video.dimensions);
         let vtotal = vsync_off + vsync_on;
         if h == 0 || v == 0 || dims == 0 || vvis == 0 || vtotal <= vvis {
-            return;
+            return None;
         }
-        let line_ns = (1_000_000_000 / 60 / vtotal as u64) as u32;
         let htotal = self.htotal();
+        let line_ns = match self.video_clock() {
+            Some(hz) => ((htotal as u64 * 1_000_000_000 + hz / 2) / hz).min(u32::MAX as u64) as u32,
+            None => (1_000_000_000 / 60 / vtotal as u64) as u32,
+        };
         let hvis = xwidth.min(htotal);
         let sync = vsync_on.clamp(1, vtotal - vvis);
-        self.timing = CrtTiming {
+        Some(CrtTiming {
             line_ns,
             hdisplay_ns: (line_ns as u64 * hvis as u64 / htotal.max(1) as u64) as u32,
             total: vtotal,
             display: vvis,
             retrace_start: vvis,
             retrace_end: vvis + sync,
-        };
+        })
+    }
+
+    /// The pixel clock the DAC gives the card, in Hz, once the PLL
+    /// control register (0Eh) has clock 0 come from a PLL register (bit
+    /// 5, which Glide sets) instead of the select pins: the register its
+    /// bits 2:0 pick, 14.318 MHz x (M + 2) / ((N + 2) x 2^P). The colour
+    /// modes that take two clocks a pixel (2, 6 and 7 in the command
+    /// register's high nibble, 7 being Glide's 24-bit output) halve it,
+    /// as in 86Box. None while the pins select it.
+    fn video_clock(&self) -> Option<u64> {
+        let ctrl = self.pll[0x0E] as u8;
+        if self.banshee.is_some() || ctrl & 0x20 == 0 {
+            return None;
+        }
+        let v = self.pll[(ctrl & 7) as usize] as u64;
+        let (m, n, p) = (v & 0x7F, (v >> 8) & 0x1F, (v >> 13) & 3);
+        let hz = 14_318_180 * (m + 2) / ((n + 2) << p);
+        let two_clocks = matches!(self.dac[6] >> 4, 2 | 6 | 7);
+        Some(if two_clocks { hz / 2 } else { hz })
+    }
+
+    /// A write of `data` to DAC register `reg` through dacData at `now`.
+    /// The PLL's data register (5) fills the PLL register the write
+    /// address (4) points at, its low byte and then its high one, and
+    /// moves the address on after the second; writing the address starts
+    /// again at a low byte.
+    pub(crate) fn dac_write(&mut self, reg: usize, data: u8, now: Now) {
+        if reg == 5 {
+            let at = (self.dac[4] & 0x0F) as usize;
+            let r = &mut self.pll[at];
+            *r = if self.pll_high {
+                *r & 0x00FF | (data as u16) << 8
+            } else {
+                *r & 0xFF00 | data as u16
+            };
+            if self.pll_high {
+                self.dac[4] = self.dac[4].wrapping_add(1);
+            }
+            self.pll_high = !self.pll_high;
+        } else if reg == 4 {
+            self.pll_high = false;
+        }
+        self.dac[reg] = data;
+        if matches!(reg, 5 | 6) {
+            self.retime(now);
+        }
     }
 
     /// The pixels of a line, sync included, from hSync.
@@ -2008,6 +2269,8 @@ impl Voodoo {
         self.update_timing();
         self.palette_dirty = true;
         self.display_dirty = true;
+        // The picture is drawn from the memory loaded, as it is.
+        self.held = None;
         // The swaps' batches were the workers' before the load: each swap
         // still pending waits for all, and those queued later keep their
         // place beside `overlay_queue`.
@@ -2096,9 +2359,11 @@ impl Voodoo {
             self.gpu.get_mut().tracker.mark(start, end);
         }
         // The software renderer draws the buffers into the memory from
-        // now on, where the GPU may have done a 2D operation.
+        // now on, where the GPU may have done a 2D operation. The
+        // program reads none of it here: the hot bytes there don't stay
+        // hot for it.
         for (start, end) in key.spans().map(clamp) {
-            self.gpu_sync(start, end);
+            self.gpu_sync_cooling(start, end);
         }
         let snapshot = self.snapshot(&key);
         if let Some(mirror) = self.mirror.get_mut() {
@@ -2298,7 +2563,7 @@ impl Voodoo {
     pub fn describe(&self, now: Now) -> serde_json::Value {
         let init: Vec<String> =
             [FBI_INIT0, FBI_INIT1, FBI_INIT2, FBI_INIT3, FBI_INIT4].iter().map(|&r| format!("{:08X}", self.reg[r])).collect();
-        serde_json::json!({
+        let mut v = serde_json::json!({
             "model": self.board.model().name(),
             "board_mb": self.board.megabytes(),
             "base": format!("{:08X}", self.pci.bar),
@@ -2340,7 +2605,11 @@ impl Voodoo {
                 "depth": self.cmdfifo.depth,
                 "holes": self.cmdfifo.holes,
             })),
-        })
+        });
+        v["held_copies"] = self.held_copies.into();
+        v["held_keeps"] = self.held_keeps.into();
+        v["held_conversions"] = self.held_conversions.get().into();
+        v
     }
 }
 
@@ -2414,8 +2683,14 @@ impl State for Voodoo {
         self.svert.save(w);
         self.sverts.save(w);
         self.blt.save(w);
-        if let Some(b) = &self.banshee {
-            b.save(w);
+        match &self.banshee {
+            Some(b) => b.save(w),
+            // Added later, at the end of a Voodoo Graphics' or Voodoo2's
+            // state: the DAC's PLL registers.
+            None => {
+                self.pll.save(w);
+                self.pll_high.save(w);
+            }
         }
     }
 
@@ -2483,6 +2758,14 @@ impl State for Voodoo {
             b.load(r)?;
             b.engine.after_load();
             b.dirty = true;
+        }
+        // A state from before the PLL was kept has the select pins
+        // choosing the clock: the 60 Hz frame it was saved at.
+        self.pll = [0; 16];
+        self.pll_high = false;
+        if self.banshee.is_none() && !r.is_empty() {
+            self.pll.load(r)?;
+            self.pll_high.load(r)?;
         }
         self.after_load();
         Ok(())

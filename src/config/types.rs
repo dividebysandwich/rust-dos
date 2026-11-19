@@ -63,17 +63,29 @@ impl AspectRatio {
 /// How the picture is scaled up to the window (`filter`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Filter {
-    /// Sharp pixels.
+    /// Sharp pixels of equal size: each pixel of the picture covers the
+    /// same width and height on the screen, with a blended edge less than
+    /// one screen pixel wide where the scale isn't a whole number. At a
+    /// whole-number scale it is nearest-neighbour sampling.
     #[default]
-    Nearest,
+    Sharp,
+    /// Nearest-neighbour sampling: every screen pixel shows the one pixel
+    /// of the picture under its centre, unblended. Where the scale isn't
+    /// a whole number, pixels come out one screen pixel wider or taller
+    /// than their neighbours in turn.
+    Hard,
     /// Smooth, interpolated pixels.
     Linear,
 }
 
 impl Filter {
+    /// `nearest` is the old name of `sharp`, still read: every saved
+    /// configuration file has it, and the two draw the same at
+    /// whole-number scales. Nearest-neighbour sampling is `hard`.
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
-            "nearest" => Some(Filter::Nearest),
+            "sharp" | "nearest" => Some(Filter::Sharp),
+            "hard" => Some(Filter::Hard),
             "linear" => Some(Filter::Linear),
             _ => None,
         }
@@ -81,7 +93,8 @@ impl Filter {
 
     pub fn name(self) -> &'static str {
         match self {
-            Filter::Nearest => "nearest",
+            Filter::Sharp => "sharp",
+            Filter::Hard => "hard",
             Filter::Linear => "linear",
         }
     }
@@ -197,6 +210,45 @@ impl DesktopDepth {
             Self::Adapter => "auto",
             Self::Palette => "8",
             Self::HighColor => "16",
+        }
+    }
+}
+
+/// The size of the built-in Windows' desktop (`win32_desktop`), as the
+/// Display Properties of Windows set it: 640x480 (the default), 800x600
+/// or 1024x768.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum DesktopSize {
+    #[default]
+    Vga,
+    Svga,
+    Xga,
+}
+
+impl DesktopSize {
+    pub const ALL: [Self; 3] = [Self::Vga, Self::Svga, Self::Xga];
+
+    /// "640x480", "800x600" or "1024x768".
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        Self::ALL.into_iter().find(|d| d.name().eq_ignore_ascii_case(s))
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Vga => "640x480",
+            Self::Svga => "800x600",
+            Self::Xga => "1024x768",
+        }
+    }
+
+    /// Its width and height in pixels. The sizes of `ALL` are the ones
+    /// ChangeDisplaySettings sets too (`screen::DESKTOP_SIZES`).
+    pub const fn size(self) -> (u32, u32) {
+        match self {
+            Self::Vga => (640, 480),
+            Self::Svga => (800, 600),
+            Self::Xga => (1024, 768),
         }
     }
 }

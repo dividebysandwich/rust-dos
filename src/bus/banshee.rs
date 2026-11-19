@@ -20,6 +20,11 @@ impl Bus {
         let Some(v) = &self.voodoo else {
             return u32::MAX;
         };
+        // The memory through BAR1 where it is in order: only the bytes
+        // and what the card does for them.
+        if let Some(addr) = v.linear_run(offset, len) {
+            return v.banshee_linear_load(addr, len);
+        }
         if vga_in_bar0(offset, len) {
             return (0..len)
                 .map(|i| (self.banshee_vga_peek(offset + i) as u32) << (8 * i))
@@ -42,6 +47,10 @@ impl Bus {
     /// `len` bytes of `value` written to the card's window at `offset`,
     /// as the dword writes with byte enables the card takes.
     pub(crate) fn banshee_write_bytes(&mut self, offset: u32, value: u32, len: u32) {
+        if let Some(addr) = self.voodoo.as_ref().and_then(|v| v.linear_run(offset, len)) {
+            self.banshee_linear_store(addr, value, len);
+            return;
+        }
         if vga_in_bar0(offset, len) {
             for i in 0..len {
                 let at = (offset + i) & 0xFF;
@@ -74,6 +83,97 @@ impl Bus {
         {
             let addr = b.linear_addr(offset - banshee::LINEAR);
             self.note_banshee_memory_write(addr, len);
+        }
+    }
+
+    /// `len` bytes (1 to 4) of `value` written into the card's memory
+    /// from byte `addr` on, which is below the tile base and outside the
+    /// command FIFOs' rings (`Voodoo::linear_run`): what the writes of
+    /// their dwords through the window do, a swap held back waited for
+    /// and `cycles=auto` told, without the way through its registers.
+    fn banshee_linear_store(&mut self, addr: u32, value: u32, len: u32) {
+        let _zone = crate::profile::zone(crate::profile::Zone::Voodoo);
+        self.voodoo_swap_wait();
+        if let Some(v) = &mut self.voodoo {
+            v.banshee_linear_store(addr, value, len);
+        }
+        self.note_banshee_memory_write(addr, len);
+    }
+
+    /// `len` bytes (1, 2 or 4) at physical address `addr`, if they are
+    /// all a Banshee's or Voodoo3's memory through BAR1 in order
+    /// (`banshee_linear_at`), as `read_8`, `read_16` and `read_32` read
+    /// them there: for translated code's reads, which come with the
+    /// address of something that isn't plain RAM and would go through
+    /// every window before the card's. None, having read nothing, where
+    /// they are something else.
+    #[cfg_attr(not(dynrec), allow(dead_code))]
+    #[inline]
+    pub(crate) fn read_banshee_linear(&self, addr: usize, len: usize) -> Option<u32> {
+        let at = self.banshee_linear_at(addr, len)?;
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, false));
+        if self.observe.on {
+            self.observe.mapped(addr, self.ram.len());
+        }
+        Some(self.voodoo.as_ref()?.banshee_linear_load(at, len as u32))
+    }
+
+    /// The same for a write, as `write_8`, `write_16` and `write_32` make
+    /// one there. False, having written nothing, where the bytes are
+    /// something else.
+    #[cfg_attr(not(dynrec), allow(dead_code))]
+    #[inline]
+    pub(crate) fn write_banshee_linear(&mut self, addr: usize, value: u32, len: usize) -> bool {
+        let Some(at) = self.banshee_linear_at(addr, len) else {
+            return false;
+        };
+        let _profile = self.profile.as_deref().map(|p| p.mem(addr, true));
+        if self.observe.on {
+            self.observe.mapped_write(addr, self.ram.len());
+        }
+        self.banshee_linear_store(at, value, len as u32);
+        true
+    }
+
+    /// Where translated code may read and write a Banshee's or Voodoo3's
+    /// memory by itself (`Voodoo::banshee_direct`): BAR1's physical
+    /// address and the memory there. None while an access does more than
+    /// move the bytes: the card's own reasons, a proof of an idle loop
+    /// that follows every access (`idle`), a VESA frame buffer over the
+    /// BAR, or another card whose windows the bus looks at before this
+    /// one's (`banshee_linear_at`).
+    #[cfg_attr(not(dynrec), allow(dead_code))]
+    pub(crate) fn banshee_direct(&self) -> Option<(u32, banshee::direct::Direct)> {
+        let v = self.voodoo.as_ref()?;
+        let b = v.banshee()?;
+        if self.observe.on
+            || self.s3()
+            || self.mach64()
+            || self.powervr.is_some()
+            || self.toadforce.is_some()
+        {
+            return None;
+        }
+        let direct = v.banshee_direct()?;
+        let bar1 = b.bar1()?;
+        let end = bar1 as u64 + direct.len as u64;
+        if (bar1 as usize) < self.ram.len() || end > 0xFFFE_0000 {
+            return None;
+        }
+        if let Some(lfb) = self.vbe.lfb_base {
+            let lfb = lfb as u64;
+            if lfb < end && (bar1 as u64) < lfb + self.vbe.vram.len() as u64 {
+                return None;
+            }
+        }
+        Some((bar1, direct))
+    }
+
+    /// Translated code wrote the card's memory by itself.
+    #[cfg_attr(not(dynrec), allow(dead_code))]
+    pub(crate) fn banshee_wrote_directly(&mut self) {
+        if let Some(v) = &mut self.voodoo {
+            v.banshee_wrote_directly();
         }
     }
 
@@ -407,5 +507,98 @@ mod tests {
         assert!(b.extended());
         assert_eq!(b.reg(VID_PROC_CFG), 0x0904_0081);
         assert_eq!(bus.banshee_crtc_read(0x1A), 0x40);
+    }
+
+    /// A Voodoo3 showing a desktop from 8000h of its memory, its rows (as
+    /// many as the VGA's mode has lines) 16 bytes apart, which ends in
+    /// the page after: BAR1 is tiled from 4 MB on.
+    fn card_with_a_desktop() -> Box<Cpu> {
+        use crate::voodoo::banshee::{
+            LFB_MEMORY_CONFIG, VGA_INIT0, VID_DESKTOP_OVERLAY_STRIDE, VID_DESKTOP_START_ADDR,
+            VID_PROC_CFG,
+        };
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.configure_voodoo(Some(Board::Voodoo3));
+        let bus = &mut cpu.bus;
+        bus.voodoo_write_32(LFB_MEMORY_CONFIG, 0x400);
+        bus.voodoo_write_32(VGA_INIT0, 0x0000_1140);
+        bus.voodoo_write_32(VID_PROC_CFG, 0x0004_0081);
+        bus.voodoo_write_32(VID_DESKTOP_OVERLAY_STRIDE, 0x10);
+        bus.voodoo_write_32(VID_DESKTOP_START_ADDR, 0x8000);
+        let (start, span) = bus.banshee().unwrap().desktop_memory();
+        assert_eq!(start, 0x8000);
+        assert!((0x1010..0x2000).contains(&span), "{span:#x} bytes");
+        cpu
+    }
+
+    #[test]
+    fn the_linear_memory_is_read_and_written_as_through_the_bus() {
+        use crate::voodoo::banshee::INITIAL_BAR0;
+        const BAR1: usize = crate::voodoo::banshee::INITIAL_BAR1 as usize;
+        let (mut a, mut b) = (card_with_a_desktop(), card_with_a_desktop());
+        let (a, b) = (&mut a.bus, &mut b.bus);
+        let mut value = 0x0103_0507u32;
+        let (_, span) = a.banshee().unwrap().desktop_memory();
+        // Out of sight, across the desktop's first byte, in it and
+        // across its last.
+        for at in [0x7001usize, 0x7FFD, 0x8003, 0x8000 + span as usize - 0x22] {
+            for len in [1usize, 2, 4] {
+                value = value.wrapping_mul(0x0101_0101).wrapping_add(len as u32);
+                let addr = BAR1 + at + 8 * len;
+                match len {
+                    1 => _ = a.write_8(addr, value as u8),
+                    2 => _ = a.write_16(addr, value as u16),
+                    _ => a.write_32(addr, value),
+                }
+                assert!(b.write_banshee_linear(addr, value, len));
+                let read = match len {
+                    1 => a.read_8(addr) as u32,
+                    2 => a.read_16(addr) as u32,
+                    _ => a.read_32(addr),
+                };
+                assert_eq!(b.read_banshee_linear(addr, len), Some(read), "{len} at {at:#x}");
+                a.clock.icount += 1;
+                b.clock.icount += 1;
+            }
+        }
+        let memory = |bus: &crate::bus::Bus| {
+            let mut bytes = vec![0; 0x4000];
+            bus.voodoo.as_ref().unwrap().banshee_memory_read(0x7000, &mut bytes);
+            bytes
+        };
+        assert!(memory(a) == memory(b), "the card's memory differs");
+        // What landed in the desktop counts for `cycles=auto` the same.
+        assert_ne!(a.activity.video_bytes, 0);
+        assert_eq!(a.activity.video_bytes, b.activity.video_bytes);
+        // The registers, the tiles and what is past the BAR stay the
+        // window's.
+        for addr in [INITIAL_BAR0 as usize + 0x28, BAR1 + 0x40_0000, BAR1 + 0x3F_FFFE, BAR1 - 2] {
+            assert_eq!(b.read_banshee_linear(addr, 4), None, "{addr:#x}");
+            assert!(!b.write_banshee_linear(addr, 0, 4), "{addr:#x}");
+        }
+        assert!(b.read_banshee_linear(BAR1 + 0x3F_FFFC, 4).is_some());
+    }
+
+    #[test]
+    fn direct_memory_leaves_the_desktop_and_observed_accesses_to_the_bus() {
+        const BAR1: u32 = crate::voodoo::banshee::INITIAL_BAR1;
+        let mut cpu = card_with_a_desktop();
+        let bus = &mut cpu.bus;
+        let (at, direct) = bus.banshee_direct().expect("a quiet card");
+        assert_eq!((at, direct.len), (BAR1, 0x40_0000));
+        let (_, span) = bus.banshee().unwrap().desktop_memory();
+        assert_eq!(direct.kept, [(0x8000, 0x8000 + span as u32), (0, 0), (0, 0)]);
+        // A proof of an idle loop follows every access (`idle`).
+        bus.observe.on = true;
+        assert!(bus.banshee_direct().is_none());
+        bus.observe.on = false;
+        // The VESA frame buffer comes before the card on the bus.
+        let lfb = bus.vbe.lfb_base.replace(BAR1 + 0x1000);
+        assert!(bus.banshee_direct().is_none());
+        bus.vbe.lfb_base = lfb;
+        assert!(bus.banshee_direct().is_some());
+        // The card's memory BARs switched off.
+        bus.banshee_mut().unwrap().pci.command = 0x01;
+        assert!(bus.banshee_direct().is_none());
     }
 }

@@ -11,6 +11,7 @@
 
 use super::Bus;
 use crate::toadforce::display::{Legacy, Shown};
+use crate::toadforce::format::Format;
 use crate::toadforce::gpu::Cause;
 use crate::toadforce::pci::Bar;
 use crate::toadforce::{Change, Effects, Live, ToadForce, caps, command, regs};
@@ -343,22 +344,34 @@ impl Bus {
     }
 
     /// Before the emulator itself reads `len` bytes of card memory at
-    /// `offset`, or writes them where it needs the others around them:
-    /// the queued commands run, and what the host renderer drew into
-    /// surfaces with those bytes is read back.
+    /// `offset` with no note of a write after it, or writes them where
+    /// it needs the others around them: the queued commands run, and
+    /// what the host renderer drew into surfaces with those bytes is
+    /// read back whole. A read that only reads takes
+    /// `toadforce_reading`.
     #[inline]
     pub fn toadforce_touch(&mut self, offset: usize, len: usize) {
-        self.toadforce_touch_for(offset, len, Cause::Program);
-    }
-
-    /// `toadforce_touch`, with what the bytes are wanted for, for the
-    /// status's counts of read-backs.
-    #[inline]
-    pub fn toadforce_touch_for(&mut self, offset: usize, len: usize, why: Cause) {
         self.toadforce_flush();
         if self.toadforce_ahead() {
             let end = (offset + len).min(u32::MAX as usize);
-            self.toadforce_read_back(Some((offset as u32, end as u32)), why);
+            let range = Some((offset as u32, end as u32));
+            self.toadforce_read_back(range, Cause::Program);
+        }
+    }
+
+    /// Before the emulator itself only reads `len` bytes of card memory
+    /// at `offset`, for `why`: the queued commands run, and of the
+    /// surfaces the host renderer drew into, the rows those bytes lie
+    /// in are read back, the rest staying with the renderer. A write
+    /// there afterwards goes through `toadforce_writing`.
+    #[inline]
+    pub fn toadforce_reading(&mut self, offset: usize, len: usize, why: Cause) {
+        self.toadforce_flush();
+        if self.toadforce_ahead()
+            && let Some(card) = &mut self.toadforce
+        {
+            let end = (offset + len).min(u32::MAX as usize);
+            card.settle_rows(&mut self.vbe.vram, (offset as u32, end as u32), why);
         }
     }
 
@@ -449,14 +462,13 @@ impl Bus {
     /// `toadforce_show` then reads nothing back, and the caller draws
     /// the window from the host's copy instead of from card memory.
     ///
-    /// The surface is the one the card shows as of the commands it has
-    /// run (`vbe.start`), and the queued ones stay queued. A program
-    /// that flipped draws its next frame into the surface the screen
-    /// had until then, which is still the one latched until the next
-    /// retrace: running the queue here and showing the latched surface
-    /// would show that frame half drawn.
+    /// The surface is the picture's, at `vbe.latched_start`, which is
+    /// the one card memory is drawn from too (`Vbe::picture`), so both
+    /// renderers show the same frame. In the card's own mode that is
+    /// the surface the card shows as of the commands it has run
+    /// (`toadforce_picture`); the queued ones stay queued.
     pub fn toadforce_host_picture(&mut self) -> Option<crate::toadforce::format::Surface> {
-        use crate::toadforce::format::{Format, Surface};
+        use crate::toadforce::format::Surface;
         if self.video_mode != VideoMode::Vesa || !self.toadforce_hosted() {
             return None;
         }
@@ -470,7 +482,7 @@ impl Bus {
             _ => return None,
         };
         let surface = Surface {
-            offset: self.vbe.start,
+            offset: self.vbe.latched_start,
             pitch: self.vbe.pitch,
             width: mode.width as u32,
             height: mode.height as u32,
@@ -571,8 +583,19 @@ impl Bus {
         self.toadforce_effects(fx);
     }
 
-    /// The surface the card shows moved, or a colour of its palette
-    /// changed: the screen shows it from the next frame.
+    /// The surface the card shows moved, or a colour of its palette or
+    /// its gamma ramp changed.
+    ///
+    /// The screen shows the surface at `MODE_START` from the moment it
+    /// changes ("Flips" in `docs/toadforce-spec.md`): the window,
+    /// screenshots, recordings and the debugger's frames, with either
+    /// renderer (`toadforce_host_picture`). That surface is the frame
+    /// the program finished. The one latched at the last retrace is the
+    /// one a program that flipped at once draws its next frame into, as
+    /// the built-in Windows' DirectDraw does after every Flip: shown
+    /// until the next retrace, it would be that frame half drawn, and a
+    /// screenshot at a fixed emulated time can land there (No One Lives
+    /// Forever clears it to black right after the flip).
     fn toadforce_picture(&mut self) {
         let Some(card) = self.toadforce.as_deref() else {
             return;
@@ -584,6 +607,12 @@ impl Bus {
         if self.vbe.start != start {
             self.vbe.start = start;
             self.note_display_start();
+        }
+        if self.vbe.latched_start != start {
+            self.vbe.latched_start = start;
+            // The flip counts for the frame rate at the next retrace,
+            // which finds nothing left to latch.
+            self.vga.flipped = true;
         }
         self.vga.mark_dirty_full();
     }
@@ -675,6 +704,32 @@ impl Bus {
         display.shown().map(|_| display.palette())
     }
 
+    /// Whether the card shows a mode of its own in direct colour, whose
+    /// picture goes through its gamma ramp (`GAMMA`).
+    pub fn toadforce_direct_colour(&self) -> bool {
+        self.toadforce
+            .as_deref()
+            .is_some_and(|c| c.display.direct_colour())
+    }
+
+    /// The colours the components of the card's picture show as, while
+    /// they aren't their own (`ToadForce::picture_ramp`): its gamma ramp,
+    /// then the screen's own gamma.
+    pub fn toadforce_gamma(&self) -> Option<[u32; 256]> {
+        self.toadforce.as_deref()?.picture_ramp()
+    }
+
+    /// The screen's own gamma for the card's picture (`toadforce_gamma`),
+    /// or None. Its picture is drawn again when it changes.
+    pub fn set_toadforce_gamma(&mut self, gamma: Option<f32>) {
+        let Some(card) = self.toadforce.as_deref_mut() else {
+            return;
+        };
+        if card.set_screen_gamma(gamma) && card.display.direct_colour() {
+            self.vga.mark_dirty_full();
+        }
+    }
+
     /// A state was loaded: the linear frame buffer is where its card has
     /// BAR 1, and the card's own mode, which a state doesn't keep the
     /// Super VGA's description of, is described again.
@@ -691,6 +746,12 @@ impl Bus {
         if let Some(shown) = shown {
             self.vbe.mode = Some(scanout(&shown));
             self.vga.set_fixed_timing(Some(shown.timing()));
+            // The picture is the surface the card shows, also in a
+            // state saved by a build that kept the one latched at the
+            // retrace (`toadforce_picture`).
+            let start = self.toadforce.as_deref().map_or(0, |c| c.display.start());
+            self.vbe.start = start;
+            self.vbe.latched_start = start;
         }
     }
 
@@ -794,5 +855,126 @@ impl Bus {
             let fx = card.service(live);
             self.toadforce_effects(fx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::cpu::Cpu;
+    use crate::toadforce::command::encode;
+    use crate::toadforce::format::{Format, Rect, Surface};
+    use crate::toadforce::regs;
+    use crate::video::adapter::{Adapter, VideoSetup};
+
+    const BACK: u32 = 2 << 20;
+
+    /// A machine showing the card's 640x480 mode of 32-bit pixels, its
+    /// surface at 0 white, with a frame begun after the last retrace.
+    fn machine() -> Box<Cpu> {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let setup = VideoSetup {
+            adapter: Adapter::ToadForce,
+            ..Default::default()
+        };
+        crate::video::bios::install(&mut cpu.bus, setup);
+        crate::interrupts::int10::set_mode(&mut cpu, 0x03);
+        let bus = &mut cpu.bus;
+        for (register, value) in [
+            (regs::MODE_WIDTH, 640),
+            (regs::MODE_HEIGHT, 480),
+            (regs::MODE_FORMAT, Format::X8R8G8B8.code()),
+            (regs::MODE_PITCH, 640 * 4),
+            (regs::MODE_REFRESH, 60),
+            (regs::MODE_ENABLE, 1),
+        ] {
+            bus.toadforce_register_write(register, value);
+        }
+        draw(bus, 0, 0x00FF_FFFF);
+        let frame = bus.vga.timing().frame_ns();
+        let ns = frame - bus.clock.now_ns() % frame + frame / 4;
+        bus.clock.icount += (ns * bus.clock.cycles_per_ms() as u64).div_ceil(1_000_000);
+        bus.sync_display();
+        cpu
+    }
+
+    /// Fill the 640x480 surface at `offset` with `colour`, as the
+    /// built-in driver's commands do.
+    fn draw(bus: &mut crate::bus::Bus, offset: u32, colour: u32) {
+        let surface = Surface {
+            offset,
+            pitch: 640 * 4,
+            width: 640,
+            height: 480,
+            format: Format::X8R8G8B8,
+        };
+        let whole = Rect {
+            left: 0,
+            top: 0,
+            width: 640,
+            height: 480,
+        };
+        let mut words = Vec::new();
+        encode::fill(&mut words, &surface, &whole, colour);
+        bus.toadforce_submit(&words);
+        bus.toadforce_flush();
+    }
+
+    fn flip(bus: &mut crate::bus::Bus, offset: u32, wait: bool) {
+        let mut words = Vec::new();
+        encode::flip(&mut words, offset, wait);
+        bus.toadforce_submit(&words);
+        bus.toadforce_flush();
+    }
+
+    /// The first pixel of the picture: the surface it starts at, and its
+    /// bytes there.
+    fn shown(bus: &crate::bus::Bus) -> (u64, u32) {
+        let (start, _) = bus.vbe.picture().unwrap();
+        let at = start as usize;
+        let pixel = u32::from_le_bytes(bus.vbe.vram[at..at + 4].try_into().unwrap());
+        (start, pixel & 0x00FF_FFFF)
+    }
+
+    #[test]
+    fn a_flip_at_once_shows_before_the_retrace() {
+        let mut cpu = machine();
+        let bus = &mut cpu.bus;
+        draw(bus, BACK, 0x0000_FF00);
+        flip(bus, BACK, false);
+        // The next frame begins in the surface shown until now.
+        draw(bus, 0, 0);
+        bus.sync_display();
+        assert_eq!(shown(bus), (BACK as u64, 0x0000_FF00));
+        assert_eq!(bus.toadforce_register(regs::MODE_START), BACK);
+    }
+
+    #[test]
+    fn a_state_from_a_build_that_lagged_shows_the_card_surface() {
+        let mut cpu = machine();
+        let bus = &mut cpu.bus;
+        draw(bus, BACK, 0x0000_FF00);
+        flip(bus, BACK, false);
+        // An older build kept the start latched at the last retrace
+        // until the next one.
+        bus.vbe.latched_start = 0;
+        bus.toadforce_after_load();
+        assert_eq!(shown(bus), (BACK as u64, 0x0000_FF00));
+    }
+
+    #[test]
+    fn a_flip_that_waits_shows_at_the_blank() {
+        let mut cpu = machine();
+        let bus = &mut cpu.bus;
+        draw(bus, BACK, 0x0000_FF00);
+        flip(bus, BACK, true);
+        bus.sync_display();
+        assert_eq!(shown(bus), (0, 0x00FF_FFFF));
+        assert_eq!(bus.toadforce_register(regs::MODE_START), 0);
+        let frame = bus.vga.timing().frame_ns();
+        bus.clock.icount += (frame * bus.clock.cycles_per_ms() as u64).div_ceil(1_000_000);
+        bus.service_timers();
+        bus.sync_display();
+        assert_eq!(shown(bus), (BACK as u64, 0x0000_FF00));
+        assert_eq!(bus.toadforce_register(regs::MODE_START), BACK);
     }
 }

@@ -31,6 +31,7 @@
 
 pub mod blit2d;
 pub mod ddc;
+pub mod direct;
 pub mod display;
 pub mod fifo;
 mod gpu2d;
@@ -400,6 +401,11 @@ impl Banshee {
         } else {
             None
         }
+    }
+
+    /// Where BAR1 is, while the card answers at its memory BARs.
+    pub fn bar1(&self) -> Option<u32> {
+        (self.pci.command & 0x02 != 0 && self.pci.bar1 != 0).then_some(self.pci.bar1)
     }
 
     /// The register of the I/O BAR at `port`, if it is one.
@@ -913,6 +919,54 @@ impl Voodoo {
         self.mirror_memory(start, end);
     }
 
+    /// Runs of bytes written into the card's memory, each as
+    /// `banshee_memory_write` writes it: run `(addr, len)` takes the next
+    /// `len` bytes of `data`. For the built-in DirectDraw's blits, which on
+    /// the card are its 2D engine's: they run in their turn in the command
+    /// FIFO, after the 3D drawing queued before them and before what is
+    /// queued after, and the CPU goes on. So while the render threads
+    /// still draw, the runs are a job of their own in that order
+    /// (`banshee_bytes_queue`) instead of a wait for all of the frame's
+    /// triangles. What reads the bytes later waits for them, and the
+    /// picture does where it shows them. Past the end of the memory a
+    /// run wraps round.
+    pub fn banshee_memory_write_runs(&mut self, runs: &[(u32, usize)], data: &[u8]) {
+        let size = self.fbi.mask as usize + 1;
+        let mut split = Vec::with_capacity(runs.len());
+        for &(addr, len) in runs {
+            let start = (addr & self.fbi.mask) as usize;
+            let here = len.min(size - start);
+            split.push((start, here));
+            let mut rest = len - here;
+            while rest > 0 {
+                split.push((0, rest.min(size)));
+                rest -= rest.min(size);
+            }
+        }
+        split.retain(|&(_, len)| len > 0);
+        if split.is_empty() {
+            return;
+        }
+        if self.workers_queue() {
+            // Behind the OpenGL renderer, the rows read back from the GPU
+            // land in the memory as the emulator asks for them, which a
+            // write queued here would then come before.
+            if !self.gpu_behind.get() && self.banshee_bytes_queue(&split, data) {
+                self.display_dirty = true;
+                return;
+            }
+            self.catch_up_workers();
+        }
+        let mut from = 0;
+        for &(start, len) in &split {
+            self.gpu_sync_bytes(start as u32, len);
+            self.fbi.ram.write_bytes(start, &data[from..from + len]);
+            from += len;
+            self.mirror_memory(start as u32, (start + len) as u32);
+        }
+        self.display_dirty = true;
+    }
+
     /// A 2D register written: the engine runs commands into the memory.
     /// The bytes a command reads and draws into are brought up to date
     /// first, as for a program's read: the drawing queued before is done,
@@ -921,10 +975,16 @@ impl Voodoo {
     /// in software, as one the program reads every frame is. A command
     /// whose bytes can't be bounded reads back all of the memory without
     /// it turning hot: the engine reads little of it, and every 3D buffer
-    /// hot would send all the drawing to software for a second.
+    /// hot would send all the drawing to software for a second. A command
+    /// over hot bytes that the GPU can't draw keeps them hot
+    /// (`banshee_2d_keeps_hot`).
     pub(crate) fn banshee_2d_write(&mut self, reg: u32, data: u32) {
         let Some(b) = &self.banshee else { return };
-        if self.writes_queue() || self.gpu.borrow().tracker.any_gpu() {
+        let (any_gpu, any_hot) = {
+            let tracker = &self.gpu.borrow().tracker;
+            (tracker.any_gpu(), tracker.any_hot())
+        };
+        if self.writes_queue() || any_gpu {
             let size = self.fbi.ram.bytes() as u32;
             let footprint = b.engine.footprint(reg, data, size);
             // The command drawn on the GPU, where it can be, reads nothing
@@ -940,11 +1000,26 @@ impl Voodoo {
             match footprint {
                 Footprint::Nothing => {}
                 Footprint::Spans(spans) => {
+                    let keeps = any_hot && self.banshee_2d_keeps_hot(reg, data);
                     for (start, end) in spans.into_iter().flatten() {
-                        self.gpu_sync(start, end);
+                        if keeps {
+                            self.gpu_sync(start, end);
+                        } else {
+                            self.gpu_sync_cooling(start, end);
+                        }
                     }
                 }
                 Footprint::All => self.gpu_sync_all(),
+            }
+        } else if any_hot && self.banshee_2d_keeps_hot(reg, data) {
+            // Nothing to read back or wait for: the command runs on the
+            // CPU as before, and the hot bytes it uses stay hot.
+            let size = self.fbi.ram.bytes() as u32;
+            if let Footprint::Spans(spans) = b.engine.footprint(reg, data, size) {
+                let tracker = &mut self.gpu.borrow_mut().tracker;
+                for (start, end) in spans.into_iter().flatten() {
+                    tracker.touch(start, end);
+                }
             }
         }
         let Some(b) = &mut self.banshee else { return };
@@ -963,6 +1038,22 @@ impl Voodoo {
         if let Some(b) = &mut self.banshee {
             b.engine.touched = runs;
         }
+    }
+
+    /// Whether the command that writing `data` to 2D register `reg` runs
+    /// keeps the hot bytes it reads and draws into hot (`Tracker::touch`).
+    /// One the GPU can't draw does: once they cooled it would read them
+    /// back. One the GPU may draw (a fill or a plain copy, with the
+    /// renderer able to take 2D commands, `banshee_2d_gpu`) leaves them
+    /// to cool: kept hot by the command, a buffer the program read once
+    /// and cleared or copied every frame would stay in software and its
+    /// commands on the CPU for good, where once it cools the GPU draws
+    /// both with nothing read back.
+    fn banshee_2d_keeps_hot(&self, reg: u32, data: u32) -> bool {
+        let size = self.fbi.ram.bytes() as u32;
+        let planned = (self.banshee.as_ref())
+            .is_some_and(|b| b.engine.plan(reg, data, size).is_ok());
+        !(planned && self.gpu_ready() && !self.software_picture)
     }
 
     /// A write through BAR1: into the memory, through the tiles, and into

@@ -149,10 +149,13 @@ impl CrtTiming {
         };
         let line_hz = 1_000_000_000 / line_ns.max(1);
         let frame_hz = 1_000_000_000 / timing.frame_ns().max(1);
+        // A card's own clock drives modes past a VGA monitor's 70 kHz: a
+        // Voodoo3's 1600x1200 at 100 Hz has lines at 125 kHz.
+        let most = if ext.clock.is_some() { 130_000 } else { 70_000 };
         let sane = hdisplay <= htotal
             && display <= total
             && retrace_start < total
-            && (15_000..=70_000).contains(&line_hz)
+            && (15_000..=most).contains(&line_hz)
             && (40..=120).contains(&frame_hz);
         sane.then_some(timing)
     }

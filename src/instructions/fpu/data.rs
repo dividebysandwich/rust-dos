@@ -152,23 +152,36 @@ fn int_of_80_bits(value: F80, control: u16) -> Option<i128> {
     Some(if exact_min { i64::MIN as i128 } else if value.get_sign() { i128::MIN } else { i128::MAX })
 }
 
+/// What FISTP of `size` bytes (2, 4 or 8) stores of ST(0), the register's
+/// value whatever its tag: from its 80 bits where they hold more than its
+/// double (`FpuRegs::beyond_double`), else from the double, rounded as the
+/// control word says, and the integer indefinite (IE set) for what doesn't
+/// fit. The recompiler's code calls it for what its own conversion of a
+/// qword doesn't cover (`Uop::FToInt64`).
+pub fn st0_int_bits(cpu: &mut Cpu, size: u8) -> u64 {
+    let top = cpu.fpu_top;
+    let precise = cpu.fpu_reg_beyond_double(top).then(|| cpu.fpu_reg(top));
+    let control = cpu.fpu_control;
+    let n = precise
+        .and_then(|f| int_of_80_bits(f, control))
+        .or_else(|| int_of_double(cpu.fpu_reg_f64(top), control));
+    int_or_indefinite(cpu, n, size)
+}
+
 // FISTP: Store Integer and Pop
 pub fn fistp(cpu: &mut Cpu, instr: &Instruction) {
-    // (The register's value whatever its tag.)
-    let top = cpu.fpu_top;
-    let val = cpu.fpu_reg_f64(top);
-    let precise = cpu.fpu_reg_beyond_double(top).then(|| cpu.fpu_reg(top));
-    cpu.fpu_drop();
-    let addr = calculate_addr(cpu, instr);
     let size = match instr.memory_size() {
         MemorySize::Int16 => 2,
         MemorySize::Int32 => 4,
         MemorySize::Int64 => 8,
-        _ => return,
+        _ => {
+            cpu.fpu_drop();
+            return;
+        }
     };
-    let control = cpu.fpu_control;
-    let n = precise.and_then(|f| int_of_80_bits(f, control)).or_else(|| int_of_double(val, control));
-    let stored = int_or_indefinite(cpu, n, size);
+    let stored = st0_int_bits(cpu, size);
+    cpu.fpu_drop();
+    let addr = calculate_addr(cpu, instr);
     match size {
         2 => cpu.lin_write_16(addr, stored as u16),
         4 => cpu.lin_write_32(addr, stored as u32),

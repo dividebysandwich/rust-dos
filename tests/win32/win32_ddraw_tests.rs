@@ -6,6 +6,7 @@
 //! and at the display while the program is still there.
 
 use iced_x86::code_asm::*;
+use rust_dos::config::DesktopSize;
 use rust_dos::cpu::{Cpu, HostConsole};
 use rust_dos::exec::{NoHook, run_batch};
 use rust_dos_pe::{self as pe, Builder, Imp};
@@ -77,7 +78,7 @@ fn program(
 
 /// A machine with the built-in Windows on and `program` loaded from the
 /// shell as T.EXE.
-fn machine(test: &str, program: Vec<u8>) -> Cpu {
+fn machine(test: &str, program: Vec<u8>) -> Box<Cpu> {
     let base = PathBuf::from("target/test_win32_ddraw").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -575,6 +576,41 @@ fn a_full_screen_program_draws_on_its_back_buffer_and_flips() {
     assert_eq!(pointer & 0x3F_FFFF, 64000);
 }
 
+const S_RELEASE: u32 = 2;
+
+/// As Adrenix's software build opens its menu in a mission: a flip chain
+/// flipped an odd number of times, so that the back buffer's memory is
+/// on the screen, released, and a primary surface of its own made in
+/// its place.
+#[test]
+fn a_released_flip_chain_gives_the_screen_back_to_the_primary_surface() {
+    let mut d = flip_chain_data();
+    // The new primary surface's description, where LOCKED is unused.
+    desc(&mut d, LOCKED, DDSD_CAPS, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
+    let (program, data) = program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start_flip_chain(a, l, &mut c)?;
+        c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
+        c.com(a, l, FRONT, S_RELEASE, &[])?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(LOCKED), Arg::At(OFFSCREEN), Arg::I(0)],
+        )?;
+        finish(a, l)
+    });
+    let mut cpu = machine("released_flip_chain", program);
+    run_until_done(&mut cpu, data);
+    let results = results(&mut cpu, data, 8);
+    // The flip and the new surface succeed (Release gives the count left).
+    assert_eq!((results[5], results[7]), (0, 0), "{results:X?}");
+    // The new primary surface is at the start of video memory, and the
+    // screen shows it there.
+    assert_eq!(cpu.bus.vbe.start, 0);
+}
+
 const DDERR_WASSTILLDRAWING: u32 = 0x8876_021C;
 
 /// What the polling program does between two calls of Flip.
@@ -747,6 +783,69 @@ fn flip_polled_with_other_calls_in_between_runs_every_call() {
     assert_eq!(peek(&cpu, data + LAST), 0);
     let polls = peek(&cpu, data + POLLS);
     assert!(polls > 50, "{polls} calls of Flip");
+}
+
+/// A flip chain, a flip at the start of a frame, so that it shows a
+/// whole frame later, then a second Flip right after it, with `flags`,
+/// through the front buffer's interface `via` (queried), else through
+/// the IDirectDrawSurface it was made with.
+fn second_flip_program(via: Option<&[u8; 16]>, flags: u32) -> (Vec<u8>, u32) {
+    let mut d = flip_chain_data();
+    put(&mut d, IID, via.unwrap_or(&IID_IDIRECTDRAWSURFACE7));
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start_flip_chain(a, l, &mut c)?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            S_QUERY_INTERFACE,
+            &[Arg::At(IID), Arg::At(QUERIED)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_WAIT_FOR_VERTICAL_BLANK,
+            &[Arg::I(DDWAITVB_BLOCKEND), Arg::I(0)],
+        )?;
+        c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
+        let object = if via.is_some() { QUERIED } else { FRONT };
+        c.com(a, l, object, S_FLIP, &[Arg::I(0), Arg::I(flags)])?;
+        finish(a, l)
+    })
+}
+
+/// The result of second_flip_program's second flip, the calls before it
+/// having succeeded.
+fn second_flip(test: &str, via: Option<&[u8; 16]>, flags: u32) -> u32 {
+    let (program, data) = second_flip_program(via, flags);
+    let mut cpu = machine(test, program);
+    run_until_done(&mut cpu, data);
+    let results = results(&mut cpu, data, 9);
+    assert_eq!(results[1..8], [0; 7]);
+    results[8]
+}
+
+/// DirectX 7's ddraw.h, at DDFLIP_DONOTWAIT: through IDirectDrawSurface7
+/// and later interfaces Flip waits by default, and DDFLIP_DONOTWAIT
+/// makes it fail with DDERR_WASSTILLDRAWING instead. Through the older
+/// interfaces it waits only with DDFLIP_WAIT.
+#[test]
+fn surface7_flip_waits_for_the_last_flip_unless_told_not_to() {
+    let (v4, v7) = (Some(&IID_IDIRECTDRAWSURFACE4), Some(&IID_IDIRECTDRAWSURFACE7));
+    let cases = [
+        ("flip7_default", v7, 0, 0),
+        ("flip7_wait", v7, DDFLIP_WAIT, 0),
+        ("flip7_donotwait", v7, DDFLIP_DONOTWAIT, DDERR_WASSTILLDRAWING),
+        ("flip4_default", v4, 0, DDERR_WASSTILLDRAWING),
+        ("flip4_wait", v4, DDFLIP_WAIT, 0),
+        ("flip1_default", None, 0, DDERR_WASSTILLDRAWING),
+        ("flip1_wait", None, DDFLIP_WAIT, 0),
+    ];
+    for (test, via, flags, result) in cases {
+        assert_eq!(second_flip(test, via, flags), result, "{test}");
+    }
 }
 
 #[test]
@@ -1792,6 +1891,57 @@ fn change_display_settings_without_a_mode_gives_the_desktops_back() {
     assert_eq!(r[9..12], [0, 640, 480]);
     let mode = cpu.bus.vbe.mode.expect("a VBE mode");
     assert_eq!((mode.width, mode.height), (640, 480));
+}
+
+/// A window on the desktop, the screen's size, the desktop's own mode
+/// (EnumDisplaySettingsA's ENUM_REGISTRY_SETTINGS), then
+/// ChangeDisplaySettingsA to 1024x768 and the screen's size, then the
+/// desktop's own mode again and its size.
+fn own_size_program() -> (Vec<u8>, u32) {
+    // DM_PELSWIDTH and DM_PELSHEIGHT.
+    const SIZE: u32 = 0x18_0000;
+    const ENUM_REGISTRY_SETTINGS: u32 = 0xFFFF_FFFE;
+    let mut d = screen_data();
+    devmode(&mut d, MODE2, SIZE, (1024, 768, 0));
+    program(&[SCREEN_USER32], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        screen_window(a, l, &mut c, (200, 100))?;
+        screen_metrics(a, l, &mut c)?;
+        let own = [Arg::I(0), Arg::I(ENUM_REGISTRY_SETTINGS), Arg::At(MODE)];
+        c.api(a, l, S_ENUM_DISPLAY_SETTINGS, &own)?;
+        c.api(a, l, S_CHANGE_DISPLAY_SETTINGS, &[Arg::At(MODE2), Arg::I(0)])?;
+        screen_metrics(a, l, &mut c)?;
+        c.api(a, l, S_CHANGE_DISPLAY_SETTINGS, &[Arg::I(0), Arg::I(0)])?;
+        screen_metrics(a, l, &mut c)?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn the_desktop_has_the_size_the_setting_gives_it() {
+    let (program, data) = own_size_program();
+    let base = PathBuf::from("target/test_win32_ddraw/own_size");
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    fs::write(base.join("T.EXE"), program).unwrap();
+    let mut cpu = Cpu::new(base);
+    cpu.bus.win32.enabled = true;
+    // win32_desktop=800x600, as Display Properties set it on Windows.
+    cpu.bus.win32.desktop = DesktopSize::Svga;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 10);
+    assert_eq!(r[1..3], [800, 600]);
+    assert_eq!(r[3], 1);
+    let own = (peek(&cpu, data + MODE + 108), peek(&cpu, data + MODE + 112));
+    assert_eq!(own, (800, 600));
+    assert_eq!(r[4..7], [0, 1024, 768]);
+    // ChangeDisplaySettings without a mode gives the setting's size back.
+    assert_eq!(r[7..10], [0, 800, 600]);
+    let mode = cpu.bus.vbe.mode.expect("a VBE mode");
+    assert_eq!((mode.width, mode.height), (800, 600));
 }
 
 // GDI on the screen in a mode DirectDraw set.
@@ -3099,6 +3249,135 @@ fn dxt_surfaces_are_whole_blocks_in_system_memory() {
     let caps = peek(&cpu, data + DESC3 + 0x68);
     assert_eq!(caps & DDSCAPS_SYSTEMMEMORY, DDSCAPS_SYSTEMMEMORY);
     assert_eq!(peek(&cpu, data + DESC3 + 0x10), 32);
+}
+
+const IID_IDIRECT3DTEXTURE2: [u8; 16] = [
+    0x02, 0x15, 0x28, 0x93, 0xF8, 0x8C, 0xD0, 0x11, 0x89, 0xAB, 0x00, 0xA0, 0xC9, 0x05, 0x41, 0x29,
+];
+/// IDirect3DTexture2::Load.
+const TEX2_LOAD: u32 = 5;
+/// The IDirect3DTexture2 interfaces of SOURCE and FRONT.
+const TEX_SOURCE: u32 = 0x24;
+const TEX_FRONT: u32 = 0x28;
+
+/// FOUR_BLOCKS in an 8x8 DXT1 texture, loaded (IDirect3DTexture2's
+/// Load) into another DXT1 texture.
+fn dxt_load_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    d.resize(DXT_DATA_SIZE, 0);
+    dxt_desc(&mut d, DESC, b"DXT1", 8, 8);
+    dxt_desc(&mut d, DESC3, b"DXT1", 8, 8);
+    put(&mut d, BLOCKS, &FOUR_BLOCKS);
+    put(&mut d, IID, &IID_IDIRECT3DTEXTURE2);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        dxt_start(a, l, &mut c, 32, &[(DESC3, FRONT)])?;
+        for (surface, texture) in [(SOURCE, TEX_SOURCE), (FRONT, TEX_FRONT)] {
+            let args = [Arg::At(IID), Arg::At(texture)];
+            c.com(a, l, surface, S_QUERY_INTERFACE, &args)?;
+        }
+        c.com(a, l, TEX_FRONT, TEX2_LOAD, &[Arg::Val(TEX_SOURCE)])?;
+        find_pixels(a, l, &mut c, FRONT, DESC3)?;
+        finish(a, l)
+    })
+}
+
+/// Load copies a DXT texture's blocks into a texture of its format, as
+/// DirectX 7 does: games fill a DXT texture in system memory and load
+/// it into a managed or video memory one, which they draw with.
+#[test]
+fn load_copies_the_blocks_of_a_dxt_texture() {
+    let (program, data) = dxt_load_program();
+    let mut cpu = machine("dxt_load", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 16);
+    assert_eq!(r[1..16], [0; 15], "{r:X?}");
+    let blocks: Vec<u8> = locked_pixels(&cpu, data, DESC3, (8, 1), 4)
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    assert_eq!(blocks, FOUR_BLOCKS);
+}
+
+/// The levels below the top of the DXT mipmaps of
+/// `dxt_mipmap_load_program`: the source's, then the destination's.
+const SOURCE_LEVELS: [u32; 2] = [BACK, PALETTE];
+const FRONT_LEVELS: [u32; 2] = [CLIPPER, OFFSCREEN];
+/// The descriptions those levels are locked with.
+const LEVEL_DESCS: [u32; 2] = [0xB00, 0xB80];
+
+/// A DDSURFACEDESC at `offset` for a 4x4 DXT1 mipmap of 4x4, 2x2 and
+/// 1x1 levels in system memory.
+fn dxt_mipmap_desc(d: &mut [u8], offset: u32) {
+    dxt_desc(d, offset, b"DXT1", 4, 4);
+    let flags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT | DDSD_MIPMAPCOUNT;
+    put32(d, offset + 0x04, flags);
+    put32(d, offset + 0x18, 3);
+    let caps = DDSCAPS_TEXTURE | DDSCAPS_SYSTEMMEMORY | DDSCAPS_MIPMAP | DDSCAPS_COMPLEX;
+    put32(d, offset + 0x68, caps);
+}
+
+/// Two DXT1 mipmaps of three levels, each level of the source a block
+/// of FOUR_BLOCKS of its own, loaded (IDirect3DTexture2's Load) into
+/// the other, whose levels are then locked.
+fn dxt_mipmap_load_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    d.resize(0xC00, 0);
+    dxt_mipmap_desc(&mut d, DESC);
+    dxt_mipmap_desc(&mut d, DESC3);
+    put(&mut d, BLOCKS, &FOUR_BLOCKS);
+    put(&mut d, IID, &IID_IDIRECT3DTEXTURE2);
+    put32(&mut d, LEVEL_CAPS, DDSCAPS_TEXTURE | DDSCAPS_MIPMAP);
+    for desc in LEVEL_DESCS {
+        put32(&mut d, desc, 108);
+    }
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        dxt_start(a, l, &mut c, 8, &[(DESC3, FRONT)])?;
+        for (top, levels) in [(SOURCE, SOURCE_LEVELS), (FRONT, FRONT_LEVELS)] {
+            let mut from = top;
+            for to in levels {
+                let args = [Arg::At(LEVEL_CAPS), Arg::At(to)];
+                c.com(a, l, from, S_GET_ATTACHED_SURFACE, &args)?;
+                from = to;
+            }
+        }
+        for ((level, desc), i) in SOURCE_LEVELS.into_iter().zip(LEVEL_DESCS).zip(1..) {
+            let args = [Arg::I(0), Arg::At(desc), Arg::I(1), Arg::I(0)];
+            c.com(a, l, level, S_LOCK, &args)?;
+            copy_in(a, l, BLOCKS + 8 * i, desc, 2)?;
+            c.com(a, l, level, S_UNLOCK, &[Arg::I(0)])?;
+        }
+        for (surface, texture) in [(SOURCE, TEX_SOURCE), (FRONT, TEX_FRONT)] {
+            let args = [Arg::At(IID), Arg::At(texture)];
+            c.com(a, l, surface, S_QUERY_INTERFACE, &args)?;
+        }
+        c.com(a, l, TEX_FRONT, TEX2_LOAD, &[Arg::Val(TEX_SOURCE)])?;
+        find_pixels(a, l, &mut c, FRONT, DESC3)?;
+        for (level, desc) in FRONT_LEVELS.into_iter().zip(LEVEL_DESCS) {
+            find_pixels(a, l, &mut c, level, desc)?;
+        }
+        finish(a, l)
+    })
+}
+
+/// Load copies every level of a DXT mipmap, the 2x2 and 1x1 ones too:
+/// a level smaller than a block is one block, which the copy takes
+/// whole.
+#[test]
+fn load_copies_every_level_of_a_dxt_mipmap() {
+    let (program, data) = dxt_mipmap_load_program();
+    let mut cpu = machine("dxt_mipmap_load", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 24);
+    assert_eq!(r[1..24], [0; 23], "{r:X?}");
+    for (desc, i) in [DESC3].into_iter().chain(LEVEL_DESCS).zip(0..) {
+        let block: Vec<u8> = locked_pixels(&cpu, data, desc, (2, 1), 4)
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        assert_eq!(block, FOUR_BLOCKS[8 * i..][..8], "level {i}");
+    }
 }
 
 // The frame rate cap (`fps_cap`).

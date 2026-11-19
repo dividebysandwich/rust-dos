@@ -26,8 +26,9 @@ use crate::win32::user32::sysparams::{self, COLOR_MENU};
 use crate::win32::user32::window::{
     self, CW_USEDEFAULT, HWND_TOP, SW_HIDE, SW_MAXIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE,
     SW_SHOWNORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS, WS_DISABLED, WS_EX_MDICHILD, WS_MAXIMIZE,
+    WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS, WS_DISABLED, WS_EX_MDICHILD, WS_HSCROLL, WS_MAXIMIZE,
     WS_MAXIMIZEBOX, WS_MINIMIZE, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WS_VISIBLE,
+    WS_VSCROLL,
 };
 use crate::win32::user32::{address_of, class, defwnd, read_words, resource, user, write_words};
 
@@ -47,6 +48,7 @@ pub struct Mdi {
     pub title: Option<Vec<u8>>,
     /// How many children were ever made, for their default places.
     pub total: u32,
+    /// NEEDUPDATE, HAS_SBHORZ and HAS_SBVERT.
     pub flags: u32,
     /// Which scroll bars to set again (SB_* + 1), or 0.
     pub recalc: u32,
@@ -120,6 +122,13 @@ const SM_CYSMICON: u32 = 50;
 
 /// The client is to set its scroll bars again.
 const NEEDUPDATE: u32 = 0x0001;
+/// The client was made with WS_HSCROLL (WS_VSCROLL), so CalcChildScroll
+/// sets its horizontal (vertical) bar. Its style can't tell later: a bar
+/// hidden because the children fit (SetScrollInfo with an empty range,
+/// ShowScrollBar for a maximized child or a tile) loses its style bit,
+/// and the bar has to come back when a child reaches past an edge again.
+const HAS_SBVERT: u32 = 0x0100;
+const HAS_SBHORZ: u32 = 0x0200;
 /// After this many children, the Window menu ends with "More
 /// Windows...".
 const MORE_WINDOWS: usize = 9;
@@ -1077,13 +1086,19 @@ fn tile(cpu: &mut Cpu, client: u32, how: u32) -> Ops {
 }
 
 /// CalcChildScroll: the client's scroll bars cover its children and its
-/// client area; none with a maximized child.
+/// client area; none with a maximized child. Only the bars the client
+/// was made with are set (HAS_SBHORZ, HAS_SBVERT): a client made without
+/// WS_HSCROLL or WS_VSCROLL lets its children reach past its edges with
+/// no bars showing, as on Windows. Wine's CalcChildScroll tests the
+/// client's style at the time instead, which leaves the bars off for
+/// good once they were hidden.
 fn calc_scroll(cpu: &mut Cpu, client: u32, bar: u32) -> Ops {
     let mut ops = Ops::default();
     let state = user(cpu);
     let Some(w) = state.window(client) else {
         return ops;
     };
+    let has = w.control.mdi.flags;
     let area = Rect::new(0, 0, w.client.width(), w.client.height());
     let mut children = Rect::default();
     for &h in &w.children {
@@ -1107,7 +1122,7 @@ fn calc_scroll(cpu: &mut Cpu, client: u32, bar: u32) -> Ops {
     } else {
         children.union(&area)
     };
-    if bar == SB_BOTH || bar == SB_HORZ {
+    if (bar == SB_BOTH || bar == SB_HORZ) && has & HAS_SBHORZ != 0 {
         let args = [
             client,
             SB_HORZ,
@@ -1117,7 +1132,7 @@ fn calc_scroll(cpu: &mut Cpu, client: u32, bar: u32) -> Ops {
         ];
         ops.op(I_SET_SCROLL, &args);
     }
-    if bar == SB_BOTH || bar == SB_VERT {
+    if (bar == SB_BOTH || bar == SB_VERT) && has & HAS_SBVERT != 0 {
         let args = [
             client,
             SB_VERT,
@@ -1202,11 +1217,20 @@ pub fn mdiclient_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             } else {
                 (0, 0)
             };
+            let style = user(cpu).window(hwnd).map_or(0, |w| w.style);
+            let mut flags = 0;
+            if style & WS_HSCROLL != 0 {
+                flags |= HAS_SBHORZ;
+            }
+            if style & WS_VSCROLL != 0 {
+                flags |= HAS_SBVERT;
+            }
             with(cpu, hwnd, |ci| {
                 *ci = Mdi {
                     client: true,
                     window_menu,
                     first_id,
+                    flags,
                     ..Mdi::default()
                 };
             });

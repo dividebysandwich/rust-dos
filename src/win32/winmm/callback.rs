@@ -4,7 +4,8 @@
 //! midiOutOpen and the others say. timeSetEvent's timers call functions
 //! too.
 //!
-//! Functions are called on the process's multimedia thread, as on
+//! A 16-bit program's function is called by its task (`Function16`).
+//! Other functions are called on the process's multimedia thread, as on
 //! Windows 95, where they ran at interrupt time outside the program's
 //! threads: a thread of the process that WinMM makes the first time a
 //! device or timer may call one (`ensure_thread`). Its code is a stub of
@@ -57,6 +58,12 @@ pub enum Callback {
     /// An event, by its object, which the callback holds.
     Event {
         id: u32,
+    },
+    /// A 16-bit program's function, at its 16:16 address, which its task
+    /// calls (`win16::queue_call16`): the task by its thread's id.
+    Function16 {
+        tid: u32,
+        address: u32,
     },
 }
 
@@ -134,15 +141,23 @@ pub fn notify(
             queue_call(cpu, pid, address, [handle, msg, instance, p1, p2]);
         }
         Callback::Event { id } => set_event(cpu, id),
+        Callback::Function16 { tid, address } => {
+            crate::win16::queue_call16(cpu, tid, address, [handle, msg, instance, p1, p2]);
+        }
     }
 }
 
-/// Set the event `id`, by its object.
+/// Set the event `id`, by its object, as SetEvent does: the waits of the
+/// threads it may end, end now (`thread::object_changed`). The system
+/// sets events in a multimedia thread's turn (a timer's), in a call of
+/// the program (a buffer's Stop) and when time passes; a thread waiting
+/// for one goes on from the moment it is set, as on Windows.
 pub fn set_event(cpu: &mut Cpu, id: u32) {
     if let Some(o) = object::objects(cpu).get_mut(id)
         && let Kind::Event { signaled, .. } = &mut o.kind
     {
         *signaled = true;
+        thread::object_changed(&mut cpu.bus.win32, id);
     }
 }
 
@@ -317,4 +332,5 @@ crate::win32::state_variants!(Callback {
     Thread { tid },
     Function { pid, address },
     Event { id },
+    Function16 { tid, address },
 });

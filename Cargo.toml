@@ -103,6 +103,11 @@ oxideav-indeo = "=0.0.5"
 oxideav-mpeg12video = "=0.0.13"
 oxideav-mp2 = "=0.0.10"
 oxideav-core = "=0.1.42"
+# Compound files (structured storage), the files OLE32's StgCreateDocfile
+# and StgOpenStorage read and write (src/win32/ole32/storage.rs).
+cfb = "0.16"
+# The CLSIDs of compound files' storages, as cfb takes them.
+uuid = "1"
 # The sound cards, each a crate of its own (crates/).
 rust-dos-opl = { path = "crates/opl" }
 rust-dos-tandy = { path = "crates/tandy" }
@@ -203,10 +208,12 @@ dynasmrt = "5"
 libc = "0.2"
 
 # The dynamic recompiler's executable memory, the console the program
-# leaves when Explorer opened one for it (src/main.rs), and the process
-# --exit-with-parent watches (src/parent_watch.rs).
+# leaves when Explorer opened one for it (src/startup.rs), and the process
+# --exit-with-parent watches (src/parent_watch.rs). libc: the C runtime's
+# descriptors 0 to 2, moved off that console's closed handles.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_System_Console"] }
+libc = "0.2"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Kernel", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_Console"] }
 
 [features]
 default = ["sdl", "gl", "vr", "midi", "hostmidi", "cdaudio", "chd", "sevenz", "manuals"]

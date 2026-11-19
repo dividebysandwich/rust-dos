@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use crate::testrunners;
 use testrunners::run_cpu_code;
 
-fn cpu() -> Cpu {
+fn cpu() -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     cpu.set_ss(0);
     cpu.set_sp(0x8000);

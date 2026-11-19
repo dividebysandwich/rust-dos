@@ -624,7 +624,7 @@ impl Memory {
     /// Take the reservation that starts at `start` away. Its length, if
     /// there was one.
     pub fn unreserve(&mut self, start: u32) -> Option<u32> {
-        let i = self.regions.iter().position(|r| r.start == start)?;
+        let i = self.regions.binary_search_by_key(&start, |r| r.start).ok()?;
         Some(self.regions.remove(i).len)
     }
 
@@ -706,26 +706,44 @@ impl Memory {
         if len == 0 {
             return None;
         }
-        let free = |start: u32| {
-            let end = start as u64 + len as u64;
-            start >= lo
-                && end <= hi as u64
-                && self
-                    .regions
-                    .iter()
-                    .all(|r| end <= r.start as u64 || start as u64 >= r.end() as u64)
-        };
+        let fits = |start: u64| start >= lo as u64 && start + len as u64 <= hi as u64;
         let start = match at {
-            Some(at) if at % GRANULARITY == 0 && free(at) => at,
+            Some(at) if at % GRANULARITY == 0 && fits(at as u64) => {
+                // The regions are in order and don't overlap: only the
+                // first one that ends after `at` can be in the way.
+                let i = self.regions.partition_point(|r| r.end() <= at);
+                match self.regions.get(i) {
+                    Some(r) if (r.start as u64) < at as u64 + len as u64 => return None,
+                    _ => at,
+                }
+            }
             Some(_) => return None,
-            None => std::iter::once(lo)
-                .chain(
-                    self.regions
-                        .iter()
-                        .map(|r| (r.end() as u64).next_multiple_of(GRANULARITY as u64) as u32),
-                )
-                .filter(|&start| free(start))
-                .min()?,
+            None => {
+                // The lowest free place: `lo`, or the first multiple of
+                // 64 KB after a region, where the gap up to the next
+                // region is long enough. A program that makes thousands
+                // of regions (a texture's every mipmap level is one)
+                // takes one pass over them for each. The pass starts at
+                // the first region that ends after `lo`, so the shared
+                // arena's search doesn't go over every private region.
+                // A region can still end before the candidate: one that
+                // fits in the rest of the 64 KB the one before it ends in.
+                let mut start = lo as u64;
+                let first = self.regions.partition_point(|r| r.end() <= lo);
+                for r in &self.regions[first..] {
+                    if r.end() as u64 <= start {
+                        continue;
+                    }
+                    if start + len as u64 <= r.start as u64 {
+                        break;
+                    }
+                    start = (r.end() as u64).next_multiple_of(GRANULARITY as u64);
+                }
+                if !fits(start) {
+                    return None;
+                }
+                start as u32
+            }
         };
         let i = self.regions.partition_point(|r| r.start < start);
         let region = Region {
@@ -1416,7 +1434,7 @@ mod tests {
 
     /// A process's page tables on a machine whose pool has `pages` pages
     /// left, with a page file of `file` pages.
-    fn machine(pages: u32, file: u32) -> (Cpu, Memory) {
+    fn machine(pages: u32, file: u32) -> (Box<Cpu>, Memory) {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
         cpu.bus.win32.pool = Pool::take(&mut cpu.bus, 0x40_0000);
         let memory = Memory::new(&mut cpu.bus).expect("a page directory");
@@ -1947,5 +1965,87 @@ mod tests {
         assert_eq!(memory.paged_ranges(&cpu.bus, 100), (all.to_vec(), false));
         assert_eq!(memory.paged_ranges(&cpu.bus, 4), (all.to_vec(), false));
         assert_eq!(memory.paged_ranges(&cpu.bus, 2), (all[..2].to_vec(), true));
+    }
+
+    /// Where the old search put a region: the lowest of `lo` and the
+    /// multiples of 64 KB after each region that leaves room for it.
+    fn lowest_free_reference(regions: &[Region], len: u32, lo: u32, hi: u32) -> Option<u32> {
+        let free = |start: u64| {
+            let end = start + len as u64;
+            start >= lo as u64
+                && end <= hi as u64
+                && regions
+                    .iter()
+                    .all(|r| end <= r.start as u64 || start >= r.end() as u64)
+        };
+        std::iter::once(lo as u64)
+            .chain(
+                regions
+                    .iter()
+                    .map(|r| (r.end() as u64).next_multiple_of(GRANULARITY as u64)),
+            )
+            .filter(|&start| free(start))
+            .min()
+            .map(|start| start as u32)
+    }
+
+    /// Regions reserved and released in a mixed order, of sizes that
+    /// leave gaps of every kind, some with the place asked for and some in
+    /// the arenas below and above: each goes where the search over every
+    /// pair of a candidate and a region put it, and none overlaps another.
+    #[test]
+    fn regions_go_to_the_lowest_free_place() {
+        let mut memory = Memory::default();
+        let mut seed = 0x1234_5678u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        let (lo, hi) = (PRIVATE, PRIVATE + 0x400_0000);
+        let mut held = Vec::new();
+        for step in 0..3000 {
+            if next() % 3 == 0 && !held.is_empty() {
+                let i = next() as usize % held.len();
+                let start = held.swap_remove(i);
+                assert!(memory.unreserve(start).is_some(), "step {step}");
+                continue;
+            }
+            let len = (next() % 40 + 1) * PAGE * if next() % 8 == 0 { 16 } else { 1 };
+            let rounded = len.next_multiple_of(PAGE);
+            if next() % 5 == 0 {
+                let at = lo + (next() % 0x400) * GRANULARITY;
+                let free = memory
+                    .regions
+                    .iter()
+                    .all(|r| at + rounded <= r.start || at >= r.end())
+                    && at + rounded <= hi;
+                let got =
+                    memory.reserve_region(Some(at), len, lo, hi, PAGE_READWRITE, MEM_PRIVATE);
+                assert_eq!(got, free.then_some(at), "step {step}: at {at:#x}");
+                held.extend(got);
+                continue;
+            }
+            // Some go to the arenas below and above, so that each search
+            // has regions of another arena on either side of its own.
+            let (lo, hi) = match next() % 8 {
+                0 => (GRANULARITY, lo),
+                1 => (hi, hi + 0x100_0000),
+                _ => (lo, hi),
+            };
+            let want = lowest_free_reference(&memory.regions, rounded, lo, hi);
+            let got = memory.reserve_region(None, len, lo, hi, PAGE_READWRITE, MEM_PRIVATE);
+            assert_eq!(got, want, "step {step}: {len:#x} bytes");
+            held.extend(got);
+        }
+        assert!(
+            memory.regions.len() > 100,
+            "{} regions",
+            memory.regions.len()
+        );
+        for pair in memory.regions.windows(2) {
+            assert!(pair[0].end() <= pair[1].start, "{pair:?}");
+        }
     }
 }

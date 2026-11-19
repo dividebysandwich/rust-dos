@@ -250,12 +250,17 @@ pub fn request(cpu: &mut Cpu, item: &str) -> Option<String> {
         if entry.name == "." || entry.name == ".." {
             continue;
         }
-        let name = entry
-            .name
-            .strip_suffix(".lnk")
-            .unwrap_or(&entry.name)
-            .to_string();
-        text.push_str(&name);
+        // A link's name without its extension, whatever its case. The
+        // test is on bytes: the last four may cut a character of several
+        // bytes (a group "Mañana"), and a name ending in ".lnk", which is
+        // ASCII, can be cut before it.
+        let n = entry.name.len();
+        let link = n > 4 && entry.name.as_bytes()[n - 4..].eq_ignore_ascii_case(b".lnk");
+        text.push_str(if link {
+            &entry.name[..n - 4]
+        } else {
+            &entry.name
+        });
         text.push_str("\r\n");
     }
     Some(text)

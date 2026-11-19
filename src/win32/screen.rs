@@ -25,19 +25,22 @@
 //!   and BAR 1 its linear frame buffer, so reading and writing it is
 //!   the first kind's.
 //!
-//! The desktop is 640x480 at 32 bits a pixel on the first kind, and at
-//! 16 (5-6-5) on the second, as Windows 95 with a Voodoo3 was usually
-//! set up; it is at the start of video memory. With `win32_depth=8` it
-//! is 640x480 at 8 bits a pixel on both, its colours GDI's system
-//! palette, which the DAC (or the card's lookup table) holds, and with
-//! `win32_depth=16` at 16 bits a pixel (5-6-5) on both.
-//! ChangeDisplaySettings can make it one of the other `DESKTOP_SIZES`
-//! at the same depth, until it gives the desktop's own size back or the
-//! process that set it ends.
+//! The desktop is 32 bits a pixel on the first kind, and 16 (5-6-5) on
+//! the second, as Windows 95 with a Voodoo3 was usually set up; it is at
+//! the start of video memory. With `win32_depth=8` it is 8 bits a pixel
+//! on both, its colours GDI's system palette, which the DAC (or the
+//! card's lookup table) holds, and with `win32_depth=16` 16 bits a pixel
+//! (5-6-5) on both. Its own size is 640x480, or the one of
+//! `DESKTOP_SIZES` the `win32_desktop` setting names, as Display
+//! Properties set it on Windows. ChangeDisplaySettings can make it one
+//! of the other `DESKTOP_SIZES` at the same depth, until it gives the
+//! desktop's own size back or the process that set it ends.
 
+use crate::config::DesktopSize;
 use crate::cpu::Cpu;
 use crate::video::crt::CrtTiming;
 use crate::toadforce::command::encode;
+use crate::toadforce::display::IDENTITY;
 use crate::toadforce::format::{Format, Rect as CardRect, Surface};
 use crate::toadforce::gpu::Cause;
 use crate::toadforce::{caps, regs};
@@ -54,12 +57,17 @@ pub struct Mode {
     pub pitch: u32,
 }
 
-/// The desktop's own size.
-pub const DESKTOP: (u32, u32) = (640, 480);
-
 /// The sizes the desktop can have: the ones EnumDisplaySettings lists
-/// and ChangeDisplaySettings sets.
-pub const DESKTOP_SIZES: [(u32, u32); 3] = [(640, 480), (800, 600), (1024, 768)];
+/// and ChangeDisplaySettings sets, those `win32_desktop` gives its own.
+pub const DESKTOP_SIZES: [(u32, u32); DesktopSize::ALL.len()] = {
+    let mut sizes = [(0, 0); DesktopSize::ALL.len()];
+    let mut i = 0;
+    while i < sizes.len() {
+        sizes[i] = DesktopSize::ALL[i].size();
+        i += 1;
+    }
+    sizes
+};
 
 /// The sizes of the modes DirectDraw offers, which have numbers of the
 /// VESA kind's own where the BIOS's list hasn't them.
@@ -120,11 +128,11 @@ pub fn linear_memory(cpu: &mut Cpu) {
     }
 }
 
-/// The desktop's mode: its size, 640x480 unless ChangeDisplaySettings
-/// set another (`set_desktop_size`), at 8 bits a pixel with
-/// `win32_depth=8` and 16 with `win32_depth=16`, else 16 on the card, 24
-/// (packed) on an S3 ViRGE, whose VESA BIOS has that instead of 32, and
-/// 32 on the others.
+/// The desktop's mode: its size, its own (`win32_desktop`) unless
+/// ChangeDisplaySettings set another (`set_desktop_size`), at 8 bits a
+/// pixel with `win32_depth=8` and 16 with `win32_depth=16`, else 16 on
+/// the card, 24 (packed) on an S3 ViRGE, whose VESA BIOS has that
+/// instead of 32, and 32 on the others.
 pub fn desktop(cpu: &Cpu) -> Mode {
     use crate::config::DesktopDepth;
     let bpp = match cpu.bus.win32.desktop_depth {
@@ -134,11 +142,7 @@ pub fn desktop(cpu: &Cpu) -> Mode {
         DesktopDepth::Adapter if cpu.bus.vga.adapter.is_virge() => 24,
         DesktopDepth::Adapter => 32,
     };
-    let (width, height) = cpu
-        .bus
-        .win32
-        .desktop_size
-        .map_or(DESKTOP, |(w, h, _)| (w, h));
+    let (width, height) = desktop_size(&cpu.bus.win32);
     Mode {
         width,
         height,
@@ -181,8 +185,14 @@ pub fn mode(cpu: &Cpu) -> Option<Mode> {
 /// clears all of video memory, as the BIOS does, the card the picture's
 /// bytes. None if the adapter has no such mode.
 pub fn set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32) -> Option<Mode> {
+    set_mode_at(cpu, width, height, bpp, 60)
+}
+
+/// `set_mode`, the card's modes at `hz` (`card_timing`), as Glide sets
+/// them; the other adapters' at their own rate.
+pub fn set_mode_at(cpu: &mut Cpu, width: u32, height: u32, bpp: u32, hz: u32) -> Option<Mode> {
     if is_card(cpu) {
-        card_set_mode(cpu, width, height, bpp)?;
+        card_set_mode(cpu, width, height, bpp, hz)?;
         let len = width * bpp / 8 * height;
         write(cpu, 0, &vec![0; len as usize]);
     } else if is_toadforce(cpu) {
@@ -208,7 +218,15 @@ pub fn set_desktop_mode(cpu: &mut Cpu) {
 /// `pid`, or with None its own size again. Only the setting changes:
 /// the caller sets the mode on the adapter if the desktop shows.
 pub fn set_desktop_size(cpu: &mut Cpu, size: Option<(u32, u32)>, pid: u32) {
-    cpu.bus.win32.desktop_size = size.filter(|&s| s != DESKTOP).map(|(w, h)| (w, h, pid));
+    let own = super::version::own_size(&cpu.bus.win32);
+    cpu.bus.win32.desktop_size = size.filter(|&s| s != own).map(|(w, h)| (w, h, pid));
+}
+
+/// The desktop's size: the one ChangeDisplaySettings set, else its own.
+pub fn desktop_size(win32: &super::Win32) -> (u32, u32) {
+    win32
+        .desktop_size
+        .map_or_else(|| super::version::own_size(win32), |(w, h, _)| (w, h))
 }
 
 /// The process that set the desktop's size, if it isn't its own.
@@ -249,6 +267,9 @@ fn toadforce_set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32) -> Optio
     if !sizes.contains(&width) || !sizes.contains(&height) || !fits {
         return None;
     }
+    // A mode set brings the identity ramp back, as on the Banshee
+    // (`card_set_mode`): a game's brightness lasts until its mode ends.
+    toadforce_load_gamma(cpu, &IDENTITY);
     let bus = &mut cpu.bus;
     for (register, value) in [
         (regs::MODE_ENABLE, 0),
@@ -282,6 +303,110 @@ fn toadforce_set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32) -> Optio
     // memory held before.
     settle(cpu);
     Some(())
+}
+
+/// A gamma ramp as Windows has it: 256 words of red, then green, then
+/// blue, each value's 8 bits in the high byte.
+pub type GammaRamp = [u16; 3 * 256];
+
+/// The display's gamma ramp, which SetDeviceGammaRamp, DirectDraw's
+/// gamma control and Direct3D 8's SetGammaRamp set. None where the
+/// display has none: on adapters without one, and in 8-bit modes, whose
+/// table is the palette.
+///
+/// - A ToadForce's is its `GAMMA` registers, in the card's own modes of
+///   direct colour.
+/// - A Banshee's or Voodoo3's is the desktop lookup table, which the
+///   video processor runs 16- and 32-bit pixels through when its bypass
+///   is off, as 3dfx's driver had it.
+///
+/// A mode set brings the identity back on both, so a ramp lasts until
+/// the mode changes.
+pub fn gamma_ramp(cpu: &mut Cpu) -> Option<GammaRamp> {
+    let table: [u32; 256] = if cpu.bus.toadforce_direct_colour() {
+        std::array::from_fn(|i| cpu.bus.toadforce_register(regs::GAMMA + 4 * i as u32))
+    } else {
+        let cfg = banshee_ramp_config(cpu)?;
+        if cfg & card::VIDPROC_DESKTOP_CLUT_BYPASS != 0 {
+            IDENTITY
+        } else {
+            std::array::from_fn(|i| {
+                cpu.bus.voodoo_write_32(card::DAC_ADDR, i as u32);
+                cpu.bus.voodoo_read_32(card::DAC_DATA)
+            })
+        }
+    };
+    let mut ramp = [0; 3 * 256];
+    for (i, rgb) in table.iter().enumerate() {
+        for (c, shift) in [16, 8, 0].into_iter().enumerate() {
+            ramp[256 * c + i] = (rgb >> shift & 0xFF) as u16 * 0x101;
+        }
+    }
+    Some(ramp)
+}
+
+/// Whether the display has a gamma ramp (`gamma_ramp`).
+pub fn has_gamma_ramp(cpu: &Cpu) -> bool {
+    cpu.bus.toadforce_direct_colour() || banshee_ramp_config(cpu).is_some()
+}
+
+/// Whether the display adapter has a gamma ramp in its modes of direct
+/// colour: a ToadForce, a Banshee or a Voodoo3. Their drivers' caps say
+/// so whatever the mode is (DirectDraw's DDCAPS2_PRIMARYGAMMA, Direct3D
+/// 8's D3DCAPS2_FULLSCREENGAMMA), and games read those caps before they
+/// set a ramp: Max Payne's Direct3D 8 driver sets none without them.
+pub fn adapter_has_gamma_ramp(cpu: &Cpu) -> bool {
+    cpu.bus.toadforce() || cpu.bus.banshee().is_some()
+}
+
+/// Set the display's gamma ramp (`gamma_ramp`), from the high byte of
+/// each word. False where the display has none.
+pub fn set_gamma_ramp(cpu: &mut Cpu, ramp: &GammaRamp) -> bool {
+    let table: [u32; 256] = std::array::from_fn(|i| {
+        let [r, g, b] = [ramp[i], ramp[256 + i], ramp[512 + i]].map(|v| (v >> 8) as u32);
+        r << 16 | g << 8 | b
+    });
+    if cpu.bus.toadforce_direct_colour() {
+        toadforce_load_gamma(cpu, &table);
+        return true;
+    }
+    let Some(cfg) = banshee_ramp_config(cpu) else {
+        return false;
+    };
+    for (i, rgb) in table.iter().enumerate() {
+        cpu.bus.voodoo_write_32(card::DAC_ADDR, i as u32);
+        cpu.bus.voodoo_write_32(card::DAC_DATA, *rgb);
+    }
+    // The identity ramp is the table bypassed, as after a mode set.
+    let cfg = if table == IDENTITY {
+        cfg | card::VIDPROC_DESKTOP_CLUT_BYPASS
+    } else {
+        cfg & !card::VIDPROC_DESKTOP_CLUT_BYPASS
+    };
+    cpu.bus.voodoo_write_32(card::VID_PROC_CFG, cfg);
+    cpu.bus.vga.mark_dirty_full();
+    true
+}
+
+/// Load `table` into a ToadForce's `GAMMA` registers. Only the entries
+/// that differ are written: each is a register write of its own, which
+/// runs the queued commands and redraws the screen, and a mode set or a
+/// game's fade gives the whole ramp where few entries, or none, change.
+fn toadforce_load_gamma(cpu: &mut Cpu, table: &[u32; 256]) {
+    for (i, rgb) in table.iter().enumerate() {
+        let register = regs::GAMMA + 4 * i as u32;
+        if cpu.bus.toadforce_register(register) != *rgb {
+            cpu.bus.toadforce_register_write(register, *rgb);
+        }
+    }
+}
+
+/// A Banshee's desktop video processor configuration, if its pixels go
+/// through the lookup table that has the ramp (16 bits or more).
+fn banshee_ramp_config(cpu: &Cpu) -> Option<u32> {
+    let cfg = cpu.bus.banshee()?.reg(card::VID_PROC_CFG);
+    let format = cfg >> 18 & 7;
+    (format != 0 && cfg & card::VIDPROC_DESKTOP_CLUT_SEL == 0).then_some(cfg)
 }
 
 /// The VBE mode of a size and depth, the list's or one of DirectDraw's
@@ -321,11 +446,21 @@ fn vbe_mode(cpu: &Cpu, w: u32, h: u32, bpp: u32) -> Option<VbeMode> {
 // Video memory.
 
 /// Read video memory from byte `offset` into `data`; what is past its end
-/// reads as 0.
+/// reads as 0. A ToadForce reads back from its host renderer the rows
+/// of a surface these bytes lie in, each read its own: code that reads
+/// a rectangle a row at a time says so first (`will_read`).
 pub fn read(cpu: &mut Cpu, offset: u32, data: &mut [u8]) {
     cpu.bus
-        .toadforce_touch_for(offset as usize, data.len(), Cause::Driver);
+        .toadforce_reading(offset as usize, data.len(), Cause::Driver);
     peek(cpu, offset, data);
+}
+
+/// Before `read`s of the `len` bytes of video memory at `offset`, a few
+/// at a time (the rows of a rectangle): a ToadForce reads back what its
+/// host renderer has of them at once, the rows they are in and no more.
+pub fn will_read(cpu: &mut Cpu, offset: u32, len: usize) {
+    cpu.bus
+        .toadforce_reading(offset as usize, len, Cause::Driver);
 }
 
 /// `read` of video memory as it is, without what a ToadForce still has
@@ -460,6 +595,51 @@ pub fn write(cpu: &mut Cpu, offset: u32, data: &[u8]) {
     }
 }
 
+/// Runs of bytes written into video memory, each as `write` writes it:
+/// run `(offset, len)` takes the next `len` bytes of `data`. The
+/// built-in DirectDraw's blits write their rows this way. A Banshee or
+/// Voodoo3 gets them all at once (`Voodoo::banshee_memory_write_runs`)
+/// and queues them behind its 3D drawing, as its 2D engine would, where
+/// a `write` of each would wait for that drawing to be done.
+pub fn write_runs(cpu: &mut Cpu, runs: &[(u32, usize)], data: &[u8]) {
+    if cpu.bus.banshee().is_none() {
+        let mut from = 0;
+        for &(offset, len) in runs {
+            write(cpu, offset, &data[from..from + len]);
+            from += len;
+        }
+        return;
+    }
+    // What is past the end of the memory goes nowhere, as with `write`.
+    let size = memory_size(cpu) as usize;
+    let mut kept = Vec::with_capacity(runs.len());
+    // The bytes of the runs kept, once one was cut short.
+    let mut cut: Option<Vec<u8>> = None;
+    let mut from = 0;
+    for &(offset, len) in runs {
+        let start = (offset as usize).min(size);
+        let end = (start + len).min(size);
+        if end - start < len && cut.is_none() {
+            cut = Some(data[..from].to_vec());
+        }
+        if let Some(bytes) = &mut cut {
+            bytes.extend_from_slice(&data[from..from + (end - start)]);
+        }
+        from += len;
+        if start == end {
+            continue;
+        }
+        cpu.bus.toadforce_writing(start, end - start);
+        cpu.bus.toadforce_wrote(start, end - start);
+        drew(cpu, start as u32, end as u32, (end - start) as u64);
+        kept.push((start as u32, end - start));
+    }
+    let data = cut.as_deref().unwrap_or(data);
+    if let Some(v) = &mut cpu.bus.voodoo {
+        v.banshee_memory_write_runs(&kept, data);
+    }
+}
+
 /// The bytes of video memory the picture the display shows takes: from
 /// the display start, the mode's rows. None while the adapter shows
 /// none of its own modes.
@@ -507,9 +687,9 @@ pub fn drew_rects(cpu: &mut Cpu, at: u32, pitch: u32, bytes: u32, rects: &[Rect]
 
 // What the picture is.
 
-/// Show the picture at byte `offset` of video memory, from the next
-/// frame: VBE's display start, the card's vidDesktopStartAddr, or a
-/// ToadForce's `FLIP`.
+/// Show the picture at byte `offset` of video memory: a ToadForce's
+/// `FLIP` without the wait or the card's vidDesktopStartAddr, which
+/// show at once, or VBE's display start, latched at the next retrace.
 pub fn show(cpu: &mut Cpu, offset: u32) {
     if is_toadforce(cpu) {
         let mut words = Vec::new();
@@ -668,13 +848,20 @@ pub fn load_area(cpu: &mut Cpu, mode: &Mode, top: u32, rows: u32, left: u32, col
 
 /// Store pixels as `load_area` gives them, `cols` a row, as the pixels
 /// `left..left + cols` of the rows from `top` on of the picture in
-/// `mode`.
+/// `mode`: GDI's drawing on the screen.
+///
+/// A row that is already there isn't written again, so a repaint that
+/// changes nothing marks nothing for the display to draw anew and
+/// counts as no frame (`Bus::frames_drawn`). `cycles=auto` still sees
+/// its bytes (`drew`), as it did before rows were compared: a program
+/// that repaints its window at its frame rate is at work.
 pub fn store_area(cpu: &mut Cpu, mode: &Mode, top: u32, left: u32, cols: u32, data: &[u8]) {
     let bytes = if mode.bpp == 8 { 1 } else { 4 };
     let row_len = (cols * bytes) as usize;
     if row_len == 0 {
         return;
     }
+    let mut there = Vec::new();
     for (i, row) in data.chunks_exact(row_len).enumerate() {
         let at = (top + i as u32) * mode.pitch + left * mode.bpp / 8;
         let pixels = row.as_chunks::<4>().0.iter();
@@ -685,7 +872,25 @@ pub fn store_area(cpu: &mut Cpu, mode: &Mode, top: u32, left: u32, cols: u32, da
                 .flat_map(|p| to_565(u32::from_le_bytes(*p)).to_le_bytes())
                 .collect(),
         };
+        there.resize(raw.len(), 0);
+        read(cpu, at, &mut there);
+        if there[..] == raw[..] {
+            rewrote(cpu, at, raw.len());
+            continue;
+        }
+        cpu.bus.vga.gdi_changed = true;
         write(cpu, at, &raw);
+    }
+}
+
+/// `write` of `len` bytes at `offset` that are there already: only
+/// `drew`, for `cycles=auto`.
+fn rewrote(cpu: &mut Cpu, offset: u32, len: usize) {
+    let size = memory_size(cpu) as usize;
+    let start = (offset as usize).min(size);
+    let end = (start + len).min(size);
+    if start < end {
+        drew(cpu, start as u32, end as u32, (end - start) as u64);
     }
 }
 
@@ -709,50 +914,75 @@ pub fn to_565(v: u32) -> u16 {
 /// A mode's timing: the pixel clock in Hz, the horizontal display end,
 /// sync start, sync end and total in pixels, the same for lines, and
 /// whether the syncs are negative.
-struct Timing {
-    clock: u64,
-    h: [u32; 4],
-    v: [u32; 4],
-    negative: bool,
+pub struct Timing {
+    pub clock: u64,
+    pub h: [u32; 4],
+    pub v: [u32; 4],
+    pub negative: bool,
 }
 
-/// The timing of a picture `width` x `lines`: VESA's for its standard
-/// sizes, and for others one at about 60 Hz with blanking of their
-/// proportions.
-fn card_timing(width: u32, lines: u32) -> Timing {
+/// The timing of a picture `width` x `lines` at `hz`, for a 3dfx card's
+/// modes: VESA's (DMT) for the standard sizes at the rates it has them,
+/// and for others the clock that gives `hz` with blanking of the
+/// picture's proportions. 640x400 at 60 Hz is VGA's 70 Hz mode, as it
+/// always was here.
+pub fn card_timing(width: u32, lines: u32, hz: u32) -> Timing {
     let t = |clock, h, v, negative| Timing {
         clock,
         h,
         v,
         negative,
     };
-    match (width, lines) {
-        (640, 400) => t(25_175_000, [640, 656, 752, 800], [400, 412, 414, 449], true),
-        (640, 480) => t(25_175_000, [640, 656, 752, 800], [480, 490, 492, 525], true),
-        (800, 600) => t(
+    const H640: [u32; 4] = [640, 656, 752, 800];
+    const H1600: [u32; 4] = [1600, 1664, 1856, 2160];
+    const V1200: [u32; 4] = [1200, 1201, 1204, 1250];
+    match (width, lines, hz) {
+        (640, 400, 60 | 70) => t(25_175_000, H640, [400, 412, 414, 449], true),
+        (640, 400, 85) => t(31_500_000, [640, 672, 736, 832], [400, 401, 404, 445], false),
+        (640, 480, 60) => t(25_175_000, H640, [480, 490, 492, 525], true),
+        (640, 480, 72) => t(31_500_000, [640, 664, 704, 832], [480, 489, 492, 520], true),
+        (640, 480, 75) => t(31_500_000, [640, 656, 720, 840], [480, 481, 484, 500], true),
+        (640, 480, 85) => t(36_000_000, [640, 696, 752, 832], [480, 481, 484, 509], true),
+        (800, 600, 72) => t(50_000_000, [800, 856, 976, 1040], [600, 637, 643, 666], false),
+        (800, 600, 75) => t(49_500_000, [800, 816, 896, 1056], [600, 601, 604, 625], false),
+        (800, 600, 85) => t(56_250_000, [800, 832, 896, 1048], [600, 601, 604, 631], false),
+        (1024, 768, 70) => t(75_000_000, [1024, 1048, 1184, 1328], [768, 771, 777, 806], true),
+        (1024, 768, 75) => t(78_750_000, [1024, 1040, 1136, 1312], [768, 769, 772, 800], false),
+        (1024, 768, 85) => t(94_500_000, [1024, 1072, 1168, 1376], [768, 769, 772, 808], false),
+        (1280, 1024, 75) => t(
+            135_000_000,
+            [1280, 1296, 1440, 1688],
+            [1024, 1025, 1028, 1066],
+            false,
+        ),
+        (1280, 1024, 85) => t(
+            157_500_000,
+            [1280, 1344, 1504, 1728],
+            [1024, 1025, 1028, 1072],
+            false,
+        ),
+        (1600, 1200, 70) => t(189_000_000, H1600, V1200, false),
+        (1600, 1200, 75) => t(202_500_000, H1600, V1200, false),
+        (1600, 1200, 85) => t(229_500_000, H1600, V1200, false),
+        (800, 600, 60) => t(
             40_000_000,
             [800, 840, 968, 1056],
             [600, 601, 605, 628],
             false,
         ),
-        (1024, 768) => t(
+        (1024, 768, 60) => t(
             65_000_000,
             [1024, 1048, 1184, 1344],
             [768, 771, 777, 806],
             true,
         ),
-        (1280, 1024) => t(
+        (1280, 1024, 60) => t(
             108_000_000,
             [1280, 1328, 1440, 1688],
             [1024, 1025, 1028, 1066],
             false,
         ),
-        (1600, 1200) => t(
-            162_000_000,
-            [1600, 1664, 1856, 2160],
-            [1200, 1201, 1204, 1250],
-            false,
-        ),
+        (1600, 1200, 60) => t(162_000_000, H1600, V1200, false),
         _ => {
             let blank = (width / 4).next_multiple_of(8).max(64);
             let h = [
@@ -763,7 +993,7 @@ fn card_timing(width: u32, lines: u32) -> Timing {
             ];
             let vblank = (lines / 20).max(12);
             let v = [lines, lines + 3, lines + 7, lines + vblank];
-            let clock = h[3] as u64 * v[3] as u64 * 60;
+            let clock = h[3] as u64 * v[3] as u64 * hz as u64;
             t(clock, h, v, false)
         }
     }
@@ -793,7 +1023,7 @@ fn pll(hz: u64) -> u32 {
 /// the PLL, and the video processor. Modes less than 400 pixels wide run
 /// at half the clock, and those less than 300 lines high show each line
 /// twice (half mode).
-fn card_set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32) -> Option<()> {
+fn card_set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32, hz: u32) -> Option<()> {
     let format = match bpp {
         8 => 0,
         16 => 1,
@@ -811,14 +1041,14 @@ fn card_set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32) -> Option<()>
     let lines = if half { height * 2 } else { height };
     let narrow = width < card::NARROW_WIDTH;
     let t = if narrow {
-        let t = card_timing(width * 2, lines);
+        let t = card_timing(width * 2, lines, hz);
         Timing {
             clock: t.clock / 2,
             h: t.h.map(|x| x / 2),
             ..t
         }
     } else {
-        card_timing(width, lines)
+        card_timing(width, lines, hz)
     };
     let chars = t.h.map(|x| x / 8);
     let [hde, hss, hse, htotal] = chars;
@@ -933,6 +1163,69 @@ mod tests {
     }
 
     #[test]
+    fn a_toadforces_gamma_ramp_and_the_screens_gamma_show_in_direct_colour() {
+        use crate::video::adapter::{Adapter, VideoSetup};
+        use crate::video::{Frame, frame_size, render_screen};
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let setup = VideoSetup {
+            adapter: Adapter::ToadForce,
+            ..Default::default()
+        };
+        crate::video::bios::install(&mut cpu.bus, setup);
+        let first_pixel = |cpu: &Cpu| {
+            let (width, height) = frame_size(&cpu.bus);
+            let mut frame = Frame::new(width, height);
+            render_screen(&mut frame, &cpu.bus);
+            [frame.rgba[0], frame.rgba[1], frame.rgba[2]]
+        };
+        // A ramp that halves red, keeps green and inverts blue.
+        let mut ramp = [0u16; 3 * 256];
+        for i in 0..256 {
+            ramp[i] = (i as u16 / 2) * 0x101;
+            ramp[256 + i] = i as u16 * 0x101;
+            ramp[512 + i] = (255 - i as u16) * 0x101;
+        }
+        for (bpp, pixel) in [(32, &[0x10, 0x80, 0xFF, 0][..]), (16, &[0x00, 0xF8][..])] {
+            set_mode(&mut cpu, 640, 480, bpp).unwrap();
+            write(&mut cpu, 0, pixel);
+            let shown = first_pixel(&cpu);
+            assert!(has_gamma_ramp(&cpu));
+            assert_eq!(gamma_ramp(&mut cpu).map(|r| r[255]), Some(0xFFFF));
+            assert!(set_gamma_ramp(&mut cpu, &ramp));
+            assert_eq!(gamma_ramp(&mut cpu), Some(ramp));
+            assert_eq!(cpu.bus.toadforce_register(regs::GAMMA + 4 * 255), 0x7F_FF00);
+            // The screen's colours change, and card memory's don't.
+            let [r, g, b] = shown;
+            let expected = [r / 2, g, 255 - b];
+            assert_eq!(first_pixel(&cpu), expected, "{bpp} bits");
+            let mut back = vec![0; pixel.len()];
+            read(&mut cpu, 0, &mut back);
+            assert_eq!(back, pixel, "{bpp} bits");
+        }
+        // A mode set brings the identity back.
+        set_mode(&mut cpu, 640, 480, 32).unwrap();
+        assert_eq!(cpu.bus.toadforce_register(regs::GAMMA + 4 * 255), 0xFF_FFFF);
+        // The screen's own gamma goes after the card's ramp, and changes
+        // nothing a program reads.
+        write(&mut cpu, 0, &[0x40, 0x40, 0x40, 0]);
+        assert_eq!(first_pixel(&cpu), [0x40; 3]);
+        cpu.bus.set_toadforce_gamma(Some(2.0));
+        // (64 / 255)^(1 / 2) of 255 is 127.75.
+        assert_eq!(first_pixel(&cpu), [0x80; 3]);
+        assert!(set_gamma_ramp(&mut cpu, &ramp));
+        // Red halved to 32 first, then (32 / 255)^(1 / 2) of 255 is 90.33.
+        assert_eq!(first_pixel(&cpu)[0], 90);
+        assert_eq!(gamma_ramp(&mut cpu), Some(ramp));
+        cpu.bus.set_toadforce_gamma(None);
+        set_mode(&mut cpu, 640, 480, 32).unwrap();
+        // 256 colours have the palette and no ramp.
+        set_mode(&mut cpu, 640, 480, 8).unwrap();
+        assert!(!has_gamma_ramp(&cpu));
+        assert_eq!(gamma_ramp(&mut cpu), None);
+        assert!(!set_gamma_ramp(&mut cpu, &ramp));
+    }
+
+    #[test]
     fn a_toadforce_sets_any_size_its_memory_holds() {
         use crate::video::adapter::{Adapter, VideoSetup};
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
@@ -1003,6 +1296,33 @@ mod tests {
     }
 
     #[test]
+    fn the_cards_modes_run_at_the_rate_set() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        crate::video::bios::install(
+            &mut cpu.bus,
+            crate::video::adapter::VideoSetup {
+                adapter: crate::video::adapter::Adapter::Voodoo3,
+                ..Default::default()
+            },
+        );
+        cpu.bus
+            .configure_voodoo(Some(crate::voodoo::Board::Voodoo3));
+        for (w, h, hz) in [
+            (640, 480, 60),
+            (640, 480, 72),
+            (640, 480, 75),
+            (800, 600, 60),
+            (1024, 768, 100),
+        ] {
+            card_set_mode(&mut cpu, w, h, 16, hz).unwrap();
+            let t = card_timing(w, h, hz);
+            let want = t.clock as f64 / (t.h[3] as f64 * t.v[3] as f64);
+            let got = cpu.bus.voodoo.as_ref().unwrap().refresh_hz();
+            assert!((got - want).abs() < 0.1, "{w}x{h} at {hz}: {got}");
+        }
+    }
+
+    #[test]
     fn the_pll_comes_near() {
         for hz in [25_175_000u64, 40_000_000, 65_000_000, 12_587_500] {
             let v = pll(hz) as u64;
@@ -1020,7 +1340,7 @@ mod tests {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
         cpu.bus
             .configure_voodoo(Some(crate::voodoo::Board::Voodoo3));
-        card_set_mode(&mut cpu, 640, 480, 32).unwrap();
+        card_set_mode(&mut cpu, 640, 480, 32, 60).unwrap();
         let bus = &mut cpu.bus;
         let screen = crate::autospeed::screen_bytes(bus);
         bus.activity

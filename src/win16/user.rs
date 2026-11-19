@@ -300,6 +300,7 @@ static APIS: &[Api16] = &[
         "DlgDirListComboBoxA",
         b'w',
     ),
+    rust("DlgDirSelectComboBox", 194, "wpw", dlg_dir_select_combo_box),
     rust("TabbedTextOut", 196, "wsspssps", tabbed_text_out),
     rust("GetTabbedTextExtent", 197, "wpwwp", get_tabbed_text_extent),
     rust("OpenComm", 200, "pww", comm::open_comm),
@@ -606,7 +607,7 @@ const PM_NOYIELD: u32 = 0x0002;
 pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
     let d = |i: usize| data.get(i).copied().unwrap_or(0);
     if d(0) >= P_MISC {
-        return super::misc::post(cpu, value, data);
+        return super::misc::post(cpu, value, data, ctx);
     }
     if d(0) >= P_GDI {
         return super::gdi::post(cpu, value, data);
@@ -1458,6 +1459,14 @@ fn dlg_dir_select(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     go(cpu, "DlgDirSelectExA", &[args[0], args[1], 128, args[2]])
 }
 
+fn dlg_dir_select_combo_box(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    go(
+        cpu,
+        "DlgDirSelectComboBoxExA",
+        &[args[0], args[1], 128, args[2]],
+    )
+}
+
 /// The child of `dialog` whose id is `id`.
 fn dlg_item(cpu: &Cpu, dialog: u32, id: u32) -> u32 {
     let user = &cpu.bus.win32.user;
@@ -1556,6 +1565,9 @@ fn post_app_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 // The message loop: MSG16s.
 
 fn get_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if super::call_queued16(cpu) {
+        return None;
+    }
     let m = thunk::scratch32(cpu, 28);
     go_at(
         cpu,
@@ -1567,6 +1579,9 @@ fn get_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 fn peek_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if super::call_queued16(cpu) {
+        return None;
+    }
     let m = thunk::scratch32(cpu, 28);
     go_at(
         cpu,

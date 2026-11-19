@@ -71,6 +71,24 @@ const fn stdcall(
     }
 }
 
+/// A stdcall function that is x86 code (`Conv::Code`), whose `handler`
+/// runs only in a state saved when it was a trap.
+const fn code(
+    name: &'static str,
+    ordinal: u16,
+    args: u8,
+    code: &'static [u8],
+    handler: super::stubs::Handler,
+) -> Api {
+    Api {
+        name,
+        ordinal,
+        args,
+        conv: Conv::Code(code),
+        handler,
+    }
+}
+
 /// The functions. Append only (see `stubs`).
 static APIS: &[Api] = &[
     // Where the program's entry point returns to: it ends with the
@@ -97,9 +115,27 @@ static APIS: &[Api] = &[
     stdcall("HeapFree", 513, 3, memory::heap_free),
     stdcall("HeapReAlloc", 515, 4, memory::heap_realloc),
     stdcall("HeapSize", 517, 3, memory::heap_size),
-    stdcall("InterlockedIncrement", 528, 1, memory::interlocked_increment),
-    stdcall("InterlockedDecrement", 525, 1, memory::interlocked_decrement),
-    stdcall("InterlockedExchange", 526, 2, memory::interlocked_exchange),
+    code(
+        "InterlockedIncrement",
+        528,
+        1,
+        memory::INTERLOCKED_INCREMENT,
+        memory::interlocked_increment,
+    ),
+    code(
+        "InterlockedDecrement",
+        525,
+        1,
+        memory::INTERLOCKED_DECREMENT,
+        memory::interlocked_decrement,
+    ),
+    code(
+        "InterlockedExchange",
+        526,
+        2,
+        memory::INTERLOCKED_EXCHANGE,
+        memory::interlocked_exchange,
+    ),
     stdcall("GetProcAddress", 419, 2, module::get_proc_address),
     stdcall("GetVersionExA", 477, 1, module::get_version_ex),
     stdcall("GetLogicalDrives", 391, 0, disk::get_logical_drives),
@@ -200,21 +236,40 @@ static APIS: &[Api] = &[
     ),
     stdcall("Sleep", 758, 1, sync::sleep),
     stdcall("SleepEx", 759, 2, sync::sleep),
-    stdcall(
+    // Critical sections are x86 code (sync.rs), which traps only to make
+    // or free a section's object and to wait or wake a waiter. The
+    // handlers are for states saved before, whose stubs trap.
+    code(
         "InitializeCriticalSection",
         522,
         1,
+        sync::INITIALIZE_CRITICAL_SECTION,
         sync::initialize_critical_section,
     ),
-    stdcall("DeleteCriticalSection", 214, 1, sync::delete_critical_section),
-    stdcall("EnterCriticalSection", 225, 1, sync::enter_critical_section),
-    stdcall("LeaveCriticalSection", 552, 1, sync::leave_critical_section),
-    stdcall(
-        "TryEnterCriticalSection",
-        779,
+    code(
+        "DeleteCriticalSection",
+        214,
         1,
-        sync::try_enter_critical_section,
+        sync::DELETE_CRITICAL_SECTION,
+        sync::delete_critical_section,
     ),
+    code(
+        "EnterCriticalSection",
+        225,
+        1,
+        sync::ENTER_CRITICAL_SECTION,
+        sync::enter_critical_section,
+    ),
+    code(
+        "LeaveCriticalSection",
+        552,
+        1,
+        sync::LEAVE_CRITICAL_SECTION,
+        sync::leave_critical_section,
+    ),
+    // Windows 98 SE's is one of its stubs that fail with
+    // ERROR_CALL_NOT_IMPLEMENTED and return FALSE; Windows 95 has none.
+    stdcall("TryEnterCriticalSection", 779, 1, not_implemented),
     stdcall("RaiseException", 627, 4, super::seh::raise_exception),
     stdcall("RtlUnwind", 657, 4, super::seh::rtl_unwind),
     stdcall(
@@ -539,10 +594,23 @@ static APIS: &[Api] = &[
     stdcall("GlobalAddAtomW", 485, 1, not_implemented),
     stdcall("CreateProcessW", 199, 10, not_implemented),
     stdcall("WinExec", 812, 2, process::win_exec),
+    stdcall("LoadModule", 557, 2, process::load_module),
     stdcall("GetDiskFreeSpaceExA", 357, 4, win98::get_disk_free_space_ex),
     stdcall("IsDebuggerPresent", 539, 0, win98::is_debugger_present),
-    stdcall("InterlockedCompareExchange", 524, 3, win98::interlocked_compare_exchange),
-    stdcall("InterlockedExchangeAdd", 527, 2, win98::interlocked_exchange_add),
+    code(
+        "InterlockedCompareExchange",
+        524,
+        3,
+        memory::INTERLOCKED_COMPARE_EXCHANGE,
+        win98::interlocked_compare_exchange,
+    ),
+    code(
+        "InterlockedExchangeAdd",
+        527,
+        2,
+        memory::INTERLOCKED_EXCHANGE_ADD,
+        win98::interlocked_exchange_add,
+    ),
     stdcall("GetFileAttributesExA", 371, 3, win98::get_file_attributes_ex),
     stdcall("GetLongPathNameA", 392, 3, win98::get_long_path_name),
     stdcall("GetPrivateProfileSectionW", 414, 4, profile::get_private_profile_section_w),
@@ -712,6 +780,20 @@ static APIS: &[Api] = &[
     stdcall("TransmitCommChar", 778, 2, comm::transmit_comm_char),
     stdcall("GetCommTimeouts", 328, 2, comm::get_comm_timeouts),
     stdcall("SetCommTimeouts", 689, 2, comm::set_comm_timeouts),
+    // Windows 9x has no MoveFileEx: both are stubs that fail with
+    // ERROR_CALL_NOT_IMPLEMENTED, and programs move a file in use at the
+    // next start through WININIT.INI instead. InstallShield 6's engine
+    // calls MoveFileExA(NULL, NULL, 4) and edits WININIT.INI when
+    // GetLastError is then 120.
+    stdcall("MoveFileExA", 590, 3, not_implemented),
+    stdcall("MoveFileExW", 591, 3, not_implemented),
+    // What the critical sections' code traps to (sync.rs): make and free
+    // a section's object, wait for a section another thread is in, and
+    // hand one that was left to a thread waiting for it.
+    stdcall("CriticalSectionCreate", 0, 1, sync::critical_section_create),
+    stdcall("CriticalSectionDelete", 0, 1, sync::critical_section_delete),
+    stdcall("CriticalSectionWait", 0, 1, sync::critical_section_wait),
+    stdcall("CriticalSectionWake", 0, 1, sync::critical_section_wake),
 ];
 
 /// The places in `APIS` of the system's own stubs.
@@ -964,6 +1046,28 @@ pub mod files {
     pub fn find(cpu: &Cpu, dir: &str, pattern: &str) -> Result<Vec<FindEntry>, u32> {
         let full = full_path(cpu, dir);
         path::find_entries(cpu, &full, pattern)
+    }
+
+    /// What FindFirstFileA and FindNextFileA find for `spec`, a path
+    /// with a file name or a pattern, all at once; or the error
+    /// FindFirstFileA sets.
+    pub fn find_spec(cpu: &Cpu, spec: &str) -> Result<Vec<FindEntry>, u32> {
+        if spec.is_empty() {
+            return Err(super::ERROR_PATH_NOT_FOUND);
+        }
+        path::find_path(cpu, &path::dos_path(spec))
+    }
+
+    /// The bytes of the file `name`, read as ReadFile reads them.
+    pub fn read_whole(cpu: &mut Cpu, name: &str) -> Result<Vec<u8>, u32> {
+        let full = full_path(cpu, name);
+        path::read_whole(cpu, &full).map(|(data, _, _)| data)
+    }
+
+    /// Whether `name` is a file.
+    pub fn is_file(cpu: &mut Cpu, name: &str) -> bool {
+        let full = full_path(cpu, name);
+        cpu.bus.disk.is_file(&full)
     }
 
     /// Write `data` as the whole file `name`, made anew.

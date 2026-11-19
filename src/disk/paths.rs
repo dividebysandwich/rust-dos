@@ -200,14 +200,16 @@ impl DiskController {
     /// name, DOS name), on a host drive and on a drive held in memory: the
     /// host's names are the long names Windows has, and so are a CD's
     /// Joliet names. None on disk images, where names are 8.3 alone, and
-    /// for a directory that isn't there.
-    pub fn long_names(&self, dos_dir: &str) -> Option<Vec<(String, String)>> {
+    /// for a directory that isn't there. A host folder's are its kept
+    /// entries (`HostDirCache`), shared rather than copied: FindFirstFileA
+    /// asks for them on each call.
+    pub fn long_names(&self, dos_dir: &str) -> Option<Rc<[(String, String)]>> {
         let normalized = dos_dir.replace('/', "\\");
         let (drive_num, rest) = self.split_drive(&normalized)?;
         let drive = self.drive(drive_num)?;
         if let Some(files) = drive.tree() {
             let dir = Self::memory_path(drive, rest);
-            return files.is_dir(&dir).then(|| files.long_names(&dir));
+            return files.is_dir(&dir).then(|| files.long_names(&dir).into());
         }
         drive.host_root()?;
         let rest = if rest.is_empty() { "." } else { rest };
@@ -216,7 +218,7 @@ impl DiskController {
             return None;
         }
         let (entries, _) = self.host_entries(&dir);
-        Some(entries.to_vec())
+        Some(entries)
     }
 
     /// Fully qualified DOS directory for the directory part of a search spec,
@@ -405,6 +407,20 @@ impl DiskController {
                 })
                 .cloned()
         };
+        self.find_host_where(dir, name, find)
+    }
+
+    /// The entries of the host folder `dir`, and what `find` finds among
+    /// them when it looks for the name `name`: in the kept entries, then in
+    /// a fresh read, unless a recent read lacked `name` too
+    /// (`HostDirCache`).
+    pub(super) fn find_host_where<T>(
+        &self,
+        dir: &Path,
+        name: &str,
+        find: impl Fn(&[(String, String)]) -> Option<T>,
+    ) -> (HostEntries, Option<T>) {
+        let upper = name.to_ascii_uppercase();
         let (mut entries, kept) = self.host_entries(dir);
         if let Some(found) = find(&entries) {
             return (entries, Some(found));

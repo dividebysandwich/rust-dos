@@ -242,6 +242,7 @@ impl Voodoo {
             return;
         }
         let dest = offs as usize / 2;
+        self.hold_shown(dest);
         let fbz = self.reg[FBZ_MODE];
 
         if lfb_mode & (1 << 8) == 0 {

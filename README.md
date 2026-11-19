@@ -396,7 +396,10 @@ python3 -m http.server -d web/www
 
 Then open http://localhost:8000/. `web/www` is the whole site, for any web
 server that serves `.wasm` as `application/wasm`; releases include it as
-`rust-dos-<version>-web.zip`.
+`rust-dos-<version>-web.zip`. The build also writes gzipped copies of the
+module, `pkg/rust_dos_web_bg.wasm.gz` and `pkg/rust_dos_web.js.gz`. The page
+downloads the `.wasm.gz`, about half the size, and unpacks it itself, with
+the plain `.wasm` as the fallback, so a server needs no compression set up.
 
 * C: is a 250 MB hard disk image kept in the browser's storage. Drop files,
   folders or `.zip` archives on the page (or use *Add files* and *Add
@@ -503,6 +506,12 @@ much was left out, so it keeps the start of the session and its latest
 lines. `--log FILE` writes it to `FILE` instead, so instances running
 at the same time keep separate logs. Rust-DOS stops with an error if it
 cannot create `FILE`.
+
+If Rust-DOS crashes, the log's last line starts with `[CRASH]` and says
+why: the error and where it happened, such as the graphics driver's
+file. A run in a window also shows the error in a dialog, with the text
+to report and the link to report it at; on Windows, Ctrl+C copies the
+dialog's text. Runs with `--hidden` or `--debug-server` only log it.
 
 ## Acknowledgements
 

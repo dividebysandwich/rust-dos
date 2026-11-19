@@ -23,7 +23,7 @@ pub fn scratch(name: &str) -> PathBuf {
 
 /// A machine with `root` mounted as C:, current drive C:, current
 /// directory the root.
-pub fn machine(root: &Path) -> Cpu {
+pub fn machine(root: &Path) -> Box<Cpu> {
     Cpu::new(root.to_path_buf())
 }
 

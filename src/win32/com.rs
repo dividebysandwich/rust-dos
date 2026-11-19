@@ -146,6 +146,7 @@ pub fn interface_of(cpu: &mut Cpu, dll: usize, this: u32) -> Option<(usize, u32)
     if this == 0 || !cpu.bus.guest_probe(this, HEADER as usize, false) {
         return None;
     }
+    crate::idle::reads_also(cpu, this, 8);
     let vtable = cpu.bus.guest_read_32(this);
     let index =
         (0..stubs::DLLS[dll].vtables.len()).find(|&i| stubs::vtable_address(dll, i) == vtable)?;
@@ -183,6 +184,7 @@ pub static CLASSES: &[&[Class]] = &[
     super::shell32::CLASSES,
     super::dinput::CLASSES8,
     super::dshow::CLASSES,
+    super::dpnet::CLASSES,
 ];
 
 /// The class with CLSID `clsid`, and its place in the list of all.

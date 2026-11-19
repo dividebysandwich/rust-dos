@@ -94,9 +94,13 @@ The JSON's sections:
 - `ports`: port accesses by device and by port, with rates a second. A
   word or doubleword access to byte ports counts once.
 - `hle`: calls of the emulator's BIOS and DOS functions by interrupt and
-  function (AH, or AL for INT 33h), with names for the common ones, and
-  the emulator's other services (the DPMI host's entries, inline and
-  far-call traps).
+  function (AH, or AL for INT 33h), with names for the common ones, the
+  emulator's other services (the DPMI host's entries, inline and
+  far-call traps), and the built-in Windows' calls by function: `win32`
+  for its DLLs' functions and its own traps, `win16` for the functions
+  of the Win16 system modules 16-bit code called (`Win16
+  USER.PeekMessage`), whose ids number them apart. The text report
+  lists the most called of all of them under `Services`.
 - `irqs`, `exceptions`: hardware interrupts delivered by IRQ line, and
   exceptions by vector.
 - `mapped_memory`: reads and writes of memory that isn't plain RAM:

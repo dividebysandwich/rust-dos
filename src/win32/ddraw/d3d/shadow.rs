@@ -186,6 +186,8 @@ pub fn fill(cpu: &mut Cpu, id: u32, rects: &[[i32; 4]], exact: u32, value: u16) 
         let n = (x1 - x0) as usize;
         let shadow_row: Vec<u8> = (0..n).flat_map(|_| value.to_le_bytes()).collect();
         let mut row = vec![0u8; n * bpp as usize];
+        let at = y0 * s.pitch + x0 * bpp;
+        surface::will_read_rows(cpu, &s, at, s.pitch, y1.saturating_sub(y0), row.len());
         for y in y0..y1 {
             let offset = y * s.pitch + x0 * bpp;
             surface::read_bytes(cpu, &s, offset, &mut row);
@@ -398,7 +400,7 @@ mod tests {
     /// A 32-bit render target of 640 by 64, `pitch` bytes a row, whose
     /// shadow at `A` only the renderer drew, in 0x1234; and the log of
     /// the renderer's reads.
-    fn renderer_drawn(pitch: u32) -> (Cpu, Surface, Rc<RefCell<Vec<String>>>) {
+    fn renderer_drawn(pitch: u32) -> (Box<Cpu>, Surface, Rc<RefCell<Vec<String>>>) {
         use crate::win32::ddraw::Format;
         let log = Rc::default();
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));

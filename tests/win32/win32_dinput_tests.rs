@@ -313,7 +313,7 @@ fn object_size(setup: &Setup) -> u32 {
 
 /// A machine with the built-in Windows on and `program` loaded from the
 /// shell as T.EXE.
-fn machine(test: &str, program: Vec<u8>) -> Cpu {
+fn machine(test: &str, program: Vec<u8>) -> Box<Cpu> {
     let dir = PathBuf::from("target/test_win32_dinput").join(test);
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();

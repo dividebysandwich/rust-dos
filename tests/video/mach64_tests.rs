@@ -15,7 +15,7 @@ use std::path::PathBuf;
 /// A buffer for the BIOS's answers, at 3000:0000.
 const BUF: u32 = 0x30000;
 
-fn machine_with(adapter: Adapter) -> Cpu {
+fn machine_with(adapter: Adapter) -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     bios::install(
         &mut cpu.bus,
@@ -28,7 +28,7 @@ fn machine_with(adapter: Adapter) -> Cpu {
     cpu
 }
 
-fn machine() -> Cpu {
+fn machine() -> Box<Cpu> {
     machine_with(Adapter::AtiRage)
 }
 
@@ -205,6 +205,43 @@ fn the_window_banks_in_32_kb_pages() {
     set_reg(&mut cpu, regs::MEM_VGA_WP_SEL, 0x0009_0000);
     cpu.bus.write_8(0xA8001, 0x33);
     assert_eq!(cpu.bus.vbe.vram[9 * 0x8000 + 1], 0x33);
+}
+
+#[test]
+fn word_and_dword_writes_across_the_window_s_halves_are_their_bytes() {
+    // A write across A8000h goes to two pages: one run of video memory
+    // where the upper page follows the lower, two places where it doesn't.
+    for pages in [0x0007_0006, 0x0009_0006, 0x0005_0006] {
+        let mut whole = machine();
+        let mut bytes = machine();
+        for cpu in [&mut whole, &mut bytes] {
+            int10(cpu, 0x4F02, 0x0101, 0, 0);
+            set_reg(cpu, regs::MEM_VGA_WP_SEL, pages);
+        }
+        let writes: [(usize, u32, usize); 4] = [
+            (0xA7FFD, 0x4433_2211, 4),
+            (0xA7FFF, 0x6655, 2),
+            (0xA7FFE, 0x8877_6655, 4),
+            (0xA8002, 0xCCBB_AA99, 4),
+        ];
+        for (addr, value, size) in writes {
+            if size == 4 {
+                whole.bus.write_32(addr, value);
+            } else {
+                whole.bus.write_16(addr, value as u16);
+            }
+            for (i, byte) in value.to_le_bytes()[..size].iter().enumerate() {
+                bytes.bus.write_8(addr + i, *byte);
+            }
+        }
+        let (p, q) = (&whole.bus.vbe.vram, &bytes.bus.vbe.vram);
+        let differs = p.iter().zip(q.iter()).position(|(x, y)| x != y);
+        assert_eq!(differs, None, "pages {pages:08X}: first differing byte");
+        let lower = 6 * 0x8000 + 0x7FFE;
+        let upper = (pages >> 16) as usize * 0x8000;
+        assert_eq!(whole.bus.vbe.vram[lower..lower + 2], [0x55, 0x66]);
+        assert_eq!(whole.bus.vbe.vram[upper..upper + 3], [0x77, 0x88, 0x99]);
+    }
 }
 
 #[test]

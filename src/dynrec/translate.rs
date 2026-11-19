@@ -82,6 +82,7 @@ pub fn translate(
         Movzx => movx(instr, false, &mut u),
         Movsx => movx(instr, true, &mut u),
         Xchg => xchg(instr, &mut u),
+        Xlatb => xlat(instr, &mut u),
         Bswap if i486 => bswap(instr, &mut u),
         Cbw => extend_acc(1, false, &mut u),
         Cwde => extend_acc(2, false, &mut u),
@@ -121,13 +122,15 @@ pub fn translate(
         Push => push(instr, stack32, &mut u),
         Pop => pop(instr, stack32, &mut u),
         Pusha | Pushad => pusha(instr, stack32, &mut u),
-        Popa | Popad => popa(instr, stack32, &mut u),
+        Popa | Popad => popa(instr, stack32, i486, &mut u),
         Pushf | Pushfd => pushf(instr, stack32, &mut u),
         Popf | Popfd if system && !real => popf(instr, stack32, &mut u),
         Bt => bit_op(instr, BitKind::Test, &mut u),
         Bts => bit_op(instr, BitKind::Set, &mut u),
         Btr => bit_op(instr, BitKind::Reset, &mut u),
         Btc => bit_op(instr, BitKind::Complement, &mut u),
+        Bsf => bit_scan(instr, true, &mut u),
+        Bsr => bit_scan(instr, false, &mut u),
         Jmp if instr.is_jmp_far() || instr.is_jmp_far_indirect() => real && far_jump(instr, next, stack32, false, &mut u),
         Call if (instr.is_call_far() || instr.is_call_far_indirect()) && real => far_jump(instr, next, stack32, true, &mut u),
         Call if instr.is_call_far() || instr.is_call_far_indirect() => system && far_call_pm(instr, next, stack32, &mut u),
@@ -405,6 +408,29 @@ fn movx(instr: &Instruction, signed: bool, u: &mut Vec<Uop>) -> bool {
     }
     u.push(Uop::Extend { t: T0, from, signed });
     u.push(Uop::Set { r: dest, t: T0 });
+    true
+}
+
+/// XLAT: AL = the byte at seg:(E)BX + AL. iced gives the operand as a
+/// memory reference with base (E)BX and index AL, which `Uop::Ea` adds
+/// zero-extended, and wraps to 16 bits with a 16-bit address size.
+fn xlat(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+    if mem(instr, T1, 1, false, u).is_none() {
+        return false;
+    }
+    u.push(Uop::Load {
+        dst: T0,
+        m: T1,
+        size: 1,
+    });
+    u.push(Uop::Set {
+        r: Gpr {
+            index: 0,
+            high: false,
+            size: 1,
+        },
+        t: T0,
+    });
     true
 }
 
@@ -916,10 +942,12 @@ fn pusha(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
 /// POPA and POPAD, as `transfer::popa`: the registers loaded one by one
 /// from EDI's slot up, skipping the stack pointer's (which is still read),
 /// then the stack pointer moved. POPAD on a 16-bit stack loads the upper
-/// half of ESP on a 386 only: its handler runs it.
-fn popa(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
+/// half of ESP on a 386 only: its handler runs it there. On a 486 and
+/// later it moves SP alone, as here (DOS/4GW's 16-bit code that calls
+/// real mode runs one for each call).
+fn popa(instr: &Instruction, stack32: bool, i486: bool, u: &mut Vec<Uop>) -> bool {
     let size = if instr.code() == Code::Popad { 4 } else { 2 };
-    if size == 4 && !stack32 {
+    if size == 4 && !stack32 && !i486 {
         return false;
     }
     let sp = sp(stack32);
@@ -1315,9 +1343,9 @@ fn pushf(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
     true
 }
 
-/// POPF or POPFD in protected mode, as `transfer::popf` at CPL 0 (the
-/// handler's elsewhere, see `Uop::LoadFlags`): the value off the stack
-/// (its access checked), the flags, then the stack pointer.
+/// POPF or POPFD in protected or virtual-8086 mode, as `transfer::popf`
+/// (see `Uop::LoadFlags`): the value off the stack (its access checked),
+/// the flags, then the stack pointer.
 fn popf(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
     let size = match instr.stack_pointer_increment() {
         2 => 2,
@@ -1332,18 +1360,18 @@ fn popf(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
     true
 }
 
-/// BT, BTS, BTR or BTC of a register, or of memory with an immediate bit
-/// offset, as `logic::bit_test`: the offset first, then the operand's
-/// access checked (for writing but for BT), read, and written back. (With
-/// a register offset, a memory operand is found from the offset too: its
-/// handler runs it.)
+/// BT, BTS, BTR or BTC of a register or of memory, as `logic::bit_test`:
+/// the offset first, then the operand's access checked (for writing but
+/// for BT), read, and written back. With a register offset, the memory
+/// operand is the word or dword the offset picks, which the access check
+/// is for, so a fault reports that address.
 fn bit_op(instr: &Instruction, op: BitKind, u: &mut Vec<Uop>) -> bool {
     let size = match instr.op0_kind() {
         OpKind::Register => match gpr(instr.op0_register()) {
             Some(r) if r.size > 1 => r.size,
             _ => return false,
         },
-        OpKind::Memory if instr.op1_kind() == OpKind::Immediate8 => instr.memory_size().size() as u8,
+        OpKind::Memory => instr.memory_size().size() as u8,
         _ => return false,
     };
     if size != 2 && size != 4 {
@@ -1366,7 +1394,41 @@ fn bit_op(instr: &Instruction, op: BitKind, u: &mut Vec<Uop>) -> bool {
             u.push(Uop::Set { r, t: T0 });
         }
     } else {
-        if mem(instr, T2, size, op != BitKind::Test, u).is_none() {
+        let write = op != BitKind::Test;
+        if let Src::T(b) = bit {
+            // A register's offset is signed, and picks the word or dword
+            // it is in, before or after the operand's (`logic::bit_test`).
+            let Some(seg) = ea(instr, T2, u) else {
+                return false;
+            };
+            u.push(Uop::Copy { dst: T0, src: b });
+            if size == 2 {
+                u.push(Uop::Extend {
+                    t: T0,
+                    from: 2,
+                    signed: true,
+                });
+            }
+            let shift = size.trailing_zeros() as u8;
+            u.push(Uop::SarConst {
+                t: T0,
+                count: shift + 3,
+            });
+            let width = addr_size(instr);
+            u.push(Uop::AddShifted {
+                t: T2,
+                src: T0,
+                shift,
+                size: width,
+            });
+            u.push(Uop::MemRef {
+                t: T2,
+                seg,
+                size,
+                write,
+                slot: 0,
+            });
+        } else if mem(instr, T2, size, write, u).is_none() {
             return false;
         }
         u.push(Uop::Load { dst: T0, m: T2, size });
@@ -1375,6 +1437,41 @@ fn bit_op(instr: &Instruction, op: BitKind, u: &mut Vec<Uop>) -> bool {
             u.push(Uop::Store { m: T2, src: T0, size });
         }
     }
+    true
+}
+
+/// BSF (`forward`) or BSR of a register or memory into a register, as
+/// `logic::bit_scan`.
+fn bit_scan(instr: &Instruction, forward: bool, u: &mut Vec<Uop>) -> bool {
+    let Some(dst) = gpr(instr.op0_register()).filter(|r| r.size > 1) else {
+        return false;
+    };
+    match instr.op1_kind() {
+        OpKind::Register => {
+            let Some(src) = gpr(instr.op1_register()).filter(|r| r.size == dst.size) else {
+                return false;
+            };
+            u.push(Uop::Get { t: T1, r: src });
+        }
+        OpKind::Memory => {
+            if mem(instr, T2, dst.size, false, u).is_none() {
+                return false;
+            }
+            u.push(Uop::Load {
+                dst: T1,
+                m: T2,
+                size: dst.size,
+            });
+        }
+        _ => return false,
+    }
+    u.push(Uop::Get { t: T0, r: dst });
+    u.push(Uop::BitScan {
+        forward,
+        dst: T0,
+        src: T1,
+    });
+    u.push(Uop::Set { r: dst, t: T0 });
     true
 }
 

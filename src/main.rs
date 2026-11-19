@@ -22,6 +22,7 @@ use crate::timer::CpuSpeed;
 mod args;
 mod clipboard;
 mod config_file;
+mod crash_dialog;
 mod debug;
 mod display;
 mod input;
@@ -225,6 +226,11 @@ fn main() -> Result<ExitCode, String> {
         || video_subsystem
             .current_video_driver()
             .eq_ignore_ascii_case("dummy");
+    // A crash from here on shows a dialog too, in a run a user watches.
+    let driver = video_subsystem.current_video_driver();
+    if crash_dialog::wanted(args.hidden, driver, args.debug_server.is_some()) {
+        crash_dialog::enable();
+    }
     let audio_output = sdl_audio::open_output(&sdl_context, &settings, headless);
     // Game controllers for the game port; the emulator does without them.
     let controller_subsystem = match sdl_context.gamepad() {
@@ -1649,6 +1655,7 @@ fn main() -> Result<ExitCode, String> {
         cpu.bus.set_fps_cap(settings.fps_cap);
         cpu.bus.set_voodoo_texture_sampling(settings.voodoo.texture_sampling);
         cpu.bus.set_powervr_filter(settings.powervr_filter);
+        cpu.bus.set_toadforce_gamma(settings.toadforce_gamma);
         // With a variable refresh rate, each frame runs to a vertical
         // retrace of the machine's display and is shown when it is due,
         // so the window refreshes at the machine's rate, where the host's
@@ -1825,6 +1832,10 @@ fn main() -> Result<ExitCode, String> {
             }
         }
 
+        if let Some(stall) = rust_dos::timer::test_stall(cpu.bus.clock.now_ns()) {
+            eprintln!("[stall] test stall of {} ms", stall.as_millis());
+            std::thread::sleep(stall);
+        }
         let exec_time = batch_start.elapsed();
         let stalled = cpu.bus.clock.stalled - batch_stalled;
         let idle = cpu.bus.clock.idle - batch_idle;
@@ -2196,7 +2207,7 @@ fn main() -> Result<ExitCode, String> {
                     let paged = if record_ui { ui.with_layer(&screen, (1.0, 1.0)) } else { None };
                     let base = paged.as_ref().unwrap_or(&screen);
                     let shaded = (settings.record_shader && (screenshot || video_recording.is_some()))
-                        .then(|| display.shaded(base, &cached_frame))
+                        .then(|| display.shaded(base, &cached_frame, false))
                         .flatten();
                     let picture = shaded.as_ref().unwrap_or(base);
                     recorder.capture(base);
@@ -2271,7 +2282,7 @@ fn main() -> Result<ExitCode, String> {
                     let paged = ui.with_layer(&screen, (1.0, 1.0));
                     let frame = paged.as_ref().unwrap_or(&screen);
                     if dbg.wants_shader_frame() {
-                        let shaded = display.shaded(frame, &cached_frame);
+                        let shaded = display.shaded(frame, &cached_frame, true);
                         dbg.capture_frame_with_shader(frame, shaded.as_ref());
                     } else {
                         dbg.capture_frame(frame);

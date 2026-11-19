@@ -312,14 +312,17 @@ fn banshee_layout(
     })
 }
 
-/// Open the card's display at `width` x `height`, `refresh` Hz, with
-/// `colors` colour buffers and `auxes` auxiliary buffers. False if the
-/// board can't: no card, a size it doesn't have, not memory enough.
+/// Open the card's display at `width` x `height` with `colors` colour
+/// buffers and `auxes` auxiliary buffers, at the refresh rate `open_rate`
+/// gives for the one the program asks for, in Hz (None for a value that
+/// is no GrScreenRefresh_t). False if the board can't: no card, a size
+/// it doesn't have, not memory enough, or on a Voodoo Graphics a value
+/// that is no rate.
 pub fn open_display(
     cpu: &mut Cpu,
     width: u32,
     height: u32,
-    refresh: u32,
+    asked: Option<u32>,
     colors: u32,
     auxes: u32,
 ) -> bool {
@@ -329,9 +332,12 @@ pub fn open_display(
     if !buffers_ok(width, height, colors, auxes) {
         return false;
     }
+    let Some(refresh) = open_rate(cpu, board.card, width, height, asked) else {
+        return false;
+    };
     let ok = match board.card {
-        Card::Banshee => open_banshee(cpu, width, height, colors, auxes),
-        _ => open_voodoo(cpu, board, width, height, colors, auxes),
+        Card::Banshee => open_banshee(cpu, width, height, refresh, colors, auxes),
+        _ => open_voodoo(cpu, board, width, height, refresh, colors, auxes),
     };
     if !ok {
         return false;
@@ -343,6 +349,130 @@ pub fn open_display(
     s.front = 0;
     s.back = 1;
     true
+}
+
+/// The refresh rates besides the size's own (`default_rate`) each card's
+/// Glide opens a display of a size at. A Voodoo Graphics' and a
+/// Voodoo2's are the modes of 3dfx's open-sourced initialisation code
+/// (sst1InitVideo and sst1InitFindVideoTimingStruct). A Banshee's or
+/// Voodoo3's are those of the two cards' mode tables (modetabl.h), by
+/// the size of the mode that shows the display (`banshee_shown`): its
+/// Glide on Windows looks for the mode among those the display driver
+/// lists.
+const VOODOO1_RATES: &[(u32, u32, &[u32])] = &[
+    (512, 384, &[72, 75, 85, 120]),
+    (640, 400, &[70, 75, 85, 120]),
+    (640, 480, &[75, 85, 120]),
+    (800, 600, &[75, 85]),
+];
+const VOODOO2_RATES: &[(u32, u32, &[u32])] = &[
+    (512, 384, &[75, 85, 120]),
+    (640, 400, &[70, 75, 85, 120]),
+    (640, 480, &[75, 85, 120]),
+    (800, 600, &[75, 85, 120]),
+    (960, 720, &[75, 85]),
+    (1024, 768, &[75, 85]),
+];
+const BANSHEE_RATES: &[(u32, u32, &[u32])] = &[
+    (512, 384, &[70, 72, 75, 85]),
+    (640, 400, &[70, 85]),
+    (640, 480, &[72, 75, 85, 100, 120]),
+    (800, 600, &[72, 75, 85, 100, 120]),
+    (960, 720, &[75, 85]),
+    (1024, 768, &[70, 72, 75, 85, 100, 120]),
+    (1280, 1024, &[75, 85, 100]),
+    (1600, 1200, &[70, 75, 80, 85, 100]),
+];
+
+/// The rate in Hz of the mode each card's Glide opens a display of
+/// `width` x `height` at when the size hasn't the rate asked for. 3dfx's
+/// libraries for the Voodoo Graphics and Voodoo2 open 640x400 at 70 Hz,
+/// and the Voodoo Graphics' 512x384 at 72 Hz (sst1InitVideo,
+/// sst1InitFindVideoTimingStruct); other sizes at 60 Hz. A Banshee's or
+/// Voodoo3's Glide on Windows sets the mode at the display's default
+/// rate when the driver lists none at the rate asked for (setVideoMode
+/// in win_mode.c), which is 60 Hz here; its 640x400 at 60 Hz is VGA's
+/// 70 Hz mode (`screen::card_timing`).
+fn default_rate(card: Card, width: u32, height: u32) -> u32 {
+    match (card, width, height) {
+        (Card::Voodoo1 | Card::Voodoo2, 640, 400) => 70,
+        (Card::Voodoo1, 512, 384) => 72,
+        _ => 60,
+    }
+}
+
+/// Whether the card's Glide opens a display of `width` x `height` at
+/// `hz` Hz: the size's own rate (`default_rate`) or one of its table's
+/// (`VOODOO1_RATES` and the others).
+pub fn has_rate(card: Card, width: u32, height: u32, hz: u32) -> bool {
+    let (table, (w, h)) = match card {
+        Card::Voodoo1 => (VOODOO1_RATES, (width, height)),
+        Card::Voodoo2 => (VOODOO2_RATES, (width, height)),
+        Card::Banshee => (BANSHEE_RATES, banshee_shown(width, height)),
+    };
+    hz == default_rate(card, width, height)
+        || table
+            .iter()
+            .any(|&(tw, th, rates)| (tw, th) == (w, h) && rates.contains(&hz))
+}
+
+/// The refresh rate in Hz the card opens a display of `width` x `height`
+/// at for a program that asks for `asked` (None for a value that is no
+/// GrScreenRefresh_t), or None where Glide fails the call. A rate the
+/// size has (`has_rate`) opens at that rate, any other at the size's own
+/// (`default_rate`). A Voodoo Graphics' library refuses a value that is
+/// no rate, the others take it for 60 Hz.
+///
+/// The environment overrides the program, as 3dfx's libraries read it:
+/// SST_SCREENREFRESH on a Voodoo Graphics (72, 75, 85 or 120, any other
+/// number 60), and SSTV2_SCREENREFRESH and then
+/// SSTV2_REFRESH_<width>x<height> on a Voodoo2 (75, 85 or 120, any other
+/// number 60). Glide 3 on a Voodoo3 takes FX_GLIDE_REFRESH before this
+/// (`glide3::gr_sst_win_open`).
+pub fn open_rate(
+    cpu: &mut Cpu,
+    card: Card,
+    width: u32,
+    height: u32,
+    asked: Option<u32>,
+) -> Option<u32> {
+    let hz = match card {
+        Card::Voodoo1 => {
+            let mut hz = asked?;
+            if let Some(n) = env_number(cpu, "SST_SCREENREFRESH") {
+                hz = if [72, 75, 85, 120].contains(&n) { n } else { 60 };
+            }
+            hz
+        }
+        Card::Voodoo2 => {
+            let mut hz = asked.unwrap_or(60);
+            let size = format!("SSTV2_REFRESH_{width}x{height}");
+            for name in ["SSTV2_SCREENREFRESH", size.as_str()] {
+                if let Some(n) = env_number(cpu, name) {
+                    hz = if [75, 85, 120].contains(&n) { n } else { 60 };
+                }
+            }
+            hz
+        }
+        Card::Banshee => asked.unwrap_or(60),
+    };
+    Some(if has_rate(card, width, height, hz) {
+        hz
+    } else {
+        default_rate(card, width, height)
+    })
+}
+
+/// The number the environment variable `name` of the running process
+/// starts with, as C's atoi reads it (0 if none), or None without the
+/// variable.
+pub fn env_number(cpu: &mut Cpu, name: &str) -> Option<u32> {
+    let env = &crate::win32::process(cpu).environment;
+    let value = crate::win32::variable_value(env, name)?.trim_start();
+    let end = value
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(value.len());
+    Some(value[..end].parse().unwrap_or(0))
 }
 
 /// Give the monitor to the card (`on`) or back to the 2D picture, as
@@ -384,6 +514,7 @@ fn open_voodoo(
     board: Board,
     width: u32,
     height: u32,
+    refresh: u32,
     colors: u32,
     auxes: u32,
 ) -> bool {
@@ -422,21 +553,10 @@ fn open_voodoo(
     );
     write(cpu, FBI, FBI_INIT3, init3 | (height - 1) << 22);
 
-    // The video timing: a quarter of the line and a twentieth of the
-    // frame blanked.
-    let hsync_on = (width / 16).max(8);
-    let htotal = width + (width / 4).max(32);
-    let vsync_on = 3;
-    let vtotal = height + (height / 20).max(10);
-    write(
-        cpu,
-        FBI,
-        H_SYNC,
-        (htotal - hsync_on - 2) << 16 | (hsync_on - 1),
-    );
-    write(cpu, FBI, V_SYNC, (vtotal - vsync_on) << 16 | vsync_on);
-    write(cpu, FBI, BACK_PORCH, 16 << 16 | (hsync_on * 2));
-    write(cpu, FBI, VIDEO_DIMENSIONS, (height - 1) << 16 | (width - 1));
+    voodoo_timing(cpu, width, height, refresh);
+    // The width less one and the height as it is, as 3dfx's libraries
+    // write them (sst1InitVideo).
+    write(cpu, FBI, VIDEO_DIMENSIONS, height << 16 | (width - 1));
     // A Voodoo Graphics' video clock, then the monitor.
     if !v2 {
         pci_write(cpu, 0xC0, 0);
@@ -447,6 +567,71 @@ fn open_voodoo(
     s.tex_base = [0, 0];
     s.tex_size = [board.tmu_bytes; 2];
     true
+}
+
+// The ICS5342 DAC's registers behind dacData, and its PLL's: clock 0's
+// first register and the control register, whose bit 5 has clock 0 come
+// from the register its bits 2:0 pick; the command register's colour
+// mode of one clock a pixel (16 bits).
+const DAC_PLL_ADDR: u32 = 4;
+const DAC_PLL_DATA: u32 = 5;
+const DAC_COMMAND: u32 = 6;
+const PLL_CTRL: u32 = 0x0E;
+const PLL_CLOCK0_SELECT: u32 = 0x20;
+const DAC_16BPP: u32 = 0x50;
+
+/// Write the DAC's register `reg` through dacData.
+fn dac_write(cpu: &mut Cpu, reg: u32, value: u32) {
+    write(cpu, FBI, DAC_DATA, reg << 8 | value & 0xFF);
+}
+
+/// A Voodoo Graphics' or Voodoo2's video timing for `width` x `height` at
+/// `refresh` Hz, as its library sets it: the frame in hSync, vSync and
+/// backPorch, and the DAC's PLL clock 0 at the mode's pixel clock in the
+/// colour mode of one clock a pixel.
+fn voodoo_timing(cpu: &mut Cpu, width: u32, height: u32, refresh: u32) {
+    let t = screen::card_timing(width, height, refresh);
+    let [_, hss, hse, htotal] = t.h;
+    let [_, vss, vse, vtotal] = t.v;
+    let (hsync, vsync) = (hse - hss, vse - vss);
+    // The card counts hSync's two fields one longer each, and the
+    // horizontal back porch two longer: 3dfx's tables give 640x480 at
+    // 75 Hz an hSync of 63 and 775 and a back porch of 118 for VESA's
+    // sync of 64, line of 840 and back porch of 120. vSync's fields and
+    // the vertical back porch count as they are.
+    write(cpu, FBI, H_SYNC, (htotal - hsync - 1) << 16 | (hsync - 1));
+    write(cpu, FBI, V_SYNC, (vtotal - vsync) << 16 | vsync);
+    write(
+        cpu,
+        FBI,
+        BACK_PORCH,
+        (vtotal - vse) << 16 | (htotal - hse - 2),
+    );
+    let (m, n, p) = ics_pll(t.clock);
+    dac_write(cpu, DAC_COMMAND, DAC_16BPP);
+    dac_write(cpu, DAC_PLL_ADDR, 0);
+    dac_write(cpu, DAC_PLL_DATA, m);
+    dac_write(cpu, DAC_PLL_DATA, p << 5 | n);
+    dac_write(cpu, DAC_PLL_ADDR, PLL_CTRL);
+    dac_write(cpu, DAC_PLL_DATA, PLL_CLOCK0_SELECT);
+}
+
+/// The ICS5342's M, N and P for the clock nearest `hz`: 14.318 MHz x
+/// (M + 2) / ((N + 2) x 2^P), with M of 7 bits, N of 5 and P of 2.
+fn ics_pll(hz: u64) -> (u32, u32, u32) {
+    let mut best = (u64::MAX, (0, 0, 0));
+    for p in 0..4u64 {
+        for n in 1..32u64 {
+            let m2 = (hz * ((n + 2) << p) + 7_159_090) / 14_318_180;
+            let m = m2.clamp(2, 129) - 2;
+            let f = 14_318_180 * (m + 2) / ((n + 2) << p);
+            let off = f.abs_diff(hz);
+            if off < best.0 {
+                best = (off, (m as u32, n as u32, p as u32));
+            }
+        }
+    }
+    best.1
 }
 
 /// A Voodoo Graphics' or Voodoo2's frame buffer for a display of
@@ -530,7 +715,14 @@ fn read_init(cpu: &Cpu, reg: usize) -> u32 {
 /// so that no surface gets it while Glide has it. Glide's buffers are at
 /// its top, tiled, and the overlay shows the front one over the mode's
 /// picture; the textures have the memory below them.
-fn open_banshee(cpu: &mut Cpu, width: u32, height: u32, colors: u32, auxes: u32) -> bool {
+fn open_banshee(
+    cpu: &mut Cpu,
+    width: u32,
+    height: u32,
+    refresh: u32,
+    colors: u32,
+    auxes: u32,
+) -> bool {
     let (dw, dh) = banshee_shown(width, height);
     // Whether the buffers fit above the picture, before anything
     // changes.
@@ -538,7 +730,7 @@ fn open_banshee(cpu: &mut Cpu, width: u32, height: u32, colors: u32, auxes: u32)
     let Some(layout) = banshee_layout(width, height, colors, auxes, floor) else {
         return false;
     };
-    let Some(mode) = display::take(cpu, dw, dh, 16) else {
+    let Some(mode) = display::take(cpu, dw, dh, 16, refresh) else {
         return false;
     };
     if display::alloc_rest(cpu).is_err() {
@@ -590,12 +782,12 @@ fn banshee_shown(width: u32, height: u32) -> (u32, u32) {
 }
 
 /// Take the display back for the open buffers (grSstControl): the same
-/// mode, and the memory above it Glide's again, with the textures and
-/// buffers where they were.
+/// mode at the same rate, and the memory above it Glide's again, with
+/// the textures and buffers where they were.
 fn reopen_banshee(cpu: &mut Cpu) -> bool {
     let s = &state(cpu).screen;
-    let (dw, dh) = banshee_shown(s.width, s.height);
-    let Some(mode) = display::take(cpu, dw, dh, 16) else {
+    let ((dw, dh), refresh) = (banshee_shown(s.width, s.height), s.refresh);
+    let Some(mode) = display::take(cpu, dw, dh, 16, refresh) else {
         return false;
     };
     if display::alloc_rest(cpu).is_err() {

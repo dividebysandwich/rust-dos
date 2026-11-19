@@ -101,7 +101,7 @@ fn program(
 
 /// A Voodoo3 machine with the built-in Windows on and `program` loaded
 /// from the shell as T.EXE.
-fn machine(test: &str, program: Vec<u8>) -> Cpu {
+fn machine(test: &str, program: Vec<u8>) -> Box<Cpu> {
     let base = PathBuf::from("target/test_win32_screen").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -667,6 +667,81 @@ fn a_flip_on_the_card_counts_as_a_frame() {
     assert_eq!(cpu.bus.frames_drawn - before, 1);
 }
 
+/// On the desktop, through GDI: a pixel drawn red (step 1), the same
+/// pixel blue (step 2), and blue again (step 3).
+fn gdi_frames_program() -> (Vec<u8>, u32) {
+    program(&[USER32, GDI32, DDRAW], &data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        c.api(a, l, GET_DC, &[Arg::I(0)])?;
+        a.mov(dword_ptr(l.at(HDC)), eax)?;
+        for (step, color) in [(1, 0x0000_00FF), (2, 0x00FF_0000)] {
+            c.api(
+                a,
+                l,
+                SET_PIXEL,
+                &[Arg::Val(HDC), Arg::I(300), Arg::I(200), Arg::I(color)],
+            )?;
+            wait(a, l, step)?;
+        }
+        c.api(
+            a,
+            l,
+            SET_PIXEL,
+            &[Arg::Val(HDC), Arg::I(300), Arg::I(200), Arg::I(0x00FF_0000)],
+        )?;
+        finish(a, l, 3)
+    })
+}
+
+/// The frames counted over the next few retraces.
+fn frames_over_retraces(cpu: &mut Cpu) -> u64 {
+    let before = cpu.bus.frames_drawn;
+    for _ in 0..3 {
+        next_retrace(cpu);
+    }
+    cpu.bus.frames_drawn - before
+}
+
+#[test]
+fn gdi_drawing_that_changes_the_cards_desktop_counts_as_a_frame() {
+    let (program, data) = gdi_frames_program();
+    let mut cpu = machine("gdi_frames", program);
+    run_until(&mut cpu, data, 1);
+    frames_over_retraces(&mut cpu);
+    // The card shows the desktop from its own memory, which the VGA's
+    // rows know nothing of.
+    assert!(cpu.bus.voodoo_output());
+    // The pixel changes: one frame.
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 2);
+    assert_eq!(shown(&mut cpu, 300, 200), [0, 0, 0xFF]);
+    assert_eq!(frames_over_retraces(&mut cpu), 1);
+    // Drawn again the same: nothing changed, no frame.
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 3);
+    assert_eq!(frames_over_retraces(&mut cpu), 0);
+}
+
+#[test]
+fn the_status_names_the_cards_desktop_not_the_vgas_mode() {
+    let (program, data) = desktop_program();
+    let mut cpu = machine("scanout", program);
+    let vga = cpu.bus.scanout();
+    assert_eq!(
+        (vga.device, vga.name.as_str(), vga.bpp),
+        ("vga", "Text80x25Color", None)
+    );
+    run_until(&mut cpu, data, 1);
+    // The VGA keeps the BIOS's text mode under the card's desktop.
+    assert!(cpu.bus.video_mode.is_text());
+    let shown = cpu.bus.scanout();
+    assert_eq!(
+        (shown.device, shown.name.as_str(), shown.bpp),
+        ("banshee", "Banshee 640x480x16", Some(16))
+    );
+}
+
 /// Other modes: 320x200 at 8 bits with a palette, then 800x600 at 32.
 fn modes_program() -> (Vec<u8>, u32) {
     let mut d = data();
@@ -1190,7 +1265,7 @@ fn keyed_blits_on_a_voodoo_graphics_keep_what_the_keys_say() {
 
 /// A machine with its usual display adapter, the add-on card `board`
 /// (or none), the built-in Windows on and `program` loaded as T.EXE.
-fn card_machine(test: &str, board: Option<Board>, program: Vec<u8>) -> Cpu {
+fn card_machine(test: &str, board: Option<Board>, program: Vec<u8>) -> Box<Cpu> {
     let base = PathBuf::from("target/test_win32_screen").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -1247,7 +1322,7 @@ type Log = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 /// `card_machine` for `program`, with WIN.INI's ScreenSaveActive=1 and
 /// ScreenSaveTimeOut=1, and SYSTEM.INI's SCRNSAVE.EXE a saver that ends
 /// with exit code 9.
-fn saver_machine(test: &str, program: Vec<u8>) -> (Cpu, Log) {
+fn saver_machine(test: &str, program: Vec<u8>) -> (Box<Cpu>, Log) {
     let mut cpu = card_machine(test, None, program);
     let base = PathBuf::from("target/test_win32_screen").join(test);
     fs::create_dir_all(base.join("WINDOWS")).unwrap();
@@ -1524,7 +1599,7 @@ fn guid(cpu: &Cpu, data: u32, offset: u32) -> Vec<u8> {
         .collect()
 }
 
-fn devices(test: &str, board: Board) -> (Cpu, u32) {
+fn devices(test: &str, board: Board) -> (Box<Cpu>, u32) {
     let (program, data) = devices_program();
     let mut cpu = card_machine(test, Some(board), program);
     run_until(&mut cpu, data, 1);
@@ -2035,7 +2110,7 @@ fn a_back_buffer_attached_on_a_voodoo2_has_the_cards_pitch() {
 }
 
 /// A machine with the VESA adapter `adapter`, the program loaded.
-fn vesa_machine(test: &str, adapter: Adapter, program: Vec<u8>) -> Cpu {
+fn vesa_machine(test: &str, adapter: Adapter, program: Vec<u8>) -> Box<Cpu> {
     let base = PathBuf::from("target/test_win32_screen").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -3921,7 +3996,7 @@ fn set_window_pos_gives_a_mouse_move_only_when_the_window_moves() {
 }
 
 /// `card_machine` under Windows 98 SE, whose USER32 has TrackMouseEvent.
-fn machine_98(test: &str, program: Vec<u8>) -> Cpu {
+fn machine_98(test: &str, program: Vec<u8>) -> Box<Cpu> {
     let base = PathBuf::from("target/test_win32_screen").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
@@ -4433,7 +4508,7 @@ fn mode_cursor_program(w: u32, h: u32) -> (Vec<u8>, u32) {
 
 /// `mode_cursor_program(w, h)` run to its step 1 on `board`, the mode
 /// set: a Voodoo3 shows it on the card, the others on the VGA.
-fn small_mode_machine(test: &str, board: Option<Board>, (w, h): (u32, u32)) -> (Cpu, u32) {
+fn small_mode_machine(test: &str, board: Option<Board>, (w, h): (u32, u32)) -> (Box<Cpu>, u32) {
     let (program, data) = mode_cursor_program(w, h);
     let mut cpu = if board == Some(Board::Voodoo3) {
         machine(test, program)

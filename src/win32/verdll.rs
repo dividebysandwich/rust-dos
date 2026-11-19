@@ -413,7 +413,7 @@ fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
     // on Windows 98 with 8.1 (DDRAW, DSOUND and DINPUT 4.08.01.0881).
     let directx = super::version::directx(windows).file;
     let version: [u16; 4] = match base.to_ascii_uppercase().as_str() {
-        "DDRAW" | "DSOUND" | "DINPUT" | "DPLAYX" | "D3D8" | "DINPUT8" => directx,
+        "DDRAW" | "DSOUND" | "DINPUT" | "DPLAYX" | "D3D8" | "DINPUT8" | "DPNET" => directx,
         "DMUSIC" | "DMIME" | "DMLOADER" | "DMSTYLE" | "DMBAND" | "DMCOMPOS" => directx,
         // DirectX 5 to 7 leave DirectX 3's DPLAY.DLL as it is: Windows 98
         // SE and a Windows 95 machine with DirectX 7 both have

@@ -164,6 +164,8 @@ pub static DLLS: &[&Dll] = &[
     &super::oledlg::DLL,
     &super::olepro32::DLL,
     &super::wing32::DLL,
+    &super::dpnet::DLL,
+    &super::rpcrt4::DLL,
 ];
 
 /// Bytes each function's stub takes.
@@ -504,6 +506,7 @@ pub fn call(cpu: &mut Cpu, id: u16) {
         }
     };
     cpu.bus.guest_read_bytes(esp.wrapping_add(4), raw);
+    crate::idle::arguments_at(cpu, esp, api.args as u32);
     for (arg, word) in args.iter_mut().zip(raw.as_chunks::<4>().0) {
         *arg = u32::from_le_bytes(*word);
     }
@@ -538,6 +541,7 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     }
     if let Some(value) = result {
         cpu.set_eax(value);
+        crate::idle::returned(cpu);
     }
     let module = &dll.name[..dll.name.len() - 4];
     if super::trace3d::on(cpu) {
@@ -648,6 +652,8 @@ mod tests {
         "OLEDLG.DLL",
         "OLEPRO32.DLL",
         "WING32.DLL",
+        "DPNET.DLL",
+        "RPCRT4.DLL",
     ];
 
     #[test]

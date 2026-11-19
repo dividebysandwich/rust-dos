@@ -482,6 +482,18 @@ pub fn write_bytes(cpu: &mut Cpu, s: &Surface, offset: u32, data: &[u8]) {
     }
 }
 
+/// Before `read_bytes` of `rows` rows of `len` bytes of a surface's
+/// pixels, the first from byte `offset` and each of the others `step`
+/// after the one before: a ToadForce reads back the rows of its host
+/// renderer's copy they lie in at once (`screen::will_read`), where
+/// each `read_bytes` of a row would read its row back by itself.
+pub fn will_read_rows(cpu: &mut Cpu, s: &Surface, offset: u32, step: u32, rows: u32, len: usize) {
+    if s.memory == MEM_VIDEO && rows > 1 {
+        let span = (rows - 1) as usize * step as usize + len;
+        screen::will_read(cpu, s.bits + offset, span);
+    }
+}
+
 /// Read rows of `len` bytes of a surface's pixels into `data`, one after
 /// another: the first from byte `offset`, each of the others a pitch
 /// after the one before. Rows as long as the pitch are read at once,
@@ -496,6 +508,8 @@ pub fn read_rows(cpu: &mut Cpu, s: &Surface, offset: u32, len: usize, data: &mut
     if s.memory == MEM_CARD {
         return voodoo::read(cpu, s, offset, len, data);
     }
+    let rows = data.len().div_ceil(len) as u32;
+    will_read_rows(cpu, s, offset, s.pitch, rows, len);
     for (row, y) in data.chunks_mut(len).zip(0u32..) {
         read_bytes(cpu, s, offset + y * s.pitch, row);
     }
@@ -507,6 +521,17 @@ pub fn write_rows(cpu: &mut Cpu, s: &Surface, offset: u32, len: usize, data: &[u
     if len == 0 {
         return;
     }
+    if s.memory == MEM_VIDEO {
+        // Rows as long as the pitch are one run.
+        let runs: Vec<_> = if len == s.pitch as usize {
+            vec![(offset, data.len())]
+        } else {
+            let rows = data.chunks(len).zip(0u32..);
+            rows.map(|(row, y)| (offset + y * s.pitch, row.len()))
+                .collect()
+        };
+        return write_runs(cpu, s, &runs, data);
+    }
     if len == s.pitch as usize {
         return write_bytes(cpu, s, offset, data);
     }
@@ -515,6 +540,21 @@ pub fn write_rows(cpu: &mut Cpu, s: &Surface, offset: u32, len: usize, data: &[u
     }
     for (row, y) in data.chunks(len).zip(0u32..) {
         write_bytes(cpu, s, offset + y * s.pitch, row);
+    }
+}
+
+/// Write runs of bytes into a surface's pixels: run `(offset, len)`
+/// puts the next `len` bytes of `data` at byte `offset`. In video memory
+/// they go to the display adapter together (`screen::write_runs`).
+pub fn write_runs(cpu: &mut Cpu, s: &Surface, runs: &[(u32, usize)], data: &[u8]) {
+    if s.memory == MEM_VIDEO {
+        let runs: Vec<_> = runs.iter().map(|&(at, len)| (s.bits + at, len)).collect();
+        return screen::write_runs(cpu, &runs, data);
+    }
+    let mut from = 0;
+    for &(at, len) in runs {
+        write_bytes(cpu, s, at, &data[from..from + len]);
+        from += len;
     }
 }
 
@@ -662,6 +702,19 @@ fn free_memory(cpu: &mut Cpu, id: u32) {
     }
 }
 
+/// The mode is about to change or go, and video memory to be the new
+/// mode's: the surfaces OpenGL's driver keeps move out of it while their
+/// pixels are still there (a mode set clears the new picture's part).
+/// OpenGL's textures are its driver's, which keeps them through the
+/// change, as a card's OpenGL driver does: the program never hears of a
+/// loss, and has no way to restore them. Called before the mode is set,
+/// and before `video_memory_lost`.
+pub fn video_memory_to_change(cpu: &mut Cpu) {
+    for id in crate::win32::opengl32::texture_surfaces(cpu) {
+        to_system_memory(cpu, id);
+    }
+}
+
 /// The mode changed or went: video memory is the new mode's, and the
 /// surfaces that had pixels there are lost, as are the blocks Direct3D's
 /// HAL took for its copies of textures.
@@ -674,6 +727,40 @@ pub fn video_memory_lost(cpu: &mut Cpu) {
         }
     }
     super::d3d::hal::video_memory_lost(cpu);
+}
+
+/// Move the surface `id` from video memory to a block of system memory
+/// of its own, with its pixels; Direct3D's HAL then copies it to the
+/// card as it draws with it. A mipmap level in its top level's block
+/// gets a block of its own too. Nothing changes for a surface elsewhere,
+/// one of another process, whose memory isn't the running one's, or
+/// with no room in system memory: it is then lost with the rest.
+fn to_system_memory(cpu: &mut Cpu, id: u32) {
+    let pid = super::current_pid(cpu);
+    if state(cpu).object(id).is_none_or(|o| o.pid != pid) {
+        return;
+    }
+    let Some(s) = state(cpu).surface(id).cloned() else {
+        return;
+    };
+    if s.memory != MEM_VIDEO {
+        return;
+    }
+    let size = s.size();
+    let Some(bits) = crate::win32::kernel32::alloc_pages(cpu, size) else {
+        return;
+    };
+    let mut pixels = vec![0u8; size as usize];
+    read_bytes(cpu, &s, 0, &mut pixels);
+    cpu.bus.guest_write_bytes(bits, &pixels);
+    if let Some(s) = surface(cpu, id) {
+        s.memory = MEM_SYSTEM;
+        s.bits = bits;
+        s.owns_bits = true;
+        s.caps[0] &= !(DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM);
+        s.caps[0] |= DDSCAPS_SYSTEMMEMORY;
+    }
+    changed(cpu, id);
 }
 
 /// The DirectDraw object of the surface `id` went: it has no pixels.
@@ -713,6 +800,18 @@ pub fn destroyed(cpu: &mut Cpu, id: u32) {
     end_lock(cpu, id);
     super::d3d::shadow::forget(cpu, id);
     free_memory(cpu, id);
+    // The front buffer of a flip chain in video memory goes: the screen
+    // shows the start of video memory again, GDI's surface, as after
+    // FlipToGDISurface. A flip may have left it on a back buffer's
+    // memory, which no surface has now, and the next primary surface the
+    // program makes is at the start.
+    if s.is_primary()
+        && s.caps[0] & DDSCAPS_FLIP != 0
+        && s.memory == MEM_VIDEO
+        && display::screen_mode(cpu).is_some()
+    {
+        display::show(cpu, 0);
+    }
     for &(other, held) in &s.attached {
         // A back buffer it flipped with no longer does.
         if s.caps[0] & DDSCAPS_FLIP != 0
@@ -1391,8 +1490,13 @@ pub fn get_pixel_format(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(DD_OK)
 }
 
-/// IsLost(this).
+/// IsLost(this). Only a call, here or in another program, loses or
+/// restores a surface, so an idle proof goes through it (#1306), lost or
+/// not: Biosys asks it in every pass of the loop it waits in. It reads
+/// no RAM but its argument and the interface block (`com::interface_of`).
 pub fn is_lost(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
     hr!(usable(cpu, args[0]));
     Some(DD_OK)
 }
@@ -1545,9 +1649,9 @@ const DDGFS_ISFLIPDONE: u32 = 0x2;
 /// DDGFS_ISFLIPDONE alike. That is a flip of the primary surface's chain
 /// that waits for its frame, or a swap of the 3D-only card's that waits
 /// for its retrace; the flips of other chains show at once. (On the card,
-/// Flip with DDFLIP_WAIT still goes ahead then: its swap goes behind the
-/// pending one.) A thread that does nothing but call it again waits for
-/// the flip (`still_to_show`). DDGFS_CANFLIP also fails with
+/// a Flip that waits (`flip_waits`) still goes ahead then: its swap goes
+/// behind the pending one.) A thread that does nothing but call it again
+/// waits for the flip (`still_to_show`). DDGFS_CANFLIP also fails with
 /// DDERR_SURFACEBUSY while a surface of the chain is locked or has a DC,
 /// as Flip does, and a lost surface gives DDERR_SURFACELOST.
 pub fn get_flip_status(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -1804,6 +1908,19 @@ pub fn get_attached_surface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 pub const DDFLIP_WAIT: u32 = 0x1;
 pub const DDFLIP_NOVSYNC: u32 = 0x8;
+pub const DDFLIP_DONOTWAIT: u32 = 0x20;
+
+/// Whether Flip through the interface `vtable` with `flags` waits for a
+/// flip still to show. Through IDirectDrawSurface7 it does unless the
+/// flags have DDFLIP_DONOTWAIT, as DirectX 7's ddraw.h says at that
+/// flag; through the older interfaces only with DDFLIP_WAIT.
+fn flip_waits(vtable: usize, flags: u32) -> bool {
+    if vtable == V_SURFACE7 {
+        flags & DDFLIP_DONOTWAIT == 0
+    } else {
+        flags & DDFLIP_WAIT != 0
+    }
+}
 
 /// The surfaces of the flip chain whose front buffer is `front`, the
 /// front first.
@@ -1838,15 +1955,17 @@ fn chain(cpu: &mut Cpu, front: u32) -> Vec<u32> {
 /// back buffer (or of `target`), the back buffers the next ones', and
 /// the last the front buffer's. A primary front buffer is shown from
 /// the next frame. With a flip still to show, it waits for that frame
-/// with DDFLIP_WAIT, and fails without it; a thread that calls it again
-/// and again with nothing else in between waits too (`display::Polls`).
-/// On the 3D-only card the card swaps its buffers at a retrace, and
-/// without DDFLIP_WAIT a flip fails the same way while a swap waits.
+/// when it waits (`flip_waits`), and fails otherwise; a thread that
+/// calls it again and again with nothing else in between waits too
+/// (`display::Polls`). On the 3D-only card the card swaps its buffers at
+/// a retrace, and a flip that doesn't wait fails the same way while a
+/// swap waits.
 pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, target, flags] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (_, id) = hr!(usable(cpu, this));
+    let (vtable, id) = hr!(usable(cpu, this));
+    let wait = flip_waits(vtable, flags);
     let Some(s) = state(cpu).surface(id).cloned() else {
         return Some(DDERR_INVALIDOBJECT);
     };
@@ -1875,11 +1994,11 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_SURFACEBUSY);
     }
     if s.memory == MEM_CARD {
-        // With swaps still waiting for their retraces, it fails without
-        // DDFLIP_WAIT, or waits for them if the thread only polls. With
-        // DDFLIP_WAIT the swap goes behind them, and the card's FIFO
-        // holds the program up when it fills.
-        if flags & DDFLIP_WAIT == 0
+        // With swaps still waiting for their retraces, a flip that doesn't
+        // wait fails, or waits for them if the thread only polls. One
+        // that waits goes behind them, and the card's FIFO holds the
+        // program up when it fills.
+        if !wait
             && let Some(until) = voodoo::swaps_pending_until(cpu)
         {
             return still_to_show(cpu, until, false);
@@ -1910,7 +2029,7 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         // Flip runs again when that frame begins: the call that ends the
         // wait stands for the polls until the frame, the last of which
         // flips.
-        return still_to_show(cpu, pending, flags & DDFLIP_WAIT != 0);
+        return still_to_show(cpu, pending, wait);
     }
     // A flip of the primary surface is a frame, which the frame rate cap
     // may hold back (`frame_held`): one waiting for the retrace shows

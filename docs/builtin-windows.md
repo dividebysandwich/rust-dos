@@ -118,6 +118,12 @@ there without that, and a WinG that a game brings in its own folder
 isn't loaded in its place. WinG's halftone brushes are solid brushes of
 their colour, without WinG's dithering.
 
+`MSVCRT20.DLL` and `MSVCRT40.DLL`, the C runtimes of Visual C++ 2 and
+4 that Windows 95 and 98 have beside `MSVCRT.DLL`, are there too, for
+programs and DLLs built with those compilers. Their functions are
+`MSVCRT.DLL`'s, so the three share one heap and one set of open files,
+where Windows' own keep one each.
+
 ### Notepad
 
 `C:\WINDOWS\NOTEPAD.EXE` is there, read-only, as on Windows 98, and the
@@ -133,10 +139,14 @@ asking whether to make it.
 
 ### Text and dialogs
 
-The fonts are the VGA's ROM glyphs, scaled, with each character of the
-dialog fonts as wide as in Windows 98's. Text still looks different, so
-some lines wrap or are cut where Windows 98's aren't, and characters the
-built-in fonts lack, such as `®`, show as `?`.
+MS Sans Serif 8, the font of menus, dialogs and buttons, has glyphs drawn in
+its style, with one-pixel strokes. The other fonts are the VGA's ROM glyphs,
+scaled, with each character of the dialog fonts as wide as in Windows 98's.
+Text still looks different, so some lines wrap or are cut where Windows 98's
+aren't, and characters the built-in fonts lack, such as `®`, show as `?`.
+Raster fonts a program adds from its own .FON or .FNT files with
+`AddFontResource` are drawn with their own glyphs; its TrueType fonts get a
+built-in face.
 
 ### Painting
 
@@ -194,14 +204,16 @@ both the IPX and the TCP/IP connection
 DirectPlay's protocol here is rust-dos's own, so a game on a Windows 95
 or 98 image in another instance doesn't see these sessions. Lobby
 programs, such as the Zone's, aren't there, and WinSock (WS2_32 and
-WSOCK32) has no network yet. TAPI32 is there as on a machine with no
-modem installed: lineInitialize fails with LINEERR_NODEVICE, so a game
-that imports it starts, and its modem play says no modem is there.
-IMM32 is there as Windows 95 and 98 have it outside their Chinese,
-Japanese and Korean editions, with no input methods: every function
-returns 0, but ImmGetCompositionString, which returns -1, and
-ImmGetVirtualKey, which returns VK_PROCESSKEY, so a game that turns the
-IME off for its window, such as Age of Empires, starts.
+WSOCK32) has no network yet. DirectPlay 8 (DPNET.DLL), which DirectX 8
+games use, has no network either: none of its connections can start, so
+such a game finds no connection for network play and plays alone. TAPI32
+is there as on a machine with no modem installed: lineInitialize fails
+with LINEERR_NODEVICE, so a game that imports it starts, and its modem
+play says no modem is there. IMM32 is there as Windows 95 and 98 have it
+outside their Chinese, Japanese and Korean editions, with no input
+methods: every function returns 0, but ImmGetCompositionString, which
+returns -1, and ImmGetVirtualKey, which returns VK_PROCESSKEY, so a game
+that turns the IME off for its window, such as Age of Empires, starts.
 
 ### Copy protection
 

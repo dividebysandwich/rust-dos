@@ -8,7 +8,7 @@ use rust_dos::video::adapter::{Adapter, VideoSetup};
 use rust_dos::video::{self, Frame};
 use std::path::PathBuf;
 
-fn machine(adapter: Adapter) -> Cpu {
+fn machine(adapter: Adapter) -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("target/test_cursor"));
     video::bios::install(&mut cpu.bus, VideoSetup { adapter, ..Default::default() });
     cpu.load_shell();
