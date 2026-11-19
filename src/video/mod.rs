@@ -478,6 +478,15 @@ pub fn render_screen_rows(frame: &mut Frame, bus: &Bus) -> std::ops::Range<usize
     if y_min >= y_max {
         return 0..0;
     }
+    // The VGA's Screen Off bit: a black picture. Turning the screen back
+    // on marks it all dirty, and the decoders' caches go, so it is drawn
+    // whole again.
+    if bus.vga.screen_off() {
+        frame.drawn_from = DrawnFrom::default();
+        frame.doubled = false;
+        frame.rgba.as_chunks_mut::<4>().0.fill([0, 0, 0, 255]);
+        return 0..frame.height as usize;
+    }
 
     // The 256-color renderer covers every pixel, and leaves the rows it
     // would draw the same as they are.

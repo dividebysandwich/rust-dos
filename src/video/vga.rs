@@ -241,6 +241,14 @@ impl VgaCard {
         self.vram_graphics = vec![0; plane_size * 4];
     }
 
+    /// Whether a VGA's picture is turned off: the sequencer's Clocking Mode
+    /// register (SR01) bit 5, Screen Off, which the VGA has and the EGA
+    /// doesn't. The VGA then sends no video data, and the screen is black,
+    /// border included, until the bit clears.
+    pub fn screen_off(&self) -> bool {
+        self.adapter.vga_bios() && self.sequencer_regs[0x01] & 0x20 != 0
+    }
+
     /// Mark the entire screen as needing re-rendering. Use for state changes
     /// (palette, mode, attribute regs, latched start address) where computing
     /// an affected row range would be more work than just repainting.

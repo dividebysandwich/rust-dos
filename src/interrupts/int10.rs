@@ -1373,6 +1373,19 @@ pub fn handle(cpu: &mut Cpu) {
                     // Cursor Emulation
                     cpu.set_reg8(Register::AL, 0x12); // Supported
                 }
+                0x36 => {
+                    // Video Refresh Control: AL 0 turns the picture on, 1
+                    // off, through the sequencer's Clocking Mode register
+                    // (SR01) bit 5, Screen Off. Programs blank the screen
+                    // with it while they redraw.
+                    let al = cpu.get_al();
+                    if al <= 1 {
+                        let vga = &mut cpu.bus.vga;
+                        vga.sequencer_regs[0x01] = (vga.sequencer_regs[0x01] & !0x20) | (al << 5);
+                        vga.mark_dirty_full();
+                        cpu.set_reg8(Register::AL, 0x12);
+                    }
+                }
                 _ => {
                     cpu.bus
                         .log_string(&format!("[BIOS] Unhandled INT 10h AH=12h BL={:02X}", bl));
