@@ -56,7 +56,10 @@ changes listed below:
   as OLE32 has no structured storage, and so is user32's `dde.c`: it
   tests DDE conversations between the test program and a child
   program, and the built-in DDEML talks only to the built-in Program
-  Manager server.
+  Manager server. `dropreg.c` is rust-dos's own, written with Wine's
+  framework: it checks what Windows 98 SE's RegisterDragDrop and
+  RevokeDragDrop returned where `dragdrop.c` doesn't look, in the
+  order of the checks, in threads and with another process's windows.
 - `shell32/`: `progman_dde.c`, `shelllink.c`, `shellpath.c`,
   `shlexec.c`, `shlfileop.c`, `string.c` and the header they share,
   `shell32_test.h`, from `dlls/shell32/tests/`.

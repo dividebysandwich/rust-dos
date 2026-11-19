@@ -26,7 +26,7 @@ use crate::win32::task::{Next, Task};
 use crate::win32::user32::{current_pid, current_tid};
 
 const RPC_E_CHANGED_MODE: u32 = 0x8001_0106;
-const RPC_E_WRONG_THREAD: u32 = 0x8001_010E;
+pub(super) const RPC_E_WRONG_THREAD: u32 = 0x8001_010E;
 const CO_E_NOT_SUPPORTED: u32 = 0x8000_4021;
 const CO_E_CLASSSTRING: u32 = 0x8004_01F3;
 const CO_E_DLLNOTFOUND: u32 = 0x8004_01F8;
@@ -126,11 +126,6 @@ pub fn initialized(cpu: &mut Cpu) -> bool {
         || apartments.iter().any(|a| a.pid == pid && a.multithreaded)
 }
 
-/// Whether the running thread called OleInitialize and hasn't undone it.
-pub fn ole_initialized(cpu: &mut Cpu) -> bool {
-    apartment(cpu).is_some_and(|a| a.ole > 0)
-}
-
 /// Whether the running thread is in its process's multithreaded
 /// apartment: it joined it with CoInitializeEx, or it never initialized
 /// COM and the process has one.
@@ -186,7 +181,9 @@ pub fn ole_initialize(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         return Some(result);
     };
     a.ole += 1;
-    Some(if a.ole == 1 { S_OK } else { S_FALSE })
+    let first = a.ole == 1;
+    super::dragdrop::ole_initialized(cpu);
+    Some(if first { S_OK } else { S_FALSE })
 }
 
 /// CoUninitialize: the last one ends the thread's apartment, revoking

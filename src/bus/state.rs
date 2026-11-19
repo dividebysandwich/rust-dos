@@ -23,7 +23,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 81;
+const WIN32_VERSION: u16 = 82;
 /// The W32 versions this rust-dos loads: its own, and those an older one
 /// saved. 71's keeps only the names of the font files a program added
 /// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
@@ -35,10 +35,11 @@ const WIN32_VERSION: u16 = 81;
 /// (`ole32::LOCAL_SERVERS`), 71's to 77's not owner-drawn menu items'
 /// sizes and drawing (`user32::menu::OWNER_DRAWN`), 71's to 78's no
 /// system heaps (`heap::SYSTEM_HEAP_SAVED`), 71's to 79's no Toolhelp32
-/// snapshots (`object::Kind::Snapshot`, which they load without), and
-/// 71's to 80's not the TrueType fonts of the files a program added
-/// (`gdi32::fnt::TRUETYPE_SAVED`).
-const WIN32_LOADS: [u16; 11] = [71, 72, 73, 74, 75, 76, 77, 78, 79, 80, WIN32_VERSION];
+/// snapshots (`object::Kind::Snapshot`, which they load without), 71's
+/// to 80's not the TrueType fonts of the files a program added
+/// (`gdi32::fnt::TRUETYPE_SAVED`), and 71's to 81's no drop targets
+/// (`ole32::DROP_TARGETS`).
+const WIN32_LOADS: [u16; 12] = [71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, WIN32_VERSION];
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -1035,6 +1036,7 @@ mod tests {
         (79, 0x3960_B363_99FF_D384), // each process's system heap
         (80, 0x2471_174C_D479_E2F6), // Toolhelp32 snapshots
         (81, 0x2471_174C_D479_E2F6), // the TrueType fonts of files AddFontResource added
+        (82, 0x7F8F_BB1B_6F82_7B99), // OLE32's drop targets and OleInitialize's processes
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

@@ -18,6 +18,7 @@ use super::com::{
 };
 use super::stubs::{Api, Conv, Dll, Vtable};
 use crate::cpu::Cpu;
+use crate::savestate::Since;
 
 mod calls;
 mod compobj;
@@ -379,6 +380,9 @@ pub struct State {
     rpc: Added<rpc::Rpc>,
     /// The docfiles open and the objects of them.
     storage: Added<storage::Storages>,
+    /// The processes that called OleInitialize and the drop targets
+    /// registered.
+    drag_drop: Since<DROP_TARGETS, dragdrop::DropTargets>,
 }
 
 /// The W32 section's version that added local servers' state: a state
@@ -387,6 +391,9 @@ pub const LOCAL_SERVERS: u16 = 77;
 
 /// State OLE32 has had since `LOCAL_SERVERS`.
 pub type Added<T> = crate::savestate::Since<LOCAL_SERVERS, T>;
+
+/// The W32 section's version that added drag and drop's state.
+pub const DROP_TARGETS: u16 = 82;
 
 fn state(cpu: &mut Cpu) -> &mut State {
     &mut cpu.bus.win32.ole
@@ -415,6 +422,7 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32, tids: &[u32]) {
     stream::process_ended(cpu, pid);
     rpc::process_ended(cpu, pid);
     storage::process_ended(cpu, pid);
+    dragdrop::process_ended(cpu, pid);
 }
 
 /// The address of OLE32's function `name`.
@@ -887,5 +895,6 @@ crate::state_fields!(State {
     mallocs,
     globals,
     rpc,
-    storage
+    storage,
+    drag_drop
 });
