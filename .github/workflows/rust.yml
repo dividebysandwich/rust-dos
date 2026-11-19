@@ -12,12 +12,14 @@ on:
   # A pull request that changes only the documentation outside `src`
   # doesn't run this workflow: nothing reads it but the packages, which
   # copy it as it is. `src/config_ui/help/*.md` is compiled into the
-  # program, so `*.md` stops at the top folder.
+  # program, so `*.md` stops at the top folder. `.claude/` holds the
+  # coding agents' skills and scripts, which no build or test reads.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore:
       - "*.md"
       - "docs/**"
+      - ".claude/**"
   # Manual runs build every artifact (downloadable from the run page)
   # without creating a release.
   workflow_dispatch:
