@@ -1,6 +1,7 @@
 //! Blits from 8-bit DIB sections to the screen, as Wages of War draws
 //! its tactical map on a desktop of 256 colours: the pixels they leave,
-//! and how long one takes.
+//! and how long one takes. And blits onto a DIB section in a Voodoo3's
+//! memory, as Adrenix draws its HUD through its back buffer's DC.
 
 use super::*;
 use crate::config::DesktopDepth;
@@ -16,7 +17,7 @@ const BITS: u32 = 0x0010_0000;
 
 /// A machine with a desktop of `depth` on a Voodoo3, as the game runs,
 /// and the screen's DC with a palette of `colors` realized.
-fn machine(depth: DesktopDepth, colors: &[u32]) -> (Cpu, u32) {
+fn machine(depth: DesktopDepth, colors: &[u32]) -> (Box<Cpu>, u32) {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.bus.win32.desktop_depth = depth;
     cpu.bus
@@ -500,4 +501,113 @@ fn msimg32_blits_take_their_pixels_time_on_the_screen() {
         assert_eq!(msimg32::alpha_blend(cpu, &args), Some(TRUE));
     });
     assert!(nothing.abs_diff(12_500) < 200, "{nothing} ns");
+}
+
+/// A 16-bit (5-6-5) DIB section of `width` by `height` pixels at `bits`,
+/// its rows the top first, in a memory DC.
+fn dib_dc_16(cpu: &mut Cpu, bits: u32, width: i32, height: i32) -> u32 {
+    let bitmap = Bitmap {
+        width,
+        height,
+        bpp: 16,
+        planes: 1,
+        stride: width as u32 * 2,
+        bits: Vec::new(),
+        dib: Some(Dib {
+            bits,
+            header: vec![0; 40],
+            colors: Vec::new(),
+            masks: [0xF800, 0x07E0, 0x001F],
+            top_down: true,
+            compression: 3,
+            section: 0,
+            offset: 0,
+        }),
+        dc: 0,
+        dimension: (0, 0),
+    };
+    let dib = add(cpu, Kind::Bitmap { bitmap });
+    let mem = dc::create_compatible_dc(cpu, &[0]).unwrap();
+    dc::select_object(cpu, &[mem, dib]);
+    mem
+}
+
+/// A SRCCOPY onto a DIB section in a Voodoo3's memory (a DirectDraw
+/// surface's DC, the back buffer's) takes its turn behind the 3D drawing
+/// queued before it without waiting for it, as a DirectDraw blit does:
+/// it doesn't read the destination, and writes only the pixels it puts.
+/// The render threads are held at a gate while it runs; if it waits for
+/// them after all, a watchdog opens the gate after a while and the test
+/// fails instead of waiting for ever. A blit that reads the destination
+/// (SRCINVERT) then sees what both drew.
+#[test]
+fn a_copy_onto_the_card_through_a_dc_takes_its_turn_behind_the_3d_drawing() {
+    use crate::voodoo::workers::Job;
+    use crate::voodoo::{Board, Voodoo};
+    use std::sync::{Arc, Condvar, Mutex};
+    const SRCINVERT: u32 = 0x0066_0046;
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    cpu.bus.configure_voodoo(Some(Board::Voodoo3));
+    cpu.bus.voodoo = Some(Voodoo::with_workers(Board::Voodoo3, 2));
+    crate::win32::screen::linear_memory(&mut cpu);
+    const BACK: u32 = 0x1_0000;
+    let (width, height) = (16, 4);
+    let lfb = crate::win32::screen::physical_base(&cpu);
+    let dst = dib_dc_16(&mut cpu, lfb + BACK, width, height);
+    // A 4x2 source in system memory.
+    let pixels: [u16; 8] = [0x1234, 1, 2, 3, 4, 5, 6, 0xF00F];
+    for (i, &p) in pixels.iter().enumerate() {
+        cpu.bus.guest_write_16(BITS + 2 * i as u32, p);
+    }
+    let src = dib_dc_16(&mut cpu, BITS, 4, 2);
+    // The drawing queued before: the render threads wait at the gate,
+    // then fill the buffer with 1111h.
+    let gate: Arc<(Mutex<bool>, Condvar)> = Arc::default();
+    let v = cpu.bus.voodoo.as_ref().unwrap();
+    let fb = v.fbi.ram.clone();
+    let filled = vec![0x11; (width * height * 2) as usize];
+    v.submit_outside(Job::Hold(gate.clone()), None);
+    v.submit_outside(Job::bytes(fb, BACK as usize, filled), None);
+    let open = |gate: &Arc<(Mutex<bool>, Condvar)>| {
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+    };
+    let blit = |cpu: &mut Cpu, (x, y): (i32, i32), rop: u32| {
+        let args = [dst, x as u32, y as u32, 4, 2, src, 0, 0, rop];
+        assert_eq!(draw::bit_blt(cpu, &args), Some(TRUE));
+    };
+    let (done, wait) = std::sync::mpsc::channel::<()>();
+    let late = std::thread::scope(|s| {
+        let (gate, open) = (&gate, &open);
+        let watchdog = s.spawn(move || {
+            let late = wait
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_err();
+            if late {
+                open(gate);
+            }
+            late
+        });
+        blit(&mut cpu, (2, 1), SRCCOPY);
+        // Gone if the watchdog gave up waiting.
+        let _ = done.send(());
+        watchdog.join().unwrap()
+    });
+    assert!(!late, "the GDI blit waited for the 3D drawing");
+    open(&gate);
+    blit(&mut cpu, (10, 2), SRCINVERT);
+    let mut memory = vec![0; (width * height * 2) as usize];
+    crate::win32::screen::read(&mut cpu, BACK, &mut memory);
+    for y in 0..height {
+        for x in 0..width {
+            let i = ((y * width + x) * 2) as usize;
+            let got = u16::from_le_bytes([memory[i], memory[i + 1]]);
+            let want = match (x, y) {
+                (2..6, 1..3) => pixels[((y - 1) * 4 + x - 2) as usize],
+                (10..14, 2..4) => pixels[((y - 2) * 4 + x - 10) as usize] ^ 0x1111,
+                _ => 0x1111,
+            };
+            assert_eq!(got, want, "pixel ({x}, {y})");
+        }
+    }
 }

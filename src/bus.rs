@@ -23,6 +23,7 @@ mod verite;
 mod mach64;
 pub(crate) mod toadforce;
 mod banshee;
+pub(crate) mod lfb;
 mod voodoo;
 
 pub use verite::bios as verite_bios;
@@ -206,6 +207,10 @@ pub struct Bus {
     /// Retraces counted, and the one of the last page flip.
     retraces: u64,
     last_flip: Option<u64>,
+    /// The retrace of the last frame DirectDraw showed or the 3dfx card
+    /// swapped in, while the card drives the monitor. Not saved: a loaded
+    /// state starts without one.
+    last_present: Option<u64>,
     /// The Tandy's or PCjr's picture memory as it was at the last retrace,
     /// and where it was: programs (and the recompiler) write it as plain
     /// RAM, which marks nothing for repainting.
@@ -441,6 +446,10 @@ pub struct Bus {
     /// The front end sets it at start and after it loads a save state,
     /// from the settings the load leaves (`slots::loaded_settings`).
     pub memory_derived: bool,
+    /// Whether the machine's processor is the default for its display
+    /// adapter, `cpu` not being set (`config::default_cpu`). Set as
+    /// `memory_derived` is, when the hardware is configured or applied.
+    pub cpu_derived: bool,
 
     /// Optional observer for every `log_string` line. Installed by the debug
     /// server so log output can be streamed to remote clients.
@@ -837,6 +846,80 @@ impl Bus {
             return None;
         }
         self.vbe.lfb_offset(dst, len)
+    }
+
+    /// Where `len` bytes written at `dst` go in the video memory, if all
+    /// of them go through a VESA mode's window at A0000h (`write_8`'s
+    /// `vbe_window` branch) to one contiguous range of it. They do when
+    /// the run stays in the bank or page the window shows, which a run in
+    /// one 4 KB page of the window does on the VBE's 64 KB banks and the
+    /// mach64's 32 KB pages. None where a byte would go elsewhere (memory
+    /// mapped registers) or the bank wraps around the end of the memory.
+    fn vesa_window_run(&self, dst: usize, len: usize) -> Option<usize> {
+        let last = dst + len - 1;
+        if dst < ADDR_VGA_GRAPHICS
+            || last >= ADDR_VGA_GRAPHICS + SIZE_GRAPHICS
+            || !self.vbe_window()
+            || [dst, last]
+                .iter()
+                .any(|&a| self.s3_mmio(a).is_some() || self.mach64_mmio(a).is_some())
+        {
+            return None;
+        }
+        let first = self.vesa_window(dst - ADDR_VGA_GRAPHICS, true);
+        let end = self.vesa_window(last - ADDR_VGA_GRAPHICS, true);
+        // The Vérité's byte swapping (`host_xor`) scatters a run's bytes.
+        let swapped = !self.mach64() && self.vbe.host_xor != 0;
+        (!swapped && end == first + len - 1 && end < self.vbe.vram.len()).then_some(first)
+    }
+
+    /// Write the `len` bytes of plain RAM at `src` into a VESA mode's
+    /// window at A0000h at `dst`, as a string move's writes through
+    /// `write_8` do (see `vesa_window_run`). Returns false, having written
+    /// nothing, where they don't all go to one range of video memory.
+    /// `size` is the element's, for the profile's count of writes.
+    pub(crate) fn move_to_vesa_window(
+        &mut self,
+        src: usize,
+        dst: usize,
+        len: usize,
+        size: usize,
+    ) -> bool {
+        let Some(offset) = self.vesa_window_run(dst, len) else {
+            return false;
+        };
+        let _profile = self
+            .profile
+            .as_deref()
+            .map(|p| p.mem_run(dst, true, (len / size) as u64));
+        self.toadforce_writing(offset, len);
+        self.vbe.vram[offset..offset + len].copy_from_slice(&self.ram[src..src + len]);
+        self.lfb_written(dst, offset, len);
+        true
+    }
+
+    /// Fill a VESA mode's window at A0000h at `dst` with `count` elements
+    /// of `size` bytes of `value`, as a string store's writes do (see
+    /// `move_to_vesa_window`).
+    pub(crate) fn fill_vesa_window(
+        &mut self,
+        dst: usize,
+        count: usize,
+        size: usize,
+        value: u32,
+    ) -> bool {
+        let len = count * size;
+        let Some(offset) = self.vesa_window_run(dst, len) else {
+            return false;
+        };
+        let _profile = self
+            .profile
+            .as_deref()
+            .map(|p| p.mem_run(dst, true, count as u64));
+        self.toadforce_writing(offset, len);
+        fill_pattern(&mut self.vbe.vram[offset..offset + len], size, value);
+        self.lfb_written(dst, offset, len);
+        true
     }
 
     /// The rest of `write_vram` for `len` bytes written at `offset` (at
@@ -1320,7 +1403,9 @@ impl Bus {
     }
 
     /// Write VESA video memory, marking the rows of the picture it shows
-    /// in for repainting.
+    /// in for repainting. Translated code does the same by itself on the
+    /// pages `lfb_direct` gives it (`dynrec::x64::card_count`): what
+    /// changes here changes there too.
     #[inline]
     fn write_vram(&mut self, offset: usize, bytes: &[u8]) {
         // What a ToadForce's driver queued to draw there comes first.
@@ -1393,6 +1478,12 @@ impl Bus {
         {
             self.powervr_write(at, value as u32, 2);
             return false;
+        }
+        // Both bytes into one place of a VESA mode's window, as the two
+        // `write_8` calls would put them.
+        if let Some(offset) = self.vesa_window_run(addr, 2) {
+            self.write_vram(offset, &value.to_le_bytes());
+            return true;
         }
         // Low byte
         let d1 = self.write_8(addr, (value & 0xFF) as u8);
@@ -1531,6 +1622,12 @@ impl Bus {
             && let Some(at) = self.powervr_at(addr)
         {
             self.powervr_write(at, value, 4);
+            return;
+        }
+        // All four bytes into one place of a VESA mode's window, as the
+        // `write_8` calls would put them.
+        if let Some(offset) = self.vesa_window_run(addr, 4) {
+            self.write_vram(offset, &value.to_le_bytes());
             return;
         }
         self.write_16(addr, (value & 0xFFFF) as u16);
@@ -3148,17 +3245,33 @@ impl Bus {
     /// flips (a flip within the last second or so) only the flips count.
     /// The 3dfx card only ever flips. A frame the built-in Windows'
     /// DirectDraw showed counts once, however many blits made it.
+    ///
+    /// GDI's drawing that changed the picture counts as a frame too. On
+    /// the VGA and the VESA modes it marks the rows it changed, as the
+    /// program's own writes do. A Banshee or Voodoo3 shows the desktop
+    /// from its own memory, which marks nothing, so there a retrace
+    /// after GDI changed the picture counts, unless DirectDraw showed a
+    /// frame or the card swapped in the last second or so: then those
+    /// are the frames, as flips are on the VGA.
     fn count_frame(&mut self) {
         self.retraces += 1;
         let flipped = std::mem::take(&mut self.vga.flipped);
         let drawn = std::mem::take(&mut self.vga.drawn);
         let presented = std::mem::take(&mut self.vga.presented);
+        let gdi = std::mem::take(&mut self.vga.gdi_changed);
         // While the 3dfx card shows, its buffer swaps are the frames, or
         // on a Banshee or Voodoo3, what DirectDraw shows in its memory.
         if let Some(v) = &mut self.voodoo {
             let swapped = std::mem::take(&mut v.swapped);
             if v.output() {
-                self.frames_drawn += swapped.max(u64::from(presented));
+                if presented || swapped > 0 {
+                    self.last_present = Some(self.retraces);
+                }
+                let presenting = self
+                    .last_present
+                    .is_some_and(|at| self.retraces - at < 70);
+                let shown = presented || (gdi && !presenting);
+                self.frames_drawn += swapped.max(u64::from(shown));
                 self.activity.swapped(swapped);
                 return;
             }
@@ -3242,6 +3355,41 @@ impl Bus {
             return (w as usize, h as usize);
         }
         self.adapter_display_size()
+    }
+
+    /// The picture on the monitor: which device scans it out, its name
+    /// and the bits a pixel of a card's own mode (the debugger's
+    /// `video.scanout` and `video.name`). It is the 3dfx card's while
+    /// it drives the monitor (a Banshee's or Voodoo3's desktop, or a
+    /// Voodoo Graphics' or Voodoo2's 3D picture), else the VGA's mode.
+    /// The VGA keeps the mode the BIOS last set while the card shows its
+    /// own, often text mode 3 under Windows, so `video_mode` says nothing
+    /// of the picture then.
+    pub fn scanout(&self) -> Scanout {
+        if let Some(v) = &self.voodoo
+            && v.output()
+        {
+            let (width, height) = v.size();
+            let (device, title, bpp) = match (v.banshee(), v.board.model()) {
+                (Some(b), _) => ("banshee", "Banshee", b.desktop_bytes_per_pixel() * 8),
+                (None, crate::voodoo::Model::Voodoo2) => ("voodoo2", "Voodoo2", 16),
+                (None, _) => ("voodoo1", "Voodoo1", 16),
+            };
+            return Scanout {
+                device,
+                name: format!("{title} {width}x{height}x{bpp}"),
+                bpp: Some(bpp),
+            };
+        }
+        let bpp = match self.video_mode {
+            VideoMode::Vesa => self.vbe.mode.map(|m| u32::from(m.bpp)),
+            _ => None,
+        };
+        Scanout {
+            device: "vga",
+            name: format!("{:?}", self.video_mode),
+            bpp,
+        }
     }
 
     /// The size of the screen of the mode the display adapter is in:
@@ -3364,4 +3512,15 @@ impl Bus {
             log.flush();
         }
     }
+}
+
+/// The picture on the monitor (`Bus::scanout`): the device that scans
+/// it out (`vga`, `banshee`, `voodoo1` or `voodoo2`), its name (the VGA
+/// mode's, or the card's like `Banshee 640x480x16`), and the bits a
+/// pixel of a VESA mode or the card's own (None in the VGA's standard
+/// modes, which the name tells).
+pub struct Scanout {
+    pub device: &'static str,
+    pub name: String,
+    pub bpp: Option<u32>,
 }

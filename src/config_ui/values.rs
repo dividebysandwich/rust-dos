@@ -110,7 +110,7 @@ fn memsizes(cpu: CpuModel) -> impl DoubleEndedIterator<Item = usize> + Clone {
 /// "(auto)" while `memsize` isn't set and the size is the default for
 /// the CPU and the display adapter.
 pub(super) fn memsize_bar(s: &Settings) -> String {
-    let (mb, steps) = (s.memory_mb(), memsizes(s.cpu));
+    let (mb, steps) = (s.memory_mb(), memsizes(s.cpu_model()));
     let (full, cells) = (steps.clone().filter(|&m| m <= mb).count().saturating_sub(1), steps.count() - 1);
     // Short enough for the row with the 15 squares of a CPU that takes
     // 512 MB: a longer value is shortened in the middle of the squares.
@@ -245,7 +245,10 @@ impl Item {
             Vfx1SwapEyes => on_off(|s, on| s.vfx1.swap_eyes = on),
             Vfx1Steer => on_off(|s, on| s.vfx1.steer = on),
             Vfx1StereoBios => on_off(|s, on| s.vfx1.stereo_bios = on),
-            Filter => each(s, [crate::config::Filter::Nearest, crate::config::Filter::Linear], |s, f| s.filter = f),
+            Filter => {
+                use crate::config::Filter;
+                each(s, [Filter::Sharp, Filter::Hard, Filter::Linear], |s, f| s.filter = f)
+            }
             Shader => each(s, crate::video::shader::Shader::ALL, |s, shader| s.shader = shader),
             Monochrome => each(s, crate::video::mono::Monochrome::ALL, |s, mono| s.monochrome = mono),
             MonitorEffects => each(s, crate::video::power::MonitorEffects::ALL, |s, e| s.monitor_effects = e),
@@ -255,10 +258,23 @@ impl Item {
             Core => each(s, [CoreMode::Auto, CoreMode::Dynamic, CoreMode::Normal], |s, core| s.core = core),
             Fpu => on_off(|s, on| s.fpu_fast = on),
             Cpu => each(s, CpuModel::ALL, |s, cpu| {
-                s.cpu = cpu;
+                s.cpu = Some(cpu);
                 s.memsize = s.memsize.map(|mb| mb.min(cpu.max_memsize()));
             }),
-            Machine => each(s, crate::video::adapter::Adapter::ALL, |s, machine| s.machine = machine),
+            // The card brings its processor where `cpu` isn't set. A set
+            // one that the new card's games don't run on is unset, so the
+            // card's default replaces it: the settings window of an earlier
+            // rust-dos saved `cpu=486` into every configuration file. One
+            // picked with the card in place stays. The memory is cut to
+            // what the processor takes, as for a picked one.
+            Machine => each(s, crate::video::adapter::Adapter::ALL, |s, machine| {
+                let suited = !s.cpu_below_card();
+                s.machine = machine;
+                if suited && s.cpu_below_card() {
+                    s.cpu = None;
+                }
+                s.memsize = s.memsize.map(|mb| mb.min(s.cpu_model().max_memsize()));
+            }),
             Voodoo => on_off(|s, on| s.voodoo.enabled = on),
             VoodooMemory => {
                 each(s, crate::voodoo::Board::ALL, |s, board| s.voodoo.board = board)
@@ -295,6 +311,7 @@ impl Item {
             ToadForceRenderer => each(s, crate::toadforce::Renderer::ALL, |s, renderer| {
                 s.toadforce_renderer = renderer
             }),
+            ToadForceGamma => each(s, gammas(), |s, gamma| s.toadforce_gamma = gamma),
             PowerVrFilter => {
                 use crate::powervr::tsp::Filter;
                 each(s, [Filter::Auto, Filter::Point, Filter::Bilinear], |s, filter| s.powervr_filter = filter)
@@ -509,8 +526,14 @@ impl Item {
                 let next = if dir > 0 { (r / 10 + 1) * 10 } else { (r - 1) / 10 * 10 };
                 s.vr.resolution = Some(next.clamp(min, max) as u32);
             }
+            // From the model the machine has, set or not.
+            Cpu => {
+                let cpu = cycle(&CpuModel::ALL, &s.cpu_model(), dir);
+                s.cpu = Some(cpu);
+                s.memsize = s.memsize.map(|mb| mb.min(cpu.max_memsize()));
+            }
             Memsize => {
-                let steps: Vec<usize> = memsizes(s.cpu).collect();
+                let steps: Vec<usize> = memsizes(s.cpu_model()).collect();
                 s.memsize = Some(step_number(&steps, s.memory_mb(), dir));
             }
             Volume(channel) => s.mixer.set_level(channel, step_units(s.mixer.level(channel), dir, 10, MAX_LEVEL)),
@@ -596,8 +619,9 @@ impl Item {
             Item::CaptureDir => s.capture_dir = expand_host_path(text, Path::new(""), crate::hostdirs::home_dir().as_deref()),
             Item::Memsize => {
                 let mb = crate::config::parse_memsize(text)?;
-                if mb > s.cpu.max_memsize() {
-                    return Err(format!("A {} takes up to {} MB", s.cpu.describe(), s.cpu.max_memsize()));
+                let cpu = s.cpu_model();
+                if mb > cpu.max_memsize() {
+                    return Err(format!("A {} takes up to {} MB", cpu.describe(), cpu.max_memsize()));
                 }
                 s.memsize = Some(mb);
             }
@@ -652,6 +676,13 @@ impl Item {
             }
             // Not set: the default for the CPU and the display adapter.
             Item::Memsize => s.memsize.take().is_some(),
+            // Not set: the default for the display adapter.
+            Item::Cpu => {
+                let changed = s.cpu.take().is_some();
+                let most = s.cpu_model().max_memsize();
+                s.memsize = s.memsize.map(|mb| mb.min(most));
+                changed
+            }
             Item::Deadzone => {
                 let default = crate::joystick::JoystickSettings::default().deadzone;
                 std::mem::replace(&mut s.joystick.deadzone, default) != default

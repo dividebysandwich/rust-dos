@@ -254,6 +254,11 @@ pub const ESP: u8 = 4;
 /// The flags POPF and POPFD load at CPL 0 (`Uop::LoadFlags`): CF, PF, AF,
 /// ZF, SF, TF, IF, DF, OF, IOPL and NT, as `Cpu::load_flags_pm` has them.
 pub const POPF_RING0: u32 = 0x7FD5;
+/// The flags they load at a CPL above 0 that allows I/O (CPL <= IOPL):
+/// those of ring 0 but IOPL.
+pub const POPF_IOPL: u32 = 0x4FD5;
+/// The flags they load at a CPL above IOPL: those but IF as well.
+pub const POPF_USER: u32 = 0x4DD5;
 /// The flags a translated POPFD leaves as they were: AC and ID.
 pub const POPF_KEPT: u32 = 0x24_0000;
 
@@ -329,6 +334,14 @@ pub enum Uop {
     AddConst { t: T, v: u32, size: u8 },
     /// t >>= count, arithmetically, without flags.
     SarConst { t: T, count: u8 },
+    /// t += src << `shift` (0 to 3), wrapped to `size` bytes (2 or 4),
+    /// without flags: an offset moved by a number of words or dwords.
+    AddShifted {
+        t: T,
+        src: T,
+        shift: u8,
+        size: u8,
+    },
     /// Zero- or sign-extend t's low `from` bytes to 32 bits.
     Extend { t: T, from: u8, signed: bool },
     /// t = the offset of a memory operand: disp + base + index * scale,
@@ -396,6 +409,14 @@ pub enum Uop {
     /// others stay), and t the value with the bit set, cleared or
     /// complemented.
     BitOp { op: BitKind, size: u8, t: T, bit: Src },
+    /// BSF (`forward`) or BSR of src, as `logic::bit_scan`: where src isn't
+    /// 0, dst = the index of its lowest or highest set bit and ZF clear;
+    /// where it is, ZF set and dst as it was. The other flags stay.
+    BitScan {
+        forward: bool,
+        dst: T,
+        src: T,
+    },
     /// #GP(0) if the value is past the CS limit (a near jump's target).
     CheckLimit { src: Src },
     /// #GP(0) in protected mode if CPL is above IOPL (CLI).
@@ -459,11 +480,12 @@ pub enum Uop {
     In { size: u8, port: Src, t: T },
     Out { size: u8, port: Src, t: T },
     /// POPF or POPFD's flags from t, a `size` byte value, as
-    /// `Cpu::load_flags_pm` loads them at CPL 0: the arithmetic flags, TF,
-    /// DF, NT, IF and IOPL. The instruction's handler runs it instead of the
-    /// operations after this one where CPL isn't 0 (or the CPU is in
-    /// virtual-8086 mode), or a POPFD would change AC or ID (as CPUID's
-    /// detection does). Nothing before it may change anything.
+    /// `Cpu::load_flags_pm` loads them: the arithmetic flags, TF, DF and
+    /// NT, IF where CPL <= IOPL, and IOPL at CPL 0 (`POPF_RING0`,
+    /// `POPF_IOPL`, `POPF_USER`). Virtual-8086 mode runs at CPL 3, so the
+    /// same rule holds there. The instruction's handler runs it instead of
+    /// the operations after this one where a POPFD would change AC or ID
+    /// (as CPUID's detection does). Nothing before it may change anything.
     LoadFlags { t: T, size: u8 },
     /// After `LoadFlags` and the stack pointer: the block stops after the
     /// instruction where TF is set (its trap comes from the execution loop)
@@ -520,11 +542,10 @@ pub enum Uop {
     /// x = the double at handle m, which is RAM's (`BailUnlessRam`); with
     /// `canon` as `FSet` makes one (the handlers' `canon_f64` of an operand).
     FLoad64 { x: X, m: T, canon: bool },
-    /// x = the signed qword at handle m, which is RAM's (`BailUnlessRam`),
-    /// where the double holds it exactly (below 2^53 either way); else the
-    /// instruction's handler runs it instead of the operations after this
-    /// one, as `Bail`.
-    FLoadInt64 { x: X, m: T },
+    /// Push the signed qword at handle m, which is RAM's (`BailUnlessRam`),
+    /// as FILD's handler does: its exact 80 bits, which every qword has,
+    /// and the double they round to.
+    FPushInt64 { m: T },
     /// t = the low dword of x's bits, or the high one with `high`.
     FToHalf { t: T, x: X, high: bool },
     /// t = the single FST stores of ST(0), whose double x holds
@@ -541,10 +562,16 @@ pub enum Uop {
     /// t = x as a word or dword (`size` 2 or 4), rounded as the control
     /// word says (`fpu::data::to_int`).
     FToInt { t: T, x: X, size: u8 },
-    /// lo and hi = the low and high dwords of x as a qword, where the
-    /// control word rounds to nearest or chops and the value fits; else
-    /// the instruction's handler runs it instead of the operations after
-    /// this one, as `Bail` (nothing before it may change anything).
+    /// lo and hi = the low and high dwords of the qword FISTP stores of
+    /// ST(0), whose double x holds (`data::st0_int_bits`): x converted
+    /// where the register holds no more than it, the control word rounds
+    /// to nearest or chops and the value fits; the integer the 80 bits
+    /// hold where it is from 2^53 to 2^63; x converted, under the same
+    /// roundings, where the 80 bits hold more but x is under 2^52 and
+    /// neither an integer nor halfway between two (`Precise::Int`), as
+    /// the 80 bits then round to the same integer; else through the
+    /// handlers' code, which sets IE for the integer indefinite. The block
+    /// goes on after it either way.
     FToInt64 { lo: T, hi: T, x: X },
     /// a *= b.
     FMul { a: X, b: X },
@@ -563,6 +590,12 @@ pub enum Uop {
     /// FSQRT: `fpu::arithmetic::fsqrt`, which takes the root of ST(0)'s
     /// double.
     FSqrt,
+    /// FRNDINT: `fpu::arithmetic::frndint`, which rounds ST(0) by the
+    /// control word's rounding mode. (The x86-64 code rounds to nearest a
+    /// double below 2^52 itself.)
+    FRndint,
+    /// FABS: `fpu::arithmetic::fabs`.
+    FAbs,
     /// Push the 80 bits at handle m, which is RAM's (`BailUnlessRam`), as
     /// FLD's handler does.
     FLoad80 { m: T },

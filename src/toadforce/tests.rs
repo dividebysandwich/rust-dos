@@ -120,7 +120,7 @@ fn the_identity_registers_read_as_the_card() {
     assert_eq!(rig.read(regs::CAPS + 24), 0);
     // Reserved registers read as 0 and ignore writes.
     let mut rig = rig;
-    for offset in [0x030, 0x068, 0x0FC, 0x800, 0xFFFC] {
+    for offset in [0x030, 0x068, 0x0FC, 0xC00, 0xFFFC] {
         rig.write(offset, u32::MAX);
         assert_eq!(rig.read(offset), 0, "{offset:X}h");
     }

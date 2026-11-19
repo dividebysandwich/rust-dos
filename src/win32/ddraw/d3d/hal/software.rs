@@ -117,6 +117,10 @@ pub fn description() -> Description {
         texture_aspect: TEXTURE_MAX,
         raster: 0,
         texture: 0,
+        // D3DPTEXTURECAPS_COLORKEYBLEND.
+        texture7: 0x1000,
+        raster8: 0,
+        ops8: 0,
         filter: 0,
         address: 0,
         // D3DPBLENDCAPS_: the destination's alpha and color and their

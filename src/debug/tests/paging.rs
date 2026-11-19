@@ -112,7 +112,7 @@ fn returns(value: u8) -> [u8; 6] {
 /// A machine with `memory_mb` MB at the shell's prompt, with the
 /// built-in Windows on and `paging_program` as T.EXE in its folder; the
 /// address of the program's data.
-fn paging_shell(name: &str, memory_mb: usize, pages: u32, sweep: bool) -> (Cpu, u32) {
+fn paging_shell(name: &str, memory_mb: usize, pages: u32, sweep: bool) -> (Box<Cpu>, u32) {
     let dir = crate::test_dir::path(&format!("debug-{name}"));
     std::fs::create_dir_all(&dir).unwrap();
     let (program, data) = paging_program(pages, sweep);
@@ -132,7 +132,7 @@ fn paging_machine(
     memory_mb: usize,
     pages: u32,
     sweep: bool,
-) -> (Cpu, DebugHub, u32, u32) {
+) -> (Box<Cpu>, DebugHub, u32, u32) {
     let (mut cpu, data) = paging_shell(name, memory_mb, pages, sweep);
     assert!(cpu.load_executable("T.EXE", None));
     let mut hub = DebugHub::for_tests(&cpu);

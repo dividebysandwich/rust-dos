@@ -581,9 +581,11 @@ impl Footprint {
             // Later data over these bytes has to come after them, and so
             // does data in the same words: a worker writes half a word by
             // reading it first.
-            Job::Bytes { at, bytes, .. } => {
-                let (start, end) = (*at as u64, (*at + bytes.len()) as u64);
-                self.texture((start & !1, end.next_multiple_of(2)));
+            Job::Bytes { runs, .. } => {
+                for &(at, len) in runs {
+                    let (start, end) = (at as u64, (at + len) as u64);
+                    self.texture((start & !1, end.next_multiple_of(2)));
+                }
             }
             _ => {}
         }

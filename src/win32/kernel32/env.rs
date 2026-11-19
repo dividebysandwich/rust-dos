@@ -164,10 +164,19 @@ pub(super) fn beep(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-/// QueryPerformanceCounter: the machine's clock in PIT ticks.
+/// QueryPerformanceCounter: the machine's clock in PIT ticks. On Windows
+/// 98, VTD latches channel 0's count with an OUT to port 43h and reads it
+/// with two INs from port 40h, and each access takes its time on the ISA
+/// bus: the count is the time of the latch, and the call returns after
+/// the reads. A frame limiter that calls it in a loop (MechCommander's)
+/// so makes a pass in some microseconds, as on Windows 98, rather than in
+/// the few instructions of the loop itself.
 pub(super) fn query_performance_counter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    use crate::timer::{IO_READ_NS, IO_WRITE_NS};
+    cpu.bus.clock.stall(IO_WRITE_NS);
     let micros = cpu.bus.clock.now_micros() as u128;
     let ticks = (micros * PERFORMANCE_FREQUENCY as u128 / 1_000_000) as u64;
+    cpu.bus.clock.stall(2 * IO_READ_NS);
     write_u64(cpu, args[0], ticks)
 }
 

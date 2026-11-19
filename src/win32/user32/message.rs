@@ -1086,7 +1086,9 @@ pub fn peek_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         0,
     );
     // Found nothing and changed nothing: an idle proof goes through it,
-    // up to when the thread's next timer is due.
+    // up to when the thread's next timer is due. It read no RAM but its
+    // arguments: the queue it looked in is the system's, and the message
+    // is written only where one is found.
     if let Some(before) = before
         && result == Some(FALSE)
         && quiet(cpu).is_some_and(|after| after == before)
@@ -1101,6 +1103,7 @@ pub fn peek_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             .min();
         let until = due.map(|due| cpu.bus.clock.icount_at_micros(due));
         crate::idle::pure_call(cpu, until);
+        crate::idle::reads_arguments(cpu);
     }
     result
 }
@@ -1702,14 +1705,7 @@ fn input_idle(cpu: &mut Cpu) {
         _ => return,
     }
     // A thread that waits for it goes on now, not at the next tick.
-    let waited = win32
-        .processes
-        .iter()
-        .flat_map(|p| &p.threads)
-        .any(|t| t.wait.as_ref().is_some_and(|w| w.objects.contains(&id)));
-    if waited {
-        thread::wake(cpu);
-    }
+    thread::object_changed(win32, id);
 }
 
 const WAIT_FAILED: u32 = 0xFFFF_FFFF;

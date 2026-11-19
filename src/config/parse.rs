@@ -2,7 +2,7 @@
 
 use super::types::parse_bool;
 use super::{
-    AspectRatio, Config, DesktopDepth, DosVersion, Filter, RunLockSetting, Section, Settings,
+    AspectRatio, Config, DesktopDepth, DesktopSize, DosVersion, Filter, RunLockSetting, Section,
     Win32Locale, Win32Trace, WindowsVersion, parse_mouse_sensitivity,
 };
 use crate::cpu::{CoreMode, CpuModel};
@@ -132,7 +132,9 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         },
                         "filter" => match Filter::parse(value) {
                             Some(filter) => config.filter = Some(filter),
-                            None => warn(format!("invalid filter '{}' (nearest or linear)", value)),
+                            None => {
+                                warn(format!("invalid filter '{value}' (sharp, hard or linear)"))
+                            }
                         },
                         "shader" => match Shader::parse(value) {
                             Some(shader) => config.shader = Some(shader),
@@ -204,6 +206,18 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                                 "invalid toadforce_renderer '{}' (auto, opengl or software)",
                                 value
                             )),
+                        },
+                        "toadforce_gamma" => match value.to_ascii_lowercase().as_str() {
+                            "off" => config.toadforce_gamma = Some(None),
+                            _ => match value.parse::<f32>() {
+                                Ok(g) if (0.1..=2.0).contains(&g) => {
+                                    config.toadforce_gamma = Some(Some(g))
+                                }
+                                _ => warn(format!(
+                                    "invalid toadforce_gamma '{}' (off, or 0.1 to 2)",
+                                    value
+                                )),
+                            },
                         },
                         "verite_rom" => {
                             let value = value.trim_matches('"');
@@ -368,6 +382,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(depth) => config.win32_depth = Some(depth),
                             None => warn(format!(
                                 "invalid win32_depth '{}' (auto, 8 or 16)",
+                                value
+                            )),
+                        },
+                        "win32_desktop" => match DesktopSize::parse(value) {
+                            Some(size) => config.win32_desktop = Some(size),
+                            None => warn(format!(
+                                "invalid win32_desktop '{}' (640x480, 800x600 or 1024x768)",
                                 value
                             )),
                         },
@@ -748,7 +769,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
         config.sound.gus.drive = None;
     }
     // More memory than the CPU's machines took is as much as they did.
-    let cpu = config.cpu.unwrap_or(Settings::default().cpu);
+    let cpu = config.cpu_model();
     if let Some(mb) = config.memsize.filter(|&mb| mb > cpu.max_memsize()) {
         warnings.push(format!("memsize {} MB is more than a {} takes: {} MB", mb, cpu.describe(), cpu.max_memsize()));
     }

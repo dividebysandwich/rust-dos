@@ -19,8 +19,8 @@ changes listed below:
   `thread.c`, `time.c`, `timer.c`, `version.c`, `virtual.c` from
   `dlls/kernel32/tests/`;
 - `advapi32/`: `registry.c` from `dlls/advapi32/tests/`;
-- `user32/`: `class.c`, `dce.c`, `dialog.c`, `input.c`, `msg.c`,
-  `resource.c`, `static.c`, `text.c`, `uitools.c`, `win.c`,
+- `user32/`: `class.c`, `dce.c`, `dialog.c`, `input.c`, `listbox.c`,
+  `msg.c`, `resource.c`, `static.c`, `text.c`, `uitools.c`, `win.c`,
   `wsprintf.c`, and the resources they share, `resource.rc` with
   `test_mono.bmp`, from `dlls/user32/tests/`;
 - `gdi32/`: `bitmap.c`, `brush.c`, `clipping.c`, `dc.c`, `gdiobj.c`,

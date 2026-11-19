@@ -26,7 +26,9 @@
 //!
 //! Memory read back for the program is hot for a while (`cool`): the
 //! program reads or writes it, and a 2D operation there is cheaper on the
-//! CPU than drawn on the GPU and read back again.
+//! CPU than drawn on the GPU and read back again. It stays hot while the
+//! program goes on reading it (`touch`), and cools once a period goes by
+//! without a read.
 
 /// Bytes a page, a row of the renderer's texture of the memory.
 pub const PAGE: u32 = 4096;
@@ -109,8 +111,13 @@ pub struct Tracker {
     /// Banshee's texture units last looked (`take_changed`): read back
     /// from the renderer, or drawn into in software.
     changed: Ranges,
-    /// Bytes read back for the program since the last `cool`.
+    /// Bytes read back for the program since the last `cool`, and those
+    /// hot before it that the program read again in the period before.
     hot: Ranges,
+    /// The hot bytes the program read since the last `cool`, which stay
+    /// hot through the next. The read that turns bytes hot isn't one of
+    /// them: bytes read back once cool at the next `cool`, however soon.
+    read: Ranges,
 }
 
 /// Add page `page` to `runs`, byte ranges of whole pages in order.
@@ -326,9 +333,33 @@ impl Tracker {
         !self.hot.is_empty()
     }
 
-    /// Nothing is hot any more: the program may have stopped reading it.
+    /// The program reads or writes bytes `start..end`: those of them
+    /// that are hot stay hot through the next `cool`, though nothing
+    /// there was behind the GPU to read back.
+    #[inline]
+    pub fn touch(&mut self, start: u32, end: u32) {
+        if self.hot.is_empty() || !self.hot.any_in(start, end) {
+            return;
+        }
+        let first = self.hot.0.partition_point(|r| r.1 <= start);
+        let last = self.hot.0.partition_point(|r| r.0 < end);
+        for i in first..last {
+            let (a, b) = self.hot.0[i];
+            self.read.add(a.max(start), b.min(end));
+        }
+    }
+
+    /// A period went by: what the program didn't read in it cools, as it
+    /// may have stopped reading there, and what it read stays hot.
     pub fn cool(&mut self) {
-        self.hot.clear();
+        self.hot = std::mem::take(&mut self.read);
+    }
+
+    /// Two periods without reads went by: nothing is hot.
+    #[cfg(test)]
+    pub fn cool_all(&mut self) {
+        self.cool();
+        self.cool();
     }
 }
 
@@ -436,8 +467,35 @@ mod tests {
         // Read back for the emulator (a save state), a page stays cool.
         p.take_gpu(PAGE, 2 * PAGE, false);
         assert!(!p.hot_in(PAGE, 2 * PAGE));
+        // Read back once and not read again, it cools at the next cool,
+        // however soon that comes.
         p.cool();
-        assert!(!p.hot_in(0, 8 * PAGE));
+        assert!(!p.any_hot());
+    }
+
+    #[test]
+    fn hot_bytes_the_program_goes_on_reading_stay_hot() {
+        // A program that reads the same rows every frame (Test Drive 4's
+        // two pixels of the back buffer) finds them in the memory after
+        // the first read back, with nothing behind the GPU there: its
+        // reads keep them hot, and they never go back to the GPU only to
+        // be read back again.
+        let mut p = Tracker::new(8 * PAGE as usize);
+        p.take_dirty(0, 8 * PAGE);
+        p.drawn_on_gpu(PAGE, 3 * PAGE);
+        p.take_gpu(2 * PAGE, 3 * PAGE, true);
+        for _ in 0..4 {
+            p.touch(2 * PAGE + 10, 2 * PAGE + 20);
+            p.cool();
+            assert!(p.hot_in(2 * PAGE + 10, 2 * PAGE + 20));
+            // Only the bytes read stay: the rest of the page cooled.
+            assert!(!p.hot_in(2 * PAGE + 20, 3 * PAGE));
+        }
+        // A read of bytes that aren't hot leaves them cool, and a period
+        // without reads cools the rest.
+        p.touch(5 * PAGE, 6 * PAGE);
+        p.cool();
+        assert!(!p.any_hot());
     }
 
     #[test]

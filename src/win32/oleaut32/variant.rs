@@ -276,7 +276,7 @@ fn currency_text(c: i64) -> String {
 }
 
 /// What the destination gets.
-enum Out {
+pub(super) enum Out {
     Bits(u16, u64),
     Str(Vec<u16>),
     Iface(u16, u32),
@@ -377,7 +377,7 @@ fn change(v: &Val, vt: u16, flags: u32) -> Result<Out, u32> {
 }
 
 /// A VT_R4's text is "%.7G" of the single value.
-fn change_from(cpu: &mut Cpu, src: u32, vt: u16, flags: u32) -> Result<Out, u32> {
+pub(super) fn change_from(cpu: &mut Cpu, src: u32, vt: u16, flags: u32) -> Result<Out, u32> {
     let v = read(cpu, src, 0)?;
     if vt == VT_BSTR
         && let Val::Real(f) = v
@@ -447,7 +447,7 @@ pub fn variant_change_type_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     change_type(cpu, dest, src, flags & 0xFFFF, vt as u16)
 }
 
-fn change_type(cpu: &mut Cpu, dest: u32, src: u32, flags: u32, vt: u16) -> Option<u32> {
+pub(super) fn change_type(cpu: &mut Cpu, dest: u32, src: u32, flags: u32, vt: u16) -> Option<u32> {
     if !cpu.bus.guest_probe(dest, 16, true) || !cpu.bus.guest_probe(src, 16, false) {
         return Some(E_INVALIDARG);
     }
@@ -459,7 +459,8 @@ fn change_type(cpu: &mut Cpu, dest: u32, src: u32, flags: u32, vt: u16) -> Optio
 }
 
 /// VariantCopy(dest, src): a BSTR copied, an interface with a reference
-/// added, a VT_BYREF pointer as it is.
+/// added, an array copied with its elements, a VT_BYREF pointer as it
+/// is.
 pub fn variant_copy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[dest, src] = args else { unreachable!() };
     if !cpu.bus.guest_probe(dest, 16, true) || !cpu.bus.guest_probe(src, 16, false) {
@@ -472,8 +473,14 @@ pub fn variant_copy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let out = if vt & VT_BYREF != 0 {
         Out::Bits(vt, cpu.bus.guest_read_32(src + 8) as u64)
     } else if vt & VT_ARRAY != 0 {
-        // SAFEARRAYs aren't taken yet.
-        return Some(DISP_E_BADVARTYPE);
+        // A copy of the array and its elements.
+        let mut releases = Vec::new();
+        super::safearray::clear_variant(cpu, dest, &mut releases);
+        let mut calls = Vec::new();
+        let copied = super::safearray::copy_variant(cpu, dest, src, &mut calls);
+        calls.extend(releases);
+        let result = if copied { S_OK } else { crate::win32::com::E_OUTOFMEMORY };
+        return crate::win32::ole32::call_all(cpu, result, &calls);
     } else {
         match read(cpu, src, 0) {
             Ok(Val::Str(units)) => {

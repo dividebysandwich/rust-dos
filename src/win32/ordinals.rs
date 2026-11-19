@@ -26,7 +26,8 @@
 //! The ordinals are the same under every `win32_version`. Programs import
 //! by ordinal only what has no name, and that is the same on Windows 95.
 //! The built-in DLLs Windows 98 SE doesn't have (GLIDE2X, GLIDE3X, D3D8,
-//! DINPUT8, WING32) number their functions as the DLLs they stand for do.
+//! DINPUT8, DPNET, WING32) number their functions as the DLLs they stand
+//! for do.
 
 use super::stubs::{DLLS, Dll};
 use std::collections::HashMap;
@@ -69,6 +70,7 @@ static LISTS: &[(&str, &str)] = &[
     ("OLEPRO32.DLL", include_str!("ordinals/olepro32_dll.txt")),
     ("OPENGL32.DLL", include_str!("ordinals/opengl32_dll.txt")),
     ("QUARTZ.DLL", include_str!("ordinals/quartz_dll.txt")),
+    ("RPCRT4.DLL", include_str!("ordinals/rpcrt4_dll.txt")),
     ("SHELL32.DLL", include_str!("ordinals/shell32_dll.txt")),
     ("TAPI32.DLL", include_str!("ordinals/tapi32_dll.txt")),
     ("USER32.DLL", include_str!("ordinals/user32_dll.txt")),
@@ -174,11 +176,18 @@ fn no_two_exports_of_a_dll_share_an_ordinal() {
 
 #[test]
 fn every_built_in_dll_windows_98_has_has_its_list() {
-    // GLIDE2X and GLIDE3X are 3dfx's, D3D8 and DINPUT8 DirectX 8's and
-    // WING32 WinG's, which games installed: none of them Windows 98
-    // SE's. A DLL added to the built-in ones needs a list made by
+    // GLIDE2X and GLIDE3X are 3dfx's, D3D8, DINPUT8 and DPNET DirectX
+    // 8's and WING32 WinG's, which games installed: none of them Windows
+    // 98 SE's. A DLL added to the built-in ones needs a list made by
     // tools/win98_ordinals.py.
-    let others = ["GLIDE2X.DLL", "GLIDE3X.DLL", "D3D8.DLL", "DINPUT8.DLL", "WING32.DLL"];
+    let others = [
+        "GLIDE2X.DLL",
+        "GLIDE3X.DLL",
+        "D3D8.DLL",
+        "DINPUT8.DLL",
+        "DPNET.DLL",
+        "WING32.DLL",
+    ];
     for dll in DLLS {
         let other = others.contains(&dll.name);
         assert_eq!(win98(dll.name).is_some(), !other, "{}", dll.name);

@@ -26,7 +26,7 @@ fn scratch(name: &str, files: &[(&str, &[u8])]) -> PathBuf {
 }
 
 /// A machine at its prompt with upper memory, and EMS if `ems`.
-fn machine(name: &str, files: &[(&str, &[u8])], ems: bool) -> Cpu {
+fn machine(name: &str, files: &[(&str, &[u8])], ems: bool) -> Box<Cpu> {
     let mut cpu = Cpu::new(scratch(name, files));
     cpu.set_upper_memory(ems, true).unwrap();
     cpu.load_shell();

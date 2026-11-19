@@ -755,7 +755,8 @@ impl Pacer {
     /// built-in Windows is such a system from the start: its idle loop
     /// halts the processor whenever none of its threads can run, so a
     /// Win32 program that keeps it from halting is at work, even one that
-    /// never waits long enough for `Auto` to see the halt.
+    /// never waits long enough for `Auto` to see the halt. A client of the
+    /// emulator's DPMI host has no system under it (`set_dpmi_client`).
     pub fn end_cpu_frame(
         &mut self,
         cpu: &mut crate::cpu::Cpu,
@@ -765,6 +766,7 @@ impl Pacer {
     ) -> Option<u32> {
         self.auto.set_protected_least(cpu.model.auto_least());
         self.auto.set_idles(cpu.os_idles || cpu.bus.win32.active());
+        self.auto.set_dpmi_client(cpu.bus.dpmi.active() && !cpu.bus.win32.active());
         // What the idle skip's watching cost (`Observe::take_watched`) is
         // work of the frame's own, as the rest of `overhead` is: counted
         // per instruction, the proofs that come with each timer event would
@@ -938,11 +940,26 @@ impl Pacer {
         let ns = bus.clock.now_ns();
         self.ran = ns > self.last_ns;
         self.last_ns = ns;
-        let ideal = self.sample.add(executed, exec, overhead).map(|(ns_per_instr, overhead_ns)| {
-            let frame_ns = self.period.as_nanos() as f64;
+        let frame_ns = self.period.as_nanos() as f64;
+        let ideal_of = |ns_per_instr: f64, overhead_ns: f64| {
             let budget_ns = (frame_ns * MAX_BUSY_SHARE - overhead_ns).max(frame_ns * 0.1);
             budget_ns / ns_per_instr / (frame_ns / 1_000_000.0)
-        });
+        };
+        // At auto, a frame of a stall stays out of the samples
+        // (`HostEstimate::outlier`).
+        let outlier = matches!(self.speed, CpuSpeed::Auto(_))
+            && executed >= SAMPLE_INSTRUCTIONS
+            && self.host.outlier(ideal_of(
+                exec.as_nanos() as f64 / executed as f64,
+                overhead.as_nanos() as f64,
+            ));
+        let ideal = if outlier {
+            None
+        } else {
+            self.sample
+                .add(executed, exec, overhead)
+                .map(|(ns_per_instr, overhead_ns)| ideal_of(ns_per_instr, overhead_ns))
+        };
         match self.speed {
             CpuSpeed::Fixed(_) => None,
             CpuSpeed::Max => {
@@ -1064,6 +1081,39 @@ impl Pacer {
     }
 }
 
+/// Stalls of the host made on purpose, to test how `Auto` takes them:
+/// `RUST_DOS_TEST_STALL` lists them as `AT_MS:LENGTH_MS`, separated by
+/// commas, and the frame that first runs past each emulated time sleeps
+/// for that long while its instructions run, as a read of a file the host
+/// doesn't have in its cache does. The variable is read once; without it,
+/// no frame sleeps. Returns the stall due by `now_ns`, if one is.
+pub fn test_stall(now_ns: u64) -> Option<Duration> {
+    use std::sync::{Mutex, OnceLock};
+    /// The stalls not yet made, as (emulated ms, length in ms).
+    type Stalls = Mutex<Vec<(u64, u64)>>;
+    static STALLS: OnceLock<Option<Stalls>> = OnceLock::new();
+    let stalls = STALLS.get_or_init(|| {
+        let text = std::env::var("RUST_DOS_TEST_STALL").ok()?;
+        let mut stalls: Vec<(u64, u64)> = text
+            .split(',')
+            .filter_map(|stall| {
+                let (at, length) = stall.trim().split_once(':')?;
+                Some((at.trim().parse().ok()?, length.trim().parse().ok()?))
+            })
+            .collect();
+        // The latest first, so the next due is the last.
+        stalls.sort_unstable_by(|a, b| b.cmp(a));
+        Some(Mutex::new(stalls))
+    });
+    let mut stalls = stalls.as_ref()?.lock().ok()?;
+    let &(at_ms, length_ms) = stalls.last()?;
+    if now_ns < at_ms.saturating_mul(1_000_000) {
+        return None;
+    }
+    stalls.pop();
+    Some(Duration::from_millis(length_ms))
+}
+
 /// Frames summed up until their instructions took long enough to time
 /// (`HOST_SAMPLE`).
 #[derive(Default)]
@@ -1106,9 +1156,51 @@ struct HostEstimate {
     /// Whether the last sample said the host can't run the speed it was
     /// taken at.
     short: bool,
+    /// The samples taken so far, up to `HOST_SEED`, and the frames in a
+    /// row left out as a stall's (`outlier`).
+    samples: u32,
+    outliers: u32,
 }
 
 impl HostEstimate {
+    /// Whether a frame whose instructions and other work say the host
+    /// keeps up with `ideal` is a stall's, which the samples leave out: a
+    /// read of a file the host doesn't have in its cache, done while the
+    /// instructions run, or a shader compiled. Its frames are `STALL_COST`
+    /// times as slow as the estimate or more, alone or a few in a row
+    /// between frames at the host's speed. Grom's loads (#783) read their
+    /// files a piece at a time, and with them not in the host's cache every
+    /// third frame said 24,000 to 28,000 against an estimate of 230,000:
+    /// two such samples in a row move it half the way down each
+    /// (`HOST_FALL`), and a few of them took it to 4,500. More such frames
+    /// in a row than a stall takes (`STALL_FRAMES`) are the host's speed at
+    /// the program's work now, and count.
+    ///
+    /// A program whose own work makes every few frames that slow reads high
+    /// the same way: 2.7 times what the host runs with every third frame
+    /// six times as slow, 1.5 times with every tenth. The pace bounds its
+    /// speed. A heavy frame drops time only where it ends `MAX_LAG` behind,
+    /// and at six times the light frames' cost and 50 frames a second or
+    /// more, that takes light frames filling 0.58 of a frame or more. At
+    /// half the estimate they fill 0.43 (`MAX_BUSY_SHARE` at all of it), so
+    /// the drops come above half the estimate, where a measurement counts
+    /// all its lag (`STALLED` in `AutoSpeed::update`), and the limits from
+    /// a host that fell behind hold the speed. Frames many times heavier
+    /// than that drop time under half the estimate too, which the
+    /// measurements leave out as stalls: those can't be told from a load
+    /// read cold.
+    fn outlier(&mut self, ideal: f64) -> bool {
+        let far = self
+            .max
+            .is_some_and(|max| ideal * crate::autospeed::STALL_COST as f64 <= max);
+        if !far {
+            self.outliers = 0;
+            return false;
+        }
+        self.outliers = self.outliers.saturating_add(1);
+        self.outliers <= crate::autospeed::STALL_FRAMES
+    }
+
     /// Add a sample that says `ideal`, taken at the speed `current`. The
     /// estimate moves a tenth of the way to each sample, so that a light
     /// stretch of the program moves it little. Two samples in a row that
@@ -1132,11 +1224,21 @@ impl HostEstimate {
     /// program running at more than a tenth of what the host has. Half the
     /// way down from there would cut the speed of every program above half
     /// the estimate, for a moment that says nothing of its work.
+    ///
+    /// The first `HOST_SEED` samples set it to the most of them. Before
+    /// them there is nothing to tell a stall by, and the first sample of a
+    /// run that a stall fell in said 1,200 to 2,500 where the host ran
+    /// 15,000 (Doom with its files not in the host's cache): taken as the
+    /// estimate, the first load ran at that, and a tenth of the way up a
+    /// sample took seconds to make up for it.
     fn add(&mut self, ideal: f64, current: u32) {
         let short = ideal < current as f64 * HOST_SHORT;
         let was_short = std::mem::replace(&mut self.short, short);
+        let seeding = self.samples < HOST_SEED;
+        self.samples = (self.samples + 1).min(HOST_SEED);
         self.max = Some(match self.max {
             None => ideal,
+            Some(max) if seeding => max.max(ideal),
             Some(max) => {
                 let share = if short && was_short && ideal < max {
                     HOST_FALL
@@ -1155,6 +1257,12 @@ const HOST_DRIFT: f64 = 0.1;
 /// The share it moves down when two samples in a row say the host can't
 /// run the speed it runs at.
 const HOST_FALL: f64 = 0.5;
+/// The first samples, the most of which is the estimate. Chosen: a sample
+/// is a frame, and in Doom's run the first said 1,200 to 2,500 where the
+/// host ran 15,000, so the most of three passes over one or two stalled
+/// frames. A run whose first three all stall starts low and climbs by
+/// `HOST_DRIFT`, as it did without the seed.
+const HOST_SEED: u32 = 3;
 /// The share of the speed below which a sample says the host can't run
 /// it: too far under the speed to be the scatter of samples taken at the
 /// estimate.
@@ -1464,7 +1572,8 @@ mod tests {
         // 1,135,918, then the drawing that follows runs at 250,000.
         let mut host = HostEstimate {
             max: Some(1_135_918.0),
-            short: false,
+            samples: HOST_SEED,
+            ..HostEstimate::default()
         };
         let mut frames = 0;
         while let Some(max) = host.max.filter(|&max| max > 250_000.0 * 1.25) {
@@ -1479,7 +1588,12 @@ mod tests {
     #[test]
     fn the_host_estimate_drifts_where_the_host_keeps_up() {
         let estimate = |max: Option<f64>, short: bool, ideal: f64, current: u32| {
-            let mut host = HostEstimate { max, short };
+            let mut host = HostEstimate {
+                max,
+                short,
+                samples: HOST_SEED,
+                ..HostEstimate::default()
+            };
             host.add(ideal, current);
             host.max.unwrap()
         };
@@ -1513,12 +1627,88 @@ mod tests {
         // of a frame that stalled says 50,000, and the next ones the
         // host's speed again.
         let mut host = HostEstimate::default();
-        host.add(400_000.0, 300_000);
+        for _ in 0..HOST_SEED {
+            host.add(400_000.0, 300_000);
+        }
         host.add(50_000.0, 300_000);
         assert_eq!(host.max, Some(365_000.0));
         host.add(400_000.0, 300_000);
         assert!(!host.short);
         assert_eq!(host.max, Some(368_500.0));
+    }
+
+    /// The host estimate after frames of 200,000 instructions that take the
+    /// host the milliseconds of `frames_ms` each, in turn.
+    fn estimate_after(frames_ms: &[u64]) -> f64 {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let mut pacer = Pacer::new(CpuSpeed::Auto(3000), None, Instant::now());
+        for &ms in frames_ms {
+            cpu.bus.clock.icount += 200_000;
+            let exec = Duration::from_millis(ms);
+            pacer.end_cpu_frame(&mut cpu, 200_000, exec, Duration::ZERO);
+        }
+        pacer.host.max.unwrap()
+    }
+
+    #[test]
+    fn a_stall_in_the_first_samples_does_not_set_the_host_estimate() {
+        // Doom's first frames with its files not in the host's cache: the
+        // first sample says a tenth of what the host runs.
+        let mut host = HostEstimate::default();
+        host.add(1_500.0, 3000);
+        host.add(15_000.0, 3000);
+        assert_eq!(host.max, Some(15_000.0));
+        // From then on the estimate moves by shares.
+        host.add(15_000.0, 3000);
+        host.add(25_000.0, 3000);
+        assert_eq!(host.max, Some(16_000.0));
+    }
+
+    #[test]
+    fn the_frames_of_a_stall_stay_out_of_the_host_estimate() {
+        let steady = estimate_after(&[10; 30]);
+        // Frames of 200 and 120 ms, alone and a few in a row among frames
+        // of 10, leave the estimate where it was.
+        let mut frames = vec![10; 20];
+        for _ in 0..4 {
+            frames.extend([200, 10, 10, 120, 120, 120, 10]);
+        }
+        let stalled = estimate_after(&frames);
+        assert!(
+            (stalled / steady - 1.0).abs() < 0.01,
+            "{stalled} against {steady}"
+        );
+        // More of them in a row than a stall takes are the host's speed
+        // now.
+        let mut frames = vec![10; 20];
+        frames.extend([200; 14]);
+        let slow = estimate_after(&frames);
+        assert!(slow < steady / 4.0, "{slow} against {steady}");
+    }
+
+    #[test]
+    fn a_heavy_frame_every_few_frames_stays_out_of_the_host_estimate() {
+        // A program whose every Nth frame costs the host a little over six
+        // times what the others do: each such frame is alone between frames
+        // at the host's speed, so all of them stay out, and the estimate
+        // reads what the light frames ran at. Averaged over all frames the
+        // host runs 2.7 times fewer instructions a ms than that with every
+        // third frame heavy, and 1.51 times with every tenth
+        // (`HostEstimate::outlier` says what bounds the speed then).
+        let steady = estimate_after(&[10; 30]);
+        for (every, high) in [(3, 2.7), (10, 1.51)] {
+            let mut frames = vec![10; 20];
+            for i in 1..=60 {
+                frames.push(if i % every == 0 { 61 } else { 10 });
+            }
+            let mixed = estimate_after(&frames);
+            assert!(
+                (mixed / steady - 1.0).abs() < 0.01,
+                "{mixed} against {steady}"
+            );
+            let mean_ms = (61.0 + 10.0 * (every - 1) as f64) / every as f64;
+            assert!((mean_ms / 10.0 - high).abs() < 0.01, "{mean_ms}");
+        }
     }
 
     #[test]

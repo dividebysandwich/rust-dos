@@ -19,22 +19,29 @@ ways:
   started from it runs with the profile's settings, and Rust-DOS doesn't
   ask the almanac for it.
 
-Rust-DOS finds a game in the almanac by the name, size and checksums of
-the program file started at its prompt; `almanac_auto` takes the
-settings of a game only when the checksums match. That works for DOS
-games and for games on the built-in Windows, which start from the same
-prompt. The almanac carries the machine's settings only: the graphics
-card, processor, speed, memory, DPMI, the DOS and Windows versions, the
-Windows desktop's colour depth (`win32_depth`) and system locale
-(`win32_locale`), the 3D cards, the sound cards, the joystick and the
-disks' speeds.
+Rust-DOS finds a game in the almanac by the name, size and checksums of the
+program file started last: at its prompt, or on the built-in Windows from
+Explorer, a game's launcher or its autorun. `almanac_auto` takes the
+settings of a game only when the checksums match, and asks only for programs
+started at the prompt. The almanac carries the machine's settings only: the
+graphics card, processor, speed, memory, DPMI, the DOS and Windows versions,
+the Windows desktop's colour depth (`win32_depth`), size (`win32_desktop`)
+and system locale (`win32_locale`), the 3D cards, the sound cards, the
+joystick and the disks' speeds.
 
-A version a report adds is filed under its program's platform: DOS,
-Windows 3.1 (an NE file) or Windows 95/98 (a PE file). For a Windows
-version the almanac recommends `win32=true` even before anyone has
-reported on it, so with `almanac_auto` a Windows game started at the
-prompt runs on the built-in Windows rather than as its DOS stub, which
-only says it needs Windows. A report that sets `win32` itself wins.
+A version a report adds is filed under its program's platform: DOS, Windows
+3.1 (an NE file) or Windows 95/98 (a PE file). An installer (`SETUP.EXE`,
+`INSTALL.EXE`) leaves the platform open, as a Windows 95 game often comes
+with a Windows 3.1 setup. For a Windows version the almanac recommends
+`win32=true` even before anyone has reported on it, so with `almanac_auto` a
+Windows game started at the prompt runs on the built-in Windows rather than
+as its DOS stub, which only says it needs Windows. A report that sets
+`win32` itself wins.
+
+Reporting a game as new by a name the almanac has already sends the report
+to that game, with a version for the program if the game hasn't one with its
+file. Fetching, the notes of the reports the settings come from show under
+the game picked: what players wrote, red reports' too, newest first.
 
 ## What this page adds
 
@@ -125,7 +132,7 @@ that names the game, its settings and what happened.
 [when a game doesn't run](../CONFIGURATION.md#when-a-game-doesnt-run)
 cover the settings most games need: `cpu=pentium_ii` for an invalid
 opcode, `win32_version=98se` when a message names the version, more
-`memsize` when it runs out. `win32_depth` is in
+`memsize` when it runs out. `win32_depth` and `win32_desktop` are in
 [`[emulator]`](../CONFIGURATION.md#emulator).
 
 * **Enemy Infestation**: the profile in
@@ -133,6 +140,17 @@ opcode, `win32_version=98se` when a message names the version, more
   installs it with its InstallShield 5 setup and runs it. For a CD
   copied to a folder, give the drive the label `EI` ([the CD's drive
   letter and label](../CONFIGURATION.md#the-cds-drive-letter-and-label)).
+* **Evil Islands: Curse of the Lost Soul** (GOG): `win32=true`,
+  `machine=svga_toadforce` ([ToadForce](../CONFIGURATION.md#toadforce))
+  and a processor with MMX, `cpu=pentium_mmx` or later; on the default
+  486 it stops with "MMX required in this version". GOG's installer
+  keeps eight of the game's settings files (`keyboard.ini`, `movie.ini`
+  and the `lights*.ini` files) in `gog-support\1457950224\app\config`;
+  copy them into the game's `config` folder. Without them the islands
+  and the menu have no daylight, only the light of fires, and the intro
+  videos don't play. The game needs no registry keys: it starts at
+  800x600 in 16 bits without them, and its Options set the rest. On the
+  ToadForce it plays the first island, and saves and loads.
 * **Grom**: `win32=true` and `machine=svga_toadforce`
   ([ToadForce](../CONFIGURATION.md#toadforce)). It stops at start with
   an assertion (`screen.Init`) when Direct3D lists no 32-bit texture
@@ -145,10 +163,13 @@ opcode, `win32_version=98se` when a message names the version, more
   setup](../CONFIGURATION.md#running-the-setup-on-first-start)).
 * **Iron Helix**: `win32_depth=8` (256 colours).
 * **Moto Racer**: `win32_depth=16`; it checks the desktop's depth before
-  it sets its own mode. *Play Link* races between instances in a [LAN
+  it sets its own mode. For its 3D races, `machine=svga_voodoo3`. Start
+  the GOG release's `game.EXE` without the `-FrameRateMax60` parameter
+  that GOG's `motoracer.ini` adds: the game stops at "Unknown parameter"
+  with it. *Play Link* races between instances in a [LAN
   room](../CONFIGURATION.md#directplay-games-on-the-built-in-windows)
   over the IPX connection, the only one the game takes; it lists the
-  TCP/IP one but ignores it, on Windows too (tested with the demo).
+  TCP/IP one but ignores it, on Windows too.
 * **Rage of Mages** (GOG): `cpu=pentium_ii`. The game needs a Pentium; on
   the default 486 the map's unexplored areas show dark blue instead of
   black. Copy the game's folder into a folder of drive C:, such as
@@ -320,6 +341,11 @@ needs.
   Voodoo3 with the 1.07.00 driver it needs DirectX 7
   ([3dfx Voodoo3 and
   Banshee](../CONFIGURATION.md#3dfx-voodoo3-and-banshee)).
+* **Moto Racer** (GOG release, `game.EXE`): play it on [the built-in
+  Windows](#windows-games-on-the-built-in-windows). On a Voodoo3 image,
+  install the driver from 3dfx's Voodoo3 driver CD 1.2 (`3dfx32v3.dll`
+  4.11.01.1151), copied over 1.07.00 as for Glover above: with 1.07.00
+  the bikes and riders draw as flat white shapes.
 * **Oni**: on a Voodoo3, take away a MiniGL `opengl32.dll` from its
   folder. On a Voodoo2, copy `3DFXVGL.DLL` into its folder as
   `OPENGL32.DLL` ([OpenGL games under

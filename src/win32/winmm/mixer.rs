@@ -918,7 +918,7 @@ mod tests {
     /// Where the tests' structures go in the guest's memory.
     const AT: u32 = 0x2_0000;
 
-    fn machine() -> Cpu {
+    fn machine() -> Box<Cpu> {
         Cpu::new(std::path::PathBuf::from("."))
     }
 

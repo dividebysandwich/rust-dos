@@ -114,9 +114,9 @@ enum Bulk {
 /// the iterations one at a time would do, with the first one's checks and
 /// page walks (the others' go through the TLB as they did, changing
 /// nothing). In plain RAM, the elements are moved together, and so are
-/// moves from plain RAM and stores into the VGA's planes or the linear
-/// frame buffer; elsewhere one by one through the bus, as each iteration
-/// would.
+/// moves from plain RAM and stores into the VGA's planes, the linear
+/// frame buffer or a VESA mode's window at A0000h; elsewhere one by one
+/// through the bus, as each iteration would.
 fn bulk(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32) -> CpuResult<Bulk> {
     let backward = a.delta != size as u32;
     let bytes = size as u32;
@@ -144,6 +144,12 @@ fn bulk(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32) -> CpuResult<B
                     || cpu
                         .bus
                         .move_to_lfb(range(src.phys), range(dst.phys), len, size as usize)
+                    || cpu.bus.move_to_vesa_window(
+                        range(src.phys),
+                        range(dst.phys),
+                        len,
+                        size as usize,
+                    )
                     || cpu.bus.move_to_voodoo(
                         range(src.phys),
                         range(dst.phys),
@@ -164,7 +170,10 @@ fn bulk(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32) -> CpuResult<B
             if cpu.bus.is_plain_ram(range(dst.phys), len) {
                 cpu.bus.fill_elements(range(dst.phys), n as usize, size as usize, value);
             } else if !(cpu.bus.fill_vga(range(dst.phys), n as usize, size as usize, value)
-                || cpu.bus.fill_lfb(range(dst.phys), n as usize, size as usize, value))
+                || cpu.bus.fill_lfb(range(dst.phys), n as usize, size as usize, value)
+                || cpu
+                    .bus
+                    .fill_vesa_window(range(dst.phys), n as usize, size as usize, value))
             {
                 for k in 0..n {
                     cpu.mem_write(element(dst, a.delta, k), value);

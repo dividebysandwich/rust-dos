@@ -443,6 +443,39 @@ impl<T: State + Default> State for Option<T> {
     }
 }
 
+/// A field a section's layout gained in its version `V`: a section saved
+/// in an older version has no bytes for it, so it loads as its default,
+/// and the older states still load.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Since<const V: u16, T>(pub T);
+
+impl<const V: u16, T> std::ops::Deref for Since<V, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<const V: u16, T> std::ops::DerefMut for Since<V, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
+}
+
+impl<const V: u16, T: State + Default> State for Since<V, T> {
+    fn save(&self, w: &mut Writer) {
+        self.0.save(w);
+    }
+    fn load(&mut self, r: &mut Reader) -> Result<()> {
+        // Bytes outside a section are in this rust-dos's own layout.
+        if r.version().is_some_and(|v| v < V) {
+            self.0 = T::default();
+            return Ok(());
+        }
+        self.0.load(r)
+    }
+}
+
 impl<A: State, B: State> State for (A, B) {
     fn save(&self, w: &mut Writer) {
         self.0.save(w);
@@ -624,6 +657,27 @@ mod tests {
         let mut back = HashMap::new();
         back.load(&mut Reader::new(&wa.buf)).unwrap();
         assert_eq!(back, a);
+    }
+
+    #[test]
+    fn a_field_since_a_version_loads_its_default_from_an_older_section() {
+        let mut w = Writer::new();
+        w.section(b"OLD ", 1, |w| 7u32.save(w));
+        w.section(b"NEW ", 2, |w| {
+            7u32.save(w);
+            9u32.save(w);
+        });
+        let mut r = Reader::new(&w.buf);
+        let (mut a, mut b) = (0u32, Since::<2, u32>(5));
+        let mut old = r.section_of(b"OLD ", &[1, 2]).unwrap();
+        a.load(&mut old).unwrap();
+        b.load(&mut old).unwrap();
+        assert_eq!((a, b.0), (7, 0));
+        assert!(old.is_empty());
+        let mut new = r.section_of(b"NEW ", &[1, 2]).unwrap();
+        a.load(&mut new).unwrap();
+        b.load(&mut new).unwrap();
+        assert_eq!((a, b.0), (7, 9));
     }
 
     #[test]

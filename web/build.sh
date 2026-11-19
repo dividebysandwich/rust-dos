@@ -28,4 +28,9 @@ if command -v wasm-opt >/dev/null 2>&1; then
 else
     echo "wasm-opt not found: the module is left as the compiler made it." >&2
 fi
+# Gzipped copies beside the files, about half the size. The page downloads
+# rust_dos_web_bg.wasm.gz and unpacks it itself, so any web server sends the
+# small one; servers that serve precompressed files (nginx's gzip_static,
+# Caddy's precompressed) send both as gzip by themselves.
+gzip -9 -n -f -k www/pkg/rust_dos_web_bg.wasm www/pkg/rust_dos_web.js
 echo "Built web/www. Serve it with, for example: python3 -m http.server -d web/www"

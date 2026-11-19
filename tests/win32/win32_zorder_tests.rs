@@ -253,7 +253,7 @@ fn peek(cpu: &Cpu, lin: u32) -> u32 {
 }
 
 /// Run `program` as T.EXE until it says it is done.
-fn run(test: &str, program: Vec<u8>, data: u32) -> Cpu {
+fn run(test: &str, program: Vec<u8>, data: u32) -> Box<Cpu> {
     let base = PathBuf::from("target/test_win32_zorder").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
