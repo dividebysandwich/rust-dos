@@ -278,6 +278,27 @@ fn ega_configuration_reports_the_switches() {
     assert_eq!(cpu.get_reg8(Register::CH), cpu.bus.read_8(0x0488) >> 4);
 }
 
+/// The sequencer's Clocking Mode register (SR01), as a program reads it.
+fn clocking_mode(cpu: &mut Cpu) -> u8 {
+    cpu.bus.io_write(0x3C4, 0x01);
+    cpu.bus.io_read(0x3C5)
+}
+
+#[test]
+fn video_refresh_control_turns_the_screen_off_and_on() {
+    // AH=12h BL=36h: AL=1 sets SR01's Screen Off bit, AL=0 clears it, and
+    // AL comes back 12h, the function supported.
+    let mut cpu = machine(0x12);
+    let on = clocking_mode(&mut cpu);
+    assert_eq!(on & 0x20, 0);
+    int10(&mut cpu, 0x1201, 0x0036, 0, 0);
+    assert_eq!(cpu.get_al(), 0x12);
+    assert_eq!(clocking_mode(&mut cpu), on | 0x20);
+    int10(&mut cpu, 0x1200, 0x0036, 0, 0);
+    assert_eq!(cpu.get_al(), 0x12);
+    assert_eq!(clocking_mode(&mut cpu), on);
+}
+
 /// The glyph of `ch` in a font of `height` at segment:offset.
 fn glyph_at(cpu: &Cpu, segment: u16, offset: u16, ch: u8, height: usize) -> Vec<u8> {
     let base = ((segment as usize) << 4) + offset as usize + ch as usize * height;
