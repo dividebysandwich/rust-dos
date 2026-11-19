@@ -773,6 +773,149 @@ fn a_real_mode_handler_chained_to_the_stub_outlives_the_pm_handler() {
     assert_eq!(cpu.bus.read_32(8 * 4), timer);
 }
 
+/// A client that sets a protected-mode timer handler and then waits in
+/// protected mode for good, as a DOS/4GW game does in its main loop.
+fn waiting_client_program() -> Vec<u8> {
+    let main = asm16(0x100, |a| {
+        let mut fail = a.create_label();
+        enter(a, false, fail)?;
+        step(a, 50)?;
+        set_pm_tick_handler(a, fail)?;
+        step(a, 51)?;
+        let mut wait = a.create_label();
+        a.set_label(&mut wait)?;
+        a.sti()?;
+        a.hlt()?;
+        a.jmp(wait)?;
+        a.set_label(&mut fail)?;
+        exit(a, 0xEE)
+    });
+    com(&[(0x100, main), (TICK_HANDLER, pm_tick_handler())])
+}
+
+/// A client closed while it runs (the settings window's close, the debug
+/// server's reboot_shell) never ends through DOS, so the host never
+/// stops. The real-mode vectors its stubs took over for the client's
+/// handlers go back to what they held, the BIOS's: with the stub left in
+/// INT 08h, the timer's IRQ 0 reached a stub with no client and no
+/// original behind it, which returned without the BIOS's end of
+/// interrupt. IRQ 0 stayed in service, so neither the timer nor the
+/// keyboard interrupted again, and the next program hung.
+#[test]
+fn closing_a_client_gives_its_hooked_vectors_back() {
+    let files = [("T.COM", waiting_client_program())];
+    let (mut cpu, psp) = machine("closed_client", &files, "T.COM");
+    let timer = cpu.bus.read_32(8 * 4);
+    for _ in 0..200 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        run_batch(&mut cpu, &mut NoHook, false);
+        if word(&cpu, psp, TICKS) >= 2 {
+            break;
+        }
+    }
+    assert!(
+        word(&cpu, psp, TICKS) >= 2,
+        "the client's handler didn't run (step {})",
+        word(&cpu, psp, STEP)
+    );
+    assert_ne!(
+        cpu.bus.read_32(8 * 4),
+        timer,
+        "the host's stub is in INT 08h"
+    );
+
+    cpu.close_program();
+    assert!(run_to_exit(&mut cpu, 100), "the shell didn't come back");
+    assert!(!cpu.bus.dpmi.active());
+    assert_eq!(cpu.bus.read_32(8 * 4), timer);
+
+    // The BIOS's tick count goes on at the prompt.
+    let ticks = cpu.bus.read_32(0x046C);
+    for _ in 0..200 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        run_batch(&mut cpu, &mut NoHook, false);
+    }
+    assert!(
+        cpu.bus.read_32(0x046C) > ticks.wrapping_add(1),
+        "the timer stopped"
+    );
+    assert_eq!(cpu.bus.pic.master.isr, 0, "an IRQ stayed in service");
+}
+
+/// A client that sets a protected-mode timer handler, chains a real-mode
+/// one in front of the host's stub and stays resident (AH=31h) with it in
+/// the vector.
+fn resident_chained_client_program() -> Vec<u8> {
+    let main = asm16(0x100, |a| {
+        let mut fail = a.create_label();
+        enter(a, false, fail)?;
+        step(a, 60)?;
+        set_pm_tick_handler(a, fail)?;
+        a.mov(ax, 0x0200)?;
+        a.mov(bl, 8)?;
+        a.int(0x31)?;
+        a.mov(word_ptr(OLDRM), dx)?;
+        a.mov(word_ptr(OLDRM + 2), cx)?;
+        a.mov(ax, 0x0201)?;
+        a.mov(bl, 8)?;
+        a.mov(cx, word_ptr(RMSEG))?;
+        a.mov(dx, RM_TICK as u32)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        step(a, 61)?;
+        a.mov(dx, 0x1000)?;
+        a.mov(ax, 0x3100)?;
+        a.int(0x21)?;
+        a.set_label(&mut fail)?;
+        exit(a, 0xEE)
+    });
+    let rm_tick = asm16(RM_TICK, |a| {
+        a.inc(word_ptr(TICKS).cs())?;
+        a.db(&[0x2E, 0xFF, 0x2E])?;
+        a.dw(&[OLDRM])
+    });
+    com(&[
+        (0x100, main),
+        (TICK_HANDLER, pm_tick_handler()),
+        (RM_TICK, rm_tick),
+    ])
+}
+
+/// A resident program's real-mode timer handler that chains to the host's
+/// stub outlives the host. Ticks that reach the stub with no client and no
+/// original recorded go on to the BIOS's handler, which ends the
+/// interrupt: returning from the stub instead left IRQ 0 in service, and
+/// neither the timer nor the keyboard interrupted again.
+#[test]
+fn a_resident_handler_chained_to_the_stub_outlives_the_host() {
+    let files = [("T.COM", resident_chained_client_program())];
+    let (mut cpu, psp) = machine("resident_chained", &files, "T.COM");
+    assert!(
+        run_to_exit(&mut cpu, 200),
+        "the program didn't end (step {})",
+        word(&cpu, psp, STEP)
+    );
+    assert_eq!(word(&cpu, psp, STEP), 61);
+    assert!(!cpu.bus.dpmi.active());
+    assert_eq!(cpu.bus.read_32(8 * 4), (psp as u32) << 16 | RM_TICK as u32);
+
+    let ticks = cpu.bus.read_32(0x046C);
+    let resident_ticks = word(&cpu, psp, TICKS);
+    for _ in 0..200 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        run_batch(&mut cpu, &mut NoHook, false);
+    }
+    assert!(
+        word(&cpu, psp, TICKS).wrapping_sub(resident_ticks) > 1,
+        "the resident handler stopped counting"
+    );
+    assert!(
+        cpu.bus.read_32(0x046C) > ticks.wrapping_add(1),
+        "the timer stopped"
+    );
+    assert_eq!(cpu.bus.pic.master.isr, 0, "an IRQ stayed in service");
+}
+
 /// Where the DOS program keeps things: results (a word each), the "MS-DOS"
 /// entry point, handles and blocks, names, EXEC's parameter block, the DTA
 /// and a buffer DOS reads into directly.
