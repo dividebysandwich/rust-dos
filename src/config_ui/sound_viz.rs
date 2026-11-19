@@ -187,6 +187,7 @@ fn source_label(channel: Channel) -> &'static str {
         Channel::Monitor => "Monitor",
         Channel::Modem => "Modem",
         Channel::Windows => "Windows",
+        Channel::AdlibGold => "AdLib Gold",
     }
 }
 

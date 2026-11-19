@@ -90,6 +90,13 @@ that names the game, its settings and what happened.
 * **Doom and Heretic** over a LAN or a serial line:
   [playing over a LAN](../CONFIGURATION.md#playing-over-a-lan) and
   [serial and modem games](../CONFIGURATION.md#serial-and-modem-games).
+* **The Jungle Book** (Virgin, 1994) on the AdLib Gold: its setup's
+  port is the card's sample port, the card's base + 4, and the game
+  reads it as digits 0-9 only (38C reads as 38h). The 380 it offers
+  would be a card at 37Ch, which can't be. Put the card at 380h
+  (`adlibgold=true`, `adlibgoldbase=380`) and enter 384 in `INSTALL`
+  (or `AGOLD 384 7 1` in `JUNGLE.CFG`). The game sends its music to the
+  FM chip at 388h, which rust-dos keeps there with the card moved.
 * **King's Quest, Ultima and other early CGA games**: their composite
   colours need `machine=cga`; `composite` and `composite_era` keep their
   defaults, `auto` and `old`

@@ -37,9 +37,12 @@ pub enum Channel {
     /// The built-in Windows's sound device: DirectSound and WinMM's wave
     /// audio.
     Windows,
+    /// The AdLib Gold's sampled sound (its MMA), through the card's mixer
+    /// and output stage. Its FM goes on `Fm`.
+    AdlibGold,
 }
 
-pub const CHANNELS: usize = 14;
+pub const CHANNELS: usize = 15;
 
 /// The loudest volume, in percent.
 pub const MAX_LEVEL: u16 = 200;
@@ -65,6 +68,7 @@ impl Channel {
         Channel::Monitor,
         Channel::Modem,
         Channel::Windows,
+        Channel::AdlibGold,
     ];
 
     /// Its key in `[mixer]`.
@@ -84,6 +88,7 @@ impl Channel {
             Channel::Monitor => "monitor",
             Channel::Modem => "modem",
             Channel::Windows => "windows",
+            Channel::AdlibGold => "adlibgold",
         }
     }
 
@@ -108,6 +113,7 @@ impl Channel {
             Channel::Monitor => "Monitor",
             Channel::Modem => "Modem",
             Channel::Windows => "Windows sound",
+            Channel::AdlibGold => "AdLib Gold digital",
         }
     }
 

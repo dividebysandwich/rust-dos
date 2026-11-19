@@ -220,6 +220,7 @@ impl Page {
                 Volume(Channel::Awe),
                 Volume(Channel::Modem),
                 Volume(Channel::Windows),
+                Volume(Channel::AdlibGold),
                 SpeakerFilter,
                 SbFilter,
                 SbCoupling,

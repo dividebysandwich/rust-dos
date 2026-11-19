@@ -817,6 +817,24 @@ limit, so without a connection it goes on as it would with one:
   `awe32ram` is the RAM in KB: `512` (the default, as the AWE32 came),
   `0`, `1024`, `2048`, `4096`, `8192`, `12288`, `16384` or `28672`.
 * `opl` is the FM synthesizer: `opl3` (the default) or `opl2`.
+* `adlibgold` installs the AdLib Gold 1000: `true` or `false` (the
+  default). It is an OPL3 with a control chip (mixer, EEPROM), a stereo
+  processor (TDA8425), the optional surround module (YM7128B) and two
+  12-bit sample channels (the YMZ263 MMA) with their own IRQ and DMA. It
+  takes eight ports, 388h to 38Fh unless `adlibgoldbase` (hex, 200 to 3F8
+  in steps of 8) moves it; the FM chip still answers at 388h then. With
+  the card the FM synthesizer is an OPL3 whatever `opl` says, and its
+  timers interrupt on the card's IRQ. `adlibgoldirq` (3, 4, 5 or 7) and
+  `adlibgolddma` (1 or 3) set the card's resources; the defaults are 7 and
+  1, the Sound Blaster's, which works while a game uses one card at a
+  time. The FM chip is both cards' here, though: a Sound Blaster game that
+  looks for an AdLib by running the FM timers also raises the card's IRQ,
+  which its Sound Blaster driver may take for its own. Leave `adlibgold`
+  off for such games, or move `adlibgoldirq`. `adlibgoldsurround` fits the
+  surround module: `true` (the default) or `false`. A DOSBox
+  configuration's `oplmode=opl3gold` imports as `adlibgold=true`. The
+  card's sampled sound is the mixer's `adlibgold` channel; its FM goes
+  through the card's output stage on the `fm` channel.
 * `soundfont` is a General MIDI SoundFont (`.sf2`) for music programs
   send to the MPU-401 at 330h.
 * `gus` installs the Gravis Ultrasound: `true` (the default) or `false`.

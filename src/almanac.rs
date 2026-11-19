@@ -31,7 +31,7 @@ pub const API_VARIABLE: &str = "RUST_DOS_ALMANAC_API";
 /// The settings the almanac knows, by section and key: those of the
 /// machine a game runs on, and the frame rate cap, which some games need
 /// (Test Drive 4 misbehaves above 60) and a benchmark's entry turns off.
-pub const KEYS: [(&str, &str); 41] = [
+pub const KEYS: [(&str, &str); 42] = [
     ("emulator", "machine"),
     ("emulator", "cpu"),
     ("emulator", "core"),
@@ -70,6 +70,7 @@ pub const KEYS: [(&str, &str); 41] = [
     ("sound", "gusdma"),
     ("sound", "midisynth"),
     ("sound", "mt32model"),
+    ("sound", "adlibgold"),
     ("sound", "lpt_dac"),
     ("sound", "tandy"),
     ("joystick", "joysticktype"),

@@ -62,6 +62,7 @@ pub mod idle;
 pub mod import;
 pub mod install;
 pub use rust_dos_gus as gus;
+pub use rust_dos_adlibgold as adlibgold;
 pub mod instr_cache;
 pub mod kbc;
 pub mod keyboard;

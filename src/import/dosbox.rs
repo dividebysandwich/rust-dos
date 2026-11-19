@@ -599,7 +599,12 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
         ("sblaster", "hdma") => imported.set("sound", "hdma", first),
         ("sblaster", "oplmode") => match first {
             "opl2" | "cms" => imported.set("sound", "opl", "opl2"),
-            "dualopl2" | "opl3" | "opl3gold" | "esfm" => imported.set("sound", "opl", "opl3"),
+            "dualopl2" | "opl3" | "esfm" => imported.set("sound", "opl", "opl3"),
+            // DOSBox's AdLib Gold: its OPL3 and control chip at 388h.
+            "opl3gold" => {
+                imported.set("sound", "opl", "opl3");
+                imported.set("sound", "adlibgold", "true");
+            }
             "auto" => {}
             _ => unknown(imported),
         },
@@ -1199,6 +1204,19 @@ mod tests {
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     }
 
+    /// `oplmode=opl3gold` is DOSBox's AdLib Gold: the card, with its
+    /// OPL3.
+    #[test]
+    fn opl3gold_installs_the_adlib_gold() {
+        let imported = import(&["[sblaster]
+sbtype=sb16
+oplmode=opl3gold
+"], &[PathBuf::from("/")], "x", None);
+        assert_eq!(get(&imported, "adlibgold").as_deref(), Some("true"));
+        assert_eq!(get(&imported, "opl").as_deref(), Some("opl3"));
+        assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+    }
+
     #[test]
     fn sound_settings_rust_dos_can_t_have_are_left_out() {
         let conf = "[sblaster]\nsbtype=ess\nsbbase=0x240\nirq=4\ndma=1\nhdma=1\noplmode=esfm\n[gus]\ngus=true\ngusbase=0x260\n[midi]\nmididevice=fluidsynth\n[fluidsynth]\nsoundfont=missing.sf2\n[mt32]\nmodel=cm32ln_100\n";
@@ -1207,6 +1225,7 @@ mod tests {
         assert_eq!(get(&imported, "sbbase").as_deref(), Some("240"), "{:?}", imported.warnings);
         assert_eq!(get(&imported, "gusbase").as_deref(), Some("260"));
         assert_eq!(get(&imported, "opl").as_deref(), Some("opl3"));
+        assert_eq!(get(&imported, "adlibgold"), None);
         assert_eq!(get(&imported, "midisynth").as_deref(), Some("soundfont"));
         assert_eq!(get(&imported, "mt32model").as_deref(), Some("cm32l"));
         assert_eq!(get(&imported, "irq"), None, "an SB can't have IRQ 4");
