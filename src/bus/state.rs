@@ -234,6 +234,7 @@ impl Bus {
             host_frames: _,
             key_waits: _,
             unhandled_writes: _,
+            limited_logs: _,
             attribute_reset: _,
             memory_derived: _,
             cpu_derived: _,
@@ -588,6 +589,7 @@ impl Bus {
             host_frames: _,
             key_waits: _,
             unhandled_writes: _,
+            limited_logs: _,
             attribute_reset: _,
             // The front end's, which sets them from the settings a load
             // leaves (`slots::loaded_settings`).

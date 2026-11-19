@@ -419,7 +419,11 @@ pub fn handle(cpu: &mut Cpu) {
     let status = call(cpu, &mut ems, function);
     cpu.bus.ems = Some(ems);
     if status != OK {
-        cpu.bus.log_string(&format!("[EMS] AX={:04X}: status {:02X}", cpu.ax(), status));
+        let ax = cpu.ax();
+        cpu.bus
+            .log_limited(&format!("EMS {ax:04X} {status:02X}"), || {
+                format!("[EMS] AX={ax:04X}: status {status:02X}")
+            });
     }
     cpu.set_reg8(Register::AH, status);
 }
