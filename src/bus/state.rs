@@ -8,11 +8,12 @@ use crate::savestate::{Reader, Result, State, StateError, Writer, load_device, s
 
 /// The sections' versions, changed with what a section holds.
 const RAM_VERSION: u16 = 2;
-const CORE_VERSION: u16 = 10;
-/// The CORE versions this rust-dos loads: its own, and 9, which kept the
-/// phase of the speaker's square wave where 10 keeps its level in the
-/// frame being made (`Bus::speaker_high`).
-const CORE_LOADS: [u16; 2] = [9, CORE_VERSION];
+const CORE_VERSION: u16 = 11;
+/// The CORE versions this rust-dos loads: its own, 9, which kept the
+/// phase of the speaker's square wave where 10 and 11 keep its level, and
+/// 10, which keeps the time high in the frame being made where 11 keeps
+/// it in the eighth of the frame being made (`Bus::speaker_high`).
+const CORE_LOADS: [u16; 3] = [9, 10, CORE_VERSION];
 const VIDEO_VERSION: u16 = 2;
 const SOUND_VERSION: u16 = 4;
 const DOS_VERSION: u16 = 6;
@@ -615,6 +616,18 @@ impl Bus {
             *speaker_until = super::frame_tick(*audio_frames);
         } else {
             load_all!(&mut section; speaker_high, speaker_until, audio_frames);
+            if section.version() == Some(10) {
+                // The time high since the frame began: its mean over that
+                // time, over the eighth being made.
+                let (part, frame) = super::speaker_starts(*speaker_until);
+                let span = *speaker_until - frame;
+                let mean = if span > 0.0 {
+                    *speaker_high / span
+                } else {
+                    0.0
+                };
+                *speaker_high = mean * (*speaker_until - part);
+            }
         }
         load_all!(&mut section; sb_frame, beep_frames, boot, pci);
         if r.next_is(b"PIT2") {

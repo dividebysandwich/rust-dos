@@ -280,11 +280,12 @@ pub struct Bus {
     pub clock: crate::timer::Clock,
     /// The two 8259 interrupt controllers.
     pub pic: crate::pic::Pic,
-    /// How long the PC speaker's level was high in the mix frame being
-    /// made, up to tick `speaker_until` (see `audio_catch_up`).
+    /// How long the PC speaker's level was high in the eighth of the mix
+    /// frame being made, up to tick `speaker_until` (see
+    /// `speaker_take_in`).
     pub speaker_high: f64,
     /// The tick, which can fall between ticks, the speaker's level is
-    /// taken in up to: the last change to it, or a frame's end.
+    /// taken in up to: the last change to it, or an eighth's end.
     pub speaker_until: f64,
     pub dta_segment: u16,
     pub dta_offset: u16,
@@ -2095,9 +2096,12 @@ impl Bus {
         if self.speaker_data { self.pit2.high_ticks(a, b) } else { 0.0 }
     }
 
-    /// Take the speaker's level in up to tick `t`, into the frame being
-    /// made. Every change to the level (port 61h, a count or mode of
-    /// channel 2) comes after this, through `audio_catch_up`.
+    /// Take the speaker's level in up to tick `t`: the mean of each eighth
+    /// of a mix frame that ends by then goes to the band-limiting
+    /// (`Mixer::speaker_part`), and the time high in the eighth `t` falls
+    /// in stays in `speaker_high`. Every change to the level (port 61h, a
+    /// count or mode of channel 2) comes after this, through
+    /// `audio_catch_up`.
     fn speaker_take_in(&mut self, t: f64) {
         if t < self.speaker_until {
             // The clock went back (a machine reset): start over from it.
@@ -2105,27 +2109,39 @@ impl Bus {
             self.speaker_until = t;
             return;
         }
+        loop {
+            let part = part_at(self.speaker_until);
+            let end = part_tick(part + 1);
+            if t < end {
+                break;
+            }
+            let high = self.speaker_high + self.speaker_high_ticks(self.speaker_until, end);
+            let len = end - part_tick(part);
+            self.mixer.speaker_part((high / len) as f32);
+            self.speaker_high = 0.0;
+            self.speaker_until = end;
+        }
         self.speaker_high += self.speaker_high_ticks(self.speaker_until, t);
         self.speaker_until = t;
     }
 
-    /// The PC speaker's mean level over mix frame `n`, 0 to 1: the part of
-    /// it the cone was driven out. The output switches as fast as channel
-    /// 2 counts, 1.19 MHz, and programs play digitized sound through it by
-    /// pulse-width modulation (a one-shot count written at every sample,
-    /// as Access's RealSound does) or by switching port 61h's data bit;
-    /// the mean gives the sample they make. A square wave too fast to hear
-    /// gives its mean level, which the speaker's filter takes out, and a
-    /// tone heard keeps the edges between frames, which point samples of
-    /// it would fold into tones of their own. DOSBox-X's PC speaker
-    /// averages its output over each sample in the same way.
+    /// The PC speaker's level for mix frame `n`, about 0 to 1: the share
+    /// of the time the cone was driven out, band-limited to the mix rate.
+    /// The output switches as fast as channel 2 counts, 1.19 MHz, and
+    /// programs play digitized sound through it by pulse-width modulation
+    /// (a one-shot count written at every sample, as Access's RealSound
+    /// does) or by switching port 61h's data bit; the mean level gives
+    /// the sample they make. A square wave too fast to hear gives its mean
+    /// level, which the speaker's filter takes out, and a tone heard keeps
+    /// the edges between frames, which point samples of it would fold into
+    /// tones of their own. The means are taken over eighths of the frame
+    /// and filtered before one sample a frame is kept
+    /// (`dsp::SpeakerDecimator`), so a PWM carrier's harmonics don't fold
+    /// into the audible range either, as they do from a mean over each
+    /// whole frame.
     fn speaker_frame(&mut self, n: u64) -> f32 {
-        let start = frame_tick(n);
-        let end = frame_tick(n + 1);
-        self.speaker_take_in(end);
-        let high = self.speaker_high;
-        self.speaker_high = 0.0;
-        (high / (end - start)).clamp(0.0, 1.0) as f32
+        self.speaker_take_in(frame_tick(n + 1));
+        self.mixer.speaker_level()
     }
 
     /// The level the speaker holds from its last change on, 0 or 1, if it
@@ -2145,14 +2161,10 @@ impl Bus {
         let Some(level) = self.speaker_steady() else {
             return false;
         };
-        // The frame `speaker_until` falls in, or starts: rounded up, as
-        // after a skip it is a frame's start between two ticks, and
-        // rounding that down would give the frame before.
-        let rate = crate::opl::RATE as u64;
-        let until = self.speaker_until.ceil() as u64;
-        let frame = crate::timer::mul_div(until, rate, crate::timer::PIT_HZ);
-        let held = level as f64 * (self.speaker_until - frame_tick(frame));
+        let start = part_tick(part_at(self.speaker_until));
+        let held = level as f64 * (self.speaker_until - start);
         (self.speaker_high - held).abs() < 1e-6
+            && self.mixer.speaker_level_rests_on(level)
             && self.mixer.speaker_rests_on(SPEAKER_SWING * level)
     }
 
@@ -3696,5 +3708,36 @@ const SPEAKER_SWING: f32 = 6000.0;
 
 /// The PIT tick mix frame `n` starts at, which can fall between ticks.
 fn frame_tick(n: u64) -> f64 {
-    n as f64 * crate::timer::PIT_HZ as f64 / crate::opl::RATE as f64
+    part_tick(n * SPEAKER_PARTS)
+}
+
+/// How many parts of a mix frame the speaker's level is taken in over.
+const SPEAKER_PARTS: u64 = crate::dsp::SPEAKER_OVERSAMPLE as u64;
+
+/// The PIT tick part `n` of the speaker's mix frames starts at: frame
+/// `n / SPEAKER_PARTS`'s part `n % SPEAKER_PARTS`.
+fn part_tick(n: u64) -> f64 {
+    (n * crate::timer::PIT_HZ) as f64 / (crate::opl::RATE as u64 * SPEAKER_PARTS) as f64
+}
+
+/// The ticks the part and the mix frame that tick `t` falls in start at.
+fn speaker_starts(t: f64) -> (f64, f64) {
+    let part = part_at(t);
+    (
+        part_tick(part),
+        part_tick(part / SPEAKER_PARTS * SPEAKER_PARTS),
+    )
+}
+
+/// The part that tick `t` falls in, or starts.
+fn part_at(t: f64) -> u64 {
+    let rate = (crate::opl::RATE as u64 * SPEAKER_PARTS) as f64;
+    let mut n = (t * rate / crate::timer::PIT_HZ as f64).floor().max(0.0) as u64;
+    // The division above can round across a part's start.
+    if part_tick(n) > t {
+        n -= 1;
+    } else if part_tick(n + 1) <= t {
+        n += 1;
+    }
+    n
 }
