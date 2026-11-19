@@ -348,7 +348,40 @@ const ACTIVATED: u16 = 20;
 /// once, before the three. WarGames never shows its window itself:
 /// hidden, the window isn't under the cursor, so the mouse's clicks went
 /// to the desktop and the game's menus didn't answer them.
-pub fn activate_step(cpu: &mut Cpu, t: &mut Task, _: u32) -> Next {
+///
+/// Direct3D 8's task has the focus window in `FILTERED`: Direct3D's
+/// procedure is in front of the focus window's on Windows, and while the
+/// device changes its windows it hands the focus window's messages to
+/// DefWindowProc instead of the program's procedure. Wine's d3d8 tests
+/// (test_wndproc) find the program's procedure of the focus window gets
+/// none of them.
+pub fn activate_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
+    let filtered = t.var(FILTERED);
+    let default = user32::address_of("DefWindowProcA");
+    if t.step == 0
+        && filtered != 0
+        && let Some(w) = cpu.bus.win32.user.window_mut(filtered)
+    {
+        let original = std::mem::replace(&mut w.proc, default);
+        t.set(FILTERED + 1, original);
+    }
+    let next = window_step(cpu, t, value);
+    if matches!(next, Next::Done(_)) && filtered != 0 {
+        let original = t.var(FILTERED + 1);
+        match cpu.bus.win32.user.window_mut(filtered) {
+            Some(w) if original != 0 && w.proc == default => w.proc = original,
+            _ => {}
+        }
+    }
+    next
+}
+
+/// The variable of `WINDOW_FULLSCREEN` with the window whose messages go
+/// to DefWindowProc while the task runs, 0 for none; the one after it
+/// keeps that window's procedure.
+const FILTERED: usize = 5;
+
+fn window_step(cpu: &mut Cpu, t: &mut Task, _: u32) -> Next {
     use user32::window::{
         HWND_NOTOPMOST, HWND_TOPMOST, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
         SWP_NOZORDER, WS_MAXIMIZE, WS_VISIBLE,
@@ -588,7 +621,11 @@ fn window_vars(cpu: &mut Cpu, hwnd: u32, focus: u32, kind: u32) -> Option<Vec<u3
 /// screen only then. DD_OK.
 pub fn cover_screen_with(cpu: &mut Cpu, window: u32, focus: u32) -> Option<u32> {
     match window_vars(cpu, window, focus, WINDOW_FULLSCREEN) {
-        Some(vars) => task::start(cpu, task::DD_ACTIVATE, vars, 0),
+        Some(mut vars) => {
+            vars.resize(FILTERED, 0);
+            vars.push(cpu.bus.win32.user.top_level(focus));
+            task::start(cpu, task::DD_ACTIVATE, vars, 0)
+        }
         None => Some(DD_OK),
     }
 }
