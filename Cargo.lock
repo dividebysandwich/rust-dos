@@ -2258,6 +2258,7 @@ dependencies = [
  "oxideav-mp2",
  "oxideav-mpeg12video",
  "png",
+ "rust-dos-adlibgold",
  "rust-dos-audio-core",
  "rust-dos-dma",
  "rust-dos-gus",
@@ -2290,6 +2291,15 @@ dependencies = [
  "uuid",
  "web-time",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rust-dos-adlibgold"
+version = "1.9.2"
+dependencies = [
+ "rust-dos-audio-core",
+ "rust-dos-dma",
+ "rust-dos-savestate",
 ]
 
 [[package]]
