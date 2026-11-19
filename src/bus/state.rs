@@ -199,8 +199,6 @@ impl Bus {
             profile: _,
             guest_paging: _,
             guest_fault: _,
-            // How many ignored ROM writes were logged.
-            rom_writes: _,
             // Requests to the front end, which it carries out before a
             // state can be saved.
             reset_requested: _,
@@ -234,6 +232,7 @@ impl Bus {
             host_frames: _,
             key_waits: _,
             unhandled_writes: _,
+            limited_logs: _,
             attribute_reset: _,
             memory_derived: _,
             cpu_derived: _,
@@ -560,7 +559,6 @@ impl Bus {
             profile: _,
             guest_paging: _,
             guest_fault: _,
-            rom_writes: _,
             config_ui_requested: _,
             exit_requested: _,
             mixer_changed: _,
@@ -588,6 +586,7 @@ impl Bus {
             host_frames: _,
             key_waits: _,
             unhandled_writes: _,
+            limited_logs: _,
             attribute_reset: _,
             // The front end's, which sets them from the settings a load
             // leaves (`slots::loaded_settings`).
