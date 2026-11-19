@@ -886,8 +886,7 @@ fn an_mfc_idle_loop_of_window_queries_is_skipped() {
         Some(a) => assert_eq!(a, host(cpu), "{test}: calls, turn before batch {n}"),
     };
     if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
-        panic!("{}: {}
-  {:?}", test, e, b.bus.observe.stats);
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
     }
     assert_eq!(host(&a), host(&b), "{test}: calls, turn at the end");
     let stats = b.bus.observe.stats;
@@ -938,8 +937,7 @@ fn a_win16_loop_with_a_long_count_on_its_stack_is_skipped() {
         Some(a) => assert_eq!(a, host(cpu), "{test}: calls, turn before batch {n}"),
     };
     if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
-        panic!("{}: {}
-  {:?}", test, e, b.bus.observe.stats);
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
     }
     assert_eq!(host(&a), host(&b), "{test}: calls, turn at the end");
     let stats = b.bus.observe.stats;
@@ -957,6 +955,68 @@ fn a_win16_loop_with_a_long_count_on_its_stack_is_skipped() {
         stats
     );
     assert!(stats.proving < 40 * stats.proofs, "{:?}", stats);
+}
+
+#[test]
+fn a_win16_loop_that_works_out_a_progress_from_the_time_is_skipped_across_milliseconds() {
+    // Metal Marines' title (#1372) waits in MFC's idle loop, which counts
+    // its passes in a LONG on its stack, calls PeekMessage, and in every
+    // pass reads timeGetTime and works out how far the wait is from it
+    // with _lmul and _ldiv, into a progress value it keeps in RAM and
+    // compares. The pass is the same in every millisecond but for the
+    // time and what comes from it: the proof follows the clock's value
+    // through it as it follows a count (MUL, DIV and the halves of DX:AX
+    // Win16Return sets), and the passes skipped read the time each would,
+    // up to where the compare comes out otherwise. A proof then holds for
+    // many milliseconds, not to the next one.
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.call("MMSYSTEM", 607).emit(&[0x8B, 0xF0]); // timeGetTime; mov si,ax
+    code.push(0).push(0).emit(&[0x8B, 0xEC]); // the count at SS:BP; mov bp,sp
+    let top = code.here();
+    code.emit(&[0x83, 0x46, 0x00, 0x01]) // add word [bp],1
+        .emit(&[0x83, 0x56, 0x02, 0x00]) // adc word [bp+2],0
+        .emit(&[0x1E]) // push ds
+        .push(0x10) // the MSG at DS:10h
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0) // PM_NOREMOVE
+        .call("USER", 109) // PeekMessage
+        .call("MMSYSTEM", 607) // timeGetTime
+        .emit(&[0x2B, 0xC6]) // sub ax,si
+        .emit(&[0xBB, 0x64, 0x00]) // mov bx,100
+        .emit(&[0xF7, 0xE3]) // mul bx
+        .emit(&[0xBB, 0xE8, 0x03]) // mov bx,1000
+        .emit(&[0xF7, 0xF3]) // div bx: the progress, in tenths
+        .emit(&[0xA3, 0x40, 0x00]) // mov ds:[40h],ax
+        .emit(&[0x3D, 0x1E, 0x00]); // cmp ax,30
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_progress";
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    let host = |cpu: &Cpu| (cpu.bus.win32.calls, cpu.bus.win32.slice_start);
+    let mut first = None;
+    let each = |n: usize, cpu: &mut Cpu| match first.take() {
+        None => first = Some(host(cpu)),
+        Some(a) => assert_eq!(a, host(cpu), "{test}: calls, turn before batch {n}"),
+    };
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    assert_eq!(host(&a), host(&b), "{test}: calls, turn at the end");
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
+    // A proof that held only to the clock's next millisecond would skip
+    // less than a millisecond's instructions.
+    let ms = b.bus.clock.cycles_per_ms() as u64;
+    assert!(stats.proofs >= 1 && stats.skipped > 100 * ms, "{:?}", stats);
+    assert!(stats.skipped / stats.proofs > 4 * ms, "{:?}", stats);
 }
 
 /// Reads of the built-in Windows's clock in a row arm their place, but not

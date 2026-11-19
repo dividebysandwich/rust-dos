@@ -347,6 +347,15 @@ enum Step {
     Op(Counting),
     /// A value that doesn't come from the counts was written to the cell.
     Kill(Cell),
+    /// The built-in Windows' clock in milliseconds was read into the four
+    /// cells from `cell` (EAX), `offset` instructions after the pass
+    /// started, and was `value`: the passes after it read it at the same
+    /// place in them, each the value the clock has then (`Model::run`).
+    Clock {
+        cell: Cell,
+        offset: u64,
+        value: u32,
+    },
 }
 
 /// The pass `Phase::Count` records.
@@ -385,6 +394,11 @@ impl Pass {
     /// The instructions recorded so far.
     pub(super) fn recorded(&self) -> u64 {
         self.flags.len() as u64
+    }
+
+    /// Whether the pass follows a read of the clock (`Step::Clock`).
+    pub(super) fn reads_clock(&self) -> bool {
+        self.steps.iter().any(|s| matches!(s, Step::Clock { .. }))
     }
 
     /// The general registers that may hold counts at the head.
@@ -754,6 +768,16 @@ pub(super) fn record(cpu: &mut Cpu) {
         if shift && count & 0x1F == 0 || repeated && rep_count(cpu) == 0 {
             kill = 0;
         }
+        // AF is undefined after AND, OR, XOR and TEST; the CPU clears it
+        // (`alu::logic`), so what an instruction before left there is
+        // gone.
+        let logic = matches!(
+            mnemonic,
+            Mnemonic::And | Mnemonic::Or | Mnemonic::Xor | Mnemonic::Test
+        );
+        if logic {
+            kill |= rflags(instr.rflags_undefined());
+        }
         (read & ARITH, kill & ARITH)
     };
     // The RAM it reads. What it writes the bus reports as it writes it
@@ -874,14 +898,12 @@ pub(super) fn record(cpu: &mut Cpu) {
     let mut failed = None;
     if opaque {
         // A service keeps EBX, ESI, EDI and EBP, sets EAX to what it
-        // returns, and reads no register but ESP (`after_service`); it may
-        // change ECX and EDX. What a Win16 function leaves in the
+        // returns, and reads no register but ESP; it may change ECX and
+        // EDX (`after_service`). What a Win16 function leaves in the
         // registers depends on whether it calls 32-bit code, which
         // `after_service` looks at. Anything else may read any.
-        let open = if service16 {
+        let open = if service16 || service {
             0..0
-        } else if service {
-            reg_cell(1)..reg_cell(3)
         } else {
             reg_cell(0)..reg_cell(8)
         };
@@ -964,6 +986,10 @@ enum Run {
         carry: bool,
     },
     Kill(usize),
+    Clock {
+        slot: usize,
+        offset: u64,
+    },
 }
 
 /// The recorded pass as the model runs it: each cell it follows has a
@@ -973,9 +999,12 @@ pub(super) struct Model {
     seeds: Vec<usize>,
     runs: Vec<Run>,
     /// For each operation, the flags it sets that something reads before
-    /// they are set again (or at the head, whose flags the passes
-    /// compare), and those flags as the recorded pass set them.
-    checks: Vec<(u32, u32)>,
+    /// they are set again, those flags as the recorded pass set them, and
+    /// the flags it sets that the head finds. A pass may leave the head
+    /// other flags than the one before it, as a SUB of the time before a
+    /// call of the built-in Windows does: the passes skipped leave those
+    /// of the last (`counted_passes`).
+    checks: Vec<(u32, u32, u32)>,
 }
 
 type State = Vec<Option<u8>>;
@@ -991,6 +1020,7 @@ impl Model {
                     }
                 }
                 Step::Kill(cell) => cells.push(*cell),
+                Step::Clock { cell, .. } => cells.extend(*cell..cell + 4),
             }
         }
         cells.sort_unstable();
@@ -1009,6 +1039,10 @@ impl Model {
                     carry: c.carry,
                 },
                 Step::Kill(cell) => Run::Kill(slot(*cell)),
+                &Step::Clock { cell, offset, .. } => Run::Clock {
+                    slot: slot(cell),
+                    offset,
+                },
             })
             .collect();
         let seeds = pass.seeds.iter().map(|&c| slot(c)).collect();
@@ -1029,11 +1063,18 @@ impl Model {
         state
     }
 
-    /// Run the pass on `state`, calling `each` with every operation's
-    /// index, the destination's, source's and `hi`'s values it found and
-    /// the flags it set; stops where `each` returns false, or where an
-    /// operation raises an exception. Whether it ran to the end.
-    fn run(&self, state: &mut State, mut each: impl FnMut(usize, [u32; 3], u32) -> bool) -> bool {
+    /// Run the pass on `state`, with `clock(offset)` the milliseconds the
+    /// built-in Windows' clock has `offset` instructions after the pass
+    /// started, calling `each` with every operation's index, the
+    /// destination's, source's and `hi`'s values it found and the flags it
+    /// set; stops where `each` returns false, or where an operation raises
+    /// an exception. Whether it ran to the end.
+    fn run(
+        &self,
+        state: &mut State,
+        clock: impl Fn(u64) -> u32,
+        mut each: impl FnMut(usize, [u32; 3], u32) -> bool,
+    ) -> bool {
         let read = |state: &State, (slot, fixed): (Option<usize>, u32), size: u8| {
             (0..size as usize).fold(0u32, |v, i| {
                 let byte = slot
@@ -1053,6 +1094,7 @@ impl Model {
         for run in &self.runs {
             match *run {
                 Run::Kill(s) => state[s] = None,
+                Run::Clock { slot, offset } => write(state, Some(slot), Some(clock(offset)), 4),
                 Run::Op {
                     op,
                     size,
@@ -1151,20 +1193,28 @@ pub(super) fn count(cpu: &mut Cpu, visit: Visit) {
         .iter()
         .filter_map(|s| match s {
             Step::Op(c) => Some(c),
-            Step::Kill(_) => None,
+            Step::Kill(_) | Step::Clock { .. } => None,
         })
         .collect();
+    // The clock as the pass read it, which the model reads from the
+    // emulated clock at the same places.
+    let clock = |offset: u64| clock_at(cpu, base.icount + offset);
+    let clocked = pass.steps.iter().all(|s| match *s {
+        Step::Clock { offset, value, .. } => clock(offset) == value,
+        _ => true,
+    });
     let mask = |size: u8| crate::cpu::alu::size_mask(size);
     let mut seen = Vec::with_capacity(ops.len());
-    let same = model.run(&mut state, |i, found, flags| {
-        let op = ops[i];
-        seen.push(flags);
-        let fixed = [op.dst.fixed, op.src.fixed, op.hi.fixed];
-        found
-            .iter()
-            .zip(fixed)
-            .all(|(&v, f)| v == f & mask(op.size))
-    });
+    let same = clocked
+        && model.run(&mut state, clock, |i, found, flags| {
+            let op = ops[i];
+            seen.push(flags);
+            let fixed = [op.dst.fixed, op.src.fixed, op.hi.fixed];
+            found
+                .iter()
+                .zip(fixed)
+                .all(|(&v, f)| v == f & mask(op.size))
+        });
     let ends_as_now = state
         .iter()
         .zip(&model.cells)
@@ -1214,7 +1264,8 @@ pub(super) fn count(cpu: &mut Cpu, visit: Visit) {
         return;
     }
     // The flags of each operation that something reads before they are
-    // set again, or at the head.
+    // set again, in this pass or, for those still set at its end, in the
+    // next one, and those that reach the head.
     model.checks = ops
         .iter()
         .zip(&seen)
@@ -1224,12 +1275,13 @@ pub(super) fn count(cpu: &mut Cpu, visit: Visit) {
             for &(read, kill) in &pass.flags[op.at + 1..] {
                 live |= read & left;
                 left &= !kill;
-                if left == 0 {
-                    break;
-                }
             }
-            let live = live | left;
-            (live, flags & live)
+            let out = left;
+            for &(read, kill) in &pass.flags[..=op.at] {
+                live |= read & left;
+                left &= !kill;
+            }
+            (live, flags & live, out)
         })
         .collect();
     cpu.bus.observe.on = true;
@@ -1248,16 +1300,36 @@ pub(super) fn count(cpu: &mut Cpu, visit: Visit) {
     );
 }
 
+/// The milliseconds the built-in Windows' clock reads at instruction count
+/// `icount`, as `idle::tick_count` reads them.
+fn clock_at(cpu: &Cpu, icount: u64) -> u32 {
+    (cpu.bus.clock.micros_at(icount) / 1000) as u32
+}
+
 /// How many of the next passes, up to `most`, run as the recorded one:
-/// those whose operations set the flags read after them as it did. Also
-/// the cells holding counts after them.
-pub(super) fn counted_passes(cpu: &Cpu, model: &Model, most: u64) -> (u64, Vec<(Cell, u8)>) {
+/// those whose operations set the flags read after them as it did, the
+/// first starting at instruction count `from` and each `period` after the
+/// one before. Also the cells holding counts after them, and the flags
+/// the last leaves the head where they come from a count: a mask and
+/// their values.
+pub(super) fn counted_passes(
+    cpu: &Cpu,
+    model: &Model,
+    most: u64,
+    from: u64,
+    period: u64,
+) -> (u64, Vec<(Cell, u8)>, (u32, u32)) {
     let mut state = model.seeded(|c| value_now(cpu, c));
     let mut done = state.clone();
     let mut passes = 0;
+    let mut head_flags = (0, 0);
     while passes < most {
-        let same = model.run(&mut state, |i, _, flags| {
-            let (live, seen) = model.checks[i];
+        let start = from + passes * period;
+        let clock = |offset: u64| clock_at(cpu, start + offset);
+        let mut left = head_flags;
+        let same = model.run(&mut state, clock, |i, _, flags| {
+            let (live, seen, out) = model.checks[i];
+            left = (left.0 | out, left.1 & !out | flags & out);
             flags & live == seen
         });
         if !same {
@@ -1265,13 +1337,14 @@ pub(super) fn counted_passes(cpu: &Cpu, model: &Model, most: u64) -> (u64, Vec<(
         }
         passes += 1;
         done.clone_from(&state);
+        head_flags = left;
     }
     let values = done
         .iter()
         .zip(&model.cells)
         .filter_map(|(v, &c)| v.map(|v| (c, v)))
         .collect();
-    (passes, values)
+    (passes, values, head_flags)
 }
 
 /// The service running read the general registers (`reads_registers`):
@@ -1293,7 +1366,9 @@ pub(super) fn registers_read(cpu: &mut Cpu) {
 /// beyond them (`reads_also`); one that may have read any reads nothing
 /// of the free stack below its caller's top.
 ///
-/// A Win16 stub that called 32-bit code may
+/// The built-in Windows' clock read by a function that returns it
+/// (`idle::tick_count`) becomes a count in EAX, which the passes after it
+/// read anew (`Step::Clock`). A Win16 stub that called 32-bit code may
 /// leave no count in a register: the registers 16-bit code goes on with
 /// are those it had there, but for DX:AX, which Win16Return sets
 /// (`idle::resumed16`), from a count in EAX where it holds one.
@@ -1305,17 +1380,31 @@ pub(super) fn after_service(cpu: &mut Cpu) {
     // DX:AX, which a Win16 function returns.
     let dx = reg_cell(2)..reg_cell(2) + 2;
     let returns = |c: &Cell| (eax.start..eax.start + 2).contains(c) || dx.contains(c);
+    let value = cpu.eax();
     let o = &mut cpu.bus.observe;
     let returned = o.service_returned;
+    let clock = o.service_clock.take();
     let resumed = o.resumed16.take();
     let regs = o.service_regs;
-    let Phase::Count { pass, .. } = &mut o.phase else {
+    let Phase::Count { pass, base, .. } = &mut o.phase else {
         return;
     };
+    let base = base.icount;
     let stub16 = pass.stub16;
+    let mut clocked = false;
     let mut moved = false;
-    if returned {
-        pass.kill(eax.clone());
+    match clock {
+        Some((ms, at, _)) if returned && value == ms => {
+            pass.steps.push(Step::Clock {
+                cell: eax.start,
+                offset: at - base,
+                value,
+            });
+            pass.tainted.extend(eax.clone());
+            clocked = true;
+        }
+        _ if returned => pass.kill(eax.clone()),
+        _ => {}
     }
     if let Some(as_is) = resumed {
         if pass.any(&eax) {
@@ -1363,6 +1452,7 @@ pub(super) fn after_service(cpu: &mut Cpu) {
     // anything in AX, BX, CX and DX.
     let thunked = stub16 && !crate::win16::in_16bit_code(cpu);
     let o = &mut cpu.bus.observe;
+    o.clock_modelled |= clocked;
     let Phase::Count { pass, .. } = &mut o.phase else {
         return;
     };
@@ -1385,12 +1475,31 @@ pub(super) fn after_service(cpu: &mut Cpu) {
                 pass.any(&cells) && cpu.reg(GPR32[i]) != o.service_regs[i]
             })
     } else {
-        pass.any(&eax)
-            || (1..8).any(|i| {
+        !clocked && pass.any(&eax)
+            || (3..8).any(|i| {
                 let cells = reg_cell(i)..reg_cell(i) + 4;
                 pass.any(&cells) && cpu.reg(GPR32[i]) != o.service_regs[i]
             })
     };
+    // A count in ECX or EDX that a 32-bit service changed is gone: the
+    // service didn't read it. One it left as it was still holds it.
+    let plain32 = !stub16 && !thunked && resumed.is_none();
+    let scratch: Vec<Range<Cell>> = (1..3)
+        .filter(|&i| plain32 && cpu.reg(GPR32[i]) != o.service_regs[i])
+        .map(|i| reg_cell(i)..reg_cell(i) + 4)
+        .collect();
+    if let Phase::Count { pass, .. } = &mut cpu.bus.observe.phase {
+        for cells in scratch {
+            pass.kill(cells);
+        }
+    }
+    if clock.is_some() && !clocked {
+        // A read of the clock the passes can't follow: they hold up to its
+        // next millisecond.
+        let next = clock.map_or(0, |(_, _, next)| next);
+        let o = &mut cpu.bus.observe;
+        o.holds_until = Some(o.holds_until.map_or(next, |h| h.min(next)));
+    }
     let o = &cpu.bus.observe;
     let Phase::Count { pass, .. } = &o.phase else {
         return;

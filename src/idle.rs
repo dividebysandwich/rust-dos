@@ -238,6 +238,19 @@ struct Ledger {
     cost: u64,
 }
 
+/// A head whose pass used the time the clock read in a way a count proof
+/// doesn't follow, as Tribal Rage's does with FILD in the pass that
+/// draws a frame once the time comes. Its next `left` proofs that skip
+/// hold what the clock read to its next millisecond (`tick_count`), as
+/// for any other loop; then they follow the clock again. `run` doubles
+/// with each such failure in a row, up to 64, and a proof that follows
+/// the clock and skips ends it.
+struct PlainClock {
+    head: Head,
+    left: u32,
+    run: u32,
+}
+
 /// Bytes of RAM an instruction reached: `len` from `start`.
 #[derive(Clone, Copy)]
 struct Access {
@@ -349,6 +362,9 @@ pub struct Observe {
     found: Option<Shape>,
     /// The proof running started from the shape of its head.
     shaped: bool,
+    /// Heads whose passes used the time the clock read in a way a count
+    /// proof doesn't follow, the most recent `KNOWN_HEADS` (`PlainClock`).
+    plain_clock: Vec<PlainClock>,
     /// The instructions `count::record` decoded, by place
     /// (`count::Decoded`), and the buffers it fills for each.
     decoded: Vec<Option<std::sync::Arc<count::Decoded>>>,
@@ -407,9 +423,19 @@ pub struct Observe {
     /// The function running set EAX to the value it returns
     /// (`returned`).
     service_returned: bool,
+    /// The function running read the built-in Windows' clock as the value
+    /// it returns (`tick_count`): the milliseconds, the instruction count
+    /// it read them at, and when they move on.
+    service_clock: Option<(u32, u64, u64)>,
     /// The function running was Win16Return, which loaded the 16-bit
     /// context with DX:AX the value in EAX if true (`resumed16`).
     resumed16: Option<bool>,
+    /// The last service's read of the clock is one the pass `Phase::Count`
+    /// records follows (`count::after_service`), which `clock_read`
+    /// doesn't hold the proof to.
+    clock_modelled: bool,
+    /// Built-in functions a service calls from Rust that run (`nested`).
+    nesting: u8,
     /// Since the base: the first instruction count at which what the
     /// services read would read otherwise, and when the last service
     /// started the thread's turn over.
@@ -456,6 +482,7 @@ impl Default for Observe {
             seen: 0,
             found: None,
             shaped: false,
+            plain_clock: Vec::new(),
             decoded: Vec::new(),
             scratch: (Vec::new(), Vec::new()),
             port_ok: None,
@@ -480,7 +507,10 @@ impl Default for Observe {
             service_args: None,
             service_reads: Vec::new(),
             service_returned: false,
+            service_clock: None,
             resumed16: None,
+            clock_modelled: false,
+            nesting: 0,
             holds_until: None,
             turn_at: None,
             stats: IdleStats::default(),
@@ -716,6 +746,7 @@ impl Observe {
         self.latch_at = None;
         self.pit_read = false;
         self.clock_read = None;
+        self.clock_modelled = false;
         self.writes.clear();
         self.found = None;
         self.shaped = false;
@@ -805,6 +836,29 @@ impl Observe {
             let ran = self.seen.saturating_sub(self.started) + recorded;
             self.charge(head, 0, ran);
         }
+        // A pass that used the time the clock read in a way the model
+        // doesn't follow: the next proofs at the head hold that time to the
+        // clock's next millisecond (`PlainClock`), and the next comes at
+        // the head's next chance.
+        let clocked = matches!(&self.phase, Phase::Count { pass, .. } if pass.reads_clock());
+        if let (true, Some(head)) = (clocked, head) {
+            match self.plain_clock.iter_mut().find(|p| p.head == head) {
+                Some(p) => {
+                    p.run = (p.run * 2).min(64);
+                    p.left = p.run;
+                }
+                None => {
+                    if self.plain_clock.len() == KNOWN_HEADS {
+                        self.plain_clock.remove(0);
+                    }
+                    self.plain_clock.push(PlainClock {
+                        head,
+                        left: 1,
+                        run: 1,
+                    });
+                }
+            }
+        }
         self.tally(head, |h| {
             h.failures += 1;
             h.failure = why;
@@ -820,7 +874,7 @@ impl Observe {
         {
             *slot = (why, slot.1 + 1);
         }
-        if let Some(head) = head {
+        if let (false, Some(head)) = (clocked, head) {
             self.back_off(head, 16);
         }
     }
@@ -972,6 +1026,7 @@ pub fn before_service(cpu: &mut Cpu) {
         o.service_args = None;
         o.service_reads.clear();
         o.service_returned = false;
+        o.service_clock = None;
         o.resumed16 = None;
     }
 }
@@ -1102,7 +1157,9 @@ pub fn nested<T>(cpu: &mut Cpu, f: impl FnOnce(&mut Cpu) -> T) -> T {
     let arguments = cpu.bus.observe.arguments;
     cpu.bus.observe.pure = false;
     cpu.bus.observe.arguments = false;
+    cpu.bus.observe.nesting += 1;
     let value = f(cpu);
+    cpu.bus.observe.nesting -= 1;
     cpu.bus.observe.pure &= claimed;
     cpu.bus.observe.arguments &= arguments;
     value
@@ -1119,15 +1176,32 @@ pub fn turn_started(cpu: &mut Cpu) {
 
 /// The milliseconds since the machine started, by its clock, as
 /// GetTickCount reads them. The service changes nothing, and what it read
-/// stays the same until the next millisecond.
+/// stays the same until the next millisecond. A pass `Phase::Count`
+/// records follows the value where the service returns it (as
+/// GetTickCount and timeGetTime do, but not a function that calls them
+/// from Rust), and the passes after it read it anew; elsewhere they hold
+/// up to the next millisecond.
 pub fn tick_count(cpu: &mut Cpu) -> u32 {
     let micros = cpu.bus.clock.now_micros();
+    let ms = (micros / 1000) as u32;
     if cpu.bus.observe.on {
         let next = cpu.bus.clock.icount_at_micros((micros / 1000 + 1) * 1000);
-        pure_call(cpu, Some(next));
+        let o = &mut cpu.bus.observe;
+        let follows = match &o.phase {
+            Phase::Count { head, .. } => {
+                !o.plain_clock.iter().any(|p| p.head == *head && p.left > 0)
+            }
+            _ => false,
+        };
+        if follows && o.nesting == 0 {
+            o.service_clock = Some((ms, cpu.bus.clock.icount, next));
+            pure_call(cpu, None);
+        } else {
+            pure_call(cpu, Some(next));
+        }
         reads_arguments(cpu);
     }
-    (micros / 1000) as u32
+    ms
 }
 
 /// Win16Return loaded the 16-bit context that called 32-bit code, with
@@ -1166,7 +1240,7 @@ pub fn clock_read(cpu: &mut Cpu, cs: u16, eip: u32) {
     let head = Head { cs, eip, pe: cpu.pe() };
     let run = cpu.bus.clock.run_count();
     let o = &mut cpu.bus.observe;
-    if o.on {
+    if o.on && !std::mem::take(&mut o.clock_modelled) {
         let ms = cpu.bus.clock.now_micros() / 1000;
         o.clock_read.get_or_insert(ms);
     }
@@ -1571,10 +1645,10 @@ fn finish(
         limit = until;
     }
     // The passes the counters let run the same. Where there was room for
-    // one and none does, as when the flags the head compares come from
-    // comparing a counter, the loop is no closer to a skip at its next
-    // proof than at this one: that is a failure, which backs off, rather
-    // than a proof started again every few passes.
+    // one and none does, as when a compare of a counter that a jump reads
+    // comes out otherwise in the next pass, the loop is no closer to a
+    // skip at its next proof than at this one: that is a failure, which
+    // backs off, rather than a proof started again every few passes.
     let mut counted_run = None;
     if let Some(pass) = &counted
         && period > 0
@@ -1582,11 +1656,11 @@ fn finish(
     {
         let room = limit.min(cpu.bus.clock.deadline) - visit.icount;
         let most = (room / period).min(COUNTED_PASSES);
-        let (same, values) = count::counted_passes(cpu, pass, most);
+        let (same, values, flags) = count::counted_passes(cpu, pass, most, visit.icount, period);
         if most > 0 && same == 0 {
             return cpu.bus.observe.fail("count passes");
         }
-        counted_run = Some((same, values));
+        counted_run = Some((same, values, flags));
     }
     let o = &mut cpu.bus.observe;
     let head = o.head();
@@ -1596,10 +1670,11 @@ fn finish(
     if period > 0 && limit > visit.icount {
         let mut passes = u64::MAX;
         let counting = counted_run.is_some();
-        if let Some((same, values)) = counted_run {
+        if let Some((same, values, (mask, bits))) = counted_run {
             for (cell, value) in values {
                 count::set_cell(cpu, cell, value);
             }
+            cpu.set_flag_bits(mask, bits);
             passes = same;
         }
         let skipped = skip(cpu, period, executed, limit, passes);
@@ -1638,6 +1713,14 @@ fn finish(
                 cpu.bus.observe.keep_shape(shape);
             }
             cpu.bus.observe.proved(head);
+            let plain = &mut cpu.bus.observe.plain_clock;
+            if let Some(at) = plain.iter().position(|p| Some(p.head) == head) {
+                if plain[at].left == 0 {
+                    plain.remove(at);
+                } else {
+                    plain[at].left -= 1;
+                }
+            }
             // The calls the passes skipped would have made, and the turn
             // the last of them would have started.
             let win32 = &mut cpu.bus.win32;
