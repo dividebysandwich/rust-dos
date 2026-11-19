@@ -50,6 +50,55 @@ impl Biquad {
         Self::normalized(b0, -(1.0 + cos), b0, 1.0 + alpha, -2.0 * cos, 1.0 - alpha)
     }
 
+    /// An all-pass at `freq` Hz with resonance `q`: every frequency at
+    /// its level, the phase turning through 360 degrees around `freq`.
+    pub fn allpass(freq: f32, q: f32) -> Self {
+        let (cos, alpha) = Self::angle(freq, q);
+        Self::normalized(1.0 - alpha, -2.0 * cos, 1.0 + alpha, 1.0 + alpha, -2.0 * cos, 1.0 - alpha)
+    }
+
+    /// A low shelf: `gain_db` below `freq` Hz, 0 dB above, with shelf
+    /// slope `slope` (1 the steepest without a bump).
+    pub fn low_shelf(freq: f32, gain_db: f32, slope: f32) -> Self {
+        let (a, cos, alpha) = Self::shelf(freq, gain_db, slope);
+        let s = 2.0 * a.sqrt() * alpha;
+        Self::normalized(
+            a * ((a + 1.0) - (a - 1.0) * cos + s),
+            2.0 * a * ((a - 1.0) - (a + 1.0) * cos),
+            a * ((a + 1.0) - (a - 1.0) * cos - s),
+            (a + 1.0) + (a - 1.0) * cos + s,
+            -2.0 * ((a - 1.0) + (a + 1.0) * cos),
+            (a + 1.0) + (a - 1.0) * cos - s,
+        )
+    }
+
+    /// A high shelf: `gain_db` above `freq` Hz, 0 dB below.
+    pub fn high_shelf(freq: f32, gain_db: f32, slope: f32) -> Self {
+        let (a, cos, alpha) = Self::shelf(freq, gain_db, slope);
+        let s = 2.0 * a.sqrt() * alpha;
+        Self::normalized(
+            a * ((a + 1.0) + (a - 1.0) * cos + s),
+            -2.0 * a * ((a - 1.0) + (a + 1.0) * cos),
+            a * ((a + 1.0) + (a - 1.0) * cos - s),
+            (a + 1.0) - (a - 1.0) * cos + s,
+            2.0 * ((a - 1.0) - (a + 1.0) * cos),
+            (a + 1.0) - (a - 1.0) * cos - s,
+        )
+    }
+
+    /// Take `other`'s response and keep this filter's state, so a change
+    /// of its settings while it plays makes no click.
+    pub fn retune(&mut self, other: Biquad) {
+        *self = Self { z1: self.z1, z2: self.z2, ..other };
+    }
+
+    fn shelf(freq: f32, gain_db: f32, slope: f32) -> (f32, f32, f32) {
+        let a = 10f32.powf(gain_db / 40.0);
+        let w = 2.0 * PI * freq.clamp(1.0, RATE * 0.49) / RATE;
+        let alpha = w.sin() / 2.0 * ((a + 1.0 / a) * (1.0 / slope - 1.0) + 2.0).sqrt();
+        (a, w.cos(), alpha)
+    }
+
     fn angle(cutoff: f32, q: f32) -> (f32, f32) {
         let w = 2.0 * PI * cutoff.clamp(1.0, RATE * 0.49) / RATE;
         (w.cos(), w.sin() / (2.0 * q))
