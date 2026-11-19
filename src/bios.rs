@@ -570,13 +570,23 @@ pub fn windows_keyboard(bus: &mut Bus, on: bool) {
 }
 
 /// Put the default vectors back, except those pointing into `keep`
-/// (the memory of resident programs, whose hooks must survive).
+/// (the memory of resident programs, whose hooks must survive) and those
+/// pointing at one of the BIOS's or DOS's own entry points or tables. A
+/// TSR that chains to a service through another vector, as Rob Northen's
+/// CDPATCH moves INT 21h's entry to INT 6Fh, leaves such a pointer: it
+/// can't dangle, and DOS doesn't put vectors back when a program ends. A
+/// vector pointed at the plain IRET goes back, as a hook of the program
+/// that ended.
 pub fn restore_ivt(bus: &mut Bus, keep: &[std::ops::Range<usize>]) {
-    for (vector, &entry) in default_ivt().iter().enumerate() {
-        let offset = bus.read_16(vector * 4) as usize;
-        let segment = bus.read_16(vector * 4 + 2) as usize;
-        let at = (segment << 4) + offset;
-        if keep.iter().any(|range| range.contains(&at)) {
+    let defaults = default_ivt();
+    let entry_point =
+        |value: u32| value != 0 && value != far(IRET_HANDLER) && defaults.contains(&value);
+    for (vector, &entry) in defaults.iter().enumerate() {
+        let offset = bus.read_16(vector * 4);
+        let segment = bus.read_16(vector * 4 + 2);
+        let at = ((segment as usize) << 4) + offset as usize;
+        let value = (segment as u32) << 16 | offset as u32;
+        if keep.iter().any(|range| range.contains(&at)) || entry_point(value) {
             continue;
         }
         bus.write_16(vector * 4, entry as u16);
