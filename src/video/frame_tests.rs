@@ -111,7 +111,7 @@ fn the_vga_screen_off_bit_blanks_the_picture_until_it_clears() {
     let mut picture = Frame::new(width, height);
     render_screen_rows(&mut picture, &cpu.bus);
     cpu.bus.vga.clear_dirty();
-    assert!(picture.rgba.as_chunks::<4>().0.iter().any(|p| *p != [0, 0, 0, 255]));
+    assert!(picture.rgba.chunks(4).any(|p| *p != [0, 0, 0, 255]));
 
     // SR01 bit 5 through the ports: the whole picture goes black.
     let mut frame = picture.clone();
@@ -120,7 +120,7 @@ fn the_vga_screen_off_bit_blanks_the_picture_until_it_clears() {
     cpu.bus.io_write(0x3C5, clocking | 0x20);
     assert_eq!(render_screen_rows(&mut frame, &cpu.bus), 0..height as usize);
     cpu.bus.vga.clear_dirty();
-    assert!(frame.rgba.as_chunks::<4>().0.iter().all(|p| *p == [0, 0, 0, 255]));
+    assert!(frame.rgba.chunks(4).all(|p| *p == [0, 0, 0, 255]));
 
     // Cleared again, the picture comes back whole.
     cpu.bus.io_write(0x3C5, clocking);
