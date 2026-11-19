@@ -151,12 +151,15 @@ fn service(cpu: &mut Cpu, ctx: &mut Context, function: u16) -> Result {
             let base = pair(ctx, ECX, EDX);
             with_desc(cpu, ctx.reg16(EBX), |d| (d & !BASE_BITS) | (descriptor(base, 0, 0, 0) & BASE_BITS))?;
         }
-        // Set the limit of BX to CX:DX: above 1 MB, in whole pages.
+        // Set the limit of BX to CX:DX: above 1 MB, in whole pages, the
+        // last one ending where CX:DX falls. DPMI 0.9 refuses a limit
+        // above 1 MB whose low 12 bits aren't all set (8021h), but
+        // DOS/4GW 1.95's own host takes it: FFFF:F000 gives a limit of
+        // FFFFFFFFh. Its programs, which ran on that host, count on it:
+        // Virtuoso sets its sound driver's data selector so and has no
+        // other limit for it.
         0x0008 => {
             let limit = pair(ctx, ECX, EDX);
-            if limit > 0xF_FFFF && limit & 0xFFF != 0xFFF {
-                return Err(INVALID_VALUE);
-            }
             with_desc(cpu, ctx.reg16(EBX), |d| (d & !LIMIT_BITS) | (descriptor(0, limit, 0, 0) & LIMIT_BITS))?;
         }
         // Set the access rights of BX: CL, and G, D/B and AVL from CH.
