@@ -5,6 +5,9 @@ const BDA_SHIFT_FLAGS: usize = 0x0417;
 
 pub fn handle(cpu: &mut Cpu) {
     let ah = cpu.get_ah();
+    if keyboard_settings(cpu, ah) {
+        return;
+    }
     if crate::keyboard::bios_keystrokes(&cpu.bus) {
         return booted(cpu, ah);
     }
@@ -96,6 +99,25 @@ pub fn handle(cpu: &mut Cpu) {
     }
 }
 
+/// The functions about the keyboard itself, which an AT BIOS with an MF2
+/// keyboard has, booted or not, the same way. False for the others.
+fn keyboard_settings(cpu: &mut Cpu, ah: u8) -> bool {
+    match ah {
+        // Set the typematic rate and delay. The keyboard controller
+        // takes the rate a program sends to the keyboard (F3h) and
+        // keeps nothing of it, and keys repeat as the host's do
+        // (#1486), so there is nothing to set and nothing to return.
+        0x03 => {}
+        // The functions there are: AH=0Ah and 10h-12h, and none of
+        // AH=03h's subfunctions, as Bochs' BIOS returns.
+        0x09 => cpu.set_reg8(iced_x86::Register::AL, 0x30),
+        // The keyboard's ID, as the identify command returns it.
+        0x0A => cpu.set_bx(cpu.bus.kbc.keyboard_id()),
+        _ => return false,
+    }
+    true
+}
+
 /// Whether only the enhanced keyboard's functions (AH=10h and 11h) return
 /// a keystroke: those of F11 and F12 and of the combinations the older
 /// keyboards had no code for (Ctrl+Up, Alt+Tab and the like), whose codes
@@ -158,17 +180,11 @@ fn booted(cpu: &mut Cpu, ah: u8) {
             let high = (flags2 & 0x03) | (flags3 & 0x0C) | (flags2 & 0x70) | ((flags2 & 0x04) << 5);
             cpu.set_ax((high as u16) << 8 | flags as u16);
         }
-        // Set the typematic rate: the host's keyboard repeats.
-        0x03 => {}
         0x05 => {
             let key = cpu.cx();
             let full = !BiosBuffer::push(&mut cpu.bus, key);
             cpu.set_reg8(iced_x86::Register::AL, full as u8);
         }
-        // The functions there are: AH=0Ah and 10h-12h.
-        0x09 => cpu.set_reg8(iced_x86::Register::AL, 0x30),
-        // The keyboard's ID: an MF2 keyboard, translated.
-        0x0A => cpu.set_bx(0x41AB),
         _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 16h AH={:02X}", ah)),
     }
 }
