@@ -267,8 +267,15 @@ pub struct Bus {
     /// return this value instead of the live count until both bytes are read.
     pub pit0_latched: u16,
     pub pit0_latched_active: bool,
+    /// Channel 0's status byte latched by a read-back command, which the
+    /// next read of port 0x40 returns before any latched count.
+    pub pit0_status: Option<u8>,
     /// Channel 0 timing: when IRQ 0 fires.
     pub pit0: crate::timer::Pit0,
+    /// Channel 1, the DRAM refresh request, which nothing else uses: its
+    /// count on port 0x41.
+    pub pit1: crate::timer::Pit0,
+    pub pit1_port: crate::timer::PitPort,
     /// Emulated time, advanced by the main loop.
     pub clock: crate::timer::Clock,
     /// The two 8259 interrupt controllers.
@@ -2669,6 +2676,16 @@ impl Bus {
                 }
             }
 
+            // PIT channel 1, the DRAM refresh request: a counter like the
+            // others, which only programs that read it or reprogram it use.
+            0x41 => {
+                let now = self.clock.now_ticks();
+                self.pit1.advance(now);
+                if let Some(count) = self.pit1_port.write(value) {
+                    self.pit1.write_count(count, now);
+                }
+            }
+
             // PIT Channel 2 Data (Port 0x42)
             // This sets the frequency.
             // Frequency = 1,193,182 Hz / Divisor
@@ -2713,7 +2730,9 @@ impl Bus {
                 // Access bits (5-4): 00 = latch count value command.
                 let access = (value >> 4) & 0x03;
 
-                if access == 0 {
+                if channel == 3 {
+                    self.pit_read_back(value);
+                } else if access == 0 {
                     // Latch counter command: freeze the current count into
                     // the read buffer so LSB/MSB reads stay consistent.
                     if channel == 0 {
@@ -2723,6 +2742,10 @@ impl Bus {
                     } else if channel == 2 && self.pit2.latched.is_none() {
                         self.pit2.latched = Some(self.pit2.read(self.clock.now_ticks()).0);
                         self.pit_read_msb = false;
+                    } else if channel == 1 {
+                        let now = self.clock.now_ticks();
+                        self.pit1.advance(now);
+                        self.pit1_port.latch_count(self.pit1.count(now));
                     }
                 } else {
                     match channel {
@@ -2732,8 +2755,15 @@ impl Bus {
                             self.pit0_write_msb = false;
                             self.pit0_read_msb = false;
                             self.pit0_access = access;
-                            self.pit0.set_mode((value >> 1) & 0x07, self.clock.now_ticks());
+                            self.pit0_status = None;
+                            self.pit0.set_mode(value, self.clock.now_ticks());
                             self.clock.schedule(self.next_event());
+                        }
+                        1 => {
+                            let now = self.clock.now_ticks();
+                            self.pit1.advance(now);
+                            self.pit1_port.control(access);
+                            self.pit1.set_mode(value, now);
                         }
                         2 => {
                             if self.speaker_data {
@@ -2742,9 +2772,9 @@ impl Bus {
                             // Reset Channel 2 LSB/MSB
                             self.pit_write_msb = false;
                             self.pit_read_msb = false;
-                            self.pit2.set_mode((value >> 1) & 0x07, access, self.clock.now_ticks());
+                            self.pit2.set_mode(value, self.clock.now_ticks());
                         }
-                        _ => {}
+                        _ => unreachable!(),
                     }
                 }
             }
@@ -2956,6 +2986,45 @@ impl Bus {
 
     // Read from an I/O Port
     /// Read from an I/O port.
+    /// The 8254's read-back command (control word bits 7-6 = 11): for each
+    /// counter selected by bits 1 to 3, latch its count unless bit 5 is set
+    /// and its status byte unless bit 4 is set. A latch already waiting to
+    /// be read stays as it was. The next read of the counter's port returns
+    /// the status first, then the count as a latch command leaves it.
+    fn pit_read_back(&mut self, value: u8) {
+        let now = self.clock.now_ticks();
+        let count = value & 0x20 == 0;
+        let status = value & 0x10 == 0;
+        if value & 0x02 != 0 {
+            if status && self.pit0_status.is_none() {
+                self.pit0_status = Some(self.pit0.status(now));
+            }
+            if count && !self.pit0_latched_active {
+                self.pit0_latched = self.pit0.count(now);
+                self.pit0_latched_active = true;
+                self.pit0_read_msb = false;
+            }
+        }
+        if value & 0x04 != 0 {
+            self.pit1.advance(now);
+            if status {
+                self.pit1_port.latch_status(self.pit1.status(now));
+            }
+            if count {
+                self.pit1_port.latch_count(self.pit1.count(now));
+            }
+        }
+        if value & 0x08 != 0 {
+            if status && self.pit2.status.is_none() {
+                self.pit2.status = Some(self.pit2.status(now));
+            }
+            if count && self.pit2.latched.is_none() {
+                self.pit2.latched = Some(self.pit2.read(now).0);
+                self.pit_read_msb = false;
+            }
+        }
+    }
+
     pub fn io_read(&mut self, port: u16) -> u8 {
         let _profile = self.profile.as_mut().map(|p| p.port(port, false));
         self.observe.port_read(port);
@@ -3012,6 +3081,9 @@ impl Bus {
             // which faults if elapsed == 0) issue a latch command and read
             // LSB then MSB.
             0x40 => {
+                if let Some(status) = self.pit0_status.take() {
+                    return status;
+                }
                 let val = if self.pit0_latched_active {
                     self.pit0_latched
                 } else {
@@ -3064,7 +3136,16 @@ impl Bus {
             // Port 0x42 — PIT channel 2 (PC speaker tone) data. Programs
             // read it as a free-running counter for timing loops, or time a
             // delay loop by gating it through port 61h bit 0.
+            0x41 => {
+                let now = self.clock.now_ticks();
+                self.pit1.advance(now);
+                self.pit1_port.read(self.pit1.count(now))
+            }
+
             0x42 => {
+                if let Some(status) = self.pit2.status.take() {
+                    return status;
+                }
                 let count = match self.pit2.latched {
                     Some(latched) => latched,
                     None => self.pit2.read(self.clock.now_ticks()).0,

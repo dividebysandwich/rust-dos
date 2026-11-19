@@ -27,6 +27,7 @@ mod mt32_tests;
 mod nat_tests;
 mod ne2000_tests;
 mod pci_irq_tests;
+mod pit_8254_tests;
 mod printer_tests;
 mod ps2_mouse_tests;
 mod sb_tests;

@@ -51,6 +51,10 @@ const SHARED_VERSION: u16 = 1;
 const SB_HIGH_SPEED_VERSION: u16 = 1;
 const ISAPNP_VERSION: u16 = 1;
 const PIT2_VERSION: u16 = 1;
+/// The 8254's parts that states saved before it lack: where a mode 3
+/// count loaded at a half-cycle starts, the control words' bits the
+/// read-back status gives, the status latches and channel 1.
+const PIT_8254_VERSION: u16 = 1;
 const TSC_VERSION: u16 = 1;
 const KEY_QUEUE_VERSION: u16 = 1;
 const FRAME_CAP_VERSION: u16 = 1;
@@ -104,7 +108,10 @@ impl Bus {
             pit0_access,
             pit0_latched,
             pit0_latched_active,
+            pit0_status,
             pit0,
+            pit1,
+            pit1_port,
             clock,
             pic,
             dma,
@@ -251,6 +258,17 @@ impl Bus {
         });
         // The time stamp counter's clock, in a section of its own so states
         // saved before it load (counting instructions, as it did then).
+        // The 8254's read-back state, channel 1 and the half-cycle loads,
+        // in a section of their own so states saved before it load.
+        let (pit0_phase, pit0_pending_at, pit0_control) =
+            (&pit0.phase, &pit0.pending_at, &pit0.control);
+        let (pit2_phase, pit2_control, pit2_status) = (&pit2.phase, &pit2.control, &pit2.status);
+        w.section(b"8254", PIT_8254_VERSION, |w| {
+            save_all!(w;
+                pit0_phase, pit0_pending_at, pit0_control, pit0_status, pit1, pit1_port,
+                pit2_phase, pit2_control, pit2_status,
+            );
+        });
         w.section(b"TSC ", TSC_VERSION, |w| clock.tsc.save(w));
         // Which queued keystrokes the BIOS never saw, in a section of its
         // own so states saved before it load.
@@ -441,7 +459,10 @@ impl Bus {
             pit0_access,
             pit0_latched,
             pit0_latched_active,
+            pit0_status,
             pit0,
+            pit1,
+            pit1_port,
             clock,
             pic,
             dma,
@@ -608,6 +629,23 @@ impl Bus {
             pit2.set_gate(*speaker_on, now);
             *speaker_data = *speaker_on;
             *ppi_checks = 0;
+        }
+        if r.next_is(b"8254") {
+            let mut section = r.section(b"8254", PIT_8254_VERSION)?;
+            load_all!(&mut section;
+                &mut pit0.phase, &mut pit0.pending_at, &mut pit0.control, pit0_status, pit1, pit1_port,
+                &mut pit2.phase, &mut pit2.control, &mut pit2.status,
+            );
+        } else {
+            // An older state: counts loaded at the end of a period, which
+            // is where it kept a pending channel 0 count, no status
+            // latched, the control words' bits as the access and mode give
+            // them (not BCD), and channel 1 as the BIOS leaves it.
+            pit0.without_8254_state(*pit0_access);
+            *pit0_status = None;
+            *pit1 = crate::timer::Pit0::refresh();
+            *pit1_port = crate::timer::PitPort::new(1);
+            pit2.without_8254_state();
         }
         clock.tsc = Default::default();
         if r.next_is(b"TSC ") {
