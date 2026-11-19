@@ -482,14 +482,8 @@ pub fn unpacked_dib_section(cpu: &mut Cpu, info: &DibInfo, bits: u32) -> Option<
     };
     let (handle, to) = make_dib_section(cpu, &plain, 0, 0);
     if handle != 0 {
-        let size = if info.image_size != 0 {
-            info.image_size.min(MAX_BITS as u32)
-        } else {
-            info.bits_size()
-        };
-        let mut data = vec![0u8; size as usize];
-        cpu.bus.guest_read_bytes(bits, &mut data);
-        cpu.bus.guest_write_bytes(to, &decode_rle(&data, info));
+        let rows = read_rle(cpu, info, bits);
+        cpu.bus.guest_write_bytes(to, &rows);
     }
     Some(handle)
 }
@@ -887,14 +881,7 @@ pub fn read_dib(
     let mut s = Surface::memory(info.width, lines, info.bpp, info.colors.clone(), info.masks);
     s.pal_indices = info.pal_indices.clone();
     if info.compression == BI_RLE8 || info.compression == BI_RLE4 {
-        let size = if info.image_size != 0 {
-            info.image_size.min(MAX_BITS as u32)
-        } else {
-            info.bits_size()
-        };
-        let mut data = vec![0u8; size as usize];
-        cpu.bus.guest_read_bytes(bits, &mut data);
-        let full = decode_rle(&data, info);
+        let full = read_rle(cpu, info, bits);
         // `full` has the scan lines from the bottom; `s` has them from
         // the last one wanted, as for bits that aren't compressed.
         let stride = s.stride;
@@ -926,6 +913,20 @@ pub fn read_dib(
         }
     }
     Some(s)
+}
+
+/// The RLE8 or RLE4 DIB `info`'s codes at `bits`, unpacked into plain
+/// rows from the bottom: biSizeImage bytes of codes, or as many as the
+/// plain rows take if it is 0.
+fn read_rle(cpu: &mut Cpu, info: &DibInfo, bits: u32) -> Vec<u8> {
+    let size = if info.image_size != 0 {
+        info.image_size.min(MAX_BITS as u32)
+    } else {
+        info.bits_size()
+    };
+    let mut data = vec![0u8; size as usize];
+    cpu.bus.guest_read_bytes(bits, &mut data);
+    decode_rle(&data, info)
 }
 
 /// Decode an RLE8 or RLE4 DIB into rows of its bits, bottom first.
@@ -1231,4 +1232,52 @@ pub fn pattern_of_packed_dib(cpu: &mut Cpu, at: u32, usage: u32) -> Option<Patte
         pixels,
         mono: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rle(width: i32, height: i32, compression: u32, codes: &[u8]) -> Vec<u8> {
+        let bpp = if compression == BI_RLE4 { 4 } else { 8 };
+        let info = DibInfo {
+            width,
+            height,
+            bpp,
+            compression,
+            ..DibInfo::default()
+        };
+        decode_rle(codes, &info)
+    }
+
+    /// RLE8 rows of an odd width, padded to 4 bytes: a run, the end of
+    /// the line, absolute pixels with their pad byte, the end.
+    #[test]
+    fn rle8_unpacks_runs_and_absolute_pixels() {
+        let codes = [3, 0xAA, 0, 0, 0, 3, 1, 2, 3, 0, 0, 1];
+        let rows = rle(3, 2, BI_RLE8, &codes);
+        assert_eq!(rows, [0xAA, 0xAA, 0xAA, 0, 1, 2, 3, 0]);
+    }
+
+    /// RLE4 with an odd width: a run of two colors in turn, absolute
+    /// pixels padded to a word, a delta over a line that keeps its
+    /// zeros, and codes after the end of the bitmap, which don't count.
+    #[test]
+    fn rle4_unpacks_runs_absolute_pixels_and_deltas() {
+        let codes = [
+            5, 0x12, 0, 0, // 1 2 1 2 1, end of line
+            0, 5, 0x34, 0x56, 0x70, 0, // 3 4 5 6 7 and the pad
+            0, 0, 0, 2, 3, 1, // end of line, three right and one up
+            2, 0x89, 0, 1, // 8 9, end of bitmap
+            2, 0xFF,
+        ];
+        let rows = rle(5, 4, BI_RLE4, &codes);
+        let expected = [
+            [0x12, 0x12, 0x10, 0],
+            [0x34, 0x56, 0x70, 0],
+            [0, 0, 0, 0],
+            [0, 0x08, 0x90, 0],
+        ];
+        assert_eq!(rows, expected.concat());
+    }
 }
