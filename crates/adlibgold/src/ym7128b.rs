@@ -3,7 +3,7 @@
 //! a feedback tap through a first-order filter and eight output taps
 //! weighed into the left and the right output.
 //!
-//! The chip has 32 registers of up to 6 bits, which it takes serially: a
+//! The chip has 31 registers of up to 6 bits, which it takes serially: a
 //! program writes bits to the control chip's register 18h, where bit 0 is
 //! the data (DIN), bit 1 the bit clock (SCI) and bit 2 the word clock
 //! (A0). A bit is taken on each rising edge of SCI, into the address while
