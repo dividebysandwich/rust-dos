@@ -238,6 +238,18 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
             guard(u, 1);
             u.push(Uop::FAbs);
         }
+        // The handlers take the double of the 80 bits themselves, and set C2
+        // for an operand out of range.
+        Fsin | Fcos | Fptan | Fsincos => {
+            let op = match instr.code() {
+                Fsin => FTrigOp::Sin,
+                Fcos => FTrigOp::Cos,
+                Fptan => FTrigOp::Tan,
+                _ => FTrigOp::SinCos,
+            };
+            guard(u, 1);
+            u.push(Uop::FTrig { op });
+        }
         // (The integer comes to the same 80 bits as the double of it.)
         Fiadd_m16int | Fiadd_m32int | Fisub_m16int | Fisub_m32int | Fisubr_m16int | Fisubr_m32int => {
             let kind = match instr.code() {

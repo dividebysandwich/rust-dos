@@ -1895,6 +1895,22 @@ impl Gen<'_> {
                 }
             }
             Uop::SarConst { t, count } => dynasm!(self.ops ; .arch aarch64 ; asr W(r(t)), W(r(t)), count as u32),
+            Uop::AddDir { t, step, size } => {
+                let t = r(t);
+                self.field(Access::Ldr32, 0, layout::FLAGS);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; movz w1, step as u32
+                    // DF.
+                    ; tbz w0, 10, >up
+                    ; neg w1, w1
+                    ; up:
+                    ; add W(t), W(t), w1
+                );
+                if size == 2 {
+                    dynasm!(self.ops ; .arch aarch64 ; uxth W(t), W(t));
+                }
+            }
             Uop::AddShifted {
                 t,
                 src,
@@ -2375,19 +2391,17 @@ impl Gen<'_> {
                 }
             }
             Uop::RepStart { t, count, max } => {
-                // As x86-64's: a count up to `max`, forward and not traced,
-                // runs here; else the handler.
+                // As x86-64's: a count up to `max`, not traced, runs here;
+                // else the handler.
                 let access = if count.size == 4 { Access::Ldr32 } else { Access::Ldr16 };
                 self.field(access, r(t), gpr_offset(count));
                 let at = self.ops.new_dynamic_label();
                 self.field(Access::Ldr32, 0, layout::FLAGS);
                 self.mov32(1, max);
-                // TF or DF.
-                self.mov32(2, 0x500);
                 dynasm!(self.ops
                     ; .arch aarch64
-                    ; tst w0, w2
-                    ; b.ne =>at
+                    // TF.
+                    ; tbnz w0, 8, =>at
                     ; cmp W(r(t)), w1
                     ; b.hi =>at
                 );
@@ -2400,13 +2414,6 @@ impl Gen<'_> {
             Uop::RepEnd { t } => {
                 let top = self.rep_top.take().expect("RepStart before RepEnd");
                 dynasm!(self.ops ; .arch aarch64 ; cbnz W(r(t)), =>top);
-            }
-            Uop::Forward => {
-                let at = self.ops.new_dynamic_label();
-                self.field(Access::Ldr32, 0, layout::FLAGS);
-                dynasm!(self.ops ; .arch aarch64 ; tbnz w0, 10, =>at);
-                let end = self.end();
-                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: false });
             }
             Uop::FpuGuard { valid } => self.fpu_guard(valid),
             Uop::FBailPrecise { regs, when } => self.fpu_bail_precise(regs, when),
@@ -2678,6 +2685,13 @@ impl Gen<'_> {
             Uop::FChs => self.fpu_op(1 << 13, None),
             Uop::FRndint => self.fpu_op(6 << 13, None),
             Uop::FAbs => self.fpu_op(7 << 13, None),
+            Uop::FTrig { op } => {
+                self.fpu_op(op.reg_op() << 13, None);
+                if op.pushes() {
+                    // As x86-64's: the registers known in range or out of it.
+                    self.fpu_known &= self.fpu_known << 1 | 1;
+                }
+            }
             Uop::FSqrt => {
                 const C1: u32 = 0x200;
                 // The root inline where the double is above 0, else (a
@@ -2706,7 +2720,10 @@ impl Gen<'_> {
                 self.fpu_op(4 << 13, None);
                 dynasm!(self.ops ; .arch aarch64 ; fsqrt_done:);
             }
-            Uop::FLoad80 { m } => self.fpu_op(2 << 13, Some(m)),
+            Uop::FLoad80 { m } => {
+                self.fpu_known = self.fpu_known << 1 | 1;
+                self.fpu_op(2 << 13, Some(m));
+            }
             Uop::FAddValue { kind, x } => {
                 use crate::instructions::fpu::arithmetic::{ADD_VALUE, SUB_VALUE};
                 // 8: the double in D16.

@@ -23,9 +23,9 @@ const DF: u32 = 0x0400;
 /// registers in protected mode too (in real mode it always has them).
 /// With `fpu`, FPU instructions are translated, for `fast_fpu`'s arithmetic
 /// (`Cpu::fpu_fast`) if set. `i486`: the CPU is a 486 or later, which
-/// has BSWAP (a 386 faults on it). `p6`: the CPU is a P6, which has
-/// CMOVcc. `simd`: MMX and SSE instructions the CPU has (`simd::MMX`,
-/// `simd::SSE`) are translated.
+/// has BSWAP and XADD (a 386 faults on them). `p6`: the CPU is a P6,
+/// which has CMOVcc. `simd`: MMX and SSE instructions the CPU has
+/// (`simd::MMX`, `simd::SSE`) are translated.
 #[allow(clippy::too_many_arguments)]
 pub fn translate(
     instr: &Instruction,
@@ -82,6 +82,7 @@ pub fn translate(
         Movzx => movx(instr, false, &mut u),
         Movsx => movx(instr, true, &mut u),
         Xchg => xchg(instr, &mut u),
+        Xadd if i486 => xadd(instr, &mut u),
         Xlatb => xlat(instr, &mut u),
         Bswap if i486 => bswap(instr, &mut u),
         Cbw => extend_acc(1, false, &mut u),
@@ -473,6 +474,58 @@ fn xchg(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
     u.push(Uop::Get { t: T1, r: b });
     u.push(Uop::Set { r: a, t: T1 });
     u.push(Uop::Set { r: b, t: T0 });
+    true
+}
+
+/// XADD of a register or memory and a register, as `transfer::xadd`: the
+/// destination checked for writing and read, the register given the
+/// destination's value, then the sum, with ADD's flags, written to the
+/// destination. (With one register for both, the sum is what stays.) A
+/// LOCK prefix changes nothing on one processor.
+fn xadd(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
+    let Some(src) = gpr(instr.op1_register()) else {
+        return false;
+    };
+    let size = src.size;
+    // The destination's value into T0; a register destination, or None
+    // for memory at T2.
+    let dst = match instr.op0_kind() {
+        OpKind::Register => {
+            let Some(dst) = gpr(instr.op0_register()).filter(|r| r.size == size) else {
+                return false;
+            };
+            u.push(Uop::Get { t: T0, r: dst });
+            Some(dst)
+        }
+        OpKind::Memory => {
+            if mem(instr, T2, size, true, u).is_none() {
+                return false;
+            }
+            u.push(Uop::Load {
+                dst: T0,
+                m: T2,
+                size,
+            });
+            None
+        }
+        _ => return false,
+    };
+    u.push(Uop::Get { t: T1, r: src });
+    u.push(Uop::Set { r: src, t: T0 });
+    u.push(Uop::Alu {
+        op: AluOp::Add,
+        size,
+        a: T0,
+        b: Src::T(T1),
+    });
+    u.push(match dst {
+        Some(r) => Uop::Set { r, t: T0 },
+        None => Uop::Store {
+            m: T2,
+            src: T0,
+            size,
+        },
+    });
     true
 }
 
@@ -1019,8 +1072,8 @@ fn near_rm(instr: &Instruction, size: u8, u: &mut Vec<Uop>) -> bool {
     true
 }
 
-/// LODS without REP, going up (DF clear): the element into AL, AX or EAX,
-/// then SI or ESI moved past it.
+/// LODS without REP: the element into AL, AX or EAX, then SI or ESI moved
+/// past it, up or down as DF says.
 fn lods(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
     let size = match instr.code() {
         Code::Lodsb_AL_m8 => 1,
@@ -1033,13 +1086,16 @@ fn lods(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
     }
     let a32 = (0..instr.op_count()).any(|i| instr.op_kind(i) == OpKind::MemorySegESI);
     let (si, width) = if a32 { (Gpr::dword(6), 4) } else { (Gpr::word(6), 2) };
-    u.push(Uop::Forward);
     u.push(Uop::Get { t: T2, r: si });
     u.push(Uop::MemRef { t: T2, seg: mem_seg(instr), size, write: false, slot: 0 });
     u.push(Uop::Load { dst: T0, m: T2, size });
     u.push(Uop::Set { r: Gpr { index: 0, high: false, size }, t: T0 });
     u.push(Uop::Get { t: T2, r: si });
-    u.push(Uop::AddConst { t: T2, v: size as u32, size: width });
+    u.push(Uop::AddDir {
+        t: T2,
+        step: size,
+        size: width,
+    });
     u.push(Uop::Set { r: si, t: T2 });
     true
 }
@@ -1113,9 +1169,11 @@ fn leave(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
 /// `instructions::string`).
 const REP_INLINE: u32 = crate::instructions::string::REP_ONE_INSTRUCTION;
 
-/// MOVS or STOS, with or without REP, going up (DF clear), an iteration as
-/// the handler does it: the source's and destination's checks, the
-/// element moved, then the indexes and the count.
+/// MOVS or STOS, with or without REP, an iteration as the handler does it:
+/// the source's and destination's checks, the element moved, then the
+/// indexes, up or down as DF says, and the count. A fault in the checks
+/// leaves the registers as they were before the iteration, where the
+/// handler goes on when the instruction runs again.
 fn string(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
     let (size, stos) = match instr.code() {
         Code::Movsb_m8_m8 => (1, false),
@@ -1133,8 +1191,6 @@ fn string(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
     let rep = instr.has_rep_prefix() || instr.has_repne_prefix();
     if rep {
         u.push(Uop::RepStart { t: T0, count: reg(ECX), max: REP_INLINE });
-    } else {
-        u.push(Uop::Forward);
     }
     u.push(Uop::Get { t: T1, r: reg(EDI) });
     if stos {
@@ -1149,7 +1205,11 @@ fn string(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
     u.push(Uop::Store { m: T1, src: T0, size });
     let step = |i: u8, u: &mut Vec<Uop>| {
         u.push(Uop::Get { t: T2, r: reg(i) });
-        u.push(Uop::AddConst { t: T2, v: size as u32, size: width });
+        u.push(Uop::AddDir {
+            t: T2,
+            step: size,
+            size: width,
+        });
         u.push(Uop::Set { r: reg(i), t: T2 });
     };
     if !stos {
