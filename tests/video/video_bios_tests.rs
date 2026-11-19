@@ -17,7 +17,7 @@ fn int10(cpu: &mut Cpu, ax: u16, bx: u16, cx: u16, dx: u16) {
     int10::handle(cpu);
 }
 
-fn machine(mode: u8) -> Cpu {
+fn machine(mode: u8) -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     int10(&mut cpu, mode as u16, 0, 0, 0);
     cpu

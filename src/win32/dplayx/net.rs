@@ -20,7 +20,7 @@ use super::session::Play;
 use super::wire::SOCKET;
 use crate::cpu::Cpu;
 use crate::net::frame::Mac;
-use crate::win32::object::{self, Kind};
+use crate::win32::object;
 use std::collections::VecDeque;
 
 /// The node the objects have without the IPX driver.
@@ -165,11 +165,7 @@ pub fn settle(cpu: &mut Cpu) {
         cpu.bus.sync_ipx();
     }
     for id in signal {
-        if let Some(o) = object::objects(cpu).get_mut(id)
-            && let Kind::Event { signaled, .. } = &mut o.kind
-        {
-            *signaled = true;
-        }
+        crate::win32::winmm::callback::set_event(cpu, id);
     }
     for (pid, event, handle) in released {
         if handle != 0 {

@@ -12,16 +12,25 @@ const CORE_VERSION: u16 = 9;
 const VIDEO_VERSION: u16 = 2;
 const SOUND_VERSION: u16 = 4;
 const DOS_VERSION: u16 = 6;
+const CD_HEAD_VERSION: u16 = 1;
 const VOODOO_VERSION: u16 = 1;
 const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 72;
-/// The W32 versions an older rust-dos saved that this one still loads:
-/// 71's keeps only the names of the font files a program added
-/// (`gdi32::fnt::AddedFile`).
-const WIN32_OLDER: [u16; 1] = [71];
+const WIN32_VERSION: u16 = 79;
+/// The W32 versions this rust-dos loads: its own, and those an older one
+/// saved. 71's keeps only the names of the font files a program added
+/// (`gdi32::fnt::AddedFile`), 71's and 72's not the desktop's own size
+/// (`version::OwnSize`), 71's to 73's MMSYSTEM's wave headers in an
+/// older form and no callback calls (`win16::Mmsystem`), 71's to 74's
+/// not DDEML's 16-bit copies, user handles and asynchronous transactions
+/// (`ddeml::DDE_SAVED`), 71's to 75's no DirectPlay 8 objects
+/// (`dpnet::State`), 71's to 76's not OLE32's local servers and proxies
+/// (`ole32::LOCAL_SERVERS`), 71's to 77's not owner-drawn menu items'
+/// sizes and drawing (`user32::menu::OWNER_DRAWN`), and 71's to 78's no
+/// system heaps (`heap::SYSTEM_HEAP_SAVED`).
+const WIN32_LOADS: [u16; 9] = [71, 72, 73, 74, 75, 76, 77, 78, WIN32_VERSION];
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -119,6 +128,7 @@ impl Bus {
             toadforce_memory,
             retraces,
             last_flip,
+            last_present: _,
             gate_array_shadow,
             gate_array_shadow_at,
             opl,
@@ -207,6 +217,7 @@ impl Bus {
             unhandled_writes: _,
             attribute_reset: _,
             memory_derived: _,
+            cpu_derived: _,
             log_hook: _,
             log_backlog: _,
             audio_hook: _,
@@ -294,6 +305,9 @@ impl Bus {
             w.label("disk");
             disk.save_state(w);
         });
+        // Where MSCDEX's drives' heads are, in a section of their own so
+        // states saved before it load (with every head at sector 0).
+        w.section(b"CDHD", CD_HEAD_VERSION, |w| mscdex.save_heads(w));
         // The Ultrasound's memory first, where it stays in place for
         // rewind's deltas (rewind.rs) whatever the queues after it hold.
         w.section(b"SOUN", SOUND_VERSION, |w| {
@@ -450,6 +464,7 @@ impl Bus {
             toadforce_memory,
             retraces,
             last_flip,
+            last_present,
             gate_array_shadow,
             gate_array_shadow_at,
             opl,
@@ -526,9 +541,10 @@ impl Bus {
             key_waits: _,
             unhandled_writes: _,
             attribute_reset: _,
-            // The front end's, which sets it from the settings a load
+            // The front end's, which sets them from the settings a load
             // leaves (`slots::loaded_settings`).
             memory_derived: _,
+            cpu_derived: _,
             log_hook: _,
             log_backlog: _,
             audio_hook: _,
@@ -585,6 +601,7 @@ impl Bus {
         }
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
+        *last_present = None;
         *virge = Default::default();
         if r.next_is(b"VIRG") {
             virge.load(&mut r.section(b"VIRG", VIRGE_VERSION)?)?;
@@ -641,6 +658,11 @@ impl Bus {
         load_device(umb, "upper memory", &mut section)?;
         dos_high.load(&mut section)?;
         let lost = disk.load_state(&mut section)?;
+        if r.next_is(b"CDHD") {
+            mscdex.load_heads(Some(&mut r.section(b"CDHD", CD_HEAD_VERSION)?))?;
+        } else {
+            mscdex.load_heads(None)?;
+        }
         let mut section = r.section(b"SOUN", SOUND_VERSION)?;
         load_device(gus, "Gravis Ultrasound", &mut section)?;
         load_all!(&mut section; opl, mpu, gus_line, tandy_sound);
@@ -700,8 +722,7 @@ impl Bus {
         }
         win32.reset();
         if r.next_is(b"W32 ") {
-            let versions = [WIN32_OLDER[0], WIN32_VERSION];
-            win32.load(&mut r.section_of(b"W32 ", &versions)?)?;
+            win32.load(&mut r.section_of(b"W32 ", &WIN32_LOADS)?)?;
         }
         // The extended memory they hold.
         xms.dpmi = dpmi.reservations();
@@ -754,9 +775,11 @@ impl Bus {
     /// the interrupt lines follow the devices, the picture is drawn anew,
     /// the FM chip and the MIDI synthesizer are told their registers and
     /// setup again, and the sound rendered before the load is dropped with
-    /// what rang on of it in the mixer.
+    /// what rang on of it in the mixer, and the idle skipper forgets the
+    /// loops of the run before the load.
     pub(crate) fn after_load(&mut self) {
         self.after_reload();
+        self.observe.after_load();
         self.opl.after_load();
         self.mpu.after_load();
         if let Some(gus) = &mut self.gus {
@@ -906,6 +929,13 @@ mod tests {
         (69, 0x0328_CB26_D841_A2ED), // Win32's serial ports, merged with 63's and 67's
         (71, 0x0DD2_950E_C2FB_1628), // copy-on-write views paged, pages held for a fault
         (72, 0x0DD2_950E_C2FB_1628), // the fonts of files AddFontResource added
+        (73, 0x2412_6CA7_250D_4193), // the desktop's own size, `win32_desktop`
+        (74, 0x6C70_EAD3_11EB_EDB6), // MMSYSTEM's headers keep lpData, callbacks
+        (75, 0x9B62_A189_49CB_DB03), // DDEML's 16-bit copies, user handles and transactions
+        (76, 0xF698_DBEB_B887_D533), // DirectPlay 8's objects
+        (77, 0xA5E9_A942_6FF9_9965), // OLE32's local servers, proxies and stubs
+        (78, 0x9A03_DEE6_921B_EE10), // owner-drawn menu items' sizes and drawing
+        (79, 0x3960_B363_99FF_D384), // each process's system heap
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

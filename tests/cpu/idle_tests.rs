@@ -25,7 +25,7 @@ const KEY_AT: usize = 250;
 
 /// A machine that runs `T.COM`, the program `code` builds, from a
 /// directory of its own.
-fn machine(test: &str, name: &str, code: &[u8], core: CoreMode, skip: bool) -> Cpu {
+fn machine(test: &str, name: &str, code: &[u8], core: CoreMode, skip: bool) -> Box<Cpu> {
     let mut cpu = machine_with(test, name, ("T.COM", code), core, skip);
     cpu.load_shell();
     cpu.pending_command = Some("T".to_string());
@@ -36,7 +36,7 @@ fn machine(test: &str, name: &str, code: &[u8], core: CoreMode, skip: bool) -> C
 /// directory of its own, its shell not loaded yet. The host's time is
 /// fixed first, so machines built a moment apart start with the same
 /// BIOS tick count.
-fn machine_with(test: &str, name: &str, file: (&str, &[u8]), core: CoreMode, skip: bool) -> Cpu {
+fn machine_with(test: &str, name: &str, file: (&str, &[u8]), core: CoreMode, skip: bool) -> Box<Cpu> {
     let at = NaiveDate::from_ymd_opt(1995, 4, 11).unwrap().and_hms_opt(12, 34, 56).unwrap();
     rust_dos::hosttime::fix(Some(at));
     let dir = Path::new("target/idle_tests").join(test).join(name);
@@ -99,6 +99,34 @@ fn a_keyboard_poll_is_skipped() {
         finish(a)
     });
     assert!(stats.proofs > 0 && stats.skipped > 0, "{:?}", stats);
+}
+
+#[test]
+fn a_load_ends_what_was_armed_before_it() {
+    // A head armed or a proof running when an older state is loaded
+    // counts instructions of the run before the load, and the execution
+    // loop would watch, on the interpreter, until the count caught up.
+    let code = assemble(|a| {
+        let mut wait = a.create_label();
+        a.set_label(&mut wait)?;
+        a.mov(ah, 1)?;
+        a.int(0x16)?;
+        a.jz(wait)?;
+        finish(a)
+    });
+    let mut cpu = machine("load", "a", &code, CoreMode::Dynamic, true);
+    for _ in 0..5 {
+        dyndiff::batch(&mut cpu, 100_000, false);
+    }
+    let older = rust_dos::savestate::machine::save(&cpu);
+    let mut batches = 0;
+    while !cpu.bus.observe.watching() {
+        batches += 1;
+        assert!(batches < 1000, "no loop was armed: {:?}", cpu.bus.observe.stats);
+        dyndiff::batch(&mut cpu, 100_000, false);
+    }
+    rust_dos::savestate::machine::load(&mut cpu, &older).unwrap();
+    assert!(!cpu.bus.observe.watching(), "the load kept a loop of the run after the state armed");
 }
 
 #[test]
@@ -721,7 +749,7 @@ fn a_loop_that_adds_up_the_pit_count_is_not_skipped() {
 
 /// A machine that runs the Windows 3.1 program `program` as T.EXE on the
 /// built-in Windows, as `machine` runs a DOS one.
-fn win16_machine(test: &str, name: &str, program: &[u8], core: CoreMode, skip: bool) -> Cpu {
+fn win16_machine(test: &str, name: &str, program: &[u8], core: CoreMode, skip: bool) -> Box<Cpu> {
     let mut cpu = machine_with(test, name, ("T.EXE", program), core, skip);
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(rust_dos::cpu::HostConsole::default());

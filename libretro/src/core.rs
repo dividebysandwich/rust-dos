@@ -177,7 +177,7 @@ impl Core {
             None => settings.memory(),
         };
 
-        let mut cpu = Box::new(Cpu::with_memory(plan.c_root.clone(), memory.mb));
+        let mut cpu = Cpu::with_memory(plan.c_root.clone(), memory.mb);
         let log = *cb;
         cpu.bus.log_hook = Some(Box::new(move |line: &str| {
             let level = if line.contains("Warning") { RETRO_LOG_WARN } else { RETRO_LOG_DEBUG };

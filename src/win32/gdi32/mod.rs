@@ -22,6 +22,8 @@ pub mod metafile;
 pub mod palette;
 pub mod region;
 pub mod rgn;
+mod sans8;
+mod truetype;
 pub mod surface;
 
 pub use region::{Rect, Region};

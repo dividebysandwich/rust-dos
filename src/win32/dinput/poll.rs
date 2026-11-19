@@ -19,7 +19,6 @@ use super::device::{DISCL_EXCLUSIVE, DISCL_FOREGROUND};
 use super::objects::{self, JOYSTICK, KEYBOARD, MOUSE};
 use super::state;
 use crate::cpu::Cpu;
-use crate::win32::object::{self, Kind};
 
 /// The mouse as DirectInput last read it: all its motion, and how often
 /// each button went down and up.
@@ -36,16 +35,12 @@ fn now_ms(cpu: &Cpu) -> u32 {
     (cpu.bus.clock.now_micros() / 1000) as u32
 }
 
-/// Set the events of the devices whose state changed, by their objects.
+/// Set the events of the devices whose state changed, by their objects,
+/// and end the waits for them (`winmm::callback::set_event`).
 fn signal(cpu: &mut Cpu, events: &[u32]) {
     for &id in events {
-        if id == 0 {
-            continue;
-        }
-        if let Some(o) = object::objects(cpu).get_mut(id)
-            && let Kind::Event { signaled, .. } = &mut o.kind
-        {
-            *signaled = true;
+        if id != 0 {
+            crate::win32::winmm::callback::set_event(cpu, id);
         }
     }
 }

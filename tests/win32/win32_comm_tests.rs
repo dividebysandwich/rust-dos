@@ -219,12 +219,12 @@ fn scratch(name: &str, exe: Vec<u8>) -> PathBuf {
 /// Run `exe` with the default serial ports (a mouse on COM1, a modem on
 /// COM2, no COM3 or COM4) to its end: the machine, its exit code and
 /// what it printed.
-fn run(test: &str, exe: Vec<u8>) -> (Cpu, u8, String) {
+fn run(test: &str, exe: Vec<u8>) -> (Box<Cpu>, u8, String) {
     run_in(scratch(test, exe))
 }
 
 /// Run T.EXE of the folder `base` as `run` does.
-fn run_in(base: PathBuf) -> (Cpu, u8, String) {
+fn run_in(base: PathBuf) -> (Box<Cpu>, u8, String) {
     let mut cpu = Cpu::new(base);
     cpu.bus.configure_serial(&SerialSettings::default());
     cpu.bus.win32.enabled = true;

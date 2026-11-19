@@ -220,6 +220,12 @@ impl Shared {
         let found = self.groups.iter().find(|g| g.id == group);
         found.map_or(&[], |g| &g.textures)
     }
+
+    /// The surfaces of the levels of every group's textures.
+    pub fn texture_surfaces(&self) -> impl Iterator<Item = u32> + '_ {
+        let textures = self.groups.iter().flat_map(|g| &g.textures);
+        textures.flat_map(|t| t.levels.iter().copied())
+    }
 }
 
 crate::state_fields!(Call { api, copied, args });

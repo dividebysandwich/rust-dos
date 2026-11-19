@@ -2,15 +2,15 @@
 //! with its standard color scheme, and the display's mode, which the
 //! screen's size follows.
 //!
-//! The screen is as large as the display mode: the desktop's, 640x480
-//! unless ChangeDisplaySettings set another, or the one DirectDraw set
-//! while it has the display. GetSystemMetrics, the desktop window, the
-//! monitor, the cursor's range and the rest take their size from
-//! `screen_size`. A change of the mode (`set_display_mode`, DirectDraw's
-//! SetDisplayMode and RestoreDisplayMode, the end of the process that
-//! set it) resizes the desktop window, keeps the cursor on the screen
-//! and tells the top-level windows with WM_DISPLAYCHANGE
-//! (`display_changed`).
+//! The screen is as large as the display mode: the desktop's, its own
+//! size (`win32_desktop`, 640x480 by default) unless
+//! ChangeDisplaySettings set another, or the one DirectDraw set while it
+//! has the display. GetSystemMetrics, the desktop window, the monitor,
+//! the cursor's range and the rest take their size from `screen_size`.
+//! A change of the mode (`set_display_mode`, DirectDraw's SetDisplayMode
+//! and RestoreDisplayMode, the end of the process that set it) resizes
+//! the desktop window, keeps the cursor on the screen and tells the
+//! top-level windows with WM_DISPLAYCHANGE (`display_changed`).
 
 use super::{FALSE, TRUE, read_words, user, write_words};
 use crate::cpu::Cpu;
@@ -93,9 +93,10 @@ pub fn set_display_mode(cpu: &mut Cpu, mode: Option<(u32, u32, u32)>) -> u32 {
 
 /// The display's mode may have changed from `old` (`display_mode`). If
 /// it has, the desktop window takes the new size, the cursor stays on
-/// the screen (`input::screen_changed`), and each top-level window gets
-/// WM_DISPLAYCHANGE with the bits a pixel and the size. Windows sends
-/// it with SendNotifyMessage, which to the broadcast address posts it.
+/// the screen and ClipCursor's rectangle goes (`input::screen_changed`),
+/// and each top-level window gets WM_DISPLAYCHANGE with the bits a pixel
+/// and the size. Windows sends it with SendNotifyMessage, which to the
+/// broadcast address posts it.
 pub fn display_changed(cpu: &mut Cpu, old: (u32, u32, u32)) {
     let mode = display_mode(cpu);
     if mode == old {
@@ -546,7 +547,7 @@ pub fn enum_display_settings(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let mode = match mode {
         0xFFFF_FFFF => display_mode(cpu),
         0xFFFF_FFFE => {
-            let (w, h) = screen::DESKTOP;
+            let (w, h) = crate::win32::version::own_size(&cpu.bus.win32);
             (w, h, screen::desktop(cpu).bpp)
         }
         i => match display_modes().get(i as usize) {

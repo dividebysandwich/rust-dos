@@ -25,6 +25,7 @@ mod cpu_tests;
 mod cpu_transfer_tests;
 mod dyndiff_tests;
 mod dynrec_speed;
+mod dynrec_lfb_tests;
 mod dynrec_tests;
 mod f80_tests;
 mod fpu_arithmetic_tests;

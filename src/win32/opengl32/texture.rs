@@ -895,31 +895,65 @@ pub fn tex_sub_image_2d(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// left, `w` by `h`, as red, green, blue and alpha, from the bottom row
 /// up.
 pub fn read_frame(cpu: &mut Cpu, x: i32, y: i32, w: u32, h: u32) -> Option<Vec<[u8; 4]>> {
-    let (target, height) = ctx(cpu).map(|c| (c.target, c.height))?;
-    super::super::ddraw::d3d::shadow::expose(cpu, target);
-    let s = ddraw::state(cpu).surface(target)?.clone();
+    let target = ctx(cpu)?.target;
+    // 5-6-5, or X8R8G8B8 (`wgl::color_bits`).
+    read_rect(cpu, target, (x, y, w, h), [0, 0, 0, 255], |p| match p {
+        [b, g, r, _] => [*r, *g, *b, 255],
+        _ => rgb565(u16::from_le_bytes([p[0], p[1]])),
+    })
+}
+
+/// The values of the depth buffer from (`x`, `y`), from the bottom
+/// left, `w` by `h`, from the bottom row up: its 16 bits, 0 the near
+/// plane and 0xFFFF the far one. What is off the buffer reads as the
+/// far plane.
+pub fn read_depth(cpu: &mut Cpu, x: i32, y: i32, w: u32, h: u32) -> Option<Vec<u16>> {
+    let depth = ctx(cpu)?.depth;
+    read_rect(cpu, depth, (x, y, w, h), u16::MAX, |p| {
+        u16::from_le_bytes([p[0], p[1]])
+    })
+}
+
+/// The pixels of a rectangle of `surface`, the context's color or depth
+/// buffer, at (`x`, `y`) from the bottom left, `w` by `h`, from the
+/// bottom row up: each pixel's bytes through `pixel`, or `outside`
+/// where it is off the surface.
+fn read_rect<T: Copy>(
+    cpu: &mut Cpu,
+    surface: u32,
+    (x, y, w, h): (i32, i32, u32, u32),
+    outside: T,
+    pixel: impl Fn(&[u8]) -> T,
+) -> Option<Vec<T>> {
+    let height = ctx(cpu)?.height;
+    super::super::ddraw::d3d::shadow::expose(cpu, surface);
+    let s = ddraw::state(cpu).surface(surface)?.clone();
     let mut out = Vec::with_capacity(w as usize * h as usize);
     let mut row = vec![0u8; s.pitch as usize];
-    // 5-6-5, or X8R8G8B8 (`wgl::color_bits`).
     let bytes = s.bytes_per_pixel() as usize;
+    // The surface's rows the rectangle's lie in, read at once.
+    let top = i64::from(height) - 1 - i64::from(y);
+    let first = (top - i64::from(h) + 1).max(0);
+    let last = top.min(i64::from(s.height) - 1);
+    if first <= last {
+        let rows = (last - first + 1) as u32;
+        dd_surface::will_read_rows(cpu, &s, first as u32 * s.pitch, s.pitch, rows, row.len());
+    }
     for r in 0..i64::from(h) {
         let sy = i64::from(height) - 1 - (i64::from(y) + r);
         if sy < 0 || sy >= i64::from(s.height) {
-            out.extend(std::iter::repeat_n([0, 0, 0, 255], w as usize));
+            out.extend(std::iter::repeat_n(outside, w as usize));
             continue;
         }
         dd_surface::read_bytes(cpu, &s, sy as u32 * s.pitch, &mut row);
         for i in 0..i64::from(w) {
             let sx = i64::from(x) + i;
             if sx < 0 || sx >= i64::from(s.width) {
-                out.push([0, 0, 0, 255]);
+                out.push(outside);
                 continue;
             }
             let at = sx as usize * bytes;
-            out.push(match bytes {
-                4 => [row[at + 2], row[at + 1], row[at], 255],
-                _ => rgb565(u16::from_le_bytes([row[at], row[at + 1]])),
-            });
+            out.push(pixel(&row[at..at + bytes]));
         }
     }
     Some(out)

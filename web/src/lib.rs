@@ -151,7 +151,7 @@ fn describe_state(header: &slots::Header) -> String {
 /// The emulated PC, as the page sees it.
 #[wasm_bindgen]
 pub struct Machine {
-    cpu: Cpu,
+    cpu: Box<Cpu>,
     /// The settings in effect (or waiting, see `Hardware`).
     settings: Settings,
     hardware: Hardware,
@@ -281,6 +281,12 @@ impl Machine {
     /// Whether to scale the picture up smoothly (`filter=linear`).
     pub fn smooth(&self) -> bool {
         self.settings.filter == Filter::Linear
+    }
+
+    /// How to scale the picture up: `sharp`, `hard` or `linear`
+    /// (`filter`).
+    pub fn filter(&self) -> String {
+        self.settings.filter.name().to_string()
     }
 
     /// The CRT look to draw the picture with (`shader`, see

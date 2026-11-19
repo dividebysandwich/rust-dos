@@ -1,4 +1,5 @@
-//! Thread local storage, heaps and the interlocked functions.
+//! Thread local storage, heaps and the interlocked functions, which are
+//! x86 code.
 
 use super::{
     ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NOT_ENOUGH_MEMORY, FALSE, TRUE, set_error,
@@ -308,8 +309,63 @@ pub(super) fn get_process_heaps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(heaps.len() as u32)
 }
 
-/// Add `delta` to the variable at `at`: its new value. (Windows 95's
-/// returns only its sign, which this agrees with.)
+// The interlocked functions are x86 code, so that the recompiler runs
+// them with the program's code instead of trapping on every call. A
+// thread is switched only between instructions, and each function
+// changes the variable in one (XADD, XCHG or CMPXCHG), so none needs a
+// LOCK prefix on the one emulated processor. XADD and CMPXCHG need a 486,
+// as Windows 98 does. Windows 95 has only the first three, and its
+// InterlockedIncrement and Decrement return only the new value's sign,
+// which the new value agrees with. The handlers below are for states
+// saved when the functions were traps, whose memory still has those
+// stubs.
+
+/// InterlockedIncrement(at): the variable's new value.
+pub(super) const INTERLOCKED_INCREMENT: &[u8] = &[
+    0x8B, 0x54, 0x24, 0x04, //       mov edx, [esp+4]
+    0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1
+    0x0F, 0xC1, 0x02, //             xadd [edx], eax
+    0x40, //                         inc eax
+    0xC2, 0x04, 0x00, //             ret 4
+];
+
+/// InterlockedDecrement(at): the variable's new value.
+pub(super) const INTERLOCKED_DECREMENT: &[u8] = &[
+    0x8B, 0x54, 0x24, 0x04, //       mov edx, [esp+4]
+    0xB8, 0xFF, 0xFF, 0xFF, 0xFF, // mov eax, -1
+    0x0F, 0xC1, 0x02, //             xadd [edx], eax
+    0x48, //                         dec eax
+    0xC2, 0x04, 0x00, //             ret 4
+];
+
+/// InterlockedExchange(at, value): the variable's old value.
+pub(super) const INTERLOCKED_EXCHANGE: &[u8] = &[
+    0x8B, 0x54, 0x24, 0x04, // mov edx, [esp+4]
+    0x8B, 0x44, 0x24, 0x08, // mov eax, [esp+8]
+    0x87, 0x02, //             xchg [edx], eax
+    0xC2, 0x08, 0x00, //       ret 8
+];
+
+/// InterlockedCompareExchange(at, exchange, comperand): the variable's
+/// old value, `exchange` stored where it was `comperand`.
+pub(super) const INTERLOCKED_COMPARE_EXCHANGE: &[u8] = &[
+    0x8B, 0x54, 0x24, 0x04, // mov edx, [esp+4]
+    0x8B, 0x4C, 0x24, 0x08, // mov ecx, [esp+8]
+    0x8B, 0x44, 0x24, 0x0C, // mov eax, [esp+0Ch]
+    0x0F, 0xB1, 0x0A, //       cmpxchg [edx], ecx
+    0xC2, 0x0C, 0x00, //       ret 0Ch
+];
+
+/// InterlockedExchangeAdd(at, value): the variable's old value, `value`
+/// added.
+pub(super) const INTERLOCKED_EXCHANGE_ADD: &[u8] = &[
+    0x8B, 0x54, 0x24, 0x04, // mov edx, [esp+4]
+    0x8B, 0x44, 0x24, 0x08, // mov eax, [esp+8]
+    0x0F, 0xC1, 0x02, //       xadd [edx], eax
+    0xC2, 0x08, 0x00, //       ret 8
+];
+
+/// Add `delta` to the variable at `at`: its new value.
 fn interlocked_add(cpu: &mut Cpu, at: u32, delta: i32) -> Option<u32> {
     let value = cpu.bus.guest_read_32(at).wrapping_add(delta as u32);
     cpu.bus.guest_write_32(at, value);
@@ -329,4 +385,59 @@ pub(super) fn interlocked_exchange(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let old = cpu.bus.guest_read_32(args[0]);
     cpu.bus.guest_write_32(args[0], args[1]);
     Some(old)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced_x86::code_asm::*;
+
+    /// The interlocked functions' bytes are the instructions their
+    /// comments list, assembled.
+    #[test]
+    fn the_interlocked_functions_are_their_listings() {
+        let assemble = |f: &dyn Fn(&mut CodeAssembler) -> Result<(), IcedError>| {
+            let mut a = CodeAssembler::new(32).unwrap();
+            f(&mut a).unwrap();
+            a.assemble(0).unwrap()
+        };
+        let increment = assemble(&|a| {
+            a.mov(edx, dword_ptr(esp + 4))?;
+            a.mov(eax, 1)?;
+            a.xadd(dword_ptr(edx), eax)?;
+            a.inc(eax)?;
+            a.ret_1(4)
+        });
+        assert_eq!(increment, INTERLOCKED_INCREMENT);
+        let decrement = assemble(&|a| {
+            a.mov(edx, dword_ptr(esp + 4))?;
+            a.mov(eax, -1)?;
+            a.xadd(dword_ptr(edx), eax)?;
+            a.dec(eax)?;
+            a.ret_1(4)
+        });
+        assert_eq!(decrement, INTERLOCKED_DECREMENT);
+        let exchange = assemble(&|a| {
+            a.mov(edx, dword_ptr(esp + 4))?;
+            a.mov(eax, dword_ptr(esp + 8))?;
+            a.xchg(dword_ptr(edx), eax)?;
+            a.ret_1(8)
+        });
+        assert_eq!(exchange, INTERLOCKED_EXCHANGE);
+        let compare_exchange = assemble(&|a| {
+            a.mov(edx, dword_ptr(esp + 4))?;
+            a.mov(ecx, dword_ptr(esp + 8))?;
+            a.mov(eax, dword_ptr(esp + 0xC))?;
+            a.cmpxchg(dword_ptr(edx), ecx)?;
+            a.ret_1(0xC)
+        });
+        assert_eq!(compare_exchange, INTERLOCKED_COMPARE_EXCHANGE);
+        let exchange_add = assemble(&|a| {
+            a.mov(edx, dword_ptr(esp + 4))?;
+            a.mov(eax, dword_ptr(esp + 8))?;
+            a.xadd(dword_ptr(edx), eax)?;
+            a.ret_1(8)
+        });
+        assert_eq!(exchange_add, INTERLOCKED_EXCHANGE_ADD);
+    }
 }

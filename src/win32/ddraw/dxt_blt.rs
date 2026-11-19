@@ -215,6 +215,8 @@ pub(super) fn copy(
     // Every row is read before any is written: the source and the
     // destination may be one surface, the rectangles overlapping.
     let mut data = vec![0u8; (rows * across) as usize];
+    let first = sr.top as u32 / 4 * s_row + sr.left as u32 / 4 * bytes;
+    surface::will_read_rows(cpu, s, first, s_row, rows, across as usize);
     for (row, i) in data.chunks_mut(across as usize).zip(0u32..) {
         let from = (sr.top as u32 / 4 + i) * s_row + sr.left as u32 / 4 * bytes;
         surface::read_bytes(cpu, s, from, row);

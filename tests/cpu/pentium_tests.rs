@@ -14,7 +14,7 @@ const UD: u8 = 6;
 const GP: u8 = 13;
 const PF: u8 = 14;
 
-fn cpu(model: CpuModel) -> Cpu {
+fn cpu(model: CpuModel) -> Box<Cpu> {
     let mut cpu = Cpu::new(std::path::PathBuf::from("."));
     cpu.model = model;
     cpu.set_ss(0);

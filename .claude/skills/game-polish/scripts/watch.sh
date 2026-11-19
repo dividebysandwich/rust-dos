@@ -11,7 +11,9 @@
 #   trouble.log   log lines that look like emulator gaps or faults
 #   alerts.log    one line for each sample that crossed a threshold
 #
-# Stops by itself when the debug server goes away.
+# Stops by itself when the debug server goes away: when it hasn't
+# answered for MISSES samples in a row, or when another emulator answers
+# on its port.
 set -u
 
 H="http://${1:?host:port}"
@@ -23,12 +25,41 @@ mkdir -p "$OUT"
 # panics.
 TROUBLE='Unhandled|Unsupported|Unknown|Invalid opcode|Triple fault|shutdown|panic|not implemented'
 
+# A request can fail while the emulator is busy (a state save, a slow
+# frame): the sample is skipped and the next one tried. The watcher stops
+# when the server hasn't answered for MISSES samples in a row. The
+# emulator it first answers for is the one watched (/api/version's
+# instance): one started later on the same port ends the watcher, so its
+# samples and log lines don't go into this one's files. /api/status,
+# asked last, carries the instance too: where it is still the watched
+# one, the log and stats asked before it came from that emulator.
+MISSES=6
+get() { curl -sf --max-time 10 "$H$1"; }
+
 after_n=0
-while curl -sf "$H/api/version" >/dev/null; do
+misses=0
+watched=
+while :; do
+    if ! version=$(get /api/version) ||
+        ! instance=$(jq -re .instance <<<"$version" 2>/dev/null); then
+        misses=$((misses + 1))
+        [ "$misses" -ge "$MISSES" ] && break
+        sleep "$INTERVAL"
+        continue
+    fi
+    misses=0
+    [ -z "$watched" ] && watched=$instance
+    [ "$instance" != "$watched" ] && break
     now=$(date +%s)
-    stats=$(curl -sf "$H/api/stats") || break
-    status=$(curl -sf "$H/api/status") || break
-    jq -cn --argjson s "$stats" --argjson st "$status" --arg t "$now" '{
+    log=$(get "/api/log?after_n=$after_n&limit=1000") || log=
+    if ! stats=$(get /api/stats) || ! status=$(get /api/status); then
+        sleep "$INTERVAL"
+        continue
+    fi
+    instance=$(jq -r '.instance // empty' <<<"$status" 2>/dev/null)
+    [ -n "$instance" ] && [ "$instance" != "$watched" ] && break
+    # A reply that isn't JSON (cut short) skips the sample too.
+    if ! sample=$(jq -cn --argjson s "$stats" --argjson st "$status" --arg t "$now" '{
         t: ($t | tonumber),
         speed: $s.frame.emulated_speed,
         fps: $s.frame.fps,
@@ -41,7 +72,11 @@ while curl -sf "$H/api/version" >/dev/null; do
         peak: $st.audio.peak,
         underruns: $st.audio.underruns,
         paused: $st.paused
-    }' >>"$OUT/stats.jsonl"
+    }' 2>/dev/null); then
+        sleep "$INTERVAL"
+        continue
+    fi
+    printf '%s\n' "$sample" >>"$OUT/stats.jsonl"
 
     # Slow emulation: under 0.9x real time while running, or the host
     # thread saturated. A speed of 0 is the first sample, before anything
@@ -49,13 +84,14 @@ while curl -sf "$H/api/version" >/dev/null; do
     jq -r --arg t "$now" 'select(.paused != true) |
         select((.speed > 0 and .speed < 0.9) or (.cpu_use != null and .cpu_use > 95)) |
         "\($t) slow: speed=\(.speed) fps=\(.fps) cpu_use=\(.cpu_use) mode=\(.mode)"' \
-        <<<"$(tail -n1 "$OUT/stats.jsonl")" >>"$OUT/alerts.log"
+        <<<"$sample" >>"$OUT/alerts.log"
 
-    log=$(curl -sf "$H/api/log?after_n=$after_n&limit=1000") || break
-    last=$(jq -r '[.lines[].n] | max // empty' <<<"$log")
-    [ -n "$last" ] && after_n=$last
-    jq -r --arg re "$TROUBLE" '.lines[] | select(.line | test($re)) |
-        "\(.t_ms)ms #\(.n) \(.line)"' <<<"$log" >>"$OUT/trouble.log"
+    if [ -n "$log" ]; then
+        last=$(jq -r '[.lines[].n] | max // empty' <<<"$log")
+        [ -n "$last" ] && after_n=$last
+        jq -r --arg re "$TROUBLE" '.lines[] | select(.line | test($re)) |
+            "\(.t_ms)ms #\(.n) \(.line)"' <<<"$log" >>"$OUT/trouble.log"
+    fi
 
     sleep "$INTERVAL"
 done

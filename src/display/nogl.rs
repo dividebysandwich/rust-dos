@@ -96,6 +96,18 @@ impl GlScreen {
         match *self {}
     }
 
+    pub fn toadforce_unmade(&self) -> bool {
+        match *self {}
+    }
+
+    pub fn toadforce_notes(&self) -> Vec<String> {
+        match *self {}
+    }
+
+    pub fn toadforce_refuse(&mut self, _reason: String) {
+        match *self {}
+    }
+
     pub fn voodoo_link(&self) -> Box<dyn rust_dos::voodoo::gpu::GpuLink> {
         match *self {}
     }
@@ -122,6 +134,7 @@ impl GlScreen {
     pub fn present_toadforce(
         &mut self,
         _surface: &rust_dos::toadforce::format::Surface,
+        _ramp: Option<&[u32; 256]>,
         _screen: &Frame,
         _base: &Frame,
         _display: (u32, u32),
@@ -129,7 +142,7 @@ impl GlScreen {
         match *self {}
     }
 
-    pub fn capture_size(&self, _display: (u32, u32)) -> Option<(u32, u32)> {
+    pub fn capture_size(&self, _display: (u32, u32), _plain: bool) -> Option<(u32, u32)> {
         match *self {}
     }
 
@@ -139,6 +152,7 @@ impl GlScreen {
         _base: &Frame,
         _mono: crate::video::mono::Monochrome,
         _display: (u32, u32),
+        _plain: bool,
     ) -> Option<Frame> {
         match *self {}
     }

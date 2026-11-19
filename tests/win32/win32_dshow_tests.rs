@@ -69,7 +69,7 @@ fn program(
 }
 
 /// A machine with the program as T.EXE and `files` next to it.
-fn machine(test: &str, program: Vec<u8>, files: &[(&str, Vec<u8>)]) -> Cpu {
+fn machine(test: &str, program: Vec<u8>, files: &[(&str, Vec<u8>)]) -> Box<Cpu> {
     let base = PathBuf::from("target/test_win32_dshow").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();

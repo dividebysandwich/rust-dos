@@ -163,6 +163,8 @@ pub(super) enum Item {
     ToadForceMemory,
     /// What draws a ToadForce's triangles.
     ToadForceRenderer,
+    /// The gamma a ToadForce's picture is shown with.
+    ToadForceGamma,
     Memsize,
     /// Expanded memory and upper memory blocks.
     Ems,
@@ -395,6 +397,7 @@ impl Item {
             VeriteIrq => "  Vérité IRQ",
             ToadForceMemory => "  ToadForce memory",
             ToadForceRenderer => "  ToadForce drawn by",
+            ToadForceGamma => "  ToadForce gamma",
             Ems => "Expanded memory (EMS)",
             Umb => "Upper memory (UMB)",
             DosHigh => "DOS high",
@@ -625,7 +628,9 @@ impl Item {
             Item::VoodooMemory | Item::VoodooRenderer | Item::VoodooTextureSampling | Item::VoodooGamma => s.voodoo.enabled,
             Item::PowerVrFilter => s.powervr.is_some(),
             Item::VeriteRisc | Item::VeriteIrq => s.machine.is_verite(),
-            Item::ToadForceMemory | Item::ToadForceRenderer => s.machine.is_toadforce(),
+            Item::ToadForceMemory | Item::ToadForceRenderer | Item::ToadForceGamma => {
+                s.machine.is_toadforce()
+            }
             Item::VeriteMhz | Item::VeriteRom => {
                 s.machine.is_verite() && s.verite.risc == crate::verite::Risc::Lle
             }
@@ -667,6 +672,7 @@ impl Item {
             }
             Cycles | AutoFps | AutoBusyOs | Core | Fpu | Dpmi | DosVersion | IdeHardDisks | BootCdrom | FloppyController | KeyboardLayout | MouseAutocapture | MouseCaptureMessages | MouseMenuHold | PauseInSettings | ShellSuggestions | ShellColors | SaveShellHistory | Rewind | RewindMemory
             | ToadForceRenderer
+            | ToadForceGamma
             | VoodooRenderer | VoodooScale | VoodooScaleShader | VoodooMsaa | VoodooDither | VoodooTextureSampling | VoodooAnisotropy | VoodooOverlay | PowerVrFilter => Applies::Now,
             Monochrome => Applies::NowAndAtPrompt,
             MonitorEffects => Applies::Now,
@@ -792,7 +798,8 @@ impl Item {
             Vfx1Steer => on_off(s.vfx1.steer),
             Vfx1StereoBios => on_off(s.vfx1.stereo_bios),
             Filter => match s.filter {
-                crate::config::Filter::Nearest => "nearest (sharp)",
+                crate::config::Filter::Sharp => "sharp",
+                crate::config::Filter::Hard => "hard (nearest)",
                 crate::config::Filter::Linear => "linear (smooth)",
             }
             .to_string(),
@@ -822,7 +829,11 @@ impl Item {
             }
             .to_string(),
             Fpu => if s.fpu_fast { "fast (not exact)" } else { "exact" }.to_string(),
-            Cpu => s.cpu.describe().to_string(),
+            // "(auto)" while `cpu` isn't set, as for the memory.
+            Cpu => match s.cpu {
+                Some(cpu) => cpu.describe().to_string(),
+                None => format!("{} (auto)", s.cpu_model().describe()),
+            },
             Machine => s.machine.describe().to_string(),
             Memsize => memsize_bar(s),
             Voodoo => on_off(s.voodoo.enabled),
@@ -874,6 +885,10 @@ impl Item {
                 crate::toadforce::Renderer::Auto => "Automatic".to_string(),
                 crate::toadforce::Renderer::OpenGl => "OpenGL".to_string(),
                 crate::toadforce::Renderer::Software => "Rust-DOS".to_string(),
+            },
+            ToadForceGamma => match s.toadforce_gamma {
+                None => "Off".to_string(),
+                Some(g) => format!("{}", g),
             },
             PowerVrFilter => match s.powervr_filter {
                 crate::powervr::tsp::Filter::Auto => "As the game sets it",

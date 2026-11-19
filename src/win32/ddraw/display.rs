@@ -95,7 +95,7 @@ impl Polls {
     /// no other built-in function called in between by any thread. A
     /// loop like that does the same until the frame the display waits
     /// for, so the caller can make the thread wait for that frame instead
-    /// of running each poll (a game calling Flip without DDFLIP_WAIT until
+    /// of running each poll (a game calling Flip without waiting until
     /// it succeeds makes hundreds of calls a millisecond). A loop that
     /// does more while it waits, such as filling its sound buffer or
     /// reading its messages, keeps every poll.
@@ -204,6 +204,10 @@ pub fn set_mode(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32) -> u32 {
 /// Glide's, the screen takes the mode's size (`display_changed`).
 fn set(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32, hz: u32) -> Option<Mode> {
     let old = display_mode(cpu);
+    // Before the mode set, which clears the new picture's part of video
+    // memory. If the adapter has no such mode, the textures stay in
+    // system memory, where they work as well.
+    super::surface::video_memory_to_change(cpu);
     let mode = screen::set_mode_at(cpu, w, h, bpp, hz)?;
     super::surface::video_memory_lost(cpu);
     let display = &mut state(cpu).display;
@@ -225,6 +229,7 @@ pub fn desktop_changed(cpu: &mut Cpu) {
     if owns_display(cpu) {
         return;
     }
+    super::surface::video_memory_to_change(cpu);
     super::surface::video_memory_lost(cpu);
     state(cpu).display.blocks.clear();
 }
@@ -263,6 +268,7 @@ pub fn restore(cpu: &mut Cpu) {
         return;
     }
     let old = display_mode(cpu);
+    super::surface::video_memory_to_change(cpu);
     super::surface::video_memory_lost(cpu);
     let display = &mut state(cpu).display;
     display.blocks.clear();

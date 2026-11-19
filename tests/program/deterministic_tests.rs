@@ -142,7 +142,7 @@ fn another_start_time_gives_another_date() {
 }
 
 /// The machine with T.COM started, at the start of its run.
-fn machine(name: &str) -> (Deterministic, Cpu) {
+fn machine(name: &str) -> (Deterministic, Box<Cpu>) {
     let dir = Path::new("target/deterministic_tests").join(name);
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();

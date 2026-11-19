@@ -245,7 +245,7 @@ mod tests {
     use super::Clipboard;
     use crate::cpu::Cpu;
 
-    fn cpu_with(lines: &[&str]) -> Cpu {
+    fn cpu_with(lines: &[&str]) -> Box<Cpu> {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
         for (row, line) in lines.iter().enumerate() {
             for (col, byte) in line.bytes().enumerate() {

@@ -206,7 +206,7 @@ impl MainHost<'_, '_> {
         {
             v.set_software_picture(true);
             v.prepare_display();
-            v.render(&mut picture.rgba, picture.width as usize);
+            v.render_memory(&mut picture.rgba, picture.width as usize);
             v.set_software_picture(false);
         }
         let mut header = slots::header(self.cpu, &hardware, game);
@@ -404,8 +404,10 @@ impl MainHost<'_, '_> {
             return Err(e);
         }
         // `loaded_settings` leaves `memsize` unset only where the state's
-        // size is the default for its hardware.
+        // size is the default for its hardware, and `cpu` unset where the
+        // state's processor is the default for its display adapter.
         self.cpu.bus.memory_derived = hardware.memsize.is_none();
+        self.cpu.bus.cpu_derived = hardware.cpu.is_none();
         // Deterministic mode runs at the speed the machine's state brought
         // (a state saved at auto or max brings the speed it had then), so
         // the run from the state is the same whatever this machine ran at.
@@ -557,6 +559,7 @@ impl Host for MainHost<'_, '_> {
         self.cpu.bus.win32.guest_replace = new.win32_dlls_replace.clone();
         self.cpu.bus.win32.version = new.win32_version;
         self.cpu.bus.win32.depth = new.win32_depth;
+        self.cpu.bus.win32.desktop = new.win32_desktop;
         self.cpu.bus.win32.locale = new.win32_locale;
         if new.win32_trace != old.win32_trace {
             rust_dos::win32::trace::set_level(self.cpu, new.win32_trace);

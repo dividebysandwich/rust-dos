@@ -1552,8 +1552,12 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     let reads_clock = crate::win32::stubs::reads_clock(id) && !crate::win16::in_16bit_code(cpu);
     let trap = (cpu.cs(), cpu.eip());
     let _profile = profile::zone(profile::Zone::Win32);
-    if let Some(p) = &mut cpu.bus.profile {
-        p.win32[id as usize] += 1;
+    if cpu.bus.profile.is_some() {
+        let win16 = crate::win16::in_16bit_code(cpu);
+        if let Some(p) = &mut cpu.bus.profile {
+            let calls = if win16 { &mut p.win16 } else { &mut p.win32 };
+            calls[id as usize] += 1;
+        }
     }
     // The program's memory is reached through its page tables, as it
     // reaches it itself.

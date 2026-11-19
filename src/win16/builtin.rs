@@ -158,7 +158,7 @@ pub static MODULES: &[&Def] = &[
     &super::misc::LZEXPAND,
     &super::misc::VER,
     &super::misc::WING,
-    &super::misc::DDEML,
+    &super::ddeml::MODULE,
     &super::misc::DISPLAY,
     &super::misc::SETUPX,
 ];
@@ -280,6 +280,21 @@ pub fn api(id: u16) -> Option<(&'static Def, &'static Api16)> {
 pub fn function_name(id: u16) -> Option<String> {
     let (def, api) = api(id)?;
     Some(format!("{}.{}", def.name, api.name))
+}
+
+/// What the stub with the trap id `id` in a system module's code runs,
+/// for the disassembler and the profiler: "Win16 USER.IsWindow". KERNEL's
+/// ids past its table are the stubs of functions the built-in Windows
+/// doesn't have (`missing_address`), which `call` numbers from 0.
+pub fn trap_name(id: u16) -> String {
+    if let Some(name) = function_name(id) {
+        return format!("Win16 {name}");
+    }
+    let kernel = MODULES[0].apis.len();
+    if id >> 10 == 0 && (id & 0x3FF) as usize >= kernel {
+        return format!("Win16 missing function {}", (id & 0x3FF) as usize - kernel);
+    }
+    format!("Win16 {id:04X}h")
 }
 
 /// The 16:16 address of the stub of the function `name` of the system

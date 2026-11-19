@@ -964,6 +964,9 @@ fn a_toadforce_makes_cube_textures_in_direct3d_8() {
     assert_eq!(peek(&cpu, data + ODD_TEXTURE), 0);
     // D3DPTEXTURECAPS_CUBEMAP, MIPCUBEMAP and CUBEMAP_POW2.
     assert_eq!(peek(&cpu, data + DEVICE_CAPS + 4 * 15) & 0x3_0800, 0x3_0800);
+    // D3DCAPS2_FULLSCREENGAMMA: the card has a gamma ramp, and games
+    // such as Max Payne set none without the bit.
+    assert_eq!(peek(&cpu, data + DEVICE_CAPS + 4 * 3) & 0x2_0000, 0x2_0000);
     // CubeTextureFilterCaps are the TextureFilterCaps: the card filters
     // a cube texture's faces as it does a texture.
     let filters = peek(&cpu, data + DEVICE_CAPS + 4 * 16);
@@ -1135,4 +1138,99 @@ fn present_comes_at_the_frame_rate_caps_rate() {
     assert!(worker > 100_000, "the other thread ran {worker} passes");
     let (uncapped, _) = rate("d3d8_present_cap_off", None);
     assert!(uncapped > 60.0, "{uncapped} presents a second without the cap");
+}
+
+// The device window of full screen.
+
+/// Where the program keeps the window's rectangle after CreateDevice.
+const WINDOW_RECT: u32 = 0x800;
+const GWL_STYLE: i32 = -16;
+const GWL_EXSTYLE: i32 = -20;
+const WS_EX_TOPMOST: u32 = 0x8;
+const WS_CLIPSIBLINGS: u32 = 0x0400_0000;
+
+/// The program: a 640x480 window, shown, as a game makes its window
+/// before it takes a larger mode, then a device of full screen at
+/// 800x600 on it, and the window's rectangle, style and extended style.
+fn device_window_program() -> (Vec<u8>, u32) {
+    const GET_WINDOW_RECT: usize = 1;
+    const GET_WINDOW_LONG: usize = 2;
+    const CREATE8: usize = 3;
+    let mut d = vec![0u8; DATA_SIZE];
+    toadforce_present(&mut d);
+    put32(&mut d, PRESENT, 800);
+    put32(&mut d, PRESENT + 4, 600);
+    let user32: (&str, &[&str]) = (
+        "USER32.DLL",
+        &["CreateWindowExA", "GetWindowRect", "GetWindowLongA"],
+    );
+    program(&[user32, D3D8], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        let window = [
+            Arg::I(0),
+            Arg::At(CLASS),
+            Arg::At(CLASS),
+            Arg::I(WS_POPUP | WS_VISIBLE),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(640),
+            Arg::I(480),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(0x40_0000),
+            Arg::I(0),
+        ];
+        c.api(a, l, CREATE_WINDOW, &window)?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        c.api(a, l, CREATE8, &[Arg::I(D3D_SDK_VERSION)])?;
+        a.mov(dword_ptr(l.at(D3D)), eax)?;
+        let create = [
+            Arg::I(0),
+            Arg::I(D3DDEVTYPE_HAL),
+            Arg::Val(HWND),
+            Arg::I(D3DCREATE_HARDWARE_VERTEXPROCESSING),
+            Arg::At(PRESENT),
+            Arg::At(DEVICE),
+        ];
+        c.com(a, l, D3D, D3D8_CREATE_DEVICE, &create)?;
+        let rect = [Arg::Val(HWND), Arg::At(WINDOW_RECT)];
+        c.api(a, l, GET_WINDOW_RECT, &rect)?;
+        for index in [GWL_STYLE, GWL_EXSTYLE] {
+            let long = [Arg::Val(HWND), Arg::I(index as u32)];
+            c.api(a, l, GET_WINDOW_LONG, &long)?;
+        }
+        a.mov(dword_ptr(l.at(RESULTS + 4 * CALLS)), c.next as i32)?;
+        finish(a, l)
+    })
+}
+
+/// A device of full screen makes its device window cover the screen of
+/// its mode, shown and topmost, as Wine's d3d8 test_window_style finds
+/// on Windows; the window keeps its style otherwise. Magic & Mayhem:
+/// The Art of Magic makes its window at 640x480 and plays at 800x600,
+/// and before this the mouse's messages beyond 640x480 went to no
+/// window of the game's.
+#[test]
+fn a_full_screen_device_window_covers_the_screen_of_its_mode() {
+    let (exe, data) = device_window_program();
+    let mut cpu = machine_toadforce("d3d8_device_window", exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + DONE), 1);
+    let calls = peek(&cpu, data + RESULTS + 4 * CALLS);
+    let r = results(&cpu, data, calls);
+    assert_eq!(r[2], 0, "CreateDevice: {r:X?}");
+    assert_eq!(r[3], 1, "GetWindowRect: {r:X?}");
+    let rect: Vec<u32> = (0..4)
+        .map(|i| peek(&cpu, data + WINDOW_RECT + 4 * i))
+        .collect();
+    assert_eq!(rect, [0, 0, 800, 600]);
+    // The style CreateWindowExA gave it (a top-level window clips its
+    // siblings).
+    assert_eq!(r[4], WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS, "style");
+    assert_eq!(
+        r[5] & WS_EX_TOPMOST,
+        WS_EX_TOPMOST,
+        "extended style {:X}",
+        r[5]
+    );
 }

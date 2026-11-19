@@ -125,9 +125,7 @@ pub fn pointer_screen(win32: &crate::win32::Win32) -> Option<(i32, i32)> {
 /// ChangeDisplaySettings may have set it (`screen::desktop`).
 pub fn screen_size(win32: &crate::win32::Win32) -> (i32, i32) {
     let (w, h) = match win32.ddraw.display.mode {
-        (0, ..) => win32
-            .desktop_size
-            .map_or(crate::win32::screen::DESKTOP, |(w, h, _)| (w, h)),
+        (0, ..) => crate::win32::screen::desktop_size(win32),
         (w, h, _) => (w, h),
     };
     (w as i32, h as i32)

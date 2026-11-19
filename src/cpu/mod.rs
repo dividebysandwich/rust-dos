@@ -758,18 +758,23 @@ fn default_environment() -> Vec<(String, String)> {
 
 impl Cpu {
     /// A CPU on a machine with the default amount of RAM.
-    pub fn new(root_path: PathBuf) -> Self {
+    pub fn new(root_path: PathBuf) -> Box<Self> {
         Self::with_bus(Bus::new(root_path))
     }
 
     /// A CPU on a machine with `memory_mb` MB of RAM.
-    pub fn with_memory(root_path: PathBuf, memory_mb: usize) -> Self {
+    pub fn with_memory(root_path: PathBuf, memory_mb: usize) -> Box<Self> {
         Self::with_bus(Bus::with_memory(root_path, memory_mb))
     }
 
-    fn with_bus(bus: Bus) -> Self {
+    /// The machine goes on the heap where it is made, and is handed on
+    /// as a box: with the bus inside it (the recompiled code reaches the
+    /// bus's fields from the CPU's address) it is about 160 KB, and every
+    /// frame that held one by value, or moved it, took that much more
+    /// stack (#1196).
+    fn with_bus(bus: Bus) -> Box<Self> {
         let resident_end = crate::mcb::first_mcb(&bus);
-        Self {
+        Box::new(Self {
             gpr: [0; 8],
             eip: 0x100,
             seg: [SegCache::real(0); 6],
@@ -857,7 +862,7 @@ impl Cpu {
             fpu_fast: std::env::var("RUST_DOS_FPU").is_ok_and(|v| v.eq_ignore_ascii_case("fast")),
             seg_loads: [seg::SegLoad::NONE; seg::SEG_LOADS],
             dynrec: crate::dynrec::DynState::default(),
-        }
+        })
     }
 
     /// Whether the dynamic recompiler runs the instructions now: always

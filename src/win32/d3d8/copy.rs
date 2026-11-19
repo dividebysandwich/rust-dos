@@ -49,6 +49,9 @@ fn read_argb(cpu: &mut Cpu, s: &DdSurface, r: &Rect) -> Vec<u32> {
     let w = (r.right - r.left).max(0) as u32;
     let mut out = Vec::with_capacity((w * (r.bottom - r.top).max(0) as u32) as usize);
     let mut row = vec![0; (w * bpp) as usize];
+    let at = r.top as u32 * s.pitch + r.left as u32 * bpp;
+    let rows = (r.bottom - r.top).max(0) as u32;
+    dd_surface::will_read_rows(cpu, s, at, s.pitch, rows, row.len());
     for y in r.top..r.bottom {
         let offset = y as u32 * s.pitch + r.left as u32 * bpp;
         dd_surface::read_bytes(cpu, s, offset, &mut row);
@@ -112,6 +115,8 @@ fn copy_rect(cpu: &mut Cpu, src: &DdSurface, dst: &DdSurface, r: &Rect, x: u32, 
     let h = (r.bottom as u32).div_ceil(side) - top;
     let (x, y) = (x / side, y / side);
     let mut row = vec![0; (w * unit) as usize];
+    let at = top * src_pitch + left * unit;
+    dd_surface::will_read_rows(cpu, src, at, src_pitch, h, row.len());
     for k in 0..h {
         let from = (top + k) * src_pitch + left * unit;
         dd_surface::read_bytes(cpu, src, from, &mut row);

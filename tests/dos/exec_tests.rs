@@ -17,7 +17,7 @@ fn scratch(name: &str, files: &[(&str, &[u8])]) -> PathBuf {
 
 /// A CPU at 0000:0100 with `code` there, an IRQ 0 handler at 0000:0600,
 /// and interrupts enabled or not.
-fn cpu_with_code(code: &[u8], interrupts: bool) -> Cpu {
+fn cpu_with_code(code: &[u8], interrupts: bool) -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     cpu.bus.load_bytes(0x100, code);
     cpu.bus.write_16(0x08 * 4, 0x0600);
@@ -70,7 +70,7 @@ const TRAP_IP: usize = 0x502;
 
 /// A CPU at 0000:0100 with `code` there and an INT 1 handler at 0000:0700
 /// that counts the traps and keeps the address it returns to.
-fn traced(code: &[u8]) -> Cpu {
+fn traced(code: &[u8]) -> Box<Cpu> {
     let mut cpu = cpu_with_code(code, false);
     cpu.set_ds(0x0000);
     cpu.bus.load_bytes(0x700, &[

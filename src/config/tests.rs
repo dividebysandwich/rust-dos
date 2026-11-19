@@ -56,6 +56,26 @@ fn toadforce_renderer_is_auto_opengl_or_software() {
 }
 
 #[test]
+fn toadforce_gamma_is_off_or_a_glide_gamma() {
+    let get = |value: &str| {
+        let text = format!("[emulator]\ntoadforce_gamma={}\n", value);
+        parse(&text, Path::new("/cfg"), None)
+    };
+    assert_eq!(get("off").toadforce_gamma, Some(None));
+    assert_eq!(get("OFF").toadforce_gamma, Some(None));
+    assert_eq!(get("1.3").toadforce_gamma, Some(Some(1.3)));
+    assert_eq!(get("2").toadforce_gamma, Some(Some(2.0)));
+    for value in ["", "0", "2.5", "on", "-1"] {
+        let config = get(value);
+        assert_eq!(config.toadforce_gamma, None, "{value}");
+        let warned = |w: &String| w.contains("invalid toadforce_gamma");
+        assert!(config.warnings.iter().any(warned), "{value}");
+    }
+    let settings = Settings::from_config(&parse("", Path::new("/cfg"), None));
+    assert_eq!(settings.toadforce_gamma, None);
+}
+
+#[test]
 fn toadforce_memory_is_one_of_the_cards_sizes() {
     let get = |value: &str| {
         let text = format!("[emulator]\ntoadforce_memory={}\n", value);
@@ -73,6 +93,55 @@ fn toadforce_memory_is_one_of_the_cards_sizes() {
         let warned = |w: &String| w.contains("invalid toadforce_memory");
         assert!(config.warnings.iter().any(warned), "{value}");
     }
+}
+
+#[test]
+fn a_toadforce_without_cpu_has_a_pentium_iii() {
+    use crate::cpu::CpuModel;
+    let settings = |text: &str| Settings::from_config(&parse(text, Path::new("/cfg"), None));
+    let card = settings("[emulator]\nmachine=svga_toadforce\n");
+    assert_eq!((card.cpu, card.cpu_model()), (None, CpuModel::PentiumIII));
+    assert_eq!(card.cpu_model().auto_least(), 150_000);
+    assert_eq!(card.cpu_lines(), ["[CONFIG] A Pentium III (the default with a ToadForce)"]);
+    // Not written to the configuration, so it follows a later card.
+    let text = update_text("", &Settings::default(), &card, &[], None);
+    assert!(text.contains("machine=svga_toadforce") && !text.contains("cpu="), "{text}");
+    let other = settings("");
+    assert_eq!((other.cpu, other.cpu_model()), (None, CpuModel::I486));
+    assert_eq!(other.cpu_lines(), ["[CONFIG] A 486 (the default)"]);
+
+    // A set model wins, with a line where it is older than the card's
+    // games expect, and none from a Pentium II on.
+    let set = settings("[emulator]\nmachine=svga_toadforce\ncpu=486\n");
+    assert_eq!((set.cpu, set.cpu_model()), (Some(CpuModel::I486), CpuModel::I486));
+    assert_eq!(set.cpu_model().auto_least(), 0);
+    let lines = set.cpu_lines();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[1].contains("expect a Pentium II or better"), "{lines:?}");
+    assert!(lines[1].ends_with("without the cpu line the machine has a Pentium III"), "{lines:?}");
+    let set = settings("[emulator]\nmachine=svga_toadforce\ncpu=pentium_ii\n");
+    assert_eq!(set.cpu_model(), CpuModel::PentiumII);
+    assert_eq!(set.cpu_lines(), ["[CONFIG] A Pentium II (cpu)"]);
+    assert_eq!(settings("[emulator]\ncpu=386\n").cpu_lines().len(), 1);
+}
+
+#[test]
+fn a_cpu_unset_for_a_toadforce_leaves_the_saved_file() {
+    use crate::cpu::CpuModel;
+    let settings = |text: &str| Settings::from_config(&parse(text, Path::new("/cfg"), None));
+    // A file the settings window of an earlier rust-dos saved has
+    // cpu=486. When the window unsets it on a change to a ToadForce, the
+    // saved file's line is commented out and the file gives the card's
+    // default.
+    let original = "[emulator]\nmachine=svga\ncpu=486\n";
+    let file = settings(original);
+    assert!(!file.cpu_below_card());
+    let changed = Settings { machine: Adapter::ToadForce, ..file.clone() };
+    assert!(changed.cpu_below_card());
+    let changed = Settings { cpu: None, ..changed };
+    let text = complete_text(original, Path::new("/cfg"), &file, &changed, &[], None);
+    assert!(text.contains("#cpu=486") && !text.contains("\ncpu="), "{text}");
+    assert_eq!(settings(&text).cpu_model(), CpuModel::PentiumIII);
 }
 
 #[test]
@@ -608,6 +677,19 @@ fn display_settings() {
         let config = parse(&format!("[emulator]\naspect={}\n", name), Path::new("/cfg"), None);
         assert_eq!(config.aspect, Some(ratio));
     }
+    // `nearest`, which every file saved before `sharp` has, reads as it.
+    let filters = [
+        ("sharp", Filter::Sharp),
+        ("Nearest", Filter::Sharp),
+        ("hard", Filter::Hard),
+        ("linear", Filter::Linear),
+    ];
+    for (name, filter) in filters {
+        let config = parse(&format!("[emulator]\nfilter={}\n", name), Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(config.filter, Some(filter));
+    }
+    assert_eq!((Settings::default().filter, Filter::Sharp.name()), (Filter::Sharp, "sharp"));
     let text = "[emulator]\nfullscreen=maybe\nvrr=sometimes\nfilter=blur\nshader=bent\nmonochrome=blue\ncrt_curvature=200\ncrt_glow=lots\n";
     let config = parse(text, Path::new("/cfg"), None);
     assert_eq!(config.warnings.len(), 7, "{:?}", config.warnings);
@@ -819,13 +901,14 @@ fn changed_settings() -> Settings {
         },
         toadforce_memory: 128,
         toadforce_renderer: crate::toadforce::Renderer::Software,
+        toadforce_gamma: Some(1.5),
         capture_dir: PathBuf::from("/home/u/dos captures"),
         record_ui: true,
         record_shader: true,
         cycles: CpuSpeed::Fixed(3000),
         auto_fps: Some(35),
         auto_busy_os: false,
-        cpu: CpuModel::I386,
+        cpu: Some(CpuModel::I386),
         core: CoreMode::Dynamic,
         fpu_fast: true,
         memsize: Some(32),
@@ -837,6 +920,7 @@ fn changed_settings() -> Settings {
         win32_dlls_replace: Vec::new(),
         win32_version: WindowsVersion::Win98Se,
         win32_depth: DesktopDepth::Palette,
+        win32_desktop: DesktopSize::Svga,
         win32_locale: Win32Locale::RuRu,
         win32_trace: Win32Trace::Off,
         dos_high: false,
@@ -1173,11 +1257,11 @@ fn saving_all_fills_in_every_setting() {
         // (The file's SoundFont; no Ultrasound directory, MT-32 or
         // Sound Canvas, LAN password, RetroAchievements account,
         // printer paths and programs, Win32 DLL folder or game fixes left
-        // out of its own, and no memsize, which stays the default for
-        // the CPU and the display adapter.)
+        // out of its own, and no memsize or cpu, which stay the defaults
+        // for the display adapter and the CPU.)
         let wanted = !matches!(
             key,
-            "memsize" | "ultradir" | "awe32rom" | "mt32roms" | "mt32lib" | "sc55roms" | "midiport" | "password" | "username" | "token"
+            "memsize" | "cpu" | "ultradir" | "awe32rom" | "mt32roms" | "mt32lib" | "sc55roms" | "midiport" | "password" | "username" | "token"
                 | "verite_rom"
                 | "win32_dlls"
                 | "win32_dlls_replace"
@@ -1261,6 +1345,21 @@ fn the_desktop_depth_is_read() {
         assert_eq!(depth.name(), value);
     }
     let config = parse("[emulator]\nwin32_depth=24\n", Path::new("/cfg"), None);
+    assert_eq!(config.warnings.len(), 1);
+}
+
+#[test]
+fn the_desktop_size_is_read() {
+    for size in DesktopSize::ALL {
+        let text = format!("[emulator]\nwin32_desktop={}\n", size.name());
+        let config = parse(&text, Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(Settings::from_config(&config).win32_desktop, size);
+        assert_eq!(DesktopSize::parse(&size.name().to_uppercase()), Some(size));
+    }
+    let config = parse("[emulator]\n", Path::new("/cfg"), None);
+    assert_eq!(Settings::from_config(&config).win32_desktop, DesktopSize::Vga);
+    let config = parse("[emulator]\nwin32_desktop=1280x1024\n", Path::new("/cfg"), None);
     assert_eq!(config.warnings.len(), 1);
 }
 
@@ -1376,7 +1475,7 @@ fn memsize_default_comes_from_the_cpu_and_the_card() {
         for adapter in Adapter::ALL {
             let wanted = if adapter == Adapter::ToadForce { with_card } else { plain };
             assert_eq!(default_memsize(cpu, adapter), wanted, "{:?} {:?}", cpu, adapter);
-            let settings = Settings { cpu, machine: adapter, ..Settings::default() };
+            let settings = Settings { cpu: Some(cpu), machine: adapter, ..Settings::default() };
             assert_eq!(settings.memory_mb(), wanted, "{:?} {:?}", cpu, adapter);
             let memory = settings.memory();
             assert_eq!((memory.mb, memory.derived), (wanted, true));
@@ -1401,7 +1500,7 @@ fn memsize_default_comes_from_the_cpu_and_the_card() {
     assert_eq!(memory("[emulator]\ncpu=pentium_iii\n").mb, 128);
     let toadforce = memory("[emulator]\nmachine=svga_toadforce\n");
     assert_eq!((toadforce.mb, toadforce.derived), (128, true));
-    assert_eq!(toadforce.source, "the default for a 486 with a ToadForce");
+    assert_eq!(toadforce.source, "the default for a Pentium III with a ToadForce");
     assert_eq!(memory("[emulator]\nmachine=svga_toadforce\ncpu=386\n").mb, 64);
 }
 
@@ -1441,7 +1540,7 @@ fn saving_keeps_an_unset_memsize_unset() {
 
     // Every setting written, another CPU chosen: no memsize line, and the
     // file read again gives the new CPU's default.
-    let changed = Settings { cpu: CpuModel::PentiumIII, ..file.clone() };
+    let changed = Settings { cpu: Some(CpuModel::PentiumIII), ..file.clone() };
     let saved = complete_text(text, Path::new("/cfg"), &file, &changed, &[], None);
     assert!(saved.contains("cpu=pentium_iii\n"), "{}", saved);
     assert!(!has_key(&lines(&saved), Section::Emulator, "memsize"), "{}", saved);
@@ -1467,7 +1566,7 @@ fn saving_keeps_an_unset_memsize_unset() {
     // would.
     let own = "[emulator]\ncpu=pentium_ii\nmemsize=64\n";
     let file = Settings::from_config(&parse(own, Path::new("/cfg"), None));
-    let changed = Settings { cpu: CpuModel::PentiumIII, ..file.clone() };
+    let changed = Settings { cpu: Some(CpuModel::PentiumIII), ..file.clone() };
     let saved = complete_text(own, Path::new("/cfg"), &file, &changed, &[], None);
     assert!(saved.contains("\nmemsize=64\n"), "{}", saved);
     assert_eq!(Settings::from_config(&parse(&saved, Path::new("/cfg"), None)).memory_mb(), 64);

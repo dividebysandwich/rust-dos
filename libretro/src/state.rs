@@ -107,8 +107,10 @@ pub fn load(m: &mut Machine, buf: &[u8]) -> Result<slots::Header, String> {
         return Err(e.to_string());
     }
     // `loaded_settings` leaves `memsize` unset only where the state's size
-    // is the default for its hardware.
+    // is the default for its hardware, and `cpu` where the state's model is
+    // the default for its display adapter.
     m.cpu.bus.memory_derived = hardware.memsize.is_none();
+    m.cpu.bus.cpu_derived = hardware.cpu.is_none();
     // The state's time stamp counter goes on at this machine's speed.
     m.cpu.set_tsc_speed(m.settings.cycles);
     Ok(header)

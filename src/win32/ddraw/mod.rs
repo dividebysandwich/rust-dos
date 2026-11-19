@@ -1094,6 +1094,9 @@ pub struct State {
     /// before the object that put DirectDraw's there went: (process,
     /// window, the procedure DirectDraw's passes the messages on to).
     pub chained: Vec<(u32, u32, u32)>,
+    /// The reasons texture Load left a level as it was that are logged
+    /// so far, one bit each (`d3d::texture::Unloaded`).
+    pub load_logged: u32,
 }
 
 pub fn state(cpu: &mut Cpu) -> &mut State {
@@ -1464,4 +1467,4 @@ crate::state_fields!(State {
     hal,
     hal_toadforce,
     chained
-} skip { hal_software });
+} skip { hal_software, load_logged });

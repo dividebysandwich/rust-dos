@@ -1287,38 +1287,88 @@ impl Gen<'_> {
         );
     }
 
-    /// `Uop::FToInt64`: the conversion where the control word rounds to
-    /// nearest or chops, else the handler's. AArch64's conversions saturate
-    /// and make a NaN 0: a NaN and the limits go to the handler too.
+    /// `Uop::FToInt64`, as x86-64's (see `x64::Gen::fpu_to_int64`).
+    /// AArch64's conversions saturate and make a NaN 0: a NaN and the
+    /// limits go through `jit_fpu_to_int64` too.
     fn fpu_to_int64(&mut self, lo: T, hi: T, x: X) {
-        let x_ = d(x);
-        let at = self.ops.new_dynamic_label();
+        let (l, h, x_) = (r(lo), r(hi), d(x));
+        self.fpu_phys(1, 0);
+        self.cpu_addr(2, layout::fpu::STALE);
+        dynasm!(self.ops ; .arch aarch64 ; ldrb w3, [x2, x1] ; cbnz w3, >toint64_double);
+        self.cpu_addr(2, layout::fpu::X80);
+        dynasm!(self.ops
+            ; .arch aarch64
+            ; add x2, x2, x1, lsl 4
+            ; ldr x3, [x2]
+            ; tst x3, 0x7FF
+            ; b.eq >toint64_double
+            // The 80 bits: exponent e from 53 to 62 (W5 e - 53), the
+            // integer bit set, and the significand's 63 - e bits below
+            // the point 0.
+            ; ldrh w4, [x2, 8]
+            ; and w5, w4, 0x7FFF
+            ; movz w0, 16383 + 53
+            ; sub w5, w5, w0
+            ; cmp w5, 9
+            ; b.hi >toint64_frac
+            ; tbz x3, 63, >toint64_frac
+            ; movz w0, 10
+            ; sub w5, w0, w5
+            ; lsr X(l), x3, x5
+            ; lsl x0, X(l), x5
+            ; cmp x0, x3
+            ; b.ne >toint64_frac
+            ; tbz w4, 15, >toint64_split
+            ; neg X(l), X(l)
+            ; b >toint64_split
+            // The double, as `fpu_bail_precise` checks it for
+            // `Precise::Int`.
+            ; toint64_frac:
+            ; fmov x0, D(x_)
+            ; ubfx x2, x0, 52, 11
+            ; cmp w2, 1023 + 52
+            ; b.hs >toint64_slow
+            ; cmp w2, 1023 - 1
+            ; b.lo >toint64_double
+            ; mov w3, 1023 + 51
+            ; sub w3, w3, w2
+            ; mov x2, 1
+            ; lsl x2, x2, x3
+            ; sub x2, x2, 1
+            ; tst x0, x2
+            ; b.eq >toint64_slow
+            ; toint64_double:
+        );
         self.field(Access::Ldr16, 0, layout::fpu::CONTROL);
         dynasm!(self.ops
             ; .arch aarch64
             ; fcmp D(x_), D(x_)
-            ; b.vs =>at
+            ; b.vs >toint64_slow
             ; and w0, w0, 0xC00
             ; cbnz w0, >toint64_other
-            ; fcvtns x1, D(x_)
+            ; fcvtns X(l), D(x_)
             ; b >toint64_check
             ; toint64_other:
             ; cmp w0, 0xC00
-            ; b.ne =>at
-            ; fcvtzs x1, D(x_)
+            ; b.ne >toint64_slow
+            ; fcvtzs X(l), D(x_)
             ; toint64_check:
             ; movz x2, 0x8000, lsl 48
-            ; cmp x1, x2
-            ; b.eq =>at
+            ; cmp X(l), x2
+            ; b.eq >toint64_slow
             ; sub x2, x2, 1
-            ; cmp x1, x2
-            ; b.eq =>at
-            ; mov W(r(lo)), w1
-            ; lsr x1, x1, 32
-            ; mov W(r(hi)), w1
+            ; cmp X(l), x2
+            ; b.ne >toint64_split
+            ; toint64_slow:
+            ; mov x0, x19
+            ; mov x1, x20
+            ; ldr x16, [x20, (CTX_FPU + 40) as u32]
+            ; blr x16
+            ; mov X(l), x0
+            ; toint64_split:
+            ; lsr X(h), X(l), 32
+            ; mov W(l), W(l)
         );
-        let end = self.end();
-        self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, leave: false });
     }
 
     /// Add `v` to the u64 CPU field at `off`.
@@ -1845,6 +1895,18 @@ impl Gen<'_> {
                 }
             }
             Uop::SarConst { t, count } => dynasm!(self.ops ; .arch aarch64 ; asr W(r(t)), W(r(t)), count as u32),
+            Uop::AddShifted {
+                t,
+                src,
+                shift,
+                size,
+            } => {
+                let (t, src) = (r(t), r(src));
+                dynasm!(self.ops ; .arch aarch64 ; add W(t), W(t), W(src), lsl shift as u32);
+                if size == 2 {
+                    dynasm!(self.ops ; .arch aarch64 ; uxth W(t), W(t));
+                }
+            }
             Uop::Extend { t, from, signed } => {
                 let t = r(t);
                 match (from, signed) {
@@ -1965,6 +2027,19 @@ impl Gen<'_> {
                         BitKind::Reset => dynasm!(self.ops ; .arch aarch64 ; bic W(r(t)), W(r(t)), w3),
                         _ => dynasm!(self.ops ; .arch aarch64 ; eor W(r(t)), W(r(t)), w3),
                     }
+                }
+            }
+            Uop::BitScan { forward, dst, src } => {
+                let (dst, src) = (r(dst), r(src));
+                dynasm!(self.ops ; .arch aarch64 ; movz w5, ZF ; cbz W(src), >zero);
+                if forward {
+                    dynasm!(self.ops ; .arch aarch64 ; rbit w4, W(src) ; clz W(dst), w4);
+                } else {
+                    dynasm!(self.ops ; .arch aarch64 ; clz w4, W(src) ; movz w3, 31 ; sub W(dst), w3, w4);
+                }
+                dynasm!(self.ops ; .arch aarch64 ; movz w5, 0 ; zero:);
+                if self.live_after & ZF != 0 {
+                    self.merge(ZF);
                 }
             }
             Uop::MulWide { signed, size, t } => self.mul_wide(signed, size, t),
@@ -2227,8 +2302,7 @@ impl Gen<'_> {
                 // As x86-64's.
                 let t_ = r(t);
                 let at = self.ops.new_dynamic_label();
-                self.field(Access::Ldr8, 1, layout::CPL);
-                dynasm!(self.ops ; .arch aarch64 ; cbnz w1, =>at);
+                let mask = self.ops.new_dynamic_label();
                 self.field(Access::Ldr32, 0, layout::FLAGS);
                 if size == 4 {
                     self.mov32(2, POPF_KEPT);
@@ -2239,9 +2313,25 @@ impl Gen<'_> {
                         ; b.ne =>at
                     );
                 }
+                // W2: the flags it loads at this CPL and IOPL.
+                self.field(Access::Ldr8, 1, layout::CPL);
                 self.mov32(2, POPF_RING0);
+                dynasm!(self.ops ; .arch aarch64 ; cbz w1, =>mask);
                 dynasm!(self.ops
                     ; .arch aarch64
+                    ; lsl w1, w1, 12
+                    ; and w3, w0, 0x3000
+                );
+                self.mov32(2, POPF_IOPL);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; cmp w1, w3
+                    ; b.ls =>mask
+                );
+                self.mov32(2, POPF_USER);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; =>mask
                     ; and w1, W(t_), w2
                     ; bic w0, w0, w2
                     ; orr w0, w0, w1
@@ -2512,21 +2602,36 @@ impl Gen<'_> {
                     self.fpu_canon(d(x));
                 }
             }
-            Uop::FLoadInt64 { x, m } => {
-                // As x86-64's.
-                let at = self.ops.new_dynamic_label();
+            Uop::FPushInt64 { m } => {
+                // As x86-64's: D16 the double, rounded to nearest, X3 the
+                // significand and W5 the sign and exponent.
+                self.fpu_known = self.fpu_known << 1 | 1;
                 dynasm!(self.ops
                     ; .arch aarch64
-                    ; ldr x1, [x21, X(r(m))]
-                    ; asr x2, x1, 53
-                    ; add x2, x2, 1
-                    ; cmp x2, 1
-                    ; b.hi =>at
-                    ; scvtf D(d(x)), x1
+                    ; ldr x0, [x21, X(r(m))]
+                    ; scvtf d16, x0
+                    ; cmp x0, 0
+                    ; cneg x3, x0, lt
+                    ; cset w5, lt
+                    ; lsl w5, w5, 15
+                    ; clz x4, x3
+                    ; lsl x3, x3, x4
+                    ; cbz x3, >fild64_zero
+                    ; movz w0, 16383 + 63
+                    ; sub w0, w0, w4
+                    ; orr w5, w5, w0
+                    ; fild64_zero:
                 );
-                let end = self.end();
-                let (ix, dirty) = (self.ix, self.dirty);
-                self.slow.push(Slow::Bail { at, end, ix, dirty, leave: false });
+                self.field(Access::Ldr64, 1, layout::fpu::TOP);
+                dynasm!(self.ops ; .arch aarch64 ; sub w1, w1, 1 ; and w1, w1, 7);
+                self.field(Access::Str64, 1, layout::fpu::TOP);
+                self.cpu_addr(2, layout::fpu::F64);
+                dynasm!(self.ops ; .arch aarch64 ; str d16, [x2, x1, lsl 3]);
+                self.cpu_addr(2, layout::fpu::STALE);
+                dynasm!(self.ops ; .arch aarch64 ; strb wzr, [x2, x1]);
+                self.fpu_tag(1, FPU_VALID);
+                self.cpu_addr(2, layout::fpu::X80);
+                dynasm!(self.ops ; .arch aarch64 ; add x2, x2, x1, lsl 4 ; stp x3, x5, [x2]);
             }
             Uop::FToHalf { t, x, high } => {
                 dynasm!(self.ops ; .arch aarch64 ; fmov X(r(t)), D(d(x)));
@@ -2571,6 +2676,8 @@ impl Gen<'_> {
                 dynasm!(self.ops ; .arch aarch64 ; addsub_done:);
             }
             Uop::FChs => self.fpu_op(1 << 13, None),
+            Uop::FRndint => self.fpu_op(6 << 13, None),
+            Uop::FAbs => self.fpu_op(7 << 13, None),
             Uop::FSqrt => {
                 const C1: u32 = 0x200;
                 // The root inline where the double is above 0, else (a

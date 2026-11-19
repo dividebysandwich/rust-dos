@@ -38,6 +38,9 @@ pub const CAPS_END: u32 = 0x400;
 /// `PALETTE[0]` to `PALETTE[255]`.
 pub const PALETTE: u32 = 0x400;
 pub const PALETTE_END: u32 = 0x800;
+/// `GAMMA[0]` to `GAMMA[255]`.
+pub const GAMMA: u32 = 0x800;
+pub const GAMMA_END: u32 = 0xC00;
 
 /// What `ID` reads: "TOAD".
 pub const ID_VALUE: u32 = 0x4441_4F54;

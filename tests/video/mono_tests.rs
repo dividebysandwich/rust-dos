@@ -21,7 +21,7 @@ fn int10(cpu: &mut Cpu, ax: u16, bx: u16, cx: u16, dx: u16) {
 }
 
 /// A machine with `adapter` and a monochrome monitor, at the prompt.
-fn mono(adapter: Adapter) -> Cpu {
+fn mono(adapter: Adapter) -> Box<Cpu> {
     let mut cpu = Cpu::new(PathBuf::from("."));
     bios::install(&mut cpu.bus, VideoSetup { adapter, mono_monitor: true });
     cpu.load_shell();

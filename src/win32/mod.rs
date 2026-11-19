@@ -28,6 +28,7 @@ pub mod dll_files;
 mod forwarders;
 mod dmusic;
 mod dplayx;
+mod dpnet;
 mod dshow;
 mod dsound;
 pub mod gdi32;
@@ -60,6 +61,7 @@ mod pace;
 mod advpack;
 pub(crate) mod realmode;
 mod registry;
+mod rpcrt4;
 mod screen;
 pub(crate) mod seh;
 mod shell32;
@@ -297,6 +299,9 @@ pub struct Process {
     /// The process that started it with CreateProcessA or WinExec, or 0
     /// for the one DOS started.
     pub(crate) parent: u32,
+    /// The system's heap in the shared arena (`Heap::create_shared`),
+    /// once a critical section needs it.
+    system_heap: heap::SystemHeap,
 }
 
 impl Process {
@@ -352,6 +357,11 @@ pub struct Win32 {
     /// of them started.
     pub depth: crate::config::DesktopDepth,
     desktop_depth: crate::config::DesktopDepth,
+    /// The desktop's own size (the `win32_desktop` setting), and the
+    /// size the running processes have, the setting's when the first of
+    /// them started.
+    pub desktop: crate::config::DesktopSize,
+    own_size: version::OwnSize,
     /// The system locale (the `win32_locale` setting), and the locale
     /// the running processes see, the setting's when the first of them
     /// started (nls.rs).
@@ -484,6 +494,8 @@ pub struct Win32 {
     oleaut32: oleaut32::State,
     /// MSACM32's streams.
     msacm32: msacm32::State,
+    /// DPNET's DirectPlay 8 objects.
+    dpnet: dpnet::State,
 }
 
 impl Win32 {
@@ -495,6 +507,7 @@ impl Win32 {
             guest_replace: std::mem::take(&mut self.guest_replace),
             version: self.version,
             depth: self.depth,
+            desktop: self.desktop,
             locale: self.locale,
             dll_files: self.dll_files.take(),
             trace: trace::Trace::new(self.trace.level()),
@@ -1260,6 +1273,7 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     dshow::process_ended(cpu, process.id);
     shell32::process_ended(cpu, process.id);
     dplayx::process_ended(cpu, process.id);
+    dpnet::process_ended(cpu, process.id);
     user32::ddeml::process_ended(cpu, process.id);
     if process.id == cpu.bus.win32.win16.pid {
         crate::win16::dos::release(cpu);
@@ -1485,7 +1499,7 @@ pub fn audio_playing(win32: &Win32) -> bool {
 /// The sound device's samples for the host's frames `first` to `first +
 /// frames`, if it plays (dsound/device.rs).
 pub fn audio_render(
-    bus: &crate::bus::Bus,
+    bus: &mut crate::bus::Bus,
     first: u64,
     frames: usize,
 ) -> Option<Vec<(f32, f32)>> {
@@ -1519,6 +1533,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         // otherwise go on finding, before the objects their players'
         // events are go.
         dplayx::session_ended(cpu);
+        dpnet::session_ended(cpu);
         if let Some(pool) = cpu.bus.win32.pool.take() {
             pool.release(&mut cpu.bus);
         }
@@ -1553,9 +1568,13 @@ pub fn import_registry(cpu: &mut Cpu, text: &str) -> Result<(), String> {
     registry::import_file(cpu, text)
 }
 
-/// What the trap with id `id` runs, for the disassembler.
-pub fn trap_name(id: u16) -> String {
+/// What the trap with id `id` runs, for the disassembler and the
+/// profiler. `code16` says the trap is in 16-bit protected-mode code,
+/// where the stubs of the Win16 system modules are: their ids number
+/// the 16-bit functions apart from the built-in DLLs' (`service`).
+pub fn trap_name(id: u16, code16: bool) -> String {
     match id {
+        _ if code16 && id < FIRST_MISSING => crate::win16::trap_name(id),
         ID_START => "Win32 start".to_string(),
         ID_REAL_RETURN => "Win32 real-mode return".to_string(),
         _ if id & 0xFF00 == ID_CALLBACK => format!("Win16 real-mode callback {}", id as u8),
@@ -1618,6 +1637,7 @@ crate::state_fields!(Process {
     imagehlp,
     parent,
     vfw,
+    system_heap,
 } skip {
     file_apis_oem,
 });
@@ -1667,6 +1687,7 @@ crate::state_fields!(Win32 {
     boot,
     win16,
     desktop_depth,
+    own_size,
     os_locale,
     atoms,
     desktop_size,
@@ -1674,12 +1695,14 @@ crate::state_fields!(Win32 {
     oleaut32,
     msacm32,
     comm,
+    dpnet,
 } skip {
     enabled,
     guest_dlls,
     guest_replace,
     version,
     depth,
+    desktop,
     locale,
     dll_files,
     trace,

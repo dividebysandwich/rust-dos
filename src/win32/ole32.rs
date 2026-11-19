@@ -23,10 +23,14 @@ mod calls;
 mod compobj;
 mod medium;
 mod propvariant;
+mod persist;
+mod rpc;
+mod storage;
 pub mod stream;
 
 pub use calls::step;
 pub(super) use propvariant::call_all;
+pub(super) use rpc::ndr;
 pub(super) use stream::method;
 
 pub static DLL: Dll = Dll {
@@ -177,6 +181,61 @@ static APIS: &[Api] = &[
         3,
         super::kernel32::time::dos_date_time_to_file_time,
     ),
+    stdcall("CoTreatAsClass", 78, 2, compobj::co_treat_as_class),
+    stdcall("ProxyMethod", 0, 0, rpc::proxy_method),
+    stdcall("OleMainWndProc", 0, 4, rpc::wnd_proc),
+    stdcall("CoResumeClassObjects", 67, 0, compobj::co_resume_class_objects),
+    stdcall("CoAddRefServerProcess", 13, 0, compobj::co_add_ref_server_process),
+    stdcall("CoReleaseServerProcess", 66, 0, compobj::co_release_server_process),
+    stdcall("CoFreeAllLibraries", 24, 0, nothing),
+    stdcall("IStorage_QueryInterface", 0, 3, storage::storage_query_interface),
+    stdcall("IStorage_AddRef", 0, 1, storage::storage_add_ref),
+    stdcall("IStorage_Release", 0, 1, storage::storage_release),
+    stdcall("IStorage_CreateStream", 0, 6, storage::create_stream),
+    stdcall("IStorage_OpenStream", 0, 6, storage::open_stream),
+    stdcall("IStorage_CreateStorage", 0, 6, storage::create_storage),
+    stdcall("IStorage_OpenStorage", 0, 7, storage::open_storage),
+    stdcall("IStorage_CopyTo", 0, 5, storage::copy_to),
+    stdcall("IStorage_MoveElementTo", 0, 5, storage::move_element_to),
+    stdcall("IStorage_Commit", 0, 2, storage::commit),
+    stdcall("IStorage_Revert", 0, 1, storage::revert),
+    stdcall("IStorage_EnumElements", 0, 5, storage::enum_elements),
+    stdcall("IStorage_DestroyElement", 0, 2, storage::destroy_element),
+    stdcall("IStorage_RenameElement", 0, 3, storage::rename_element),
+    stdcall("IStorage_SetElementTimes", 0, 5, storage::set_element_times),
+    stdcall("IStorage_SetClass", 0, 2, storage::set_class),
+    stdcall("IStorage_SetStateBits", 0, 3, storage::set_state_bits),
+    stdcall("IStorage_Stat", 0, 3, storage::storage_stat),
+    stdcall("IStorageStream_QueryInterface", 0, 3, storage::stream_query_interface),
+    stdcall("IStorageStream_AddRef", 0, 1, storage::stream_add_ref),
+    stdcall("IStorageStream_Release", 0, 1, storage::stream_release),
+    stdcall("IStorageStream_Read", 0, 4, storage::stream_read),
+    stdcall("IStorageStream_Write", 0, 4, storage::stream_write),
+    stdcall("IStorageStream_Seek", 0, 5, storage::stream_seek),
+    stdcall("IStorageStream_SetSize", 0, 3, storage::stream_set_size),
+    stdcall("IStorageStream_CopyTo", 0, 6, storage::stream_copy_to),
+    stdcall("IStorageStream_Commit", 0, 2, storage::stream_nothing),
+    stdcall("IStorageStream_Revert", 0, 1, storage::stream_nothing),
+    stdcall("IStorageStream_LockRegion", 0, 6, storage::stream_lock_region),
+    stdcall("IStorageStream_UnlockRegion", 0, 6, storage::stream_lock_region),
+    stdcall("IStorageStream_Stat", 0, 3, storage::stream_stat),
+    stdcall("IStorageStream_Clone", 0, 2, storage::stream_clone),
+    stdcall("IEnumSTATSTG_QueryInterface", 0, 3, storage::enum_query_interface),
+    stdcall("IEnumSTATSTG_AddRef", 0, 1, storage::enum_add_ref),
+    stdcall("IEnumSTATSTG_Release", 0, 1, storage::enum_release),
+    stdcall("IEnumSTATSTG_Next", 0, 4, storage::enum_next),
+    stdcall("IEnumSTATSTG_Skip", 0, 2, storage::enum_skip),
+    stdcall("IEnumSTATSTG_Reset", 0, 1, storage::enum_reset),
+    stdcall("IEnumSTATSTG_Clone", 0, 2, storage::enum_clone),
+    stdcall("StgCreateDocfile", 241, 4, storage::stg_create_docfile),
+    stdcall("StgOpenStorage", 249, 6, storage::stg_open_storage),
+    stdcall("StgIsStorageFile", 246, 1, storage::stg_is_storage_file),
+    stdcall("WriteClassStm", 262, 2, persist::write_class_stm),
+    stdcall("ReadClassStm", 223, 2, persist::read_class_stm),
+    stdcall("WriteClassStg", 261, 2, persist::write_class_stg),
+    stdcall("ReadClassStg", 222, 2, persist::read_class_stg),
+    stdcall("OleSaveToStream", 209, 2, persist::ole_save_to_stream),
+    stdcall("OleLoadFromStream", 197, 3, persist::ole_load_from_stream),
 ];
 
 /// The vtables, by their places in this list.
@@ -239,6 +298,60 @@ static VTABLES: &[Vtable] = &[
             "IStream_Stat",
         ],
     },
+    Vtable {
+        name: "IStorage",
+        methods: &[
+            "IStorage_QueryInterface",
+            "IStorage_AddRef",
+            "IStorage_Release",
+            "IStorage_CreateStream",
+            "IStorage_OpenStream",
+            "IStorage_CreateStorage",
+            "IStorage_OpenStorage",
+            "IStorage_CopyTo",
+            "IStorage_MoveElementTo",
+            "IStorage_Commit",
+            "IStorage_Revert",
+            "IStorage_EnumElements",
+            "IStorage_DestroyElement",
+            "IStorage_RenameElement",
+            "IStorage_SetElementTimes",
+            "IStorage_SetClass",
+            "IStorage_SetStateBits",
+            "IStorage_Stat",
+        ],
+    },
+    Vtable {
+        name: "IStorageStream",
+        methods: &[
+            "IStorageStream_QueryInterface",
+            "IStorageStream_AddRef",
+            "IStorageStream_Release",
+            "IStorageStream_Read",
+            "IStorageStream_Write",
+            "IStorageStream_Seek",
+            "IStorageStream_SetSize",
+            "IStorageStream_CopyTo",
+            "IStorageStream_Commit",
+            "IStorageStream_Revert",
+            "IStorageStream_LockRegion",
+            "IStorageStream_UnlockRegion",
+            "IStorageStream_Stat",
+            "IStorageStream_Clone",
+        ],
+    },
+    Vtable {
+        name: "IEnumSTATSTG",
+        methods: &[
+            "IEnumSTATSTG_QueryInterface",
+            "IEnumSTATSTG_AddRef",
+            "IEnumSTATSTG_Release",
+            "IEnumSTATSTG_Next",
+            "IEnumSTATSTG_Skip",
+            "IEnumSTATSTG_Reset",
+            "IEnumSTATSTG_Clone",
+        ],
+    },
 ];
 const CLASS_FACTORY: usize = 0;
 const MALLOC: usize = 1;
@@ -259,7 +372,18 @@ pub struct State {
     mallocs: Vec<(u32, u32)>,
     /// The streams and byte arrays on global memory, by their ids.
     globals: Vec<Option<stream::Global>>,
+    /// The objects other processes hold and the proxies of them.
+    rpc: Added<rpc::Rpc>,
+    /// The docfiles open and the objects of them.
+    storage: Added<storage::Storages>,
 }
+
+/// The W32 section's version that added local servers' state: a state
+/// saved by an older rust-dos has none.
+pub const LOCAL_SERVERS: u16 = 77;
+
+/// State OLE32 has had since `LOCAL_SERVERS`.
+pub type Added<T> = crate::savestate::Since<LOCAL_SERVERS, T>;
 
 fn state(cpu: &mut Cpu) -> &mut State {
     &mut cpu.bus.win32.ole
@@ -286,6 +410,17 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32, tids: &[u32]) {
     ole.mallocs.retain(|&(p, _)| p != pid);
     compobj::process_ended(cpu, pid, tids);
     stream::process_ended(cpu, pid);
+    rpc::process_ended(cpu, pid);
+    storage::process_ended(cpu, pid);
+}
+
+/// The address of OLE32's function `name`.
+fn address_of(name: &str) -> u32 {
+    let index = APIS
+        .iter()
+        .position(|a| a.name == name)
+        .unwrap_or_else(|| panic!("OLE32 has no {}", name));
+    super::stubs::stub_address(dll_index(), index)
 }
 
 fn nothing(_: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -340,6 +475,7 @@ fn co_create_instance(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             compobj::start_class(cpu, true, clsid, iid, out, outer, object)
         }
         compobj::Source::Server => compobj::start_class(cpu, true, clsid, iid, out, outer, 0),
+        compobj::Source::Local => rpc::activate(cpu, true, clsid, iid, out, outer),
     }
 }
 
@@ -367,6 +503,7 @@ fn co_get_class_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             compobj::start_class(cpu, false, clsid, iid, out, 0, object)
         }
         compobj::Source::Server => compobj::start_class(cpu, false, clsid, iid, out, 0, 0),
+        compobj::Source::Local => rpc::activate(cpu, false, clsid, iid, out, 0),
     }
 }
 
@@ -745,5 +882,7 @@ fn co_get_current_process(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 crate::state_fields!(State {
     com,
     mallocs,
-    globals
+    globals,
+    rpc,
+    storage
 });
