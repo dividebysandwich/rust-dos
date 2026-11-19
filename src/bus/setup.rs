@@ -173,6 +173,7 @@ impl Bus {
         // driver's entry.
         crate::dos_files::write_table(&mut bus);
         crate::xms::install_entry(&mut bus);
+        crate::mouse::install_entry(&mut bus);
 
         bus
     }
@@ -268,6 +269,7 @@ impl Bus {
         self.sync_drive_bda();
         crate::dos_files::write_table(self);
         crate::xms::install_entry(self);
+        crate::mouse::install_entry(self);
     }
 
     /// The layout text typed in from the host goes in as: the keyboard's,

@@ -1863,6 +1863,7 @@ impl Cpu {
         crate::dos_files::write_table(&mut self.bus);
         crate::dos_data::write(&mut self.bus);
         crate::xms::install_entry(&mut self.bus);
+        crate::mouse::install_entry(&mut self.bus);
 
         self.bus.log_string("[SYSTEM] Shell Loaded. Ready.");
     }
@@ -2418,6 +2419,7 @@ impl Cpu {
             crate::dos_files::write_table(&mut self.bus);
             crate::dos_data::write(&mut self.bus);
             crate::xms::install_entry(&mut self.bus);
+            crate::mouse::install_entry(&mut self.bus);
         }
 
         // Re-install the HLE Interrupt Vectors — only for the top-level load.

@@ -21,6 +21,50 @@ fn dos4gw_can_allocate_an_unused_mouse_callback_vector() {
     assert_ne!(ivt[0x33], 0, "the mouse driver remains installed");
 }
 
+/// Wasteland looks at the INT 33h vector before it calls the driver, and
+/// takes a zero low byte of its offset or of its segment for no driver.
+/// A mouse driver's handler is in low memory, where it was loaded; with
+/// it at F000 the game played without the mouse.
+#[test]
+fn a_program_checking_the_vector_bytes_finds_the_driver() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    let mut a = CodeAssembler::new(16).unwrap();
+    let mut none = a.create_label();
+    let mut done = a.create_label();
+    a.xor(ax, ax).unwrap();
+    a.mov(es, ax).unwrap();
+    a.mov(di, 0x00CC).unwrap();
+    a.cmp(byte_ptr(di).es(), 0).unwrap();
+    a.je(none).unwrap();
+    a.add(di, 2).unwrap();
+    a.cmp(byte_ptr(di).es(), 0).unwrap();
+    a.je(none).unwrap();
+    a.int(0x33).unwrap();
+    a.jmp(done).unwrap();
+    a.set_label(&mut none).unwrap();
+    a.mov(ax, 0x1234).unwrap();
+    a.set_label(&mut done).unwrap();
+    a.hlt().unwrap();
+    let code = a.assemble(0x100).unwrap();
+    for (i, &byte) in code.iter().enumerate() {
+        cpu.bus.write_8(0x20100 + i, byte);
+    }
+    cpu.set_cs(0x2000);
+    cpu.set_ip(0x100);
+    cpu.set_ss(0x3000);
+    cpu.set_sp(0xFF00);
+    let end = 0x100 + code.len() as u16 - 1;
+    for _ in 0..40 {
+        if (cpu.cs(), cpu.ip()) == (0x2000, end) {
+            break;
+        }
+        cpu.step();
+    }
+    assert_eq!((cpu.cs(), cpu.ip()), (0x2000, end), "the check ran to its end");
+    assert_eq!(cpu.ax(), 0xFFFF, "the driver was called and answered");
+    assert!(cpu.bus.mouse.installed);
+}
+
 #[test]
 fn enable_activates_mouse_without_reset() {
     let mut cpu = Cpu::new(PathBuf::from("."));
@@ -158,7 +202,7 @@ fn polling_cpu() -> Box<Cpu> {
 fn execute_poll(cpu: &mut Cpu, function: u16) {
     cpu.set_ax(function);
     cpu.step(); // INT 33h: enters the HLE trap with IF clear.
-    assert_eq!(cpu.cs(), 0xF000);
+    assert_eq!(cpu.cs(), (rust_dos::mouse::vector() >> 16) as u16);
     assert!(!cpu.get_cpu_flag(CpuFlags::IF));
     cpu.step(); // HLE service: simulated IRET, then synchronous dispatch.
 }

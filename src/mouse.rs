@@ -505,6 +505,20 @@ fn driver_extent((w, h): (usize, usize)) -> (i32, i32) {
     ((w as i32).max(640), h as i32)
 }
 
+/// Write the driver's INT 33h handler into DOS's data segment: the
+/// emulator's service trap and an IRET. Written with DOS's memory set up
+/// afresh, as the XMS driver's entry is (`xms::install_entry`).
+pub fn install_entry(bus: &mut crate::bus::Bus) {
+    let at = crate::dos_data::address(crate::dos_data::MOUSE_ENTRY);
+    bus.load_bytes(at, &[0xFE, 0x38, 0x33, 0xCF]);
+}
+
+/// The INT 33h vector the driver installs: its handler in low memory
+/// (`install_entry`).
+pub const fn vector() -> u32 {
+    crate::dos_data::far(crate::dos_data::MOUSE_ENTRY)
+}
+
 /// ROM trampoline (F000:F200) that runs the INT 33h AX=000Ch event handler
 /// the way a mouse driver's IRQ handler does: save the registers, load the
 /// event registers, CALL FAR the handler (which returns with RETF), restore

@@ -173,6 +173,7 @@ pub fn default_ivt() -> [u32; 256] {
         ivt[vector as usize] = far(TRAP_BASE + 4 * i as u16);
     }
     ivt[0x08] = far(TIMER_HANDLER);
+    ivt[0x33] = crate::mouse::vector();
     ivt[0x1E] = far(DISKETTE_PARAMS);
     // The video BIOS's fonts: the second half of the 8x8 font for the CGA
     // graphics modes, and the graphics font of the mode it starts in.

@@ -77,6 +77,11 @@ const DISK_BUFFER: u16 = CDS + LASTDRIVE as u16 * CDS_SIZE;
 /// programs load stay as they were.
 pub const DBCS_TABLE: u16 = DISK_BUFFER + 0x14 + 0x200;
 const DBCS_TABLE_SIZE: u16 = 4;
+/// The mouse driver's INT 33h handler (`mouse::install_entry`), in low
+/// memory as a mouse driver's resident code is. Programs look at the
+/// vector before they call the driver, and some, such as Wasteland, take
+/// one whose segment has a zero low byte, as F000 has, for no driver.
+pub const MOUSE_ENTRY: u16 = EMM_IMPORT - 0x10;
 /// The expanded memory manager's Global EMM Import record for Windows
 /// (`ems::ioctl_read`).
 pub const EMM_IMPORT: u16 = 0x1D00;
@@ -85,7 +90,7 @@ pub const EMM_IMPORT: u16 = 0x1D00;
 pub const XMS_ENTRY: u16 = EMM_IMPORT + 0x200;
 const END: u16 = XMS_ENTRY + 0x10;
 
-const _: () = assert!(DBCS_TABLE + DBCS_TABLE_SIZE <= EMM_IMPORT);
+const _: () = assert!(DBCS_TABLE + DBCS_TABLE_SIZE <= MOUSE_ENTRY);
 
 const _: () = assert!(DEVICE_RETF < DOSMGR_PATCHES && DOSMGR_PATCHES + 0x0E <= DEVICE_HEADERS);
 const _: () = assert!(
