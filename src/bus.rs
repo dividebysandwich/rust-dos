@@ -51,6 +51,13 @@ pub const DEFAULT_MEMORY_MB: usize = 16;
 /// enough that a program's variables rarely share a block with its code.
 pub const GEN_SHIFT: usize = 6;
 
+/// The upper memory between the video BIOS and the BIOS: RAM, as on a PC
+/// with EMM386, which holds the upper memory blocks (`mcb::UMB_START`)
+/// and the EMS page frame (`ems::FRAME_SEGMENT`, which holds copies of the
+/// pages mapped there). DOS extenders keep their ring 0 stacks and task
+/// state segments in it, which every switch to ring 0 touches.
+pub const UPPER_RAM: std::ops::Range<usize> = 0xC8000..0xF0000;
+
 /// `Bus::code_blocks`' marks: a block with code, and every block while
 /// the writes are watched.
 pub const CODE_BLOCK: u8 = 1;
@@ -577,7 +584,7 @@ impl Bus {
     /// Whether `addr` is in a ROM, which ignores the CPU's writes: the video
     /// BIOS's 32 KB at C0000h, and the BIOS's 64 KB at F0000h.
     pub fn is_rom(addr: usize) -> bool {
-        (0xC0000..0xC8000).contains(&addr) || (0xF0000..0x10_0000).contains(&addr)
+        (0xC0000..UPPER_RAM.start).contains(&addr) || (UPPER_RAM.end..0x10_0000).contains(&addr)
     }
 
     /// Put `data` into a ROM at `addr`, as the emulator sets its ROMs up
@@ -1045,10 +1052,13 @@ impl Bus {
     }
 
     /// True for `len` bytes at `addr` that are plain RAM: conventional
-    /// memory below the video window, or extended memory above 1 MB.
+    /// memory below the video window, the upper memory between the ROMs
+    /// (`UPPER_RAM`), or extended memory above 1 MB.
     #[inline(always)]
     pub(crate) fn is_plain_ram(&self, addr: usize, len: usize) -> bool {
-        addr + len <= ADDR_VGA_GRAPHICS || (addr >= 0x10_0000 && addr + len <= self.ram.len())
+        addr + len <= ADDR_VGA_GRAPHICS
+            || (addr >= 0x10_0000 && addr + len <= self.ram.len())
+            || (addr >= UPPER_RAM.start && addr + len <= UPPER_RAM.end.min(self.ram.len()))
     }
 
     /// Read `S` bytes (1, 2 or 4) of plain RAM at `addr`, which

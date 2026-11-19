@@ -19,6 +19,7 @@ use iced_x86::ConditionCode;
 use super::block::{BlockData, LINKS, RETURN_LINK, RETURN_MISS, SIDE_LINK};
 use super::helpers::*;
 use super::uop::*;
+use crate::bus::UPPER_RAM;
 use crate::cpu::Seg;
 use crate::cpu::alu::ShiftOp;
 use crate::cpu::layout;
@@ -183,10 +184,11 @@ enum Thunk {
     Store1,
     Store2,
     Store4,
-    /// The handle of an operand at physical address EAX that isn't plain
-    /// RAM, as `MemRef` gives it for offset EDX and `memref_desc` ECX: the
-    /// address with `DEV_BIT` where the operand is within one page, else
-    /// `jit_memref`'s.
+    /// The handle of an operand at physical address EAX that the inline
+    /// checks didn't take as plain RAM, as `MemRef` gives it for offset EDX
+    /// and `memref_desc` ECX: where the operand is within one page, the
+    /// address, with `DEV_BIT` unless it is in the upper memory between
+    /// the ROMs; else `jit_memref`'s.
     Dev,
     /// The same for linear address EAX, through the TLB's set for
     /// supervisor or user code, for a read or a write.
@@ -691,11 +693,20 @@ fn dev_thunk(ops: &mut Asm, tlb: Option<(i32, i32)>, memref: DynamicLabel) {
             ; or eax, DWORD [rbx + rdx + TLB + entry + layout::TLB_PHYS as i32]
         );
     }
+    // The upper memory between the ROMs is RAM (`bus::UPPER_RAM`): its
+    // handle is the address, which the inline checks only don't take
+    // because they stop at A0000h. Its ends are on page boundaries, so the
+    // operand, within one page, is all in it or all out.
+    const _: () = assert!(UPPER_RAM.start & 0xFFF == 0 && UPPER_RAM.end & 0xFFF == 0);
     dynasm!(ops
         ; .arch x64
         ; add rsp, 16
         ; mov eax, eax
+        ; lea ecx, [eax - UPPER_RAM.start as i32]
+        ; cmp ecx, (UPPER_RAM.end - UPPER_RAM.start) as i32
+        ; jb >ram
         ; bts rax, 32
+        ; ram:
         ; ret
         ; slow:
         ; pop rdx
