@@ -602,12 +602,68 @@ fn run_to_hlt(cpu: &mut Cpu) {
     panic!("no HLT reached");
 }
 
+/// Press and let go of the key `scan`: the make code goes through the
+/// BIOS's keyboard interrupt as IRQ 1 (STI, then CLI and HLT once it ran),
+/// and the break code goes by unread, as for a program that doesn't care.
+fn press_through_the_bios(cpu: &mut Cpu, scan: u8) {
+    use rust_dos::keyboard::key_event;
+    key_event(&mut cpu.bus, scan, false, true, None);
+    cpu.set_cpu_flag(CpuFlags::IF, false);
+    cpu.set_ss(0);
+    cpu.set_sp(0x8000);
+    cpu.set_ds(0);
+    cpu.set_cs(0);
+    cpu.set_ip(0x100);
+    cpu.bus.load_bytes(0x100, &[0xFB, 0x90, 0xFA, 0xF4]); // STI; NOP; CLI; HLT
+    run_to_hlt(cpu);
+    cpu.bus.kbc.release();
+    key_event(&mut cpu.bus, scan, false, false, None);
+    cpu.bus.io_read(0x60);
+    cpu.bus.kbc.release();
+}
+
+#[test]
+fn the_bios_keyboard_interrupt_types_the_key_int_15h_4fh_hands_back() {
+    // A key remapper's hook hands back another scan code with CF set: the
+    // BIOS goes on with that one, as an AT's does with AL after the call.
+    use rust_dos::keyboard::BiosBuffer;
+    let mut cpu = cpu();
+    // The hook at 0000:0500: AH=4Fh with AL the byte at 0603h changes AL
+    // to the byte at 0604h; every key goes on to the BIOS (CF set).
+    let hook = [
+        0x80, 0xFC, 0x4F, // CMP AH, 4Fh
+        0x75, 0x0D, // JNE out
+        0x3A, 0x06, 0x03, 0x06, // CMP AL, [0603h]
+        0x75, 0x03, // JNE keep
+        0xA0, 0x04, 0x06, // MOV AL, [0604h]
+        0xF9, // keep: STC
+        0xCA, 0x02, 0x00, // RETF 2
+        0xCF, // out: IRET
+    ];
+    cpu.bus.load_bytes(0x500, &hook);
+    cpu.bus.write_16(0x15 * 4, 0x0500);
+    cpu.bus.write_16(0x15 * 4 + 2, 0x0000);
+
+    // A becomes B: B's keystroke, not the A the host typed.
+    cpu.bus.load_bytes(0x603, &[0x1E, 0x30]);
+    press_through_the_bios(&mut cpu, 0x1E);
+    assert_eq!(BiosBuffer::keys(&mut cpu.bus), [0x3062]);
+    assert!(cpu.bus.keyboard_buffer.is_empty(), "A is not typed later");
+    // A's make code becomes a break code: no keystroke, and the next key
+    // still types its own.
+    cpu.bus.load_bytes(0x603, &[0x1E, 0x9E]);
+    press_through_the_bios(&mut cpu, 0x1E);
+    press_through_the_bios(&mut cpu, 0x1F);
+    assert_eq!(BiosBuffer::keys(&mut cpu.bus), [0x3062, 0x1F73]);
+    assert!(cpu.bus.keyboard_buffer.is_empty());
+}
+
 #[test]
 fn the_bios_keyboard_interrupt_hands_each_scan_code_to_int_15h_4fh() {
     // Sink or Swim leaves INT 09h to the BIOS and keeps its table of held
     // keys from INT 15h AH=4Fh, which an AT's BIOS calls with each scan
     // code. Its hook takes the key (CF clear), so no keystroke is kept.
-    use rust_dos::keyboard::{BiosBuffer, key_event};
+    use rust_dos::keyboard::BiosBuffer;
     let mut cpu = cpu();
     // The hook at 0000:0500: AH=4Fh puts AL at 0600h and counts the call
     // at 0601h, then returns with CF from 0602h.
@@ -628,22 +684,7 @@ fn the_bios_keyboard_interrupt_hands_each_scan_code_to_int_15h_4fh() {
     cpu.bus.write_16(0x15 * 4 + 2, 0x0000);
     let press = |cpu: &mut Cpu, scan: u8, pass_on: bool| {
         cpu.bus.write_8(0x602, pass_on as u8);
-        key_event(&mut cpu.bus, scan, false, true, None);
-        // INT 09h; HLT with interrupts off: the handler runs once, as
-        // IRQ 1 runs it.
-        cpu.set_cpu_flag(CpuFlags::IF, false);
-        cpu.set_ss(0);
-        cpu.set_sp(0x8000);
-        cpu.set_ds(0);
-        cpu.set_cs(0);
-        cpu.set_ip(0x100);
-        cpu.bus.load_bytes(0x100, &[0xCD, 0x09, 0xF4]);
-        run_to_hlt(&mut *cpu);
-        // The break code goes by unread, as a program that doesn't care.
-        cpu.bus.kbc.release();
-        key_event(&mut cpu.bus, scan, false, false, None);
-        cpu.bus.io_read(0x60);
-        cpu.bus.kbc.release();
+        press_through_the_bios(cpu, scan);
     };
 
     press(&mut cpu, 0x1E, false);

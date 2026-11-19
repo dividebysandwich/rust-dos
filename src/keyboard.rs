@@ -238,22 +238,30 @@ pub fn bios_took_scan(bus: &mut Bus, scan: u8) {
 }
 
 /// The built-in DOS's keyboard interrupt (`bios::DOS_KBD_HANDLER`) handed
-/// the scan code it read to INT 15h AH=4Fh, which left the scan code in AL
+/// the scan code it read to INT 15h AH=4Fh, which left a scan code in AL
 /// and CF set for the BIOS to go on with it. A make code the hook let
 /// through has its keystrokes moved into the BIOS's buffer, as before; one
 /// it took (CF clear) has them thrown away, since a PC's BIOS makes no
-/// keystroke from a key its intercept took. Under a V86 monitor the
-/// keystrokes stay queued for INT 16h, which reads them from there.
+/// keystroke from a key its intercept took. A hook that hands back another
+/// scan code (a key remapper) has the BIOS make the keystroke of that one,
+/// in place of those the host queued for the key read. Under a V86 monitor
+/// the keystrokes stay queued for INT 16h, which reads them from there.
 pub fn bios_intercepted(cpu: &mut Cpu) {
     bios_saw_keys(&mut cpu.bus);
     if cpu.v86() {
         return;
     }
     let scan = cpu.get_al();
-    if cpu.get_cpu_flag(crate::cpu::CpuFlags::CF) {
+    // A state loaded between the read and the call doesn't say what was
+    // read: the hook's scan code stands for it.
+    let read = cpu.bus.kbc.keyboard_byte_read().unwrap_or(scan);
+    if !cpu.get_cpu_flag(crate::cpu::CpuFlags::CF) {
+        bios_dropped_scan(&mut cpu.bus, read);
+    } else if scan == read {
         bios_took_scan(&mut cpu.bus, scan);
     } else {
-        bios_dropped_scan(&mut cpu.bus, scan);
+        bios_dropped_scan(&mut cpu.bus, read);
+        bios_key(&mut cpu.bus, scan);
     }
 }
 

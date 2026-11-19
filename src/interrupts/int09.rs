@@ -15,12 +15,14 @@
 //! The keyboard interrupt's trap now jumps to the ROM's handler
 //! (`bios::DOS_KBD_HANDLER`), which calls INT 15h AH=4Fh as an AT's BIOS
 //! does. This service is reached only from the trap a save state made
-//! before that keeps in its ROM.
+//! before that keeps in its ROM, and it takes that one key, then points
+//! the trap at the ROM's handler for the keys after it.
 
 use crate::cpu::Cpu;
 
 pub fn handle(cpu: &mut Cpu) {
     crate::keyboard::bios_saw_keys(&mut cpu.bus);
+    crate::bios::dos_keyboard(&mut cpu.bus);
     if cpu.v86() {
         // Under a V86 monitor the processor reads the scan code and
         // acknowledges the interrupt on the way out (`return_from_hle`):

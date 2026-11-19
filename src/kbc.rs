@@ -76,6 +76,9 @@ pub struct Kbc {
     aux_irq: bool,
     /// The CPU read a keyboard byte: the next one waits until `release`.
     held: bool,
+    /// The keyboard byte the CPU last took from the output buffer, if it
+    /// took one since the machine started or a state was loaded.
+    keyboard_read: Option<u8>,
     /// The keyboard's lights as the system last set them (command ED):
     /// bit 0 Scroll Lock, bit 1 Num Lock, bit 2 Caps Lock.
     pub lights: Option<u8>,
@@ -130,6 +133,7 @@ impl Kbc {
             output_aux: false,
             aux_irq: false,
             held: false,
+            keyboard_read: None,
             lights: None,
         }
     }
@@ -256,7 +260,10 @@ impl Kbc {
             Some(byte) => {
                 // The keyboard sends its next byte after a while; the
                 // mouse's can come at once.
-                self.held |= !self.output_aux;
+                if !self.output_aux {
+                    self.held = true;
+                    self.keyboard_read = Some(byte);
+                }
                 byte
             }
             None => self.last,
@@ -264,6 +271,20 @@ impl Kbc {
         self.output_aux = false;
         self.refill();
         byte
+    }
+
+    /// The keyboard byte the CPU last took from the output buffer: what the
+    /// BIOS's keyboard interrupt read, whatever an INT 15h AH=4Fh hook it
+    /// calls then hands back in AL. None until the CPU takes one.
+    pub fn keyboard_byte_read(&self) -> Option<u8> {
+        self.keyboard_read
+    }
+
+    /// A state was loaded: the keyboard's next byte comes at once, and the
+    /// byte the CPU read before is the running machine's, not the state's.
+    pub fn after_load(&mut self) {
+        self.keyboard_read = None;
+        self.release();
     }
 
     /// Port 64h read: the status register.
@@ -385,4 +406,4 @@ impl Kbc {
 crate::state_fields!(Kbc {
     queue, output, last, command_byte, output_port, pending_command, pending_kbd, last_was_command, irq,
     aux, output_aux, aux_irq,
-} skip { held, lights });
+} skip { held, keyboard_read, lights });

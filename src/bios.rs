@@ -535,7 +535,7 @@ pub fn is_default_irq_handler(entry: u32) -> bool {
 fn keyboard_handler() -> Vec<u8> {
     let mut a = crate::asm16::Asm::new(KBD_HANDLER);
     a.op(&[0x50]); // PUSH AX
-    a.op(&[0xE4, 0x60]); // IN AL, 60h
+    a.op(&[0xE4, 0x60, 0xFB]); // IN AL, 60h; STI, as an AT's BIOS
     a.op(&[0xB4, 0x4F, 0xF9, 0xCD, 0x15]); // MOV AH, 4Fh; STC; INT 15h
     a.jump(0x73, "eoi"); // JNC eoi: the hook took the key
     a.op(&[0xFE, 0x39, SERVICE_KBD_SCAN]); // AH: what else to do
@@ -563,7 +563,9 @@ fn keyboard_handler() -> Vec<u8> {
     a.label("eoi");
     a.op(&[0xFA, 0xB0, 0x20, 0xE6, 0x20]); // CLI; MOV AL, 20h; OUT 20h, AL
     a.op(&[0x58, 0xCF]); // POP AX; IRET
-    a.finish()
+    let code = a.finish();
+    assert!(KBD_HANDLER as usize + code.len() <= FIXED_DISK_PARAMS as usize);
+    code
 }
 
 /// The keyboard interrupt of the built-in DOS, as an AT's BIOS runs it:
@@ -575,7 +577,7 @@ fn keyboard_handler() -> Vec<u8> {
 fn dos_keyboard_handler() -> Vec<u8> {
     let mut a = crate::asm16::Asm::new(DOS_KBD_HANDLER);
     a.op(&[0x50]); // PUSH AX
-    a.op(&[0xE4, 0x60]); // IN AL, 60h
+    a.op(&[0xE4, 0x60, 0xFB]); // IN AL, 60h; STI, as an AT's BIOS
     a.op(&[0xB4, 0x4F, 0xF9, 0xCD, 0x15]); // MOV AH, 4Fh; STC; INT 15h
     a.op(&[0xFE, 0x39, SERVICE_KBD_INTERCEPTED]); // AL, CF: what the hook left
     a.op(&[0xFA, 0xB0, 0x20, 0xE6, 0x20]); // CLI; MOV AL, 20h; OUT 20h, AL
@@ -593,6 +595,16 @@ fn keyboard_trap(handler: u16) -> [u8; 4] {
     [0xE9, lo, hi, 0xCF] // JMP near handler
 }
 
+/// Point the keyboard interrupt's trap of a state saved before the built-in
+/// DOS had a keyboard interrupt of its own (`interrupts::int09`) at the
+/// ROM's handler, which calls INT 15h AH=4Fh, from the next key on.
+pub fn dos_keyboard(bus: &mut Bus) {
+    if !bus.kbd.windows {
+        write_rom(bus, DOS_KBD_HANDLER, &dos_keyboard_handler());
+        write_rom(bus, hle_trap(0x09), &keyboard_trap(DOS_KBD_HANDLER));
+    }
+}
+
 /// Windows' 386 enhanced mode starts (`on`) or ends: while it runs, its
 /// keyboard driver hands each virtual machine its keys through the
 /// keyboard controller, and the machine's BIOS makes the keystrokes from
@@ -606,7 +618,14 @@ pub fn windows_keyboard(bus: &mut Bus, on: bool) {
     }
     bus.kbd.windows = on;
     crate::keyboard::reset_keystrokes(bus);
-    let handler = if on { KBD_HANDLER } else { DOS_KBD_HANDLER };
+    // The handler's code goes in with the jump: the ROM of a state saved
+    // before the built-in DOS had a handler of its own lacks it.
+    let (handler, code) = if on {
+        (KBD_HANDLER, keyboard_handler())
+    } else {
+        (DOS_KBD_HANDLER, dos_keyboard_handler())
+    };
+    write_rom(bus, handler, &code);
     write_rom(bus, hle_trap(0x09), &keyboard_trap(handler));
 }
 
