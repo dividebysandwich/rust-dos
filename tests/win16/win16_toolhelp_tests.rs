@@ -13,6 +13,8 @@ const GLOBAL_ALLOC: u16 = 15;
 const GLOBAL_LOCK: u16 = 18;
 const GLOBAL_SIZE: u16 = 20;
 const GET_CURRENT_TASK: u16 = 36;
+const GET_CURRENT_PDB: u16 = 37;
+const FAR_SET_OWNER: u16 = 403;
 const GET_EXE_PTR: u16 = 133;
 const GET_SELECTOR_BASE: u16 = 186;
 const LOCAL_INIT: u16 = 4;
@@ -216,8 +218,9 @@ fn exit_ok(code: &mut Code) {
 /// descriptor and GlobalSize have them, its handle and lock counts,
 /// GF_PDB_OWNER with the task (what GetCurrentTask gives) as its owner,
 /// and GT_UNKNOWN, as Windows 3.1 does for private data. SmartHeap, in
-/// Outpost 1.1, checks its blocks that way. An entry whose dwSize isn't
-/// 36 gets FALSE.
+/// Outpost 1.1, checks its blocks that way. A block FarSetOwner gave to
+/// the task's PDB is the task's too. An entry whose dwSize isn't 36 gets
+/// FALSE.
 #[test]
 fn global_entry_handle_describes_a_block() {
     let mut code = Code::new();
@@ -256,6 +259,17 @@ fn global_entry_handle_describes_a_block() {
     set(&mut code, FOUND, 0x0FF6);
     entry_handle(&mut code, FOUND);
     expect_ax(&mut code, 0, 16);
+
+    // FarSetOwner(handle, GetCurrentPDB()): a block the task's PDB owns
+    // is the task's too.
+    push_word(&mut code, HANDLE);
+    code.call("KERNEL", GET_CURRENT_PDB);
+    code.emit(&[0x50]).call("KERNEL", FAR_SET_OWNER); // push ax
+    set(&mut code, H_OWNER, 0);
+    entry_handle(&mut code, HANDLE);
+    expect_ax(&mut code, 1, 17);
+    expect_byte(&mut code, W_FLAGS + 1, hi(GF_PDB_OWNER), 18);
+    expect_same(&mut code, H_OWNER, TASK, 19);
     exit_ok(&mut code);
 
     let (status, log) = run("toolhelp_entry_handle", program(&code, CODE));

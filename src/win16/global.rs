@@ -41,7 +41,8 @@ pub struct Arena {
     pub base: u32,
     pub size: u32,
     pub handle: u16,
-    /// The task's PSP or the module that owns it.
+    /// The task or the module that owns it. A few blocks have the task's
+    /// PSP instead: WinG's, and those FarSetOwner gave to a PDB.
     pub owner: u16,
     pub lock: u8,
     pub page_lock: u8,
@@ -528,7 +529,13 @@ pub fn heap_places(cpu: &Cpu) -> Vec<HeapPlace> {
 fn describe(cpu: &Cpu, a: &Arena) -> HeapItem {
     let state = &cpu.bus.win32.win16;
     let sel = handle_to_sel(a.handle);
-    let task = state.tasks.iter().find(|t| t.handle == a.owner);
+    // A task's block may have its PSP as the owner (WinG's, and those
+    // FarSetOwner gave to GetCurrentPDB's answer); TOOLHELP gives the
+    // task for both.
+    let task = state
+        .tasks
+        .iter()
+        .find(|t| t.handle == a.owner || t.psp == a.owner);
     let (kind, data) = kind_of(cpu, a);
     HeapItem {
         address: a.base,
@@ -536,7 +543,7 @@ fn describe(cpu: &Cpu, a: &Arena) -> HeapItem {
         handle: a.handle,
         lock: a.lock as u16,
         page_lock: a.page_lock as u16,
-        owner: a.owner,
+        owner: task.map_or(a.owner, |t| t.handle),
         pdb_owner: task.is_some(),
         flags: a.flags,
         heap_present: state.local_heaps.iter().any(|h| h.sel | 3 == sel | 3),
