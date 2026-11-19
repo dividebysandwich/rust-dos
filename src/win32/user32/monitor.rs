@@ -212,10 +212,9 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
 const DISPLAY_DEVICE_OLD: u32 = 168;
 const DISPLAY_DEVICE: u32 = 424;
 
-/// A DISPLAY_DEVICEA's fields: DeviceName, DeviceString, StateFlags,
-/// DeviceID and DeviceKey.
+/// A DISPLAY_DEVICEA's fields but DeviceName: DeviceString,
+/// StateFlags, DeviceID and DeviceKey.
 struct DisplayDevice {
-    name: &'static str,
     string: &'static str,
     flags: u32,
     id: &'static str,
@@ -226,7 +225,6 @@ struct DisplayDevice {
 /// name: DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, PRIMARY_DEVICE and
 /// VGA_COMPATIBLE.
 const ADAPTER: DisplayDevice = DisplayDevice {
-    name: DEVICE,
     string: "Standard PCI Graphics Adapter (VGA)",
     flags: 0x15,
     id: "",
@@ -235,20 +233,29 @@ const ADAPTER: DisplayDevice = DisplayDevice {
 
 /// The monitor on the adapter, which EnumDisplayDevicesA gives with the
 /// adapter's name: Windows 98's "Default Monitor", the one it installs
-/// for a monitor without Plug and Play, with DISPLAY_DEVICE_ACTIVE and
-/// DISPLAY_DEVICE_ATTACHED.
+/// for a monitor without Plug and Play. Windows 98 SE names it after the
+/// adapter's name as the program spelled it, with "\Monitor1" after it
+/// (`monitor_name`), and gives it the adapter's StateFlags: 15h, whose
+/// bit 0 is DISPLAY_DEVICE_ACTIVE for a monitor.
 const MONITOR_DEVICE: DisplayDevice = DisplayDevice {
-    name: "\\\\.\\Display1\\Monitor0",
     string: "Default Monitor",
-    flags: 0x3,
-    id: "Monitor\\Default_Monitor",
+    flags: 0x15,
+    id: "MONITOR\\DEFAULT_MONITOR\\0001",
     key: "System\\CurrentControlSet\\Services\\Class\\Monitor\\0000",
 };
 
+/// The monitor's DeviceName for the adapter's name `adapter`, in the
+/// case the program gave it.
+fn monitor_name(adapter: &[u8]) -> Vec<u8> {
+    [adapter, b"\\Monitor1"].concat()
+}
+
 /// EnumDisplayDevicesA(device, number, info, flags): with no device
 /// name the display adapter, the only one, as number 0; with the
-/// adapter's name the monitor on it, as number 0. Myth III lists the
-/// display modes only of the adapters it finds a monitor on.
+/// adapter's name, in any case, the monitor on it, as number 0. Any
+/// other name, the monitor's too, gives FALSE. None of the failures sets
+/// an error. Myth III lists the display modes only of the adapters it
+/// finds a monitor on.
 pub fn enum_display_devices(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[device, number, info, _] = args else {
         unreachable!()
@@ -256,14 +263,14 @@ pub fn enum_display_devices(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if number != 0 || info == 0 {
         return Some(FALSE);
     }
-    let found = if device == 0 {
-        &ADAPTER
+    let (found, name) = if device == 0 {
+        (&ADAPTER, DEVICE.as_bytes().to_vec())
     } else {
         let name = super::bytes_at(cpu, device)?;
         if !name.eq_ignore_ascii_case(DEVICE.as_bytes()) {
             return Some(FALSE);
         }
-        &MONITOR_DEVICE
+        (&MONITOR_DEVICE, monitor_name(&name))
     };
     let size = cpu.bus.guest_read_32(info);
     if size < DISPLAY_DEVICE_OLD {
@@ -271,11 +278,11 @@ pub fn enum_display_devices(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let mut data = vec![0u8; DISPLAY_DEVICE as usize];
     data[..4].copy_from_slice(&size.to_le_bytes());
-    let mut put = |at: usize, s: &str| data[at..at + s.len()].copy_from_slice(s.as_bytes());
-    put(4, found.name);
-    put(36, found.string);
-    put(168, found.id);
-    put(296, found.key);
+    let mut put = |at: usize, s: &[u8]| data[at..at + s.len()].copy_from_slice(s);
+    put(4, &name);
+    put(36, found.string.as_bytes());
+    put(168, found.id.as_bytes());
+    put(296, found.key.as_bytes());
     data[164..168].copy_from_slice(&found.flags.to_le_bytes());
     let len = size.min(DISPLAY_DEVICE) as usize;
     cpu.bus.guest_write_bytes(info, &data[..len]);
@@ -283,13 +290,19 @@ pub fn enum_display_devices(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// ChangeDisplaySettingsExA(device, devmode, window, flags, param):
-/// ChangeDisplaySettingsA for the display adapter, named or not. Another
-/// device's name gets DISP_CHANGE_BADPARAM.
+/// ChangeDisplaySettingsA for the display adapter, named (in any case)
+/// or not. As on Windows 98 SE, another name (an empty one, the
+/// monitor's), a window, which must be NULL, and CDS_VIDEOPARAMETERS get
+/// DISP_CHANGE_BADPARAM; `param` is not looked at.
 pub fn change_display_settings_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     const DISP_CHANGE_BADPARAM: u32 = -5i32 as u32;
-    let &[device, devmode, _, flags, _] = args else {
+    const CDS_VIDEOPARAMETERS: u32 = 0x20;
+    let &[device, devmode, window, flags, _] = args else {
         unreachable!()
     };
+    if window != 0 || flags & CDS_VIDEOPARAMETERS != 0 {
+        return Some(DISP_CHANGE_BADPARAM);
+    }
     if device != 0 && !super::bytes_at(cpu, device)?.eq_ignore_ascii_case(DEVICE.as_bytes()) {
         return Some(DISP_CHANGE_BADPARAM);
     }
