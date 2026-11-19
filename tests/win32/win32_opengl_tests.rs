@@ -299,7 +299,8 @@ enum Draws {
 }
 
 /// A machine with the built-in Windows on, `program` loaded from the
-/// shell as T.EXE, and `card` as its display adapter.
+/// shell as T.EXE, and `card` as its display adapter. Its folder is
+/// `folder_on(test, card)`.
 fn machine_on(test: &str, card: Draws, program: Vec<u8>) -> Box<Cpu> {
     match card {
         Draws::Voodoo3 => machine(test, true, program),
@@ -310,6 +311,16 @@ fn machine_on(test: &str, card: Draws, program: Vec<u8>) -> Box<Cpu> {
             program,
         ),
     }
+}
+
+/// The folder of `machine_on(test, card)`'s machine, which only that
+/// test makes and empties: the place for the files the test writes.
+fn folder_on(test: &str, card: Draws) -> PathBuf {
+    let name = match card {
+        Draws::Voodoo3 => test.to_string(),
+        Draws::ToadForce => format!("{test}_toadforce"),
+    };
+    PathBuf::from("target/test_win32_opengl").join(name)
 }
 
 /// On a ToadForce, the card drew and took every command its drivers
@@ -3598,12 +3609,10 @@ fn runs_draw_alike(card: Draws) {
             "list_runs"
         };
         let mut cpu = machine_on(name, card, exe.clone());
-        // A file of this card's run: both cards' tests run at once.
-        let file = match card {
-            Draws::Voodoo3 => "voodoo3.trace",
-            Draws::ToadForce => "toadforce.trace",
-        };
-        let path = PathBuf::from(format!("target/test_win32_opengl/{name}/{file}"));
+        // In this card's own folder: both cards' tests run at once, and
+        // each empties its folder as it starts, so a file in the other
+        // card's folder may be gone, or its folder not there yet.
+        let path = folder_on(name, card).join("t.trace");
         if traced {
             rust_dos::win32::trace3d::start(&mut cpu, &path).unwrap();
         }

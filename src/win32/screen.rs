@@ -512,19 +512,27 @@ pub fn expose(cpu: &mut Cpu) {
 /// A program reads video memory through DirectDraw and Direct3D 8 (a
 /// locked surface, which stays readable after the call), so every call
 /// of theirs settles but those of the Direct3D devices and of what they
-/// draw from, which fill the queue, and a scene's end and Direct3D 8's
-/// present. GDI and USER show windows and what is in them, and OpenGL's
-/// WGL presents. Everything else leaves a ToadForce's queue to grow:
-/// the devices' and OpenGL's drawing and state calls, and the rest of
-/// Windows, which a program calls between its draws. A device's call
-/// that reads video memory itself reads it through `read`, which
-/// settles.
+/// draw from, which fill the queue, and Direct3D 8's present. GDI and
+/// USER show windows and what is in them, but for USER's arithmetic on
+/// rectangles, and OpenGL's WGL presents. Everything else leaves a
+/// ToadForce's queue to grow: the devices' and OpenGL's drawing and
+/// state calls, and the rest of Windows, which a program calls between
+/// its draws. A device's call that reads video memory itself reads it
+/// through `read`, which settles.
+///
+/// A scene's end doesn't settle. On a real card EndScene hands the
+/// driver's buffer to the card and returns without waiting for it, and
+/// the program sees what was drawn only through a call above, which
+/// settles (a Lock, a Blt, a Flip, a DC). Some programs make a scene of
+/// every object: Phoenix ends 3,600 scenes a second in its menu and
+/// up to 48,000 in a fight, and settling at each had the host renderer
+/// draw a batch of one or two draws each time.
 pub fn api_settles(dll: &str, name: &str) -> bool {
-    // A scene's end and a present are where a program has the card
-    // catch up.
-    let frame_end = name.ends_with("_EndScene") || name.ends_with("_Present");
+    // A present is where a program has the card catch up.
+    let frame_end = name.ends_with("_Present");
     match dll {
-        "GDI32.DLL" | "USER32.DLL" => true,
+        "GDI32.DLL" => true,
+        "USER32.DLL" => !RECTANGLE_ARITHMETIC.contains(&name),
         "DDRAW.DLL" => {
             // The Direct3D device and what it draws from, which hold no
             // video memory but through the HAL.
@@ -565,6 +573,22 @@ pub fn api_settles(dll: &str, name: &str) -> bool {
         _ => false,
     }
 }
+
+/// USER32's functions that only work on RECT and POINT structures in the
+/// program's memory, and show nothing.
+const RECTANGLE_ARITHMETIC: [&str; 11] = [
+    "SetRect",
+    "SetRectEmpty",
+    "CopyRect",
+    "IsRectEmpty",
+    "EqualRect",
+    "IntersectRect",
+    "UnionRect",
+    "SubtractRect",
+    "OffsetRect",
+    "InflateRect",
+    "PtInRect",
+];
 
 /// Write `data` into video memory at byte `offset`: what is past its end
 /// goes nowhere. The picture shows it.
@@ -1274,12 +1298,16 @@ mod tests {
         };
         for (dll, name, settles) in [
             ("DDRAW.DLL", "IDirect3DDevice7_DrawPrimitive", false),
-            ("DDRAW.DLL", "IDirect3DDevice7_EndScene", true),
+            ("DDRAW.DLL", "IDirect3DDevice7_EndScene", false),
+            ("DDRAW.DLL", "IDirect3DDevice_EndScene", false),
+            ("DDRAW.DLL", "Surface_Flip", true),
+            ("DDRAW.DLL", "Surface_Blt", true),
+            ("DDRAW.DLL", "Surface_GetDC", true),
             ("DDRAW.DLL", "Surface_Lock", true),
             ("D3D8.DLL", "Device8_DrawPrimitive", false),
             ("D3D8.DLL", "Device8_SetRenderState", false),
             ("D3D8.DLL", "Buffer8_Lock", false),
-            ("D3D8.DLL", "Device8_EndScene", true),
+            ("D3D8.DLL", "Device8_EndScene", false),
             ("D3D8.DLL", "Device8_Present", true),
             ("D3D8.DLL", "SwapChain8_Present", true),
             ("D3D8.DLL", "Surface8_LockRect", true),
@@ -1290,8 +1318,15 @@ mod tests {
             ("OPENGL32.DLL", "wglSwapBuffers", true),
             ("GDI32.DLL", "SwapBuffers", true),
             ("KERNEL32.DLL", "GetTickCount", false),
+            ("USER32.DLL", "PtInRect", false),
+            ("USER32.DLL", "IntersectRect", false),
+            ("USER32.DLL", "InvalidateRect", true),
+            ("USER32.DLL", "GetDC", true),
         ] {
             assert_eq!(listed(dll, name), settles, "{dll} {name}");
+        }
+        for name in RECTANGLE_ARITHMETIC {
+            assert!(!listed("USER32.DLL", name), "USER32.DLL {name}");
         }
     }
 
