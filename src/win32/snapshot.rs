@@ -382,6 +382,14 @@ fn describe(kind: &Kind) -> (&'static str, Vec<(&'static str, Field)>) {
             "process",
             vec![("id", Id(*id)), ("exit_code", Code(*exit_code))],
         ),
+        Kind::Snapshot { lists, .. } => (
+            "toolhelp_snapshot",
+            ["heap_lists", "processes", "threads", "modules"]
+                .into_iter()
+                .zip(lists)
+                .map(|(name, list)| (name, Number(list.len() as u32)))
+                .collect(),
+        ),
         // Kinds added after this list: their state as Rust prints it.
         other => ("other", vec![("debug", Text(format!("{:?}", other)))]),
     }
