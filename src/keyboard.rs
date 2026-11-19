@@ -237,6 +237,48 @@ pub fn bios_took_scan(bus: &mut Bus, scan: u8) {
     }
 }
 
+/// The built-in DOS's keyboard interrupt (`bios::DOS_KBD_HANDLER`) handed
+/// the scan code it read to INT 15h AH=4Fh, which left a scan code in AL
+/// and CF set for the BIOS to go on with it. A make code the hook let
+/// through has its keystrokes moved into the BIOS's buffer, as before; one
+/// it took (CF clear) has them thrown away, since a PC's BIOS makes no
+/// keystroke from a key its intercept took. A hook that hands back another
+/// scan code (a key remapper) has the BIOS make the keystroke of that one,
+/// in place of those the host queued for the key read. Under a V86 monitor
+/// the keystrokes stay queued for INT 16h, which reads them from there.
+pub fn bios_intercepted(cpu: &mut Cpu) {
+    bios_saw_keys(&mut cpu.bus);
+    if cpu.v86() {
+        return;
+    }
+    let scan = cpu.get_al();
+    // A state loaded between the read and the call doesn't say what was
+    // read: the hook's scan code stands for it.
+    let read = cpu.bus.kbc.keyboard_byte_read().unwrap_or(scan);
+    if !cpu.get_cpu_flag(crate::cpu::CpuFlags::CF) {
+        bios_dropped_scan(&mut cpu.bus, read);
+    } else if scan == read {
+        bios_took_scan(&mut cpu.bus, scan);
+    } else {
+        bios_dropped_scan(&mut cpu.bus, read);
+        bios_key(&mut cpu.bus, scan);
+    }
+}
+
+/// The intercept took the make code `scan`: the keystrokes it queued never
+/// reach the BIOS's buffer.
+fn bios_dropped_scan(bus: &mut Bus, scan: u8) {
+    if bios_keystrokes(bus) || scan == 0 || scan >= 0x80 {
+        return;
+    }
+    let Some(count) = bus.kbd.made.pop_front() else { return };
+    for _ in 0..count {
+        if bus.keyboard_buffer.pop_front().is_none() {
+            break;
+        }
+    }
+}
+
 /// Take the next keystroke from where the BIOS keeps them.
 pub fn take_keystroke(bus: &mut Bus) -> Option<u16> {
     if let Some(key) = BiosBuffer::pop(bus) {

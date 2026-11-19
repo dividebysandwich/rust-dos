@@ -961,9 +961,9 @@ fn dos_takes_the_current_directory_from_the_machines_cds() {
 #[test]
 fn the_keyboard_interrupt_reads_its_scan_code_through_the_ports_in_virtual_8086_mode() {
     let mut rig = Rig::new();
-    // IRQ 1 as a monitor reflects it (Windows' VKD): the scan code is read,
-    // and the interrupt acknowledged, where the monitor traps them, as it
-    // hands the machine its keys one at a time.
+    // IRQ 1 as a monitor reflects it (Windows' VKD): the BIOS reads the
+    // scan code with IN AL, 60h, as an AT's does, and the monitor traps
+    // the read, as it hands the machine its keys one at a time.
     let v86 = asm16(0x30000, |a| {
         a.pushf()?;
         a.db(&[0x9A, 0x04, 0x10, 0x00, 0xF0])?; // CALL FAR F000:1004, INT 09h
@@ -979,7 +979,9 @@ fn the_keyboard_interrupt_reads_its_scan_code_through_the_ports_in_virtual_8086_
     });
     let (vector, stack) = rig.recorded();
     assert_eq!((vector, stack[2]), (GP as u32, 0xF000));
-    assert_eq!(rig.cpu.dx(), 0x60, "reading the scan code");
+    let at = 0xF0000 + stack[1] as usize;
+    let fault = [rig.cpu.bus.read_8(at), rig.cpu.bus.read_8(at + 1)];
+    assert_eq!(fault, [0xE4, 0x60], "reading the scan code");
 }
 
 #[test]

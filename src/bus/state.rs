@@ -893,7 +893,7 @@ impl Bus {
         self.rtc_next = None;
         self.schedule_rtc();
         self.kbc_release_at = None;
-        self.kbc.release();
+        self.kbc.after_load();
         self.net.nic_changed();
         // What the machine last wrote into its SDA isn't what the state's
         // SDA holds: until the next DOS call writes it, nothing in it
