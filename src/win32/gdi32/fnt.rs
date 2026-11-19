@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::font::Glyphs;
+use super::ttf::Ttf;
 
 /// RT_FONT in a NE resource table, with the bit of a numbered type.
 const RT_FONT: u16 = 0x8008;
@@ -168,12 +169,19 @@ impl Fnt {
 /// state is loaded, as it did when it was saved.
 pub const FONTS_SAVED: u16 = 72;
 
+/// The W32 section version whose states keep the TrueType fonts of the
+/// files added too. An older state loads them as none, and the program
+/// draws in GDI's own faces after it is loaded, as it did when it was
+/// saved.
+pub const TRUETYPE_SAVED: u16 = 80;
+
 /// A file AddFontResourceA added: its name as the program gave it, and
-/// its raster fonts (none for a TrueType file).
+/// its raster fonts or its TrueType fonts.
 #[derive(Debug, Default)]
 pub struct AddedFile {
     pub name: String,
     pub fonts: Vec<Rc<Fnt>>,
+    pub truetype: Vec<Rc<Ttf>>,
 }
 
 impl crate::savestate::State for AddedFile {
@@ -182,6 +190,17 @@ impl crate::savestate::State for AddedFile {
         self.fonts.len().save(w);
         for f in &self.fonts {
             f.data.save(w);
+        }
+        // The file's bytes once, and the index of each of its fonts.
+        let data = self
+            .truetype
+            .first()
+            .map(|t| t.data.clone())
+            .unwrap_or_default();
+        data.save(w);
+        self.truetype.len().save(w);
+        for t in &self.truetype {
+            t.index.save(w);
         }
     }
 
@@ -199,6 +218,22 @@ impl crate::savestate::State for AddedFile {
                 crate::savestate::StateError::Invalid("an added font that isn't one".into())
             })?;
             self.fonts.push(Rc::new(f));
+        }
+        self.truetype.clear();
+        if r.version().is_some_and(|v| v < TRUETYPE_SAVED) {
+            return Ok(());
+        }
+        let mut data: Vec<u8> = Vec::new();
+        data.load(r)?;
+        for _ in 0..r.count()? {
+            let mut index = 0u32;
+            index.load(r)?;
+            let t = Ttf::parse(data.clone(), index).ok_or_else(|| {
+                crate::savestate::StateError::Invalid(
+                    "an added TrueType font that isn't one".into(),
+                )
+            })?;
+            self.truetype.push(Rc::new(t));
         }
         Ok(())
     }
@@ -362,19 +397,46 @@ pub(super) mod tests {
     fn a_state_keeps_the_added_fonts_and_an_older_one_their_files_names() {
         use crate::savestate::{Reader, State, Writer};
         let font = Fnt::parse(fnt("Kept", 10)).unwrap();
-        let files = vec![AddedFile {
-            name: "F.FON".into(),
-            fonts: vec![Rc::new(font)],
-        }];
+        let ttf = super::super::ttf::tests::ttf("Kept TT", false);
+        let files = vec![
+            AddedFile {
+                name: "F.FON".into(),
+                fonts: vec![Rc::new(font)],
+                truetype: Vec::new(),
+            },
+            AddedFile {
+                name: "F.TTF".into(),
+                fonts: Vec::new(),
+                truetype: Ttf::fonts_of_file(&ttf).into_iter().map(Rc::new).collect(),
+            },
+        ];
         let mut w = Writer::new();
-        w.section(b"TEST", FONTS_SAVED, |w| files.save(w));
+        w.section(b"TEST", TRUETYPE_SAVED, |w| files.save(w));
         let mut back: Vec<AddedFile> = Vec::new();
         let mut r = Reader::new(&w.buf);
-        back.load(&mut r.section(b"TEST", FONTS_SAVED).unwrap())
+        back.load(&mut r.section(b"TEST", TRUETYPE_SAVED).unwrap())
             .unwrap();
         assert_eq!(back[0].name, "F.FON");
         assert_eq!(back[0].fonts[0].face, "Kept");
         assert_eq!(back[0].fonts[0].data, files[0].fonts[0].data);
+        assert!(back[0].truetype.is_empty());
+        assert_eq!(back[1].truetype[0].face, "Kept TT");
+        assert_eq!(back[1].truetype[0].data, ttf);
+        // Version 72 to 79 saved the raster fonts and no TrueType ones.
+        let mut w = Writer::new();
+        w.section(b"TEST", FONTS_SAVED, |w| {
+            "OLD.TTF".to_string().save(w);
+            0usize.save(w);
+        });
+        let mut r = Reader::new(&w.buf);
+        let mut section = r
+            .section_of(b"TEST", &[FONTS_SAVED, TRUETYPE_SAVED])
+            .unwrap();
+        let mut old = AddedFile::default();
+        old.load(&mut section).unwrap();
+        assert!(section.is_empty());
+        assert_eq!(old.name, "OLD.TTF");
+        assert!(old.truetype.is_empty());
         // Version 71 saved the names alone.
         let mut w = Writer::new();
         w.section(b"TEST", 71, |w| vec!["OLD.FON".to_string()].save(w));

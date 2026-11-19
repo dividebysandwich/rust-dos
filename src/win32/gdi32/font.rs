@@ -1,6 +1,8 @@
-//! Fonts and text. GDI here has raster fonts only, all drawn from the
+//! Fonts and text. GDI's own faces are raster fonts, all drawn from the
 //! glyphs of the VGA's ROM fonts (8x8, 8x14, 8x16), scaled to the size a
-//! font asks for. A font of variable pitch has each glyph as wide as its
+//! font asks for. The fonts of files a program adds are drawn from the
+//! files: raster ones from their glyphs (`fnt`), TrueType ones from their
+//! outlines (`ttf`). A font of variable pitch has each glyph as wide as its
 //! lit columns and a column between glyphs. The ROM's glyphs are code
 //! page 437's; the characters of the other code pages the built-in
 //! Windows has (Central European, Cyrillic, Greek, Turkish, Baltic) are
@@ -42,6 +44,7 @@ use std::rc::Rc;
 
 use super::dc::{self, Dc, OPAQUE};
 use super::fnt::{AddedFile, Fnt};
+use super::ttf::{self, Ttf};
 use super::draw::{Canvas, Fill, value_for};
 use super::sans8;
 use super::truetype;
@@ -1101,6 +1104,9 @@ pub struct Realized {
     pub external_leading: i32,
     pub weight: i32,
     pub italic: bool,
+    /// The glyphs are leaned right as they are drawn: an italic font made
+    /// from an upright one.
+    lean: bool,
     pub underline: bool,
     pub strike: bool,
     pub charset: u8,
@@ -1239,6 +1245,7 @@ fn realize(log: &Log, sys: &System, device_height: i32, device_width: i32) -> Re
         external_leading: 0,
         weight,
         italic: log.italic,
+        lean: log.italic,
         underline: log.underline,
         strike: log.strike,
         charset,
@@ -1315,6 +1322,7 @@ fn realize_truetype(
         external_leading: size.external,
         weight,
         italic: log.italic,
+        lean: log.italic,
         underline: log.underline,
         strike: log.strike,
         charset,
@@ -1411,6 +1419,7 @@ fn realize_file(
         external_leading: f.external * y_scale,
         weight: if made_bold { 700 } else { f.weight },
         italic: log.italic,
+        lean: log.italic,
         underline: log.underline || f.underline,
         strike: log.strike || f.strike,
         charset: f.charset,
@@ -1466,6 +1475,131 @@ fn file_glyphs(f: &Fnt, x_scale: i32, y_scale: i32, bold: bool) -> Rc<Glyphs> {
         .clone()
 }
 
+/// The TrueType font of a file AddFontResourceA added whose family the
+/// logical font `log` names, and the character set it is realized in:
+/// SYMBOL_CHARSET for a symbol font, whatever was asked for, else the
+/// one asked for where the font's code page bits have it (or the system
+/// locale's for DEFAULT_CHARSET), else the first the font has. Of the
+/// family's fonts, the one nearest the weight asked for, then upright or
+/// italic as asked, as Windows' mapper weighs them.
+fn added_truetype(files: &[AddedFile], log: &Log, sys: &System) -> Option<(Rc<Ttf>, u8)> {
+    if log.face.is_empty() {
+        return None;
+    }
+    let weight = if log.weight == 0 { 400 } else { log.weight };
+    let t = added_fonts_truetype(files)
+        .filter(|t| t.face.eq_ignore_ascii_case(&log.face))
+        .min_by_key(|t| ((t.weight - weight).abs(), t.italic != log.italic))?
+        .clone();
+    if t.symbol {
+        return Some((t, SYMBOL_CHARSET));
+    }
+    let has = |c: u8| {
+        t.code_pages == 0 && c == ANSI_CHARSET
+            || nls::charset(c).is_some_and(|c| t.code_pages & c.csb != 0)
+    };
+    let want = if log.charset == DEFAULT_CHARSET {
+        sys.charset
+    } else {
+        log.charset
+    };
+    let charset = if has(want) {
+        want
+    } else {
+        [ANSI_CHARSET]
+            .into_iter()
+            .chain(nls::CHARSETS.iter().map(|c| c.charset))
+            .find(|&c| has(c))
+            .unwrap_or(ANSI_CHARSET)
+    };
+    Some((t, charset))
+}
+
+/// The TrueType fonts of the files added, those of a file added more
+/// than once once (`added_fonts`).
+fn added_fonts_truetype(files: &[AddedFile]) -> impl Iterator<Item = &Rc<Ttf>> {
+    files
+        .iter()
+        .enumerate()
+        .filter(|&(i, file)| {
+            !files[..i]
+                .iter()
+                .any(|f| f.name.eq_ignore_ascii_case(&file.name))
+        })
+        .flat_map(|(_, file)| file.truetype.iter())
+}
+
+/// Realize the logical font `log` as the TrueType font of an added file
+/// it names (`added_truetype`), drawn from its outlines (`ttf`). A font
+/// asked for bold of a font that isn't is made bold, a column wider; one
+/// asked for italic of an upright font is leaned as it is drawn.
+fn realize_added_truetype(
+    files: &[AddedFile],
+    log: &Log,
+    sys: &System,
+    device_height: i32,
+    device_width: i32,
+) -> Option<Realized> {
+    let (t, charset) = added_truetype(files, log, sys)?;
+    let made_bold = log.weight >= 600 && t.weight < 600;
+    let m = t.metrics(device_height, device_width, made_bold);
+    let page = sys.code_page(charset);
+    let glyphs = truetype_file_glyphs(&t, &m, page, charset == SYMBOL_CHARSET);
+    Some(Realized {
+        face: Cow::Owned(t.face.clone()),
+        height: m.height,
+        ascent: m.ascent,
+        descent: m.height - m.ascent,
+        internal_leading: m.internal,
+        external_leading: m.external,
+        weight: if made_bold { 700 } else { t.weight },
+        italic: log.italic || t.italic,
+        lean: log.italic && !t.italic,
+        underline: log.underline,
+        strike: log.strike,
+        charset,
+        pitch_family: t.pitch_family,
+        page,
+        csb: nls::charset(charset).map_or(0, |c| c.csb),
+        average: m.average,
+        max: m.max,
+        // As Windows 98's own TrueType fonts (`realize_truetype`).
+        chars: [0x1F, 0xFF, 0x1F, 0x20],
+        glyphs,
+    })
+}
+
+/// The glyphs of the TrueType font `t` at the size `m` for the bytes of
+/// the code page `page`, or of a symbol font's bytes with `symbol`: the
+/// control characters and the bytes a code page leaves out are drawn
+/// with the font's missing glyph (`truetype_char`).
+fn truetype_file_glyphs(t: &Ttf, m: &ttf::Metrics, page: CodePage, symbol: bool) -> Rc<Glyphs> {
+    let make = || {
+        let drawn = t.draw(m, |b| {
+            if symbol {
+                Some(b as u32)
+            } else {
+                truetype_char(page, b).map(u32::from)
+            }
+        });
+        let glyphs = drawn
+            .into_iter()
+            .map(|d| Glyph {
+                rows: d.rows,
+                advance: d.advance,
+                offset: d.offset,
+            })
+            .collect();
+        Rc::new(Glyphs { glyphs })
+    };
+    let page = if symbol { 0 } else { page.number() as u16 };
+    t.drawn
+        .borrow_mut()
+        .entry((m.key, page))
+        .or_insert_with(make)
+        .clone()
+}
+
 /// The font selected into the DC `dc`, realized.
 pub fn realized_of(cpu: &mut Cpu, dc: &Dc) -> Realized {
     let log = gdi(cpu)
@@ -1482,6 +1616,9 @@ pub fn realized_of(cpu: &mut Cpu, dc: &Dc) -> Realized {
     let sys = System::of(cpu);
     let sizes = file_sizes(cpu, &log);
     if let Some(f) = realize_file(&log, &sys, &sizes, height, width) {
+        return f;
+    }
+    if let Some(f) = realize_added_truetype(&gdi(cpu).font_files, &log, &sys, height, width) {
         return f;
     }
     realize(&log, &sys, height, width)
@@ -1860,7 +1997,7 @@ pub fn draw_text(
             }
             let sy = gy + row as i32;
             // Italic leans the glyph right above its baseline.
-            let lean = if f.italic {
+            let lean = if f.lean {
                 (f.ascent - row as i32) / 3
             } else {
                 0
@@ -2131,9 +2268,11 @@ pub fn get_rasterizer_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// AddFontResourceA(file): how many fonts it added, 0 if the file can't
 /// be read. The raster fonts of a .FON or .FNT file are drawn, listed
-/// with the system's faces and chosen by their face's name. A file of
-/// other fonts (TrueType) counts as one font none of whose faces is
-/// drawn: a font that asks for its face gets one GDI has.
+/// with the system's faces and chosen by their face's name, and so are
+/// the TrueType fonts of a .TTF or .TTC file (`ttf`), by their family's
+/// name, though they aren't listed. A file of other fonts counts as one
+/// font none of whose faces is drawn: a font that asks for its face
+/// gets one GDI has.
 pub fn add_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(name) = crate::win32::user32::string_at(cpu, args[0]) else {
         return Some(0);
@@ -2145,9 +2284,21 @@ pub fn add_font_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         .into_iter()
         .map(Rc::new)
         .collect();
-    let count = fonts.len().max(1) as u32;
+    let truetype: Vec<Rc<Ttf>> = if fonts.is_empty() {
+        Ttf::fonts_of_file(&bytes)
+            .into_iter()
+            .map(Rc::new)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let count = (fonts.len() + truetype.len()).max(1) as u32;
     init(cpu);
-    gdi(cpu).font_files.push(AddedFile { name, fonts });
+    gdi(cpu).font_files.push(AddedFile {
+        name,
+        fonts,
+        truetype,
+    });
     Some(count)
 }
 
@@ -2750,12 +2901,66 @@ mod tests {
         assert_eq!((f.weight, f.advance(b'!')), (700, 3));
     }
 
+    /// A TrueType file added: its family's fonts are drawn from its
+    /// outlines at the size asked for, with its metrics, where GDI's own
+    /// faces would draw a ROM glyph.
+    #[test]
+    fn an_added_truetype_face_is_drawn_from_its_outlines() {
+        let files = [AddedFile {
+            name: "FACE.TTF".into(),
+            fonts: Vec::new(),
+            truetype: Ttf::fonts_of_file(&super::super::ttf::tests::ttf("Outlined", false))
+                .into_iter()
+                .map(Rc::new)
+                .collect(),
+        }];
+        let log = Log::of(&logfont(-20, 0, 0, 0, 0, "Outlined"));
+        let f = realize_added_truetype(&files, &log, &System::WESTERN, -20, 0).unwrap();
+        assert_eq!(f.face, "Outlined");
+        assert_eq!((f.height, f.ascent, f.charset), (20, 16, ANSI_CHARSET));
+        assert_eq!(f.average_width(), 10);
+        // "A" is the font's square: 10 pixels a side on the baseline.
+        let a = f.glyph(b'A');
+        assert_eq!((a.advance, a.offset), (12, 2));
+        assert_eq!(a.rows.iter().filter(|&&r| r == (1 << 10) - 1).count(), 10);
+        assert_eq!(a.rows[15], (1 << 10) - 1);
+        assert_eq!(a.rows[16], 0);
+        // Another face isn't the file's.
+        let other = Log::of(&logfont(-20, 0, 0, 0, 0, "Arial"));
+        assert!(realize_added_truetype(&files, &other, &System::WESTERN, -20, 0).is_none());
+        // Bold of the regular font is made bold, a column wider.
+        let bold = Log::of(&logfont(-20, 0, 700, 0, 0, "Outlined"));
+        let b = realize_added_truetype(&files, &bold, &System::WESTERN, -20, 0).unwrap();
+        assert_eq!((b.weight, b.advance(b'A')), (700, 13));
+        assert_eq!(b.glyph(b'A').rows[15], (1 << 11) - 1);
+    }
+
+    /// A symbol font's bytes are its characters F000h up, in
+    /// SYMBOL_CHARSET whatever character set the logical font asks for.
+    #[test]
+    fn an_added_symbol_font_draws_its_bytes() {
+        let files = [AddedFile {
+            name: "SYM.TTF".into(),
+            fonts: Vec::new(),
+            truetype: Ttf::fonts_of_file(&super::super::ttf::tests::ttf("Symbols", true))
+                .into_iter()
+                .map(Rc::new)
+                .collect(),
+        }];
+        let log = Log::of(&logfont(-20, 0, 0, ANSI_CHARSET, 0, "Symbols"));
+        let f = realize_added_truetype(&files, &log, &System::WESTERN, -20, 0).unwrap();
+        assert_eq!(f.charset, SYMBOL_CHARSET);
+        assert_eq!(f.advance(b'A'), 12);
+        assert!(f.glyph(b'A').rows.iter().any(|&r| r != 0));
+    }
+
     /// A file added twice lists its fonts once.
     #[test]
     fn a_file_added_twice_has_its_fonts_once() {
         let file = |name: &str| AddedFile {
             name: name.into(),
             fonts: vec![added("Twice", 400)],
+            truetype: Vec::new(),
         };
         let files = [file("A.FON"), file("a.fon"), file("B.FON")];
         assert_eq!(added_fonts(&files).count(), 2);
