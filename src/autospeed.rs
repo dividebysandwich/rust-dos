@@ -1644,8 +1644,13 @@ impl AutoSpeed {
         // memory, which keeps `done` from coming: Millennia's intro player
         // reads the next stretch of its video from the CD every 6 seconds
         // and writes a few hundred bytes a second in between. Going on
-        // from all the host has, it took 11 measurements to step down.
-        let over = working.is_some() && self.working.is_none() && measured.fps.is_none();
+        // from all the host has, it took 11 measurements to step down. One
+        // that keeps an idling system busy (`flat_out` without `working`)
+        // is at work too, and keeps all the host has.
+        let over = working.is_some()
+            && self.working.is_none()
+            && !self.flat_out
+            && measured.fps.is_none();
         if self.working.is_some() || over {
             self.working = working.or(self.working);
         }
@@ -3900,6 +3905,30 @@ mod tests {
             bus.activity.video_bytes += 20;
             if let Some(speed) = auto.update(bus, true, HOST, 0) {
                 assert_eq!(speed, PROTECTED_LEAST);
+                assert_eq!(auto.work_return(), None);
+                return;
+            }
+        }
+        panic!("no measurement");
+    }
+
+    #[test]
+    fn a_load_that_ends_in_a_busy_system_keeps_all_the_host_has() {
+        // Under a system seen idling, a program that loaded and then keeps
+        // it busy without frames or output (3DMark 2000 building a scene)
+        // is at work: it stays at all the host has.
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(HOST);
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_idles(true);
+        auto.working = Some(PROTECTED_LEAST);
+        assert_eq!(auto.update(bus, true, HOST, 0), None);
+        for _ in 0..10 {
+            bus.clock.icount += HOST as u64 * 50;
+            bus.activity.video_bytes += 20;
+            assert_eq!(auto.update(bus, true, HOST, 0), None);
+            if auto.flat_out() {
                 assert_eq!(auto.work_return(), None);
                 return;
             }
