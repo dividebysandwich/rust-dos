@@ -2900,20 +2900,18 @@ impl Bus {
 
             // Dispatch to Devices
             // TODO: Use a proper map lookup
-            // Ports we intentionally ignore — writes are harmless but other-
-            // wise spam the log. Programs blindly touch these as leftovers
-            // from CGA/EGA-era code even when they're really talking to VGA.
-            0x3D8 | 0x3D9 if !self.vga.decodes(port) => {
-                // CGA Mode Control / Color Select. Real VGA ignores writes
-                // here; VGA mode lives at 0x3D4/0x3D5 (handled by the VGA).
-            }
-            // The CRTC of the display adapter the machine hasn't: the
-            // monochrome one at 3B4h beside a colour card, the colour one
-            // at 3D4h beside a monochrome card. Nothing answers there on a
-            // real machine either, and programs write to it to find out
-            // whether a second adapter is there (Shadow Knights does on an
-            // EGA).
-            0x3B4 | 0x3B5 | 0x3D4 | 0x3D5 if !self.vga.decodes(port) => {}
+            // The ports of the display adapter the machine hasn't, which
+            // nothing decodes on a real machine either: the monochrome
+            // adapter's 3B0h-3BBh and the Hercules configuration switch
+            // (3BFh) beside a colour card, the colour adapter's 3D0h-3DFh
+            // beside a monochrome one, and on an EGA or VGA whichever
+            // CRTC the Miscellaneous Output register's bit 0 doesn't
+            // select. Programs write there to find out whether a second
+            // adapter is there (Shadow Knights' CRTC probe on an EGA), or
+            // as leftovers of CGA code (3D8h, 3D9h), so the writes go
+            // nowhere without a log line. 3BCh-3BEh are the monochrome
+            // adapter's printer port.
+            0x3B0..=0x3BB | 0x3BF | 0x3D0..=0x3DF if !self.vga.decodes(port) => {}
             // Game port write: the one-shots fire.
             0x0201 => {
                 let now_ns = self.clock.now_ns();
