@@ -25,6 +25,7 @@ use iced_x86::ConditionCode;
 use super::block::{BlockData, LINKS, RETURN_BITS, RETURN_LINK, RETURN_MISS, SIDE_LINK};
 use super::helpers::*;
 use super::uop::*;
+use crate::bus::UPPER_RAM;
 use crate::cpu::Seg;
 use crate::cpu::alu::ShiftOp;
 use crate::cpu::layout;
@@ -50,6 +51,13 @@ const _: () = assert!(crate::config::MAX_MEMSIZE << 20 <= 0x8000_0000 && SLOW as
 /// (both multiples of 4 KB, so they fit a compare's shifted immediate).
 const VIDEO: u32 = 0xA0000;
 const EXTENDED: u32 = 0x10_0000;
+/// The upper memory between the ROMs (`bus::UPPER_RAM`), RAM that the
+/// inline checks don't take: its first page and its number of pages. Its
+/// ends are on page boundaries, so an operand within one page is all in
+/// it or all out.
+const UPPER_START: u32 = (UPPER_RAM.start >> 12) as u32;
+const UPPER_PAGES: u32 = ((UPPER_RAM.end - UPPER_RAM.start) >> 12) as u32;
+const _: () = assert!(UPPER_RAM.start & 0xFFF == 0 && UPPER_RAM.end & 0xFFF == 0);
 
 /// The lowest of `fields`, rounded down to 16 bytes.
 const fn lowest(fields: &[usize]) -> usize {
@@ -533,8 +541,10 @@ enum Slow {
     /// block.
     Fetch { at: DynamicLabel, back: DynamicLabel, stub: DynamicLabel, slot: usize, g: u32 },
     /// A memory operand of `size` bytes at physical address `addr` (a
-    /// register) that isn't plain RAM: within a page, its handle is that
-    /// address with `DEV_BIT`; else it goes on to `slow`, the `MemRef`.
+    /// register) that the inline checks didn't take as plain RAM: within a
+    /// page, its handle is that address, with `DEV_BIT` unless it is in
+    /// the upper memory between the ROMs; else it goes on to `slow`, the
+    /// `MemRef`.
     Dev { at: DynamicLabel, back: DynamicLabel, slow: DynamicLabel, t: T, addr: u8, size: u8 },
 }
 
@@ -1691,13 +1701,23 @@ impl Gen<'_> {
                     );
                 }
                 Slow::Dev { at, back, slow, t, addr, size } => {
+                    // The upper memory between the ROMs is RAM
+                    // (`UPPER_PAGES`): its handle is the address, which the
+                    // inline checks only don't take because they stop at
+                    // A0000h.
                     dynasm!(self.ops
                         ; .arch aarch64
                         ; =>at
                         ; and w1, W(addr), 0xFFF
                         ; cmp w1, 0x1000 - size as u32
                         ; b.hi =>slow
+                        ; sub w1, WSP(addr), UPPER_START, lsl 12
+                        ; cmp w1, UPPER_PAGES, lsl 12
+                        ; b.lo >ram
                         ; orr XSP(r(t)), X(addr), 1u64 << DEV_BIT
+                        ; b =>back
+                        ; ram:
+                        ; mov W(r(t)), W(addr)
                         ; b =>back
                     );
                 }

@@ -7768,7 +7768,7 @@ fn upper_memory_between_the_roms_is_ram_to_translated_code() {
         assert_eq!(rig.cpu.bus.read_32(UMB as usize + 4), sum);
         assert_eq!(rig.cpu.bus.read_32(0xF0000), before, "the ROM as it was");
     }
-    if AVAILABLE && cfg!(target_arch = "x86_64") {
+    if AVAILABLE {
         // The ROM's 1000 stores go to the helpers, the RAM's none.
         let calls = b.cpu.dynrec.calls().map_or(0, |c| c.dev);
         assert!(calls <= 1100, "{calls} calls");
