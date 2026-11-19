@@ -3,8 +3,11 @@ name: Conformance
 # Wine's conformance tests under the built-in Windows
 # (tests/win32/conformance_tests.rs), and those ported to Windows 3.1
 # programs (tests/win16/win16_conformance_tests.rs). They need MinGW and
-# OpenWatcom, so they run in jobs of their own: on changes to what they
-# test, every night, and by hand.
+# OpenWatcom, so they run in a job of their own: on changes to what they
+# test, every night, and by hand. The two sets share one job: the release
+# build of the crate takes most of its time (the programs run in about
+# 90 s and 10 s), and a second job would build it again and hold another
+# of the repository's runners while it does.
 on:
   # Pushes to main and tags only: a branch with a pull request runs through
   # `pull_request`, whose runs a newer push cancels.
@@ -64,15 +67,20 @@ jobs:
     # tests/conformance/expected.txt was made with: another version's
     # headers and code can give other results.
     container: ubuntu:22.04
+    env:
+      # OpenWatcom's snapshot of 2026-10-01, the one
+      # tests/conformance16/expected.txt was made with.
+      OW_URL: https://github.com/open-watcom/open-watcom-v2/releases/download/2026-10-01-Build/ow-snapshot.tar.xz
+      OW_SHA256: e6aa1b1e40ac8bbf97658d2c70fff8a4242d6ca4a1c60806f2baa5317083d4fe
     steps:
       # The container has no sudo, git or compiler; see rust.yml's compat
-      # builds.
+      # builds. xz-utils unpacks OpenWatcom.
       - name: Install build environment
         uses: $/.github/actions/apt-install
         with:
           packages: >-
-            git ca-certificates curl zstd build-essential pkg-config libasound2-dev
-            gcc-mingw-w64-i686-win32
+            git ca-certificates curl zstd xz-utils build-essential pkg-config
+            libasound2-dev gcc-mingw-w64-i686-win32
           update: true
 
       - name: Build SDL3
@@ -80,6 +88,17 @@ jobs:
         with:
           flavor: ubuntu:22.04
           update: "true"
+
+      - name: Install OpenWatcom
+        run: |
+          curl -fsSL -o ow.tar.xz "$OW_URL"
+          echo "$OW_SHA256  ow.tar.xz" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/watcom"
+          tar -xJf ow.tar.xz -C "$RUNNER_TEMP/watcom"
+          rm ow.tar.xz
+          echo "WATCOM=$RUNNER_TEMP/watcom" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/watcom/binl64" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/watcom/binl" >> "$GITHUB_PATH"
 
       - name: Trust the workspace
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -100,11 +119,18 @@ jobs:
 
       # In release: a debug build runs the user32 and gdi32 programs,
       # msg.c and win.c above all, many times slower.
-      - name: Run the conformance tests
+      - name: Run the Win32 conformance tests
         env:
           CONFORMANCE_CC: i686-w64-mingw32-gcc-win32
           CONFORMANCE_REQUIRED: "1"
         run: "cargo test --locked --release --test win32 conformance_tests::"
+
+      # Runs when the Win32 set fails too, so one run reports both.
+      - name: Run the Win16 conformance tests
+        if: ${{ !cancelled() }}
+        env:
+          CONFORMANCE_REQUIRED: "1"
+        run: "cargo test --locked --release --test win16 win16_conformance_tests::"
 
       # What each test program printed, to look at when they fail.
       - name: Keep the test programs' output
@@ -112,57 +138,6 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conformance-logs
-          path: target/conformance/**/*.log
-
-  win16:
-    runs-on: ubuntu-latest
-    env:
-      # OpenWatcom's snapshot of 2026-10-01, the one
-      # tests/conformance16/expected.txt was made with.
-      OW_URL: https://github.com/open-watcom/open-watcom-v2/releases/download/2026-10-01-Build/ow-snapshot.tar.xz
-      OW_SHA256: e6aa1b1e40ac8bbf97658d2c70fff8a4242d6ca4a1c60806f2baa5317083d4fe
-    steps:
-      - name: Install build environment
-        uses: $/.github/actions/apt-install
-        with:
-          packages: libasound2-dev
-          update: false
-
-      - name: Build SDL3
-        uses: $/.github/actions/sdl3
-        with:
-          flavor: ubuntu-latest
-
-      - name: Install OpenWatcom
-        run: |
-          curl -fsSL -o ow.tar.xz "$OW_URL"
-          echo "$OW_SHA256  ow.tar.xz" | sha256sum -c -
-          mkdir "$RUNNER_TEMP/watcom"
-          tar -xJf ow.tar.xz -C "$RUNNER_TEMP/watcom"
-          rm ow.tar.xz
-          echo "WATCOM=$RUNNER_TEMP/watcom" >> "$GITHUB_ENV"
-          echo "$RUNNER_TEMP/watcom/binl64" >> "$GITHUB_PATH"
-          echo "$RUNNER_TEMP/watcom/binl" >> "$GITHUB_PATH"
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3 # zizmor: ignore[cache-poisoning]
-        with:
-          key: conformance16
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Run the Win16 conformance tests
-        env:
-          CONFORMANCE_REQUIRED: "1"
-        run: "cargo test --locked --release --test win16 win16_conformance_tests::"
-
-      - name: Keep the test programs' output
-        if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: conformance16-logs
-          path: target/conformance16/**/*.log
+          path: |
+            target/conformance/**/*.log
+            target/conformance16/**/*.log
