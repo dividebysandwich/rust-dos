@@ -173,7 +173,7 @@ pub const FONTS_SAVED: u16 = 72;
 /// files added too. An older state loads them as none, and the program
 /// draws in GDI's own faces after it is loaded, as it did when it was
 /// saved.
-pub const TRUETYPE_SAVED: u16 = 80;
+pub const TRUETYPE_SAVED: u16 = 81;
 
 /// A file AddFontResourceA added: its name as the program gave it, and
 /// its raster fonts or its TrueType fonts.
@@ -422,7 +422,7 @@ pub(super) mod tests {
         assert!(back[0].truetype.is_empty());
         assert_eq!(back[1].truetype[0].face, "Kept TT");
         assert_eq!(back[1].truetype[0].data, ttf);
-        // Version 72 to 79 saved the raster fonts and no TrueType ones.
+        // Version 72 to 80 saved the raster fonts and no TrueType ones.
         let mut w = Writer::new();
         w.section(b"TEST", FONTS_SAVED, |w| {
             "OLD.TTF".to_string().save(w);
