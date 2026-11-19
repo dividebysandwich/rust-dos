@@ -89,10 +89,27 @@ pub fn handle(cpu: &mut Cpu) {
             }
         }
 
+        0x03 | 0x09 | 0x0A => keyboard_settings(cpu, ah),
+
         _ => {
             cpu.bus
                 .log_string(&format!("[BIOS] Unhandled INT 16h AH={:02X}", ah));
         }
+    }
+}
+
+/// The functions about the keyboard itself, which an AT BIOS with an MF2
+/// keyboard has, booted or not.
+fn keyboard_settings(cpu: &mut Cpu, ah: u8) {
+    match ah {
+        // Set the typematic rate and delay: the host's keyboard repeats,
+        // so there is nothing to set and nothing to return.
+        0x03 => {}
+        // The functions there are: AH=0Ah and 10h-12h.
+        0x09 => cpu.set_reg8(iced_x86::Register::AL, 0x30),
+        // The keyboard's ID: an MF2 keyboard, translated.
+        0x0A => cpu.set_bx(0x41AB),
+        _ => unreachable!("not a keyboard settings function: {ah:02X}"),
     }
 }
 
@@ -158,17 +175,12 @@ fn booted(cpu: &mut Cpu, ah: u8) {
             let high = (flags2 & 0x03) | (flags3 & 0x0C) | (flags2 & 0x70) | ((flags2 & 0x04) << 5);
             cpu.set_ax((high as u16) << 8 | flags as u16);
         }
-        // Set the typematic rate: the host's keyboard repeats.
-        0x03 => {}
         0x05 => {
             let key = cpu.cx();
             let full = !BiosBuffer::push(&mut cpu.bus, key);
             cpu.set_reg8(iced_x86::Register::AL, full as u8);
         }
-        // The functions there are: AH=0Ah and 10h-12h.
-        0x09 => cpu.set_reg8(iced_x86::Register::AL, 0x30),
-        // The keyboard's ID: an MF2 keyboard, translated.
-        0x0A => cpu.set_bx(0x41AB),
+        0x03 | 0x09 | 0x0A => keyboard_settings(cpu, ah),
         _ => cpu.bus.log_string(&format!("[BIOS] Unhandled INT 16h AH={:02X}", ah)),
     }
 }

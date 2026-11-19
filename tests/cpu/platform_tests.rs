@@ -443,6 +443,40 @@ fn f11_and_f12_send_their_make_codes_and_only_the_enhanced_reads_return_them() {
 }
 
 #[test]
+fn the_bios_answers_the_keyboard_settings_functions_at_the_dos_prompt() {
+    let mut cpu = cpu();
+    let lines = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let log = lines.clone();
+    cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+        log.borrow_mut().push(line.to_string())
+    }));
+
+    // AH=03h, AL=05h: set the typematic rate (BL) and delay (BH), as
+    // 1830's SOUND.EXE does on its way out. Nothing comes back.
+    cpu.set_ax(0x0305);
+    cpu.set_bx(0x0000);
+    rust_dos::interrupts::int16::handle(&mut cpu);
+    assert_eq!((cpu.ax(), cpu.bx()), (0x0305, 0x0000));
+    // AH=09h: the functions there are, which the configuration table's
+    // feature byte 2 (bit 6) says to ask for.
+    cpu.set_ax(0x0900);
+    rust_dos::interrupts::int16::handle(&mut cpu);
+    assert_eq!(cpu.get_al(), 0x30, "AH=0Ah and AH=10h-12h");
+    // AH=0Ah: the keyboard's ID, an MF2 keyboard behind the translating
+    // controller.
+    cpu.set_ax(0x0A00);
+    rust_dos::interrupts::int16::handle(&mut cpu);
+    assert_eq!(cpu.bx(), 0x41AB);
+
+    cpu.bus.log_hook = None;
+    let lines = lines.take();
+    assert!(
+        !lines.iter().any(|l| l.contains("Unhandled INT 16h")),
+        "{lines:?}"
+    );
+}
+
+#[test]
 fn the_bios_keeps_left_and_right_ctrl_and_alt_apart() {
     use rust_dos::keyboard::key_event;
     let mut cpu = cpu();
