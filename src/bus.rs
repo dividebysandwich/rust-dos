@@ -1946,9 +1946,7 @@ impl Bus {
         }
         let mut settled = quiet;
 
-        let divisor = if self.pit_divisor == 0 { 65536.0 } else { self.pit_divisor as f32 };
-        let speaker_step = crate::timer::PIT_HZ as f32 / divisor / rate as f32;
-        let speaker = self.speaker_on && speaker_step * rate as f32 > 20.0;
+        let speaker_step = self.speaker_tone_step();
         let ((vl, vr), (fl, fr)) = self.sb.as_ref().map_or(((1.0, 1.0), (1.0, 1.0)), |sb| sb.volumes());
         let (cl, cr) = self.sb.as_ref().map_or((1.0, 1.0), |sb| sb.cd_volume());
         // The built-in Windows's mixer and MIDI volume, 1 until a program
@@ -1987,11 +1985,8 @@ impl Bus {
             // filter, which rings on a little after them.
             let mut speaker_sample = 0.0;
             let mut sounding = false;
-            if speaker {
-                self.audio_phase += speaker_step;
-                if self.audio_phase >= 1.0 {
-                    self.audio_phase -= 1.0;
-                }
+            if let Some(step) = speaker_step {
+                self.audio_phase = (self.audio_phase + step).fract();
                 speaker_sample += if self.audio_phase < 0.5 { SPEAKER } else { -SPEAKER };
                 sounding = true;
             }
@@ -2088,15 +2083,26 @@ impl Bus {
         !sb.output_on() || self.mixer.sb_coupling_rests_on(held)
     }
 
+    /// How far the PC speaker's square wave moves through its period in
+    /// one frame of the mix, while it sounds a tone: the speaker gated on
+    /// to PIT channel 2, at more than 20 Hz and less than half the mix's
+    /// rate. Programs that drive the speaker with a divisor of a few
+    /// counts (596 kHz at 2, as Xenon 2 does between its notes) give it
+    /// a wave far too fast for the cone to follow: the speaker sits at
+    /// the wave's mean level, which is silence, and the mix takes no
+    /// samples of it, which would alias down into the audible range.
+    fn speaker_tone_step(&self) -> Option<f32> {
+        let divisor = if self.pit_divisor == 0 { 65536.0 } else { self.pit_divisor as f32 };
+        let hz = crate::timer::PIT_HZ as f32 / divisor;
+        let rate = crate::opl::RATE as f32;
+        (self.speaker_on && hz > 20.0 && hz < rate / 2.0).then_some(hz / rate)
+    }
+
     /// Whether no source makes a sound, or would move on in a way the
     /// sound coming later depends on, as the frames to mix start (see
     /// `audio_settled`).
     fn audio_quiet(&mut self) -> bool {
-        let speaker = self.speaker_on && {
-            let divisor = if self.pit_divisor == 0 { 65536.0 } else { self.pit_divisor as f32 };
-            crate::timer::PIT_HZ as f32 / divisor > 20.0
-        };
-        !speaker
+        self.speaker_tone_step().is_none()
             && self.beep_frames == 0
             && self.opl.is_idle()
             && self.sb_quiet()

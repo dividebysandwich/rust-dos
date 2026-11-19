@@ -109,6 +109,45 @@ fn master_is_the_volume_of_the_mix() {
     assert_eq!(peaks[Channel::Fm as usize], 0.0);
 }
 
+/// PIT channel 2's divisor, written as Xenon 2 writes it: the mode, then
+/// the low and high bytes.
+fn speaker_divisor(bus: &mut Bus, divisor: u16) {
+    bus.io_write(0x43, 0xB6);
+    bus.io_write(0x42, divisor as u8);
+    bus.io_write(0x42, (divisor >> 8) as u8);
+}
+
+#[test]
+fn an_ultrasonic_divisor_silences_the_speaker() {
+    // Xenon 2 leaves the speaker gated on and sets a divisor of 2
+    // (596 kHz) between its notes: too fast for the cone, so silence.
+    let mut bus = bus();
+    speaker_on(&mut bus);
+    speaker_divisor(&mut bus, 2);
+    wait_ms(&mut bus, 20);
+    peak(&mut bus);
+    wait_ms(&mut bus, 20);
+    assert_eq!(peak(&mut bus), 0);
+}
+
+#[test]
+fn a_tone_after_an_ultrasonic_divisor_sounds() {
+    let mut bus = bus();
+    speaker_on(&mut bus);
+    // Long enough at 596 kHz to have pushed the wave's phase far out of
+    // its period, were it not wrapped.
+    speaker_divisor(&mut bus, 2);
+    wait_ms(&mut bus, 200);
+    peak(&mut bus);
+    speaker_divisor(&mut bus, 0x04A9);
+    wait_ms(&mut bus, 20);
+    // The 1 kHz square wave swings both ways, not a level held on one
+    // side of it.
+    let tone = samples(&mut bus);
+    assert!(tone.iter().any(|&s| s > 1000), "no high half");
+    assert!(tone.iter().any(|&s| s < -1000), "no low half");
+}
+
 /// An output device that keeps what it is given.
 struct Recorder(Rc<RefCell<Vec<i16>>>);
 
