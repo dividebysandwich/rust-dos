@@ -24,6 +24,7 @@ pub static DLL: Dll = Dll {
     init: None,
     term: None,
     vtables: &[],
+    resources: None,
 };
 
 const fn stdcall(name: &'static str, ordinal: u16, args: u8, handler: Handler) -> Api {

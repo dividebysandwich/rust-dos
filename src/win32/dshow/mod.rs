@@ -63,6 +63,7 @@ pub static QUARTZ: Dll = Dll {
     init: None,
     term: None,
     vtables: QUARTZ_VTABLES,
+    resources: None,
 };
 
 pub static AMSTREAM: Dll = Dll {
@@ -73,6 +74,7 @@ pub static AMSTREAM: Dll = Dll {
     init: None,
     term: None,
     vtables: AMSTREAM_VTABLES,
+    resources: None,
 };
 
 /// The DLLs, by their places in `Iface::0`.

@@ -115,7 +115,16 @@ const IMPORTS: &[(&str, &[&str])] = &[
             "SetFocus",
         ],
     ),
-    ("KERNEL32.DLL", &["GetModuleHandleA", "InterlockedExchange"]),
+    (
+        "KERNEL32.DLL",
+        &[
+            "GetModuleHandleA",
+            "InterlockedExchange",
+            "FindResourceA",
+            "LoadResource",
+            "SizeofResource",
+        ],
+    ),
     (
         "USER32.DLL",
         &[
@@ -1482,6 +1491,53 @@ fn a_modeless_property_sheet_shows_its_page() {
     assert_eq!(r[8], 1);
     assert_ne!(r[9], 0);
     assert_eq!(r[10], 1);
+}
+
+/// MFC lays out its property pages in the font of COMCTL32's own sheet
+/// and wizard dialogs, which it reads from their resources
+/// (AfxGetPropSheetFont): Beasts and Bumpkins' setup came out with pages
+/// many times their size without them.
+#[test]
+fn comctl32_has_the_sheet_and_wizard_dialog_resources() {
+    use Arg::*;
+    const RT_DIALOG: u32 = 5;
+    const IDD_PROPSHEET: u32 = 1006;
+    const IDD_WIZARD: u32 = 1020;
+    const NAME: u32 = FREE;
+    let mut calls = vec![call("GetModuleHandleA", &[At(NAME)])];
+    for id in [IDD_PROPSHEET, IDD_WIZARD] {
+        let found = calls.len();
+        calls.push(call("FindResourceA", &[Res(0), I(id), I(RT_DIALOG)]));
+        calls.push(call("LoadResource", &[Res(0), Res(found)]));
+        calls.push(call("SizeofResource", &[Res(0), Res(found)]));
+    }
+    let mut d = data();
+    put(&mut d, NAME, b"COMCTL32.DLL\0");
+    let (cpu, at) = run("sheet_resources", &d, &calls);
+    let r = results(&cpu, at, calls.len());
+    assert_ne!(r[0], 0, "COMCTL32 is loaded");
+    let word = |lin: u32| peek(&cpu, lin) & 0xFFFF;
+    // The sheet's buttons and tab control, and the wizard's buttons,
+    // lines and tab control.
+    for (i, controls) in [(1, 5), (4, 8)] {
+        assert_ne!(r[i], 0, "FindResourceA finds dialog {i}");
+        let (template, size) = (r[i + 1], r[i + 2]);
+        assert_ne!(template, 0, "LoadResource gives its data");
+        assert_ne!(peek(&cpu, template) & 0x40, 0, "DS_SETFONT");
+        assert_eq!(word(template + 8), controls);
+        // No menu or class, then the caption: the font after it.
+        assert_eq!((word(template + 18), word(template + 20)), (0, 0));
+        let mut p = template + 22;
+        while word(p) != 0 {
+            p += 2;
+        }
+        assert_eq!(word(p + 2), 8, "an 8-point font");
+        let face: String = (0..12)
+            .map(|k| char::from(word(p + 4 + 2 * k) as u8))
+            .collect();
+        assert_eq!(face, "MS Shell Dlg");
+        assert!(size > p + 4 - template, "the template is all there");
+    }
 }
 
 #[test]

@@ -700,6 +700,22 @@ fn push32(b: &mut Vec<u8>, v: u32) {
     b.extend_from_slice(&v.to_le_bytes());
 }
 
+/// The sheet's and the wizard's dialog resources, IDD_PROPSHEET and
+/// IDD_WIZARD. Windows' COMCTL32 has them too, in US English, and MFC
+/// reads the font of the sheet it makes from the one it needs
+/// (AfxGetPropSheetFont), to lay its pages out in that font. Without
+/// them MFC takes a font size it never set, and the pages come out many
+/// times their size, with their controls out of sight.
+pub(super) fn resources() -> Vec<(u16, u16, u16, Vec<u8>)> {
+    const IDD_PROPSHEET: u16 = 1006;
+    const IDD_WIZARD: u16 = 1020;
+    const LANG_ENGLISH_US: u16 = 0x0409;
+    [(IDD_PROPSHEET, 0), (IDD_WIZARD, PSH_WIZARD)]
+        .into_iter()
+        .map(|(id, flags)| (RT_DIALOG as u16, id, LANG_ENGLISH_US, sheet_template(flags)))
+        .collect()
+}
+
 /// The sheet's DLGTEMPLATE, or the wizard's, as PROPSHEET_CreateDialog
 /// adjusts it for PSH_NOCONTEXTHELP and PSH_WIZARDCONTEXTHELP.
 fn sheet_template(flags: u32) -> Vec<u8> {

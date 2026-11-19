@@ -36,6 +36,7 @@ pub static DLL: Dll = Dll {
     init: None,
     term: None,
     vtables: &[],
+    resources: None,
 };
 
 const ACMERR_NOTPOSSIBLE: u32 = 512;
