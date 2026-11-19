@@ -524,15 +524,16 @@ fn alloc_in(bus: &mut Bus, chain: Vec<(u16, Mcb)>, owner_psp: u16, paras: u16, f
 ///
 /// Coalesces with adjacent free blocks on both sides. A segment with no
 /// 'M' or 'Z' at `block_seg - 1` is an invalid block address (09h), as in
-/// MS-DOS's `$DEALLOC`. A block that is already free is one too here,
-/// where `$DEALLOC` checks only the signature and frees it again.
+/// MS-DOS's `$DEALLOC`, which checks only the signature: a block that is
+/// already free is freed again, and the call succeeds. A-10 Tank Killer's
+/// menu program frees two such blocks each time it starts. A coalesce
+/// here zeroes the header of the block it absorbs, so freeing that
+/// block's old address still fails with 09h, where MS-DOS's `Coalesce`
+/// leaves the header in memory (#411).
 pub fn free(bus: &mut Bus, block_seg: u16) -> Result<(), u8> {
     let mcb_seg = block_seg.wrapping_sub(1);
     let m = read_mcb(bus, mcb_seg);
     if !m.is_valid() {
-        return Err(ERR_INVALID_BLOCK);
-    }
-    if m.is_free() {
         return Err(ERR_INVALID_BLOCK);
     }
 

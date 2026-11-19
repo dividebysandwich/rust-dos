@@ -412,6 +412,7 @@ pub fn install_device(bus: &mut Bus, nul: usize) {
 /// INT 67h: the function in AH, the status back in AH.
 pub fn handle(cpu: &mut Cpu) {
     let function = cpu.get_ah();
+    let (ax, bx, dx) = (cpu.ax(), cpu.bx(), cpu.dx());
     let Some(mut ems) = cpu.bus.ems.take() else {
         cpu.set_reg8(Register::AH, UNDEFINED_FUNCTION);
         return;
@@ -419,7 +420,12 @@ pub fn handle(cpu: &mut Cpu) {
     let status = call(cpu, &mut ems, function);
     cpu.bus.ems = Some(ems);
     if status != OK {
-        cpu.bus.log_string(&format!("[EMS] AX={:04X}: status {:02X}", cpu.ax(), status));
+        // Apart for each call, handle and status; the logical page in
+        // BX is shown but not kept apart, as a program walking past
+        // the end of its pages would log each one.
+        cpu.bus.log_limited(("EMS", ax, dx, status), || {
+            format!("[EMS] AX={ax:04X} BX={bx:04X} DX={dx:04X}: status {status:02X}")
+        });
     }
     cpu.set_reg8(Register::AH, status);
 }

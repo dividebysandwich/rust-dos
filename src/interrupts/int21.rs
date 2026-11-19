@@ -1853,10 +1853,13 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     cpu.set_ax(crate::mcb::ERR_INSUFFICIENT as u16);
                     cpu.set_bx(max_free);
                     cpu.set_cpu_flag(CpuFlags::CF, true);
-                    cpu.bus.log_string(&format!(
-                        "[DOS] Alloc {:04X} paras failed (max free {:04X})",
-                        requested, max_free
-                    ));
+                    // Programs ask for FFFFh paragraphs to learn the
+                    // largest free block, often many times a second.
+                    cpu.bus.log_limited(("alloc", requested), || {
+                        format!(
+                            "[DOS] Alloc {requested:04X} paras failed (max free {max_free:04X})"
+                        )
+                    });
                 }
             }
         }
@@ -2129,10 +2132,13 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
                 Err(code) => {
-                    cpu.bus.log_string(&format!(
-                        "[DOS] FindFirst/Next Failed: Pattern='{}' Index={} Error={:02X}",
-                        search_pattern, index, code
-                    ));
+                    // A game looking for its save slots on every frame
+                    // of a menu asks for the same missing files again.
+                    cpu.bus.log_limited(("find", &search_pattern, code), || {
+                        format!(
+                            "[DOS] FindFirst/Next Failed: Pattern='{search_pattern}' Index={index} Error={code:02X}"
+                        )
+                    });
                     cpu.set_reg16(Register::AX, code as u16);
                     cpu.set_cpu_flag(CpuFlags::CF, true);
                 }
