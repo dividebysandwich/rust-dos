@@ -365,15 +365,18 @@ impl Clock {
     }
 }
 
-/// 8253 PIT channel 0, which drives IRQ 0. Only the timing is modelled;
+/// An 8254 counter whose gate is always up: channel 0, which drives IRQ 0,
+/// and channel 1, the DRAM refresh request. Only the timing is modelled;
 /// port-level byte sequencing (LSB/MSB toggles, latches) lives on the bus.
+#[derive(Clone, Debug)]
 pub struct Pit0 {
     /// Counter mode, 0..=5 (6 and 7 alias 2 and 3).
     mode: u8,
     /// Count loaded at each reload, 1..=65536.
     reload: u32,
-    /// Count written while a mode 2/3 period was running. It takes effect at
-    /// the end of that period, as on real hardware.
+    /// Count written while a mode 2/3 period was running. It takes effect
+    /// at `pending_at`, as on the 8254: at the end of the current
+    /// half-cycle in mode 3, of the current period in mode 2.
     pending_reload: Option<u32>,
     /// False after a control word until the first count is written.
     counting: bool,
@@ -385,12 +388,31 @@ pub struct Pit0 {
     armed: bool,
     period_start: u64,
     next_tc: u64,
+    /// How far into its period the count was at `period_start`: a mode 3
+    /// count loaded at the end of a high half-cycle starts with the low
+    /// half. Saved in the 8254 section, as are the next two.
+    pub(crate) phase: u64,
+    /// The tick `pending_reload` loads at.
+    pub(crate) pending_at: u64,
+    /// Bits 5-0 of the last control word (access, mode as written and
+    /// BCD), which the read-back command's status byte gives back.
+    pub(crate) control: u8,
 }
 
 impl Default for Pit0 {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The value a mode 3 count reads `into` ticks into its period. It runs
+/// down by two from the count, rounded down to an even number, in each
+/// half: an odd count N loads N - 1 and is high for one tick longer than
+/// it is low (the 8254 data sheet's mode 3).
+fn square_wave_count(reload: u64, into: u64) -> u16 {
+    let high = reload.div_ceil(2);
+    let into_half = if into < high { into } else { into - high };
+    ((reload & !1) - 2 * into_half) as u16
 }
 
 impl Pit0 {
@@ -405,7 +427,19 @@ impl Pit0 {
             armed: true,
             period_start: 0,
             next_tc: 0x10000,
+            phase: 0,
+            pending_at: 0,
+            control: 0x36,
         }
+    }
+
+    /// Channel 1 as the BIOS leaves it: mode 2, count 18, a refresh
+    /// request every 15 microseconds.
+    pub fn refresh() -> Self {
+        let mut counter = Self::new();
+        counter.set_mode(0x14, 0);
+        counter.write_count(18, 0);
+        counter
     }
 
     fn periodic(&self) -> bool {
@@ -417,21 +451,41 @@ impl Pit0 {
         self.reload
     }
 
+    /// Counter mode, 0..=5.
+    pub fn mode(&self) -> u8 {
+        self.mode
+    }
+
     /// False between a control word and the first count written after it.
     pub fn is_counting(&self) -> bool {
         self.counting
     }
 
-    /// Time of the next IRQ 0 edge, if one is coming.
+    /// Time of the next IRQ 0 edge, or of the end of the half-cycle a new
+    /// mode 3 count loads at, if one is coming. The count programs write
+    /// again on every tick, the one already loaded, gets no event of its
+    /// own: loading it at the half-cycle changes no edge, and `advance`
+    /// or the next count write makes the load.
     pub fn next_event(&self) -> Option<u64> {
-        (self.counting && self.armed).then_some(self.next_tc)
+        if !(self.counting && self.armed) {
+            return None;
+        }
+        Some(match self.pending_reload {
+            Some(reload) if self.pending_at < self.next_tc && reload != self.reload => {
+                self.pending_at
+            }
+            _ => self.next_tc,
+        })
     }
 
-    /// Control word for channel 0 at `now`: set the mode and stop counting
-    /// until a count is written. The count stays where it got to (Future
-    /// Crew's demos time a frame by stopping the counter so and reading it).
-    pub fn set_mode(&mut self, mode: u8, now: u64) {
+    /// Control word for the counter at `now`: set the mode and stop
+    /// counting until a count is written. The count stays where it got to
+    /// (Future Crew's demos time a frame by stopping the counter so and
+    /// reading it). `control` is the control word; its bits 5-0 are kept.
+    pub fn set_mode(&mut self, control: u8, now: u64) {
         self.stopped = self.count(now);
+        self.control = control & 0x3F;
+        let mode = (control >> 1) & 0x07;
         self.mode = if mode >= 6 { mode - 4 } else { mode };
         self.counting = false;
         self.armed = false;
@@ -441,8 +495,18 @@ impl Pit0 {
     /// A complete count was written (0 means 65536).
     pub fn write_count(&mut self, count: u16, now: u64) {
         let reload = if count == 0 { 0x10000 } else { count as u32 };
+        self.load_at_half_cycle(now);
         if self.counting && self.periodic() {
+            let current = self.reload as u64;
+            let into = (now.saturating_sub(self.period_start) + self.phase) % current;
+            let high = current.div_ceil(2);
+            let left = if self.mode == 3 && into < high {
+                high - into
+            } else {
+                current - into
+            };
             self.pending_reload = Some(reload);
+            self.pending_at = now + left;
             return;
         }
         self.reload = reload;
@@ -450,30 +514,77 @@ impl Pit0 {
         self.counting = true;
         self.armed = true;
         self.period_start = now;
+        self.phase = 0;
         self.next_tc = now + reload as u64;
+    }
+
+    /// Load a mode 3 count written in a high half-cycle if that half has
+    /// ended by `now`: it loads where the output goes low, and runs the
+    /// low half of its own period first. No event comes at the load, so
+    /// whatever changes the counter makes it first.
+    fn load_at_half_cycle(&mut self, now: u64) {
+        if let Some(reload) = self.pending_reload
+            && self.pending_at < self.next_tc
+            && self.pending_at <= now
+        {
+            self.pending_reload = None;
+            self.reload = reload;
+            self.period_start = self.pending_at;
+            self.phase = (reload as u64).div_ceil(2);
+            self.next_tc = self.pending_at + reload as u64 - self.phase;
+        }
     }
 
     /// Advance to `now`. Returns true if at least one IRQ 0 edge happened.
     pub fn advance(&mut self, now: u64) -> bool {
-        if !(self.counting && self.armed) || self.next_tc > now {
+        if !(self.counting && self.armed) {
             return false;
         }
-        if !self.periodic() {
-            // One-shot: the output stays high until the next count write,
-            // while the count keeps running down through zero.
-            self.armed = false;
-            return true;
+        let mut edge = false;
+        loop {
+            self.load_at_half_cycle(now);
+            if self.next_tc > now {
+                return edge;
+            }
+            edge = true;
+            if !self.periodic() {
+                // One-shot: the output stays high until the next count
+                // write, while the count keeps running down through zero.
+                self.armed = false;
+                return true;
+            }
+            self.period_start = self.next_tc;
+            self.phase = 0;
+            if let Some(reload) = self.pending_reload
+                && self.pending_at <= self.period_start
+            {
+                self.pending_reload = None;
+                self.reload = reload;
+            }
+            let reload = self.reload as u64;
+            if self.pending_reload.is_none() {
+                // Skip whole periods arithmetically; several may have
+                // passed.
+                let behind = now - self.period_start;
+                self.period_start += behind / reload * reload;
+            }
+            self.next_tc = self.period_start + reload;
         }
-        self.period_start = self.next_tc;
-        if let Some(reload) = self.pending_reload.take() {
-            self.reload = reload;
-        }
-        // Skip whole periods arithmetically; several may have passed.
-        let reload = self.reload as u64;
-        let behind = now - self.period_start;
-        self.period_start += behind / reload * reload;
-        self.next_tc = self.period_start + reload;
-        true
+    }
+
+    /// This counter with a pending count that is due by `now` loaded.
+    fn settled(&self, now: u64) -> Option<Self> {
+        let due = self.counting && self.pending_reload.is_some() && self.pending_at <= now;
+        due.then(|| {
+            let mut settled = self.clone();
+            settled.advance(now);
+            settled
+        })
+    }
+
+    /// Ticks into the current period at `now`, for a periodic mode.
+    fn period_position(&self, now: u64) -> u64 {
+        (now.saturating_sub(self.period_start) + self.phase) % self.reload as u64
     }
 
     /// The value a counter read returns at `now`. The count runs down from
@@ -484,16 +595,59 @@ impl Pit0 {
         if !self.counting {
             return self.stopped;
         }
-        let elapsed = now.saturating_sub(self.period_start);
+        if let Some(settled) = self.settled(now) {
+            return settled.count(now);
+        }
         if self.periodic() {
             let reload = self.reload as u64;
-            let into = elapsed % reload;
-            let down = if self.mode == 3 { 2 * into % reload } else { into };
-            (reload - down) as u16
+            let into = self.period_position(now);
+            if self.mode == 3 {
+                square_wave_count(reload, into)
+            } else {
+                (reload - into) as u16
+            }
         } else {
             // One-shot counters keep counting down through zero.
+            let elapsed = now.saturating_sub(self.period_start);
             (self.reload as u64).wrapping_sub(elapsed) as u16
         }
+    }
+
+    /// The counter's output at `now`.
+    pub fn output(&self, now: u64) -> bool {
+        if !self.counting {
+            // Mode 0's output goes low at the control word, the others'
+            // high.
+            return self.mode != 0;
+        }
+        if let Some(settled) = self.settled(now) {
+            return settled.output(now);
+        }
+        let reload = self.reload as u64;
+        let elapsed = now.saturating_sub(self.period_start);
+        match self.mode {
+            2 => self.period_position(now) != reload - 1,
+            3 => self.period_position(now) < reload.div_ceil(2),
+            0 | 1 => elapsed >= reload,
+            _ => elapsed != reload,
+        }
+    }
+
+    /// The parts a state saved before the 8254 section lacks: a pending
+    /// count loads at the end of the period, as it did then, and the
+    /// control word's bits are those `access` and the mode give.
+    pub(crate) fn without_8254_state(&mut self, access: u8) {
+        self.phase = 0;
+        self.pending_at = self.next_tc;
+        self.control = access << 4 | self.mode << 1;
+    }
+
+    /// The status byte the read-back command latches at `now`: the output,
+    /// the null count flag (a count or control word written and not yet
+    /// loaded into the counting element) and the control word's bits 5-0.
+    pub fn status(&self, now: u64) -> u8 {
+        let null = !self.counting || self.pending_reload.is_some() && self.pending_at > now;
+        (self.output(now) as u8) << 7 | (null as u8) << 6 | self.control
     }
 }
 
@@ -1344,8 +1498,9 @@ pub struct Pit2 {
     mode: u8,
     /// Count loaded at each reload, 1..=65536.
     reload: u32,
-    /// Count written while a mode 2/3 period was running, and the tick the
-    /// period ends at, when it takes effect.
+    /// Count written while a mode 2/3 period was running, and the tick it
+    /// takes effect at: the end of the current half-cycle in mode 3, of the
+    /// current period in mode 2, as the 8254 data sheet has it.
     pending: Option<(u32, u64)>,
     /// Port 61h bit 0.
     gate: bool,
@@ -1367,6 +1522,16 @@ pub struct Pit2 {
     /// loads at once, even into a mode 2 or 3 period that ran on through
     /// the control word. Saved after the PIT2 section's first fields.
     pub count_due: bool,
+    /// How far into its period the count was at `start`: a mode 3 count
+    /// loaded at the end of a high half-cycle starts with the low half.
+    /// Saved in the 8254 section, as are the next two.
+    pub(crate) phase: u64,
+    /// Bits 5-0 of the last control word (access, mode as written and
+    /// BCD), which the read-back command's status byte gives back.
+    pub(crate) control: u8,
+    /// Status byte latched by a read-back command, which the next read of
+    /// port 42h returns before any latched count.
+    pub status: Option<u8>,
 }
 
 impl Default for Pit2 {
@@ -1389,6 +1554,9 @@ impl Pit2 {
             access: 3,
             latched: None,
             count_due: false,
+            phase: 0,
+            control: 0x36,
+            status: None,
         }
     }
 
@@ -1404,21 +1572,39 @@ impl Pit2 {
         self.gate
     }
 
+    /// Counter mode, 0..=5.
+    pub fn mode(&self) -> u8 {
+        self.mode
+    }
+
     /// A count written in mode 2 or 3 while a period ran, taking effect
-    /// when the period ends.
+    /// at the end of the half-cycle or period it was written in. A count
+    /// that loads where a mode 3 output goes low starts with the low half
+    /// of its own period. With the gate low the counter stops, and the
+    /// count loads when the gate triggers it (`set_gate`).
     fn apply_pending(&mut self, now: u64) {
         if let Some((reload, at)) = self.pending
             && at <= now
+            && self.held.is_none()
         {
+            let current = self.reload as u64;
+            let into = (at - self.start + self.phase) % current;
+            let low_next = self.mode == 3 && into == current.div_ceil(2);
             self.pending = None;
             self.reload = reload;
             self.from = reload;
             self.start = at;
+            self.phase = if low_next {
+                (reload as u64).div_ceil(2)
+            } else {
+                0
+            };
         }
     }
 
     /// Control word for channel 2: set the mode and stop the counter until
-    /// a count is written, as the 8254 data sheet has it.
+    /// a count is written, as the 8254 data sheet has it. `control` is the
+    /// control word; its bits 5-0 are kept.
     ///
     /// A mode 2 or 3 count that runs when a control word for the same mode
     /// comes goes on with the count it had. A switch between modes 2 and 3
@@ -1427,15 +1613,18 @@ impl Pit2 {
     /// and two reads of port 42h, never writing a count; a stopped count
     /// gives it the same number every time (DOSBox SVN's "every roll is
     /// 5", DOSBox-X issue 1274).
-    pub fn set_mode(&mut self, mode: u8, access: u8, now: u64) {
+    pub fn set_mode(&mut self, control: u8, now: u64) {
         self.apply_pending(now);
         let (count, _) = self.read(now);
+        let mode = (control >> 1) & 0x07;
         let mode = if mode >= 6 { mode - 4 } else { mode };
         let runs_on = self.held.is_none() && self.periodic() && mode == self.mode;
         self.mode = mode;
-        self.access = access;
+        self.access = (control >> 4) & 0x03;
+        self.control = control & 0x3F;
         self.pending = None;
         self.latched = None;
+        self.status = None;
         self.count_due = true;
         if !runs_on {
             // Mode 0's output goes low at the control word, the others' high.
@@ -1448,15 +1637,22 @@ impl Pit2 {
         let reload = if count == 0 { 0x10000 } else { count as u32 };
         self.apply_pending(now);
         if self.held.is_none() && self.periodic() && !self.count_due {
-            let reload_now = self.reload as u64;
-            let into = (now - self.start) % reload_now;
-            self.pending = Some((reload, now - into + reload_now));
+            let current = self.reload as u64;
+            let into = (now - self.start + self.phase) % current;
+            let high = current.div_ceil(2);
+            let left = if self.mode == 3 && into < high {
+                high - into
+            } else {
+                current - into
+            };
+            self.pending = Some((reload, now + left));
             return;
         }
         self.count_due = false;
         self.reload = reload;
         self.from = reload;
         self.pending = None;
+        self.phase = 0;
         if matches!(self.mode, 1 | 5) {
             // Loaded, but counting waits for the gate to trigger it.
             self.held = Some((reload as u16, true));
@@ -1484,10 +1680,15 @@ impl Pit2 {
             return;
         }
         match self.mode {
-            // A rising gate reloads the count and starts a new period.
+            // A rising gate reloads the count and starts a new period,
+            // with a count written since if there is one.
             1 | 2 | 3 | 5 => {
+                if let Some((reload, _)) = self.pending.take() {
+                    self.reload = reload;
+                }
                 self.from = self.reload;
                 self.start = now;
+                self.phase = 0;
                 self.held = None;
             }
             // Modes 0 and 4 go on from where the gate stopped them.
@@ -1524,15 +1725,14 @@ impl Pit2 {
         let reload = self.reload as u64;
         match self.mode {
             2 => {
-                let into = elapsed % reload;
-                let count = (reload - into) as u16;
-                (count, count != 1)
+                let into = (elapsed + self.phase) % reload;
+                ((reload - into) as u16, into != reload - 1)
             }
             3 => {
                 // The count runs down by two, twice a period, high for the
                 // first half.
-                let into = elapsed % reload;
-                ((reload - 2 * into % reload) as u16, into < reload.div_ceil(2))
+                let into = (elapsed + self.phase) % reload;
+                (square_wave_count(reload, into), into < reload.div_ceil(2))
             }
             // One-shot modes count down through zero and wrap: 0 and 1
             // raise their output at the terminal count, 4 and 5 pulse it low
@@ -1544,33 +1744,56 @@ impl Pit2 {
         }
     }
 
-    /// The output `elapsed` ticks after `start`, while the count runs.
-    fn output_at(&self, elapsed: u64) -> bool {
+    /// The parts a state saved before the 8254 section lacks: no status
+    /// latched, counts that start their periods from the top, and the
+    /// control word's bits those the access and the mode give.
+    pub(crate) fn without_8254_state(&mut self) {
+        self.phase = 0;
+        self.control = self.access << 4 | self.mode << 1;
+        self.status = None;
+    }
+
+    /// The status byte the read-back command latches at `now`: the output,
+    /// the null count flag (a count or control word written and not yet
+    /// loaded into the counting element) and the control word's bits 5-0.
+    pub fn status(&self, now: u64) -> u8 {
+        let (_, out) = self.read(now);
+        let pending = self
+            .pending
+            .is_some_and(|(_, at)| at > now || self.held.is_some());
+        let untriggered = matches!(self.mode, 1 | 5) && self.held.is_some();
+        let null = self.count_due || pending || untriggered;
+        (out as u8) << 7 | (null as u8) << 6 | self.control
+    }
+
+    /// The output at `at` ticks into the count's run, counted from the
+    /// start of its period in the periodic modes (`start` plus `phase`).
+    fn output_at(&self, at: u64) -> bool {
         let reload = self.reload as u64;
         match self.mode {
-            2 => elapsed % reload != reload - 1,
-            3 => elapsed % reload < reload.div_ceil(2),
-            0 | 1 => elapsed >= self.from as u64,
-            _ => elapsed != self.from as u64,
+            2 => at % reload != reload - 1,
+            3 => at % reload < reload.div_ceil(2),
+            0 | 1 => at >= self.from as u64,
+            _ => at != self.from as u64,
         }
     }
 
-    /// How many of the first `elapsed` ticks after `start` the output is
-    /// high, while the count runs.
-    fn high_count(&self, elapsed: u64) -> u64 {
+    /// How many of the first `at` ticks of the count's run the output is
+    /// high, counted as for `output_at`.
+    fn high_count(&self, at: u64) -> u64 {
         let reload = self.reload as u64;
         let from = self.from as u64;
         match self.mode {
             // Low for the last tick of each period.
-            2 => elapsed - elapsed / reload,
+            2 => at - at / reload,
             // High for the first half of each period, the longer one of an
             // odd count.
             3 => {
                 let high = reload.div_ceil(2);
-                elapsed / reload * high + (elapsed % reload).min(high)
+                at / reload * high + (at % reload).min(high)
             }
-            0 | 1 => elapsed.saturating_sub(from),
-            _ => elapsed - (elapsed > from) as u64,
+            0 | 1 => at.saturating_sub(from),
+            _ => at - (at > from) as u64,
         }
     }
 
@@ -1584,7 +1807,9 @@ impl Pit2 {
         if b <= a {
             return 0.0;
         }
-        if let Some((_, at)) = self.pending {
+        if let Some((_, at)) = self.pending
+            && self.held.is_none()
+        {
             let at = at as f64;
             if a < at {
                 let mut before = self.clone();
@@ -1613,11 +1838,15 @@ impl Pit2 {
     /// How long the output is high from `start` to tick `t`, while the
     /// count runs.
     fn high_until(&self, t: f64) -> f64 {
-        let elapsed = (t - self.start as f64).max(0.0);
-        let whole = elapsed.floor();
+        let at = (t - self.start as f64).max(0.0) + self.phase as f64;
+        let whole = at.floor();
         let ticks = whole as u64;
-        let part = if self.output_at(ticks) { elapsed - whole } else { 0.0 };
-        self.high_count(ticks) as f64 + part
+        let part = if self.output_at(ticks) {
+            at - whole
+        } else {
+            0.0
+        };
+        (self.high_count(ticks) - self.high_count(self.phase)) as f64 + part
     }
 
     /// The output's level from `now` on while nothing is written to the
@@ -1637,8 +1866,119 @@ impl Pit2 {
     }
 }
 
-crate::state_fields!(Pit0 { mode, reload, pending_reload, counting, stopped, armed, period_start, next_tc });
-crate::state_fields!(Pit2 { mode, reload, pending, gate, start, from, held, access, latched } skip { count_due });
+/// The byte interface of channel 1's port 41h: the access mode, the
+/// LSB/MSB flip-flops and the latches. Channels 0 and 2 keep theirs on the
+/// bus (`Bus::pit0_access`) and in `Pit2`.
+#[derive(Clone, Debug)]
+pub struct PitPort {
+    /// Access mode from the last control word: 1 = LSB only, 2 = MSB only,
+    /// 3 = LSB then MSB.
+    pub access: u8,
+    write_msb: bool,
+    read_msb: bool,
+    /// The count as assembled from the bytes written.
+    divisor: u16,
+    /// Count frozen by a latch command, read until both bytes are read.
+    latched: Option<u16>,
+    /// Status byte latched by a read-back command, read before the count.
+    status: Option<u8>,
+}
+
+impl Default for PitPort {
+    fn default() -> Self {
+        Self::new(3)
+    }
+}
+
+impl PitPort {
+    pub fn new(access: u8) -> Self {
+        Self {
+            access,
+            write_msb: false,
+            read_msb: false,
+            divisor: 0,
+            latched: None,
+            status: None,
+        }
+    }
+
+    /// A control word with `access` (not a latch command): the byte
+    /// sequencing starts over and the latches are dropped.
+    pub fn control(&mut self, access: u8) {
+        *self = Self::new(access);
+    }
+
+    /// A latch command, or a read-back command's count latch. A count
+    /// latched and not yet read stays: the 8254 ignores the later ones.
+    pub fn latch_count(&mut self, count: u16) {
+        if self.latched.is_none() {
+            self.latched = Some(count);
+            self.read_msb = false;
+        }
+    }
+
+    /// A read-back command's status latch, ignored while one is unread.
+    pub fn latch_status(&mut self, status: u8) {
+        self.status.get_or_insert(status);
+    }
+
+    /// A byte written to the port. Returns the count once it is complete.
+    pub fn write(&mut self, value: u8) -> Option<u16> {
+        match self.access {
+            1 => self.divisor = value as u16,
+            2 => self.divisor = (value as u16) << 8,
+            _ if !self.write_msb => {
+                self.divisor = (self.divisor & 0xFF00) | value as u16;
+                self.write_msb = true;
+                return None;
+            }
+            _ => {
+                self.divisor = (self.divisor & 0x00FF) | (value as u16) << 8;
+                self.write_msb = false;
+            }
+        }
+        Some(self.divisor)
+    }
+
+    /// A byte read from the port, with `live` the count at the moment: a
+    /// latched status first, then a latched count, else the live one.
+    pub fn read(&mut self, live: u16) -> u8 {
+        if let Some(status) = self.status.take() {
+            return status;
+        }
+        let count = self.latched.unwrap_or(live);
+        match self.access {
+            1 => {
+                self.latched = None;
+                count as u8
+            }
+            2 => {
+                self.latched = None;
+                (count >> 8) as u8
+            }
+            _ if !self.read_msb => {
+                self.read_msb = true;
+                count as u8
+            }
+            _ => {
+                self.read_msb = false;
+                self.latched = None;
+                (count >> 8) as u8
+            }
+        }
+    }
+}
+
+crate::state_fields!(Pit0 { mode, reload, pending_reload, counting, stopped, armed, period_start, next_tc } skip { phase, pending_at, control });
+crate::state_fields!(Pit2 { mode, reload, pending, gate, start, from, held, access, latched } skip { count_due, phase, control, status });
+crate::state_fields!(PitPort {
+    access,
+    write_msb,
+    read_msb,
+    divisor,
+    latched,
+    status
+});
 crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns } skip { tsc, offloaded, disk_wait });
 crate::state_fields!(Tsc { base, icount, hz });
 
@@ -2320,7 +2660,7 @@ mod tests {
         // MS-Kermit's calibration: mode 2, count 0, gate up for a delay
         // loop, gate down, then read the count without a latch.
         let mut pit = Pit2::new();
-        pit.set_mode(2, 3, 1000);
+        pit.set_mode(0x34, 1000);
         pit.write_count(0, 1010);
         assert_eq!(pit.read(5000).0, 0);
         pit.set_gate(true, 20_000);
@@ -2335,7 +2675,7 @@ mod tests {
     fn channel_2_mode_0_resumes_where_the_gate_stopped_it() {
         let mut pit = Pit2::new();
         pit.set_gate(true, 0);
-        pit.set_mode(0, 3, 0);
+        pit.set_mode(0x30, 0);
         pit.write_count(100, 10);
         assert_eq!(pit.read(50), (60, false));
         pit.set_gate(false, 50);
@@ -2353,7 +2693,7 @@ mod tests {
         for mode in 0..6u8 {
             for count in [2u16, 3, 7, 10] {
                 let mut pit = Pit2::new();
-                pit.set_mode(mode, 3, 0);
+                pit.set_mode(0x30 | mode << 1, 0);
                 pit.set_gate(true, 0);
                 pit.write_count(count, 5);
                 if matches!(mode, 1 | 5) {
@@ -2383,11 +2723,11 @@ mod tests {
     #[test]
     fn a_square_wave_is_high_for_its_longer_half() {
         let mut pit = Pit2::new();
-        pit.set_mode(3, 3, 0);
+        pit.set_mode(0x36, 0);
         pit.set_gate(true, 0);
         pit.write_count(2, 0);
         assert_eq!(pit.high_ticks(0.0, 1000.0), 500.0);
-        pit.set_mode(3, 3, 1000);
+        pit.set_mode(0x36, 1000);
         pit.write_count(3, 1000);
         assert_eq!(pit.high_ticks(1000.0, 1300.0), 200.0);
     }

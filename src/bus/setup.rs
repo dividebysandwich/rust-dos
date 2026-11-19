@@ -88,7 +88,10 @@ impl Bus {
             pit0_access: 3,
             pit0_latched: 0,
             pit0_latched_active: false,
+            pit0_status: None,
             pit0: crate::timer::Pit0::new(),
+            pit1: crate::timer::Pit0::refresh(),
+            pit1_port: crate::timer::PitPort::new(1),
             clock: crate::timer::Clock::new(crate::timer::CpuSpeed::Max.initial_cycles()),
             pic: crate::pic::Pic::new(),
             speaker_high: 0.0,
@@ -371,13 +374,14 @@ impl Bus {
     pub fn reset_timers(&mut self) {
         // Mode 3, count 65536, counting from now.
         let now = self.clock.now_ticks();
-        self.pit0.set_mode(3, now);
+        self.pit0.set_mode(0x36, now);
         self.pit0.write_count(0, now);
         self.pit0_divisor = 0;
         self.pit0_write_msb = false;
         self.pit0_read_msb = false;
         self.pit0_access = 3;
         self.pit0_latched_active = false;
+        self.pit0_status = None;
         self.pic = crate::pic::Pic::new();
         if let Some(irq) = self.kbc.output_irq() {
             self.pic.raise(irq);

@@ -378,6 +378,13 @@ fn main_code(a: &mut CodeAssembler, audio_start: u32) -> Asm {
     outb(a, 0x43, 0x00)?;
     a.in_(al, 0x40)?;
     store(a, 70, ax)?;
+    // The same count again while the period runs, which waits for its
+    // end, and channel 1 as a square wave, given a second count while
+    // it runs, which waits for the end of its half-cycle.
+    outb(a, 0x40, 0x80)?;
+    outb(a, 0x43, 0x56)?;
+    outb(a, 0x41, 0x80)?;
+    outb(a, 0x41, 0x40)?;
     // Channel 2 again, an octave up, as the last control word: a pulse
     // train in mode 2, high for all but a tick of each period, so the
     // speaker's level in the frame being made at a stop (`speaker_high`)
@@ -385,6 +392,9 @@ fn main_code(a: &mut CodeAssembler, audio_start: u32) -> Asm {
     outb(a, 0x43, 0xB4)?;
     outb(a, 0x42, 0x4E)?;
     outb(a, 0x42, 0x02)?;
+    // The status of channels 0 and 2, latched by a read-back command and
+    // left for a read that doesn't come.
+    outb(a, 0x43, 0xEA)?;
 
     // DOS's upper memory link, turned the other way.
     a.mov(ax, 0x5802u32)?;
@@ -1467,6 +1477,9 @@ const STILL: &[(&str, &str)] = &[
     ("CORE.pit0_read_msb", "channel 0's read flip-flop, at rest after a whole read"),
     ("CORE.pit0_write_msb", "channel 0's write flip-flop, at rest after a whole write"),
     ("CORE.pit0_latched_active", "channel 0's latch, read out"),
+    ("8254.pit0_phase", "a mode 3 count loaded at a half-cycle, which the run's mode 2 has none of"),
+    ("8254.pit1_phase", "a count loaded at a half-cycle, which the run never reads channel 1 after"),
+    ("8254.pit2_phase", "a mode 3 count loaded at a half-cycle, which the run's mode 2 has none of"),
     ("VIDE.gate_array_shadow", "the PCjr's and Tandy's gate array"),
     ("VIDE.gate_array_shadow_at", "the PCjr's and Tandy's gate array"),
     ("SOUN.tandy_sound", "the PCjr's and Tandy's sound chip"),
