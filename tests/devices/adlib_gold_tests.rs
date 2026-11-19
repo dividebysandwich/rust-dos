@@ -82,6 +82,18 @@ fn the_sdtk_finds_the_card_and_the_opl3_stays_behind_it() {
     assert_eq!(bus.io_read(BASE) & 0xE0, 0xC0);
 }
 
+/// The Ultrasound latches what is written to 388h whichever card's FM
+/// chip answers there: its detection reads the number back at 2XAh.
+#[test]
+fn the_ultrasound_still_latches_388h_behind_the_card() {
+    let mut bus = bus(true);
+    assert!(bus.gus.is_some(), "the machine has its Ultrasound at 240h");
+    bus.io_write(BASE, 0x5A);
+    assert_eq!(bus.io_read(0x24A), 0x5A);
+    bus.io_write(BASE, 0xA5);
+    assert_eq!(bus.io_read(0x24A), 0xA5);
+}
+
 /// The Jungle Book's effects: MMA channel 0 at 11 kHz, 8-bit PCM from an
 /// auto-init buffer on DMA 1, which the game follows by reading the
 /// channel's count.

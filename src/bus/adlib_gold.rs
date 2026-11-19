@@ -36,6 +36,11 @@ impl Bus {
     /// Run the AdLib Gold's MMA up to the present and update its
     /// interrupt line.
     pub(super) fn adlib_gold_advance(&mut self) {
+        // The DMA ports call this at every access: without the card, it
+        // costs the check alone, not the clock's time.
+        if self.adlib_gold.is_none() {
+            return;
+        }
         let now = self.clock.now_ticks();
         if let Some(gold) = &mut self.adlib_gold {
             gold.advance(now, &mut self.dma, &self.ram);
@@ -79,7 +84,7 @@ impl Bus {
             return;
         };
         match port.wrapping_sub(gold.base()) {
-            0 => self.opl.write_address(0, value),
+            0 => self.opl_address(port, value),
             1 => self.opl_data(0, value),
             2 => {
                 if !gold.write_control_address(value) {

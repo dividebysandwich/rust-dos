@@ -2326,6 +2326,20 @@ impl Bus {
         }
     }
 
+    /// Pick a register of the FM chip's first bank through `port`.
+    fn opl_address(&mut self, port: u16, value: u8) {
+        self.opl.write_address(0, value);
+        // The Ultrasound latches the AdLib register numbers written to
+        // 388h too, whichever card's FM chip answers there (an AdLib
+        // Gold's at its default base); its detection reads them back at
+        // 2XAh.
+        if port == 0x388
+            && let Some(gus) = &mut self.gus
+        {
+            gus.write_adlib_address(value);
+        }
+    }
+
     /// Write an FM register at its emulated time.
     fn opl_data(&mut self, bank: usize, value: u8) {
         self.audio_catch_up();
@@ -2801,14 +2815,7 @@ impl Bus {
 
             // The FM chip: AdLib ports 388h/389h, and the OPL3's second
             // register bank at 38Ah/38Bh.
-            0x388 => {
-                self.opl.write_address(0, value);
-                // The Ultrasound latches AdLib register numbers too; its
-                // detection reads them back at 2XAh.
-                if let Some(gus) = &mut self.gus {
-                    gus.write_adlib_address(value);
-                }
-            }
+            0x388 => self.opl_address(0x388, value),
             0x389 => self.opl_data(0, value),
             0x38A => self.opl.write_address(1, value),
             0x38B => self.opl_data(1, value),
