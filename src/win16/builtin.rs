@@ -390,6 +390,13 @@ pub fn converts_handle(c: u8) -> bool {
     matches!(c, b'i' | b'm' | b'a' | b'n')
 }
 
+/// Whether `post_auto` gives 16-bit code a return of the kind `c` as the
+/// 32-bit function returned it, in DX:AX: neither a handle converted nor
+/// a BOOL made 0 or 1.
+pub fn returns_as_is(c: u8) -> bool {
+    !converts_handle(c) && c != b'b'
+}
+
 /// Run the function the trap with id `id` is the stub of, called by 16-bit
 /// code: its far return address on the stack, its arguments above.
 pub fn call(cpu: &mut Cpu, id: u16) {

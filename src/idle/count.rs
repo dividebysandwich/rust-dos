@@ -45,8 +45,8 @@ use std::ops::Range;
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpAccess, OpKind, Register};
 
 use super::{
-    code_at, copy_blocks, entries, finish, physical, present, rflags, segment_runs, Access, Phase,
-    Visit, CHUNK, FACTORY, PASS_LIMIT, REP_SPAN, STACK_REACH,
+    Access, CHUNK, FACTORY, PASS_LIMIT, Phase, REP_SPAN, STACK_REACH, Visit, code_at, copy_blocks,
+    entries_into, finish, pages, physical_into, present, rflags, segment_runs,
 };
 use crate::cpu::Cpu;
 
@@ -148,6 +148,12 @@ pub(super) fn set_cell(cpu: &mut Cpu, cell: Cell, value: u8) {
 }
 
 /// What an instruction the model follows does with its operands.
+///
+/// MUL and DIV have a second destination, `hi`: MUL puts the product's
+/// upper half there (AH, DX or EDX), and DIV takes the dividend's upper
+/// half from it and leaves the remainder there. ADC and SBB take the carry
+/// the recorded pass had, which the passes after it have too: a count
+/// that set it sets it as it did there (`Model::checks`).
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum CountOp {
     Mov,
@@ -155,46 +161,85 @@ enum CountOp {
     Dec,
     Add,
     Sub,
+    Adc,
+    Sbb,
+    Neg,
+    Not,
+    And,
+    Or,
+    Xor,
+    Mul,
+    Div,
     Cmp,
     Test,
 }
 
+/// What a step of the model left: the destination's new value (None
+/// where it keeps it), `hi`'s, and the flags, of those it sets.
+type Outcome = (Option<u32>, Option<u32>, u32);
+
 impl CountOp {
-    /// The destination's new value (None where it keeps it) and the flags,
-    /// of those it sets.
-    fn run(self, size: u8, dst: u32, src: u32) -> (Option<u32>, u32) {
+    /// What it leaves for the operands' values, or None where it raises
+    /// an exception (a DIV by 0 or whose quotient doesn't fit), which the
+    /// pass recorded didn't.
+    fn run(self, size: u8, dst: u32, src: u32, hi: u32, carry: bool) -> Option<Outcome> {
         use crate::cpu::alu;
         let m = alu::size_mask(size);
-        let (dst, src) = (dst & m, src & m);
+        let (dst, src, hi) = (dst & m, src & m, hi & m);
+        let value = |(r, f): (u32, u32)| Some((Some(r), None, f));
         match self {
-            CountOp::Mov => (Some(src), 0),
+            CountOp::Mov => Some((Some(src), None, 0)),
             CountOp::Inc => {
                 let (r, f) = alu::add(size, dst, 1, false);
-                (Some(r), f & !alu::CF)
+                Some((Some(r), None, f & !alu::CF))
             }
             CountOp::Dec => {
                 let (r, f) = alu::sub(size, dst, 1, false);
-                (Some(r), f & !alu::CF)
+                Some((Some(r), None, f & !alu::CF))
             }
-            CountOp::Add => {
-                let (r, f) = alu::add(size, dst, src, false);
-                (Some(r), f)
+            CountOp::Add => value(alu::add(size, dst, src, false)),
+            CountOp::Sub => value(alu::sub(size, dst, src, false)),
+            CountOp::Adc => value(alu::add(size, dst, src, carry)),
+            CountOp::Sbb => value(alu::sub(size, dst, src, carry)),
+            CountOp::Neg => value(alu::sub(size, 0, dst, false)),
+            CountOp::Not => Some((Some(!dst & m), None, 0)),
+            CountOp::And => Some((Some(dst & src), None, alu::logic(size, dst & src))),
+            CountOp::Or => Some((Some(dst | src), None, alu::logic(size, dst | src))),
+            CountOp::Xor => Some((Some(dst ^ src), None, alu::logic(size, dst ^ src))),
+            CountOp::Mul => {
+                // As `instructions::arith::mul`: CF and OF tell whether
+                // the upper half is in use.
+                let bits = 8 * size as u32;
+                let product = dst as u64 * src as u64;
+                let upper = (product >> bits) as u32;
+                let flags = if upper != 0 { alu::CF | alu::OF } else { 0 };
+                Some((Some(product as u32 & m), Some(upper), flags))
             }
-            CountOp::Sub => {
-                let (r, f) = alu::sub(size, dst, src, false);
-                (Some(r), f)
+            CountOp::Div => {
+                let bits = 8 * size as u32;
+                let dividend = (hi as u64) << bits | dst as u64;
+                if src == 0 || dividend / src as u64 > m as u64 {
+                    return None;
+                }
+                let (q, r) = (
+                    (dividend / src as u64) as u32,
+                    (dividend % src as u64) as u32,
+                );
+                let flags = crate::instructions::arith::division_flags(q, r, bits);
+                Some((Some(q), Some(r), flags))
             }
-            CountOp::Cmp => (None, alu::sub(size, dst, src, false).1),
-            CountOp::Test => (None, alu::logic(size, dst & src)),
+            CountOp::Cmp => Some((None, None, alu::sub(size, dst, src, false).1)),
+            CountOp::Test => Some((None, None, alu::logic(size, dst & src))),
         }
     }
 
     /// The flags it sets.
     fn sets(self) -> u32 {
-        use crate::cpu::alu::{ARITH, CF};
+        use crate::cpu::alu::{ARITH, CF, OF};
         match self {
-            CountOp::Mov => 0,
+            CountOp::Mov | CountOp::Not => 0,
             CountOp::Inc | CountOp::Dec => ARITH & !CF,
+            CountOp::Mul => CF | OF,
             _ => ARITH,
         }
     }
@@ -205,6 +250,15 @@ impl CountOp {
 
     fn writes_dst(self) -> bool {
         !matches!(self, CountOp::Cmp | CountOp::Test)
+    }
+
+    /// Whether it has a second destination (`hi`), and reads it.
+    fn has_hi(self) -> bool {
+        matches!(self, CountOp::Mul | CountOp::Div)
+    }
+
+    fn reads_hi(self) -> bool {
+        self == CountOp::Div
     }
 }
 
@@ -240,12 +294,28 @@ impl Place {
     }
 }
 
-/// An instruction the model can follow, with its operands.
+/// An instruction the model can follow, with its operands: `hi` of MUL
+/// and DIV (`CountOp`), and the carry ADC and SBB found.
 struct Operation {
     op: CountOp,
     size: u8,
     dst: Place,
     src: Place,
+    hi: Option<Place>,
+    carry: bool,
+}
+
+impl Operation {
+    /// Whether it reads a cell holding a count.
+    fn reads_count(&self, pass: &Pass) -> bool {
+        let any = |p: Option<Place>| {
+            p.and_then(|p| p.cells(self.size))
+                .is_some_and(|c| pass.any(&c))
+        };
+        any(Some(self.src))
+            || self.op.reads_dst() && any(Some(self.dst))
+            || self.op.reads_hi() && any(self.hi)
+    }
 }
 
 /// An operand as the pass found it: its first cell (none for a constant)
@@ -264,6 +334,10 @@ struct Counting {
     size: u8,
     dst: Operand,
     src: Operand,
+    /// MUL's and DIV's second destination (`CountOp`), a constant 0 for
+    /// the others.
+    hi: Operand,
+    carry: bool,
     /// The instruction's place in the pass.
     at: usize,
 }
@@ -292,6 +366,9 @@ pub(super) struct Pass {
     /// The cells of RAM the instruction running sets from the counts,
     /// tainted once its writes are settled.
     deferred: Vec<Cell>,
+    /// The instruction running is the trap of a Win16 stub in 16-bit
+    /// code (`after_service`).
+    stub16: bool,
 }
 
 impl Pass {
@@ -303,6 +380,11 @@ impl Pass {
             seeds,
             ..Pass::default()
         }
+    }
+
+    /// The instructions recorded so far.
+    pub(super) fn recorded(&self) -> u64 {
+        self.flags.len() as u64
     }
 
     /// The general registers that may hold counts at the head.
@@ -340,10 +422,13 @@ fn settle(cpu: &mut Cpu) {
     let Phase::Count { pass, .. } = &mut o.phase else {
         return;
     };
-    let pending = std::mem::take(&mut pass.pending);
-    let deferred = std::mem::take(&mut pass.deferred);
+    if pass.pending.is_empty() && pass.deferred.is_empty() {
+        return;
+    }
+    let mut pending = std::mem::take(&mut pass.pending);
+    let mut deferred = std::mem::take(&mut pass.deferred);
     let mut inexact = false;
-    for (start, end, exact) in pending {
+    for &(start, end, exact) in &pending {
         let hit: Vec<Cell> = pass
             .tainted
             .range(start as Cell..end as Cell)
@@ -356,7 +441,9 @@ fn settle(cpu: &mut Cpu) {
             pass.steps.push(Step::Kill(c));
         }
     }
-    pass.tainted.extend(deferred);
+    pass.tainted.extend(deferred.drain(..));
+    pending.clear();
+    (pass.pending, pass.deferred) = (pending, deferred);
     if inexact {
         o.opaque_because("counter");
     }
@@ -373,10 +460,16 @@ fn linear(cpu: &Cpu, instr: &Instruction, operand: u32) -> Option<u32> {
 
 /// The RAM of the `size` bytes at linear `lin`, if one run of it.
 fn ram_at(cpu: &Cpu, lin: u32, size: u8, write: bool) -> Option<Place> {
-    match physical(cpu, lin, size as u64, write)?.as_slice() {
-        [one] => Some(Place::Ram(one.start)),
-        _ => None,
+    let mut run: Option<Access> = None;
+    for piece in pages(cpu, lin, size as u64, write) {
+        let piece = piece?;
+        match &mut run {
+            None => run = Some(piece),
+            Some(r) if r.start + r.len == piece.start => r.len += piece.len,
+            Some(_) => return None,
+        }
     }
+    run.map(|r| Place::Ram(r.start))
 }
 
 /// Operand `i` of `instr`, of `size` bytes.
@@ -427,12 +520,41 @@ fn operation(cpu: &Cpu, instr: &Instruction) -> Option<Operation> {
         (Mnemonic::Mov | Mnemonic::Push | Mnemonic::Pop, _) => CountOp::Mov,
         (Mnemonic::Inc, 1) => CountOp::Inc,
         (Mnemonic::Dec, 1) => CountOp::Dec,
+        (Mnemonic::Neg, 1) => CountOp::Neg,
+        (Mnemonic::Not, 1) => CountOp::Not,
+        (Mnemonic::Mul, 1) => CountOp::Mul,
+        (Mnemonic::Div, 1) => CountOp::Div,
         (Mnemonic::Add, 2) => CountOp::Add,
         (Mnemonic::Sub, 2) => CountOp::Sub,
+        (Mnemonic::Adc, 2) => CountOp::Adc,
+        (Mnemonic::Sbb, 2) => CountOp::Sbb,
+        (Mnemonic::And, 2) => CountOp::And,
+        (Mnemonic::Or, 2) => CountOp::Or,
+        (Mnemonic::Xor, 2) => CountOp::Xor,
         (Mnemonic::Cmp, 2) => CountOp::Cmp,
         (Mnemonic::Test, 2) => CountOp::Test,
         _ => return None,
     };
+    let carry = cpu.get_cpu_flag(crate::cpu::CpuFlags::CF);
+    if op.has_hi() {
+        // AL, AX or EAX by the operand's size, and the upper half in AH,
+        // DX or EDX.
+        let size = size_of(instr, 0)?;
+        let hi = if size == 1 {
+            reg_cell(0) + 1
+        } else {
+            reg_cell(2)
+        };
+        let src = place(cpu, instr, 0, size, false)?;
+        return Some(Operation {
+            op,
+            size,
+            dst: Place::Reg(reg_cell(0)),
+            src,
+            hi: Some(Place::Reg(hi)),
+            carry,
+        });
+    }
     let (size, dst, src) = match (mnemonic, instr.op_count()) {
         (Mnemonic::Push, 1) => {
             let size = u8::try_from(-instr.stack_pointer_increment()).ok()?;
@@ -463,7 +585,83 @@ fn operation(cpu: &Cpu, instr: &Instruction) -> Option<Operation> {
     if !matches!(size, 1 | 2 | 4) || matches!(dst, Place::Imm(_)) {
         return None;
     }
-    Some(Operation { op, size, dst, src })
+    Some(Operation {
+        op,
+        size,
+        dst,
+        src,
+        hi: None,
+        carry,
+    })
+}
+
+/// What `record` takes from an instruction's bytes alone, kept by its
+/// place for the proofs after (`Observe::decoded`): a loop runs the same
+/// instructions in each pass, and a loop proven again at every timer
+/// event or millisecond records the same pass each time.
+pub(super) struct Decoded {
+    /// Its linear address, EIP and code size.
+    lin: u32,
+    eip: u32,
+    bitness: u32,
+    /// The bytes it was decoded from, and how many of them it depends on:
+    /// its length, or all that could be read where it doesn't decode (a
+    /// trap).
+    bytes: [u8; 15],
+    known: usize,
+    instr: Instruction,
+    used: Vec<iced_x86::UsedMemory>,
+    regs: Vec<iced_x86::UsedRegister>,
+}
+
+/// Places of `Observe::decoded`.
+pub(super) const DECODED: usize = 4096;
+
+/// The instruction at linear address `ip`, with `bytes` there, of which
+/// `mapped` could be read: from `Observe::decoded` where it has the same
+/// instruction, else decoded and kept there.
+fn decode(
+    cpu: &mut Cpu,
+    ip: u32,
+    bitness: u32,
+    bytes: &[u8; 15],
+    mapped: usize,
+) -> std::sync::Arc<Decoded> {
+    let eip = cpu.eip();
+    let slot = (ip.wrapping_mul(0x9E37_79B1) >> 20) as usize % DECODED;
+    let cache = &mut cpu.bus.observe.decoded;
+    if let Some(Some(d)) = cache.get(slot)
+        && (d.lin, d.eip, d.bitness) == (ip, eip, bitness)
+        && d.known <= mapped
+        && d.bytes[..d.known] == bytes[..d.known]
+    {
+        return d.clone();
+    }
+    let instr = Decoder::with_ip(bitness, bytes, eip as u64, DecoderOptions::NONE).decode();
+    let (used, regs) = FACTORY.with_borrow_mut(|f| {
+        let info = f.info(&instr);
+        (info.used_memory().to_vec(), info.used_registers().to_vec())
+    });
+    let known = if instr.is_invalid() {
+        mapped
+    } else {
+        instr.len().min(mapped)
+    };
+    let d = std::sync::Arc::new(Decoded {
+        lin: ip,
+        eip,
+        bitness,
+        bytes: *bytes,
+        known,
+        instr,
+        used,
+        regs,
+    });
+    if cache.is_empty() {
+        cache.resize(DECODED, None);
+    }
+    cache[slot] = Some(d.clone());
+    d
 }
 
 /// During `Phase::Count`, the instruction about to run: what it does to
@@ -476,14 +674,18 @@ pub(super) fn record(cpu: &mut Cpu) {
     let bitness = if cs.attr & crate::cpu::ATTR_DB != 0 { 32 } else { 16 };
     let ip = cs.base.wrapping_add(cpu.eip());
     let (bytes, mapped) = code_at(cpu, ip);
-    let instr = Decoder::with_ip(bitness, &bytes, cpu.eip() as u64, DecoderOptions::NONE).decode();
+    let decoded = decode(cpu, ip, bitness, &bytes, mapped);
+    let instr = decoded.instr;
     // An instruction that runs into a page that isn't there faults, and
     // the fault ends the proof: its bytes aren't known before.
     if instr.len() > mapped || instr.is_invalid() && mapped < bytes.len() {
         return cpu.bus.observe.fail("paging");
     }
     // The page table entries that find its bytes and the RAM it reaches.
-    let mut tables = entries(cpu, ip, instr.len() as u64);
+    let (mut reads, mut tables) = std::mem::take(&mut cpu.bus.observe.scratch);
+    reads.clear();
+    tables.clear();
+    entries_into(cpu, ip, instr.len() as u64, &mut tables);
     let trap = instr.is_invalid() && bytes[0] == 0xFE;
     // A service of the built-in Windows called from 32-bit code, which
     // takes its arguments on the stack (`after_service`), or the stub of
@@ -556,12 +758,8 @@ pub(super) fn record(cpu: &mut Cpu) {
     };
     // The RAM it reads. What it writes the bus reports as it writes it
     // (`Pass::wrote`).
-    let mut reads: Vec<Access> = Vec::with_capacity(4);
-    let (used, regs) = FACTORY.with_borrow_mut(|f| {
-        let info = f.info(&instr);
-        (info.used_memory().to_vec(), info.used_registers().to_vec())
-    });
-    for m in &used {
+    let (used, regs) = (&decoded.used, &decoded.regs);
+    for m in used {
         let write = matches!(m.access(), OpAccess::Write | OpAccess::CondWrite);
         let seg_base = |r: Register| {
             crate::cpu::Seg::from_register(r).map(|s| cpu.seg_cache(s).base as u64)
@@ -604,13 +802,14 @@ pub(super) fn record(cpu: &mut Cpu) {
             [(addr as u32, size), (0, 0)]
         };
         for (lin, len) in runs {
-            let Some(found) = physical(cpu, lin, len, write) else {
+            let from = reads.len();
+            if !physical_into(cpu, lin, len, write, &mut reads) {
                 return cpu.bus.observe.fail("paging");
-            };
-            if !write {
-                reads.extend(found);
             }
-            tables.extend(entries(cpu, lin, len));
+            if write {
+                reads.truncate(from);
+            }
+            entries_into(cpu, lin, len, &mut tables);
         }
     }
     if opaque && !service {
@@ -632,16 +831,16 @@ pub(super) fn record(cpu: &mut Cpu) {
         };
         for (lin, len) in runs {
             reads.extend(present(cpu, lin, len, false));
-            tables.extend(entries(cpu, lin, len));
+            entries_into(cpu, lin, len, &mut tables);
         }
         reads.push(Access { start: 0, len: 0x400 });
         if cpu.pe() {
             let idt = cpu.idtr;
             reads.extend(present(cpu, idt.base, idt.limit as u64 + 1, false));
-            tables.extend(entries(cpu, idt.base, idt.limit as u64 + 1));
+            entries_into(cpu, idt.base, idt.limit as u64 + 1, &mut tables);
         }
     }
-    reads.extend(tables);
+    reads.extend_from_slice(&tables);
     let operation = if opaque { None } else { operation(cpu, &instr) };
     // XOR and SUB of a register with itself read nothing of it.
     let zeroes = matches!(mnemonic, Mnemonic::Xor | Mnemonic::Sub)
@@ -649,9 +848,10 @@ pub(super) fn record(cpu: &mut Cpu) {
         && instr.op0_kind() == OpKind::Register
         && instr.op1_kind() == OpKind::Register
         && instr.op0_register() == instr.op1_register();
-    let values = operation
-        .as_ref()
-        .map(|m| (m.dst.value(cpu, m.size), m.src.value(cpu, m.size)));
+    let values = operation.as_ref().map(|m| {
+        let hi = m.hi.map_or(0, |h| h.value(cpu, m.size));
+        (m.dst.value(cpu, m.size), m.src.value(cpu, m.size), hi)
+    });
     let o = &mut cpu.bus.observe;
     let Phase::Count { pass, .. } = &mut o.phase else {
         return;
@@ -661,15 +861,13 @@ pub(super) fn record(cpu: &mut Cpu) {
     }
     let at = pass.flags.len();
     pass.flags.push(flags);
-    // The instruction counts if it reads a count, as the model follows.
-    let counting = operation.filter(|m| {
-        let src = m.src.cells(m.size).is_some_and(|c| pass.any(&c));
-        let dst = m.op.reads_dst() && m.dst.cells(m.size).is_some_and(|c| pass.any(&c));
-        src || dst
-    });
+    pass.stub16 = service16;
+    // The instruction counts if it reads a count, as the model follows. (A
+    // register XORed or subtracted from itself is 0, whatever it held.)
+    let counting = operation.filter(|m| !zeroes && m.reads_count(pass));
     let covered: Vec<Range<Cell>> = counting
         .iter()
-        .flat_map(|m| [m.dst.cells(m.size), m.src.cells(m.size)])
+        .flat_map(|m| [Some(m.dst), Some(m.src), m.hi].map(|p| p.and_then(|p| p.cells(m.size))))
         .flatten()
         .collect();
     let is_covered = |c: Cell| covered.iter().any(|r| r.contains(&c));
@@ -677,13 +875,11 @@ pub(super) fn record(cpu: &mut Cpu) {
     if opaque {
         // A service keeps EBX, ESI, EDI and EBP, sets EAX to what it
         // returns, and reads no register but ESP (`after_service`); it may
-        // change ECX and EDX. A Win16 function keeps SI, DI and BP, and
-        // may leave anything in AX, BX, CX and DX: it returns DX:AX, and
-        // the thunk to a 32-bit function it may go through (`builtin::
-        // auto_thunk`) gives them back only where it returns. Anything
-        // else may read any.
+        // change ECX and EDX. What a Win16 function leaves in the
+        // registers depends on whether it calls 32-bit code, which
+        // `after_service` looks at. Anything else may read any.
         let open = if service16 {
-            reg_cell(0)..reg_cell(4)
+            0..0
         } else if service {
             reg_cell(1)..reg_cell(3)
         } else {
@@ -693,7 +889,7 @@ pub(super) fn record(cpu: &mut Cpu) {
             failed = Some(if service { "count service" } else { "counter" });
         }
     } else {
-        for u in &regs {
+        for u in regs {
             let Some((c, size)) = reg_cells(u.register()) else {
                 continue;
             };
@@ -723,10 +919,11 @@ pub(super) fn record(cpu: &mut Cpu) {
             failed = Some("counter");
         }
     }
+    o.scratch = (reads, tables);
     if let Some(why) = failed {
         return o.fail(why);
     }
-    let (Some(m), Some((dst_value, src_value))) = (counting, values) else {
+    let (Some(m), Some((dst_value, src_value, hi_value))) = (counting, values) else {
         return;
     };
     // A count may not move the stack.
@@ -742,11 +939,14 @@ pub(super) fn record(cpu: &mut Cpu) {
         size: m.size,
         dst: operand(m.dst, dst_value),
         src: operand(m.src, src_value),
+        hi: operand(m.hi.unwrap_or(Place::Imm(0)), hi_value),
+        carry: m.carry,
         at,
     }));
-    if m.op.writes_dst() {
-        let cells = m.dst.cells(m.size).unwrap_or(0..0);
-        match m.dst {
+    let written = [m.op.writes_dst().then_some(m.dst), m.hi];
+    for place in written.into_iter().flatten() {
+        let cells = place.cells(m.size).unwrap_or(0..0);
+        match place {
             Place::Reg(_) => pass.tainted.extend(cells),
             _ => pass.deferred.extend(cells),
         }
@@ -760,6 +960,8 @@ enum Run {
         size: u8,
         dst: (Option<usize>, u32),
         src: (Option<usize>, u32),
+        hi: (Option<usize>, u32),
+        carry: bool,
     },
     Kill(usize),
 }
@@ -784,7 +986,7 @@ impl Model {
         for step in &pass.steps {
             match step {
                 Step::Op(c) => {
-                    for o in [c.dst, c.src] {
+                    for o in [c.dst, c.src, c.hi] {
                         cells.extend(o.cell.map(|s| s..s + c.size as Cell).into_iter().flatten());
                     }
                 }
@@ -803,6 +1005,8 @@ impl Model {
                     size: c.size,
                     dst: (c.dst.cell.map(slot), c.dst.fixed),
                     src: (c.src.cell.map(slot), c.src.fixed),
+                    hi: (c.hi.cell.map(slot), c.hi.fixed),
+                    carry: c.carry,
                 },
                 Step::Kill(cell) => Run::Kill(slot(*cell)),
             })
@@ -826,10 +1030,10 @@ impl Model {
     }
 
     /// Run the pass on `state`, calling `each` with every operation's
-    /// index and the destination's and source's values it found and the
-    /// flags it set; stops where `each` returns false. Whether it ran to
-    /// the end.
-    fn run(&self, state: &mut State, mut each: impl FnMut(usize, u32, u32, u32) -> bool) -> bool {
+    /// index, the destination's, source's and `hi`'s values it found and
+    /// the flags it set; stops where `each` returns false, or where an
+    /// operation raises an exception. Whether it ran to the end.
+    fn run(&self, state: &mut State, mut each: impl FnMut(usize, [u32; 3], u32) -> bool) -> bool {
         let read = |state: &State, (slot, fixed): (Option<usize>, u32), size: u8| {
             (0..size as usize).fold(0u32, |v, i| {
                 let byte = slot
@@ -838,19 +1042,33 @@ impl Model {
                 v | (byte as u32) << (8 * i)
             })
         };
+        let write = |state: &mut State, slot: Option<usize>, value: Option<u32>, size: u8| {
+            if let (Some(value), Some(slot)) = (value, slot) {
+                for i in 0..size as usize {
+                    state[slot + i] = Some((value >> (8 * i)) as u8);
+                }
+            }
+        };
         let mut index = 0;
         for run in &self.runs {
             match *run {
                 Run::Kill(s) => state[s] = None,
-                Run::Op { op, size, dst, src } => {
-                    let (d, s) = (read(state, dst, size), read(state, src, size));
-                    let (after, flags) = op.run(size, d, s);
-                    if let (Some(after), Some(slot)) = (after, dst.0) {
-                        for i in 0..size as usize {
-                            state[slot + i] = Some((after >> (8 * i)) as u8);
-                        }
-                    }
-                    if !each(index, d, s, flags) {
+                Run::Op {
+                    op,
+                    size,
+                    dst,
+                    src,
+                    hi,
+                    carry,
+                } => {
+                    let found = [dst, src, hi].map(|o| read(state, o, size));
+                    let [d, s, h] = found;
+                    let Some((after, upper, flags)) = op.run(size, d, s, h, carry) else {
+                        return false;
+                    };
+                    write(state, dst.0, after, size);
+                    write(state, hi.0, upper, size);
+                    if !each(index, found, flags) {
                         return false;
                     }
                     index += 1;
@@ -938,10 +1156,14 @@ pub(super) fn count(cpu: &mut Cpu, visit: Visit) {
         .collect();
     let mask = |size: u8| crate::cpu::alu::size_mask(size);
     let mut seen = Vec::with_capacity(ops.len());
-    let same = model.run(&mut state, |i, d, s, flags| {
+    let same = model.run(&mut state, |i, found, flags| {
         let op = ops[i];
         seen.push(flags);
-        d == op.dst.fixed & mask(op.size) && s == op.src.fixed & mask(op.size)
+        let fixed = [op.dst.fixed, op.src.fixed, op.hi.fixed];
+        found
+            .iter()
+            .zip(fixed)
+            .all(|(&v, f)| v == f & mask(op.size))
     });
     let ends_as_now = state
         .iter()
@@ -1011,6 +1233,11 @@ pub(super) fn count(cpu: &mut Cpu, visit: Visit) {
         })
         .collect();
     cpu.bus.observe.on = true;
+    cpu.bus.observe.found = Some(super::Shape {
+        head,
+        seeds: pass.seeds.clone(),
+        blocks: copies.iter().map(|(k, _)| *k).collect(),
+    });
     finish(
         cpu,
         &visit,
@@ -1029,7 +1256,7 @@ pub(super) fn counted_passes(cpu: &Cpu, model: &Model, most: u64) -> (u64, Vec<(
     let mut done = state.clone();
     let mut passes = 0;
     while passes < most {
-        let same = model.run(&mut state, |i, _, _, flags| {
+        let same = model.run(&mut state, |i, _, flags| {
             let (live, seen) = model.checks[i];
             flags & live == seen
         });
@@ -1065,27 +1292,109 @@ pub(super) fn registers_read(cpu: &mut Cpu) {
 /// read no RAM but its arguments (`reads_arguments`) names what it read
 /// beyond them (`reads_also`); one that may have read any reads nothing
 /// of the free stack below its caller's top.
+///
+/// A Win16 stub that called 32-bit code may
+/// leave no count in a register: the registers 16-bit code goes on with
+/// are those it had there, but for DX:AX, which Win16Return sets
+/// (`idle::resumed16`), from a count in EAX where it holds one.
 pub(super) fn after_service(cpu: &mut Cpu) {
     // A count in EAX is gone where the function returned a value there,
     // and may be anything where it didn't.
     let eax = reg_cell(0)..reg_cell(1);
+    let all = reg_cell(0)..reg_cell(8);
+    // DX:AX, which a Win16 function returns.
+    let dx = reg_cell(2)..reg_cell(2) + 2;
+    let returns = |c: &Cell| (eax.start..eax.start + 2).contains(c) || dx.contains(c);
     let o = &mut cpu.bus.observe;
     let returned = o.service_returned;
+    let resumed = o.resumed16.take();
+    let regs = o.service_regs;
     let Phase::Count { pass, .. } = &mut o.phase else {
         return;
     };
+    let stub16 = pass.stub16;
+    let mut moved = false;
     if returned {
         pass.kill(eax.clone());
+    }
+    if let Some(as_is) = resumed {
+        if pass.any(&eax) {
+            if !as_is {
+                return cpu.bus.observe.opaque_because("count service");
+            }
+            // AX keeps EAX's low half; DX takes its high half.
+            let at = pass.flags.len().saturating_sub(1);
+            pass.steps.push(Step::Op(Counting {
+                op: CountOp::Mov,
+                size: 2,
+                dst: Operand {
+                    cell: Some(dx.start),
+                    fixed: regs[2] & 0xFFFF,
+                },
+                src: Operand {
+                    cell: Some(eax.start + 2),
+                    fixed: regs[0] >> 16,
+                },
+                hi: Operand {
+                    cell: None,
+                    fixed: 0,
+                },
+                carry: false,
+                at,
+            }));
+            pass.tainted.extend(dx.clone());
+            moved = true;
+        }
+        // The rest is the 16-bit context's, which held no count.
+        let gone: Vec<Cell> = pass
+            .tainted
+            .range(all.clone())
+            .copied()
+            .filter(|c| !(moved && returns(c)))
+            .collect();
+        for c in gone {
+            pass.kill(c..c + 1);
+        }
+    }
+    // A Win16 function keeps SI, DI and BP. One that calls 32-bit code
+    // (`builtin::auto_thunk`) gives 16-bit code back the registers it had
+    // at the call, but for DX:AX, which it returns, and the 32-bit code
+    // starts with registers of its own; one that doesn't may leave
+    // anything in AX, BX, CX and DX.
+    let thunked = stub16 && !crate::win16::in_16bit_code(cpu);
+    let o = &mut cpu.bus.observe;
+    let Phase::Count { pass, .. } = &mut o.phase else {
+        return;
+    };
+    if thunked {
+        if pass.tainted.range(all.clone()).any(|c| !returns(c)) {
+            return o.opaque_because("count service");
+        }
+        pass.kill(all.clone());
     }
     let o = &cpu.bus.observe;
     let Phase::Count { pass, .. } = &o.phase else {
         return;
     };
-    let changed = pass.any(&eax)
-        || (1..8).any(|i| {
-            let cells = reg_cell(i)..reg_cell(i) + 4;
-            pass.any(&cells) && cpu.reg(GPR32[i]) != o.service_regs[i]
-        });
+    let changed = if resumed.is_some() || thunked {
+        false
+    } else if stub16 {
+        pass.any(&(reg_cell(0)..reg_cell(4)))
+            || (4..8).any(|i| {
+                let cells = reg_cell(i)..reg_cell(i) + 4;
+                pass.any(&cells) && cpu.reg(GPR32[i]) != o.service_regs[i]
+            })
+    } else {
+        pass.any(&eax)
+            || (1..8).any(|i| {
+                let cells = reg_cell(i)..reg_cell(i) + 4;
+                pass.any(&cells) && cpu.reg(GPR32[i]) != o.service_regs[i]
+            })
+    };
+    let o = &cpu.bus.observe;
+    let Phase::Count { pass, .. } = &o.phase else {
+        return;
+    };
     let ram: Vec<usize> = pass.tainted.range(..REG_CELLS).map(|&c| c as usize).collect();
     let top = o.service_top;
     let reads_ok = ram.is_empty()

@@ -945,11 +945,18 @@ fn a_win16_loop_with_a_long_count_on_its_stack_is_skipped() {
     let stats = b.bus.observe.stats;
     println!("{}: {:?}", test, stats);
     assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
-    // Each proof holds only to the clock's next millisecond, where the
-    // pass that recorded the count costs about as much as the passes it
-    // saves, so the head backs off: the proofs held is what is checked.
-    let counter = stats.failed_by.iter().find(|(w, _)| *w == "counter");
-    assert!(stats.proofs >= 10 && counter.is_none(), "{:?}", stats);
+    // The batches of 100,000 instructions end the skips. After the first
+    // proof, each starts from what it found (the count's cells and the
+    // blocks its pass writes) and records one pass, where finding them
+    // again would run about four: the head never backs off for the cost.
+    // The one failure is where the loop ends, in the pass recorded then.
+    assert!(stats.proofs >= 10 && stats.failures <= 1, "{:?}", stats);
+    assert!(
+        stats.shaped + 1 >= stats.proofs && stats.costly == 0,
+        "{:?}",
+        stats
+    );
+    assert!(stats.proving < 40 * stats.proofs, "{:?}", stats);
 }
 
 /// Reads of the built-in Windows's clock in a row arm their place, but not
