@@ -282,10 +282,23 @@ fn generic_block_ioctl(cpu: &mut Cpu) {
                 _ => 0x05,                                                     // fixed disk
             };
             cpu.bus.guest_write_8(block + 0x01, device_type);
-            cpu.bus.guest_write_16(block + 0x02, if kind.is_removable() { 0 } else { 1 }); // 02: bit 0 = fixed
+            // 02: bit 0 = not removable, bit 1 = the drive has a change
+            // line, which MS-DOS sets for a diskette drive when INT 13h
+            // AH=15h says so, as the BIOS here does for every one.
+            let attributes = match kind {
+                DriveKind::Floppy => 0x0002,
+                _ if kind.is_removable() => 0x0000,
+                _ => 0x0001,
+            };
+            cpu.bus.guest_write_16(block + 0x02, attributes);
             cpu.bus.guest_write_16(block + 0x04, layout.cylinders());
             cpu.bus.guest_write_8(block + 0x06, 0); // 06: media type, the drive's own
-            cpu.bus.guest_write_bytes(block + 0x07, &layout.bpb());
+            // 07: the BPB through its 32-bit sector count, 25 bytes, as
+            // MS-DOS copies it ("small" BPB_TYPE in its MSIOCTL.INC).
+            // The 6 reserved bytes after it stay as the caller left them:
+            // Sierra's setup passes a block of 36 bytes, which ends in
+            // the middle of them.
+            cpu.bus.guest_write_bytes(block + 0x07, &layout.bpb()[..0x19]);
         }
         0x0866 => {
             cpu.bus.guest_write_16(block, 0); // 00: info level
