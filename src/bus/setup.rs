@@ -59,6 +59,7 @@ impl Bus {
             tandy_mode: crate::sn76489::TandySound::Auto,
             freezes: Vec::new(),
             mixer_changed: false,
+            settings_requests: Vec::new(),
             frames_drawn: 0,
             activity: crate::autospeed::Activity::new(),
             retraces: 0,

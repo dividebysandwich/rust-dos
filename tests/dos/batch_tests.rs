@@ -730,3 +730,62 @@ fn more_shows_a_screenful_at_a_time() {
     assert!(!text.contains("More"), "{}", text);
     assert!(pipe_files(&dir).is_empty());
 }
+
+/// What CONFIG -SET asked the frontend for.
+fn requested(cpu: &Cpu) -> Vec<(&str, &str, &str)> {
+    cpu.bus.settings_requests.iter().map(|(s, k, v)| (s.as_str(), k.as_str(), v.as_str())).collect()
+}
+
+#[test]
+fn config_set_waits_for_the_frontend_to_take_its_settings() {
+    let bat = b"@echo off\r\nCONFIG -set \"composite=on\"\r\nconfig -set cpu cycles=9000\r\necho after\r\n";
+    let dir = scratch("config_set", &[("T.BAT", bat)]);
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T".into());
+    run_until(&mut cpu, 100, |_| false);
+    assert_eq!(requested(&cpu), [("emulator", "composite", "on")]);
+    assert!(!screen(&cpu).contains("after"), "{}", screen(&cpu));
+    // The frontend takes them, and the next line runs.
+    cpu.bus.settings_requests.clear();
+    run_until(&mut cpu, 200, |cpu| !cpu.bus.settings_requests.is_empty());
+    assert_eq!(requested(&cpu), [("emulator", "cycles", "9000")]);
+    assert!(!screen(&cpu).contains("after"), "{}", screen(&cpu));
+    cpu.bus.settings_requests.clear();
+    run_batch_files(&mut cpu);
+    assert!(screen(&cpu).contains("after"), "{}", screen(&cpu));
+}
+
+#[test]
+fn config_set_goes_on_without_a_frontend_to_take_its_settings() {
+    let dir = scratch("config_set_alone", &[("T.BAT", b"@echo off\r\nconfig -set composite=on\r\necho after\r\n")]);
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T".into());
+    run_batch_files(&mut cpu);
+    assert!(screen(&cpu).contains("after"), "{}", screen(&cpu));
+    assert!(cpu.bus.settings_requests.is_empty(), "nothing takes them later");
+}
+
+#[test]
+fn config_says_what_it_can_t_set() {
+    let bat = b"@echo off\r\nconfig -set \"nosuch=1\"\r\nconfig -get cpu\r\necho after\r\n";
+    let dir = scratch("config_unknown", &[("T.BAT", bat)]);
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T".into());
+    run_batch_files(&mut cpu);
+    let text = screen(&cpu);
+    assert!(text.contains("CONFIG: rust-dos has no setting like nosuch=1"), "{}", text);
+    assert!(text.contains("CONFIG: only CONFIG -SET"), "{}", text);
+    assert!(text.contains("after") && cpu.bus.settings_requests.is_empty(), "{}", text);
+}
+
+/// DOSBox's CONFIG is a program on Z:, which a game's own CONFIG (its
+/// setup) comes before.
+#[test]
+fn a_program_called_config_runs_instead_of_the_command() {
+    let dir = scratch("config_program", &[("CONFIG.COM", &exits_with(7)), ("T.BAT", b"@echo off\r\nconfig -set cycles=9000\r\n")]);
+    let mut cpu = machine(&dir);
+    cpu.pending_command = Some("T".into());
+    run_batch_files(&mut cpu);
+    assert_eq!(cpu.errorlevel, 7);
+    assert!(cpu.bus.settings_requests.is_empty());
+}

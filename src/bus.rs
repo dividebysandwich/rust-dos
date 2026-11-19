@@ -206,6 +206,10 @@ pub struct Bus {
     /// The MIXER command changed the mixer's settings, which the frontend
     /// takes over into its own.
     pub mixer_changed: bool,
+    /// The settings CONFIG -SET asked for, as (section, key, value) of
+    /// rust-dos's configuration, for the frontend to apply; the batch file
+    /// waits until it has (`ShellWait::Settings`).
+    pub settings_requests: Vec<(String, String, String)>,
     /// The frames the program drew: the retraces after which the picture
     /// had changed, or while it flips pages, the flips (see `sync_display`).
     pub frames_drawn: u64,

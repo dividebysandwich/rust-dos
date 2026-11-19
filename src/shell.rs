@@ -306,6 +306,11 @@ pub enum ShellWait {
     /// (almanac.rs): its command line, its file, and the tick it waits
     /// until at most.
     Almanac { line: String, program: String, until: u64 },
+    /// CONFIG -SET: the frontend taking the settings it asked for
+    /// (`Bus::settings_requests`), so the batch file's next line runs with
+    /// them, or the tick it waits until at most, for a frontend that
+    /// doesn't take them.
+    Settings { until: u64 },
 }
 
 /// A CHOICE waiting for a key.
@@ -422,6 +427,19 @@ pub fn take_key(cpu: &mut Cpu, key: u16) -> bool {
             cpu.shell_wait = Some(wait);
             return crate::almanac::key(cpu, key);
         }
+        // Only the settings taken end it; a key typed meanwhile was put
+        // back for what runs next (`key_ready`).
+        ShellWait::Settings { until } => {
+            if !settings_taken(cpu, until) {
+                cpu.shell_wait = Some(wait);
+                return false;
+            }
+            // A frontend that doesn't take them won't later either.
+            if !cpu.bus.settings_requests.is_empty() {
+                cpu.bus.settings_requests.clear();
+                cpu.bus.log_string("[CONFIG] CONFIG -SET: the settings weren't applied");
+            }
+        }
         ShellWait::Choice(choice) => match choice.index(key) {
             Some(i) => {
                 video::print_string(cpu, &format!("{}\r\n", choice.keys[i] as char));
@@ -485,21 +503,29 @@ pub fn feed_wait(cpu: &mut Cpu, input: &[u8]) {
 }
 
 /// The key a CHOICE takes once its time is up, if it is, and 0 once what
-/// LAN waits for happened.
+/// LAN or CONFIG -SET waits for happened.
 pub fn timed_out_key(cpu: &Cpu) -> Option<u8> {
     match cpu.shell_wait {
         Some(ShellWait::Choice(Choice { timeout: Some((key, at)), .. })) if cpu.bus.clock.now_ticks() >= at => Some(key),
         Some(ShellWait::Lan { until }) if crate::lan_command::wait_over(cpu, until) => Some(0),
         Some(ShellWait::LanList { until }) if crate::lan_command::list_over(cpu, until) => Some(0),
+        Some(ShellWait::Settings { until }) if settings_taken(cpu, until) => Some(0),
         _ => None,
     }
+}
+
+/// Whether CONFIG -SET waits no longer: the frontend took the settings it
+/// asked for, or the time is up.
+fn settings_taken(cpu: &Cpu, until: u64) -> bool {
+    cpu.bus.settings_requests.is_empty() || cpu.bus.clock.now_ticks() >= until
 }
 
 /// The shell's code at KEY_READY (SERVICE_SHELL_KEY_READY), with the key
 /// PAUSE or CHOICE waited for in AX (`take_key`).
 pub fn key_ready(cpu: &mut Cpu) {
-    // A key that stops LAN waiting is typed at the prompt as well.
-    if matches!(cpu.shell_wait, Some(ShellWait::Lan { .. } | ShellWait::LanList { .. }))
+    // A key that stops LAN waiting is typed at the prompt as well, and
+    // one typed while CONFIG -SET waits is for what runs after it.
+    if matches!(cpu.shell_wait, Some(ShellWait::Lan { .. } | ShellWait::LanList { .. } | ShellWait::Settings { .. }))
         && cpu.ax() != 0
         && cpu.ax() as u8 != 0x03
     {
@@ -670,6 +696,10 @@ impl crate::savestate::State for ShellWait {
                 program.save(w);
                 until.save(w);
             }
+            ShellWait::Settings { until } => {
+                12u8.save(w);
+                until.save(w);
+            }
         }
     }
     fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
@@ -728,6 +758,11 @@ impl crate::savestate::State for ShellWait {
                 program.load(r)?;
                 until.load(r)?;
                 ShellWait::Almanac { line, program, until }
+            }
+            12 => {
+                let mut until = 0u64;
+                until.load(r)?;
+                ShellWait::Settings { until }
             }
             _ => return Err(crate::savestate::StateError::Invalid("a wait of the shell it doesn't know".into())),
         };

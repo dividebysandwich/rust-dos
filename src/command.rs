@@ -69,6 +69,24 @@ static COMMANDS: &[(&str, &(dyn ShellCommand + Sync))] = &[
     ("AWEUTIL", &crate::aweutil::AweUtilCommand),
 ];
 
+/// The commands DOSBox has as programs on Z:, which run where no program
+/// of their name is found: a game's own CONFIG.EXE comes first, from the
+/// current directory or the PATH, as it would in DOSBox.
+static PROGRAMS: &[(&str, &(dyn ShellCommand + Sync))] = &[("CONFIG", &crate::config_command::ConfigCommand)];
+
+/// Run `command` (a name, with .COM or not) as one of `PROGRAMS`, once no
+/// program of its name was found. True if it is one.
+pub fn run_fallback(cpu: &mut Cpu, command: &str, args: &str) -> bool {
+    let name = command.strip_suffix(".COM").or_else(|| command.strip_suffix(".com")).unwrap_or(command);
+    match PROGRAMS.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) {
+        Some(&(_, program)) => {
+            program.execute(cpu, args);
+            true
+        }
+        None => false,
+    }
+}
+
 /// The names of the built-in commands.
 pub(crate) fn names() -> impl Iterator<Item = &'static str> {
     COMMANDS.iter().map(|&(name, _)| name)
