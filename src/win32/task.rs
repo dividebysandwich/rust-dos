@@ -240,21 +240,21 @@ fn run(cpu: &mut Cpu, mut task: Task, resume: (u32, u32), mut value: u32) -> Opt
     }
 }
 
-/// The variables of each task `kind` that a thread of the running
-/// process is in: one whose call into the program hasn't returned. A
-/// task whose thread ended, or which the program left by an exception,
-/// is none of them, as its call is gone with it.
-pub fn running(cpu: &mut Cpu, kind: u16) -> Vec<Vec<u32>> {
+/// Whether a thread of the running process is in a task `kind` whose
+/// variables `test` holds for: one whose call into the program hasn't
+/// returned. A task whose thread ended, or which the program left by an
+/// exception, is none of them, as its call is gone with it. It looks at
+/// the calls' data as `Task::encode` lays it out, without decoding: a
+/// window procedure asks for each message.
+pub fn any_running(cpu: &mut Cpu, kind: u16, test: impl Fn(&[u32]) -> bool) -> bool {
     super::process(cpu)
         .threads
         .iter()
         .filter(|t| t.exit_code.is_none())
         .flat_map(|t| &t.calls)
         .filter(|c| c.then == call::TASK)
-        .map(|c| Task::decode(&c.data, c.resume))
-        .filter(|t| t.kind == kind)
-        .map(|t| t.vars)
-        .collect()
+        .filter(|c| c.data.first().is_some_and(|&head| head as u16 == kind))
+        .any(|c| test(c.data.get(2..).unwrap_or_default()))
 }
 
 /// A call a task made returned `value`: it goes on.

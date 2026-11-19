@@ -391,9 +391,9 @@ const FILTERED: usize = 5;
 /// the program hasn't returned: one its thread didn't come back from, as
 /// when a window procedure ended the thread, is over.
 fn filtering(cpu: &mut Cpu, hwnd: u32) -> bool {
-    task::running(cpu, task::DD_ACTIVATE)
-        .iter()
-        .any(|vars| vars.get(FILTERED) == Some(&hwnd))
+    task::any_running(cpu, task::DD_ACTIVATE, |vars| {
+        vars.get(FILTERED) == Some(&hwnd)
+    })
 }
 
 fn window_step(cpu: &mut Cpu, t: &mut Task, _: u32) -> Next {
