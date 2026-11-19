@@ -487,39 +487,45 @@ fn xadd(instr: &Instruction, u: &mut Vec<Uop>) -> bool {
         return false;
     };
     let size = src.size;
-    match instr.op0_kind() {
+    // The destination's value into T0; a register destination, or None
+    // for memory at T2.
+    let dst = match instr.op0_kind() {
         OpKind::Register => {
             let Some(dst) = gpr(instr.op0_register()).filter(|r| r.size == size) else {
                 return false;
             };
             u.push(Uop::Get { t: T0, r: dst });
-            u.push(Uop::Get { t: T1, r: src });
-            u.push(Uop::Set { r: src, t: T0 });
-            u.push(Uop::Alu {
-                op: AluOp::Add,
-                size,
-                a: T0,
-                b: Src::T(T1),
-            });
-            u.push(Uop::Set { r: dst, t: T0 });
+            Some(dst)
         }
         OpKind::Memory => {
             if mem(instr, T2, size, true, u).is_none() {
                 return false;
             }
-            u.push(Uop::Load { dst: T0, m: T2, size });
-            u.push(Uop::Get { t: T1, r: src });
-            u.push(Uop::Set { r: src, t: T0 });
-            u.push(Uop::Alu {
-                op: AluOp::Add,
+            u.push(Uop::Load {
+                dst: T0,
+                m: T2,
                 size,
-                a: T0,
-                b: Src::T(T1),
             });
-            u.push(Uop::Store { m: T2, src: T0, size });
+            None
         }
         _ => return false,
-    }
+    };
+    u.push(Uop::Get { t: T1, r: src });
+    u.push(Uop::Set { r: src, t: T0 });
+    u.push(Uop::Alu {
+        op: AluOp::Add,
+        size,
+        a: T0,
+        b: Src::T(T1),
+    });
+    u.push(match dst {
+        Some(r) => Uop::Set { r, t: T0 },
+        None => Uop::Store {
+            m: T2,
+            src: T0,
+            size,
+        },
+    });
     true
 }
 
