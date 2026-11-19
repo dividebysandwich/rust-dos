@@ -765,16 +765,23 @@ impl DiskController {
     }
 }
 
-/// The local time a DOS time and date give, None for one that isn't a
-/// time (a month 0, a 30th of February).
+/// The host's time a DOS time and date give as the host's local time,
+/// which `file_time` reads back the same, whatever the host's time zone.
+/// None for one that isn't a time (a month 0, a 30th of February). A
+/// time the host's clocks skip as daylight saving time starts is taken
+/// as the hour after it, as `hosttime::now` does, and the earlier of
+/// the two a time the clocks go through twice can be.
 fn dos_to_system_time(time: u16, date: u16) -> Option<std::time::SystemTime> {
-    use chrono::TimeZone;
+    use chrono::{NaiveDate, TimeDelta, TimeZone};
     let year = 1980 + i32::from(date >> 9);
     let (month, day) = (u32::from(date >> 5 & 15), u32::from(date & 31));
     let (hour, minute) = (u32::from(time >> 11), u32::from(time >> 5 & 63));
     let second = u32::from(time & 31) * 2;
-    let t = Local
-        .with_ymd_and_hms(year, month, day, hour, minute, second)
-        .earliest()?;
+    let at = NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, minute, second)?;
+    let t = Local.from_local_datetime(&at).earliest().or_else(|| {
+        Local
+            .from_local_datetime(&(at + TimeDelta::hours(1)))
+            .earliest()
+    })?;
     Some(t.into())
 }

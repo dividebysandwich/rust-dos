@@ -5733,6 +5733,95 @@ fn a_program_makes_reads_finds_moves_and_deletes_files() {
     assert!(!dir.join("D").exists() && !dir.join("G.TXT").exists());
 }
 
+/// SetFileTime on a file in a host folder, as Windows 98 SE does it on
+/// FAT: the time of the last write is rounded up to an even second
+/// (2001-10-08 19:20:01.5 is kept as 19:20:02), a time before 1980 fails
+/// with ERROR_INVALID_DATA (13), and a handle opened only for reading
+/// fails with ERROR_ACCESS_DENIED (5). The program ends with the number
+/// of the first check that failed, or 0.
+#[test]
+fn set_file_time_rounds_up_to_even_seconds() {
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &[
+            "CreateFileA",
+            "SetFileTime",
+            "GetFileTime",
+            "GetLastError",
+            "CloseHandle",
+        ],
+    )];
+    let mut data = b"F.TXT\0".to_vec();
+    data.resize(0x10, 0);
+    // FILETIMEs: 2001-10-08 19:20:01.5 and 1979-10-08 19:20:04 (UTC, which
+    // is the built-in Windows' local time), then room for one read back.
+    data.extend(0x01C1_502E_3A01_D1C0u64.to_le_bytes());
+    data.extend(0x01A8_A576_DBF0_4A00u64.to_le_bytes());
+    data.resize(0x28, 0);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        let open = |a: &mut CodeAssembler, access: u32, share, disposition| {
+            for arg in [0, 0, disposition, 0, share, access as i32, l.at(0) as i32] {
+                a.push(arg)?;
+            }
+            a.call(l.import(0))?;
+            a.mov(esi, eax)
+        };
+        let set = |a: &mut CodeAssembler, at: u32| {
+            a.push(l.at(at) as i32)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(esi)?;
+            a.call(l.import(1))
+        };
+        // GENERIC_WRITE, CREATE_ALWAYS.
+        open(a, 0x4000_0000, 0, 2)?;
+        set(a, 0x10)?;
+        a.mov(ebx, 1)?;
+        a.test(eax, eax)?;
+        a.je(fail)?;
+        a.push(l.at(0x20) as i32)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(esi)?;
+        a.call(l.import(2))?;
+        a.mov(ebx, 2)?;
+        a.cmp(dword_ptr(l.at(0x20)), 0x3A4E_1D00)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x24)), 0x01C1_502E)?;
+        a.jne(fail)?;
+        set(a, 0x18)?;
+        a.mov(ebx, 3)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        a.call(l.import(3))?;
+        a.mov(ebx, 4)?;
+        a.cmp(eax, 13)?;
+        a.jne(fail)?;
+        a.push(esi)?;
+        a.call(l.import(4))?;
+        // GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING.
+        open(a, 0x8000_0000, 1, 3)?;
+        set(a, 0x10)?;
+        a.mov(ebx, 5)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        a.call(l.import(3))?;
+        a.mov(ebx, 6)?;
+        a.cmp(eax, 5)?;
+        a.jne(fail)?;
+        a.push(esi)?;
+        a.call(l.import(4))?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let mut cpu = machine_with("set_file_time", &[("T.EXE", exe)]);
+    assert!(run_to_exit(&mut cpu, 200), "{:?}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0);
+}
+
 /// A change notification for C:\ with FILE_NOTIFY_CHANGE_FILE_NAME isn't
 /// signaled (bit 0) until a file is made there (1), stays signaled (2)
 /// until FindNextChangeNotification (3), and closes (4). One with
