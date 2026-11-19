@@ -339,6 +339,59 @@ impl Heap {
             .max()
             .unwrap_or(0)
     }
+
+    /// The next piece of a walk of the heap, as Toolhelp32's Heap32First
+    /// (`after` None) and Heap32Next (`after` the address of the piece
+    /// before) take them: its ranges in turn, and in each, in address
+    /// order, the blocks given out, as (address, size, false), and the
+    /// free gaps of the committed part around them, as (address, length,
+    /// true). None after the last piece, or when `after` isn't in a range.
+    pub fn piece_after(&self, after: Option<u32>) -> Option<(u32, u32, bool)> {
+        let (first, mut pos) = match after {
+            None => (0, None),
+            Some(at) => {
+                let s = self.segments.iter().position(|s| {
+                    (s.base as u64..s.base as u64 + s.reserved as u64).contains(&(at as u64))
+                })?;
+                (s, Some(at + 1))
+            }
+        };
+        for segment in &self.segments[first..] {
+            let piece = self.piece_from(segment, pos.unwrap_or(segment.base));
+            if piece.is_some() {
+                return piece;
+            }
+            pos = None;
+        }
+        None
+    }
+
+    /// The first piece of `segment` that starts at `pos` or after it.
+    fn piece_from(&self, segment: &Segment, pos: u32) -> Option<(u32, u32, bool)> {
+        let end = segment.base + segment.committed;
+        let limit = segment.base as u64 + segment.reserved as u64;
+        let first = self.blocks.partition_point(|&(b, _)| b < segment.base);
+        let i = self.blocks.partition_point(|&(b, _)| b < pos).max(first);
+        // Where the gap in front of block `i` (or at the range's end)
+        // starts: the end of the block before it in the range.
+        let gap = match i {
+            i if i > first => {
+                let (start, size) = self.blocks[i - 1];
+                start + extent(size).unwrap_or(0)
+            }
+            _ => segment.base,
+        };
+        let next = self
+            .blocks
+            .get(i)
+            .filter(|&&(b, _)| (b as u64) < limit)
+            .copied();
+        let gap_end = next.map_or(end, |(b, _)| b);
+        if gap >= pos && gap_end > gap {
+            return Some((gap, gap_end - gap, true));
+        }
+        next.map(|(b, size)| (b, size, false))
+    }
 }
 
 /// A moveable block of GlobalAlloc's or LocalAlloc's: its handle, the
@@ -468,5 +521,39 @@ mod tests {
         assert!(heap.free(at));
         assert_eq!(heap.hint(48), 1000);
         assert_eq!(heap.fit(0, 48), Some((0x10_0000 + 16_000, 1000)));
+    }
+
+    /// A walk of the pieces, as Heap32First and Heap32Next take them,
+    /// gives the blocks and the free gaps between them, range by range in
+    /// the ranges' order, up to the end of what is committed.
+    #[test]
+    fn walk_gives_blocks_and_gaps_in_range_order() {
+        let mut heap = heap(&[0x20_0000, 0x10_0000], 0x100);
+        heap.blocks = vec![
+            (0x10_0010, 0xF0),
+            (0x20_0000, 0x10),
+            (0x20_0018, 5),
+            (0x20_0040, 0x20),
+        ];
+        let mut pieces = Vec::new();
+        let mut piece = heap.piece_after(None);
+        while let Some(p) = piece {
+            pieces.push(p);
+            piece = heap.piece_after(Some(p.0));
+        }
+        assert_eq!(
+            pieces,
+            [
+                (0x20_0000, 0x10, false),
+                (0x20_0010, 8, true),
+                (0x20_0018, 5, false),
+                (0x20_0020, 0x20, true),
+                (0x20_0040, 0x20, false),
+                (0x20_0060, 0xA0, true),
+                (0x10_0000, 0x10, true),
+                (0x10_0010, 0xF0, false),
+            ]
+        );
+        assert_eq!(heap.piece_after(Some(0x40_0000)), None);
     }
 }
