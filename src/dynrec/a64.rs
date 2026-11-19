@@ -1895,6 +1895,18 @@ impl Gen<'_> {
                 }
             }
             Uop::SarConst { t, count } => dynasm!(self.ops ; .arch aarch64 ; asr W(r(t)), W(r(t)), count as u32),
+            Uop::AddShifted {
+                t,
+                src,
+                shift,
+                size,
+            } => {
+                let (t, src) = (r(t), r(src));
+                dynasm!(self.ops ; .arch aarch64 ; add W(t), W(t), W(src), lsl shift as u32);
+                if size == 2 {
+                    dynasm!(self.ops ; .arch aarch64 ; uxth W(t), W(t));
+                }
+            }
             Uop::Extend { t, from, signed } => {
                 let t = r(t);
                 match (from, signed) {
@@ -2015,6 +2027,19 @@ impl Gen<'_> {
                         BitKind::Reset => dynasm!(self.ops ; .arch aarch64 ; bic W(r(t)), W(r(t)), w3),
                         _ => dynasm!(self.ops ; .arch aarch64 ; eor W(r(t)), W(r(t)), w3),
                     }
+                }
+            }
+            Uop::BitScan { forward, dst, src } => {
+                let (dst, src) = (r(dst), r(src));
+                dynasm!(self.ops ; .arch aarch64 ; movz w5, ZF ; cbz W(src), >zero);
+                if forward {
+                    dynasm!(self.ops ; .arch aarch64 ; rbit w4, W(src) ; clz W(dst), w4);
+                } else {
+                    dynasm!(self.ops ; .arch aarch64 ; clz w4, W(src) ; movz w3, 31 ; sub W(dst), w3, w4);
+                }
+                dynasm!(self.ops ; .arch aarch64 ; movz w5, 0 ; zero:);
+                if self.live_after & ZF != 0 {
+                    self.merge(ZF);
                 }
             }
             Uop::MulWide { signed, size, t } => self.mul_wide(signed, size, t),
@@ -2651,6 +2676,8 @@ impl Gen<'_> {
                 dynasm!(self.ops ; .arch aarch64 ; addsub_done:);
             }
             Uop::FChs => self.fpu_op(1 << 13, None),
+            Uop::FRndint => self.fpu_op(6 << 13, None),
+            Uop::FAbs => self.fpu_op(7 << 13, None),
             Uop::FSqrt => {
                 const C1: u32 = 0x200;
                 // The root inline where the double is above 0, else (a

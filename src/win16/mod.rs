@@ -37,7 +37,7 @@ pub mod task;
 pub(crate) mod thunk;
 mod user;
 
-pub use builtin::function_name;
+pub use builtin::{function_name, trap_name};
 
 use crate::bus::Bus;
 use crate::cpu::{ATTR_DB, Cpu, Seg};

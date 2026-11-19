@@ -334,6 +334,14 @@ pub enum Uop {
     AddConst { t: T, v: u32, size: u8 },
     /// t >>= count, arithmetically, without flags.
     SarConst { t: T, count: u8 },
+    /// t += src << `shift` (0 to 3), wrapped to `size` bytes (2 or 4),
+    /// without flags: an offset moved by a number of words or dwords.
+    AddShifted {
+        t: T,
+        src: T,
+        shift: u8,
+        size: u8,
+    },
     /// Zero- or sign-extend t's low `from` bytes to 32 bits.
     Extend { t: T, from: u8, signed: bool },
     /// t = the offset of a memory operand: disp + base + index * scale,
@@ -401,6 +409,14 @@ pub enum Uop {
     /// others stay), and t the value with the bit set, cleared or
     /// complemented.
     BitOp { op: BitKind, size: u8, t: T, bit: Src },
+    /// BSF (`forward`) or BSR of src, as `logic::bit_scan`: where src isn't
+    /// 0, dst = the index of its lowest or highest set bit and ZF clear;
+    /// where it is, ZF set and dst as it was. The other flags stay.
+    BitScan {
+        forward: bool,
+        dst: T,
+        src: T,
+    },
     /// #GP(0) if the value is past the CS limit (a near jump's target).
     CheckLimit { src: Src },
     /// #GP(0) in protected mode if CPL is above IOPL (CLI).
@@ -574,6 +590,12 @@ pub enum Uop {
     /// FSQRT: `fpu::arithmetic::fsqrt`, which takes the root of ST(0)'s
     /// double.
     FSqrt,
+    /// FRNDINT: `fpu::arithmetic::frndint`, which rounds ST(0) by the
+    /// control word's rounding mode. (The x86-64 code rounds to nearest a
+    /// double below 2^52 itself.)
+    FRndint,
+    /// FABS: `fpu::arithmetic::fabs`.
+    FAbs,
     /// Push the 80 bits at handle m, which is RAM's (`BailUnlessRam`), as
     /// FLD's handler does.
     FLoad80 { m: T },

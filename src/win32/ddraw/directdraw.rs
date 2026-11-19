@@ -348,7 +348,40 @@ const ACTIVATED: u16 = 20;
 /// once, before the three. WarGames never shows its window itself:
 /// hidden, the window isn't under the cursor, so the mouse's clicks went
 /// to the desktop and the game's menus didn't answer them.
-pub fn activate_step(cpu: &mut Cpu, t: &mut Task, _: u32) -> Next {
+///
+/// Direct3D 8's task has the focus window in `FILTERED`: Direct3D's
+/// procedure is in front of the focus window's on Windows, and while the
+/// device changes its windows it hands the focus window's messages to
+/// DefWindowProc instead of the program's procedure. Wine's d3d8 tests
+/// (test_wndproc) find the program's procedure of the focus window gets
+/// none of them.
+pub fn activate_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
+    let filtered = t.var(FILTERED);
+    let default = user32::address_of("DefWindowProcA");
+    if t.step == 0
+        && filtered != 0
+        && let Some(w) = cpu.bus.win32.user.window_mut(filtered)
+    {
+        let original = std::mem::replace(&mut w.proc, default);
+        t.set(FILTERED + 1, original);
+    }
+    let next = window_step(cpu, t, value);
+    if matches!(next, Next::Done(_)) && filtered != 0 {
+        let original = t.var(FILTERED + 1);
+        match cpu.bus.win32.user.window_mut(filtered) {
+            Some(w) if original != 0 && w.proc == default => w.proc = original,
+            _ => {}
+        }
+    }
+    next
+}
+
+/// The variable of `WINDOW_FULLSCREEN` with the window whose messages go
+/// to DefWindowProc while the task runs, 0 for none; the one after it
+/// keeps that window's procedure.
+const FILTERED: usize = 5;
+
+fn window_step(cpu: &mut Cpu, t: &mut Task, _: u32) -> Next {
     use user32::window::{
         HWND_NOTOPMOST, HWND_TOPMOST, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
         SWP_NOZORDER, WS_MAXIMIZE, WS_VISIBLE,
@@ -537,7 +570,6 @@ fn cover_screen(cpu: &mut Cpu, id: u32) -> Option<u32> {
 /// screen, or None when it would change nothing, the level doesn't ask
 /// for it, or there is no such object.
 fn fullscreen_vars(cpu: &mut Cpu, id: u32, kind: u32) -> Option<Vec<u32>> {
-    use user32::window::{WS_EX_TOPMOST, WS_MAXIMIZE, WS_VISIBLE};
     let d = ddraw(cpu, id)?;
     // MakeFullscreen asks whether the focus window is the foreground
     // one. A level without a device window makes the window of exclusive
@@ -545,6 +577,17 @@ fn fullscreen_vars(cpu: &mut Cpu, id: u32, kind: u32) -> Option<Vec<u32>> {
     let device_window = DDSCL_SETDEVICEWINDOW | DDSCL_CREATEDEVICEWINDOW;
     let focus = if d.level & device_window != 0 { d.focus } else { d.hwnd };
     let (level, hwnd) = (d.level, d.hwnd);
+    if level & DDSCL_EXCLUSIVE == 0 || level & DDSCL_NOWINDOWCHANGES != 0 {
+        return None;
+    }
+    window_vars(cpu, hwnd, focus, kind)
+}
+
+/// The variables of the task `kind` that makes the window `hwnd` cover
+/// the screen, the focus window being `focus`, or None when it would
+/// change nothing.
+fn window_vars(cpu: &mut Cpu, hwnd: u32, focus: u32, kind: u32) -> Option<Vec<u32>> {
+    use user32::window::{WS_EX_TOPMOST, WS_MAXIMIZE, WS_VISIBLE};
     let (w, h) = user32::sysparams::screen_size(cpu);
     let user = &cpu.bus.win32.user;
     let (top, focus) = (user.top_level(hwnd), user.top_level(focus));
@@ -559,10 +602,32 @@ fn fullscreen_vars(cpu: &mut Cpu, id: u32, kind: u32) -> Option<Vec<u32>> {
             && user.top_levels().first() == Some(&top);
         win.rect == screen && (placed || user.foreground_window() != focus)
     });
-    if level & DDSCL_EXCLUSIVE == 0 || level & DDSCL_NOWINDOWCHANGES != 0 || done {
+    if done {
         return None;
     }
     Some(vec![kind, top, w as u32, h as u32, focus])
+}
+
+/// Direct3D 8's device of full screen has the mode it asked for: its
+/// device window `window` is made to cover the screen, and while the
+/// focus window `focus` is the foreground one shown, topmost and not
+/// maximized, as DirectDraw does with its window of exclusive mode
+/// (`activate_step`). Wine's d3d8 tests (test_window_style) find the
+/// device window's rectangle the screen's on Windows after CreateDevice,
+/// shown and topmost, and the focus window's style and rectangle as they
+/// were; test_wndproc has the device window sent WM_WINDOWPOSCHANGING,
+/// WM_MOVE and WM_SIZE. A game that made its window at another size
+/// before it took a larger mode has the mouse's messages of the whole
+/// screen only then. DD_OK.
+pub fn cover_screen_with(cpu: &mut Cpu, window: u32, focus: u32) -> Option<u32> {
+    match window_vars(cpu, window, focus, WINDOW_FULLSCREEN) {
+        Some(mut vars) => {
+            vars.resize(FILTERED, 0);
+            vars.push(cpu.bus.win32.user.top_level(focus));
+            task::start(cpu, task::DD_ACTIVATE, vars, 0)
+        }
+        None => Some(DD_OK),
+    }
 }
 
 /// RestoreDisplayMode(this).

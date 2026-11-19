@@ -702,6 +702,19 @@ fn free_memory(cpu: &mut Cpu, id: u32) {
     }
 }
 
+/// The mode is about to change or go, and video memory to be the new
+/// mode's: the surfaces OpenGL's driver keeps move out of it while their
+/// pixels are still there (a mode set clears the new picture's part).
+/// OpenGL's textures are its driver's, which keeps them through the
+/// change, as a card's OpenGL driver does: the program never hears of a
+/// loss, and has no way to restore them. Called before the mode is set,
+/// and before `video_memory_lost`.
+pub fn video_memory_to_change(cpu: &mut Cpu) {
+    for id in crate::win32::opengl32::texture_surfaces(cpu) {
+        to_system_memory(cpu, id);
+    }
+}
+
 /// The mode changed or went: video memory is the new mode's, and the
 /// surfaces that had pixels there are lost, as are the blocks Direct3D's
 /// HAL took for its copies of textures.
@@ -714,6 +727,40 @@ pub fn video_memory_lost(cpu: &mut Cpu) {
         }
     }
     super::d3d::hal::video_memory_lost(cpu);
+}
+
+/// Move the surface `id` from video memory to a block of system memory
+/// of its own, with its pixels; Direct3D's HAL then copies it to the
+/// card as it draws with it. A mipmap level in its top level's block
+/// gets a block of its own too. Nothing changes for a surface elsewhere,
+/// one of another process, whose memory isn't the running one's, or
+/// with no room in system memory: it is then lost with the rest.
+fn to_system_memory(cpu: &mut Cpu, id: u32) {
+    let pid = super::current_pid(cpu);
+    if state(cpu).object(id).is_none_or(|o| o.pid != pid) {
+        return;
+    }
+    let Some(s) = state(cpu).surface(id).cloned() else {
+        return;
+    };
+    if s.memory != MEM_VIDEO {
+        return;
+    }
+    let size = s.size();
+    let Some(bits) = crate::win32::kernel32::alloc_pages(cpu, size) else {
+        return;
+    };
+    let mut pixels = vec![0u8; size as usize];
+    read_bytes(cpu, &s, 0, &mut pixels);
+    cpu.bus.guest_write_bytes(bits, &pixels);
+    if let Some(s) = surface(cpu, id) {
+        s.memory = MEM_SYSTEM;
+        s.bits = bits;
+        s.owns_bits = true;
+        s.caps[0] &= !(DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM);
+        s.caps[0] |= DDSCAPS_SYSTEMMEMORY;
+    }
+    changed(cpu, id);
 }
 
 /// The DirectDraw object of the surface `id` went: it has no pixels.

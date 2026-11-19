@@ -93,6 +93,9 @@ pub struct Counters {
     pub services: [[u64; 256]; SERVICE_KINDS],
     /// Calls of the built-in Windows's functions and traps, by id.
     pub win32: Box<[u64]>,
+    /// Calls of the Win16 system modules' functions from 16-bit code, by
+    /// id: their ids number them apart from the built-in DLLs'.
+    pub win16: Box<[u64]>,
     /// Hardware interrupts delivered, by IRQ line.
     pub irqs: [u64; 16],
     /// Exceptions the CPU raised, by vector.
@@ -116,6 +119,7 @@ impl Counters {
             hle: vec![0; 0x10000].into_boxed_slice(),
             services: [[0; 256]; SERVICE_KINDS],
             win32: vec![0; 0x10000].into_boxed_slice(),
+            win16: vec![0; 0x10000].into_boxed_slice(),
             irqs: [0; 16],
             exceptions: [0; 32],
             mem_reads: Default::default(),
