@@ -1568,9 +1568,13 @@ pub fn import_registry(cpu: &mut Cpu, text: &str) -> Result<(), String> {
     registry::import_file(cpu, text)
 }
 
-/// What the trap with id `id` runs, for the disassembler.
-pub fn trap_name(id: u16) -> String {
+/// What the trap with id `id` runs, for the disassembler and the
+/// profiler. `code16` says the trap is in 16-bit protected-mode code,
+/// where the stubs of the Win16 system modules are: their ids number
+/// the 16-bit functions apart from the built-in DLLs' (`service`).
+pub fn trap_name(id: u16, code16: bool) -> String {
     match id {
+        _ if code16 && id < FIRST_MISSING => crate::win16::trap_name(id),
         ID_START => "Win32 start".to_string(),
         ID_REAL_RETURN => "Win32 real-mode return".to_string(),
         _ if id & 0xFF00 == ID_CALLBACK => format!("Win16 real-mode callback {}", id as u8),

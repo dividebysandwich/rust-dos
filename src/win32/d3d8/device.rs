@@ -459,6 +459,8 @@ fn build_into(cpu: &mut Cpu, id: u32, p: &[u32], chain: &mut Chain) -> Result<()
         // Windows, making and releasing a full-screen device sends the
         // focus window's procedure no message of DirectDraw's window
         // changes (Wine's d3d8 test_wndproc checks that none comes).
+        // CreateDevice and Reset make the device window cover the
+        // screen once the buffers are made (`cover_screen`).
         let flags = DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN | DDSCL_NOWINDOWCHANGES;
         ok(directdraw::set_cooperative_level(
             cpu,
@@ -580,7 +582,9 @@ pub fn set_targets(cpu: &mut Cpu, id: u32, target: u32, depth: u32) {
 }
 
 /// CreateDevice(this, adapter, type, focus, flags, params, out) of the
-/// IDirect3D8 `d3d`.
+/// IDirect3D8 `d3d`. A device of full screen ends with its device window
+/// made to cover the screen (`cover_screen`), which calls the program's
+/// window procedure.
 #[allow(clippy::too_many_arguments)]
 pub fn create(
     cpu: &mut Cpu,
@@ -591,38 +595,38 @@ pub fn create(
     flags: u32,
     params_at: u32,
     out: u32,
-) -> u32 {
+) -> Option<u32> {
     if !com::write_out(cpu, out, 0) {
-        return D3DERR_INVALIDCALL;
+        return Some(D3DERR_INVALIDCALL);
     }
     if adapter != 0 {
-        return D3DERR_INVALIDCALL;
+        return Some(D3DERR_INVALIDCALL);
     }
     let Some(mut p) = read_params(cpu, params_at) else {
-        return D3DERR_INVALIDCALL;
+        return Some(D3DERR_INVALIDCALL);
     };
     let vp = flags
         & (CREATE_SOFTWARE_VERTEXPROCESSING
             | CREATE_HARDWARE_VERTEXPROCESSING
             | CREATE_MIXED_VERTEXPROCESSING);
     if vp.count_ones() != 1 {
-        return D3DERR_INVALIDCALL;
+        return Some(D3DERR_INVALIDCALL);
     }
     match devtype {
         DEVTYPE_HAL => {}
-        DEVTYPE_REF => return D3DERR_NOTAVAILABLE,
-        _ => return D3DERR_INVALIDCALL,
+        DEVTYPE_REF => return Some(D3DERR_NOTAVAILABLE),
+        _ => return Some(D3DERR_INVALIDCALL),
     }
     // A Voodoo Graphics or Voodoo2 add-on card has no Direct3D 8 driver.
     let Some(kind) = super::caps::card(cpu) else {
-        return D3DERR_NOTAVAILABLE;
+        return Some(D3DERR_NOTAVAILABLE);
     };
     // Hardware and mixed vertex processing are of a card that
     // transforms and lights. The draws are the same with each: the
     // HAL hands the card the vertices it can transform as the pipeline
     // would, and the pipeline does the others (`hal::draw_geometry`).
     if vp != CREATE_SOFTWARE_VERTEXPROCESSING && !hal::transforms(kind) {
-        return D3DERR_INVALIDCALL;
+        return Some(D3DERR_INVALIDCALL);
     }
     let window = if p[PP_WINDOW] != 0 {
         p[PP_WINDOW]
@@ -630,10 +634,10 @@ pub fn create(
         focus
     };
     if !cpu.bus.win32.user.is_window(window) || p[PP_WINDOWED] == 0 && focus == 0 {
-        return D3DERR_INVALIDCALL;
+        return Some(D3DERR_INVALIDCALL);
     }
     if let Err(e) = check_params(cpu, &mut p, window) {
-        return e;
+        return Some(e);
     }
 
     // The DirectDraw object.
@@ -641,7 +645,7 @@ pub fn create(
     let dd_iface = ddraw::iface(cpu, dd, V_DD7);
     if dd_iface == 0 {
         ddraw::destroy(cpu, dd);
-        return com::E_OUTOFMEMORY;
+        return Some(com::E_OUTOFMEMORY);
     }
     ddraw::add_ref(cpu, dd_iface);
     let device = Device {
@@ -662,14 +666,14 @@ pub fn create(
     let id = add(cpu, o, V_DEVICE8, 1);
     if id == 0 {
         ddraw::release(cpu, dd_iface);
-        return com::E_OUTOFMEMORY;
+        return Some(com::E_OUTOFMEMORY);
     }
     super::add_ref(cpu, d3d);
     let chain = match build(cpu, id, &p) {
         Ok(c) => c,
         Err(e) => {
             super::destroy(cpu, id);
-            return e;
+            return Some(e);
         }
     };
 
@@ -699,7 +703,7 @@ pub fn create(
     write_params(cpu, params_at, &p);
     let iface = super::iface(cpu, id);
     com::write_out(cpu, out, iface);
-    D3D_OK
+    cover_screen(cpu, id)
 }
 
 // The methods.
@@ -946,7 +950,20 @@ pub fn reset(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     use_chain(cpu, id, chain, p.clone());
     super::states::defaults(cpu, id);
     write_params(cpu, at, &p);
-    Some(D3D_OK)
+    cover_screen(cpu, id)
+}
+
+/// CreateDevice or Reset made the device `id`'s buffers: in full screen
+/// its device window covers the screen of the mode it took
+/// (`directdraw::cover_screen_with`). D3D_OK.
+fn cover_screen(cpu: &mut Cpu, id: u32) -> Option<u32> {
+    match get(cpu, id) {
+        Some(d) if d.params.get(PP_WINDOWED) == Some(&0) => {
+            let (window, focus) = (d.window, d.focus);
+            directdraw::cover_screen_with(cpu, window, focus)
+        }
+        _ => Some(D3D_OK),
+    }
 }
 
 /// The rectangle (left, top, right, bottom) at `at`, if there is one.

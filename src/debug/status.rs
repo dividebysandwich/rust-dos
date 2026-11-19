@@ -376,7 +376,7 @@ impl DebugHub {
         for _ in 0..count.min(1000) {
             let p = start.byte(cpu, at);
             let bytes = start.read_from(cpu, at, 15);
-            let (len, text) = if let Some(name) = trace::trap_name(&bytes, None, cpu.pm()) {
+            let (len, text) = if let Some(name) = trace::trap_name(&bytes, None, cpu.pm(), code32) {
                 (trace::trap_len(&bytes), name)
             } else {
                 // 32-bit code without a segment is taken to be flat, so

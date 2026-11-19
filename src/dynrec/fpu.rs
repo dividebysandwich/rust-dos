@@ -228,6 +228,16 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
             guard(u, 1);
             u.push(Uop::FSqrt);
         }
+        // The handler rounds by the control word's mode, from the 80 bits
+        // where they hold more than the double.
+        Frndint => {
+            guard(u, 1);
+            u.push(Uop::FRndint);
+        }
+        Fabs => {
+            guard(u, 1);
+            u.push(Uop::FAbs);
+        }
         // (The integer comes to the same 80 bits as the double of it.)
         Fiadd_m16int | Fiadd_m32int | Fisub_m16int | Fisub_m32int | Fisubr_m16int | Fisubr_m32int => {
             let kind = match instr.code() {
