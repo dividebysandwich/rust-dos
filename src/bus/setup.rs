@@ -32,7 +32,6 @@ impl Bus {
             port_accesses: VecDeque::new(),
             port_log: None,
             profile: None,
-            rom_writes: 0,
             config_ui_requested: false,
             exit_requested: false,
             config_dir: None,

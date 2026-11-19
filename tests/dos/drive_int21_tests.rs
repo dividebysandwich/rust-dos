@@ -868,7 +868,7 @@ fn fcb_file_functions_work_on_host_directories() {
 /// asks for FFFFh paragraphs to learn the largest free block, many times
 /// a second on its menus. Each kind of failure is logged the first few
 /// times, the last of them saying so; another file or size still gets
-/// its own lines.
+/// its own lines, and the next program starts counting again.
 #[test]
 fn repeated_dos_failures_are_logged_a_few_times() {
     let base = scratch("repeated_failures", &["c"]);
@@ -891,10 +891,16 @@ fn repeated_dos_failures_are_logged_a_few_times() {
     }
     set_dsdx_string(&mut cpu, "GAME1.SAV");
     int21(&mut cpu, 0x4E);
+    std::fs::write(base.join("c/NEXT.COM"), [0xC3]).unwrap();
+    assert!(cpu.load_executable("NEXT.COM", None));
+    set_dta(&mut cpu);
+    set_dsdx_string(&mut cpu, "GAME0.SAV");
+    cpu.set_cx(0);
+    int21(&mut cpu, 0x4E);
     cpu.bus.log_hook = None;
     let lines = lines.take();
     let of = |text: &str| lines.iter().filter(|l| l.contains(text)).count();
-    assert_eq!(of("Pattern='GAME0.SAV'"), 8, "{lines:?}");
+    assert_eq!(of("Pattern='GAME0.SAV'"), 8 + 1, "{lines:?}");
     assert_eq!(of("Alloc FFFF paras failed"), 8, "{lines:?}");
     assert_eq!(of("(not logging more)"), 2, "{lines:?}");
     assert_eq!(of("Pattern='GAME1.SAV'"), 1, "{lines:?}");

@@ -1855,7 +1855,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     cpu.set_cpu_flag(CpuFlags::CF, true);
                     // Programs ask for FFFFh paragraphs to learn the
                     // largest free block, often many times a second.
-                    cpu.bus.log_limited(&format!("alloc {requested:04X}"), || {
+                    cpu.bus.log_limited(("alloc", requested), || {
                         format!(
                             "[DOS] Alloc {requested:04X} paras failed (max free {max_free:04X})"
                         )
@@ -2134,7 +2134,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 Err(code) => {
                     // A game looking for its save slots on every frame
                     // of a menu asks for the same missing files again.
-                    cpu.bus.log_limited(&format!("find {search_pattern} {code:02X}"), || {
+                    cpu.bus.log_limited(("find", &search_pattern, code), || {
                         format!(
                             "[DOS] FindFirst/Next Failed: Pattern='{search_pattern}' Index={index} Error={code:02X}"
                         )

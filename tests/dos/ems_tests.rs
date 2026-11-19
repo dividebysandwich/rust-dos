@@ -551,8 +551,8 @@ fn windows_takes_the_page_frame_over_and_gives_it_back() {
 /// function 50h, the last two past the end of its handle, many times a
 /// frame, and ignores the 8Ah it gets. Each failing call is logged the
 /// first few times only, the last of them saying so, so a session's log
-/// isn't millions of the same line. Another call or status still gets
-/// its own lines.
+/// isn't millions of the same line. Another call, handle or status
+/// still gets its own lines.
 #[test]
 fn a_failure_repeated_many_times_is_logged_a_few_times() {
     let mut cpu = machine();
@@ -575,24 +575,39 @@ fn a_failure_repeated_many_times_is_logged_a_few_times() {
         assert_eq!(ems(&mut cpu, 0x5000), 0x8A);
     }
     assert_eq!(map(&mut cpu, handle, 2, 0), 0x8A);
+    let other = allocate(&mut cpu, 2);
+    cpu.set_ds(0x3100);
+    cpu.set_si(0);
+    cpu.set_cx(4);
+    cpu.set_dx(other);
+    assert_eq!(ems(&mut cpu, 0x5000), 0x8A);
     cpu.bus.log_hook = None;
     let lines = lines.take();
-    let of = |prefix: &str| {
+    let of = |prefix: &str, dx: u16| {
         lines
             .iter()
-            .filter(|l| l.starts_with(prefix))
+            .filter(|l| l.starts_with(prefix) && l.contains(&format!("DX={dx:04X}: status 8A")))
             .cloned()
             .collect::<Vec<_>>()
     };
-    let map_multiple = of("[EMS] AX=5000: status 8A");
+    let map_multiple = of("[EMS] AX=5000 ", handle);
     assert_eq!(map_multiple.len(), 8, "{lines:?}");
+    let last = lines
+        .iter()
+        .filter(|l| l.starts_with("[EMS] AX=5000 "))
+        .nth(7);
     assert!(
-        map_multiple[7].ends_with("(not logging more)"),
-        "{map_multiple:?}"
+        last.is_some_and(|l| l.ends_with("(not logging more)")),
+        "{lines:?}"
     );
     assert_eq!(
-        of("[EMS] AX=4400: status 8A").len(),
+        of("[EMS] AX=4400 ", handle).len(),
         1,
         "another call is logged"
+    );
+    assert_eq!(
+        of("[EMS] AX=5000 ", other).len(),
+        1,
+        "another handle is logged"
     );
 }

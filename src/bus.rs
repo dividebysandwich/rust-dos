@@ -141,8 +141,6 @@ pub struct Bus {
     /// Something asked for a CPU reset (8042 or port 92h); the execution
     /// loop carries it out.
     pub reset_requested: bool,
-    /// Writes to the ROMs logged so far (`note_rom_write`).
-    rom_writes: u16,
     /// The port accesses a BIOS service left for a V86 monitor to see,
     /// which the BIOS makes on its way out (`bios::PORT_ACCESSES`).
     pub port_accesses: VecDeque<crate::bios::PortAccess>,
@@ -444,9 +442,10 @@ pub struct Bus {
     /// Writes logged so far to each port nothing emulates: a program
     /// polling for hardware that isn't there would flood the log.
     unhandled_writes: Vec<u8>,
-    /// Lines of each kind `log_limited` has logged so far. The log's,
-    /// and left out of save states.
-    limited_logs: std::collections::HashMap<String, u8>,
+    /// Lines of each kind `log_limited` has logged since the last
+    /// program started, by the hash of the kind's key. The log's, and
+    /// left out of save states.
+    limited_logs: std::collections::HashMap<u64, u8>,
 
     /// Generation counter for every block of RAM (`GEN_SHIFT`). Bumped on
     /// every write inside the Bus write helpers. The decoded-instruction
@@ -1405,12 +1404,9 @@ impl Bus {
     /// Log the first writes to the ROMs, which go nowhere.
     #[cold]
     fn note_rom_write(&mut self, addr: usize) {
-        const LOGGED: u16 = 8;
-        if self.rom_writes < LOGGED {
-            self.rom_writes += 1;
-            let more = if self.rom_writes == LOGGED { " (not logging more)" } else { "" };
-            self.log_string(&format!("[BIOS] Write to the ROM at {:05X} ignored{}", addr, more));
-        }
+        self.log_limited("rom write", || {
+            format!("[BIOS] Write to the ROM at {addr:05X} ignored")
+        });
     }
 
     /// A write of `size` bytes of `value` at `addr` into the VESA linear
@@ -3725,19 +3721,22 @@ impl Bus {
     }
 
     /// Log the line `line` makes, the first few times a line of the kind
-    /// `key` comes, the last of them saying no more follow. For failures
-    /// a program gets and ignores many times a frame, such as an EMS map
-    /// past the end of a handle or a search for a file that isn't there,
-    /// which would otherwise flood the log.
-    pub fn log_limited(&mut self, key: &str, line: impl FnOnce() -> String) {
+    /// `key` comes after a program starts, the last of them saying no
+    /// more follow. For failures a program gets and ignores many times a
+    /// frame, such as an EMS map past the end of a handle or a search for
+    /// a file that isn't there, which would otherwise flood the log. The
+    /// key holds what a reader would want to see apart (the call and the
+    /// error, say), and is hashed, so a call costs no allocation.
+    pub fn log_limited(&mut self, key: impl std::hash::Hash, line: impl FnOnce() -> String) {
         const LOGGED: u8 = 8;
         if !self.logs() {
             return;
         }
-        let count = match self.limited_logs.get_mut(key) {
-            Some(count) => count,
-            None => self.limited_logs.entry(key.to_string()).or_default(),
+        let key = {
+            use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
+            BuildHasherDefault::<DefaultHasher>::default().hash_one(key)
         };
+        let count = self.limited_logs.entry(key).or_default();
         if *count >= LOGGED {
             return;
         }
@@ -3747,6 +3746,13 @@ impl Bus {
             line.push_str(" (not logging more)");
         }
         self.log_string(&line);
+    }
+
+    /// Start counting `log_limited`'s lines again: a program starts, and
+    /// its first failures of each kind are logged even where the program
+    /// before it had the same ones.
+    pub fn reset_log_limits(&mut self) {
+        self.limited_logs.clear();
     }
 
     /// The lines logged before the log hook was installed, with their

@@ -199,8 +199,6 @@ impl Bus {
             profile: _,
             guest_paging: _,
             guest_fault: _,
-            // How many ignored ROM writes were logged.
-            rom_writes: _,
             // Requests to the front end, which it carries out before a
             // state can be saved.
             reset_requested: _,
@@ -561,7 +559,6 @@ impl Bus {
             profile: _,
             guest_paging: _,
             guest_fault: _,
-            rom_writes: _,
             config_ui_requested: _,
             exit_requested: _,
             mixer_changed: _,
