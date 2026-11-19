@@ -837,10 +837,13 @@ impl Observe {
             self.charge(head, 0, ran);
         }
         // A pass that used the time the clock read in a way the model
-        // doesn't follow: the next proofs at the head hold that time to the
-        // clock's next millisecond (`PlainClock`), and the next comes at
-        // the head's next chance.
-        let clocked = matches!(&self.phase, Phase::Count { pass, .. } if pass.reads_clock());
+        // doesn't follow, as an instruction or a service the model doesn't
+        // follow reading it ("counter", "count service"): the next proofs
+        // at the head hold that time to the clock's next millisecond
+        // (`PlainClock`), and the next comes at the head's next chance.
+        // A failure for another reason backs off as any other does.
+        let clocked = matches!(why, "counter" | "count service")
+            && matches!(&self.phase, Phase::Count { pass, .. } if pass.reads_clock());
         if let (true, Some(head)) = (clocked, head) {
             match self.plain_clock.iter_mut().find(|p| p.head == head) {
                 Some(p) => {
