@@ -785,25 +785,32 @@ fn mouse_event_at(cpu: &mut Cpu, message: u32, _button: u32) {
     let (x, y) = state.input.cursor;
     let capture = state.input.capture;
     let (hwnd, hit) = if capture != 0 && state.is_window(capture) {
+        // The capture window gets the mouse's messages even where it, or
+        // a window it is in, is disabled: Windows skips disabled windows
+        // only when it looks for the window under the cursor. A button's
+        // release then still reaches the window that took the capture
+        // when it was pressed, after a modal dialog disabled its frame
+        // in between, and it lets the capture go (Tribal Rage's view,
+        // #1410).
         (capture, HTCLIENT)
     } else {
         let hwnd = window::window_at(state, x, y);
         if hwnd == DESKTOP || hwnd == 0 {
             return;
         }
+        // A disabled window, or one in a disabled window, gets no input.
+        let mut h = hwnd;
+        while let Some(w) = state.window(h) {
+            if w.style & WS_DISABLED != 0 && message != WM_MOUSEMOVE {
+                return;
+            }
+            if w.style & WS_CHILD == 0 {
+                break;
+            }
+            h = w.parent;
+        }
         (hwnd, hit_test(state, hwnd, x, y))
     };
-    // A disabled window, or one in a disabled window, gets no input.
-    let mut h = hwnd;
-    while let Some(w) = state.window(h) {
-        if w.style & WS_DISABLED != 0 && message != WM_MOUSEMOVE {
-            return;
-        }
-        if w.style & WS_CHILD == 0 {
-            break;
-        }
-        h = w.parent;
-    }
     let Some(w) = state.window(hwnd) else {
         return;
     };

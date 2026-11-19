@@ -86,6 +86,14 @@ pub enum Kind {
         looked: u64,
         signaled: bool,
     },
+    /// A snapshot of CreateToolhelp32Snapshot: the entries of each of its
+    /// lists (heaps, processes, threads, modules) as the bytes of their
+    /// structures after dwSize, and the entry each list's Next function
+    /// gives next (kernel32/toolhelp.rs).
+    Snapshot {
+        lists: Vec<Vec<Vec<u8>>>,
+        next: Vec<u32>,
+    },
 }
 
 /// A file or directory a search found, as WIN32_FIND_DATA has it.
@@ -365,6 +373,7 @@ crate::win32::state_variants!(Kind {
         looked,
         signaled
     },
+    Snapshot { lists, next },
 });
 crate::state_fields!(FindEntry {
     attributes,

@@ -163,10 +163,37 @@ opcode, `win32_version=98se` when a message names the version, more
   setup](../CONFIGURATION.md#running-the-setup-on-first-start)).
 * **Iron Helix**: `win32_depth=8` (256 colours).
 * **Moto Racer**: `win32_depth=16`; it checks the desktop's depth before
-  it sets its own mode. *Play Link* races between instances in a [LAN
+  it sets its own mode. For its 3D races, `machine=svga_voodoo3`. Start
+  the GOG release's `game.EXE` without the `-FrameRateMax60` parameter
+  that GOG's `motoracer.ini` adds: the game stops at "Unknown parameter"
+  with it. *Play Link* races between instances in a [LAN
   room](../CONFIGURATION.md#directplay-games-on-the-built-in-windows)
   over the IPX connection, the only one the game takes; it lists the
-  TCP/IP one but ignores it, on Windows too (tested with the demo).
+  TCP/IP one but ignores it, on Windows too.
+* **Rage of Mages** (GOG): `cpu=pentium_ii`. The game needs a Pentium; on
+  the default 486 the map's unexplored areas show dark blue instead of
+  black. Copy the game's folder into a folder of drive C:, such as
+  `C:\ALLODS`; at the drive's root it stops at start with an error. Leave
+  out GOG's DirectDraw wrapper (`ddraw.dll` and `aqrit.cfg`). Move the
+  `Allods` folder, which holds the disc's `MUSIC.RES` and video files, into
+  a folder mounted as a CD drive ([`[drives]`](../CONFIGURATION.md#drives)),
+  so that it is `D:\ALLODS`. The game reads both places from
+  `HKEY_LOCAL_MACHINE\Software\1C\Allods` in a [`.reg`
+  file](../CONFIGURATION.md#registry-keys): `"INSTALLDIR"="C:\\ALLODS"`,
+  without a backslash at the end, and `"CD"="D:\\"`. Start it with
+  `ROM.EXE -1024` (or `-800`) for 1024x768 (800x600); with neither it
+  runs at 640x480.
+* **Rage of Mages II: Necromancer** (GOG): `cpu=pentium_ii`. On the
+  default 486, `cycles=auto` holds the game at about 30000 in a mission,
+  where it draws 4 to 12 frames a second. Copy the game's folder into a
+  folder of drive C:, such as `C:\ROM2`. The game reads its folders from
+  `HKEY_LOCAL_MACHINE\Software\Rage of Mages 2` in a [`.reg`
+  file](../CONFIGURATION.md#registry-keys): `"INSTALLDIR"="C:\\ROM2"`
+  and `"CD"="C:\\ROM2"`. GOG's folder holds the disc's files, so no CD
+  drive is needed. Without `CD` the game says "Incorrect CD or no CD
+  detected" and offers only to join a multiplayer game. Start it with
+  `ALLODS2.EXE -1024` (or `-800`) for 1024x768 (800x600); with neither it
+  runs at 640x480.
 * **Test Drive 4**: update it to version 1.2 with its patch,
   TD42UP.EXE, which runs on the built-in Windows. The game fix
   `td4-intro-camera` then keeps the race camera behind the car at any
@@ -314,6 +341,11 @@ needs.
   Voodoo3 with the 1.07.00 driver it needs DirectX 7
   ([3dfx Voodoo3 and
   Banshee](../CONFIGURATION.md#3dfx-voodoo3-and-banshee)).
+* **Moto Racer** (GOG release, `game.EXE`): play it on [the built-in
+  Windows](#windows-games-on-the-built-in-windows). On a Voodoo3 image,
+  install the driver from 3dfx's Voodoo3 driver CD 1.2 (`3dfx32v3.dll`
+  4.11.01.1151), copied over 1.07.00 as for Glover above: with 1.07.00
+  the bikes and riders draw as flat white shapes.
 * **Oni**: on a Voodoo3, take away a MiniGL `opengl32.dll` from its
   folder. On a Voodoo2, copy `3DFXVGL.DLL` into its folder as
   `OPENGL32.DLL` ([OpenGL games under

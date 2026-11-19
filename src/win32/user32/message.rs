@@ -206,6 +206,11 @@ impl Msg {
 
     pub fn read(cpu: &mut Cpu, at: u32) -> Msg {
         let w = read_words(cpu, at, 7);
+        Msg::from_words(&w)
+    }
+
+    /// The message of a MSG's seven words, as `words` gives them.
+    pub fn from_words(w: &[u32]) -> Msg {
         Msg {
             hwnd: w[0],
             message: w[1],
@@ -1050,6 +1055,10 @@ const GET_CURSOR_LP: usize = 8;
 /// The window a click activates, while WM_MOUSEACTIVATE is asked; then
 /// whether the click is eaten.
 const GET_ACTIVATE: usize = 9;
+/// The devices' message the keyboard's or the mouse's hook is asked
+/// about, its seven words. It is kept here, not in the program's MSG,
+/// which a hook that peeks at the queue with the same MSG overwrites.
+const GET_HOOKED: usize = 10;
 const WAITS: u32 = 0x8000_0000;
 
 /// GetMessageA(msg, hwnd, min, max).
@@ -1182,8 +1191,9 @@ pub fn wait_message(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 /// Take the message the filter `f` wants from the thread `tid`'s queue,
-/// if one is there; `remove` takes it out.
-fn take_message(cpu: &mut Cpu, tid: u32, f: Filter, remove: bool) -> Option<Msg> {
+/// if one is there, and whether it is the devices' input; `remove` takes
+/// it out.
+fn take_message(cpu: &mut Cpu, tid: u32, f: Filter, remove: bool) -> Option<(Msg, bool)> {
     // What the devices did since they were last read comes first: a move
     // replaces the one SetCursorPos queued, which the program's next
     // SetCursorPos would otherwise undo before any poll saw it.
@@ -1200,7 +1210,7 @@ fn take_message(cpu: &mut Cpu, tid: u32, f: Filter, remove: bool) -> Option<Msg>
         } else {
             q.posted[i].clone()
         };
-        return Some(m);
+        return Some((m, false));
     }
     // WM_QUIT.
     if let Some(code) = q.quit
@@ -1209,12 +1219,13 @@ fn take_message(cpu: &mut Cpu, tid: u32, f: Filter, remove: bool) -> Option<Msg>
         if remove {
             state.queue_mut(tid).quit = None;
         }
-        return Some(Msg {
+        let m = Msg {
             message: WM_QUIT,
             wparam: code,
             time: (now / 1000) as u32,
             ..Msg::default()
-        });
+        };
+        return Some((m, false));
     }
     // Input.
     let q = state.queue(tid)?;
@@ -1234,21 +1245,22 @@ fn take_message(cpu: &mut Cpu, tid: u32, f: Filter, remove: bool) -> Option<Msg>
                 state.input.last_input = pid;
             }
         }
-        return Some(m);
+        return Some((m, true));
     }
     // WM_PAINT.
     if f.wants_message(WM_PAINT)
         && let Some(hwnd) = paint_window(state, tid, f.hwnd)
     {
         let (x, y) = state.input.cursor;
-        return Some(Msg {
+        let m = Msg {
             hwnd,
             message: WM_PAINT,
             time: (now / 1000) as u32,
             x,
             y,
             ..Msg::default()
-        });
+        };
+        return Some((m, false));
     }
     // WM_TIMER.
     let i = state
@@ -1260,7 +1272,7 @@ fn take_message(cpu: &mut Cpu, tid: u32, f: Filter, remove: bool) -> Option<Msg>
         t.due = now + t.elapse as u64 * 1000;
     }
     let (x, y) = state.input.cursor;
-    Some(Msg {
+    let m = Msg {
         hwnd: t.hwnd,
         message: if t.system { WM_SYSTIMER } else { WM_TIMER },
         wparam: t.id,
@@ -1268,7 +1280,8 @@ fn take_message(cpu: &mut Cpu, tid: u32, f: Filter, remove: bool) -> Option<Msg>
         time: (now / 1000) as u32,
         x,
         y,
-    })
+    };
+    Some((m, false))
 }
 
 /// Whether `message` is a key or a mouse button going down: the input
@@ -1302,36 +1315,24 @@ pub fn get_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 };
                 let flags = t.var(GET_FLAGS);
                 let remove = flags & PM_REMOVE != 0;
-                if let Some(m) = take_message(cpu, tid, f, remove) {
+                if let Some((m, input)) = take_message(cpu, tid, f, remove) {
                     if matches!(m.message, WM_TIMER | WM_SYSTIMER) && flags & PM_NOYIELD == 0 {
                         input_idle(cpu);
                     }
-                    let state = user(cpu);
-                    let q = state.queue_mut(tid);
-                    q.last_time = m.time;
-                    q.last_pos = (m.x, m.y);
-                    q.changed = 0;
-                    write_words(cpu, t.var(GET_MSG), &m.words());
-                    let result = if flags & WAITS != 0 {
-                        (m.message != WM_QUIT) as u32
-                    } else {
-                        TRUE
-                    };
-                    t.set(GET_RESULT, result);
                     t.set(GET_REMOVE, remove as u32);
-                    let cursor = super::input::sets_cursor(cpu, &m).filter(|_| remove);
-                    let (hwnd, lp) = cursor.unwrap_or((0, 0));
-                    t.set(GET_CURSOR_HWND, hwnd);
-                    t.set(GET_CURSOR_LP, lp);
-                    // A click on a window that isn't the active one in the
-                    // foreground: WM_MOUSEACTIVATE asks the window under
-                    // the cursor whether it activates its top-level
-                    // window, and whether the click is still delivered.
-                    if remove && let Some((top, lp)) = super::input::click_activates(cpu, &m) {
-                        t.set(GET_ACTIVATE, top);
-                        return super::window::send(m.hwnd, WM_MOUSEACTIVATE, top, lp, 5);
+                    // The keyboard's and the mouse's hooks see what the
+                    // devices did before the program does, and a hook
+                    // that returns nonzero throws it away.
+                    if input && let Some((kind, wp, lp)) = input_hook(cpu, t, &m) {
+                        for (k, w) in m.words().into_iter().enumerate() {
+                            t.set(GET_HOOKED + k, w);
+                        }
+                        let code = if remove { HC_ACTION } else { HC_NOREMOVE };
+                        return super::hook::call(kind, code, wp, lp, 7);
                     }
-                    t.step = 3;
+                    if let Some(next) = found(cpu, t, tid, &m) {
+                        return next;
+                    }
                     continue;
                 }
                 if flags & PM_NOYIELD == 0 {
@@ -1399,9 +1400,121 @@ pub fn get_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 }
                 return Next::Done(t.var(GET_RESULT));
             }
+            7 => {
+                // What the keyboard's or the mouse's hook returned.
+                let w: [u32; 7] = std::array::from_fn(|k| t.var(GET_HOOKED + k));
+                let m = Msg::from_words(&w);
+                if value != 0 {
+                    // Thrown away, also by a peek that leaves messages
+                    // in the queue: the thread looks for the next one.
+                    if t.var(GET_REMOVE) == 0 {
+                        drop_input(cpu, tid, &m);
+                    }
+                    t.step = 0;
+                    continue;
+                }
+                if let Some(next) = found(cpu, t, tid, &m) {
+                    return next;
+                }
+            }
             _ => return Next::Done(t.var(GET_RESULT)),
         }
     }
+}
+
+/// HC_ACTION and HC_NOREMOVE: the code a keyboard or mouse hook gets
+/// for a message taken out of the queue, and for one left in it.
+const HC_ACTION: u32 = 0;
+const HC_NOREMOVE: u32 = 3;
+
+/// WH_KEYBOARD and WH_MOUSE.
+const WH_KEYBOARD: u32 = super::hook::WH_KEYBOARD as u32;
+const WH_MOUSE: u32 = super::hook::WH_MOUSE as u32;
+
+/// The hook a message of the devices goes to, if the thread has one,
+/// with its wParam and lParam: for a key, its virtual key and the
+/// message's lParam; for the mouse, the message and a MOUSEHOOKSTRUCT
+/// (the point on the screen, the window, the hit test code and the extra
+/// information) in the task's scratch space, which this makes on the
+/// stack the first time.
+fn input_hook(cpu: &mut Cpu, t: &mut Task, m: &Msg) -> Option<(u32, u32, u32)> {
+    let hit = match m.message {
+        WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP => {
+            if !super::hook::has(cpu, WH_KEYBOARD) {
+                return None;
+            }
+            return Some((WH_KEYBOARD, m.wparam, m.lparam));
+        }
+        // From WM_MOUSEMOVE to WM_MOUSEWHEEL, then the non-client
+        // messages, whose wParam is the hit test code.
+        WM_MOUSEMOVE..=0x020A => super::input::HTCLIENT,
+        WM_NCMOUSEMOVE..=0x00A9 => m.wparam,
+        _ => return None,
+    };
+    if !super::hook::has(cpu, WH_MOUSE) {
+        return None;
+    }
+    if t.scratch == 0 {
+        let at = cpu.esp().wrapping_sub(MOUSEHOOKSTRUCT_SIZE) & !3;
+        if !cpu.bus.guest_probe(at, MOUSEHOOKSTRUCT_SIZE as usize, true) {
+            return None;
+        }
+        cpu.set_esp(at);
+        t.scratch = at;
+    }
+    let words = [m.x as u32, m.y as u32, m.hwnd, hit, 0];
+    write_words(cpu, t.scratch, &words);
+    Some((WH_MOUSE, m.message, t.scratch))
+}
+
+/// MOUSEHOOKSTRUCT's size.
+const MOUSEHOOKSTRUCT_SIZE: u32 = 20;
+
+/// Take the devices' message `m`, which a hook threw away, out of the
+/// thread `tid`'s queue, where a peek left it.
+fn drop_input(cpu: &mut Cpu, tid: u32, m: &Msg) {
+    let state = user(cpu);
+    let q = state.queue_mut(tid);
+    if let Some(i) = q.input.iter().position(|x| x == m) {
+        q.input.remove(i);
+        super::input::message_taken(state, m);
+    }
+}
+
+/// A message GetMessageA or PeekMessageA found and returns: it goes to
+/// the program's MSG, the queue keeps its time and place, and a mouse
+/// message sets the cursor and may activate the window clicked. What
+/// comes next, if it calls into the program; otherwise the task goes on
+/// at the step this sets.
+fn found(cpu: &mut Cpu, t: &mut Task, tid: u32, m: &Msg) -> Option<Next> {
+    write_words(cpu, t.var(GET_MSG), &m.words());
+    let flags = t.var(GET_FLAGS);
+    let remove = t.var(GET_REMOVE) != 0;
+    let state = user(cpu);
+    let q = state.queue_mut(tid);
+    q.last_time = m.time;
+    q.last_pos = (m.x, m.y);
+    q.changed = 0;
+    let result = if flags & WAITS != 0 {
+        (m.message != WM_QUIT) as u32
+    } else {
+        TRUE
+    };
+    t.set(GET_RESULT, result);
+    let cursor = super::input::sets_cursor(cpu, m).filter(|_| remove);
+    let (hwnd, lp) = cursor.unwrap_or((0, 0));
+    t.set(GET_CURSOR_HWND, hwnd);
+    t.set(GET_CURSOR_LP, lp);
+    // A click on a window that isn't the active one in the foreground:
+    // WM_MOUSEACTIVATE asks the window under the cursor whether it
+    // activates its top-level window, and whether the click is still
+    // delivered.
+    if remove && let Some((top, lp)) = super::input::click_activates(cpu, m) {
+        t.set(GET_ACTIVATE, top);
+        return Some(super::window::send(m.hwnd, WM_MOUSEACTIVATE, top, lp, 5));
+    }
+    t.step = 3;
+    None
 }
 
 /// The variables of DispatchMessageA's task.
@@ -1973,7 +2086,7 @@ pub(super) mod tests {
 
     /// The next message for `tid`, taken: its message and lParam.
     fn take(cpu: &mut Cpu, tid: u32) -> Option<(u32, u32)> {
-        take_message(cpu, tid, Filter::default(), true).map(|m| (m.message, m.lparam))
+        take_message(cpu, tid, Filter::default(), true).map(|(m, _)| (m.message, m.lparam))
     }
 
     /// A program that puts the cursor back in the middle after each move
@@ -1990,6 +2103,41 @@ pub(super) mod tests {
         cpu.bus.mouse.move_by(50.0, 0.0);
         assert_eq!(take(&mut cpu, tid), Some((WM_MOUSEMOVE, 100 << 16 | 150)));
         assert_eq!(take(&mut cpu, tid), None);
+    }
+
+    /// A window that took the capture when the button went down gets its
+    /// release though a modal dialog disabled the frame it is in
+    /// meanwhile, as on Windows: Tribal Rage's view lets the capture go
+    /// there, and otherwise kept it and every click after it (#1410).
+    #[test]
+    fn the_capture_window_gets_the_mouse_in_a_disabled_frame() {
+        use super::super::window::{WS_CHILD, WS_DISABLED, Window};
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let frame = user(&mut cpu).new_window(Window::default()).unwrap();
+        let view = Window {
+            style: WS_CHILD,
+            parent: frame,
+            ..Window::default()
+        };
+        let view = user(&mut cpu).new_window(view).unwrap();
+        user(&mut cpu).desktop = true;
+        user(&mut cpu).input.capture = view;
+        let tid = user(&mut cpu).window(view).map(|w| w.tid).unwrap_or(0);
+        input::set_cursor_pos(&mut cpu, &[100, 100]);
+        cpu.bus.mouse.button_down(0);
+        input::set_cursor_pos(&mut cpu, &[100, 100]);
+        assert_eq!(take(&mut cpu, tid), Some((WM_MOUSEMOVE, 100 << 16 | 100)));
+        assert_eq!(take(&mut cpu, tid), Some((WM_LBUTTONDOWN, 100 << 16 | 100)));
+        // The dialog disables the frame; the button comes up.
+        if let Some(w) = user(&mut cpu).window_mut(frame) {
+            w.style |= WS_DISABLED;
+        }
+        cpu.bus.mouse.button_up(0);
+        input::set_cursor_pos(&mut cpu, &[100, 100]);
+        let got: Vec<u32> = std::iter::from_fn(|| take(&mut cpu, tid))
+            .map(|m| m.0)
+            .collect();
+        assert!(got.contains(&WM_LBUTTONUP), "{got:X?}");
     }
 
     /// A click the mouse made before the program put the cursor back is

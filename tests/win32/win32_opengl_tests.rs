@@ -299,7 +299,8 @@ enum Draws {
 }
 
 /// A machine with the built-in Windows on, `program` loaded from the
-/// shell as T.EXE, and `card` as its display adapter.
+/// shell as T.EXE, and `card` as its display adapter. Its folder is
+/// `folder_on(test, card)`.
 fn machine_on(test: &str, card: Draws, program: Vec<u8>) -> Box<Cpu> {
     match card {
         Draws::Voodoo3 => machine(test, true, program),
@@ -310,6 +311,16 @@ fn machine_on(test: &str, card: Draws, program: Vec<u8>) -> Box<Cpu> {
             program,
         ),
     }
+}
+
+/// The folder of `machine_on(test, card)`'s machine, which only that
+/// test makes and empties: the place for the files the test writes.
+fn folder_on(test: &str, card: Draws) -> PathBuf {
+    let name = match card {
+        Draws::Voodoo3 => test.to_string(),
+        Draws::ToadForce => format!("{test}_toadforce"),
+    };
+    PathBuf::from("target/test_win32_opengl").join(name)
 }
 
 /// On a ToadForce, the card drew and took every command its drivers
@@ -2217,6 +2228,164 @@ fn pixels_read_back_in_the_packed_types_texels_come_in() {
     }
 }
 
+/// glReadPixels of GL_DEPTH_COMPONENT reads the depth buffer: 1.0 where
+/// it was cleared, and 0.5 where a quad at z 0 was drawn with the
+/// identity matrices, which the 16-bit buffer holds as 0x7FFF or 0x8000.
+/// A float gets the depth, an unsigned integer of b bits the depth times
+/// 2^b - 1. Oni reads one pixel's depth so each frame.
+#[test]
+fn depth_reads_back_as_float_and_unsigned_integers() {
+    // (type, the cleared depth, the quad's, a value's bytes).
+    let reads = [
+        (GL_FLOAT, 1.0f32.to_bits(), 0.5f32.to_bits(), 4),
+        (GL_UNSIGNED_SHORT, 0xFFFF, 0x8000, 2),
+        (GL_UNSIGNED_INT, 0xFFFF_FFFF, 0x8000_0000, 4),
+    ];
+    // Outside the quad, then inside it.
+    let places = [(4, 4), (32, 32)];
+    for (card, name) in [
+        (Draws::Voodoo3, "a Voodoo3"),
+        (Draws::ToadForce, "a ToadForce"),
+    ] {
+        let mut at = 0;
+        let (exe, data) = program(&data(), |a, l| {
+            let mut c = Calls { next: 0 };
+            start(a, l, &mut c)?;
+            let both = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT;
+            c.api(a, l, CLEAR, &[Arg::I(both)])?;
+            c.api(a, l, ENABLE, &[Arg::I(GL_DEPTH_TEST)])?;
+            c.api(a, l, DEPTH_FUNC, &[Arg::I(GL_LESS)])?;
+            c.api(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+            c.api(a, l, COLOR3F, &[Arg::F(1.0), Arg::F(0.0), Arg::F(0.0)])?;
+            for (x, y) in [(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)] {
+                c.api(a, l, VERTEX3F, &[Arg::F(x), Arg::F(y), Arg::F(0.0)])?;
+            }
+            c.api(a, l, END, &[])?;
+            at = c.next;
+            for (i, (kind, ..)) in reads.iter().enumerate() {
+                for (j, (x, y)) in places.iter().enumerate() {
+                    let one = [
+                        Arg::I(*x),
+                        Arg::I(*y),
+                        Arg::I(1),
+                        Arg::I(1),
+                        Arg::I(GL_DEPTH_COMPONENT),
+                        Arg::I(*kind),
+                        Arg::At(PIXELS + 8 * (2 * i + j) as u32),
+                    ];
+                    c.api(a, l, READ_PIXELS, &one)?;
+                    c.api(a, l, GET_ERROR, &[])?;
+                }
+            }
+            finish(a, l)
+        });
+        let mut cpu = machine_on("depth_read_back", card, exe);
+        run_until_done(&mut cpu, data);
+        for (i, (kind, cleared, drawn, bytes)) in reads.iter().enumerate() {
+            for (j, want) in [cleared, drawn].iter().enumerate() {
+                let n = (2 * i + j) as u32;
+                let error = peek(&cpu, data + RESULTS + 4 * (at + 2 * n + 1));
+                assert_eq!(error, 0, "{kind:#x} on {name}");
+                // A value is its bytes alone: the ones after it stay 0.
+                let got = peek(&cpu, data + PIXELS + 8 * n);
+                assert_eq!(peek(&cpu, data + PIXELS + 8 * n + 4), 0, "{name}");
+                assert!(*bytes == 4 || got >> 16 == 0, "{kind:#x} on {name}");
+                // The quad's depth is a half, whichever way it rounds to
+                // 16 bits.
+                let near = match *kind {
+                    GL_FLOAT => (f32::from_bits(got) - f32::from_bits(**want)).abs() < 1e-4,
+                    GL_UNSIGNED_SHORT => got.abs_diff(**want) <= 1,
+                    _ => got.abs_diff(**want) <= 0x1_0001,
+                };
+                assert!(near, "{kind:#x} at {:?} on {name}: {got:#x}", places[j]);
+            }
+        }
+    }
+}
+
+/// Depth read back in bytes and signed types, laid out as the pack
+/// settings say. A 2 by 2 rectangle at (15, 15) has the corner at
+/// (16, 16) in the quad of `depth_reads_back_as_float_and_unsigned_integers`:
+/// its bottom row comes first, a row to each 4 bytes with the default
+/// alignment and to each 2 with an alignment of 1. A cleared pixel is
+/// 2^b - 1 as an unsigned byte, and (2^b - 2) / 2 as a signed type of b
+/// bits (OpenGL 1.1's section 4.3.2). GL_BITMAP is no type for depth.
+#[test]
+fn depth_reads_back_in_bytes_and_signed_types_as_packed() {
+    const GL_INT: u32 = 0x1404;
+    const GL_BITMAP: u32 = 0x1A00;
+    const GL_PACK_ALIGNMENT: u32 = 0x0D05;
+    let slot = |n: u32| PIXELS + 8 * n;
+    // (x, y, width, height, type, pack alignment).
+    let reads = [
+        (15, 15, 2, 2, GL_UNSIGNED_BYTE, 4),
+        (15, 15, 2, 2, GL_UNSIGNED_BYTE, 1),
+        (4, 4, 1, 1, GL_BYTE, 4),
+        (4, 4, 1, 1, GL_SHORT, 4),
+        (4, 4, 1, 1, GL_INT, 4),
+        (4, 4, 1, 1, GL_BITMAP, 4),
+    ];
+    for (card, name) in [
+        (Draws::Voodoo3, "a Voodoo3"),
+        (Draws::ToadForce, "a ToadForce"),
+    ] {
+        let mut errors = Vec::new();
+        let (exe, data) = program(&data(), |a, l| {
+            let mut c = Calls { next: 0 };
+            start(a, l, &mut c)?;
+            let both = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT;
+            c.api(a, l, CLEAR, &[Arg::I(both)])?;
+            c.api(a, l, ENABLE, &[Arg::I(GL_DEPTH_TEST)])?;
+            c.api(a, l, DEPTH_FUNC, &[Arg::I(GL_LESS)])?;
+            c.api(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+            for (x, y) in [(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)] {
+                c.api(a, l, VERTEX3F, &[Arg::F(x), Arg::F(y), Arg::F(0.0)])?;
+            }
+            c.api(a, l, END, &[])?;
+            for (n, &(x, y, w, h, kind, align)) in reads.iter().enumerate() {
+                let pack = [Arg::I(GL_PACK_ALIGNMENT), Arg::I(align)];
+                gl(a, l, PIXEL_STOREI, &pack)?;
+                let read = [
+                    Arg::I(x),
+                    Arg::I(y),
+                    Arg::I(w),
+                    Arg::I(h),
+                    Arg::I(GL_DEPTH_COMPONENT),
+                    Arg::I(kind),
+                    Arg::At(slot(n as u32)),
+                ];
+                c.api(a, l, READ_PIXELS, &read)?;
+                errors.push(c.next);
+                c.api(a, l, GET_ERROR, &[])?;
+            }
+            finish(a, l)
+        });
+        let mut cpu = machine_on("depth_read_packed", card, exe);
+        run_until_done(&mut cpu, data);
+        let error = |n: usize| peek(&cpu, data + RESULTS + 4 * errors[n]);
+        let got = |n: u32, at: u32| peek(&cpu, data + slot(n) + at);
+        for n in 0..5 {
+            assert_eq!(error(n), 0, "read {n} on {name}");
+        }
+        // The quad's corner is a half: 0x7FFF or 0x8000, 127 either way.
+        assert_eq!(
+            (got(0, 0), got(0, 4)),
+            (0xFFFF, 0x7FFF),
+            "aligned to 4 on {name}"
+        );
+        assert_eq!(
+            (got(1, 0), got(1, 4)),
+            (0x7FFF_FFFF, 0),
+            "aligned to 1 on {name}"
+        );
+        assert_eq!(got(2, 0), 0x7F, "GL_BYTE on {name}");
+        assert_eq!(got(3, 0), 0x7FFF, "GL_SHORT on {name}");
+        assert_eq!(got(4, 0), 0x7FFF_FFFF, "GL_INT on {name}");
+        assert_eq!(error(5), GL_INVALID_ENUM, "GL_BITMAP on {name}");
+        assert_eq!(got(5, 0), 0, "GL_BITMAP on {name}");
+    }
+}
+
 /// A texture keeps its texels when the display's mode changes: the
 /// driver keeps OpenGL's textures, where DirectDraw's surfaces in video
 /// memory are lost. Oni draws its menus and play from textures it made
@@ -3440,12 +3609,10 @@ fn runs_draw_alike(card: Draws) {
             "list_runs"
         };
         let mut cpu = machine_on(name, card, exe.clone());
-        // A file of this card's run: both cards' tests run at once.
-        let file = match card {
-            Draws::Voodoo3 => "voodoo3.trace",
-            Draws::ToadForce => "toadforce.trace",
-        };
-        let path = PathBuf::from(format!("target/test_win32_opengl/{name}/{file}"));
+        // In this card's own folder: both cards' tests run at once, and
+        // each empties its folder as it starts, so a file in the other
+        // card's folder may be gone, or its folder not there yet.
+        let path = folder_on(name, card).join("t.trace");
         if traced {
             rust_dos::win32::trace3d::start(&mut cpu, &path).unwrap();
         }
