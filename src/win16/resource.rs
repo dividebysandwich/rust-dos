@@ -622,11 +622,17 @@ fn name_table(file: &[u8], parsed: &ne::Module) -> Vec<(ne::ResId, ne::ResId, u1
     entries
 }
 
+/// The type of the resource `hrsrc` in a module's resource table.
+pub(super) fn type_of(parsed: &ne::Module, hrsrc: u16) -> Option<&ne::ResourceType> {
+    let t = (hrsrc >> 10) as usize;
+    parsed.resources.get(t.checked_sub(1)?)
+}
+
 /// The entry of the resource `hrsrc` in a module's resource table.
 fn entry(parsed: &ne::Module, hrsrc: u16) -> Option<&ne::Resource> {
-    let t = (hrsrc >> 10) as usize;
-    let rt = parsed.resources.get(t.checked_sub(1)?)?;
-    rt.resources.get((hrsrc & 0x3FF) as usize)
+    type_of(parsed, hrsrc)?
+        .resources
+        .get((hrsrc & 0x3FF) as usize)
 }
 
 /// The data of the resource `hrsrc` of the module at `index`.

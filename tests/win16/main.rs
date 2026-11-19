@@ -17,4 +17,5 @@ mod win16_hook_tests;
 mod win16_mmsystem_tests;
 mod win16_resource_tests;
 mod win16_tests;
+mod win16_toolhelp_tests;
 mod win16_user_tests;

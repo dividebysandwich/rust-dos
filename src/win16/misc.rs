@@ -6,6 +6,7 @@
 //! does when there is no such device.
 
 use super::builtin::{Def, register, rust, win32};
+use super::global::{HeapItem, HeapPlace};
 use super::lz;
 use super::thunk;
 use super::user::{P_MISC, P_WORDS};
@@ -101,11 +102,11 @@ pub static TOOLHELP: Def = Def {
     file: "TOOLHELP.DLL",
     apis: &[
         rust("GlobalHandleToSel", 50, "w", global_handle_to_sel),
-        rust("GlobalFirst", 51, "pw", zero),
-        rust("GlobalNext", 52, "pw", zero),
-        rust("GlobalInfo", 53, "p", zero),
-        rust("GlobalEntryHandle", 54, "pw", zero),
-        rust("GlobalEntryModule", 55, "pww", zero),
+        rust("GlobalFirst", 51, "pw", global_first),
+        rust("GlobalNext", 52, "pw", global_next),
+        rust("GlobalInfo", 53, "p", global_info),
+        rust("GlobalEntryHandle", 54, "pw", global_entry_handle),
+        rust("GlobalEntryModule", 55, "pww", global_entry_module),
         rust("LocalInfo", 56, "pw", zero),
         rust("LocalFirst", 57, "pw", zero),
         rust("LocalNext", 58, "p", zero),
@@ -569,6 +570,169 @@ fn fp_math(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 fn global_handle_to_sel(_: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(super::global::handle_to_sel(args[0] as u16) as u32)
+}
+
+/// GlobalFirst's and GlobalNext's flags: every block and free piece, the
+/// blocks of the LRU list, or the free pieces.
+const GLOBAL_ALL: u32 = 0;
+const GLOBAL_LRU: u32 = 1;
+const GLOBAL_FREE: u32 = 2;
+
+/// GLOBALENTRY's size, which its dwSize must be, and its wFlags' bit
+/// for a block a task owns. The low byte of wFlags is KERNEL's flags of
+/// the block.
+const GLOBALENTRY_SIZE: u32 = 36;
+const GF_PDB_OWNER: u16 = 0x0100;
+
+/// Whether `place` is on the list GlobalFirst's `flags` walk.
+fn on_list(place: &HeapPlace, flags: u32) -> bool {
+    match flags {
+        GLOBAL_ALL => true,
+        GLOBAL_LRU => place.lru,
+        GLOBAL_FREE => place.is_free(),
+        _ => false,
+    }
+}
+
+/// Whether `at` is a GLOBALENTRY whose dwSize is set, as TOOLHELP checks
+/// before it writes one.
+fn global_entry_at(cpu: &Cpu, at: u32) -> bool {
+    at != 0 && super::read_32(cpu, at) == GLOBALENTRY_SIZE
+}
+
+/// Fill the GLOBALENTRY at `at` with `item`. dwNext is the address of
+/// the item after it in the heap (`places`), and dwNextAlt that of the
+/// item after it on the LRU or free list it is on, 0 at a list's end
+/// and for a discarded block, which isn't in the heap; GlobalNext goes
+/// on from there.
+fn fill_global_entry(cpu: &mut Cpu, at: u32, places: &[HeapPlace], item: &HeapItem) {
+    let after = |list: Option<u32>| {
+        if item.address == 0 {
+            return 0;
+        }
+        places
+            .iter()
+            .find(|p| p.address > item.address && list.is_none_or(|f| on_list(p, f)))
+            .map_or(0, |p| p.address)
+    };
+    let alt = if item.lru {
+        Some(GLOBAL_LRU)
+    } else if item.kind == super::global::GT_FREE {
+        Some(GLOBAL_FREE)
+    } else {
+        None
+    };
+    let next = after(None);
+    let next_alt = alt.map_or(0, |f| after(Some(f)));
+    super::write_32(cpu, at + 4, item.address);
+    super::write_32(cpu, at + 8, item.size);
+    let words = [
+        item.handle,
+        item.lock,
+        item.page_lock,
+        item.flags as u16 | if item.pdb_owner { GF_PDB_OWNER } else { 0 },
+        item.heap_present as u16,
+        item.owner,
+        item.kind,
+        item.data,
+    ];
+    for (i, w) in words.into_iter().enumerate() {
+        super::write_16(cpu, at + 12 + 2 * i as u32, w);
+    }
+    super::write_32(cpu, at + 28, next);
+    super::write_32(cpu, at + 32, next_alt);
+}
+
+/// GlobalFirst(lpGlobal, wFlags): the first item of the list `wFlags`
+/// names.
+fn global_first(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (at, flags) = (args[0], args[1] & 0xFFFF);
+    if !global_entry_at(cpu, at) {
+        return Some(0);
+    }
+    let places = super::global::heap_places(cpu);
+    let Some(place) = places.iter().find(|p| on_list(p, flags)) else {
+        return Some(0);
+    };
+    let item = super::global::place_item(cpu, place);
+    fill_global_entry(cpu, at, &places, &item);
+    Some(1)
+}
+
+/// GlobalNext(lpGlobal, wFlags): the item the entry's dwNext (for
+/// GLOBAL_ALL) or dwNextAlt (for the LRU and free lists) points to, or
+/// the first one after it if that block is gone.
+fn global_next(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (at, flags) = (args[0], args[1] & 0xFFFF);
+    if !global_entry_at(cpu, at) {
+        return Some(0);
+    }
+    let cursor = super::read_32(cpu, at + if flags == GLOBAL_ALL { 28 } else { 32 });
+    if cursor == 0 {
+        return Some(0);
+    }
+    let places = super::global::heap_places(cpu);
+    let found = places
+        .iter()
+        .find(|p| p.address >= cursor && on_list(p, flags));
+    let Some(place) = found else {
+        return Some(0);
+    };
+    let item = super::global::place_item(cpu, place);
+    fill_global_entry(cpu, at, &places, &item);
+    Some(1)
+}
+
+/// GlobalInfo(lpGlobalInfo): GLOBALINFO's counts of the heap's items,
+/// its free pieces and the LRU list's blocks.
+fn global_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let at = args[0];
+    if at == 0 {
+        return Some(0);
+    }
+    let places = super::global::heap_places(cpu);
+    let count = |flags| places.iter().filter(|p| on_list(p, flags)).count() as u16;
+    let counts = [count(GLOBAL_ALL), count(GLOBAL_FREE), count(GLOBAL_LRU)];
+    for (i, v) in counts.into_iter().enumerate() {
+        super::write_16(cpu, at + 4 + 2 * i as u32, v);
+    }
+    Some(1)
+}
+
+/// Fill the GLOBALENTRY at `at` with the block whose handle or selector
+/// is `handle`: whether there is one.
+fn entry_of_block(cpu: &mut Cpu, at: u32, handle: u16) -> u32 {
+    if !global_entry_at(cpu, at) {
+        return 0;
+    }
+    let Some(item) = super::global::heap_item(cpu, handle) else {
+        return 0;
+    };
+    let places = if item.address == 0 {
+        Vec::new()
+    } else {
+        super::global::heap_places(cpu)
+    };
+    fill_global_entry(cpu, at, &places, &item);
+    1
+}
+
+/// GlobalEntryHandle(lpGlobal, hItem): the block whose handle or
+/// selector is `hItem`.
+fn global_entry_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    Some(entry_of_block(cpu, args[0], args[1] as u16))
+}
+
+/// GlobalEntryModule(lpGlobal, hModule, wSeg): the block of segment
+/// `wSeg` (from 1) of the module `hModule` (or its instance).
+fn global_entry_module(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (at, module, seg) = (args[0], args[1] as u16, args[2] as u16);
+    let sel = super::module_index(cpu, module).and_then(|i| {
+        let m = &cpu.bus.win32.win16.modules[i];
+        let n = u8::try_from(seg).ok()?;
+        super::module::segment_selector(cpu, m, n)
+    });
+    Some(sel.map_or(0, |sel| entry_of_block(cpu, at, sel)))
 }
 
 fn system_heap_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
