@@ -1904,6 +1904,117 @@ fn a_bit_test_of_memory_by_a_register_faults_at_the_dword_its_offset_picks() {
     assert_eq!(b.read32(0x54FF0), 0x1234_5678);
 }
 
+#[test]
+fn xadd_of_registers_and_memory_runs_in_translated_code() {
+    // XADD of registers of each size, of AH and AL and of one register with
+    // itself (the sum stays), then of memory: with LOCK, a word and a byte
+    // at a scaled index, through FS (based at 1000h), and with a 16-bit
+    // address, [BX+6000h]. The flags and results go into a checksum.
+    let (mut a, mut b) = twins(|rig| {
+        rig.set_gdt(FREE, seg_desc(0x1000, 0xF_FFFF, DATA_R0, G32));
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut top = a.create_label();
+            let flags = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+                a.pushfd()?;
+                a.pop(edx)?;
+                a.and(edx, 0x8D5)?;
+                a.add(edi, edx)?;
+                a.rol(edi, 5)
+            };
+            a.mov(ax, FREE as u32)?;
+            a.mov(fs, ax)?;
+            a.mov(ecx, 300u32)?;
+            a.mov(esi, 0x8001_7F35u32)?;
+            a.mov(ebx, DATA + 0x40)?;
+            a.set_label(&mut top)?;
+            a.imul_3(eax, ecx, 0x9E37_79B1u32 as i32)?;
+            a.mov(edx, esi)?;
+            a.xadd(edx, eax)?;
+            flags(a)?;
+            a.add(esi, edx)?;
+            a.mov(edx, esi)?;
+            a.xadd(ax, dx)?;
+            flags(a)?;
+            a.xadd(ah, al)?;
+            flags(a)?;
+            a.mov(edx, esi)?;
+            a.xadd(dl, dh)?;
+            flags(a)?;
+            a.add(esi, edx)?;
+            a.xadd(eax, eax)?;
+            flags(a)?;
+            a.lock().xadd(dword_ptr(ebx), esi)?;
+            flags(a)?;
+            a.xadd(word_ptr(ebx + ecx * 2), ax)?;
+            flags(a)?;
+            a.xadd(byte_ptr(ebx + ecx + 1), ah)?;
+            flags(a)?;
+            // XADD FS:[EBX+8], EAX.
+            a.db(&[0x64, 0x0F, 0xC1, 0x43, 0x08])?;
+            flags(a)?;
+            // XADD [BX+6000h], EAX.
+            a.db(&[0x67, 0x0F, 0xC1, 0x87, 0x00, 0x60])?;
+            flags(a)?;
+            a.add(edi, eax)?;
+            a.add(edi, esi)?;
+            a.dec(ecx)?;
+            a.jnz(top)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(a.cpu.edi(), b.cpu.edi());
+    assert_eq!(a.read32(DATA + 0x40), b.read32(DATA + 0x40));
+    if AVAILABLE {
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Xadd), 0);
+    }
+}
+
+#[test]
+fn xadd_into_a_missing_page_faults_with_its_register_as_it_was() {
+    // LOCK XADD [EBX],EDX with EBX in the missing page 55000h: #PF for a
+    // write, EDX and the flags not changed.
+    let (mut a, mut b) = twins(|rig| {
+        let (dir, table) = (0x80000u32, 0x81000u32);
+        rig.write32(dir, table | 3);
+        for i in 0..1024u32 {
+            rig.write32(table + 4 * i, (i << 12) | 3);
+        }
+        rig.write32(table + 0x55 * 4, 0);
+        rig.handler(PF, 0, |a| {
+            a.mov(dword_ptr(RESULT + 0x40), edx)?;
+            a.pushfd()?;
+            a.pop(dword_ptr(RESULT + 0x44))?;
+            record_code(a, PF)
+        });
+        let code = asm32(CODE, |a| {
+            a.mov(eax, dir)?;
+            a.mov(cr3, eax)?;
+            a.mov(eax, cr0)?;
+            a.or(eax, 0x8000_0000u32)?;
+            a.mov(cr0, eax)?;
+            a.jmp(CODE as u64 + 0x100)
+        });
+        rig.load(CODE, &code);
+        let body = asm32(CODE + 0x100, |a| {
+            a.mov(ebx, 0x55010u32)?;
+            a.mov(edx, 0x1234_5678u32)?;
+            a.xor(eax, eax)?;
+            a.lock().xadd(dword_ptr(ebx), edx)?;
+            a.mov(edx, 9u32)?;
+            a.hlt()
+        });
+        rig.load(CODE + 0x100, &body);
+    });
+    run_both(&mut a, &mut b);
+    let (vector, stack) = b.recorded();
+    assert_eq!((vector, stack[0]), (PF as u32, 2), "a write to a page not present");
+    assert_eq!(stack[1], CODE + 0x100 + 12, "EIP of the XADD");
+    assert_eq!(b.cpu.cr2, 0x55010);
+    assert_eq!(b.read32(RESULT + 0x40), 0x1234_5678);
+    assert_eq!(b.read32(RESULT + 0x44) & 0x8D5, 0x44, "ZF and PF of the XOR");
+}
+
 /// Virtual-8086 code at 3000:0000 that pushes the flags after an ADD,
 /// 500 times, then enters ring 0 through INT 40h; entered with IOPL
 /// `iopl`. Returns the recompiler's machine.
@@ -2472,9 +2583,8 @@ fn indirect_jumps_are_translated_and_linked_to_where_they_go() {
 fn rep_movs_and_stos_of_a_few_elements_run_as_translated_loops() {
     // REP MOVS and STOS of each size with counts of 0 to 17 (the last more
     // than a translated loop does, which the handler runs), overlapping
-    // moves, MOVS and STOS without REP, going down (DF set, which the
-    // handler runs), and with 16-bit addressing wrapping around at 64 KB,
-    // 100 times over.
+    // moves, MOVS and STOS without REP, going down (DF set), and with
+    // 16-bit addressing wrapping around at 64 KB, 100 times over.
     let (mut a, mut b) = twins(|rig| {
         let bytes: Vec<u8> = (0..0x800u32).map(|i| (i * 7 + 3) as u8).collect();
         rig.load(DATA, &bytes);
@@ -2617,6 +2727,145 @@ fn a_translated_rep_movs_into_a_missing_page_faults_where_it_is_reached() {
     assert_eq!(b.recorded().0, PF as u32);
     assert_eq!(b.cpu.cr2, 0x55000);
     assert_eq!(recorded_indexes(&b), (4, 0x53010, 0x55000));
+}
+
+#[test]
+fn movs_stos_and_lods_going_down_run_in_translated_code() {
+    // With DF set: MOVS, STOS and LODS of each size without REP, REP MOVSD
+    // and REP STOSW of 0 to 7 elements, and a MOVSD from FS (based 1000h
+    // above DS). Then with 16-bit addressing, into an ES based at DATA +
+    // 4000h: MOVSW, MOVSB, STOSB and REP MOVSB from SI and DI 1, which wrap
+    // below 0 to FFFFh and keep the upper halves of ESI, EDI and ECX. The
+    // indexes and the values loaded go into a checksum, 100 times over.
+    let (mut a, mut b) = twins(|rig| {
+        let bytes: Vec<u8> = (0..0x4000u32).map(|i| (i * 13 + 5) as u8).collect();
+        rig.load(DATA, &bytes);
+        rig.set_gdt(FREE, seg_desc(DATA + 0x4000, 0xFFFF, DATA_R0, 0x4));
+        rig.set_gdt(FREE + 8, seg_desc(0x1000, 0xF_FFFF, DATA_R0, G32));
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut top = a.create_label();
+            a.xor(ebx, ebx)?;
+            a.mov(ax, FREE as u32 + 8)?;
+            a.mov(fs, ax)?;
+            a.mov(ebp, 100u32)?;
+            a.set_label(&mut top)?;
+            a.std()?;
+            a.mov(esi, DATA + 0x300)?;
+            a.mov(edi, DATA + 0x3000)?;
+            a.imul_3(eax, ebp, 0x0101_0101)?;
+            a.movsd()?;
+            a.movsw()?;
+            a.movsb()?;
+            a.stosd()?;
+            a.stosw()?;
+            a.stosb()?;
+            a.lodsd()?;
+            a.add(ebx, eax)?;
+            a.lodsw()?;
+            a.lodsb()?;
+            a.add(ebx, eax)?;
+            a.mov(ecx, ebp)?;
+            a.and(ecx, 7)?;
+            a.rep().movsd()?;
+            a.mov(ecx, ebp)?;
+            a.and(ecx, 3)?;
+            a.rep().stosw()?;
+            // FS: MOVSD.
+            a.db(&[0x64, 0xA5])?;
+            a.add(ebx, esi)?;
+            a.add(ebx, edi)?;
+            a.rol(ebx, 3)?;
+            a.add(ebx, dword_ptr(DATA + 0x2FF0))?;
+            // 16-bit addressing.
+            a.mov(ax, FREE as u32)?;
+            a.mov(es, ax)?;
+            a.mov(esi, 0x1234_0001u32)?;
+            a.mov(edi, 0x5678_0001u32)?;
+            a.db(&[0x67, 0x66, 0xA5])?;
+            a.db(&[0x67, 0xA4])?;
+            a.db(&[0x67, 0xAA])?;
+            a.mov(ecx, 0xABCD_0002u32)?;
+            a.db(&[0x67, 0xF3, 0xA4])?;
+            a.add(ebx, esi)?;
+            a.add(ebx, edi)?;
+            a.add(ebx, ecx)?;
+            a.add(ebx, dword_ptr(DATA + 0x4000 + 0xFFFC))?;
+            a.mov(ax, DATA32 as u32)?;
+            a.mov(es, ax)?;
+            a.cld()?;
+            a.dec(ebp)?;
+            a.jnz(top)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(a.cpu.ebx(), b.cpu.ebx());
+    if AVAILABLE {
+        use iced_x86::Mnemonic::{Lodsb, Lodsd, Lodsw, Movsb, Movsd, Movsw, Stosb, Stosd, Stosw};
+        for m in [Movsb, Movsw, Movsd, Stosb, Stosw, Stosd, Lodsb, Lodsw, Lodsd] {
+            assert_eq!(handled(&b, m), 0, "{m:?}");
+        }
+    }
+}
+
+#[test]
+fn a_translated_rep_movs_going_down_into_a_missing_page_faults_where_it_is_reached() {
+    // STD, then REP MOVSD of 8 dwords down from 56008h with page 55000h not
+    // present: #PF in the fourth iteration, at 55FFCh, with the three
+    // before it done and counted.
+    let (mut a, mut b) = twins(|rig| {
+        let (dir, table) = (0x80000u32, 0x81000u32);
+        rig.write32(dir, table | 3);
+        for i in 0..1024u32 {
+            rig.write32(table + 4 * i, (i << 12) | 3);
+        }
+        rig.write32(table + 0x55 * 4, 0);
+        record_indexes(rig, PF);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(eax, dir)?;
+            a.mov(cr3, eax)?;
+            a.mov(eax, cr0)?;
+            a.or(eax, 0x8000_0000u32)?;
+            a.mov(cr0, eax)?;
+            a.std()?;
+            a.mov(esi, 0x53020u32)?;
+            a.mov(edi, 0x56008u32)?;
+            a.mov(ecx, 8u32)?;
+            a.rep().movsd()?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(b.recorded().0, PF as u32);
+    assert_eq!(b.cpu.cr2, 0x55FFC);
+    assert_eq!(recorded_indexes(&b), (5, 0x53014, 0x55FFC));
+}
+
+#[test]
+fn a_stos_going_down_past_offset_0_faults_and_keeps_its_index() {
+    // STD, then STOSD at EDI 4 and 0 in an ES of 8 KB, and a third at
+    // FFFFFFFCh, past the limit: #GP with EDI there, the two before it
+    // written.
+    let (mut a, mut b) = twins(|rig| {
+        rig.set_gdt(FREE, seg_desc(0x60000, 0x1FFF, DATA_R0, 0x4));
+        record_indexes(rig, GP);
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.mov(ax, FREE as u32)?;
+            a.mov(es, ax)?;
+            a.std()?;
+            a.mov(esi, 0x1234u32)?;
+            a.mov(edi, 4u32)?;
+            a.mov(eax, 0x5555_AAAAu32)?;
+            a.stosd()?;
+            a.stosd()?;
+            a.stosd()?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    assert_eq!(b.recorded().0, GP as u32);
+    assert_eq!(recorded_indexes(&b).2, 0xFFFF_FFFC);
+    assert_eq!((b.read32(0x60000), b.read32(0x60004)), (0x5555_AAAA, 0x5555_AAAA));
 }
 
 #[test]
@@ -4641,6 +4890,107 @@ fn fpu_rounding_to_integers_and_absolute_values_run_as_their_handlers() {
     if AVAILABLE && cfg!(target_arch = "x86_64") {
         assert!(stats.native + 20 > stats.instructions, "handlers ran them: {:?}", stats);
     }
+}
+
+#[test]
+fn fpu_sines_cosines_and_tangents_run_in_translated_code() {
+    for fast in [false, true] {
+        let (_, b, _) = fpu_loop_in(fast, |a| {
+            // FSIN, FCOS, FPTAN and FSINCOS of every kind of single and of
+            // its square, which is out of range (C2 set, nothing pushed)
+            // from 1e10's on, and of a sum whose 80 bits hold more than its
+            // double. The status words go into EBX, the results to EDI.
+            a.fld(dword_ptr(esi))?;
+            a.fsin()?;
+            a.fnstsw(ax)?;
+            a.add(ebx, eax)?;
+            a.fstp(qword_ptr(edi))?;
+            a.fld(dword_ptr(esi + 4))?;
+            a.fmul_2(st0, st0)?;
+            a.fcos()?;
+            a.fnstsw(ax)?;
+            a.add(ebx, eax)?;
+            a.fstp(qword_ptr(edi + 8))?;
+            a.fld(dword_ptr(esi))?;
+            a.fmul_2(st0, st0)?;
+            a.fptan()?;
+            a.fnstsw(ax)?;
+            a.add(ebx, eax)?;
+            // The 1.0, or the operand out of range.
+            a.fstp(qword_ptr(edi + 16))?;
+            a.fld(dword_ptr(esi + 4))?;
+            a.fptan()?;
+            a.fnstsw(ax)?;
+            a.add(ebx, eax)?;
+            a.fstp(qword_ptr(edi + 24))?;
+            a.fstp(qword_ptr(edi + 32))?;
+            a.fild(dword_ptr(esi + 8))?;
+            a.fld(dword_ptr(esi + 4))?;
+            a.fadd_2(st0, st1)?;
+            a.fsincos()?;
+            a.fnstsw(ax)?;
+            a.add(ebx, eax)?;
+            a.fstp(qword_ptr(edi + 40))?;
+            a.fstp(qword_ptr(edi + 48))?;
+            a.fstp(dword_ptr(edi + 56))?;
+            // Eight registers in use, so FPTAN's push wraps onto the
+            // first: the stack as the handler leaves it.
+            a.fninit()?;
+            for _ in 0..7 {
+                a.fld(dword_ptr(esi + 4))?;
+            }
+            a.fld(dword_ptr(esi))?;
+            a.fptan()?;
+            a.fnstsw(ax)?;
+            a.add(ebx, eax)?;
+            for k in 0..8 {
+                a.fstp(dword_ptr(edi + 60 - 4 * k))?;
+            }
+            a.fninit()
+        });
+        assert_ne!(b.cpu.ebx(), 0);
+        if AVAILABLE {
+            use iced_x86::Mnemonic::{Fcos, Fptan, Fsin, Fsincos};
+            for m in [Fsin, Fcos, Fptan, Fsincos] {
+                assert_eq!(handled(&b, m), 0, "{m:?} (fast {fast})");
+            }
+        }
+    }
+}
+
+#[test]
+fn fpu_sines_of_empty_registers_and_after_80_bit_loads_are_the_handlers() {
+    // FSIN and FPTAN of an empty ST(0), which the handlers run. Then FLD of
+    // ST(1) and FLD of 80 bits before an add of ST(2), the register the
+    // ST(0) before them became, which is empty every other 256
+    // iterations: the add finds it empty, as its handler does.
+    let (_, b, _) = fpu_loop_in(true, |a| {
+        a.fld(dword_ptr(esi))?;
+        a.fld(dword_ptr(esi + 4))?;
+        a.ffree(st0)?;
+        a.fsin()?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.fptan()?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.fninit()?;
+        a.fld(dword_ptr(esi))?;
+        a.fld(dword_ptr(esi + 4))?;
+        a.test(ecx, 0x100)?;
+        let mut keep = a.create_label();
+        a.jnz(keep)?;
+        a.ffree(st0)?;
+        a.set_label(&mut keep)?;
+        a.fld(st1)?;
+        a.fld(tword_ptr(edi + 0x1000))?;
+        a.fadd_2(st0, st2)?;
+        a.fnstsw(ax)?;
+        a.add(ebx, eax)?;
+        a.fstp(qword_ptr(edi))?;
+        a.fninit()
+    });
+    assert_ne!(b.cpu.ebx(), 0);
 }
 
 /// FCOM, FNSTSW AX, SAHF and a branch on the flags, as MSVC compiles a

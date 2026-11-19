@@ -248,6 +248,28 @@ pub enum FKind {
     Int,
 }
 
+/// The instruction of a `Uop::FTrig`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FTrigOp {
+    Sin,
+    Cos,
+    Tan,
+    SinCos,
+}
+
+impl FTrigOp {
+    /// Whether it pushes a register where ST(0) is in range: FPTAN's 1.0,
+    /// FSINCOS's cosine.
+    pub fn pushes(self) -> bool {
+        matches!(self, FTrigOp::Tan | FTrigOp::SinCos)
+    }
+
+    /// Its code for `helpers::jit_fpu_reg_op` (`desc >> 13`).
+    pub fn reg_op(self) -> u32 {
+        8 + self as u32
+    }
+}
+
 pub const ECX: u8 = 1;
 pub const ESP: u8 = 4;
 
@@ -334,6 +356,10 @@ pub enum Uop {
     AddConst { t: T, v: u32, size: u8 },
     /// t >>= count, arithmetically, without flags.
     SarConst { t: T, count: u8 },
+    /// t += `step`, or -= where DF is set, wrapped to `size` bytes (2 or
+    /// 4), without flags: a string instruction's index moved past its
+    /// element in the direction DF says.
+    AddDir { t: T, step: u8, size: u8 },
     /// t += src << `shift` (0 to 3), wrapped to `size` bytes (2 or 4),
     /// without flags: an offset moved by a number of words or dwords.
     AddShifted {
@@ -498,17 +524,14 @@ pub enum Uop {
     /// is past the CS limit), else at `next`; either way first set `commit`
     /// (LOOP's counter).
     ExitIf { cond: Cond, taken: u32, next: u32, commit: Option<(Gpr, T)> },
-    /// The start of a REP MOVS or STOS: t = the `count` register. Where DF
-    /// or TF is set (iterations going down, or a trap after each) or the
-    /// count is above `max`, the instruction's handler runs it instead, all
-    /// at once; with a count of 0 the instruction ends here. The operations
-    /// up to `RepEnd` are an iteration, which leaves the count left in t.
+    /// The start of a REP MOVS or STOS: t = the `count` register. Where TF
+    /// is set (a trap after each iteration) or the count is above `max`,
+    /// the instruction's handler runs it instead, all at once; with a
+    /// count of 0 the instruction ends here. The operations up to `RepEnd`
+    /// are an iteration, which leaves the count left in t.
     RepStart { t: T, count: Gpr, max: u32 },
     /// Back to the iteration after `RepStart` while t isn't 0.
     RepEnd { t: T },
-    /// MOVS or STOS without REP: where DF is set, the instruction's handler
-    /// runs it instead of the operations after this one.
-    Forward,
     /// The start of an FPU instruction: its handler runs it instead of the
     /// operations after this one where CR0's EM or TS is set (#NM), or one
     /// of the registers ST(i) with bit i set in `valid` is empty (it then
@@ -596,6 +619,10 @@ pub enum Uop {
     FRndint,
     /// FABS: `fpu::arithmetic::fabs`.
     FAbs,
+    /// FSIN, FCOS, FPTAN or FSINCOS: the handler in
+    /// `fpu::transcendental`. Out of range, it sets C2 and changes nothing
+    /// else; in range, FPTAN and FSINCOS push a register.
+    FTrig { op: FTrigOp },
     /// Push the 80 bits at handle m, which is RAM's (`BailUnlessRam`), as
     /// FLD's handler does.
     FLoad80 { m: T },

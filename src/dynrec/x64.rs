@@ -2167,6 +2167,22 @@ impl Gen<'_> {
                 }
             }
             Uop::SarConst { t, count } => dynasm!(self.ops ; .arch x64 ; sar Rd(r(t)), count as i8),
+            Uop::AddDir { t, step, size } => {
+                const DF: i32 = 0x400;
+                let t = r(t);
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov eax, step as i32
+                    ; test DWORD [rbx + FLAGS], DF
+                    ; jz >up
+                    ; neg eax
+                    ; up:
+                    ; add Rd(t), eax
+                );
+                if size == 2 {
+                    dynasm!(self.ops ; .arch x64 ; movzx Rd(t), Rw(t));
+                }
+            }
             Uop::AddShifted {
                 t,
                 src,
@@ -2645,12 +2661,11 @@ impl Gen<'_> {
             Uop::Out { size, port, t } => self.port_io(true, size, port, t),
             Uop::RepStart { t, count, max } => {
                 const TF: i32 = 0x100;
-                const DF: i32 = 0x400;
                 self.get_into(r(t), count);
                 let at = self.ops.new_dynamic_label();
                 dynasm!(self.ops
                     ; .arch x64
-                    ; test DWORD [rbx + FLAGS], TF | DF
+                    ; test DWORD [rbx + FLAGS], TF
                     ; jnz =>at
                     ; cmp Rd(r(t)), max as i32
                     ; ja =>at
@@ -2670,14 +2685,6 @@ impl Gen<'_> {
             Uop::RepEnd { t } => {
                 let top = self.rep_top.take().expect("RepStart before RepEnd");
                 dynasm!(self.ops ; .arch x64 ; test Rd(r(t)), Rd(r(t)) ; jnz =>top);
-            }
-            Uop::Forward => {
-                const DF: i32 = 0x400;
-                let at = self.ops.new_dynamic_label();
-                dynasm!(self.ops ; .arch x64 ; test DWORD [rbx + FLAGS], DF ; jnz =>at);
-                let end = self.end();
-                let (wb, reload) = (self.cache.dirty, self.cache.loaded);
-                self.slow.push(Slow::Bail { at, end, ix: self.ix, dirty: self.dirty, wb, reload, leave: false });
             }
             Uop::FpuGuard { valid } => self.fpu_guard(valid),
             Uop::FBailPrecise { regs, when } => self.fpu_bail_precise(regs, when),
@@ -3033,6 +3040,14 @@ impl Gen<'_> {
                 dynasm!(self.ops ; .arch x64 ; frndint_done:);
             }
             Uop::FAbs => self.fpu_op(7 << 13, None),
+            Uop::FTrig { op } => {
+                self.fpu_op((op.reg_op() << 13) as i32, None);
+                if op.pushes() {
+                    // Pushed in range, as it was out of it: the registers
+                    // known either way.
+                    self.fpu_known &= self.fpu_known << 1 | 1;
+                }
+            }
             Uop::FSqrt => {
                 const C1: i16 = 0x200;
                 // The root inline where the double is above 0, else (a
@@ -3054,7 +3069,10 @@ impl Gen<'_> {
                 self.fpu_op(4 << 13, None);
                 dynasm!(self.ops ; .arch x64 ; fsqrt_done:);
             }
-            Uop::FLoad80 { m } => self.fpu_op(2 << 13, Some(m)),
+            Uop::FLoad80 { m } => {
+                self.fpu_known = self.fpu_known << 1 | 1;
+                self.fpu_op(2 << 13, Some(m));
+            }
             Uop::FAddValue { kind, x } => {
                 use crate::instructions::fpu::arithmetic::{ADD_VALUE, SUB_VALUE};
                 // 8: the double in X.

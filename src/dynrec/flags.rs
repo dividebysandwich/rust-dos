@@ -71,7 +71,6 @@ impl Uop {
             | Uop::BailUnlessRam { .. }
             | Uop::CsReal
             | Uop::RepStart { .. }
-            | Uop::Forward
             | Uop::FpuGuard { .. }
             | Uop::FBailPrecise { .. }
             | Uop::SimdGuard { .. }
