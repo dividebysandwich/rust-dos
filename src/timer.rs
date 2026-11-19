@@ -1336,8 +1336,8 @@ const HOST_SHORT: f64 = 0.8;
 /// and the output on port 61h bit 5. Its gate is port 61h bit 0. Programs
 /// time delay loops with it by raising the gate, running the loop, lowering
 /// the gate and reading the count that stopped (MS-Kermit), so the gate has
-/// to stop and restart the count as on the 8253. The speaker's tone is
-/// made from the divisor elsewhere and doesn't use this.
+/// to stop and restart the count as on the 8253. Its output, ANDed with
+/// port 61h bit 1, drives the PC speaker (`high_ticks`).
 #[derive(Clone, Debug)]
 pub struct Pit2 {
     /// Counter mode, 0..=5 (6 and 7 alias 2 and 3).
@@ -1428,6 +1428,7 @@ impl Pit2 {
     /// gives it the same number every time (DOSBox SVN's "every roll is
     /// 5", DOSBox-X issue 1274).
     pub fn set_mode(&mut self, mode: u8, access: u8, now: u64) {
+        self.apply_pending(now);
         let (count, _) = self.read(now);
         let mode = if mode >= 6 { mode - 4 } else { mode };
         let runs_on = self.held.is_none() && self.periodic() && mode == self.mode;
@@ -1500,9 +1501,22 @@ impl Pit2 {
         }
     }
 
-    /// The count and output at `now`.
-    pub fn read(&mut self, now: u64) -> (u16, bool) {
-        self.apply_pending(now);
+    /// The count and output at `now`. A count that a mode 2 or 3 period
+    /// had pending takes effect here without being stored: the state
+    /// changes only at the writes to the channel and its gate, which the
+    /// speaker's model (`high_ticks`) follows.
+    pub fn read(&self, now: u64) -> (u16, bool) {
+        if let Some((_, at)) = self.pending
+            && at <= now
+        {
+            let mut applied = self.clone();
+            applied.apply_pending(now);
+            return applied.read_applied(now);
+        }
+        self.read_applied(now)
+    }
+
+    fn read_applied(&self, now: u64) -> (u16, bool) {
         if let Some(held) = self.held {
             return held;
         }
@@ -1525,12 +1539,100 @@ impl Pit2 {
             // for a tick there.
             _ => {
                 let count = (self.from as u64).wrapping_sub(elapsed) as u16;
-                let out = match self.mode {
-                    0 | 1 => elapsed >= self.from as u64,
-                    _ => elapsed != self.from as u64,
-                };
-                (count, out)
+                (count, self.output_at(elapsed))
             }
+        }
+    }
+
+    /// The output `elapsed` ticks after `start`, while the count runs.
+    fn output_at(&self, elapsed: u64) -> bool {
+        let reload = self.reload as u64;
+        match self.mode {
+            2 => elapsed % reload != reload - 1,
+            3 => elapsed % reload < reload.div_ceil(2),
+            0 | 1 => elapsed >= self.from as u64,
+            _ => elapsed != self.from as u64,
+        }
+    }
+
+    /// How many of the first `elapsed` ticks after `start` the output is
+    /// high, while the count runs.
+    fn high_count(&self, elapsed: u64) -> u64 {
+        let reload = self.reload as u64;
+        let from = self.from as u64;
+        match self.mode {
+            // Low for the last tick of each period.
+            2 => elapsed - elapsed / reload,
+            // High for the first half of each period, the longer one of an
+            // odd count.
+            3 => {
+                let high = reload.div_ceil(2);
+                elapsed / reload * high + (elapsed % reload).min(high)
+            }
+            0 | 1 => elapsed.saturating_sub(from),
+            _ => elapsed - (elapsed > from) as u64,
+        }
+    }
+
+    /// How long the output is high from tick `a` to tick `b`, which can
+    /// fall between ticks: the output keeps each tick's level until the
+    /// next. The speaker's level is this output (with port 61h bit 1), and
+    /// its mean over a mix frame is what the speaker plays (see
+    /// `Bus::audio_catch_up`). `a` is no earlier than the last change to
+    /// the channel's mode, count or gate.
+    pub fn high_ticks(&self, a: f64, b: f64) -> f64 {
+        if b <= a {
+            return 0.0;
+        }
+        if let Some((_, at)) = self.pending {
+            let at = at as f64;
+            if a < at {
+                let mut before = self.clone();
+                before.pending = None;
+                if b <= at {
+                    return before.high_ticks(a, b);
+                }
+                return before.high_ticks(a, at) + self.applied_at(at).high_ticks(at, b);
+            }
+            return self.applied_at(a).high_ticks(a, b);
+        }
+        if let Some((_, out)) = self.held {
+            return if out { b - a } else { 0.0 };
+        }
+        self.high_until(b) - self.high_until(a)
+    }
+
+    /// This counter with its pending count, which takes effect by `t`,
+    /// loaded.
+    fn applied_at(&self, t: f64) -> Self {
+        let mut applied = self.clone();
+        applied.apply_pending(t.ceil() as u64);
+        applied
+    }
+
+    /// How long the output is high from `start` to tick `t`, while the
+    /// count runs.
+    fn high_until(&self, t: f64) -> f64 {
+        let elapsed = (t - self.start as f64).max(0.0);
+        let whole = elapsed.floor();
+        let ticks = whole as u64;
+        let part = if self.output_at(ticks) { elapsed - whole } else { 0.0 };
+        self.high_count(ticks) as f64 + part
+    }
+
+    /// The output's level from `now` on while nothing is written to the
+    /// channel or its gate, if it holds one: the counter is stopped, or a
+    /// one-shot mode is past its terminal count.
+    pub fn steady_output(&self, now: u64) -> Option<bool> {
+        if let Some((_, out)) = self.held {
+            return Some(out);
+        }
+        let elapsed = now.saturating_sub(self.start);
+        let from = self.from as u64;
+        match self.mode {
+            0 | 1 if elapsed >= from => Some(true),
+            4 | 5 if elapsed > from => Some(true),
+            _ => None,
         }
     }
 }
@@ -2241,6 +2343,53 @@ mod tests {
         pit.set_gate(true, 1000);
         assert_eq!(pit.read(1059), (1, false));
         assert_eq!(pit.read(1060), (0, true));
+    }
+
+    /// How long the output is high over a span agrees with the output
+    /// read tick by tick, in every mode, across a count that a mode 2 or
+    /// 3 period had pending.
+    #[test]
+    fn the_time_high_matches_the_output() {
+        for mode in 0..6u8 {
+            for count in [2u16, 3, 7, 10] {
+                let mut pit = Pit2::new();
+                pit.set_mode(mode, 3, 0);
+                pit.set_gate(true, 0);
+                pit.write_count(count, 5);
+                if matches!(mode, 1 | 5) {
+                    pit.set_gate(false, 6);
+                    pit.set_gate(true, 7);
+                }
+                // A new count while the period runs.
+                pit.write_count(count + 2, 13);
+                let mut high = 0.0;
+                for tick in 13..80u64 {
+                    let at = pit.high_ticks(13.0, tick as f64);
+                    assert_eq!(at, high, "mode {mode}, count {count}, to {tick}");
+                    high += pit.read(tick).1 as u8 as f64;
+                }
+                // A span between ticks takes in the parts of the ticks at
+                // its ends.
+                let part = pit.high_ticks(20.25, 40.5);
+                let whole = pit.high_ticks(21.0, 40.0);
+                let ends = 0.75 * pit.read(20).1 as u8 as f64 + 0.5 * pit.read(40).1 as u8 as f64;
+                assert!((part - whole - ends).abs() < 1e-9, "mode {mode}, count {count}");
+            }
+        }
+    }
+
+    /// A square wave's time high over whole periods: half of an even
+    /// count, the longer half of an odd one.
+    #[test]
+    fn a_square_wave_is_high_for_its_longer_half() {
+        let mut pit = Pit2::new();
+        pit.set_mode(3, 3, 0);
+        pit.set_gate(true, 0);
+        pit.write_count(2, 0);
+        assert_eq!(pit.high_ticks(0.0, 1000.0), 500.0);
+        pit.set_mode(3, 3, 1000);
+        pit.write_count(3, 1000);
+        assert_eq!(pit.high_ticks(1000.0, 1300.0), 200.0);
     }
 }
 

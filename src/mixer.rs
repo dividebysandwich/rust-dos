@@ -4,7 +4,7 @@
 //! emulated cards' own levels, such as the Sound Blaster's mixer chip,
 //! which programs set and a new program resets.
 
-use crate::dsp::{Chorus, OutputCoupling, Reverb, SpeakerFilter, StereoLowpass};
+use crate::dsp::{Chorus, DcBlocker, OutputCoupling, Reverb, SpeakerFilter, StereoLowpass};
 pub use crate::dsp::{ChorusPreset, ReverbPreset};
 
 /// A sound source the mixer has a volume for, or `Master` for the mix.
@@ -221,6 +221,8 @@ fn dry_wet(mix: u16) -> (f32, f32) {
 #[derive(Clone, Debug, Default)]
 struct Dsp {
     speaker: SpeakerFilter,
+    /// The speaker's steady level taken out while its filter is off.
+    speaker_dc: DcBlocker,
     sb: StereoLowpass,
     sb_coupling: OutputCoupling,
     reverb: Option<Reverb>,
@@ -337,6 +339,7 @@ impl Mixer {
         }
         if settings.speaker_filter != old.speaker_filter {
             self.dsp.speaker = SpeakerFilter::default();
+            self.dsp.speaker_dc = DcBlocker::default();
         }
         if settings.sb_filter != old.sb_filter {
             self.dsp.sb = StereoLowpass::default();
@@ -351,6 +354,7 @@ impl Mixer {
     /// rang on in them, as after a save state was loaded.
     pub fn clear_tails(&mut self) {
         self.dsp.speaker = SpeakerFilter::default();
+        self.dsp.speaker_dc = DcBlocker::default();
         self.dsp.sb = StereoLowpass::default();
         self.dsp.sb_coupling = OutputCoupling::default();
         self.dsp.reverb = (self.settings.reverb != ReverbPreset::Off).then(|| Reverb::new(self.settings.reverb));
@@ -451,10 +455,26 @@ impl Mixer {
         }
     }
 
-    /// The PC speaker's sample through its filter, if it is on.
+    /// The PC speaker's sample through its filter, if it is on. Without
+    /// it, the level the speaker rests at is taken out still, so a speaker
+    /// left high adds nothing to the mix.
     #[inline]
     pub(crate) fn speaker_filter(&mut self, sample: f32) -> f32 {
-        if self.settings.speaker_filter { self.dsp.speaker.process(sample) } else { sample }
+        if self.settings.speaker_filter {
+            self.dsp.speaker.process(sample)
+        } else {
+            self.dsp.speaker_dc.process(sample)
+        }
+    }
+
+    /// Whether a speaker sample of `sample` would give exactly 0 and leave
+    /// the speaker's filter as it is (see `speaker_filter`).
+    pub(crate) fn speaker_rests_on(&self, sample: f32) -> bool {
+        if self.settings.speaker_filter {
+            self.dsp.speaker.rests_on(sample)
+        } else {
+            self.dsp.speaker_dc.rests_on(sample)
+        }
     }
 
     /// The Sound Blaster's frame through its low-pass at `cutoff` Hz, of

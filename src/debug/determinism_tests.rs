@@ -378,8 +378,11 @@ fn main_code(a: &mut CodeAssembler, audio_start: u32) -> Asm {
     outb(a, 0x43, 0x00)?;
     a.in_(al, 0x40)?;
     store(a, 70, ax)?;
-    // Channel 2 again, an octave up, as the last control word.
-    outb(a, 0x43, 0xB6)?;
+    // Channel 2 again, an octave up, as the last control word: a pulse
+    // train in mode 2, high for all but a tick of each period, so the
+    // speaker's level in the frame being made at a stop (`speaker_high`)
+    // isn't 0 (a square wave can be low through it at every stop).
+    outb(a, 0x43, 0xB4)?;
     outb(a, 0x42, 0x4E)?;
     outb(a, 0x42, 0x02)?;
 

@@ -273,7 +273,12 @@ pub struct Bus {
     pub clock: crate::timer::Clock,
     /// The two 8259 interrupt controllers.
     pub pic: crate::pic::Pic,
-    pub audio_phase: f32, // Track wave position to prevent clicking
+    /// How long the PC speaker's level was high in the mix frame being
+    /// made, up to tick `speaker_until` (see `audio_catch_up`).
+    pub speaker_high: f64,
+    /// The tick, which can fall between ticks, the speaker's level is
+    /// taken in up to: the last change to it, or a frame's end.
+    pub speaker_until: f64,
     pub dta_segment: u16,
     pub dta_offset: u16,
     /// The state of DOS last written to the SDA (`dos_data::ProcessState`),
@@ -1927,11 +1932,15 @@ impl Bus {
             self.disknoise.skip(target - rate / 2 - self.audio_frames);
             self.serial.skip_sound(target - rate / 2 - self.audio_frames);
             self.audio_frames = target - rate / 2;
+            self.speaker_high = 0.0;
+            self.speaker_until = frame_tick(self.audio_frames);
         }
         let frames = target.saturating_sub(self.audio_frames) as usize;
         if frames == 0 {
+            self.speaker_take_in(self.clock.now_ticks() as f64);
             return;
         }
+        let first = self.audio_frames;
         self.audio_frames = target;
         // The Sound Blaster made its frames up to `target` too: those
         // before the span mixed now (skipped above) go.
@@ -1952,11 +1961,14 @@ impl Bus {
             }
             self.audio_out.extend(std::iter::repeat_n(0, 2 * frames));
             self.trim_audio();
+            // The speaker held its level through the frames.
+            self.speaker_high = 0.0;
+            self.speaker_until = frame_tick(target);
+            self.speaker_take_in(self.clock.now_ticks() as f64);
             return;
         }
         let mut settled = quiet;
 
-        let speaker_step = self.speaker_tone_step();
         let ((vl, vr), (fl, fr)) = self.sb.as_ref().map_or(((1.0, 1.0), (1.0, 1.0)), |sb| sb.volumes());
         let (cl, cr) = self.sb.as_ref().map_or((1.0, 1.0), |sb| sb.cd_volume());
         // The built-in Windows's mixer and MIDI volume, 1 until a program
@@ -1967,7 +1979,7 @@ impl Bus {
             (cl * wl, cr * wr)
         };
         let sb_on = self.sb.as_ref().is_some_and(|sb| sb.output_on());
-        const SPEAKER: f32 = 3000.0;
+        const SPEAKER: f32 = SPEAKER_SWING / 2.0;
         const GUS_GAIN: f32 = 1.0;
         // The Sound Blaster's output filter, as its model has it: its
         // cutoff and order, or none.
@@ -1993,20 +2005,13 @@ impl Bus {
             let mut mix = crate::mixer::MixFrame::default();
             // The PC speaker, and the prompt's beep, through the speaker's
             // filter, which rings on a little after them.
-            let mut speaker_sample = 0.0;
-            let mut sounding = false;
-            if let Some(step) = speaker_step {
-                self.audio_phase = (self.audio_phase + step).fract();
-                speaker_sample += if self.audio_phase < 0.5 { SPEAKER } else { -SPEAKER };
-                sounding = true;
-            }
+            let mut speaker_sample = SPEAKER_SWING * self.speaker_frame(first + n as u64);
             if self.beep_frames > 0 {
                 self.beep_frames -= 1;
                 speaker_sample += if self.beep_frames % 50 < 25 { SPEAKER } else { -SPEAKER };
-                sounding = true;
             }
             let s = self.mixer.speaker_filter(speaker_sample);
-            if sounding || s != 0.0 {
+            if s != 0.0 {
                 self.mixer.add(&mut mix, &mut peaks, Channel::Speaker, (s, s));
             }
             let (ol, or) = self.opl.render();
@@ -2072,6 +2077,76 @@ impl Bus {
         self.audio_settled = settled;
         self.mixer.add_peaks(peaks);
         self.trim_audio();
+        self.speaker_take_in(self.clock.now_ticks() as f64);
+    }
+
+    /// How long the PC speaker drives its cone out from tick `a` to tick
+    /// `b`: channel 2's output with port 61h bit 1. With the bit clear the
+    /// cone rests, and with the gate low the output of modes 2 and 3
+    /// stays high, so bit 1 alone moves it.
+    fn speaker_high_ticks(&self, a: f64, b: f64) -> f64 {
+        if self.speaker_data { self.pit2.high_ticks(a, b) } else { 0.0 }
+    }
+
+    /// Take the speaker's level in up to tick `t`, into the frame being
+    /// made. Every change to the level (port 61h, a count or mode of
+    /// channel 2) comes after this, through `audio_catch_up`.
+    fn speaker_take_in(&mut self, t: f64) {
+        if t < self.speaker_until {
+            // The clock went back (a machine reset): start over from it.
+            self.speaker_high = 0.0;
+            self.speaker_until = t;
+            return;
+        }
+        self.speaker_high += self.speaker_high_ticks(self.speaker_until, t);
+        self.speaker_until = t;
+    }
+
+    /// The PC speaker's mean level over mix frame `n`, 0 to 1: the part of
+    /// it the cone was driven out. The output switches as fast as channel
+    /// 2 counts, 1.19 MHz, and programs play digitized sound through it by
+    /// pulse-width modulation (a one-shot count written at every sample,
+    /// as Access's RealSound does) or by switching port 61h's data bit;
+    /// the mean gives the sample they make. A square wave too fast to hear
+    /// gives its mean level, which the speaker's filter takes out, and a
+    /// tone heard keeps the edges between frames, which point samples of
+    /// it would fold into tones of their own. DOSBox-X's PC speaker
+    /// averages its output over each sample in the same way.
+    fn speaker_frame(&mut self, n: u64) -> f32 {
+        let start = frame_tick(n);
+        let end = frame_tick(n + 1);
+        self.speaker_take_in(end);
+        let high = self.speaker_high;
+        self.speaker_high = 0.0;
+        (high / (end - start)).clamp(0.0, 1.0) as f32
+    }
+
+    /// The level the speaker holds from its last change on, 0 or 1, if it
+    /// holds one: the data bit is clear, or channel 2's output stays put.
+    fn speaker_steady(&self) -> Option<f32> {
+        if !self.speaker_data {
+            return Some(0.0);
+        }
+        let at = self.speaker_until.floor() as u64;
+        self.pit2.steady_output(at).map(|high| if high { 1.0 } else { 0.0 })
+    }
+
+    /// Whether the speaker adds nothing to the frames to mix and its
+    /// filter stays as it is: it held its level through the frame being
+    /// made, and the filter has taken that level out.
+    fn speaker_rests(&self) -> bool {
+        let Some(level) = self.speaker_steady() else {
+            return false;
+        };
+        // The frame `speaker_until` falls in, or starts: rounded up, as
+        // after a skip it is a frame's start between two ticks, and
+        // rounding that down would give the frame before.
+        let rate = crate::opl::RATE as u64;
+        let until = self.speaker_until.ceil() as u64;
+        let frame = crate::timer::mul_div(until, rate, crate::timer::PIT_HZ);
+        let held = level as f64 * (self.speaker_until - frame_tick(frame));
+        (self.speaker_high - held).abs() < 1e-6
+            && self.mixer.speaker_rests_on(SPEAKER_SWING * level)
     }
 
     /// Whether the Sound Blaster adds nothing to the mix and nothing it
@@ -2093,26 +2168,11 @@ impl Bus {
         !sb.output_on() || self.mixer.sb_coupling_rests_on(held)
     }
 
-    /// How far the PC speaker's square wave moves through its period in
-    /// one frame of the mix, while it sounds a tone: the speaker gated on
-    /// to PIT channel 2, at more than 20 Hz and less than half the mix's
-    /// rate. Programs that drive the speaker with a divisor of a few
-    /// counts (596 kHz at 2, as Xenon 2 does between its notes) give it
-    /// a wave far too fast for the cone to follow: the speaker sits at
-    /// the wave's mean level, which is silence, and the mix takes no
-    /// samples of it, which would alias down into the audible range.
-    fn speaker_tone_step(&self) -> Option<f32> {
-        let divisor = if self.pit_divisor == 0 { 65536.0 } else { self.pit_divisor as f32 };
-        let hz = crate::timer::PIT_HZ as f32 / divisor;
-        let rate = crate::opl::RATE as f32;
-        (self.speaker_on && hz > 20.0 && hz < rate / 2.0).then_some(hz / rate)
-    }
-
     /// Whether no source makes a sound, or would move on in a way the
     /// sound coming later depends on, as the frames to mix start (see
     /// `audio_settled`).
     fn audio_quiet(&mut self) -> bool {
-        self.speaker_tone_step().is_none()
+        self.speaker_rests()
             && self.beep_frames == 0
             && self.opl.is_idle()
             && self.sb_quiet()
@@ -2613,7 +2673,9 @@ impl Bus {
             // This sets the frequency.
             // Frequency = 1,193,182 Hz / Divisor
             0x42 => {
-                if self.speaker_on {
+                // The speaker's level up to now, before the new count
+                // changes it.
+                if self.speaker_data {
                     self.audio_catch_up();
                 }
                 let now = self.clock.now_ticks();
@@ -2674,6 +2736,9 @@ impl Bus {
                             self.clock.schedule(self.next_event());
                         }
                         2 => {
+                            if self.speaker_data {
+                                self.audio_catch_up();
+                            }
                             // Reset Channel 2 LSB/MSB
                             self.pit_write_msb = false;
                             self.pit_read_msb = false;
@@ -2688,15 +2753,18 @@ impl Bus {
             // Bit 0: Timer 2 Gate (Must be 1 for timer to run)
             // Bit 1: Speaker Data (Must be 1 for sound to pass to speaker)
             0x61 => {
-                self.pit2.set_gate(value & 0x01 != 0, self.clock.now_ticks());
-                self.speaker_data = value & 0x02 != 0;
-                self.ppi_checks = value & 0x0C;
-                // If both Bit 0 and Bit 1 are set, the speaker is ON
-                let enabled = (value & 0x03) == 0x03;
-                if enabled != self.speaker_on {
+                let gate = value & 0x01 != 0;
+                let data = value & 0x02 != 0;
+                // The speaker's level up to now, before the data bit or the
+                // gate changes it. Programs switch the data bit at a
+                // sample rate to play digitized sound.
+                if data != self.speaker_data || data && gate != self.pit2.gate() {
                     self.audio_catch_up();
                 }
-                self.speaker_on = enabled;
+                self.pit2.set_gate(gate, self.clock.now_ticks());
+                self.speaker_data = data;
+                self.ppi_checks = value & 0x0C;
+                self.speaker_on = gate && data;
             }
 
             // The FM chip: AdLib ports 388h/389h, and the OPL3's second
@@ -3539,4 +3607,13 @@ pub struct Scanout {
     pub device: &'static str,
     pub name: String,
     pub bpp: Option<u32>,
+}
+
+/// How far apart the PC speaker's two levels are in the mix: its cone
+/// driven out and at rest.
+const SPEAKER_SWING: f32 = 6000.0;
+
+/// The PIT tick mix frame `n` starts at, which can fall between ticks.
+fn frame_tick(n: u64) -> f64 {
+    n as f64 * crate::timer::PIT_HZ as f64 / crate::opl::RATE as f64
 }

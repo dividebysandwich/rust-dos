@@ -50,6 +50,21 @@ fn speaker_on(bus: &mut Bus) {
     bus.io_write(0x61, 0x03);
 }
 
+/// The speaker on at 1 kHz for a second, its sound thrown away: the
+/// square wave's mean level, which the speaker's filter takes out (or,
+/// with the filter off, the high-pass that keeps the mix centred), has
+/// gone, and the wave swings evenly about 0.
+fn speaker_settled(bus: &mut Bus) {
+    speaker_on(bus);
+    wait_ms(bus, 1000);
+    peak(bus);
+}
+
+/// Whether two peaks are the same, but for the rounding of a sample.
+fn near(a: u16, b: u16) -> bool {
+    a.abs_diff(b) <= 2
+}
+
 /// The loudest sample rendered since the last call.
 fn peak(bus: &mut Bus) -> u16 {
     bus.audio_catch_up();
@@ -65,29 +80,32 @@ fn with_level(channel: Channel, percent: u16) -> MixerSettings {
 #[test]
 fn a_source_plays_at_its_volume() {
     let mut bus = bus();
-    speaker_on(&mut bus);
+    speaker_settled(&mut bus);
     wait_ms(&mut bus, 20);
     let full = peak(&mut bus);
     assert!(full > 1000, "peak {}", full);
 
     bus.set_mixer(with_level(Channel::Speaker, 50));
     wait_ms(&mut bus, 20);
-    assert_eq!(peak(&mut bus), full / 2);
+    let half = peak(&mut bus);
+    assert!(near(half, full / 2), "{half} against {full}");
 
     // Another source's volume leaves the speaker alone.
     bus.set_mixer(with_level(Channel::Fm, 0));
     wait_ms(&mut bus, 20);
-    assert_eq!(peak(&mut bus), full);
+    let same = peak(&mut bus);
+    assert!(near(same, full), "{same} against {full}");
 
     bus.set_mixer(with_level(Channel::Speaker, 200));
     wait_ms(&mut bus, 20);
-    assert_eq!(peak(&mut bus), full * 2);
+    let double = peak(&mut bus);
+    assert!(near(double, full * 2), "{double} against {full}");
 }
 
 #[test]
 fn master_is_the_volume_of_the_mix() {
     let mut bus = bus();
-    speaker_on(&mut bus);
+    speaker_settled(&mut bus);
     wait_ms(&mut bus, 20);
     let full = peak(&mut bus);
 
@@ -100,7 +118,8 @@ fn master_is_the_volume_of_the_mix() {
     bus.set_mixer(settings);
     bus.mixer.take_peaks();
     wait_ms(&mut bus, 20);
-    assert_eq!(peak(&mut bus), full / 4);
+    let quarter = peak(&mut bus);
+    assert!(near(quarter, full / 4), "{quarter} against {full}");
 
     // The meters: the speaker at its volume, the mix at the master's.
     let peaks = bus.mixer.take_peaks();
@@ -120,14 +139,19 @@ fn speaker_divisor(bus: &mut Bus, divisor: u16) {
 #[test]
 fn an_ultrasonic_divisor_silences_the_speaker() {
     // Xenon 2 leaves the speaker gated on and sets a divisor of 2
-    // (596 kHz) between its notes: too fast for the cone, so silence.
+    // (596 kHz) between its notes: too fast for the cone, which rests at
+    // the wave's mean level, and the speaker's filter takes that out.
+    // What is left is the frames' means differing by a part of a period,
+    // far below a sound.
     let mut bus = bus();
+    bus.set_mixer(MixerSettings::default());
     speaker_on(&mut bus);
     speaker_divisor(&mut bus, 2);
-    wait_ms(&mut bus, 20);
+    wait_ms(&mut bus, 200);
     peak(&mut bus);
     wait_ms(&mut bus, 20);
-    assert_eq!(peak(&mut bus), 0);
+    let peak = peak(&mut bus);
+    assert!(peak < 32, "peak {peak}");
 }
 
 #[test]
@@ -207,10 +231,12 @@ fn steepest(samples: &[i16]) -> i32 {
 #[test]
 fn the_speaker_filter_softens_the_square_wave() {
     let mut bus = bus();
-    speaker_on(&mut bus);
+    speaker_settled(&mut bus);
     wait_ms(&mut bus, 20);
+    // The edges of a square wave, which take two frames where one falls
+    // inside a frame.
     let square = steepest(&samples(&mut bus));
-    assert_eq!(square, 6000, "the edges of a square wave");
+    assert!(square > 5000, "the edges of a square wave: {square}");
 
     bus.set_mixer(MixerSettings::default());
     wait_ms(&mut bus, 20);

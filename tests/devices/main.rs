@@ -21,6 +21,7 @@ mod ipx_tests;
 mod joystick_tests;
 mod lpt_dac_tests;
 mod mixer_tests;
+mod pc_speaker_tests;
 mod mouse_driver_tests;
 mod mt32_tests;
 mod nat_tests;

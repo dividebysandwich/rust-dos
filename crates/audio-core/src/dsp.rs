@@ -71,6 +71,11 @@ impl Biquad {
         }
         y
     }
+
+    /// Whether silence in gives silence out and leaves it as it is.
+    pub fn at_rest(&self) -> bool {
+        self.z1 == 0.0 && self.z2 == 0.0
+    }
 }
 
 /// A first-order high-pass.
@@ -96,6 +101,44 @@ impl OnePoleHighpass {
         self.x1 = x;
         self.y1 = y;
         y
+    }
+
+    /// Whether `x` would give exactly 0 and leave the filter as it is: it
+    /// got that level last, and what it passed of it has faded out.
+    pub fn rests_on(&self, x: f32) -> bool {
+        self.x1 == x && self.y1 == 0.0
+    }
+}
+
+/// A first-order high-pass at `COUPLING_HZ` on one channel, which takes a
+/// steady level out of a source and passes its sound as it was. It starts
+/// settled on the first sample it gets after `Default`, as
+/// `OutputCoupling` does.
+#[derive(Clone, Copy, Debug)]
+pub struct DcBlocker {
+    filter: OnePoleHighpass,
+    settled: bool,
+}
+
+impl Default for DcBlocker {
+    fn default() -> Self {
+        Self { filter: OnePoleHighpass::new(COUPLING_HZ), settled: false }
+    }
+}
+
+impl DcBlocker {
+    #[inline]
+    pub fn process(&mut self, x: f32) -> f32 {
+        if !self.settled {
+            self.settled = true;
+            self.filter.x1 = x;
+        }
+        self.filter.process(x)
+    }
+
+    /// Whether `x` would give exactly 0 and leave the filter as it is.
+    pub fn rests_on(&self, x: f32) -> bool {
+        !self.settled && x == 0.0 || self.settled && self.filter.rests_on(x)
     }
 }
 
@@ -157,24 +200,44 @@ impl OutputCoupling {
 
 /// The small speaker of a PC, as DOSBox Staging has it: a third-order
 /// high-pass at 120 Hz, as it can't move much air, and a second-order
-/// low-pass at 4.8 kHz.
+/// low-pass at 4.8 kHz. The high-pass takes out the steady level the
+/// speaker's cone rests at, so it starts settled on the first sample it
+/// gets after `Default` (a state loaded with the speaker's output high
+/// gives no click).
 #[derive(Clone, Copy, Debug)]
 pub struct SpeakerFilter {
     first: OnePoleHighpass,
     high: Biquad,
     low: Biquad,
+    settled: bool,
 }
 
 impl Default for SpeakerFilter {
     fn default() -> Self {
-        Self { first: OnePoleHighpass::new(120.0), high: Biquad::highpass(120.0, 1.0), low: Biquad::lowpass(4800.0, BUTTERWORTH_Q) }
+        Self {
+            first: OnePoleHighpass::new(120.0),
+            high: Biquad::highpass(120.0, 1.0),
+            low: Biquad::lowpass(4800.0, BUTTERWORTH_Q),
+            settled: false,
+        }
     }
 }
 
 impl SpeakerFilter {
     #[inline]
     pub fn process(&mut self, x: f32) -> f32 {
+        if !self.settled {
+            self.settled = true;
+            self.first.x1 = x;
+        }
         self.low.process(self.high.process(self.first.process(x)))
+    }
+
+    /// Whether `x` would give exactly 0 and leave the filter as it is: it
+    /// got that level last and has rung out.
+    pub fn rests_on(&self, x: f32) -> bool {
+        let rests = !self.settled && x == 0.0 || self.settled && self.first.rests_on(x);
+        rests && self.high.at_rest() && self.low.at_rest()
     }
 }
 
