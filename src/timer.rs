@@ -1116,7 +1116,8 @@ impl Pacer {
             self.auto.cap_boost(cap);
             if crate::autospeed::trace() {
                 eprintln!(
-                    "[auto] boost: {run} slow frames in a row, down to {cap:.0} (estimate {:.0})",
+                    "[auto] boost capped at {cap:.0}: a frame at {ideal:.0}, {run} stalled \
+                     in a row (estimate {:.0})",
                     self.host.max.unwrap_or(0.0)
                 );
             }
