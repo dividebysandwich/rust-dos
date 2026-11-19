@@ -1677,15 +1677,25 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
     }
 }
 
+/// Put back what the real-mode vectors held before the host's stubs took
+/// them over, where a stub is still in the vector, and forget the hooks.
+/// For the last client's end, and for a program closed while it runs
+/// (`Cpu::load_shell`), which no DOS exit ends: a stub left in a vector
+/// with no client and no original behind it returns from a hardware
+/// interrupt without the BIOS handler's end of interrupt, and that IRQ
+/// and those below it never come again.
+pub fn release_vectors(bus: &mut Bus) {
+    for (vector, original) in std::mem::take(&mut bus.dpmi.hooks) {
+        if read_ivt(bus, vector) == rm_stub(vector) {
+            write_ivt(bus, vector, original);
+        }
+    }
+}
+
 /// The last client ended: the host's tables go, and the A20 gate is as it
 /// was before.
 fn stop_host(cpu: &mut Cpu) {
-    let dpmi = &mut cpu.bus.dpmi;
-    for (vector, original) in std::mem::take(&mut dpmi.hooks) {
-        if read_ivt(&cpu.bus, vector) == rm_stub(vector) {
-            write_ivt(&mut cpu.bus, vector, original);
-        }
-    }
+    release_vectors(&mut cpu.bus);
     let dpmi = &mut cpu.bus.dpmi;
     if let Some(host) = dpmi.host.take() {
         cpu.bus.xms.release_dpmi(host);

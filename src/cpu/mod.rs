@@ -1755,6 +1755,10 @@ impl Cpu {
             self.resident_upper.clear();
         }
 
+        // A DPMI client closed while it ran never ended through DOS: the
+        // vectors the host's stubs took over get back what they held
+        // first, and what of that was the program's goes below.
+        crate::dpmi::release_vectors(&mut self.bus);
         // Re-install the HLE Interrupt Vectors
         self.install_bios_traps();
         self.alloc_strategy = 0;
