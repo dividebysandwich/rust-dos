@@ -1281,6 +1281,62 @@ fn a_client_moves_to_and_from_debug_and_control_registers() {
 }
 
 #[test]
+fn a_limit_above_1_mb_not_ending_a_page_covers_the_page() {
+    // INT 31h AX=0008h with CX:DX=FFFF:F000, as Virtuoso sets its sound
+    // driver's data selector: DOS/4GW's own host takes it and the limit
+    // is FFFFFFFFh. DPMI 0.9 would refuse it with 8021h. 0010:0000, one
+    // byte past 1 MB, gives the whole page that byte is in: 00100FFFh.
+    let main = asm16(0x100, |a| {
+        let mut fail = a.create_label();
+        enter(a, true, fail)?;
+        step(a, 4)?;
+        a.xor(ax, ax)?;
+        a.mov(cx, 1)?;
+        a.int(0x31)?;
+        a.jc(fail)?;
+        a.mov(word_ptr(R), ax)?;
+        step(a, 5)?;
+        a.mov(bx, ax)?;
+        a.mov(ax, 0x0008)?;
+        a.mov(cx, 0xFFFF)?;
+        a.mov(dx, 0xF000)?;
+        a.int(0x31)?;
+        a.mov(word_ptr(R + 2), ax)?;
+        a.jc(fail)?;
+        step(a, 6)?;
+        a.movzx(ebx, word_ptr(R))?;
+        a.lsl(eax, ebx)?;
+        a.mov(dword_ptr(R + 4), eax)?;
+        step(a, 7)?;
+        a.mov(bx, word_ptr(R))?;
+        a.mov(ax, 0x0008)?;
+        a.mov(cx, 0x0010)?;
+        a.xor(dx, dx)?;
+        a.int(0x31)?;
+        a.mov(word_ptr(R + 2), ax)?;
+        a.jc(fail)?;
+        a.movzx(ebx, word_ptr(R))?;
+        a.lsl(eax, ebx)?;
+        a.mov(dword_ptr(R + 8), eax)?;
+        exit(a, 0x2A)?;
+        a.set_label(&mut fail)?;
+        exit(a, 0xEE)
+    });
+    let (mut cpu, psp) = machine("pagelimit", &[("T.COM", com(&[(0x100, main)]))], "T.COM");
+    let w = |cpu: &Cpu, offset: u16| word(cpu, psp, offset);
+    let ended = run_to_exit(&mut cpu, 200);
+    assert!(ended, "the program didn't end (step {})", w(&cpu, STEP));
+    let (stage, code) = (w(&cpu, STEP), w(&cpu, R + 2));
+    assert_eq!(
+        cpu.errorlevel, 0x2A,
+        "failed at step {stage} (AX {code:04X})"
+    );
+    let dword = |offset: u16| cpu.bus.read_32(psp as usize * 16 + offset as usize);
+    assert_eq!(dword(R + 4), 0xFFFF_FFFF);
+    assert_eq!(dword(R + 8), 0x0010_0FFF);
+}
+
+#[test]
 fn a_client_allocates_linear_memory_at_an_address() {
     // DPMI 1.0's 0504h, as HX's loader places a program whose relocations
     // were stripped at its image base: the block at 400000h, the address
