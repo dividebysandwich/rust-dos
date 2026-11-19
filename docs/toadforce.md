@@ -1328,9 +1328,12 @@ are the emulator's.
   reads it (`win32::screen`), with a flip or a mode set, and before a
   call that lets the program read it or shows a window
   (`screen::api_settles`: all of DirectDraw and Direct3D 8 but the
-  Direct3D devices' methods and those of what they draw from, with a
-  scene's end and Direct3D 8's present among those that settle; GDI;
-  USER; WGL; and OpenGL's pixel transfers). It also runs when it is
+  Direct3D devices' methods and those of what they draw from, with
+  Direct3D 8's present among those that settle; GDI; USER but its
+  arithmetic on rectangles; WGL; and OpenGL's pixel transfers). A
+  scene's end doesn't settle, as EndScene doesn't wait for a real card:
+  a game that makes a scene of each object would have the renderer
+  draw its queue a few draws at a time. It also runs when it is
   full, and 5 ms of emulated time after its first command, so a
   program that reads video memory it kept a pointer to sees the picture
   a frame's fraction late at worst, as it would beside a real card that

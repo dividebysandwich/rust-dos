@@ -1546,3 +1546,161 @@ fn try_enter_critical_section_is_exported_from_windows_98_on() {
     assert_eq!(run(Win95, "try_enter", finds()).0, 3);
     assert_eq!(run(Win98Se, "try_enter", finds()).0, 7);
 }
+
+/// A program that walks a Toolhelp32 snapshot of itself as SmartHeap's
+/// start does: it finds CreateToolhelp32Snapshot and Heap32ListFirst
+/// with GetProcAddress (1), takes a snapshot of its heaps, processes,
+/// threads and modules (2), finds its process heap first in the heap
+/// list, flagged as the default (3), walks that heap to a block it
+/// allocated (4), finds itself as the first process (5), its main
+/// thread (6) and its program's module (7), and ends with 0, or with
+/// the number of the check that failed.
+fn toolhelp_walk() -> Vec<u8> {
+    let names: &[&str] = &[
+        "GetModuleHandleA",
+        "GetProcAddress",
+        "CreateToolhelp32Snapshot",
+        "Heap32ListFirst",
+        "Heap32First",
+        "Heap32Next",
+        "Process32First",
+        "Thread32First",
+        "Module32First",
+        "Module32Next",
+        "GetProcessHeap",
+        "HeapAlloc",
+        "GetCurrentProcessId",
+        "CloseHandle",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // Names at 0, 20h and 40h; HEAPLIST32 at 100h, HEAPENTRY32 at 120h,
+    // THREADENTRY32 at 150h, PROCESSENTRY32 at 200h, MODULEENTRY32 at
+    // 400h, each with its dwSize.
+    let mut data = b"KERNEL32.DLL\0".to_vec();
+    data.resize(0x20, 0);
+    data.extend_from_slice(b"CreateToolhelp32Snapshot\0");
+    data.resize(0x40, 0);
+    data.extend_from_slice(b"Heap32ListFirst\0");
+    data.resize(0x700, 0);
+    for (at, size) in [
+        (0x100, 16u32),
+        (0x120, 36),
+        (0x150, 28),
+        (0x200, 296),
+        (0x400, 548),
+    ] {
+        data[at..at + 4].copy_from_slice(&size.to_le_bytes());
+    }
+    program(imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut fail = a.create_label();
+        a.mov(ebx, 1)?;
+        a.push(l.at(0) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.mov(esi, eax)?;
+        for name in [0x20, 0x40] {
+            a.push(l.at(name) as i32)?;
+            a.push(esi)?;
+            a.call(f("GetProcAddress"))?;
+            a.test(eax, eax)?;
+            a.jz(fail)?;
+        }
+        a.mov(ebx, 2)?;
+        a.push(0)?;
+        a.push(0xF)?;
+        a.call(f("CreateToolhelp32Snapshot"))?;
+        a.cmp(eax, -1)?;
+        a.je(fail)?;
+        a.mov(edi, eax)?;
+        a.mov(ebx, 3)?;
+        a.push(l.at(0x100) as i32)?;
+        a.push(edi)?;
+        a.call(f("Heap32ListFirst"))?;
+        a.test(eax, eax)?;
+        a.jz(fail)?;
+        a.call(f("GetProcessHeap"))?;
+        a.mov(esi, eax)?;
+        a.cmp(dword_ptr(l.at(0x108)), esi)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x10C)), 1)?;
+        a.jne(fail)?;
+        // A block of 40h bytes, and a walk of the heap until it comes.
+        a.mov(ebx, 4)?;
+        a.push(0x40)?;
+        a.push(0)?;
+        a.push(esi)?;
+        a.call(f("HeapAlloc"))?;
+        a.mov(ebp, eax)?;
+        a.call(f("GetCurrentProcessId"))?;
+        a.push(esi)?;
+        a.push(eax)?;
+        a.push(l.at(0x120) as i32)?;
+        a.call(f("Heap32First"))?;
+        let mut next = a.create_label();
+        let mut found = a.create_label();
+        a.set_label(&mut next)?;
+        a.test(eax, eax)?;
+        a.jz(fail)?;
+        a.cmp(dword_ptr(l.at(0x128)), ebp)?;
+        a.je(found)?;
+        a.push(l.at(0x120) as i32)?;
+        a.call(f("Heap32Next"))?;
+        a.jmp(next)?;
+        a.set_label(&mut found)?;
+        a.cmp(dword_ptr(l.at(0x12C)), 0x40)?;
+        a.jne(fail)?;
+        // LF32_FIXED.
+        a.cmp(dword_ptr(l.at(0x130)), 1)?;
+        a.jne(fail)?;
+        a.mov(ebx, 5)?;
+        a.call(f("GetCurrentProcessId"))?;
+        a.mov(esi, eax)?;
+        a.push(l.at(0x200) as i32)?;
+        a.push(edi)?;
+        a.call(f("Process32First"))?;
+        a.test(eax, eax)?;
+        a.jz(fail)?;
+        a.cmp(dword_ptr(l.at(0x208)), esi)?;
+        a.jne(fail)?;
+        a.mov(ebx, 6)?;
+        a.push(l.at(0x150) as i32)?;
+        a.push(edi)?;
+        a.call(f("Thread32First"))?;
+        a.test(eax, eax)?;
+        a.jz(fail)?;
+        a.cmp(dword_ptr(l.at(0x15C)), esi)?;
+        a.jne(fail)?;
+        // The modules until the program's, at its base.
+        a.mov(ebx, 7)?;
+        a.push(l.at(0x400) as i32)?;
+        a.push(edi)?;
+        a.call(f("Module32First"))?;
+        let mut module = a.create_label();
+        let mut program_found = a.create_label();
+        a.set_label(&mut module)?;
+        a.test(eax, eax)?;
+        a.jz(fail)?;
+        a.cmp(dword_ptr(l.at(0x41C)), BASE as i32)?;
+        a.je(program_found)?;
+        a.push(l.at(0x400) as i32)?;
+        a.push(edi)?;
+        a.call(f("Module32Next"))?;
+        a.jmp(module)?;
+        a.set_label(&mut program_found)?;
+        a.push(edi)?;
+        a.call(f("CloseHandle"))?;
+        a.xor(eax, eax)?;
+        a.ret()?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    })
+}
+
+#[test]
+fn toolhelp32_walks_the_process_heaps_threads_and_modules() {
+    for version in [Win95, Win98Se] {
+        let (code, text) = run(version, "toolhelp", toolhelp_walk());
+        assert_eq!(code, 0, "check {} failed: {}", code, text);
+    }
+}

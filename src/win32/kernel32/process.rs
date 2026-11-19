@@ -670,6 +670,18 @@ fn process_memory(cpu: &mut Cpu, args: &[u32], write: bool) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_HANDLE);
         return Some(FALSE);
     };
+    copy_process_memory(cpu, p, [address, buffer, size, done_at], write)
+}
+
+/// The copy of `process_memory`, with the process `p` (its index in
+/// `Win32::processes`) and [address, buffer, size, done_at]: also
+/// Toolhelp32ReadProcessMemory's.
+pub(super) fn copy_process_memory(
+    cpu: &mut Cpu,
+    p: usize,
+    [address, buffer, size, done_at]: [u32; 4],
+    write: bool,
+) -> Option<u32> {
     if !cpu.bus.guest_probe(buffer, size as usize, !write) {
         return None;
     }
