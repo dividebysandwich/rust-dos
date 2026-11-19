@@ -89,17 +89,6 @@ jobs:
           flavor: ubuntu:22.04
           update: "true"
 
-      - name: Install OpenWatcom
-        run: |
-          curl -fsSL -o ow.tar.xz "$OW_URL"
-          echo "$OW_SHA256  ow.tar.xz" | sha256sum -c -
-          mkdir "$RUNNER_TEMP/watcom"
-          tar -xJf ow.tar.xz -C "$RUNNER_TEMP/watcom"
-          rm ow.tar.xz
-          echo "WATCOM=$RUNNER_TEMP/watcom" >> "$GITHUB_ENV"
-          echo "$RUNNER_TEMP/watcom/binl64" >> "$GITHUB_PATH"
-          echo "$RUNNER_TEMP/watcom/binl" >> "$GITHUB_PATH"
-
       - name: Trust the workspace
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
@@ -118,16 +107,38 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # In release: a debug build runs the user32 and gdi32 programs,
-      # msg.c and win.c above all, many times slower.
+      # msg.c and win.c above all, many times slower. Both test programs
+      # are built here, so that an error in the build fails this step
+      # alone, and the steps after it tell a failed Win32 set apart from a
+      # job that never got that far.
+      - name: Build the tests
+        id: build
+        run: "cargo test --locked --release --test win32 --test win16 --no-run"
+
       - name: Run the Win32 conformance tests
         env:
           CONFORMANCE_CC: i686-w64-mingw32-gcc-win32
           CONFORMANCE_REQUIRED: "1"
         run: "cargo test --locked --release --test win32 conformance_tests::"
 
-      # Runs when the Win32 set fails too, so one run reports both.
+      # After the Win32 set and also when it fails, so one run reports
+      # both. Only the Win16 set needs OpenWatcom, so a failed download
+      # skips that set alone.
+      - name: Install OpenWatcom
+        id: watcom
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/ow.tar.xz" "$OW_URL"
+          echo "$OW_SHA256  $RUNNER_TEMP/ow.tar.xz" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/watcom"
+          tar -xJf "$RUNNER_TEMP/ow.tar.xz" -C "$RUNNER_TEMP/watcom"
+          rm "$RUNNER_TEMP/ow.tar.xz"
+          echo "WATCOM=$RUNNER_TEMP/watcom" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/watcom/binl64" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/watcom/binl" >> "$GITHUB_PATH"
+
       - name: Run the Win16 conformance tests
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.watcom.outcome == 'success' }}
         env:
           CONFORMANCE_REQUIRED: "1"
         run: "cargo test --locked --release --test win16 win16_conformance_tests::"
