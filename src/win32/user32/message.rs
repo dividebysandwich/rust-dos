@@ -2105,6 +2105,41 @@ pub(super) mod tests {
         assert_eq!(take(&mut cpu, tid), None);
     }
 
+    /// A window that took the capture when the button went down gets its
+    /// release though a modal dialog disabled the frame it is in
+    /// meanwhile, as on Windows: Tribal Rage's view lets the capture go
+    /// there, and otherwise kept it and every click after it (#1410).
+    #[test]
+    fn the_capture_window_gets_the_mouse_in_a_disabled_frame() {
+        use super::super::window::{WS_CHILD, WS_DISABLED, Window};
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let frame = user(&mut cpu).new_window(Window::default()).unwrap();
+        let view = Window {
+            style: WS_CHILD,
+            parent: frame,
+            ..Window::default()
+        };
+        let view = user(&mut cpu).new_window(view).unwrap();
+        user(&mut cpu).desktop = true;
+        user(&mut cpu).input.capture = view;
+        let tid = user(&mut cpu).window(view).map(|w| w.tid).unwrap_or(0);
+        input::set_cursor_pos(&mut cpu, &[100, 100]);
+        cpu.bus.mouse.button_down(0);
+        input::set_cursor_pos(&mut cpu, &[100, 100]);
+        assert_eq!(take(&mut cpu, tid), Some((WM_MOUSEMOVE, 100 << 16 | 100)));
+        assert_eq!(take(&mut cpu, tid), Some((WM_LBUTTONDOWN, 100 << 16 | 100)));
+        // The dialog disables the frame; the button comes up.
+        if let Some(w) = user(&mut cpu).window_mut(frame) {
+            w.style |= WS_DISABLED;
+        }
+        cpu.bus.mouse.button_up(0);
+        input::set_cursor_pos(&mut cpu, &[100, 100]);
+        let got: Vec<u32> = std::iter::from_fn(|| take(&mut cpu, tid))
+            .map(|m| m.0)
+            .collect();
+        assert!(got.contains(&WM_LBUTTONUP), "{got:X?}");
+    }
+
     /// A click the mouse made before the program put the cursor back is
     /// where the mouse was, not where the cursor went.
     #[test]
