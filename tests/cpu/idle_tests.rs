@@ -102,6 +102,38 @@ fn a_keyboard_poll_is_skipped() {
 }
 
 #[test]
+fn a_dos_direct_console_poll_is_skipped() {
+    // Yendorian Tales 3 waits on INT 21h AH=06h DL=FFh, which reads the
+    // keystrokes the BIOS status call does.
+    let stats = compare("dos_console", |a| {
+        let mut wait = a.create_label();
+        a.set_label(&mut wait)?;
+        a.mov(ah, 6)?;
+        a.mov(dl, 0xFF)?;
+        a.int(0x21)?;
+        a.jz(wait)?;
+        a.mov(byte_ptr(DATA), al)?;
+        a.mov(ax, 0x4C00)?;
+        a.int(0x21)
+    });
+    assert!(stats.proofs > 0 && stats.skipped > 0, "{:?}", stats);
+}
+
+#[test]
+fn a_dos_input_status_poll_is_skipped() {
+    let stats = compare("dos_status", |a| {
+        let mut wait = a.create_label();
+        a.set_label(&mut wait)?;
+        a.mov(ah, 0x0B)?;
+        a.int(0x21)?;
+        a.test(al, al)?;
+        a.jz(wait)?;
+        finish(a)
+    });
+    assert!(stats.proofs > 0 && stats.skipped > 0, "{:?}", stats);
+}
+
+#[test]
 fn a_load_ends_what_was_armed_before_it() {
     // A head armed or a proof running when an older state is loaded
     // counts instructions of the run before the load, and the execution

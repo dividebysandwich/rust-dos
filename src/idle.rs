@@ -982,12 +982,19 @@ impl Observe {
     }
 }
 
-/// Whether the emulator service `kind` (FE 38h-3Bh) of `vector` with AX
-/// leaves nothing changed but RAM and registers, which a proof can follow:
+/// Whether the emulator service `kind` (FE 38h-3Bh) of `vector`, about to
+/// run with the CPU's registers, leaves nothing changed but RAM and
+/// registers, which a proof can follow:
 ///
 /// - the BIOS keyboard's status and shift state (the keystrokes are in the
 ///   BIOS data area on a booted system, and come between batches
-///   otherwise), and the BIOS tick count in the data area;
+///   otherwise), DOS's console input status, which reads the same
+///   keystrokes, and the BIOS tick count in the data area;
+/// - DOS's direct console input (INT 21h AH=06h with DL=FFh) when it will
+///   find no key, which leaves AL and the flags as the status calls do. A
+///   key waiting is taken from the emulator's queue, which a proof can't
+///   follow, and so is the scan code an extended key left for the next
+///   call;
 /// - DOS's date and time, whose state is in its swappable data area, and
 ///   the mouse driver's position, which moves between batches. The time is
 ///   the host's: the loop is only proven where it read the same time in the
@@ -996,13 +1003,19 @@ impl Observe {
 /// - Windows' device call-outs (INT 2Fh AX=1607h), which only DOS's
 ///   DOSMGR interface answers, in registers: Windows 3.1's VMPOLL makes
 ///   one in each pass of its idle loop.
-pub fn pure_service(kind: u8, vector: u8, ax: u16) -> bool {
+pub fn pure_service(cpu: &mut Cpu, kind: u8, vector: u8) -> bool {
+    let ax = cpu.ax();
     let ah = (ax >> 8) as u8;
     kind == 0x38
         && match vector {
             0x16 => matches!(ah, 0x01 | 0x02 | 0x11 | 0x12),
             0x1A => ah == 0x00,
-            0x21 => matches!(ah, 0x2A | 0x2C),
+            0x21 if ah == 0x06 => {
+                cpu.get_dl() == 0xFF
+                    && cpu.con_pending_scan.is_none()
+                    && crate::keyboard::peek_keystroke(&mut cpu.bus).is_none()
+            }
+            0x21 => matches!(ah, 0x0B | 0x2A | 0x2C),
             0x2F => ax == 0x1607,
             0x33 => ax == 0x0003,
             _ => false,
