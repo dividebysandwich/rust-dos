@@ -103,6 +103,32 @@ fn mode13_with_a_scrolled_start_keeps_full_screen_dirty_tracking() {
 }
 
 #[test]
+fn the_vga_screen_off_bit_blanks_the_picture_until_it_clears() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    crate::interrupts::int10::set_mode(&mut cpu, 0x13);
+    cpu.bus.write_8(0xA0000 + 40 * 320 + 17, 0x0F);
+    let (width, height) = frame_size(&cpu.bus);
+    let mut picture = Frame::new(width, height);
+    render_screen_rows(&mut picture, &cpu.bus);
+    cpu.bus.vga.clear_dirty();
+    assert!(picture.rgba.as_chunks::<4>().0.iter().any(|p| *p != [0, 0, 0, 255]));
+
+    // SR01 bit 5 through the ports: the whole picture goes black.
+    let mut frame = picture.clone();
+    cpu.bus.io_write(0x3C4, 0x01);
+    let clocking = cpu.bus.io_read(0x3C5);
+    cpu.bus.io_write(0x3C5, clocking | 0x20);
+    assert_eq!(render_screen_rows(&mut frame, &cpu.bus), 0..height as usize);
+    cpu.bus.vga.clear_dirty();
+    assert!(frame.rgba.as_chunks::<4>().0.iter().all(|p| *p == [0, 0, 0, 255]));
+
+    // Cleared again, the picture comes back whole.
+    cpu.bus.io_write(0x3C5, clocking);
+    render_screen_rows(&mut frame, &cpu.bus);
+    assert_eq!(frame.rgba, picture.rgba);
+}
+
+#[test]
 #[should_panic]
 fn rgb_import_rejects_a_pixel_count_that_does_not_fit() {
     Frame::from_rgb(1, 1, vec![1, 2, 3, 4]);

@@ -1380,8 +1380,9 @@ pub fn handle(cpu: &mut Cpu) {
                     // with it while they redraw.
                     let al = cpu.get_al();
                     if al <= 1 {
-                        let clocking = cpu.bus.vga.sequencer_regs[0x01] & !0x20;
-                        cpu.bus.vga.sequencer_regs[0x01] = clocking | (al << 5);
+                        let vga = &mut cpu.bus.vga;
+                        vga.sequencer_regs[0x01] = (vga.sequencer_regs[0x01] & !0x20) | (al << 5);
+                        vga.mark_dirty_full();
                         cpu.set_reg8(Register::AL, 0x12);
                     }
                 }
