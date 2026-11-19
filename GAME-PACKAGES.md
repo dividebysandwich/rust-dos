@@ -254,14 +254,17 @@ then `SUBST C: X:\GAME`) or mount another C:. What doesn't come across
 goes to the log. A folder with a `dosbox.conf` is imported the same way.
 
 **CONFIG -SET in a batch file.** A launcher that sets up the machine for
-the choice made in its menu with DOSBox's `CONFIG -set "[section]
+the choice made in its menu with DOSBox's `CONFIG -set "section
 setting=value"`, as eXoDOS's do (composite or RGB colours, an MT-32 or
 General MIDI, another CPU speed), gets those settings as the import
 makes them, before the batch file's next line runs, and the game's own
-come back when it ends. CONFIG says on the screen what it can't set.
-DOSBox has CONFIG as a program on Z:, so a game's own CONFIG.EXE (its
-setup, often) in the current directory or on the PATH runs instead.
-`CONFIG -get` isn't there.
+come back when it ends. The section can be left out, and the value can
+follow the setting after a space, as DOSBox takes them. CONFIG says on
+the screen what it can't set, such as `memsize`, which DOSBox can't
+change at run time either. DOSBox has CONFIG as a program on Z:, the
+first directory of its PATH, so a game's own CONFIG.EXE (its setup,
+often) runs instead when it is in the current directory, and one in a
+directory of the PATH doesn't. `CONFIG -get` isn't there.
 
 **rust-dos's own settings.** Settings of rust-dos's in the DOSBox
 configuration go over what the import makes of DOSBox's, so a game can

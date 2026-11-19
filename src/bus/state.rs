@@ -207,7 +207,6 @@ impl Bus {
             config_ui_requested: _,
             exit_requested: _,
             mixer_changed: _,
-            settings_requests: _,
             // The host's: its output, its settings and what it shows.
             config_dir: _,
             freezes: _,
@@ -565,7 +564,6 @@ impl Bus {
             config_ui_requested: _,
             exit_requested: _,
             mixer_changed: _,
-            settings_requests: _,
             config_dir: _,
             freezes: _,
             frames_drawn: _,

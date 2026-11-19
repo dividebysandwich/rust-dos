@@ -718,30 +718,68 @@ fn setting(imported: &mut Imported, section: &str, key: &str, value: &str) {
 }
 
 /// The sections of DOSBox's settings that are imported, in the order
-/// DOSBox keeps them, for CONFIG -SET with a setting's name alone: the
-/// first section with a setting of that name has it.
-const SECTIONS: [&str; 17] = [
-    "dosbox", "render", "composite", "cpu", "voodoo", "midi", "fluidsynth", "mt32", "soundcanvas", "sblaster", "gus",
-    "speaker", "joystick", "parallel", "printer", "dos", "ipx",
+/// DOSBox keeps them (DOSBox Staging's, with DOSBox-X's own sections
+/// where DOSBox-X has them), for CONFIG -SET with a setting's name alone:
+/// the first section with a setting of that name has it. Each setting
+/// `setting` takes is in one of them only, as in DOSBox, apart from
+/// DOSBox-X's [pci] Voodoo settings, which it takes as [voodoo]'s.
+const SECTIONS: [&str; 20] = [
+    "dosbox",
+    "render",
+    "composite",
+    "cpu",
+    "voodoo",
+    "pci",
+    "midi",
+    "fluidsynth",
+    "mt32",
+    "soundcanvas",
+    "sblaster",
+    "gus",
+    "speaker",
+    "joystick",
+    "parallel",
+    "printer",
+    "dos",
+    "ipx",
+    "ne2000",
+    "ethernet",
 ];
 
 /// What `CONFIG -SET` sets, as rust-dos's settings: `args` are the
-/// command's arguments, `-set` first, then `"section key=value"`,
-/// `section key=value` or `key=value` (quoted or not), as DOSBox takes
-/// them. The settings go into `imported.settings`, and the values rust-dos
-/// has no equivalent for into its warnings. False if the arguments aren't
-/// a CONFIG -SET of a setting the import knows.
+/// command's arguments, `-set` first, then the setting in one of the
+/// forms DOSBox takes, quoted or not: `section key=value`, `key=value`,
+/// `section key value` or `key value`. The settings go into
+/// `imported.settings`, and the values rust-dos has no equivalent for
+/// into its warnings. False if the arguments aren't a CONFIG -SET of a
+/// setting the import knows.
 fn config_set_into(imported: &mut Imported, args: &[&str]) -> bool {
     let Some((flag, rest)) = args.split_first() else { return false };
     if !flag.eq_ignore_ascii_case("-set") || rest.is_empty() {
         return false;
     }
     let joined = rest.join(" ");
-    let (head, value) = joined.split_once('=').unwrap_or((joined.as_str(), ""));
-    let words: Vec<String> = head.split_whitespace().map(str::to_ascii_lowercase).collect();
+    let (words, value): (Vec<String>, String) = match joined.split_once('=') {
+        Some((head, value)) => (
+            head.split_whitespace().map(str::to_ascii_lowercase).collect(),
+            value.trim().to_string(),
+        ),
+        // Without '=', the value is what follows the setting's name, which
+        // follows the section's, if the first word is one. [gus] and [ipx]
+        // have a setting of their own name (`gus true`).
+        None => {
+            let words: Vec<&str> = joined.split_whitespace().collect();
+            let named = |n: usize| {
+                let (head, value) = words.split_at(n.min(words.len()));
+                (head.iter().map(|w| w.to_ascii_lowercase()).collect(), value.join(" "))
+            };
+            let first = words.first().map(|w| w.to_ascii_lowercase()).unwrap_or_default();
+            if words.len() > 2 && SECTIONS.contains(&first.as_str()) { named(2) } else { named(1) }
+        }
+    };
     let taken = |imported: &mut Imported, section: &str, key: &str| {
         let (before, warnings) = (imported.settings.clone(), imported.warnings.len());
-        setting(imported, section, key, value.trim());
+        setting(imported, section, key, &value);
         imported.settings != before || imported.warnings.len() != warnings
     };
     match words.as_slice() {
@@ -751,11 +789,14 @@ fn config_set_into(imported: &mut Imported, args: &[&str]) -> bool {
     }
 }
 
+/// A setting of rust-dos's configuration: (section, key, value).
+pub type Entry = (String, String, String);
+
 /// What a `CONFIG` command line sets, with `args` the line after the
 /// command's name: rust-dos's settings as (section, key, value), and the
 /// values it has no equivalent for. Err, saying why, if it isn't a
 /// CONFIG -SET of a setting the import knows.
-pub fn config_set(args: &str) -> Result<(Vec<(String, String, String)>, Vec<String>), String> {
+pub fn config_set(args: &str) -> Result<(Vec<Entry>, Vec<String>), String> {
     let tokens = tokenize(args)?;
     let args: Vec<&str> = tokens.iter().map(String::as_str).collect();
     let mut imported = Imported::default();
@@ -1302,7 +1343,8 @@ sbtype=sb16vibra
     /// knows, as eXoDOS's launchers name them (Shamus' composite choice).
     #[test]
     fn config_set_finds_a_setting_by_its_name_alone() {
-        let imported = import(&["[autoexec]\nconfig -set \"composite=on\"\nconfig -set mididevice=mt32\n"], &[PathBuf::from("/")], "x", None);
+        let conf = "[autoexec]\nconfig -set \"composite=on\"\nconfig -set mididevice=mt32\n";
+        let imported = import(&[conf], &[PathBuf::from("/")], "x", None);
         assert_eq!(get(&imported, "composite").as_deref(), Some("on"), "{:?}", imported.warnings);
         assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
     }
@@ -1310,15 +1352,30 @@ sbtype=sb16vibra
     #[test]
     fn config_set_of_a_batch_file_says_what_it_sets() {
         let (settings, warnings) = config_set("-set \"cpu cycles=175000\"").unwrap();
-        assert_eq!(settings, [("emulator".to_string(), "cycles".to_string(), "175000".to_string())]);
+        let entry = |k: &str, v: &str| ("emulator".to_string(), k.to_string(), v.to_string());
+        assert_eq!(settings, [entry("cycles", "175000")]);
         assert!(warnings.is_empty());
         let (settings, _) = config_set("-SET composite=off").unwrap();
-        assert_eq!(settings, [("emulator".to_string(), "composite".to_string(), "off".to_string())]);
+        assert_eq!(settings, [entry("composite", "off")]);
         // A value rust-dos has no equivalent for is a warning.
         let (settings, warnings) = config_set("-set \"cpu core=bogus\"").unwrap();
         assert!(settings.is_empty() && warnings.len() == 1, "{:?} {:?}", settings, warnings);
         assert!(config_set("-set \"nosuch=1\"").unwrap_err().contains("no setting"));
         assert!(config_set("-get cpu").unwrap_err().contains("only CONFIG -SET"));
+    }
+
+    /// DOSBox's forms without '=': the value after the setting's name, with
+    /// its section before it or not, and [gus]'s setting of its own name.
+    #[test]
+    fn config_set_takes_the_value_after_a_space() {
+        let cycles = [("emulator".to_string(), "cycles".to_string(), "9000".to_string())];
+        assert_eq!(config_set("-set cpu cycles 9000").unwrap().0, cycles);
+        assert_eq!(config_set("-set \"cycles 9000\"").unwrap().0, cycles);
+        assert_eq!(config_set("-set cpu cycles=9000").unwrap().0, cycles);
+        let gus = [("sound".to_string(), "gus".to_string(), "true".to_string())];
+        assert_eq!(config_set("-set gus true").unwrap().0, gus);
+        assert_eq!(config_set("-set gus gus true").unwrap().0, gus);
+        assert!(config_set("-set cpu cycles").is_err());
     }
 
     /// A configuration in a game's zip or folder, which is

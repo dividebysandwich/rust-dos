@@ -449,11 +449,12 @@ impl Core {
         }
         // CONFIG -SET asked for settings: they are applied as the window's
         // are, and the batch file waiting for them goes on.
-        let requests = std::mem::take(&mut m.cpu.bus.settings_requests);
+        let requests = rust_dos::shell::take_settings(&mut m.cpu);
         if !requests.is_empty() {
             let dir = m.cpu.bus.config_dir.clone().unwrap_or_else(|| PathBuf::from("."));
             let home = rust_dos::hostdirs::home_dir();
-            let (new, warnings) = rust_dos::config::with_entries(&m.settings, &requests, &dir, home.as_deref());
+            let (new, warnings) =
+                rust_dos::config::with_entries(&m.settings, &requests, &dir, home.as_deref());
             for warning in warnings {
                 m.warn(&format!("CONFIG -SET: {}", warning));
             }

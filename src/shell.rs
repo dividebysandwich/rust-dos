@@ -306,11 +306,13 @@ pub enum ShellWait {
     /// (almanac.rs): its command line, its file, and the tick it waits
     /// until at most.
     Almanac { line: String, program: String, until: u64 },
-    /// CONFIG -SET: the frontend taking the settings it asked for
-    /// (`Bus::settings_requests`), so the batch file's next line runs with
-    /// them, or the tick it waits until at most, for a frontend that
-    /// doesn't take them.
-    Settings { until: u64 },
+    /// CONFIG -SET: the settings it asks for, as (section, key, value) of
+    /// rust-dos's configuration, until the frontend takes them
+    /// (`take_settings`), so the batch file's next line runs with them, and
+    /// the tick it waits until at most, for a frontend that doesn't take
+    /// them. They are the machine's while it waits, so a state saved then
+    /// has them.
+    Settings { requests: Vec<(String, String, String)>, until: u64 },
 }
 
 /// A CHOICE waiting for a key.
@@ -429,14 +431,13 @@ pub fn take_key(cpu: &mut Cpu, key: u16) -> bool {
         }
         // Only the settings taken end it; a key typed meanwhile was put
         // back for what runs next (`key_ready`).
-        ShellWait::Settings { until } => {
-            if !settings_taken(cpu, until) {
+        ShellWait::Settings { ref requests, until } => {
+            if !settings_taken(cpu, requests, until) {
                 cpu.shell_wait = Some(wait);
                 return false;
             }
             // A frontend that doesn't take them won't later either.
-            if !cpu.bus.settings_requests.is_empty() {
-                cpu.bus.settings_requests.clear();
+            if !requests.is_empty() {
                 cpu.bus.log_string("[CONFIG] CONFIG -SET: the settings weren't applied");
             }
         }
@@ -509,15 +510,35 @@ pub fn timed_out_key(cpu: &Cpu) -> Option<u8> {
         Some(ShellWait::Choice(Choice { timeout: Some((key, at)), .. })) if cpu.bus.clock.now_ticks() >= at => Some(key),
         Some(ShellWait::Lan { until }) if crate::lan_command::wait_over(cpu, until) => Some(0),
         Some(ShellWait::LanList { until }) if crate::lan_command::list_over(cpu, until) => Some(0),
-        Some(ShellWait::Settings { until }) if settings_taken(cpu, until) => Some(0),
+        Some(ShellWait::Settings { ref requests, until })
+            if settings_taken(cpu, requests, until) =>
+        {
+            Some(0)
+        }
         _ => None,
     }
 }
 
 /// Whether CONFIG -SET waits no longer: the frontend took the settings it
 /// asked for, or the time is up.
-fn settings_taken(cpu: &Cpu, until: u64) -> bool {
-    cpu.bus.settings_requests.is_empty() || cpu.bus.clock.now_ticks() >= until
+fn settings_taken(cpu: &Cpu, requests: &[(String, String, String)], until: u64) -> bool {
+    requests.is_empty() || cpu.bus.clock.now_ticks() >= until
+}
+
+/// The settings a CONFIG -SET waiting in a batch file asks for, as
+/// (section, key, value) of rust-dos's configuration, for the frontend to
+/// apply; the batch file goes on once they are taken.
+pub fn take_settings(cpu: &mut Cpu) -> Vec<(String, String, String)> {
+    match &mut cpu.shell_wait {
+        Some(ShellWait::Settings { requests, .. }) => std::mem::take(requests),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether a CONFIG -SET waiting in a batch file asks for settings that
+/// the frontend hasn't taken (`take_settings`).
+pub fn settings_asked(cpu: &Cpu) -> bool {
+    matches!(&cpu.shell_wait, Some(ShellWait::Settings { requests, .. }) if !requests.is_empty())
 }
 
 /// The shell's code at KEY_READY (SERVICE_SHELL_KEY_READY), with the key
@@ -525,7 +546,10 @@ fn settings_taken(cpu: &Cpu, until: u64) -> bool {
 pub fn key_ready(cpu: &mut Cpu) {
     // A key that stops LAN waiting is typed at the prompt as well, and
     // one typed while CONFIG -SET waits is for what runs after it.
-    if matches!(cpu.shell_wait, Some(ShellWait::Lan { .. } | ShellWait::LanList { .. } | ShellWait::Settings { .. }))
+    if matches!(
+        cpu.shell_wait,
+        Some(ShellWait::Lan { .. } | ShellWait::LanList { .. } | ShellWait::Settings { .. })
+    )
         && cpu.ax() != 0
         && cpu.ax() as u8 != 0x03
     {
@@ -696,8 +720,9 @@ impl crate::savestate::State for ShellWait {
                 program.save(w);
                 until.save(w);
             }
-            ShellWait::Settings { until } => {
+            ShellWait::Settings { requests, until } => {
                 12u8.save(w);
+                requests.save(w);
                 until.save(w);
             }
         }
@@ -760,9 +785,10 @@ impl crate::savestate::State for ShellWait {
                 ShellWait::Almanac { line, program, until }
             }
             12 => {
-                let mut until = 0u64;
+                let (mut requests, mut until) = (Vec::new(), 0u64);
+                requests.load(r)?;
                 until.load(r)?;
-                ShellWait::Settings { until }
+                ShellWait::Settings { requests, until }
             }
             _ => return Err(crate::savestate::StateError::Invalid("a wait of the shell it doesn't know".into())),
         };

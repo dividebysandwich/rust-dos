@@ -232,11 +232,11 @@ pub fn with_entries(
     home: Option<&Path>,
 ) -> (Settings, Vec<String>) {
     let base = update_text("", &Settings::default(), settings, &[], home);
-    let own: String = entries.iter().map(|(section, key, value)| format!("[{}]
-{}={}
-", section, key, value)).collect();
-    let config = parse(&format!("{}
-{}", base, own), base_dir, home);
+    let own: String = entries
+        .iter()
+        .map(|(section, key, value)| format!("[{}]\n{}={}\n", section, key, value))
+        .collect();
+    let config = parse(&format!("{}\n{}", base, own), base_dir, home);
     // What the entries brought: the settings' own were taken before. The
     // line numbers are of no file.
     let before = parse(&base, base_dir, home).warnings;
@@ -244,7 +244,11 @@ pub fn with_entries(
         .warnings
         .iter()
         .filter(|w| !before.contains(w))
-        .map(|w| w.split_once(": ").filter(|(at, _)| at.starts_with("line ")).map_or(w.as_str(), |(_, rest)| rest))
+        .map(|w| {
+            w.split_once(": ")
+                .filter(|(at, _)| at.starts_with("line "))
+                .map_or(w.as_str(), |(_, rest)| rest)
+        })
         .map(str::to_string)
         .collect();
     (Settings::from_config(&config), warnings)

@@ -621,7 +621,6 @@ pub fn run_command_line(cpu: &mut Cpu, cmd: &str) {
         create_output(&mut cpu.bus, path, *append);
     }
     match start(cpu, command, args.trim(), false, false) {
-        None if crate::command::run_fallback(cpu, command, args) => {}
         None => bad_command(cpu),
         Some(Started::Program) => redirect_program(cpu, &redirect),
         Some(Started::Batch) => {}
@@ -850,7 +849,7 @@ pub fn call(cpu: &mut Cpu, line: &str) {
     if command.is_empty() || CommandDispatcher::new().dispatch(cpu, command, args) {
         return;
     }
-    if start(cpu, command, args.trim(), false, true).is_none() && !crate::command::run_fallback(cpu, command, args) {
+    if start(cpu, command, args.trim(), false, true).is_none() {
         bad_command(cpu);
     }
 }

@@ -884,6 +884,38 @@ fn typed_run(name: &str, frame_ms: u64) -> (u64, Vec<u8>, Vec<Value>) {
     (cpu.executed, cpu.bus.ram().to_vec(), journal)
 }
 
+/// Run T.BAT, whose CONFIG -SET asks for a setting, to 2 s of emulated
+/// time in host frames of `frame_ms`, with a frontend that takes the
+/// settings after each frame as the main loop does: when it took them,
+/// and the instructions executed.
+fn config_set_run(name: &str, frame_ms: u64) -> (u64, u64) {
+    let (mut cpu, mut hub, mut mode) = deterministic_machine(name);
+    let bat = "@echo off\r\nconfig -set composite=on\r\necho after\r\n";
+    std::fs::write(crate::test_dir::path(&format!("det-{name}")).join("T.BAT"), bat).unwrap();
+    reply(&mut cpu, &mut hub, typed("T\n")).unwrap();
+    reply(&mut cpu, &mut hub, Cmd::Resume { until: None, until_ms: Some(2000) }).unwrap();
+    let mut taken = None;
+    for _ in 0..1000 {
+        run_deterministic(&mut cpu, &mut hub, &mut mode, 1, frame_ms);
+        if !rust_dos::shell::take_settings(&mut cpu).is_empty() {
+            taken = Some(cpu.bus.clock.now_ns());
+        }
+        if hub.paused {
+            break;
+        }
+    }
+    (taken.expect("CONFIG -SET asked for a setting"), cpu.executed)
+}
+
+/// The frontend takes CONFIG -SET's settings at the same emulated time in
+/// host frames of any size, so the batch file goes on at the same time.
+#[test]
+fn config_set_is_taken_at_the_same_time_whatever_the_frames() {
+    let a = config_set_run("config-a", 16);
+    let b = config_set_run("config-b", 41);
+    assert_eq!(a, b);
+}
+
 #[test]
 fn deterministic_input_gives_the_same_run_whatever_the_frames() {
     let a = typed_run("a", 16);
