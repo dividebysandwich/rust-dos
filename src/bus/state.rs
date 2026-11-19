@@ -8,7 +8,11 @@ use crate::savestate::{Reader, Result, State, StateError, Writer, load_device, s
 
 /// The sections' versions, changed with what a section holds.
 const RAM_VERSION: u16 = 2;
-const CORE_VERSION: u16 = 9;
+const CORE_VERSION: u16 = 10;
+/// The CORE versions this rust-dos loads: its own, and 9, which kept the
+/// phase of the speaker's square wave where 10 keeps its level in the
+/// frame being made (`Bus::speaker_high`).
+const CORE_LOADS: [u16; 2] = [9, CORE_VERSION];
 const VIDEO_VERSION: u16 = 2;
 const SOUND_VERSION: u16 = 4;
 const DOS_VERSION: u16 = 6;
@@ -116,7 +120,8 @@ impl Bus {
             post_code,
             refresh_toggle,
             speaker_on,
-            audio_phase,
+            speaker_high,
+            speaker_until,
             audio_frames,
             sb_frame,
             beep_frames,
@@ -233,8 +238,8 @@ impl Bus {
                 pit0_divisor, pit0_write_msb, pit0_read_msb, pit0_access, pit0_latched, pit0_latched_active,
                 pit0, clock, pic, dma, joystick,
                 dta_segment, dta_offset, search_handles, search_serial, cursor_x, cursor_y,
-                post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_frame, beep_frames,
-                boot, pci,
+                post_code, refresh_toggle, speaker_on, speaker_high, speaker_until,
+                audio_frames, sb_frame, beep_frames, boot, pci,
             );
         });
         // Channel 2's counter and gate, in a section of their own so states
@@ -452,7 +457,8 @@ impl Bus {
             post_code,
             refresh_toggle,
             speaker_on,
-            audio_phase,
+            speaker_high,
+            speaker_until,
             audio_frames,
             sb_frame,
             beep_frames,
@@ -565,16 +571,26 @@ impl Bus {
             *code_blocks = vec![0; len >> super::GEN_SHIFT];
         }
         ram.copy_from_slice(section.take(len)?);
-        let mut section = r.section(b"CORE", CORE_VERSION)?;
+        let mut section = r.section_of(b"CORE", &CORE_LOADS)?;
         load_all!(&mut section;
             keyboard_buffer, kbd, kbc, a20_mask, cmos,
             pit_divisor, pit_read_msb, pit_mode, pit_write_msb,
             pit0_divisor, pit0_write_msb, pit0_read_msb, pit0_access, pit0_latched, pit0_latched_active,
             pit0, clock, pic, dma, joystick,
             dta_segment, dta_offset, search_handles, search_serial, cursor_x, cursor_y,
-            post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_frame, beep_frames,
-                boot, pci,
+            post_code, refresh_toggle, speaker_on,
         );
+        if section.version() == Some(9) {
+            // The square wave's phase, which the speaker's level replaced:
+            // the frame being made starts at the frames mixed.
+            let mut phase = 0.0f32;
+            load_all!(&mut section; &mut phase, audio_frames);
+            *speaker_high = 0.0;
+            *speaker_until = super::frame_tick(*audio_frames);
+        } else {
+            load_all!(&mut section; speaker_high, speaker_until, audio_frames);
+        }
+        load_all!(&mut section; sb_frame, beep_frames, boot, pci);
         if r.next_is(b"PIT2") {
             let mut section = r.section(b"PIT2", PIT2_VERSION)?;
             load_all!(&mut section; pit2, speaker_data);
