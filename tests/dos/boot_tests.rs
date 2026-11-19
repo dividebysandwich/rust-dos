@@ -714,6 +714,8 @@ fn windows_hands_its_machines_their_keys_through_their_bios() {
     let mut cpu = Cpu::new(base);
     cpu.bus.set_cycles_per_ms(1000);
     cpu.load_shell();
+    let trap = |cpu: &Cpu| (0..4).map(|i| cpu.bus.read_8(0xF1004 + i)).collect::<Vec<_>>();
+    let dos_trap = trap(&cpu);
     // Windows' 386 enhanced mode starts (INT 2Fh AX=1605h, DX bit 0
     // clear): its keyboard driver hands each machine its keys through the
     // keyboard controller, and the machine's BIOS makes the keystrokes.
@@ -736,7 +738,7 @@ fn windows_hands_its_machines_their_keys_through_their_bios() {
     cpu.set_dx(0);
     int2f::handle(&mut cpu);
     assert!(!cpu.bus.kbd.windows);
-    assert_eq!((0..4).map(|i| cpu.bus.read_8(0xF1004 + i)).collect::<Vec<_>>(), [0xFE, 0x38, 0x09, 0xCF]);
+    assert_eq!(trap(&cpu), dos_trap, "the keyboard interrupt is the built-in DOS's again");
     press(&mut cpu, 0x1E, false);
     assert_eq!(cpu.bus.keyboard_buffer.front(), Some(&0x1E61));
 }
