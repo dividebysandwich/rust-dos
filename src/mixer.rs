@@ -4,7 +4,9 @@
 //! emulated cards' own levels, such as the Sound Blaster's mixer chip,
 //! which programs set and a new program resets.
 
-use crate::dsp::{Chorus, DcBlocker, OutputCoupling, Reverb, SpeakerDecimator, SpeakerFilter, StereoLowpass};
+use crate::dsp::{
+    Chorus, DcBlocker, OutputCoupling, Reverb, SpeakerDecimator, SpeakerFilter, StereoLowpass,
+};
 pub use crate::dsp::{ChorusPreset, ReverbPreset};
 
 /// A sound source the mixer has a volume for, or `Master` for the mix.

@@ -255,11 +255,11 @@ const SPEAKER_TAPS: usize = 192;
 /// lets what lies above half the mix rate fold into the audible range: a
 /// pulse-width-modulated carrier's harmonics come out as tones. A
 /// windowed-sinc low-pass at the eighths' rate passes the audible range
-/// (within 0.004 dB to 16 kHz, 1.5 dB down at 18 kHz) and takes
-/// everything that would fold below 20 kHz down by 70 dB or more (from
-/// 24.1 kHz on), and the eighths' own means take out what lies near
-/// their rate's multiples. The cost is the same in every frame: eight
-/// means and a 192-tap filter.
+/// (within 0.003 dB to 15 kHz, 0.03 dB at 16 kHz, 1.5 dB down at
+/// 18 kHz) and takes everything that would fold below 20 kHz down by
+/// 70 dB or more (from 24.1 kHz on), and the eighths' own means take out
+/// what lies near their rate's multiples. The cost is the same in every
+/// frame: eight means and a 192-tap filter.
 ///
 /// It starts settled on the first part it gets after `Default` (a reset
 /// of the mixer's filters, as after a state was loaded), as if the level
@@ -365,7 +365,18 @@ impl SpeakerDecimator {
         // The filter is symmetric, so the order the parts lie in, oldest
         // first from `at`, doesn't matter to it.
         let parts = &self.history[self.at..self.at + SPEAKER_TAPS];
-        parts.iter().zip(speaker_taps()).map(|(x, h)| x * h).sum()
+        // Eight sums side by side, which the compiler turns into vector
+        // instructions; one running sum can't be, as each addition would
+        // have to wait for the one before.
+        let (parts, _) = parts.as_chunks::<8>();
+        let (taps, _) = speaker_taps().as_chunks::<8>();
+        let mut sums = [0.0f32; 8];
+        for (x, h) in parts.iter().zip(taps) {
+            for ((sum, x), h) in sums.iter_mut().zip(x).zip(h) {
+                *sum += x * h;
+            }
+        }
+        sums.iter().sum()
     }
 
     /// Whether parts of `x` from now on give `x` exactly and leave the

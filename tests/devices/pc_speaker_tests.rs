@@ -151,6 +151,17 @@ fn an_audible_tone_is_unchanged() {
         (fundamental / expected - 1.0).abs() < 0.02,
         "{fundamental} against {expected}"
     );
+    // The square wave's odd harmonics, a third, a fifth and so on of the
+    // fundamental, at their levels up to 15 kHz. A mean over each whole
+    // frame took 0.2 dB off the 5 kHz harmonic and 1.6 dB off the 15 kHz
+    // one; the band limit passes them all.
+    for k in (3..=15).step_by(2) {
+        let level = amplitude(&played, k as f64 * hz) * k as f64;
+        assert!(
+            (level / fundamental - 1.0).abs() < 0.01,
+            "harmonic {k} at {level} of {fundamental} for its share"
+        );
+    }
     // Each frame is one of the two levels, or between them near an edge,
     // which the band limit spreads over about three frames: six frames of
     // the period's 44 at most.
