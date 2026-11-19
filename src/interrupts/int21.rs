@@ -723,6 +723,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     // No Key: Return 0 and Set Zero Flag
                     cpu.set_reg8(Register::AL, 0x00);
                     cpu.set_zflag(true);
+                    // A loop polling here waits, as one on INT 16h AH=01h
+                    // does: the idle proof may skip its passes.
+                    cpu.bus.observe.polled = true;
                 }
             } else {
                 // --- OUTPUT ---
@@ -793,6 +796,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         0x0B => {
             if crate::keyboard::peek_keystroke(&mut cpu.bus).is_none() && cpu.con_pending_scan.is_none() {
                 cpu.set_reg8(Register::AL, 0x00);
+                cpu.bus.observe.polled = true;
             } else {
                 cpu.set_reg8(Register::AL, 0xFF);
             }

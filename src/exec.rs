@@ -1425,7 +1425,10 @@ fn service_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     // A loop being proven to change nothing (`idle`) may only use services
     // that work on RAM alone: the others keep state of their own, or reach
     // devices.
-    if cpu.bus.observe.on && !crate::idle::pure_service(kind, vector, cpu.ax()) {
+    if cpu.bus.observe.on
+        && !crate::idle::pure_service(kind, vector, cpu.ax())
+        && !crate::idle::pure_console_poll(cpu, kind, vector)
+    {
         cpu.bus.observe.opaque();
     }
     let trap = (cpu.cs(), cpu.eip());

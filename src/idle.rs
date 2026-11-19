@@ -987,7 +987,8 @@ impl Observe {
 ///
 /// - the BIOS keyboard's status and shift state (the keystrokes are in the
 ///   BIOS data area on a booted system, and come between batches
-///   otherwise), and the BIOS tick count in the data area;
+///   otherwise), DOS's console input status, which reads the same
+///   keystrokes, and the BIOS tick count in the data area;
 /// - DOS's date and time, whose state is in its swappable data area, and
 ///   the mouse driver's position, which moves between batches. The time is
 ///   the host's: the loop is only proven where it read the same time in the
@@ -1002,11 +1003,25 @@ pub fn pure_service(kind: u8, vector: u8, ax: u16) -> bool {
         && match vector {
             0x16 => matches!(ah, 0x01 | 0x02 | 0x11 | 0x12),
             0x1A => ah == 0x00,
-            0x21 => matches!(ah, 0x2A | 0x2C),
+            0x21 => matches!(ah, 0x0B | 0x2A | 0x2C),
             0x2F => ax == 0x1607,
             0x33 => ax == 0x0003,
             _ => false,
         }
+}
+
+/// Whether the service is DOS's direct console input (INT 21h AH=06h with
+/// DL=FFh) about to find no key, which leaves nothing changed but AL and
+/// the flags, as the BIOS keyboard's status call does. A key waiting is
+/// taken from the emulator's queue, which a proof can't follow, and so is
+/// the scan code an extended key left for the next call.
+pub fn pure_console_poll(cpu: &mut Cpu, kind: u8, vector: u8) -> bool {
+    kind == 0x38
+        && vector == 0x21
+        && cpu.ax() >> 8 == 0x06
+        && cpu.get_dl() == 0xFF
+        && cpu.con_pending_scan.is_none()
+        && crate::keyboard::peek_keystroke(&mut cpu.bus).is_none()
 }
 
 /// Before a service of the built-in Windows runs during a proof: one the
