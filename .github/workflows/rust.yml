@@ -42,8 +42,45 @@ defaults:
     shell: bash
 
 jobs:
+  # When a draft is marked ready for review: whether an earlier run of this
+  # workflow on the same commit of the pull request succeeded. That run was
+  # the draft's, and it ran every job but the release builds and `web`, so
+  # this run then skips the tests and the libretro jobs and makes only
+  # those. Each pull_request run tests the pull request merged into main as
+  # it was when the run started, so the tests skipped here ran against an
+  # older main. Nothing tests the merge again when it lands either: main's
+  # own push run is what finds a pull request that main has broken.
+  # Skipped on every other event, which costs the jobs below no wait.
+  tested:
+    name: tested
+    if: github.event.action == 'ready_for_review'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      passed: ${{ steps.check.outputs.passed }}
+    steps:
+      - name: Look for an earlier successful run on this commit
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/rust.yml/runs?head_sha=$HEAD_SHA&event=pull_request&status=success" \
+            --jq "[.workflow_runs[] | select(.id != $RUN_ID) | .html_url]")
+          echo "earlier successful runs: $runs"
+          if [[ $(jq length <<< "$runs") -gt 0 ]]; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
     name: test (${{ matrix.label }})
+    # `tested` is skipped on every event but ready_for_review, and a job
+    # whose need was skipped runs only with a status function in its `if`.
+    # If `tested` fails, its output is empty and the tests run.
+    needs: tested
+    if: ${{ !cancelled() && needs.tested.outputs.passed != 'true' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -252,7 +289,8 @@ jobs:
   build:
     name: ${{ matrix.label }}
     needs: [test, scope]
-    if: needs.scope.outputs.builds != '[]'
+    # A skipped `test` (see `tested`) passes; a failed one stops the builds.
+    if: ${{ !cancelled() && !failure() && needs.scope.outputs.builds != '[]' }}
     runs-on: ${{ matrix.os }}
     # Empty for every non-compat entry, which means "no container". zizmor
     # can't see the images in a matrix that comes from `scope`, so it
@@ -602,7 +640,7 @@ jobs:
   web:
     name: web
     needs: test
-    if: ${{ !github.event.pull_request.draft }}
+    if: ${{ !cancelled() && !failure() && !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -764,8 +802,10 @@ jobs:
   # picks: its tests and clippy, without the release build or the package.
   libretro-pr:
     name: libretro (linux-x86_64, tests and clippy)
-    needs: [test, scope]
-    if: needs.scope.outputs.libretro != 'true'
+    needs: [tested, test, scope]
+    if: >-
+      ${{ !cancelled() && !failure() && needs.tested.outputs.passed != 'true'
+      && needs.scope.outputs.libretro != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -796,8 +836,10 @@ jobs:
   # the library without SDL or ALSA, which the frontend has in their place.
   libretro:
     name: libretro (${{ matrix.label }})
-    needs: [test, scope]
-    if: needs.scope.outputs.libretro == 'true'
+    needs: [tested, test, scope]
+    if: >-
+      ${{ !cancelled() && !failure() && needs.tested.outputs.passed != 'true'
+      && needs.scope.outputs.libretro == 'true' }}
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     strategy:
@@ -910,8 +952,10 @@ jobs:
   # Cross-built, so its tests run in the libretro job above instead.
   libretro-android:
     name: libretro (android-${{ matrix.abi }})
-    needs: [test, scope]
-    if: needs.scope.outputs.libretro == 'true'
+    needs: [tested, test, scope]
+    if: >-
+      ${{ !cancelled() && !failure() && needs.tested.outputs.passed != 'true'
+      && needs.scope.outputs.libretro == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -978,7 +1022,9 @@ jobs:
 
   release:
     name: create release
-    if: github.ref_type == 'tag'
+    # `tested` is skipped on tags, and without a status function this `if`
+    # would also need every job before its own needs to have succeeded.
+    if: ${{ !cancelled() && !failure() && github.ref_type == 'tag' }}
     needs: [build, web, libretro, libretro-android]
     runs-on: ubuntu-latest
     permissions:
