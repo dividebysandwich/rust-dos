@@ -8709,6 +8709,70 @@ fn a_program_reads_its_resources_and_file_name() {
     assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
 }
 
+/// LoadImageA with LR_CREATEDIBSECTION of an RLE8 bitmap gives a DIB
+/// section with the codes unpacked into plain rows, as Windows 95 and 98
+/// do (CreateDIBSection itself refuses a compressed one). Beasts and
+/// Bumpkins loads its fonts this way, and crashed when it got none.
+#[test]
+fn load_image_unpacks_an_rle8_bitmap_into_a_dib_section() {
+    let names: &[&str] = &["GetModuleHandleA", "LoadImageA", "GetObjectA"];
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &names[..1]),
+        ("USER32.DLL", &names[1..2]),
+        ("GDI32.DLL", &names[2..]),
+    ];
+    const RT_BITMAP: u16 = 2;
+    const LR_CREATEDIBSECTION: u32 = 0x2000;
+    const DIBSECTION: u32 = 0x100;
+    // A 4x2 bitmap of 8 bits, two colors. Bottom row: two of color 5 and
+    // two of 7; top row: four of 9; then the end of the bitmap.
+    let mut dib = Vec::new();
+    for w in [40u32, 4, 2, 1 | 8 << 16, 1, 8, 0, 0, 2, 0] {
+        dib.extend_from_slice(&w.to_le_bytes());
+    }
+    dib.extend_from_slice(&[0; 8]);
+    dib.extend_from_slice(&[2, 5, 2, 7, 0, 0, 4, 9, 0, 1]);
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        a.xor(ebx, ebx)?;
+        call_with(a, l.import(0), &[Arg::I(0)])?;
+        a.mov(esi, eax)?;
+        let image = [Arg::Esi, Arg::I(3), Arg::I(0), Arg::I(0), Arg::I(0)];
+        let flags = [Arg::I(LR_CREATEDIBSECTION)];
+        call_with(a, l.import(1), &[&image[..], &flags[..]].concat())?;
+        a.mov(esi, eax)?;
+        a.test(esi, esi)?;
+        check(a, true, 0)?;
+        let out = l.at(DIBSECTION) as u32;
+        call_with(a, l.import(2), &[Arg::Esi, Arg::I(84), Arg::I(out)])?;
+        a.cmp(eax, 84)?;
+        check(a, false, 1)?;
+        // dsBmih.biCompression: plain rows.
+        a.cmp(dword_ptr(l.at(DIBSECTION + 40)), 0)?;
+        check(a, false, 2)?;
+        a.mov(esi, dword_ptr(l.at(DIBSECTION + 20)))?;
+        let mut no_bits = a.create_label();
+        a.test(esi, esi)?;
+        a.jz(no_bits)?;
+        a.cmp(dword_ptr(esi), 0x0707_0505)?;
+        check(a, false, 3)?;
+        a.cmp(dword_ptr(esi + 4), 0x0909_0909)?;
+        check(a, false, 4)?;
+        a.set_label(&mut no_bits)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(
+        BASE,
+        None,
+        imports,
+        &[0; 0x200],
+        &[("", &main)],
+        &[(RT_BITMAP, 3, 0x409, &dib)],
+    );
+    let (code, text) = run_files("load_image_rle8", &[("T.EXE", exe)]);
+    assert_eq!(code, 0x1F, "the checks that failed: {:05b} {text}", !code & 0x1F);
+}
+
 /// LoadLibraryA of files Windows 95 can't load: an empty one is in a bad
 /// format, and one whose PE header has no optional header gives
 /// ERROR_GEN_FAILURE, as Wine's loader test found on Windows 9x.

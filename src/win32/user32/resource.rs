@@ -754,6 +754,9 @@ fn bitmap_from_dib(cpu: &mut Cpu, at: u32, dib_section: bool) -> Option<u32> {
         };
     };
     if dib_section {
+        if let Some(h) = bitmap::unpacked_dib_section(cpu, &info, bits) {
+            return Some(h);
+        }
         let h = bitmap::create_dib_section(cpu, &[0, at, 0, 0, 0, 0])?;
         let to = gdi32::gdi(cpu)
             .bitmap(h)

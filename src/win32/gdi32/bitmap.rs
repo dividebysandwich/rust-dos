@@ -459,6 +459,41 @@ pub fn create_dib_section(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(handle)
 }
 
+/// For LoadImageA with LR_CREATEDIBSECTION: the RLE8 or RLE4 DIB
+/// `info`, its codes at `bits`, unpacked into a DIB section of plain
+/// rows, which CreateDIBSection itself refuses to make compressed. Its
+/// handle, or 0 if it can't be made; None for a DIB that isn't
+/// compressed. Windows 95 and 98 load such a bitmap: Beasts and
+/// Bumpkins loads its fonts this way and has no fallback.
+pub fn unpacked_dib_section(cpu: &mut Cpu, info: &DibInfo, bits: u32) -> Option<u32> {
+    if info.compression != BI_RLE8 && info.compression != BI_RLE4 {
+        return None;
+    }
+    init(cpu);
+    // RLE codes run from the bottom row: a top-down one isn't a DIB.
+    if info.width <= 0 || info.height <= 0 {
+        set_error(cpu, ERROR_INVALID_PARAMETER);
+        return Some(0);
+    }
+    let plain = DibInfo {
+        compression: BI_RGB,
+        image_size: 0,
+        ..info.clone()
+    };
+    let (handle, to) = make_dib_section(cpu, &plain, 0, 0);
+    if handle != 0 {
+        let size = if info.image_size != 0 {
+            info.image_size.min(MAX_BITS as u32)
+        } else {
+            info.bits_size()
+        };
+        let mut data = vec![0u8; size as usize];
+        cpu.bus.guest_read_bytes(bits, &mut data);
+        cpu.bus.guest_write_bytes(to, &decode_rle(&data, info));
+    }
+    Some(handle)
+}
+
 /// Whether a DIB's color table is black and then white, which makes
 /// CreateDIBitmap's bitmap monochrome.
 fn black_and_white(info: &DibInfo) -> bool {
