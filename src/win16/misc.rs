@@ -579,7 +579,8 @@ const GLOBAL_LRU: u32 = 1;
 const GLOBAL_FREE: u32 = 2;
 
 /// GLOBALENTRY's size, which its dwSize must be, and its wFlags' bit
-/// for an owner that is a task's PDB.
+/// for a block a task owns. The low byte of wFlags is KERNEL's flags of
+/// the block.
 const GLOBALENTRY_SIZE: u32 = 36;
 const GF_PDB_OWNER: u16 = 0x0100;
 
@@ -625,7 +626,7 @@ fn fill_global_entry(cpu: &mut Cpu, at: u32, items: &[HeapItem], item: &HeapItem
         item.handle,
         item.lock,
         item.page_lock,
-        if item.pdb_owner { GF_PDB_OWNER } else { 0 },
+        item.flags as u16 | if item.pdb_owner { GF_PDB_OWNER } else { 0 },
         item.heap_present as u16,
         item.owner,
         item.kind,

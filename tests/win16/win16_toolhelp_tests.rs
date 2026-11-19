@@ -13,7 +13,6 @@ const GLOBAL_ALLOC: u16 = 15;
 const GLOBAL_LOCK: u16 = 18;
 const GLOBAL_SIZE: u16 = 20;
 const GET_CURRENT_TASK: u16 = 36;
-const GET_CURRENT_PDB: u16 = 37;
 const GET_EXE_PTR: u16 = 133;
 const GET_SELECTOR_BASE: u16 = 186;
 const LOCAL_INIT: u16 = 4;
@@ -43,13 +42,13 @@ const GT_FREE: u16 = 7;
 const GF_PDB_OWNER: u16 = 0x0100;
 
 /// Where the programs keep things in their data segment: a block's
-/// handle and selector, its size and base, the PDB, the module, DS,
+/// handle and selector, its size and base, the task, the module, DS,
 /// counters, a GLOBALINFO at 30h and a GLOBALENTRY at 40h.
 const HANDLE: u16 = 0x10;
 const SEL: u16 = 0x12;
 const SIZE: u16 = 0x14;
 const BASE: u16 = 0x18;
-const PDB: u16 = 0x1C;
+const TASK: u16 = 0x1C;
 const MODULE: u16 = 0x1E;
 const DS: u16 = 0x20;
 const FOUND: u16 = 0x22;
@@ -116,6 +115,12 @@ fn expect_ax(code: &mut Code, value: u16, fail: u8) {
 /// End with `fail` unless the word at `at` is `value`.
 fn expect(code: &mut Code, at: u16, value: u16, fail: u8) {
     code.emit(&[0x81, 0x3E, lo(at), hi(at), lo(value), hi(value)]);
+    or_fail(code, fail);
+}
+
+/// End with `fail` unless the byte at `at` is `value`.
+fn expect_byte(code: &mut Code, at: u16, value: u8, fail: u8) {
+    code.emit(&[0x80, 0x3E, lo(at), hi(at), value]);
     or_fail(code, fail);
 }
 
@@ -208,16 +213,17 @@ fn exit_ok(code: &mut Code) {
 
 /// GlobalEntryHandle fills GLOBALENTRY for a block a program allocated,
 /// given its selector or its handle: its address and size as the
-/// descriptor and GlobalSize have them, its handle and lock counts, the
-/// task's PDB as its owner (with GF_PDB_OWNER) and GT_UNKNOWN, as
-/// Windows 3.1 does for private data. An entry whose dwSize isn't 36
-/// gets FALSE.
+/// descriptor and GlobalSize have them, its handle and lock counts,
+/// GF_PDB_OWNER with the task (what GetCurrentTask gives) as its owner,
+/// and GT_UNKNOWN, as Windows 3.1 does for private data. SmartHeap, in
+/// Outpost 1.1, checks its blocks that way. An entry whose dwSize isn't
+/// 36 gets FALSE.
 #[test]
 fn global_entry_handle_describes_a_block() {
     let mut code = Code::new();
     alloc_block(&mut code, GMEM_MOVEABLE);
-    code.call("KERNEL", GET_CURRENT_PDB);
-    store_ax(&mut code, PDB);
+    code.call("KERNEL", GET_CURRENT_TASK);
+    store_ax(&mut code, TASK);
 
     entry_size(&mut code, 36);
     entry_handle(&mut code, SEL);
@@ -229,8 +235,8 @@ fn global_entry_handle_describes_a_block() {
     expect_same(&mut code, H_BLOCK, HANDLE, 6);
     expect(&mut code, WC_LOCK, 1, 7);
     expect(&mut code, WC_PAGE_LOCK, 0, 8);
-    expect(&mut code, W_FLAGS, GF_PDB_OWNER, 9);
-    expect_same(&mut code, H_OWNER, PDB, 10);
+    expect_byte(&mut code, W_FLAGS + 1, hi(GF_PDB_OWNER), 9);
+    expect_same(&mut code, H_OWNER, TASK, 10);
     expect(&mut code, W_TYPE, GT_UNKNOWN, 11);
     expect(&mut code, W_HEAP_PRESENT, 0, 12);
 
@@ -282,7 +288,7 @@ fn global_entry_module_describes_segments() {
     expect(&mut code, W_TYPE, GT_CODE, 3);
     expect(&mut code, W_DATA, 1, 4);
     expect_same(&mut code, H_OWNER, MODULE, 5);
-    expect(&mut code, W_FLAGS, 0, 6);
+    expect_byte(&mut code, W_FLAGS + 1, 0, 6);
 
     entry_module(&mut code, 2);
     expect_ax(&mut code, 1, 7);

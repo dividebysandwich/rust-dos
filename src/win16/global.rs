@@ -434,11 +434,14 @@ pub struct HeapItem {
     pub handle: u16,
     pub lock: u16,
     pub page_lock: u16,
-    /// Its owner: a task's PDB for the blocks a task allocated, else the
+    /// Its owner: the task for the blocks a task allocated, else the
     /// module that owns it.
     pub owner: u16,
-    /// Whether `owner` is a PDB (GF_PDB_OWNER).
+    /// Whether a task owns it (GF_PDB_OWNER: Windows 3.1's KERNEL has the
+    /// task's PDB as the owner, and TOOLHELP gives the task).
     pub pdb_owner: bool,
+    /// The arena's flags (GA_), the low byte of wFlags.
+    pub flags: u8,
     /// Whether the block has a local heap.
     pub heap_present: bool,
     /// Its wType and wData: the segment's number for a module's segment,
@@ -493,8 +496,9 @@ fn describe(cpu: &Cpu, a: &Arena) -> HeapItem {
         handle: a.handle,
         lock: a.lock as u16,
         page_lock: a.page_lock as u16,
-        owner: task.map_or(a.owner, |t| t.psp),
+        owner: a.owner,
         pdb_owner: task.is_some(),
+        flags: a.flags,
         heap_present: state.local_heaps.iter().any(|h| h.sel | 3 == sel | 3),
         kind,
         data,
