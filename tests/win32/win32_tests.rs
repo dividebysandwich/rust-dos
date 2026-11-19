@@ -1069,6 +1069,57 @@ fn a_wait_on_the_clock_is_skipped_exactly() {
     }
 }
 
+/// An idle loop that waits for a deadline as Tribal Rage's MFC loop does
+/// (#1339): it counts its passes in RAM, reads GetTickCount and compares
+/// how long it has waited with its deadline. The compare's flags reach
+/// the next pass's call, and change with the time. A count proof follows
+/// the time as it follows a count, so the passes it skips run up to the
+/// deadline rather than to the clock's next millisecond, and they come
+/// out the same as when they all run.
+#[test]
+fn an_idle_loop_that_waits_for_a_deadline_by_get_tick_count_is_skipped_to_it() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetTickCount"])];
+    // The count at 0.
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let mut spin = a.create_label();
+        a.call(l.import(0))?;
+        a.mov(ebx, eax)?;
+        a.set_label(&mut spin)?;
+        a.inc(dword_ptr(l.data))?;
+        a.call(l.import(0))?;
+        a.sub(eax, ebx)?;
+        a.cmp(eax, 200)?;
+        a.jb(spin)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu
+    };
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
+    let mut plain = start("deadline_plain", CoreMode::Normal, false);
+    let mut skipping = start("deadline_skipping", CoreMode::Dynamic, true);
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 60, 1_000_000, |_, _| {});
+    if let Err(e) = run {
+        panic!("{e}\n  {:?}", skipping.bus.observe.stats);
+    }
+    assert_eq!(plain.errorlevel, 0x2A, "the wait ended");
+    let stats = &skipping.bus.observe.stats;
+    assert_eq!(skipping.errorlevel, 0x2A, "{stats:?}");
+    // A proof that held only to the clock's next millisecond would skip
+    // less than a millisecond's instructions.
+    let ms = skipping.bus.clock.cycles_per_ms() as u64;
+    assert!(stats.proofs >= 1 && stats.skipped > 100 * ms, "{stats:?}");
+    assert!(stats.skipped / stats.proofs > 4 * ms, "{stats:?}");
+}
+
 /// Run `image` on a machine that skips passes (on the recompiler) and one
 /// that runs them all (on the interpreter), in lockstep: they must come
 /// out the same after every batch, and the program must end with 2Ah.
@@ -1261,9 +1312,10 @@ fn a_sleep_zero_loop_that_counts_runs_all_its_passes() {
     });
     let stats = idle_lockstep("sleep_zero_count", image);
     // The memory loop's flags at the head come from comparing its count,
-    // so no two passes are the same: its proofs fail and back off rather
-    // than start again every few calls.
-    assert!(failed_by(&stats, "count passes") > 0, "{stats:?}");
+    // so no two passes leave the same there: the passes skipped leave
+    // those of the last.
+    assert!(stats.skipped > 0, "{stats:?}");
+    assert_eq!(failed_by(&stats, "count passes"), 0, "{stats:?}");
     assert!(stats.starts < 1000, "{stats:?}");
 }
 

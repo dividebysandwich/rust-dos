@@ -490,10 +490,19 @@ fn one(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// it makes its first window). On Windows 98 the setup started from the
 /// Run dialog gets Explorer's window.
 fn get_active_window(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    match crate::win32::user32::input::active(cpu) {
-        0 => Some(crate::win32::user32::progman::server(cpu)),
+    use crate::win32::user32::progman;
+    let active = match crate::win32::user32::input::active(cpu) {
+        0 => progman::existing_server(cpu),
         active => Some(active),
-    }
+    };
+    let Some(active) = active else {
+        return Some(progman::server(cpu));
+    };
+    // Only a read, which an idle proof goes through: Metal Marines asks
+    // it in every pass of its PeekMessage loop.
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
+    Some(active)
 }
 
 /// GetTimerResolution: 1000, as Wine says.
@@ -630,6 +639,7 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Optio
                 // turn started over: an idle proof follows that.
                 if running.is_some() && running_thread(cpu) == running {
                     crate::idle::pure_call(cpu, None);
+                    crate::idle::reads_arguments(cpu);
                     crate::idle::turn_started(cpu);
                 }
                 return None;
@@ -638,6 +648,7 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Optio
                 // message found was converted, and the 32-bit function
                 // that found it already ended the proof.)
                 crate::idle::pure_call(cpu, None);
+                crate::idle::reads_arguments(cpu);
             }
         }
         P_PAINT => {
@@ -705,7 +716,12 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Optio
             let kind = d(1) as u8;
             return Some(proc16_of(cpu, value, kind));
         }
-        P_INSTANCE => return Some(instance16(cpu, value) as u32),
+        P_INSTANCE => {
+            // A look-up of the module whose image of resources it is.
+            crate::idle::pure_call(cpu, None);
+            crate::idle::reads_arguments(cpu);
+            return Some(instance16(cpu, value) as u32);
+        }
         P_ICON => return Some(icon16(value) as u32),
         P_WORDS => {
             // 32-bit integers at d(1) as 16-bit ones at d(2), d(3) of them.
@@ -1011,6 +1027,11 @@ fn window_instance(cpu: &Cpu, hwnd: u32) -> u16 {
 }
 
 fn get_window_word(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // It goes on to a USER32 function that says for itself whether an
+    // idle proof goes through it; here only the 32-bit stack and the
+    // frame `post` takes off again change.
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
     let (hwnd, index) = (args[0], args[1]);
     match index {
         GWL_HINSTANCE => go_post(cpu, "GetWindowLongA", &[hwnd, index], vec![P_INSTANCE]),
@@ -1593,6 +1614,7 @@ fn peek_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // Only the 32-bit stack and the frame `post` takes off again changed:
     // an idle proof follows PeekMessageA from here (`idle::pure_call`).
     crate::idle::pure_call(cpu, None);
+    crate::idle::reads_arguments(cpu);
     None
 }
 

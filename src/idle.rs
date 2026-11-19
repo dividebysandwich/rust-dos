@@ -97,14 +97,41 @@ const STACK_REACH: u32 = 64;
 const REP_SPAN: u64 = 1 << 20;
 /// Passes skipped at most over counters at once.
 const COUNTED_PASSES: u64 = 1 << 20;
-/// Instructions a proof over counts (`Phase::Count`) must skip for each
-/// instruction the proof ran, or the head backs off as after a failure.
-/// Such a proof steps the interpreter and records every instruction: in
-/// Biosys's idle loop that took the host about 250 ns an instruction,
-/// where translated code takes one or two. A loop that holds only until
-/// the clock's next millisecond and takes a tenth of it to prove costs
-/// more than it saves.
-const PAYOFF: u64 = 256;
+/// Instructions the proofs over counts (`Phase::Count`) at a head must
+/// save for each instruction the proof after each runs, or the head backs
+/// off as after a failure. Such a proof steps the interpreter and records
+/// every instruction: in Metal Marines' title loop, with paging on, that
+/// takes the host about 350 ns an instruction, where translated code
+/// takes one or two. A loop that holds only until the clock's next
+/// millisecond and takes a tenth of it to prove costs more than it saves.
+/// The proof after one that found the loop's shape runs one pass
+/// (`Shape`), the first that finds it several. The head's recent proofs
+/// are taken together (`Ledger`): one that ends late in a batch skips
+/// less than the one before it.
+const PAYOFF: u64 = 200;
+/// The most a head whose proofs cost a little more than they save backs
+/// off: to one chance in 64, and 16 times as far each time what they
+/// cost doubles against what they save, up to one in 64K. Its proofs
+/// hold, and the loop may save more later: Metal Marines' title loop has
+/// spells where a timer event comes every half millisecond, and skips of
+/// less than one don't pay, and spells where the skips run to the next
+/// millisecond, which do.
+const COSTLY_BACKOFF: u32 = 6;
+/// How much less a proof counts in a head's ledger (`Ledger`) with each
+/// proof after it: by a 64th. A ledger then covers about the last 64
+/// proofs, so that one failure, which may run many passes, doesn't
+/// outweigh the dozens of proofs of one pass each that come with it in
+/// Metal Marines' title loop.
+const LEDGER_DECAY: u64 = 64;
+/// What a call of the built-in Windows that the passes skipped would have
+/// made costs the host, in instructions of translated code as `PAYOFF`
+/// counts them (one or two nanoseconds each): its trap, the Rust function
+/// behind it and the way back. A pass of Metal Marines' title loop, about
+/// 600 instructions, makes seven Win16 calls, five of which go on to a
+/// Win32 function and back: about 17 traps. On main the host took 19 ns
+/// an instruction there, two thirds of it in the calls, about 450 ns a
+/// call.
+const SERVICE_COST: u64 = 256;
 
 /// An instruction's place: its CS selector and EIP, and the mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,6 +210,47 @@ enum Phase {
     Time(Box<time::TimeProof>),
 }
 
+/// What a proof over counts found at a head: the cells holding counts
+/// there and the blocks its pass wrote. The pass `Phase::Count` records
+/// from a visit of the head, with copies of the blocks, proves the loop by
+/// itself: it compares all the CPU's state and every block written at the
+/// next visit, and the passes after it run as the model of it makes them.
+/// The passes before it that `Phase::Learn` and `Phase::Verify` run only
+/// find the counts and the blocks, and a loop whose skips end at every
+/// millisecond, as one that reads the clock does in deterministic runs,
+/// would run them again each time. With its shape, the next proof at the
+/// head records the first pass from where it starts. Where the loop wrote
+/// another block or counted elsewhere, that proof fails, and the head's
+/// next proof finds them again.
+struct Shape {
+    head: Head,
+    seeds: Vec<count::Cell>,
+    blocks: Vec<usize>,
+}
+
+/// What the proofs at a head saved, and what they cost (`PAYOFF`): the
+/// instructions each failed proof ran, and for each that skipped, what
+/// the proof after it is expected to run. Each proof counts less by
+/// `LEDGER_DECAY` with every proof after it.
+struct Ledger {
+    head: Head,
+    saved: u64,
+    cost: u64,
+}
+
+/// A head whose pass used the time the clock read in a way a count proof
+/// doesn't follow, as one of Tribal Rage's does by loading it into the
+/// FPU with FILD. Its next `left` proofs that skip hold what the clock
+/// read to its next millisecond (`tick_count`), as for any other loop;
+/// then they follow the clock again. `run` doubles with each such
+/// failure in a row, up to 64, and a proof that follows the clock and
+/// skips ends it.
+struct PlainClock {
+    head: Head,
+    left: u32,
+    run: u32,
+}
+
 /// Bytes of RAM an instruction reached: `len` from `start`.
 #[derive(Clone, Copy)]
 struct Access {
@@ -213,9 +281,16 @@ pub struct IdleStats {
     pub backed_off: u64,
     pub starts: u64,
     pub cut: u64,
-    /// Proofs whose skip fell short of `PAYOFF` times the instructions
-    /// they ran, which back off as failures do.
+    /// Proofs after which the head's proofs together saved less than
+    /// `PAYOFF` times the instructions they ran, which back off as
+    /// failures do.
     pub costly: u64,
+    /// The instructions the proofs that skipped ran, from the visit of
+    /// the head that started them to the one that proved the loop.
+    pub proving: u64,
+    /// Of the proofs that skipped, those that started from what the last
+    /// proof at their head found (`Shape`).
+    pub shaped: u64,
     /// The failures by why, in the order the reasons first came up (an
     /// empty one is a free slot).
     pub failed_by: [(&'static str, u64); 16],
@@ -274,6 +349,27 @@ pub struct Observe {
     /// The last `KNOWN_HEADS` heads whose passes were skipped, oldest
     /// first.
     known: Vec<Head>,
+    /// What the last proof over counts at each of the last `KNOWN_HEADS`
+    /// such heads found, oldest first: a proof there starts recording a
+    /// pass at once (`Shape`).
+    shapes: Vec<Shape>,
+    /// The ledgers of the last `KNOWN_HEADS` heads proven over counts or
+    /// failed, oldest first.
+    ledgers: Vec<Ledger>,
+    /// The instruction count at the last instruction looked at while
+    /// watching (`visit`).
+    seen: u64,
+    /// The shape the proof over counts running found, kept once it skips.
+    found: Option<Shape>,
+    /// The proof running started from the shape of its head.
+    shaped: bool,
+    /// Heads whose passes used the time the clock read in a way a count
+    /// proof doesn't follow, the most recent `KNOWN_HEADS` (`PlainClock`).
+    plain_clock: Vec<PlainClock>,
+    /// The instructions `count::record` decoded, by place
+    /// (`count::Decoded`), and the buffers it fills for each.
+    decoded: Vec<Option<std::sync::Arc<count::Decoded>>>,
+    scratch: (Vec<Access>, Vec<Access>),
     /// The port the instruction about to run may read: an IN AL of a port
     /// `Bus::idle_port` knows.
     port_ok: Option<u16>,
@@ -328,6 +424,19 @@ pub struct Observe {
     /// The function running set EAX to the value it returns
     /// (`returned`).
     service_returned: bool,
+    /// The function running read the built-in Windows' clock as the value
+    /// it returns (`tick_count`): the milliseconds, the instruction count
+    /// it read them at, and when they move on.
+    service_clock: Option<(u32, u64, u64)>,
+    /// The function running was Win16Return, which loaded the 16-bit
+    /// context with DX:AX the value in EAX if true (`resumed16`).
+    resumed16: Option<bool>,
+    /// The last service's read of the clock is one the pass `Phase::Count`
+    /// records follows (`count::after_service`), which `clock_read`
+    /// doesn't hold the proof to.
+    clock_modelled: bool,
+    /// Built-in functions a service calls from Rust that run (`nested`).
+    nesting: u8,
     /// Since the base: the first instruction count at which what the
     /// services read would read otherwise, and when the last service
     /// started the thread's turn over.
@@ -369,6 +478,14 @@ impl Default for Observe {
             proven_time: false,
             started: 0,
             known: Vec::new(),
+            shapes: Vec::new(),
+            ledgers: Vec::new(),
+            seen: 0,
+            found: None,
+            shaped: false,
+            plain_clock: Vec::new(),
+            decoded: Vec::new(),
+            scratch: (Vec::new(), Vec::new()),
             port_ok: None,
             ports: Vec::new(),
             first_read: None,
@@ -391,6 +508,10 @@ impl Default for Observe {
             service_args: None,
             service_reads: Vec::new(),
             service_returned: false,
+            service_clock: None,
+            resumed16: None,
+            clock_modelled: false,
+            nesting: 0,
             holds_until: None,
             turn_at: None,
             stats: IdleStats::default(),
@@ -626,7 +747,10 @@ impl Observe {
         self.latch_at = None;
         self.pit_read = false;
         self.clock_read = None;
+        self.clock_modelled = false;
         self.writes.clear();
+        self.found = None;
+        self.shaped = false;
     }
 
     fn forget_ports(&mut self) {
@@ -698,6 +822,46 @@ impl Observe {
 
     fn fail(&mut self, why: &'static str) {
         let head = self.head();
+        if self.shaped {
+            self.shapes.retain(|s| Some(s.head) != head);
+        }
+        // What the failed proof ran, from its start to the instruction it
+        // failed at (`seen`), counts against the proofs that skip there: a
+        // loop that fails every other proof pays for two. Only heads
+        // proven over counts keep a ledger.
+        let counting = matches!(self.phase, Phase::Count { .. });
+        if let Some(head) = head
+            && (counting || self.ledgers.iter().any(|l| l.head == head))
+        {
+            let ran = self.seen.saturating_sub(self.started);
+            self.charge(head, 0, ran);
+        }
+        // A pass that used the time the clock read in a way the model
+        // doesn't follow, as an instruction or a service the model doesn't
+        // follow reading it ("counter", "count service"): the next proofs
+        // at the head hold that time to the clock's next millisecond
+        // (`PlainClock`), and the next comes at the head's next chance.
+        // A failure for another reason backs off as any other does.
+        let clocked = matches!(why, "counter" | "count service")
+            && matches!(&self.phase, Phase::Count { pass, .. } if pass.reads_clock());
+        if let (true, Some(head)) = (clocked, head) {
+            match self.plain_clock.iter_mut().find(|p| p.head == head) {
+                Some(p) => {
+                    p.run = (p.run * 2).min(64);
+                    p.left = p.run;
+                }
+                None => {
+                    if self.plain_clock.len() == KNOWN_HEADS {
+                        self.plain_clock.remove(0);
+                    }
+                    self.plain_clock.push(PlainClock {
+                        head,
+                        left: 1,
+                        run: 1,
+                    });
+                }
+            }
+        }
         self.tally(head, |h| {
             h.failures += 1;
             h.failure = why;
@@ -713,15 +877,16 @@ impl Observe {
         {
             *slot = (why, slot.1 + 1);
         }
-        if let Some(head) = head {
-            self.back_off(head);
+        if let (false, Some(head)) = (clocked, head) {
+            self.back_off(head, 16);
         }
     }
 
-    /// Arm `head` less often: twice as seldom as the last time in a row.
-    /// (A loop that changes something every pass, as DOS 7's keyboard
-    /// poll counts down, is looked at about once in 64K arms.)
-    fn back_off(&mut self, head: Head) {
+    /// Arm `head` less often: twice as seldom as the last time in a row,
+    /// up to once in `1 << most` arms. (A loop that changes something
+    /// every pass, as DOS 7's keyboard poll counts down, is looked at
+    /// about once in 64K arms.)
+    fn back_off(&mut self, head: Head, most: u32) {
         let at = match self.backoffs.iter().position(|b| b.head == head) {
             Some(at) => at,
             None => {
@@ -737,7 +902,7 @@ impl Observe {
             }
         };
         let b = &mut self.backoffs[at];
-        b.in_row = (b.in_row + 1).min(16);
+        b.in_row = (b.in_row + 1).min(most);
         b.left = 1 << b.in_row;
     }
 
@@ -760,6 +925,39 @@ impl Observe {
             }
             self.known.push(head);
         }
+    }
+
+    /// Adds `saved` and `cost` to `head`'s ledger, after the decay, and
+    /// returns it.
+    fn charge(&mut self, head: Head, saved: u64, cost: u64) -> (u64, u64) {
+        let at = match self.ledgers.iter().position(|l| l.head == head) {
+            Some(at) => at,
+            None => {
+                if self.ledgers.len() == KNOWN_HEADS {
+                    self.ledgers.remove(0);
+                }
+                self.ledgers.push(Ledger {
+                    head,
+                    saved: 0,
+                    cost: 0,
+                });
+                self.ledgers.len() - 1
+            }
+        };
+        let l = &mut self.ledgers[at];
+        l.saved = l.saved - l.saved / LEDGER_DECAY + saved;
+        l.cost = l.cost - l.cost / LEDGER_DECAY + cost;
+        (l.saved, l.cost)
+    }
+
+    /// Keep what a proof over counts found at its head, for the next proof
+    /// there.
+    fn keep_shape(&mut self, shape: Shape) {
+        self.shapes.retain(|s| s.head != shape.head);
+        if self.shapes.len() == KNOWN_HEADS {
+            self.shapes.remove(0);
+        }
+        self.shapes.push(shape);
     }
 
     /// A proof saw the PIT's count latched at `head`: the loop reads the
@@ -831,6 +1029,8 @@ pub fn before_service(cpu: &mut Cpu) {
         o.service_args = None;
         o.service_reads.clear();
         o.service_returned = false;
+        o.service_clock = None;
+        o.resumed16 = None;
     }
 }
 
@@ -880,6 +1080,18 @@ pub fn pure_call(cpu: &mut Cpu, until: Option<u64>) {
     }
 }
 
+/// The service running that called `pure_call` read the general
+/// registers too, which the services `pure_call` describes don't: a
+/// Win16 function of the register convention, as KERNEL's Catch, which
+/// writes them into the program's buffer. A proof whose passes differ in
+/// a count kept in one of them can't follow it (`count`); one whose
+/// passes leave everything as it was can.
+pub fn reads_registers(cpu: &mut Cpu) {
+    if cpu.bus.observe.on {
+        count::registers_read(cpu);
+    }
+}
+
 /// The service running changed more after all: what it called it
 /// `pure_call` for did, but not what came after.
 pub fn not_pure(cpu: &mut Cpu) {
@@ -903,6 +1115,17 @@ pub fn arguments_at(cpu: &mut Cpu, esp: u32, count: u32) {
     if cpu.bus.observe.on {
         let lin = cpu.seg_cache(crate::cpu::Seg::SS).base.wrapping_add(esp);
         cpu.bus.observe.service_args = Some((lin, 4 + 4 * count));
+    }
+}
+
+/// The Win16 function running takes `bytes` bytes of arguments above its
+/// far return address on the 16-bit stack (`builtin::call` read them).
+#[inline(always)]
+pub fn arguments16(cpu: &mut Cpu, bytes: u32) {
+    if cpu.bus.observe.on {
+        let ss = cpu.seg_cache(crate::cpu::Seg::SS).base;
+        let lin = ss.wrapping_add(cpu.sp() as u32);
+        cpu.bus.observe.service_args = Some((lin, 4 + bytes));
     }
 }
 
@@ -937,7 +1160,9 @@ pub fn nested<T>(cpu: &mut Cpu, f: impl FnOnce(&mut Cpu) -> T) -> T {
     let arguments = cpu.bus.observe.arguments;
     cpu.bus.observe.pure = false;
     cpu.bus.observe.arguments = false;
+    cpu.bus.observe.nesting += 1;
     let value = f(cpu);
+    cpu.bus.observe.nesting -= 1;
     cpu.bus.observe.pure &= claimed;
     cpu.bus.observe.arguments &= arguments;
     value
@@ -954,15 +1179,41 @@ pub fn turn_started(cpu: &mut Cpu) {
 
 /// The milliseconds since the machine started, by its clock, as
 /// GetTickCount reads them. The service changes nothing, and what it read
-/// stays the same until the next millisecond.
+/// stays the same until the next millisecond. A pass `Phase::Count`
+/// records follows the value where the service returns it (as
+/// GetTickCount and timeGetTime do, but not a function that calls them
+/// from Rust), and the passes after it read it anew; elsewhere they hold
+/// up to the next millisecond.
 pub fn tick_count(cpu: &mut Cpu) -> u32 {
     let micros = cpu.bus.clock.now_micros();
+    let ms = (micros / 1000) as u32;
     if cpu.bus.observe.on {
         let next = cpu.bus.clock.icount_at_micros((micros / 1000 + 1) * 1000);
-        pure_call(cpu, Some(next));
+        let o = &mut cpu.bus.observe;
+        let follows = match &o.phase {
+            Phase::Count { head, .. } => {
+                !o.plain_clock.iter().any(|p| p.head == *head && p.left > 0)
+            }
+            _ => false,
+        };
+        if follows && o.nesting == 0 {
+            o.service_clock = Some((ms, cpu.bus.clock.icount, next));
+            pure_call(cpu, None);
+        } else {
+            pure_call(cpu, Some(next));
+        }
         reads_arguments(cpu);
     }
-    (micros / 1000) as u32
+    ms
+}
+
+/// Win16Return loaded the 16-bit context that called 32-bit code, with
+/// DX:AX the value EAX holds if `as_is`, and else a value made from it
+/// (a handle, a BOOL).
+pub fn resumed16(cpu: &mut Cpu, as_is: bool) {
+    if cpu.bus.observe.on {
+        cpu.bus.observe.resumed16 = Some(as_is);
+    }
 }
 
 fn head_of(cpu: &Cpu) -> Head {
@@ -992,7 +1243,7 @@ pub fn clock_read(cpu: &mut Cpu, cs: u16, eip: u32) {
     let head = Head { cs, eip, pe: cpu.pe() };
     let run = cpu.bus.clock.run_count();
     let o = &mut cpu.bus.observe;
-    if o.on {
+    if o.on && !std::mem::take(&mut o.clock_modelled) {
         let ms = cpu.bus.clock.now_micros() / 1000;
         o.clock_read.get_or_insert(ms);
     }
@@ -1053,7 +1304,21 @@ pub fn at_event(cpu: &mut Cpu) {
                 t.wait = true;
             }
         } else {
+            // A chance at a head that backs off, let pass, keeps it for
+            // the next event: the loop goes on, and the head's next
+            // chance comes after the events its back-off lets pass,
+            // rather than when an event happens to find the CPU there.
+            // Meanwhile the CPU may be in another loop, which is armed as
+            // it would be with no head held: a costly head's back-off can
+            // run to 64K events, and the program may have left its loop.
+            let held = o.enabled && o.backoffs.iter().any(|b| b.head == head && b.left > 0);
             o.arm(head, now);
+            if held {
+                o.proven = Some(head);
+                if here.0 != head && (near || o.known.contains(&here.0)) {
+                    o.arm(here.0, now);
+                }
+            }
         }
     } else if near || o.known.contains(&here.0) {
         o.arm(here.0, now);
@@ -1144,6 +1409,7 @@ pub fn before_instruction(cpu: &mut Cpu) {
 fn visit(cpu: &mut Cpu, now: u64) {
     let here = head_of(cpu);
     let o = &mut cpu.bus.observe;
+    o.seen = now;
     if let Some(why) = o.failed.get() {
         return o.fail(why);
     }
@@ -1216,7 +1482,30 @@ fn visit(cpu: &mut Cpu, now: u64) {
             o.failed.set(None);
             o.chunks.clear();
             o.forget_ports();
-            o.phase = Phase::Learn { head, visits: vec![visit], until: now + PROOF_LIMIT };
+            let until = now + PROOF_LIMIT;
+            let Some(shape) = o.shapes.iter().find(|s| s.head == head) else {
+                o.phase = Phase::Learn {
+                    head,
+                    visits: vec![visit],
+                    until,
+                };
+                return;
+            };
+            // The loop's shape is known: its pass is recorded from here.
+            let pass = count::Pass::new(shape.seeds.clone());
+            let blocks = shape.blocks.clone();
+            o.shaped = true;
+            o.restart_ports();
+            let copies = copy_blocks(cpu.bus.ram(), blocks);
+            cpu.bus.observe.phase = Phase::Count {
+                head,
+                base: Box::new(visit),
+                copies,
+                loose: pass.registers(),
+                pass: Box::new(pass),
+                until,
+                rounds: 0,
+            };
         }
         Step::Remember => {
             if let Phase::Learn { visits, .. } = &mut o.phase {
@@ -1363,10 +1652,10 @@ fn finish(
         limit = until;
     }
     // The passes the counters let run the same. Where there was room for
-    // one and none does, as when the flags the head compares come from
-    // comparing a counter, the loop is no closer to a skip at its next
-    // proof than at this one: that is a failure, which backs off, rather
-    // than a proof started again every few passes.
+    // one and none does, as when a compare of a counter that a jump reads
+    // comes out otherwise in the next pass, the loop is no closer to a
+    // skip at its next proof than at this one: that is a failure, which
+    // backs off, rather than a proof started again every few passes.
     let mut counted_run = None;
     if let Some(pass) = &counted
         && period > 0
@@ -1374,40 +1663,75 @@ fn finish(
     {
         let room = limit.min(cpu.bus.clock.deadline) - visit.icount;
         let most = (room / period).min(COUNTED_PASSES);
-        let (same, values) = count::counted_passes(cpu, pass, most);
+        let (same, values, flags) = count::counted_passes(cpu, pass, most, visit.icount, period);
         if most > 0 && same == 0 {
             return cpu.bus.observe.fail("count passes");
         }
-        counted_run = Some((same, values));
+        counted_run = Some((same, values, flags));
     }
     let o = &mut cpu.bus.observe;
     let head = o.head();
+    let found = o.found.take();
+    let shaped = o.shaped;
     o.stop();
     if period > 0 && limit > visit.icount {
         let mut passes = u64::MAX;
         let counting = counted_run.is_some();
-        if let Some((same, values)) = counted_run {
+        if let Some((same, values, (mask, bits))) = counted_run {
             for (cell, value) in values {
                 count::set_cell(cpu, cell, value);
             }
+            cpu.set_flag_bits(mask, bits);
             passes = same;
         }
         let skipped = skip(cpu, period, executed, limit, passes);
-        let cost = visit.icount.saturating_sub(cpu.bus.observe.started);
+        let ran = visit.icount.saturating_sub(cpu.bus.observe.started);
+        let saved = skipped
+            + (skipped / period)
+                .saturating_mul(calls)
+                .saturating_mul(SERVICE_COST);
         let o = &mut cpu.bus.observe;
-        if counting && skipped < cost.saturating_mul(PAYOFF) {
-            // The skip is real, but proving it again at the next chance
-            // would cost the host more than running the loop: the head
-            // backs off further each time in a row.
+        // The head's recent proofs with this one (`Ledger`): what they
+        // saved, against what the next proof at the head will run, one
+        // pass where it starts from the shape this one found (kept below
+        // when the proof skipped), else as many as this one.
+        let next = if found.is_some() && skipped > 0 {
+            period
+        } else {
+            ran
+        };
+        let ledger = match head {
+            Some(head) if counting => o.charge(head, saved, next),
+            _ => (saved, next),
+        };
+        if counting && ledger.0 < ledger.1.saturating_mul(PAYOFF) {
+            // The skips are real, but proving them again would cost the
+            // host more than running the loop: the head backs off further
+            // each time in a row, the further the more it falls short.
             o.stats.costly += 1;
             if let Some(head) = head {
-                o.back_off(head);
+                let short = ledger.1.saturating_mul(PAYOFF) / ledger.0.max(1);
+                let most = COSTLY_BACKOFF + 4 * short.max(1).ilog2();
+                o.back_off(head, most.min(16));
             }
         } else {
             o.succeed(head);
         }
         if skipped > 0 {
+            cpu.bus.observe.stats.proving += ran;
+            cpu.bus.observe.stats.shaped += shaped as u64;
+            if let Some(shape) = found {
+                cpu.bus.observe.keep_shape(shape);
+            }
             cpu.bus.observe.proved(head);
+            let plain = &mut cpu.bus.observe.plain_clock;
+            if let Some(at) = plain.iter().position(|p| Some(p.head) == head) {
+                if plain[at].left == 0 {
+                    plain.remove(at);
+                } else {
+                    plain[at].left -= 1;
+                }
+            }
             // The calls the passes skipped would have made, and the turn
             // the last of them would have started.
             let win32 = &mut cpu.bus.win32;
@@ -1467,17 +1791,27 @@ fn physical_at(cpu: &Cpu, lin: u32, write: bool) -> Option<u32> {
         .or_else(|| cpu.peek_translate(lin))
 }
 
-/// The RAM the `len` bytes at linear address `lin` are in, a range for
-/// each run of them that follows on in RAM (`physical_at`). None where a
-/// page isn't there, whose access faults.
-fn physical(cpu: &Cpu, lin: u32, len: u64, write: bool) -> Option<Vec<Access>> {
-    let pieces: Option<Vec<Access>> = pages(cpu, lin, len, write).collect();
-    Some(merged(pieces?))
+/// The RAM the `len` bytes at linear address `lin` are in, added to `out`:
+/// a range for each run of them that follows on in RAM (`physical_at`).
+/// False where a page isn't there, whose access faults.
+fn physical_into(cpu: &Cpu, lin: u32, len: u64, write: bool, out: &mut Vec<Access>) -> bool {
+    let from = out.len();
+    for piece in pages(cpu, lin, len, write) {
+        let Some(piece) = piece else {
+            return false;
+        };
+        let joins = out.len() > from;
+        match out.last_mut() {
+            Some(last) if joins && last.start + last.len == piece.start => last.len += piece.len,
+            _ => out.push(piece),
+        }
+    }
+    true
 }
 
-/// As `physical`, without the pages that aren't there: the RAM a service
-/// or an interrupt may reach near the stack's top or in the IDT, which it
-/// can't reach in a missing page without a fault.
+/// As `physical_into`, without the pages that aren't there: the RAM a
+/// service or an interrupt may reach near the stack's top or in the IDT,
+/// which it can't reach in a missing page without a fault.
 fn present(cpu: &Cpu, lin: u32, len: u64, write: bool) -> Vec<Access> {
     merged(pages(cpu, lin, len, write).flatten())
 }
@@ -1507,13 +1841,13 @@ fn segment_runs(base: u32, off: u32, len: u32) -> [(u32, u64); 2] {
 }
 
 /// The page directory and page table entries that find the pages of the
-/// `len` bytes at linear address `lin`, with paging on (none with it off).
-/// The CPU reads them for the passes after the one recorded too, where
-/// its TLB doesn't have the page: a counter in one would move the page.
-fn entries(cpu: &Cpu, lin: u32, len: u64) -> Vec<Access> {
-    let mut found = Vec::new();
+/// `len` bytes at linear address `lin`, with paging on (none with it off),
+/// added to `found`. The CPU reads them for the passes after the one
+/// recorded too, where its TLB doesn't have the page: a counter in one
+/// would move the page.
+fn entries_into(cpu: &Cpu, lin: u32, len: u64, found: &mut Vec<Access>) {
     if cpu.cr0 & crate::cpu::CR0_PG == 0 {
-        return found;
+        return;
     }
     let mut done = 0;
     while done < len {
@@ -1531,7 +1865,6 @@ fn entries(cpu: &Cpu, lin: u32, len: u64) -> Vec<Access> {
             });
         }
     }
-    found
 }
 
 /// The RAM of each page the `len` bytes at linear address `lin` are in,

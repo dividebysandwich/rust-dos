@@ -797,8 +797,16 @@ fn fatal_app_exit(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// Catch(buffer), a register function: the caller's place, where Throw
 /// goes back to, in the buffer's nine words; 0 returned.
 fn catch(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    // It changes only the buffer, in RAM, and the registers, from the
+    // registers and its stack: an idle proof goes through it. MFC's
+    // message loop calls it in every pass (Metal Marines).
+    crate::idle::pure_call(cpu, None);
+    crate::idle::reads_registers(cpu);
+    crate::idle::reads_arguments(cpu);
     let mut ctx = Context::of(cpu);
     let (ip, cs, buffer) = far_call_frame(cpu, &ctx);
+    let frame = super::selector_base(cpu, ctx.seg[Seg::SS as usize]).map_or(0, |(b, _, _)| b);
+    crate::idle::reads_also(cpu, frame.wrapping_add(ctx.gpr[ESP] & 0xFFFF), 8);
     let sp = (ctx.gpr[ESP] as u16).wrapping_add(8);
     let at = super::linear(cpu, buffer);
     let words = [

@@ -59,18 +59,23 @@ pub fn is_server(w: &Window) -> bool {
     w.pid == 0 && w.proc == proc_address()
 }
 
+/// The server's window if `server` made it already.
+pub fn existing_server(cpu: &mut Cpu) -> Option<u32> {
+    let state = user(cpu);
+    state
+        .top_levels()
+        .into_iter()
+        .find(|&h| state.window(h).is_some_and(is_server))
+}
+
 /// Program Manager's window, made if it isn't there yet: its handle, or
 /// 0 when there is no room for it.
 pub fn server(cpu: &mut Cpu) -> u32 {
     super::init(cpu);
-    let state = user(cpu);
-    let found = state
-        .top_levels()
-        .into_iter()
-        .find(|&h| state.window(h).is_some_and(is_server));
-    if let Some(hwnd) = found {
+    if let Some(hwnd) = existing_server(cpu) {
         return hwnd;
     }
+    let state = user(cpu);
     let window = Window {
         text: TITLE.to_vec(),
         ..Window::default()

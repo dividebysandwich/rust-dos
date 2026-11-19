@@ -281,7 +281,12 @@ pub fn win16_return(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         None => Some(value),
     };
     if plain && cpu.bus.observe.on {
+        // The frame is the emulator's; of the machine, `post_auto` reads
+        // only the copies it names (`idle::reads_also`).
         crate::idle::pure_call(cpu, None);
+        crate::idle::reads_arguments(cpu);
+        let as_is = post == POST_PLAIN || ret.is_some_and(super::builtin::returns_as_is);
+        crate::idle::resumed16(cpu, as_is);
     }
     if let Some(value) = result {
         resume16(cpu, ctx, value);

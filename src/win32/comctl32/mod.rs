@@ -538,9 +538,11 @@ pub fn client(cpu: &mut Cpu, hwnd: u32) -> crate::win32::gdi32::Rect {
     crate::win32::gdi32::Rect::new(0, 0, c.width(), c.height())
 }
 
-/// GetParent(hwnd): a child's parent, a popup's owner.
+/// GetParent(hwnd): a child's parent, a popup's owner. Read here, not
+/// through GetParent's handler, which tells an idle proof the service
+/// running changed nothing.
 pub fn parent(cpu: &mut Cpu, hwnd: u32) -> u32 {
-    user32::window::get_parent(cpu, &[hwnd]).unwrap_or(0)
+    user32::window::parent_of(user32::user(cpu), hwnd)
 }
 
 /// InvalidateRect(hwnd, NULL, erase).
