@@ -103,11 +103,11 @@ const COUNTED_PASSES: u64 = 1 << 20;
 /// every instruction: in Metal Marines' title loop, with paging on, that
 /// takes the host about 350 ns an instruction, where translated code
 /// takes one or two. A loop that holds only until the clock's next
-/// millisecond and takes a tenth of it to prove costs more than it
-/// saves. The proof after one that found the
-/// loop's shape runs one pass (`Shape`), the first that finds it several.
-/// The head's recent proofs are taken together: one that ends late in a
-/// batch skips less than the one before it.
+/// millisecond and takes a tenth of it to prove costs more than it saves.
+/// The proof after one that found the loop's shape runs one pass
+/// (`Shape`), the first that finds it several. The head's recent proofs
+/// are taken together (`Ledger`): one that ends late in a batch skips
+/// less than the one before it.
 const PAYOFF: u64 = 200;
 /// The most a head whose proofs cost a little more than they save backs
 /// off: to one chance in 64, and 16 times as far each time what they
@@ -827,8 +827,11 @@ impl Observe {
         // What the failed proof ran counts against the proofs that skip
         // there: a loop that fails every other proof pays for two. A pass
         // that fails before it comes back to the head ran what it
-        // recorded.
-        if let Some(head) = head {
+        // recorded. Only heads proven over counts keep a ledger.
+        let counting = matches!(self.phase, Phase::Count { .. });
+        if let Some(head) = head
+            && (counting || self.ledgers.iter().any(|l| l.head == head))
+        {
             let recorded = match &self.phase {
                 Phase::Count { pass, .. } => pass.recorded(),
                 _ => 0,
@@ -924,8 +927,6 @@ impl Observe {
         }
     }
 
-    /// Keep what a proof over counts found at its head, for the next proof
-    /// there.
     /// Adds `saved` and `cost` to `head`'s ledger, after the decay, and
     /// returns it.
     fn charge(&mut self, head: Head, saved: u64, cost: u64) -> (u64, u64) {
@@ -949,6 +950,8 @@ impl Observe {
         (l.saved, l.cost)
     }
 
+    /// Keep what a proof over counts found at its head, for the next proof
+    /// there.
     fn keep_shape(&mut self, shape: Shape) {
         self.shapes.retain(|s| s.head != shape.head);
         if self.shapes.len() == KNOWN_HEADS {
@@ -1684,10 +1687,10 @@ fn finish(
                 .saturating_mul(calls)
                 .saturating_mul(SERVICE_COST);
         let o = &mut cpu.bus.observe;
-        // What the head's recent proofs saved, and what the proof after
-        // each runs, this one with them.
-        // What the next proof at the head will run: one pass where it
-        // starts from the shape this one found, else as many as this one.
+        // The head's recent proofs with this one (`Ledger`): what they
+        // saved, against what the next proof at the head will run, one
+        // pass where it starts from the shape this one found, else as many
+        // as this one.
         let next = if found.is_some() { period } else { ran };
         let ledger = match head {
             Some(head) if counting => o.charge(head, saved, next),
