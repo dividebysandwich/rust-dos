@@ -1861,7 +1861,21 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         //   ES = segment returned by AH=48h
         0x49 => {
             let segment_to_free = cpu.es();
-            match crate::mcb::free(&mut cpu.bus, segment_to_free) {
+            // A program started from the shell has its environment in
+            // DOS's environment area, which has no MCB. On DOS it is a
+            // block of the program's, which it may free, as a TSR does
+            // before it stays resident: the free succeeds, and the area
+            // stays for the next program.
+            let psp = cpu.get_physical_addr(cpu.current_psp, 0x2C);
+            let shell_environment = segment_to_free
+                == crate::dos_data::layout(&cpu.bus).environment
+                && cpu.bus.read_16(psp) == segment_to_free;
+            let freed = if shell_environment {
+                Ok(())
+            } else {
+                crate::mcb::free(&mut cpu.bus, segment_to_free)
+            };
+            match freed {
                 Ok(()) => {
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                     cpu.set_ax(0);
