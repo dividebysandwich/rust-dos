@@ -427,8 +427,9 @@ pub fn call(cpu: &mut Cpu, id: u16) {
         return;
     };
     cpu.set_eip(cpu.eip().wrapping_add(4));
-    let bytes = api.args.bytes().map(arg_bytes_of).sum();
-    crate::idle::arguments16(cpu, bytes);
+    if cpu.bus.observe.on {
+        crate::idle::arguments16(cpu, arg_bytes(api.args) as u32);
+    }
     let raw = read_args(cpu, api.args, api.conv);
     if cpu.bus.guest_faulted() {
         return;
