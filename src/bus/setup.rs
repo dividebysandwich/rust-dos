@@ -170,10 +170,10 @@ impl Bus {
         // The default Ultrasound's software, and the equipment word, hard
         // disk count and DPBs for the drives C:, X: and Z:.
         let _ = bus.mount_ultrasnd(crate::gus::GusConfig::default().drive);
-        // The file table, with the standard devices open, and the XMS
-        // driver's entry.
+        // The file table, with the standard devices open, and the code the
+        // built-in drivers keep in DOS's data segment.
         crate::dos_files::write_table(&mut bus);
-        crate::xms::install_entry(&mut bus);
+        crate::dos_data::write_driver_code(&mut bus);
 
         bus
     }
@@ -268,7 +268,7 @@ impl Bus {
         crate::mcb::build_upper(self);
         self.sync_drive_bda();
         crate::dos_files::write_table(self);
-        crate::xms::install_entry(self);
+        crate::dos_data::write_driver_code(self);
     }
 
     /// The layout text typed in from the host goes in as: the keyboard's,
