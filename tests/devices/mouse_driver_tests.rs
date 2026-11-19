@@ -382,6 +382,37 @@ fn get_range_returns_the_virtual_coordinates_range() {
 }
 
 #[test]
+fn get_maximum_returns_the_screen_whatever_the_range() {
+    // AX=0026h: BX = 0 while enabled, CX, DX = the largest x and y of the
+    // mode's virtual screen. Drivers from 7.05 on return those after a
+    // range is set too (RBIL); AX=0031h returns the range.
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x0013, 0);
+    call(&mut cpu, 0x0000);
+    range(&mut cpu, 0x0007, 0, 319);
+    range(&mut cpu, 0x0008, 0, 99);
+    cpu.set_bx(0x1234);
+    call(&mut cpu, 0x0026);
+    assert_eq!((cpu.bx(), cpu.cx(), cpu.dx()), (0, 639, 199));
+    call(&mut cpu, 0x0031);
+    assert_eq!((cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()), (0, 0, 319, 99));
+}
+
+#[test]
+fn active_advanced_functions_lists_the_ones_answered() {
+    // AX=0032h: bit 15 for AX=0025h down to bit 0 for AX=0034h. This
+    // driver answers 0026h (bit 14), 0031h (bit 3) and 0032h (bit 2).
+    // Unanswered, AX came back 0032h, claiming 002Fh, 0030h and 0033h.
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    call(&mut cpu, 0x0000);
+    cpu.set_bx(0x1111);
+    cpu.set_cx(0x2222);
+    cpu.set_dx(0x3333);
+    call(&mut cpu, 0x0032);
+    assert_eq!((cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()), (0x400C, 0, 0, 0));
+}
+
+#[test]
 fn setting_the_same_mode_again_keeps_the_programs_range() {
     // Dark Sun 2: x 0-319 and y 0-199 in mode 13h, then mode 13h again,
     // with its own cursor drawn at the driver's x as a 320-pixel position.
