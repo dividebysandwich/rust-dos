@@ -99,7 +99,7 @@ fn bit_banging_port_61h_plays_the_samples() {
     // alone moves the speaker: on for the sample's share of each 64 us.
     let mut bus = bus(true);
     bus.io_write(0x61, 0x00);
-    let mut play = |bus: &mut Bus, ms: u64| {
+    let play = |bus: &mut Bus, ms: u64| {
         for n in 0..ms * 1000 / 64 {
             let on = (sine_sample(n, 64) * 64.0).round() as u64;
             bus.io_write(0x61, 0x02);
