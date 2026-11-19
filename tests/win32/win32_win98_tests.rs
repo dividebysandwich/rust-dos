@@ -1704,3 +1704,66 @@ fn toolhelp32_walks_the_process_heaps_threads_and_modules() {
         assert_eq!(code, 0, "check {} failed: {}", code, text);
     }
 }
+
+/// Windows 98 SE's USER32 has no desktops or window stations: OpenDesktopA
+/// and GetProcessWindowStation are its stubs that fail with
+/// ERROR_CALL_NOT_IMPLEMENTED, GetThreadDesktop gives 12345678h for any
+/// thread and SetThreadDesktop succeeds. QuickTime 5 calls OpenDesktopA
+/// when it starts. The program ends with the number of the first check
+/// that failed, or 0.
+#[test]
+fn desktops_are_windows_98s_stubs() {
+    let names: &[&str] = &[
+        "OpenDesktopA",
+        "GetProcessWindowStation",
+        "GetThreadDesktop",
+        "SetThreadDesktop",
+    ];
+    let imports: &[(&str, &[&str])] = &[
+        ("USER32.DLL", names),
+        ("KERNEL32.DLL", &["GetLastError", "SetLastError"]),
+    ];
+    let exe = program(imports, b"Default\0", |a, l| {
+        let mut fail = a.create_label();
+        let check_error = |a: &mut CodeAssembler, n: i32, fail| {
+            a.mov(ebx, n)?;
+            a.call(l.import(4))?;
+            a.cmp(eax, 120)?;
+            a.jne(fail)
+        };
+        a.push(0)?;
+        a.call(l.import(5))?;
+        a.push(0x40)?;
+        a.push(0)?;
+        a.push(1)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, 1)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        check_error(a, 2, fail)?;
+        a.push(0)?;
+        a.call(l.import(5))?;
+        a.call(l.import(1))?;
+        a.mov(ebx, 3)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        check_error(a, 4, fail)?;
+        a.push(0)?;
+        a.call(l.import(2))?;
+        a.mov(ebx, 5)?;
+        a.cmp(eax, 0x1234_5678)?;
+        a.jne(fail)?;
+        a.push(eax)?;
+        a.call(l.import(3))?;
+        a.mov(ebx, 6)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run(Win98Se, "desktops", exe);
+    assert_eq!(code, 0, "check {} failed: {}", code, text);
+}

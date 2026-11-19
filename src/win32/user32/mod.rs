@@ -1240,14 +1240,27 @@ static APIS: &[Api] = &[
     ),
     stdcall("ExitWindowsEx", 209, 2, session::exit_windows_ex),
     stdcall("GetGuiResources", 260, 2, nothing),
-    stdcall(
-        "GetProcessWindowStation",
-        306,
-        0,
-        sysparams::get_process_window_station,
-    ),
+    // Windows 98 has no desktops or window stations of its own: these
+    // are its stubs that fail with ERROR_CALL_NOT_IMPLEMENTED, but for
+    // GetThreadDesktop and SetThreadDesktop. QuickTime 5 calls
+    // OpenDesktopA when it starts.
+    stdcall("CloseDesktop", 64, 1, not_implemented),
+    stdcall("CloseWindowStation", 66, 1, not_implemented),
+    stdcall("CreateDesktopA", 77, 6, not_implemented),
+    stdcall("CreateWindowStationA", 93, 4, not_implemented),
+    stdcall("EnumDesktopWindows", 189, 3, not_implemented),
+    stdcall("EnumDesktopsA", 190, 3, not_implemented),
+    stdcall("EnumWindowStationsA", 204, 2, not_implemented),
+    stdcall("GetInputDesktop", 262, 0, not_implemented),
+    stdcall("GetProcessWindowStation", 306, 0, not_implemented),
     stdcall("GetThreadDesktop", 322, 1, sysparams::get_thread_desktop),
     stdcall("GetUserObjectInformationA", 327, 5, not_implemented),
+    stdcall("OpenDesktopA", 452, 4, not_implemented),
+    stdcall("OpenInputDesktop", 455, 3, not_implemented),
+    stdcall("OpenWindowStationA", 456, 3, not_implemented),
+    stdcall("SetProcessWindowStation", 546, 1, not_implemented),
+    stdcall("SetThreadDesktop", 558, 1, succeed),
+    stdcall("SwitchDesktop", 586, 1, not_implemented),
     stdcall("WinHelpA", 636, 4, winhelp::win_help),
     stdcall("GetSystemDefaultLangID", 652, 0, nothing),
     stdcall("EnumDisplayDevicesA", 192, 4, monitor::enum_display_devices),
