@@ -1311,6 +1311,7 @@ impl Bus {
         }
         // The Tandy's and PCjr's window onto system memory.
         if let Some(ram) = self.vga.cpu_window(addr) {
+            let unchanged = self.ram[ram] == value;
             self.ram[ram] = value;
             let page = ram >> GEN_SHIFT;
             self.page_gen[page] = self.page_gen[page].wrapping_add(1);
@@ -1318,7 +1319,12 @@ impl Bus {
             if !(base..base + size).contains(&ram) {
                 return false;
             }
-            self.mark_text_dirty(ram - base, ram - base + 1);
+            // As in the text window below: the same byte again changes no
+            // pixel, and the retrace's comparison with the shadow
+            // (`compare_gate_array`) still sees what other writes changed.
+            if !unchanged {
+                self.mark_text_dirty(ram - base, ram - base + 1);
+            }
             return true;
         }
         let (text, size, wrap) = self.vga.text_window();

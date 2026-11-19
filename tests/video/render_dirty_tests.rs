@@ -396,3 +396,24 @@ fn rewriting_text_vram_with_the_same_bytes_repaints_nothing() {
     cpu.bus.write_8(cell, b'B');
     assert!(cpu.bus.vga.dirty, "another character is painted");
 }
+
+#[test]
+fn rewriting_a_gate_arrays_text_with_the_same_bytes_repaints_nothing() {
+    // The Tandy's and PCjr's window at B8000h onto system memory, as the
+    // card's text VRAM above.
+    use rust_dos::video::adapter::{Adapter, VideoSetup};
+    use rust_dos::video::bios;
+    for adapter in [Adapter::Tandy, Adapter::Pcjr] {
+        let mut cpu = Cpu::new(scratch("same_bytes_gate_array"));
+        bios::install(&mut cpu.bus, VideoSetup { adapter, ..Default::default() });
+        cpu.load_shell();
+        let cell = 0xB8000 + 2 * (5 * 80 + 10);
+        cpu.bus.write_8(cell, b'A');
+        assert!(cpu.bus.vga.dirty, "{adapter:?}: a new character is painted");
+        cpu.bus.vga.clear_dirty();
+        cpu.bus.write_8(cell, b'A');
+        assert!(!cpu.bus.vga.dirty, "{adapter:?}: the same character again changes no pixel");
+        cpu.bus.write_8(cell, b'B');
+        assert!(cpu.bus.vga.dirty, "{adapter:?}: another character is painted");
+    }
+}
