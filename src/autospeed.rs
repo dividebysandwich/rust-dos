@@ -71,9 +71,43 @@ use crate::video::VideoMode;
 
 /// Emulated time a measurement takes at least, and at most while it waits
 /// for enough frames to go by: a frame more or less is a twentieth.
+///
+/// The search's first measurement waits for them only where the count
+/// changes the kind of step it takes. With room above the speed and no
+/// reads on the drives for `WORK_DONE_NS`, frames short of the refresh rate
+/// by `FIRST_STEP`, a frame more counted, take a step of `FIRST_STEP` or
+/// more whatever their count, and a busy program's frames short of it at
+/// all (`AT_REFRESH`) take the step that would bring them to it, which its
+/// next measurement judges. Either way the measurement ends at `WINDOW_NS`,
+/// once `EARLY_FRAMES` have come after its first frame, and the step goes
+/// by a rate that a frame more or less moves by a tenth or so rather than a
+/// twentieth. It measures the time since that frame, and the rate of the
+/// frames after it: a scene that starts in the middle of the window would
+/// read low by the time before it, and a busy program steps by its frame
+/// rate (see `FIRST_STEP`); the end of a load before the first frame would
+/// count as reads. It counts at once, without a second measurement to
+/// agree with (`AGREE`): a game that catches up on frames after a change of
+/// speed reads high, and steps less than it needs.
+///
+/// A busy scene after a waiting one starts far under the speed it needs.
+/// Omikron's intro movies hold the speed at 20,000, and the load of its
+/// main menu leaves it at the host's estimate then, 33,000 to 91,000, where
+/// the menu draws 8 to 28 frames a second; the host runs it at 60 at
+/// 210,000. The first measurement waited up to 2 s for 20 frames, and a
+/// step capped at `FIRST_STEP` took a second one: 60 frames a second came
+/// up to 5 s after the menu's first frame (#1227). Reads are left out
+/// because a loading screen's frames come as its data does, and say
+/// nothing of the scene after it: Quake's drew 8 frames a second at
+/// 20,000, and a step judged on it alone put the knee of its timedemo
+/// there (#1160).
 const WINDOW_NS: u64 = 500_000_000;
 const LONG_WINDOW_NS: u64 = 2_000_000_000;
 const ENOUGH_FRAMES: u64 = 20;
+/// Chosen: frames after a measurement's first one that its early end (see
+/// `WINDOW_NS`) needs. Over three or more, the host's frames of 17 ms that
+/// the program's are seen in move a rate of 8 frames a second by 5% at
+/// most.
+const EARLY_FRAMES: u64 = 3;
 /// A measurement that runs at less than this share of real time ends once
 /// it has dropped `WINDOW_NS` (`AutoSpeed::update`). It is also the
 /// deepest cut one measurement behind makes (`AutoSpeed::decide`): under
@@ -98,7 +132,16 @@ const AGREE: f64 = 0.15;
 const TRIES: u32 = 4;
 
 /// How much more a step up asks for at most, the first time and when the
-/// speed it holds at is tried again.
+/// speed it holds at is tried again. Not where a protected-mode program
+/// keeps a system that idles from halting (`BUSY`) and doesn't load
+/// (`LOADS`): with no time to spare, it draws as many frames as it gets
+/// instructions for, and goes by the frames short of the refresh rate all
+/// the way, up to the host's estimate. Omikron's main menu after the intro
+/// movies drew 8 frames a second at 33,700, and took two steps to reach
+/// its 60 at 212,000, the first of them capped at 134,800 (#1227). A
+/// program that paces itself by spinning on the clock draws no more frames
+/// at the step, and the search goes back to the knee as from any step
+/// that gained nothing.
 const FIRST_STEP: f64 = 4.0;
 const FINE_STEP: f64 = 1.15;
 /// A step up whose frame rate grew by at least this share of the speed's
@@ -775,6 +818,17 @@ impl Mark {
             io: a.io_bytes,
         }
     }
+
+    /// Since `from`: the share of the instructions run that the processor
+    /// sat halted, leaving out its waits for the host's disk, and the bytes
+    /// a second moved on drives.
+    fn since(&self, from: &Mark) -> (f64, f64) {
+        let ran = self.icount.saturating_sub(from.icount).max(1) as f64;
+        let waited = self.disk_wait.saturating_sub(from.disk_wait);
+        let halted = self.idle.saturating_sub(from.idle).saturating_sub(waited);
+        let seconds = self.ns.saturating_sub(from.ns) as f64 / 1e9;
+        (halted as f64 / ran, (self.io - from.io) as f64 / seconds)
+    }
 }
 
 /// The frame rate steps down keep `KEPT` of. It moves only by more than
@@ -1139,6 +1193,10 @@ pub struct AutoSpeed {
     /// (`auto_fps`).
     target_fps: Option<u32>,
     mark: Option<Mark>,
+    /// The first frame of the measurement going on: the emulated time of
+    /// its mark, the counts at that frame, and the frames counted by then,
+    /// which an early end measures from (see `WINDOW_NS`).
+    first_frame: Option<(u64, Mark, u64)>,
     /// No measurement starts before this emulated time.
     settle_until: u64,
     /// Since the last change of speed: the frame rates measured that
@@ -1275,6 +1333,7 @@ impl AutoSpeed {
             base,
             target_fps,
             mark: None,
+            first_frame: None,
             settle_until: 0,
             unsettled: None,
             step: Step::Start,
@@ -1503,6 +1562,9 @@ impl AutoSpeed {
             (0, presents, _) => presents,
             (flips, _, _) => flips,
         };
+        if frames > 0 && self.first_frame.is_none_or(|(at, ..)| at != mark.ns) {
+            self.first_frame = Some((mark.ns, now, frames));
+        }
         // The window counts emulated time, which a host far behind runs at
         // a fraction of the wall clock's pace: at a tenth, a window of
         // `LONG_WINDOW_NS` takes 20 wall seconds, all of them at that
@@ -1517,9 +1579,23 @@ impl AutoSpeed {
         // as lag while a game loads (#783), keeps the whole window.
         let dropped = now.lost_ns.saturating_sub(mark.lost_ns);
         let behind = dropped >= WINDOW_NS && (ns as f64) < (ns + dropped) as f64 * FAR_BEHIND;
-        if !behind
-            && (ns < WINDOW_NS || (frames > 0 && frames < ENOUGH_FRAMES && ns < LONG_WINDOW_NS))
-        {
+        let refresh = self.refresh(bus, now.ns);
+        let waits = ns < WINDOW_NS || (frames > 0 && frames < ENOUGH_FRAMES && ns < LONG_WINDOW_NS);
+        let first = self
+            .first_frame
+            .filter(|&(at, ..)| at == mark.ns)
+            .map(|(_, first, count)| (first, frames.saturating_sub(count)));
+        let early = match first {
+            Some((first, after)) if !behind && waits && ns >= WINDOW_NS => {
+                let most = self.lagged.map_or(host_max, |(most, _)| most.min(host_max));
+                let room = current < most.max(self.least(protected, host_max));
+                let (halted, io) = now.since(&first);
+                let busy = self.busy(protected, halted, io);
+                self.early_rate(now.ns, first.ns, after, refresh, room, busy)
+            }
+            _ => None,
+        };
+        if !behind && waits && early.is_none() {
             return cut;
         }
         self.mark = Some(now);
@@ -1527,25 +1603,18 @@ impl AutoSpeed {
         // one isn't settled: then both go together.
         let window = self.frames;
         self.frames.start();
+        // An early end measures from its first frame (see `WINDOW_NS`).
+        let (mark, ns) = match (early, first) {
+            (Some(_), Some((first, _))) => (first, now.ns.saturating_sub(first.ns)),
+            _ => (mark, ns),
+        };
         let seconds = ns as f64 / 1e9;
-        let ran = now.icount.saturating_sub(mark.icount).max(1) as f64;
+        let (halted, io) = now.since(&mark);
         let polls = (now.polls - mark.polls) as f64 / seconds;
         let status = (now.status_reads - mark.status_reads) as f64 * STATUS_READ_NS / ns as f64;
-        let refresh = match (self.target_fps, &bus.voodoo) {
-            (Some(fps), _) => fps as f64,
-            (None, Some(v)) if v.output() => v.refresh_hz(),
-            (None, _) => bus.vga.peek_timing().hz(),
-        };
-        // The frame rate cap shows no more frames than its rate while a
-        // program presents through it, as a display shows no more than
-        // its refresh rate: more speed only adds to the time its frames
-        // are held.
-        let refresh = match bus.frame_cap.get().refresh_timing(now.ns) {
-            Some(cap) => refresh.min(cap.hz()),
-            None => refresh,
-        };
-        let mut fps = (frames > 0).then(|| frames as f64 / seconds);
-        if let (Some(rate), Some((before, tries))) = (fps, self.unsettled) {
+        // An early end's rate counts alone (see `WINDOW_NS`).
+        let mut fps = early.or((frames > 0).then(|| frames as f64 / seconds));
+        if let (Some(rate), Some((before, tries)), None) = (fps, self.unsettled, early) {
             let settled = behind || (rate / before - 1.0).abs() <= AGREE || tries + 1 >= TRIES;
             if !settled {
                 self.unsettled = Some((rate, tries + 1));
@@ -1588,14 +1657,12 @@ impl AutoSpeed {
                 window.count
             );
         }
-        let waited = now.disk_wait.saturating_sub(mark.disk_wait);
-        let halted = now.idle.saturating_sub(mark.idle).saturating_sub(waited);
         let measured = Measurement {
             fps,
             polling: if polls > POLLS_PER_SECOND { status.max(0.5) } else { status },
-            halted: halted as f64 / ran,
+            halted,
             output: (now.output - mark.output) as f64 / seconds,
-            io: (now.io - mark.io) as f64 / seconds,
+            io,
             refresh,
             pace: paced as f64 / (paced + lost - stall) as f64,
         };
@@ -1646,6 +1713,55 @@ impl AutoSpeed {
             self.watch(current);
         }
         Some(next)
+    }
+
+    /// The frame rate the search aims for: the display's refresh rate, or
+    /// `auto_fps` in its place, and no more than the frame rate cap's while
+    /// the program presents through it, as a display shows no more than its
+    /// refresh rate: more speed only adds to the time its frames are held.
+    fn refresh(&self, bus: &Bus, now_ns: u64) -> f64 {
+        let refresh = match (self.target_fps, &bus.voodoo) {
+            (Some(fps), _) => fps as f64,
+            (None, Some(v)) if v.output() => v.refresh_hz(),
+            (None, _) => bus.vga.peek_timing().hz(),
+        };
+        match bus.frame_cap.get().refresh_timing(now_ns) {
+            Some(cap) => refresh.min(cap.hz()),
+            None => refresh,
+        }
+    }
+
+    /// A protected-mode program keeps a system seen idling from halting
+    /// (`BUSY`), and doesn't load (`LOADS`): it has no time to spare, and its
+    /// frames follow the speed (`FIRST_STEP`).
+    fn busy(&self, protected: bool, halted: f64, io: f64) -> bool {
+        protected && self.idles && self.busy_os && !self.dpmi_client && halted < BUSY && io < LOADS
+    }
+
+    /// The frame rate that ends the measurement early, if the `after`
+    /// frames that came after its first one, at `first_ns`, already decide
+    /// the search's first step (see `WINDOW_NS`): at the start, with `room`
+    /// above the speed, no reads on the drives for `WORK_DONE_NS` up to
+    /// `now_ns`, and `EARLY_FRAMES` of them. With a frame more, they are
+    /// short of `refresh` by `FIRST_STEP`, or of `AT_REFRESH` of it for a
+    /// `busy` program.
+    fn early_rate(
+        &self,
+        now_ns: u64,
+        first_ns: u64,
+        after: u64,
+        refresh: f64,
+        room: bool,
+        busy: bool,
+    ) -> Option<f64> {
+        let seconds = now_ns.saturating_sub(first_ns) as f64 / 1e9;
+        let most = (after + 1) as f64 / seconds;
+        let known = matches!(self.step, Step::Start)
+            && room
+            && after >= EARLY_FRAMES
+            && now_ns.saturating_sub(self.io.1) >= WORK_DONE_NS
+            && (most * FIRST_STEP <= refresh || (busy && most < refresh * AT_REFRESH));
+        known.then(|| after as f64 / seconds)
     }
 
     /// Watch the frames of a step up from `from`, counting none of those
@@ -1973,11 +2089,16 @@ impl AutoSpeed {
             return hold(self, top as f64, HOLD_WINDOWS, false);
         }
         // More, by as much as would take the frame rate to the display's.
+        let busy = self.busy(protected, m.halted, m.io);
         let up = |this: &mut Self, most: f64, below: (u32, f64)| {
             if fps >= m.refresh * AT_REFRESH || current >= top {
                 return hold(this, c, HOLD_WINDOWS, false);
             }
             this.step = Step::Raised { from: current, fps, below };
+            // A program that keeps an idling system from halting has no
+            // time to spare: its frames follow the speed, and it goes the
+            // whole way at once (`FIRST_STEP`).
+            let most = if busy { f64::INFINITY } else { most };
             // No further at once than a step under where the host fell
             // behind, and past it a step at a time.
             let most = match this.fell_at {
@@ -5987,5 +6108,127 @@ mod tests {
         let speeds = run(game(0.00001, f64::INFINITY), true, 20);
         assert!(speeds.iter().all(|&s| s <= HOST));
         assert_eq!(*speeds.last().unwrap(), HOST);
+    }
+
+    /// A protected-mode program, never halted, under a system seen idling
+    /// if `idles`, that starts drawing `blank_ns` after the search starts at
+    /// `start` right after a change of speed, as a scene after a load does,
+    /// reading `loads` bytes a ms until then. Each frame takes `work`
+    /// instructions, and frames come no faster than 60 a second (it spins
+    /// until the next one), reading `reads` bytes each. Returns each speed
+    /// the search asks for in the first 6 s, with the emulated time it asks
+    /// at.
+    fn busy_scene(
+        idles: bool,
+        start: u32,
+        (blank_ns, loads): (u64, u64),
+        work: u64,
+        reads: u64,
+    ) -> Vec<(u64, u32)> {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(start);
+        let mut auto = AutoSpeed::new(3000, Some(60));
+        auto.set_idles(idles);
+        auto.unsettled = Some((f64::NAN, 0));
+        let mut speeds = Vec::new();
+        while bus.clock.now_ns() < 6_000_000_000 {
+            let speed = bus.clock.cycles_per_ms() as u64;
+            if bus.clock.now_ns() < blank_ns {
+                bus.clock.icount += speed;
+                bus.activity.io_bytes += loads;
+            } else {
+                bus.clock.icount += work.max(speed * 1000 / 60);
+                bus.activity.io_bytes += reads;
+                bus.activity.swapped(1);
+            }
+            if let Some(next) = auto.update(bus, true, 430_000, 0) {
+                speeds.push((bus.clock.now_ns(), next));
+                bus.set_cycles_per_ms(next);
+            }
+        }
+        speeds
+    }
+
+    #[test]
+    fn a_busy_scene_after_a_load_reaches_its_frame_rate_in_one_step() {
+        // Omikron's main menu after the intro movies (#1227): the load
+        // leaves the speed at the host's estimate then, here 33,700, where
+        // the menu draws about 9.6 frames a second, and 70,000, where it
+        // draws 20; it draws its 60 at 210,000. It starts 0.3 s into the
+        // first measurement, which ends early on the frames after the
+        // first, and steps the whole way at once; also where the load reads
+        // 5 MB a second until the menu's first frame, as the window holds
+        // the end of the load.
+        for start in [33_700, 70_000] {
+            let speeds = busy_scene(true, start, (300_000_000, 0), 3_500_000, 0);
+            let (at, first) = speeds[0];
+            assert!(at < 1_000_000_000, "{speeds:?}");
+            assert!((205_000..=240_000).contains(&first), "{speeds:?}");
+        }
+        for start in [33_700, 70_000] {
+            let speeds = busy_scene(true, start, (300_000_000, 5000), 3_500_000, 0);
+            let (at, first) = speeds[0];
+            assert!(at < 1_000_000_000, "{speeds:?}");
+            assert!((205_000..=240_000).contains(&first), "{speeds:?}");
+            assert!(
+                speeds.iter().all(|&(_, speed)| speed >= 205_000),
+                "{speeds:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_first_measurement_waits_for_its_frames_where_their_count_decides() {
+        // 9.6 frames a second while the program reads its drives with each
+        // frame: a loading screen's frames come as its data does (#1160).
+        // The measurement waits for 20 frames, the one after the change of
+        // speed to agree with it, and the step goes no further than
+        // `FIRST_STEP`.
+        let speeds = busy_scene(true, 33_700, (0, 0), 3_500_000, 200_000);
+        let (at, first) = speeds[0];
+        assert!(at >= 2 * LONG_WINDOW_NS, "{speeds:?}");
+        assert_eq!(first, 33_700 * 4, "{speeds:?}");
+        // 30 frames a second under a system not seen idling: short of 60 by
+        // less than `FIRST_STEP`, so the count decides the step, and the
+        // measurement and the one that agrees with it wait for 20 frames
+        // each.
+        let speeds = busy_scene(false, 33_700, (0, 0), 1_100_000, 0);
+        let frame_ns = 1_100_000 * 1_000_000 / 33_700;
+        assert!(speeds[0].0 >= 39 * frame_ns, "{speeds:?}");
+        // Under one that idles, the program is busy, and steps by its frame
+        // rate whatever the count.
+        let speeds = busy_scene(true, 33_700, (0, 0), 1_100_000, 0);
+        assert!(speeds[0].0 < 39 * frame_ns, "{speeds:?}");
+    }
+
+    #[test]
+    fn a_busy_program_under_a_system_that_idles_steps_all_the_way() {
+        // Omikron's main menu (#1227): 8 frames a second at 33,700, never
+        // halted, under the built-in Windows, which halts when it idles.
+        let first = |idles: bool, dpmi: bool, halted: f64, io: f64, host: u32| {
+            let mut auto = AutoSpeed::new(3000, None);
+            auto.set_idles(idles);
+            auto.set_dpmi_client(dpmi);
+            let m = Measurement {
+                fps: Some(8.0),
+                halted,
+                io,
+                refresh: 60.0,
+                ..STILL
+            };
+            auto.decide(33_700, &m, true, host)
+        };
+        assert_eq!(first(true, false, 0.0, 0.0, HOST), 252_750);
+        // No further than the host's estimate.
+        assert_eq!(first(true, false, 0.0, 0.0, 200_000), 200_000);
+        // Halted a fifth of the time, it has time to spare, and steps by
+        // `FIRST_STEP`; so does one under a system not seen idling, whose
+        // halts say nothing, a DOS program on the emulator's DPMI host, and
+        // one that loads.
+        assert_eq!(first(true, false, 0.2, 0.0, HOST), 134_800);
+        assert_eq!(first(false, false, 0.0, 0.0, HOST), 134_800);
+        assert_eq!(first(true, true, 0.0, 0.0, HOST), 134_800);
+        assert_eq!(first(true, false, 0.0, LOADS, HOST), 134_800);
     }
 }
