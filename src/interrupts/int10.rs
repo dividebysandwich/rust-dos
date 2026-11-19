@@ -6,6 +6,7 @@ use crate::video::et4000;
 use crate::video::{BDA_CURSOR_MODE, BDA_CURSOR_POS, VideoMode, pixels};
 use iced_x86::Register;
 
+mod ril;
 mod state;
 
 /// The size of the INT 10h AH=1Ch transfer buffer for the requested states.
@@ -730,6 +731,12 @@ pub fn handle(cpu: &mut Cpu) {
         || (ega_only && !adapter.ega_bios() && !gate_array_palette)
         || (ah == 0x4F && !adapter.has_vbe())
     {
+        return;
+    }
+    // The EGA Register Interface, which the built-in mouse driver adds to
+    // the EGA's and VGA's BIOS. A booted system has no built-in driver
+    // (`bios::boot_ivt`), and its own mouse driver brings its own RIL.
+    if adapter.ega_bios() && cpu.bus.boot.is_none() && ril::handle(cpu) {
         return;
     }
 

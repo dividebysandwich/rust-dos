@@ -16,6 +16,9 @@ pub const FONT_8X16: u16 = 0x2000;
 pub const FONT_8X14: u16 = 0x3000;
 pub const FONT_9X14: u16 = 0x3E00;
 pub const FONT_9X16: u16 = 0x3F40;
+/// The EGA Register Interface's version, major then minor, which INT 10h
+/// AH=FAh points at.
+pub const RIL_VERSION: u16 = 0x0FF0;
 /// Where the PC BIOS keeps the first half of its 8x8 font, for the CGA
 /// graphics modes: F000:FA6E.
 pub const PC_FONT_8X8: usize = 0xFFA6E;
@@ -119,6 +122,12 @@ pub fn gray_summing(bus: &Bus) -> bool {
     bus.vga.adapter.vga_bios() && bus.read_8(0x0489) & 0x02 != 0
 }
 
+/// The EGA Register Interface's version, 1.00, where INT 10h AH=FAh
+/// points.
+fn install_ril_version(bus: &mut Bus) {
+    bus.write_rom(((ROM_SEGMENT as usize) << 4) + RIL_VERSION as usize, &[1, 0]);
+}
+
 /// Write the fonts into the ROMs.
 fn install_fonts(bus: &mut Bus) {
     let rom = |offset: u16| ((ROM_SEGMENT as usize) << 4) + offset as usize;
@@ -196,6 +205,7 @@ pub fn install(bus: &mut Bus, setup: VideoSetup) {
         // The EGA BIOS ROM: 16 KB (32 blocks), without the VGA's name.
         bus.write_rom(0xC0000, &[0x55, 0xAA, 0x20]);
         bus.load_bytes(0xC001E, b"IBM EGA");
+        install_ril_version(bus);
         install_fonts(bus);
         return;
     }
@@ -218,6 +228,7 @@ pub fn install(bus: &mut Bus, setup: VideoSetup) {
     // and the name that programs look for.
     bus.write_rom(0xC0000, &[0x55, 0xAA, 0x40]);
     bus.load_bytes(0xC001E, b"IBM VGA");
+    install_ril_version(bus);
     // An S3's BIOS says which chip it is for.
     let s3 = setup.adapter.is_s3();
     let chip: &[u8; 10] = match setup.adapter {
