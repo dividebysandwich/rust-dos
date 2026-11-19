@@ -1879,6 +1879,33 @@ fn main() -> Result<ExitCode, String> {
             settings.mixer = cpu.bus.mixer.settings();
             ui.sync_mixer(settings.mixer);
         }
+        // CONFIG -SET asked for settings: they are applied as the window's
+        // are, and the batch file waiting for them goes on.
+        let requests = rust_dos::shell::take_settings(&mut cpu);
+        if !requests.is_empty() {
+            let dir = cpu.bus.config_dir.clone().unwrap_or_else(|| PathBuf::from("."));
+            let home = rust_dos::hostdirs::home_dir();
+            let (new, warnings) =
+                crate::config::with_entries(&settings, &requests, &dir, home.as_deref());
+            for warning in warnings {
+                config_warning(&mut cpu, &format!("CONFIG -SET: {}", warning));
+            }
+            match host!().apply(&new) {
+                // A change of hardware under a running program waits for
+                // it to end: the log says so too, for a run without a
+                // window.
+                Ok(note) => {
+                    if let Some(note) = note {
+                        cpu.bus.log_string(&format!("[CONFIG] CONFIG -SET: {}", note));
+                        osd.show(note);
+                    }
+                }
+                Err(e) => {
+                    config_warning(&mut cpu, &format!("CONFIG -SET: {}", e));
+                    osd.show(e);
+                }
+            }
+        }
         // A program from the prompt waiting for the almanac's settings, and
         // one that played with them and has ended.
         let window_open = ui.is_open();
