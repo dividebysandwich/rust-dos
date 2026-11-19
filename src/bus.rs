@@ -1324,6 +1324,7 @@ impl Bus {
         let (text, size, wrap) = self.vga.text_window();
         if (text..text + size).contains(&addr) {
             let text_off = (addr - text) & wrap;
+            let unchanged = self.vga.vram_text[text_off] == value;
             self.vga.vram_text[text_off] = value;
             self.note_video_write(text_off, 1);
 
@@ -1331,8 +1332,13 @@ impl Bus {
             // we're in a text mode (see `text::geometry`). CGA graphics modes
             // (4/5/6) also live in this VRAM but their byte-to-scanline
             // mapping is interleaved, so we conservatively repaint everything
-            // for those.
-            self.mark_text_dirty(text_off, text_off + 1);
+            // for those. A byte written with the value it had changes no
+            // pixel: programs that redraw a whole menu every pass of their
+            // loop (Sink or Swim's setup) would otherwise have the rows
+            // painted again every frame.
+            if !unchanged {
+                self.mark_text_dirty(text_off, text_off + 1);
+            }
 
             // Check if current mode uses this memory
             return matches!(

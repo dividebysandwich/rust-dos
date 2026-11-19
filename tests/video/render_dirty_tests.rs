@@ -379,3 +379,20 @@ fn moving_and_blinking_cursors_match_full_composition_in_text_and_graphics() {
         }
     }
 }
+
+#[test]
+fn rewriting_text_vram_with_the_same_bytes_repaints_nothing() {
+    // Sink or Swim's setup menu writes its whole screen again on every
+    // pass of its loop; the bytes are the ones already there.
+    let (mut cpu, _frame) = rendered_shell("same_bytes");
+    let cell = 0xB8000 + 2 * (5 * 80 + 10);
+    cpu.bus.write_8(cell, b'A');
+    cpu.bus.write_8(cell + 1, 0x1F);
+    assert!(cpu.bus.vga.dirty, "a new character is painted");
+    cpu.bus.vga.clear_dirty();
+    cpu.bus.write_8(cell, b'A');
+    cpu.bus.write_8(cell + 1, 0x1F);
+    assert!(!cpu.bus.vga.dirty, "the same character again changes no pixel");
+    cpu.bus.write_8(cell, b'B');
+    assert!(cpu.bus.vga.dirty, "another character is painted");
+}
