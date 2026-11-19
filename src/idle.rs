@@ -1308,12 +1308,16 @@ pub fn at_event(cpu: &mut Cpu) {
             // the next event: the loop goes on, and the head's next
             // chance comes after the events its back-off lets pass,
             // rather than when an event happens to find the CPU there.
-            let passes = o.enabled
-                && !o.watching()
-                && o.backoffs.iter().any(|b| b.head == head && b.left > 0);
+            // Meanwhile the CPU may be in another loop, which is armed as
+            // it would be with no head held: a costly head's back-off can
+            // run to 64K events, and the program may have left its loop.
+            let held = o.enabled && o.backoffs.iter().any(|b| b.head == head && b.left > 0);
             o.arm(head, now);
-            if passes {
+            if held {
                 o.proven = Some(head);
+                if here.0 != head && (near || o.known.contains(&here.0)) {
+                    o.arm(here.0, now);
+                }
             }
         }
     } else if near || o.known.contains(&here.0) {
