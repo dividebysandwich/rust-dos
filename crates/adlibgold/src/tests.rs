@@ -206,14 +206,14 @@ fn cpu_fed_playback_and_fifo_interrupt() {
     assert_eq!(out[3], (0, 0));
     assert_eq!(out[4 * 3 + 3], (3 << 8, 0));
     assert_eq!(rig.card.mma.status() & 1, 0);
-    assert_eq!(rig.card.irq(), None);
+    assert_eq!(rig.card.irq(false), None);
     // 33 samples leave 31 bytes, below 32: the flag and the interrupt.
     let next = rig.card.next_event(&rig.dma).expect("an interrupt to come");
     rig.run_to_frame(4 * 32);
-    assert_eq!(rig.card.irq(), None);
+    assert_eq!(rig.card.irq(false), None);
     rig.run_to_frame(4 * 33);
     assert!(rig.now >= next, "{} {}", rig.now, next);
-    assert_eq!(rig.card.irq(), Some(7));
+    assert_eq!(rig.card.irq(false), Some(7));
     rig.out(2, 0xFF);
     assert_eq!(
         rig.inp(2) & 0x02,
@@ -222,7 +222,7 @@ fn cpu_fed_playback_and_fifo_interrupt() {
     );
     rig.out(2, 0xFE);
     assert_eq!(rig.inp(4) & 1, 1);
-    assert_eq!(rig.card.irq(), None, "the status read clears it");
+    assert_eq!(rig.card.irq(false), None, "the status read clears it");
     // Running dry: the level holds and OV rises.
     rig.run_to_frame(4 * 70);
     assert_eq!(rig.inp(4) & 0x80, 0x80);

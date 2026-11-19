@@ -341,11 +341,11 @@ impl AdlibGold {
         [line(self.regs[0x13]), line(self.regs[0x14])]
     }
 
-    /// The IRQ the card asks for now, if it does: the MMA wants one and
-    /// AEN is set.
-    pub fn irq(&self) -> Option<u8> {
+    /// The IRQ the card asks for now, if it does: AEN is set, and the MMA
+    /// or the FM chip (`fm_irq`, the OPL3's IRQ output) wants one.
+    pub fn irq(&self, fm_irq: bool) -> Option<u8> {
         let r = self.regs[0x13];
-        (r & 0x08 != 0 && self.mma.irq_pending()).then_some(IRQS[(r & 7) as usize])
+        (r & 0x08 != 0 && (fm_irq || self.mma.irq_pending())).then_some(IRQS[(r & 7) as usize])
     }
 
     /// The IRQ line the card drives, raised or not.

@@ -219,6 +219,30 @@ impl Opl {
         self.timer_start[i] = Some(next.saturating_sub(self.timer_period(i)));
     }
 
+    /// Whether the chip's IRQ output is up at `now_us`: the flag of an
+    /// unmasked timer, which stays up until register 04h resets it. The
+    /// status's bit 7 shows the same; the AdLib Gold puts it on its
+    /// interrupt line.
+    pub fn irq_at(&self, now_us: u64) -> bool {
+        (0..2).any(|i| {
+            !self.timer_mask[i]
+                && (self.timer_expired[i]
+                    || self.timer_start[i]
+                        .is_some_and(|start| now_us.saturating_sub(start) >= self.timer_period(i)))
+        })
+    }
+
+    /// When after `now_us` an unmasked running timer raises its flag, in
+    /// emulated microseconds, if one will. A flag already up stays up
+    /// until register 04h resets it, which reschedules.
+    pub fn next_irq_us(&self, now_us: u64) -> Option<u64> {
+        (0..2)
+            .filter(|&i| !self.timer_mask[i] && !self.timer_expired[i])
+            .filter_map(|i| self.timer_start[i].map(|start| start + self.timer_period(i)))
+            .filter(|&at| at > now_us)
+            .min()
+    }
+
     /// The status register: IRQ (bit 7) and the timer flags (6, 5) that
     /// aren't masked. An OPL2 also reads 06h in the low bits, which is
     /// how programs tell the two apart.

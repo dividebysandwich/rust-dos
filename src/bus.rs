@@ -1779,7 +1779,10 @@ impl Bus {
         if self.gus_next_event().is_some_and(|t| t <= now) {
             self.gus_advance();
         }
-        if self.adlib_gold_next_event().is_some_and(|t| t <= now) {
+        if self.adlib_gold.is_some() {
+            // Its next event may be the OPL3's timer, which is in the past
+            // by now and so no longer its next event: the card's line is
+            // checked at every service.
             self.adlib_gold_advance();
         }
         if self.voodoo_next_event().is_some_and(|t| t <= now) {
@@ -2328,6 +2331,11 @@ impl Bus {
         self.audio_catch_up();
         let now = self.clock.now_micros();
         self.opl.write_data(bank, value, now);
+        if self.adlib_gold.is_some() {
+            // The timers' interrupt goes out on the AdLib Gold's line.
+            self.sync_adlib_gold_irq();
+            self.clock.schedule(self.next_event());
+        }
     }
 
     /// The Sound Blaster's base port, if the card is there: a ViBRA16C's

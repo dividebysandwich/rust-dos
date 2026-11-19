@@ -152,3 +152,34 @@ fn the_fifo_interrupt_reaches_the_pic() {
     bus.audio_catch_up();
     assert_eq!(bus.pic.master.irr & 0x80, 0, "withdrawn by the read");
 }
+
+/// The OPL3's timers interrupt on the card's line, as the SDTK's timer
+/// driver uses them: timer 1 running unmasked raises IRQ 7 when it runs
+/// out, the control chip's status shows the FM source, and the IRQ reset
+/// of register 04h withdraws it.
+#[test]
+fn the_opl3_timers_interrupt_on_the_card_s_line() {
+    let mut bus = bus(true);
+    bus.io_write(BASE, 0x02);
+    bus.io_write(BASE + 1, 0x00);
+    bus.io_write(BASE, 0x04);
+    bus.io_write(BASE + 1, 0x01);
+    wait_ms(&mut bus, 10.0);
+    assert_eq!(bus.pic.master.irr & 0x80, 0, "20.48 ms to run out");
+    wait_ms(&mut bus, 11.0);
+    assert_ne!(bus.pic.master.irr & 0x80, 0, "IRQ 7 raised");
+    bus.io_write(BASE + 2, 0xFF);
+    assert_eq!(bus.io_read(BASE + 2) & 0x01, 0, "FM in the status");
+    bus.io_write(BASE + 2, 0xFE);
+    bus.io_write(BASE, 0x04);
+    bus.io_write(BASE + 1, 0x80);
+    assert_eq!(bus.pic.master.irr & 0x80, 0, "withdrawn by the IRQ reset");
+    // Without the card, the FM chip has no interrupt line.
+    let mut bus = self::bus(false);
+    bus.io_write(BASE, 0x02);
+    bus.io_write(BASE + 1, 0x00);
+    bus.io_write(BASE, 0x04);
+    bus.io_write(BASE + 1, 0x01);
+    wait_ms(&mut bus, 25.0);
+    assert_eq!(bus.pic.master.irr & 0x80, 0);
+}

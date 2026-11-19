@@ -43,16 +43,23 @@ impl Bus {
         }
     }
 
+    /// When the card's interrupt may next come up: the MMA's next event,
+    /// or the OPL3 timer's that next raises the FM chip's IRQ output.
     pub(super) fn adlib_gold_next_event(&self) -> Option<u64> {
-        self.adlib_gold
-            .as_ref()
-            .and_then(|g| g.next_event(&self.dma))
+        let gold = self.adlib_gold.as_ref()?;
+        gold.irq_line()?;
+        let fm = self
+            .opl
+            .next_irq_us(self.clock.now_micros())
+            .map(|us| crate::timer::mul_div_ceil(us, crate::timer::PIT_HZ, 1_000_000));
+        [gold.next_event(&self.dma), fm].into_iter().flatten().min()
     }
 
     /// Drive the card's interrupt line: raise the IRQ as a request comes
     /// up, withdraw it as it goes.
     pub(super) fn sync_adlib_gold_irq(&mut self) {
-        let line = self.adlib_gold.as_ref().and_then(|g| g.irq());
+        let fm = self.opl.irq_at(self.clock.now_micros());
+        let line = self.adlib_gold.as_ref().and_then(|g| g.irq(fm));
         if let Some(old) = self.adlib_gold_line
             && line != Some(old)
         {
