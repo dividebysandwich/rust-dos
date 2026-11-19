@@ -1693,9 +1693,13 @@ fn finish(
         let o = &mut cpu.bus.observe;
         // The head's recent proofs with this one (`Ledger`): what they
         // saved, against what the next proof at the head will run, one
-        // pass where it starts from the shape this one found, else as many
-        // as this one.
-        let next = if found.is_some() { period } else { ran };
+        // pass where it starts from the shape this one found (kept below
+        // when the proof skipped), else as many as this one.
+        let next = if found.is_some() && skipped > 0 {
+            period
+        } else {
+            ran
+        };
         let ledger = match head {
             Some(head) if counting => o.charge(head, saved, next),
             _ => (saved, next),
