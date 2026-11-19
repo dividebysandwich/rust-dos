@@ -2,10 +2,18 @@
 //! writes and AddFontResourceA reads: a NE module with no code whose
 //! resources are a font directory (type 8007h) and the TrueType file's
 //! name (type 80CCh), the way Windows 3.1 to 98 installed TrueType
-//! fonts. The layout follows Windows': a DOS stub saying "This is a
-//! TrueType resource file", the NE header, the resource table, the
+//! fonts. `target` reads the name from any such file, Windows 98's too.
+//!
+//! The files `build` writes have Wine's layout: a DOS stub saying "This
+//! is a TrueType resource file", the NE header, the resource table, the
 //! resident names (the module's name), the non-resident names
-//! ("FONTRES 100,96,72 : " and the face) and the two resources.
+//! ("FONTRES 100,96,72 : " and the face) and the two resources, the
+//! font directory with only the fields GDI reads. Windows 98 SE's are
+//! 1318 bytes whatever the font, with the stub "This is a TrueType font,
+//! not a program.", "FONTDIR" and the module's name as resident names,
+//! "FONTRES:" and the face as the non-resident one, and a font directory
+//! with the font's metrics. Only GDI reads these files, so the
+//! difference shows to no program.
 
 /// The resource types of the font directory and of the file's name.
 const RT_FONTDIR: u16 = 0x8007;
@@ -130,15 +138,16 @@ pub fn build(module: &str, face: &str, ttf_name: &str, hidden: bool) -> Vec<u8> 
     b
 }
 
-/// The .FOT file `fot` that CreateScalableFontResourceA writes for the
-/// TrueType file `ttf` at `ttf_path`: its module name is `fot`'s base
-/// name in capitals, its face the family of the file's first font. None
-/// if `ttf` isn't a TrueType font GDI can draw.
-pub fn for_truetype(fot: &str, ttf_path: &str, ttf: &[u8], hidden: bool) -> Option<Vec<u8>> {
+/// The .FOT file that CreateScalableFontResourceA writes for the
+/// TrueType file `ttf` named `ttf_name`: its module name is the
+/// TrueType file's base name in capitals, as Windows 98 SE has it, its
+/// face the family of the file's first font. None if `ttf` isn't a
+/// TrueType font GDI can draw.
+pub fn for_truetype(ttf_name: &str, ttf: &[u8], hidden: bool) -> Option<Vec<u8>> {
     let face = super::ttf::Ttf::fonts_of_file(ttf).into_iter().next()?.face;
-    let base = fot.rsplit(['\\', '/', ':']).next().unwrap_or("");
+    let base = ttf_name.rsplit(['\\', '/', ':']).next().unwrap_or("");
     let module = base.split('.').next().unwrap_or("").to_ascii_uppercase();
-    Some(build(&module, &face, ttf_path, hidden))
+    Some(build(&module, &face, ttf_name, hidden))
 }
 
 /// The TrueType file a .FOT names, None for a file that isn't one.
@@ -190,8 +199,8 @@ mod tests {
     #[test]
     fn a_fot_for_a_truetype_file_has_its_family() {
         let ttf = super::super::ttf::tests::ttf("Quick Face", false);
-        let fot = for_truetype("C:\\WINDOWS\\QTFONT.FOT", "C:\\QT.TTF", &ttf, true).unwrap();
-        assert_eq!(target(&fot).as_deref(), Some("C:\\QT.TTF"));
+        let fot = for_truetype("C:\\QTFONT.TTF", &ttf, true).unwrap();
+        assert_eq!(target(&fot).as_deref(), Some("C:\\QTFONT.TTF"));
         // The module's name, then the face in the font directory, which
         // is marked hidden: its last copy, after the non-resident names'.
         let at = |s: &[u8]| fot.windows(s.len()).rposition(|w| w == s);
@@ -200,7 +209,31 @@ mod tests {
         let dir = face - 4 - 113;
         assert_eq!(u16::from_le_bytes([fot[dir + 70], fot[dir + 71]]), 0x83);
         // A file that isn't TrueType gets none.
-        assert!(for_truetype("A.FOT", "A.TTF", b"not a font", false).is_none());
+        assert!(for_truetype("A.TTF", b"not a font", false).is_none());
+    }
+
+    /// A .FOT that Windows 98 SE's CreateScalableFontResourceA wrote for
+    /// "QX.TTF" in a folder given as `path`: its DOS header's pointer to
+    /// the NE header, which is at 80h, the NE header and its resource
+    /// table, and the name it keeps as it was given, at 400h.
+    #[test]
+    fn a_windows_98_fot_names_its_file() {
+        let ne: [u8; 0x70] = [
+            0x4E, 0x45, 0x05, 0x10, 0x84, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x17, 0x00, 0x40, 0x00, 0x40, 0x00, 0x74, 0x00, 0x7C, 0x00,
+            0x7C, 0x00, 0x08, 0x01, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x02, 0x00, 0x02, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x04, 0x00, 0x07, 0x80, 0x01, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x48, 0x00, 0x0A, 0x00, 0x50, 0x0C, 0x2C, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0xCC, 0x80, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x08, 0x00,
+            0x50, 0x0C, 0x01, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x46, 0x4F, 0x4E,
+        ];
+        let mut fot = vec![0u8; 1318];
+        fot[..2].copy_from_slice(b"MZ");
+        fot[0x3C] = 0x80;
+        fot[0x80..0xF0].copy_from_slice(&ne);
+        fot[0x400..0x406].copy_from_slice(b"QX.TTF");
+        assert_eq!(target(&fot).as_deref(), Some("QX.TTF"));
     }
 
     #[test]

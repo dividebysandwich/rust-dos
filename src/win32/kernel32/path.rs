@@ -30,8 +30,8 @@ const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFF_FFFF;
 
 /// Where Windows 95 is, as far as programs ask.
-const WINDOWS: &str = "C:\\WINDOWS";
-const SYSTEM: &str = "C:\\WINDOWS\\SYSTEM";
+pub(crate) const WINDOWS: &str = "C:\\WINDOWS";
+pub(crate) const SYSTEM: &str = "C:\\WINDOWS\\SYSTEM";
 
 /// WIN32_FIND_DATAA's size, and where its names are.
 const FIND_DATA: usize = 320;
