@@ -260,3 +260,41 @@ fn a_library_with_a_loaded_module_name_loads_from_its_file() {
     });
     assert_eq!(exit, 1, "{log}");
 }
+
+#[test]
+fn a_file_with_a_loaded_file_name_is_that_module() {
+    // C:\RES.DLL (module R) loads, then C:\SUB\RES.DLL (module Q) is
+    // asked for. KERNEL finds a loaded module by the base name of the
+    // file asked for, wherever the file is, so the second LoadLibrary
+    // gives the first library's instance: the program ends with 1, or
+    // 10h if it got another instance or an error.
+    let mut code = Code::new();
+    let first_at = code.here() + 2;
+    code.push_far(0)
+        .call("KERNEL", LOAD_LIBRARY)
+        .emit(&[0x8B, 0xD8]); // mov bx,ax
+    let second_at = code.here() + 2;
+    code.push_far(0).call("KERNEL", LOAD_LIBRARY).emit(&[
+        0x3B, 0xC3, // cmp ax,bx
+        0x75, 0x09, // jne bad
+        0x3D, 0x20, 0x00, // cmp ax,20h
+        0x72, 0x04, // jb bad
+        0xB0, 0x01, // mov al,1
+        0xEB, 0x02, // jmp end
+        0xB0, 0x10, // bad: mov al,10h
+    ]);
+    code.exit_al();
+    let first = code.here();
+    code.emit(b"C:\\RES.DLL\0");
+    code.patch(first_at, first);
+    let second = code.here();
+    code.emit(b"C:\\SUB\\RES.DLL\0");
+    code.patch(second_at, second);
+    let (exit, log) = run_with("same_file_name", program(&code, CODE), |_, base| {
+        fs::write(base.join("RES.DLL"), library("R")).unwrap();
+        let sub = base.join("SUB");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("RES.DLL"), library("Q")).unwrap();
+    });
+    assert_eq!(exit, 1, "{log}");
+}
