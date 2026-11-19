@@ -48,16 +48,21 @@ defaults:
 jobs:
   # When a draft is marked ready for review: whether another run of this
   # workflow on the same commit of the pull request succeeded or is still
-  # going. That run is the draft's, which runs every job but the release
-  # builds and `web`, so this run then skips the tests and the libretro
-  # jobs and makes only those, while the draft's run reports the tests on
-  # the pull request. A run that failed or was cancelled doesn't count,
-  # and the tests then run here. Each pull_request run tests the pull
-  # request merged into main as it was when the run started, so the tests
-  # skipped here may have run against an older main. Nothing tests the
-  # merge again when it lands either: main's own push run is what finds a
-  # pull request that main has broken. Skipped on every other event,
-  # which costs the jobs below no wait.
+  # going, with its tests passed or still running. That run is the
+  # draft's, which runs every job but the release builds and `web`, so
+  # this run then skips the tests and the libretro jobs and makes only
+  # those, while the draft's run reports the tests on the pull request.
+  # The tests run here instead when no run counts: one that failed or
+  # was cancelled doesn't, nor one with a test job that failed, was
+  # cancelled or was skipped (an earlier ready run that counted on
+  # another), nor a ready run still going (this run's start cancels it).
+  # A lookup that fails shows its error and counts nothing. Each
+  # pull_request run tests the pull request merged into main as it was
+  # when the run started, so the tests skipped here may have run against
+  # an older main. Nothing tests the merge again when it lands either:
+  # main's own push run is what finds a pull request that main has
+  # broken. Skipped on every other event, which costs the jobs below no
+  # wait.
   tested:
     name: tested
     if: github.event.action == 'ready_for_review'
@@ -69,26 +74,51 @@ jobs:
     steps:
       - name: Look for another passed or running run on this commit
         id: check
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           RUN_ID: ${{ github.run_id }}
         run: |
-          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/rust.yml/runs?head_sha=$HEAD_SHA&event=pull_request" \
-            | jq --argjson self "$RUN_ID" '[.workflow_runs[]
-                | select(.id != $self)
-                | select(.status != "completed" or .conclusion == "success")
-                | "\(.html_url) \(.status) \(.conclusion)"]')
-          echo "runs that cover the tests: $runs"
-          if [[ $(jq length <<< "$runs") -gt 0 ]]; then
+          runs=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows/rust.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=100" \
+            --jq '.workflow_runs[] | [.id, .status, .conclusion // "-", .html_url] | @tsv')
+          while IFS=$'\t' read -r id status conclusion url; do
+            [[ -n $id && $id != "$RUN_ID" ]] || continue
+            # A run waiting for approval (a fork's) or for an environment
+            # may never start.
+            case "$status $conclusion" in
+              "completed success" | requested* | pending* | queued* | in_progress*) ;;
+              *)
+                echo "$url: $status $conclusion"
+                continue
+                ;;
+            esac
+            # A test job's name starts with "test (", also when it is skipped
+            # and its matrix isn't expanded. A job still going has no
+            # conclusion.
+            flags=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?per_page=100" \
+              --jq '.jobs[]
+                | if (.name | startswith("test (")) and .conclusion != null
+                    and .conclusion != "success" then "test-not-passed"
+                  elif .name == "tested" and .conclusion != "skipped" then "ready-run"
+                  else empty end')
+            if [[ $flags == *test-not-passed* ]]; then
+              echo "$url: a test job failed, was cancelled or was skipped"
+              continue
+            fi
+            if [[ $status != completed && $flags == *ready-run* ]]; then
+              echo "$url: a ready run, which this one cancels"
+              continue
+            fi
+            echo "$url: $status $conclusion, covers the tests"
             echo "covered=true" >> "$GITHUB_OUTPUT"
-          fi
+            break
+          done <<< "$runs"
 
   test:
     name: test (${{ matrix.label }})
     # `tested` is skipped on every event but ready_for_review, and a job
     # whose need was skipped runs only with a status function in its `if`.
-    # If `tested` fails, its output is empty and the tests run.
     needs: tested
     if: ${{ !cancelled() && needs.tested.outputs.covered != 'true' }}
     runs-on: ${{ matrix.os }}
